@@ -2561,7 +2561,8 @@ typedef struct AlterTableStmt
 typedef enum AlterTableType
 {
 	AT_AddColumn,				/* add column */
-	AT_AddColumnToView,			/* implicitly via CREATE OR REPLACE VIEW */
+	AT_AddColumnToView,			/* implicitly via CREATE OR REPLACE
+								 * [MATERIALIZED] VIEW */
 	AT_ColumnDefault,			/* alter column default */
 	AT_CookedColumnDefault,		/* add a pre-cooked column default */
 	AT_DropNotNull,				/* alter column drop not null */
@@ -4637,6 +4638,5 @@ typedef struct WaitStmt
 	char	   *lsn_literal;	/* LSN string from grammar */
 	List	   *options;		/* List of DefElem nodes */
 } WaitStmt;
-
 
 #endif							/* PARSENODES_H */
