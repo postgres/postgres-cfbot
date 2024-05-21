@@ -968,3 +968,83 @@ CloseMatViewIncrementalMaintenance(void)
 	matview_maintenance_depth--;
 	Assert(matview_maintenance_depth >= 0);
 }
+
+/*
+ * Verify that the columns associated with proposed new matview definition
+ * match the columns of the old matview.  This is similar to equalRowTypes(),
+ * with code added to generate specific complaints.  Also, we allow the new
+ * matview to have more columns than the old.
+ */
+void
+checkMatviewColumns(TupleDesc newdesc, TupleDesc olddesc)
+{
+	int			i;
+
+	if (newdesc->natts < olddesc->natts)
+	{
+		ereport(ERROR,
+				errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+				errmsg("cannot drop columns from materialized view"));
+	}
+
+	for (i = 0; i < olddesc->natts; i++)
+	{
+		Form_pg_attribute newattr = TupleDescAttr(newdesc, i);
+		Form_pg_attribute oldattr = TupleDescAttr(olddesc, i);
+
+		/* XXX msg not right, but we don't support DROP COL on matview anyway */
+		if (newattr->attisdropped != oldattr->attisdropped)
+		{
+			ereport(ERROR,
+					errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+					errmsg("cannot drop columns from materialized view"));
+		}
+
+		if (strcmp(NameStr(newattr->attname), NameStr(oldattr->attname)) != 0)
+		{
+			ereport(ERROR,
+					errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+					errmsg("cannot change name of materialized view column \"%s\" to \"%s\"",
+						   NameStr(oldattr->attname),
+						   NameStr(newattr->attname)),
+					errhint("Use ALTER MATERIALIZED VIEW ... RENAME COLUMN ... to change name of materialized view column instead."));
+		}
+
+		/*
+		 * We cannot allow type, typmod, or collation to change, since these
+		 * properties may be embedded in Vars of other views/rules referencing
+		 * this one.  Other column attributes can be ignored.
+		 */
+		if (newattr->atttypid != oldattr->atttypid ||
+			newattr->atttypmod != oldattr->atttypmod)
+		{
+			ereport(ERROR,
+					errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+					errmsg("cannot change data type of materialized view column \"%s\" from %s to %s",
+						   NameStr(oldattr->attname),
+						   format_type_with_typemod(oldattr->atttypid,
+													oldattr->atttypmod),
+						   format_type_with_typemod(newattr->atttypid,
+													newattr->atttypmod)));
+		}
+
+		/*
+		 * At this point, attcollations should be both valid or both invalid,
+		 * so applying get_collation_name unconditionally should be fine.
+		 */
+		if (newattr->attcollation != oldattr->attcollation)
+		{
+			ereport(ERROR,
+					errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+					errmsg("cannot change collation of materialized view column \"%s\" from \"%s\" to \"%s\"",
+						   NameStr(oldattr->attname),
+						   get_collation_name(oldattr->attcollation),
+						   get_collation_name(newattr->attcollation)));
+		}
+	}
+
+	/*
+	 * We ignore the constraint fields since the new matview desc can't have
+	 * any constraints.
+	 */
+}
