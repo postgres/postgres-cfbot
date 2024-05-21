@@ -33,4 +33,6 @@ extern DestReceiver *CreateTransientRelDestReceiver(Oid transientoid);
 
 extern bool MatViewIncrementalMaintenanceIsEnabled(void);
 
+extern void checkMatviewColumns(TupleDesc newdesc, TupleDesc olddesc);
+
 #endif							/* MATVIEW_H */
