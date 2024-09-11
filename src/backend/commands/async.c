@@ -811,9 +811,6 @@ AsyncShmemRequest(void *arg)
 					 .name = "notify",
 					 .Dir = "pg_notify",
 
-	/* long segment names are used in order to avoid wraparound */
-					 .long_segment_names = true,
-
 					 .nslots = notify_buffers,
 
 					 .sync_handler = SYNC_HANDLER_NONE,
