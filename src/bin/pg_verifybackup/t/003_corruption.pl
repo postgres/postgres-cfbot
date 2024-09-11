@@ -259,7 +259,7 @@ sub mutilate_extra_tablespace_file
 sub mutilate_missing_file
 {
 	my ($backup_path) = @_;
-	my $pathname = "$backup_path/pg_xact/0000";
+	my $pathname = "$backup_path/pg_xact/000000000000000";
 	unlink($pathname) || die "$pathname: $!";
 	return;
 }
