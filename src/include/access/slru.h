@@ -146,14 +146,6 @@ typedef struct SlruOpts
 	const char *Dir;
 
 	/*
-	 * If true, use long segment file names.  Otherwise, use short file names.
-	 *
-	 * For details about the file name format, see SlruFileName().
-	 */
-	bool		long_segment_names;
-
-
-	/*
 	 * Decide whether a page is "older" for truncation and as a hint for
 	 * evicting pages in LRU order.  Return true if every entry of the first
 	 * argument is older than every entry of the second argument.  Note that
