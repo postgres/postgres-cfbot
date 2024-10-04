@@ -38,7 +38,9 @@ extern ObjectAddress CreateExtension(ParseState *pstate, CreateExtensionStmt *st
 extern void RemoveExtensionById(Oid extId);
 
 extern ObjectAddress InsertExtensionTuple(const char *extName, Oid extOwner,
-										  Oid schemaOid, bool relocatable, const char *extVersion,
+										  Oid schemaOid, bool relocatable,
+										  bool ownedSchema,
+										  const char *extVersion,
 										  Datum extConfig, Datum extCondition,
 										  List *requiredExtensions);
 

@@ -303,3 +303,82 @@ ALTER EXTENSION test_ext_req_schema1 SET SCHEMA test_s_dep2;  -- now ok
 SELECT test_s_dep2.dep_req1();
 SELECT test_s_dep.dep_req2();
 DROP EXTENSION test_ext_req_schema1 CASCADE;
+
+--
+-- Test owned schema extensions
+--
+
+CREATE SCHEMA test_ext_owned_schema;
+-- Fails for an already existing schema to be provided
+CREATE EXTENSION test_ext_owned_schema SCHEMA test_ext_owned_schema;
+-- Fails because a different schema is set in control file
+CREATE EXTENSION test_ext_owned_schema SCHEMA test_schema;
+DROP SCHEMA test_ext_owned_schema;
+CREATE EXTENSION test_ext_owned_schema;
+\dx+ test_ext_owned_schema;
+-- Test ALTER EXTENSION UPDATE with owned schema
+ALTER EXTENSION test_ext_owned_schema UPDATE TO '1.1';
+\dx+ test_ext_owned_schema;
+-- Verify that the owned schema is dropped together with the extension
+DROP EXTENSION test_ext_owned_schema;
+SELECT COUNT(*) FROM pg_namespace WHERE nspname = 'test_ext_owned_schema';
+
+-- Test drop behavior with non-extension objects in the owned schema
+CREATE EXTENSION test_ext_owned_schema;
+CREATE FUNCTION test_ext_owned_schema.non_ext_func() RETURNS int LANGUAGE SQL AS $$ SELECT 1 $$;
+-- Fails because of the non-extension object
+DROP EXTENSION test_ext_owned_schema;
+-- Succeeds and cascades to the non-extension object
+DROP EXTENSION test_ext_owned_schema CASCADE;
+
+CREATE SCHEMA already_existing;
+-- Fails for an already existing schema to be provided
+CREATE EXTENSION test_ext_owned_schema_relocatable SCHEMA already_existing;
+-- Fails because no schema is set in control file
+CREATE EXTENSION test_ext_owned_schema_relocatable;
+CREATE EXTENSION test_ext_owned_schema_relocatable SCHEMA test_schema;
+\dx+ test_ext_owned_schema_relocatable
+-- Fails because schema already exists
+ALTER EXTENSION test_ext_owned_schema_relocatable SET SCHEMA already_existing;
+ALTER EXTENSION test_ext_owned_schema_relocatable SET SCHEMA some_other_name;
+-- Setting the schema to the current one is a no-op
+ALTER EXTENSION test_ext_owned_schema_relocatable SET SCHEMA some_other_name;
+\dx+ test_ext_owned_schema_relocatable
+DROP EXTENSION test_ext_owned_schema_relocatable;
+-- Verify the schema was dropped with the extension
+DROP SCHEMA some_other_name;
+
+-- Test owned_schema + superuser=false extension
+CREATE USER regress_test_ext_user;
+-- The database name differs between meson and autoconf builds, so we can't
+-- hardcode it in the GRANT/REVOKE statements.
+DO $$ BEGIN EXECUTE format('GRANT CREATE ON DATABASE %I TO regress_test_ext_user', current_database()); END $$;
+SET SESSION AUTHORIZATION regress_test_ext_user;
+CREATE EXTENSION test_ext_owned_schema_nosuperuser;
+\dx+ test_ext_owned_schema_nosuperuser;
+-- Check that schema is owned by the creating user (not bootstrap superuser)
+SELECT n.nspname, n.nspowner = current_user::regrole as owned_by_current_user
+FROM pg_namespace n
+WHERE n.nspname = 'test_owned_schema_nosuperuser';
+-- Upgrades should work for superuser=false extensions
+ALTER EXTENSION test_ext_owned_schema_nosuperuser UPDATE TO '1.1';
+\dx+ test_ext_owned_schema_nosuperuser;
+DROP EXTENSION test_ext_owned_schema_nosuperuser;
+RESET SESSION AUTHORIZATION;
+
+-- Test owned_schema + trusted=true extension
+SET SESSION AUTHORIZATION regress_test_ext_user;
+CREATE EXTENSION test_ext_owned_schema_trusted;
+\dx+ test_ext_owned_schema_trusted;
+-- Check that schema is owned by bootstrap superuser for trusted extension,
+-- even though the extension is owned by regress_test_ext_user
+SELECT n.nspname, n.nspowner = 10 as owned_by_bootstrap_superuser
+FROM pg_namespace n
+WHERE n.nspname = 'test_owned_schema_trusted';
+-- Updating trusted extensions should work normally
+ALTER EXTENSION test_ext_owned_schema_trusted UPDATE TO '1.1';
+\dx+ test_ext_owned_schema_trusted;
+DROP EXTENSION test_ext_owned_schema_trusted;
+RESET SESSION AUTHORIZATION;
+DO $$ BEGIN EXECUTE format('REVOKE CREATE ON DATABASE %I FROM regress_test_ext_user', current_database()); END $$;
+DROP USER regress_test_ext_user;
