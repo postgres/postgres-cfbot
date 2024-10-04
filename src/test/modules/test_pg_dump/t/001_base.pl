@@ -381,6 +381,38 @@ my %tests = (
 		},
 	},
 
+	'CREATE EXTENSION test_ext_owned_schema' => {
+		create_order => 1,
+		create_sql => 'CREATE EXTENSION test_ext_owned_schema;',
+		regexp => qr/^
+			\QCREATE EXTENSION IF NOT EXISTS test_ext_owned_schema WITH SCHEMA test_ext_owned_schema;\E
+			\n/xm,
+		like => {
+			%full_runs,
+			schema_only => 1,
+			section_pre_data => 1,
+		},
+		unlike => {
+			binary_upgrade => 1,
+			with_extension => 1,
+			without_extension => 1
+		}
+	},
+
+	'CREATE SCHEMA test_ext_owned_schema' => {
+		regexp => qr/^
+			\QCREATE SCHEMA test_ext_owned_schema;\E
+			\n/xm,
+		like => {},
+	},
+
+	'ALTER EXTENSION test_ext_owned_schema ADD SCHEMA test_ext_owned_schema' => {
+		regexp => qr/^
+			\QALTER EXTENSION test_ext_owned_schema ADD SCHEMA test_ext_owned_schema;\E
+			\n/xm,
+		like => {},
+	},
+
 	'CREATE ROLE regress_dump_test_role' => {
 		create_order => 1,
 		create_sql => 'CREATE ROLE regress_dump_test_role;',
