@@ -36,6 +36,7 @@ CATALOG(pg_extension,3079,ExtensionRelationId)
 	Oid			extnamespace BKI_LOOKUP(pg_namespace);	/* namespace of
 														 * contained objects */
 	bool		extrelocatable; /* if true, allow ALTER EXTENSION SET SCHEMA */
+	bool		extownedschema; /* if true, schema is owned by extension */
 
 #ifdef CATALOG_VARLEN			/* variable-length fields start here */
 	/* extversion may never be null, but the others can be. */
