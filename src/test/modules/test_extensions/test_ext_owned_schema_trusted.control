@@ -1,0 +1,5 @@
+comment = 'Test extension with owned schema (trusted=true)'
+default_version = '1.0'
+trusted = true
+owned_schema = true
+schema = 'test_owned_schema_trusted'
