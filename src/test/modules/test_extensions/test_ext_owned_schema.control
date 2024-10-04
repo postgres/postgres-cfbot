@@ -1,0 +1,5 @@
+comment = 'Test extension with an owned schema'
+default_version = '1.0'
+relocatable = false
+schema = test_ext_owned_schema
+owned_schema = true
