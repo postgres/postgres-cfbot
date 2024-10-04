@@ -814,6 +814,40 @@ RETURNS anycompatible AS ...
       </listitem>
      </varlistentry>
 
+     <varlistentry id="extend-extensions-files-owned-schema">
+      <term><varname>owned_schema</varname> (<type>boolean</type>)</term>
+      <listitem>
+       <para>
+        An extension should set <firstterm>owned_schema</firstterm> to
+        <literal>true</literal> in its control file if the extension wants a
+        dedicated schema for its objects. Such a schema should not exist yet at
+        the time of extension creation, and will be created automatically by
+        <literal>CREATE EXTENSION</literal>. The default is
+        <literal>false</literal>, i.e., the extension can be installed into an
+        existing schema.
+       </para>
+       <para>
+        Having a schema owned by the extension can make it much easier to
+        reason about possible <literal>search_path</literal> injection attacks.
+        For instance with an owned schema, it is generally safe to set the
+        <literal>search_path</literal> of a <literal>SECURITY DEFINER</literal>
+        function to the schema of the extension. While without an owned schema
+        it might not be safe to do so, because a malicious user could insert
+        objects in that schema and thus <link
+        linkend="sql-createfunction-security"> cause malicious to be executed
+        as superuser</link>. Similarly, having an owned schema can make it safe
+        by default to execute general-purpose SQL in the extension script,
+        because the search_path now only contains trusted schemas. Without an
+        owned schema it's <link linkend="extend-extensions-security-scripts">
+        recommended to manually change the search_path</link>.
+       </para>
+       <para>
+        Apart from the security considerations, having an owned schema can help
+        prevent naming conflicts between objects of different extensions.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="extend-extensions-files-schema">
       <term><varname>schema</varname> (<type>string</type>)</term>
       <listitem>
