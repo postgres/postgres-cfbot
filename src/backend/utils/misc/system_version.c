@@ -34,6 +34,7 @@
 #endif
 
 #include "funcapi.h"
+#include "jit/jit.h"
 #include "utils/builtins.h"
 #include "utils/hsearch.h"
 #include "utils/system_version.h"
@@ -117,6 +118,12 @@ glibc_get_version(bool *available)
 	return (const char *) gnu_get_libc_version();
 }
 #endif
+
+void
+jit_register_version(void)
+{
+	add_system_version("LLVM", jit_get_version, RunTime);
+}
 
 /*
  * Register versions that describe core components and do not correspond to any
