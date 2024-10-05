@@ -5419,4 +5419,11 @@ register_system_versions(void)
 {
 	/* Set up reporting of core versions. */
 	register_core_versions();
+
+	/*
+	 * Set up reporting for JIT provider version. JIT provider initialization
+	 * happens when the first expression is getting compiled, which is too
+	 * late. Thus register the callback here instead.
+	 */
+	jit_register_version();
 }
