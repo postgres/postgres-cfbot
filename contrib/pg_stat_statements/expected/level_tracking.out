@@ -1598,7 +1598,7 @@ SELECT toplevel, calls, rows, plans, query FROM pg_stat_statements
   ORDER BY query COLLATE "C";
  toplevel | calls | rows | plans |                        query                        
 ----------+-------+------+-------+-----------------------------------------------------
- f        |     2 |    2 |     0 | INSERT INTO audit_table VALUES ($15, TG_OP, NEW.id)
+ f        |     2 |    2 |     0 | INSERT INTO audit_table VALUES ($17, TG_OP, NEW.id)
  t        |     2 |    2 |     0 | INSERT INTO test_trigger VALUES ($1, $2)
  t        |     1 |    1 |     0 | SELECT pg_stat_statements_reset() IS NOT NULL AS t
 (3 rows)

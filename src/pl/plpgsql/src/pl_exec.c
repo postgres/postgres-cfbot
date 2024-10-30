@@ -1416,6 +1416,7 @@ plpgsql_fulfill_promise(PLpgSQL_execstate *estate,
 						PLpgSQL_var *var)
 {
 	MemoryContext oldcontext;
+	ForPortionOfState *fpo;
 
 	if (var->promise == PLPGSQL_PROMISE_NONE)
 		return;					/* nothing to do */
@@ -1545,6 +1546,37 @@ plpgsql_fulfill_promise(PLpgSQL_execstate *estate,
 			{
 				assign_simple_var(estate, var, (Datum) 0, true, false);
 			}
+			break;
+
+		case PLPGSQL_PROMISE_TG_PERIOD_NAME:
+			if (estate->trigdata == NULL)
+				elog(ERROR, "trigger promise is not in a trigger function");
+			if (estate->trigdata->tg_temporal)
+				assign_text_var(estate, var, estate->trigdata->tg_temporal->fp_rangeName);
+			else
+				assign_simple_var(estate, var, (Datum) 0, true, false);
+			break;
+
+		case PLPGSQL_PROMISE_TG_PERIOD_BOUNDS:
+			if (estate->trigdata == NULL)
+				elog(ERROR, "trigger promise is not in a trigger function");
+
+			fpo = estate->trigdata->tg_temporal;
+			if (fpo)
+			{
+
+				Oid			funcid;
+				bool		varlena;
+
+				getTypeOutputInfo(fpo->fp_rangeType, &funcid, &varlena);
+				Assert(OidIsValid(funcid));
+
+				assign_text_var(estate, var,
+								OidOutputFunctionCall(funcid,
+													  fpo->fp_targetRange));
+			}
+			else
+				assign_simple_var(estate, var, (Datum) 0, true, false);
 			break;
 
 		case PLPGSQL_PROMISE_TG_EVENT:
