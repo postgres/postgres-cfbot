@@ -893,8 +893,13 @@ CREATE FUNCTION dump_trigger()
 RETURNS TRIGGER LANGUAGE plpgsql AS
 $$
 BEGIN
-  RAISE NOTICE '%: % % %:',
-    TG_NAME, TG_WHEN, TG_OP, TG_LEVEL;
+  IF TG_PERIOD_NAME IS NOT NULL THEN
+    RAISE NOTICE '%: % % FOR PORTION OF % (%) %:',
+      TG_NAME, TG_WHEN, TG_OP, TG_PERIOD_NAME, TG_PERIOD_BOUNDS, TG_LEVEL;
+  ELSE
+    RAISE NOTICE '%: % % %:',
+      TG_NAME, TG_WHEN, TG_OP, TG_LEVEL;
+  END IF;
 
   IF TG_ARGV[0] THEN
     RAISE NOTICE '  old: %', (SELECT string_agg(old_table::text, '\n       ') FROM old_table);
@@ -1085,6 +1090,44 @@ UPDATE for_portion_of_test
 COMMIT;
 
 SELECT * FROM for_portion_of_test;
+
+-- test inserts fired from triggers during FOR PORTION OF:
+
+DROP TABLE for_portion_of_test;
+CREATE TABLE for_portion_of_test (
+  id int4range,
+  valid_at daterange,
+  name text
+);
+INSERT INTO for_portion_of_test (id, valid_at, name) VALUES
+  ('[1,2)', '[2018-01-01,2020-01-01)', 'one');
+
+CREATE FUNCTION trg_fpo_insert()
+RETURNS TRIGGER LANGUAGE plpgsql AS
+$$
+BEGIN
+  IF pg_trigger_depth() = 1 THEN
+    INSERT INTO for_portion_of_test
+      (id, valid_at, name) VALUES
+      (int4range(lower(NEW.id) + 1, upper(NEW.id) + 1), NEW.valid_at, NEW.name);
+  END IF;
+  RETURN CASE WHEN 'TG_OP' = 'DELETE' THEN OLD ELSE NEW END;
+END;
+$$;
+
+CREATE TRIGGER fpo_01_dump_before
+  BEFORE INSERT OR UPDATE OR DELETE ON for_portion_of_test
+  FOR EACH ROW EXECUTE PROCEDURE dump_trigger(false, false);
+CREATE TRIGGER fpo_02_before_row
+  BEFORE INSERT OR UPDATE OR DELETE ON for_portion_of_test
+  FOR EACH ROW EXECUTE PROCEDURE trg_fpo_insert();
+
+UPDATE for_portion_of_test
+  FOR PORTION OF valid_at FROM '2019-01-01' TO '2019-06-01'
+  SET name = CONCAT(name, '^')
+  WHERE id = '[1,2)';
+
+SELECT * FROM for_portion_of_test ORDER BY id, valid_at;
 
 -- test FOR PORTION OF from triggers during FOR PORTION OF:
 
