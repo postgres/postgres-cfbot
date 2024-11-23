@@ -290,6 +290,7 @@
 #include "tcop/tcopprot.h"
 #include "utils/acl.h"
 #include "utils/guc.h"
+#include "utils/injection_point.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -3008,7 +3009,10 @@ apply_handle_update_internal(ApplyExecutionData *edata,
 			conflicttuple.origin != replorigin_xact_state.origin)
 			type = CT_UPDATE_DELETED;
 		else
+		{
+			INJECTION_POINT("apply_handle_update_internal_update_missing", NULL);
 			type = CT_UPDATE_MISSING;
+		}
 
 		/* Store the new tuple for conflict reporting */
 		slot_store_data(newslot, relmapentry, newtup);
