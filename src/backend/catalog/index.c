@@ -2967,6 +2967,15 @@ FormIndexDatum(IndexInfo *indexInfo,
 	ListCell   *indexpr_item;
 	int			i;
 
+	/* Auxiliary index does not need any values to be computed */
+	if (unlikely(indexInfo->ii_Auxiliary))
+	{
+		Assert(indexInfo->ii_Am == STIR_AM_OID);
+		memset(values, 0, sizeof(Datum) * indexInfo->ii_NumIndexAttrs);
+		memset(isnull, true, sizeof(bool) * indexInfo->ii_NumIndexAttrs);
+		return;
+	}
+
 	if (indexInfo->ii_Expressions != NIL &&
 		indexInfo->ii_ExpressionsState == NIL)
 	{

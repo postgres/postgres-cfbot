@@ -169,8 +169,10 @@ typedef struct ExprState
  *		entries for a particular index.  Used for both index_build and
  *		retail creation of index entries.
  *
- * ii_Concurrent, ii_BrokenHotChain, ii_Auxiliary and ii_ParallelWorkers
- * are used only during index build; they're conventionally zeroed otherwise.
+ * ii_Concurrent, ii_BrokenHotChain, and ii_ParallelWorkers are used only
+ * during index build; they're conventionally zeroed otherwise.  ii_Auxiliary
+ * is also used during retail inserts to skip datum formation for auxiliary
+ * indexes.
  * ----------------
  */
 typedef struct IndexInfo
