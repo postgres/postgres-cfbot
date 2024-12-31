@@ -452,16 +452,24 @@ stirendscan(IndexScanDesc scan)
 }
 
 /*
- * Build a STIR index - not supported so far.
- * Following commits will allow it for auxiliary indexes only.
+ * Build a STIR index - only allowed for auxiliary indexes.
+ * Just initializes the meta-page without any heap scans.
  */
 IndexBuildResult *
 stirbuild(Relation heap, Relation index,
 		  struct IndexInfo *indexInfo)
 {
-	ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("Building STIR indexes is not supported")));
+	IndexBuildResult *result;
 
-	return NULL;				/* keep compiler quiet */
+	if (!indexInfo->ii_Auxiliary)
+		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("Building STIR indexes is not supported")));
+
+	StirInitMetapage(index);
+
+	result = (IndexBuildResult *) palloc(sizeof(IndexBuildResult));
+	result->heap_tuples = 0;
+	result->index_tuples = 0;
+	return result;
 }
 
 /*
