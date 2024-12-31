@@ -1349,10 +1349,61 @@ REINDEX INDEX aux_index_ind6_ccaux;
 REINDEX INDEX CONCURRENTLY aux_index_ind6_ccaux;
 -- This makes the previous failure go away, so the index can become valid.
 DELETE FROM aux_index_tab5 WHERE c1 = 1;
+-- Should be skipped during reindex and dropped
+REINDEX INDEX aux_index_ind6;
+-- Make sure aux index is dropped
+\d aux_index_tab5
+DROP INDEX aux_index_ind6;
+
+-- Insert duplicates again
+INSERT INTO aux_index_tab5 VALUES (1), (1);
+-- Create invalid index again
+CREATE UNIQUE INDEX CONCURRENTLY aux_index_ind6 ON aux_index_tab5 (c1);
+-- This makes the previous failure go away, so the index can become valid.
+DELETE FROM aux_index_tab5 WHERE c1 = 1;
 -- Should be skipped during reindex
-REINDEX TABLE aux_index_tab5;
--- Should be skipped during concurrent reindex
 REINDEX TABLE CONCURRENTLY aux_index_tab5;
+-- Make sure it is still exists
+\d aux_index_tab5
+-- Should be skipped during reindex and dropped
+REINDEX TABLE aux_index_tab5;
+-- Make sure aux index is dropped
+\d aux_index_tab5
+DROP INDEX aux_index_ind6;
+
+-- Insert duplicates again
+INSERT INTO aux_index_tab5 VALUES (1), (1);
+-- Create invalid index again
+CREATE UNIQUE INDEX CONCURRENTLY aux_index_ind6 ON aux_index_tab5 (c1);
+-- This makes the previous failure go away, so the index can become valid.
+DELETE FROM aux_index_tab5 WHERE c1 = 1;
+-- Should be skipped during reindex and dropped
+REINDEX INDEX CONCURRENTLY aux_index_ind6;
+-- Make sure aux index is dropped
+\d aux_index_tab5
+DROP INDEX aux_index_ind6;
+
+-- Insert duplicates again
+INSERT INTO aux_index_tab5 VALUES (1), (1);
+-- Create invalid index again
+CREATE UNIQUE INDEX CONCURRENTLY aux_index_ind6 ON aux_index_tab5 (c1);
+-- This makes the previous failure go away, so the index can become valid.
+DELETE FROM aux_index_tab5 WHERE c1 = 1;
+-- Drop main index CONCURRENTLY
+DROP INDEX CONCURRENTLY aux_index_ind6;
+-- Make sure auxiliary index dropped too
+\d aux_index_tab5
+DROP INDEX aux_index_ind6;
+
+-- Insert duplicates again
+INSERT INTO aux_index_tab5 VALUES (1), (1);
+-- Create invalid index again
+CREATE UNIQUE INDEX CONCURRENTLY aux_index_ind6 ON aux_index_tab5 (c1);
+-- Drop main index
+DROP INDEX aux_index_ind6;
+-- Make sure auxiliary index dropped too
+\d aux_index_tab5
+
 DROP TABLE aux_index_tab5;
 
 -- Check handling of indexes with expressions and predicates.  The

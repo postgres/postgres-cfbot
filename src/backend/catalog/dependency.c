@@ -287,7 +287,7 @@ performDeletion(const ObjectAddress *object,
 	 * Acquire deletion lock on the target object.  (Ideally the caller has
 	 * done this already, but many places are sloppy about it.)
 	 */
-	AcquireDeletionLock(object, 0);
+	AcquireDeletionLock(object, flags);
 
 	/*
 	 * Construct a list of objects to delete (ie, the given object plus

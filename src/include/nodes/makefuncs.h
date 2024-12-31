@@ -100,7 +100,7 @@ extern IndexInfo *makeIndexInfo(int numattrs, int numkeyattrs, Oid amoid,
 								bool unique, bool nulls_not_distinct,
 								bool isready, bool concurrent,
 								bool summarizing, bool withoutoverlaps,
-								bool auxiliary);
+								bool auxiliary, Oid auxiliary_for_index_id);
 
 extern Node *makeStringConst(char *str, int location);
 extern DefElem *makeDefElem(char *name, Node *arg, int location);
