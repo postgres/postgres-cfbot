@@ -3290,12 +3290,108 @@ REINDEX INDEX CONCURRENTLY aux_index_ind6_ccaux;
 ERROR:  reindex of auxiliary index "aux_index_ind6_ccaux" not supported
 -- This makes the previous failure go away, so the index can become valid.
 DELETE FROM aux_index_tab5 WHERE c1 = 1;
+-- Should be skipped during reindex and dropped
+REINDEX INDEX aux_index_ind6;
+-- Make sure aux index is dropped
+\d aux_index_tab5
+           Table "public.aux_index_tab5"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ c1     | integer |           |          | 
+Indexes:
+    "aux_index_ind6" UNIQUE, btree (c1)
+
+DROP INDEX aux_index_ind6;
+-- Insert duplicates again
+INSERT INTO aux_index_tab5 VALUES (1), (1);
+-- Create invalid index again
+CREATE UNIQUE INDEX CONCURRENTLY aux_index_ind6 ON aux_index_tab5 (c1);
+ERROR:  could not create unique index "aux_index_ind6"
+DETAIL:  Key (c1)=(1) is duplicated.
+-- This makes the previous failure go away, so the index can become valid.
+DELETE FROM aux_index_tab5 WHERE c1 = 1;
 -- Should be skipped during reindex
-REINDEX TABLE aux_index_tab5;
-WARNING:  skipping reindex of auxiliary index "public.aux_index_ind6_ccaux"
--- Should be skipped during concurrent reindex
 REINDEX TABLE CONCURRENTLY aux_index_tab5;
+WARNING:  skipping reindex of invalid index "public.aux_index_ind6"
+HINT:  Use DROP INDEX or REINDEX INDEX.
 WARNING:  skipping reindex of auxiliary index "public.aux_index_ind6_ccaux"
+NOTICE:  table "aux_index_tab5" has no indexes that can be reindexed concurrently
+-- Make sure it is still exists
+\d aux_index_tab5
+           Table "public.aux_index_tab5"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ c1     | integer |           |          | 
+Indexes:
+    "aux_index_ind6" UNIQUE, btree (c1) INVALID
+    "aux_index_ind6_ccaux" stir (c1) INVALID
+
+-- Should be skipped during reindex and dropped
+REINDEX TABLE aux_index_tab5;
+-- Make sure aux index is dropped
+\d aux_index_tab5
+           Table "public.aux_index_tab5"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ c1     | integer |           |          | 
+Indexes:
+    "aux_index_ind6" UNIQUE, btree (c1)
+
+DROP INDEX aux_index_ind6;
+-- Insert duplicates again
+INSERT INTO aux_index_tab5 VALUES (1), (1);
+-- Create invalid index again
+CREATE UNIQUE INDEX CONCURRENTLY aux_index_ind6 ON aux_index_tab5 (c1);
+ERROR:  could not create unique index "aux_index_ind6"
+DETAIL:  Key (c1)=(1) is duplicated.
+-- This makes the previous failure go away, so the index can become valid.
+DELETE FROM aux_index_tab5 WHERE c1 = 1;
+-- Should be skipped during reindex and dropped
+REINDEX INDEX CONCURRENTLY aux_index_ind6;
+-- Make sure aux index is dropped
+\d aux_index_tab5
+           Table "public.aux_index_tab5"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ c1     | integer |           |          | 
+Indexes:
+    "aux_index_ind6" UNIQUE, btree (c1)
+
+DROP INDEX aux_index_ind6;
+-- Insert duplicates again
+INSERT INTO aux_index_tab5 VALUES (1), (1);
+-- Create invalid index again
+CREATE UNIQUE INDEX CONCURRENTLY aux_index_ind6 ON aux_index_tab5 (c1);
+ERROR:  could not create unique index "aux_index_ind6"
+DETAIL:  Key (c1)=(1) is duplicated.
+-- This makes the previous failure go away, so the index can become valid.
+DELETE FROM aux_index_tab5 WHERE c1 = 1;
+-- Drop main index CONCURRENTLY
+DROP INDEX CONCURRENTLY aux_index_ind6;
+-- Make sure auxiliary index dropped too
+\d aux_index_tab5
+           Table "public.aux_index_tab5"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ c1     | integer |           |          | 
+
+DROP INDEX aux_index_ind6;
+ERROR:  index "aux_index_ind6" does not exist
+-- Insert duplicates again
+INSERT INTO aux_index_tab5 VALUES (1), (1);
+-- Create invalid index again
+CREATE UNIQUE INDEX CONCURRENTLY aux_index_ind6 ON aux_index_tab5 (c1);
+ERROR:  could not create unique index "aux_index_ind6"
+DETAIL:  Key (c1)=(1) is duplicated.
+-- Drop main index
+DROP INDEX aux_index_ind6;
+-- Make sure auxiliary index dropped too
+\d aux_index_tab5
+           Table "public.aux_index_tab5"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ c1     | integer |           |          | 
+
 DROP TABLE aux_index_tab5;
 -- Check handling of indexes with expressions and predicates.  The
 -- definitions of the rebuilt indexes should match the original

@@ -590,14 +590,13 @@ reindex index concurrently idxpart11_a_b_idx;
 alter index idxpart1_a_b_idx attach partition idxpart11_a_b_idx;
 select relname, indisvalid from pg_class join pg_index on indexrelid = oid
    where relname like 'idxpart%' order by relname;
-         relname         | indisvalid 
--------------------------+------------
- idxpart11_a_b_idx       | t
- idxpart11_a_b_idx_ccaux | f
- idxpart1_a_b_idx        | t
- idxpart2_a_b_idx        | t
- idxpart_a_b_idx         | t
-(5 rows)
+      relname      | indisvalid 
+-------------------+------------
+ idxpart11_a_b_idx | t
+ idxpart1_a_b_idx  | t
+ idxpart2_a_b_idx  | t
+ idxpart_a_b_idx   | t
+(4 rows)
 
 drop table idxpart;
 -- Verify that re-attaching does not validate the parent when another
@@ -648,11 +647,10 @@ select relname, indisvalid from pg_class join pg_index on indexrelid = oid
         relname         | indisvalid 
 ------------------------+------------
  idxpart1_a_b_idx       | t
- idxpart1_a_b_idx_ccaux | f
  idxpart2_a_b_idx       | f
  idxpart2_a_b_idx_ccaux | f
  idxpart_a_b_idx        | f
-(5 rows)
+(4 rows)
 
 drop table idxpart;
 -- verify dependency handling during ALTER TABLE DETACH PARTITION
