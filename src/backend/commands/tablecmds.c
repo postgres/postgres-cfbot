@@ -1610,6 +1610,8 @@ RemoveRelations(DropStmt *drop)
 	ListCell   *cell;
 	int			flags = 0;
 	LOCKMODE	lockmode = AccessExclusiveLock;
+	MemoryContext private_context,
+				  oldcontext;
 
 	/* DROP CONCURRENTLY uses a weaker lock, and has some restrictions */
 	if (drop->concurrent)
@@ -1674,9 +1676,20 @@ RemoveRelations(DropStmt *drop)
 			relkind = 0;		/* keep compiler quiet */
 			break;
 	}
+	/*
+	 * Create a memory context that will survive forced transaction commits we
+	 * may need to do below (in case of concurrent index drop).
+	 * Since it is a child of PortalContext, it will go away eventually even if
+	 * we suffer an error; there's no need for special abort cleanup logic.
+	 */
+	private_context = AllocSetContextCreate(PortalContext,
+											"RemoveRelations",
+											ALLOCSET_SMALL_SIZES);
 
+	oldcontext = MemoryContextSwitchTo(private_context);
 	/* Lock and validate each relation; build a list of object addresses */
 	objects = new_object_addresses();
+	MemoryContextSwitchTo(oldcontext);
 
 	foreach(cell, drop->objects)
 	{
@@ -1729,6 +1742,38 @@ RemoveRelations(DropStmt *drop)
 		}
 
 		/*
+		 * Concurrent index drop requires it to be the first transaction. But in
+		 * case we have junk auxiliary index - we want to drop it too (and also
+		 * in a concurrent way). In this case perform silent internal deletion
+		 * of auxiliary index, and restore transaction state. It is fine to do it
+		 * in the loop because there is only single element in drop->objects.
+		 */
+		if ((flags & PERFORM_DELETION_CONCURRENTLY) != 0 &&
+			state.actual_relkind == RELKIND_INDEX)
+		{
+			Oid junkAuxIndexOid = get_auxiliary_index(relOid);
+			if (OidIsValid(junkAuxIndexOid))
+			{
+				ObjectAddress object;
+				object.classId = RelationRelationId;
+				object.objectId = junkAuxIndexOid;
+				object.objectSubId = 0;
+				performDeletion(&object, DROP_RESTRICT,
+										 PERFORM_DELETION_CONCURRENTLY |
+										 PERFORM_DELETION_INTERNAL |
+										 PERFORM_DELETION_QUIETLY);
+				CommitTransactionCommand();
+				MemoryContextDelete(private_context);
+
+				/* And start again - now without auxiliary index. */
+				StartTransactionCommand();
+				PushActiveSnapshot(GetTransactionSnapshot());
+				RemoveRelations(drop);
+				return;
+			}
+		}
+
+		/*
 		 * Concurrent index drop cannot be used with partitioned indexes,
 		 * either.
 		 */
@@ -1756,12 +1801,17 @@ RemoveRelations(DropStmt *drop)
 		obj.objectId = relOid;
 		obj.objectSubId = 0;
 
+		oldcontext = MemoryContextSwitchTo(private_context);
 		add_exact_object_address(&obj, objects);
+		MemoryContextSwitchTo(oldcontext);
 	}
 
+	/* Deletion may involve multiple commits, so, switch to memory context */
+	oldcontext = MemoryContextSwitchTo(private_context);
 	performMultipleDeletions(objects, drop->behavior, flags);
+	MemoryContextSwitchTo(oldcontext);
 
-	free_object_addresses(objects);
+	MemoryContextDelete(private_context);
 }
 
 /*

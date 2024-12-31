@@ -233,6 +233,8 @@ typedef struct IndexInfo
 	/* # of workers requested (excludes leader) */
 	int			ii_ParallelWorkers;
 
+	/* if creating an auxiliary index, the OID of the main index; otherwise InvalidOid. */
+	Oid			ii_AuxiliaryForIndexId;
 	/* Oid of index AM */
 	Oid			ii_Am;
 	/* private cache area for index AM */

@@ -20,6 +20,7 @@
 #include "catalog/catalog.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
+#include "catalog/pg_am_d.h"
 #include "catalog/pg_constraint.h"
 #include "catalog/pg_depend.h"
 #include "catalog/pg_extension.h"
@@ -1237,6 +1238,67 @@ get_index_constraint(Oid indexId)
 	table_close(depRel, AccessShareLock);
 
 	return constraintId;
+}
+
+/*
+ * get_auxiliary_index
+ *		Given the OID of an index, return the OID of its auxiliary
+ *		index, or InvalidOid if there is no auxiliary index.
+ */
+Oid
+get_auxiliary_index(Oid indexId)
+{
+	Oid			auxiliaryIndexOid = InvalidOid;
+	Relation	depRel;
+	ScanKeyData key[3];
+	SysScanDesc scan;
+	HeapTuple	tup;
+
+	/* Search the dependency table for the index */
+	depRel = table_open(DependRelationId, AccessShareLock);
+
+	ScanKeyInit(&key[0],
+				Anum_pg_depend_refclassid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(RelationRelationId));
+	ScanKeyInit(&key[1],
+				Anum_pg_depend_refobjid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(indexId));
+	ScanKeyInit(&key[2],
+				Anum_pg_depend_refobjsubid,
+				BTEqualStrategyNumber, F_INT4EQ,
+				Int32GetDatum(0));
+
+	scan = systable_beginscan(depRel, DependReferenceIndexId, true,
+							  NULL, 3, key);
+
+	while (HeapTupleIsValid(tup = systable_getnext(scan)))
+	{
+		Form_pg_depend deprec = (Form_pg_depend) GETSTRUCT(tup);
+
+		/*
+		 * Look for an AUTO dependency on a STIR index.  There can be at most
+		 * one STIR auxiliary per index, so we stop at the first match.
+		 * Transitive auxiliaries (e.g. ccnew_ccaux from a failed REINDEX
+		 * CONCURRENTLY) are found by calling this with the ccnew OID, and
+		 * are also cleaned up automatically via cascading AUTO dependency
+		 * when the intermediate index is dropped.
+		 */
+		if (deprec->classid == RelationRelationId &&
+			(deprec->deptype == DEPENDENCY_AUTO) &&
+			get_rel_relkind(deprec->objid) == RELKIND_INDEX &&
+			get_rel_relam(deprec->objid) == STIR_AM_OID)
+		{
+			auxiliaryIndexOid = deprec->objid;
+			break;
+		}
+	}
+
+	systable_endscan(scan);
+	table_close(depRel, AccessShareLock);
+
+	return auxiliaryIndexOid;
 }
 
 /*
