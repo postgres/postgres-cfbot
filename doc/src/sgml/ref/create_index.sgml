@@ -620,10 +620,10 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
     out writes.  This method is invoked by specifying the
     <literal>CONCURRENTLY</literal> option of <command>CREATE INDEX</command>.
     When this option is used,
-    <productname>PostgreSQL</productname> must perform two scans of the table, and in
-    addition it must wait for all existing transactions that could potentially
-    modify or use the index to terminate.  Thus
-    this method requires more total work than a standard index build and takes
+    <productname>PostgreSQL</productname> must perform a table scan followed by
+    a validation phase, and in addition it must wait for all existing transactions
+    that could potentially modify or use the index to terminate.  Thus
+    this method requires more total work than a standard index build and may take
     significantly longer to complete.  However, since it allows normal
     operations to continue while the index is built, this method is useful for
     adding new indexes in a production environment.  Of course, the extra CPU
@@ -631,14 +631,14 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
    </para>
 
    <para>
-    In a concurrent index build, the index is actually entered as an
-    <quote>invalid</quote> index into
-    the system catalogs in one transaction, then two table scans occur in
-    two more transactions.  Before each table scan, the index build must
+    In a concurrent index build, the main and auxiliary indexes are actually
+    entered as <quote>invalid</quote> indexes into
+    the system catalogs in one transaction, then two phases occur in
+    multiple transactions.  Before each phase, the index build must
     wait for existing transactions that have modified the table to terminate.
-    After the second scan, the index build must wait for any transactions
+    After the second phase, the index build must wait for any transactions
     that have a snapshot (see <xref linkend="mvcc"/>) predating the second
-    scan to terminate, including transactions used by any phase of concurrent
+    phase to terminate, including transactions used by any phase of concurrent
     index builds on other tables, if the indexes involved are partial or have
     columns that are not simple column references.
     Then finally the index can be marked <quote>valid</quote> and ready for use,
@@ -651,10 +651,11 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
    <para>
     If a problem arises while scanning the table, such as a deadlock or a
     uniqueness violation in a unique index, the <command>CREATE INDEX</command>
-    command will fail but leave behind an <quote>invalid</quote> index. This index
-    will be ignored for querying purposes because it might be incomplete;
-    however it will still consume update overhead. The <application>psql</application>
-    <command>\d</command> command will report such an index as <literal>INVALID</literal>:
+    command will fail but leave behind two <quote>invalid</quote> indexes:
+    the main index and its associated auxiliary index. These indexes
+    will be ignored for querying purposes because they might be incomplete;
+    however they will still consume update overhead. The <application>psql</application>
+    <command>\d</command> command will report such indexes as <literal>INVALID</literal>:
 
 <programlisting>
 postgres=# \d tab
@@ -664,11 +665,12 @@ postgres=# \d tab
  col    | integer |           |          |
 Indexes:
     "idx" btree (col) INVALID
+    "idx_ccaux" stir (col) INVALID
 </programlisting>
 
     The recommended recovery
-    method in such cases is to drop the index and try again to perform
-    <command>CREATE INDEX CONCURRENTLY</command>.  (Another possibility is
+    method in such cases is to drop these indexes and try again to perform
+    <command>CREATE INDEX CONCURRENTLY</command>. (Another possibility is
     to rebuild the index with <command>REINDEX INDEX CONCURRENTLY</command>).
    </para>
 

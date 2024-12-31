@@ -271,6 +271,7 @@ extern PGDLLIMPORT bool allowSystemTableMods;
 extern PGDLLIMPORT int work_mem;
 extern PGDLLIMPORT double hash_mem_multiplier;
 extern PGDLLIMPORT int maintenance_work_mem;
+extern PGDLLIMPORT int debug_cic_validate_store_mem_pct;
 extern PGDLLIMPORT int max_parallel_maintenance_workers;
 
 /*

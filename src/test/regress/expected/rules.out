@@ -2087,14 +2087,15 @@ pg_stat_progress_create_index| SELECT s.pid,
         CASE s.param10
             WHEN 0 THEN 'initializing'::text
             WHEN 1 THEN 'waiting for writers before build'::text
-            WHEN 2 THEN ('building index'::text || COALESCE((': '::text || pg_indexam_progress_phasename((s.param9)::oid, s.param11)), ''::text))
-            WHEN 3 THEN 'waiting for writers before validation'::text
-            WHEN 4 THEN 'index validation: scanning index'::text
-            WHEN 5 THEN 'index validation: sorting tuples'::text
-            WHEN 6 THEN 'index validation: scanning table'::text
-            WHEN 7 THEN 'waiting for old snapshots'::text
-            WHEN 8 THEN 'waiting for readers before marking dead'::text
-            WHEN 9 THEN 'waiting for readers before dropping'::text
+            WHEN 2 THEN 'waiting for writers to use auxiliary index'::text
+            WHEN 3 THEN ('building index'::text || COALESCE((': '::text || pg_indexam_progress_phasename((s.param9)::oid, s.param11)), ''::text))
+            WHEN 4 THEN 'waiting for writers before validation'::text
+            WHEN 5 THEN 'index validation: scanning index'::text
+            WHEN 6 THEN 'index validation: sorting tuples'::text
+            WHEN 7 THEN 'index validation: merging indexes'::text
+            WHEN 8 THEN 'waiting for old snapshots'::text
+            WHEN 9 THEN 'waiting for readers before marking dead'::text
+            WHEN 10 THEN 'waiting for readers before dropping'::text
             ELSE NULL::text
         END AS phase,
     s.param4 AS lockers_total,

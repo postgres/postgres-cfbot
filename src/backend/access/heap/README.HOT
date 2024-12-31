@@ -375,6 +375,11 @@ constraint on which updates can be HOT.  Other transactions must include
 such an index when determining HOT-safety of updates, even though they
 must ignore it for both insertion and searching purposes.
 
+Also, special auxiliary index is created the same way. It is marked as
+"ready for inserts" without any actual table scan. Its purpose is to collect
+new tuples inserted into table while our target index is still "not ready
+for inserts".
+
 We must do this to avoid making incorrect index entries.  For example,
 suppose we are building an index on column X and we make an index entry for
 a non-HOT tuple with X=1.  Then some other backend, unaware that X is an
@@ -394,10 +399,10 @@ entry at the root of the HOT-update chain but we use the key value from the
 live tuple.
 
 We mark the index open for inserts (but still not ready for reads) then
-we again wait for transactions which have the table open.  Then we take
-a second reference snapshot and validate the index.  This searches for
-tuples missing from the index, and inserts any missing ones.  Again,
-the index entries have to have TIDs equal to HOT-chain root TIDs, but
+we again wait for transactions which have the table open.  Then validate
+the index.  This searches for tuples missing from the index in auxiliary
+index, and inserts any missing ones if they are visible to reference snapshot.
+Again, the index entries have to have TIDs equal to HOT-chain root TIDs, but
 the value to be inserted is the one from the live tuple.
 
 Then we wait until every transaction that could have a snapshot older than

@@ -640,6 +640,15 @@
   boot_val => 'DEFAULT_ASSERT_ENABLED',
 },
 
+{ name => 'debug_cic_validate_store_mem_pct', type => 'int', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Percentage of maintenance_work_mem used for CIC validation tuplestore.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'debug_cic_validate_store_mem_pct',
+  boot_val => '10',
+  min => '1',
+  max => '90',
+},
+
 { name => 'debug_copy_parse_plan_trees', type => 'bool', context => 'PGC_SUSET', group => 'DEVELOPER_OPTIONS',
   short_desc => 'Set this to force all parse and plan trees to be passed through copyObject(), to facilitate catching errors and omissions in copyObject().',
   flags => 'GUC_NOT_IN_SAMPLE',

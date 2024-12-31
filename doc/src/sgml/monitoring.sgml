@@ -7305,6 +7305,18 @@ FROM pg_stat_get_backend_idset() AS backendid;
       </entry>
      </row>
      <row>
+      <entry><literal>waiting for writers to use auxiliary index</literal></entry>
+      <entry>
+       <command>CREATE INDEX CONCURRENTLY</command> or <command>REINDEX CONCURRENTLY</command> is waiting for transactions
+       with write locks that can potentially see the table to finish, to ensure use of auxiliary index for new tuples in
+       future transactions.
+       This phase is skipped when not in concurrent mode.
+       Columns <structname>lockers_total</structname>, <structname>lockers_done</structname>
+       and <structname>current_locker_pid</structname> contain the progress
+       information for this phase.
+      </entry>
+     </row>
+     <row>
       <entry><literal>building index</literal></entry>
       <entry>
        The index is being built by the access method-specific code.  In this phase,
@@ -7344,13 +7356,12 @@ FROM pg_stat_get_backend_idset() AS backendid;
       </entry>
      </row>
      <row>
-      <entry><literal>index validation: scanning table</literal></entry>
+      <entry><literal>index validation: merging indexes</literal></entry>
       <entry>
-       <command>CREATE INDEX CONCURRENTLY</command> is scanning the table
-       to validate the index tuples collected in the previous two phases.
+       <command>CREATE INDEX CONCURRENTLY</command> is merging content of auxiliary index with the target index.
        This phase is skipped when not in concurrent mode.
-       Columns <structname>blocks_total</structname> (set to the total size of the table)
-       and <structname>blocks_done</structname> contain the progress information for this phase.
+       Columns <structname>tuples_total</structname> (set to the number of tuples to be merged)
+       and <structname>tuples_done</structname> contain the progress information for this phase.
       </entry>
      </row>
      <row>
@@ -7367,8 +7378,9 @@ FROM pg_stat_get_backend_idset() AS backendid;
      <row>
       <entry><literal>waiting for readers before marking dead</literal></entry>
       <entry>
-       <command>REINDEX CONCURRENTLY</command> is waiting for transactions
-       with read locks on the table to finish, before marking the old index dead.
+       <command>CREATE INDEX CONCURRENTLY</command> is waiting for transactions
+       with read locks on the table to finish, before marking the auxiliary index as dead.
+       <command>REINDEX CONCURRENTLY</command> is also waiting before marking the old index as dead.
        This phase is skipped when not in concurrent mode.
        Columns <structname>lockers_total</structname>, <structname>lockers_done</structname>
        and <structname>current_locker_pid</structname> contain the progress

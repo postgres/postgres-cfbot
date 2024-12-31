@@ -42,11 +42,16 @@
 #include "storage/lmgr.h"
 #include "storage/lock.h"
 #include "storage/predicate.h"
+#include "storage/proc.h"
 #include "storage/procarray.h"
 #include "storage/smgr.h"
 #include "utils/builtins.h"
 #include "utils/rel.h"
 #include "utils/tuplesort.h"
+#include "utils/tuplestore.h"
+
+/* GUC: percentage of maintenance_work_mem for CIC validation tuplestore */
+int			debug_cic_validate_store_mem_pct = 10;
 
 static void reform_and_rewrite_tuple(HeapTuple tuple,
 									 Relation OldHeap, Relation NewHeap,
@@ -1708,241 +1713,421 @@ heapam_index_build_range_scan(Relation heapRelation,
 	return reltuples;
 }
 
+/*
+ * Calculate set difference (relative complement) of main and aux
+ * sets.
+ *
+ * All records which are present in auxiliary tuplesort but not in
+ * main are added to the store.
+ *
+ * In set theory notation store = aux - main or store = aux / main.
+ *
+ * returns number of items added to store
+ */
+static int64
+heapam_index_validate_tuplesort_difference(Tuplesortstate *main,
+										   Tuplesortstate *aux,
+										   Tuplestorestate *store)
+{
+	int64		num = 0;
+	/* state variables for the merge */
+	ItemPointer	indexcursor = NULL,
+					auxindexcursor = NULL;
+	ItemPointerData decoded,
+					auxdecoded;
+	bool			tuplesort_empty = false,
+					auxtuplesort_empty = false;
+
+	/* Initialize pointers. */
+	ItemPointerSetInvalid(&decoded);
+	ItemPointerSetInvalid(&auxdecoded);
+
+	/*
+	 * Main loop: we step through the auxiliary sort (auxState->tuplesort),
+	 * which holds TIDs that must compared to those from the "main" sort
+	 * (state->tuplesort).
+	 */
+	while (!auxtuplesort_empty)
+	{
+		Datum		ts_val;
+		bool		ts_isnull;
+		CHECK_FOR_INTERRUPTS();
+
+		/*
+		 * Attempt to fetch the next TID from the auxiliary sort. If it's
+		 * empty, we set auxindexcursor to NULL.
+		 */
+		auxtuplesort_empty = !tuplesort_getdatum(aux, true,
+												 false, &ts_val, &ts_isnull,
+												 NULL);
+		Assert(auxtuplesort_empty || !ts_isnull);
+		if (!auxtuplesort_empty)
+		{
+			itemptr_decode(&auxdecoded, DatumGetInt64(ts_val));
+			auxindexcursor = &auxdecoded;
+		}
+		else
+		{
+			auxindexcursor = NULL;
+		}
+
+		/*
+		 * If the auxiliary sort is not yet empty, we now try to synchronize
+		 * the "main" sort cursor (indexcursor) with auxindexcursor. We advance
+		 * the main sort cursor until we've reached or passed the auxiliary TID.
+		 */
+		if (!auxtuplesort_empty)
+		{
+			/*
+			 * Move the main sort forward while:
+			 *   (1) It's not exhausted (tuplesort_empty == false), and
+			 *   (2) Either indexcursor is NULL (first iteration) or
+			 *       indexcursor < auxindexcursor in TID order.
+			 */
+			while (!tuplesort_empty && (indexcursor == NULL || /* null on first time here */
+						ItemPointerCompare(indexcursor, auxindexcursor) < 0))
+			{
+				/*
+				 * Get the next TID from the main sort. If it's empty,
+				 * we set indexcursor to NULL.
+				 */
+				tuplesort_empty = !tuplesort_getdatum(main, true,
+													  false, &ts_val, &ts_isnull,
+													  NULL);
+				Assert(tuplesort_empty || !ts_isnull);
+
+				if (!tuplesort_empty)
+				{
+					itemptr_decode(&decoded, DatumGetInt64(ts_val));
+					indexcursor = &decoded;
+				}
+				else
+				{
+					indexcursor = NULL;
+				}
+
+				CHECK_FOR_INTERRUPTS();
+			}
+
+			/*
+			 * Now, if either:
+			 *  - the main sort is empty, or
+			 *  - indexcursor > auxindexcursor,
+			 *
+			 * then auxindexcursor identifies a TID that doesn't appear in
+			 * the main sort. We likely need to insert it
+			 * into the target index if it’s visible in the heap.
+			 */
+			if (tuplesort_empty || ItemPointerCompare(indexcursor, auxindexcursor) > 0)
+			{
+				tuplestore_putdatum(store, Int64GetDatum(itemptr_encode(auxindexcursor)));
+				num++;
+			}
+		}
+	}
+
+	return num;
+}
+
+typedef struct ValidateIndexScanState
+{
+	Tuplestorestate		*store;
+	BlockNumber			prev_block_number;
+	OffsetNumber		prev_offset_number;
+} ValidateIndexScanState;
+
+/*
+ * This is ReadStreamBlockNumberCB implementation which works as follows:
+ *
+ * 1) It iterates over a sorted tuplestore, where each element is an encoded
+ *    ItemPointer
+ *
+ * 2) It returns the current BlockNumber and collects all OffsetNumbers
+ *    for that block in per_buffer_data.
+ *
+ * 3) Once the code encounters a new BlockNumber, it stops reading more
+ *    offsets and saves the OffsetNumber of the new block for the next call.
+ *
+ * 4) The list of offsets for a block is always terminated with InvalidOffsetNumber.
+ *
+ * This function is intended to be repeatedly called, each time returning
+ * the next block and its corresponding set of offsets.
+ */
+static BlockNumber
+heapam_index_validate_scan_read_stream_next(
+								  ReadStream *stream,
+								  void *void_callback_private_data,
+								  void *void_per_buffer_data
+								  )
+{
+	bool should_free;
+	Datum datum;
+	BlockNumber result = InvalidBlockNumber;
+	int i = 0;
+
+	/*
+	 * Retrieve the specialized callback state and the output buffer.
+	 * callback_private_data keeps track of the previous block and offset
+	 * from a prior invocation, if any.
+	 */
+	ValidateIndexScanState *callback_private_data = void_callback_private_data;
+	OffsetNumber *per_buffer_data = void_per_buffer_data;
+
+	/*
+	 * If there is a "leftover" offset number from the previous invocation,
+	 * it means we had switched to a new block in the middle of the last call.
+	 * We place that leftover offset number into the buffer first.
+	 */
+	if (callback_private_data->prev_offset_number != InvalidOffsetNumber)
+	{
+		Assert(callback_private_data->prev_block_number != InvalidBlockNumber);
+		/*
+		 * 'result' is the block number to return. We set it to the block
+		 * from the previous leftover offset.
+		 */
+		result = callback_private_data->prev_block_number;
+		/* Place leftover offset number in the output buffer. */
+		per_buffer_data[i++] = callback_private_data->prev_offset_number;
+		/*
+		 * Clear the leftover offset number so it won't be reused unless
+		 * we encounter another block change.
+		 */
+		callback_private_data->prev_offset_number = InvalidOffsetNumber;
+	}
+
+	/*
+	 * Read from the tuplestore until we either run out of tuples or we
+	 * encounter a block change. For each tuple:
+	 *
+	 *   1) Decode its block/offset from the Datum.
+	 *   2) If it's the first time in this call (prev_block_number == InvalidBlockNumber),
+	 *      initialize prev_block_number.
+	 *   3) If the block number matches the current block, collect the offset.
+	 *   4) If the block number differs, save that offset as leftover and break
+	 *      so that the next call can handle the new block.
+	 */
+	while (tuplestore_getdatum(callback_private_data->store, true, &should_free, &datum))
+	{
+		BlockNumber next_block_number;
+		ItemPointerData next_data;
+
+		/* Decode the datum into an ItemPointer (block + offset). */
+		itemptr_decode(&next_data, DatumGetInt64(datum));
+		next_block_number = ItemPointerGetBlockNumber(&next_data);
+
+		/*
+		 * If we haven't set a block number yet this round, initialize it
+		 * using the first tuple we read.
+		 */
+		if (callback_private_data->prev_block_number == InvalidBlockNumber)
+			callback_private_data->prev_block_number = next_block_number;
+
+		/*
+		 * Always set the result to be the "current" block number
+		 * we are filling offsets for.
+		 */
+		result = callback_private_data->prev_block_number;
+
+		/*
+		 * If this tuple is from the same block, just store its offset
+		 * in our per_buffer_data array.
+		 */
+		if (next_block_number == callback_private_data->prev_block_number)
+		{
+			per_buffer_data[i++] = ItemPointerGetOffsetNumber(&next_data);
+
+			/* Free the datum if needed. */
+			if (should_free)
+				pfree(DatumGetPointer(datum));
+		}
+		else
+		{
+			/*
+			 * If the block just changed, store the offset of the new block
+			 * as leftover for the next invocation and break out.
+			 */
+			callback_private_data->prev_block_number = next_block_number;
+			callback_private_data->prev_offset_number = ItemPointerGetOffsetNumber(&next_data);
+
+			/* Free the datum if needed. */
+			if (should_free)
+				pfree(DatumGetPointer(datum));
+
+			/* Break to let the next call handle the new block. */
+			break;
+		}
+	}
+
+	/*
+	 * Terminate the list of offsets for this block with an InvalidOffsetNumber.
+	 */
+	per_buffer_data[i] = InvalidOffsetNumber;
+	return result;
+}
+
 static void
 heapam_index_validate_scan(Relation heapRelation,
 						   Relation indexRelation,
 						   IndexInfo *indexInfo,
 						   Snapshot snapshot,
-						   ValidateIndexState *state)
+						   ValidateIndexState *state,
+						   ValidateIndexState *auxState)
 {
-	TableScanDesc scan;
-	HeapScanDesc hscan;
-	HeapTuple	heapTuple;
 	Datum		values[INDEX_MAX_KEYS];
 	bool		isnull[INDEX_MAX_KEYS];
-	ExprState  *predicate;
-	TupleTableSlot *slot;
-	EState	   *estate;
-	ExprContext *econtext;
-	BlockNumber root_blkno = InvalidBlockNumber;
-	OffsetNumber root_offsets[MaxHeapTuplesPerPage];
-	bool		in_index[MaxHeapTuplesPerPage];
-	BlockNumber previous_blkno = InvalidBlockNumber;
 
-	/* state variables for the merge */
-	ItemPointer indexcursor = NULL;
-	ItemPointerData decoded;
-	bool		tuplesort_empty = false;
+	TupleTableSlot  *slot;
+	EState			*estate;
+	ExprContext		*econtext;
+	BufferAccessStrategy bstrategy = GetAccessStrategy(BAS_BULKREAD);
+
+	int64			num_to_check;
+	Tuplestorestate *tuples_for_check;
+	ValidateIndexScanState callback_private_data;
+
+	Buffer buf;
+	OffsetNumber *tuples;
+	ReadStream *read_stream;
+
+	/* Use a percentage of maintenance_work_mem for tuple store. */
+	int		store_work_mem_part = maintenance_work_mem * debug_cic_validate_store_mem_pct / 100;
+
+	/*
+	 * Encode TIDs as int8 values for the sort, rather than directly sorting
+	 * item pointers.  This can be significantly faster, primarily because TID
+	 * is a pass-by-reference type on all platforms, whereas int8 is
+	 * pass-by-value on most platforms.
+	 */
+	tuples_for_check = tuplestore_begin_datum(INT8OID, false, false, store_work_mem_part);
 
 	/*
 	 * sanity checks
 	 */
 	Assert(OidIsValid(indexRelation->rd_rel->relam));
 
-	/*
-	 * Need an EState for evaluation of index expressions and partial-index
-	 * predicates.  Also a slot to hold the current tuple.
-	 */
+	num_to_check = heapam_index_validate_tuplesort_difference(state->tuplesort,
+														 auxState->tuplesort,
+														 tuples_for_check);
+
+	/* It is our responsibility to close tuple sort as fast as we can */
+	tuplesort_end(state->tuplesort);
+	tuplesort_end(auxState->tuplesort);
+
+	state->tuplesort = auxState->tuplesort = NULL;
+
 	estate = CreateExecutorState();
 	econtext = GetPerTupleExprContext(estate);
 	slot = MakeSingleTupleTableSlot(RelationGetDescr(heapRelation),
-									&TTSOpsHeapTuple);
+									&TTSOpsBufferHeapTuple);
 
 	/* Arrange for econtext's scan tuple to be the tuple under test */
 	econtext->ecxt_scantuple = slot;
 
-	/* Set up execution state for predicate, if any. */
-	predicate = ExecPrepareQual(indexInfo->ii_Predicate, estate);
+	callback_private_data.prev_block_number = InvalidBlockNumber;
+	callback_private_data.store = tuples_for_check;
+	callback_private_data.prev_offset_number = InvalidOffsetNumber;
 
-	/*
-	 * Prepare for scan of the base relation.  We need just those tuples
-	 * satisfying the passed-in reference snapshot.  We must disable syncscan
-	 * here, because it's critical that we read from block zero forward to
-	 * match the sorted TIDs.
-	 */
-	scan = table_beginscan_strat(heapRelation,	/* relation */
-								 snapshot,	/* snapshot */
-								 0, /* number of keys */
-								 NULL,	/* scan key */
-								 true,	/* buffer access strategy OK */
-								 false);	/* syncscan not OK */
-	hscan = (HeapScanDesc) scan;
+	read_stream = read_stream_begin_relation(READ_STREAM_MAINTENANCE | READ_STREAM_USE_BATCHING,
+														 bstrategy,
+														 heapRelation, MAIN_FORKNUM,
+														 heapam_index_validate_scan_read_stream_next,
+														 &callback_private_data,
+														 (MaxHeapTuplesPerPage + 1) * sizeof(OffsetNumber));
 
-	pgstat_progress_update_param(PROGRESS_SCAN_BLOCKS_TOTAL,
-								 hscan->rs_nblocks);
+	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_TOTAL, num_to_check);
+	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, 0);
 
-	/*
-	 * Scan all tuples matching the snapshot.
-	 */
-	while ((heapTuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
+	while ((buf = read_stream_next_buffer(read_stream, (void **) &tuples)) != InvalidBuffer)
 	{
-		ItemPointer heapcursor = &heapTuple->t_self;
-		ItemPointerData rootTuple;
-		OffsetNumber root_offnum;
+		HeapTupleData	heap_tuple_data[MaxHeapTuplesPerPage];
+		int i;
+		OffsetNumber off;
+		BlockNumber block_number;
 
 		CHECK_FOR_INTERRUPTS();
 
-		state->htups += 1;
+		LockBuffer(buf, BUFFER_LOCK_SHARE);
+		block_number = BufferGetBlockNumber(buf);
 
-		if ((previous_blkno == InvalidBlockNumber) ||
-			(hscan->rs_cblock != previous_blkno))
+		i = 0;
+		while ((off = tuples[i]) != InvalidOffsetNumber)
 		{
-			pgstat_progress_update_param(PROGRESS_SCAN_BLOCKS_DONE,
-										 hscan->rs_cblock);
-			previous_blkno = hscan->rs_cblock;
+			ItemPointerData tid;
+			bool		all_dead, found;
+			ItemPointerSet(&tid, block_number, off);
+
+			found = heap_hot_search_buffer(&tid, heapRelation, buf, snapshot,
+										   &heap_tuple_data[i], &all_dead, true);
+			if (!found)
+				ItemPointerSetInvalid(&heap_tuple_data[i].t_self);
+			i++;
+			state->htups += 1;
 		}
+		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
 
 		/*
-		 * As commented in table_index_build_scan, we should index heap-only
-		 * tuples under the TIDs of their root tuples; so when we advance onto
-		 * a new heap page, build a map of root item offsets on the page.
-		 *
-		 * This complicates merging against the tuplesort output: we will
-		 * visit the live tuples in order by their offsets, but the root
-		 * offsets that we need to compare against the index contents might be
-		 * ordered differently.  So we might have to "look back" within the
-		 * tuplesort output, but only within the current page.  We handle that
-		 * by keeping a bool array in_index[] showing all the
-		 * already-passed-over tuplesort output TIDs of the current page. We
-		 * clear that array here, when advancing onto a new heap page.
+		 * It is safe to access tuple data after releasing the buffer lock
+		 * because the buffer pin is still held, and the only operation that
+		 * could physically move tuple data on the page is
+		 * PageRepairFragmentation via heap_page_prune.  VACUUM conflicts with
+		 * CIC (both take ShareUpdateExclusiveLock), and opportunistic pruning
+		 * from concurrent DML cannot affect root tuples we are referencing.
 		 */
-		if (hscan->rs_cblock != root_blkno)
-		{
-			Page		page = BufferGetPage(hscan->rs_cbuf);
-
-			LockBuffer(hscan->rs_cbuf, BUFFER_LOCK_SHARE);
-			heap_get_root_tuples(page, root_offsets);
-			LockBuffer(hscan->rs_cbuf, BUFFER_LOCK_UNLOCK);
-
-			memset(in_index, 0, sizeof(in_index));
-
-			root_blkno = hscan->rs_cblock;
-		}
-
-		/* Convert actual tuple TID to root TID */
-		rootTuple = *heapcursor;
-		root_offnum = ItemPointerGetOffsetNumber(heapcursor);
-
-		if (HeapTupleIsHeapOnly(heapTuple))
-		{
-			root_offnum = root_offsets[root_offnum - 1];
-			if (!OffsetNumberIsValid(root_offnum))
-				ereport(ERROR,
-						(errcode(ERRCODE_DATA_CORRUPTED),
-						 errmsg_internal("failed to find parent tuple for heap-only tuple at (%u,%u) in table \"%s\"",
-										 ItemPointerGetBlockNumber(heapcursor),
-										 ItemPointerGetOffsetNumber(heapcursor),
-										 RelationGetRelationName(heapRelation))));
-			ItemPointerSetOffsetNumber(&rootTuple, root_offnum);
-		}
-
 		/*
-		 * "merge" by skipping through the index tuples until we find or pass
-		 * the current root tuple.
+		 * No predicate evaluation is needed here: the auxiliary STIR index
+		 * only contains TIDs for tuples that already satisfied the partial
+		 * index predicate at DML time (checked in ExecInsertIndexTuples).
 		 */
-		while (!tuplesort_empty &&
-			   (!indexcursor ||
-				ItemPointerCompare(indexcursor, &rootTuple) < 0))
+		i = 0;
+		while ((off = tuples[i]) != InvalidOffsetNumber)
 		{
-			Datum		ts_val;
-			bool		ts_isnull;
-
-			if (indexcursor)
+			if (ItemPointerIsValid(&heap_tuple_data[i].t_self))
 			{
+				ItemPointerData root_tid;
+				ItemPointerSet(&root_tid, block_number, off);
+
+				/* Reset the per-tuple memory context for the next fetch. */
+				MemoryContextReset(econtext->ecxt_per_tuple_memory);
+				ExecStoreBufferHeapTuple(&heap_tuple_data[i], slot, buf);
+
+				/* Compute the key values and null flags for this tuple. */
+				FormIndexDatum(indexInfo,
+							   slot,
+							   estate,
+							   values,
+							   isnull);
+
 				/*
-				 * Remember index items seen earlier on the current heap page
+				 * Insert the tuple into the target index.
 				 */
-				if (ItemPointerGetBlockNumber(indexcursor) == root_blkno)
-					in_index[ItemPointerGetOffsetNumber(indexcursor) - 1] = true;
+				index_insert(indexRelation,
+							 values,
+							 isnull,
+							 &root_tid, /* insert root tuple */
+							 heapRelation,
+							 indexInfo->ii_Unique ?
+							 UNIQUE_CHECK_YES : UNIQUE_CHECK_NO,
+							 false,
+							 indexInfo);
+
+				state->tups_inserted += 1;
 			}
 
-			tuplesort_empty = !tuplesort_getdatum(state->tuplesort, true,
-												  false, &ts_val, &ts_isnull,
-												  NULL);
-			Assert(tuplesort_empty || !ts_isnull);
-			if (!tuplesort_empty)
-			{
-				itemptr_decode(&decoded, DatumGetInt64(ts_val));
-				indexcursor = &decoded;
-			}
-			else
-			{
-				/* Be tidy */
-				indexcursor = NULL;
-			}
+			pgstat_progress_incr_param(PROGRESS_CREATEIDX_TUPLES_DONE, 1);
+			i++;
 		}
 
-		/*
-		 * If the tuplesort has overshot *and* we didn't see a match earlier,
-		 * then this tuple is missing from the index, so insert it.
-		 */
-		if ((tuplesort_empty ||
-			 ItemPointerCompare(indexcursor, &rootTuple) > 0) &&
-			!in_index[root_offnum - 1])
-		{
-			MemoryContextReset(econtext->ecxt_per_tuple_memory);
-
-			/* Set up for predicate or expression evaluation */
-			ExecStoreHeapTuple(heapTuple, slot, false);
-
-			/*
-			 * In a partial index, discard tuples that don't satisfy the
-			 * predicate.
-			 */
-			if (predicate != NULL)
-			{
-				if (!ExecQual(predicate, econtext))
-					continue;
-			}
-
-			/*
-			 * For the current heap tuple, extract all the attributes we use
-			 * in this index, and note which are null.  This also performs
-			 * evaluation of any expressions needed.
-			 */
-			FormIndexDatum(indexInfo,
-						   slot,
-						   estate,
-						   values,
-						   isnull);
-
-			/*
-			 * You'd think we should go ahead and build the index tuple here,
-			 * but some index AMs want to do further processing on the data
-			 * first. So pass the values[] and isnull[] arrays, instead.
-			 */
-
-			/*
-			 * If the tuple is already committed dead, you might think we
-			 * could suppress uniqueness checking, but this is no longer true
-			 * in the presence of HOT, because the insert is actually a proxy
-			 * for a uniqueness check on the whole HOT-chain.  That is, the
-			 * tuple we have here could be dead because it was already
-			 * HOT-updated, and if so the updating transaction will not have
-			 * thought it should insert index entries.  The index AM will
-			 * check the whole HOT-chain and correctly detect a conflict if
-			 * there is one.
-			 */
-
-			index_insert(indexRelation,
-						 values,
-						 isnull,
-						 &rootTuple,
-						 heapRelation,
-						 indexInfo->ii_Unique ?
-						 UNIQUE_CHECK_YES : UNIQUE_CHECK_NO,
-						 false,
-						 indexInfo);
-
-			state->tups_inserted += 1;
-		}
+		ReleaseBuffer(buf);
 	}
-
-	table_endscan(scan);
 
 	ExecDropSingleTupleTableSlot(slot);
 
 	FreeExecutorState(estate);
+
+	read_stream_end(read_stream);
+	tuplestore_end(tuples_for_check);
+
+	FreeAccessStrategy(bstrategy);
 
 	/* These may have been pointing to the now-gone estate */
 	indexInfo->ii_ExpressionsState = NIL;
