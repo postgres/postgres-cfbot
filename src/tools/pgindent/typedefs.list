@@ -3513,6 +3513,7 @@ X509_STORE
 X509_STORE_CTX
 X86FeatureId
 XLTW_Oper
+XLogCompressionHeader
 XLogCtlData
 XLogCtlInsert
 XLogDumpConfig
