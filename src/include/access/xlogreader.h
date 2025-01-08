@@ -242,7 +242,7 @@ struct XLogReaderState
 	 */
 
 #ifdef USE_ZSTD
-	/* Decompression context reused for zstd-compressed full-page images. */
+	/* Decompression context for independent zstd records and page images. */
 	void	   *zstd_dctx;
 #ifndef FRONTEND
 	/* Reset callback for zstd_dctx */
@@ -261,6 +261,10 @@ struct XLogReaderState
 	bool		free_decode_buffer; /* need to free? */
 	char	   *decode_buffer_head; /* data is read from the head */
 	char	   *decode_buffer_tail; /* new data is written at the tail */
+
+	/* Buffer for decompressing whole-record compressed WAL records */
+	char	   *decompression_buffer;
+	uint32		decompression_buffer_size;
 
 	/*
 	 * Queue of records that have been decoded.  This is a linked list that
