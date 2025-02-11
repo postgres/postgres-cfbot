@@ -419,6 +419,8 @@ main(int argc, char **argv)
 {
 	int			c;
 	const char *filename = NULL;
+	char	   *pipe_command = NULL;
+	bool		is_pipe = false;
 	const char *format = "p";
 	TableInfo  *tblinfo;
 	int			numTables;
@@ -535,6 +537,7 @@ main(int argc, char **argv)
 		{"exclude-extension", required_argument, NULL, 17},
 		{"sequence-data", no_argument, &dopt.sequence_data, 1},
 		{"restrict-key", required_argument, NULL, 25},
+		{"pipe", required_argument, NULL, 26},
 
 		{NULL, 0, NULL, 0}
 	};
@@ -607,6 +610,8 @@ main(int argc, char **argv)
 
 			case 'f':
 				filename = pg_strdup(optarg);
+				is_pipe = false;	/* it already is, setting again here just
+									 * for clarity */
 				break;
 
 			case 'F':
@@ -799,12 +804,21 @@ main(int argc, char **argv)
 				dopt.restrict_key = pg_strdup(optarg);
 				break;
 
+			case 26:			/* pipe command */
+				pipe_command = pg_strdup(optarg);
+				is_pipe = true;
+				break;
+
 			default:
 				/* getopt_long already emitted a complaint */
 				pg_log_error_hint("Try \"%s --help\" for more information.", progname);
 				exit_nicely(1);
 		}
 	}
+
+	if (filename && pipe_command)
+		pg_fatal("options %s and %s cannot be used together",
+				 "-f/--file", "--pipe");
 
 	/*
 	 * Non-option argument specifies database name as long as it wasn't
@@ -907,14 +921,23 @@ main(int argc, char **argv)
 	else if (dopt.restrict_key)
 		pg_fatal("option %s can only be used with %s",
 				 "--restrict-key", "--format=plain");
+	if (is_pipe && archiveFormat != archDirectory)
+		pg_fatal("option --pipe is only supported with directory format");
+
+	if (is_pipe && strcmp(compression_algorithm_str, "none") != 0)
+		pg_fatal("option --pipe is not supported with any compression type");
+
+	if (is_pipe && numWorkers > 1 && strstr(pipe_command, "%f") == NULL)
+		pg_log_warning("parallel jobs with --pipe usually require the \"%%f\" placeholder to avoid data corruption from multiple workers writing to the same file");
 
 	/*
 	 * Custom and directory formats are compressed by default with gzip when
 	 * available, not the others.  If gzip is not available, no compression is
-	 * done by default.
+	 * done by default. If directory format is being used with pipe, no
+	 * compression is done.
 	 */
 	if ((archiveFormat == archCustom || archiveFormat == archDirectory) &&
-		!user_compression_defined)
+		!is_pipe && !user_compression_defined)
 	{
 #ifdef HAVE_LIBZ
 		compression_algorithm_str = "gzip";
@@ -963,8 +986,8 @@ main(int argc, char **argv)
 		pg_fatal("parallel backup only supported by the directory format");
 
 	/* Open the output file */
-	fout = CreateArchive(filename, archiveFormat, compression_spec,
-						 dosync, archiveMode, setupDumpWorker, sync_method);
+	fout = CreateArchive(is_pipe ? pipe_command : filename, archiveFormat, compression_spec,
+						 dosync, archiveMode, setupDumpWorker, sync_method, is_pipe);
 
 	/* Make dump options accessible right away */
 	SetArchiveOptions(fout, &dopt, NULL);
@@ -1296,6 +1319,8 @@ help(const char *progname)
 
 	printf(_("\nGeneral options:\n"));
 	printf(_("  -f, --file=FILENAME          output file or directory name\n"));
+	printf(_("  --pipe=COMMAND               execute command for each output file and\n"
+			 "                               write data to it via pipe\n"));
 	printf(_("  -F, --format=c|d|t|p         output file format (custom, directory, tar,\n"
 			 "                               plain text (default))\n"));
 	printf(_("  -j, --jobs=NUM               use this many parallel jobs to dump\n"));
