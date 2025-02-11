@@ -20,6 +20,7 @@
 extern void InitCompressorZstd(CompressorState *cs,
 							   const pg_compress_specification compression_spec);
 extern void InitCompressFileHandleZstd(CompressFileHandle *CFH,
-									   const pg_compress_specification compression_spec);
+									   const pg_compress_specification compression_spec,
+									   bool is_pipe);
 
 #endif							/* COMPRESS_ZSTD_H */
