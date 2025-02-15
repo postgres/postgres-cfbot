@@ -75,6 +75,48 @@ command_fails_like(
 );
 
 command_fails_like(
+	[ 'pg_dump', '-Fd', '--pipe="cat"', '-f', 'testdir', 'test'],
+	qr/\Qpg_dump: error: options -f\/--file and --pipe cannot be used together\E/,
+	'pg_dump: options -f/--file and --pipe cannot be used together'
+);
+
+command_fails_like(
+	[ 'pg_dump', '-Fd', '--pipe="cat"', '-Z', 'gzip', 'test'],
+	qr/\Qpg_dump: error: option --pipe is not supported with any compression type\E/,
+	'pg_dump: option --pipe is not supported with any compression type'
+);
+
+command_fails_like(
+	[ 'pg_dump', '-Fd', '--pipe="cat"', '--compress=lz4', 'test'],
+	qr/\Qpg_dump: error: option --pipe is not supported with any compression type\E/,
+	'pg_dump: option --pipe is not supported with any compression type'
+);
+
+command_fails_like(
+	[ 'pg_dump', '-Fd', '--pipe="cat"', '--compress=gzip', 'test'],
+	qr/\Qpg_dump: error: option --pipe is not supported with any compression type\E/,
+	'pg_dump: option --pipe is not supported with any compression type'
+);
+
+command_fails_like(
+	[ 'pg_dump', '-Fd', '--pipe="cat"', '-Z', '1', 'test'],
+	qr/\Qpg_dump: error: option --pipe is not supported with any compression type\E/,
+	'pg_dump: option --pipe is not supported with any compression type'
+);
+
+command_fails_like(
+	[ 'pg_dump', '-Fc', '--pipe="cat"', 'test'],
+	qr/\Qpg_dump: error: option --pipe is only supported with directory format\E/,
+	'pg_dump: option --pipe is only supported with directory format'
+);
+
+command_fails_like(
+	[ 'pg_dump', '--format=tar', '--pipe="cat"', 'test'],
+	qr/\Qpg_dump: error: option --pipe is only supported with directory format\E/,
+	'pg_dump: option --pipe is only supported with directory format'
+);
+
+command_fails_like(
 	[ 'pg_dump', '-j2', '--include-foreign-data=xxx' ],
 	qr/\Qpg_dump: error: option --include-foreign-data is not supported with parallel backup\E/,
 	'pg_dump: option --include-foreign-data is not supported with parallel backup'
@@ -94,12 +136,38 @@ command_fails_like(
 command_fails_like(
 	[ 'pg_restore', '-d', 'xxx', '-f', 'xxx' ],
 	qr/\Qpg_restore: error: options -d\/--dbname and -f\/--file cannot be used together\E/,
-	'pg_restore: options -d/--dbname and -f/--file cannot be used together');
+	'pg_restore: options -d/--dbname and -f/--file cannot be used together'
+);
+
+command_fails_like(
+	[ 'pg_restore', '-f', '-', '--pipe="cat"', 'dumpdir' ],
+	qr/\Qpg_restore: error: cannot specify both an input file and --pipe\E/,
+	'pg_restore: cannot specify both an input file and --pipe'
+);
+
+command_fails_like(
+	[ 'pg_restore', '-Fd', '-f', '-', '--pipe="cat"', 'dumpdir' ],
+	qr/\Qpg_restore: error: cannot specify both an input file and --pipe\E/,
+	'pg_restore: cannot specify both an input file and --pipe'
+);
+
+command_fails_like(
+	[ 'pg_restore', '-Fc', '-f', '-', '--pipe="cat"' ],
+	qr/\Qpg_restore: error: option --pipe is only supported with directory format\E/,
+	'pg_restore: option --pipe is only supported with directory format'
+);
+
+command_fails_like(
+	[ 'pg_restore', '--format=tar', '-f', '-', '--pipe="cat"' ],
+	qr/\Qpg_restore: error: option --pipe is only supported with directory format\E/,
+	'pg_restore: option --pipe is only supported with directory format'
+);
 
 command_fails_like(
 	[ 'pg_dump', '-c', '-a' ],
 	qr/\Qpg_dump: error: options -c\/--clean and -a\/--data-only cannot be used together\E/,
-	'pg_dump: options -c/--clean and -a/--data-only cannot be used together');
+	'pg_dump: options -c/--clean and -a/--data-only cannot be used together'
+);
 
 command_fails_like(
 	[ 'pg_dumpall', '-c', '-a' ],
