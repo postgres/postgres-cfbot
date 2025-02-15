@@ -7,8 +7,10 @@ use warnings FATAL => 'all';
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
+use File::Spec;
 
 my $tempdir = PostgreSQL::Test::Utils::tempdir;
+$tempdir =~ s!\\!/!g if $PostgreSQL::Test::Utils::windows_os;
 
 ###############################################################
 # Definition of the pg_dump runs to make.
@@ -45,6 +47,59 @@ my $tempdir = PostgreSQL::Test::Utils::tempdir;
 
 my $supports_icu = ($ENV{with_icu} eq 'yes');
 my $supports_gzip = check_pg_config("#define HAVE_LIBZ 1");
+
+# Use perl one-liner as a portable 'cat' replacement for Windows compatibility.
+# On Windows, perl opens file handles in text mode by default, which corrupts
+# binary archive data by translating newlines and interpreting EOF characters.
+# We use -Mopen=IO,:raw to force raw binary mode. We use -pe 1 instead of
+# -pe '' to avoid shell quoting issues with empty strings on Windows cmd.exe.
+my $perlbin = $^X;
+$perlbin =~ s!\\!/!g if $PostgreSQL::Test::Utils::windows_os;
+
+my $is_win = $PostgreSQL::Test::Utils::windows_os;
+
+my $perl_cat = "\"$perlbin\" -Mopen=IO,:raw -pe 1";
+
+# Check for external gzip program for pipe tests.
+my $gzip_path = $ENV{GZIP_PROGRAM} || 'gzip';
+my $gzip_bin = "\"$gzip_path\"";
+my $has_gzip_bin =
+  (system("$gzip_bin --version > /dev/null 2>&1") == 0);
+
+# Pre-calculate complex pipe commands to keep the test definitions readable
+# and ensure unified --pipe=... syntax.
+my $pipe_defaults_dir = "$perl_cat > \"$tempdir/defaults_dir_format/%f\"";
+my $pipe_defaults_res = "$perl_cat \"$tempdir/defaults_dir_format/%f\"";
+
+my $pipe_cross_dump = "$perl_cat > \"$tempdir/pipe_cross_dump/%f\"";
+
+my $pipe_cross_restore = ($supports_gzip)
+	? "if [ -f \"$tempdir/pipe_cross_restore/%f.gz\" ]; then $gzip_bin -d -c \"$tempdir/pipe_cross_restore/%f.gz\"; else $perl_cat \"$tempdir/pipe_cross_restore/%f\"; fi"
+	: "$perl_cat \"$tempdir/pipe_cross_restore/%f\"";
+
+my $pipe_parallel_out = "$perl_cat > \"$tempdir/pipe_out_dir_parallel/%f\"";
+my $pipe_parallel_in = "$perl_cat \"$tempdir/pipe_out_dir_parallel/%f\"";
+
+my $pipe_parallel_8_out = "$perl_cat > \"$tempdir/pipe_out_dir_parallel_8/%f\"";
+my $pipe_parallel_8_in = "$perl_cat \"$tempdir/pipe_out_dir_parallel_8/%f\"";
+
+my $pipe_complex_out = "$gzip_bin | $perl_cat > \"$tempdir/pipe_out_dir_complex/%f.gz\"";
+my $pipe_complex_in = "$perl_cat \"$tempdir/pipe_out_dir_complex/%f.gz\" | $gzip_bin -d";
+
+my $pipe_lo_out = "$perl_cat > \"$tempdir/pipe_out_dir_lo/%f\"";
+my $pipe_lo_in = "$perl_cat \"$tempdir/pipe_out_dir_lo/%f\"";
+
+my $pipe_schema_out = "$perl_cat > \"$tempdir/schema_only_pipe_dir/%f\"";
+my $pipe_schema_in = "$perl_cat \"$tempdir/schema_only_pipe_dir/%f\"";
+
+# Create output directories for pipe tests
+mkdir "$tempdir/pipe_out_dir_parallel";
+mkdir "$tempdir/pipe_out_dir_parallel_8";
+mkdir "$tempdir/pipe_out_dir_complex";
+mkdir "$tempdir/pipe_out_dir_lo";
+mkdir "$tempdir/pipe_cross_dump";
+mkdir "$tempdir/pipe_cross_restore";
+mkdir "$tempdir/schema_only_pipe_dir";
 
 my %pgdump_runs = (
 	binary_upgrade => {
@@ -220,6 +275,139 @@ my %pgdump_runs = (
 			"$tempdir/defaults_dir_format/blobs_*.toc",
 			$supports_gzip ? "$tempdir/defaults_dir_format/*.dat.gz"
 			: "$tempdir/defaults_dir_format/*.dat",
+		],
+	},
+
+	defaults_dir_format_pipe => {
+		test_key => 'defaults',
+		dump_cmd => [
+			'pg_dump',
+			'--format' => 'directory',
+			"--pipe=$pipe_defaults_dir",
+			'--statistics',
+			'postgres',
+		],
+		restore_cmd => [
+			'pg_restore',
+			'--format' => 'directory',
+			'--file' => "$tempdir/defaults_dir_format_pipe.sql",
+			"--pipe=$pipe_defaults_res",
+			'--statistics',
+		],
+	},
+
+	defaults_dir_format_pipe_dump_only => {
+		test_key => 'defaults',
+		dump_cmd => [
+			'pg_dump',
+			'--format' => 'directory',
+			"--pipe=$pipe_cross_dump",
+			'--statistics',
+			'postgres',
+		],
+		restore_cmd => [
+			'pg_restore',
+			'--format' => 'directory',
+			'--file' => "$tempdir/defaults_dir_format_pipe_dump_only.sql",
+			'--statistics',
+			"$tempdir/pipe_cross_dump",
+		],
+	},
+
+	defaults_dir_format_pipe_restore_only => {
+		test_key => 'defaults',
+		dump_cmd => [
+			'pg_dump',
+			'--format' => 'directory',
+			'--file' => "$tempdir/pipe_cross_restore",
+			'--statistics',
+			'postgres',
+		],
+		restore_cmd => [
+			'pg_restore',
+			'--format' => 'directory',
+			'--file' => "$tempdir/defaults_dir_format_pipe_restore_only.sql",
+			"--pipe=$pipe_cross_restore",
+			'--statistics',
+		],
+	},
+
+	defaults_parallel_pipe => {
+		test_key => 'defaults',
+		dump_cmd => [
+			'pg_dump',
+			'--format' => 'directory',
+			'--jobs' => 2,
+			"--pipe=$pipe_parallel_out",
+			'--statistics',
+			'postgres',
+		],
+		restore_cmd => [
+			'pg_restore',
+			'--format' => 'directory',
+			'--file' => "$tempdir/defaults_parallel_pipe.sql",
+			"--pipe=$pipe_parallel_in",
+			'--statistics',
+		],
+	},
+
+	defaults_parallel_8_pipe => {
+		test_key => 'defaults',
+		dump_cmd => [
+			'pg_dump',
+			'--format' => 'directory',
+			'--jobs' => 8,
+			"--pipe=$pipe_parallel_8_out",
+			'--statistics',
+			'postgres',
+		],
+		restore_cmd => [
+			'pg_restore',
+			'--format' => 'directory',
+			'--file' => "$tempdir/defaults_parallel_8_pipe.sql",
+			"--pipe=$pipe_parallel_8_in",
+			'--statistics',
+		],
+	},
+
+	defaults_complex_pipe => {
+		test_key => 'defaults',
+		skip_unless => \$has_gzip_bin,
+		dump_cmd => [
+			'pg_dump',
+			'--format' => 'directory',
+			"--pipe=$pipe_complex_out",
+			'--statistics',
+			'postgres',
+		],
+		restore_cmd => [
+			'pg_restore',
+			'--format' => 'directory',
+			'--file' => "$tempdir/defaults_complex_pipe.sql",
+			"--pipe=$pipe_complex_in",
+			'--statistics',
+		],
+	},
+
+	defaults_lo_pipe => {
+		test_key => 'defaults',
+		dump_cmd => [
+			'pg_dump',
+			'--format' => 'directory',
+			'--statistics',
+			"--pipe=$pipe_lo_out",
+			'postgres',
+		],
+		restore_cmd => [
+			'pg_restore',
+			'--format' => 'directory',
+			'--file' => "$tempdir/defaults_lo_pipe.sql",
+			'--statistics',
+			"--pipe=$pipe_lo_in",
+		],
+		glob_patterns => [
+			"$tempdir/pipe_out_dir_lo/toc.dat",
+			"$tempdir/pipe_out_dir_lo/blobs_*.toc",
 		],
 	},
 
@@ -525,6 +713,22 @@ my %pgdump_runs = (
 			'--file' => "$tempdir/schema_only.sql",
 			'--schema-only',
 			'postgres',
+		],
+	},
+	schema_only_pipe => {
+		test_key => 'schema_only',
+		dump_cmd => [
+			'pg_dump', '--no-sync',
+			'--format' => 'directory',
+			'--schema-only',
+			"--pipe=$pipe_schema_out",
+			'postgres',
+		],
+		restore_cmd => [
+			'pg_restore',
+			'--format' => 'directory',
+			'--file' => "$tempdir/schema_only_pipe.sql",
+			"--pipe=$pipe_schema_in",
 		],
 	},
 	section_pre_data => {
@@ -5249,28 +5453,35 @@ command_fails_like(
 	'pg_dump: option --table rejects cross-database three part table names with embedded dots'
 );
 
+if ($is_win)
+{
+	foreach my $run (keys %pgdump_runs)
+	{
+		delete $pgdump_runs{$run} if $run =~ /pipe/;
+	}
+}
+
 #########################################
 # Run all runs
+
 
 foreach my $run (sort keys %pgdump_runs)
 {
 	my $test_key = $run;
-	my $run_db = 'postgres';
+	my $run_db   = 'postgres';
 
 	$node->command_ok(\@{ $pgdump_runs{$run}->{dump_cmd} },
 		"$run: pg_dump runs");
 
 	if ($pgdump_runs{$run}->{glob_patterns})
 	{
-		my $glob_patterns = $pgdump_runs{$run}->{glob_patterns};
-		foreach my $glob_pattern (@{$glob_patterns})
+		foreach my $glob_pattern (@{ $pgdump_runs{$run}->{glob_patterns} })
 		{
-			my @glob_output = glob($glob_pattern);
 			my $ok = 0;
-			# certainly found some files if glob() returned multiple matches
-			$ok = 1 if (scalar(@glob_output) > 1);
-			# if just one match, we need to check if it's real
-			$ok = 1 if (scalar(@glob_output) == 1 && -f $glob_output[0]);
+			foreach my $file (glob("$glob_pattern"))
+			{
+				$ok = 1 if -e $file;
+			}
 			is($ok, 1, "$run: glob check for $glob_pattern");
 		}
 	}
@@ -5374,7 +5585,76 @@ foreach my $run (sort keys %pgdump_runs)
 	}
 }
 
-#########################################
+unless ($is_win)
+{
+	#########################################
+	# Test error reporting for a failing pipe command.
+	# We use a perl one-liner that exits with 1 after processing input.
+	# This ensures we test the error handling in pclose() at the end of the dump,
+	# verifying that the child's exit status is correctly captured and reported.
+	my $failing_perl_cat = "\"$perlbin\" -Mopen=IO,:raw -pe \"END { exit 1 }\"";
+
+	# Verify that pg_dump's error message includes the exact failing command,
+	# including the specific "-pe "END { exit 1 }"" payload.
+	$node->command_fails_like(
+		[ 'pg_dump', '-Fd', "--pipe=$failing_perl_cat > \"%f\"", 'postgres' ],
+		qr/pipe command failed: ".*perl.*-Mopen=IO,:raw.*-pe.*END.*": /,
+		'pg_dump pipe command error reporting includes full command string'
+	);
+
+
+	# Verify that pg_restore's error message also includes the exact failing command
+	# and its arguments, including the target file path.
+	$node->command_fails_like(
+		[ 'pg_restore', '-Fd', '-l', "--pipe=$failing_perl_cat \"$tempdir/pipe_cross_dump/%f\"", ],
+		qr/pipe command failed: ".*perl.*-Mopen=IO,:raw.*-pe.*END.*pipe_cross_dump.*": /,
+		'pg_restore pipe command error reporting includes full command string'
+	);
+
+	# Targeted Edge Case Tests
+	$node->command_fails_like(
+		[ 'pg_dump', '-Fd', '--pipe=/nonexistent/binary', 'postgres' ],
+		qr/could not write to file: (?:Broken pipe|The pipe has been ended)|Permission denied/,
+		'pg_dump early pipe command execution failure'
+	);
+
+	$node->command_fails_like(
+		[ 'pg_dump', '-Fd', '--pipe=no_such_command_at_all', 'postgres' ],
+		qr/could not write to file: (?:Broken pipe|The pipe has been ended)|not found|not recognized/,
+		'pg_dump command not found error reporting'
+	);
+
+	$node->command_fails_like(
+		[ 'pg_dump', '-Fd', '-f', '-', "--pipe=$perl_cat > \"%f\"", 'postgres' ],
+		qr/options -f\/--file and --pipe cannot be used together/,
+		'pg_dump options -f/--file and --pipe conflict check'
+	);
+
+	# Test that pg_restore rejects a positional argument when --pipe is used.
+	# We create a dummy cluster archive (containing toc.glo) to verify that
+	# even in cluster mode, the mutual exclusivity holds.
+	mkdir "$tempdir/dummy_cluster_archive";
+	open my $fh, '>', "$tempdir/dummy_cluster_archive/toc.glo";
+	close $fh;
+
+	$node->command_fails_like(
+		[ 'pg_restore', '-Fd', '-l', "--pipe=$perl_cat \"%f\"", "$tempdir/dummy_cluster_archive" ],
+		qr/cannot specify both an input file and --pipe/,
+		'pg_restore --pipe rejects positional argument even for cluster archive'
+	);
+
+	# Test that pg_dump --pipe bypasses local directory existence check.
+	# We use a pipe command that writes to a subdirectory that hasn't been created.
+	# The dump itself will fail when the pipe command tries to write to the
+	# non-existent directory, but the error should come from the pipe command/write
+	# failure, not from pg_dump's directory initialization.
+	my $remote_dir = "$tempdir/non_existent_remote_dir";
+	$node->command_fails_like(
+		[ 'pg_dump', '-Fd', "--pipe=$perl_cat > \"$remote_dir/%f\"", 'postgres' ],
+		qr/could not write to file: (?:Broken pipe|The pipe has been ended)|pipe command failed/,
+		'pg_dump --pipe bypasses local directory existence check'
+	);
+}
 # Stop the database instance, which will be removed at the end of the tests.
 
 $node->stop('fast');
