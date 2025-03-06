@@ -1439,21 +1439,34 @@ include $(PGXS)
    </sect2>
   </sect1>
 
-  <sect1 id="extend-pgxs">
+  <sect1 id="extend-postgres">
    <title>Extension Building Infrastructure</title>
-
-   <indexterm zone="extend-pgxs">
-    <primary>pgxs</primary>
-   </indexterm>
 
    <para>
     If you are thinking about distributing your
     <productname>PostgreSQL</productname> extension modules, setting up a
     portable build system for them can be fairly difficult.  Therefore
     the <productname>PostgreSQL</productname> installation provides a build
-    infrastructure for extensions, called <acronym>PGXS</acronym>, so
-    that simple extension modules can be built simply against an
-    already installed server.  <acronym>PGXS</acronym> is mainly intended
+    infrastructure for extensions, called <literal>PGXS</literal>
+    (<xref linkend="extend-pgxs"/>).
+   </para>
+
+   <para>
+    When <productname>PostgreSQL</productname> is built with
+    <productname>Meson</productname>, it also installs a
+    <literal>pkg-config</literal> file,
+    <literal>postgresql-&majorversion;-llvm-jit-bitcode.pc</literal>
+    (<xref linkend="extend-pkg-config"/>).  This file is used internally to
+    emit <acronym>LLVM</acronym> <acronym>JIT</acronym> bitcode; it is not
+    (yet) a stable, supported interface for building extensions.
+   </para>
+
+  </sect1>
+
+  <sect1 id="extend-pgxs">
+   <title>PGXS</title>
+
+   <para>  <acronym>PGXS</acronym> is mainly intended
     for extensions that include C code, although it can be used for
     pure-SQL extensions too.  Note that <acronym>PGXS</acronym> is not
     intended to be a universal build system framework that can be used
@@ -1927,6 +1940,75 @@ make VPATH=/path/to/extension/source/tree install
     </para>
 
    </tip>
+  </sect1>
+
+  <sect1 id="extend-pkg-config">
+   <title>postgresql-&majorversion;-llvm-jit-bitcode.pc</title>
+
+   <para>
+    When <productname>PostgreSQL</productname> is built with
+    <productname>Meson</productname>, it installs a
+    <literal>pkg-config</literal> file named
+    <literal>postgresql-&majorversion;-llvm-jit-bitcode.pc</literal>.  It is
+    used internally to emit <acronym>LLVM</acronym> <acronym>JIT</acronym>
+    bitcode for the server and for selected
+    <filename>contrib</filename> modules, and it collects the same
+    compilation flags that are used to build the server itself.
+   </para>
+
+   <para>
+    The file is deliberately versioned and named after its bitcode purpose
+    because there is not yet agreement on a stable, general-purpose interface
+    for building extensions.  It is therefore <emphasis>not</emphasis> a
+    supported replacement for <acronym>PGXS</acronym>
+    (<xref linkend="extend-pgxs"/>), and its name and contents may change
+    between major releases.
+   </para>
+
+   <para>
+    To use the
+    <literal>postgresql-&majorversion;-llvm-jit-bitcode.pc</literal>
+    infrastructure for your extension, you must write a simple
+    <filename>meson.build</filename> file. In the
+    <filename>meson.build</filename> file, you need to include the
+    <literal>postgresql-&majorversion;-llvm-jit-bitcode.pc</literal>
+    <literal>pkg-config</literal> file. Here is an example that builds an
+    extension module named <literal>isbn_issn</literal>, consisting of a
+    shared library containing some C code, an extension control file, an
+    <acronym>SQL</acronym> script, an include file (only needed if other
+    modules might need to access the extension functions without going via
+    <acronym>SQL</acronym>), and a documentation text file:
+<programlisting>
+project('isbn_issn', 'c')
+
+pg_ext = dependency('postgresql-&majorversion;-llvm-jit-bitcode-warnings')
+
+isbn_issn_sources = files('isbn_issn.c')
+
+isbn_issn = shared_module('isbn_issn',
+  isbn_issn_sources,
+  dependencies: pg_ext,
+  install_dir: pg_ext.get_variable(pkgconfig: 'dir_mod'),
+)
+
+install_data(
+     'isbn_issn.control',
+     'isbn_issn--1.0.sql',
+     install_dir: pg_ext.get_variable(pkgconfig: 'dir_data'),
+)
+
+install_headers(
+     'isbn_issn.h',
+     install_dir: pg_ext.get_variable(pkgconfig: 'dir_include'),
+)
+
+install_data(
+     'README.isbn_issn',
+     install_dir: pg_ext.get_variable(pkgconfig: 'dir_doc'),
+)
+</programlisting>
+   </para>
+
   </sect1>
 
  </chapter>
