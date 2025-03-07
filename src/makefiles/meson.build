@@ -113,9 +113,8 @@ pgxs_kv = {
     ' '.join(cc.get_supported_link_arguments('-Wl,--export-dynamic')),
   'LDFLAGS_SL': var_ldflags_sl,
 
-  # TODO: requires bitcode generation to be implemented for meson
-  'BITCODE_CFLAGS': '',
-  'BITCODE_CXXFLAGS': '',
+  'BITCODE_CFLAGS': ' '.join(var_bitcode_cflags),
+  'BITCODE_CXXFLAGS': ' '.join(var_bitcode_cxxflags),
 
   'BISONFLAGS': ' '.join(bison_flags),
   'FLEXFLAGS': ' '.join(flex_flags),
