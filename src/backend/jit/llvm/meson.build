@@ -42,27 +42,31 @@ backend_targets += llvmjit
 
 # Define a few bits and pieces used here and elsewhere to generate bitcode
 
-llvm_irgen_args = [
-  '-c', '-o', '@OUTPUT@', '@INPUT@',
+llvm_irgen_command = []
+if ccache.found()
+  llvm_irgen_command += ccache
+endif
+
+llvm_irgen_command += [
+  clang,
+  '-c', '-o', '@OUTPUT0@', '@INPUT0@',
   '-flto=thin', '-emit-llvm',
-  '-MD', '-MQ', '@OUTPUT@', '-MF', '@DEPFILE@',
-  '-O2',
   '-Wno-ignored-attributes',
   '-Wno-empty-body',
+  '-Wno-unknown-warning-option',
+  '-Wno-compound-token-split-by-macro',
 ]
-
-if ccache.found()
-  llvm_irgen_command = ccache
-  llvm_irgen_args = [clang.full_path()] + llvm_irgen_args
-else
-  llvm_irgen_command = clang
-endif
+llvm_irgen_dep_args = ['-MD', '-MQ', '@OUTPUT0@', '-MF', '@DEPFILE@']
 
 
 # XXX: Need to determine proper version of the function cflags for clang
-bitcode_cflags = ['-fno-strict-aliasing', '-fwrapv']
-bitcode_cflags += get_option('c_args')
+bitcode_cflags = ['-fno-strict-aliasing', '-fwrapv', '-O2']
 bitcode_cflags += cppflags
+
+var_bitcode_cxxflags = bitcode_cflags
+var_bitcode_cxxflags += get_option('cpp_args')
+bitcode_cflags += get_option('c_args')
+var_bitcode_cflags = bitcode_cflags
 
 # XXX: Worth improving on the logic to find directories here
 bitcode_cflags += '-I@BUILD_ROOT@/src/include'
@@ -73,7 +77,7 @@ bitcode_cflags += '-I@SOURCE_ROOT@/src/include'
 # Note this is intentionally not installed to bitcodedir, as it's not for
 # inlining
 llvmjit_types = custom_target('llvmjit_types.bc',
-  command: [llvm_irgen_command] + llvm_irgen_args + bitcode_cflags,
+  command: llvm_irgen_command + llvm_irgen_dep_args + bitcode_cflags,
   input: 'llvmjit_types.c',
   output: 'llvmjit_types.bc',
   depends: [postgres],
@@ -82,3 +86,11 @@ llvmjit_types = custom_target('llvmjit_types.bc',
   depfile: '@BASENAME@.c.bc.d',
 )
 backend_targets += llvmjit_types
+
+# Figure out -I's needed to build all postgres code, including all its
+# dependencies
+pkg_config = find_program(['pkg-config', 'pkgconf'], required: true)
+r = run_command(pkg_config,
+  ['--cflags-only-I', meson.project_build_root() / 'meson-uninstalled/postgresql-@0@-llvm-jit-bitcode-uninstalled.pc'.format(pg_version_major)],
+  check: true)
+bitcode_cflags += r.stdout().split()
