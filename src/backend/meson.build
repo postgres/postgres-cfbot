@@ -7,6 +7,9 @@ backend_link_with = [pgport_srv, common_srv]
 generated_backend_sources = []
 post_export_backend_sources = []
 
+var_bitcode_cflags = []
+var_bitcode_cxxflags = []
+
 subdir('access')
 subdir('archive')
 subdir('backup')
@@ -164,6 +167,12 @@ postgres = executable('postgres',
 )
 
 backend_targets += postgres
+
+bitcode_modules += {
+  'name': 'postgres',
+  'target': postgres_lib,
+  'srcfiles': backend_sources,
+}
 
 pg_mod_c_args = cflags_mod
 pg_mod_cxx_args = cxxflags_mod
