@@ -1,0 +1,53 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s2_mod s1_begin s1_prepare_sorted s1_fetch_1 s2_vacuum s1_fetch_all s1_commit
+step s2_mod: 
+  DELETE FROM ios_needs_cleanup_lock WHERE a != point '(1,1)';
+
+step s1_begin: BEGIN;
+step s1_prepare_sorted: 
+	DECLARE foo NO SCROLL CURSOR FOR SELECT a <-> point '(0,0)' as x FROM ios_needs_cleanup_lock ORDER BY a <-> point '(0,0)';
+
+step s1_fetch_1: 
+	FETCH FROM foo;
+
+                 x
+------------------
+1.4142135623730951
+(1 row)
+
+step s2_vacuum: VACUUM (TRUNCATE false) ios_needs_cleanup_lock;
+step s1_fetch_all: 
+	FETCH ALL FROM foo;
+
+x
+-
+(0 rows)
+
+step s1_commit: COMMIT;
+
+starting permutation: s2_mod s1_begin s1_prepare_unsorted s1_fetch_1 s2_vacuum s1_fetch_all s1_commit
+step s2_mod: 
+  DELETE FROM ios_needs_cleanup_lock WHERE a != point '(1,1)';
+
+step s1_begin: BEGIN;
+step s1_prepare_unsorted: 
+	DECLARE foo NO SCROLL CURSOR FOR SELECT a FROM ios_needs_cleanup_lock WHERE box '((-100,-100),(100,100))' @> a;
+
+step s1_fetch_1: 
+	FETCH FROM foo;
+
+a    
+-----
+(1,1)
+(1 row)
+
+step s2_vacuum: VACUUM (TRUNCATE false) ios_needs_cleanup_lock;
+step s1_fetch_all: 
+	FETCH ALL FROM foo;
+
+a
+-
+(0 rows)
+
+step s1_commit: COMMIT;
