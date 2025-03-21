@@ -32,10 +32,20 @@
 #include "miscadmin.h"
 #include "pg_trace.h"
 #include "pgstat.h"
+
+#if defined(WIN32) && !defined(__CYGWIN__)
+#include "port/win32ntdll.h"
+#endif
+
 #include "storage/aio.h"
 #include "storage/bufmgr.h"
 #include "storage/fd.h"
 #include "storage/md.h"
+
+#if defined(WIN32) && !defined(__CYGWIN__)
+#include "storage/procsignal.h"
+#endif
+
 #include "storage/relfilelocator.h"
 #include "storage/smgr.h"
 #include "storage/sync.h"
@@ -224,6 +234,9 @@ mdcreate(SMgrRelation reln, ForkNumber forknum, bool isRedo)
 	MdfdVec    *mdfd;
 	RelPathStr	path;
 	File		fd;
+#if defined(WIN32) && !defined(__CYGWIN__)
+	bool		retryattempted = false;
+#endif
 
 	if (isRedo && reln->md_num_open_segs[forknum] > 0)
 		return;					/* created and opened already... */
@@ -245,6 +258,9 @@ mdcreate(SMgrRelation reln, ForkNumber forknum, bool isRedo)
 
 	path = relpath(reln->smgr_rlocator, forknum);
 
+#if defined(WIN32) && !defined(__CYGWIN__)
+retry:
+#endif
 	fd = PathNameOpenFile(path.str, _mdfd_open_flags() | O_CREAT | O_EXCL);
 
 	if (fd < 0)
@@ -255,6 +271,15 @@ mdcreate(SMgrRelation reln, ForkNumber forknum, bool isRedo)
 			fd = PathNameOpenFile(path.str, _mdfd_open_flags());
 		if (fd < 0)
 		{
+#if defined(WIN32) && !defined(__CYGWIN__)
+			if (!retryattempted && pg_RtlGetLastNtStatus() == STATUS_DELETE_PENDING)
+			{
+				retryattempted = true;
+				WaitForProcSignalBarrier(EmitProcSignalBarrier(PROCSIGNAL_BARRIER_SMGRRELEASE));
+				goto retry;
+			}
+#endif
+
 			/* be sure to report the error reported by create, not open */
 			errno = save_errno;
 			ereport(ERROR,
