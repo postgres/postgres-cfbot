@@ -54,7 +54,7 @@
 
 /*
  * To detect repeated access to the same block and skip useless extra system
- * calls, we remember a small window of recently prefetched blocks.
+ * calls, we remember a small window of recently prefetched / FPW blocks.
  */
 #define XLOGPREFETCHER_SEQ_WINDOW_SIZE 4
 
@@ -679,6 +679,26 @@ XLogPrefetcherNextBlock(uintptr_t pgsr_private, XLogRecPtr *lsn)
 			if (block->has_image)
 			{
 				XLogPrefetchIncrement(&SharedStats->skip_fpw);
+
+				/*
+				 * A full page image is copied to shared buffer during replay.
+				 * Every next WAL records related to particular block doesn't
+				 * require prefetching of shared buffer.
+				 */
+				for (int i = 0; i < XLOGPREFETCHER_SEQ_WINDOW_SIZE; ++i)
+				{
+					if (block->blkno == prefetcher->recent_block[i] &&
+						RelFileLocatorEquals(block->rlocator, prefetcher->recent_rlocator[i]))
+					{
+						return LRQ_NEXT_NO_IO;
+					}
+				}
+
+				prefetcher->recent_rlocator[prefetcher->recent_idx] = block->rlocator;
+				prefetcher->recent_block[prefetcher->recent_idx] = block->blkno;
+				prefetcher->recent_idx =
+					(prefetcher->recent_idx + 1) % XLOGPREFETCHER_SEQ_WINDOW_SIZE;
+
 				return LRQ_NEXT_NO_IO;
 			}
 
