@@ -401,12 +401,12 @@ live tuple.
 We mark the index open for inserts (but still not ready for reads) then
 we again wait for transactions which have the table open.  Then validate
 the index.  This searches for tuples missing from the index in auxiliary
-index, and inserts any missing ones if they are visible to reference snapshot.
+index, and inserts any missing ones if they are visible to a fresh snapshot.
 Again, the index entries have to have TIDs equal to HOT-chain root TIDs, but
 the value to be inserted is the one from the live tuple.
 
 Then we wait until every transaction that could have a snapshot older than
-the second reference snapshot is finished.  This ensures that nobody is
+the latest used snapshot is finished.  This ensures that nobody is
 alive any longer who could need to see any tuples that might be missing
 from the index, as well as ensuring that no one can see any inconsistent
 rows in a broken HOT chain (the first condition is stronger than the

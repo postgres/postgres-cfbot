@@ -739,12 +739,11 @@ typedef struct TableAmRoutine
 										   TableScanDesc scan);
 
 	/* see table_index_validate_scan for reference about parameters */
-	void		(*index_validate_scan) (Relation table_rel,
-										Relation index_rel,
-										IndexInfo *index_info,
-										Snapshot snapshot,
-										ValidateIndexState *state,
-										ValidateIndexState *aux_state);
+	TransactionId		(*index_validate_scan) (Relation table_rel,
+												Relation index_rel,
+												IndexInfo *index_info,
+												ValidateIndexState *state,
+												ValidateIndexState *aux_state);
 
 
 	/* ------------------------------------------------------------------------
@@ -1913,20 +1912,18 @@ table_index_build_range_scan(Relation table_rel,
  * Note: it is responsibility of that function to close sortstates in
  * both `state` and `auxstate`.
  */
-static inline void
+static inline TransactionId
 table_index_validate_scan(Relation table_rel,
 						  Relation index_rel,
 						  IndexInfo *index_info,
-						  Snapshot snapshot,
 						  ValidateIndexState *state,
 						  ValidateIndexState *auxstate)
 {
-	table_rel->rd_tableam->index_validate_scan(table_rel,
-											   index_rel,
-											   index_info,
-											   snapshot,
-											   state,
-											   auxstate);
+	return table_rel->rd_tableam->index_validate_scan(table_rel,
+													  index_rel,
+													  index_info,
+													  state,
+													  auxstate);
 }
 
 
