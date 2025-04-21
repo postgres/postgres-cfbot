@@ -42,7 +42,6 @@
 #include "storage/lmgr.h"
 #include "storage/lock.h"
 #include "storage/predicate.h"
-#include "storage/proc.h"
 #include "storage/procarray.h"
 #include "storage/smgr.h"
 #include "utils/builtins.h"
@@ -1958,17 +1957,19 @@ heapam_index_validate_scan_read_stream_next(
 	return result;
 }
 
-static void
+static TransactionId
 heapam_index_validate_scan(Relation heapRelation,
 						   Relation indexRelation,
 						   IndexInfo *indexInfo,
-						   Snapshot snapshot,
 						   ValidateIndexState *state,
 						   ValidateIndexState *auxState)
 {
+	TransactionId limitXmin;
+
 	Datum		values[INDEX_MAX_KEYS];
 	bool		isnull[INDEX_MAX_KEYS];
 
+	SnapshotRotation *rotation = &indexInfo->ii_SnapshotRotation;
 	TupleTableSlot  *slot;
 	EState			*estate;
 	ExprContext		*econtext;
@@ -1976,6 +1977,7 @@ heapam_index_validate_scan(Relation heapRelation,
 
 	int64			num_to_check;
 	Tuplestorestate *tuples_for_check;
+
 	ValidateIndexScanState callback_private_data;
 
 	Buffer buf;
@@ -1992,12 +1994,20 @@ heapam_index_validate_scan(Relation heapRelation,
 	 * pass-by-value on most platforms.
 	 */
 	tuples_for_check = tuplestore_begin_datum(INT8OID, false, false, store_work_mem_part);
+	validate_index_reset_snapshot(indexInfo);
 
 	/*
 	 * sanity checks
 	 */
 	Assert(OidIsValid(indexRelation->rd_rel->relam));
 
+	/*
+	 * TODO: When adding _bt_load()'s heap-fetch budget, include skipped TIDs
+	 * here too.  Rows inserted before STIR was created may be absent from
+	 * both indexes, so the difference below would miss them.
+	 *
+	 * https://commitfest.postgresql.org/patch/6401/
+	 */
 	num_to_check = heapam_index_validate_tuplesort_difference(state->tuplesort,
 														 auxState->tuplesort,
 														 tuples_for_check);
@@ -2007,6 +2017,9 @@ heapam_index_validate_scan(Relation heapRelation,
 	tuplesort_end(auxState->tuplesort);
 
 	state->tuplesort = auxState->tuplesort = NULL;
+
+	/* The caller waits for snapshots older than any used to skip dead tuples. */
+	limitXmin = validate_index_reset_snapshot(indexInfo);
 
 	estate = CreateExecutorState();
 	econtext = GetPerTupleExprContext(estate);
@@ -2039,6 +2052,9 @@ heapam_index_validate_scan(Relation heapRelation,
 
 		CHECK_FOR_INTERRUPTS();
 
+		limitXmin = TransactionIdNewer(limitXmin,
+									   validate_index_reset_snapshot(indexInfo));
+
 		LockBuffer(buf, BUFFER_LOCK_SHARE);
 		block_number = BufferGetBlockNumber(buf);
 
@@ -2049,7 +2065,7 @@ heapam_index_validate_scan(Relation heapRelation,
 			bool		all_dead, found;
 			ItemPointerSet(&tid, block_number, off);
 
-			found = heap_hot_search_buffer(&tid, heapRelation, buf, snapshot,
+			found = heap_hot_search_buffer(&tid, heapRelation, buf, rotation->snapshot,
 										   &heap_tuple_data[i], &all_dead, true);
 			if (!found)
 				ItemPointerSetInvalid(&heap_tuple_data[i].t_self);
@@ -2110,6 +2126,7 @@ heapam_index_validate_scan(Relation heapRelation,
 			i++;
 		}
 
+		ExecClearTuple(slot);
 		ReleaseBuffer(buf);
 	}
 
@@ -2125,6 +2142,8 @@ heapam_index_validate_scan(Relation heapRelation,
 	/* These may have been pointing to the now-gone estate */
 	indexInfo->ii_ExpressionsState = NIL;
 	indexInfo->ii_PredicateState = NULL;
+
+	return limitXmin;
 }
 
 /*

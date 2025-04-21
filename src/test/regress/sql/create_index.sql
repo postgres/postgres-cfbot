@@ -1404,6 +1404,10 @@ DROP INDEX aux_index_ind6;
 -- Make sure auxiliary index dropped too
 \d aux_index_tab5
 
+SET default_transaction_isolation = 'repeatable read';
+CREATE INDEX CONCURRENTLY aux_index_ind6 ON aux_index_tab5 (c1);
+SET default_transaction_isolation = 'read committed';
+
 DROP TABLE aux_index_tab5;
 
 -- Check handling of indexes with expressions and predicates.  The

@@ -606,7 +606,6 @@ DefineIndex(ParseState *pstate,
 	LockRelId	heaprelid;
 	LOCKTAG		heaplocktag;
 	LOCKMODE	lockmode;
-	Snapshot	snapshot;
 	Oid			root_save_userid;
 	int			root_save_sec_context;
 	int			root_save_nestlevel;
@@ -1842,32 +1841,11 @@ DefineIndex(ParseState *pstate,
 	/* Tell concurrent index builds to ignore us, if index qualifies */
 	if (safe_index)
 		set_indexsafe_procflags();
-
-	/*
-	 * Now take the "reference snapshot" that will be used by validate_index()
-	 * to filter candidate tuples.  Beware!  There might still be snapshots in
-	 * use that treat some transaction as in-progress that our reference
-	 * snapshot treats as committed.  If such a recently-committed transaction
-	 * deleted tuples in the table, we will not include them in the index; yet
-	 * those transactions which see the deleting one as still-in-progress will
-	 * expect such tuples to be there once we mark the index as valid.
-	 *
-	 * We solve this by waiting for all endangered transactions to exit before
-	 * we mark the index as valid.
-	 *
-	 * We also set ActiveSnapshot to this snap, since functions in indexes may
-	 * need a snapshot.
-	 */
-	snapshot = RegisterSnapshot(GetTransactionSnapshot());
-	PushActiveSnapshot(snapshot);
 	/*
 	 * Merge content of auxiliary and target indexes - insert any missing index entries.
 	 */
-	validate_index(tableId, indexRelationId, auxIndexRelationId, snapshot);
-	limitXmin = snapshot->xmin;
+	limitXmin = validate_index(tableId, indexRelationId, auxIndexRelationId);
 
-	PopActiveSnapshot();
-	UnregisterSnapshot(snapshot);
 	/*
 	 * The snapshot subsystem could still contain registered snapshots that
 	 * are holding back our process's advertised xmin; in particular, if
@@ -1889,8 +1867,8 @@ DefineIndex(ParseState *pstate,
 	/*
 	 * The index is now valid in the sense that it contains all currently
 	 * interesting tuples.  But since it might not contain tuples deleted just
-	 * before the reference snap was taken, we have to wait out any
-	 * transactions that might have older snapshots.
+	 * before the last snapshot during validating was taken, we have to wait
+	 * out any transactions that might have older snapshots.
 	 */
 	INJECTION_POINT("define-index-before-set-valid", NULL);
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
@@ -4589,7 +4567,6 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	{
 		ReindexIndexInfo *newidx = lfirst(lc);
 		TransactionId limitXmin;
-		Snapshot	snapshot;
 
 		StartTransactionCommand();
 
@@ -4605,13 +4582,6 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 			set_indexsafe_procflags();
 
 		/*
-		 * Take the "reference snapshot" that will be used by validate_index()
-		 * to filter candidate tuples.
-		 */
-		snapshot = RegisterSnapshot(GetTransactionSnapshot());
-		PushActiveSnapshot(snapshot);
-
-		/*
 		 * Update progress for the index to build, with the correct parent
 		 * table involved.
 		 */
@@ -4622,16 +4592,7 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		progress_vals[3] = newidx->amId;
 		pgstat_progress_update_multi_param(4, progress_index, progress_vals);
 
-		validate_index(newidx->tableId, newidx->indexId, newidx->auxIndexId, snapshot);
-
-		/*
-		 * We can now do away with our active snapshot, we still need to save
-		 * the xmin limit to wait for older snapshots.
-		 */
-		limitXmin = snapshot->xmin;
-
-		PopActiveSnapshot();
-		UnregisterSnapshot(snapshot);
+		limitXmin = validate_index(newidx->tableId, newidx->indexId, newidx->auxIndexId);
 
 		/*
 		 * To ensure no deadlocks, we must commit and start yet another
@@ -4641,10 +4602,13 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		CommitTransactionCommand();
 		StartTransactionCommand();
 
+		/* We should now definitely not be advertising any xmin. */
+		Assert(!TransactionIdIsValid(MyProc->xmin));
+
 		/*
 		 * The index is now valid in the sense that it contains all currently
 		 * interesting tuples.  But since it might not contain tuples deleted
-		 * just before the reference snap was taken, we have to wait out any
+		 * just before the latest snap was taken, we have to wait out any
 		 * transactions that might have older snapshots.
 		 *
 		 * Because we don't take a snapshot or Xid in this transaction,
