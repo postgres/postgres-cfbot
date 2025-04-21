@@ -163,7 +163,9 @@ extern void index_build(Relation heapRelation,
 						bool parallel,
 						bool progress);
 
-extern void validate_index(Oid heapId, Oid indexId, Oid auxIndexId, Snapshot snapshot);
+extern TransactionId validate_index(Oid heapId, Oid indexId, Oid auxIndexId);
+
+extern TransactionId validate_index_reset_snapshot(IndexInfo *indexInfo);
 
 extern void index_set_state_flags(Oid indexId, IndexStateFlagsAction action);
 

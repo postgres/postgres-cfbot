@@ -418,6 +418,21 @@ NormalTransactionIdOlder(TransactionId a, TransactionId b)
 }
 
 /* return the newer of the two IDs */
+static inline TransactionId
+TransactionIdNewer(TransactionId a, TransactionId b)
+{
+	if (!TransactionIdIsValid(a))
+		return b;
+
+	if (!TransactionIdIsValid(b))
+		return a;
+
+	if (TransactionIdFollows(a, b))
+		return a;
+	return b;
+}
+
+/* return the newer of the two IDs */
 static inline FullTransactionId
 FullTransactionIdNewer(FullTransactionId a, FullTransactionId b)
 {

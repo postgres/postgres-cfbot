@@ -739,12 +739,11 @@ typedef struct TableAmRoutine
 										   TableScanDesc scan);
 
 	/* see table_index_validate_scan for reference about parameters */
-	void		(*index_validate_scan) (Relation table_rel,
-										Relation index_rel,
-										IndexInfo *index_info,
-										Snapshot snapshot,
-										ValidateIndexState *state,
-										ValidateIndexState *aux_state);
+	TransactionId		(*index_validate_scan) (Relation table_rel,
+												Relation index_rel,
+												IndexInfo *index_info,
+												ValidateIndexState *state,
+												ValidateIndexState *aux_state);
 
 
 	/* ------------------------------------------------------------------------
@@ -1928,23 +1927,23 @@ table_index_build_range_scan(Relation table_rel,
  *
  * See validate_index() for an explanation.
  *
- * Note: it is responsibility of that function to close sortstates in
- * both `state` and `auxstate`.
+ * The caller supplies an active snapshot.  The scan may replace it, but
+ * must leave it active on return.  Return the newest xmin used to check
+ * visibility, so the caller can wait for older snapshots before marking
+ * the index valid.  The scan must close both sortstates.
  */
-static inline void
+static inline TransactionId
 table_index_validate_scan(Relation table_rel,
 						  Relation index_rel,
 						  IndexInfo *index_info,
-						  Snapshot snapshot,
 						  ValidateIndexState *state,
 						  ValidateIndexState *auxstate)
 {
-	table_rel->rd_tableam->index_validate_scan(table_rel,
-											   index_rel,
-											   index_info,
-											   snapshot,
-											   state,
-											   auxstate);
+	return table_rel->rd_tableam->index_validate_scan(table_rel,
+													  index_rel,
+													  index_info,
+													  state,
+													  auxstate);
 }
 
 
