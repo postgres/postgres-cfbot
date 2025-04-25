@@ -7298,49 +7298,71 @@ get_actual_variable_endpoint(Relation heapRel,
 	/* Set it up for index-only scan */
 	index_scan->xs_want_itup = true;
 	index_rescan(index_scan, scankeys, 1, NULL, 0);
+	index_scan->xs_visrecheck = TMVC_Unchecked;
 
 	/* Fetch first/next tuple in specified direction */
 	while ((tid = index_getnext_tid(index_scan, indexscandir)) != NULL)
 	{
 		BlockNumber block = ItemPointerGetBlockNumber(tid);
+		TMVC_Result visres = index_scan->xs_visrecheck;
 
-		if (!VM_ALL_VISIBLE(heapRel,
-							block,
-							&vmbuffer))
+		if (visres == TMVC_Unchecked)
+			visres = table_index_vischeck_tuple(heapRel, &vmbuffer, tid);
+
+		Assert(visres != TMVC_Unchecked);
+
+		switch (visres)
 		{
-			/* Rats, we have to visit the heap to check visibility */
-			if (!index_fetch_heap(index_scan, tableslot))
-			{
+			case TMVC_Unchecked:
+				elog(ERROR, "Failed to check visibility for tuple");
+
 				/*
-				 * No visible tuple for this index entry, so we need to
-				 * advance to the next entry.  Before doing so, count heap
-				 * page fetches and give up if we've done too many.
-				 *
-				 * We don't charge a page fetch if this is the same heap page
-				 * as the previous tuple.  This is on the conservative side,
-				 * since other recently-accessed pages are probably still in
-				 * buffers too; but it's good enough for this heuristic.
+				 * In case of compilers that don't undertand that elog(ERROR)
+				 * doens't exit, and which have -Wimplicit-fallthrough:
 				 */
+				/* fallthrough */
+			case TMVC_MaybeVisible:
+				{
+					/* Rats, we have to visit the heap to check visibility */
+					if (!index_fetch_heap(index_scan, tableslot))
+					{
+						/*
+						 * No visible tuple for this index entry, so we need
+						 * to advance to the next entry.  Before doing so,
+						 * count heap page fetches and give up if we've done
+						 * too many.
+						 *
+						 * We don't charge a page fetch if this is the same
+						 * heap page as the previous tuple.  This is on the
+						 * conservative side, since other recently-accessed
+						 * pages are probably still in buffers too; but it's
+						 * good enough for this heuristic.
+						 */
 #define VISITED_PAGES_LIMIT 100
 
-				if (block != last_heap_block)
-				{
-					last_heap_block = block;
-					n_visited_heap_pages++;
-					if (n_visited_heap_pages > VISITED_PAGES_LIMIT)
-						break;
+						if (block != last_heap_block)
+						{
+							last_heap_block = block;
+							n_visited_heap_pages++;
+							if (n_visited_heap_pages > VISITED_PAGES_LIMIT)
+								goto exit_loop;
+						}
+
+						continue;	/* no visible tuple, try next index entry */
+					}
+
+					/* We don't actually need the heap tuple for anything */
+					ExecClearTuple(tableslot);
+
+					/*
+					 * We don't care whether there's more than one visible
+					 * tuple in the HOT chain; if any are visible, that's good
+					 * enough.
+					 */
+					break;
 				}
-
-				continue;		/* no visible tuple, try next index entry */
-			}
-
-			/* We don't actually need the heap tuple for anything */
-			ExecClearTuple(tableslot);
-
-			/*
-			 * We don't care whether there's more than one visible tuple in
-			 * the HOT chain; if any are visible, that's good enough.
-			 */
+			case TMVC_Visible:
+				break;
 		}
 
 		/*
@@ -7373,6 +7395,7 @@ get_actual_variable_endpoint(Relation heapRel,
 		have_data = true;
 		break;
 	}
+exit_loop:
 
 	if (vmbuffer != InvalidBuffer)
 		ReleaseBuffer(vmbuffer);

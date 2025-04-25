@@ -607,6 +607,12 @@ index_getnext_tid(IndexScanDesc scan, ScanDirection direction)
 	Assert(TransactionIdIsValid(RecentXmin));
 
 	/*
+	 * Reset xs_visrecheck, so we don't confuse the next tuple's visibility
+	 * state with that of the previous.
+	 */
+	scan->xs_visrecheck = TMVC_Unchecked;
+
+	/*
 	 * The AM's amgettuple proc finds the next index entry matching the scan
 	 * keys, and puts the TID into scan->xs_heaptid.  It should also set
 	 * scan->xs_recheck and possibly scan->xs_itup/scan->xs_hitup, though we

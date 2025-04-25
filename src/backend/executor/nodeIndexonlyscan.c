@@ -125,13 +125,16 @@ IndexOnlyNext(IndexOnlyScanState *node)
 	while ((tid = index_getnext_tid(scandesc, direction)) != NULL)
 	{
 		bool		tuple_from_heap = false;
+		TMVC_Result vischeck = scandesc->xs_visrecheck;
 
 		CHECK_FOR_INTERRUPTS();
 
 		/*
 		 * We can skip the heap fetch if the TID references a heap page on
 		 * which all tuples are known visible to everybody.  In any case,
-		 * we'll use the index tuple not the heap tuple as the data source.
+		 * we'll use the index tuple not the heap tuple as the data source. We
+		 * can skip the VM lookup if the index has already issued that VM
+		 * lookup, indicated by a non-Unchecked value in xs_visrecheck.
 		 *
 		 * Note on Memory Ordering Effects: visibilitymap_get_status does not
 		 * lock the visibility map buffer, and therefore the result we read
@@ -161,37 +164,62 @@ IndexOnlyNext(IndexOnlyScanState *node)
 		 *
 		 * It's worth going through this complexity to avoid needing to lock
 		 * the VM buffer, which could cause significant contention.
+		 *
+		 * The index doing these checks for us doesn't materially change these
+		 * considerations.
 		 */
-		if (!VM_ALL_VISIBLE(scandesc->heapRelation,
-							ItemPointerGetBlockNumber(tid),
-							&node->ioss_VMBuffer))
+		if (vischeck == TMVC_Unchecked)
+			vischeck = table_index_vischeck_tuple(scandesc->heapRelation,
+												  &node->ioss_VMBuffer,
+												  tid);
+
+		Assert(vischeck != TMVC_Unchecked);
+
+		switch (vischeck)
 		{
-			/*
-			 * Rats, we have to visit the heap to check visibility.
-			 */
-			InstrCountTuples2(node, 1);
-			if (!index_fetch_heap(scandesc, node->ioss_TableSlot))
-				continue;		/* no visible tuple, try next index entry */
+			case TMVC_Unchecked:
+				elog(ERROR, "Failed to check visibility for tuple");
 
-			ExecClearTuple(node->ioss_TableSlot);
+				/*
+				 * In case of compilers that don't undertand that elog(ERROR)
+				 * doens't exit, but which do have a functional
+				 * -Wimplicit-fallthrough warning:
+				 */
+				pg_fallthrough;
+			case TMVC_MaybeVisible:
+				{
+					/*
+					 * Rats, we have to visit the heap to check visibility.
+					 */
+					InstrCountTuples2(node, 1);
+					if (!index_fetch_heap(scandesc, node->ioss_TableSlot))
+						continue;	/* no visible tuple, try next index entry */
 
-			/*
-			 * Only MVCC snapshots are supported here, so there should be no
-			 * need to keep following the HOT chain once a visible entry has
-			 * been found.  If we did want to allow that, we'd need to keep
-			 * more state to remember not to call index_getnext_tid next time.
-			 */
-			if (scandesc->xs_heap_continue)
-				elog(ERROR, "non-MVCC snapshots are not supported in index-only scans");
+					ExecClearTuple(node->ioss_TableSlot);
 
-			/*
-			 * Note: at this point we are holding a pin on the heap page, as
-			 * recorded in scandesc->xs_cbuf.  We could release that pin now,
-			 * but it's not clear whether it's a win to do so.  The next index
-			 * entry might require a visit to the same heap page.
-			 */
+					/*
+					 * Only MVCC snapshots are supported here, so there should
+					 * be no need to keep following the HOT chain once a
+					 * visible entry has been found.  If we did want to allow
+					 * that, we'd need to keep more state to remember not to
+					 * call index_getnext_tid next time.
+					 */
+					if (scandesc->xs_heap_continue)
+						elog(ERROR, "non-MVCC snapshots are not supported in index-only scans");
 
-			tuple_from_heap = true;
+					/*
+					 * Note: at this point we are holding a pin on the heap
+					 * page, as recorded in scandesc->xs_cbuf.  We could
+					 * release that pin now, but it's not clear whether it's a
+					 * win to do so. The next index entry might require a
+					 * visit to the same heap page.
+					 */
+
+					tuple_from_heap = true;
+					break;
+				}
+			case TMVC_Visible:
+				break;
 		}
 
 		/* Fill the scan tuple slot with data from the index */

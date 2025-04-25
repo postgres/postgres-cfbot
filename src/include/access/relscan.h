@@ -188,6 +188,7 @@ typedef struct IndexScanDescData
 	IndexFetchTableData *xs_heapfetch;
 
 	bool		xs_recheck;		/* T means scan keys must be rechecked */
+	uint8		xs_visrecheck;	/* TMVC_Result; see tableam.h */
 
 	/*
 	 * When fetching with an ordering operator, the values of the ORDER BY
