@@ -20,7 +20,7 @@ step wakegrant4:
 	SELECT FROM injection_points_wakeup('heap_update-before-pin');
  <waiting ...>
 step grant1: <... completed>
-ERROR:  tuple concurrently deleted
+ERROR:  operation failed due to a concurrent command
 step wakegrant4: <... completed>
 
 starting permutation: cachefill1 at2 waitprunable4 vac4 grant1 wakeinval4 mkrels4 wakegrant4
