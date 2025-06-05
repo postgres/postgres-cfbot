@@ -3220,6 +3220,7 @@ simple_heap_delete(Relation relation, const ItemPointerData *tid)
 {
 	TM_Result	result;
 	TM_FailureData tmfd;
+	bool is_catalog = IsCatalogRelation(relation);
 
 	result = heap_delete(relation, tid,
 						 GetCurrentCommandId(true),
@@ -3239,11 +3240,23 @@ simple_heap_delete(Relation relation, const ItemPointerData *tid)
 			break;
 
 		case TM_Updated:
-			elog(ERROR, "tuple concurrently updated");
+			if (is_catalog)
+				ereport(ERROR,
+						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						 errmsg("operation failed due to a concurrent command"),
+						 errdetail("Another command modified the same object in a concurrent session.")));
+			else
+				elog(ERROR, "tuple concurrently updated");
 			break;
 
 		case TM_Deleted:
-			elog(ERROR, "tuple concurrently deleted");
+			if (is_catalog)
+				ereport(ERROR,
+						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						 errmsg("operation failed due to a concurrent command"),
+						 errdetail("Another command dropped the same object in a concurrent session.")));
+			else
+				elog(ERROR, "tuple concurrently deleted");
 			break;
 
 		default:
@@ -4642,6 +4655,7 @@ simple_heap_update(Relation relation, const ItemPointerData *otid, HeapTuple tup
 	TM_Result	result;
 	TM_FailureData tmfd;
 	LockTupleMode lockmode;
+	bool is_catalog = IsCatalogRelation(relation);
 
 	result = heap_update(relation, otid, tup,
 						 GetCurrentCommandId(true), 0,
@@ -4660,11 +4674,23 @@ simple_heap_update(Relation relation, const ItemPointerData *otid, HeapTuple tup
 			break;
 
 		case TM_Updated:
-			elog(ERROR, "tuple concurrently updated");
+			if (is_catalog)
+				ereport(ERROR,
+						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						 errmsg("operation failed due to a concurrent command"),
+						 errdetail("Another command modified the same object in a concurrent session.")));
+			else
+				elog(ERROR, "tuple concurrently updated");
 			break;
 
 		case TM_Deleted:
-			elog(ERROR, "tuple concurrently deleted");
+			if (is_catalog)
+				ereport(ERROR,
+						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						 errmsg("operation failed due to a concurrent command"),
+						 errdetail("Another command dropped the same object in a concurrent session.")));
+			else
+				elog(ERROR, "tuple concurrently deleted");
 			break;
 
 		default:
