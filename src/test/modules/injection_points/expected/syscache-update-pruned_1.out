@@ -73,7 +73,7 @@ step wakegrant4:
 	SELECT FROM injection_points_wakeup('heap_update-before-pin');
  <waiting ...>
 step grant1: <... completed>
-ERROR:  tuple concurrently updated
+ERROR:  operation failed due to a concurrent command
 step wakegrant4: <... completed>
 step inspect4: 
 	SELECT relhastriggers, relhassubclass FROM pg_class
