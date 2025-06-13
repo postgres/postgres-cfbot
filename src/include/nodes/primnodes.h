@@ -2453,6 +2453,7 @@ typedef struct ForPortionOfExpr
 	Oid			withoutPortionProc; /* SRF proc for old_range - target_range */
 	ParseLoc	location;		/* token location, or -1 if unknown */
 	ParseLoc	targetLocation; /* token location, or -1 if unknown */
+	char	   *range_name;		/* Range name */
 } ForPortionOfExpr;
 
 #endif							/* PRIMNODES_H */

@@ -5668,6 +5668,7 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 		/* Create state for FOR PORTION OF operation */
 
 		fpoState = makeNode(ForPortionOfState);
+		fpoState->fp_rangeName = pstrdup(forPortionOf->range_name);
 		fpoState->fp_rangeType = forPortionOf->rangeType;
 		fpoState->fp_rangeAttno = forPortionOf->rangeVar->varattno;
 		fpoState->fp_targetRange = targetRange;
@@ -5954,6 +5955,7 @@ ExecInitForPortionOf(ModifyTableState *mtstate, EState *estate,
 
 	leafState = makeNode(ForPortionOfState);
 
+	leafState->fp_rangeName = pstrdup(fpoState->fp_rangeName);
 	leafState->fp_rangeType = fpoState->fp_rangeType;
 	leafState->fp_targetRange = fpoState->fp_targetRange;
 	map = ExecGetChildToRootMap(resultRelInfo);
