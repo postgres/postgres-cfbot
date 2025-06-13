@@ -49,6 +49,7 @@
 #include "storage/lmgr.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
+#include "utils/datum.h"
 #include "utils/fmgroids.h"
 #include "utils/guc_hooks.h"
 #include "utils/inval.h"
@@ -2461,6 +2462,7 @@ ExecBSInsertTriggers(EState *estate, ResultRelInfo *relinfo)
 	LocTriggerData.tg_event = TRIGGER_EVENT_INSERT |
 		TRIGGER_EVENT_BEFORE;
 	LocTriggerData.tg_relation = relinfo->ri_RelationDesc;
+	LocTriggerData.tg_temporal = relinfo->ri_forPortionOf;
 	for (i = 0; i < trigdesc->numtriggers; i++)
 	{
 		Trigger    *trigger = &trigdesc->triggers[i];
@@ -2517,6 +2519,7 @@ ExecBRInsertTriggers(EState *estate, ResultRelInfo *relinfo,
 		TRIGGER_EVENT_ROW |
 		TRIGGER_EVENT_BEFORE;
 	LocTriggerData.tg_relation = relinfo->ri_RelationDesc;
+	LocTriggerData.tg_temporal = relinfo->ri_forPortionOf;
 	for (i = 0; i < trigdesc->numtriggers; i++)
 	{
 		Trigger    *trigger = &trigdesc->triggers[i];
@@ -2621,6 +2624,7 @@ ExecIRInsertTriggers(EState *estate, ResultRelInfo *relinfo,
 		TRIGGER_EVENT_ROW |
 		TRIGGER_EVENT_INSTEAD;
 	LocTriggerData.tg_relation = relinfo->ri_RelationDesc;
+	LocTriggerData.tg_temporal = relinfo->ri_forPortionOf;
 	for (i = 0; i < trigdesc->numtriggers; i++)
 	{
 		Trigger    *trigger = &trigdesc->triggers[i];
@@ -2690,6 +2694,7 @@ ExecBSDeleteTriggers(EState *estate, ResultRelInfo *relinfo)
 	LocTriggerData.tg_event = TRIGGER_EVENT_DELETE |
 		TRIGGER_EVENT_BEFORE;
 	LocTriggerData.tg_relation = relinfo->ri_RelationDesc;
+	LocTriggerData.tg_temporal = relinfo->ri_forPortionOf;
 	for (i = 0; i < trigdesc->numtriggers; i++)
 	{
 		Trigger    *trigger = &trigdesc->triggers[i];
@@ -2798,6 +2803,7 @@ ExecBRDeleteTriggers(EState *estate, EPQState *epqstate,
 		TRIGGER_EVENT_ROW |
 		TRIGGER_EVENT_BEFORE;
 	LocTriggerData.tg_relation = relinfo->ri_RelationDesc;
+	LocTriggerData.tg_temporal = relinfo->ri_forPortionOf;
 	for (i = 0; i < trigdesc->numtriggers; i++)
 	{
 		HeapTuple	newtuple;
@@ -2899,6 +2905,7 @@ ExecIRDeleteTriggers(EState *estate, ResultRelInfo *relinfo,
 		TRIGGER_EVENT_ROW |
 		TRIGGER_EVENT_INSTEAD;
 	LocTriggerData.tg_relation = relinfo->ri_RelationDesc;
+	LocTriggerData.tg_temporal = relinfo->ri_forPortionOf;
 
 	ExecForceStoreHeapTuple(trigtuple, slot, false);
 
@@ -2962,6 +2969,7 @@ ExecBSUpdateTriggers(EState *estate, ResultRelInfo *relinfo)
 		TRIGGER_EVENT_BEFORE;
 	LocTriggerData.tg_relation = relinfo->ri_RelationDesc;
 	LocTriggerData.tg_updatedcols = updatedCols;
+	LocTriggerData.tg_temporal = relinfo->ri_forPortionOf;
 	for (i = 0; i < trigdesc->numtriggers; i++)
 	{
 		Trigger    *trigger = &trigdesc->triggers[i];
@@ -3105,6 +3113,7 @@ ExecBRUpdateTriggers(EState *estate, EPQState *epqstate,
 		TRIGGER_EVENT_ROW |
 		TRIGGER_EVENT_BEFORE;
 	LocTriggerData.tg_relation = relinfo->ri_RelationDesc;
+	LocTriggerData.tg_temporal = relinfo->ri_forPortionOf;
 	updatedCols = ExecGetAllUpdatedCols(relinfo, estate);
 	LocTriggerData.tg_updatedcols = updatedCols;
 	for (i = 0; i < trigdesc->numtriggers; i++)
@@ -3267,6 +3276,7 @@ ExecIRUpdateTriggers(EState *estate, ResultRelInfo *relinfo,
 		TRIGGER_EVENT_ROW |
 		TRIGGER_EVENT_INSTEAD;
 	LocTriggerData.tg_relation = relinfo->ri_RelationDesc;
+	LocTriggerData.tg_temporal = relinfo->ri_forPortionOf;
 
 	ExecForceStoreHeapTuple(trigtuple, oldslot, false);
 
@@ -3738,6 +3748,7 @@ typedef struct AfterTriggerSharedData
 	Oid			ats_relid;		/* the relation it's on */
 	Oid			ats_rolid;		/* role to execute the trigger */
 	CommandId	ats_firing_id;	/* ID for firing cycle */
+	ForPortionOfState *ats_for_portion_of;	/* the FOR PORTION OF clause */
 	struct AfterTriggersTableData *ats_table;	/* transition table access */
 	Bitmapset  *ats_modifiedcols;	/* modified columns */
 } AfterTriggerSharedData;
@@ -4131,6 +4142,81 @@ afterTriggerCopyBitmap(Bitmapset *src)
 }
 
 /* ----------
+ * afterTriggerCopyForPortionOfState()
+ *
+ * Copies a ForPortionOfState into the afterTriggers memory context, so that
+ * it survives long enough for DEFERRED triggers.
+ *
+ * We copy only what a trigger can use: the range column's name, type and
+ * attribute number, and the bounds computed for the clause.  The tuple table
+ * slots are left NULL, since they belong to the executor and are gone by the
+ * time a deferred trigger runs.  The type cache entry is safe to share,
+ * because those live as long as the session.
+ */
+static ForPortionOfState *
+afterTriggerCopyForPortionOfState(ForPortionOfState *src)
+{
+	ForPortionOfState *dst;
+	MemoryContext oldcxt;
+	bool		typbyval;
+	int16		typlen;
+
+	if (src == NULL)
+		return NULL;
+
+	oldcxt = MemoryContextSwitchTo(afterTriggers.event_cxt);
+
+	get_typlenbyval(src->fp_rangeType, &typlen, &typbyval);
+
+	dst = makeNode(ForPortionOfState);
+	dst->fp_rangeName = pstrdup(src->fp_rangeName);
+	dst->fp_rangeType = src->fp_rangeType;
+	dst->fp_rangeAttno = src->fp_rangeAttno;
+	dst->fp_leftoverstypcache = src->fp_leftoverstypcache;
+	dst->fp_Existing = NULL;
+	dst->fp_Leftover = NULL;
+	dst->fp_targetRange = datumCopy(src->fp_targetRange, typbyval, typlen);
+
+	MemoryContextSwitchTo(oldcxt);
+
+	return dst;
+}
+
+/* ----------
+ * afterTriggerForPortionOfStatesEqual()
+ *
+ * Tells whether two ForPortionOfStates describe the same FOR PORTION OF
+ * clause, so that events can share one AfterTriggerSharedData.
+ *
+ * We must compare by value, not by pointer: what a shared record holds is a
+ * copy made by afterTriggerCopyForPortionOfState, so it never has the same
+ * address as the state the executor is handing us.  This is the same reason
+ * we compare ats_modifiedcols with bms_equal.
+ */
+static bool
+afterTriggerForPortionOfStatesEqual(ForPortionOfState *a, ForPortionOfState *b)
+{
+	bool		typbyval;
+	int16		typlen;
+
+	if (a == NULL || b == NULL)
+		return a == b;
+
+	if (a->fp_rangeType != b->fp_rangeType ||
+		a->fp_rangeAttno != b->fp_rangeAttno)
+		return false;
+
+	/*
+	 * The bounds are computed once per query, so the two datums are byte for
+	 * byte identical whenever they came from the same clause, and
+	 * datumIsEqual is enough.  (They are freshly built range values, never
+	 * toasted.)
+	 */
+	get_typlenbyval(a->fp_rangeType, &typlen, &typbyval);
+	return datumIsEqual(a->fp_targetRange, b->fp_targetRange, typbyval, typlen);
+}
+
+/* ----------
  * afterTriggerAddEvent()
  *
  *	Add a new trigger event to the specified queue.
@@ -4234,7 +4320,9 @@ afterTriggerAddEvent(AfterTriggerEventList *events,
 			newshared->ats_relid == evtshared->ats_relid &&
 			newshared->ats_rolid == evtshared->ats_rolid &&
 			bms_equal(newshared->ats_modifiedcols,
-					  evtshared->ats_modifiedcols))
+					  evtshared->ats_modifiedcols) &&
+			afterTriggerForPortionOfStatesEqual(newshared->ats_for_portion_of,
+												evtshared->ats_for_portion_of))
 			break;
 	}
 	if ((char *) newshared >= chunk->endptr)
@@ -4243,6 +4331,8 @@ afterTriggerAddEvent(AfterTriggerEventList *events,
 		*newshared = *evtshared;
 		/* now we must make a suitably-long-lived copy of the bitmap */
 		newshared->ats_modifiedcols = afterTriggerCopyBitmap(evtshared->ats_modifiedcols);
+		/* Likewise we must make a copy of the ForPortionOfState */
+		newshared->ats_for_portion_of = afterTriggerCopyForPortionOfState(evtshared->ats_for_portion_of);
 		newshared->ats_firing_id = 0;	/* just to be sure */
 		chunk->endfree = (char *) newshared;
 	}
@@ -4599,6 +4689,7 @@ AfterTriggerExecute(EState *estate,
 	LocTriggerData.tg_event =
 		evtshared->ats_event & (TRIGGER_EVENT_OPMASK | TRIGGER_EVENT_ROW);
 	LocTriggerData.tg_relation = rel;
+	LocTriggerData.tg_temporal = evtshared->ats_for_portion_of;
 	if (TRIGGER_FOR_UPDATE(LocTriggerData.tg_trigger->tgtype))
 		LocTriggerData.tg_updatedcols = evtshared->ats_modifiedcols;
 
@@ -6697,6 +6788,7 @@ AfterTriggerSaveEvent(EState *estate, ResultRelInfo *relinfo,
 		else
 			new_shared.ats_table = NULL;
 		new_shared.ats_modifiedcols = modifiedCols;
+		new_shared.ats_for_portion_of = relinfo->ri_forPortionOf;
 
 		afterTriggerAddEvent(&afterTriggers.query_stack[afterTriggers.query_depth].events,
 							 &new_event, &new_shared);
