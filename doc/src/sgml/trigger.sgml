@@ -566,17 +566,18 @@ CALLED_AS_TRIGGER(fcinfo)
 <programlisting>
 typedef struct TriggerData
 {
-    NodeTag          type;
-    TriggerEvent     tg_event;
-    Relation         tg_relation;
-    HeapTuple        tg_trigtuple;
-    HeapTuple        tg_newtuple;
-    Trigger         *tg_trigger;
-    TupleTableSlot  *tg_trigslot;
-    TupleTableSlot  *tg_newslot;
-    Tuplestorestate *tg_oldtable;
-    Tuplestorestate *tg_newtable;
-    const Bitmapset *tg_updatedcols;
+    NodeTag            type;
+    TriggerEvent       tg_event;
+    Relation           tg_relation;
+    HeapTuple          tg_trigtuple;
+    HeapTuple          tg_newtuple;
+    Trigger           *tg_trigger;
+    TupleTableSlot    *tg_trigslot;
+    TupleTableSlot    *tg_newslot;
+    Tuplestorestate   *tg_oldtable;
+    Tuplestorestate   *tg_newtable;
+    const Bitmapset   *tg_updatedcols;
+    ForPortionOfState *tg_temporal;
 } TriggerData;
 </programlisting>
 
@@ -841,6 +842,50 @@ typedef struct Trigger
        <para>
         For triggers other than <literal>UPDATE</literal> triggers, this will
         be <symbol>NULL</symbol>.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><structfield>tg_temporal</structfield></term>
+      <listitem>
+       <para>
+        Set for <literal>UPDATE</literal> and <literal>DELETE</literal> queries
+        that use <literal>FOR PORTION OF</literal>, otherwise <symbol>NULL</symbol>.
+        Also set for the implicit <literal>INSERT</literal> statements to add
+        the <glossterm linkend="glossary-temporal-leftovers">temporal
+        leftovers</glossterm>. Contains a pointer to a structure of type
+        <structname>ForPortionOfState</structname>, defined in
+        <filename>nodes/execnodes.h</filename>:
+
+<programlisting>
+typedef struct ForPortionOfState
+{
+    NodeTag     type;
+
+    Oid         fp_rangeType;   /* the type of the FOR PORTION OF expression */
+    int         fp_rangeAttno;  /* the attno of the range/multirange column */
+    Datum       fp_targetRange; /* the range/multirange from FOR PORTION OF */
+    TypeCacheEntry *fp_leftoverstypcache;   /* type cache entry of the range/multirange */
+    TupleTableSlot *fp_Existing;    /* slot to store old tuple */
+    TupleTableSlot *fp_Leftover;    /* slot to store leftover */
+    char       *fp_rangeName;   /* the column named in FOR PORTION OF */
+} ForPortionOfState;
+</programlisting>
+
+       where <structfield>fp_rangeType</structfield> is its range type,
+       <structfield>fp_rangeAttno</structfield> is its attribute number,
+       <structfield>fp_targetRange</structfield> is a rangetype value created
+       by evaluating the <literal>FOR PORTION OF</literal> bounds,
+       <structfield>fp_leftoverstypcache</structfield> is the type cache entry of the range column,
+       and <structfield>fp_rangeName</structfield> is the range
+       column named in the <literal>FOR PORTION OF</literal> clause.
+       The <structfield>fp_Existing</structfield> and
+       <structfield>fp_Leftover</structfield> tuple table slots are for the
+       executor's own use, and trigger functions should not rely on them: they
+       do not outlive the query that created them, so they are
+       <symbol>NULL</symbol> in an <literal>AFTER</literal> trigger, which may
+       run much later.
        </para>
       </listitem>
      </varlistentry>
