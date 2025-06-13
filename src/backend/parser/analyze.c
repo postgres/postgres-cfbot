@@ -1554,7 +1554,7 @@ transformForPortionOfClause(ParseState *pstate,
 		/*
 		 * Whatever operator is used for intersect by temporal foreign keys,
 		 * we can use its backing procedure for intersects in FOR PORTION OF.
-		 * XXX: Share code with FindFKPeriodOpers?
+		 * XXX: Share code with FindFKPeriodOpersAndProcs?
 		 */
 		switch (opcintype)
 		{

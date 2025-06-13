@@ -140,6 +140,11 @@ typedef struct RI_ConstraintInfo
 	Oid			agged_period_contained_by_oper; /* fkattr <@ range_agg(pkattr) */
 	Oid			period_intersect_oper;	/* anyrange * anyrange (or
 										 * multiranges) */
+	Oid			period_intersect_proc;	/* anyrange * anyrange (or
+										 * multiranges) */
+	Oid			period_without_portion_proc;	/* anyrange minus anyrange,
+												 * returning SETOF anyrange
+												 * (or multiranges) */
 	dlist_node	valid_link;		/* Link in list of valid entries */
 
 	Oid			conindid;
@@ -2537,10 +2542,12 @@ ri_LoadConstraintInfo(Oid constraintOid)
 	{
 		Oid			opclass = get_index_column_opclass(conForm->conindid, riinfo->nkeys);
 
-		FindFKPeriodOpers(opclass,
-						  &riinfo->period_contained_by_oper,
-						  &riinfo->agged_period_contained_by_oper,
-						  &riinfo->period_intersect_oper);
+		FindFKPeriodOpersAndProcs(opclass,
+								  &riinfo->period_contained_by_oper,
+								  &riinfo->agged_period_contained_by_oper,
+								  &riinfo->period_intersect_oper,
+								  &riinfo->period_intersect_proc,
+								  &riinfo->period_without_portion_proc);
 	}
 
 	/* Metadata used by fast path. */
