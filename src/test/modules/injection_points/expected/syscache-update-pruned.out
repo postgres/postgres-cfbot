@@ -46,7 +46,7 @@ step wakegrant4:
 	SELECT FROM injection_points_wakeup('heap_update-before-pin');
  <waiting ...>
 step grant1: <... completed>
-ERROR:  duplicate key value violates unique constraint "pg_class_oid_index"
+ERROR:  could not create object because a conflicting object already exists
 step wakegrant4: <... completed>
 
 starting permutation: snap3 cachefill1 at2 mkrels4 r3 waitprunable4 vac4 grant1 wakeinval4 at4 wakegrant4 inspect4
