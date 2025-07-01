@@ -769,6 +769,11 @@ extern void check_exclusion_constraint(Relation heap, Relation index,
 									   const ItemPointerData *tupleid,
 									   const Datum *values, const bool *isnull,
 									   EState *estate, bool newIndex);
+extern bool check_unique_constraint(Relation heap, Relation index,
+									IndexInfo *indexInfo,
+									ItemPointer tupleid,
+									const Datum *values, const bool *isnull,
+									EState *estate);
 
 /*
  * prototypes from functions in execReplication.c
