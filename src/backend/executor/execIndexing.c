@@ -981,6 +981,25 @@ check_exclusion_constraint(Relation heap, Relation index,
 }
 
 /*
+ * Check for violation of a unique constraint
+ *
+ * This is a dumbed down version of check_exclusion_or_unique_constraint
+ * for external callers. They don't need all the special modes.
+ */
+bool
+check_unique_constraint(Relation heap, Relation index,
+						   IndexInfo *indexInfo,
+						   ItemPointer tupleid,
+						   const Datum *values, const bool *isnull,
+						   EState *estate)
+{
+	return check_exclusion_or_unique_constraint(heap, index, indexInfo, tupleid,
+												values, isnull,
+												estate, false,
+												CEOUC_WAIT, true, NULL);
+}
+
+/*
  * Check existing tuple's index values to see if it really matches the
  * exclusion condition against the new_values.  Returns true if conflict.
  */
