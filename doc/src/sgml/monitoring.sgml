@@ -1666,6 +1666,20 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        Send time of last reply message received from standby server
       </para></entry>
      </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>rb_total_size</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Total size of the changes belonging to all the transactions queued in the
+       reorder buffer. This includes the size of changes queued in memory or
+       spilled to the disk or sent downstream as part of a an unfinished
+       streamed transaction. It can be used to tune
+       <literal>logical_decoding_work_mem</literal> or estimate the logical
+       decoding load on the wal sender.
+      </para></entry>
+     </row>
     </tbody>
    </tgroup>
   </table>

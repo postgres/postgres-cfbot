@@ -1591,6 +1591,7 @@ StartLogicalReplication(StartReplicationCmd *cmd)
 	/* Also update the sent position status in shared memory */
 	SpinLockAcquire(&MyWalSnd->mutex);
 	MyWalSnd->sentPtr = MyReplicationSlot->data.restart_lsn;
+	MyWalSnd->rb_total_size = logical_decoding_ctx->reorder->totalSize;
 	SpinLockRelease(&MyWalSnd->mutex);
 
 	replication_active = true;
@@ -3232,6 +3233,7 @@ InitWalSenderSlot(void)
 			walsnd->applyLag = -1;
 			walsnd->sync_standby_priority = 0;
 			walsnd->replyTime = 0;
+			walsnd->rb_total_size = 0;
 
 			/*
 			 * The kind assignment is done here and not in StartReplication()
@@ -3748,6 +3750,7 @@ XLogSendLogical(void)
 
 		SpinLockAcquire(&walsnd->mutex);
 		walsnd->sentPtr = sentPtr;
+		walsnd->rb_total_size = logical_decoding_ctx->reorder->totalSize;
 		SpinLockRelease(&walsnd->mutex);
 	}
 }
@@ -4248,7 +4251,7 @@ offset_to_interval(TimeOffset offset)
 Datum
 pg_stat_get_wal_senders(PG_FUNCTION_ARGS)
 {
-#define PG_STAT_GET_WAL_SENDERS_COLS	12
+#define PG_STAT_GET_WAL_SENDERS_COLS	13
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	SyncRepStandbyData *sync_standbys;
 	int			num_standbys;
@@ -4276,10 +4279,12 @@ pg_stat_get_wal_senders(PG_FUNCTION_ARGS)
 		int			pid;
 		WalSndState state;
 		TimestampTz replyTime;
+		int64		rb_total_size;
 		bool		is_sync_standby;
 		Datum		values[PG_STAT_GET_WAL_SENDERS_COLS];
 		bool		nulls[PG_STAT_GET_WAL_SENDERS_COLS] = {0};
 		int			j;
+		ReplicationKind replkind;
 
 		/* Collect data from shared memory */
 		SpinLockAcquire(&walsnd->mutex);
@@ -4299,6 +4304,8 @@ pg_stat_get_wal_senders(PG_FUNCTION_ARGS)
 		applyLag = walsnd->applyLag;
 		priority = walsnd->sync_standby_priority;
 		replyTime = walsnd->replyTime;
+		rb_total_size = walsnd->rb_total_size;
+		replkind = walsnd->kind;
 		SpinLockRelease(&walsnd->mutex);
 
 		/*
@@ -4395,6 +4402,12 @@ pg_stat_get_wal_senders(PG_FUNCTION_ARGS)
 				nulls[11] = true;
 			else
 				values[11] = TimestampTzGetDatum(replyTime);
+
+			/* Physical walsenders do not maintain a reorder buffer. */
+			if (replkind == REPLICATION_KIND_PHYSICAL)
+				nulls[12] = true;
+			else
+				values[12] = Int64GetDatum(rb_total_size);
 		}
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
