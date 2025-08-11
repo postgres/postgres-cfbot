@@ -394,6 +394,7 @@ ReorderBufferAllocate(void)
 	buffer->memExceededCount = 0;
 	buffer->totalTxns = 0;
 	buffer->totalBytes = 0;
+	buffer->totalSize = 0;
 
 	buffer->current_restart_decoding_lsn = InvalidXLogRecPtr;
 
@@ -3212,7 +3213,7 @@ ReorderBufferAbortOld(ReorderBuffer *rb, TransactionId oldestRunningXid)
  * to this xid might re-create the transaction incompletely.
  */
 void
-ReorderBufferForget(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn)
+ReorderBufferForget(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn, bool upd_rb_total_size)
 {
 	ReorderBufferTXN *txn;
 
@@ -3243,6 +3244,12 @@ ReorderBufferForget(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn)
 
 	/* remove potential on-disk data, and deallocate */
 	ReorderBufferCleanupTXN(rb, txn);
+
+	if (upd_rb_total_size)
+	{
+		/* Update the total size of the reorder buffer */
+		rb->totalSize -= txn->rb_size;
+	}
 }
 
 /*
@@ -3452,6 +3459,13 @@ ReorderBufferChangeMemoryUpdate(ReorderBuffer *rb,
 
 		txn->size += sz;
 		rb->size += sz;
+
+		/*
+		 * TODO: update totalSize if only this is a new change being added the
+		 * first time - i.e. not being read from the spilled disk.
+		 */
+		rb->totalSize += sz;
+		txn->rb_size += sz;
 
 		/* Update the total size in the top transaction. */
 		toptxn->total_size += sz;
