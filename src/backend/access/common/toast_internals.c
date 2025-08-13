@@ -124,7 +124,7 @@ toast_save_datum(Relation rel, Datum value,
 	TupleDesc	toasttupDesc;
 	CommandId	mycid = GetCurrentCommandId(true);
 	varlena    *result;
-	varatt_external toast_pointer;
+	varatt_external_oid toast_pointer;
 	int32		chunk_seq = 0;
 	char	   *data_p;
 	int32		data_todo;
@@ -176,7 +176,7 @@ toast_save_datum(Relation rel, Datum value,
 		VARATT_EXTERNAL_SET_SIZE_AND_COMPRESS_METHOD(toast_pointer, data_todo,
 													 VARDATA_COMPRESSED_GET_COMPRESS_METHOD(dval));
 		/* Assert that the numbers look like it's compressed */
-		Assert(VARATT_EXTERNAL_IS_COMPRESSED(toast_pointer));
+		Assert(VARATT_EXTERNAL_OID_IS_COMPRESSED(toast_pointer));
 	}
 	else
 	{
@@ -225,7 +225,7 @@ toast_save_datum(Relation rel, Datum value,
 		toast_pointer.va_valueid = InvalidOid;
 		if (oldexternal != NULL)
 		{
-			varatt_external old_toast_pointer;
+			varatt_external_oid old_toast_pointer;
 
 			Assert(VARATT_IS_EXTERNAL_ONDISK(oldexternal));
 			/* Must copy to access aligned fields */
@@ -289,7 +289,7 @@ toast_save_datum(Relation rel, Datum value,
 		{
 			alignas(int32) varlena hdr;
 			/* this is to make the union big enough for a chunk: */
-			char		data[TOAST_MAX_CHUNK_SIZE + VARHDRSZ];
+			char		data[TOAST_OID_MAX_CHUNK_SIZE + VARHDRSZ];
 		}			chunk_data;
 		int32		chunk_size;
 
@@ -298,7 +298,7 @@ toast_save_datum(Relation rel, Datum value,
 		/*
 		 * Calculate the size of this chunk
 		 */
-		chunk_size = Min(TOAST_MAX_CHUNK_SIZE, data_todo);
+		chunk_size = Min(TOAST_OID_MAX_CHUNK_SIZE, data_todo);
 
 		/*
 		 * Build a tuple and store it
@@ -359,8 +359,8 @@ toast_save_datum(Relation rel, Datum value,
 	/*
 	 * Create the TOAST pointer value that we'll return
 	 */
-	result = (varlena *) palloc(TOAST_POINTER_SIZE);
-	SET_VARTAG_EXTERNAL(result, VARTAG_ONDISK);
+	result = (varlena *) palloc(TOAST_OID_POINTER_SIZE);
+	SET_VARTAG_EXTERNAL(result, VARTAG_ONDISK_OID);
 	memcpy(VARDATA_EXTERNAL(result), &toast_pointer, sizeof(toast_pointer));
 
 	return PointerGetDatum(result);
@@ -376,7 +376,7 @@ void
 toast_delete_datum(Relation rel, Datum value, bool is_speculative)
 {
 	varlena    *attr = (varlena *) DatumGetPointer(value);
-	varatt_external toast_pointer;
+	varatt_external_oid toast_pointer;
 	Relation	toastrel;
 	Relation   *toastidxs;
 	ScanKeyData toastkey;

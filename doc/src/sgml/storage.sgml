@@ -417,7 +417,7 @@ described in more detail below.
 
 <para>
 Out-of-line values are divided (after compression if used) into chunks of at
-most <symbol>TOAST_MAX_CHUNK_SIZE</symbol> bytes (by default this value is chosen
+most <symbol>TOAST_OID_MAX_CHUNK_SIZE</symbol> bytes (by default this value is chosen
 so that four chunk rows will fit on a page, making it about 2000 bytes).
 Each chunk is stored as a separate row in the <acronym>TOAST</acronym> table
 belonging to the owning table.  Every

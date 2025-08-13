@@ -5168,7 +5168,7 @@ ReorderBufferToastReplace(ReorderBuffer *rb, ReorderBufferTXN *txn,
 		varlena    *varlena_pointer;
 
 		/* va_rawsize is the size of the original datum -- including header */
-		varatt_external toast_pointer;
+		varatt_external_oid toast_pointer;
 		varatt_indirect redirect_pointer;
 		varlena    *new_datum = NULL;
 		varlena    *reconstructed;
@@ -5238,10 +5238,10 @@ ReorderBufferToastReplace(ReorderBuffer *rb, ReorderBufferTXN *txn,
 				   VARSIZE(chunk) - VARHDRSZ);
 			data_done += VARSIZE(chunk) - VARHDRSZ;
 		}
-		Assert(data_done == VARATT_EXTERNAL_GET_EXTSIZE(toast_pointer));
+		Assert(data_done == VARATT_EXTERNAL_OID_GET_EXTSIZE(toast_pointer));
 
 		/* make sure its marked as compressed or not */
-		if (VARATT_EXTERNAL_IS_COMPRESSED(toast_pointer))
+		if (VARATT_EXTERNAL_OID_IS_COMPRESSED(toast_pointer))
 			SET_VARSIZE_COMPRESSED(reconstructed, data_done + VARHDRSZ);
 		else
 			SET_VARSIZE(reconstructed, data_done + VARHDRSZ);

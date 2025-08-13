@@ -647,7 +647,7 @@ heap_fetch_toast_slice(Relation toastrel, Oid8 valueid, int32 attrsize,
 									&toastidxs,
 									&num_indexes);
 
-	max_chunk_size = TOAST_MAX_CHUNK_SIZE;
+	max_chunk_size = TOAST_OID_MAX_CHUNK_SIZE;
 
 	totalchunks = ((attrsize - 1) / max_chunk_size) + 1;
 	startchunk = sliceoffset / max_chunk_size;

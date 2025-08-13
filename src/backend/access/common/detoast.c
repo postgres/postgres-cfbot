@@ -225,12 +225,12 @@ detoast_attr_slice(varlena *attr,
 
 	if (VARATT_IS_EXTERNAL_ONDISK(attr))
 	{
-		varatt_external toast_pointer;
+		varatt_external_oid toast_pointer;
 
 		VARATT_EXTERNAL_GET_POINTER(toast_pointer, attr);
 
 		/* fast path for non-compressed external datums */
-		if (!VARATT_EXTERNAL_IS_COMPRESSED(toast_pointer))
+		if (!VARATT_EXTERNAL_OID_IS_COMPRESSED(toast_pointer))
 			return toast_fetch_datum_slice(attr, sliceoffset, slicelength);
 
 		/*
@@ -240,7 +240,7 @@ detoast_attr_slice(varlena *attr,
 		 */
 		if (slicelimit >= 0)
 		{
-			int32		max_size = VARATT_EXTERNAL_GET_EXTSIZE(toast_pointer);
+			int32		max_size = VARATT_EXTERNAL_OID_GET_EXTSIZE(toast_pointer);
 
 			/*
 			 * Determine maximum amount of compressed data needed for a prefix
@@ -251,7 +251,7 @@ detoast_attr_slice(varlena *attr,
 			 * determine how much compressed data we need to be sure of being
 			 * able to decompress the required slice.
 			 */
-			if (VARATT_EXTERNAL_GET_COMPRESS_METHOD(toast_pointer) ==
+			if (VARATT_EXTERNAL_OID_GET_COMPRESS_METHOD(toast_pointer) ==
 				TOAST_PGLZ_COMPRESSION_ID)
 				max_size = pglz_maximum_compressed_size(slicelimit, max_size);
 
@@ -344,7 +344,7 @@ toast_fetch_datum(varlena *attr)
 {
 	Relation	toastrel;
 	varlena    *result;
-	varatt_external toast_pointer;
+	varatt_external_oid toast_pointer;
 	int32		attrsize;
 
 	if (!VARATT_IS_EXTERNAL_ONDISK(attr))
@@ -353,11 +353,11 @@ toast_fetch_datum(varlena *attr)
 	/* Must copy to access aligned fields */
 	VARATT_EXTERNAL_GET_POINTER(toast_pointer, attr);
 
-	attrsize = VARATT_EXTERNAL_GET_EXTSIZE(toast_pointer);
+	attrsize = VARATT_EXTERNAL_OID_GET_EXTSIZE(toast_pointer);
 
 	result = (varlena *) palloc(attrsize + VARHDRSZ);
 
-	if (VARATT_EXTERNAL_IS_COMPRESSED(toast_pointer))
+	if (VARATT_EXTERNAL_OID_IS_COMPRESSED(toast_pointer))
 		SET_VARSIZE_COMPRESSED(result, attrsize + VARHDRSZ);
 	else
 		SET_VARSIZE(result, attrsize + VARHDRSZ);
@@ -398,7 +398,7 @@ toast_fetch_datum_slice(varlena *attr, int32 sliceoffset,
 {
 	Relation	toastrel;
 	varlena    *result;
-	varatt_external toast_pointer;
+	varatt_external_oid toast_pointer;
 	int32		attrsize;
 
 	if (!VARATT_IS_EXTERNAL_ONDISK(attr))
@@ -412,9 +412,9 @@ toast_fetch_datum_slice(varlena *attr, int32 sliceoffset,
 	 * prefix -- this isn't lo_* we can't return a compressed datum which is
 	 * meaningful to toast later.
 	 */
-	Assert(!VARATT_EXTERNAL_IS_COMPRESSED(toast_pointer) || 0 == sliceoffset);
+	Assert(!VARATT_EXTERNAL_OID_IS_COMPRESSED(toast_pointer) || 0 == sliceoffset);
 
-	attrsize = VARATT_EXTERNAL_GET_EXTSIZE(toast_pointer);
+	attrsize = VARATT_EXTERNAL_OID_GET_EXTSIZE(toast_pointer);
 
 	if (sliceoffset >= attrsize)
 	{
@@ -427,7 +427,7 @@ toast_fetch_datum_slice(varlena *attr, int32 sliceoffset,
 	 * space required by va_tcinfo, which is stored at the beginning as an
 	 * int32 value.
 	 */
-	if (VARATT_EXTERNAL_IS_COMPRESSED(toast_pointer) && slicelength > 0)
+	if (VARATT_EXTERNAL_OID_IS_COMPRESSED(toast_pointer) && slicelength > 0)
 		slicelength = slicelength + sizeof(int32);
 
 	/*
@@ -440,7 +440,7 @@ toast_fetch_datum_slice(varlena *attr, int32 sliceoffset,
 
 	result = (varlena *) palloc(slicelength + VARHDRSZ);
 
-	if (VARATT_EXTERNAL_IS_COMPRESSED(toast_pointer))
+	if (VARATT_EXTERNAL_OID_IS_COMPRESSED(toast_pointer))
 		SET_VARSIZE_COMPRESSED(result, slicelength + VARHDRSZ);
 	else
 		SET_VARSIZE(result, slicelength + VARHDRSZ);
@@ -550,7 +550,7 @@ toast_raw_datum_size(Datum value)
 	if (VARATT_IS_EXTERNAL_ONDISK(attr))
 	{
 		/* va_rawsize is the size of the original datum -- including header */
-		varatt_external toast_pointer;
+		varatt_external_oid toast_pointer;
 
 		VARATT_EXTERNAL_GET_POINTER(toast_pointer, attr);
 		result = toast_pointer.va_rawsize;
@@ -610,10 +610,10 @@ toast_datum_size(Datum value)
 		 * compressed or not.  We do not count the size of the toast pointer
 		 * ... should we?
 		 */
-		varatt_external toast_pointer;
+		varatt_external_oid toast_pointer;
 
 		VARATT_EXTERNAL_GET_POINTER(toast_pointer, attr);
-		result = VARATT_EXTERNAL_GET_EXTSIZE(toast_pointer);
+		result = VARATT_EXTERNAL_OID_GET_EXTSIZE(toast_pointer);
 	}
 	else if (VARATT_IS_EXTERNAL_INDIRECT(attr))
 	{

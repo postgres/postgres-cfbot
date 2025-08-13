@@ -3594,7 +3594,7 @@ acl      | {postgres=arwdDxtm/postgres,foo=r/postgres}
       </row>
 
       <row>
-       <entry><structfield>max_toast_chunk_size</structfield></entry>
+       <entry><structfield>max_toast_oid_chunk_size</structfield></entry>
        <entry><type>integer</type></entry>
       </row>
 
