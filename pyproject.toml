@@ -1,0 +1,28 @@
+[project]
+name = "postgresql-hackers-tooling"
+version = "0.1.0"
+description = "Python infrastructure for PostgreSQL"
+requires-python = ">=3.9"
+dependencies = [
+    # Pluggy 1.0 is why the hook wrappers are old-style ones. Some OSes worth
+    # considering when we have a reason to bump this:
+    # - Debian Bookworm ships pytest 7.2.1 with pluggy 1.0.0
+    # - Ubuntu 24.04 ships pytest 7.4.4 with pluggy 1.4.0
+    # - RHEL9 ships pytest 7.4.2 with pluggy 1.2.0 in its CRB repository (and
+    #   7.2.0 with pluggy 1.0.0 for Python 3.11).
+    "pytest >= 7.2",
+
+    # Any other dependencies are effectively optional (added below). We import
+    # these libraries using pytest.importorskip(). So tests will be skipped if
+    # they are not available.
+]
+
+[tool.setuptools]
+# Nothing to package: "pip install ." is only for the dependencies.
+packages = []
+
+[tool.pytest.ini_options]
+minversion = "7.2"
+
+# Common test code can be found here.
+pythonpath = ["src/test/pytest"]
