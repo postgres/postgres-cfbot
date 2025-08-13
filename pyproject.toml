@@ -1,0 +1,24 @@
+[project]
+name = "postgresql-hackers-tooling"
+version = "0.1.0"
+description = "Python infrastructure for PostgreSQL"
+requires-python = ">=3.9"
+dependencies = [
+    # We need at least 7.2 for the new-style hook wrappers
+    # (@pytest.hookimpl(wrapper=True)). Some OSes worth considering when we
+    # have a reason to bump this:
+    # - Debian Bookworm ships pytest 7.2.1
+    # - Ubuntu 24.04 ships pytest 7.4.4
+    # - RHEL9 ships 7.4.2 in its CRB repository.
+    "pytest >= 7.2",
+
+    # Any other dependencies are effectively optional (added below). We import
+    # these libraries using pytest.importorskip(). So tests will be skipped if
+    # they are not available.
+]
+
+[tool.pytest.ini_options]
+minversion = "7.2"
+
+# Common test code can be found here.
+pythonpath = ["src/test/pytest"]

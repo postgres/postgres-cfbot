@@ -1,0 +1,69 @@
+src/test/pytest/README
+
+Pytest-based tests
+==================
+
+This directory contains the infrastructure for Python-based tests using
+pytest.
+
+The tests themselves live in pyt/ directories next to the code they cover, the
+same way the Perl tests live in t/ directories, in files named test_<name>.py.
+Every function in such a file whose name starts with test_ is run as a test. A
+new file must also be listed in the directory's meson.build, in the 'pytest'
+entry of its tests dict.
+
+If you're unfamiliar with pytest it's worth reading two pages of its
+documentation first: getting started[1] and fixtures[2].
+
+
+Running the tests
+=================
+
+NOTE: You must have given the --enable-pytest argument to configure (or
+-Dpytest=enabled for Meson builds). You also need to have pytest installed.
+
+If you don't have pytest installed system-wide, you can create a virtual
+environment:
+
+    python3 -m venv .venv
+    source .venv/bin/activate    # On Windows: .venv\Scripts\activate
+    pip install .                # Installs pytest and other dependencies
+
+Or using uv[3]:
+
+    uv sync
+    source .venv/bin/activate    # On Windows: .venv\Scripts\activate
+
+Remember to activate the virtual environment before running configure/meson
+setup.
+
+With Meson builds, you can run:
+    meson test --suite pytest
+
+With autoconf based builds, a directory's pytest tests run as part of its
+check target, so for all of them use check-world, and for one directory e.g.:
+    make -C src/test/recovery check
+
+They run against an already installed build with installcheck instead, which
+skips building a temporary installation and finds everything through the
+pg_config on PATH:
+    make -C src/test/recovery installcheck
+
+You can run specific test files and/or use pytest's -k option to select tests:
+    pytest src/test/recovery/pyt/test_049_wait_for_lsn.py
+    pytest -k "wait_for_lsn"
+
+
+Directory structure
+===================
+
+pgtap.py
+    A pytest plugin to output results in TAP format
+
+
+References
+==========
+
+[1] https://docs.pytest.org/en/stable/getting-started.html
+[2] https://docs.pytest.org/en/stable/explanation/fixtures.html
+[3] https://docs.astral.sh/uv/
