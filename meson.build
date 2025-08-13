@@ -1828,6 +1828,47 @@ endif
 
 
 ###############################################################
+# Library: pytest
+###############################################################
+
+pytest_enabled = false
+pytest_version = ''
+pytest_cmd = ['pytest']  # dummy, overwritten when pytest is found
+# The mtest runner passes our pgtap plugin with -p, and that plugin lives in
+# the directory below. pyproject.toml puts the same directory on pytest's
+# pythonpath, but versions below 8.4 only apply that setting after loading the
+# plugins passed with -p, so on those the plugin is only importable if
+# PYTHONPATH is set here too. This won't help people manually running pytest
+# outside of meson/make, but we expect those to use a recent enough version of
+# pytest anyway (and if not they can manually configure PYTHONPATH too).
+pytest_env = {'PYTHONPATH': meson.project_source_root() / 'src' / 'test' / 'pytest'}
+
+pytestopt = get_option('pytest')
+if not pytestopt.disabled()
+  pytest = find_program(get_option('PYTEST'), native: true, required: false)
+
+  if pytest.found()
+    pytest_enabled = true
+    pytest_version = run_command(pytest, '--version', check: false).stdout().strip().split(' ')[-1]
+    pytest_cmd = [pytest.full_path()]
+  else
+    # Try python -m pytest as a fallback
+    pytest_check = run_command(python, '-m', 'pytest', '--version', check: false)
+    if pytest_check.returncode() == 0
+      pytest_enabled = true
+      pytest_version = pytest_check.stdout().strip().split(' ')[-1]
+      pytest_cmd = [python.full_path(), '-m', 'pytest']
+    endif
+  endif
+
+  if not pytest_enabled and pytestopt.enabled()
+    error('pytest not found')
+  endif
+endif
+
+
+
+###############################################################
 # Library: zstd
 ###############################################################
 
@@ -4120,6 +4161,64 @@ foreach test_dir : tests
         )
       endforeach
       install_suites += test_group
+    elif kind == 'pytest'
+      testwrap_pytest = testwrap_base
+      if not pytest_enabled
+        testwrap_pytest += ['--skip', 'pytest not enabled']
+      endif
+
+      test_command = pytest_cmd
+
+      test_command += [
+        '-c', meson.project_source_root() / 'pyproject.toml',
+        '--verbose',
+        '-p', 'pgtap',  # enable our test reporter plugin
+        '-ra',  # show skipped and xfailed tests too
+      ]
+
+      # Add temporary install, the build directory for non-installed binaries and
+      # also test/ for non-installed test binaries built separately.
+      env = test_env
+      env.prepend('PATH', temp_install_bindir, test_dir['bd'], test_dir['bd'] / 'test')
+      temp_install_datadir = '@0@@1@'.format(test_install_destdir, dir_prefix / dir_data)
+      env.set('share_contrib_dir', temp_install_datadir / 'contrib')
+      env.prepend('PYTHONPATH', pytest_env['PYTHONPATH'])
+
+      foreach name, value : t.get('env', {})
+        env.set(name, value)
+      endforeach
+
+      test_group = test_dir['name']
+      test_kwargs = {
+        'protocol': 'tap',
+        'suite': test_group,
+        'timeout': test_timeout,
+        'depends': test_deps + t.get('deps', []),
+        'env': env,
+      } + t.get('test_kwargs', {})
+
+      foreach onetest : t['tests']
+        # Make test names prettier, remove pyt/ and .py
+        onetest_p = onetest
+        if onetest_p.startswith('pyt/')
+          onetest_p = onetest.split('pyt/')[1]
+        endif
+        if onetest_p.endswith('.py')
+          onetest_p = fs.stem(onetest_p)
+        endif
+
+        test(test_dir['name'] / onetest_p,
+          python,
+          kwargs: test_kwargs,
+          args: testwrap_pytest + [
+            '--testgroup', test_dir['name'],
+            '--testname', onetest_p,
+            '--', test_command,
+            test_dir['sd'] / onetest,
+          ],
+        )
+      endforeach
+      install_suites += test_group
     else
       error('unknown kind @0@ of test in @1@'.format(kind, test_dir['sd']))
     endif
@@ -4324,6 +4423,7 @@ summary(
     'bison': '@0@ @1@'.format(bison.full_path(), bison_version),
     'dtrace': dtrace,
     'flex': '@0@ @1@'.format(flex.full_path(), flex_version),
+    'pytest': pytest_enabled ? ' '.join(pytest_cmd) + ' ' + pytest_version : not_found_dep,
   },
   section: 'Programs',
 )

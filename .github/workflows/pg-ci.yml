@@ -91,6 +91,7 @@ env:
     -Dreadline=enabled
     -Dssl=openssl
     -Dtap_tests=enabled
+    -Dpytest=enabled
     -Dzlib=enabled
     -Dzstd=enabled
 
@@ -502,7 +503,7 @@ jobs:
         run: |
           ./configure \
             --enable-cassert --enable-injection-points --enable-debug \
-            --enable-tap-tests --enable-nls \
+            --enable-tap-tests --enable-pytest --enable-nls \
             --with-segsize-blocks=6 \
             --with-libnuma \
             --with-liburing \
@@ -604,6 +605,7 @@ jobs:
             --buildtype=debug \
             --pkg-config-path /usr/lib/i386-linux-gnu/pkgconfig/ \
             -DPERL=perl5.40-i386-linux-gnu \
+            -DPYTEST=pytest-i386 \
             -Dlibnuma=disabled \
             build
 
@@ -685,6 +687,10 @@ jobs:
       - *ccache_restore_branch_step
       - *linux_prepare_workspace_step
 
+      # The pytest suites load the asan-instrumented libpq into an
+      # uninstrumented python via dlopen(), which the asan runtime refuses
+      # unless it's the very first library in the process. The pytest-asan
+      # wrapper LD_PRELOADs the runtime to make that so.
       - name: Configure
         shell: *su_postgres_shell
         run: |
@@ -693,6 +699,7 @@ jobs:
             -Duuid=e2fs \
             --buildtype=debug \
             -Dllvm=enabled \
+            -DPYTEST="$(pwd)/src/tools/ci/pytest-asan" \
             build
 
       - name: Build
@@ -747,6 +754,8 @@ jobs:
         p5.34-io-tty
         p5.34-ipc-run
         python312
+        py312-packaging
+        py312-pytest
         tcl
         zstd
 
@@ -815,6 +824,7 @@ jobs:
           sh src/tools/ci/ci_macports_packages.sh $MACOS_PACKAGE_LIST
           # system python doesn't provide headers
           sudo /opt/local/bin/port select python3 python312
+          sudo /opt/local/bin/port select pytest pytest312
           # Make macports install visible to subsequent steps
           echo /opt/local/sbin >> "$GITHUB_PATH"
           echo /opt/local/bin >> "$GITHUB_PATH"
@@ -907,6 +917,7 @@ jobs:
         -Dplpython=enabled
         -Dssl=openssl
         -Dtap_tests=enabled
+        -Dpytest=enabled
 
     defaults:
       run:
@@ -994,7 +1005,7 @@ jobs:
         run: |
           # meson is not preinstalled on windows-2022. Install via pip
           echo ::group::pip
-          python -m pip install --upgrade meson
+          python -m pip install --upgrade meson pytest
           if (!$?) { throw 'cmdfail' }
           echo ::endgroup::
 
@@ -1134,6 +1145,7 @@ jobs:
             ${MINGW_PACKAGE_PREFIX}-meson \
             ${MINGW_PACKAGE_PREFIX}-perl \
             ${MINGW_PACKAGE_PREFIX}-pkgconf \
+            ${MINGW_PACKAGE_PREFIX}-python-pytest \
             ${MINGW_PACKAGE_PREFIX}-readline \
             ${MINGW_PACKAGE_PREFIX}-zlib \
             ${MINGW_PACKAGE_PREFIX}-zstd

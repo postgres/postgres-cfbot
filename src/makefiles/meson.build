@@ -56,6 +56,8 @@ pgxs_kv = {
   'enable_nls': libintl.found() ? 'yes' : 'no',
   'enable_injection_points': get_option('injection_points') ? 'yes' : 'no',
   'enable_tap_tests': tap_tests_enabled ? 'yes' : 'no',
+  'enable_pytest': pytest_enabled ? 'yes' : 'no',
+  'PYTEST': pytest_enabled ? ' '.join(pytest_cmd) : '',
   'enable_debug': get_option('debug') ? 'yes' : 'no',
   'enable_coverage': 'no',
   'enable_dtrace': dtrace.found() ? 'yes' : 'no',
