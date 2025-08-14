@@ -43,7 +43,7 @@ typedef struct CheckPoint
 	int			wal_level;		/* current wal_level */
 	bool		logicalDecodingEnabled; /* current logical decoding status */
 	FullTransactionId nextXid;	/* next free transaction ID */
-	Oid			nextOid;		/* next free OID */
+	Oid8		nextOid;		/* next free OID */
 	MultiXactId nextMulti;		/* next free MultiXactId */
 	MultiXactOffset nextMultiOffset;	/* next free MultiXact offset */
 	TransactionId oldestXid;	/* cluster-wide minimum datfrozenxid */

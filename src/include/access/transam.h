@@ -211,7 +211,7 @@ typedef struct TransamVariablesData
 	/*
 	 * These fields are protected by OidGenLock.
 	 */
-	Oid			nextOid;		/* next OID to assign */
+	Oid8		nextOid;		/* next OID (8 bytes) to assign */
 	uint32		oidCount;		/* OIDs available before must do XLOG work */
 
 	/*
@@ -353,6 +353,7 @@ extern void SetTransactionIdLimit(TransactionId oldest_datfrozenxid,
 extern void AdvanceOldestClogXid(TransactionId oldest_datfrozenxid);
 extern bool ForceTransactionIdLimitUpdate(void);
 extern Oid	GetNewObjectId(void);
+extern Oid8 GetNewObjectId8(void);
 extern void StopGeneratingPinnedObjectIds(void);
 
 #ifdef USE_ASSERT_CHECKING

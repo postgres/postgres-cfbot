@@ -8603,10 +8603,10 @@ KeepLogSeg(XLogRecPtr recptr, XLogSegNo *logSegNo)
  * Write a NEXTOID log record
  */
 void
-XLogPutNextOid(Oid nextOid)
+XLogPutNextOid(Oid8 nextOid)
 {
 	XLogBeginInsert();
-	XLogRegisterData(&nextOid, sizeof(Oid));
+	XLogRegisterData(&nextOid, sizeof(Oid8));
 	(void) XLogInsert(RM_XLOG_ID, XLOG_NEXTOID);
 
 	/*
@@ -8872,7 +8872,7 @@ xlog_redo(XLogReaderState *record)
 
 	if (info == XLOG_NEXTOID)
 	{
-		Oid			nextOid;
+		Oid8		nextOid;
 
 		/*
 		 * We used to try to take the maximum of TransamVariables->nextOid and
@@ -8881,7 +8881,7 @@ xlog_redo(XLogReaderState *record)
 		 * anyway, better to just believe the record exactly.  We still take
 		 * OidGenLock while setting the variable, just in case.
 		 */
-		memcpy(&nextOid, XLogRecGetData(record), sizeof(Oid));
+		memcpy(&nextOid, XLogRecGetData(record), sizeof(Oid8));
 		LWLockAcquire(OidGenLock, LW_EXCLUSIVE);
 		TransamVariables->nextOid = nextOid;
 		TransamVariables->oidCount = 0;
