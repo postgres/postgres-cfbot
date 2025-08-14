@@ -159,9 +159,15 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 	 */
 	if (!IsBinaryUpgrade)
 	{
+		StdRdOptToastValueType value_type;
+
 		/* Normal mode, normal check */
 		if (!needs_toast_table(rel))
 			return false;
+
+		value_type = RelationGetToastValueType(rel, STDRD_OPTION_TOAST_VALUE_TYPE_OID);
+		if (value_type == STDRD_OPTION_TOAST_VALUE_TYPE_OID)
+			toast_chunkid_typid = OIDOID;
 	}
 	else
 	{
