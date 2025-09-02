@@ -3658,6 +3658,7 @@ BufferSync(int flags)
 			item = &CkptBufferIds[num_to_scan++];
 			item->buf_id = buf_id;
 			item->tsId = bufHdr->tag.spcOid;
+			item->dbId = bufHdr->tag.dbOid;
 			item->relNumber = BufTagGetRelNumber(&bufHdr->tag);
 			item->forkNum = BufTagGetForkNum(&bufHdr->tag);
 			item->blockNum = bufHdr->tag.blockNum;
@@ -7702,6 +7703,13 @@ ckpt_buforder_comparator(const CkptSortItem *a, const CkptSortItem *b)
 		return -1;
 	else if (a->tsId > b->tsId)
 		return 1;
+
+	/* compare database */
+	if (a->dbId < b->dbId)
+		return -1;
+	else if (a->dbId > b->dbId)
+		return 1;
+
 	/* compare relation */
 	if (a->relNumber < b->relNumber)
 		return -1;
