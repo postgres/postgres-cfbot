@@ -1599,6 +1599,12 @@
   boot_val => '"localhost"',
 },
 
+{ name => 'listen_mptcp', type => 'bool', context => 'PGC_POSTMASTER', group => 'CONN_AUTH_SETTINGS',
+  short_desc => 'Whether to enable MPTCP on the listening socket',
+  variable => 'ListenMPTCP',
+  boot_val => 'false',
+},
+
 { name => 'lo_compat_privileges', type => 'bool', context => 'PGC_SUSET', group => 'COMPAT_OPTIONS_PREVIOUS',
   short_desc => 'Enables backward compatibility mode for privilege checks on large objects.',
   long_desc => 'Skips privilege checks when reading or modifying large objects, for compatibility with PostgreSQL releases prior to 9.0.',
