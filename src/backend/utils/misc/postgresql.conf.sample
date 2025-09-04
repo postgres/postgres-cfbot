@@ -63,6 +63,8 @@
                                         # comma-separated list of addresses;
                                         # defaults to 'localhost'; use '*' for all
                                         # (change requires restart)
+#listen_mptcp = off                     # whether to enable Multipathing TCP or not
+                                        # (change requires restart)
 #port = 5432                            # (change requires restart)
 #max_connections = 100                  # (change requires restart)
 #reserved_connections = 0               # (change requires restart)
