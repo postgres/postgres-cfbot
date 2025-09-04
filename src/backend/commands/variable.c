@@ -1231,6 +1231,19 @@ check_bonjour(bool *newval, void **extra, GucSource source)
 }
 
 bool
+check_listen_mptcp(bool *newval, void **extra, GucSource source)
+{
+#ifndef IPPROTO_MPTCP
+	if (*newval)
+	{
+		GUC_check_errmsg("setting the MPTCP listening socket is not supported on this platform");
+		return false;
+	}
+#endif
+	return true;
+}
+
+bool
 check_default_with_oids(bool *newval, void **extra, GucSource source)
 {
 	if (*newval)
