@@ -485,6 +485,8 @@ ListenServerPort(int family, const char *hostName, unsigned short portNumber,
 
 	for (addr = addrs; addr; addr = addr->ai_next)
 	{
+		int			ipprotocol = 0;
+
 		if (family != AF_UNIX && addr->ai_family == AF_UNIX)
 		{
 			/*
@@ -536,7 +538,16 @@ ListenServerPort(int family, const char *hostName, unsigned short portNumber,
 			addrDesc = addrBuf;
 		}
 
-		if ((fd = socket(addr->ai_family, SOCK_STREAM, 0)) == PGINVALID_SOCKET)
+		/*
+		 * enable MPTCP only on IP and IPv6 sockets and not for UNIX domain
+		 * sockets
+		 */
+#ifdef IPPROTO_MPTCP
+		if (addr->ai_family != AF_UNIX)
+			ipprotocol = ListenMPTCP ? IPPROTO_MPTCP : 0;
+#endif
+
+		if ((fd = socket(addr->ai_family, SOCK_STREAM, ipprotocol)) == PGINVALID_SOCKET)
 		{
 			ereport(LOG,
 					(errcode_for_socket_access(),
