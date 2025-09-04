@@ -2585,6 +2585,22 @@ postgresql://%2Fvar%2Flib%2Fpostgresql/dbname
       </listitem>
      </varlistentry>
 
+     <varlistentry id="libpq-connect-mptcp" xreflabel="mptcp">
+      <term><literal>MPTCP</literal><indexterm><primary>Multipath TCP</primary></indexterm></term>
+      <listitem>
+       <para>
+        Controls whether client-side MPTCP protocol is used. The default
+        value is 0, meaning off, but you can change this to 1, meaning on.
+        This parameter is ignored for connections made via a Unix-domain socket.
+       </para>
+
+       <para>
+        MPTCP protocol is only supported on Linux and allows connection aggregation
+        (multiplexing) over multiple network paths, provided that remote also
+        supports MPTCP.
+       </para>
+      </listitem>
+     </varlistentry>
     </variablelist>
    </para>
   </sect2>
@@ -9100,6 +9116,16 @@ myEventProc(PGEventId evtId, void *evtInfo, void *passThrough)
       This environment variable is deprecated in favor of the
       <envar>PGSSLMODE</envar> variable; setting both variables suppresses the
       effect of this one.
+     </para>
+    </listitem>
+
+    <listitem>
+     <para>
+      <indexterm>
+       <primary><envar>PGMPTCP</envar></primary>
+      </indexterm>
+      <envar>PGMPTCP</envar> behaves the same as the <xref
+      linkend="libpq-connect-mptcp"/> connection parameter.
      </para>
     </listitem>
 
