@@ -815,12 +815,13 @@ SELECT
     LATERAL pg_identify_object_as_address('pg_event_trigger'::regclass, e.oid, 0) as b,
     LATERAL pg_get_object_address(b.type, b.object_names, b.object_args) as a
   ORDER BY e.evtname;
-      evtname      |              descr              |     type      |    object_names     | object_args |                         ident                          
--------------------+---------------------------------+---------------+---------------------+-------------+--------------------------------------------------------
- end_rls_command   | event trigger end_rls_command   | event trigger | {end_rls_command}   | {}          | ("event trigger",,end_rls_command,end_rls_command)
- sql_drop_command  | event trigger sql_drop_command  | event trigger | {sql_drop_command}  | {}          | ("event trigger",,sql_drop_command,sql_drop_command)
- start_rls_command | event trigger start_rls_command | event trigger | {start_rls_command} | {}          | ("event trigger",,start_rls_command,start_rls_command)
-(3 rows)
+            evtname            |                    descr                    |     type      |          object_names           | object_args |                                     ident                                      
+-------------------------------+---------------------------------------------+---------------+---------------------------------+-------------+--------------------------------------------------------------------------------
+ end_rls_command               | event trigger end_rls_command               | event trigger | {end_rls_command}               | {}          | ("event trigger",,end_rls_command,end_rls_command)
+ regress_ddl_roundtrip_trigger | event trigger regress_ddl_roundtrip_trigger | event trigger | {regress_ddl_roundtrip_trigger} | {}          | ("event trigger",,regress_ddl_roundtrip_trigger,regress_ddl_roundtrip_trigger)
+ sql_drop_command              | event trigger sql_drop_command              | event trigger | {sql_drop_command}              | {}          | ("event trigger",,sql_drop_command,sql_drop_command)
+ start_rls_command             | event trigger start_rls_command             | event trigger | {start_rls_command}             | {}          | ("event trigger",,start_rls_command,start_rls_command)
+(4 rows)
 
 DROP EVENT TRIGGER start_rls_command;
 DROP EVENT TRIGGER end_rls_command;

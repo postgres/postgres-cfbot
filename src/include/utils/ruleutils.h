@@ -34,8 +34,11 @@ extern char *pg_get_partkeydef_columns(Oid relid, bool pretty);
 extern char *pg_get_partconstrdef_string(Oid partitionId, char *aliasname);
 
 extern char *pg_get_constraintdef_command(Oid constraintId);
+extern char *pg_get_constraintdef_for_ddl(Oid constraintId, bool fullCommand,
+										  bool pretty, bool missing_ok);
 extern char *deparse_expression(Node *expr, List *dpcontext,
 								bool forceprefix, bool showimplicit);
+extern char *deparse_expression_for_ddl(Node *expr, bool pretty);
 extern List *deparse_context_for(const char *aliasname, Oid relid);
 extern List *deparse_context_for_plan_tree(PlannedStmt *pstmt,
 										   List *rtable_names);
@@ -50,6 +53,7 @@ extern char *get_window_frame_options_for_explain(int frameOptions,
 												  bool forceprefix);
 extern char *generate_collation_name(Oid collid);
 extern char *generate_opclass_name(Oid opclass);
+extern char *generate_qualified_type_name(Oid typid);
 extern char *get_range_partbound_string(List *bound_datums);
 extern void get_reloptions(StringInfo buf, Datum reloptions);
 

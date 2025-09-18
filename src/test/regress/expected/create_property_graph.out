@@ -248,6 +248,7 @@ ERROR:  mismatching number of properties in definition of label "t3l1"
 ALTER PROPERTY GRAPH g1 OWNER TO regress_graph_user1;
 SET ROLE regress_graph_user1;
 GRANT SELECT ON PROPERTY GRAPH g1 TO regress_graph_user2;
+WARNING:  regress_ddl_roundtrip_trigger_func: skipping DDL round-trip check (XX000): unsupported object type: 30
 GRANT UPDATE ON PROPERTY GRAPH g1 TO regress_graph_user2;  -- fail
 ERROR:  invalid privilege type UPDATE for property graph
 GRANT UPDATE ON TABLE g1 TO regress_graph_user2;  -- fail
