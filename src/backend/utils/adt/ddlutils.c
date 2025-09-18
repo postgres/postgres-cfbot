@@ -24,9 +24,11 @@
 #include "catalog/pg_auth_members.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_collation.h"
+#include "catalog/pg_constraint.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_db_role_setting.h"
 #include "catalog/pg_tablespace.h"
+#include "catalog/pg_type.h"
 #include "commands/tablespace.h"
 #include "common/relpath.h"
 #include "funcapi.h"
@@ -56,6 +58,9 @@ static List *pg_get_tablespace_ddl_internal(Oid tsid, bool pretty, bool no_owner
 static Datum pg_get_tablespace_ddl_srf(FunctionCallInfo fcinfo, Oid tsid);
 static List *pg_get_database_ddl_internal(Oid dbid, bool pretty,
 										  bool no_owner, bool no_tablespace);
+static void scan_domain_constraints(Oid domain_oid, List **validcons,
+									List **invalidcons);
+static List *pg_get_domain_ddl_internal(Oid domain_oid, bool pretty);
 
 
 /*
@@ -966,6 +971,233 @@ pg_get_database_ddl(PG_FUNCTION_ARGS)
 		char	   *stmt;
 
 		stmt = list_nth(statements, funcctx->call_cntr);
+
+		SRF_RETURN_NEXT(funcctx, CStringGetTextDatum(stmt));
+	}
+	else
+	{
+		list_free_deep(statements);
+		SRF_RETURN_DONE(funcctx);
+	}
+}
+
+/*
+ * scan_domain_constraints
+ *		Split a domain's pg_constraint rows into validated and NOT VALID
+ *		lists, each sorted by OID for stable, deterministic output.
+ */
+static void
+scan_domain_constraints(Oid domain_oid, List **validcons, List **invalidcons)
+{
+	Relation	constraintRel;
+	SysScanDesc sscan;
+	ScanKeyData skey;
+	HeapTuple	constraintTup;
+
+	*validcons = NIL;
+	*invalidcons = NIL;
+
+	constraintRel = table_open(ConstraintRelationId, AccessShareLock);
+
+	ScanKeyInit(&skey,
+				Anum_pg_constraint_contypid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(domain_oid));
+
+	sscan = systable_beginscan(constraintRel,
+							   ConstraintTypidIndexId,
+							   true,
+							   NULL,
+							   1,
+							   &skey);
+
+	while (HeapTupleIsValid(constraintTup = systable_getnext(sscan)))
+	{
+		Form_pg_constraint con = (Form_pg_constraint) GETSTRUCT(constraintTup);
+
+		if (con->convalidated)
+			*validcons = lappend_oid(*validcons, con->oid);
+		else
+			*invalidcons = lappend_oid(*invalidcons, con->oid);
+	}
+
+	systable_endscan(sscan);
+	table_close(constraintRel, AccessShareLock);
+
+	/* Sort constraints by OID for stable output */
+	if (list_length(*validcons) > 1)
+		list_sort(*validcons, list_oid_cmp);
+	if (list_length(*invalidcons) > 1)
+		list_sort(*invalidcons, list_oid_cmp);
+}
+
+/*
+ * pg_get_domain_ddl_internal
+ *		Generate DDL statements to recreate a domain.
+ *
+ * Returns a List of palloc'd strings, each a complete SQL statement.  The
+ * first element is always the CREATE DOMAIN statement, including any
+ * COLLATE/DEFAULT clauses and already-validated CHECK/NOT NULL constraints;
+ * subsequent elements, if any, are one ALTER DOMAIN ... ADD CONSTRAINT ...
+ * NOT VALID statement per constraint that has not yet been validated.
+ */
+static List *
+pg_get_domain_ddl_internal(Oid domain_oid, bool pretty)
+{
+	HeapTuple	typeTuple;
+	Form_pg_type typForm;
+	Node	   *defaultExpr;
+	List	   *validConstraints;
+	List	   *invalidConstraints;
+	StringInfoData buf;
+	List	   *statements = NIL;
+
+	typeTuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(domain_oid));
+	if (!HeapTupleIsValid(typeTuple))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("domain with OID %u does not exist", domain_oid)));
+
+	typForm = (Form_pg_type) GETSTRUCT(typeTuple);
+
+	if (typForm->typtype != TYPTYPE_DOMAIN)
+	{
+		ReleaseSysCache(typeTuple);
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not a domain", format_type_be(domain_oid)),
+				 errhint("Use a schema-qualified name if the domain name conflicts with a built-in name.")));
+	}
+
+	defaultExpr = get_typdefault(domain_oid);
+	scan_domain_constraints(domain_oid, &validConstraints, &invalidConstraints);
+
+	initStringInfo(&buf);
+
+	appendStringInfo(&buf, "CREATE DOMAIN %s AS %s",
+					 generate_qualified_type_name(typForm->oid),
+					 format_type_extended(typForm->typbasetype,
+										  typForm->typtypmod,
+										  FORMAT_TYPE_TYPEMOD_GIVEN |
+										  FORMAT_TYPE_FORCE_QUALIFY));
+
+	/* only show COLLATE if it differs from the base type's collation */
+	if (OidIsValid(typForm->typcollation))
+	{
+		HeapTuple	baseTypeTuple = SearchSysCache1(TYPEOID,
+													ObjectIdGetDatum(typForm->typbasetype));
+		Oid			baseCollation = InvalidOid;
+
+		if (HeapTupleIsValid(baseTypeTuple))
+		{
+			baseCollation = ((Form_pg_type) GETSTRUCT(baseTypeTuple))->typcollation;
+			ReleaseSysCache(baseTypeTuple);
+		}
+
+		if (typForm->typcollation != baseCollation)
+			append_ddl_option(&buf, pretty, 4, "COLLATE %s",
+							  generate_collation_name(typForm->typcollation));
+	}
+
+	if (defaultExpr != NULL)
+	{
+		char	   *defaultValue = deparse_expression_for_ddl(defaultExpr, pretty);
+
+		append_ddl_option(&buf, pretty, 4, "DEFAULT %s", defaultValue);
+	}
+
+	foreach_oid(constraintOid, validConstraints)
+	{
+		HeapTuple	constraintTup;
+		Form_pg_constraint con;
+		char	   *constraintDef;
+
+		constraintTup = SearchSysCache1(CONSTROID, ObjectIdGetDatum(constraintOid));
+		if (!HeapTupleIsValid(constraintTup))
+			continue;			/* constraint was dropped concurrently */
+
+		con = (Form_pg_constraint) GETSTRUCT(constraintTup);
+		constraintDef = pg_get_constraintdef_for_ddl(constraintOid, false,
+													 pretty, true);
+
+		if (constraintDef == NULL)
+		{
+			ReleaseSysCache(constraintTup);
+			continue;			/* constraint was dropped concurrently */
+		}
+
+		append_ddl_option(&buf, pretty, 4, "CONSTRAINT %s",
+						  quote_identifier(NameStr(con->conname)));
+		append_ddl_option(&buf, pretty, 8, "%s", constraintDef);
+
+		ReleaseSysCache(constraintTup);
+	}
+
+	appendStringInfoChar(&buf, ';');
+	statements = lappend(statements, pstrdup(buf.data));
+
+	/* each NOT VALID constraint is its own ALTER DOMAIN row */
+	foreach_oid(constraintOid, invalidConstraints)
+	{
+		char	   *alterStmt = pg_get_constraintdef_for_ddl(constraintOid, true,
+															 pretty, true);
+
+		if (alterStmt == NULL)
+			continue;			/* constraint was dropped concurrently */
+
+		resetStringInfo(&buf);
+		appendStringInfo(&buf, "%s;", alterStmt);
+		statements = lappend(statements, pstrdup(buf.data));
+	}
+
+	list_free(validConstraints);
+	list_free(invalidConstraints);
+	pfree(buf.data);
+	ReleaseSysCache(typeTuple);
+
+	return statements;
+}
+
+/*
+ * pg_get_domain_ddl
+ *		Return DDL to recreate a domain as a set of text rows.
+ *
+ * Each row is a complete SQL statement.  The first row is always the
+ * CREATE DOMAIN statement; subsequent rows, if any, are ALTER DOMAIN ...
+ * ADD CONSTRAINT ... NOT VALID statements for constraints that have not
+ * been validated.
+ */
+Datum
+pg_get_domain_ddl(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *funcctx;
+	List	   *statements;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		MemoryContext oldcontext;
+		Oid			domain_oid;
+		bool		pretty;
+
+		funcctx = SRF_FIRSTCALL_INIT();
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		domain_oid = PG_GETARG_OID(0);
+		pretty = PG_GETARG_BOOL(1);
+
+		statements = pg_get_domain_ddl_internal(domain_oid, pretty);
+		funcctx->user_fctx = statements;
+		funcctx->max_calls = list_length(statements);
+
+		MemoryContextSwitchTo(oldcontext);
+	}
+
+	funcctx = SRF_PERCALL_SETUP();
+	statements = (List *) funcctx->user_fctx;
+
+	if (funcctx->call_cntr < funcctx->max_calls)
+	{
+		char	   *stmt = (char *) list_nth(statements, funcctx->call_cntr);
 
 		SRF_RETURN_NEXT(funcctx, CStringGetTextDatum(stmt));
 	}
