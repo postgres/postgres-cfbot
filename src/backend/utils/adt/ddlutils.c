@@ -20,12 +20,14 @@
 
 #include "access/genam.h"
 #include "access/htup_details.h"
+#include "access/relation.h"
 #include "access/table.h"
 #include "catalog/pg_auth_members.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_collation.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_db_role_setting.h"
+#include "catalog/pg_publication_rel.h"
 #include "catalog/pg_tablespace.h"
 #include "commands/tablespace.h"
 #include "common/relpath.h"
@@ -56,7 +58,10 @@ static List *pg_get_tablespace_ddl_internal(Oid tsid, bool pretty, bool no_owner
 static Datum pg_get_tablespace_ddl_srf(FunctionCallInfo fcinfo, Oid tsid);
 static List *pg_get_database_ddl_internal(Oid dbid, bool pretty,
 										  bool no_owner, bool no_tablespace);
-
+static Datum pg_get_publication_ddl_srf(FunctionCallInfo fcinfo,
+										Oid puboid, bool isnull);
+static List *pg_get_publication_ddl_internal(Oid puboid, bool pretty,
+											 bool no_owner);
 
 /*
  * Helper to append a formatted string with optional pretty-printing.
@@ -974,4 +979,378 @@ pg_get_database_ddl(PG_FUNCTION_ARGS)
 		list_free_deep(statements);
 		SRF_RETURN_DONE(funcctx);
 	}
+}
+
+/*
+ * pg_get_publication_ddl_srf - common SRF logic for publication DDL
+ */
+static Datum
+pg_get_publication_ddl_srf(FunctionCallInfo fcinfo, Oid puboid, bool isnull)
+{
+	FuncCallContext *funcctx;
+	List	   *statements;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		MemoryContext oldcontext;
+		DdlOption	opts[] = {
+			{"pretty", DDL_OPT_BOOL},
+			{"owner", DDL_OPT_BOOL},
+		};
+
+		funcctx = SRF_FIRSTCALL_INIT();
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		if (isnull)
+		{
+			MemoryContextSwitchTo(oldcontext);
+			SRF_RETURN_DONE(funcctx);
+		}
+
+		parse_ddl_options(fcinfo, 1, opts, lengthof(opts));
+
+		statements = pg_get_publication_ddl_internal(puboid,
+													 opts[0].isset && opts[0].boolval,
+													 opts[1].isset && !opts[1].boolval);
+
+		funcctx->user_fctx = statements;
+		funcctx->max_calls = list_length(statements);
+
+		MemoryContextSwitchTo(oldcontext);
+	}
+
+	funcctx = SRF_PERCALL_SETUP();
+	statements = (List *) funcctx->user_fctx;
+
+	if (funcctx->call_cntr < funcctx->max_calls)
+	{
+		char	   *stmt;
+
+		stmt = (char *) list_nth(statements, funcctx->call_cntr);
+
+		SRF_RETURN_NEXT(funcctx, CStringGetTextDatum(stmt));
+	}
+	else
+	{
+		list_free_deep(statements);
+		SRF_RETURN_DONE(funcctx);
+	}
+}
+
+/*
+ * pg_get_publication_ddl_oid
+ *		Return DDL to recreate a publication, taking OID.
+ */
+Datum
+pg_get_publication_ddl_oid(PG_FUNCTION_ARGS)
+{
+	Oid			puboid = InvalidOid;
+	bool		isnull;
+
+	isnull = PG_ARGISNULL(0);
+	if (!isnull)
+		puboid = PG_GETARG_OID(0);
+
+	return pg_get_publication_ddl_srf(fcinfo, puboid, isnull);
+}
+
+/*
+ * pg_get_publication_ddl_name
+ *		Return DDL to recreate a publication, taking name.
+ */
+Datum
+pg_get_publication_ddl_name(PG_FUNCTION_ARGS)
+{
+	Oid			puboid = InvalidOid;
+	bool		isnull;
+
+	isnull = PG_ARGISNULL(0);
+	if (!isnull)
+	{
+		char	   *pubname = text_to_cstring(PG_GETARG_TEXT_PP(0));
+
+		puboid = get_publication_oid(pubname, false);
+		pfree(pubname);
+	}
+
+	return pg_get_publication_ddl_srf(fcinfo, puboid, isnull);
+}
+
+/*
+ * pg_get_publication_ddl_internal
+ *		Common code for pg_get_publication_ddl_oid and
+ *		pg_get_publication_ddl_name.
+ *
+ * Returns a List of palloc'd strings.  The first element is the
+ * CREATE PUBLICATION statement; if no_owner is false a second element
+ * carries an ALTER PUBLICATION ... OWNER TO statement (the CREATE
+ * PUBLICATION grammar has no OWNER clause, so ownership must be applied
+ * as a follow-on statement).
+ */
+static List *
+pg_get_publication_ddl_internal(Oid puboid, bool pretty, bool no_owner)
+{
+	Publication *pub;
+	StringInfoData buf;
+	List	   *statements = NIL;
+	List	   *pub_incl_relids = NIL;
+	List	   *pub_excl_relids = NIL;
+	List	   *pub_schemas = NIL;
+	bool		first_perm = true;
+
+	if (!SearchSysCacheExists1(PUBLICATIONOID, ObjectIdGetDatum(puboid)))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("publication with OID %u does not exist", puboid)));
+
+	pub = GetPublication(puboid);
+
+	initStringInfo(&buf);
+
+	appendStringInfo(&buf, "CREATE PUBLICATION %s", quote_identifier(pub->name));
+
+	/*
+	 * Having all tables or all sequences means that there are no per-table
+	 * publications
+	 */
+	if (pub->alltables || pub->allsequences)
+	{
+		append_ddl_option(&buf, pretty, 4, "FOR ");
+
+		if (pub->alltables)
+		{
+			appendStringInfoString(&buf, "ALL TABLES");
+			pub_excl_relids = GetExcludedPublicationTables(
+														   pub->oid, PUBLICATION_PART_ROOT);
+
+			if (pub_excl_relids != NIL)
+			{
+				ListCell   *excl_cell;
+				char	   *schemaname = NULL;
+
+				appendStringInfoString(&buf, " EXCEPT (TABLE ");
+
+				foreach(excl_cell, pub_excl_relids)
+				{
+					HeapTuple	tp = SearchSysCache1(RELOID, ObjectIdGetDatum(excl_cell->oid_value));
+					Form_pg_class reltup;
+
+					if (!HeapTupleIsValid(tp))
+						elog(ERROR, "cache lookup failed for relation %u", excl_cell->oid_value);
+
+					reltup = (Form_pg_class) GETSTRUCT(tp);
+					schemaname = get_namespace_name(reltup->relnamespace);
+
+					appendStringInfo(&buf, "%s%s",
+									 foreach_current_index(excl_cell) > 0 ? ", " : "",
+									 quote_qualified_identifier(schemaname, NameStr(reltup->relname)));
+
+					pfree(schemaname);
+					ReleaseSysCache(tp);
+				}
+
+				appendStringInfoChar(&buf, ')');
+			}
+		}
+		if (pub->allsequences)
+			appendStringInfo(&buf,
+							 "%sALL SEQUENCES",
+							 pub->alltables ? ", " : "");
+	}
+	else
+	{
+		pub_incl_relids = GetIncludedPublicationRelations(pub->oid, PUBLICATION_PART_ROOT);
+		pub_schemas = GetPublicationSchemas(pub->oid);
+	}
+
+	/*
+	 * Publication can have table relations
+	 */
+	if (pub_incl_relids != NIL)
+	{
+		ListCell   *pub_cell;
+		char	   *schemaname = NULL;
+		char	   *tablename;
+
+		append_ddl_option(&buf, pretty, 4, "FOR TABLE ");
+
+		foreach(pub_cell, pub_incl_relids)
+		{
+			HeapTuple	pubtuple = NULL;
+			HeapTuple	reltup;
+			Form_pg_class relform;
+			Datum		columns,
+						rowfilter;
+			Oid			relid = pub_cell->oid_value;
+			bool		cols_nulls,
+						condition_nulls;
+
+			reltup = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+			if (!HeapTupleIsValid(reltup))
+				elog(ERROR,
+					 "cache lookup failed for relation %u",
+					 relid);
+
+			relform = (Form_pg_class) GETSTRUCT(reltup);
+			tablename = NameStr(relform->relname);
+			schemaname = get_namespace_name(relform->relnamespace);
+
+			appendStringInfo(&buf, "%s%s",
+							 foreach_current_index(pub_cell) > 0 ? ", " : "",
+							 quote_qualified_identifier(schemaname, tablename));
+
+			pfree(schemaname);
+
+			pubtuple = SearchSysCache2(PUBLICATIONRELMAP, ObjectIdGetDatum(relid),
+									   ObjectIdGetDatum(pub->oid));
+
+			if (!HeapTupleIsValid(pubtuple))
+				elog(ERROR,
+					 "cache lookup failed for relation %u in publication %u",
+					 relid, pub->oid);
+
+			columns = SysCacheGetAttr(PUBLICATIONRELMAP, pubtuple,
+									  Anum_pg_publication_rel_prattrs,
+									  &cols_nulls);
+
+			rowfilter = SysCacheGetAttr(PUBLICATIONRELMAP, pubtuple,
+										Anum_pg_publication_rel_prqual,
+										&condition_nulls);
+
+			/* If non-null, we have a list of columns to publish */
+			if (!cols_nulls)
+			{
+				Bitmapset  *attmap;
+				int			attnum = -1;
+
+				attmap = pub_collist_to_bitmapset(NULL, columns, NULL);
+
+				appendStringInfoChar(&buf, '(');
+				while ((attnum = bms_next_member(attmap, attnum)) >= 0)
+				{
+					appendStringInfo(&buf, "%s%s",
+									 bms_member_index(attmap, attnum) ? ", " : "",
+									 quote_identifier(get_attname(relid, attnum, false)));
+				}
+				appendStringInfoChar(&buf, ')');
+
+				bms_free(attmap);
+			}
+
+			/*
+			 * If there is a condition it goes after the columns. We can have
+			 * conditions without columns as well.
+			 */
+			if (!condition_nulls)
+			{
+				Node	   *node;
+				List	   *context;
+				char	   *str;
+
+				node = stringToNode(TextDatumGetCString(rowfilter));
+				context = deparse_context_for(tablename, relid);
+				str = deparse_expression(node, context, false, false);
+				appendStringInfo(&buf, " WHERE (%s)", str);
+			}
+
+			ReleaseSysCache(pubtuple);
+			ReleaseSysCache(reltup);
+		}
+	}
+
+	/* If we have schemas, they will go right before the EXCEPT and/or WITH */
+	if (pub_schemas != NIL)
+	{
+		ListCell   *schema_cell;
+
+		/*
+		 * Schemas can be preceded by a list of tables.  When they are, the
+		 * "TABLES IN SCHEMA" stays inline as a continuation of the existing
+		 * FOR clause; otherwise it starts the FOR clause on its own line in
+		 * pretty mode.
+		 */
+		if (pub_incl_relids == NIL)
+			append_ddl_option(&buf, pretty, 4, "FOR TABLES IN SCHEMA");
+		else
+			appendStringInfoString(&buf, ", TABLES IN SCHEMA");
+
+		foreach(schema_cell, pub_schemas)
+		{
+			char	   *nspname = get_namespace_name(schema_cell->oid_value);
+
+			appendStringInfo(&buf, "%s %s",
+							 foreach_current_index(schema_cell) > 0 ? "," : "",
+							 quote_identifier(nspname));
+			pfree(nspname);
+		}
+	}
+
+	/* Always add the WITH options */
+	append_ddl_option(&buf, pretty, 4, "WITH (");
+
+	/* Publish string */
+	appendStringInfoString(&buf, "publish='");
+
+
+	if (pub->pubactions.pubinsert)
+	{
+		/*
+		 * By precedence we know that the insert will always be first, no need
+		 * to check previous values
+		 */
+		appendStringInfoString(&buf, "insert");
+		first_perm = false;
+	}
+	if (pub->pubactions.pubupdate)
+	{
+		appendStringInfo(&buf, "%supdate", first_perm ? "" : ", ");
+		first_perm = false;
+	}
+	if (pub->pubactions.pubdelete)
+	{
+		appendStringInfo(&buf, "%sdelete", first_perm ? "" : ", ");
+		first_perm = false;
+	}
+	if (pub->pubactions.pubtruncate)
+	{
+		appendStringInfo(&buf, "%struncate", first_perm ? "" : ", ");
+	}
+
+	appendStringInfoString(&buf, "', ");
+
+	/* publish_generated_columns string */
+	appendStringInfo(&buf, "publish_generated_columns=%s, ",
+					 pub->pubgencols_type == PUBLISH_GENCOLS_NONE ? "none" : "stored");
+
+	/* publish_via_partition_root value */
+	appendStringInfo(&buf, "publish_via_partition_root=%s)",
+					 pub->pubviaroot ? "true" : "false");
+
+	appendStringInfoChar(&buf, ';');
+	statements = lappend(statements, pstrdup(buf.data));
+	pfree(buf.data);
+
+	/* OWNER */
+	if (!no_owner)
+	{
+		HeapTuple	tup;
+		Form_pg_publication pubform;
+		char	   *owner;
+
+		tup = SearchSysCache1(PUBLICATIONOID, ObjectIdGetDatum(puboid));
+		if (!HeapTupleIsValid(tup))
+			elog(ERROR, "cache lookup failed for publication %u", puboid);
+		pubform = (Form_pg_publication) GETSTRUCT(tup);
+		owner = GetUserNameFromId(pubform->pubowner, false);
+		ReleaseSysCache(tup);
+
+		initStringInfo(&buf);
+		appendStringInfo(&buf, "ALTER PUBLICATION %s OWNER TO %s;",
+						 quote_identifier(pub->name), quote_identifier(owner));
+		statements = lappend(statements, pstrdup(buf.data));
+		pfree(buf.data);
+		pfree(owner);
+	}
+
+	return statements;
 }
