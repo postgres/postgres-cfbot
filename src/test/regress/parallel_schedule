@@ -135,13 +135,16 @@ test: compression compression_lz4 compression_pglz cluster
 # oidjoins is read-only, though, and should run late for best coverage
 test: oidjoins event_trigger
 
-
 # event_trigger_login cannot run concurrently with any other tests because
 # on-login event handling could catch connection of a concurrent test.
 test: event_trigger_login
 
 # this test also uses event triggers, so likewise run it by itself
 test: fast_default
+
+# run retail DDL tests last to avoid object name collisions and
+# interference with previous tests.
+test: publication_ddl
 
 # run tablespace test at the end because it drops the tablespace created during
 # setup that other tests may use.
