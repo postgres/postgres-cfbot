@@ -1,6 +1,9 @@
-CREATE TABLE test1 (x int, y int[]);
-INSERT INTO test1 VALUES (1, ARRAY[11, 111]);
+CREATE TABLE test1 (x int, y int[], z text[]);
+INSERT INTO test1 VALUES (1, ARRAY[11, 111], ARRAY['a', 'b', 'c']);
+INSERT INTO test1 VALUES (2, ARRAY[NULL, 222], ARRAY['d', NULL]);
 CREATE INDEX test1_y_idx ON test1 USING gin (y) WITH (fastupdate = off);
+CREATE INDEX test2_y_z_idx ON test1 USING gin (y, z) WITH (fastupdate = off);
+CREATE INDEX test3_y_z_idx ON test1 USING gin (y, z) WITH (fastupdate = on);
 \x
 SELECT * FROM gin_metapage_info(get_raw_page('test1_y_idx', 0));
 -[ RECORD 1 ]----+-----------
@@ -12,7 +15,7 @@ n_pending_tuples | 0
 n_total_pages    | 2
 n_entry_pages    | 1
 n_data_pages     | 0
-n_entries        | 2
+n_entries        | 4
 version          | 2
 
 SELECT * FROM gin_metapage_info(get_raw_page('test1_y_idx', 1));
@@ -27,6 +30,75 @@ flags     | {leaf}
 SELECT * FROM gin_leafpage_items(get_raw_page('test1_y_idx', 1));
 ERROR:  input page is not a compressed GIN data leaf page
 DETAIL:  Flags 0002, expected 0083
+SELECT * FROM gin_entrypage_items(get_raw_page('test1_y_idx', 1), 'test1_y_idx'::regclass);
+-[ RECORD 1 ]--------------
+itemoffset | 1
+downlink   | (2147483664,1)
+tids       | {"(0,1)"}
+keys       | y=11
+-[ RECORD 2 ]--------------
+itemoffset | 2
+downlink   | (2147483664,1)
+tids       | {"(0,1)"}
+keys       | y=111
+-[ RECORD 3 ]--------------
+itemoffset | 3
+downlink   | (2147483664,1)
+tids       | {"(0,2)"}
+keys       | y=222
+-[ RECORD 4 ]--------------
+itemoffset | 4
+downlink   | (2147483666,1)
+tids       | {"(0,2)"}
+keys       | y=NULL
+
+SELECT * FROM gin_entrypage_items(get_raw_page('test2_y_z_idx', 1), 'test2_y_z_idx'::regclass);
+-[ RECORD 1 ]--------------
+itemoffset | 1
+downlink   | (2147483664,1)
+tids       | {"(0,1)"}
+keys       | y=11
+-[ RECORD 2 ]--------------
+itemoffset | 2
+downlink   | (2147483664,1)
+tids       | {"(0,1)"}
+keys       | y=111
+-[ RECORD 3 ]--------------
+itemoffset | 3
+downlink   | (2147483664,1)
+tids       | {"(0,2)"}
+keys       | y=222
+-[ RECORD 4 ]--------------
+itemoffset | 4
+downlink   | (2147483672,1)
+tids       | {"(0,2)"}
+keys       | y=NULL
+-[ RECORD 5 ]--------------
+itemoffset | 5
+downlink   | (2147483664,1)
+tids       | {"(0,1)"}
+keys       | z=a
+-[ RECORD 6 ]--------------
+itemoffset | 6
+downlink   | (2147483664,1)
+tids       | {"(0,1)"}
+keys       | z=b
+-[ RECORD 7 ]--------------
+itemoffset | 7
+downlink   | (2147483664,1)
+tids       | {"(0,1)"}
+keys       | z=c
+-[ RECORD 8 ]--------------
+itemoffset | 8
+downlink   | (2147483664,1)
+tids       | {"(0,2)"}
+keys       | z=d
+-[ RECORD 9 ]--------------
+itemoffset | 9
+downlink   | (2147483672,1)
+tids       | {"(0,2)"}
+keys       | z=NULL
+
 INSERT INTO test1 SELECT x, ARRAY[1,10] FROM generate_series(2,10000) x;
 SELECT COUNT(*) > 0
 FROM gin_leafpage_items(get_raw_page('test1_y_idx',
@@ -34,6 +106,23 @@ FROM gin_leafpage_items(get_raw_page('test1_y_idx',
                          current_setting('block_size')::bigint)::int - 1));
 -[ RECORD 1 ]
 ?column? | t
+
+-- Now test posting tree non-leaf page.
+-- This requires inserting many tuples on a single leaf page to trigger page split.
+CREATE TABLE test_data_page(i INT[]);
+CREATE INDEX test_data_page_i_idx ON test_data_page USING gin(i) WITH (fastupdate = off);
+INSERT INTO test_data_page SELECT ARRAY[1] FROM generate_series(1, 10000);
+-- For this index, block 0 is metapage, block 1 is entry tree, block 2 is
+-- posting tree non-leaf page and block 3 & 4 are compressed data leaf pages.
+SELECT * FROM gin_datapage_items(get_raw_page('test_data_page_i_idx', 2));
+-[ RECORD 1 ]-------
+itemoffset | 1
+downlink   | 4
+item_tid   | (44,83)
+-[ RECORD 2 ]-------
+itemoffset | 2
+downlink   | 3
+item_tid   | (0,0)
 
 -- Failure with various modes.
 -- Suppress the DETAIL message, to allow the tests to work across various
@@ -54,11 +143,33 @@ ERROR:  input page is not a valid GIN data leaf page
 SELECT * FROM gin_leafpage_items(get_raw_page('test1', 0));
 ERROR:  input page is not a valid GIN data leaf page
 \set VERBOSITY default
+-- Reject unsupported page types in gin_entrypage_items.
+SELECT * FROM gin_entrypage_items(get_raw_page('test2_y_z_idx', 0), 'test2_y_z_idx'::regclass);
+ERROR:  gin_entrypage_items does not support metapages
+-- Check the error message for the internal posting tree page.
+SELECT * FROM gin_entrypage_items(get_raw_page('test_data_page_i_idx', 2), 'test_data_page_i_idx'::regclass);
+ERROR:  gin_entrypage_items does not support posting tree pages
+HINT:  This appears to be a GIN posting tree page. Please use gin_datapage_items.
+-- insert new row to trigger new (fast-list) page allocation.
+INSERT INTO test1 VALUES (1, ARRAY[11, 111], ARRAY['a', 'b', 'c']);
+-- double check that the new page is fast-list.
+SELECT * FROM gin_page_opaque_info(get_raw_page('test3_y_z_idx', 2));
+-[ RECORD 1 ]------------------
+rightlink | 3
+maxoff    | 120
+flags     | {list,list_fullrow}
+
+-- reject fast-list pages.
+SELECT * FROM gin_entrypage_items(get_raw_page('test3_y_z_idx', 3), 'test3_y_z_idx'::regclass);
+ERROR:  gin_entrypage_items does not support fast list pages
 -- Tests with all-zero pages.
 SHOW block_size \gset
 SELECT gin_leafpage_items(decode(repeat('00', :block_size), 'hex'));
 -[ RECORD 1 ]------+-
 gin_leafpage_items | 
+
+SELECT gin_datapage_items(decode(repeat('00', :block_size), 'hex'));
+(0 rows)
 
 SELECT gin_metapage_info(decode(repeat('00', :block_size), 'hex'));
 -[ RECORD 1 ]-----+-
