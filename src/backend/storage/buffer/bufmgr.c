@@ -130,6 +130,28 @@ typedef struct PrivateRefCountEntry
 	PrivateRefCountData data;
 } PrivateRefCountEntry;
 
+/*
+ * Used to write out multiple blocks at a time in a combined IO. buffers
+ * contains the buffers holding adjacent blocks of the same fork of the same
+ * relation.
+ */
+typedef struct WriteBuffersOperation
+{
+	ForkNumber	forkno;
+	SMgrRelation reln;
+	IOContext	io_context;
+
+	/*
+	 * While assembling the buffers, we keep track of the maximum LSN so that
+	 * we can flush WAL through this LSN before flushing the buffers.
+	 */
+	XLogRecPtr	max_lsn;
+
+	/* The number of valid entries in buffers */
+	uint32		n;
+	Buffer		buffers[MAX_IO_COMBINE_LIMIT];
+} WriteBuffersOperation;
+
 #define SH_PREFIX refcount
 #define SH_ELEMENT_TYPE PrivateRefCountEntry
 #define SH_KEY_TYPE Buffer
@@ -651,6 +673,7 @@ static int	SyncOneBuffer(int buf_id, bool skip_recently_used,
 static void WaitIO(BufferDesc *buf);
 static void AbortBufferIO(Buffer buffer);
 static void shared_buffer_write_error_callback(void *arg);
+static void shared_buffers_write_error_callback(void *arg);
 static void local_buffer_write_error_callback(void *arg);
 static inline BufferDesc *BufferAlloc(SMgrRelation smgr,
 									  char relpersistence,
@@ -665,11 +688,18 @@ static pg_always_inline void TrackBufferHit(IOObject io_object,
 											IOContext io_context,
 											Relation rel, char persistence, SMgrRelation smgr,
 											ForkNumber forknum, BlockNumber blocknum);
+static uint32 MaxWriteBuffers(void);
 static Buffer GetVictimBuffer(BufferAccessStrategy strategy, IOContext io_context);
 static void FlushUnlockedBuffer(BufferDesc *buf, SMgrRelation reln,
 								IOObject io_object, IOContext io_context);
 static void FlushBuffer(BufferDesc *buf, SMgrRelation reln,
 						IOObject io_object, IOContext io_context);
+static void WriteBuffers(WriteBuffersOperation *batch);
+static void CompleteWriteBuffers(WriteBuffersOperation *batch,
+								 WritebackContext *wb_context);
+static void ScheduleBufferTagsForWriteback(WritebackContext *wb_context,
+										   BufferTag tag, uint32 n,
+										   IOContext io_context);
 static void FindAndDropRelationBuffers(RelFileLocator rlocator,
 									   ForkNumber forkNum,
 									   BlockNumber nForkBlock,
@@ -2560,6 +2590,21 @@ InvalidateVictimBuffer(BufferDesc *buf_hdr)
 	return true;
 }
 
+/*
+ * Determine the largest IO we can assemble given global constraints on the
+ * number of pinned buffers and max IO size. Currently only a single write is
+ * inflight at a time, so the batch can consume all the pinned buffers this
+ * backend is allowed. Only for batches of shared (non-local) relations.
+ */
+static uint32
+MaxWriteBuffers(void)
+{
+	uint32		result = Min(io_combine_limit, GetPinLimit());
+
+	/* Ensure forward progress */
+	return Max(result, 1);
+}
+
 static Buffer
 GetVictimBuffer(BufferAccessStrategy strategy, IOContext io_context)
 {
@@ -3601,8 +3646,6 @@ TrackNewBufferPin(Buffer buf)
 void
 CheckPointBuffers(int flags)
 {
-	uint64		buf_state;
-	int			buf_id;
 	int			num_to_scan;
 	int			num_spaces;
 	int			num_processed;
@@ -3613,6 +3656,8 @@ CheckPointBuffers(int flags)
 	int			i;
 	uint64		mask = BM_DIRTY;
 	WritebackContext wb_context;
+	uint32		max_batch_size;
+	WriteBuffersOperation batch;
 
 	/*
 	 * Unless this is a shutdown checkpoint or we have been explicitly told,
@@ -3640,10 +3685,11 @@ CheckPointBuffers(int flags)
 	 * certainly need to be written for the next checkpoint attempt, too.
 	 */
 	num_to_scan = 0;
-	for (buf_id = 0; buf_id < NBuffers; buf_id++)
+	for (int buf_id = 0; buf_id < NBuffers; buf_id++)
 	{
 		BufferDesc *bufHdr = GetBufferDescriptor(buf_id);
 		uint64		set_bits = 0;
+		uint64		buf_state;
 
 		/*
 		 * Header spinlock is enough to examine BM_DIRTY, see comment in
@@ -3786,48 +3832,222 @@ CheckPointBuffers(int flags)
 	 */
 	num_processed = 0;
 	num_written = 0;
+	max_batch_size = MaxWriteBuffers();
 	while (!binaryheap_empty(ts_heap))
 	{
-		BufferDesc *bufHdr = NULL;
+		uint32		batch_limit = max_batch_size;
+		BlockNumber batch_start = InvalidBlockNumber;
 		CkptTsStatus *ts_stat = (CkptTsStatus *)
 			DatumGetPointer(binaryheap_first(ts_heap));
+		int			ts_end = ts_stat->index - ts_stat->num_scanned + ts_stat->num_to_scan;
+		int			processed = 0;
 
-		buf_id = CkptBufferIds[ts_stat->index].buf_id;
-		Assert(buf_id != -1);
+		batch.io_context = IOCONTEXT_NORMAL;
+		batch.max_lsn = InvalidXLogRecPtr;
+		batch.n = 0;
 
-		bufHdr = GetBufferDescriptor(buf_id);
-
-		num_processed++;
-
-		/*
-		 * We don't need to acquire the lock here, because we're only looking
-		 * at a single bit. It's possible that someone else writes the buffer
-		 * and clears the flag right after we check, but that doesn't matter
-		 * since SyncOneBuffer will then do nothing.  However, there is a
-		 * further race condition: it's conceivable that between the time we
-		 * examine the bit here and the time SyncOneBuffer acquires the lock,
-		 * someone else not only wrote the buffer but replaced it with another
-		 * page and dirtied it.  In that improbable case, SyncOneBuffer will
-		 * write the buffer though we didn't need to.  It doesn't seem worth
-		 * guarding against this, though.
-		 */
-		if (pg_atomic_read_u64(&bufHdr->state) & BM_CHECKPOINT_NEEDED)
+		while (batch.n < batch_limit)
 		{
-			if (SyncOneBuffer(buf_id, false, &wb_context) & BUF_WRITTEN)
+			BufferDesc *bufHdr = NULL;
+			uint64		buf_state;
+			CkptSortItem item;
+			Buffer		bufnum;
+			StartBufferIOResult status;
+
+			/* Check if we are done with this tablespace */
+			if (ts_stat->index + processed >= ts_end)
+				break;
+
+			item = CkptBufferIds[ts_stat->index + processed];
+
+			Assert(item.buf_id != -1);
+
+			bufHdr = GetBufferDescriptor(item.buf_id);
+			bufnum = BufferDescriptorGetBuffer(bufHdr);
+
+			/*
+			 * If this is the first block of the batch, then check if we need
+			 * to open a new relation. Open the relation now because we have
+			 * to determine the maximum IO size based on how many blocks
+			 * remain in the file.
+			 */
+			if (!BlockNumberIsValid(batch_start))
 			{
-				TRACE_POSTGRESQL_BUFFER_SYNC_WRITTEN(buf_id);
-				PendingCheckpointerStats.buffers_written++;
-				num_written++;
+				RelFileLocator rlocator = {
+					.spcOid = item.tsId,
+					.dbOid = item.dbId,
+					.relNumber = item.relNumber
+				};
+
+				Assert(batch.max_lsn == InvalidXLogRecPtr && batch.n == 0);
+				batch.forkno = item.forkNum;
+				batch_start = item.blockNum;
+				batch.reln = smgropen(rlocator, INVALID_PROC_NUMBER);
+				batch_limit = smgrmaxcombine(batch.reln, batch.forkno, batch_start);
+				batch_limit = Min(max_batch_size, batch_limit);
+				batch_limit = Min(GetAdditionalPinLimit(), batch_limit);
+				/* Guarantee progress even if at max pins */
+				batch_limit = Max(batch_limit, 1);
 			}
+
+			/*
+			 * Once we hit blocks from the next relation or fork of the
+			 * relation, break out of the loop and issue the IO we've built up
+			 * so far. It is important that we don't increment processed
+			 * because we want to start the next IO with this item.
+			 */
+			if (item.dbId != batch.reln->smgr_rlocator.locator.dbOid ||
+				item.relNumber != batch.reln->smgr_rlocator.locator.relNumber ||
+				item.forkNum != batch.forkno)
+				break;
+
+			Assert(item.tsId == batch.reln->smgr_rlocator.locator.spcOid);
+
+			/*
+			 * If the next block is not contiguous, we can't include it in the
+			 * IO we will issue. Break out of the loop and issue what we have
+			 * so far. Do not count this item as processed -- otherwise we
+			 * will end up skipping it.
+			 */
+			if (item.blockNum != batch_start + batch.n)
+				break;
+
+			/*
+			 * We don't need to acquire the lock here, because we're only
+			 * looking at a few bits. It's possible that someone else writes
+			 * the buffer and clears the flag right after we check, but that
+			 * doesn't matter since StartBufferIO will then return false.
+			 *
+			 * If the buffer doesn't need checkpointing, don't include it in
+			 * the batch we are building. And if the buffer doesn't need
+			 * flushing, we're done with the item, so count it as processed
+			 * and break out of the loop to issue the IO so far.
+			 *
+			 * It's okay for us to check if the buffer needs flushing (if it's
+			 * dirty) without holding the buffer content lock as long as we
+			 * mark pages dirty in access methods *before* logging changes
+			 * with XLogInsert(): if someone marks the buffer dirty just after
+			 * our check we don't worry because our checkpoint.redo points
+			 * before log record for upcoming changes and so we are not
+			 * required to write such a dirty buffer.
+			 */
+			buf_state = pg_atomic_read_u64(&bufHdr->state);
+			if ((buf_state & (BM_CHECKPOINT_NEEDED | BM_VALID | BM_DIRTY)) !=
+				(BM_CHECKPOINT_NEEDED | BM_VALID | BM_DIRTY))
+			{
+				processed++;
+				break;
+			}
+
+			ReservePrivateRefCountEntry();
+			ResourceOwnerEnlarge(CurrentResourceOwner);
+
+			/* If the buffer is not BM_VALID, nothing to do on this buffer */
+			if (!PinBuffer(bufHdr, BUC_ZERO, true))
+			{
+				processed++;
+				break;
+			}
+
+			/*
+			 * Now that we have a pin, we must recheck that the buffer
+			 * contains the specified block. Someone may have replaced the
+			 * block in the buffer with a different block. In that case, count
+			 * it as processed and issue the IO so far. These fields won't
+			 * change as long as we hold a pin, so we don't need a spinlock to
+			 * read them.
+			 */
+			if (!BufTagMatchesRelFileLocator(&bufHdr->tag,
+											 &batch.reln->smgr_rlocator.locator) ||
+				BufTagGetForkNum(&bufHdr->tag) != batch.forkno ||
+				bufHdr->tag.blockNum != batch_start + batch.n)
+			{
+				UnpinBuffer(bufHdr);
+				processed++;
+				break;
+			}
+
+			/*
+			 * It's conceivable that between the time we examine the buffer
+			 * header for BM_CHECKPOINT_NEEDED above and when we are now
+			 * acquiring the lock that someone else wrote the buffer out. In
+			 * that improbable case, we will write the buffer though we didn't
+			 * need to. It doesn't seem worth guarding against this, though.
+			 *
+			 * We are willing to wait for the content lock on the first IO in
+			 * the batch. However, for subsequent IOs, waiting could lead to
+			 * deadlock. We have to eventually flush all eligible buffers,
+			 * though. So, if we fail to acquire the lock on a subsequent
+			 * buffer, we break out and issue the IO we've built up so far.
+			 * Then we come back and start a new IO with that buffer as the
+			 * starting buffer. As such, we must not count the item as
+			 * processed if we end up failing to acquire the content lock.
+			 */
+			if (batch.n == 0)
+				BufferLockAcquire(bufnum, bufHdr, BUFFER_LOCK_SHARE_EXCLUSIVE);
+			else if (!BufferLockConditional(bufnum, bufHdr, BUFFER_LOCK_SHARE_EXCLUSIVE))
+			{
+				UnpinBuffer(bufHdr);
+				break;
+			}
+
+			/*
+			 * If the buffer doesn't need IO, count the item as processed,
+			 * release the buffer, and break out of the loop to issue the IO
+			 * we have built up so far.
+			 */
+			if ((status = StartBufferIO(bufnum, false, true, NULL)) !=
+				BUFFER_IO_READY_FOR_IO)
+			{
+				Assert(status == BUFFER_IO_ALREADY_DONE);
+				UnlockReleaseBuffer(bufnum);
+				processed++;
+				break;
+			}
+
+			/*
+			 * Keep track of the max LSN so that we can be sure to flush
+			 * enough WAL before flushing data from the buffers. See comment
+			 * in FlushBuffer() for more on why we don't consider the LSNs of
+			 * unlogged relations.
+			 */
+			if (pg_atomic_read_u64(&bufHdr->state) & BM_PERMANENT)
+			{
+				XLogRecPtr	lsn = BufferGetLSN(bufHdr);
+
+				if (lsn > batch.max_lsn)
+					batch.max_lsn = lsn;
+			}
+
+			batch.buffers[batch.n++] = bufnum;
+			processed++;
 		}
 
 		/*
 		 * Measure progress independent of actually having to flush the buffer
-		 * - otherwise writing become unbalanced.
+		 * - otherwise writing becomes unbalanced.
 		 */
-		ts_stat->progress += ts_stat->progress_slice;
-		ts_stat->num_scanned++;
-		ts_stat->index++;
+		num_processed += processed;
+		ts_stat->progress += ts_stat->progress_slice * processed;
+		ts_stat->num_scanned += processed;
+		ts_stat->index += processed;
+
+		/*
+		 * If we built up an IO, issue it. There's a chance we didn't find any
+		 * items referencing buffers that needed flushing this time, but we
+		 * still want to check if we should update the heap if we examined and
+		 * processed the items.
+		 */
+		if (batch.n > 0)
+		{
+			WriteBuffers(&batch);
+			CompleteWriteBuffers(&batch, &wb_context);
+
+			TRACE_POSTGRESQL_BUFFERS_SYNC_WRITTEN(batch.n);
+			PendingCheckpointerStats.buffers_written += batch.n;
+			num_written += batch.n;
+			batch.n = 0;
+		}
 
 		/* Have all the buffers from the tablespace been processed? */
 		if (ts_stat->num_scanned == ts_stat->num_to_scan)
@@ -3845,7 +4065,9 @@ CheckPointBuffers(int flags)
 		 *
 		 * (This will check for barrier events even if it doesn't sleep.)
 		 */
-		CheckpointWriteDelay(flags, (double) num_processed / num_to_scan);
+		Assert(batch.n == 0);
+		CheckpointWriteDelay(flags, (double) num_processed / num_to_scan,
+							 processed);
 	}
 
 	/*
@@ -4656,6 +4878,69 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln, IOObject io_object,
 }
 
 /*
+ * Given a prepared batch of buffers write them out as a vector.
+ */
+static void
+WriteBuffers(WriteBuffersOperation *batch)
+{
+	BlockNumber batch_start = GetBufferDescriptor(batch->buffers[0] - 1)->tag.blockNum;
+	BlockNumber blknums[MAX_IO_COMBINE_LIMIT];
+	Block		blocks[MAX_IO_COMBINE_LIMIT];
+	instr_time	io_start;
+	ErrorContextCallback errcallback =
+	{
+		.callback = shared_buffers_write_error_callback,
+		.previous = error_context_stack,
+	};
+
+	errcallback.arg = batch;
+	error_context_stack = &errcallback;
+
+	if (XLogRecPtrIsValid(batch->max_lsn))
+		XLogFlush(batch->max_lsn);
+
+	/* Should have been opened when initializing the batch */
+	Assert(batch->reln);
+
+#ifdef USE_ASSERT_CHECKING
+	for (uint32 i = 0; i < batch->n; i++)
+	{
+		BufferDesc *bufhdr = GetBufferDescriptor(batch->buffers[i] - 1);
+
+		Assert(!(pg_atomic_read_u64(&bufhdr->state) & BM_PERMANENT) ||
+			   !XLogNeedsFlush(BufferGetLSN(bufhdr)));
+		Assert(BufTagGetForkNum(&bufhdr->tag) == batch->forkno);
+		Assert(bufhdr->tag.blockNum == batch_start + i);
+	}
+#endif
+
+	TRACE_POSTGRESQL_BUFFERS_FLUSH_START(batch->forkno,
+										 batch->reln->smgr_rlocator.locator.spcOid,
+										 batch->reln->smgr_rlocator.locator.dbOid,
+										 batch->reln->smgr_rlocator.locator.relNumber,
+										 batch->reln->smgr_rlocator.backend,
+										 batch->n);
+
+	for (uint32 i = 0; i < batch->n; i++)
+	{
+		blknums[i] = batch_start + i;
+		blocks[i] = BufHdrGetBlock(GetBufferDescriptor(batch->buffers[i] - 1));
+	}
+
+	PagesSetChecksum((Page *) blocks, blknums, batch->n);
+
+	io_start = pgstat_prepare_io_time(track_io_timing);
+
+	smgrwritev(batch->reln, batch->forkno,
+			   batch_start, (const void **) blocks, batch->n, false);
+
+	pgstat_count_io_op_time(IOOBJECT_RELATION, batch->io_context, IOOP_WRITE,
+							io_start, 1, batch->n * BLCKSZ);
+
+	error_context_stack = errcallback.previous;
+}
+
+/*
  * Convenience wrapper around FlushBuffer() that locks/unlocks the buffer
  * before/after calling FlushBuffer().
  */
@@ -4668,6 +4953,53 @@ FlushUnlockedBuffer(BufferDesc *buf, SMgrRelation reln,
 	BufferLockAcquire(buffer, buf, BUFFER_LOCK_SHARE_EXCLUSIVE);
 	FlushBuffer(buf, reln, io_object, io_context);
 	BufferLockUnlock(buffer, buf);
+}
+
+/*
+ * Given a previously initialized batch with buffers that have already been
+ * flushed, terminate the IO on each buffer and then unlock and unpin them.
+ * This assumes all the buffers were locked and pinned. wb_context will be
+ * modified.
+ */
+static void
+CompleteWriteBuffers(WriteBuffersOperation *batch,
+					 WritebackContext *wb_context)
+{
+	BufferTag	tag;
+	ErrorContextCallback errcallback =
+	{
+		.callback = shared_buffer_write_error_callback,
+		.previous = error_context_stack,
+	};
+
+	error_context_stack = &errcallback;
+	pgBufferUsage.shared_blks_written += batch->n;
+
+	/* Snapshot the tag before unpinning the buffer */
+	tag = GetBufferDescriptor(batch->buffers[0] - 1)->tag;
+
+	for (uint32 i = 0; i < batch->n; i++)
+	{
+		Buffer		buffer = batch->buffers[i];
+
+		errcallback.arg = GetBufferDescriptor(buffer - 1);
+
+		/* Mark the buffer as clean and end the BM_IO_IN_PROGRESS state. */
+		TerminateBufferIO(GetBufferDescriptor(buffer - 1), true, 0, true, false);
+		UnlockReleaseBuffer(buffer);
+	}
+
+	TRACE_POSTGRESQL_BUFFERS_FLUSH_DONE(batch->forkno,
+										batch->reln->smgr_rlocator.locator.spcOid,
+										batch->reln->smgr_rlocator.locator.dbOid,
+										batch->reln->smgr_rlocator.locator.relNumber,
+										batch->reln->smgr_rlocator.backend,
+										batch->n,
+										tag.blockNum);
+
+	error_context_stack = errcallback.previous;
+
+	ScheduleBufferTagsForWriteback(wb_context, tag, batch->n, batch->io_context);
 }
 
 /*
@@ -7532,6 +7864,36 @@ shared_buffer_write_error_callback(void *arg)
 }
 
 /*
+ * Error context callback for errors occurring during a combined write of
+ * multiple shared buffers (see WriteBuffers()).
+ */
+static void
+shared_buffers_write_error_callback(void *arg)
+{
+	WriteBuffersOperation *batch = (WriteBuffersOperation *) arg;
+	BufferDesc *first_bufhdr;
+	BlockNumber start;
+
+	if (batch == NULL || batch->n == 0)
+		return;
+
+	first_bufhdr = GetBufferDescriptor(batch->buffers[0] - 1);
+	start = first_bufhdr->tag.blockNum;
+
+	/* Buffers are pinned, so we can read the tag without locking the spinlock */
+	if (batch->n == 1)
+		errcontext("writing block %u of relation \"%s\"",
+				   start,
+				   relpathperm(BufTagGetRelFileLocator(&first_bufhdr->tag),
+							   BufTagGetForkNum(&first_bufhdr->tag)).str);
+	else
+		errcontext("writing blocks %u..%u of relation \"%s\"",
+				   start, start + batch->n - 1,
+				   relpathperm(BufTagGetRelFileLocator(&first_bufhdr->tag),
+							   BufTagGetForkNum(&first_bufhdr->tag)).str);
+}
+
+/*
  * Error context callback for errors occurring during local buffer writes.
  */
 static void
@@ -7790,6 +8152,59 @@ ScheduleBufferTagForWriteback(WritebackContext *wb_context, IOContext io_context
 	 */
 	if (wb_context->nr_pending >= *wb_context->max_pending)
 		IssuePendingWritebacks(wb_context, io_context);
+}
+
+/*
+ * Add all the blocks from a write batch that was recently issued to a list of
+ * pending writeback requests. Don't call while holding buffer locks. tag
+ * should be a copy of a BufferTag from a buffer in the batch from when it was
+ * still pinned. It is okay to call this function for pinned or unpinned
+ * buffers as long as the tag was saved before any pin was released.
+ */
+static void
+ScheduleBufferTagsForWriteback(WritebackContext *wb_context,
+							   BufferTag tag, uint32 n,
+							   IOContext io_context)
+{
+	/*
+	 * As pg_flush_data() doesn't do anything with fsync disabled, there's no
+	 * point in tracking in that case.
+	 */
+	if (io_direct_flags & IO_DIRECT_DATA ||
+		!enableFsync)
+		return;
+
+	/*
+	 * Drain the queue to make room if needed. We do this even if writeback
+	 * control is disabled because it may have been previously enabled.
+	 */
+	if (wb_context->nr_pending >= *wb_context->max_pending)
+		IssuePendingWritebacks(wb_context, io_context);
+
+	/* If writeback control is disabled, leave */
+	if (*wb_context->max_pending <= 0)
+		return;
+
+	/* It is okay if n is > max_pending because we flush as we go */
+	Assert(*wb_context->max_pending <= WRITEBACK_MAX_PENDING_FLUSHES);
+
+	/*
+	 * Add the buffers to the pending writeback array. They must be contiguous
+	 * and from the same relation.
+	 */
+	for (uint32 i = 0; i < n; i++)
+	{
+		PendingWriteback *pending;
+
+		pending = &wb_context->pending_writebacks[wb_context->nr_pending++];
+		pending->tag = tag;
+
+		tag.blockNum++;
+
+		/* Perform pending flushes if writeback limit exceeded */
+		if (wb_context->nr_pending >= *wb_context->max_pending)
+			IssuePendingWritebacks(wb_context, io_context);
+	}
 }
 
 #define ST_SORT sort_pending_writebacks
