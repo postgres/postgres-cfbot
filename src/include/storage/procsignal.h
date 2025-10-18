@@ -41,9 +41,11 @@ typedef enum
 	PROCSIG_RECOVERY_CONFLICT,	/* backend is blocking recovery, check
 								 * PGPROC->pendingRecoveryConflicts for the
 								 * reason */
+	PROCSIG_REQUEST_DISCONNECT, /* ask backend to request its client to
+								 * disconnect */
 } ProcSignalReason;
 
-#define NUM_PROCSIGNALS (PROCSIG_RECOVERY_CONFLICT + 1)
+#define NUM_PROCSIGNALS (PROCSIG_REQUEST_DISCONNECT + 1)
 
 typedef enum
 {

@@ -2475,6 +2475,15 @@ BeginReportingGUCOptions(void)
 		SetConfigOption("in_hot_standby", "true",
 						PGC_INTERNAL, PGC_S_OVERRIDE);
 
+	/*
+	 * Same hack for disconnect_requested: reflect a disconnect that was
+	 * already requested for this backend (e.g. a smart shutdown that began
+	 * before this backend reached its first ready-for-query).
+	 */
+	if (disconnect_requested)
+		SetConfigOption("disconnect_requested", "true",
+						PGC_INTERNAL, PGC_S_OVERRIDE);
+
 	/* Transmit initial values of interesting variables */
 	hash_seq_init(&status, guc_hashtab);
 	while ((hentry = (GUCHashEntry *) hash_seq_search(&status)) != NULL)
@@ -2516,6 +2525,16 @@ ReportChangedGUCOptions(void)
 	 */
 	if (in_hot_standby_guc && !RecoveryInProgress())
 		SetConfigOption("in_hot_standby", "false",
+						PGC_INTERNAL, PGC_S_OVERRIDE);
+
+	/*
+	 * Likewise for disconnect_requested. The disconnect_requested
+	 * sig_atomic_t variable is only set from a signal handler, so we need to
+	 * reflect its value in the GUC if it changed. For speed, we rely on the
+	 * assumption that it can never transition from true to false.
+	 */
+	if (!disconnect_requested_guc && disconnect_requested)
+		SetConfigOption("disconnect_requested", "true",
 						PGC_INTERNAL, PGC_S_OVERRIDE);
 
 	/* Transmit new values of interesting variables */
