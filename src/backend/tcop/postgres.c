@@ -3181,6 +3181,19 @@ FloatExceptionHandler(SIGNAL_ARGS)
 }
 
 /*
+ * Note that we've been asked to request that our client disconnect.  We act on
+ * it the next time we're ready for a query; see ReportChangedGUCOptions().
+ * Runs in a SIGUSR1 handler.
+ */
+void
+HandleDisconnectRequestInterrupt(void)
+{
+	disconnect_requested = true;
+	InterruptPending = true;
+	/* latch will be set by procsignal_sigusr1_handler */
+}
+
+/*
  * Tell the next CHECK_FOR_INTERRUPTS() to process recovery conflicts.  Runs
  * in a SIGUSR1 handler.
  */
