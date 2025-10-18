@@ -2102,6 +2102,80 @@ process_result(PGconn *conn, PGresult *res, int results, int numsent)
 
 
 static void
+test_disconnect_request(PGconn *conn)
+{
+	PGconn	   *otherConn;
+	PGresult   *res;
+	int			pid;
+	char		pid_str[32];
+	const char *val;
+	int			i;
+
+	fprintf(stderr, "test disconnect request... ");
+
+	otherConn = copy_connection(conn);
+	Assert(PQstatus(otherConn) == CONNECTION_OK);
+
+	if (!PQconsumeInput(conn))
+		pg_fatal("PQconsumeInput failed: %s", PQerrorMessage(conn));
+
+	pid = PQbackendPID(conn);
+	snprintf(pid_str, sizeof(pid_str), "%d", pid);
+
+	/* The server should not have requested a disconnect yet. */
+	val = PQparameterStatus(conn, "disconnect_requested");
+	if (val && strcmp(val, "on") == 0)
+		pg_fatal("disconnect already requested before pg_request_disconnect_backend");
+
+	/* Ask the target backend to request its client to disconnect. */
+	{
+		const char *paramValues[1] = {pid_str};
+
+		res = PQexecParams(otherConn,
+						   "SELECT pg_request_disconnect_backend($1)",
+						   1, NULL, paramValues,
+						   NULL, NULL, 0);
+	}
+	if (PQresultStatus(res) != PGRES_TUPLES_OK)
+		pg_fatal("pg_request_disconnect_backend failed: %s", PQerrorMessage(otherConn));
+	if (strcmp(PQgetvalue(res, 0, 0), "t") != 0)
+		pg_fatal("pg_request_disconnect_backend returned false");
+	PQclear(res);
+
+	/*
+	 * The backend reflects the request in its disconnect_requested GUC the next
+	 * time it becomes ready for a query, and (thanks to GUC_REPORT) reports the
+	 * new value with a ParameterStatus message.  So run a query to give it that
+	 * opportunity; the connection remains fully usable meanwhile.  We loop in
+	 * case the asynchronous signal has not been delivered to the target backend
+	 * by the time it processes our first query.
+	 */
+	for (i = 0; i < 100; i++)
+	{
+		res = PQexec(conn, "SELECT 'still_alive'");
+		if (PQresultStatus(res) != PGRES_TUPLES_OK)
+			pg_fatal("query failed after disconnect request: %s", PQerrorMessage(conn));
+		if (strcmp(PQgetvalue(res, 0, 0), "still_alive") != 0)
+			pg_fatal("unexpected query result after disconnect request");
+		PQclear(res);
+
+		val = PQparameterStatus(conn, "disconnect_requested");
+		if (val && strcmp(val, "on") == 0)
+			break;
+
+		pg_usleep(50000);		/* 50ms */
+	}
+
+	val = PQparameterStatus(conn, "disconnect_requested");
+	if (!val || strcmp(val, "on") != 0)
+		pg_fatal("disconnect_requested not reported as on after pg_request_disconnect_backend");
+
+	PQfinish(otherConn);
+
+	fprintf(stderr, "ok\n");
+}
+
+static void
 usage(const char *progname)
 {
 	fprintf(stderr, "%s tests libpq's pipeline mode.\n\n", progname);
@@ -2118,6 +2192,7 @@ print_test_list(void)
 {
 	printf("cancel\n");
 	printf("disallowed_in_pipeline\n");
+	printf("disconnect_request\n");
 	printf("multi_pipelines\n");
 	printf("nosync\n");
 	printf("pipeline_abort\n");
@@ -2225,6 +2300,8 @@ main(int argc, char **argv)
 		test_cancel(conn);
 	else if (strcmp(testname, "disallowed_in_pipeline") == 0)
 		test_disallowed_in_pipeline(conn);
+	else if (strcmp(testname, "disconnect_request") == 0)
+		test_disconnect_request(conn);
 	else if (strcmp(testname, "multi_pipelines") == 0)
 		test_multi_pipelines(conn);
 	else if (strcmp(testname, "nosync") == 0)

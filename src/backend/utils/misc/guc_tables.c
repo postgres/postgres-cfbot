@@ -673,8 +673,9 @@ static char *recovery_target_lsn_string;
 /* should be static, but commands/variable.c needs to get at this */
 char	   *role_string;
 
-/* should be static, but guc.c needs to get at this */
+/* both of these should be static, but guc.c needs to get at them */
 bool		in_hot_standby_guc;
+bool		disconnect_requested_guc;
 
 /*
  * set default log_min_messages to WARNING for all process types
