@@ -819,6 +819,14 @@
   check_hook => 'check_default_with_oids',
 },
 
+{ name => 'disconnect_requested', type => 'bool', context => 'PGC_INTERNAL', group => 'PRESET_OPTIONS',
+  short_desc => 'Shows whether the server has requested this session to disconnect.',
+  long_desc => 'When true, the server has politely requested that the client close this connection at a convenient moment, for example during a smart shutdown or after pg_request_disconnect_backend() was called for this backend. The request is advisory: the connection remains fully usable.',
+  flags => 'GUC_REPORT | GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE',
+  variable => 'disconnect_requested_guc',
+  boot_val => 'false',
+},
+
 { name => 'dynamic_library_path', type => 'string', context => 'PGC_SUSET', group => 'CLIENT_CONN_OTHER',
   short_desc => 'Sets the path for dynamically loadable modules.',
   long_desc => 'If a dynamically loadable module needs to be opened and the specified name does not have a directory component (i.e., the name does not contain a slash), the system will search this path for the specified file.',

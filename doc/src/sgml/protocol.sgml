@@ -1542,6 +1542,7 @@ SELCT 1/0;<!-- this typo is intentional -->
      <member><varname>client_encoding</varname></member>
      <member><varname>DateStyle</varname></member>
      <member><varname>default_transaction_read_only</varname></member>
+     <member><varname>disconnect_requested</varname></member>
      <member><varname>in_hot_standby</varname></member>
      <member><varname>integer_datetimes</varname></member>
      <member><varname>IntervalStyle</varname></member>
@@ -1558,7 +1559,8 @@ SELCT 1/0;<!-- this typo is intentional -->
     <varname>in_hot_standby</varname> were not reported by releases before
     14; <varname>scram_iterations</varname> was not reported by releases
     before 16; <varname>search_path</varname> was not reported by releases
-    before 18.)
+    before 18; <varname>disconnect_requested</varname> was not reported by
+       releases before 20.)
     Note that
     <varname>server_version</varname>,
     <varname>server_encoding</varname> and

@@ -325,6 +325,7 @@ extern PGDLLIMPORT int tcp_user_timeout;
 
 extern PGDLLIMPORT char *role_string;
 extern PGDLLIMPORT bool in_hot_standby_guc;
+extern PGDLLIMPORT bool disconnect_requested_guc;
 extern PGDLLIMPORT bool trace_sort;
 
 #ifdef DEBUG_BOUNDED_SORT
