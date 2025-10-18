@@ -139,6 +139,9 @@ typedef struct _psqlSettings
 								 * loop */
 	bool		cur_cmd_interactive;
 	int			sversion;		/* backend server version */
+	bool		disconnect_request_reported;	/* have we told the user the
+												 * server requested a graceful
+												 * disconnect? */
 	const char *progname;		/* in case you renamed psql */
 	char	   *inputfile;		/* file being currently processed, if any */
 	uint64		lineno;			/* also for error reporting */
