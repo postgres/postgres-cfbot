@@ -113,6 +113,7 @@
 #include "storage/fd.h"
 #include "storage/io_worker.h"
 #include "storage/ipc.h"
+#include "storage/pg_job_object.h"
 #include "storage/pmsignal.h"
 #include "storage/proc.h"
 #include "storage/shmem_internal.h"
@@ -1015,6 +1016,11 @@ PostmasterMain(int argc, char *argv[])
 	 * clean up dead IPC objects if the postmaster crashes and is restarted.
 	 */
 	CreateSharedMemoryAndSemaphores();
+
+#ifdef WIN32
+	/* Configure child cleanup before launching any Windows backends. */
+	pg_create_job_object();
+#endif
 
 	/*
 	 * Estimate number of openable files.  This must happen after setting up
