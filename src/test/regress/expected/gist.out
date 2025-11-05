@@ -452,6 +452,38 @@ drop table gist_prune_tbl;
 -- Force an index build using buffering.
 create index gist_tbl_box_index_forcing_buffering on gist_tbl using gist (p)
   with (buffering=on, fillfactor=50);
+-- create unique indexes
+create table gist_rngtbl (id int4range);
+insert into gist_rngtbl values ('[1,2)'), ('[2,3)'); -- okay
+create unique index uq_gist_rngtbl on gist_rngtbl using gist (id);
+insert into gist_rngtbl values ('[3,4)'), ('[4,5)'); -- okay
+\d gist_rngtbl
+             Table "public.gist_rngtbl"
+ Column |   Type    | Collation | Nullable | Default 
+--------+-----------+-----------+----------+---------
+ id     | int4range |           |          | 
+Indexes:
+    "uq_gist_rngtbl" UNIQUE, gist (id)
+
+select pg_get_indexdef('uq_gist_rngtbl'::regclass);
+                             pg_get_indexdef                              
+--------------------------------------------------------------------------
+ CREATE UNIQUE INDEX uq_gist_rngtbl ON public.gist_rngtbl USING gist (id)
+(1 row)
+
+-- enforced on build
+drop index uq_gist_rngtbl;
+insert into gist_rngtbl values ('[1,2)');
+create unique index uq_gist_rngtbl on gist_rngtbl using gist (id); -- fail
+ERROR:  could not create unique index "uq_gist_rngtbl"
+DETAIL:  Key (id)=([1,2)) is duplicated.
+truncate gist_rngtbl;
+-- enforced on insert
+create unique index uq_gist_rngtbl on gist_rngtbl using gist (id);
+insert into gist_rngtbl values ('[1,2)'), ('[2,3)'); -- okay
+insert into gist_rngtbl values ('[1,2)'); -- fail
+ERROR:  duplicate key value violates unique constraint "uq_gist_rngtbl"
+DETAIL:  Key (id)=([1,2)) already exists.
 -- Clean up
 reset enable_seqscan;
 reset enable_bitmapscan;
