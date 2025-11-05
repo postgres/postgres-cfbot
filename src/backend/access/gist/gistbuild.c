@@ -108,6 +108,9 @@ typedef struct
 	BlockNumber pages_allocated;
 
 	BulkWriteState *bulkstate;
+
+	bool		isunique;
+	bool		nulls_not_distinct;
 } GISTBuildState;
 
 #define GIST_SORTED_BUILD_PAGE_NUM 4
@@ -198,6 +201,10 @@ gistbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	buildstate.heaprel = heap;
 	buildstate.sortstate = NULL;
 	buildstate.giststate = initGISTstate(index);
+	if (indexInfo->ii_Unique)
+		initGISTstateExclude(buildstate.giststate, index);
+	buildstate.isunique = indexInfo->ii_Unique;
+	buildstate.nulls_not_distinct = indexInfo->ii_NullsNotDistinct;
 
 	/*
 	 * Create a temporary memory context that is reset once for each tuple
@@ -266,6 +273,8 @@ gistbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		 */
 		buildstate.sortstate = tuplesort_begin_index_gist(heap,
 														  index,
+														  buildstate.isunique,
+														  buildstate.nulls_not_distinct,
 														  maintenance_work_mem,
 														  NULL,
 														  TUPLESORT_NONE);
@@ -862,8 +871,28 @@ gistBuildCallback(Relation index,
 		 * There's no buffers (yet). Since we already have the index relation
 		 * locked, we call gistdoinsert directly.
 		 */
-		gistdoinsert(index, itup, buildstate->freespace,
-					 buildstate->giststate, buildstate->heaprel, true);
+		bool known_unique = gistdoinsert(index, itup,
+										 buildstate->isunique ? UNIQUE_CHECK_YES
+															  : UNIQUE_CHECK_NO,
+										 values, isnull,
+										 buildstate->freespace,
+										 buildstate->giststate,
+										 buildstate->heaprel, true);
+		/*
+		 * There are no other users of the index yet, so if we aren't sure it's
+		 * unique, there must be duplicates.
+		 * TODO: right??
+		 */
+		// TODO: say which keys are duplicated if possible (as in
+		// utils/sort/tuplesortvariants.c)
+		if (buildstate->isunique && !known_unique)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNIQUE_VIOLATION),
+					 errmsg("could not create unique index \"%s\"",
+							RelationGetRelationName(buildstate->indexrel)),
+					 errdetail("Duplicate keys exist."),
+					 errtableconstraint(buildstate->heaprel,
+										RelationGetRelationName(buildstate->indexrel))));
 	}
 
 	MemoryContextSwitchTo(oldCtx);

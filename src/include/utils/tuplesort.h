@@ -407,6 +407,8 @@ extern Tuplesortstate *tuplesort_begin_index_hash(Relation heapRel,
 												  int sortopt);
 extern Tuplesortstate *tuplesort_begin_index_gist(Relation heapRel,
 												  Relation indexRel,
+												  bool enforceUnique,
+												  bool uniqueNullsNotDistinct,
 												  int workMem, SortCoordinate coordinate,
 												  int sortopt);
 extern Tuplesortstate *tuplesort_begin_index_brin(int workMem, SortCoordinate coordinate,

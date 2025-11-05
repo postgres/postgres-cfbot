@@ -223,6 +223,23 @@ drop table gist_prune_tbl;
 create index gist_tbl_box_index_forcing_buffering on gist_tbl using gist (p)
   with (buffering=on, fillfactor=50);
 
+-- create unique indexes
+create table gist_rngtbl (id int4range);
+insert into gist_rngtbl values ('[1,2)'), ('[2,3)'); -- okay
+create unique index uq_gist_rngtbl on gist_rngtbl using gist (id);
+insert into gist_rngtbl values ('[3,4)'), ('[4,5)'); -- okay
+\d gist_rngtbl
+select pg_get_indexdef('uq_gist_rngtbl'::regclass);
+-- enforced on build
+drop index uq_gist_rngtbl;
+insert into gist_rngtbl values ('[1,2)');
+create unique index uq_gist_rngtbl on gist_rngtbl using gist (id); -- fail
+truncate gist_rngtbl;
+-- enforced on insert
+create unique index uq_gist_rngtbl on gist_rngtbl using gist (id);
+insert into gist_rngtbl values ('[1,2)'), ('[2,3)'); -- okay
+insert into gist_rngtbl values ('[1,2)'); -- fail
+
 -- Clean up
 reset enable_seqscan;
 reset enable_bitmapscan;
