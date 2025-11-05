@@ -683,7 +683,7 @@ BEGIN;
   INSERT INTO temporal_mltrng (id, valid_at) VALUES ('[1,2)', datemultirange(daterange('2018-01-01', '2018-01-05')));
   ALTER TABLE temporal_mltrng ADD CONSTRAINT temporal_mltrng_pk PRIMARY KEY (id, valid_at WITHOUT OVERLAPS);
 ERROR:  could not create exclusion constraint "temporal_mltrng_pk"
-DETAIL:  Key (id, valid_at)=([1,2), {[2018-01-02,2018-02-03)}) conflicts with key (id, valid_at)=([1,2), {[2018-01-01,2018-01-05)}).
+DETAIL:  Key (id, valid_at)=([1,2), {[2018-01-01,2018-01-05)}) conflicts with key (id, valid_at)=([1,2), {[2018-01-02,2018-02-03)}).
 ROLLBACK;
 -- rejects empty:
 BEGIN;
@@ -808,7 +808,7 @@ BEGIN;
   INSERT INTO temporal_mltrng3 (id, valid_at) VALUES ('[1,2)', datemultirange(daterange('2018-01-01', '2018-01-05')));
   ALTER TABLE temporal_mltrng3 ADD CONSTRAINT temporal_mltrng3_uq UNIQUE (id, valid_at WITHOUT OVERLAPS);
 ERROR:  could not create exclusion constraint "temporal_mltrng3_uq"
-DETAIL:  Key (id, valid_at)=([1,2), {[2018-01-02,2018-02-03)}) conflicts with key (id, valid_at)=([1,2), {[2018-01-01,2018-01-05)}).
+DETAIL:  Key (id, valid_at)=([1,2), {[2018-01-01,2018-01-05)}) conflicts with key (id, valid_at)=([1,2), {[2018-01-02,2018-02-03)}).
 ROLLBACK;
 -- rejects empty:
 BEGIN;

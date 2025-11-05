@@ -72,7 +72,7 @@ select prop,
  bitmap_scan        |    | t     | 
  backward_scan      |    | f     | 
  can_order          | f  |       | 
- can_unique         | f  |       | 
+ can_unique         | t  |       | 
  can_multi_col      | t  |       | 
  can_exclude        | t  |       | 
  can_include        | t  |       | 
@@ -156,7 +156,7 @@ select amname, prop, pg_indexam_has_property(a.oid, prop) as p
  gin    | can_include   | f
  gin    | bogus         | 
  gist   | can_order     | f
- gist   | can_unique    | f
+ gist   | can_unique    | t
  gist   | can_multi_col | t
  gist   | can_exclude   | t
  gist   | can_include   | t
