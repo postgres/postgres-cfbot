@@ -490,6 +490,8 @@ tuplesort_begin_index_hash(Relation heapRel,
 Tuplesortstate *
 tuplesort_begin_index_gist(Relation heapRel,
 						   Relation indexRel,
+						   bool enforceUnique,
+						   bool uniqueNullsNotDistinct,
 						   int workMem,
 						   SortCoordinate coordinate,
 						   int sortopt)
@@ -521,8 +523,8 @@ tuplesort_begin_index_gist(Relation heapRel,
 
 	arg->index.heapRel = heapRel;
 	arg->index.indexRel = indexRel;
-	arg->enforceUnique = false;
-	arg->uniqueNullsNotDistinct = false;
+	arg->enforceUnique = enforceUnique;
+	arg->uniqueNullsNotDistinct = uniqueNullsNotDistinct;
 
 	/* Prepare SortSupport data for each column */
 	base->sortKeys = (SortSupport) palloc0_array(SortSupportData, base->nKeys);
