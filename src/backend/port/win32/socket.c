@@ -285,7 +285,11 @@ pgwin32_waitforsinglesocket(SOCKET s, int what, int timeout)
 }
 
 /*
- * Create a socket, setting it to overlapped and non-blocking
+ * Create a socket, setting it to overlapped, non-blocking, and non-inheritable.
+ *
+ * We must prevent child processes from inheriting socket handles. Otherwise,
+ * the kernel's reference counting means listening sockets can stay bound even
+ * after postmaster exit, preventing restart.
  */
 SOCKET
 pgwin32_socket(int af, int type, int protocol)
@@ -293,7 +297,8 @@ pgwin32_socket(int af, int type, int protocol)
 	SOCKET		s;
 	unsigned long on = 1;
 
-	s = WSASocket(af, type, protocol, NULL, 0, WSA_FLAG_OVERLAPPED);
+	s = WSASocket(af, type, protocol, NULL, 0,
+				  WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
 	if (s == INVALID_SOCKET)
 	{
 		TranslateSocketError();
