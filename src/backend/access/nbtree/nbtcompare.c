@@ -62,6 +62,7 @@
 #include "utils/fmgrprotos.h"
 #include "utils/skipsupport.h"
 #include "utils/sortsupport.h"
+#include "common/int.h"
 
 #ifdef STRESS_SORT_INT_MIN
 #define A_LESS_THAN_B		INT_MIN
