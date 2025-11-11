@@ -248,33 +248,6 @@ CMPTRGM_CHOOSE(const void *a, const void *b)
 	return CMPTRGM(a, b);
 }
 
-#define ST_SORT trigram_qsort_signed
-#define ST_ELEMENT_TYPE_VOID
-#define ST_COMPARE(a, b) CMPTRGM_SIGNED(a, b)
-#define ST_SCOPE static
-#define ST_DEFINE
-#define ST_DECLARE
-#include "lib/sort_template.h"
-
-#define ST_SORT trigram_qsort_unsigned
-#define ST_ELEMENT_TYPE_VOID
-#define ST_COMPARE(a, b) CMPTRGM_UNSIGNED(a, b)
-#define ST_SCOPE static
-#define ST_DEFINE
-#define ST_DECLARE
-#include "lib/sort_template.h"
-
-/* Sort an array of trigrams, handling signedness correctly */
-static void
-trigram_qsort(trgm *array, size_t n)
-{
-	if (GetDefaultCharSignedness())
-		trigram_qsort_signed(array, n, sizeof(trgm));
-	else
-		trigram_qsort_unsigned(array, n, sizeof(trgm));
-}
-
-
 /*
  * Compare two trigrams for equality.  This has the same signature as
  * comparison functions used for sorting, so that this can be used with
@@ -290,11 +263,94 @@ CMPTRGM_EQ(const void *a, const void *b)
 	return aa[0] != bb[0] || aa[1] != bb[1] || aa[2] != bb[2] ? 1 : 0;
 }
 
-/* Deduplicate an array of trigrams */
-static size_t
-trigram_qunique(trgm *array, size_t n)
+/*
+ * Needed to properly handle negative numbers in case char is signed.
+ */
+static inline unsigned char
+radix_key(char x, bool char_is_signed)
 {
-	return qunique(array, n, sizeof(trgm), CMPTRGM_EQ);
+	return char_is_signed ? x ^ 0x80 : x;
+}
+
+static inline size_t
+trigram_radix_sort_and_unique(trgm *trg, size_t count, bool char_is_signed)
+{
+	if (count < 64)
+	{
+		for (size_t i = 1; i < count; i++)
+		{
+			trgm	tmp;
+			size_t	j = i;
+
+			memcpy(&tmp, trg[i], sizeof(trgm));
+
+			while (j > 0 && cmptrgm(trg[j - 1], tmp, char_is_signed) > 0)
+			{
+				memcpy(trg[j], trg[j - 1], sizeof(trgm));
+				j--;
+			}
+
+			memcpy(trg[j], &tmp, sizeof(trgm));
+		}
+
+		return qunique(trg, count, sizeof(trgm), CMPTRGM_EQ);
+	}
+	else
+	{
+		trgm *buffer = palloc_array(trgm, count);
+		trgm *starts[256];
+		trgm *from = trg;
+		trgm *to = buffer;
+		uint32_t freqs[3][256];
+
+		/*
+		* Compute frequencies to partition the buffer.
+		*/
+		memset(freqs, 0, sizeof(freqs));
+
+		for (size_t j = 0; j < count; j++)
+		{
+			freqs[0][radix_key(trg[j][0], char_is_signed)]++;
+			freqs[1][radix_key(trg[j][1], char_is_signed)]++;
+			freqs[2][radix_key(trg[j][2], char_is_signed)]++;
+		}
+
+		/*
+		* Do the sorting. Start with last character because that's the "LSB"
+		* in a trigram. Avoid unnecessary copies by ping-ponging between the buffers.
+		*/
+		for (int i = 2; i >= 0; i--)
+		{
+			trgm *old_from = from;
+			trgm *next = to;
+
+			for (size_t j = 0; j < 256; j++)
+			{
+				starts[j] = next;
+				next += freqs[i][j];
+			}
+
+			for (size_t j = 0; j < count; j++)
+				memcpy(starts[radix_key(from[j][i], char_is_signed)]++, from[j], sizeof(trgm));
+
+			from = to;
+			to = old_from;
+		}
+
+		count = qunique(buffer, count, sizeof(trgm), CMPTRGM_EQ);
+		memcpy(trg, buffer, sizeof(trgm) * count);
+		pfree(buffer);
+		return count;
+	}
+}
+
+static size_t
+trigram_sort_and_unique(trgm *array, size_t n)
+{
+	if (GetDefaultCharSignedness())
+		return trigram_radix_sort_and_unique(array, n, true);
+	else
+		return trigram_radix_sort_and_unique(array, n, false);
 }
 
 /*
@@ -633,10 +689,7 @@ generate_trgm(char *str, int slen)
 	 * Make trigrams unique.
 	 */
 	if (len > 1)
-	{
-		trigram_qsort(GETARR(trg), len);
-		len = trigram_qunique(GETARR(trg), len);
-	}
+		len = trigram_sort_and_unique(GETARR(trg), len);
 
 	SET_VARSIZE(trg, CALCGTSIZE(ARRKEY, len));
 
@@ -1164,10 +1217,7 @@ generate_wildcard_trgm(const char *str, int slen)
 	trg = arr.datum;
 	len = arr.length;
 	if (len > 1)
-	{
-		trigram_qsort(GETARR(trg), len);
-		len = trigram_qunique(GETARR(trg), len);
-	}
+		len = trigram_sort_and_unique(GETARR(trg), len);
 
 	trg->flag = ARRKEY;
 	SET_VARSIZE(trg, CALCGTSIZE(ARRKEY, len));
