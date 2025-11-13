@@ -1,0 +1,19 @@
+CREATE EXTENSION test_large_files;
+SELECT test_large_files_offset_size() >= 8 AS has_large_file_support \gset
+-- Only run test on platforms with 64-bit offsets
+\if :has_large_file_support
+    -- Test file I/O at 4GB + 1 byte boundary
+    -- This validates that pgoff_t is used correctly throughout
+    -- the file I/O layer and catches both:
+    -- 1. off_t truncation bugs (affects all operations at 2GB+)
+    -- 2. Windows OVERLAPPED structure bugs (OffsetHigh must be set
+    --    correctly at 4GB+ where high 32 bits are non-zero)
+    SELECT test_large_files_test_4gb_boundary();
+ test_large_files_test_4gb_boundary 
+------------------------------------
+ 4GB boundary test passed
+(1 row)
+
+\else
+    SELECT 'Skipped - 32-bit offsets not supported'::text AS test_large_files_test_4gb_boundary;
+\endif
