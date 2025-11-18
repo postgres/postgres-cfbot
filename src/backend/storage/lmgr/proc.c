@@ -163,6 +163,7 @@ ProcGlobalShmemRequest(void *arg)
 	size = add_size(size, mul_size(TotalProcs, sizeof(PGPROC)));
 	size = add_size(size, mul_size(TotalProcs, sizeof(*ProcGlobal->xids)));
 	size = add_size(size, mul_size(TotalProcs, sizeof(*ProcGlobal->subxidStates)));
+	size = add_size(size, mul_size(TotalProcs, sizeof(*ProcGlobal->pgxactoffs)));
 	size = add_size(size, mul_size(TotalProcs, sizeof(*ProcGlobal->statusFlags)));
 	ProcGlobalAllProcsShmemSize = size;
 	ShmemRequestStruct(.name = "PGPROC structures",
@@ -266,6 +267,9 @@ ProcGlobalShmemInit(void *arg)
 	 */
 	ProcGlobal->xids = (TransactionId *) ptr;
 	ptr = ptr + (TotalProcs * sizeof(*ProcGlobal->xids));
+
+	ProcGlobal->pgxactoffs = (int *) ptr;
+	ptr = ptr + (TotalProcs * sizeof(*ProcGlobal->pgxactoffs));
 
 	ProcGlobal->subxidStates = (XidCacheStatus *) ptr;
 	ptr = ptr + (TotalProcs * sizeof(*ProcGlobal->subxidStates));
@@ -1552,7 +1556,7 @@ ProcSleep(LOCALLOCK *locallock)
 			 * the lock held, which is much more undesirable.
 			 */
 			LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
-			statusFlags = ProcGlobal->statusFlags[autovac->pgxactoff];
+			statusFlags = ProcGlobal->statusFlags[ProcGetXactOff(GetNumberFromPGProc(autovac))];
 			lockmethod_copy = lock->tag.locktag_lockmethodid;
 			locktag_copy = lock->tag;
 			LWLockRelease(ProcArrayLock);
