@@ -85,7 +85,7 @@ GetNewTransactionId(bool isSubXact)
 	{
 		Assert(!isSubXact);
 		MyProc->xid = BootstrapTransactionId;
-		ProcGlobal->xids[MyProc->pgxactoff] = BootstrapTransactionId;
+		ProcGlobal->xids[ProcGetMyXactOff()] = BootstrapTransactionId;
 		return FullTransactionIdFromEpochAndXid(0, BootstrapTransactionId);
 	}
 
@@ -244,18 +244,18 @@ GetNewTransactionId(bool isSubXact)
 	 */
 	if (!isSubXact)
 	{
-		Assert(ProcGlobal->subxidStates[MyProc->pgxactoff].count == 0);
-		Assert(!ProcGlobal->subxidStates[MyProc->pgxactoff].overflowed);
+		Assert(ProcGlobal->subxidStates[ProcGetMyXactOff()].count == 0);
+		Assert(!ProcGlobal->subxidStates[ProcGetMyXactOff()].overflowed);
 		Assert(MyProc->subxidStatus.count == 0);
 		Assert(!MyProc->subxidStatus.overflowed);
 
 		/* LWLockRelease acts as barrier */
 		MyProc->xid = xid;
-		ProcGlobal->xids[MyProc->pgxactoff] = xid;
+		ProcGlobal->xids[ProcGetMyXactOff()] = xid;
 	}
 	else
 	{
-		XidCacheStatus *substat = &ProcGlobal->subxidStates[MyProc->pgxactoff];
+		XidCacheStatus *substat = &ProcGlobal->subxidStates[ProcGetMyXactOff()];
 		int			nxids = MyProc->subxidStatus.count;
 
 		Assert(substat->count == MyProc->subxidStatus.count);

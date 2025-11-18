@@ -175,7 +175,8 @@ typedef enum
  *
  * Some fields in PGPROC (see "mirrored in ..." comment) are mirrored into an
  * element of more densely packed ProcGlobal arrays. These arrays are indexed
- * by PGPROC->pgxactoff. Both copies need to be maintained coherently.
+ * by a PGPROC's pgxactoffs entry. Both copies need to be maintained
+ * coherently.
  *
  * NB: The pgxactoff indexed value can *never* be accessed without holding
  * locks.
@@ -210,9 +211,6 @@ typedef struct PGPROC
 
 	Oid			tempNamespaceId;	/* OID of temp schema this backend is
 									 * using */
-
-	int			pgxactoff;		/* offset into various ProcGlobal->arrays with
-								 * data mirrored from this PGPROC */
 
 	uint8		statusFlags;	/* this backend's status flags, see PROC_*
 								 * above. mirrored in
@@ -403,10 +401,11 @@ extern PGDLLIMPORT PGPROC *MyProc;
  * for PGPROCs that have been added to the shared array with ProcArrayAdd()
  * (in contrast to PGPROC array which has unused PGPROCs interspersed).
  *
- * The dense arrays are indexed by PGPROC->pgxactoff. Any concurrent
- * ProcArrayAdd() / ProcArrayRemove() can lead to pgxactoff of a procarray
- * member to change.  Therefore it is only safe to use PGPROC->pgxactoff to
- * access the dense array while holding either ProcArrayLock or XidGenLock.
+ * The dense arrays are indexed by the PGPROC's corresponding offset in
+ * pgxactoff.  Any concurrent ProcArrayAdd() / ProcArrayRemove() can cause
+ * the pgxactoff of a procarray member to change.  Therefore it is only safe
+ * to use a proc's pgxactoff to access the dense array while holding either
+ * ProcArrayLock or XidGenLock.
  *
  * As long as a PGPROC is in the procarray, the mirrored values need to be
  * maintained in both places in a coherent manner.
@@ -446,6 +445,12 @@ typedef struct PROC_HDR
 {
 	/* Array of PGPROC structures (not including dummies for prepared txns) */
 	PGPROC	   *allProcs;
+
+	/*
+	 * Dense offsets into various ProcGlobal->arrays with data mirrored from
+	 * appropriate PGPROCs.  Like allProcs, values are indexed by ProcNumber.
+	 */
+	int		   *pgxactoffs;
 
 	/* Array mirroring PGPROC.xid for each PGPROC currently in the procarray */
 	TransactionId *xids;
@@ -512,6 +517,8 @@ extern PGDLLIMPORT PGPROC *PreparedXactProcs;
  */
 #define GetPGProcByNumber(n) (&ProcGlobal->allProcs[(n)])
 #define GetNumberFromPGProc(proc) ((proc) - &ProcGlobal->allProcs[0])
+#define ProcGetXactOff(procno) (ProcGlobal->pgxactoffs[(procno)])
+#define ProcGetMyXactOff() (ProcGetXactOff(MyProcNumber))
 
 /*
  * We set aside some extra PGPROC structures for "special worker" processes,
