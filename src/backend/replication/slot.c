@@ -1318,6 +1318,13 @@ ReplicationSlotsComputeRequiredLSN(void)
 
 	Assert(ReplicationSlotCtl != NULL);
 
+	/*
+	 * Hold the ReplicationSlotControlLock until after updating the slot's
+	 * minimum LSN value. A detailed reason and analysis for the safety
+	 * concerning xmin is provided in the comments of
+	 * ReplicationSlotsComputeRequiredXmin(), which similarly applies here when
+	 * considering the restart_lsn.
+	 */
 	LWLockAcquire(ReplicationSlotControlLock, LW_SHARED);
 	for (i = 0; i < max_replication_slots + max_repack_replication_slots; i++)
 	{
@@ -1363,9 +1370,10 @@ ReplicationSlotsComputeRequiredLSN(void)
 			 restart_lsn < min_required))
 			min_required = restart_lsn;
 	}
-	LWLockRelease(ReplicationSlotControlLock);
 
 	XLogSetReplicationSlotMinimumLSN(min_required);
+
+	LWLockRelease(ReplicationSlotControlLock);
 }
 
 /*
@@ -1762,9 +1770,22 @@ ReplicationSlotReserveWal(void)
 	else
 		restart_lsn = GetXLogInsertRecPtr();
 
+	/*
+	 * Hold the ReplicationSlotControlLock exclusive when updating the slot
+	 * restart_lsn. Doing so ensures that other backends either wait for the
+	 * restart_lsn update before computing the minimum LSN or include the
+	 * updated restart_lsn in their minimum LSN computations. This prevents
+	 * other backends from overwriting the minimum LSN with a position more
+	 * recent than the WAL position being reserved, ensuring the WALs required
+	 * by this slot are not prematurely removed during checkpoint.
+	 */
+	LWLockAcquire(ReplicationSlotControlLock, LW_EXCLUSIVE);
+
 	SpinLockAcquire(&slot->mutex);
 	slot->data.restart_lsn = restart_lsn;
 	SpinLockRelease(&slot->mutex);
+
+	LWLockRelease(ReplicationSlotControlLock);
 
 	/* prevent WAL removal as fast as possible */
 	ReplicationSlotsComputeRequiredLSN();
