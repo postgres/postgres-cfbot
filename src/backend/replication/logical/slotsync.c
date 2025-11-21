@@ -654,6 +654,14 @@ reserve_wal_for_local_slot(XLogRecPtr restart_lsn)
 	LWLockAcquire(ReplicationSlotAllocationLock, LW_EXCLUSIVE);
 
 	/*
+	 * Acquire an exclusive lock to prevent other backends from concurrently
+	 * updating the minimum slot LSN. In addition to the reason mentioned for
+	 * this lock in ReplicationSlotReserveWal(), it also ensures the fetched
+	 * minimum slot LSN remains safe when updating the slot.restart_lsn.
+	 */
+	LWLockAcquire(ReplicationSlotControlLock, LW_EXCLUSIVE);
+
+	/*
 	 * Determine the minimum non-removable LSN by comparing the redo pointer
 	 * with the minimum slot LSN.
 	 *
@@ -677,6 +685,8 @@ reserve_wal_for_local_slot(XLogRecPtr restart_lsn)
 	SpinLockAcquire(&slot->mutex);
 	slot->data.restart_lsn = Max(restart_lsn, min_safe_lsn);
 	SpinLockRelease(&slot->mutex);
+
+	LWLockRelease(ReplicationSlotControlLock);
 
 	ReplicationSlotsComputeRequiredLSN();
 
