@@ -30,6 +30,7 @@ test_decoding_isolation = [
   'skip_snapshot_restore',
   'invalidation_distribution',
   'parallel_session_origin',
+  'snapshot_build',
   'tuplecid_nested',
   'tuplecid_restart',
 ]
