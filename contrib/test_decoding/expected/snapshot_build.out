@@ -1,0 +1,33 @@
+Parsed test spec with 4 sessions
+
+starting permutation: s1_begin s1_insert s2_init s3_begin s3_insert s4_create s1_commit s4_begin s4_insert s3_commit s4_commit s2_get_changes
+step s1_begin: BEGIN;
+step s1_insert: INSERT INTO tbl1 VALUES (1);
+step s2_init: SELECT 'init' FROM pg_create_logical_replication_slot('isolation_slot', 'test_decoding'); <waiting ...>
+step s3_begin: BEGIN;
+step s3_insert: INSERT INTO tbl1 VALUES (1);
+step s4_create: CREATE TABLE tbl2 (val1 integer);
+step s1_commit: COMMIT;
+step s4_begin: BEGIN;
+step s4_insert: INSERT INTO tbl2 VALUES (1);
+step s3_commit: COMMIT;
+step s2_init: <... completed>
+?column?
+--------
+init    
+(1 row)
+
+step s4_commit: COMMIT;
+step s2_get_changes: SELECT data FROM pg_logical_slot_get_changes('isolation_slot', NULL, NULL, 'skip-empty-xacts', '1', 'include-xids', '0');
+data                                      
+------------------------------------------
+BEGIN                                     
+table public.tbl2: INSERT: val1[integer]:1
+COMMIT                                    
+(3 rows)
+
+?column?
+--------
+stop    
+(1 row)
+
