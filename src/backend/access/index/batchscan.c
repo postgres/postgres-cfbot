@@ -137,7 +137,7 @@ batchscan_unlock(IndexScanDesc scan, IndexScanBatch batch, Buffer buf)
 		{
 			/* drop both the lock and the pin */
 			UnlockReleaseBuffer(buf);
-			batch->isGuarded = false;	/* won't call amunguardbatch */
+			Assert(!batch->isGuarded);	/* won't call amunguardbatch */
 		}
 		else
 		{
