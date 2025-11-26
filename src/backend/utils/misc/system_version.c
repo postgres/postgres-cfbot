@@ -25,6 +25,14 @@
  */
 #include "postgres.h"
 
+#ifdef USE_ICU
+#include <unicode/uchar.h>
+#endif
+
+#ifdef __GLIBC__
+#include <gnu/libc-version.h>
+#endif
+
 #include "funcapi.h"
 #include "utils/builtins.h"
 #include "utils/hsearch.h"
@@ -64,6 +72,70 @@ add_system_version(const char *name, SystemVersionCB cb, VersionType type)
 
 	hentry->callback = cb;
 	hentry->type = type;
+}
+
+static const char *
+core_get_version(bool *available)
+{
+	*available = true;
+	return (const char *) psprintf("%s", PG_VERSION);
+}
+
+static const char *
+core_get_arch(bool *available)
+{
+	*available = true;
+	return (const char *) psprintf("%s", PG_ARCH_STR);
+}
+
+static const char *
+core_get_compiler(bool *available)
+{
+	*available = true;
+	return (const char *) psprintf("%s", PG_CC_STR);
+}
+
+#ifdef USE_ICU
+static const char *
+icu_get_version(bool *available)
+{
+	UVersionInfo UCDVersion;
+	char	   *version = palloc0(U_MAX_VERSION_STRING_LENGTH);
+
+	*available = true;
+	u_getUnicodeVersion(UCDVersion);
+	u_versionToString(UCDVersion, version);
+	return (const char *) version;
+}
+#endif
+
+#ifdef __GLIBC__
+static const char *
+glibc_get_version(bool *available)
+{
+	*available = true;
+	return (const char *) gnu_get_libc_version();
+}
+#endif
+
+/*
+ * Register versions that describe core components and do not correspond to any
+ * individual component.
+ */
+void
+register_core_versions()
+{
+	add_system_version("Core", core_get_version, CompileTime);
+	add_system_version("Arch", core_get_arch, CompileTime);
+	add_system_version("Compiler", core_get_compiler, CompileTime);
+
+#ifdef USE_ICU
+	add_system_version("ICU", icu_get_version, RunTime);
+#endif
+
+#ifdef __GLIBC__
+	add_system_version("Glibc", glibc_get_version, RunTime);
+#endif
 }
 
 /*

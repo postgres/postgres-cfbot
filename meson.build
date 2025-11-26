@@ -3299,6 +3299,10 @@ cdata.set('USE_@0@_SEMAPHORES'.format(sema_kind.to_upper()), 1)
 cdata.set('MEMSET_LOOP_LIMIT', memset_loop_limit)
 cdata.set_quoted('DLSUFFIX', dlsuffix)
 
+cdata.set_quoted('PG_CC_STR', '@0@-@1@'.format(cc.get_id(), cc.version()))
+
+cdata.set_quoted('PG_ARCH_STR', '@0@-@1@'.format(
+  host_machine.cpu_family(), host_system))
 
 # built later than the rest of the version metadata, we need SIZEOF_VOID_P
 cdata.set_quoted('PG_VERSION_STR',

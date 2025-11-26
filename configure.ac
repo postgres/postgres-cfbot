@@ -2553,6 +2553,10 @@ else
   cc_string=$CC
 fi
 
+AC_DEFINE_UNQUOTED(PG_CC_STR, ["$cc_string"], [C compiler version])
+
+AC_DEFINE_UNQUOTED(PG_ARCH_STR, ["$host"], [Platform])
+
 AC_DEFINE_UNQUOTED(PG_VERSION_STR,
                    ["PostgreSQL $PG_VERSION on $host, compiled by $cc_string, `expr $ac_cv_sizeof_void_p \* 8`-bit"],
                    [A string containing the version number, platform, and C compiler])

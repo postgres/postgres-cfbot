@@ -34,5 +34,6 @@ typedef struct SystemVersion
 } SystemVersion;
 
 void		add_system_version(const char *name, SystemVersionCB cb, VersionType type);
+extern void register_core_versions(void);
 
 #endif							/* SYSTEM_VERSION_H */
