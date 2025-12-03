@@ -48,7 +48,6 @@
  */
 static HTAB *prepared_queries = NULL;
 
-static void InitQueryHashTable(void);
 static ParamListInfo EvaluateParams(ParseState *pstate,
 									PreparedStatement *pstmt, List *params,
 									EState *estate);
@@ -366,18 +365,6 @@ EvaluateParams(ParseState *pstate, PreparedStatement *pstmt, List *params,
 	return paramLI;
 }
 
-
-/*
- * Initialize query hash table upon first use.
- */
-static void
-InitQueryHashTable(void)
-{
-	prepared_queries = hash_make(PreparedStatement, stmt_name,
-								 "Prepared Queries", 32,
-								 .mcxt = TopMemoryContext);
-}
-
 /*
  * Store all the data pertaining to a query in the hash table using
  * the specified key.  The passed CachedPlanSource should be "unsaved"
@@ -395,7 +382,9 @@ StorePreparedStatement(const char *stmt_name,
 
 	/* Initialize the hash table, if necessary */
 	if (!prepared_queries)
-		InitQueryHashTable();
+		prepared_queries = hash_make(PreparedStatement, stmt_name,
+									"Prepared Queries", 32,
+									.mcxt = TopMemoryContext);
 
 	/* Add entry to hash table */
 	entry = (PreparedStatement *) hash_search(prepared_queries,
