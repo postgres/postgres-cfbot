@@ -39,6 +39,9 @@ static void *ShmemHashAlloc(Size size, void *alloc_arg);
  *
  * Similar to ShmemRequestStruct(), but requests a hash table instead of an
  * opaque area.
+ *
+ * This is the function behind both the ShmemRequestHash() and the
+ * ShmemRequestHashMake() macro, see shmem.h for how they differ.
  */
 void
 ShmemRequestHashWithOpts(const ShmemHashOpts *options)
@@ -50,6 +53,35 @@ ShmemRequestHashWithOpts(const ShmemHashOpts *options)
 	options_copy = MemoryContextAlloc(TopMemoryContext,
 									  sizeof(ShmemHashOpts));
 	memcpy(options_copy, options, sizeof(ShmemHashOpts));
+
+	/*
+	 * Translate a ShmemRequestHashMake() request to hash_info and hash_flags
+	 * right away, so that everything else only has to deal with the one
+	 * representation.
+	 */
+	if (options->keysize != 0)
+	{
+		HASHOPTS	hash_opts = {HASH_COMMON_OPTS_COPY(options)};
+
+		Assert(options->hash_flags == 0);
+
+		hash_opts_init(&options_copy->hash_info, &options_copy->hash_flags,
+					   options->keysize, options->entrysize,
+					   options->string_key, &hash_opts);
+	}
+	else
+	{
+		/*
+		 * Catch plain ShmemRequestHash() callers that set e.g. .hash where
+		 * .hash_info.hash was meant, which would otherwise be silently
+		 * ignored.
+		 */
+		Assert(options->hash == NULL);
+		Assert(options->match == NULL);
+		Assert(options->keycopy == NULL);
+		Assert(options->num_partitions == 0);
+		Assert(!options->force_blobs);
+	}
 
 	/* Set options for the fixed-size area holding the hash table */
 	options_copy->base.name = options->name;
@@ -111,7 +143,7 @@ shmem_hash_attach(void *location, ShmemStructOpts *base_options)
  * choose to specify HASH_PARTITION.
  *
  * Note: This is a legacy interface, kept for backwards compatibility with
- * extensions.  Use ShmemRequestHash() in new code!
+ * extensions.  Use ShmemRequestHashMake() in new code!
  */
 HTAB *
 ShmemInitHash(const char *name,		/* table string name for shmem index */

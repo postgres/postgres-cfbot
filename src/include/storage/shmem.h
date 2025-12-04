@@ -69,7 +69,7 @@ typedef struct ShmemStructOpts
 #define SHMEM_ATTACH_UNKNOWN_SIZE (-1)
 
 /*
- * Options for ShmemRequestHash()
+ * Options for ShmemRequestHash() and ShmemRequestHashMake()
  *
  * Each hash table is backed by a contiguous shmem area.
  */
@@ -100,6 +100,20 @@ typedef struct ShmemHashOpts
 	 */
 	HASHCTL		hash_info;
 	int			hash_flags;
+
+	/*
+	 * Set by ShmemRequestHashMake() instead of hash_info and hash_flags; do
+	 * not touch directly.
+	 */
+	Size		keysize;
+	Size		entrysize;
+	bool		string_key;
+
+	/*
+	 * Options for ShmemRequestHashMake(): the hash_make() options that work
+	 * for shared memory hash tables, see HASH_COMMON_OPTS_FIELDS.
+	 */
+				HASH_COMMON_OPTS_FIELDS;
 
 	/*
 	 * When the hash table is initialized or attached to, pointer to its
@@ -172,12 +186,43 @@ extern bool ShmemAddrIsValid(const void *addr);
 /*
  * These macros provide syntactic sugar for calling the underlying functions
  * with named arguments -like syntax.
+ *
+ * ShmemRequestHashMake() is the preferred way to request a hash table.  It is
+ * to ShmemRequestHash() what hash_make() is to hash_create(): it takes the
+ * entry type and the name of the key member as its first two arguments, and
+ * uses those to derive the key and entry sizes and to automatically choose
+ * HASH_STRINGS vs HASH_BLOBS based on the key type (char arrays and NameData
+ * are treated as strings).
+ *
+ * Example:
+ *   ShmemRequestHashMake(MyEntry, key,
+ *                        .name = "my hash",
+ *                        .nelems = 64,
+ *                        .ptr = &MyHash);
+ *
+ * For partitioned tables, custom hash functions, etc., use the same options
+ * as for hash_make(), instead of .hash_info and .hash_flags:
+ *   ShmemRequestHashMake(LOCK, tag,
+ *                        .name = "LOCK hash",
+ *                        .nelems = max_table_size,
+ *                        .ptr = &LockMethodLockHash,
+ *                        .num_partitions = NUM_LOCK_PARTITIONS);
  */
 #define ShmemRequestStruct(...)  \
 	ShmemRequestStructWithOpts(&(ShmemStructOpts){__VA_ARGS__})
 
 #define ShmemRequestHash(...)  \
 	ShmemRequestHashWithOpts(&(ShmemHashOpts){__VA_ARGS__})
+
+#define ShmemRequestHashMake(entrytype, keymember, ...) \
+	(StaticAssertExpr(offsetof(entrytype, keymember) == 0, \
+					  #keymember " must be first member in " #entrytype), \
+	 ShmemRequestHashWithOpts(&(ShmemHashOpts){ \
+		 .keysize = sizeof(((entrytype *)0)->keymember), \
+		 .entrysize = sizeof(entrytype), \
+		 .string_key = HASH_KEY_AS_STRING(entrytype, keymember), \
+		 __VA_ARGS__ \
+	 }))
 
 extern void ShmemRequestStructWithOpts(const ShmemStructOpts *options);
 extern void ShmemRequestHashWithOpts(const ShmemHashOpts *options);

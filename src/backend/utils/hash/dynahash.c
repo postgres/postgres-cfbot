@@ -619,6 +619,93 @@ hash_create(const char *tabname, int64 nelem, const HASHCTL *info, int flags)
 }
 
 /*
+ * hash_opts_init -- initialize HASHCTL and flags from HASHOPTS
+ *
+ * For code that takes HASHOPTS but needs to call hash_create() itself.
+ */
+void
+hash_opts_init(HASHCTL *ctl, int *flags,
+			   Size keysize, Size entrysize, bool string_key,
+			   const HASHOPTS *opts)
+{
+	MemSet(ctl, 0, sizeof(*ctl));
+	ctl->keysize = keysize;
+	ctl->entrysize = entrysize;
+
+	*flags = HASH_ELEM;
+
+	if (opts == NULL)
+	{
+		*flags |= string_key ? HASH_STRINGS : HASH_BLOBS;
+		return;
+	}
+
+	if (opts->hash != NULL)
+	{
+		/* force_blobs only affects default hash selection, not custom hash */
+		Assert(!opts->force_blobs);
+		ctl->hash = opts->hash;
+		*flags |= HASH_FUNCTION;
+	}
+	else if (opts->force_blobs)
+	{
+		*flags |= HASH_BLOBS;
+	}
+	else
+	{
+		*flags |= string_key ? HASH_STRINGS : HASH_BLOBS;
+	}
+
+	if (opts->match != NULL)
+	{
+		ctl->match = opts->match;
+		*flags |= HASH_COMPARE;
+	}
+
+	if (opts->keycopy != NULL)
+	{
+		ctl->keycopy = opts->keycopy;
+		*flags |= HASH_KEYCOPY;
+	}
+
+	if (opts->alloc != NULL)
+	{
+		ctl->alloc = opts->alloc;
+		*flags |= HASH_ALLOC;
+	}
+
+	if (opts->num_partitions > 0)
+	{
+		ctl->num_partitions = opts->num_partitions;
+		*flags |= HASH_PARTITION;
+	}
+
+	if (opts->fixed_size)
+		*flags |= HASH_FIXED_SIZE;
+}
+
+/*
+ * hash_make_impl -- implementation of the hash_make() and hashset_make()
+ * macros, see hsearch.h.
+ */
+HTAB *
+hash_make_impl(const char *tabname, int64 nelem,
+			   Size keysize, Size entrysize,
+			   bool string_key,
+			   HASHOPTS opts)
+{
+	HASHCTL		ctl;
+	int			flags;
+
+	hash_opts_init(&ctl, &flags, keysize, entrysize, string_key, &opts);
+
+	ctl.hcxt = opts.mcxt ? opts.mcxt : CurrentMemoryContext;
+	flags |= HASH_CONTEXT;
+
+	return hash_create(tabname, nelem, &ctl, flags);
+}
+
+/*
  * Set default HASHHDR parameters.
  */
 static void
