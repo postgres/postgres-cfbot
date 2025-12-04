@@ -165,15 +165,10 @@ static void
 forget_invalid_pages(RelFileLocator locator, ForkNumber forkno,
 					 BlockNumber minblkno)
 {
-	HASH_SEQ_STATUS status;
-	xl_invalid_page *hentry;
-
 	if (invalid_page_tab == NULL)
 		return;					/* nothing to do */
 
-	hash_seq_init(&status, invalid_page_tab);
-
-	while ((hentry = (xl_invalid_page *) hash_seq_search(&status)) != NULL)
+	foreach_hash(xl_invalid_page, hentry, invalid_page_tab)
 	{
 		if (RelFileLocatorEquals(hentry->key.locator, locator) &&
 			hentry->key.forkno == forkno &&
@@ -195,15 +190,10 @@ forget_invalid_pages(RelFileLocator locator, ForkNumber forkno,
 static void
 forget_invalid_pages_db(Oid dbid)
 {
-	HASH_SEQ_STATUS status;
-	xl_invalid_page *hentry;
-
 	if (invalid_page_tab == NULL)
 		return;					/* nothing to do */
 
-	hash_seq_init(&status, invalid_page_tab);
-
-	while ((hentry = (xl_invalid_page *) hash_seq_search(&status)) != NULL)
+	foreach_hash(xl_invalid_page, hentry, invalid_page_tab)
 	{
 		if (hentry->key.locator.dbOid == dbid)
 		{
@@ -233,20 +223,16 @@ XLogHaveInvalidPages(void)
 void
 XLogCheckInvalidPages(void)
 {
-	HASH_SEQ_STATUS status;
-	xl_invalid_page *hentry;
 	bool		foundone = false;
 
 	if (invalid_page_tab == NULL)
 		return;					/* nothing to do */
 
-	hash_seq_init(&status, invalid_page_tab);
-
 	/*
 	 * Our strategy is to emit WARNING messages for all remaining entries and
 	 * only PANIC after we've dumped all the available info.
 	 */
-	while ((hentry = (xl_invalid_page *) hash_seq_search(&status)) != NULL)
+	foreach_hash(xl_invalid_page, hentry, invalid_page_tab)
 	{
 		report_invalid_page(WARNING, hentry->key.locator, hentry->key.forkno,
 							hentry->key.blkno, hentry->present);

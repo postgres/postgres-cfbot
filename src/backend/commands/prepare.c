@@ -541,16 +541,12 @@ DropPreparedStatement(const char *stmt_name, bool showError)
 void
 DropAllPreparedStatements(void)
 {
-	HASH_SEQ_STATUS seq;
-	PreparedStatement *entry;
-
 	/* nothing cached */
 	if (!prepared_queries)
 		return;
 
 	/* walk over cache */
-	hash_seq_init(&seq, prepared_queries);
-	while ((entry = hash_seq_search(&seq)) != NULL)
+	foreach_hash(PreparedStatement, entry, prepared_queries)
 	{
 		/* Release the plancache entry */
 		DropCachedPlan(entry->plansource);
@@ -697,11 +693,7 @@ pg_prepared_statement(PG_FUNCTION_ARGS)
 	/* hash table might be uninitialized */
 	if (prepared_queries)
 	{
-		HASH_SEQ_STATUS hash_seq;
-		PreparedStatement *prep_stmt;
-
-		hash_seq_init(&hash_seq, prepared_queries);
-		while ((prep_stmt = hash_seq_search(&hash_seq)) != NULL)
+		foreach_hash(PreparedStatement, prep_stmt, prepared_queries)
 		{
 			TupleDesc	result_desc;
 			Datum		values[8];

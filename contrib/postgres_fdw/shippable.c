@@ -65,17 +65,13 @@ static void
 InvalidateShippableCacheCallback(Datum arg, SysCacheIdentifier cacheid,
 								 uint32 hashvalue)
 {
-	HASH_SEQ_STATUS status;
-	ShippableCacheEntry *entry;
-
 	/*
 	 * In principle we could flush only cache entries relating to the
 	 * pg_foreign_server entry being outdated; but that would be more
 	 * complicated, and it's probably not worth the trouble.  So for now, just
 	 * flush all entries.
 	 */
-	hash_seq_init(&status, ShippableCacheHash);
-	while ((entry = (ShippableCacheEntry *) hash_seq_search(&status)) != NULL)
+	foreach_hash(ShippableCacheEntry, entry, ShippableCacheHash)
 	{
 		if (hash_search(ShippableCacheHash,
 						&entry->key,

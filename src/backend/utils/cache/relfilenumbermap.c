@@ -51,14 +51,10 @@ typedef struct
 static void
 RelfilenumberMapInvalidateCallback(Datum arg, Oid relid)
 {
-	HASH_SEQ_STATUS status;
-	RelfilenumberMapEntry *entry;
-
 	/* callback only gets registered after creating the hash */
 	Assert(RelfilenumberMapHash != NULL);
 
-	hash_seq_init(&status, RelfilenumberMapHash);
-	while ((entry = (RelfilenumberMapEntry *) hash_seq_search(&status)) != NULL)
+	foreach_hash(RelfilenumberMapEntry, entry, RelfilenumberMapHash)
 	{
 		/*
 		 * If relid is InvalidOid, signaling a complete reset, we must remove

@@ -1338,8 +1338,6 @@ GetPredicateLockStatusData(void)
 	int			i;
 	int			els,
 				el;
-	HASH_SEQ_STATUS seqstat;
-	PREDICATELOCK *predlock;
 
 	data = palloc_object(PredicateLockData);
 
@@ -1359,11 +1357,9 @@ GetPredicateLockStatusData(void)
 
 
 	/* Scan through PredicateLockHash and copy contents */
-	hash_seq_init(&seqstat, PredicateLockHash);
-
 	el = 0;
 
-	while ((predlock = (PREDICATELOCK *) hash_seq_search(&seqstat)))
+	foreach_hash(PREDICATELOCK, predlock, PredicateLockHash)
 	{
 		data->locktags[el] = predlock->tag.myTarget->tag;
 		data->xacts[el] = *predlock->tag.myXact;
@@ -2785,8 +2781,6 @@ exit:
 static void
 DropAllPredicateLocksFromTable(Relation relation, bool transfer)
 {
-	HASH_SEQ_STATUS seqstat;
-	PREDICATELOCKTARGET *oldtarget;
 	PREDICATELOCKTARGET *heaptarget;
 	Oid			dbId;
 	Oid			relId;
@@ -2842,9 +2836,7 @@ DropAllPredicateLocksFromTable(Relation relation, bool transfer)
 		RemoveScratchTarget(true);
 
 	/* Scan through target map */
-	hash_seq_init(&seqstat, PredicateLockTargetHash);
-
-	while ((oldtarget = (PREDICATELOCKTARGET *) hash_seq_search(&seqstat)))
+	foreach_hash(PREDICATELOCKTARGET, oldtarget, PredicateLockTargetHash)
 	{
 		dlist_mutable_iter iter;
 
@@ -4267,8 +4259,6 @@ CheckForSerializableConflictIn(Relation relation, const ItemPointerData *tid, Bl
 void
 CheckTableForSerializableConflictIn(Relation relation)
 {
-	HASH_SEQ_STATUS seqstat;
-	PREDICATELOCKTARGET *target;
 	Oid			dbId;
 	Oid			heapId;
 	int			i;
@@ -4302,9 +4292,7 @@ CheckTableForSerializableConflictIn(Relation relation)
 	LWLockAcquire(SerializableXactHashLock, LW_EXCLUSIVE);
 
 	/* Scan through target list */
-	hash_seq_init(&seqstat, PredicateLockTargetHash);
-
-	while ((target = (PREDICATELOCKTARGET *) hash_seq_search(&seqstat)))
+	foreach_hash(PREDICATELOCKTARGET, target, PredicateLockTargetHash)
 	{
 		dlist_mutable_iter iter;
 

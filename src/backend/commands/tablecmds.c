@@ -2299,14 +2299,9 @@ ExecuteTruncateGuts(List *explicit_rels,
 	/* Now go through the hash table, and truncate foreign tables */
 	if (ft_htab)
 	{
-		ForeignTruncateInfo *ft_info;
-		HASH_SEQ_STATUS seq;
-
-		hash_seq_init(&seq, ft_htab);
-
 		PG_TRY();
 		{
-			while ((ft_info = hash_seq_search(&seq)) != NULL)
+			foreach_hash(ForeignTruncateInfo, ft_info, ft_htab)
 			{
 				FdwRoutine *routine = GetFdwRoutineByServerId(ft_info->serverid);
 

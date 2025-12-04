@@ -297,16 +297,11 @@ begin_heap_rewrite(Relation old_heap, Relation new_heap, TransactionId oldest_xm
 void
 end_heap_rewrite(RewriteState state)
 {
-	HASH_SEQ_STATUS seq_status;
-	UnresolvedTup unresolved;
-
 	/*
 	 * Write any remaining tuples in the UnresolvedTups table. If we have any
 	 * left, they should in fact be dead, but let's err on the safe side.
 	 */
-	hash_seq_init(&seq_status, state->rs_unresolved_tups);
-
-	while ((unresolved = hash_seq_search(&seq_status)) != NULL)
+	foreach_hash(UnresolvedTupData, unresolved, state->rs_unresolved_tups)
 	{
 		ItemPointerSetInvalid(&unresolved->tuple->t_data->t_ctid);
 		raw_heap_insert(state, unresolved->tuple);
@@ -819,8 +814,6 @@ logical_begin_heap_rewrite(RewriteState state)
 static void
 logical_heap_rewrite_flush_mappings(RewriteState state)
 {
-	HASH_SEQ_STATUS seq_status;
-	RewriteMappingFile *src;
 	dlist_mutable_iter iter;
 
 	Assert(state->rs_logical_rewrite);
@@ -832,8 +825,7 @@ logical_heap_rewrite_flush_mappings(RewriteState state)
 	elog(DEBUG1, "flushing %u logical rewrite mapping entries",
 		 state->rs_num_rewrite_mappings);
 
-	hash_seq_init(&seq_status, state->rs_logical_mappings);
-	while ((src = (RewriteMappingFile *) hash_seq_search(&seq_status)) != NULL)
+	foreach_hash(RewriteMappingFile, src, state->rs_logical_mappings)
 	{
 		char	   *waldata;
 		char	   *waldata_start;
@@ -921,9 +913,6 @@ logical_heap_rewrite_flush_mappings(RewriteState state)
 static void
 logical_end_heap_rewrite(RewriteState state)
 {
-	HASH_SEQ_STATUS seq_status;
-	RewriteMappingFile *src;
-
 	/* done, no logical rewrite in progress */
 	if (!state->rs_logical_rewrite)
 		return;
@@ -933,8 +922,7 @@ logical_end_heap_rewrite(RewriteState state)
 		logical_heap_rewrite_flush_mappings(state);
 
 	/* Iterate over all mappings we have written and fsync the files. */
-	hash_seq_init(&seq_status, state->rs_logical_mappings);
-	while ((src = (RewriteMappingFile *) hash_seq_search(&seq_status)) != NULL)
+	foreach_hash(RewriteMappingFile, src, state->rs_logical_mappings)
 	{
 		if (FileSync(src->vfd, WAIT_EVENT_LOGICAL_REWRITE_SYNC) != 0)
 			ereport(data_sync_elevel(ERROR),

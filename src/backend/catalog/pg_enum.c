@@ -850,12 +850,10 @@ SerializeUncommittedEnums(void *space, Size size)
 	/* Write out all the OIDs from the types hash table, if there is one. */
 	if (uncommitted_enum_types)
 	{
-		HASH_SEQ_STATUS status;
-		Oid		   *value;
-
-		hash_seq_init(&status, uncommitted_enum_types);
-		while ((value = (Oid *) hash_seq_search(&status)))
+		foreach_hash(Oid, value, uncommitted_enum_types)
+		{
 			*serialized++ = *value;
+		}
 	}
 
 	/* Write out the terminator. */
@@ -864,12 +862,10 @@ SerializeUncommittedEnums(void *space, Size size)
 	/* Write out all the OIDs from the values hash table, if there is one. */
 	if (uncommitted_enum_values)
 	{
-		HASH_SEQ_STATUS status;
-		Oid		   *value;
-
-		hash_seq_init(&status, uncommitted_enum_values);
-		while ((value = (Oid *) hash_seq_search(&status)))
+		foreach_hash(Oid, value, uncommitted_enum_values)
+		{
 			*serialized++ = *value;
+		}
 	}
 
 	/* Write out the terminator. */

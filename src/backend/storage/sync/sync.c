@@ -288,8 +288,6 @@ ProcessSyncRequests(void)
 {
 	static bool sync_in_progress = false;
 
-	HASH_SEQ_STATUS hstat;
-	PendingFsyncEntry *entry;
 	int			absorb_counter;
 
 	/* Statistics on sync times */
@@ -346,8 +344,7 @@ ProcessSyncRequests(void)
 	if (sync_in_progress)
 	{
 		/* prior try failed, so update any stale cycle_ctr values */
-		hash_seq_init(&hstat, pendingOps);
-		while ((entry = (PendingFsyncEntry *) hash_seq_search(&hstat)) != NULL)
+		foreach_hash(PendingFsyncEntry, entry, pendingOps)
 		{
 			entry->cycle_ctr = sync_cycle_ctr;
 		}
@@ -361,8 +358,7 @@ ProcessSyncRequests(void)
 
 	/* Now scan the hashtable for fsync requests to process */
 	absorb_counter = FSYNCS_PER_ABSORB;
-	hash_seq_init(&hstat, pendingOps);
-	while ((entry = (PendingFsyncEntry *) hash_seq_search(&hstat)) != NULL)
+	foreach_hash(PendingFsyncEntry, entry, pendingOps)
 	{
 		int			failures;
 
@@ -388,8 +384,8 @@ ProcessSyncRequests(void)
 			 * If in checkpointer, we want to absorb pending requests every so
 			 * often to prevent overflow of the fsync request queue.  It is
 			 * unspecified whether newly-added entries will be visited by
-			 * hash_seq_search, but we don't care since we don't need to
-			 * process them anyway.
+			 * foreach_hash, but we don't care since we don't need to process
+			 * them anyway.
 			 */
 			if (--absorb_counter <= 0)
 			{
@@ -503,13 +499,10 @@ RememberSyncRequest(const FileTag *ftag, SyncRequestType type)
 	}
 	else if (type == SYNC_FILTER_REQUEST)
 	{
-		HASH_SEQ_STATUS hstat;
-		PendingFsyncEntry *pfe;
 		ListCell   *cell;
 
 		/* Cancel matching fsync requests */
-		hash_seq_init(&hstat, pendingOps);
-		while ((pfe = (PendingFsyncEntry *) hash_seq_search(&hstat)) != NULL)
+		foreach_hash(PendingFsyncEntry, pfe, pendingOps)
 		{
 			if (pfe->tag.handler == ftag->handler &&
 				syncsw[ftag->handler].sync_filetagmatches(ftag, &pfe->tag))

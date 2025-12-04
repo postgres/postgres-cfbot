@@ -5411,15 +5411,11 @@ ReorderBufferToastReplace(ReorderBuffer *rb, ReorderBufferTXN *txn,
 static void
 ReorderBufferToastReset(ReorderBuffer *rb, ReorderBufferTXN *txn)
 {
-	HASH_SEQ_STATUS hstat;
-	ReorderBufferToastEnt *ent;
-
 	if (txn->toast_hash == NULL)
 		return;
 
 	/* sequentially walk over the hash and free everything */
-	hash_seq_init(&hstat, txn->toast_hash);
-	while ((ent = (ReorderBufferToastEnt *) hash_seq_search(&hstat)) != NULL)
+	foreach_hash(ReorderBufferToastEnt, ent, txn->toast_hash)
 	{
 		dlist_mutable_iter it;
 
@@ -5482,11 +5478,7 @@ typedef struct RewriteMappingFile
 static void
 DisplayMapping(HTAB *tuplecid_data)
 {
-	HASH_SEQ_STATUS hstat;
-	ReorderBufferTupleCidEnt *ent;
-
-	hash_seq_init(&hstat, tuplecid_data);
-	while ((ent = (ReorderBufferTupleCidEnt *) hash_seq_search(&hstat)) != NULL)
+	foreach_hash(ReorderBufferTupleCidEnt, ent, tuplecid_data)
 	{
 		elog(DEBUG3, "mapping: node: %u/%u/%u tid: %u/%u cmin: %u, cmax: %u",
 			 ent->key.rlocator.dbOid,

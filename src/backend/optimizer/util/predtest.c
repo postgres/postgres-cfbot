@@ -2348,15 +2348,10 @@ static void
 InvalidateOprProofCacheCallBack(Datum arg, SysCacheIdentifier cacheid,
 								uint32 hashvalue)
 {
-	HASH_SEQ_STATUS status;
-	OprProofCacheEntry *hentry;
-
 	Assert(OprProofCacheHash != NULL);
 
 	/* Currently we just reset all entries; hard to be smarter ... */
-	hash_seq_init(&status, OprProofCacheHash);
-
-	while ((hentry = (OprProofCacheEntry *) hash_seq_search(&status)) != NULL)
+	foreach_hash(OprProofCacheEntry, hentry, OprProofCacheHash)
 	{
 		hentry->have_implic = false;
 		hentry->have_refute = false;

@@ -467,9 +467,6 @@ set_interp_require(bool trusted)
 static void
 plperl_fini(int code, Datum arg)
 {
-	HASH_SEQ_STATUS hash_seq;
-	plperl_interp_desc *interp_desc;
-
 	elog(DEBUG3, "plperl_fini");
 
 	/*
@@ -491,8 +488,7 @@ plperl_fini(int code, Datum arg)
 	plperl_destroy_interp(&plperl_held_interp);
 
 	/* Zap any fully-initialized interpreters */
-	hash_seq_init(&hash_seq, plperl_interp_hash);
-	while ((interp_desc = hash_seq_search(&hash_seq)) != NULL)
+	foreach_hash(plperl_interp_desc, interp_desc, plperl_interp_hash)
 	{
 		if (interp_desc->interp)
 		{

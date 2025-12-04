@@ -482,11 +482,7 @@ PartitionDirectoryLookup(PartitionDirectory pdir, Relation rel)
 void
 DestroyPartitionDirectory(PartitionDirectory pdir)
 {
-	HASH_SEQ_STATUS status;
-	PartitionDirectoryEntry *pde;
-
-	hash_seq_init(&status, pdir->pdir_hash);
-	while ((pde = hash_seq_search(&status)) != NULL)
+	foreach_hash(PartitionDirectoryEntry, pde, pdir->pdir_hash)
 		RelationDecrementReferenceCount(pde->rel);
 }
 

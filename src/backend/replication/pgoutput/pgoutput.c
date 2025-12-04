@@ -2395,13 +2395,9 @@ get_rel_sync_entry(PGOutputData *data, Relation relation)
 static void
 cleanup_rel_sync_cache(TransactionId xid, bool mark_schema_sent)
 {
-	HASH_SEQ_STATUS hash_seq;
-	RelationSyncEntry *entry;
-
 	Assert(RelationSyncCache != NULL);
 
-	hash_seq_init(&hash_seq, RelationSyncCache);
-	while ((entry = hash_seq_search(&hash_seq)) != NULL)
+	foreach_hash(RelationSyncEntry, entry, RelationSyncCache)
 	{
 		/*
 		 * We can set the schema_sent flag for an entry that has a committed
@@ -2430,8 +2426,6 @@ cleanup_rel_sync_cache(TransactionId xid, bool mark_schema_sent)
 static void
 rel_sync_cache_relation_cb(Datum arg, Oid relid)
 {
-	RelationSyncEntry *entry;
-
 	/*
 	 * We can get here if the plugin was used in SQL interface as the
 	 * RelationSyncCache is destroyed when the decoding finishes, but there is
@@ -2454,18 +2448,16 @@ rel_sync_cache_relation_cb(Datum arg, Oid relid)
 		 * Getting invalidations for relations that aren't in the table is
 		 * entirely normal.  So we don't care if it's found or not.
 		 */
-		entry = (RelationSyncEntry *) hash_search(RelationSyncCache, &relid,
-												  HASH_FIND, NULL);
+		RelationSyncEntry *entry = hash_search(RelationSyncCache, &relid,
+											   HASH_FIND, NULL);
+
 		if (entry != NULL)
 			entry->replicate_valid = false;
 	}
 	else
 	{
 		/* Whole cache must be flushed. */
-		HASH_SEQ_STATUS status;
-
-		hash_seq_init(&status, RelationSyncCache);
-		while ((entry = (RelationSyncEntry *) hash_seq_search(&status)) != NULL)
+		foreach_hash(RelationSyncEntry, entry, RelationSyncCache)
 		{
 			entry->replicate_valid = false;
 		}
@@ -2481,9 +2473,6 @@ static void
 rel_sync_cache_publication_cb(Datum arg, SysCacheIdentifier cacheid,
 							  uint32 hashvalue)
 {
-	HASH_SEQ_STATUS status;
-	RelationSyncEntry *entry;
-
 	/*
 	 * We can get here if the plugin was used in SQL interface as the
 	 * RelationSyncCache is destroyed when the decoding finishes, but there is
@@ -2496,8 +2485,7 @@ rel_sync_cache_publication_cb(Datum arg, SysCacheIdentifier cacheid,
 	 * We have no easy way to identify which cache entries this invalidation
 	 * event might have affected, so just mark them all invalid.
 	 */
-	hash_seq_init(&status, RelationSyncCache);
-	while ((entry = (RelationSyncEntry *) hash_seq_search(&status)) != NULL)
+	foreach_hash(RelationSyncEntry, entry, RelationSyncCache)
 	{
 		entry->replicate_valid = false;
 	}

@@ -224,7 +224,6 @@ compute_array_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 	/* This is D from the LC algorithm. */
 	HTAB	   *elements_tab;
 	HASHCTL		elem_hash_ctl;
-	HASH_SEQ_STATUS scan_status;
 
 	/* This is the current bucket number from the LC algorithm */
 	int			b_current;
@@ -233,11 +232,9 @@ compute_array_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 	int			bucket_width;
 	int			array_no;
 	int64		element_no;
-	TrackItem  *item;
 	int			slot_idx;
 	HTAB	   *count_tab;
 	HASHCTL		count_hash_ctl;
-	DECountItem *count_item;
 
 	extra_data = (ArrayAnalyzeExtraData *) stats->extra_data;
 
@@ -313,6 +310,7 @@ compute_array_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 		int64		prev_element_no = element_no;
 		int			distinct_count;
 		bool		count_item_found;
+		DECountItem *count_item;
 
 		vacuum_delay_point(true);
 
@@ -351,6 +349,7 @@ compute_array_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 		{
 			Datum		elem_value;
 			bool		found;
+			TrackItem  *item;
 
 			/* No null element processing other than flag setting here */
 			if (elem_nulls[j])
@@ -471,10 +470,9 @@ compute_array_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 		i = hash_get_num_entries(elements_tab); /* surely enough space */
 		sort_table = palloc_array(TrackItem *, i);
 
-		hash_seq_init(&scan_status, elements_tab);
 		track_len = 0;
 		maxfreq = 0;
-		while ((item = (TrackItem *) hash_seq_search(&scan_status)) != NULL)
+		foreach_hash(TrackItem, item, elements_tab)
 		{
 			if (item->frequency > cutoff_freq)
 			{
@@ -607,9 +605,8 @@ compute_array_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 			 * increasing count order.
 			 */
 			sorted_count_items = palloc_array(DECountItem *, count_items_count);
-			hash_seq_init(&scan_status, count_tab);
 			j = 0;
-			while ((count_item = (DECountItem *) hash_seq_search(&scan_status)) != NULL)
+			foreach_hash(DECountItem, count_item, count_tab)
 			{
 				sorted_count_items[j++] = count_item;
 			}
@@ -696,11 +693,7 @@ compute_array_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 static void
 prune_element_hashtable(HTAB *elements_tab, int b_current)
 {
-	HASH_SEQ_STATUS scan_status;
-	TrackItem  *item;
-
-	hash_seq_init(&scan_status, elements_tab);
-	while ((item = (TrackItem *) hash_seq_search(&scan_status)) != NULL)
+	foreach_hash(TrackItem, item, elements_tab)
 	{
 		if (item->frequency + item->delta <= b_current)
 		{

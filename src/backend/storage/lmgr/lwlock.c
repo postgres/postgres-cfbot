@@ -338,15 +338,10 @@ init_lwlock_stats(void)
 static void
 print_lwlock_stats(int code, Datum arg)
 {
-	HASH_SEQ_STATUS scan;
-	lwlock_stats *lwstats;
-
-	hash_seq_init(&scan, lwlock_stats_htab);
-
 	/* Grab an LWLock to keep different backends from mixing reports */
 	LWLockAcquire(&MainLWLockArray[0].lock, LW_EXCLUSIVE);
 
-	while ((lwstats = (lwlock_stats *) hash_seq_search(&scan)) != NULL)
+	foreach_hash(lwlock_stats, lwstats, lwlock_stats_htab)
 	{
 		fprintf(stderr,
 				"PID %d lwlock %s %p: shacq %u exacq %u blk %u spindelay %u dequeue self %u\n",

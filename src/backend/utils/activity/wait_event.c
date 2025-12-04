@@ -276,8 +276,6 @@ char	  **
 GetWaitEventCustomNames(uint32 classId, int *nwaitevents)
 {
 	char	  **waiteventnames;
-	WaitEventCustomEntryByName *hentry;
-	HASH_SEQ_STATUS hash_seq;
 	int			index;
 	int			els;
 
@@ -290,10 +288,8 @@ GetWaitEventCustomNames(uint32 classId, int *nwaitevents)
 	waiteventnames = palloc_array(char *, els);
 
 	/* Now scan the hash table to copy the data */
-	hash_seq_init(&hash_seq, WaitEventCustomHashByName);
-
 	index = 0;
-	while ((hentry = (WaitEventCustomEntryByName *) hash_seq_search(&hash_seq)) != NULL)
+	foreach_hash(WaitEventCustomEntryByName, hentry, WaitEventCustomHashByName)
 	{
 		if ((hentry->wait_event_info & WAIT_EVENT_CLASS_MASK) != classId)
 			continue;

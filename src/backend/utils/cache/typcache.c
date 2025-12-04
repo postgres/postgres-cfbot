@@ -2441,14 +2441,13 @@ InvalidateCompositeTypeCacheEntry(TypeCacheEntry *typentry)
 static void
 TypeCacheRelCallback(Datum arg, Oid relid)
 {
-	TypeCacheEntry *typentry;
-
 	/*
 	 * RelIdToTypeIdCacheHash and TypeCacheHash should exist, otherwise this
 	 * callback wouldn't be registered
 	 */
 	if (OidIsValid(relid))
 	{
+		TypeCacheEntry *typentry;
 		RelIdToTypeIdCacheEntry *relentry;
 
 		/*
@@ -2499,15 +2498,12 @@ TypeCacheRelCallback(Datum arg, Oid relid)
 	}
 	else
 	{
-		HASH_SEQ_STATUS status;
-
 		/*
 		 * Relid is invalid. By convention, we need to reset all composite
 		 * types in cache. Also, we should reset flags for domain types, and
 		 * we loop over all entries in hash, so, do it in a single scan.
 		 */
-		hash_seq_init(&status, TypeCacheHash);
-		while ((typentry = (TypeCacheEntry *) hash_seq_search(&status)) != NULL)
+		foreach_hash(TypeCacheEntry, typentry, TypeCacheHash)
 		{
 			if (typentry->typtype == TYPTYPE_COMPOSITE)
 			{
@@ -2588,12 +2584,8 @@ TypeCacheTypCallback(Datum arg, SysCacheIdentifier cacheid, uint32 hashvalue)
 static void
 TypeCacheOpcCallback(Datum arg, SysCacheIdentifier cacheid, uint32 hashvalue)
 {
-	HASH_SEQ_STATUS status;
-	TypeCacheEntry *typentry;
-
 	/* TypeCacheHash must exist, else this callback wouldn't be registered */
-	hash_seq_init(&status, TypeCacheHash);
-	while ((typentry = (TypeCacheEntry *) hash_seq_search(&status)) != NULL)
+	foreach_hash(TypeCacheEntry, typentry, TypeCacheHash)
 	{
 		/* Reset equality/comparison/hashing validity information */
 		typentry->flags &= ~TCFLAGS_OPERATOR_FLAGS;

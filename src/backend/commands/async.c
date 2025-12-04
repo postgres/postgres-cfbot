@@ -1103,11 +1103,7 @@ pg_listening_channels(PG_FUNCTION_ARGS)
 	 */
 	if (localChannelTable != NULL)
 	{
-		HASH_SEQ_STATUS status;
-		ChannelName *channelEntry;
-
-		hash_seq_init(&status, localChannelTable);
-		while ((channelEntry = (ChannelName *) hash_seq_search(&status)) != NULL)
+		foreach_hash(ChannelName, channelEntry, localChannelTable)
 		{
 			Datum		values[1];
 			bool		nulls[1];
@@ -1225,14 +1221,10 @@ PreCommit_Notify(void)
 		pendingNotifies->uniqueChannelNames = NIL;
 		if (pendingNotifies->uniqueChannelHash != NULL)
 		{
-			HASH_SEQ_STATUS status;
-			ChannelName *channelEntry;
-
-			hash_seq_init(&status, pendingNotifies->uniqueChannelHash);
-			while ((channelEntry = (ChannelName *) hash_seq_search(&status)) != NULL)
+			foreach_hash(ChannelName, channelEntry, pendingNotifies->uniqueChannelHash)
 				pendingNotifies->uniqueChannelNames =
-					lappend(pendingNotifies->uniqueChannelNames,
-							channelEntry->channel);
+				lappend(pendingNotifies->uniqueChannelNames,
+						channelEntry->channel);
 		}
 		else
 		{
@@ -1647,8 +1639,6 @@ PrepareTableEntriesForUnlisten(const char *channel)
 static void
 PrepareTableEntriesForUnlistenAll(void)
 {
-	HASH_SEQ_STATUS seq;
-	ChannelName *channelEntry;
 	PendingListenEntry *pending;
 
 	/*
@@ -1656,8 +1646,7 @@ PrepareTableEntriesForUnlistenAll(void)
 	 * we are listening on or have prepared to listen on.  Record an UNLISTEN
 	 * action for each one, overwriting any earlier attempt to LISTEN.
 	 */
-	hash_seq_init(&seq, localChannelTable);
-	while ((channelEntry = (ChannelName *) hash_seq_search(&seq)) != NULL)
+	foreach_hash(ChannelName, channelEntry, localChannelTable)
 	{
 		pending = (PendingListenEntry *)
 			hash_search(pendingListenActions, channelEntry->channel, HASH_ENTER, NULL);
@@ -1704,9 +1693,6 @@ RemoveListenerFromChannel(GlobalChannelEntry **entry_ptr,
 static void
 ApplyPendingListenActions(bool isCommit)
 {
-	HASH_SEQ_STATUS seq;
-	PendingListenEntry *pending;
-
 	/* Quick exit if nothing to do */
 	if (pendingListenActions == NULL)
 		return;
@@ -1716,8 +1702,7 @@ ApplyPendingListenActions(bool isCommit)
 		elog(PANIC, "global channel table missing post-commit/abort");
 
 	/* For each staged action ... */
-	hash_seq_init(&seq, pendingListenActions);
-	while ((pending = (PendingListenEntry *) hash_seq_search(&seq)) != NULL)
+	foreach_hash(PendingListenEntry, pending, pendingListenActions)
 	{
 		GlobalChannelKey key;
 		GlobalChannelEntry *entry;

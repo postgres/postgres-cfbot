@@ -1046,8 +1046,6 @@ rebuild_database_list(Oid newdb)
 		TimestampTz current_time;
 		int			millis_increment;
 		avl_dbase  *dbary;
-		avl_dbase  *db;
-		HASH_SEQ_STATUS seq;
 		int			i;
 
 		/* put all the hash elements into an array */
@@ -1058,8 +1056,7 @@ rebuild_database_list(Oid newdb)
 #endif
 
 		i = 0;
-		hash_seq_init(&seq, dbhash);
-		while ((db = hash_seq_search(&seq)) != NULL)
+		foreach_hash(avl_dbase, db, dbhash)
 			memcpy(&(dbary[i++]), db, sizeof(avl_dbase));
 
 		/* sort the array */
@@ -1084,7 +1081,7 @@ rebuild_database_list(Oid newdb)
 		 */
 		for (i = 0; i < nelems; i++)
 		{
-			db = &(dbary[i]);
+			avl_dbase  *db = &(dbary[i]);
 
 			current_time = TimestampTzPlusMilliseconds(current_time,
 													   millis_increment);

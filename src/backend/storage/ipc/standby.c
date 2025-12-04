@@ -1107,13 +1107,9 @@ StandbyReleaseLockTree(TransactionId xid, int nsubxids, TransactionId *subxids)
 void
 StandbyReleaseAllLocks(void)
 {
-	HASH_SEQ_STATUS status;
-	RecoveryLockXidEntry *entry;
-
 	elog(DEBUG2, "release all standby locks");
 
-	hash_seq_init(&status, RecoveryLockXidHash);
-	while ((entry = hash_seq_search(&status)))
+	foreach_hash(RecoveryLockXidEntry, entry, RecoveryLockXidHash)
 	{
 		StandbyReleaseXidEntryLocks(entry);
 		hash_search(RecoveryLockXidHash, entry, HASH_REMOVE, NULL);
@@ -1131,11 +1127,7 @@ StandbyReleaseAllLocks(void)
 void
 StandbyReleaseOldLocks(TransactionId oldxid)
 {
-	HASH_SEQ_STATUS status;
-	RecoveryLockXidEntry *entry;
-
-	hash_seq_init(&status, RecoveryLockXidHash);
-	while ((entry = hash_seq_search(&status)))
+	foreach_hash(RecoveryLockXidEntry, entry, RecoveryLockXidHash)
 	{
 		Assert(TransactionIdIsValid(entry->xid));
 

@@ -411,9 +411,6 @@ smgrdestroyall(void)
 void
 smgrreleaseall(void)
 {
-	HASH_SEQ_STATUS status;
-	SMgrRelation reln;
-
 	/* Nothing to do if hashtable not set up */
 	if (SMgrRelationHash == NULL)
 		return;
@@ -421,9 +418,7 @@ smgrreleaseall(void)
 	/* seems unsafe to accept interrupts while iterating */
 	HOLD_INTERRUPTS();
 
-	hash_seq_init(&status, SMgrRelationHash);
-
-	while ((reln = (SMgrRelation) hash_seq_search(&status)) != NULL)
+	foreach_hash(SMgrRelationData, reln, SMgrRelationHash)
 	{
 		smgrrelease(reln);
 	}

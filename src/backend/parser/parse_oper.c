@@ -1109,15 +1109,10 @@ static void
 InvalidateOprCacheCallBack(Datum arg, SysCacheIdentifier cacheid,
 						   uint32 hashvalue)
 {
-	HASH_SEQ_STATUS status;
-	OprCacheEntry *hentry;
-
 	Assert(OprCacheHash != NULL);
 
 	/* Currently we just flush all entries; hard to be smarter ... */
-	hash_seq_init(&status, OprCacheHash);
-
-	while ((hentry = (OprCacheEntry *) hash_seq_search(&status)) != NULL)
+	foreach_hash(OprCacheEntry, hentry, OprCacheHash)
 	{
 		if (hash_search(OprCacheHash,
 						&hentry->key,

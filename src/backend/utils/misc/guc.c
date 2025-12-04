@@ -289,8 +289,6 @@ ProcessConfigFileInternal(GucContext context, bool applySettings, int elevel)
 	const char *ConfFileWithError;
 	ConfigVariable *head,
 			   *tail;
-	HASH_SEQ_STATUS status;
-	GUCHashEntry *hentry;
 
 	/* Parse the main config file into a list of option names and values */
 	ConfFileWithError = ConfigFileName;
@@ -365,8 +363,7 @@ ProcessConfigFileInternal(GucContext context, bool applySettings, int elevel)
 	 * need this so that we can tell below which ones have been removed from
 	 * the file since we last processed it.
 	 */
-	hash_seq_init(&status, guc_hashtab);
-	while ((hentry = (GUCHashEntry *) hash_seq_search(&status)) != NULL)
+	foreach_hash(GUCHashEntry, hentry, guc_hashtab)
 	{
 		struct config_generic *gconf = hentry->gucvar;
 
@@ -450,8 +447,7 @@ ProcessConfigFileInternal(GucContext context, bool applySettings, int elevel)
 	 * boot-time defaults.  If such a variable can't be changed after startup,
 	 * report that and continue.
 	 */
-	hash_seq_init(&status, guc_hashtab);
-	while ((hentry = (GUCHashEntry *) hash_seq_search(&status)) != NULL)
+	foreach_hash(GUCHashEntry, hentry, guc_hashtab)
 	{
 		struct config_generic *gconf = hentry->gucvar;
 
@@ -840,8 +836,6 @@ struct config_generic **
 get_guc_variables(int *num_vars)
 {
 	struct config_generic **result;
-	HASH_SEQ_STATUS status;
-	GUCHashEntry *hentry;
 	int			i;
 
 	*num_vars = hash_get_num_entries(guc_hashtab);
@@ -849,8 +843,7 @@ get_guc_variables(int *num_vars)
 
 	/* Extract pointers from the hash table */
 	i = 0;
-	hash_seq_init(&status, guc_hashtab);
-	while ((hentry = (GUCHashEntry *) hash_seq_search(&status)) != NULL)
+	foreach_hash(GUCHashEntry, hentry, guc_hashtab)
 		result[i++] = hentry->gucvar;
 	Assert(i == *num_vars);
 
@@ -1407,9 +1400,6 @@ check_GUC_init(const struct config_generic *gconf)
 void
 InitializeGUCOptions(void)
 {
-	HASH_SEQ_STATUS status;
-	GUCHashEntry *hentry;
-
 	/*
 	 * Before log_line_prefix could possibly receive a nonempty setting, make
 	 * sure that timezone processing is minimally alive (see elog.c).
@@ -1425,8 +1415,7 @@ InitializeGUCOptions(void)
 	 * Load all variables with their compiled-in defaults, and initialize
 	 * status fields as needed.
 	 */
-	hash_seq_init(&status, guc_hashtab);
-	while ((hentry = (GUCHashEntry *) hash_seq_search(&status)) != NULL)
+	foreach_hash(GUCHashEntry, hentry, guc_hashtab)
 	{
 		/* Check mapping between initial and default value */
 		Assert(check_GUC_init(hentry->gucvar));
@@ -2452,9 +2441,6 @@ AtEOXact_GUC(bool isCommit, int nestLevel)
 void
 BeginReportingGUCOptions(void)
 {
-	HASH_SEQ_STATUS status;
-	GUCHashEntry *hentry;
-
 	/*
 	 * Don't do anything unless talking to an interactive frontend.
 	 */
@@ -2476,8 +2462,7 @@ BeginReportingGUCOptions(void)
 						PGC_INTERNAL, PGC_S_OVERRIDE);
 
 	/* Transmit initial values of interesting variables */
-	hash_seq_init(&status, guc_hashtab);
-	while ((hentry = (GUCHashEntry *) hash_seq_search(&status)) != NULL)
+	foreach_hash(GUCHashEntry, hentry, guc_hashtab)
 	{
 		struct config_generic *conf = hentry->gucvar;
 
@@ -5203,16 +5188,13 @@ void
 MarkGUCPrefixReserved(const char *className)
 {
 	int			classLen = strlen(className);
-	HASH_SEQ_STATUS status;
-	GUCHashEntry *hentry;
 	MemoryContext oldcontext;
 
 	/*
 	 * Check for existing placeholders.  We must actually remove invalid
 	 * placeholders, else future parallel worker startups will fail.
 	 */
-	hash_seq_init(&status, guc_hashtab);
-	while ((hentry = (GUCHashEntry *) hash_seq_search(&status)) != NULL)
+	foreach_hash(GUCHashEntry, hentry, guc_hashtab)
 	{
 		struct config_generic *var = hentry->gucvar;
 

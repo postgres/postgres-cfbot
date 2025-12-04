@@ -55,11 +55,7 @@ static void
 InvalidateTableSpaceCacheCallback(Datum arg, SysCacheIdentifier cacheid,
 								  uint32 hashvalue)
 {
-	HASH_SEQ_STATUS status;
-	TableSpaceCacheEntry *spc;
-
-	hash_seq_init(&status, TableSpaceCacheHash);
-	while ((spc = (TableSpaceCacheEntry *) hash_seq_search(&status)) != NULL)
+	foreach_hash(TableSpaceCacheEntry, spc, TableSpaceCacheHash)
 	{
 		if (spc->opts)
 			pfree(spc->opts);

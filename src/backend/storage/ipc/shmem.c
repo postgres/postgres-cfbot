@@ -1150,8 +1150,6 @@ pg_get_shmem_allocations(PG_FUNCTION_ARGS)
 {
 #define PG_GET_SHMEM_SIZES_COLS 4
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-	HASH_SEQ_STATUS hstat;
-	ShmemIndexEnt *ent;
 	Size		named_allocated = 0;
 	Datum		values[PG_GET_SHMEM_SIZES_COLS];
 	bool		nulls[PG_GET_SHMEM_SIZES_COLS];
@@ -1160,11 +1158,9 @@ pg_get_shmem_allocations(PG_FUNCTION_ARGS)
 
 	LWLockAcquire(ShmemIndexLock, LW_SHARED);
 
-	hash_seq_init(&hstat, ShmemIndex);
-
 	/* output all allocated entries */
 	memset(nulls, 0, sizeof(nulls));
-	while ((ent = (ShmemIndexEnt *) hash_seq_search(&hstat)) != NULL)
+	foreach_hash(ShmemIndexEnt, ent, ShmemIndex)
 	{
 		values[0] = CStringGetTextDatum(ent->key);
 		values[1] = Int64GetDatum((char *) ent->location - (char *) ShmemSegHdr);
@@ -1207,8 +1203,6 @@ pg_get_shmem_allocations_numa(PG_FUNCTION_ARGS)
 {
 #define PG_GET_SHMEM_NUMA_SIZES_COLS 3
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-	HASH_SEQ_STATUS hstat;
-	ShmemIndexEnt *ent;
 	Datum		values[PG_GET_SHMEM_NUMA_SIZES_COLS];
 	bool		nulls[PG_GET_SHMEM_NUMA_SIZES_COLS];
 	Size		os_page_size;
@@ -1260,10 +1254,8 @@ pg_get_shmem_allocations_numa(PG_FUNCTION_ARGS)
 
 	LWLockAcquire(ShmemIndexLock, LW_SHARED);
 
-	hash_seq_init(&hstat, ShmemIndex);
-
 	/* output all allocated entries */
-	while ((ent = (ShmemIndexEnt *) hash_seq_search(&hstat)) != NULL)
+	foreach_hash(ShmemIndexEnt, ent, ShmemIndex)
 	{
 		char	   *startptr,
 				   *endptr;

@@ -95,11 +95,8 @@ static void
 InvalidateTSCacheCallBack(Datum arg, SysCacheIdentifier cacheid, uint32 hashvalue)
 {
 	HTAB	   *hash = (HTAB *) DatumGetPointer(arg);
-	HASH_SEQ_STATUS status;
-	TSAnyCacheEntry *entry;
 
-	hash_seq_init(&status, hash);
-	while ((entry = (TSAnyCacheEntry *) hash_seq_search(&status)) != NULL)
+	foreach_hash(TSAnyCacheEntry, entry, hash)
 		entry->isvalid = false;
 
 	/* Also invalidate the current-config cache if it's pg_ts_config */

@@ -35,7 +35,7 @@
  * used in initially sizing the PortalHashTable in EnablePortalManager().
  * Since the hash table can expand, there's no need to make this overly
  * generous, and keeping it small avoids unnecessary overhead in the
- * hash_seq_search() calls executed during transaction end.
+ * foreach_hash loops executed during transaction end.
  */
 #define PORTALS_PER_USER	   16
 
@@ -617,14 +617,10 @@ PortalDrop(Portal portal, bool isTopCommit)
 void
 PortalHashTableDeleteAll(void)
 {
-	HASH_SEQ_STATUS status;
-	PortalHashEnt *hentry;
-
 	if (PortalHashTable == NULL)
 		return;
 
-	hash_seq_init(&status, PortalHashTable);
-	while ((hentry = hash_seq_search(&status)) != NULL)
+	foreach_hash(PortalHashEnt, hentry, PortalHashTable)
 	{
 		Portal		portal = hentry->portal;
 
@@ -640,8 +636,7 @@ PortalHashTableDeleteAll(void)
 		PortalDrop(portal, false);
 
 		/* Restart the iteration in case that led to other drops */
-		hash_seq_term(&status);
-		hash_seq_init(&status, PortalHashTable);
+		foreach_hash_restart(hentry, PortalHashTable);
 	}
 }
 
@@ -651,14 +646,10 @@ PortalHashTableDeleteAll(void)
 void
 DropQueryEnvPortals(QueryEnvironment *queryEnv)
 {
-	HASH_SEQ_STATUS status;
-	PortalHashEnt *hentry;
-
 	if (PortalHashTable == NULL)
 		return;
 
-	hash_seq_init(&status, PortalHashTable);
-	while ((hentry = hash_seq_search(&status)) != NULL)
+	foreach_hash(PortalHashEnt, hentry, PortalHashTable)
 	{
 		Portal		portal = hentry->portal;
 
@@ -674,8 +665,7 @@ DropQueryEnvPortals(QueryEnvironment *queryEnv)
 		PortalDrop(portal, false);
 
 		/* Restart the iteration in case that led to other drops */
-		hash_seq_term(&status);
-		hash_seq_init(&status, PortalHashTable);
+		foreach_hash_restart(hentry, PortalHashTable);
 	}
 }
 
@@ -727,12 +717,8 @@ bool
 PreCommit_Portals(bool isPrepare)
 {
 	bool		result = false;
-	HASH_SEQ_STATUS status;
-	PortalHashEnt *hentry;
 
-	hash_seq_init(&status, PortalHashTable);
-
-	while ((hentry = (PortalHashEnt *) hash_seq_search(&status)) != NULL)
+	foreach_hash(PortalHashEnt, hentry, PortalHashTable)
 	{
 		Portal		portal = hentry->portal;
 
@@ -814,8 +800,7 @@ PreCommit_Portals(bool isPrepare)
 		 * iteration, because we could have invoked user-defined code that
 		 * caused a drop of the next portal in the hash chain.
 		 */
-		hash_seq_term(&status);
-		hash_seq_init(&status, PortalHashTable);
+		foreach_hash_restart(hentry, PortalHashTable);
 	}
 
 	return result;
@@ -830,12 +815,7 @@ PreCommit_Portals(bool isPrepare)
 void
 AtAbort_Portals(void)
 {
-	HASH_SEQ_STATUS status;
-	PortalHashEnt *hentry;
-
-	hash_seq_init(&status, PortalHashTable);
-
-	while ((hentry = (PortalHashEnt *) hash_seq_search(&status)) != NULL)
+	foreach_hash(PortalHashEnt, hentry, PortalHashTable)
 	{
 		Portal		portal = hentry->portal;
 
@@ -913,12 +893,7 @@ AtAbort_Portals(void)
 void
 AtCleanup_Portals(void)
 {
-	HASH_SEQ_STATUS status;
-	PortalHashEnt *hentry;
-
-	hash_seq_init(&status, PortalHashTable);
-
-	while ((hentry = (PortalHashEnt *) hash_seq_search(&status)) != NULL)
+	foreach_hash(PortalHashEnt, hentry, PortalHashTable)
 	{
 		Portal		portal = hentry->portal;
 
@@ -976,12 +951,7 @@ AtCleanup_Portals(void)
 void
 PortalErrorCleanup(void)
 {
-	HASH_SEQ_STATUS status;
-	PortalHashEnt *hentry;
-
-	hash_seq_init(&status, PortalHashTable);
-
-	while ((hentry = (PortalHashEnt *) hash_seq_search(&status)) != NULL)
+	foreach_hash(PortalHashEnt, hentry, PortalHashTable)
 	{
 		Portal		portal = hentry->portal;
 
@@ -1011,12 +981,7 @@ AtSubCommit_Portals(SubTransactionId mySubid,
 					int parentLevel,
 					ResourceOwner parentXactOwner)
 {
-	HASH_SEQ_STATUS status;
-	PortalHashEnt *hentry;
-
-	hash_seq_init(&status, PortalHashTable);
-
-	while ((hentry = (PortalHashEnt *) hash_seq_search(&status)) != NULL)
+	foreach_hash(PortalHashEnt, hentry, PortalHashTable)
 	{
 		Portal		portal = hentry->portal;
 
@@ -1047,12 +1012,7 @@ AtSubAbort_Portals(SubTransactionId mySubid,
 				   ResourceOwner myXactOwner,
 				   ResourceOwner parentXactOwner)
 {
-	HASH_SEQ_STATUS status;
-	PortalHashEnt *hentry;
-
-	hash_seq_init(&status, PortalHashTable);
-
-	while ((hentry = (PortalHashEnt *) hash_seq_search(&status)) != NULL)
+	foreach_hash(PortalHashEnt, hentry, PortalHashTable)
 	{
 		Portal		portal = hentry->portal;
 
@@ -1159,12 +1119,7 @@ AtSubAbort_Portals(SubTransactionId mySubid,
 void
 AtSubCleanup_Portals(SubTransactionId mySubid)
 {
-	HASH_SEQ_STATUS status;
-	PortalHashEnt *hentry;
-
-	hash_seq_init(&status, PortalHashTable);
-
-	while ((hentry = (PortalHashEnt *) hash_seq_search(&status)) != NULL)
+	foreach_hash(PortalHashEnt, hentry, PortalHashTable)
 	{
 		Portal		portal = hentry->portal;
 
@@ -1199,8 +1154,6 @@ Datum
 pg_cursor(PG_FUNCTION_ARGS)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-	HASH_SEQ_STATUS hash_seq;
-	PortalHashEnt *hentry;
 
 	/*
 	 * We put all the tuples into a tuplestore in one scan of the hashtable.
@@ -1208,8 +1161,7 @@ pg_cursor(PG_FUNCTION_ARGS)
 	 */
 	InitMaterializedSRF(fcinfo, 0);
 
-	hash_seq_init(&hash_seq, PortalHashTable);
-	while ((hentry = hash_seq_search(&hash_seq)) != NULL)
+	foreach_hash(PortalHashEnt, hentry, PortalHashTable)
 	{
 		Portal		portal = hentry->portal;
 		Datum		values[6];
@@ -1238,18 +1190,13 @@ pg_cursor(PG_FUNCTION_ARGS)
 bool
 ThereAreNoReadyPortals(void)
 {
-	HASH_SEQ_STATUS status;
-	PortalHashEnt *hentry;
-
-	hash_seq_init(&status, PortalHashTable);
-
-	while ((hentry = (PortalHashEnt *) hash_seq_search(&status)) != NULL)
+	foreach_hash(PortalHashEnt, hentry, PortalHashTable)
 	{
 		Portal		portal = hentry->portal;
 
 		if (portal->status == PORTAL_READY)
 		{
-			hash_seq_term(&status);
+			foreach_hash_term(hentry);
 			return false;
 		}
 	}
@@ -1277,12 +1224,7 @@ ThereAreNoReadyPortals(void)
 void
 HoldPinnedPortals(void)
 {
-	HASH_SEQ_STATUS status;
-	PortalHashEnt *hentry;
-
-	hash_seq_init(&status, PortalHashTable);
-
-	while ((hentry = (PortalHashEnt *) hash_seq_search(&status)) != NULL)
+	foreach_hash(PortalHashEnt, hentry, PortalHashTable)
 	{
 		Portal		portal = hentry->portal;
 
@@ -1326,15 +1268,11 @@ HoldPinnedPortals(void)
 void
 ForgetPortalSnapshots(void)
 {
-	HASH_SEQ_STATUS status;
-	PortalHashEnt *hentry;
 	int			numPortalSnaps = 0;
 	int			numActiveSnaps = 0;
 
 	/* First, scan PortalHashTable and clear portalSnapshot fields */
-	hash_seq_init(&status, PortalHashTable);
-
-	while ((hentry = (PortalHashEnt *) hash_seq_search(&status)) != NULL)
+	foreach_hash(PortalHashEnt, hentry, PortalHashTable)
 	{
 		Portal		portal = hentry->portal;
 
