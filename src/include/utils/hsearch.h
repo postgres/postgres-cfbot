@@ -121,6 +121,77 @@ typedef struct
 	uint32		hashvalue;		/* hashvalue to start seqscan over hash */
 } HASH_SEQ_STATUS;
 
+extern void hash_seq_init(HASH_SEQ_STATUS *status, HTAB *hashp);
+
+/*
+ * Same as hash_seq_init(), but returns the status struct instead of taking a
+ * pointer. This way we can use it in the initialization clause of a for loop,
+ * which we need in the foreach_hash macro.
+ *
+ * Not intended to be called directly by user code.
+ */
+static inline HASH_SEQ_STATUS
+foreach_hash_start(HTAB *hashp)
+{
+	HASH_SEQ_STATUS status;
+
+	hash_seq_init(&status, hashp);
+	return status;
+}
+
+
+/*
+ * foreach_hash - iterate over all entries in a hash table
+ *
+ * This macro simplifies hash table iteration by combining hash_seq_init
+ * and hash_seq_search into a single for-loop construct.
+ *
+ * Usage:
+ *   foreach_hash(MyEntry, entry, my_hashtable)
+ *   {
+ *       // use entry
+ *   }
+ *
+ * For early termination, use foreach_hash_term() before break:
+ *   foreach_hash(MyEntry, entry, my_hashtable)
+ *   {
+ *       if (found_it)
+ *       {
+ *           foreach_hash_term(entry);
+ *           break;
+ *       }
+ *   }
+ *
+ * This macro actually generates two loops in order to declare two variables of
+ * different types.  The outer loop only iterates once, so we expect optimizing
+ * compilers will unroll it, thereby optimizing it away. (This is the same
+ * trick that's used in the foreach_internal macro in pg_list.h)
+ */
+#define foreach_hash(type, var, htab) \
+	for (type *var = NULL, *var##__outerloop = (type *) 1; \
+		 var##__outerloop; \
+		 var##__outerloop = 0) \
+		for (HASH_SEQ_STATUS var##__status = foreach_hash_start(htab); \
+			 (var = (type *) hash_seq_search(&var##__status)) != NULL; )
+
+/*
+ * foreach_hash_term - terminate a foreach_hash loop early
+ *
+ * Always call this before breaking out of a foreach_hash loop, whether done by
+ * using "break", "return" or "goto". (Not needed when using "continue")
+ */
+#define foreach_hash_term(var) hash_seq_term(&var##__status)
+
+/*
+ * foreach_hash_restart - restart iteration from the beginning
+ *
+ * Use when modifications during iteration may have invalidated the scan.
+ * The next iteration will start from the first entry again.
+ */
+#define foreach_hash_restart(var, htab) \
+	(hash_seq_term(&var##__status), \
+	 hash_seq_init(&var##__status, htab))
+
 /*
  * prototypes for functions in dynahash.c
  */
@@ -137,7 +208,6 @@ extern void *hash_search_with_hash_value(HTAB *hashp, const void *keyPtr,
 extern bool hash_update_hash_key(HTAB *hashp, void *existingEntry,
 								 const void *newKeyPtr);
 extern int64 hash_get_num_entries(HTAB *hashp);
-extern void hash_seq_init(HASH_SEQ_STATUS *status, HTAB *hashp);
 extern void hash_seq_init_with_hash_value(HASH_SEQ_STATUS *status,
 										  HTAB *hashp,
 										  uint32 hashvalue);
