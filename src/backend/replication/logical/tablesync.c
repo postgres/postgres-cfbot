@@ -118,6 +118,7 @@
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/rls.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
@@ -388,12 +389,10 @@ ProcessSyncingTablesForApply(XLogRecPtr current_lsn)
 	 */
 	if (table_states_not_ready != NIL && !last_start_times)
 	{
-		HASHCTL		ctl;
-
-		ctl.keysize = sizeof(Oid);
-		ctl.entrysize = sizeof(struct tablesync_start_time_mapping);
-		last_start_times = hash_create("Logical replication table sync worker start times",
-									   256, &ctl, HASH_ELEM | HASH_BLOBS);
+		last_start_times = hash_make(struct tablesync_start_time_mapping, relid,
+									 "Logical replication table sync worker start times",
+									 256,
+									 .mcxt = TopMemoryContext);
 	}
 
 	/*

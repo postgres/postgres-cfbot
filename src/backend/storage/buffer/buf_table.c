@@ -61,14 +61,11 @@ BufTableShmemRequest(void *arg)
 	 */
 	size = NBuffers + NUM_BUFFER_PARTITIONS;
 
-	ShmemRequestHash(.name = "Shared Buffer Lookup Table",
-					 .nelems = size,
-					 .ptr = &SharedBufHash,
-					 .hash_info.keysize = sizeof(BufferTag),
-					 .hash_info.entrysize = sizeof(BufferLookupEnt),
-					 .hash_info.num_partitions = NUM_BUFFER_PARTITIONS,
-					 .hash_flags = HASH_ELEM | HASH_BLOBS | HASH_PARTITION | HASH_FIXED_SIZE,
-		);
+	ShmemRequestHashMake(BufferLookupEnt, key,
+						 .name = "Shared Buffer Lookup Table",
+						 .nelems = size,
+						 .ptr = &SharedBufHash,
+						 .num_partitions = NUM_BUFFER_PARTITIONS);
 }
 
 /*

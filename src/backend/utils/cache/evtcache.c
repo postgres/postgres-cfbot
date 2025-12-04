@@ -77,7 +77,6 @@ EventCacheLookup(EventTriggerEvent event)
 static void
 BuildEventTriggerCache(void)
 {
-	HASHCTL		ctl;
 	HTAB	   *cache;
 	Relation	rel;
 	Relation	irel;
@@ -114,11 +113,9 @@ BuildEventTriggerCache(void)
 	EventTriggerCacheState = ETCS_REBUILD_STARTED;
 
 	/* Create new hash table. */
-	ctl.keysize = sizeof(EventTriggerEvent);
-	ctl.entrysize = sizeof(EventTriggerCacheEntry);
-	ctl.hcxt = EventTriggerCacheContext;
-	cache = hash_create("EventTriggerCacheHash", 32, &ctl,
-						HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	cache = hash_make(EventTriggerCacheEntry, event,
+					  "EventTriggerCacheHash", 32,
+					  .mcxt = EventTriggerCacheContext);
 
 	/*
 	 * Prepare to scan pg_event_trigger in name order.

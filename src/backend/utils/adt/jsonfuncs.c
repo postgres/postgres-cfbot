@@ -3837,18 +3837,12 @@ static HTAB *
 get_json_object_as_hash(const char *json, int len, const char *funcname,
 						Node *escontext)
 {
-	HASHCTL		ctl;
 	HTAB	   *tab;
 	JHashState *state;
 	JsonSemAction *sem;
 
-	ctl.keysize = NAMEDATALEN;
-	ctl.entrysize = sizeof(JsonHashEntry);
-	ctl.hcxt = CurrentMemoryContext;
-	tab = hash_create("json object hashtable",
-					  100,
-					  &ctl,
-					  HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
+	tab = hash_make(JsonHashEntry, fname,
+					"json object hashtable", 100);
 
 	state = palloc0_object(JHashState);
 	sem = palloc0_object(JsonSemAction);
@@ -4242,7 +4236,6 @@ populate_recordset_object_start(void *state)
 {
 	PopulateRecordsetState *_state = (PopulateRecordsetState *) state;
 	int			lex_level = _state->lex->lex_level;
-	HASHCTL		ctl;
 
 	/* Reject object at top level: we must have an array at level 0 */
 	if (lex_level == 0)
@@ -4256,13 +4249,8 @@ populate_recordset_object_start(void *state)
 		return JSON_SUCCESS;
 
 	/* Object at level 1: set up a new hash table for this object */
-	ctl.keysize = NAMEDATALEN;
-	ctl.entrysize = sizeof(JsonHashEntry);
-	ctl.hcxt = CurrentMemoryContext;
-	_state->json_hash = hash_create("json object hashtable",
-									100,
-									&ctl,
-									HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
+	_state->json_hash = hash_make(JsonHashEntry, fname,
+								  "json object hashtable", 100);
 
 	return JSON_SUCCESS;
 }

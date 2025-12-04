@@ -1978,7 +1978,6 @@ pgoutput_stream_prepare_txn(LogicalDecodingContext *ctx,
 static void
 init_rel_sync_cache(MemoryContext cachectx)
 {
-	HASHCTL		ctl;
 	static bool relation_callbacks_registered = false;
 
 	/* Nothing to do if hash table already exists */
@@ -1986,13 +1985,10 @@ init_rel_sync_cache(MemoryContext cachectx)
 		return;
 
 	/* Make a new hash table for the cache */
-	ctl.keysize = sizeof(Oid);
-	ctl.entrysize = sizeof(RelationSyncEntry);
-	ctl.hcxt = cachectx;
-
-	RelationSyncCache = hash_create("logical replication output relation cache",
-									128, &ctl,
-									HASH_ELEM | HASH_CONTEXT | HASH_BLOBS);
+	RelationSyncCache = hash_make(RelationSyncEntry, relid,
+								  "logical replication output relation cache",
+								  128,
+								  .mcxt = cachectx);
 
 	Assert(RelationSyncCache != NULL);
 

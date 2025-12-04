@@ -327,7 +327,6 @@ ReorderBuffer *
 ReorderBufferAllocate(void)
 {
 	ReorderBuffer *buffer;
-	HASHCTL		hash_ctl;
 	MemoryContext new_ctx;
 
 	Assert(MyReplicationSlot != NULL);
@@ -339,8 +338,6 @@ ReorderBufferAllocate(void)
 
 	buffer =
 		(ReorderBuffer *) MemoryContextAlloc(new_ctx, sizeof(ReorderBuffer));
-
-	memset(&hash_ctl, 0, sizeof(hash_ctl));
 
 	buffer->context = new_ctx;
 
@@ -370,12 +367,9 @@ ReorderBufferAllocate(void)
 												  SLAB_DEFAULT_BLOCK_SIZE,
 												  SLAB_DEFAULT_BLOCK_SIZE);
 
-	hash_ctl.keysize = sizeof(TransactionId);
-	hash_ctl.entrysize = sizeof(ReorderBufferTXNByIdEnt);
-	hash_ctl.hcxt = buffer->context;
-
-	buffer->by_txn = hash_create("ReorderBufferByXid", 1000, &hash_ctl,
-								 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	buffer->by_txn = hash_make(ReorderBufferTXNByIdEnt, xid,
+							   "ReorderBufferByXid", 1000,
+							   .mcxt = buffer->context);
 
 	buffer->by_txn_last_xid = InvalidTransactionId;
 	buffer->by_txn_last_txn = NULL;
@@ -1840,22 +1834,18 @@ static void
 ReorderBufferBuildTupleCidHash(ReorderBuffer *rb, ReorderBufferTXN *txn)
 {
 	dlist_iter	iter;
-	HASHCTL		hash_ctl;
 
 	if (!rbtxn_has_catalog_changes(txn) || dlist_is_empty(&txn->tuplecids))
 		return;
-
-	hash_ctl.keysize = sizeof(ReorderBufferTupleCidKey);
-	hash_ctl.entrysize = sizeof(ReorderBufferTupleCidEnt);
-	hash_ctl.hcxt = rb->context;
 
 	/*
 	 * create the hash with the exact number of to-be-stored tuplecids from
 	 * the start
 	 */
 	txn->tuplecid_hash =
-		hash_create("ReorderBufferTupleCid", txn->ntuplecids, &hash_ctl,
-					HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+		hash_make(ReorderBufferTupleCidEnt, key,
+				  "ReorderBufferTupleCid", txn->ntuplecids,
+				  .mcxt = rb->context);
 
 	dlist_foreach(iter, &txn->tuplecids)
 	{
@@ -5112,15 +5102,11 @@ StartupReorderBuffer(void)
 static void
 ReorderBufferToastInitHash(ReorderBuffer *rb, ReorderBufferTXN *txn)
 {
-	HASHCTL		hash_ctl;
-
 	Assert(txn->toast_hash == NULL);
 
-	hash_ctl.keysize = sizeof(Oid8);
-	hash_ctl.entrysize = sizeof(ReorderBufferToastEnt);
-	hash_ctl.hcxt = rb->context;
-	txn->toast_hash = hash_create("ReorderBufferToastHash", 5, &hash_ctl,
-								  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	txn->toast_hash = hash_make(ReorderBufferToastEnt, chunk_id,
+								"ReorderBufferToastHash", 5,
+								.mcxt = rb->context);
 }
 
 /*

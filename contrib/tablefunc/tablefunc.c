@@ -707,24 +707,17 @@ static HTAB *
 load_categories_hash(char *cats_sql, MemoryContext per_query_ctx)
 {
 	HTAB	   *crosstab_hash;
-	HASHCTL		ctl;
 	int			ret;
 	uint64		proc;
 	MemoryContext SPIcontext;
 
-	/* initialize the category hash table */
-	ctl.keysize = MAX_CATNAME_LEN;
-	ctl.entrysize = sizeof(crosstab_HashEnt);
-	ctl.hcxt = per_query_ctx;
-
 	/*
-	 * use INIT_CATS, defined above as a guess of how many hash table entries
-	 * to create, initially
+	 * Initialize the category hash table. Use INIT_CATS, defined above as a
+	 * guess of how many hash table entries to create, initially.
 	 */
-	crosstab_hash = hash_create("crosstab hash",
-								INIT_CATS,
-								&ctl,
-								HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
+	crosstab_hash = hash_make(crosstab_HashEnt, internal_catname,
+							  "crosstab hash", INIT_CATS,
+							  .mcxt = per_query_ctx);
 
 	/* Connect to SPI manager */
 	SPI_connect();

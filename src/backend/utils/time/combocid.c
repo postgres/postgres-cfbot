@@ -214,8 +214,6 @@ GetComboCommandId(CommandId cmin, CommandId cmax)
 	 */
 	if (comboHash == NULL)
 	{
-		HASHCTL		hash_ctl;
-
 		/* Make array first; existence of hash table asserts array exists */
 		comboCids = (ComboCidKeyData *)
 			MemoryContextAlloc(TopTransactionContext,
@@ -223,14 +221,9 @@ GetComboCommandId(CommandId cmin, CommandId cmax)
 		sizeComboCids = CCID_ARRAY_SIZE;
 		usedComboCids = 0;
 
-		hash_ctl.keysize = sizeof(ComboCidKeyData);
-		hash_ctl.entrysize = sizeof(ComboCidEntryData);
-		hash_ctl.hcxt = TopTransactionContext;
-
-		comboHash = hash_create("Combo CIDs",
-								CCID_HASH_SIZE,
-								&hash_ctl,
-								HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+		comboHash = hash_make(ComboCidEntryData, key,
+							  "Combo CIDs", CCID_HASH_SIZE,
+							  .mcxt = TopTransactionContext);
 	}
 
 	/*

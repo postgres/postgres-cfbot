@@ -131,8 +131,6 @@ InitSync(void)
 	 */
 	if (!IsUnderPostmaster || AmCheckpointerProcess())
 	{
-		HASHCTL		hash_ctl;
-
 		/*
 		 * XXX: The checkpointer needs to add entries to the pending ops table
 		 * when absorbing fsync requests.  That is done within a critical
@@ -147,13 +145,9 @@ InitSync(void)
 											  ALLOCSET_DEFAULT_SIZES);
 		MemoryContextAllowInCriticalSection(pendingOpsCxt, true);
 
-		hash_ctl.keysize = sizeof(FileTag);
-		hash_ctl.entrysize = sizeof(PendingFsyncEntry);
-		hash_ctl.hcxt = pendingOpsCxt;
-		pendingOps = hash_create("Pending Ops Table",
-								 100L,
-								 &hash_ctl,
-								 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+		pendingOps = hash_make(PendingFsyncEntry, tag,
+							   "Pending Ops Table", 100L,
+							   .mcxt = pendingOpsCxt);
 		pendingUnlinks = NIL;
 	}
 }

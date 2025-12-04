@@ -238,17 +238,13 @@ GetConnection(UserMapping *user, bool will_prep_stmt, PgFdwConnState **state)
 	/* First time through, initialize connection cache hashtable */
 	if (ConnectionHash == NULL)
 	{
-		HASHCTL		ctl;
-
 		if (pgfdw_we_get_result == 0)
 			pgfdw_we_get_result =
 				WaitEventExtensionNew("PostgresFdwGetResult");
 
-		ctl.keysize = sizeof(ConnCacheKey);
-		ctl.entrysize = sizeof(ConnCacheEntry);
-		ConnectionHash = hash_create("postgres_fdw connections", 8,
-									 &ctl,
-									 HASH_ELEM | HASH_BLOBS);
+		ConnectionHash = hash_make(ConnCacheEntry, key,
+								   "postgres_fdw connections", 8,
+								   .mcxt = TopMemoryContext);
 
 		/*
 		 * Register some callback functions that manage connection cleanup.

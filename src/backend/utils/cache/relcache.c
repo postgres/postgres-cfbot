@@ -1712,17 +1712,14 @@ LookupOpclassInfo(Oid operatorClassOid,
 
 	if (OpClassCache == NULL)
 	{
-		/* First time through: initialize the opclass cache */
-		HASHCTL		ctl;
-
 		/* Also make sure CacheMemoryContext exists */
 		if (!CacheMemoryContext)
 			CreateCacheMemoryContext();
 
-		ctl.keysize = sizeof(Oid);
-		ctl.entrysize = sizeof(OpClassCacheEnt);
-		OpClassCache = hash_create("Operator class cache", 64,
-								   &ctl, HASH_ELEM | HASH_BLOBS);
+		/* First time through: initialize the opclass cache */
+		OpClassCache = hash_make(OpClassCacheEnt, opclassoid,
+								 "Operator class cache", 64,
+								 .mcxt = TopMemoryContext);
 	}
 
 	opcentry = (OpClassCacheEnt *) hash_search(OpClassCache,
@@ -4025,7 +4022,6 @@ RelationAssumeNewRelfilelocator(Relation relation)
 void
 RelationCacheInitialize(void)
 {
-	HASHCTL		ctl;
 	int			allocsize;
 
 	/*
@@ -4037,10 +4033,9 @@ RelationCacheInitialize(void)
 	/*
 	 * create hashtable that indexes the relcache
 	 */
-	ctl.keysize = sizeof(Oid);
-	ctl.entrysize = sizeof(RelIdCacheEnt);
-	RelationIdCache = hash_create("Relcache by OID", INITRELCACHESIZE,
-								  &ctl, HASH_ELEM | HASH_BLOBS);
+	RelationIdCache = hash_make(RelIdCacheEnt, reloid,
+								"Relcache by OID", INITRELCACHESIZE,
+								.mcxt = TopMemoryContext);
 
 	/*
 	 * reserve enough in_progress_list slots for many cases

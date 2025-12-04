@@ -339,7 +339,6 @@ _PG_init(void)
 	 * plperl_init_interp() as part of required initialization.
 	 */
 	static bool inited = false;
-	HASHCTL		hash_ctl;
 
 	if (inited)
 		return;
@@ -409,19 +408,13 @@ _PG_init(void)
 	/*
 	 * Create hash tables.
 	 */
-	hash_ctl.keysize = sizeof(Oid);
-	hash_ctl.entrysize = sizeof(plperl_interp_desc);
-	plperl_interp_hash = hash_create("PL/Perl interpreters",
-									 8,
-									 &hash_ctl,
-									 HASH_ELEM | HASH_BLOBS);
+	plperl_interp_hash = hash_make(plperl_interp_desc, user_id,
+								   "PL/Perl interpreters", 8,
+								   .mcxt = TopMemoryContext);
 
-	hash_ctl.keysize = sizeof(plperl_proc_key);
-	hash_ctl.entrysize = sizeof(plperl_proc_ptr);
-	plperl_proc_hash = hash_create("PL/Perl procedures",
-								   32,
-								   &hash_ctl,
-								   HASH_ELEM | HASH_BLOBS);
+	plperl_proc_hash = hash_make(plperl_proc_ptr, proc_key,
+								 "PL/Perl procedures", 32,
+								 .mcxt = TopMemoryContext);
 
 	/*
 	 * Save the default opmask.
@@ -537,14 +530,9 @@ select_perl_context(bool trusted)
 	/* Make sure we have a query_hash for this interpreter */
 	if (interp_desc->query_hash == NULL)
 	{
-		HASHCTL		hash_ctl;
-
-		hash_ctl.keysize = NAMEDATALEN;
-		hash_ctl.entrysize = sizeof(plperl_query_entry);
-		interp_desc->query_hash = hash_create("PL/Perl queries",
-											  32,
-											  &hash_ctl,
-											  HASH_ELEM | HASH_STRINGS);
+		interp_desc->query_hash = hash_make(plperl_query_entry, query_name,
+											"PL/Perl queries", 32,
+											.mcxt = TopMemoryContext);
 	}
 
 	/*

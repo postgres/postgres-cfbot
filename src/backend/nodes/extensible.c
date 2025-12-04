@@ -22,6 +22,7 @@
 
 #include "nodes/extensible.h"
 #include "utils/hsearch.h"
+#include "utils/memutils.h"
 
 static HTAB *extensible_node_methods = NULL;
 static HTAB *custom_scan_methods = NULL;
@@ -45,13 +46,9 @@ RegisterExtensibleNodeEntry(HTAB **p_htable, const char *htable_label,
 
 	if (*p_htable == NULL)
 	{
-		HASHCTL		ctl;
-
-		ctl.keysize = EXTNODENAME_MAX_LEN;
-		ctl.entrysize = sizeof(ExtensibleNodeEntry);
-
-		*p_htable = hash_create(htable_label, 100, &ctl,
-								HASH_ELEM | HASH_STRINGS);
+		*p_htable = hash_make(ExtensibleNodeEntry, extnodename,
+							  htable_label, 100,
+							  .mcxt = TopMemoryContext);
 	}
 
 	if (strlen(extnodename) >= EXTNODENAME_MAX_LEN)

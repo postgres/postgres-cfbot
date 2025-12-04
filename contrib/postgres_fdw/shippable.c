@@ -28,6 +28,7 @@
 #include "postgres_fdw.h"
 #include "utils/hsearch.h"
 #include "utils/inval.h"
+#include "utils/memutils.h"
 #include "utils/syscache.h"
 
 /* Hash table for caching the results of shippability lookups */
@@ -87,13 +88,10 @@ InvalidateShippableCacheCallback(Datum arg, SysCacheIdentifier cacheid,
 static void
 InitializeShippableCache(void)
 {
-	HASHCTL		ctl;
-
 	/* Create the hash table. */
-	ctl.keysize = sizeof(ShippableCacheKey);
-	ctl.entrysize = sizeof(ShippableCacheEntry);
-	ShippableCacheHash =
-		hash_create("Shippability cache", 256, &ctl, HASH_ELEM | HASH_BLOBS);
+	ShippableCacheHash = hash_make(ShippableCacheEntry, key,
+								   "Shippability cache", 256,
+								   .mcxt = TopMemoryContext);
 
 	/* Set up invalidation callback on pg_foreign_server. */
 	CacheRegisterSyscacheCallback(FOREIGNSERVEROID,

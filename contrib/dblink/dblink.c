@@ -2690,13 +2690,9 @@ getConnectionByName(const char *name)
 static HTAB *
 createConnHash(void)
 {
-	HASHCTL		ctl;
-
-	ctl.keysize = NAMEDATALEN;
-	ctl.entrysize = sizeof(remoteConnHashEnt);
-
-	return hash_create("Remote Con hash", NUMCONN, &ctl,
-					   HASH_ELEM | HASH_STRINGS);
+	return hash_make(remoteConnHashEnt, name,
+					 "Remote Con hash", NUMCONN,
+					 .mcxt = TopMemoryContext);
 }
 
 static remoteConn *

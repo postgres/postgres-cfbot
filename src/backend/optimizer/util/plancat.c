@@ -701,19 +701,10 @@ get_relation_notnullatts(PlannerInfo *root, Relation relation)
 	/* create the hash table if it hasn't been created yet */
 	if (root->glob->rel_notnullatts_hash == NULL)
 	{
-		HTAB	   *hashtab;
-		HASHCTL		hash_ctl;
-
-		hash_ctl.keysize = sizeof(Oid);
-		hash_ctl.entrysize = sizeof(NotnullHashEntry);
-		hash_ctl.hcxt = CurrentMemoryContext;
-
-		hashtab = hash_create("Relation NOT NULL attnums",
-							  64L,	/* arbitrary initial size */
-							  &hash_ctl,
-							  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
-
-		root->glob->rel_notnullatts_hash = hashtab;
+		root->glob->rel_notnullatts_hash =
+			hash_make(NotnullHashEntry, relid,
+					  "Relation NOT NULL attnums",
+					  64L);		/* arbitrary initial size */
 	}
 
 	/*

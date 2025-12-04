@@ -1125,13 +1125,9 @@ lock_and_open_sequence(SeqTable seq)
 static void
 create_seq_hashtable(void)
 {
-	HASHCTL		ctl;
-
-	ctl.keysize = sizeof(Oid);
-	ctl.entrysize = sizeof(SeqTableData);
-
-	seqhashtab = hash_create("Sequence values", 16, &ctl,
-							 HASH_ELEM | HASH_BLOBS);
+	seqhashtab = hash_make(SeqTableData, relid,
+						   "Sequence values", 16,
+						   .mcxt = TopMemoryContext);
 }
 
 /*

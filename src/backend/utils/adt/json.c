@@ -942,19 +942,9 @@ json_unique_hash_match(const void *key1, const void *key2, Size keysize)
 static void
 json_unique_check_init(JsonUniqueCheckState *cxt)
 {
-	HASHCTL		ctl;
-
-	memset(&ctl, 0, sizeof(ctl));
-	ctl.keysize = sizeof(JsonUniqueHashEntry);
-	ctl.entrysize = sizeof(JsonUniqueHashEntry);
-	ctl.hcxt = CurrentMemoryContext;
-	ctl.hash = json_unique_hash;
-	ctl.match = json_unique_hash_match;
-
-	*cxt = hash_create("json object hashtable",
-					   32,
-					   &ctl,
-					   HASH_ELEM | HASH_CONTEXT | HASH_FUNCTION | HASH_COMPARE);
+	*cxt = hashset_make(JsonUniqueHashEntry, "json object hashtable", 32,
+						.hash = json_unique_hash,
+						.match = json_unique_hash_match);
 }
 
 static void

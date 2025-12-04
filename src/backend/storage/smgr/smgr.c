@@ -73,6 +73,7 @@
 #include "storage/smgr.h"
 #include "utils/hsearch.h"
 #include "utils/inval.h"
+#include "utils/memutils.h"
 
 
 /*
@@ -250,12 +251,9 @@ smgropen(RelFileLocator rlocator, ProcNumber backend)
 	if (SMgrRelationHash == NULL)
 	{
 		/* First time through: initialize the hash table */
-		HASHCTL		ctl;
-
-		ctl.keysize = sizeof(RelFileLocatorBackend);
-		ctl.entrysize = sizeof(SMgrRelationData);
-		SMgrRelationHash = hash_create("smgr relation table", 400,
-									   &ctl, HASH_ELEM | HASH_BLOBS);
+		SMgrRelationHash = hash_make(SMgrRelationData, smgr_rlocator,
+									 "smgr relation table", 400,
+									 .mcxt = TopMemoryContext);
 		dlist_init(&unpinned_relns);
 	}
 

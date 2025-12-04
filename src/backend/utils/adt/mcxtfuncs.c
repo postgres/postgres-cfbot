@@ -188,17 +188,10 @@ pg_get_backend_memory_contexts(PG_FUNCTION_ARGS)
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	int			context_id;
 	List	   *contexts;
-	HASHCTL		ctl;
 	HTAB	   *context_id_lookup;
 
-	ctl.keysize = sizeof(MemoryContext);
-	ctl.entrysize = sizeof(MemoryContextId);
-	ctl.hcxt = CurrentMemoryContext;
-
-	context_id_lookup = hash_create("pg_get_backend_memory_contexts",
-									256,
-									&ctl,
-									HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	context_id_lookup = hash_make(MemoryContextId, context,
+								  "pg_get_backend_memory_contexts", 256);
 
 	InitMaterializedSRF(fcinfo, 0);
 

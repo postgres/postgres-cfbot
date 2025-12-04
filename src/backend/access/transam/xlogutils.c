@@ -27,6 +27,7 @@
 #include "storage/fd.h"
 #include "storage/smgr.h"
 #include "utils/hsearch.h"
+#include "utils/memutils.h"
 #include "utils/rel.h"
 
 
@@ -131,15 +132,9 @@ log_invalid_page(RelFileLocator locator, ForkNumber forkno, BlockNumber blkno,
 	if (invalid_page_tab == NULL)
 	{
 		/* create hash table when first needed */
-		HASHCTL		ctl;
-
-		ctl.keysize = sizeof(xl_invalid_page_key);
-		ctl.entrysize = sizeof(xl_invalid_page);
-
-		invalid_page_tab = hash_create("XLOG invalid-page table",
-									   100,
-									   &ctl,
-									   HASH_ELEM | HASH_BLOBS);
+		invalid_page_tab = hash_make(xl_invalid_page, key,
+									 "XLOG invalid-page table", 100,
+									 .mcxt = TopMemoryContext);
 	}
 
 	/* we currently assume xl_invalid_page_key contains no padding */

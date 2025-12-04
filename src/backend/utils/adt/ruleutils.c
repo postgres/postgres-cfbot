@@ -3896,7 +3896,6 @@ static void
 set_rtable_names(deparse_namespace *dpns, List *parent_namespaces,
 				 Bitmapset *rels_used)
 {
-	HASHCTL		hash_ctl;
 	HTAB	   *names_hash;
 	NameHashEntry *hentry;
 	bool		found;
@@ -3912,13 +3911,9 @@ set_rtable_names(deparse_namespace *dpns, List *parent_namespaces,
 	 * We use a hash table to hold known names, so that this process is O(N)
 	 * not O(N^2) for N names.
 	 */
-	hash_ctl.keysize = NAMEDATALEN;
-	hash_ctl.entrysize = sizeof(NameHashEntry);
-	hash_ctl.hcxt = CurrentMemoryContext;
-	names_hash = hash_create("set_rtable_names names",
-							 list_length(dpns->rtable),
-							 &hash_ctl,
-							 HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
+	names_hash = hash_make(NameHashEntry, name,
+						   "set_rtable_names names",
+						   list_length(dpns->rtable));
 
 	/* Preload the hash table with names appearing in parent_namespaces */
 	foreach(lc, parent_namespaces)
@@ -4989,7 +4984,6 @@ expand_colnames_array_to(deparse_columns *colinfo, int n)
 static void
 build_colinfo_names_hash(deparse_columns *colinfo)
 {
-	HASHCTL		hash_ctl;
 	int			i;
 	ListCell   *lc;
 
@@ -5005,13 +4999,10 @@ build_colinfo_names_hash(deparse_columns *colinfo)
 	 * Set up the hash table.  The entries are just strings with no other
 	 * payload.
 	 */
-	hash_ctl.keysize = NAMEDATALEN;
-	hash_ctl.entrysize = NAMEDATALEN;
-	hash_ctl.hcxt = CurrentMemoryContext;
-	colinfo->names_hash = hash_create("deparse_columns names",
-									  colinfo->num_cols + colinfo->num_new_cols,
-									  &hash_ctl,
-									  HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
+	colinfo->names_hash =
+		hashset_make(NameData, "deparse_columns names",
+					 colinfo->num_cols + colinfo->num_new_cols,
+					 .mcxt = CurrentMemoryContext);
 
 	/*
 	 * Preload the hash table with any names already present (these would have

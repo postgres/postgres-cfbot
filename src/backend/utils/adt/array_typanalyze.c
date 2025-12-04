@@ -223,7 +223,6 @@ compute_array_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 
 	/* This is D from the LC algorithm. */
 	HTAB	   *elements_tab;
-	HASHCTL		elem_hash_ctl;
 
 	/* This is the current bucket number from the LC algorithm */
 	int			b_current;
@@ -234,7 +233,6 @@ compute_array_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 	int64		element_no;
 	int			slot_idx;
 	HTAB	   *count_tab;
-	HASHCTL		count_hash_ctl;
 
 	extra_data = (ArrayAnalyzeExtraData *) stats->extra_data;
 
@@ -273,24 +271,14 @@ compute_array_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 	 * worry about overflowing the initial size. Also we don't need to pay any
 	 * attention to locking and memory management.
 	 */
-	elem_hash_ctl.keysize = sizeof(Datum);
-	elem_hash_ctl.entrysize = sizeof(TrackItem);
-	elem_hash_ctl.hash = element_hash;
-	elem_hash_ctl.match = element_match;
-	elem_hash_ctl.hcxt = CurrentMemoryContext;
-	elements_tab = hash_create("Analyzed elements table",
-							   num_mcelem,
-							   &elem_hash_ctl,
-							   HASH_ELEM | HASH_FUNCTION | HASH_COMPARE | HASH_CONTEXT);
+	elements_tab = hash_make(TrackItem, key,
+							 "Analyzed elements table", num_mcelem,
+							 .hash = element_hash,
+							 .match = element_match);
 
 	/* hashtable for array distinct elements counts */
-	count_hash_ctl.keysize = sizeof(int);
-	count_hash_ctl.entrysize = sizeof(DECountItem);
-	count_hash_ctl.hcxt = CurrentMemoryContext;
-	count_tab = hash_create("Array distinct element count table",
-							64,
-							&count_hash_ctl,
-							HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	count_tab = hash_make(DECountItem, count,
+						  "Array distinct element count table", 64);
 
 	/* Initialize counters. */
 	b_current = 1;

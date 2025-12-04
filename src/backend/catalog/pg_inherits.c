@@ -257,19 +257,12 @@ find_all_inheritors(Oid parentrelId, LOCKMODE lockmode, List **numparents)
 {
 	/* hash table for O(1) rel_oid -> rel_numparents cell lookup */
 	HTAB	   *seen_rels;
-	HASHCTL		ctl;
 	List	   *rels_list,
 			   *rel_numparents;
 	ListCell   *l;
 
-	ctl.keysize = sizeof(Oid);
-	ctl.entrysize = sizeof(SeenRelsEntry);
-	ctl.hcxt = CurrentMemoryContext;
-
-	seen_rels = hash_create("find_all_inheritors temporary table",
-							32, /* start small and extend */
-							&ctl,
-							HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	seen_rels = hash_make(SeenRelsEntry, rel_id,
+						  "find_all_inheritors temporary table", 32);
 
 	/*
 	 * We build a list starting with the given rel and adding all direct and

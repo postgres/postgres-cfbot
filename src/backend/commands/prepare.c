@@ -373,15 +373,9 @@ EvaluateParams(ParseState *pstate, PreparedStatement *pstmt, List *params,
 static void
 InitQueryHashTable(void)
 {
-	HASHCTL		hash_ctl;
-
-	hash_ctl.keysize = NAMEDATALEN;
-	hash_ctl.entrysize = sizeof(PreparedStatement);
-
-	prepared_queries = hash_create("Prepared Queries",
-								   32,
-								   &hash_ctl,
-								   HASH_ELEM | HASH_STRINGS);
+	prepared_queries = hash_make(PreparedStatement, stmt_name,
+								 "Prepared Queries", 32,
+								 .mcxt = TopMemoryContext);
 }
 
 /*

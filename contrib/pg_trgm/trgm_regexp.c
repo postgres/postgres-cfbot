@@ -895,7 +895,6 @@ convertPgWchar(pg_wchar c, trgm_mb_char *result)
 static void
 transformGraph(TrgmNFA *trgmNFA)
 {
-	HASHCTL		hashCtl;
 	TrgmStateKey initkey;
 	TrgmState  *initstate;
 	ListCell   *lc;
@@ -907,13 +906,7 @@ transformGraph(TrgmNFA *trgmNFA)
 	trgmNFA->overflowed = false;
 
 	/* Create hashtable for states */
-	hashCtl.keysize = sizeof(TrgmStateKey);
-	hashCtl.entrysize = sizeof(TrgmState);
-	hashCtl.hcxt = CurrentMemoryContext;
-	trgmNFA->states = hash_create("Trigram NFA",
-								  1024,
-								  &hashCtl,
-								  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	trgmNFA->states = hash_make(TrgmState, stateKey, "Trigram NFA", 1024);
 	trgmNFA->nstates = 0;
 
 	/* Create initial state: ambiguous prefix, NFA's initial state */

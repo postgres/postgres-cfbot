@@ -390,32 +390,28 @@ lookup_type_cache(Oid type_id, int flags)
 	if (RelIdToTypeIdCacheHash == NULL)
 	{
 		/* First time through: initialize the hash table */
-		HASHCTL		ctl;
-
 		if (TypeCacheHash == NULL)
 		{
-			ctl.keysize = sizeof(Oid);
-			ctl.entrysize = sizeof(TypeCacheEntry);
-
 			/*
 			 * TypeCacheEntry takes hash value from the system cache. For
 			 * TypeCacheHash we use the same hash in order to speedup search
 			 * by hash value. This is used by hash_seq_init_with_hash_value().
 			 */
-			ctl.hash = type_cache_syshash;
-
-			TypeCacheHash = hash_create("Type information cache", 64,
-										&ctl, HASH_ELEM | HASH_FUNCTION);
+			TypeCacheHash = hash_make(TypeCacheEntry, type_id,
+									  "Type information cache", 64,
+									  .hash = type_cache_syshash,
+									  .match = NULL,
+									  .mcxt = TopMemoryContext);
 		}
 
 		/* Also make sure CacheMemoryContext exists */
 		if (!CacheMemoryContext)
 			CreateCacheMemoryContext();
 
-		ctl.keysize = sizeof(Oid);
-		ctl.entrysize = sizeof(RelIdToTypeIdCacheEntry);
-		RelIdToTypeIdCacheHash = hash_create("Map from relid to OID of cached composite type", 64,
-											 &ctl, HASH_ELEM | HASH_BLOBS);
+		RelIdToTypeIdCacheHash = hash_make(RelIdToTypeIdCacheEntry, relid,
+										   "Map from relid to OID of cached composite type",
+										   64,
+										   .mcxt = TopMemoryContext);
 
 		/*
 		 * Set up callbacks for SI invalidations.  These steps are done last,
@@ -2052,15 +2048,11 @@ assign_record_type_typmod(TupleDesc tupDesc)
 	if (RecordCacheHash == NULL)
 	{
 		/* First time through: initialize the hash table */
-		HASHCTL		ctl;
-
-		ctl.keysize = sizeof(TupleDesc);	/* just the pointer */
-		ctl.entrysize = sizeof(RecordCacheEntry);
-		ctl.hash = record_type_typmod_hash;
-		ctl.match = record_type_typmod_compare;
-		RecordCacheHash = hash_create("Record information cache", 64,
-									  &ctl,
-									  HASH_ELEM | HASH_FUNCTION | HASH_COMPARE);
+		RecordCacheHash = hash_make(RecordCacheEntry, tupdesc,
+									"Record information cache", 64,
+									.hash = record_type_typmod_hash,
+									.match = record_type_typmod_compare,
+									.mcxt = TopMemoryContext);
 
 		/* Also make sure CacheMemoryContext exists */
 		if (!CacheMemoryContext)

@@ -238,7 +238,6 @@ begin_heap_rewrite(Relation old_heap, Relation new_heap, TransactionId oldest_xm
 	RewriteState state;
 	MemoryContext rw_cxt;
 	MemoryContext old_cxt;
-	HASHCTL		hash_ctl;
 
 	/*
 	 * To ease cleanup, make a separate context that will contain the
@@ -263,24 +262,19 @@ begin_heap_rewrite(Relation old_heap, Relation new_heap, TransactionId oldest_xm
 	state->rs_cxt = rw_cxt;
 	state->rs_bulkstate = smgr_bulk_start_rel(new_heap, MAIN_FORKNUM);
 
-	/* Initialize hash tables used to track update chains */
-	hash_ctl.keysize = sizeof(TidHashKey);
-	hash_ctl.entrysize = sizeof(UnresolvedTupData);
-	hash_ctl.hcxt = state->rs_cxt;
-
+	/*
+	 * Initialize hash tables used to track update chains (with arbitrary
+	 * initial sizes)
+	 */
 	state->rs_unresolved_tups =
-		hash_create("Rewrite / Unresolved ctids",
-					128,		/* arbitrary initial size */
-					&hash_ctl,
-					HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
-
-	hash_ctl.entrysize = sizeof(OldToNewMappingData);
+		hash_make(UnresolvedTupData, key,
+				  "Rewrite / Unresolved ctids", 128,
+				  .mcxt = state->rs_cxt);
 
 	state->rs_old_new_tid_map =
-		hash_create("Rewrite / Old to new tid map",
-					128,		/* arbitrary initial size */
-					&hash_ctl,
-					HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+		hash_make(OldToNewMappingData, key,
+				  "Rewrite / Old to new tid map", 128,
+				  .mcxt = state->rs_cxt);
 
 	MemoryContextSwitchTo(old_cxt);
 
@@ -766,7 +760,6 @@ raw_heap_insert(RewriteState state, HeapTuple tup)
 static void
 logical_begin_heap_rewrite(RewriteState state)
 {
-	HASHCTL		hash_ctl;
 	TransactionId logical_xmin;
 
 	/*
@@ -797,15 +790,11 @@ logical_begin_heap_rewrite(RewriteState state)
 	state->rs_begin_lsn = GetXLogInsertRecPtr();
 	state->rs_num_rewrite_mappings = 0;
 
-	hash_ctl.keysize = sizeof(TransactionId);
-	hash_ctl.entrysize = sizeof(RewriteMappingFile);
-	hash_ctl.hcxt = state->rs_cxt;
-
 	state->rs_logical_mappings =
-		hash_create("Logical rewrite mapping",
-					128,		/* arbitrary initial size */
-					&hash_ctl,
-					HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+		hash_make(RewriteMappingFile, xid,
+				  "Logical rewrite mapping",
+				  128,			/* arbitrary initial size */
+				  .mcxt = state->rs_cxt);
 }
 
 /*

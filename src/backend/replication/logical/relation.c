@@ -95,8 +95,6 @@ logicalrep_relmap_invalidate_cb(Datum arg, Oid reloid)
 static void
 logicalrep_relmap_init(void)
 {
-	HASHCTL		ctl;
-
 	if (!LogicalRepRelMapContext)
 		LogicalRepRelMapContext =
 			AllocSetContextCreate(CacheMemoryContext,
@@ -104,12 +102,9 @@ logicalrep_relmap_init(void)
 								  ALLOCSET_DEFAULT_SIZES);
 
 	/* Initialize the relation hash table. */
-	ctl.keysize = sizeof(LogicalRepRelId);
-	ctl.entrysize = sizeof(LogicalRepRelMapEntry);
-	ctl.hcxt = LogicalRepRelMapContext;
-
-	LogicalRepRelMap = hash_create("logicalrep relation map cache", 128, &ctl,
-								   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	LogicalRepRelMap = hash_make(LogicalRepRelMapEntry, remoterel.remoteid,
+								 "logicalrep relation map cache", 128,
+								 .mcxt = LogicalRepRelMapContext);
 
 	/* Watch for invalidation events. */
 	CacheRegisterRelcacheCallback(logicalrep_relmap_invalidate_cb,
@@ -587,8 +582,6 @@ logicalrep_partmap_reset_relmap(LogicalRepRelation *remoterel)
 static void
 logicalrep_partmap_init(void)
 {
-	HASHCTL		ctl;
-
 	if (!LogicalRepPartMapContext)
 		LogicalRepPartMapContext =
 			AllocSetContextCreate(CacheMemoryContext,
@@ -596,12 +589,9 @@ logicalrep_partmap_init(void)
 								  ALLOCSET_DEFAULT_SIZES);
 
 	/* Initialize the relation hash table. */
-	ctl.keysize = sizeof(Oid);	/* partition OID */
-	ctl.entrysize = sizeof(LogicalRepPartMapEntry);
-	ctl.hcxt = LogicalRepPartMapContext;
-
-	LogicalRepPartMap = hash_create("logicalrep partition map cache", 64, &ctl,
-									HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	LogicalRepPartMap = hash_make(LogicalRepPartMapEntry, partoid,
+								  "logicalrep partition map cache", 64,
+								  .mcxt = LogicalRepPartMapContext);
 
 	/* Watch for invalidation events. */
 	CacheRegisterRelcacheCallback(logicalrep_partmap_invalidate_cb,

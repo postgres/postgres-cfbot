@@ -81,7 +81,6 @@ RelfilenumberMapInvalidateCallback(Datum arg, Oid relid)
 static void
 InitializeRelfilenumberMap(void)
 {
-	HASHCTL		ctl;
 	int			i;
 
 	/* Make sure we've initialized CacheMemoryContext. */
@@ -109,13 +108,10 @@ InitializeRelfilenumberMap(void)
 	 * initialized when fmgr_info_cxt() above ERRORs out with an out of memory
 	 * error.
 	 */
-	ctl.keysize = sizeof(RelfilenumberMapKey);
-	ctl.entrysize = sizeof(RelfilenumberMapEntry);
-	ctl.hcxt = CacheMemoryContext;
-
 	RelfilenumberMapHash =
-		hash_create("RelfilenumberMap cache", 64, &ctl,
-					HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+		hash_make(RelfilenumberMapEntry, key,
+				  "RelfilenumberMap cache", 64,
+				  .mcxt = CacheMemoryContext);
 
 	/* Watch for invalidation events. */
 	CacheRegisterRelcacheCallback(RelfilenumberMapInvalidateCallback,

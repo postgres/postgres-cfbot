@@ -738,8 +738,8 @@ InitShmemAllocator(PGShmemHeader *seghdr)
 	 * Create (or attach to) the shared memory index of shmem areas.
 	 *
 	 * This is the same initialization as ShmemInitHash() does, but we cannot
-	 * use ShmemInitHash() here because it relies on ShmemIndex being already
-	 * initialized.
+	 * use ShmemInitHash() nor ShmemRequestHash() here because it relies on
+	 * ShmemIndex being already initialized.
 	 */
 	hash_nelems = list_length(pending_shmem_requests) + SHMEM_INDEX_ADDITIONAL_SIZE;
 

@@ -90,15 +90,9 @@ AddPendingSync(const RelFileLocator *rlocator)
 
 	/* create the hash if not yet */
 	if (!pendingSyncHash)
-	{
-		HASHCTL		ctl;
-
-		ctl.keysize = sizeof(RelFileLocator);
-		ctl.entrysize = sizeof(PendingRelSync);
-		ctl.hcxt = TopTransactionContext;
-		pendingSyncHash = hash_create("pending sync hash", 16, &ctl,
-									  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
-	}
+		pendingSyncHash = hash_make(PendingRelSync, rlocator,
+									"pending sync hash", 16,
+									.mcxt = TopTransactionContext);
 
 	pending = hash_search(pendingSyncHash, rlocator, HASH_ENTER, &found);
 	Assert(!found);
@@ -610,7 +604,6 @@ void
 SerializePendingSyncs(Size maxSize, char *startAddress)
 {
 	HTAB	   *tmphash;
-	HASHCTL		ctl;
 	PendingRelDelete *delete;
 	RelFileLocator *dest = (RelFileLocator *) startAddress;
 
@@ -618,12 +611,8 @@ SerializePendingSyncs(Size maxSize, char *startAddress)
 		goto terminate;
 
 	/* Create temporary hash to collect active relfilelocators */
-	ctl.keysize = sizeof(RelFileLocator);
-	ctl.entrysize = sizeof(RelFileLocator);
-	ctl.hcxt = CurrentMemoryContext;
-	tmphash = hash_create("tmp relfilelocators",
-						  hash_get_num_entries(pendingSyncHash), &ctl,
-						  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	tmphash = hashset_make(RelFileLocator, "tmp relfilelocators",
+						   hash_get_num_entries(pendingSyncHash));
 
 	/* collect all rlocator from pending syncs */
 	foreach_hash(PendingRelSync, sync, pendingSyncHash)

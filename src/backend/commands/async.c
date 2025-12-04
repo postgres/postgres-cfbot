@@ -750,21 +750,15 @@ initGlobalChannelTable(void)
 static void
 initLocalChannelTable(void)
 {
-	HASHCTL		hash_ctl;
-
 	/* Quick exit if we already did this */
 	if (localChannelTable != NULL)
 		return;
 
 	/* Initialize local hash table for this backend's listened channels */
-	hash_ctl.keysize = NAMEDATALEN;
-	hash_ctl.entrysize = sizeof(ChannelName);
-
 	localChannelTable =
-		hash_create("Local Listen Channels",
-					64,
-					&hash_ctl,
-					HASH_ELEM | HASH_STRINGS);
+		hash_make(ChannelName, channel, "Local Listen Channels",
+				  64,
+				  .mcxt = TopMemoryContext);
 }
 
 /*
@@ -776,20 +770,13 @@ initLocalChannelTable(void)
 static void
 initPendingListenActions(void)
 {
-	HASHCTL		hash_ctl;
-
 	if (pendingListenActions != NULL)
 		return;
 
-	hash_ctl.keysize = NAMEDATALEN;
-	hash_ctl.entrysize = sizeof(PendingListenEntry);
-	hash_ctl.hcxt = CurTransactionContext;
-
 	pendingListenActions =
-		hash_create("Pending Listen Actions",
-					list_length(pendingActions->actions),
-					&hash_ctl,
-					HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
+		hash_make(PendingListenEntry, channel, "Pending Listen Actions",
+				  list_length(pendingActions->actions),
+				  .mcxt = CurTransactionContext);
 }
 
 /*
@@ -3156,31 +3143,22 @@ AddEventToPendingNotifies(Notification *n)
 	if (list_length(pendingNotifies->events) >= MIN_HASHABLE_NOTIFIES &&
 		pendingNotifies->hashtab == NULL)
 	{
-		HASHCTL		hash_ctl;
 		ListCell   *l;
 
 		/* Create the hash table */
-		hash_ctl.keysize = sizeof(Notification *);
-		hash_ctl.entrysize = sizeof(struct NotificationHash);
-		hash_ctl.hash = notification_hash;
-		hash_ctl.match = notification_match;
-		hash_ctl.hcxt = CurTransactionContext;
 		pendingNotifies->hashtab =
-			hash_create("Pending Notifies",
-						256L,
-						&hash_ctl,
-						HASH_ELEM | HASH_FUNCTION | HASH_COMPARE | HASH_CONTEXT);
+			hash_make(struct NotificationHash, event,
+					  "Pending Notifies", 256,
+					  .hash = notification_hash,
+					  .match = notification_match,
+					  .mcxt = CurTransactionContext);
 
 		/* Create the unique channel name table */
 		Assert(pendingNotifies->uniqueChannelHash == NULL);
-		hash_ctl.keysize = NAMEDATALEN;
-		hash_ctl.entrysize = sizeof(ChannelName);
-		hash_ctl.hcxt = CurTransactionContext;
 		pendingNotifies->uniqueChannelHash =
-			hash_create("Pending Notify Channel Names",
-						64L,
-						&hash_ctl,
-						HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
+			hash_make(ChannelName, channel, "Pending Notify Channel Names",
+					  64L,
+					  .mcxt = CurTransactionContext);
 
 		/* Insert all the already-existing events */
 		foreach(l, pendingNotifies->events)
