@@ -1201,6 +1201,7 @@ set_max_safe_fds(void)
 {
 	int			usable_fds;
 	int			already_open;
+	char	   *max_safe_fds_string;
 
 	/*----------
 	 * We want to set max_safe_fds to
@@ -1215,6 +1216,15 @@ set_max_safe_fds(void)
 					 &usable_fds, &already_open);
 
 	max_safe_fds = Min(usable_fds, max_files_per_process);
+
+	/*
+	 * Update the GUC to the value we actually use, so users can see when it
+	 * differs from what they had configured.
+	 */
+	max_safe_fds_string = psprintf("%d", max_safe_fds);
+	SetConfigOption("max_files_per_process", max_safe_fds_string,
+					PGC_POSTMASTER, PGC_S_OVERRIDE);
+	pfree(max_safe_fds_string);
 
 	/*
 	 * Take off the FDs reserved for system() etc.
