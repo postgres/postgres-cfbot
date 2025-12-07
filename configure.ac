@@ -1877,6 +1877,7 @@ AC_CHECK_FUNCS(m4_normalize([
 	localeconv_l
 	mbstowcs_l
 	memset_explicit
+	pipe2
 	posix_fallocate
 	ppoll
 	pthread_is_threaded_np

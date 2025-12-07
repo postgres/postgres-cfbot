@@ -165,9 +165,9 @@ RestoreArchivedFile(char *path, const char *xlogfname,
 	/*
 	 * PreRestoreCommand() informs the SIGTERM handler for the startup process
 	 * that it should proc_exit() right away.  This is done for the duration
-	 * of the system() call because there isn't a good way to break out while
-	 * it is executing.  Since we might call proc_exit() in a signal handler,
-	 * it is best to put any additional logic before or after the
+	 * of the pg_system() call because there isn't a good way to break out
+	 * while it is executing.  Since we might call proc_exit() in a signal
+	 * handler, it is best to put any additional logic before or after the
 	 * PreRestoreCommand()/PostRestoreCommand() section.
 	 */
 	PreRestoreCommand();
@@ -175,7 +175,7 @@ RestoreArchivedFile(char *path, const char *xlogfname,
 	/*
 	 * Copy xlog from archival storage to XLOGDIR
 	 */
-	rc = system(xlogRestoreCmd);
+	rc = pg_system(xlogRestoreCmd);
 
 	PostRestoreCommand();
 
@@ -248,9 +248,9 @@ RestoreArchivedFile(char *path, const char *xlogfname,
 	 * However, if the failure was due to any sort of signal, it's best to
 	 * punt and abort recovery.  (If we "return false" here, upper levels will
 	 * assume that recovery is complete and start up the database!) It's
-	 * essential to abort on child SIGINT and SIGQUIT, because per spec
-	 * system() ignores SIGINT and SIGQUIT while waiting; if we see one of
-	 * those it's a good bet we should have gotten it too.
+	 * essential to abort on child SIGINT and SIGQUIT, because the postmaster
+	 * sends those to our whole process group; if the restore command died on
+	 * one of those, the signal was most likely meant for us too.
 	 *
 	 * On SIGTERM, assume we have received a fast shutdown request, and exit
 	 * cleanly. It's pure chance whether we receive the SIGTERM first, or the
@@ -328,7 +328,7 @@ ExecuteRecoveryCommand(const char *command, const char *commandName,
 	 */
 	fflush(NULL);
 	pgstat_report_wait_start(wait_event_info);
-	rc = system(xlogRecoveryCmd);
+	rc = pg_system(xlogRecoveryCmd);
 	pgstat_report_wait_end();
 
 	pfree(xlogRecoveryCmd);

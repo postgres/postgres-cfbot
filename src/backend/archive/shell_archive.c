@@ -22,6 +22,7 @@
 #include "archive/shell_archive.h"
 #include "common/percentrepl.h"
 #include "pgstat.h"
+#include "storage/fd.h"
 #include "utils/wait_event.h"
 
 static bool shell_archive_configured(ArchiveModuleState *state);
@@ -78,18 +79,18 @@ shell_archive_file(ArchiveModuleState *state, const char *file,
 
 	fflush(NULL);
 	pgstat_report_wait_start(WAIT_EVENT_ARCHIVE_COMMAND);
-	rc = system(xlogarchcmd);
+	rc = pg_system(xlogarchcmd);
 	pgstat_report_wait_end();
 
 	if (rc != 0)
 	{
 		/*
 		 * If either the shell itself, or a called command, died on a signal,
-		 * abort the archiver.  We do this because system() ignores SIGINT and
-		 * SIGQUIT while waiting; so a signal is very likely something that
-		 * should have interrupted us too.  Also die if the shell got a hard
-		 * "command not found" type of error.  If we overreact it's no big
-		 * deal, the postmaster will just start the archiver again.
+		 * abort the archiver.  We do this because a signal is very likely
+		 * something that should have interrupted us too, e.g. because the
+		 * postmaster signaled our whole process group.  Also die if the shell
+		 * got a hard "command not found" type of error.  If we overreact it's
+		 * no big deal, the postmaster will just start the archiver again.
 		 */
 		int			lev = wait_result_is_any_signal(rc, true) ? FATAL : LOG;
 
