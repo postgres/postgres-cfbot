@@ -159,10 +159,9 @@ RestoreArchivedFile(char *path, const char *xlogfname,
 			(errmsg_internal("executing restore command \"%s\"",
 							 xlogRestoreCmd)));
 
-	fflush(NULL);
-	pgstat_report_wait_start(WAIT_EVENT_RESTORE_COMMAND);
-
 	/*
+	 * Copy xlog from archival storage to XLOGDIR
+	 *
 	 * PreRestoreCommand() informs the SIGTERM handler for the startup process
 	 * that it should proc_exit() right away.  This is done for the duration
 	 * of the system() call because there isn't a good way to break out while
@@ -170,16 +169,13 @@ RestoreArchivedFile(char *path, const char *xlogfname,
 	 * it is best to put any additional logic before or after the
 	 * PreRestoreCommand()/PostRestoreCommand() section.
 	 */
+	fflush(NULL);
+	pgstat_report_wait_start(WAIT_EVENT_RESTORE_COMMAND);
 	PreRestoreCommand();
-
-	/*
-	 * Copy xlog from archival storage to XLOGDIR
-	 */
-	rc = system(xlogRestoreCmd);
-
+	rc = pg_system(xlogRestoreCmd);
 	PostRestoreCommand();
-
 	pgstat_report_wait_end();
+
 	pfree(xlogRestoreCmd);
 
 	if (rc == 0)
@@ -328,7 +324,7 @@ ExecuteRecoveryCommand(const char *command, const char *commandName,
 	 */
 	fflush(NULL);
 	pgstat_report_wait_start(wait_event_info);
-	rc = system(xlogRecoveryCmd);
+	rc = pg_system(xlogRecoveryCmd);
 	pgstat_report_wait_end();
 
 	pfree(xlogRecoveryCmd);
