@@ -80,6 +80,7 @@
 #include <sys/types.h>
 #ifndef WIN32
 #include <sys/mman.h>
+#include <sys/wait.h>
 #endif
 #include <limits.h>
 #include <unistd.h>
@@ -91,6 +92,7 @@
 #include "common/file_perm.h"
 #include "common/file_utils.h"
 #include "common/pg_prng.h"
+#include "libpq/pqsignal.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "postmaster/startup.h"
@@ -158,6 +160,13 @@ int			max_files_per_process = 1000;
  * setting this variable, and so need not be tested separately.
  */
 int			max_safe_fds = FD_MINFREE;	/* default if not changed */
+
+#ifdef HAVE_GETRLIMIT
+static bool saved_original_max_open_files;
+static struct rlimit original_max_open_files;
+static struct rlimit custom_max_open_files;
+#endif
+
 
 /* Whether it is safe to continue running after fsync() fails. */
 bool		data_sync_retry = false;
@@ -265,6 +274,11 @@ typedef struct
 		FILE	   *file;
 		DIR		   *dir;
 		int			fd;
+		struct
+		{
+			FILE	   *file;
+			pid_t		pid;
+		}			pipe;
 	}			desc;
 } AllocateDesc;
 
@@ -948,6 +962,128 @@ InitTemporaryFileAccess(void)
 }
 
 /*
+ * Returns true if the passed in highestfd is the last one that we're allowed
+ * to open based on our. This should only be called if
+ */
+static bool
+IsOpenFileLimit(int highestfd)
+{
+#ifdef HAVE_GETRLIMIT
+	if (!saved_original_max_open_files)
+	{
+		return false;
+	}
+
+	return highestfd >= custom_max_open_files.rlim_cur - 1;
+#else
+	return false;
+#endif
+}
+
+/*
+ * Increases the open file limit (RLIMIT_NOFILE) by the requested amount.
+ * Returns true if successful, false otherwise.
+ */
+static bool
+IncreaseOpenFileLimit(int extra_files)
+{
+#ifdef HAVE_GETRLIMIT
+	struct rlimit rlim;
+
+	if (!saved_original_max_open_files)
+	{
+		return false;
+	}
+
+	rlim = custom_max_open_files;
+
+	/* If we're already at the max we reached our limit */
+	if (rlim.rlim_cur == original_max_open_files.rlim_max)
+		return false;
+
+	/* Otherwise try to increase the soft limit to what we need */
+	rlim.rlim_cur = Min(rlim.rlim_cur + extra_files, rlim.rlim_max);
+
+	if (setrlimit(RLIMIT_NOFILE, &rlim) != 0)
+	{
+		/* We made sure not to exceed the hard limit, so this shouldn't fail */
+		ereport(WARNING, (errmsg("setrlimit failed: %m")));
+		return false;
+	}
+
+	custom_max_open_files = rlim;
+
+	elog(LOG, "increased open file limit to %ld", (long) rlim.rlim_cur);
+
+	return true;
+#else
+	return false;
+#endif
+}
+
+/*
+ * Saves the original open file limit (RLIMIT_NOFILE) the first time when this
+ * is called. If called again it's a no-op.
+ *
+ * Returns true if successful, false otherwise.
+ */
+static void
+SaveOriginalOpenFileLimit(void)
+{
+#ifdef HAVE_GETRLIMIT
+	int			status;
+
+	if (saved_original_max_open_files)
+	{
+		/* Already saved, no need to do it again */
+		return;
+	}
+
+	status = getrlimit(RLIMIT_NOFILE, &original_max_open_files);
+	if (status != 0)
+	{
+		ereport(WARNING, (errmsg("getrlimit failed: %m")));
+		return;
+	}
+
+	custom_max_open_files = original_max_open_files;
+	saved_original_max_open_files = true;
+	return;
+#endif
+}
+
+#ifndef WIN32
+/*
+ * UseOriginalOpenFileLimit --- Makes the process use the original open file
+ * 		limit that was present at postmaster start.
+ *
+ * This should be called before spawning subprocesses that might use select(2)
+ * which can only handle file descriptors up to 1024.
+ */
+static void
+UseOriginalOpenFileLimit(void)
+{
+#ifdef HAVE_GETRLIMIT
+	if (!saved_original_max_open_files)
+	{
+		return;
+	}
+
+	if (custom_max_open_files.rlim_cur == original_max_open_files.rlim_cur)
+	{
+		/* Not changed, so no need to call setrlimit at all */
+		return;
+	}
+
+	if (setrlimit(RLIMIT_NOFILE, &original_max_open_files) != 0)
+	{
+		ereport(WARNING, (errmsg("setrlimit failed: %m")));
+	}
+#endif
+}
+#endif							/* WIN32 */
+
+/*
  * count_usable_fds --- count how many FDs the system will let us open,
  *		and estimate how many are already open.
  *
@@ -970,38 +1106,39 @@ count_usable_fds(int max_to_probe, int *usable_fds, int *already_open)
 	int			highestfd = 0;
 	int			j;
 
-#ifdef HAVE_GETRLIMIT
-	struct rlimit rlim;
-	int			getrlimit_status;
-#endif
-
 	size = 1024;
 	fd = palloc_array(int, size);
 
-#ifdef HAVE_GETRLIMIT
-	getrlimit_status = getrlimit(RLIMIT_NOFILE, &rlim);
-	if (getrlimit_status != 0)
-		ereport(WARNING, (errmsg("getrlimit failed: %m")));
-#endif							/* HAVE_GETRLIMIT */
+	SaveOriginalOpenFileLimit();
 
 	/* dup until failure or probe limit reached */
 	for (;;)
 	{
 		int			thisfd;
 
-#ifdef HAVE_GETRLIMIT
-
 		/*
 		 * don't go beyond RLIMIT_NOFILE; causes irritating kernel logs on
 		 * some platforms
 		 */
-		if (getrlimit_status == 0 && highestfd >= rlim.rlim_cur - 1)
-			break;
-#endif
+		if (IsOpenFileLimit(highestfd))
+		{
+			if (!IncreaseOpenFileLimit(max_to_probe - used))
+				break;
+		}
 
 		thisfd = dup(2);
 		if (thisfd < 0)
 		{
+			/*
+			 * Eventhough we do the pre-check above, it's still possible that
+			 * the call to dup fails with EMFILE. This can happen if the last
+			 * file descriptor was already assigned to an "already open" file.
+			 * One example of this happening, is if we're already at the soft
+			 * limit when we call count_usable_fds.
+			 */
+			if (errno == EMFILE && IncreaseOpenFileLimit(max_to_probe - used))
+				continue;
+
 			/* Expect EMFILE or ENFILE, else it's fishy */
 			if (errno != EMFILE && errno != ENFILE)
 				elog(WARNING, "duplicating stderr file descriptor failed after %d successes: %m", used);
@@ -2718,6 +2855,265 @@ OpenTransientFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 	return -1;					/* failure */
 }
 
+#ifndef WIN32
+/*
+ * Helper function to fork a child process for executing a shell command.
+ *
+ * This handles all the standard child process setup:
+ * - Blocks signals before fork to avoid race conditions
+ * - Lowers the file limit in the child (UseOriginalOpenFileLimit)
+ * - Resets signal handlers that the backend has set to SIG_IGN
+ * - Unblocks signals in both parent and child after setup
+ *
+ * Returns -1 on fork failure, 0 in the child, or the child PID in the parent.
+ * After this returns in the child, the caller should do any additional setup
+ * (like pipe redirection) and then call exec_shell_command().
+ */
+static pid_t
+fork_for_shell_command(void)
+{
+	pid_t		pid;
+	sigset_t	save_mask;
+
+	/* Block signals during fork to avoid race conditions in child setup */
+	sigprocmask(SIG_SETMASK, &BlockSig, &save_mask);
+
+	pid = fork();
+	if (pid == 0)
+	{
+		/* Child process */
+		UseOriginalOpenFileLimit();
+
+		/*
+		 * Reset signal handlers to default. The backend ignores these, and
+		 * SIG_IGN is preserved across exec, so we must reset them to allow
+		 * the child process to respond to signals normally.
+		 */
+		pqsignal(SIGINT, PG_SIG_DFL);
+		pqsignal(SIGQUIT, PG_SIG_DFL);
+		pqsignal(SIGPIPE, PG_SIG_DFL);
+	}
+
+	/* Restore/unblock signals in both parent and child (also if fork failed) */
+	sigprocmask(SIG_SETMASK, &save_mask, NULL);
+
+	return pid;
+}
+
+/*
+ * Execute a shell command via /bin/sh. This function does not return.
+ * Should be called in the child process after fork_for_shell_command().
+ */
+static pg_noreturn void
+exec_shell_command(const char *command)
+{
+	execl("/bin/sh", "sh", "-c", command, (char *) NULL);
+	_exit(127);
+}
+#endif
+
+/*
+ * pg_system - Custom system() that lowers file limit in child process.
+ *
+ * This is needed because we may have bumped the soft RLIMIT_NOFILE limit
+ * above its original value. The child process should use the original limit
+ * to avoid issues with programs that use select(2), which can only handle
+ * FDs up to FD_SETSIZE (typically 1024).
+ *
+ * We can't just call UseOriginalOpenFileLimit() before the standard system()
+ * because that would temporarily lower the limit in the parent process,
+ * which could cause concurrent file operations to fail in a multithreaded
+ * environment.
+ */
+int
+pg_system(const char *command)
+{
+#ifndef WIN32
+	pid_t		pid;
+	int			status;
+	pid_t		waitresult;
+
+	pid = fork_for_shell_command();
+	if (pid == (pid_t) -1)
+		return -1;
+	if (pid == 0)
+		exec_shell_command(command);	/* does not return */
+
+	/* Wait for child */
+	do
+	{
+		waitresult = waitpid(pid, &status, 0);
+	} while (waitresult == (pid_t) -1 && errno == EINTR);
+
+	if (waitresult != pid)
+		return -1;
+
+	return status;
+#else
+	/* On Windows, just use standard system() - no RLIMIT_NOFILE bumping there */
+	return system(command);
+#endif
+}
+
+
+/*
+ * pg_popen - Custom popen() that lowers file limit in child process.
+ *
+ * This is needed because we may have bumped the soft RLIMIT_NOFILE limit
+ * above its original value. The child process should use the original limit
+ * to avoid issues with programs that use select(2), which can only handle
+ * FDs up to FD_SETSIZE (typically 1024).
+ *
+ * We can't just call UseOriginalOpenFileLimit() before popen() of the stdlib
+ * because popen() opens a file descriptor in the parent process (the parent's
+ * side of the pipe), which would fail if we're already above the original
+ * limit.
+ *
+ * Returns the FILE* for the pipe, or NULL on error.
+ * On success, *child_pid is set to the child's PID (or 0 on Windows where
+ * we use standard popen).
+ */
+static FILE *
+pg_popen(const char *command, const char *mode, pid_t *child_pid)
+{
+#ifndef WIN32
+	int			pipe_fds[2];
+	int			parent_fd;
+	int			child_fd;
+	int			child_target_fd;
+	pid_t		pid;
+	FILE	   *pipe_file;
+	int			save_errno;
+
+	/* Only "r" and "w" modes are supported */
+	if (mode[0] == 'r')
+	{
+		/* Parent reads from child's stdout */
+		parent_fd = 0;
+		child_fd = 1;
+		child_target_fd = STDOUT_FILENO;
+	}
+	else if (mode[0] == 'w')
+	{
+		/* Parent writes to child's stdin */
+		parent_fd = 1;
+		child_fd = 0;
+		child_target_fd = STDIN_FILENO;
+	}
+	else
+	{
+		errno = EINVAL;
+		return NULL;
+	}
+
+	/*
+	 * Set close-on-exec to prevent other concurrently spawned child processes
+	 * from inheriting the pipe file descriptors. This is impossible while
+	 * we're not using threads, but since this is part of adding such
+	 * multithreading support let's pretend that we already have it. For
+	 * systems that don't have pipe2, there's always a risk of race
+	 * conditions, but let's minimize that by quickly setting the
+	 * close-on-exec flag with fnctl.
+	 */
+#ifdef HAVE_PIPE2
+	if (pipe2(pipe_fds, O_CLOEXEC) < 0)
+		return NULL;
+#else
+	if (pipe(pipe_fds) < 0)
+		return NULL;
+	if (fcntl(pipe_fds[0], F_SETFD, FD_CLOEXEC) == -1 ||
+		fcntl(pipe_fds[1], F_SETFD, FD_CLOEXEC) == -1)
+	{
+		save_errno = errno;
+		close(pipe_fds[0]);
+		close(pipe_fds[1]);
+		errno = save_errno;
+		return NULL;
+	}
+#endif
+
+	fflush(NULL);
+
+	pid = fork_for_shell_command();
+	if (pid < 0)
+	{
+		/* fork failed */
+		save_errno = errno;
+		close(pipe_fds[0]);
+		close(pipe_fds[1]);
+		errno = save_errno;
+		return NULL;
+	}
+
+	if (pid == 0)
+	{
+		/* Child process - set up pipe redirection and exec */
+		close(pipe_fds[parent_fd]);
+		if (pipe_fds[child_fd] != child_target_fd)
+		{
+			dup2(pipe_fds[child_fd], child_target_fd);
+			close(pipe_fds[child_fd]);
+		}
+
+		exec_shell_command(command);	/* does not return */
+	}
+
+	/* Parent process */
+	close(pipe_fds[child_fd]);
+	pipe_file = fdopen(pipe_fds[parent_fd], mode);
+	if (pipe_file == NULL)
+	{
+		save_errno = errno;
+		close(pipe_fds[parent_fd]);
+		errno = save_errno;
+		return NULL;
+	}
+
+	*child_pid = pid;
+	return pipe_file;
+#else
+	/* On Windows, just use standard popen - no RLIMIT_NOFILE bumping there */
+	fflush(NULL);
+	*child_pid = 0;
+	return popen(command, mode);
+#endif
+}
+
+/*
+ * pg_pclose - Close a pipe opened by pg_popen().
+ *
+ * On Unix, this closes the FILE* and waits for the child process.
+ * On Windows, this just calls pclose().
+ *
+ * Returns the child's exit status (like pclose), or -1 on error.
+ */
+static int
+pg_pclose(FILE *fp, pid_t child_pid)
+{
+#ifndef WIN32
+	int			status;
+	pid_t		waitresult;
+
+	/* Close the FILE* first */
+	if (fclose(fp) != 0)
+		return -1;
+
+	/* Then wait for the child process, like pclose() does */
+	do
+	{
+		waitresult = waitpid(child_pid, &status, 0);
+	} while (waitresult == (pid_t) -1 && errno == EINTR);
+
+	if (waitresult == child_pid)
+		return status;
+	else
+		return -1;
+#else
+	(void) child_pid;			/* unused on Windows */
+	return pclose(fp);
+#endif
+}
+
 /*
  * Routines that want to initiate a pipe stream should use OpenPipeStream
  * rather than plain popen().  This lets fd.c deal with freeing FDs if
@@ -2732,6 +3128,7 @@ OpenPipeStream(const char *command, const char *mode)
 {
 	FILE	   *file;
 	int			save_errno;
+	pid_t		child_pid;
 
 	DO_DB(elog(LOG, "OpenPipeStream: Allocated %d (%s)",
 			   numAllocatedDescs, command));
@@ -2747,22 +3144,21 @@ OpenPipeStream(const char *command, const char *mode)
 	ReleaseLruFiles();
 
 TryAgain:
-	fflush(NULL);
-	pqsignal(SIGPIPE, PG_SIG_DFL);
+
 	errno = 0;
-	file = popen(command, mode);
+	file = pg_popen(command, mode, &child_pid);
 	save_errno = errno;
 	pqsignal(SIGPIPE, PG_SIG_IGN);
-	errno = save_errno;
 	if (file != NULL)
 	{
 		AllocateDesc *desc = &allocatedDescs[numAllocatedDescs];
 
 		desc->kind = AllocateDescPipe;
-		desc->desc.file = file;
+		desc->desc.pipe.file = file;
+		desc->desc.pipe.pid = child_pid;
 		desc->create_subid = GetCurrentSubTransactionId();
 		numAllocatedDescs++;
-		return desc->desc.file;
+		return desc->desc.pipe.file;
 	}
 
 	if (errno == EMFILE || errno == ENFILE)
@@ -2795,7 +3191,7 @@ FreeDesc(AllocateDesc *desc)
 			result = fclose(desc->desc.file);
 			break;
 		case AllocateDescPipe:
-			result = pclose(desc->desc.file);
+			result = pg_pclose(desc->desc.pipe.file, desc->desc.pipe.pid);
 			break;
 		case AllocateDescDir:
 			result = closedir(desc->desc.dir);
@@ -3047,7 +3443,7 @@ ClosePipeStream(FILE *file)
 	{
 		AllocateDesc *desc = &allocatedDescs[i];
 
-		if (desc->kind == AllocateDescPipe && desc->desc.file == file)
+		if (desc->kind == AllocateDescPipe && desc->desc.pipe.file == file)
 			return FreeDesc(desc);
 	}
 
