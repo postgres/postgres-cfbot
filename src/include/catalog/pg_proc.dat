@@ -3975,9 +3975,6 @@
   proargtypes => 'oid oid', prosrc => 'oidge' },
 
 # System-view support functions
-{ oid => '1573', descr => 'source text of a rule',
-  proname => 'pg_get_ruledef', provolatile => 's', prorettype => 'text',
-  proargtypes => 'oid', prosrc => 'pg_get_ruledef' },
 { oid => '1640', descr => 'select statement of a view',
   proname => 'pg_get_viewdef', provolatile => 's', proparallel => 'r',
   prorettype => 'text', proargtypes => 'text',
@@ -8642,9 +8639,10 @@
   prosrc => 'macaddr8_send' },
 
 # System-view support functions with pretty-print option
-{ oid => '2504', descr => 'source text of a rule with pretty-print option',
+{ oid => '2504', descr => 'source text of a rule',
   proname => 'pg_get_ruledef', provolatile => 's', prorettype => 'text',
-  proargtypes => 'oid bool', prosrc => 'pg_get_ruledef_ext' },
+  proargtypes => 'oid bool', proargnames => '{rule,pretty}',
+  proargdefaults => '{false}', prosrc => 'pg_get_ruledef' },
 { oid => '2505',
   descr => 'select statement of a view with pretty-print option',
   proname => 'pg_get_viewdef', provolatile => 's', proparallel => 'r',
