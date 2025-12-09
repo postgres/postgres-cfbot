@@ -1130,26 +1130,6 @@ Datum
 pg_get_indexdef(PG_FUNCTION_ARGS)
 {
 	Oid			indexrelid = PG_GETARG_OID(0);
-	int			prettyFlags;
-	char	   *res;
-
-	prettyFlags = PRETTYFLAG_INDENT;
-
-	res = pg_get_indexdef_worker(indexrelid, 0, NULL,
-								 false, false,
-								 false, false,
-								 prettyFlags, true);
-
-	if (res == NULL)
-		PG_RETURN_NULL();
-
-	PG_RETURN_TEXT_P(string_to_text(res));
-}
-
-Datum
-pg_get_indexdef_ext(PG_FUNCTION_ARGS)
-{
-	Oid			indexrelid = PG_GETARG_OID(0);
 	int32		colno = PG_GETARG_INT32(1);
 	bool		pretty = PG_GETARG_BOOL(2);
 	int			prettyFlags;
