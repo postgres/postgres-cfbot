@@ -823,20 +823,6 @@ Datum
 pg_get_triggerdef(PG_FUNCTION_ARGS)
 {
 	Oid			trigid = PG_GETARG_OID(0);
-	char	   *res;
-
-	res = pg_get_triggerdef_worker(trigid, false);
-
-	if (res == NULL)
-		PG_RETURN_NULL();
-
-	PG_RETURN_TEXT_P(string_to_text(res));
-}
-
-Datum
-pg_get_triggerdef_ext(PG_FUNCTION_ARGS)
-{
-	Oid			trigid = PG_GETARG_OID(0);
 	bool		pretty = PG_GETARG_BOOL(1);
 	char	   *res;
 
