@@ -1106,7 +1106,7 @@ pg_get_triggerdef_worker(Oid trigid, bool pretty)
 /* ----------
  * pg_get_indexdef			- Get the definition of an index
  *
- * In the extended version, there is a colno argument as well as pretty bool.
+ * There is a colno argument as well as an optional pretty bool.
  *	if colno == 0, we want a complete index definition.
  *	if colno > 0, we only want the Nth index key's variable or expression.
  *
@@ -1117,26 +1117,6 @@ pg_get_triggerdef_worker(Oid trigid, bool pretty)
  */
 Datum
 pg_get_indexdef(PG_FUNCTION_ARGS)
-{
-	Oid			indexrelid = PG_GETARG_OID(0);
-	int			prettyFlags;
-	char	   *res;
-
-	prettyFlags = PRETTYFLAG_INDENT;
-
-	res = pg_get_indexdef_worker(indexrelid, 0, NULL,
-								 false, false,
-								 false, false,
-								 prettyFlags, true);
-
-	if (res == NULL)
-		PG_RETURN_NULL();
-
-	PG_RETURN_TEXT_P(string_to_text(res));
-}
-
-Datum
-pg_get_indexdef_ext(PG_FUNCTION_ARGS)
 {
 	Oid			indexrelid = PG_GETARG_OID(0);
 	int32		colno = PG_GETARG_INT32(1);
