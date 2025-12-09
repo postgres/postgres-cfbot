@@ -1587,7 +1587,7 @@ SELECT pg_type_is_visible('myschema.widget'::regtype);
         <indexterm>
          <primary>pg_get_indexdef</primary>
         </indexterm>
-        <function>pg_get_indexdef</function> ( <parameter>index</parameter> <type>oid</type> <optional>, <parameter>column</parameter> <type>integer</type>, <parameter>pretty</parameter> <type>boolean</type> </optional> )
+        <function>pg_get_indexdef</function> ( <parameter>index</parameter> <type>oid</type> <optional>, <parameter>column</parameter> <type>integer</type> <optional>, <parameter>pretty</parameter> <type>boolean</type> </optional></optional> )
         <returnvalue>text</returnvalue>
        </para>
        <para>
