@@ -4000,9 +4000,6 @@
   proname => 'pg_get_partition_constraintdef', provolatile => 's',
   prorettype => 'text', proargtypes => 'oid',
   prosrc => 'pg_get_partition_constraintdef' },
-{ oid => '1662', descr => 'trigger description',
-  proname => 'pg_get_triggerdef', provolatile => 's', prorettype => 'text',
-  proargtypes => 'oid', prosrc => 'pg_get_triggerdef' },
 { oid => '1665', descr => 'name of sequence for a serial column',
   proname => 'pg_get_serial_sequence', provolatile => 's', prorettype => 'text',
   proargtypes => 'text text', prosrc => 'pg_get_serial_sequence' },
@@ -8717,9 +8714,10 @@
   proallargtypes => '{text,text,interval,bool}', proargmodes => '{o,o,o,o}',
   proargnames => '{name,abbrev,utc_offset,is_dst}',
   prosrc => 'pg_timezone_names' },
-{ oid => '2730', descr => 'trigger description with pretty-print option',
+{ oid => '2730', descr => 'trigger description',
   proname => 'pg_get_triggerdef', provolatile => 's', prorettype => 'text',
-  proargtypes => 'oid bool', prosrc => 'pg_get_triggerdef_ext' },
+  proargtypes => 'oid bool', proargnames => '{trigger,pretty}',
+  proargdefaults => '{false}', prosrc => 'pg_get_triggerdef' },
 
 # asynchronous notifications
 { oid => '3035',
