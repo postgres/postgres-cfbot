@@ -2938,23 +2938,6 @@ pg_get_expr(PG_FUNCTION_ARGS)
 {
 	text	   *expr = PG_GETARG_TEXT_PP(0);
 	Oid			relid = PG_GETARG_OID(1);
-	text	   *result;
-	int			prettyFlags;
-
-	prettyFlags = PRETTYFLAG_INDENT;
-
-	result = pg_get_expr_worker(expr, relid, prettyFlags);
-	if (result)
-		PG_RETURN_TEXT_P(result);
-	else
-		PG_RETURN_NULL();
-}
-
-Datum
-pg_get_expr_ext(PG_FUNCTION_ARGS)
-{
-	text	   *expr = PG_GETARG_TEXT_PP(0);
-	Oid			relid = PG_GETARG_OID(1);
 	bool		pretty = PG_GETARG_BOOL(2);
 	text	   *result;
 	int			prettyFlags;
