@@ -892,6 +892,7 @@ tid_block(tid)
 tid_offset(tid)
 uuid_larger(uuid,uuid)
 uuid_smaller(uuid,uuid)
+pg_datum_image_equal(anyelement,anyelement)
 -- Check that functions without argument are not marked as leakproof.
 SELECT p1.oid::regprocedure
 FROM pg_proc p1 JOIN pg_namespace pn
