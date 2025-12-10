@@ -23,7 +23,9 @@
 #include "postgres.h"
 
 #include "libpq/pqformat.h"
+#include "utils/datum.h"
 #include "utils/fmgrprotos.h"
+#include "utils/lsyscache.h"
 
 
 /*
@@ -375,3 +377,52 @@ PSEUDOTYPE_DUMMY_IO_FUNCS(anyelement);
 PSEUDOTYPE_DUMMY_IO_FUNCS(anynonarray);
 PSEUDOTYPE_DUMMY_IO_FUNCS(anycompatible);
 PSEUDOTYPE_DUMMY_IO_FUNCS(anycompatiblenonarray);
+
+/*
+ * Compares two datums of the same (any) type, and returns whether they have
+ * the same binary representation.
+ */
+Datum
+pg_datum_image_equal(PG_FUNCTION_ARGS)
+{
+	bool		eq;
+
+	if (PG_ARGISNULL(0) != PG_ARGISNULL(1))
+	{
+		eq = false;
+	}
+	else if (PG_ARGISNULL(0))
+	{
+		/* both NULL */
+		eq = true;
+	}
+	else
+	{
+		Oid		typ;
+		Datum	arg0;
+		Datum	arg1;
+		bool	typbyval;
+		char	typalign;
+		int16	typlen;
+
+		typ = get_fn_expr_argtype(fcinfo->flinfo, 0);
+
+		if (!OidIsValid(typ))
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("could not determine type")));
+		}
+
+		Assert(typ == get_fn_expr_argtype(fcinfo->flinfo, 1));
+
+		arg0 = PG_GETARG_DATUM(0);
+		arg1 = PG_GETARG_DATUM(1);
+
+		get_typlenbyvalalign(typ, &typlen, &typbyval, &typalign);
+
+		eq = datum_image_eq(arg0, arg1, typbyval, typlen);
+	}
+
+	PG_RETURN_BOOL(eq);
+}
