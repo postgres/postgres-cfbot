@@ -12776,4 +12776,11 @@
   proname => 'hashoid8extended', prorettype => 'int8',
   proargtypes => 'oid8 int8', prosrc => 'hashoid8extended' },
 
+{ oid => '9200',
+  descr => 'test if two values have the same binary representation',
+  proname => 'pg_datum_image_equal', proisstrict => 'f',
+  proleakproof => 't', prorettype => 'bool',
+  proargtypes => 'anyelement anyelement',
+  prosrc => 'pg_datum_image_equal' },
+
 ]

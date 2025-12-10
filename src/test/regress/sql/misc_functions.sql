@@ -356,3 +356,28 @@ CREATE FUNCTION test_instr_time()
     AS :'regresslib'
     LANGUAGE C;
 SELECT test_instr_time();
+
+-- test pg_datum_image_equal(..., ...)
+WITH values AS (
+    SELECT val::numeric FROM (
+        VALUES ('1.0'),
+               ('1.00'),
+               ('2.0'),
+               ('2.1'),
+               (NULL)
+    ) AS v(val)
+)
+SELECT a.val a, b.val b, a.val = b.val eq, pg_datum_image_equal(a.val, b.val) pdie
+FROM values a CROSS JOIN values b;
+
+WITH values AS (
+    SELECT val::jsonb FROM (
+        VALUES ('{"key": 1.0}'),
+               ('{"key": 1.00}'),
+               ('{"key": 2.0}'),
+               ('{"key": null}'),
+               (NULL)
+    ) AS v(val)
+)
+SELECT a.val a, b.val b, a.val = b.val eq, pg_datum_image_equal(a.val, b.val) pdie
+FROM values a CROSS JOIN values b;
