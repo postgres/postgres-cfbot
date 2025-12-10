@@ -686,19 +686,14 @@ SnapBuildProcessChange(SnapBuild *builder, TransactionId xid, XLogRecPtr lsn)
 /*
  * Do CommandId/combo CID handling after reading an xl_heap_new_cid record.
  * This implies that a transaction has done some form of write to system
- * catalogs.
+ * catalogs. Caller must mark the transaction as containing catalog
+ * modifications in the reorder buffer.
  */
 void
 SnapBuildProcessNewCid(SnapBuild *builder, TransactionId xid,
 					   XLogRecPtr lsn, xl_heap_new_cid *xlrec)
 {
 	CommandId	cid;
-
-	/*
-	 * we only log new_cid's if a catalog tuple was modified, so mark the
-	 * transaction as containing catalog modifications
-	 */
-	ReorderBufferXidSetCatalogChanges(builder->reorder, xid, lsn);
 
 	ReorderBufferAddNewTupleCids(builder->reorder, xlrec->top_xid, lsn,
 								 xlrec->target_locator, xlrec->target_tid,
