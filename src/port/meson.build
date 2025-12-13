@@ -33,6 +33,7 @@ if host_system == 'windows'
     'dirmod.c',
     'kill.c',
     'open.c',
+    'pthread-win32.c',
     'system.c',
     'win32common.c',
     'win32dlopen.c',
