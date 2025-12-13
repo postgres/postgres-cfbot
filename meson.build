@@ -3642,7 +3642,7 @@ frontend_code = declare_dependency(
   include_directories: [postgres_inc],
   link_with: [fe_utils, common_static, pgport_static],
   sources: generated_headers_stamp,
-  dependencies: [os_deps, libintl],
+  dependencies: [os_deps, libintl, thread_dep],
 )
 
 backend_both_deps += [

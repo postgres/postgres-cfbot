@@ -58,7 +58,7 @@ vacuuming_main(ConnParams *cparams, const char *dbname,
 			   unsigned int tbl_count, int concurrentCons,
 			   const char *progname)
 {
-	setup_cancel_handler(NULL);
+	setup_cancel_handler(NULL, NULL);
 
 	/* Avoid opening extra connections. */
 	if (tbl_count > 0 && (concurrentCons > tbl_count))

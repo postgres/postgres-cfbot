@@ -305,23 +305,27 @@ volatile sig_atomic_t sigint_interrupt_enabled = false;
 
 sigjmp_buf	sigint_interrupt_jmp;
 
+#ifndef WIN32
 static void
 psql_cancel_callback(void)
 {
-#ifndef WIN32
 	/* if we are waiting for input, longjmp out of it */
 	if (sigint_interrupt_enabled)
 	{
 		sigint_interrupt_enabled = false;
 		siglongjmp(sigint_interrupt_jmp, 1);
 	}
-#endif
 }
+#endif
 
 void
 psql_setup_cancel_handler(void)
 {
-	setup_cancel_handler(psql_cancel_callback);
+#ifndef WIN32
+	setup_cancel_handler(psql_cancel_callback, NULL);
+#else
+	setup_cancel_handler(NULL, NULL);
+#endif
 }
 
 
