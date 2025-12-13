@@ -23,10 +23,15 @@ extern PGDLLIMPORT volatile sig_atomic_t CancelRequested;
 extern void SetCancelConn(PGconn *conn);
 extern void ResetCancelConn(void);
 
-/*
- * A callback can be optionally set up to be called at cancellation
- * time.
- */
-extern void setup_cancel_handler(void (*query_cancel_callback) (void));
+extern void setup_cancel_handler(void (*signal_callback) (void),
+								 void (*thread_callback) (void));
+
+extern void LockCancelThread(void);
+extern void UnlockCancelThread(void);
+
+#ifndef WIN32
+extern void ResetCancelAfterFork(void);
+extern void CancelSignalHandler(SIGNAL_ARGS);
+#endif
 
 #endif							/* CANCEL_H */
