@@ -288,8 +288,12 @@ struct _archiveHandle
 	char	   *savedPassword;	/* password for ropt->username, if known */
 	char	   *use_role;
 	PGconn	   *connection;
-	/* If connCancel isn't NULL, SIGINT handler will send a cancel */
-	PGcancel   *volatile connCancel;
+
+	/*
+	 * If cancelConn isn't NULL, SIGINT handler will trigger the cancel thread
+	 * to send a cancel.
+	 */
+	PGcancelConn *cancelConn;
 
 	int			connectToDB;	/* Flag to indicate if direct DB connection is
 								 * required */

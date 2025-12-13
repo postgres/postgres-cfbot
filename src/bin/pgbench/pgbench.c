@@ -5333,7 +5333,7 @@ runInitSteps(const char *initialize_steps)
 	if ((con = doConnect()) == NULL)
 		pg_fatal("could not create connection for initialization");
 
-	setup_cancel_handler(NULL);
+	setup_cancel_handler(NULL, NULL);
 	SetCancelConn(con);
 
 	for (step = initialize_steps; *step != '\0'; step++)
