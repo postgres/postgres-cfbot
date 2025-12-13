@@ -22,6 +22,8 @@ pg_dump_common_sources = files(
 pg_dump_common = static_library('libpgdump_common',
   pg_dump_common_sources,
   c_pch: pch_postgres_fe_h,
+  # port needs to be in include path due to pthread-win32.h
+  include_directories: ['../../port'],
   dependencies: [frontend_code, libpq, lz4, zlib, zstd],
   kwargs: internal_lib_args,
 )
