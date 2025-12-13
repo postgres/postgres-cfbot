@@ -105,7 +105,7 @@ do
 	test "$f" = src/include/port/win32_msvc/dirent.h && continue
 	test "$f" = src/include/port/win32_msvc/utime.h && continue
 	test "$f" = src/include/port/win32ntdll.h && continue
-	test "$f" = src/port/pthread-win32.h && continue
+	test "$f" = src/include/port/pthread-win32.h && continue
 
 	# Likewise, these files are platform-specific, and the one
 	# relevant to our platform will be included by atomics.h.

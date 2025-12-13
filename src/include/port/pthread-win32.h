@@ -1,5 +1,5 @@
 /*
- * src/port/pthread-win32.h
+ * src/include/port/pthread-win32.h
  */
 #ifndef __PTHREAD_H
 #define __PTHREAD_H
