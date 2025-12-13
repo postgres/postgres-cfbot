@@ -20,7 +20,7 @@ libpq_sources = files(
 libpq_so_sources = [] # for shared lib, in addition to the above
 
 if host_system == 'windows'
-  libpq_sources += files('pthread-win32.c', 'win32.c')
+  libpq_sources += files('win32.c')
   libpq_so_sources += rc_lib_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'libpq',
     '--FILEDESC', 'PostgreSQL Access Library',])
