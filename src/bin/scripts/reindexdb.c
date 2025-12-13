@@ -211,7 +211,7 @@ main(int argc, char *argv[])
 	cparams.prompt_password = prompt_password;
 	cparams.override_dbname = NULL;
 
-	setup_cancel_handler(NULL);
+	setup_cancel_handler(NULL, NULL);
 
 	if (concurrentCons > 1 && syscatalog)
 		pg_fatal("cannot use multiple jobs to reindex system catalogs");
