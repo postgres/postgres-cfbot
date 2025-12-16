@@ -3,8 +3,8 @@ src/test/pytest/README
 Pytest-based tests
 ==================
 
-This directory contains the infrastructure for Python-based tests using
-pytest.
+This directory contains the infrastructure and helper functions and classes for
+Python-based tests using pytest.
 
 The tests themselves live in pyt/ directories next to the code they cover, the
 same way the Perl tests live in t/ directories, in files named test_<name>.py.
@@ -57,8 +57,200 @@ You can run specific test files and/or use pytest's -k option to select tests:
 Directory structure
 ===================
 
+pypg/
+    Python library providing common functions and pytest fixtures that can be
+    used in tests.
+
+libpq/
+    A simple but user-friendly python wrapper around libpq
+
 pgtap.py
     A pytest plugin to output results in TAP format
+
+
+Writing tests
+=============
+
+The simplest test you can write is:
+
+    def test_addition(pg):
+        assert pg.sql("SELECT $1 + $2", 40, 2) == 42
+
+Taking the "pg" fixture[2] provisions a default server. Each test file gets
+its own server: it is started the first time a test in that file uses "pg",
+and stopped once the file is done. The tests in a file therefore share one
+server, but not with any other file.
+
+A best effort cleanup happens between tests: connections are closed and config
+changes are rolled back (see "Server configuration"). It stops there, though.
+Anything a test creates with SQL -- tables, roles, databases -- is still there
+for the tests that follow, so drop it yourself, or pick names that don't
+collide with the other tests in the file.
+
+It's also possible to create a dedicated Postgres server for the test using
+"create_pg". This can be used a non-default configured server is needed
+or more than one server is needed in a single test:
+
+    def test_two_servers(create_pg):
+        node1 = create_pg("node1", conf={"work_mem": "1MB"})
+        node2 = create_pg("node2")
+
+        assert node1.sql("SHOW work_mem") == "1MB"
+        assert node1.port != node2.port
+
+When several tests in a file can share one setup, build it once in a
+module-scoped fixture with create_pg_module. Those servers live as long as the
+file does, and are rolled back between tests just like "pg":
+
+    @pytest.fixture(scope="module")
+    def node(create_pg_module):
+        return create_pg_module("node", conf={"wal_level": "logical"})
+
+    def test_wal_level(node):
+        assert node.sql("SHOW wal_level") == "logical"
+
+    def test_slot_can_be_created(node):
+        node.sql("SELECT pg_create_logical_replication_slot('s', 'pgoutput')")
+        assert node.sql("SELECT count(*) FROM pg_replication_slots") == 1
+        node.sql("SELECT pg_drop_replication_slot('s')")
+
+
+Running queries
+===============
+
+All the examples above use the pg.sql() method to run queries, it's the one to
+use by default. It runs a single query and returns its result, with any
+arguments bound to the query's $1, $2, ... placeholders. Building queries using
+string formatting should usually not be needed. Results are converted to Python
+and simplified to the shape of the query, and errors from the server are raised
+as LibpqError:
+
+    def test_error(pg):
+        with pytest.raises(LibpqError, match="division by zero"):
+            pg.sql("SELECT 1/0")
+
+Every pg.sql() call reuses one cached connection, so its session lasts as long
+as the test: a SET, a temporary table or an open transaction is still in
+effect in the next call. The connection is dropped between tests, so none of
+that reaches the next one. There are quite a few alternative ways of running
+queries, each of which are useful in its own scenario (an example using all of
+them is below):
+
+pg.sql_batch(...)
+    Pure syntactic sugar for consecutive pg.sql() calls on the same connection,
+    returning a list with each statement's result. Convenient to run a series
+    of statements in a row, e.g. for setup or cleanup.
+
+pg.sql_oneshot(...)
+    Runs a query on a fresh connection and closes it right away. Use it over
+    pg.sql() when the query requires a temporary clean connection. It can also
+    take connection options as keyword arguments, e.g.
+    pg.sql_oneshot("SELECT current_user", user="alice").
+
+pg.background_sql(...)
+    Runs a query in the background on its own thread and returns a Future
+    instead of a result. Use it over sql() for a query that is expected to
+    block, which sql() would simply hang on. You can use result() on the Future
+    to wait for the query once it should be unblocked.
+
+pg.poll_query_until(...)
+    Opens a new connection and runs a query over on that connection until it
+    returns the expected result, or the timeout expires. Use it over sql()
+    whenever the answer depends on something that happens in the background,
+    e.g. a standby catching up or a checkpoint finishing.
+
+pg.connect(...)
+    Returns a connection of its own and takes any connection options. Use it
+    over sql() when the test needs to keep two sessions going at once, or wants
+    to hold on to session state while running other queries through pg.sql().
+    The sql(), sql_batch() and background_sql() methods work on the returned
+    connection exactly the same way as on pg itself.
+
+
+These go together whenever a test has to observe blocking:
+
+    def test_lock_waits(pg):
+        pg.sql_batch("CREATE TABLE t (i int)", "BEGIN", "LOCK TABLE t")
+
+        other = pg.connect(application_name="locker")
+        other.sql("BEGIN")
+        waiting = other.background_sql("LOCK TABLE t")
+        pg.poll_query_until(
+            "SELECT count(*) FROM pg_stat_activity "
+            "WHERE application_name = 'locker' AND wait_event_type = 'Lock'",
+            expected=1,
+        )
+
+        pg.sql("COMMIT")
+        waiting.result()
+
+These are all PostgresServer methods; see pypg/server.py for the rest of them,
+including the log helpers, the other wait helpers, and the backup and recovery
+ones.
+
+
+Server configuration
+====================
+
+Server configuration is changed by editing the config files and then
+reloading (or restarting) the server:
+
+    pg.append_conf(log_connections="all")   # append a setting
+    pg.adjust_conf(work_mem="4MB")           # replace any existing line(s)
+    pg.pg_ctl("reload")                      # or pg.pg_ctl("restart")
+
+Both helpers quote and escape values for postgresql.conf automatically, and
+boolean GUCs accept Python True/False. The pg_hba.conf and pg_ident.conf files
+can be reset to a single rule with pg.reset_hba(database, role, method) and
+pg.reset_ident(map, system_user, pg_user); both reload the server themselves.
+
+A test does not have to put any of this back: the config files are restored
+when it ends, and the server is reloaded or restarted to match. Config given
+to a server when it is created is part of the server rather than of a test, so
+that is kept.
+
+
+Testing libpq itself
+====================
+
+It's also possible to write tests for libpq that don't need or even want a
+Postgres server at all. For example tests of libpq itself that connect to a
+mock server. Those tests can use the connect fixture instead to connect
+anywhere:
+
+    def test_must_connect_errors(connect):
+        with pytest.raises(LibpqError, match="invalid connection option"):
+            connect(some_unknown_keyword="whatever")
+
+
+Timeouts
+========
+
+Tests inherit the PG_TEST_TIMEOUT_DEFAULT environment variable (defaulting
+to 180 seconds). It is used as the default connect_timeout for connections
+and as the default timeout for the polling/wait helpers (poll_query_until,
+wait_for_log, wait_for_catchup, and similar).
+
+
+Environment variables
+=====================
+
+PG_TEST_TIMEOUT_DEFAULT
+    Default timeout in seconds for connections and for the wait helpers, not
+    for a test as a whole (default: 180)
+
+PG_CONFIG
+    Path to pg_config (default: uses PATH)
+
+TESTDATADIR
+    Directory for test data (default: pytest temp directory)
+
+PG_TEST_EXTRA
+    Space-separated list of optional test categories to run (e.g., "ssl")
+
+PG_TEST_NOCLEAN
+    Keep the data directories of servers whose tests passed, which are
+    otherwise removed at the end of each test file
 
 
 References

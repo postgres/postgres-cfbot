@@ -22,3 +22,11 @@ minversion = "7.2"
 
 # Common test code can be found here.
 pythonpath = ["src/test/pytest"]
+
+# Load the shared fixtures plugin.
+#
+# --tb=short shows only the failing statement of each frame. The default
+# shows the frame's whole function up to the failing line, and many tests
+# are one long function, so a single failed assertion printed hundreds of
+# lines of test source. Pass --tb=long to get that back.
+addopts = ["-p", "pypg.fixtures", "--tb=short"]
