@@ -1022,7 +1022,9 @@ PG_TEST_NOCLEAN=1 make -C src/bin/pg_dump check
 
    <para>
     Tests in <filename>pyt</filename> directories use the Python
-    <application>pytest</application> framework.
+    <application>pytest</application> framework. These tests provide a
+    convenient way to test libpq client functionality and scenarios requiring
+    multiple PostgreSQL server instances.
    </para>
 
    <para>
@@ -1057,6 +1059,23 @@ meson test --suite recovery
 <programlisting>
 make -C src/test/recovery check
 </programlisting>
+   </para>
+
+   <para>
+    You can also run pytest directly, to run every pytest test in the tree, or
+    to select tests the ways pytest itself supports:
+<programlisting>
+pytest
+pytest src/test/recovery/pyt/test_049_wait_for_lsn.py
+pytest -k "wait_for_lsn"
+</programlisting>
+   </para>
+
+   <para>
+    Many operations in the test suites use a 180-second timeout, which on slow
+    hosts may lead to load-induced timeouts.  Setting the environment variable
+    <varname>PG_TEST_TIMEOUT_DEFAULT</varname> to a higher number will change
+    the default to avoid this.
    </para>
 
    <para>
