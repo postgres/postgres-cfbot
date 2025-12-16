@@ -1834,13 +1834,20 @@ endif
 pytest_enabled = false
 pytest_version = ''
 pytest_cmd = ['pytest']  # dummy, overwritten when pytest is found
-# The mtest runner passes our pgtap plugin with -p, and that plugin lives in
-# the directory below. pyproject.toml puts the same directory on pytest's
-# pythonpath, but versions below 8.4 only apply that setting after loading the
-# plugins passed with -p, so on those the plugin is only importable if
-# PYTHONPATH is set here too. This won't help people manually running pytest
-# outside of meson/make, but we expect those to use a recent enough version of
-# pytest anyway (and if not they can manually configure PYTHONPATH too).
+# We also configure the same PYTHONPATH in the pytest settings in
+# pyproject.toml, but pytest versions below 8.4 only apply that setting after
+# loading the plugins listed in its addopts. So on lower versions, any pytest
+# invocation from the source root (even just 'pytest --version') fails with an
+# import error for the 'pypg.fixtures' plugin, because it's only findable
+# through that not-yet-applied PYTHONPATH. So we need to configure PYTHONPATH
+# here too. This won't help people manually running pytest outside of
+# meson/make, but we expect those to use a recent enough version of pytest
+# anyway (and if not they can manually configure PYTHONPATH too).
+#
+# This PYTHONPATH requirement is also why we cannot use pytest.version()
+# below, instead of parsing the 'pytest --version' output ourselves: meson
+# provides no way to set env for its --version probe. And pytest.version()
+# would need meson >= 0.62 anyway which we don't require yet.
 pytest_env = {'PYTHONPATH': meson.project_source_root() / 'src' / 'test' / 'pytest'}
 
 pytestopt = get_option('pytest')
@@ -1849,11 +1856,11 @@ if not pytestopt.disabled()
 
   if pytest.found()
     pytest_enabled = true
-    pytest_version = run_command(pytest, '--version', check: false).stdout().strip().split(' ')[-1]
+    pytest_version = run_command(pytest, '--version', env: pytest_env, check: false).stdout().strip().split(' ')[-1]
     pytest_cmd = [pytest.full_path()]
   else
     # Try python -m pytest as a fallback
-    pytest_check = run_command(python, '-m', 'pytest', '--version', check: false)
+    pytest_check = run_command(python, '-m', 'pytest', '--version', env: pytest_env, check: false)
     if pytest_check.returncode() == 0
       pytest_enabled = true
       pytest_version = pytest_check.stdout().strip().split(' ')[-1]
