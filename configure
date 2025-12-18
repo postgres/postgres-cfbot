@@ -16414,6 +16414,20 @@ cat >>confdefs.h <<_ACEOF
 _ACEOF
 
 
+# Linux open file descriptor locks
+ac_fn_c_check_decl "$LINENO" "F_OFD_SETLK" "ac_cv_have_decl_F_OFD_SETLK" "#include <fcntl.h>
+"
+if test "x$ac_cv_have_decl_F_OFD_SETLK" = xyes; then :
+  ac_have_decl=1
+else
+  ac_have_decl=0
+fi
+
+cat >>confdefs.h <<_ACEOF
+#define HAVE_DECL_F_OFD_SETLK $ac_have_decl
+_ACEOF
+
+
 ac_fn_c_check_func "$LINENO" "explicit_bzero" "ac_cv_func_explicit_bzero"
 if test "x$ac_cv_func_explicit_bzero" = xyes; then :
   $as_echo "#define HAVE_EXPLICIT_BZERO 1" >>confdefs.h
