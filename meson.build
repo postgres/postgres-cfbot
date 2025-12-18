@@ -2892,6 +2892,7 @@ decl_checks = [
   ['strlcpy', 'string.h'],
   ['strsep',  'string.h'],
   ['timingsafe_bcmp',  'string.h'],
+  ['F_OFD_SETLK', 'fcntl.h'],
 ]
 
 # Need to check for function declarations for these functions, because
