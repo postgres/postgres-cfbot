@@ -1912,6 +1912,9 @@ AC_CHECK_DECLS([memset_s], [], [], [#define __STDC_WANT_LIB_EXT1__ 1
 # This is probably only present on macOS, but may as well check always
 AC_CHECK_DECLS(F_FULLFSYNC, [], [], [#include <fcntl.h>])
 
+# Linux open file descriptor locks
+AC_CHECK_DECLS([F_OFD_SETLK], [], [], [#include <fcntl.h>])
+
 AC_REPLACE_FUNCS(m4_normalize([
 	explicit_bzero
 	getopt
