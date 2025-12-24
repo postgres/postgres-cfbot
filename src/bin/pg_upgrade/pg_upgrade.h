@@ -326,6 +326,7 @@ typedef struct
 	int			char_signedness;	/* default char signedness: -1 for initial
 									 * value, 1 for "signed" and 0 for
 									 * "unsigned" */
+	char	   *extra_dependencies;	/* consider these extra dependencies */
 } UserOpts;
 
 typedef struct
