@@ -263,6 +263,23 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
+      <term><option>--extra-dependencies=<replaceable class="parameter">dependencylist</replaceable></option></term>
+      <listitem>
+       <para>
+        Use this option to specify additional dependencies when determining
+        the table dump order.  Each dependency must be provided in the format
+        <replaceable class="parameter">tablename#referredtablename</replaceable>,
+        with multiple pairs separated by commas.  This ensures that the
+        referred table is dumped and its data loaded immediately after its
+        creation.
+       </para>
+       <para>
+        This value is propagated unchanged to <application>pg_dump</application>.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
       <term><option>--no-statistics</option></term>
       <listitem>
        <para>
