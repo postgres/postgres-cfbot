@@ -178,6 +178,7 @@ static SimpleOidList table_exclude_oids = {NULL, NULL};
 static SimpleStringList tabledata_exclude_patterns = {NULL, NULL};
 static SimpleStringList tabledata_exclude_patterns_and_children = {NULL, NULL};
 static SimpleOidList tabledata_exclude_oids = {NULL, NULL};
+static SimpleOidList immediate_tabledata_oids = {NULL, NULL};
 
 static SimpleStringList foreign_servers_include_patterns = {NULL, NULL};
 static SimpleOidList foreign_servers_include_oids = {NULL, NULL};
@@ -262,7 +263,8 @@ static void prohibit_crossdb_refs(PGconn *conn, const char *dbname,
 								  const char *pattern);
 
 static NamespaceInfo *findNamespace(Oid nsoid);
-static void dumpTableData(Archive *fout, const TableDataInfo *tdinfo);
+static void dumpTableData(Archive *fout, const TableDataInfo *tdinfo,
+						  bool isPre);
 static void refreshMatViewData(Archive *fout, const TableDataInfo *tdinfo);
 static const char *getRoleName(const char *roleoid_str);
 static void collectRoleNames(Archive *fout);
@@ -347,6 +349,8 @@ static void findDumpableDependencies(ArchiveHandle *AH, const DumpableObject *do
 static DumpableObject *createBoundaryObjects(void);
 static void addBoundaryDependencies(DumpableObject **dobjs, int numObjs,
 									DumpableObject *boundaryObjs);
+static void addExtraDependencies(Archive *fout, DumpOptions *dopt,
+								 char *extra_dependencies);
 
 static void addConstrChildIdxDeps(DumpableObject *dobj, const IndxInfo *refidx);
 static void getDomainConstraints(Archive *fout, TypeInfo *tyinfo);
@@ -450,6 +454,7 @@ main(int argc, char **argv)
 	bool		no_data = false;
 	bool		no_schema = false;
 	bool		no_statistics = false;
+	char	   *extra_dependencies = NULL;
 
 	static DumpOptions dopt;
 
@@ -535,6 +540,7 @@ main(int argc, char **argv)
 		{"exclude-extension", required_argument, NULL, 17},
 		{"sequence-data", no_argument, &dopt.sequence_data, 1},
 		{"restrict-key", required_argument, NULL, 25},
+		{"extra-dependencies", required_argument, NULL, 26},
 
 		{NULL, 0, NULL, 0}
 	};
@@ -797,6 +803,10 @@ main(int argc, char **argv)
 
 			case 25:
 				dopt.restrict_key = pg_strdup(optarg);
+				break;
+
+			case 26:
+				extra_dependencies = pg_strdup(optarg);
 				break;
 
 			default:
@@ -1149,6 +1159,18 @@ main(int argc, char **argv)
 		getLOs(fout);
 
 	/*
+	 * Add user given dependencies, if any.
+	 *
+	 * Ensure the referenced table is dumped before the dependent table.  When
+	 * this option is used, the referenced table's data is dumped immediately
+	 * after its definition via dumpTableData().  This prevents restore-time
+	 * failures for objects that depend on the table's data rather than just
+	 * its schema.  See the function definition for more details.
+	 */
+	if (extra_dependencies)
+		addExtraDependencies(fout, &dopt, extra_dependencies);
+
+	/*
 	 * Collect dependency data to assist in ordering the objects.
 	 */
 	getDependencies(fout);
@@ -1341,6 +1363,8 @@ help(const char *progname)
 	printf(_("  --exclude-table-data-and-children=PATTERN\n"
 			 "                               do NOT dump data for the specified table(s),\n"
 			 "                               including child and partition tables\n"));
+	printf(_("  --extra-dependencies=DEPENDENCYLIST\n"
+			 "                               consider these extra dependencies\n"));
 	printf(_("  --extra-float-digits=NUM     override default setting for extra_float_digits\n"));
 	printf(_("  --filter=FILENAME            include or exclude objects and data from dump\n"
 			 "                               based on expressions in FILENAME\n"));
@@ -2828,7 +2852,7 @@ forcePartitionRootLoad(const TableInfo *tbinfo)
  * Actually, this just makes an ArchiveEntry for the table contents.
  */
 static void
-dumpTableData(Archive *fout, const TableDataInfo *tdinfo)
+dumpTableData(Archive *fout, const TableDataInfo *tdinfo, bool isPre)
 {
 	DumpOptions *dopt = fout->dopt;
 	const TableInfo *tbinfo = tdinfo->tdtable;
@@ -2897,8 +2921,8 @@ dumpTableData(Archive *fout, const TableDataInfo *tdinfo)
 						  ARCHIVE_OPTS(.tag = tbinfo->dobj.name,
 									   .namespace = tbinfo->dobj.namespace->dobj.name,
 									   .owner = tbinfo->rolname,
-									   .description = "TABLE DATA",
-									   .section = SECTION_DATA,
+									   .description = isPre ? "IMMEDIATE TABLE DATA": "TABLE DATA",
+									   .section = isPre ? SECTION_PRE_DATA : SECTION_DATA,
 									   .createStmt = tdDefn,
 									   .copyStmt = copyStmt,
 									   .deps = &(tbinfo->dobj.dumpId),
@@ -11731,7 +11755,7 @@ dumpDumpableObject(Archive *fout, DumpableObject *dobj)
 			dumpSequenceData(fout, (const TableDataInfo *) dobj);
 			break;
 		case DO_TABLE_DATA:
-			dumpTableData(fout, (const TableDataInfo *) dobj);
+			dumpTableData(fout, (const TableDataInfo *) dobj, false);
 			break;
 		case DO_DUMMY_TYPE:
 			/* table rowtypes and array types are never dumped separately */
@@ -18077,6 +18101,34 @@ dumpTableSchema(Archive *fout, const TableInfo *tbinfo)
 			dumpTableConstraintComment(fout, constr);
 	}
 
+	/*
+	 * Dump table data immediately if the user has requested it and it has not
+	 * been explicitly excluded.
+	 *
+	 * FIXME: During this PRE dump, we temporarily ignore any filter conditions
+	 * (by saving and restoring the original filtercond pointer).  Should this
+	 * be conditional? If so, what logic or new pg_dump option would drive that
+	 * decision?
+	 *
+	 * NOTE: The filter condition must be ignored in the PostGIS issue case.
+	 */
+	if (tbinfo->dataObj && simple_oid_list_member(&immediate_tabledata_oids,
+												  tbinfo->dobj.catId.oid))
+	{
+		TableDataInfo *tdinfo = tbinfo->dataObj;
+		char	   *savedfiltercond = tdinfo->filtercond;
+
+		/* Reset filter condition */
+		tdinfo->filtercond = NULL;
+		dumpTableData(fout, tdinfo, true);
+
+		/* Restore filter condition */
+		tdinfo->filtercond = savedfiltercond;
+
+		/* Don't dump it again later OR should we? For now, NO */
+		tdinfo->dobj.dump = DUMP_COMPONENT_NONE;
+	}
+
 	destroyPQExpBuffer(q);
 	destroyPQExpBuffer(delq);
 	destroyPQExpBuffer(extra);
@@ -20831,4 +20883,107 @@ read_dump_filters(const char *filename, DumpOptions *dopt)
 	}
 
 	filter_free(&fstate);
+}
+
+/*
+ * addExtraDependencies
+ *		Add user given extra dependencies.
+ *
+ * Note: Parameter extra_dependencies must be a comma-separated list of
+ * dependencies in the format: "table-name#ref-table-name".
+ */
+static void
+addExtraDependencies(Archive *fout, DumpOptions *dopt, char *extra_dependencies)
+{
+	SimpleStringList extra_dependencies_patterns = {NULL, NULL};
+	SimpleOidList extra_dependencies_oids = {NULL, NULL};
+	SimpleOidListCell *cell;
+	char	  **dependlist;
+	char	  **dependptr;
+	int			count = 0;
+
+	/*
+	 * Separate multiple dependencies.
+	 *
+	 * We store in the simple string list with table name and its dependent
+	 * table name one after another.  So, every entry should have two table
+	 * names separated by '#'.  And multiple such entries are separated by ','.
+	 * The count of entries thus is always multiple of two.
+	 */
+	if (SplitGUCList(extra_dependencies, ',', &dependlist))
+	{
+		for (dependptr = dependlist; *dependptr; dependptr++)
+		{
+			char	  **elemlist;
+			char	  **elemptr;
+
+			/* Parse dependency element */
+			if (SplitGUCList(*dependptr, '#', &elemlist))
+			{
+				for (elemptr = elemlist; *elemptr; elemptr++)
+				{
+					simple_string_list_append(&extra_dependencies_patterns,
+											  *elemptr);
+					count++;
+				}
+			}
+
+			pg_free(elemlist);
+
+			if ((count % 2) != 0)
+			{
+				/* Mismatch entries.  Return. */
+				pg_free(dependlist);
+
+				return;
+			}
+		}
+	}
+
+	pg_free(dependlist);
+
+	/* Count should be multiple of two */
+	Assert((count % 2) == 0);
+
+	/*
+	 * Convert table names to their oids.
+	 */
+	expand_table_name_patterns(fout, &extra_dependencies_patterns,
+							   &extra_dependencies_oids,
+							   false, false);
+
+	for (cell = extra_dependencies_oids.head; cell; cell = cell->next)
+	{
+		Oid			objid;
+		Oid			refid;
+		TableInfo  *objtbinfo;
+		TableInfo  *reftbinfo;
+
+		/* We should be having two table oids back to back */
+		objid = cell->val;
+		cell = cell->next;
+		Assert(cell);
+		refid = cell->val;
+
+		/* Find table info for these tables referred by oids */
+		objtbinfo = findTableByOid(objid);
+		reftbinfo = findTableByOid(refid);
+
+		/*
+		 * We should mark dependency on the reference table.  We cannot add
+		 * dependency on the table data as PRE-DATA BOUNDARY object causes a
+		 * dependency loop.  So, we need to dump table data immediately after
+		 * creating the table definition.  Add those oids in the
+		 * immediate_tabledata_oids list to dump that later.
+		 */
+		addObjectDependency(&objtbinfo->dobj, reftbinfo->dobj.dumpId);
+		simple_oid_list_append(&immediate_tabledata_oids, refid);
+
+		/*
+		 * For binary-upgrades, create the TableDataInfo for the referenced
+		 * table to ensure it is dumped immediately.
+		 */
+		if (dopt->binary_upgrade && fout->remoteVersion >= 190000)
+			makeTableDataInfo(dopt, reftbinfo);
+	}
 }
