@@ -63,6 +63,7 @@ parseCommandLine(int argc, char *argv[])
 		{"no-statistics", no_argument, NULL, 5},
 		{"set-char-signedness", required_argument, NULL, 6},
 		{"swap", no_argument, NULL, 7},
+		{"extra-dependencies", required_argument, NULL, 8},
 
 		{NULL, 0, NULL, 0}
 	};
@@ -234,6 +235,10 @@ parseCommandLine(int argc, char *argv[])
 				user_opts.transfer_mode = TRANSFER_MODE_SWAP;
 				break;
 
+			case 8:
+				user_opts.extra_dependencies = pg_strdup(optarg);
+				break;
+
 			default:
 				fprintf(stderr, _("Try \"%s --help\" for more information.\n"),
 						os_info.progname);
@@ -328,6 +333,8 @@ usage(void)
 	printf(_("  --clone                       clone instead of copying files to new cluster\n"));
 	printf(_("  --copy                        copy files to new cluster (default)\n"));
 	printf(_("  --copy-file-range             copy files to new cluster with copy_file_range\n"));
+	printf(_("  --extra-dependencies=DEPENDENCYLIST\n"
+			 "                                consider these extra dependencies\n"));
 	printf(_("  --no-statistics               do not import statistics from old cluster\n"));
 	printf(_("  --set-char-signedness=OPTION  set new cluster char signedness to \"signed\" or\n"
 			 "                                \"unsigned\"\n"));
