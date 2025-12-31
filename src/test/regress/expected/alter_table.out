@@ -4015,6 +4015,22 @@ LINE 1: ALTER TABLE partitioned ALTER COLUMN b TYPE char(5);
 ALTER TABLE partitioned SET (fillfactor=100);
 ERROR:  cannot specify storage parameters for a partitioned table
 HINT:  Specify storage parameters for its leaf partitions instead.
+-- If the partition expression contains a whole-row reference, altering a
+-- column’s data type or dropping the column is not allowed.
+CREATE TABLE partitioned1(a int, b int) PARTITION BY list((partitioned1));
+ALTER TABLE partitioned1 DROP COLUMN a; --error
+ERROR:  cannot drop column "a" because it is part of the partition key of relation "partitioned1"
+ALTER TABLE partitioned1 DROP COLUMN b; --error
+ERROR:  cannot drop column "b" because it is part of the partition key of relation "partitioned1"
+ALTER TABLE partitioned1 ALTER COLUMN a TYPE text; --error
+ERROR:  cannot alter column "a" because it is part of the partition key of relation "partitioned1"
+LINE 1: ALTER TABLE partitioned1 ALTER COLUMN a TYPE text;
+                                              ^
+ALTER TABLE partitioned1 ALTER COLUMN b TYPE text; --error
+ERROR:  cannot alter column "b" because it is part of the partition key of relation "partitioned1"
+LINE 1: ALTER TABLE partitioned1 ALTER COLUMN b TYPE text;
+                                              ^
+DROP TABLE partitioned1;
 -- partitioned table cannot participate in regular inheritance
 CREATE TABLE nonpartitioned (
 	a int,
