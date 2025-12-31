@@ -290,6 +290,20 @@ has_partition_attrs(Relation rel, Bitmapset *attnums, bool *used_in_expr)
 
 			/* Find all attributes referenced */
 			pull_varattnos(expr, 1, &expr_attrs);
+
+			/*
+			 * If the partition expression contains a whole-row reference,
+			 * then all columns are indirectly associated with that
+			 * expression.
+			 */
+			if (bms_is_member(InvalidAttrNumber - FirstLowInvalidHeapAttributeNumber,
+							  expr_attrs))
+			{
+				if (used_in_expr)
+					*used_in_expr = true;
+				return true;
+			}
+
 			partexprs_item = lnext(partexprs, partexprs_item);
 
 			if (bms_overlap(attnums, expr_attrs))
