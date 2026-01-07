@@ -633,6 +633,11 @@ llvm_optimize_module(LLVMJitContext *context, LLVMModuleRef module)
 	{
 		/* we rely on mem2reg heavily, so emit even in the O0 case */
 		LLVMAddPromoteMemoryToRegisterPass(llvm_fpm);
+		/*
+		 * the tuple deforming generates a lot of basic blocks,
+		 * simplify them even with O0
+		 */
+		LLVMAddCFGSimplificationPass(llvm_fpm);
 	}
 
 	LLVMPassManagerBuilderPopulateFunctionPassManager(llvm_pmb, llvm_fpm);
@@ -672,14 +677,21 @@ llvm_optimize_module(LLVMJitContext *context, LLVMModuleRef module)
 	LLVMErrorRef err;
 	const char *passes;
 
+	/*
+	 * Determine the LLVM pass pipeline to use.
+	 * For OPT3 we use the standard suite.
+	 * For lower optimization levels, we explicitly include:
+	 * - mem2reg to promote stack variables,
+	 * - simplifycfg to clean up the control flow
+	 * When the inliner flag is set, the inline pass is added. Note that
+	 * default<O0> already includes the always-inline pass.
+	 */
 	if (context->base.flags & PGJIT_OPT3)
 		passes = "default<O3>";
 	else if (context->base.flags & PGJIT_INLINE)
-		/* if doing inlining, but no expensive optimization, add inline pass */
-		passes = "default<O0>,mem2reg,inline";
+		passes = "default<O0>,mem2reg,simplifycfg,inline";
 	else
-		/* default<O0> includes always-inline pass */
-		passes = "default<O0>,mem2reg";
+		passes = "default<O0>,mem2reg,simplifycfg";
 
 	options = LLVMCreatePassBuilderOptions();
 
