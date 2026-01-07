@@ -38,8 +38,8 @@ gin_metapage_info(PG_FUNCTION_ARGS)
 
 	if (!superuser())
 		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser to use raw page functions")));
+				errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				errmsg("must be superuser to use raw page functions"));
 
 	page = get_page_from_raw(raw_page);
 
@@ -48,20 +48,20 @@ gin_metapage_info(PG_FUNCTION_ARGS)
 
 	if (PageGetSpecialSize(page) != MAXALIGN(sizeof(GinPageOpaqueData)))
 		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("input page is not a valid GIN metapage"),
-				 errdetail("Expected special size %d, got %d.",
-						   (int) MAXALIGN(sizeof(GinPageOpaqueData)),
-						   (int) PageGetSpecialSize(page))));
+				errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				errmsg("input page is not a valid GIN metapage"),
+				errdetail("Expected special size %d, got %d.",
+						  (int) MAXALIGN(sizeof(GinPageOpaqueData)),
+						  (int) PageGetSpecialSize(page)));
 
 	opaq = GinPageGetOpaque(page);
 
 	if (opaq->flags != GIN_META)
 		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("input page is not a GIN metapage"),
-				 errdetail("Flags %04X, expected %04X",
-						   opaq->flags, GIN_META)));
+				errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				errmsg("input page is not a GIN metapage"),
+				errdetail("Flags %04X, expected %04X",
+						  opaq->flags, GIN_META));
 
 	/* Build a tuple descriptor for our result type */
 	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
@@ -108,8 +108,8 @@ gin_page_opaque_info(PG_FUNCTION_ARGS)
 
 	if (!superuser())
 		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser to use raw page functions")));
+				errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				errmsg("must be superuser to use raw page functions"));
 
 	page = get_page_from_raw(raw_page);
 
@@ -118,11 +118,11 @@ gin_page_opaque_info(PG_FUNCTION_ARGS)
 
 	if (PageGetSpecialSize(page) != MAXALIGN(sizeof(GinPageOpaqueData)))
 		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("input page is not a valid GIN data leaf page"),
-				 errdetail("Expected special size %d, got %d.",
-						   (int) MAXALIGN(sizeof(GinPageOpaqueData)),
-						   (int) PageGetSpecialSize(page))));
+				errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				errmsg("input page is not a valid GIN data leaf page"),
+				errdetail("Expected special size %d, got %d.",
+						  (int) MAXALIGN(sizeof(GinPageOpaqueData)),
+						  (int) PageGetSpecialSize(page)));
 
 	opaq = GinPageGetOpaque(page);
 
@@ -184,8 +184,8 @@ gin_leafpage_items(PG_FUNCTION_ARGS)
 
 	if (!superuser())
 		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser to use raw page functions")));
+				errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				errmsg("must be superuser to use raw page functions"));
 
 	if (SRF_IS_FIRSTCALL())
 	{
@@ -207,20 +207,20 @@ gin_leafpage_items(PG_FUNCTION_ARGS)
 
 		if (PageGetSpecialSize(page) != MAXALIGN(sizeof(GinPageOpaqueData)))
 			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("input page is not a valid GIN data leaf page"),
-					 errdetail("Expected special size %d, got %d.",
-							   (int) MAXALIGN(sizeof(GinPageOpaqueData)),
-							   (int) PageGetSpecialSize(page))));
+					errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					errmsg("input page is not a valid GIN data leaf page"),
+					errdetail("Expected special size %d, got %d.",
+							  (int) MAXALIGN(sizeof(GinPageOpaqueData)),
+							  (int) PageGetSpecialSize(page)));
 
 		opaq = GinPageGetOpaque(page);
 		if (opaq->flags != (GIN_DATA | GIN_LEAF | GIN_COMPRESSED))
 			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("input page is not a compressed GIN data leaf page"),
-					 errdetail("Flags %04X, expected %04X",
-							   opaq->flags,
-							   (GIN_DATA | GIN_LEAF | GIN_COMPRESSED))));
+					errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					errmsg("input page is not a compressed GIN data leaf page"),
+					errdetail("Flags %04X, expected %04X",
+							  opaq->flags,
+							  (GIN_DATA | GIN_LEAF | GIN_COMPRESSED)));
 
 		inter_call_data = palloc_object(gin_leafpage_items_state);
 
