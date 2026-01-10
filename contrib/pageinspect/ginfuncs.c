@@ -31,8 +31,7 @@ PG_FUNCTION_INFO_V1(gin_entrypage_items);
 PG_FUNCTION_INFO_V1(gin_leafpage_items);
 PG_FUNCTION_INFO_V1(gin_datapage_items);
 
-#define IS_INDEX(r) ((r)->rd_rel->relkind == RELKIND_INDEX)
-#define IS_GIN(r) ((r)->rd_rel->relam == GIN_AM_OID)
+#define IS_GIN(r) (IS_INDEX(r) && (r)->rd_rel->relam == GIN_AM_OID)
 
 Datum
 gin_metapage_info(PG_FUNCTION_ARGS)
@@ -213,7 +212,7 @@ gin_entrypage_items(PG_FUNCTION_ARGS)
 	/* Open the index relation */
 	indexRel = index_open(indexRelid, AccessShareLock);
 
-	if (!IS_INDEX(indexRel) || !IS_GIN(indexRel))
+	if (!IS_GIN(indexRel))
 		ereport(ERROR,
 				errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				errmsg("\"%s\" is not a %s index",
