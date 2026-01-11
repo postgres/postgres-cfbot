@@ -2129,14 +2129,17 @@ WHERE a1.amopopr = o1.oid AND a1.amoppurpose = 's' AND
 
 -- Check that each opclass in an opfamily has associated operators, that is
 -- ones whose oprleft matches opcintype (possibly by coercion).
+-- Currently, the only exception is stir_ops: STIR stores no key data and
+-- supports no scans, so its opclass intentionally has no operators.
 SELECT c1.opcname, c1.opcfamily
 FROM pg_opclass AS c1
 WHERE NOT EXISTS(SELECT 1 FROM pg_amop AS a1
                  WHERE a1.amopfamily = c1.opcfamily
                    AND binary_coercible(c1.opcintype, a1.amoplefttype));
- opcname | opcfamily 
----------+-----------
-(0 rows)
+ opcname  | opcfamily 
+----------+-----------
+ stir_ops |      5558
+(1 row)
 
 -- Check that each operator listed in pg_amop has an associated opclass,
 -- that is one whose opcintype matches oprleft (possibly by coercion).

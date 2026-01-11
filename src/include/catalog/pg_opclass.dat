@@ -492,4 +492,8 @@
 
 # no brin opclass for the geometric types except box
 
+# allow any types for STIR
+{ opcmethod => 'stir', oid_symbol => 'ANY_STIR_OPS_OID', opcname => 'stir_ops',
+  opcfamily => 'stir/any_ops', opcintype => 'any'},
+
 ]
