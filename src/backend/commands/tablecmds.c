@@ -2108,13 +2108,19 @@ ExecuteTruncateGuts(List *explicit_rels,
 	 * Check foreign key references.  In CASCADE mode, this should be
 	 * unnecessary since we just pulled in all the references; but as a
 	 * cross-check, do it anyway if in an Assert-enabled build.
+	 * 
+	 * Skip foreign key checks when `session_replication_role = replica` to
+	 * match the behaviour of disabling FK triggers in the same situation
 	 */
+	if (SessionReplicationRole != SESSION_REPLICATION_ROLE_REPLICA)
+	{
 #ifdef USE_ASSERT_CHECKING
-	heap_truncate_check_FKs(rels, false);
-#else
-	if (behavior == DROP_RESTRICT)
 		heap_truncate_check_FKs(rels, false);
+#else
+		if (behavior == DROP_RESTRICT)
+			heap_truncate_check_FKs(rels, false);
 #endif
+	}
 
 	/*
 	 * If we are asked to restart sequences, find all the sequences, lock them
@@ -6174,7 +6180,12 @@ ATRewriteTables(AlterTableStmt *parsetree, List **wqueue, LOCKMODE lockmode,
 	 * theoretically possible that we have changed both relations of the
 	 * foreign key, and we'd better have finished both rewrites before we try
 	 * to read the tables.
+	 * 
+	 * Skip the check when `session_replication_mode = replica` to save time 
+	 * and to match the FK trigger behaviour in the same situation 
 	 */
+	if (SessionReplicationRole != SESSION_REPLICATION_ROLE_REPLICA)
+	{
 	foreach(ltab, *wqueue)
 	{
 		AlteredTableInfo *tab = (AlteredTableInfo *) lfirst(ltab);
@@ -6218,6 +6229,7 @@ ATRewriteTables(AlterTableStmt *parsetree, List **wqueue, LOCKMODE lockmode,
 
 		if (rel)
 			table_close(rel, NoLock);
+	}
 	}
 
 	/* Finally, run any afterStmts that were queued up */

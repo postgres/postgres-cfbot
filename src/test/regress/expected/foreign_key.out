@@ -3502,6 +3502,41 @@ ALTER TABLE fk_r DROP CONSTRAINT fk_r_p_id_p_jd_fkey_1;
 ERROR:  cannot drop inherited constraint "fk_r_p_id_p_jd_fkey_1" of relation "fk_r"
 ALTER TABLE fk_r_2 DROP CONSTRAINT fk_r_p_id_p_jd_fkey;
 ERROR:  cannot drop inherited constraint "fk_r_p_id_p_jd_fkey" of relation "fk_r_2"
+-- tests for SET session_replication_role = replica;
+RESET session_replication_role;
+-- disabling FK checks
+CREATE TABLE pkt(id int PRIMARY KEY);
+CREATE TABLE fkt(fk int REFERENCES pkt(id));
+INSERT INTO fkt VALUES(1); -- should fail
+ERROR:  insert or update on table "fkt" violates foreign key constraint "fkt_fk_fkey"
+DETAIL:  Key (fk)=(1) is not present in table "pkt".
+SET session_replication_role=replica;
+INSERT INTO fkt VALUES(1); -- should succeed now
+DROP TABLE fkt, pkt;
+RESET session_replication_role;
+-- skipping FK validation during ALTER TABLE ... ADD FOREIGN KEY
+CREATE TABLE pkt(id int PRIMARY KEY);
+CREATE TABLE fkt(fk int);
+INSERT INTO fkt VALUES(1);
+ALTER TABLE fkt ADD FOREIGN KEY (fk) REFERENCES pkt(id); -- should fail
+ERROR:  insert or update on table "fkt" violates foreign key constraint "fkt_fk_fkey"
+DETAIL:  Key (fk)=(1) is not present in table "pkt".
+SET session_replication_role=replica;
+ALTER TABLE fkt ADD FOREIGN KEY (fk) REFERENCES pkt(id); -- should succeed now
+DROP TABLE fkt, pkt;
+RESET session_replication_role;
+-- skipping FK existence checks during TRUNCATE
+CREATE TABLE pkt(id int PRIMARY KEY);
+CREATE TABLE fkt(fk int REFERENCES pkt(id));
+TRUNCATE pkt; -- should fail
+ERROR:  cannot truncate a table referenced in a foreign key constraint
+DETAIL:  Table "fkt" references "pkt".
+HINT:  Truncate table "fkt" at the same time, or use TRUNCATE ... CASCADE.
+SET session_replication_role=replica;
+TRUNCATE pkt; -- should succeed now
+DROP TABLE fkt, pkt;
+RESET session_replication_role;
+-- end of tests for SET session_replication_role = replica;
 SET client_min_messages TO warning;
 DROP SCHEMA fkpart12 CASCADE;
 RESET client_min_messages;
