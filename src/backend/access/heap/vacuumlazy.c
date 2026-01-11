@@ -3054,6 +3054,7 @@ lazy_vacuum_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 	ivinfo.message_level = DEBUG2;
 	ivinfo.num_heap_tuples = reltuples;
 	ivinfo.strategy = vacrel->bstrategy;
+	ivinfo.validate_index = false;
 
 	/* Report which index we're currently processing */
 	pgstat_progress_update_param(PROGRESS_VACUUM_CURRENT_INDEX_RELID,
@@ -3118,6 +3119,7 @@ lazy_cleanup_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 
 	ivinfo.num_heap_tuples = reltuples;
 	ivinfo.strategy = vacrel->bstrategy;
+	ivinfo.validate_index = false;
 
 	/* Report which index we're currently processing */
 	pgstat_progress_update_param(PROGRESS_VACUUM_CURRENT_INDEX_RELID,
