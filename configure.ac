@@ -1465,7 +1465,7 @@ fi
 if test "$with_liburing" = yes; then
   _LIBS="$LIBS"
   LIBS="$LIBURING_LIBS $LIBS"
-  AC_CHECK_FUNCS([io_uring_queue_init_mem])
+  AC_CHECK_FUNCS([io_uring_queue_init_mem io_uring_opcode_supported])
   LIBS="$_LIBS"
 fi
 
