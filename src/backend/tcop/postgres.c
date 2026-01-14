@@ -3596,34 +3596,40 @@ ProcessInterrupts(void)
 			get_timeout_finish_time(STATEMENT_TIMEOUT) < get_timeout_finish_time(LOCK_TIMEOUT))
 			lock_timeout_occurred = false;	/* report stmt timeout */
 
-		if (lock_timeout_occurred)
+		if (DoingCommandRead)
+		{
+			/*
+			 * If we are reading a command from the client that means that the
+			 * query completed before we were able to cancel it (whether due
+			 * to cancel request or timeout). Sending an extra error message
+			 * won't accomplish anything in that case. So we just do nothing
+			 * in this case, except for the resetting of the flags which
+			 * happened above. Otherwise, go ahead and throw an error with the
+			 * correct reason.
+			 */
+		}
+		else if (lock_timeout_occurred)
 		{
 			LockErrorCleanup();
 			ereport(ERROR,
 					(errcode(ERRCODE_LOCK_NOT_AVAILABLE),
 					 errmsg("canceling statement due to lock timeout")));
 		}
-		if (stmt_timeout_occurred)
+		else if (stmt_timeout_occurred)
 		{
 			LockErrorCleanup();
 			ereport(ERROR,
 					(errcode(ERRCODE_QUERY_CANCELED),
 					 errmsg("canceling statement due to statement timeout")));
 		}
-		if (AmAutoVacuumWorkerProcess())
+		else if (AmAutoVacuumWorkerProcess())
 		{
 			LockErrorCleanup();
 			ereport(ERROR,
 					(errcode(ERRCODE_QUERY_CANCELED),
 					 errmsg("canceling autovacuum task")));
 		}
-
-		/*
-		 * If we are reading a command from the client, just ignore the cancel
-		 * request --- sending an extra error message won't accomplish
-		 * anything.  Otherwise, go ahead and throw the error.
-		 */
-		if (!DoingCommandRead)
+		else
 		{
 			LockErrorCleanup();
 			ereport(ERROR,
@@ -5389,22 +5395,34 @@ enable_statement_timeout(void)
 	if (StatementTimeout > 0
 		&& (StatementTimeout < TransactionTimeout || TransactionTimeout == 0))
 	{
-		if (!get_timeout_active(STATEMENT_TIMEOUT))
+		/*
+		 * We check both if it's active or if it's already triggered. If it's
+		 * already triggered we don't want to restart it because that clears
+		 * the indicator flag, which in turn would cause the wrong error
+		 * message to be used by ProcessInterrupts() on the next
+		 * CHECK_FOR_INTERRUPTS() call. Restarting the timer in that case
+		 * would be pointless anyway, because the statement timeout error is
+		 * going to trigger on the next CHECK_FOR_INTERRUPTS() call.
+		 */
+		if (!get_timeout_active(STATEMENT_TIMEOUT)
+			&& !get_timeout_indicator(STATEMENT_TIMEOUT, false))
 			enable_timeout_after(STATEMENT_TIMEOUT, StatementTimeout);
 	}
 	else
 	{
-		if (get_timeout_active(STATEMENT_TIMEOUT))
-			disable_timeout(STATEMENT_TIMEOUT, false);
+		disable_statement_timeout();
 	}
 }
 
 /*
- * Disable statement timeout, if active.
+ * Disable statement timeout, if active. We preserve the indicator flag
+ * though, otherwise in the rare case where the timeout fires between
+ * get_timeout_active and disable_timeout, we'd lose the knowledge in
+ * ProcessInterupts that the SIGINT came from a statement timeout.
  */
 static void
 disable_statement_timeout(void)
 {
 	if (get_timeout_active(STATEMENT_TIMEOUT))
-		disable_timeout(STATEMENT_TIMEOUT, false);
+		disable_timeout(STATEMENT_TIMEOUT, true);
 }
