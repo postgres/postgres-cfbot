@@ -2815,8 +2815,9 @@ pullup_replace_vars_callback(const Var *var,
 	 * references to the same subquery output as being equal().  So it's worth
 	 * a bit of extra effort to avoid it.
 	 *
-	 * The cached items have phlevelsup = 0 and phnullingrels = NULL; we'll
-	 * copy them and adjust those values for this reference site below.
+	 * The cached items have phlevelsup = 0, phnullingrels = NULL, and
+	 * phpreserved = false.  We'll copy them and adjust phpreserved here; the
+	 * other values are adjusted for this reference site below.
 	 */
 	if (need_phv &&
 		varattno >= InvalidAttrNumber &&
@@ -2825,6 +2826,13 @@ pullup_replace_vars_callback(const Var *var,
 	{
 		/* Just copy the entry and fall through to adjust phlevelsup etc */
 		newnode = copyObject(rcon->rv_cache[varattno]);
+
+		/*
+		 * Mark the PlaceHolderVar as preserved if it's used for
+		 * identification purposes.
+		 */
+		if (rcon->wrap_option != REPLACE_WRAP_NONE)
+			((PlaceHolderVar *) newnode)->phpreserved = true;
 	}
 	else
 	{
@@ -3010,6 +3018,13 @@ pullup_replace_vars_callback(const Var *var,
 				if (varattno >= InvalidAttrNumber &&
 					varattno <= list_length(rcon->targetlist))
 					rcon->rv_cache[varattno] = copyObject(newnode);
+
+				/*
+				 * Mark the PlaceHolderVar as preserved if it's used for
+				 * identification purposes.
+				 */
+				if (rcon->wrap_option != REPLACE_WRAP_NONE)
+					((PlaceHolderVar *) newnode)->phpreserved = true;
 			}
 		}
 	}
@@ -3302,23 +3317,28 @@ reduce_outer_joins(PlannerInfo *root)
 	 * remove references to those joins as nulling rels.  This is handled as
 	 * an additional pass, for simplicity and because we can handle all
 	 * fully-reduced joins in a single pass over the parse tree.
+	 *
+	 * We allow stripping no-op PlaceHolderVars here, as this is a
+	 * tree-simplification pass and we want to remove useless wrappers.
 	 */
 	if (!bms_is_empty(state2.inner_reduced))
 	{
 		root->parse = (Query *)
 			remove_nulling_relids((Node *) root->parse,
 								  state2.inner_reduced,
-								  NULL);
+								  NULL, true);
 		/* There could be references in the append_rel_list, too */
 		root->append_rel_list = (List *)
 			remove_nulling_relids((Node *) root->append_rel_list,
 								  state2.inner_reduced,
-								  NULL);
+								  NULL, true);
 	}
 
 	/*
 	 * Partially-reduced full joins have to be done one at a time, since
 	 * they'll each need a different setting of except_relids.
+	 *
+	 * As above, we allow stripping no-op PlaceHolderVars.
 	 */
 	foreach(lc, state2.partial_reduced)
 	{
@@ -3328,11 +3348,13 @@ reduce_outer_joins(PlannerInfo *root)
 		root->parse = (Query *)
 			remove_nulling_relids((Node *) root->parse,
 								  full_join_relids,
-								  statep->unreduced_side);
+								  statep->unreduced_side,
+								  true);
 		root->append_rel_list = (List *)
 			remove_nulling_relids((Node *) root->append_rel_list,
 								  full_join_relids,
-								  statep->unreduced_side);
+								  statep->unreduced_side,
+								  true);
 	}
 }
 
@@ -4062,18 +4084,21 @@ remove_useless_result_rtes(PlannerInfo *root)
 	 * know that such an outer join wouldn't really have nulled anything.)  We
 	 * don't do this during the main recursion, for simplicity and because we
 	 * can handle all such joins in a single pass over the parse tree.
+	 *
+	 * We allow stripping no-op PlaceHolderVars here, as this is a
+	 * tree-simplification pass and we want to remove useless wrappers.
 	 */
 	if (!bms_is_empty(dropped_outer_joins))
 	{
 		root->parse = (Query *)
 			remove_nulling_relids((Node *) root->parse,
 								  dropped_outer_joins,
-								  NULL);
+								  NULL, true);
 		/* There could be references in the append_rel_list, too */
 		root->append_rel_list = (List *)
 			remove_nulling_relids((Node *) root->append_rel_list,
 								  dropped_outer_joins,
-								  NULL);
+								  NULL, true);
 	}
 
 	/*

@@ -2326,11 +2326,11 @@ have_partkey_equi_join(PlannerInfo *root, RelOptInfo *joinrel,
 			if (bms_overlap(rel1->relids, root->outer_join_rels))
 				expr1 = (Expr *) remove_nulling_relids((Node *) expr1,
 													   root->outer_join_rels,
-													   NULL);
+													   NULL, false);
 			if (bms_overlap(rel2->relids, root->outer_join_rels))
 				expr2 = (Expr *) remove_nulling_relids((Node *) expr2,
 													   root->outer_join_rels,
-													   NULL);
+													   NULL, false);
 		}
 
 		/*

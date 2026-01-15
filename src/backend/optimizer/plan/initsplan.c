@@ -2714,13 +2714,15 @@ deconstruct_distribute_oj_quals(PlannerInfo *root,
 		 *
 		 * We first strip out all the nullingrels bits corresponding to
 		 * commuting joins below this one, and then successively put them back
-		 * as we crawl up the join stack.
+		 * as we crawl up the join stack.  Note that we do not allow stripping
+		 * no-op PlaceHolderVars here; if a PHV were removed, we would be
+		 * unable to restore its nullingrels bits later.
 		 */
 		quals = jtitem->oj_joinclauses;
 		if (!bms_is_empty(joins_below))
 			quals = (List *) remove_nulling_relids((Node *) quals,
 												   joins_below,
-												   NULL);
+												   NULL, false);
 
 		/*
 		 * We'll need to mark the lower versions of the quals as not safe to
