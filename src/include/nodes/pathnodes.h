@@ -3095,6 +3095,11 @@ typedef struct MergeScanSelCache
  * level of a PlaceHolderVar might be a join rather than a base relation.
  * Likewise, phnullingrels corresponds to varnullingrels.
  *
+ * phpreserved indicates whether the PlaceHolderVar needs to be preserved
+ * when its phnullingrels becomes empty.  This is set true in cases where
+ * the PlaceHolderVar is used to enforce the separate identity of the
+ * contained expression.
+ *
  * Although the planner treats this as an expression node type, it is not
  * recognized by the parser or executor, so we declare it here rather than
  * in primnodes.h.
@@ -3127,6 +3132,9 @@ typedef struct PlaceHolderVar
 
 	/* RT indexes of outer joins that can null PHV's value */
 	Relids		phnullingrels;
+
+	/* true if PHV enforces separate identity */
+	bool		phpreserved pg_node_attr(equal_ignore);
 
 	/* ID for PHV (unique within planner run) */
 	Index		phid;

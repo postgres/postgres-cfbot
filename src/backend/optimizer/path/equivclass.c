@@ -2469,8 +2469,8 @@ reconsider_full_join_clause(PlannerInfo *root, OuterJoinClauseInfo *ojcinfo)
 				 * representation for FULL JOIN USING output columns, this
 				 * wouldn't be needed?)
 				 */
-				cfirst = remove_nulling_relids(cfirst, fjrelids, NULL);
-				csecond = remove_nulling_relids(csecond, fjrelids, NULL);
+				cfirst = remove_nulling_relids(cfirst, fjrelids, NULL, false);
+				csecond = remove_nulling_relids(csecond, fjrelids, NULL, false);
 
 				if (equal(leftvar, cfirst) && equal(rightvar, csecond))
 				{
