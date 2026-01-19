@@ -5609,14 +5609,6 @@ postgresAcquireSampleRowsFunc(Relation relation, int elevel,
 	else
 		*totalrows = reltuples;
 
-	/*
-	 * Emit some interesting relation info
-	 */
-	ereport(elevel,
-			(errmsg("\"%s\": table contains %.0f rows, %d rows in sample",
-					RelationGetRelationName(relation),
-					*totalrows, astate.numrows)));
-
 	return astate.numrows;
 }
 
