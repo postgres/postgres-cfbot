@@ -1327,14 +1327,5 @@ file_acquire_sample_rows(Relation onerel, int elevel,
 	pfree(values);
 	pfree(nulls);
 
-	/*
-	 * Emit some interesting relation info
-	 */
-	ereport(elevel,
-			(errmsg("\"%s\": file contains %.0f rows; "
-					"%d rows in sample",
-					RelationGetRelationName(onerel),
-					*totalrows, numrows)));
-
 	return numrows;
 }
