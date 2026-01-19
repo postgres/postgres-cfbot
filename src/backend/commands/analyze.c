@@ -88,11 +88,13 @@ static VacAttrStats *examine_attribute(Relation onerel, int attnum,
 									   Node *index_expr);
 static int	acquire_sample_rows(Relation onerel, int elevel,
 								HeapTuple *rows, int targrows,
-								double *totalrows, double *totaldeadrows);
+								double *totalrows, double *totaldeadrows,
+								AnalyzeSamplingStats *sampling_stats);
 static int	compare_rows(const void *a, const void *b, void *arg);
 static int	acquire_inherited_sample_rows(Relation onerel, int elevel,
 										  HeapTuple *rows, int targrows,
-										  double *totalrows, double *totaldeadrows);
+										  double *totalrows, double *totaldeadrows,
+										  List **sampling_stats_list);
 static void update_attstats(Oid relid, bool inh,
 							int natts, VacAttrStats **vacattrstats);
 static Datum std_fetch_func(VacAttrStatsP stats, int rownum, bool *isNull);
@@ -213,9 +215,7 @@ analyze_rel(Oid relid, RangeVar *relation,
 	if (onerel->rd_rel->relkind == RELKIND_RELATION ||
 		onerel->rd_rel->relkind == RELKIND_MATVIEW)
 	{
-		/* Regular table, so we'll use the regular row acquisition function */
-		acquirefunc = acquire_sample_rows;
-		/* Also get regular table's size */
+		/* Get regular table's size */
 		relpages = RelationGetNumberOfBlocks(onerel);
 	}
 	else if (onerel->rd_rel->relkind == RELKIND_FOREIGN_TABLE)
@@ -326,6 +326,8 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 	double		totalrows,
 				totaldeadrows;
 	HeapTuple  *rows;
+	AnalyzeSamplingStats sampling_stats = {0};
+	List	   *sampling_stats_list = NIL;
 	PGRUsage	ru0;
 	TimestampTz starttime = 0;
 	MemoryContext caller_context;
@@ -540,11 +542,17 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 	if (inh)
 		numrows = acquire_inherited_sample_rows(onerel, elevel,
 												rows, targrows,
-												&totalrows, &totaldeadrows);
-	else
+												&totalrows, &totaldeadrows,
+												&sampling_stats_list);
+	else if (onerel->rd_rel->relkind == RELKIND_FOREIGN_TABLE)
 		numrows = (*acquirefunc) (onerel, elevel,
 								  rows, targrows,
 								  &totalrows, &totaldeadrows);
+	else
+		numrows = acquire_sample_rows(onerel, elevel,
+									  rows, targrows,
+									  &totalrows, &totaldeadrows,
+									  &sampling_stats);
 
 	/*
 	 * Compute the statistics.  Temporary results during the calculations for
@@ -810,7 +818,12 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 			initStringInfo(&buf);
 
 			if (AmAutoVacuumWorkerProcess())
-				msgfmt = _("automatic analyze of table \"%s.%s.%s\"\n");
+			{
+				if (inh)
+					msgfmt = _("automatic analyze of table \"%s.%s.%s\" inheritance tree\n");
+				else
+					msgfmt = _("automatic analyze of table \"%s.%s.%s\"\n");
+			}
 			else
 				msgfmt = _("finished analyzing table \"%s.%s.%s\"\n");
 
@@ -818,6 +831,49 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 							 get_database_name(MyDatabaseId),
 							 get_namespace_name(RelationGetNamespace(onerel)),
 							 RelationGetRelationName(onerel));
+
+			/*
+			 * Report sampling statistics based on the table type.
+			 *
+			 * For foreign tables, we can only report the number of rows
+			 * sampled and estimated total, since sampling is done by the FDW.
+			 *
+			 * For inheritance trees and partitioned tables, we report
+			 * per-child sampling statistics collected during sampling.
+			 *
+			 * For regular tables, we report the standard sampling statistics.
+			 */
+			if (onerel->rd_rel->relkind == RELKIND_FOREIGN_TABLE)
+				appendStringInfo(&buf,
+								 _("sampling: target contains %.0f rows; %d rows in sample\n"),
+								 totalrows, numrows);
+			else if (inh && sampling_stats_list != NIL)
+			{
+				ListCell   *lc;
+
+				foreach(lc, sampling_stats_list)
+				{
+					AnalyzeSamplingStats *stats = (AnalyzeSamplingStats *) lfirst(lc);
+
+					appendStringInfo(&buf,
+									 _("sampling \"%s.%s\": scanned %u of %u pages, "
+									   "containing %.0f live rows and %.0f dead rows; "
+									   "%d rows in sample, %.0f estimated total rows\n"),
+									 get_namespace_name(get_rel_namespace(stats->relid)),
+									 get_rel_name(stats->relid),
+									 stats->scannedpages, stats->totalpages,
+									 stats->liverows, stats->deadrows,
+									 stats->samplerows, stats->totalrows);
+				}
+			}
+			else
+				appendStringInfo(&buf,
+								 _("sampling: scanned %u of %u pages, "
+								   "containing %.0f live rows and %.0f dead rows; "
+								   "%d rows in sample, %.0f estimated total rows\n"),
+								 sampling_stats.scannedpages, sampling_stats.totalpages,
+								 sampling_stats.liverows, sampling_stats.deadrows,
+								 sampling_stats.samplerows, sampling_stats.totalrows);
 			if (track_cost_delay_timing)
 			{
 				/*
@@ -1260,7 +1316,8 @@ block_sampling_read_stream_next(ReadStream *stream,
 static int
 acquire_sample_rows(Relation onerel, int elevel,
 					HeapTuple *rows, int targrows,
-					double *totalrows, double *totaldeadrows)
+					double *totalrows, double *totaldeadrows,
+					AnalyzeSamplingStats *sampling_stats)
 {
 	int			numrows = 0;	/* # rows now in reservoir */
 	double		samplerows = 0; /* total # rows collected */
@@ -1397,17 +1454,13 @@ acquire_sample_rows(Relation onerel, int elevel,
 		*totaldeadrows = 0.0;
 	}
 
-	/*
-	 * Emit some interesting relation info
-	 */
-	ereport(elevel,
-			(errmsg("\"%s\": scanned %d of %u pages, "
-					"containing %.0f live rows and %.0f dead rows; "
-					"%d rows in sample, %.0f estimated total rows",
-					RelationGetRelationName(onerel),
-					bs.m, totalblocks,
-					liverows, deadrows,
-					numrows, *totalrows)));
+	/* Populate sampling statistics output parameters */
+	sampling_stats->totalpages = totalblocks;
+	sampling_stats->scannedpages = bs.m;
+	sampling_stats->liverows = liverows;
+	sampling_stats->deadrows = deadrows;
+	sampling_stats->samplerows = numrows;
+	sampling_stats->totalrows = *totalrows;
 
 	return numrows;
 }
@@ -1448,7 +1501,8 @@ compare_rows(const void *a, const void *b, void *arg)
 static int
 acquire_inherited_sample_rows(Relation onerel, int elevel,
 							  HeapTuple *rows, int targrows,
-							  double *totalrows, double *totaldeadrows)
+							  double *totalrows, double *totaldeadrows,
+							  List **sampling_stats_list)
 {
 	List	   *tableOIDs;
 	Relation   *rels;
@@ -1464,6 +1518,7 @@ acquire_inherited_sample_rows(Relation onerel, int elevel,
 	/* Initialize output parameters to zero now, in case we exit early */
 	*totalrows = 0;
 	*totaldeadrows = 0;
+	*sampling_stats_list = NIL;
 
 	/*
 	 * Find all members of inheritance set.  We only need AccessShareLock on
@@ -1525,7 +1580,6 @@ acquire_inherited_sample_rows(Relation onerel, int elevel,
 			childrel->rd_rel->relkind == RELKIND_MATVIEW)
 		{
 			/* Regular table, so use the regular row acquisition function */
-			acquirefunc = acquire_sample_rows;
 			relpages = RelationGetNumberOfBlocks(childrel);
 		}
 		else if (childrel->rd_rel->relkind == RELKIND_FOREIGN_TABLE)
@@ -1637,9 +1691,29 @@ acquire_inherited_sample_rows(Relation onerel, int elevel,
 							tdrows;
 
 				/* Fetch a random sample of the child's rows */
-				childrows = (*acquirefunc) (childrel, elevel,
-											rows + numrows, childtargrows,
-											&trows, &tdrows);
+				if (childrel->rd_rel->relkind == RELKIND_FOREIGN_TABLE)
+				{
+					childrows = (*acquirefunc) (childrel, elevel,
+												rows + numrows, childtargrows,
+												&trows, &tdrows);
+				}
+				else
+				{
+					AnalyzeSamplingStats *child_sampling_stats;
+
+					child_sampling_stats = (AnalyzeSamplingStats *)
+						palloc(sizeof(AnalyzeSamplingStats));
+
+					childrows = acquire_sample_rows(childrel, elevel,
+													rows + numrows, childtargrows,
+													&trows, &tdrows,
+													child_sampling_stats);
+
+					/* Set the relation OID and add to the list */
+					child_sampling_stats->relid = RelationGetRelid(childrel);
+					*sampling_stats_list = lappend(*sampling_stats_list,
+												   child_sampling_stats);
+				}
 
 				/* We may need to convert from child's rowtype to parent's */
 				if (childrows > 0 &&

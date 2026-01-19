@@ -124,6 +124,7 @@ AmcheckOptions
 AnalyzeAttrComputeStatsFunc
 AnalyzeAttrFetchFunc
 AnalyzeForeignTable_function
+AnalyzeSamplingStats
 AnlExprData
 AnlIndexData
 AnyArrayType
