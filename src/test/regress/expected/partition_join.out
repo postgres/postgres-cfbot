@@ -576,8 +576,8 @@ SELECT * FROM prt1 t1 JOIN LATERAL
 -- lateral reference in scan's restriction clauses
 EXPLAIN (COSTS OFF)
 SELECT count(*) FROM prt1 t1 LEFT JOIN LATERAL
-			  (SELECT t1.b AS t1b, t2.* FROM prt2 t2) s
-			  ON t1.a = s.b WHERE s.t1b = s.a;
+			  (SELECT (t1.b >= 0 AND t1.b = a) AS t1b, t2.* FROM prt2 t2) s
+			  ON t1.a = s.b WHERE s.t1b;
                           QUERY PLAN                           
 ---------------------------------------------------------------
  Aggregate
@@ -586,22 +586,22 @@ SELECT count(*) FROM prt1 t1 LEFT JOIN LATERAL
                ->  Seq Scan on prt1_p1 t1_1
                ->  Index Scan using iprt2_p1_b on prt2_p1 t2_1
                      Index Cond: (b = t1_1.a)
-                     Filter: (t1_1.b = a)
+                     Filter: ((t1_1.b >= 0) AND (t1_1.b = a))
          ->  Nested Loop
                ->  Seq Scan on prt1_p2 t1_2
                ->  Index Scan using iprt2_p2_b on prt2_p2 t2_2
                      Index Cond: (b = t1_2.a)
-                     Filter: (t1_2.b = a)
+                     Filter: ((t1_2.b >= 0) AND (t1_2.b = a))
          ->  Nested Loop
                ->  Seq Scan on prt1_p3 t1_3
                ->  Index Scan using iprt2_p3_b on prt2_p3 t2_3
                      Index Cond: (b = t1_3.a)
-                     Filter: (t1_3.b = a)
+                     Filter: ((t1_3.b >= 0) AND (t1_3.b = a))
 (17 rows)
 
 SELECT count(*) FROM prt1 t1 LEFT JOIN LATERAL
-			  (SELECT t1.b AS t1b, t2.* FROM prt2 t2) s
-			  ON t1.a = s.b WHERE s.t1b = s.a;
+			  (SELECT (t1.b >= 0 AND t1.b = a) AS t1b, t2.* FROM prt2 t2) s
+			  ON t1.a = s.b WHERE s.t1b;
  count 
 -------
    100
@@ -609,8 +609,8 @@ SELECT count(*) FROM prt1 t1 LEFT JOIN LATERAL
 
 EXPLAIN (COSTS OFF)
 SELECT count(*) FROM prt1 t1 LEFT JOIN LATERAL
-			  (SELECT t1.b AS t1b, t2.* FROM prt2 t2) s
-			  ON t1.a = s.b WHERE s.t1b = s.b;
+			  (SELECT (t1.b >= 0 AND t1.b = b) AS t1b, t2.* FROM prt2 t2) s
+			  ON t1.a = s.b WHERE s.t1b;
                              QUERY PLAN                             
 --------------------------------------------------------------------
  Aggregate
@@ -619,22 +619,22 @@ SELECT count(*) FROM prt1 t1 LEFT JOIN LATERAL
                ->  Seq Scan on prt1_p1 t1_1
                ->  Index Only Scan using iprt2_p1_b on prt2_p1 t2_1
                      Index Cond: (b = t1_1.a)
-                     Filter: (b = t1_1.b)
+                     Filter: ((t1_1.b >= 0) AND (t1_1.b = b))
          ->  Nested Loop
                ->  Seq Scan on prt1_p2 t1_2
                ->  Index Only Scan using iprt2_p2_b on prt2_p2 t2_2
                      Index Cond: (b = t1_2.a)
-                     Filter: (b = t1_2.b)
+                     Filter: ((t1_2.b >= 0) AND (t1_2.b = b))
          ->  Nested Loop
                ->  Seq Scan on prt1_p3 t1_3
                ->  Index Only Scan using iprt2_p3_b on prt2_p3 t2_3
                      Index Cond: (b = t1_3.a)
-                     Filter: (b = t1_3.b)
+                     Filter: ((t1_3.b >= 0) AND (t1_3.b = b))
 (17 rows)
 
 SELECT count(*) FROM prt1 t1 LEFT JOIN LATERAL
-			  (SELECT t1.b AS t1b, t2.* FROM prt2 t2) s
-			  ON t1.a = s.b WHERE s.t1b = s.b;
+			  (SELECT (t1.b >= 0 AND t1.b = b) AS t1b, t2.* FROM prt2 t2) s
+			  ON t1.a = s.b WHERE s.t1b;
  count 
 -------
      5
@@ -2207,39 +2207,39 @@ SELECT * FROM prt1_l t1 JOIN LATERAL
 -- partitionwise join with lateral reference in scan's restriction clauses
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) FROM prt1_l t1 LEFT JOIN LATERAL
-			  (SELECT t1.b AS t1b, t2.* FROM prt2_l t2) s
+			  (SELECT (t1.b >= 0 AND t1.b = a) AS t1b, t2.* FROM prt2_l t2) s
 			  ON t1.a = s.b AND t1.b = s.a AND t1.c = s.c
-			  WHERE s.t1b = s.a;
-                                                  QUERY PLAN                                                   
----------------------------------------------------------------------------------------------------------------
+			  WHERE s.t1b;
+                                                            QUERY PLAN                                                             
+-----------------------------------------------------------------------------------------------------------------------------------
  Aggregate
    ->  Append
          ->  Nested Loop
                ->  Seq Scan on prt1_l_p1 t1_1
                ->  Seq Scan on prt2_l_p1 t2_1
-                     Filter: ((a = t1_1.b) AND (t1_1.a = b) AND (t1_1.b = a) AND ((t1_1.c)::text = (c)::text))
+                     Filter: (((t1_1.b >= 0) AND (t1_1.b = a)) AND (t1_1.a = b) AND (t1_1.b = a) AND ((t1_1.c)::text = (c)::text))
          ->  Nested Loop
                ->  Seq Scan on prt1_l_p2_p1 t1_2
                ->  Seq Scan on prt2_l_p2_p1 t2_2
-                     Filter: ((a = t1_2.b) AND (t1_2.a = b) AND (t1_2.b = a) AND ((t1_2.c)::text = (c)::text))
+                     Filter: (((t1_2.b >= 0) AND (t1_2.b = a)) AND (t1_2.a = b) AND (t1_2.b = a) AND ((t1_2.c)::text = (c)::text))
          ->  Nested Loop
                ->  Seq Scan on prt1_l_p2_p2 t1_3
                ->  Seq Scan on prt2_l_p2_p2 t2_3
-                     Filter: ((a = t1_3.b) AND (t1_3.a = b) AND (t1_3.b = a) AND ((t1_3.c)::text = (c)::text))
+                     Filter: (((t1_3.b >= 0) AND (t1_3.b = a)) AND (t1_3.a = b) AND (t1_3.b = a) AND ((t1_3.c)::text = (c)::text))
          ->  Nested Loop
                ->  Seq Scan on prt1_l_p3_p1 t1_4
                ->  Seq Scan on prt2_l_p3_p1 t2_4
-                     Filter: ((a = t1_4.b) AND (t1_4.a = b) AND (t1_4.b = a) AND ((t1_4.c)::text = (c)::text))
+                     Filter: (((t1_4.b >= 0) AND (t1_4.b = a)) AND (t1_4.a = b) AND (t1_4.b = a) AND ((t1_4.c)::text = (c)::text))
          ->  Nested Loop
                ->  Seq Scan on prt1_l_p3_p2 t1_5
                ->  Seq Scan on prt2_l_p3_p2 t2_5
-                     Filter: ((a = t1_5.b) AND (t1_5.a = b) AND (t1_5.b = a) AND ((t1_5.c)::text = (c)::text))
+                     Filter: (((t1_5.b >= 0) AND (t1_5.b = a)) AND (t1_5.a = b) AND (t1_5.b = a) AND ((t1_5.c)::text = (c)::text))
 (22 rows)
 
 SELECT COUNT(*) FROM prt1_l t1 LEFT JOIN LATERAL
-			  (SELECT t1.b AS t1b, t2.* FROM prt2_l t2) s
+			  (SELECT (t1.b >= 0 AND t1.b = a) AS t1b, t2.* FROM prt2_l t2) s
 			  ON t1.a = s.b AND t1.b = s.a AND t1.c = s.c
-			  WHERE s.t1b = s.a;
+			  WHERE s.t1b;
  count 
 -------
    100

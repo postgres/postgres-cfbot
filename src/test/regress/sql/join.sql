@@ -42,6 +42,17 @@ create temp table onerow();
 insert into onerow default values;
 analyze onerow;
 
+--
+-- A STABLE, non-inlinable identity function used to
+-- prevent the planner from stripping no-op PHVs in some tests.
+--
+CREATE OR REPLACE FUNCTION phv(anyelement)
+RETURNS anyelement AS $$
+BEGIN
+  RETURN $1;
+END;
+$$ LANGUAGE plpgsql STABLE COST 0.00001;
+
 
 --
 -- CORRELATION NAMES
@@ -1450,7 +1461,7 @@ from nt3 as nt3
     (select nt2.*, (nt2.b1 and ss1.a3) AS b3
      from nt2 as nt2
        left join
-         (select nt1.*, (nt1.id is not null) as a3 from nt1) as ss1
+         (select nt1.*, (nt1.id > 0 and nt1.id < 5) as a3 from nt1) as ss1
          on ss1.id = nt2.nt1_id
     ) as ss2
     on ss2.id = nt3.nt2_id
@@ -1462,7 +1473,7 @@ from nt3 as nt3
     (select nt2.*, (nt2.b1 and ss1.a3) AS b3
      from nt2 as nt2
        left join
-         (select nt1.*, (nt1.id is not null) as a3 from nt1) as ss1
+         (select nt1.*, (nt1.id > 0 and nt1.id < 5) as a3 from nt1) as ss1
          on ss1.id = nt2.nt1_id
     ) as ss2
     on ss2.id = nt3.nt2_id
@@ -1498,7 +1509,7 @@ select * from
   int4_tbl as i41,
   lateral
     (select 1 as x from
-      (select i41.f1 as lat,
+      (select phv(i41.f1) as lat,
               i42.f1 as loc from
          int8_tbl as i81, int4_tbl as i42) as ss1
       right join int4_tbl as i43 on (i43.f1 > 1)
@@ -1509,7 +1520,7 @@ select * from
   int4_tbl as i41,
   lateral
     (select 1 as x from
-      (select i41.f1 as lat,
+      (select phv(i41.f1) as lat,
               i42.f1 as loc from
          int8_tbl as i81, int4_tbl as i42) as ss1
       right join int4_tbl as i43 on (i43.f1 > 1)
@@ -1560,9 +1571,9 @@ explain (costs off)
 select t1.unique2, t1.stringu1, t2.unique1, t2.stringu2 from
   tenk1 t1
   inner join int4_tbl i1
-    left join (select v1.x2, v2.y1, 11 AS d1
+    left join (select v1.x2, v2.y1, phv(11) AS d1
                from (select 1,0 from onerow) v1(x1,x2)
-               left join (select 3,1 from onerow) v2(y1,y2)
+               left join (select phv(3),1 from onerow) v2(y1,y2)
                on v1.x1 = v2.y2) subq1
     on (i1.f1 = subq1.x2)
   on (t1.unique2 = subq1.d1)
@@ -1573,9 +1584,9 @@ where t1.unique2 < 42 and t1.stringu1 > t2.stringu2;
 select t1.unique2, t1.stringu1, t2.unique1, t2.stringu2 from
   tenk1 t1
   inner join int4_tbl i1
-    left join (select v1.x2, v2.y1, 11 AS d1
+    left join (select v1.x2, v2.y1, phv(11) AS d1
                from (select 1,0 from onerow) v1(x1,x2)
-               left join (select 3,1 from onerow) v2(y1,y2)
+               left join (select phv(3),1 from onerow) v2(y1,y2)
                on v1.x1 = v2.y2) subq1
     on (i1.f1 = subq1.x2)
   on (t1.unique2 = subq1.d1)
@@ -1624,9 +1635,9 @@ explain (costs off)
 select t1.unique2, t1.stringu1, t2.unique1, t2.stringu2 from
   tenk1 t1
   inner join int4_tbl i1
-    left join (select v1.x2, v2.y1, 11 AS d1
+    left join (select v1.x2, v2.y1, phv(11) AS d1
                from (values(1,0)) v1(x1,x2)
-               left join (values(3,1)) v2(y1,y2)
+               left join (values(phv(3),1)) v2(y1,y2)
                on v1.x1 = v2.y2) subq1
     on (i1.f1 = subq1.x2)
   on (t1.unique2 = subq1.d1)
@@ -1637,9 +1648,9 @@ where t1.unique2 < 42 and t1.stringu1 > t2.stringu2;
 select t1.unique2, t1.stringu1, t2.unique1, t2.stringu2 from
   tenk1 t1
   inner join int4_tbl i1
-    left join (select v1.x2, v2.y1, 11 AS d1
+    left join (select v1.x2, v2.y1, phv(11) AS d1
                from (values(1,0)) v1(x1,x2)
-               left join (values(3,1)) v2(y1,y2)
+               left join (values(phv(3),1)) v2(y1,y2)
                on v1.x1 = v2.y2) subq1
     on (i1.f1 = subq1.x2)
   on (t1.unique2 = subq1.d1)
@@ -1651,10 +1662,10 @@ where t1.unique2 < 42 and t1.stringu1 > t2.stringu2;
 -- or we end up with noplace to evaluate the lateral PHV
 explain (verbose, costs off)
 select * from
-  (select 1 as x) ss1 left join (select 2 as y) ss2 on (true),
+  (select 1 as x) ss1 left join (select phv(2) as y) ss2 on (true),
   lateral (select ss2.y as z limit 1) ss3;
 select * from
-  (select 1 as x) ss1 left join (select 2 as y) ss2 on (true),
+  (select 1 as x) ss1 left join (select phv(2) as y) ss2 on (true),
   lateral (select ss2.y as z limit 1) ss3;
 
 -- Also, we mustn't remove an RTE_RESULT that is the only baserel where a PHV
@@ -1692,7 +1703,7 @@ select * from t t1
 explain (verbose, costs off)
 select * from
      (select k from
-         (select i, coalesce(i, j) as k from
+         (select i, (i > 0 and j > 0) as k from
              (select i from t union all select 0)
              join (select 1 as j limit 1) on i = j)
          right join (select 2 as x) on true
@@ -1730,7 +1741,7 @@ explain (costs off)
 select * from
   (select 0 as z) as t1
   left join
-  (select true as a) as t2
+  (select phv(true) as a) as t2
   on true,
   lateral (select true as b
            union all
@@ -1740,7 +1751,7 @@ where b;
 select * from
   (select 0 as z) as t1
   left join
-  (select true as a) as t2
+  (select phv(true) as a) as t2
   on true,
   lateral (select true as b
            union all
@@ -2293,7 +2304,7 @@ explain (verbose, costs off)
 select ss2.* from
   int4_tbl i41
   left join int8_tbl i8
-    join (select i42.f1 as c1, i43.f1 as c2, 42 as c3
+    join (select i42.f1 as c1, i43.f1 as c2, phv(42) as c3
           from int4_tbl i42, int4_tbl i43) ss1
     on i8.q1 = ss1.c2
   on i41.f1 = ss1.c1,
@@ -2303,7 +2314,7 @@ where ss1.c2 = 0;
 select ss2.* from
   int4_tbl i41
   left join int8_tbl i8
-    join (select i42.f1 as c1, i43.f1 as c2, 42 as c3
+    join (select i42.f1 as c1, i43.f1 as c2, phv(42) as c3
           from int4_tbl i42, int4_tbl i43) ss1
     on i8.q1 = ss1.c2
   on i41.f1 = ss1.c1,
@@ -2916,7 +2927,7 @@ insert into t values (1,1), (2,2);
 explain (costs off)
 select 1
 from t t1
-  left join (select t2.a, 1 as c
+  left join (select t2.a, phv(1) as c
              from t t2 left join t t3 on t2.a = t3.a) s
   on true
   left join t t4 on true
@@ -2946,14 +2957,14 @@ explain (verbose, costs off)
 select i8.*, ss.v, t.unique2
   from int8_tbl i8
     left join int4_tbl i4 on i4.f1 = 1
-    left join lateral (select i4.f1 + 1 as v) as ss on true
+    left join lateral (select phv(i4.f1 + 1) as v) as ss on true
     left join tenk1 t on t.unique2 = ss.v
 where q2 = 456;
 
 select i8.*, ss.v, t.unique2
   from int8_tbl i8
     left join int4_tbl i4 on i4.f1 = 1
-    left join lateral (select i4.f1 + 1 as v) as ss on true
+    left join lateral (select phv(i4.f1 + 1) as v) as ss on true
     left join tenk1 t on t.unique2 = ss.v
 where q2 = 456;
 
@@ -2964,12 +2975,12 @@ create temp table parttbl1 partition of parttbl for values from (1) to (100);
 insert into parttbl values (11), (12);
 explain (costs off)
 select * from
-  (select *, 12 as phv from parttbl) as ss
+  (select *, phv(12) as phv from parttbl) as ss
   right join int4_tbl on true
 where ss.a = ss.phv and f1 = 0;
 
 select * from
-  (select *, 12 as phv from parttbl) as ss
+  (select *, phv(12) as phv from parttbl) as ss
   right join int4_tbl on true
 where ss.a = ss.phv and f1 = 0;
 
@@ -3322,7 +3333,7 @@ on true;
 -- not implemented yet.
 explain (verbose, costs off)
 select 1 from emp1 t1 left join
-    ((select 1 as x, * from emp1 t2) s1 inner join
+    ((select phv(1) as x, * from emp1 t2) s1 inner join
         (select * from emp1 t3) s2 on s1.id = s2.id)
     on true
 where s1.x = 1;
@@ -3351,7 +3362,7 @@ INSERT INTO tbl_phv (x, y)
 VACUUM ANALYZE tbl_phv;
 EXPLAIN (COSTS OFF, VERBOSE)
 SELECT 1 FROM tbl_phv t1 LEFT JOIN
-  (SELECT 1 extra, x, y FROM tbl_phv tl) t3 JOIN
+  (SELECT phv(1) extra, x, y FROM tbl_phv tl) t3 JOIN
     (SELECT y FROM tbl_phv tr) t4
   ON t4.y = t3.y
 ON true WHERE t3.extra IS NOT NULL AND t3.x = t1.x % 2;
@@ -3703,12 +3714,12 @@ select * from
 explain (verbose, costs off)
 select * from
   (select 0 as val0) as ss0
-  left join (select 1 as val) as ss1 on true
+  left join (select phv(1) as val) as ss1 on true
   left join lateral (select ss1.val as val_filtered where false) as ss2 on true;
 
 select * from
   (select 0 as val0) as ss0
-  left join (select 1 as val) as ss1 on true
+  left join (select phv(1) as val) as ss1 on true
   left join lateral (select ss1.val as val_filtered where false) as ss2 on true;
 
 -- case that breaks the old ph_may_need optimization
@@ -4140,11 +4151,11 @@ DROP TABLE group_tbl;
 -- Test that we ignore PlaceHolderVars when looking up statistics
 EXPLAIN (COSTS OFF)
 SELECT t1.unique1 FROM tenk1 t1 LEFT JOIN
-  (SELECT *, 42 AS phv FROM tenk1 t2) ss ON t1.unique2 = ss.unique2
+  (SELECT *, phv(42) AS phv FROM tenk1 t2) ss ON t1.unique2 = ss.unique2
 WHERE ss.unique1 = ss.phv AND t1.unique1 < 100;
 
 SELECT t1.unique1 FROM tenk1 t1 LEFT JOIN
-  (SELECT *, 42 AS phv FROM tenk1 t2) ss ON t1.unique2 = ss.unique2
+  (SELECT *, phv(42) AS phv FROM tenk1 t2) ss ON t1.unique2 = ss.unique2
 WHERE ss.unique1 = ss.phv AND t1.unique1 < 100;
 
 --
@@ -4163,3 +4174,5 @@ SELECT COUNT(*) FROM onek t1 LEFT JOIN tenk1 t2
     ON (t2.thousand = t1.tenthous OR t2.thousand = t1.thousand);
 SELECT COUNT(*) FROM onek t1 LEFT JOIN tenk1 t2
     ON (t2.thousand = t1.tenthous OR t2.thousand = t1.thousand);
+
+DROP FUNCTION phv(anyelement);

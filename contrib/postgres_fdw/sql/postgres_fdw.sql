@@ -1439,7 +1439,7 @@ FROM
     "S 1"."T 1" AS ref_0,
     LATERAL (
         SELECT ref_0."C 1" c1, subq_0.*
-        FROM (SELECT ref_0.c2, ref_1.c3
+        FROM (SELECT ref_0.c2::bigint, ref_1.c3
               FROM ft1 AS ref_1) AS subq_0
              RIGHT JOIN ft2 AS ref_3 ON (subq_0.c3 = ref_3.c3)
     ) AS subq_1
@@ -1451,7 +1451,7 @@ FROM
     "S 1"."T 1" AS ref_0,
     LATERAL (
         SELECT ref_0."C 1" c1, subq_0.*
-        FROM (SELECT ref_0.c2, ref_1.c3
+        FROM (SELECT ref_0.c2::bigint, ref_1.c3
               FROM ft1 AS ref_1) AS subq_0
              RIGHT JOIN ft2 AS ref_3 ON (subq_0.c3 = ref_3.c3)
     ) AS subq_1
