@@ -119,19 +119,19 @@ SELECT * FROM prt1 t1 JOIN LATERAL
 -- lateral reference in scan's restriction clauses
 EXPLAIN (COSTS OFF)
 SELECT count(*) FROM prt1 t1 LEFT JOIN LATERAL
-			  (SELECT t1.b AS t1b, t2.* FROM prt2 t2) s
-			  ON t1.a = s.b WHERE s.t1b = s.a;
+			  (SELECT (t1.b >= 0 AND t1.b = a) AS t1b, t2.* FROM prt2 t2) s
+			  ON t1.a = s.b WHERE s.t1b;
 SELECT count(*) FROM prt1 t1 LEFT JOIN LATERAL
-			  (SELECT t1.b AS t1b, t2.* FROM prt2 t2) s
-			  ON t1.a = s.b WHERE s.t1b = s.a;
+			  (SELECT (t1.b >= 0 AND t1.b = a) AS t1b, t2.* FROM prt2 t2) s
+			  ON t1.a = s.b WHERE s.t1b;
 
 EXPLAIN (COSTS OFF)
 SELECT count(*) FROM prt1 t1 LEFT JOIN LATERAL
-			  (SELECT t1.b AS t1b, t2.* FROM prt2 t2) s
-			  ON t1.a = s.b WHERE s.t1b = s.b;
+			  (SELECT (t1.b >= 0 AND t1.b = b) AS t1b, t2.* FROM prt2 t2) s
+			  ON t1.a = s.b WHERE s.t1b;
 SELECT count(*) FROM prt1 t1 LEFT JOIN LATERAL
-			  (SELECT t1.b AS t1b, t2.* FROM prt2 t2) s
-			  ON t1.a = s.b WHERE s.t1b = s.b;
+			  (SELECT (t1.b >= 0 AND t1.b = b) AS t1b, t2.* FROM prt2 t2) s
+			  ON t1.a = s.b WHERE s.t1b;
 
 -- bug with inadequate sort key representation
 SET enable_partitionwise_aggregate TO true;
@@ -439,13 +439,13 @@ SELECT * FROM prt1_l t1 JOIN LATERAL
 -- partitionwise join with lateral reference in scan's restriction clauses
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) FROM prt1_l t1 LEFT JOIN LATERAL
-			  (SELECT t1.b AS t1b, t2.* FROM prt2_l t2) s
+			  (SELECT (t1.b >= 0 AND t1.b = a) AS t1b, t2.* FROM prt2_l t2) s
 			  ON t1.a = s.b AND t1.b = s.a AND t1.c = s.c
-			  WHERE s.t1b = s.a;
+			  WHERE s.t1b;
 SELECT COUNT(*) FROM prt1_l t1 LEFT JOIN LATERAL
-			  (SELECT t1.b AS t1b, t2.* FROM prt2_l t2) s
+			  (SELECT (t1.b >= 0 AND t1.b = a) AS t1b, t2.* FROM prt2_l t2) s
 			  ON t1.a = s.b AND t1.b = s.a AND t1.c = s.c
-			  WHERE s.t1b = s.a;
+			  WHERE s.t1b;
 
 -- join with one side empty
 EXPLAIN (COSTS OFF)
