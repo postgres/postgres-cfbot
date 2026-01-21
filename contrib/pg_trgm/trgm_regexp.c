@@ -479,11 +479,11 @@ typedef struct
 
 /* prototypes for private functions */
 static TRGM *createTrgmNFAInternal(regex_t *regex, TrgmPackedGraph **graph,
-								   MemoryContext rcontext);
+								   MemoryContext rcontext, Oid collation);
 static void RE_compile(regex_t *regex, text *text_re,
 					   int cflags, Oid collation);
-static void getColorInfo(regex_t *regex, TrgmNFA *trgmNFA);
-static int	convertPgWchar(pg_wchar c, trgm_mb_char *result);
+static void getColorInfo(regex_t *regex, TrgmNFA *trgmNFA, Oid collation);
+static int	convertPgWchar(pg_wchar c, trgm_mb_char *result, Oid collation);
 static void transformGraph(TrgmNFA *trgmNFA);
 static void processState(TrgmNFA *trgmNFA, TrgmState *state);
 static void addKey(TrgmNFA *trgmNFA, TrgmState *state, TrgmStateKey *key);
@@ -551,7 +551,7 @@ createTrgmNFA(text *text_re, Oid collation,
 			   REG_ADVANCED | REG_NOSUB, collation);
 #endif
 
-	trg = createTrgmNFAInternal(&regex, graph, rcontext);
+	trg = createTrgmNFAInternal(&regex, graph, rcontext, collation);
 
 	/* Clean up all the cruft we created (including regex) */
 	MemoryContextSwitchTo(oldcontext);
@@ -565,7 +565,7 @@ createTrgmNFA(text *text_re, Oid collation,
  */
 static TRGM *
 createTrgmNFAInternal(regex_t *regex, TrgmPackedGraph **graph,
-					  MemoryContext rcontext)
+					  MemoryContext rcontext, Oid collation)
 {
 	TRGM	   *trg;
 	TrgmNFA		trgmNFA;
@@ -573,7 +573,7 @@ createTrgmNFAInternal(regex_t *regex, TrgmPackedGraph **graph,
 	trgmNFA.regex = regex;
 
 	/* Collect color information from the regex */
-	getColorInfo(regex, &trgmNFA);
+	getColorInfo(regex, &trgmNFA, collation);
 
 #ifdef TRGM_REGEXP_DEBUG
 	printSourceNFA(regex, trgmNFA.colorInfo, trgmNFA.ncolors);
@@ -762,7 +762,7 @@ RE_compile(regex_t *regex, text *text_re, int cflags, Oid collation)
  * Fill TrgmColorInfo structure for each color using regex export functions.
  */
 static void
-getColorInfo(regex_t *regex, TrgmNFA *trgmNFA)
+getColorInfo(regex_t *regex, TrgmNFA *trgmNFA, Oid collation)
 {
 	int			colorsCount = pg_reg_getnumcolors(regex);
 	int			i;
@@ -806,7 +806,7 @@ getColorInfo(regex_t *regex, TrgmNFA *trgmNFA)
 		for (j = 0; j < charsCount; j++)
 		{
 			trgm_mb_char c;
-			int			clen = convertPgWchar(chars[j], &c);
+			int			clen = convertPgWchar(chars[j], &c, collation);
 
 			if (!clen)
 				continue;		/* ok to ignore it altogether */
@@ -826,7 +826,7 @@ getColorInfo(regex_t *regex, TrgmNFA *trgmNFA)
  * byte length.
  */
 static int
-convertPgWchar(pg_wchar c, trgm_mb_char *result)
+convertPgWchar(pg_wchar c, trgm_mb_char *result, Oid collation)
 {
 	/* "s" has enough space for a multibyte character and a trailing NUL */
 	char		s[MAX_MULTIBYTE_CHAR_LEN + 1];
@@ -859,7 +859,7 @@ convertPgWchar(pg_wchar c, trgm_mb_char *result)
 	 */
 #ifdef IGNORECASE
 	{
-		char	   *lowerCased = str_tolower(s, clen, DEFAULT_COLLATION_OID);
+		char	   *lowerCased = str_tolower(s, clen, collation);
 
 		if (strcmp(lowerCased, s) != 0)
 		{
