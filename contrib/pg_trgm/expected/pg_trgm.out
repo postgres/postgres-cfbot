@@ -5448,3 +5448,20 @@ SELECT DISTINCT city, similarity(city, 'Warsaw'), show_limit()
  Warsaw |          1 |        0.5
 (1 row)
 
+-- Check that conflicting implicit collations are reported properly
+CREATE TEMP TABLE ic_a(x text COLLATE "C");
+CREATE TEMP TABLE ic_b(y text COLLATE "POSIX");
+INSERT INTO ic_a VALUES ('hello world');
+INSERT INTO ic_b VALUES ('hello word');
+SELECT similarity(x, y) FROM ic_a, ic_b;
+ERROR:  could not determine which collation to use for trigram generation
+HINT:  Use the COLLATE clause to set the collation explicitly.
+SELECT show_trgm(x || y) FROM ic_a, ic_b;
+ERROR:  could not determine which collation to use for trigram generation
+HINT:  Use the COLLATE clause to set the collation explicitly.
+SELECT similarity(x, y COLLATE "C") FROM ic_a, ic_b;
+ similarity 
+------------
+   0.642857
+(1 row)
+
