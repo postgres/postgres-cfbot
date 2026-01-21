@@ -42,6 +42,7 @@ tests += {
       'pg_utf8_trgm',
       'pg_word_trgm',
       'pg_strict_word_trgm',
+      'pg_trgm_collation',
     ],
   },
 }

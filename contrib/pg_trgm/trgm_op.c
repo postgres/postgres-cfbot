@@ -67,6 +67,24 @@ typedef uint8 TrgmBound;
 											 * word bounds */
 
 /*
+ * Return the collation to use for a similarity function call.  If the
+ * parser could not resolve a conflict of implicit collations, InvalidOid
+ * is passed; report an error in that case, like other collation-dependent
+ * functions.
+ */
+static Oid
+similarity_get_collation(FunctionCallInfo fcinfo)
+{
+	if (!OidIsValid(fcinfo->fncollation))
+		ereport(ERROR,
+				(errcode(ERRCODE_INDETERMINATE_COLLATION),
+				 errmsg("could not determine which collation to use for string similarity"),
+				 errhint("Use the COLLATE clause to set the collation explicitly.")));
+
+	return fcinfo->fncollation;
+}
+
+/*
  * A growable array of trigrams
  *
  * The actual array of trigrams is in 'datum'.  Note that the other fields in
@@ -490,7 +508,7 @@ done:
  * bounds_p: where to return bounds of trigrams (if needed).
  */
 static void
-generate_trgm_only(growable_trgm_array *dst, char *str, int slen, TrgmBound **bounds_p)
+generate_trgm_only(growable_trgm_array *dst, char *str, int slen, Oid collation, TrgmBound **bounds_p)
 {
 	size_t		buflen;
 	char	   *buf;
@@ -542,7 +560,7 @@ generate_trgm_only(growable_trgm_array *dst, char *str, int slen, TrgmBound **bo
 		{
 			char	   *lowered;
 
-			lowered = str_tolower(bword, eword - bword, DEFAULT_COLLATION_OID);
+			lowered = str_tolower(bword, eword - bword, collation);
 			bytelen = strlen(lowered);
 
 			/* grow the buffer if necessary */
@@ -596,13 +614,13 @@ generate_trgm_only(growable_trgm_array *dst, char *str, int slen, TrgmBound **bo
  * Returns the sorted array of unique trigrams.
  */
 TRGM *
-generate_trgm(char *str, int slen)
+generate_trgm(char *str, int slen, Oid collation)
 {
 	TRGM	   *trg;
 	growable_trgm_array arr;
 	int			len;
 
-	generate_trgm_only(&arr, str, slen, NULL);
+	generate_trgm_only(&arr, str, slen, collation, NULL);
 	len = arr.length;
 	trg = arr.datum;
 	trg->flag = ARRKEY;
@@ -857,7 +875,7 @@ iterate_word_similarity(int *trg2indexes,
  */
 static float4
 calc_word_similarity(char *str1, int slen1, char *str2, int slen2,
-					 uint8 flags)
+					 uint8 flags, Oid collation)
 {
 	bool	   *found;
 	pos_trgm   *ptrg;
@@ -875,9 +893,9 @@ calc_word_similarity(char *str1, int slen1, char *str2, int slen2,
 
 	/* Make positional trigrams */
 
-	generate_trgm_only(&trg1, str1, slen1, NULL);
+	generate_trgm_only(&trg1, str1, slen1, collation, NULL);
 	len1 = trg1.length;
-	generate_trgm_only(&trg2, str2, slen2, (flags & WORD_SIMILARITY_STRICT) ? &bounds : NULL);
+	generate_trgm_only(&trg2, str2, slen2, collation, (flags & WORD_SIMILARITY_STRICT) ? &bounds : NULL);
 	len2 = trg2.length;
 
 	ptrg = make_positional_trgm(GETARR(trg1.datum), len1, GETARR(trg2.datum), len2);
@@ -1086,7 +1104,7 @@ get_wildcard_part(const char *str, int lenstr,
  * " a", "bcd" would be extracted.
  */
 TRGM *
-generate_wildcard_trgm(const char *str, int slen)
+generate_wildcard_trgm(const char *str, int slen, Oid collation)
 {
 	TRGM	   *trg;
 	growable_trgm_array arr;
@@ -1118,7 +1136,7 @@ generate_wildcard_trgm(const char *str, int slen)
 		char	   *word;
 
 #ifdef IGNORECASE
-		word = str_tolower(buf, bytelen, DEFAULT_COLLATION_OID);
+		word = str_tolower(buf, bytelen, collation);
 		bytelen = strlen(word);
 #else
 		word = buf;
@@ -1177,7 +1195,7 @@ show_trgm(PG_FUNCTION_ARGS)
 	trgm	   *ptr;
 	int			i;
 
-	trg = generate_trgm(VARDATA_ANY(in), VARSIZE_ANY_EXHDR(in));
+	trg = generate_trgm(VARDATA_ANY(in), VARSIZE_ANY_EXHDR(in), PG_GET_COLLATION());
 	d = palloc_array(Datum, 1 + ARRNELEM(trg));
 
 	for (i = 0, ptr = GETARR(trg); i < ARRNELEM(trg); i++, ptr++)
@@ -1344,8 +1362,8 @@ similarity(PG_FUNCTION_ARGS)
 			   *trg2;
 	float4		res;
 
-	trg1 = generate_trgm(VARDATA_ANY(in1), VARSIZE_ANY_EXHDR(in1));
-	trg2 = generate_trgm(VARDATA_ANY(in2), VARSIZE_ANY_EXHDR(in2));
+	trg1 = generate_trgm(VARDATA_ANY(in1), VARSIZE_ANY_EXHDR(in1), similarity_get_collation(fcinfo));
+	trg2 = generate_trgm(VARDATA_ANY(in2), VARSIZE_ANY_EXHDR(in2), similarity_get_collation(fcinfo));
 
 	res = cnt_sml(trg1, trg2, false);
 
@@ -1366,7 +1384,7 @@ word_similarity(PG_FUNCTION_ARGS)
 
 	res = calc_word_similarity(VARDATA_ANY(in1), VARSIZE_ANY_EXHDR(in1),
 							   VARDATA_ANY(in2), VARSIZE_ANY_EXHDR(in2),
-							   0);
+							   0, similarity_get_collation(fcinfo));
 
 	PG_FREE_IF_COPY(in1, 0);
 	PG_FREE_IF_COPY(in2, 1);
@@ -1382,7 +1400,7 @@ strict_word_similarity(PG_FUNCTION_ARGS)
 
 	res = calc_word_similarity(VARDATA_ANY(in1), VARSIZE_ANY_EXHDR(in1),
 							   VARDATA_ANY(in2), VARSIZE_ANY_EXHDR(in2),
-							   WORD_SIMILARITY_STRICT);
+							   WORD_SIMILARITY_STRICT, similarity_get_collation(fcinfo));
 
 	PG_FREE_IF_COPY(in1, 0);
 	PG_FREE_IF_COPY(in2, 1);
@@ -1392,9 +1410,10 @@ strict_word_similarity(PG_FUNCTION_ARGS)
 Datum
 similarity_dist(PG_FUNCTION_ARGS)
 {
-	float4		res = DatumGetFloat4(DirectFunctionCall2(similarity,
-														 PG_GETARG_DATUM(0),
-														 PG_GETARG_DATUM(1)));
+	float4		res = DatumGetFloat4(DirectFunctionCall2Coll(similarity,
+															 similarity_get_collation(fcinfo),
+															 PG_GETARG_DATUM(0),
+															 PG_GETARG_DATUM(1)));
 
 	PG_RETURN_FLOAT4(1.0 - res);
 }
@@ -1402,9 +1421,10 @@ similarity_dist(PG_FUNCTION_ARGS)
 Datum
 similarity_op(PG_FUNCTION_ARGS)
 {
-	float4		res = DatumGetFloat4(DirectFunctionCall2(similarity,
-														 PG_GETARG_DATUM(0),
-														 PG_GETARG_DATUM(1)));
+	float4		res = DatumGetFloat4(DirectFunctionCall2Coll(similarity,
+															 similarity_get_collation(fcinfo),
+															 PG_GETARG_DATUM(0),
+															 PG_GETARG_DATUM(1)));
 
 	PG_RETURN_BOOL(res >= similarity_threshold);
 }
@@ -1418,7 +1438,7 @@ word_similarity_op(PG_FUNCTION_ARGS)
 
 	res = calc_word_similarity(VARDATA_ANY(in1), VARSIZE_ANY_EXHDR(in1),
 							   VARDATA_ANY(in2), VARSIZE_ANY_EXHDR(in2),
-							   WORD_SIMILARITY_CHECK_ONLY);
+							   WORD_SIMILARITY_CHECK_ONLY, similarity_get_collation(fcinfo));
 
 	PG_FREE_IF_COPY(in1, 0);
 	PG_FREE_IF_COPY(in2, 1);
@@ -1434,7 +1454,7 @@ word_similarity_commutator_op(PG_FUNCTION_ARGS)
 
 	res = calc_word_similarity(VARDATA_ANY(in2), VARSIZE_ANY_EXHDR(in2),
 							   VARDATA_ANY(in1), VARSIZE_ANY_EXHDR(in1),
-							   WORD_SIMILARITY_CHECK_ONLY);
+							   WORD_SIMILARITY_CHECK_ONLY, similarity_get_collation(fcinfo));
 
 	PG_FREE_IF_COPY(in1, 0);
 	PG_FREE_IF_COPY(in2, 1);
@@ -1450,7 +1470,7 @@ word_similarity_dist_op(PG_FUNCTION_ARGS)
 
 	res = calc_word_similarity(VARDATA_ANY(in1), VARSIZE_ANY_EXHDR(in1),
 							   VARDATA_ANY(in2), VARSIZE_ANY_EXHDR(in2),
-							   0);
+							   0, similarity_get_collation(fcinfo));
 
 	PG_FREE_IF_COPY(in1, 0);
 	PG_FREE_IF_COPY(in2, 1);
@@ -1466,7 +1486,7 @@ word_similarity_dist_commutator_op(PG_FUNCTION_ARGS)
 
 	res = calc_word_similarity(VARDATA_ANY(in2), VARSIZE_ANY_EXHDR(in2),
 							   VARDATA_ANY(in1), VARSIZE_ANY_EXHDR(in1),
-							   0);
+							   0, similarity_get_collation(fcinfo));
 
 	PG_FREE_IF_COPY(in1, 0);
 	PG_FREE_IF_COPY(in2, 1);
@@ -1482,7 +1502,8 @@ strict_word_similarity_op(PG_FUNCTION_ARGS)
 
 	res = calc_word_similarity(VARDATA_ANY(in1), VARSIZE_ANY_EXHDR(in1),
 							   VARDATA_ANY(in2), VARSIZE_ANY_EXHDR(in2),
-							   WORD_SIMILARITY_CHECK_ONLY | WORD_SIMILARITY_STRICT);
+							   WORD_SIMILARITY_CHECK_ONLY | WORD_SIMILARITY_STRICT,
+							   similarity_get_collation(fcinfo));
 
 	PG_FREE_IF_COPY(in1, 0);
 	PG_FREE_IF_COPY(in2, 1);
@@ -1498,7 +1519,8 @@ strict_word_similarity_commutator_op(PG_FUNCTION_ARGS)
 
 	res = calc_word_similarity(VARDATA_ANY(in2), VARSIZE_ANY_EXHDR(in2),
 							   VARDATA_ANY(in1), VARSIZE_ANY_EXHDR(in1),
-							   WORD_SIMILARITY_CHECK_ONLY | WORD_SIMILARITY_STRICT);
+							   WORD_SIMILARITY_CHECK_ONLY | WORD_SIMILARITY_STRICT,
+							   similarity_get_collation(fcinfo));
 
 	PG_FREE_IF_COPY(in1, 0);
 	PG_FREE_IF_COPY(in2, 1);
@@ -1514,7 +1536,7 @@ strict_word_similarity_dist_op(PG_FUNCTION_ARGS)
 
 	res = calc_word_similarity(VARDATA_ANY(in1), VARSIZE_ANY_EXHDR(in1),
 							   VARDATA_ANY(in2), VARSIZE_ANY_EXHDR(in2),
-							   WORD_SIMILARITY_STRICT);
+							   WORD_SIMILARITY_STRICT, similarity_get_collation(fcinfo));
 
 	PG_FREE_IF_COPY(in1, 0);
 	PG_FREE_IF_COPY(in2, 1);
@@ -1530,7 +1552,7 @@ strict_word_similarity_dist_commutator_op(PG_FUNCTION_ARGS)
 
 	res = calc_word_similarity(VARDATA_ANY(in2), VARSIZE_ANY_EXHDR(in2),
 							   VARDATA_ANY(in1), VARSIZE_ANY_EXHDR(in1),
-							   WORD_SIMILARITY_STRICT);
+							   WORD_SIMILARITY_STRICT, similarity_get_collation(fcinfo));
 
 	PG_FREE_IF_COPY(in1, 0);
 	PG_FREE_IF_COPY(in2, 1);

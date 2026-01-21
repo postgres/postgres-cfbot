@@ -1,0 +1,43 @@
+/*
+ * This test is for ICU collations.
+ */
+/* skip test if not UTF8 server encoding or no ICU collations installed */
+SELECT getdatabaseencoding() <> 'UTF8' OR
+       (SELECT count(*) FROM pg_collation WHERE collprovider = 'i' AND collname <> 'unicode') = 0
+       AS skip_test \gset
+\if :skip_test
+\quit
+\endif
+-- Test that lowercase conversion of trigrams uses specified collation
+CREATE TABLE test(col TEXT COLLATE "tr-x-icu");
+INSERT INTO test VALUES ('ISTANBUL');
+SELECT show_trgm(col) FROM test;
+                       show_trgm                        
+--------------------------------------------------------
+ {0xf31e1a,0xfe581d,0x3efd30,anb,bul,nbu,sta,tan,"ul "}
+(1 row)
+
+SELECT show_trgm('ISTANBUL' COLLATE "tr-x-icu");
+                       show_trgm                        
+--------------------------------------------------------
+ {0xf31e1a,0xfe581d,0x3efd30,anb,bul,nbu,sta,tan,"ul "}
+(1 row)
+
+SELECT show_trgm('ISTANBUL' COLLATE "C");
+                  show_trgm                  
+---------------------------------------------
+ {"  i"," is",anb,bul,ist,nbu,sta,tan,"ul "}
+(1 row)
+
+SELECT similarity('ıstanbul' COLLATE "tr-x-icu", 'ISTANBUL' COLLATE "tr-x-icu");
+ similarity 
+------------
+          1
+(1 row)
+
+SELECT similarity('ıstanbul' COLLATE "C", 'ISTANBUL' COLLATE "C");
+ similarity 
+------------
+ 0.54545456
+(1 row)
+
