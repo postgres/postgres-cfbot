@@ -47,9 +47,9 @@ typedef char trgm[3];
 } while(0)
 extern int	(*CMPTRGM) (const void *a, const void *b);
 
-#define ISWORDCHR(c, len)	(t_isalnum_with_len(c, len))
-#define ISPRINTABLECHAR(a)	( isascii( *(unsigned char*)(a) ) && (isalnum( *(unsigned char*)(a) ) || *(unsigned char*)(a)==' ') )
-#define ISPRINTABLETRGM(t)	( ISPRINTABLECHAR( ((char*)(t)) ) && ISPRINTABLECHAR( ((char*)(t))+1 ) && ISPRINTABLECHAR( ((char*)(t))+2 ) )
+#define ISWORDCHR(c, len, collation)	(t_isalnum_with_len_collation(c, len, collation))
+#define ISPRINTABLECHAR(a)				( isascii( *(unsigned char*)(a) ) && (isalnum( *(unsigned char*)(a) ) || *(unsigned char*)(a)==' ') )
+#define ISPRINTABLETRGM(t)				( ISPRINTABLECHAR( ((char*)(t)) ) && ISPRINTABLECHAR( ((char*)(t))+1 ) && ISPRINTABLECHAR( ((char*)(t))+2 ) )
 
 #define ISESCAPECHAR(x) (*(x) == '\\')	/* Wildcard escape character */
 #define ISWILDCARDCHAR(x) (*(x) == '_' || *(x) == '%')	/* Wildcard

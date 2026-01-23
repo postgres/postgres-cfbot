@@ -810,7 +810,7 @@ getColorInfo(regex_t *regex, TrgmNFA *trgmNFA, Oid collation)
 
 			if (!clen)
 				continue;		/* ok to ignore it altogether */
-			if (ISWORDCHR(c.bytes, clen))
+			if (ISWORDCHR(c.bytes, clen, collation))
 				colorInfo->wordChars[colorInfo->wordCharsCount++] = c;
 			else
 				colorInfo->containsNonWord = true;
