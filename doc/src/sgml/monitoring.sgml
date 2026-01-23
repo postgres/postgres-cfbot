@@ -520,6 +520,17 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
      </row>
 
      <row>
+      <entry><structname>pg_stat_io_histogram</structname><indexterm><primary>pg_stat_io_histogram</primary></indexterm></entry>
+      <entry>
+       One row for each combination of backend type, context, target object,
+       IO operation type and latency bucket (in microseconds) containing
+       cluster-wide I/O statistics.
+       See <link linkend="monitoring-pg-stat-io-histogram-view">
+       <structname>pg_stat_io_histogram</structname></link> for details.
+     </entry>
+     </row>
+
+     <row>
       <entry><structname>pg_stat_kind_info</structname><indexterm><primary>pg_stat_kind_info</primary></indexterm></entry>
       <entry>
        One row for each registered statistics kind, showing information
@@ -754,6 +765,8 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
    Users are advised to use the <productname>PostgreSQL</productname>
    statistics views in combination with operating system utilities for a more
    complete picture of their database's I/O performance.
+   Furthermore the <structname>pg_stat_io_histogram</structname> view can be helpful
+   identifying latency outliers for specific I/O operations.
   </para>
 
  </sect2>
@@ -3473,6 +3486,283 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
  </sect2>
 
+ <sect2 id="monitoring-pg-stat-io-histogram-view">
+  <title><structname>pg_stat_io_histogram</structname></title>
+
+  <indexterm>
+   <primary>pg_stat_io_histogram</primary>
+  </indexterm>
+
+  <para>
+   The <structname>pg_stat_io_histogram</structname> view will contain one row for each
+   combination of backend type, target I/O object, and I/O context, IO operation
+   type, bucket latency cluster-wide I/O statistics. Combinations which do not make sense
+   are omitted.
+  </para>
+
+  <para>
+   The view shows measured perceived I/O latency by the backend, not the kernel or device
+   one. This is important distinction when troubleshooting, as the I/O latency observed by
+   the backend might get affected by:
+   <itemizedlist>
+     <listitem>
+        <para>OS scheduler decisions and available CPU resources.</para>
+        <para>With AIO, it might include time to service other IOs from the queue. That will often inflate IO latency.</para>
+        <para>In case of writing, additional filesystem journaling operations.</para>
+     </listitem>
+  </itemizedlist>
+  </para>
+
+  <para>
+   Currently, I/O on relations (e.g. tables, indexes) and WAL activity are
+   tracked. However, relation I/O which bypasses shared buffers
+   (e.g. when moving a table from one tablespace to another) is currently
+   not tracked.
+  </para>
+
+  <table id="pg-stat-io-histogram-view" xreflabel="pg_stat_io_histogram">
+   <title><structname>pg_stat_io_histogram</structname> View</title>
+   <tgroup cols="1">
+    <thead>
+     <row>
+      <entry role="catalog_table_entry">
+       <para role="column_definition">
+        Column Type
+       </para>
+       <para>
+        Description
+       </para>
+      </entry>
+     </row>
+    </thead>
+    <tbody>
+     <row>
+      <entry role="catalog_table_entry">
+       <para role="column_definition">
+        <structfield>backend_type</structfield> <type>text</type>
+       </para>
+       <para>
+        Type of backend (e.g. background worker, autovacuum worker). See <link
+        linkend="monitoring-pg-stat-activity-view">
+        <structname>pg_stat_activity</structname></link> for more information
+        on <varname>backend_type</varname>s. Some
+        <varname>backend_type</varname>s do not accumulate I/O operation
+        statistics and will not be included in the view.
+       </para>
+      </entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry">
+       <para role="column_definition">
+        <structfield>object</structfield> <type>text</type>
+       </para>
+       <para>
+        Target object of an I/O operation. Possible values are:
+       <itemizedlist>
+        <listitem>
+         <para>
+          <literal>relation</literal>: Permanent relations.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>temp relation</literal>: Temporary relations.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>wal</literal>: Write Ahead Logs.
+         </para>
+        </listitem>
+       </itemizedlist>
+       </para>
+      </entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry">
+       <para role="column_definition">
+        <structfield>context</structfield> <type>text</type>
+       </para>
+       <para>
+        The context of an I/O operation. Possible values are:
+       </para>
+       <itemizedlist>
+        <listitem>
+         <para>
+          <literal>normal</literal>: The default or standard
+          <varname>context</varname> for a type of I/O operation. For
+          example, by default, relation data is read into and written out from
+          shared buffers. Thus, reads and writes of relation data to and from
+          shared buffers are tracked in <varname>context</varname>
+          <literal>normal</literal>.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>init</literal>: I/O operations performed while creating the
+          WAL segments are tracked in <varname>context</varname>
+          <literal>init</literal>.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>vacuum</literal>: I/O operations performed outside of shared
+          buffers while vacuuming and analyzing permanent relations. Temporary
+          table vacuums use the same local buffer pool as other temporary table
+          I/O operations and are tracked in <varname>context</varname>
+          <literal>normal</literal>.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>bulkread</literal>: Certain large read I/O operations
+          done outside of shared buffers, for example, a sequential scan of a
+          large table.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>bulkwrite</literal>: Certain large write I/O operations
+          done outside of shared buffers, such as <command>COPY</command>.
+         </para>
+        </listitem>
+       </itemizedlist>
+      </entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry">
+       <para role="column_definition">
+        <structfield>io_type</structfield> <type>text</type>
+       </para>
+       <para>
+        The type of I/O operation. Possible values are:
+       </para>
+       <itemizedlist>
+        <listitem>
+         <para>
+          <literal>evict</literal>: eviction from shared buffers cache.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>fsync</literal>: synchronization of modified kernel's
+          filesystem page cache with storage device.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>hit</literal>: shared buffers cache lookup hit.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>reuse</literal>: reuse of existing buffer in case of
+          reusing limited-space ring buffer (applies to <literal>bulkread</literal>,
+          <literal>bulkwrite</literal>, or <literal>vacuum</literal> contexts).
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>writeback</literal>: advise kernel that the described dirty
+          data should be flushed to disk preferably asynchronously.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>extend</literal>: add new zeroed blocks to the end of file.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>read</literal>: self explanatory.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>write</literal>: self explanatory.
+         </para>
+        </listitem>
+       </itemizedlist>
+      </entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry">
+       <para role="column_definition">
+        <structfield>bucket_latency_us</structfield> <type>int4range</type>
+       </para>
+       <para>
+        The latency bucket (in microseconds).
+       </para>
+      </entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry">
+       <para role="column_definition">
+        <structfield>bucket_count</structfield> <type>bigint</type>
+       </para>
+       <para>
+        Number of times latency of the I/O operation hit this specific bucket (with
+        up to <varname>bucket_latency_us</varname> microseconds).
+       </para>
+      </entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry">
+       <para role="column_definition">
+        <structfield>stats_reset</structfield> <type>timestamp with time zone</type>
+       </para>
+       <para>
+        Time at which these statistics were last reset.
+       </para>
+      </entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+
+  <para>
+   Some backend types never perform I/O operations on some I/O objects and/or
+   in some I/O contexts. These rows might display zero bucket counts for such
+   specific operations.
+  </para>
+
+  <para>
+   <structname>pg_stat_io_histogram</structname> can be used to identify
+   I/O storage issues
+   For example:
+   <itemizedlist>
+    <listitem>
+     <para>
+      Presence of abnormally high latency for <varname>fsyncs</varname> might
+      indicate I/O saturation, oversubscription or hardware connectivity issues.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      Unusually high latency for <varname>fsyncs</varname> on standby's startup
+      backend type, might be responsible for high duration of commits in
+      synchronous replication setups.
+     </para>
+    </listitem>
+   </itemizedlist>
+  </para>
+
+  <note>
+   <para>
+    Columns tracking I/O wait time will only be non-zero when
+    <xref linkend="guc-track-io-timing"/> is enabled. The user should be
+    careful when referencing these columns in combination with their
+    corresponding I/O operations in case <varname>track_io_timing</varname>
+    was not enabled for the entire time since the last stats reset.
+   </para>
+  </note>
+ </sect2>
 
  <sect2 id="monitoring-pg-stat-kind-info-view">
   <title><structname>pg_stat_kind_info</structname></title>
