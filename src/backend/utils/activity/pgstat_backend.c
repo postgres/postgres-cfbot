@@ -202,7 +202,7 @@ pgstat_flush_backend_entry_io(PgStat_EntryRef *entry_ref)
 {
 	PgStatShared_Backend *shbackendent;
 	PgStat_BktypeIO *bktype_shstats;
-	PgStat_PendingIO pending_io;
+	PgStat_BackendPendingIO pending_io;
 
 	/*
 	 * This function can be called even if nothing at all has happened for IO
@@ -239,7 +239,7 @@ pgstat_flush_backend_entry_io(PgStat_EntryRef *entry_ref)
 	/*
 	 * Clear out the statistics buffer, so it can be re-used.
 	 */
-	MemSet(&PendingBackendStats.pending_io, 0, sizeof(PgStat_PendingIO));
+	MemSet(&PendingBackendStats.pending_io, 0, sizeof(PgStat_BackendPendingIO));
 
 	backend_has_iostats = false;
 }

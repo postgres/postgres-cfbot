@@ -2048,6 +2048,7 @@ builtins = [
   'bswap32',
   'bswap64',
   'clz',
+  'clzl',
   'ctz',
   'constant_p',
   'frame_address',

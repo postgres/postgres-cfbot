@@ -105,8 +105,10 @@
 #include <unistd.h>
 
 #include "access/xact.h"
+#include "access/xlog.h"
 #include "lib/dshash.h"
 #include "pgstat.h"
+#include "storage/bufmgr.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
@@ -704,6 +706,14 @@ pgstat_initialize(void)
 
 	/* Set up a process-exit hook to clean up */
 	before_shmem_exit(pgstat_shutdown_hook, 0);
+
+	/* Allocate I/O latency buckets only if we are going to populate it */
+	if (track_io_timing || track_wal_io_timing)
+		PendingIOStats.pending_hist_time_buckets = MemoryContextAllocZero(TopMemoryContext,
+																		  IOOBJECT_NUM_TYPES * IOCONTEXT_NUM_TYPES * IOOP_NUM_TYPES *
+																		  PGSTAT_IO_HIST_BUCKETS * sizeof(uint64));
+	else
+		PendingIOStats.pending_hist_time_buckets = NULL;
 
 #ifdef USE_ASSERT_CHECKING
 	pgstat_is_initialized = true;
@@ -1727,9 +1737,16 @@ pgstat_write_statsfile(void)
 
 		pgstat_build_snapshot_fixed(kind);
 		if (pgstat_is_kind_builtin(kind))
-			ptr = ((char *) &pgStatLocal.snapshot) + info->snapshot_ctl_off;
+		{
+			if (kind == PGSTAT_KIND_IO)
+				ptr = (char *) pgStatLocal.snapshot.io;
+			else
+				ptr = ((char *) &pgStatLocal.snapshot) + info->snapshot_ctl_off;
+		}
 		else
 			ptr = pgStatLocal.snapshot.custom_data[kind - PGSTAT_KIND_CUSTOM_MIN];
+
+		Assert(ptr != NULL);
 
 		fputc(PGSTAT_FILE_ENTRY_FIXED, fpout);
 		write_chunk_s(fpout, &kind);
