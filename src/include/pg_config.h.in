@@ -532,6 +532,9 @@
 /* Define to 1 if your compiler understands __builtin_clz. */
 #undef HAVE__BUILTIN_CLZ
 
+/* Define to 1 if your compiler understands __builtin_clzl. */
+#undef HAVE__BUILTIN_CLZL
+
 /* Define to 1 if your compiler understands __builtin_constant_p. */
 #undef HAVE__BUILTIN_CONSTANT_P
 
