@@ -41,3 +41,16 @@ SELECT similarity('ıstanbul' COLLATE "C", 'ISTANBUL' COLLATE "C");
  0.54545456
 (1 row)
 
+-- Test that word boundary identification uses specified collation
+SELECT show_trgm('helloıtestIworldİcode' COLLATE "tr-x-icu");
+                                                           show_trgm                                                           
+-------------------------------------------------------------------------------------------------------------------------------
+ {0x8fc0a2,0x93dfbf,0x1bf43c,"  h"," he",0x22d44f,0x4398ff,cod,"de ",dic,ell,est,hel,ico,ldi,llo,ode,orl,0x71b8f5,rld,tes,wor}
+(1 row)
+
+SELECT show_trgm('helloıtestIworldİcode' COLLATE "C");
+                                                  show_trgm                                                  
+-------------------------------------------------------------------------------------------------------------
+ {"  c","  h","  t"," co"," he"," te",cod,"de ",ell,est,hel,iwo,"ld ",llo,"lo ",ode,orl,rld,sti,tes,tiw,wor}
+(1 row)
+
