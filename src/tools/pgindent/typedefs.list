@@ -2314,6 +2314,7 @@ PgStatShared_Wal
 PgStat_ArchiverStats
 PgStat_Backend
 PgStat_BackendPending
+PgStat_BackendPendingIO
 PgStat_BackendSubEntry
 PgStat_BgWriterStats
 PgStat_BktypeIO
@@ -3849,6 +3850,7 @@ gzFile
 having_grouping_ctx
 heap_page_items_state
 help_handler
+histogram_io_stat_col
 hlCheck
 host_cache_hash
 hstoreCheckKeyLen_t
