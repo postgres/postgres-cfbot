@@ -9189,9 +9189,11 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
         displayed in <link linkend="monitoring-pg-stat-database-view">
         <structname>pg_stat_database</structname></link>,
         <link linkend="monitoring-pg-stat-io-view">
-        <structname>pg_stat_io</structname></link> (if <varname>object</varname>
-        is not <literal>wal</literal>), in the output of the
-        <link linkend="pg-stat-get-backend-io">
+        <structname>pg_stat_io</structname></link> and
+        <link linkend="monitoring-pg-stat-io-histogram-view">
+        <structname>pg_stat_io_histogram</structname></link>
+        (if <varname>object</varname> is not <literal>wal</literal>),
+        in the output of the <link linkend="pg-stat-get-backend-io">
         <function>pg_stat_get_backend_io()</function></link> function (if
         <varname>object</varname> is not <literal>wal</literal>), in the
         output of <xref linkend="sql-explain"/> when the <literal>BUFFERS</literal>
@@ -9221,7 +9223,9 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
         measure the overhead of timing on your system.
         I/O timing information is displayed in
         <link linkend="monitoring-pg-stat-io-view">
-        <structname>pg_stat_io</structname></link> for the
+        <structname>pg_stat_io</structname></link> and
+        <link linkend="monitoring-pg-stat-io-histogram-view">
+        <structname>pg_stat_io_histogram</structname></link> for the
         <varname>object</varname> <literal>wal</literal> and in the output of
         the <link linkend="pg-stat-get-backend-io">
         <function>pg_stat_get_backend_io()</function></link> function for the

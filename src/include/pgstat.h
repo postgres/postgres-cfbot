@@ -326,11 +326,23 @@ typedef enum IOOp
 	(((unsigned int) (io_op)) < IOOP_NUM_TYPES && \
 	 ((unsigned int) (io_op)) >= IOOP_EXTEND)
 
+/*
+ * This should represent balance between being fast and providing value
+ * to the users:
+ * 1. We want to cover various fast and slow device types (0.01ms - 15ms)
+ * 2. We want to also cover sporadic long tail latencies (hardware issues,
+ *    delayed fsyncs, stuck I/O)
+ * 3. We want to be as small as possible here in terms of size:
+ *    16 * sizeof(uint64) = which should be less than two cachelines.
+ */
+#define PGSTAT_IO_HIST_BUCKETS 16
+
 typedef struct PgStat_BktypeIO
 {
 	uint64		bytes[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
 	PgStat_Counter counts[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
 	PgStat_Counter times[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
+	uint64		hist_time_buckets[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES][PGSTAT_IO_HIST_BUCKETS];
 } PgStat_BktypeIO;
 
 typedef struct PgStat_PendingIO
@@ -338,7 +350,17 @@ typedef struct PgStat_PendingIO
 	uint64		bytes[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
 	PgStat_Counter counts[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
 	instr_time	pending_times[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
+
+	/*
+	 * Dynamically allocated array of
+	 * [IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES]
+	 * [IOOP_NUM_TYPES][PGSTAT_IO_HIST_BUCKETS] only with track_io_timings
+	 * true.
+	 */
+	uint64		(*pending_hist_time_buckets)[IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES][PGSTAT_IO_HIST_BUCKETS];
 } PgStat_PendingIO;
+
+extern PgStat_PendingIO PendingIOStats;
 
 typedef struct PgStat_IO
 {
@@ -527,15 +549,24 @@ typedef struct PgStat_Backend
 } PgStat_Backend;
 
 /* ---------
- * PgStat_BackendPending	Non-flushed backend stats.
+ * PgStat_BackendPending(IO)	Non-flushed backend stats.
  * ---------
  */
+typedef struct PgStat_BackendPendingIO
+{
+	uint64		bytes[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
+	PgStat_Counter counts[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
+	instr_time	pending_times[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
+}			PgStat_BackendPendingIO;
+
 typedef struct PgStat_BackendPending
 {
 	/*
-	 * Backend statistics store the same amount of IO data as PGSTAT_KIND_IO.
+	 * Backend statistics store almost the same amount of IO data as
+	 * PGSTAT_KIND_IO. The only difference between PgStat_BackendPendingIO and
+	 * PgStat_PendingIO is that the latter also track IO latency histograms.
 	 */
-	PgStat_PendingIO pending_io;
+	PgStat_BackendPendingIO pending_io;
 
 	/*
 	 * Backend statistics store the same amount of lock data as
@@ -636,6 +667,7 @@ extern void pgstat_count_io_op_time(IOObject io_object, IOContext io_context,
 extern PgStat_IO *pgstat_fetch_stat_io(void);
 extern const char *pgstat_get_io_context_name(IOContext io_context);
 extern const char *pgstat_get_io_object_name(IOObject io_object);
+extern const char *pgstat_get_io_op_name(IOOp io_op);
 
 extern bool pgstat_tracks_io_bktype(BackendType bktype);
 extern bool pgstat_tracks_io_object(BackendType bktype,

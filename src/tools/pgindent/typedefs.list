@@ -3866,6 +3866,7 @@ gzFile
 having_grouping_ctx
 heap_page_items_state
 help_handler
+histogram_io_stat_col
 hlCheck
 host_cache_hash
 hstoreCheckKeyLen_t

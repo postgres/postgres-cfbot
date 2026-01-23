@@ -32,6 +32,42 @@ extern PGDLLIMPORT const uint8 pg_leftmost_one_pos[256];
 extern PGDLLIMPORT const uint8 pg_rightmost_one_pos[256];
 extern PGDLLIMPORT const uint8 pg_number_of_ones[256];
 
+
+/*
+ * pg_leading_zero_bits64
+ *		Returns the number of leading 0-bits in x, starting at the most significant bit position.
+ *		Word must not be 0 (as it is undefined behavior).
+ */
+static inline int
+pg_leading_zero_bits64(uint64 word)
+{
+#ifdef HAVE__BUILTIN_CLZL
+	Assert(word != 0);
+
+#if SIZEOF_LONG == 8
+	return __builtin_clzl(word);
+#elif SIZEOF_LONG_LONG == 8
+	return __builtin_clzll(word);
+#else
+#error "cannot find integer type of the same size as uint64_t"
+#endif
+
+#else
+	uint64 y;
+	int n = 64;
+	if (word == 0)
+		return 64;
+
+	y = word >> 32; if (y != 0) { n -= 32; word = y; }
+	y = word >> 16; if (y != 0) { n -= 16; word = y; }
+	y = word >> 8;  if (y != 0) { n -= 8;  word = y; }
+	y = word >> 4;  if (y != 0) { n -= 4;  word = y; }
+	y = word >> 2;  if (y != 0) { n -= 2;  word = y; }
+	y = word >> 1;  if (y != 0) { return n - 2; }
+	return n - 1;
+#endif
+}
+
 /*
  * pg_leftmost_one_pos32
  *		Returns the position of the most significant set bit in "word",
@@ -71,7 +107,7 @@ pg_leftmost_one_pos32(uint32 word)
 static inline int
 pg_leftmost_one_pos64(uint64 word)
 {
-#ifdef HAVE__BUILTIN_CLZ
+#ifdef HAVE__BUILTIN_CLZL
 	Assert(word != 0);
 
 #if SIZEOF_LONG == 8
