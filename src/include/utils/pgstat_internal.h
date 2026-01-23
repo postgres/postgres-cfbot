@@ -626,7 +626,7 @@ typedef struct PgStat_Snapshot
 
 	PgStat_CheckpointerStats checkpointer;
 
-	PgStat_IO	io;
+	PgStat_IO  *io;
 
 	PgStat_Lock lock;
 
