@@ -17,10 +17,12 @@
 #include "postgres.h"
 
 #include "executor/instrument.h"
+#include "port/pg_bitutils.h"
 #include "storage/bufmgr.h"
+#include "utils/memutils.h"
 #include "utils/pgstat_internal.h"
 
-static PgStat_PendingIO PendingIOStats;
+PgStat_PendingIO PendingIOStats;
 static bool have_iostats = false;
 
 /*
@@ -99,6 +101,35 @@ pgstat_prepare_io_time(bool track_io_guc)
 	return io_start;
 }
 
+#define MIN_PG_STAT_IO_HIST_LATENCY 8191
+static inline int
+get_bucket_index(uint64_t ns)
+{
+	const uint32_t max_index = PGSTAT_IO_HIST_BUCKETS - 1;
+
+	/*
+	 * hopefully pre-calculated by the compiler: clzl(8191) =
+	 * clz(01111111111111b on uint64)
+	 */
+	const uint32_t min_latency_leading_zeros =
+		pg_leading_zero_bits64(MIN_PG_STAT_IO_HIST_LATENCY);
+
+	/*
+	 * make sure the tmp value has at least 8191 (our minimum bucket size) as
+	 * __builtin_clzl might return undefined behavior when operating on 0
+	 */
+	uint64_t	tmp = ns | MIN_PG_STAT_IO_HIST_LATENCY;
+
+	/* count leading zeros */
+	int			leading_zeros = pg_leading_zero_bits64(tmp);
+
+	/* normalize the index */
+	uint32_t	index = min_latency_leading_zeros - leading_zeros;
+
+	/* clamp it to the maximum */
+	return (index > max_index) ? max_index : index;
+}
+
 /*
  * Like pgstat_count_io_op() except it also accumulates time.
  *
@@ -117,6 +148,7 @@ pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOp io_op,
 	if (!INSTR_TIME_IS_ZERO(start_time))
 	{
 		instr_time	io_time;
+		int			bucket_index;
 
 		INSTR_TIME_SET_CURRENT(io_time);
 		INSTR_TIME_SUBTRACT(io_time, start_time);
@@ -144,6 +176,16 @@ pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOp io_op,
 		INSTR_TIME_ADD(PendingIOStats.pending_times[io_object][io_context][io_op],
 					   io_time);
 
+		if (PendingIOStats.pending_hist_time_buckets != NULL)
+		{
+			/*
+			 * calculate the bucket_index based on latency in nanoseconds
+			 * (uint64)
+			 */
+			bucket_index = get_bucket_index(INSTR_TIME_GET_NANOSEC(io_time));
+			PendingIOStats.pending_hist_time_buckets[io_object][io_context][io_op][bucket_index]++;
+		}
+
 		/* Add the per-backend count */
 		pgstat_count_backend_io_op_time(io_object, io_context, io_op,
 										io_time);
@@ -157,7 +199,7 @@ pgstat_fetch_stat_io(void)
 {
 	pgstat_snapshot_fixed(PGSTAT_KIND_IO);
 
-	return &pgStatLocal.snapshot.io;
+	return pgStatLocal.snapshot.io;
 }
 
 /*
@@ -213,6 +255,11 @@ pgstat_io_flush_cb(bool nowait)
 
 				bktype_shstats->times[io_object][io_context][io_op] +=
 					INSTR_TIME_GET_MICROSEC(time);
+
+				if (PendingIOStats.pending_hist_time_buckets != NULL)
+					for (int b = 0; b < PGSTAT_IO_HIST_BUCKETS; b++)
+						bktype_shstats->hist_time_buckets[io_object][io_context][io_op][b] +=
+							PendingIOStats.pending_hist_time_buckets[io_object][io_context][io_op][b];
 			}
 		}
 	}
@@ -221,7 +268,8 @@ pgstat_io_flush_cb(bool nowait)
 
 	LWLockRelease(bktype_lock);
 
-	memset(&PendingIOStats, 0, sizeof(PendingIOStats));
+	/* Avoid overwriting latency buckets array pointer */
+	memset(&PendingIOStats, 0, offsetof(PgStat_PendingIO, pending_hist_time_buckets));
 
 	have_iostats = false;
 
@@ -266,6 +314,33 @@ pgstat_get_io_object_name(IOObject io_object)
 	pg_unreachable();
 }
 
+const char *
+pgstat_get_io_op_name(IOOp io_op)
+{
+	switch (io_op)
+	{
+		case IOOP_EVICT:
+			return "evict";
+		case IOOP_FSYNC:
+			return "fsync";
+		case IOOP_HIT:
+			return "hit";
+		case IOOP_REUSE:
+			return "reuse";
+		case IOOP_WRITEBACK:
+			return "writeback";
+		case IOOP_EXTEND:
+			return "extend";
+		case IOOP_READ:
+			return "read";
+		case IOOP_WRITE:
+			return "write";
+	}
+
+	elog(ERROR, "unrecognized IOOp value: %d", io_op);
+	pg_unreachable();
+}
+
 void
 pgstat_io_init_shmem_cb(void *stats)
 {
@@ -273,6 +348,9 @@ pgstat_io_init_shmem_cb(void *stats)
 
 	for (int i = 0; i < BACKEND_NUM_TYPES; i++)
 		LWLockInitialize(&stat_shmem->locks[i], LWTRANCHE_PGSTATS_DATA);
+
+	/* this might end up being lazily allocated in pgstat_io_snapshot_cb() */
+	pgStatLocal.snapshot.io = NULL;
 }
 
 void
@@ -300,11 +378,15 @@ pgstat_io_reset_all_cb(TimestampTz ts)
 void
 pgstat_io_snapshot_cb(void)
 {
+	if (unlikely(pgStatLocal.snapshot.io == NULL))
+		pgStatLocal.snapshot.io = MemoryContextAllocZero(TopMemoryContext,
+														 sizeof(PgStat_IO));
+
 	for (int i = 0; i < BACKEND_NUM_TYPES; i++)
 	{
 		LWLock	   *bktype_lock = &pgStatLocal.shmem->io.locks[i];
 		PgStat_BktypeIO *bktype_shstats = &pgStatLocal.shmem->io.stats.stats[i];
-		PgStat_BktypeIO *bktype_snap = &pgStatLocal.snapshot.io.stats[i];
+		PgStat_BktypeIO *bktype_snap = &pgStatLocal.snapshot.io->stats[i];
 
 		LWLockAcquire(bktype_lock, LW_SHARED);
 
@@ -313,7 +395,7 @@ pgstat_io_snapshot_cb(void)
 		 * the reset timestamp as well.
 		 */
 		if (i == 0)
-			pgStatLocal.snapshot.io.stat_reset_timestamp =
+			pgStatLocal.snapshot.io->stat_reset_timestamp =
 				pgStatLocal.shmem->io.stats.stat_reset_timestamp;
 
 		/* using struct assignment due to better type safety */

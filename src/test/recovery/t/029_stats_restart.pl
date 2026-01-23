@@ -293,7 +293,36 @@ cmp_ok(
 	$wal_restart_immediate->{reset},
 	"$sect: reset timestamp is new");
 
+
+## Test pg_stat_io_histogram that is becoming active due to dynamic memory
+## allocation only for new backends with globally set track_[io|wal_io]_timing
+$sect = "pg_stat_io_histogram";
+$node->append_conf('postgresql.conf', "track_io_timing = 'on'");
+$node->append_conf('postgresql.conf', "track_wal_io_timing = 'on'");
+$node->restart;
+
+
+## Check that pg_stat_io_histograms sees some growing counts in buckets
+## We could also try with checkpointer, but it often runs with fsync=off
+## during test.
+my $countbefore = $node->safe_psql('postgres',
+	"SELECT sum(bucket_count) AS hist_bucket_count_sum FROM pg_stat_get_io_histogram() " .
+	"WHERE backend_type='client backend' AND object='relation' AND context='normal'");
+
+$node->safe_psql('postgres', "CREATE TABLE test_io_hist(id bigint);");
+$node->safe_psql('postgres', "INSERT INTO test_io_hist SELECT generate_series(1, 100) s;");
+$node->safe_psql('postgres', "SELECT pg_stat_force_next_flush();");
+
+my $countafter = $node->safe_psql('postgres',
+	"SELECT sum(bucket_count) AS hist_bucket_count_sum FROM pg_stat_get_io_histogram() " .
+	"WHERE backend_type='client backend' AND object='relation' AND context='normal'");
+
+cmp_ok(
+	$countafter, '>', $countbefore,
+	"pg_stat_io_histogram: latency buckets growing");
+
 $node->stop;
+
 done_testing();
 
 sub trigger_funcrel_stat
