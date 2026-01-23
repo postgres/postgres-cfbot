@@ -22,3 +22,8 @@ SELECT show_trgm('ISTANBUL' COLLATE "C");
 SELECT similarity('ıstanbul' COLLATE "tr-x-icu", 'ISTANBUL' COLLATE "tr-x-icu");
 SELECT similarity('ıstanbul' COLLATE "C", 'ISTANBUL' COLLATE "C");
 
+-- Test that word boundary identification uses specified collation
+
+SELECT show_trgm('helloıtestIworldİcode' COLLATE "tr-x-icu");
+SELECT show_trgm('helloıtestIworldİcode' COLLATE "C");
+
