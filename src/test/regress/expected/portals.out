@@ -1572,3 +1572,22 @@ fetch all in held_portal;
 (1 row)
 
 reset default_toast_compression;
+-- Changing a composite type after a cursor has emitted rows should error
+DROP TYPE IF EXISTS portal_composite CASCADE;
+NOTICE:  type "portal_composite" does not exist, skipping
+CREATE TYPE portal_composite AS (a int, b int);
+BEGIN;
+DECLARE stale_portal CURSOR FOR
+  SELECT (i, power(2, 10))::portal_composite FROM generate_series(1, 2) i;
+FETCH FROM stale_portal;
+   row    
+----------
+ (1,1024)
+(1 row)
+
+ALTER TYPE portal_composite ALTER ATTRIBUTE b TYPE text;
+FETCH FROM stale_portal; -- should fail instead of crashing
+ERROR:  type portal_composite has changed
+DETAIL:  The composite value was created using a previous definition of type portal_composite.
+ROLLBACK;
+DROP TYPE portal_composite;
