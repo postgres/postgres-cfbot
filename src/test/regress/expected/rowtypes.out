@@ -135,11 +135,8 @@ ERROR:  cannot alter table "fullname" because column "people.fn" uses its row ty
 -- but this should work:
 alter table fullname add column suffix text default null;
 select * from people;
-     fn      |     bd     
--------------+------------
- (Joe,Blow,) | 01-10-1984
-(1 row)
-
+ERROR:  type fullname has changed
+DETAIL:  The composite value was created using a previous definition of type fullname.
 -- test insertion/updating of subfields
 update people set fn.suffix = 'Jr';
 select * from people;
