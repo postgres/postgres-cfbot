@@ -57,6 +57,7 @@
 #include "catalog/pg_range.h"
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
+#include "common/hashfn.h"
 #include "common/int.h"
 #include "executor/executor.h"
 #include "lib/dshash.h"
@@ -306,12 +307,15 @@ static int32 RecordCacheArrayLen = 0;	/* allocated length of above array */
 static int32 NextRecordTypmod = 0;	/* number of entries used */
 
 /*
- * Process-wide counter for generating unique tupledesc identifiers.
+ * Process-wide counter for generating unique tupledesc identifiers for
+ * record (RECORDOID) tupdescs. Named composite types now derive their
+ * identifiers from a deterministic signature of the tupledesc contents.
  * Zero and one (INVALID_TUPLEDESC_IDENTIFIER) aren't allowed to be chosen
  * as identifiers, so we start the counter at INVALID_TUPLEDESC_IDENTIFIER.
  */
 static uint64 tupledesc_id_counter = INVALID_TUPLEDESC_IDENTIFIER;
 
+static uint64 compute_tupdesc_identifier(TupleDesc tupdesc);
 static void load_typcache_tupdesc(TypeCacheEntry *typentry);
 static void load_rangetype_info(TypeCacheEntry *typentry);
 static void load_multirangetype_info(TypeCacheEntry *typentry);
@@ -353,6 +357,75 @@ static dsa_pointer share_tupledesc(dsa_area *area, TupleDesc tupdesc,
 								   uint32 typmod);
 static void insert_rel_type_cache_if_needed(TypeCacheEntry *typentry);
 static void delete_rel_type_cache_if_needed(TypeCacheEntry *typentry);
+
+
+/*
+ * compute_tupdesc_identifier
+ *
+ * Build a stable, deterministic 64-bit signature for a tuple descriptor so
+ * that unchanged composite type definitions keep the same identifier across
+ * cache reloads and backends.  We hash only structural fields that affect the
+ * layout or logical contract of the rowtype, avoiding volatile fields such as
+ * attcacheoff.
+ */
+static uint64
+compute_tupdesc_identifier(TupleDesc tupdesc)
+{
+	uint64		hash;
+	int		natts = tupdesc->natts;
+
+	hash = hash_bytes_extended((const unsigned char *) &tupdesc->tdtypeid,
+								 sizeof(Oid), 0);
+	hash = hash_bytes_extended((const unsigned char *) &tupdesc->tdtypmod,
+								 sizeof(int32), hash);
+	hash = hash_bytes_extended((const unsigned char *) &natts,
+								 sizeof(int), hash);
+
+	for (int i = 0; i < natts; i++)
+	{
+		Form_pg_attribute att = TupleDescAttr(tupdesc, i);
+
+		hash = hash_bytes_extended((const unsigned char *) att->attname.data,
+										 NAMEDATALEN, hash);
+		hash = hash_bytes_extended((const unsigned char *) &att->attisdropped,
+										 sizeof(bool), hash);
+		hash = hash_bytes_extended((const unsigned char *) &att->attnotnull,
+										 sizeof(bool), hash);
+		hash = hash_bytes_extended((const unsigned char *) &att->attlen,
+										 sizeof(int16), hash);
+		hash = hash_bytes_extended((const unsigned char *) &att->attbyval,
+										 sizeof(bool), hash);
+		hash = hash_bytes_extended((const unsigned char *) &att->attalign,
+										 sizeof(char), hash);
+		hash = hash_bytes_extended((const unsigned char *) &att->attstorage,
+										 sizeof(char), hash);
+		hash = hash_bytes_extended((const unsigned char *) &att->attcompression,
+										 sizeof(char), hash);
+		hash = hash_bytes_extended((const unsigned char *) &att->atttypid,
+										 sizeof(Oid), hash);
+		hash = hash_bytes_extended((const unsigned char *) &att->atttypmod,
+										 sizeof(int32), hash);
+		hash = hash_bytes_extended((const unsigned char *) &att->attcollation,
+										 sizeof(Oid), hash);
+		hash = hash_bytes_extended((const unsigned char *) &att->attndims,
+										 sizeof(int32), hash);
+		hash = hash_bytes_extended((const unsigned char *) &att->attidentity,
+										 sizeof(char), hash);
+		hash = hash_bytes_extended((const unsigned char *) &att->attgenerated,
+										 sizeof(char), hash);
+		hash = hash_bytes_extended((const unsigned char *) &att->atthasmissing,
+										 sizeof(bool), hash);
+	}
+
+	/* Avoid reserved identifiers (0 and 1). */
+	if (hash <= INVALID_TUPLEDESC_IDENTIFIER)
+		hash = hash_bytes_extended((const unsigned char *) &natts,
+										 sizeof(int), UINT64CONST(0xA5A5A5A5A5A5A5A5));
+	if (hash <= INVALID_TUPLEDESC_IDENTIFIER)
+		hash = INVALID_TUPLEDESC_IDENTIFIER + 1;
+
+	return hash;
+}
 
 
 /*
@@ -1005,11 +1078,14 @@ load_typcache_tupdesc(TypeCacheEntry *typentry)
 	Assert(typentry->tupDesc->tdrefcount > 0);
 	typentry->tupDesc->tdrefcount++;
 
+	typentry->tupDesc_identifier = compute_tupdesc_identifier(typentry->tupDesc);
+
 	/*
-	 * In future, we could take some pains to not change tupDesc_identifier if
-	 * the tupdesc didn't really change; but for now it's not worth it.
+	 * Stash a version marker in tdtypmod so composite Datums can detect stale
+	 * definitions later.  Keep it non-negative so callers can reliably check
+	 * for it.
 	 */
-	typentry->tupDesc_identifier = ++tupledesc_id_counter;
+	typentry->tupDesc->tdtypmod = (int32) (typentry->tupDesc_identifier & 0x7FFFFFFF);
 
 	relation_close(rel, AccessShareLock);
 }
@@ -1875,9 +1951,30 @@ lookup_rowtype_tupdesc_internal(Oid type_id, int32 typmod, bool noError)
 		typentry = lookup_type_cache(type_id, TYPECACHE_TUPDESC);
 		if (typentry->tupDesc == NULL && !noError)
 			ereport(ERROR,
-					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-					 errmsg("type %s is not composite",
-							format_type_be(type_id))));
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("type %s is not composite",
+					 format_type_be(type_id))));
+		else if (typentry->tupDesc == NULL)
+			return NULL;
+
+		/*
+		 * If the caller supplied a non-negative typmod, treat it as the version
+		 * of the composite type that was current when the Datum was formed.  If
+		 * it doesn't match the current definition, fail fast instead of
+		 * interpreting the tuple using the wrong layout.
+		 */
+		if (typmod >= 0)
+		{
+			int32		expected_typmod = typentry->tupDesc->tdtypmod;
+
+			if (expected_typmod >= 0 && typmod != expected_typmod)
+				ereport(ERROR,
+					(errcode(ERRCODE_DATATYPE_MISMATCH),
+					 errmsg("type %s has changed",
+						 format_type_be(type_id)),
+					 errdetail("The composite value was created using a previous definition of type %s.",
+						 format_type_be(type_id))));
+		}
 		return typentry->tupDesc;
 	}
 	else
