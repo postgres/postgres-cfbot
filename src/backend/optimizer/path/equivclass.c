@@ -2673,12 +2673,23 @@ exprs_known_equal(PlannerInfo *root, Node *item1, Node *item2, Oid opfamily)
 		foreach(lc2, ec->ec_members)
 		{
 			EquivalenceMember *em = (EquivalenceMember *) lfirst(lc2);
+			Expr	   *expr = em->em_expr;
+
+			/* Remove any relabel decorations if collation match */
+			while (IsA(expr, RelabelType))
+			{
+				RelabelType *re = castNode(RelabelType, expr);
+
+				if (re->resultcollid != exprCollation((Node *) re->arg))
+					break;
+				expr = re->arg;
+			}
 
 			/* Child members should not exist in ec_members */
 			Assert(!em->em_is_child);
-			if (equal(item1, em->em_expr))
+			if (equal(item1, expr))
 				item1member = true;
-			else if (equal(item2, em->em_expr))
+			else if (equal(item2, expr))
 				item2member = true;
 			/* Exit as soon as equality is proven */
 			if (item1member && item2member)
