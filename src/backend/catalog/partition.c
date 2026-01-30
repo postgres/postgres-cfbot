@@ -26,6 +26,7 @@
 #include "nodes/makefuncs.h"
 #include "optimizer/optimizer.h"
 #include "rewrite/rewriteManip.h"
+#include "storage/lmgr.h"
 #include "utils/fmgroids.h"
 #include "utils/partcache.h"
 #include "utils/rel.h"
@@ -143,6 +144,24 @@ get_partition_ancestors(Oid relid)
 	table_close(inhRel, AccessShareLock);
 
 	return result;
+}
+
+/*
+ * lock_partition_ancestors
+ *		Lock all ancestors of given relation from root to parent.
+ */
+List *
+lock_partition_ancestors(Oid relid, LOCKMODE lockmode)
+{
+	List	   *ancestors = get_partition_ancestors(relid);
+
+	for (int i = list_length(ancestors) - 1; i >= 0; i--)
+	{
+		Oid			parentoid = list_nth_oid(ancestors, i);
+
+		LockRelationOid(parentoid, lockmode);
+	}
+	return ancestors;
 }
 
 /*

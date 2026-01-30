@@ -20506,6 +20506,39 @@ RangeVarCallbackForAlterRelation(const RangeVar *rv, Oid relid, Oid oldrelid,
 					 errhint("Change the schema of the table instead.")));
 	}
 
+	/* 
+	 * For ALTER TABLE ATTACH PARTITION, pre-lock all ancestors. That's because
+	 * ATTACH PARTITION needs to find all ancestors' partition bounds, thus it
+	 * will recurse up the partition tree, and lock each ancestor it meets,
+	 * which may lead to deadlock. So we pre-lock all ancestors here to avoid
+	 * that.
+	 */
+	if (IsA(stmt, AlterTableStmt))
+	{
+		AlterTableStmt *ats = (AlterTableStmt *) stmt;
+		ListCell   *l;
+		bool found = false;
+
+		foreach (l, ats->cmds)
+		{
+			AlterTableCmd *atc = lfirst_node(AlterTableCmd, l);
+
+			if (atc->subtype == AT_AttachPartition)
+			{
+				found = true;
+				break;
+			}
+		}
+		if (found)
+		{
+			/* 
+			 * The target table must be a partitioned table, but if, we don't
+			 * need to fail here; The normal ALTER TABLE processing will do that.
+			 */
+			if (relkind == RELKIND_PARTITIONED_TABLE)
+				lock_partition_ancestors(relid, AccessShareLock);
+		}
+	}
 	ReleaseSysCache(tuple);
 }
 
