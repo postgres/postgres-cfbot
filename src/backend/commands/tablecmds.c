@@ -327,6 +327,16 @@ struct DropRelationCallbackState
 	char		actual_relpersistence;
 };
 
+/*
+ * communication between AlterTableLookupRelation and
+ * RangeVarCallbackForAttachPartition
+ */
+struct AttachPartitionCallbackState
+{
+	Node	   *stmt;
+	List	   *lockedAncestors;
+};
+
 /* Alter table target-type flags for ATSimplePermissions */
 #define		ATT_TABLE				0x0001
 #define		ATT_VIEW				0x0002
@@ -724,6 +734,8 @@ static void RangeVarCallbackForDropRelation(const RangeVar *rel, Oid relOid,
 											Oid oldRelOid, void *arg);
 static void RangeVarCallbackForAlterRelation(const RangeVar *rv, Oid relid,
 											 Oid oldrelid, void *arg);
+static void RangeVarCallbackForAttachPartition(const RangeVar *rv, Oid relid,
+											   Oid oldrelid, void *arg);
 static PartitionSpec *transformPartitionSpec(Relation rel, PartitionSpec *partspec);
 static void ComputePartitionAttrs(ParseState *pstate, Relation rel, List *partParams, AttrNumber *partattrs,
 								  List **partexprs, Oid *partopclass, Oid *partcollation,
@@ -4532,6 +4544,27 @@ CheckAlterTableIsSafe(Relation rel)
 Oid
 AlterTableLookupRelation(AlterTableStmt *stmt, LOCKMODE lockmode)
 {
+	ListCell   *lc;
+
+	foreach(lc, stmt->cmds)
+	{
+		AlterTableCmd *cmd = lfirst_node(AlterTableCmd, lc);
+
+		if (cmd->subtype == AT_AttachPartition)
+		{
+			struct AttachPartitionCallbackState state = {0};
+			Oid			relid;
+
+			state.stmt = (Node *) stmt;
+			relid = RangeVarGetRelidExtended(stmt->relation, lockmode,
+											 stmt->missing_ok ? RVR_MISSING_OK : 0,
+											 RangeVarCallbackForAttachPartition,
+											 &state);
+			list_free(state.lockedAncestors);
+			return relid;
+		}
+	}
+
 	return RangeVarGetRelidExtended(stmt->relation, lockmode,
 									stmt->missing_ok ? RVR_MISSING_OK : 0,
 									RangeVarCallbackForAlterRelation,
@@ -20309,6 +20342,7 @@ RangeVarCallbackForAlterRelation(const RangeVar *rv, Oid relid, Oid oldrelid,
 	AclResult	aclresult;
 	char		relkind;
 
+
 	tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
 	if (!HeapTupleIsValid(tuple))
 		return;					/* concurrently dropped */
@@ -20444,6 +20478,53 @@ RangeVarCallbackForAlterRelation(const RangeVar *rv, Oid relid, Oid oldrelid,
 	}
 
 	ReleaseSysCache(tuple);
+}
+
+/*
+ * Pre-lock ATTACH PARTITION's ancestors before locking the target relation.
+ */
+static void
+RangeVarCallbackForAttachPartition(const RangeVar *rv, Oid relid, Oid oldrelid,
+								   void *arg)
+{
+	struct AttachPartitionCallbackState *state = arg;
+
+	/* Release locks belonging to a previous lookup of a different relation. */
+	if (relid != oldrelid && state->lockedAncestors != NIL)
+	{
+		ListCell   *lc;
+
+		foreach(lc, state->lockedAncestors)
+			UnlockRelationOid(lfirst_oid(lc), AccessShareLock);
+		list_free(state->lockedAncestors);
+		state->lockedAncestors = NIL;
+	}
+
+	RangeVarCallbackForAlterRelation(rv, relid, oldrelid, state->stmt);
+
+	if (relid == oldrelid || !OidIsValid(relid))
+		return;
+
+	/*
+	 * Lock ancestors from root to parent before ATTACH locks the target and
+	 * walks up the tree to collect partition constraints.  If the target is
+	 * not a partitioned table, let normal ALTER TABLE processing report that.
+	 *
+	 * The target is not locked yet, so its ancestry could change before we
+	 * lock it, leaving some ancestors not pre-locked.  This does not
+	 * necessarily cause a deadlock.  Rechecking after locking the target and
+	 * rejecting such changes would force retries even when the operation
+	 * could succeed, so we tolerate the race.  If a deadlock does occur, the
+	 * deadlock detector will abort one of the transactions, which can then be
+	 * retried.
+	 */
+	if (get_rel_relkind(relid) == RELKIND_PARTITIONED_TABLE &&
+		get_rel_relispartition(relid))
+	{
+		/* Include detach-pending links, as generate_partition_qual() does. */
+		state->lockedAncestors =
+			lock_partition_ancestors(relid, AccessShareLock, true);
+	}
 }
 
 /*

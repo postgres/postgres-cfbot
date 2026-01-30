@@ -26,6 +26,7 @@
 #include "nodes/makefuncs.h"
 #include "optimizer/optimizer.h"
 #include "rewrite/rewriteManip.h"
+#include "storage/lmgr.h"
 #include "utils/fmgroids.h"
 #include "utils/partcache.h"
 #include "utils/rel.h"
@@ -34,7 +35,7 @@
 static Oid	get_partition_parent_worker(Relation inhRel, Oid relid,
 										bool *detach_pending);
 static void get_partition_ancestors_worker(Relation inhRel, Oid relid,
-										   List **ancestors);
+										   List **ancestors, bool even_if_detached);
 
 /*
  * get_partition_parent
@@ -126,6 +127,9 @@ get_partition_parent_worker(Relation inhRel, Oid relid, bool *detach_pending)
  * The first element is the immediate parent and the last one is the topmost
  * parent in the partition hierarchy.
  *
+ * If a partition is being detached, stop before adding its parent, excluding
+ * that parent and any ancestors above it.
+ *
  * Note: Because this function assumes that the relation whose OID is passed
  * as an argument and each ancestor will have precisely one parent, it should
  * only be called when it is known that the relation is a partition.
@@ -138,7 +142,7 @@ get_partition_ancestors(Oid relid)
 
 	inhRel = table_open(InheritsRelationId, AccessShareLock);
 
-	get_partition_ancestors_worker(inhRel, relid, &result);
+	get_partition_ancestors_worker(inhRel, relid, &result, false);
 
 	table_close(inhRel, AccessShareLock);
 
@@ -146,25 +150,55 @@ get_partition_ancestors(Oid relid)
 }
 
 /*
+ * lock_partition_ancestors
+ *		Lock all ancestors of given relation from root to parent.
+ *
+ * Include detach-pending links if even_if_detached is true; otherwise stop
+ * at such a link, as get_partition_ancestors() does.  Return the locked
+ * ancestors in parent-to-root order so callers can release the locks if
+ * relation lookup must be retried for a different relation.
+ */
+List *
+lock_partition_ancestors(Oid relid, LOCKMODE lockmode, bool even_if_detached)
+{
+	List	   *ancestors = NIL;
+	Relation	inhRel;
+
+	inhRel = table_open(InheritsRelationId, AccessShareLock);
+	get_partition_ancestors_worker(inhRel, relid, &ancestors, even_if_detached);
+	table_close(inhRel, AccessShareLock);
+
+	for (int i = list_length(ancestors) - 1; i >= 0; i--)
+	{
+		Oid			parentoid = list_nth_oid(ancestors, i);
+
+		LockRelationOid(parentoid, lockmode);
+	}
+	return ancestors;
+}
+
+/*
  * get_partition_ancestors_worker
  *		recursive worker for get_partition_ancestors
  */
 static void
-get_partition_ancestors_worker(Relation inhRel, Oid relid, List **ancestors)
+get_partition_ancestors_worker(Relation inhRel, Oid relid, List **ancestors,
+							   bool even_if_detached)
 {
 	Oid			parentOid;
 	bool		detach_pending;
 
 	/*
 	 * Recursion ends at the topmost level, ie., when there's no parent; also
-	 * when the partition is being detached.
+	 * when the partition is being detached, unless requested otherwise.
 	 */
 	parentOid = get_partition_parent_worker(inhRel, relid, &detach_pending);
-	if (parentOid == InvalidOid || detach_pending)
+	if (parentOid == InvalidOid || (detach_pending && !even_if_detached))
 		return;
 
 	*ancestors = lappend_oid(*ancestors, parentOid);
-	get_partition_ancestors_worker(inhRel, parentOid, ancestors);
+	get_partition_ancestors_worker(inhRel, parentOid, ancestors,
+								   even_if_detached);
 }
 
 /*
