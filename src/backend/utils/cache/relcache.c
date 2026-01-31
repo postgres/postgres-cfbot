@@ -314,12 +314,9 @@ static int	AttrDefaultCmp(const void *a, const void *b);
 static void CheckNNConstraintFetch(Relation relation);
 static int	CheckConstraintCmp(const void *a, const void *b);
 static void InitIndexAmRoutine(Relation relation);
-static void IndexSupportInitialize(oidvector *indclass,
-								   RegProcedure *indexSupport,
-								   Oid *opFamily,
-								   Oid *opcInType,
-								   StrategyNumber maxSupportNumber,
-								   AttrNumber maxAttributeNumber);
+static void IndexSupportInitialize(oidvector *indclass, AttrNumber nKeyAtts, StrategyNumber maxSupportNumber,
+								   MemoryContext indexcxt, const Oid **rd_opfamily, const Oid **rd_opcintype,
+								   const RegProcedure **rd_support, FmgrInfo **rd_supportinfo);
 static OpClassCacheEnt *LookupOpclassInfo(Oid operatorClassOid,
 										  StrategyNumber numSupport);
 static void RelationCacheInitFileRemoveInDir(const char *tblspcpath);
@@ -1451,9 +1448,6 @@ RelationInitIndexAccessInfo(Relation relation)
 	int			indnatts;
 	int			indnkeyatts;
 	uint16		amsupport;
-	Oid		   *opfamily;
-	Oid		   *opcintype;
-	RegProcedure *support;
 
 	/*
 	 * Make a copy of the pg_index entry for the index.  Since pg_index
@@ -1509,27 +1503,11 @@ RelationInitIndexAccessInfo(Relation relation)
 	/*
 	 * Allocate arrays to hold data. Opclasses are not used for included
 	 * columns, so allocate them for indnkeyatts only.
+	 *
+	 * Note that rd_opcintype/_opfamily/_support/_supportinfo are filled
+	 * in by IndexSupportInitialize.
 	 */
-	opfamily = (Oid *)
-		MemoryContextAllocZero(indexcxt, indnkeyatts * sizeof(Oid));
-	opcintype = (Oid *)
-		MemoryContextAllocZero(indexcxt, indnkeyatts * sizeof(Oid));
-
 	amsupport = relation->rd_indam->amsupport;
-	if (amsupport > 0)
-	{
-		int			nsupport = indnatts * amsupport;
-
-		support = (RegProcedure *)
-			MemoryContextAllocZero(indexcxt, nsupport * sizeof(RegProcedure));
-		relation->rd_supportinfo = (FmgrInfo *)
-			MemoryContextAllocZero(indexcxt, nsupport * sizeof(FmgrInfo));
-	}
-	else
-	{
-		support = NULL;
-		relation->rd_supportinfo = NULL;
-	}
 
 	relation->rd_indcollation = (Oid *)
 		MemoryContextAllocZero(indexcxt, indnkeyatts * sizeof(Oid));
@@ -1567,12 +1545,12 @@ RelationInitIndexAccessInfo(Relation relation)
 	 * opfamilies and opclass input types.  (aminfo and supportinfo are left
 	 * as zeroes, and are filled on-the-fly when used)
 	 */
-	IndexSupportInitialize(indclass, support, opfamily, opcintype,
-						   amsupport, indnkeyatts);
+	IndexSupportInitialize(indclass, indnkeyatts, amsupport, indexcxt,
+						   &relation->rd_opfamily,
+						   &relation->rd_opcintype,
+						   &relation->rd_support,
+						   &relation->rd_supportinfo);
 
-	relation->rd_opfamily = opfamily;
-	relation->rd_opcintype = opcintype;
-	relation->rd_support = support;
 	/*
 	 * Similarly extract indoption and copy it to the cache entry
 	 */
@@ -1611,16 +1589,38 @@ RelationInitIndexAccessInfo(Relation relation)
  * for the index and access method.
  */
 static void
-IndexSupportInitialize(oidvector *indclass,
-					   RegProcedure *indexSupport,
-					   Oid *opFamily,
-					   Oid *opcInType,
+IndexSupportInitialize(oidvector *indclass, AttrNumber nKeyAtts,
 					   StrategyNumber maxSupportNumber,
-					   AttrNumber maxAttributeNumber)
+					   MemoryContext indexcxt,
+					   const Oid **rd_opfamily,
+					   const Oid **rd_opcintype,
+					   const RegProcedure **rd_support,
+					   FmgrInfo **rd_supportinfo)
 {
-	int			attIndex;
+	Oid		   *opFamily;
+	Oid		   *opcInType;
+	RegProcedure *indexSupport;
 
-	for (attIndex = 0; attIndex < maxAttributeNumber; attIndex++)
+	if (maxSupportNumber > 0)
+	{
+		int		nprocs = maxSupportNumber * nKeyAtts;
+		rd_supportinfo[0] = (FmgrInfo *)
+			MemoryContextAllocZero(indexcxt, nprocs * sizeof(FmgrInfo));
+		indexSupport = (RegProcedure *)
+			MemoryContextAllocZero(indexcxt, nprocs * sizeof(RegProcedure));
+	}
+	else
+	{
+		*rd_supportinfo = NULL;
+		indexSupport = NULL;
+	}
+
+	opFamily = (Oid *)
+		MemoryContextAllocZero(indexcxt, nKeyAtts * sizeof(Oid));
+	opcInType = (Oid *)
+		MemoryContextAllocZero(indexcxt, nKeyAtts * sizeof(Oid));
+
+	for (int attIndex = 0; attIndex < nKeyAtts; attIndex++)
 	{
 		OpClassCacheEnt *opcentry;
 
@@ -1639,6 +1639,10 @@ IndexSupportInitialize(oidvector *indclass,
 				   opcentry->supportProcs,
 				   maxSupportNumber * sizeof(RegProcedure));
 	}
+
+	rd_support[0] = indexSupport;
+	rd_opcintype[0] = opcInType;
+	rd_opfamily[0] = opFamily;
 }
 
 /*
@@ -6042,8 +6046,7 @@ RelationGetIndexAttOptions(Relation relation, bool copy)
 	MemoryContext oldcxt;
 	bytea	  **opts = relation->rd_opcoptions;
 	Oid			relid = RelationGetRelid(relation);
-	int			natts = RelationGetNumberOfAttributes(relation);	/* XXX
-																	 * IndexRelationGetNumberOfKeyAttributes */
+	int			natts = IndexRelationGetNumberOfKeyAttributes(relation);
 	int			i;
 
 	/* Try to copy cached options. */
