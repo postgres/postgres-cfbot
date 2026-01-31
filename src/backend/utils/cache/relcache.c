@@ -1451,6 +1451,9 @@ RelationInitIndexAccessInfo(Relation relation)
 	int			indnatts;
 	int			indnkeyatts;
 	uint16		amsupport;
+	Oid		   *opfamily;
+	Oid		   *opcintype;
+	RegProcedure *support;
 
 	/*
 	 * Make a copy of the pg_index entry for the index.  Since pg_index
@@ -1507,9 +1510,9 @@ RelationInitIndexAccessInfo(Relation relation)
 	 * Allocate arrays to hold data. Opclasses are not used for included
 	 * columns, so allocate them for indnkeyatts only.
 	 */
-	relation->rd_opfamily = (Oid *)
+	opfamily = (Oid *)
 		MemoryContextAllocZero(indexcxt, indnkeyatts * sizeof(Oid));
-	relation->rd_opcintype = (Oid *)
+	opcintype = (Oid *)
 		MemoryContextAllocZero(indexcxt, indnkeyatts * sizeof(Oid));
 
 	amsupport = relation->rd_indam->amsupport;
@@ -1517,14 +1520,14 @@ RelationInitIndexAccessInfo(Relation relation)
 	{
 		int			nsupport = indnatts * amsupport;
 
-		relation->rd_support = (RegProcedure *)
+		support = (RegProcedure *)
 			MemoryContextAllocZero(indexcxt, nsupport * sizeof(RegProcedure));
 		relation->rd_supportinfo = (FmgrInfo *)
 			MemoryContextAllocZero(indexcxt, nsupport * sizeof(FmgrInfo));
 	}
 	else
 	{
-		relation->rd_support = NULL;
+		support = NULL;
 		relation->rd_supportinfo = NULL;
 	}
 
@@ -1564,10 +1567,12 @@ RelationInitIndexAccessInfo(Relation relation)
 	 * opfamilies and opclass input types.  (aminfo and supportinfo are left
 	 * as zeroes, and are filled on-the-fly when used)
 	 */
-	IndexSupportInitialize(indclass, relation->rd_support,
-						   relation->rd_opfamily, relation->rd_opcintype,
+	IndexSupportInitialize(indclass, support, opfamily, opcintype,
 						   amsupport, indnkeyatts);
 
+	relation->rd_opfamily = opfamily;
+	relation->rd_opcintype = opcintype;
+	relation->rd_support = support;
 	/*
 	 * Similarly extract indoption and copy it to the cache entry
 	 */
