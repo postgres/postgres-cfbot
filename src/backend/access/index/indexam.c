@@ -852,7 +852,7 @@ index_getprocid(Relation irel,
 				AttrNumber attnum,
 				uint16 procnum)
 {
-	RegProcedure *loc;
+	const RegProcedure *loc;
 	int			nproc;
 	int			procindex;
 
@@ -907,7 +907,7 @@ index_getprocinfo(Relation irel,
 	/* Initialize the lookup info if first time through */
 	if (locinfo->fn_oid == InvalidOid)
 	{
-		RegProcedure *loc = irel->rd_support;
+		const RegProcedure *loc = irel->rd_support;
 		RegProcedure procId;
 
 		Assert(loc != NULL);
