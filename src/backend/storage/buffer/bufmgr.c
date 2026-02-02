@@ -185,6 +185,19 @@ typedef struct SMgrSortArray
 	SMgrRelation srel;
 } SMgrSortArray;
 
+/* How much PinBuffer() should increase the usage count of the target buffer */
+typedef enum BufferUsageCountChange
+{
+	/* Do not increase the usage count */
+	BUC_ZERO,
+
+	/* Increase usage count by one to a maximum of one (used with strategies) */
+	BUC_MAX_ONE,
+
+	/* Increase usage count by one up to the max (BM_MAX_USAGE_COUNT) */
+	BUC_ONE,
+} BufferUsageCountChange;
+
 /* GUC variables */
 bool		zero_damaged_pages = false;
 int			bgwriter_lru_maxpages = 100;
@@ -628,7 +641,7 @@ static BlockNumber ExtendBufferedRelShared(BufferManagerRelation bmr,
 										   BlockNumber extend_upto,
 										   Buffer *buffers,
 										   uint32 *extended_by);
-static bool PinBuffer(BufferDesc *buf, BufferAccessStrategy strategy,
+static bool PinBuffer(BufferDesc *buf, BufferUsageCountChange usage_count_change,
 					  bool skip_if_not_valid);
 static void PinBuffer_Locked(BufferDesc *buf);
 static void UnpinBuffer(BufferDesc *buf);
@@ -857,7 +870,7 @@ ReadRecentBuffer(RelFileLocator rlocator, ForkNumber forkNum, BlockNumber blockN
 		 * pin.
 		 */
 		if (BufferTagsEqual(&tag, &bufHdr->tag) &&
-			PinBuffer(bufHdr, NULL, true))
+			PinBuffer(bufHdr, BUC_ONE, true))
 		{
 			if (BufferTagsEqual(&tag, &bufHdr->tag))
 			{
@@ -2234,7 +2247,9 @@ BufferAlloc(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 		 */
 		buf = GetBufferDescriptor(existing_buf_id);
 
-		valid = PinBuffer(buf, strategy, false);
+		valid = PinBuffer(buf,
+						  strategy ? BUC_MAX_ONE : BUC_ONE,
+						  false);
 
 		/* Can release the mapping lock as soon as we've pinned it */
 		LWLockRelease(newPartitionLock);
@@ -2296,7 +2311,9 @@ BufferAlloc(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 
 		existing_buf_hdr = GetBufferDescriptor(existing_buf_id);
 
-		valid = PinBuffer(existing_buf_hdr, strategy, false);
+		valid = PinBuffer(existing_buf_hdr,
+						  strategy ? BUC_MAX_ONE : BUC_ONE,
+						  false);
 
 		/* Can release the mapping lock as soon as we've pinned it */
 		LWLockRelease(newPartitionLock);
@@ -2953,7 +2970,9 @@ ExtendBufferedRelShared(BufferManagerRelation bmr,
 			 * Pin the existing buffer before releasing the partition lock,
 			 * preventing it from being evicted.
 			 */
-			valid = PinBuffer(existing_hdr, strategy, false);
+			valid = PinBuffer(existing_hdr,
+							  strategy ? BUC_MAX_ONE : BUC_ONE,
+							  false);
 
 			LWLockRelease(partition_lock);
 			UnpinBuffer(victim_buf_hdr);
@@ -3269,6 +3288,7 @@ ReleaseAndReadBuffer(Buffer buffer,
 /*
  * PinBuffer -- make buffer unavailable for replacement.
  *
+ * Most callers will want to bump the usage count to at least one.
  * For the default access strategy, the buffer's usage_count is incremented
  * when we first pin it; for other strategies we just make sure the usage_count
  * isn't zero.  (The idea of the latter is that we don't want synchronized
@@ -3292,7 +3312,7 @@ ReleaseAndReadBuffer(Buffer buffer,
  * (recently) invalid and has not been pinned.
  */
 static bool
-PinBuffer(BufferDesc *buf, BufferAccessStrategy strategy,
+PinBuffer(BufferDesc *buf, BufferUsageCountChange usage_count_change,
 		  bool skip_if_not_valid)
 {
 	Buffer		b = BufferDescriptorGetBuffer(buf);
@@ -3332,13 +3352,13 @@ PinBuffer(BufferDesc *buf, BufferAccessStrategy strategy,
 			/* increase refcount */
 			buf_state += BUF_REFCOUNT_ONE;
 
-			if (strategy == NULL)
+			if (usage_count_change == BUC_ONE)
 			{
 				/* Default case: increase usagecount unless already max. */
 				if (BUF_STATE_GET_USAGECOUNT(buf_state) < BM_MAX_USAGE_COUNT)
 					buf_state += BUF_USAGECOUNT_ONE;
 			}
-			else
+			else if (usage_count_change == BUC_MAX_ONE)
 			{
 				/*
 				 * Ring buffers shouldn't evict others from pool.  Thus we
@@ -3346,6 +3366,11 @@ PinBuffer(BufferDesc *buf, BufferAccessStrategy strategy,
 				 */
 				if (BUF_STATE_GET_USAGECOUNT(buf_state) == 0)
 					buf_state += BUF_USAGECOUNT_ONE;
+			}
+			else
+			{
+				/* Don't increase usage count */
+				Assert(usage_count_change == BUC_ZERO);
 			}
 
 			if (pg_atomic_compare_exchange_u64(&buf->state, &old_buf_state,
