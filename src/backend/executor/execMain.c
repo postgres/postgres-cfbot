@@ -53,6 +53,8 @@
 #include "foreign/fdwapi.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
+#include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
 #include "nodes/queryjumble.h"
 #include "parser/parse_relation.h"
 #include "pgstat.h"
@@ -1357,6 +1359,8 @@ InitResultRelInfo(ResultRelInfo *resultRelInfo,
 	resultRelInfo->ri_GenVirtualNotNullConstraintExprs = NULL;
 	resultRelInfo->ri_GeneratedExprsI = NULL;
 	resultRelInfo->ri_GeneratedExprsU = NULL;
+	resultRelInfo->ri_VirtualGeneratedExprsI = NULL;
+	resultRelInfo->ri_VirtualGeneratedExprsU = NULL;
 	resultRelInfo->ri_projectReturning = NULL;
 	resultRelInfo->ri_onConflictArbiterIndexes = NIL;
 	resultRelInfo->ri_onConflict = NULL;
@@ -1877,7 +1881,13 @@ ExecRelCheck(ResultRelInfo *resultRelInfo,
 				continue;
 
 			checkconstr = stringToNode(check[i].ccbin);
-			checkconstr = (Expr *) expand_generated_columns_in_expr((Node *) checkconstr, rel, 1);
+
+			/*
+			 * No need to call expand_generated_columns_in_expr() here.
+			 * Virtual generated column values are computed and stored in the
+			 * slot by ExecComputeVirtualGenerated() before we get here, so
+			 * the expression evaluator can read them directly from the slot.
+			 */
 			resultRelInfo->ri_CheckConstraintExprs[i] =
 				ExecPrepareExpr(checkconstr, estate);
 		}
@@ -2538,9 +2548,12 @@ ExecBuildSlotValueDescription(Oid reloid,
 
 		if (table_perm || column_perm)
 		{
-			if (att->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL)
-				val = "virtual";
-			else if (slot->tts_isnull[i])
+			/*
+			 * Virtual generated column values are computed and stored in the
+			 * slot by ExecComputeVirtualGenerated(), so we can read them
+			 * directly like regular columns.
+			 */
+			if (slot->tts_isnull[i])
 				val = "null";
 			else
 			{
