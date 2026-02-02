@@ -809,13 +809,15 @@ nextval_internal(Oid relid, bool check_permissions)
 	START_CRIT_SECTION();
 
 	/*
-	 * We must mark the buffer dirty before doing XLogInsert(); see notes in
-	 * SyncOneBuffer().  However, we don't apply the desired changes just yet.
-	 * This looks like a violation of the buffer update protocol, but it is in
-	 * fact safe because we hold exclusive lock on the buffer.  Any other
-	 * process, including a checkpoint, that tries to examine the buffer
-	 * contents will block until we release the lock, and then will see the
-	 * final state that we install below.
+	 * We must mark the buffer dirty before doing XLogInsert(); otherwise a
+	 * checkpoint could write the buffer without the change and its WAL record
+	 * before the redo point, making the change unrecoverable.  However, we
+	 * don't apply the desired changes just yet.  This looks like a violation
+	 * of the buffer update protocol, but it is in fact safe because we hold
+	 * exclusive lock on the buffer.  Any other process, including a
+	 * checkpoint, that tries to examine the buffer contents will block until
+	 * we release the lock, and then will see the final state that we install
+	 * below.
 	 */
 	MarkBufferDirty(buf);
 

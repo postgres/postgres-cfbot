@@ -80,10 +80,6 @@
 #define LocalBufHdrGetBlock(bufHdr) \
 	LocalBufferBlockPointers[-((bufHdr)->buf_id + 2)]
 
-/* Bits in SyncOneBuffer's return value */
-#define BUF_WRITTEN				0x01
-#define BUF_REUSABLE			0x02
-
 #define RELS_BSEARCH_THRESHOLD		20
 
 /*
@@ -668,8 +664,6 @@ static bool PinBuffer(BufferDesc *buf, BufferUsageCountChange usage_count_change
 static void PinBuffer_Locked(BufferDesc *buf);
 static void UnpinBuffer(BufferDesc *buf);
 static void UnpinBufferNoOwner(BufferDesc *buf);
-static int	SyncOneBuffer(int buf_id, bool skip_recently_used,
-						  WritebackContext *wb_context);
 static void WaitIO(BufferDesc *buf);
 static void AbortBufferIO(Buffer buffer);
 static void shared_buffer_write_error_callback(void *arg);
@@ -3692,8 +3686,12 @@ CheckPointBuffers(int flags)
 		uint64		buf_state;
 
 		/*
-		 * Header spinlock is enough to examine BM_DIRTY, see comment in
-		 * SyncOneBuffer.
+		 * We can make this check without taking the buffer content lock so
+		 * long as we mark pages dirty in access methods *before* logging
+		 * changes with XLogInsert(): if someone marks the buffer dirty just
+		 * after our check we don't worry because our checkpoint.redo points
+		 * before log record for upcoming changes and so we are not required
+		 * to write such dirty buffer.
 		 */
 		buf_state = LockBufHdr(bufHdr);
 
@@ -4321,29 +4319,57 @@ BgBufferSync(WritebackContext *wb_context)
 	reusable_buffers = reusable_buffers_est;
 
 	/* Execute the LRU scan */
-	while (num_to_scan > 0 && reusable_buffers < upcoming_alloc_est)
+	for (; num_to_scan > 0; num_to_scan--, next_to_clean++)
 	{
-		int			sync_state = SyncOneBuffer(next_to_clean, true,
-											   wb_context);
+		uint64		buf_state;
+		BufferDesc *bufHdr;
+		BufferTag	tag;
 
-		if (++next_to_clean >= NBuffers)
+		if (reusable_buffers >= upcoming_alloc_est)
+			break;
+
+		if (next_to_clean >= NBuffers)
 		{
 			next_to_clean = 0;
 			next_passes++;
 		}
-		num_to_scan--;
 
-		if (sync_state & BUF_WRITTEN)
+		bufHdr = GetBufferDescriptor(next_to_clean);
+		buf_state = pg_atomic_read_u64(&bufHdr->state);
+		if (BUF_STATE_GET_REFCOUNT(buf_state) != 0 ||
+			BUF_STATE_GET_USAGECOUNT(buf_state) != 0)
+			continue;
+
+		reusable_buffers++;
+
+		/*
+		 * Racy check is fine: bgwriter writes are opportunistic. If we miss a
+		 * buffer that just became dirty, it will be written by a future
+		 * bgwriter pass or by checkpointer.
+		 */
+		if (!(buf_state & BM_VALID) || !(buf_state & BM_DIRTY))
+			continue;
+
+		/* Make sure we can handle the pin */
+		ReservePrivateRefCountEntry();
+		ResourceOwnerEnlarge(CurrentResourceOwner);
+
+		if (!PinBuffer(bufHdr, BUC_ZERO, true))
+			continue;
+
+		FlushUnlockedBuffer(bufHdr, NULL, IOOBJECT_RELATION, IOCONTEXT_NORMAL);
+
+		/* Snapshot the tag before unpinning */
+		tag = bufHdr->tag;
+		UnpinBuffer(bufHdr);
+
+		ScheduleBufferTagForWriteback(wb_context, IOCONTEXT_NORMAL, &tag);
+
+		if (++num_written >= bgwriter_lru_maxpages)
 		{
-			reusable_buffers++;
-			if (++num_written >= bgwriter_lru_maxpages)
-			{
-				PendingBgWriterStats.maxwritten_clean++;
-				break;
-			}
+			PendingBgWriterStats.maxwritten_clean++;
+			break;
 		}
-		else if (sync_state & BUF_REUSABLE)
-			reusable_buffers++;
 	}
 
 	PendingBgWriterStats.buf_written_clean += num_written;
@@ -4382,83 +4408,6 @@ BgBufferSync(WritebackContext *wb_context)
 
 	/* Return true if OK to hibernate */
 	return (bufs_to_lap == 0 && recent_alloc == 0);
-}
-
-/*
- * SyncOneBuffer -- process a single buffer during syncing.
- *
- * If skip_recently_used is true, we don't write currently-pinned buffers, nor
- * buffers marked recently used, as these are not replacement candidates.
- *
- * Returns a bitmask containing the following flag bits:
- *	BUF_WRITTEN: we wrote the buffer.
- *	BUF_REUSABLE: buffer is available for replacement, ie, it has
- *		pin count 0 and usage count 0.
- *
- * (BUF_WRITTEN could be set in error if FlushBuffer finds the buffer clean
- * after locking it, but we don't care all that much.)
- */
-static int
-SyncOneBuffer(int buf_id, bool skip_recently_used, WritebackContext *wb_context)
-{
-	BufferDesc *bufHdr = GetBufferDescriptor(buf_id);
-	int			result = 0;
-	uint64		buf_state;
-	BufferTag	tag;
-
-	/* Make sure we can handle the pin */
-	ReservePrivateRefCountEntry();
-	ResourceOwnerEnlarge(CurrentResourceOwner);
-
-	/*
-	 * Check whether buffer needs writing.
-	 *
-	 * We can make this check without taking the buffer content lock so long
-	 * as we mark pages dirty in access methods *before* logging changes with
-	 * XLogInsert(): if someone marks the buffer dirty just after our check we
-	 * don't worry because our checkpoint.redo points before log record for
-	 * upcoming changes and so we are not required to write such dirty buffer.
-	 */
-	buf_state = LockBufHdr(bufHdr);
-
-	if (BUF_STATE_GET_REFCOUNT(buf_state) == 0 &&
-		BUF_STATE_GET_USAGECOUNT(buf_state) == 0)
-	{
-		result |= BUF_REUSABLE;
-	}
-	else if (skip_recently_used)
-	{
-		/* Caller told us not to write recently-used buffers */
-		UnlockBufHdr(bufHdr);
-		return result;
-	}
-
-	if (!(buf_state & BM_VALID) || !(buf_state & BM_DIRTY))
-	{
-		/* It's clean, so nothing to do */
-		UnlockBufHdr(bufHdr);
-		return result;
-	}
-
-	/*
-	 * Pin it, share-exclusive-lock it, write it.  (FlushBuffer will do
-	 * nothing if the buffer is clean by the time we've locked it.)
-	 */
-	PinBuffer_Locked(bufHdr);
-
-	FlushUnlockedBuffer(bufHdr, NULL, IOOBJECT_RELATION, IOCONTEXT_NORMAL);
-
-	tag = bufHdr->tag;
-
-	UnpinBuffer(bufHdr);
-
-	/*
-	 * SyncOneBuffer() is only called by checkpointer and bgwriter, so
-	 * IOContext will always be IOCONTEXT_NORMAL.
-	 */
-	ScheduleBufferTagForWriteback(wb_context, IOCONTEXT_NORMAL, &tag);
-
-	return result | BUF_WRITTEN;
 }
 
 /*
