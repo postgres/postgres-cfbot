@@ -125,7 +125,7 @@ extern PGDLLIMPORT int FastPathLockGroupsPerBackend;
  * and we acquire an exclusive content lock and MarkBufferDirty() on the
  * relevant buffers before writing WAL, this mechanism is not needed, because
  * phase 2 will block until we release the content lock and then flush the
- * modified data to disk.  See transam/README and SyncOneBuffer().)
+ * modified data to disk.  See transam/README.)
  *
  * Setting DELAY_CHKPT_COMPLETE prevents the system from moving from phase 2
  * to phase 3. This is useful if we are performing a WAL-logged operation that
