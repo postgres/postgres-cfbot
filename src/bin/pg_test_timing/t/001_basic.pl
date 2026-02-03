@@ -46,7 +46,7 @@ like(
 	qr/
 \QTesting timing overhead for 1 second.\E.*
 \QHistogram of timing durations:\E.*
-\QObserved timing durations up to 99.9900%:\E
+\QObserved timing durations up to 99\E[.,]\Q9900%:\E
 /sx,
 	'pg_test_timing: stdout passes sanity check');
 
