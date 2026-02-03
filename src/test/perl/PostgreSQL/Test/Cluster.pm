@@ -2103,6 +2103,52 @@ sub safe_psql
 
 =pod
 
+=item $node->get_decimal_separator()
+
+Detect the locale's decimal separator by querying psql with numericlocale
+enabled. Returns '.' or ',' depending on the locale. The result is cached
+for subsequent calls.
+
+This is useful for formatting numbers to be parsed by psql's locale-aware
+strtod(), such as the interval argument to \watch.
+
+=cut
+
+sub get_decimal_separator
+{
+	my ($self) = @_;
+
+	# Return cached result if available
+	return $self->{_decimal_sep} if defined $self->{_decimal_sep};
+
+	my $result = $self->safe_psql('postgres',
+		"\\pset numericlocale on\n\\pset tuples_only on\nSELECT 0.5");
+	$result =~ s/^0(.)5$/$1/ or $result = '.';
+
+	$self->{_decimal_sep} = $result;
+	return $result;
+}
+
+=pod
+
+=item $node->format_locale_number($num)
+
+Format a number using the locale's decimal separator. This is needed when
+passing numeric arguments to psql commands that use locale-aware parsing,
+such as the interval argument to \watch.
+
+=cut
+
+sub format_locale_number
+{
+	my ($self, $num) = @_;
+	my $sep = $self->get_decimal_separator();
+	(my $str = sprintf("%g", $num)) =~ s/\./$sep/;
+	return $str;
+}
+
+=pod
+
 =item $node->psql($dbname, $sql, %params) => psql_retval
 
 Invoke B<psql> to execute B<$sql> on B<$dbname> and return the return value
