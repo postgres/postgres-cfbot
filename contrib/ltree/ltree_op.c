@@ -181,7 +181,7 @@ hash_ltree(PG_FUNCTION_ARGS)
 
 	while (an > 0)
 	{
-		uint32		levelHash = DatumGetUInt32(hash_any((unsigned char *) al->name, al->len));
+		uint32		levelHash = hash_bytes((unsigned char *) al->name, al->len);
 
 		/*
 		 * Combine hash values of successive elements by multiplying the
