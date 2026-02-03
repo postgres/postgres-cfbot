@@ -674,9 +674,9 @@ globalChannelTableHash(const void *key, size_t size, void *arg)
 	const GlobalChannelKey *k = (const GlobalChannelKey *) key;
 	dshash_hash h;
 
-	h = DatumGetUInt32(hash_uint32(k->dboid));
-	h ^= DatumGetUInt32(hash_any((const unsigned char *) k->channel,
-								 strnlen(k->channel, NAMEDATALEN)));
+	h = murmurhash32(k->dboid);
+	h ^= hash_bytes((const unsigned char *) k->channel,
+					strnlen(k->channel, NAMEDATALEN));
 
 	return h;
 }
@@ -3251,8 +3251,8 @@ notification_hash(const void *key, Size keysize)
 
 	Assert(keysize == sizeof(Notification *));
 	/* We don't bother to include the payload's trailing null in the hash */
-	return DatumGetUInt32(hash_any((const unsigned char *) k->data,
-								   k->channel_len + k->payload_len + 1));
+	return hash_bytes((const unsigned char *) k->data,
+					  k->channel_len + k->payload_len + 1);
 }
 
 /*
