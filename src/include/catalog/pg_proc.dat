@@ -10888,6 +10888,9 @@
 { oid => '5066', descr => 'commit status of transaction',
   proname => 'pg_xact_status', provolatile => 'v', prorettype => 'text',
   proargtypes => 'xid8', prosrc => 'pg_xact_status' },
+{ oid => '9538', descr => 'get current virtual transaction ID',
+  proname => 'pg_current_vxact_id', provolatile => 's', proparallel => 'u',
+  prorettype => 'text', proargtypes => '', prosrc => 'pg_current_vxact_id' },
 
 # record comparison using normal comparison rules
 { oid => '2981',
