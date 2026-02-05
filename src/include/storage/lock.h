@@ -65,6 +65,13 @@ typedef struct VirtualTransactionId
 	LocalTransactionId localTransactionId;	/* lxid from PGPROC */
 } VirtualTransactionId;
 
+/*
+ * Format string for VXID display.
+ * Used by elog.c (%v placeholder), lockfuncs.c (VXIDGetDatum),
+ * and xid8funcs.c (pg_current_vxact_id).
+ */
+#define VXID_FMT "%d/%u"
+
 #define InvalidLocalTransactionId		0
 #define LocalTransactionIdIsValid(lxid) ((lxid) != InvalidLocalTransactionId)
 #define VirtualTransactionIdIsValid(vxid) \
