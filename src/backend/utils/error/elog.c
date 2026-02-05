@@ -3609,12 +3609,12 @@ log_status_format(StringInfo buf, const char *format, ErrorData *edata)
 					{
 						char		strfbuf[128];
 
-						snprintf(strfbuf, sizeof(strfbuf) - 1, "%d/%u",
+						snprintf(strfbuf, sizeof(strfbuf) - 1, VXID_FMT,
 								 MyProc->vxid.procNumber, MyProc->vxid.lxid);
 						appendStringInfo(buf, "%*s", padding, strfbuf);
 					}
 					else
-						appendStringInfo(buf, "%d/%u", MyProc->vxid.procNumber, MyProc->vxid.lxid);
+						appendStringInfo(buf, VXID_FMT, MyProc->vxid.procNumber, MyProc->vxid.lxid);
 				}
 				else if (padding != 0)
 					appendStringInfoSpaces(buf,
