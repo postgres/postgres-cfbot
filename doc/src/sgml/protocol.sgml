@@ -262,7 +262,29 @@
       </row>
       <row>
       <entry>3.0</entry>
+      <entry>PostgreSQL 17 and later</entry>
+      <entry>The 3.0 protocol definition was updated to recognize connections that
+        immediately begin SSL negotiation without a prior SSLRequest message.
+        Clients based on libpq can use <literal>sslnegotiation=direct</literal>
+        to skip sending the SSLRequest.
+      </entry>
+      </row>
+      <row>
+      <entry>3.0</entry>
+      <entry>PostgreSQL 9.3.21 and later</entry>
+      <entry>The 3.0 protocol definition was updated to include a
+        NegotiateProtocolVersion message. The NegotiateProtocolVersion message
+        allows servers to indicate to the client that it does not support the
+        minor protocol version or protocol extensions that the client has
+        requested. The client can then choose to continue using the connection
+        with the older protocol version and/or without the unsupported protocol
+        extensions, or to abort the connection attempt.
+      </entry>
+      </row>
+      <row>
+      <entry>3.0</entry>
       <entry>PostgreSQL 7.4 and later</entry>
+      <entry>The first 3.x protocol version.</entry>
       </row>
      </tbody>
     </tgroup>
