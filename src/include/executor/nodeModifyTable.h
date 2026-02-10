@@ -27,6 +27,8 @@ extern ModifyTableState *ExecInitModifyTable(ModifyTable *node, EState *estate, 
 extern void ExecEndModifyTable(ModifyTableState *node);
 extern void ExecReScanModifyTable(ModifyTableState *node);
 
+extern PGDLLIMPORT List *(*add_should_index_insert_hook) (ResultRelInfo *, TupleTableSlot *, ItemPointer, EState *);
+
 extern void ExecInitMergeTupleSlots(ModifyTableState *mtstate,
 									ResultRelInfo *resultRelInfo);
 

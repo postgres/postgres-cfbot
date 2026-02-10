@@ -78,6 +78,8 @@
 #include "utils/builtins.h"
 #include "utils/snapmgr.h"
 
+bool		(*add_snapshot_satisfies_hook) (HeapTuple tup, Snapshot snapshot, Buffer buffer) = NULL;
+
 
 /*
  * To be allowed to set hint bits, SetHintBits() needs to call
@@ -1749,6 +1751,10 @@ HeapTupleSatisfiesVisibility(HeapTuple htup, Snapshot snapshot, Buffer buffer)
 			return HeapTupleSatisfiesHistoricMVCC(htup, snapshot, buffer);
 		case SNAPSHOT_NON_VACUUMABLE:
 			return HeapTupleSatisfiesNonVacuumable(htup, snapshot, buffer);
+		case SNAPSHOT_VCI_WOS2ROS:
+		case SNAPSHOT_VCI_LOCALROS:
+			if (add_snapshot_satisfies_hook)
+				return add_snapshot_satisfies_hook(htup, snapshot, buffer);
 	}
 
 	return false;				/* keep compiler quiet */

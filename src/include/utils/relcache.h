@@ -62,6 +62,8 @@ extern List *RelationGetDummyIndexExpressions(Relation relation);
 extern List *RelationGetIndexPredicate(Relation relation);
 extern bytea **RelationGetIndexAttOptions(Relation relation, bool copy);
 
+extern bool isRelHasVCIIndex(Oid relid, bool *is_partition);
+
 /*
  * Which set of columns to return by RelationGetIndexAttrBitmap.
  */
@@ -160,5 +162,8 @@ extern PGDLLIMPORT bool criticalRelcachesBuilt;
 
 /* should be used only by relcache.c and postinit.c */
 extern PGDLLIMPORT bool criticalSharedRelcachesBuilt;
+
+/* vci index original hook*/
+extern PGDLLIMPORT bool (*add_skip_vci_index_hook) (Relation rel);
 
 #endif							/* RELCACHE_H */

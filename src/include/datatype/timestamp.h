@@ -15,6 +15,11 @@
 #ifndef DATATYPE_TIMESTAMP_H
 #define DATATYPE_TIMESTAMP_H
 
+#ifndef FRONTEND
+#include "postgres.h"
+#include "fmgr.h"
+#endif
+
 /*
  * Timestamp represents absolute time.
  *
@@ -87,6 +92,23 @@ struct pg_itm_in
 	int			tm_year;
 };
 
+#ifndef FRONTEND
+/*
+ * The transition datatype for interval aggregates is declared as internal.
+ * It's a pointer to an IntervalAggState allocated in the aggregate context.
+ */
+typedef struct IntervalAggState
+{
+	int64		N;				/* count of finite intervals processed */
+	Interval	sumX;			/* sum of finite intervals processed */
+	/* These counts are *not* included in N!  Use IA_TOTAL_COUNT() as needed */
+	int64		pInfcount;		/* count of +infinity intervals */
+	int64		nInfcount;		/* count of -infinity intervals */
+} IntervalAggState;
+
+extern IntervalAggState *makeIntervalAggState(FunctionCallInfo fcinfo);
+extern void finite_interval_pl(const Interval *span1, const Interval *span2, Interval *result);
+#endif
 
 /* Limits on the "precision" option (typmod) for these data types */
 #define MAX_TIMESTAMP_PRECISION 6

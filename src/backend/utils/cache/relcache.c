@@ -96,6 +96,8 @@
 
 #define RELCACHE_INIT_FILEMAGIC		0x573266	/* version ID value */
 
+bool		(*add_skip_vci_index_hook) (Relation rel) = NULL;
+
 /*
  * Whether to bother checking if relation cache memory needs to be freed
  * eagerly.  See also RelationBuildDesc() and pg_config_manual.h.
@@ -5471,6 +5473,16 @@ restart:
 
 		indexDesc = index_open(indexOid, AccessShareLock);
 
+		if (add_skip_vci_index_hook)
+		{
+			if (add_skip_vci_index_hook(indexDesc))
+			{
+				/* Skip if Index is VCI index */
+				index_close(indexDesc, AccessShareLock);
+				continue;
+			}
+		}
+
 		/*
 		 * Extract index expressions and index predicate.  Note: Don't use
 		 * RelationGetIndexExpressions()/RelationGetIndexPredicate(), because
@@ -7085,6 +7097,60 @@ unlink_initfile(const char *initfilename, int elevel)
 					 errmsg("could not remove cache file \"%s\": %m",
 							initfilename)));
 	}
+}
+
+bool
+isRelHasVCIIndex(Oid relid, bool *is_partition)
+{
+	ListCell   *l;
+	Relation	relation;
+
+	bool		hasVCI = false;
+
+	*is_partition = false;
+	relation = table_open(relid, NoLock);
+
+	if ((relation->rd_rel->relispartition == true) || relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+		*is_partition = true;
+
+	if (relation->rd_rel->relhasindex)
+	{
+		List	   *indexoidlist;
+
+		indexoidlist = RelationGetIndexList(relation);
+
+		foreach(l, indexoidlist)
+		{
+			Oid			relam;
+			Oid			indexoid = lfirst_oid(l);
+			Relation	indexRelation;
+			Form_pg_am	aform;
+			HeapTuple	amtuple;
+
+			indexRelation = index_open(indexoid, AccessShareLock);
+			relam = indexRelation->rd_rel->relam;
+
+			amtuple = SearchSysCache1(AMOID, ObjectIdGetDatum(relam));
+			if (!HeapTupleIsValid(amtuple))
+				elog(ERROR, "cache lookup failed for access method %u",
+					 relam);
+			aform = (Form_pg_am) GETSTRUCT(amtuple);
+
+			if (strcmp(NameStr(aform->amname), "vci") == 0)
+			{
+				hasVCI = true;
+			}
+
+			ReleaseSysCache(amtuple);
+			index_close(indexRelation, AccessShareLock);
+
+			if (hasVCI)
+				break;
+		}
+	}
+
+	table_close(relation, NoLock);
+	return hasVCI;
 }
 
 /*

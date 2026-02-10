@@ -33,6 +33,7 @@
 #include "optimizer/placeholder.h"
 #include "optimizer/plancat.h"
 #include "optimizer/planmain.h"
+#include "optimizer/planner.h"
 #include "optimizer/prep.h"
 #include "optimizer/restrictinfo.h"
 #include "optimizer/subselect.h"
@@ -173,7 +174,6 @@ static Node *fix_indexqual_operand(Node *node, IndexOptInfo *index, int indexcol
 static List *get_switched_clauses(List *clauses, Relids outerrelids);
 static List *order_qual_clauses(PlannerInfo *root, List *clauses);
 static void copy_generic_path_info(Plan *dest, Path *src);
-static void copy_plan_costsize(Plan *dest, Plan *src);
 static void label_sort_with_costsize(PlannerInfo *root, Sort *plan,
 									 double limit_tuples);
 static void label_incrementalsort_with_costsize(PlannerInfo *root, IncrementalSort *plan,
@@ -5467,7 +5467,7 @@ copy_generic_path_info(Plan *dest, Path *src)
  * Copy cost and size info from a lower plan node to an inserted node.
  * (Most callers alter the info after copying it.)
  */
-static void
+void
 copy_plan_costsize(Plan *dest, Plan *src)
 {
 	dest->disabled_nodes = src->disabled_nodes;

@@ -54,6 +54,8 @@ typedef void (*create_upper_paths_hook_type) (PlannerInfo *root,
 											  void *extra);
 extern PGDLLIMPORT create_upper_paths_hook_type create_upper_paths_hook;
 
+extern void copy_plan_costsize(Plan *dest, Plan *src);
+
 
 extern PlannedStmt *standard_planner(Query *parse, const char *query_string,
 									 int cursorOptions,

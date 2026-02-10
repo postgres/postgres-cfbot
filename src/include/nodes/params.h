@@ -19,6 +19,7 @@ typedef struct ExprState ExprState;
 typedef struct Param Param;
 typedef struct ParseState ParseState;
 
+struct PlanState;
 
 /*
  *	  ParamListInfo
@@ -165,5 +166,6 @@ extern ParamListInfo RestoreParamList(char **start_address);
 extern char *BuildParamLogString(ParamListInfo params, char **knownTextValues,
 								 int maxlen);
 extern void ParamsErrorCallback(void *arg);
+typedef struct ExprState *(*ExecInitParam_hook_type) (Param *param, struct PlanState *parent);
 
 #endif							/* PARAMS_H */

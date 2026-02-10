@@ -1217,6 +1217,7 @@ ExplainPreScanNode(PlanState *planstate, Bitmapset **rels_used)
 										 ((ForeignScan *) plan)->fs_base_relids);
 			break;
 		case T_CustomScan:
+		case T_CustomPlanMarkPos:
 			*rels_used = bms_add_members(*rels_used,
 										 ((CustomScan *) plan)->custom_relids);
 			break;
@@ -1520,6 +1521,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 			}
 			break;
 		case T_CustomScan:
+		case T_CustomPlanMarkPos:
 			sname = "Custom Scan";
 			custom_name = ((CustomScan *) plan)->methods->CustomName;
 			if (custom_name)
@@ -1683,9 +1685,17 @@ ExplainNode(PlanState *planstate, List *ancestors,
 			ExplainScanTarget((Scan *) plan, es);
 			break;
 		case T_ForeignScan:
-		case T_CustomScan:
 			if (((Scan *) plan)->scanrelid > 0)
 				ExplainScanTarget((Scan *) plan, es);
+			break;
+		case T_CustomScan:
+		case T_CustomPlanMarkPos:
+			{
+				CustomScanState *css = (CustomScanState *) planstate;
+
+				if (css->methods->ExplainCustomPlanTargetRel)
+					css->methods->ExplainCustomPlanTargetRel(css, es);
+			}
 			break;
 		case T_IndexScan:
 			{
@@ -2160,6 +2170,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 			show_foreignscan_info((ForeignScanState *) planstate, es);
 			break;
 		case T_CustomScan:
+		case T_CustomPlanMarkPos:
 			{
 				CustomScanState *css = (CustomScanState *) planstate;
 
@@ -2421,6 +2432,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 						"Subquery", NULL, es);
 			break;
 		case T_CustomScan:
+		case T_CustomPlanMarkPos:
 			ExplainCustomChildren((CustomScanState *) planstate,
 								  ancestors, es);
 			break;
@@ -4722,6 +4734,7 @@ ExplainTargetRel(Plan *plan, Index rti, ExplainState *es)
 		case T_TidRangeScan:
 		case T_ForeignScan:
 		case T_CustomScan:
+		case T_CustomPlanMarkPos:
 		case T_ModifyTable:
 			/* Assert it's on a real relation */
 			Assert(rte->rtekind == RTE_RELATION);
@@ -5427,4 +5440,13 @@ ExplainFlushWorkersState(ExplainState *es)
 	pfree(wstate->worker_str);
 	pfree(wstate->worker_state_save);
 	pfree(wstate);
+}
+
+void
+ExplainPropertySortGroupKeys(PlanState *planstate, const char *qlabel,
+							 int nkeys, AttrNumber *keycols,
+							 List *ancestors, ExplainState *es)
+{
+	show_sort_group_keys(planstate, qlabel, nkeys, 0, keycols,
+						 NULL, NULL, NULL, ancestors, es);
 }

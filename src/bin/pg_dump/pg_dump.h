@@ -159,6 +159,7 @@ typedef struct _dumpableObject
 	DumpId	   *dependencies;	/* dumpIds of objects this one depends on */
 	int			nDeps;			/* number of valid dependencies */
 	int			allocDeps;		/* allocated size of dependencies[] */
+	bool		isvciview;		/* this table is a vci internal relation */
 } DumpableObject;
 
 /*

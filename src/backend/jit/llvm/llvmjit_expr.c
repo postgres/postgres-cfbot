@@ -2941,6 +2941,18 @@ llvm_compile_expr(ExprState *state)
 				LLVMBuildBr(b, opblocks[opno + 1]);
 				break;
 
+			case EEOP_VCI_VAR:
+				build_EvalXFunc(b, mod, "VciExprEvalVarHook",
+								v_state, op, v_econtext);
+				LLVMBuildBr(b, opblocks[opno + 1]);
+				break;
+
+			case EEOP_VCI_PARAM_EXEC:
+				build_EvalXFunc(b, mod, "VciExprEvalParamHook",
+								v_state, op, v_econtext);
+				LLVMBuildBr(b, opblocks[opno + 1]);
+				break;
+
 			case EEOP_LAST:
 				Assert(false);
 				break;

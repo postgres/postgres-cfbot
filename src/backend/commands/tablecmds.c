@@ -114,6 +114,10 @@
 #include "utils/typcache.h"
 #include "utils/usercontext.h"
 
+bool		(*add_alter_tablespace_hook) (Relation rel) = NULL;
+void		(*add_alter_table_change_owner_hook) (Oid relOid, char relKind, Oid newOwnerId) = NULL;
+void		(*add_alter_table_change_schema_hook) (Oid relOid, char relKind, Oid newNspOid) = NULL;
+
 /*
  * ON COMMIT action list
  */
@@ -17652,6 +17656,9 @@ ATExecChangeOwner(Oid relationOid, Oid newOwnerId, bool recursing, LOCKMODE lock
 
 		/* If it has dependent sequences, recurse to change them too */
 		change_owner_recurse_to_sequences(relationOid, newOwnerId, lockmode);
+
+		if (add_alter_table_change_owner_hook)
+			add_alter_table_change_owner_hook(relationOid, tuple_class->relkind, newOwnerId);
 	}
 
 	InvokeObjectPostAlterHook(RelationRelationId, relationOid, 0);
@@ -18201,6 +18208,112 @@ ATExecSetRelOptions(Relation rel, List *defList, AlterTableType operation,
 	}
 
 	table_close(pgclass, RowExclusiveLock);
+
+	/*
+	 * Look up the index's access method, save the OID of its handler function
+	 */
+	if (rel->rd_rel->relam)
+	{
+		Form_pg_am	aform;
+		HeapTuple	amtuple;
+
+		amtuple = SearchSysCache1(AMOID, ObjectIdGetDatum(rel->rd_rel->relam));
+		if (!HeapTupleIsValid(amtuple))
+			elog(ERROR, "cache lookup failed for access method %u",
+				 rel->rd_rel->relam);
+		aform = (Form_pg_am) GETSTRUCT(amtuple);
+
+		if (strcmp(NameStr(aform->amname), "vci") == 0)
+
+			/*
+			 * if((rel->rd_am) && (strcmp(NameStr(rel->rd_am->amname), "vci")
+			 * == 0))
+			 */
+		{
+			Relation	depRel,
+						viewRel;
+			Oid			vci_relid,
+						viewrelid;
+			ScanKeyData key;
+			SysScanDesc scan;
+			HeapTuple	tup;
+
+			depRel = table_open(DependRelationId, AccessShareLock);
+			vci_relid = RelationGetRelid(rel);
+			ScanKeyInit(&key,
+						Anum_pg_depend_refobjid,
+						BTEqualStrategyNumber, F_OIDEQ,
+						ObjectIdGetDatum(vci_relid));
+			scan = systable_beginscan(depRel, DependReferenceIndexId, true,
+									  NULL, 1, &key);
+			while (HeapTupleIsValid((tup = systable_getnext(scan))))
+			{
+				Form_pg_depend depform = (Form_pg_depend) GETSTRUCT(tup);
+
+				/* Retrieve objid of the internal function  */
+				if (depform->classid == RelationRelationId)
+				{
+					viewrelid = depform->objid;
+					viewRel = table_open(viewrelid, AccessExclusiveLock);
+					pgclass = table_open(RelationRelationId, RowExclusiveLock);
+					tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(viewrelid));
+					if (!HeapTupleIsValid(tuple))
+						elog(ERROR, "cache lookup failed for relation %u", viewrelid);
+
+					datum = (Datum) 0;
+
+					/* Generate new proposed reloptions (text array) */
+					newOptions = transformRelOptions(datum, defList, NULL, validnsps, false,
+													 operation == AT_ResetRelOptions);
+
+					(void) view_reloptions(newOptions, true);
+
+					/*
+					 * All we need do here is update the pg_class row; the new
+					 * options will be propagated into relcaches during
+					 * post-commit cache inval.
+					 */
+					memset(repl_val, 0, sizeof(repl_val));
+					memset(repl_null, false, sizeof(repl_null));
+					memset(repl_repl, false, sizeof(repl_repl));
+
+					if (newOptions != (Datum) 0)
+						repl_val[Anum_pg_class_reloptions - 1] = newOptions;
+					else
+						repl_null[Anum_pg_class_reloptions - 1] = true;
+
+					repl_repl[Anum_pg_class_reloptions - 1] = true;
+
+					newtuple = heap_modify_tuple(tuple, RelationGetDescr(pgclass),
+												 repl_val, repl_null, repl_repl);
+
+					/*
+					 * simple_heap_update(pgclass, &newtuple->t_self,
+					 * newtuple);
+					 *
+					 * CatalogUpdateIndexes(pgclass, newtuple);
+					 */
+					/* Perform actual update */
+					CatalogTupleUpdate(pgclass, &newtuple->t_self, newtuple);
+					InvokeObjectPostAlterHook(RelationRelationId, viewrelid, 0);
+
+					heap_freetuple(newtuple);
+
+					ReleaseSysCache(tuple);
+
+					table_close(pgclass, RowExclusiveLock);
+					table_close(viewRel, AccessExclusiveLock);
+
+				}
+			}
+
+			systable_endscan(scan);
+
+			table_close(depRel, AccessShareLock);
+		}
+
+		ReleaseSysCache(amtuple);
+	}
 }
 
 /*
@@ -18221,6 +18334,15 @@ ATExecSetTableSpace(Oid tableOid, Oid newTableSpace, LOCKMODE lockmode)
 	 * Need lock here in case we are recursing to toast table or index
 	 */
 	rel = relation_open(tableOid, lockmode);
+
+	if (add_alter_tablespace_hook)
+	{
+		if (add_alter_tablespace_hook(rel))
+		{
+			relation_close(rel, NoLock);
+			return;
+		}
+	}
 
 	/* Check first if relation can be moved to new tablespace */
 	if (!CheckRelationTableSpaceMove(rel, newTableSpace))
@@ -20498,6 +20620,9 @@ AlterRelationNamespaceInternal(Relation classRel, Oid relOid,
 	if (!already_done)
 	{
 		add_exact_object_address(&thisobj, objsMoved);
+
+		if (add_alter_table_change_schema_hook)
+			add_alter_table_change_schema_hook(relOid, classForm->relkind, newNspOid);
 
 		InvokeObjectPostAlterHook(RelationRelationId, relOid, 0);
 	}

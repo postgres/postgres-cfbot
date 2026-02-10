@@ -86,6 +86,7 @@
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
 
+bool		(*add_drop_relation_hook) (const ObjectAddress *object, int flags) = NULL;
 
 /*
  * Deletion processing requires additional state for each ObjectAddress that
@@ -1372,6 +1373,12 @@ doDeletion(const ObjectAddress *object, int flags)
 		case RelationRelationId:
 			{
 				char		relKind = get_rel_relkind(object->objectId);
+
+				if (add_drop_relation_hook)
+				{
+					if (add_drop_relation_hook(object, flags))
+						break;
+				}
 
 				if (relKind == RELKIND_INDEX ||
 					relKind == RELKIND_PARTITIONED_INDEX)

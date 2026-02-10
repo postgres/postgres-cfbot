@@ -670,6 +670,7 @@ AssignDumpId(DumpableObject *dobj)
 	dobj->dependencies = NULL;
 	dobj->nDeps = 0;
 	dobj->allocDeps = 0;
+	dobj->isvciview = false; /* default assumption */
 
 	/* Add object to dumpIdMap[], enlarging that array if need be */
 	while (dobj->dumpId >= allocedDumpIds)

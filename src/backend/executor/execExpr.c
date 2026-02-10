@@ -68,7 +68,6 @@ typedef struct ExprSetupInfo
 	List	   *multiexpr_subplans;
 } ExprSetupInfo;
 
-static void ExecReadyExpr(ExprState *state);
 static void ExecInitExprRec(Expr *node, ExprState *state,
 							Datum *resv, bool *resnull);
 static void ExecInitFunc(ExprEvalStep *scratch, Expr *node, List *args,
@@ -77,7 +76,6 @@ static void ExecInitFunc(ExprEvalStep *scratch, Expr *node, List *args,
 static void ExecInitSubPlanExpr(SubPlan *subplan,
 								ExprState *state,
 								Datum *resv, bool *resnull);
-static void ExecCreateExprSetupSteps(ExprState *state, Node *node);
 static void ExecPushExprSetupSteps(ExprState *state, ExprSetupInfo *info);
 static bool expr_setup_walker(Node *node, ExprSetupInfo *info);
 static bool ExecComputeSlotInfo(ExprState *state, ExprEvalStep *op);
@@ -898,7 +896,7 @@ ExecCheck(ExprState *state, ExprContext *econtext)
  * Therefore this should be used instead of directly calling
  * ExecReadyInterpretedExpr().
  */
-static void
+void
 ExecReadyExpr(ExprState *state)
 {
 	if (jit_compile_expr(state))
@@ -2878,7 +2876,7 @@ ExecInitSubPlanExpr(SubPlan *subplan,
  * Add expression steps performing setup that's needed before any of the
  * main execution of the expression.
  */
-static void
+void
 ExecCreateExprSetupSteps(ExprState *state, Node *node)
 {
 	ExprSetupInfo info = {0, 0, 0, 0, 0, NIL};

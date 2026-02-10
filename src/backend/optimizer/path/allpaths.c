@@ -47,6 +47,7 @@
 #include "partitioning/partbounds.h"
 #include "port/pg_bitutils.h"
 #include "rewrite/rewriteManip.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/selfuncs.h"
 
@@ -828,6 +829,8 @@ static void
 set_plain_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 {
 	Relids		required_outer;
+	char	   *isVCIEnabled;
+	bool		is_partition = false;
 
 	/*
 	 * We don't support pushing join clauses into the quals of a seqscan, but
@@ -853,6 +856,20 @@ set_plain_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 	/* If appropriate, consider parallel sequential scan */
 	if (rel->consider_parallel && required_outer == NULL)
 		create_plain_partial_paths(root, rel);
+	/****
+	 * Putting the isRelHasVCIIndex after the create_plain_partial_paths because
+	 * want to enable oss parallelscan working on VCI tables but disable other
+	 * gather plan like parallel_loop,parallel_agg working on VCI tables.
+	 * Don't do this for partitioned tables or partitions as parallelscans on partitioned
+	 * tables require gather plans
+	*/
+	if (isRelHasVCIIndex(rte->relid, &is_partition) && (bms_membership(root->all_baserels) == BMS_SINGLETON) &&
+		!is_partition)
+	{
+		isVCIEnabled = GetConfigOptionByName("vci.enable", NULL, false);
+		if (strcmp(isVCIEnabled, "on") == 0)
+			rel->consider_parallel = false;
+	}
 
 	/* Consider index scans */
 	create_index_paths(root, rel);
