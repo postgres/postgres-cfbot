@@ -6,9 +6,9 @@ subdir('utils')
 
 
 vci_sources = files(
-#        'vci_main.c',
-#        'vci_read_guc.c',
-#        'vci_shmem.c',
+        'vci_main.c',
+        'vci_read_guc.c',
+        'vci_shmem.c',
         'vci_supported_funcs.c',
         'vci_supported_types.c',
 )

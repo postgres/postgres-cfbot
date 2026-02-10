@@ -3,9 +3,9 @@
 MODULE_big = vci
 
 OBJS = \
-#	vci_main.o \
-#	vci_read_guc.o \
-#	vci_shmem.o \
+	vci_main.o \
+	vci_read_guc.o \
+	vci_shmem.o \
 	vci_supported_funcs.o \
 	vci_supported_types.o
 SUBDIRS = \
