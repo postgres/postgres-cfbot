@@ -105,9 +105,9 @@ my $lsn = $primary->safe_psql('postgres', "SELECT pg_current_wal_lsn();");
 
 # Make sure that the WAL segment containing that LSN has been archived.
 # PostgreSQL won't issue two consecutive XLOG_SWITCH records, and the backup
-# just issued one, so call txid_current() to generate some WAL activity
+# just issued one, so call pg_current_xact_id() to generate some WAL activity
 # before calling pg_switch_wal().
-$primary->safe_psql('postgres', 'SELECT txid_current();');
+$primary->safe_psql('postgres', 'SELECT pg_current_xact_id();');
 $primary->safe_psql('postgres', 'SELECT pg_switch_wal()');
 
 # Now wait for the LSN we chose above to be archived.
