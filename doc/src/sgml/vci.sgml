@@ -1,0 +1,150 @@
+<!-- doc/src/sgml/vci.sgml -->
+
+<sect1 id="vci" xreflabel="vci">
+ <title>vci &mdash; Vertical Clustered Index</title>
+
+ <indexterm zone="vci">
+  <primary>vci</primary>
+ </indexterm>
+
+ <para>
+  <literal>vci</literal> provides a columnar store that is implemented using
+  <productname>PostgreSQL</productname> index access methods (see <xref linkend="indexam"/>).
+  All data can be stored in memory.
+ </para>
+
+ <para>
+  This module must be loaded by adding <literal>vci</literal> to both
+  <xref linkend="guc-shared-preload-libraries"/> and <xref linkend="guc-session-preload-libraries"/>
+  in <filename>postgresql.conf</filename>, as it requires additional shared memory.
+  A server restart is required to add or remove the module.
+ </para>
+
+ <sect2 id="vci-functions">
+  <title>Functions</title>
+
+  <variablelist>
+   <varlistentry>
+    <term>
+     <function>vci_runs_in_query() returns bool</function>
+     <indexterm>
+      <primary>vci_runs_in_query</primary>
+     </indexterm>
+    </term>
+
+    <listitem>
+
+     <para>
+      Returns <literal>true</literal> if a VCI index and custom scan are used
+      in the current query execution. This function is typically used to verify
+      whether a query is processed using VCI. For example:
+
+<programlisting>
+SELECT vci_runs_in_query() AS vci_runs_in_query, key, count(*) FROM test_table;
+</programlisting>
+
+     </para>
+    </listitem>
+   </varlistentry>
+  </variablelist>
+ </sect2>
+
+ <sect2 id="vci-parameters">
+  <title>Parameters</title>
+  <variablelist>
+
+   <varlistentry id="guc-vci-cost-threshold" xreflabel="vci.cost_threshold">
+    <term>
+     <varname>vci.cost_threshold</varname> (<type>integer</type>)
+     <indexterm>
+      <primary><varname>vci.cost_threshold</varname> configuration parameter</primary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Specifies the CPU cost threshold beyond which the VCI control worker will
+      stop running.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="guc-vci-log-query" xreflabel="vci.log_query">
+    <term>
+     <varname>vci.log_query</varname> (<type>boolean</type>)
+     <indexterm>
+      <primary><varname>vci.log_query</varname> configuration parameter</primary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Logs a message when a query cannot be executed using VCI.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="guc-vci-maintenance-work-mem" xreflabel="vci.maintenance_work_mem">
+    <term>
+     <varname>vci.maintenance_work_mem</varname> (<type>integer</type>)
+     <indexterm>
+      <primary><varname>vci.maintenance_work_mem</varname> configuration parameter</primary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Specifies the maximum amount of memory that can be used by each VCI control
+      worker during maintenance operations.
+     </para>
+    </listitem>
+   </varlistentry>
+
+  </variablelist>
+  <para>
+   TBD. There are many more parameters which are not yet documented.
+  </para>
+ </sect2>
+
+ <sect2 id="vci-examples">
+  <title>Examples</title>
+  <para>
+   TBD. Add examples here.
+  </para>
+ </sect2>
+
+ <sect2 id="vci-limitations">
+  <title>Limitations</title>
+  <para>
+   <itemizedlist>
+    <listitem>
+     <para>
+      Currently, only a limited set of data types is supported for indexing with VCI.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      This extension does not support the <command>ALTER EXTENSION UPDATE</command> command.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      The command <command>ALTER INDEX</command> cannot be used for VCI indexes.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      VCI indexes cannot be used with the <command>CLUSTER</command> command.
+     </para>
+    </listitem>
+   </itemizedlist>
+  </para>
+ </sect2>
+
+
+ <sect2 id="vci-authors">
+  <title>Authors</title>
+  <para>
+   Aya Iwata <email>iwata.aya@fujitsu.com</email>,
+   Fujitsu Limited, Kanagawa, Japan
+  </para>
+ </sect2>
+
+</sect1>
