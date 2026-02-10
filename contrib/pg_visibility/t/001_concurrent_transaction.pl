@@ -30,7 +30,7 @@ my $bsession = $node->background_psql('other_database');
 $bsession->query_safe(
 	qq[
 	BEGIN;
-	SELECT txid_current();
+	SELECT pg_current_xact_id();
 ]);
 
 # Create a sample table and run vacuum

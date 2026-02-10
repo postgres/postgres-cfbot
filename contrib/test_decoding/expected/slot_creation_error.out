@@ -2,7 +2,7 @@ Parsed test spec with 2 sessions
 
 starting permutation: s1_b s1_xid s2_init s1_view_slot s1_cancel_s2 s1_view_slot s1_c
 step s1_b: BEGIN;
-step s1_xid: SELECT 'xid' FROM txid_current();
+step s1_xid: SELECT 'xid' FROM pg_current_xact_id();
 ?column?
 --------
 xid     
@@ -43,7 +43,7 @@ step s1_c: COMMIT;
 
 starting permutation: s1_b s1_xid s2_init s1_c s1_view_slot s1_drop_slot
 step s1_b: BEGIN;
-step s1_xid: SELECT 'xid' FROM txid_current();
+step s1_xid: SELECT 'xid' FROM pg_current_xact_id();
 ?column?
 --------
 xid     
@@ -78,7 +78,7 @@ pg_drop_replication_slot
 
 starting permutation: s1_b s1_xid s2_init s1_terminate_s2 s1_c s1_view_slot
 step s1_b: BEGIN;
-step s1_xid: SELECT 'xid' FROM txid_current();
+step s1_xid: SELECT 'xid' FROM pg_current_xact_id();
 ?column?
 --------
 xid     
