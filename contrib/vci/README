@@ -1,0 +1,976 @@
+src/contrib/vci/README
+
+VCI (Vertical Clustered Indexing)
+
+1. Overview
+2. Core Architecture
+	2.1 Dual Storage - WOS and ROS
+	2.2 WOS (Write-Optimized Storage)
+		2.2.1 MVCC Handling
+		2.2.2 Data WOS and Whiteout WOS
+	2.3 ROS (Read-Optimized Storage)
+		2.3.1 Column data
+		2.3.2 TID-CRID mapping
+		2.3.3 Delete Vector
+		2.3.4 NULL information
+	2.4. VCI "Internal Relations"
+	2.5. Extent-based Storage Management
+		2.5.1 Locating an extent
+		2.5.2 Locating column data within an extent
+		2.5.3 Garbage Collection
+	2.6. Compression System
+		2.6.1 Dictionaries
+3. VCI Integration with PostgreSQL
+	3.1 Standard hooks
+		3.1.1 IndexAccessMethod hooks
+		3.1.2 Other standard hooks
+	3.2 Executor hooks
+	3.3 Known problems
+		3.3.1 Ad-hoc hooks
+		3.3.2 Embedded code
+4. Data Flow and Conversion
+	4.1 WOS-to-ROS Background Process
+	4.2 Overview Diagram
+	4.3 Local ROS Creation
+	4.4 Existing Table Data
+5. MVCC and Transaction Handling
+6. Query Execution
+	6.1 Custom Plan Integration
+		6.1.1 VCI mode requirements
+	6.2 Custom Plan Execution Steps
+	6.3 Is VCI getting used?
+7. Configuration Parameters
+	7.1 VCI-specific parameters
+		7.1.1 Core Parameters
+		7.1.2 Memory Management
+		7.1.3 Background Worker Control
+		7.1.4 Data Management Thresholds
+	7.2 Affected PostgreSQL Parameters
+8. Known Restrictions/Limitations/Differences
+	8.1 Restrictions
+		8.1.1 DROP EXTENSION vci
+		8.1.2 Backup and Restore
+		8.1.3 Version Upgrades
+	8.2 Limitations
+		8.2.1 CREATE INDEX
+		8.2.2 Supported Relation Types
+		8.2.3 Supported Data Types
+		8.2.4 Performance Testing
+	8.3 Differences
+		8.3.1 Configuration (Planner GUCs)
+		8.3.2 Disk Size and Estimation
+
+
+
+==============================================================================
+1. Overview
+==============================================================================
+
+VCI (Vertical Clustered Indexing) is a PostgreSQL extension that implements a
+hybrid storage architecture combining row-oriented OLTP capabilities with
+column-oriented OLAP performance. It provides an in-memory column store while
+maintaining PostgreSQL's transactional guarantees and row-based architecture.
+
+The extension provides a new indexing method "vci", which can be specified as
+the method for the CREATE INDEX statement, to create a VCI index for a
+nominated set of columns:
+┌─────────────────────────────────────────────────────────────────┐
+│ CREATE INDEX index ON table                                     │
+│     USING vci (column [, ...])                                  │
+│     [WITH (storage_parameter = value, [...])]                   │
+│     [TABLESPACE tablespace]                                     │
+└─────────────────────────────────────────────────────────────────┘
+
+
+
+==============================================================================
+2. Core Architecture
+==============================================================================
+
+2.1 Dual storage - WOS and ROS
+==============================
+
+VCI implements two storage areas (WOS and ROS) that work together.
+- WOS: Write Optimized Storage
+- ROS: Read Optimized Storage
+
+The purpose of VCI is to maintain the ROS as the column-oriented storage for
+live table data.
+
+┌─────────────────────────────────────────────────────────────────┐
+│                        VCI Architecture                         │
+├─────────────────────────────────┬───────────────────────────────┤
+│             WOS                 │             ROS               │
+│    (Write Optimized Storage)    │   (Read Optimized Storage)    │
+├─────────────────────────────────┼───────────────────────────────┤
+│ • Row-oriented format           │ • Column-oriented format      │
+│ • Handles INSERT/UPDATE/DELETE  │ • Optimized for SELECT/OLAP   │
+│ • MVCC transaction data         │ • Compressed storage          │
+│ • Temporary buffer              │ • Frozen committed data       │
+│ • Tuple IDs (TID)               │ • Columnar Record IDs (CRID)  │
+│                                 │ • Extent-based storage units  │
+└─────────────────────────────────┴───────────────────────────────┘
+                                  │
+                        Background Worker
+                      (WOS → ROS Conversion)
+
+
+The WOS is a row-oriented temporary buffer for incoming write operations. It
+maintains MVCC consistency.
+
+The ROS provides column-oriented storage for efficient OLAP queries.
+
+At intervals, a Background Worker performs WOS-to-ROS conversion for any
+frozen/committed WOS rows.
+
+Additional WOS/ROS related components, are included to defer the need for
+WOS-to-ROS conversion for every query:
+e.g.
+- Whiteout WOS = TID records of WOS rows that are marked for deletion on ROS
+- ROS delete vector = Records of ROS data marked for deletion
+- Local ROS = Temporary ROS (scope of SELECT) for any unconverted WOS data
+
+
+2.2 WOS (Write Optimized Storage)
+=================================
+
+Purpose: Buffer incoming write operations and maintain MVCC consistency
+
+Data Structure:
+- Row-oriented format same as PostgreSQL's native storage
+- Contains both actual tuple data and MVCC metadata
+- Stores transaction information (xmin, xmax, cmin, cmax)
+- Maintains TID for each record
+
+
+2.2.1 MVCC Handling:
+--------------------
+Uses cmin,cmax,xmin,xmax
+
+
+2.2.2 Data WOS and Whiteout WOS
+-------------------------------
+(internal relations)
+
+There are two kinds of data in the WOS:
+a. Data WOS -- Actual tuple data from INSERT/UPDATE operations
+b. Whiteout WOS -- TID records of WOS rows that are marked for deletion on ROS
+
+
+Example:
+
+INSERT Operation (Data WOS):
+┌────────────────────────────────────────────────────────────┐
+│ TID │ xmin │ xmax │ cmin │ cmax │ Column Data              │
+├─────┼──────┼──────┼──────┼──────┼──────────────────────────┤
+│ 100 │  T1  │  -   │  1   │  1   │ customer_id=123, amt=500 │
+└────────────────────────────────────────────────────────────┘
+
+DELETE Operation (Whiteout WOS):
+┌────────────────────────────────────┐
+│ TID │ xmax │ Status                │
+├─────┼──────┼───────────────────────┤
+│ 100 │  T2  │ Marked for deletion   │
+└────────────────────────────────────┘
+
+
+2.3 ROS (Read Optimized Storage)
+================================
+
+Purpose: Provide columnar storage for efficient analytical queries
+
+Data Organization:
+- Column-oriented storage with independent compression per column
+- Uses CRID (Columnar Record ID) instead of TID for internal addressing
+- Organized into fixed-size "extents" (262,144 records each)
+- Maintains TID-to-CRID mapping for consistency
+
+ROS Structure:
+┌─────────────────────────────────────────────────────────────────┐
+│                      ROS Components                             │
+├─────────────────────┬───────────────────┬───────────────────────┤
+│   Management Info   │   Data Storage    │   Support Structures  │
+├─────────────────────┼───────────────────┼───────────────────────┤
+│ • TID-CRID mapping  │ • Column data     │ • Delete vector       │
+│ • Extent metadata   │ • Compression     │ • NULL information    │
+│ • Dictionary info   │ • TOAST links     │ • TID relation        │
+└─────────────────────┴───────────────────┴───────────────────────┘
+
+
+2.3.1. Column data
+------------------
+(multiple internal relations)
+
+Each VCI indexed column is stored as an internal relation. Records are
+addresses by CRID (Columnar Record ID) instead of by TID. The CRID gives
+the logical position of the columnar data, and is generated in increasing
+order of record registration.
+
+CRID is used to address the data (from each different column-data relation)
+that comprised the whole record.
+
+ROS column data Relations:
+┌────────────────────────────────────────────────────────────────┐
+│                       ROS column data                          │
+├────────────────────────────────────────────────────────────────┤
+│            ┌──────┐  ┌──────┐  ┌──────┐     ┌──────┐           │
+│ [CRID=0]   │ col1 │  │ col2 │  │ col3 │     │ colN │           │
+│ [CRID=1]   │ col1 │  │ col2 │  │ col3 │     │ colN │           │
+│ [CRID=2]   │ col1 │  │ col2 │  │ col3 │ ... │ colN │           │
+│ [CRID=3]   │ col1 │  │ col2 │  │ col3 │     │ colN │           │
+│ [CRID=4]   │ col1 │  │ col2 │  │ col3 │     │ colN │           │
+│ [CRID=5]   │ col1 │  │ col2 │  │ col3 │     │ colN │           │
+│ ...        └──────┘  └──────┘  └──────┘     └──────┘           │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
+
+
+2.3.2. TID-CRID mapping
+-----------------------
+(internal relation)
+
+This maps TID to the CRID. When a WOS record (identified by TID) is deleted,
+this mapping is needed to identify the matching records from the ROS
+
+There is also a TID relation that maps a CRID back to the original TID
+
+
+2.3.3. Delete Vector
+--------------------
+(internal relation)
+
+Instead of immediately removing deleted records, VCI uses a bit vector for
+efficient tracking of CRIDs of deleted records.
+
+Delete Vector (Bit Array):
+┌────────────────────────────────────────────────────────────────┐
+│ CRID:     0    1    2    3    4    5    6    7    8    9  ...  │
+│ Status:  [0]  [1]  [0]  [0]  [1]  [0]  [0]  [1]  [0]  [0] ...  │
+│          Live  Del  Live Live Del  Live Live Del  Live Live    │
+└────────────────────────────────────────────────────────────────┘
+
+Actual deletion of the ROS records (called "deleted-rows-collection")
+happens during the WOS-to-ROS conversion, but it is triggered only when the
+deleted records exceeds some configurable threshold.
+
+
+2.3.4. NULL information
+------------------------
+(internal relation)
+
+Bit vector implemented as a fixed-length column element of an internal table.
+This indicates (with 1 bit) whether the column element at this CRID is null or
+not null.
+
+
+2.4. VCI "Internal Relations"
+=============================
+
+Each VCI index results in the creation of multiple internal relations.
+
+Notice that most of the VCI data structures of the WOS and ROS etc are stored
+within (e.g. binary data columns of) these internal relations.
+
+These internal relations have a common name pattern "pg_vci_%010d_%05d_%c".
+
+Where:
+┌────────────────────────────────────────────────────────────────┐
+│ %010d: Original table OID (the table with the VCI index)       │
+│ %05d:  Internal relation type identifier                       │
+│ %c:    Special meanings -- e.g. Metadata vs Data indicator     │
+└────────────────────────────────────────────────────────────────┘
+
+Internal Relation Types:
+- -1:  TID relation (maps CRID to original TID)
+- -2:  NULL vector (bit array for NULL values)
+- -3:  Delete vector (bit array for deleted records)
+- -5:  TID-CRID mappings
+- -6:  TID-CRID mappings (update list)
+- -9:  Data WOS (buffered row data)
+- -10: Whiteout WOS (deletion markers)
+- 0-N: ROS column data relations (one per indexed column)
+
+Example:
+For a VCI index on sales(customer_id, amount, date):
+
+Generated relations include:
+pg_vci_0000012345_00000_d  → Column 0 data (customer_id)
+pg_vci_0000012345_00000_m    ... and metadata
+pg_vci_0000012345_00001_d  → Column 1 data (amount)
+pg_vci_0000012345_00001_m    ... and metadata
+pg_vci_0000012345_00002_d  → Column 2 data (date)
+pg_vci_0000012345_00002_m    ... and metadata
+pg_vci_0000012345_65526_d  → Whiteout WOS
+pg_vci_0000012345_65527_d  → Data WOS
+pg_vci_0000012345_65531_d  → TID-CRID mappings
+pg_vci_0000012345_65531_m    ... and metadata
+pg_vci_0000012345_65530_0    ... and update list #0
+pg_vci_0000012345_65530_1    ... and update list #1
+pg_vci_0000012345_65533_d  → Delete vector
+pg_vci_0000012345_65533_m    ... and metadata
+pg_vci_0000012345_65534_d  → NULL vector
+pg_vci_0000012345_65534_m    ... and metadata
+pg_vci_0000012345_65535_d  → TID relation
+pg_vci_0000012345_65535_m    ... and metadata
+
+These relations (implemented as materialized views) are for internal VCI use
+only. Normal users do not need to be aware of them and are not allowed to
+tamper with them.
+
+
+2.5. Extent-Based Storage Management
+====================================
+
+VCI introduces the concept of "extents". Extents are logical units of data
+management used by the ROS.
+
+Each extent contains a fixed number of consecutive CRIDs/data; there are
+always exactly 262,144 (= 256 * 1024) records per extent, including used and
+unused CRIDs.
+
+Notice that even though the number of records per extent is fixed, the size of
+extents might vary according to the VCI index column data type sizes and
+compression.
+
+When a large number of records is transferred during WOS-to-ROS conversion
+that work is divided into units of extents. The NULL information and
+compression is also executed in units of extents.
+
+Extent Layout:
+┌────────────────────────────────────────────────────────────────┐
+│                        Extent N                                │
+├────────────────────────────────────────────────────────────────┤
+│ Header:                                                        │
+│ • Extent ID                                                    │
+│ • Compression dictionary                                       │
+│ • Offset information (for variable-length data)                │
+│ • Record count and capacity                                    │
+├────────────────────────────────────────────────────────────────┤
+│ Data Section:                                                  │
+│ ┌─────────────────────────────────────────────┐                │
+│ │ │ Data0   │  Data1   │  ...  │  DataN     │ │                │
+│ └─────────────────────────────────────────────┘                │
+└────────────────────────────────────────────────────────────────┘
+
+
+2.5.1 Locating an Extent
+------------------------
+
+Extents can be different sizes. Also, due to the garbage collection, they can
+become shuffled and fragmented.
+
+Extents can be located by offset. The approriate offset is found using
+extent-ID as an index, as shown below.
+
+┌────────────────────────────────────────────────────────────────┐
+│           Locating where is Extent N in memory?                │
+├────────────────────────────────────────────────────────────────┤
+│                                                                │
+│        Relation (meta)              Relation (data)            │
+│       ┌───────────┐                ┌───────────┐               │
+│       │ Offsets:  │                │ Extent 0  │               │
+│       │           │                │           │               │
+│       │ [Extent0] │                ├───────────┤               │
+│       │ [Extent1] │                │ Extent 1  │               │
+│       │ [Extent2] │                ├───────────┤               │
+│       │ [Extent3] │                │ Extent 5  │               │
+│       │ [Extent4] │                ├───────────┤               │
+│       │ [Extent5] │                │///////////│               │
+│       └───────────┘                │/   gap   /│               │
+│                                    │///////////│               │
+│                                    ├───────────┤               │
+│                                    │ Extent 3  │               │
+│                                    ├───────────┤               │
+│                                    │ Extent 4  │               │
+│                                    │           │               │
+│                                    │           │               │
+│                                    │           │               │
+│                                    ├───────────┤               │
+│                                    │ Extent 2  │               │
+│                                    └───────────┘               │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
+
+
+2.5.2 Locating column data within an extent
+-------------------------------------------
+
+Fixed-Length Data Access:
+
+Since the extent ID is known and the extent always has a fixed number of
+records, the column data position of fixed-length data can be directly
+calculated.
+
+e.g. Position = Extent_Base + (CRID % 262144) * Element_Size
+
+┌────────────────────────────────────────────────────────────────┐
+│ Addressing fixed-length data: Direct CRID-based addressing     │
+├────────────────────────────────────────────────────────────────┤
+│ Extent                                                         │
+│ ┌─────────────────────────────────────────────────────────┐    │
+│ │ Header        │ [pos0]  │  [pos1]  │       │  [posN]   ││    │
+│ │               │ Data0   │  Data1   │  ...  │  DataN    ││    │
+│ └─────────────────────────────────────────────────────────┘    │
+└────────────────────────────────────────────────────────────────┘
+
+Variable-Length Data Access:
+
+- Data offsets recorded in the extent header
+- TOAST links stored for very large data
+- TOAST link vs normal data is indicated by reserved bits in the offset
+
+┌────────────────────────────────────────────────────────────────┐
+│ Addressing variable-length data: Offset array + data           │
+├────────────────────────────────────────────────────────────────┤
+│ Extent                                                         │
+│ ┌────────────────────────────────────────────────────────────┐ │
+│ │ Header        │                                            │ │
+│ │ Offset array  │  [pos0]  │  [pos1]  │  ...  │  [posN]    │ │ │
+│ │ [pos1...posN] │  Data0   │  Data1   │       │  DataN     │ │ │
+│ └────────────────────────────────────────────────────────────┘ │
+└────────────────────────────────────────────────────────────────┘
+
+
+2.5.3 Garbage collection
+------------------------
+
+During WOS-to-ROS conversion, when the delete vector is processed to delete the
+ROS data (aka "deleted-rows-collection"), VCI makes a "copy" of the extent.
+It writes the modified extent back to the ROS after the necessary data is
+deleted, and removes the original extent.
+
+Copying like this allows VCI queries to run even during the
+"deleted-rows-collection" phase, but it can lead to some fragmentation (i.e.
+"gaps") between extents as they are copied/deleted. VCI includes logic to
+relocate extents such that fragmentation is minimized.
+
+
+2.6. Compression System
+========================
+
+//
+// Note: compression logic is currently disabled in contrib/vci
+//
+
+Column data compression occurs (if enabled) at the time of WOS-to-ROS
+conversion.
+
+The only compression method currently implemented is run-length encoding,
+which is used for integer columns with low cardinality.
+
+e.g.
+Original Data:    [5, 5, 5, 7, 7, 2, 2, 2, 2, 5, 5]
+Compressed:       [(5,3), (7,2), (2,4), (5,2)]
+Dictionary:       {[0]=5, [1]=7, [2]=2}
+Final Encoding:   [(0,3), (1,2), (2,4), (0,2)]
+
+
+2.6.1 Dictionaries
+------------------
+
+- Each extent of each column is compressed independently.
+- Each extent can have its own independent compression dictionary or all
+  extents can share a common dictionary
+
+Independent Dictionaries (per extent):
+- Stored in the column-data internal relation in each extent header, along with
+- size/position/count information.
+
+Common Dictionaries (shared across extents):
+- Stored in the column-data internal relation in the first extent header
+- The size/positions/counts etc needed for the "common" dictionaries are
+  stored in the column-metadata internal relation
+
+
+
+==============================================================================
+3. VCI Integration with PostgreSQL
+==============================================================================
+
+In general, the VCI extension integrates with the PostgreSQL core via hooks.
+
+e.g. Some primary hooks are for:
+- adding data to the WOS (see 'add_should_index_insert_hook')
+- deleting data from the WOS (see 'add_index_delete_hook')
+
+
+3.1 Standard hooks
+===========================
+
+Mostly VCI is implemented as per other indexes; many of the hooks are
+implementations of the Index Access Method (IAM) routine.
+
+
+3.1.1 IndexAccessMethod hooks
+-----------------------------
+
+(see vci_handler)
+• amroutine->ambuild = vci_build;
+• amroutine->ambuildempty = vci_buildempty;
+• amroutine->aminsert = vci_insert;
+• amroutine->aminsertcleanup = NULL;
+• amroutine->ambulkdelete = vci_bulkdelete;
+• amroutine->amvacuumcleanup = vci_vacuumcleanup;
+• amroutine->amcanreturn = NULL;
+• amroutine->amcostestimate = vci_costestimate;
+• amroutine->amgettreeheight = vci_gettreeheight;
+• amroutine->amoptions = vci_options;
+• amroutine->amvalidate = vci_validate;
+• amroutine->amadjustmembers = NULL;
+• amroutine->ambeginscan = vci_beginscan;
+• amroutine->amrescan = vci_rescan;
+• amroutine->amgettuple = NULL;
+• amroutine->amgetbitmap = NULL;
+• amroutine->amendscan = vci_endscan;
+• amroutine->ammarkpos = vci_markpos;
+• amroutine->amrestrpos = vci_restrpos;
+
+
+3.1.2 Other standard hooks
+---------------------------
+
+(see _PG_init)
+• ProcessUtility_hook = vci_process_utility;
+• shmem_request_hook = vci_shmem_request;
+
+(see vci_setup_shmem)
+• shmem_startup_hook = vci_shmem_startup_routine;
+
+
+3.2 Executor hooks
+==================
+VCI also implements Executor hooks. These enable the Query planner to identify
+which queries are capable of using the ROS data.
+
+(see function vci_setup_executor_hook)
+• ExecutorStart_hook = vci_executor_start_routine;
+• ExecutorRun_hook = vci_executor_run_routine;
+• ExecutorEnd_hook = vci_executor_end_routine;
+• ExplainOneQuery_hook = vci_explain_one_query_routine;
+• ExprEvalVar_hook = VciExecEvalScalarVarFromColumnStore;
+• ExprEvalParam_hook = VciExecEvalParamExec;
+
+
+3.3 Known problems
+==================
+
+NOTE:
+There are some artifacts in the current VCI implementation since these patches
+historically were implemented in vendor-specific source code, forked from the
+PostgreSQL master code.
+
+These are known problems that will need to be addressed for the VCI
+implementation to be accepted by the OSS community.
+
+3.3.1 Ad-hoc hooks
+------------------
+There are places where VCI uses non-standard, hardwired non-extensible hooks,
+instead of implementing callbacks from well documented APIs such as IAM.
+
+(see _PG_init)
+• add_index_delete_hook = vci_add_index_delete;
+• add_should_index_insert_hook = vci_add_should_index_insert;
+• add_drop_relation_hook = vci_add_drop_relation;
+• add_reindex_index_hook = vci_add_reindex_index;
+• add_skip_vci_index_hook = vci_add_skip_vci_index;
+• add_alter_tablespace_hook = vci_add_alter_tablespace;
+• add_alter_table_change_owner_hook = vci_alter_table_change_owner;
+• add_alter_table_change_schema_hook = vci_alter_table_change_schema;
+• add_snapshot_satisfies_hook = VCITupleSatisfiesVisibility;
+• add_skip_vacuum_hook = vci_isVciAdditionalRelation;
+
+
+3.3.2 Embedded code
+--------------------
+There are some places where VCI code is simply embedded in the PostgreSQL core.
+
+
+
+==============================================================================
+4. Data Flow and Conversion
+==============================================================================
+
+
+4.1. WOS-to-ROS Background Process
+==================================
+
+A dedicated background worker continuously converts "freezable" data from WOS
+to ROS:
+
+Conversion Process:
+┌-───────────────────────────────────────────────────────────────┐
+│                    Background Worker Cycle                     │
+├────────────────────────────────────────────────────────────────┤
+│ 1. Check Whiteout WOS → Update ROS delete vector               │
+│ 2. Execute "deleted-rows-collection" if threshold exceeded     │
+│ 3. Identify freezable tuples in WOS                            │
+│ 4. Convert freezable data to columnar format                   │
+│ 5. Apply compression algorithms                                │
+│ 6. Update TID-CRID mapping                                     │
+│ 7. Truncate processed WOS data                                 │
+└────────────────────────────────────────────────────────────────┘
+
+Freezable Data Criteria:
+- Transaction must be committed
+- No active transactions started before the commit timestamp
+- Ensures MVCC consistency during WOS-to-ROS conversion
+
+
+4.2 Overview Diagram
+====================
+Details of some of these concepts (e.g. extents) are given later.
+
+┌-───────────────────────────────────────────────────────────────┐
+│                     WOS-to-ROS conversion                      │
+├────────────────────────────────────────────────────────────────┤
+│BEFORE:                                                         │
+│                                                                │
+│  Data WOS (new rows)          ROS extent (before)              │
+│  ┌────────────────────────┐   ┌──────────────────────────┐     │
+│  │ newA-5 │ newB-5 │ ...  │   │      delete vector       │     │
+│  │ newA-6 │ newB-6 │ ...  │   │CRID  ▼  column data:     │     │
+│  └────────────────────────┘   │  1 │ 0 │ ColA-1 │ ColB-1 │     │
+│                               │  2 │ 1 │ ColA-2 │ ColB-2 │     │
+│  Whiteout WOS:                │  3 │ 0 │ ColA-3 │ ColB-3 │     │
+│  ┌────────────────────────┐   │  4 │ 0 │ ColA-4 │ ColB-4 │     │
+│  │ delete rec with CRID 4 │   └──────────────────────────┘     │
+│  └────────────────────────┘         │                          │
+│                              • Remove WOS Whiteout records     │
+│                              • Remove delete vector rows       │
+│                              • Add new records from Data WOS   │
+│                              • Renumber CRIDs                  │
+│                              • Compress data                   │
+│                                     │                          │
+│ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ │ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─│
+│AFTER:                               │                          │
+│                                     ▼                          │
+│ Data WOS:                     ROS extent (after)               │
+│ ┌─────────────────────────┐   ┌──────────────────────────┐     │
+│ └─────────────────────────┘   │  1 │   │ ColA-1 │ ColB-1 │     │
+│                               │  2 │   │ ColA-3 │ ColB-3 │     │
+│ Whiteout WOS:                 │  3 │   │ new5-1 │ new5-1 │     │
+│ ┌─────────────────────────┐   │  4 │   │ new6-1 │ new6-1 │     │
+│ └─────────────────────────┘   └──────────────────────────┘     │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
+
+
+4.3 Local ROS Creation
+======================
+During SELECT operations, if WOS contains unconverted data, VCI creates a
+temporary Local ROS. This is combined with the persisted ROS during query
+execution. At the end of the query the Local ROS is discarded.
+
+Later, a full WOS-to-ROS conversion will be performed, so any unconverted WOS
+data will be permanently converted to the ROS.
+
+Query Execution with Local ROS:
+┌────────────────────────────────────────────────────────────────┐
+│                       SELECT Operation                         │
+├────────────────────────────────────────────────────────────────┤
+│                                                                │
+│                              ROS                               │
+│                  /-------------------------\                   │
+│   ┌─────────┐    ┌────────────────────────┐                    │
+│   │   WOS   │───▶│ Local ROS              │  }                 │
+│   │(Partial)│    │(Temporary)             │  } Combined ROS    │
+│   └─────────┘    └────────────────────────┘  } Columnar        │
+│                  ┌────────────────────────┐  } Processing      │
+│                  │ Persistent ROS         │  } for SELECT      │
+│                  │ (Previously Converted) │  }                 │
+│                  └────────────────────────┘                    │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
+
+
+4.4 Existing table data
+=======================
+The whole point of the asynchronous WOS-to-ROS conversion is to maintain the
+column-oriented data in sync with row-based table data on-the-fly.
+
+Be aware that creating a VCI index for a table with lots of existing data is
+costly because VCI has to initialise the ROS for all that data up-front.
+
+
+
+==============================================================================
+5. MVCC and Transaction Handling
+==============================================================================
+
+Transaction Visibility
+
+VCI maintains MVCC consistency across both WOS and ROS:
+
+e.g. Transaction Timeline:
+┌────────────────────────────────────────────────────────────────┐
+│ T1: BEGIN → INSERT → COMMIT (timestamp: 100)                   │
+│ T2: BEGIN (timestamp: 99) → SELECT → ...                       │
+│ T3: BEGIN (timestamp: 101) → SELECT → ...                      │
+└────────────────────────────────────────────────────────────────┘
+- T2 cannot see T1's insert (it started before T1 committed)
+- T3 can see T1's insert (it started after T1 committed)
+
+Visibility Rules:
+Data remains in WOS until no transaction needs old versions -- see
+"freezable" criteria.
+
+WOS: Handles active transaction visibility using xmin/xmax
+ROS: Contains only frozen data visible to all current transactions
+Local ROS: Applies snapshot visibility rules during query execution
+
+
+
+==============================================================================
+6. Query Execution
+==============================================================================
+
+6.1 Custom Plan Integration
+===========================
+
+VCI integrates with PostgreSQL's query planner by replacing standard plan
+nodes with custom plan nodes for VCI when possible.
+
+VCI registers a set of callbacks as custom plan providers.
+
+There are 4 types of operations that can potentially be replaced:
+table scan, aggregation (e.g. SUM, COUNT, AVG), sort, join.
+
+Furthermore, instead of replacing one plan node with one custom plan node,
+plan nodes are collectively replaced.
+
+┌─────────────────────────────────────────────────────────────────┐
+│  Replacing a Plan Tree                                          │
+├─────────────────────────────────────────────────────────────────┤
+│  Standard PostgreSQL Plan   │  VCI Optimized Plan               │
+│                             │  (e.g. VCI judges Agg and         │
+│                             │  SeqScan are replaceable)         │
+├─────────────────────────────────────────────────────────────────┤
+│     ┌─────────────┐         │     ┌─────────────┐               │
+│     │             │         │     │             │               │
+│     └─────┬───────┘         │     └─────┬───────┘               │
+│           │                 │           │                       │
+│     ┌─────▼───────┐         │     ┌─────▼───────┐               │
+│     │    Sort     │         │     │    Sort     │               │
+│     └─────┬───────┘         │     └─────┬───────┘               │
+│           │                 │           │                       │
+│     ┌─────▼───────┐         │     ┌─────▼───────────┐           │
+│     │    Agg      │         │     │ VCI CustomPlan  │           │
+│     └─────┬───────┘         │     │                 │           │
+│           │                 │     │ Agg and SeqScan │           │
+│     ┌─────▼───────┐         │     │ combined        │           │
+│     │   SeqScan   │         │     └─────────────────┘           │
+│     └─────────────┘         │                                   │
+└─────────────────────────────────────────────────────────────────┘
+
+
+6.1.1 VCI mode requirements
+----------------------------
+
+There are a number of conditions that must be met for nodes to be replaced:
+
+Scan node - must be for a relation (table) with a VCI index
+Agg node - plan tree must be for scan node as above
+Sort node - plan tree must be for scan node as above
+Join node - plan tree must be for scan node as above
+
+Expression node:
+- All columns in the expression node tree must be indexed by VCI
+- Cannot have any SubPlan in the expression node tree
+- If an expression has functions then there are other restrictions:
+	- not all functions are supported
+	- function data types must be supported by VCI
+	- user-defined functions not supported
+	- user-defined aggregate functions not supported
+
+
+6.2 Custom Plan Execution Steps
+===============================
+
+Preparation Phase:
+- Create Local ROS from visible WOS data
+- Build delete TID list from Whiteout WOS
+- Prepare extent access structures
+
+Execution Phase:
+- Process ROS extents using columnar operations
+- Apply delete vector filtering
+- Combine results with Local ROS data
+- Execute aggregations and sorting in columnar format
+
+VCI implements optimized hash joins for columnar data.
+
+
+6.3 Is VCI getting used?
+========================
+
+Use EXPLAIN ANALYZE to see if VCI custom nodes are in the query plan.
+
+Boolean function vci_runs_in_query() returns true if a VCI index and custom
+scan are used by the current query execution.
+
+e.g.
+┌────────────────────────────────────────────────────────────────┐
+│  SELECT                                                        │
+│      vci_runs_in_query() AS vci_runs_in_query, key, count(*)   │
+│  FROM test_table;                                              │
+└────────────────────────────────────────────────────────────────┘
+
+
+
+==============================================================================
+7. Configuration Parameters
+==============================================================================
+
+7.1 VCI-specific Parameters
+=============================
+VCI provides numerous configuration parameters that can be set in
+postgresql.conf. These parameters control various aspects of VCI behavior,
+from basic functionality to advanced performance tuning.
+
+There are also many DEVELOPER_OPTIONS (see code contrib/vci/vci_read_guc.c).
+
+
+7.1.1 Core Parameters
+----------------------
+
+- vci.enable
+  Controls whether VCI functionality is active.
+
+- vci.enable_compression
+  Enables compression of column data in ROS storage.
+
+- vci.log_query
+  Logs detailed information when queries fail to execute through VCI's
+  columnar processing path, useful for debugging query execution issues.
+
+
+7.1.2 Memory Management
+------------------------
+
+- vci.maintenance_work_mem
+  Memory limit for VCI background operations, including WOS-to-ROS conversions
+  and garbage collection processes.
+
+- vci.max_local_ros
+  Maximum memory allowed for temporary Local ROS creation during query
+  execution when WOS contains unconverted data.
+
+
+7.1.3 Background Worker Control
+--------------------------------
+
+- vci.enable_ros_control_daemon
+  Enables the background worker responsible for WOS-to-ROS conversion.
+  Essential for maintaining columnar storage efficiency.
+
+- vci.control_max_workers
+  Maximum number of concurrent VCI background workers. Should be balanced
+  with system resources and PostgreSQL's max_worker_processes setting.
+
+- vci.control_naptime
+  Sleep interval between background worker cycles. Lower values provide
+  more responsive WOS-to-ROS conversion but increase system overhead.
+
+- vci.cost_threshold
+  CPU load threshold above which VCI background workers are paused to
+  avoid impacting foreground query performance.
+
+
+7.1.4 Data Management Thresholds
+---------------------------------
+
+- vci.wosros_conv_threshold
+  Number of WOS rows that trigger automatic conversion to ROS format.
+  Lower values reduce WOS size but increase conversion overhead.
+
+- vci.cdr_threshold
+  Percentage of deleted rows in ROS that triggers garbage collection.
+  Typical values range from 20-40% depending on workload patterns.
+
+
+
+7.2 Affected PostgreSQL Parameters
+===================================
+
+- max_worker_processes
+  Must be increased from default values to accommodate VCI background
+  workers. Recommended minimum increase of 4-8 workers for VCI operation.
+
+
+
+==============================================================================
+8. Known Restrictions/Limitations/Differences
+==============================================================================
+
+8.1 Restrictions
+==================
+
+8.1.1 DROP EXTENSION vci
+-------------------------
+Unloading the extension is not supported.
+
+
+8.1.2 Backup and Restore
+--------------------------
+Databases containing VCI indexes cannot be restored to PostgreSQL
+installations without VCI extension. Cross-compatibility requires
+dropping VCI indexes before backup or ensuring target system has
+VCI available.
+
+
+8.1.3 Version Upgrades
+-----------------------
+pg_upgrade is not currently supported for VCI-enabled databases.
+Upgrades require dump/restore procedures with VCI-compatible target
+systems.
+
+
+8.2 Limitations
+================
+
+8.2.1 CREATE INDEX
+-------------------
+Since the internal structure of VCI indexes is different from other indexes,
+some of the CREATE INDEX options are not supported for VCI.
+- expressions instead of columns
+- UNIQUE, CONCURRENTLY, WHERE clauses
+- ASC/DESC, NULLS FIRST/LAST operator class options
+
+
+8.2.2 Supported Relation Types
+-------------------------------
+Cannot create a VCI index for a view.
+
+
+8.2.3 Supported Data Types
+---------------------------
+Not all data types are supported for VCI indexing.
+
+
+8.2.4 Performance Testing
+--------------------------
+Standard benchmarks like pgbench focuses on OLTP workloads and will not
+demonstrate VCI's analytical query performance benefits. Custom OLAP
+benchmarks are needed to evaluate VCI effectiveness.
+
+
+8.3 Differences
+================
+
+8.3.1 Configuration (Planner GUCs)
+-----------------------------------
+VCI may execute operations (such as hash joins) even when corresponding
+PostgreSQL planner options are disabled, as VCI uses its own execution
+strategies within custom plan nodes.
+
+8.3.2 Disk Size and Estimation
+--------------------------------
+VCI maintains both WOS and ROS storage simultaneously, requiring
+additional disk space during data conversion periods.
+
+Standard PostgreSQL index size functions (pg_relation_size) do not
+account for VCI's distributed storage architecture. Use the provided
+pg_vci_index_size() function for VCI storage measurements.
+
+
+[END]
