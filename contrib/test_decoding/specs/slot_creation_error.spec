@@ -4,7 +4,7 @@ session "s1"
 setup { SET synchronous_commit=on; }
 
 step s1_b { BEGIN; }
-step s1_xid { SELECT 'xid' FROM txid_current(); }
+step s1_xid { SELECT 'xid' FROM pg_current_xact_id(); }
 step s1_c { COMMIT; }
 step s1_cancel_s2 {
     SELECT pg_cancel_backend(pid)

@@ -34,7 +34,7 @@ SELECT * FROM pg_xact_commit_timestamp_origin('1'::xid); -- ok, NULL
 SELECT * FROM pg_xact_commit_timestamp_origin('2'::xid); -- ok, NULL
 
 -- Test transaction without replication origin
-SELECT txid_current() as txid_no_origin \gset
+SELECT pg_current_xact_id() as txid_no_origin \gset
 SELECT x.timestamp > '-infinity'::timestamptz AS ts_low,
        x.timestamp <= now() AS ts_high,
        roident != 0 AS valid_roident
@@ -48,7 +48,7 @@ SELECT x.timestamp > '-infinity'::timestamptz AS ts_low,
 SELECT pg_replication_origin_create('regress_commit_ts: get_origin') != 0
   AS valid_roident;
 SELECT pg_replication_origin_session_setup('regress_commit_ts: get_origin');
-SELECT txid_current() as txid_with_origin \gset
+SELECT pg_current_xact_id() as txid_with_origin \gset
 SELECT x.timestamp > '-infinity'::timestamptz AS ts_low,
        x.timestamp <= now() AS ts_high,
        r.roname
