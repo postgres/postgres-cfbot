@@ -330,7 +330,7 @@ like(
 	'update target row was deleted in tab');
 
 # Remember the next transaction ID to be assigned
-my $next_xid = $node_A->safe_psql('postgres', "SELECT txid_current() + 1;");
+my $next_xid = $node_A->safe_psql('postgres', "SELECT pg_current_xact_id() + 1;");
 
 # Confirm that the xmin value is advanced to the latest nextXid. If no
 # transactions are running, the apply worker selects nextXid as the candidate
@@ -388,7 +388,7 @@ $node_A->safe_psql('postgres',
 	"ALTER SUBSCRIPTION $subname_AB REFRESH PUBLICATION");
 
 # Remember the next transaction ID to be assigned
-$next_xid = $node_A->safe_psql('postgres', "SELECT txid_current() + 1;");
+$next_xid = $node_A->safe_psql('postgres', "SELECT pg_current_xact_id() + 1;");
 
 # Confirm that the xmin value is advanced to the latest nextXid. If no
 # transactions are running, the apply worker selects nextXid as the candidate
@@ -535,7 +535,8 @@ if ($injection_points_supported != 0)
 		'update target row was deleted in tab');
 
 	# Remember the next transaction ID to be assigned
-	$next_xid = $node_A->safe_psql('postgres', "SELECT txid_current() + 1;");
+	$next_xid =
+	  $node_A->safe_psql('postgres', "SELECT pg_current_xact_id() + 1;");
 
 	# Confirm that the xmin value is advanced to the latest nextXid after the
 	# prepared transaction on the publisher has been committed.
@@ -587,7 +588,7 @@ $node_B->safe_psql('postgres', "INSERT INTO tab VALUES (5, 5);");
 
 # Advance the xid on Node A to trigger the next cycle of oldest_nonremovable_xid
 # advancement.
-$node_A->safe_psql('postgres', "SELECT txid_current() + 1;");
+$node_A->safe_psql('postgres', "SELECT pg_current_xact_id() + 1;");
 
 $log_offset = -s $node_A->logfile;
 
