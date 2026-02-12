@@ -46,6 +46,7 @@ $node->safe_psql('postgres',
 	  . "CREATE TYPE enum1 AS ENUM ('foo', 'bar', 'baz', 'BLACK');\n"
 	  . "CREATE PUBLICATION some_publication;\n"
 	  . "CREATE TABLE fpo_test (id int4range, valid_at daterange, name text);\n"
+	  . "CREATE FUNCTION tcfunc_test(int) RETURNS int LANGUAGE sql AS 'SELECT 1';\n"
 );
 
 # In a VPATH build, we'll be started in the source directory, but we want
@@ -457,6 +458,22 @@ check_completion("v\t", qr/valid_at /,
 
 check_completion("FR\t", qr/FROM /,
 	"complete FOR PORTION OF <col> FR<tab> to FROM");
+
+clear_query();
+
+# check completion of function names after SELECT
+check_completion(
+	"SELECT tcfunc_te\t",
+	qr/tcfunc_test\b/,
+	"complete function name after SELECT");
+
+clear_query();
+
+# check that pg_ prefix enables system function completion
+check_completion(
+	"SELECT pg_cancel_b\t",
+	qr/pg_cancel_backend\b/,
+	"complete pg_catalog function with pg_ prefix in SELECT");
 
 clear_query();
 
