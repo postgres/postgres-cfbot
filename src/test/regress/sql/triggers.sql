@@ -1189,15 +1189,15 @@ $$;
 create trigger upsert_after_trig after insert or update on upsert
   for each row execute procedure upsert_after_func();
 
-insert into upsert values(1, 'black') on conflict (key) do update set color = 'updated ' || upsert.color;
-insert into upsert values(2, 'red') on conflict (key) do update set color = 'updated ' || upsert.color;
-insert into upsert values(3, 'orange') on conflict (key) do update set color = 'updated ' || upsert.color;
-insert into upsert values(4, 'green') on conflict (key) do update set color = 'updated ' || upsert.color;
-insert into upsert values(5, 'purple') on conflict (key) do update set color = 'updated ' || upsert.color;
-insert into upsert values(6, 'white') on conflict (key) do update set color = 'updated ' || upsert.color;
-insert into upsert values(7, 'pink') on conflict (key) do update set color = 'updated ' || upsert.color;
-insert into upsert values(8, 'yellow') on conflict (key) do update set color = 'updated ' || upsert.color;
-insert into upsert values(8, 'blue') on conflict (key) do select for update where upsert.color = 'yellow trig modified' returning old.*, new.*, upsert.*;
+insert into upsert values(1, 'black') on conflict (key) do update set color = 'updated ' || upsert.color returning old.*, new.*, excluded.*;
+insert into upsert values(2, 'red') on conflict (key) do update set color = 'updated ' || upsert.color returning old.*, new.*, excluded.*;
+insert into upsert values(3, 'orange') on conflict (key) do update set color = 'updated ' || upsert.color returning old.*, new.*, excluded.*;
+insert into upsert values(4, 'green') on conflict (key) do update set color = 'updated ' || upsert.color returning old.*, new.*, excluded.*;
+insert into upsert values(5, 'purple') on conflict (key) do update set color = 'updated ' || upsert.color returning old.*, new.*, excluded.*;
+insert into upsert values(6, 'white') on conflict (key) do update set color = 'updated ' || upsert.color returning old.*, new.*, excluded.*;
+insert into upsert values(7, 'pink') on conflict (key) do update set color = 'updated ' || upsert.color returning old.*, new.*, excluded.*;
+insert into upsert values(8, 'yellow') on conflict (key) do update set color = 'updated ' || upsert.color returning old.*, new.*, excluded.*;
+insert into upsert values(8, 'blue') on conflict (key) do select for update where upsert.color = 'yellow trig modified' returning old.*, new.*, upsert.*, excluded.*;
 
 select * from upsert;
 

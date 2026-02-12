@@ -2683,6 +2683,7 @@ ReturnSetInfo
 ReturnStmt
 ReturningClause
 ReturningExpr
+ReturningExprKind
 ReturningOption
 ReturningOptionKind
 RevmapContents

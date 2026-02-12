@@ -293,7 +293,10 @@ preprocess_targetlist(PlannerInfo *root)
 	 * used in RETURNING that belong to other relations.  We need to do this
 	 * to make these Vars available for the RETURNING calculation.  Vars that
 	 * belong to the result rel don't need to be added, because they will be
-	 * made to refer to the actual heap tuple.
+	 * made to refer to the actual heap tuple.  Vars that refer to the
+	 * EXCLUDED pseudo-relation of an INSERT ... ON CONFLICT DO SELECT/UPDATE
+	 * command are also not needed, because they are handled specially in the
+	 * executor.
 	 */
 	if (parse->returningList && list_length(parse->rtable) > 1)
 	{
@@ -310,7 +313,9 @@ preprocess_targetlist(PlannerInfo *root)
 			TargetEntry *tle;
 
 			if (IsA(var, Var) &&
-				var->varno == result_relation)
+				(var->varno == result_relation ||
+				 (parse->onConflict &&
+				  var->varno == parse->onConflict->exclRelIndex)))
 				continue;		/* don't need it */
 
 			if (tlist_member((Expr *) var, tlist))
