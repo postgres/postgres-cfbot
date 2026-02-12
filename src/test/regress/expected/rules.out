@@ -3719,6 +3719,67 @@ SELECT * FROM hat_data WHERE hat_name IN ('h8', 'h9', 'h7') ORDER BY hat_name;
 (3 rows)
 
 DROP RULE hat_upsert ON hats;
+-- DO UPDATE ... RETURNING excluded values
+CREATE RULE hat_upsert AS ON INSERT TO hats
+    DO INSTEAD
+    INSERT INTO hat_data VALUES (
+           NEW.hat_name,
+           NEW.hat_color)
+        ON CONFLICT (hat_name)
+        DO UPDATE
+           SET hat_name = hat_data.hat_name, hat_color = 'Excl: '||excluded.hat_color
+           WHERE excluded.hat_color <>  'forbidden' AND hat_data.* != excluded.*
+        RETURNING excluded.*;
+SELECT definition FROM pg_rules WHERE tablename = 'hats' ORDER BY rulename;
+                                                                             definition                                                                              
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ CREATE RULE hat_upsert AS                                                                                                                                          +
+     ON INSERT TO public.hats DO INSTEAD  INSERT INTO hat_data (hat_name, hat_color)                                                                                +
+   VALUES (new.hat_name, new.hat_color) ON CONFLICT(hat_name) DO UPDATE SET hat_name = hat_data.hat_name, hat_color = ('Excl: '::text || (excluded.hat_color)::text)+
+   WHERE ((excluded.hat_color <> 'forbidden'::bpchar) AND (hat_data.* <> excluded.*))                                                                               +
+   RETURNING excluded.hat_name,                                                                                                                                     +
+     excluded.hat_color;
+(1 row)
+
+-- EXCLUDED not allowed in plain INSERT
+INSERT INTO hats VALUES ('h6', 'black'), ('h7', 'forbidden'), ('h8', 'red')
+  RETURNING excluded.*;
+ERROR:  missing FROM-clause entry for table "excluded"
+LINE 2:   RETURNING excluded.*;
+                    ^
+-- OLD/NEW have no effect on EXCLUDED
+EXPLAIN (verbose, costs off)
+INSERT INTO hats VALUES ('h6', 'black'), ('h7', 'forbidden'), ('h8', 'red')
+  RETURNING old.*, new.*, *;
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
+ Insert on public.hat_data
+   Output: excluded.hat_name, excluded.hat_color, excluded.hat_name, excluded.hat_color, excluded.hat_name, excluded.hat_color
+   Conflict Resolution: UPDATE
+   Conflict Arbiter Indexes: hat_data_unique_idx
+   Conflict Filter: ((excluded.hat_color <> 'forbidden'::bpchar) AND (hat_data.* <> excluded.*))
+   ->  Values Scan on "*VALUES*"
+         Output: "*VALUES*".column1, "*VALUES*".column2
+(7 rows)
+
+INSERT INTO hats VALUES ('h6', 'black'), ('h7', 'forbidden'), ('h8', 'red')
+  RETURNING old.*, new.*, *;
+  hat_name  | hat_color  |  hat_name  | hat_color  |  hat_name  | hat_color  
+------------+------------+------------+------------+------------+------------
+            |            |            |            |            | 
+ h8         | red        | h8         | red        | h8         | red       
+(2 rows)
+
+SELECT * FROM hat_data ORDER BY hat_name;
+  hat_name  | hat_color  
+------------+------------
+ h6         | black     
+ h7         | black     
+ h8         | Excl: red 
+ h9         | blue      
+(4 rows)
+
+DROP RULE hat_upsert ON hats;
 -- DO SELECT with a WHERE clause
 CREATE RULE hat_confsel AS ON INSERT TO hats
     DO INSTEAD

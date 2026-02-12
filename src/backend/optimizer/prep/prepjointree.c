@@ -72,8 +72,7 @@ typedef struct pullup_replace_vars_context
 	PlannerInfo *root;
 	List	   *targetlist;		/* tlist of subquery being pulled up */
 	RangeTblEntry *target_rte;	/* RTE of subquery */
-	int			result_relation;	/* the index of the result relation in the
-									 * rewritten query */
+	int			new_target_varno;	/* see ReplaceVarFromTargetList() */
 	Relids		relids;			/* relids within subquery, as numbered after
 								 * pullup (set only if target_rte->lateral) */
 	nullingrel_info *nullinfo;	/* per-RTE nullingrel info (set only if
@@ -554,11 +553,20 @@ expand_virtual_generated_columns(PlannerInfo *root, Query *parse,
 		 * insert into the query, except that we may need to wrap them in
 		 * PlaceHolderVars.  Set up required context data for
 		 * pullup_replace_vars.
+		 *
+		 * In order to handle any Vars with non-default varreturningtype,
+		 * new_target_varno should equal rt_index if it is the result relation
+		 * or the EXCLUDED pseudo-relation.  Otherwise, it should be 0.  See
+		 * comments in ReplaceVarFromTargetList().
 		 */
 		rvcontext.root = root;
 		rvcontext.targetlist = tlist;
 		rvcontext.target_rte = rte;
-		rvcontext.result_relation = parse->resultRelation;
+		if (rt_index == parse->resultRelation ||
+			(parse->onConflict && rt_index == parse->onConflict->exclRelIndex))
+			rvcontext.new_target_varno = rt_index;
+		else
+			rvcontext.new_target_varno = 0;
 		/* won't need these values */
 		rvcontext.relids = NULL;
 		rvcontext.nullinfo = NULL;
@@ -1590,7 +1598,7 @@ pull_up_simple_subquery(PlannerInfo *root, Node *jtnode, RangeTblEntry *rte,
 	rvcontext.root = root;
 	rvcontext.targetlist = subquery->targetList;
 	rvcontext.target_rte = rte;
-	rvcontext.result_relation = 0;
+	rvcontext.new_target_varno = 0;
 	if (rte->lateral)
 	{
 		rvcontext.relids = get_relids_in_jointree((Node *) subquery->jointree,
@@ -2143,7 +2151,7 @@ pull_up_simple_values(PlannerInfo *root, Node *jtnode, RangeTblEntry *rte)
 	rvcontext.root = root;
 	rvcontext.targetlist = tlist;
 	rvcontext.target_rte = rte;
-	rvcontext.result_relation = 0;
+	rvcontext.new_target_varno = 0;
 	rvcontext.relids = NULL;	/* can't be any lateral references here */
 	rvcontext.nullinfo = NULL;
 	rvcontext.outer_hasSubLinks = &parse->hasSubLinks;
@@ -2302,7 +2310,7 @@ pull_up_constant_function(PlannerInfo *root, Node *jtnode,
 													  NULL, /* resname */
 													  false));	/* resjunk */
 	rvcontext.target_rte = rte;
-	rvcontext.result_relation = 0;
+	rvcontext.new_target_varno = 0;
 
 	/*
 	 * Since this function was reduced to a Const, it doesn't contain any
@@ -2839,7 +2847,7 @@ pullup_replace_vars_callback(const Var *var,
 		newnode = ReplaceVarFromTargetList(var,
 										   rcon->target_rte,
 										   rcon->targetlist,
-										   rcon->result_relation,
+										   rcon->new_target_varno,
 										   REPLACEVARS_REPORT_ERROR,
 										   0);
 
