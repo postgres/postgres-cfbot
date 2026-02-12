@@ -26,9 +26,9 @@ struct JsonConstructorExprState;
 
 /* Bits in ExprState->flags (see also execnodes.h for public flag bits): */
 /* expression's interpreter has been initialized */
-#define EEO_FLAG_INTERPRETER_INITIALIZED	(1 << 5)
+#define EEO_FLAG_INTERPRETER_INITIALIZED	(1 << 6)
 /* jump-threading is in use */
-#define EEO_FLAG_DIRECT_THREADED			(1 << 6)
+#define EEO_FLAG_DIRECT_THREADED			(1 << 7)
 
 /* Typical API for out-of-line evaluation subroutines */
 typedef void (*ExecEvalSubroutine) (ExprState *state,
@@ -338,7 +338,8 @@ typedef struct ExprEvalStep
 			/* but it's just the normal (negative) attr number for SYSVAR */
 			int			attnum;
 			Oid			vartype;	/* type OID of variable */
-			VarReturningType varreturningtype;	/* return old/new/default */
+			/* if not default, return old/new/excluded value */
+			VarReturningType varreturningtype;
 		}			var;
 
 		/* for EEOP_WHOLEROW */

@@ -58,6 +58,10 @@ INSERT INTO gtest1 VALUES (3, DEFAULT), (4, 44);  -- error
 INSERT INTO gtest1 VALUES (3, 33), (4, DEFAULT);  -- error
 INSERT INTO gtest1 VALUES (3, DEFAULT), (4, DEFAULT);  -- ok
 
+INSERT INTO gtest1 VALUES (4, DEFAULT), (5, DEFAULT)
+  ON CONFLICT (a) DO UPDATE SET a = excluded.a + 100
+  RETURNING old.*, new.*, excluded.*;
+
 SELECT * FROM gtest1 ORDER BY a;
 SELECT gtest1 FROM gtest1 ORDER BY a;  -- whole-row reference
 SELECT a, (SELECT gtest1.b) FROM gtest1 ORDER BY a;  -- sublink

@@ -209,19 +209,21 @@ INSERT INTO foo VALUES (4)
   RETURNING old.tableoid::regclass, old.ctid, old.*,
             new.tableoid::regclass, new.ctid, new.*, *;
 
--- INSERT ... ON CONFLICT ... UPDATE has OLD and NEW
+-- INSERT ... ON CONFLICT ... UPDATE has OLD and NEW (and EXLCUDED)
 CREATE UNIQUE INDEX foo_f1_idx ON foo (f1);
 EXPLAIN (verbose, costs off)
 INSERT INTO foo VALUES (4, 'conflict'), (5, 'ok')
   ON CONFLICT (f1) DO UPDATE SET f2 = excluded.f2||'ed', f3 = -1
   RETURNING WITH (OLD AS o, NEW AS n)
             o.tableoid::regclass, o.ctid, o.*,
-            n.tableoid::regclass, n.ctid, n.*, *;
+            n.tableoid::regclass, n.ctid, n.*, *,
+            excluded.*;
 INSERT INTO foo VALUES (4, 'conflict'), (5, 'ok')
   ON CONFLICT (f1) DO UPDATE SET f2 = excluded.f2||'ed', f3 = -1
   RETURNING WITH (OLD AS o, NEW AS n)
             o.tableoid::regclass, o.ctid, o.*,
-            n.tableoid::regclass, n.ctid, n.*, *;
+            n.tableoid::regclass, n.ctid, n.*, *,
+            excluded.*;
 
 -- UPDATE has OLD and NEW
 EXPLAIN (verbose, costs off)

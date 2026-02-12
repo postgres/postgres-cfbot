@@ -300,7 +300,8 @@ struct ParseState
  * forbid LATERAL references to an UPDATE/DELETE target table.
  *
  * While processing the RETURNING clause, special namespace items are added to
- * refer to the OLD and NEW state of the result relation.  These namespace
+ * refer to the OLD and NEW state of the result relation, and EXCLUDED pseudo-
+ * relation for INSERT ... ON CONFLICT DO SELECT/UPDATE.  These namespace
  * items have p_returning_type set appropriately, for use when creating Vars.
  * For convenience, this information is duplicated on each namespace column.
  *
@@ -321,7 +322,7 @@ struct ParseNamespaceItem
 	bool		p_cols_visible; /* Column names visible as unqualified refs? */
 	bool		p_lateral_only; /* Is only visible to LATERAL expressions? */
 	bool		p_lateral_ok;	/* If so, does join type allow use? */
-	VarReturningType p_returning_type;	/* Is OLD/NEW for use in RETURNING? */
+	VarReturningType p_returning_type;	/* for RETURNING OLD/NEW/EXCLUDED */
 };
 
 /*
@@ -352,7 +353,7 @@ struct ParseNamespaceColumn
 	Oid			p_vartype;		/* pg_type OID */
 	int32		p_vartypmod;	/* type modifier value */
 	Oid			p_varcollid;	/* OID of collation, or InvalidOid */
-	VarReturningType p_varreturningtype;	/* for RETURNING OLD/NEW */
+	VarReturningType p_varreturningtype;	/* for RETURNING OLD/NEW/EXCLUDED */
 	Index		p_varnosyn;		/* rangetable index of syntactic referent */
 	AttrNumber	p_varattnosyn;	/* attribute number of syntactic referent */
 	bool		p_dontexpand;	/* not included in star expansion */

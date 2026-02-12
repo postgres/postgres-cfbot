@@ -709,12 +709,27 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 
 		/*
 		 * Convert Vars in it to contain this partition's attribute numbers.
+		 * If we're doing an INSERT ... ON CONFLICT DO SELECT/UPDATE, the
+		 * RETURNING list might contain references to the EXCLUDED
+		 * pseudo-relation (INNER_VAR), so we must map their attribute numbers
+		 * too.
 		 */
 		if (part_attmap == NULL)
 			part_attmap =
 				build_attrmap_by_name(RelationGetDescr(partrel),
 									  RelationGetDescr(firstResultRel),
 									  false);
+
+		if (node->onConflictAction != ONCONFLICT_NONE)
+		{
+			returningList = (List *)
+				map_variable_attnos((Node *) returningList,
+									INNER_VAR, 0,
+									part_attmap,
+									RelationGetForm(partrel)->reltype,
+									&found_whole_row);
+			/* We ignore the value of found_whole_row. */
+		}
 		returningList = (List *)
 			map_variable_attnos((Node *) returningList,
 								firstVarno, 0,

@@ -917,7 +917,7 @@ IncrementVarSublevelsUp_rtable(List *rtable, int delta_sublevels_up,
 /*
  * SetVarReturningType - adjust Var nodes for a specified varreturningtype.
  *
- * Find all Var nodes referring to the specified result relation in the given
+ * Find all Var nodes referring to the specified relation in the given
  * expression and set their varreturningtype to the specified value.
  *
  * NOTE: although this has the form of a walker, we cheat and modify the
@@ -927,7 +927,7 @@ IncrementVarSublevelsUp_rtable(List *rtable, int delta_sublevels_up,
 
 typedef struct
 {
-	int			result_relation;
+	int			target_varno;
 	int			sublevels_up;
 	VarReturningType returning_type;
 } SetVarReturningType_context;
@@ -941,7 +941,7 @@ SetVarReturningType_walker(Node *node, SetVarReturningType_context *context)
 	{
 		Var		   *var = (Var *) node;
 
-		if (var->varno == context->result_relation &&
+		if (var->varno == context->target_varno &&
 			var->varlevelsup == context->sublevels_up)
 			var->varreturningtype = context->returning_type;
 
@@ -963,12 +963,12 @@ SetVarReturningType_walker(Node *node, SetVarReturningType_context *context)
 }
 
 static void
-SetVarReturningType(Node *node, int result_relation, int sublevels_up,
+SetVarReturningType(Node *node, int target_varno, int sublevels_up,
 					VarReturningType returning_type)
 {
 	SetVarReturningType_context context;
 
-	context.result_relation = result_relation;
+	context.target_varno = target_varno;
 	context.sublevels_up = sublevels_up;
 	context.returning_type = returning_type;
 
@@ -1721,14 +1721,29 @@ map_variable_attnos(Node *node,
  * relation.  This is needed to handle whole-row Vars referencing the target.
  * We expand such Vars into RowExpr constructs.
  *
- * In addition, for INSERT/UPDATE/DELETE/MERGE queries, the caller must
- * provide result_relation, the index of the result relation in the rewritten
- * query.  This is needed to handle OLD/NEW RETURNING list Vars referencing
- * target_varno.  When such Vars are expanded, their varreturningtype is
- * copied onto any replacement Vars referencing result_relation.  In addition,
- * if the replacement expression from the targetlist is not simply a Var
- * referencing result_relation, it is wrapped in a ReturningExpr node (causing
- * the executor to return NULL if the OLD/NEW row doesn't exist).
+ * In addition, the caller should provide new_target_varno, which is needed to
+ * handle any OLD/NEW/EXCLUDED RETURNING list Vars (Vars with non-default
+ * varreturningtype) referencing target_varno.  When such Vars are expanded,
+ * their varreturningtype is copied onto any Vars that reference
+ * new_target_varno in the replacement expression from the targetlist.  In
+ * addition, if the replacement expression is not simply a Var referencing
+ * new_target_varno, it is wrapped in a ReturningExpr node (causing the
+ * executor to return NULL if the OLD/NEW/EXCLUDED row doesn't exist).  The
+ * caller should set new_target_varno as follows:
+ *
+ *	If the input node contains Vars from the RETURNING list of a query, and
+ *	target_varno is the resultRelation of that query, then new_target_varno
+ *	should be the (possibly new) resultRelation of the rewritten query.
+ *
+ *	If the input node contains Vars from the RETURNING list of an INSERT ...
+ *	ON CONFLICT DO SELECT/UPDATE query, and target_varno is the index of the
+ *	EXCLUDED pseudo-relation, then new_target_varno should be the (possibly
+ *	new) index of the EXCLUDED pseudo-relation in the rewritten query.
+ *
+ *	Otherwise, new_target_varno should be set to 0 in order to detect any
+ *	Vars with non-default varreturningtype outside the RETURNING list, or
+ *	referencing a relation other than the result relation or the EXCLUDED
+ *	pseudo-relation.
  *
  * Note that ReplaceVarFromTargetList always generates the replacement
  * expression with varlevelsup = 0.  The caller is responsible for adjusting
@@ -1742,7 +1757,7 @@ typedef struct
 {
 	RangeTblEntry *target_rte;
 	List	   *targetlist;
-	int			result_relation;
+	int			new_target_varno;
 	ReplaceVarsNoMatchOption nomatch_option;
 	int			nomatch_varno;
 } ReplaceVarsFromTargetList_context;
@@ -1757,7 +1772,7 @@ ReplaceVarsFromTargetList_callback(const Var *var,
 	newnode = ReplaceVarFromTargetList(var,
 									   rcon->target_rte,
 									   rcon->targetlist,
-									   rcon->result_relation,
+									   rcon->new_target_varno,
 									   rcon->nomatch_option,
 									   rcon->nomatch_varno);
 
@@ -1772,7 +1787,7 @@ Node *
 ReplaceVarFromTargetList(const Var *var,
 						 RangeTblEntry *target_rte,
 						 List *targetlist,
-						 int result_relation,
+						 int new_target_varno,
 						 ReplaceVarsNoMatchOption nomatch_option,
 						 int nomatch_varno)
 {
@@ -1821,7 +1836,7 @@ ReplaceVarFromTargetList(const Var *var,
 				field = ReplaceVarFromTargetList((Var *) field,
 												 target_rte,
 												 targetlist,
-												 result_relation,
+												 new_target_varno,
 												 nomatch_option,
 												 nomatch_varno);
 			rowexpr->args = lappend(rowexpr->args, field);
@@ -1833,7 +1848,7 @@ ReplaceVarFromTargetList(const Var *var,
 			ReturningExpr *rexpr = makeNode(ReturningExpr);
 
 			rexpr->retlevelsup = 0;
-			rexpr->retold = (var->varreturningtype == VAR_RETURNING_OLD);
+			rexpr->retkind = (ReturningExprKind) var->varreturningtype;
 			rexpr->retexpr = (Expr *) rowexpr;
 
 			return (Node *) rexpr;
@@ -1918,28 +1933,28 @@ ReplaceVarFromTargetList(const Var *var,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("NEW variables in ON UPDATE rules cannot reference columns that are part of a multiple assignment in the subject UPDATE command")));
 
-		/* Handle any OLD/NEW RETURNING list Vars */
+		/* Handle any OLD/NEW/EXCLUDED RETURNING list Vars */
 		if (var->varreturningtype != VAR_RETURNING_DEFAULT)
 		{
 			/*
 			 * Copy varreturningtype onto any Vars in the tlist item that
-			 * refer to result_relation (which had better be non-zero).
+			 * refer to new_target_varno (which had better be non-zero).
 			 */
-			if (result_relation == 0)
-				elog(ERROR, "variable returning old/new found outside RETURNING list");
+			if (new_target_varno == 0)
+				elog(ERROR, "variable returning old/new/excluded found outside RETURNING list, or referencing a relation other than the result relation or the EXCLUDED pseudo-relation");
 
-			SetVarReturningType((Node *) newnode, result_relation,
+			SetVarReturningType((Node *) newnode, new_target_varno,
 								0, var->varreturningtype);
 
 			/* Wrap it in a ReturningExpr, if needed, per comments above */
 			if (!IsA(newnode, Var) ||
-				((Var *) newnode)->varno != result_relation ||
+				((Var *) newnode)->varno != new_target_varno ||
 				((Var *) newnode)->varlevelsup != 0)
 			{
 				ReturningExpr *rexpr = makeNode(ReturningExpr);
 
 				rexpr->retlevelsup = 0;
-				rexpr->retold = (var->varreturningtype == VAR_RETURNING_OLD);
+				rexpr->retkind = (ReturningExprKind) var->varreturningtype;
 				rexpr->retexpr = newnode;
 
 				newnode = (Expr *) rexpr;
@@ -1955,7 +1970,7 @@ ReplaceVarsFromTargetList(Node *node,
 						  int target_varno, int sublevels_up,
 						  RangeTblEntry *target_rte,
 						  List *targetlist,
-						  int result_relation,
+						  int new_target_varno,
 						  ReplaceVarsNoMatchOption nomatch_option,
 						  int nomatch_varno,
 						  bool *outer_hasSubLinks)
@@ -1964,7 +1979,7 @@ ReplaceVarsFromTargetList(Node *node,
 
 	context.target_rte = target_rte;
 	context.targetlist = targetlist;
-	context.result_relation = result_relation;
+	context.new_target_varno = new_target_varno;
 	context.nomatch_option = nomatch_option;
 	context.nomatch_varno = nomatch_varno;
 
