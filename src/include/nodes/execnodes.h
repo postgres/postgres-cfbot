@@ -94,6 +94,8 @@ typedef Datum (*ExprStateEvalFunc) (ExprState *expression,
 #define EEO_FLAG_OLD_IS_NULL				(1 << 3)
 /* NEW table row is NULL in RETURNING list */
 #define EEO_FLAG_NEW_IS_NULL				(1 << 4)
+/* INNER (EXCLUDED) table row is NULL in RETURNING list */
+#define EEO_FLAG_INNER_IS_NULL				(1 << 5)
 
 typedef struct ExprState
 {
