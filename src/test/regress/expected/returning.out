@@ -463,18 +463,19 @@ INSERT INTO foo VALUES (4)
           |      |    |    |    |    | foo      | (0,4) |  4 |    | 42 | 99 |  4 |    | 42 | 99
 (1 row)
 
--- INSERT ... ON CONFLICT ... UPDATE has OLD and NEW
+-- INSERT ... ON CONFLICT ... UPDATE has OLD and NEW (and EXLCUDED)
 CREATE UNIQUE INDEX foo_f1_idx ON foo (f1);
 EXPLAIN (verbose, costs off)
 INSERT INTO foo VALUES (4, 'conflict'), (5, 'ok')
   ON CONFLICT (f1) DO UPDATE SET f2 = excluded.f2||'ed', f3 = -1
   RETURNING WITH (OLD AS o, NEW AS n)
             o.tableoid::regclass, o.ctid, o.*,
-            n.tableoid::regclass, n.ctid, n.*, *;
-                                                                        QUERY PLAN                                                                        
-----------------------------------------------------------------------------------------------------------------------------------------------------------
+            n.tableoid::regclass, n.ctid, n.*, *,
+            excluded.*;
+                                                                                                  QUERY PLAN                                                                                                  
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Insert on pg_temp.foo
-   Output: (o.tableoid)::regclass, o.ctid, o.f1, o.f2, o.f3, o.f4, (n.tableoid)::regclass, n.ctid, n.f1, n.f2, n.f3, n.f4, foo.f1, foo.f2, foo.f3, foo.f4
+   Output: (o.tableoid)::regclass, o.ctid, o.f1, o.f2, o.f3, o.f4, (n.tableoid)::regclass, n.ctid, n.f1, n.f2, n.f3, n.f4, foo.f1, foo.f2, foo.f3, foo.f4, excluded.f1, excluded.f2, excluded.f3, excluded.f4
    Conflict Resolution: UPDATE
    Conflict Arbiter Indexes: foo_f1_idx
    ->  Values Scan on "*VALUES*"
@@ -485,11 +486,12 @@ INSERT INTO foo VALUES (4, 'conflict'), (5, 'ok')
   ON CONFLICT (f1) DO UPDATE SET f2 = excluded.f2||'ed', f3 = -1
   RETURNING WITH (OLD AS o, NEW AS n)
             o.tableoid::regclass, o.ctid, o.*,
-            n.tableoid::regclass, n.ctid, n.*, *;
- tableoid | ctid  | f1 | f2 | f3 | f4 | tableoid | ctid  | f1 |     f2     | f3 | f4 | f1 |     f2     | f3 | f4 
-----------+-------+----+----+----+----+----------+-------+----+------------+----+----+----+------------+----+----
- foo      | (0,4) |  4 |    | 42 | 99 | foo      | (0,5) |  4 | conflicted | -1 | 99 |  4 | conflicted | -1 | 99
-          |       |    |    |    |    | foo      | (0,6) |  5 | ok         | 42 | 99 |  5 | ok         | 42 | 99
+            n.tableoid::regclass, n.ctid, n.*, *,
+            excluded.*;
+ tableoid | ctid  | f1 | f2 | f3 | f4 | tableoid | ctid  | f1 |     f2     | f3 | f4 | f1 |     f2     | f3 | f4 | f1 |    f2    | f3 | f4 
+----------+-------+----+----+----+----+----------+-------+----+------------+----+----+----+------------+----+----+----+----------+----+----
+ foo      | (0,4) |  4 |    | 42 | 99 | foo      | (0,5) |  4 | conflicted | -1 | 99 |  4 | conflicted | -1 | 99 |  4 | conflict | 42 | 99
+          |       |    |    |    |    | foo      | (0,6) |  5 | ok         | 42 | 99 |  5 | ok         | 42 | 99 |    |          |    |   
 (2 rows)
 
 -- UPDATE has OLD and NEW

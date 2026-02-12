@@ -501,8 +501,8 @@ contain_vars_of_level_walker(Node *node, int *sublevels_up)
  *
  *	  Returns true if any found.
  *
- * Any ReturningExprs are also detected --- if an OLD/NEW Var was rewritten,
- * we still regard this as a clause that returns OLD/NEW values.
+ * Any ReturningExprs are also checked --- if an OLD/NEW Var was rewritten, we
+ * still regard this as a clause that returns OLD/NEW values.
  *
  * Does not examine subqueries, therefore must only be used after reduction
  * of sublinks to subplans!
@@ -521,13 +521,16 @@ contain_vars_returning_old_or_new_walker(Node *node, void *context)
 	if (IsA(node, Var))
 	{
 		if (((Var *) node)->varlevelsup == 0 &&
-			((Var *) node)->varreturningtype != VAR_RETURNING_DEFAULT)
+			(((Var *) node)->varreturningtype == VAR_RETURNING_OLD ||
+			 ((Var *) node)->varreturningtype == VAR_RETURNING_NEW))
 			return true;		/* abort the tree traversal and return true */
 		return false;
 	}
 	if (IsA(node, ReturningExpr))
 	{
-		if (((ReturningExpr *) node)->retlevelsup == 0)
+		if (((ReturningExpr *) node)->retlevelsup == 0 &&
+			(((ReturningExpr *) node)->retkind == RETURNING_OLD_EXPR ||
+			 ((ReturningExpr *) node)->retkind == RETURNING_NEW_EXPR))
 			return true;		/* abort the tree traversal and return true */
 		return false;
 	}
