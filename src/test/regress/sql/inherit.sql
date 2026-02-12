@@ -901,7 +901,8 @@ select * from inhpar;
 
 -- Also check ON CONFLICT
 insert into inhpar as i values (3), (7) on conflict (f1)
-  do update set (f1, f2) = (select i.f1, i.f2 || '+');
+  do update set (f1, f2) = (select i.f1, i.f2 || '+')
+  returning old, new, excluded;
 select * from inhpar order by f1;  -- tuple order might be unstable here
 
 drop table inhpar cascade;
