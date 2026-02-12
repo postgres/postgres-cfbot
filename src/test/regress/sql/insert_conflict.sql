@@ -109,8 +109,7 @@ insert into insertconflicttest
 values (1, 'Apple'), (2, 'Orange')
 on conflict (key) do update set (fruit, key) = (excluded.fruit, excluded.key);
 
--- Give good diagnostic message when EXCLUDED.* spuriously referenced from
--- RETURNING:
+-- EXCLUDED.* referenced from RETURNING:
 insert into insertconflicttest values (1, 'Apple') on conflict (key) do update set fruit = excluded.fruit RETURNING excluded.fruit;
 
 -- Only suggest <table>.* column when inference element misspelled:
@@ -258,16 +257,16 @@ create unique index plain on insertconflicttest(key);
 
 -- Succeeds, updates existing row:
 insert into insertconflicttest as i values (23, 'Jackfruit') on conflict (key) do update set fruit = excluded.fruit
-  where i.* != excluded.* returning *;
+  where i.* != excluded.* returning *, excluded.* = old.*, excluded.* = new.*;
 -- No update this time, though:
 insert into insertconflicttest as i values (23, 'Jackfruit') on conflict (key) do update set fruit = excluded.fruit
-  where i.* != excluded.* returning *;
+  where i.* != excluded.* returning *, excluded.* = old.*, excluded.* = new.*;
 -- Predicate changed to require match rather than non-match, so updates once more:
 insert into insertconflicttest as i values (23, 'Jackfruit') on conflict (key) do update set fruit = excluded.fruit
-  where i.* = excluded.* returning *;
+  where i.* = excluded.* returning *, excluded.* = old.*, excluded.* = new.*;
 -- Assign:
 insert into insertconflicttest as i values (23, 'Avocado') on conflict (key) do update set fruit = excluded.*::text
-  returning *;
+  returning *, excluded.* = old.*, excluded.* = new.*;
 -- deparse whole row var in WHERE and SET clauses:
 explain (costs off) insert into insertconflicttest as i values (23, 'Avocado') on conflict (key) do update set fruit = excluded.fruit where excluded.* is null;
 explain (costs off) insert into insertconflicttest as i values (23, 'Avocado') on conflict (key) do update set fruit = excluded.*::text;
@@ -287,6 +286,7 @@ drop table insertconflicttest;
 create table syscolconflicttest(key int4, data text);
 insert into syscolconflicttest values (1);
 insert into syscolconflicttest values (1) on conflict (key) do update set data = excluded.ctid::text;
+insert into syscolconflicttest values (1) on conflict (key) do update set data = excluded.data returning excluded.ctid;
 drop table syscolconflicttest;
 
 --
@@ -364,20 +364,24 @@ select * from capitals;
 
 -- Succeeds:
 insert into cities values ('Las Vegas', 2.583E+5, 2174) on conflict do nothing;
-insert into capitals values ('Sacramento', 4664.E+5, 30, 'CA') on conflict (name) do update set population = excluded.population;
+insert into capitals values ('Sacramento', 4664.E+5, 30, 'CA') on conflict (name) do update set population = excluded.population
+  returning old.*, new.*, excluded.*;
 -- Wrong "Sacramento", so do nothing:
 insert into capitals values ('Sacramento', 50, 2267, 'NE') on conflict (name) do nothing;
 select * from capitals;
-insert into cities values ('Las Vegas', 5.83E+5, 2001) on conflict (name) do update set population = excluded.population, altitude = excluded.altitude;
+insert into cities values ('Las Vegas', 5.83E+5, 2001) on conflict (name) do update set population = excluded.population, altitude = excluded.altitude
+  returning old, new, excluded;
 select tableoid::regclass, * from cities;
-insert into capitals values ('Las Vegas', 5.83E+5, 2222, 'NV') on conflict (name) do update set population = excluded.population;
+insert into capitals values ('Las Vegas', 5.83E+5, 2222, 'NV') on conflict (name) do update set population = excluded.population
+  returning old, new, excluded;
 -- Capitals will contain new capital, Las Vegas:
 select * from capitals;
 -- Cities contains two instances of "Las Vegas", since unique constraints don't
 -- work across inheritance:
 select tableoid::regclass, * from cities;
 -- This only affects "cities" version of "Las Vegas":
-insert into cities values ('Las Vegas', 5.86E+5, 2223) on conflict (name) do update set population = excluded.population, altitude = excluded.altitude;
+insert into cities values ('Las Vegas', 5.86E+5, 2223) on conflict (name) do update set population = excluded.population, altitude = excluded.altitude
+  returning old.*, new.*, excluded.*;
 select tableoid::regclass, * from cities;
 
 -- clean up
@@ -394,8 +398,11 @@ insert into excluded values(1, '2') on conflict (key) do update set data = exclu
 insert into excluded AS target values(1, '2') on conflict (key) do update set data = excluded.data RETURNING *;
 -- ok, aliased
 insert into excluded AS target values(1, '2') on conflict (key) do update set data = target.data RETURNING *;
--- make sure excluded isn't a problem in returning clause
+-- error, ambiguous
 insert into excluded values(1, '2') on conflict (key) do update set data = 3 RETURNING excluded.*;
+-- ok, aliased
+insert into excluded AS target values(1, '2') on conflict (key) do update set data = 3
+RETURNING target.*, excluded.*;
 
 -- clean up
 drop table excluded;
@@ -539,7 +546,7 @@ insert into parted_conflict_test values (3, 'a') on conflict (a) do update set b
 insert into parted_conflict_test values (3, 'b') on conflict (a) do update set b = excluded.b;
 insert into parted_conflict_test values (3, 'a') on conflict (a) do select returning b;
 insert into parted_conflict_test values (3, 'a') on conflict (a) do select where excluded.b = 'a' returning parted_conflict_test;
-insert into parted_conflict_test values (3, 'a') on conflict (a) do select where parted_conflict_test.b = 'b' returning b;
+insert into parted_conflict_test values (3, 'a') on conflict (a) do select where parted_conflict_test.b = 'b' returning b, excluded;
 
 -- should see (3, 'b')
 select * from parted_conflict_test order by a;
@@ -550,7 +557,7 @@ create table parted_conflict_test_3 partition of parted_conflict_test for values
 truncate parted_conflict_test;
 insert into parted_conflict_test (a, b) values (4, 'a') on conflict (a) do update set b = excluded.b;
 insert into parted_conflict_test (a, b) values (4, 'b') on conflict (a) do update set b = excluded.b where parted_conflict_test.b = 'a';
-insert into parted_conflict_test (a, b) values (4, 'b') on conflict (a) do select returning b;
+insert into parted_conflict_test (a, b) values (4, 'b') on conflict (a) do select returning b, excluded;
 
 -- should see (4, 'b')
 select * from parted_conflict_test order by a;
