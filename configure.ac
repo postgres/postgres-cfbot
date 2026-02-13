@@ -325,9 +325,9 @@ AC_DEFINE_UNQUOTED([RELSEG_SIZE], ${RELSEG_SIZE}, [
 # WAL block size
 #
 AC_MSG_CHECKING([for WAL block size])
-PGAC_ARG_REQ(with, wal-blocksize, [BLOCKSIZE], [set WAL block size in kB [8]],
+PGAC_ARG_REQ(with, wal-blocksize, [BLOCKSIZE], [set WAL block size in kB [4]],
              [wal_blocksize=$withval],
-             [wal_blocksize=8])
+             [wal_blocksize=4])
 case ${wal_blocksize} in
   1) XLOG_BLCKSZ=1024;;
   2) XLOG_BLCKSZ=2048;;
