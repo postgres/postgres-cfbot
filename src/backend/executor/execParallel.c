@@ -305,6 +305,9 @@ ExecParallelEstimate(PlanState *planstate, ExecParallelEstimateContext *e)
 			if (planstate->plan->parallel_aware)
 				ExecCustomScanEstimate((CustomScanState *) planstate,
 									   e->pcxt);
+			/* even when not parallel-aware, for EXPLAIN ANALYZE */
+			ExecCustomScanInstrumentEstimate((CustomScanState *) planstate,
+											 e->pcxt);
 			break;
 		case T_BitmapHeapScanState:
 			if (planstate->plan->parallel_aware)
@@ -556,6 +559,9 @@ ExecParallelInitializeDSM(PlanState *planstate,
 		case T_CustomScanState:
 			if (planstate->plan->parallel_aware)
 				ExecCustomScanInitializeDSM((CustomScanState *) planstate,
+											d->pcxt);
+			/* even when not parallel-aware, for EXPLAIN ANALYZE */
+			ExecCustomScanInstrumentInitDSM((CustomScanState *) planstate,
 											d->pcxt);
 			break;
 		case T_BitmapHeapScanState:
@@ -1177,6 +1183,9 @@ ExecParallelRetrieveInstrumentation(PlanState *planstate,
 		case T_TidRangeScanState:
 			ExecTidRangeScanRetrieveInstrumentation((TidRangeScanState *) planstate);
 			break;
+		case T_CustomScanState:
+			ExecCustomScanRetrieveInstrumentation((CustomScanState *) planstate);
+			break;
 		default:
 			break;
 	}
@@ -1461,6 +1470,9 @@ ExecParallelInitializeWorker(PlanState *planstate, ParallelWorkerContext *pwcxt)
 		case T_CustomScanState:
 			if (planstate->plan->parallel_aware)
 				ExecCustomScanInitializeWorker((CustomScanState *) planstate,
+											   pwcxt);
+			/* even when not parallel-aware, for EXPLAIN ANALYZE */
+			ExecCustomScanInstrumentInitWorker((CustomScanState *) planstate,
 											   pwcxt);
 			break;
 		case T_BitmapHeapScanState:
