@@ -58,6 +58,22 @@ typedef struct ShmemStructOpts
 	size_t		alignment;
 
 	/*
+	 * Minimum size this structure can shrink to. Should be set to 0 for
+	 * fixed-size structures.
+	 */
+	ssize_t		minimum_size;
+
+	/*
+	 * Maximum size this structure can grow upto in future. The memory is not
+	 * allocated right away but the corresponding address space is reserved so
+	 * that memory can be mapped to it when the structure grows. Typically
+	 * should be used for large resizable structures which need several pages
+	 * worth of contiguous memory. Should be set to 0 for fixed-size
+	 * structures.
+	 */
+	ssize_t		maximum_size;
+
+	/*
 	 * When the shmem area is initialized or attached to, pointer to it is
 	 * stored in *ptr.  It usually points to a global variable, used to access
 	 * the shared memory area later.  *ptr is set before the init_fn or
@@ -168,6 +184,9 @@ typedef struct ShmemCallbacks
 
 extern void RegisterShmemCallbacks(const ShmemCallbacks *callbacks);
 extern bool ShmemAddrIsValid(const void *addr);
+extern bool ShmemResizeStruct(const char *name, Size new_size);
+extern void ShmemProtectStruct(const char *name);
+extern void ShmemReprotectResizableStructs(void);
 
 /*
  * These macros provide syntactic sugar for calling the underlying functions

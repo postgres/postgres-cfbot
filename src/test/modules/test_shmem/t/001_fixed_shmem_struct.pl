@@ -56,5 +56,36 @@ else
 	);
 }
 
+###
+# Test that a fixed-size shared memory structure cannot be resized.
+# Only relevant on platforms that support resizable shmem.
+###
+my $have_resizable_shmem =
+  $node->safe_psql('postgres', 'SHOW have_resizable_shmem;') eq 'on';
+
+if ($have_resizable_shmem)
+{
+   # Try expanding the fixed-size structure
+   my ($ret, $stdout, $stderr) =
+     $node->psql("postgres", "SELECT test_shmem_resize_fixed(1000);");
+   isnt($ret, 0, "expanding a fixed-size structure fails");
+   like($stderr, qr/is not resizable/, "expand error message mentions not resizable");
+
+   # Try shrinking the fixed-size structure
+   ($ret, $stdout, $stderr) =
+     $node->psql("postgres", "SELECT test_shmem_resize_fixed(1);");
+   isnt($ret, 0, "shrinking a fixed-size structure fails");
+   like($stderr, qr/is not resizable/, "shrink error message mentions not resizable");
+}
+
+###
+# Test that minimum_size and maximum_size equal size for a fixed-size structure
+# in pg_shmem_allocations.
+###
+is($node->safe_psql('postgres',
+   "SELECT minimum_size = size AND maximum_size = size FROM pg_shmem_allocations WHERE name = 'test_shmem area';"),
+   't', "fixed-size structure has minimum_size = maximum_size = size");
+
 $node->stop;
+
 done_testing();

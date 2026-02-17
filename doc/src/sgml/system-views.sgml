@@ -4244,8 +4244,46 @@ SELECT * FROM pg_locks pl LEFT JOIN pg_prepared_xacts ppx
        Size of the allocation in bytes including padding. For anonymous
        allocations, no information about padding is available, so the
        <literal>size</literal> and <literal>allocated_size</literal> columns
-       will always be equal. Padding is not meaningful for free memory, so
-       the columns will be equal in that case also.
+       will always be equal. Padding is not meaningful for free memory, so the
+       columns will be equal in that case also. For resizable allocations which
+       may span multiple memory pages, the padding includes the padding due to
+       page alignment.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>minimum_size</structfield> <type>int8</type>
+      </para>
+      <para>
+       Minimum size in bytes that the resizable allocation can shrink to. Equals
+       <structfield>size</structfield> for fixed-size allocations, anonymous
+       allocations, and free memory.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>maximum_size</structfield> <type>int8</type>
+      </para>
+      <para>
+       Maximum size in bytes that the resizable allocation can grow to. Equals
+       <structfield>size</structfield> for fixed-size allocations, anonymous
+       allocations, and free memory.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>reserved_space</structfield> <type>int8</type>
+      </para>
+      <para>
+       Address space reserved for the allocation in bytes. For resizable
+       structures, this is the total address space reserved to accommodate
+       growth up to <structfield>maximum_size</structfield>, and is greater
+       than or equal to <structfield>allocated_size</structfield>. For
+       fixed-size allocations, anonymous allocations, and free memory this
+       is same as <structfield>allocated_size</structfield>.
       </para></entry>
      </row>
     </tbody>
@@ -4257,6 +4295,21 @@ SELECT * FROM pg_locks pl LEFT JOIN pg_prepared_xacts ppx
    with <literal>ShmemAlloc()</literal> directly, rather than via
    <literal>ShmemRequestStruct()</literal> or
    <literal>ShmemRequestHash()</literal>.
+  </para>
+
+  <para>
+   Resizable structures are allocations whose size can change while the server
+   is running. <xref linkend="guc-have-resizable-shmem"/> indicates whether the
+   running server supports resizable allocations. Each such allocation has a
+   minimum size give by <structfield>minimum_size</structfield> it can shrink to
+   and a maximum size given by <structfield>maximum_size</structfield> it can
+   grow to; enough address space is reserved up front to accommodate its
+   <structfield>maximum_size</structfield>.  The aggregate initial, minimum and
+   maximum sizes of all shared memory allocations are reported by <xref
+   linkend="guc-shared-memory-initial-size"/>, <xref
+   linkend="guc-shared-memory-minimum-size"/> and <xref
+   linkend="guc-shared-memory-maximum-size"/> respectively (and their
+   <literal>_in_huge_pages</literal> counterparts).
   </para>
 
   <para>

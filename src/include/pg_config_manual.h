@@ -132,6 +132,20 @@
 #endif
 
 /*
+ * HAVE_RESIZABLE_SHMEM indicates whether resizable shared memory structures are
+ * supported. The implementation requires Linux-specific madvise constants
+ * (MADV_REMOVE and MADV_POPULATE_WRITE) and existence of mprotect() API.
+ *
+ * TODO: We may want to remove EXEC_BACKEND from the condition to test attaching
+ * and resizing resizable shared memory structures in EXEC_BACKEND mode. Windows
+ * will anyway won't have HAVE_RESIZABLE_SHMEM defined since it won't have
+ * MADV_REMOVE and MADV_POPULATE_WRITE.
+ */
+#if HAVE_DECL_MADV_REMOVE && HAVE_DECL_MADV_POPULATE_WRITE && !defined(EXEC_BACKEND)
+#define HAVE_RESIZABLE_SHMEM
+#endif
+
+/*
  * USE_POSIX_FADVISE controls whether Postgres will attempt to use the
  * posix_fadvise() kernel call.  Usually the automatic configure tests are
  * sufficient, but some older Linux distributions had broken versions of

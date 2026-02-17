@@ -52,31 +52,50 @@ RequestAddinShmemSpace(Size size)
 /*
  * CalculateShmemSize
  *		Calculates the amount of shared memory needed.
+ *
+ *	- `initial` is the amount of memory needed when the server startup.
+ *  - `min` is the minimum amount of memory needed when all the resizable
+ *  structures are shrunk to their respective minimum sizes.
+ *  - `max` is the maximum amount of memory needed when all the resizable
+ *  structures are expanded to their respective maximum sizes. It is also the
+ *  size of address space that must be reserved for the shared memory segment.
+ *
+ * When no resizable structures are requested, all three totals are identical.
+ *
+ * We take some care to ensure that the total size request doesn't overflow
+ * size_t.  If this gets through, we don't need to be so careful during the
+ * actual allocation phase.
  */
-Size
-CalculateShmemSize(void)
+void
+CalculateShmemSize(size_t *initial, size_t *min, size_t *max)
 {
-	Size		size;
+	size_t		initial_req;
+	size_t		min_req;
+	size_t		max_req;
+	size_t		fixed_addins;
+
+	ShmemGetRequestedSize(&initial_req, &min_req, &max_req);
 
 	/*
 	 * Size of the Postgres shared-memory block is estimated via moderately-
 	 * accurate estimates for the big hogs, plus 100K for the stuff that's too
 	 * small to bother with estimating.
 	 *
-	 * We take some care to ensure that the total size request doesn't
-	 * overflow size_t.  If this gets through, we don't need to be so careful
-	 * during the actual allocation phase.
+	 * Also include additional requested shmem from preload libraries.
+	 *
+	 * These are not resizable, so they contribute equally to all three
+	 * totals.
 	 */
-	size = 100000;
-	size = add_size(size, ShmemGetRequestedSize());
+	fixed_addins = add_size(100000, total_addin_request);
 
-	/* include additional requested shmem from preload libraries */
-	size = add_size(size, total_addin_request);
+	*initial = add_size(initial_req, fixed_addins);
+	*min = add_size(min_req, fixed_addins);
+	*max = add_size(max_req, fixed_addins);
 
-	/* might as well round it off to a multiple of a typical page size */
-	size = add_size(size, 8192 - (size % 8192));
-
-	return size;
+	/* might as well round each off to a multiple of a typical page size */
+	*initial = add_size(*initial, 8192 - (*initial % 8192));
+	*min = add_size(*min, 8192 - (*min % 8192));
+	*max = add_size(*max, 8192 - (*max % 8192));
 }
 
 #ifdef EXEC_BACKEND
@@ -121,18 +140,24 @@ CreateSharedMemoryAndSemaphores(void)
 {
 	PGShmemHeader *shim;
 	PGShmemHeader *seghdr;
-	Size		size;
+	size_t		initial_size;
+	size_t		min_size;
+	size_t		max_size;
 
 	Assert(!IsUnderPostmaster);
 
 	/* Compute the size of the shared-memory block */
-	size = CalculateShmemSize();
-	elog(DEBUG3, "invoking IpcMemoryCreate(size=%zu)", size);
+	CalculateShmemSize(&initial_size, &min_size, &max_size);
+	elog(DEBUG3, "invoking IpcMemoryCreate(initial size=%zu, minimum size=%zu, maximum size=%zu)",
+		 initial_size, min_size, max_size);
 
 	/*
-	 * Create the shmem segment
+	 * Create the shmem segment.
+	 *
+	 * Reserve enough shared address space to accommodate every requested
+	 * structure grown to its maximum size.
 	 */
-	seghdr = PGSharedMemoryCreate(size, &shim);
+	seghdr = PGSharedMemoryCreate(initial_size, max_size, &shim);
 
 	/*
 	 * Make sure that huge pages are never reported as "unknown" while the
@@ -189,32 +214,49 @@ void
 InitializeShmemGUCs(void)
 {
 	char		buf[64];
-	Size		size_b;
-	Size		size_mb;
-	Size		hp_size;
+	size_t		initial_b;
+	size_t		min_b;
+	size_t		max_b;
+	size_t		hp_size;
+	size_t		size_mb;
 
-	/*
-	 * Calculate the shared memory size and round up to the nearest megabyte.
-	 */
-	size_b = CalculateShmemSize();
-	size_mb = add_size(size_b, (1024 * 1024) - 1) / (1024 * 1024);
+	CalculateShmemSize(&initial_b, &min_b, &max_b);
+
+	/* Round each size up to the nearest megabyte. */
+	size_mb = add_size(initial_b, (1024 * 1024) - 1) / (1024 * 1024);
 	sprintf(buf, "%zu", size_mb);
-	SetConfigOption("shared_memory_size", buf,
+	SetConfigOption("shared_memory_initial_size", buf,
 					PGC_INTERNAL, PGC_S_DYNAMIC_DEFAULT);
 
-	/*
-	 * Calculate the number of huge pages required.
-	 */
+	size_mb = add_size(min_b, (1024 * 1024) - 1) / (1024 * 1024);
+	sprintf(buf, "%zu", size_mb);
+	SetConfigOption("shared_memory_minimum_size", buf,
+					PGC_INTERNAL, PGC_S_DYNAMIC_DEFAULT);
+
+	size_mb = add_size(max_b, (1024 * 1024) - 1) / (1024 * 1024);
+	sprintf(buf, "%zu", size_mb);
+	SetConfigOption("shared_memory_maximum_size", buf,
+					PGC_INTERNAL, PGC_S_DYNAMIC_DEFAULT);
+
+	/* Calculate the number of huge pages required for each size. */
 	GetHugePageSize(&hp_size, NULL);
 	if (hp_size != 0)
 	{
-		Size		hp_required;
+		size_t		hp_required;
 
-		hp_required = size_b / hp_size;
-		if (size_b % hp_size != 0)
-			hp_required = add_size(hp_required, 1);
+		hp_required = initial_b / hp_size + (initial_b % hp_size != 0);
 		sprintf(buf, "%zu", hp_required);
-		SetConfigOption("shared_memory_size_in_huge_pages", buf,
+		SetConfigOption("shared_memory_initial_size_in_huge_pages", buf,
+						PGC_INTERNAL, PGC_S_DYNAMIC_DEFAULT);
+
+		hp_required = min_b / hp_size + (min_b % hp_size != 0);
+		sprintf(buf, "%zu", hp_required);
+		SetConfigOption("shared_memory_minimum_size_in_huge_pages", buf,
+						PGC_INTERNAL, PGC_S_DYNAMIC_DEFAULT);
+
+		hp_required = max_b / hp_size + (max_b % hp_size != 0);
+		sprintf(buf, "%zu", hp_required);
+		SetConfigOption("shared_memory_maximum_size_in_huge_pages", buf,
 						PGC_INTERNAL, PGC_S_DYNAMIC_DEFAULT);
 	}
 

@@ -36,7 +36,7 @@ extern void ResetShmemAllocator(void);
 
 extern void ShmemRequestInternal(ShmemStructOpts *options, ShmemRequestKind kind);
 
-extern size_t ShmemGetRequestedSize(void);
+extern void ShmemGetRequestedSize(size_t *initial, size_t *min, size_t *max);
 extern void ShmemInitRequested(void);
 #ifdef EXEC_BACKEND
 extern void ShmemAttachRequested(void);

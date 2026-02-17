@@ -3744,6 +3744,98 @@ my_shmem_init(void *arg)
      </para>
     </sect3>
 
+    <sect3 id="xfunc-shared-addin-resizable">
+     <title>Resizable shared memory structures</title>
+
+     <para>
+     A resizable memory structure can be requested using
+     <function>ShmemRequestStruct</function> by passing
+     <parameter>.maximum_size</parameter> along with
+     <parameter>.size</parameter>. <parameter>.maximum_size</parameter> is
+     maximum size upto which the structure can grow where as
+     <parameter>.size</parameter> is the initial size of the structure.
+     Optionally, <parameter>.minimum_size</parameter> can be set to the minimum
+     size that the structure can shrink to.  While
+     contiguous address space worth <parameter>maximum_size</parameter> is
+     allocated to the structure, only memory worth <parameter>size</parameter>
+     bytes is allocated initially. The <function>init_fn</function> should only
+     initialize the <parameter>size</parameter> amount of memory. The actual
+     memory allocated to this structure at any point in time is given by <link
+     linkend="view-pg-shmem-allocations"><structname>pg_shmem_allocations</structname>.<structfield>allocated_size</structfield></link>
+     and the address space reserved for this structure is given by <link
+     linkend="view-pg-shmem-allocations"><structname>pg_shmem_allocations</structname>.<structfield>reserved_space</structfield></link>.
+     </para>
+
+    <para>
+    The structure can be resized using <function>ShmemResizeStruct</function> by
+    passing it the structure's name and the
+    new size which can be anywhere between <parameter>minimum_size</parameter>
+    and <parameter>maximum_size</parameter>. If the new size is smaller than the
+    current size of the structure, the memory between the new size and current
+    size is freed while keeping the contents of the memory upto new size intact.
+    If the new size is greater than the current size, memory is allocated upto
+    new size while keeping the current contents of the structure intact. The
+    starting address of the structure does not change because of resizing
+    operation.
+    </para>
+
+    <para>
+    <function>ShmemResizeStruct</function> returns <literal>true</literal> on
+    success. If the operating system cannot supply the additional memory
+    required to expand the structure, it emits a <literal>WARNING</literal>
+    naming the structure and the number of bytes that could not be allocated,
+    leaves the structure at its previous size, and returns
+    <literal>false</literal>.
+    </para>
+
+    <para>
+    <function>ShmemResizeStruct</function> does not coordinate with other
+    backends that may be accessing the shared structure. The caller is
+    responsible for ensuring that no backend is accessing the parts of the
+    structure between old size and the new size while
+    <function>ShmemResizeStruct</function> is executing. Similarly after the
+    function has finished, the caller must ensure that each backend knows the
+    new size before accessing the parts of the structure between the old size
+    and the new size. Accessing the range <literal>[current_size,
+    maximum_size)</literal> results in an undefined operating-system dependent
+    behaviour.
+    </para>
+
+    <para>
+    <function>ShmemProtectStruct</function> can be used to make the range beyond
+    the current size inaccessible in a backend's address space, so that stray
+    accesses cause a fault instead of silently succeeding. When a backend
+    starts, protections for all resizable structures are adjusted according to
+    their current sizes, so subsystems need not call
+    <function>ShmemProtectStruct</function> from their per-backend
+    initialization routines. During runtime after calling
+    <function>ShmemResizeStruct</function> from one backend,
+    <function>ShmemProtectStruct</function> should be called from all the
+    backends that may access the structure.
+    </para>
+
+    <para>
+    <productname>PostgreSQL</productname>'s
+    <function>ProcSignalBarrier</function> mechanism (see
+    <filename>src/include/storage/procsignal.h</filename>) may be used to
+    coordinate the resize across backends and adjusting access to the address
+    space.
+    </para>
+
+    <para>
+    This functionality is available only on the platforms which provide the APIs
+    necessary to reserve contiguous address space and to allocate or free memory
+    in that address space on demand. Macro <symbol>HAVE_RESIZABLE_SHMEM</symbol>
+    is defined on such platforms. It can be used to guard code related to
+    resizing a shared memory structure. The functionality is available on with
+    mmap'ed memory, so subsystems which use resizable structures may have to
+    addtionally disable resizable memory usage when <symbol>shared_memory_type</symbol> is not
+    <symbol>SHMEM_TYPE_MMAP</symbol>. A GUC <xref linkend="guc-have-resizable-shmem"/> is set to
+    <literal>on</literal> when this functionality is available in a running
+    server, <literal>off</literal> otherwise.
+    </para>
+    </sect3>
+
     <sect3 id="xfunc-shared-addin-dynamic">
      <title>Allocating Dynamic Shared Memory after Startup</title>
 

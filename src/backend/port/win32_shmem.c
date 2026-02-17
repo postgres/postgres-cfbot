@@ -200,11 +200,13 @@ EnableLockPagesPrivilege(int elevel)
 /*
  * PGSharedMemoryCreate
  *
- * Create a shared memory segment of the given size and initialize its
- * standard header.
+ * Create a shared memory segment of the given size and initialize its standard
+ * header. initial_size is only relevant when we want to create a larger memory
+ * segment with only a part of it being allocated initially. We don't support
+ * that on Windows, so we ignore it.
  */
 PGShmemHeader *
-PGSharedMemoryCreate(Size size,
+PGSharedMemoryCreate(Size initial_size, Size size,
 					 PGShmemHeader **shim)
 {
 	void	   *memAddress;
@@ -647,4 +649,60 @@ check_huge_page_size(int *newval, void **extra, GucSource source)
 		return false;
 	}
 	return true;
+}
+
+/*
+ * Get the page size used by the shared memory.
+ *
+ * The function should be called only after the shared memory has been setup.
+ */
+size_t
+GetOSPageSize(void)
+{
+	SYSTEM_INFO sysinfo;
+	size_t		os_page_size;
+
+	Assert(huge_pages_status != HUGE_PAGES_UNKNOWN);
+
+	GetSystemInfo(&sysinfo);
+	os_page_size = sysinfo.dwPageSize;
+
+	/* If huge pages are actually in use, use huge page size */
+	if (huge_pages_status == HUGE_PAGES_ON)
+		GetHugePageSize(&os_page_size, NULL);
+
+	return os_page_size;
+}
+
+/*
+ * PGSharedMemoryEnsureFreed / PGSharedMemoryEnsureAllocated
+ *
+ * Not supported on Windows.  These are only meaningful on platforms with
+ * resizable shared memory (mmap + madvise).
+ */
+bool
+PGSharedMemoryEnsureFreed(void *addr, Size size)
+{
+	ereport(ERROR,
+			errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			errmsg("resizable shared memory is not supported on this platform"));
+	return false;				/* keep compiler quiet */
+}
+
+bool
+PGSharedMemoryEnsureAllocated(void *addr, Size size)
+{
+	ereport(ERROR,
+			errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			errmsg("resizable shared memory is not supported on this platform"));
+	return false;				/* keep compiler quiet */
+}
+
+bool
+PGSharedMemoryProtect(void *rw_start, void *rw_end, void *prot_end)
+{
+	ereport(ERROR,
+			errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			errmsg("resizable shared memory is not supported on this platform"));
+	return false;				/* keep compiler quiet */
 }

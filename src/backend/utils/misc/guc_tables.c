@@ -644,8 +644,12 @@ static int	max_index_keys;
 static int	max_identifier_length;
 static int	block_size;
 static int	segment_size;
-static int	shared_memory_size_mb;
-static int	shared_memory_size_in_huge_pages;
+static int	shared_memory_initial_size_mb;
+static int	shared_memory_minimum_size_mb;
+static int	shared_memory_maximum_size_mb;
+static int	shared_memory_initial_size_in_huge_pages;
+static int	shared_memory_minimum_size_in_huge_pages;
+static int	shared_memory_maximum_size_in_huge_pages;
 static int	wal_block_size;
 static int	num_os_semaphores;
 static int	effective_wal_level = WAL_LEVEL_REPLICA;
@@ -664,6 +668,13 @@ static bool assert_enabled = DEFAULT_ASSERT_ENABLED;
 #define EXEC_BACKEND_ENABLED false
 #endif
 static bool exec_backend_enabled = EXEC_BACKEND_ENABLED;
+
+#ifdef HAVE_RESIZABLE_SHMEM
+#define HAVE_RESIZABLE_SHMEM_ENABLED true
+#else
+#define HAVE_RESIZABLE_SHMEM_ENABLED false
+#endif
+static bool have_resizable_shmem_enabled = HAVE_RESIZABLE_SHMEM_ENABLED;
 
 static char *recovery_target_timeline_string;
 static char *recovery_target_string;
