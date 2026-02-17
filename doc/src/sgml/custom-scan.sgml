@@ -409,6 +409,49 @@ void (*ShutdownCustomScan) (CustomScanState *node);
 
    <para>
 <programlisting>
+void (*EstimateDSMCustomScanInstrumentation) (CustomScanState *node,
+                                              ParallelContext *pcxt);
+</programlisting>
+    Estimate the amount of dynamic shared memory that will be required
+    for parallel operation's instrumentation (for <literal>EXPLAIN ANALYZE</literal>).
+    This callback is optional, and need only be supplied if this custom
+    scan provider supports parallel execution and needs custom instrumentation.
+   </para>
+
+   <para>
+<programlisting>
+void (*InitializeDSMCustomScanInstrumentation) (CustomScanState *node,
+                                                ParallelContext *pcxt);
+</programlisting>
+    Initialize the dynamic shared memory that will be required for parallel
+    operation's instrumentation.
+    This callback is optional, and need only be supplied if this custom
+    scan provider supports parallel execution and needs custom instrumentation.
+   </para>
+
+   <para>
+<programlisting>
+void (*InitializeWorkerCustomScanInstrumentation) (CustomScanState *node,
+                                                   ParallelWorkerContext *pwcxt);
+</programlisting>
+    Initialize a parallel worker's local state based on the shared state
+    set up by the leader during <function>InitializeDSMCustomScanInstrumentation</function>.
+    This callback is optional, and need only be supplied if this custom
+    scan provider supports parallel execution and needs custom instrumentation.
+   </para>
+
+   <para>
+<programlisting>
+void (*RetrieveInstrumentationCustomScan) (CustomScanState *node);
+</programlisting>
+    Retrieve parallel instrumentation data from dynamic shared memory into local
+    memory when the custom-scan plan node finishes execution.
+    This callback is optional, and need only be supplied if this custom
+    scan provider supports parallel execution and needs custom instrumentation.
+   </para>
+
+   <para>
+<programlisting>
 void (*ExplainCustomScan) (CustomScanState *node,
                            List *ancestors,
                            ExplainState *es);
