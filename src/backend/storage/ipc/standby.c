@@ -26,6 +26,7 @@
 #include "pgstat.h"
 #include "replication/slot.h"
 #include "storage/bufmgr.h"
+#include "storage/latch.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "storage/sinvaladt.h"
@@ -791,10 +792,13 @@ cleanup:
  * so we don't do a deadlock check right away ... only if we have had to wait
  * at least deadlock_timeout.
  */
+#define STANDBY_CONFLICT_RESEND_MS	1000
+
 void
 ResolveRecoveryConflictWithBufferPin(void)
 {
 	TimestampTz ltime;
+	bool		limit_expired = false;
 
 	Assert(InHotStandby);
 
@@ -806,6 +810,7 @@ ResolveRecoveryConflictWithBufferPin(void)
 		 * We're already behind, so clear a path as quickly as possible.
 		 */
 		SendRecoveryConflictWithBufferPin(RECOVERY_CONFLICT_BUFFERPIN);
+		limit_expired = true;
 	}
 	else
 	{
@@ -841,8 +846,24 @@ ResolveRecoveryConflictWithBufferPin(void)
 	 * above can wake us up here. WakeupRecovery() called by walreceiver or
 	 * SIGHUP signal handler, etc cannot do that because it uses the different
 	 * latch from that ProcWaitForSignal() waits on.
+	 *
+	 * If the limit has already expired, no timeout is armed.  A backend that
+	 * pins the buffer after it has processed our signal would then never be
+	 * told to cancel, and UnpinBuffer() only wakes us when the last other pin
+	 * goes away.  So wake up periodically, to let the caller recheck the
+	 * buffer and come back here to resend the signal.
 	 */
-	ProcWaitForSignal(WAIT_EVENT_BUFFER_CLEANUP);
+	if (limit_expired)
+	{
+		(void) WaitLatch(MyLatch,
+						 WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+						 STANDBY_CONFLICT_RESEND_MS,
+						 WAIT_EVENT_BUFFER_CLEANUP);
+		ResetLatch(MyLatch);
+		CHECK_FOR_INTERRUPTS();
+	}
+	else
+		ProcWaitForSignal(WAIT_EVENT_BUFFER_CLEANUP);
 
 	if (got_standby_delay_timeout)
 		SendRecoveryConflictWithBufferPin(RECOVERY_CONFLICT_BUFFERPIN);
