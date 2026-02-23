@@ -29,6 +29,7 @@
 #include "mb/stringinfo_mb.h"
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
+#include "nodes/subscripting.h"
 #include "nodes/supportnodes.h"
 #include "optimizer/optimizer.h"
 #include "parser/parse_coerce.h"
@@ -3026,39 +3027,51 @@ exec_stmt_forc(PLpgSQL_execstate *estate, PLpgSQL_stmt_forc *stmt)
 	return rc;
 }
 
-
 /* ----------
- * exec_stmt_foreach_a			Loop over elements or slices of an array
- *
- * When looping over elements, the loop variable is the same type that the
- * array stores (eg: integer), when looping through slices, the loop variable
- * is an array of size and dimensions to match the size of the slice.
- * ----------
+ * exec_stmt_foreach_a			Loop over elements in an array or jsonb array
+  * ----------
  */
 static int
 exec_stmt_foreach_a(PLpgSQL_execstate *estate, PLpgSQL_stmt_foreach_a *stmt)
 {
-	ArrayType  *arr;
-	Oid			arrtype;
-	int32		arrtypmod;
-	PLpgSQL_datum *loop_var;
-	Oid			loop_var_elem_type;
-	bool		found = false;
-	int			rc = PLPGSQL_RC_OK;
-	MemoryContext stmt_mcontext;
-	MemoryContext oldcontext;
-	ArrayIterator array_iterator;
-	Oid			iterator_result_type;
-	int32		iterator_result_typmod;
-	Datum		value;
+	Datum		expr;
+	Oid			expr_typid;
+	int32		expr_typmod;
+	int16		expr_typlen;
+	bool		expr_typbyval;
 	bool		isnull;
+	PLpgSQL_datum *target_var;
+	Oid			target_typid;
+	int32		target_typmod;
+	Oid			target_collation;
+	Datum		value;
+	Oid			typid;
+	int32		typmod;
+	int			rc = PLPGSQL_RC_OK;
+	const struct SubscriptRoutines *sbroutines;
+	ForeachAIterator *iterator;
+	ForeachAIteratorOptions iterator_options;
+	MemoryContext stmt_mcontext;
+	MemoryContext tmp_cxt;
+	MemoryContext oldcontext;
+	bool		found = false;
 
-	/* get the value of the array expression */
-	value = exec_eval_expr(estate, stmt->expr, &isnull, &arrtype, &arrtypmod);
+	/* get the value of the expression */
+	expr = exec_eval_expr(estate, stmt->expr, &isnull,
+						  &expr_typid, &expr_typmod);
 	if (isnull)
 		ereport(ERROR,
 				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
 				 errmsg("FOREACH expression must not be null")));
+
+	sbroutines = getSubscriptingRoutines(expr_typid, NULL);
+	if (!sbroutines)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("cannot iterate over type %s because it does not support subscripting",
+						format_type_be(expr_typid))));
+
+	Assert(sbroutines->create_foreach_a_iterator);
 
 	/*
 	 * Do as much as possible of the code below in stmt_mcontext, to avoid any
@@ -3069,79 +3082,42 @@ exec_stmt_foreach_a(PLpgSQL_execstate *estate, PLpgSQL_stmt_foreach_a *stmt)
 	push_stmt_mcontext(estate);
 	oldcontext = MemoryContextSwitchTo(stmt_mcontext);
 
-	/* check the type of the expression - must be an array */
-	if (!OidIsValid(get_element_type(arrtype)))
-		ereport(ERROR,
-				(errcode(ERRCODE_DATATYPE_MISMATCH),
-				 errmsg("FOREACH expression must yield an array, not type %s",
-						format_type_be(arrtype))));
+	/* Set up the target (loop) variable */
+	target_var = estate->datums[stmt->varno];
+
+	plpgsql_exec_get_datum_type_info(estate, target_var,
+									 &target_typid, &target_typmod,
+									 &target_collation);
 
 	/*
 	 * We must copy the array into stmt_mcontext, else it will disappear in
 	 * exec_eval_cleanup.  This is annoying, but cleanup will certainly happen
 	 * while running the loop body, so we have little choice.
 	 */
-	arr = DatumGetArrayTypePCopy(value);
+	get_typlenbyval(expr_typid, &expr_typlen, &expr_typbyval);
+	expr = datumCopy(expr, expr_typbyval, expr_typlen);
+
+	iterator_options.target_typid = target_typid;
+	iterator_options.target_typmod = target_typmod;
+	iterator_options.coercion_strategy = COERCION_STRATEGY_ASSIGNMENT;
+
+	iterator = sbroutines->create_foreach_a_iterator(expr,
+													 expr_typid, expr_typmod,
+													 stmt->slice,
+													 &iterator_options);
 
 	/* Clean up any leftover temporary memory */
 	exec_eval_cleanup(estate);
 
-	/* Slice dimension must be less than or equal to array dimension */
-	if (stmt->slice < 0 || stmt->slice > ARR_NDIM(arr))
-		ereport(ERROR,
-				(errcode(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
-				 errmsg("slice dimension (%d) is out of the valid range 0..%d",
-						stmt->slice, ARR_NDIM(arr))));
+	tmp_cxt = AllocSetContextCreate(stmt_mcontext,
+									"FOREACH IN ARRAY temporary cxt",
+									ALLOCSET_DEFAULT_SIZES);
 
-	/* Set up the loop variable and see if it is of an array type */
-	loop_var = estate->datums[stmt->varno];
-	if (loop_var->dtype == PLPGSQL_DTYPE_REC ||
-		loop_var->dtype == PLPGSQL_DTYPE_ROW)
-	{
-		/*
-		 * Record/row variable is certainly not of array type, and might not
-		 * be initialized at all yet, so don't try to get its type
-		 */
-		loop_var_elem_type = InvalidOid;
-	}
-	else
-		loop_var_elem_type = get_element_type(plpgsql_exec_get_datum_type(estate,
-																		  loop_var));
+	MemoryContextSwitchTo(tmp_cxt);
 
-	/*
-	 * Sanity-check the loop variable type.  We don't try very hard here, and
-	 * should not be too picky since it's possible that exec_assign_value can
-	 * coerce values of different types.  But it seems worthwhile to complain
-	 * if the array-ness of the loop variable is not right.
-	 */
-	if (stmt->slice > 0 && loop_var_elem_type == InvalidOid)
-		ereport(ERROR,
-				(errcode(ERRCODE_DATATYPE_MISMATCH),
-				 errmsg("FOREACH ... SLICE loop variable must be of an array type")));
-	if (stmt->slice == 0 && loop_var_elem_type != InvalidOid)
-		ereport(ERROR,
-				(errcode(ERRCODE_DATATYPE_MISMATCH),
-				 errmsg("FOREACH loop variable must not be of an array type")));
-
-	/* Create an iterator to step through the array */
-	array_iterator = array_create_iterator(arr, stmt->slice, NULL);
-
-	/* Identify iterator result type */
-	if (stmt->slice > 0)
-	{
-		/* When slicing, nominal type of result is same as array type */
-		iterator_result_type = arrtype;
-		iterator_result_typmod = arrtypmod;
-	}
-	else
-	{
-		/* Without slicing, results are individual array elements */
-		iterator_result_type = ARR_ELEMTYPE(arr);
-		iterator_result_typmod = arrtypmod;
-	}
-
-	/* Iterate over the array elements or slices */
-	while (array_iterate(array_iterator, &value, &isnull))
+	while (iterator->iterate(iterator,
+							 &value, &isnull,
+							 &typid, &typmod))
 	{
 		found = true;			/* looped at least once */
 
@@ -3149,12 +3125,9 @@ exec_stmt_foreach_a(PLpgSQL_execstate *estate, PLpgSQL_stmt_foreach_a *stmt)
 		MemoryContextSwitchTo(oldcontext);
 
 		/* Assign current element/slice to the loop variable */
-		exec_assign_value(estate, loop_var, value, isnull,
-						  iterator_result_type, iterator_result_typmod);
+		exec_assign_value(estate, target_var, value, isnull, typid, typmod);
 
-		/* In slice case, value is temporary; must free it to avoid leakage */
-		if (stmt->slice > 0)
-			pfree(DatumGetPointer(value));
+		MemoryContextReset(tmp_cxt);
 
 		/*
 		 * Execute the statements
@@ -3163,7 +3136,7 @@ exec_stmt_foreach_a(PLpgSQL_execstate *estate, PLpgSQL_stmt_foreach_a *stmt)
 
 		LOOP_RC_PROCESSING(stmt->label, break);
 
-		MemoryContextSwitchTo(stmt_mcontext);
+		MemoryContextSwitchTo(tmp_cxt);
 	}
 
 	/* Restore memory context state */
@@ -5636,6 +5609,53 @@ plpgsql_exec_get_datum_type_info(PLpgSQL_execstate *estate,
 				*typeId = var->datatype->typoid;
 				*typMod = var->datatype->atttypmod;
 				*collation = var->datatype->collation;
+				break;
+			}
+
+		case PLPGSQL_DTYPE_ROW:
+			{
+				PLpgSQL_row *row = (PLpgSQL_row *) datum;
+
+				if (!row->rowtupdesc)
+				{
+					int			i;
+
+					row->rowtupdesc = CreateTemplateTupleDesc(row->nfields);
+
+					for (i = 0; i < row->nfields; i++)
+					{
+						PLpgSQL_datum *var = estate->datums[row->varnos[i]];
+						Oid			vartypid;
+						int32		vartypmod;
+						Oid			varcollation;
+
+						/*
+						 * We cannot use fieldnames for tupdescentry, because
+						 * these names can be suffixed by name of row variable.
+						 * Unfortunately, the PLpgSQL_recfield is not casted to
+						 * PLpgSQL_variable.
+						 */
+						plpgsql_exec_get_datum_type_info(estate, var,
+														 &vartypid, &vartypmod,
+														 &varcollation);
+
+						TupleDescInitEntry(row->rowtupdesc, i + 1,
+										   var->refname, vartypid, vartypmod,
+										   0);
+						TupleDescInitEntryCollation(row->rowtupdesc, i + 1,
+													varcollation);
+					}
+
+					TupleDescFinalize(row->rowtupdesc);
+
+					/* Make sure we have a valid type/typmod setting */
+					BlessTupleDesc(row->rowtupdesc);
+				}
+
+				*typeId = row->rowtupdesc->tdtypeid;
+				*typMod = row->rowtupdesc->tdtypmod;
+				/* composite types are never collatable */
+				*collation = InvalidOid;
 				break;
 			}
 
