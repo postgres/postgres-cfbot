@@ -154,6 +154,72 @@ typedef void (*SubscriptExecSetup) (const SubscriptingRef *sbsref,
 									SubscriptingRefState *sbsrefstate,
 									SubscriptExecSteps *methods);
 
+typedef struct _ForeachAIterator ForeachAIterator;
+
+/*
+ * ForeachAIiterator allows an iteration over a container object
+ * like an array of jsonb's array. Containers can holds a values of
+ * different types, so in any iteration, the returned value can be
+ * of any different type. Containers can holds composite types in own
+ * binary formats (jsonb object). We cannot to do safe conversion to
+ * Postgres's generic composite type without extra knowledge,
+ * so a user can specify the expected type (when it is known).
+ * Expected type can be unspecified (InvalidOid), but when
+ * it is specified, then it can be used for some other special cases
+ * like transformation of jsonb jbvNull to NULL or to string "null".
+ * Although the expected type is specified, the iterator doesn't enforce
+ * the conversion to this type (because conversion rules can be different
+ * in possible environments (SQL, PL/pgSQL).
+ */
+typedef enum ForeachAIteratorCoercionStrategy
+{
+	/*
+	 * Use type that is common for all fields in a container.
+	 * example. For jsonb array returns jsonb fields. It is natural
+	 * mode for Posgres arrays.
+	 */
+	COERCION_STRATEGY_COMMON_TYPE,
+
+	/*
+	 * Returns a fields in format, where is most propability
+	 * of successfull execution of plpgsql assignment statement.
+	 * The type returned value should not be specified target
+	 * type - plpgsql supports some own conversion routines.
+	 * This mode should to reduce slower useless packing, unpacking
+	 * operations of non atomic types.
+	 */
+	COERCION_STRATEGY_ASSIGNMENT,
+
+	/*
+	 * Force coercion to specified target type.
+	 */
+	COERCION_STRATEGY_COERCION
+} ForeachAIteratorCoercionStrategy;
+
+typedef struct ForeachAIteratorOptions
+{
+	Oid		target_typid;
+	int32	target_typmod;
+	ForeachAIteratorCoercionStrategy coercion_strategy;
+} ForeachAIteratorOptions;
+
+
+struct _ForeachAIterator
+{
+	bool		(*iterate) (ForeachAIterator *self,
+							Datum *value,
+							bool *isnull,
+							Oid *typid,
+							int32 *typmod);
+	/* Private fields might appear beyond this point... */
+};
+
+typedef ForeachAIterator * (*CreateForeachAIterator) (Datum value,
+													  Oid typid,
+													  int32 typmod,
+													  int slice,
+													  ForeachAIteratorOptions *options);
+
 /* Struct returned by the SQL-visible subscript handler function */
 typedef struct SubscriptRoutines
 {
@@ -163,6 +229,9 @@ typedef struct SubscriptRoutines
 	bool		fetch_leakproof;	/* is fetch SubscriptingRef leakproof? */
 	bool		store_leakproof;	/* is assignment SubscriptingRef
 									 * leakproof? */
+
+	/* returns iterator used by PL/pgSQL FOREACH statement */
+	CreateForeachAIterator create_foreach_a_iterator;
 } SubscriptRoutines;
 
 #endif							/* SUBSCRIPTING_H */
