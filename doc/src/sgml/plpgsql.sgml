@@ -2697,12 +2697,12 @@ END LOOP <optional> <replaceable>label</replaceable> </optional>;
    </sect2>
 
    <sect2 id="plpgsql-foreach-array">
-    <title>Looping through Arrays</title>
+    <title>Looping through Arrays or Jsonb arrays</title>
 
     <para>
      The <literal>FOREACH</literal> loop is much like a <literal>FOR</literal> loop,
      but instead of iterating through the rows returned by an SQL query,
-     it iterates through the elements of an array value.
+     it iterates through the elements of an array value or of jsonb array value.
      (In general, <literal>FOREACH</literal> is meant for looping through
      components of a composite-valued expression; variants for looping
      through composites besides arrays may be added in future.)
@@ -2777,6 +2777,64 @@ NOTICE:  row = {4,5,6}
 NOTICE:  row = {7,8,9}
 NOTICE:  row = {10,11,12}
 </programlisting>
+    </para>
+
+    <para>
+     The <literal>SLICE</literal> higher than zero cannot be used when iterates
+     through jsonb arrays.
+    </para>
+
+    <para>
+     The <literal>FOREACH</literal> loop over jsonb arrays uses
+     same syntax like <literal>FOREACH</literal> loop over arrays,
+     but instead of iterating through elements of the array,
+     it iterates through the elements of a Jsonb array value.
+    </para>
+
+    <para>
+     The target can be a scalar variable, a composite variable, or a list
+     of scalar variables. When variable is not scalar, then assigned value
+     should be a JSON object and the JSON attributes are assigned by names.
+
+<programlisting>
+CREATE FUNCTION print_elements(jsonb) RETURNS void AS $$
+DECLARE
+  x int;
+BEGIN
+  FOREACH x IN ARRAY $1
+  LOOP
+    RAISE NOTICE 'row = %', x;
+  END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT print_elements('[1,2,3]');
+NOTICE:  row = 1
+NOTICE:  row = 2
+NOTICE:  row = 3
+
+CREATE FUNCTION print_fields(jsonb) RETURNS void AS $$
+DECLARE
+  x int; y varchar;
+BEGIN
+  FOREACH x, y IN ARRAY $1
+  LOOP
+    RAISE NOTICE 'x: %, y: %', x, y;
+  END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT print_fields('[{},{"x":10},{"y":"Hi"},{"y":"Hi", "x":1000}]');
+NOTICE:  x: &lt;NULL&gt;, y: &lt;NULL&gt;
+NOTICE:  x: 10, y: &lt;NULL&gt;
+NOTICE:  x: &lt;NULL&gt;, y: Hi
+NOTICE:  x: 1000, y: Hi
+</programlisting>
+    </para>
+
+    <para>
+     The target variable can be of type <literal>RECORD</literal>, but the real structure has to be
+     assigned before usage in the <literal>FOREACH</literal> statement.
     </para>
    </sect2>
 
