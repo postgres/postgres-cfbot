@@ -88,6 +88,7 @@ tests += {
       'plpgsql_trap',
       'plpgsql_trigger',
       'plpgsql_varprops',
+      'plpgsql_foreach',
     ],
   },
 }
