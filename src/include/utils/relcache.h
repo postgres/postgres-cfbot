@@ -60,7 +60,7 @@ extern Oid	RelationGetReplicaIndex(Relation relation);
 extern List *RelationGetIndexExpressions(Relation relation);
 extern List *RelationGetDummyIndexExpressions(Relation relation);
 extern List *RelationGetIndexPredicate(Relation relation);
-extern bytea **RelationGetIndexAttOptions(Relation relation, bool copy);
+extern const bytea *const *RelationGetIndexAttOptions(Relation relation, bool copy);
 
 /*
  * Which set of columns to return by RelationGetIndexAttrBitmap.

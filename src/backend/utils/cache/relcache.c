@@ -68,6 +68,7 @@
 #include "commands/policy.h"
 #include "commands/publicationcmds.h"
 #include "commands/trigger.h"
+#include "common/hashfn.h"
 #include "common/int.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
@@ -93,7 +94,7 @@
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 
-#define RELCACHE_INIT_FILEMAGIC		0x573266	/* version ID value */
+#define RELCACHE_INIT_FILEMAGIC		0x573267	/* version ID value */
 
 /*
  * Whether to bother checking if relation cache memory needs to be freed
@@ -136,6 +137,31 @@ typedef struct relidcacheent
 } RelIdCacheEnt;
 
 static HTAB *RelationIdCache;
+
+typedef struct RelShapeCacheKey
+{
+	AttrNumber	nkeyatts;
+	uint16		nsupport;
+	/* opclass-specific data */
+	const Oid  *opclass;
+	const bytea *const *opcoptions;		/* Treated as an array of NULL
+										 * elements when NULL */
+} RelShapeCacheKey;
+
+typedef struct RelShapeCacheEnt
+{
+	RelShapeCacheKey key;
+	int			rsc_refcount;			/* refcount */
+	MemoryContext rsc_mctx;				/* memory context for this entry */
+	/* Allocations in rsc_mctx */
+	const Oid  *rsc_opfamily;			/* opfamilies of key.opclass */
+	const Oid  *rsc_opcintype;
+	const RegProcedure *rsc_support;	/* support functions */
+	FmgrInfo   *rsc_supportinfo;		/* can be updated */
+} RelShapeCacheEnt;
+
+static HTAB *RelShapeCache;
+static MemoryContext RelShapeContext;
 
 /*
  * This flag is false until we have prepared the critical relcache entries
@@ -294,6 +320,7 @@ static void AtEOXact_cleanup(Relation relation, bool isCommit);
 static void AtEOSubXact_cleanup(Relation relation, bool isCommit,
 								SubTransactionId mySubid, SubTransactionId parentSubid);
 static bool load_relcache_init_file(bool shared);
+static bool load_relcache_init_index(Relation relation, FILE *fp);
 static void write_relcache_init_file(bool shared);
 static void write_item(const void *data, Size len, FILE *fp);
 
@@ -315,13 +342,21 @@ static void CheckNNConstraintFetch(Relation relation);
 static int	CheckConstraintCmp(const void *a, const void *b);
 static void InitIndexAmRoutine(Relation relation);
 static void IndexSupportInitialize(oidvector *indclass, AttrNumber nKeyAtts, StrategyNumber maxSupportNumber,
-								   MemoryContext indexcxt, const Oid **rd_opfamily, const Oid **rd_opcintype,
-								   const RegProcedure **rd_support, FmgrInfo **rd_supportinfo);
+								   const Oid **rd_opfamily, const Oid **rd_opcintype,
+								   const RegProcedure **rd_support, FmgrInfo **rd_supportinfo,
+								   const bytea *const **rd_opcoptions);
+static void IndexSupportDeregister(oidvector *indclass, AttrNumber nKeyAtts,
+								   StrategyNumber maxSupportNumber,
+								   const bytea * const*rd_opcoptions);
+static bytea **IndexRelationGetAttOptions(Relation relation);
 static OpClassCacheEnt *LookupOpclassInfo(Oid operatorClassOid,
 										  StrategyNumber numSupport);
 static void RelationCacheInitFileRemoveInDir(const char *tblspcpath);
 static void unlink_initfile(const char *initfilename, int elevel);
 
+static uint32 HashRelShapeKey(const void *key, Size keysize);
+static int CmpRelShapeKey(const void *key1, const void *key2, Size keysize);
+static void *CopyRelShapeKey(void *dest, const void *src, Size keysize);
 
 /*
  *		ScanPgRelation
@@ -1448,6 +1483,8 @@ RelationInitIndexAccessInfo(Relation relation)
 	int			indnatts;
 	int			indnkeyatts;
 	uint16		amsupport;
+	const bytea *const *opcoptions;
+	bool		hasopcoptions = false;
 
 	/*
 	 * Make a copy of the pg_index entry for the index.  Since pg_index
@@ -1542,14 +1579,58 @@ RelationInitIndexAccessInfo(Relation relation)
 
 	/*
 	 * Fill the support procedure OID array, as well as the info about
-	 * opfamilies and opclass input types.  (aminfo and supportinfo are left
-	 * as zeroes, and are filled on-the-fly when used)
+	 * opfamilies and opclass input types.
+	 *
+	 * rd_opcoptions and rd_supportinfo are only minimally initialized here:
+	 * rd_opcoptions is updated with the real values down below if we have
+	 * any non-NULL options, supportinfo's function data is loaded only when
+	 * accessed by a caller.
 	 */
-	IndexSupportInitialize(indclass, indnkeyatts, amsupport, indexcxt,
+	IndexSupportInitialize(indclass, indnkeyatts, amsupport,
 						   &relation->rd_opfamily,
 						   &relation->rd_opcintype,
 						   &relation->rd_support,
-						   &relation->rd_supportinfo);
+						   &relation->rd_supportinfo,
+						   &relation->rd_opcoptions);
+
+	opcoptions = (const bytea *const *) IndexRelationGetAttOptions(relation);
+
+	for (int i = 0; i < indnkeyatts; i++)
+	{
+		if (opcoptions[i] != NULL)
+			hasopcoptions = true;
+	}
+
+	if (hasopcoptions)
+	{
+		IndexSupportDeregister(indclass, indnkeyatts, amsupport,
+							   relation->rd_opcoptions);
+
+		relation->rd_opcoptions = opcoptions;
+
+		/*
+		 * This fills in all fields, again; now whilst taking the new opcoptions
+		 * into account.
+		 */
+		IndexSupportInitialize(indclass, indnkeyatts, amsupport,
+							   &relation->rd_opfamily,
+							   &relation->rd_opcintype,
+							   &relation->rd_support,
+							   &relation->rd_supportinfo,
+							   &relation->rd_opcoptions);
+	}
+
+	/*
+	 * Opcoptions was either copied into the cache context, or wasn't used;
+	 * in either case it's now unused and we should free it.
+	 */
+	Assert(opcoptions != relation->rd_opcoptions);
+	for (int i = 0; i < indnkeyatts; i++)
+	{
+		if (opcoptions[i] != NULL)
+			pfree(unconstify(bytea *, opcoptions[i]));
+	}
+	pfree(unconstify_array(const bytea *, opcoptions));
 
 	/*
 	 * Similarly extract indoption and copy it to the cache entry
@@ -1561,8 +1642,6 @@ RelationInitIndexAccessInfo(Relation relation)
 	Assert(!isnull);
 	indoption = (int2vector *) DatumGetPointer(indoptionDatum);
 	memcpy(relation->rd_indoption, indoption->values, indnkeyatts * sizeof(int16));
-
-	(void) RelationGetIndexAttOptions(relation, false);
 
 	/*
 	 * expressions, predicate, exclusion caches will be filled later
@@ -1591,58 +1670,174 @@ RelationInitIndexAccessInfo(Relation relation)
 static void
 IndexSupportInitialize(oidvector *indclass, AttrNumber nKeyAtts,
 					   StrategyNumber maxSupportNumber,
-					   MemoryContext indexcxt,
 					   const Oid **rd_opfamily,
 					   const Oid **rd_opcintype,
 					   const RegProcedure **rd_support,
-					   FmgrInfo **rd_supportinfo)
+					   FmgrInfo **rd_supportinfo,
+					   const bytea *const **rd_opcoptions)
 {
-	Oid		   *opFamily;
-	Oid		   *opcInType;
-	RegProcedure *indexSupport;
+	RelShapeCacheKey key = {0};
+	RelShapeCacheEnt *entry;
+	bool			found;
 
-	if (maxSupportNumber > 0)
+	key.nkeyatts = nKeyAtts;
+	key.nsupport = maxSupportNumber;
+	key.opclass = indclass->values;
+	key.opcoptions = *rd_opcoptions;
+
+	entry = hash_search(RelShapeCache, &key, HASH_ENTER, &found);
+
+	Assert(entry != NULL);
+
+	if (!found)
 	{
-		int		nprocs = maxSupportNumber * nKeyAtts;
-		rd_supportinfo[0] = (FmgrInfo *)
-			MemoryContextAllocZero(indexcxt, nprocs * sizeof(FmgrInfo));
-		indexSupport = (RegProcedure *)
-			MemoryContextAllocZero(indexcxt, nprocs * sizeof(RegProcedure));
-	}
-	else
-	{
-		*rd_supportinfo = NULL;
-		indexSupport = NULL;
-	}
+		Oid		   *opFamily;
+		Oid		   *opcInType;
+		Size		allocsize;
+		char	   *bulkalloc;
+		char	   *bulkalloc_end PG_USED_FOR_ASSERTS_ONLY;
+		RegProcedure *support;
+		FmgrInfo   *supportinfo;
+		MemoryContext shapectx;
 
-	opFamily = (Oid *)
-		MemoryContextAllocZero(indexcxt, nKeyAtts * sizeof(Oid));
-	opcInType = (Oid *)
-		MemoryContextAllocZero(indexcxt, nKeyAtts * sizeof(Oid));
+		shapectx = AllocSetContextCreate(RelShapeContext, "index shape",
+										 ALLOCSET_SMALL_SIZES);
 
-	for (int attIndex = 0; attIndex < nKeyAtts; attIndex++)
-	{
-		OpClassCacheEnt *opcentry;
+		allocsize = sizeof(Oid) * 2 * key.nkeyatts;
+		allocsize += sizeof(RegProcedure) * key.nsupport * key.nkeyatts;
+		allocsize += sizeof(FmgrInfo) * key.nsupport * key.nkeyatts;
 
-		if (!OidIsValid(indclass->values[attIndex]))
-			elog(ERROR, "bogus pg_index tuple");
+		bulkalloc = MemoryContextAllocZero(shapectx, allocsize);
+		bulkalloc_end = bulkalloc + allocsize;
 
-		/* look up the info for this opclass, using a cache */
-		opcentry = LookupOpclassInfo(indclass->values[attIndex],
-									 maxSupportNumber);
-
-		/* copy cached data into relcache entry */
-		opFamily[attIndex] = opcentry->opcfamily;
-		opcInType[attIndex] = opcentry->opcintype;
 		if (maxSupportNumber > 0)
-			memcpy(&indexSupport[attIndex * maxSupportNumber],
-				   opcentry->supportProcs,
-				   maxSupportNumber * sizeof(RegProcedure));
+		{
+			supportinfo = (FmgrInfo *) bulkalloc;
+			bulkalloc += maxSupportNumber * nKeyAtts * sizeof(FmgrInfo);
+
+			support = (RegProcedure *) bulkalloc;
+			bulkalloc += maxSupportNumber * nKeyAtts * sizeof(RegProcedure);
+		}
+		else
+		{
+			supportinfo = NULL;
+			support = NULL;
+		}
+
+		opFamily = (Oid *) bulkalloc;
+		bulkalloc += nKeyAtts * sizeof(Oid);
+
+		opcInType = (Oid *) bulkalloc;
+		bulkalloc += nKeyAtts * sizeof(Oid);
+		Assert(bulkalloc == bulkalloc_end);
+
+		for (int attIndex = 0; attIndex < nKeyAtts; attIndex++)
+		{
+			OpClassCacheEnt *opcentry;
+
+			if (!OidIsValid(indclass->values[attIndex]))
+				elog(ERROR, "bogus pg_index tuple");
+
+			/* look up the info for this opclass, using a cache */
+			opcentry = LookupOpclassInfo(indclass->values[attIndex],
+										 maxSupportNumber);
+
+			/* copy cached data into relcache entry */
+			opFamily[attIndex] = opcentry->opcfamily;
+			opcInType[attIndex] = opcentry->opcintype;
+
+			if (maxSupportNumber > 0)
+			{
+				/* copy support proc IDs into the support proc array */
+				memcpy(&support[attIndex * maxSupportNumber],
+					   opcentry->supportProcs,
+					   maxSupportNumber * sizeof(RegProcedure));
+			}
+		}
+
+		if (maxSupportNumber > 0)
+		{
+			set_fn_opclass_options_bulk(supportinfo,
+										entry->key.opcoptions,
+										maxSupportNumber,
+										nKeyAtts, shapectx);
+		}
+
+		entry->rsc_opfamily = opFamily;
+		entry->rsc_opcintype = opcInType;
+		entry->rsc_support = support;
+		entry->rsc_supportinfo = supportinfo;
+		entry->rsc_refcount = 1;
+		entry->rsc_mctx = shapectx;
+
+		Assert(maxSupportNumber == 0 || entry->rsc_supportinfo);
+		Assert(maxSupportNumber == 0 || entry->rsc_support);
+		Assert(maxSupportNumber == 0 || entry->key.opcoptions);
 	}
 
-	rd_support[0] = indexSupport;
-	rd_opcintype[0] = opcInType;
-	rd_opfamily[0] = opFamily;
+	entry->rsc_refcount++;
+
+	*rd_opcoptions = entry->key.opcoptions;
+
+	*rd_opfamily = entry->rsc_opfamily;
+	*rd_opcintype = entry->rsc_opcintype;
+	*rd_support = entry->rsc_support;
+	*rd_supportinfo = entry->rsc_supportinfo;
+}
+
+static void
+IndexSupportDeregister(oidvector *indclass, AttrNumber nKeyAtts,
+					   StrategyNumber maxSupportNumber,
+					   const bytea *const *rd_opcoptions)
+{
+	RelShapeCacheKey key = {0};
+	RelShapeCacheEnt *entry;
+	bool			found;
+
+	key.nkeyatts = nKeyAtts;
+	key.nsupport = maxSupportNumber;
+	key.opclass = indclass->values;
+	key.opcoptions = rd_opcoptions;
+
+	entry = hash_search(RelShapeCache, &key, HASH_FIND, &found);
+
+	Assert(found);
+
+	entry->rsc_refcount--;
+
+	if (entry->rsc_refcount > 1)
+		return;
+
+	Assert(entry->rsc_refcount == 1);
+	/*
+	 * Apart from key.opclass[], which is taken from an oidvector, all key
+	 * fields are stored in RelationData and are expected to be passed
+	 * directly by the caller.
+	 */
+	Assert(entry->key.opcoptions == key.opcoptions);
+	Assert(entry->key.opclass != key.opclass);
+
+	/*
+	 * Store the opclass reference, so we can use it after removing the hash
+	 * entry.
+	 */
+	key.opclass = entry->key.opclass;
+
+	/* free memory associated with this shape, in bulk */
+	MemoryContextDelete(entry->rsc_mctx);
+
+	/* Remove the hash entry */
+	entry = hash_search(RelShapeCache, &key, HASH_REMOVE, &found);
+	Assert(found);
+
+	/* free the key's allocated elements */
+	pfree(unconstify(Oid *, key.opclass));
+	for (int i = 0; i < key.nkeyatts; i++)
+	{
+		if (key.opcoptions[i] != NULL)
+			pfree(unconstify(bytea *, key.opcoptions[i]));
+	}
+	pfree(unconstify_array(const bytea *, key.opcoptions));
 }
 
 /*
@@ -2460,6 +2655,28 @@ RelationDestroyRelation(Relation relation, bool remember_tupdesc)
 
 	/* break mutual link with stats entry */
 	pgstat_unlink_relation(relation);
+
+	if (relation->rd_isvalid && relation->rd_indam)
+	{
+		Datum		indclassDatum;
+		bool		isnull;
+		oidvector  *indclass;
+
+		Assert(relation->rd_indextuple != NULL);
+
+		indclassDatum = fastgetattr(relation->rd_indextuple,
+								   Anum_pg_index_indclass,
+								   GetPgIndexDescriptor(),
+								   &isnull);
+		Assert(!isnull);
+
+		indclass = (oidvector *) DatumGetPointer(indclassDatum);
+
+		IndexSupportDeregister(indclass,
+							   IndexRelationGetNumberOfKeyAttributes(relation),
+							   relation->rd_indam->amsupport,
+							   relation->rd_opcoptions);
+	}
 
 	/*
 	 * Free all the subsidiary data structures of the relcache entry, then the
@@ -4030,6 +4247,25 @@ RelationCacheInitialize(void)
 	RelationIdCache = hash_create("Relcache by OID", INITRELCACHESIZE,
 								  &ctl, HASH_ELEM | HASH_BLOBS);
 
+	RelShapeContext =
+		AllocSetContextCreate(CacheMemoryContext, "Relation shape cache",
+							  ALLOCSET_DEFAULT_SIZES);
+
+	/*
+	 * create hashtable that indexes and caches relation shapes
+	 */
+	ctl.keysize = sizeof(RelShapeCacheKey);
+	ctl.entrysize = sizeof(RelShapeCacheEnt);
+	ctl.keycopy = CopyRelShapeKey;
+	ctl.hash = HashRelShapeKey;
+	ctl.match = CmpRelShapeKey;
+	ctl.hcxt = RelShapeContext;
+
+	RelShapeCache = hash_create("Relation shape hash", INITRELCACHESIZE,
+								&ctl, HASH_ELEM |
+								HASH_FUNCTION | HASH_COMPARE | HASH_KEYCOPY |
+								HASH_CONTEXT);
+
 	/*
 	 * reserve enough in_progress_list slots for many cases
 	 */
@@ -4400,6 +4636,192 @@ RelationCacheInitializePhase3(void)
 		write_relcache_init_file(false);
 	}
 }
+
+static uint32
+HashRelShapeKey(const void *key, Size keysize)
+{
+	const RelShapeCacheKey *rskey = key;
+	uint32		hdr_hash, opc_hash, opcopt_hash;
+
+	hdr_hash = hash_combine(hash_uint32(rskey->nkeyatts),
+							hash_uint32(rskey->nsupport));
+	opc_hash = hash_any((void *) rskey->opclass,
+						sizeof(Oid) * rskey->nkeyatts);
+
+	/*
+	 * Opcoptions hashing is special; as it may be NULL in search keys.
+	 * Additionally, the array (if present) can contain nulls.  We must still
+	 * hash these NULLs, because positionality matters: An index with
+	 * (opts, NULL) must hash differently from one with (NULL, opts) or even
+	 * (opts). If we ignored NULLs in the array, they'd be guaranteed to have
+	 * an equal hash value, causing hash conflicts with performance issues
+	 * as a result.
+	 */
+	opcopt_hash = 0;
+	if (rskey->opcoptions == NULL)
+	{
+		/*
+		 * Only present for search operations, but regardless, we'll have to
+		 * combine the hashes of every (missing) element of the NULL array.
+		 */
+		for (int i = 0; i < rskey->nkeyatts; i++)
+			opcopt_hash = hash_combine(opcopt_hash, 0);
+	}
+	else
+	{
+		for (int i = 0; i < rskey->nkeyatts; i++)
+		{
+			const bytea *opt = rskey->opcoptions[i];
+			uint32	hash;
+
+			if (opt == NULL)
+				hash = 0;
+			else
+			{
+				hash = hash_any((const unsigned char *) VARDATA(opt),
+								(int) VARSIZE_ANY_EXHDR(opt));
+			}
+
+			opcopt_hash = hash_combine(opcopt_hash, hash);
+		}
+	}
+
+	return hash_combine(opcopt_hash, hash_combine(hdr_hash, opc_hash));
+}
+
+static int
+CmpRelShapeKey(const void *key1, const void *key2, Size keysize)
+{
+	const RelShapeCacheKey *rskey1 = key1;
+	const RelShapeCacheKey *rskey2 = key2;
+
+	if (rskey1->nkeyatts != rskey2->nkeyatts ||
+		rskey1->nsupport != rskey2->nsupport)
+		return 1;
+
+	if (rskey1->opclass != rskey2->opclass &&
+		memcmp(rskey1->opclass, rskey2->opclass,
+			   sizeof(Oid) * rskey1->nkeyatts) != 0)
+		return 1;
+
+	/* both NULL, or point to the same memory */
+	if (rskey1->opcoptions == rskey2->opcoptions)
+		return 0;
+
+	/*
+	 * One of the two arrays is null; they only match when the allocated
+	 * array's elements are all NULL too
+	 */
+	if (rskey1->opcoptions == NULL || rskey2->opcoptions == NULL)
+	{
+		const bytea *const *opts;
+
+		if (rskey1->opcoptions != NULL)
+		{
+			Assert(rskey2->opcoptions == NULL);
+			opts = rskey1->opcoptions;
+		}
+		else
+		{
+			Assert(rskey2->opcoptions != NULL);
+			opts = rskey2->opcoptions;
+		}
+
+		for (int i = 0; i < rskey1->nkeyatts; i++)
+		{
+			if (opts[i] != NULL)
+				return 1;
+		}
+
+		return 0;
+	}
+
+	/*
+	 * Compare the options elements; now that we've established that
+	 * both arrays are non-null.
+	 */
+	for (int i = 0; i < rskey1->nkeyatts; i++)
+	{
+		const bytea *a = rskey1->opcoptions[i];
+		const bytea *b = rskey2->opcoptions[i];
+
+		/* both elements are NULL, or point to the same value */
+		if (a == b)
+			continue;
+
+		/* not the same: only one of the elements is NULL */
+		if (a == NULL || b == NULL)
+			return 1;
+
+		/* different; if the sizes are different */
+		if (VARSIZE_ANY_EXHDR(a) != VARSIZE_ANY_EXHDR(b))
+			return 1;
+
+		/* different; if the data in the options is different */
+		if (memcmp(VARDATA(a), VARDATA(b), VARSIZE_ANY_EXHDR(a)) != 0)
+			return 1;
+	}
+
+	/* no differences detected */
+	return 0;
+}
+
+static void *
+CopyRelShapeKey(void *dest, const void *src, Size keysize)
+{
+	RelShapeCacheKey *destrskey = dest;
+	const RelShapeCacheKey *srcrskey = src;
+	Oid			   *opclass;
+	const bytea	  **opcoptions;
+
+	opclass = MemoryContextAlloc(RelShapeContext,
+								 sizeof(Oid) * srcrskey->nkeyatts);
+	opcoptions = MemoryContextAlloc(RelShapeContext,
+									sizeof(bytea *) * srcrskey->nkeyatts);
+
+	memcpy(opclass, srcrskey->opclass, sizeof(Oid) * srcrskey->nkeyatts);
+
+	if (srcrskey->opcoptions != NULL)
+	{
+		for (int i = 0; i < srcrskey->nkeyatts; i++)
+		{
+			const bytea *srcopt = srcrskey->opcoptions[i];
+			Size	srcsize;
+
+			if (srcopt != NULL)
+			{
+				bytea *newopt;
+
+				srcsize = VARSIZE_ANY_EXHDR(srcopt);
+				newopt = MemoryContextAlloc(RelShapeContext, srcsize + VARHDRSZ);
+				SET_VARSIZE(newopt, srcsize + VARHDRSZ);
+				memcpy(VARDATA(newopt), VARDATA(srcopt), srcsize);
+				opcoptions[i] = newopt;
+			}
+			else
+			{
+				opcoptions[i] = NULL;
+			}
+		}
+	}
+	else
+	{
+		for (int i = 0; i < srcrskey->nkeyatts; i++)
+			opcoptions[i] = NULL;
+	}
+
+	destrskey->nkeyatts = srcrskey->nkeyatts;
+	destrskey->nsupport = srcrskey->nsupport;
+
+	destrskey->opclass = opclass;
+	destrskey->opcoptions = opcoptions;
+
+	Assert(HashRelShapeKey(src, keysize) == HashRelShapeKey(dest, keysize));
+	Assert(CmpRelShapeKey(src, dest, keysize) == 0);
+
+	return destrskey;
+}
+
 
 /*
  * Load one critical system index into the relcache
@@ -6021,13 +6443,13 @@ RelationBuildPublicationDesc(Relation relation, PublicationDesc *pubdesc)
 }
 
 static bytea **
-CopyIndexAttOptions(bytea **srcopts, int natts)
+CopyIndexAttOptions(const bytea *const *srcopts, int natts)
 {
 	bytea	  **opts = palloc_array(bytea *, natts);
 
 	for (int i = 0; i < natts; i++)
 	{
-		bytea	   *opt = srcopts[i];
+		const bytea *opt = srcopts[i];
 
 		opts[i] = !opt ? NULL : (bytea *)
 			DatumGetPointer(datumCopy(PointerGetDatum(opt), false, -1));
@@ -6036,29 +6458,19 @@ CopyIndexAttOptions(bytea **srcopts, int natts)
 	return opts;
 }
 
-/*
- * RelationGetIndexAttOptions
- *		get AM/opclass-specific options for an index parsed into a binary form
- */
-bytea	  **
-RelationGetIndexAttOptions(Relation relation, bool copy)
+static bytea	  **
+IndexRelationGetAttOptions(Relation relation)
 {
-	MemoryContext oldcxt;
-	bytea	  **opts = relation->rd_opcoptions;
-	Oid			relid = RelationGetRelid(relation);
-	int			natts = IndexRelationGetNumberOfKeyAttributes(relation);
-	int			i;
-
-	/* Try to copy cached options. */
-	if (opts)
-		return copy ? CopyIndexAttOptions(opts, natts) : opts;
+	bytea **opts;
+	int natts = IndexRelationGetNumberOfKeyAttributes(relation);
+	Oid relid = relation->rd_id;
 
 	/* Get and parse opclass options. */
 	opts = palloc0_array(bytea *, natts);
 
-	for (i = 0; i < natts; i++)
+	if (criticalRelcachesBuilt && relid != AttributeRelidNumIndexId)
 	{
-		if (criticalRelcachesBuilt && relid != AttributeRelidNumIndexId)
+		for (int i = 0; i < natts; i++)
 		{
 			Datum		attoptions = get_attoptions(relid, i + 1);
 
@@ -6069,23 +6481,30 @@ RelationGetIndexAttOptions(Relation relation, bool copy)
 		}
 	}
 
-	/* Copy parsed options to the cache. */
-	oldcxt = MemoryContextSwitchTo(relation->rd_indexcxt);
-	relation->rd_opcoptions = CopyIndexAttOptions(opts, natts);
-	MemoryContextSwitchTo(oldcxt);
+	return opts;
+}
+
+/*
+ * RelationGetIndexAttOptions
+ *		get AM/opclass-specific options for an index parsed into a binary form
+ */
+const bytea	*const *
+RelationGetIndexAttOptions(Relation relation, bool copy)
+{
+	const bytea	  *const *opts = relation->rd_opcoptions;
+	int			natts = IndexRelationGetNumberOfKeyAttributes(relation);
+
+	/*
+	 * Every index Relation in the relcache should've gone through either
+	 * load_relcache_init_index or RelationInitIndexAccessInfo, both of
+	 * which initialize rd_opcoptions.
+	 */
+	Assert(opts);
 
 	if (copy)
-		return opts;
+		return (const bytea *const *) CopyIndexAttOptions(opts, natts);
 
-	for (i = 0; i < natts; i++)
-	{
-		if (opts[i])
-			pfree(opts[i]);
-	}
-
-	pfree(opts);
-
-	return relation->rd_opcoptions;
+	return opts;
 }
 
 /*
@@ -6361,119 +6780,12 @@ load_relcache_init_file(bool shared)
 		 */
 		if (rel->rd_rel->relkind == RELKIND_INDEX)
 		{
-			MemoryContext indexcxt;
-			Oid		   *opfamily;
-			Oid		   *opcintype;
-			RegProcedure *support;
-			int			nsupport;
-			int16	   *indoption;
-			Oid		   *indcollation;
-
 			/* Count nailed indexes to ensure we have 'em all */
 			if (rel->rd_isnailed)
 				nailed_indexes++;
 
-			/* read the pg_index tuple */
-			if (fread(&len, 1, sizeof(len), fp) != sizeof(len))
+			if (!load_relcache_init_index(rel, fp))
 				goto read_failed;
-
-			rel->rd_indextuple = (HeapTuple) palloc(len);
-			if (fread(rel->rd_indextuple, 1, len, fp) != len)
-				goto read_failed;
-
-			/* Fix up internal pointers in the tuple -- see heap_copytuple */
-			rel->rd_indextuple->t_data = (HeapTupleHeader) ((char *) rel->rd_indextuple + HEAPTUPLESIZE);
-			rel->rd_index = (Form_pg_index) GETSTRUCT(rel->rd_indextuple);
-
-			/*
-			 * prepare index info context --- parameters should match
-			 * RelationInitIndexAccessInfo
-			 */
-			indexcxt = AllocSetContextCreate(CacheMemoryContext,
-											 "index info",
-											 ALLOCSET_SMALL_SIZES);
-			rel->rd_indexcxt = indexcxt;
-			MemoryContextCopyAndSetIdentifier(indexcxt,
-											  RelationGetRelationName(rel));
-
-			/*
-			 * Now we can fetch the index AM's API struct.  (We can't store
-			 * that in the init file, since it contains function pointers that
-			 * might vary across server executions.  Fortunately, it should be
-			 * safe to call the amhandler even while bootstrapping indexes.)
-			 */
-			InitIndexAmRoutine(rel);
-
-			/* read the vector of opfamily OIDs */
-			if (fread(&len, 1, sizeof(len), fp) != sizeof(len))
-				goto read_failed;
-
-			opfamily = (Oid *) MemoryContextAlloc(indexcxt, len);
-			if (fread(opfamily, 1, len, fp) != len)
-				goto read_failed;
-
-			rel->rd_opfamily = opfamily;
-
-			/* read the vector of opcintype OIDs */
-			if (fread(&len, 1, sizeof(len), fp) != sizeof(len))
-				goto read_failed;
-
-			opcintype = (Oid *) MemoryContextAlloc(indexcxt, len);
-			if (fread(opcintype, 1, len, fp) != len)
-				goto read_failed;
-
-			rel->rd_opcintype = opcintype;
-
-			/* read the vector of support procedure OIDs */
-			if (fread(&len, 1, sizeof(len), fp) != sizeof(len))
-				goto read_failed;
-			support = (RegProcedure *) MemoryContextAlloc(indexcxt, len);
-			if (fread(support, 1, len, fp) != len)
-				goto read_failed;
-
-			rel->rd_support = support;
-
-			/* read the vector of collation OIDs */
-			if (fread(&len, 1, sizeof(len), fp) != sizeof(len))
-				goto read_failed;
-
-			indcollation = (Oid *) MemoryContextAlloc(indexcxt, len);
-			if (fread(indcollation, 1, len, fp) != len)
-				goto read_failed;
-
-			rel->rd_indcollation = indcollation;
-
-			/* read the vector of indoption values */
-			if (fread(&len, 1, sizeof(len), fp) != sizeof(len))
-				goto read_failed;
-
-			indoption = (int16 *) MemoryContextAlloc(indexcxt, len);
-			if (fread(indoption, 1, len, fp) != len)
-				goto read_failed;
-
-			rel->rd_indoption = indoption;
-
-			/* read the vector of opcoptions values */
-			rel->rd_opcoptions = (bytea **)
-				MemoryContextAllocZero(indexcxt, sizeof(*rel->rd_opcoptions) * relform->relnatts);
-
-			for (i = 0; i < relform->relnatts; i++)
-			{
-				if (fread(&len, 1, sizeof(len), fp) != sizeof(len))
-					goto read_failed;
-
-				if (len > 0)
-				{
-					rel->rd_opcoptions[i] = (bytea *) MemoryContextAlloc(indexcxt, len);
-					if (fread(rel->rd_opcoptions[i], 1, len, fp) != len)
-						goto read_failed;
-				}
-			}
-
-			/* set up zeroed fmgr-info vector */
-			nsupport = relform->relnatts * rel->rd_indam->amsupport;
-			rel->rd_supportinfo = (FmgrInfo *)
-				MemoryContextAllocZero(indexcxt, nsupport * sizeof(FmgrInfo));
 		}
 		else
 		{
@@ -6634,6 +6946,202 @@ read_failed:
 	return false;
 }
 
+static bool
+load_relcache_init_index(Relation rel, FILE *fp)
+{
+	MemoryContext indexcxt;
+	RelShapeCacheKey key;
+	const bytea **opcoptions;
+	RelShapeCacheEnt *entry;
+	Oid		   *opfamily;
+	Oid		   *opcintype;
+	RegProcedure *support;
+	int16	   *indoption;
+	Oid		   *indcollation;
+	Oid			indclass[INDEX_MAX_KEYS];
+	Size		len;
+	Datum		indclassDatum;
+	bool		isnull, found;
+
+	/* read the pg_index tuple */
+	if (fread(&len, 1, sizeof(len), fp) != sizeof(len))
+		return false;
+
+	Assert(len >= HEAPTUPLESIZE + SizeofHeapTupleHeader + sizeof(FormData_pg_index));
+
+	rel->rd_indextuple = (HeapTuple) palloc(len);
+	Assert(len != 0);
+
+	if (fread(rel->rd_indextuple, 1, len, fp) != len)
+		return false;
+	Assert(rel->rd_indextuple->t_len >= 0);
+
+	/* Fix up internal pointers in the tuple -- see heap_copytuple */
+	rel->rd_indextuple->t_data = (HeapTupleHeader) (((char *) rel->rd_indextuple) + HEAPTUPLESIZE);
+	rel->rd_index = (Form_pg_index) GETSTRUCT(rel->rd_indextuple);
+
+	/*
+	 * prepare index info context --- parameters should match
+	 * RelationInitIndexAccessInfo
+	 */
+	indexcxt = AllocSetContextCreate(CacheMemoryContext, "index info",
+									 ALLOCSET_SMALL_SIZES);
+	rel->rd_indexcxt = indexcxt;
+	MemoryContextCopyAndSetIdentifier(indexcxt,
+									  RelationGetRelationName(rel));
+
+	/*
+	 * Now we can fetch the index AM's API struct.  (We can't store
+	 * that in the init file, since it contains function pointers that
+	 * might vary across server executions.  Fortunately, it should be
+	 * safe to call the amhandler even while bootstrapping indexes.)
+	 */
+	InitIndexAmRoutine(rel);
+
+	key.nkeyatts = IndexRelationGetNumberOfKeyAttributes(rel);
+	key.nsupport = rel->rd_indam->amsupport;
+
+	indclassDatum = fastgetattr(rel->rd_indextuple,
+								Anum_pg_index_indclass,
+								GetPgIndexDescriptor(),
+								&isnull);
+	Assert(!isnull);
+	memcpy(&indclass[0],
+		   ((oidvector *) DatumGetPointer(indclassDatum))->values,
+		   sizeof(Oid) * key.nkeyatts);
+	key.opclass = indclass;
+
+	/* read the vector of opcoptions values */
+	opcoptions = (const bytea **)
+		MemoryContextAlloc(RelShapeContext, sizeof(const bytea *) * key.nkeyatts);
+
+	/* read the values */
+	for (int i = 0; i < key.nkeyatts; i++)
+	{
+		if (fread(&len, 1, sizeof(len), fp) != sizeof(len))
+			return false;
+
+		if (len > 0)
+		{
+			bytea *read = (bytea *)
+				MemoryContextAlloc(RelShapeContext, len);
+
+			Assert(len >= 4);
+
+			if (fread(read, 1, len, fp) != len)
+				return false;
+
+			opcoptions[i] = read;
+		}
+		else
+			opcoptions[i] = NULL;
+	}
+
+	Assert(opcoptions);
+	Assert(key.nkeyatts > 0 && key.nkeyatts <= INDEX_MAX_KEYS);
+	Assert(key.nsupport);
+
+	key.opcoptions = opcoptions;
+	entry = hash_search(RelShapeCache, &key, HASH_ENTER, &found);
+
+#define READ_ITEM(type, name, neachkey, context) \
+	do { \
+		if (fread(&len, 1, sizeof(len), fp) != sizeof(len)) \
+			return false; \
+		\
+		if (len != sizeof(type) * (neachkey) * key.nkeyatts) \
+			return false; \
+		\
+		name = (type *) \
+			MemoryContextAlloc(context, len); \
+		\
+		if (fread(name, 1, len, fp) != len) \
+			return false; \
+	} while (0)
+
+	READ_ITEM(Oid, opfamily, 1, RelShapeContext);
+	READ_ITEM(Oid, opcintype, 1, RelShapeContext);
+	READ_ITEM(RegProcedure, support, key.nsupport, RelShapeContext);
+	READ_ITEM(Oid, indcollation, 1, indexcxt);
+	READ_ITEM(int16, indoption, 1, indexcxt);
+
+	if (!found)
+	{
+		MemoryContext idxshapectx;
+		char		*bulkalloc;
+		char		*bulkalloc_end PG_USED_FOR_ASSERTS_ONLY;
+		Size		total_alloc = 0;
+
+		entry->rsc_refcount = 1;
+
+		idxshapectx = AllocSetContextCreate(RelShapeContext, "index shape",
+											ALLOCSET_SMALL_SIZES);
+
+		total_alloc = sizeof(FmgrInfo) * key.nsupport * key.nkeyatts;
+		total_alloc += sizeof(Oid) * 2 * key.nkeyatts;
+		total_alloc += sizeof(RegProcedure) * key.nsupport * key.nkeyatts;
+
+
+		bulkalloc = MemoryContextAllocZero(idxshapectx, total_alloc);
+		bulkalloc_end = bulkalloc + total_alloc;
+
+		entry->rsc_mctx = idxshapectx;
+
+		if (key.nsupport > 0)
+		{
+			entry->rsc_supportinfo = (FmgrInfo *) bulkalloc;
+			bulkalloc += sizeof(FmgrInfo) * key.nkeyatts * key.nsupport;
+
+			memcpy(bulkalloc, support,
+				   sizeof(RegProcedure) * key.nkeyatts * key.nsupport);
+			entry->rsc_support = (Oid *) bulkalloc;
+			bulkalloc += sizeof(RegProcedure) * key.nkeyatts * key.nsupport;
+		}
+		else
+		{
+			entry->rsc_supportinfo = NULL;
+			entry->rsc_support = NULL;
+		}
+
+		memcpy(bulkalloc, opfamily, sizeof(Oid) * key.nkeyatts);
+		entry->rsc_opfamily = (Oid *) bulkalloc;
+		bulkalloc += sizeof(Oid) * key.nkeyatts;
+
+		memcpy(bulkalloc, opcintype, sizeof(Oid) * key.nkeyatts);
+		entry->rsc_opcintype = (Oid *) bulkalloc;
+		bulkalloc += sizeof(Oid) * key.nkeyatts;
+
+		Assert(bulkalloc == bulkalloc_end);
+
+		Assert(entry->key.opcoptions);
+		Assert(entry->key.opclass);
+		Assert(entry->rsc_opcintype);
+		Assert(entry->rsc_opfamily);
+		Assert(entry->rsc_supportinfo || entry->key.nsupport == 0);
+		Assert(entry->rsc_support || entry->key.nsupport == 0);
+
+		set_fn_opclass_options_bulk(entry->rsc_supportinfo,
+									entry->key.opcoptions,
+									key.nsupport,
+									key.nkeyatts, idxshapectx);
+	}
+	pfree(opfamily);
+	pfree(opcintype);
+	pfree(support);
+
+	entry->rsc_refcount++;
+
+	rel->rd_opfamily = entry->rsc_opfamily;
+	rel->rd_opcintype = entry->rsc_opcintype;
+	rel->rd_support = entry->rsc_support;
+	rel->rd_indcollation = indcollation;
+	rel->rd_indoption = indoption;
+	rel->rd_opcoptions = entry->key.opcoptions;
+	rel->rd_supportinfo = entry->rsc_supportinfo;
+
+	return true;
+}
+
 /*
  * Write out a new initialization file with the current contents
  * of the relcache (either shared rels or local rels, as indicated).
@@ -6758,46 +7266,56 @@ write_relcache_init_file(bool shared)
 		 */
 		if (rel->rd_rel->relkind == RELKIND_INDEX)
 		{
+			int		nkeyatts = IndexRelationGetNumberOfKeyAttributes(rel);
+			bool	isnull;
+#ifdef USE_ASSERT_CHECKING
+			Datum	indclassDatum =
+				fastgetattr(rel->rd_indextuple,
+							Anum_pg_index_indclass,
+							GetPgIndexDescriptor(),
+							&isnull);
+			Assert(!isnull);
+			Assert(((oidvector *) DatumGetPointer(indclassDatum))->values[0] != InvalidOid);
+#endif
+
 			/* write the pg_index tuple */
 			/* we assume this was created by heap_copytuple! */
 			write_item(rel->rd_indextuple,
 					   HEAPTUPLESIZE + rel->rd_indextuple->t_len,
 					   fp);
 
+			/* write the vector of opcoptions values */
+			for (i = 0; i < nkeyatts; i++)
+			{
+				const bytea *opt = rel->rd_opcoptions[i];
+
+				write_item(opt, opt ? VARSIZE(opt) : 0, fp);
+			}
+
 			/* write the vector of opfamily OIDs */
 			write_item(rel->rd_opfamily,
-					   relform->relnatts * sizeof(Oid),
+					   nkeyatts * sizeof(Oid),
 					   fp);
 
 			/* write the vector of opcintype OIDs */
 			write_item(rel->rd_opcintype,
-					   relform->relnatts * sizeof(Oid),
+					   nkeyatts * sizeof(Oid),
 					   fp);
 
 			/* write the vector of support procedure OIDs */
 			write_item(rel->rd_support,
-					   relform->relnatts * (rel->rd_indam->amsupport * sizeof(RegProcedure)),
+					   nkeyatts * (rel->rd_indam->amsupport * sizeof(RegProcedure)),
 					   fp);
 
 			/* write the vector of collation OIDs */
 			write_item(rel->rd_indcollation,
-					   relform->relnatts * sizeof(Oid),
+					   nkeyatts * sizeof(Oid),
 					   fp);
 
 			/* write the vector of indoption values */
 			write_item(rel->rd_indoption,
-					   relform->relnatts * sizeof(int16),
+					   nkeyatts * sizeof(int16),
 					   fp);
-
-			Assert(rel->rd_opcoptions);
-
-			/* write the vector of opcoptions values */
-			for (i = 0; i < relform->relnatts; i++)
-			{
-				bytea	   *opt = rel->rd_opcoptions[i];
-
-				write_item(opt, opt ? VARSIZE(opt) : 0, fp);
-			}
 		}
 	}
 
