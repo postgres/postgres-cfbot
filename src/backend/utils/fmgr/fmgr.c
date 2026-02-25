@@ -2027,17 +2027,120 @@ get_fn_expr_variadic(FmgrInfo *flinfo)
 }
 
 /*
- * Set options to FmgrInfo of opclass support function.
+ * Set options of an uncached FmgrInfo of opclass support function.
  *
  * Opclass support functions are called outside of expressions.  Thanks to that
  * we can use fn_expr to store opclass options as bytea constant.
+ *
+ * The relcache code will populate a relation's rd_supportinfo through
+ * set_fn_opclass_options_bulk().  This function is therefore mostly useful
+ * for non-default (e.g. cross-type) support procedures.
  */
 void
-set_fn_opclass_options(FmgrInfo *flinfo, bytea *options)
+set_fn_opclass_options(FmgrInfo *flinfo, const bytea *options)
 {
+	Assert(flinfo->fn_expr == NULL);
 	flinfo->fn_expr = (Node *) makeConst(BYTEAOID, -1, InvalidOid, -1,
 										 PointerGetDatum(options),
 										 options == NULL, false);
+}
+
+/* used only in set/clear_fn_opclass_options_bulk */
+static const Const OPCOPTION_NULL_CONST = {
+	.xpr = { .type = T_Const },
+	.consttype = BYTEAOID,
+	.consttypmod = -1,
+	.constcollid = InvalidOid,
+	.constlen = -1,
+	.constvalue = (Datum) (uintptr_t) NULL,
+	.constisnull = true,
+	.constbyval = false,
+	.location = -1
+};
+
+/*
+ * Set options to FmgrInfos of opclass support functions.
+ *
+ * Opclass support functions are called outside of expressions, and so don't
+ * use the fn_expr field.  As such, we use the field to store the index'
+ * opclass options inside a bytea-typed Const node.
+ *
+ * Note: For NULL opcopts, a sentinel OPCOPTION_NULL_CONST is used, all other
+ * options get their own Const allocation in the caller's memory context.
+ */
+void
+set_fn_opclass_options_bulk(FmgrInfo *flinfo, const bytea *const *opcopts,
+							int nsupport, int nkeycols,
+							MemoryContext shapectx)
+{
+	MemoryContext	old_ctx;
+	Const		   *bulk = NULL;
+	int				nonnulls = 0;
+
+	if (nsupport == 0)
+		return;
+
+	old_ctx = MemoryContextSwitchTo(shapectx);
+
+	Assert(flinfo != NULL);
+	Assert(opcopts != NULL);
+
+	for (int attno = 0; attno < nkeycols; attno++)
+	{
+		if (opcopts[attno] != NULL)
+			nonnulls++;
+	}
+
+	if (nonnulls)
+		bulk = palloc0(sizeof(Const) * nonnulls);
+	nonnulls = 0;
+
+	for (int attno = 0; attno < nkeycols; attno++)
+	{
+		Node *option;
+		const bytea *opcoption = opcopts[attno];
+
+		/* Avoid allocating memory in the common case of no opcoptions */
+		if (opcoption == NULL)
+			option = (Node *) &OPCOPTION_NULL_CONST;
+		else
+		{
+			Const *coption = &bulk[nonnulls++];
+			coption->xpr.type = T_Const;
+
+			coption->consttype = BYTEAOID;
+			coption->consttypmod = -1;
+			coption->constcollid = InvalidOid;
+			coption->constlen = -1;
+			coption->constvalue = PointerGetDatum(opcoption);
+			coption->constisnull = false;
+			coption->constbyval = false;
+
+			option = (Node *) coption;
+		}
+		Assert(option != NULL);
+
+		/*
+		 * Assign the const container and shape memory context.
+		 *
+		 * We push the same allocation into all support functions of the same
+		 * attribute, so we can avoid what would be duplicate allocations, and
+		 * minimize duplicated allocations.  All infos also use the same
+		 * MemoryContext associated with this shape, because assigning a
+		 * Relation's rd_indexcxt would cause stale pointers when one index is
+		 * dropped but others of the same shape survive.
+		 */
+		for (int support = 0; support < nsupport; support++)
+		{
+			Assert(flinfo->fn_expr == NULL);
+
+			flinfo->fn_expr = option;
+			flinfo->fn_mcxt = shapectx;
+			flinfo++;
+		}
+	}
+
+	MemoryContextSwitchTo(old_ctx);
 }
 
 /*
