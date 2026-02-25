@@ -1392,7 +1392,7 @@ typedef struct IndexOptInfo
 	/* do NULLs come first in the sort order? or NULL if partitioned index */
 	bool	   *nulls_first pg_node_attr(array_size(nkeycolumns));
 	/* opclass-specific options for columns */
-	bytea	  **opclassoptions pg_node_attr(read_write_ignore);
+	const bytea *const *opclassoptions pg_node_attr(read_write_ignore);
 	/* which index cols can be returned in an index-only scan? */
 	bool	   *canreturn pg_node_attr(array_size(ncolumns));
 	/* OID of the access method (in pg_am) */
