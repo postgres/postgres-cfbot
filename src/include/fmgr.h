@@ -779,7 +779,11 @@ extern bool get_call_expr_arg_stable(Node *expr, int argnum);
 extern bool get_fn_expr_variadic(FmgrInfo *flinfo);
 extern bytea *get_fn_opclass_options(FmgrInfo *flinfo);
 extern bool has_fn_opclass_options(FmgrInfo *flinfo);
-extern void set_fn_opclass_options(FmgrInfo *flinfo, bytea *options);
+extern void set_fn_opclass_options(FmgrInfo *flinfo, const bytea *options);
+extern void set_fn_opclass_options_bulk(FmgrInfo *flinfo,
+										const bytea * const*opcopts,
+										int ninfos, int nkeycols,
+										MemoryContext shapectx);
 extern bool CheckFunctionValidatorAccess(Oid validatorOid, Oid functionOid);
 
 /*
