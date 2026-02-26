@@ -44,6 +44,7 @@
 #include "commands/comment.h"
 #include "commands/defrem.h"
 #include "commands/sequence.h"
+#include "lib/stringinfo.h"
 #include "commands/tablecmds.h"
 #include "commands/tablespace.h"
 #include "miscadmin.h"
@@ -1302,17 +1303,18 @@ transformTableLikeClause(CreateStmtContext *cxt, TableLikeClause *table_like_cla
 	}
 
 	/*
-	 * We cannot yet deal with defaults, CHECK constraints, indexes, or
-	 * statistics, since we don't yet know what column numbers the copied
-	 * columns will have in the finished table.  If any of those options are
-	 * specified, add the LIKE clause to cxt->likeclauses so that
-	 * expandTableLikeClause will be called after we do know that.
+	 * We cannot yet deal with defaults, CHECK constraints, indexes,
+	 * statistics, or table comments, since we don't yet know what column
+	 * numbers the copied columns will have in the finished table.  If any of
+	 * those options are specified, add the LIKE clause to cxt->likeclauses
+	 * so that expandTableLikeClause will be called after we do know that.
 	 *
 	 * In order for this to work, we remember the relation OID so that
 	 * expandTableLikeClause is certain to open the same table.
 	 */
 	if (table_like_clause->options &
-		(CREATE_TABLE_LIKE_DEFAULTS |
+		(CREATE_TABLE_LIKE_COMMENTS |
+		 CREATE_TABLE_LIKE_DEFAULTS |
 		 CREATE_TABLE_LIKE_GENERATED |
 		 CREATE_TABLE_LIKE_CONSTRAINTS |
 		 CREATE_TABLE_LIKE_INDEXES |
@@ -1628,6 +1630,51 @@ expandTableLikeClause(RangeVar *heapRel, TableLikeClause *table_like_clause)
 		}
 
 		list_free(parent_extstats);
+	}
+
+	/*
+	 * Copy comment on the relation itself, if requested.
+	 */
+	if (table_like_clause->options & CREATE_TABLE_LIKE_COMMENTS)
+	{
+		comment = GetComment(RelationGetRelid(relation), RelationRelationId, 0);
+
+		if (comment != NULL)
+		{
+			CommentStmt *stmt;
+			char *existing_comment;
+
+			/*
+			 * Check if the target table already has a comment from a previous
+			 * LIKE clause.  If so, append this comment to it with a newline
+			 * separator.
+			 */
+			existing_comment = GetComment(RelationGetRelid(childrel), RelationRelationId, 0);
+
+			stmt = makeNode(CommentStmt);
+			stmt->objtype = OBJECT_TABLE;
+			if (heapRel->schemaname)
+				stmt->object = (Node *)list_make2(makeString(heapRel->schemaname),
+												  makeString(heapRel->relname));
+			else
+				stmt->object = (Node *)list_make1(makeString(heapRel->relname));
+
+			/* Combine comments if there was a previous one */
+			if (existing_comment != NULL)
+			{
+				StringInfoData buf;
+
+				initStringInfo(&buf);
+				appendStringInfoString(&buf, existing_comment);
+				appendStringInfoChar(&buf, '\n');
+				appendStringInfoString(&buf, comment);
+				stmt->comment = buf.data;
+			}
+			else
+				stmt->comment = comment;
+
+			result = lappend(result, stmt);
+		}
 	}
 
 	/* Done with child rel */
