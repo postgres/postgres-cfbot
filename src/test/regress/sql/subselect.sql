@@ -1566,15 +1566,19 @@ EXPLAIN (COSTS OFF)
 SELECT ten FROM onek t WHERE 1.0::integer IN ((VALUES (1), (3)));
 
 --
--- Check NOT IN performs an ANTI JOIN when both the outer query's expressions
--- and the sub-select's output columns are provably non-nullable, and the
--- operator itself cannot return NULL for non-null inputs.
+-- Test cases for NOT ANY transformations and ALL transformations
 --
 
 BEGIN;
 
 CREATE TEMP TABLE not_null_tab (id int NOT NULL, val int NOT NULL);
 CREATE TEMP TABLE null_tab (id int, val int);
+
+--
+-- Check NOT IN performs an ANTI JOIN when both the outer query's expressions
+-- and the sub-select's output columns are provably non-nullable, and the
+-- operator itself cannot return NULL for non-null inputs.
+--
 
 -- ANTI JOIN: both sides are defined NOT NULL
 EXPLAIN (COSTS OFF)
@@ -1776,5 +1780,65 @@ WHERE COALESCE(t1.id, -1) NOT IN
 SELECT * FROM null_tab t1
 WHERE COALESCE(t1.id, -1) NOT IN
     (SELECT t1.val FROM not_null_tab t2 WHERE t2.val IS NOT NULL);
+
+--
+-- Check ALL SubLink is converted to ANY SubLink if negated testexpr exists
+--
+
+-- Ensure we get a hashed ANY SubPlan
+EXPLAIN (COSTS OFF)
+SELECT * FROM not_null_tab
+WHERE id <> ALL (SELECT id FROM null_tab);
+
+-- Ensure we get a hashed ANY SubPlan
+EXPLAIN (COSTS OFF)
+SELECT * FROM not_null_tab
+WHERE (id, val) <> ALL (SELECT id, val FROM null_tab);
+
+-- Ensure we get an ANY SubPlan
+EXPLAIN (COSTS OFF)
+SELECT * FROM not_null_tab
+WHERE (id, val) > ALL (SELECT id, val FROM null_tab);
+
+-- Ensure we get an anti-join
+EXPLAIN (COSTS OFF)
+SELECT * FROM not_null_tab
+WHERE id <> ALL (SELECT id FROM not_null_tab);
+
+-- Ensure we get an anti-join
+EXPLAIN (COSTS OFF)
+SELECT * FROM not_null_tab
+WHERE (id, val) <> ALL (SELECT id, val FROM not_null_tab);
+
+-- Ensure we get an anti-join
+EXPLAIN (COSTS OFF)
+SELECT * FROM not_null_tab
+WHERE (id, val) > ALL (SELECT id, val FROM not_null_tab);
+
+-- Ensure we get a semi-join
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_tab
+WHERE NOT id <> ALL (SELECT id FROM null_tab);
+
+-- Ensure we get a hashed ANY SubPlan
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_tab t1
+LEFT JOIN null_tab t2
+ON NOT t1.id <> ALL (SELECT id FROM null_tab);
+
+-- Ensure we get a semi-join
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_tab
+WHERE NOT (id, val) <> ALL (SELECT id, val FROM null_tab);
+
+-- Ensure we get a semi-join
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_tab
+WHERE NOT (id, val) > ALL (SELECT id, val FROM null_tab);
+
+-- Ensure we get ALL SubPlan, as the operator has no negator
+EXPLAIN (COSTS OFF)
+SELECT * FROM not_null_tab
+WHERE id ?= ALL (SELECT id FROM not_null_tab);
 
 ROLLBACK;
