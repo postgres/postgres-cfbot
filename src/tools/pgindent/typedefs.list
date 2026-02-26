@@ -3066,6 +3066,8 @@ SysScanDesc
 SysScanDescData
 SyscacheCallbackFunction
 SysloggerStartupData
+SystemBlock
+SystemContext
 SystemRowsSamplerData
 SystemSamplerData
 SystemTimeSamplerData

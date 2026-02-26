@@ -471,8 +471,8 @@ thrashing.
 Alternative Memory Context Implementations
 ------------------------------------------
 
-aset.c (AllocSetContext) is our default general-purpose allocator.  Three other
-allocator types also exist which are special-purpose:
+aset.c (AllocSetContext) is our default general-purpose allocator.  Several
+other allocator types also exist which are special-purpose:
 
 * slab.c (SlabContext) is designed for allocations of fixed-sized
   chunks.  The fixed chunk size must be specified when creating the context.
@@ -494,6 +494,17 @@ allocator types also exist which are special-purpose:
   which is especially useful for workloads that perform lots of small
   allocations.  Blocks are only free'd back to the operating system when the
   context is reset or deleted.
+
+* systemctx.c (SystemContext) is best suited for cases that require long-lived
+  allocations, but have minimal allocation traffic that doesn't require the
+  lowest latencies.  Because headers for each allocation are much larger than
+  with other context types, this context type is not well suited when many
+  small allocations are required.  Every allocation results in a malloc()
+  call, and every pfree results in a free().  The most suitable use cases are
+  for contexts that require very few and long-lived allocations.  The memory
+  overhead for the context itself is much smaller than with other context
+  types, so this implementation can be suitable when a large number of
+  contexts are required.
 
 For further details, please read the header comment in the corresponding .c
 file.
