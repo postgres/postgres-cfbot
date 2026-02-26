@@ -160,6 +160,9 @@ PutMemoryContextsStatsTupleStore(Tuplestorestate *tupstore,
 		case T_BumpContext:
 			type = "Bump";
 			break;
+		case T_ProxyContext:
+			type = "Proxy";
+			break;
 		default:
 			type = "???";
 			break;
