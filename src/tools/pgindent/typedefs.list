@@ -2430,6 +2430,8 @@ ProjectionInfo
 ProjectionPath
 PromptInterruptContext
 ProtocolVersion
+ProxyContext
+ProxyChunk
 PrsStorage
 PruneFreezeParams
 PruneFreezeResult
