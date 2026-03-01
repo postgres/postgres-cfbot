@@ -893,7 +893,16 @@ select count(*) from pg_constraint where contypid = 'connotnull'::regtype and co
      1
 (1 row)
 
-alter domain connotnull add constraint constr1bis not null;  -- redundant
+alter domain connotnull add constraint constr1bis not null;  -- error
+ERROR:  cannot create not-null constraint "constr1bis" for domain "connotnull"
+DETAIL:  A not-null constraint named "constr1" already exists for domain "connotnull".
+alter domain connotnull add constraint constr1 not null;  -- redundant
+alter domain connotnull add not null;  -- redundant
+alter domain connotnull set not null;  -- redundant
+alter domain connotnull add not null not valid;  -- error
+ERROR:  NOT NULL constraints cannot be marked NOT VALID
+LINE 1: alter domain connotnull add not null not valid;
+                                             ^
 select count(*) from pg_constraint where contypid = 'connotnull'::regtype and contype = 'n';
  count 
 -------
