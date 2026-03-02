@@ -607,6 +607,8 @@ refresh_by_match_merge(Oid matviewOid, Oid tempOid, Oid relowner,
 	ListCell   *indexoidscan;
 	int16		relnatts;
 	Oid		   *opUsedForQual;
+	StringInfoData precheck_cond_buf;
+	bool		precheck_has_cond;
 
 	initStringInfo(&querybuf);
 	matviewRel = table_open(matviewOid, NoLock);
@@ -634,45 +636,6 @@ refresh_by_match_merge(Oid matviewOid, Oid tempOid, Oid relowner,
 	appendStringInfo(&querybuf, "ANALYZE %s", tempname);
 	if (SPI_exec(querybuf.data, 0) != SPI_OK_UTILITY)
 		elog(ERROR, "SPI_exec failed: %s", querybuf.data);
-
-	/*
-	 * We need to ensure that there are not duplicate rows without NULLs in
-	 * the new data set before we can count on the "diff" results.  Check for
-	 * that in a way that allows showing the first duplicated row found.  Even
-	 * after we pass this test, a unique index on the materialized view may
-	 * find a duplicate key problem.
-	 *
-	 * Note: here and below, we use "tablename.*::tablerowtype" as a hack to
-	 * keep ".*" from being expanded into multiple columns in a SELECT list.
-	 * Compare ruleutils.c's get_variable().
-	 */
-	resetStringInfo(&querybuf);
-	appendStringInfo(&querybuf,
-					 "SELECT newdata.*::%s FROM %s newdata "
-					 "WHERE newdata.* IS NOT NULL AND EXISTS "
-					 "(SELECT 1 FROM %s newdata2 WHERE newdata2.* IS NOT NULL "
-					 "AND newdata2.* OPERATOR(pg_catalog.*=) newdata.* "
-					 "AND newdata2.ctid OPERATOR(pg_catalog.<>) "
-					 "newdata.ctid)",
-					 tempname, tempname, tempname);
-	if (SPI_execute(querybuf.data, false, 1) != SPI_OK_SELECT)
-		elog(ERROR, "SPI_exec failed: %s", querybuf.data);
-	if (SPI_processed > 0)
-	{
-		/*
-		 * Note that this ereport() is returning data to the user.  Generally,
-		 * we would want to make sure that the user has been granted access to
-		 * this data.  However, REFRESH MAT VIEW is only able to be run by the
-		 * owner of the mat view (or a superuser) and therefore there is no
-		 * need to check for access to data in the mat view.
-		 */
-		ereport(ERROR,
-				(errcode(ERRCODE_CARDINALITY_VIOLATION),
-				 errmsg("new data for materialized view \"%s\" contains duplicate rows without any null columns",
-						RelationGetRelationName(matviewRel)),
-				 errdetail("Row: %s",
-						   SPI_getvalue(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1))));
-	}
 
 	/*
 	 * Create the temporary "diff" table.
@@ -716,6 +679,8 @@ refresh_by_match_merge(Oid matviewOid, Oid tempOid, Oid relowner,
 	tupdesc = matviewRel->rd_att;
 	opUsedForQual = palloc0_array(Oid, relnatts);
 	foundUniqueIndex = false;
+	initStringInfo(&precheck_cond_buf);
+	precheck_has_cond = false;
 
 	indexoidlist = RelationGetIndexList(matviewRel);
 
@@ -803,6 +768,30 @@ refresh_by_match_merge(Oid matviewOid, Oid tempOid, Oid relowner,
 										 rightop, attrtype);
 
 				foundUniqueIndex = true;
+
+				/*
+				 * Also accumulate the same condition for the duplicate-row
+				 * pre-check, comparing newdata2 against newdata (instead of
+				 * newdata against mv).  This lets us detect rows that are
+				 * duplicates with respect to the unique index semantics ---
+				 * i.e. rows whose indexed columns are non-null and equal ---
+				 * without falsely flagging rows whose indexed columns are
+				 * NULL (which unique indexes treat as distinct).
+				 */
+				if (precheck_has_cond)
+					appendStringInfoString(&precheck_cond_buf, " AND ");
+
+				leftop = quote_qualified_identifier("newdata2",
+														NameStr(attr->attname));
+				rightop = quote_qualified_identifier("newdata",
+														 NameStr(attr->attname));
+
+				generate_operator_clause(&precheck_cond_buf,
+										 leftop, attrtype,
+										 op,
+										 rightop, attrtype);
+
+				precheck_has_cond = true;
 			}
 		}
 
@@ -831,6 +820,61 @@ refresh_by_match_merge(Oid matviewOid, Oid tempOid, Oid relowner,
 						   " AND newdata.* OPERATOR(pg_catalog.*=) mv.*) "
 						   "WHERE newdata.* IS NULL OR mv.* IS NULL "
 						   "ORDER BY tid");
+
+	/*
+	 * Before populating the diff table, check for duplicate rows in the
+	 * new data set.  We look for rows that are equal in all unique index
+	 * columns (using the same operators as the join above, where
+	 * NULL = NULL is false) AND are also *=-equal overall.  Such rows
+	 * would both match the same materialized view row in the join,
+	 * producing an ambiguous diff.
+	 *
+	 * Using index column operators rather than *= alone is important: it
+	 * correctly excludes rows whose indexed columns are NULL, because
+	 * unique indexes treat NULLs as distinct so those rows do not cause
+	 * join ambiguity.
+	 *
+	 * Note: here and below, we use "tablename.*::tablerowtype" as a hack
+	 * to keep ".*" from being expanded into multiple columns in a SELECT
+	 * list.  Compare ruleutils.c's get_variable().
+	 *
+	 * Even after we pass this test, a unique index on the materialized
+	 * view may find a duplicate key problem.
+	 */
+	{
+		StringInfoData precheck_querybuf;
+
+		initStringInfo(&precheck_querybuf);
+		appendStringInfo(&precheck_querybuf,
+						 "SELECT newdata.*::%s FROM %s newdata "
+						 "WHERE EXISTS "
+						 "(SELECT 1 FROM %s newdata2 WHERE %s"
+						 " AND newdata2.* OPERATOR(pg_catalog.*=) newdata.*"
+						 " AND newdata2.ctid OPERATOR(pg_catalog.<>) newdata.ctid)",
+						 tempname, tempname, tempname, precheck_cond_buf.data);
+
+		if (SPI_execute(precheck_querybuf.data, false, 1) != SPI_OK_SELECT)
+			elog(ERROR, "SPI_exec failed: %s", precheck_querybuf.data);
+
+		if (SPI_processed > 0)
+		{
+			/*
+			 * Note that this ereport() is returning data to the user.
+			 * Generally, we would want to make sure that the user has been
+			 * granted access to this data.  However, REFRESH MAT VIEW is
+			 * only able to be run by the owner of the mat view (or a
+			 * superuser) and therefore there is no need to check for access
+			 * to data in the mat view.
+			 */
+			ereport(ERROR,
+					(errcode(ERRCODE_CARDINALITY_VIOLATION),
+					 errmsg("new data for materialized view \"%s\" contains duplicate rows",
+							RelationGetRelationName(matviewRel)),
+					 errdetail("Row: %s",
+							   SPI_getvalue(SPI_tuptable->vals[0],
+										   SPI_tuptable->tupdesc, 1))));
+		}
+	}
 
 	/* Populate the temporary "diff" table. */
 	if (SPI_exec(querybuf.data, 0) != SPI_OK_INSERT)
