@@ -135,6 +135,28 @@ REFRESH MATERIALIZED VIEW mvtest_mv;
 REFRESH MATERIALIZED VIEW CONCURRENTLY mvtest_mv;
 DROP TABLE mvtest_foo CASCADE;
 
+-- test that duplicate rows containing NULLs in non-indexed columns are detected
+CREATE TABLE mvtest_foo(a text, b text);
+INSERT INTO mvtest_foo VALUES('test', NULL);
+CREATE MATERIALIZED VIEW mvtest_mv AS SELECT * FROM mvtest_foo;
+CREATE UNIQUE INDEX ON mvtest_mv(a);
+INSERT INTO mvtest_foo VALUES('test', NULL);
+REFRESH MATERIALIZED VIEW mvtest_mv;
+REFRESH MATERIALIZED VIEW CONCURRENTLY mvtest_mv;
+DROP TABLE mvtest_foo CASCADE;
+
+-- test that rows with NULLs in the indexed column are not false positives:
+-- unique indexes treat NULLs as distinct, so (NULL,NULL)x2 is a valid state
+-- and CONCURRENTLY should succeed and update the view to reflect both rows
+CREATE TABLE mvtest_foo(a int, b int);
+INSERT INTO mvtest_foo VALUES(NULL, NULL);
+CREATE MATERIALIZED VIEW mvtest_mv AS SELECT * FROM mvtest_foo;
+CREATE UNIQUE INDEX ON mvtest_mv(a);
+INSERT INTO mvtest_foo VALUES(NULL, NULL);
+REFRESH MATERIALIZED VIEW CONCURRENTLY mvtest_mv;
+SELECT COUNT(*) FROM mvtest_mv;
+DROP TABLE mvtest_foo CASCADE;
+
 -- make sure that all columns covered by unique indexes works
 CREATE TABLE mvtest_foo(a, b, c) AS VALUES(1, 2, 3);
 CREATE MATERIALIZED VIEW mvtest_mv AS SELECT * FROM mvtest_foo;
