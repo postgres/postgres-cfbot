@@ -396,8 +396,39 @@ REFRESH MATERIALIZED VIEW mvtest_mv;
 ERROR:  could not create unique index "mvtest_mv_a_idx"
 DETAIL:  Key (a)=(1) is duplicated.
 REFRESH MATERIALIZED VIEW CONCURRENTLY mvtest_mv;
-ERROR:  new data for materialized view "mvtest_mv" contains duplicate rows without any null columns
+ERROR:  new data for materialized view "mvtest_mv" contains duplicate rows
 DETAIL:  Row: (1,10)
+DROP TABLE mvtest_foo CASCADE;
+NOTICE:  drop cascades to materialized view mvtest_mv
+-- test that duplicate rows containing NULLs in non-indexed columns are detected
+CREATE TABLE mvtest_foo(a text, b text);
+INSERT INTO mvtest_foo VALUES('test', NULL);
+CREATE MATERIALIZED VIEW mvtest_mv AS SELECT * FROM mvtest_foo;
+CREATE UNIQUE INDEX ON mvtest_mv(a);
+INSERT INTO mvtest_foo VALUES('test', NULL);
+REFRESH MATERIALIZED VIEW mvtest_mv;
+ERROR:  could not create unique index "mvtest_mv_a_idx"
+DETAIL:  Key (a)=(test) is duplicated.
+REFRESH MATERIALIZED VIEW CONCURRENTLY mvtest_mv;
+ERROR:  new data for materialized view "mvtest_mv" contains duplicate rows
+DETAIL:  Row: (test,)
+DROP TABLE mvtest_foo CASCADE;
+NOTICE:  drop cascades to materialized view mvtest_mv
+-- test that rows with NULLs in the indexed column are not false positives:
+-- unique indexes treat NULLs as distinct, so (NULL,NULL)x2 is a valid state
+-- and CONCURRENTLY should succeed and update the view to reflect both rows
+CREATE TABLE mvtest_foo(a int, b int);
+INSERT INTO mvtest_foo VALUES(NULL, NULL);
+CREATE MATERIALIZED VIEW mvtest_mv AS SELECT * FROM mvtest_foo;
+CREATE UNIQUE INDEX ON mvtest_mv(a);
+INSERT INTO mvtest_foo VALUES(NULL, NULL);
+REFRESH MATERIALIZED VIEW CONCURRENTLY mvtest_mv;
+SELECT COUNT(*) FROM mvtest_mv;
+ count 
+-------
+     2
+(1 row)
+
 DROP TABLE mvtest_foo CASCADE;
 NOTICE:  drop cascades to materialized view mvtest_mv
 -- make sure that all columns covered by unique indexes works
