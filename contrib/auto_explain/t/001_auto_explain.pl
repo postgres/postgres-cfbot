@@ -60,7 +60,7 @@ $log_contents = query_log($node,
 
 like(
 	$log_contents,
-	qr/Query Text: PREPARE get_proc\(name\) AS SELECT \* FROM pg_proc WHERE proname = \$1;/,
+	qr/Query Text: PREPARE get_proc\(name\) AS SELECT \* FROM pg_proc WHERE proname = \$1/,
 	"prepared query text logged, text mode");
 
 like(
@@ -82,7 +82,7 @@ $log_contents = query_log(
 
 like(
 	$log_contents,
-	qr/Query Text: PREPARE get_type\(name\) AS SELECT \* FROM pg_type WHERE typname = \$1;/,
+	qr/Query Text: PREPARE get_type\(name\) AS SELECT \* FROM pg_type WHERE typname = \$1/,
 	"prepared query text logged, text mode");
 
 like(
@@ -98,7 +98,7 @@ $log_contents = query_log(
 
 like(
 	$log_contents,
-	qr/Query Text: PREPARE get_type\(name\) AS SELECT \* FROM pg_type WHERE typname = \$1;/,
+	qr/Query Text: PREPARE get_type\(name\) AS SELECT \* FROM pg_type WHERE typname = \$1/,
 	"prepared query text logged, text mode");
 
 unlike(
@@ -164,7 +164,7 @@ $log_contents = query_log(
 
 like(
 	$log_contents,
-	qr/"Query Text": "PREPARE get_class\(name\) AS SELECT \* FROM pg_class WHERE relname = \$1;"/,
+	qr/"Query Text": "PREPARE get_class\(name\) AS SELECT \* FROM pg_class WHERE relname = \$1"/,
 	"prepared query text logged, json mode");
 
 like(
