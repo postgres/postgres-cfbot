@@ -63,6 +63,9 @@ usage() if $help;
 usage("Cannot use --commit with command line file list")
   if (@commits && @ARGV);
 
+# default to current directory if no files/dirs given
+@ARGV = ('.') unless @ARGV || @commits;
+
 # command line option wins, then environment, then locations based on current
 # dir, then default location
 $typedefs_file ||= $ENV{PGTYPEDEFS};
