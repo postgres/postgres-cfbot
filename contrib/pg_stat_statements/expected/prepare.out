@@ -1,0 +1,53 @@
+-- Tests for PREPARE
+SELECT pg_stat_statements_reset() IS NOT NULL AS t;
+ t 
+---
+ t
+(1 row)
+
+-- Test that prepared statements in a multi-query string behaves as expected
+SELECT 1\;PREPARE p1 AS SELECT 1\; PREPARE p2(int) AS SELECT 2 * $1\; SELECT 1, 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+ ?column? | ?column? 
+----------+----------
+        1 |        1
+(1 row)
+
+SELECT calls, rows, query FROM pg_stat_statements ORDER BY query COLLATE "C";
+ calls | rows |                       query                        
+-------+------+----------------------------------------------------
+     1 |    1 | SELECT $1
+     1 |    1 | SELECT $1, $2
+     1 |    1 | SELECT pg_stat_statements_reset() IS NOT NULL AS t
+(3 rows)
+
+SELECT pg_stat_statements_reset() IS NOT NULL AS t;
+ t 
+---
+ t
+(1 row)
+
+EXECUTE p1;
+ ?column? 
+----------
+        1
+(1 row)
+
+EXECUTE p2(0);
+ ?column? 
+----------
+        0
+(1 row)
+
+SELECT calls, rows, query FROM pg_stat_statements ORDER BY query COLLATE "C";
+ calls | rows |                       query                        
+-------+------+----------------------------------------------------
+     1 |    1 | PREPARE p1 AS SELECT 1
+     1 |    1 | PREPARE p2(int) AS SELECT 2 * $1
+     1 |    1 | SELECT pg_stat_statements_reset() IS NOT NULL AS t
+(3 rows)
+
