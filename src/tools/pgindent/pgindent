@@ -13,7 +13,6 @@ use strict;
 use warnings FATAL => 'all';
 
 use Cwd qw(abs_path getcwd);
-use File::Find;
 use File::Spec;
 use File::Temp;
 use IO::Handle;
@@ -383,6 +382,49 @@ sub diff
 	return $diff;
 }
 
+sub discover_files
+{
+	my @paths = @_;
+	my @discovered;
+
+	# Separate individual files from directories
+	my @dirs;
+	foreach my $path (@paths)
+	{
+		if (-f $path)
+		{
+			push(@discovered, $path);
+		}
+		elsif (-d $path)
+		{
+			push(@dirs, $path);
+		}
+		else
+		{
+			warn "Could not find $path";
+		}
+	}
+
+	# Use git ls-files for directories to avoid searching build trees etc.
+	if (@dirs)
+	{
+		# Use -z to handle files with newlines in their names, and split on \0
+		# afterward.
+		open(my $git_ls, '-|', 'git', 'ls-files', '-z', '--', @dirs)
+		  || die "could not open git ls-files: $!";
+		binmode($git_ls);
+		# Slurp all output into a single string by temporarily unsetting
+		# the line separator.
+		my $git_output = do { local $/; <$git_ls> };
+		close($git_ls);
+		die "git ls-files error" if $?;
+		my @git_files = split(/\0/, $git_output);
+		push(@discovered, grep { /\.[ch]$/ } @git_files);
+	}
+
+	return @discovered;
+}
+
 sub usage
 {
 	my $message = shift;
@@ -418,16 +460,8 @@ $filtered_typedefs_fh = load_typedefs();
 
 check_indent();
 
-my $wanted = sub {
-	my ($dev, $ino, $mode, $nlink, $uid, $gid);
-	(($dev, $ino, $mode, $nlink, $uid, $gid) = lstat($_))
-	  && -f _
-	  && /^.*\.[ch]\z/s
-	  && push(@files, $File::Find::name);
-};
-
 # any non-option arguments are files or directories to be processed
-File::Find::find({ wanted => $wanted }, @ARGV) if @ARGV;
+push(@files, discover_files(@ARGV)) if @ARGV;
 
 # commit file locations are relative to the source root
 chdir "$sourcedir/../../.." if @commits && $sourcedir;
