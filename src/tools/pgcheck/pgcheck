@@ -175,8 +175,29 @@ if (!$indent && $sourcedir)
 }
 $indent ||= "pg_bsd_indent";
 
-# get perltidy location: command line wins, then environment, then PATH.
-my $perltidy = $perltidy_arg || $ENV{PERLTIDY} || "perltidy";
+# get perltidy location: command line wins, then environment, then try to
+# find a get_perltidy-installed copy in the source tree, then fall back to
+# PATH.
+my $perltidy = $perltidy_arg || $ENV{PERLTIDY};
+if (!$perltidy && $sourcedir)
+{
+	# Look for a get_perltidy-installed perltidy in the source tree.
+	my $candidate = "$sourcedir/perltidy/bin/perltidy";
+	if (-x $candidate)
+	{
+		$perltidy = $candidate;
+
+		# Local installs need PERL5LIB set so perltidy can find its
+		# modules.
+		my $libdir = "$sourcedir/perltidy/lib/perl5";
+		if (-d $libdir)
+		{
+			$ENV{PERL5LIB} =
+			  $ENV{PERL5LIB} ? "$libdir:$ENV{PERL5LIB}" : $libdir;
+		}
+	}
+}
+$perltidy ||= "perltidy";
 
 # get perlcritic location: command line wins, then environment, then PATH.
 my $perlcritic = $perlcritic_arg || $ENV{PERLCRITIC} || "perlcritic";
