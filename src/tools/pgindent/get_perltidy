@@ -1,0 +1,62 @@
+#!/bin/sh
+
+# src/tools/pgindent/get_perltidy
+#
+# Downloads and installs perltidy 20230309 into src/tools/pgindent/perltidy/.
+
+set -e
+
+PERLTIDY_VERSION=20230309
+PERLTIDY_TARBALL="Perl-Tidy-${PERLTIDY_VERSION}.tar.gz"
+PERLTIDY_URL="https://cpan.metacpan.org/authors/id/S/SH/SHANCOCK/${PERLTIDY_TARBALL}"
+PERLTIDY_SHA256="e22949a208c618d671a18c5829b451abbe9da0da2cddd78fdbfcb036c7361c18"
+
+# Determine the directory this script lives in, i.e. src/tools/pgindent
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+
+PERLTIDY_DIR="$SCRIPT_DIR/perltidy"
+PERLTIDY_BIN="$PERLTIDY_DIR/bin/perltidy"
+
+# Check if already installed with the correct version
+if [ -x "$PERLTIDY_BIN" ]; then
+	perltidy_lib="$PERLTIDY_DIR/lib/perl5"
+	installed_version=$(PERL5LIB="$perltidy_lib${PERL5LIB:+:$PERL5LIB}" "$PERLTIDY_BIN" -v 2>/dev/null || true)
+	if echo "$installed_version" | grep -q "$PERLTIDY_VERSION"; then
+		echo "perltidy $PERLTIDY_VERSION is already installed in $PERLTIDY_DIR"
+		exit 0
+	fi
+fi
+
+WORK_DIR=$(mktemp -d)
+trap 'rm -rf "$WORK_DIR"' EXIT
+
+# Download
+TARBALL="$WORK_DIR/$PERLTIDY_TARBALL"
+if command -v curl >/dev/null 2>&1; then
+	curl -sSL -o "$TARBALL" "$PERLTIDY_URL"
+elif command -v wget >/dev/null 2>&1; then
+	wget -q -O "$TARBALL" "$PERLTIDY_URL"
+else
+	echo "error: neither curl nor wget found" >&2
+	exit 1
+fi
+
+# Verify SHA256
+if command -v sha256sum >/dev/null 2>&1; then
+	echo "$PERLTIDY_SHA256  $TARBALL" | sha256sum -c - >/dev/null
+elif command -v shasum >/dev/null 2>&1; then
+	echo "$PERLTIDY_SHA256  $TARBALL" | shasum -a 256 -c - >/dev/null
+else
+	echo "error: neither sha256sum nor shasum found" >&2
+	exit 1
+fi
+
+# Extract, build, install
+cd "$WORK_DIR"
+tar xzf "$TARBALL"
+cd "Perl-Tidy-${PERLTIDY_VERSION}"
+perl Makefile.PL INSTALL_BASE="$PERLTIDY_DIR" >/dev/null
+make >/dev/null
+make install >/dev/null
+
+echo "perltidy $PERLTIDY_VERSION installed in $PERLTIDY_DIR"
