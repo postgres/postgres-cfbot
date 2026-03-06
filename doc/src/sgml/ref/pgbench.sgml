@@ -217,41 +217,93 @@ pgbench <optional> <replaceable>options</replaceable> </optional> <replaceable>d
            </para>
           </listitem>
          </varlistentry>
-         <varlistentry id="pgbench-option-init-steps-g">
-          <term><literal>g</literal> or <literal>G</literal> (Generate data, client-side or server-side)</term>
+
+         <varlistentry id="pgbench-option-init-steps-client">
+          <term><literal>g</literal> or <literal>c</literal> (Generate data, client-side)</term>
           <listitem>
            <para>
-            Generate data and load it into the standard tables,
-            replacing any data already present.
-           </para>
-           <para>
-            With <literal>g</literal> (client-side data generation),
-            data is generated in <command>pgbench</command> client and then
-            sent to the server. This uses the client/server bandwidth
+            Generate data and load it into the standard tables using client-side
+            generation. Data is generated in the <command>pgbench</command> client
+            and then sent to the server. This uses the client/server bandwidth
             extensively through a <command>COPY</command>.
             <command>pgbench</command> uses the <option>FREEZE</option> option
             to load data into ordinary (non-partition) tables with version 14
             or later of <productname>PostgreSQL</productname> to speed up
-            subsequent <command>VACUUM</command>.
-            Using <literal>g</literal> causes logging to
-            print one message every 100,000 rows while generating data for all
-            tables.
+            subsequent <command>VACUUM</command>. Using <literal>g</literal>
+            or <literal>c</literal> causes logging to print one message
+            every 100,000 rows while generating data for all tables.
            </para>
            <para>
-            With <literal>G</literal> (server-side data generation),
+            With <literal>g</literal> (text format), the client sends data in
+            <command>COPY ... FROM STDIN (FORMAT TEXT)</command>.
+            This is default mode for data initialization.
+           </para>
+           <para>
+            With <literal>c</literal> (binary format), the client sends data using
+            <command>COPY ... FROM STDIN (FORMAT BINARY)</command>. Binary transfer
+            can be faster than text, but may be less portable across different
+            versions or platforms.
+           </para>
+           <para>
+            The default initialization behavior uses client-side data generation
+            with text format (equivalent to <literal>g</literal>).
+           </para>
+          </listitem>
+         </varlistentry>
+
+         <varlistentry id="pgbench-option-init-steps-server">
+          <term><literal>G</literal> or <literal>U</literal> (Generate data, server-side)</term>
+          <listitem>
+           <para>
+            With <literal>G</literal> or <literal>U</literal> (server-side data generation),
             only small queries are sent from the <command>pgbench</command>
             client and then data is actually generated in the server.
             No significant bandwidth is required for this variant, but
             the server will do more work.
-            Using <literal>G</literal> causes logging not to print any progress
-            message while generating data.
+            Using <literal>G</literal> or <literal>U</literal> causes logging not to print
+            any progress message while generating data.
            </para>
            <para>
-            The default initialization behavior uses client-side data
-            generation (equivalent to <literal>g</literal>).
+            With <literal>G</literal>, the server uses <literal>INSERT ...
+            SELECT generate_series(...)</literal> to produce the rows. This method
+            is simple and widely used.
+           </para>
+           <para>
+            With <literal>U</literal>, the server uses <literal>INSERT ...
+            SELECT unnest(...)</literal> to expand arrays of generated values. This can
+            be more efficient when multiple columns are generated together for column-based
+            table, as the work is done in a single scan.
            </para>
           </listitem>
          </varlistentry>
+
+         <varlistentry id="pgbench-option-init-steps-transaction-mode">
+          <term><literal>S</literal> or <literal>M</literal> (Transaction mode for initialization)</term>
+          <listitem>
+           <para>
+            Specifies whether the initialization steps are performed in a single
+            transaction or in multiple transactions.
+           </para>
+           <para>
+            With <literal>S</literal> (single transaction), all data generation
+            are executed within one transaction. This is the default
+            behavior. Using a single transaction allows the use of the
+            <option>FREEZE</option> option with client-side <command>COPY</command>.
+           </para>
+           <para>
+            With <literal>M</literal> (multiple transactions), data for each scale factor
+            unit (e.g., for each increment of <option>--scale=</option>) is loaded in a
+            separate transaction. For example, if you set <option>--scale=20</option>
+            data will be added to three main tables in 20 separate transactions.
+            In this mode, the <option>FREEZE</option> option
+            cannot be used with client-side <command>COPY</command>.
+            Using multiple transactions can speed up data generation by
+            committing data in smaller batches, which may reduce the overhead of a
+            single huge transaction, but also adds per-transaction commit costs.
+           </para>
+          </listitem>
+         </varlistentry>
+
          <varlistentry id="pgbench-option-init-steps-v">
           <term><literal>v</literal> (Vacuum)</term>
           <listitem>
@@ -260,6 +312,7 @@ pgbench <optional> <replaceable>options</replaceable> </optional> <replaceable>d
            </para>
           </listitem>
          </varlistentry>
+
          <varlistentry id="pgbench-option-init-steps-p">
           <term><literal>p</literal> (create Primary keys)</term>
           <listitem>
@@ -268,6 +321,7 @@ pgbench <optional> <replaceable>options</replaceable> </optional> <replaceable>d
            </para>
           </listitem>
          </varlistentry>
+
          <varlistentry id="pgbench-option-init-steps-f">
          <term><literal>f</literal> (create Foreign keys)</term>
           <listitem>
