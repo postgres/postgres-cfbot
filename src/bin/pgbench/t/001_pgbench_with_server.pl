@@ -16,25 +16,30 @@ sub check_data_state
 	local $Test::Builder::Level = $Test::Builder::Level + 1;
 	my $node = shift;
 	my $type = shift;
+	my $sql_result;
 
-	my $sql_result = $node->safe_psql('postgres',
-		'SELECT count(*) AS null_count FROM pgbench_accounts WHERE filler IS NULL LIMIT 10;'
-	);
-	is($sql_result, '0',
-		"$type: filler column of pgbench_accounts has no NULL data");
 	$sql_result = $node->safe_psql('postgres',
 		'SELECT count(*) AS null_count FROM pgbench_branches WHERE filler IS NULL;'
 	);
 	is($sql_result, '1',
 		"$type: filler column of pgbench_branches has only NULL data");
+
 	$sql_result = $node->safe_psql('postgres',
 		'SELECT count(*) AS null_count FROM pgbench_tellers WHERE filler IS NULL;'
 	);
 	is($sql_result, '10',
 		"$type: filler column of pgbench_tellers has only NULL data");
+
+	$sql_result = $node->safe_psql('postgres',
+		'SELECT count(*) AS null_count FROM pgbench_accounts WHERE filler IS NULL LIMIT 10;'
+	);
+	is($sql_result, '0',
+		"$type: filler column of pgbench_accounts has no NULL data");
+
 	$sql_result = $node->safe_psql('postgres',
 		'SELECT count(*) AS data_count FROM pgbench_history;');
-	is($sql_result, '0', "$type: pgbench_history has no data");
+	is($sql_result, '0',
+		"$type: pgbench_history has no data");
 }
 
 # start a pgbench specific server
@@ -112,6 +117,7 @@ $node->pgbench(
 	[qr{Perhaps you need to do initialization}],
 	'run without init');
 
+
 # Initialize pgbench tables scale 1
 $node->pgbench(
 	'-i', 0,
@@ -125,7 +131,7 @@ $node->pgbench(
 	'pgbench scale 1 initialization',);
 
 # Check data state, after client-side data generation.
-check_data_state($node, 'client-side');
+check_data_state($node, 'client-side (default options)');
 
 # Again, with all possible options
 $node->pgbench(
@@ -143,6 +149,7 @@ $node->pgbench(
 		qr{done in \d+\.\d\d s }
 	],
 	'pgbench scale 1 initialization');
+check_data_state($node, 'client-side (all options)');
 
 # Test interaction of --init-steps with legacy step-selection options
 $node->pgbench(
@@ -154,7 +161,7 @@ $node->pgbench(
 		qr{creating tables},
 		qr{creating 3 partitions},
 		qr{creating primary keys},
-		qr{generating data \(server-side\)},
+		qr{generating data \(server-side as single transaction\)},
 		qr{creating foreign keys},
 		qr{(?!vacuuming)},    # no vacuum
 		qr{done in \d+\.\d\d s }
@@ -163,6 +170,219 @@ $node->pgbench(
 
 # Check data state, after server-side data generation.
 check_data_state($node, 'server-side');
+
+
+# Test server-side generation with generate_series
+$node->pgbench(
+	'--initialize --init-steps=dtG',
+	0,
+	[qr{^$}],
+	[
+		qr{dropping old tables},
+		qr{creating tables},
+		qr{generating data \(server-side as single transaction\)},
+		qr{done in \d+\.\d\d s }
+	],
+	'pgbench --init-steps server-side generate_series');
+
+# Check data state, after server-side data generation.
+check_data_state($node, 'server-side (generate_series)');
+
+$node->pgbench(
+	'--initialize --init-steps=dtSG',
+	0,
+	[qr{^$}],
+	[
+		qr{dropping old tables},
+		qr{creating tables},
+		qr{generating data \(server-side as single transaction\)},
+		qr{done in \d+\.\d\d s }
+	],
+	'pgbench --init-steps server-side generate_series');
+
+# Check data state, after server-side data generation.
+check_data_state($node, 'server-side (generate_series single XACT)');
+
+$node->pgbench(
+	'--initialize --init-steps=dtMG',
+	0,
+	[qr{^$}],
+	[
+		qr{dropping old tables},
+		qr{creating tables},
+		qr{generating data \(server-side as multiple transactions\)},
+		qr{done in \d+\.\d\d s }
+	],
+	'pgbench --init-steps server-side generate_series');
+
+# Check data state, after server-side data generation.
+check_data_state($node, 'server-side (generate_series multiple XACTs)');
+
+
+# Test server-side generation with UNNEST
+$node->pgbench(
+	'--initialize --init-steps=dtU',
+	0,
+	[qr{^$}],
+	[
+		qr{dropping old tables},
+		qr{creating tables},
+		qr{generating data \(server-side as single transaction\)},
+		qr{done in \d+\.\d\d s }
+	],
+	'pgbench --init-steps server-side UNNEST');
+
+# Check data state, after server-side data generation.
+check_data_state($node, 'server-side (unnest)');
+
+$node->pgbench(
+	'--initialize --init-steps=dtSU',
+	0,
+	[qr{^$}],
+	[
+		qr{dropping old tables},
+		qr{creating tables},
+		qr{generating data \(server-side as single transaction\)},
+		qr{done in \d+\.\d\d s }
+	],
+	'pgbench --init-steps server-side UNNEST');
+
+# Check data state, after server-side data generation.
+check_data_state($node, 'server-side (unnest)');
+
+$node->pgbench(
+	'--initialize --init-steps=dtMU',
+	0,
+	[qr{^$}],
+	[
+		qr{dropping old tables},
+		qr{creating tables},
+		qr{generating data \(server-side as multiple transactions\)},
+		qr{done in \d+\.\d\d s }
+	],
+	'pgbench --init-steps server-side UNNEST');
+
+# Check data state, after server-side data generation.
+check_data_state($node, 'server-side (unnest)');
+
+
+# Test client-side generation with COPY TEXT
+$node->pgbench(
+	'--initialize --init-steps=dtg',
+	0,
+	[qr{^$}],
+	[
+		qr{dropping old tables},
+		qr{creating tables},
+		qr{generating data \(client-side as single transaction},
+		qr{done in \d+\.\d\d s }
+	],
+	'pgbench --init-steps client-side TEXT (single XACT #1)');
+
+# Check data state, after client-side data generation.
+check_data_state($node, 'client-side (text)');
+
+$node->pgbench(
+	'--initialize --init-steps=dtSg',
+	0,
+	[qr{^$}],
+	[
+		qr{dropping old tables},
+		qr{creating tables},
+		qr{generating data \(client-side as single transaction},
+		qr{\d of \d+ tuples \(\d%\) of pgbench_branches done},
+		qr{\d of \d+ tuples \(\d%\) of pgbench_tellers done},
+		qr{\d of \d+ tuples \(\d%\) of pgbench_accounts done},
+		qr{done in \d+\.\d\d s }
+	],
+	'pgbench --init-steps client-side TEXT (single XACT #2)');
+
+# Check data state, after client-side data generation.
+check_data_state($node, 'client-side (text)');
+
+$node->pgbench(
+	'--initialize --init-steps=dtMg',
+	0,
+	[qr{^$}],
+	[
+		qr{dropping old tables},
+		qr{creating tables},
+		qr{generating data \(client-side as multiple transactions},
+		qr{done in \d+\.\d\d s }
+	],
+	'pgbench --init-steps client-side TEXT (multiple XACTs)');
+
+# Check data state, after client-side data generation.
+check_data_state($node, 'client-side (text)');
+
+
+# Test client-side generation with COPY BINARY
+$node->pgbench(
+	'--initialize --init-steps=dtc',
+	0,
+	[qr{^$}],
+	[
+		qr{dropping old tables},
+		qr{creating tables},
+		qr{generating data \(client-side as single transaction},
+		qr{done in \d+\.\d\d s }
+	],
+	'pgbench --init-steps client-side BINARY (single XACT #1)');
+
+# Check data state, after client-side data generation.
+check_data_state($node, 'client-side (binary)');
+
+$node->pgbench(
+	'--initialize --init-steps=dtSc',
+	0,
+	[qr{^$}],
+	[
+		qr{dropping old tables},
+		qr{creating tables},
+		qr{generating data \(client-side as single transaction},
+		qr{done in \d+\.\d\d s }
+	],
+	'pgbench --init-steps client-side BINARY (single XACT #2)');
+
+# Check data state, after client-side data generation.
+check_data_state($node, 'client-side (binary)');
+
+$node->pgbench(
+	'--initialize --init-steps=dtMc',
+	0,
+	[qr{^$}],
+	[
+		qr{dropping old tables},
+		qr{creating tables},
+		qr{generating data \(client-side as multiple transactions},
+		qr{done in \d+\.\d\d s }
+	],
+	'pgbench --init-steps client-side BINARY');
+
+# Check data state, after client-side data generation.
+check_data_state($node, 'client-side (binary)');
+
+
+# Check data state, after different modes of client-side data generation.
+check_data_state($node, 'client-side (binary)');
+
+$node->pgbench(
+	'--initialize --init-steps=dtMccSc',
+	0,
+	[qr{^$}],
+	[
+		qr{dropping old tables},
+		qr{creating tables},
+		qr{generating data \(client-side as multiple transactions},
+		qr{generating data \(client-side as multiple transactions},
+		qr{generating data \(client-side as single transaction},
+		qr{done in \d+\.\d\d s }
+	],
+	'pgbench --init-steps client-side BINARY (multiple XACT modes)');
+
+# Check data state, after client-side data generation.
+check_data_state($node, 'client-side (binary different XACT modes in list of --init-steps)');
+
 
 # Run all builtin scripts, for a few transactions each
 $node->pgbench(
