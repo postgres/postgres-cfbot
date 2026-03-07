@@ -1,0 +1,5 @@
+# test_session_buffer_usage extension
+comment = 'show buffer usage statistics for the current session'
+default_version = '1.0'
+module_pathname = '$libdir/test_session_buffer_usage'
+relocatable = true
