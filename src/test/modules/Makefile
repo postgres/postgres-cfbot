@@ -50,6 +50,7 @@ SUBDIRS = \
 		  test_resowner \
 		  test_rls_hooks \
 		  test_saslprep \
+		  test_session_buffer_usage \
 		  test_shmem \
 		  test_shm_mq \
 		  test_slru \
