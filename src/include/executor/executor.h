@@ -817,5 +817,8 @@ extern ResultRelInfo *ExecLookupResultRelByOid(ModifyTableState *node,
 											   Oid resultoid,
 											   bool missing_ok,
 											   bool update_cache);
+extern Bitmapset *ExecUpdateModifiedIdxAttrs(ResultRelInfo *relinfo,
+											 TupleTableSlot *old_tts,
+											 TupleTableSlot *new_tts);
 
 #endif							/* EXECUTOR_H  */

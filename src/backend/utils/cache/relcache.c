@@ -2478,6 +2478,7 @@ RelationDestroyRelation(Relation relation, bool remember_tupdesc)
 	bms_free(relation->rd_idattr);
 	bms_free(relation->rd_hotblockingattr);
 	bms_free(relation->rd_summarizedattr);
+	bms_free(relation->rd_indexedattr);
 	if (relation->rd_pubdesc)
 		pfree(relation->rd_pubdesc);
 	if (relation->rd_options)
@@ -5326,6 +5327,7 @@ RelationGetIndexPredicate(Relation relation)
  *									index (empty if FULL)
  *	INDEX_ATTR_BITMAP_HOT_BLOCKING	Columns that block updates from being HOT
  *	INDEX_ATTR_BITMAP_SUMMARIZED	Columns included in summarizing indexes
+ *	INDEX_ATTR_BITMAP_INDEXED		Columns referenced by any index
  *
  * Attribute numbers are offset by FirstLowInvalidHeapAttributeNumber so that
  * we can include system attributes (e.g., OID) in the bitmap representation.
@@ -5350,6 +5352,7 @@ RelationGetIndexAttrBitmap(Relation relation, IndexAttrBitmapKind attrKind)
 	Bitmapset  *idindexattrs;	/* columns in the replica identity */
 	Bitmapset  *hotblockingattrs;	/* columns with HOT blocking indexes */
 	Bitmapset  *summarizedattrs;	/* columns with summarizing indexes */
+	Bitmapset  *indexedattrs;	/* columns referenced by any index */
 	List	   *indexoidlist;
 	List	   *newindexoidlist;
 	Oid			relpkindex;
@@ -5372,6 +5375,8 @@ RelationGetIndexAttrBitmap(Relation relation, IndexAttrBitmapKind attrKind)
 				return bms_copy(relation->rd_hotblockingattr);
 			case INDEX_ATTR_BITMAP_SUMMARIZED:
 				return bms_copy(relation->rd_summarizedattr);
+			case INDEX_ATTR_BITMAP_INDEXED:
+				return bms_copy(relation->rd_indexedattr);
 			default:
 				elog(ERROR, "unknown attrKind %u", attrKind);
 		}
@@ -5552,6 +5557,8 @@ restart:
 		goto restart;
 	}
 
+	indexedattrs = bms_union(hotblockingattrs, summarizedattrs);
+
 	/* Don't leak the old values of these bitmaps, if any */
 	relation->rd_attrsvalid = false;
 	bms_free(relation->rd_keyattr);
@@ -5564,6 +5571,8 @@ restart:
 	relation->rd_hotblockingattr = NULL;
 	bms_free(relation->rd_summarizedattr);
 	relation->rd_summarizedattr = NULL;
+	bms_free(relation->rd_indexedattr);
+	relation->rd_indexedattr = NULL;
 
 	/*
 	 * Now save copies of the bitmaps in the relcache entry.  We intentionally
@@ -5578,6 +5587,7 @@ restart:
 	relation->rd_idattr = bms_copy(idindexattrs);
 	relation->rd_hotblockingattr = bms_copy(hotblockingattrs);
 	relation->rd_summarizedattr = bms_copy(summarizedattrs);
+	relation->rd_indexedattr = bms_copy(indexedattrs);
 	relation->rd_attrsvalid = true;
 	MemoryContextSwitchTo(oldcxt);
 
@@ -5594,6 +5604,8 @@ restart:
 			return hotblockingattrs;
 		case INDEX_ATTR_BITMAP_SUMMARIZED:
 			return summarizedattrs;
+		case INDEX_ATTR_BITMAP_INDEXED:
+			return indexedattrs;
 		default:
 			elog(ERROR, "unknown attrKind %u", attrKind);
 			return NULL;
