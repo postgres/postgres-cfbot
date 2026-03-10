@@ -760,7 +760,8 @@ SELECT to_tsvector('SKIES My booKs');
 SELECT plainto_tsquery('SKIES My booKs');
 SELECT to_tsquery('SKIES & My | booKs');
 
---trigger
+-- tsvector_update_trigger() uses heap_modify_tuple() to set column 'a'
+-- without going through the executor's SET-clause tracking.
 CREATE TRIGGER tsvectorupdate
 BEFORE UPDATE OR INSERT ON test_tsvector
 FOR EACH ROW EXECUTE PROCEDURE tsvector_update_trigger(a, 'pg_catalog.english', t);
