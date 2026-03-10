@@ -46,6 +46,7 @@ test: eval-plan-qual-dropped-column
 test: eval-plan-qual-resjunk
 test: eval-plan-qual-rowtype-alter
 test: eval-plan-qual-trigger
+test: update-epq-indexes
 test: eval-plan-qual-partition-prune
 test: inplace-inval
 test: intra-grant-inplace
