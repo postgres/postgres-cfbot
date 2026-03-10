@@ -103,7 +103,7 @@ session s1
 setup	{
 	SET debug_discard_caches = 0;
 	SELECT FROM injection_points_set_local();
-	SELECT FROM injection_points_attach('heap_update-before-pin', 'wait');
+	SELECT FROM injection_points_attach('simple_heap_update-before-pin', 'wait');
 }
 step cachefill1	{ SELECT FROM vactest.reloid_catcache_set('vactest.orig50'); }
 step grant1	{ GRANT SELECT ON vactest.orig50 TO PUBLIC; }
@@ -140,8 +140,8 @@ step mkrels4	{
 	SELECT FROM vactest.mkrels('intruder', 1, 100);  -- repopulate LP_UNUSED
 }
 step wakegrant4	{
-	SELECT FROM injection_points_detach('heap_update-before-pin');
-	SELECT FROM injection_points_wakeup('heap_update-before-pin');
+	SELECT FROM injection_points_detach('simple_heap_update-before-pin');
+	SELECT FROM injection_points_wakeup('simple_heap_update-before-pin');
 }
 step at4	{ ALTER TABLE vactest.child50 INHERIT vactest.orig50; }
 step wakeinval4	{
