@@ -125,7 +125,7 @@ INSERT INTO rw_view16 VALUES (3, 'Row 3', 3); -- should fail
 INSERT INTO rw_view16 (a, b) VALUES (3, 'Row 3'); -- should be OK
 UPDATE rw_view16 SET a=3, aa=-3 WHERE a=3; -- should fail
 UPDATE rw_view16 SET aa=-3 WHERE a=3; -- should be OK
-SELECT * FROM base_tbl;
+SELECT * FROM base_tbl ORDER BY a;
 DELETE FROM rw_view16 WHERE a=-3; -- should be OK
 -- Read-only views
 INSERT INTO ro_view17 VALUES (3, 'ROW 3');

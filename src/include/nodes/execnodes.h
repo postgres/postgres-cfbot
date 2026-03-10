@@ -215,9 +215,13 @@ typedef struct IndexInfo
 	bool		ii_NullsNotDistinct;
 	/* is it valid for inserts? */
 	bool		ii_ReadyForInserts;
-	/* IndexUnchanged status determined yet? */
-	bool		ii_CheckedUnchanged;
-	/* aminsert hint, cached for retail inserts */
+
+	/*
+	 * aminsert hint: is this index logically unchanged by an UPDATE?  Narrow
+	 * rule: key columns only; INCLUDE columns and the partial-index predicate
+	 * are not considered (expression keys are treated conservatively).
+	 * Populated per UPDATE by ExecSetIndexUnchanged().
+	 */
 	bool		ii_IndexUnchanged;
 	/* are we doing a concurrent index build? */
 	bool		ii_Concurrent;
