@@ -18,6 +18,7 @@
  *		ExecModifyTable		- retrieve the next tuple from the node
  *		ExecEndModifyTable	- shut down the ModifyTable node
  *		ExecReScanModifyTable - rescan the ModifyTable node
+ *		ExecUpdateModifiedIdxAttrs - find set of updated indexed columns
  *
  *	 NOTES
  *		The ModifyTable node receives input from its outerPlan, which is
@@ -56,6 +57,7 @@
 #include "access/htup_details.h"
 #include "access/tableam.h"
 #include "access/tupconvert.h"
+#include "access/tupdesc.h"
 #include "access/xact.h"
 #include "commands/trigger.h"
 #include "executor/execPartition.h"
@@ -192,6 +194,39 @@ static TupleTableSlot *ExecMergeNotMatched(ModifyTableContext *context,
 										   ResultRelInfo *resultRelInfo,
 										   bool canSetTag);
 
+/*
+ * ExecUpdateModifiedIdxAttrs
+ *
+ * Return the set of indexed attributes whose values differ between old_tts
+ * and new_tts, using the FirstLowInvalidHeapAttributeNumber convention.  The
+ * result describes this one pair of tuples; the caller frees it.
+ *
+ * All indexed attributes are compared, not just those the UPDATE targets.
+ * ExecGetAllUpdatedCols() names the columns an UPDATE targets, not the values
+ * that changed: a BEFORE ROW trigger can change an indexed column with
+ * heap_modify_tuple() (see tsvector_update_trigger()), and logical
+ * replication and REPACK apply hand us whole tuples.
+ *
+ * Values are compared byte for byte as stored, as heap_update() always has
+ * (see table_slot_modified_idx_attrs()).  An unchanged toasted value keeps
+ * its toast pointer, so it compares equal without being fetched.  Two values
+ * that are equal but stored differently count as changed; that costs an
+ * index entry, never a missed one.
+ *
+ * simple_heap_update() and simple_table_tuple_update() make the same
+ * determination with table_slot_modified_idx_attrs().
+ */
+Bitmapset *
+ExecUpdateModifiedIdxAttrs(ResultRelInfo *resultRelInfo,
+						   TupleTableSlot *old_tts,
+						   TupleTableSlot *new_tts)
+{
+	if (resultRelInfo->ri_NumIndices == 0)
+		return NULL;
+
+	return table_slot_modified_idx_attrs(resultRelInfo->ri_RelationDesc,
+										 old_tts, new_tts);
+}
 
 /*
  * Verify that the tuples to be produced by INSERT match the
@@ -2203,13 +2238,16 @@ ExecUpdatePrepareSlot(ResultRelInfo *resultRelInfo,
  */
 static TM_Result
 ExecUpdateAct(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
-			  ItemPointer tupleid, HeapTuple oldtuple, TupleTableSlot *slot,
-			  bool canSetTag, UpdateContext *updateCxt)
+			  ItemPointer tupleid, HeapTuple oldtuple, TupleTableSlot *oldSlot,
+			  TupleTableSlot *slot, bool canSetTag, UpdateContext *updateCxt)
 {
 	EState	   *estate = context->estate;
 	Relation	resultRelationDesc = resultRelInfo->ri_RelationDesc;
 	bool		partition_constraint_failed;
 	TM_Result	result;
+
+	/* The set of modified indexed attributes that trigger new index entries */
+	Bitmapset  *modified_idx_attrs = NULL;
 
 	updateCxt->crossPartUpdate = false;
 
@@ -2326,8 +2364,10 @@ lreplace:
 	if (resultRelationDesc->rd_att->constr)
 		ExecConstraints(resultRelInfo, slot, estate);
 
+	modified_idx_attrs = ExecUpdateModifiedIdxAttrs(resultRelInfo, oldSlot, slot);
+
 	/*
-	 * replace the heap tuple
+	 * Call into the table AM to update the heap tuple.
 	 *
 	 * Note: if es_crosscheck_snapshot isn't InvalidSnapshot, we check that
 	 * the row to be updated is visible to that snapshot, and throw a
@@ -2342,7 +2382,9 @@ lreplace:
 								estate->es_crosscheck_snapshot,
 								true /* wait for commit */ ,
 								&context->tmfd, &updateCxt->lockmode,
+								modified_idx_attrs,
 								&updateCxt->updateIndexes);
+	bms_free(modified_idx_attrs);
 
 	return result;
 }
@@ -2583,8 +2625,8 @@ ExecUpdate(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 		 */
 redo_act:
 		lockedtid = *tupleid;
-		result = ExecUpdateAct(context, resultRelInfo, tupleid, oldtuple, slot,
-							   canSetTag, &updateCxt);
+		result = ExecUpdateAct(context, resultRelInfo, tupleid, oldtuple, oldSlot,
+							   slot, canSetTag, &updateCxt);
 
 		/*
 		 * If ExecUpdateAct reports that a cross-partition update was done,
@@ -3435,8 +3477,8 @@ lmerge_matched:
 					Assert(oldtuple == NULL);
 
 					result = ExecUpdateAct(context, resultRelInfo, tupleid,
-										   NULL, newslot, canSetTag,
-										   &updateCxt);
+										   NULL, resultRelInfo->ri_oldTupleSlot,
+										   newslot, canSetTag, &updateCxt);
 
 					/*
 					 * As in ExecUpdate(), if ExecUpdateAct() reports that a
