@@ -2501,7 +2501,7 @@ RelationDestroyRelation(Relation relation, bool remember_tupdesc)
 	bms_free(relation->rd_keyattr);
 	bms_free(relation->rd_pkattr);
 	bms_free(relation->rd_idattr);
-	bms_free(relation->rd_hotblockingattr);
+	bms_free(relation->rd_indexedattr);
 	bms_free(relation->rd_summarizedattr);
 	if (relation->rd_pubdesc)
 		pfree(relation->rd_pubdesc);
@@ -5349,8 +5349,8 @@ RelationGetIndexPredicate(Relation relation)
  *									(beware: even if PK is deferrable!)
  *	INDEX_ATTR_BITMAP_IDENTITY_KEY	Columns in the table's replica identity
  *									index (empty if FULL)
- *	INDEX_ATTR_BITMAP_HOT_BLOCKING	Columns that block updates from being HOT
- *	INDEX_ATTR_BITMAP_SUMMARIZED	Columns included in summarizing indexes
+ *	INDEX_ATTR_BITMAP_INDEXED		Columns referenced by indexes
+ *	INDEX_ATTR_BITMAP_SUMMARIZED	Columns only included in summarizing indexes
  *
  * Attribute numbers are offset by FirstLowInvalidHeapAttributeNumber so that
  * we can include system attributes (e.g., OID) in the bitmap representation.
@@ -5373,8 +5373,8 @@ RelationGetIndexAttrBitmap(Relation relation, IndexAttrBitmapKind attrKind)
 	Bitmapset  *uindexattrs;	/* columns in unique indexes */
 	Bitmapset  *pkindexattrs;	/* columns in the primary index */
 	Bitmapset  *idindexattrs;	/* columns in the replica identity */
-	Bitmapset  *hotblockingattrs;	/* columns with HOT blocking indexes */
-	Bitmapset  *summarizedattrs;	/* columns with summarizing indexes */
+	Bitmapset  *indexedattrs;	/* columns referenced by indexes */
+	Bitmapset  *summarizedattrs;	/* columns only in summarizing indexes */
 	List	   *indexoidlist;
 	List	   *newindexoidlist;
 	Oid			relpkindex;
@@ -5393,8 +5393,8 @@ RelationGetIndexAttrBitmap(Relation relation, IndexAttrBitmapKind attrKind)
 				return bms_copy(relation->rd_pkattr);
 			case INDEX_ATTR_BITMAP_IDENTITY_KEY:
 				return bms_copy(relation->rd_idattr);
-			case INDEX_ATTR_BITMAP_HOT_BLOCKING:
-				return bms_copy(relation->rd_hotblockingattr);
+			case INDEX_ATTR_BITMAP_INDEXED:
+				return bms_copy(relation->rd_indexedattr);
 			case INDEX_ATTR_BITMAP_SUMMARIZED:
 				return bms_copy(relation->rd_summarizedattr);
 			default:
@@ -5439,7 +5439,7 @@ restart:
 	uindexattrs = NULL;
 	pkindexattrs = NULL;
 	idindexattrs = NULL;
-	hotblockingattrs = NULL;
+	indexedattrs = NULL;
 	summarizedattrs = NULL;
 	foreach(l, indexoidlist)
 	{
@@ -5499,7 +5499,7 @@ restart:
 		if (indexDesc->rd_indam->amsummarizing)
 			attrs = &summarizedattrs;
 		else
-			attrs = &hotblockingattrs;
+			attrs = &indexedattrs;
 
 		/* Collect simple attribute references */
 		for (i = 0; i < indexDesc->rd_index->indnatts; i++)
@@ -5508,9 +5508,9 @@ restart:
 
 			/*
 			 * Since we have covering indexes with non-key columns, we must
-			 * handle them accurately here. non-key columns must be added into
-			 * hotblockingattrs or summarizedattrs, since they are in index,
-			 * and update shouldn't miss them.
+			 * handle them accurately here. Non-key columns must be added into
+			 * indexedattrs or summarizedattrs, since they are in index, and
+			 * update shouldn't miss them.
 			 *
 			 * Summarizing indexes do not block HOT, but do need to be updated
 			 * when the column value changes, thus require a separate
@@ -5571,11 +5571,19 @@ restart:
 		bms_free(uindexattrs);
 		bms_free(pkindexattrs);
 		bms_free(idindexattrs);
-		bms_free(hotblockingattrs);
+		bms_free(indexedattrs);
 		bms_free(summarizedattrs);
 
 		goto restart;
 	}
+
+	/*
+	 * Record what attributes are only referenced by summarizing indexes. Then
+	 * add that into the other indexed attributes to track all referenced
+	 * attributes.
+	 */
+	summarizedattrs = bms_del_members(summarizedattrs, indexedattrs);
+	indexedattrs = bms_add_members(indexedattrs, summarizedattrs);
 
 	/* Don't leak the old values of these bitmaps, if any */
 	relation->rd_attrsvalid = false;
@@ -5585,8 +5593,8 @@ restart:
 	relation->rd_pkattr = NULL;
 	bms_free(relation->rd_idattr);
 	relation->rd_idattr = NULL;
-	bms_free(relation->rd_hotblockingattr);
-	relation->rd_hotblockingattr = NULL;
+	bms_free(relation->rd_indexedattr);
+	relation->rd_indexedattr = NULL;
 	bms_free(relation->rd_summarizedattr);
 	relation->rd_summarizedattr = NULL;
 
@@ -5601,7 +5609,7 @@ restart:
 	relation->rd_keyattr = bms_copy(uindexattrs);
 	relation->rd_pkattr = bms_copy(pkindexattrs);
 	relation->rd_idattr = bms_copy(idindexattrs);
-	relation->rd_hotblockingattr = bms_copy(hotblockingattrs);
+	relation->rd_indexedattr = bms_copy(indexedattrs);
 	relation->rd_summarizedattr = bms_copy(summarizedattrs);
 	relation->rd_attrsvalid = true;
 	MemoryContextSwitchTo(oldcxt);
@@ -5615,8 +5623,8 @@ restart:
 			return pkindexattrs;
 		case INDEX_ATTR_BITMAP_IDENTITY_KEY:
 			return idindexattrs;
-		case INDEX_ATTR_BITMAP_HOT_BLOCKING:
-			return hotblockingattrs;
+		case INDEX_ATTR_BITMAP_INDEXED:
+			return indexedattrs;
 		case INDEX_ATTR_BITMAP_SUMMARIZED:
 			return summarizedattrs;
 		default:

@@ -16,8 +16,8 @@ step wakeinval4:
 step at2: <... completed>
 step wakeinval4: <... completed>
 step wakegrant4: 
-	SELECT FROM injection_points_detach('heap_update-before-pin');
-	SELECT FROM injection_points_wakeup('heap_update-before-pin');
+	SELECT FROM injection_points_detach('simple_heap_update-before-pin');
+	SELECT FROM injection_points_wakeup('simple_heap_update-before-pin');
  <waiting ...>
 step grant1: <... completed>
 step wakegrant4: <... completed>
@@ -41,8 +41,8 @@ step mkrels4:
 	SELECT FROM vactest.mkrels('intruder', 1, 100);  -- repopulate LP_UNUSED
 
 step wakegrant4: 
-	SELECT FROM injection_points_detach('heap_update-before-pin');
-	SELECT FROM injection_points_wakeup('heap_update-before-pin');
+	SELECT FROM injection_points_detach('simple_heap_update-before-pin');
+	SELECT FROM injection_points_wakeup('simple_heap_update-before-pin');
  <waiting ...>
 step grant1: <... completed>
 step wakegrant4: <... completed>
@@ -69,8 +69,8 @@ step at2: <... completed>
 step wakeinval4: <... completed>
 step at4: ALTER TABLE vactest.child50 INHERIT vactest.orig50;
 step wakegrant4: 
-	SELECT FROM injection_points_detach('heap_update-before-pin');
-	SELECT FROM injection_points_wakeup('heap_update-before-pin');
+	SELECT FROM injection_points_detach('simple_heap_update-before-pin');
+	SELECT FROM injection_points_wakeup('simple_heap_update-before-pin');
  <waiting ...>
 step grant1: <... completed>
 ERROR:  tuple concurrently updated
