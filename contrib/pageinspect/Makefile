@@ -32,7 +32,8 @@ REGRESS = \
 	gin \
 	gist \
 	hash \
-	oldextversions
+	oldextversions \
+	hot_updates
 
 ifdef USE_PGXS
 PG_CONFIG = pg_config
