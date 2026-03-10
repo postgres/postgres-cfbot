@@ -372,15 +372,15 @@ INSERT INTO rw_view16 (a, b) VALUES (3, 'Row 3'); -- should be OK
 UPDATE rw_view16 SET a=3, aa=-3 WHERE a=3; -- should fail
 ERROR:  multiple assignments to same column "a"
 UPDATE rw_view16 SET aa=-3 WHERE a=3; -- should be OK
-SELECT * FROM base_tbl;
+SELECT * FROM base_tbl ORDER BY a;
  a  |   b    
 ----+--------
+ -3 | Row 3
  -2 | Row -2
  -1 | Row -1
   0 | Row 0
   1 | Row 1
   2 | Row 2
- -3 | Row 3
 (6 rows)
 
 DELETE FROM rw_view16 WHERE a=-3; -- should be OK
