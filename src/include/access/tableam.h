@@ -129,22 +129,6 @@ typedef enum TM_Result
 } TM_Result;
 
 /*
- * Result codes for table_update(..., update_indexes*..).
- * Used to determine which indexes to update.
- */
-typedef enum TU_UpdateIndexes
-{
-	/* No indexed columns were updated (incl. TID addressing of tuple) */
-	TU_None,
-
-	/* A non-summarizing indexed column was updated, or the TID has changed */
-	TU_All,
-
-	/* Only summarized columns were updated, TID is unchanged */
-	TU_Summarizing,
-} TU_UpdateIndexes;
-
-/*
  * Additional results from table_tuple_update, table_tuple_delete, and
  * table_tuple_lock.  The AM must initialize all fields on every call.  The
  * first three fields describe the returned failure, not an intermediate
@@ -631,7 +615,8 @@ typedef struct TableAmRoutine
 								 bool wait,
 								 TM_FailureData *tmfd,
 								 LockTupleMode *lockmode,
-								 TU_UpdateIndexes *update_indexes);
+								 const Bitmapset *modified_attrs,
+								 bool *row_moved);
 
 	/*
 	 * Given a candidate set of attribute numbers (in the
@@ -1733,12 +1718,22 @@ table_tuple_delete(Relation rel, ItemPointer tid, CommandId cid,
  *		has already locked; see TUPLE_LOCK_FLAG_LOCKED_VERSION.
  *	crosscheck - if not InvalidSnapshot, also check old tuple against this
  *
+ * In parameters:
+ *	modified_attrs - input only; the set of indexed attributes whose values
+ *		changed (FirstLowInvalidHeapAttributeNumber convention).  Caller-owned;
+ *		the table AM must not modify it.  A table AM may use it to choose
+ *		between HOT and non-HOT storage of the new tuple.
+ *
  * Output parameters:
  *	slot - newly constructed tuple data to store
  *	tmfd - filled in failure cases (see below)
  *	lockmode - filled with lock mode acquired on tuple
- *	update_indexes - in success cases this is set if new index entries
- *		are required for this tuple; see TU_UpdateIndexes
+ *	row_moved - set true iff the AM stored the new tuple such that index
+ *		entries referencing the old version no longer locate it (for heap, a
+ *		non-HOT update at a new TID), meaning every index needs a fresh entry.
+ *		When false, the caller consults each index's own attributes against
+ *		modified_attrs to decide per index (the HOT / selective-index-update
+ *		cases).
  *
  * Normal, successful return value is TM_Ok, which means we did actually
  * update it.  Failure return codes are TM_SelfModified, TM_Updated, and
@@ -1758,12 +1753,12 @@ table_tuple_update(Relation rel, ItemPointer otid, TupleTableSlot *slot,
 				   CommandId cid, uint32 options,
 				   Snapshot snapshot, Snapshot crosscheck,
 				   bool wait, TM_FailureData *tmfd, LockTupleMode *lockmode,
-				   TU_UpdateIndexes *update_indexes)
+				   const Bitmapset *modified_attrs, bool *row_moved)
 {
 	return rel->rd_tableam->tuple_update(rel, otid, slot,
 										 cid, options, snapshot, crosscheck,
-										 wait, tmfd,
-										 lockmode, update_indexes);
+										 wait, tmfd, lockmode,
+										 modified_attrs, row_moved);
 }
 
 /*
@@ -2282,7 +2277,8 @@ extern void simple_table_tuple_delete(Relation rel, ItemPointer tid,
 									  Snapshot snapshot);
 extern void simple_table_tuple_update(Relation rel, ItemPointer otid,
 									  TupleTableSlot *slot, Snapshot snapshot,
-									  TU_UpdateIndexes *update_indexes);
+									  const Bitmapset *modified_attrs,
+									  bool *row_moved);
 
 
 /* ----------------------------------------------------------------------------

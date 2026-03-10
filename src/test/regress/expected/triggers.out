@@ -959,16 +959,24 @@ NOTICE:  main_view BEFORE UPDATE STATEMENT (before_view_upd_stmt)
 NOTICE:  main_view AFTER UPDATE STATEMENT (after_view_upd_stmt)
 UPDATE 0
 -- Delete from view using trigger
-DELETE FROM main_view WHERE a IN (20,21);
+DELETE FROM main_view WHERE a = 20 AND b = 31;
+NOTICE:  main_view BEFORE DELETE STATEMENT (before_view_del_stmt)
+NOTICE:  main_view INSTEAD OF DELETE ROW (instead_of_del)
+NOTICE:  OLD: (20,31)
+NOTICE:  main_view AFTER DELETE STATEMENT (after_view_del_stmt)
+DELETE 1
+DELETE FROM main_view WHERE a = 21 AND b = 10;
 NOTICE:  main_view BEFORE DELETE STATEMENT (before_view_del_stmt)
 NOTICE:  main_view INSTEAD OF DELETE ROW (instead_of_del)
 NOTICE:  OLD: (21,10)
-NOTICE:  main_view INSTEAD OF DELETE ROW (instead_of_del)
-NOTICE:  OLD: (20,31)
+NOTICE:  main_view AFTER DELETE STATEMENT (after_view_del_stmt)
+DELETE 1
+DELETE FROM main_view WHERE a = 21 AND b = 32;
+NOTICE:  main_view BEFORE DELETE STATEMENT (before_view_del_stmt)
 NOTICE:  main_view INSTEAD OF DELETE ROW (instead_of_del)
 NOTICE:  OLD: (21,32)
 NOTICE:  main_view AFTER DELETE STATEMENT (after_view_del_stmt)
-DELETE 3
+DELETE 1
 DELETE FROM main_view WHERE a = 31 RETURNING a, b;
 NOTICE:  main_view BEFORE DELETE STATEMENT (before_view_del_stmt)
 NOTICE:  main_view INSTEAD OF DELETE ROW (instead_of_del)
