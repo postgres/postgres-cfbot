@@ -30,6 +30,9 @@
 #include "storage/bufmgr.h"
 #include "storage/shmem.h"
 #include "storage/smgr.h"
+#include "utils/datum.h"
+#include "utils/relcache.h"
+#include "varatt.h"
 
 /*
  * Constants to control the behavior of block allocation to parallel workers
@@ -311,6 +314,83 @@ simple_table_tuple_delete(Relation rel, ItemPointer tid, Snapshot snapshot)
 	}
 }
 
+/* Would two varlena values be stored the same, byte for byte? */
+static bool
+varlena_image_eq(Datum value1, Datum value2)
+{
+	varlena    *v1 = (varlena *) DatumGetPointer(value1);
+	varlena    *v2 = (varlena *) DatumGetPointer(value2);
+
+	if (VARATT_IS_EXTERNAL(v1) || VARATT_IS_EXTERNAL(v2) ||
+		VARATT_IS_COMPRESSED(v1) || VARATT_IS_COMPRESSED(v2))
+		return datumIsEqual(value1, value2, false, -1);
+
+	return VARSIZE_ANY_EXHDR(v1) == VARSIZE_ANY_EXHDR(v2) &&
+		memcmp(VARDATA_ANY(v1), VARDATA_ANY(v2), VARSIZE_ANY_EXHDR(v1)) == 0;
+}
+
+/*
+ * table_slot_modified_idx_attrs - which indexed attributes differ?
+ *
+ * Return the set of attributes referenced by indexes of rel whose values
+ * differ between old_slot and new_slot, offset by
+ * FirstLowInvalidHeapAttributeNumber, in memory the caller frees.  Values
+ * are compared byte for byte as the table would store them, so an unchanged
+ * toasted value compares equal without being fetched, and two values that
+ * are equal but stored differently count as changed.
+ *
+ * A varlena value in a slot need not have the header it will be stored with:
+ * a short one may have a 4-byte header until heap_form_tuple() packs it, for
+ * instance when tuple routing has converted the slot.  So an inline,
+ * uncompressed varlena is compared without its header.
+ */
+Bitmapset *
+table_slot_modified_idx_attrs(Relation rel, TupleTableSlot *old_slot,
+							  TupleTableSlot *new_slot)
+{
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+	Bitmapset  *attrs;
+	int			attidx = -1;
+
+	attrs = RelationGetIndexAttrBitmap(rel, INDEX_ATTR_BITMAP_INDEXED);
+
+	while ((attidx = bms_next_member(attrs, attidx)) >= 0)
+	{
+		AttrNumber	attrnum = attidx + FirstLowInvalidHeapAttributeNumber;
+		CompactAttribute *att;
+		Datum		value1,
+					value2;
+		bool		null1,
+					null2;
+
+		/*
+		 * A whole-row reference is "changed" (it could only be unchanged
+		 * after a no-op update), and so is any system column other than
+		 * tableoid, which need not be set yet in the new tuple.
+		 */
+		if (attrnum <= 0)
+		{
+			if (attrnum == TableOidAttributeNumber)
+				attrs = bms_del_member(attrs, attidx);
+			continue;
+		}
+
+		att = TupleDescCompactAttr(tupdesc, attrnum - 1);
+		value1 = slot_getattr(old_slot, attrnum, &null1);
+		value2 = slot_getattr(new_slot, attrnum, &null2);
+
+		if (null1 != null2)
+			continue;
+		if (null1 ||
+			(att->attlen == -1 ?
+			 varlena_image_eq(value1, value2) :
+			 datumIsEqual(value1, value2, att->attbyval, att->attlen)))
+			attrs = bms_del_member(attrs, attidx);
+	}
+
+	return attrs;
+}
+
 /*
  * simple_table_tuple_update - replace a tuple
  *
@@ -325,6 +405,35 @@ simple_table_tuple_update(Relation rel, ItemPointer otid,
 						  Snapshot snapshot,
 						  TU_UpdateIndexes *update_indexes)
 {
+	TupleTableSlot *oldslot = table_slot_create(rel, NULL);
+	Bitmapset  *modified_idx_attrs;
+
+	if (!table_tuple_fetch_row_version(rel, otid, SnapshotAny, oldslot))
+	{
+		ExecDropSingleTupleTableSlot(oldslot);
+		elog(ERROR, "tuple concurrently deleted");
+	}
+	modified_idx_attrs = table_slot_modified_idx_attrs(rel, oldslot, slot);
+	ExecDropSingleTupleTableSlot(oldslot);
+
+	simple_table_tuple_update_ext(rel, otid, slot, snapshot,
+								  modified_idx_attrs, update_indexes);
+	bms_free(modified_idx_attrs);
+}
+
+/*
+ * simple_table_tuple_update_ext - replace a tuple, given what changed
+ *
+ * As simple_table_tuple_update(), but the caller passes the indexed
+ * attributes the update changes, as table_tuple_update() takes them.
+ */
+void
+simple_table_tuple_update_ext(Relation rel, ItemPointer otid,
+							  TupleTableSlot *slot,
+							  Snapshot snapshot,
+							  const Bitmapset *modified_idx_attrs,
+							  TU_UpdateIndexes *update_indexes)
+{
 	TM_Result	result;
 	TM_FailureData tmfd;
 	LockTupleMode lockmode;
@@ -333,7 +442,9 @@ simple_table_tuple_update(Relation rel, ItemPointer otid,
 								GetCurrentCommandId(true),
 								0, snapshot, InvalidSnapshot,
 								true /* wait for commit */ ,
-								&tmfd, &lockmode, update_indexes);
+								&tmfd, &lockmode,
+								modified_idx_attrs,
+								update_indexes);
 
 	switch (result)
 	{

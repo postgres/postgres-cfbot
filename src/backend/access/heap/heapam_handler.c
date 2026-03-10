@@ -218,12 +218,19 @@ static TM_Result
 heapam_tuple_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 					CommandId cid, uint32 options,
 					Snapshot snapshot, Snapshot crosscheck,
-					bool wait, TM_FailureData *tmfd,
-					LockTupleMode *lockmode, TU_UpdateIndexes *update_indexes)
+					bool wait, TM_FailureData *tmfd, LockTupleMode *lockmode,
+					const Bitmapset *modified_idx_attrs, TU_UpdateIndexes *update_indexes)
 {
 	bool		shouldFree = true;
 	HeapTuple	tuple = ExecFetchSlotHeapTuple(slot, true, &shouldFree);
+	bool		hot_allowed;
+	bool		summarized_only;
 	TM_Result	result;
+
+	Assert(ItemPointerIsValid(otid));
+
+	hot_allowed = HeapUpdateHotAllowable(relation, modified_idx_attrs, &summarized_only);
+	*lockmode = HeapUpdateDetermineLockmode(relation, modified_idx_attrs);
 
 	/* Update the tuple with table oid */
 	slot->tts_tableOid = RelationGetRelid(relation);
@@ -231,7 +238,7 @@ heapam_tuple_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 
 	result = heap_update(relation, otid, tuple, cid, options,
 						 crosscheck, wait,
-						 tmfd, lockmode, update_indexes);
+						 tmfd, *lockmode, modified_idx_attrs, hot_allowed);
 	ItemPointerCopy(&tuple->t_self, &slot->tts_tid);
 
 	/*
@@ -244,16 +251,17 @@ heapam_tuple_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 	 * HOT, it could be that we updated summarized columns, so we either
 	 * update only summarized indexes, or none at all.
 	 */
-	if (result != TM_Ok)
+	*update_indexes = TU_None;
+	if (result == TM_Ok)
 	{
-		Assert(*update_indexes == TU_None);
-		*update_indexes = TU_None;
+		if (HeapTupleIsHeapOnly(tuple))
+		{
+			if (summarized_only)
+				*update_indexes = TU_Summarizing;
+		}
+		else
+			*update_indexes = TU_All;
 	}
-	else if (!HeapTupleIsHeapOnly(tuple))
-		Assert(*update_indexes == TU_All);
-	else
-		Assert((*update_indexes == TU_Summarizing) ||
-			   (*update_indexes == TU_None));
 
 	if (shouldFree)
 		pfree(tuple);
