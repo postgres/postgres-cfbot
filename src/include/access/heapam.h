@@ -385,12 +385,36 @@ extern TM_Result heap_delete(Relation relation, const ItemPointerData *tid,
 							 bool wait, TM_FailureData *tmfd);
 extern void heap_finish_speculative(Relation relation, const ItemPointerData *tid);
 extern void heap_abort_speculative(Relation relation, const ItemPointerData *tid);
+/*
+ * HeapUpdateIndexMode --
+ *	Classification returned by HeapUpdateHotAllowable() that tells heap_update()
+ *	whether a HOT update is permitted for this tuple.
+ *
+ *	HEAP_UPDATE_ALL_INDEXES
+ *		HOT is not allowed; the new tuple must go on its own TID and every
+ *		index receives a fresh entry.  This is the classic behavior for updates
+ *		that modify a non-summarizing indexed attribute.
+ *
+ *	HEAP_HEAP_ONLY_UPDATE
+ *		Classic HOT update: no non-summarizing indexed attribute changed (only
+ *		summarizing ones, if any), so no non-summarizing index needs a new
+ *		entry.
+ *
+ *	HEAP_UPDATE_ALL_INDEXES is the zero value and doubles as a "no HOT"
+ *	sentinel (e.g. testing hot_mode != HEAP_UPDATE_ALL_INDEXES).
+ */
+typedef enum HeapUpdateIndexMode
+{
+	HEAP_UPDATE_ALL_INDEXES = 0,
+	HEAP_HEAP_ONLY_UPDATE = 1,
+} HeapUpdateIndexMode;
+
 extern TM_Result heap_update(Relation relation, const ItemPointerData *otid,
-							 HeapTuple newtup,
-							 CommandId cid, uint32 options,
+							 HeapTuple newtup, CommandId cid, uint32 options,
 							 Snapshot crosscheck, bool wait,
-							 TM_FailureData *tmfd, LockTupleMode *lockmode,
-							 TU_UpdateIndexes *update_indexes);
+							 TM_FailureData *tmfd, const LockTupleMode lockmode,
+							 const Bitmapset *modified_idx_attrs,
+							 HeapUpdateIndexMode hot_mode);
 extern TM_Result heap_lock_tuple(Relation relation, HeapTuple tuple,
 								 CommandId cid, LockTupleMode mode, LockWaitPolicy wait_policy,
 								 bool follow_updates,
@@ -425,7 +449,7 @@ extern bool heap_tuple_needs_eventual_freeze(HeapTupleHeader tuple);
 extern void simple_heap_insert(Relation relation, HeapTuple tup);
 extern void simple_heap_delete(Relation relation, const ItemPointerData *tid);
 extern void simple_heap_update(Relation relation, const ItemPointerData *otid,
-							   HeapTuple tup, TU_UpdateIndexes *update_indexes);
+							   HeapTuple tup, bool *update_all_indexes);
 
 extern TransactionId heap_index_delete_tuples(Relation rel,
 											  TM_IndexDeleteOp *delstate);
@@ -462,6 +486,12 @@ extern void log_heap_prune_and_freeze(Relation relation, Buffer buffer,
 									  OffsetNumber *redirected, int nredirected,
 									  OffsetNumber *dead, int ndead,
 									  OffsetNumber *unused, int nunused);
+
+/* in heap/heapam.c */
+extern HeapUpdateIndexMode HeapUpdateHotAllowable(Relation relation,
+												  const Bitmapset *modified_idx_attrs);
+extern LockTupleMode HeapUpdateDetermineLockmode(Relation relation,
+												 const Bitmapset *modified_idx_attrs);
 
 /* in heap/vacuumlazy.c */
 extern void heap_vacuum_rel(Relation rel,
