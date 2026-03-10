@@ -1,0 +1,94 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s2_begin s2_status s1_status s2_commit s1_check
+step s2_begin: BEGIN;
+step s2_status: UPDATE hot_epq SET status = 'b' WHERE id = 1;
+step s1_status: UPDATE hot_epq SET status = 'a' WHERE id = 1; <waiting ...>
+step s2_commit: COMMIT;
+step s1_status: <... completed>
+step s1_check: 
+	SET enable_seqscan = off;
+	SET enable_bitmapscan = off;
+	SELECT count(*) AS status_a FROM hot_epq WHERE status = 'a';
+	SELECT count(*) AS doc_a FROM hot_epq WHERE doc->>'status' = 'a';
+	SELECT count(*) AS vip FROM hot_epq WHERE vip AND id = 1;
+	RESET enable_seqscan;
+	RESET enable_bitmapscan;
+
+status_a
+--------
+       1
+(1 row)
+
+doc_a
+-----
+    1
+(1 row)
+
+vip
+---
+  1
+(1 row)
+
+
+starting permutation: s2_begin s2_doc s1_doc s2_commit s1_check
+step s2_begin: BEGIN;
+step s2_doc: UPDATE hot_epq SET doc = jsonb_set(doc, ARRAY['status'], to_jsonb('b'::text)) WHERE id = 1;
+step s1_doc: UPDATE hot_epq SET doc = jsonb_set(doc, ARRAY['status'], to_jsonb('a'::text)) WHERE id = 1; <waiting ...>
+step s2_commit: COMMIT;
+step s1_doc: <... completed>
+step s1_check: 
+	SET enable_seqscan = off;
+	SET enable_bitmapscan = off;
+	SELECT count(*) AS status_a FROM hot_epq WHERE status = 'a';
+	SELECT count(*) AS doc_a FROM hot_epq WHERE doc->>'status' = 'a';
+	SELECT count(*) AS vip FROM hot_epq WHERE vip AND id = 1;
+	RESET enable_seqscan;
+	RESET enable_bitmapscan;
+
+status_a
+--------
+       1
+(1 row)
+
+doc_a
+-----
+    1
+(1 row)
+
+vip
+---
+  1
+(1 row)
+
+
+starting permutation: s2_begin s2_vip s1_vip s2_commit s1_check
+step s2_begin: BEGIN;
+step s2_vip: UPDATE hot_epq SET vip = false WHERE id = 1;
+step s1_vip: UPDATE hot_epq SET vip = true WHERE id = 1; <waiting ...>
+step s2_commit: COMMIT;
+step s1_vip: <... completed>
+step s1_check: 
+	SET enable_seqscan = off;
+	SET enable_bitmapscan = off;
+	SELECT count(*) AS status_a FROM hot_epq WHERE status = 'a';
+	SELECT count(*) AS doc_a FROM hot_epq WHERE doc->>'status' = 'a';
+	SELECT count(*) AS vip FROM hot_epq WHERE vip AND id = 1;
+	RESET enable_seqscan;
+	RESET enable_bitmapscan;
+
+status_a
+--------
+       1
+(1 row)
+
+doc_a
+-----
+    1
+(1 row)
+
+vip
+---
+  1
+(1 row)
+
