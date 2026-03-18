@@ -45,6 +45,7 @@ tests += {
       't/009_growing_files.pl',
       't/010_keep_recycled_wals.pl',
       't/011_wal_copy.pl',
+      't/012_missing_source_wal.pl',
     ],
   },
 }
