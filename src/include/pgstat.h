@@ -352,12 +352,20 @@ typedef struct PgStat_PendingIO
 	instr_time	pending_times[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
 
 	/*
-	 * Dynamically allocated array of
-	 * [IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES]
-	 * [IOOP_NUM_TYPES][PGSTAT_IO_HIST_BUCKETS] only with track_io_timings
-	 * true.
+	 * Dynamically allocated array for pg_stat_io_histograms only when
+	 * track_io_timings is true. pending_hist_time_buckets_offsets is just an
+	 * offset within pending_hist_time_buckets to avoid using unnecessary
+	 * memory.
 	 */
-	uint64		(*pending_hist_time_buckets)[IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES][PGSTAT_IO_HIST_BUCKETS];
+	uint64		(*pending_hist_time_buckets)[PGSTAT_IO_HIST_BUCKETS];
+	uint64		pending_hist_time_buckets_offsets[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
+
+	/*
+	 * Cache how much histograms we have allocated to avoid repetably calling
+	 * pgstat_bktype_count_potentially_used(MyBackendType) from
+	 * pgstat_io_flush_cb()
+	 */
+	int			pending_hist_time_buckets_size;
 } PgStat_PendingIO;
 
 extern PgStat_PendingIO PendingIOStats;
@@ -657,6 +665,7 @@ extern PgStat_CheckpointerStats *pgstat_fetch_stat_checkpointer(void);
 
 extern bool pgstat_bktype_io_stats_valid(PgStat_BktypeIO *backend_io,
 										 BackendType bktype);
+extern int	pgstat_bktype_count_potentially_used(BackendType bktype);
 extern void pgstat_count_io_op(IOObject io_object, IOContext io_context,
 							   IOOp io_op, uint32 cnt, uint64 bytes);
 extern instr_time pgstat_prepare_io_time(bool track_io_guc);

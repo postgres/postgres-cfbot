@@ -445,6 +445,7 @@ static const PgStat_KindInfo pgstat_kind_builtin_infos[PGSTAT_KIND_BUILTIN_SIZE]
 		.shared_data_off = offsetof(PgStatShared_IO, stats),
 		.shared_data_len = sizeof(((PgStatShared_IO *) 0)->stats),
 
+		.init_backend_cb = pgstat_io_init_backend_cb,
 		.flush_static_cb = pgstat_io_flush_cb,
 		.init_shmem_cb = pgstat_io_init_shmem_cb,
 		.reset_all_cb = pgstat_io_reset_all_cb,
@@ -690,14 +691,6 @@ pgstat_initialize(void)
 
 	/* Set up a process-exit hook to clean up */
 	before_shmem_exit(pgstat_shutdown_hook, 0);
-
-	/* Allocate I/O latency buckets only if we are going to populate it */
-	if (track_io_timing || track_wal_io_timing)
-		PendingIOStats.pending_hist_time_buckets = MemoryContextAllocZero(TopMemoryContext,
-																		  IOOBJECT_NUM_TYPES * IOCONTEXT_NUM_TYPES * IOOP_NUM_TYPES *
-																		  PGSTAT_IO_HIST_BUCKETS * sizeof(uint64));
-	else
-		PendingIOStats.pending_hist_time_buckets = NULL;
 
 #ifdef USE_ASSERT_CHECKING
 	pgstat_is_initialized = true;
