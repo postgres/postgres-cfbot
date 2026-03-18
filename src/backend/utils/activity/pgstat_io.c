@@ -16,6 +16,7 @@
 
 #include "postgres.h"
 
+#include "access/xlog.h"
 #include "executor/instrument.h"
 #include "port/pg_bitutils.h"
 #include "storage/bufmgr.h"
@@ -56,6 +57,27 @@ pgstat_bktype_io_stats_valid(PgStat_BktypeIO *backend_io,
 	}
 
 	return true;
+}
+
+int
+pgstat_bktype_count_potentially_used(BackendType bktype)
+{
+	int			cnt = 0;
+
+	for (int io_object = 0; io_object < IOOBJECT_NUM_TYPES; io_object++)
+	{
+		for (int io_context = 0; io_context < IOCONTEXT_NUM_TYPES; io_context++)
+		{
+			for (int io_op = 0; io_op < IOOP_NUM_TYPES; io_op++)
+			{
+				/* we do track it */
+				if (pgstat_tracks_io_op(bktype, io_object, io_context, io_op))
+					cnt++;
+			}
+		}
+	}
+
+	return cnt;
 }
 
 void
@@ -178,12 +200,16 @@ pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOp io_op,
 
 		if (PendingIOStats.pending_hist_time_buckets != NULL)
 		{
+			int			offset;
+
 			/*
 			 * calculate the bucket_index based on latency in nanoseconds
 			 * (uint64)
 			 */
 			bucket_index = get_bucket_index(INSTR_TIME_GET_NANOSEC(io_time));
-			PendingIOStats.pending_hist_time_buckets[io_object][io_context][io_op][bucket_index]++;
+
+			offset = PendingIOStats.pending_hist_time_buckets_offsets[io_object][io_context][io_op];
+			PendingIOStats.pending_hist_time_buckets[offset][bucket_index]++;
 		}
 
 		/* Add the per-backend count */
@@ -256,10 +282,23 @@ pgstat_io_flush_cb(bool nowait)
 				bktype_shstats->times[io_object][io_context][io_op] +=
 					INSTR_TIME_GET_MICROSEC(time);
 
+				/*
+				 * If tracking I/O stats, save I/O histograms from backend
+				 * local's PendingIOStats by using indirect offsets from the
+				 * pending_hist_time_buckets dynamic array (accessed with
+				 * offsets to save memory) into shared memory.
+				 */
 				if (PendingIOStats.pending_hist_time_buckets != NULL)
 					for (int b = 0; b < PGSTAT_IO_HIST_BUCKETS; b++)
-						bktype_shstats->hist_time_buckets[io_object][io_context][io_op][b] +=
-							PendingIOStats.pending_hist_time_buckets[io_object][io_context][io_op][b];
+					{
+						int			pending_off = PendingIOStats.pending_hist_time_buckets_offsets[io_object][io_context][io_op];
+
+						if (pending_off != -1)
+						{
+							bktype_shstats->hist_time_buckets[io_object][io_context][io_op][b] +=
+								PendingIOStats.pending_hist_time_buckets[pending_off][b];
+						}
+					}
 			}
 		}
 	}
@@ -268,8 +307,14 @@ pgstat_io_flush_cb(bool nowait)
 
 	LWLockRelease(bktype_lock);
 
-	/* Avoid overwriting latency buckets array pointer */
+	/*
+	 * Avoid overwriting histogram latency array (with offsets) and pointer to
+	 * dynamically allocated memory
+	 */
 	memset(&PendingIOStats, 0, offsetof(PgStat_PendingIO, pending_hist_time_buckets));
+	if (PendingIOStats.pending_hist_time_buckets != NULL)
+		memset(PendingIOStats.pending_hist_time_buckets, 0,
+			   PendingIOStats.pending_hist_time_buckets_size * sizeof(*PendingIOStats.pending_hist_time_buckets));
 
 	have_iostats = false;
 
@@ -339,6 +384,43 @@ pgstat_get_io_op_name(IOOp io_op)
 
 	elog(ERROR, "unrecognized IOOp value: %d", io_op);
 	pg_unreachable();
+}
+
+void
+pgstat_io_init_backend_cb(void)
+{
+	/* Allocate I/O latency buckets only if we are going to populate it */
+	if (track_io_timing || track_wal_io_timing)
+	{
+		int			alloc_sz,
+					io_histograms_used = 0;
+
+		PendingIOStats.pending_hist_time_buckets_size = pgstat_bktype_count_potentially_used(MyBackendType);
+		alloc_sz = PendingIOStats.pending_hist_time_buckets_size * sizeof(*PendingIOStats.pending_hist_time_buckets);
+		PendingIOStats.pending_hist_time_buckets = MemoryContextAllocZero(TopMemoryContext, alloc_sz);
+
+		for (int io_object = 0; io_object < IOOBJECT_NUM_TYPES; io_object++)
+		{
+			for (int io_context = 0; io_context < IOCONTEXT_NUM_TYPES; io_context++)
+			{
+				for (int io_op = 0; io_op < IOOP_NUM_TYPES; io_op++)
+				{
+					if (pgstat_tracks_io_op(MyBackendType, io_object, io_context, io_op))
+					{
+						Assert(io_histograms_used <= PendingIOStats.pending_hist_time_buckets_size);
+
+						PendingIOStats.pending_hist_time_buckets_offsets[io_object][io_context][io_op] =
+							io_histograms_used++;
+					}
+					else
+						PendingIOStats.pending_hist_time_buckets_offsets[io_object][io_context][io_op] = -1;
+				}
+			}
+		}
+	}
+	else
+		PendingIOStats.pending_hist_time_buckets = NULL;
+
 }
 
 void

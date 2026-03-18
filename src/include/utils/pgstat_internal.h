@@ -768,6 +768,7 @@ extern void pgstat_function_reset_timestamp_cb(PgStatShared_Common *header, Time
 extern void pgstat_flush_io(bool nowait);
 
 extern bool pgstat_io_flush_cb(bool nowait);
+extern void pgstat_io_init_backend_cb(void);
 extern void pgstat_io_init_shmem_cb(void *stats);
 extern void pgstat_io_reset_all_cb(TimestampTz ts);
 extern void pgstat_io_snapshot_cb(void);
