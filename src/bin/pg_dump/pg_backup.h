@@ -242,6 +242,9 @@ typedef struct Archive
 
 	/* info needed for string escaping */
 	int			encoding;		/* libpq code for client_encoding */
+	int			server_encoding;	/* libpq code for server encoding;
+									 * distinct from encoding (client
+									 * encoding) */
 	bool		std_strings;	/* standard_conforming_strings */
 
 	/* other important stuff */

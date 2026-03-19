@@ -66,6 +66,7 @@ OBJS_COMMON = \
 	kwlookup.o \
 	link-canary.o \
 	md5_common.o \
+	objectname.o \
 	parse_manifest.o \
 	percentrepl.o \
 	pg_get_line.o \

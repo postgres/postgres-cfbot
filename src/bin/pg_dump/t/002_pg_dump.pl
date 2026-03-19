@@ -2334,6 +2334,44 @@ my %tests = (
 		},
 	},
 
+	# Test that pg_dump uses makeObjectName truncation logic when deciding
+	# whether to emit CONSTRAINT for an auto-generated NOT NULL constraint name.
+	# A 55-char domain name causes makeObjectName to truncate to 54 chars
+	# before appending "_not_null", so pg_dump must apply the same truncation.
+	'CREATE DOMAIN dump_test.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' => {
+		create_order => 101,
+		create_sql =>
+		  'CREATE DOMAIN dump_test.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa AS integer NOT NULL;',
+		regexp => qr/^
+			\QCREATE DOMAIN dump_test.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa AS integer NOT NULL;\E
+			/xm,
+		like =>
+		  { %full_runs, %dump_test_schema_runs, section_pre_data => 1, },
+		unlike => {
+			exclude_dump_test_schema => 1,
+			only_dump_measurement => 1,
+		},
+	},
+
+	# A 27-char table name + 27-char column name (total 54 > 53) causes
+	# makeObjectName to truncate, so pg_dump must apply the same truncation
+	# when deciding whether to emit CONSTRAINT for a column NOT NULL.
+	'CREATE TABLE dump_test.ttttttttttttttttttttttttttt' => {
+		create_order => 102,
+		create_sql =>
+		  'CREATE TABLE dump_test.ttttttttttttttttttttttttttt (ttttttttttttttttttttttttttt integer NOT NULL);',
+		regexp => qr/^
+			\QCREATE TABLE dump_test.ttttttttttttttttttttttttttt (\E\n
+			\s+\Qttttttttttttttttttttttttttt integer NOT NULL\E
+			/xm,
+		like =>
+		  { %full_runs, %dump_test_schema_runs, section_pre_data => 1, },
+		unlike => {
+			exclude_dump_test_schema => 1,
+			only_dump_measurement => 1,
+		},
+	},
+
 	'CREATE FUNCTION dump_test.pltestlang_call_handler' => {
 		create_order => 17,
 		create_sql => 'CREATE FUNCTION dump_test.pltestlang_call_handler()

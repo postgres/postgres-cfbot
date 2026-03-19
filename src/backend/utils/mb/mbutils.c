@@ -1216,37 +1216,6 @@ pg_mbcliplen(const char *mbstr, int len, int limit)
 }
 
 /*
- * pg_mbcliplen with specified encoding; string must be valid in encoding
- */
-int
-pg_encoding_mbcliplen(int encoding, const char *mbstr,
-					  int len, int limit)
-{
-	mblen_converter mblen_fn;
-	int			clen = 0;
-	int			l;
-
-	/* optimization for single byte encoding */
-	if (pg_encoding_max_length(encoding) == 1)
-		return cliplen(mbstr, len, limit);
-
-	mblen_fn = pg_wchar_table[encoding].mblen;
-
-	while (len > 0 && *mbstr)
-	{
-		l = (*mblen_fn) ((const unsigned char *) mbstr);
-		if ((clen + l) > limit)
-			break;
-		clen += l;
-		if (clen == limit)
-			break;
-		len -= l;
-		mbstr += l;
-	}
-	return clen;
-}
-
-/*
  * Similar to pg_mbcliplen except the limit parameter specifies the
  * character length, not the byte length.
  */

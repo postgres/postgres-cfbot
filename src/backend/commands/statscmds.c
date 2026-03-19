@@ -27,6 +27,8 @@
 #include "catalog/pg_statistic_ext_data.h"
 #include "commands/comment.h"
 #include "commands/defrem.h"
+#include "common/string.h"
+#include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
@@ -891,7 +893,8 @@ ChooseExtendedStatisticName(const char *name1, const char *name2,
 	{
 		Oid			existingstats;
 
-		stxname = makeObjectName(name1, name2, modlabel);
+		stxname = makeObjectName(name1, name2, modlabel,
+								 GetDatabaseEncoding());
 
 		existingstats = GetSysCacheOid2(STATEXTNAMENSP, Anum_pg_statistic_ext_oid,
 										PointerGetDatum(stxname),

@@ -28,6 +28,7 @@
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
 #include "commands/typecmds.h"
+#include "common/string.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "utils/acl.h"
@@ -862,7 +863,7 @@ makeArrayTypeName(const char *typeName, Oid typeNamespace)
 	 */
 
 	/* First, try with no numeric suffix */
-	arr_name = makeObjectName("", typeName, NULL);
+	arr_name = makeObjectName("", typeName, NULL, GetDatabaseEncoding());
 
 	for (;;)
 	{
@@ -874,7 +875,8 @@ makeArrayTypeName(const char *typeName, Oid typeNamespace)
 		/* That attempt conflicted.  Prepare a new name with some digits. */
 		pfree(arr_name);
 		snprintf(suffix, sizeof(suffix), "%d", ++pass);
-		arr_name = makeObjectName("", typeName, suffix);
+		arr_name = makeObjectName("", typeName, suffix,
+								  GetDatabaseEncoding());
 	}
 
 	return arr_name;

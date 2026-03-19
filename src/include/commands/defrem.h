@@ -38,8 +38,6 @@ extern ObjectAddress DefineIndex(ParseState *pstate,
 								 bool skip_build,
 								 bool quiet);
 extern void ExecReindex(ParseState *pstate, const ReindexStmt *stmt, bool isTopLevel);
-extern char *makeObjectName(const char *name1, const char *name2,
-							const char *label);
 extern char *ChooseRelationName(const char *name1, const char *name2,
 								const char *label, Oid namespaceid,
 								bool isconstraint);
