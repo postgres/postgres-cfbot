@@ -58,6 +58,7 @@ enum dbObjectTypePriorities
 	PRIO_COLLATION,
 	PRIO_TRANSFORM,
 	PRIO_EXTENSION,
+	PRIO_EXTENSION_DATA,		/* ext config data: used for binary upgrade */
 	PRIO_TYPE,					/* used for DO_TYPE and DO_SHELL_TYPE */
 	PRIO_CAST,
 	PRIO_FUNC,
@@ -106,6 +107,7 @@ static const int dbObjectTypePriority[] =
 {
 	[DO_NAMESPACE] = PRIO_NAMESPACE,
 	[DO_EXTENSION] = PRIO_EXTENSION,
+	[DO_EXTENSION_DATA] = PRIO_EXTENSION_DATA,
 	[DO_TYPE] = PRIO_TYPE,
 	[DO_SHELL_TYPE] = PRIO_TYPE,
 	[DO_FUNC] = PRIO_FUNC,
@@ -1523,6 +1525,11 @@ describeDumpableObject(DumpableObject *obj, char *buf, int bufsize)
 		case DO_EXTENSION:
 			snprintf(buf, bufsize,
 					 "EXTENSION %s  (ID %d OID %u)",
+					 obj->name, obj->dumpId, obj->catId.oid);
+			return;
+		case DO_EXTENSION_DATA:
+			snprintf(buf, bufsize,
+					 "EXTENSION DATA %s  (ID %d OID %u)",
 					 obj->name, obj->dumpId, obj->catId.oid);
 			return;
 		case DO_TYPE:
