@@ -221,6 +221,8 @@ typedef struct
 	uint64		chkpnt_nxtmxoff;
 	uint32		chkpnt_oldstMulti;
 	uint32		chkpnt_oldstxid;
+	uint32		chkpnt_oldstCommitTsxid;
+	uint32		chkpnt_newstCommitTsxid;
 	uint32		align;
 	uint32		blocksz;
 	uint32		largesz;
@@ -289,6 +291,8 @@ typedef struct
 	int			nsubs;			/* number of subscriptions */
 	bool		sub_retain_dead_tuples; /* whether a subscription enables
 										 * retain_dead_tuples. */
+	bool		copy_commit_ts;	/* whether transfer commit timestamps should be
+								 * copied. */
 } ClusterInfo;
 
 
@@ -358,7 +362,6 @@ extern UserOpts user_opts;
 extern ClusterInfo old_cluster,
 			new_cluster;
 extern OSInfo os_info;
-
 
 /* check.c */
 

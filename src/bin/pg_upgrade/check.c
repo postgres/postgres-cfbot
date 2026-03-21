@@ -38,6 +38,8 @@ static void check_new_cluster_subscription_configuration(void);
 static void check_old_cluster_for_valid_slots(void);
 static void check_old_cluster_subscription_state(void);
 static void check_old_cluster_global_names(ClusterInfo *cluster);
+static void determine_commit_ts_transfer(void);
+static void check_new_cluster_commit_ts(void);
 static void check_for_oldestxid_consistency(ClusterInfo *cluster);
 
 /*
@@ -601,6 +603,7 @@ check_and_dump_old_cluster(void)
 
 	get_loadable_libraries();
 
+	determine_commit_ts_transfer();
 
 	/*
 	 * Check for various failure cases
@@ -746,8 +749,65 @@ check_new_cluster(void)
 	check_new_cluster_replication_slots();
 
 	check_new_cluster_subscription_configuration();
+
+	check_new_cluster_commit_ts();
 }
 
+/*
+ * Decide whether commit timestamps must be transferred.
+ */
+static void
+determine_commit_ts_transfer(void)
+{
+	PGconn	   *conn;
+	PGresult   *res;
+
+	old_cluster.copy_commit_ts = false;
+
+	/*
+	 * Quick return if no commit timestamp information was available from
+	 * pg_control.
+	 */
+	if (old_cluster.controldata.chkpnt_oldstCommitTsxid == 0 ||
+		old_cluster.controldata.chkpnt_newstCommitTsxid == 0)
+		return;
+
+	conn = connectToServer(&old_cluster, "template1");
+	res = executeQueryOrDie(conn, "SELECT setting FROM pg_settings "
+							"WHERE name = 'track_commit_timestamp'");
+
+	/*
+	 * Starting the old server with tracking disabled removes its commit
+	 * timestamps, even if the limits read from pg_control before startup
+	 * were valid.  Transfer the data only if tracking is still enabled.
+	 */
+	old_cluster.copy_commit_ts = strcmp(PQgetvalue(res, 0, 0), "on") == 0;
+
+	PQclear(res);
+	PQfinish(conn);
+}
+
+static void
+check_new_cluster_commit_ts(void)
+{
+	PGconn	   *conn;
+	PGresult   *res;
+	bool		commit_ts_is_enabled;
+
+	prep_status("Checking for new cluster configuration for commit timestamp");
+
+	conn = connectToServer(&new_cluster, "template1");
+	res = executeQueryOrDie(conn, "SELECT setting FROM pg_settings "
+							"WHERE name = 'track_commit_timestamp'");
+	commit_ts_is_enabled = strcmp(PQgetvalue(res, 0, 0), "on") == 0;
+	PQclear(res);
+	PQfinish(conn);
+
+	if (!commit_ts_is_enabled && old_cluster.copy_commit_ts)
+		pg_fatal("\"track_commit_timestamp\" must be \"on\" but is set to \"off\"");
+
+	check_ok();
+}
 
 void
 report_clusters_compatible(void)
