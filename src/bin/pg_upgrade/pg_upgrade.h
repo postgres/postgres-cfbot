@@ -221,6 +221,8 @@ typedef struct
 	uint64		chkpnt_nxtmxoff;
 	uint32		chkpnt_oldstMulti;
 	uint32		chkpnt_oldstxid;
+	uint32		chkpnt_oldstCommitTsxid;
+	uint32		chkpnt_newstCommitTsxid;
 	uint32		align;
 	uint32		blocksz;
 	uint32		largesz;
@@ -358,7 +360,6 @@ extern UserOpts user_opts;
 extern ClusterInfo old_cluster,
 			new_cluster;
 extern OSInfo os_info;
-
 
 /* check.c */
 
