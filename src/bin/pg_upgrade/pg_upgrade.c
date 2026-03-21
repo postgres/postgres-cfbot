@@ -85,7 +85,6 @@ char	   *output_files[] = {
 	NULL
 };
 
-
 int
 main(int argc, char **argv)
 {
@@ -766,11 +765,31 @@ copy_subdir_files(const char *old_subdir, const char *new_subdir)
 static void
 copy_xact_xlog_xid(void)
 {
+	bool		is_copy_commit_ts;
+	uint32		oldest_xid,
+				newest_xid;
+
 	/*
 	 * Copy old commit logs to new data dir. pg_clog has been renamed to
 	 * pg_xact in post-10 clusters.
 	 */
 	copy_subdir_files("pg_xact", "pg_xact");
+
+	/*
+	 * Copy old commit_timestamp data to new, if available.
+	 */
+	is_copy_commit_ts =
+		(old_cluster.controldata.chkpnt_oldstCommitTsxid > 0 &&
+		 old_cluster.controldata.chkpnt_newstCommitTsxid > 0);
+
+	if (is_copy_commit_ts)
+	{
+		copy_subdir_files("pg_commit_ts", "pg_commit_ts");
+		oldest_xid = old_cluster.controldata.chkpnt_oldstCommitTsxid;
+		newest_xid = old_cluster.controldata.chkpnt_newstCommitTsxid;
+	}
+	else
+		oldest_xid = newest_xid = old_cluster.controldata.chkpnt_nxtxid;
 
 	prep_status("Setting oldest XID for new cluster");
 	exec_prog(UTILITY_LOG_FILE, NULL, true, true,
@@ -789,12 +808,15 @@ copy_xact_xlog_xid(void)
 			  "\"%s/pg_resetwal\" -f -e %u \"%s\"",
 			  new_cluster.bindir, old_cluster.controldata.chkpnt_nxtepoch,
 			  new_cluster.pgdata);
-	/* must reset commit timestamp limits also */
+
+	/*
+	 * must reset commit timestamp limits also or copy from the old cluster
+	 */
 	exec_prog(UTILITY_LOG_FILE, NULL, true, true,
 			  "\"%s/pg_resetwal\" -f -c %u,%u \"%s\"",
 			  new_cluster.bindir,
-			  old_cluster.controldata.chkpnt_nxtxid,
-			  old_cluster.controldata.chkpnt_nxtxid,
+			  oldest_xid,
+			  newest_xid,
 			  new_cluster.pgdata);
 	check_ok();
 
