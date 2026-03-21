@@ -86,7 +86,6 @@ char	   *output_files[] = {
 	NULL
 };
 
-
 int
 main(int argc, char **argv)
 {
@@ -223,17 +222,17 @@ main(int argc, char **argv)
 	 * generate some WAL before we could create the slots in the new cluster
 	 * but we can ignore that WAL as that won't be required downstream.
 	 *
+	 * FIXME: must be updated after the replication origin can be preserved.
 	 * The conflict detection slot is not affected by concerns related to WALs
 	 * as it only retains the dead tuples. It is created here for consistency.
 	 * Note that the new conflict detection slot uses the latest transaction
 	 * ID as xmin, so it cannot protect dead tuples that existed before the
-	 * upgrade. Additionally, commit timestamps and origin data are not
-	 * preserved during the upgrade. So, even after creating the slot, the
-	 * upgraded subscriber may be unable to detect conflicts or log relevant
-	 * commit timestamps and origins when applying changes from the publisher
-	 * occurred before the upgrade especially if those changes were not
-	 * replicated. It can only protect tuples that might be deleted after the
-	 * new cluster starts.
+	 * upgrade. Additionally, origin data is not preserved during the upgrade.
+	 * So, even after creating the slot, the upgraded subscriber may be unable
+	 * to detect origin-related conflicts or log the relevant origins when
+	 * applying changes from the publisher occurred before the upgrade
+	 * especially if those changes were not replicated. It can only protect
+	 * tuples that might be deleted after the new cluster starts.
 	 */
 	if (migrate_logical_slots || old_cluster.sub_retain_dead_tuples)
 	{
@@ -782,11 +781,31 @@ copy_subdir_files(const char *old_subdir, const char *new_subdir)
 static void
 copy_xact_xlog_xid(void)
 {
+	bool		is_copy_commit_ts;
+	uint32		oldest_xid,
+				newest_xid;
+
 	/*
 	 * Copy old commit logs to new data dir. pg_clog has been renamed to
 	 * pg_xact in post-10 clusters.
 	 */
 	copy_subdir_files("pg_xact", "pg_xact");
+
+	/*
+	 * Copy old commit_timestamp data to new, if available.
+	 */
+	is_copy_commit_ts =
+		(old_cluster.controldata.chkpnt_oldstCommitTsxid > 0 &&
+		 old_cluster.controldata.chkpnt_newstCommitTsxid > 0);
+
+	if (is_copy_commit_ts)
+	{
+		copy_subdir_files("pg_commit_ts", "pg_commit_ts");
+		oldest_xid = old_cluster.controldata.chkpnt_oldstCommitTsxid;
+		newest_xid = old_cluster.controldata.chkpnt_newstCommitTsxid;
+	}
+	else
+		oldest_xid = newest_xid = old_cluster.controldata.chkpnt_nxtxid;
 
 	prep_status("Setting oldest XID for new cluster");
 	exec_prog(UTILITY_LOG_FILE, NULL, true, true,
@@ -805,12 +824,15 @@ copy_xact_xlog_xid(void)
 			  "\"%s/pg_resetwal\" -f -e %u \"%s\"",
 			  new_cluster.bindir, old_cluster.controldata.chkpnt_nxtepoch,
 			  new_cluster.pgdata);
-	/* must reset commit timestamp limits also */
+
+	/*
+	 * must reset commit timestamp limits also or copy from the old cluster
+	 */
 	exec_prog(UTILITY_LOG_FILE, NULL, true, true,
 			  "\"%s/pg_resetwal\" -f -c %u,%u \"%s\"",
 			  new_cluster.bindir,
-			  old_cluster.controldata.chkpnt_nxtxid,
-			  old_cluster.controldata.chkpnt_nxtxid,
+			  oldest_xid,
+			  newest_xid,
 			  new_cluster.pgdata);
 	check_ok();
 
