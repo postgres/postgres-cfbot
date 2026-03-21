@@ -35,6 +35,7 @@ static void check_new_cluster_replication_slots(void);
 static void check_new_cluster_subscription_configuration(void);
 static void check_old_cluster_for_valid_slots(void);
 static void check_old_cluster_subscription_state(void);
+static void check_new_cluster_pg_commit_ts(void);
 static void check_old_cluster_global_names(ClusterInfo *cluster);
 
 /*
@@ -708,9 +709,34 @@ check_new_cluster(void)
 	check_new_cluster_replication_slots();
 
 	check_new_cluster_subscription_configuration();
+
+	check_new_cluster_pg_commit_ts();
+
 }
 
+void
+check_new_cluster_pg_commit_ts(void)
+{
+	PGconn	   *conn;
+	PGresult   *res;
+	bool		commit_ts_is_enabled;
 
+
+	prep_status("Checking for new cluster configuration for commit timestamp");
+
+	conn = connectToServer(&new_cluster, "template1");
+	res = executeQueryOrDie(conn, "SELECT setting FROM pg_settings "
+							"WHERE name = 'track_commit_timestamp'");
+	commit_ts_is_enabled = strcmp(PQgetvalue(res, 0, 0), "on") == 0;
+	PQclear(res);
+	PQfinish(conn);
+
+	if (!commit_ts_is_enabled &&
+		old_cluster.controldata.chkpnt_newstCommitTsxid > 0)
+		pg_fatal("\"track_commit_timestamp\" must be \"on\" but is set to \"off\"");
+
+	check_ok();
+}
 void
 report_clusters_compatible(void)
 {
