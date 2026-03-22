@@ -132,6 +132,9 @@ typedef struct IndexScanHeapData
 
 	bool		xs_readonly;	/* scan is read-only? */
 
+	/* Plain index scan xs_lastinblock optimization */
+	bool		xs_lastinblock; /* last TID on this block in current batch? */
+
 	uint16		xs_blkswitch_count; /* number of heap blocks fetched */
 } IndexScanHeapData;
 
