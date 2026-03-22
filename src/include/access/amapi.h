@@ -14,9 +14,12 @@
 
 #include "access/cmptype.h"
 #include "access/genam.h"
+#include "access/relscan.h"
 #include "access/stratnum.h"
 #include "nodes/nodes.h"
 #include "nodes/pg_list.h"
+#include "pgstat.h"
+#include "utils/rel.h"
 
 /*
  * We don't wish to include planner header files here, since most of an index
@@ -331,5 +334,38 @@ extern const IndexAmRoutine *GetIndexAmRoutine(Oid amhandler);
 extern const IndexAmRoutine *GetIndexAmRoutineByAmId(Oid amoid, bool noerror);
 extern CompareType IndexAmTranslateStrategy(StrategyNumber strategy, Oid amoid, Oid opfamily, bool missing_ok);
 extern StrategyNumber IndexAmTranslateCompareType(CompareType cmptype, Oid amoid, Oid opfamily, bool missing_ok);
+
+/*
+ * index_getnext_tid - amgettuple interface
+ *
+ * Fetch the next matching TID for the scan (or the first).  Returns true when
+ * a TID was found (the index AM will have saved it in scan->xs_heaptid), or
+ * false when we're out of index entries.
+ */
+static inline bool
+index_getnext_tid(IndexScanDesc scan, ScanDirection direction)
+{
+	bool		found;
+
+	Assert(RelationIsValid(scan->indexRelation));
+	Assert(scan->indexRelation->rd_indam != NULL);
+	Assert(scan->indexRelation->rd_indam->amgettuple != NULL);
+
+	found = scan->indexRelation->rd_indam->amgettuple(scan, direction);
+
+	/* Reset kill flag immediately for safety */
+	scan->kill_prior_tuple = false;
+	scan->xs_heap_continue = false;
+
+	/* If we're out of index entries, we're done */
+	if (!found)
+		return false;
+
+	Assert(ItemPointerIsValid(&scan->xs_heaptid));
+
+	pgstat_count_index_tuples(scan->indexRelation, 1);
+
+	return true;
+}
 
 #endif							/* AMAPI_H */
