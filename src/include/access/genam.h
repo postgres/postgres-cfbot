@@ -156,6 +156,7 @@ extern void index_insert_cleanup(Relation indexRelation,
 
 extern IndexScanDesc index_beginscan(Relation heapRelation,
 									 Relation indexRelation,
+									 bool index_only_scan,
 									 Snapshot snapshot,
 									 IndexScanInstrumentation *instrument,
 									 int nkeys, int norderbys,
@@ -178,15 +179,13 @@ extern void index_parallelscan_initialize(Relation heapRelation,
 extern void index_parallelrescan(IndexScanDesc scan);
 extern IndexScanDesc index_beginscan_parallel(Relation heaprel,
 											  Relation indexrel,
+											  bool index_only_scan,
 											  IndexScanInstrumentation *instrument,
 											  int nkeys, int norderbys,
 											  ParallelIndexScanDesc pscan,
 											  uint32 flags);
 extern ItemPointer index_getnext_tid(IndexScanDesc scan,
 									 ScanDirection direction);
-extern bool index_fetch_heap(IndexScanDesc scan, TupleTableSlot *slot);
-extern bool index_getnext_slot(IndexScanDesc scan, ScanDirection direction,
-							   TupleTableSlot *slot);
 extern int64 index_getbitmap(IndexScanDesc scan, TIDBitmap *bitmap);
 
 extern IndexBulkDeleteResult *index_bulk_delete(IndexVacuumInfo *info,
@@ -200,6 +199,7 @@ extern RegProcedure index_getprocid(Relation irel, AttrNumber attnum,
 									uint16 procnum);
 extern FmgrInfo *index_getprocinfo(Relation irel, AttrNumber attnum,
 								   uint16 procnum);
+extern void index_fill_ios_slot(IndexScanDesc scan, TupleTableSlot *slot);
 extern void index_store_float8_orderby_distances(IndexScanDesc scan,
 												 Oid *orderByTypes,
 												 IndexOrderByDistance *distances,

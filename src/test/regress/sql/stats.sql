@@ -403,6 +403,35 @@ SELECT pg_stat_reset_single_index_counters('test_last_scan_pkey'::regclass);
 SELECT idx_scan, stats_reset IS NOT NULL AS has_stats_reset
   FROM pg_stat_all_indexes WHERE indexrelid = 'test_last_scan_pkey'::regclass;
 
+-- Test pg_stat_all_indexes.idx_tup_read counter
+CREATE TEMPORARY TABLE test_idx_tup_read AS
+  SELECT g AS a FROM generate_series(1, 200) g;
+CREATE INDEX ON test_idx_tup_read(a);
+
+SET enable_seqscan = off;
+SET enable_indexonlyscan = off;
+-- plain index scan
+SET enable_bitmapscan = off;
+EXPLAIN (COSTS off) SELECT count(*) FROM test_idx_tup_read WHERE a BETWEEN 1 AND 200;
+SELECT count(*) FROM test_idx_tup_read WHERE a BETWEEN 1 AND 200;
+-- bitmap index scan
+SET enable_indexscan = off;
+SET enable_bitmapscan = on;
+EXPLAIN (COSTS off) SELECT count(*) FROM test_idx_tup_read WHERE a BETWEEN 1 AND 200;
+SELECT count(*) FROM test_idx_tup_read WHERE a BETWEEN 1 AND 200;
+RESET enable_seqscan;
+RESET enable_indexonlyscan;
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+
+-- We expect a total of 400 tuples read (200 from plain index scan, 200 from
+-- bitmap index scan).  However, we only expect 200 tuple fetches, because
+-- bitmap index scans/heap scans don't affect the relevant counter.
+SELECT pg_stat_force_next_flush();
+SELECT idx_tup_read, idx_tup_fetch FROM pg_stat_all_indexes
+  WHERE indexrelid = 'test_idx_tup_read_a_idx'::regclass;
+DROP TABLE test_idx_tup_read;
+
 -----
 -- Test reset of some stats for shared table
 -----

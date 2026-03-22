@@ -32,6 +32,7 @@
 #include "utils/acl.h"
 #include "utils/injection_point.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/rls.h"
 #include "utils/ruleutils.h"
@@ -84,7 +85,7 @@ RelationGetIndexScan(Relation indexRelation, int nkeys, int norderbys)
 	scan = palloc_object(IndexScanDescData);
 
 	scan->heapRelation = NULL;	/* may be set later */
-	scan->xs_heapfetch = NULL;
+	scan->xs_table_opaque = NULL;
 	scan->indexRelation = indexRelation;
 	scan->xs_snapshot = InvalidSnapshot;	/* caller must initialize this */
 	scan->numberOfKeys = nkeys;
@@ -126,6 +127,14 @@ RelationGetIndexScan(Relation indexRelation, int nkeys, int norderbys)
 	scan->xs_hitup = NULL;
 	scan->xs_hitupdesc = NULL;
 
+	scan->xs_getnext_slot = NULL;
+
+	scan->xs_name_cstring_attnums = NULL;
+	scan->xs_name_cstring_count = 0;
+	scan->xs_name_cstring_cxt = NULL;
+
+	scan->xs_visited_pages_limit = 0;
+
 	return scan;
 }
 
@@ -148,6 +157,10 @@ IndexScanEnd(IndexScanDesc scan)
 		pfree(scan->keyData);
 	if (scan->orderByData != NULL)
 		pfree(scan->orderByData);
+	if (scan->xs_name_cstring_attnums != NULL)
+		pfree(scan->xs_name_cstring_attnums);
+	if (scan->xs_name_cstring_cxt != NULL)
+		MemoryContextDelete(scan->xs_name_cstring_cxt);
 
 	pfree(scan);
 }
@@ -454,7 +467,7 @@ systable_beginscan(Relation heapRelation,
 				elog(ERROR, "column is not in index");
 		}
 
-		sysscan->iscan = index_beginscan(heapRelation, irel,
+		sysscan->iscan = index_beginscan(heapRelation, irel, false,
 										 snapshot, NULL, nkeys, 0,
 										 SO_NONE);
 		index_rescan(sysscan->iscan, idxkey, nkeys, NULL, 0);
@@ -518,7 +531,8 @@ systable_getnext(SysScanDesc sysscan)
 
 	if (sysscan->irel)
 	{
-		if (index_getnext_slot(sysscan->iscan, ForwardScanDirection, sysscan->slot))
+		if (table_index_getnext_slot(sysscan->iscan, ForwardScanDirection,
+									 sysscan->slot))
 		{
 			bool		shouldFree;
 
@@ -643,7 +657,7 @@ systable_endscan(SysScanDesc sysscan)
  * we could do a heapscan and sort, but the uses are in places that
  * probably don't need to still work with corrupted catalog indexes.)
  * For the moment, therefore, these functions are merely the thinest of
- * wrappers around index_beginscan/index_getnext_slot.  The main reason for
+ * wrappers around index_beginscan/table_index_getnext_slot.  The main reason for
  * their existence is to centralize possible future support of lossy operators
  * in catalog scans.
  */
@@ -716,7 +730,7 @@ systable_beginscan_ordered(Relation heapRelation,
 	if (TransactionIdIsValid(CheckXidAlive))
 		bsysscan = true;
 
-	sysscan->iscan = index_beginscan(heapRelation, indexRelation,
+	sysscan->iscan = index_beginscan(heapRelation, indexRelation, false,
 									 snapshot, NULL, nkeys, 0,
 									 SO_NONE);
 	index_rescan(sysscan->iscan, idxkey, nkeys, NULL, 0);
@@ -736,7 +750,7 @@ systable_getnext_ordered(SysScanDesc sysscan, ScanDirection direction)
 	HeapTuple	htup = NULL;
 
 	Assert(sysscan->irel);
-	if (index_getnext_slot(sysscan->iscan, direction, sysscan->slot))
+	if (table_index_getnext_slot(sysscan->iscan, direction, sysscan->slot))
 		htup = ExecFetchSlotHeapTuple(sysscan->slot, false, NULL);
 
 	/* See notes in systable_getnext */

@@ -24,15 +24,14 @@
  *		index_parallelscan_initialize - initialize parallel scan
  *		index_parallelrescan  - (re)start a parallel scan of an index
  *		index_beginscan_parallel - join parallel index scan
- *		index_getnext_tid	- get the next TID from a scan
- *		index_fetch_heap		- get the scan's next heap tuple
- *		index_getnext_slot	- get the next tuple from a scan
+ *		index_getnext_tid	- amgettuple table AM helper routine
  *		index_getbitmap - get all tuples from a scan
  *		index_bulk_delete	- bulk deletion of index tuples
  *		index_vacuum_cleanup	- post-deletion cleanup of an index
  *		index_can_return	- does index support index-only scans?
  *		index_getprocid - get a support procedure OID
  *		index_getprocinfo - get a support procedure's lookup info
+ *		index_fill_ios_slot - fill an index-only scan's result slot
  *
  * NOTES
  *		This file contains the index_ routines which used
@@ -44,17 +43,21 @@
 #include "postgres.h"
 
 #include "access/amapi.h"
+#include "access/htup_details.h"
 #include "access/relation.h"
 #include "access/reloptions.h"
 #include "access/relscan.h"
 #include "access/tableam.h"
 #include "catalog/index.h"
 #include "catalog/pg_type.h"
+#include "executor/tuptable.h"
 #include "nodes/execnodes.h"
 #include "pgstat.h"
 #include "storage/lmgr.h"
 #include "storage/lock.h"
 #include "storage/predicate.h"
+#include "utils/builtins.h"
+#include "utils/memutils.h"
 #include "utils/ruleutils.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
@@ -105,9 +108,16 @@ do { \
 			 CppAsString(pname), RelationGetRelationName(scan->indexRelation)); \
 } while(0)
 
-static IndexScanDesc index_beginscan_internal(Relation indexRelation,
-											  int nkeys, int norderbys, Snapshot snapshot,
-											  ParallelIndexScanDesc pscan, bool temp_snap);
+static pg_always_inline IndexScanDesc index_beginscan_internal(Relation indexRelation,
+															   Relation heapRelation,
+															   int nkeys,
+															   int norderbys,
+															   Snapshot snapshot,
+															   ParallelIndexScanDesc pscan,
+															   IndexScanInstrumentation *instrument,
+															   bool index_only_scan,
+															   bool temp_snap,
+															   uint32 flags);
 static inline void validate_relation_as_index(Relation r);
 
 
@@ -256,13 +266,12 @@ index_insert_cleanup(Relation indexRelation,
 IndexScanDesc
 index_beginscan(Relation heapRelation,
 				Relation indexRelation,
+				bool index_only_scan,
 				Snapshot snapshot,
 				IndexScanInstrumentation *instrument,
 				int nkeys, int norderbys,
 				uint32 flags)
 {
-	IndexScanDesc scan;
-
 	Assert(snapshot != InvalidSnapshot);
 
 	/* Check that a historic snapshot is not used for non-catalog tables */
@@ -275,20 +284,10 @@ index_beginscan(Relation heapRelation,
 						RelationGetRelationName(heapRelation))));
 	}
 
-	scan = index_beginscan_internal(indexRelation, nkeys, norderbys, snapshot, NULL, false);
-
-	/*
-	 * Save additional parameters into the scandesc.  Everything else was set
-	 * up by RelationGetIndexScan.
-	 */
-	scan->heapRelation = heapRelation;
-	scan->xs_snapshot = snapshot;
-	scan->instrument = instrument;
-
-	/* prepare to fetch index matches from table */
-	scan->xs_heapfetch = table_index_fetch_begin(heapRelation, flags);
-
-	return scan;
+	return index_beginscan_internal(indexRelation, heapRelation,
+									nkeys, norderbys,
+									snapshot, NULL, instrument,
+									index_only_scan, false, flags);
 }
 
 /*
@@ -303,29 +302,24 @@ index_beginscan_bitmap(Relation indexRelation,
 					   IndexScanInstrumentation *instrument,
 					   int nkeys)
 {
-	IndexScanDesc scan;
-
 	Assert(snapshot != InvalidSnapshot);
+	Assert(IsMVCCLikeSnapshot(snapshot));
 
-	scan = index_beginscan_internal(indexRelation, nkeys, 0, snapshot, NULL, false);
-
-	/*
-	 * Save additional parameters into the scandesc.  Everything else was set
-	 * up by RelationGetIndexScan.
-	 */
-	scan->xs_snapshot = snapshot;
-	scan->instrument = instrument;
-
-	return scan;
+	return index_beginscan_internal(indexRelation, NULL, nkeys, 0, snapshot,
+									NULL, instrument, false, false, SO_NONE);
 }
 
 /*
  * index_beginscan_internal --- common code for index_beginscan variants
+ *
+ * When heapRelation is not NULL, also initializes table AM index scan state.
  */
-static IndexScanDesc
-index_beginscan_internal(Relation indexRelation,
+static pg_always_inline IndexScanDesc
+index_beginscan_internal(Relation indexRelation, Relation heapRelation,
 						 int nkeys, int norderbys, Snapshot snapshot,
-						 ParallelIndexScanDesc pscan, bool temp_snap)
+						 ParallelIndexScanDesc pscan,
+						 IndexScanInstrumentation *instrument,
+						 bool index_only_scan, bool temp_snap, uint32 flags)
 {
 	IndexScanDesc scan;
 
@@ -348,6 +342,66 @@ index_beginscan_internal(Relation indexRelation,
 	/* Initialize information for parallel scan. */
 	scan->parallel_scan = pscan;
 	scan->xs_temp_snap = temp_snap;
+
+	scan->xs_snapshot = snapshot;
+	scan->instrument = instrument;
+
+	/*
+	 * Initialize heap-side scan state when a heap relation is provided.
+	 * Bitmap index scans don't provide one.
+	 */
+	if (heapRelation != NULL)
+	{
+		scan->heapRelation = heapRelation;
+		scan->xs_want_itup = index_only_scan;
+		scan->xs_heap_continue = false;
+
+		/*
+		 * The "name" type's btree opclass stores index keys as cstrings
+		 * rather than names to save space, so keys returned by an index-only
+		 * scan must be re-padded to NAMEDATALEN allocations.  Set up the
+		 * state index_fill_ios_slot uses to do that.  We detect such columns
+		 * generically (stored type CSTRINGOID, opclass input type NAMEOID) in
+		 * case other opclasses adopt the same optimization.
+		 */
+		if (index_only_scan)
+		{
+			int			indnkeyatts = indexRelation->rd_index->indnkeyatts;
+			int			namecount = 0;
+
+			for (int attnum = 0; attnum < indnkeyatts; attnum++)
+			{
+				if (TupleDescAttr(indexRelation->rd_att, attnum)->atttypid == CSTRINGOID &&
+					indexRelation->rd_opcintype[attnum] == NAMEOID)
+					namecount++;
+			}
+
+			if (unlikely(namecount > 0))
+			{
+				int			idx = 0;
+
+				scan->xs_name_cstring_attnums = palloc_array(AttrNumber, namecount);
+				for (int attnum = 0; attnum < indnkeyatts; attnum++)
+				{
+					if (TupleDescAttr(indexRelation->rd_att, attnum)->atttypid == CSTRINGOID &&
+						indexRelation->rd_opcintype[attnum] == NAMEOID)
+						scan->xs_name_cstring_attnums[idx++] = (AttrNumber) attnum;
+				}
+
+				scan->xs_name_cstring_count = namecount;
+				scan->xs_name_cstring_cxt =
+					AllocSetContextCreate(CurrentMemoryContext,
+										  "index-only scan name columns",
+										  ALLOCSET_SMALL_SIZES);
+			}
+		}
+
+		/* set up table AM state for the index scan (sets xs_table_opaque) */
+		table_index_scan_begin(scan, flags);
+
+		/* table AM must set these for us */
+		Assert(scan->xs_getnext_slot != NULL && scan->xs_table_opaque != NULL);
+	}
 
 	return scan;
 }
@@ -376,8 +430,8 @@ index_rescan(IndexScanDesc scan,
 	Assert(norderbys == scan->numberOfOrderBys);
 
 	/* reset table AM state for rescan */
-	if (scan->xs_heapfetch)
-		table_index_fetch_reset(scan->xs_heapfetch);
+	if (scan->xs_table_opaque)
+		table_index_scan_reset(scan);
 
 	scan->kill_prior_tuple = false; /* for safety */
 	scan->xs_heap_continue = false;
@@ -397,10 +451,10 @@ index_endscan(IndexScanDesc scan)
 	CHECK_SCAN_PROCEDURE(amendscan);
 
 	/* Release resources (like buffer pins) from table accesses */
-	if (scan->xs_heapfetch)
+	if (scan->xs_table_opaque)
 	{
-		table_index_fetch_end(scan->xs_heapfetch);
-		scan->xs_heapfetch = NULL;
+		table_index_scan_end(scan);
+		scan->xs_table_opaque = NULL;
 	}
 
 	/* End the AM's scan */
@@ -453,8 +507,8 @@ index_restrpos(IndexScanDesc scan)
 	CHECK_SCAN_PROCEDURE(amrestrpos);
 
 	/* reset table AM state for restoring the marked position */
-	if (scan->xs_heapfetch)
-		table_index_fetch_reset(scan->xs_heapfetch);
+	if (scan->xs_table_opaque)
+		table_index_scan_reset(scan);
 
 	scan->kill_prior_tuple = false; /* for safety */
 	scan->xs_heap_continue = false;
@@ -540,8 +594,8 @@ index_parallelrescan(IndexScanDesc scan)
 	SCAN_CHECKS;
 
 	/* reset table AM state for rescan */
-	if (scan->xs_heapfetch)
-		table_index_fetch_reset(scan->xs_heapfetch);
+	if (scan->xs_table_opaque)
+		table_index_scan_reset(scan);
 
 	/* amparallelrescan is optional; assume no-op if not provided by AM */
 	if (scan->indexRelation->rd_indam->amparallelrescan != NULL)
@@ -558,41 +612,33 @@ index_parallelrescan(IndexScanDesc scan)
  */
 IndexScanDesc
 index_beginscan_parallel(Relation heaprel, Relation indexrel,
+						 bool index_only_scan,
 						 IndexScanInstrumentation *instrument,
 						 int nkeys, int norderbys,
 						 ParallelIndexScanDesc pscan,
 						 uint32 flags)
 {
 	Snapshot	snapshot;
-	IndexScanDesc scan;
 
 	Assert(RelFileLocatorEquals(heaprel->rd_locator, pscan->ps_locator));
 	Assert(RelFileLocatorEquals(indexrel->rd_locator, pscan->ps_indexlocator));
 
 	snapshot = RestoreSnapshot(pscan->ps_snapshot_data);
 	RegisterSnapshot(snapshot);
-	scan = index_beginscan_internal(indexrel, nkeys, norderbys, snapshot,
-									pscan, true);
 
-	/*
-	 * Save additional parameters into the scandesc.  Everything else was set
-	 * up by index_beginscan_internal.
-	 */
-	scan->heapRelation = heaprel;
-	scan->xs_snapshot = snapshot;
-	scan->instrument = instrument;
-
-	/* prepare to fetch index matches from table */
-	scan->xs_heapfetch = table_index_fetch_begin(heaprel, flags);
-
-	return scan;
+	return index_beginscan_internal(indexrel, heaprel, nkeys, norderbys,
+									snapshot, pscan, instrument,
+									index_only_scan, true, flags);
 }
 
 /* ----------------
- * index_getnext_tid - get the next TID from a scan
+ * index_getnext_tid - amgettuple interface
  *
  * The result is the next TID satisfying the scan keys,
  * or NULL if no more matching tuples exist.
+ *
+ * This should only be called by table AM amgettuple-based index scan
+ * callbacks.
  * ----------------
  */
 ItemPointer
@@ -622,8 +668,8 @@ index_getnext_tid(IndexScanDesc scan, ScanDirection direction)
 	if (!found)
 	{
 		/* reset table AM state */
-		if (scan->xs_heapfetch)
-			table_index_fetch_reset(scan->xs_heapfetch);
+		if (scan->xs_table_opaque)
+			table_index_scan_reset(scan);
 
 		return NULL;
 	}
@@ -633,97 +679,6 @@ index_getnext_tid(IndexScanDesc scan, ScanDirection direction)
 
 	/* Return the TID of the tuple we found. */
 	return &scan->xs_heaptid;
-}
-
-/* ----------------
- *		index_fetch_heap - get the scan's next heap tuple
- *
- * The result is a visible heap tuple associated with the index TID most
- * recently fetched by index_getnext_tid, or NULL if no more matching tuples
- * exist.  (There can be more than one matching tuple because of HOT chains,
- * although when using an MVCC snapshot it should be impossible for more than
- * one such tuple to exist.)
- *
- * On success, the buffer containing the heap tup is pinned (the pin will be
- * dropped in a future index_getnext_tid, index_fetch_heap or index_endscan
- * call).
- *
- * Note: caller must check scan->xs_recheck, and perform rechecking of the
- * scan keys if required.  We do not do that here because we don't have
- * enough information to do it efficiently in the general case.
- * ----------------
- */
-bool
-index_fetch_heap(IndexScanDesc scan, TupleTableSlot *slot)
-{
-	bool		all_dead = false;
-	bool		found;
-
-	found = table_index_fetch_tuple(scan->xs_heapfetch, &scan->xs_heaptid,
-									scan->xs_snapshot, slot,
-									&scan->xs_heap_continue, &all_dead);
-
-	if (found)
-		pgstat_count_heap_fetch(scan->indexRelation);
-
-	/*
-	 * If we scanned a whole HOT chain and found only dead tuples, tell index
-	 * AM to kill its entry for that TID (this will take effect in the next
-	 * amgettuple call, in index_getnext_tid).  We do not do this when in
-	 * recovery because it may violate MVCC to do so.  See comments in
-	 * RelationGetIndexScan().
-	 */
-	if (!scan->xactStartedInRecovery)
-		scan->kill_prior_tuple = all_dead;
-
-	return found;
-}
-
-/* ----------------
- *		index_getnext_slot - get the next tuple from a scan
- *
- * The result is true if a tuple satisfying the scan keys and the snapshot was
- * found, false otherwise.  The tuple is stored in the specified slot.
- *
- * On success, resources (like buffer pins) are likely to be held, and will be
- * dropped by a future index_getnext_tid, index_fetch_heap or index_endscan
- * call).
- *
- * Note: caller must check scan->xs_recheck, and perform rechecking of the
- * scan keys if required.  We do not do that here because we don't have
- * enough information to do it efficiently in the general case.
- * ----------------
- */
-bool
-index_getnext_slot(IndexScanDesc scan, ScanDirection direction, TupleTableSlot *slot)
-{
-	for (;;)
-	{
-		if (!scan->xs_heap_continue)
-		{
-			ItemPointer tid;
-
-			/* Time to fetch the next TID from the index */
-			tid = index_getnext_tid(scan, direction);
-
-			/* If we're out of index entries, we're done */
-			if (tid == NULL)
-				break;
-
-			Assert(ItemPointerEquals(tid, &scan->xs_heaptid));
-		}
-
-		/*
-		 * Fetch the next (or only) visible heap tuple for this index entry.
-		 * If we don't find anything, loop around and grab the next TID from
-		 * the index.
-		 */
-		Assert(ItemPointerIsValid(&scan->xs_heaptid));
-		if (index_fetch_heap(scan, slot))
-			return true;
-	}
-
-	return false;
 }
 
 /* ----------------
@@ -939,6 +894,89 @@ index_getprocinfo(Relation irel,
 	}
 
 	return locinfo;
+}
+
+/* ----------------
+ *		index_fill_ios_slot
+ *
+ *		Fill an index-only scan's result slot from the data the index AM
+ *		returned.
+ *
+ *		The data is provided in either HeapTuple (xs_hitup) or IndexTuple
+ *		(xs_itup) format.  An amgettuple index AM may fill both, in which
+ *		case the heap format is used, since it's a bit cheaper to fill a
+ *		slot from.
+ *
+ *		This is only intended to be called by table AMs, in their
+ *		xs_getnext_slot callbacks.
+ * ----------------
+ */
+void
+index_fill_ios_slot(IndexScanDesc scan, TupleTableSlot *slot)
+{
+	/* Caller is required to call ExecClearTuple before calling here */
+	Assert(TTS_EMPTY(slot));
+
+	/*
+	 * We must deform the tuple using the tupdesc the index AM formed it with
+	 * (xs_hitupdesc or xs_itupdesc), not the slot's tupdesc.  The datums
+	 * returned by the index AM must be binary compatible, but the descriptors
+	 * may align each column differently in certain rare cases. (Actually,
+	 * btree's "name" opclass stores cstring tuples that _aren't_ even binary
+	 * compatible, in the strictest sense.  We directly handle that here.)
+	 */
+	if (scan->xs_hitup)
+	{
+		Assert(slot->tts_tupleDescriptor->natts == scan->xs_hitupdesc->natts);
+
+		heap_deform_tuple(scan->xs_hitup, scan->xs_hitupdesc,
+						  slot->tts_values, slot->tts_isnull);
+	}
+	else if (scan->xs_itup)
+	{
+		Assert(slot->tts_tupleDescriptor->natts == scan->xs_itupdesc->natts);
+
+		index_deform_tuple(scan->xs_itup, scan->xs_itupdesc,
+						   slot->tts_values, slot->tts_isnull);
+
+		/*
+		 * Copy all name columns stored as cstrings back into a NAMEDATALEN
+		 * byte sized allocation.  We mark this branch as unlikely as
+		 * generally "name" is used only for the system catalogs and this
+		 * would have to be a user query running on those or some other user
+		 * table with an index on a name column.
+		 */
+		if (unlikely(scan->xs_name_cstring_attnums != NULL))
+		{
+			/* free the previous tuple's name allocations */
+			MemoryContextReset(scan->xs_name_cstring_cxt);
+
+			for (int idx = 0; idx < scan->xs_name_cstring_count; idx++)
+			{
+				int			attnum = scan->xs_name_cstring_attnums[idx];
+				Name		name;
+
+				/* skip null Datums */
+				if (slot->tts_isnull[attnum])
+					continue;
+
+				/*
+				 * allocate the NAMEDATALEN and copy the datum into that
+				 * memory
+				 */
+				name = (Name) MemoryContextAlloc(scan->xs_name_cstring_cxt,
+												 NAMEDATALEN);
+
+				/* use namestrcpy to zero-pad all trailing bytes */
+				namestrcpy(name, DatumGetCString(slot->tts_values[attnum]));
+				slot->tts_values[attnum] = NameGetDatum(name);
+			}
+		}
+	}
+	else
+		elog(ERROR, "no data returned for index-only scan");
+
+	ExecStoreVirtualTuple(slot);
 }
 
 /* ----------------
