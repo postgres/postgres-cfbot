@@ -30,6 +30,7 @@ extern List *transformGroupClause(ParseState *pstate, List *grouplist,
 								  List **targetlist, List *sortClause,
 								  ParseExprKind exprKind, bool useSQL99);
 extern List *transformSortClause(ParseState *pstate, List *orderlist,
+								 bool orderByAll,
 								 List **targetlist, ParseExprKind exprKind,
 								 bool useSQL99);
 
