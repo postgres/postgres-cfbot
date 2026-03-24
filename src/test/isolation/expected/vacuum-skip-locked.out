@@ -1,6 +1,6 @@
 Parsed test spec with 2 sessions
 
-starting permutation: lock_share vac_specified commit
+starting permutation: lock_share vac_specified commit check_stat
 step lock_share: 
 	BEGIN;
 	LOCK part1 IN SHARE MODE;
@@ -10,8 +10,23 @@ step vac_specified: VACUUM (SKIP_LOCKED) part1, part2;
 step commit: 
 	COMMIT;
 
+step check_stat: 
+	SELECT relname,
+		   vacuum_count, lock_skipped_vacuum_count,
+		   analyze_count, lock_skipped_analyze_count
+	FROM pg_stat_all_tables
+	WHERE relname IN ('parted', 'part1', 'part2')
+	ORDER BY relname;
 
-starting permutation: lock_share vac_all_parts commit
+relname|vacuum_count|lock_skipped_vacuum_count|analyze_count|lock_skipped_analyze_count
+-------+------------+-------------------------+-------------+--------------------------
+part1  |           0|                        1|            0|                         0
+part2  |           1|                        0|            0|                         0
+parted |           0|                        0|            0|                         0
+(3 rows)
+
+
+starting permutation: lock_share vac_all_parts commit check_stat
 step lock_share: 
 	BEGIN;
 	LOCK part1 IN SHARE MODE;
@@ -20,8 +35,23 @@ step vac_all_parts: VACUUM (SKIP_LOCKED) parted;
 step commit: 
 	COMMIT;
 
+step check_stat: 
+	SELECT relname,
+		   vacuum_count, lock_skipped_vacuum_count,
+		   analyze_count, lock_skipped_analyze_count
+	FROM pg_stat_all_tables
+	WHERE relname IN ('parted', 'part1', 'part2')
+	ORDER BY relname;
 
-starting permutation: lock_share analyze_specified commit
+relname|vacuum_count|lock_skipped_vacuum_count|analyze_count|lock_skipped_analyze_count
+-------+------------+-------------------------+-------------+--------------------------
+part1  |           0|                        1|            0|                         0
+part2  |           1|                        0|            0|                         0
+parted |           0|                        0|            0|                         0
+(3 rows)
+
+
+starting permutation: lock_share analyze_specified commit check_stat
 step lock_share: 
 	BEGIN;
 	LOCK part1 IN SHARE MODE;
@@ -31,8 +61,23 @@ step analyze_specified: ANALYZE (SKIP_LOCKED) part1, part2;
 step commit: 
 	COMMIT;
 
+step check_stat: 
+	SELECT relname,
+		   vacuum_count, lock_skipped_vacuum_count,
+		   analyze_count, lock_skipped_analyze_count
+	FROM pg_stat_all_tables
+	WHERE relname IN ('parted', 'part1', 'part2')
+	ORDER BY relname;
 
-starting permutation: lock_share analyze_all_parts commit
+relname|vacuum_count|lock_skipped_vacuum_count|analyze_count|lock_skipped_analyze_count
+-------+------------+-------------------------+-------------+--------------------------
+part1  |           0|                        0|            0|                         1
+part2  |           0|                        0|            1|                         0
+parted |           0|                        0|            0|                         0
+(3 rows)
+
+
+starting permutation: lock_share analyze_all_parts commit check_stat
 step lock_share: 
 	BEGIN;
 	LOCK part1 IN SHARE MODE;
@@ -41,8 +86,23 @@ step analyze_all_parts: ANALYZE (SKIP_LOCKED) parted;
 step commit: 
 	COMMIT;
 
+step check_stat: 
+	SELECT relname,
+		   vacuum_count, lock_skipped_vacuum_count,
+		   analyze_count, lock_skipped_analyze_count
+	FROM pg_stat_all_tables
+	WHERE relname IN ('parted', 'part1', 'part2')
+	ORDER BY relname;
 
-starting permutation: lock_share vac_analyze_specified commit
+relname|vacuum_count|lock_skipped_vacuum_count|analyze_count|lock_skipped_analyze_count
+-------+------------+-------------------------+-------------+--------------------------
+part1  |           0|                        0|            0|                         1
+part2  |           0|                        0|            1|                         0
+parted |           0|                        0|            1|                         0
+(3 rows)
+
+
+starting permutation: lock_share vac_analyze_specified commit check_stat
 step lock_share: 
 	BEGIN;
 	LOCK part1 IN SHARE MODE;
@@ -52,8 +112,23 @@ step vac_analyze_specified: VACUUM (ANALYZE, SKIP_LOCKED) part1, part2;
 step commit: 
 	COMMIT;
 
+step check_stat: 
+	SELECT relname,
+		   vacuum_count, lock_skipped_vacuum_count,
+		   analyze_count, lock_skipped_analyze_count
+	FROM pg_stat_all_tables
+	WHERE relname IN ('parted', 'part1', 'part2')
+	ORDER BY relname;
 
-starting permutation: lock_share vac_analyze_all_parts commit
+relname|vacuum_count|lock_skipped_vacuum_count|analyze_count|lock_skipped_analyze_count
+-------+------------+-------------------------+-------------+--------------------------
+part1  |           0|                        1|            0|                         1
+part2  |           1|                        0|            1|                         0
+parted |           0|                        0|            0|                         0
+(3 rows)
+
+
+starting permutation: lock_share vac_analyze_all_parts commit check_stat
 step lock_share: 
 	BEGIN;
 	LOCK part1 IN SHARE MODE;
@@ -62,8 +137,23 @@ step vac_analyze_all_parts: VACUUM (ANALYZE, SKIP_LOCKED) parted;
 step commit: 
 	COMMIT;
 
+step check_stat: 
+	SELECT relname,
+		   vacuum_count, lock_skipped_vacuum_count,
+		   analyze_count, lock_skipped_analyze_count
+	FROM pg_stat_all_tables
+	WHERE relname IN ('parted', 'part1', 'part2')
+	ORDER BY relname;
 
-starting permutation: lock_share vac_full_specified commit
+relname|vacuum_count|lock_skipped_vacuum_count|analyze_count|lock_skipped_analyze_count
+-------+------------+-------------------------+-------------+--------------------------
+part1  |           0|                        1|            0|                         1
+part2  |           1|                        0|            1|                         0
+parted |           0|                        0|            1|                         0
+(3 rows)
+
+
+starting permutation: lock_share vac_full_specified commit check_stat
 step lock_share: 
 	BEGIN;
 	LOCK part1 IN SHARE MODE;
@@ -73,8 +163,23 @@ step vac_full_specified: VACUUM (SKIP_LOCKED, FULL) part1, part2;
 step commit: 
 	COMMIT;
 
+step check_stat: 
+	SELECT relname,
+		   vacuum_count, lock_skipped_vacuum_count,
+		   analyze_count, lock_skipped_analyze_count
+	FROM pg_stat_all_tables
+	WHERE relname IN ('parted', 'part1', 'part2')
+	ORDER BY relname;
 
-starting permutation: lock_share vac_full_all_parts commit
+relname|vacuum_count|lock_skipped_vacuum_count|analyze_count|lock_skipped_analyze_count
+-------+------------+-------------------------+-------------+--------------------------
+part1  |           0|                        0|            0|                         0
+part2  |           0|                        0|            0|                         0
+parted |           0|                        0|            0|                         0
+(3 rows)
+
+
+starting permutation: lock_share vac_full_all_parts commit check_stat
 step lock_share: 
 	BEGIN;
 	LOCK part1 IN SHARE MODE;
@@ -83,8 +188,23 @@ step vac_full_all_parts: VACUUM (SKIP_LOCKED, FULL) parted;
 step commit: 
 	COMMIT;
 
+step check_stat: 
+	SELECT relname,
+		   vacuum_count, lock_skipped_vacuum_count,
+		   analyze_count, lock_skipped_analyze_count
+	FROM pg_stat_all_tables
+	WHERE relname IN ('parted', 'part1', 'part2')
+	ORDER BY relname;
 
-starting permutation: lock_access_exclusive vac_specified commit
+relname|vacuum_count|lock_skipped_vacuum_count|analyze_count|lock_skipped_analyze_count
+-------+------------+-------------------------+-------------+--------------------------
+part1  |           0|                        0|            0|                         0
+part2  |           0|                        0|            0|                         0
+parted |           0|                        0|            0|                         0
+(3 rows)
+
+
+starting permutation: lock_access_exclusive vac_specified commit check_stat
 step lock_access_exclusive: 
 	BEGIN;
 	LOCK part1 IN ACCESS EXCLUSIVE MODE;
@@ -94,8 +214,23 @@ step vac_specified: VACUUM (SKIP_LOCKED) part1, part2;
 step commit: 
 	COMMIT;
 
+step check_stat: 
+	SELECT relname,
+		   vacuum_count, lock_skipped_vacuum_count,
+		   analyze_count, lock_skipped_analyze_count
+	FROM pg_stat_all_tables
+	WHERE relname IN ('parted', 'part1', 'part2')
+	ORDER BY relname;
 
-starting permutation: lock_access_exclusive vac_all_parts commit
+relname|vacuum_count|lock_skipped_vacuum_count|analyze_count|lock_skipped_analyze_count
+-------+------------+-------------------------+-------------+--------------------------
+part1  |           0|                        1|            0|                         0
+part2  |           1|                        0|            0|                         0
+parted |           0|                        0|            0|                         0
+(3 rows)
+
+
+starting permutation: lock_access_exclusive vac_all_parts commit check_stat
 step lock_access_exclusive: 
 	BEGIN;
 	LOCK part1 IN ACCESS EXCLUSIVE MODE;
@@ -104,8 +239,23 @@ step vac_all_parts: VACUUM (SKIP_LOCKED) parted;
 step commit: 
 	COMMIT;
 
+step check_stat: 
+	SELECT relname,
+		   vacuum_count, lock_skipped_vacuum_count,
+		   analyze_count, lock_skipped_analyze_count
+	FROM pg_stat_all_tables
+	WHERE relname IN ('parted', 'part1', 'part2')
+	ORDER BY relname;
 
-starting permutation: lock_access_exclusive analyze_specified commit
+relname|vacuum_count|lock_skipped_vacuum_count|analyze_count|lock_skipped_analyze_count
+-------+------------+-------------------------+-------------+--------------------------
+part1  |           0|                        1|            0|                         0
+part2  |           1|                        0|            0|                         0
+parted |           0|                        0|            0|                         0
+(3 rows)
+
+
+starting permutation: lock_access_exclusive analyze_specified commit check_stat
 step lock_access_exclusive: 
 	BEGIN;
 	LOCK part1 IN ACCESS EXCLUSIVE MODE;
@@ -115,8 +265,23 @@ step analyze_specified: ANALYZE (SKIP_LOCKED) part1, part2;
 step commit: 
 	COMMIT;
 
+step check_stat: 
+	SELECT relname,
+		   vacuum_count, lock_skipped_vacuum_count,
+		   analyze_count, lock_skipped_analyze_count
+	FROM pg_stat_all_tables
+	WHERE relname IN ('parted', 'part1', 'part2')
+	ORDER BY relname;
 
-starting permutation: lock_access_exclusive analyze_all_parts commit
+relname|vacuum_count|lock_skipped_vacuum_count|analyze_count|lock_skipped_analyze_count
+-------+------------+-------------------------+-------------+--------------------------
+part1  |           0|                        0|            0|                         1
+part2  |           0|                        0|            1|                         0
+parted |           0|                        0|            0|                         0
+(3 rows)
+
+
+starting permutation: lock_access_exclusive analyze_all_parts commit check_stat
 step lock_access_exclusive: 
 	BEGIN;
 	LOCK part1 IN ACCESS EXCLUSIVE MODE;
@@ -126,8 +291,23 @@ step commit:
 	COMMIT;
 
 step analyze_all_parts: <... completed>
+step check_stat: 
+	SELECT relname,
+		   vacuum_count, lock_skipped_vacuum_count,
+		   analyze_count, lock_skipped_analyze_count
+	FROM pg_stat_all_tables
+	WHERE relname IN ('parted', 'part1', 'part2')
+	ORDER BY relname;
 
-starting permutation: lock_access_exclusive vac_analyze_specified commit
+relname|vacuum_count|lock_skipped_vacuum_count|analyze_count|lock_skipped_analyze_count
+-------+------------+-------------------------+-------------+--------------------------
+part1  |           0|                        0|            1|                         0
+part2  |           0|                        0|            1|                         0
+parted |           0|                        0|            1|                         0
+(3 rows)
+
+
+starting permutation: lock_access_exclusive vac_analyze_specified commit check_stat
 step lock_access_exclusive: 
 	BEGIN;
 	LOCK part1 IN ACCESS EXCLUSIVE MODE;
@@ -137,8 +317,23 @@ step vac_analyze_specified: VACUUM (ANALYZE, SKIP_LOCKED) part1, part2;
 step commit: 
 	COMMIT;
 
+step check_stat: 
+	SELECT relname,
+		   vacuum_count, lock_skipped_vacuum_count,
+		   analyze_count, lock_skipped_analyze_count
+	FROM pg_stat_all_tables
+	WHERE relname IN ('parted', 'part1', 'part2')
+	ORDER BY relname;
 
-starting permutation: lock_access_exclusive vac_analyze_all_parts commit
+relname|vacuum_count|lock_skipped_vacuum_count|analyze_count|lock_skipped_analyze_count
+-------+------------+-------------------------+-------------+--------------------------
+part1  |           0|                        1|            0|                         1
+part2  |           1|                        0|            1|                         0
+parted |           0|                        0|            0|                         0
+(3 rows)
+
+
+starting permutation: lock_access_exclusive vac_analyze_all_parts commit check_stat
 step lock_access_exclusive: 
 	BEGIN;
 	LOCK part1 IN ACCESS EXCLUSIVE MODE;
@@ -148,8 +343,23 @@ step commit:
 	COMMIT;
 
 step vac_analyze_all_parts: <... completed>
+step check_stat: 
+	SELECT relname,
+		   vacuum_count, lock_skipped_vacuum_count,
+		   analyze_count, lock_skipped_analyze_count
+	FROM pg_stat_all_tables
+	WHERE relname IN ('parted', 'part1', 'part2')
+	ORDER BY relname;
 
-starting permutation: lock_access_exclusive vac_full_specified commit
+relname|vacuum_count|lock_skipped_vacuum_count|analyze_count|lock_skipped_analyze_count
+-------+------------+-------------------------+-------------+--------------------------
+part1  |           1|                        0|            1|                         0
+part2  |           1|                        0|            1|                         0
+parted |           0|                        0|            1|                         0
+(3 rows)
+
+
+starting permutation: lock_access_exclusive vac_full_specified commit check_stat
 step lock_access_exclusive: 
 	BEGIN;
 	LOCK part1 IN ACCESS EXCLUSIVE MODE;
@@ -159,8 +369,23 @@ step vac_full_specified: VACUUM (SKIP_LOCKED, FULL) part1, part2;
 step commit: 
 	COMMIT;
 
+step check_stat: 
+	SELECT relname,
+		   vacuum_count, lock_skipped_vacuum_count,
+		   analyze_count, lock_skipped_analyze_count
+	FROM pg_stat_all_tables
+	WHERE relname IN ('parted', 'part1', 'part2')
+	ORDER BY relname;
 
-starting permutation: lock_access_exclusive vac_full_all_parts commit
+relname|vacuum_count|lock_skipped_vacuum_count|analyze_count|lock_skipped_analyze_count
+-------+------------+-------------------------+-------------+--------------------------
+part1  |           0|                        0|            0|                         0
+part2  |           0|                        0|            0|                         0
+parted |           0|                        0|            0|                         0
+(3 rows)
+
+
+starting permutation: lock_access_exclusive vac_full_all_parts commit check_stat
 step lock_access_exclusive: 
 	BEGIN;
 	LOCK part1 IN ACCESS EXCLUSIVE MODE;
@@ -168,4 +393,19 @@ step lock_access_exclusive:
 step vac_full_all_parts: VACUUM (SKIP_LOCKED, FULL) parted;
 step commit: 
 	COMMIT;
+
+step check_stat: 
+	SELECT relname,
+		   vacuum_count, lock_skipped_vacuum_count,
+		   analyze_count, lock_skipped_analyze_count
+	FROM pg_stat_all_tables
+	WHERE relname IN ('parted', 'part1', 'part2')
+	ORDER BY relname;
+
+relname|vacuum_count|lock_skipped_vacuum_count|analyze_count|lock_skipped_analyze_count
+-------+------------+-------------------------+-------------+--------------------------
+part1  |           0|                        0|            0|                         0
+part2  |           0|                        0|            0|                         0
+parted |           0|                        0|            0|                         0
+(3 rows)
 
