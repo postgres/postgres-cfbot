@@ -1894,6 +1894,22 @@ SELECT a + b AS sum, c FROM table1 ORDER BY sum + c;          -- wrong
   </para>
 
   <para>
+   <productname>PostgreSQL</productname> also supports the syntax
+   <literal>ORDER BY ALL</literal>, which is equivalent to explicitly
+   writing all select-list columns. The sort direction (ascending or
+   descending) and null ordering can optionally be specified; these apply
+   to all columns. For example:
+<programlisting>
+SELECT a, b, c FROM table1 ORDER BY ALL;
+SELECT a, b, c FROM table1 ORDER BY ALL DESC;
+SELECT a, b, c FROM table1 ORDER BY ALL DESC NULLS LAST;
+</programlisting>
+   The first example is equivalent to <literal>ORDER BY a, b, c</literal>.
+   The second is equivalent to <literal>ORDER BY a DESC, b DESC, c DESC</literal>.
+   This syntax can simplify ad-hoc exploration of data.
+  </para>
+
+  <para>
    <literal>ORDER BY</literal> can be applied to the result of a
    <literal>UNION</literal>, <literal>INTERSECT</literal>, or <literal>EXCEPT</literal>
    combination, but in this case it is only permitted to sort by
