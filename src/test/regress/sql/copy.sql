@@ -555,3 +555,12 @@ ALTER TABLE pp_dropcol ATTACH PARTITION pp_dropcol_1 FOR VALUES FROM (1) TO (10)
 INSERT INTO pp_dropcol VALUES (1, 11), (2, 12);
 COPY pp_dropcol TO stdout(header);
 DROP TABLE pp_dropcol;
+
+-- Test COPY TO BLACKHOLE
+CREATE TABLE copy_blackhole_test (a int, b text);
+INSERT INTO copy_blackhole_test SELECT g, 'text' || g FROM generate_series(1, 10) g;
+COPY copy_blackhole_test TO BLACKHOLE;
+COPY (SELECT * FROM copy_blackhole_test) TO BLACKHOLE;
+-- COPY FROM BLACKHOLE should fail
+COPY copy_blackhole_test FROM BLACKHOLE;
+DROP TABLE copy_blackhole_test;
