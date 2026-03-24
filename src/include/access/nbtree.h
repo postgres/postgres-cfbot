@@ -774,8 +774,9 @@ typedef BTStackData *BTStack;
  * bit, but may not when inserting into an INCLUDE index (tuple header value
  * is affected by the NULL-ness of both key and non-key attributes).
  *
- * See comments in _bt_first for an explanation of the nextkey and backward
- * fields.
+ * nextkey determines how the scankey's boundary is interpreted, and backward
+ * indicates a backward scan.  See comments in _bt_first for a more detailed
+ * explanation of these fields.
  *
  * scantid is the heap TID that is used as a final tiebreaker attribute.  It
  * is set to NULL when index scan doesn't need to find a position for a
