@@ -110,6 +110,11 @@ DoCopy(ParseState *pstate, const CopyStmt *stmt,
 		}
 	}
 
+	if (stmt->is_blackhole && is_from)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("COPY FROM BLACKHOLE is not supported")));
+
 	if (stmt->relation)
 	{
 		LOCKMODE	lockmode = is_from ? RowExclusiveLock : AccessShareLock;
@@ -376,6 +381,7 @@ DoCopy(ParseState *pstate, const CopyStmt *stmt,
 
 		cstate = BeginCopyTo(pstate, rel, query, relid,
 							 stmt->filename, stmt->is_program,
+							 stmt->is_blackhole,
 							 NULL, stmt->attlist, stmt->options);
 		*processed = DoCopyTo(cstate);	/* copy from database to file */
 		EndCopyTo(cstate);
