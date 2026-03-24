@@ -757,7 +757,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	AGGREGATE ALL ALSO ALTER ALWAYS ANALYSE ANALYZE AND ANY ARRAY AS ASC
 	ASENSITIVE ASSERTION ASSIGNMENT ASYMMETRIC ATOMIC AT ATTACH ATTRIBUTE AUTHORIZATION
 
-	BACKWARD BEFORE BEGIN_P BETWEEN BIGINT BINARY BIT
+	BACKWARD BEFORE BEGIN_P BETWEEN BIGINT BINARY BIT BLACKHOLE
 	BOOLEAN_P BOTH BREADTH BY
 
 	CACHE CALL CALLED CASCADE CASCADED CASE CAST CATALOG_P CHAIN CHAR_P
@@ -3568,7 +3568,16 @@ CopyStmt:	COPY opt_binary qualified_name opt_column_list
 					n->attlist = $4;
 					n->is_from = $5;
 					n->is_program = $6;
-					n->filename = $7;
+					if ($7 == (char *) -1)
+					{
+						n->filename = NULL;
+						n->is_blackhole = true;
+					}
+					else
+					{
+						n->filename = $7;
+						n->is_blackhole = false;
+					}
 					n->whereClause = $11;
 
 					if (n->is_program && n->filename == NULL)
@@ -3603,7 +3612,16 @@ CopyStmt:	COPY opt_binary qualified_name opt_column_list
 					n->attlist = NIL;
 					n->is_from = false;
 					n->is_program = $6;
-					n->filename = $7;
+					if ($7 == (char *) -1)
+					{
+						n->filename = NULL;
+						n->is_blackhole = true;
+					}
+					else
+					{
+						n->filename = $7;
+						n->is_blackhole = false;
+					}
 					n->options = $9;
 
 					if (n->is_program && n->filename == NULL)
@@ -3635,6 +3653,7 @@ copy_file_name:
 			Sconst									{ $$ = $1; }
 			| STDIN									{ $$ = NULL; }
 			| STDOUT								{ $$ = NULL; }
+			| BLACKHOLE								{ $$ = (char *) -1; }
 		;
 
 copy_options: copy_opt_list							{ $$ = $1; }
@@ -18926,6 +18945,7 @@ unreserved_keyword:
 			| BACKWARD
 			| BEFORE
 			| BEGIN_P
+			| BLACKHOLE
 			| BREADTH
 			| BY
 			| CACHE
@@ -19496,6 +19516,7 @@ bare_label_keyword:
 			| BIGINT
 			| BINARY
 			| BIT
+			| BLACKHOLE
 			| BOOLEAN_P
 			| BOTH
 			| BREADTH
