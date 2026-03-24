@@ -1,0 +1,614 @@
+--
+-- Test ORDER BY ALL
+--
+CREATE TEMP TABLE test_order (
+  a int,
+  b text,
+  c float
+);
+INSERT INTO test_order VALUES
+  (3, 'foo', 1.5),
+  (1, 'bar', 2.5),
+  (2, 'baz', 1.5),
+  (1, 'qux', 1.5);
+-- Basic ORDER BY ALL test (default ASC)
+SELECT * FROM test_order ORDER BY ALL;
+ a |  b  |  c  
+---+-----+-----
+ 1 | bar | 2.5
+ 1 | qux | 1.5
+ 2 | baz | 1.5
+ 3 | foo | 1.5
+(4 rows)
+
+-- ORDER BY ALL ASC (explicit)
+SELECT * FROM test_order ORDER BY ALL ASC;
+ a |  b  |  c  
+---+-----+-----
+ 1 | bar | 2.5
+ 1 | qux | 1.5
+ 2 | baz | 1.5
+ 3 | foo | 1.5
+(4 rows)
+
+-- ORDER BY ALL DESC
+SELECT * FROM test_order ORDER BY ALL DESC;
+ a |  b  |  c  
+---+-----+-----
+ 3 | foo | 1.5
+ 2 | baz | 1.5
+ 1 | qux | 1.5
+ 1 | bar | 2.5
+(4 rows)
+
+-- ORDER BY ALL with NULLS FIRST
+SELECT * FROM test_order ORDER BY ALL NULLS FIRST;
+ a |  b  |  c  
+---+-----+-----
+ 1 | bar | 2.5
+ 1 | qux | 1.5
+ 2 | baz | 1.5
+ 3 | foo | 1.5
+(4 rows)
+
+-- ORDER BY ALL DESC NULLS LAST
+SELECT * FROM test_order ORDER BY ALL DESC NULLS LAST;
+ a |  b  |  c  
+---+-----+-----
+ 3 | foo | 1.5
+ 2 | baz | 1.5
+ 1 | qux | 1.5
+ 1 | bar | 2.5
+(4 rows)
+
+-- ORDER BY ALL with specific columns in SELECT
+SELECT a, b FROM test_order ORDER BY ALL;
+ a |  b  
+---+-----
+ 1 | bar
+ 1 | qux
+ 2 | baz
+ 3 | foo
+(4 rows)
+
+-- ORDER BY ALL with expressions
+SELECT a, b, a + c AS sum FROM test_order ORDER BY ALL;
+ a |  b  | sum 
+---+-----+-----
+ 1 | bar | 3.5
+ 1 | qux | 2.5
+ 2 | baz | 3.5
+ 3 | foo | 4.5
+(4 rows)
+
+-- ORDER BY ALL with aggregates (should only order by non-aggregated columns)
+SELECT a, COUNT(*) FROM test_order GROUP BY a ORDER BY ALL;
+ a | count 
+---+-------
+ 1 |     2
+ 2 |     1
+ 3 |     1
+(3 rows)
+
+-- ORDER BY ALL with WHERE clause
+SELECT * FROM test_order WHERE a > 1 ORDER BY ALL;
+ a |  b  |  c  
+---+-----+-----
+ 2 | baz | 1.5
+ 3 | foo | 1.5
+(2 rows)
+
+-- Verify that ORDER BY ALL is equivalent to listing all columns
+SELECT * FROM test_order ORDER BY ALL;
+ a |  b  |  c  
+---+-----+-----
+ 1 | bar | 2.5
+ 1 | qux | 1.5
+ 2 | baz | 1.5
+ 3 | foo | 1.5
+(4 rows)
+
+SELECT * FROM test_order ORDER BY a, b, c;
+ a |  b  |  c  
+---+-----+-----
+ 1 | bar | 2.5
+ 1 | qux | 1.5
+ 2 | baz | 1.5
+ 3 | foo | 1.5
+(4 rows)
+
+-- ORDER BY ALL with LIMIT
+SELECT * FROM test_order ORDER BY ALL LIMIT 2;
+ a |  b  |  c  
+---+-----+-----
+ 1 | bar | 2.5
+ 1 | qux | 1.5
+(2 rows)
+
+-- Test deparsing of ORDER BY ALL (ruleutils.c)
+-- Verify that ORDER BY ALL with modifiers is correctly preserved in view definitions
+-- View with ORDER BY ALL (default)
+CREATE VIEW view_order_all AS
+  SELECT * FROM test_order ORDER BY ALL;
+NOTICE:  view "view_order_all" will be a temporary view
+DETAIL:  It depends on temporary table test_order.
+SELECT pg_get_viewdef('view_order_all'::regclass, true);
+   pg_get_viewdef   
+--------------------
+  SELECT a,        +
+     b,            +
+     c             +
+    FROM test_order+
+   ORDER BY ALL;
+(1 row)
+
+-- View with ORDER BY ALL ASC
+CREATE VIEW view_order_all_asc AS
+  SELECT * FROM test_order ORDER BY ALL ASC;
+NOTICE:  view "view_order_all_asc" will be a temporary view
+DETAIL:  It depends on temporary table test_order.
+SELECT pg_get_viewdef('view_order_all_asc'::regclass, true);
+   pg_get_viewdef   
+--------------------
+  SELECT a,        +
+     b,            +
+     c             +
+    FROM test_order+
+   ORDER BY ALL;
+(1 row)
+
+-- View with ORDER BY ALL DESC
+CREATE VIEW view_order_all_desc AS
+  SELECT * FROM test_order ORDER BY ALL DESC;
+NOTICE:  view "view_order_all_desc" will be a temporary view
+DETAIL:  It depends on temporary table test_order.
+SELECT pg_get_viewdef('view_order_all_desc'::regclass, true);
+    pg_get_viewdef    
+----------------------
+  SELECT a,          +
+     b,              +
+     c               +
+    FROM test_order  +
+   ORDER BY ALL DESC;
+(1 row)
+
+-- View with ORDER BY ALL NULLS FIRST
+CREATE VIEW view_order_all_nulls_first AS
+  SELECT * FROM test_order ORDER BY ALL NULLS FIRST;
+NOTICE:  view "view_order_all_nulls_first" will be a temporary view
+DETAIL:  It depends on temporary table test_order.
+SELECT pg_get_viewdef('view_order_all_nulls_first'::regclass, true);
+       pg_get_viewdef        
+-----------------------------
+  SELECT a,                 +
+     b,                     +
+     c                      +
+    FROM test_order         +
+   ORDER BY ALL NULLS FIRST;
+(1 row)
+
+-- View with ORDER BY ALL NULLS LAST
+CREATE VIEW view_order_all_nulls_last AS
+  SELECT * FROM test_order ORDER BY ALL NULLS LAST;
+NOTICE:  view "view_order_all_nulls_last" will be a temporary view
+DETAIL:  It depends on temporary table test_order.
+SELECT pg_get_viewdef('view_order_all_nulls_last'::regclass, true);
+   pg_get_viewdef   
+--------------------
+  SELECT a,        +
+     b,            +
+     c             +
+    FROM test_order+
+   ORDER BY ALL;
+(1 row)
+
+-- View with ORDER BY ALL DESC NULLS FIRST
+CREATE VIEW view_order_all_desc_nulls_first AS
+  SELECT * FROM test_order ORDER BY ALL DESC NULLS FIRST;
+NOTICE:  view "view_order_all_desc_nulls_first" will be a temporary view
+DETAIL:  It depends on temporary table test_order.
+SELECT pg_get_viewdef('view_order_all_desc_nulls_first'::regclass, true);
+    pg_get_viewdef    
+----------------------
+  SELECT a,          +
+     b,              +
+     c               +
+    FROM test_order  +
+   ORDER BY ALL DESC;
+(1 row)
+
+-- View with ORDER BY ALL ASC NULLS LAST
+CREATE VIEW view_order_all_asc_nulls_last AS
+  SELECT * FROM test_order ORDER BY ALL ASC NULLS LAST;
+NOTICE:  view "view_order_all_asc_nulls_last" will be a temporary view
+DETAIL:  It depends on temporary table test_order.
+SELECT pg_get_viewdef('view_order_all_asc_nulls_last'::regclass, true);
+   pg_get_viewdef   
+--------------------
+  SELECT a,        +
+     b,            +
+     c             +
+    FROM test_order+
+   ORDER BY ALL;
+(1 row)
+
+-- Verify the views actually work
+SELECT * FROM view_order_all;
+ a |  b  |  c  
+---+-----+-----
+ 1 | bar | 2.5
+ 1 | qux | 1.5
+ 2 | baz | 1.5
+ 3 | foo | 1.5
+(4 rows)
+
+SELECT * FROM view_order_all_desc;
+ a |  b  |  c  
+---+-----+-----
+ 3 | foo | 1.5
+ 2 | baz | 1.5
+ 1 | qux | 1.5
+ 1 | bar | 2.5
+(4 rows)
+
+-- Clean up views
+DROP VIEW view_order_all;
+DROP VIEW view_order_all_asc;
+DROP VIEW view_order_all_desc;
+DROP VIEW view_order_all_nulls_first;
+DROP VIEW view_order_all_nulls_last;
+DROP VIEW view_order_all_desc_nulls_first;
+DROP VIEW view_order_all_asc_nulls_last;
+-- Test with NULL values
+CREATE TEMP TABLE test_order_nulls (
+  a int,
+  b text,
+  c float
+);
+INSERT INTO test_order_nulls VALUES
+  (3, 'foo', 1.5),
+  (1, 'bar', 2.5),
+  (2, 'baz', 1.5),
+  (1, 'qux', 1.5),
+  (NULL, 'null_a', 3.0),
+  (2, NULL, 2.0),
+  (3, 'foo', NULL);
+-- ORDER BY ALL with NULLs (default ASC)
+SELECT * FROM test_order_nulls ORDER BY ALL;
+ a |   b    |  c  
+---+--------+-----
+ 1 | bar    | 2.5
+ 1 | qux    | 1.5
+ 2 | baz    | 1.5
+ 2 |        |   2
+ 3 | foo    | 1.5
+ 3 | foo    |    
+   | null_a |   3
+(7 rows)
+
+-- ORDER BY ALL ASC (explicit) with NULLs
+SELECT * FROM test_order_nulls ORDER BY ALL ASC;
+ a |   b    |  c  
+---+--------+-----
+ 1 | bar    | 2.5
+ 1 | qux    | 1.5
+ 2 | baz    | 1.5
+ 2 |        |   2
+ 3 | foo    | 1.5
+ 3 | foo    |    
+   | null_a |   3
+(7 rows)
+
+-- ORDER BY ALL DESC with NULLs
+SELECT * FROM test_order_nulls ORDER BY ALL DESC;
+ a |   b    |  c  
+---+--------+-----
+   | null_a |   3
+ 3 | foo    |    
+ 3 | foo    | 1.5
+ 2 |        |   2
+ 2 | baz    | 1.5
+ 1 | qux    | 1.5
+ 1 | bar    | 2.5
+(7 rows)
+
+-- ORDER BY ALL NULLS FIRST (with default ASC)
+SELECT * FROM test_order_nulls ORDER BY ALL NULLS FIRST;
+ a |   b    |  c  
+---+--------+-----
+   | null_a |   3
+ 1 | bar    | 2.5
+ 1 | qux    | 1.5
+ 2 |        |   2
+ 2 | baz    | 1.5
+ 3 | foo    |    
+ 3 | foo    | 1.5
+(7 rows)
+
+-- ORDER BY ALL NULLS LAST (with default ASC)
+SELECT * FROM test_order_nulls ORDER BY ALL NULLS LAST;
+ a |   b    |  c  
+---+--------+-----
+ 1 | bar    | 2.5
+ 1 | qux    | 1.5
+ 2 | baz    | 1.5
+ 2 |        |   2
+ 3 | foo    | 1.5
+ 3 | foo    |    
+   | null_a |   3
+(7 rows)
+
+-- ORDER BY ALL ASC NULLS FIRST
+SELECT * FROM test_order_nulls ORDER BY ALL ASC NULLS FIRST;
+ a |   b    |  c  
+---+--------+-----
+   | null_a |   3
+ 1 | bar    | 2.5
+ 1 | qux    | 1.5
+ 2 |        |   2
+ 2 | baz    | 1.5
+ 3 | foo    |    
+ 3 | foo    | 1.5
+(7 rows)
+
+-- ORDER BY ALL DESC NULLS LAST
+SELECT * FROM test_order_nulls ORDER BY ALL DESC NULLS LAST;
+ a |   b    |  c  
+---+--------+-----
+ 3 | foo    | 1.5
+ 3 | foo    |    
+ 2 | baz    | 1.5
+ 2 |        |   2
+ 1 | qux    | 1.5
+ 1 | bar    | 2.5
+   | null_a |   3
+(7 rows)
+
+-- ORDER BY ALL DESC NULLS FIRST
+SELECT * FROM test_order_nulls ORDER BY ALL DESC NULLS FIRST;
+ a |   b    |  c  
+---+--------+-----
+   | null_a |   3
+ 3 | foo    |    
+ 3 | foo    | 1.5
+ 2 |        |   2
+ 2 | baz    | 1.5
+ 1 | qux    | 1.5
+ 1 | bar    | 2.5
+(7 rows)
+
+-- Verify ORDER BY ALL DESC is equivalent to listing all columns DESC
+SELECT * FROM test_order_nulls ORDER BY ALL DESC;
+ a |   b    |  c  
+---+--------+-----
+   | null_a |   3
+ 3 | foo    |    
+ 3 | foo    | 1.5
+ 2 |        |   2
+ 2 | baz    | 1.5
+ 1 | qux    | 1.5
+ 1 | bar    | 2.5
+(7 rows)
+
+SELECT * FROM test_order_nulls ORDER BY a DESC, b DESC, c DESC;
+ a |   b    |  c  
+---+--------+-----
+   | null_a |   3
+ 3 | foo    |    
+ 3 | foo    | 1.5
+ 2 |        |   2
+ 2 | baz    | 1.5
+ 1 | qux    | 1.5
+ 1 | bar    | 2.5
+(7 rows)
+
+-- Test with WHERE clause and NULLs
+SELECT * FROM test_order_nulls WHERE a IS NOT NULL ORDER BY ALL DESC;
+ a |  b  |  c  
+---+-----+-----
+ 3 | foo |    
+ 3 | foo | 1.5
+ 2 |     |   2
+ 2 | baz | 1.5
+ 1 | qux | 1.5
+ 1 | bar | 2.5
+(6 rows)
+
+-- Test with LIMIT and NULLs
+SELECT * FROM test_order_nulls ORDER BY ALL DESC LIMIT 3;
+ a |   b    |  c  
+---+--------+-----
+   | null_a |   3
+ 3 | foo    |    
+ 3 | foo    | 1.5
+(3 rows)
+
+-- Test with subset of columns and NULLs
+SELECT a, b FROM test_order_nulls ORDER BY ALL DESC;
+ a |   b    
+---+--------
+   | null_a
+ 3 | foo
+ 3 | foo
+ 2 | 
+ 2 | baz
+ 1 | qux
+ 1 | bar
+(7 rows)
+
+-- Clean up
+DROP TABLE test_order_nulls;
+-- Negative tests: invalid ORDER BY ALL syntax
+-- ORDER BY ALL cannot be mixed with explicit column specifications
+SELECT * FROM test_order ORDER BY ALL, a;
+ERROR:  syntax error at or near ","
+LINE 1: SELECT * FROM test_order ORDER BY ALL, a;
+                                             ^
+-- ORDER BY ALL cannot use USING operator
+SELECT * FROM test_order ORDER BY ALL USING <;
+ERROR:  syntax error at or near "USING"
+LINE 1: SELECT * FROM test_order ORDER BY ALL USING <;
+                                              ^
+-- ORDER BY ALL with multiple ALL keywords (should fail)
+SELECT * FROM test_order ORDER BY ALL, ALL;
+ERROR:  syntax error at or near ","
+LINE 1: SELECT * FROM test_order ORDER BY ALL, ALL;
+                                             ^
+-- ORDER BY ALL with set operations (UNION)
+SELECT a, b FROM test_order UNION SELECT a, b FROM test_order ORDER BY ALL;
+ a |  b  
+---+-----
+ 1 | bar
+ 1 | qux
+ 2 | baz
+ 3 | foo
+(4 rows)
+
+-- ORDER BY ALL with column number reference throw an error
+SELECT a, b FROM test_order ORDER BY ALL, 1;
+ERROR:  syntax error at or near ","
+LINE 1: SELECT a, b FROM test_order ORDER BY ALL, 1;
+                                                ^
+-- Additional test coverage for edge cases
+-- Test ORDER BY ALL in subquery
+SELECT * FROM (SELECT a, b FROM test_order ORDER BY ALL) sq;
+ a |  b  
+---+-----
+ 1 | bar
+ 1 | qux
+ 2 | baz
+ 3 | foo
+(4 rows)
+
+-- Test ORDER BY ALL with nested subquery
+SELECT * FROM (
+  SELECT a, b FROM (
+    SELECT * FROM test_order ORDER BY ALL DESC
+  ) sub1 ORDER BY ALL
+) sub2;
+ a |  b  
+---+-----
+ 1 | bar
+ 1 | qux
+ 2 | baz
+ 3 | foo
+(4 rows)
+
+-- Test ORDER BY ALL with DISTINCT
+SELECT DISTINCT a, b FROM test_order ORDER BY ALL;
+ a |  b  
+---+-----
+ 1 | bar
+ 1 | qux
+ 2 | baz
+ 3 | foo
+(4 rows)
+
+-- Test ORDER BY ALL with JOIN
+CREATE TEMP TABLE test_order2 (
+  x int,
+  y text
+);
+INSERT INTO test_order2 VALUES (1, 'alpha'), (2, 'beta'), (3, 'gamma');
+SELECT t1.a, t1.b, t2.x, t2.y
+FROM test_order t1
+JOIN test_order2 t2 ON t1.a = t2.x
+ORDER BY ALL;
+ a |  b  | x |   y   
+---+-----+---+-------
+ 1 | bar | 1 | alpha
+ 1 | qux | 1 | alpha
+ 2 | baz | 2 | beta
+ 3 | foo | 3 | gamma
+(4 rows)
+
+DROP TABLE test_order2;
+-- Test ORDER BY ALL with CTE
+WITH cte AS (
+  SELECT a, b FROM test_order WHERE a > 1
+)
+SELECT * FROM cte ORDER BY ALL;
+ a |  b  
+---+-----
+ 2 | baz
+ 3 | foo
+(2 rows)
+
+-- Test ORDER BY ALL with window function (ORDER BY ALL in outer query)
+SELECT a, b, ROW_NUMBER() OVER (PARTITION BY a ORDER BY b) as rn
+FROM test_order
+ORDER BY ALL;
+ a |  b  | rn 
+---+-----+----
+ 1 | bar |  1
+ 1 | qux |  2
+ 2 | baz |  1
+ 3 | foo |  1
+(4 rows)
+
+-- Test ORDER BY ALL with INTERSECT (should fail like UNION)
+SELECT a, b FROM test_order INTERSECT SELECT a, b FROM test_order ORDER BY ALL;
+ a |  b  
+---+-----
+ 1 | bar
+ 1 | qux
+ 2 | baz
+ 3 | foo
+(4 rows)
+
+-- Test ORDER BY ALL with EXCEPT (should fail like UNION)
+SELECT a, b FROM test_order EXCEPT SELECT a, b FROM test_order ORDER BY ALL;
+ a | b 
+---+---
+(0 rows)
+
+-- Test ORDER BY ALL with VALUES
+SELECT * FROM (VALUES (3, 'foo'), (1, 'bar'), (2, 'baz')) AS t(x, y) ORDER BY ALL;
+ x |  y  
+---+-----
+ 1 | bar
+ 2 | baz
+ 3 | foo
+(3 rows)
+
+-- Test ORDER BY ALL with only computed columns (no junk)
+SELECT a + 1 AS col1, b || '_test' AS col2 FROM test_order ORDER BY ALL;
+ col1 |   col2   
+------+----------
+    2 | bar_test
+    2 | qux_test
+    3 | baz_test
+    4 | foo_test
+(4 rows)
+
+-- Test behavior when all selected columns would be junk (using ctid/system columns)
+-- This should still work as system columns aren't marked as junk in target list when explicitly selected
+SELECT ctid FROM test_order ORDER BY ALL;
+ ctid  
+-------
+ (0,1)
+ (0,2)
+ (0,3)
+ (0,4)
+(4 rows)
+
+-- Test ORDER BY ALL with UNION ALL in subquery (ORDER BY on outer query should work)
+SELECT * FROM (
+  SELECT a, b FROM test_order
+  UNION ALL
+  SELECT a, b FROM test_order
+) sub ORDER BY ALL;
+ a |  b  
+---+-----
+ 1 | bar
+ 1 | bar
+ 1 | qux
+ 1 | qux
+ 2 | baz
+ 2 | baz
+ 3 | foo
+ 3 | foo
+(8 rows)
+
+-- Clean up
+DROP TABLE test_order;
