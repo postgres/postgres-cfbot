@@ -2908,12 +2908,68 @@ transformGroupClause(ParseState *pstate, List *grouplist, List **groupingSets,
 List *
 transformSortClause(ParseState *pstate,
 					List *orderlist,
+					bool orderByAll,
 					List **targetlist,
 					ParseExprKind exprKind,
 					bool useSQL99)
 {
 	List	   *sortlist = NIL;
 	ListCell   *olitem;
+
+	/*
+	 * Handle ORDER BY ALL expansion.
+	 *
+	 * The target list has already been transformed and contains the
+	 * columns we should sort by. We create a SortBy node for each
+	 * non-junk target entry, applying the same sort direction and
+	 * NULLS ordering specified in the marker to all columns.
+	 */
+	if (orderByAll)
+	{
+		SortBy	   *sortby;
+		SortBy	   *all_marker;
+		SortByDir	sort_dir;
+		SortByNulls	nulls_order;
+
+		/*
+		 * orderlist should contain a single SortBy marker with node=NULL
+		 * that specifies the sort direction and nulls ordering to apply
+		 * to all columns.
+		 */
+		Assert(list_length(orderlist) == 1);
+		all_marker = (SortBy *) linitial(orderlist);
+		Assert(IsA(all_marker, SortBy) && all_marker->node == NULL);
+
+		/* Extract sort direction and nulls ordering from the marker */
+		sort_dir = all_marker->sortby_dir;
+		nulls_order = all_marker->sortby_nulls;
+
+		/* Iterate over targets, adding all non-junk columns to sort clause */
+		foreach_ptr(TargetEntry, tle, *targetlist)
+		{
+			/*
+			 * Ignore junk TLEs. These are system columns (like ctid, xmin)
+			 * or internal working columns that shouldn't be part of the
+			 * user-visible ordering.
+			 */
+			if (tle->resjunk)
+				continue;
+
+			/* Create a SortBy for this target entry with specified direction */
+			sortby = makeNode(SortBy);
+
+			sortby->node = (Node *) tle->expr;
+			sortby->sortby_dir = sort_dir;
+			sortby->sortby_nulls = nulls_order;
+			sortby->useOp = NIL;
+			sortby->location = exprLocation((Node *) tle->expr);
+
+			sortlist = addTargetToSortList(pstate, tle,
+										   sortlist, *targetlist, sortby);
+		}
+
+		return sortlist;
+	}
 
 	foreach(olitem, orderlist)
 	{
@@ -2990,6 +3046,7 @@ transformWindowDefinitions(ParseState *pstate,
 		 */
 		orderClause = transformSortClause(pstate,
 										  windef->orderClause,
+										  false /* not applicable for window ORDER BY */ ,
 										  targetlist,
 										  EXPR_KIND_WINDOW_ORDER,
 										  true /* force SQL99 rules */ );

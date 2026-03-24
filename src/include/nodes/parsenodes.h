@@ -230,6 +230,7 @@ typedef struct Query
 	List	   *distinctClause; /* a list of SortGroupClause's */
 
 	List	   *sortClause;		/* a list of SortGroupClause's */
+	bool		orderByAll;		/* was ORDER BY ALL used? */
 
 	Node	   *limitOffset;	/* # of result tuples to skip (int8 expr) */
 	Node	   *limitCount;		/* # of result tuples to return (int8 expr) */
@@ -2332,6 +2333,7 @@ typedef struct SelectStmt
 	 * SelectStmts.
 	 */
 	List	   *sortClause;		/* sort clause (a list of SortBy's) */
+	bool		orderByAll;		/* Is this ORDER BY ALL? */
 	Node	   *limitOffset;	/* # of result tuples to skip */
 	Node	   *limitCount;		/* # of result tuples to return */
 	LimitOption limitOption;	/* limit type */
