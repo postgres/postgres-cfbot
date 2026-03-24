@@ -14046,6 +14046,21 @@ opt_sort_clause:
 
 sort_clause:
 			ORDER BY sortby_list					{ $$ = $3; }
+			| ORDER BY ALL opt_asc_desc opt_nulls_order
+				{
+					/*
+					 * Create a special marker SortBy node for ORDER BY ALL.
+					 * We use a SortBy with node=NULL as the marker, and store
+					 * the sort direction and nulls ordering to apply to all columns.
+					 */
+					SortBy *sortby = makeNode(SortBy);
+					sortby->node = NULL;  /* NULL node indicates ORDER BY ALL */
+					sortby->sortby_dir = $4;
+					sortby->sortby_nulls = $5;
+					sortby->useOp = NIL;
+					sortby->location = @2;
+					$$ = list_make1(sortby);
+				}
 		;
 
 sortby_list:
@@ -18793,7 +18808,25 @@ PLpgSQL_Expr: opt_distinct_clause opt_target_list
 					n->groupDistinct = ($5)->distinct;
 					n->havingClause = $6;
 					n->windowClause = $7;
-					n->sortClause = $8;
+					/*
+					 * Check for ORDER BY ALL marker (SortBy with NULL node).
+					 * We detect this in the grammar action because PLpgSQL_Expr
+					 * creates SelectStmt nodes directly without going through
+					 * insertSelectOptions(), so we must set the orderByAll flag
+					 * here to ensure it gets properly transformed.
+					 */
+					if ($8 && list_length($8) == 1 &&
+						IsA(linitial($8), SortBy) &&
+						((SortBy *) linitial($8))->node == NULL)
+					{
+						n->orderByAll = true;
+						/* Store the SortBy marker to preserve direction/nulls info */
+						n->sortClause = $8;
+					}
+					else
+					{
+						n->sortClause = $8;
+					}
 					if ($9)
 					{
 						n->limitOffset = $9->limitOffset;
@@ -20295,7 +20328,15 @@ insertSelectOptions(SelectStmt *stmt,
 					(errcode(ERRCODE_SYNTAX_ERROR),
 					 errmsg("multiple ORDER BY clauses not allowed"),
 					 parser_errposition(exprLocation((Node *) sortClause))));
+
 		stmt->sortClause = sortClause;
+		/* Check for ORDER BY ALL marker (SortBy with NULL node) */
+		if (list_length(sortClause) == 1 &&
+			IsA(linitial(sortClause), SortBy) &&
+			((SortBy *) linitial(sortClause))->node == NULL)
+		{
+			stmt->orderByAll = true;
+		}
 	}
 	/* We can handle multiple locking clauses, though */
 	stmt->lockingClause = list_concat(stmt->lockingClause, lockingClause);
