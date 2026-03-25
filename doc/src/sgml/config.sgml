@@ -12850,6 +12850,36 @@ dynamic_library_path = '/usr/local/lib/postgresql:$libdir'
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-debug-disable-indexscan-prefetch" xreflabel="debug_disable_indexscan_prefetch">
+      <term><varname>debug_disable_indexscan_prefetch</varname> (<type>boolean</type>)
+      <indexterm>
+       <primary><varname>debug_disable_indexscan_prefetch</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Disables I/O prefetching of table pages during the execution of
+        index scans and index-only scans.  The default is
+        <literal>off</literal>.
+       </para>
+       <para>
+        This parameter is intended for developer testing only.  Setting it
+        to <literal>on</literal> makes index scans read each table page
+        synchronously, at the point where it is needed.  This is useful for
+        isolating the effects of prefetching, but it is not intended as a
+        way of tuning performance.
+       </para>
+       <para>
+        Users who wish to limit or disable asynchronous I/O during index
+        scans should tune <xref linkend="guc-effective-io-concurrency"/>
+        (or the corresponding tablespace parameter) instead.  Setting
+        <varname>effective_io_concurrency</varname> to <literal>0</literal>
+        disables the issuance of asynchronous I/O requests without otherwise
+        changing how index scans are executed.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-debug-discard-caches" xreflabel="debug_discard_caches">
       <term><varname>debug_discard_caches</varname> (<type>integer</type>)
       <indexterm>
