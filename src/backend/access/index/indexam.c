@@ -13,13 +13,11 @@
  * INTERFACE ROUTINES
  *		index_open		- open an index relation by relation OID
  *		index_close		- close an index relation
- *		index_beginscan - start a scan of an index with amgettuple
+ *		index_beginscan - start a scan of an index with amgetbatch/amgettuple
  *		index_beginscan_bitmap - start a scan of an index with amgetbitmap
  *		index_rescan	- restart a scan of an index
  *		index_endscan	- end a scan
  *		index_insert	- insert an index tuple into a relation
- *		index_markpos	- mark a scan position
- *		index_restrpos	- restore a scan position
  *		index_parallelscan_estimate - estimate shared memory for parallel scan
  *		index_parallelscan_initialize - initialize parallel scan
  *		index_parallelrescan  - (re)start a parallel scan of an index
@@ -253,7 +251,7 @@ index_insert_cleanup(Relation indexRelation,
 }
 
 /*
- * index_beginscan - start a scan of an index with amgettuple
+ * index_beginscan - start a scan of an index with amgetbatch/amgettuple
  *
  * Caller must be holding suitable locks on the heap and the index.
  */
@@ -339,6 +337,7 @@ index_beginscan_internal(Relation indexRelation, Relation heapRelation,
 	scan->xs_temp_snap = temp_snap;
 
 	scan->xs_snapshot = snapshot;
+	scan->MVCCScan = IsMVCCLikeSnapshot(snapshot);
 	scan->instrument = instrument;
 
 	/*
@@ -350,6 +349,7 @@ index_beginscan_internal(Relation indexRelation, Relation heapRelation,
 		scan->heapRelation = heapRelation;
 		scan->xs_want_itup = index_only_scan;
 		scan->xs_heap_continue = false;
+		scan->batchImmediateUnguard = (scan->MVCCScan && !index_only_scan);
 
 		/*
 		 * The "name" type's btree opclass stores index keys as cstrings
@@ -395,6 +395,14 @@ index_beginscan_internal(Relation indexRelation, Relation heapRelation,
 		Assert(scan->xs_getnext_slot != NULL && scan->xs_table_opaque != NULL);
 	}
 
+	/*
+	 * Bitmap index scans should never use a batch ring buffer (though can use
+	 * the scan's batch cache).  Plain index scans (and index-only scans)
+	 * should only use a batch ring buffer with an amgetbatch index AM.
+	 */
+	Assert(!scan->xs_table_opaque ? !scan->usebatchring :
+		   (indexRelation->rd_indam->amgetbatch != NULL) == scan->usebatchring);
+
 	return scan;
 }
 
@@ -421,9 +429,9 @@ index_rescan(IndexScanDesc scan,
 	Assert(nkeys == scan->numberOfKeys);
 	Assert(norderbys == scan->numberOfOrderBys);
 
-	/* reset table AM state for rescan */
+	/* tell the table AM that there's to be a rescan */
 	if (scan->xs_table_opaque)
-		table_index_scan_reset(scan);
+		table_index_scan_rescan(scan);
 
 	scan->kill_prior_tuple = false; /* for safety */
 	scan->xs_heap_continue = false;
@@ -442,7 +450,21 @@ index_endscan(IndexScanDesc scan)
 	SCAN_CHECKS;
 	CHECK_SCAN_PROCEDURE(amendscan);
 
-	/* Release resources (like buffer pins) from table accesses */
+	/*
+	 * amgetbitmap scans of an index AM that supports amgetbatch make limited
+	 * use of the scan's batch cache.  Check for that.
+	 */
+	if (!scan->usebatchring && scan->batchcache[0] != NULL)
+	{
+		Assert(scan->xs_table_opaque == NULL);
+		Assert(scan->indexRelation->rd_indam->amgetbatch != NULL);
+		pfree(index_scan_batch_base(scan, scan->batchcache[0]));
+	}
+
+	/*
+	 * Release resources (like buffer pins and batch ring buffer) held by
+	 * table AM for index scan
+	 */
 	if (scan->xs_table_opaque)
 		table_index_scan_end(scan);
 
@@ -457,52 +479,6 @@ index_endscan(IndexScanDesc scan)
 
 	/* Release the scan data structure itself */
 	IndexScanEnd(scan);
-}
-
-/* ----------------
- *		index_markpos  - mark a scan position
- * ----------------
- */
-void
-index_markpos(IndexScanDesc scan)
-{
-	SCAN_CHECKS;
-	CHECK_SCAN_PROCEDURE(ammarkpos);
-
-	scan->indexRelation->rd_indam->ammarkpos(scan);
-}
-
-/* ----------------
- *		index_restrpos	- restore a scan position
- *
- * NOTE: this only restores the internal scan state of the index AM.  See
- * comments for ExecRestrPos().
- *
- * NOTE: For heap, in the presence of HOT chains, mark/restore only works
- * correctly if the scan's snapshot is MVCC-safe; that ensures that there's at
- * most one returnable tuple in each HOT chain, and so restoring the prior
- * state at the granularity of the index AM is sufficient.  Since the only
- * current user of mark/restore functionality is nodeMergejoin.c, this
- * effectively means that merge-join plans only work for MVCC snapshots.  This
- * could be fixed if necessary, but for now it seems unimportant.
- * ----------------
- */
-void
-index_restrpos(IndexScanDesc scan)
-{
-	Assert(IsMVCCLikeSnapshot(scan->xs_snapshot));
-
-	SCAN_CHECKS;
-	CHECK_SCAN_PROCEDURE(amrestrpos);
-
-	/* reset table AM state for restoring the marked position */
-	if (scan->xs_table_opaque)
-		table_index_scan_reset(scan);
-
-	scan->kill_prior_tuple = false; /* for safety */
-	scan->xs_heap_continue = false;
-
-	scan->indexRelation->rd_indam->amrestrpos(scan);
 }
 
 /*
@@ -582,9 +558,9 @@ index_parallelrescan(IndexScanDesc scan)
 {
 	SCAN_CHECKS;
 
-	/* reset table AM state for rescan */
+	/* tell the table AM that there's to be a rescan */
 	if (scan->xs_table_opaque)
-		table_index_scan_reset(scan);
+		table_index_scan_rescan(scan);
 
 	/* amparallelrescan is optional; assume no-op if not provided by AM */
 	if (scan->indexRelation->rd_indam->amparallelrescan != NULL)

@@ -454,10 +454,12 @@ typedef struct TableAmRoutine
 	 * flags is a bitmask of ScanOptions affecting underlying table scan
 	 * behavior. See scan_begin() for more information on passing these.
 	 *
-	 * Callback is responsible for setting scan->xs_getnext_slot, the callback
-	 * that table_index_getnext_slot() dispatches to.  Tuples are then
-	 * returned through the caller's slot.  No separate xs_getnext_slot
-	 * callback exists in this struct.
+	 * Callback is responsible for initializing the scan's batch ring buffer
+	 * (when the scan's index AM supports the amgetbatch interface), and for
+	 * setting scan->xs_getnext_slot, the callback that
+	 * table_index_getnext_slot() dispatches to.  Tuples are then returned
+	 * through the caller's slot.  No separate slot-based callback exists in
+	 * this struct.
 	 *
 	 * In principle a single general-purpose callback (stored here) would
 	 * suffice, but using specialized variants allows the table AM to provide
@@ -470,6 +472,11 @@ typedef struct TableAmRoutine
 	 * using index data in a standardized way (though determining which index
 	 * tuples satisfy scan->xs_snapshot is still up to the table AM).
 	 *
+	 * Callback also initializes the scan descriptor's batch_table_opaque_size
+	 * field, to let the core code know how much memory will be required in
+	 * the table AM portion of each batch allocation (though only during
+	 * amgetbatch index scans).  See relscan.h for full details.
+	 *
 	 * The xs_getnext_slot callback is also responsible for whatever
 	 * bookkeeping its callers expect of an index scan, such as maintaining
 	 * instrumentation counters.
@@ -477,15 +484,30 @@ typedef struct TableAmRoutine
 	void		(*index_scan_begin) (IndexScanDesc scan, uint32 flags);
 
 	/*
-	 * Inform the table AM that there's to be either a rescan or a restore of
-	 * a marked position.
+	 * Initialize table AM's per-batch opaque area within a batch allocation.
 	 */
-	void		(*index_scan_reset) (IndexScanDesc scan);
+	void		(*index_scan_batch_init) (IndexScanDesc scan,
+										  IndexScanBatch batch);
+
+	/*
+	 * Inform the table AM that there's to be a rescan.
+	 */
+	void		(*index_scan_rescan) (IndexScanDesc scan);
 
 	/*
 	 * Release resources and deallocate index scan state.
 	 */
 	void		(*index_scan_end) (IndexScanDesc scan);
+
+	/*
+	 * Mark the current scan position so it can be restored later.
+	 */
+	void		(*index_scan_markpos) (IndexScanDesc scan);
+
+	/*
+	 * Restore a previously marked scan position.
+	 */
+	void		(*index_scan_restrpos) (IndexScanDesc scan);
 
 	/* ------------------------------------------------------------------------
 	 * Callbacks for non-modifying operations on individual tuples
@@ -1258,15 +1280,53 @@ table_index_scan_begin(IndexScanDesc scan, uint32 flags)
 }
 
 /*
- * Inform the table AM that there's to be either a rescan or a restore of a
- * marked position
+ * Inform the table AM that there's to be a rescan
  */
 static inline void
-table_index_scan_reset(IndexScanDesc scan)
+table_index_scan_rescan(IndexScanDesc scan)
 {
 	Assert(scan->xs_table_opaque);
 
-	scan->heapRelation->rd_tableam->index_scan_reset(scan);
+	scan->heapRelation->rd_tableam->index_scan_rescan(scan);
+}
+
+/*
+ * Mark the current scan position so it can be restored later
+ */
+static inline void
+table_index_scan_markpos(IndexScanDesc scan)
+{
+	Assert(scan->xs_table_opaque && scan->usebatchring);
+
+	scan->heapRelation->rd_tableam->index_scan_markpos(scan);
+}
+
+/*
+ * Restore a previously marked scan position
+ *
+ * NOTE: this only restores the batch positional state of the table AM.  See
+ * comments for ExecRestrPos().
+ */
+static inline void
+table_index_scan_restrpos(IndexScanDesc scan)
+{
+	Assert(scan->xs_table_opaque && scan->usebatchring);
+	Assert(!scan->kill_prior_tuple);	/* not used with amgetbatch */
+
+	/*
+	 * Mark/restore only works correctly when there's at most one returnable
+	 * tuple per scan item, so that restoring the prior state at the scan item
+	 * granularity is sufficient.  Table AMs that can reach multiple row
+	 * versions through a single TID can generally only guarantee that under
+	 * MVCC snapshots (for heap, an MVCC-safe snapshot ensures that there's at
+	 * most one returnable tuple in each HOT chain).  Since the only current
+	 * user of mark/restore functionality is nodeMergejoin.c, this effectively
+	 * means that merge-join plans only work for MVCC snapshots.
+	 */
+	Assert(scan->MVCCScan);
+	scan->xs_heap_continue = false;
+
+	scan->heapRelation->rd_tableam->index_scan_restrpos(scan);
 }
 
 /*
@@ -1280,6 +1340,19 @@ table_index_scan_end(IndexScanDesc scan)
 	Assert(scan->xs_table_opaque);
 
 	scan->heapRelation->rd_tableam->index_scan_end(scan);
+}
+
+/*
+ * Initialize table AM's per-batch opaque area within a batch allocation
+ */
+static inline void
+table_index_scan_batch_init(IndexScanDesc scan, IndexScanBatch batch)
+{
+	/* Only called when the table AM reserved an opaque area for the scan */
+	Assert(scan->xs_table_opaque && scan->usebatchring);
+	Assert(scan->batch_table_opaque_size > 0);
+
+	scan->heapRelation->rd_tableam->index_scan_batch_init(scan, batch);
 }
 
 /*
