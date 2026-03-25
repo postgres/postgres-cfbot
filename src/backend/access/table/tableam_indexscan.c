@@ -6,14 +6,21 @@
  *
  * Table AMs can use these functions to implement xs_getnext_slot callbacks.
  * See access/tableam.h.  This includes the table AM side of batch-based index
- * scans.  The scan's batch ring buffer is managed by the table AM.
+ * scans.  The scan's batch ring buffer is managed by the table AM, since it
+ * is closely tied to whatever mechanism the table AM uses to implement
+ * prefetching of table blocks (typically a read stream).
  *
- * The ring buffer loads batches in index key space/index scan order.
+ * The ring buffer loads batches in index key space/index scan order.  This
+ * allows the table AM to maintain an adequate prefetch distance: prefetching
+ * is thereby able to request table blocks referenced by index pages that are
+ * well ahead of the current scan position's index page.
  *
  * The tableam_index_* functions manage the batch ring buffer's lifecycle and
  * positional state, and help with certain aspects of resource management.
  * The table AM uses scanPos to return items from batches returned by
- * amgetbatch.
+ * amgetbatch.  Table AMs that support I/O prefetching of table blocks during
+ * index scans use prefetchPos to request table blocks well ahead of those
+ * that are of immediate interest to scanPos.
  *
  * Batches are allocated and released on behalf of index AMs by the support
  * routines in batchscan.c.  Index AMs free and unlock batches as described
@@ -37,6 +44,9 @@
 #include "lib/qunique.h"
 #include "utils/builtins.h"
 
+/* GUC storage */
+bool		debug_disable_indexscan_prefetch = false;
+
 static void release_and_unguard_batch(IndexScanDesc scan, IndexScanBatch batch,
 									  bool allow_cache);
 static int	batch_compare_int(const void *va, const void *vb);
@@ -56,6 +66,7 @@ tableam_index_batchscan_reset(IndexScanDesc scan, bool endscan)
 	bool		markBatchFreed = false;
 
 	batchringbuf->scanPos.valid = false;
+	batchringbuf->prefetchPos.valid = false;
 	batchringbuf->markPos.valid = false;
 
 	for (uint8 i = batchringbuf->headBatch; i != batchringbuf->nextBatch; i++)
@@ -169,7 +180,12 @@ tableam_index_batchscan_mark_pos(IndexScanDesc scan)
  * the current scanBatch when needed.
  *
  * We just discard all batches (other than markBatch/restored scanBatch),
- * except when markBatch is already the scan's current scanBatch.
+ * except when markBatch is already the scan's current scanBatch.  We always
+ * invalidate prefetchPos.  The table AM's prefetching state (e.g., its read
+ * stream) is reset by the caller (which calls this function as it resets that
+ * state).  This approach keeps things simple for table AMs: most code that
+ * deals with batches is thereby able to assume that the common case where
+ * scan direction never changes is the only case.
  *
  * Note: This relies on the assumption that we already have a valid scanPos.
  * Table AMs must never call tableam_index_batchscan_reset between taking a
@@ -197,6 +213,13 @@ tableam_index_batchscan_restore_pos(IndexScanDesc scan)
 	Assert(markPos->valid);
 	Assert(markPos->item >= markBatch->firstItem &&
 		   markPos->item <= markBatch->lastItem);
+
+	/*
+	 * Restoring a mark always requires stopping prefetching.  This is similar
+	 * to the handling table AMs implement to deal with a tuple-level change
+	 * in the scan's direction.
+	 */
+	batchringbuf->prefetchPos.valid = false;
 
 	if (scanBatch == markBatch)
 	{
