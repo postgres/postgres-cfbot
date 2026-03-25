@@ -51,8 +51,11 @@ GetTableAmRoutine(Oid amhandler)
 	Assert(routine->parallelscan_reinitialize != NULL);
 
 	Assert(routine->index_scan_begin != NULL);
-	Assert(routine->index_scan_reset != NULL);
+	Assert(routine->index_scan_rescan != NULL);
 	Assert(routine->index_scan_end != NULL);
+	Assert(routine->index_scan_batch_init != NULL);
+	Assert(routine->index_scan_markpos != NULL);
+	Assert(routine->index_scan_restrpos != NULL);
 
 	Assert(routine->fetch_tid != NULL);
 	Assert(routine->tuple_fetch_row_version != NULL);
