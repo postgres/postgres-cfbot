@@ -655,6 +655,13 @@
   ifdef => 'LOCK_DEBUG',
 },
 
+{ name => 'debug_disable_indexscan_prefetch', type => 'bool', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Disables I/O prefetching during index scans and index-only scans.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'debug_disable_indexscan_prefetch',
+  boot_val => 'false',
+},
+
 { name => 'debug_discard_caches', type => 'int', context => 'PGC_SUSET', group => 'DEVELOPER_OPTIONS',
   short_desc => 'Aggressively flush system caches for debugging purposes.',
   long_desc => '0 means use normal caching behavior.',
