@@ -55,6 +55,18 @@ GetIndexAmRoutine(Oid amhandler)
 	Assert(routine->amrescan != NULL);
 	Assert(routine->amendscan != NULL);
 
+	/* AM must use either amgetbatch or amgettuple (never both) */
+	Assert(routine->amgetbatch == NULL || routine->amgettuple == NULL);
+	Assert(!(routine->amgetbatch != NULL && routine->amgettuple != NULL));
+
+	/* amgetbatch AMs are required to provide an amunguardbatch callback */
+	Assert((routine->amgetbatch != NULL) == (routine->amunguardbatch != NULL));
+
+	/* amgettuple AMs must not register any amgetbatch-only callbacks */
+	Assert(routine->amgetbatch != NULL || routine->amkillitemsbatch == NULL);
+	Assert(routine->amgetbatch != NULL || routine->amposreset == NULL);
+	Assert(routine->amgetbatch != NULL || !routine->amcanmarkpos);
+
 	return routine;
 }
 
