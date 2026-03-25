@@ -86,7 +86,8 @@ index_scan_tids(PG_FUNCTION_ARGS)
 				 errmsg("\"%s\" is not a regular index",
 						RelationGetRelationName(indexrel))));
 
-	if (indexrel->rd_indam->amgettuple == NULL)
+	if (indexrel->rd_indam->amgettuple == NULL &&
+		indexrel->rd_indam->amgetbatch == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("index \"%s\" does not support plain index scans",
