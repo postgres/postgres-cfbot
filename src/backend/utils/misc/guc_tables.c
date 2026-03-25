@@ -32,6 +32,7 @@
 #include "access/commit_ts.h"
 #include "access/gin.h"
 #include "access/slru.h"
+#include "access/tableam_indexscan.h"
 #include "access/toast_compression.h"
 #include "access/twophase.h"
 #include "access/xlog_internal.h"
