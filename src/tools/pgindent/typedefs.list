@@ -262,6 +262,7 @@ BaseBackupTargetHandle
 BaseBackupTargetType
 BatchMVCCState
 BatchMatchingItem
+BatchPosAdvanceResult
 BatchRingBuffer
 BatchRingItemPos
 BeginDirectModify_function
