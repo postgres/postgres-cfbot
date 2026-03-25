@@ -1,41 +1,109 @@
 Parsed test spec with 2 sessions
 
-starting permutation: rxwy1 c1 rywx2 c2
-step rxwy1: DELETE FROM taby WHERE id = (SELECT min(id) FROM tabx);
-step c1: COMMIT;
-step rywx2: DELETE FROM tabx WHERE id = (SELECT min(id) FROM taby);
-step c2: COMMIT;
+starting permutation: s1_cursor_move10 s2_select_row1 s2_delete_row11 s2_commit s1_fetch_next_row s1_delete_row1 s1_commit
+step s1_cursor_move10: 
+  EXPLAIN (COSTS OFF) DECLARE c CURSOR FOR SELECT id FROM ios ORDER BY id;
+  DECLARE c CURSOR FOR SELECT id FROM ios ORDER BY id;
+  MOVE FORWARD 10 FROM c;
 
-starting permutation: rxwy1 rywx2 c1 c2
-step rxwy1: DELETE FROM taby WHERE id = (SELECT min(id) FROM tabx);
-step rywx2: DELETE FROM tabx WHERE id = (SELECT min(id) FROM taby);
-step c1: COMMIT;
-step c2: COMMIT;
+QUERY PLAN                           
+-------------------------------------
+Index Only Scan using ios_pkey on ios
+(1 row)
+
+step s2_select_row1: 
+  EXPLAIN (COSTS OFF) SELECT id FROM ios WHERE id = 1;
+  SELECT id FROM ios WHERE id = 1;
+
+QUERY PLAN                           
+-------------------------------------
+Index Only Scan using ios_pkey on ios
+  Index Cond: (id = 1)               
+(2 rows)
+
+id
+--
+ 1
+(1 row)
+
+step s2_delete_row11: DELETE FROM ios WHERE id = 11;
+step s2_commit: COMMIT;
+step s1_fetch_next_row: FETCH 1 FROM c;
+id
+--
+11
+(1 row)
+
+step s1_delete_row1: DELETE FROM ios WHERE id = 1;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step s1_commit: COMMIT;
+
+starting permutation: s1_cursor_move10 s1_delete_row1 s2_select_row1 s2_delete_row11 s1_commit s2_commit
+step s1_cursor_move10: 
+  EXPLAIN (COSTS OFF) DECLARE c CURSOR FOR SELECT id FROM ios ORDER BY id;
+  DECLARE c CURSOR FOR SELECT id FROM ios ORDER BY id;
+  MOVE FORWARD 10 FROM c;
+
+QUERY PLAN                           
+-------------------------------------
+Index Only Scan using ios_pkey on ios
+(1 row)
+
+step s1_delete_row1: DELETE FROM ios WHERE id = 1;
+step s2_select_row1: 
+  EXPLAIN (COSTS OFF) SELECT id FROM ios WHERE id = 1;
+  SELECT id FROM ios WHERE id = 1;
+
+QUERY PLAN                           
+-------------------------------------
+Index Only Scan using ios_pkey on ios
+  Index Cond: (id = 1)               
+(2 rows)
+
+id
+--
+ 1
+(1 row)
+
+step s2_delete_row11: DELETE FROM ios WHERE id = 11;
+step s1_commit: COMMIT;
+step s2_commit: COMMIT;
 ERROR:  could not serialize access due to read/write dependencies among transactions
 
-starting permutation: rxwy1 rywx2 c2 c1
-step rxwy1: DELETE FROM taby WHERE id = (SELECT min(id) FROM tabx);
-step rywx2: DELETE FROM tabx WHERE id = (SELECT min(id) FROM taby);
-step c2: COMMIT;
-step c1: COMMIT;
-ERROR:  could not serialize access due to read/write dependencies among transactions
+starting permutation: s2_select_row1 s2_delete_row11 s1_cursor_move10 s1_fetch_next_row s1_delete_row1 s2_commit s1_commit
+step s2_select_row1: 
+  EXPLAIN (COSTS OFF) SELECT id FROM ios WHERE id = 1;
+  SELECT id FROM ios WHERE id = 1;
 
-starting permutation: rywx2 rxwy1 c1 c2
-step rywx2: DELETE FROM tabx WHERE id = (SELECT min(id) FROM taby);
-step rxwy1: DELETE FROM taby WHERE id = (SELECT min(id) FROM tabx);
-step c1: COMMIT;
-step c2: COMMIT;
-ERROR:  could not serialize access due to read/write dependencies among transactions
+QUERY PLAN                           
+-------------------------------------
+Index Only Scan using ios_pkey on ios
+  Index Cond: (id = 1)               
+(2 rows)
 
-starting permutation: rywx2 rxwy1 c2 c1
-step rywx2: DELETE FROM tabx WHERE id = (SELECT min(id) FROM taby);
-step rxwy1: DELETE FROM taby WHERE id = (SELECT min(id) FROM tabx);
-step c2: COMMIT;
-step c1: COMMIT;
-ERROR:  could not serialize access due to read/write dependencies among transactions
+id
+--
+ 1
+(1 row)
 
-starting permutation: rywx2 c2 rxwy1 c1
-step rywx2: DELETE FROM tabx WHERE id = (SELECT min(id) FROM taby);
-step c2: COMMIT;
-step rxwy1: DELETE FROM taby WHERE id = (SELECT min(id) FROM tabx);
-step c1: COMMIT;
+step s2_delete_row11: DELETE FROM ios WHERE id = 11;
+step s1_cursor_move10: 
+  EXPLAIN (COSTS OFF) DECLARE c CURSOR FOR SELECT id FROM ios ORDER BY id;
+  DECLARE c CURSOR FOR SELECT id FROM ios ORDER BY id;
+  MOVE FORWARD 10 FROM c;
+
+QUERY PLAN                           
+-------------------------------------
+Index Only Scan using ios_pkey on ios
+(1 row)
+
+step s1_fetch_next_row: FETCH 1 FROM c;
+id
+--
+11
+(1 row)
+
+step s1_delete_row1: DELETE FROM ios WHERE id = 1;
+step s2_commit: COMMIT;
+step s1_commit: COMMIT;
+ERROR:  could not serialize access due to read/write dependencies among transactions
