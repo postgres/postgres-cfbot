@@ -310,7 +310,7 @@ ExecIndexOnlyMarkPos(IndexOnlyScanState *node)
 		}
 	}
 
-	index_markpos(node->ioss_ScanDesc);
+	table_index_scan_markpos(node->ioss_ScanDesc);
 }
 
 /* ----------------------------------------------------------------
@@ -339,7 +339,7 @@ ExecIndexOnlyRestrPos(IndexOnlyScanState *node)
 		}
 	}
 
-	index_restrpos(node->ioss_ScanDesc);
+	table_index_scan_restrpos(node->ioss_ScanDesc);
 }
 
 /* ----------------------------------------------------------------

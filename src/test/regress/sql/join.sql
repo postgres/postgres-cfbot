@@ -4036,15 +4036,6 @@ select * from j1
 inner join j2 on j1.id1 = j2.id1 and j1.id2 = j2.id2
 where j1.id1 % 1000 = 1 and j2.id1 % 1000 = 1;
 
--- Exercise array keys mark/restore B-Tree code
-explain (costs off) select * from j1
-inner join j2 on j1.id1 = j2.id1 and j1.id2 = j2.id2
-where j1.id1 % 1000 = 1 and j2.id1 % 1000 = 1 and j2.id1 = any (array[1]);
-
-select * from j1
-inner join j2 on j1.id1 = j2.id1 and j1.id2 = j2.id2
-where j1.id1 % 1000 = 1 and j2.id1 % 1000 = 1 and j2.id1 = any (array[1]);
-
 -- Exercise array keys "find extreme element" B-Tree code
 explain (costs off) select * from j1
 inner join j2 on j1.id1 = j2.id1 and j1.id2 = j2.id2
@@ -4061,6 +4052,35 @@ reset enable_sort;
 drop table j1;
 drop table j2;
 drop table j3;
+
+-- Exercise btposreset when a merge join's mark/restore crosses a leaf-page/batch
+-- boundary with SAOP array keys set
+create table btposreset_outer (h int);
+insert into btposreset_outer values (0), (0), (99);
+create index on btposreset_outer (h);
+analyze btposreset_outer;
+set enable_hashjoin to 0;
+set enable_nestloop to 0;
+set enable_material to 0;
+set enable_sort to 0;
+
+-- tenk1_hundred is a low-cardinality deduplicated index, so hundred = 0 and
+-- hundred = 99 land on different leaf pages.  With tenk1 as the inner input,
+-- the scan marks in the hundred = 0 group and advances its array key to 99
+-- before the restore; btposreset must reset that array-key state, or the
+-- second outer "0" row loses all of its matches.  (The reset isn't required
+-- in the common case where we restore a mark within the same batch.)
+explain (costs off) select count(*) from btposreset_outer o
+inner join tenk1 i on o.h = i.hundred where i.hundred = any (array[0,99]);
+
+select count(*) from btposreset_outer o
+inner join tenk1 i on o.h = i.hundred where i.hundred = any (array[0,99]);
+
+reset enable_hashjoin;
+reset enable_nestloop;
+reset enable_material;
+reset enable_sort;
+drop table btposreset_outer;
 
 -- check that semijoin inner is not seen as unique for a portion of the outerrel
 explain (verbose, costs off)
