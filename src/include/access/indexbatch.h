@@ -197,6 +197,41 @@ index_scan_batch_index_opaque_dyn(IndexScanDesc scan, IndexScanBatch batch)
  */
 
 /*
+ * Compare two batch ring positions in the given scan direction.
+ *
+ * Returns negative if pos1 is behind pos2, 0 if equal, positive if pos1 is
+ * ahead of pos2.
+ */
+static inline int
+index_scan_pos_cmp(BatchRingItemPos *pos1, BatchRingItemPos *pos2,
+				   ScanDirection direction)
+{
+	int8		batchdiff;
+
+	Assert(pos1->valid && pos2->valid);
+
+	batchdiff = (int8) (pos1->batch - pos2->batch);
+
+	Assert(batchdiff > -INDEX_SCAN_MAX_BATCHES &&
+		   batchdiff < INDEX_SCAN_MAX_BATCHES);
+
+	if (batchdiff != 0)
+	{
+		/* Resolve comparison using differing batch offsets */
+		return batchdiff;
+	}
+
+	/*
+	 * Resolve comparison using items[]-wise indexes from caller's positions,
+	 * since both positions point to the same ring buffer batch
+	 */
+	if (ScanDirectionIsForward(direction))
+		return pos1->item - pos2->item;
+	else
+		return pos2->item - pos1->item;
+}
+
+/*
  * Advance position to its next item in the batch.
  *
  * Advance to the next item within the provided batch (or to the previous item,
@@ -297,6 +332,7 @@ tableam_util_batchscan_init(IndexScanDesc scan)
 	Assert(scan->indexRelation->rd_indam->amgetbatch != NULL);
 
 	scan->batchringbuf.scanPos.valid = false;
+	scan->batchringbuf.prefetchPos.valid = false;
 	scan->batchringbuf.markPos.valid = false;
 
 	scan->batchringbuf.markBatch = NULL;
@@ -346,7 +382,7 @@ tableam_util_scanpos_advance(IndexScanDesc scan, ScanDirection direction,
 
 	/*
 	 * scanPos is valid, so scanBatch must already be loaded in batch ring
-	 * buffer.  We rely on that here.
+	 * buffer.  We rely on that here (can't do this with prefetchBatch).
 	 */
 	pg_assume(batchringbuf->headBatch == scanPos->batch);
 
@@ -358,9 +394,9 @@ tableam_util_scanpos_advance(IndexScanDesc scan, ScanDirection direction,
 /*
  * Fetch the next batch of matching items for the scan (or the first).
  *
- * Called when caller's current batch (passed to us as priorBatch) has no more
- * matching items in the given scan direction.  Caller passes a NULL
- * priorBatch on the first call here for the scan.
+ * Called when caller's current scanBatch/prefetchBatch (passed to us as
+ * priorBatch) has no more matching items in the given scan direction.  Caller
+ * passes a NULL priorBatch on the first call here for the scan.
  *
  * Returns the next batch to be processed by caller in the given scan
  * direction, or NULL when there are no more matches in that direction.
@@ -369,7 +405,7 @@ tableam_util_scanpos_advance(IndexScanDesc scan, ScanDirection direction,
  *
  * We don't free any batches here; that is a separate step performed by
  * tableam_util_scanpos_nextbatch.  Caller also needs to advance their
- * position to the start of the returned batch.
+ * scanPos/prefetchPos position to the start of the returned batch.
  */
 static pg_always_inline IndexScanBatch
 tableam_util_fetch_next_batch(IndexScanDesc scan, ScanDirection direction,
@@ -482,13 +518,19 @@ tableam_util_fetch_next_batch(IndexScanDesc scan, ScanDirection direction,
  * now-obsolescent old scanBatch (the ring buffer's head batch), freeing up
  * its ring buffer slot.  (When newScanBatch is the scan's first batch, there
  * is no old scanBatch for us to release.)
+ *
+ * Return value indicates if a previously occupied ring buffer slot was freed.
+ * A table AM that paused its prefetch mechanism because the ring buffer was
+ * full (see tableam_util_prefetchpos_advance) can resume it when we return
+ * true (to indicate to caller that there's now space to store another batch).
  */
-static pg_always_inline void
+static pg_always_inline bool
 tableam_util_scanpos_nextbatch(IndexScanDesc scan, ScanDirection direction,
 							   IndexScanBatch newScanBatch)
 {
 	BatchRingBuffer *batchringbuf = &scan->batchringbuf;
 	BatchRingItemPos *scanPos = &batchringbuf->scanPos;
+	BatchRingItemPos *prefetchPos = &batchringbuf->prefetchPos;
 	bool		releaseOldHeadBatch = scanPos->valid;
 	IndexScanBatch headBatch;
 
@@ -500,7 +542,7 @@ tableam_util_scanpos_nextbatch(IndexScanDesc scan, ScanDirection direction,
 	{
 		/* newScanBatch is the scan's first and only batch */
 		Assert(batchringbuf->headBatch == scanPos->batch);
-		return;
+		return false;
 	}
 
 	headBatch = index_scan_batch(scan, batchringbuf->headBatch);
@@ -511,12 +553,184 @@ tableam_util_scanpos_nextbatch(IndexScanDesc scan, ScanDirection direction,
 	/* free obsolescent head batch (unless it is scan's markBatch) */
 	tableam_util_release_batch(scan, headBatch);
 
+	/*
+	 * If we're about to release the batch that prefetchPos currently points
+	 * to, just invalidate prefetchPos.  This keeps prefetchPos from ever
+	 * falling behind scanPos at the batch granularity, which
+	 * tableam_util_prefetchpos_catchup relies on.
+	 */
+	if (prefetchPos->valid &&
+		prefetchPos->batch == batchringbuf->headBatch)
+		prefetchPos->valid = false;
+
 	/* Remove the batch from the ring buffer (even if it's markBatch) */
 	batchringbuf->headBatch++;
 
 	/* Postconditions for having freed up a ring buffer slot */
+	Assert(!prefetchPos->valid ||
+		   index_scan_batch_loaded(scan, prefetchPos->batch));
 	Assert(!index_scan_batch_full(scan));
 	Assert(batchringbuf->headBatch == scanPos->batch);
+
+	return true;
+}
+
+/*
+ * Handle initialization of the scan's prefetchPos, when prefetchPos isn't
+ * yet valid (also handles the prefetchPos < scanPos edge case).
+ *
+ * Called at the start of each table AM prefetch callback call.  Returns true
+ * after setting prefetchPos to the scan's current scanPos.  That's a special
+ * case: the prefetch callback should process the very item that the scan is
+ * on directly (e.g., by returning that item's table block to its read
+ * stream), rather than reading ahead of the scan.  Returns false when
+ * prefetchPos is ahead of (or equal to) scanPos, in which case the prefetch
+ * callback picks up from where its last call left off.
+ */
+static inline bool
+tableam_util_prefetchpos_catchup(IndexScanDesc scan, ScanDirection direction)
+{
+	BatchRingBuffer *batchringbuf = &scan->batchringbuf;
+	BatchRingItemPos *scanPos = &batchringbuf->scanPos;
+	BatchRingItemPos *prefetchPos = &batchringbuf->prefetchPos;
+
+	/*
+	 * scanPos must always be valid when prefetching takes place.  There has
+	 * to be at least one batch, loaded as the scan's scanBatch.
+	 */
+	Assert(index_scan_batch_count(scan) > 0);
+	Assert(scanPos->valid && index_scan_batch_loaded(scan, scanPos->batch));
+
+	/*
+	 * prefetchPos can "fall behind" scanPos at the item granularity: the
+	 * prefetch callback only runs on demand, so scanPos can overtake
+	 * prefetchPos whenever the scan consumes items without the callback being
+	 * called (e.g., runs of adjacent matching items whose TIDs all point to
+	 * the same table block).  We handle that case using exactly the same
+	 * steps as initialization.
+	 *
+	 * prefetchPos can never fall behind scanPos at the batch granularity,
+	 * since tableam_util_scanpos_nextbatch invalidates prefetchPos before
+	 * releasing the batch that prefetchPos points to.  There is therefore no
+	 * danger of prefetchPos.batch falling so far behind scanPos.batch that it
+	 * wraps around (and appears to be ahead of scanPos instead of behind it).
+	 */
+	if (unlikely(!prefetchPos->valid ||
+				 index_scan_pos_cmp(scanPos, prefetchPos, direction) > 0))
+	{
+		*prefetchPos = *scanPos;
+		return true;
+	}
+
+	/* Picking up prefetching from where the last callback call left off */
+	Assert(index_scan_pos_cmp(scanPos, prefetchPos, direction) <= 0);
+	return false;
+}
+
+/*
+ * Result of a tableam_util_prefetchpos_advance call
+ */
+typedef enum BatchPosAdvanceResult
+{
+	BATCH_POS_ADVANCED,			/* advanced to next item in current batch */
+	BATCH_POS_BATCH_ADVANCED,	/* advanced to first item of new batch */
+	BATCH_POS_DONE,				/* no further matching items in direction */
+	BATCH_POS_RING_FULL,		/* couldn't advance; ring buffer full */
+} BatchPosAdvanceResult;
+
+/*
+ * Advance the scan's prefetchPos to the next item that the table AM's
+ * prefetch callback should consider reading ahead, moving in the given scan
+ * direction.
+ *
+ * On entry, *prefetchBatch must be the batch that prefetchPos points to.
+ * Advances prefetchPos to the next item within *prefetchBatch when possible
+ * (returns BATCH_POS_ADVANCED).  Otherwise tries to advance to the scan's
+ * next batch, setting *prefetchBatch to the new batch and positioning
+ * prefetchPos at its first item in the scan direction (returns
+ * BATCH_POS_BATCH_ADVANCED).  Callers must use the returned result (never
+ * compare *prefetchBatch against its earlier value) to detect this case;
+ * batch recycling can reuse the memory of a recently released batch.
+ *
+ * Returns BATCH_POS_DONE when there are no further matching items in the
+ * given scan direction (*prefetchBatch is set to NULL).
+ *
+ * Returns BATCH_POS_RING_FULL when the next batch couldn't be loaded because
+ * all available ring buffer batch slots are currently in use (prefetchPos
+ * and *prefetchBatch are left unchanged).  Caller responds by momentarily
+ * pausing its read-ahead mechanism; it can be resumed once
+ * tableam_util_scanpos_nextbatch reports that the scan freed up a slot
+ * (which'll happen only after scanPos has consumed all remaining items from
+ * the scan's current scanBatch).
+ *
+ * When caller passes throttle=true we likewise decline to advance to the next
+ * batch and return BATCH_POS_RING_FULL instead.  Caller uses this to cap how
+ * many batches a single read-ahead callback invocation can advance by.
+ * Advancing within the current batch (BATCH_POS_ADVANCED) ignores throttle,
+ * so throttling only takes effect at a batch boundary.
+ */
+static inline BatchPosAdvanceResult
+tableam_util_prefetchpos_advance(IndexScanDesc scan, ScanDirection direction,
+								 IndexScanBatch *prefetchBatch,
+								 BatchRingItemPos *prefetchPos,
+								 bool throttle)
+{
+	if (!index_scan_pos_advance(direction, *prefetchBatch, prefetchPos))
+	{
+		/*
+		 * Ran out of items from prefetchBatch.  Try to advance to the scan's
+		 * next batch.
+		 */
+		if (unlikely(index_scan_batch_full(scan)) || unlikely(throttle))
+		{
+			/*
+			 * Can't advance prefetchBatch because all available ring buffer
+			 * batch slots are currently in use (or because caller wants us to
+			 * throttle instead of returning another batch).  Undo the changes
+			 * we've already made to prefetchPos before returning, leaving it
+			 * in a state that's consistent with the work actually performed
+			 * (various positional state assertions expect this).
+			 */
+			if (ScanDirectionIsForward(direction))
+			{
+				Assert(prefetchPos->item == (*prefetchBatch)->lastItem + 1);
+				prefetchPos->item--;
+			}
+			else				/* ScanDirectionIsBackward */
+			{
+				Assert(prefetchPos->item == (*prefetchBatch)->firstItem - 1);
+				prefetchPos->item++;
+			}
+
+			return BATCH_POS_RING_FULL;
+		}
+
+		/* We have a free ring buffer slot to fit another batch */
+		*prefetchBatch = tableam_util_fetch_next_batch(scan, direction,
+													   *prefetchBatch,
+													   prefetchPos);
+		if (*prefetchBatch == NULL)
+		{
+			/*
+			 * Deliberately leave prefetchPos in "just-before-start" or
+			 * "just-after-end" position
+			 */
+			return BATCH_POS_DONE;
+		}
+
+		/*
+		 * Have a new prefetchBatch.
+		 *
+		 * tableam_util_fetch_next_batch already appended the new batch to the
+		 * ring buffer for us, but we must advance prefetchPos ourselves.
+		 * Position prefetchPos to the start of the new batch.
+		 */
+		index_scan_pos_startbatch(direction, *prefetchBatch, prefetchPos);
+
+		return BATCH_POS_BATCH_ADVANCED;
+	}
+
+	return BATCH_POS_ADVANCED;
 }
 
 /*

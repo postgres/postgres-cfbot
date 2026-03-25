@@ -5,15 +5,21 @@
  *
  * This module provides the core infrastructure for batch-based index scans,
  * which allow index AMs to return multiple matching TIDs per page in a single
- * call.  The batch ring buffer is owned by the table AM.
+ * call.  The batch ring buffer is owned by the table AM, typically maintained
+ * alongside a read stream used for prefetching table blocks.
  *
- * The ring buffer loads batches in index key space/index scan order.
+ * The ring buffer loads batches in index key space/index scan order.  This
+ * allows the table AM to maintain an adequate prefetch distance: prefetching
+ * is thereby able to request table blocks referenced by index pages that are
+ * well ahead of the current scan position's index page.
  *
  * Most functions here are table AM utilities (tableam_util_*), called by
  * table AMs during amgetbatch index scans.  These manage the batch ring
  * buffer's lifecycle and positional state, and help with certain aspects of
  * resource management.  The table AM uses scanPos to return items from
- * batches returned by amgetbatch.
+ * batches returned by amgetbatch.  Table AMs that support I/O prefetching of
+ * table blocks during index scans use prefetchPos to request table blocks
+ * well ahead of those that are of immediate interest to scanPos.
  *
  * There are also some index AM utilities (indexam_util_*), called by index
  * AMs that implement the amgetbatch interface, to help manage resources like
@@ -104,6 +110,7 @@ tableam_util_batchscan_reset(IndexScanDesc scan, bool endscan)
 	bool		markBatchFreed = false;
 
 	batchringbuf->scanPos.valid = false;
+	batchringbuf->prefetchPos.valid = false;
 	batchringbuf->markPos.valid = false;
 
 	for (uint8 i = batchringbuf->headBatch; i != batchringbuf->nextBatch; i++)
@@ -217,7 +224,12 @@ tableam_util_batchscan_mark_pos(IndexScanDesc scan)
  * the current scanBatch when needed.
  *
  * We just discard all batches (other than markBatch/restored scanBatch),
- * except when markBatch is already the scan's current scanBatch.
+ * except when markBatch is already the scan's current scanBatch.  We always
+ * invalidate prefetchPos.  The table AM's prefetching state (e.g., its read
+ * stream) is reset by the caller (which calls this function as it resets that
+ * state).  This approach keeps things simple for table AMs: most code that
+ * deals with batches is thereby able to assume that the common case where
+ * scan direction never changes is the only case.
  *
  * Note: This relies on the assumption that we already have a valid scanPos.
  * Table AMs must never call tableam_util_batchscan_reset between taking a
@@ -245,6 +257,14 @@ tableam_util_batchscan_restore_pos(IndexScanDesc scan)
 	Assert(markPos->valid);
 	Assert(markPos->item >= markBatch->firstItem &&
 		   markPos->item <= markBatch->lastItem);
+
+	/*
+	 * Restoring a mark always requires stopping prefetching.  This is similar
+	 * to the handling table AMs implement to deal with a tuple-level change
+	 * in the scan's direction.  The read stream must have already been reset
+	 * by the table AM caller.
+	 */
+	batchringbuf->prefetchPos.valid = false;
 
 	if (scanBatch == markBatch)
 	{
@@ -320,6 +340,13 @@ tableam_util_batchscan_restore_pos(IndexScanDesc scan)
  * to determine which batch comes next in the new scan direction.  This
  * approach isn't particularly efficient, but it works well enough for what
  * ought to be a relatively rare occurrence.
+ *
+ * Caller must have reset the scan's read stream before calling here.  That
+ * needs to happen as soon as the scan requests a tuple in whatever scan
+ * direction is opposite-to-current.  We only deal with the case where the
+ * scan backs up by enough items to cross a batch boundary (when the scan
+ * resumes scanning in its original direction/ends before crossing a boundary,
+ * there isn't any need to call here).
  */
 void
 tableam_util_scanbatch_dirchange(IndexScanDesc scan)

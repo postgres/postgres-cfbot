@@ -186,6 +186,10 @@ typedef struct IndexScanBatchData
 	 * This allows table AMs to avoid redundant amgetbatch calls with the same
 	 * priorbatch -- the index AM might need to read additional index pages to
 	 * determine there are no more matching items beyond caller's priorbatch.
+	 * In particular, during prefetching the read stream callback discovers
+	 * the end-of-scan via prefetchBatch.  tableam_util_fetch_next_batch()
+	 * checks these flags so that the scan side doesn't repeat the same
+	 * amgetbatch call when it later reaches that batch as scanBatch.
 	 */
 	bool		knownEndBackward;
 	bool		knownEndForward;
@@ -236,11 +240,14 @@ typedef struct IndexScanBatchData *IndexScanBatch;
  * current read position by _multiple_ batches/index pages.  The further out
  * the table AM reads ahead like this, the further it can see into the future.
  * That way the table AM is able to reorder work as aggressively as desired.
+ * Index scans sometimes need to readahead by several dozen batches in order
+ * to maintain an optimal I/O prefetch distance (for reading table blocks).
  */
 typedef struct BatchRingBuffer
 {
 	/* current positions in IndexScanDescData.batchbuf[] for scan */
 	BatchRingItemPos scanPos;	/* scan's read position */
+	BatchRingItemPos prefetchPos;	/* prefetching position */
 	BatchRingItemPos markPos;	/* mark/restore position */
 
 	/* markPos's batch (not in ring buffer when markBatch != scanBatch) */
