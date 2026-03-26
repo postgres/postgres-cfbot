@@ -57,6 +57,7 @@
 #include "parser/parse_relation.h"
 #include "pgstat.h"
 #include "rewrite/rewriteHandler.h"
+#include "storage/lmgr.h"
 #include "tcop/utility.h"
 #include "utils/acl.h"
 #include "utils/backend_status.h"
@@ -76,6 +77,7 @@ ExecutorEnd_hook_type ExecutorEnd_hook = NULL;
 ExecutorCheckPerms_hook_type ExecutorCheckPerms_hook = NULL;
 
 /* decls for local routines only used within this module */
+static void ExecutorPrep(QueryDesc *queryDesc, ResourceOwner owner, int eflags);
 static void InitPlan(QueryDesc *queryDesc, int eflags);
 static void CheckValidRowMarkRel(Relation rel, RowMarkType markType);
 static void ExecPostprocessPlan(EState *estate);
@@ -147,7 +149,6 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 
 	/* sanity checks: queryDesc must not be started already */
 	Assert(queryDesc != NULL);
-	Assert(queryDesc->estate == NULL);
 
 	/* caller must ensure the query's snapshot is active */
 	Assert(GetActiveSnapshot() == queryDesc->snapshot);
@@ -173,9 +174,67 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 
 	/*
 	 * Build EState, switch into per-query memory context for startup.
+	 *
+	 * If ExecutorPrep() ran earlier (e.g., to do initial pruning during plan
+	 * validity checking), reuse its EState to avoid redoing range table setup
+	 * and pruning. Otherwise, create a fresh EState as usual.
+	 *
+	 * In assert builds, verify that the expected locks are held.  When no
+	 * prep EState was provided, AcquireExecutorLocks() should have locked
+	 * every relation in the plan.  When one was provided, pruning-aware
+	 * locking should have locked at least the unpruned relations.  Both
+	 * checks are skipped in parallel workers, which acquire relation locks
+	 * lazily in ExecGetRangeTableRelation().
 	 */
-	estate = CreateExecutorState();
-	queryDesc->estate = estate;
+	if (queryDesc->estate == NULL)
+	{
+#ifdef USE_ASSERT_CHECKING
+		if (!IsParallelWorker())
+		{
+			ListCell   *lc;
+
+			foreach(lc, queryDesc->plannedstmt->rtable)
+			{
+				RangeTblEntry *rte = lfirst_node(RangeTblEntry, lc);
+
+				if (rte->rtekind == RTE_RELATION ||
+					(rte->rtekind == RTE_SUBQUERY && rte->relid != InvalidOid))
+					Assert(CheckRelationOidLockedByMe(rte->relid,
+													  rte->rellockmode,
+													  true));
+			}
+		}
+#endif
+		ExecutorPrep(queryDesc, CurrentResourceOwner, eflags);
+	}
+#ifdef USE_ASSERT_CHECKING
+	else
+	{
+		/*
+		 * A prep EState was provided, meaning pruning-aware locking should
+		 * have locked at least the unpruned relations.
+		 */
+		if (!IsParallelWorker())
+		{
+			int			rtindex = -1;
+
+			while ((rtindex = bms_next_member(queryDesc->estate->es_unpruned_relids,
+											  rtindex)) >= 0)
+			{
+				RangeTblEntry *rte = exec_rt_fetch(rtindex, queryDesc->estate);
+
+				Assert(rte->rtekind == RTE_RELATION ||
+					   (rte->rtekind == RTE_SUBQUERY &&
+						rte->relid != InvalidOid));
+				Assert(CheckRelationOidLockedByMe(rte->relid,
+												  rte->rellockmode, true));
+			}
+		}
+	}
+#endif
+
+	estate = queryDesc->estate;
+	Assert(estate);
 
 	oldcontext = MemoryContextSwitchTo(estate->es_query_cxt);
 
@@ -272,6 +331,64 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	InitPlan(queryDesc, eflags);
 
 	MemoryContextSwitchTo(oldcontext);
+}
+
+/*
+ * ExecutorPrep
+ *
+ * Build the initial executor state for queryDesc before ExecutorStart().
+ *
+ * This creates the EState and performs the subset of executor startup that
+ * does not require plan-tree initialization, allowing that work to be reused
+ * by callers that need executor state before ExecutorStart():
+ *
+ * - initialize the range table
+ * - perform permission checks
+ * - perform initial partition pruning
+ *
+ * On success, queryDesc->estate is set and can later be reused by
+ * ExecutorStart() instead of rebuilding the same state.
+ *
+ * Caller must ensure that queryDesc->snapshot is active.
+ */
+static void
+ExecutorPrep(QueryDesc *queryDesc, ResourceOwner owner, int eflags)
+{
+	ResourceOwner oldowner;
+	EState	   *estate;
+	PlannedStmt *pstmt;
+
+	Assert(queryDesc != NULL);
+
+	if (queryDesc->operation == CMD_UTILITY)
+		return;
+
+	Assert(ActiveSnapshotSet());
+	Assert(GetActiveSnapshot() == queryDesc->snapshot);
+	Assert(queryDesc->estate == NULL);
+
+	pstmt = queryDesc->plannedstmt;
+
+	estate = CreateExecutorState();
+	queryDesc->estate = estate;
+
+	estate->es_plannedstmt = pstmt;
+	estate->es_part_prune_infos = pstmt->partPruneInfos;
+	estate->es_param_list_info = queryDesc->params;
+	estate->es_queryEnv = queryDesc->queryEnv;
+	estate->es_top_eflags = eflags;
+
+	ExecCheckPermissions(pstmt->rtable, pstmt->permInfos, true);
+
+	ExecInitRangeTable(estate, pstmt->rtable, pstmt->permInfos,
+					   bms_copy(pstmt->unprunableRelids));
+
+	oldowner = CurrentResourceOwner;
+	CurrentResourceOwner = owner;
+
+	ExecDoInitialPruning(estate);
+
+	CurrentResourceOwner = oldowner;
 }
 
 /* ----------------------------------------------------------------
@@ -849,37 +966,14 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 	CmdType		operation = queryDesc->operation;
 	PlannedStmt *plannedstmt = queryDesc->plannedstmt;
 	Plan	   *plan = plannedstmt->planTree;
-	List	   *rangeTable = plannedstmt->rtable;
 	EState	   *estate = queryDesc->estate;
 	PlanState  *planstate;
 	TupleDesc	tupType;
 	ListCell   *l;
 	int			i;
 
-	/*
-	 * Do permissions checks
-	 */
-	ExecCheckPermissions(rangeTable, plannedstmt->permInfos, true);
-
-	/*
-	 * initialize the node's execution state
-	 */
-	ExecInitRangeTable(estate, rangeTable, plannedstmt->permInfos,
-					   bms_copy(plannedstmt->unprunableRelids));
-
-	estate->es_plannedstmt = plannedstmt;
-	estate->es_part_prune_infos = plannedstmt->partPruneInfos;
-
-	/*
-	 * Perform runtime "initial" pruning to identify which child subplans,
-	 * corresponding to the children of plan nodes that contain
-	 * PartitionPruneInfo such as Append, will not be executed. The results,
-	 * which are bitmapsets of indexes of the child subplans that will be
-	 * executed, are saved in es_part_prune_results.  These results correspond
-	 * to each PartitionPruneInfo entry, and the es_part_prune_results list is
-	 * parallel to es_part_prune_infos.
-	 */
-	ExecDoInitialPruning(estate);
+	/* ExecutorPrep() must have been done. */
+	Assert(queryDesc->estate);
 
 	/*
 	 * Next, build the ExecRowMark array from the PlanRowMark(s), if any.
