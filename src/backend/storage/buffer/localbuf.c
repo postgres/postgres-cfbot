@@ -218,7 +218,7 @@ FlushLocalBuffer(BufferDesc *bufHdr, SMgrRelation reln)
 	/* Mark not-dirty */
 	TerminateLocalBufferIO(bufHdr, true, 0, false);
 
-	pgBufferUsage.local_blks_written++;
+	INSTR_BUFUSAGE_INCR(local_blks_written);
 }
 
 static Buffer
@@ -487,7 +487,7 @@ ExtendBufferedRelLocal(BufferManagerRelation bmr,
 
 	*extended_by = extend_by;
 
-	pgBufferUsage.local_blks_written += extend_by;
+	INSTR_BUFUSAGE_ADD(local_blks_written, extend_by);
 
 	return first_block;
 }
@@ -518,7 +518,7 @@ MarkLocalBufferDirty(Buffer buffer)
 	buf_state = pg_atomic_read_u64(&bufHdr->state);
 
 	if (!(buf_state & BM_DIRTY))
-		pgBufferUsage.local_blks_dirtied++;
+		INSTR_BUFUSAGE_INCR(local_blks_dirtied);
 
 	buf_state |= BM_DIRTY;
 
