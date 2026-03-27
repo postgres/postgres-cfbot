@@ -155,4 +155,23 @@ extern void BufferUsageAccumDiff(BufferUsage *dst,
 extern void WalUsageAccumDiff(WalUsage *dst, const WalUsage *add,
 							  const WalUsage *sub);
 
+#define INSTR_BUFUSAGE_INCR(fld) do { \
+		pgBufferUsage.fld++; \
+	} while(0)
+#define INSTR_BUFUSAGE_ADD(fld,val) do { \
+		pgBufferUsage.fld += (val); \
+	} while(0)
+#define INSTR_BUFUSAGE_TIME_ADD(fld,val) do { \
+	INSTR_TIME_ADD(pgBufferUsage.fld, val); \
+	} while (0)
+#define INSTR_BUFUSAGE_TIME_ACCUM_DIFF(fld,endval,startval) do { \
+	INSTR_TIME_ACCUM_DIFF(pgBufferUsage.fld, endval, startval); \
+	} while (0)
+#define INSTR_WALUSAGE_INCR(fld) do { \
+		pgWalUsage.fld++; \
+	} while(0)
+#define INSTR_WALUSAGE_ADD(fld,val) do { \
+		pgWalUsage.fld += (val); \
+	} while(0)
+
 #endif							/* INSTRUMENT_H */
