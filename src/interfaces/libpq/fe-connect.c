@@ -375,6 +375,15 @@ static const internalPQconninfoOption PQconninfoOptions[] = {
 		"GSS-delegation", "", 1,
 	offsetof(struct pg_conn, gssdelegation)},
 
+	/*
+	 * As with SSL and GSS options, ldapserviceurl is exposed even in builds
+	 * that do not have support
+	 */
+	{"ldapserviceurl", "PGLDAPSERVICEURL", NULL, NULL,
+		"Database-LDAP-Service", "", 64,
+	offsetof(struct pg_conn, pgldapserviceurl)},
+
+
 	{"replication", NULL, NULL, NULL,
 		"Replication", "D", 5,
 	offsetof(struct pg_conn, replication)},
@@ -6121,7 +6130,10 @@ parseServiceFile(const char *serviceFile,
 				bool		found_keyword;
 
 #ifdef USE_LDAP
-				if (strncmp(line, "ldap", 4) == 0)
+				/*
+				 * Is this a potential LDAP URL or an ldapserviceurl parameter?
+				 */
+				if (strncmp(line, "ldap:", 5) == 0)
 				{
 					int			rc = ldapServiceLookup(line, options, errorMessage);
 
@@ -6157,6 +6169,16 @@ parseServiceFile(const char *serviceFile,
 				{
 					libpq_append_error(errorMessage,
 									   "nested \"service\" specifications not supported in service file \"%s\", line %d",
+									   serviceFile,
+									   linenr);
+					result = 3;
+					goto exit;
+				}
+
+				if (strcmp(key, "ldapserviceurl") == 0)
+				{
+					libpq_append_error(errorMessage,
+									   "ldapserviceurl parameters are not supported in service file \"%s\", line %d",
 									   serviceFile,
 									   linenr);
 					result = 3;
@@ -6713,6 +6735,38 @@ conninfo_add_defaults(PQconninfoOption *options, PQExpBuffer errorMessage)
 	PQconninfoOption *sslmode_default = NULL,
 			   *sslrootcert = NULL;
 	char	   *tmp;
+#ifdef USE_LDAP
+	int rc;
+	const char *ldapserviceurl = conninfo_getval(options, "ldapserviceurl");
+
+	if (ldapserviceurl == NULL)
+		ldapserviceurl = getenv("PGLDAPSERVICEURL");
+
+	if (ldapserviceurl != NULL)
+	{
+
+		/*
+		 * ldapServiceLookup has 4 potential return values. We only care here
+		 * if it succeeded, if it failed we dont care why, return failure.
+		 */
+		if ((rc = ldapServiceLookup(ldapserviceurl, options, errorMessage)) != 0){
+
+			/*
+			* ldapServiceLookup() return code 2 means the LDAP server could
+			* not be contacted. Unlike other non-zero returns, it does not
+			* append an error message, because in pg_service.conf parsing
+			* the caller silently falls back to the next URL. Here there is
+			* no fallback, so we must provide an error message ourselves.
+			*/
+			if (rc == 2)
+				libpq_append_error(errorMessage,
+						           "connection could not be established to ldapserviceurl: \"%s\"",
+								   ldapserviceurl);
+
+			return false;
+		}
+	}
+#endif
 
 	/*
 	 * If there's a service spec, use it to obtain any not-explicitly-given
