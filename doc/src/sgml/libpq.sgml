@@ -2333,6 +2333,20 @@ postgresql://%2Fvar%2Flib%2Fpostgresql/dbname
       </listitem>
      </varlistentry>
 
+     <varlistentry id="libpq-connect-ldapserviceurl" xreflabel="ldapserviceurl">
+      <term><literal>ldapserviceurl</literal></term>
+      <listitem>
+       <para>
+        This option specifies an LDAP query that can be used to reference connection parameters
+        stored on an LDAP server. Any connection parameter that is looked up in this way is
+        overridden by explicitly named connection parameters. Please note that environment
+        variables passed to libpq will be overridden by values found during the ldap lookup. This
+        option cannot be specified in a <filename>pg_service.conf</filename> file. This
+        functionality is described in more detail in <xref linkend="libpq-ldap"/>.
+        </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="libpq-connect-target-session-attrs" xreflabel="target_session_attrs">
       <term><literal>target_session_attrs</literal></term>
       <listitem>
@@ -9176,6 +9190,16 @@ myEventProc(PGEventId evtId, void *evtInfo, void *passThrough)
     <listitem>
      <para>
       <indexterm>
+       <primary><envar>PGLDAPSERVICEURL</envar></primary>
+      </indexterm>
+      <envar>PGLDAPSERVICEURL</envar> behaves the same as the
+      <xref linkend="libpq-connect-ldapserviceurl"/> connection parameter.
+     </para>
+    </listitem>
+
+    <listitem>
+     <para>
+      <indexterm>
        <primary><envar>PGSSLSNI</envar></primary>
       </indexterm>
       <envar>PGSSLSNI</envar>  behaves the same as the <xref
@@ -9559,12 +9583,20 @@ user=admin
   <para>
    LDAP connection parameter lookup uses the connection service file
    <filename>pg_service.conf</filename> (see <xref
-   linkend="libpq-pgservice"/>).  A line in a
-   <filename>pg_service.conf</filename> stanza that starts with
-   <literal>ldap://</literal> will be recognized as an LDAP URL and an
-   LDAP query will be performed. The result must be a list of
-   <literal>keyword = value</literal> pairs which will be used to set
-   connection options.  The URL must conform to
+   linkend="libpq-pgservice"/>) or the
+   <xref linkend="libpq-connect-ldapserviceurl"/> connection parameter.
+   A line in a <filename>pg_service.conf</filename> stanza that starts with
+   <literal>ldap://</literal> or an explicitly provided
+   <xref linkend="libpq-connect-ldapserviceurl"/> connection parameter
+   will be recognized as an LDAP URL and an LDAP query will be performed.
+   Please note that if both methods are used the in conjunction any parameter
+   found via <xref linkend="libpq-connect-ldapserviceurl"/> will take precedence
+   over results found in the lookup from the LDAP URL specified in
+   <filename>pg_service.conf</filename>. Also please note that any
+   <xref linkend="libpq-connect-ldapserviceurl"/> value
+   that is found during an LDAP lookup will be ignored. The result of an LDAP lookup
+   must be a list of <literal>keyword = value</literal> pairs which will be used to
+   set connection options. The URL must conform to
    <ulink url="https://datatracker.ietf.org/doc/html/rfc1959">RFC 1959</ulink>
    and be of the form
 <synopsis>
