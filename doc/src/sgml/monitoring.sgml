@@ -4777,6 +4777,38 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>visible_page_marks_cleared</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of times the all-visible mark in the
+       <link linkend="storage-vm">visibility map</link> was cleared for
+       pages of this table.  The all-visible mark of a heap page is
+       cleared whenever a backend process modifies a page that was
+       previously marked all-visible by vacuum activity (whether manual
+       <command>VACUUM</command> or autovacuum).  The page must then be
+       processed again by vacuum on a subsequent run.  A high rate of
+       change in this counter means that vacuum has to repeatedly
+       re-process pages of this table.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>frozen_page_marks_cleared</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of times the all-frozen mark in the
+       <link linkend="storage-vm">visibility map</link> was cleared for
+       pages of this table.  The all-frozen mark of a heap page is cleared
+       whenever a backend process modifies a page that was previously
+       marked all-frozen by vacuum activity (manual <command>VACUUM</command>
+       or autovacuum).  The page must then be processed again by vacuum on
+       the next freeze run for this table.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
        <structfield>last_vacuum</structfield> <type>timestamp with time zone</type>
       </para>
       <para>

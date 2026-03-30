@@ -196,9 +196,17 @@ typedef struct PgStat_TableCounts
 
 	PgStat_Counter blocks_fetched;
 	PgStat_Counter blocks_hit;
+
+	/*
+	 * Revocations of all-visible and all-frozen marks in the visibility map.
+	 * The bits are cleared by the page modification itself, so these count
+	 * whether or not the transaction commits.
+	 */
+	PgStat_Counter visible_page_marks_cleared;
+	PgStat_Counter frozen_page_marks_cleared;
 } PgStat_TableCounts;
 
-StaticAssertDecl(sizeof(PgStat_TableCounts) == 5 * sizeof(PgStat_Counter),
+StaticAssertDecl(sizeof(PgStat_TableCounts) == 7 * sizeof(PgStat_Counter),
 				 "PgStat_TableCounts has no padding");
 
 /* ----------
@@ -596,6 +604,8 @@ typedef struct PgStat_StatTabEntry
 
 	PgStat_Counter blocks_fetched;
 	PgStat_Counter blocks_hit;
+	PgStat_Counter visible_page_marks_cleared;
+	PgStat_Counter frozen_page_marks_cleared;
 
 	TimestampTz last_vacuum_time;	/* user initiated vacuum */
 	PgStat_Counter vacuum_count;
@@ -978,6 +988,27 @@ extern void pgstat_report_analyze(Relation rel,
 				(rel)->pgstat_info->idx.blocks_hit++;				\
 			else													\
 				(rel)->pgstat_info->tab.counts.blocks_hit++;			\
+		}															\
+	} while (0)
+/*
+ * Count revocations of all-visible and all-frozen marks in the visibility
+ * map.  Only tables have a visibility map, so these always work on the
+ * relation part of the pending entry.
+ */
+#define pgstat_count_visible_page_marks_cleared(rel)					\
+	do {															\
+		if (pgstat_should_count_relation(rel))						\
+		{															\
+			Assert((rel)->pgstat_info->kind == PGSTAT_KIND_RELATION);	\
+			(rel)->pgstat_info->tab.counts.visible_page_marks_cleared++;	\
+		}															\
+	} while (0)
+#define pgstat_count_frozen_page_marks_cleared(rel)					\
+	do {															\
+		if (pgstat_should_count_relation(rel))						\
+		{															\
+			Assert((rel)->pgstat_info->kind == PGSTAT_KIND_RELATION);	\
+			(rel)->pgstat_info->tab.counts.frozen_page_marks_cleared++;	\
 		}															\
 	} while (0)
 

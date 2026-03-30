@@ -12836,4 +12836,14 @@
   proname => 'hashoid8extended', prorettype => 'int8',
   proargtypes => 'oid8 int8', prosrc => 'hashoid8extended' },
 
+{ oid => '8002',
+  descr => 'statistics: number of times the all-visible marks in the visibility map were cleared for pages of this table',
+  proname => 'pg_stat_get_visible_page_marks_cleared', provolatile => 's',
+  proparallel => 'r', prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_visible_page_marks_cleared' },
+{ oid => '8003',
+  descr => 'statistics: number of times the all-frozen marks in the visibility map were cleared for pages of this table',
+  proname => 'pg_stat_get_frozen_page_marks_cleared', provolatile => 's',
+  proparallel => 'r', prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_frozen_page_marks_cleared' },
 ]

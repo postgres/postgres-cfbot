@@ -2071,7 +2071,7 @@ heap_insert(Relation relation, HeapTuple tup, CommandId cid,
 	if (clear_all_visible)
 	{
 		/* It's possible the VM bits were already clear */
-		if (visibilitymap_clear(relation->rd_locator,
+		if (visibilitymap_clear_rel(relation,
 								ItemPointerGetBlockNumber(&(heaptup->t_self)),
 								vmbuffer, VISIBILITYMAP_VALID_BITS))
 			vmbuffer_modified = true;
@@ -2473,7 +2473,7 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 		{
 			Assert(!(options & HEAP_INSERT_FROZEN));
 			/* It's possible the VM bits were already clear */
-			if (visibilitymap_clear(relation->rd_locator,
+			if (visibilitymap_clear_rel(relation,
 									BufferGetBlockNumber(buffer),
 									vmbuffer, VISIBILITYMAP_VALID_BITS))
 				vmbuffer_modified = true;
@@ -3047,7 +3047,7 @@ l1:
 	if (clear_all_visible)
 	{
 		/* It's possible the VM bits were already clear */
-		if (visibilitymap_clear(relation->rd_locator, BufferGetBlockNumber(buffer),
+		if (visibilitymap_clear_rel(relation, BufferGetBlockNumber(buffer),
 								vmbuffer, VISIBILITYMAP_VALID_BITS))
 			vmbuffer_modified = true;
 
@@ -3910,7 +3910,7 @@ l2:
 		if (PageIsAllVisible(page))
 		{
 			/* It's possible all-frozen was already clear */
-			if (visibilitymap_clear(relation->rd_locator, block, vmbuffer,
+			if (visibilitymap_clear_rel(relation, block, vmbuffer,
 									VISIBILITYMAP_ALL_FROZEN))
 				cleared_all_frozen = true;
 		}
@@ -4224,7 +4224,7 @@ l2:
 	 */
 	if (clear_all_visible)
 	{
-		if (visibilitymap_clear(relation->rd_locator, block,
+		if (visibilitymap_clear_rel(relation, block,
 								vmbuffer, VISIBILITYMAP_VALID_BITS))
 		{
 			/*
@@ -4248,7 +4248,7 @@ l2:
 		 * If both heap blocks' VM bits are on the same VM buffer, this will
 		 * clear the new heap block's VM bits from the shared vmbuffer.
 		 */
-		if (visibilitymap_clear(relation->rd_locator, BufferGetBlockNumber(newbuf),
+		if (visibilitymap_clear_rel(relation, BufferGetBlockNumber(newbuf),
 								vmbuffer_new, VISIBILITYMAP_VALID_BITS))
 			vmbuffer_new_modified = true;
 
@@ -5360,7 +5360,7 @@ failed:
 	/* Clear only the all-frozen bit on visibility map if needed */
 	if (PageIsAllVisible(page))
 	{
-		if (visibilitymap_clear(relation->rd_locator, block, vmbuffer,
+		if (visibilitymap_clear_rel(relation, block, vmbuffer,
 								VISIBILITYMAP_ALL_FROZEN))
 			cleared_all_frozen = true;
 	}
@@ -6153,7 +6153,7 @@ l4:
 		if (PageIsAllVisible(page))
 		{
 			/* It's possible all-frozen was already clear */
-			if (visibilitymap_clear(rel->rd_locator, block, vmbuffer,
+			if (visibilitymap_clear_rel(rel, block, vmbuffer,
 									VISIBILITYMAP_ALL_FROZEN))
 				cleared_all_frozen = true;
 		}
