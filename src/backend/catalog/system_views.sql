@@ -750,7 +750,9 @@ CREATE VIEW pg_stat_all_tables AS
             pg_stat_get_total_vacuum_delay_time(C.oid) AS total_vacuum_delay_time,
             pg_stat_get_total_autovacuum_delay_time(C.oid) AS total_autovacuum_delay_time,
             pg_stat_get_vacuum_failsafe_count(C.oid) AS vacuum_failsafe_count,
-            pg_stat_get_stat_reset_time(C.oid) AS stats_reset
+            pg_stat_get_stat_reset_time(C.oid) AS stats_reset,
+            pg_stat_get_visible_page_marks_cleared(C.oid) AS visible_page_marks_cleared,
+            pg_stat_get_frozen_page_marks_cleared(C.oid) AS frozen_page_marks_cleared
     FROM pg_class C LEFT JOIN
          pg_index I ON C.oid = I.indrelid
          LEFT JOIN pg_namespace N ON (N.oid = C.relnamespace)

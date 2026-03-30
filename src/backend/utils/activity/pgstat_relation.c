@@ -1016,6 +1016,8 @@ pgstat_relation_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 
 	tabentry->blocks_fetched += lstats->tab.counts.blocks_fetched;
 	tabentry->blocks_hit += lstats->tab.counts.blocks_hit;
+	tabentry->visible_page_marks_cleared += lstats->tab.counts.visible_page_marks_cleared;
+	tabentry->frozen_page_marks_cleared += lstats->tab.counts.frozen_page_marks_cleared;
 
 	/* Clamp live_tuples in case of negative delta_live_tuples */
 	tabentry->live_tuples = Max(tabentry->live_tuples, 0);

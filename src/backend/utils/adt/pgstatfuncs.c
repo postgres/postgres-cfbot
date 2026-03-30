@@ -111,6 +111,12 @@ PG_STAT_GET_RELENTRY_INT64(vacuum_count)
 /* pg_stat_get_vacuum_failsafe_count */
 PG_STAT_GET_RELENTRY_INT64(vacuum_failsafe_count)
 
+/* pg_stat_get_visible_page_marks_cleared */
+PG_STAT_GET_RELENTRY_INT64(visible_page_marks_cleared)
+
+/* pg_stat_get_frozen_page_marks_cleared */
+PG_STAT_GET_RELENTRY_INT64(frozen_page_marks_cleared)
+
 /*
  * Accessor macro for index stats entries (PgStat_StatIdxEntry).
  */
