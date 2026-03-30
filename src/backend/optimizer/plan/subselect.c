@@ -34,6 +34,7 @@
 #include "optimizer/prep.h"
 #include "optimizer/subselect.h"
 #include "parser/parse_relation.h"
+#include "parser/parsetree.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
@@ -1589,10 +1590,250 @@ sublink_testexpr_is_not_nullable(PlannerInfo *root, SubLink *sublink)
 }
 
 /*
- * convert_EXISTS_sublink_to_join: try to convert an EXISTS SubLink to a join
+ * HoistJoinQualsContext accumulates information while traversing
+ * a subquery's jointree.
  *
- * The API of this function is identical to convert_ANY_sublink_to_join's.
+ * outer_clauses:	List of expressions that reference parent-level variables and
+ *					WHERE clauses and can become join conditions after the conversion.
+ *
+ * contain_outer_vars:	Flag indicating whether the subquery contains
+ *						parent-level variables.
+ * root:			PlannerInfo for the parent query level.
+ *
+ * nullable_above:	Set of relation IDs that are nullable due to outer joins
+ *					(LEFT, RIGHT, FULL, ANTI) encountered above the current join
+ *					node in the join tree.
+ * available_rels:  Set of relations on the nonnullable side of join.
  */
+typedef struct HoistJoinQualsContext
+{
+	List	   *outer_clauses;
+	bool		contain_outer_vars;
+	PlannerInfo *root;
+	Bitmapset  *nullable_above;
+}			HoistJoinQualsContext;
+
+static Node *
+preprocess_quals(Node *node)
+{
+	/*
+	 * Run const-folding without planner context.
+	 *
+	 * IMPORTANT: Pass NULL as PlannerInfo here because we’re simplifying a
+	 * *subquery’s* quals before its rtable has been merged with the parent.
+	 * If we passed a non-NULL root, eval_const_expressions() could perform
+	 * root-dependent transforms (e.g., fold NullTest on Var using
+	 * var_is_nonnullable) against the *wrong* rangetable, risking
+	 * out-of-bounds RTE access. See eval_const_expressions()’s contract:
+	 * “root can be passed as NULL …” for exactly this use-case.
+	 */
+	node = eval_const_expressions(NULL, node);
+	node = (Node *) canonicalize_qual((Expr *) node, false);
+
+	node = (Node *) make_ands_implicit((Expr *) node);
+
+	return node;
+}
+
+ /*
+  * compute_nullable_side Return the set of relids that become NULL-able at
+  * this join node.
+  */
+static Relids
+compute_nullable_side(JoinExpr *j, Relids left, Relids right)
+{
+	switch (j->jointype)
+	{
+		case JOIN_LEFT:
+		case JOIN_ANTI:
+			return bms_copy(right);
+		case JOIN_RIGHT:
+			return bms_copy(left);
+		case JOIN_FULL:
+		default:
+			return NULL;
+	}
+}
+
+ /*
+  * hoist_parent_quals_jointree_mutator
+  *
+  * Recursively traverse a subquery's jointree to identify and extract
+  * qualifiers that reference parent query variables. Returns NULL if the
+  * conversion cannot proceed.
+  */
+static Node *
+hoist_parent_quals_jointree_mutator(Node *jtnode, HoistJoinQualsContext * context)
+{
+	if (jtnode == NULL)
+		return NULL;
+
+	if (IsA(jtnode, RangeTblRef))
+		return jtnode;			/* nothing to change */
+
+	if (IsA(jtnode, JoinExpr))
+	{
+		JoinExpr   *j = (JoinExpr *) jtnode;
+		JoinExpr   *newj = makeNode(JoinExpr);
+		Node	   *qual;
+		Relids		qual_rels,
+					lrels,
+					rrels;
+		bool		touches_nullable;
+		List	   *processed_quals = NIL;
+
+		/* Copy the JoinExpr */
+		memcpy(newj, j, sizeof(JoinExpr));
+
+		/* Recurse into join inputs */
+		newj->larg = (Node *) hoist_parent_quals_jointree_mutator(j->larg, context);
+		newj->rarg = (Node *) hoist_parent_quals_jointree_mutator(j->rarg, context);
+
+		/*
+		 * Fail the conversion if quals contain volatile functions.
+		 */
+		if (contain_volatile_functions(newj->quals) ||
+			newj->larg == NULL ||
+			newj->rarg == NULL)
+			return NULL;
+
+		lrels = get_relids_in_jointree(newj->larg, true, true);
+		rrels = get_relids_in_jointree(newj->rarg, true, true);
+
+		/*
+		 * Include nullable relations above as anything lower can become
+		 * nullable at this join node.
+		 */
+		context->nullable_above = bms_union(context->nullable_above, compute_nullable_side(newj, lrels, rrels));
+
+		qual = newj->quals;
+		processed_quals = (List *) preprocess_quals(qual);
+
+		/*
+		 * Check if any relations referenced in the join quals are nullable
+		 * due to outer joins above this node. If quals touch nullable
+		 * relations, hoisting them to the parent query could change query
+		 * semantics. Moving quals that reference nullable relations can
+		 * affect which rows are filtered out vs. which are extended with
+		 * NULLs. Therefore, we can only hoist quals that don't reference
+		 * nullable relations.
+		 */
+		qual_rels = pull_varnos(NULL, newj->quals);
+		touches_nullable = bms_overlap(qual_rels, context->nullable_above);
+
+		Assert(j->jointype != JOIN_SEMI || j->jointype != JOIN_ANTI);
+
+
+		if (!touches_nullable)
+		{
+			/*
+			 * If the processed quals contain parent query variables, we have
+			 * to pull them up to the parent query. Add them to the
+			 * outer_clauses list and replace them with TRUE.
+			 */
+			if (processed_quals != NIL && contain_vars_of_level((Node *) processed_quals, 1))
+			{
+				context->contain_outer_vars = true;
+				context->outer_clauses = list_concat(context->outer_clauses, processed_quals);
+				newj->quals = (Node *) makeBoolConst(true, false);
+			}
+			else
+			{
+				/* No parent vars, keep the quals in the subquery */
+				newj->quals = (Node *) make_ands_explicit(processed_quals);
+			}
+		}
+		else
+		{
+			/*
+			 * If the quals reference nullable relations and contain parent
+			 * query variables because we cannot continue the conversion at
+			 * all, as we'd be unable to properly handle the correlation
+			 * between parent and child queries with nullable relations
+			 * involved.
+			 */
+			if (contain_vars_of_level(j->quals, 1))
+				return NULL;
+
+			/*
+			 * No quals left here, replace them with TRUE
+			 */
+			newj->quals = (Node *) makeBoolConst(true, false);
+		}
+
+		return (Node *) newj;
+	}
+
+	if (IsA(jtnode, FromExpr))
+	{
+		FromExpr   *f = (FromExpr *) jtnode;
+		FromExpr   *newf = makeNode(FromExpr);
+		ListCell   *lc;
+		List	   *fromlist = NIL;
+
+		/* Copy the FromExpr */
+		memcpy(newf, f, sizeof(FromExpr));
+
+		/* Recurse into fromlist */
+		foreach(lc, newf->fromlist)
+		{
+			Node	   *fnode = hoist_parent_quals_jointree_mutator(lfirst(lc), context);
+
+			if (fnode == NULL)
+				return NULL;
+			fromlist = lappend(fromlist, fnode);
+		}
+
+		newf->fromlist = fromlist;
+
+		/*
+		 * Fail the conversion if the WHERE clause contains volatile functions
+		 */
+		if (contain_volatile_functions(newf->quals))
+			return NULL;
+
+		if (newf->quals)
+		{
+			Node	   *qual = newf->quals;
+
+			Relids		qual_rels = pull_varnos(NULL, newf->quals);
+			bool		touches_nullable = bms_overlap(qual_rels, context->nullable_above);
+
+			if (touches_nullable)
+				return NULL;
+
+			/* Quals (WHERE clause) may still contain sublinks etc */
+			qual = preprocess_quals(qual);
+
+			/*
+			 * Add WHERE clause to the outer_clauses list. Set the
+			 * contain_outer_vars flag as true - means that the subquery
+			 * contains parent query variables.
+			 */
+			{
+				if (contain_vars_of_level((Node *) qual, 1))
+				{
+					context->contain_outer_vars = true;
+
+				}
+				context->outer_clauses = list_concat(context->outer_clauses, (List *) qual);
+				newf->quals = NULL;
+			}
+		}
+
+		return (Node *) newf;
+	}
+
+	return jtnode;				/* quiet compiler */
+}
+
+ /*
+  * convert_EXISTS_sublink_to_join: try to convert an EXISTS SubLink to a join
+  *
+  * The API of this function is identical to convert_ANY_sublink_to_join's,
+  * except that we also support the case where the caller has found NOT
+  * EXISTS, so we need an additional input parameter "under_not".
+  */
 JoinExpr *
 convert_EXISTS_sublink_to_join(PlannerInfo *root, SubLink *sublink,
 							   bool under_not, Relids available_rels)
@@ -1606,6 +1847,13 @@ convert_EXISTS_sublink_to_join(PlannerInfo *root, SubLink *sublink,
 	int			varno;
 	Relids		clause_varnos;
 	Relids		upper_varnos;
+
+	HoistJoinQualsContext hjq_context = {
+		NIL,					/* outer_clauses */
+		false,					/* contain_outer_vars */
+		root,					/* root */
+		NULL,					/* nullable_above */
+	};
 
 	Assert(sublink->subLinkType == EXISTS_SUBLINK);
 
@@ -1636,34 +1884,6 @@ convert_EXISTS_sublink_to_join(PlannerInfo *root, SubLink *sublink,
 		return NULL;
 
 	/*
-	 * Separate out the WHERE clause.  (We could theoretically also remove
-	 * top-level plain JOIN/ON clauses, but it's probably not worth the
-	 * trouble.)
-	 */
-	whereClause = subselect->jointree->quals;
-	subselect->jointree->quals = NULL;
-
-	/*
-	 * The rest of the sub-select must not refer to any Vars of the parent
-	 * query.  (Vars of higher levels should be okay, though.)
-	 */
-	if (contain_vars_of_level((Node *) subselect, 1))
-		return NULL;
-
-	/*
-	 * On the other hand, the WHERE clause must contain some Vars of the
-	 * parent query, else it's not gonna be a join.
-	 */
-	if (!contain_vars_of_level(whereClause, 1))
-		return NULL;
-
-	/*
-	 * We don't risk optimizing if the WHERE clause is volatile, either.
-	 */
-	if (contain_volatile_functions(whereClause))
-		return NULL;
-
-	/*
 	 * Scan the rangetable for relation RTEs and retrieve the necessary
 	 * catalog information for each relation.  Using this information, clear
 	 * the inh flag for any relation that has no children, collect not-null
@@ -1683,14 +1903,37 @@ convert_EXISTS_sublink_to_join(PlannerInfo *root, SubLink *sublink,
 	subroot.type = T_PlannerInfo;
 	subroot.glob = root->glob;
 	subroot.parse = subselect;
-	subselect->jointree->quals = whereClause;
 	subselect = preprocess_relation_rtes(&subroot);
 
+
+	subselect->jointree =
+		(FromExpr *) hoist_parent_quals_jointree_mutator((Node *) subselect->jointree,
+														 &hjq_context);
+
 	/*
-	 * Now separate out the WHERE clause again.
+	 * Stop conversion if the jointree is NULL or no parent query variables
+	 * were found. XXX: Add push down converse - we need to build the join
+	 * tree and pull main table bellow! It's a solution for outer joins too!
 	 */
-	whereClause = subselect->jointree->quals;
+	if (subselect->jointree == NULL || !hjq_context.contain_outer_vars)
+		return NULL;
+
+	Assert(hjq_context.outer_clauses != NIL);
+
 	subselect->jointree->quals = NULL;
+
+	/*
+	 * The hoisted WHERE clause accounts for the parent-level Var references
+	 * in the EXISTS subquery's quals.  But if any FROM-list items (e.g. a
+	 * correlated subquery in the EXISTS FROM clause) still contain level-1
+	 * Vars, we cannot safely merge them into the outer rtable: they would
+	 * end up with outer-level Var references but without a lateral=true
+	 * flag, producing an inconsistent state that the planner cannot handle.
+	 */
+	if (contain_vars_of_level((Node *) subselect, 1))
+		return NULL;
+
+	whereClause = (Node *) make_ands_explicit(hjq_context.outer_clauses);
 
 	/*
 	 * The subquery must have a nonempty jointree, but we can make it so.
