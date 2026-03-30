@@ -1,18 +1,8 @@
 #!/bin/sh
 
-# src/tools/pgindent/pgperltidy
+# Copyright (c) 2021-2026, PostgreSQL Global Development Group
 
-set -e
+# Wrapper that runs pgcheck in perltidy-only mode.
+# See src/tools/pgcheck/pgcheck for the full implementation.
 
-# set this to override default perltidy program:
-PERLTIDY=${PERLTIDY:-perltidy}
-
-PERLTIDY_VERSION=20230309
-if ! $PERLTIDY -v | grep -q $PERLTIDY_VERSION; then
-	echo "You do not appear to have $PERLTIDY version $PERLTIDY_VERSION installed on your system." >&2
-	exit 1
-fi
-
-. src/tools/perlcheck/find_perl_files
-
-find_perl_files "$@" | xargs $PERLTIDY --profile=src/tools/pgindent/perltidyrc
+exec "$(dirname "$0")/../pgcheck/pgcheck" --perltidy "$@"
