@@ -529,6 +529,436 @@ where exists (
 rollback;
 
 --
+-- Test case for exist sublink where we can consider some undependent expression
+-- with outer link
+--
+
+EXPLAIN (COSTS OFF)
+SELECT 1
+FROM ta
+WHERE EXISTS (
+  SELECT 1
+  FROM tb
+  JOIN tc ON ta.id = tb.id
+);
+
+EXPLAIN (COSTS OFF)
+SELECT 1
+FROM ta
+WHERE EXISTS (
+  SELECT 1
+  FROM tb
+  JOIN tc ON ta.id = tc.id
+);
+
+EXPLAIN (COSTS OFF)
+SELECT 1
+FROM ta
+WHERE EXISTS (
+  SELECT 1
+  FROM tb
+  JOIN tc ON 1 = 1
+  WHERE ta.id = tc.id
+);
+
+-- Join compound expression
+EXPLAIN (COSTS OFF)
+SELECT 1
+FROM ta
+WHERE EXISTS (
+  SELECT 1
+  FROM tb
+  JOIN tc ON ta.id = tc.id
+           AND ta.id = tb.id
+);
+
+EXPLAIN (COSTS OFF)
+SELECT 1
+FROM ta ta1
+WHERE EXISTS (
+  SELECT 1
+  FROM tb
+  JOIN tc ON tb.aval = tc.aid
+           AND tb.aval = ta1.id
+);
+
+EXPLAIN (COSTS OFF)
+SELECT 1
+FROM ta
+JOIN tb ON true
+WHERE EXISTS (
+  SELECT 1
+  FROM tb tb1
+  JOIN tc ON ta.id = tb.id
+);
+
+-- Compound expression with const type or other type of expressions
+EXPLAIN (COSTS OFF)
+SELECT 1
+FROM ta
+WHERE EXISTS (
+  SELECT 1
+  FROM tb
+  JOIN tc ON ta.id = tc.id
+           AND ta.id = 1
+);
+
+EXPLAIN (COSTS OFF)
+SELECT 1
+FROM ta
+WHERE EXISTS (
+  SELECT 1
+  FROM tb
+  JOIN tc ON ta.id = tc.id
+           AND tb.id = 1
+);
+
+EXPLAIN (COSTS OFF)
+SELECT 1
+FROM ta
+WHERE EXISTS (
+  SELECT 1
+  FROM tb
+  RIGHT JOIN tc ON ta.id = tc.id
+  WHERE ta.val = 1
+);
+
+EXPLAIN (COSTS OFF)
+SELECT 1
+FROM ta
+WHERE EXISTS (
+  SELECT 1
+  FROM tb
+  JOIN tc ON ta.id = tb.id
+           AND tb.aval = ANY ('{1}'::int[])
+);
+
+-- Exists SubLink expression within expression
+EXPLAIN (COSTS OFF)
+SELECT 1
+FROM ta ta1
+WHERE EXISTS (
+  SELECT 1
+  FROM ta
+  JOIN tb ON ta.id = ta1.id
+           AND ta1.val = 1
+  WHERE EXISTS (
+    SELECT 1
+    FROM ta ta2
+    WHERE ta2.id = ta1.id
+  )
+);
+
+EXPLAIN (COSTS OFF)
+SELECT 1
+FROM ta ta1
+WHERE EXISTS (
+  SELECT 1
+  FROM ta
+  JOIN tb ON ta.val = ta1.id
+           AND ta1.id = 1
+  WHERE EXISTS (
+    SELECT 1
+    FROM ta ta2
+    WHERE ta2.id = ta.id
+  )
+);
+
+EXPLAIN (COSTS OFF)
+SELECT 1
+FROM ta
+WHERE EXISTS (
+  SELECT 1
+  FROM tb
+  WHERE ta.id = tb.id
+    AND EXISTS (
+      SELECT 1
+      FROM tc
+      WHERE tc.id = tb.id
+        AND tc.aid + tb.aval > 0
+    )
+);
+
+EXPLAIN (COSTS OFF)
+SELECT 1
+FROM ta
+WHERE EXISTS (
+  SELECT 1
+  FROM tb
+  WHERE ta.id = tb.id
+    AND EXISTS (
+      SELECT 1
+      FROM tc
+      WHERE tc.id = tb.id
+        AND tc.aid + ta.val > 0
+    )
+);
+
+-- Check with NULL and NOT NULL expressions
+ALTER TABLE ta ADD COLUMN is_active bool;
+UPDATE ta SET is_active = true;
+
+EXPLAIN (COSTS OFF)
+SELECT 1
+FROM ta
+WHERE EXISTS (
+  SELECT 1
+  FROM tb
+  JOIN tc ON ta.id = tb.id
+         AND COALESCE(ta.is_active, true)
+);
+
+EXPLAIN (COSTS OFF)
+SELECT 1
+FROM tb
+WHERE EXISTS (
+  SELECT 1
+  FROM ta
+  JOIN tc ON ta.id = tb.id
+         AND COALESCE(ta.is_active, true)
+);
+
+EXPLAIN (COSTS OFF)
+SELECT 1
+FROM ta
+WHERE EXISTS (
+  SELECT 1
+  FROM tb
+  JOIN tc ON ta.id = tb.id
+         AND CASE
+               WHEN ta.is_active THEN true
+               ELSE false
+             END = true
+);
+
+EXPLAIN (COSTS OFF)
+SELECT 1
+FROM tb
+WHERE EXISTS (
+  SELECT 1
+  FROM ta
+  JOIN tc ON ta.id = tb.id
+         AND CASE
+               WHEN ta.is_active THEN true
+               ELSE false
+             END = true
+);
+
+EXPLAIN (COSTS OFF)
+SELECT 1
+FROM ta
+WHERE EXISTS (
+  SELECT 1
+  FROM tb
+  JOIN tc ON ta.id = tb.id
+         AND ta.is_active
+);
+
+EXPLAIN (COSTS OFF)
+SELECT 1
+FROM ta
+WHERE EXISTS (
+  SELECT 1
+  FROM tb
+  JOIN tc ON ta.id = tb.id
+         AND ta.is_active IS NOT NULL
+);
+
+
+-- Disabled pull up because it is applcapable for INNER JOIN connection
+EXPLAIN (COSTS OFF)
+SELECT 1
+FROM ta
+WHERE EXISTS (
+  SELECT 1
+  FROM tb
+  RIGHT JOIN tc ON ta.id = tc.id
+);
+
+-- Disable pull-up due to lack of the outer var
+EXPLAIN (COSTS OFF)
+SELECT 1
+FROM ta
+WHERE EXISTS (
+  SELECT 1
+  FROM tb
+  JOIN tc ON tc.id = tb.id
+);
+
+CREATE TABLE td (id int, tc_id bytea, val int);
+
+INSERT INTO td
+SELECT g.id, 'Test1'::bytea AS tc_id, 6 AS val
+FROM generate_series(1, 25) AS g(id)
+
+UNION ALL
+
+SELECT g.id, 'Test2'::bytea AS tc_id, 7 AS val
+FROM generate_series(26, 50) AS g(id)
+
+UNION ALL
+
+SELECT g.id, 'Test4'::bytea AS tc_id, 6 AS val
+FROM generate_series(51, 75) AS g(id)
+
+UNION ALL
+
+SELECT g.id, 'Test5'::bytea AS tc_id, 7 AS val
+FROM generate_series(76, 100) AS g(id);
+
+EXPLAIN (COSTS OFF)
+ SELECT ta.id
+   FROM ta
+  WHERE EXISTS (
+    SELECT 1
+      FROM tb
+     WHERE tb.id = ta.id AND
+           EXISTS
+        (SELECT 1
+           FROM tc
+          WHERE tc.id = tb.id)
+               );
+
+EXPLAIN (COSTS OFF)
+ SELECT ta.id
+   FROM ta
+  WHERE EXISTS (
+    SELECT 1
+      FROM tb
+     WHERE tb.id = ta.id AND
+           EXISTS
+        (SELECT 1
+           FROM tc
+          WHERE tc.id = ta.id)
+               );
+
+EXPLAIN (COSTS OFF)
+ SELECT ta.id
+   FROM ta
+  WHERE EXISTS (
+    SELECT 1
+      FROM tb
+     WHERE tb.id = ta.id
+       AND EXISTS
+              (SELECT 1
+                 FROM tc
+               WHERE tb.id = ta.id)
+                );
+
+explain (COSTS OFF)
+ SELECT ta.id
+   FROM ta
+  WHERE EXISTS (
+    SELECT 1
+      FROM tb
+        join tc on tc.id = ta.id
+          AND EXISTS (
+                SELECT 1
+                  FROM td
+                WHERE td.id = ta.id)
+                );
+
+explain (COSTS OFF)
+ SELECT ta.id
+   FROM ta
+  WHERE EXISTS (
+    SELECT 1
+      FROM tb
+        join tc on tc.id = ta.id
+          AND EXISTS (
+                SELECT 1
+                  FROM td
+                WHERE tb.id = ta.id)
+                );
+
+CREATE TABLE te (id int, tc_id bytea, val int);
+INSERT INTO te SELECT * FROM td;
+
+EXPLAIN (COSTS OFF)
+SELECT t1.*
+FROM ta t1
+WHERE EXISTS (
+  SELECT 1
+  FROM (SELECT 1 AS SDBL_DUMMY) SDBL_DUAL
+  JOIN tb t2 ON t2.id = t1.id
+  WHERE EXISTS (
+    SELECT 1
+    FROM (SELECT 1 AS SDBL_DUMMY) SDBL_DUAL
+    JOIN td t3 ON t3.tc_id IN ('Test1'::bytea, 'Test2'::bytea)
+    WHERE EXISTS (
+      SELECT 1
+      FROM te t4
+      WHERE t4.tc_id = t3.tc_id
+        AND t4.val = t2.aval
+    ) = EXISTS (
+      SELECT 1
+      FROM tc t5
+      WHERE t5.id = t3.id
+    )
+  )
+);
+
+EXPLAIN (COSTS OFF)
+SELECT ta.*
+FROM ta
+WHERE EXISTS (
+  SELECT 1
+  FROM tb
+  JOIN tc ON tc.id = tb.id
+         AND tb.id = ta.id
+  JOIN td ON td.id = tc.id
+);
+
+-- Test case for invalid reference to FROM-clause entry in nested join
+-- Fixed: tb cannot be referenced in the join condition of nested join (tc join td)
+-- Restructure: move tb.id>111 to WHERE clause or outer join condition
+-- Preserve semantics: tc JOIN td is inner join, then LEFT JOIN with tb
+EXPLAIN (COSTS OFF)
+select * from ta
+where exists (
+    select *
+    from tb left join
+        (tc join td on (tc.id is null or td.id is null))
+    on true
+    where tb.id > 111 or (tc.id is null or td.id is null)
+);
+
+-- Test case for column reference error in lateral subquery
+-- Fixed: subq_3.id doesn't exist, need to select id from tb in subq_3
+explain (costs off)
+select
+  subq_3.id as c32
+from
+  (
+    select
+       sample_0.id as c0
+    from
+       ta as sample_0
+  ) as subq_0,
+  lateral
+  (
+    select
+        ref_0.id as id,
+        '' as c0
+      from
+        tb as ref_0
+  ) as subq_3
+where EXISTS
+(
+    select
+       1
+    from
+      (
+         select
+            subq_3.c0 as c2
+          from
+            tc  as sample_3
+    ) as subq_4
+    where subq_3.c0 >= subq_4.c2
+);
+
+DROP TABLE td, te;
+
 -- Test case for sublinks pushed down into subselects via join alias expansion
 --
 
