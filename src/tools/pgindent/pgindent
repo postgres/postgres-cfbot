@@ -2,7 +2,7 @@
 
 # Copyright (c) 2021-2026, PostgreSQL Global Development Group
 
-# Wrapper that runs pgcheck in perlcritic-only mode.
+# Wrapper that runs pgcheck in pgindent-only mode.
 # See src/tools/pgcheck/pgcheck for the full implementation.
 
-exec "$(dirname "$0")/../pgcheck/pgcheck" --perlcritic "$@"
+exec "$(dirname "$0")/../pgcheck/pgcheck" --pgindent "$@"

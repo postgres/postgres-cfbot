@@ -2,12 +2,21 @@
 
 # Copyright (c) 2021-2026, PostgreSQL Global Development Group
 
-# Program to maintain uniform layout style in our C code.
+# Unified tool for formatting and checking PostgreSQL C and Perl code.
+#
+# Supported tools
+#   --pgindent       format C code with pg_bsd_indent
+#   --perltidy       format Perl code with perltidy
+#   --perlcritic     lint Perl code with perlcritic
+#   --perl-syncheck  syntax-check Perl code with perl -cw
+#
+# When no tool flags are given, all tools are run.
+#
 # Exit codes:
 #   0 -- all OK
-#   1 -- error invoking pgindent, nothing done
+#   1 -- error invoking pgcheck, nothing done
 #   2 -- --check mode and at least one file requires changes
-#   3 -- pg_bsd_indent failed on at least one file
+#   3 -- a formatting or checking tool failed on at least one file
 
 use strict;
 use warnings FATAL => 'all';
@@ -44,10 +53,20 @@ my $indent_opts =
 my $devnull = File::Spec->devnull;
 
 my ($typedefs_file, $typedef_str, @excludes, $indent,
-	$diff, $check, $help, @commits, $jobs,);
+	$diff, $check, $help, @commits,
+	$perltidy_arg, $perlcritic_arg, $jobs,);
+
+# tool selectors
+my ($do_pgindent, $do_perltidy, $do_perlcritic, $do_perl_syncheck);
 
 $help = 0;
 $jobs = 0;
+
+# Save @ARGV before parsing so we can distinguish --perltidy=PATH (where
+# the value should be used as the perltidy path) from --perltidy PATH
+# (where PATH is a file to format that Getopt::Long greedily consumed).
+# Same for --perlcritic.
+my @orig_argv = @ARGV;
 
 my %options = (
 	"help" => \$help,
@@ -56,6 +75,10 @@ my %options = (
 	"list-of-typedefs=s" => \$typedef_str,
 	"excludes=s" => \@excludes,
 	"indent=s" => \$indent,
+	"pgindent" => \$do_pgindent,
+	"perltidy:s" => \$perltidy_arg,
+	"perlcritic:s" => \$perlcritic_arg,
+	"perl-syncheck" => \$do_perl_syncheck,
 	"diff" => \$diff,
 	"check" => \$check,
 	"jobs|j=i" => \$jobs,);
@@ -70,6 +93,32 @@ elsif ($jobs < 0)
 	usage("--jobs must be a non-negative number");
 }
 
+# For --perltidy and --perlcritic, distinguish =PATH from bare PATH. The PATH
+# in =PATH is interpreted as a path to the perltidy/perlcritic binary, but a
+# separated PATH is interpreted as a file to be processed.
+foreach my $pair ([ \$perltidy_arg, "perltidy" ],
+	[ \$perlcritic_arg, "perlcritic" ])
+{
+	my ($ref, $name) = @$pair;
+	if (defined($$ref) && $$ref ne '')
+	{
+		unless (grep { $_ eq "--$name=$$ref" } @orig_argv)
+		{
+			# If it's not =PATH add the argument back to @ARGV for processing
+			# as a file argument
+			unshift(@ARGV, $$ref);
+			# Set the $perltidy_arg/perlcritic_arg to the empty string, to
+			# indicate for the later code that the tool was selected but no
+			# path was given.
+			$$ref = '';
+		}
+	}
+}
+
+# --perltidy and --perlcritic as tool selectors: if given (even
+# without a value), they select their respective tool.
+$do_perltidy = 1 if defined($perltidy_arg);
+$do_perlcritic = 1 if defined($perlcritic_arg);
 
 usage() if $help;
 
@@ -78,6 +127,22 @@ usage("Cannot use --commit with command line file list")
 
 # default to current directory if no files/dirs given
 @ARGV = ('.') unless @ARGV || @commits;
+
+# If no tool flags were given, run everything.
+my $any_op =
+	 $do_pgindent
+  || $do_perltidy
+  || $do_perlcritic
+  || $do_perl_syncheck;
+if (!$any_op)
+{
+	$do_pgindent = 1;
+	$do_perltidy = 1;
+	$do_perlcritic = 1;
+	$do_perl_syncheck = 1;
+}
+
+my $do_perl_any = $do_perltidy || $do_perlcritic || $do_perl_syncheck;
 
 # command line option wins, then environment, then locations based on current
 # dir, then default location
@@ -109,6 +174,12 @@ if (!$indent && $sourcedir)
 	}
 }
 $indent ||= "pg_bsd_indent";
+
+# get perltidy location: command line wins, then environment, then PATH.
+my $perltidy = $perltidy_arg || $ENV{PERLTIDY} || "perltidy";
+
+# get perlcritic location: command line wins, then environment, then PATH.
+my $perlcritic = $perlcritic_arg || $ENV{PERLCRITIC} || "perlcritic";
 
 # if it's the base of a postgres tree, we will exclude the files
 # postgres wants excluded
@@ -175,6 +246,57 @@ sub check_indent
 	{
 		print STDERR
 		  "You appear to have GNU indent rather than BSD indent.\n";
+		exit 1;
+	}
+
+	return;
+}
+
+my $PERLTIDY_VERSION = "20230309";
+
+sub check_perltidy
+{
+	if (!$sourcedir)
+	{
+		print STDERR
+		  "Cannot find perltidyrc: not running inside a PostgreSQL source tree.\n";
+		exit 1;
+	}
+
+	my $ver = `$perltidy -v 2>&1`;
+	if ($? != 0)
+	{
+		print STDERR
+		  "You do not appear to have $perltidy installed on your system.\n"
+		  . "See src/tools/pgindent/README for installation instructions.\n";
+		exit 1;
+	}
+
+	if ($ver !~ m/$PERLTIDY_VERSION/)
+	{
+		print STDERR
+		  "You do not appear to have $perltidy version $PERLTIDY_VERSION installed on your system.\n"
+		  . "See src/tools/pgindent/README for installation instructions.\n";
+		exit 1;
+	}
+
+	return;
+}
+
+sub check_perlcritic
+{
+	if (!$sourcedir)
+	{
+		print STDERR
+		  "Cannot find perlcriticrc: not running inside a PostgreSQL source tree.\n";
+		exit 1;
+	}
+
+	my $ver = `$perlcritic --version 2>&1`;
+	if ($? != 0)
+	{
+		print STDERR
+		  "You do not appear to have $perlcritic installed on your system.\n";
 		exit 1;
 	}
 
@@ -417,6 +539,78 @@ sub run_indent
 	return $source;
 }
 
+sub format_c
+{
+	my $source = shift;
+	my $source_filename = shift;
+	my $error_message = '';
+
+	my $formatted = pre_indent($source);
+	$formatted = run_indent($formatted, \$error_message);
+	if ($formatted eq "")
+	{
+		print "Failure in $source_filename: " . $error_message . "\n";
+		return ("", 1);
+	}
+	return post_indent($formatted);
+}
+
+sub format_perl
+{
+	my $source = shift;
+	my $source_filename = shift;
+
+	my $tmp_fh = new File::Temp(TEMPLATE => "pgperltidyXXXXX");
+	my $tmp_filename = $tmp_fh->filename;
+	print $tmp_fh $source;
+	$tmp_fh->close();
+
+	my $perltidy_profile = "$sourcedir/perltidyrc";
+	my $err =
+	  `$perltidy --profile=$perltidy_profile -b -bext='/' $tmp_filename 2>&1`;
+	if ($? != 0)
+	{
+		print "Failure in $source_filename: " . $err . "\n";
+		return ("", 1);
+	}
+	return read_source($tmp_filename);
+}
+
+sub run_perlcritic
+{
+	my $source_filename = shift;
+
+	my $perlcheck_dir = "$sourcedir/../perlcheck";
+	my $criticrc = "$perlcheck_dir/perlcriticrc";
+
+	my $err =
+	  `$perlcritic --quiet --program-extensions .pl --profile=$criticrc "$source_filename" 2>&1`;
+	return ("", 0) if $? == 0;
+	return ($err, 1);
+}
+
+sub run_perl_syncheck
+{
+	my $source_filename = shift;
+
+	my $includes = join(
+		' ',
+		map { "-I $_" } (
+			"src/backend/catalog", "src/test/perl",
+			"src/backend/utils/mb/Unicode", "src/bin/pg_rewind",
+			"src/test/ssl/t",));
+
+	my $output = `perl $includes -cw "$source_filename" 2>&1`;
+	my $failed = $? != 0;
+
+	# Filter out "OK" lines — perl -cw prints "<file> syntax OK" on success
+	my @lines = grep { !/\bsyntax OK$/ } split(/\n/, $output);
+	my $filtered = join("\n", @lines);
+	$filtered .= "\n" if $filtered;
+
+	return ($filtered, $failed || scalar(@lines) > 0);
+}
+
 sub diff
 {
 	my $indented = shift;
@@ -431,6 +625,33 @@ sub diff
 
 	my $diff = `diff -upd "$source_filename" "$post_fh_filename"  2>&1`;
 	return $diff;
+}
+
+sub is_c_file
+{
+	my $filename = shift;
+	# It needs to have .c or .h extension
+	return 0 unless $filename =~ /\.[ch]$/;
+	# Automatically ignore .c and .h files that correspond to a .y or .l file.
+	# pg_bsd_indent tends to get badly confused by Bison/flex output, and
+	# there's no value in indenting derived files anyway.
+	my $otherfile = $filename;
+	$otherfile =~ s/\.[ch]$/.y/;
+	return 0 if $otherfile ne $filename && -f $otherfile;
+	$otherfile =~ s/\.y$/.l/;
+	return 0 if $otherfile ne $filename && -f $otherfile;
+	return 1;
+}
+
+sub is_perl_file
+{
+	my $filename = shift;
+	# take all .pl and .pm files
+	return 1 if $filename =~ /\.p[lm]$/;
+	# take executable files that file(1) thinks are perl files
+	return 0 unless -x $filename;
+	my $file_out = `file "$filename"`;
+	return $file_out =~ /:.*perl[0-9]*\b/i;
 }
 
 sub discover_files
@@ -470,7 +691,7 @@ sub discover_files
 		close($git_ls);
 		die "git ls-files error" if $?;
 		my @git_files = split(/\0/, $git_output);
-		push(@discovered, grep { /\.[ch]$/ } @git_files);
+		push(@discovered, @git_files);
 	}
 
 	return @discovered;
@@ -480,57 +701,111 @@ sub process_file
 {
 	my $source_filename = shift;
 
-	# ignore anything that's not a .c or .h file
-	return 0 unless $source_filename =~ /\.[ch]$/;
-
-	# don't try to indent a file that doesn't exist
+	# don't try to format a file that doesn't exist
 	unless (-f $source_filename)
 	{
 		warn "Could not find $source_filename";
 		return 0;
 	}
-	# Automatically ignore .c and .h files that correspond to a .y or .l
-	# file.  indent tends to get badly confused by Bison/flex output,
-	# and there's no value in indenting derived files anyway.
-	my $otherfile = $source_filename;
-	$otherfile =~ s/\.[ch]$/.y/;
-	return 0 if $otherfile ne $source_filename && -f $otherfile;
-	$otherfile =~ s/\.y$/.l/;
-	return 0 if $otherfile ne $source_filename && -f $otherfile;
 
-	my $source = read_source($source_filename);
-	my $orig_source = $source;
-	my $error_message = '';
+	# The more complex filtering is already done by discover_files, at this
+	# point we can simply check the file extension to determine if it's a C
+	# file.
+	my $is_c = $source_filename =~ /\.[ch]$/;
+	# All other files are Perl files
+	my $is_perl = !$is_c;
 
-	$source = pre_indent($source);
-
-	$source = run_indent($source, \$error_message);
-	if ($source eq "")
+	# Formatting step: pgindent or perltidy
+	if ($is_c && $do_pgindent)
 	{
-		print STDERR "Failure in $source_filename: " . $error_message . "\n";
-		return 3;
+		my $source = read_source($source_filename);
+		my ($formatted, $failure) = format_c($source, $source_filename);
+
+		if ($failure)
+		{
+			return 3;
+		}
+
+		if ($formatted ne $source)
+		{
+			if (!$diff && !$check)
+			{
+				write_source($formatted, $source_filename);
+			}
+			else
+			{
+				if ($diff)
+				{
+					my $output = diff($formatted, $source_filename);
+					flock($stdout_lock_fh, LOCK_EX) or die "flock: $!";
+					print $output;
+					STDOUT->flush();
+					flock($stdout_lock_fh, LOCK_UN) or die "flock: $!";
+				}
+
+				return 2 if $check;
+			}
+		}
+	}
+	elsif ($is_perl && $do_perltidy)
+	{
+		my $source = read_source($source_filename);
+		my ($formatted, $failure) = format_perl($source, $source_filename);
+
+		if ($failure)
+		{
+			return 3;
+		}
+
+		if ($formatted ne $source)
+		{
+			if (!$diff && !$check)
+			{
+				write_source($formatted, $source_filename);
+			}
+			else
+			{
+				if ($diff)
+				{
+					my $output = diff($formatted, $source_filename);
+					flock($stdout_lock_fh, LOCK_EX) or die "flock: $!";
+					print $output;
+					STDOUT->flush();
+					flock($stdout_lock_fh, LOCK_UN) or die "flock: $!";
+				}
+
+				return 2 if $check;
+			}
+		}
 	}
 
-	$source = post_indent($source);
-
-	if ($source ne $orig_source)
+	# Validation steps: perlcritic and syncheck (only for perl files)
+	if ($is_perl)
 	{
-		if (!$diff && !$check)
+		if ($do_perlcritic)
 		{
-			write_source($source, $source_filename);
-		}
-		else
-		{
-			if ($diff)
+			my ($output, $failed) = run_perlcritic($source_filename);
+			if ($failed)
 			{
-				my $output = diff($source, $source_filename);
 				flock($stdout_lock_fh, LOCK_EX) or die "flock: $!";
 				print $output;
 				STDOUT->flush();
 				flock($stdout_lock_fh, LOCK_UN) or die "flock: $!";
+				return 3;
 			}
+		}
 
-			return 2 if $check;
+		if ($do_perl_syncheck)
+		{
+			my ($output, $failed) = run_perl_syncheck($source_filename);
+			if ($failed)
+			{
+				flock($stdout_lock_fh, LOCK_EX) or die "flock: $!";
+				print $output;
+				STDOUT->flush();
+				flock($stdout_lock_fh, LOCK_UN) or die "flock: $!";
+				return 3;
+			}
 		}
 	}
 
@@ -542,9 +817,13 @@ sub usage
 	my $message = shift;
 	my $helptext = <<'EOF';
 Usage:
-pgindent [OPTION]... [FILE|DIR]...
+pgcheck [OPTION]... [FILE|DIR]...
 Options:
 	--help                  show this message and quit
+	--pgindent              format C code with pg_bsd_indent
+	--perltidy[=PATH]       format Perl code with perltidy
+	--perlcritic[=PATH]     lint Perl code with perlcritic
+	--perl-syncheck         syntax-check Perl code with perl -cw
 	--commit=gitref         use files modified by the named commit
 	--typedefs=FILE         file containing a list of typedefs
 	--list-of-typedefs=STR  string containing typedefs, space separated
@@ -553,6 +832,8 @@ Options:
 	--diff                  show the changes that would be made
 	--check                 exit with status 2 if any changes would be made
 	--jobs=N, -j N          number of parallel workers (0 = num CPUs, default 0)
+When no --pgindent, --perltidy, --perlcritic, or --perl-syncheck flags are
+provided, all of these tools are run.
 The --excludes and --commit options can be given more than once.
 EOF
 	if ($help)
@@ -569,12 +850,37 @@ EOF
 
 # main
 
-$filtered_typedefs_fh = load_typedefs();
+if ($do_pgindent)
+{
+	$filtered_typedefs_fh = load_typedefs();
+	check_indent();
+}
 
-check_indent();
+if ($do_perltidy)
+{
+	check_perltidy();
+}
+
+if ($do_perlcritic)
+{
+	check_perlcritic();
+}
 
 # any non-option arguments are files or directories to be processed
-push(@files, discover_files(@ARGV)) if @ARGV;
+if (@ARGV)
+{
+	foreach my $f (discover_files(@ARGV))
+	{
+		if ($do_pgindent && is_c_file($f))
+		{
+			push(@files, $f);
+		}
+		elsif ($do_perl_any && is_perl_file($f))
+		{
+			push(@files, $f);
+		}
+	}
+}
 
 # commit file locations are relative to the source root
 chdir "$sourcedir/../../.." if @commits && $sourcedir;
@@ -586,7 +892,8 @@ foreach my $commit (@commits)
 	my @affected = `git diff --diff-filter=ACMR --name-only $prev $commit`;
 	die "git error" if $?;
 	chomp(@affected);
-	push(@files, @affected);
+	push(@files, grep { is_c_file($_) } @affected) if $do_pgindent;
+	push(@files, grep { is_perl_file($_) } @affected) if $do_perl_any;
 }
 
 warn "No files to process" unless @files;
