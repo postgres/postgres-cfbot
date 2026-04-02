@@ -93,6 +93,137 @@ SELECT
   FROM generate_series(1,10) AS s;
 
 --
+-- Test that the LIMIT bound is pushed through the outer side of a left or
+-- full join down to a Sort node.
+--
+create function explain_limit_bound(query text) returns setof text
+language plpgsql as
+$$
+declare ln text;
+begin
+    for ln in
+        execute 'explain (analyze, costs off, timing off, summary off, buffers off) '
+                || query
+    loop
+        return next regexp_replace(ln, '\d+kB', 'NNkB', 'g');
+    end loop;
+end;
+$$;
+
+begin;
+
+-- Force merge join to keep plans stable.
+set local enable_hashjoin = off;
+set local enable_nestloop = off;
+
+-- the bound is pushed to the Sort: expect a top-N heapsort
+select * from explain_limit_bound($$
+  select o.tenthous, i.f1
+  from (select * from onek order by tenthous) o
+    left join int4_tbl i on o.tenthous = i.f1
+  order by o.tenthous
+  limit 3
+$$);
+select o.tenthous, i.f1
+from (select * from onek order by tenthous) o
+  left join int4_tbl i on o.tenthous = i.f1
+order by o.tenthous
+limit 3;
+
+-- a join qual and a qual pushed down below the Sort don't prevent that
+select * from explain_limit_bound($$
+  select o.tenthous, i.f1
+  from (select * from onek order by tenthous) o
+    left join int4_tbl i on o.tenthous = i.f1 and i.f1 > 0
+  where o.two = 0
+  order by o.tenthous
+  limit 3
+$$);
+select o.tenthous, i.f1
+from (select * from onek order by tenthous) o
+  left join int4_tbl i on o.tenthous = i.f1 and i.f1 > 0
+where o.two = 0
+order by o.tenthous
+limit 3;
+
+-- a qual applied to the join output prevents the top-N heapsort
+select * from explain_limit_bound($$
+  select o.tenthous, i.f1
+  from (select * from onek order by tenthous) o
+    left join int4_tbl i on o.tenthous = i.f1
+  where i.f1 is null or i.f1 > 0
+  limit 3
+$$);
+
+-- no pushdown for a left join reduced to an anti join
+select * from explain_limit_bound($$
+  select o.tenthous, i.f1
+  from (select * from onek order by tenthous) o
+    left join int4_tbl i on o.tenthous = i.f1
+  where i.f1 is null
+  limit 3
+$$);
+
+-- WITH TIES has no fixed bound to push
+select * from explain_limit_bound($$
+  select o.tenthous, i.f1
+  from (select * from onek order by tenthous) o
+    left join int4_tbl i on o.tenthous = i.f1
+  order by o.tenthous fetch first 3 rows with ties
+$$);
+
+-- rescans with a changing bound must re-sort with the new one
+select v.n, s.tenthous, s.f1
+from (values (1), (3), (2)) v(n),
+     lateral (select o.tenthous, i.f1
+              from (select * from onek order by tenthous) o
+                left join int4_tbl i on o.tenthous = i.f1
+              order by o.tenthous
+              limit v.n) s
+order by v.n, s.tenthous;
+
+-- a full join keeps every outer row too, so the bound reaches the outer Sort
+select * from explain_limit_bound($$
+  select o.tenthous, i.f1
+  from (select * from onek order by tenthous) o
+    full join int4_tbl i on o.tenthous = i.f1
+  limit 3
+$$);
+select o.tenthous, i.f1
+from (select * from onek order by tenthous) o
+  full join int4_tbl i on o.tenthous = i.f1
+limit 3;
+
+-- the bound passes through a chain of left joins
+select * from explain_limit_bound($$
+  select o.tenthous, i.f1, j.f1
+  from (select * from onek order by tenthous) o
+    left join int4_tbl i on o.tenthous = i.f1
+    left join int4_tbl j on o.tenthous = j.f1
+  order by o.tenthous
+  limit 3
+$$);
+select o.tenthous, i.f1, j.f1
+from (select * from onek order by tenthous) o
+  left join int4_tbl i on o.tenthous = i.f1
+  left join int4_tbl j on o.tenthous = j.f1
+order by o.tenthous
+limit 3;
+
+-- but stops at an inner join in the chain
+select * from explain_limit_bound($$
+  select o.tenthous, i.f1, j.f1
+  from (select * from onek order by tenthous) o
+    join int4_tbl i on o.tenthous = i.f1
+    left join int4_tbl j on o.tenthous = j.f1
+  limit 3
+$$);
+
+rollback;
+
+drop function explain_limit_bound(text);
+
+--
 -- Test behavior of volatile and set-returning functions in conjunction
 -- with ORDER BY and LIMIT.
 --

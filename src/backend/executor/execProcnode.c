@@ -958,6 +958,20 @@ ExecSetTupleBound(int64 tuples_needed, PlanState *child_node)
 
 		ExecSetTupleBound(tuples_needed, outerPlanState(child_node));
 	}
+	else if (IsA(child_node, NestLoopState) || IsA(child_node, MergeJoinState))
+	{
+		/*
+		 * A left or full join emits at least one tuple for each outer tuple
+		 * before fetching the next one, so unless a qual filters its output it
+		 * never needs more outer tuples than it returns.  HashJoin doesn't
+		 * qualify: a multi-batch join pulls more outer tuples into batches.
+		 */
+		JoinState *jstate = (JoinState *) child_node;
+
+		if ((jstate->jointype == JOIN_LEFT || jstate->jointype == JOIN_FULL)
+			&& jstate->ps.qual == NULL)
+			ExecSetTupleBound(tuples_needed, outerPlanState(child_node));
+	}
 
 	/*
 	 * In principle we could descend through any plan node type that is
