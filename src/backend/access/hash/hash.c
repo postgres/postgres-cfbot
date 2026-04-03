@@ -24,12 +24,14 @@
 #include "access/stratnum.h"
 #include "access/tableam.h"
 #include "access/xloginsert.h"
+#include "catalog/index.h"
 #include "commands/progress.h"
 #include "commands/vacuum.h"
 #include "miscadmin.h"
 #include "nodes/execnodes.h"
 #include "optimizer/plancat.h"
 #include "pgstat.h"
+#include "storage/proc.h"
 #include "storage/read_stream.h"
 #include "utils/fmgrprotos.h"
 #include "utils/index_selfuncs.h"
@@ -210,6 +212,8 @@ hashbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 
 	result->heap_tuples = reltuples;
 	result->index_tuples = buildstate.indtuples;
+	InvalidateCatalogSnapshot();
+	Assert(!IndexBuildResetsSnapshots(indexInfo) || !TransactionIdIsValid(MyProc->xmin));
 
 	return result;
 }
