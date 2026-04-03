@@ -235,8 +235,9 @@ extern Path *get_cheapest_fractional_path_for_pathkeys(List *paths,
 													   Relids required_outer,
 													   double fraction);
 extern Path *get_cheapest_parallel_safe_total_inner(List *paths);
-extern List *build_index_pathkeys(PlannerInfo *root, IndexOptInfo *index,
-								  ScanDirection scandir);
+extern List *build_index_pathkeys(PlannerInfo *root, IndexOptInfo *index);
+extern PathKey *make_reversed_pathkey(PlannerInfo *root, PathKey *pathkey);
+extern List *reverse_pathkeys(PlannerInfo *root, List *pathkeys);
 extern List *build_partition_pathkeys(PlannerInfo *root, RelOptInfo *partrel,
 									  ScanDirection scandir, bool *partialkeys);
 extern List *build_expression_pathkey(PlannerInfo *root, Expr *expr,

@@ -917,8 +917,7 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 	index_is_ordered = (index->sortopfamily != NULL);
 	if (index_is_ordered && pathkeys_possibly_useful)
 	{
-		index_pathkeys = build_index_pathkeys(root, index,
-											  ForwardScanDirection);
+		index_pathkeys = build_index_pathkeys(root, index);
 		useful_pathkeys = truncate_useless_pathkeys(root, rel,
 													index_pathkeys);
 		orderbyclauses = NIL;
@@ -1008,14 +1007,15 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 	}
 
 	/*
-	 * 5. If the index is ordered, a backwards scan might be interesting.
+	 * 5. If the index is ordered, a backwards scan might be interesting. Only
+	 * consider it if we have forward pathkeys to reverse.
 	 */
-	if (index_is_ordered && pathkeys_possibly_useful)
+	if (index_is_ordered && pathkeys_possibly_useful && index_pathkeys != NIL)
 	{
-		index_pathkeys = build_index_pathkeys(root, index,
-											  BackwardScanDirection);
+		List	   *backward_pathkeys = reverse_pathkeys(root, index_pathkeys);
+
 		useful_pathkeys = truncate_useless_pathkeys(root, rel,
-													index_pathkeys);
+													backward_pathkeys);
 		if (useful_pathkeys != NIL)
 		{
 			ipath = create_index_path(root, index,
