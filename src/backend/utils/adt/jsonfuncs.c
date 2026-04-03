@@ -920,6 +920,199 @@ jsonb_object_field_text(PG_FUNCTION_ARGS)
 	PG_RETURN_NULL();
 }
 
+/*
+ * Typed scalar extraction from jsonb object fields.
+ *
+ * These functions extract a typed scalar directly from the in-memory
+ * JsonbValue found by key lookup, skipping the intermediate Jsonb
+ * serialization that occurs with the unoptimized cast-over-extraction path.
+ *
+ * They live here alongside jsonb_object_field() because they share the
+ * same key-lookup logic (getKeyJsonValueFromContainer).
+ *
+ * Registered in pg_proc as ordinary SQL-callable builtins; also serve as
+ * planner rewrite targets for jsonb_cast_support() in jsonb.c.
+ *
+ * NULL semantics match the existing cast path: a missing key or a JSON
+ * null value both produce SQL NULL; a type mismatch raises ERROR.
+ */
+
+/*
+ * Look up a key in a jsonb object and return the JsonbValue, or NULL.
+ * Returns NULL (without error) when the input is not an object, the key
+ * is absent, or the value is JSON null.
+ */
+static JsonbValue *
+jsonb_object_field_lookup(Jsonb *jb, text *key, JsonbValue *vbuf)
+{
+	JsonbValue *v;
+
+	if (!JB_ROOT_IS_OBJECT(jb))
+		return NULL;
+
+	v = getKeyJsonValueFromContainer(&jb->root,
+									 VARDATA_ANY(key),
+									 VARSIZE_ANY_EXHDR(key),
+									 vbuf);
+
+	/* Missing key or JSON null both map to SQL NULL */
+	if (v == NULL || v->type == jbvNull)
+		return NULL;
+
+	return v;
+}
+
+/*
+ * Raise a type-mismatch error for typed field extraction.
+ *
+ * The message wording matches cannotCastJsonbValue() in jsonb.c so that
+ * the optimized and unoptimized paths produce identical errors.
+ */
+static void
+jsonb_field_cast_error(JsonbValue *v, const char *sqltype)
+{
+	const char *jsontype;
+
+	switch (v->type)
+	{
+		case jbvNull:
+			jsontype = "null";
+			break;
+		case jbvString:
+			jsontype = "string";
+			break;
+		case jbvNumeric:
+			jsontype = "numeric";
+			break;
+		case jbvBool:
+			jsontype = "boolean";
+			break;
+		case jbvArray:
+			jsontype = "array";
+			break;
+		case jbvObject:
+			jsontype = "object";
+			break;
+		case jbvBinary:
+			jsontype = "array or object";
+			break;
+		default:
+			elog(ERROR, "unknown jsonb type: %d", (int) v->type);
+			jsontype = NULL;	/* keep compiler quiet */
+	}
+
+	ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("cannot cast jsonb %s to type %s",
+					jsontype, sqltype)));
+}
+
+/*
+ * Per-type conversion helpers for typed field extraction.
+ *
+ * Each validates the expected JsonbValue type, raises a type-mismatch
+ * error (via jsonb_field_cast_error) if wrong, and returns the converted
+ * value as Datum.  These are the only place where conversion semantics
+ * live; the wrapper macro below is intentionally kept thin.
+ */
+static Datum
+jsonb_value_to_numeric_datum(JsonbValue *v)
+{
+	if (v->type != jbvNumeric)
+		jsonb_field_cast_error(v, "numeric");
+
+	return NumericGetDatum(DatumGetNumericCopy(NumericGetDatum(v->val.numeric)));
+}
+
+static Datum
+jsonb_value_to_bool_datum(JsonbValue *v)
+{
+	if (v->type != jbvBool)
+		jsonb_field_cast_error(v, "boolean");
+
+	return BoolGetDatum(v->val.boolean);
+}
+
+static Datum
+jsonb_value_to_int4_datum(JsonbValue *v)
+{
+	if (v->type != jbvNumeric)
+		jsonb_field_cast_error(v, "integer");
+
+	return DirectFunctionCall1(numeric_int4, NumericGetDatum(v->val.numeric));
+}
+
+static Datum
+jsonb_value_to_int8_datum(JsonbValue *v)
+{
+	if (v->type != jbvNumeric)
+		jsonb_field_cast_error(v, "bigint");
+
+	return DirectFunctionCall1(numeric_int8, NumericGetDatum(v->val.numeric));
+}
+
+static Datum
+jsonb_value_to_float8_datum(JsonbValue *v)
+{
+	if (v->type != jbvNumeric)
+		jsonb_field_cast_error(v, "double precision");
+
+	return DirectFunctionCall1(numeric_float8, NumericGetDatum(v->val.numeric));
+}
+
+static Datum
+jsonb_value_to_int2_datum(JsonbValue *v)
+{
+	if (v->type != jbvNumeric)
+		jsonb_field_cast_error(v, "smallint");
+
+	return DirectFunctionCall1(numeric_int2, NumericGetDatum(v->val.numeric));
+}
+
+static Datum
+jsonb_value_to_float4_datum(JsonbValue *v)
+{
+	if (v->type != jbvNumeric)
+		jsonb_field_cast_error(v, "real");
+
+	return DirectFunctionCall1(numeric_float4, NumericGetDatum(v->val.numeric));
+}
+
+/*
+ * Thin-wrapper macro for the jsonb_object_field_<type> extractor family.
+ * Reduces repetition: each wrapper does lookup, NULL handling, and delegates
+ * to a type-specific conversion helper that holds the actual semantics.
+ */
+#define DEFINE_JSONB_OBJECT_FIELD_TYPED(fname, convfn) \
+Datum \
+fname(PG_FUNCTION_ARGS) \
+{ \
+	Jsonb	   *jb = PG_GETARG_JSONB_P(0); \
+	text	   *key = PG_GETARG_TEXT_PP(1); \
+	JsonbValue	vbuf; \
+	JsonbValue *v; \
+	Datum		result; \
+\
+	v = jsonb_object_field_lookup(jb, key, &vbuf); \
+	if (v == NULL) \
+	{ \
+		PG_FREE_IF_COPY(jb, 0); \
+		PG_RETURN_NULL(); \
+	} \
+\
+	result = convfn(v); \
+	PG_FREE_IF_COPY(jb, 0); \
+	return result; \
+}
+
+DEFINE_JSONB_OBJECT_FIELD_TYPED(jsonb_object_field_numeric, jsonb_value_to_numeric_datum)
+DEFINE_JSONB_OBJECT_FIELD_TYPED(jsonb_object_field_bool, jsonb_value_to_bool_datum)
+DEFINE_JSONB_OBJECT_FIELD_TYPED(jsonb_object_field_int4, jsonb_value_to_int4_datum)
+DEFINE_JSONB_OBJECT_FIELD_TYPED(jsonb_object_field_int8, jsonb_value_to_int8_datum)
+DEFINE_JSONB_OBJECT_FIELD_TYPED(jsonb_object_field_float8, jsonb_value_to_float8_datum)
+DEFINE_JSONB_OBJECT_FIELD_TYPED(jsonb_object_field_int2, jsonb_value_to_int2_datum)
+DEFINE_JSONB_OBJECT_FIELD_TYPED(jsonb_object_field_float4, jsonb_value_to_float4_datum)
+
 Datum
 json_array_element(PG_FUNCTION_ARGS)
 {
