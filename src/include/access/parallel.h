@@ -28,6 +28,7 @@ typedef struct ParallelWorkerInfo
 {
 	BackgroundWorkerHandle *bgwhandle;
 	shm_mq_handle *error_mqh;
+	bool		  *snapshot_restored;
 } ParallelWorkerInfo;
 
 typedef struct ParallelContext
@@ -67,7 +68,7 @@ extern void InitializeParallelDSM(ParallelContext *pcxt);
 extern void ReinitializeParallelDSM(ParallelContext *pcxt);
 extern void ReinitializeParallelWorkers(ParallelContext *pcxt, int nworkers_to_launch);
 extern void LaunchParallelWorkers(ParallelContext *pcxt);
-extern void WaitForParallelWorkersToAttach(ParallelContext *pcxt);
+extern void WaitForParallelWorkersToAttach(ParallelContext *pcxt, bool wait_for_snapshot);
 extern void WaitForParallelWorkersToFinish(ParallelContext *pcxt);
 extern void DestroyParallelContext(ParallelContext *pcxt);
 extern bool ParallelContextActive(void);
