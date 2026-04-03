@@ -99,6 +99,54 @@ make_canonical_pathkey(PlannerInfo *root,
 }
 
 /*
+ * make_reversed_pathkey
+ *	  Create a pathkey with reversed sort direction.
+ *
+ * This flips COMPARE_LT <-> COMPARE_GT and inverts nulls_first.
+ */
+PathKey *
+make_reversed_pathkey(PlannerInfo *root, PathKey *pathkey)
+{
+	CompareType reversed_cmptype;
+
+	if (pathkey->pk_cmptype == COMPARE_LT)
+		reversed_cmptype = COMPARE_GT;
+	else if (pathkey->pk_cmptype == COMPARE_GT)
+		reversed_cmptype = COMPARE_LT;
+	else
+		reversed_cmptype = pathkey->pk_cmptype;
+
+	return make_canonical_pathkey(root,
+								  pathkey->pk_eclass,
+								  pathkey->pk_opfamily,
+								  reversed_cmptype,
+								  !pathkey->pk_nulls_first);
+}
+
+/*
+ * reverse_pathkeys
+ *	  Create a list of pathkeys with reversed sort directions.
+ *
+ * This is useful for deriving backward index scan pathkeys from
+ * forward scan pathkeys without recomputing them from scratch.
+ */
+List *
+reverse_pathkeys(PlannerInfo *root, List *pathkeys)
+{
+	List	   *result = NIL;
+	ListCell   *lc;
+
+	foreach(lc, pathkeys)
+	{
+		PathKey    *pk = lfirst_node(PathKey, lc);
+
+		result = lappend(result, make_reversed_pathkey(root, pk));
+	}
+
+	return result;
+}
+
+/*
  * append_pathkeys
  *		Append all non-redundant PathKeys in 'source' onto 'target' and
  *		returns the updated 'target' list.
@@ -722,8 +770,8 @@ get_cheapest_parallel_safe_total_inner(List *paths)
  *	  scan using the given index.  (Note that an unordered index doesn't
  *	  induce any ordering, so we return NIL.)
  *
- * If 'scandir' is BackwardScanDirection, build pathkeys representing a
- * backwards scan of the index.
+ * This always builds pathkeys for a forward scan of the index.  For backward
+ * scans, the caller should use reverse_pathkeys() on the result.
  *
  * We iterate only key columns of covering indexes, since non-key columns
  * don't influence index ordering.  The result is canonical, meaning that
@@ -738,8 +786,7 @@ get_cheapest_parallel_safe_total_inner(List *paths)
  */
 List *
 build_index_pathkeys(PlannerInfo *root,
-					 IndexOptInfo *index,
-					 ScanDirection scandir)
+					 IndexOptInfo *index)
 {
 	List	   *retval = NIL;
 	ListCell   *lc;
@@ -767,16 +814,9 @@ build_index_pathkeys(PlannerInfo *root,
 		/* We assume we don't need to make a copy of the tlist item */
 		indexkey = indextle->expr;
 
-		if (ScanDirectionIsBackward(scandir))
-		{
-			reverse_sort = !index->reverse_sort[i];
-			nulls_first = !index->nulls_first[i];
-		}
-		else
-		{
-			reverse_sort = index->reverse_sort[i];
-			nulls_first = index->nulls_first[i];
-		}
+		/* Use the index's natural sort order (forward scan) */
+		reverse_sort = index->reverse_sort[i];
+		nulls_first = index->nulls_first[i];
 
 		/*
 		 * OK, try to make a canonical pathkey for this sort key.
