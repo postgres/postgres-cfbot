@@ -36,6 +36,7 @@ tests += {
       'hashagg',
       'reindex_conc',
       'vacuum',
+      'cic_reset_snapshots',
     ],
     'regress_args': ['--dlpath', meson.project_build_root() / 'src/test/regress'],
     # The injection points are cluster-wide, so disable installcheck
