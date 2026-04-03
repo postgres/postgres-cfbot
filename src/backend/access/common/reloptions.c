@@ -1522,6 +1522,15 @@ transformRelOptions(Datum oldOptions, List *defList, const char *nameSpace,
 List *
 untransformRelOptions(Datum options)
 {
+	return untransformRelOptionsExtended(options, NULL);
+}
+
+/*
+ * Same as untransformRelOptions() but includes a namespace into DefElem.
+ */
+List *
+untransformRelOptionsExtended(Datum options, char *nameSpace)
+{
 	List	   *result = NIL;
 	ArrayType  *array;
 	Datum	   *optiondatums;
@@ -1549,7 +1558,13 @@ untransformRelOptions(Datum options)
 			*p++ = '\0';
 			val = (Node *) makeString(p);
 		}
-		result = lappend(result, makeDefElem(s, val, -1));
+
+		if (nameSpace == NULL)
+			result = lappend(result, makeDefElem(s, val, -1));
+		else
+			result = lappend(result, makeDefElemExtended(nameSpace, s, val,
+														 DEFELEM_UNSPEC,
+														 -1));
 	}
 
 	return result;
