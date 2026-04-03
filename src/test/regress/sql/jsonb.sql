@@ -155,7 +155,123 @@ CREATE TEMP TABLE test_jsonb (
 INSERT INTO test_jsonb VALUES
 ('scalar','"a scalar"'),
 ('array','["zero", "one","two",null,"four","five", [1,2,3],{"f1":9}]'),
-('object','{"field1":"val1","field2":"val2","field3":null, "field4": 4, "field5": [1,2,3], "field6": {"f1":9}}');
+('object','{"field1":"val1","field2":"val2","field3":null, "field4": 4, "field5": [1,2,3], "field6": {"f1":9}, "field7": true}');
+
+-- Optimized typed extraction: the planner rewrites (j->'key')::type into a
+-- direct typed extractor call, currently for numeric, bool, int2, int4, int8,
+-- float4, float8.
+
+-- Section 1: planner rewrite verification (rewritten targets)
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json -> 'field4')::numeric FROM test_jsonb WHERE json_type = 'object';
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json -> 'field7')::bool FROM test_jsonb WHERE json_type = 'object';
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json -> 'field4')::int4 FROM test_jsonb WHERE json_type = 'object';
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json -> 'field4')::int8 FROM test_jsonb WHERE json_type = 'object';
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json -> 'field4')::float8 FROM test_jsonb WHERE json_type = 'object';
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json -> 'field4')::int2 FROM test_jsonb WHERE json_type = 'object';
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json -> 'field4')::float4 FROM test_jsonb WHERE json_type = 'object';
+
+-- Section 1b: planner rewrite verification for subscripting syntax
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json['field4'])::numeric FROM test_jsonb WHERE json_type = 'object';
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json['field7'])::bool FROM test_jsonb WHERE json_type = 'object';
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json['field4'])::int4 FROM test_jsonb WHERE json_type = 'object';
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json['field4'])::int8 FROM test_jsonb WHERE json_type = 'object';
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json['field4'])::float8 FROM test_jsonb WHERE json_type = 'object';
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json['field4'])::int2 FROM test_jsonb WHERE json_type = 'object';
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json['field4'])::float4 FROM test_jsonb WHERE json_type = 'object';
+
+-- Section 2: correct execution through the rewritten path
+SELECT (test_json -> 'field4')::numeric FROM test_jsonb WHERE json_type = 'object';
+SELECT (test_json -> 'field7')::bool FROM test_jsonb WHERE json_type = 'object';
+SELECT (test_json -> 'field4')::int4 FROM test_jsonb WHERE json_type = 'object';
+SELECT (test_json -> 'field4')::int8 FROM test_jsonb WHERE json_type = 'object';
+SELECT (test_json -> 'field4')::float8 FROM test_jsonb WHERE json_type = 'object';
+SELECT (test_json -> 'field4')::int2 FROM test_jsonb WHERE json_type = 'object';
+SELECT (test_json -> 'field4')::float4 FROM test_jsonb WHERE json_type = 'object';
+
+-- Section 2b: correct execution through subscripting syntax
+SELECT (test_json['field4'])::numeric FROM test_jsonb WHERE json_type = 'object';
+SELECT (test_json['field7'])::bool FROM test_jsonb WHERE json_type = 'object';
+SELECT (test_json['field4'])::int4 FROM test_jsonb WHERE json_type = 'object';
+SELECT (test_json['field4'])::int8 FROM test_jsonb WHERE json_type = 'object';
+SELECT (test_json['field4'])::float8 FROM test_jsonb WHERE json_type = 'object';
+SELECT (test_json['field4'])::int2 FROM test_jsonb WHERE json_type = 'object';
+SELECT (test_json['field4'])::float4 FROM test_jsonb WHERE json_type = 'object';
+
+-- Section 3: NULL semantics (missing key, JSON null, non-object input)
+SELECT (test_json -> 'field3')::numeric FROM test_jsonb WHERE json_type = 'object';  -- JSON null
+SELECT (test_json -> 'nonexistent')::numeric FROM test_jsonb WHERE json_type = 'object';  -- missing key
+SELECT (test_json -> 'x')::numeric FROM test_jsonb WHERE json_type = 'array';  -- non-object
+SELECT (test_json -> 'field3')::bool FROM test_jsonb WHERE json_type = 'object';  -- JSON null, bool path
+SELECT (test_json -> 'field3')::int4 FROM test_jsonb WHERE json_type = 'object';  -- JSON null, int4 path
+SELECT (test_json -> 'nonexistent')::int4 FROM test_jsonb WHERE json_type = 'object';  -- missing key, int4
+SELECT (test_json -> 'field3')::float8 FROM test_jsonb WHERE json_type = 'object';  -- JSON null, float8 path
+SELECT (test_json -> 'nonexistent')::float8 FROM test_jsonb WHERE json_type = 'object';  -- missing key, float8
+SELECT (test_json -> 'field3')::int2 FROM test_jsonb WHERE json_type = 'object';  -- JSON null, int2 path
+SELECT (test_json -> 'nonexistent')::int2 FROM test_jsonb WHERE json_type = 'object';  -- missing key, int2
+SELECT (test_json -> 'field3')::float4 FROM test_jsonb WHERE json_type = 'object';  -- JSON null, float4 path
+SELECT (test_json -> 'nonexistent')::float4 FROM test_jsonb WHERE json_type = 'object';  -- missing key, float4
+
+-- Section 3b: NULL semantics through subscripting syntax
+SELECT (test_json['field3'])::numeric FROM test_jsonb WHERE json_type = 'object';  -- JSON null
+SELECT (test_json['nonexistent'])::numeric FROM test_jsonb WHERE json_type = 'object';  -- missing key
+SELECT (test_json['nonexistent'])::float8 FROM test_jsonb WHERE json_type = 'object';  -- missing key, float8
+
+-- Section 4: type-mismatch errors (scalar and container types)
+SELECT (test_json -> 'field1')::numeric FROM test_jsonb WHERE json_type = 'object';  -- string to numeric
+SELECT (test_json -> 'field1')::bool FROM test_jsonb WHERE json_type = 'object';  -- string to bool
+SELECT (test_json -> 'field5')::numeric FROM test_jsonb WHERE json_type = 'object';  -- array to numeric
+SELECT (test_json -> 'field1')::int4 FROM test_jsonb WHERE json_type = 'object';  -- string to int4
+SELECT (test_json -> 'field1')::int8 FROM test_jsonb WHERE json_type = 'object';  -- string to int8
+SELECT (test_json -> 'field1')::float8 FROM test_jsonb WHERE json_type = 'object';  -- string to float8
+SELECT (test_json -> 'field5')::int4 FROM test_jsonb WHERE json_type = 'object';  -- array to int4
+SELECT (test_json -> 'field5')::float8 FROM test_jsonb WHERE json_type = 'object';  -- array to float8
+SELECT (test_json -> 'field1')::int2 FROM test_jsonb WHERE json_type = 'object';  -- string to int2
+SELECT (test_json -> 'field1')::float4 FROM test_jsonb WHERE json_type = 'object';  -- string to float4
+SELECT (test_json -> 'field5')::int2 FROM test_jsonb WHERE json_type = 'object';  -- array to int2
+SELECT (test_json -> 'field5')::float4 FROM test_jsonb WHERE json_type = 'object';  -- array to float4
+
+-- Section 4b: type-mismatch error through subscripting syntax
+SELECT (test_json['field1'])::numeric FROM test_jsonb WHERE json_type = 'object';  -- string to numeric
+SELECT (test_json['field1'])::int8 FROM test_jsonb WHERE json_type = 'object';  -- string to int8
+
+-- Section 5: direct calls to typed extractor builtins
+SELECT jsonb_object_field_numeric('{"a": 1}'::jsonb, 'a');
+SELECT jsonb_object_field_numeric('{"a": 3.14}'::jsonb, 'a');
+SELECT jsonb_object_field_bool('{"a": true}'::jsonb, 'a');
+SELECT jsonb_object_field_bool('{"a": false}'::jsonb, 'a');
+SELECT jsonb_object_field_int4('{"a": 42}'::jsonb, 'a');
+SELECT jsonb_object_field_int8('{"a": 9876543210}'::jsonb, 'a');
+SELECT jsonb_object_field_float8('{"a": 3.14}'::jsonb, 'a');
+SELECT jsonb_object_field_int2('{"a": 42}'::jsonb, 'a');
+SELECT jsonb_object_field_int2('{"a": 3}'::jsonb, 'a');
+SELECT jsonb_object_field_float4('{"a": 3.14}'::jsonb, 'a');
+SELECT jsonb_object_field_float4('{"a": 1.5}'::jsonb, 'a');
+-- direct calls: NULL semantics
+SELECT jsonb_object_field_numeric('{"a": 1}'::jsonb, 'missing');
+SELECT jsonb_object_field_numeric('{"a": null}'::jsonb, 'a');
+SELECT jsonb_object_field_bool('{"a": true}'::jsonb, 'missing');
+SELECT jsonb_object_field_int4('{"a": 1}'::jsonb, 'missing');
+SELECT jsonb_object_field_int4('{"a": null}'::jsonb, 'a');
+SELECT jsonb_object_field_float8('{"a": 1.0}'::jsonb, 'missing');
+SELECT jsonb_object_field_int2('{"a": 1}'::jsonb, 'missing');
+SELECT jsonb_object_field_int2('{"a": null}'::jsonb, 'a');
+SELECT jsonb_object_field_float4('{"a": 1.0}'::jsonb, 'missing');
+SELECT jsonb_object_field_float4('{"a": null}'::jsonb, 'a');
+-- direct calls: type-mismatch errors
+SELECT jsonb_object_field_numeric('{"a": "text"}'::jsonb, 'a');
+SELECT jsonb_object_field_bool('{"a": 1}'::jsonb, 'a');
+SELECT jsonb_object_field_numeric('{"a": {"x":1}}'::jsonb, 'a');  -- container to scalar
+SELECT jsonb_object_field_int4('{"a": "text"}'::jsonb, 'a');
+SELECT jsonb_object_field_int8('{"a": true}'::jsonb, 'a');
+SELECT jsonb_object_field_float8('{"a": [1,2]}'::jsonb, 'a');  -- container to float8
+SELECT jsonb_object_field_int2('{"a": "text"}'::jsonb, 'a');  -- string to int2
+SELECT jsonb_object_field_float4('{"a": true}'::jsonb, 'a');  -- bool to float4
+SELECT jsonb_object_field_int2('{"a": [1,2]}'::jsonb, 'a');  -- container to int2
+SELECT jsonb_object_field_float4('{"a": {"x":1}}'::jsonb, 'a');  -- container to float4
+-- direct calls: integer overflow
+SELECT jsonb_object_field_int4('{"a": 9999999999}'::jsonb, 'a');
+-- direct calls: int2 overflow
+SELECT jsonb_object_field_int2('{"a": 99999}'::jsonb, 'a');
 
 SELECT test_json -> 'x' FROM test_jsonb WHERE json_type = 'scalar';
 SELECT test_json -> 'x' FROM test_jsonb WHERE json_type = 'array';

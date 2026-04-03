@@ -17,6 +17,9 @@
 #include "funcapi.h"
 #include "libpq/pqformat.h"
 #include "miscadmin.h"
+#include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
+#include "nodes/supportnodes.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/json.h"
@@ -1813,6 +1816,155 @@ cannotCastJsonbValue(enum jbvType type, const char *sqltype, Node *escontext)
 	/* should be unreachable */
 	elog(ERROR, "unknown jsonb type: %d", (int) type);
 	return (Datum) 0;
+}
+
+/*
+ * jsonb_cast_support()
+ *
+ * Planner support function for jsonb-to-scalar cast functions, attached via
+ * prosupport on the jsonb_numeric, jsonb_bool, jsonb_int4, jsonb_int8, and
+ * jsonb_float8 catalog entries.
+ *
+ * When the sole argument to the cast is a jsonb_object_field() call (the ->
+ * operator), we replace the two-step cast(extract(...)) expression with a
+ * single typed extractor that reads the scalar directly from the in-memory
+ * JsonbValue, avoiding a round-trip through JsonbValueToJsonb.
+ *
+ * For example, (j -> 'a')::numeric is parsed as:
+ *   jsonb_numeric(jsonb_object_field(j, 'a'))
+ * and is rewritten to:
+ *   jsonb_object_field_numeric(j, 'a')
+ */
+Datum
+jsonb_cast_support(PG_FUNCTION_ARGS)
+{
+	Node	   *rawreq = (Node *) PG_GETARG_POINTER(0);
+	Node	   *ret = NULL;
+
+	if (IsA(rawreq, SupportRequestSimplify))
+	{
+		SupportRequestSimplify *req = (SupportRequestSimplify *) rawreq;
+		FuncExpr   *fexpr = req->fcall;
+		Node	   *arg;
+		Oid			inner_funcid;
+		List	   *inner_args;
+		int			location;
+		Oid			replacement_funcid;
+		Oid			replacement_rettype;
+		FuncExpr   *newfexpr;
+
+		/* The cast function must have exactly one argument */
+		if (list_length(fexpr->args) != 1)
+			PG_RETURN_POINTER(NULL);
+
+		arg = (Node *) linitial(fexpr->args);
+
+		/*
+		 * Identify the inner extraction expression.  It may appear as a
+		 * FuncExpr, an OpExpr, or a SubscriptingRef, depending on how the
+		 * expression is represented at this point.  Accept the supported
+		 * forms.
+		 */
+		if (IsA(arg, FuncExpr))
+		{
+			FuncExpr   *inner = (FuncExpr *) arg;
+
+			inner_funcid = inner->funcid;
+			inner_args = inner->args;
+			location = inner->location;
+		}
+		else if (IsA(arg, OpExpr))
+		{
+			OpExpr	   *inner = (OpExpr *) arg;
+
+			inner_funcid = inner->opfuncid;
+			inner_args = inner->args;
+			location = inner->location;
+		}
+		else if (IsA(arg, SubscriptingRef))
+		{
+			SubscriptingRef *sbsref = (SubscriptingRef *) arg;
+			Node	   *subscript;
+
+			/*
+			 * Only handle the narrow case equivalent to object-field
+			 * extraction: a single text-typed subscript on a jsonb
+			 * container, with no slice and no assignment.
+			 */
+			if (sbsref->refcontainertype != JSONBOID)
+				PG_RETURN_POINTER(NULL);
+			if (list_length(sbsref->refupperindexpr) != 1)
+				PG_RETURN_POINTER(NULL);
+			if (sbsref->reflowerindexpr != NIL)
+				PG_RETURN_POINTER(NULL);
+			if (sbsref->refassgnexpr != NULL)
+				PG_RETURN_POINTER(NULL);
+
+			subscript = (Node *) linitial(sbsref->refupperindexpr);
+			if (exprType(subscript) != TEXTOID)
+				PG_RETURN_POINTER(NULL);
+
+			inner_funcid = F_JSONB_OBJECT_FIELD;
+			inner_args = list_make2(sbsref->refexpr, subscript);
+			location = exprLocation(arg);
+		}
+		else
+			PG_RETURN_POINTER(NULL);
+
+		/* Only rewrite jsonb_object_field(jsonb, text); verify arity too */
+		if (inner_funcid != F_JSONB_OBJECT_FIELD)
+			PG_RETURN_POINTER(NULL);
+		if (list_length(inner_args) != 2)
+			PG_RETURN_POINTER(NULL);
+
+		/* Map the outer cast to the corresponding typed extractor */
+		if (fexpr->funcid == F_NUMERIC_JSONB)
+		{
+			replacement_funcid = F_JSONB_OBJECT_FIELD_NUMERIC;
+			replacement_rettype = NUMERICOID;
+		}
+		else if (fexpr->funcid == F_BOOL_JSONB)
+		{
+			replacement_funcid = F_JSONB_OBJECT_FIELD_BOOL;
+			replacement_rettype = BOOLOID;
+		}
+		else if (fexpr->funcid == F_INT4_JSONB)
+		{
+			replacement_funcid = F_JSONB_OBJECT_FIELD_INT4;
+			replacement_rettype = INT4OID;
+		}
+		else if (fexpr->funcid == F_INT8_JSONB)
+		{
+			replacement_funcid = F_JSONB_OBJECT_FIELD_INT8;
+			replacement_rettype = INT8OID;
+		}
+		else if (fexpr->funcid == F_FLOAT8_JSONB)
+		{
+			replacement_funcid = F_JSONB_OBJECT_FIELD_FLOAT8;
+			replacement_rettype = FLOAT8OID;
+		}
+		else if (fexpr->funcid == F_INT2_JSONB)
+		{
+			replacement_funcid = F_JSONB_OBJECT_FIELD_INT2;
+			replacement_rettype = INT2OID;
+		}
+		else if (fexpr->funcid == F_FLOAT4_JSONB)
+		{
+			replacement_funcid = F_JSONB_OBJECT_FIELD_FLOAT4;
+			replacement_rettype = FLOAT4OID;
+		}
+		else
+			PG_RETURN_POINTER(NULL);
+
+		/* Build the replacement function call */
+		newfexpr = makeFuncExpr(replacement_funcid, replacement_rettype,
+								inner_args, InvalidOid, InvalidOid,
+								COERCE_EXPLICIT_CALL);
+		newfexpr->location = location;
+		ret = (Node *) newfexpr;
+	}
+
+	PG_RETURN_POINTER(ret);
 }
 
 Datum
