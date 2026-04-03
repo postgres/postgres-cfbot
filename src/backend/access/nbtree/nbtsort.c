@@ -262,7 +262,7 @@ static double _bt_spools_heapscan(Relation heap, Relation index,
 static void _bt_spooldestroy(BTSpool *btspool);
 static void _bt_spool(BTSpool *btspool, const ItemPointerData *self,
 					  const Datum *values, const bool *isnull);
-static void _bt_leafbuild(BTSpool *btspool, BTSpool *btspool2);
+static void _bt_leafbuild(BTSpool *btspool, BTSpool *btspool2, bool reset_snapshots);
 static void _bt_build_callback(Relation index, ItemPointer tid, Datum *values,
 							   bool *isnull, bool tupleIsAlive, void *state);
 static BulkWriteBuffer _bt_blnewpage(BTWriteState *wstate, uint32 level);
@@ -325,18 +325,20 @@ btbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 			 RelationGetRelationName(index));
 
 	reltuples = _bt_spools_heapscan(heap, index, &buildstate, indexInfo);
+	Assert(!IndexBuildResetsSnapshots(indexInfo) || !TransactionIdIsValid(MyProc->xmin));
 
 	/*
 	 * Finish the build by (1) completing the sort of the spool file, (2)
 	 * inserting the sorted tuples into btree pages and (3) building the upper
 	 * levels.  Finally, it may also be necessary to end use of parallelism.
 	 */
-	_bt_leafbuild(buildstate.spool, buildstate.spool2);
+	_bt_leafbuild(buildstate.spool, buildstate.spool2, IndexBuildResetsSnapshots(indexInfo));
 	_bt_spooldestroy(buildstate.spool);
 	if (buildstate.spool2)
 		_bt_spooldestroy(buildstate.spool2);
 	if (buildstate.btleader)
 		_bt_end_parallel(buildstate.btleader);
+	Assert(!IndexBuildResetsSnapshots(indexInfo) || !TransactionIdIsValid(MyProc->xmin));
 
 	result = palloc_object(IndexBuildResult);
 
@@ -484,6 +486,8 @@ _bt_spools_heapscan(Relation heap, Relation index, BTBuildState *buildstate,
 	else
 		reltuples = _bt_parallel_heapscan(buildstate,
 										  &indexInfo->ii_BrokenHotChain);
+	InvalidateCatalogSnapshot();
+	Assert(!IndexBuildResetsSnapshots(indexInfo) || !TransactionIdIsValid(MyProc->xmin));
 
 	/*
 	 * Set the progress target for the next phase.  Reset the block number
@@ -539,7 +543,7 @@ _bt_spool(BTSpool *btspool, const ItemPointerData *self, const Datum *values, co
  * create an entire btree.
  */
 static void
-_bt_leafbuild(BTSpool *btspool, BTSpool *btspool2)
+_bt_leafbuild(BTSpool *btspool, BTSpool *btspool2, bool reset_snapshots)
 {
 	BTWriteState wstate;
 
@@ -561,18 +565,21 @@ _bt_leafbuild(BTSpool *btspool, BTSpool *btspool2)
 									 PROGRESS_BTREE_PHASE_PERFORMSORT_2);
 		tuplesort_performsort(btspool2->sortstate);
 	}
+	Assert(!reset_snapshots || !TransactionIdIsValid(MyProc->xmin));
 
 	wstate.heap = btspool->heap;
 	wstate.index = btspool->index;
 	wstate.inskey = _bt_mkscankey(wstate.index, NULL);
 	/* _bt_mkscankey() won't set allequalimage without metapage */
 	wstate.inskey->allequalimage = _bt_allequalimage(wstate.index, true);
+	InvalidateCatalogSnapshot();
 
 	/* reserve the metapage */
 	wstate.btws_pages_alloced = BTREE_METAPAGE + 1;
 
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE,
 								 PROGRESS_BTREE_PHASE_LEAF_LOAD);
+	Assert(!reset_snapshots || !TransactionIdIsValid(MyProc->xmin));
 	_bt_load(&wstate, btspool, btspool2);
 }
 
@@ -1411,6 +1418,7 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	WalUsage   *walusage;
 	BufferUsage *bufferusage;
 	bool		leaderparticipates = true;
+	bool		need_pop_active_snapshot = true;
 	int			querylen;
 
 #ifdef DISABLE_LEADER_PARTICIPATION
@@ -1436,9 +1444,16 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	 * live according to that.
 	 */
 	if (!isconcurrent)
+	{
+		Assert(ActiveSnapshotSet());
 		snapshot = SnapshotAny;
+		need_pop_active_snapshot = false;
+	}
 	else
+	{
 		snapshot = RegisterSnapshot(GetTransactionSnapshot());
+		PushActiveSnapshot(snapshot);
+	}
 
 	/*
 	 * Estimate size for our own PARALLEL_KEY_BTREE_SHARED workspace, and
@@ -1492,6 +1507,8 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	/* If no DSM segment was available, back out (do serial build) */
 	if (pcxt->seg == NULL)
 	{
+		if (need_pop_active_snapshot)
+			PopActiveSnapshot();
 		if (IsMVCCSnapshot(snapshot))
 			UnregisterSnapshot(snapshot);
 		DestroyParallelContext(pcxt);
@@ -1586,6 +1603,8 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	/* If no workers were successfully launched, back out (do serial build) */
 	if (pcxt->nworkers_launched == 0)
 	{
+		if (need_pop_active_snapshot)
+			PopActiveSnapshot();
 		_bt_end_parallel(btleader);
 		return;
 	}
@@ -1602,6 +1621,8 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	 * sure that the failure-to-start case will not hang forever.
 	 */
 	WaitForParallelWorkersToAttach(pcxt);
+	if (need_pop_active_snapshot)
+		PopActiveSnapshot();
 }
 
 /*

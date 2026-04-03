@@ -516,6 +516,16 @@
   options => 'compute_query_id_options',
 },
 
+{ name => 'concurrent_index_reset_snapshot_every_n_pages', type => 'int', context => 'PGC_SUSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Sets how often concurrent index builds refresh their snapshot.',
+  long_desc => 'Zero disables periodic snapshot refresh during the first heap scan of eligible CREATE INDEX CONCURRENTLY and REINDEX CONCURRENTLY builds.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'concurrent_index_reset_snapshot_every_n_pages',
+  boot_val => '4096',
+  min => '0',
+  max => 'INT_MAX',
+},
+
 { name => 'config_file', type => 'string', context => 'PGC_POSTMASTER', group => 'FILE_LOCATIONS',
   short_desc => 'Sets the server\'s main configuration file.',
   flags => 'GUC_DISALLOW_IN_FILE | GUC_SUPERUSER_ONLY',
