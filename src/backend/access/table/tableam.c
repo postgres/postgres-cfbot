@@ -132,10 +132,10 @@ table_parallelscan_estimate(Relation rel, Snapshot snapshot)
 {
 	Size		sz = 0;
 
-	if (IsMVCCSnapshot(snapshot))
+	if (snapshot != InvalidSnapshot && IsMVCCSnapshot(snapshot))
 		sz = add_size(sz, EstimateSnapshotSpace(snapshot));
 	else
-		Assert(snapshot == SnapshotAny);
+		Assert(snapshot == SnapshotAny || snapshot == InvalidSnapshot);
 
 	sz = add_size(sz, rel->rd_tableam->parallelscan_estimate(rel));
 
@@ -144,21 +144,36 @@ table_parallelscan_estimate(Relation rel, Snapshot snapshot)
 
 void
 table_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan,
-							  Snapshot snapshot)
+							  Snapshot snapshot, bool reset_snapshot)
 {
 	Size		snapshot_off = rel->rd_tableam->parallelscan_initialize(rel, pscan);
 
 	pscan->phs_snapshot_off = snapshot_off;
 
-	if (IsMVCCSnapshot(snapshot))
+	/*
+	 * Initialize parallel scan description. For normal scans with a regular
+	 * MVCC snapshot, serialize the snapshot info. For scans that use periodic
+	 * snapshot resets, mark the scan accordingly.
+	 */
+	if (reset_snapshot)
+	{
+		Assert(snapshot == InvalidSnapshot);
+		pscan->phs_snapshot_any = false;
+		pscan->phs_reset_snapshot = true;
+		INJECTION_POINT("table_parallelscan_initialize", NULL);
+	}
+	else if (IsMVCCSnapshot(snapshot))
 	{
 		SerializeSnapshot(snapshot, (char *) pscan + pscan->phs_snapshot_off);
 		pscan->phs_snapshot_any = false;
+		pscan->phs_reset_snapshot = false;
 	}
 	else
 	{
 		Assert(snapshot == SnapshotAny);
+		Assert(!reset_snapshot);
 		pscan->phs_snapshot_any = true;
+		pscan->phs_reset_snapshot = false;
 	}
 }
 
@@ -172,7 +187,19 @@ table_beginscan_parallel(Relation relation, ParallelTableScanDesc pscan,
 
 	Assert(RelFileLocatorEquals(relation->rd_locator, pscan->phs_locator));
 
-	if (!pscan->phs_snapshot_any)
+	/*
+	 * For scans that
+	 * use periodic snapshot resets, mark the scan accordingly and use the active
+	 * snapshot as the initial state.
+	 */
+	if (pscan->phs_reset_snapshot)
+	{
+		Assert(ActiveSnapshotSet());
+		internal_flags |= SO_RESET_SNAPSHOT;
+		/* Start with current active snapshot. */
+		snapshot = GetActiveSnapshot();
+	}
+	else if (!pscan->phs_snapshot_any)
 	{
 		/* Snapshot was serialized -- restore it */
 		snapshot = RestoreSnapshot((char *) pscan + pscan->phs_snapshot_off);

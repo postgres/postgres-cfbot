@@ -3,7 +3,7 @@ CREATE EXTENSION injection_points;
 SELECT injection_points_set_local();
 SELECT injection_points_attach('heap_reset_scan_snapshot_effective', 'notice');
 SELECT injection_points_attach('table_beginscan_strat_reset_snapshots', 'notice');
-
+SELECT injection_points_attach('table_parallelscan_initialize', 'notice');
 
 CREATE SCHEMA cic_reset_snap;
 CREATE TABLE cic_reset_snap.tbl(i int primary key, j int);
@@ -52,6 +52,9 @@ DROP INDEX CONCURRENTLY cic_reset_snap.idx;
 
 -- The same in parallel mode
 ALTER TABLE cic_reset_snap.tbl SET (parallel_workers=2);
+
+-- Detach to keep test stable, since parallel worker may complete scan before leader
+SELECT injection_points_detach('heap_reset_scan_snapshot_effective');
 
 CREATE UNIQUE INDEX CONCURRENTLY idx ON cic_reset_snap.tbl(i);
 REINDEX INDEX CONCURRENTLY cic_reset_snap.idx;
