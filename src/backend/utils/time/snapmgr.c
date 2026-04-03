@@ -354,14 +354,6 @@ Snapshot
 GetLatestSnapshot(void)
 {
 	/*
-	 * We might be able to relax this, but nothing that could otherwise work
-	 * needs it.
-	 */
-	if (IsInParallelMode())
-		elog(ERROR,
-			 "cannot update SecondarySnapshot during a parallel operation");
-
-	/*
 	 * So far there are no cases requiring support for GetLatestSnapshot()
 	 * during logical decoding, but it wouldn't be hard to add if required.
 	 */
