@@ -24,6 +24,7 @@
 #include "storage/read_stream.h"
 #include "utils/rel.h"
 #include "utils/snapshot.h"
+#include "utils/injection_point.h"
 
 
 #define DEFAULT_TABLE_ACCESS_METHOD	"heap"
@@ -72,6 +73,18 @@ typedef enum ScanOptions
 
 	/* collect scan instrumentation */
 	SO_SCAN_INSTRUMENT = 1 << 11,
+	/*
+	 * Reset scan and catalog snapshot every so often? If so, the
+	 * concurrent_index_reset_snapshot_every_n_pages GUC decides when the
+	 * active snapshot is popped, the catalog snapshot invalidated, and the
+	 * latest snapshot pushed as active.
+	 *
+	 * At the end of the scan snapshot is not popped.
+	 * Goal of such mode is keep xmin propagating horizon forward.
+	 *
+	 * see heap_reset_scan_snapshot for details.
+	 */
+	SO_RESET_SNAPSHOT = 1 << 12,
 }			ScanOptions;
 
 /*
@@ -85,7 +98,7 @@ typedef enum ScanOptions
 	(SO_TYPE_SEQSCAN | SO_TYPE_BITMAPSCAN | SO_TYPE_SAMPLESCAN | \
 	 SO_TYPE_TIDSCAN | SO_TYPE_TIDRANGESCAN | SO_TYPE_ANALYZE | \
 	 SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE | \
-	 SO_TEMP_SNAPSHOT)
+	 SO_TEMP_SNAPSHOT | SO_RESET_SNAPSHOT)
 
 /*
  * Result codes for table_{update,delete,lock_tuple}, and for visibility
@@ -967,7 +980,8 @@ extern TableScanDesc table_beginscan_catalog(Relation relation, int nkeys,
 static inline TableScanDesc
 table_beginscan_strat(Relation rel, Snapshot snapshot,
 					  int nkeys, ScanKeyData *key,
-					  bool allow_strat, bool allow_sync)
+					  bool allow_strat, bool allow_sync,
+					  bool reset_snapshot)
 {
 	uint32		flags = SO_TYPE_SEQSCAN | SO_ALLOW_PAGEMODE;
 
@@ -975,6 +989,15 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
 		flags |= SO_ALLOW_STRAT;
 	if (allow_sync)
 		flags |= SO_ALLOW_SYNC;
+	if (reset_snapshot)
+	{
+		INJECTION_POINT("table_beginscan_strat_reset_snapshots", NULL);
+		/* Active snapshot is required on start. */
+		Assert(GetActiveSnapshot() == snapshot);
+		/* Active snapshot should not be registered to keep xmin propagating. */
+		Assert(GetActiveSnapshot()->regd_count == 0);
+		flags |= (SO_RESET_SNAPSHOT);
+	}
 
 	return table_beginscan_common(rel, snapshot, nkeys, key, NULL,
 								  flags, SO_NONE);
@@ -1844,6 +1867,10 @@ table_scan_analyze_next_tuple(TableScanDesc scan,
  * very hard to detect whether they're really incompatible with the chain tip.
  * This only really makes sense for heap AM, it might need to be generalized
  * for other AMs later.
+ *
+ * In case of non-unique index and non-parallel concurrent build,
+ * concurrent_index_reset_snapshot_every_n_pages is applied for the scan.
+ * That leads to changing snapshots on the fly to allow xmin horizon propagate.
  */
 static inline double
 table_index_build_scan(Relation table_rel,

@@ -272,6 +272,7 @@ extern PGDLLIMPORT int work_mem;
 extern PGDLLIMPORT double hash_mem_multiplier;
 extern PGDLLIMPORT int maintenance_work_mem;
 extern PGDLLIMPORT int max_parallel_maintenance_workers;
+extern PGDLLIMPORT int concurrent_index_reset_snapshot_every_n_pages;
 
 /*
  * Upper and lower hard limits for the buffer access strategy ring size
