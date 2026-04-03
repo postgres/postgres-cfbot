@@ -63,6 +63,7 @@
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/selfuncs.h"
+#include "utils/snapmgr.h"
 
 /* GUC parameters */
 double		cursor_tuple_fraction = DEFAULT_CURSOR_TUPLE_FRACTION;
@@ -7220,6 +7221,7 @@ plan_create_index_workers(Oid tableOid, Oid indexOid)
 	Relation	heap;
 	Relation	index;
 	RelOptInfo *rel;
+	bool		need_pop_active_snapshot = false;
 	int			parallel_workers;
 	BlockNumber heap_blocks;
 	double		reltuples;
@@ -7275,6 +7277,12 @@ plan_create_index_workers(Oid tableOid, Oid indexOid)
 	heap = table_open(tableOid, NoLock);
 	index = index_open(indexOid, NoLock);
 
+	/* Set ActiveSnapshot since functions in the indexes may need it */
+	if (!ActiveSnapshotSet())
+	{
+		PushActiveSnapshot(GetTransactionSnapshot());
+		need_pop_active_snapshot = true;
+	}
 	/*
 	 * Determine if it's safe to proceed.
 	 *
@@ -7332,6 +7340,8 @@ plan_create_index_workers(Oid tableOid, Oid indexOid)
 		parallel_workers--;
 
 done:
+	if (need_pop_active_snapshot)
+		PopActiveSnapshot();
 	index_close(index, NoLock);
 	table_close(heap, NoLock);
 
