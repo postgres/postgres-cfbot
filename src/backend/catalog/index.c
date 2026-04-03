@@ -81,6 +81,7 @@
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 #include "utils/tuplesort.h"
+#include "storage/proc.h"
 
 /* Potentially set by pg_upgrade_support functions */
 Oid			binary_upgrade_next_index_pg_class_oid = InvalidOid;
@@ -1525,8 +1526,8 @@ index_concurrently_build(Oid heapRelationId,
 	Relation	indexRelation;
 	IndexInfo  *indexInfo;
 
-	/* This had better make sure that a snapshot is active */
-	Assert(ActiveSnapshotSet());
+	Assert(!TransactionIdIsValid(MyProc->xmin));
+	Assert(!TransactionIdIsValid(MyProc->xid));
 
 	/* Open and lock the parent heap relation */
 	heapRel = table_open(heapRelationId, ShareUpdateExclusiveLock);
@@ -1544,18 +1545,27 @@ index_concurrently_build(Oid heapRelationId,
 
 	indexRelation = index_open(indexRelationId, RowExclusiveLock);
 
+	/* BuildIndexInfo may require a snapshot for expressions and predicates */
+	PushActiveSnapshot(GetTransactionSnapshot());
 	/*
 	 * We have to re-build the IndexInfo struct, since it was lost in the
 	 * commit of the transaction where this concurrent index was created at
 	 * the catalog level.
 	 */
 	indexInfo = BuildIndexInfo(indexRelation);
+	/* Done with snapshot */
+	PopActiveSnapshot();
 	Assert(!indexInfo->ii_ReadyForInserts);
 	indexInfo->ii_Concurrent = true;
 	indexInfo->ii_BrokenHotChain = false;
+	InvalidateCatalogSnapshot();
+	Assert(!IndexBuildResetsSnapshots(indexInfo) || !TransactionIdIsValid(MyProc->xmin));
 
 	/* Now build the index */
 	index_build(heapRel, indexRelation, indexInfo, false, true, true);
+
+	InvalidateCatalogSnapshot();
+	Assert(!IndexBuildResetsSnapshots(indexInfo) || !TransactionIdIsValid(MyProc->xmin));
 
 	/* Roll back any GUC changes executed by index functions */
 	AtEOXact_GUC(false, save_nestlevel);
@@ -1568,11 +1578,18 @@ index_concurrently_build(Oid heapRelationId,
 	index_close(indexRelation, NoLock);
 
 	/*
+	 * Updating pg_index might involve TOAST table access, so ensure we
+	 * have a valid snapshot.
+	 */
+	PushActiveSnapshot(GetTransactionSnapshot());
+	/*
 	 * Update the pg_index row to mark the index as ready for inserts. Once we
 	 * commit this transaction, any new transactions that open the table must
 	 * insert new entries into the index for insertions and non-HOT updates.
 	 */
 	index_set_state_flags(indexRelationId, INDEX_CREATE_SET_READY);
+	/* we can do away with our snapshot */
+	PopActiveSnapshot();
 }
 
 /*
@@ -3285,7 +3302,8 @@ IndexCheckExclusion(Relation heapRelation,
 								 0, /* number of keys */
 								 NULL,	/* scan key */
 								 true,	/* buffer access strategy OK */
-								 true); /* syncscan OK */
+								 true, /* syncscan OK */
+								 false);
 
 	while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
 	{
@@ -3348,11 +3366,15 @@ IndexCheckExclusion(Relation heapRelation,
  * as of the start of the scan (see table_index_build_scan), whereas a normal
  * build takes care to include recently-dead tuples.  This is OK because
  * we won't mark the index valid until all transactions that might be able
- * to see those tuples are gone.  The reason for doing that is to avoid
+ * to see those tuples are gone.  One of reasons for doing that is to avoid
  * bogus unique-index failures due to concurrent UPDATEs (we might see
  * different versions of the same row as being valid when we pass over them,
  * if we used HeapTupleSatisfiesVacuum).  This leaves us with an index that
  * does not contain any tuples added to the table while we built the index.
+ *
+ * Furthermore, in case of non-unique index we set SO_RESET_SNAPSHOT for the
+ * scan, which causes new snapshot to be set as active every so often. The reason
+ * for that is to propagate the xmin horizon forward.
  *
  * Next, we mark the index "indisready" (but still not "indisvalid") and
  * commit the second transaction and start a third.  Again we wait for all
