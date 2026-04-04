@@ -272,6 +272,10 @@ CreateNewPortal(void)
  * the passed plan trees have adequate lifetime.  Typically this is done by
  * copying them into the portal's context.
  *
+ * If plansource is provided, it is the CachedPlanSource that produced
+ * cplan.  PortalLockCachedPlan() uses it to fetch a fresh plan if the
+ * current one is invalidated during execution lock acquisition.
+ *
  * The caller is also responsible for ensuring that the passed prepStmtName
  * (if not NULL) and sourceText have adequate lifetime.
  *
@@ -286,6 +290,7 @@ PortalDefineQuery(Portal portal,
 				  const char *sourceText,
 				  CommandTag commandTag,
 				  List *stmts,
+				  CachedPlanSource *plansource,
 				  CachedPlan *cplan)
 {
 	Assert(PortalIsValid(portal));
@@ -299,6 +304,7 @@ PortalDefineQuery(Portal portal,
 	portal->commandTag = commandTag;
 	SetQueryCompletion(&portal->qc, commandTag, 0);
 	portal->stmts = stmts;
+	portal->plansource = plansource;
 	portal->cplan = cplan;
 	portal->status = PORTAL_DEFINED;
 }
@@ -517,6 +523,7 @@ PortalDrop(Portal portal, bool isTopCommit)
 
 	/* drop cached plan reference, if any */
 	PortalReleaseCachedPlan(portal);
+	portal->plansource = NULL;
 
 	/*
 	 * If portal has a snapshot protecting its data, release that.  This needs
