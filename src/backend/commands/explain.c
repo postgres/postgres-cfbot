@@ -377,7 +377,8 @@ standard_ExplainOneQuery(Query *query, int cursorOptions,
 	/* run it (if needed) and produce output */
 	ExplainOnePlan(plan, into, es, queryString, params, queryEnv,
 				   &planduration, (es->buffers ? &bufusage : NULL),
-				   es->memory ? &mem_counters : NULL);
+				   es->memory ? &mem_counters : NULL,
+				   NULL);
 }
 
 /*
@@ -501,7 +502,8 @@ ExplainOnePlan(PlannedStmt *plannedstmt, IntoClause *into, ExplainState *es,
 			   const char *queryString, ParamListInfo params,
 			   QueryEnvironment *queryEnv, const instr_time *planduration,
 			   const BufferUsage *bufusage,
-			   const MemoryContextCounters *mem_counters)
+			   const MemoryContextCounters *mem_counters,
+			   QueryDesc *prep_qd)
 {
 	DestReceiver *dest;
 	QueryDesc  *queryDesc;
@@ -533,13 +535,6 @@ ExplainOnePlan(PlannedStmt *plannedstmt, IntoClause *into, ExplainState *es,
 	INSTR_TIME_SET_CURRENT(starttime);
 
 	/*
-	 * Use a snapshot with an updated command ID to ensure this query sees
-	 * results of any previously executed queries.
-	 */
-	PushCopiedSnapshot(GetActiveSnapshot());
-	UpdateActiveSnapshotCommandId();
-
-	/*
 	 * We discard the output if we have no use for it.  If we're explaining
 	 * CREATE TABLE AS, we'd better use the appropriate tuple receiver, while
 	 * the SERIALIZE option requires its own tuple receiver.  (If you specify
@@ -554,10 +549,34 @@ ExplainOnePlan(PlannedStmt *plannedstmt, IntoClause *into, ExplainState *es,
 	else
 		dest = None_Receiver;
 
-	/* Create a QueryDesc for the query */
-	queryDesc = CreateQueryDesc(plannedstmt, queryString,
-								GetActiveSnapshot(), InvalidSnapshot,
-								dest, params, queryEnv, instrument_option);
+	/*
+	 * Create a QueryDesc for the query, or use the one provided by the
+	 * caller.  When reusing a prep QueryDesc, its snapshot was set at
+	 * creation time; we push it as active for ExecutorStart and override the
+	 * destination and instrument options, which were not known when the
+	 * caller created it.
+	 */
+	if (prep_qd)
+	{
+		PushActiveSnapshot(GetActiveSnapshot());
+		queryDesc = prep_qd;
+		Assert(queryDesc->dest == None_Receiver);
+		queryDesc->dest = dest;
+		queryDesc->instrument_options = instrument_option;
+	}
+	else
+	{
+		/*
+		 * Use a snapshot with an updated command ID to ensure this query sees
+		 * results of any previously executed queries.
+		 */
+		PushCopiedSnapshot(GetActiveSnapshot());
+		UpdateActiveSnapshotCommandId();
+		queryDesc = CreateQueryDesc(plannedstmt, queryString,
+									GetActiveSnapshot(), InvalidSnapshot,
+									dest, params, queryEnv,
+									instrument_option);
+	}
 
 	/* Select execution options */
 	if (es->analyze)
