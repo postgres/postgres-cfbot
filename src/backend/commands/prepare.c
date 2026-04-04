@@ -207,6 +207,7 @@ ExecuteQuery(ParseState *pstate,
 					  query_string,
 					  entry->plansource->commandTag,
 					  plan_list,
+					  entry->plansource,
 					  cplan);
 
 	/*
@@ -632,8 +633,17 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 	}
 
 	/* Replan if needed, and acquire a transient refcount */
-	cplan = GetCachedPlan(entry->plansource, paramLI,
-						  CurrentResourceOwner, pstate->p_queryEnv);
+	for (;;)
+	{
+		cplan = GetCachedPlan(entry->plansource, paramLI,
+							  CurrentResourceOwner,
+							  pstate->p_queryEnv);
+		plan_list = cplan->stmt_list;
+
+		if (AcquireExecutorLocks(cplan))
+			break;
+		ReleaseCachedPlan(cplan, CurrentResourceOwner);
+	}
 
 	INSTR_TIME_SET_CURRENT(planduration);
 	INSTR_TIME_SUBTRACT(planduration, planstart);

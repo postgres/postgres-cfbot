@@ -1684,6 +1684,7 @@ SPI_cursor_open_internal(const char *name, SPIPlanPtr plan,
 					  query_string,
 					  plansource->commandTag,
 					  stmt_list,
+					  plansource,
 					  cplan);
 
 	/*
@@ -2103,6 +2104,16 @@ SPI_plan_get_cached_plan(SPIPlanPtr plan)
 						  plan->saved ? CurrentResourceOwner : NULL,
 						  _SPI_current->queryEnv);
 	Assert(cplan == plansource->gplan);
+
+	if (!AcquireExecutorLocks(cplan))
+	{
+		/* Plan invalidated during locking; get a fresh one. */
+		ReleaseCachedPlan(cplan,
+						  plan->saved ? CurrentResourceOwner : NULL);
+		cplan = GetCachedPlan(plansource, NULL,
+							  plan->saved ? CurrentResourceOwner : NULL,
+							  _SPI_current->queryEnv);
+	}
 
 	/* Pop the error context stack */
 	error_context_stack = spierrcontext.previous;
@@ -2572,9 +2583,14 @@ _SPI_execute_plan(SPIPlanPtr plan, const SPIExecuteOptions *options,
 		 * Replan if needed, and increment plan refcount.  If it's a saved
 		 * plan, the refcount must be backed by the plan_owner.
 		 */
-		cplan = GetCachedPlan(plansource, options->params,
-							  plan_owner, _SPI_current->queryEnv);
-
+		for (;;)
+		{
+			cplan = GetCachedPlan(plansource, options->params,
+								  plan_owner, _SPI_current->queryEnv);
+			if (AcquireExecutorLocks(cplan))
+				break;
+			ReleaseCachedPlan(cplan, plan_owner);
+		}
 		stmt_list = cplan->stmt_list;
 
 		/*
