@@ -120,6 +120,16 @@ typedef struct PlannedStmt
 	/* RT indexes of relations targeted by INSERT/UPDATE/DELETE/MERGE */
 	Bitmapset  *resultRelationRelids;
 
+	/*
+	 * rtable indexes of first target relation in each ModifyTable node in the
+	 * plan for INSERT/UPDATE/DELETE/MERGE.  NIL if resultRelations is NIL.
+	 *
+	 * These are used by AcquireExecutorLocksPrepared() to ensure that the
+	 * first result rel for each ModifyTable remains locked even if pruned;
+	 * see ExecInitModifyTable() for the executor side assumptions.
+	 */
+	List	   *firstResultRels;
+
 	/* list of AppendRelInfo nodes */
 	List	   *appendRelations;
 
