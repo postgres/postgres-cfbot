@@ -137,6 +137,8 @@ typedef struct PortalData
 	CommandTag	commandTag;		/* command tag for original query */
 	QueryCompletion qc;			/* command completion data for executed query */
 	List	   *stmts;			/* list of PlannedStmts */
+	CachedPlanSource *plansource;	/* CachedPlanSource, for replanning on
+									 * invalidation */
 	CachedPlan *cplan;			/* CachedPlan, if stmts are from one */
 
 	ParamListInfo portalParams; /* params to pass to query */
@@ -240,6 +242,7 @@ extern void PortalDefineQuery(Portal portal,
 							  const char *sourceText,
 							  CommandTag commandTag,
 							  List *stmts,
+							  CachedPlanSource *plansource,
 							  CachedPlan *cplan);
 extern PlannedStmt *PortalGetPrimaryStmt(Portal portal);
 extern void PortalCreateHoldStore(Portal portal);
