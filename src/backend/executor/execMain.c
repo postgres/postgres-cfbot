@@ -334,6 +334,124 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 }
 
 /*
+ * LockRangeTableRelids
+ * 		Acquire or release locks on the specified relids, which reference
+ * 		entries in the provided range table.
+ *
+ * Helper for AcquireExecutorLocksPrepared().
+ */
+static void
+LockRangeTableRelids(List *rtable, Bitmapset *relids, bool acquire)
+{
+	int			rtindex = -1;
+
+	while ((rtindex = bms_next_member(relids, rtindex)) >= 0)
+	{
+		RangeTblEntry *rte = list_nth_node(RangeTblEntry, rtable, rtindex - 1);
+
+		Assert(rte->rtekind == RTE_RELATION ||
+			   (rte->rtekind == RTE_SUBQUERY && OidIsValid(rte->relid)));
+
+		/*
+		 * Acquire the appropriate type of lock on each relation OID. Note
+		 * that we don't actually try to open the rel, and hence will not fail
+		 * if it's been dropped entirely --- we'll just transiently acquire a
+		 * non-conflicting lock.
+		 */
+		if (acquire)
+			LockRelationOid(rte->relid, rte->rellockmode);
+		else
+			UnlockRelationOid(rte->relid, rte->rellockmode);
+	}
+}
+
+/*
+ * AcquireExecutorLocksPrepared
+ *
+ * Acquire or release execution locks using pruning results already computed
+ * by ExecutorPrep() and stored in queryDesc->estate.
+ *
+ * This is intended for single-statement reused generic-plan paths that
+ * choose pruning-aware locking instead of the conservative
+ * AcquireExecutorLocks() path.
+ */
+static void
+AcquireExecutorLocksPrepared(QueryDesc *queryDesc, bool acquire)
+{
+	PlannedStmt *plannedstmt = queryDesc->plannedstmt;
+	EState	   *estate = queryDesc->estate;
+	Bitmapset  *lock_relids;
+	ListCell   *lc;
+
+	Assert(queryDesc != NULL);
+	Assert(estate != NULL);
+	Assert(plannedstmt != NULL);
+	Assert(plannedstmt->commandType != CMD_UTILITY);
+
+	lock_relids = bms_difference(estate->es_unpruned_relids,
+								 plannedstmt->unprunableRelids);
+
+	/*
+	 * Keep the first result relation of each ModifyTable locked even if
+	 * pruning removed all target partitions.  ExecInitModifyTable() relies on
+	 * one such relation remaining available.
+	 */
+	foreach(lc, plannedstmt->firstResultRels)
+	{
+		Index		rti = lfirst_int(lc);
+
+		lock_relids = bms_add_member(lock_relids, rti);
+	}
+
+	LockRangeTableRelids(plannedstmt->rtable, lock_relids, acquire);
+
+	bms_free(lock_relids);
+
+}
+
+/*
+ * ExecutorPrepAndLock
+ *		Perform pruning-aware locking for a single PlannedStmt.
+ *
+ * Locks unprunable relations first, then runs ExecutorPrep() to
+ * determine which partitions survive initial pruning, then locks
+ * only those survivors.  Checks *is_valid after each locking step
+ * to detect plan invalidation (e.g., from concurrent DDL or DDL
+ * triggered by a pruning expression).
+ *
+ * Returns true if the plan is still valid and all needed locks are
+ * held.  Returns false if the plan was invalidated at any point, in
+ * which case all acquired locks have been released and the caller
+ * should discard the QueryDesc and retry with a fresh plan.
+ */
+bool
+ExecutorPrepAndLock(QueryDesc *queryDesc, ResourceOwner owner,
+					int eflags, bool *is_valid)
+{
+	PlannedStmt *pstmt = queryDesc->plannedstmt;
+
+	/* Lock unprunable rels before pruning can access them. */
+	LockRangeTableRelids(pstmt->rtable, pstmt->unprunableRelids, true);
+	if (!*is_valid)
+	{
+		LockRangeTableRelids(pstmt->rtable, pstmt->unprunableRelids, false);
+		return false;
+	}
+
+	/* Run pruning and lock survivors. */
+	ExecutorPrep(queryDesc, owner, eflags);
+	AcquireExecutorLocksPrepared(queryDesc, true);
+	if (!*is_valid)
+	{
+		AcquireExecutorLocksPrepared(queryDesc, false);
+		LockRangeTableRelids(pstmt->rtable, pstmt->unprunableRelids, false);
+		return false;
+	}
+
+	return true;
+}
+
+/*
  * ExecutorPrep
  *
  * Build the initial executor state for queryDesc before ExecutorStart().
@@ -389,6 +507,30 @@ ExecutorPrep(QueryDesc *queryDesc, ResourceOwner owner, int eflags)
 	ExecDoInitialPruning(estate);
 
 	CurrentResourceOwner = oldowner;
+}
+
+/*
+ * ExecutorPrepCleanup
+ *		Clean up an EState that was created by ExecutorPrep() but never
+ *		passed to ExecutorStart().  This happens when the plan is
+ *		invalidated between prep and execution, and the caller must
+ *		discard the prepped state before retrying with a fresh plan.
+ *
+ * Unlike ExecutorEnd(), this does not expect a fully initialized
+ * plan state tree -- only the range table relations and the
+ * EState itself need to be freed.
+ */
+void
+ExecutorPrepCleanup(QueryDesc *queryDesc)
+{
+	EState	   *estate = queryDesc->estate;
+
+	if (estate == NULL)
+		return;
+
+	ExecCloseRangeTableRelations(estate);
+	FreeExecutorState(estate);
+	queryDesc->estate = NULL;
 }
 
 /* ----------------------------------------------------------------

@@ -1987,6 +1987,22 @@ AcquireExecutorLocks(CachedPlan *cplan)
 }
 
 /*
+ * CachedPlanCanPrep
+ *		Check whether a cached plan is eligible for pruning-aware locking
+ *		via ExecutorPrepAndLock().
+ *
+ * Only single-statement reused generic plans with a non-utility command
+ * qualify.
+ */
+bool
+CachedPlanCanPrep(CachedPlan *cplan, CachedPlanSource *plansource)
+{
+	return (cplan == plansource->gplan &&
+			list_length(cplan->stmt_list) == 1 &&
+			linitial_node(PlannedStmt, cplan->stmt_list)->commandType != CMD_UTILITY);
+}
+
+/*
  * AcquirePlannerLocks: acquire locks needed for planning of a querytree list;
  * or release them if acquire is false.
  *
