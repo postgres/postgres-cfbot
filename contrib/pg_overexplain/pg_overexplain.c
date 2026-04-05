@@ -234,18 +234,18 @@ overexplain_per_node_hook(PlanState *planstate, List *ancestors,
 				break;
 			case T_Append:
 				overexplain_bitmapset("Append RTIs",
-									  ((Append *) plan)->apprelids,
+									  ((Append *) plan)->ab.apprelids,
 									  es);
 				overexplain_bitmapset_list("Child Append RTIs",
-										   ((Append *) plan)->child_append_relid_sets,
+										   ((Append *) plan)->ab.child_append_relid_sets,
 										   es);
 				break;
 			case T_MergeAppend:
 				overexplain_bitmapset("Append RTIs",
-									  ((MergeAppend *) plan)->apprelids,
+									  ((MergeAppend *) plan)->ab.apprelids,
 									  es);
 				overexplain_bitmapset_list("Child Append RTIs",
-										   ((MergeAppend *) plan)->child_append_relid_sets,
+										   ((MergeAppend *) plan)->ab.child_append_relid_sets,
 										   es);
 				break;
 			case T_Result:

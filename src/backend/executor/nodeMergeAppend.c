@@ -80,12 +80,12 @@ ExecInitMergeAppend(MergeAppend *node, EState *estate, int eflags)
 	/*
 	 * create new MergeAppendState for our node
 	 */
-	mergestate->ps.plan = (Plan *) node;
-	mergestate->ps.state = estate;
-	mergestate->ps.ExecProcNode = ExecMergeAppend;
+	mergestate->as.ps.plan = (Plan *) node;
+	mergestate->as.ps.state = estate;
+	mergestate->as.ps.ExecProcNode = ExecMergeAppend;
 
 	/* If run-time partition pruning is enabled, then set that up now */
-	if (node->part_prune_index >= 0)
+	if (node->ab.part_prune_index >= 0)
 	{
 		PartitionPruneState *prunestate;
 
@@ -94,12 +94,12 @@ ExecInitMergeAppend(MergeAppend *node, EState *estate, int eflags)
 		 * subplans to initialize (validsubplans) by taking into account the
 		 * result of performing initial pruning if any.
 		 */
-		prunestate = ExecInitPartitionExecPruning(&mergestate->ps,
-												  list_length(node->mergeplans),
-												  node->part_prune_index,
-												  node->apprelids,
+		prunestate = ExecInitPartitionExecPruning(&mergestate->as.ps,
+												  list_length(node->ab.subplans),
+												  node->ab.part_prune_index,
+												  node->ab.apprelids,
 												  &validsubplans);
-		mergestate->ms_prune_state = prunestate;
+		mergestate->as.prune_state = prunestate;
 		nplans = bms_num_members(validsubplans);
 
 		/*
@@ -108,25 +108,25 @@ ExecInitMergeAppend(MergeAppend *node, EState *estate, int eflags)
 		 * later calls to ExecFindMatchingSubPlans.
 		 */
 		if (!prunestate->do_exec_prune && nplans > 0)
-			mergestate->ms_valid_subplans = bms_add_range(NULL, 0, nplans - 1);
+			mergestate->as.valid_subplans = bms_add_range(NULL, 0, nplans - 1);
 	}
 	else
 	{
-		nplans = list_length(node->mergeplans);
+		nplans = list_length(node->ab.subplans);
 
 		/*
 		 * When run-time partition pruning is not enabled we can just mark all
 		 * subplans as valid; they must also all be initialized.
 		 */
 		Assert(nplans > 0);
-		mergestate->ms_valid_subplans = validsubplans =
+		mergestate->as.valid_subplans = validsubplans =
 			bms_add_range(NULL, 0, nplans - 1);
-		mergestate->ms_prune_state = NULL;
+		mergestate->as.prune_state = NULL;
 	}
 
 	mergeplanstates = palloc_array(PlanState *, nplans);
-	mergestate->mergeplans = mergeplanstates;
-	mergestate->ms_nplans = nplans;
+	mergestate->as.plans = mergeplanstates;
+	mergestate->as.nplans = nplans;
 
 	mergestate->ms_slots = palloc0_array(TupleTableSlot *, nplans);
 	mergestate->ms_heap = binaryheap_allocate(nplans, heap_compare_slots,
@@ -140,7 +140,7 @@ ExecInitMergeAppend(MergeAppend *node, EState *estate, int eflags)
 	i = -1;
 	while ((i = bms_next_member(validsubplans, i)) >= 0)
 	{
-		Plan	   *initNode = (Plan *) list_nth(node->mergeplans, i);
+		Plan	   *initNode = (Plan *) list_nth(node->ab.subplans, i);
 
 		mergeplanstates[j++] = ExecInitNode(initNode, estate, eflags);
 	}
@@ -157,20 +157,20 @@ ExecInitMergeAppend(MergeAppend *node, EState *estate, int eflags)
 	mergeops = ExecGetCommonSlotOps(mergeplanstates, j);
 	if (mergeops != NULL)
 	{
-		ExecInitResultTupleSlotTL(&mergestate->ps, mergeops);
+		ExecInitResultTupleSlotTL(&mergestate->as.ps, mergeops);
 	}
 	else
 	{
-		ExecInitResultTupleSlotTL(&mergestate->ps, &TTSOpsVirtual);
+		ExecInitResultTupleSlotTL(&mergestate->as.ps, &TTSOpsVirtual);
 		/* show that the output slot type is not fixed */
-		mergestate->ps.resultopsset = true;
-		mergestate->ps.resultopsfixed = false;
+		mergestate->as.ps.resultopsset = true;
+		mergestate->as.ps.resultopsfixed = false;
 	}
 
 	/*
 	 * Miscellaneous initialization
 	 */
-	mergestate->ps.ps_ProjInfo = NULL;
+	mergestate->as.ps.ps_ProjInfo = NULL;
 
 	/*
 	 * initialize sort-key information
@@ -225,26 +225,26 @@ ExecMergeAppend(PlanState *pstate)
 	if (!node->ms_initialized)
 	{
 		/* Nothing to do if all subplans were pruned */
-		if (node->ms_nplans == 0)
-			return ExecClearTuple(node->ps.ps_ResultTupleSlot);
+		if (node->as.nplans == 0)
+			return ExecClearTuple(node->as.ps.ps_ResultTupleSlot);
 
 		/*
 		 * If we've yet to determine the valid subplans then do so now.  If
 		 * run-time pruning is disabled then the valid subplans will always be
 		 * set to all subplans.
 		 */
-		if (node->ms_valid_subplans == NULL)
-			node->ms_valid_subplans =
-				ExecFindMatchingSubPlans(node->ms_prune_state, false, NULL);
+		if (node->as.valid_subplans == NULL)
+			node->as.valid_subplans =
+				ExecFindMatchingSubPlans(node->as.prune_state, false, NULL);
 
 		/*
 		 * First time through: pull the first tuple from each valid subplan,
 		 * and set up the heap.
 		 */
 		i = -1;
-		while ((i = bms_next_member(node->ms_valid_subplans, i)) >= 0)
+		while ((i = bms_next_member(node->as.valid_subplans, i)) >= 0)
 		{
-			node->ms_slots[i] = ExecProcNode(node->mergeplans[i]);
+			node->ms_slots[i] = ExecProcNode(node->as.plans[i]);
 			if (!TupIsNull(node->ms_slots[i]))
 				binaryheap_add_unordered(node->ms_heap, Int32GetDatum(i));
 		}
@@ -262,7 +262,7 @@ ExecMergeAppend(PlanState *pstate)
 		 * to not pull tuples until necessary.)
 		 */
 		i = DatumGetInt32(binaryheap_first(node->ms_heap));
-		node->ms_slots[i] = ExecProcNode(node->mergeplans[i]);
+		node->ms_slots[i] = ExecProcNode(node->as.plans[i]);
 		if (!TupIsNull(node->ms_slots[i]))
 			binaryheap_replace_first(node->ms_heap, Int32GetDatum(i));
 		else
@@ -272,7 +272,7 @@ ExecMergeAppend(PlanState *pstate)
 	if (binaryheap_empty(node->ms_heap))
 	{
 		/* All the subplans are exhausted, and so is the heap */
-		result = ExecClearTuple(node->ps.ps_ResultTupleSlot);
+		result = ExecClearTuple(node->as.ps.ps_ResultTupleSlot);
 	}
 	else
 	{
@@ -343,8 +343,8 @@ ExecEndMergeAppend(MergeAppendState *node)
 	/*
 	 * get information from the node
 	 */
-	mergeplans = node->mergeplans;
-	nplans = node->ms_nplans;
+	mergeplans = node->as.plans;
+	nplans = node->as.nplans;
 
 	/*
 	 * shut down each of the subscans
@@ -363,24 +363,24 @@ ExecReScanMergeAppend(MergeAppendState *node)
 	 * we'd better unset the valid subplans so that they are reselected for
 	 * the new parameter values.
 	 */
-	if (node->ms_prune_state &&
-		bms_overlap(node->ps.chgParam,
-					node->ms_prune_state->execparamids))
+	if (node->as.prune_state &&
+		bms_overlap(node->as.ps.chgParam,
+					node->as.prune_state->execparamids))
 	{
-		bms_free(node->ms_valid_subplans);
-		node->ms_valid_subplans = NULL;
+		bms_free(node->as.valid_subplans);
+		node->as.valid_subplans = NULL;
 	}
 
-	for (i = 0; i < node->ms_nplans; i++)
+	for (i = 0; i < node->as.nplans; i++)
 	{
-		PlanState  *subnode = node->mergeplans[i];
+		PlanState  *subnode = node->as.plans[i];
 
 		/*
 		 * ExecReScan doesn't know about my subplans, so I have to do
 		 * changed-parameter signaling myself.
 		 */
-		if (node->ps.chgParam != NULL)
-			UpdateChangedParamSet(subnode, node->ps.chgParam);
+		if (node->as.ps.chgParam != NULL)
+			UpdateChangedParamSet(subnode, node->as.ps.chgParam);
 
 		/*
 		 * If chgParam of subnode is not null then plan will be re-scanned by
