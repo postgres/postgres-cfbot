@@ -1253,12 +1253,12 @@ create_append_plan(PlannerInfo *root, AppendPath *best_path, int flags)
 	 * child plans, to make cross-checking the sort info easier.
 	 */
 	plan = makeNode(Append);
-	plan->plan.targetlist = tlist;
-	plan->plan.qual = NIL;
-	plan->plan.lefttree = NULL;
-	plan->plan.righttree = NULL;
-	plan->apprelids = rel->relids;
-	plan->child_append_relid_sets = best_path->child_append_relid_sets;
+	plan->ab.plan.targetlist = tlist;
+	plan->ab.plan.qual = NIL;
+	plan->ab.plan.lefttree = NULL;
+	plan->ab.plan.righttree = NULL;
+	plan->ab.apprelids = rel->relids;
+	plan->ab.child_append_relid_sets = best_path->child_append_relid_sets;
 
 	if (pathkeys != NIL)
 	{
@@ -1277,7 +1277,7 @@ create_append_plan(PlannerInfo *root, AppendPath *best_path, int flags)
 										  &nodeSortOperators,
 										  &nodeCollations,
 										  &nodeNullsFirst);
-		tlist_was_changed = (orig_tlist_length != list_length(plan->plan.targetlist));
+		tlist_was_changed = (orig_tlist_length != list_length(plan->ab.plan.targetlist));
 	}
 
 	/* If appropriate, consider async append */
@@ -1387,7 +1387,7 @@ create_append_plan(PlannerInfo *root, AppendPath *best_path, int flags)
 	}
 
 	/* Set below if we find quals that we can use to run-time prune */
-	plan->part_prune_index = -1;
+	plan->ab.part_prune_index = -1;
 
 	/*
 	 * If any quals exist, they may be useful to perform further partition
@@ -1412,16 +1412,16 @@ create_append_plan(PlannerInfo *root, AppendPath *best_path, int flags)
 		}
 
 		if (prunequal != NIL)
-			plan->part_prune_index = make_partition_pruneinfo(root, rel,
-															  best_path->subpaths,
-															  prunequal);
+			plan->ab.part_prune_index = make_partition_pruneinfo(root, rel,
+																 best_path->subpaths,
+																 prunequal);
 	}
 
-	plan->appendplans = subplans;
+	plan->ab.subplans = subplans;
 	plan->nasyncplans = nasyncplans;
 	plan->first_partial_plan = best_path->first_partial_path;
 
-	copy_generic_path_info(&plan->plan, (Path *) best_path);
+	copy_generic_path_info(&plan->ab.plan, (Path *) best_path);
 
 	/*
 	 * If prepare_sort_from_pathkeys added sort columns, but we were told to
@@ -1430,9 +1430,9 @@ create_append_plan(PlannerInfo *root, AppendPath *best_path, int flags)
 	 */
 	if (tlist_was_changed && (flags & (CP_EXACT_TLIST | CP_SMALL_TLIST)))
 	{
-		tlist = list_copy_head(plan->plan.targetlist, orig_tlist_length);
+		tlist = list_copy_head(plan->ab.plan.targetlist, orig_tlist_length);
 		return inject_projection_plan((Plan *) plan, tlist,
-									  plan->plan.parallel_safe);
+									  plan->ab.plan.parallel_safe);
 	}
 	else
 		return (Plan *) plan;
@@ -1450,7 +1450,7 @@ create_merge_append_plan(PlannerInfo *root, MergeAppendPath *best_path,
 						 int flags)
 {
 	MergeAppend *node = makeNode(MergeAppend);
-	Plan	   *plan = &node->plan;
+	Plan	   *plan = &node->ab.plan;
 	List	   *tlist = build_path_tlist(root, &best_path->path);
 	int			orig_tlist_length = list_length(tlist);
 	bool		tlist_was_changed;
@@ -1470,8 +1470,8 @@ create_merge_append_plan(PlannerInfo *root, MergeAppendPath *best_path,
 	plan->qual = NIL;
 	plan->lefttree = NULL;
 	plan->righttree = NULL;
-	node->apprelids = rel->relids;
-	node->child_append_relid_sets = best_path->child_append_relid_sets;
+	node->ab.apprelids = rel->relids;
+	node->ab.child_append_relid_sets = best_path->child_append_relid_sets;
 
 	/*
 	 * Compute sort column info, and adjust MergeAppend's tlist as needed.
@@ -1577,7 +1577,7 @@ create_merge_append_plan(PlannerInfo *root, MergeAppendPath *best_path,
 	}
 
 	/* Set below if we find quals that we can use to run-time prune */
-	node->part_prune_index = -1;
+	node->ab.part_prune_index = -1;
 
 	/*
 	 * If any quals exist, they may be useful to perform further partition
@@ -1594,12 +1594,12 @@ create_merge_append_plan(PlannerInfo *root, MergeAppendPath *best_path,
 		Assert(best_path->path.param_info == NULL);
 
 		if (prunequal != NIL)
-			node->part_prune_index = make_partition_pruneinfo(root, rel,
-															  best_path->subpaths,
-															  prunequal);
+			node->ab.part_prune_index = make_partition_pruneinfo(root, rel,
+																 best_path->subpaths,
+																 prunequal);
 	}
 
-	node->mergeplans = subplans;
+	node->ab.subplans = subplans;
 
 	/*
 	 * If prepare_sort_from_pathkeys added sort columns, but we were told to

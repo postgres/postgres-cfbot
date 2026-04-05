@@ -5165,9 +5165,9 @@ set_deparse_plan(deparse_namespace *dpns, Plan *plan)
 	 * natural choice.
 	 */
 	if (IsA(plan, Append))
-		dpns->outer_plan = linitial(((Append *) plan)->appendplans);
+		dpns->outer_plan = linitial(((Append *) plan)->ab.subplans);
 	else if (IsA(plan, MergeAppend))
-		dpns->outer_plan = linitial(((MergeAppend *) plan)->mergeplans);
+		dpns->outer_plan = linitial(((MergeAppend *) plan)->ab.subplans);
 	else
 		dpns->outer_plan = outerPlan(plan);
 
@@ -7976,10 +7976,10 @@ resolve_special_varno(Node *node, deparse_context *context,
 
 		if (IsA(dpns->plan, Append))
 			context->appendparents = bms_union(context->appendparents,
-											   ((Append *) dpns->plan)->apprelids);
+											   ((Append *) dpns->plan)->ab.apprelids);
 		else if (IsA(dpns->plan, MergeAppend))
 			context->appendparents = bms_union(context->appendparents,
-											   ((MergeAppend *) dpns->plan)->apprelids);
+											   ((MergeAppend *) dpns->plan)->ab.apprelids);
 
 		push_child_plan(dpns, dpns->outer_plan, &save_dpns);
 		resolve_special_varno((Node *) tle->expr, context,

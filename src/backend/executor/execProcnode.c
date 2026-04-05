@@ -891,8 +891,8 @@ ExecSetTupleBound(int64 tuples_needed, PlanState *child_node)
 		AppendState *aState = (AppendState *) child_node;
 		int			i;
 
-		for (i = 0; i < aState->as_nplans; i++)
-			ExecSetTupleBound(tuples_needed, aState->appendplans[i]);
+		for (i = 0; i < aState->as.nplans; i++)
+			ExecSetTupleBound(tuples_needed, aState->as.plans[i]);
 	}
 	else if (IsA(child_node, MergeAppendState))
 	{
@@ -904,8 +904,8 @@ ExecSetTupleBound(int64 tuples_needed, PlanState *child_node)
 		MergeAppendState *maState = (MergeAppendState *) child_node;
 		int			i;
 
-		for (i = 0; i < maState->ms_nplans; i++)
-			ExecSetTupleBound(tuples_needed, maState->mergeplans[i]);
+		for (i = 0; i < maState->as.nplans; i++)
+			ExecSetTupleBound(tuples_needed, maState->as.plans[i]);
 	}
 	else if (IsA(child_node, ResultState))
 	{

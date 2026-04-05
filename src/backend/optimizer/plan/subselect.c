@@ -2912,7 +2912,7 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 
 		case T_Append:
 			{
-				foreach(l, ((Append *) plan)->appendplans)
+				foreach(l, ((Append *) plan)->ab.subplans)
 				{
 					context.paramids =
 						bms_add_members(context.paramids,
@@ -2927,7 +2927,7 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 
 		case T_MergeAppend:
 			{
-				foreach(l, ((MergeAppend *) plan)->mergeplans)
+				foreach(l, ((MergeAppend *) plan)->ab.subplans)
 				{
 					context.paramids =
 						bms_add_members(context.paramids,

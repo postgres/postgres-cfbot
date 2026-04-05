@@ -443,14 +443,14 @@ pgpa_walk_recursively(pgpa_plan_walker_context *walker, Plan *plan,
 			{
 				Append	   *aplan = (Append *) plan;
 
-				extraplans = aplan->appendplans;
+				extraplans = aplan->ab.subplans;
 			}
 			break;
 		case T_MergeAppend:
 			{
 				MergeAppend *maplan = (MergeAppend *) plan;
 
-				extraplans = maplan->mergeplans;
+				extraplans = maplan->ab.subplans;
 			}
 			break;
 		case T_BitmapAnd:
@@ -573,9 +573,9 @@ pgpa_relids(Plan *plan)
 	else if (IsA(plan, ForeignScan))
 		return ((ForeignScan *) plan)->fs_relids;
 	else if (IsA(plan, Append))
-		return ((Append *) plan)->apprelids;
+		return ((Append *) plan)->ab.apprelids;
 	else if (IsA(plan, MergeAppend))
-		return ((MergeAppend *) plan)->apprelids;
+		return ((MergeAppend *) plan)->ab.apprelids;
 
 	return NULL;
 }

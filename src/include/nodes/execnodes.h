@@ -1491,6 +1491,39 @@ typedef struct ModifyTableState
 } ModifyTableState;
 
 /* ----------------
+ *	 AppendBaseState information
+ *
+ *		Common base for AppendState and MergeAppendState.
+ *		Contains fields shared by both node types: the array of subplan
+ *		states, asynchronous execution infrastructure, and partition
+ *		pruning state.
+ * ----------------
+ */
+typedef struct AppendBaseState
+{
+	pg_node_attr(abstract)
+
+	PlanState	ps;				/* its first field is NodeTag */
+	PlanState **plans;			/* array of PlanStates for my inputs */
+	int			nplans;
+
+	/* Asynchronous execution state */
+	Bitmapset  *asyncplans;		/* asynchronous plans indexes */
+	int			nasyncplans;	/* # of asynchronous plans */
+	AsyncRequest **asyncrequests;	/* array of AsyncRequests */
+	TupleTableSlot **asyncresults;	/* unreturned results of async plans */
+	Bitmapset  *needrequest;	/* asynchronous plans needing a new request */
+	struct WaitEventSet *eventset;	/* WaitEventSet used to configure file
+									 * descriptor wait events */
+
+	/* Partition pruning state */
+	struct PartitionPruneState *prune_state;
+	bool		valid_subplans_identified;	/* is valid_subplans valid? */
+	Bitmapset  *valid_subplans;
+	Bitmapset  *valid_asyncplans;	/* valid asynchronous plans indexes */
+} AppendBaseState;
+
+/* ----------------
  *	 AppendState information
  *
  *		nplans				how many plans are in the array
@@ -1511,30 +1544,21 @@ struct PartitionPruneState;
 
 struct AppendState
 {
-	PlanState	ps;				/* its first field is NodeTag */
-	PlanState **appendplans;	/* array of PlanStates for my inputs */
-	int			as_nplans;
+	AppendBaseState as;			/* its first field is NodeTag */
+
 	int			as_whichplan;
 	bool		as_begun;		/* false means need to initialize */
-	Bitmapset  *as_asyncplans;	/* asynchronous plans indexes */
-	int			as_nasyncplans; /* # of asynchronous plans */
-	AsyncRequest **as_asyncrequests;	/* array of AsyncRequests */
-	TupleTableSlot **as_asyncresults;	/* unreturned results of async plans */
-	int			as_nasyncresults;	/* # of valid entries in as_asyncresults */
+	int			as_nasyncresults;	/* # of valid entries in asyncresults */
 	bool		as_syncdone;	/* true if all synchronous plans done in
 								 * asynchronous mode, else false */
 	int			as_nasyncremain;	/* # of remaining asynchronous plans */
-	Bitmapset  *as_needrequest; /* asynchronous plans needing a new request */
-	struct WaitEventSet *as_eventset;	/* WaitEventSet used to configure file
-										 * descriptor wait events */
-	int			as_first_partial_plan;	/* Index of 'appendplans' containing
-										 * the first partial plan */
+	int			as_first_partial_plan;	/* Index of 'as.plans' containing the
+										 * first partial plan */
+
+	/* Parallel append specific */
 	ParallelAppendState *as_pstate; /* parallel coordination info */
 	Size		pstate_len;		/* size of parallel coordination info */
-	struct PartitionPruneState *as_prune_state;
-	bool		as_valid_subplans_identified;	/* is as_valid_subplans valid? */
-	Bitmapset  *as_valid_subplans;
-	Bitmapset  *as_valid_asyncplans;	/* valid asynchronous plans indexes */
+
 	bool		(*choose_next_subplan) (AppendState *);
 };
 
@@ -1555,16 +1579,13 @@ struct AppendState
  */
 typedef struct MergeAppendState
 {
-	PlanState	ps;				/* its first field is NodeTag */
-	PlanState **mergeplans;		/* array of PlanStates for my inputs */
-	int			ms_nplans;
+	AppendBaseState as;			/* its first field is NodeTag */
+
 	int			ms_nkeys;
 	SortSupport ms_sortkeys;	/* array of length ms_nkeys */
 	TupleTableSlot **ms_slots;	/* array of length ms_nplans */
 	struct binaryheap *ms_heap; /* binary heap of slot indices */
 	bool		ms_initialized; /* are subplans started? */
-	struct PartitionPruneState *ms_prune_state;
-	Bitmapset  *ms_valid_subplans;
 } MergeAppendState;
 
 /* ----------------

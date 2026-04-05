@@ -1230,12 +1230,9 @@ ExplainPreScanNode(PlanState *planstate, Bitmapset **rels_used)
 											linitial_int(((ModifyTable *) plan)->resultRelations));
 			break;
 		case T_Append:
-			*rels_used = bms_add_members(*rels_used,
-										 ((Append *) plan)->apprelids);
-			break;
 		case T_MergeAppend:
 			*rels_used = bms_add_members(*rels_used,
-										 ((MergeAppend *) plan)->apprelids);
+										 ((AppendBase *) plan)->apprelids);
 			break;
 		case T_Result:
 			*rels_used = bms_add_members(*rels_used,
@@ -1269,34 +1266,17 @@ plan_is_disabled(Plan *plan)
 	 * Handle special nodes first.  Children of BitmapOrs and BitmapAnds can't
 	 * be disabled, so no need to handle those specifically.
 	 */
-	if (IsA(plan, Append))
+	if (IsA(plan, Append) || IsA(plan, MergeAppend))
 	{
 		ListCell   *lc;
-		Append	   *aplan = (Append *) plan;
+		AppendBase *abplan = (AppendBase *) plan;
 
 		/*
-		 * Sum the Append childrens' disabled_nodes.  This purposefully
-		 * includes any run-time pruned children.  Ignoring those could give
-		 * us the incorrect number of disabled nodes.
+		 * Sum the Append/MergeAppend childrens' disabled_nodes.  This
+		 * purposefully includes any run-time pruned children.  Ignoring
+		 * those could give us the incorrect number of disabled nodes.
 		 */
-		foreach(lc, aplan->appendplans)
-		{
-			Plan	   *subplan = lfirst(lc);
-
-			child_disabled_nodes += subplan->disabled_nodes;
-		}
-	}
-	else if (IsA(plan, MergeAppend))
-	{
-		ListCell   *lc;
-		MergeAppend *maplan = (MergeAppend *) plan;
-
-		/*
-		 * Sum the MergeAppend childrens' disabled_nodes.  This purposefully
-		 * includes any run-time pruned children.  Ignoring those could give
-		 * us the incorrect number of disabled nodes.
-		 */
-		foreach(lc, maplan->mergeplans)
+		foreach(lc, abplan->subplans)
 		{
 			Plan	   *subplan = lfirst(lc);
 
@@ -2344,13 +2324,9 @@ ExplainNode(PlanState *planstate, List *ancestors,
 	switch (nodeTag(plan))
 	{
 		case T_Append:
-			ExplainMissingMembers(((AppendState *) planstate)->as_nplans,
-								  list_length(((Append *) plan)->appendplans),
-								  es);
-			break;
 		case T_MergeAppend:
-			ExplainMissingMembers(((MergeAppendState *) planstate)->ms_nplans,
-								  list_length(((MergeAppend *) plan)->mergeplans),
+			ExplainMissingMembers(((AppendBaseState *) planstate)->nplans,
+								  list_length(((AppendBase *) plan)->subplans),
 								  es);
 			break;
 		default:
@@ -2394,13 +2370,9 @@ ExplainNode(PlanState *planstate, List *ancestors,
 	switch (nodeTag(plan))
 	{
 		case T_Append:
-			ExplainMemberNodes(((AppendState *) planstate)->appendplans,
-							   ((AppendState *) planstate)->as_nplans,
-							   ancestors, es);
-			break;
 		case T_MergeAppend:
-			ExplainMemberNodes(((MergeAppendState *) planstate)->mergeplans,
-							   ((MergeAppendState *) planstate)->ms_nplans,
+			ExplainMemberNodes(((AppendBaseState *) planstate)->plans,
+							   ((AppendBaseState *) planstate)->nplans,
 							   ancestors, es);
 			break;
 		case T_BitmapAnd:
@@ -2614,7 +2586,7 @@ static void
 show_merge_append_keys(MergeAppendState *mstate, List *ancestors,
 					   ExplainState *es)
 {
-	MergeAppend *plan = (MergeAppend *) mstate->ps.plan;
+	MergeAppend *plan = (MergeAppend *) mstate->as.ps.plan;
 
 	show_sort_group_keys((PlanState *) mstate, "Sort Key",
 						 plan->numCols, 0, plan->sortColIdx,

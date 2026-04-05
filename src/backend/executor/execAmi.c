@@ -538,7 +538,7 @@ ExecSupportsBackwardScan(Plan *node)
 				if (((Append *) node)->nasyncplans > 0)
 					return false;
 
-				foreach(l, ((Append *) node)->appendplans)
+				foreach(l, ((Append *) node)->ab.subplans)
 				{
 					if (!ExecSupportsBackwardScan((Plan *) lfirst(l)))
 						return false;
