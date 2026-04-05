@@ -59,13 +59,17 @@
 
 #include "postgres.h"
 
+#include "catalog/namespace.h"
 #include "catalog/pg_collation.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "nodes/miscnodes.h"
 #include "nodes/nodeFuncs.h"
+#include "nodes/pg_list.h"
 #include "regex/regex.h"
+#include "tsearch/ts_cache.h"
+#include "tsearch/ts_utils.h"
 #include "utils/builtins.h"
 #include "utils/date.h"
 #include "utils/datetime.h"
@@ -74,6 +78,7 @@
 #include "utils/json.h"
 #include "utils/jsonpath.h"
 #include "utils/memutils.h"
+#include "utils/regproc.h"
 #include "utils/timestamp.h"
 
 /*
@@ -114,6 +119,7 @@ typedef struct JsonPathExecContext
 	bool		throwErrors;	/* with "false" all suppressible errors are
 								 * suppressed */
 	bool		useTz;
+	List	   *tsmatch_cache;	/* Persists compiled FTS queries */
 } JsonPathExecContext;
 
 /* Context for LIKE_REGEX execution. */
@@ -122,6 +128,14 @@ typedef struct JsonLikeRegexContext
 	text	   *regex;
 	int			cflags;
 } JsonLikeRegexContext;
+
+/* Context for tsmatch execution. */
+typedef struct JsonTsMatchCacheEntry
+{
+	void	   *jsp_ptr;		/* Cache key: pointer to the AST node */
+	Datum		queryDatum;		/* Cached compiled query */
+	Oid			tsconfigId;		/* Cached dictionary OID */
+}			JsonTsMatchCacheEntry;
 
 /* Result of jsonpath predicate evaluation */
 typedef enum JsonPathBool
@@ -343,6 +357,7 @@ static JsonPathExecResult executeKeyValueMethod(JsonPathExecContext *cxt,
 												JsonPathItem *jsp, JsonbValue *jb, JsonValueList *found);
 static JsonPathExecResult appendBoolResult(JsonPathExecContext *cxt,
 										   JsonPathItem *jsp, JsonValueList *found, JsonPathBool res);
+static JsonPathBool executeTsMatch(JsonPathItem *jsp, JsonbValue *str, JsonbValue *rarg, void *param);
 static void getJsonPathItem(JsonPathExecContext *cxt, JsonPathItem *item,
 							JsonbValue *value);
 static JsonbValue *GetJsonPathVar(void *cxt, char *varName, int varNameLen,
@@ -748,6 +763,7 @@ executeJsonPath(JsonPath *path, void *vars, JsonPathGetVarCallback getVar,
 	cxt.innermostArraySize = -1;
 	cxt.throwErrors = throwErrors;
 	cxt.useTz = useTz;
+	cxt.tsmatch_cache = NIL;
 
 	if (jspStrictAbsenceOfErrors(&cxt) && !result)
 	{
@@ -848,6 +864,7 @@ executeItemOptUnwrapTarget(JsonPathExecContext *cxt, JsonPathItem *jsp,
 		case jpiExists:
 		case jpiStartsWith:
 		case jpiLikeRegex:
+		case jpiTsMatch:
 			{
 				JsonPathBool st = executeBoolItem(cxt, jsp, jb, true);
 
@@ -1910,6 +1927,18 @@ executeBoolItem(JsonPathExecContext *cxt, JsonPathItem *jsp,
 				return executePredicate(cxt, jsp, &larg, NULL, jb, false,
 										executeLikeRegex, &lrcxt);
 			}
+		case jpiTsMatch:
+			{
+				jspInitByBuffer(&larg, jsp->base,
+								jsp->content.tsmatch.doc);
+
+				/*
+				 * Pass 'cxt' as the param so executeTsMatch can access the
+				 * cache list
+				 */
+				return executePredicate(cxt, jsp, &larg, NULL, jb, false,
+										executeTsMatch, cxt);
+			}
 
 		case jpiExists:
 			jspGetArg(jsp, &larg);
@@ -1948,7 +1977,6 @@ executeBoolItem(JsonPathExecContext *cxt, JsonPathItem *jsp,
 
 				return jper == jperOk ? jpbTrue : jpbFalse;
 			}
-
 		default:
 			elog(ERROR, "invalid boolean jsonpath item type: %d", jsp->type);
 			return jpbUnknown;
@@ -3193,6 +3221,123 @@ executeKeyValueMethod(JsonPathExecContext *cxt, JsonPathItem *jsp,
 
 	return res;
 }
+
+static JsonPathBool
+executeTsMatch(JsonPathItem *jsp, JsonbValue *str, JsonbValue *rarg,
+			   void *param)
+{
+	JsonPathExecContext *cxt = (JsonPathExecContext *) param;
+	JsonTsMatchCacheEntry *cache = NULL;
+	ListCell   *lc;
+	text	   *doc_text;
+	Datum		tsvector_datum;
+	bool		match;
+
+	if (!(str = getScalar(str, jbvString)))
+		return jpbUnknown;
+
+	/* Check if we already compiled the query for this specific AST node */
+	foreach(lc, cxt->tsmatch_cache)
+	{
+		JsonTsMatchCacheEntry *entry = (JsonTsMatchCacheEntry *) lfirst(lc);
+
+		if (entry->jsp_ptr == (void *) jsp)
+		{
+			cache = entry;
+			break;
+		}
+	}
+
+	/* If not found, parse, compile, and cache it */
+	if (cache == NULL)
+	{
+		text	   *query_text;
+		char	   *parser_mode;
+		uint32		parser_len;
+
+		/* Allocate new cache entry in the execution memory context */
+		cache = palloc0(sizeof(JsonTsMatchCacheEntry));
+		cache->jsp_ptr = (void *) jsp;
+
+		if (jsp->content.tsmatch.tsconfig != 0)
+		{
+			JsonPathItem config_item;
+			int32		config_len;
+			char	   *config_str;
+			char	   *safe_config_str;
+
+			jspInitByBuffer(&config_item, jsp->base, jsp->content.tsmatch.tsconfig);
+			config_str = jspGetString(&config_item, &config_len);
+
+			/* Null-terminate for safe catalog lookup */
+			safe_config_str = pnstrdup(config_str, config_len);
+			cache->tsconfigId = get_ts_config_oid(stringToQualifiedNameList(safe_config_str, NULL), false);
+			pfree(safe_config_str);
+		}
+		else
+		{
+			cache->tsconfigId = getTSCurrentConfig(true);
+		}
+
+		/* Prepare Query Text */
+		query_text = cstring_to_text_with_len(jsp->content.tsmatch.tsquery,
+											  jsp->content.tsmatch.tsquery_len);
+
+		/* Select Parser and Compile Query */
+		parser_mode = jsp->content.tsmatch.tsqparser;
+		parser_len = jsp->content.tsmatch.tsqparser_len;
+
+		if (parser_len > 0)
+		{
+			if (parser_len == 2 && pg_strncasecmp(parser_mode, "pl", 2) == 0)
+			{
+				cache->queryDatum = DirectFunctionCall2(plainto_tsquery_byid,
+														ObjectIdGetDatum(cache->tsconfigId),
+														PointerGetDatum(query_text));
+			}
+			else if (parser_len == 2 && pg_strncasecmp(parser_mode, "ph", 2) == 0)
+			{
+				cache->queryDatum = DirectFunctionCall2(phraseto_tsquery_byid,
+														ObjectIdGetDatum(cache->tsconfigId),
+														PointerGetDatum(query_text));
+			}
+			else if (parser_len == 1 && pg_strncasecmp(parser_mode, "w", 1) == 0)
+			{
+				cache->queryDatum = DirectFunctionCall2(websearch_to_tsquery_byid,
+														ObjectIdGetDatum(cache->tsconfigId),
+														PointerGetDatum(query_text));
+			}
+			else
+			{
+				pg_unreachable();
+			}
+		}
+		else
+		{
+			cache->queryDatum = DirectFunctionCall2(to_tsquery_byid,
+													ObjectIdGetDatum(cache->tsconfigId),
+													PointerGetDatum(query_text));
+		}
+
+		/* Append the newly compiled cache entry to the context's list */
+		cxt->tsmatch_cache = lappend(cxt->tsmatch_cache, cache);
+	}
+
+	/* Runtime Execution (Using the cached query) */
+	doc_text = cstring_to_text_with_len(str->val.string.val,
+										str->val.string.len);
+
+	tsvector_datum = DirectFunctionCall2(to_tsvector_byid,
+										 ObjectIdGetDatum(cache->tsconfigId),
+										 PointerGetDatum(doc_text));
+
+	match = DatumGetBool(DirectFunctionCall2(ts_match_vq,
+											 tsvector_datum,
+											 cache->queryDatum));
+
+	return match ? jpbTrue : jpbFalse;
+}
+
 
 /*
  * Convert boolean execution status 'res' to a boolean JSON item and execute
