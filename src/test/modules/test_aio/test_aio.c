@@ -698,11 +698,13 @@ read_buffers(PG_FUNCTION_ARGS)
 	Oid			relid = PG_GETARG_OID(0);
 	BlockNumber startblock = PG_GETARG_UINT32(1);
 	int32		nblocks = PG_GETARG_INT32(2);
+	int32		abandon_after = PG_GETARG_INT32(3);
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	Relation	rel;
 	SMgrRelation smgr;
 	int			nblocks_done = 0;
 	int			nblocks_disp = 0;
+	int			nblocks_wait = 0;
 	int			nios = 0;
 	ReadBuffersOperation *operations;
 	Buffer	   *buffers;
@@ -723,6 +725,9 @@ read_buffers(PG_FUNCTION_ARGS)
 
 	rel = relation_open(relid, AccessShareLock);
 	smgr = RelationGetSmgr(rel);
+
+	if (abandon_after < 0)
+		abandon_after = nblocks;
 
 	/*
 	 * Do StartReadBuffers() until IO for all the required blocks has been
@@ -758,9 +763,17 @@ read_buffers(PG_FUNCTION_ARGS)
 	for (int nio = 0; nio < nios; nio++)
 	{
 		ReadBuffersOperation *operation = &operations[nio];
+		int			nblocks_this_io = nblocks_per_io[nio];
 
 		if (io_reqds[nio])
-			WaitReadBuffers(operation);
+		{
+			if (nblocks_wait < abandon_after)
+				WaitReadBuffers(operation);
+			else
+				AbandonReadBuffers(operation);
+		}
+
+		nblocks_wait += nblocks_this_io;
 	}
 
 	/*
@@ -770,8 +783,8 @@ read_buffers(PG_FUNCTION_ARGS)
 	{
 		ReadBuffersOperation *operation = &operations[nio];
 		int			nblocks_this_io = nblocks_per_io[nio];
-		Datum		values[6] = {0};
-		bool		nulls[6] = {0};
+		Datum		values[7] = {0};
+		bool		nulls[7] = {0};
 		ArrayType  *buffers_arr;
 
 		/* convert buffer array to datum array */
@@ -804,13 +817,17 @@ read_buffers(PG_FUNCTION_ARGS)
 		values[3] = BoolGetDatum(io_reqds[nio] ? operation->foreign_io : false);
 		nulls[3] = false;
 
-		/* nblocks */
-		values[4] = Int32GetDatum(nblocks_this_io);
+		/* abandoned */
+		values[4] = BoolGetDatum(nblocks_disp >= abandon_after);
 		nulls[4] = false;
 
-		/* array of buffers */
-		values[5] = PointerGetDatum(buffers_arr);
+		/* nblocks */
+		values[5] = Int32GetDatum(nblocks_this_io);
 		nulls[5] = false;
+
+		/* array of buffers */
+		values[6] = PointerGetDatum(buffers_arr);
+		nulls[6] = false;
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 
@@ -1063,6 +1080,13 @@ inj_io_completion_wait_matches(PgAioHandle *ioh)
 	if (inj_blockno != InvalidBlockNumber &&
 		!(inj_blockno >= io_blockno && inj_blockno < (io_blockno + td->smgr.nblocks)))
 		return false;
+
+	ereport(LOG,
+			errmsg("wait injection point matches for IO %d, inj blockno %d, io blockno %d, io nblocks %d",
+				   pgaio_io_get_id(ioh),
+				   inj_blockno, io_blockno, td->smgr.nblocks
+				   ),
+			errhidestmt(true), errhidecontext(true));
 
 	return true;
 }
