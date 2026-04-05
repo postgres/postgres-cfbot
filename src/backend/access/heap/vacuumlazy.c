@@ -636,8 +636,7 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 				new_rel_allfrozen;
 	PGRUsage	ru0;
 	TimestampTz starttime = 0;
-	WalUsage	startwalusage = pgWalUsage;
-	BufferUsage startbufferusage = pgBufferUsage;
+	Instrumentation *instr = NULL;
 	ErrorContextCallback errcallback;
 	char	  **indnames = NULL;
 	Size		dead_items_max_bytes = 0;
@@ -646,7 +645,11 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 	instrument = (verbose || (AmAutoVacuumWorkerProcess() &&
 							  params->log_vacuum_min_duration >= 0));
 	if (instrument)
+	{
 		pg_rusage_init(&ru0);
+		instr = InstrAlloc(INSTRUMENT_BUFFERS | INSTRUMENT_WAL);
+		InstrStart(instr);
+	}
 
 	/* Used for instrumentation and stats report */
 	starttime = GetCurrentTimestamp();
@@ -986,14 +989,14 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 	{
 		TimestampTz endtime = GetCurrentTimestamp();
 
+		InstrStop(instr);
+
 		if (verbose || params->log_vacuum_min_duration == 0 ||
 			TimestampDifferenceExceeds(starttime, endtime,
 									   params->log_vacuum_min_duration))
 		{
 			long		secs_dur;
 			int			usecs_dur;
-			WalUsage	walusage;
-			BufferUsage bufferusage;
 			StringInfoData buf;
 			char	   *msgfmt;
 			int32		diff;
@@ -1002,12 +1005,10 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 			int64		total_blks_hit;
 			int64		total_blks_read;
 			int64		total_blks_dirtied;
+			BufferUsage bufferusage = instr->bufusage;
+			WalUsage	walusage = instr->walusage;
 
 			TimestampDifference(starttime, endtime, &secs_dur, &usecs_dur);
-			memset(&walusage, 0, sizeof(WalUsage));
-			WalUsageAccumDiff(&walusage, &pgWalUsage, &startwalusage);
-			memset(&bufferusage, 0, sizeof(BufferUsage));
-			BufferUsageAccumDiff(&bufferusage, &pgBufferUsage, &startbufferusage);
 
 			total_blks_hit = bufferusage.shared_blks_hit +
 				bufferusage.local_blks_hit;
