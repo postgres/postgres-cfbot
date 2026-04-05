@@ -354,9 +354,7 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 	Oid			save_userid;
 	int			save_sec_context;
 	int			save_nestlevel;
-	WalUsage	startwalusage = pgWalUsage;
-	BufferUsage startbufferusage = pgBufferUsage;
-	BufferUsage bufferusage;
+	Instrumentation *instr = NULL;
 	PgStat_Counter startreadtime = 0;
 	PgStat_Counter startwritetime = 0;
 
@@ -407,6 +405,9 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 		}
 
 		pg_rusage_init(&ru0);
+
+		instr = InstrAlloc(INSTRUMENT_BUFFERS | INSTRUMENT_WAL);
+		InstrStart(instr);
 	}
 
 	/* Used for instrumentation and stats report */
@@ -769,12 +770,13 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 	{
 		TimestampTz endtime = GetCurrentTimestamp();
 
+		InstrStop(instr);
+
 		if (verbose || params->log_analyze_min_duration == 0 ||
 			TimestampDifferenceExceeds(starttime, endtime,
 									   params->log_analyze_min_duration))
 		{
 			long		delay_in_ms;
-			WalUsage	walusage;
 			double		read_rate = 0;
 			double		write_rate = 0;
 			char	   *msgfmt;
@@ -782,18 +784,15 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 			int64		total_blks_hit;
 			int64		total_blks_read;
 			int64		total_blks_dirtied;
+			BufferUsage bufusage = instr->bufusage;
+			WalUsage	walusage = instr->walusage;
 
-			memset(&bufferusage, 0, sizeof(BufferUsage));
-			BufferUsageAccumDiff(&bufferusage, &pgBufferUsage, &startbufferusage);
-			memset(&walusage, 0, sizeof(WalUsage));
-			WalUsageAccumDiff(&walusage, &pgWalUsage, &startwalusage);
-
-			total_blks_hit = bufferusage.shared_blks_hit +
-				bufferusage.local_blks_hit;
-			total_blks_read = bufferusage.shared_blks_read +
-				bufferusage.local_blks_read;
-			total_blks_dirtied = bufferusage.shared_blks_dirtied +
-				bufferusage.local_blks_dirtied;
+			total_blks_hit = bufusage.shared_blks_hit +
+				bufusage.local_blks_hit;
+			total_blks_read = bufusage.shared_blks_read +
+				bufusage.local_blks_read;
+			total_blks_dirtied = bufusage.shared_blks_dirtied +
+				bufusage.local_blks_dirtied;
 
 			/*
 			 * We do not expect an analyze to take > 25 days and it simplifies
