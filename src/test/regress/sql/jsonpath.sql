@@ -306,3 +306,22 @@ FROM unnest(ARRAY['$ ? (@ like_regex "pattern" flag "smixq")'::text,
                   '00',
                   '1a']) str,
      LATERAL pg_input_error_info(str, 'jsonpath') as errinfo;
+
+-- tsmatch (Full Text Search)
+
+-- basic success
+select '$ ? (@ tsmatch "simple")'::jsonpath;
+select '$ ? (@ tsmatch "running" tsconfig "english")'::jsonpath;
+-- w/out tsconfig and tsqparser
+select '$ ? (@ tsmatch "fast & furious" tsconfig "simple")'::jsonpath;
+select '$ ? (@ tsmatch "fast & furious" tsconfig "simple" tsqparser "w")'::jsonpath;
+-- tsconfig and tsqparser can appear in any order
+select '$ ? (@ tsmatch "fast & furious" tsqparser "w" tsconfig "simple" )'::jsonpath;
+select '$ ? (@ tsmatch "fast & furious" tsqparser "w")'::jsonpath;
+select '$[*] ? (@.title tsmatch "god" && @.rating > 5)'::jsonpath;
+select '$ ? (@ tsmatch $pattern)'::jsonpath;
+
+-- only string literals (no variables) are allowed for tsquery
+select '$ ? (@ tsmatch $var tsconfig "english")'::jsonpath;
+-- if a tsconfig doesn't exist it should parse nonetheless (executor will fail it)
+select '$ ? (@ tsmatch "running" tsconfig "wrongconfig")'::jsonpath;
