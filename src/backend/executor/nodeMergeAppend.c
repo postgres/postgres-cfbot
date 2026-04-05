@@ -153,9 +153,12 @@ ExecMergeAppend(PlanState *pstate)
 		 * run-time pruning is disabled then the valid subplans will always be
 		 * set to all subplans.
 		 */
-		if (node->as.valid_subplans == NULL)
+		if (!node->as.valid_subplans_identified)
+		{
 			node->as.valid_subplans =
 				ExecFindMatchingSubPlans(node->as.prune_state, false, NULL);
+			node->as.valid_subplans_identified = true;
+		}
 
 		/*
 		 * First time through: pull the first tuple from each valid subplan,

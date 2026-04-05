@@ -22,5 +22,12 @@ extern void ExecInitAppendBase(AppendBaseState *state,
 							   int *first_valid_partial_plan);
 extern void ExecEndAppendBase(AppendBaseState *node);
 extern void ExecReScanAppendBase(AppendBaseState *node);
+extern void ExecAppendBaseAsyncBegin(AppendBaseState *node);
+extern void ExecAppendBaseAsyncEventWait(AppendBaseState *node,
+										 int timeout,
+										 uint32 wait_event_info);
+extern bool classify_matching_subplans_common(Bitmapset **valid_subplans,
+											  Bitmapset *asyncplans,
+											  Bitmapset **valid_asyncplans);
 
 #endif							/* EXECAPPEND_H */
