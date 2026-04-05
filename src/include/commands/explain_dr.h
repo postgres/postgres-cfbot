@@ -23,11 +23,10 @@ typedef struct ExplainState ExplainState;
 typedef struct SerializeMetrics
 {
 	uint64		bytesSent;		/* # of bytes serialized */
-	instr_time	timeSpent;		/* time spent serializing */
-	BufferUsage bufferUsage;	/* buffers accessed during serialization */
+	Instrumentation instr;		/* time and buffer usage */
 } SerializeMetrics;
 
 extern DestReceiver *CreateExplainSerializeDestReceiver(ExplainState *es);
-extern SerializeMetrics GetSerializationMetrics(DestReceiver *dest);
+extern SerializeMetrics *GetSerializationMetrics(DestReceiver *dest);
 
 #endif

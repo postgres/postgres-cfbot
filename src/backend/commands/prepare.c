@@ -22,6 +22,7 @@
 #include "catalog/pg_type.h"
 #include "commands/createas.h"
 #include "commands/explain.h"
+#include "executor/instrument.h"
 #include "commands/explain_format.h"
 #include "commands/explain_state.h"
 #include "commands/prepare.h"
@@ -580,13 +581,16 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 	ListCell   *p;
 	ParamListInfo paramLI = NULL;
 	EState	   *estate = NULL;
-	instr_time	planstart;
-	instr_time	planduration;
-	BufferUsage bufusage_start,
-				bufusage;
+	Instrumentation plan_instr = {0};
+	int			instrument_options = INSTRUMENT_TIMER;
 	MemoryContextCounters mem_counters;
 	MemoryContext planner_ctx = NULL;
 	MemoryContext saved_ctx = NULL;
+
+	if (es->buffers)
+		instrument_options |= INSTRUMENT_BUFFERS;
+
+	InstrInitOptions(&plan_instr, instrument_options);
 
 	if (es->memory)
 	{
@@ -598,9 +602,7 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 		saved_ctx = MemoryContextSwitchTo(planner_ctx);
 	}
 
-	if (es->buffers)
-		bufusage_start = pgBufferUsage;
-	INSTR_TIME_SET_CURRENT(planstart);
+	InstrStart(&plan_instr);
 
 	/* Look it up in the hash table */
 	entry = FetchPreparedStatement(execstmt->name, true);
@@ -635,20 +637,12 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 	cplan = GetCachedPlan(entry->plansource, paramLI,
 						  CurrentResourceOwner, pstate->p_queryEnv);
 
-	INSTR_TIME_SET_CURRENT(planduration);
-	INSTR_TIME_SUBTRACT(planduration, planstart);
+	InstrStop(&plan_instr);
 
 	if (es->memory)
 	{
 		MemoryContextSwitchTo(saved_ctx);
 		MemoryContextMemConsumed(planner_ctx, &mem_counters);
-	}
-
-	/* calc differences of buffer counters. */
-	if (es->buffers)
-	{
-		memset(&bufusage, 0, sizeof(BufferUsage));
-		BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &bufusage_start);
 	}
 
 	plan_list = cplan->stmt_list;
@@ -660,7 +654,7 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 
 		if (pstmt->commandType != CMD_UTILITY)
 			ExplainOnePlan(pstmt, into, es, query_string, paramLI, pstate->p_queryEnv,
-						   &planduration, (es->buffers ? &bufusage : NULL),
+						   &plan_instr.total, (es->buffers ? &plan_instr.bufusage : NULL),
 						   es->memory ? &mem_counters : NULL);
 		else
 			ExplainOneUtility(pstmt->utilityStmt, into, es, pstate, paramLI);
