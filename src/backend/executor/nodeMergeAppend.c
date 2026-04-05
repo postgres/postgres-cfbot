@@ -25,6 +25,20 @@
  *		to a common sort key.  The MergeAppend node merges these streams
  *		to produce output sorted the same way.
  *
+ *		MergeAppend supports async-capable subplans (e.g. foreign scans).
+ *		Async execution is beneficial during the initial heap fill, where
+ *		all async subplans are kicked off concurrently and their first
+ *		tuples are fetched in parallel.  In steady state, the heap
+ *		algorithm still needs the next tuple from one specific subplan
+ *		(the one at the heap top), so we can only make progress on that
+ *		one subplan at a time.  For a synchronous subplan we simply call
+ *		ExecProcNode() again.  An asynchronous subplan, however, must
+ *		still be driven through the async request/response protocol: a
+ *		plain ExecProcNode() call bypasses it, and FDWs such as
+ *		postgres_fdw treat that as end-of-data once their locally cached
+ *		batch of tuples is exhausted.  So for those we issue a fresh
+ *		async request and block until it completes.
+ *
  *		MergeAppend nodes don't make use of their left and right
  *		subtrees, rather they maintain a list of subplans so
  *		a typical MergeAppend node looks like this in the plan tree:
@@ -40,12 +54,14 @@
 #include "postgres.h"
 
 #include "executor/execAppend.h"
+#include "executor/execAsync.h"
 #include "executor/executor.h"
 #include "executor/execPartition.h"
 #include "executor/nodeMergeAppend.h"
 #include "lib/binaryheap.h"
 #include "miscadmin.h"
 #include "utils/sortsupport.h"
+#include "utils/wait_event.h"
 
 /*
  * We have one slot for each item in the heap array.  We use SlotNumber
@@ -56,6 +72,12 @@ typedef int32 SlotNumber;
 
 static TupleTableSlot *ExecMergeAppend(PlanState *pstate);
 static int	heap_compare_slots(Datum a, Datum b, void *arg);
+
+static void classify_matching_subplans(MergeAppendState *node);
+static void ExecMergeAppendAsyncBegin(MergeAppendState *node);
+static void ExecMergeAppendAsyncGetNext(MergeAppendState *node, int mplan);
+static void ExecMergeAppendAsyncEventWait(MergeAppendState *node);
+static void ExecMergeAppendGetNextSlot(MergeAppendState *node, int mplan);
 
 
 /* ----------------------------------------------------------------
@@ -88,9 +110,14 @@ ExecInitMergeAppend(MergeAppend *node, EState *estate, int eflags)
 					   -1,
 					   NULL);
 
+	if (mergestate->as.nasyncplans > 0 && mergestate->as.valid_subplans_identified)
+		classify_matching_subplans(mergestate);
+
 	mergestate->ms_slots = palloc0_array(TupleTableSlot *, mergestate->as.nplans);
 	mergestate->ms_heap = binaryheap_allocate(mergestate->as.nplans, heap_compare_slots,
 											  mergestate);
+
+	mergestate->ms_asyncremain = NULL;
 
 	/*
 	 * initialize sort-key information
@@ -158,7 +185,12 @@ ExecMergeAppend(PlanState *pstate)
 			node->as.valid_subplans =
 				ExecFindMatchingSubPlans(node->as.prune_state, false, NULL);
 			node->as.valid_subplans_identified = true;
+			classify_matching_subplans(node);
 		}
+
+		/* If there are any async subplans, begin executing them. */
+		if (node->as.nasyncplans > 0)
+			ExecMergeAppendAsyncBegin(node);
 
 		/*
 		 * First time through: pull the first tuple from each valid subplan,
@@ -171,6 +203,16 @@ ExecMergeAppend(PlanState *pstate)
 			if (!TupIsNull(node->ms_slots[i]))
 				binaryheap_add_unordered(node->ms_heap, Int32GetDatum(i));
 		}
+
+		/* Look at valid async subplans */
+		i = -1;
+		while ((i = bms_next_member(node->as.valid_asyncplans, i)) >= 0)
+		{
+			ExecMergeAppendAsyncGetNext(node, i);
+			if (!TupIsNull(node->ms_slots[i]))
+				binaryheap_add_unordered(node->ms_heap, Int32GetDatum(i));
+		}
+
 		binaryheap_build(node->ms_heap);
 		node->ms_initialized = true;
 	}
@@ -185,7 +227,7 @@ ExecMergeAppend(PlanState *pstate)
 		 * to not pull tuples until necessary.)
 		 */
 		i = DatumGetInt32(binaryheap_first(node->ms_heap));
-		node->ms_slots[i] = ExecProcNode(node->as.plans[i]);
+		ExecMergeAppendGetNextSlot(node, i);
 		if (!TupIsNull(node->ms_slots[i]))
 			binaryheap_replace_first(node->ms_heap, Int32GetDatum(i));
 		else
@@ -204,6 +246,35 @@ ExecMergeAppend(PlanState *pstate)
 	}
 
 	return result;
+}
+
+/* ----------------------------------------------------------------
+ *		ExecMergeAppendGetNextSlot
+ *
+ *		Retrieve the next tuple for the given subplan into ms_slots[mplan].
+ *		Synchronous subplans are pulled directly; asynchronous ones must go
+ *		through the async request/response protocol, since a plain
+ *		ExecProcNode() call bypasses it and would be mistaken by an
+ *		async-capable FDW for end-of-data (see the file header comment).
+ * ----------------------------------------------------------------
+ */
+static void
+ExecMergeAppendGetNextSlot(MergeAppendState *node, int mplan)
+{
+	if (bms_is_member(mplan, node->as.asyncplans))
+	{
+		AsyncRequest *areq = node->as.asyncrequests[mplan];
+
+		Assert(bms_is_member(mplan, node->as.valid_asyncplans));
+		Assert(!areq->callback_pending);
+
+		/* Discard the previously-returned result before requesting a new one. */
+		node->ms_slots[mplan] = NULL;
+		ExecAsyncRequest(areq);
+		ExecMergeAppendAsyncGetNext(node, mplan);
+	}
+	else
+		node->ms_slots[mplan] = ExecProcNode(node->as.plans[mplan]);
 }
 
 /*
@@ -265,8 +336,159 @@ ExecEndMergeAppend(MergeAppendState *node)
 void
 ExecReScanMergeAppend(MergeAppendState *node)
 {
+	int			nasyncplans = node->as.nasyncplans;
+
+	/*
+	 * MergeAppend never has an async request still pending a callback at
+	 * rescan time: it uses async only to seed the heap, fetching one tuple
+	 * from each child, and every async fetch is immediately followed by a
+	 * synchronous wait for its result (see ExecMergeAppendGetNextSlot()).  So
+	 * the async reset in ExecReScanAppendBase() has nothing to drain for us.
+	 */
 	ExecReScanAppendBase(&node->as);
 
+	/* Reset MergeAppend-specific state */
+	if (nasyncplans > 0)
+	{
+		bms_free(node->ms_asyncremain);
+		node->ms_asyncremain = NULL;
+	}
 	binaryheap_reset(node->ms_heap);
 	node->ms_initialized = false;
+
+	/*
+	 * Discard any results left over from before the rescan.  An async
+	 * subplan's slot can still hold a tuple that was delivered but never
+	 * consumed (e.g. because a LIMIT above us stopped pulling before that
+	 * subplan reached the heap top); if we didn't clear it here, the next
+	 * scan's initial fill would mistake it for a fresh result via its
+	 * TupIsNull() check, instead of waiting for the subplan's new async
+	 * response.
+	 */
+	memset(node->ms_slots, 0, node->as.nplans * sizeof(TupleTableSlot *));
+}
+
+/* ----------------------------------------------------------------
+ *		classify_matching_subplans
+ *
+ *		Classify the node's ms_valid_subplans into sync ones and
+ *		async ones, adjust it to contain sync ones only, and save
+ *		async ones in the node's as.valid_asyncplans.
+ * ----------------------------------------------------------------
+ */
+static void
+classify_matching_subplans(MergeAppendState *node)
+{
+	Assert(node->as.valid_subplans_identified);
+
+	/* Nothing to do if there are no valid subplans. */
+	if (bms_is_empty(node->as.valid_subplans))
+	{
+		node->ms_asyncremain = NULL;
+		return;
+	}
+
+	/* No valid async subplans identified. */
+	if (!classify_matching_subplans_common(&node->as.valid_subplans,
+										   node->as.asyncplans,
+										   &node->as.valid_asyncplans))
+		node->ms_asyncremain = NULL;
+}
+
+/* ----------------------------------------------------------------
+ *		ExecMergeAppendAsyncBegin
+ *
+ *		Begin executing designed async-capable subplans.
+ * ----------------------------------------------------------------
+ */
+static void
+ExecMergeAppendAsyncBegin(MergeAppendState *node)
+{
+	/* ExecMergeAppend() identifies valid subplans */
+	Assert(node->as.valid_subplans_identified);
+
+	/* Initialize state variables. */
+	node->ms_asyncremain = bms_copy(node->as.valid_asyncplans);
+
+	/* Nothing to do if there are no valid async subplans. */
+	if (bms_is_empty(node->ms_asyncremain))
+		return;
+
+	ExecAppendBaseAsyncBegin(&node->as);
+}
+
+/* ----------------------------------------------------------------
+ *		ExecMergeAppendAsyncGetNext
+ *
+ *		Get the next tuple from specified asynchronous subplan.
+ * ----------------------------------------------------------------
+ */
+static void
+ExecMergeAppendAsyncGetNext(MergeAppendState *node, int mplan)
+{
+	/*
+	 * All initial async requests were fired by ExecMergeAppendAsyncBegin. The
+	 * result may already be cached from a prior event wait - if so, nothing
+	 * to do.  Otherwise, wait for the specific subplan to deliver a tuple or
+	 * report exhaustion.
+	 */
+	while (TupIsNull(node->ms_slots[mplan]) &&
+		   bms_is_member(mplan, node->ms_asyncremain))
+	{
+		CHECK_FOR_INTERRUPTS();
+		ExecMergeAppendAsyncEventWait(node);
+	}
+}
+
+/* ----------------------------------------------------------------
+ *		ExecAsyncMergeAppendResponse
+ *
+ *		Receive a response from an asynchronous request we made.
+ * ----------------------------------------------------------------
+ */
+void
+ExecAsyncMergeAppendResponse(AsyncRequest *areq)
+{
+	MergeAppendState *node = (MergeAppendState *) areq->requestor;
+	TupleTableSlot *slot = areq->result;
+
+	/* The result should be a TupleTableSlot or NULL. */
+	Assert(slot == NULL || IsA(slot, TupleTableSlot));
+
+	/* Nothing to do if the request is pending. */
+	if (!areq->request_complete)
+	{
+		/* The request would have been pending for a callback. */
+		Assert(areq->callback_pending);
+		return;
+	}
+
+	/* If the result is NULL or an empty slot, the subplan is exhausted. */
+	if (TupIsNull(slot))
+	{
+		/* The ending subplan wouldn't have been pending for a callback. */
+		Assert(!areq->callback_pending);
+		node->ms_asyncremain = bms_del_member(node->ms_asyncremain,
+											  areq->request_index);
+		return;
+	}
+
+	/* Save result directly into the merge slot array. */
+	node->ms_slots[areq->request_index] = slot;
+}
+
+/* ----------------------------------------------------------------
+ *		ExecMergeAppendAsyncEventWait
+ *
+ *		Wait or poll for file descriptor events and fire callbacks.
+ * ----------------------------------------------------------------
+ */
+static void
+ExecMergeAppendAsyncEventWait(MergeAppendState *node)
+{
+	/* We should never be called when there are no valid async subplans. */
+	Assert(bms_num_members(node->ms_asyncremain) > 0);
+
+	ExecAppendBaseAsyncEventWait(&node->as, -1 /* no timeout */ ,
+								 WAIT_EVENT_MERGE_APPEND_READY);
 }

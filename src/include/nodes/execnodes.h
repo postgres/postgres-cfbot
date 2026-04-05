@@ -1586,6 +1586,9 @@ typedef struct MergeAppendState
 	TupleTableSlot **ms_slots;	/* array of length ms_nplans */
 	struct binaryheap *ms_heap; /* binary heap of slot indices */
 	bool		ms_initialized; /* are subplans started? */
+
+	/* Merge-specific async tracking */
+	Bitmapset  *ms_asyncremain; /* remaining asynchronous plans */
 } MergeAppendState;
 
 /* ----------------
