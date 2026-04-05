@@ -4937,3 +4937,61 @@ ORDER BY s1.num, s2.num;
  {"s": "B"}    | {"s": "B"}    | false | true  | true  | true  | false
 (144 rows)
 
+select jsonb_path_query('[null, 1, "running", "runs", "ran", "run", "runner", "jogging"]', 'lax $[*] ? (@ tsmatch "fly" tsconfig "english")');
+ jsonb_path_query 
+------------------
+(0 rows)
+
+select jsonb_path_query('[null, 1, "running", "runs", "ran", "run", "runner", "jogging"]', 'lax $[*] ? (@ tsmatch "run" tsconfig "english")');
+ jsonb_path_query 
+------------------
+ "running"
+ "runs"
+ "run"
+(3 rows)
+
+select jsonb_path_query('[null, 1, "running", "runs", "ran", "run", "runner", "jogging"]', 'lax $[*] ? (@ tsmatch "run" tsconfig "simple")');
+ jsonb_path_query 
+------------------
+ "run"
+(1 row)
+
+select jsonb_path_query('[null, 1, "PostgreSQL", "postgres", "POSTGRES", "database"]', 'lax $[*] ? (@ tsmatch "Postgres" tsconfig "english")');
+ jsonb_path_query 
+------------------
+ "postgres"
+ "POSTGRES"
+(2 rows)
+
+select jsonb_path_query('[null, 1, "PostgreSQL", "postgres", "POSTGRES", "database"]', 'lax $[*] ? (@ tsmatch "Postgres" tsconfig "simple")');
+ jsonb_path_query 
+------------------
+ "postgres"
+ "POSTGRES"
+(2 rows)
+
+-- in the default tsqparser (to_tsquery) spaces are not allowed, so this should fail for syntax
+select jsonb_path_query('["fast car", "super fast car", "fast and furious", "slow car"]', 'lax $[*] ? (@ tsmatch "fast car" tsconfig "english")');
+ERROR:  syntax error in tsquery: "fast car"
+-- if we specify "w" however it should be ok
+select jsonb_path_query('["fast car", "super fast car", "fast and furious", "slow car"]', 'lax $[*] ? (@ tsmatch "fast car" tsconfig "english" tsqparser "w")');
+ jsonb_path_query 
+------------------
+ "fast car"
+ "super fast car"
+(2 rows)
+
+-- it should also be ok if we change to a valid to_tsquery
+select jsonb_path_query('["fast car", "super fast car", "fast and furious", "slow car"]', 'lax $[*] ? (@ tsmatch "fast & car" tsconfig "english")');
+ jsonb_path_query 
+------------------
+ "fast car"
+ "super fast car"
+(2 rows)
+
+select jsonb_path_query('["fat cat", "cat fat", "fat rats"]', 'lax $[*] ? (@ tsmatch "fat & rat" tsconfig "english")');
+ jsonb_path_query 
+------------------
+ "fat rats"
+(1 row)
+
