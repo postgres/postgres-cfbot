@@ -3248,6 +3248,41 @@ ERROR:  jsonpath member accessor can only be applied to an object
         <returnvalue>[]</returnvalue>
        </para></entry>
       </row>
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <replaceable>json_string</replaceable> <literal>tsmatch</literal> <replaceable>query</replaceable>
+        <optional> <literal>tsconfig</literal> <replaceable>config_name</replaceable> </optional>
+        <optional> <literal>tsqparser</literal> <replaceable>parser_mode</replaceable> </optional>
+        <returnvalue>boolean</returnvalue>
+       </para>
+        <para>
+         Tests whether the JSON string (first operand) matches the full-text search query
+         (second operand). The matching behavior can be customized using the optional
+         <literal>tsconfig</literal> and <literal>tsqparser</literal> clauses.
+         If <literal>tsconfig</literal> is omitted, the current session's default text search configuration
+         is used (see <xref linkend="guc-default-text-search-config"/>).
+         The <literal>tsqparser</literal> clause determines how the query string is parsed
+         (see <xref linkend="textsearch-parsing-queries"/>).
+         Valid options are <literal>"pl"</literal> (<function>plainto_tsquery</function>),
+         <literal>"ph"</literal> (<function>phraseto_tsquery</function>), and
+         <literal>"w"</literal> (<function>websearch_to_tsquery</function>).
+         If <literal>tsqparser</literal> is omitted, the query is parsed using <function>to_tsquery</function>.
+         <literal>tsconfig</literal> and <literal>tsqparser</literal> can appear in any order.
+        </para>
+        <para>
+         <literal>jsonb_path_query_array('["running", "runs", "ran", "jogging"]', '$[*] ? (@ tsmatch "run" tsconfig "english")')</literal>
+         <returnvalue>["running", "runs"]</returnvalue>
+        </para>
+        <para>
+         <literal>jsonb_path_query_array('["fast car", "slow car", "fast and furious"]', '$[*] ? (@ tsmatch "fast &amp; car")')</literal>
+         <returnvalue>["fast car"]</returnvalue>
+        </para>
+        <para>
+         <literal>jsonb_path_query_array('["fast car", "slow car", "fast and furious"]', '$[*] ? (@ tsmatch "fast car" tsqparser "w")')</literal>
+         <returnvalue>["fast car"]</returnvalue>
+        </para>
+       </entry>
+      </row>
      </tbody>
     </tgroup>
    </table>

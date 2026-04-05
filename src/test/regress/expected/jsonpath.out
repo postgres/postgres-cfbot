@@ -1480,3 +1480,65 @@ FROM unnest(ARRAY['$ ? (@ like_regex "pattern" flag "smixq")'::text,
  1a                                        | f  | 42601          | trailing junk after numeric literal at or near "1a" of jsonpath input |                                                          | 
 (5 rows)
 
+-- tsmatch (Full Text Search)
+-- basic success
+select '$ ? (@ tsmatch "simple")'::jsonpath;
+        jsonpath        
+------------------------
+ $?(@ tsmatch "simple")
+(1 row)
+
+select '$ ? (@ tsmatch "running" tsconfig "english")'::jsonpath;
+                  jsonpath                  
+--------------------------------------------
+ $?(@ tsmatch "running" tsconfig "english")
+(1 row)
+
+-- w/out tsconfig and tsqparser
+select '$ ? (@ tsmatch "fast & furious" tsconfig "simple")'::jsonpath;
+                     jsonpath                     
+--------------------------------------------------
+ $?(@ tsmatch "fast & furious" tsconfig "simple")
+(1 row)
+
+select '$ ? (@ tsmatch "fast & furious" tsconfig "simple" tsqparser "w")'::jsonpath;
+                            jsonpath                            
+----------------------------------------------------------------
+ $?(@ tsmatch "fast & furious" tsconfig "simple" tsqparser "w")
+(1 row)
+
+-- tsconfig and tsqparser can appear in any order
+select '$ ? (@ tsmatch "fast & furious" tsqparser "w" tsconfig "simple" )'::jsonpath;
+                            jsonpath                            
+----------------------------------------------------------------
+ $?(@ tsmatch "fast & furious" tsconfig "simple" tsqparser "w")
+(1 row)
+
+select '$ ? (@ tsmatch "fast & furious" tsqparser "w")'::jsonpath;
+                   jsonpath                   
+----------------------------------------------
+ $?(@ tsmatch "fast & furious" tsqparser "w")
+(1 row)
+
+select '$[*] ? (@.title tsmatch "god" && @.rating > 5)'::jsonpath;
+                     jsonpath                     
+--------------------------------------------------
+ $[*]?(@."title" tsmatch "god" && @."rating" > 5)
+(1 row)
+
+select '$ ? (@ tsmatch $pattern)'::jsonpath;
+ERROR:  syntax error at or near "$pattern" of jsonpath input
+LINE 1: select '$ ? (@ tsmatch $pattern)'::jsonpath;
+               ^
+-- only string literals (no variables) are allowed for tsquery
+select '$ ? (@ tsmatch $var tsconfig "english")'::jsonpath;
+ERROR:  syntax error at or near "$var" of jsonpath input
+LINE 1: select '$ ? (@ tsmatch $var tsconfig "english")'::jsonpath;
+               ^
+-- if a tsconfig doesn't exist it should parse nonetheless (executor will fail it)
+select '$ ? (@ tsmatch "running" tsconfig "wrongconfig")'::jsonpath;
+                    jsonpath                    
+------------------------------------------------
+ $?(@ tsmatch "running" tsconfig "wrongconfig")
+(1 row)
+

@@ -43,7 +43,12 @@ static bool makeItemLikeRegex(JsonPathParseItem *expr,
 							  JsonPathString *flags,
 							  JsonPathParseItem ** result,
 							  struct Node *escontext);
-
+static bool makeItemTsMatch(JsonPathParseItem *doc,
+							  JsonPathString *tsquery,
+							  JsonPathString *tsconfig,
+							  JsonPathString *tsquery_parser,
+							  JsonPathParseItem ** result,
+							  struct Node *escontext);
 /*
  * Bison doesn't allocate anything that needs to live across parser calls,
  * so we can easily have it use palloc instead of malloc.  This prevents
@@ -73,6 +78,13 @@ static bool makeItemLikeRegex(JsonPathParseItem *expr,
 	JsonPathParseItem  *value;
 	JsonPathParseResult *result;
 	JsonPathItemType	optype;
+	struct
+	{
+		bool            has_tsconfig;
+		JsonPathString  tsconfig;
+		bool            has_tsqparser;
+		JsonPathString  tsqparser;
+	}               tsmatch_opts;
 	bool				boolean;
 	int					integer;
 }
@@ -81,7 +93,7 @@ static bool makeItemLikeRegex(JsonPathParseItem *expr,
 %token	<str>		IDENT_P STRING_P NUMERIC_P INT_P VARIABLE_P
 %token	<str>		OR_P AND_P NOT_P
 %token	<str>		LESS_P LESSEQUAL_P EQUAL_P NOTEQUAL_P GREATEREQUAL_P GREATER_P
-%token	<str>		ANY_P STRICT_P LAX_P LAST_P STARTS_P WITH_P LIKE_REGEX_P FLAG_P
+%token	<str>		ANY_P STRICT_P LAX_P LAST_P STARTS_P WITH_P LIKE_REGEX_P FLAG_P TSMATCH_P TSCONFIG_P TSQUERYPARSER_P
 %token	<str>		ABS_P SIZE_P TYPE_P FLOOR_P DOUBLE_P CEILING_P KEYVALUE_P
 %token	<str>		DATETIME_P
 %token	<str>		BIGINT_P BOOLEAN_P DATE_P DECIMAL_P INTEGER_P NUMBER_P
@@ -108,6 +120,8 @@ static bool makeItemLikeRegex(JsonPathParseItem *expr,
 %type	<str>		key_name
 
 %type	<integer>	any_level
+
+%type  <tsmatch_opts>  tsmatch_opts
 
 %left	OR_P
 %left	AND_P
@@ -189,6 +203,17 @@ predicate:
 			YYABORT;
 		$$ = jppitem;
 	}
+	| expr TSMATCH_P STRING_P tsmatch_opts
+    {
+		JsonPathParseItem *jppitem;
+
+		if (!makeItemTsMatch($1, &$3,
+				$4.has_tsconfig ? &$4.tsconfig : NULL,
+				$4.has_tsqparser ? &$4.tsqparser : NULL,
+				&jppitem, escontext))
+			YYABORT;
+		$$ = jppitem;
+    }
 	;
 
 starts_with_initial:
@@ -337,6 +362,33 @@ str_str_args:
 	str_elem ',' str_elem 			{ $$ = list_make2($1, $3); }
 	;
 
+tsmatch_opts:
+	/* EMPTY */
+	{
+		$$.has_tsconfig = false;
+		$$.has_tsqparser = false;
+	}
+	| tsmatch_opts TSCONFIG_P STRING_P
+	{
+		$$ = $1;
+		if ($$.has_tsconfig)
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("duplicate tsconfig option in tsmatch")));
+		$$.has_tsconfig = true;
+		$$.tsconfig = $3;
+	}
+	| tsmatch_opts TSQUERYPARSER_P STRING_P
+	{
+		$$ = $1;
+		if ($$.has_tsqparser)
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("duplicate tsqparser option in tsmatch")));
+		$$.has_tsqparser = true;
+		$$.tsqparser = $3;
+	}
+	;
 key:
 	key_name						{ $$ = makeItemKey(&$1); }
 	;
@@ -377,6 +429,9 @@ key_name:
 	| TIME_TZ_P
 	| TIMESTAMP_P
 	| TIMESTAMP_TZ_P
+	| TSCONFIG_P
+	| TSMATCH_P
+	| TSQUERYPARSER_P
 	| STR_LOWER_P
 	| STR_UPPER_P
 	| STR_INITCAP_P
@@ -713,5 +768,63 @@ jspConvertRegexFlags(uint32 xflags, int *result, struct Node *escontext)
 
 	*result = cflags;
 
+	return true;
+}
+
+static bool
+makeItemTsMatch(JsonPathParseItem *doc,
+			 JsonPathString *tsquery,
+			 JsonPathString *tsconfig,
+			 JsonPathString *tsquery_parser,
+			 JsonPathParseItem **result,
+			 struct Node *escontext)
+{
+	JsonPathParseItem *v = makeItemType(jpiTsMatch);
+
+	v->value.tsmatch.doc = doc;
+
+	v->value.tsmatch.tsquery = tsquery->val;
+	v->value.tsmatch.tsquery_len = tsquery->len;
+
+	/* Handle the Configuration (Stored as a Node) */
+	if (tsconfig)
+	{
+	   JsonPathParseItem *conf = makeItemType(jpiString);
+	   conf->value.string.val = tsconfig->val;
+	   conf->value.string.len = tsconfig->len;
+	   v->value.tsmatch.tsconfig = conf;
+	}
+	else
+	{
+	   v->value.tsmatch.tsconfig = NULL;
+	}
+
+	/* Handle the TSQuery Parser Flag */
+	if (tsquery_parser)
+	{
+		/* Check for "pl", "ph", "w" here to throw a syntax error immediately */
+		if (!(tsquery_parser->len == 2 && pg_strncasecmp(tsquery_parser->val, "pl", 2) == 0) &&
+            !(tsquery_parser->len == 2 && pg_strncasecmp(tsquery_parser->val, "ph", 2) == 0) &&
+            !(tsquery_parser->len == 1 && pg_strncasecmp(tsquery_parser->val, "w",  1) == 0))
+		{
+			errsave(escontext,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+						errmsg("invalid tsquery_parser value: \"%.*s\"",
+							(int) tsquery_parser->len, tsquery_parser->val),
+						errhint("Valid values are \"pl\", \"ph\", and \"w\".")));
+    		return false;
+		}
+
+		v->value.tsmatch.tsqparser = tsquery_parser->val;
+		v->value.tsmatch.tsqparser_len = tsquery_parser->len;
+	}
+	else
+	{
+		v->value.tsmatch.tsqparser = NULL;
+		v->value.tsmatch.tsqparser_len = 0;
+	}
+
+	/* Success */
+	*result = v;
 	return true;
 }
