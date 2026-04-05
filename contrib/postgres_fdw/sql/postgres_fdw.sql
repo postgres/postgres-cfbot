@@ -4286,10 +4286,28 @@ INSERT INTO result_tbl SELECT a, b, 'AAA' || c FROM async_pt WHERE b === 505;
 SELECT * FROM result_tbl ORDER BY a;
 DELETE FROM result_tbl;
 
+-- Test Merge Append
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM async_pt WHERE b % 100 = 0 ORDER BY b, a;
+SELECT * FROM async_pt WHERE b % 100 = 0 ORDER BY b, a;
+
+-- Test that steady-state execution of an async Merge Append re-fetches from
+-- an async subplan instead of just consuming its initial batch and treating
+-- exhaustion of that batch as end-of-data.  Each partition here has 200
+-- matching rows, more than the FDW's default fetch_size (100), so getting
+-- the right count requires more than one fetch from at least one partition
+-- after the initial heap fill.  The LIMIT keeps the ORDER BY (and therefore
+-- the Merge Append) from being optimized away in the subquery.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM async_pt ORDER BY b, a;
+SELECT count(*) FROM (SELECT * FROM async_pt ORDER BY b, a LIMIT 100000) ss;
+
 -- Test error handling, if accessing one of the foreign partitions errors out
 CREATE FOREIGN TABLE async_p_broken PARTITION OF async_pt FOR VALUES FROM (10000) TO (10001)
   SERVER loopback OPTIONS (table_name 'non_existent_table');
 SELECT * FROM async_pt;
+-- Test error handling for async Merge Append
+SELECT * FROM async_pt ORDER BY b, a;
 DROP FOREIGN TABLE async_p_broken;
 
 -- Check case where multiple partitions use the same connection
@@ -4319,6 +4337,51 @@ SELECT o.x FROM (VALUES (2505), (3505)) o(x), LATERAL (SELECT a FROM async_pt WH
 -- Test COPY TO when foreign table is partition
 COPY async_pt TO stdout; --error
 
+-- Test Merge Append
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM async_pt WHERE b === 505 ORDER BY b, a;
+SELECT * FROM async_pt WHERE b === 505 ORDER BY b, a;
+
+-- Test async Merge Append rescan
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT
+	ARRAY(SELECT f.i FROM (SELECT b + g.i FROM async_pt WHERE a > g.i ORDER BY b) f(i) ORDER BY f.i LIMIT 10)
+FROM generate_series(1, 3) g(i);
+SELECT
+	ARRAY(SELECT f.i FROM (SELECT b + g.i FROM async_pt WHERE a > g.i ORDER BY b) f(i) ORDER BY f.i LIMIT 10)
+FROM generate_series(1, 3) g(i);
+
+-- Test async Merge Append rescan when a LIMIT stops the scan before every
+-- async subplan's request has completed, so on the next rescan (for the
+-- next outer row) some subplan's request is still in flight.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT g.i, s.b FROM generate_series(1, 3) g(i),
+	LATERAL (SELECT b FROM async_pt WHERE a > g.i ORDER BY b LIMIT 1) s;
+SELECT g.i, s.b FROM generate_series(1, 3) g(i),
+	LATERAL (SELECT b FROM async_pt WHERE a > g.i ORDER BY b LIMIT 1) s;
+
+-- Test async Merge Append rescan when a LIMIT stops the scan before an
+-- async subplan's already-delivered result was ever consumed (because it
+-- didn't win the race to the heap top).  The next rescan (for the next
+-- outer row) must not mistake that leftover result for a fresh one; the
+-- expected result increases each row, so a stale reused value would show
+-- up as the first row's value repeating instead.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT g.i, s.b FROM generate_series(1, 3) g(i),
+	LATERAL (SELECT b FROM async_pt WHERE a > g.i AND b > g.i * 100 ORDER BY b LIMIT 1) s;
+SELECT g.i, s.b FROM generate_series(1, 3) g(i),
+	LATERAL (SELECT b FROM async_pt WHERE a > g.i AND b > g.i * 100 ORDER BY b LIMIT 1) s;
+
+-- Test the ExecMergeAppendAsyncProcessPending code path: same shared-connection
+-- pruned-out hazard as the Append case earlier, but with ORDER BY forcing a
+-- MergeAppend.  async_p2 and async_p3 share a connection; per outer row exactly
+-- one of them is pruned while async_p1 (a different connection) always matches,
+-- and the inner LIMIT leaves the other shared-connection request outstanding
+-- across the rescan.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT o.x, s.b FROM (VALUES (2505), (3505)) o(x), LATERAL (SELECT b FROM async_pt WHERE a = 1505 OR a = o.x ORDER BY b LIMIT 1) s ORDER BY o.x;
+SELECT o.x, s.b FROM (VALUES (2505), (3505)) o(x), LATERAL (SELECT b FROM async_pt WHERE a = 1505 OR a = o.x ORDER BY b LIMIT 1) s ORDER BY o.x;
+
 DROP FOREIGN TABLE async_p3;
 DROP TABLE base_tbl3;
 
@@ -4333,6 +4396,11 @@ INSERT INTO result_tbl SELECT * FROM async_pt WHERE b === 505;
 
 SELECT * FROM result_tbl ORDER BY a;
 DELETE FROM result_tbl;
+
+-- Test Merge Append
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM async_pt WHERE b === 505 ORDER BY b, a;
+SELECT * FROM async_pt WHERE b === 505 ORDER BY b, a;
 
 -- partitionwise joins
 SET enable_partitionwise_join TO true;
@@ -4374,6 +4442,10 @@ SELECT * FROM async_pt WHERE a < 3000;
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT * FROM async_pt WHERE a < 2000;
 
+-- Test interaction of async Merge Append with plan-time partition pruning
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM async_pt WHERE a < 3000 ORDER BY b, a;
+
 -- Test interaction of async execution with run-time partition pruning
 SET plan_cache_mode TO force_generic_plan;
 
@@ -4393,6 +4465,18 @@ EXECUTE async_pt_query (2000, 505);
 
 SELECT * FROM result_tbl ORDER BY a;
 DELETE FROM result_tbl;
+
+-- Test interaction of async Merge Append with run-time partition pruning
+PREPARE async_pt_merge_query (int, int) AS
+  SELECT * FROM async_pt WHERE a < $1 AND b === $2 ORDER BY b, a;
+
+EXPLAIN (VERBOSE, COSTS OFF)
+EXECUTE async_pt_merge_query (3000, 505);
+EXECUTE async_pt_merge_query (3000, 505);
+
+EXPLAIN (VERBOSE, COSTS OFF)
+EXECUTE async_pt_merge_query (2000, 505);
+EXECUTE async_pt_merge_query (2000, 505);
 
 RESET plan_cache_mode;
 
@@ -4571,6 +4655,69 @@ SELECT a FROM base_tbl WHERE (a, random() > 0) IN (SELECT a, random() > 0 FROM f
 -- Clean up
 DROP FOREIGN TABLE foreign_tbl CASCADE;
 DROP TABLE base_tbl;
+
+-- Test async Merge Append
+CREATE TABLE distr1 (i int, j int, k text) PARTITION BY HASH (i);
+CREATE TABLE base1 (i int, j int, k text);
+CREATE TABLE base2 (i int, j int, k text);
+CREATE FOREIGN TABLE distr1_p1 PARTITION OF distr1 FOR VALUES WITH (MODULUS 2, REMAINDER 0)
+SERVER loopback OPTIONS (table_name 'base1');
+CREATE FOREIGN TABLE distr1_p2 PARTITION OF distr1 FOR VALUES WITH (MODULUS 2, REMAINDER 1)
+SERVER loopback OPTIONS (table_name 'base2');
+
+CREATE TABLE distr2 (i int, j int, k text) PARTITION BY HASH (i);
+CREATE TABLE base3 (i int, j int, k text);
+CREATE TABLE base4 (i int, j int, k text);
+CREATE FOREIGN TABLE distr2_p1 PARTITION OF distr2 FOR VALUES WITH (MODULUS 2, REMAINDER 0)
+SERVER loopback OPTIONS (table_name 'base3');
+CREATE FOREIGN TABLE distr2_p2 PARTITION OF distr2 FOR VALUES WITH (MODULUS 2, REMAINDER 1)
+SERVER loopback OPTIONS (table_name 'base4');
+
+INSERT INTO distr1
+SELECT i, i*10, 'data_' || i FROM generate_series(1, 1000) i;
+
+INSERT INTO distr2
+SELECT i, i*10, 'data_' || i FROM generate_series(1, 100) i;
+
+ANALYZE distr1_p1;
+ANALYZE distr1_p2;
+ANALYZE distr2_p1;
+ANALYZE distr2_p2;
+
+SET enable_partitionwise_join TO ON;
+
+-- Test joins with async Merge Append
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM distr1, distr2 WHERE distr1.i=distr2.i AND distr2.j > 90 and distr2.k like 'data%'
+ORDER BY distr2.i LIMIT 10;
+SELECT * FROM distr1, distr2 WHERE distr1.i=distr2.i AND distr2.j > 90 and distr2.k like 'data%'
+ORDER BY distr2.i LIMIT 10;
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM distr1 LEFT JOIN distr2 ON distr1.i=distr2.i AND distr2.k like 'data%' WHERE  distr1.i > 90
+ORDER BY distr1.i LIMIT 20;
+SELECT * FROM distr1 LEFT JOIN distr2 ON  distr1.i=distr2.i AND distr2.k like 'data%' WHERE distr1.i > 90
+ORDER BY distr1.i LIMIT 20;
+
+-- Test pruning with async Merge Append
+DELETE FROM distr2;
+INSERT INTO distr2
+SELECT i%10, i*10, 'data_' || i FROM generate_series(1, 1000) i;
+
+DEALLOCATE ALL;
+SET plan_cache_mode TO force_generic_plan;
+PREPARE async_pt_query (int, int) AS
+  SELECT * FROM distr2 WHERE i = ANY(ARRAY[$1, $2])
+  ORDER BY i,j
+  LIMIT 10;
+EXPLAIN (VERBOSE, COSTS OFF)
+	EXECUTE async_pt_query(1, 1);
+EXECUTE async_pt_query(1, 1);
+RESET plan_cache_mode;
+
+RESET enable_partitionwise_join;
+
+DROP TABLE distr1, distr2, base1, base2, base3, base4;
 
 ALTER SERVER loopback OPTIONS (DROP async_capable);
 ALTER SERVER loopback2 OPTIONS (DROP async_capable);
