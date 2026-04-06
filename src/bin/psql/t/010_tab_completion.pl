@@ -347,6 +347,35 @@ check_completion(
 
 clear_query();
 
+# check INSERT ... SET completes column names, not GUC names
+check_completion(
+	"INSERT INTO tab1 SET c\t\t",
+	qr/c1 +c2/,
+	"complete INSERT INTO <table> SET with column names");
+
+clear_query();
+
+check_completion(
+	"INSERT INTO tab1 SET c1 \t",
+	qr/INSERT INTO tab1 SET c1 = /,
+	"complete INSERT INTO <table> SET <column> with =");
+
+clear_query();
+
+check_completion(
+	"INSERT INTO tab1 OVERRIDING SYSTEM VALUE SET c\t\t",
+	qr/c1 +c2/,
+	"complete INSERT ... OVERRIDING ... VALUE SET with column names");
+
+clear_query();
+
+check_completion(
+	"INSERT INTO tab1 OVERRIDING SYSTEM VALUE SET c1 \t",
+	qr/INSERT INTO tab1 OVERRIDING SYSTEM VALUE SET c1 = /,
+	"complete INSERT ... OVERRIDING ... VALUE SET <column> with =");
+
+clear_query();
+
 # check VersionedQuery infrastructure
 check_completion(
 	"DROP PUBLIC\t \t\t",
