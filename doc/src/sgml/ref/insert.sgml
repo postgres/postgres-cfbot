@@ -24,7 +24,9 @@ PostgreSQL documentation
 [ WITH [ RECURSIVE ] <replaceable class="parameter">with_query</replaceable> [, ...] ]
 INSERT INTO <replaceable class="parameter">table_name</replaceable> [ AS <replaceable class="parameter">alias</replaceable> ] [ ( <replaceable class="parameter">column_name</replaceable> [, ...] ) ]
     [ OVERRIDING { SYSTEM | USER } VALUE ]
-    { DEFAULT VALUES | VALUES ( { <replaceable class="parameter">expression</replaceable> | DEFAULT } [, ...] ) [, ...] | <replaceable class="parameter">query</replaceable> }
+    { DEFAULT VALUES | VALUES ( { <replaceable class="parameter">expression</replaceable> | DEFAULT } [, ...] ) [, ...] | <replaceable class="parameter">query</replaceable> |
+      SET <replaceable class="parameter">column_name</replaceable> = { <replaceable class="parameter">expression</replaceable> | DEFAULT } [, ...] |
+      SET ( <replaceable class="parameter">column_name</replaceable> = { <replaceable class="parameter">expression</replaceable> | DEFAULT } [, ...] ) [, ...] }
     [ ON CONFLICT [ <replaceable class="parameter">conflict_target</replaceable> ] <replaceable class="parameter">conflict_action</replaceable> ]
     [ RETURNING [ WITH ( { OLD | NEW } AS <replaceable class="parameter">output_alias</replaceable> [, ...] ) ]
                 { * | <replaceable class="parameter">output_expression</replaceable> [ [ AS ] <replaceable class="parameter">output_name</replaceable> ] } [, ...] ]
@@ -63,6 +65,29 @@ INSERT INTO <replaceable class="parameter">table_name</replaceable> [ AS <replac
    <literal>VALUES</literal> clause or <replaceable>query</replaceable>.  The values
    supplied by the <literal>VALUES</literal> clause or <replaceable>query</replaceable> are
    associated with the explicit or implicit column list left-to-right.
+  </para>
+
+  <para>
+   As an alternative to the <literal>VALUES</literal> clause, you can use the
+   <literal>SET</literal> clause to specify column values using named
+   assignments. The <literal>SET</literal> clause has the form
+   <literal>SET <replaceable>column_name</replaceable> = <replaceable>expression</replaceable></literal>,
+   with multiple column assignments separated by commas. This syntax is
+   particularly convenient when inserting a single row with values for
+   specific columns, as it eliminates the need to specify a separate
+   column list. When using <literal>SET</literal>, columns not mentioned
+   will receive their default values or NULL. The <literal>SET</literal>
+   syntax cannot be combined with an explicit column list.
+  </para>
+
+  <para>
+   For multi-row inserts, the <literal>SET</literal> clause uses parentheses
+   to group each row's assignments:
+   <literal>SET (col1=val1, col2=val2), (col1=val3, col2=val4)</literal>.
+   Each row can specify a different set of columns; columns omitted from
+   a particular row will receive their default value or NULL. Column names
+   are matched across rows by name rather than position, so the order of
+   assignments within each row does not need to be consistent.
   </para>
 
   <para>
@@ -733,6 +758,59 @@ INSERT INTO films DEFAULT VALUES;
 INSERT INTO films (code, title, did, date_prod, kind) VALUES
     ('B6717', 'Tampopo', 110, '1985-02-10', 'Comedy'),
     ('HG120', 'The Dinner Game', 140, DEFAULT, 'Comedy');
+</programlisting>
+  </para>
+
+  <para>
+   To insert a single row using the <literal>SET</literal> syntax:
+
+<programlisting>
+INSERT INTO films SET code='UA502', title='Bananas', did=105,
+    date_prod='1971-07-13', kind='Comedy', len='82 minutes';
+</programlisting>
+  </para>
+
+  <para>
+   This example uses the <literal>SET</literal> syntax with
+   <literal>DEFAULT</literal> for some columns:
+
+<programlisting>
+INSERT INTO films SET code='T_601', title='Yojimbo', did=106,
+    date_prod=DEFAULT, kind='Drama';
+</programlisting>
+  </para>
+
+  <para>
+   The <literal>SET</literal> syntax can be used with expressions
+   and functions:
+
+<programlisting>
+INSERT INTO films SET code='HG120', title=upper('the dinner game'),
+    did=140, date_prod=current_date, kind='Comedy';
+</programlisting>
+  </para>
+
+  <para>
+   To insert multiple rows using the <literal>SET</literal> syntax,
+   enclose each row's assignments in parentheses:
+
+<programlisting>
+INSERT INTO films SET
+    (code='B6717', title='Tampopo', did=110, date_prod='1985-02-10', kind='Comedy'),
+    (code='HG120', title='The Dinner Game', did=140, date_prod=DEFAULT, kind='Comedy');
+</programlisting>
+  </para>
+
+  <para>
+   In multi-row <literal>SET</literal> syntax, each row can specify
+   different columns. Columns not specified in a row will use their
+   default values:
+
+<programlisting>
+INSERT INTO films SET
+    (code='UA502', title='Bananas', did=105, kind='Comedy', len='82 minutes'),
+    (code='T_601', title='Yojimbo', did=106, kind='Drama');
+-- The second row's len and date_prod columns will receive DEFAULT values
 </programlisting>
   </para>
 
