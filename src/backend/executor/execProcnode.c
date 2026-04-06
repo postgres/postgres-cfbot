@@ -465,7 +465,7 @@ ExecProcNodeFirst(PlanState *node)
 	 * have ExecProcNode() directly call the relevant function from now on.
 	 */
 	if (node->instrument)
-		node->ExecProcNode = ExecProcNodeInstr;
+		node->ExecProcNode = InstrNodeSetupExecProcNode(node->instrument);
 	else
 		node->ExecProcNode = node->ExecProcNodeReal;
 

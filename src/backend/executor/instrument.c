@@ -74,19 +74,27 @@ InstrInitOptions(Instrumentation *instr, int instrument_options)
 	instr->need_timer = (instrument_options & INSTRUMENT_TIMER) != 0;
 }
 
-inline void
-InstrStart(Instrumentation *instr)
+static inline void
+InstrStartTimer(Instrumentation *instr)
 {
-	if (instr->need_timer)
-	{
-		if (!INSTR_TIME_IS_ZERO(instr->starttime))
-			elog(ERROR, "InstrStart called twice in a row");
-		else
-			INSTR_TIME_SET_CURRENT_FAST(instr->starttime);
-	}
+	if (!INSTR_TIME_IS_ZERO(instr->starttime))
+		elog(ERROR, "InstrStart called twice in a row");
 
-	if (instr->need_stack)
-		InstrPushStack(instr);
+	INSTR_TIME_SET_CURRENT_FAST(instr->starttime);
+}
+
+static inline void
+InstrStopTimer(Instrumentation *instr, instr_time *accum_time)
+{
+	instr_time	endtime;
+
+	if (INSTR_TIME_IS_ZERO(instr->starttime))
+		elog(ERROR, "InstrStop called without start");
+
+	INSTR_TIME_SET_CURRENT_FAST(endtime);
+	INSTR_TIME_ACCUM_DIFF(*accum_time, endtime, instr->starttime);
+
+	INSTR_TIME_SET_ZERO(instr->starttime);
 }
 
 /*
@@ -96,23 +104,23 @@ InstrStart(Instrumentation *instr)
 static inline void
 InstrStopCommon(Instrumentation *instr, instr_time *accum_time)
 {
-	instr_time	endtime;
-
 	/* update the time only if the timer was requested */
 	if (instr->need_timer)
-	{
-		if (INSTR_TIME_IS_ZERO(instr->starttime))
-			elog(ERROR, "InstrStop called without start");
-
-		INSTR_TIME_SET_CURRENT_FAST(endtime);
-		INSTR_TIME_ACCUM_DIFF(*accum_time, endtime, instr->starttime);
-
-		INSTR_TIME_SET_ZERO(instr->starttime);
-	}
+		InstrStopTimer(instr, accum_time);
 
 	/* pop the stack, unless InstrStopFinalize previously cleaned up */
 	if (instr->on_stack)
 		InstrPopStack(instr);
+}
+
+void
+InstrStart(Instrumentation *instr)
+{
+	if (instr->need_timer)
+		InstrStartTimer(instr);
+
+	if (instr->need_stack)
+		InstrPushStack(instr);
 }
 
 void
@@ -462,31 +470,29 @@ InstrInitNode(NodeInstrumentation *instr, int instrument_options, bool async_mod
 	instr->async_mode = async_mode;
 }
 
-/* Entry to a plan node */
-inline void
+/* Entry to a plan node. If you modify this, check InstrNodeSetupExecProcNode. */
+void
 InstrStartNode(NodeInstrumentation *instr)
 {
 	InstrStart(&instr->instr);
 }
 
-
-/* Exit from a plan node */
-inline void
-InstrStopNode(NodeInstrumentation *instr, double nTuples)
+/*
+ * Count the tuples returned by a plan node call, and remember the time it
+ * took to get to the first tuple of this cycle (which InstrEndLoop turns into
+ * the node's startup time).  Must be called after the node's timer has been
+ * stopped for this call.
+ *
+ * Shared by InstrStopNode and the specialized ExecProcNode wrappers below,
+ * so that both account in exactly the same way.
+ */
+static inline void
+InstrCountNodeTuples(NodeInstrumentation *instr, double nTuples)
 {
 	double		save_tuplecount = instr->tuplecount;
 
 	/* count the returned tuples */
 	instr->tuplecount += nTuples;
-
-	/*
-	 * Note that in contrast to InstrStop() the time is accumulated into
-	 * NodeInstrumentation->counter, with total only getting updated in
-	 * InstrEndLoop.  We need the separate counter variable because we need to
-	 * calculate start-up time for the first tuple in each cycle, and then
-	 * accumulate it together.
-	 */
-	InstrStopCommon(&instr->instr, &instr->counter);
 
 	/* Is this the first tuple of this cycle? */
 	if (!instr->running)
@@ -505,26 +511,114 @@ InstrStopNode(NodeInstrumentation *instr, double nTuples)
 	}
 }
 
+/* Exit from a plan node */
+void
+InstrStopNode(NodeInstrumentation *instr, double nTuples)
+{
+	/*
+	 * Note that in contrast to InstrStop() the time is accumulated into
+	 * NodeInstrumentation->counter, with total only getting updated in
+	 * InstrEndLoop.  We need the separate counter variable because we need to
+	 * calculate start-up time for the first tuple in each cycle, and then
+	 * accumulate it together.
+	 */
+	InstrStopCommon(&instr->instr, &instr->counter);
+
+	InstrCountNodeTuples(instr, nTuples);
+}
+
 /*
- * ExecProcNode wrapper that performs instrumentation calls.  By keeping
- * this a separate function, we avoid overhead in the normal case where
+ * ExecProcNode wrappers that perform instrumentation calls.  By keeping
+ * them in separate functions, we avoid overhead in the normal case where
  * no instrumentation is wanted.
+ *
+ * These functions are equivalent to running ExecProcNodeReal wrapped in
+ * InstrStartNode and InstrStopNode, but avoid the conditionals in the hot path
+ * by checking the instrumentation options when the ExecProcNode pointer gets
+ * first set, and then using a special-purpose function for each. This results
+ * in a more optimized set of compiled instructions.
  *
  * This is implemented in instrument.c as all the functions it calls directly
  * are here, allowing them to be inlined even when not using LTO.
  */
-TupleTableSlot *
-ExecProcNodeInstr(PlanState *node)
+
+/* Simplified pop: restore saved state instead of re-deriving from array */
+static inline void
+InstrPopStackTo(Instrumentation *prev)
 {
+	Assert(instr_stack.stack_size > 0);
+	Assert(instr_stack.stack_size > 1 ? instr_stack.entries[instr_stack.stack_size - 2] == prev : &instr_top == prev);
+	instr_stack.entries[instr_stack.stack_size - 1]->on_stack = false;
+	instr_stack.stack_size--;
+	instr_stack.current = prev;
+}
+
+static pg_always_inline TupleTableSlot *
+ExecProcNodeInstr(PlanState *node, bool need_timer, bool need_stack)
+{
+	NodeInstrumentation *instr = node->instrument;
+	Instrumentation *prev = instr_stack.current;
 	TupleTableSlot *result;
 
-	InstrStartNode(node->instrument);
+	if (need_stack)
+		InstrPushStack(&instr->instr);
+	if (need_timer)
+		InstrStartTimer(&instr->instr);
 
 	result = node->ExecProcNodeReal(node);
 
-	InstrStopNode(node->instrument, TupIsNull(result) ? 0.0 : 1.0);
+	if (need_timer)
+		InstrStopTimer(&instr->instr, &instr->counter);
+	if (need_stack)
+		InstrPopStackTo(prev);
+
+	InstrCountNodeTuples(instr, TupIsNull(result) ? 0.0 : 1.0);
 
 	return result;
+}
+
+static TupleTableSlot *
+ExecProcNodeInstrFull(PlanState *node)
+{
+	return ExecProcNodeInstr(node, true, true);
+}
+
+static TupleTableSlot *
+ExecProcNodeInstrRowsStackOnly(PlanState *node)
+{
+	return ExecProcNodeInstr(node, false, true);
+}
+
+static TupleTableSlot *
+ExecProcNodeInstrRowsTimerOnly(PlanState *node)
+{
+	return ExecProcNodeInstr(node, true, false);
+}
+
+static TupleTableSlot *
+ExecProcNodeInstrRowsOnly(PlanState *node)
+{
+	return ExecProcNodeInstr(node, false, false);
+}
+
+/*
+ * Returns an ExecProcNode wrapper that performs instrumentation calls,
+ * tailored to the instrumentation options enabled for the node.
+ */
+ExecProcNodeMtd
+InstrNodeSetupExecProcNode(NodeInstrumentation *instr)
+{
+	bool		need_timer = instr->instr.need_timer;
+	bool		need_stack = instr->instr.need_stack;
+
+	if (need_timer && need_stack)
+		return ExecProcNodeInstrFull;
+	else if (need_stack)
+		return ExecProcNodeInstrRowsStackOnly;
+	else if (need_timer)
+		return ExecProcNodeInstrRowsTimerOnly;
+	else
+		return ExecProcNodeInstrRowsOnly;
 }
 
 /* Update tuple count */
