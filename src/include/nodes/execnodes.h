@@ -53,6 +53,7 @@ typedef struct Instrumentation Instrumentation;
 typedef struct pairingheap pairingheap;
 typedef struct PlanState PlanState;
 typedef struct QueryEnvironment QueryEnvironment;
+typedef struct QueryInstrumentation QueryInstrumentation;
 typedef struct RelationData *Relation;
 typedef Relation *RelationPtr;
 typedef struct ScanKeyData ScanKeyData;
@@ -732,6 +733,7 @@ typedef struct EState
 
 	int			es_top_eflags;	/* eflags passed to ExecutorStart */
 	int			es_instrument;	/* OR of InstrumentOption flags */
+	QueryInstrumentation *es_query_instr;	/* query-level instrumentation */
 	bool		es_finished;	/* true when ExecutorFinish is done */
 
 	List	   *es_exprcontexts;	/* List of ExprContexts within EState */

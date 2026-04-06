@@ -1120,14 +1120,25 @@ ExecParallelRetrieveInstrumentation(PlanState *planstate,
 	instrument = GetInstrumentationArray(instrumentation);
 	instrument += i * instrumentation->num_workers;
 	for (n = 0; n < instrumentation->num_workers; ++n)
+	{
 		InstrAggNode(planstate->instrument, &instrument[n]);
+
+		/*
+		 * The worker's per-node activity is not part of the query-level stats
+		 * that InstrAccumParallelQuery receives (the worker does not roll up
+		 * its nodes, to avoid double counting in EXPLAIN), so this is the
+		 * point where it gets imported.
+		 */
+		InstrAccumWorkerUsage(&instrument[n].instr.bufusage,
+							  &instrument[n].instr.walusage);
+	}
 
 	/*
 	 * Also store the per-worker detail.
 	 *
-	 * Worker instrumentation should be allocated in the same context as the
-	 * regular instrumentation information, which is the per-query context.
-	 * Switch into per-query memory context.
+	 * Ensure worker instrumentation is allocated in the per-query context. We
+	 * don't need to place this in the instrumentation context since no more
+	 * stack-based instrumentation work is being done.
 	 */
 	oldcontext = MemoryContextSwitchTo(planstate->state->es_query_cxt);
 	ibytes = mul_size(instrumentation->num_workers, sizeof(NodeInstrumentation));
@@ -1286,8 +1297,12 @@ ExecParallelCleanup(ParallelExecutorInfo *pei)
 {
 	/* Accumulate instrumentation, if any. */
 	if (pei->instrumentation)
+	{
 		ExecParallelRetrieveInstrumentation(pei->planstate,
 											pei->instrumentation);
+
+		ExecFinalizeWorkerInstrumentation(pei->planstate);
+	}
 
 	/* Accumulate JIT instrumentation, if any. */
 	if (pei->jit_instrumentation)
@@ -1529,6 +1544,7 @@ void
 ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 {
 	FixedParallelExecutorState *fpes;
+	QueryInstrumentation *instr;
 	BufferUsage *buffer_usage;
 	WalUsage   *wal_usage;
 	DestReceiver *receiver;
@@ -1589,7 +1605,7 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 	 * leader, which also doesn't count buffer accesses and WAL activity that
 	 * occur during executor startup.
 	 */
-	InstrStartParallelQuery();
+	instr = InstrStartParallelQuery();
 
 	/*
 	 * Run the plan.  If we specified a tuple bound, be careful not to demand
@@ -1605,7 +1621,8 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 	/* Report buffer/WAL usage during parallel execution. */
 	buffer_usage = shm_toc_lookup(toc, PARALLEL_KEY_BUFFER_USAGE, false);
 	wal_usage = shm_toc_lookup(toc, PARALLEL_KEY_WAL_USAGE, false);
-	InstrEndParallelQuery(&buffer_usage[ParallelWorkerNumber],
+	InstrEndParallelQuery(instr,
+						  &buffer_usage[ParallelWorkerNumber],
 						  &wal_usage[ParallelWorkerNumber]);
 
 	/* Report instrumentation data if any instrumentation options are set. */
