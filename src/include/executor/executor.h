@@ -235,6 +235,7 @@ ExecGetJunkAttribute(TupleTableSlot *slot, AttrNumber attno, bool *isNull)
 /*
  * prototypes from functions in execMain.c
  */
+typedef struct QueryInstrumentation QueryInstrumentation;
 extern void ExecutorStart(QueryDesc *queryDesc, int eflags);
 extern void standard_ExecutorStart(QueryDesc *queryDesc, int eflags);
 extern void ExecutorRun(QueryDesc *queryDesc,
@@ -256,7 +257,8 @@ extern void InitResultRelInfo(ResultRelInfo *resultRelInfo,
 							  Relation resultRelationDesc,
 							  Index resultRelationIndex,
 							  ResultRelInfo *partition_root_rri,
-							  int instrument_options);
+							  int instrument_options,
+							  QueryInstrumentation *qinstr);
 extern ResultRelInfo *ExecGetTriggerResultRel(EState *estate, Oid relid,
 											  ResultRelInfo *rootRelInfo);
 extern List *ExecGetAncestorResultRels(EState *estate, ResultRelInfo *resultRelInfo);
@@ -303,6 +305,8 @@ extern void ExecSetExecProcNode(PlanState *node, ExecProcNodeMtd function);
 extern Node *MultiExecProcNode(PlanState *node);
 extern void ExecEndNode(PlanState *node);
 extern void ExecShutdownNode(PlanState *node);
+extern void ExecFinalizeNodeInstrumentation(PlanState *node);
+extern void ExecFinalizeWorkerInstrumentation(PlanState *node);
 extern void ExecSetTupleBound(int64 tuples_needed, PlanState *child_node);
 
 /*
