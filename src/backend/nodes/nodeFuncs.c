@@ -4370,6 +4370,8 @@ raw_expression_tree_walker_impl(Node *node,
 					return true;
 				if (WALK(stmt->selectStmt))
 					return true;
+				if (WALK(stmt->setClause))
+					return true;
 				if (WALK(stmt->onConflictClause))
 					return true;
 				if (WALK(stmt->returningClause))
