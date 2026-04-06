@@ -915,7 +915,7 @@ create_edata_for_relation(LogicalRepRelMapEntry *rel)
 	 * Use Relation opened by logicalrep_rel_open() instead of opening it
 	 * again.
 	 */
-	InitResultRelInfo(resultRelInfo, rel->localrel, 1, NULL, 0);
+	InitResultRelInfo(resultRelInfo, rel->localrel, 1, NULL, 0, NULL);
 
 	/*
 	 * We put the ResultRelInfo in the es_opened_result_relations list, even

@@ -75,6 +75,7 @@ typedef uint32 ResourceReleasePriority;
 #define RELEASE_PRIO_SNAPSHOT_REFS			500
 #define RELEASE_PRIO_FILES					600
 #define RELEASE_PRIO_WAITEVENTSETS			700
+#define RELEASE_PRIO_INSTRUMENTATION		800
 
 /* 0 is considered invalid */
 #define RELEASE_PRIO_FIRST					1

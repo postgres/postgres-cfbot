@@ -1,0 +1,253 @@
+src/backend/executor/README.instrument
+
+Instrumentation
+===============
+
+The instrumentation subsystem measures time, buffer usage and WAL activity
+during query execution and other similar activities.  It is used by
+EXPLAIN ANALYZE, pg_stat_statements, and other consumers that need
+activity and/or timing metrics over a section of code.
+
+The design has two central goals:
+
+* Make it cheap to measure activity in a section of code, even when
+  that section is called many times and the aggregate is what is used
+  (as is the case with per-node instrumentation in the executor)
+
+* Ensure nested instrumentation accurately measures activity/timing,
+  even when execution is aborted due to errors being thrown.
+
+The key data structures are defined in src/include/executor/instrument.h
+and the implementation lives in src/backend/executor/instrument.c.
+
+
+Instrumentation Options
+-----------------------
+
+Callers specify what to measure with a bitmask of InstrumentOption flags:
+
+  INSTRUMENT_ROWS     -- row counts only (used with NodeInstrumentation)
+  INSTRUMENT_TIMER    -- wall-clock timing and row counts
+  INSTRUMENT_BUFFERS  -- buffer hit/read/dirtied/written counts and I/O time
+  INSTRUMENT_WAL      -- WAL records, FPI, bytes
+
+INSTRUMENT_BUFFERS and INSTRUMENT_WAL utilize the instrumentation stack
+(described below) for efficient handling of counter values.
+
+
+Struct Hierarchy
+----------------
+
+There are the following instrumentation structs, each specialized for a
+different scope:
+
+Instrumentation        Base struct.  Holds timing and buffer/WAL counters.
+
+QueryInstrumentation   Extends Instrumentation for query-level tracking.  When
+                       stack-based tracking is enabled, it owns a dedicated
+                       MemoryContext and uses the ResourceOwner mechanism for
+                       abort cleanup.
+
+NodeInstrumentation    Extends Instrumentation for per-plan-node statistics
+                       (startup time, tuple counts, loop counts, etc).
+
+TriggerInstrumentation Extends Instrumentation with a firing count.
+
+
+Stack-based instrumentation
+===========================
+
+For tracking WAL or buffer usage counters, the specialized stack-based
+instrumentation is used.
+
+A simple approach to measuring buffer/WAL activity in a code section could be
+to have a set of global counters, snapshot all the counters at the start, and
+diff them at the end. But, this is expensive in practice: BufferUsage alone
+has many fields, and the diff must be computed for every InstrStartNode /
+InstrStopNode cycle.
+
+An alternative is to write counter updates directly into the struct that
+should receive them, avoiding the diff.  But that has two complexities: Low-level
+code such as the buffer manager, has no direct pointers to higher level
+structs, such as plan nodes tracking buffer usage. And instrumentation is often
+nested: We might both be interested in the aggregate buffer usage of a query, and
+the individual per-node details. Stack-based instrumentation solves for that:
+
+At all times, there is a stack that tracks which Instrumentation is currently
+active.  The stack is represented by instr_stack, a per-backend global
+that holds a dynamic array of Instrumentation pointers.  The field
+instr_stack.current always points to the current stack entry that should
+be updated when activity occurs.  When the stack array is empty, the
+current stack points to instr_top.
+
+For example, if a backend has two portals open, the overall nesting of
+Instrumentation and their respective InstrStart/InstrStop calls creates a
+tree-like structure like this:
+
+    Session (instr_top)
+     |
+     +-- Query A (QueryInstrumentation)
+     |    |
+     |    +-- NestLoop (NodeInstrumentation)
+     |         |
+     |         +-- Seq Scan A (NodeInstrumentation)
+     |         +-- Seq Scan B (NodeInstrumentation)
+     |
+     +-- Query B (QueryInstrumentation)
+          |
+          +-- Seq Scan C (NodeInstrumentation)
+
+While executing Seq Scan B, the stack looks like:
+
+    instr_top              (implicit bottom, not in the entries array)
+    0: Query A
+    1: NestLoop
+    2: Seq Scan B          <-- instr_stack.current
+
+When no query is running, the stack is empty (stack_size == 0) and
+instr_stack.current points to instr_top.
+
+Any buffer or WAL counter update (via the INSTR_BUFUSAGE_* and
+INSTR_WALUSAGE_* macros in the buffer manager, WAL insertion code, etc.)
+writes directly into instr_stack.current.  Each instrumentation node starts
+zeroed, so the values it accumulates while on top of the stack represent
+exactly the activity that occurred during that time.
+
+Every Instrumentation node (except for instr_top) has a target, or parent, it
+will be accumulated into, which is typically the Instrumentation that was the
+current stack entry when it was created.
+
+For example, when Seq Scan A gets finalized in regular execution via ExecutorFinish,
+its instrumentation data gets added to the immediate parent in
+the execution tree, the NestLoop, which will then get added to Query A's
+QueryInstrumentation, which then accumulates to the parent.
+
+While we can typically think of this as a tree, the NodeInstrumentation
+underneath a particular QueryInstrumentation could behave differently --
+for example, it could propagate directly to the QueryInstrumentation, in
+order to not show cumulative numbers in EXPLAIN ANALYZE.
+
+Note these relationships are partially implicit, especially when it comes
+to NodeInstrumentation. Each QueryInstrumentation maintains a list of its
+unfinalized child nodes.  The parent of a QueryInstrumentation itself is
+determined by the stack (see below): when a query is finalized or cleaned
+up on abort, its counters are accumulated to whatever entry is then current
+on the stack, which is typically instr_top.
+
+
+Finalization and Abort Safety
+=============================
+
+Finalization is the process of rolling up a node's buffer/WAL counters to
+its parent.  In normal execution, nodes are pushed onto the stack when they
+start and popped when they stop; at finalization time their accumulated
+counters are added to the parent.
+
+Due to the use of longjmp for error handling, functions can exit abruptly
+without executing their normal cleanup code.  On abort, two things need
+to happen:
+
+1. The stack is reset to the level saved at the start of the aborting
+   (sub-)transaction level.  This ensures that we don't later try to update
+   counters on a freed stack entry.  We also need to ensure that the stack
+   entry that was current before a particular Instrumentation started, is
+   current again after it stops.
+
+2. Finalize all affected Instrumentation nodes, rolling up their counters
+   to the innermost surviving Instrumentation, so that data is not lost.
+
+For example, if Seq Scan B aborts while the stack is:
+
+    instr_top              (implicit bottom)
+    0: Query A
+    1: NestLoop
+    2: Seq Scan B
+
+The abort handler for Query A accumulates all unfinalized children (Seq
+Scan A, Seq Scan B, NestLoop) directly into Query A's counters, then
+unwinds the instrumentation stack and accumulates Query A's counters to
+instr_top.
+
+Note that on abort the children do not accumulate through each other (Seq
+Scan B -> NestLoop -> Query A); they all accumulate directly to their
+parent QueryInstrumentation.  This means the order in which children are
+released does not matter -- this is important because ResourceOwner cleanup
+does not guarantee a particular release order.  The per-node breakdown is lost,
+but the instrumentation active when the query was started (instr_top in the
+above example) survives the abort, and its counters include the activity.
+
+If multiple QueryInstrumentations are active on the stack (e.g. nested
+portals), the abort handler of each uses InstrStopFinalize() to accumulate
+the statistics to the parent entry of either the entry being released, or a
+previously released entry if it was higher up in the stack, so they compose
+correctly regardless of release order.
+
+There are two mechanisms for achieving abort safety:
+
+* Resource Owner (QueryInstrumentation): registers with the current
+  ResourceOwner at start.  On transaction abort, the resource owner system
+  calls the release callback, which walks unfinalized child entries,
+  accumulates their data, unwinds the stack, and destroys the dedicated
+  memory context (freeing the QueryInstrumentation and all child
+  allocations as a unit).  This is the recommended approach when the
+  instrumented code already has an appropriate resource owner (e.g. it
+  runs inside a portal).  The query executor uses this path.
+
+* PG_FINALLY (base Instrumentation): when no suitable resource owner
+  exists, or when the caller wants to inspect the instrumentation data
+  even after an error, the base Instrumentation can be used with a
+  PG_TRY/PG_FINALLY block that calls InstrStopFinalize().
+
+Both mechanisms add overhead, so neither is suitable for high-frequency
+instrumentation like per-node measurements in the executor.  Instead,
+plan node and trigger children rely on their parent QueryInstrumentation
+for abort safety: they are allocated in the parent's memory context and
+registered in its unfinalized-entries list, so the parent's abort handler
+recovers their data automatically.  In normal execution, children are
+finalized explicitly by the caller.
+
+Parallel Query
+--------------
+
+Regardless of whether per-node instrumentation is active, each parallel
+worker measures the buffer and WAL activity of its whole parallel section
+with a QueryInstrumentation entry (InstrStartParallelQuery), and copies the
+totals into dynamic shared memory at the end (InstrEndParallelQuery).  The
+leader accumulates these totals into its own stack, so that query-level
+consumers such as EXPLAIN and pg_stat_statements see the complete activity.
+
+When per-node instrumentation is active, the worker's per-node stats are
+additionally copied into dynamic shared memory and aggregated into the
+leader's nodes through InstrAggNode(), which the leader then rolls up as
+usual.  To avoid double counting, the worker does not roll up its own nodes
+into its query entry.
+
+
+Memory Handling
+===============
+
+Instrumentation objects that use the stack must survive until finalization
+runs, including the abort case.  To ensure this, QueryInstrumentation
+creates a dedicated "Instrumentation" MemoryContext (instr_cxt).  All child
+instrumentation (nodes, triggers) should be allocated in this context.
+
+The parent of instr_cxt follows ownership.  It is created as a child of the
+context current at InstrQueryAlloc (the per-query context in the executor),
+so that it is freed together with the caller's state if the caller is
+abandoned before anything was measured, e.g. when ExecutorStart fails.  The
+first InstrQueryStart moves it under TopMemoryContext and registers it with
+the current ResourceOwner, which stays responsible for it until
+InstrQueryStopFinalize; this is necessary because the abort cleanup runs
+after portal memory has already been released (see AtAbort_Portals), so the
+context must not depend on it.  Note that InstrQueryStop does not release
+the registration, so an abort between two start/stop pairs, e.g. between
+fetches from a cursor, still accumulates what was measured so far.
+
+On successful completion, InstrQueryStopFinalize releases the registration
+and reparents instr_cxt to CurrentMemoryContext so its lifetime is tied to
+the caller's context again.  On abort, the ResourceOwner cleanup frees it
+after accumulating the instrumentation data to the current stack entry
+after resetting the stack.
+
+When the stack is not needed (timer/rows only), Instrumentation allocations
+happen in CurrentMemoryContext and no dedicated context is created.
