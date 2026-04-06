@@ -1268,6 +1268,7 @@ parallel_vacuum_main(dsm_segment *seg, shm_toc *toc)
 	PVIndStats *indstats;
 	PVShared   *shared;
 	TidStore   *dead_items;
+	QueryInstrumentation *instr;
 	BufferUsage *buffer_usage;
 	WalUsage   *wal_usage;
 	int			nindexes;
@@ -1382,7 +1383,7 @@ parallel_vacuum_main(dsm_segment *seg, shm_toc *toc)
 	error_context_stack = &errcallback;
 
 	/* Prepare to track buffer usage during parallel execution */
-	InstrStartParallelQuery();
+	instr = InstrStartParallelQuery();
 
 	/* Register this worker for vacuum progress reporting */
 	pgstat_progress_start_command(PROGRESS_COMMAND_VACUUM, shared->relid);
@@ -1393,7 +1394,8 @@ parallel_vacuum_main(dsm_segment *seg, shm_toc *toc)
 	/* Report buffer/WAL usage during parallel execution */
 	buffer_usage = shm_toc_lookup(toc, PARALLEL_VACUUM_KEY_BUFFER_USAGE, false);
 	wal_usage = shm_toc_lookup(toc, PARALLEL_VACUUM_KEY_WAL_USAGE, false);
-	InstrEndParallelQuery(&buffer_usage[ParallelWorkerNumber],
+	InstrEndParallelQuery(instr,
+						  &buffer_usage[ParallelWorkerNumber],
 						  &wal_usage[ParallelWorkerNumber]);
 
 	/* Report any remaining cost-based vacuum delay time */

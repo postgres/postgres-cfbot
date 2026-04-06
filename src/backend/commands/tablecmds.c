@@ -2153,7 +2153,7 @@ ExecuteTruncateGuts(List *explicit_rels,
 						  rel,
 						  0,	/* dummy rangetable index */
 						  NULL,
-						  0);
+						  0, NULL);
 		estate->es_opened_result_relations =
 			lappend(estate->es_opened_result_relations, resultRelInfo);
 		resultRelInfo++;
@@ -6366,7 +6366,8 @@ ATRewriteTable(AlteredTableInfo *tab, Oid OIDNewHeap)
 							  oldrel,
 							  0,	/* dummy rangetable index */
 							  NULL,
-							  estate->es_instrument);
+							  estate->es_instrument,
+							  estate->es_query_instr);
 			MemoryContextSwitchTo(oldcontext);
 		}
 
