@@ -11208,6 +11208,8 @@ get_windowfunc_expr_helper(WindowFunc *wfunc, deparse_context *context,
 		appendStringInfoChar(buf, '*');
 	else
 	{
+		if (wfunc->windistinct)
+			appendStringInfoString(buf, "DISTINCT ");
 		if (is_json_objectagg)
 		{
 			get_rule_expr((Node *) linitial(wfunc->args), context, false);
