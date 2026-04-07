@@ -26,6 +26,7 @@
 #include "optimizer/subselect.h"
 #include "optimizer/tlist.h"
 #include "parser/parse_relation.h"
+#include "parser/parse_type.h"
 #include "rewrite/rewriteManip.h"
 #include "tcop/utility.h"
 #include "utils/syscache.h"
@@ -498,6 +499,34 @@ add_rtes_to_flat_rtable(PlannerInfo *root, bool recursing)
 }
 
 /*
+ * Record relcache dependencies for RTE_FUNCTION entries whose declared result
+ * is a named composite type (or a domain over one).  ALTER TYPE {ADD | DROP |
+ * ALTER} ATTRIBUTE updates the composite type's pg_class row without changing
+ * OIDs of dependent functions, so plans must be rebuilt when the composite
+ * rowtype changes.  (Compare extract_query_dependencies_walker, which must
+ * stay in sync.)
+ */
+static void
+add_function_rte_relation_deps(PlannerGlobal *glob, const RangeTblEntry *rte)
+{
+	ListCell   *lc;
+
+	Assert(rte->rtekind == RTE_FUNCTION);
+
+	foreach(lc, rte->functions)
+	{
+		RangeTblFunction *rtfunc = (RangeTblFunction *) lfirst(lc);
+		Oid			typid;
+		Oid			typrelid;
+
+		typid = exprType(rtfunc->funcexpr);
+		typrelid = typeOrDomainTypeRelid(typid);
+		if (OidIsValid(typrelid))
+			glob->relationOids = lappend_oid(glob->relationOids, typrelid);
+	}
+}
+
+/*
  * Extract RangeTblEntries from a subquery that was never planned at all
  */
 
@@ -526,6 +555,8 @@ flatten_rtes_walker(Node *node, flatten_rtes_walker_context *cxt)
 		if (rte->rtekind == RTE_RELATION ||
 			(rte->rtekind == RTE_SUBQUERY && OidIsValid(rte->relid)))
 			add_rte_to_flat_rtable(cxt->glob, cxt->query->rteperminfos, rte);
+		else if (rte->rtekind == RTE_FUNCTION)
+			add_function_rte_relation_deps(cxt->glob, rte);
 		return false;
 	}
 	if (IsA(node, Query))
@@ -563,6 +594,9 @@ add_rte_to_flat_rtable(PlannerGlobal *glob, List *rteperminfos,
 					   RangeTblEntry *rte)
 {
 	RangeTblEntry *newrte;
+
+	if (rte->rtekind == RTE_FUNCTION)
+		add_function_rte_relation_deps(glob, rte);
 
 	/* flat copy to duplicate all the scalar fields */
 	newrte = palloc_object(RangeTblEntry);
@@ -3767,6 +3801,8 @@ extract_query_dependencies_walker(Node *node, PlannerInfo *context)
 				(rte->rtekind == RTE_NAMEDTUPLESTORE && OidIsValid(rte->relid)))
 				context->glob->relationOids =
 					lappend_oid(context->glob->relationOids, rte->relid);
+			else if (rte->rtekind == RTE_FUNCTION)
+				add_function_rte_relation_deps(context->glob, rte);
 		}
 
 		/* And recurse into the query's subexpressions */
