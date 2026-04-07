@@ -6258,8 +6258,7 @@ SELECT last_value FROM null_treatment_seq;
 DROP TABLE planets CASCADE;
 NOTICE:  drop cascades to view planets_view
 --
--- Test DISTINCT in window aggregates (parse/deparse plumbing only;
--- execution support is not yet implemented)
+-- Test DISTINCT in window aggregates
 --
 -- Should parse successfully and round-trip through a view definition
 CREATE TEMP VIEW window_distinct_view AS
@@ -6277,6 +6276,185 @@ SELECT ntile(DISTINCT 4) OVER () FROM tenk1; -- error
 ERROR:  DISTINCT is not implemented for non-aggregate window functions
 LINE 1: SELECT ntile(DISTINCT 4) OVER () FROM tenk1;
                ^
--- Execution fails with a clear executor-side error
-SELECT count(DISTINCT four) OVER (PARTITION BY ten) FROM tenk1; -- error
-ERROR:  DISTINCT is not yet implemented for window aggregates
+-- Basic DISTINCT whole-partition cases (should succeed)
+SELECT count(DISTINCT four) OVER (PARTITION BY ten)
+FROM tenk1 LIMIT 20;
+ count 
+-------
+     2
+     2
+     2
+     2
+     2
+     2
+     2
+     2
+     2
+     2
+     2
+     2
+     2
+     2
+     2
+     2
+     2
+     2
+     2
+     2
+(20 rows)
+
+-- DISTINCT with no PARTITION BY (whole single partition)
+SELECT x, sum(DISTINCT x % 3) OVER ()
+FROM generate_series(1, 9) g(x);
+ x | sum 
+---+-----
+ 1 |   3
+ 2 |   3
+ 3 |   3
+ 4 |   3
+ 5 |   3
+ 6 |   3
+ 7 |   3
+ 8 |   3
+ 9 |   3
+(9 rows)
+
+-- DISTINCT with explicit UNBOUNDED PRECEDING to UNBOUNDED FOLLOWING
+SELECT x, avg(DISTINCT x % 4) OVER (PARTITION BY x > 5
+  ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+FROM generate_series(1, 10) g(x);
+ x  |        avg         
+----+--------------------
+  1 | 1.5000000000000000
+  2 | 1.5000000000000000
+  3 | 1.5000000000000000
+  4 | 1.5000000000000000
+  5 | 1.5000000000000000
+  6 | 1.5000000000000000
+  7 | 1.5000000000000000
+  8 | 1.5000000000000000
+  9 | 1.5000000000000000
+ 10 | 1.5000000000000000
+(10 rows)
+
+-- DISTINCT with FILTER
+SELECT x,
+       count(DISTINCT x % 3) FILTER (WHERE x > 3) OVER (PARTITION BY x > 5)
+FROM generate_series(1, 10) g(x);
+ x  | count 
+----+-------
+  1 |     2
+  2 |     2
+  3 |     2
+  4 |     2
+  5 |     2
+  6 |     3
+  7 |     3
+  8 |     3
+  9 |     3
+ 10 |     3
+(10 rows)
+
+-- NULL handling
+SELECT x,
+       count(DISTINCT x) OVER ()
+FROM (VALUES (1),(2),(NULL),(2),(NULL),(1),(3)) v(x);
+ x | count 
+---+-------
+ 1 |     3
+ 2 |     3
+   |     3
+ 2 |     3
+   |     3
+ 1 |     3
+ 3 |     3
+(7 rows)
+
+-- Pass-by-reference argument type (text) over the whole partition.
+-- array_agg is order-sensitive, but the sort-based dedup emits the distinct
+-- values in sorted order, so the result is deterministic.
+SELECT array_agg(DISTINCT v) OVER ()
+FROM (VALUES ('pear'),('apple'),('pear'),('banana'),('apple')) s(v)
+LIMIT 1;
+      array_agg      
+---------------------
+ {apple,banana,pear}
+(1 row)
+
+-- Strict transition function with a pass-by-reference type: the first
+-- non-NULL distinct value is copied into the aggregate's context and NULLs
+-- are skipped.
+SELECT max(DISTINCT v) OVER (), min(DISTINCT v) OVER ()
+FROM (VALUES ('pear'),('apple'),(NULL),('banana'),('apple')) s(v)
+LIMIT 1;
+ max  |  min  
+------+-------
+ pear | apple
+(1 row)
+
+-- Mixed DISTINCT and non-DISTINCT aggregates in same window
+SELECT x,
+       count(DISTINCT x % 3) OVER w,
+       sum(x) OVER w
+FROM generate_series(1, 9) g(x)
+WINDOW w AS (PARTITION BY x > 5);
+ x | count | sum 
+---+-------+-----
+ 1 |     3 |  15
+ 2 |     3 |  15
+ 3 |     3 |  15
+ 4 |     3 |  15
+ 5 |     3 |  15
+ 6 |     3 |  30
+ 7 |     3 |  30
+ 8 |     3 |  30
+ 9 |     3 |  30
+(9 rows)
+
+-- Multiple DISTINCT aggregates in same query
+SELECT x,
+       count(DISTINCT x % 2) OVER (PARTITION BY x > 5),
+       sum(DISTINCT x % 3) OVER (PARTITION BY x > 5)
+FROM generate_series(1, 10) g(x);
+ x  | count | sum 
+----+-------+-----
+  1 |     2 |   3
+  2 |     2 |   3
+  3 |     2 |   3
+  4 |     2 |   3
+  5 |     2 |   3
+  6 |     2 |   3
+  7 |     2 |   3
+  8 |     2 |   3
+  9 |     2 |   3
+ 10 |     2 |   3
+(10 rows)
+
+-- Error: non-whole-partition frame (has ORDER BY -> RANGE UNBOUNDED PRECEDING to CURRENT ROW)
+SELECT count(DISTINCT x) OVER (PARTITION BY x > 5 ORDER BY x)
+FROM generate_series(1, 10) g(x); -- error
+ERROR:  DISTINCT is only supported for window functions with a frame that covers the entire partition
+HINT:  Remove ORDER BY from the window definition, or use ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING.
+-- Error: partial ROWS frame
+SELECT count(DISTINCT x) OVER (ROWS 3 PRECEDING)
+FROM generate_series(1, 10) g(x); -- error
+ERROR:  DISTINCT is only supported for window functions with a frame that covers the entire partition
+HINT:  Remove ORDER BY from the window definition, or use ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING.
+-- Error: EXCLUDE clause
+SELECT count(DISTINCT x) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING EXCLUDE CURRENT ROW)
+FROM generate_series(1, 10) g(x); -- error
+ERROR:  DISTINCT is only supported for window functions with a frame that covers the entire partition
+HINT:  Remove ORDER BY from the window definition, or use ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING.
+-- Error: ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW (not whole-partition
+-- even without ORDER BY, because ROWS CURRENT ROW means exactly one row)
+SELECT x,
+       count(DISTINCT x % 3) OVER (
+           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+       )
+FROM generate_series(1, 10) g(x); -- error
+ERROR:  DISTINCT is only supported for window functions with a frame that covers the entire partition
+HINT:  Remove ORDER BY from the window definition, or use ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING.
+-- Error: multi-argument DISTINCT window aggregate (not yet supported)
+SELECT string_agg(DISTINCT four::text, ',') OVER (PARTITION BY ten)
+FROM tenk1; -- error
+ERROR:  DISTINCT is not supported for window aggregate functions with more than one argument
