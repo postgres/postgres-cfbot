@@ -243,6 +243,15 @@ ALTER TYPE <replaceable class="parameter">name</replaceable> SET ( <replaceable 
   </para>
 
   <para>
+   Changing a composite type's attributes also invalidates cached plans for
+   queries that scan <literal>SETOF</literal> functions returning that
+   composite type (including through a domain over the composite), even when
+   no <command>CREATE OR REPLACE FUNCTION</command> is run.  This matches the
+   relcache invalidation already sent for the composite type's cataloged
+   rowtype.
+  </para>
+
+  <para>
    You must own the type to use <command>ALTER TYPE</command>.
    To change the schema of a type, you must also have
    <literal>CREATE</literal> privilege on the new schema.
