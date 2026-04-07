@@ -31,6 +31,7 @@
 #include "common.h"
 #include "common/logging.h"
 #include "describe.h"
+#include "fe_utils/cancel.h"
 #include "fe_utils/mbprint.h"
 #include "fe_utils/print.h"
 #include "fe_utils/string_utils.h"
@@ -1509,7 +1510,7 @@ describeTableDetails(const char *pattern, bool verbose, bool showSystem)
 			PQclear(res);
 			return false;
 		}
-		if (cancel_pressed)
+		if (CancelRequested)
 		{
 			PQclear(res);
 			return false;
@@ -5419,7 +5420,7 @@ listTSParsersVerbose(const char *pattern)
 			return false;
 		}
 
-		if (cancel_pressed)
+		if (CancelRequested)
 		{
 			PQclear(res);
 			return false;
@@ -5809,7 +5810,7 @@ listTSConfigsVerbose(const char *pattern)
 			return false;
 		}
 
-		if (cancel_pressed)
+		if (CancelRequested)
 		{
 			PQclear(res);
 			return false;
@@ -6288,7 +6289,7 @@ listExtensionContents(const char *pattern)
 			PQclear(res);
 			return false;
 		}
-		if (cancel_pressed)
+		if (CancelRequested)
 		{
 			PQclear(res);
 			return false;
