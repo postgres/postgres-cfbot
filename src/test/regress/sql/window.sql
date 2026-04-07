@@ -2366,25 +2366,84 @@ SELECT x,
        sum(DISTINCT x % 3) OVER (PARTITION BY x > 5)
 FROM generate_series(1, 10) g(x);
 
--- Error: non-whole-partition frame (has ORDER BY -> RANGE UNBOUNDED PRECEDING to CURRENT ROW)
+-- Non-shrinking frame: ORDER BY produces RANGE UNBOUNDED PRECEDING to CURRENT ROW
 SELECT count(DISTINCT x) OVER (PARTITION BY x > 5 ORDER BY x)
-FROM generate_series(1, 10) g(x); -- error
+FROM generate_series(1, 10) g(x);
 
--- Error: partial ROWS frame
-SELECT count(DISTINCT x) OVER (ROWS 3 PRECEDING)
-FROM generate_series(1, 10) g(x); -- error
+-- Non-shrinking frame: running count with ORDER BY (default RANGE frame)
+SELECT x, count(DISTINCT x % 3) OVER (ORDER BY x)
+FROM generate_series(1, 10) g(x);
 
--- Error: EXCLUDE clause
-SELECT count(DISTINCT x) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING EXCLUDE CURRENT ROW)
-FROM generate_series(1, 10) g(x); -- error
+-- Non-shrinking frame: explicit ROWS UNBOUNDED PRECEDING to CURRENT ROW
+SELECT x, count(DISTINCT x % 3) OVER (
+    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+FROM generate_series(1, 10) g(x);
 
--- Error: ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW (not whole-partition
--- even without ORDER BY, because ROWS CURRENT ROW means exactly one row)
+-- Non-shrinking frame: PARTITION BY and ORDER BY
+SELECT x, sum(DISTINCT x % 3) OVER (PARTITION BY x > 5 ORDER BY x)
+FROM generate_series(1, 10) g(x);
+
+-- Non-shrinking frame: FILTER with ORDER BY
+SELECT x, count(DISTINCT x % 3) FILTER (WHERE x > 2) OVER (ORDER BY x)
+FROM generate_series(1, 10) g(x);
+
+-- Non-shrinking frame: mixed DISTINCT + non-DISTINCT with ORDER BY
+SELECT x,
+       count(DISTINCT x % 3) OVER w,
+       sum(x) OVER w
+FROM generate_series(1, 9) g(x)
+WINDOW w AS (ORDER BY x);
+
+-- Grow-only frame with a pass-by-reference type (text).  The hash-based
+-- incremental path adds each newly seen distinct value in arrival order,
+-- which ORDER BY rn makes deterministic, so array_agg yields a stable,
+-- growing list in insertion (not sorted) order.
+SELECT rn, v, array_agg(DISTINCT v) OVER (ORDER BY rn ROWS UNBOUNDED PRECEDING)
+FROM (VALUES (1,'pear'),(2,'apple'),(3,'pear'),(4,'banana'),(5,'apple')) s(rn, v)
+ORDER BY rn;
+
+-- Non-shrinking frame: verify monotonically increasing running count
+SELECT x, count(DISTINCT x) OVER (ORDER BY x)
+FROM generate_series(1, 5) g(x);
+
+-- Non-shrinking frame: ROWS UNBOUNDED PRECEDING to CURRENT ROW without ORDER BY
 SELECT x,
        count(DISTINCT x % 3) OVER (
            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
        )
+FROM generate_series(1, 10) g(x);
+
+-- Non-shrinking frame: FOLLOWING bound (not just CURRENT ROW)
+SELECT x,
+       count(DISTINCT x % 3) OVER (
+           ORDER BY x
+           ROWS BETWEEN UNBOUNDED PRECEDING AND 2 FOLLOWING
+       )
+FROM generate_series(1, 10) g(x);
+
+-- Error: sliding frame (start is not UNBOUNDED PRECEDING)
+SELECT count(DISTINCT x) OVER (ROWS 3 PRECEDING)
 FROM generate_series(1, 10) g(x); -- error
+
+-- Error: sliding frame with explicit bounds
+SELECT count(DISTINCT x) OVER (ROWS BETWEEN 3 PRECEDING AND CURRENT ROW)
+FROM generate_series(1, 10) g(x); -- error
+
+-- Error: EXCLUDE clause with ORDER BY
+SELECT count(DISTINCT x) OVER (
+    ORDER BY x ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    EXCLUDE CURRENT ROW)
+FROM generate_series(1, 10) g(x); -- error
+
+-- Error: EXCLUDE clause with UNBOUNDED frame
+SELECT count(DISTINCT x) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING EXCLUDE CURRENT ROW)
+FROM generate_series(1, 10) g(x); -- error
+
+-- Error: non-hashable type with non-shrinking frame (money has btree but no hash).
+-- Whole-partition DISTINCT uses sort-based dedup so money works there,
+-- but the incremental non-shrinking path requires hash support.
+SELECT count(DISTINCT x::money) OVER (ORDER BY x)
+FROM generate_series(1, 5) g(x); -- error
 
 -- Error: multi-argument DISTINCT window aggregate (not yet supported)
 SELECT string_agg(DISTINCT four::text, ',') OVER (PARTITION BY ten)
