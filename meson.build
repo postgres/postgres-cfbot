@@ -3215,6 +3215,7 @@ func_checks = [
   ['posix_fadvise'],
   ['posix_fallocate'],
   ['ppoll'],
+  ['pselect'],
   ['pthread_barrier_wait', {'dependencies': [thread_dep]}],
   ['pthread_is_threaded_np', {'dependencies': [thread_dep]}],
   ['sem_init', {'dependencies': [rt_dep, thread_dep], 'skip': sema_kind != 'unnamed_posix', 'define': false}],

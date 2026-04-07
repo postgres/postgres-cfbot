@@ -1864,6 +1864,7 @@ AC_CHECK_FUNCS(m4_normalize([
 	memset_explicit
 	posix_fallocate
 	ppoll
+	pselect
 	pthread_is_threaded_np
 	setproctitle
 	setproctitle_fast
