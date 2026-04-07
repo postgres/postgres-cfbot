@@ -2967,6 +2967,15 @@ initialize_peragg(WindowAggState *winstate, WindowFunc *wfunc,
 	int			i;
 	ListCell   *lc;
 
+	/*
+	 * Temporary: reject DISTINCT window aggregates until executor support
+	 * lands.  Patch 2 will replace this with actual DISTINCT handling.
+	 */
+	if (wfunc->windistinct)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("DISTINCT is not yet implemented for window aggregates")));
+
 	numArguments = list_length(wfunc->args);
 
 	/*
