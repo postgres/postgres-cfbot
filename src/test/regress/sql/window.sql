@@ -2301,3 +2301,21 @@ SELECT last_value FROM null_treatment_seq;
 
 --cleanup
 DROP TABLE planets CASCADE;
+
+--
+-- Test DISTINCT in window aggregates (parse/deparse plumbing only;
+-- execution support is not yet implemented)
+--
+
+-- Should parse successfully and round-trip through a view definition
+CREATE TEMP VIEW window_distinct_view AS
+SELECT count(DISTINCT four) OVER (PARTITION BY ten) AS cnt
+FROM tenk1;
+SELECT pg_get_viewdef('window_distinct_view') LIKE '%DISTINCT%' AS has_distinct;
+DROP VIEW window_distinct_view;
+
+-- DISTINCT on a non-aggregate window function is still a parse error
+SELECT ntile(DISTINCT 4) OVER () FROM tenk1; -- error
+
+-- Execution fails with a clear executor-side error
+SELECT count(DISTINCT four) OVER (PARTITION BY ten) FROM tenk1; -- error
