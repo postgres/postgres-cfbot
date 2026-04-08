@@ -154,6 +154,8 @@ typedef struct BtreeCheckState
 	/* Reusable slot and executor state for FormIndexDatum() */
 	TupleTableSlot *iakm_slot;
 	EState	   *iakm_estate;
+	/* Short heap segments verification */
+	BlockNumber heapnblocks;
 } BtreeCheckState;
 
 /*
@@ -453,6 +455,24 @@ bt_check_every_level(Relation rel, Relation heaprel, bool heapkeyspace,
 	state->heaprel = heaprel;
 	state->heapkeyspace = heapkeyspace;
 	state->readonly = readonly;
+
+	/*
+	 * Remember the current size of the heap for beyond-EOF TID checks.
+	 *
+	 * Those checks target silent data loss: when a higher-numbered segment
+	 * of the main fork is missing or truncated, mdnblocks() returns a short
+	 * size without any error.  If instead the first segment is missing
+	 * entirely, there is nothing silent to detect -- every heap access
+	 * fails with "could not open file" -- so skip the beyond-EOF checks
+	 * (by making any comparison against heapnblocks false) rather than
+	 * fail an index-only check that otherwise would not touch the heap.
+	 * This matters for pg_amcheck, which may check an index while its
+	 * corrupt table was explicitly excluded from verification.
+	 */
+	if (smgrexists(RelationGetSmgr(state->heaprel), MAIN_FORKNUM))
+		state->heapnblocks = RelationGetNumberOfBlocks(state->heaprel);
+	else
+		state->heapnblocks = InvalidBlockNumber;
 	state->heapallindexed = heapallindexed;
 	state->indexallkeysmatch = indexallkeysmatch;
 	state->rootdescend = rootdescend;
@@ -1634,6 +1654,62 @@ bt_target_page_check(BtreeCheckState *state)
 				/* Be tidy */
 				if (norm != itup)
 					pfree(norm);
+			}
+		}
+
+		/* Check that leaf page tuples do not point beyond the end of heap */
+		if (P_ISLEAF(topaque) && !ItemIdIsDead(itemid))
+		{
+			int			nposting = 1;
+
+			if (BTreeTupleIsPosting(itup))
+				nposting = BTreeTupleGetNPosting(itup);
+
+			for (int i = 0; i < nposting; i++)
+			{
+				ItemPointer htid;
+				BlockNumber heapblk;
+				OffsetNumber heapoff;
+
+				if (nposting > 1)
+					htid = BTreeTupleGetPostingN(itup, i);
+				else
+					htid = BTreeTupleGetPointsToTID(itup);
+
+				heapblk = ItemPointerGetBlockNumber(htid);
+				heapoff = ItemPointerGetOffsetNumber(htid);
+
+				/*
+				 * Does heapblk go beyond RelationGetNumberOfBlocks(),
+				 * potentially indicating a missing relation segment?
+				 */
+				if (state->heapnblocks != InvalidBlockNumber &&
+					heapblk >= state->heapnblocks)
+				{
+					/*
+					 * The relation may have been extended concurrently;
+					 * refresh the cached value before reporting corruption.
+					 */
+					state->heapnblocks = RelationGetNumberOfBlocks(state->heaprel);
+					if (heapblk >= state->heapnblocks)
+					{
+						char	   *postingoff = "";
+
+						if (nposting > 1)
+							postingoff = psprintf(" posting list offset=%d", i);
+
+						ereport(ERROR,
+								(errcode(ERRCODE_INDEX_CORRUPTED),
+								 errmsg("index line pointer in index \"%s\" points to missing page in table \"%s\"",
+										RelationGetRelationName(state->rel),
+										RelationGetRelationName(state->heaprel)),
+								 errdetail_internal("Index tid=(%u,%u)%s points to heap tid=(%u,%u) but heap has only %u blocks.",
+													state->targetblock, offset, postingoff,
+													heapblk, heapoff,
+													state->heapnblocks),
+								 errhint("This can be caused by a lost relation segment (missing or removed file).")));
+					}
+				}
 			}
 		}
 
