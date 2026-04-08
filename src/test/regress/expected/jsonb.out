@@ -939,6 +939,314 @@ ERROR:  integer out of range
 -- direct calls: int2 overflow
 SELECT jsonb_object_field_int2('{"a": 99999}'::jsonb, 'a');
 ERROR:  smallint out of range
+-- Optimized typed extraction: array-element family
+-- The planner rewrites (j->idx)::type and (j[idx])::type into direct
+-- typed extractor calls for the same target types as the object-field family.
+-- Create a small fixture with typed array elements for testing
+CREATE TEMP TABLE test_jsonb_arr (test_arr jsonb);
+INSERT INTO test_jsonb_arr VALUES ('[10, 2.5, true, null, "hello", [1,2], {"k":1}]');
+-- Section A1: planner rewrite verification (array element, operator form)
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr -> 0)::numeric FROM test_jsonb_arr;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb_arr
+   Output: jsonb_array_element_numeric(test_arr, 0)
+(2 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr -> 0)::int4 FROM test_jsonb_arr;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb_arr
+   Output: jsonb_array_element_int4(test_arr, 0)
+(2 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr -> 1)::float8 FROM test_jsonb_arr;
+                    QUERY PLAN                     
+---------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb_arr
+   Output: jsonb_array_element_float8(test_arr, 1)
+(2 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr -> 2)::bool FROM test_jsonb_arr;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb_arr
+   Output: jsonb_array_element_bool(test_arr, 2)
+(2 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr -> 0)::int8 FROM test_jsonb_arr;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb_arr
+   Output: jsonb_array_element_int8(test_arr, 0)
+(2 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr -> 0)::int2 FROM test_jsonb_arr;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb_arr
+   Output: jsonb_array_element_int2(test_arr, 0)
+(2 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr -> 1)::float4 FROM test_jsonb_arr;
+                    QUERY PLAN                     
+---------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb_arr
+   Output: jsonb_array_element_float4(test_arr, 1)
+(2 rows)
+
+-- Section A1b: planner rewrite verification (array subscripting form)
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr[0])::numeric FROM test_jsonb_arr;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb_arr
+   Output: jsonb_array_element_numeric(test_arr, 0)
+(2 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr[0])::int4 FROM test_jsonb_arr;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb_arr
+   Output: jsonb_array_element_int4(test_arr, 0)
+(2 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr[1])::float8 FROM test_jsonb_arr;
+                    QUERY PLAN                     
+---------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb_arr
+   Output: jsonb_array_element_float8(test_arr, 1)
+(2 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr[2])::bool FROM test_jsonb_arr;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb_arr
+   Output: jsonb_array_element_bool(test_arr, 2)
+(2 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr[0])::int8 FROM test_jsonb_arr;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb_arr
+   Output: jsonb_array_element_int8(test_arr, 0)
+(2 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr[0])::int2 FROM test_jsonb_arr;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb_arr
+   Output: jsonb_array_element_int2(test_arr, 0)
+(2 rows)
+
+-- Section A1c: planner rewrite verification (direct function call form)
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (jsonb_array_element(test_arr, 0))::int4 FROM test_jsonb_arr;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb_arr
+   Output: jsonb_array_element_int4(test_arr, 0)
+(2 rows)
+
+-- Section A2: correct execution through rewritten path
+SELECT (test_arr -> 0)::int4 FROM test_jsonb_arr;
+ int4 
+------
+   10
+(1 row)
+
+SELECT (test_arr -> 0)::int8 FROM test_jsonb_arr;
+ int8 
+------
+   10
+(1 row)
+
+SELECT (test_arr -> 0)::numeric FROM test_jsonb_arr;
+ numeric 
+---------
+      10
+(1 row)
+
+SELECT (test_arr -> 1)::float8 FROM test_jsonb_arr;
+ float8 
+--------
+    2.5
+(1 row)
+
+SELECT (test_arr -> 2)::bool FROM test_jsonb_arr;
+ bool 
+------
+ t
+(1 row)
+
+SELECT (test_arr -> 0)::int2 FROM test_jsonb_arr;
+ int2 
+------
+   10
+(1 row)
+
+SELECT (test_arr -> 1)::float4 FROM test_jsonb_arr;
+ float4 
+--------
+    2.5
+(1 row)
+
+-- Section A2b: correct execution through subscripting
+SELECT (test_arr[0])::int4 FROM test_jsonb_arr;
+ test_arr 
+----------
+       10
+(1 row)
+
+SELECT (test_arr[1])::float8 FROM test_jsonb_arr;
+ test_arr 
+----------
+      2.5
+(1 row)
+
+SELECT (test_arr[2])::bool FROM test_jsonb_arr;
+ test_arr 
+----------
+ t
+(1 row)
+
+-- Section A3: NULL semantics
+SELECT (test_arr -> 99)::int4 FROM test_jsonb_arr;  -- out of range
+ int4 
+------
+     
+(1 row)
+
+SELECT (test_arr -> 3)::numeric FROM test_jsonb_arr;  -- JSON null element
+ numeric 
+---------
+        
+(1 row)
+
+SELECT (test_arr -> -1)::int4 FROM test_jsonb_arr;  -- negative: last element is object, wrong type would error; use -4 for null
+ERROR:  cannot cast jsonb array or object to type integer
+SELECT (test_arr -> -4)::numeric FROM test_jsonb_arr;  -- negative index pointing to null element
+ numeric 
+---------
+        
+(1 row)
+
+SELECT ('{"k":1}'::jsonb -> 0)::int4;  -- non-array input
+ int4 
+------
+     
+(1 row)
+
+SELECT (test_arr -> 99)::int2 FROM test_jsonb_arr;  -- out of range, int2
+ int2 
+------
+     
+(1 row)
+
+SELECT (test_arr -> 3)::float4 FROM test_jsonb_arr;  -- JSON null element, float4
+ float4 
+--------
+       
+(1 row)
+
+-- Section A3b: NULL through subscripting
+SELECT (test_arr[99])::float8 FROM test_jsonb_arr;  -- out of range
+ test_arr 
+----------
+         
+(1 row)
+
+SELECT (test_arr[3])::int8 FROM test_jsonb_arr;  -- JSON null element
+ test_arr 
+----------
+         
+(1 row)
+
+-- Section A4: type-mismatch errors
+SELECT (test_arr -> 4)::int4 FROM test_jsonb_arr;  -- string to int4
+ERROR:  cannot cast jsonb string to type integer
+SELECT (test_arr -> 4)::float8 FROM test_jsonb_arr;  -- string to float8
+ERROR:  cannot cast jsonb string to type double precision
+SELECT (test_arr -> 5)::numeric FROM test_jsonb_arr;  -- array container to numeric
+ERROR:  cannot cast jsonb array or object to type numeric
+SELECT (test_arr -> 6)::int8 FROM test_jsonb_arr;  -- object container to int8
+ERROR:  cannot cast jsonb array or object to type bigint
+SELECT (test_arr -> 2)::int4 FROM test_jsonb_arr;  -- bool to int4
+ERROR:  cannot cast jsonb boolean to type integer
+SELECT (test_arr -> 4)::int2 FROM test_jsonb_arr;  -- string to int2
+ERROR:  cannot cast jsonb string to type smallint
+SELECT (test_arr -> 4)::float4 FROM test_jsonb_arr;  -- string to float4
+ERROR:  cannot cast jsonb string to type real
+-- Section A4b: error through subscripting
+SELECT (test_arr[4])::int8 FROM test_jsonb_arr;  -- string to int8
+ERROR:  cannot cast jsonb string to type bigint
+-- Section A5: direct calls to array-element typed extractor builtins
+SELECT jsonb_array_element_int4('[10, 20, 30]'::jsonb, 0);
+ jsonb_array_element_int4 
+--------------------------
+                       10
+(1 row)
+
+SELECT jsonb_array_element_int8('[10, 20, 30]'::jsonb, 1);
+ jsonb_array_element_int8 
+--------------------------
+                       20
+(1 row)
+
+SELECT jsonb_array_element_float8('[1.5, 2.5]'::jsonb, 0);
+ jsonb_array_element_float8 
+----------------------------
+                        1.5
+(1 row)
+
+SELECT jsonb_array_element_numeric('[3.14]'::jsonb, 0);
+ jsonb_array_element_numeric 
+-----------------------------
+                        3.14
+(1 row)
+
+SELECT jsonb_array_element_bool('[true, false]'::jsonb, 1);
+ jsonb_array_element_bool 
+--------------------------
+ f
+(1 row)
+
+-- direct calls: NULL semantics
+SELECT jsonb_array_element_int4('[1, 2]'::jsonb, 5);  -- out of range
+ jsonb_array_element_int4 
+--------------------------
+                         
+(1 row)
+
+SELECT jsonb_array_element_int4('[1, null, 3]'::jsonb, 1);  -- JSON null
+ jsonb_array_element_int4 
+--------------------------
+                         
+(1 row)
+
+SELECT jsonb_array_element_float8('{"a":1}'::jsonb, 0);  -- non-array
+ jsonb_array_element_float8 
+----------------------------
+                           
+(1 row)
+
+-- direct calls: type-mismatch errors
+SELECT jsonb_array_element_int4('["text"]'::jsonb, 0);
+ERROR:  cannot cast jsonb string to type integer
+SELECT jsonb_array_element_int8('[true]'::jsonb, 0);
+ERROR:  cannot cast jsonb boolean to type bigint
+SELECT jsonb_array_element_float8('[[1,2]]'::jsonb, 0);  -- container to float8
+ERROR:  cannot cast jsonb array or object to type double precision
+SELECT jsonb_array_element_int2('[10, 20]'::jsonb, 0);
+ jsonb_array_element_int2 
+--------------------------
+                       10
+(1 row)
+
+SELECT jsonb_array_element_float4('[3.14, 2.5]'::jsonb, 1);
+ jsonb_array_element_float4 
+----------------------------
+                        2.5
+(1 row)
+
 SELECT test_json -> 'x' FROM test_jsonb WHERE json_type = 'scalar';
  ?column? 
 ----------
