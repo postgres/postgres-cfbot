@@ -273,6 +273,91 @@ SELECT jsonb_object_field_int4('{"a": 9999999999}'::jsonb, 'a');
 -- direct calls: int2 overflow
 SELECT jsonb_object_field_int2('{"a": 99999}'::jsonb, 'a');
 
+-- Optimized typed extraction: array-element family
+-- The planner rewrites (j->idx)::type and (j[idx])::type into direct
+-- typed extractor calls for the same target types as the object-field family.
+
+-- Create a small fixture with typed array elements for testing
+CREATE TEMP TABLE test_jsonb_arr (test_arr jsonb);
+INSERT INTO test_jsonb_arr VALUES ('[10, 2.5, true, null, "hello", [1,2], {"k":1}]');
+
+-- Section A1: planner rewrite verification (array element, operator form)
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr -> 0)::numeric FROM test_jsonb_arr;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr -> 0)::int4 FROM test_jsonb_arr;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr -> 1)::float8 FROM test_jsonb_arr;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr -> 2)::bool FROM test_jsonb_arr;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr -> 0)::int8 FROM test_jsonb_arr;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr -> 0)::int2 FROM test_jsonb_arr;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr -> 1)::float4 FROM test_jsonb_arr;
+
+-- Section A1b: planner rewrite verification (array subscripting form)
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr[0])::numeric FROM test_jsonb_arr;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr[0])::int4 FROM test_jsonb_arr;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr[1])::float8 FROM test_jsonb_arr;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr[2])::bool FROM test_jsonb_arr;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr[0])::int8 FROM test_jsonb_arr;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr[0])::int2 FROM test_jsonb_arr;
+
+-- Section A1c: planner rewrite verification (direct function call form)
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (jsonb_array_element(test_arr, 0))::int4 FROM test_jsonb_arr;
+
+-- Section A2: correct execution through rewritten path
+SELECT (test_arr -> 0)::int4 FROM test_jsonb_arr;
+SELECT (test_arr -> 0)::int8 FROM test_jsonb_arr;
+SELECT (test_arr -> 0)::numeric FROM test_jsonb_arr;
+SELECT (test_arr -> 1)::float8 FROM test_jsonb_arr;
+SELECT (test_arr -> 2)::bool FROM test_jsonb_arr;
+SELECT (test_arr -> 0)::int2 FROM test_jsonb_arr;
+SELECT (test_arr -> 1)::float4 FROM test_jsonb_arr;
+
+-- Section A2b: correct execution through subscripting
+SELECT (test_arr[0])::int4 FROM test_jsonb_arr;
+SELECT (test_arr[1])::float8 FROM test_jsonb_arr;
+SELECT (test_arr[2])::bool FROM test_jsonb_arr;
+
+-- Section A3: NULL semantics
+SELECT (test_arr -> 99)::int4 FROM test_jsonb_arr;  -- out of range
+SELECT (test_arr -> 3)::numeric FROM test_jsonb_arr;  -- JSON null element
+SELECT (test_arr -> -1)::int4 FROM test_jsonb_arr;  -- negative: last element is object, wrong type would error; use -4 for null
+SELECT (test_arr -> -4)::numeric FROM test_jsonb_arr;  -- negative index pointing to null element
+SELECT ('{"k":1}'::jsonb -> 0)::int4;  -- non-array input
+SELECT (test_arr -> 99)::int2 FROM test_jsonb_arr;  -- out of range, int2
+SELECT (test_arr -> 3)::float4 FROM test_jsonb_arr;  -- JSON null element, float4
+
+-- Section A3b: NULL through subscripting
+SELECT (test_arr[99])::float8 FROM test_jsonb_arr;  -- out of range
+SELECT (test_arr[3])::int8 FROM test_jsonb_arr;  -- JSON null element
+
+-- Section A4: type-mismatch errors
+SELECT (test_arr -> 4)::int4 FROM test_jsonb_arr;  -- string to int4
+SELECT (test_arr -> 4)::float8 FROM test_jsonb_arr;  -- string to float8
+SELECT (test_arr -> 5)::numeric FROM test_jsonb_arr;  -- array container to numeric
+SELECT (test_arr -> 6)::int8 FROM test_jsonb_arr;  -- object container to int8
+SELECT (test_arr -> 2)::int4 FROM test_jsonb_arr;  -- bool to int4
+SELECT (test_arr -> 4)::int2 FROM test_jsonb_arr;  -- string to int2
+SELECT (test_arr -> 4)::float4 FROM test_jsonb_arr;  -- string to float4
+
+-- Section A4b: error through subscripting
+SELECT (test_arr[4])::int8 FROM test_jsonb_arr;  -- string to int8
+
+-- Section A5: direct calls to array-element typed extractor builtins
+SELECT jsonb_array_element_int4('[10, 20, 30]'::jsonb, 0);
+SELECT jsonb_array_element_int8('[10, 20, 30]'::jsonb, 1);
+SELECT jsonb_array_element_float8('[1.5, 2.5]'::jsonb, 0);
+SELECT jsonb_array_element_numeric('[3.14]'::jsonb, 0);
+SELECT jsonb_array_element_bool('[true, false]'::jsonb, 1);
+-- direct calls: NULL semantics
+SELECT jsonb_array_element_int4('[1, 2]'::jsonb, 5);  -- out of range
+SELECT jsonb_array_element_int4('[1, null, 3]'::jsonb, 1);  -- JSON null
+SELECT jsonb_array_element_float8('{"a":1}'::jsonb, 0);  -- non-array
+-- direct calls: type-mismatch errors
+SELECT jsonb_array_element_int4('["text"]'::jsonb, 0);
+SELECT jsonb_array_element_int8('[true]'::jsonb, 0);
+SELECT jsonb_array_element_float8('[[1,2]]'::jsonb, 0);  -- container to float8
+SELECT jsonb_array_element_int2('[10, 20]'::jsonb, 0);
+SELECT jsonb_array_element_float4('[3.14, 2.5]'::jsonb, 1);
+
+
 SELECT test_json -> 'x' FROM test_jsonb WHERE json_type = 'scalar';
 SELECT test_json -> 'x' FROM test_jsonb WHERE json_type = 'array';
 SELECT test_json -> 'x' FROM test_jsonb WHERE json_type = 'object';
