@@ -292,19 +292,26 @@ filter_partitions(List *table_infos)
  * schema is associated with the publication.
  */
 bool
-is_schema_publication(Oid pubid)
+is_schema_publication(Form_pg_publication pubform)
 {
 	Relation	pubschsrel;
 	ScanKeyData scankey;
 	SysScanDesc scan;
 	HeapTuple	tup;
-	bool		result = false;
+	bool		result;
+
+	/*
+	 *  FOR TABLES IN SCHEMA cannot coexist with FOR ALL TABLES.
+	 *  FOR TABLES IN SCHEMA cannot coexist with FOR ALL SEQUENCES.
+	 */
+	if (pubform->puballtables || pubform->puballsequences)
+		return false;
 
 	pubschsrel = table_open(PublicationNamespaceRelationId, AccessShareLock);
 	ScanKeyInit(&scankey,
 				Anum_pg_publication_namespace_pnpubid,
 				BTEqualStrategyNumber, F_OIDEQ,
-				ObjectIdGetDatum(pubid));
+				ObjectIdGetDatum(pubform->oid));
 
 	scan = systable_beginscan(pubschsrel,
 							  PublicationNamespacePnnspidPnpubidIndexId,
@@ -319,41 +326,36 @@ is_schema_publication(Oid pubid)
 }
 
 /*
- * Returns true if the publication has explicitly included relation (i.e.,
- * not marked as EXCEPT).
+ * Returns true if the publication has explicitly included relations (e.g.,
+ * FOR TABLE).
  */
 bool
-is_table_publication(Oid pubid)
+is_table_publication(Form_pg_publication pubform)
 {
 	Relation	pubrelsrel;
 	ScanKeyData scankey;
 	SysScanDesc scan;
 	HeapTuple	tup;
-	bool		result = false;
+	bool		result;
+
+	/*
+	 *  FOR TABLE cannot coexist with FOR ALL TABLES.
+	 *  FOR TABLE cannot coexist with FOR ALL SEQUENCES.
+	 */
+	if (pubform->puballtables || pubform->puballsequences)
+		return false;
 
 	pubrelsrel = table_open(PublicationRelRelationId, AccessShareLock);
 	ScanKeyInit(&scankey,
 				Anum_pg_publication_rel_prpubid,
 				BTEqualStrategyNumber, F_OIDEQ,
-				ObjectIdGetDatum(pubid));
+				ObjectIdGetDatum(pubform->oid));
 
 	scan = systable_beginscan(pubrelsrel,
 							  PublicationRelPrpubidIndexId,
 							  true, NULL, 1, &scankey);
 	tup = systable_getnext(scan);
-	if (HeapTupleIsValid(tup))
-	{
-		Form_pg_publication_rel pubrel;
-
-		pubrel = (Form_pg_publication_rel) GETSTRUCT(tup);
-
-		/*
-		 * For any publication, pg_publication_rel contains either only EXCEPT
-		 * entries or only explicitly included tables. Therefore, examining
-		 * the first tuple is sufficient to determine table inclusion.
-		 */
-		result = !pubrel->prexcept;
-	}
+	result = HeapTupleIsValid(tup);
 
 	systable_endscan(scan);
 	table_close(pubrelsrel, AccessShareLock);
