@@ -1825,15 +1825,14 @@ cannotCastJsonbValue(enum jbvType type, const char *sqltype, Node *escontext)
  * prosupport on the jsonb_numeric, jsonb_bool, jsonb_int4, jsonb_int8, and
  * jsonb_float8 catalog entries.
  *
- * When the sole argument to the cast is a jsonb_object_field() call (the ->
- * operator), we replace the two-step cast(extract(...)) expression with a
- * single typed extractor that reads the scalar directly from the in-memory
- * JsonbValue, avoiding a round-trip through JsonbValueToJsonb.
+ * When the sole argument to the cast is a jsonb extraction call, we replace
+ * the two-step cast(extract(...)) expression with a single typed extractor
+ * that reads the scalar directly from the in-memory JsonbValue, avoiding a
+ * round-trip through JsonbValueToJsonb.
  *
- * For example, (j -> 'a')::numeric is parsed as:
- *   jsonb_numeric(jsonb_object_field(j, 'a'))
- * and is rewritten to:
- *   jsonb_object_field_numeric(j, 'a')
+ * Supported extraction families:
+ *   - jsonb_object_field(j, 'key')  /  j -> 'key'  /  j['key']
+ *   - jsonb_array_element(j, idx)   /  j -> idx    /  j[idx]
  */
 Datum
 jsonb_cast_support(PG_FUNCTION_ARGS)
@@ -1885,11 +1884,12 @@ jsonb_cast_support(PG_FUNCTION_ARGS)
 		{
 			SubscriptingRef *sbsref = (SubscriptingRef *) arg;
 			Node	   *subscript;
+			Oid			subscript_type;
 
 			/*
-			 * Only handle the narrow case equivalent to object-field
-			 * extraction: a single text-typed subscript on a jsonb
-			 * container, with no slice and no assignment.
+			 * Handle single-subscript jsonb access with no slice and no
+			 * assignment.  Text subscripts map to object-field extraction;
+			 * int4 subscripts map to array-element extraction.
 			 */
 			if (sbsref->refcontainertype != JSONBOID)
 				PG_RETURN_POINTER(NULL);
@@ -1901,57 +1901,113 @@ jsonb_cast_support(PG_FUNCTION_ARGS)
 				PG_RETURN_POINTER(NULL);
 
 			subscript = (Node *) linitial(sbsref->refupperindexpr);
-			if (exprType(subscript) != TEXTOID)
+			subscript_type = exprType(subscript);
+
+			if (subscript_type == TEXTOID)
+			{
+				inner_funcid = F_JSONB_OBJECT_FIELD;
+				inner_args = list_make2(sbsref->refexpr, subscript);
+			}
+			else if (subscript_type == INT4OID)
+			{
+				inner_funcid = F_JSONB_ARRAY_ELEMENT;
+				inner_args = list_make2(sbsref->refexpr, subscript);
+			}
+			else
 				PG_RETURN_POINTER(NULL);
 
-			inner_funcid = F_JSONB_OBJECT_FIELD;
-			inner_args = list_make2(sbsref->refexpr, subscript);
 			location = exprLocation(arg);
 		}
 		else
 			PG_RETURN_POINTER(NULL);
 
-		/* Only rewrite jsonb_object_field(jsonb, text); verify arity too */
-		if (inner_funcid != F_JSONB_OBJECT_FIELD)
-			PG_RETURN_POINTER(NULL);
+		/*
+		 * Verify the inner extraction function and map the outer cast to the
+		 * corresponding typed extractor.  Each supported extraction family
+		 * has its own set of typed rewrite targets.
+		 */
 		if (list_length(inner_args) != 2)
 			PG_RETURN_POINTER(NULL);
 
-		/* Map the outer cast to the corresponding typed extractor */
-		if (fexpr->funcid == F_NUMERIC_JSONB)
+		if (inner_funcid == F_JSONB_OBJECT_FIELD)
 		{
-			replacement_funcid = F_JSONB_OBJECT_FIELD_NUMERIC;
-			replacement_rettype = NUMERICOID;
+			if (fexpr->funcid == F_NUMERIC_JSONB)
+			{
+				replacement_funcid = F_JSONB_OBJECT_FIELD_NUMERIC;
+				replacement_rettype = NUMERICOID;
+			}
+			else if (fexpr->funcid == F_BOOL_JSONB)
+			{
+				replacement_funcid = F_JSONB_OBJECT_FIELD_BOOL;
+				replacement_rettype = BOOLOID;
+			}
+			else if (fexpr->funcid == F_INT4_JSONB)
+			{
+				replacement_funcid = F_JSONB_OBJECT_FIELD_INT4;
+				replacement_rettype = INT4OID;
+			}
+			else if (fexpr->funcid == F_INT8_JSONB)
+			{
+				replacement_funcid = F_JSONB_OBJECT_FIELD_INT8;
+				replacement_rettype = INT8OID;
+			}
+			else if (fexpr->funcid == F_FLOAT8_JSONB)
+			{
+				replacement_funcid = F_JSONB_OBJECT_FIELD_FLOAT8;
+				replacement_rettype = FLOAT8OID;
+			}
+			else if (fexpr->funcid == F_INT2_JSONB)
+			{
+				replacement_funcid = F_JSONB_OBJECT_FIELD_INT2;
+				replacement_rettype = INT2OID;
+			}
+			else if (fexpr->funcid == F_FLOAT4_JSONB)
+			{
+				replacement_funcid = F_JSONB_OBJECT_FIELD_FLOAT4;
+				replacement_rettype = FLOAT4OID;
+			}
+			else
+				PG_RETURN_POINTER(NULL);
 		}
-		else if (fexpr->funcid == F_BOOL_JSONB)
+		else if (inner_funcid == F_JSONB_ARRAY_ELEMENT)
 		{
-			replacement_funcid = F_JSONB_OBJECT_FIELD_BOOL;
-			replacement_rettype = BOOLOID;
-		}
-		else if (fexpr->funcid == F_INT4_JSONB)
-		{
-			replacement_funcid = F_JSONB_OBJECT_FIELD_INT4;
-			replacement_rettype = INT4OID;
-		}
-		else if (fexpr->funcid == F_INT8_JSONB)
-		{
-			replacement_funcid = F_JSONB_OBJECT_FIELD_INT8;
-			replacement_rettype = INT8OID;
-		}
-		else if (fexpr->funcid == F_FLOAT8_JSONB)
-		{
-			replacement_funcid = F_JSONB_OBJECT_FIELD_FLOAT8;
-			replacement_rettype = FLOAT8OID;
-		}
-		else if (fexpr->funcid == F_INT2_JSONB)
-		{
-			replacement_funcid = F_JSONB_OBJECT_FIELD_INT2;
-			replacement_rettype = INT2OID;
-		}
-		else if (fexpr->funcid == F_FLOAT4_JSONB)
-		{
-			replacement_funcid = F_JSONB_OBJECT_FIELD_FLOAT4;
-			replacement_rettype = FLOAT4OID;
+			if (fexpr->funcid == F_NUMERIC_JSONB)
+			{
+				replacement_funcid = F_JSONB_ARRAY_ELEMENT_NUMERIC;
+				replacement_rettype = NUMERICOID;
+			}
+			else if (fexpr->funcid == F_BOOL_JSONB)
+			{
+				replacement_funcid = F_JSONB_ARRAY_ELEMENT_BOOL;
+				replacement_rettype = BOOLOID;
+			}
+			else if (fexpr->funcid == F_INT4_JSONB)
+			{
+				replacement_funcid = F_JSONB_ARRAY_ELEMENT_INT4;
+				replacement_rettype = INT4OID;
+			}
+			else if (fexpr->funcid == F_INT8_JSONB)
+			{
+				replacement_funcid = F_JSONB_ARRAY_ELEMENT_INT8;
+				replacement_rettype = INT8OID;
+			}
+			else if (fexpr->funcid == F_FLOAT8_JSONB)
+			{
+				replacement_funcid = F_JSONB_ARRAY_ELEMENT_FLOAT8;
+				replacement_rettype = FLOAT8OID;
+			}
+			else if (fexpr->funcid == F_INT2_JSONB)
+			{
+				replacement_funcid = F_JSONB_ARRAY_ELEMENT_INT2;
+				replacement_rettype = INT2OID;
+			}
+			else if (fexpr->funcid == F_FLOAT4_JSONB)
+			{
+				replacement_funcid = F_JSONB_ARRAY_ELEMENT_FLOAT4;
+				replacement_rettype = FLOAT4OID;
+			}
+			else
+				PG_RETURN_POINTER(NULL);
 		}
 		else
 			PG_RETURN_POINTER(NULL);
