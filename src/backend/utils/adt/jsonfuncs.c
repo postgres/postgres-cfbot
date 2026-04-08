@@ -1113,6 +1113,73 @@ DEFINE_JSONB_OBJECT_FIELD_TYPED(jsonb_object_field_float8, jsonb_value_to_float8
 DEFINE_JSONB_OBJECT_FIELD_TYPED(jsonb_object_field_int2, jsonb_value_to_int2_datum)
 DEFINE_JSONB_OBJECT_FIELD_TYPED(jsonb_object_field_float4, jsonb_value_to_float4_datum)
 
+/*
+ * Look up an element by index in a jsonb array and return the JsonbValue,
+ * or NULL.  Returns NULL (without error) when the input is not an array,
+ * the index is out of range, or the value is JSON null.  Handles negative
+ * indices the same way as jsonb_array_element().
+ */
+static JsonbValue *
+jsonb_array_element_lookup(Jsonb *jb, int32 element)
+{
+	JsonbValue *v;
+
+	if (!JB_ROOT_IS_ARRAY(jb))
+		return NULL;
+
+	/* Handle negative subscript */
+	if (element < 0)
+	{
+		uint32		nelements = JB_ROOT_COUNT(jb);
+
+		if (pg_abs_s32(element) > nelements)
+			return NULL;
+		else
+			element += nelements;
+	}
+
+	v = getIthJsonbValueFromContainer(&jb->root, element);
+
+	/* Missing index or JSON null both map to SQL NULL */
+	if (v == NULL || v->type == jbvNull)
+		return NULL;
+
+	return v;
+}
+
+/*
+ * Thin-wrapper macro for the jsonb_array_element_<type> extractor family.
+ * Same pattern as DEFINE_JSONB_OBJECT_FIELD_TYPED but for array elements.
+ */
+#define DEFINE_JSONB_ARRAY_ELEMENT_TYPED(fname, convfn) \
+Datum \
+fname(PG_FUNCTION_ARGS) \
+{ \
+	Jsonb	   *jb = PG_GETARG_JSONB_P(0); \
+	int32		element = PG_GETARG_INT32(1); \
+	JsonbValue *v; \
+	Datum		result; \
+\
+	v = jsonb_array_element_lookup(jb, element); \
+	if (v == NULL) \
+	{ \
+		PG_FREE_IF_COPY(jb, 0); \
+		PG_RETURN_NULL(); \
+	} \
+\
+	result = convfn(v); \
+	PG_FREE_IF_COPY(jb, 0); \
+	return result; \
+}
+
+DEFINE_JSONB_ARRAY_ELEMENT_TYPED(jsonb_array_element_numeric, jsonb_value_to_numeric_datum)
+DEFINE_JSONB_ARRAY_ELEMENT_TYPED(jsonb_array_element_bool, jsonb_value_to_bool_datum)
+DEFINE_JSONB_ARRAY_ELEMENT_TYPED(jsonb_array_element_int4, jsonb_value_to_int4_datum)
+DEFINE_JSONB_ARRAY_ELEMENT_TYPED(jsonb_array_element_int8, jsonb_value_to_int8_datum)
+DEFINE_JSONB_ARRAY_ELEMENT_TYPED(jsonb_array_element_float8, jsonb_value_to_float8_datum)
+DEFINE_JSONB_ARRAY_ELEMENT_TYPED(jsonb_array_element_int2, jsonb_value_to_int2_datum)
+DEFINE_JSONB_ARRAY_ELEMENT_TYPED(jsonb_array_element_float4, jsonb_value_to_float4_datum)
+
 Datum
 json_array_element(PG_FUNCTION_ARGS)
 {
