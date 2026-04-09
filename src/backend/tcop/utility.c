@@ -1696,7 +1696,7 @@ ProcessUtilitySlow(ParseState *pstate,
 				PG_TRY(2);
 				{
 					address = ExecRefreshMatView((RefreshMatViewStmt *) parsetree,
-												 queryString, qc);
+												 queryString, params, qc);
 				}
 				PG_FINALLY(2);
 				{
