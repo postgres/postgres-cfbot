@@ -4197,6 +4197,7 @@ typedef struct RefreshMatViewStmt
 	bool		concurrent;		/* allow concurrent access? */
 	bool		skipData;		/* true for WITH NO DATA */
 	RangeVar   *relation;		/* relation to insert into */
+	Node	   *whereClause;	/* qualification for partial refresh */
 } RefreshMatViewStmt;
 
 /* ----------------------

@@ -293,8 +293,8 @@ ExecCreateTableAs(ParseState *pstate, CreateTableAsStmt *stmt,
 		 * reduces the chance that a subsequent refresh will fail.
 		 */
 		if (do_refresh)
-			RefreshMatViewByOid(address.objectId, true, false, false,
-								pstate->p_sourcetext, qc);
+			RefreshMatViewByOid(address.objectId, true, false, false, NULL,
+								pstate->p_sourcetext, params, qc);
 
 	}
 	else
