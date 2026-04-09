@@ -32,12 +32,20 @@
 #include "executor/spi.h"
 #include "miscadmin.h"
 #include "pgstat.h"
+#include "optimizer/optimizer.h"
+#include "parser/parse_clause.h"
+#include "parser/parse_coerce.h"
+#include "parser/parse_expr.h"
+#include "parser/parse_relation.h"
 #include "rewrite/rewriteHandler.h"
 #include "storage/lmgr.h"
 #include "tcop/tcopprot.h"
 #include "utils/builtins.h"
+#include "utils/hsearch.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/ruleutils.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 
@@ -53,6 +61,28 @@ typedef struct
 	BulkInsertState bistate;	/* bulk insert state */
 } DR_transientrel;
 
+/*
+ * Session-level cache for Partial Refresh plans.
+ * We cache the prepared SPI plans for both the row-locking and refresh steps
+ * avoiding expensive calls (pg_get_viewdef) and parsing on every execution.
+ */
+typedef struct MatViewPartialRefreshCache
+{
+	Oid			matviewOid;		/* Hash Key */
+
+	/* Validation fields */
+	Oid			uniqueIndexOid; /* The unique index used for conflict
+								 * resolution */
+	char	   *whereClauseStr; /* The WHERE clause string used to build the
+								 * plans */
+
+	/* The cached plans */
+	SPIPlanPtr	lockPlan;		/* SELECT FOR UPDATE */
+	SPIPlanPtr	refreshPlan;	/* Fused CTE: Evaluate -> Upsert -> Delete */
+}			MatViewPartialRefreshCache;
+
+static HTAB *MatViewRefreshCache = NULL;
+
 static int	matview_maintenance_depth = 0;
 
 static void transientrel_startup(DestReceiver *self, int operation, TupleDesc typeinfo);
@@ -62,11 +92,19 @@ static void transientrel_destroy(DestReceiver *self);
 static uint64 refresh_matview_datafill(DestReceiver *dest, Query *query,
 									   const char *queryString, bool is_create);
 static void refresh_by_match_merge(Oid matviewOid, Oid tempOid, Oid relowner,
-								   int save_sec_context);
+								   int save_sec_context, char *whereClauseStr,
+								   ParamListInfo params);
+static uint64 refresh_by_direct_modification(Oid matviewOid, Oid relowner,
+											 int save_sec_context, char *whereClauseStr,
+											 ParamListInfo params);
 static void refresh_by_heap_swap(Oid matviewOid, Oid OIDNewHeap, char relpersistence);
 static bool is_usable_unique_index(Relation indexRel);
 static void OpenMatViewIncrementalMaintenance(void);
 static void CloseMatViewIncrementalMaintenance(void);
+static int	matview_execute_spi(const char *command, ParamListInfo params, bool read_only);
+static int	matview_execute_spi_plan(SPIPlanPtr plan, ParamListInfo params, bool read_only);
+static char *get_matview_view_query(Oid matviewOid);
+static void InitMatViewCache(void);
 
 /*
  * SetMatViewPopulatedState
@@ -79,8 +117,16 @@ SetMatViewPopulatedState(Relation relation, bool newstate)
 {
 	Relation	pgrel;
 	HeapTuple	tuple;
+	Form_pg_class classForm;
 
 	Assert(relation->rd_rel->relkind == RELKIND_MATVIEW);
+
+	/*
+	 * If the state matches, do nothing. This prevents cache invalidation
+	 * storms when doing frequent partial refreshes via triggers.
+	 */
+	if (relation->rd_rel->relispopulated == newstate)
+		return;
 
 	/*
 	 * Update relation's pg_class entry.  Crucial side-effect: other backends
@@ -94,9 +140,13 @@ SetMatViewPopulatedState(Relation relation, bool newstate)
 		elog(ERROR, "cache lookup failed for relation %u",
 			 RelationGetRelid(relation));
 
-	((Form_pg_class) GETSTRUCT(tuple))->relispopulated = newstate;
+	classForm = (Form_pg_class) GETSTRUCT(tuple);
 
-	CatalogTupleUpdate(pgrel, &tuple->t_self, tuple);
+	if (classForm->relispopulated != newstate)
+	{
+		classForm->relispopulated = newstate;
+		CatalogTupleUpdate(pgrel, &tuple->t_self, tuple);
+	}
 
 	heap_freetuple(tuple);
 	table_close(pgrel, RowExclusiveLock);
@@ -109,22 +159,182 @@ SetMatViewPopulatedState(Relation relation, bool newstate)
 }
 
 /*
+ * Hook to allow parameters (e.g. $1) in the WHERE clause.
+ */
+static Node *
+refresh_paramref_hook(ParseState *pstate, ParamRef *pref)
+{
+	ParamListInfo params = (ParamListInfo) pstate->p_ref_hook_state;
+	Param	   *param;
+
+	param = makeNode(Param);
+	param->paramkind = PARAM_EXTERN;
+	param->paramid = pref->number;
+	param->paramtype = UNKNOWNOID;
+	param->paramtypmod = -1;
+	param->paramcollid = InvalidOid;
+	param->location = pref->location;
+
+	if (params && pref->number > 0 && pref->number <= params->numParams)
+	{
+		Oid			ptype = params->params[pref->number - 1].ptype;
+
+		if (OidIsValid(ptype))
+			param->paramtype = ptype;
+	}
+
+	return (Node *) param;
+}
+
+/*
+ * Transform the WHERE clause for REFRESH MATERIALIZED VIEW.
+ */
+static Node *
+transformRefreshWhereClause(Oid relid, Node *whereClause, ParamListInfo params)
+{
+	ParseState *pstate = make_parsestate(NULL);
+	Relation	rel = table_open(relid, NoLock);
+	ParseNamespaceItem *nsitem;
+	Node	   *result;
+
+	pstate->p_paramref_hook = refresh_paramref_hook;
+	pstate->p_ref_hook_state = (void *) params;
+
+	nsitem = addRangeTableEntryForRelation(pstate, rel, AccessShareLock, NULL, false, true);
+	addNSItemToQuery(pstate, nsitem, false, true, true);
+
+	result = transformExpr(pstate, whereClause, EXPR_KIND_WHERE);
+	result = coerce_to_boolean(pstate, result, "WHERE");
+
+	if (contain_volatile_functions(result))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("WHERE clause in REFRESH MATERIALIZED VIEW cannot contain volatile functions")));
+
+	if (pstate->p_hasAggs)
+		ereport(ERROR,
+				(errcode(ERRCODE_GROUPING_ERROR),
+				 errmsg("WHERE clause in REFRESH MATERIALIZED VIEW cannot contain aggregates")));
+
+	table_close(rel, NoLock);
+	free_parsestate(pstate);
+
+	return result;
+}
+
+static char *
+deparseRefreshWhereClause(Oid relid, Node *whereClause)
+{
+	return TextDatumGetCString(DirectFunctionCall2(pg_get_expr,
+												   CStringGetTextDatum(nodeToString(whereClause)),
+												   ObjectIdGetDatum(relid)));
+}
+
+/*
+ * Helper to execute SPI commands with optional parameters.
+ */
+static int
+matview_execute_spi(const char *command, ParamListInfo params, bool read_only)
+{
+	if (params && params->numParams > 0)
+	{
+		Oid		   *argtypes;
+		Datum	   *argvalues;
+		char	   *nulls;
+		int			i;
+		int			res;
+
+		argtypes = (Oid *) palloc(params->numParams * sizeof(Oid));
+		argvalues = (Datum *) palloc(params->numParams * sizeof(Datum));
+		nulls = (char *) palloc(params->numParams * sizeof(char));
+
+		for (i = 0; i < params->numParams; i++)
+		{
+			ParamExternData *prm = &params->params[i];
+
+			argtypes[i] = prm->ptype;
+			argvalues[i] = prm->value;
+			nulls[i] = prm->isnull ? 'n' : ' ';
+		}
+
+		res = SPI_execute_with_args(command, params->numParams, argtypes,
+									argvalues, nulls, read_only, 0);
+
+		pfree(argtypes);
+		pfree(argvalues);
+		pfree(nulls);
+
+		return res;
+	}
+	else
+	{
+		return SPI_exec(command, 0);
+	}
+}
+
+/*
+ * Helper to execute Prepared SPI Plans with optional parameters.
+ */
+static int
+matview_execute_spi_plan(SPIPlanPtr plan, ParamListInfo params, bool read_only)
+{
+	if (params && params->numParams > 0)
+	{
+		Datum	   *argvalues;
+		char	   *nulls;
+		int			i;
+		int			res;
+
+		argvalues = (Datum *) palloc(params->numParams * sizeof(Datum));
+		nulls = (char *) palloc(params->numParams * sizeof(char));
+
+		for (i = 0; i < params->numParams; i++)
+		{
+			ParamExternData *prm = &params->params[i];
+
+			argvalues[i] = prm->value;
+			nulls[i] = prm->isnull ? 'n' : ' ';
+		}
+
+		res = SPI_execute_plan(plan, argvalues, nulls, read_only, 0);
+
+		pfree(argvalues);
+		pfree(nulls);
+
+		return res;
+	}
+	else
+	{
+		return SPI_execute_plan(plan, NULL, NULL, read_only, 0);
+	}
+}
+
+/*
  * ExecRefreshMatView -- execute a REFRESH MATERIALIZED VIEW command
  *
- * If WITH NO DATA was specified, this is effectively like a TRUNCATE;
- * otherwise it is like a TRUNCATE followed by an INSERT using the SELECT
- * statement associated with the materialized view.  The statement node's
- * skipData field shows whether the clause was used.
+ * This is the entry point for REFRESH MATERIALIZED VIEW.  It handles:
+ *
+ * - WITH NO DATA: effectively like a TRUNCATE.
+ * - CONCURRENTLY: diff-based refresh allowing concurrent reads.
+ * - WHERE clause: partial refresh of a subset of rows.
+ * - Default: full rebuild via heap swap.
+ *
+ * The statement node's skipData field shows whether WITH NO DATA was used.
  */
 ObjectAddress
 ExecRefreshMatView(RefreshMatViewStmt *stmt, const char *queryString,
-				   QueryCompletion *qc)
+				   ParamListInfo params, QueryCompletion *qc)
 {
 	Oid			matviewOid;
 	LOCKMODE	lockmode;
 
 	/* Determine strength of lock needed. */
-	lockmode = stmt->concurrent ? ExclusiveLock : AccessExclusiveLock;
+	if (stmt->concurrent)
+		lockmode = ExclusiveLock;
+	else if (stmt->whereClause)
+		lockmode = RowExclusiveLock;
+	else
+		lockmode = AccessExclusiveLock;
 
 	/*
 	 * Get a lock until end of transaction.
@@ -135,24 +345,40 @@ ExecRefreshMatView(RefreshMatViewStmt *stmt, const char *queryString,
 										  NULL);
 
 	return RefreshMatViewByOid(matviewOid, false, stmt->skipData,
-							   stmt->concurrent, queryString, qc);
+							   stmt->concurrent, stmt->whereClause,
+							   queryString, params, qc);
 }
 
 /*
  * RefreshMatViewByOid -- refresh materialized view by OID
  *
- * This refreshes the materialized view by creating a new table and swapping
- * the relfilenumbers of the new table and the old materialized view, so the OID
- * of the original materialized view is preserved. Thus we do not lose GRANT
- * nor references to this materialized view.
+ * This refreshes a materialized view using one of three strategies:
+ *
+ * 1. Partial non-concurrent (WHERE clause, no CONCURRENTLY):
+ * Directly modifies the matview in-place using a two-step approach
+ * (SELECT FOR UPDATE followed by a CTE upsert/delete).
+ * Uses RowExclusiveLock, allowing concurrent reads and concurrent writes
+ * to non-overlapping rows. Overlapping writes are serialized by row locks.
+ *
+ * 2. Concurrent (CONCURRENTLY, with or without WHERE clause):
+ * Creates a temporary table with new data, computes a diff against
+ * the existing matview, and applies changes. Uses ExclusiveLock,
+ * allowing concurrent reads throughout the operation but blocking all
+ * concurrent writes.
+ *
+ * 3. Full rebuild (default, no WHERE, no CONCURRENTLY):
+ * Creates a new heap, populates it, and swaps relfilenumbers.
+ * Uses AccessExclusiveLock, blocking all concurrent access.
+ * The OID of the original materialized view is preserved, so we
+ * do not lose GRANT nor references to this materialized view.
  *
  * If skipData is true, this is effectively like a TRUNCATE; otherwise it is
  * like a TRUNCATE followed by an INSERT using the SELECT statement associated
  * with the materialized view.
  *
- * Indexes are rebuilt too, via REINDEX. Since we are effectively bulk-loading
- * the new heap, it's better to create the indexes afterwards than to fill them
- * incrementally while we load.
+ * For full rebuild, indexes are rebuilt too, via REINDEX.  Since we are
+ * effectively bulk-loading the new heap, it's better to create the indexes
+ * afterwards than to fill them incrementally while we load.
  *
  * The matview's "populated" state is changed based on whether the contents
  * reflect the result set of the materialized view's query.
@@ -162,22 +388,22 @@ ExecRefreshMatView(RefreshMatViewStmt *stmt, const char *queryString,
  */
 ObjectAddress
 RefreshMatViewByOid(Oid matviewOid, bool is_create, bool skipData,
-					bool concurrent, const char *queryString,
+					bool concurrent, Node *whereClause,
+					const char *queryString, ParamListInfo params,
 					QueryCompletion *qc)
 {
 	Relation	matviewRel;
 	RewriteRule *rule;
 	List	   *actions;
 	Query	   *dataQuery;
-	Oid			tableSpace;
 	Oid			relowner;
-	Oid			OIDNewHeap;
 	uint64		processed = 0;
-	char		relpersistence;
 	Oid			save_userid;
 	int			save_sec_context;
 	int			save_nestlevel;
 	ObjectAddress address;
+	Node	   *qual = NULL;
+	char	   *qual_str = NULL;
 
 	matviewRel = table_open(matviewOid, NoLock);
 	relowner = matviewRel->rd_rel->relowner;
@@ -206,7 +432,11 @@ RefreshMatViewByOid(Oid matviewOid, bool is_create, bool skipData,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("CONCURRENTLY cannot be used when the materialized view is not populated")));
 
-	/* Check that conflicting options have not been specified. */
+	if (whereClause && !RelationIsPopulated(matviewRel))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("WHERE clause cannot be used when the materialized view is not populated")));
+
 	if (concurrent && skipData)
 		ereport(ERROR,
 				(errcode(ERRCODE_SYNTAX_ERROR),
@@ -239,6 +469,12 @@ RefreshMatViewByOid(Oid matviewOid, bool is_create, bool skipData,
 		elog(ERROR,
 			 "the rule for materialized view \"%s\" is not a single action",
 			 RelationGetRelationName(matviewRel));
+
+	if (whereClause)
+	{
+		qual = transformRefreshWhereClause(matviewOid, whereClause, params);
+		qual_str = deparseRefreshWhereClause(matviewOid, qual);
+	}
 
 	/*
 	 * Check that there is a unique index with no WHERE clause on one or more
@@ -299,47 +535,83 @@ RefreshMatViewByOid(Oid matviewOid, bool is_create, bool skipData,
 	if (RelationIsPopulated(matviewRel) != !skipData)
 		SetMatViewPopulatedState(matviewRel, !skipData);
 
-	/* Concurrent refresh builds new data in temp tablespace, and does diff. */
-	if (concurrent)
+	/*
+	 * STRATEGY 1: PARTIAL NON-CONCURRENT
+	 */
+	if (qual && !concurrent && !skipData)
 	{
-		tableSpace = GetDefaultTablespace(RELPERSISTENCE_TEMP, false);
-		relpersistence = RELPERSISTENCE_TEMP;
-	}
-	else
-	{
-		tableSpace = matviewRel->rd_rel->reltablespace;
-		relpersistence = matviewRel->rd_rel->relpersistence;
+		processed = refresh_by_direct_modification(matviewOid, relowner,
+												   save_sec_context, qual_str,
+												   params);
 	}
 
 	/*
-	 * Create the transient table that will receive the regenerated data. Lock
-	 * it against access by any other process until commit (by which time it
-	 * will be gone).
+	 * STRATEGY 2: CONCURRENT (PARTIAL or FULL)
 	 */
-	OIDNewHeap = make_new_heap(matviewOid, tableSpace,
-							   matviewRel->rd_rel->relam,
-							   relpersistence, ExclusiveLock);
-	Assert(CheckRelationOidLockedByMe(OIDNewHeap, AccessExclusiveLock, false));
-
-	/* Generate the data, if wanted. */
-	if (!skipData)
+	else if (concurrent)
 	{
-		DestReceiver *dest;
-
-		dest = CreateTransientRelDestReceiver(OIDNewHeap);
-		processed = refresh_matview_datafill(dest, dataQuery, queryString,
-											 is_create);
-	}
-
-	/* Make the matview match the newly generated data. */
-	if (concurrent)
-	{
+		Oid			tableSpace;
+		char		relpersistence;
+		Oid			OIDNewHeap;
 		int			old_depth = matview_maintenance_depth;
+
+		tableSpace = GetDefaultTablespace(RELPERSISTENCE_TEMP, false);
+		relpersistence = RELPERSISTENCE_TEMP;
+
+		/*
+		 * Create the transient table that will receive the regenerated data.
+		 * Lock it against access by any other process until commit (by which
+		 * time it will be gone).
+		 */
+		OIDNewHeap = make_new_heap(matviewOid, tableSpace,
+								   matviewRel->rd_rel->relam,
+								   relpersistence, ExclusiveLock);
+		Assert(CheckRelationOidLockedByMe(OIDNewHeap, AccessExclusiveLock, false));
+
+		/* Generate the data, if wanted. */
+		if (!skipData)
+		{
+			if (qual_str)
+			{
+				StringInfoData buf;
+				char	   *view_sql = get_matview_view_query(matviewOid);
+				char	   *transient_name;
+				Relation	transientRel = table_open(OIDNewHeap, NoLock);
+
+				transient_name = quote_qualified_identifier(get_namespace_name(RelationGetNamespace(transientRel)),
+															RelationGetRelationName(transientRel));
+				table_close(transientRel, NoLock);
+
+				/*
+				 * Init buffer before SPI connection to avoid double free
+				 * issues on context destroy
+				 */
+				initStringInfo(&buf);
+				appendStringInfo(&buf, "INSERT INTO %s SELECT * FROM (%s) _mv_q WHERE %s",
+								 transient_name, view_sql, qual_str);
+
+				SPI_connect();
+				if (matview_execute_spi(buf.data, params, false) != SPI_OK_INSERT)
+					elog(ERROR, "SPI_exec failed: %s", buf.data);
+				processed = SPI_processed;
+				SPI_finish();
+				pfree(view_sql);
+				pfree(transient_name);
+				pfree(buf.data);
+			}
+			else
+			{
+				DestReceiver *dest;
+
+				dest = CreateTransientRelDestReceiver(OIDNewHeap);
+				processed = refresh_matview_datafill(dest, dataQuery, queryString, is_create);
+			}
+		}
 
 		PG_TRY();
 		{
 			refresh_by_match_merge(matviewOid, OIDNewHeap, relowner,
-								   save_sec_context);
+								   save_sec_context, qual_str, params);
 		}
 		PG_CATCH();
 		{
@@ -347,10 +619,34 @@ RefreshMatViewByOid(Oid matviewOid, bool is_create, bool skipData,
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
+
 		Assert(matview_maintenance_depth == old_depth);
 	}
+
+	/*
+	 * STRATEGY 3: FULL REBUILD
+	 */
 	else
 	{
+		Oid			tableSpace;
+		char		relpersistence;
+		Oid			OIDNewHeap;
+
+		tableSpace = matviewRel->rd_rel->reltablespace;
+		relpersistence = matviewRel->rd_rel->relpersistence;
+
+		OIDNewHeap = make_new_heap(matviewOid, tableSpace,
+								   matviewRel->rd_rel->relam,
+								   relpersistence, AccessExclusiveLock);
+
+		if (!skipData)
+		{
+			DestReceiver *dest;
+
+			dest = CreateTransientRelDestReceiver(OIDNewHeap);
+			processed = refresh_matview_datafill(dest, dataQuery, queryString, is_create);
+		}
+
 		refresh_by_heap_swap(matviewOid, OIDNewHeap, relpersistence);
 
 		/*
@@ -557,6 +853,355 @@ transientrel_destroy(DestReceiver *self)
 }
 
 /*
+ * get_matview_view_query
+ *
+ * Retrieve the SQL definition of a materialized view's underlying query.
+ * Returns the query text with trailing semicolons and whitespace removed.
+ */
+static char *
+get_matview_view_query(Oid matviewOid)
+{
+	char	   *view_sql;
+
+	view_sql = TextDatumGetCString(DirectFunctionCall2(pg_get_viewdef,
+													   ObjectIdGetDatum(matviewOid),
+													   BoolGetDatum(false)));
+	if (view_sql)
+	{
+		int			len = strlen(view_sql);
+
+		while (len > 0 && (view_sql[len - 1] == ';' || isspace((unsigned char) view_sql[len - 1])))
+			view_sql[--len] = '\0';
+	}
+	return view_sql;
+}
+
+static void
+InitMatViewCache(void)
+{
+	HASHCTL		ctl;
+
+	memset(&ctl, 0, sizeof(ctl));
+	ctl.keysize = sizeof(Oid);
+	ctl.entrysize = sizeof(MatViewPartialRefreshCache);
+	ctl.hcxt = CacheMemoryContext;
+
+	MatViewRefreshCache = hash_create("MatView Partial Refresh Cache",
+									  16,
+									  &ctl,
+									  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+}
+
+/*
+ * refresh_by_direct_modification
+ *
+ * This modifies the materialized view in-place without creating a temporary
+ * heap or swapping relfilenumbers.  It requires a usable unique index on the
+ * matview for conflict resolution.
+ *
+ * Concurrency is handled in two steps, each executed as a separate SPI
+ * statement:
+ *
+ * 1. Lock existing rows matching the WHERE clause via SELECT FOR UPDATE.
+ *    This serializes concurrent partial refreshes that touch overlapping
+ *    rows while allowing non-overlapping refreshes to proceed in parallel.
+ *
+ * 2. Execute a single CTE that evaluates the underlying query, upserts
+ *    the results into the matview, and deletes rows that no longer match
+ *    the predicate (via anti-join against the fresh query output).
+ *
+ * To avoid rebuilding the SQL and re-preparing the SPI plans on every call,
+ * we cache both plans in a session-level hash table keyed by matview OID.
+ *
+ * Returns the number of rows processed by the refresh CTE.
+ */
+static uint64
+refresh_by_direct_modification(Oid matviewOid, Oid relowner,
+							   int save_sec_context, char *whereClauseStr,
+							   ParamListInfo params)
+{
+	Relation	matviewRel;
+	Oid			uniqueIndexOid = InvalidOid;
+	List	   *indexoidlist;
+	ListCell   *lc;
+	MatViewPartialRefreshCache *cacheEntry;
+	bool		found;
+	uint64		result_processed = 0;
+
+	matviewRel = table_open(matviewOid, NoLock);
+
+	/* Find a usable unique index, preferring the primary key. */
+	indexoidlist = RelationGetIndexList(matviewRel);
+	foreach(lc, indexoidlist)
+	{
+		Oid			indexoid = lfirst_oid(lc);
+		Relation	indexRel;
+		bool		usable;
+		bool		is_pk;
+
+		indexRel = index_open(indexoid, AccessShareLock);
+		usable = is_usable_unique_index(indexRel);
+		is_pk = indexRel->rd_index->indisprimary;
+		index_close(indexRel, AccessShareLock);
+
+		if (usable)
+		{
+			if (is_pk)
+			{
+				uniqueIndexOid = indexoid;
+				break;
+			}
+			if (!OidIsValid(uniqueIndexOid))
+				uniqueIndexOid = indexoid;
+		}
+	}
+	list_free(indexoidlist);
+
+	if (!OidIsValid(uniqueIndexOid))
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("cannot perform partial refresh on materialized view \"%s\"",
+						RelationGetRelationName(matviewRel)),
+				 errdetail("Partial refresh requires a usable unique index to perform an UPSERT operation.")));
+
+	/* Look up or create a plan cache entry for this matview. */
+	if (!MatViewRefreshCache)
+		InitMatViewCache();
+
+	cacheEntry = (MatViewPartialRefreshCache *) hash_search(MatViewRefreshCache,
+															&matviewOid,
+															HASH_ENTER,
+															&found);
+
+	/*
+	 * We have a cache hit ONLY if the entry exists, the unique index matches,
+	 * and the WHERE clause string perfectly matches.  We also ensure
+	 * whereClauseStr is not NULL to prevent a strcmp segfault if a previous
+	 * compilation failed midway.
+	 */
+	if (found &&
+		cacheEntry->uniqueIndexOid == uniqueIndexOid &&
+		cacheEntry->whereClauseStr != NULL &&
+		whereClauseStr != NULL &&
+		strcmp(cacheEntry->whereClauseStr, whereClauseStr) == 0)
+	{
+		/* Cache is valid.  Do nothing. */
+	}
+	else
+	{
+		if (found)
+		{
+			/* Index or WHERE clause changed; discard stale plans. */
+			if (cacheEntry->lockPlan)
+				SPI_freeplan(cacheEntry->lockPlan);
+			if (cacheEntry->refreshPlan)
+				SPI_freeplan(cacheEntry->refreshPlan);
+			if (cacheEntry->whereClauseStr)
+				pfree(cacheEntry->whereClauseStr);
+		}
+
+		cacheEntry->lockPlan = NULL;
+		cacheEntry->refreshPlan = NULL;
+		cacheEntry->whereClauseStr = NULL;
+	}
+
+	OpenMatViewIncrementalMaintenance();
+
+	SPI_connect();
+
+	/* Prepare plans if we don't have valid cached ones. */
+	if (cacheEntry->lockPlan == NULL || cacheEntry->refreshPlan == NULL)
+	{
+		StringInfoData buf;
+		char	   *view_sql;
+		char	   *matview_name;
+		const char *matview_alias;
+		Oid		   *argtypes = NULL;
+		int			nargs = 0;
+		Relation	indexRel;
+		Form_pg_index indexStruct;
+		TupleDesc	tupdesc = matviewRel->rd_att;
+		StringInfoData conflict_cols;
+		StringInfoData set_clause;
+		StringInfoData join_clause;
+		bool		first;
+		bool		has_non_key_cols = false;
+		int			i;
+		MemoryContext oldcxt;
+
+		matview_name = quote_qualified_identifier(get_namespace_name(RelationGetNamespace(matviewRel)),
+												  RelationGetRelationName(matviewRel));
+		matview_alias = quote_identifier(RelationGetRelationName(matviewRel));
+		view_sql = get_matview_view_query(matviewOid);
+
+		if (params && params->numParams > 0)
+		{
+			nargs = params->numParams;
+			argtypes = (Oid *) palloc(nargs * sizeof(Oid));
+			for (i = 0; i < nargs; i++)
+				argtypes[i] = params->params[i].ptype;
+		}
+
+		/*
+		 * Prepare the row-locking statement.  This acquires FOR UPDATE locks
+		 * on matview rows matching the WHERE clause to serialize concurrent
+		 * partial refreshes on overlapping rows.
+		 */
+		initStringInfo(&buf);
+		appendStringInfo(&buf, "SELECT 1 FROM %s mv WHERE (%s) FOR UPDATE",
+						 matview_name, whereClauseStr);
+
+		cacheEntry->lockPlan = SPI_prepare(buf.data, nargs, argtypes);
+		if (cacheEntry->lockPlan == NULL)
+			elog(ERROR, "SPI_prepare failed for lock acquisition: %s", buf.data);
+		SPI_keepplan(cacheEntry->lockPlan);
+
+		/*
+		 * Build the refresh CTE: evaluate the underlying query with the WHERE
+		 * predicate, upsert the results, and delete matview rows that no
+		 * longer appear in the query output.
+		 */
+		indexRel = index_open(uniqueIndexOid, AccessShareLock);
+		indexStruct = indexRel->rd_index;
+
+		initStringInfo(&conflict_cols);
+		initStringInfo(&set_clause);
+		initStringInfo(&join_clause);
+
+		/* Build the ON CONFLICT column list and anti-join condition. */
+		first = true;
+		for (i = 0; i < indexStruct->indnkeyatts; i++)
+		{
+			int			attnum = indexStruct->indkey.values[i];
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
+			const char *quoted;
+
+			quoted = quote_identifier(NameStr(attr->attname));
+
+			if (!first)
+			{
+				appendStringInfoString(&conflict_cols, ", ");
+				appendStringInfoString(&join_clause, " AND ");
+			}
+			first = false;
+
+			appendStringInfoString(&conflict_cols, quoted);
+			appendStringInfo(&join_clause,
+							 "nd.%s IS NOT DISTINCT FROM mv.%s",
+							 quoted, quoted);
+		}
+
+		/* Build the DO UPDATE SET clause for non-key columns. */
+		first = true;
+		for (i = 0; i < tupdesc->natts; i++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+			const char *quoted;
+			bool		is_key = false;
+			int			j;
+
+			if (attr->attisdropped)
+				continue;
+
+			for (j = 0; j < indexStruct->indnkeyatts; j++)
+			{
+				if (indexStruct->indkey.values[j] == (i + 1))
+				{
+					is_key = true;
+					break;
+				}
+			}
+
+			if (is_key)
+				continue;
+
+			if (!first)
+				appendStringInfoString(&set_clause, ", ");
+			first = false;
+			has_non_key_cols = true;
+
+			quoted = quote_identifier(NameStr(attr->attname));
+			appendStringInfo(&set_clause, "%s = EXCLUDED.%s", quoted, quoted);
+		}
+
+		index_close(indexRel, NoLock);
+
+		resetStringInfo(&buf);
+
+		if (has_non_key_cols)
+		{
+			appendStringInfo(&buf,
+							 "WITH new_data AS MATERIALIZED ( "
+							 "  SELECT * FROM (%s) %s WHERE (%s) "
+							 "), "
+							 "upsert AS ( "
+							 "  INSERT INTO %s SELECT * FROM new_data "
+							 "  ON CONFLICT (%s) DO UPDATE SET %s "
+							 ") "
+							 "DELETE FROM %s mv WHERE (%s) AND NOT EXISTS ( "
+							 "  SELECT 1 FROM new_data nd WHERE %s"
+							 ")",
+							 view_sql, matview_alias, whereClauseStr,
+							 matview_name, conflict_cols.data, set_clause.data,
+							 matview_name, whereClauseStr, join_clause.data);
+		}
+		else
+		{
+			appendStringInfo(&buf,
+							 "WITH new_data AS MATERIALIZED ( "
+							 "  SELECT * FROM (%s) %s WHERE (%s) "
+							 "), "
+							 "upsert AS ( "
+							 "  INSERT INTO %s SELECT * FROM new_data "
+							 "  ON CONFLICT (%s) DO NOTHING "
+							 ") "
+							 "DELETE FROM %s mv WHERE (%s) AND NOT EXISTS ( "
+							 "  SELECT 1 FROM new_data nd WHERE %s"
+							 ")",
+							 view_sql, matview_alias, whereClauseStr,
+							 matview_name, conflict_cols.data,
+							 matview_name, whereClauseStr, join_clause.data);
+		}
+
+		cacheEntry->refreshPlan = SPI_prepare(buf.data, nargs, argtypes);
+		if (cacheEntry->refreshPlan == NULL)
+			elog(ERROR, "SPI_prepare failed for refresh CTE: %s", buf.data);
+		SPI_keepplan(cacheEntry->refreshPlan);
+
+		/* Save cache metadata in a long-lived context. */
+		oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
+		cacheEntry->uniqueIndexOid = uniqueIndexOid;
+		cacheEntry->whereClauseStr = pstrdup(whereClauseStr);
+		MemoryContextSwitchTo(oldcxt);
+
+		pfree(matview_name);
+		pfree(view_sql);
+		pfree(buf.data);
+		pfree(conflict_cols.data);
+		pfree(set_clause.data);
+		pfree(join_clause.data);
+		if (argtypes != NULL)
+			pfree(argtypes);
+	}
+
+
+	/* Execute: lock matching rows, then run the refresh CTE. */
+	if (matview_execute_spi_plan(cacheEntry->lockPlan, params, false) < 0)
+		elog(ERROR, "SPI_execute_plan failed during lock acquisition");
+
+	if (matview_execute_spi_plan(cacheEntry->refreshPlan, params, false) < 0)
+		elog(ERROR, "SPI_execute_plan failed during refresh");
+
+	result_processed = SPI_processed;
+
+	SPI_finish();
+	CloseMatViewIncrementalMaintenance();
+	table_close(matviewRel, NoLock);
+
+	return result_processed;
+}
+
+/*
  * refresh_by_match_merge
  *
  * Refresh a materialized view with transactional semantics, while allowing
@@ -572,6 +1217,10 @@ transientrel_destroy(DestReceiver *self)
  * indexes turns out to be quite convenient here; the tests we need to make
  * are consistent with default behavior.  If there is at least one UNIQUE
  * index on the materialized view, we have exactly the guarantee we need.
+ *
+ * If whereClauseStr is provided, only rows matching the WHERE condition
+ * in the existing matview are considered for the diff operation, enabling
+ * partial concurrent refresh.
  *
  * The temporary table used to hold the diff results contains just the TID of
  * the old record (if matched) and the ROW from the new table as a single
@@ -590,7 +1239,8 @@ transientrel_destroy(DestReceiver *self)
  */
 static void
 refresh_by_match_merge(Oid matviewOid, Oid tempOid, Oid relowner,
-					   int save_sec_context)
+					   int save_sec_context, char *whereClauseStr,
+					   ParamListInfo params)
 {
 	StringInfoData querybuf;
 	Relation	matviewRel;
@@ -704,8 +1354,15 @@ refresh_by_match_merge(Oid matviewOid, Oid tempOid, Oid relowner,
 	appendStringInfo(&querybuf,
 					 "INSERT INTO %s "
 					 "SELECT mv.ctid AS tid, newdata.*::%s AS newdata "
-					 "FROM %s mv FULL JOIN %s newdata ON (",
-					 diffname, tempname, matviewname, tempname);
+					 "FROM ",
+					 diffname, tempname);
+
+	if (whereClauseStr)
+		appendStringInfo(&querybuf, "(SELECT ctid, * FROM %s WHERE %s) mv", matviewname, whereClauseStr);
+	else
+		appendStringInfo(&querybuf, "%s mv", matviewname);
+
+	appendStringInfo(&querybuf, " FULL JOIN %s newdata ON (", tempname);
 
 	/*
 	 * Get the list of index OIDs for the table from the relcache, and look up
@@ -827,13 +1484,42 @@ refresh_by_match_merge(Oid matviewOid, Oid tempOid, Oid relowner,
 				errmsg("could not find suitable unique index on materialized view \"%s\"",
 					   RelationGetRelationName(matviewRel)));
 
-	appendStringInfoString(&querybuf,
-						   " AND newdata.* OPERATOR(pg_catalog.*=) mv.*) "
-						   "WHERE newdata.* IS NULL OR mv.* IS NULL "
-						   "ORDER BY tid");
+	if (whereClauseStr)
+	{
+		StringInfoData cols;
+		int			i;
+		bool		first = true;
+
+		initStringInfo(&cols);
+		for (i = 0; i < relnatts; i++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+			if (attr->attisdropped)
+				continue;
+			if (!first)
+				appendStringInfoString(&cols, ", ");
+			first = false;
+			appendStringInfo(&cols, "mv.%s", quote_qualified_identifier(NULL, NameStr(attr->attname)));
+		}
+
+		appendStringInfo(&querybuf,
+						 " AND newdata.* OPERATOR(pg_catalog.*=) ROW(%s)) "
+						 "WHERE newdata.* IS NULL OR mv.ctid IS NULL "
+						 "ORDER BY tid",
+						 cols.data);
+		pfree(cols.data);
+	}
+	else
+	{
+		appendStringInfoString(&querybuf,
+							   " AND newdata.* OPERATOR(pg_catalog.*=) mv.*) "
+							   "WHERE newdata.* IS NULL OR mv.* IS NULL "
+							   "ORDER BY tid");
+	}
 
 	/* Populate the temporary "diff" table. */
-	if (SPI_exec(querybuf.data, 0) != SPI_OK_INSERT)
+	if (matview_execute_spi(querybuf.data, params, false) != SPI_OK_INSERT)
 		elog(ERROR, "SPI_exec failed: %s", querybuf.data);
 
 	/*
@@ -899,7 +1585,8 @@ refresh_by_heap_swap(Oid matviewOid, Oid OIDNewHeap, char relpersistence)
 }
 
 /*
- * Check whether specified index is usable for match merge.
+ * Check whether the specified index is usable for refresh_by_match_merge
+ *  or refresh_by_direct_modification.
  */
 static bool
 is_usable_unique_index(Relation indexRel)
@@ -947,8 +1634,10 @@ is_usable_unique_index(Relation indexRel)
  *
  * While the function names reflect the fact that their main intended use is
  * incremental maintenance of materialized views (in response to changes to
- * the data in referenced relations), they are initially used to allow REFRESH
- * without blocking concurrent reads.
+ * the data in referenced relations), they are currently used to allow:
+ *
+ * - REFRESH CONCURRENTLY without blocking concurrent reads.
+ * - REFRESH ... WHERE ... which modifies the matview in-place.
  */
 bool
 MatViewIncrementalMaintenanceIsEnabled(void)
