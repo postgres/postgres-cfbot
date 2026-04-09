@@ -160,12 +160,26 @@ HINT:  Rebuild all objects affected by this collation and run ALTER COLLATION pg
    The following query can be used to identify all collations in the current
    database that need to be refreshed and the objects that depend on them:
 <programlisting><![CDATA[
-SELECT pg_describe_object(refclassid, refobjid, refobjsubid) AS "Collation",
-       pg_describe_object(classid, objid, objsubid) AS "Object"
-  FROM pg_depend d JOIN pg_collation c
-       ON refclassid = 'pg_collation'::regclass AND refobjid = c.oid
-  WHERE c.collversion <> pg_collation_actual_version(c.oid)
-  ORDER BY 1, 2;
+SELECT DISTINCT
+  currentdb AS database,
+  indrelid::regclass::text AS table,
+  indexrelid::regclass::text AS index,
+  collname,
+  collprovider,
+  CASE WHEN collprovider='d' THEN datcollversion ELSE collversion END AS collation_version,
+  CASE WHEN collprovider='d' THEN pg_database_collation_actual_version(d.oid) ELSE pg_collation_actual_version(c.oid) END AS actual_collation_version,
+  pg_get_indexdef(indexrelid) AS index_definition
+FROM
+  (SELECT indexrelid, indrelid, indcollation[i] coll, current_database() AS currentdb FROM pg_index, generate_subscripts(indcollation, 1) g(i)) s
+      JOIN pg_collation c ON coll=c.oid
+    JOIN pg_database d ON currentdb=d.datname
+WHERE
+  (
+    ((collprovider='d') AND (d.datlocprovider='c') AND d.datcollversion <> pg_database_collation_actual_version(d.oid))
+  OR
+    ((collprovider='c') AND collversion <> pg_collation_actual_version(c.oid) )
+  ) AND
+  collname NOT IN ('C', 'POSIX');
 ]]></programlisting></para>
  </refsect1>
 
