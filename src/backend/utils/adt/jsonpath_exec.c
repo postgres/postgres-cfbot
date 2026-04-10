@@ -72,6 +72,7 @@
 #include "utils/float.h"
 #include "utils/formatting.h"
 #include "utils/json.h"
+#include "utils/jsonfuncs.h"
 #include "utils/jsonpath.h"
 #include "utils/memutils.h"
 #include "utils/timestamp.h"
@@ -694,6 +695,118 @@ jsonb_path_query_first_tz(PG_FUNCTION_ARGS)
 {
 	return jsonb_path_query_first_internal(fcinfo, true);
 }
+
+/*
+ * Wrapper macro for the jsonb_path_query_first_<type> extractor family.
+ *
+ * Invokes the jsonpath execution machinery and converts the first result
+ * directly to the target scalar type.  The JsonValueList is kept on the
+ * caller's stack so that the pointer returned by JsonValueListHead() remains
+ * valid through the conversion call.
+ */
+#define DEFINE_JSONB_PATH_QUERY_FIRST_TYPED(fname, convfn) \
+Datum \
+fname(PG_FUNCTION_ARGS) \
+{ \
+	Jsonb	   *jb = PG_GETARG_JSONB_P(0); \
+	JsonPath   *jp = PG_GETARG_JSONPATH_P(1); \
+	Jsonb	   *vars = PG_GETARG_JSONB_P(2); \
+	bool		silent = PG_GETARG_BOOL(3); \
+	JsonValueList found; \
+	JsonbValue *v; \
+	Datum		result; \
+\
+	JsonValueListInit(&found); \
+\
+	(void) executeJsonPath(jp, vars, getJsonPathVariableFromJsonb, \
+						   countVariablesFromJsonb, \
+						   jb, !silent, &found, false); \
+\
+	if (JsonValueListIsEmpty(&found)) \
+	{ \
+		PG_FREE_IF_COPY(jb, 0); \
+		PG_FREE_IF_COPY(jp, 1); \
+		PG_FREE_IF_COPY(vars, 2); \
+		PG_RETURN_NULL(); \
+	} \
+\
+	v = JsonValueListHead(&found); \
+	if (v->type == jbvNull) \
+	{ \
+		PG_FREE_IF_COPY(jb, 0); \
+		PG_FREE_IF_COPY(jp, 1); \
+		PG_FREE_IF_COPY(vars, 2); \
+		PG_RETURN_NULL(); \
+	} \
+\
+	result = convfn(v); \
+	PG_FREE_IF_COPY(jb, 0); \
+	PG_FREE_IF_COPY(jp, 1); \
+	PG_FREE_IF_COPY(vars, 2); \
+	return result; \
+}
+
+DEFINE_JSONB_PATH_QUERY_FIRST_TYPED(jsonb_path_query_first_numeric, jsonb_value_to_numeric_datum)
+DEFINE_JSONB_PATH_QUERY_FIRST_TYPED(jsonb_path_query_first_bool, jsonb_value_to_bool_datum)
+DEFINE_JSONB_PATH_QUERY_FIRST_TYPED(jsonb_path_query_first_int4, jsonb_value_to_int4_datum)
+DEFINE_JSONB_PATH_QUERY_FIRST_TYPED(jsonb_path_query_first_int8, jsonb_value_to_int8_datum)
+DEFINE_JSONB_PATH_QUERY_FIRST_TYPED(jsonb_path_query_first_float8, jsonb_value_to_float8_datum)
+DEFINE_JSONB_PATH_QUERY_FIRST_TYPED(jsonb_path_query_first_int2, jsonb_value_to_int2_datum)
+DEFINE_JSONB_PATH_QUERY_FIRST_TYPED(jsonb_path_query_first_float4, jsonb_value_to_float4_datum)
+
+/*
+ * Wrapper macro for the jsonb_path_query_first_tz_<type> extractor family.
+ * Same as above but with timezone-aware evaluation.
+ */
+#define DEFINE_JSONB_PATH_QUERY_FIRST_TZ_TYPED(fname, convfn) \
+Datum \
+fname(PG_FUNCTION_ARGS) \
+{ \
+	Jsonb	   *jb = PG_GETARG_JSONB_P(0); \
+	JsonPath   *jp = PG_GETARG_JSONPATH_P(1); \
+	Jsonb	   *vars = PG_GETARG_JSONB_P(2); \
+	bool		silent = PG_GETARG_BOOL(3); \
+	JsonValueList found; \
+	JsonbValue *v; \
+	Datum		result; \
+\
+	JsonValueListInit(&found); \
+\
+	(void) executeJsonPath(jp, vars, getJsonPathVariableFromJsonb, \
+						   countVariablesFromJsonb, \
+						   jb, !silent, &found, true); \
+\
+	if (JsonValueListIsEmpty(&found)) \
+	{ \
+		PG_FREE_IF_COPY(jb, 0); \
+		PG_FREE_IF_COPY(jp, 1); \
+		PG_FREE_IF_COPY(vars, 2); \
+		PG_RETURN_NULL(); \
+	} \
+\
+	v = JsonValueListHead(&found); \
+	if (v->type == jbvNull) \
+	{ \
+		PG_FREE_IF_COPY(jb, 0); \
+		PG_FREE_IF_COPY(jp, 1); \
+		PG_FREE_IF_COPY(vars, 2); \
+		PG_RETURN_NULL(); \
+	} \
+\
+	result = convfn(v); \
+	PG_FREE_IF_COPY(jb, 0); \
+	PG_FREE_IF_COPY(jp, 1); \
+	PG_FREE_IF_COPY(vars, 2); \
+	return result; \
+}
+
+DEFINE_JSONB_PATH_QUERY_FIRST_TZ_TYPED(jsonb_path_query_first_tz_numeric, jsonb_value_to_numeric_datum)
+DEFINE_JSONB_PATH_QUERY_FIRST_TZ_TYPED(jsonb_path_query_first_tz_bool, jsonb_value_to_bool_datum)
+DEFINE_JSONB_PATH_QUERY_FIRST_TZ_TYPED(jsonb_path_query_first_tz_int4, jsonb_value_to_int4_datum)
+DEFINE_JSONB_PATH_QUERY_FIRST_TZ_TYPED(jsonb_path_query_first_tz_int8, jsonb_value_to_int8_datum)
+DEFINE_JSONB_PATH_QUERY_FIRST_TZ_TYPED(jsonb_path_query_first_tz_float8, jsonb_value_to_float8_datum)
+DEFINE_JSONB_PATH_QUERY_FIRST_TZ_TYPED(jsonb_path_query_first_tz_int2, jsonb_value_to_int2_datum)
+DEFINE_JSONB_PATH_QUERY_FIRST_TZ_TYPED(jsonb_path_query_first_tz_float4, jsonb_value_to_float4_datum)
 
 /********************Execute functions for JsonPath**************************/
 

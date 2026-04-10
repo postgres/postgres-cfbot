@@ -91,6 +91,16 @@ extern Datum datum_to_jsonb(Datum val, JsonTypeCategory tcategory,
 							Oid outfuncoid);
 extern Datum jsonb_from_text(text *js, bool unique_keys);
 
+/* Typed field extraction helpers (shared by jsonfuncs.c and jsonpath_exec.c) */
+extern void jsonb_field_cast_error(JsonbValue *v, const char *sqltype);
+extern Datum jsonb_value_to_numeric_datum(JsonbValue *v);
+extern Datum jsonb_value_to_bool_datum(JsonbValue *v);
+extern Datum jsonb_value_to_int4_datum(JsonbValue *v);
+extern Datum jsonb_value_to_int8_datum(JsonbValue *v);
+extern Datum jsonb_value_to_float8_datum(JsonbValue *v);
+extern Datum jsonb_value_to_int2_datum(JsonbValue *v);
+extern Datum jsonb_value_to_float4_datum(JsonbValue *v);
+
 extern Datum json_populate_type(Datum json_val, Oid json_type,
 								Oid typid, int32 typmod,
 								void **cache, MemoryContext mcxt,
