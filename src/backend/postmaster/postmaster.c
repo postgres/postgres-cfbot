@@ -116,6 +116,7 @@
 #include "storage/pmsignal.h"
 #include "storage/proc.h"
 #include "storage/shmem_internal.h"
+#include "storage/sync.h"
 #include "tcop/backend_startup.h"
 #include "tcop/tcopprot.h"
 #include "utils/datetime.h"
@@ -930,6 +931,16 @@ PostmasterMain(int argc, char *argv[])
 	 * Register the shared memory needs of all core subsystems.
 	 */
 	RegisterBuiltinShmemCallbacks();
+
+	/*
+	 * Register the built-in sync handlers (md, CLOG, commit_ts,
+	 * multixact_offset, multixact_member).  This must happen before
+	 * process_shared_preload_libraries() so that extensions which
+	 * call register_sync_handler() from their _PG_init() receive IDs
+	 * starting at SYNC_HANDLER_FIRST_DYNAMIC instead of colliding
+	 * with the built-in slots.
+	 */
+	InitSyncHandlers();
 
 	/*
 	 * process any libraries that should be preloaded at postmaster start
