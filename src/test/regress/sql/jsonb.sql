@@ -358,6 +358,67 @@ SELECT jsonb_array_element_int2('[10, 20]'::jsonb, 0);
 SELECT jsonb_array_element_float4('[3.14, 2.5]'::jsonb, 1);
 
 
+-- Optimized typed extraction: extract-path family
+-- The planner rewrites (j #> path)::type and (jsonb_extract_path(j, ...))::type
+-- into direct typed extractor calls for the same target types.
+
+-- Section P1: planner rewrite verification (operator form #>)
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json #> '{field4}')::numeric FROM test_jsonb WHERE json_type = 'object';
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json #> '{field4}')::int4 FROM test_jsonb WHERE json_type = 'object';
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json #> '{field4}')::float8 FROM test_jsonb WHERE json_type = 'object';
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json #> '{field6,f1}')::int8 FROM test_jsonb WHERE json_type = 'object';
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json #> '{field7}')::bool FROM test_jsonb WHERE json_type = 'object';
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json #> '{field4}')::int2 FROM test_jsonb WHERE json_type = 'object';
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json #> '{field4}')::float4 FROM test_jsonb WHERE json_type = 'object';
+-- Section P1b: planner rewrite verification (direct function-call form)
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (jsonb_extract_path(test_json, 'field4'))::float8 FROM test_jsonb WHERE json_type = 'object';
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (jsonb_extract_path(test_json, 'field6', 'f1'))::int4 FROM test_jsonb WHERE json_type = 'object';
+
+-- Section P1c: planner rewrite verification (VARIADIC ARRAY form)
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (jsonb_extract_path(test_json, VARIADIC ARRAY['field6','f1']))::int4 FROM test_jsonb WHERE json_type = 'object';
+
+-- Section P2: correct execution through rewritten path
+SELECT (test_json #> '{field4}')::int4 FROM test_jsonb WHERE json_type = 'object';
+SELECT (test_json #> '{field4}')::numeric FROM test_jsonb WHERE json_type = 'object';
+SELECT (test_json #> '{field4}')::float8 FROM test_jsonb WHERE json_type = 'object';
+SELECT (test_json #> '{field6,f1}')::int4 FROM test_jsonb WHERE json_type = 'object';
+SELECT (test_json #> '{field6,f1}')::int8 FROM test_jsonb WHERE json_type = 'object';
+SELECT (test_json #> '{field7}')::bool FROM test_jsonb WHERE json_type = 'object';
+-- array index in path
+SELECT ('{"a":[10,20,30]}'::jsonb #> '{a,1}')::int4;
+
+-- Section P3: NULL semantics
+SELECT (test_json #> '{nonexistent}')::int4 FROM test_jsonb WHERE json_type = 'object';  -- missing key
+SELECT (test_json #> '{field3}')::numeric FROM test_jsonb WHERE json_type = 'object';  -- JSON null leaf
+SELECT (test_json #> '{field6,missing}')::int4 FROM test_jsonb WHERE json_type = 'object';  -- missing nested key
+-- null in path array
+SELECT jsonb_extract_path_int4('{"a":1}'::jsonb, ARRAY[NULL]::text[]);
+-- empty path on container root produces cast error
+SELECT jsonb_extract_path_int4('{"a":1}'::jsonb, '{}'::text[]);
+
+-- Section P4: type-mismatch errors
+SELECT (test_json #> '{field1}')::int4 FROM test_jsonb WHERE json_type = 'object';  -- string to int4
+SELECT (test_json #> '{field5}')::float8 FROM test_jsonb WHERE json_type = 'object';  -- array to float8
+SELECT (test_json #> '{field6}')::int8 FROM test_jsonb WHERE json_type = 'object';  -- object to int8
+
+-- Section P5: direct calls to extract-path typed extractor builtins
+SELECT jsonb_extract_path_int4('{"a":{"b":42}}'::jsonb, ARRAY['a','b']);
+SELECT jsonb_extract_path_int8('{"x":99}'::jsonb, ARRAY['x']);
+SELECT jsonb_extract_path_float8('{"a":3.14}'::jsonb, ARRAY['a']);
+SELECT jsonb_extract_path_numeric('{"a":1.23}'::jsonb, ARRAY['a']);
+SELECT jsonb_extract_path_bool('{"a":true}'::jsonb, ARRAY['a']);
+-- direct calls: missing path
+SELECT jsonb_extract_path_int4('{"a":1}'::jsonb, ARRAY['b']);
+-- direct calls: type-mismatch
+SELECT jsonb_extract_path_int4('{"a":"text"}'::jsonb, ARRAY['a']);
+-- direct calls: array index in path
+SELECT jsonb_extract_path_int4('{"a":[10,20]}'::jsonb, ARRAY['a','1']);
+-- direct calls: int2 and float4
+SELECT jsonb_extract_path_int2('{"a":{"b":7}}'::jsonb, ARRAY['a','b']);
+SELECT jsonb_extract_path_float4('{"a":3.14}'::jsonb, ARRAY['a']);
+
+
 SELECT test_json -> 'x' FROM test_jsonb WHERE json_type = 'scalar';
 SELECT test_json -> 'x' FROM test_jsonb WHERE json_type = 'array';
 SELECT test_json -> 'x' FROM test_jsonb WHERE json_type = 'object';

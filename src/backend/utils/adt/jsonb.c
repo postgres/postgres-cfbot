@@ -1833,6 +1833,7 @@ cannotCastJsonbValue(enum jbvType type, const char *sqltype, Node *escontext)
  * Supported extraction families:
  *   - jsonb_object_field(j, 'key')  /  j -> 'key'  /  j['key']
  *   - jsonb_array_element(j, idx)   /  j -> idx    /  j[idx]
+ *   - jsonb_extract_path(j, ...)    /  j #> '{a,b}'
  */
 Datum
 jsonb_cast_support(PG_FUNCTION_ARGS)
@@ -2004,6 +2005,46 @@ jsonb_cast_support(PG_FUNCTION_ARGS)
 			else if (fexpr->funcid == F_FLOAT4_JSONB)
 			{
 				replacement_funcid = F_JSONB_ARRAY_ELEMENT_FLOAT4;
+				replacement_rettype = FLOAT4OID;
+			}
+			else
+				PG_RETURN_POINTER(NULL);
+		}
+		else if (inner_funcid == F_JSONB_EXTRACT_PATH)
+		{
+			if (fexpr->funcid == F_NUMERIC_JSONB)
+			{
+				replacement_funcid = F_JSONB_EXTRACT_PATH_NUMERIC;
+				replacement_rettype = NUMERICOID;
+			}
+			else if (fexpr->funcid == F_BOOL_JSONB)
+			{
+				replacement_funcid = F_JSONB_EXTRACT_PATH_BOOL;
+				replacement_rettype = BOOLOID;
+			}
+			else if (fexpr->funcid == F_INT4_JSONB)
+			{
+				replacement_funcid = F_JSONB_EXTRACT_PATH_INT4;
+				replacement_rettype = INT4OID;
+			}
+			else if (fexpr->funcid == F_INT8_JSONB)
+			{
+				replacement_funcid = F_JSONB_EXTRACT_PATH_INT8;
+				replacement_rettype = INT8OID;
+			}
+			else if (fexpr->funcid == F_FLOAT8_JSONB)
+			{
+				replacement_funcid = F_JSONB_EXTRACT_PATH_FLOAT8;
+				replacement_rettype = FLOAT8OID;
+			}
+			else if (fexpr->funcid == F_INT2_JSONB)
+			{
+				replacement_funcid = F_JSONB_EXTRACT_PATH_INT2;
+				replacement_rettype = INT2OID;
+			}
+			else if (fexpr->funcid == F_FLOAT4_JSONB)
+			{
+				replacement_funcid = F_JSONB_EXTRACT_PATH_FLOAT4;
 				replacement_rettype = FLOAT4OID;
 			}
 			else
