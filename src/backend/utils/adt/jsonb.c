@@ -1835,6 +1835,8 @@ cannotCastJsonbValue(enum jbvType type, const char *sqltype, Node *escontext)
  *   - jsonb_array_element(j, idx)   /  j -> idx    /  j[idx]
  *   - jsonb_extract_path(j, ...)    /  j #> '{a,b}'
  *   - multi-subscript chains         j['a']['b'], j['a'][0], etc.
+ *   - jsonb_path_query_first(j, path [, vars [, silent]])
+ *   - jsonb_path_query_first_tz(j, path [, vars [, silent]])
  */
 Datum
 jsonb_cast_support(PG_FUNCTION_ARGS)
@@ -2011,13 +2013,13 @@ jsonb_cast_support(PG_FUNCTION_ARGS)
 		/*
 		 * Verify the inner extraction function and map the outer cast to the
 		 * corresponding typed extractor.  Each supported extraction family
-		 * has its own set of typed rewrite targets.
+		 * has its own set of typed rewrite targets and expected arg count.
 		 */
-		if (list_length(inner_args) != 2)
-			PG_RETURN_POINTER(NULL);
-
 		if (inner_funcid == F_JSONB_OBJECT_FIELD)
 		{
+			if (list_length(inner_args) != 2)
+				PG_RETURN_POINTER(NULL);
+
 			if (fexpr->funcid == F_NUMERIC_JSONB)
 			{
 				replacement_funcid = F_JSONB_OBJECT_FIELD_NUMERIC;
@@ -2058,6 +2060,9 @@ jsonb_cast_support(PG_FUNCTION_ARGS)
 		}
 		else if (inner_funcid == F_JSONB_ARRAY_ELEMENT)
 		{
+			if (list_length(inner_args) != 2)
+				PG_RETURN_POINTER(NULL);
+
 			if (fexpr->funcid == F_NUMERIC_JSONB)
 			{
 				replacement_funcid = F_JSONB_ARRAY_ELEMENT_NUMERIC;
@@ -2098,6 +2103,9 @@ jsonb_cast_support(PG_FUNCTION_ARGS)
 		}
 		else if (inner_funcid == F_JSONB_EXTRACT_PATH)
 		{
+			if (list_length(inner_args) != 2)
+				PG_RETURN_POINTER(NULL);
+
 			if (fexpr->funcid == F_NUMERIC_JSONB)
 			{
 				replacement_funcid = F_JSONB_EXTRACT_PATH_NUMERIC;
@@ -2131,6 +2139,92 @@ jsonb_cast_support(PG_FUNCTION_ARGS)
 			else if (fexpr->funcid == F_FLOAT4_JSONB)
 			{
 				replacement_funcid = F_JSONB_EXTRACT_PATH_FLOAT4;
+				replacement_rettype = FLOAT4OID;
+			}
+			else
+				PG_RETURN_POINTER(NULL);
+		}
+		else if (inner_funcid == F_JSONB_PATH_QUERY_FIRST)
+		{
+			if (list_length(inner_args) != 4)
+				PG_RETURN_POINTER(NULL);
+
+			if (fexpr->funcid == F_NUMERIC_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_NUMERIC;
+				replacement_rettype = NUMERICOID;
+			}
+			else if (fexpr->funcid == F_BOOL_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_BOOL;
+				replacement_rettype = BOOLOID;
+			}
+			else if (fexpr->funcid == F_INT4_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_INT4;
+				replacement_rettype = INT4OID;
+			}
+			else if (fexpr->funcid == F_INT8_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_INT8;
+				replacement_rettype = INT8OID;
+			}
+			else if (fexpr->funcid == F_FLOAT8_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_FLOAT8;
+				replacement_rettype = FLOAT8OID;
+			}
+			else if (fexpr->funcid == F_INT2_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_INT2;
+				replacement_rettype = INT2OID;
+			}
+			else if (fexpr->funcid == F_FLOAT4_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_FLOAT4;
+				replacement_rettype = FLOAT4OID;
+			}
+			else
+				PG_RETURN_POINTER(NULL);
+		}
+		else if (inner_funcid == F_JSONB_PATH_QUERY_FIRST_TZ)
+		{
+			if (list_length(inner_args) != 4)
+				PG_RETURN_POINTER(NULL);
+
+			if (fexpr->funcid == F_NUMERIC_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_TZ_NUMERIC;
+				replacement_rettype = NUMERICOID;
+			}
+			else if (fexpr->funcid == F_BOOL_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_TZ_BOOL;
+				replacement_rettype = BOOLOID;
+			}
+			else if (fexpr->funcid == F_INT4_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_TZ_INT4;
+				replacement_rettype = INT4OID;
+			}
+			else if (fexpr->funcid == F_INT8_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_TZ_INT8;
+				replacement_rettype = INT8OID;
+			}
+			else if (fexpr->funcid == F_FLOAT8_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_TZ_FLOAT8;
+				replacement_rettype = FLOAT8OID;
+			}
+			else if (fexpr->funcid == F_INT2_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_TZ_INT2;
+				replacement_rettype = INT2OID;
+			}
+			else if (fexpr->funcid == F_FLOAT4_JSONB)
+			{
+				replacement_funcid = F_JSONB_PATH_QUERY_FIRST_TZ_FLOAT4;
 				replacement_rettype = FLOAT4OID;
 			}
 			else
