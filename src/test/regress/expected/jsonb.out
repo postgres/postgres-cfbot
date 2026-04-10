@@ -1247,6 +1247,233 @@ SELECT jsonb_array_element_float4('[3.14, 2.5]'::jsonb, 1);
                         2.5
 (1 row)
 
+-- Optimized typed extraction: extract-path family
+-- The planner rewrites (j #> path)::type and (jsonb_extract_path(j, ...))::type
+-- into direct typed extractor calls for the same target types.
+-- Section P1: planner rewrite verification (operator form #>)
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json #> '{field4}')::numeric FROM test_jsonb WHERE json_type = 'object';
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb
+   Output: jsonb_extract_path_numeric(test_json, '{field4}'::text[])
+   Filter: (test_jsonb.json_type = 'object'::text)
+(3 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json #> '{field4}')::int4 FROM test_jsonb WHERE json_type = 'object';
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb
+   Output: jsonb_extract_path_int4(test_json, '{field4}'::text[])
+   Filter: (test_jsonb.json_type = 'object'::text)
+(3 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json #> '{field4}')::float8 FROM test_jsonb WHERE json_type = 'object';
+                             QUERY PLAN                             
+--------------------------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb
+   Output: jsonb_extract_path_float8(test_json, '{field4}'::text[])
+   Filter: (test_jsonb.json_type = 'object'::text)
+(3 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json #> '{field6,f1}')::int8 FROM test_jsonb WHERE json_type = 'object';
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb
+   Output: jsonb_extract_path_int8(test_json, '{field6,f1}'::text[])
+   Filter: (test_jsonb.json_type = 'object'::text)
+(3 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json #> '{field7}')::bool FROM test_jsonb WHERE json_type = 'object';
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb
+   Output: jsonb_extract_path_bool(test_json, '{field7}'::text[])
+   Filter: (test_jsonb.json_type = 'object'::text)
+(3 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json #> '{field4}')::int2 FROM test_jsonb WHERE json_type = 'object';
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb
+   Output: jsonb_extract_path_int2(test_json, '{field4}'::text[])
+   Filter: (test_jsonb.json_type = 'object'::text)
+(3 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json #> '{field4}')::float4 FROM test_jsonb WHERE json_type = 'object';
+                             QUERY PLAN                             
+--------------------------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb
+   Output: jsonb_extract_path_float4(test_json, '{field4}'::text[])
+   Filter: (test_jsonb.json_type = 'object'::text)
+(3 rows)
+
+-- Section P1b: planner rewrite verification (direct function-call form)
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (jsonb_extract_path(test_json, 'field4'))::float8 FROM test_jsonb WHERE json_type = 'object';
+                             QUERY PLAN                             
+--------------------------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb
+   Output: jsonb_extract_path_float8(test_json, '{field4}'::text[])
+   Filter: (test_jsonb.json_type = 'object'::text)
+(3 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (jsonb_extract_path(test_json, 'field6', 'f1'))::int4 FROM test_jsonb WHERE json_type = 'object';
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb
+   Output: jsonb_extract_path_int4(test_json, '{field6,f1}'::text[])
+   Filter: (test_jsonb.json_type = 'object'::text)
+(3 rows)
+
+-- Section P1c: planner rewrite verification (VARIADIC ARRAY form)
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (jsonb_extract_path(test_json, VARIADIC ARRAY['field6','f1']))::int4 FROM test_jsonb WHERE json_type = 'object';
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb
+   Output: jsonb_extract_path_int4(test_json, '{field6,f1}'::text[])
+   Filter: (test_jsonb.json_type = 'object'::text)
+(3 rows)
+
+-- Section P2: correct execution through rewritten path
+SELECT (test_json #> '{field4}')::int4 FROM test_jsonb WHERE json_type = 'object';
+ int4 
+------
+    4
+(1 row)
+
+SELECT (test_json #> '{field4}')::numeric FROM test_jsonb WHERE json_type = 'object';
+ numeric 
+---------
+       4
+(1 row)
+
+SELECT (test_json #> '{field4}')::float8 FROM test_jsonb WHERE json_type = 'object';
+ float8 
+--------
+      4
+(1 row)
+
+SELECT (test_json #> '{field6,f1}')::int4 FROM test_jsonb WHERE json_type = 'object';
+ int4 
+------
+    9
+(1 row)
+
+SELECT (test_json #> '{field6,f1}')::int8 FROM test_jsonb WHERE json_type = 'object';
+ int8 
+------
+    9
+(1 row)
+
+SELECT (test_json #> '{field7}')::bool FROM test_jsonb WHERE json_type = 'object';
+ bool 
+------
+ t
+(1 row)
+
+-- array index in path
+SELECT ('{"a":[10,20,30]}'::jsonb #> '{a,1}')::int4;
+ int4 
+------
+   20
+(1 row)
+
+-- Section P3: NULL semantics
+SELECT (test_json #> '{nonexistent}')::int4 FROM test_jsonb WHERE json_type = 'object';  -- missing key
+ int4 
+------
+     
+(1 row)
+
+SELECT (test_json #> '{field3}')::numeric FROM test_jsonb WHERE json_type = 'object';  -- JSON null leaf
+ numeric 
+---------
+        
+(1 row)
+
+SELECT (test_json #> '{field6,missing}')::int4 FROM test_jsonb WHERE json_type = 'object';  -- missing nested key
+ int4 
+------
+     
+(1 row)
+
+-- null in path array
+SELECT jsonb_extract_path_int4('{"a":1}'::jsonb, ARRAY[NULL]::text[]);
+ jsonb_extract_path_int4 
+-------------------------
+                        
+(1 row)
+
+-- empty path on container root produces cast error
+SELECT jsonb_extract_path_int4('{"a":1}'::jsonb, '{}'::text[]);
+ERROR:  cannot cast jsonb array or object to type integer
+-- Section P4: type-mismatch errors
+SELECT (test_json #> '{field1}')::int4 FROM test_jsonb WHERE json_type = 'object';  -- string to int4
+ERROR:  cannot cast jsonb string to type integer
+SELECT (test_json #> '{field5}')::float8 FROM test_jsonb WHERE json_type = 'object';  -- array to float8
+ERROR:  cannot cast jsonb array or object to type double precision
+SELECT (test_json #> '{field6}')::int8 FROM test_jsonb WHERE json_type = 'object';  -- object to int8
+ERROR:  cannot cast jsonb array or object to type bigint
+-- Section P5: direct calls to extract-path typed extractor builtins
+SELECT jsonb_extract_path_int4('{"a":{"b":42}}'::jsonb, ARRAY['a','b']);
+ jsonb_extract_path_int4 
+-------------------------
+                      42
+(1 row)
+
+SELECT jsonb_extract_path_int8('{"x":99}'::jsonb, ARRAY['x']);
+ jsonb_extract_path_int8 
+-------------------------
+                      99
+(1 row)
+
+SELECT jsonb_extract_path_float8('{"a":3.14}'::jsonb, ARRAY['a']);
+ jsonb_extract_path_float8 
+---------------------------
+                      3.14
+(1 row)
+
+SELECT jsonb_extract_path_numeric('{"a":1.23}'::jsonb, ARRAY['a']);
+ jsonb_extract_path_numeric 
+----------------------------
+                       1.23
+(1 row)
+
+SELECT jsonb_extract_path_bool('{"a":true}'::jsonb, ARRAY['a']);
+ jsonb_extract_path_bool 
+-------------------------
+ t
+(1 row)
+
+-- direct calls: missing path
+SELECT jsonb_extract_path_int4('{"a":1}'::jsonb, ARRAY['b']);
+ jsonb_extract_path_int4 
+-------------------------
+                        
+(1 row)
+
+-- direct calls: type-mismatch
+SELECT jsonb_extract_path_int4('{"a":"text"}'::jsonb, ARRAY['a']);
+ERROR:  cannot cast jsonb string to type integer
+-- direct calls: array index in path
+SELECT jsonb_extract_path_int4('{"a":[10,20]}'::jsonb, ARRAY['a','1']);
+ jsonb_extract_path_int4 
+-------------------------
+                      20
+(1 row)
+
+-- direct calls: int2 and float4
+SELECT jsonb_extract_path_int2('{"a":{"b":7}}'::jsonb, ARRAY['a','b']);
+ jsonb_extract_path_int2 
+-------------------------
+                       7
+(1 row)
+
+SELECT jsonb_extract_path_float4('{"a":3.14}'::jsonb, ARRAY['a']);
+ jsonb_extract_path_float4 
+---------------------------
+                      3.14
+(1 row)
+
 SELECT test_json -> 'x' FROM test_jsonb WHERE json_type = 'scalar';
  ?column? 
 ----------

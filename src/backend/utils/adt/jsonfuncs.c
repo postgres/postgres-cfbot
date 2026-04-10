@@ -1059,7 +1059,6 @@ jsonb_value_to_float8_datum(JsonbValue *v)
 
 	return DirectFunctionCall1(numeric_float8, NumericGetDatum(v->val.numeric));
 }
-
 static Datum
 jsonb_value_to_int2_datum(JsonbValue *v)
 {
@@ -1179,6 +1178,191 @@ DEFINE_JSONB_ARRAY_ELEMENT_TYPED(jsonb_array_element_int8, jsonb_value_to_int8_d
 DEFINE_JSONB_ARRAY_ELEMENT_TYPED(jsonb_array_element_float8, jsonb_value_to_float8_datum)
 DEFINE_JSONB_ARRAY_ELEMENT_TYPED(jsonb_array_element_int2, jsonb_value_to_int2_datum)
 DEFINE_JSONB_ARRAY_ELEMENT_TYPED(jsonb_array_element_float4, jsonb_value_to_float4_datum)
+
+/*
+ * Walk a text[] path through a jsonb value and return the leaf JsonbValue,
+ * or NULL.  Returns NULL when a path element is missing, the leaf is JSON
+ * null, or the path array contains null elements.
+ *
+ * For an empty path, returns the root value itself (as a jbvBinary for
+ * containers, or the unwrapped scalar for scalar jsonb).  The caller's
+ * conversion helper then decides whether to accept or reject the type.
+ *
+ * For arrays, path elements are parsed as integers (matching the existing
+ * jsonb_extract_path / jsonb_get_element traversal semantics).
+ */
+static JsonbValue *
+jsonb_extract_path_lookup(Jsonb *jb, ArrayType *path, JsonbValue *vbuf)
+{
+	Datum	   *pathtext;
+	int			npath;
+	JsonbContainer *container = &jb->root;
+	JsonbValue *jbvp = NULL;
+	bool		have_object,
+				have_array;
+	int			i;
+
+	/* If the path array contains any nulls, return NULL */
+	if (array_contains_nulls(path))
+		return NULL;
+
+	deconstruct_array_builtin(path, TEXTOID, &pathtext, NULL, &npath);
+
+	/* Identify top-level container type */
+	if (JB_ROOT_IS_OBJECT(jb))
+	{
+		have_object = true;
+		have_array = false;
+	}
+	else if (JB_ROOT_IS_ARRAY(jb) && !JB_ROOT_IS_SCALAR(jb))
+	{
+		have_object = false;
+		have_array = true;
+	}
+	else
+	{
+		Assert(JB_ROOT_IS_ARRAY(jb) && JB_ROOT_IS_SCALAR(jb));
+
+		/* For a scalar root with an empty path, return the scalar itself */
+		if (npath <= 0)
+		{
+			jbvp = getIthJsonbValueFromContainer(container, 0);
+			if (jbvp == NULL || jbvp->type == jbvNull)
+				return NULL;
+			return jbvp;
+		}
+
+		/* Non-empty path into a scalar yields NULL */
+		return NULL;
+	}
+
+	/*
+	 * For an empty path on a container root, return the container as a
+	 * jbvBinary value.  The conversion helper will reject it with the
+	 * usual "cannot cast jsonb array or object" error.
+	 */
+	if (npath <= 0)
+	{
+		vbuf->type = jbvBinary;
+		vbuf->val.binary.data = container;
+		vbuf->val.binary.len = VARSIZE(jb) - VARHDRSZ;
+		return vbuf;
+	}
+
+	for (i = 0; i < npath; i++)
+	{
+		if (have_object)
+		{
+			text	   *subscr = DatumGetTextPP(pathtext[i]);
+
+			jbvp = getKeyJsonValueFromContainer(container,
+												VARDATA_ANY(subscr),
+												VARSIZE_ANY_EXHDR(subscr),
+												NULL);
+		}
+		else if (have_array)
+		{
+			int			lindex;
+			uint32		index;
+			char	   *indextext = TextDatumGetCString(pathtext[i]);
+			char	   *endptr;
+
+			errno = 0;
+			lindex = strtoint(indextext, &endptr, 10);
+			if (endptr == indextext || *endptr != '\0' || errno != 0)
+				return NULL;
+
+			if (lindex >= 0)
+			{
+				index = (uint32) lindex;
+			}
+			else
+			{
+				uint32		nelements;
+
+				if (!JsonContainerIsArray(container))
+					elog(ERROR, "not a jsonb array");
+
+				nelements = JsonContainerSize(container);
+
+				if (lindex == INT_MIN || -lindex > nelements)
+					return NULL;
+				else
+					index = nelements + lindex;
+			}
+
+			jbvp = getIthJsonbValueFromContainer(container, index);
+		}
+		else
+		{
+			/* scalar: cannot traverse further */
+			return NULL;
+		}
+
+		if (jbvp == NULL)
+			return NULL;
+
+		/* If this is the last path element, we have our leaf */
+		if (i == npath - 1)
+			break;
+
+		/* Descend into the next container level */
+		if (jbvp->type == jbvBinary)
+		{
+			container = jbvp->val.binary.data;
+			have_object = JsonContainerIsObject(container);
+			have_array = JsonContainerIsArray(container);
+		}
+		else
+		{
+			/* scalar at intermediate step: no further traversal */
+			have_object = false;
+			have_array = false;
+		}
+	}
+
+	/* Missing value or JSON null both map to SQL NULL */
+	if (jbvp == NULL || jbvp->type == jbvNull)
+		return NULL;
+
+	return jbvp;
+}
+
+/*
+ * Thin-wrapper macro for the jsonb_extract_path_<type> extractor family.
+ * Same pattern as the object-field and array-element wrapper macros.
+ */
+#define DEFINE_JSONB_EXTRACT_PATH_TYPED(fname, convfn) \
+Datum \
+fname(PG_FUNCTION_ARGS) \
+{ \
+	Jsonb	   *jb = PG_GETARG_JSONB_P(0); \
+	ArrayType  *path = PG_GETARG_ARRAYTYPE_P(1); \
+	JsonbValue	vbuf; \
+	JsonbValue *v; \
+	Datum		result; \
+\
+	v = jsonb_extract_path_lookup(jb, path, &vbuf); \
+	if (v == NULL) \
+	{ \
+		PG_FREE_IF_COPY(path, 1); \
+		PG_FREE_IF_COPY(jb, 0); \
+		PG_RETURN_NULL(); \
+	} \
+\
+	result = convfn(v); \
+	PG_FREE_IF_COPY(path, 1); \
+	PG_FREE_IF_COPY(jb, 0); \
+	return result; \
+}
+
+DEFINE_JSONB_EXTRACT_PATH_TYPED(jsonb_extract_path_numeric, jsonb_value_to_numeric_datum)
+DEFINE_JSONB_EXTRACT_PATH_TYPED(jsonb_extract_path_bool, jsonb_value_to_bool_datum)
+DEFINE_JSONB_EXTRACT_PATH_TYPED(jsonb_extract_path_int4, jsonb_value_to_int4_datum)
+DEFINE_JSONB_EXTRACT_PATH_TYPED(jsonb_extract_path_int8, jsonb_value_to_int8_datum)
+DEFINE_JSONB_EXTRACT_PATH_TYPED(jsonb_extract_path_float8, jsonb_value_to_float8_datum)
+DEFINE_JSONB_EXTRACT_PATH_TYPED(jsonb_extract_path_int2, jsonb_value_to_int2_datum)
+DEFINE_JSONB_EXTRACT_PATH_TYPED(jsonb_extract_path_float4, jsonb_value_to_float4_datum)
 
 Datum
 json_array_element(PG_FUNCTION_ARGS)
