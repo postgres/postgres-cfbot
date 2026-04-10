@@ -966,7 +966,7 @@ jsonb_object_field_lookup(Jsonb *jb, text *key, JsonbValue *vbuf)
  * The message wording matches cannotCastJsonbValue() in jsonb.c so that
  * the optimized and unoptimized paths produce identical errors.
  */
-static void
+void
 jsonb_field_cast_error(JsonbValue *v, const char *sqltype)
 {
 	const char *jsontype;
@@ -1013,7 +1013,7 @@ jsonb_field_cast_error(JsonbValue *v, const char *sqltype)
  * value as Datum.  These are the only place where conversion semantics
  * live; the wrapper macro below is intentionally kept thin.
  */
-static Datum
+Datum
 jsonb_value_to_numeric_datum(JsonbValue *v)
 {
 	if (v->type != jbvNumeric)
@@ -1022,7 +1022,7 @@ jsonb_value_to_numeric_datum(JsonbValue *v)
 	return NumericGetDatum(DatumGetNumericCopy(NumericGetDatum(v->val.numeric)));
 }
 
-static Datum
+Datum
 jsonb_value_to_bool_datum(JsonbValue *v)
 {
 	if (v->type != jbvBool)
@@ -1031,7 +1031,7 @@ jsonb_value_to_bool_datum(JsonbValue *v)
 	return BoolGetDatum(v->val.boolean);
 }
 
-static Datum
+Datum
 jsonb_value_to_int4_datum(JsonbValue *v)
 {
 	if (v->type != jbvNumeric)
@@ -1040,7 +1040,7 @@ jsonb_value_to_int4_datum(JsonbValue *v)
 	return DirectFunctionCall1(numeric_int4, NumericGetDatum(v->val.numeric));
 }
 
-static Datum
+Datum
 jsonb_value_to_int8_datum(JsonbValue *v)
 {
 	if (v->type != jbvNumeric)
@@ -1049,7 +1049,7 @@ jsonb_value_to_int8_datum(JsonbValue *v)
 	return DirectFunctionCall1(numeric_int8, NumericGetDatum(v->val.numeric));
 }
 
-static Datum
+Datum
 jsonb_value_to_float8_datum(JsonbValue *v)
 {
 	if (v->type != jbvNumeric)
@@ -1057,7 +1057,8 @@ jsonb_value_to_float8_datum(JsonbValue *v)
 
 	return DirectFunctionCall1(numeric_float8, NumericGetDatum(v->val.numeric));
 }
-static Datum
+
+Datum
 jsonb_value_to_int2_datum(JsonbValue *v)
 {
 	if (v->type != jbvNumeric)
@@ -1066,7 +1067,7 @@ jsonb_value_to_int2_datum(JsonbValue *v)
 	return DirectFunctionCall1(numeric_int2, NumericGetDatum(v->val.numeric));
 }
 
-static Datum
+Datum
 jsonb_value_to_float4_datum(JsonbValue *v)
 {
 	if (v->type != jbvNumeric)
