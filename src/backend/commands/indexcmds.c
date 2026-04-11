@@ -1730,8 +1730,8 @@ DefineIndex(ParseState *pstate,
 	 * chains can be created where the new tuple and the old tuple in the
 	 * chain have different index keys.
 	 *
-	 * We build the index using all tuples that are visible using single or
-	 * multiple refreshing snapshots. We can be sure that any HOT updates to
+	 * We build the index using all tuples that are visible using multiple
+	 * refreshing snapshots. We can be sure that any HOT updates to
 	 * these tuples will be compatible with the index, since any updates made
 	 * by transactions that didn't know about the index are now committed or
 	 * rolled back.  Thus, each visible tuple is either the end of its
