@@ -688,6 +688,7 @@ tuplesort_begin_batch(Tuplesortstate *state)
 	state->tapeset = NULL;
 
 	state->memtupcount = 0;
+	state->base.ntuples = 0;
 
 	state->growmemtuples = true;
 	state->slabAllocatorUsed = false;
@@ -1073,6 +1074,7 @@ tuplesort_puttuple_common(Tuplesortstate *state, SortTuple *tuple,
 	/* account for the memory used for this tuple */
 	USEMEM(state, tuplen);
 	state->tupleMem += tuplen;
+	state->base.ntuples++;
 
 	if (!useAbbrev)
 	{
