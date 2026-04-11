@@ -32,13 +32,11 @@ typedef struct AttrMap AttrMap;
  *
  * Snapshot resetting is only applicable when all of:
  * - the build is concurrent (ii_Concurrent)
- * - the index is non-unique (unique needs consistent snapshot)
  * - isolation level is not REPEATABLE READ/SERIALIZABLE (those keep a
  *   registered transaction snapshot)
  */
 #define IndexBuildResetsSnapshots(indexInfo) \
 	((indexInfo)->ii_Concurrent && \
-	 !(indexInfo)->ii_Unique && \
 	 !IsolationUsesXactSnapshot())
 
 /* Action code for index_set_state_flags */

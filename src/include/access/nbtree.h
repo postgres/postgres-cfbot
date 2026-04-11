@@ -1307,13 +1307,17 @@ extern bool btproperty(Oid index_oid, int attno,
 extern char *btbuildphasename(int64 phasenum);
 extern IndexTuple _bt_truncate(Relation rel, IndexTuple lastleft,
 							   IndexTuple firstright, BTScanInsert itup_key);
+extern int	_bt_keep_natts(Relation rel, IndexTuple lastleft, IndexTuple firstright,
+						   BTScanInsert itup_key, bool *hasnulls);
 extern int	_bt_keep_natts_fast(Relation rel, IndexTuple lastleft,
-								IndexTuple firstright);
+								IndexTuple firstright, bool *hasnulls);
 extern bool _bt_check_natts(Relation rel, bool heapkeyspace, Page page,
 							OffsetNumber offnum);
 extern void _bt_check_third_page(Relation rel, Relation heap,
 								 bool needheaptidspace, Page page, IndexTuple newtup);
 extern bool _bt_allequalimage(Relation rel, bool debugmessage);
+extern void _bt_report_duplicate(Relation indexRel, Relation heapRel,
+								 IndexTuple itup);
 
 /*
  * prototypes for functions in nbtvalidate.c

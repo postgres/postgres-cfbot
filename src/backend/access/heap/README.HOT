@@ -386,12 +386,12 @@ have the HOT-safety property enforced before we start to build the new
 index.
 
 After waiting for transactions which had the table open, we build the index
-for all rows that are valid in a fresh snapshot.  Any tuples visible in the
-snapshot will have only valid forward-growing HOT chains.  (They might have
-older HOT updates behind them which are broken, but this is OK for the same
-reason it's OK in a regular index build.)  As above, we point the index
-entry at the root of the HOT-update chain but we use the key value from the
-live tuple.
+for all rows that are valid in a fresh snapshot, which is updated every so
+often. Any tuples visible in the snapshot will have only valid forward-growing
+HOT chains.  (They might have older HOT updates behind them which are broken,
+but this is OK for the same reason it's OK in a regular index build.)
+As above, we point the index entry at the root of the HOT-update chain but we
+use the key value from the live tuple.
 
 We mark the index open for inserts (but still not ready for reads) then
 we again wait for transactions which have the table open.  Then we take

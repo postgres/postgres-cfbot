@@ -41,7 +41,11 @@ END; $$;
 ----------------
 ALTER TABLE cic_reset_snap.tbl SET (parallel_workers=0);
 CREATE UNIQUE INDEX CONCURRENTLY idx ON cic_reset_snap.tbl(i);
+NOTICE:  notice triggered for injection point table_beginscan_strat_reset_snapshots
+NOTICE:  notice triggered for injection point heap_reset_scan_snapshot_effective
 REINDEX INDEX CONCURRENTLY cic_reset_snap.idx;
+NOTICE:  notice triggered for injection point table_beginscan_strat_reset_snapshots
+NOTICE:  notice triggered for injection point heap_reset_scan_snapshot_effective
 DROP INDEX CONCURRENTLY cic_reset_snap.idx;
 CREATE INDEX CONCURRENTLY idx ON cic_reset_snap.tbl(i);
 NOTICE:  notice triggered for injection point table_beginscan_strat_reset_snapshots
@@ -86,7 +90,9 @@ SELECT injection_points_detach('heap_reset_scan_snapshot_effective');
 (1 row)
 
 CREATE UNIQUE INDEX CONCURRENTLY idx ON cic_reset_snap.tbl(i);
+NOTICE:  notice triggered for injection point table_parallelscan_initialize
 REINDEX INDEX CONCURRENTLY cic_reset_snap.idx;
+NOTICE:  notice triggered for injection point table_parallelscan_initialize
 DROP INDEX CONCURRENTLY cic_reset_snap.idx;
 CREATE INDEX CONCURRENTLY idx ON cic_reset_snap.tbl(i);
 NOTICE:  notice triggered for injection point table_parallelscan_initialize
