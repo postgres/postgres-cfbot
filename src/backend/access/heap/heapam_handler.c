@@ -1208,13 +1208,14 @@ heapam_index_build_range_scan(Relation heapRelation,
 	 * qual checks (because we have to index RECENTLY_DEAD tuples). In a
 	 * concurrent build, or during bootstrap, we take a regular MVCC snapshot
 	 * and index whatever's live according to that while that snapshot is reset
-	 * every so often (in the case of non-unique index).
+	 * every so often.
 	 */
 	OldestXmin = InvalidTransactionId;
 
 	/*
-	 * For unique indexes we need a consistent snapshot for the whole scan.
-	 * Resetting snapshots also doesn't work in xact-snapshot isolation modes,
+	 * For concurrent builds of non-system indexes, we want to periodically
+	 * reset snapshots.
+	 * Resetting snapshots doesn't work in xact-snapshot isolation modes,
 	 * because those keep a registered transaction snapshot for the whole xact.
 	 */
 	reset_snapshots = IndexBuildResetsSnapshots(indexInfo) &&
