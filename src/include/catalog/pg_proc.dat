@@ -12780,4 +12780,8 @@
   proname => 'rangejoinsel', provolatile => 's', prorettype => 'float8',
   proargtypes => 'internal oid internal int2 internal',
   prosrc => 'rangejoinsel' },
+{ oid => '8356', descr => 'join selectivity for multirange operators',
+  proname => 'multirangejoinsel', provolatile => 's', prorettype => 'float8',
+  proargtypes => 'internal oid internal int2 internal',
+  prosrc => 'multirangejoinsel' },
 ]
