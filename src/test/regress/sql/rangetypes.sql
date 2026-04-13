@@ -722,3 +722,56 @@ select * from text_support_test where t <@ textrange_supp('a', 'd');
 drop table text_support_test;
 
 drop type textrange_supp;
+
+--
+-- test selectivity of range join operators
+--
+create table test_range_join_1 (ir1 int4range);
+create table test_range_join_2 (ir2 int4range);
+create table test_range_join_3 (ir3 int4range);
+
+insert into test_range_join_1 select int4range(g, g+10) from generate_series(1, 1000) g;
+insert into test_range_join_1 select int4range(g, g+100) from generate_series(1, 1000, 10) g;
+insert into test_range_join_2 select int4range(g, g+10) from generate_series(1, 500) g;
+insert into test_range_join_2 select int4range(g, g+100) from generate_series(1, 500, 10) g;
+insert into test_range_join_3 select int4range(g, g+10) from generate_series(501, 1000) g;
+insert into test_range_join_3 select int4range(g, g+100) from generate_series(501, 1000, 10) g;
+
+analyze test_range_join_1;
+analyze test_range_join_2;
+analyze test_range_join_3;
+
+-- reorder joins based on computed selectivity
+explain (costs off) select count(*) from test_range_join_1, test_range_join_2, test_range_join_3 where ir1 && ir2 and ir2 && ir3;
+explain (costs off) select count(*) from test_range_join_1, test_range_join_2, test_range_join_3 where ir1 << ir2 and ir2 << ir3;
+explain (costs off) select count(*) from test_range_join_1, test_range_join_2, test_range_join_3 where ir1 >> ir2 and ir2 >> ir3;
+
+drop table test_range_join_1;
+drop table test_range_join_2;
+drop table test_range_join_3;
+
+--
+-- test range join selectivity with fully disjoint histograms
+-- (exercises the bounds-check logic when histograms do not overlap)
+--
+create table test_range_join_lo (r int4range);
+create table test_range_join_hi (r int4range);
+
+-- low ranges: [1,11), [2,12), ... [500,510)
+insert into test_range_join_lo select int4range(g, g+10) from generate_series(1, 500) g;
+-- high ranges: [10001,10011), [10002,10012), ... [10500,10510)
+insert into test_range_join_hi select int4range(g, g+10) from generate_series(10001, 10500) g;
+
+analyze test_range_join_lo;
+analyze test_range_join_hi;
+
+-- lo << hi should produce a large selectivity (most pairs match)
+-- lo >> hi should produce a near-zero selectivity
+-- lo && hi should produce a near-zero selectivity (no overlap)
+-- These should not crash and should produce stable plans.
+explain (costs off) select count(*) from test_range_join_lo a, test_range_join_hi b where a.r << b.r;
+explain (costs off) select count(*) from test_range_join_lo a, test_range_join_hi b where a.r >> b.r;
+explain (costs off) select count(*) from test_range_join_lo a, test_range_join_hi b where a.r && b.r;
+
+drop table test_range_join_lo;
+drop table test_range_join_hi;
