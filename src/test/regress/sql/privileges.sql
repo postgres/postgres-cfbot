@@ -420,7 +420,9 @@ CREATE TYPE leakrange AS RANGE (subtype = integer,
   multirange_type_name = leakmultirange);
 
 CREATE TABLE atest13 AS
-  SELECT leakrange(x, x + 10) AS r FROM generate_series(1, 1000) x;
+  SELECT leakrange(x, x + 10) AS r,
+         leakmultirange(leakrange(x, x + 10)) AS mr
+    FROM generate_series(1, 1000) x;
 ALTER TABLE atest13 SET (autovacuum_enabled = off);
 ANALYZE atest13;
 
@@ -447,6 +449,7 @@ CREATE OR REPLACE FUNCTION leakrange_subdiff(integer, integer) RETURNS double pr
 ALTER FUNCTION leakrange_subdiff(integer, integer) LEAKPROOF;
 SET SESSION AUTHORIZATION regress_priv_user2;
 EXPLAIN (COSTS OFF) SELECT * FROM atest13 x, atest13 y WHERE x.r << y.r;
+EXPLAIN (COSTS OFF) SELECT * FROM atest13 x, atest13 y WHERE x.mr << y.mr;
 
 -- Now only the subtype diff function is unsafe, so only the check on it can
 -- prevent the leak.  This must not raise an error either.
@@ -458,6 +461,7 @@ ALTER FUNCTION leakrange_cmp(integer, integer) LEAKPROOF;
 ALTER FUNCTION leakrange_subdiff(integer, integer) NOT LEAKPROOF;
 SET SESSION AUTHORIZATION regress_priv_user2;
 EXPLAIN (COSTS OFF) SELECT * FROM atest13 x, atest13 y WHERE x.r << y.r;
+EXPLAIN (COSTS OFF) SELECT * FROM atest13 x, atest13 y WHERE x.mr << y.mr;
 
 -- With both support functions leakproof the histogram may be used, which
 -- confirms that the checks above are what prevented the leak.
@@ -465,6 +469,7 @@ RESET SESSION AUTHORIZATION;
 ALTER FUNCTION leakrange_subdiff(integer, integer) LEAKPROOF;
 SET SESSION AUTHORIZATION regress_priv_user2;
 EXPLAIN (COSTS OFF) SELECT * FROM atest13 x, atest13 y WHERE x.r << y.r;
+EXPLAIN (COSTS OFF) SELECT * FROM atest13 x, atest13 y WHERE x.mr << y.mr;
 
 -- clean up
 RESET SESSION AUTHORIZATION;
