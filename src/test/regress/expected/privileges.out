@@ -651,7 +651,9 @@ CREATE TYPE leakrange AS RANGE (subtype = integer,
   subtype_opclass = leakrange_ops, subtype_diff = leakrange_subdiff,
   multirange_type_name = leakmultirange);
 CREATE TABLE atest13 AS
-  SELECT leakrange(x, x + 10) AS r FROM generate_series(1, 1000) x;
+  SELECT leakrange(x, x + 10) AS r,
+         leakmultirange(leakrange(x, x + 10)) AS mr
+    FROM generate_series(1, 1000) x;
 ALTER TABLE atest13 SET (autovacuum_enabled = off);
 ANALYZE atest13;
 -- regress_priv_user2 may query the table but row-level security keeps it
@@ -686,6 +688,18 @@ EXPLAIN (COSTS OFF) SELECT * FROM atest13 x, atest13 y WHERE x.r << y.r;
                Filter: (upper(r) < 0)
 (7 rows)
 
+EXPLAIN (COSTS OFF) SELECT * FROM atest13 x, atest13 y WHERE x.mr << y.mr;
+              QUERY PLAN              
+--------------------------------------
+ Nested Loop
+   Join Filter: (x.mr << y.mr)
+   ->  Seq Scan on atest13 x
+         Filter: (upper(r) < 0)
+   ->  Materialize
+         ->  Seq Scan on atest13 y
+               Filter: (upper(r) < 0)
+(7 rows)
+
 -- Now only the subtype diff function is unsafe, so only the check on it can
 -- prevent the leak.  This must not raise an error either.
 RESET SESSION AUTHORIZATION;
@@ -707,12 +721,27 @@ EXPLAIN (COSTS OFF) SELECT * FROM atest13 x, atest13 y WHERE x.r << y.r;
                Filter: (upper(r) < 0)
 (7 rows)
 
+EXPLAIN (COSTS OFF) SELECT * FROM atest13 x, atest13 y WHERE x.mr << y.mr;
+              QUERY PLAN              
+--------------------------------------
+ Nested Loop
+   Join Filter: (x.mr << y.mr)
+   ->  Seq Scan on atest13 x
+         Filter: (upper(r) < 0)
+   ->  Materialize
+         ->  Seq Scan on atest13 y
+               Filter: (upper(r) < 0)
+(7 rows)
+
 -- With both support functions leakproof the histogram may be used, which
 -- confirms that the checks above are what prevented the leak.
 RESET SESSION AUTHORIZATION;
 ALTER FUNCTION leakrange_subdiff(integer, integer) LEAKPROOF;
 SET SESSION AUTHORIZATION regress_priv_user2;
 EXPLAIN (COSTS OFF) SELECT * FROM atest13 x, atest13 y WHERE x.r << y.r;
+ERROR:  leaked statistics to range subtype diff function
+CONTEXT:  PL/pgSQL function leakrange_subdiff(integer,integer) line 1 at RAISE
+EXPLAIN (COSTS OFF) SELECT * FROM atest13 x, atest13 y WHERE x.mr << y.mr;
 ERROR:  leaked statistics to range subtype diff function
 CONTEXT:  PL/pgSQL function leakrange_subdiff(integer,integer) line 1 at RAISE
 -- clean up
