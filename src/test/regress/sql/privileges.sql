@@ -400,6 +400,81 @@ EXPLAIN (COSTS OFF) SELECT * FROM atest12 x, atest12 y
 DROP FUNCTION leak2(integer, integer) CASCADE;
 
 
+-- test leaky-function protections in range join selectivity estimation
+
+RESET SESSION AUTHORIZATION;
+
+-- A range type whose support functions are deliberately not leakproof.
+CREATE FUNCTION leakrange_cmp(integer, integer) RETURNS integer
+  AS $$begin return btint4cmp($1, $2); end$$
+  LANGUAGE plpgsql IMMUTABLE STRICT;
+CREATE FUNCTION leakrange_subdiff(integer, integer) RETURNS double precision
+  AS $$begin return ($1 - $2)::float8; end$$
+  LANGUAGE plpgsql IMMUTABLE STRICT;
+
+CREATE OPERATOR CLASS leakrange_ops FOR TYPE integer USING btree AS
+  OPERATOR 1 <, OPERATOR 2 <=, OPERATOR 3 =, OPERATOR 4 >=, OPERATOR 5 >,
+  FUNCTION 1 leakrange_cmp(integer, integer);
+CREATE TYPE leakrange AS RANGE (subtype = integer,
+  subtype_opclass = leakrange_ops, subtype_diff = leakrange_subdiff,
+  multirange_type_name = leakmultirange);
+
+CREATE TABLE atest13 AS
+  SELECT leakrange(x, x + 10) AS r FROM generate_series(1, 1000) x;
+ALTER TABLE atest13 SET (autovacuum_enabled = off);
+ANALYZE atest13;
+
+-- regress_priv_user2 may query the table but row-level security keeps it
+-- from reading all rows, so vardata->acl_ok is false and the planner must
+-- not pass the table's statistics to a support function that is not
+-- leakproof.  (A security barrier view would not do here: for those,
+-- examine_simple_variable() declines to look up statistics at all.)
+ALTER TABLE atest13 ENABLE ROW LEVEL SECURITY;
+CREATE POLICY p1 ON atest13 USING (upper(r) < 0);
+GRANT SELECT ON atest13 TO PUBLIC;
+
+-- The statistics exist now, so replace the support functions with versions
+-- that report any further call.  Only the planner can reach them from here.
+CREATE OR REPLACE FUNCTION leakrange_cmp(integer, integer) RETURNS integer
+  AS $$begin raise exception 'leaked statistics to range comparison function'; end$$
+  LANGUAGE plpgsql IMMUTABLE STRICT;
+CREATE OR REPLACE FUNCTION leakrange_subdiff(integer, integer) RETURNS double precision
+  AS $$begin raise exception 'leaked statistics to range subtype diff function'; end$$
+  LANGUAGE plpgsql IMMUTABLE STRICT;
+
+-- Only the comparison function is unsafe here, so only the check on it can
+-- prevent the leak.  This must not raise an error.
+ALTER FUNCTION leakrange_subdiff(integer, integer) LEAKPROOF;
+SET SESSION AUTHORIZATION regress_priv_user2;
+EXPLAIN (COSTS OFF) SELECT * FROM atest13 x, atest13 y WHERE x.r << y.r;
+
+-- Now only the subtype diff function is unsafe, so only the check on it can
+-- prevent the leak.  This must not raise an error either.
+RESET SESSION AUTHORIZATION;
+CREATE OR REPLACE FUNCTION leakrange_cmp(integer, integer) RETURNS integer
+  AS $$begin return btint4cmp($1, $2); end$$
+  LANGUAGE plpgsql IMMUTABLE STRICT;
+ALTER FUNCTION leakrange_cmp(integer, integer) LEAKPROOF;
+ALTER FUNCTION leakrange_subdiff(integer, integer) NOT LEAKPROOF;
+SET SESSION AUTHORIZATION regress_priv_user2;
+EXPLAIN (COSTS OFF) SELECT * FROM atest13 x, atest13 y WHERE x.r << y.r;
+
+-- With both support functions leakproof the histogram may be used, which
+-- confirms that the checks above are what prevented the leak.
+RESET SESSION AUTHORIZATION;
+ALTER FUNCTION leakrange_subdiff(integer, integer) LEAKPROOF;
+SET SESSION AUTHORIZATION regress_priv_user2;
+EXPLAIN (COSTS OFF) SELECT * FROM atest13 x, atest13 y WHERE x.r << y.r;
+
+-- clean up
+RESET SESSION AUTHORIZATION;
+DROP TABLE atest13;
+DROP TYPE leakrange;
+DROP OPERATOR CLASS leakrange_ops USING btree;
+DROP FUNCTION leakrange_cmp(integer, integer);
+DROP FUNCTION leakrange_subdiff(integer, integer);
+
+
 -- groups
 
 SET SESSION AUTHORIZATION regress_priv_user3;
