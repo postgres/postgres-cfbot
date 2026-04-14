@@ -51,7 +51,6 @@ SELECT injection_points_attach('plpgsql-return-query-before-exec', 'wait');
 $backend2->query_until(
 	qr/race_started/, q[
 \echo race_started
-BEGIN;
 SELECT * FROM planinv_caller();
 \echo race_done
 ]);
@@ -65,7 +64,12 @@ SELECT EXISTS (
 );
 ]) or die 'backend2 did not reach injection point in time';
 
-$node->safe_psql('postgres', q[
+my $ddl_backend = $node->background_psql('postgres', on_error_stop => 0);
+my $ddl_pid = $ddl_backend->query_safe('SELECT pg_backend_pid()');
+chomp($ddl_pid);
+$ddl_backend->query_until(
+	qr/ddl_started/, q[
+\echo ddl_started
 BEGIN;
 ALTER TYPE planinv_ct ADD ATTRIBUTE c int;
 CREATE OR REPLACE FUNCTION planinv_srf() RETURNS SETOF planinv_ct
@@ -73,18 +77,27 @@ CREATE OR REPLACE FUNCTION planinv_srf() RETURNS SETOF planinv_ct
     SELECT a, b, 99 FROM planinv_tbl
   $$;
 COMMIT;
+\echo ddl_done
 ]);
 
 $node->safe_psql('postgres',
 	"SELECT injection_points_wakeup('plpgsql-return-query-before-exec');");
 
 my $out = $backend2->query_until(qr/race_done/, q[]);
-like($out, qr/^1\|2\|99$/m,
-	'concurrent ALTER TYPE + CREATE OR REPLACE does not break RETURN QUERY');
+like($out, qr/^1\|2$/m,
+	'in-progress statement keeps old row shape across concurrent DDL');
 is($backend2->{stderr}, '',
 	'no tuple shape mismatch reported by RETURN QUERY');
 
 ok($backend2->quit);
+
+my $ddl_out = $ddl_backend->query_until(qr/ddl_done/, q[]);
+is($ddl_backend->{stderr}, '', 'concurrent DDL session completed cleanly');
+like($ddl_out, qr/ddl_done/m, 'DDL proceeds after RETURN QUERY finishes');
+ok($ddl_backend->quit);
+
+is($node->safe_psql('postgres', 'SELECT * FROM planinv_caller();'), '1|2|99',
+	'subsequent statement sees new composite row shape');
 
 $node->safe_psql('postgres', q[
 DROP FUNCTION planinv_caller();

@@ -34,6 +34,7 @@
 #include "parser/parse_coerce.h"
 #include "parser/parse_type.h"
 #include "plpgsql.h"
+#include "storage/lmgr.h"
 #include "storage/proc.h"
 #include "tcop/cmdtag.h"
 #include "tcop/pquery.h"
@@ -4037,6 +4038,20 @@ plpgsql_estate_setup(PLpgSQL_execstate *estate,
 	estate->fn_rettype = func->fn_rettype;
 	estate->retistuple = func->fn_retistuple;
 	estate->retisset = func->fn_retset;
+
+	/*
+	 * Keep named composite SETOF return types stable for the whole function
+	 * execution.  This prevents concurrent ALTER TYPE from changing rowshape
+	 * between statement setup and RETURN QUERY execution.
+	 */
+	if (estate->retisset && estate->retistuple)
+	{
+		Oid			typrelid;
+
+		typrelid = typeOrDomainTypeRelid(estate->fn_rettype);
+		if (OidIsValid(typrelid))
+			LockRelationOid(typrelid, AccessShareLock);
+	}
 
 	estate->readonly_func = func->fn_readonly;
 	estate->atomic = true;
