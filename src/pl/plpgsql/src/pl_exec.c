@@ -41,6 +41,7 @@
 #include "utils/builtins.h"
 #include "utils/datum.h"
 #include "utils/fmgroids.h"
+#include "utils/injection_point.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -3593,6 +3594,11 @@ exec_stmt_return_query(PLpgSQL_execstate *estate,
 		exec_init_tuple_store(estate);
 	/* There might be some tuples in the tuplestore already */
 	tcount = tuplestore_tuple_count(estate->tuple_store);
+
+	/*
+	 * Test-only pause point for RETURN QUERY race conditions.
+	 */
+	INJECTION_POINT("plpgsql-return-query-before-exec", NULL);
 
 	/*
 	 * Set up DestReceiver to transfer results directly to tuplestore,
