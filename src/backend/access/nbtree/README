@@ -1041,6 +1041,156 @@ that need a page split anyway.  Besides, supporting variable "split points"
 while splitting posting lists won't actually improve overall space
 utilization.
 
+Notes about prefix compression
+------------------------------
+
+Prefix compression is an orthogonal leaf-page encoding that targets
+multi-column indexes whose leading key columns repeat across many adjacent
+logical tuples -- for example, an index on (customer_id, order_date) with
+a heavily skewed customer_id distribution.  The encoding is modeled on
+Bayer/Unterauer's "Prefix B-trees" as described by Graefe.  It is opt-in
+per index at build time, gated on the index having at least 2 key
+attributes and the leading (nkeyatts - 1) columns being equalimage (which
+makes byte-verbatim reuse of the anchor's leading attrs sound).
+
+An index opts in during bulk build by recording btm_prefix_compression on
+the metapage; BTP_HAS_PREFIX_COMPRESSION is set on every leaf page the
+index produces.  Prefix compression and posting-list deduplication are
+strictly mutually exclusive on any given index: btm_prefix_compression
+implies !btm_allequalimage, and dedup only runs when allequalimage is set.
+A prefix-compressed leaf page therefore never contains posting tuples, and
+a dedup-eligible leaf page never contains compressed followers.
+
+On-disk structure.  A prefix-compressed leaf page is organized as one or
+more "drifting" prefix groups.  Each group consists of:
+
+  * An anchor tuple.  Byte-identical to a plain non-pivot leaf tuple:
+    INDEX_ALT_TID_MASK is clear, t_tid carries the real heap TID, and the
+    body contains the full set of key + INCLUDE attrs.  All regular leaf
+    tuple invariants (e.g. BTreeTupleGetHeapTID(itup) == &itup->t_tid)
+    hold unchanged.  A page's first data item is always an anchor.
+
+  * Zero or more compressed followers that physically follow the anchor in
+    offset order.  A follower sets INDEX_ALT_TID_MASK in t_info and
+    encodes BT_IS_COMPRESSED (0x4000) in the upper nibble of t_tid's
+    offset field.  The low 12 bits of the offset field (BT_OFFSET_MASK)
+    hold the real heap-tuple offset; the block number in t_tid.ip_blkid
+    is stored in the clear.  Because MaxHeapTuplesPerPage fits in 12 bits
+    for every supported BLCKSZ, the encoding has zero per-follower
+    overhead: a follower is shorter than its plain form by exactly the
+    space of the omitted leading attrs.  The body stores only the
+    trailing key attrs (natts_anchor+1 .. nkeyatts) plus INCLUDE attrs.
+
+A group ends at the next anchor (the next plain non-pivot tuple) or at
+the end of the page's data area.  A single page can host many groups,
+each with a different prefix -- hence "drifting".  Internal pages are
+unaffected; only leaf pages carry BTP_HAS_PREFIX_COMPRESSION, and pivot
+tuples (internal-page downlinks and leaf high keys) are always plain.
+
+Scan-time reconstruction.  _bt_readpage, _bt_compare, _bt_killitems, and
+the VACUUM page-walker materialize a follower into a plain IndexTuple on
+demand: they combine the governing anchor's leading attrs (discovered via
+a short leftward walk in _bt_prefix_find_anchor, cached in a
+BTPrefixPageState across items of the same group) with the follower's
+trailing attrs, and demask t_tid via BTreeCompressedTupleGetHeapTID.
+Callers above nbtree (including _bt_checkkeys, amcheck, and index-only
+scan tuple return) never see a compressed follower.
+
+Build path.  _bt_buildadd emits the first tuple on each page as a plain
+anchor and compares subsequent sorted input tuples to the current anchor
+using _bt_keep_natts_fast.  If the leading (nkeyatts - 1) attrs match, the
+new tuple is emitted as a compressed follower via
+_bt_prefix_compress_new_tuple.  Otherwise the tuple is emitted plain and
+becomes the anchor of a new group.  Parallel build produces the same
+plain sorted tuples as always; compression happens only inside
+_bt_buildadd on the leader.
+
+Insert path.  _bt_insertonpg compresses a newly inserted tuple when the
+target leaf is BTP_HAS_PREFIX_COMPRESSION and the incoming tuple shares
+the governing anchor's leading attrs (resolved via _bt_prefix_find_anchor
+walking left from newitemoff).  The incoming tuple's heap TID is passed
+through as scantid for search, so the insert is placed at the correct
+(key, TID) position before compression.  A tuple that doesn't share the
+anchor's leading attrs is inserted plain and starts a new group.
+
+Split path.  Leaf page splits may land at a group boundary or inside a
+group.  If firstright (the first item of the right page) is a compressed
+follower, _bt_split reconstructs it into plain form and uses that for
+both the right page's leftmost item (satisfying "first data item is an
+anchor") and for _bt_truncate's firstright input.  If lastleft is a
+compressed follower, _bt_split reconstructs it before passing to
+_bt_truncate.  The high key that gets produced is plain; internal pages
+never carry compressed tuples or the BTP_HAS_PREFIX_COMPRESSION flag.
+
+Space management and the "splits never fail" invariant.  Two places
+perform a follower-to-plain-anchor promotion: (a) VACUUM's anchor-
+promotion in _bt_delitems_vacuum/_bt_delitems_delete via
+_bt_prefix_vacuum_plan/_apply, when an anchor is being deleted with at
+least one surviving follower; and (b) _bt_split when firstright is a
+compressed follower.  Both rely on the following invariant:
+
+    promoted_plain_size = header + prefix_keys + suffix_keys + include
+    follower_on_disk     = header + suffix_keys + include
+
+so promotion costs exactly prefix_keys bytes of extra space per
+promoted follower.  For VACUUM we get those bytes for free because the
+anchor (whose size is >= header + prefix_keys + suffix_keys + include,
+i.e. >= prefix_keys by far) is being deleted in the same operation.
+PageIndexMultiDelete runs first and frees the anchor's bytes; the
+subsequent PageIndexTupleOverwrite for the promoted follower always fits
+by construction, summed across all promotions on the same page.
+
+For _bt_split the story is worse: nbtsplitloc.c does not account for
+promotion at all.  The split chooser is unaware of prefix compression
+entirely -- it scores candidate splits using on-disk sizes, ignoring
+that a mid-group split forces _bt_split to reconstruct firstright into
+a plain anchor that's prefix_keys bytes larger than the compressed
+follower.  There is no code in nbtsplitloc.c that reserves space for
+this growth or preferentially picks group-boundary split points.  The
+"promotion always fits" guarantee does NOT hold on the split path.
+Left as follow-up work.
+
+Mutual exclusion with posting-list dedup is the second leg of the "never
+fail" argument.  Dedup produces and rewrites posting tuples, and posting
+splits expand an existing posting slot in place (same allocated size, TIDs
+shifted).  If dedup could run on a prefix-compressed page, its posting
+tuples could turn into compressed followers (via a later bulk-style merge
+in a future hybrid design), and the space accounting would get tangled
+with promotion.  The mutex keeps the two encodings strictly separated per
+index: _bt_dedup_pass asserts !P_HAS_PREFIX_COMPRESSION(page) at entry,
+and _bt_initmetapage refuses to set both flags.
+
+Orphan anchors.  After VACUUM removes every follower of a group, the
+anchor remains in place as a singleton group; no cleanup is necessary
+because an anchor is byte-identical to a plain leaf tuple.  The reverse
+case (anchor deleted with followers surviving) is handled by the
+promotion path above.
+
+On-the-fly scan-time interlocks.  _bt_readpage's LP_DEAD-skip branch
+still has to update the current prefix state when it skips a dead plain
+tuple, because such a dead plain tuple is the governing anchor for any
+compressed follower that physically follows it on the page.  Silently
+skipping would leave st->anchor_off pointing at an earlier anchor and
+cause every subsequent follower to reconstruct under the wrong leading
+attrs.
+
+WAL.  Compressed-follower bytes travel verbatim through existing
+xl_btree_insert and xl_btree_split records; replay uses the raw bytes
+without reconstructing.  The per-page BTP_HAS_PREFIX_COMPRESSION flag is
+included in BTP_SPLIT_PRESERVED_FLAGS so split replay carries it forward
+on both halves, and new-root replay (XLOG_BTREE_NEWROOT) sets the flag on
+a fresh leaf root when btm_prefix_compression is set on the metapage.
+xl_btree_metadata carries btm_prefix_compression alongside
+btm_allequalimage so the mutex invariant survives recovery.
+
+Downgrade to a version that doesn't understand BT_IS_COMPRESSED is not
+supported for indexes that opted in.  An older binary reading a
+compressed follower would misclassify it as a pivot (ALT-TID set,
+BT_IS_POSTING clear), which is catastrophic on a leaf page.  Affected
+indexes need a REINDEX to downgrade.  Anchors, being byte-identical to
+plain leaf tuples, would read fine.  This mirrors the upgrade story for
+v4's introduction of posting lists.
+
 Notes About Data Representation
 -------------------------------
 

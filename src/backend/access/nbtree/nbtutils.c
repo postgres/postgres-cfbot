@@ -83,12 +83,14 @@ _bt_mkscankey(Relation rel, IndexTuple itup)
 	key = palloc(offsetof(BTScanInsertData, scankeys) +
 				 sizeof(ScanKeyData) * indnkeyatts);
 	if (itup)
-		_bt_metaversion(rel, &key->heapkeyspace, &key->allequalimage);
+		_bt_metaversion(rel, &key->heapkeyspace, &key->allequalimage,
+						&key->prefix_compression);
 	else
 	{
 		/* Utility statement callers can set these fields themselves */
 		key->heapkeyspace = true;
 		key->allequalimage = false;
+		key->prefix_compression = false;
 	}
 	key->anynullkeys = false;	/* initial assumption */
 	key->nextkey = false;		/* usual case, required by btinsert */
@@ -333,8 +335,23 @@ _bt_killitems(IndexScanDesc scan)
 				if (j == nposting)
 					killtuple = true;
 			}
-			else if (ItemPointerEquals(&ituple->t_tid, &kitem->heapTid))
-				killtuple = true;
+			else
+			{
+				/*
+				 * Plain leaf tuple (or a prefix-compressed follower -- whose
+				 * t_tid.ip_posid carries BT_IS_COMPRESSED in its upper nibble).
+				 * Decode the follower's real heap TID before comparing; the
+				 * scan recorded kitem->heapTid in its clean, demasked form.
+				 */
+				ItemPointerData htid;
+
+				if (BTreeTupleIsCompressed(ituple))
+					BTreeCompressedTupleGetHeapTID(ituple, &htid);
+				else
+					htid = ituple->t_tid;
+				if (ItemPointerEquals(&htid, &kitem->heapTid))
+					killtuple = true;
+			}
 
 			/*
 			 * Mark index item as dead, if it isn't already.  Since this
@@ -914,6 +931,17 @@ _bt_keep_natts_fast(Relation rel, IndexTuple lastleft, IndexTuple firstright)
 	int			keysz = IndexRelationGetNumberOfKeyAttributes(rel);
 	int			keepnatts;
 
+	/*
+	 * index_getattr with the full tupdesc would walk off the end of a
+	 * compressed follower's body and trip the indextuple.c fast-path
+	 * assertion.  Callers that work with on-page tuples must reconstruct
+	 * compressed followers before calling (see _bt_split_keep_natts_fast()
+	 * in nbtsplitloc.c for the split path, and the P_HAS_PREFIX_COMPRESSION
+	 * guard in _bt_set_startikey()).
+	 */
+	Assert(!BTreeTupleIsCompressed(lastleft));
+	Assert(!BTreeTupleIsCompressed(firstright));
+
 	keepnatts = 1;
 	for (int attnum = 1; attnum <= keysz; attnum++)
 	{
@@ -990,6 +1018,29 @@ _bt_check_natts(Relation rel, bool heapkeyspace, Page page, OffsetNumber offnum)
 	if (natts != nkeyatts && BTreeTupleIsPosting(itup))
 		return false;
 
+	/* Compressed followers only appear on prefix-compressed leaf pages */
+	if (BTreeTupleIsCompressed(itup))
+	{
+		if (!P_ISLEAF(opaque))
+			return false;
+		if (!P_HAS_PREFIX_COMPRESSION(opaque))
+			return false;
+		if (offnum < P_FIRSTDATAKEY(opaque))
+			return false;		/* never a high key */
+		/* Mutually exclusive with posting-list status */
+		if ((ItemPointerGetOffsetNumberNoCheck(&itup->t_tid) & BT_IS_POSTING) != 0)
+			return false;
+		/* BT_PIVOT_HEAP_TID_ATTR is a pivot-only bit */
+		if ((ItemPointerGetOffsetNumberNoCheck(&itup->t_tid) &
+			 BT_PIVOT_HEAP_TID_ATTR) != 0)
+			return false;
+	}
+
+	/* Posting tuples are forbidden on prefix-compressed leaf pages */
+	if (BTreeTupleIsPosting(itup) && P_ISLEAF(opaque) &&
+		P_HAS_PREFIX_COMPRESSION(opaque))
+		return false;
+
 	if (P_ISLEAF(opaque))
 	{
 		if (offnum >= P_FIRSTDATAKEY(opaque))
@@ -1004,8 +1055,8 @@ _bt_check_natts(Relation rel, bool heapkeyspace, Page page, OffsetNumber offnum)
 			/*
 			 * Leaf tuples that are not the page high key (non-pivot tuples)
 			 * should never be truncated.  (Note that tupnatts must have been
-			 * inferred, even with a posting list tuple, because only pivot
-			 * tuples store tupnatts directly.)
+			 * inferred, even with a posting list tuple or a prefix-compressed
+			 * follower, because only pivot tuples store tupnatts directly.)
 			 */
 			return tupnatts == natts;
 		}

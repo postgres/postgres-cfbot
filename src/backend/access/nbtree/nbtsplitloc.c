@@ -58,7 +58,94 @@ typedef struct
 	int			nsplits;		/* current number of splits */
 	SplitPoint *splits;			/* all candidate split points for page */
 	int			interval;		/* current range of acceptable split points */
+
+	/*
+	 * Prefix-compression materialization state.  Only initialized (and only
+	 * non-NULL scratch buffers) when origpage is BTP_HAS_PREFIX_COMPRESSION.
+	 * Lets _bt_split_keep_natts_fast() reconstruct compressed followers into
+	 * plain tuples before handing them to _bt_keep_natts_fast(), which assumes
+	 * full-tupdesc tuples.
+	 */
+	bool		prefix_page;
+	BTPrefixPageState prefix_state;
+	char	   *lbuf;			/* scratch for reconstructed lastleft */
+	char	   *rbuf;			/* scratch for reconstructed firstright */
 } FindSplitData;
+
+/*
+ * Materialize a tuple that may be a compressed follower into plain form for
+ * the benefit of _bt_keep_natts_fast().  Non-compressed tuples are returned
+ * as-is.  The caller-provided scratch buffer is used so that we don't need to
+ * palloc per call.
+ *
+ * offnum must be the offset of 'tup' on state->origpage when tup came from
+ * the page, or InvalidOffsetNumber if tup is newitem (in which case tup is
+ * guaranteed not to be compressed).
+ */
+static inline IndexTuple
+_bt_split_materialize(FindSplitData *state, IndexTuple tup,
+					  OffsetNumber offnum, char *scratch)
+{
+	if (!state->prefix_page)
+		return tup;
+	if (!BTreeTupleIsCompressed(tup))
+		return tup;
+	Assert(offnum >= FirstOffsetNumber);
+	return _bt_prefix_reconstruct(state->rel, &state->prefix_state,
+								  offnum, scratch);
+}
+
+/*
+ * Wrapper around _bt_keep_natts_fast() that accepts compressed followers
+ * from state->origpage.  Either or both of lastleftoff/firstrightoff can be
+ * InvalidOffsetNumber when the corresponding tuple is newitem (plain).
+ */
+static inline int
+_bt_split_keep_natts_fast(FindSplitData *state,
+						  IndexTuple lastleft, OffsetNumber lastleftoff,
+						  IndexTuple firstright, OffsetNumber firstrightoff)
+{
+	lastleft = _bt_split_materialize(state, lastleft, lastleftoff, state->lbuf);
+	firstright = _bt_split_materialize(state, firstright, firstrightoff, state->rbuf);
+	return _bt_keep_natts_fast(state->rel, lastleft, firstright);
+}
+
+/*
+ * Like _bt_split_lastleft()/_bt_split_firstright() but also returns the
+ * on-origpage offset via *off (InvalidOffsetNumber for newitem).  Used by
+ * _bt_split_keep_natts_fast() to reconstruct a compressed follower.
+ */
+static inline IndexTuple
+_bt_split_lastleft_off(FindSplitData *state, SplitPoint *split,
+					   OffsetNumber *off)
+{
+	ItemId		itemid;
+
+	if (split->newitemonleft && split->firstrightoff == state->newitemoff)
+	{
+		*off = InvalidOffsetNumber;
+		return state->newitem;
+	}
+	*off = OffsetNumberPrev(split->firstrightoff);
+	itemid = PageGetItemId(state->origpage, *off);
+	return (IndexTuple) PageGetItem(state->origpage, itemid);
+}
+
+static inline IndexTuple
+_bt_split_firstright_off(FindSplitData *state, SplitPoint *split,
+						 OffsetNumber *off)
+{
+	ItemId		itemid;
+
+	if (!split->newitemonleft && split->firstrightoff == state->newitemoff)
+	{
+		*off = InvalidOffsetNumber;
+		return state->newitem;
+	}
+	*off = split->firstrightoff;
+	itemid = PageGetItemId(state->origpage, split->firstrightoff);
+	return (IndexTuple) PageGetItem(state->origpage, itemid);
+}
 
 static void _bt_recsplitloc(FindSplitData *state,
 							OffsetNumber firstrightoff, bool newitemonleft,
@@ -201,6 +288,24 @@ _bt_findsplitloc(Relation rel,
 	state.nsplits = 0;
 
 	/*
+	 * Set up prefix-compression reconstruction state if the origpage is
+	 * prefix-compressed.  Without this, _bt_keep_natts_fast cannot evaluate
+	 * same-group prefix matches between candidate lastleft and firstright
+	 * tuples and suffix truncation would be degraded (the "no common prefix
+	 * identified" fallback kicks in every time).
+	 */
+	state.prefix_page = state.is_leaf && P_HAS_PREFIX_COMPRESSION(opaque);
+	state.lbuf = NULL;
+	state.rbuf = NULL;
+	if (state.prefix_page)
+	{
+		memset(&state.prefix_state, 0, sizeof(state.prefix_state));
+		_bt_prefix_state_init(&state.prefix_state, origpage);
+		state.lbuf = palloc(BTMaxItemSize);
+		state.rbuf = palloc(BTMaxItemSize);
+	}
+
+	/*
 	 * Scan through the data items and calculate space usage for a split at
 	 * each possible position
 	 */
@@ -314,6 +419,12 @@ _bt_findsplitloc(Relation rel,
 					newitemoff == split->firstrightoff)
 				{
 					pfree(state.splits);
+					if (state.lbuf)
+						pfree(state.lbuf);
+					if (state.rbuf)
+						pfree(state.rbuf);
+					if (state.prefix_page)
+						_bt_prefix_state_cleanup(&state.prefix_state);
 					*newitemonleft = true;
 					return newitemoff;
 				}
@@ -424,6 +535,12 @@ _bt_findsplitloc(Relation rel,
 	firstrightoff = _bt_bestsplitloc(&state, perfectpenalty, newitemonleft,
 									 strategy);
 	pfree(state.splits);
+	if (state.lbuf)
+		pfree(state.lbuf);
+	if (state.rbuf)
+		pfree(state.rbuf);
+	if (state.prefix_page)
+		_bt_prefix_state_cleanup(&state.prefix_state);
 
 	return firstrightoff;
 }
@@ -659,11 +776,17 @@ _bt_afternewitemoff(FindSplitData *state, OffsetNumber maxoff,
 	 * non-pivot tuples must be the same width as well.  (Note that the
 	 * possibly-truncated existing high key isn't counted in
 	 * olddataitemstotal, and must be subtracted from maxoff.)
+	 *
+	 * XXX Disable this for the benefit of prefix compression, since we cannot
+	 * expect TPC-C indexes to have uniform tuple size anymore.  Revisit the
+	 * trade-offs here.
 	 */
+#if 0
 	if (state->newitemsz != state->minfirstrightsz)
 		return false;
 	if (state->newitemsz * (maxoff - 1) != state->olddataitemstotal)
 		return false;
+#endif
 
 	/*
 	 * Avoid applying optimization when tuples are wider than a tuple
@@ -688,7 +811,9 @@ _bt_afternewitemoff(FindSplitData *state, OffsetNumber maxoff,
 	{
 		itemid = PageGetItemId(state->origpage, maxoff);
 		tup = (IndexTuple) PageGetItem(state->origpage, itemid);
-		keepnatts = _bt_keep_natts_fast(state->rel, tup, state->newitem);
+		keepnatts = _bt_split_keep_natts_fast(state, tup, maxoff,
+											  state->newitem,
+											  InvalidOffsetNumber);
 
 		if (keepnatts > 1 && keepnatts <= nkeyatts)
 		{
@@ -712,14 +837,28 @@ _bt_afternewitemoff(FindSplitData *state, OffsetNumber maxoff,
 	 * optimization.  Besides, all inappropriate cases triggered here will
 	 * still split in the middle of the page on average.
 	 */
-	itemid = PageGetItemId(state->origpage, OffsetNumberPrev(state->newitemoff));
-	tup = (IndexTuple) PageGetItem(state->origpage, itemid);
-	/* Do cheaper test first */
-	if (BTreeTupleIsPosting(tup) ||
-		!_bt_adjacenthtid(&tup->t_tid, &state->newitem->t_tid))
-		return false;
-	/* Check same conditions as rightmost item case, too */
-	keepnatts = _bt_keep_natts_fast(state->rel, tup, state->newitem);
+	{
+		OffsetNumber tup_off = OffsetNumberPrev(state->newitemoff);
+		ItemPointerData left_htid;
+
+		itemid = PageGetItemId(state->origpage, tup_off);
+		tup = (IndexTuple) PageGetItem(state->origpage, itemid);
+		/* Do cheaper test first */
+		if (BTreeTupleIsPosting(tup))
+			return false;
+
+		if (BTreeTupleIsCompressed(tup))
+			BTreeCompressedTupleGetHeapTID(tup, &left_htid);
+		else
+			left_htid = tup->t_tid;
+		if (!_bt_adjacenthtid(&left_htid, &state->newitem->t_tid))
+			return false;
+
+		/* Check same conditions as rightmost item case, too */
+		keepnatts = _bt_split_keep_natts_fast(state, tup, tup_off,
+											  state->newitem,
+											  InvalidOffsetNumber);
+	}
 
 	if (keepnatts > 1 && keepnatts <= nkeyatts)
 	{
@@ -937,6 +1076,8 @@ _bt_strategy(FindSplitData *state, SplitPoint *leftpage,
 {
 	IndexTuple	leftmost,
 				rightmost;
+	OffsetNumber leftmost_off,
+				rightmost_off;
 	SplitPoint *leftinterval,
 			   *rightinterval;
 	int			perfectpenalty;
@@ -960,15 +1101,17 @@ _bt_strategy(FindSplitData *state, SplitPoint *leftpage,
 	 * current split interval
 	 */
 	_bt_interval_edges(state, &leftinterval, &rightinterval);
-	leftmost = _bt_split_lastleft(state, leftinterval);
-	rightmost = _bt_split_firstright(state, rightinterval);
+	leftmost = _bt_split_lastleft_off(state, leftinterval, &leftmost_off);
+	rightmost = _bt_split_firstright_off(state, rightinterval, &rightmost_off);
 
 	/*
 	 * If initial split interval can produce a split point that will at least
 	 * avoid appending a heap TID in new high key, we're done.  Finish split
 	 * with default strategy and initial split interval.
 	 */
-	perfectpenalty = _bt_keep_natts_fast(state->rel, leftmost, rightmost);
+	perfectpenalty = _bt_split_keep_natts_fast(state,
+											   leftmost, leftmost_off,
+											   rightmost, rightmost_off);
 	if (perfectpenalty <= indnkeyatts)
 		return perfectpenalty;
 
@@ -980,8 +1123,8 @@ _bt_strategy(FindSplitData *state, SplitPoint *leftpage,
 	 * Use the leftmost split's lastleft tuple and the rightmost split's
 	 * firstright tuple to assess every possible split.
 	 */
-	leftmost = _bt_split_lastleft(state, leftpage);
-	rightmost = _bt_split_firstright(state, rightpage);
+	leftmost = _bt_split_lastleft_off(state, leftpage, &leftmost_off);
+	rightmost = _bt_split_firstright_off(state, rightpage, &rightmost_off);
 
 	/*
 	 * If page (including new item) has many duplicates but is not entirely
@@ -989,7 +1132,9 @@ _bt_strategy(FindSplitData *state, SplitPoint *leftpage,
 	 * If page is entirely full of duplicates, a single value strategy split
 	 * will be performed.
 	 */
-	perfectpenalty = _bt_keep_natts_fast(state->rel, leftmost, rightmost);
+	perfectpenalty = _bt_split_keep_natts_fast(state,
+											   leftmost, leftmost_off,
+											   rightmost, rightmost_off);
 	if (perfectpenalty <= indnkeyatts)
 	{
 		*strategy = SPLIT_MANY_DUPLICATES;
@@ -1027,6 +1172,7 @@ _bt_strategy(FindSplitData *state, SplitPoint *leftpage,
 
 		itemid = PageGetItemId(state->origpage, P_HIKEY);
 		hikey = (IndexTuple) PageGetItem(state->origpage, itemid);
+		/* hikey is a pivot, never compressed; newitem is plain */
 		perfectpenalty = _bt_keep_natts_fast(state->rel, hikey,
 											 state->newitem);
 		if (perfectpenalty <= indnkeyatts)
@@ -1147,10 +1293,17 @@ _bt_split_penalty(FindSplitData *state, SplitPoint *split)
 		return MAXALIGN(ItemIdGetLength(itemid)) + sizeof(ItemIdData);
 	}
 
-	lastleft = _bt_split_lastleft(state, split);
-	firstright = _bt_split_firstright(state, split);
+	{
+		OffsetNumber lastleft_off;
+		OffsetNumber firstright_off;
 
-	return _bt_keep_natts_fast(state->rel, lastleft, firstright);
+		lastleft = _bt_split_lastleft_off(state, split, &lastleft_off);
+		firstright = _bt_split_firstright_off(state, split, &firstright_off);
+
+		return _bt_split_keep_natts_fast(state,
+										 lastleft, lastleft_off,
+										 firstright, firstright_off);
+	}
 }
 
 /*

@@ -701,6 +701,9 @@ _bt_compare(Relation rel,
 	int			ncmpkey;
 	int			ntupatts;
 	int32		result;
+	BTPrefixPageState prefix_st;
+	bool		prefix_st_init = false;
+	char	   *scratch = NULL;
 
 	Assert(_bt_check_natts(rel, key->heapkeyspace, page, offnum));
 	Assert(key->keysz <= IndexRelationGetNumberOfKeyAttributes(rel));
@@ -714,6 +717,27 @@ _bt_compare(Relation rel,
 		return 1;
 
 	itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, offnum));
+
+	/*
+	 * On a prefix-compressed leaf page a follower's leading attrs live on the
+	 * governing anchor.  Reconstruct the tuple into a scratch buffer so the
+	 * rest of this function can treat it as an ordinary IndexTuple.  For
+	 * compressed tuples the caller-visible heap TID also requires decoding;
+	 * we do that below via BTreeCompressedTupleGetHeapTID().
+	 */
+	if (P_ISLEAF(opaque) && BTreeTupleIsCompressed(itup))
+	{
+		memset(&prefix_st, 0, sizeof(prefix_st));
+		_bt_prefix_state_init(&prefix_st, page);
+		prefix_st_init = true;
+		scratch = palloc(BTMaxItemSize);
+		/*
+		 * _bt_prefix_reconstruct returns a plain-looking IndexTuple whose
+		 * t_tid is already demasked into a real heap TID.
+		 */
+		itup = _bt_prefix_reconstruct(rel, &prefix_st, offnum, scratch);
+	}
+
 	ntupatts = BTreeTupleGetNAtts(itup, rel);
 
 	/*
@@ -776,7 +800,7 @@ _bt_compare(Relation rel,
 
 		/* if the keys are unequal, return the difference */
 		if (result != 0)
-			return result;
+			goto done;
 
 		scankey++;
 	}
@@ -791,7 +815,10 @@ _bt_compare(Relation rel,
 	 * necessary.
 	 */
 	if (key->keysz > ntupatts)
-		return 1;
+	{
+		result = 1;
+		goto done;
+	}
 
 	/*
 	 * Use the heap TID attribute and scantid to try to break the tie.  The
@@ -826,10 +853,14 @@ _bt_compare(Relation rel,
 		 */
 		if (!key->backward && key->keysz == ntupatts && heapTid == NULL &&
 			key->heapkeyspace)
-			return 1;
+		{
+			result = 1;
+			goto done;
+		}
 
 		/* All provided scankey arguments found to be equal */
-		return 0;
+		result = 0;
+		goto done;
 	}
 
 	/*
@@ -838,7 +869,10 @@ _bt_compare(Relation rel,
 	 */
 	Assert(key->keysz == IndexRelationGetNumberOfKeyAttributes(rel));
 	if (heapTid == NULL)
-		return 1;
+	{
+		result = 1;
+		goto done;
+	}
 
 	/*
 	 * Scankey must be treated as equal to a posting list tuple if its scantid
@@ -849,16 +883,27 @@ _bt_compare(Relation rel,
 	Assert(ntupatts >= IndexRelationGetNumberOfKeyAttributes(rel));
 	result = ItemPointerCompare(key->scantid, heapTid);
 	if (result <= 0 || !BTreeTupleIsPosting(itup))
-		return result;
+		goto done;
 	else
 	{
 		result = ItemPointerCompare(key->scantid,
 									BTreeTupleGetMaxHeapTID(itup));
 		if (result > 0)
-			return 1;
+		{
+			result = 1;
+			goto done;
+		}
 	}
 
-	return 0;
+	result = 0;
+
+done:
+	if (prefix_st_init)
+	{
+		_bt_prefix_state_cleanup(&prefix_st);
+		pfree(scratch);
+	}
+	return result;
 }
 
 /*
@@ -1441,7 +1486,8 @@ _bt_first(IndexScanDesc scan, ScanDirection dir)
 	 * page _bt_search returns).
 	 *----------
 	 */
-	_bt_metaversion(rel, &inskey.heapkeyspace, &inskey.allequalimage);
+	_bt_metaversion(rel, &inskey.heapkeyspace, &inskey.allequalimage,
+					&inskey.prefix_compression);
 	inskey.anynullkeys = false; /* unused */
 	inskey.scantid = NULL;
 	inskey.keysz = keysz;
@@ -1676,8 +1722,16 @@ _bt_steppage(IndexScanDesc scan, ScanDirection dir)
 			   offsetof(BTScanPosData, items[1]) +
 			   so->currPos.lastItem * sizeof(BTScanPosItem));
 		if (so->markTuples)
+		{
+			if (so->markTuplesSize < so->currPos.nextTupleOffset)
+			{
+				so->markTuples = (char *) repalloc(so->markTuples,
+												   so->currPos.nextTupleOffset);
+				so->markTuplesSize = so->currPos.nextTupleOffset;
+			}
 			memcpy(so->markTuples, so->currTuples,
 				   so->currPos.nextTupleOffset);
+		}
 		so->markPos.itemIndex = so->markItemIndex;
 		so->markItemIndex = -1;
 

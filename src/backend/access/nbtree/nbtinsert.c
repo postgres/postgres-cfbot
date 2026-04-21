@@ -526,7 +526,18 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
 				{
 					/* ... htid is from simple non-pivot tuple */
 					Assert(!inposting);
-					htid = curitup->t_tid;
+
+					/*
+					 * A prefix-compressed follower packs BT_IS_COMPRESSED in
+					 * t_tid's upper nibble; decode to a clean heap TID before
+					 * any tableam fetch or TID comparison below.  Plain
+					 * (non-compressed) tuples, including anchors, fall through
+					 * with their t_tid used verbatim.
+					 */
+					if (P_HAS_PREFIX_COMPRESSION(opaque) && BTreeTupleIsCompressed(curitup))
+						BTreeCompressedTupleGetHeapTID(curitup, &htid);
+					else
+						htid = curitup->t_tid;
 				}
 				else if (!inposting)
 				{
@@ -910,7 +921,12 @@ _bt_findinsertloc(Relation rel,
 
 		/*
 		 * If the target page cannot fit newitem, try to avoid splitting the
-		 * page on insert by performing deletion or deduplication now
+		 * page on insert by performing deletion or deduplication now.  On
+		 * prefix-compressed indexes deduplication is disabled index-wide
+		 * (btm_allequalimage is false), but we still run the combined
+		 * delete-or-dedup helper: the deletion pass (LP_DEAD and
+		 * bottom-up) is still valuable, and the dedup pass is a no-op
+		 * because allequalimage is false.
 		 */
 		if (PageGetFreeSpace(page) < insertstate->itemsz)
 			_bt_delete_or_dedup_one_page(rel, heapRel, insertstate, false,
@@ -1135,6 +1151,9 @@ _bt_insertonpg(Relation rel,
 	IndexTuple	oposting = NULL;
 	IndexTuple	origitup = NULL;
 	IndexTuple	nposting = NULL;
+	IndexTuple	emit_itup;		/* possibly-compressed form actually written */
+	Size		emit_itemsz;
+	char	   *emit_scratch = NULL;
 	XLogRecPtr	recptr;
 
 	page = BufferGetPage(buf);
@@ -1154,9 +1173,77 @@ _bt_insertonpg(Relation rel,
 		   BTreeTupleGetNAtts(itup, rel) <=
 		   IndexRelationGetNumberOfKeyAttributes(rel));
 	Assert(!BTreeTupleIsPosting(itup));
+	Assert(!BTreeTupleIsCompressed(itup));
 	Assert(MAXALIGN(IndexTupleSize(itup)) == itemsz);
 	/* Caller must always finish incomplete split for us */
 	Assert(!P_INCOMPLETE_SPLIT(opaque));
+
+	/*
+	 * Default: emit itup as-is with its plain size.  When the target leaf page
+	 * is prefix-compressed we may replace emit_itup with a compressed follower
+	 * below.
+	 */
+	emit_itup = itup;
+	emit_itemsz = itemsz;
+
+	/*
+	 * Prefix compression: if this is a leaf page that already carries
+	 * BTP_HAS_PREFIX_COMPRESSION and the incoming tuple shares the governing
+	 * anchor's leading (nkeyatts-1) key attrs, emit the compressed form.
+	 *
+	 * The invariant that the leftmost data item on a prefix-compressed leaf
+	 * page must be a plain anchor is preserved: we never compress when
+	 * newitemoff == P_FIRSTDATAKEY (the to-be-leftmost position).  Posting
+	 * splits never happen on prefix-compressed pages because such indexes
+	 * have btm_allequalimage=false, so dedup is disabled index-wide.
+	 */
+	if (isleaf && itup_key->prefix_compression &&
+		P_HAS_PREFIX_COMPRESSION(opaque) && postingoff == 0 &&
+		newitemoff > P_FIRSTDATAKEY(opaque))
+	{
+		OffsetNumber aoff;
+
+		aoff = _bt_prefix_find_anchor(page, OffsetNumberPrev(newitemoff));
+		if (aoff == InvalidOffsetNumber)
+			ereport(ERROR,
+					(errcode(ERRCODE_INDEX_CORRUPTED),
+					 errmsg_internal("prefix-compressed leaf page has no anchor before offset %u in index \"%s\"",
+									 newitemoff,
+									 RelationGetRelationName(rel))));
+		else
+		{
+			IndexTuple	anchor = (IndexTuple) PageGetItem(page,
+														  PageGetItemId(page, aoff));
+			int			natts_anchor =
+				IndexRelationGetNumberOfKeyAttributes(rel) - 1;
+
+			if (_bt_keep_natts_fast(rel, anchor, itup) > natts_anchor)
+			{
+				TupleDesc	follower_tupdesc;
+
+				/*
+				 * By btree sort-order invariant, any incoming tuple that lies
+				 * inside the governing anchor's group (by offset and sort
+				 * position) must share all natts_anchor leading attrs -- the
+				 * check above turns that invariant into a precondition for
+				 * compression, not a guarantee.  A tuple landing between two
+				 * groups, or at the start of a new group, will fall through
+				 * and be emitted plain, becoming a new anchor.
+				 */
+				follower_tupdesc =
+					_bt_prefix_build_follower_tupdesc(rel, natts_anchor);
+				emit_scratch = palloc(BTMaxItemSize);
+				emit_itup =
+					_bt_prefix_compress_new_tuple(RelationGetDescr(rel),
+												  follower_tupdesc,
+												  natts_anchor,
+												  itup,
+												  emit_scratch);
+				emit_itemsz = MAXALIGN(IndexTupleSize(emit_itup));
+				FreeTupleDesc(follower_tupdesc);
+			}
+		}
+	}
 
 	/*
 	 * Every internal page should have exactly one negative infinity item at
@@ -1209,6 +1296,19 @@ _bt_insertonpg(Relation rel,
 		nposting = _bt_swap_posting(itup, oposting, postingoff);
 		/* itup now contains rightmost/max TID from oposting */
 
+		/*
+		 * The tuple physically inserted on the page after the posting split
+		 * is 'itup' (with the TID swap applied by _bt_swap_posting), not
+		 * 'emit_itup' (which still points at origitup).  Master's code uses
+		 * 'itup' directly.  Our prefix-compression branch introduced
+		 * emit_itup as the thing PageAddItem writes out, so we must update
+		 * it to match 'itup' in the posting-split path or we'd write origitup
+		 * (with its original unsw­apped TID) and corrupt the page's
+		 * (key, TID) sort order.
+		 */
+		emit_itup = itup;
+		emit_itemsz = itemsz;
+
 		/* Alter offset so that newitem goes after posting list */
 		newitemoff = OffsetNumberNext(newitemoff);
 	}
@@ -1219,14 +1319,27 @@ _bt_insertonpg(Relation rel,
 	 * Note: PageGetFreeSpace() subtracts sizeof(ItemIdData) from its result,
 	 * so this comparison is correct even though we appear to be accounting
 	 * only for the item and not for its line pointer.
+	 *
+	 * Use emit_itemsz (the possibly-compressed size) here so that a tuple
+	 * whose uncompressed size would not fit but whose compressed size does
+	 * can avoid a page split.
 	 */
-	if (PageGetFreeSpace(page) < itemsz)
+	if (PageGetFreeSpace(page) < emit_itemsz)
 	{
 		Buffer		rbuf;
 
 		Assert(!split_only_page);
 
-		/* split the buffer into left and right halves */
+		/*
+		 * _bt_split has not yet been taught about prefix compression; hand it
+		 * the plain tuple and plain size.  The split logic will produce pages
+		 * that the build/insert paths can subsequently compress to.
+		 */
+		if (emit_scratch != NULL)
+		{
+			pfree(emit_scratch);
+			emit_scratch = NULL;
+		}
 		rbuf = _bt_split(rel, heaprel, itup_key, buf, cbuf, newitemoff, itemsz,
 						 itup, origitup, nposting, postingoff);
 		PredicateLockPageSplit(rel,
@@ -1297,7 +1410,7 @@ _bt_insertonpg(Relation rel,
 		if (postingoff != 0)
 			memcpy(oposting, nposting, MAXALIGN(IndexTupleSize(nposting)));
 
-		if (PageAddItem(page, itup, itemsz, newitemoff, false, false) == InvalidOffsetNumber)
+		if (PageAddItem(page, emit_itup, emit_itemsz, newitemoff, false, false) == InvalidOffsetNumber)
 			elog(PANIC, "failed to add new item to block %u in index \"%s\"",
 				 BufferGetBlockNumber(buf), RelationGetRelationName(rel));
 
@@ -1373,6 +1486,7 @@ _bt_insertonpg(Relation rel,
 					xlmeta.fastlevel = metad->btm_fastlevel;
 					xlmeta.last_cleanup_num_delpages = metad->btm_last_cleanup_num_delpages;
 					xlmeta.allequalimage = metad->btm_allequalimage;
+					xlmeta.prefix_compression = metad->btm_prefix_compression;
 
 					XLogRegisterBuffer(2, metabuf,
 									   REGBUF_WILL_INIT | REGBUF_STANDARD);
@@ -1384,8 +1498,11 @@ _bt_insertonpg(Relation rel,
 			XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
 			if (postingoff == 0)
 			{
-				/* Just log itup from caller */
-				XLogRegisterBufData(0, itup, IndexTupleSize(itup));
+				/*
+				 * Log the bytes as they appear on the page -- compressed when
+				 * prefix compression turned itup into a follower, else plain.
+				 */
+				XLogRegisterBufData(0, emit_itup, IndexTupleSize(emit_itup));
 			}
 			else
 			{
@@ -1445,6 +1562,9 @@ _bt_insertonpg(Relation rel,
 		if (BlockNumberIsValid(blockcache) &&
 			_bt_getrootheight(rel) >= BTREE_FASTPATH_MIN_LEVEL)
 			RelationSetTargetBlock(rel, blockcache);
+
+		if (emit_scratch != NULL)
+			pfree(emit_scratch);
 	}
 
 	/* be tidy */
@@ -1517,6 +1637,12 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 				isleaf,
 				isrightmost;
 	XLogRecPtr	recptr;
+	/*
+	 * Scratch buffers used when prefix compression forces us to reconstruct
+	 * firstright and/or lastleft to their plain form.
+	 */
+	char	   *firstright_scratch = NULL;
+	char	   *lastleft_scratch = NULL;
 
 	/*
 	 * origpage is the original page to be split.  leftpage is a temporary
@@ -1638,6 +1764,19 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 	 * lastleft.  A tuple with all the keys from firstright but the max heap
 	 * TID from lastleft is used, to avoid introducing a special case.)
 	 */
+	/*
+	 * Prefix-compression bookkeeping:
+	 *   - firstright is the candidate first item on the new right page.  On a
+	 *     BTP_HAS_PREFIX_COMPRESSION page, the leftmost data item on the right
+	 *     page must be a plain anchor (invariant #1).  If the tuple at
+	 *     firstrightoff is a compressed follower (the split landed mid-group),
+	 *     we reconstruct its plain form and use that for both _bt_truncate's
+	 *     firstright input and the right page's P_FIRSTKEY.
+	 *   - lastleft must also be a plain tuple for _bt_truncate, so we
+	 *     reconstruct it on the fly if it was a compressed follower.
+	 * Scratch buffers are declared above and freed near the end of the
+	 * function.
+	 */
 	if (!newitemonleft && newitemoff == firstrightoff)
 	{
 		/* incoming tuple becomes firstright */
@@ -1652,6 +1791,22 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 		firstright = (IndexTuple) PageGetItem(origpage, itemid);
 		if (firstrightoff == origpagepostingoff)
 			firstright = nposting;
+
+		/* Mid-group split: promote compressed follower to plain anchor */
+		if (isleaf && itup_key->prefix_compression &&
+			BTreeTupleIsCompressed(firstright))
+		{
+			BTPrefixPageState rst;
+
+			memset(&rst, 0, sizeof(rst));
+			_bt_prefix_state_init(&rst, origpage);
+			firstright_scratch = palloc(BTMaxItemSize);
+			firstright = _bt_prefix_reconstruct(rel, &rst,
+												firstrightoff,
+												firstright_scratch);
+			_bt_prefix_state_cleanup(&rst);
+			itemsz = MAXALIGN(IndexTupleSize(firstright));
+		}
 	}
 
 	if (isleaf)
@@ -1675,6 +1830,21 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 			lastleft = (IndexTuple) PageGetItem(origpage, itemid);
 			if (lastleftoff == origpagepostingoff)
 				lastleft = nposting;
+
+			/* Reconstruct if lastleft is a compressed follower */
+			if (itup_key->prefix_compression &&
+				BTreeTupleIsCompressed(lastleft))
+			{
+				BTPrefixPageState rst;
+
+				memset(&rst, 0, sizeof(rst));
+				_bt_prefix_state_init(&rst, origpage);
+				lastleft_scratch = palloc(BTMaxItemSize);
+				lastleft = _bt_prefix_reconstruct(rel, &rst,
+												  lastleftoff,
+												  lastleft_scratch);
+				_bt_prefix_state_cleanup(&rst);
+			}
 		}
 
 		lefthighkey = _bt_truncate(rel, lastleft, firstright, itup_key);
@@ -1872,6 +2042,20 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 		}
 		else
 		{
+			/*
+			 * On a prefix-compressed page, if the split landed mid-group, we
+			 * promote the first right-page data item to its plain form so
+			 * the right page's leftmost data item is a plain anchor.
+			 * Subsequent followers on the right page inherit from this new
+			 * anchor (their leading attrs matched the original anchor, and
+			 * the promotion preserves those attrs).
+			 */
+			if (i == firstrightoff && firstright_scratch != NULL)
+			{
+				dataitem = firstright;
+				itemsz = MAXALIGN(IndexTupleSize(dataitem));
+			}
+
 			if (!_bt_pgaddtup(rightpage, itemsz, dataitem, afterrightoff,
 							  afterrightoff == minusinfoff))
 			{
@@ -2004,6 +2188,8 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 		xlrec.postingoff = 0;
 		if (postingoff != 0 && origpagepostingoff < firstrightoff)
 			xlrec.postingoff = postingoff;
+		/* Preserve origpage flags (BTP_HAS_PREFIX_COMPRESSION etc.) */
+		xlrec.origflags = oopaque->btpo_flags;
 
 		XLogBeginInsert();
 		XLogRegisterData(&xlrec, SizeOfBtreeSplit);
@@ -2103,6 +2289,10 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 	/* be tidy */
 	if (isleaf)
 		pfree(lefthighkey);
+	if (firstright_scratch != NULL)
+		pfree(firstright_scratch);
+	if (lastleft_scratch != NULL)
+		pfree(lastleft_scratch);
 
 	/* split's done */
 	return rbuf;
@@ -2622,6 +2812,7 @@ _bt_newlevel(Relation rel, Relation heaprel, Buffer lbuf, Buffer rbuf)
 		md.fastlevel = metad->btm_level;
 		md.last_cleanup_num_delpages = metad->btm_last_cleanup_num_delpages;
 		md.allequalimage = metad->btm_allequalimage;
+		md.prefix_compression = metad->btm_prefix_compression;
 
 		XLogRegisterBufData(2, &md, sizeof(xl_btree_metadata));
 
@@ -2723,6 +2914,18 @@ _bt_pgaddtup(Page page,
  * all this because !heapkeyspace indexes must still do a "getting tired"
  * linear search, and so are likely to get some benefit from using it as a
  * gating condition.)
+ *
+ * XXX prefix compression interaction: bottom-up deletion and deduplication
+ * both ultimately call _bt_keep_natts_fast on pairs of on-page tuples, which
+ * cannot yet consume compressed followers directly (see the comment over
+ * _bt_keep_natts_fast itself).  Dedup is already disabled at the index level
+ * (btm_prefix_compression ⇒ !btm_allequalimage); bottom-up delete is
+ * suppressed per-call below on prefix-compressed pages only.  Simple
+ * deletion stays enabled for prefix-compressed pages because its per-tuple
+ * handling has been taught to decode compressed heap TIDs (see
+ * _bt_simpledel_pass), so there's no asymmetry of "delete nothing" --
+ * simple deletion still runs, bottom-up does not.  Remove that asymmetry
+ * once nbtsplitloc.c/dedup learn to reconstruct.
  */
 static void
 _bt_delete_or_dedup_one_page(Relation rel, Relation heapRel,
@@ -2816,7 +3019,17 @@ _bt_delete_or_dedup_one_page(Relation rel, Relation heapRel,
 	 * together index tuples, so the same correctness considerations do not
 	 * apply.  We deliberately omit an index-is-allequalimage test here.
 	 */
+	/*
+	 * Bottom-up deletion compares on-page tuples via _bt_keep_natts_fast,
+	 * which expects plain tuples with the full tupdesc.  Compressed
+	 * followers on a prefix-compressed leaf don't satisfy that contract, so
+	 * skip the optimization on such pages -- this is purely advisory and
+	 * simply gives up some free-space reclamation.  The subsequent dedup
+	 * pass is also guarded (and is always disabled for prefix-compressed
+	 * indexes anyway), so insertion falls through to split as usual.
+	 */
 	if ((indexUnchanged || uniquedup) &&
+		!P_HAS_PREFIX_COMPRESSION(BTPageGetOpaque(BufferGetPage(buffer))) &&
 		_bt_bottomupdel_pass(rel, buffer, heapRel, insertstate->itemsz))
 		return;
 
@@ -2863,6 +3076,7 @@ _bt_simpledel_pass(Relation rel, Buffer buffer, Relation heapRel,
 	int			ndeadblocks;
 	TM_IndexDeleteOp delstate;
 	OffsetNumber offnum;
+	BTPageOpaque opaque = BTPageGetOpaque(page);
 
 	/* Get array of table blocks pointed to by LP_DEAD-set tuples */
 	deadblocks = _bt_deadblocks(page, deletable, ndeletable, newitem,
@@ -2902,9 +3116,15 @@ _bt_simpledel_pass(Relation rel, Buffer buffer, Relation heapRel,
 
 			/*
 			 * TID's table block is among those pointed to by the TIDs from
-			 * LP_DEAD-bit set tuples on page -- add TID to deltids
+			 * LP_DEAD-bit set tuples on page -- add TID to deltids.  For
+			 * compressed followers we must demask the heap offset, because
+			 * t_tid.ip_posid carries BT_IS_COMPRESSED in its upper nibble
+			 * and the tableam below expects a clean ItemPointerData.
 			 */
-			odeltid->tid = itup->t_tid;
+			if (P_HAS_PREFIX_COMPRESSION(opaque) && BTreeTupleIsCompressed(itup))
+				BTreeCompressedTupleGetHeapTID(itup, &odeltid->tid);
+			else
+				odeltid->tid = itup->t_tid;
 			odeltid->id = delstate.ndeltids;
 			ostatus->idxoffnum = offnum;
 			ostatus->knowndeletable = ItemIdIsDead(itemid);

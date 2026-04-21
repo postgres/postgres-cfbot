@@ -183,14 +183,21 @@ void
 btbuildempty(Relation index)
 {
 	bool		allequalimage = _bt_allequalimage(index, false);
+	bool		prefix_compression = _bt_prefix_leading_equalimage(index);
 	BulkWriteState *bulkstate;
 	BulkWriteBuffer metabuf;
 
 	bulkstate = smgr_bulk_start_rel(index, INIT_FORKNUM);
 
-	/* Construct metapage. */
+	/*
+	 * Construct metapage.  allequalimage and prefix_compression are mutually
+	 * exclusive; when prefix_compression is chosen, clear allequalimage
+	 * (dedup is disabled index-wide for prefix-compressed indexes).
+	 */
 	metabuf = smgr_bulk_get_buf(bulkstate);
-	_bt_initmetapage((Page) metabuf, P_NONE, 0, allequalimage);
+	_bt_initmetapage((Page) metabuf, P_NONE, 0,
+					 allequalimage && !prefix_compression,
+					 prefix_compression);
 	smgr_bulk_write(bulkstate, BTREE_METAPAGE, metabuf, true);
 
 	smgr_bulk_finish(bulkstate);
@@ -373,6 +380,7 @@ btbeginscan(Relation rel, int nkeys, int norderbys)
 	 * scan->xs_itupdesc whether we'll need it or not, since that's so cheap.
 	 */
 	so->currTuples = so->markTuples = NULL;
+	so->currTuplesSize = so->markTuplesSize = 0;
 
 	scan->xs_itupdesc = RelationGetDescr(rel);
 
@@ -429,14 +437,17 @@ btrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
 
 	/*
 	 * Allocate tuple workspace arrays, if needed for an index-only scan and
-	 * not already done in a previous rescan call.  To save on palloc
-	 * overhead, both workspaces are allocated as one palloc block; only this
-	 * function and btendscan know that.
+	 * not already done in a previous rescan call.  Each workspace must hold
+	 * a full page's worth of tuples; BLCKSZ is the natural starting size, but
+	 * prefix compression can produce reconstructed pages larger than BLCKSZ,
+	 * so we allow _bt_ensure_tuple_workspace() to grow the buffers on demand.
 	 */
 	if (scan->xs_want_itup && so->currTuples == NULL)
 	{
-		so->currTuples = (char *) palloc(BLCKSZ * 2);
-		so->markTuples = so->currTuples + BLCKSZ;
+		so->currTuples = (char *) palloc(BLCKSZ);
+		so->markTuples = (char *) palloc(BLCKSZ);
+		so->currTuplesSize = BLCKSZ;
+		so->markTuplesSize = BLCKSZ;
 	}
 
 	/*
@@ -480,7 +491,8 @@ btendscan(IndexScanDesc scan)
 		pfree(so->killedItems);
 	if (so->currTuples != NULL)
 		pfree(so->currTuples);
-	/* so->markTuples should not be pfree'd, see btrescan */
+	if (so->markTuples != NULL)
+		pfree(so->markTuples);
 	pfree(so);
 }
 
@@ -554,8 +566,16 @@ btrestrpos(IndexScanDesc scan)
 				   offsetof(BTScanPosData, items[1]) +
 				   so->markPos.lastItem * sizeof(BTScanPosItem));
 			if (so->currTuples)
+			{
+				if (so->currTuplesSize < so->markPos.nextTupleOffset)
+				{
+					so->currTuples = (char *) repalloc(so->currTuples,
+													   so->markPos.nextTupleOffset);
+					so->currTuplesSize = so->markPos.nextTupleOffset;
+				}
 				memcpy(so->currTuples, so->markTuples,
 					   so->markPos.nextTupleOffset);
+			}
 			/* Reset the scan's array keys (see _bt_steppage for why) */
 			if (so->numArrayKeys)
 			{
@@ -1575,8 +1595,27 @@ backtrack:
 				Assert(!BTreeTupleIsPivot(itup));
 				if (!BTreeTupleIsPosting(itup))
 				{
-					/* Regular tuple, standard table TID representation */
-					if (callback(&itup->t_tid, callback_state))
+					ItemPointerData htidbuf;
+					ItemPointer htid;
+
+					/*
+					 * Regular tuple, standard table TID representation -- but
+					 * if the tuple is a prefix-compressed follower, t_tid
+					 * packs BT_IS_COMPRESSED in its upper nibble and the real
+					 * heap offset in the low 12 bits.  Feeding the raw bytes
+					 * to the VACUUM callback would never match any dead heap
+					 * TID and we'd silently leak the index entry; decode to
+					 * a scratch ItemPointerData first.
+					 */
+					if (P_HAS_PREFIX_COMPRESSION(opaque) && BTreeTupleIsCompressed(itup))
+					{
+						BTreeCompressedTupleGetHeapTID(itup, &htidbuf);
+						htid = &htidbuf;
+					}
+					else
+						htid = &itup->t_tid;
+
+					if (callback(htid, callback_state))
 					{
 						deletable[ndeletable++] = offnum;
 						nhtidsdead++;

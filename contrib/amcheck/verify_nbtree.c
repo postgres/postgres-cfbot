@@ -312,7 +312,8 @@ bt_index_check_callback(Relation indrel, Relation heaprel, void *state, bool rea
 {
 	BTCallbackState *args = (BTCallbackState *) state;
 	bool		heapkeyspace,
-				allequalimage;
+				allequalimage,
+				prefix_compression;
 
 	if (!smgrexists(RelationGetSmgr(indrel), MAIN_FORKNUM))
 		ereport(ERROR,
@@ -321,7 +322,7 @@ bt_index_check_callback(Relation indrel, Relation heaprel, void *state, bool rea
 						RelationGetRelationName(indrel))));
 
 	/* Extract metadata from metapage, and sanitize it in passing */
-	_bt_metaversion(indrel, &heapkeyspace, &allequalimage);
+	_bt_metaversion(indrel, &heapkeyspace, &allequalimage, &prefix_compression);
 	if (allequalimage && !heapkeyspace)
 		ereport(ERROR,
 				(errcode(ERRCODE_INDEX_CORRUPTED),
