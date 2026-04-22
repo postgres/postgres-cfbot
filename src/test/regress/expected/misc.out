@@ -396,3 +396,15 @@ SELECT *, (equipment(CAST((h.*) AS hobbies_r))).name FROM hobbies_r h;
 --
 -- rewrite rules
 --
+do $$ declare a text;
+begin a := 's'::text::unknown;
+end$$;
+ERROR:  cannot cast type text to unknown
+LINE 1: a := 's'::text::unknown
+                      ^
+QUERY:  a := 's'::text::unknown
+CONTEXT:  PL/pgSQL function inline_code_block line 2 at assignment
+select 's'::text::unknown;
+ERROR:  cannot cast type text to unknown
+LINE 1: select 's'::text::unknown;
+                        ^
