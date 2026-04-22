@@ -1120,7 +1120,8 @@ GinBuildShared
 GinBuildState
 GinChkVal
 GinEntries
-GinEntryAccumulator
+GinHashEntry
+GinHashKey
 GinIndexStat
 GinLeader
 GinMetaPageData
@@ -1140,6 +1141,7 @@ GinScanKeyData
 GinScanOpaque
 GinScanOpaqueData
 GinSegmentInfo
+GinSortEntry
 GinState
 GinStatsData
 GinTernaryValue
