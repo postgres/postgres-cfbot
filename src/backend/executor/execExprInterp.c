@@ -579,6 +579,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_JSON_CONSTRUCTOR,
 		&&CASE_EEOP_IS_JSON,
 		&&CASE_EEOP_JSONEXPR_PATH,
+		&&CASE_EEOP_JSON_TRANSFORM,
 		&&CASE_EEOP_JSONEXPR_COERCION,
 		&&CASE_EEOP_JSONEXPR_COERCION_FINISH,
 		&&CASE_EEOP_AGGREF,
@@ -1940,6 +1941,13 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		{
 			/* too complex for an inline implementation */
 			EEO_JUMP(ExecEvalJsonExprPath(state, op, econtext));
+		}
+
+		EEO_CASE(EEOP_JSON_TRANSFORM)
+		{
+			/* too complex for an inline implementation */
+			ExecEvalJsonTransform(state, op, econtext);
+			EEO_NEXT();
 		}
 
 		EEO_CASE(EEOP_JSONEXPR_COERCION)
@@ -5100,6 +5108,185 @@ ExecEvalJsonExprPath(ExprState *state, ExprEvalStep *op,
 	}
 
 	return jump_eval_coercion >= 0 ? jump_eval_coercion : jsestate->jump_end;
+}
+
+/* Forward declarations for SQL-callable jsonb functions we invoke directly. */
+extern Datum jsonb_set(PG_FUNCTION_ARGS);
+extern Datum jsonb_insert(PG_FUNCTION_ARGS);
+extern Datum jsonb_delete_path(PG_FUNCTION_ARGS);
+
+/*
+ * Convert a simple jsonpath (chain of jpiRoot + jpiKey items only) into a
+ * text[] Datum suitable for passing to jsonb_set / jsonb_insert /
+ * jsonb_delete_path.
+ *
+ * If the jsonpath contains any item type other than jpiRoot/jpiKey (e.g.,
+ * jpiAnyKey, jpiIndexArray, jpiFilter), raise an ereport.  The JSON_TRANSFORM
+ * spec restricts target paths to member accessors, but because the jsonpath
+ * type is general-purpose we must enforce the restriction here.  For now we additionally disallow jpiAnyKey (wildcard '.*')
+ * since the text[] API can't express it.
+ */
+static Datum
+JsonPathToTextArray(JsonPath *jp)
+{
+	JsonPathItem v;
+	ArrayBuildState *astate;
+	MemoryContext curctx = CurrentMemoryContext;
+
+	astate = initArrayResult(TEXTOID, curctx, false);
+
+	jspInit(&v, jp);
+
+	/* Per spec, the path must begin with '$'. */
+	if (v.type != jpiRoot)
+		ereport(ERROR,
+				errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				errmsg("JSON_TRANSFORM target path must start with the context variable $, not a named variable. The transformation applies to the input document."));
+
+	/*
+	 * Walk the chain.  Each subsequent item must be a jpiKey; anything else
+	 * is rejected.
+	 */
+	while (jspHasNext(&v))
+	{
+		JsonPathItem next;
+		char	   *name;
+		int32		namelen;
+		text	   *t;
+
+		jspGetNext(&v, &next);
+		v = next;
+
+		if (v.type != jpiKey)
+			ereport(ERROR,
+					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("JSON_TRANSFORM target path may only contain named member accessors"),
+					errdetail("Only '.key' accessors are supported now; wildcards, array subscripts, filters, and methods are not allowed."));
+
+		name = jspGetString(&v, &namelen);
+		t = cstring_to_text_with_len(name, namelen);
+
+		astate = accumArrayResult(astate,
+								  PointerGetDatum(t),
+								  false,
+								  TEXTOID,
+								  curctx);
+	}
+
+	/*
+	 * At least one key must follow the root (otherwise the path is just '$'
+	 * which has nothing to target).
+	 */
+	if (astate->nelems == 0)
+		ereport(ERROR,
+				errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				errmsg("JSON_TRANSFORM target path must name at least one member"));
+
+	return makeArrayResult(astate, curctx);
+}
+
+/*
+ * Runtime handler for EEOP_JSON_TRANSFORM.
+ *
+ * By the time we get here, prior steps have populated:
+ *   jtstate->formatted_expr  — the input jsonb (guaranteed non-null; the
+ *								EEOP_JUMP_IF_NULL before us handles null)
+ *   jtstate->pathspec        — the compiled jsonpath Datum (non-null)
+ *   jtstate->action_value    — the value for INSERT/REPLACE/RENAME
+ *								(isnull=true for REMOVE, or if user passed NULL)
+ *
+ * We branch on action->op, convert the jsonpath to a text[], and delegate
+ * to the existing jsonb_set / jsonb_insert / jsonb_delete_path C functions.
+ *
+ * Note on behavior clauses: per spec 6.44, each action supports per-action
+ * ON EXISTING / ON MISSING / ON NULL / ON EMPTY / ON ERROR.  This v1
+ * implementation uses HARDCODED behavior — whatever jsonb_set/insert/delete
+ * do naturally:
+ *   - REMOVE  : no-op if path missing   (matches spec default IGNORE ON MISSING)
+ *   - INSERT  : error if key exists     (matches spec default ERROR ON EXISTING)
+ *   - REPLACE : no-op if path missing   (matches spec default IGNORE ON MISSING)
+ *   - RENAME  : not yet implemented; raises an error
+ *
+ * Per-action behavior clauses (e.g., IGNORE ON EXISTING, NULL ON NULL) are
+ * not yet supported.
+ */
+void
+ExecEvalJsonTransform(ExprState *state, ExprEvalStep *op,
+					  ExprContext *econtext)
+{
+	JsonTransformExprState *jtstate = op->d.json_transform.jtstate;
+	JsonExpr   *jsexpr = jtstate->jsexpr;
+	JsonTransformAction *action = jsexpr->action;
+	Jsonb	   *in;
+	JsonPath   *jp;
+	Datum		path_array;
+	Datum		result;
+
+	/*
+	 * The JUMP_IF_NULL guards in the step array already skip us if
+	 * formatted_expr or pathspec is NULL.
+	 */
+	Assert(!jtstate->formatted_expr.isnull);
+	Assert(!jtstate->pathspec.isnull);
+
+	in = DatumGetJsonbP(jtstate->formatted_expr.value);
+	jp = DatumGetJsonPathP(jtstate->pathspec.value);
+
+	/* Validate + convert jsonpath to text[] */
+	path_array = JsonPathToTextArray(jp);
+
+	switch (action->op)
+	{
+		case TRANSFORM_REMOVE:
+			result = DirectFunctionCall2(jsonb_delete_path,
+										 JsonbPGetDatum(in),
+										 path_array);
+			break;
+
+		case TRANSFORM_INSERT:
+			if (jtstate->action_value.isnull)
+				ereport(ERROR,
+						errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+						errmsg("NULL value for INSERT not allowed in JSON_TRANSFORM"));
+			/* insert_after=false means before (standard insert semantic) */
+			result = DirectFunctionCall4(jsonb_insert,
+										 JsonbPGetDatum(in),
+										 path_array,
+										 jtstate->action_value.value,
+										 BoolGetDatum(false));
+			break;
+
+		case TRANSFORM_REPLACE:
+			if (jtstate->action_value.isnull)
+				ereport(ERROR,
+						errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+						errmsg("NULL value for REPLACE not allowed in JSON_TRANSFORM"));
+			/* create_missing=false: REPLACE is no-op if path missing */
+			result = DirectFunctionCall4(jsonb_set,
+										 JsonbPGetDatum(in),
+										 path_array,
+										 jtstate->action_value.value,
+										 BoolGetDatum(false));
+			break;
+
+		case TRANSFORM_RENAME:
+
+			/*
+			 * RENAME operates on KEYS, not values.  remove/insert/replace
+			 * work on values at a given path, so RENAME isn't trivially
+			 * expressible in terms of them.
+			 */
+			ereport(ERROR,
+					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("JSON_TRANSFORM RENAME is not yet implemented"));
+			break;
+
+		default:
+			elog(ERROR, "unrecognized JsonTransformOp: %d", (int) action->op);
+	}
+
+	*op->resvalue = result;
+	*op->resnull = false;
 }
 
 /*

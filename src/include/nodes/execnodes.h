@@ -1095,6 +1095,20 @@ typedef struct DomainConstraintState
 	ExprState  *check_exprstate;	/* check_expr's eval state, or NULL */
 } DomainConstraintState;
 
+typedef struct JsonTransformExprState
+{
+	JsonExpr   *jsexpr;			/* back-pointer to analyzed node */
+
+	/* Runtime slots — filled by prior steps */
+	NullableDatum formatted_expr;	/* input jsonb document */
+	NullableDatum pathspec;		/* compiled jsonpath Datum */
+	NullableDatum action_value; /* value to for transform ops (NULL for
+								 * REMOVE) */
+
+	/* PASSING args (only used if jsonpath needs them) */
+	List	   *args;			/* List of JsonPathVariable */
+}			JsonTransformExprState;
+
 /*
  * State for JsonExpr evaluation, too big to inline.
  *
