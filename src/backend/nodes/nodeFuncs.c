@@ -2399,6 +2399,13 @@ expression_tree_walker_impl(Node *node,
 					return true;
 				if (WALK(jexpr->on_error))
 					return true;
+				if (jexpr->action)
+				{
+					if (WALK(jexpr->action->pathspec))
+						return true;
+					if (WALK(jexpr->action->value_expr))
+						return true;
+				}
 			}
 			break;
 		case T_JsonBehavior:
@@ -3494,6 +3501,21 @@ expression_tree_mutator_impl(Node *node,
 				/* assume mutator does not care about passing_names */
 				MUTATE(newnode->on_empty, jexpr->on_empty, JsonBehavior *);
 				MUTATE(newnode->on_error, jexpr->on_error, JsonBehavior *);
+				if (jexpr->action)
+				{
+					/*
+					 * Copy the JsonTransformAction node ourselves and mutate its
+					 * sub-expressions, rather than handing the action node to
+					 * the mutator callback ,this keeps us away from modifying the
+					 * oldfield.
+					 */
+					JsonTransformAction *newact;
+
+					FLATCOPY(newact, jexpr->action, JsonTransformAction);
+					MUTATE(newact->pathspec, jexpr->action->pathspec, Node *);
+					MUTATE(newact->value_expr, jexpr->action->value_expr, Node *);
+					newnode->action = newact;
+				}
 				return (Node *) newnode;
 			}
 			break;

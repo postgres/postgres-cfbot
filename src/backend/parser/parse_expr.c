@@ -4424,6 +4424,7 @@ transformJsonFuncExpr(ParseState *pstate, JsonFuncExpr *func)
 	Node	   *coerced_path_spec;
 	const char *func_name = NULL;
 	JsonFormatType default_format;
+	JsonTransformAction *jst_action = func->action;
 
 	switch (func->op)
 	{
@@ -4441,6 +4442,10 @@ transformJsonFuncExpr(ParseState *pstate, JsonFuncExpr *func)
 			break;
 		case JSON_TABLE_OP:
 			func_name = "JSON_TABLE";
+			default_format = JS_FORMAT_JSONB;
+			break;
+		case JSON_TRANSFORM_OP:
+			func_name = "JSON_TRANSFORM";
 			default_format = JS_FORMAT_JSONB;
 			break;
 		default:
@@ -4636,22 +4641,83 @@ transformJsonFuncExpr(ParseState *pstate, JsonFuncExpr *func)
 													false);
 	jsexpr->format = func->context_item->format;
 
-	path_spec = transformExprRecurse(pstate, func->pathspec);
-	pathspec_type = exprType(path_spec);
-	pathspec_loc = exprLocation(path_spec);
-	coerced_path_spec = coerce_to_target_type(pstate, path_spec,
-											  pathspec_type,
-											  JSONPATHOID, -1,
-											  COERCION_EXPLICIT,
-											  COERCE_IMPLICIT_CAST,
-											  pathspec_loc);
-	if (coerced_path_spec == NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_DATATYPE_MISMATCH),
-				 errmsg("JSON path expression must be of type %s, not of type %s",
-						"jsonpath", format_type_be(pathspec_type)),
-				 parser_errposition(pstate, pathspec_loc)));
-	jsexpr->path_spec = coerced_path_spec;
+	if (jst_action)
+	{
+		JsonTransformAction *analyzed_jst_action = makeNode(JsonTransformAction);
+
+		analyzed_jst_action->op = jst_action->op;
+		analyzed_jst_action->location = jst_action->location;
+
+		switch (jst_action->op)
+		{
+			case TRANSFORM_INSERT:
+			case TRANSFORM_REPLACE:
+				analyzed_jst_action->value_expr = transformJsonValueExpr(pstate, func_name,
+																		 (JsonValueExpr *) jst_action->value_expr,
+																		 default_format,
+																		 JSONBOID,
+																		 false);
+				break;
+			case TRANSFORM_RENAME:
+				{
+				Node	   *v = transformExprRecurse(pstate, jst_action->value_expr);
+
+				v = coerce_to_target_type(pstate, v, exprType(v),
+										  TEXTOID, -1,
+										  COERCION_EXPLICIT,
+										  COERCE_IMPLICIT_CAST,
+										  exprLocation(v));
+				if (v == NULL)
+					ereport(ERROR,
+							errcode(ERRCODE_DATATYPE_MISMATCH),
+							errmsg("RENAME target must be convertible to text"),
+							parser_errposition(pstate, exprLocation(jst_action->value_expr)));
+				analyzed_jst_action->value_expr = v;
+				break;
+				}
+			case TRANSFORM_REMOVE:
+				/* REMOVE has no value_expr */
+				analyzed_jst_action->value_expr = NULL;
+				break;
+		}
+
+		path_spec = transformExprRecurse(pstate, jst_action->pathspec);
+		pathspec_type = exprType(path_spec);
+		pathspec_loc = exprLocation(path_spec);
+		coerced_path_spec = coerce_to_target_type(pstate, path_spec,
+												  pathspec_type,
+												  JSONPATHOID, -1,
+												  COERCION_EXPLICIT,
+												  COERCE_IMPLICIT_CAST,
+												  pathspec_loc);
+		if (coerced_path_spec == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATATYPE_MISMATCH),
+					 errmsg("JSON path expression must be of type %s, not of type %s",
+							"jsonpath", format_type_be(pathspec_type)),
+					 parser_errposition(pstate, pathspec_loc)));
+		analyzed_jst_action->pathspec = coerced_path_spec;
+		jsexpr->action = analyzed_jst_action;
+	}
+	else
+	{
+		path_spec = transformExprRecurse(pstate, func->pathspec);
+		pathspec_type = exprType(path_spec);
+		pathspec_loc = exprLocation(path_spec);
+		coerced_path_spec = coerce_to_target_type(pstate, path_spec,
+												  pathspec_type,
+												  JSONPATHOID, -1,
+												  COERCION_EXPLICIT,
+												  COERCE_IMPLICIT_CAST,
+												  pathspec_loc);
+		if (coerced_path_spec == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATATYPE_MISMATCH),
+					 errmsg("JSON path expression must be of type %s, not of type %s",
+							"jsonpath", format_type_be(pathspec_type)),
+					 parser_errposition(pstate, pathspec_loc)));
+		jsexpr->path_spec = coerced_path_spec;
+	}
 
 	/* Transform and coerce the PASSING arguments to jsonb. */
 	transformJsonPassingArgs(pstate, func_name,
@@ -4793,6 +4859,16 @@ transformJsonFuncExpr(ParseState *pstate, JsonFuncExpr *func)
 													 jsexpr->returning);
 			break;
 
+		case JSON_TRANSFORM_OP:
+			/* Return type is always jsonb */
+			if (!OidIsValid(jsexpr->returning->typid))
+			{
+				jsexpr->returning->typid = JSONBOID;
+				jsexpr->returning->typmod = -1;
+			}
+			jsexpr->collation = get_typcollation(jsexpr->returning->typid);
+			/* No top-level ON EMPTY / ON ERROR for JSON_TRANSFORM */
+			break;
 		default:
 			elog(ERROR, "invalid JsonFuncExpr op %d", (int) func->op);
 			break;

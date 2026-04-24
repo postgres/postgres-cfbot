@@ -1957,6 +1957,7 @@ typedef struct JsonFuncExpr
 								 * not for a JSON_TABLE() */
 	JsonValueExpr *context_item;	/* context item expression */
 	Node	   *pathspec;		/* JSON path specification expression */
+	JsonTransformAction *action;	/* Actions: INSERT/REMOVE/RENAME/REPLACE */
 	List	   *passing;		/* list of PASSING clause arguments, if any */
 	JsonOutput *output;			/* output clause, if specified */
 	JsonBehavior *on_empty;		/* ON EMPTY behavior */

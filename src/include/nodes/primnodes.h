@@ -1693,6 +1693,23 @@ typedef struct JsonValueExpr
 	JsonFormat *format;			/* FORMAT clause, if specified */
 } JsonValueExpr;
 
+typedef enum JsonTransformOp
+{
+	TRANSFORM_INSERT,
+	TRANSFORM_REMOVE,
+	TRANSFORM_RENAME,
+	TRANSFORM_REPLACE,
+}			JsonTransformOp;
+
+typedef struct JsonTransformAction
+{
+	NodeTag		type;
+	JsonTransformOp op;
+	Node	   *pathspec;		/* The JSON Path: '$.a' */
+	Node	   *value_expr;
+	ParseLoc	location;		/* token location, or -1 if unknown */
+}			JsonTransformAction;
+
 typedef enum JsonConstructorType
 {
 	JSCTOR_JSON_OBJECT = 1,
@@ -1829,6 +1846,7 @@ typedef enum JsonExprOp
 	JSON_QUERY_OP,				/* JSON_QUERY() */
 	JSON_VALUE_OP,				/* JSON_VALUE() */
 	JSON_TABLE_OP,				/* JSON_TABLE() */
+	JSON_TRANSFORM_OP,			/* JSON_TRANSFORM() */
 } JsonExprOp;
 
 /*
@@ -1853,6 +1871,8 @@ typedef struct JsonExpr
 
 	/* jsonpath-valued expression containing the query pattern */
 	Node	   *path_spec;
+
+	JsonTransformAction *action;
 
 	/* Expected type/format of the output. */
 	JsonReturning *returning;
