@@ -99,6 +99,9 @@ static void ExecBuildAggTransCall(ExprState *state, AggState *aggstate,
 static void ExecInitJsonExpr(JsonExpr *jsexpr, ExprState *state,
 							 Datum *resv, bool *resnull,
 							 ExprEvalStep *scratch);
+static void ExecInitJsonTransformExpr(JsonExpr *jsexpr, ExprState *state,
+									  Datum *resv, bool *resnull,
+									  ExprEvalStep *scratch);
 static void ExecInitJsonCoercion(ExprState *state, JsonReturning *returning,
 								 ErrorSaveContext *escontext, bool omit_quotes,
 								 bool exists_coerce,
@@ -2492,6 +2495,8 @@ ExecInitExprRec(Expr *node, ExprState *state,
 				if (jsexpr->op == JSON_TABLE_OP)
 					ExecInitExprRec((Expr *) jsexpr->formatted_expr, state,
 									resv, resnull);
+				else if (jsexpr->op == JSON_TRANSFORM_OP)
+					ExecInitJsonTransformExpr(jsexpr, state, resv, resnull, &scratch);
 				else
 					ExecInitJsonExpr(jsexpr, state, resv, resnull, &scratch);
 				break;
@@ -5035,6 +5040,160 @@ ExecInitJsonExpr(JsonExpr *jsexpr, ExprState *state,
 	}
 
 	jsestate->jump_end = state->steps_len;
+}
+
+/*
+ * Compile a JSON_TRANSFORM expression into a sequence of expression-eval
+ * steps.
+ *
+ * JSON_TRANSFORM is fundamentally different from JSON_QUERY/VALUE/EXISTS:
+ * those ops query a document, we mutate one.  So we don't reuse
+ * ExecInitJsonExpr; we emit our own step sequence tailored to the mutation
+ * pipeline.
+ *
+ * For now, a single action is attached to the JsonExpr.  The step layout is:
+ *
+ *   steps[..]  evaluate formatted_expr (input doc)  -> jtstate->formatted_expr
+ *   steps[K]   EEOP_JUMP_IF_NULL                     (if doc is NULL, jump to M)
+ *   steps[..]  evaluate action->pathspec             -> jtstate->pathspec
+ *   steps[L]   EEOP_JUMP_IF_NULL                     (if path is NULL, jump to M)
+ *   steps[..]  evaluate action->value_expr (if any)  -> jtstate->action_value
+ *   steps[..]  evaluate PASSING args (currently unused by mutation, but
+ *              we evaluate them for parity with JSON_QUERY and for future use)
+ *   steps[P]   EEOP_JSON_TRANSFORM                   (handler: do the mutation)
+ *   steps[M]   EEOP_CONST(NULL)                      (return-null landing pad)
+ *
+ */
+static void
+ExecInitJsonTransformExpr(JsonExpr *jsexpr, ExprState *state,
+						  Datum *resv, bool *resnull,
+						  ExprEvalStep *scratch)
+{
+	JsonTransformExprState *jtstate = palloc0(sizeof(JsonTransformExprState));
+	JsonTransformAction *action = jsexpr->action;
+	List	   *jumps_return_null = NIL;
+	ListCell   *argexprlc;
+	ListCell   *argnamelc;
+	ListCell   *lc;
+
+	Assert(action != NULL);
+
+	jtstate->jsexpr = jsexpr;
+
+	/*
+	 * Evaluate formatted_expr storing the result into
+	 * jtstate->formatted_expr.
+	 */
+	ExecInitExprRec((Expr *) jsexpr->formatted_expr, state,
+					&jtstate->formatted_expr.value,
+					&jtstate->formatted_expr.isnull);
+
+	/* JUMP to return-NULL landing pad if formatted_expr is NULL */
+	jumps_return_null = lappend_int(jumps_return_null, state->steps_len);
+	scratch->opcode = EEOP_JUMP_IF_NULL;
+	scratch->resnull = &jtstate->formatted_expr.isnull;
+	scratch->d.jump.jumpdone = -1;	/* patched below */
+	ExprEvalPushStep(state, scratch);
+
+	/*
+	 * Evaluate the action's pathspec (a compiled jsonpath Const) into
+	 * jtstate->pathspec.
+	 */
+	ExecInitExprRec((Expr *) action->pathspec, state,
+					&jtstate->pathspec.value,
+					&jtstate->pathspec.isnull);
+
+	/* JUMP to return-NULL landing pad if pathspec is NULL */
+	jumps_return_null = lappend_int(jumps_return_null, state->steps_len);
+	scratch->opcode = EEOP_JUMP_IF_NULL;
+	scratch->resnull = &jtstate->pathspec.isnull;
+	scratch->d.jump.jumpdone = -1;	/* patched below */
+	ExprEvalPushStep(state, scratch);
+
+	/*
+	 * Evaluate the action's value_expr, if any.  REMOVE has no value.
+	 */
+	if (action->value_expr != NULL)
+	{
+		ExecInitExprRec((Expr *) action->value_expr, state,
+						&jtstate->action_value.value,
+						&jtstate->action_value.isnull);
+	}
+
+	/*
+	 * Steps to compute PASSING args.  These don't feed the mutation functions
+	 * directly, but the jsonpath engine may reference them if in future we
+	 * switch to native jsonpath-aware mutation.  For now we evaluate but don't
+	 * use them; kept for forward compatibility and for parity with how
+	 * JSON_QUERY handles PASSING.
+	 */
+	jtstate->args = NIL;
+	forboth(argexprlc, jsexpr->passing_values,
+			argnamelc, jsexpr->passing_names)
+	{
+		Expr	   *argexpr = (Expr *) lfirst(argexprlc);
+		String	   *argname = lfirst_node(String, argnamelc);
+		JsonPathVariable *var = palloc(sizeof(*var));
+
+		var->name = argname->sval;
+		var->namelen = strlen(var->name);
+		var->typid = exprType((Node *) argexpr);
+		var->typmod = exprTypmod((Node *) argexpr);
+
+		ExecInitExprRec((Expr *) argexpr, state, &var->value, &var->isnull);
+
+		jtstate->args = lappend(jtstate->args, var);
+	}
+
+	/*
+	 * The main step: EEOP_JSON_TRANSFORM.  Its handler branches on
+	 * action->op, converts the jsonpath to a text[] path, and calls the
+	 * appropriate jsonb mutation function, writing the result to resv.
+	 */
+	scratch->opcode = EEOP_JSON_TRANSFORM;
+	scratch->resvalue = resv;
+	scratch->resnull = resnull;
+	scratch->d.json_transform.jtstate = jtstate;
+	ExprEvalPushStep(state, scratch);
+
+	/*
+	 * Unconditional JUMP over the NULL landing pad below.  Without this, a
+	 * successful main step would fall through into EEOP_CONST(NULL) and have
+	 * its result overwritten with NULL.
+	 */
+	{
+		int			jump_past_null = state->steps_len;
+
+		scratch->opcode = EEOP_JUMP;
+		scratch->d.jump.jumpdone = -1;	/* patched below */
+		ExprEvalPushStep(state, scratch);
+
+		/*
+		 * Patch the JUMP_IF_NULL placeholders to land on the NULL pad we are
+		 * about to emit.
+		 */
+		foreach(lc, jumps_return_null)
+		{
+			ExprEvalStep *as = &state->steps[lfirst_int(lc)];
+
+			as->d.jump.jumpdone = state->steps_len;
+		}
+
+		/* Return-NULL landing pad */
+		scratch->opcode = EEOP_CONST;
+		scratch->resvalue = resv;
+		scratch->resnull = resnull;
+		scratch->d.constval.value = (Datum) 0;
+		scratch->d.constval.isnull = true;
+		ExprEvalPushStep(state, scratch);
+
+		/*
+		 * Patch the unconditional JUMP to land just past the NULL pad.
+		 * Success path (via JUMP) and null path (via fallthrough) converge
+		 * here.
+		 */
+		state->steps[jump_past_null].d.jump.jumpdone = state->steps_len;
+	}
 }
 
 /*
