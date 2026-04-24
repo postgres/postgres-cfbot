@@ -670,6 +670,11 @@ SELECT to_date('2016 365', 'YYYY DDD');  -- ok
 SELECT to_date('2016 366', 'YYYY DDD');  -- ok
 SELECT to_date('2016 367', 'YYYY DDD');
 SELECT to_date('0000-02-01','YYYY-MM-DD');  -- allowed, though it shouldn't be
+-- Zero month/day values are treated as missing data and default to 1
+SELECT to_date('2024-00-15', 'YYYY-MM-DD');  -- ok, 0 -> January
+SELECT to_date('2024-01-00', 'YYYY-MM-DD');  -- ok, 0 -> 1'st
+SELECT to_date('100-00-00', 'YYY-MM-DD');  -- ok, 0/0 -> Jan 1st, year 100 -> 2100
+SELECT to_date('100', 'YYY'); -- ok, equivalent to above
 SELECT to_date('100000000', 'CC');
 SELECT to_date('-100000000', 'CC');
 SELECT to_date('-2147483648 01', 'CC YY');
