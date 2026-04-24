@@ -2482,6 +2482,10 @@ _allocAH(const char *FileSpec, const ArchiveFormat fmt,
 			InitArchiveFmt_Tar(AH);
 			break;
 
+		case archBlackhole:
+			InitArchiveFmt_Blackhole(AH);
+			break;
+
 		default:
 			pg_fatal("unrecognized file format \"%d\"", AH->format);
 	}
