@@ -11,6 +11,7 @@ pg_dump_common_sources = files(
   'filter.c',
   'parallel.c',
   'pg_backup_archiver.c',
+  'pg_backup_blackhole.c',
   'pg_backup_custom.c',
   'pg_backup_db.c',
   'pg_backup_directory.c',

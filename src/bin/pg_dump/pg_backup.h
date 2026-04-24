@@ -43,6 +43,7 @@ typedef enum _archiveFormat
 	archTar = 3,
 	archNull = 4,
 	archDirectory = 5,
+	archBlackhole = 6,
 } ArchiveFormat;
 
 typedef enum _archiveMode
