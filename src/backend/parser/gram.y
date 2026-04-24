@@ -676,6 +676,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 				json_table_plan_union
 				json_table_plan_cross
 				json_table_plan_primary
+				json_transform_action
 %type <list>	json_name_and_value_list
 				json_value_expr_list
 				json_array_aggregate_order_by_clause_opt
@@ -788,7 +789,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	INTERSECT INTERVAL INTO INVOKER IS ISNULL ISOLATION
 
 	JOIN JSON JSON_ARRAY JSON_ARRAYAGG JSON_EXISTS JSON_OBJECT JSON_OBJECTAGG
-	JSON_QUERY JSON_SCALAR JSON_SERIALIZE JSON_TABLE JSON_VALUE
+	JSON_QUERY JSON_SCALAR JSON_SERIALIZE JSON_TABLE JSON_TRANSFORM JSON_VALUE
 
 	KEEP KEY KEYS
 
@@ -816,7 +817,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	QUOTE QUOTES
 
 	RANGE READ REAL REASSIGN RECURSIVE REF_P REFERENCES REFERENCING
-	REFRESH REINDEX RELATIONSHIP RELATIVE_P RELEASE RENAME REPACK REPEATABLE REPLACE REPLICA
+	REFRESH REINDEX RELATIONSHIP RELATIVE_P RELEASE REMOVE RENAME REPACK REPEATABLE REPLACE REPLICA
 	RESET RESPECT_P RESTART RESTRICT RETURN RETURNING RETURNS REVOKE RIGHT ROLE ROLLBACK ROLLUP
 	ROUTINE ROUTINES ROW ROWS RULE
 
@@ -17202,6 +17203,19 @@ func_expr_common_subexpr:
 					n->location = @1;
 					$$ = (Node *) n;
 				}
+			| JSON_TRANSFORM '('
+				json_value_expr ',' json_transform_action
+				json_passing_clause_opt
+			')'
+				{
+					JsonFuncExpr *n = makeNode(JsonFuncExpr);
+					n->op = JSON_TRANSFORM_OP;
+					n->context_item = (JsonValueExpr *) $3;
+					n->action = $5;
+					n->passing = $6;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
 			;
 
 
@@ -18082,6 +18096,52 @@ json_returning_clause_opt:
 				}
 			| /* EMPTY */							{ $$ = NULL; }
 		;
+
+json_transform_action:
+			/* INSERT path_expr = value_expr */
+			INSERT a_expr '=' json_value_expr
+			{
+				JsonTransformAction *n = makeNode(JsonTransformAction);
+				n->op = TRANSFORM_INSERT;
+				n->pathspec = $2;
+				n->value_expr = $4;
+				n->location = @1;
+
+				$$ = (Node *) n;
+			}
+			|
+			RENAME a_expr '=' Sconst
+			{
+				JsonTransformAction *n = makeNode(JsonTransformAction);
+				n->op = TRANSFORM_RENAME;
+				n->pathspec = $2;
+				n->value_expr = makeStringConst($4, @4);
+				n->location = @1;
+
+				$$ = (Node *) n;
+			}
+			|
+			REPLACE a_expr '=' json_value_expr
+			{
+				JsonTransformAction *n = makeNode(JsonTransformAction);
+				n->op = TRANSFORM_REPLACE;
+				n->pathspec = $2;
+				n->value_expr = $4;
+				n->location = @1;
+
+				$$ = (Node *) n;
+			}
+			|
+			REMOVE a_expr
+			{
+				JsonTransformAction *n = makeNode(JsonTransformAction);
+				n->op = TRANSFORM_REMOVE;
+				n->pathspec = $2;
+				n->value_expr = NULL;
+				n->location = @1;
+
+				$$ = (Node *) n;
+			};
 
 /*
  * We must assign the only-JSON production a precedence less than IDENT in
@@ -19092,6 +19152,7 @@ unreserved_keyword:
 			| RELATIONSHIP
 			| RELATIVE_P
 			| RELEASE
+			| REMOVE
 			| RENAME
 			| REPACK
 			| REPEATABLE
@@ -19239,6 +19300,7 @@ col_name_keyword:
 			| JSON_SCALAR
 			| JSON_SERIALIZE
 			| JSON_TABLE
+			| JSON_TRANSFORM
 			| JSON_VALUE
 			| LEAST
 			| MERGE_ACTION
@@ -19614,6 +19676,7 @@ bare_label_keyword:
 			| JSON_SCALAR
 			| JSON_SERIALIZE
 			| JSON_TABLE
+			| JSON_TRANSFORM
 			| JSON_VALUE
 			| KEEP
 			| KEY
@@ -19739,6 +19802,7 @@ bare_label_keyword:
 			| RELATIONSHIP
 			| RELATIVE_P
 			| RELEASE
+			| REMOVE
 			| RENAME
 			| REPACK
 			| REPEATABLE
