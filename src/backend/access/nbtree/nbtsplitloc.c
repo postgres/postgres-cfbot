@@ -18,6 +18,7 @@
 #include "access/tableam.h"
 #include "common/int.h"
 #include "pg_trace.h"
+#include "common/pg_prng.h"
 
 typedef enum
 {
@@ -778,7 +779,8 @@ _bt_adjacenthtid(const ItemPointerData *lowhtid, const ItemPointerData *highhtid
  * points that fall within current/final split interval.  Penalty is an
  * abstract score, with a definition that varies depending on whether we're
  * splitting a leaf page or an internal page.  See _bt_split_penalty() for
- * details.
+ * details. If there are multiple equally good split points, pick up one at
+ * random to spread the choice.
  *
  * "perfectpenalty" is assumed to be the lowest possible penalty among
  * candidate split points.  This allows us to return early without wasting
@@ -801,20 +803,89 @@ _bt_bestsplitloc(FindSplitData *state, int perfectpenalty,
 
 	bestpenalty = INT_MAX;
 	lowsplit = 0;
-	for (int i = lowsplit; i < highsplit; i++)
+
+	/*
+	 * There are workloads, where we would find the same best split location
+	 * over and over, even with the suffix truncation introducing some
+	 * variability. According to [1] this leads to the number of splits
+	 * following oscillating pattern, due to the fact that lots of pages will
+	 * have similar space utilization and at some point have to be split all at
+	 * once. The easiest workaround is to introduce some randomness in chosing
+	 * split location, thus making space utilization less uniform across the
+	 * tree.
+	 *
+	 * To achieve that we pick up a split point at random among the list of
+	 * equally good ones using reservoir sampling as described in [2].
+	 *
+	 * This optimization is applied only in case of SPLIT_DEFAULT strategy,
+	 * as it probably doesn't make sense for others.
+	 *
+	 * [1]: Glombiewski N., Seeger B., Graefe G. (2019). Waves of Misery After
+	 * Index Creation. BTW 2019. Gesellschaft für Informatik. doi:10.18420/btw2019-06
+	 *
+	 * [2]: Vitter, J. S. (1985). Random sampling with a reservoir. ACM
+	 * Transactions on Mathematical Software (TOMS), 11(1), 37-57.
+	 */
+	if (strategy == SPLIT_DEFAULT)
 	{
-		int			penalty;
+		int	matches = 0;
 
-		penalty = _bt_split_penalty(state, state->splits + i);
-
-		if (penalty < bestpenalty)
+		for (int i = lowsplit; i < highsplit; i++)
 		{
-			bestpenalty = penalty;
-			lowsplit = i;
-		}
+			int			penalty;
 
-		if (penalty <= perfectpenalty)
-			break;
+			penalty = _bt_split_penalty(state, state->splits + i);
+
+			/* lowsplit is going to be our reservoir with one element in it */
+			if (penalty == bestpenalty &&
+				pg_prng_uint64_range(&pg_global_prng_state, 0, matches) == 0)
+					lowsplit = i;
+			else if (penalty < bestpenalty)
+			{
+				/*
+				 * If we found better penalty than before, reset everything and
+				 * start from scratch
+				 */
+				bestpenalty = penalty;
+				lowsplit = i;
+				matches = 1;
+			}
+
+			/*
+			 * Break loop condition for randomization case. We search either
+			 * until all the split points are evaluated, or we've collected 20%
+			 * of all possible locations in the list of equally good split
+			 * points at perfect penalty.
+			 *
+			 * Note that having reached a perfect penalty is mandatory here, as
+			 * we cannot guarantee that there is a better penalty beyond those
+			 * 20%.
+			 */
+			if (matches > state->nsplits * 0.2 && bestpenalty == perfectpenalty)
+				break;
+		}
+	}
+	else
+	{
+		/*
+		 * Any other strategy does not use randomization. Instead search for
+		 * the first best split location.
+		 */
+		for (int i = lowsplit; i < highsplit; i++)
+		{
+			int			penalty;
+
+			penalty = _bt_split_penalty(state, state->splits + i);
+
+			if (penalty < bestpenalty)
+			{
+				bestpenalty = penalty;
+				lowsplit = i;
+			}
+
+			if (penalty <= perfectpenalty)
+				break;
+		}
 	}
 
 	final = &state->splits[lowsplit];
