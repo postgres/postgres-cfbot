@@ -1474,6 +1474,163 @@ SELECT jsonb_extract_path_float4('{"a":3.14}'::jsonb, ARRAY['a']);
                       3.14
 (1 row)
 
+-- Optimized typed extraction: multi-subscript chains
+-- The planner lowers j['a']['b'], j['a'][0], etc. to the extract-path typed
+-- extractor family, reusing the same functions as the #> operator path.
+-- Section M1: planner rewrite verification for multi-subscript chains
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json['field6']['f1'])::int4 FROM test_jsonb WHERE json_type = 'object';
+                                   QUERY PLAN                                    
+---------------------------------------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb
+   Output: jsonb_extract_path_int4(test_json, ARRAY['field6'::text, 'f1'::text])
+   Filter: (test_jsonb.json_type = 'object'::text)
+(3 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json['field5'][0])::int4 FROM test_jsonb WHERE json_type = 'object';
+                                   QUERY PLAN                                   
+--------------------------------------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb
+   Output: jsonb_extract_path_int4(test_json, ARRAY['field5'::text, '0'::text])
+   Filter: (test_jsonb.json_type = 'object'::text)
+(3 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr[6]['k'])::int4 FROM test_jsonb_arr;
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb_arr
+   Output: jsonb_extract_path_int4(test_arr, ARRAY['6'::text, 'k'::text])
+(2 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json['field6']['f1'])::float8 FROM test_jsonb WHERE json_type = 'object';
+                                    QUERY PLAN                                     
+-----------------------------------------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb
+   Output: jsonb_extract_path_float8(test_json, ARRAY['field6'::text, 'f1'::text])
+   Filter: (test_jsonb.json_type = 'object'::text)
+(3 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json['field6']['f1'])::numeric FROM test_jsonb WHERE json_type = 'object';
+                                     QUERY PLAN                                     
+------------------------------------------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb
+   Output: jsonb_extract_path_numeric(test_json, ARRAY['field6'::text, 'f1'::text])
+   Filter: (test_jsonb.json_type = 'object'::text)
+(3 rows)
+
+-- Verify single subscript still uses the existing object-field family, not extract-path
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json['field4'])::int4 FROM test_jsonb WHERE json_type = 'object';
+                          QUERY PLAN                          
+--------------------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb
+   Output: jsonb_object_field_int4(test_json, 'field4'::text)
+   Filter: (test_jsonb.json_type = 'object'::text)
+(3 rows)
+
+-- Section M1b: multi-subscript int2/float4
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json['field6']['f1'])::int2 FROM test_jsonb WHERE json_type = 'object';
+                                   QUERY PLAN                                    
+---------------------------------------------------------------------------------
+ Seq Scan on pg_temp.test_jsonb
+   Output: jsonb_extract_path_int2(test_json, ARRAY['field6'::text, 'f1'::text])
+   Filter: (test_jsonb.json_type = 'object'::text)
+(3 rows)
+
+SELECT (('{"a":{"b":7}}'::jsonb)['a']['b'])::int2;
+ int2 
+------
+    7
+(1 row)
+
+-- Section M2: execution through multi-subscript rewrite
+SELECT (('{"a":{"b":42}}'::jsonb)['a']['b'])::int4;
+ int4 
+------
+   42
+(1 row)
+
+SELECT (('{"a":[10,20,30]}'::jsonb)['a'][1])::int4;
+ int4 
+------
+   20
+(1 row)
+
+SELECT (('[{"a":true}]'::jsonb)[0]['a'])::bool;
+ bool 
+------
+ t
+(1 row)
+
+SELECT (('[[1,2],[3,4]]'::jsonb)[0][1])::int4;
+ int4 
+------
+    2
+(1 row)
+
+SELECT (('{"a":[{"b":3.14}]}'::jsonb)['a'][0]['b'])::float8;
+ float8 
+--------
+   3.14
+(1 row)
+
+SELECT (('{"a":{"b":42}}'::jsonb)['a']['b'])::numeric;
+ numeric 
+---------
+      42
+(1 row)
+
+SELECT (('{"a":{"b":42}}'::jsonb)['a']['b'])::int8;
+ int8 
+------
+   42
+(1 row)
+
+-- negative index in nested chain
+SELECT (('{"a":[10,20,30]}'::jsonb)['a'][-1])::int4;
+ int4 
+------
+   30
+(1 row)
+
+-- Section M3: NULL semantics for multi-subscript chains
+SELECT (('{"a":1}'::jsonb)['x']['b'])::int4;  -- missing intermediate key
+ int4 
+------
+     
+(1 row)
+
+SELECT (('{"a":{"c":1}}'::jsonb)['a']['b'])::int4;  -- missing final key
+ int4 
+------
+     
+(1 row)
+
+SELECT (('{"a":{"b":null}}'::jsonb)['a']['b'])::int4;  -- JSON null leaf
+ int4 
+------
+     
+(1 row)
+
+SELECT (('{"a":[1]}'::jsonb)['a'][5])::int4;  -- out-of-range nested index
+ int4 
+------
+     
+(1 row)
+
+-- Section M4: type-mismatch errors for multi-subscript chains
+SELECT (('{"a":{"b":"hello"}}'::jsonb)['a']['b'])::int4;  -- string to int4
+ERROR:  cannot cast jsonb string to type integer
+SELECT (('{"a":{"b":[1,2]}}'::jsonb)['a']['b'])::int4;  -- container to int4
+ERROR:  cannot cast jsonb array to type integer
+-- Section M5: non-constant int4 subscript declines rewrite
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT (('{"a":[[10,20],[30,40]]}'::jsonb)['a'][i][0])::int4 FROM generate_series(0,1) AS i;
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ Function Scan on pg_catalog.generate_series i
+   Output: (('{"a": [[10, 20], [30, 40]]}'::jsonb)['a'::text][i][0])::integer
+   Function Call: generate_series(0, 1)
+(3 rows)
+
 SELECT test_json -> 'x' FROM test_jsonb WHERE json_type = 'scalar';
  ?column? 
 ----------

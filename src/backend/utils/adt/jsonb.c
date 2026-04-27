@@ -1834,6 +1834,7 @@ cannotCastJsonbValue(enum jbvType type, const char *sqltype, Node *escontext)
  *   - jsonb_object_field(j, 'key')  /  j -> 'key'  /  j['key']
  *   - jsonb_array_element(j, idx)   /  j -> idx    /  j[idx]
  *   - jsonb_extract_path(j, ...)    /  j #> '{a,b}'
+ *   - multi-subscript chains         j['a']['b'], j['a'][0], etc.
  */
 Datum
 jsonb_cast_support(PG_FUNCTION_ARGS)
@@ -1884,35 +1885,120 @@ jsonb_cast_support(PG_FUNCTION_ARGS)
 		else if (IsA(arg, SubscriptingRef))
 		{
 			SubscriptingRef *sbsref = (SubscriptingRef *) arg;
-			Node	   *subscript;
-			Oid			subscript_type;
+			int			nsubscripts;
 
 			/*
-			 * Handle single-subscript jsonb access with no slice and no
-			 * assignment.  Text subscripts map to object-field extraction;
-			 * int4 subscripts map to array-element extraction.
+			 * Handle jsonb subscript access with no slice and no assignment.
+			 * Single subscripts map to object-field or array-element
+			 * extraction; multi-subscript chains lower to the extract-path
+			 * family.
 			 */
 			if (sbsref->refcontainertype != JSONBOID)
-				PG_RETURN_POINTER(NULL);
-			if (list_length(sbsref->refupperindexpr) != 1)
 				PG_RETURN_POINTER(NULL);
 			if (sbsref->reflowerindexpr != NIL)
 				PG_RETURN_POINTER(NULL);
 			if (sbsref->refassgnexpr != NULL)
 				PG_RETURN_POINTER(NULL);
 
-			subscript = (Node *) linitial(sbsref->refupperindexpr);
-			subscript_type = exprType(subscript);
+			nsubscripts = list_length(sbsref->refupperindexpr);
 
-			if (subscript_type == TEXTOID)
+			if (nsubscripts == 1)
 			{
-				inner_funcid = F_JSONB_OBJECT_FIELD;
-				inner_args = list_make2(sbsref->refexpr, subscript);
+				/*
+				 * Single subscript: text maps to object-field, int4 maps to
+				 * array-element.
+				 */
+				Node	   *subscript;
+				Oid			subscript_type;
+
+				subscript = (Node *) linitial(sbsref->refupperindexpr);
+				subscript_type = exprType(subscript);
+
+				if (subscript_type == TEXTOID)
+				{
+					inner_funcid = F_JSONB_OBJECT_FIELD;
+					inner_args = list_make2(sbsref->refexpr, subscript);
+				}
+				else if (subscript_type == INT4OID)
+				{
+					inner_funcid = F_JSONB_ARRAY_ELEMENT;
+					inner_args = list_make2(sbsref->refexpr, subscript);
+				}
+				else
+					PG_RETURN_POINTER(NULL);
 			}
-			else if (subscript_type == INT4OID)
+			else if (nsubscripts >= 2)
 			{
-				inner_funcid = F_JSONB_ARRAY_ELEMENT;
-				inner_args = list_make2(sbsref->refexpr, subscript);
+				/*
+				 * Multi-subscript chain: build a text[] path and lower to
+				 * the extract-path family.  Each subscript must be text or
+				 * a constant int4; non-constant integer subscripts cause
+				 * the entire chain to be left unoptimized.
+				 */
+				List	   *path_elems = NIL;
+				ListCell   *lc;
+				ArrayExpr  *aexpr;
+
+				foreach(lc, sbsref->refupperindexpr)
+				{
+					Node	   *subscript = (Node *) lfirst(lc);
+					Oid			subscript_type = exprType(subscript);
+
+					if (subscript_type == TEXTOID)
+					{
+						path_elems = lappend(path_elems, subscript);
+					}
+					else if (subscript_type == INT4OID)
+					{
+						Const	   *con;
+
+						/*
+						 * Only constant integer subscripts can be safely
+						 * converted to text at plan time.  Non-constant
+						 * ones would require a runtime CoerceViaIO node;
+						 * decline the rewrite for the entire chain.
+						 */
+						if (!IsA(subscript, Const))
+							PG_RETURN_POINTER(NULL);
+
+						con = (Const *) subscript;
+
+						if (con->constisnull)
+						{
+							path_elems = lappend(path_elems,
+												 makeNullConst(TEXTOID,
+															   -1,
+															   InvalidOid));
+						}
+						else
+						{
+							char	   *str;
+
+							str = DatumGetCString(
+								DirectFunctionCall1(int4out,
+													con->constvalue));
+							path_elems = lappend(path_elems,
+								makeConst(TEXTOID, -1, InvalidOid, -1,
+										  CStringGetTextDatum(str),
+										  false, false));
+						}
+					}
+					else
+						PG_RETURN_POINTER(NULL);
+				}
+
+				aexpr = makeNode(ArrayExpr);
+				aexpr->array_typeid = TEXTARRAYOID;
+				aexpr->array_collid = InvalidOid;
+				aexpr->element_typeid = TEXTOID;
+				aexpr->elements = path_elems;
+				aexpr->multidims = false;
+				aexpr->list_start = -1;
+				aexpr->list_end = -1;
+				aexpr->location = -1;
+
+				inner_funcid = F_JSONB_EXTRACT_PATH;
+				inner_args = list_make2(sbsref->refexpr, aexpr);
 			}
 			else
 				PG_RETURN_POINTER(NULL);
