@@ -18,6 +18,7 @@
 #include "access/tableam.h"
 #include "common/int.h"
 #include "pg_trace.h"
+#include "common/pg_prng.h"
 
 typedef enum
 {
@@ -778,7 +779,8 @@ _bt_adjacenthtid(const ItemPointerData *lowhtid, const ItemPointerData *highhtid
  * points that fall within current/final split interval.  Penalty is an
  * abstract score, with a definition that varies depending on whether we're
  * splitting a leaf page or an internal page.  See _bt_split_penalty() for
- * details.
+ * details. If there are multiple equally good split points, pick up one at
+ * random to spread the choice.
  *
  * "perfectpenalty" is assumed to be the lowest possible penalty among
  * candidate split points.  This allows us to return early without wasting
@@ -797,27 +799,70 @@ _bt_bestsplitloc(FindSplitData *state, int perfectpenalty,
 	int			bestpenalty,
 				lowsplit;
 	int			highsplit = Min(state->interval, state->nsplits);
+	int			rand_offset = 0;
+	int			j = 0;
 	SplitPoint *final;
+
+	/*
+	 * We're going to collect equally good split points to later pick up one
+	 * from this set.
+	 */
+	int			*best_locs = palloc_array(int, state->maxsplits);
 
 	bestpenalty = INT_MAX;
 	lowsplit = 0;
+
 	for (int i = lowsplit; i < highsplit; i++)
 	{
 		int			penalty;
 
 		penalty = _bt_split_penalty(state, state->splits + i);
 
-		if (penalty < bestpenalty)
+		if (penalty == bestpenalty)
 		{
+			best_locs[j] = i;
+			j++;
+		}
+		else if (penalty < bestpenalty)
+		{
+			/*
+			 * If we found a better split point, reset the list of already
+			 * found ones and start anew.
+			 */
+			j = 0;
+
 			bestpenalty = penalty;
 			lowsplit = i;
+
+			best_locs[j] = i;
+			j++;
 		}
 
-		if (penalty <= perfectpenalty)
+		/*
+		 * We search either until all the split points are evaluated, or we've
+		 * collected 20% of all possible locations in the list of equally good
+		 * split points.
+		 */
+		if (j > state->nsplits * 0.2)
 			break;
 	}
 
-	final = &state->splits[lowsplit];
+	/*
+	 * There are workloads, where we would find the same best split location
+	 * over and over, even with the suffix truncation introducing some
+	 * variability. According to [1] this leads to the number of splits
+	 * following oscillating pattern, and the easiest workaround is to
+	 * introduce some randomness in chosing split location.
+	 *
+	 * To achieve that we pick up a split point at random among the list of
+	 * equally good ones. Note that at this moment j points to an available
+	 * spot in the list, so we need to reduce it by one.
+	 *
+	 * [1]: Glombiewski N., Seeger B., Graefe G. (2019). Waves of Misery After
+	 * Index Creation. BTW 2019. Gesellschaft für Informatik. doi:10.18420/btw2019-06
+	 */
+	rand_offset = pg_prng_uint64_range(&pg_global_prng_state, 0, j - 1);
+	final = &state->splits[best_locs[rand_offset]];
 
 	/*
 	 * There is a risk that the "many duplicates" strategy will repeatedly do
