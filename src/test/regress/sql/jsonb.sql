@@ -419,6 +419,49 @@ SELECT jsonb_extract_path_int2('{"a":{"b":7}}'::jsonb, ARRAY['a','b']);
 SELECT jsonb_extract_path_float4('{"a":3.14}'::jsonb, ARRAY['a']);
 
 
+-- Optimized typed extraction: multi-subscript chains
+-- The planner lowers j['a']['b'], j['a'][0], etc. to the extract-path typed
+-- extractor family, reusing the same functions as the #> operator path.
+
+-- Section M1: planner rewrite verification for multi-subscript chains
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json['field6']['f1'])::int4 FROM test_jsonb WHERE json_type = 'object';
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json['field5'][0])::int4 FROM test_jsonb WHERE json_type = 'object';
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_arr[6]['k'])::int4 FROM test_jsonb_arr;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json['field6']['f1'])::float8 FROM test_jsonb WHERE json_type = 'object';
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json['field6']['f1'])::numeric FROM test_jsonb WHERE json_type = 'object';
+
+-- Verify single subscript still uses the existing object-field family, not extract-path
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json['field4'])::int4 FROM test_jsonb WHERE json_type = 'object';
+
+
+-- Section M1b: multi-subscript int2/float4
+EXPLAIN (VERBOSE, COSTS OFF) SELECT (test_json['field6']['f1'])::int2 FROM test_jsonb WHERE json_type = 'object';
+SELECT (('{"a":{"b":7}}'::jsonb)['a']['b'])::int2;
+-- Section M2: execution through multi-subscript rewrite
+SELECT (('{"a":{"b":42}}'::jsonb)['a']['b'])::int4;
+SELECT (('{"a":[10,20,30]}'::jsonb)['a'][1])::int4;
+SELECT (('[{"a":true}]'::jsonb)[0]['a'])::bool;
+SELECT (('[[1,2],[3,4]]'::jsonb)[0][1])::int4;
+SELECT (('{"a":[{"b":3.14}]}'::jsonb)['a'][0]['b'])::float8;
+SELECT (('{"a":{"b":42}}'::jsonb)['a']['b'])::numeric;
+SELECT (('{"a":{"b":42}}'::jsonb)['a']['b'])::int8;
+-- negative index in nested chain
+SELECT (('{"a":[10,20,30]}'::jsonb)['a'][-1])::int4;
+
+-- Section M3: NULL semantics for multi-subscript chains
+SELECT (('{"a":1}'::jsonb)['x']['b'])::int4;  -- missing intermediate key
+SELECT (('{"a":{"c":1}}'::jsonb)['a']['b'])::int4;  -- missing final key
+SELECT (('{"a":{"b":null}}'::jsonb)['a']['b'])::int4;  -- JSON null leaf
+SELECT (('{"a":[1]}'::jsonb)['a'][5])::int4;  -- out-of-range nested index
+
+-- Section M4: type-mismatch errors for multi-subscript chains
+SELECT (('{"a":{"b":"hello"}}'::jsonb)['a']['b'])::int4;  -- string to int4
+SELECT (('{"a":{"b":[1,2]}}'::jsonb)['a']['b'])::int4;  -- container to int4
+
+-- Section M5: non-constant int4 subscript declines rewrite
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT (('{"a":[[10,20],[30,40]]}'::jsonb)['a'][i][0])::int4 FROM generate_series(0,1) AS i;
+
 SELECT test_json -> 'x' FROM test_jsonb WHERE json_type = 'scalar';
 SELECT test_json -> 'x' FROM test_jsonb WHERE json_type = 'array';
 SELECT test_json -> 'x' FROM test_jsonb WHERE json_type = 'object';
