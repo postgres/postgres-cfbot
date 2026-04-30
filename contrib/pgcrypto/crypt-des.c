@@ -651,6 +651,7 @@ char *
 px_crypt_des(const char *key, const char *setting)
 {
 	int			i;
+	size_t		bytenum;
 	uint32		count,
 				salt,
 				l,
@@ -670,7 +671,7 @@ px_crypt_des(const char *key, const char *setting)
 	 * zeros.
 	 */
 	q = (uint8 *) keybuf;
-	while (q - (uint8 *) keybuf - 8)
+	for (bytenum = 0; bytenum < sizeof(keybuf); bytenum++)
 	{
 		*q++ = *key << 1;
 		if (*key != '\0')
@@ -714,7 +715,9 @@ px_crypt_des(const char *key, const char *setting)
 			 * And XOR with the next 8 characters of the key.
 			 */
 			q = (uint8 *) keybuf;
-			while (q - (uint8 *) keybuf - 8 && *key)
+			for (bytenum = 0;
+				 bytenum < sizeof(keybuf) && *key;
+				 bytenum++)
 				*q++ ^= *key++ << 1;
 
 			if (des_setkey((char *) keybuf))
