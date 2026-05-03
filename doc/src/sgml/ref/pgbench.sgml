@@ -382,6 +382,11 @@ pgbench <optional> <replaceable>options</replaceable> </optional> <replaceable>d
         the scaled number of accounts.
         Default is <literal>0</literal>, meaning no partitioning.
        </para>
+       <para>
+        With <option>-j</option> greater than 1 and
+        <option>--partition-method=range</option>, partitions are
+        loaded in parallel.
+       </para>
       </listitem>
      </varlistentry>
 
@@ -501,6 +506,10 @@ pgbench <optional> <replaceable>options</replaceable> </optional> <replaceable>d
         Using more than one thread can be helpful on multi-CPU machines.
         Clients are distributed as evenly as possible among available threads.
         Default is 1.
+       </para>
+       <para>
+        In initialization mode (<option>-i</option>), <option>-j</option>
+        sets the number of threads used to load partitions in parallel.
        </para>
       </listitem>
      </varlistentry>
