@@ -37,6 +37,17 @@ sub check_data_state
 	is($sql_result, '0', "$type: pgbench_history has no data");
 }
 
+# Check that all rows of pgbench_accounts were loaded exactly once.
+sub check_accounts_count
+{
+	local $Test::Builder::Level = $Test::Builder::Level + 1;
+	my ($node, $type) = @_;
+
+	my $sql_result = $node->safe_psql('postgres',
+		'SELECT count(*), count(DISTINCT aid) FROM pgbench_accounts;');
+	is($sql_result, '100000|100000', "$type: pgbench_accounts fully loaded");
+}
+
 # start a pgbench specific server
 my $node = PostgreSQL::Test::Cluster->new('main');
 # Set to untranslated messages, to be able to compare program output with
@@ -163,6 +174,25 @@ $node->pgbench(
 
 # Check data state, after server-side data generation.
 check_data_state($node, 'server-side');
+
+# Test parallel initialization with range partitions (client-side generation).
+# Use -j to control the number of worker threads.
+$node->pgbench(
+	'-i -j 2 -s 1 --partitions=4 --partition-method=range',
+	0,
+	[qr{^$}],
+	[
+		qr{creating tables},
+		qr{creating 4 partitions},
+		qr{loading pgbench_accounts with 2 threads},
+		qr{vacuuming},
+		qr{creating primary keys},
+		qr{done in \d+\.\d\d s }
+	],
+	'pgbench parallel initialization with range partitions');
+
+check_data_state($node, 'parallel-range-partitions');
+check_accounts_count($node, 'parallel-range-partitions');
 
 # Run all builtin scripts, for a few transactions each
 $node->pgbench(
