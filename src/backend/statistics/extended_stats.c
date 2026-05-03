@@ -194,41 +194,73 @@ BuildRelationExtStatistics(Relation onerel, bool inh, double totalrows,
 		if (stattarget == 0)
 			continue;
 
-		/* evaluate expressions (if the statistics object has any) */
-		data = make_build_data(onerel, stat, numrows, rows, stats, stattarget);
-
-		/* compute statistic of each requested type */
-		foreach(lc2, stat->types)
+		/*
+		 * Wrap expression evaluation and stats computation in PG_TRY so
+		 * that errors from evaluating expressions (e.g. division by zero
+		 * in virtual generated columns) don't cause ANALYZE to fail
+		 * entirely.  Skip the statistics object and issue a WARNING
+		 * instead.
+		 */
+		PG_TRY();
 		{
-			char		t = (char) lfirst_int(lc2);
+			/* evaluate expressions (if the statistics has any) */
+			data = make_build_data(onerel, stat, numrows, rows,
+								   stats, stattarget);
 
-			if (t == STATS_EXT_NDISTINCT)
-				ndistinct = statext_ndistinct_build(totalrows, data);
-			else if (t == STATS_EXT_DEPENDENCIES)
-				dependencies = statext_dependencies_build(data);
-			else if (t == STATS_EXT_MCV)
-				mcv = statext_mcv_build(data, totalrows, stattarget);
-			else if (t == STATS_EXT_EXPRESSIONS)
+			/* compute statistic of each requested type */
+			foreach(lc2, stat->types)
 			{
-				AnlExprData *exprdata;
-				int			nexprs;
+				char		t = (char) lfirst_int(lc2);
 
-				/* should not happen, thanks to checks when defining stats */
-				if (!stat->exprs)
-					elog(ERROR, "requested expression stats, but there are no expressions");
+				if (t == STATS_EXT_NDISTINCT)
+					ndistinct = statext_ndistinct_build(totalrows, data);
+				else if (t == STATS_EXT_DEPENDENCIES)
+					dependencies = statext_dependencies_build(data);
+				else if (t == STATS_EXT_MCV)
+					mcv = statext_mcv_build(data, totalrows, stattarget);
+				else if (t == STATS_EXT_EXPRESSIONS)
+				{
+					AnlExprData *exprdata;
+					int			nexprs;
 
-				exprdata = build_expr_data(stat->exprs, stattarget);
-				nexprs = list_length(stat->exprs);
+					/* should not happen, thanks to checks when defining stats */
+					if (!stat->exprs)
+						elog(ERROR, "requested expression stats, but there are no expressions");
 
-				compute_expr_stats(onerel, exprdata, nexprs, rows, numrows);
+					exprdata = build_expr_data(stat->exprs, stattarget);
+					nexprs = list_length(stat->exprs);
 
-				exprstats = serialize_expr_stats(exprdata, nexprs);
+					compute_expr_stats(onerel, exprdata, nexprs,
+									   rows, numrows);
+
+					exprstats = serialize_expr_stats(exprdata, nexprs);
+				}
 			}
-		}
 
-		/* store the statistics in the catalog */
-		statext_store(stat->statOid, inh,
-					  ndistinct, dependencies, mcv, exprstats, stats);
+			/* store the statistics in the catalog */
+			statext_store(stat->statOid, inh,
+						  ndistinct, dependencies, mcv, exprstats, stats);
+		}
+		PG_CATCH();
+		{
+			ErrorData  *edata;
+
+			/* Save the error, issue a WARNING and continue */
+			MemoryContextSwitchTo(cxt);
+			edata = CopyErrorData();
+			FlushErrorState();
+
+			ereport(WARNING,
+					(errcode(ERRCODE_WARNING),
+					 errmsg("skipping statistics object \"%s.%s\" for relation \"%s.%s\"",
+							stat->schema, stat->name,
+							get_namespace_name(onerel->rd_rel->relnamespace),
+							RelationGetRelationName(onerel)),
+					 errdetail("%s", edata->message)));
+
+			FreeErrorData(edata);
+		}
+		PG_END_TRY();
 
 		/* for reporting progress */
 		pgstat_progress_update_param(PROGRESS_ANALYZE_EXT_STATS_COMPUTED,
@@ -2179,46 +2211,58 @@ compute_expr_stats(Relation onerel, AnlExprData *exprdata, int nexprs,
 		exprnulls = palloc_array(bool, numrows);
 
 		tcnt = 0;
-		for (i = 0; i < numrows; i++)
+		PG_TRY();
 		{
-			Datum		datum;
-			bool		isnull;
-
-			/*
-			 * Reset the per-tuple context each time, to reclaim any cruft
-			 * left behind by evaluating the statistics expressions.
-			 */
-			ResetExprContext(econtext);
-
-			/* Set up for expression evaluation */
-			ExecStoreHeapTuple(rows[i], slot, false);
-
-			/*
-			 * Evaluate the expression. We do this in the per-tuple context so
-			 * as not to leak memory, and then copy the result into the
-			 * context created at the beginning of this function.
-			 */
-			datum = ExecEvalExprSwitchContext(exprstate,
-											  GetPerTupleExprContext(estate),
-											  &isnull);
-			if (isnull)
+			for (i = 0; i < numrows; i++)
 			{
-				exprvals[tcnt] = (Datum) 0;
-				exprnulls[tcnt] = true;
-			}
-			else
-			{
-				/* Make sure we copy the data into the context. */
-				Assert(CurrentMemoryContext == expr_context);
+				Datum		datum;
+				bool		isnull;
 
-				exprvals[tcnt] = datumCopy(datum,
-										   stats->attrtype->typbyval,
-										   stats->attrtype->typlen);
-				exprnulls[tcnt] = false;
-			}
+				/*
+				 * Reset the per-tuple context each time, to reclaim any
+				 * cruft left behind by evaluating the statistics
+				 * expressions.
+				 */
+				ResetExprContext(econtext);
 
-			tcnt++;
+				/* Set up for expression evaluation */
+				ExecStoreHeapTuple(rows[i], slot, false);
+
+				/*
+				 * Evaluate the expression. We do this in the per-tuple
+				 * context so as not to leak memory, and then copy the
+				 * result into the context created at the beginning of
+				 * this function.
+				 */
+				datum = ExecEvalExprSwitchContext(exprstate,
+												  GetPerTupleExprContext(estate),
+												  &isnull);
+				if (isnull)
+				{
+					exprvals[tcnt] = (Datum) 0;
+					exprnulls[tcnt] = true;
+				}
+				else
+				{
+					/* Make sure we copy the data into the context. */
+					Assert(CurrentMemoryContext == expr_context);
+
+					exprvals[tcnt] = datumCopy(datum,
+											   stats->attrtype->typbyval,
+											   stats->attrtype->typlen);
+					exprnulls[tcnt] = false;
+				}
+
+				tcnt++;
+			}
 		}
+		PG_CATCH();
+		{
+			ExecDropSingleTupleTableSlot(slot);
+			FreeExecutorState(estate);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 
 		/*
 		 * Now we can compute the statistics for the expression columns.
@@ -2618,46 +2662,56 @@ make_build_data(Relation rel, StatExtEntry *stat, int numrows, HeapTuple *rows,
 	/* Set up expression evaluation state */
 	exprstates = ExecPrepareExprList(stat->exprs, estate);
 
-	for (i = 0; i < numrows; i++)
+	PG_TRY();
 	{
-		/*
-		 * Reset the per-tuple context each time, to reclaim any cruft left
-		 * behind by evaluating the statistics object expressions.
-		 */
-		ResetExprContext(econtext);
-
-		/* Set up for expression evaluation */
-		ExecStoreHeapTuple(rows[i], slot, false);
-
-		idx = bms_num_members(stat->columns);
-		foreach(lc, exprstates)
+		for (i = 0; i < numrows; i++)
 		{
-			Datum		datum;
-			bool		isnull;
-			ExprState  *exprstate = (ExprState *) lfirst(lc);
-
 			/*
-			 * XXX This probably leaks memory. Maybe we should use
-			 * ExecEvalExprSwitchContext but then we need to copy the result
-			 * somewhere else.
+			 * Reset the per-tuple context each time, to reclaim any cruft
+			 * left behind by evaluating the statistics object expressions.
 			 */
-			datum = ExecEvalExpr(exprstate,
-								 GetPerTupleExprContext(estate),
-								 &isnull);
-			if (isnull)
-			{
-				result->values[idx][i] = (Datum) 0;
-				result->nulls[idx][i] = true;
-			}
-			else
-			{
-				result->values[idx][i] = datum;
-				result->nulls[idx][i] = false;
-			}
+			ResetExprContext(econtext);
 
-			idx++;
+			/* Set up for expression evaluation */
+			ExecStoreHeapTuple(rows[i], slot, false);
+
+			idx = bms_num_members(stat->columns);
+			foreach(lc, exprstates)
+			{
+				Datum		datum;
+				bool		isnull;
+				ExprState  *exprstate = (ExprState *) lfirst(lc);
+
+				/*
+				 * XXX This probably leaks memory. Maybe we should use
+				 * ExecEvalExprSwitchContext but then we need to copy the
+				 * result somewhere else.
+				 */
+				datum = ExecEvalExpr(exprstate,
+									 GetPerTupleExprContext(estate),
+									 &isnull);
+				if (isnull)
+				{
+					result->values[idx][i] = (Datum) 0;
+					result->nulls[idx][i] = true;
+				}
+				else
+				{
+					result->values[idx][i] = datum;
+					result->nulls[idx][i] = false;
+				}
+
+				idx++;
+			}
 		}
 	}
+	PG_CATCH();
+	{
+		ExecDropSingleTupleTableSlot(slot);
+		FreeExecutorState(estate);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 
 	ExecDropSingleTupleTableSlot(slot);
 	FreeExecutorState(estate);

@@ -1610,6 +1610,13 @@ SELECT * FROM check_estimated_rows('SELECT * FROM virtual_gen_stats WHERE w = 0'
 
 DROP TABLE virtual_gen_stats;
 
+-- extended statistics on virtual generated columns whose expressions can error
+CREATE TABLE virtual_gen_err (a int, b int GENERATED ALWAYS AS (a / 0) VIRTUAL);
+INSERT INTO virtual_gen_err VALUES (1), (2), (3);
+CREATE STATISTICS virtual_gen_err_s ON a, b FROM virtual_gen_err;
+ANALYZE virtual_gen_err;  -- should warn, not fail
+DROP TABLE virtual_gen_err;
+
 -- Permission tests. Users should not be able to see specific data values in
 -- the extended statistics, if they lack permission to see those values in
 -- the underlying table.
@@ -1928,3 +1935,16 @@ SELECT range_length_histogram, range_empty_frac, range_bounds_histogram
    FROM pg_stats_ext_exprs
    WHERE statistics_name = 'stats_ext_range';
 DROP TABLE stats_ext_tbl_range;
+
+-- Expression statistics with errors (not involving virtual generated columns).
+-- Errors during expression evaluation should produce a WARNING, not a failure,
+-- and non-erroring statistics objects should still be computed.
+CREATE TABLE expr_err (a int);
+INSERT INTO expr_err VALUES (1), (2), (3);
+CREATE STATISTICS expr_err_s1 ON ((a/0)) FROM expr_err;
+CREATE STATISTICS expr_err_s2 ON (a/0),(a+1) FROM expr_err;
+CREATE STATISTICS expr_err_s3 ON ((a+1)) FROM expr_err;
+ANALYZE expr_err;  -- should warn, not fail
+SELECT statistics_name from pg_stats_ext x
+    WHERE tablename = 'expr_err' ORDER BY ROW(x.*);
+DROP TABLE expr_err;
