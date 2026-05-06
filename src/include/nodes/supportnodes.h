@@ -33,7 +33,10 @@
 #ifndef SUPPORTNODES_H
 #define SUPPORTNODES_H
 
+#include "catalog/pg_type_d.h"
+#include "nodes/nodes.h"
 #include "nodes/plannodes.h"
+#include "utils/palloc.h"
 
 typedef struct PlannerInfo PlannerInfo; /* avoid including pathnodes.h here */
 typedef struct IndexOptInfo IndexOptInfo;
@@ -444,5 +447,29 @@ typedef struct SupportRequestModifyInPlace
 	List	   *args;			/* Arguments to the function */
 	int			paramid;		/* ID of Param(s) representing variable */
 } SupportRequestModifyInPlace;
+
+/* ----------
+ * SupportRequestMonotonic: request monotonicity information for SLOPE
+ *
+ * This allows the planner to use an index on 'x' to satisfy ORDER BY f(x)
+ * when f is monotonic.  The support function fills in the slopes array
+ * to indicate the monotonicity of each argument.
+ *
+ *	'expr' is the FuncExpr or OpExpr being analyzed.
+ *	'slopes' points to a MonotonicFunction array (one per argument up to
+ *	'nslopes').  Arguments beyond 'nslopes' are treated as MONOTONICFUNC_NONE.
+ * ----------
+ */
+typedef struct SupportRequestMonotonic
+{
+	NodeTag		type;
+
+	/* Input fields: */
+	Node	   *expr;			/* FuncExpr or OpExpr */
+
+	/* Output fields (set by prosupport function): */
+	int			nslopes;		/* number of slopes in array */
+	const MonotonicFunction *slopes;	/* array of slopes, one per arg */
+} SupportRequestMonotonic;
 
 #endif							/* SUPPORTNODES_H */
