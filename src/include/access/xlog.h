@@ -278,6 +278,7 @@ extern XLogRecPtr GetFakeLSNForUnloggedRel(void);
 extern void BootStrapXLOG(uint32 data_checksum_version);
 extern void InitializeWalConsistencyChecking(void);
 extern void LocalProcessControlFile(bool reset);
+extern void ApplyWalSegSizeSettings(void);
 extern WalLevel GetActiveWalLevelOnStandby(void);
 extern void StartupXLOG(void);
 extern void ShutdownXLOG(int code, Datum arg);
