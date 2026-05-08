@@ -443,6 +443,8 @@ CREATE TABLE gtest22c (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL);
 --CREATE INDEX gtest22c_b_idx ON gtest22c (b);
 --CREATE INDEX gtest22c_expr_idx ON gtest22c ((b * 3));
 --CREATE INDEX gtest22c_pred_idx ON gtest22c (a) WHERE b > 0;
+CREATE INDEX gtest22c_row_idx ON gtest22c ((gtest22c));
+CREATE UNIQUE INDEX gtest22c_row_pred_idx ON gtest22c (a) WHERE gtest22c IS NOT NULL;
 --\d gtest22c
 
 --INSERT INTO gtest22c VALUES (1), (2), (3);
