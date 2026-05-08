@@ -459,7 +459,13 @@ static const PgStat_KindInfo pgstat_kind_builtin_infos[PGSTAT_KIND_BUILTIN_SIZE]
 		.snapshot_ctl_off = offsetof(PgStat_Snapshot, io),
 		.shared_ctl_off = offsetof(PgStat_ShmemControl, io),
 		.shared_data_off = offsetof(PgStatShared_IO, stats),
-		.shared_data_len = sizeof(((PgStatShared_IO *) 0)->stats),
+
+		/*
+		 * Do not write everything using this .shared_data_len, as the IO
+		 * histogram backing store is handled by special-case (as it is
+		 * dynamic) in pgstat_write_statsfile() / pgstat_read_statsfile().
+		 */
+		.shared_data_len = offsetof(PgStat_IO, hist_time_buckets_slot_count),
 
 		.init_backend_cb = pgstat_io_init_backend_cb,
 		.flush_static_cb = pgstat_io_flush_cb,
@@ -1744,6 +1750,21 @@ pgstat_write_statsfile(void)
 		fputc(PGSTAT_FILE_ENTRY_FIXED, fpout);
 		write_chunk_s(fpout, &kind);
 		write_chunk(fpout, ptr, info->shared_data_len);
+
+		/*
+		 * PGSTAT_KIND_IO has a dynamically-sized histogram that lives outside
+		 * the shared_data_len region. This assumes that PGSTAT_FILE_FORMAT_ID
+		 * would be bumped each time that pgstat_track_io*() logic is altered.
+		 */
+		if (kind == PGSTAT_KIND_IO)
+		{
+			PgStat_IO  *io = pgStatLocal.snapshot.io;
+
+			write_chunk(fpout, io->hist_time_buckets_slots,
+							   (size_t) io->hist_time_buckets_slot_count *
+							   PGSTAT_IO_HIST_BUCKETS *
+							   sizeof(uint64));
+		}
 	}
 
 	/*
@@ -2006,6 +2027,25 @@ pgstat_read_statsfile(void)
 						elog(WARNING, "could not read data of stats kind %u for entry of type %c with size %u",
 							 kind, t, info->shared_data_len);
 						goto error;
+					}
+
+					/*
+					 * PGSTAT_KIND_IO has also semi-dynamic histogram array
+					 * appended after the main chunk. By now, the
+					 * StatsShmemInit() prepared the memory.
+					 */
+					if (kind == PGSTAT_KIND_IO)
+					{
+						PgStat_IO  *io = &shmem->io.stats;
+
+						if (!read_chunk(fpin, io->hist_time_buckets_slots,
+											   (size_t) io->hist_time_buckets_slot_count *
+											   PGSTAT_IO_HIST_BUCKETS *
+											   sizeof(uint64)))
+						{
+							elog(WARNING, "could not read pgstat_io histogram backing store");
+							goto error;
+						}
 					}
 
 					break;
