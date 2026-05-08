@@ -420,8 +420,8 @@ WHERE c1.relnatts != (SELECT count(*) FROM pg_attribute AS a1
                       WHERE a1.attrelid = c1.oid AND a1.attnum > 0);
 
 -- Cross-check against pg_type entry
--- NOTE: we allow attstorage to be 'plain' even when typstorage is not;
--- this is mainly for toast tables.
+-- NOTE: we allow attstorage to be 'plain' or 'external' even when typstorage
+-- is not; this is mainly for toast tables.
 
 SELECT a1.attrelid, a1.attname, t1.oid, t1.typname
 FROM pg_attribute AS a1, pg_type AS t1
@@ -429,7 +429,7 @@ WHERE a1.atttypid = t1.oid AND
     (a1.attlen != t1.typlen OR
      a1.attalign != t1.typalign OR
      a1.attbyval != t1.typbyval OR
-     (a1.attstorage != t1.typstorage AND a1.attstorage != 'p'));
+     (a1.attstorage != t1.typstorage AND a1.attstorage NOT IN ('e', 'p')));
 
 -- Look for IsCatalogTextUniqueIndexOid() omissions.
 
