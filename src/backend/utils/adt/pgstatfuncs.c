@@ -1667,6 +1667,7 @@ typedef enum hist_io_stat_col
  */
 static void
 pg_stat_io_histogram_build_tuples(ReturnSetInfo *rsinfo,
+								  PgStat_IO *backends_io_stats,
 								  PgStat_BktypeIO *bktype_stats,
 								  BackendType bktype,
 								  TimestampTz stat_reset_timestamp)
@@ -1695,6 +1696,16 @@ pg_stat_io_histogram_build_tuples(ReturnSetInfo *rsinfo,
 			for (int io_op = 0; io_op < IOOP_NUM_TYPES; io_op++)
 			{
 				const char *op_name = pgstat_get_io_op_name(io_op);
+				int			bktype_hist_time_bucket_off;
+
+				/*
+				 * The offset is the same for every histogram bucket of this
+				 * io_obj/io_context/io_op combination.
+				 */
+				bktype_hist_time_bucket_off = bktype_stats->hist_time_buckets_offsets[io_obj][io_context][io_op];
+				if (bktype_hist_time_bucket_off == -1)
+					continue;
+				Assert(bktype_hist_time_bucket_off < backends_io_stats->hist_time_buckets_slot_count);
 
 				for (int bucket = 0; bucket < PGSTAT_IO_HIST_BUCKETS; bucket++)
 				{
@@ -1703,6 +1714,7 @@ pg_stat_io_histogram_build_tuples(ReturnSetInfo *rsinfo,
 					RangeBound	lower,
 								upper;
 					RangeType  *range;
+					uint64		bktype_bucket;
 
 					values[HIST_IO_COL_BACKEND_TYPE] = bktype_desc;
 					values[HIST_IO_COL_OBJECT] = CStringGetTextDatum(obj_name);
@@ -1731,9 +1743,9 @@ pg_stat_io_histogram_build_tuples(ReturnSetInfo *rsinfo,
 					range = make_range(typcache, &lower, &upper, false, NULL);
 					values[HIST_IO_COL_BUCKET_US] = RangeTypePGetDatum(range);
 
-					/* bucket count */
-					values[HIST_IO_COL_COUNT] = Int64GetDatum(
-															  bktype_stats->hist_time_buckets[io_obj][io_context][io_op][bucket]);
+					/* get bucket count, access indirectly */
+					bktype_bucket = backends_io_stats->hist_time_buckets_slots[bktype_hist_time_bucket_off][bucket];
+					values[HIST_IO_COL_COUNT] = Int64GetDatum(bktype_bucket);
 
 					if (stat_reset_timestamp != 0)
 						values[HIST_IO_COL_RESET_TIME] = TimestampTzGetDatum(stat_reset_timestamp);
@@ -1779,7 +1791,7 @@ pg_stat_get_io_histogram(PG_FUNCTION_ARGS)
 			continue;
 
 		/* save tuples with data from this PgStat_BktypeIO */
-		pg_stat_io_histogram_build_tuples(rsinfo, bktype_stats, bktype,
+		pg_stat_io_histogram_build_tuples(rsinfo, backends_io_stats, bktype_stats, bktype,
 										  backends_io_stats->stat_reset_timestamp);
 	}
 

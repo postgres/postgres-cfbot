@@ -20,7 +20,6 @@
 #include "utils/backend_status.h"	/* for backward compatibility */	/* IWYU pragma: export */
 #include "utils/pgstat_kind.h"
 
-
 /* avoid including access/transam.h */
 typedef struct FullTransactionId FullTransactionId;
 
@@ -218,7 +217,7 @@ typedef struct PgStat_TableXactStatus
  * ------------------------------------------------------------
  */
 
-#define PGSTAT_FILE_FORMAT_ID	0x01A5BCBC
+#define PGSTAT_FILE_FORMAT_ID	0x01A5BCBD
 
 typedef struct PgStat_ArchiverStats
 {
@@ -342,7 +341,14 @@ typedef struct PgStat_BktypeIO
 	uint64		bytes[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
 	PgStat_Counter counts[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
 	PgStat_Counter times[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
-	uint64		hist_time_buckets[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES][PGSTAT_IO_HIST_BUCKETS];
+
+	/*
+	 * Indirect offset to PgStat_IO (parent
+	 * structure).hist_time_buckets_slots. This needs to be the last field due
+	 * to the use of memset(.., offsetof(hist_time_buckets_offsets)) in
+	 * pgstat_io_reset_all_cb().
+	 */
+	int			hist_time_buckets_offsets[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
 } PgStat_BktypeIO;
 
 typedef struct PgStat_PendingIO
@@ -358,7 +364,7 @@ typedef struct PgStat_PendingIO
 	 * memory.
 	 */
 	uint64		(*pending_hist_time_buckets)[PGSTAT_IO_HIST_BUCKETS];
-	uint64		pending_hist_time_buckets_offsets[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
+	int			pending_hist_time_buckets_offsets[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
 
 	/*
 	 * Cache how much histograms we have allocated to avoid repetably calling
@@ -374,6 +380,16 @@ typedef struct PgStat_IO
 {
 	TimestampTz stat_reset_timestamp;
 	PgStat_BktypeIO stats[BACKEND_NUM_TYPES];
+
+	/*
+	 * The IO histogram memory is sized at postmaster start from the rules in
+	 * pgstat_tracks_io_*() and persisted by additinal code to handle this
+	 * dynamic (shared) memory pointer in pgstat_write_statsfile() /
+	 * pgstat_read_statsfile(), so they nes are not part of the serialization
+	 * to disk by common code.
+	 */
+	int			hist_time_buckets_slot_count;
+	uint64		(*hist_time_buckets_slots)[PGSTAT_IO_HIST_BUCKETS];
 } PgStat_IO;
 
 typedef struct PgStat_LockEntry
@@ -666,6 +682,8 @@ extern PgStat_CheckpointerStats *pgstat_fetch_stat_checkpointer(void);
 extern bool pgstat_bktype_io_stats_valid(PgStat_BktypeIO *backend_io,
 										 BackendType bktype);
 extern int	pgstat_bktype_count_potentially_used(BackendType bktype);
+extern int	pgstat_io_get_sum_tracked(void);
+extern Size pgstat_io_histogram_shmem_size(void);
 extern void pgstat_count_io_op(IOObject io_object, IOContext io_context,
 							   IOOp io_op, uint32 cnt, uint64 bytes);
 extern instr_time pgstat_prepare_io_time(bool track_io_guc);
