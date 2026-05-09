@@ -126,7 +126,14 @@
 
 List	   *table_states_not_ready = NIL;
 
-static StringInfo copybuf = NULL;
+typedef struct CopyBuf
+{
+	char	   *data;
+	int			len;
+	int			cursor;
+}			CopyBuf;
+
+static CopyBuf copybuf;
 
 /*
  * Wait until the relation sync state is set in the catalog to the expected
@@ -649,13 +656,13 @@ copy_read_data(void *outbuf, int minread, int maxread)
 	int			avail;
 
 	/* If there are some leftover data from previous read, use it. */
-	avail = copybuf->len - copybuf->cursor;
+	avail = copybuf.len - copybuf.cursor;
 	if (avail)
 	{
 		if (avail > maxread)
 			avail = maxread;
-		memcpy(outbuf, &copybuf->data[copybuf->cursor], avail);
-		copybuf->cursor += avail;
+		memcpy(outbuf, &copybuf.data[copybuf.cursor], avail);
+		copybuf.cursor += avail;
 		maxread -= avail;
 		bytesread += avail;
 	}
@@ -680,16 +687,16 @@ copy_read_data(void *outbuf, int minread, int maxread)
 			else
 			{
 				/* Process the data */
-				copybuf->data = buf;
-				copybuf->len = len;
-				copybuf->cursor = 0;
+				copybuf.data = buf;
+				copybuf.len = len;
+				copybuf.cursor = 0;
 
-				avail = copybuf->len - copybuf->cursor;
+				avail = copybuf.len - copybuf.cursor;
 				if (avail > maxread)
 					avail = maxread;
-				memcpy(outbuf, &copybuf->data[copybuf->cursor], avail);
+				memcpy(outbuf, &copybuf.data[copybuf.cursor], avail);
 				outbuf = (char *) outbuf + avail;
-				copybuf->cursor += avail;
+				copybuf.cursor += avail;
 				maxread -= avail;
 				bytesread += avail;
 			}
@@ -1199,7 +1206,7 @@ copy_table(Relation rel)
 						lrel.nspname, lrel.relname, res->err)));
 	walrcv_clear_result(res);
 
-	copybuf = makeStringInfo();
+	memset(&copybuf, 0, sizeof(copybuf));
 
 	pstate = make_parsestate(NULL);
 	(void) addRangeTableEntryForRelation(pstate, rel, AccessShareLock,
