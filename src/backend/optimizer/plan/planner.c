@@ -7933,6 +7933,19 @@ create_partial_grouping_paths(PlannerInfo *root,
 										 extra);
 	}
 
+	/*
+	 * Let extensions possibly add some more partial paths, mirroring the
+	 * FDW call above and the analogous extension hook on
+	 * UPPERREL_PARTIAL_DISTINCT in create_partial_distinct_paths.  Paths
+	 * added here are picked up by the caller's subsequent
+	 * gather_grouping_paths call and become candidates for the upstream
+	 * Finalize Aggregate that add_paths_to_grouping_rel builds.
+	 */
+	if (create_upper_paths_hook)
+		(*create_upper_paths_hook) (root, UPPERREL_PARTIAL_GROUP_AGG,
+									input_rel, partially_grouped_rel,
+									extra);
+
 	return partially_grouped_rel;
 }
 
