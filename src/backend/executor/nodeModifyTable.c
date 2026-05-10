@@ -85,44 +85,6 @@ typedef struct MTTargetRelLookup
 } MTTargetRelLookup;
 
 /*
- * Context struct for a ModifyTable operation, containing basic execution
- * state and some output variables populated by ExecUpdateAct() and
- * ExecDeleteAct() to report the result of their actions to callers.
- */
-typedef struct ModifyTableContext
-{
-	/* Operation state */
-	ModifyTableState *mtstate;
-	EPQState   *epqstate;
-	EState	   *estate;
-
-	/*
-	 * Slot containing tuple obtained from ModifyTable's subplan.  Used to
-	 * access "junk" columns that are not going to be stored.
-	 */
-	TupleTableSlot *planSlot;
-
-	/*
-	 * Information about the changes that were made concurrently to a tuple
-	 * being updated or deleted
-	 */
-	TM_FailureData tmfd;
-
-	/*
-	 * The tuple deleted when doing a cross-partition UPDATE with a RETURNING
-	 * clause that refers to OLD columns (converted to the root's tuple
-	 * descriptor).
-	 */
-	TupleTableSlot *cpDeletedSlot;
-
-	/*
-	 * The tuple projected by the INSERT's RETURNING clause, when doing a
-	 * cross-partition UPDATE
-	 */
-	TupleTableSlot *cpUpdateReturningSlot;
-} ModifyTableContext;
-
-/*
  * Context struct containing output data specific to UPDATE operations.
  */
 typedef struct UpdateContext
@@ -870,7 +832,7 @@ ExecGetUpdateNewTuple(ResultRelInfo *relinfo,
  *		save the previous value to avoid losing track of it.
  * ----------------------------------------------------------------
  */
-static TupleTableSlot *
+TupleTableSlot *
 ExecInsert(ModifyTableContext *context,
 		   ResultRelInfo *resultRelInfo,
 		   TupleTableSlot *slot,
