@@ -164,7 +164,7 @@ static void SnapBuildFreeSnapshot(Snapshot snap);
 
 static void SnapBuildSnapIncRefcount(Snapshot snap);
 
-static void SnapBuildDistributeSnapshotAndInval(SnapBuild *builder, XLogRecPtr lsn, TransactionId xid);
+static void SnapBuildDistributeInval(SnapBuild *builder, XLogRecPtr lsn, TransactionId xid);
 
 static inline bool SnapBuildXidHasCatalogChanges(SnapBuild *builder, TransactionId xid,
 												 uint32 xinfo);
@@ -641,6 +641,8 @@ SnapBuildResetExportedSnapshotState(void)
 bool
 SnapBuildProcessChange(SnapBuild *builder, TransactionId xid, XLogRecPtr lsn)
 {
+	ReorderBufferTXN *txn;
+
 	/*
 	 * We can't handle data in transactions if we haven't built a snapshot
 	 * yet, so don't store them.
@@ -658,10 +660,23 @@ SnapBuildProcessChange(SnapBuild *builder, TransactionId xid, XLogRecPtr lsn)
 		return false;
 
 	/*
-	 * If the reorderbuffer doesn't yet have a snapshot, add one now, it will
-	 * be needed to decode the change we're currently processing.
+	 * Look up the transaction once and reuse it for both the base snapshot
+	 * check and the lazy catalog snapshot distribution below.  This avoids
+	 * repeated hash lookups that were previously done separately by
+	 * ReorderBufferXidHasBaseSnapshot(), ReorderBufferSetBaseSnapshot(),
+	 * and the lazy distribution logic.
 	 */
-	if (!ReorderBufferXidHasBaseSnapshot(builder->reorder, xid))
+	txn = ReorderBufferTXNByXid(builder->reorder, xid, true,
+								NULL, lsn, true);
+	if (rbtxn_is_known_subxact(txn))
+		txn = ReorderBufferTXNByXid(builder->reorder, txn->toplevel_xid,
+									false, NULL, InvalidXLogRecPtr, false);
+
+	/*
+	 * If the reorderbuffer doesn't yet have a base snapshot, add one now,
+	 * it will be needed to decode the change we're currently processing.
+	 */
+	if (txn->base_snapshot == NULL)
 	{
 		/* only build a new snapshot if we don't have a prebuilt one */
 		if (builder->snapshot == NULL)
@@ -678,6 +693,28 @@ SnapBuildProcessChange(SnapBuild *builder, TransactionId xid, XLogRecPtr lsn)
 		SnapBuildSnapIncRefcount(builder->snapshot);
 		ReorderBufferSetBaseSnapshot(builder->reorder, xid, lsn,
 									 builder->snapshot);
+	}
+
+	/*
+	 * Lazily distribute the catalog snapshot to this transaction if it hasn't
+	 * received the latest one yet.  This replaces the previous eager
+	 * distribution in SnapBuildDistributeSnapshotAndInval(), avoiding O(N^2)
+	 * disk usage when many catalog-modifying transactions (e.g. autovacuum)
+	 * commit while a long-running transaction is in progress.
+	 *
+	 * We only add a snapshot when the transaction actually has a data change
+	 * to decode, so idle long-running transactions won't accumulate any
+	 * snapshots at all.
+	 */
+	if (builder->snapshot_generation > 0 &&
+		txn->last_snapshot_generation < builder->snapshot_generation)
+	{
+		Assert(builder->snapshot != NULL);
+
+		SnapBuildSnapIncRefcount(builder->snapshot);
+		ReorderBufferAddSnapshot(builder->reorder, txn->xid,
+								 lsn, builder->snapshot);
+		txn->last_snapshot_generation = builder->snapshot_generation;
 	}
 
 	return true;
@@ -723,15 +760,20 @@ SnapBuildProcessNewCid(SnapBuild *builder, TransactionId xid,
 }
 
 /*
- * Add a new Snapshot and invalidation messages to all transactions we're
- * decoding that currently are in-progress so they can see new catalog contents
- * made by the transaction that just committed. This is necessary because those
- * in-progress transactions will use the new catalog's contents from here on
- * (at the very least everything they do needs to be compatible with newer
- * catalog contents).
+ * Distribute invalidation messages to all in-progress transactions so they
+ * can see new catalog contents made by the transaction that just committed.
+ *
+ * Note: we no longer eagerly distribute snapshots here.  Instead, snapshots
+ * are lazily distributed in SnapBuildProcessChange() when a transaction
+ * actually needs to decode a data change.  This avoids O(N^2) snapshot disk
+ * usage when a long-running transaction coexists with many catalog-modifying
+ * commits (e.g. autovacuum of many tables).  The snapshot_generation counter
+ * in SnapBuild tracks when a new snapshot is available, and each transaction's
+ * last_snapshot_generation in ReorderBufferTXN tracks whether it has received
+ * the latest snapshot.
  */
 static void
-SnapBuildDistributeSnapshotAndInval(SnapBuild *builder, XLogRecPtr lsn, TransactionId xid)
+SnapBuildDistributeInval(SnapBuild *builder, XLogRecPtr lsn, TransactionId xid)
 {
 	dlist_iter	txn_i;
 	ReorderBufferTXN *txn;
@@ -739,8 +781,7 @@ SnapBuildDistributeSnapshotAndInval(SnapBuild *builder, XLogRecPtr lsn, Transact
 	/*
 	 * Iterate through all toplevel transactions. This can include
 	 * subtransactions which we just don't yet know to be that, but that's
-	 * fine, they will just get an unnecessary snapshot and invalidations
-	 * queued.
+	 * fine, they will just get unnecessary invalidations queued.
 	 */
 	dlist_foreach(txn_i, &builder->reorder->toplevel_by_lsn)
 	{
@@ -750,60 +791,25 @@ SnapBuildDistributeSnapshotAndInval(SnapBuild *builder, XLogRecPtr lsn, Transact
 
 		/*
 		 * If we don't have a base snapshot yet, there are no changes in this
-		 * transaction which in turn implies we don't yet need a snapshot at
-		 * all. We'll add a snapshot when the first change gets queued.
-		 *
-		 * Similarly, we don't need to add invalidations to a transaction
-		 * whose base snapshot is not yet set. Once a base snapshot is built,
-		 * it will include the xids of committed transactions that have
-		 * modified the catalog, thus reflecting the new catalog contents. The
-		 * existing catalog cache will have already been invalidated after
-		 * processing the invalidations in the transaction that modified
-		 * catalogs, ensuring that a fresh cache is constructed during
-		 * decoding.
-		 *
-		 * NB: This works correctly even for subtransactions because
-		 * ReorderBufferAssignChild() takes care to transfer the base snapshot
-		 * to the top-level transaction, and while iterating the changequeue
-		 * we'll get the change from the subtxn.
+		 * transaction which in turn implies we don't yet need invalidations.
+		 * Once a base snapshot is built, it will include the xids of committed
+		 * transactions that have modified the catalog, thus reflecting the new
+		 * catalog contents.
 		 */
 		if (!ReorderBufferXidHasBaseSnapshot(builder->reorder, txn->xid))
 			continue;
 
 		/*
-		 * We don't need to add snapshot or invalidations to prepared
-		 * transactions as they should not see the new catalog contents.
+		 * We don't need to add invalidations to prepared transactions as they
+		 * should not see the new catalog contents.
 		 */
 		if (rbtxn_is_prepared(txn))
 			continue;
-
-		elog(DEBUG2, "adding a new snapshot and invalidations to %u at %X/%08X",
-			 txn->xid, LSN_FORMAT_ARGS(lsn));
-
-		/*
-		 * increase the snapshot's refcount for the transaction we are handing
-		 * it out to
-		 */
-		SnapBuildSnapIncRefcount(builder->snapshot);
-		ReorderBufferAddSnapshot(builder->reorder, txn->xid, lsn,
-								 builder->snapshot);
 
 		/*
 		 * Add invalidation messages to the reorder buffer of in-progress
 		 * transactions except the current committed transaction, for which we
 		 * will execute invalidations at the end.
-		 *
-		 * It is required, otherwise, we will end up using the stale catcache
-		 * contents built by the current transaction even after its decoding,
-		 * which should have been invalidated due to concurrent catalog
-		 * changing transaction.
-		 *
-		 * Distribute only the invalidation messages generated by the current
-		 * committed transaction. Invalidation messages received from other
-		 * transactions would have already been propagated to the relevant
-		 * in-progress transactions. This transaction would have processed
-		 * those invalidations, ensuring that subsequent transactions observe
-		 * a consistent cache state.
 		 */
 		if (txn->xid != xid)
 		{
@@ -816,6 +822,9 @@ SnapBuildDistributeSnapshotAndInval(SnapBuild *builder, XLogRecPtr lsn, Transact
 			if (ninvalidations > 0)
 			{
 				Assert(msgs != NULL);
+
+				elog(DEBUG2, "adding invalidations to %u at %X/%08X",
+					 txn->xid, LSN_FORMAT_ARGS(lsn));
 
 				ReorderBufferAddDistributedInvalidations(builder->reorder,
 														 txn->xid, lsn,
@@ -1084,6 +1093,9 @@ SnapBuildCommitTxn(SnapBuild *builder, XLogRecPtr lsn, TransactionId xid,
 
 		builder->snapshot = SnapBuildBuildSnapshot(builder);
 
+		/* Track that the catalog snapshot changed */
+		builder->snapshot_generation++;
+
 		/* we might need to execute invalidations, add snapshot */
 		if (!ReorderBufferXidHasBaseSnapshot(builder->reorder, xid))
 		{
@@ -1096,10 +1108,12 @@ SnapBuildCommitTxn(SnapBuild *builder, XLogRecPtr lsn, TransactionId xid,
 		SnapBuildSnapIncRefcount(builder->snapshot);
 
 		/*
-		 * Add a new catalog snapshot and invalidations messages to all
-		 * currently running transactions.
+		 * Distribute invalidation messages to all currently running
+		 * transactions.  Snapshots are distributed lazily in
+		 * SnapBuildProcessChange() when a transaction decodes a data
+		 * change, avoiding O(N^2) disk usage from snapshot accumulation.
 		 */
-		SnapBuildDistributeSnapshotAndInval(builder, lsn, xid);
+		SnapBuildDistributeInval(builder, lsn, xid);
 	}
 }
 
@@ -1477,7 +1491,7 @@ SnapBuildWaitSnapshot(xl_running_xacts *running, TransactionId cutoff)
 	offsetof(SnapBuildOnDisk, version)
 
 #define SNAPBUILD_MAGIC 0x51A1E001
-#define SNAPBUILD_VERSION 6
+#define SNAPBUILD_VERSION 7
 
 /*
  * Store/Load a snapshot from disk, depending on the snapshot builder's state.

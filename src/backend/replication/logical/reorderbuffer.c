@@ -235,7 +235,7 @@ int			debug_logical_replication_streaming = DEBUG_LOGICAL_REP_STREAMING_BUFFERED
  */
 static ReorderBufferTXN *ReorderBufferAllocTXN(ReorderBuffer *rb);
 static void ReorderBufferFreeTXN(ReorderBuffer *rb, ReorderBufferTXN *txn);
-static ReorderBufferTXN *ReorderBufferTXNByXid(ReorderBuffer *rb,
+ReorderBufferTXN *ReorderBufferTXNByXid(ReorderBuffer *rb,
 											   TransactionId xid, bool create, bool *is_new,
 											   XLogRecPtr lsn, bool create_as_top);
 static void ReorderBufferTransferSnapToParent(ReorderBufferTXN *txn,
@@ -650,7 +650,7 @@ ReorderBufferFreeRelids(ReorderBuffer *rb, Oid *relids)
  * (with the given LSN, and as top transaction if that's specified);
  * when this happens, is_new is set to true.
  */
-static ReorderBufferTXN *
+ReorderBufferTXN *
 ReorderBufferTXNByXid(ReorderBuffer *rb, TransactionId xid, bool create,
 					  bool *is_new, XLogRecPtr lsn, bool create_as_top)
 {
