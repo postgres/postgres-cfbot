@@ -46,6 +46,15 @@ typedef struct varatt_external
 #define VARLENA_EXTSIZE_MASK	((1U << VARLENA_EXTSIZE_BITS) - 1)
 
 /*
+ * On-disk compression method IDs stored in the high bits of va_tcinfo
+ * and va_extinfo.  Only 2 bits are available, so at most 4 values should
+ * be used here.
+ */
+#define TOAST_PGLZ_COMPRESSION_ID		0
+#define TOAST_LZ4_COMPRESSION_ID		1
+#define TOAST_INVALID_COMPRESSION_ID	2
+
+/*
  * varatt_indirect is a "TOAST pointer" representing an out-of-line
  * Datum that's stored in memory, not in an external toast relation.
  * The creator of such a Datum is entirely responsible that the referenced
