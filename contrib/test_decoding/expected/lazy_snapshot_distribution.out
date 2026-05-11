@@ -1,0 +1,70 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s1_begin s1_insert_tbl1 s2_add_col_c1 s2_add_col_c2 s1_insert_tbl2_3col s1_commit s3_get_changes
+step s1_begin: BEGIN;
+step s1_insert_tbl1: INSERT INTO tbl1 VALUES (1);
+step s2_add_col_c1: ALTER TABLE tbl2 ADD COLUMN c1 integer;
+step s2_add_col_c2: ALTER TABLE tbl2 ADD COLUMN c2 integer;
+step s1_insert_tbl2_3col: INSERT INTO tbl2 VALUES (1, 10, 100);
+step s1_commit: COMMIT;
+step s3_get_changes: SELECT data FROM pg_logical_slot_get_changes('isolation_slot', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1');
+data                                                                     
+-------------------------------------------------------------------------
+BEGIN                                                                    
+table public.tbl1: INSERT: val1[integer]:1                               
+table public.tbl2: INSERT: val1[integer]:1 c1[integer]:10 c2[integer]:100
+COMMIT                                                                   
+(4 rows)
+
+?column?
+--------
+stop    
+(1 row)
+
+
+starting permutation: s1_begin s1_insert_tbl1 s2_create_dummy1 s2_create_dummy2 s2_create_dummy3 s1_insert_tbl1 s1_commit s3_get_changes
+step s1_begin: BEGIN;
+step s1_insert_tbl1: INSERT INTO tbl1 VALUES (1);
+step s2_create_dummy1: CREATE TABLE dummy1 (id int);
+step s2_create_dummy2: CREATE TABLE dummy2 (id int);
+step s2_create_dummy3: CREATE TABLE dummy3 (id int);
+step s1_insert_tbl1: INSERT INTO tbl1 VALUES (1);
+step s1_commit: COMMIT;
+step s3_get_changes: SELECT data FROM pg_logical_slot_get_changes('isolation_slot', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1');
+data                                      
+------------------------------------------
+BEGIN                                     
+table public.tbl1: INSERT: val1[integer]:1
+table public.tbl1: INSERT: val1[integer]:1
+COMMIT                                    
+(4 rows)
+
+?column?
+--------
+stop    
+(1 row)
+
+
+starting permutation: s1_begin s1_savepoint s1_insert_tbl1 s2_add_col_c1 s2_add_col_c2 s1_insert_tbl2_3col s1_release s1_commit s3_get_changes
+step s1_begin: BEGIN;
+step s1_savepoint: SAVEPOINT sp1;
+step s1_insert_tbl1: INSERT INTO tbl1 VALUES (1);
+step s2_add_col_c1: ALTER TABLE tbl2 ADD COLUMN c1 integer;
+step s2_add_col_c2: ALTER TABLE tbl2 ADD COLUMN c2 integer;
+step s1_insert_tbl2_3col: INSERT INTO tbl2 VALUES (1, 10, 100);
+step s1_release: RELEASE SAVEPOINT sp1;
+step s1_commit: COMMIT;
+step s3_get_changes: SELECT data FROM pg_logical_slot_get_changes('isolation_slot', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1');
+data                                                                     
+-------------------------------------------------------------------------
+BEGIN                                                                    
+table public.tbl1: INSERT: val1[integer]:1                               
+table public.tbl2: INSERT: val1[integer]:1 c1[integer]:10 c2[integer]:100
+COMMIT                                                                   
+(4 rows)
+
+?column?
+--------
+stop    
+(1 row)
+
