@@ -4208,7 +4208,7 @@ pg_column_compression(PG_FUNCTION_ARGS)
 {
 	int			typlen;
 	char	   *result;
-	ToastCompressionId cmid;
+	uint32		cmid;
 
 	/* On first call, get the input type's typlen, and save at *fn_extra */
 	if (fcinfo->flinfo->fn_extra == NULL)
