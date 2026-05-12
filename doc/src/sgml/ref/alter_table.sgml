@@ -813,6 +813,25 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
       causing future partitions to default to
       <varname>default_table_access_method</varname>.
      </para>
+     <para>
+      The new access method must accept every storage parameter
+      currently set on the table.  An access method may define its own
+      set of parameters, so a parameter that was legal under the old
+      access method is not necessarily recognized by the new one; if any
+      such parameter remains, <command>ALTER TABLE</command> raises an
+      error rather than silently dropping the value.  The unwanted
+      parameters can be cleared in the same statement, for example:
+<programlisting>
+ALTER TABLE measurement
+    SET ACCESS METHOD columnar,
+    RESET (fillfactor);
+</programlisting>
+      Validation is performed once, after all storage-parameter
+      sub-commands in the statement have been applied, so the order of
+      <literal>SET</literal>, <literal>RESET</literal>, and
+      <literal>SET ACCESS METHOD</literal> within the same
+      <command>ALTER TABLE</command> does not matter.
+     </para>
     </listitem>
    </varlistentry>
 

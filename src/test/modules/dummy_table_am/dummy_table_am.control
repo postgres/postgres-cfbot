@@ -1,0 +1,5 @@
+# dummy_table_am extension
+comment = 'dummy_table_am - table access method template'
+default_version = '1.0'
+module_pathname = '$libdir/dummy_table_am'
+relocatable = true

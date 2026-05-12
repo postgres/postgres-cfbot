@@ -710,6 +710,8 @@ DropSubscriptionStmt
 DropTableSpaceStmt
 DropUserMappingStmt
 DropdbStmt
+DummyTableEnum
+DummyTableOptions
 DumpComponents
 DumpId
 DumpOptions
