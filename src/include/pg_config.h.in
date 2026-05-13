@@ -101,6 +101,14 @@
    don't. */
 #undef HAVE_DECL_PWRITEV
 
+/* Define to 1 if you have the declaration of `SSL_get1_groups', and to 0 if
+   you don't. */
+#undef HAVE_DECL_SSL_GET1_GROUPS
+
+/* Define to 1 if you have the declaration of `SSL_get_negotiated_group', and
+   to 0 if you don't. */
+#undef HAVE_DECL_SSL_GET_NEGOTIATED_GROUP
+
 /* Define to 1 if you have the declaration of `strchrnul', and to 0 if you
    don't. */
 #undef HAVE_DECL_STRCHRNUL
@@ -383,6 +391,9 @@
 
 /* Define to 1 if you have the `SSL_CTX_set_num_tickets' function. */
 #undef HAVE_SSL_CTX_SET_NUM_TICKETS
+
+/* Define to 1 if you have the `SSL_group_to_name' function. */
+#undef HAVE_SSL_GROUP_TO_NAME
 
 /* Define to 1 if you have the <stdint.h> header file. */
 #undef HAVE_STDINT_H
