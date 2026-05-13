@@ -13189,6 +13189,42 @@ _ACEOF
 fi
 done
 
+  # Functions for groups support, some of them are real functions, some are
+  # just wrappers around SSL_ctrl.
+  for ac_func in SSL_group_to_name
+do :
+  ac_fn_c_check_func "$LINENO" "SSL_group_to_name" "ac_cv_func_SSL_group_to_name"
+if test "x$ac_cv_func_SSL_group_to_name" = xyes; then :
+  cat >>confdefs.h <<_ACEOF
+#define HAVE_SSL_GROUP_TO_NAME 1
+_ACEOF
+
+fi
+done
+
+ac_fn_c_check_decl "$LINENO" "SSL_get1_groups" "ac_cv_have_decl_SSL_get1_groups" "#include <openssl/ssl.h>
+"
+if test "x$ac_cv_have_decl_SSL_get1_groups" = xyes; then :
+  ac_have_decl=1
+else
+  ac_have_decl=0
+fi
+
+cat >>confdefs.h <<_ACEOF
+#define HAVE_DECL_SSL_GET1_GROUPS $ac_have_decl
+_ACEOF
+ac_fn_c_check_decl "$LINENO" "SSL_get_negotiated_group" "ac_cv_have_decl_SSL_get_negotiated_group" "#include <openssl/ssl.h>
+"
+if test "x$ac_cv_have_decl_SSL_get_negotiated_group" = xyes; then :
+  ac_have_decl=1
+else
+  ac_have_decl=0
+fi
+
+cat >>confdefs.h <<_ACEOF
+#define HAVE_DECL_SSL_GET_NEGOTIATED_GROUP $ac_have_decl
+_ACEOF
+
 
 $as_echo "#define USE_OPENSSL 1" >>confdefs.h
 
