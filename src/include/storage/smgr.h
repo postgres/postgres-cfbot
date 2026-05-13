@@ -97,6 +97,9 @@ extern bool smgrprefetch(SMgrRelation reln, ForkNumber forknum,
 						 BlockNumber blocknum, int nblocks);
 extern uint32 smgrmaxcombine(SMgrRelation reln, ForkNumber forknum,
 							 BlockNumber blocknum);
+extern void smgrblockbounds(SMgrRelation reln, ForkNumber forknum,
+							BlockNumber blocknum,
+							BlockNumber *start, BlockNumber *end);
 extern void smgrreadv(SMgrRelation reln, ForkNumber forknum,
 					  BlockNumber blocknum,
 					  void **buffers, BlockNumber nblocks);
