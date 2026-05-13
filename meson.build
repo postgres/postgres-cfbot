@@ -1677,6 +1677,9 @@ if sslopt in ['auto', 'openssl']
       ['SSL_CTX_set_num_tickets'],
       ['SSL_CTX_set_keylog_callback'],
       ['SSL_CTX_set_client_hello_cb'],
+
+      # Function for groups support.
+      ['SSL_group_to_name'],
     ]
 
     are_openssl_funcs_complete = true
@@ -2903,6 +2906,14 @@ decl_checks += [
   ['strchrnul', 'string.h'],
   ['memset_s', 'string.h', '#define __STDC_WANT_LIB_EXT1__ 1'],
 ]
+
+if ssl.found()
+  decl_checks += [
+    # Declarations for groups support.
+    ['SSL_get1_groups',           'openssl/ssl.h'],
+    ['SSL_get_negotiated_group',  'openssl/ssl.h'],
+  ]
+endif
 
 foreach c : decl_checks
   func = c.get(0)
