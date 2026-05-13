@@ -37,6 +37,9 @@ extern bool mdprefetch(SMgrRelation reln, ForkNumber forknum,
 					   BlockNumber blocknum, int nblocks);
 extern uint32 mdmaxcombine(SMgrRelation reln, ForkNumber forknum,
 						   BlockNumber blocknum);
+extern void mdblockbounds(SMgrRelation reln, ForkNumber forknum,
+						  BlockNumber blocknum,
+						  BlockNumber *start, BlockNumber *end);
 extern void mdreadv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 					void **buffers, BlockNumber nblocks);
 extern void mdstartreadv(PgAioHandle *ioh,
