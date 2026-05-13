@@ -678,12 +678,24 @@ static pg_always_inline void TrackBufferHit(IOObject io_object,
 											Relation rel, char persistence, SMgrRelation smgr,
 											ForkNumber forknum, BlockNumber blocknum);
 static uint32 MaxWriteBuffers(void);
+static uint32 CurrentMaxWriteBuffers(uint32 max_batch_size);
+static uint32 InitWriteBuffersOperation(BufferDesc *required_bufhdr, IOContext io_context,
+										WriteBuffersOperation *batch,
+										BlockNumber *scan_start, BlockNumber *scan_end);
 static Buffer GetVictimBuffer(BufferAccessStrategy strategy, IOContext io_context);
 static void FlushUnlockedBuffer(BufferDesc *buf, SMgrRelation reln,
 								IOObject io_object, IOContext io_context);
 static void FlushBuffer(BufferDesc *buf, SMgrRelation reln,
 						IOObject io_object, IOContext io_context);
+static BufferDesc *PrepareOrRejectEagerWriteBuffer(Buffer bufnum,
+												   BufferTag *require,
+												   bool allow_pending_wal,
+												   XLogRecPtr *lsn);
 static void WriteBuffers(WriteBuffersOperation *batch);
+static void GatherContiguousDirtyBuffers(BufferDesc *required_bufhdr,
+										 IOContext io_context,
+										 WriteBuffersOperation *batch);
+static Buffer LookupBufferForTag(BufferTag *tag);
 static void CompleteWriteBuffers(WriteBuffersOperation *batch,
 								 WritebackContext *wb_context);
 static void ScheduleBufferTagsForWriteback(WritebackContext *wb_context,
@@ -2580,6 +2592,48 @@ InvalidateVictimBuffer(BufferDesc *buf_hdr)
 }
 
 /*
+ * Given a target victim buffer, clean it and look for additional adjacent
+ * blocks that are already in shared buffers and dirty to eagerly flush along
+ * with it in a single write. The victim buffer must be already pinned and
+ * locked and will remain pinned upon return.
+ */
+static void
+WriteBufferAndNeighbors(Buffer bufnum, BufferDesc *buf_hdr, IOContext io_context,
+						WritebackContext *wb_context)
+{
+	WriteBuffersOperation batch;
+	StartBufferIOResult status;
+
+	/* Start IO on the victim buffer */
+	if ((status = StartBufferIO(bufnum, false, true, NULL)) !=
+		BUFFER_IO_READY_FOR_IO)
+	{
+		Assert(status == BUFFER_IO_ALREADY_DONE);
+
+		/*
+		 * Don't eagerly flush anything if the victim buffer is already clean.
+		 * Leave the buffer pinned for the caller.
+		 */
+		BufferLockUnlock(bufnum, buf_hdr);
+		return;
+	}
+
+	/*
+	 * Pin victim again so it stays ours even after batch released.
+	 */
+	IncrBufferRefCount(bufnum);
+
+	/*
+	 * If we are allowed more pins and there are more blocks in the relation
+	 * and the victim buffer's block's preceding and/or following blocks are
+	 * eligible for eager flushing, combine them into a batch.
+	 */
+	GatherContiguousDirtyBuffers(buf_hdr, io_context, &batch);
+	WriteBuffers(&batch);
+	CompleteWriteBuffers(&batch, wb_context);
+}
+
+/*
  * Helper to claim a victim buffer -- which is invalidating its existing
  * contents (including flushing the old contents first if needed).
  * Returns true if it successfully claimed the victim buffer and false if it
@@ -2649,11 +2703,7 @@ ClaimVictimBuffer(BufferAccessStrategy strategy,
 		}
 
 		/* OK, do the I/O */
-		FlushBuffer(buf_hdr, NULL, IOOBJECT_RELATION, io_context);
-		BufferLockUnlock(bufnum, buf_hdr);
-
-		ScheduleBufferTagForWriteback(&BackendWritebackContext, io_context,
-									  &buf_hdr->tag);
+		WriteBufferAndNeighbors(bufnum, buf_hdr, io_context, &BackendWritebackContext);
 	}
 
 	/*
@@ -2683,6 +2733,17 @@ MaxWriteBuffers(void)
 
 	/* Ensure forward progress */
 	return Max(result, 1);
+}
+
+static uint32
+CurrentMaxWriteBuffers(uint32 max_batch_size)
+{
+	uint32		limit;
+
+	limit = Min(GetAdditionalPinLimit(), max_batch_size);
+
+	/* Guarantee forward progress */
+	return Max(limit, 1);
 }
 
 static Buffer
@@ -4813,6 +4874,357 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln, IOObject io_object,
 
 	/* Pop the error context stack */
 	error_context_stack = errcallback.previous;
+}
+
+static Buffer
+LookupBufferForTag(BufferTag *tag)
+{
+	uint32		hash;
+	LWLock	   *partition_lock;
+	int			buf_id;
+
+	hash = BufTableHashCode(tag);
+	partition_lock = BufMappingPartitionLock(hash);
+
+	/*
+	 * We can release the partition lock as soon as we've done the lookup. The
+	 * buffer may be evicted and reused before we pin it, but
+	 * PrepareOrRejectEagerWriteBuffer() rechecks the buffer's tag after
+	 * pinning it, so it will reject the buffer if that happens.
+	 */
+	LWLockAcquire(partition_lock, LW_SHARED);
+	buf_id = BufTableLookup(tag, hash);
+	LWLockRelease(partition_lock);
+
+	if (buf_id < 0)
+		return InvalidBuffer;
+
+	return buf_id + 1;
+}
+
+/*
+ * Given a required bufhdr, set up a batch that will include it and may
+ * include blocks from its same segment, preceding and/or following. Returns
+ * the current maximum number of blocks that can be in this batch given the
+ * location of the block in the file, the current available pins, and various
+ * configuration GUCs.
+ */
+static uint32
+InitWriteBuffersOperation(BufferDesc *required_bufhdr, IOContext io_context,
+						  WriteBuffersOperation *batch,
+						  BlockNumber *scan_start, BlockNumber *scan_end)
+{
+	uint32		batch_limit;
+	BlockNumber required_block;
+	BlockNumber bound_start,
+				bound_end;
+
+	Assert(required_bufhdr);
+	batch->io_context = io_context;
+	batch->forkno = BufTagGetForkNum(&required_bufhdr->tag);
+	batch->reln = smgropen(BufTagGetRelFileLocator(&required_bufhdr->tag),
+						   INVALID_PROC_NUMBER);
+
+	Assert(BufferIsLockedByMe(BufferDescriptorGetBuffer(required_bufhdr)));
+	batch->max_lsn =
+		pg_atomic_read_u64(&required_bufhdr->state) & BM_PERMANENT ?
+		BufferGetLSN(required_bufhdr) : InvalidXLogRecPtr;
+
+	batch->n = 0;
+
+	batch_limit = CurrentMaxWriteBuffers(MaxWriteBuffers());
+
+	/* If we can only write out the required buffer, do that */
+	if (batch_limit <= 1)
+	{
+		batch->buffers[0] = BufferDescriptorGetBuffer(required_bufhdr);
+		batch->n = 1;
+		return 1;
+	}
+
+	required_block = required_bufhdr->tag.blockNum;
+	Assert(BlockNumberIsValid(required_block));
+
+	smgrblockbounds(batch->reln, batch->forkno, required_block,
+					&bound_start, &bound_end);
+
+	Assert(bound_start <= required_block);
+	Assert(required_block <= bound_end);
+
+	/* Limit the scan to batch_limit in either direction */
+	*scan_start = required_block - Min(required_block - bound_start,
+									   batch_limit - 1);
+	*scan_end = required_block + Min(bound_end - required_block,
+									 batch_limit - 1);
+
+	return batch_limit;
+}
+
+/*
+ * Prepare bufnum for eager flushing.
+ *
+ * Given bufnum, return its buffer descriptor, pinned and locked and with
+ * BM_IO_IN_PROGRESS set, or NULL if this buffer does not contain a block that
+ * should be flushed. Buffers that are accepted are suitable for writing out
+ * eagerly. The input buffer should not already be pinned.
+ *
+ * If the caller requires a particular block to be in the buffer in order to
+ * accept it, they will provide the required block number and its
+ * RelFileLocator and fork.
+ *
+ * If allow_pending_wal is true, the caller is willing to eagerly flush a
+ * buffer that would require first flushing WAL. This is true, for example,
+ * when constructing a WriteBuffersOperation around a victim buffer that has
+ * its own pending WAL.
+ *
+ * If returning a buffer, also return its LSN.
+ */
+static BufferDesc *
+PrepareOrRejectEagerWriteBuffer(Buffer bufnum,
+								BufferTag *require,
+								bool allow_pending_wal,
+								XLogRecPtr *lsn)
+{
+	BufferDesc *bufhdr;
+	uint64		buf_state;
+
+	*lsn = InvalidXLogRecPtr;
+
+	if (!BufferIsValid(bufnum))
+		goto reject_buffer;
+
+	Assert(!BufferIsLocal(bufnum));
+
+	bufhdr = GetBufferDescriptor(bufnum - 1);
+
+	/*
+	 * Quick, unsafe checks to see if buffer even possibly contains a block
+	 * meeting our requirements. We'll recheck it all again after getting a
+	 * pin.
+	 */
+	if (require && !BufferTagsEqual(require, &bufhdr->tag))
+		goto reject_buffer;
+
+	buf_state = pg_atomic_read_u64(&bufhdr->state);
+
+	/*
+	 * We'll recheck if it is dirty later, when we have a pin and lock, before
+	 * actually setting BM_IO_IN_PROGRESS.
+	 */
+	if (!(buf_state & BM_DIRTY))
+		goto reject_buffer;
+
+	/*
+	 * Quick check to see if the buffer is pinned, in which case it is more
+	 * likely to be dirtied again soon, and we don't want to eagerly flush it.
+	 * We don't care if it has a non-zero usage count because we don't need to
+	 * reuse it right away and a non-zero usage count doesn't necessarily mean
+	 * it will be dirtied again soon.
+	 */
+	if (BUF_STATE_GET_REFCOUNT(buf_state) > 0)
+		goto reject_buffer;
+
+	/*
+	 * Don't eagerly flush buffers requiring WAL flush unless the caller has
+	 * specifically allowed it. We must check this again later while holding
+	 * the buffer content lock for correctness.
+	 */
+	if (buf_state & BM_PERMANENT &&
+		!allow_pending_wal && XLogNeedsFlush(BufferGetLSN(bufhdr)))
+		goto reject_buffer;
+
+	/*
+	 * Ensure that there's a free refcount entry and resource owner slot for
+	 * the pin before pinning the buffer. While this may leak a refcount and
+	 * slot if we return without a buffer, that slot will be reused.
+	 */
+	ResourceOwnerEnlarge(CurrentResourceOwner);
+	ReservePrivateRefCountEntry();
+
+	/* There is no need to flush the buffer if it is not BM_VALID */
+	if (!PinBuffer(bufhdr, BUC_ZERO, true /* skip_if_not_valid */ ))
+		goto reject_buffer;
+
+	CheckBufferIsPinnedOnce(bufnum);
+
+	/* Now that we have the buffer pinned, recheck it's got the right block */
+	if (require && !BufferTagsEqual(require, &bufhdr->tag))
+		goto reject_buffer_unpin;
+
+	if (!BufferLockConditional(bufnum, bufhdr, BUFFER_LOCK_SHARE_EXCLUSIVE))
+		goto reject_buffer_unpin;
+
+	/* Re-read buf_state now that we have the buffer pinned */
+	buf_state = pg_atomic_read_u64(&bufhdr->state);
+	if (buf_state & BM_PERMANENT)
+	{
+		/* The LSN is for flushing WAL, so we only care about "real" LSNs */
+		*lsn = BufferGetLSN(bufhdr);
+
+		/*
+		 * Recheck if the buffer needs WAL flush now that we hold the lock.
+		 * Dirtiness and concurrent use are rechecked by the caller when
+		 * flushing the buffer.
+		 */
+		if (!allow_pending_wal && XLogNeedsFlush(*lsn))
+			goto reject_buffer_unlock;
+	}
+
+	/* Try to start an I/O operation */
+	if (StartBufferIO(bufnum, false, true, NULL) != BUFFER_IO_READY_FOR_IO)
+		goto reject_buffer_unlock;
+
+	return bufhdr;
+
+reject_buffer_unlock:
+	BufferLockUnlock(bufnum, bufhdr);
+
+reject_buffer_unpin:
+	UnpinBuffer(bufhdr);
+
+reject_buffer:
+	return NULL;
+}
+
+/*
+ * Construct a contiguous, fully prepared batch containing required_bufhdr.
+ * This looks both forward and backwards for contiguous blocks that are dirty
+ * and in shared buffers.
+ */
+static void
+GatherContiguousDirtyBuffers(BufferDesc *required_bufhdr,
+							 IOContext io_context,
+							 WriteBuffersOperation *batch)
+{
+	BufferDesc *left_bufhdrs[MAX_IO_COMBINE_LIMIT];
+	uint32		left_count = 0;
+	BlockNumber scan_start,
+				scan_end;
+	BufferTag	require;
+	bool		allow_pending_wal;
+	XLogRecPtr	lsn;
+	uint32		batch_limit;
+	BlockNumber blkno = required_bufhdr->tag.blockNum;
+
+	Assert(required_bufhdr);
+	Assert(BufferIsLockedByMe(BufferDescriptorGetBuffer(required_bufhdr)));
+
+	batch_limit = InitWriteBuffersOperation(required_bufhdr, io_context,
+											batch,
+											&scan_start, &scan_end);
+	if (batch_limit <= 1)
+		return;
+
+	/*
+	 * If the required buffer needs its WAL flushed, this operation will flush
+	 * WAL anyway, so admitting other buffers with pending WAL adds no WAL
+	 * flushes. Deciding this once is safe: while allow_pending_wal is false,
+	 * only buffers with already-flushed LSNs are admitted, so batch->max_lsn
+	 * stays behind the flushed pointer. If another backend flushes the
+	 * required buffer's WAL after we decide, admitting a later-dirtied buffer
+	 * may cost this operation an extra WAL flush; that's rare and bounded.
+	 */
+	allow_pending_wal = XLogRecPtrIsValid(batch->max_lsn) &&
+		XLogNeedsFlush(batch->max_lsn);
+
+	InitBufferTag(&require, &batch->reln->smgr_rlocator.locator,
+				  batch->forkno,
+				  InvalidBlockNumber);
+
+	/*
+	 * Loop backwards from our required block, looking for up to batch_limit
+	 * contiguous blocks, but stop once we hit the start of the current
+	 * file/segment.
+	 */
+	while (blkno > scan_start && left_count < batch_limit - 1)
+	{
+		Buffer		bufnum;
+		BufferDesc *bufhdr;
+
+		/*
+		 * We must be sure not to process the required buffer here, as we've
+		 * already confirmed it is dirty and needs to be written out and
+		 * pinned and locked it.
+		 */
+		require.blockNum = --blkno;
+
+		/*
+		 * blkno is guaranteed to be valid because we checked scan_start
+		 * before decrementing it.
+		 */
+		Assert(BlockNumberIsValid(blkno));
+		bufnum = LookupBufferForTag(&require);
+		bufhdr = PrepareOrRejectEagerWriteBuffer(bufnum, &require,
+												 allow_pending_wal, &lsn);
+		if (bufhdr == NULL)
+			break;
+
+		if (lsn > batch->max_lsn)
+			batch->max_lsn = lsn;
+
+		left_bufhdrs[left_count++] = bufhdr;
+	}
+
+	/*
+	 * Copy those left side buffer descriptors we found into the final result
+	 * batch.
+	 */
+	while (left_count > 0)
+	{
+		batch->buffers[batch->n++] = BufferDescriptorGetBuffer(left_bufhdrs[left_count - 1]);
+		left_count--;
+	}
+
+	/* Now we know where our required buffer will be in the batch */
+	batch->buffers[batch->n++] = BufferDescriptorGetBuffer(required_bufhdr);
+
+	/*
+	 * Loop forward from our required block and put any contiguous blocks we
+	 * find, up to batch_limit, in our buffers array. Stop if we hit the end
+	 * of the segment.
+	 *
+	 * scan_end comes from smgrblockbounds(), which bounds us to the segment
+	 * without consulting the on-disk relation size, so it may extend past the
+	 * relation's EOF. That's not a problem, because a non-existent block
+	 * won't have a valid associated buffer and we'll just break out of the
+	 * loop below.
+	 */
+	for (BlockNumber right_blkno = required_bufhdr->tag.blockNum;
+		 right_blkno < scan_end && batch->n < batch_limit;)
+	{
+		Buffer		bufnum;
+		BufferDesc *bufhdr;
+
+		/*
+		 * We must be sure not to process the required buffer here, as we've
+		 * already confirmed it is dirty and needs to be written out and
+		 * pinned and locked it.
+		 */
+		require.blockNum = ++right_blkno;
+
+		bufnum = LookupBufferForTag(&require);
+		bufhdr = PrepareOrRejectEagerWriteBuffer(bufnum, &require,
+												 allow_pending_wal, &lsn);
+		if (bufhdr == NULL)
+			break;
+
+		if (lsn > batch->max_lsn)
+			batch->max_lsn = lsn;
+
+		batch->buffers[batch->n++] = BufferDescriptorGetBuffer(bufhdr);
+	}
+
+	/*
+	 * Batch validations, including that we actually added the required buffer
+	 * to the batch and it is at the expected location in the array.
+	 */
+	Assert(batch->n > 0);
+	Assert(GetBufferDescriptor(batch->buffers[0] - 1)->tag.blockNum <= required_bufhdr->tag.blockNum);
+	Assert(required_bufhdr->tag.blockNum <
+		   GetBufferDescriptor(batch->buffers[0] - 1)->tag.blockNum + batch->n);
+	Assert(batch->buffers[required_bufhdr->tag.blockNum -
+						  GetBufferDescriptor(batch->buffers[0] - 1)->tag.blockNum] ==
+		   BufferDescriptorGetBuffer(required_bufhdr));
 }
 
 /*
