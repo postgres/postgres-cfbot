@@ -1677,6 +1677,9 @@ if sslopt in ['auto', 'openssl']
       ['SSL_CTX_set_num_tickets'],
       ['SSL_CTX_set_keylog_callback'],
       ['SSL_CTX_set_client_hello_cb'],
+
+      # Function for groups support.
+      ['SSL_group_to_name'],
     ]
 
     are_openssl_funcs_complete = true
@@ -2892,6 +2895,8 @@ decl_checks = [
   ['strlcpy', 'string.h'],
   ['strsep',  'string.h'],
   ['timingsafe_bcmp',  'string.h'],
+  ['SSL_get1_groups',           'openssl/ssl.h'],
+  ['SSL_get_negotiated_group',  'openssl/ssl.h'],
 ]
 
 # Need to check for function declarations for these functions, because
