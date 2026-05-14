@@ -1387,26 +1387,37 @@ pg_gbk_verifystr(const unsigned char *s, int len)
 static int
 pg_uhc_verifychar(const unsigned char *s, int len)
 {
-	int			l,
-				mbl;
+	int			l;
+	unsigned char c1,
+				c2;
 
-	l = mbl = pg_uhc_mblen(s);
+	c1 = *s++;
 
-	if (len < l)
-		return -1;
-
-	if (l == 2 &&
-		s[0] == NONUTF8_INVALID_BYTE0 &&
-		s[1] == NONUTF8_INVALID_BYTE1)
-		return -1;
-
-	while (--l > 0)
+	if (IS_HIGHBIT_SET(c1))
 	{
-		if (*++s == '\0')
+		l = 2;
+		if (l > len)
+			return -1;
+
+		c2 = *s++;
+
+		/* CP949 lead byte must be 0x81-0xFE */
+		if (c1 < 0x81 || c1 > 0xfe)
+			return -1;
+
+		/* CP949 trail byte: 0x41-0x5A, 0x61-0x7A, or 0x81-0xFE */
+		if (!((c2 >= 0x41 && c2 <= 0x5a) ||
+			  (c2 >= 0x61 && c2 <= 0x7a) ||
+			  (c2 >= 0x81 && c2 <= 0xfe)))
 			return -1;
 	}
+	else
+		/* must be ASCII */
+	{
+		l = 1;
+	}
 
-	return mbl;
+	return l;
 }
 
 static int
