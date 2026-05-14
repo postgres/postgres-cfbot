@@ -69,22 +69,22 @@ SELECT encode(convert_to(convert_from('\xfea1', 'UHC'), 'UTF8'), 'hex');	-- high
 
 -- invalid lead byte (0x80 and 0xFF are unused in CP949)
 SELECT convert_from('\x8041', 'UHC');
-ERROR:  character with byte sequence 0x80 0x41 in encoding "UHC" has no equivalent in encoding "UTF8"
+ERROR:  invalid byte sequence for encoding "UHC": 0x80 0x41
 SELECT convert_from('\xff41', 'UHC');
-ERROR:  character with byte sequence 0xff 0x41 in encoding "UHC" has no equivalent in encoding "UTF8"
+ERROR:  invalid byte sequence for encoding "UHC": 0xff 0x41
 -- invalid trail byte
 SELECT convert_from('\x8140', 'UHC');	-- 0x40
-ERROR:  character with byte sequence 0x81 0x40 in encoding "UHC" has no equivalent in encoding "UTF8"
+ERROR:  invalid byte sequence for encoding "UHC": 0x81 0x40
 SELECT convert_from('\x815b', 'UHC');	-- 0x5B
-ERROR:  character with byte sequence 0x81 0x5b in encoding "UHC" has no equivalent in encoding "UTF8"
+ERROR:  invalid byte sequence for encoding "UHC": 0x81 0x5b
 SELECT convert_from('\x8160', 'UHC');	-- 0x60
-ERROR:  character with byte sequence 0x81 0x60 in encoding "UHC" has no equivalent in encoding "UTF8"
+ERROR:  invalid byte sequence for encoding "UHC": 0x81 0x60
 SELECT convert_from('\x817b', 'UHC');	-- 0x7B
-ERROR:  character with byte sequence 0x81 0x7b in encoding "UHC" has no equivalent in encoding "UTF8"
+ERROR:  invalid byte sequence for encoding "UHC": 0x81 0x7b
 SELECT convert_from('\x8180', 'UHC');	-- 0x80
-ERROR:  character with byte sequence 0x81 0x80 in encoding "UHC" has no equivalent in encoding "UTF8"
+ERROR:  invalid byte sequence for encoding "UHC": 0x81 0x80
 SELECT convert_from('\x81ff', 'UHC');	-- 0xFF
-ERROR:  character with byte sequence 0x81 0xff in encoding "UHC" has no equivalent in encoding "UTF8"
+ERROR:  invalid byte sequence for encoding "UHC": 0x81 0xff
 SELECT convert_from('\x8d20', 'UHC');	-- NONUTF8_INVALID sentinel pair
 ERROR:  invalid byte sequence for encoding "UHC": 0x8d 0x20
 -- truncated two-byte character
