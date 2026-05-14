@@ -16205,10 +16205,13 @@ ATPostAlterTypeCleanup(List **wqueue, ObjectAddresses *objects, AlteredTableInfo
 		 * If the constraint is inherited (only), we don't want to inject a
 		 * new definition here; it'll get recreated when
 		 * ATAddCheckNNConstraint recurses from adding the parent table's
-		 * constraint.  But we had to carry the info this far so that we can
-		 * drop the constraint below.
+		 * constraint. But we had to carry the info this far so that we can
+		 * drop the constraint below. The exception to this are primary key
+		 * or unique constraints: we need to process the child constraints
+		 * explicitly so we save the necessary information to avoid re-indexing.
 		 */
-		if (!conislocal)
+		if (!conislocal && con->contype != CONSTRAINT_PRIMARY 
+			&& con->contype != CONSTRAINT_UNIQUE)
 			continue;
 
 		/*
@@ -16440,9 +16443,12 @@ ATPostAlterTypeParse(Oid oldId, Oid oldRelId, Oid refRelId, char *cmd,
 				{
 					IndexStmt  *indstmt;
 					Oid			indoid;
+					char		relkind;
+					AlterTablePass indexCreationPass;
 
 					indstmt = castNode(IndexStmt, cmd->def);
 					indoid = get_constraint_index(oldId);
+					relkind = get_rel_relkind(indoid);
 
 					if (!rewrite)
 						TryReuseIndex(indoid, indstmt);
@@ -16452,12 +16458,26 @@ ATPostAlterTypeParse(Oid oldId, Oid oldRelId, Oid refRelId, char *cmd,
 					indstmt->reset_default_tblspc = true;
 
 					cmd->subtype = AT_ReAddIndex;
-					tab->subcmds[AT_PASS_OLD_INDEX] =
-						lappend(tab->subcmds[AT_PASS_OLD_INDEX], cmd);
+
+					/*
+					 * We process constraints backed by a partitioned index at
+					 * a later stage. Otherwise, we might create the child 
+					 * indexes twice, which will error out. We mimic here
+					 * the behavior for partitioned indexes, although in here
+					 * the logic relies on parent constraints automatically 
+					 * reusing existing child constraints.
+					 */
+					if (relkind == RELKIND_PARTITIONED_INDEX)
+						indexCreationPass = AT_PASS_OLD_PARTITIONED_INDEX;
+					else
+						indexCreationPass = AT_PASS_OLD_INDEX;
+
+					tab->subcmds[indexCreationPass] =
+						lappend(tab->subcmds[indexCreationPass], cmd);
 
 					/* recreate any comment on the constraint */
 					RebuildConstraintComment(tab,
-											 AT_PASS_OLD_INDEX,
+											 indexCreationPass,
 											 oldId,
 											 rel,
 											 NIL,
