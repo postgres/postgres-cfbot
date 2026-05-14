@@ -2304,23 +2304,23 @@ select relname,
   from pg_class c left join old_oids using (relname)
   where relname like 'at_partitioned%'
   order by relname;
-           relname            | orig_oid | storage |     desc     
-------------------------------+----------+---------+--------------
+           relname            | orig_oid | storage |     desc      
+------------------------------+----------+---------+---------------
  at_partitioned               | t        | none    | 
  at_partitioned_0             | t        | own     | 
- at_partitioned_0_id_name_key | f        | own     | 
+ at_partitioned_0_id_name_key | f        | orig    | child 0 index
  at_partitioned_1             | t        | own     | 
- at_partitioned_1_id_name_key | f        | own     | 
+ at_partitioned_1_id_name_key | f        | orig    | child 1 index
  at_partitioned_id_name_key   | f        | none    | parent index
 (6 rows)
 
 select conname, obj_description(oid, 'pg_constraint') as desc
   from pg_constraint where conname like 'at_partitioned%'
   order by conname;
-           conname            |       desc        
-------------------------------+-------------------
- at_partitioned_0_id_name_key | 
- at_partitioned_1_id_name_key | 
+           conname            |        desc        
+------------------------------+--------------------
+ at_partitioned_0_id_name_key | child 0 constraint
+ at_partitioned_1_id_name_key | child 1 constraint
  at_partitioned_id_name_key   | parent constraint
 (3 rows)
 
@@ -2358,10 +2358,10 @@ select relname,
  at_idx_part_code_idx    | f        | none
  at_idx_part_p1          | t        | own
  at_idx_part_p1_code_idx | f        | orig
- at_idx_part_p1_pkey     | f        | own
+ at_idx_part_p1_pkey     | f        | orig
  at_idx_part_p2          | t        | own
  at_idx_part_p2_code_idx | f        | orig
- at_idx_part_p2_pkey     | f        | own
+ at_idx_part_p2_pkey     | f        | orig
  at_idx_part_pkey        | f        | none
 (9 rows)
 
