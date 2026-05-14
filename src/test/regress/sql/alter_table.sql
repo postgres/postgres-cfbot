@@ -1530,8 +1530,7 @@ select conname, obj_description(oid, 'pg_constraint') as desc
 drop table at_partitioned;
 
 -- Alter column type when no index rewrite is required
--- for partitioned tables. Reindex is required although
--- it shouldn't be.
+-- for partitioned tables.
 create table at_idx_part (id int, code varchar(10),
                           primary key (id, code))
   partition by range (id);
