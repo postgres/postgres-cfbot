@@ -1557,6 +1557,74 @@ select conname, obj_description(oid, 'pg_constraint') as desc
 -- Don't remove this DROP, it exposes bug #15672
 drop table at_partitioned;
 
+-- Alter column type when no index rewrite is required
+-- for partitioned tables. Reindex is required although
+-- it shouldn't be.
+create table at_idx_part (id int, code varchar(10),
+                          primary key (id, code))
+  partition by range (id);
+create table at_idx_part_p1 partition of at_idx_part
+  for values from (0)   to (100);
+create table at_idx_part_p2 partition of at_idx_part
+  for values from (100) to (200);
+create index at_idx_part_code_idx on at_idx_part (code);
+insert into at_idx_part values (1, 'a'), (101, 'b');
+
+create temp table at_idx_old as
+  select relname, oid as oldoid, relfilenode as oldfilenode
+  from pg_class where relname like 'at_idx_part%';
+
+alter table at_idx_part alter column code type varchar(20);
+
+select relname,
+  c.oid = oldoid as same_oid,
+  case relfilenode
+    when 0 then 'none'
+    when c.oid then 'own'
+    when oldfilenode then 'orig'
+    else 'OTHER'
+    end as storage
+  from pg_class c join at_idx_old using (relname)
+  where relname like 'at_idx_part%'
+  order by relname;
+
+drop table at_idx_part;
+
+-- Same, but with two levels of partitioning.
+create table at_idx_part2 (id int, code varchar(10),
+                           primary key (id, code))
+  partition by range (id);
+create table at_idx_part2_p1 partition of at_idx_part2
+  for values from (0)   to (100) partition by range (id);
+create table at_idx_part2_p1_1 partition of at_idx_part2_p1
+  for values from (0)   to (50);
+create table at_idx_part2_p1_2 partition of at_idx_part2_p1
+  for values from (50)  to (100);
+create table at_idx_part2_p2 partition of at_idx_part2
+  for values from (100) to (200);
+create index at_idx_part2_code_idx on at_idx_part2 (code);
+insert into at_idx_part2 values (1, 'a'), (51, 'b'), (101, 'c');
+
+create temp table at_idx_old2 as
+  select relname, oid as oldoid, relfilenode as oldfilenode
+  from pg_class where relname like 'at_idx_part2%';
+
+alter table at_idx_part2 alter column code type varchar(20);
+
+select relname,
+  c.oid = oldoid as same_oid,
+  case relfilenode
+    when 0 then 'none'
+    when c.oid then 'own'
+    when oldfilenode then 'orig'
+    else 'OTHER'
+    end as storage
+  from pg_class c join at_idx_old2 using (relname)
+  where relname like 'at_idx_part2%'
+  order by relname;
+
+drop table at_idx_part2;
+
 -- disallow recursive containment of row types
 create temp table recur1 (f1 int);
 alter table recur1 add column f2 recur1; -- fails
