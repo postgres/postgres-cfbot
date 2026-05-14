@@ -2327,8 +2327,7 @@ select conname, obj_description(oid, 'pg_constraint') as desc
 -- Don't remove this DROP, it exposes bug #15672
 drop table at_partitioned;
 -- Alter column type when no index rewrite is required
--- for partitioned tables. Reindex is required although
--- it shouldn't be.
+-- for partitioned tables.
 create table at_idx_part (id int, code varchar(10),
                           primary key (id, code))
   partition by range (id);
@@ -2358,10 +2357,10 @@ select relname,
  at_idx_part             | t        | none
  at_idx_part_code_idx    | f        | none
  at_idx_part_p1          | t        | own
- at_idx_part_p1_code_idx | f        | own
+ at_idx_part_p1_code_idx | f        | orig
  at_idx_part_p1_pkey     | f        | own
  at_idx_part_p2          | t        | own
- at_idx_part_p2_code_idx | f        | own
+ at_idx_part_p2_code_idx | f        | orig
  at_idx_part_p2_pkey     | f        | own
  at_idx_part_pkey        | f        | none
 (9 rows)
