@@ -571,6 +571,12 @@ SendCopyEnd(CopyToState cstate)
 	pq_putemptymessage(PqMsg_CopyDone);
 }
 
+#define CopySendCharBuf(buf, c) \
+	appendStringInfoCharMacro(buf, c)
+
+#define CopySendDataBuf(buf, databuf, datasize) \
+	appendBinaryStringInfo(buf, databuf, datasize)
+
 /*----------
  * CopySendData sends output data to the destination (file or frontend)
  * CopySendString does the same for null-terminated strings
@@ -584,7 +590,7 @@ SendCopyEnd(CopyToState cstate)
 static void
 CopySendData(CopyToState cstate, const void *databuf, int datasize)
 {
-	appendBinaryStringInfo(cstate->fe_msgbuf, databuf, datasize);
+	CopySendDataBuf(cstate->fe_msgbuf, databuf, datasize);
 }
 
 static void
@@ -596,7 +602,7 @@ CopySendString(CopyToState cstate, const char *str)
 static void
 CopySendChar(CopyToState cstate, char c)
 {
-	appendStringInfoCharMacro(cstate->fe_msgbuf, c);
+	CopySendCharBuf(cstate->fe_msgbuf, c);
 }
 
 static void
@@ -1439,16 +1445,44 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 			CopySendData(cstate, start, ptr - start); \
 	} while (0)
 
-static void
-CopyAttributeOutText(CopyToState cstate, const char *string)
+/* Like above, but it works with a string buffer */
+#define DUMPSOFAR_TO_BUF() \
+	do { \
+		if (ptr > start) \
+			CopySendDataBuf(buf, start, ptr - start); \
+	} while (0)
+
+
+/*
+ * Escape a string for COPY TEXT format output
+ *
+ * Escapes control characters, backslashes, and the delimiter character
+ * according to COPY TEXT format rules. The escaped string is appended
+ * to 'buf'.
+ *
+ * Parameters:
+ *   buf - StringInfo buffer to append the escaped text to
+ *   string - the input string to escape
+ *   delimc - the delimiter character that must be escaped
+ *   file_encoding - target encoding for the output
+ *   need_transcoding - if true, convert from server encoding to file_encoding
+ *   encoding_embeds_ascii - if true, the encoding may have ASCII bytes as
+ *                           non-first bytes of multi-byte characters
+ */
+void
+CopyEscapeText(StringInfo buf,
+			   const char *string,
+			   char delimc,
+			   int file_encoding,
+			   bool need_transcoding,
+			   bool encoding_embeds_ascii)
 {
 	const char *ptr;
 	const char *start;
 	char		c;
-	char		delimc = cstate->opts.delim[0];
 
-	if (cstate->need_transcoding)
-		ptr = pg_server_to_any(string, strlen(string), cstate->file_encoding);
+	if (need_transcoding)
+		ptr = pg_server_to_any(string, strlen(string), file_encoding);
 	else
 		ptr = string;
 
@@ -1466,7 +1500,7 @@ CopyAttributeOutText(CopyToState cstate, const char *string)
 	 * it's worth making two copies of it to get the IS_HIGHBIT_SET() test out
 	 * of the normal safe-encoding path.
 	 */
-	if (cstate->encoding_embeds_ascii)
+	if (encoding_embeds_ascii)
 	{
 		start = ptr;
 		while ((c = *ptr) != '\0')
@@ -1509,19 +1543,19 @@ CopyAttributeOutText(CopyToState cstate, const char *string)
 						continue;	/* fall to end of loop */
 				}
 				/* if we get here, we need to convert the control char */
-				DUMPSOFAR();
-				CopySendChar(cstate, '\\');
-				CopySendChar(cstate, c);
+				DUMPSOFAR_TO_BUF();
+				CopySendCharBuf(buf, '\\');
+				CopySendCharBuf(buf, c);
 				start = ++ptr;	/* do not include char in next run */
 			}
 			else if (c == '\\' || c == delimc)
 			{
-				DUMPSOFAR();
-				CopySendChar(cstate, '\\');
+				DUMPSOFAR_TO_BUF();
+				CopySendCharBuf(buf, '\\');
 				start = ptr++;	/* we include char in next run */
 			}
 			else if (IS_HIGHBIT_SET(c))
-				ptr += pg_encoding_mblen(cstate->file_encoding, ptr);
+				ptr += pg_encoding_mblen(file_encoding, ptr);
 			else
 				ptr++;
 		}
@@ -1569,15 +1603,15 @@ CopyAttributeOutText(CopyToState cstate, const char *string)
 						continue;	/* fall to end of loop */
 				}
 				/* if we get here, we need to convert the control char */
-				DUMPSOFAR();
-				CopySendChar(cstate, '\\');
-				CopySendChar(cstate, c);
+				DUMPSOFAR_TO_BUF();
+				CopySendCharBuf(buf, '\\');
+				CopySendCharBuf(buf, c);
 				start = ++ptr;	/* do not include char in next run */
 			}
 			else if (c == '\\' || c == delimc)
 			{
-				DUMPSOFAR();
-				CopySendChar(cstate, '\\');
+				DUMPSOFAR_TO_BUF();
+				CopySendCharBuf(buf, '\\');
 				start = ptr++;	/* we include char in next run */
 			}
 			else
@@ -1585,7 +1619,18 @@ CopyAttributeOutText(CopyToState cstate, const char *string)
 		}
 	}
 
-	DUMPSOFAR();
+	DUMPSOFAR_TO_BUF();
+}
+
+static void
+CopyAttributeOutText(CopyToState cstate, const char *string)
+{
+	CopyEscapeText(cstate->fe_msgbuf,
+				   string,
+				   cstate->opts.delim[0],
+				   cstate->file_encoding,
+				   cstate->need_transcoding,
+				   cstate->encoding_embeds_ascii);
 }
 
 /*
