@@ -3970,6 +3970,26 @@ acl      | {postgres=arwdDxtm/postgres,foo=r/postgres}
         is false, the <literal>OWNER</literal> clause is omitted.
        </para></entry>
       </row>
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>pg_get_policy_ddl</primary>
+        </indexterm>
+        <function>pg_get_policy_ddl</function>
+        ( <parameter>table</parameter> <type>regclass</type>,
+        <parameter>policyname</parameter> <type>name</type>
+        <optional>, <parameter>pretty</parameter> <type>boolean</type>
+        </optional> )
+        <returnvalue>setof text</returnvalue>
+       </para>
+       <para>
+        Reconstructs the <command>CREATE POLICY</command> statement for the
+        named row-level security policy on the specified table.  The result
+        is returned as a single row.  If <parameter>pretty</parameter> is
+        true, the output is formatted for readability; the default is false.
+        All object references in the output are schema-qualified.
+       </para></entry>
+      </row>
      </tbody>
     </tgroup>
    </table>
