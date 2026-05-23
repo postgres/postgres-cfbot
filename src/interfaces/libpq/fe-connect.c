@@ -140,6 +140,7 @@ static int	ldapServiceLookup(const char *purl, PQconninfoOption *options,
 #else
 #define DefaultGSSMode "disable"
 #endif
+#define DefaultScramMaxIterations	"100000"
 
 /* ----------
  * Definition of the conninfo parameters and their fallback resources.
@@ -221,6 +222,10 @@ static const internalPQconninfoOption PQconninfoOptions[] = {
 	{"channel_binding", "PGCHANNELBINDING", DefaultChannelBinding, NULL,
 		"Channel-Binding", "", 8,	/* sizeof("require") == 8 */
 	offsetof(struct pg_conn, channel_binding)},
+
+	{"scram_max_iterations", "PGSCRAMMAXITERATIONS", DefaultScramMaxIterations, NULL,
+		"SCRAM-Max-Iterations", "", 10,	/* strlen(INT32_MAX) == 10 */
+	offsetof(struct pg_conn, scram_max_iterations)},
 
 	{"connect_timeout", "PGCONNECT_TIMEOUT", NULL, NULL,
 		"Connect-timeout", "", 10,	/* strlen(INT32_MAX) == 10 */
@@ -1765,6 +1770,30 @@ pqConnectOptions2(PGconn *conn)
 		conn->channel_binding = strdup(DefaultChannelBinding);
 		if (!conn->channel_binding)
 			goto oom_error;
+	}
+
+	/*
+	 * validate scram_max_iterations option
+	 */
+	if (conn->scram_max_iterations)
+	{
+		int			max_iterations;
+
+		if (!pqParseIntParam(conn->scram_max_iterations, &max_iterations,
+							 conn, "scram_max_iterations"))
+		{
+			conn->status = CONNECTION_BAD;
+			return false;
+		}
+		if (max_iterations < 0)
+		{
+			conn->status = CONNECTION_BAD;
+			libpq_append_conn_error(conn,
+									"invalid %s value: \"%s\" (must be zero or positive)",
+									"scram_max_iterations",
+									conn->scram_max_iterations);
+			return false;
+		}
 	}
 
 #ifndef USE_SSL
@@ -5084,6 +5113,7 @@ freePGconn(PGconn *conn)
 	free(conn->pghostaddr);
 	free(conn->pgport);
 	free(conn->connect_timeout);
+	free(conn->scram_max_iterations);
 	free(conn->pgtcp_user_timeout);
 	free(conn->client_encoding_initial);
 	free(conn->pgoptions);
