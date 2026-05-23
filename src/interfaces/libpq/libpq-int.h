@@ -484,6 +484,14 @@ struct pg_conn
 	int			whichhost;		/* host we're currently trying/connected to */
 	pg_conn_host *connhost;		/* details about each named host */
 	char	   *connip;			/* IP address for current network connection */
+	/*
+	 * Deadline for the in-progress connection attempt against the current
+	 * host, in PQgetCurrentTimeUSec() units; -1 if no connect_timeout is in
+	 * effect.  This mirrors the local end_time tracked in
+	 * pqConnectDBComplete() so that code paths invoked during connection
+	 * establishment (e.g. authentication) can consult the deadline.
+	 */
+	pg_usec_time_t connect_deadline;
 
 	/*
 	 * The pending command queue as a singly-linked list.  Head is the command

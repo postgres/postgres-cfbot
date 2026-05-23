@@ -2812,6 +2812,12 @@ pqConnectDBComplete(PGconn *conn)
 		return 0;
 
 	/*
+	 * Clear any stale deadline from a previous invocation before deciding
+	 * whether this attempt installs one.
+	 */
+	conn->connect_deadline = -1;
+
+	/*
 	 * Set up a time limit, if connect_timeout is greater than zero.
 	 */
 	if (conn->connect_timeout != NULL)
@@ -2840,6 +2846,7 @@ pqConnectDBComplete(PGconn *conn)
 			 conn->whichaddr != last_whichaddr))
 		{
 			end_time = PQgetCurrentTimeUSec() + (pg_usec_time_t) timeout * 1000000;
+			conn->connect_deadline = end_time;
 			last_whichhost = conn->whichhost;
 			last_whichaddr = conn->whichaddr;
 		}
@@ -5012,6 +5019,7 @@ pqMakeEmptyPGconn(void)
 	conn->show_context = PQSHOW_CONTEXT_ERRORS;
 	conn->sock = PGINVALID_SOCKET;
 	conn->altsock = PGINVALID_SOCKET;
+	conn->connect_deadline = -1;
 	conn->Pfdebug = NULL;
 
 	/*
