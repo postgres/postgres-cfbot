@@ -99,6 +99,7 @@
 #include "storage/subsystems.h"
 #include "storage/sync.h"
 #include "utils/guc_hooks.h"
+#include "utils/uuid.h"
 #include "utils/guc_tables.h"
 #include "utils/injection_point.h"
 #include "utils/pgstat_internal.h"
@@ -6644,6 +6645,9 @@ StartupXLOG(void)
 	newTLI = endOfRecoveryInfo->lastRecTLI;
 	if (ArchiveRecoveryRequested)
 	{
+		struct timeval tv;
+		pg_uuid_t	uuid_buf;
+
 		newTLI = findNewestTimeLine(recoveryTargetTLI) + 1;
 		ereport(LOG,
 				(errmsg("selected new timeline ID: %u", newTLI)));
@@ -6674,8 +6678,19 @@ StartupXLOG(void)
 		 * to the new timeline, and will try to connect to the new timeline.
 		 * To minimize the window for that, try to do as little as possible
 		 * between here and writing the end-of-recovery record.
+		 *
+		 * Generate a UUIDv7 that uniquely identifies this promotion.  The
+		 * same UUID is written into the history file so that pg_rewind can
+		 * distinguish two servers that independently promoted to the same
+		 * timeline ID.  Use gettimeofday() since we are not on a hot path;
+		 * generate_uuidv7 wants milliseconds and we pass 0 for sub-ms since
+		 * the random bits already distinguish UUIDs generated within the same
+		 * millisecond.
 		 */
+		gettimeofday(&tv, NULL);
+		generate_uuidv7_r(&uuid_buf, tv.tv_sec * 1000 + tv.tv_usec / 1000, 0);
 		writeTimeLineHistory(newTLI, recoveryTargetTLI,
+							 &uuid_buf,
 							 EndOfLog, endOfRecoveryInfo->recoveryStopReason);
 
 		ereport(LOG,
