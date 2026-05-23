@@ -819,4 +819,27 @@ test_conn(
 		qr/connection authenticated: identity="regress_not_member" method=scram-sha-256/
 	]);
 
+# Test that connect_timeout interrupts a slow SCRAM auth
+reset_pg_hba($node, 'all', 'all', 'trust');
+$node->safe_psql(
+	'postgres',
+	"SET password_encryption='scram-sha-256';
+	 CREATE ROLE scram_slow LOGIN PASSWORD 'pass';");
+$node->safe_psql(
+	'postgres',
+	q{UPDATE pg_authid
+	     SET rolpassword = regexp_replace(rolpassword,
+	                                      '^SCRAM-SHA-256\$[0-9]+:',
+	                                      'SCRAM-SHA-256$999999999:')
+	   WHERE rolname = 'scram_slow';});
+reset_pg_hba($node, 'all', 'all', 'scram-sha-256');
+{
+	$node->connect_fails(
+		"user=scram_slow connect_timeout=1",
+		'connect_timeout aborts SCRAM iteration loop',
+		expected_stderr => qr/connection timeout expired/);
+}
+reset_pg_hba($node, 'all', 'all', 'trust');
+$node->safe_psql('postgres', 'DROP ROLE scram_slow;');
+
 done_testing();
