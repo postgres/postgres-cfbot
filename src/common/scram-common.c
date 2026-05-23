@@ -29,18 +29,54 @@
 #endif
 #include "port/pg_bswap.h"
 
+#ifdef FRONTEND
+/*
+ * Invoke the caller-supplied interrupt callback every this many PBKDF2
+ * iterations.
+ */
+#define SCRAM_INTERRUPT_CHECK_INTERVAL 4096
+#endif
+
 /*
  * Calculate SaltedPassword.
  *
- * The password should already be normalized by SASLprep.  Returns 0 on
- * success, -1 on failure with *errstr pointing to a message about the
- * error details.
+ * Equivalent to scram_SaltedPasswordExt() with no interrupt callback.
+ * Preserved as a stable entry point for backend code and any external
+ * consumers compiled against the pre-callback signature.
  */
 int
 scram_SaltedPassword(const char *password,
 					 pg_cryptohash_type hash_type, int key_length,
 					 const uint8 *salt, int saltlen, int iterations,
 					 uint8 *result, const char **errstr)
+{
+	return scram_SaltedPasswordExt(password, hash_type, key_length,
+								   salt, saltlen, iterations,
+								   NULL, NULL,
+								   result, errstr);
+}
+
+/*
+ * Calculate SaltedPassword, with an optional caller interrupt callback.
+ *
+ * The password should already be normalized by SASLprep.  Returns 0 on
+ * success, -1 on failure with *errstr pointing to a message about the
+ * error details.
+ *
+ * In frontend code, an optional interrupt callback may be supplied.  It
+ * is invoked periodically from within the PBKDF2 iteration loop, and if
+ * it returns true the loop aborts with the callback-provided errstr.
+ * The callback is the frontend analogue of the backend's
+ * CHECK_FOR_INTERRUPTS() check.  Pass NULL to disable.  Ignored in the
+ * backend, which uses CHECK_FOR_INTERRUPTS() directly.
+ */
+int
+scram_SaltedPasswordExt(const char *password,
+						pg_cryptohash_type hash_type, int key_length,
+						const uint8 *salt, int saltlen, int iterations,
+						scram_interrupt_callback interrupt_cb,
+						void *interrupt_arg,
+						uint8 *result, const char **errstr)
 {
 	int			password_len = strlen(password);
 	uint32		one = pg_hton32(1);
@@ -84,6 +120,20 @@ scram_SaltedPassword(const char *password,
 		 * set to a large value.
 		 */
 		CHECK_FOR_INTERRUPTS();
+#else
+		/*
+		 * In the frontend, the iteration count is dictated by the server
+		 * and could be set to a large value.  Allow the caller to abort
+		 * the loop via the interrupt callback.  The callback owns both the
+		 * abort policy and the error message.
+		 */
+		if (interrupt_cb != NULL &&
+			(i % SCRAM_INTERRUPT_CHECK_INTERVAL) == 0 &&
+			interrupt_cb(interrupt_arg, errstr))
+		{
+			pg_hmac_free(hmac_ctx);
+			return -1;
+		}
 #endif
 
 		if (pg_hmac_init(hmac_ctx, (const uint8 *) password, password_len) < 0 ||
