@@ -9,9 +9,40 @@
  */
 #include "postgres_fe.h"
 
+#include <ctype.h>
+#include <string.h>
+
 #include "access/timeline.h"
 #include "common/pg_parse_lsn.h"
 #include "pg_rewind.h"
+
+/*
+ * Parse a UUID string in standard dashed form into a pg_uuid_t.
+ * Returns true on success, false if str is not a valid UUID string.
+ */
+static bool
+rewind_parse_uuid(const char *str, pg_uuid_t *uuid)
+{
+	const char *src = str;
+
+	for (int i = 0; i < UUID_LEN; i++)
+	{
+		char		buf[3];
+
+		if (!isxdigit((unsigned char) src[0]) ||
+			!isxdigit((unsigned char) src[1]))
+			return false;
+		buf[0] = src[0];
+		buf[1] = src[1];
+		buf[2] = '\0';
+		uuid->data[i] = (unsigned char) strtoul(buf, NULL, 16);
+		src += 2;
+		/* skip dash at positions after bytes 3, 5, 7, 9 (i == 3,5,7,9) */
+		if (src[0] == '-' && (i == 3 || i == 5 || i == 7 || i == 9))
+			src++;
+	}
+	return (*src == '\0');
+}
 
 /*
  * This is copy-pasted from the backend readTimeLineHistory, modified to
@@ -52,6 +83,7 @@ rewind_parseTimeLineHistory(char *buffer, TimeLineID targetTLI, int *nentries)
 		bool		valid_switchpoint = false;
 		int			nchars;
 		size_t		nspaces;
+		char		uuid_str[UUID_STR_LEN + 1] = {0};
 
 		fline = bufptr;
 		while (*bufptr && *bufptr != '\n')
@@ -94,6 +126,7 @@ rewind_parseTimeLineHistory(char *buffer, TimeLineID targetTLI, int *nentries)
 			*token_end = '\0';
 			valid_switchpoint = pg_parse_lsn(ptr, &switchpoint);
 			*token_end = save;
+			ptr = token_end;
 		}
 
 		if (!valid_switchpoint)
@@ -120,7 +153,29 @@ rewind_parseTimeLineHistory(char *buffer, TimeLineID targetTLI, int *nentries)
 		entry->end = switchpoint;
 		prevend = entry->end;
 
-		/* we ignore the remainder of each line */
+		/*
+		 * Parse the optional UUID field that follows the switchpoint. Old
+		 * history files have a human-readable reason string there instead;
+		 * its first word is much shorter than UUID_STR_LEN, so the length
+		 * check safely distinguishes old from new format.  We ignore the
+		 * remainder of the line beyond the UUID field.
+		 */
+		memset(&entry->tluuid, 0, sizeof(pg_uuid_t));
+		nspaces = strspn(ptr, " \t\n\r\f\v");
+		if (nspaces > 0)
+		{
+			pg_uuid_t	buf;
+
+			ptr += nspaces;
+			token_end = ptr + strcspn(ptr, " \t\n\r\f\v");
+			if ((size_t) (token_end - ptr) == UUID_STR_LEN)
+			{
+				memcpy(uuid_str, ptr, UUID_STR_LEN);
+				uuid_str[UUID_STR_LEN] = '\0';
+				if (rewind_parse_uuid(uuid_str, &buf))
+					memcpy(&entry->tluuid, &buf, sizeof(pg_uuid_t));
+			}
+		}
 	}
 
 	if (entries && targetTLI <= lasttli)
@@ -144,6 +199,7 @@ rewind_parseTimeLineHistory(char *buffer, TimeLineID targetTLI, int *nentries)
 	entry->tli = targetTLI;
 	entry->begin = prevend;
 	entry->end = InvalidXLogRecPtr;
+	memset(&entry->tluuid, 0, sizeof(pg_uuid_t));
 
 	*nentries = nlines;
 	return entries;
