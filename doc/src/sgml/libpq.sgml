@@ -1444,6 +1444,17 @@ postgresql://%2Fvar%2Flib%2Fpostgresql/dbname
        seconds, so the total time spent waiting for a connection might be
        up to 10 seconds.
       </para>
+      <para>
+       In addition to bounding network establishment, this deadline
+       also bounds client-side SCRAM PBKDF2 work performed during
+       authentication on the blocking connection path
+       (<xref linkend="libpq-PQconnectdb"/> and friends).  Connecting to
+       a server that advertises a very large SCRAM iteration count under
+       an unusually small <literal>connect_timeout</literal> may
+       therefore fail with
+       <literal>connection timeout expired</literal> during authentication
+       rather than during network establishment.
+      </para>
       </listitem>
      </varlistentry>
 

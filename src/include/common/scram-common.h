@@ -49,10 +49,34 @@
  */
 #define SCRAM_SHA_256_DEFAULT_ITERATIONS	4096
 
+/*
+ * Optional caller-supplied interrupt check for scram_SaltedPasswordExt().
+ *
+ * Called periodically from within the PBKDF2 iteration loop in frontend
+ * builds.  Return true to abort, false to continue iterating.  On abort,
+ * set *errstr to the error message to surface to the caller of
+ * scram_SaltedPasswordExt().  arg is opaque caller-owned state.
+ *
+ * The SCRAM code knows nothing about the policy behind the check.  It
+ * simply offers a hook analogous to the backend's CHECK_FOR_INTERRUPTS().
+ */
+typedef bool (*scram_interrupt_callback) (void *arg, const char **errstr);
+
+/*
+ * Original entry point.  Equivalent to scram_SaltedPasswordExt() with
+ * NULL callback arguments.  Kept so existing callers do not need to change.
+ */
 extern int	scram_SaltedPassword(const char *password,
 								 pg_cryptohash_type hash_type, int key_length,
 								 const uint8 *salt, int saltlen, int iterations,
 								 uint8 *result, const char **errstr);
+
+extern int	scram_SaltedPasswordExt(const char *password,
+									pg_cryptohash_type hash_type, int key_length,
+									const uint8 *salt, int saltlen, int iterations,
+									scram_interrupt_callback interrupt_cb,
+									void *interrupt_arg,
+									uint8 *result, const char **errstr);
 extern int	scram_H(const uint8 *input, pg_cryptohash_type hash_type,
 					int key_length, uint8 *result,
 					const char **errstr);
