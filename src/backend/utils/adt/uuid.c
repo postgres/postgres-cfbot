@@ -91,7 +91,7 @@ static bool uuid_abbrev_abort(int memtupcount, SortSupport ssup);
 static Datum uuid_abbrev_convert(Datum original, SortSupport ssup);
 static inline void uuid_set_version(pg_uuid_t *uuid, unsigned char version);
 static inline int64 get_real_time_ns_ascending(void);
-static pg_uuid_t *generate_uuidv7(uint64 unix_ts_ms, uint32 sub_ms);
+pg_uuid_t  *generate_uuidv7(uint64 unix_ts_ms, uint32 sub_ms);
 
 Datum
 uuid_in(PG_FUNCTION_ARGS)
@@ -702,6 +702,14 @@ get_real_time_ns_ascending(void)
 	return ns;
 }
 
+pg_uuid_t *
+generate_uuidv7(uint64 unix_ts_ms, uint32 sub_ms)
+{
+	pg_uuid_t  *uuid = palloc(UUID_LEN);
+
+	return generate_uuidv7_r(uuid, unix_ts_ms, sub_ms);
+}
+
 /*
  * Generate UUID version 7 per RFC 9562, with the given timestamp.
  *
@@ -718,10 +726,9 @@ get_real_time_ns_ascending(void)
  *
  * NB: all numbers here are unsigned, unix_ts_ms cannot be negative per RFC.
  */
-static pg_uuid_t *
-generate_uuidv7(uint64 unix_ts_ms, uint32 sub_ms)
+pg_uuid_t *
+generate_uuidv7_r(pg_uuid_t *uuid, uint64 unix_ts_ms, uint32 sub_ms)
 {
-	pg_uuid_t  *uuid = palloc(UUID_LEN);
 	uint32		increased_clock_precision;
 
 	/* Fill in time part */
