@@ -384,6 +384,9 @@ struct pg_conn
 	char	   *pgport;			/* the server's communication port number, or
 								 * a comma-separated list of ports */
 	char	   *connect_timeout;	/* connection timeout (numeric string) */
+	char	   *scram_max_iterations;	/* maximum acceptable server-advertised
+										 * SCRAM iteration count (numeric
+										 * string); 0 disables */
 	char	   *pgtcp_user_timeout; /* tcp user timeout (numeric string) */
 	char	   *client_encoding_initial;	/* encoding to use */
 	char	   *pgoptions;		/* options to start the backend with */
