@@ -834,10 +834,56 @@ $node->safe_psql(
 	   WHERE rolname = 'scram_slow';});
 reset_pg_hba($node, 'all', 'all', 'scram-sha-256');
 {
+	# The default scram_max_iterations cap (100000) would reject this
+	# doctored verifier before any PBKDF2 work begins. Explicitly
+	# disable the cap with scram_max_iterations=0 so the iteration
+	# loop is reached and connect_timeout has something to interrupt.
 	$node->connect_fails(
-		"user=scram_slow connect_timeout=1",
+		"user=scram_slow connect_timeout=1 scram_max_iterations=0",
 		'connect_timeout aborts SCRAM iteration loop',
 		expected_stderr => qr/connection timeout expired/);
+}
+
+# Test scram_max_iterations
+{
+	# Default rejects excessive iterations
+	$node->connect_fails(
+		"user=scram_slow",
+		'scram_max_iterations default rejects oversized server iteration count',
+		expected_stderr =>
+		  qr/server requested SCRAM iteration count 999999999, exceeding scram_max_iterations \(100000\)/
+	);
+
+	# Explicit setting equal to the default behaves the same way.
+	$node->connect_fails(
+		"user=scram_slow scram_max_iterations=100000",
+		'scram_max_iterations rejects oversized server iteration count',
+		expected_stderr =>
+		  qr/server requested SCRAM iteration count 999999999, exceeding scram_max_iterations \(100000\)/
+	);
+
+	# Accept scram iterations below scram_max_iterations.
+	$node->connect_ok(
+		"user=scram_role scram_max_iterations=100000",
+		'scram_max_iterations accepts normal server iteration count');
+
+	# A normal verifier connects fine under the compiled-in default.
+	$node->connect_ok(
+		"user=scram_role",
+		'scram_max_iterations default accepts normal verifier');
+
+	# Zero disables the client-side iteration-count cap.
+	$node->connect_ok(
+		"user=scram_role scram_max_iterations=0",
+		'scram_max_iterations=0 accepts normal verifier');
+
+	# Reject negative scram_max_iterations.
+	$node->connect_fails(
+		"user=scram_role scram_max_iterations=-1",
+		'scram_max_iterations rejects negative values',
+		expected_stderr =>
+		  qr/invalid scram_max_iterations value: "-1" \(must be zero or positive\)/
+	);
 }
 reset_pg_hba($node, 'all', 'all', 'trust');
 $node->safe_psql('postgres', 'DROP ROLE scram_slow;');
