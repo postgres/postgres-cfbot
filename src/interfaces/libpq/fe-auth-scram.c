@@ -698,8 +698,32 @@ read_server_first_message(fe_scram_state *state, char *input)
 		return false;
 	}
 
-	if (*input != '\0')
+	if (*input != '\0') {
 		libpq_append_conn_error(conn, "malformed SCRAM message (garbage at end of server-first-message)");
+		return false;
+	}
+
+	/*
+	 * Enforce a client-side hard cap on the server-advertised iteration
+	 * count, if one was configured.  This protects callers (including
+	 * those with no connect_timeout set) from a misconfigured or hostile
+	 * server forcing arbitrarily large PBKDF2 work.
+	 */
+	if (conn->scram_max_iterations != NULL)
+	{
+		int			max_iterations;
+
+		if (!pqParseIntParam(conn->scram_max_iterations, &max_iterations, conn,
+							 "scram_max_iterations"))
+			return false;
+		if (max_iterations > 0 && state->iterations > max_iterations)
+		{
+			libpq_append_conn_error(conn,
+									"server requested SCRAM iteration count %d, exceeding scram_max_iterations (%d)",
+									state->iterations, max_iterations);
+			return false;
+		}
+	}
 
 	return true;
 }
