@@ -600,7 +600,6 @@ parse_scram_secret(const char *secret, int *iterations,
 				   char **salt, uint8 *stored_key, uint8 *server_key)
 {
 	char	   *v;
-	char	   *p;
 	char	   *scheme_str;
 	char	   *salt_str;
 	char	   *iterations_str;
@@ -637,9 +636,7 @@ parse_scram_secret(const char *secret, int *iterations,
 	*hash_type = PG_SHA256;
 	*key_length = SCRAM_SHA_256_KEY_LEN;
 
-	errno = 0;
-	*iterations = strtol(iterations_str, &p, 10);
-	if (*p || errno != 0)
+	if (!scram_parse_iterations(iterations_str, iterations))
 		goto invalid_secret;
 
 	/*
