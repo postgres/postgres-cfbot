@@ -608,7 +608,6 @@ read_server_first_message(fe_scram_state *state, char *input)
 {
 	PGconn	   *conn = state->conn;
 	char	   *iterations_str;
-	char	   *endptr;
 	char	   *encoded_salt;
 	char	   *nonce;
 	int			decoded_salt_len;
@@ -673,8 +672,7 @@ read_server_first_message(fe_scram_state *state, char *input)
 		/* read_attr_value() has appended an error string */
 		return false;
 	}
-	state->iterations = strtol(iterations_str, &endptr, 10);
-	if (*endptr != '\0' || state->iterations < 1)
+	if (!scram_parse_iterations(iterations_str, &state->iterations))
 	{
 		libpq_append_conn_error(conn, "malformed SCRAM message (invalid iteration count)");
 		return false;
