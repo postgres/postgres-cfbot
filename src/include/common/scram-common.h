@@ -67,4 +67,6 @@ extern char *scram_build_secret(pg_cryptohash_type hash_type, int key_length,
 								const uint8 *salt, int saltlen, int iterations,
 								const char *password, const char **errstr);
 
+extern bool scram_parse_iterations(const char *str, int *iterations);
+
 #endif							/* SCRAM_COMMON_H */

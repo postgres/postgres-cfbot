@@ -19,6 +19,8 @@
 #include "postgres_fe.h"
 #endif
 
+#include <limits.h>
+
 #include "common/base64.h"
 #include "common/hmac.h"
 #include "common/scram-common.h"
@@ -326,4 +328,55 @@ scram_build_secret(pg_cryptohash_type hash_type, int key_length,
 	Assert(p - result <= maxlen);
 
 	return result;
+}
+
+/*
+ * Parse a SCRAM iteration count from a null-terminated string.
+ *
+ * On success, stores the parsed value in *iterations and returns true.
+ * On failure, *iterations is unchanged and false is returned.
+ *
+ * The accepted input is a non-empty sequence of ASCII digits ('0'-'9').
+ * Leading whitespace, a leading '+' or '-' sign, and any trailing
+ * non-digit characters are rejected, even though strtol() would
+ * otherwise accept them; the SCRAM verifier and server-first-message
+ * formats both define the iteration count as a sequence of digits with
+ * no surrounding decoration, so anything else is malformed.
+ *
+ * Beyond digit shape we also reject ERANGE (overflow of long), values
+ * that would silently truncate when narrowed to int on platforms where
+ * sizeof(long) is greater than sizeof(int), and any value below 1
+ * (RFC 5802 requires a positive iteration count).
+ */
+bool
+scram_parse_iterations(const char *str, int *iterations)
+{
+	const char *p;
+	char	   *endptr;
+	long		val;
+
+	/* Require a non-empty, pure-digit string. */
+	if (*str == '\0')
+		return false;
+	for (p = str; *p != '\0'; p++)
+	{
+		if (*p < '0' || *p > '9')
+			return false;
+	}
+
+	errno = 0;
+	val = strtol(str, &endptr, 10);
+
+	/*
+	 * The digit-only pre-scan guarantees strtol() consumes the entire
+	 * string, so *endptr is always '\0' here.  ERANGE still has to be
+	 * checked because strtol() reports long overflow that way; the
+	 * int-range and below-1 checks catch inputs that are valid as longs
+	 * but unacceptable as iteration counts.
+	 */
+	Assert(*endptr == '\0');
+	if (errno != 0 || val <= 0 || val > INT_MAX)
+		return false;
+	*iterations = (int) val;
+	return true;
 }
