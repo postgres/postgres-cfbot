@@ -1,0 +1,5 @@
+# test_scram extension
+comment = 'Test SCRAM helpers in src/common'
+default_version = '1.0'
+module_pathname = '$libdir/test_scram'
+relocatable = true
