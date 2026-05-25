@@ -1683,7 +1683,9 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
      and/or <command>ANALYZE</command> operations on this table following the rules
      discussed in <xref linkend="autovacuum"/>.
      If false, this table will not be autovacuumed, except to prevent
-     transaction ID wraparound. See <xref linkend="vacuum-for-wraparound"/> for
+     transaction ID wraparound.  In that case, only <command>VACUUM</command>
+     is performed; <command>ANALYZE</command> is skipped.
+     See <xref linkend="vacuum-for-wraparound"/> for
      more about wraparound prevention.
      Note that the autovacuum daemon does not run at all (except to prevent
      transaction ID wraparound) if the <xref linkend="guc-autovacuum"/>
