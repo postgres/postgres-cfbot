@@ -467,7 +467,7 @@ Excluded from publications:
 Number of partitions: 1 (Use \d+ to list them.)
 
 CREATE PUBLICATION testpub9 FOR ALL TABLES EXCEPT (TABLE testpub_part1);
-ERROR:  cannot specify relation "public.testpub_part1" in the publication EXCEPT clause
+ERROR:  cannot specify "public.testpub_part1" in the publication EXCEPT (TABLE) clause
 DETAIL:  This operation is not supported for individual partitions.
 CREATE TABLE tab_main (a int) PARTITION BY RANGE(a);
 -- Attaching a partition is not allowed if the partitioned table appears in a
@@ -480,8 +480,9 @@ RESET client_min_messages;
 DROP TABLE testpub_root, testpub_part1, tab_main;
 DROP PUBLICATION testpub8;
 --- Tests for publications with SEQUENCES
-CREATE SEQUENCE regress_pub_seq0;
-CREATE SEQUENCE pub_test.regress_pub_seq1;
+CREATE SEQUENCE regress_seq0;
+CREATE SEQUENCE pub_test.regress_seq1;
+CREATE SEQUENCE regress_seq2;
 -- FOR ALL SEQUENCES
 SET client_min_messages = 'ERROR';
 CREATE PUBLICATION regress_pub_forallsequences1 FOR ALL SEQUENCES;
@@ -492,8 +493,8 @@ SELECT pubname, puballtables, puballsequences FROM pg_publication WHERE pubname 
  regress_pub_forallsequences1 | f            | t
 (1 row)
 
-\d+ regress_pub_seq0
-                      Sequence "public.regress_pub_seq0"
+\d+ regress_seq0
+                        Sequence "public.regress_seq0"
   Type  | Start | Minimum |       Maximum       | Increment | Cycles? | Cache 
 --------+-------+---------+---------------------+-----------+---------+-------
  bigint |     1 |       1 | 9223372036854775807 |         1 | no      |     1
@@ -511,8 +512,8 @@ SET client_min_messages = 'ERROR';
 CREATE PUBLICATION regress_pub_forallsequences2 FOR ALL SEQUENCES;
 RESET client_min_messages;
 -- check that describe sequence lists both publications the sequence belongs to
-\d+ pub_test.regress_pub_seq1
-                     Sequence "pub_test.regress_pub_seq1"
+\d+ pub_test.regress_seq1
+                       Sequence "pub_test.regress_seq1"
   Type  | Start | Minimum |       Maximum       | Increment | Cycles? | Cache 
 --------+-------+---------+---------------------+-----------+---------+-------
  bigint |     1 |       1 | 9223372036854775807 |         1 | no      |     1
@@ -543,10 +544,92 @@ SELECT pubname, puballtables, puballsequences FROM pg_publication WHERE pubname 
  regress_publication_user | t          | t             | t       | f       | f       | f         | stored            | f        | 
 (1 row)
 
-DROP SEQUENCE regress_pub_seq0, pub_test.regress_pub_seq1;
+---------------------------------------------
+-- EXCEPT clause tests for sequences
+---------------------------------------------
+SET client_min_messages = 'ERROR';
+CREATE PUBLICATION regress_pub_forallsequences_except FOR ALL SEQUENCES EXCEPT (SEQUENCE regress_seq0, pub_test.regress_seq1, SEQUENCE regress_seq2);
+\dRp+ regress_pub_forallsequences_except
+                                                Publication regress_pub_forallsequences_except
+          Owner           | All tables | All sequences | Inserts | Updates | Deletes | Truncates | Generated columns | Via root | Description 
+--------------------------+------------+---------------+---------+---------+---------+-----------+-------------------+----------+-------------
+ regress_publication_user | f          | t             | t       | t       | t       | t         | none              | f        | 
+Except sequences:
+    "pub_test.regress_seq1"
+    "public.regress_seq0"
+    "public.regress_seq2"
+
+-- Check that the sequence description shows the publications where it is named
+-- in an EXCEPT clause
+\d+ regress_seq0
+                        Sequence "public.regress_seq0"
+  Type  | Start | Minimum |       Maximum       | Increment | Cycles? | Cache 
+--------+-------+---------+---------------------+-----------+---------+-------
+ bigint |     1 |       1 | 9223372036854775807 |         1 | no      |     1
+Included in publications:
+    "regress_pub_for_allsequences_alltables"
+    "regress_pub_forallsequences1"
+    "regress_pub_forallsequences2"
+Excluded from publications:
+    "regress_pub_forallsequences_except"
+
+-- Verify that an excluded sequence remains excluded after being moved to
+-- another schema.
+ALTER SEQUENCE regress_seq2 SET SCHEMA pub_test;
+\dRp+ regress_pub_forallsequences_except
+                                                Publication regress_pub_forallsequences_except
+          Owner           | All tables | All sequences | Inserts | Updates | Deletes | Truncates | Generated columns | Via root | Description 
+--------------------------+------------+---------------+---------+---------+---------+-----------+-------------------+----------+-------------
+ regress_publication_user | f          | t             | t       | t       | t       | t         | none              | f        | 
+Except sequences:
+    "pub_test.regress_seq1"
+    "pub_test.regress_seq2"
+    "public.regress_seq0"
+
+-- Test combination of ALL SEQUENCES and ALL TABLES each with an EXCEPT clause
+CREATE TABLE regress_tab1(a int);
+CREATE PUBLICATION regress_pub_for_allsequences_alltables_except FOR ALL TABLES EXCEPT (TABLE regress_tab1), ALL SEQUENCES EXCEPT (SEQUENCE regress_seq0);
+\dRp+ regress_pub_for_allsequences_alltables_except
+                                          Publication regress_pub_for_allsequences_alltables_except
+          Owner           | All tables | All sequences | Inserts | Updates | Deletes | Truncates | Generated columns | Via root | Description 
+--------------------------+------------+---------------+---------+---------+---------+-----------+-------------------+----------+-------------
+ regress_publication_user | t          | t             | t       | t       | t       | t         | none              | f        | 
+Except tables:
+    "public.regress_tab1"
+Except sequences:
+    "public.regress_seq0"
+
+RESET client_min_messages;
+-- fail - EXCEPT (SEQUENCE) clause must have SEQUENCE keyword
+CREATE PUBLICATION regress_pub_should_fail FOR ALL TABLES EXCEPT (regress_seq0, pub_test.regress_seq1);
+ERROR:  syntax error at or near "regress_seq0"
+LINE 1: ...ON regress_pub_should_fail FOR ALL TABLES EXCEPT (regress_se...
+                                                             ^
+-- fail - EXCEPT (SEQUENCE) clause specifies an unlogged sequence
+CREATE UNLOGGED SEQUENCE regress_seq_unlogged;
+CREATE PUBLICATION regress_pub_should_fail FOR ALL SEQUENCES EXCEPT (SEQUENCE regress_seq_unlogged);
+ERROR:  cannot specify "public.regress_seq_unlogged" in the publication EXCEPT (SEQUENCE) clause
+DETAIL:  This operation is not supported for unlogged sequences.
+-- fail - EXCEPT (SEQUENCE) clause specifies a temporary sequence
+CREATE TEMPORARY SEQUENCE regress_seq_temp;
+CREATE PUBLICATION regress_pub_should_fail FOR ALL SEQUENCES EXCEPT (SEQUENCE regress_seq_temp);
+ERROR:  cannot specify "pg_temp.regress_seq_temp" in the publication EXCEPT (SEQUENCE) clause
+DETAIL:  This operation is not supported for temporary sequences.
+-- fail - EXCEPT (TABLE) clause specifies a sequence object
+CREATE PUBLICATION regress_pub_should_fail FOR ALL TABLES EXCEPT (TABLE regress_seq0);
+ERROR:  cannot specify "public.regress_seq0" in the publication EXCEPT (TABLE) clause
+DETAIL:  This operation is not supported for sequences.
+-- fail - EXCEPT (SEQUENCE) clause specifies a table object
+CREATE PUBLICATION regress_pub_should_fail FOR ALL SEQUENCES EXCEPT (SEQUENCE regress_tab1);
+ERROR:  cannot specify "public.regress_tab1" in the publication EXCEPT (SEQUENCE) clause
+DETAIL:  This operation is not supported for tables.
+DROP SEQUENCE regress_seq0, pub_test.regress_seq1, pub_test.regress_seq2, regress_seq_unlogged, regress_seq_temp;
 DROP PUBLICATION regress_pub_forallsequences1;
 DROP PUBLICATION regress_pub_forallsequences2;
+DROP PUBLICATION regress_pub_forallsequences_except;
 DROP PUBLICATION regress_pub_for_allsequences_alltables;
+DROP PUBLICATION regress_pub_for_allsequences_alltables_except;
+DROP TABLE regress_tab1;
 -- fail - Specifying ALL TABLES more than once
 CREATE PUBLICATION regress_pub_for_allsequences_alltables FOR ALL SEQUENCES, ALL TABLES, ALL TABLES;
 ERROR:  invalid publication object list

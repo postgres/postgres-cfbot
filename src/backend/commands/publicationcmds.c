@@ -61,11 +61,11 @@ typedef struct rf_context
 	Oid			parentid;		/* relid of the parent relation */
 } rf_context;
 
-static List *OpenTableList(List *tables);
-static void CloseTableList(List *rels);
+static List *OpenRelationList(List *rels);
+static void CloseRelationList(List *rels);
 static void LockSchemaList(List *schemalist);
-static void PublicationAddTables(Oid pubid, List *rels, bool if_not_exists,
-								 AlterPublicationStmt *stmt);
+static void PublicationAddRelations(Oid pubid, List *rels, bool if_not_exists,
+									AlterPublicationStmt *stmt, char pubrelkind);
 static void PublicationDropTables(Oid pubid, List *rels, bool missing_ok);
 static void PublicationAddSchemas(Oid pubid, List *schemas, bool if_not_exists,
 								  AlterPublicationStmt *stmt);
@@ -176,12 +176,13 @@ parse_publication_options(ParseState *pstate,
 }
 
 /*
- * Convert the PublicationObjSpecType list into schema oid list and
- * PublicationTable list.
+ * Convert the PublicationObjSpecType list into PublicationRelation lists
+ * (`rels`, `excepttbls`, `exceptseqs`) and a schema oid list (`schemas`).
  */
 static void
 ObjectsInPublicationToOids(List *pubobjspec_list, ParseState *pstate,
-						   List **rels, List **exceptrels, List **schemas)
+						   List **rels, List **excepttbls, List **exceptseqs,
+						   List **schemas)
 {
 	ListCell   *cell;
 	PublicationObjSpec *pubobj;
@@ -199,12 +200,16 @@ ObjectsInPublicationToOids(List *pubobjspec_list, ParseState *pstate,
 		switch (pubobj->pubobjtype)
 		{
 			case PUBLICATIONOBJ_EXCEPT_TABLE:
-				pubobj->pubtable->except = true;
-				*exceptrels = lappend(*exceptrels, pubobj->pubtable);
+				pubobj->pubrelation->except = true;
+				*excepttbls = lappend(*excepttbls, pubobj->pubrelation);
+				break;
+			case PUBLICATIONOBJ_EXCEPT_SEQUENCE:
+				pubobj->pubrelation->except = true;
+				*exceptseqs = lappend(*exceptseqs, pubobj->pubrelation);
 				break;
 			case PUBLICATIONOBJ_TABLE:
-				pubobj->pubtable->except = false;
-				*rels = lappend(*rels, pubobj->pubtable);
+				pubobj->pubrelation->except = false;
+				*rels = lappend(*rels, pubobj->pubrelation);
 				break;
 			case PUBLICATIONOBJ_TABLES_IN_SCHEMA:
 				schemaid = get_namespace_oid(pubobj->name, false);
@@ -849,7 +854,8 @@ CreatePublication(ParseState *pstate, CreatePublicationStmt *stmt)
 	char		publish_generated_columns;
 	AclResult	aclresult;
 	List	   *relations = NIL;
-	List	   *exceptrelations = NIL;
+	List	   *excepttbls = NIL;
+	List	   *exceptseqs = NIL;
 	List	   *schemaidlist = NIL;
 
 	/* must have CREATE privilege on database */
@@ -936,18 +942,29 @@ CreatePublication(ParseState *pstate, CreatePublicationStmt *stmt)
 
 	/* Associate objects with the publication. */
 	ObjectsInPublicationToOids(stmt->pubobjects, pstate, &relations,
-							   &exceptrelations, &schemaidlist);
+							   &excepttbls, &exceptseqs, &schemaidlist);
+
+	if (stmt->for_all_sequences)
+	{
+		/* Process EXCEPT sequence list */
+		if (exceptseqs != NIL)
+		{
+			List	   *rels = OpenRelationList(exceptseqs);
+
+			PublicationAddRelations(puboid, rels, true, NULL, RELKIND_SEQUENCE);
+			CloseRelationList(rels);
+		}
+	}
 
 	if (stmt->for_all_tables)
 	{
 		/* Process EXCEPT table list */
-		if (exceptrelations != NIL)
+		if (excepttbls != NIL)
 		{
-			List	   *rels;
+			List	   *rels = OpenRelationList(excepttbls);
 
-			rels = OpenTableList(exceptrelations);
-			PublicationAddTables(puboid, rels, true, NULL);
-			CloseTableList(rels);
+			PublicationAddRelations(puboid, rels, true, NULL, RELKIND_RELATION);
+			CloseRelationList(rels);
 		}
 
 		/*
@@ -969,7 +986,7 @@ CreatePublication(ParseState *pstate, CreatePublicationStmt *stmt)
 		{
 			List	   *rels;
 
-			rels = OpenTableList(relations);
+			rels = OpenRelationList(relations);
 			TransformPubWhereClauses(rels, pstate->p_sourcetext,
 									 publish_via_partition_root);
 
@@ -977,8 +994,8 @@ CreatePublication(ParseState *pstate, CreatePublicationStmt *stmt)
 									   schemaidlist != NIL,
 									   publish_via_partition_root);
 
-			PublicationAddTables(puboid, rels, true, NULL);
-			CloseTableList(rels);
+			PublicationAddRelations(puboid, rels, true, NULL, RELKIND_RELATION);
+			CloseRelationList(rels);
 		}
 
 		if (schemaidlist != NIL)
@@ -1255,7 +1272,7 @@ AlterPublicationTables(AlterPublicationStmt *stmt, HeapTuple tup,
 	if (!tables && stmt->action != AP_SetObjects)
 		return;
 
-	rels = OpenTableList(tables);
+	rels = OpenRelationList(tables);
 
 	if (stmt->action == AP_AddObjects)
 	{
@@ -1266,7 +1283,7 @@ AlterPublicationTables(AlterPublicationStmt *stmt, HeapTuple tup,
 		CheckPubRelationColumnList(stmt->pubname, rels, publish_schema,
 								   pubform->pubviaroot);
 
-		PublicationAddTables(pubid, rels, false, stmt);
+		PublicationAddRelations(pubid, rels, false, stmt, RELKIND_RELATION);
 	}
 	else if (stmt->action == AP_DropObjects)
 		PublicationDropTables(pubid, rels, false);
@@ -1289,8 +1306,8 @@ AlterPublicationTables(AlterPublicationStmt *stmt, HeapTuple tup,
 			 */
 			if (pubform->puballtables)
 			{
-				oldrelids = GetExcludedPublicationTables(pubid,
-														 PUBLICATION_PART_ROOT);
+				oldrelids = GetExcludedPublicationRelations(pubid,
+															PUBLICATION_PART_ROOT);
 			}
 		}
 		else
@@ -1363,8 +1380,8 @@ AlterPublicationTables(AlterPublicationStmt *stmt, HeapTuple tup,
 				/*
 				 * Validate the column list.  If the column list or WHERE
 				 * clause changes, then the validation done here will be
-				 * duplicated inside PublicationAddTables().  The validation
-				 * is cheap enough that that seems harmless.
+				 * duplicated inside PublicationAddRelations().  The
+				 * validation is cheap enough that that seems harmless.
 				 */
 				newcolumns = pub_collist_validate(newpubrel->relation,
 												  newpubrel->columns);
@@ -1410,12 +1427,12 @@ AlterPublicationTables(AlterPublicationStmt *stmt, HeapTuple tup,
 		 * Don't bother calculating the difference for adding, we'll catch and
 		 * skip existing ones when doing catalog update.
 		 */
-		PublicationAddTables(pubid, rels, true, stmt);
+		PublicationAddRelations(pubid, rels, true, stmt, RELKIND_RELATION);
 
-		CloseTableList(delrels);
+		CloseRelationList(delrels);
 	}
 
-	CloseTableList(rels);
+	CloseRelationList(rels);
 }
 
 /*
@@ -1651,7 +1668,7 @@ AlterPublicationAllFlags(AlterPublicationStmt *stmt, Relation rel,
  * Alter the existing publication.
  *
  * This is dispatcher function for AlterPublicationOptions,
- * AlterPublicationSchemas and AlterPublicationTables.
+ * AlterPublicationSchemas and AlterPublicationRelations.
  */
 void
 AlterPublication(ParseState *pstate, AlterPublicationStmt *stmt)
@@ -1683,12 +1700,15 @@ AlterPublication(ParseState *pstate, AlterPublicationStmt *stmt)
 	else
 	{
 		List	   *relations = NIL;
-		List	   *exceptrelations = NIL;
+		List	   *excepttbls = NIL;
+		List	   *exceptseqs = NIL;
 		List	   *schemaidlist = NIL;
 		Oid			pubid = pubform->oid;
 
 		ObjectsInPublicationToOids(stmt->pubobjects, pstate, &relations,
-								   &exceptrelations, &schemaidlist);
+								   &excepttbls, &exceptseqs, &schemaidlist);
+
+		Assert(exceptseqs == NIL);
 
 		CheckAlterPublication(stmt, tup, relations, schemaidlist);
 
@@ -1711,7 +1731,7 @@ AlterPublication(ParseState *pstate, AlterPublicationStmt *stmt)
 					errmsg("publication \"%s\" does not exist",
 						   stmt->pubname));
 
-		relations = list_concat(relations, exceptrelations);
+		relations = list_concat(relations, excepttbls);
 		AlterPublicationTables(stmt, tup, relations, pstate->p_sourcetext,
 							   schemaidlist != NIL);
 		AlterPublicationSchemas(stmt, tup, schemaidlist);
@@ -1830,15 +1850,15 @@ RemovePublicationSchemaById(Oid psoid)
 }
 
 /*
- * Open relations specified by a PublicationTable list.
- * The returned tables are locked in ShareUpdateExclusiveLock mode in order to
- * add them to a publication.
+ * Open relations specified by a PublicationRelation list.
+ * The returned relations are locked in ShareUpdateExclusiveLock mode in order
+ * to add them to a publication.
  */
 static List *
-OpenTableList(List *tables)
+OpenRelationList(List *rels)
 {
 	List	   *relids = NIL;
-	List	   *rels = NIL;
+	List	   *pub_rels = NIL;
 	ListCell   *lc;
 	List	   *relids_with_rf = NIL;
 	List	   *relids_with_collist = NIL;
@@ -1846,9 +1866,9 @@ OpenTableList(List *tables)
 	/*
 	 * Open, share-lock, and check all the explicitly-specified relations
 	 */
-	foreach(lc, tables)
+	foreach(lc, rels)
 	{
-		PublicationTable *t = lfirst_node(PublicationTable, lc);
+		PublicationRelation *t = lfirst_node(PublicationRelation, lc);
 		bool		recurse = t->relation->inh;
 		Relation	rel;
 		Oid			myrelid;
@@ -1892,7 +1912,7 @@ OpenTableList(List *tables)
 		pub_rel->whereClause = t->whereClause;
 		pub_rel->columns = t->columns;
 		pub_rel->except = t->except;
-		rels = lappend(rels, pub_rel);
+		pub_rels = lappend(pub_rels, pub_rel);
 		relids = lappend_oid(relids, myrelid);
 
 		if (t->whereClause)
@@ -1965,7 +1985,7 @@ OpenTableList(List *tables)
 				/* child inherits column list from parent */
 				pub_rel->columns = t->columns;
 				pub_rel->except = t->except;
-				rels = lappend(rels, pub_rel);
+				pub_rels = lappend(pub_rels, pub_rel);
 				relids = lappend_oid(relids, childrelid);
 
 				if (t->whereClause)
@@ -1977,14 +1997,14 @@ OpenTableList(List *tables)
 		}
 	}
 
-	return rels;
+	return pub_rels;
 }
 
 /*
  * Close all relations in the list.
  */
 static void
-CloseTableList(List *rels)
+CloseRelationList(List *rels)
 {
 	ListCell   *lc;
 
@@ -2029,11 +2049,15 @@ LockSchemaList(List *schemalist)
 }
 
 /*
- * Add listed tables to the publication.
+ * Add listed relations to the publication.
+ *
+ * 'pubrelkind' is the relkind accepted by the publication clause.
+ * The relkind of each relation in 'rels' is checked for compatibility
+ * against it.
  */
 static void
-PublicationAddTables(Oid pubid, List *rels, bool if_not_exists,
-					 AlterPublicationStmt *stmt)
+PublicationAddRelations(Oid pubid, List *rels, bool if_not_exists,
+						AlterPublicationStmt *stmt, char pubrelkind)
 {
 	ListCell   *lc;
 
@@ -2043,12 +2067,12 @@ PublicationAddTables(Oid pubid, List *rels, bool if_not_exists,
 		Relation	rel = pub_rel->relation;
 		ObjectAddress obj;
 
-		/* Must be owner of the table or superuser. */
+		/* Must be owner of the relation or superuser. */
 		if (!object_ownercheck(RelationRelationId, RelationGetRelid(rel), GetUserId()))
 			aclcheck_error(ACLCHECK_NOT_OWNER, get_relkind_objtype(rel->rd_rel->relkind),
 						   RelationGetRelationName(rel));
 
-		obj = publication_add_relation(pubid, pub_rel, if_not_exists, stmt);
+		obj = publication_add_relation(pubid, pub_rel, if_not_exists, stmt, pubrelkind);
 		if (stmt)
 		{
 			EventTriggerCollectSimpleCommand(obj, InvalidObjectAddress,
