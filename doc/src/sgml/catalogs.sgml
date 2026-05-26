@@ -7099,7 +7099,7 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
        (references <link linkend="catalog-pg-class"><structname>pg_class</structname></link>.<structfield>oid</structfield>)
       </para>
       <para>
-       Reference to table
+       Reference to table or sequence
       </para></entry>
      </row>
 
@@ -7108,8 +7108,8 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
       <structfield>prexcept</structfield> <type>bool</type>
       </para>
       <para>
-       True if the table is excluded from the publication. See
-       <link linkend="sql-createpublication-params-for-except-table"><literal>EXCEPT</literal></link>.
+       True if the table or sequence is excluded from the publication. See
+       <link linkend="sql-createpublication-params-for-except"><literal>EXCEPT</literal></link>.
       </para></entry>
      </row>
 
@@ -7118,7 +7118,7 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
       <structfield>prqual</structfield> <type>pg_node_tree</type>
       </para>
       <para>Expression tree (in <function>nodeToString()</function>
-      representation) for the relation's publication qualifying condition. Null
+      representation) for the table's publication qualifying condition. Null
       if there is no publication qualifying condition.</para></entry>
      </row>
 
@@ -7131,7 +7131,8 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
        This is an array of values that indicates which table columns are
        part of the publication.  For example, a value of <literal>1 3</literal>
        would mean that the first and the third table columns are published.
-       A null value indicates that all columns are published.
+       For tables, a null value indicates that all columns are published.
+       For sequences, this field is always null.
       </para></entry>
      </row>
     </tbody>

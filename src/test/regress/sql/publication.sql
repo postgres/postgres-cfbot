@@ -223,8 +223,9 @@ DROP TABLE testpub_root, testpub_part1, tab_main;
 DROP PUBLICATION testpub8;
 
 --- Tests for publications with SEQUENCES
-CREATE SEQUENCE regress_pub_seq0;
-CREATE SEQUENCE pub_test.regress_pub_seq1;
+CREATE SEQUENCE regress_seq0;
+CREATE SEQUENCE pub_test.regress_seq1;
+CREATE SEQUENCE regress_seq2;
 
 -- FOR ALL SEQUENCES
 SET client_min_messages = 'ERROR';
@@ -232,7 +233,7 @@ CREATE PUBLICATION regress_pub_forallsequences1 FOR ALL SEQUENCES;
 RESET client_min_messages;
 
 SELECT pubname, puballtables, puballsequences FROM pg_publication WHERE pubname = 'regress_pub_forallsequences1';
-\d+ regress_pub_seq0
+\d+ regress_seq0
 \dRp+ regress_pub_forallsequences1
 
 SET client_min_messages = 'ERROR';
@@ -240,7 +241,7 @@ CREATE PUBLICATION regress_pub_forallsequences2 FOR ALL SEQUENCES;
 RESET client_min_messages;
 
 -- check that describe sequence lists both publications the sequence belongs to
-\d+ pub_test.regress_pub_seq1
+\d+ pub_test.regress_seq1
 
 --- Specifying both ALL TABLES and ALL SEQUENCES
 SET client_min_messages = 'ERROR';
@@ -255,10 +256,51 @@ RESET client_min_messages;
 SELECT pubname, puballtables, puballsequences FROM pg_publication WHERE pubname = 'regress_pub_for_allsequences_alltables';
 \dRp+ regress_pub_for_allsequences_alltables
 
-DROP SEQUENCE regress_pub_seq0, pub_test.regress_pub_seq1;
+---------------------------------------------
+-- EXCEPT clause tests for sequences
+---------------------------------------------
+SET client_min_messages = 'ERROR';
+CREATE PUBLICATION regress_pub_forallsequences_except FOR ALL SEQUENCES EXCEPT (SEQUENCE regress_seq0, pub_test.regress_seq1, SEQUENCE regress_seq2);
+\dRp+ regress_pub_forallsequences_except
+-- Check that the sequence description shows the publications where it is named
+-- in an EXCEPT clause
+\d+ regress_seq0
+
+-- Verify that an excluded sequence remains excluded after being moved to
+-- another schema.
+ALTER SEQUENCE regress_seq2 SET SCHEMA pub_test;
+\dRp+ regress_pub_forallsequences_except
+
+-- Test combination of ALL SEQUENCES and ALL TABLES each with an EXCEPT clause
+CREATE TABLE regress_tab1(a int);
+CREATE PUBLICATION regress_pub_for_allsequences_alltables_except FOR ALL TABLES EXCEPT (TABLE regress_tab1), ALL SEQUENCES EXCEPT (SEQUENCE regress_seq0);
+\dRp+ regress_pub_for_allsequences_alltables_except
+RESET client_min_messages;
+
+-- fail - EXCEPT (SEQUENCE) clause must have SEQUENCE keyword
+CREATE PUBLICATION regress_pub_should_fail FOR ALL TABLES EXCEPT (regress_seq0, pub_test.regress_seq1);
+
+-- fail - EXCEPT (SEQUENCE) clause specifies an unlogged sequence
+CREATE UNLOGGED SEQUENCE regress_seq_unlogged;
+CREATE PUBLICATION regress_pub_should_fail FOR ALL SEQUENCES EXCEPT (SEQUENCE regress_seq_unlogged);
+
+-- fail - EXCEPT (SEQUENCE) clause specifies a temporary sequence
+CREATE TEMPORARY SEQUENCE regress_seq_temp;
+CREATE PUBLICATION regress_pub_should_fail FOR ALL SEQUENCES EXCEPT (SEQUENCE regress_seq_temp);
+
+-- fail - EXCEPT (TABLE) clause specifies a sequence object
+CREATE PUBLICATION regress_pub_should_fail FOR ALL TABLES EXCEPT (TABLE regress_seq0);
+
+-- fail - EXCEPT (SEQUENCE) clause specifies a table object
+CREATE PUBLICATION regress_pub_should_fail FOR ALL SEQUENCES EXCEPT (SEQUENCE regress_tab1);
+
+DROP SEQUENCE regress_seq0, pub_test.regress_seq1, pub_test.regress_seq2, regress_seq_unlogged, regress_seq_temp;
 DROP PUBLICATION regress_pub_forallsequences1;
 DROP PUBLICATION regress_pub_forallsequences2;
+DROP PUBLICATION regress_pub_forallsequences_except;
 DROP PUBLICATION regress_pub_for_allsequences_alltables;
+DROP PUBLICATION regress_pub_for_allsequences_alltables_except;
+DROP TABLE regress_tab1;
 
 -- fail - Specifying ALL TABLES more than once
 CREATE PUBLICATION regress_pub_for_allsequences_alltables FOR ALL SEQUENCES, ALL TABLES, ALL TABLES;
