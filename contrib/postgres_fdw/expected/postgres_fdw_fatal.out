@@ -1,0 +1,68 @@
+-- ===================================================================
+-- reestablish a connection broken while idle
+-- ===================================================================
+-- When a cached connection's remote backend goes away while the connection
+-- sits idle, postgres_fdw should transparently reconnect at the start of a new
+-- remote transaction, but must fail (not reconnect) when starting a remote
+-- subtransaction.  The SQLSTATE of that failure depends on whether the server's
+-- FATAL message reaches us before the dead connection is reset, which varies by
+-- platform, so this test has alternative expected outputs and lives on its own.
+SELECT current_database() AS current_database,
+  current_setting('port') AS current_port \gset
+-- Use a dedicated server with a distinctive application_name so we can find and
+-- terminate exactly this test's remote backend.
+CREATE SERVER fdw_retry_server FOREIGN DATA WRAPPER postgres_fdw
+  OPTIONS (dbname :'current_database', port :'current_port',
+           application_name 'fdw_retry_check');
+CREATE USER MAPPING FOR CURRENT_USER SERVER fdw_retry_server;
+CREATE TABLE fdw_retry_local (c1 int);
+INSERT INTO fdw_retry_local VALUES (1);
+CREATE FOREIGN TABLE fdw_retry_ft (c1 int)
+  SERVER fdw_retry_server OPTIONS (table_name 'fdw_retry_local');
+-- Make sure we have a remote connection.
+SELECT 1 FROM fdw_retry_ft LIMIT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+-- Terminate the remote connection and wait for the termination to complete.
+-- (If a cache flush happens, the remote connection might have already been
+-- dropped; so code this step in a way that doesn't fail if no connection.)
+DO $$ BEGIN
+PERFORM pg_terminate_backend(pid, 180000) FROM pg_stat_activity
+	WHERE application_name = 'fdw_retry_check';
+END $$;
+-- This query should detect the broken connection when starting a new remote
+-- transaction, reestablish a new connection, and then succeed.
+BEGIN;
+SELECT 1 FROM fdw_retry_ft LIMIT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+-- If we detect the broken connection when starting a new remote
+-- subtransaction, we should fail instead of establishing a new connection.
+-- Terminate the remote connection and wait for the termination to complete.
+DO $$ BEGIN
+PERFORM pg_terminate_backend(pid, 180000) FROM pg_stat_activity
+	WHERE application_name = 'fdw_retry_check';
+END $$;
+SAVEPOINT s;
+-- This should fail.  On most platforms libpq receives the server's FATAL
+-- message before the dead connection is torn down, so we report it verbatim
+-- ("terminating connection due to administrator command") -- in particular
+-- without the bogus "server closed the connection unexpectedly" text.  The
+-- exact message and SQLSTATE can differ on platforms where the connection is
+-- reset before the message arrives (e.g. Windows), so this test has
+-- alternative expected output files.
+SELECT 1 FROM fdw_retry_ft LIMIT 1;    -- should fail
+ERROR:  terminating connection due to administrator command
+CONTEXT:  remote SQL command: SAVEPOINT s2
+COMMIT;
+-- Clean up
+DROP FOREIGN TABLE fdw_retry_ft;
+DROP TABLE fdw_retry_local;
+DROP USER MAPPING FOR CURRENT_USER SERVER fdw_retry_server;
+DROP SERVER fdw_retry_server;
