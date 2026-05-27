@@ -7077,10 +7077,9 @@ FROM pg_stat_get_backend_idset() AS backendid;
        <structfield>tuples_skipped</structfield> <type>bigint</type>
       </para>
       <para>
-       Number of tuples skipped because they contain malformed data.
-       This counter only advances when
-       <literal>ignore</literal> is specified to the <literal>ON_ERROR</literal>
-       option.
+       Number of tuples skipped because they contain malformed data or constraint violations (unique or exclusion).
+       This counter advances when <literal>ignore</literal> is specified to the <literal>ON_ERROR</literal>
+       option or <literal>table</literal> is specified to the <literal>ON_CONFLICT</literal> option.
       </para></entry>
      </row>
     </tbody>

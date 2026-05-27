@@ -94,9 +94,13 @@ typedef struct CopyFormatOptions
 	bool	   *force_null_flags;	/* per-column CSV FN flags */
 	bool		convert_selectively;	/* do selective binary conversion? */
 	CopyOnErrorChoice on_error; /* what to do when error happened */
+	OnConflictAction on_conflict;	/* what to do when unique conflict
+									 * happened */
 	CopyLogVerbosityChoice log_verbosity;	/* verbosity of logged messages */
 	int64		reject_limit;	/* maximum tolerable number of errors */
 	List	   *convert_select; /* list of column names (can be NIL) */
+	char	   *on_conflictRel; /* Name of the table used to log details of
+								 * unique constraint violations. */
 } CopyFormatOptions;
 
 /* These are private in commands/copy[from|to].c */

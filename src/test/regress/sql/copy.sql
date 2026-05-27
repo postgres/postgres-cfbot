@@ -380,6 +380,17 @@ copy tab_progress_reporting from :'filename'
 	where (salary < 2000);
 
 -- Generate COPY FROM report with PIPE, with some skipped tuples.
+create unique index tab_progress_reporting_idx1 on tab_progress_reporting(name);
+create temp table conflict_tbl(copy_tbl oid, filename text, lineno bigint, line text);
+copy tab_progress_reporting from stdin(on_conflict table, conflict_table 'conflict_tbl');
+sharon	25	(115,12)	1000	sam
+bill	20	(111,10)	1000	sharon
+bill	20	(111,10)	1000	sharon
+\.
+drop index tab_progress_reporting_idx1;
+drop table conflict_tbl;
+
+-- Generate COPY FROM report with PIPE, with some skipped tuples.
 copy tab_progress_reporting from stdin(on_error ignore);
 sharon	x	(15,12)	x	sam
 sharon	25	(15,12)	1000	sam

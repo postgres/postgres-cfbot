@@ -439,6 +439,14 @@ copy tab_progress_reporting from :'filename'
 	where (salary < 2000);
 INFO:  progress: {"type": "FILE", "command": "COPY FROM", "relname": "tab_progress_reporting", "tuples_skipped": 0, "has_bytes_total": true, "tuples_excluded": 1, "tuples_processed": 2, "has_bytes_processed": true}
 -- Generate COPY FROM report with PIPE, with some skipped tuples.
+create unique index tab_progress_reporting_idx1 on tab_progress_reporting(name);
+create temp table conflict_tbl(copy_tbl oid, filename text, lineno bigint, line text);
+copy tab_progress_reporting from stdin(on_conflict table, conflict_table 'conflict_tbl');
+NOTICE:  3 rows were saved to conflict table "conflict_tbl" due to unique constraint violation
+INFO:  progress: {"type": "PIPE", "command": "COPY FROM", "relname": "tab_progress_reporting", "tuples_skipped": 3, "has_bytes_total": false, "tuples_excluded": 0, "tuples_processed": 0, "has_bytes_processed": true}
+drop index tab_progress_reporting_idx1;
+drop table conflict_tbl;
+-- Generate COPY FROM report with PIPE, with some skipped tuples.
 copy tab_progress_reporting from stdin(on_error ignore);
 NOTICE:  2 rows were skipped due to data type incompatibility
 INFO:  progress: {"type": "PIPE", "command": "COPY FROM", "relname": "tab_progress_reporting", "tuples_skipped": 2, "has_bytes_total": false, "tuples_excluded": 0, "tuples_processed": 1, "has_bytes_processed": true}

@@ -562,6 +562,36 @@ defGetCopyLogVerbosityChoice(DefElem *def, ParseState *pstate)
 }
 
 /*
+ * Extract an OnConflictAction value from a DefElem.
+ */
+static OnConflictAction
+defGetCopyOnConflictChoice(DefElem *def, ParseState *pstate, bool is_from)
+{
+	char	   *sval;
+
+	sval = defGetString(def);
+
+	if (!is_from)
+		ereport(ERROR,
+				errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				errmsg("COPY %s cannot be used with %s", "ON_CONFLICT", "COPY TO"),
+				parser_errposition(pstate, def->location));
+
+	if (pg_strcasecmp(sval, "stop") == 0)
+		return ONCONFLICT_NONE;
+	else if (pg_strcasecmp(sval, "table") == 0)
+		return ONCONFLICT_TABLE;
+
+	ereport(ERROR,
+			errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+	/*- translator: first %s is the name of a COPY option, e.g. ON_ERROR */
+			errmsg("COPY %s \"%s\" not recognized", "ON_CONFLICT", sval),
+			parser_errposition(pstate, def->location));
+
+	return ONCONFLICT_NONE;		/* keep compiler quiet */
+}
+
+/*
  * Process the statement option list for COPY.
  *
  * Scan the options list (a list of DefElem) and transpose the information
@@ -587,9 +617,11 @@ ProcessCopyOptions(ParseState *pstate,
 	bool		freeze_specified = false;
 	bool		header_specified = false;
 	bool		on_error_specified = false;
+	bool		conflict_rel_specified = false;
 	bool		log_verbosity_specified = false;
 	bool		reject_limit_specified = false;
 	bool		force_array_specified = false;
+	bool		on_conflict_specified = false;
 	ListCell   *option;
 
 	/* Support external use for option sanity checking */
@@ -599,6 +631,7 @@ ProcessCopyOptions(ParseState *pstate,
 	opts_out->file_encoding = -1;
 	/* default format */
 	opts_out->format = COPY_FORMAT_TEXT;
+	opts_out->on_conflict = ONCONFLICT_NONE;
 
 	/* Extract options from the statement node tree */
 	foreach(option, options)
@@ -774,12 +807,47 @@ ProcessCopyOptions(ParseState *pstate,
 			reject_limit_specified = true;
 			opts_out->reject_limit = defGetCopyRejectLimitOption(defel);
 		}
+		else if (strcmp(defel->defname, "on_conflict") == 0)
+		{
+			if (on_conflict_specified)
+				errorConflictingDefElem(defel, pstate);
+			on_conflict_specified = true;
+			opts_out->on_conflict = defGetCopyOnConflictChoice(defel, pstate, is_from);
+		}
+		else if (strcmp(defel->defname, "conflict_table") == 0)
+		{
+			if (conflict_rel_specified)
+				errorConflictingDefElem(defel, pstate);
+			conflict_rel_specified = true;
+
+			opts_out->on_conflictRel = defGetString(defel);
+		}
 		else
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
 					 errmsg("option \"%s\" not recognized",
 							defel->defname),
 					 parser_errposition(pstate, defel->location)));
+	}
+
+	/* Check CONFLICT_TABLE and ON_CONFLICT option */
+	if (opts_out->on_conflict != ONCONFLICT_TABLE)
+	{
+		if (conflict_rel_specified)
+			ereport(ERROR,
+					errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					errmsg("COPY %s requires %s option specified as TABLE", "CONFLICT_TABLE", "ON_CONFLICT"));
+	}
+	else
+	{
+		if (!conflict_rel_specified)
+			ereport(ERROR,
+					errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					errmsg("COPY %s requires %s option", "ON_CONFLICT", "CONFLICT_TABLE"));
+		else if (opts_out->format == COPY_FORMAT_BINARY)
+			ereport(ERROR,
+					errcode(ERRCODE_SYNTAX_ERROR),
+					errmsg("only ON_CONFLICT STOP is allowed in BINARY mode"));
 	}
 
 	/*
