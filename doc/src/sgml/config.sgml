@@ -8480,6 +8480,74 @@ log_line_prefix = '%m [%p] %q%u@%d/%a '
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-log-postmaster-excess-connections" xreflabel="log_postmaster_excess_connections">
+      <term><varname>log_postmaster_excess_connections</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>log_postmaster_excess_connections</varname></primary>
+       <secondary>configuration parameter</secondary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        If set to a positive value, the postmaster checks once per second
+        how many new connections it accepted during that second, and if
+        that rate exceeds this many connections per second, emits the same
+        <literal>LOG</literal>-level message as
+        <xref linkend="guc-log-postmaster-overloads"/> does.  This can help
+        detect cconnection storms even in cases where the postmaster is not
+        overloaded.
+       </para>
+       <para>
+        The default is <literal>0</literal>, which disables this check.
+        This parameter can only be set in the
+        <filename>postgresql.conf</filename> file or on the server
+        command line.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-log-postmaster-overloads" xreflabel="log_postmaster_overloads">
+      <term><varname>log_postmaster_overloads</varname> (<type>boolean</type>)
+      <indexterm>
+       <primary><varname>log_postmaster_overloads</varname></primary>
+       <secondary>configuration parameter</secondary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        If enabled, the postmaster checks its own resource usage every
+        second, and if it has used more than 75% of one CPU core during
+        that second, emits a message at <literal>LOG</literal> level
+        summarizing its recent activity. Since by the design the postmaster is
+        single process handling all new connections (or parallel workers),
+        constant CPU usage above this threshold indicates that it may
+        be struggling to keep up, typically because of a very high
+        rate of incoming connection attempts.  A sample message looks like:
+        <screen>
+            postmaster potentially overloaded, stats: avg 2905.00 conns/sec; 2904.00 disconns/sec; 0.00 parallel workers started/sec;
+            CPU: user: 0.01 s, system: 0.97 s, elapsed: 1.00
+        </screen>
+        Note that a single parallel query may register multiple workers. The
+        final <literal>CPU</literal> portion reports postmaster process
+        resource usage over the same window (over 1 second).  See also
+        <xref linkend="guc-log-postmaster-excess-connections"/>, which emits
+        the same message based just on the incoming connection rate.
+       </para>
+       <para>
+        The default is <literal>off</literal>.  This parameter can only be
+        set in the <filename>postgresql.conf</filename> file or on the
+        server command line.
+       </para>
+       <tip>
+        <para>
+        If you are receiving warnings about potentially overloaded postmaster,
+        be sure to investigate the application, their connection pools and usage
+        of independent connection poolers. Be also sure to double-check if the
+        huge pages are used and if the OS is not being overloaded.
+        </para>
+       </tip>
+      </listitem>
+     </varlistentry>
 
      <varlistentry id="guc-log-recovery-conflict-waits" xreflabel="log_recovery_conflict_waits">
       <term><varname>log_recovery_conflict_waits</varname> (<type>boolean</type>)
