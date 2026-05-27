@@ -48,6 +48,7 @@ extern void ReportBackgroundWorkerExit(RegisteredBgWorker *rw);
 extern void BackgroundWorkerStopNotifications(pid_t pid);
 extern void ForgetUnstartedBackgroundWorkers(void);
 extern void ResetBackgroundWorkerCrashTimes(void);
+extern uint32 GetParallelWorkerRegisterCount(void);
 
 /* Entry point for background worker processes */
 pg_noreturn extern void BackgroundWorkerMain(const void *startup_data, size_t startup_data_len);
