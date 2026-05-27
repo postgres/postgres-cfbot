@@ -22,15 +22,40 @@ max_wal_size = 4MB
 log_checkpoints = yes
 ));
 $node_primary->start;
+
+# A slot that has not reserved WAL has no meaningful WAL availability or
+# remaining safe WAL size, even when max_slot_wal_keep_size is finite.
+$node_primary->safe_psql('postgres',
+	"ALTER SYSTEM SET max_slot_wal_keep_size TO '6MB'; SELECT pg_reload_conf();"
+);
+$node_primary->safe_psql('postgres',
+	"SELECT pg_create_physical_replication_slot('rep_unreserved')");
+
+my $result = $node_primary->safe_psql(
+	'postgres',
+	qq[
+	SELECT restart_lsn IS NULL, wal_status IS NULL, safe_wal_size IS NULL
+	FROM pg_replication_slots WHERE slot_name = 'rep_unreserved']);
+is($result, "t|t|t",
+	'check non-reserved slot state with finite max_slot_wal_keep_size');
+
+$node_primary->safe_psql('postgres',
+	"SELECT pg_drop_replication_slot('rep_unreserved')");
+$node_primary->safe_psql('postgres',
+	"ALTER SYSTEM RESET max_slot_wal_keep_size; SELECT pg_reload_conf();");
+
 $node_primary->safe_psql('postgres',
 	"SELECT pg_create_physical_replication_slot('rep1')");
 
 # The slot state and remain should be null before the first connection
-my $result = $node_primary->safe_psql('postgres',
-	"SELECT restart_lsn IS NULL, wal_status is NULL, safe_wal_size is NULL FROM pg_replication_slots WHERE slot_name = 'rep1'"
+$result = $node_primary->safe_psql(
+	'postgres',
+	qq[
+	SELECT restart_lsn IS NULL, wal_status is NULL, safe_wal_size is NULL
+	FROM pg_replication_slots WHERE slot_name = 'rep1'
+	]
 );
 is($result, "t|t|t", 'check the state of non-reserved slot is "unknown"');
-
 
 # Take backup
 my $backup_name = 'my_backup';
