@@ -240,6 +240,16 @@ BackgroundWorkerShmemInit(void *arg)
 }
 
 /*
+ * Return the total count of parallel-worker registrations seen since
+ * startup by doing unlocked read (for stats it should be good enough).
+ */
+uint32
+GetParallelWorkerRegisterCount(void)
+{
+	return BackgroundWorkerData->parallel_register_count;
+}
+
+/*
  * Search the postmaster's backend-private list of RegisteredBgWorker objects
  * for the one that maps to the given slot number.
  */

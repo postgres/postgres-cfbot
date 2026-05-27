@@ -120,6 +120,7 @@
 #include "tcop/tcopprot.h"
 #include "utils/datetime.h"
 #include "utils/memutils.h"
+#include "utils/pg_rusage.h"
 #include "utils/pidfile.h"
 #include "utils/timestamp.h"
 #include "utils/varlena.h"
@@ -240,6 +241,41 @@ bool		EnableSSL = false;
 
 int			PreAuthDelay = 0;
 int			AuthenticationTimeout = 60;
+
+/*
+ * If enabled, check postmaster CPU usage every PM_STATS_CHECK_INTERVAL
+ * seconds.
+ */
+bool		log_postmaster_overloads = false;
+
+/* How often to check when log_postmaster_overloads is on */
+#define PM_STATS_CHECK_INTERVAL 1
+
+/*
+ * Since the postmaster is single process, consider it overloaded when
+ * it has used more than this fraction of one core during the check
+ * interval.
+ */
+#define PM_STATS_CPU_THRESHOLD 0.75
+
+/*
+ * Alternatively, also log if the check itself ran this much later than
+ * intended (as a multipler of the PM_STATS_CHECK_INTERVAL above).  Postmaster
+ * that isn't getting scheduled promptly in time to run checks on schedule
+ * is a sign of trouble even if it is not itself burning much CPU.
+ */
+#define PM_STATS_ELAPSED_LATE_FACTOR 1.2
+
+/*
+ * If positive, log when the rate of new connections accepted during the
+ * preceding PM_STATS_CHECK_INTERVAL exceeds this many connections per
+ * second.  0 disables this check.
+ */
+int			log_postmaster_excess_connections = 0;
+
+/* Running counts used by log_postmaster_overloads / log_postmaster_excess_connections. */
+static uint64 pmstats_new_connections = 0;
+static uint64 pmstats_disconnections = 0;
 
 bool		log_hostname;		/* for ps display and logging */
 
@@ -1636,10 +1672,15 @@ DetermineSleepTime(void)
 		/* result of TimestampDifferenceMilliseconds is in [0, INT_MAX] */
 		ms = (int) TimestampDifferenceMilliseconds(GetCurrentTimestamp(),
 												   next_wakeup);
+		if (log_postmaster_overloads || log_postmaster_excess_connections > 0)
+			ms = Min(ms, PM_STATS_CHECK_INTERVAL * 1000);
 		return Min(60 * 1000, ms);
 	}
 
-	return 60 * 1000;
+	if (log_postmaster_overloads || log_postmaster_excess_connections > 0)
+		return Min(60 * 1000, PM_STATS_CHECK_INTERVAL * 1000);
+	else
+		return 60 * 1000;
 }
 
 /*
@@ -1678,12 +1719,21 @@ static int
 ServerLoop(void)
 {
 	time_t		last_lockfile_recheck_time,
-				last_touch_time;
+				last_touch_time,
+				last_pmstats_time;
+	uint64		last_pmstats_connections = 0;
+	uint64		last_pmstats_disconnections = 0;
+	uint32		last_pmstats_parallel_regs = 0;
+	PGRUsage	pmstats_ru0;
 	WaitEvent	events[MAXLISTEN];
 	int			nevents;
 
 	ConfigurePostmasterWaitSet(true);
-	last_lockfile_recheck_time = last_touch_time = time(NULL);
+	last_lockfile_recheck_time = last_touch_time = last_pmstats_time = time(NULL);
+	last_pmstats_connections = pmstats_new_connections;
+	last_pmstats_disconnections = pmstats_disconnections;
+	last_pmstats_parallel_regs = GetParallelWorkerRegisterCount();
+	pg_rusage_init(&pmstats_ru0);
 
 	for (;;)
 	{
@@ -1725,7 +1775,10 @@ ServerLoop(void)
 				ClientSocket s;
 
 				if (AcceptConnection(events[i].fd, &s) == STATUS_OK)
+				{
 					BackendStartup(&s);
+					pmstats_new_connections++;
+				}
 
 				/* We no longer need the open socket in this process */
 				if (s.sock != PGINVALID_SOCKET)
@@ -1823,6 +1876,82 @@ ServerLoop(void)
 			TouchSocketFiles();
 			TouchSocketLockFiles();
 			last_touch_time = now;
+		}
+
+		/*
+		 * Optionally check periodically whether the postmaster is short of
+		 * CPU or is being handed an excessive rate of new connections, and
+		 * if so, log connection and resource usage statistics to help
+		 * diagnose the root cause (e.g. a flood of connection attempts or slow fork()).
+		 */
+		if ((log_postmaster_overloads || log_postmaster_excess_connections > 0) &&
+			now - last_pmstats_time >= PM_STATS_CHECK_INTERVAL)
+		{
+			time_t		elapsed = now - last_pmstats_time;
+			uint32		cur_parallel_regs = GetParallelWorkerRegisterCount();
+
+			/*
+			 * Just to be on safe side: emit LOG message only in the case of
+			 * positive elapsed time (to avoid potential divisions by zero
+			 * in case of time jumping backwards).
+			 */
+			if (elapsed > 0)
+			{
+				uint64		conn_delta = pmstats_new_connections - last_pmstats_connections;
+				uint64		disc_delta = pmstats_disconnections - last_pmstats_disconnections;
+				uint32		pqw_delta = cur_parallel_regs - last_pmstats_parallel_regs;
+				double		conn_rate = (double) conn_delta / (double) elapsed;
+				PGRUsage	cur_ru;
+				double		cpu_seconds;
+
+				/*
+				 * The postmaster is single backend, so treat it as short
+				 * of CPU whenever either of two symptoms is observed: it
+				 * has burned more than PM_STATS_CPU_THRESHOLD of one core
+				 * over the elapsed time, or the check itself is running
+				 * much later than the intended PM_STATS_CHECK_INTERVAL.
+				 */
+				pg_rusage_init(&cur_ru);
+				cpu_seconds =
+					(cur_ru.ru.ru_utime.tv_sec - pmstats_ru0.ru.ru_utime.tv_sec) +
+					(cur_ru.ru.ru_utime.tv_usec - pmstats_ru0.ru.ru_utime.tv_usec) / 1000000.0 +
+					(cur_ru.ru.ru_stime.tv_sec - pmstats_ru0.ru.ru_stime.tv_sec) +
+					(cur_ru.ru.ru_stime.tv_usec - pmstats_ru0.ru.ru_stime.tv_usec) / 1000000.0;
+
+				if (log_postmaster_overloads)
+				{
+					bool		cpu_overloaded;
+
+					cpu_overloaded = (cpu_seconds > PM_STATS_CPU_THRESHOLD * elapsed ||
+						 elapsed > PM_STATS_ELAPSED_LATE_FACTOR * PM_STATS_CHECK_INTERVAL);
+					if (cpu_overloaded)
+					{
+						ereport(LOG,
+								(errmsg("postmaster potentially overloaded, stats: avg %.2f conns/sec; %.2f disconns/sec; %.2f parallel workers started/sec; %s",
+										conn_rate,
+										(double) disc_delta / (double) elapsed,
+										(double) pqw_delta / (double) elapsed,
+										pg_rusage_show(&pmstats_ru0))));
+					}
+				}
+
+				if (log_postmaster_excess_connections > 0 &&
+						conn_rate > log_postmaster_excess_connections) {
+
+					ereport(LOG,
+							(errmsg("postmaster excessive connections, stats: avg %.2f conns/sec; %.2f disconns/sec; %.2f parallel workers started/sec; %s",
+									conn_rate,
+									(double) disc_delta / (double) elapsed,
+									(double) pqw_delta / (double) elapsed,
+									pg_rusage_show(&pmstats_ru0))));
+				}
+			}
+
+			last_pmstats_connections = pmstats_new_connections;
+			last_pmstats_disconnections = pmstats_disconnections;
+			last_pmstats_parallel_regs = cur_parallel_regs;
+			last_pmstats_time = now;
+			pg_rusage_init(&pmstats_ru0);
 		}
 	}
 }
@@ -2606,6 +2735,10 @@ CleanupBackend(PMChild *bp,
 	}
 	else
 		procname = _(GetBackendTypeDesc(bp->bkend_type));
+
+	/* Count external (client or walsender) backend exits for stats. */
+	if (IsExternalConnectionBackend(bp->bkend_type))
+		pmstats_disconnections++;
 
 	/*
 	 * If a backend dies in an ugly way then we must signal all other backends
