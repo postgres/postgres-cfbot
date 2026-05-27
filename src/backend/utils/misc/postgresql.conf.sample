@@ -670,6 +670,11 @@
                                         # e.g. '<%u%%%d> '
 #log_lock_waits = on                    # log lock waits >= deadlock_timeout
 #log_lock_failures = off                # log lock failures
+#log_postmaster_overloads = off        # log postmaster stats once per
+                                        # second when it is CPU-bound
+#log_postmaster_excess_connections = 0 # log postmaster stats once per
+                                        # second when new connection rate
+                                        # exceeds this value; 0 disables
 #log_recovery_conflict_waits = off      # log standby recovery conflict waits
                                         # >= deadlock_timeout
 #log_parameter_max_length = -1          # when logging statements, limit logged
