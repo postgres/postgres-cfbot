@@ -16,6 +16,7 @@
 
 #include "commands/copy.h"
 #include "commands/trigger.h"
+#include "executor/nodeModifyTable.h"
 #include "nodes/miscnodes.h"
 
 /*
@@ -73,6 +74,7 @@ typedef struct CopyFromStateData
 
 	/* parameters from the COPY command */
 	Relation	rel;			/* relation to copy from */
+	Relation	conflictRel;	/* relation for copy from conflict saving */
 	List	   *attnumlist;		/* integer list of attnums to copy */
 	char	   *filename;		/* filename, or NULL for STDIN */
 	bool		is_program;		/* is 'filename' a program to popen? */
@@ -102,6 +104,8 @@ typedef struct CopyFromStateData
 									 * execution */
 	uint64		num_errors;		/* total number of rows which contained soft
 								 * errors */
+	uint64		num_conflicts;	/* total number of rows skipped due to unique
+								 * constraint conflict */
 	int		   *defmap;			/* array of default att numbers related to
 								 * missing att */
 	ExprState **defexprs;		/* array of default att expressions for all
@@ -189,6 +193,13 @@ typedef struct CopyFromStateData
 #define RAW_BUF_BYTES(cstate) ((cstate)->raw_buf_len - (cstate)->raw_buf_index)
 
 	uint64		bytes_processed;	/* number of bytes processed so far */
+
+	/*
+	 * INSERT operation context for inserting COPY FROM unique constraint
+	 * violation failure information to conflict_table. This is set only when
+	 * COPY FROM (ON_CONFLICT TABLE) is used; otherwise it remains NULL.
+	 */
+	ModifyTableContext *mtcontext;
 } CopyFromStateData;
 
 extern void ReceiveCopyBegin(CopyFromState cstate);

@@ -68,7 +68,8 @@ extern TupleTableSlot *ExecInsert(ModifyTableContext *context,
 								  TupleTableSlot *slot,
 								  bool canSetTag,
 								  TupleTableSlot **inserted_tuple,
-								  ResultRelInfo **insert_destrel);
+								  ResultRelInfo **insert_destrel,
+								  Oid *conflict_relOid);
 extern void ExecEndModifyTable(ModifyTableState *node);
 extern void ExecReScanModifyTable(ModifyTableState *node);
 
