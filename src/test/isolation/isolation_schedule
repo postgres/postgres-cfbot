@@ -12,6 +12,7 @@ test: project-manager
 test: classroom-scheduling
 test: total-cash
 test: referential-integrity
+test: ri-cascade-del
 test: ri-trigger
 test: partial-index
 test: two-ids
