@@ -1,0 +1,24 @@
+-- Test AcquireSampleRowsFunc_hook
+-- Usually this would be tested via a C extension.
+-- Here we just confirm this does not break the existing ANALYZE code
+-- by verifying that ANALYZE completes without error.
+
+CREATE TABLE employees (
+    id SERIAL PRIMARY KEY,
+    name TEXT,
+    department TEXT,
+    salary NUMERIC
+);
+
+INSERT INTO employees 
+    SELECT
+        i,
+        'Employee ' || i,
+        'Department ' || (i % 5),
+        (i % 100) * 1000 + 50000
+    FROM generate_series(1, 1000) i;
+
+-- Should complete without error
+ANALYZE employees;
+
+DROP TABLE employees;
