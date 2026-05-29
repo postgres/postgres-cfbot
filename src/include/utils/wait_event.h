@@ -17,6 +17,8 @@ extern const char *pgstat_get_wait_event(uint32 wait_event_info);
 extern const char *pgstat_get_wait_event_type(uint32 wait_event_info);
 static inline void pgstat_report_wait_start(uint32 wait_event_info);
 static inline void pgstat_report_wait_end(void);
+static inline uint32 pgstat_report_wait_start_nested(uint32 wait_event_info);
+static inline void pgstat_report_wait_end_nested(uint32 outer_wait_event_info);
 extern void pgstat_set_wait_event_storage(uint32 *wait_event_info);
 extern void pgstat_reset_wait_event_storage(void);
 
@@ -84,6 +86,46 @@ pgstat_report_wait_end(void)
 {
 	/* see pgstat_report_wait_start() */
 	*(volatile uint32 *) my_wait_event_info = 0;
+}
+
+/* ----------
+ * pgstat_report_wait_start_nested() -
+ *
+ *	Like pgstat_report_wait_start(), for a wait that can occur while another
+ *	wait event is already published, such as a write to the server log made
+ *	from inside a wait region.  Returns the wait event that was published
+ *	before, for the caller to hand back to pgstat_report_wait_end_nested()
+ *	once its own wait is over.
+ * ----------
+ */
+static inline uint32
+pgstat_report_wait_start_nested(uint32 wait_event_info)
+{
+	uint32		outer_wait_event_info;
+
+	/* see pgstat_report_wait_start() */
+	outer_wait_event_info = *(volatile uint32 *) my_wait_event_info;
+	*(volatile uint32 *) my_wait_event_info = wait_event_info;
+
+	return outer_wait_event_info;
+}
+
+/* ----------
+ * pgstat_report_wait_end_nested() -
+ *
+ *	Called to report end of a wait started with
+ *	pgstat_report_wait_start_nested().  Where pgstat_report_wait_end() would
+ *	clear the wait event, this publishes the one that was current before the
+ *	nested wait began, so that an enclosing wait region keeps its event.  If
+ *	there was none, outer_wait_event_info is 0 and the effect is the same as
+ *	pgstat_report_wait_end().
+ * ----------
+ */
+static inline void
+pgstat_report_wait_end_nested(uint32 outer_wait_event_info)
+{
+	/* see pgstat_report_wait_start() */
+	*(volatile uint32 *) my_wait_event_info = outer_wait_event_info;
 }
 
 
