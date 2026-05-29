@@ -4275,4 +4275,14 @@ supportfn(internal) returns internal
     To create such conditions, the support function must implement
     the <literal>SupportRequestIndexCondition</literal> request type.
    </para>
+
+   <para>
+    The hook variable <varname>AcquireSampleRowsFunc_hook</varname> allows extensions
+    to override the row sampling function during <command>ANALYZE</command> for regular
+    heap relations. This is useful for extensions/systems which implement distributed
+    databases and want to sample rows from remote nodes instead of the local heap.
+    The hook function fills the provided <literal>rows[]</literal> buffer with at most
+    <literal>targrows</literal> heap tuples and sets <literal>*totalrows</literal> to the
+    estimated total live row count of the relation.
+   </para>
   </sect1>

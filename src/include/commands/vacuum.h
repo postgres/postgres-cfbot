@@ -21,6 +21,7 @@
 #include "catalog/pg_class.h"
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_type.h"
+#include "foreign/fdwapi.h"
 #include "parser/parse_node.h"
 #include "storage/buf.h"
 #include "utils/relcache.h"
@@ -111,6 +112,9 @@ typedef void (*AnalyzeAttrComputeStatsFunc) (VacAttrStatsP stats,
 											 AnalyzeAttrFetchFunc fetchfunc,
 											 int samplerows,
 											 double totalrows);
+
+/* Hook type for plugins to acquire sample rows for ANALYZE */
+typedef AcquireSampleRowsFunc AcquireSampleRowsFunc_hook_type;
 
 typedef struct VacAttrStats
 {
@@ -359,6 +363,13 @@ extern PGDLLIMPORT double vacuum_cost_delay;
 extern PGDLLIMPORT int vacuum_cost_limit;
 
 extern PGDLLIMPORT int64 parallel_vacuum_worker_delay_ns;
+
+/*
+ * Hook for plugins to override row sampling during ANALYZE.
+ * Also applies to child relations of partitioned/inherited tables.
+ * See acquire_sample_rows() in src/backend/commands/analyze.c.
+ */
+extern PGDLLIMPORT AcquireSampleRowsFunc_hook_type AcquireSampleRowsFunc_hook;
 
 /* in commands/vacuum.c */
 extern void ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel);
