@@ -3015,6 +3015,11 @@ write_eventlog(int level, const char *line, int len)
 		{
 			const WCHAR *utf16_const = utf16;
 
+			/*
+			 * A nested log write briefly masks any outer wait event
+			 * (wait events are single-slot).
+			 */
+			pgstat_report_wait_start(WAIT_EVENT_EVENTLOG_WRITE);
 			ReportEventW(evtHandle,
 						 eventlevel,
 						 0,
@@ -3024,12 +3029,14 @@ write_eventlog(int level, const char *line, int len)
 						 0,
 						 &utf16_const,
 						 NULL);
+			pgstat_report_wait_end();
 			/* XXX Try ReportEventA() when ReportEventW() fails? */
 
 			pfree(utf16);
 			return;
 		}
 	}
+	pgstat_report_wait_start(WAIT_EVENT_EVENTLOG_WRITE);
 	ReportEventA(evtHandle,
 				 eventlevel,
 				 0,
@@ -3039,6 +3046,7 @@ write_eventlog(int level, const char *line, int len)
 				 0,
 				 &line,
 				 NULL);
+	pgstat_report_wait_end();
 }
 #endif							/* WIN32 */
 
@@ -3080,11 +3088,14 @@ write_console(const char *line, int len)
 			DWORD		written;
 
 			stdHandle = GetStdHandle(STD_ERROR_HANDLE);
+			pgstat_report_wait_start(WAIT_EVENT_STDERR_WRITE);
 			if (WriteConsoleW(stdHandle, utf16, utf16len, &written, NULL))
 			{
+				pgstat_report_wait_end();
 				pfree(utf16);
 				return;
 			}
+			pgstat_report_wait_end();
 
 			/*
 			 * In case WriteConsoleW() failed, fall back to writing the
