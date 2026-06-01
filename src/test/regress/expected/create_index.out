@@ -475,9 +475,9 @@ SELECT count(*) FROM point_tbl p WHERE p.f1 ~= '(-5, -12)';
 
 EXPLAIN (COSTS OFF)
 SELECT * FROM point_tbl ORDER BY f1 <-> '0,1';
-                  QUERY PLAN                  
-----------------------------------------------
- Index Only Scan using gpointind on point_tbl
+               QUERY PLAN                
+-----------------------------------------
+ Index Scan using gpointind on point_tbl
    Order By: (f1 <-> '(0,1)'::point)
 (2 rows)
 
@@ -513,9 +513,9 @@ SELECT * FROM point_tbl WHERE f1 IS NULL;
 
 EXPLAIN (COSTS OFF)
 SELECT * FROM point_tbl WHERE f1 IS NOT NULL ORDER BY f1 <-> '0,1';
-                  QUERY PLAN                  
-----------------------------------------------
- Index Only Scan using gpointind on point_tbl
+               QUERY PLAN                
+-----------------------------------------
+ Index Scan using gpointind on point_tbl
    Index Cond: (f1 IS NOT NULL)
    Order By: (f1 <-> '(0,1)'::point)
 (3 rows)
@@ -539,7 +539,7 @@ EXPLAIN (COSTS OFF)
 SELECT * FROM point_tbl WHERE f1 <@ '(-10,-10),(10,10)':: box ORDER BY f1 <-> '0,1';
                    QUERY PLAN                   
 ------------------------------------------------
- Index Only Scan using gpointind on point_tbl
+ Index Scan using gpointind on point_tbl
    Index Cond: (f1 <@ '(10,10),(-10,-10)'::box)
    Order By: (f1 <-> '(0,1)'::point)
 (3 rows)

@@ -66,6 +66,7 @@ gist_desc(StringInfo buf, XLogReaderState *record)
 	switch (info)
 	{
 		case XLOG_GIST_PAGE_UPDATE:
+		case XLOG_GIST_PAGE_VACUUM:
 			out_gistxlogPageUpdate(buf, (gistxlogPageUpdate *) rec);
 			break;
 		case XLOG_GIST_PAGE_REUSE:
@@ -92,6 +93,9 @@ gist_identify(uint8 info)
 	{
 		case XLOG_GIST_PAGE_UPDATE:
 			id = "PAGE_UPDATE";
+			break;
+		case XLOG_GIST_PAGE_VACUUM:
+			id = "PAGE_VACUUM";
 			break;
 		case XLOG_GIST_DELETE:
 			id = "DELETE";
