@@ -1587,7 +1587,7 @@ include_dir 'conf.d'
       </term>
       <listitem>
        <para>
-        Specifies the named group to use for <acronym>TLS</acronym> key
+        Specifies the named group(s) to use for <acronym>TLS</acronym> key
         exchange.  It needs to be supported by all clients that
         connect.  Multiple groups can be specified by using a colon-separated
         list.  It does not need to match the key type used by the server
