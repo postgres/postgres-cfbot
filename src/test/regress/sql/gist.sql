@@ -65,7 +65,7 @@ select p from gist_tbl where p <@ box(point(0,0), point(0.5, 0.5));
 -- execute the same
 select p from gist_tbl where p <@ box(point(0,0), point(0.5, 0.5));
 
--- Also test an index-only knn-search
+-- Also test a knn-search
 explain (costs off)
 select p from gist_tbl where p <@ box(point(0,0), point(0.5, 0.5))
 order by p <-> point(0.201, 0.201);
@@ -109,7 +109,7 @@ select b from gist_tbl where b <@ box(point(5,5), point(6,6));
 -- execute the same
 select b from gist_tbl where b <@ box(point(5,5), point(6,6));
 
--- Also test an index-only knn-search
+-- Also test a knn-search
 explain (costs off)
 select b from gist_tbl where b <@ box(point(5,5), point(6,6))
 order by b <-> point(5.2, 5.91);
@@ -164,7 +164,9 @@ explain (verbose, costs off)
 select count(*) from gist_tbl;
 select count(*) from gist_tbl;
 
--- This case isn't supported, but it should at least EXPLAIN correctly.
+-- An ordering-operator (nearest-neighbor) scan is never planned as an
+-- index-only scan, so this lossy-distance case runs as a plain index scan that
+-- rechecks the distances against the heap tuple.
 explain (verbose, costs off)
 select p from gist_tbl order by circle(p,1) <-> point(0,0) limit 1;
 select p from gist_tbl order by circle(p,1) <-> point(0,0) limit 1;

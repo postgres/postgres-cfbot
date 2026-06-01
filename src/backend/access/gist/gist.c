@@ -103,10 +103,11 @@ gisthandler(PG_FUNCTION_ARGS)
 		.amadjustmembers = gistadjustmembers,
 		.ambeginscan = gistbeginscan,
 		.amrescan = gistrescan,
-		.amgettuple = gistgettuple,
-		.amgetbatch = NULL,
-		.amunguardbatch = NULL,
-		.amkillitemsbatch = NULL,
+		.amgettuple = NULL,
+		.amgetbatch = gistgetbatch,
+		.amunguardbatch = gistunguardbatch,
+		.amkillitemsbatch = gistkillitemsbatch,
+		.amgettransform = gistgettransform,
 		.amgetbitmap = gistgetbitmap,
 		.amendscan = gistendscan,
 		.amposreset = NULL,
@@ -594,7 +595,7 @@ gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
 
 				recptr = gistXLogUpdate(buffer,
 										deloffs, ndeloffs, itup, ntup,
-										leftchildbuf);
+										leftchildbuf, false);
 			}
 			else
 				recptr = XLogGetFakeLSN(rel);
