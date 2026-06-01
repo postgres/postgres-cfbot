@@ -27,86 +27,84 @@
 #include "utils/rel.h"
 
 /*
- * gistkillitems() -- set LP_DEAD state for items an indexscan caller has
- * told us were killed.
- *
- * We re-read page here, so it's important to check page LSN. If the page
- * has been modified since the last read (as determined by LSN), we cannot
- * flag any entries because it is possible that the old entry was vacuumed
- * away and the TID was re-used by a completely different heap tuple.
+ * gistkillitemsbatch() -- Mark dead items' index tuples LP_DEAD
  */
 void
-gistkillitems(IndexScanDesc scan)
+gistkillitemsbatch(IndexScanDesc scan, IndexScanBatch batch)
 {
-	GISTScanOpaque so = (GISTScanOpaque) scan->opaque;
-	int			numKilled = so->numKilled;
-	Buffer		buffer;
+	GISTBatchData *gbatch = GISTBatchGetData(scan, batch);
+	Relation	rel = scan->indexRelation;
+	Buffer		buf;
 	Page		page;
 	bool		killedsomething = false;
+	XLogRecPtr	latestlsn;
 
-	Assert(so->curBlkno != InvalidBlockNumber);
-	Assert(XLogRecPtrIsValid(so->curPageLSN));
-	Assert(so->killedItems != NULL);
-	Assert(numKilled > 0);
+	Assert(batch->numDead > 0);
 
 	/*
-	 * Always reset the scan state, so we don't look for same items on other
-	 * pages
+	 * Skip virtual (ordered-scan) batches, since there's no practical way to
+	 * visit all of the index pages that these tuples really came from
 	 */
-	so->numKilled = 0;
+	if (gbatch->blkno == InvalidBlockNumber)
+		return;
 
-	buffer = ReadBuffer(scan->indexRelation, so->curBlkno);
-	LockBuffer(buffer, GIST_SHARE);
-	gistcheckpage(scan->indexRelation, buffer);
-	page = BufferGetPage(buffer);
+	buf = ReadBuffer(rel, gbatch->blkno);
+	LockBuffer(buf, GIST_SHARE);
+	gistcheckpage(rel, buf);
+	page = BufferGetPage(buf);
 
-	/*
-	 * If page LSN differs it means that the page was modified since the last
-	 * read. killedItems could be not valid so LP_DEAD hints applying is not
-	 * safe.
-	 */
-	if (BufferGetLSNAtomic(buffer) != so->curPageLSN)
+	latestlsn = BufferGetLSNAtomic(buf);
+	Assert(batch->lsn <= latestlsn);
+	if (batch->lsn != latestlsn)
 	{
-		UnlockReleaseBuffer(buffer);
+		/* Modified, give up on hinting */
+		UnlockReleaseBuffer(buf);
 		return;
 	}
 
-	Assert(GistPageIsLeaf(page));
-
-	/*
-	 * Mark all killedItems as dead. We need no additional recheck, because,
-	 * if page was modified, curPageLSN must have changed.
-	 */
-	for (int i = 0; i < numKilled; i++)
+	/* Iterate through batch->deadItems[] in index page order */
+	for (int i = 0; i < batch->numDead; i++)
 	{
-		OffsetNumber offnum = so->killedItems[i];
+		int			itemIndex = batch->deadItems[i];
+		OffsetNumber offnum = batch->items[itemIndex].indexOffset;
 		ItemId		iid = PageGetItemId(page, offnum);
 
-		if (!killedsomething)
-		{
-			/*
-			 * Use the hint bit infrastructure to check if we can update the
-			 * page while just holding a share lock. If we are not allowed,
-			 * there's no point continuing.
-			 */
-			if (!BufferBeginSetHintBits(buffer))
-			{
-				UnlockReleaseBuffer(buffer);
-				return;
-			}
-		}
+		Assert(itemIndex >= batch->firstItem && itemIndex <= batch->lastItem);
+		Assert(i == 0 ||
+			   offnum > batch->items[batch->deadItems[i - 1]].indexOffset);
+		Assert(offnum <= PageGetMaxOffsetNumber(page));
+		Assert(ItemPointerEquals(&((IndexTuple) PageGetItem(page, iid))->t_tid,
+								 &batch->items[itemIndex].tableTid));
 
-		ItemIdMarkDead(iid);
-		killedsomething = true;
+		/* Mark index item as dead, if it isn't already */
+		if (!ItemIdIsDead(iid))
+		{
+			if (!killedsomething)
+			{
+				/*
+				 * Use the hint bit infrastructure to check if we can update
+				 * the page while just holding a share lock. If we are not
+				 * allowed, there's no point continuing.
+				 */
+				if (!BufferBeginSetHintBits(buf))
+				{
+					UnlockReleaseBuffer(buf);
+					return;
+				}
+			}
+
+			ItemIdMarkDead(iid);
+			killedsomething = true;
+		}
 	}
 
 	if (killedsomething)
 	{
 		GistMarkPageHasGarbage(page);
-		BufferFinishSetHintBits(buffer, true, true);
+		BufferFinishSetHintBits(buf, true, true);
 	}
 
-	UnlockReleaseBuffer(buffer);
+	UnlockReleaseBuffer(buf);
 }
 
 /*
@@ -320,16 +318,25 @@ gistindex_keytest(IndexScanDesc scan,
  * scan: index scan we are executing
  * pageItem: search queue item identifying an index page to scan
  * myDistances: distances array associated with pageItem, or NULL at the root
- * tbm: if not NULL, gistgetbitmap's output bitmap
- * ntids: if not NULL, gistgetbitmap's output tuple counter
+ * newbatch: caller's batch to fill, for a non-ordered scan; NULL when ordered
  *
- * If tbm/ntids aren't NULL, we are doing an amgetbitmap scan, and heap
- * tuples should be reported directly into the bitmap.  If they are NULL,
- * we're doing a plain or ordered indexscan.  For a plain indexscan, heap
- * tuple TIDs are returned into so->pageData[].  For an ordered indexscan,
- * heap tuple TIDs are pushed into individual search queue items.  In an
- * index-only scan, reconstructed index tuples are returned along with the
- * TIDs.
+ * For a non-ordered scan (newbatch isn't NULL, which is the case for both
+ * unordered gistgetbatch and gistgetbitmap), matching item TIDs from a leaf
+ * page are stored into caller's newbatch to return via gistgetbatch.  If we
+ * don't save any items in newbatch, caller needs to find the next leaf page
+ * that has matches and save its items in newbatch instead (if there is none
+ * then caller should release newbatch).
+ *
+ * For an ordered (nearest-neighbor) scan (newbatch is NULL), matching leaf heap
+ * tuples are pushed onto the search queue as GISTSearchItems carrying their
+ * distances, so the queue can later be drained in distance order.  The page's
+ * buffer pin is dropped before returning.  This can only happen during
+ * batchImmediateUnguard scans, which is what makes it safe.  Groups of enqueued
+ * items will eventually be returned (in the expected order) as "virtual
+ * batches", but we don't do that here.
+ *
+ * In all cases, lower index pages are pushed onto the search queue to be
+ * visited later.
  *
  * If we detect that the index page has split since we saw its downlink
  * in the parent, we push its new right sibling onto the queue so the
@@ -337,10 +344,9 @@ gistindex_keytest(IndexScanDesc scan,
  */
 static void
 gistScanPage(IndexScanDesc scan, GISTSearchItem *pageItem,
-			 IndexOrderByDistance *myDistances, TIDBitmap *tbm, int64 *ntids)
+			 IndexOrderByDistance *myDistances, IndexScanBatch newbatch)
 {
 	GISTScanOpaque so = (GISTScanOpaque) scan->opaque;
-	GISTSTATE  *giststate = so->giststate;
 	Relation	r = scan->indexRelation;
 	Buffer		buffer;
 	Page		page;
@@ -349,7 +355,16 @@ gistScanPage(IndexScanDesc scan, GISTSearchItem *pageItem,
 	OffsetNumber i;
 	MemoryContext oldcxt;
 
+	/* state used when saving matching items into caller's newbatch */
+	int			itemIndex = 0;
+	int			tupleOffset = 0;
+	bool	   *recheckarr = NULL;
+
 	Assert(!GISTSearchItemIsHeap(*pageItem));
+	Assert((scan->numberOfOrderBys == 0) == (newbatch != NULL));
+
+	if (newbatch)
+		recheckarr = GISTBatchGetRecheck(scan, newbatch);
 
 	buffer = ReadBuffer(scan->indexRelation, pageItem->blkno);
 	LockBuffer(buffer, GIST_SHARE);
@@ -401,24 +416,10 @@ gistScanPage(IndexScanDesc scan, GISTSearchItem *pageItem,
 	 */
 	if (GistPageIsDeleted(page))
 	{
+		Assert(!newbatch || newbatch->firstItem > newbatch->lastItem);
 		UnlockReleaseBuffer(buffer);
 		return;
 	}
-
-	so->nPageData = so->curPageData = 0;
-	scan->xs_hitup = NULL;		/* might point into pageDataCxt */
-	if (so->pageDataCxt)
-		MemoryContextReset(so->pageDataCxt);
-
-	/*
-	 * Save the current page's block number for a possible gistkillitems()
-	 * call later.  We also save its LSN, so that we know whether it is safe
-	 * to apply the LP_DEAD hints to the page later.  This allows us to drop
-	 * the pin for MVCC scans, which allows vacuum to avoid blocking.
-	 */
-	Assert(so->numKilled == 0);
-	so->curBlkno = pageItem->blkno;
-	so->curPageLSN = BufferGetLSNAtomic(buffer);
 
 	/*
 	 * check all tuples on page
@@ -460,36 +461,28 @@ gistScanPage(IndexScanDesc scan, GISTSearchItem *pageItem,
 		if (!match)
 			continue;
 
-		if (tbm && GistPageIsLeaf(page))
+		if (scan->numberOfOrderBys == 0 && GistPageIsLeaf(page))
 		{
 			/*
-			 * getbitmap scan, so just push heap tuple TIDs into the bitmap
-			 * without worrying about ordering
+			 * Non-ordered scan (unordered amgetbatch or bitmap), so just
+			 * store another matching item in caller's batch without worrying
+			 * about ordering
 			 */
-			tbm_add_tuples(tbm, &it->t_tid, 1, recheck);
-			(*ntids)++;
-		}
-		else if (scan->numberOfOrderBys == 0 && GistPageIsLeaf(page))
-		{
-			/*
-			 * Non-ordered scan, so report tuples in so->pageData[]
-			 */
-			so->pageData[so->nPageData].heapPtr = it->t_tid;
-			so->pageData[so->nPageData].recheck = recheck;
-			so->pageData[so->nPageData].offnum = i;
+			newbatch->items[itemIndex].tableTid = it->t_tid;
+			newbatch->items[itemIndex].indexOffset = i;
+			newbatch->items[itemIndex].tupleOffset = 0;
+			recheckarr[itemIndex] = recheck;
 
-			/*
-			 * In an index-only scan, also fetch the data from the tuple.  The
-			 * reconstructed tuples are stored in pageDataCxt.
-			 */
 			if (scan->xs_want_itup)
 			{
-				oldcxt = MemoryContextSwitchTo(so->pageDataCxt);
-				so->pageData[so->nPageData].recontup =
-					gistFetchTuple(giststate, r, it);
-				MemoryContextSwitchTo(oldcxt);
+				/* Copy on-disk format index tuple into currTuples */
+				Size		itupsz = IndexTupleSize(it);
+
+				newbatch->items[itemIndex].tupleOffset = tupleOffset;
+				memcpy(newbatch->currTuples + tupleOffset, it, itupsz);
+				tupleOffset += MAXALIGN(itupsz);
 			}
-			so->nPageData++;
+			itemIndex++;
 		}
 		else
 		{
@@ -508,17 +501,15 @@ gistScanPage(IndexScanDesc scan, GISTSearchItem *pageItem,
 
 			if (GistPageIsLeaf(page))
 			{
-				/* Creating heap-tuple GISTSearchItem */
+				/* Creating heap-tuple GISTSearchItem for ordered search */
+				Assert(scan->numberOfOrderBys > 0);
+				Assert(newbatch == NULL);
+				Assert(scan->batchImmediateUnguard);
+
 				item->blkno = InvalidBlockNumber;
 				item->data.heap.heapPtr = it->t_tid;
 				item->data.heap.recheck = recheck;
 				item->data.heap.recheckDistances = recheck_distances;
-
-				/*
-				 * In an index-only scan, also fetch the data from the tuple.
-				 */
-				if (scan->xs_want_itup)
-					item->data.heap.recontup = gistFetchTuple(giststate, r, it);
 			}
 			else
 			{
@@ -541,6 +532,30 @@ gistScanPage(IndexScanDesc scan, GISTSearchItem *pageItem,
 
 			MemoryContextSwitchTo(oldcxt);
 		}
+	}
+
+	if (newbatch)
+	{
+		/* Finalize result batch during a non-ordered scan */
+		Assert(scan->numberOfOrderBys == 0);
+
+		newbatch->firstItem = 0;
+		newbatch->lastItem = itemIndex - 1;
+
+		if (itemIndex > 0)
+		{
+			GISTBatchData *gnewbatch;
+
+			Assert(GistPageIsLeaf(page));
+
+			gnewbatch = GISTBatchGetData(scan, newbatch);
+			gnewbatch->buf = buffer;
+			gnewbatch->blkno = BufferGetBlockNumber(buffer);
+
+			indexam_util_unlock_batch(scan, newbatch, buffer);
+			return;
+		}
+		/* else caller needs to find another page to fill newbatch */
 	}
 
 	UnlockReleaseBuffer(buffer);
@@ -571,22 +586,111 @@ getNextGISTSearchItem(GISTScanOpaque so)
 }
 
 /*
- * Fetch next heap tuple in an ordered search
+ * gistScanStart() -- begin a scan by queueing its root page
+ *
+ * Called on the first amgetbatch/amgetbitmap call of a scan (the caller having
+ * already checked that the qual is satisfiable).  Counts the scan for stats and
+ * queues the root page as the first work item, so the scan drivers are
+ * otherwise pure queue drainers.  The root carries a zeroed parentlsn (it has
+ * no parent, so gistScanPage's split-detection is a no-op for it) and zeroed
+ * distances (so it sorts first in an ordered scan).
+ *
+ * Starting the scan here, rather than in gistrescan, follows the convention
+ * that amrescan only sets up scan keys while the scan proper (counting it,
+ * reading index pages) begins on the first fetch.
  */
-static bool
-getNextNearest(IndexScanDesc scan)
+static void
+gistScanStart(IndexScanDesc scan)
 {
 	GISTScanOpaque so = (GISTScanOpaque) scan->opaque;
-	bool		res = false;
+	GISTSearchItem *root;
+	MemoryContext oldcxt;
 
-	if (scan->xs_hitup)
+	pgstat_count_index_scan(scan->indexRelation);
+	if (scan->instrument)
+		scan->instrument->nsearches++;
+
+	oldcxt = MemoryContextSwitchTo(so->queueCxt);
+	root = palloc(SizeOfGISTSearchItem(scan->numberOfOrderBys));
+	root->blkno = GIST_ROOT_BLKNO;
+	memset(&root->data.parentlsn, 0, sizeof(GistNSN));
+	memset(root->distances, 0,
+		   sizeof(root->distances[0]) * scan->numberOfOrderBys);
+	pairingheap_add(so->queue, &root->phNode);
+	MemoryContextSwitchTo(oldcxt);
+}
+
+/*
+ * getNextBatch() -- read the next leaf page with matches into a fresh batch
+ *
+ * gistgetbatch's non-ordered walker, also driven by gistgetbitmap.  Allocates a
+ * batch and drains the queue, scanning each queued index page until one
+ * produces matching leaf items, then returns that batch.  When the queue is
+ * exhausted without a match, releases the batch and returns NULL.
+ */
+static IndexScanBatch
+getNextBatch(IndexScanDesc scan)
+{
+	GISTScanOpaque so = (GISTScanOpaque) scan->opaque;
+	IndexScanBatch newbatch = indexam_util_alloc_batch(scan);
+
+	/* GiST only ever scans forward; set the batch's direction up front */
+	newbatch->dir = ForwardScanDirection;
+
+	for (;;)
 	{
-		/* free previously returned tuple */
-		pfree(scan->xs_hitup);
-		scan->xs_hitup = NULL;
+		GISTSearchItem *item = getNextGISTSearchItem(so);
+
+		if (item == NULL)
+		{
+			/* No more index pages to scan; the scan is exhausted */
+			indexam_util_release_batch(scan, newbatch);
+			return NULL;
+		}
+
+		CHECK_FOR_INTERRUPTS();
+
+		/* Scan this queued index page; matching leaf items go into the batch */
+		gistScanPage(scan, item, item->distances, newbatch);
+		pfree(item);
+
+		/* If this leaf page produced matching items, return the batch */
+		if (newbatch->firstItem <= newbatch->lastItem)
+			return newbatch;
 	}
 
-	do
+	pg_unreachable();
+
+	return NULL;
+}
+
+/*
+ * getNextNearestBatch() -- drain the queue into a fresh batch in distance order
+ *
+ * gistgetbatch's ordered (nearest-neighbor) walker.  The pairing-heap queue
+ * (so->queue) holds both unvisited index pages and matching leaf heap tuples,
+ * ordered by (lower-bound) distance.  We pop items in that order, dispatching
+ * on the item type.  A popped heap tuple is appended to the batch.  We stop
+ * once the batch is full (maxitemsbatch items) or the queue is exhausted,
+ * leaving any remaining items queued for the next call.
+ *
+ * Because the queue is drained in nondecreasing distance order across the whole
+ * scan (a downlink's distance is a lower bound on its subtree, so items pushed
+ * while scanning a page never sort ahead of items already popped), the
+ * batches we emit are globally distance-ordered.
+ */
+static IndexScanBatch
+getNextNearestBatch(IndexScanDesc scan)
+{
+	GISTScanOpaque so = (GISTScanOpaque) scan->opaque;
+	IndexScanBatch newbatch = indexam_util_alloc_batch(scan);
+	GISTBatchData *gnewbatch;
+	int			nitems = 0;
+
+	/* GiST only ever scans forward; set the batch's direction up front */
+	newbatch->dir = ForwardScanDirection;
+
+	for (;;)
 	{
 		GISTSearchItem *item = getNextGISTSearchItem(so);
 
@@ -596,155 +700,189 @@ getNextNearest(IndexScanDesc scan)
 		if (GISTSearchItemIsHeap(*item))
 		{
 			/* found a heap item at currently minimal distance */
-			scan->xs_heaptid = item->data.heap.heapPtr;
-			scan->xs_recheck = item->data.heap.recheck;
+			GISTBatchItem *bitem = GISTBatchGetItem(scan, newbatch, nitems);
 
-			index_store_float8_orderby_distances(scan, so->orderByTypes,
-												 item->distances,
-												 item->data.heap.recheckDistances);
+			newbatch->items[nitems].tableTid = item->data.heap.heapPtr;
+			newbatch->items[nitems].indexOffset = -1;	/* meaningless here */
+			newbatch->items[nitems].tupleOffset = 0;
 
-			/* in an index-only scan, also return the reconstructed tuple. */
-			if (scan->xs_want_itup)
-				scan->xs_hitup = item->data.heap.recontup;
-			res = true;
+			bitem->recheck = item->data.heap.recheck;
+			bitem->recheckDistances = item->data.heap.recheckDistances;
+			memcpy(bitem->distances, item->distances,
+				   sizeof(item->distances[0]) * scan->numberOfOrderBys);
+
+			nitems++;
+			pfree(item);
+
+			if (nitems == scan->maxitemsbatch)
+				break;			/* batch full; remaining items stay queued */
 		}
 		else
 		{
 			/* visit an index page, extract its items into queue */
 			CHECK_FOR_INTERRUPTS();
 
-			gistScanPage(scan, item, item->distances, NULL, NULL);
+			gistScanPage(scan, item, item->distances, NULL);
+			pfree(item);
 		}
+	}
 
-		pfree(item);
-	} while (!res);
+	if (nitems == 0)
+	{
+		/* No matching items remain: the scan is exhausted */
+		indexam_util_release_batch(scan, newbatch);
+		return NULL;
+	}
 
-	return res;
+	/*
+	 * An ordered batch is "virtual": its items come from many leaf pages,
+	 * whose pins gistScanPage already dropped, so it holds no TID recycling
+	 * interlock.  It has no single originating page, and we don't track those
+	 * index pages in any case (gistkillitemsbatch will just skip it).
+	 */
+	Assert(!newbatch->isGuarded);
+
+	newbatch->firstItem = 0;
+	newbatch->lastItem = nitems - 1;
+
+	gnewbatch = GISTBatchGetData(scan, newbatch);
+	gnewbatch->buf = InvalidBuffer;
+	gnewbatch->blkno = InvalidBlockNumber;
+
+	return newbatch;
 }
 
 /*
- * gistgettuple() -- Get the next tuple in the scan
+ * gistgetbatch() -- Get the first or next batch of items in a scan
+ *
+ * Dispatches to the ordered or non-ordered walker.  Persistent traversal state
+ * lives in so->queue, so priorbatch is unused except to recognize the scan's
+ * first call, when we queue the root page (gistScanStart).
  */
-bool
-gistgettuple(IndexScanDesc scan, ScanDirection dir)
+IndexScanBatch
+gistgetbatch(IndexScanDesc scan, IndexScanBatch priorbatch, ScanDirection dir)
 {
 	GISTScanOpaque so = (GISTScanOpaque) scan->opaque;
+	IndexScanBatch batch;
 
 	if (dir != ForwardScanDirection)
 		elog(ERROR, "GiST only supports forward scan direction");
 
 	if (!so->qual_ok)
-		return false;
+		return NULL;
 
-	if (so->firstCall)
-	{
-		/* Begin the scan by processing the root page */
-		GISTSearchItem fakeItem;
-
-		pgstat_count_index_scan(scan->indexRelation);
-		if (scan->instrument)
-			scan->instrument->nsearches++;
-
-		so->firstCall = false;
-		so->curPageData = so->nPageData = 0;
-		scan->xs_hitup = NULL;
-		if (so->pageDataCxt)
-			MemoryContextReset(so->pageDataCxt);
-
-		fakeItem.blkno = GIST_ROOT_BLKNO;
-		memset(&fakeItem.data.parentlsn, 0, sizeof(GistNSN));
-		gistScanPage(scan, &fakeItem, NULL, NULL, NULL);
-	}
+	if (priorbatch == NULL)
+		gistScanStart(scan);
 
 	if (scan->numberOfOrderBys > 0)
-	{
-		/* Must fetch tuples in strict distance order */
-		return getNextNearest(scan);
-	}
+		batch = getNextNearestBatch(scan);
 	else
+		batch = getNextBatch(scan);
+
+	/*
+	 * When the search queue was left empty, the scan already ended on the
+	 * returned batch; mark the batch accordingly
+	 */
+	if (batch && pairingheap_is_empty(so->queue))
+		batch->knownEndForward = true;
+
+	return batch;
+}
+
+/*
+ * gistunguardbatch() -- Drop a batch's TID recycling interlock (buffer pin)
+ *
+ * Called by the table AM when it's safe to drop the buffer pin held to
+ * prevent concurrent TID recycling by VACUUM.
+ */
+void
+gistunguardbatch(IndexScanDesc scan, IndexScanBatch batch)
+{
+	GISTBatchData *gbatch = GISTBatchGetData(scan, batch);
+
+	/* Should be called exactly once iff !batchImmediateUnguard */
+	Assert(!scan->batchImmediateUnguard);
+	Assert(batch->isGuarded);
+
+	ReleaseBuffer(gbatch->buf);
+}
+
+/*
+ * gistgettransform() -- Set up the scan's per-tuple output for one batch item
+ *
+ * Implements the amgettransform interface.  The table AM calls this as it
+ * returns each item of a GiST scan, to set the scan descriptor's per-tuple
+ * output from the item's per-item data.
+ *
+ *   - We always apply the item's qual recheck flag to scan->xs_recheck.
+ *   - For ordered scans, we report the item's own ORDER BY distances (stored in
+ *     the per-item index AM area by getNextNearestBatch) as xs_orderbyvals.
+ *     They are flagged for recheck only when the distance function was lossy
+ *     for that item; an exact distance is reported as final, while a lossy
+ *     lower bound is rechecked by the executor's reorder queue to recompute
+ *     the true order.
+ *   - For index-only scans, we reconstruct the originally indexed values from
+ *     the stored on-disk index tuple into a heap tuple, exposed as xs_hitup.
+ *
+ * The reconstructed tuple lives in the scan's memory context and only needs to
+ * outlive a single table_index_getnext_slot call (the executor copies it into
+ * the scan slot).  We free the previously returned tuple before building the
+ * next one.
+ */
+void
+gistgettransform(IndexScanDesc scan, IndexScanBatch batch, int item)
+{
+	GISTScanOpaque so = (GISTScanOpaque) scan->opaque;
+
+	Assert(item >= batch->firstItem && item <= batch->lastItem);
+
+	/* Ordered scan (must be a plain index scan) */
+	if (scan->numberOfOrderBys > 0)
 	{
-		/* Fetch tuples index-page-at-a-time */
-		for (;;)
+		GISTBatchItem *bitem = GISTBatchGetItem(scan, batch, item);
+
+		Assert(!scan->xs_want_itup);
+
+		/* Apply this item's qual recheck flag */
+		scan->xs_recheck = bitem->recheck;
+
+		/*
+		 * Note: This is a "virtual" batch.  The items from caller's batch
+		 * were stored in the batch in distance order by getNextNearestBatch,
+		 * right before gistgetbatch returned it.
+		 */
+		Assert(GISTBatchGetData(scan, batch)->blkno == InvalidBlockNumber);
+		index_store_float8_orderby_distances(scan, so->orderByTypes,
+											 bitem->distances,
+											 bitem->recheckDistances);
+		return;
+	}
+
+	/*
+	 * Unordered scan.
+	 *
+	 * Always uses simple bool array for item recheck flags.
+	 */
+	scan->xs_recheck = GISTBatchGetRecheck(scan, batch)[item];
+
+	/* Index-only scan */
+	if (scan->xs_want_itup)
+	{
+		/* Reconstruct a returnable heap tuple from stashed index tuple */
+		IndexTuple	itup = (IndexTuple) (batch->currTuples +
+										 batch->items[item].tupleOffset);
+		MemoryContext oldcxt;
+
+		if (scan->xs_hitup)
 		{
-			if (so->curPageData < so->nPageData)
-			{
-				if (scan->kill_prior_tuple && so->curPageData > 0)
-				{
-
-					if (so->killedItems == NULL)
-					{
-						MemoryContext oldCxt =
-							MemoryContextSwitchTo(so->giststate->scanCxt);
-
-						so->killedItems = palloc_array(OffsetNumber, MaxIndexTuplesPerPage);
-
-						MemoryContextSwitchTo(oldCxt);
-					}
-					if (so->numKilled < MaxIndexTuplesPerPage)
-						so->killedItems[so->numKilled++] =
-							so->pageData[so->curPageData - 1].offnum;
-				}
-				/* continuing to return tuples from a leaf page */
-				scan->xs_heaptid = so->pageData[so->curPageData].heapPtr;
-				scan->xs_recheck = so->pageData[so->curPageData].recheck;
-
-				/* in an index-only scan, also return the reconstructed tuple */
-				if (scan->xs_want_itup)
-					scan->xs_hitup = so->pageData[so->curPageData].recontup;
-
-				so->curPageData++;
-
-				return true;
-			}
-
-			/*
-			 * Check the last returned tuple and add it to killedItems if
-			 * necessary
-			 */
-			if (scan->kill_prior_tuple
-				&& so->curPageData > 0
-				&& so->curPageData == so->nPageData)
-			{
-
-				if (so->killedItems == NULL)
-				{
-					MemoryContext oldCxt =
-						MemoryContextSwitchTo(so->giststate->scanCxt);
-
-					so->killedItems = palloc_array(OffsetNumber, MaxIndexTuplesPerPage);
-
-					MemoryContextSwitchTo(oldCxt);
-				}
-				if (so->numKilled < MaxIndexTuplesPerPage)
-					so->killedItems[so->numKilled++] =
-						so->pageData[so->curPageData - 1].offnum;
-			}
-			/* find and process the next index page */
-			do
-			{
-				GISTSearchItem *item;
-
-				if ((so->curBlkno != InvalidBlockNumber) && (so->numKilled > 0))
-					gistkillitems(scan);
-
-				item = getNextGISTSearchItem(so);
-
-				if (!item)
-					return false;
-
-				CHECK_FOR_INTERRUPTS();
-
-				/*
-				 * While scanning a leaf page, ItemPointers of matching heap
-				 * tuples are stored in so->pageData.  If there are any on
-				 * this page, we fall out of the inner "do" and loop around to
-				 * return them.
-				 */
-				gistScanPage(scan, item, item->distances, NULL, NULL);
-
-				pfree(item);
-			} while (so->nPageData == 0);
+			pfree(scan->xs_hitup);
+			scan->xs_hitup = NULL;
 		}
+
+		/* reconstruct the originally indexed values as a heap tuple */
+		oldcxt = MemoryContextSwitchTo(so->giststate->scanCxt);
+		scan->xs_hitup = gistFetchTuple(so->giststate, scan->indexRelation, itup);
+		MemoryContextSwitchTo(oldcxt);
 	}
 }
 
@@ -756,41 +894,34 @@ gistgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 {
 	GISTScanOpaque so = (GISTScanOpaque) scan->opaque;
 	int64		ntids = 0;
-	GISTSearchItem fakeItem;
+	IndexScanBatch batch;
 
 	if (!so->qual_ok)
 		return 0;
 
-	pgstat_count_index_scan(scan->indexRelation);
-	if (scan->instrument)
-		scan->instrument->nsearches++;
-
-	/* Begin the scan by processing the root page */
-	so->curPageData = so->nPageData = 0;
-	scan->xs_hitup = NULL;
-	if (so->pageDataCxt)
-		MemoryContextReset(so->pageDataCxt);
-
-	fakeItem.blkno = GIST_ROOT_BLKNO;
-	memset(&fakeItem.data.parentlsn, 0, sizeof(GistNSN));
-	gistScanPage(scan, &fakeItem, NULL, tbm, &ntids);
+	/* Begin the scan by queueing the root page */
+	gistScanStart(scan);
 
 	/*
-	 * While scanning a leaf page, ItemPointers of matching heap tuples will
-	 * be stored directly into tbm, so we don't need to deal with them here.
+	 * Drive the same non-ordered walker as gistgetbatch, one leaf page at a
+	 * time, draining each batch into the bitmap and releasing it before
+	 * fetching the next, so only one batch is ever live (cf. spggetbitmap).
 	 */
-	for (;;)
+	while ((batch = getNextBatch(scan)) != NULL)
 	{
-		GISTSearchItem *item = getNextGISTSearchItem(so);
+		bool	   *recheck = GISTBatchGetRecheck(scan, batch);
 
-		if (!item)
-			break;
+		for (int i = batch->firstItem; i <= batch->lastItem; i++)
+		{
+			tbm_add_tuples(tbm, &batch->items[i].tableTid, 1, recheck[i]);
+			ntids++;
+		}
 
-		CHECK_FOR_INTERRUPTS();
-
-		gistScanPage(scan, item, item->distances, tbm, &ntids);
-
-		pfree(item);
+		/*
+		 * Return the batch to the single-slot bitmap cache, to be reused by
+		 * the next getNextBatch
+		 */
+		indexam_util_release_batch(scan, batch);
 	}
 
 	return ntids;
