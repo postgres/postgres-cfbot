@@ -116,7 +116,7 @@ extern PGDLLIMPORT char *ssl_dh_params_file;
 extern PGDLLIMPORT bool ssl_sni;
 extern PGDLLIMPORT char *SSLCipherSuites;
 extern PGDLLIMPORT char *SSLCipherList;
-extern PGDLLIMPORT char *SSLECDHCurve;
+extern PGDLLIMPORT char *SSLNamedGroups;
 extern PGDLLIMPORT bool SSLPreferServerCiphers;
 #ifdef USE_SSL
 extern PGDLLIMPORT bool ssl_loaded_verify_locations;
