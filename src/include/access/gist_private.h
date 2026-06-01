@@ -16,6 +16,7 @@
 
 #include "access/amapi.h"
 #include "access/gist.h"
+#include "access/indexbatch.h"
 #include "access/itup.h"
 #include "lib/pairingheap.h"
 #include "storage/bufmgr.h"
@@ -120,10 +121,6 @@ typedef struct GISTSearchHeapItem
 	ItemPointerData heapPtr;
 	bool		recheck;		/* T if quals must be rechecked */
 	bool		recheckDistances;	/* T if distances must be rechecked */
-	HeapTuple	recontup;		/* data reconstructed from the index, used in
-								 * index-only scans */
-	OffsetNumber offnum;		/* track offset in page to mark tuple as
-								 * LP_DEAD */
 } GISTSearchHeapItem;
 
 /* Unvisited item, either index page or heap tuple */
@@ -148,6 +145,55 @@ typedef struct GISTSearchItem
 	(offsetof(GISTSearchItem, distances) + \
 	 sizeof(IndexOrderByDistance) * (n_distances))
 
+/* Per-batch data private to the GiST index AM */
+typedef struct GISTBatchData
+{
+	/* leaf page's buffer pin */
+	Buffer		buf;
+	/* leaf page's block number (InvalidBlockNumber means "virtual" batch) */
+	BlockNumber blkno;
+} GISTBatchData;
+
+/* Access the GiST-private per-batch data from an IndexScanBatch pointer */
+#define GISTBatchGetData(scan, batch) \
+	index_scan_batch_index_opaque_static(scan, batch, GISTBatchData)
+
+/*
+ * Per-item private GiST data.  We lay out the index AM's dynamic opaque area
+ * as an array of these, one per batch item, and subscript it via
+ * GISTBatchGetItem.
+ *
+ * GiST matching is potentially lossy, and the Consistent function's recheck
+ * flag varies from one item to the next, so every batch item records its own
+ * qual recheck flag; gistgettransform reports it as the item's xs_recheck.
+ *
+ * Note: Unordered scans only need a recheck flag, so their dynamic opaque
+ * area is just a bool array, subscripted via GISTBatchGetRecheck.
+ */
+typedef struct GISTBatchItem
+{
+	bool		recheck;		/* T if quals must be rechecked */
+	bool		recheckDistances;	/* T if distances are lossy lower bounds */
+	/* numberOfOrderBys entries */
+	IndexOrderByDistance distances[FLEXIBLE_ARRAY_MEMBER];
+} GISTBatchItem;
+
+#define SizeOfGISTBatchItem(n_distances) \
+	(offsetof(GISTBatchItem, distances) + \
+	 sizeof(IndexOrderByDistance) * (n_distances))
+
+/* Get an item from dynamic area during an ordered scan */
+#define GISTBatchGetItem(scan, batch, item) \
+	(AssertMacro((scan)->numberOfOrderBys > 0), \
+	 AssertMacro((item) >= 0 && (item) < MaxIndexTuplesPerPage), \
+	 (GISTBatchItem *) ((char *) index_scan_batch_index_opaque_dyn((scan), (batch)) + \
+						(Size) (item) * SizeOfGISTBatchItem((scan)->numberOfOrderBys)))
+
+/* Get an item from dynamic area during a non-ordered scan */
+#define GISTBatchGetRecheck(scan, batch) \
+	(AssertMacro((scan)->numberOfOrderBys == 0), \
+	 (bool *) index_scan_batch_index_opaque_dyn((scan), (batch)))
+
 /*
  * GISTScanOpaqueData: private state for a scan of a GiST index
  */
@@ -159,23 +205,9 @@ typedef struct GISTScanOpaqueData
 	pairingheap *queue;			/* queue of unvisited items */
 	MemoryContext queueCxt;		/* context holding the queue */
 	bool		qual_ok;		/* false if qual can never be satisfied */
-	bool		firstCall;		/* true until first gistgettuple call */
 
 	/* pre-allocated workspace arrays */
 	IndexOrderByDistance *distances;	/* output area for gistindex_keytest */
-
-	/* info about killed items if any (killedItems is NULL if never used) */
-	OffsetNumber *killedItems;	/* offset numbers of killed items */
-	int			numKilled;		/* number of currently stored items */
-	BlockNumber curBlkno;		/* current number of block */
-	GistNSN		curPageLSN;		/* pos in the WAL stream when page was read */
-
-	/* In a non-ordered search, returnable heap items are stored here: */
-	GISTSearchHeapItem pageData[BLCKSZ / sizeof(IndexTupleData)];
-	OffsetNumber nPageData;		/* number of valid items in array */
-	OffsetNumber curPageData;	/* next item to return */
-	MemoryContext pageDataCxt;	/* context holding the fetched tuples, for
-								 * index-only scans */
 } GISTScanOpaqueData;
 
 typedef GISTScanOpaqueData *GISTScanOpaque;
@@ -446,7 +478,7 @@ extern void gistXLogPageReuse(Relation rel, Relation heaprel, BlockNumber blkno,
 extern XLogRecPtr gistXLogUpdate(Buffer buffer,
 								 OffsetNumber *todelete, int ntodelete,
 								 IndexTuple *itup, int ituplen,
-								 Buffer leftchildbuf);
+								 Buffer leftchildbuf, bool vacuum);
 
 extern XLogRecPtr gistXLogDelete(Buffer buffer, OffsetNumber *todelete,
 								 int ntodelete, TransactionId snapshotConflictHorizon,
@@ -458,8 +490,11 @@ extern XLogRecPtr gistXLogSplit(bool page_is_leaf,
 								Buffer leftchildbuf, bool markfollowright);
 
 /* gistget.c */
-extern void gistkillitems(IndexScanDesc scan);
-extern bool gistgettuple(IndexScanDesc scan, ScanDirection dir);
+extern void gistkillitemsbatch(IndexScanDesc scan, IndexScanBatch batch);
+extern IndexScanBatch gistgetbatch(IndexScanDesc scan, IndexScanBatch priorbatch,
+								   ScanDirection dir);
+extern void gistunguardbatch(IndexScanDesc scan, IndexScanBatch batch);
+extern void gistgettransform(IndexScanDesc scan, IndexScanBatch batch, int item);
 extern int64 gistgetbitmap(IndexScanDesc scan, TIDBitmap *tbm);
 extern bool gistcanreturn(Relation index, int attno);
 

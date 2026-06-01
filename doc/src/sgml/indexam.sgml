@@ -172,6 +172,7 @@ typedef struct IndexAmRoutine
     amgetbatch_function amgetbatch; /* can be NULL */
     amunguardbatch_function amunguardbatch; /* can be NULL */
     amkillitemsbatch_function amkillitemsbatch;	/* can be NULL */
+    amgettransform_function amgettransform; /* can be NULL */
     amgetbitmap_function amgetbitmap;   /* can be NULL */
     amendscan_function amendscan;
     amposreset_function amposreset; /* can be NULL */
@@ -718,14 +719,44 @@ ambeginscan (Relation indexRelation,
     </listitem>
     <listitem>
      <para>
+      <literal>scan-&gt;batch_index_opaque_dyn</literal>: the size of an
+      optional second per-batch opaque area, or 0 if the index AM does not need
+      one.  Unlike the area above, its size need not be known at compile time;
+      the index AM may choose it at the start of each scan.  It sits immediately
+      before the static area, and core code treats it as a single opaque
+      allocation that the index AM lays out however it likes (for example, to
+      carry per-item match metadata, such as a recheck flag or order-by
+      distances, that must travel with the batch).
+     </para>
+    </listitem>
+    <listitem>
+     <para>
       <literal>scan-&gt;batch_tuples_workspace</literal>: the size in bytes
       of the per-batch tuple storage workspace used for index-only scans
       (typically <literal>BLCKSZ</literal>), or 0 if the index AM does not
-      support index-only scans.  The workspace is accessible via
-      <structfield>batch-&gt;currTuples</structfield>.
+      support index-only scans.  The workspace is accessible via the batch's
+      <structfield>currTuples</structfield> field.  The index AM stores each
+      matching tuple here in its on-disk format (an
+      <structname>IndexTuple</structname>, or another on-disk tuple form used by
+      the AM); it is either exposed directly as
+      <literal>scan-&gt;xs_itup</literal>, or converted to the returnable tuple
+      later, by <function>amgettransform</function> (see below).
      </para>
     </listitem>
    </itemizedlist>
+  </para>
+
+  <para>
+   These batch fields are usually set in <function>ambeginscan</function>, but an
+   index access method may instead set any of them in
+   <function>amrescan</function> when their value cannot be determined until then.
+   For example, the size of the dynamic opaque area might depend on whether this
+   is an <link linkend="indexes-index-only-scans">index-only scan</link>
+   (<literal>scan-&gt;xs_want_itup</literal>), which core code only sets after
+   <function>ambeginscan</function> has returned; such an access method sizes
+   <literal>scan-&gt;batch_index_opaque_dyn</literal> in
+   <function>amrescan</function> instead.  This is safe because no batch is ever
+   allocated before the first <function>amrescan</function> call.
   </para>
 
   <para>
@@ -733,10 +764,11 @@ ambeginscan (Relation indexRelation,
    a fixed property of the whole scan (rather than something that varies from
    one matching item to the next) should also set
    <literal>scan-&gt;xs_recheck</literal> here, in
-   <function>ambeginscan</function>, since the value applies to every item the
-   scan returns.  The value set here persists across any subsequent
-   <function>amrescan</function> calls.  B-tree (always false) and hash (always
-   true) work this way.
+   <function>ambeginscan</function>: the value then applies to every item the
+   scan returns, and persists across any subsequent
+   <function>amrescan</function> calls.  See <function>amgetbatch</function>
+   below, which describes both this whole-scan case and the per-item case in
+   detail.
   </para>
 
   <para>
@@ -756,6 +788,13 @@ amrescan (IndexScanDesc scan,
    feature is used when a new outer tuple is selected by a nested-loop join
    and so a new key comparison value is needed, but the scan key structure
    remains the same.
+  </para>
+
+  <para>
+   <function>amrescan</function> is also where an
+   <function>amgetbatch</function> access method sets any of the batch fields
+   described under <function>ambeginscan</function> above whose value could not
+   be determined until now.
   </para>
 
   <para>
@@ -894,23 +933,75 @@ amgetbatch (IndexScanDesc scan,
   </para>
 
   <para>
-   Index access methods using <function>amgetbatch</function> must set
-   <literal>scan-&gt;xs_recheck</literal> to indicate whether rechecking of
-   scan keys is required, in the same way as <function>amgettuple</function>
-   does. However, <literal>scan-&gt;xs_recheck</literal> must be set consistently
-   for an entire scan rather than varying on a per-tuple basis. This is a key
-   difference from <function>amgettuple</function>, which can set
-   <literal>scan-&gt;xs_recheck</literal> independently for each tuple it returns.
-   Index access methods that require granular control over
-   <literal>scan-&gt;xs_recheck</literal> must use the <function>amgettuple</function>
-   interface instead of <function>amgetbatch</function>.
+   Index access methods using <function>amgetbatch</function> must convey
+   whether the scan keys need to be rechecked, via
+   <literal>scan-&gt;xs_recheck</literal>, just as
+   <function>amgettuple</function> access methods do.  Unlike
+   <function>amgettuple</function>, however, an
+   <function>amgetbatch</function> access method cannot set
+   <literal>scan-&gt;xs_recheck</literal> at the point an individual item is
+   returned, because the interface decouples the order of
+   <function>amgetbatch</function> calls from the order in which items are
+   later returned to the scan.  When the recheck requirement is a fixed
+   property of the whole scan, the index access method instead sets
+   <literal>scan-&gt;xs_recheck</literal> once, at scan start (in its
+   <function>ambeginscan</function> routine): B-tree always sets it false, and
+   hash always sets it true.  When the requirement instead varies from one
+   matching item to the next, the index access method records the per-item
+   value in the batch and provides an <function>amgettransform</function>
+   callback (see below), which the table AM invokes for each returned item to
+   set <literal>scan-&gt;xs_recheck</literal> from that recorded state; GiST
+   works this way.
   </para>
 
   <para>
-   Similarly, the <function>amgetbatch</function> interface does not currently
-   support index-only scans that return data in the form of a
-   <structname>HeapTuple</structname> pointer stored in
-   <literal>scan-&gt;xs_hitup</literal>.
+   An <function>amgetbatch</function> access method that supports index-only
+   scans must supply the scan's returnable tuple for each matching item, and
+   must do so in one of exactly two ways.  Which one applies is a fixed
+   property of the access method, determined by whether it provides an
+   <function>amgettransform</function> callback:
+   <itemizedlist>
+    <listitem>
+     <para>
+      If the index access method does <emphasis>not</emphasis> provide
+      <function>amgettransform</function>, it must store each matching tuple
+      in the batch's <structfield>currTuples</structfield> workspace as an
+      on-disk <structname>IndexTuple</structname> whose layout is exactly what
+      <literal>scan-&gt;xs_itupdesc</literal> describes.  The table AM exposes
+      those stored bytes directly as <literal>scan-&gt;xs_itup</literal> and
+      deforms them against <literal>xs_itupdesc</literal> (just as for an
+      <function>amgettuple</function> index-only scan); the index access
+      method must not set <literal>scan-&gt;xs_itup</literal> itself.  Among
+      the core access methods only B-tree uses this path, because it stores
+      the original indexed values unchanged, so the stored tuple already
+      matches <literal>xs_itupdesc</literal>.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      Otherwise the index access method must provide an
+      <function>amgettransform</function> callback that produces the
+      returnable tuple in <literal>scan-&gt;xs_hitup</literal> (a
+      <structname>HeapTuple</structname> matching
+      <literal>scan-&gt;xs_hitupdesc</literal>).  This gives the access method
+      complete freedom to form that tuple from whatever it stored in
+      <structfield>currTuples</structfield>, in whatever on-disk format suits
+      it.  GiST uses this path, because the representation it
+      stores differs from the indexed value and so could not satisfy the
+      <literal>xs_itupdesc</literal> layout directly.
+     </para>
+    </listitem>
+   </itemizedlist>
+   The first path is generic, but useful only to an access method that &mdash;
+   like B-tree &mdash; already stores tuples in exactly the indexed-attribute
+   format; an access method that stores some other representation must take
+   the second path.  The two paths are mutually exclusive: an
+   <function>amgetbatch</function> access method takes one or the other, never
+   both.  (For historical reasons an <function>amgettuple</function> access
+   method is allowed to set both <literal>scan-&gt;xs_itup</literal> and
+   <literal>scan-&gt;xs_hitup</literal> for the same scan &mdash; the
+   heap-tuple form is then used &mdash; but that latitude is a legacy quirk
+   that <function>amgetbatch</function> deliberately does not repeat.)
   </para>
 
   <para>
@@ -940,8 +1031,10 @@ amunguardbatch (IndexScanDesc scan,
    is not even required to use the standard helper
    <function>indexam_util_unlock_batch</function> to manage it.  In practice,
    though, most or all index AMs will use that helper and hold the simplest
-   possible interlock: each guarded B-tree or hash batch keeps a single
-   buffer pin on the one index page the batch came from.  See <xref
+   possible interlock: each guarded B-tree, hash, or GiST batch keeps a
+   single buffer pin on the one index page the batch came from.  (The
+   <quote>virtual</quote> nearest-neighbor batches that GiST uses for ordered
+   scans are not guarded, and hold no such pin.)  See <xref
     linkend="index-locking"/> for details on buffer pin management during
    index scans.  This function will be called at most once for each guarded
    batch; it is not called when the index AM has already unguarded the batch
@@ -985,8 +1078,8 @@ amkillitemsbatch (IndexScanDesc scan,
    <function>amgetbatch</function> index AMs (those that don't can leave
    the field set to <literal>NULL</literal>), but doing so is recommended for
    performance, as it allows future scans to skip known-dead index entries.
-   Both core index access methods that currently support
-   <function>amgetbatch</function> (B-tree and hash) implement
+   All three core index access methods that currently support
+   <function>amgetbatch</function> (B-tree, hash, and GiST) implement
    <literal>LP_DEAD</literal> marking, though third-party index access methods
    are free to choose whether to implement this feature.  The table AM may
    call <function>tableam_util_scanpos_killitem</function> to mark dead items as
@@ -1028,7 +1121,7 @@ amkillitemsbatch (IndexScanDesc scan,
    <command>VACUUM</command> recycling table TIDs &mdash; so it would be
    unsafe to assume that index entries still point to the same heap/table
    tuples.  Since <literal>LP_DEAD</literal> marking is only an optimization
-   hint, it is always safe to skip it.  Both B-tree and hash use this
+   hint, it is always safe to skip it.  B-tree, hash, and GiST use this
    approach.
   </para>
 
@@ -1063,6 +1156,41 @@ amkillitemsbatch (IndexScanDesc scan,
    independently verifies the page LSN and can always safely give up on
    setting <literal>LP_DEAD</literal> bits, correctness is obvious without any
    coupling between the two.
+  </para>
+
+  <para>
+<programlisting>
+void
+amgettransform (IndexScanDesc scan,
+                IndexScanBatch batch,
+                int item);
+</programlisting>
+   Called by the table AM as it returns each matching item
+   (<replaceable>item</replaceable> is an index into the batch's
+   <structfield>items</structfield> array) of an <function>amgetbatch</function>
+   scan, to set up the scan's per-tuple output from per-item state that the
+   access method recorded in the batch.  This is needed when that output cannot
+   be a fixed property of the whole scan.  An access method may use it to set
+   <literal>scan-&gt;xs_recheck</literal> (when the need to recheck the scan
+   conditions varies from one matching item to the next), to set
+   <structfield>xs_orderbyvals</structfield> and
+   <structfield>xs_recheckorderby</structfield> for an ordered
+   (nearest-neighbor) scan, and to set <literal>scan-&gt;xs_hitup</literal> for
+   an index-only scan whose returnable tuple must be reconstructed rather than
+   returned directly as a stored index tuple.
+  </para>
+
+  <para>
+   Implementing <function>amgettransform</function> is optional, and is only
+   meaningful together with <function>amgetbatch</function>.  An access method
+   need only provide it when some part of its per-tuple output varies from one
+   matching item to the next.  When every such output is instead a fixed
+   property of the whole scan &mdash; or, for index-only scans, is the on-disk
+   index tuple returned directly via <literal>scan-&gt;xs_itup</literal> &mdash;
+   the field can be left <literal>NULL</literal>, as B-tree and hash do.  GiST
+   provides one because parts of its per-tuple output (the recheck flag, the
+   <literal>ORDER BY</literal> distances, and the reconstructed index-only
+   tuples) vary per matching item, as described above.
   </para>
 
   <para>
@@ -1361,8 +1489,26 @@ amtranslatecmptype (CompareType cmptype, Oid opfamily, Oid opcintype);
   </para>
 
   <para>
-   Note that <function>amgetbatch</function> scans do not currently support
-   ordering operators.
+   An <function>amgetbatch</function> access method can support ordering
+   operators by providing an <function>amgettransform</function> callback: it
+   records each matching item's ordering values in the batch, and the table AM
+   calls <function>amgettransform</function> as it returns each item to set
+   <structfield>xs_orderbyvals</structfield> and
+   <structfield>xs_recheckorderby</structfield> from that recorded state.  GiST
+   uses this for nearest-neighbor scans.  As with
+   <literal>scan-&gt;xs_recheck</literal>, these values cannot be set directly as
+   items are returned.
+  </para>
+
+  <para>
+   Scans that use ordering operators are never planned as index-only scans.
+   Because an ordered scan can collect matching items from many index leaf
+   pages without retaining a buffer pin on any of them (GiST's
+   <quote>virtual</quote> nearest-neighbor batches work this way), it has no
+   pin to serve as the interlock against concurrent TID recycling that an
+   index-only scan depends on (see <xref linkend="index-locking"/>).  The
+   planner therefore costs and executes such scans as plain index scans, which
+   always fetch and recheck the heap tuple.
   </para>
 
   <para>

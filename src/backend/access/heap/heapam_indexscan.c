@@ -831,10 +831,22 @@ heapam_index_return_scanpos_tid(IndexScanDesc scan, IndexScanHeapData *hscan,
 								BatchRingItemPos *scanPos,
 								bool *all_visible)
 {
+	amgettransform_function amgettransform =
+		scan->indexRelation->rd_indam->amgettransform;
 	HeapBatchData *hbatch;
 
 	/* Set xs_heaptid, which caller (and core executor) will need */
 	scan->xs_heaptid = scanBatch->items[scanPos->item].tableTid;
+
+	/*
+	 * Let the index AM set this item's per-tuple output.  An AM that provides
+	 * amgettransform uses it to set the item's qual recheck flag
+	 * (scan->xs_recheck), an ordered scan's ORDER BY distances
+	 * (xs_orderbyvals/xs_recheckorderby), and an index-only scan's returnable
+	 * tuple (xs_hitup).
+	 */
+	if (amgettransform != NULL)
+		amgettransform(scan, scanBatch, scanPos->item);
 
 	if (all_visible == NULL)
 	{
@@ -848,8 +860,14 @@ heapam_index_return_scanpos_tid(IndexScanDesc scan, IndexScanHeapData *hscan,
 	/* Index-only scan */
 	Assert(scan->xs_want_itup);
 
-	scan->xs_itup = (IndexTuple) (scanBatch->currTuples +
-								  scanBatch->items[scanPos->item].tupleOffset);
+	/*
+	 * Unless the index AM already produced the returnable tuple via
+	 * amgettransform above (in xs_hitup), set the original index tuple that
+	 * amgetbatch stored in currTuples in xs_itup.
+	 */
+	if (amgettransform == NULL)
+		scan->xs_itup = (IndexTuple) (scanBatch->currTuples +
+									  scanBatch->items[scanPos->item].tupleOffset);
 
 	/*
 	 * Set visibility info for the current scanPos item (plus possibly some

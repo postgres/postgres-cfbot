@@ -370,6 +370,11 @@ typedef struct IndexScanDescData
 	uint32		batch_table_opaque_size;	/* table AM opaque area size */
 
 	/*
+	 * Optional dynamic opaque size, also set by index AM in ambeginscan
+	 */
+	uint32		batch_index_opaque_dyn;
+
+	/*
 	 * Offset used by index_scan_batch_base (set on first batch alloc).  See
 	 * access/indexbatch.h.
 	 */
