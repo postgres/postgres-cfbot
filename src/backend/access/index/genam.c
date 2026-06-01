@@ -134,6 +134,7 @@ RelationGetIndexScan(Relation indexRelation, int nkeys, int norderbys)
 	scan->batch_index_opaque_static = 0;
 	scan->batch_tuples_workspace = 0;
 	scan->batch_table_opaque_size = 0;
+	scan->batch_index_opaque_dyn = 0;
 	scan->batch_base_offset = 0;
 
 	scan->xs_name_cstring_attnums = NULL;

@@ -117,6 +117,7 @@ hashhandler(PG_FUNCTION_ARGS)
 		.amgetbatch = hashgetbatch,
 		.amunguardbatch = hashunguardbatch,
 		.amkillitemsbatch = hashkillitemsbatch,
+		.amgettransform = NULL,
 		.amgettuple = NULL,
 		.amgetbitmap = hashgetbitmap,
 		.amendscan = hashendscan,

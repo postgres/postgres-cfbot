@@ -212,6 +212,10 @@ typedef void (*amunguardbatch_function) (IndexScanDesc scan,
 typedef void (*amkillitemsbatch_function) (IndexScanDesc scan,
 										   IndexScanBatch batch);
 
+/* Set up the scan's xs_hitup output tuple for the given batch item */
+typedef void (*amgettransform_function) (IndexScanDesc scan,
+										 IndexScanBatch batch, int item);
+
 /* fetch all valid tuples */
 typedef int64 (*amgetbitmap_function) (IndexScanDesc scan,
 									   TIDBitmap *tbm);
@@ -325,6 +329,7 @@ typedef struct IndexAmRoutine
 	amgetbatch_function amgetbatch; /* can be NULL */
 	amunguardbatch_function amunguardbatch; /* can be NULL */
 	amkillitemsbatch_function amkillitemsbatch; /* can be NULL */
+	amgettransform_function amgettransform; /* can be NULL */
 	amgettuple_function amgettuple; /* can be NULL */
 	amgetbitmap_function amgetbitmap;	/* can be NULL */
 	amendscan_function amendscan;

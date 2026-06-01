@@ -301,6 +301,7 @@ brinhandler(PG_FUNCTION_ARGS)
 		.amgetbatch = NULL,
 		.amunguardbatch = NULL,
 		.amkillitemsbatch = NULL,
+		.amgettransform = NULL,
 		.amgettuple = NULL,
 		.amgetbitmap = bringetbitmap,
 		.amendscan = brinendscan,
