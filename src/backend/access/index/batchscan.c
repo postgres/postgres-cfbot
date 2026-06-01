@@ -231,6 +231,7 @@ batchscan_alloc(IndexScanDesc scan)
 		{
 			/* We lazily compute batch_base_offset on scan's first call */
 			size_t		table_area = 0;
+			size_t		index_dyn_area = MAXALIGN(scan->batch_index_opaque_dyn);
 
 			if (scan->usebatchring)
 			{
@@ -241,8 +242,8 @@ batchscan_alloc(IndexScanDesc scan)
 				table_area = MAXALIGN(scan->batch_table_opaque_size);
 			}
 
-			/* ...though we always need an index AM area */
-			scan->batch_base_offset = table_area +
+			/* ...though we always need index AM areas */
+			scan->batch_base_offset = table_area + index_dyn_area +
 				scan->batch_index_opaque_static;
 		}
 

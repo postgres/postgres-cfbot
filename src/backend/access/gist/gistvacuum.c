@@ -326,10 +326,17 @@ restart:
 	recurse_to = InvalidBlockNumber;
 
 	/*
-	 * We are not going to stay here for a long time, aggressively grab an
-	 * exclusive lock.
+	 * Get a full cleanup lock on this page.  We must get such a lock on every
+	 * leaf page over the course of the vacuum scan, whether or not it
+	 * actually contains any deletable tuples.
+	 *
+	 * Note: we could avoid this for internal pages, but not for the root
+	 * page.  The root page can start out as a leaf page, but subsequently
+	 * become an internal page, even while a scan holds an interlock pin on
+	 * that page (this isn't possible in nbtree because root splits always
+	 * create a new root page, stored within a separate block number).
 	 */
-	LockBuffer(buffer, GIST_EXCLUSIVE);
+	LockBufferForCleanup(buffer);
 	page = BufferGetPage(buffer);
 
 	if (gistPageRecyclable(page))
@@ -408,7 +415,7 @@ restart:
 
 				recptr = gistXLogUpdate(buffer,
 										todelete, ntodelete,
-										NULL, 0, InvalidBuffer);
+										NULL, 0, InvalidBuffer, true);
 				PageSetLSN(page, recptr);
 			}
 			else

@@ -363,6 +363,11 @@ typedef struct IndexScanDescData
 	uint32		batch_table_opaque_size;	/* table AM opaque area size */
 
 	/*
+	 * Optional dynamic opaque size, also set by index AM in ambeginscan
+	 */
+	uint32		batch_index_opaque_dyn;
+
+	/*
 	 * Offset used by index_scan_batch_base (set on first batch alloc)
 	 */
 	size_t		batch_base_offset;
@@ -406,6 +411,8 @@ typedef struct IndexScanDescData
  *
  *   [table AM opaque area]    <- table AM area (batch_table_opaque_size),
  *                                optionally requested by table AM
+ *   [index AM dyn opaque]     <- index AM area (batch_index_opaque_dyn),
+ *                                optionally requested by index AM
  *   [index AM static opaque]  <- index AM area (batch_index_opaque_static),
  *                                mandatory fixed-size index page info
  *   [IndexScanBatchData]      <- batch pointer, returned by amgetbatch
@@ -413,12 +420,12 @@ typedef struct IndexScanDescData
  *   [tuples workspace]        <- index tuple area (batch_tuples_workspace),
  *                                only used during index-only scans
  *
- * batch_base_offset combines the table AM opaque area and the static index AM
- * opaque area into a single offset from the batch pointer to the true
- * allocation base.  We pfree a batch by passing pfree a pointer returned by
- * index_scan_batch_base.  We rely on the assumption that batches have a fixed
- * layout for the duration of an index scan (batches are cached for reuse to
- * avoid palloc churn).
+ * batch_base_offset combines the table AM opaque area, the optional dynamic
+ * index AM opaque area, and the static index AM opaque area into a single
+ * offset from the batch pointer to the true allocation base.  We pfree a
+ * batch by passing pfree a pointer returned by index_scan_batch_base.  We
+ * rely on the assumption that batches have a fixed layout for the duration of
+ * an index scan (batches are cached for reuse to avoid palloc churn).
  *
  * The table AM accesses its opaque area (sized batch_table_opaque_size) using
  * the index_scan_batch_table_area shim accessor.  The table AM is permitted
@@ -434,6 +441,17 @@ typedef struct IndexScanDescData
  * area.  Access to the area is cheap (a compile-time-constant subtraction),
  * but its size cannot vary from scan to scan.  Index AMs typically use this
  * area to store things like index page sibling link block numbers.
+ *
+ * Index AMs can use a second, optional dynamically-sized private area
+ * (batch_index_opaque_dyn) that sits just before the static area.  Its size
+ * is chosen at scan start rather than at compile time.  It is accessed via
+ * index_scan_batch_index_opaque_dyn.  This second area is generally only used
+ * during scans where large amounts of supplemental metadata are required,
+ * that cannot reasonably be allocated for every scan.  Typically, this is
+ * granular information about the batch's items for use by the index AM's
+ * amgettransform routine (the tuples themselves are stored separately, in
+ * on-disk format, in the tuples workspace; amgettransform converts each
+ * one into the scan's returnable tuple).
  * ----------------------------------------------------------------------------
  */
 
@@ -469,6 +487,18 @@ index_scan_batch_table_area(struct IndexScanDescData *scan, IndexScanBatch batch
 #define index_scan_batch_index_opaque_static(scan, batch, type) \
 	(AssertMacro((scan)->batch_index_opaque_static == MAXALIGN(sizeof(type))), \
 	 ((type *) ((char *) (batch) - MAXALIGN(sizeof(type)))))
+
+/*
+ * Return a pointer to the index AM's dynamic opaque area
+ */
+static inline void *
+index_scan_batch_index_opaque_dyn(struct IndexScanDescData *scan, IndexScanBatch batch)
+{
+	Assert(scan->batch_index_opaque_dyn > 0);
+
+	return (char *) batch - scan->batch_index_opaque_static -
+		MAXALIGN(scan->batch_index_opaque_dyn);
+}
 
 /* Generic structure for parallel scans */
 typedef struct ParallelIndexScanDescData

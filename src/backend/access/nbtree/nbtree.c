@@ -166,6 +166,7 @@ bthandler(PG_FUNCTION_ARGS)
 		.amgetbatch = btgetbatch,
 		.amunguardbatch = btunguardbatch,
 		.amkillitemsbatch = btkillitemsbatch,
+		.amgettransform = NULL,
 		.amgetbitmap = btgetbitmap,
 		.amendscan = btendscan,
 		.amposreset = btposreset,
