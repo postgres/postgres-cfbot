@@ -1048,6 +1048,8 @@ GBT_NUMKEY_R
 GBT_VARKEY
 GBT_VARKEY_R
 GENERAL_NAME
+GISTBatchData
+GISTBatchItem
 GISTBuildBuffers
 GISTBuildState
 GISTDeletedPageContents
