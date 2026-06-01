@@ -23,6 +23,7 @@
 #include "utils/float.h"
 #include "utils/fmgrprotos.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
@@ -670,6 +671,7 @@ gistFetchTuple(GISTSTATE *giststate, Relation r, IndexTuple tuple)
 	Datum		fetchatt[INDEX_MAX_KEYS];
 	bool		isnull[INDEX_MAX_KEYS];
 	int			i;
+	HeapTuple	htup;
 
 	for (i = 0; i < IndexRelationGetNumberOfKeyAttributes(r); i++)
 	{
@@ -717,7 +719,12 @@ gistFetchTuple(GISTSTATE *giststate, Relation r, IndexTuple tuple)
 	}
 	MemoryContextSwitchTo(oldcxt);
 
-	return heap_form_tuple(giststate->fetchTupdesc, fetchatt, isnull);
+	htup = heap_form_tuple(giststate->fetchTupdesc, fetchatt, isnull);
+
+	/* cleanup */
+	MemoryContextReset(giststate->tempCxt);
+
+	return htup;
 }
 
 float
