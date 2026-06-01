@@ -2811,10 +2811,10 @@
 },
 
 { name => 'ssl_groups', type => 'string', context => 'PGC_SIGHUP', group => 'CONN_AUTH_SSL',
-  short_desc => 'Sets the group(s) to use for Diffie-Hellman key exchange.',
+  short_desc => 'Sets the named group(s) to use for TLS key exchange.',
   long_desc => 'Multiple groups can be specified using a colon-separated list.',
   flags => 'GUC_SUPERUSER_ONLY',
-  variable => 'SSLECDHCurve',
+  variable => 'SSLNamedGroups',
   boot_val => 'DEFAULT_SSL_GROUPS',
 },
 
