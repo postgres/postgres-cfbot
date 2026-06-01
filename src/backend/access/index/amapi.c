@@ -66,6 +66,7 @@ GetIndexAmRoutine(Oid amhandler)
 	Assert(routine->amgetbatch != NULL || routine->amkillitemsbatch == NULL);
 	Assert(routine->amgetbatch != NULL || routine->amposreset == NULL);
 	Assert(routine->amgetbatch != NULL || !routine->amcanmarkpos);
+	Assert(routine->amgetbatch != NULL || routine->amgettransform == NULL);
 
 	return routine;
 }
