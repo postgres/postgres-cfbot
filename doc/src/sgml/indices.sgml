@@ -1167,7 +1167,11 @@ CREATE INDEX mytable_cat_data ON mytable (category, data);
      <para>
       The index type must support index-only scans.  B-tree indexes always
       do.  GiST and SP-GiST indexes support index-only scans for some
-      operator classes but not others.  Other index types have no support.
+      operator classes but not others, and never for
+      <quote>nearest-neighbor</quote> searches, that is, scans that return
+      rows in the order of an ordering operator (see
+      <xref linkend="indexes-type-gist"/> and
+      <xref linkend="indexes-type-spgist"/>).  Other index types have no support.
       The underlying requirement is that the index must physically store, or
       else be able to reconstruct, the original data value for each index
       entry.  As a counterexample, GIN indexes cannot support index-only
