@@ -67,14 +67,15 @@ gistRedoClearFollowRight(XLogReaderState *record, uint8 block_id)
  * redo any page update (except page split)
  */
 static void
-gistRedoPageUpdateRecord(XLogReaderState *record)
+gistRedoPageUpdateRecord(XLogReaderState *record, bool get_cleanup_lock)
 {
 	XLogRecPtr	lsn = record->EndRecPtr;
 	gistxlogPageUpdate *xldata = (gistxlogPageUpdate *) XLogRecGetData(record);
 	Buffer		buffer;
 	Page		page;
 
-	if (XLogReadBufferForRedo(record, 0, &buffer) == BLK_NEEDS_REDO)
+	if (XLogReadBufferForRedoExtended(record, 0, RBM_NORMAL, get_cleanup_lock,
+									  &buffer) == BLK_NEEDS_REDO)
 	{
 		char	   *begin;
 		char	   *data;
@@ -404,7 +405,10 @@ gist_redo(XLogReaderState *record)
 	switch (info)
 	{
 		case XLOG_GIST_PAGE_UPDATE:
-			gistRedoPageUpdateRecord(record);
+			gistRedoPageUpdateRecord(record, false);
+			break;
+		case XLOG_GIST_PAGE_VACUUM:
+			gistRedoPageUpdateRecord(record, true);
 			break;
 		case XLOG_GIST_DELETE:
 			gistRedoDeleteRecord(record);
@@ -595,6 +599,11 @@ gistXLogPageReuse(Relation rel, Relation heaprel,
  * If this update inserts a downlink for a split page, also record that
  * the F_FOLLOW_RIGHT flag on the child page is cleared and NSN set.
  *
+ * A VACUUM deletion of leaf index tuples uses the same on-page
+ * representation, but caller passes vacuum=true so that the record is logged
+ * under a distinct record type, telling replay to take a cleanup lock on the
+ * target page.
+ *
  * Note that both the todelete array and the tuples are marked as belonging
  * to the target buffer; they need not be stored in XLOG if XLogInsert decides
  * to log the whole buffer contents instead.
@@ -603,11 +612,13 @@ XLogRecPtr
 gistXLogUpdate(Buffer buffer,
 			   OffsetNumber *todelete, int ntodelete,
 			   IndexTuple *itup, int ituplen,
-			   Buffer leftchildbuf)
+			   Buffer leftchildbuf, bool vacuum)
 {
 	gistxlogPageUpdate xlrec;
 	int			i;
 	XLogRecPtr	recptr;
+
+	Assert(!vacuum || (ituplen == 0 && !BufferIsValid(leftchildbuf)));
 
 	xlrec.ntodelete = ntodelete;
 	xlrec.ntoinsert = ituplen;
@@ -629,7 +640,8 @@ gistXLogUpdate(Buffer buffer,
 	if (BufferIsValid(leftchildbuf))
 		XLogRegisterBuffer(1, leftchildbuf, REGBUF_STANDARD);
 
-	recptr = XLogInsert(RM_GIST_ID, XLOG_GIST_PAGE_UPDATE);
+	recptr = XLogInsert(RM_GIST_ID,
+						vacuum ? XLOG_GIST_PAGE_VACUUM : XLOG_GIST_PAGE_UPDATE);
 
 	return recptr;
 }

@@ -951,9 +951,12 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 	/*
 	 * 3. Check if an index-only scan is possible.  If we're not building
 	 * plain indexscans, this isn't relevant since bitmap scans don't support
-	 * index data retrieval anyway.
+	 * index data retrieval anyway.  If there are ordering operators then we
+	 * assume that an index-only scan is unsafe due to the difficulty with
+	 * holding index page pins sufficient to avoid concurrent TID recycling.
 	 */
 	index_only_scan = (scantype != ST_BITMAPSCAN &&
+					   orderbyclauses == NIL &&
 					   check_index_only(rel, index));
 
 	/*
