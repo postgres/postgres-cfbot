@@ -184,6 +184,9 @@ static BufferDesc *GetBufferFromRing(BufferAccessStrategy strategy,
 static void AddBufferToRing(BufferAccessStrategy strategy,
 							BufferDesc *buf);
 static ClockSweep *ChooseClockSweep(bool balance);
+static BufferDesc *StrategyGetBufferPartition(ClockSweep *sweep,
+											  BufferAccessStrategy strategy,
+											  uint64 *buf_state);
 
 /*
  * clocksweep allocation balancing
@@ -251,10 +254,9 @@ static int clocksweep_partition_budget = 0;
  * id of the buffer now under the hand.
  */
 static inline uint32
-ClockSweepTick(void)
+ClockSweepTick(ClockSweep *sweep)
 {
 	uint32		victim;
-	ClockSweep *sweep = ChooseClockSweep(true);
 
 	/*
 	 * Atomically move hand ahead one buffer - if there's several processes
@@ -486,7 +488,8 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_r
 {
 	BufferDesc *buf;
 	int			bgwprocno;
-	int			trycounter;
+	ClockSweep *sweep,
+			   *sweep_start;		/* starting clock-sweep partition */
 
 	*from_ring = false;
 
@@ -545,33 +548,61 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_r
 	/*
 	 * Use the "clock sweep" algorithm to find a free buffer
 	 *
-	 * XXX Note that ClockSweepTick() is NUMA-aware, i.e. it only looks at
-	 * buffers from a single partition, aligned with the NUMA node. That means
-	 * a process "sweeps" only a fraction of buffers, even if the other buffers
-	 * are better candidates for eviction. Maybe there should be some logic to
-	 * "steal" buffers from other partitions or other nodes?
-	 *
-	 * XXX This only searches a single partition, which can result in "no
-	 * unpinned buffers available" even if there are buffers in other
-	 * partitions. Needs to scan partitions if needed, as a fallback.
-	 *
-	 * XXX Would that also mean we should have multiple bgwriters, one for each
-	 * node, or would one bgwriter still handle all nodes?
-	 *
-	 * XXX Also, the trycounter should not be set to NBuffers, but to buffer
-	 * count for that one partition. In fact, this should not call ClockSweepTick
-	 * for every iteration. The call is likely quite expensive (does a lot
-	 * of stuff), and also may return a different partition on each call.
-	 * We should just do it once, and then do the for(;;) loop. And then
-	 * maybe advance to the next partition, until we scan through all of them.
+	 * Start with the "preferred" partition, and then proceed in a round-robin
+	 * manner. If we cycle back to the starting partition, it means none of the
+	 * partitions has unpinned buffers.
 	 */
-	trycounter = NBuffers;
+	sweep = ChooseClockSweep(true);
+	sweep_start = sweep;
+	for (;;)
+	{
+		buf = StrategyGetBufferPartition(sweep, strategy, buf_state);
+
+		/* found a buffer in the "sweep" partition, we're done */
+		if (buf != NULL)
+			return buf;
+
+		/*
+		 * Try advancing to the next partition, round-robin (if last partition,
+		 * wrap around to the beginning).
+		 *
+		 * XXX This is a bit ugly, there must be a better way to advance to the
+		 * next partition.
+		 */
+		if (sweep == &StrategyControl->sweeps[StrategyControl->num_partitions - 1])
+			sweep = StrategyControl->sweeps;
+		else
+			sweep++;
+
+		/* we've scanned all partitions */
+		if (sweep == sweep_start)
+			break;
+	}
+
+	/* we shouldn't get here if there are unpinned buffers */
+	elog(ERROR, "no unpinned buffers available");
+}
+
+/*
+ * StrategyGetBufferPartition
+ *		get a free buffer from a single clock-sweep partition
+ *
+ * Returns NULL if there are no free (unpinned) buffers in the partition.
+*/
+static BufferDesc *
+StrategyGetBufferPartition(ClockSweep *sweep, BufferAccessStrategy strategy,
+						   uint64 *buf_state)
+{
+	BufferDesc *buf;
+	int			trycounter;
+
+	trycounter = sweep->numBuffers;
 	for (;;)
 	{
 		uint64		old_buf_state;
 		uint64		local_buf_state;
 
-		buf = GetBufferDescriptor(ClockSweepTick());
+		buf = GetBufferDescriptor(ClockSweepTick(sweep));
 
 		/*
 		 * Check whether the buffer can be used and pin it if so. Do this
@@ -599,7 +630,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_r
 					 * one eventually, but it's probably better to fail than
 					 * to risk getting stuck in an infinite loop.
 					 */
-					elog(ERROR, "no unpinned buffers available");
+					return NULL;
 				}
 				break;
 			}
@@ -618,7 +649,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_r
 				if (pg_atomic_compare_exchange_u64(&buf->state, &old_buf_state,
 												   local_buf_state))
 				{
-					trycounter = NBuffers;
+					trycounter = sweep->numBuffers;
 					break;
 				}
 			}
