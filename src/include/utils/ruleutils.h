@@ -25,6 +25,7 @@ typedef struct PlannedStmt PlannedStmt;
 #define RULE_INDEXDEF_KEYS_ONLY		0x02	/* ignore included attributes */
 
 extern char *pg_get_indexdef_string(Oid indexrelid);
+extern char *pg_get_indexdef_ddl(Oid indexrelid, bool no_tablespace);
 extern char *pg_get_indexdef_columns(Oid indexrelid, bool pretty);
 extern char *pg_get_indexdef_columns_extended(Oid indexrelid,
 											  uint16 flags);
@@ -34,6 +35,7 @@ extern char *pg_get_partkeydef_columns(Oid relid, bool pretty);
 extern char *pg_get_partconstrdef_string(Oid partitionId, char *aliasname);
 
 extern char *pg_get_constraintdef_command(Oid constraintId);
+extern char *pg_get_constraintdef_body(Oid constraintId, bool no_tablespace);
 extern char *deparse_expression(Node *expr, List *dpcontext,
 								bool forceprefix, bool showimplicit);
 extern List *deparse_context_for(const char *aliasname, Oid relid);
@@ -54,5 +56,7 @@ extern char *get_range_partbound_string(List *bound_datums);
 extern void get_reloptions(StringInfo buf, Datum reloptions);
 
 extern char *pg_get_statisticsobjdef_string(Oid statextid);
+extern char *pg_get_statisticsobjdef_ddl(Oid statextid);
+extern char *pg_get_ruledef_ddl(Oid ruleoid);
 
 #endif							/* RULEUTILS_H */
