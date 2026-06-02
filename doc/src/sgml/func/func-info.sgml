@@ -3965,6 +3965,217 @@ acl      | {postgres=arwdDxtm/postgres,foo=r/postgres}
         is false, the <literal>OWNER</literal> clause is omitted.
        </para></entry>
       </row>
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>pg_get_table_ddl</primary>
+        </indexterm>
+        <function>pg_get_table_ddl</function>
+        ( <parameter>relation</parameter> <type>regclass</type>
+        <optional>, <parameter>pretty</parameter> <type>boolean</type>
+        <literal>DEFAULT</literal> false</optional>
+        <optional>, <parameter>owner</parameter> <type>boolean</type>
+        <literal>DEFAULT</literal> true</optional>
+        <optional>, <parameter>tablespace</parameter> <type>boolean</type>
+        <literal>DEFAULT</literal> true</optional>
+        <optional>, <parameter>schema_qualified</parameter> <type>boolean</type>
+        <literal>DEFAULT</literal> true</optional>
+        <optional>, <parameter>only_kinds</parameter> <type>text[]</type>
+        <literal>DEFAULT</literal> NULL</optional>
+        <optional>, <parameter>except_kinds</parameter> <type>text[]</type>
+        <literal>DEFAULT</literal> NULL</optional> )
+        <returnvalue>setof text</returnvalue>
+       </para>
+       <para>
+        Reconstructs the <command>CREATE TABLE</command> statement for the
+        specified ordinary or partitioned table, followed by the
+        <command>ALTER TABLE</command>, <command>CREATE INDEX</command>,
+        <command>CREATE RULE</command>, and <command>CREATE STATISTICS</command>
+        statements needed to recreate the table's columns, constraints,
+        indexes, rules, extended statistics, and row-level security flags.
+        This includes per-index statistics targets
+        (<command>ALTER INDEX ... SET STATISTICS</command>),
+        the clustering index (<command>ALTER TABLE ... CLUSTER ON</command>),
+        and non-default rule firing states
+        (<command>ALTER TABLE ... DISABLE/ENABLE RULE</command>).
+        Inherited columns and constraints are emitted by the parent table's
+        DDL and are not duplicated on inheritance children or partitions.
+        Each statement is returned as a separate row.
+        Foreign-key constraints are always emitted after all other
+        constraints so that self-referencing foreign keys (where the
+        referenced primary or unique key is on the same table) can be
+        added once that key already exists.
+        When <parameter>pretty</parameter> is true, the output is
+        pretty-printed.  When <parameter>owner</parameter> is false, the
+        <command>ALTER TABLE ... OWNER TO</command> statement is omitted.
+        When <parameter>tablespace</parameter> is false, the
+        <literal>TABLESPACE</literal> clause is omitted from the
+        <command>CREATE TABLE</command> statement.  The
+        <parameter>only_kinds</parameter> and <parameter>except_kinds</parameter>
+        parameters described below control which object classes are emitted.
+       </para>
+       <para>
+        The <parameter>schema_qualified</parameter> parameter (default
+        <literal>true</literal>) controls whether the target table's own
+        schema is included in the generated DDL.  When set to
+        <literal>false</literal>, the table name is emitted unqualified
+        in the <command>CREATE TABLE</command> and every subsequent
+        <command>ALTER TABLE</command>, <command>CREATE INDEX</command>,
+        <command>CREATE RULE</command>, and
+        <command>CREATE STATISTICS</command> statement.  References to
+        objects in the same schema as the target table (inheritance
+        parents, partition parents, identity sequences, and any
+        same-schema object the deparse helpers happen to mention) are
+        also emitted unqualified, so the script can be replayed under a
+        different <varname>search_path</varname> to recreate the table
+        in another schema.  Cross-schema references (for example a
+        foreign key target in a different schema) remain qualified for
+        correctness.  Partition children that reside in a different
+        schema than the target table are always emitted with full schema
+        qualification regardless of this parameter, because the output
+        would otherwise place the child in the wrong schema when
+        replayed.
+       </para>
+       <para>
+        The <parameter>only_kinds</parameter> and <parameter>except_kinds</parameter>
+        parameters each take a text array of object-class kind names
+        and are mutually exclusive (specifying both raises an
+        error).  When <parameter>only_kinds</parameter> is set, only the
+        listed kinds are emitted; when <parameter>except_kinds</parameter> is
+        set, every kind <emphasis>except</emphasis> the listed ones is
+        emitted.  When neither is set (the default), every kind is
+        emitted.  Leading and trailing whitespace in each array element
+        is ignored and matching is case-insensitive; an unrecognized
+        kind name raises an error.
+        The kind vocabulary is
+        <literal>table</literal>,
+        <literal>index</literal>,
+        <literal>primary_key</literal>,
+        <literal>unique</literal>,
+        <literal>check</literal>,
+        <literal>foreign_key</literal>,
+        <literal>exclusion</literal>,
+        <literal>rule</literal>,
+        <literal>statistics</literal>,
+        <literal>trigger</literal>,
+        <literal>policy</literal>,
+        <literal>rls</literal> (the
+        <command>ENABLE</command>/<command>FORCE ROW LEVEL SECURITY</command>
+        toggles),
+        <literal>replica_identity</literal>, and
+        <literal>partition</literal> (the DDL for each direct
+        partition child of a partitioned-table parent).
+        Note that <literal>trigger</literal> and <literal>policy</literal>
+        are accepted in the vocabulary but currently produce no output;
+        they are reserved for future use when standalone
+        <function>pg_get_trigger_ddl</function> and
+        <function>pg_get_policy_ddl</function> helpers become available.  The
+        <literal>table</literal> kind groups the
+        <command>CREATE TABLE</command> statement together with the
+        related per-table <command>ALTER TABLE</command> passes:
+        <command>OWNER TO</command>, child-default
+        <command>SET DEFAULT</command>, and per-column
+        <command>SET (<replaceable>attoptions</replaceable>)</command>.
+        <literal>NOT NULL</literal> constraints are not part of the
+        vocabulary; they are always emitted as part of the table to
+        avoid producing schemas that silently accept
+        <literal>NULL</literal> values the source would have rejected.
+        For example, the second pass of a two-pass schema clone that
+        adds cross-table foreign keys after data has loaded can be
+        written as
+        <literal>only_kinds => ARRAY['foreign_key']</literal>, and the
+        pub/sub-style clone that keeps a primary key but drops every
+        other constraint can be written as
+        <literal>except_kinds => ARRAY['unique','check','foreign_key','exclusion']</literal>.
+       </para>
+       <para>
+        When the table has
+        <literal>REPLICA IDENTITY USING INDEX</literal> and the
+        <literal>replica_identity</literal> kind is in the active
+        filter, the kind that emits the referenced index
+        (<literal>primary_key</literal>, <literal>unique</literal>,
+        <literal>exclusion</literal>, or <literal>index</literal>) must
+        also be in the filter.  Otherwise the emitted
+        <command>ALTER TABLE ... REPLICA IDENTITY USING INDEX</command>
+        would reference an index the same DDL never produced, and the
+        function reports an error before emitting any statements.
+       </para>
+       <para>
+        All three forms of <command>CREATE TABLE</command> are supported:
+        the ordinary column-list form, the typed-table form
+        (<literal>OF <replaceable>type_name</replaceable></literal>, with
+        per-column <literal>WITH OPTIONS</literal> overrides for local
+        defaults, <literal>NOT NULL</literal>, and <literal>CHECK</literal>
+        constraints), and the <literal>PARTITION OF</literal> form.
+        <literal>TEMPORARY</literal> and <literal>UNLOGGED</literal>
+        persistence modes are emitted from
+        <structfield>relpersistence</structfield>.  For temporary tables
+        registered in the current session, the
+        <literal>ON COMMIT DELETE ROWS</literal> and
+        <literal>ON COMMIT DROP</literal> clauses are emitted; the default
+        <literal>ON COMMIT PRESERVE ROWS</literal> is omitted.
+       </para>
+       <para>
+        The following table-related objects are intentionally outside the
+        scope of this function and are not emitted:
+        <itemizedlist>
+         <listitem>
+          <para>
+           <emphasis>Sequences</emphasis> owned by serial columns
+           (<type>serial</type>, <type>bigserial</type>,
+           <type>smallserial</type>) &mdash;sequences are independent catalog
+           objects.  Use <function>pg_get_sequence_ddl</function> (if
+           available) or <productname>pg_dump</productname> to capture them
+           alongside the table.
+          </para>
+         </listitem>
+         <listitem>
+          <para>
+           <emphasis>Partition children whose column order differs from the
+           parent</emphasis> &mdash;the <literal>PARTITION OF</literal> syntax
+           can only reproduce the parent's column order.  Such partitions
+           require a standalone <command>CREATE TABLE</command> followed by
+           <command>ALTER TABLE ... ATTACH PARTITION</command>, which
+           <productname>pg_dump</productname> performs automatically.
+          </para>
+         </listitem>
+         <listitem>
+          <para>
+           <emphasis>Triggers and row-level security policies</emphasis> &mdash;
+           reserved for future use when standalone
+           <function>pg_get_trigger_ddl</function> and
+           <function>pg_get_policy_ddl</function> helpers are available.
+          </para>
+         </listitem>
+         <listitem>
+          <para>
+           <emphasis>Security labels</emphasis> &mdash; labels applied with
+           <link linkend="sql-security-label"><command>SECURITY LABEL</command></link>
+           are not emitted.
+          </para>
+         </listitem>
+         <listitem>
+          <para>
+           <emphasis>Constraint names on partition children</emphasis> &mdash;
+           when called on a partition child in isolation (not as part of emitting
+           the whole partitioned tree), <productname>PostgreSQL</productname>
+           auto-generates names for inherited PK, UNIQUE, and EXCLUSION
+           constraints, which may differ from the names in the source catalog.
+           Round-trip fidelity for these names requires emitting the whole tree
+           via the parent table.
+          </para>
+         </listitem>
+         <listitem>
+          <para>
+           <emphasis><command>COMMENT ON</command> and
+           <command>GRANT</command>/<command>REVOKE</command></emphasis> &mdash;
+           these are separate from the table's structural DDL and are not
+           emitted.
+          </para>
+         </listitem>
+        </itemizedlist>
+       </para></entry>
+      </row>
      </tbody>
     </tgroup>
    </table>

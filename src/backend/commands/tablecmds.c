@@ -748,7 +748,6 @@ static ObjectAddress ATExecSetCompression(Relation rel,
 										  const char *column, Node *newValue, LOCKMODE lockmode);
 
 static void index_copy_data(Relation rel, RelFileLocator newrlocator);
-static const char *storage_name(char c);
 
 static void RangeVarCallbackForDropRelation(const RangeVar *rel, Oid relOid,
 											Oid oldRelOid, void *arg);
@@ -2534,7 +2533,7 @@ truncate_check_activity(Relation rel)
  * storage_name
  *	  returns the name corresponding to a typstorage/attstorage enum value
  */
-static const char *
+const char *
 storage_name(char c)
 {
 	switch (c)
@@ -20047,6 +20046,33 @@ remove_on_commit_action(Oid relid)
 			break;
 		}
 	}
+}
+
+/*
+ * Look up the registered ON COMMIT action for a relation.
+ *
+ * Returns ONCOMMIT_NOOP when nothing was registered, which also covers
+ * temporary tables created with the default ON COMMIT PRESERVE ROWS
+ * behavior (register_on_commit_action() skips those, since no action is
+ * needed at commit).  Entries marked for deletion in the current
+ * transaction are ignored.
+ */
+OnCommitAction
+get_on_commit_action(Oid relid)
+{
+	ListCell   *l;
+
+	foreach(l, on_commits)
+	{
+		OnCommitItem *oc = (OnCommitItem *) lfirst(l);
+
+		if (oc->relid != relid)
+			continue;
+		if (oc->deleting_subid != InvalidSubTransactionId)
+			continue;
+		return oc->oncommit;
+	}
+	return ONCOMMIT_NOOP;
 }
 
 /*

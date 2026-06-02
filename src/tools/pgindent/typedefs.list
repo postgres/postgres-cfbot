@@ -1651,6 +1651,7 @@ ListenerEntry
 LoInfo
 LoadStmt
 LocalBufferLookupEnt
+LocalNotNullEntry
 LocalPgBackendStatus
 LocalTransactionId
 Location
@@ -3156,6 +3157,7 @@ TableFuncScan
 TableFuncScanState
 TableFuncType
 TableInfo
+TableDdlContext
 TableLikeClause
 TableSampleClause
 TableScanDesc
