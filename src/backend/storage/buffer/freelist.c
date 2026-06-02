@@ -36,6 +36,26 @@
 
 
 /*
+ * XXX We need to make ClockSweep fixed-size, so that we can have an array
+ * in shared memory. The easiest way is to pick a sufficiently high value
+ * that no system will actually need. 32 seems high enough.
+ *
+ * XXX We should enforce this in bufmgr.c, when initializing the partitions.
+ */
+#define MAX_BUFFER_PARTITIONS		32
+
+/*
+ * Coefficient used to combine the old and new balance coefficients, using
+ * weighted average, so that we don't flap too much. The higher the value, the
+ * more the old value affects the result.
+ *
+ * XXX Doesn't this obscure the interpretation of weights as probabilities to
+ * allocate from a given partition? Does it still sum to 100%? I don't think
+ * so, it's just a fraction of allocations to go from a given partition.
+ */
+#define CLOCKSWEEP_HISTORY_COEFF	0.5
+
+/*
  * Information about one partition of the ClockSweep (on a subset of buffers).
  *
  * XXX Should be careful to align this to cachelines, etc.
@@ -68,9 +88,32 @@ typedef struct
 	uint32		completePasses; /* Complete cycles of the clock-sweep */
 	pg_atomic_uint32 numBufferAllocs;	/* Buffers allocated since last reset */
 
+	/*
+	 * Buffers that should have been allocated in this partition (but might
+	 * have been redirected to keep allocations balanced).
+	 */
+	pg_atomic_uint32 numRequestedAllocs;
+
 	/* running total of allocs */
 	pg_atomic_uint64 numTotalAllocs;
+	pg_atomic_uint64 numTotalRequestedAllocs;
 
+	/*
+	 * Weights to balance buffer allocations for all the partitions. Each
+	 * partition gets a vector of weights 0-100, determining what fraction
+	 * of buffers to allocate from that partition. So [75, 15, 5, 5] would
+	 * mean 75% allocations should go from partition 0, 15% from partition
+	 * 1, and 5% from partitions 2&3. Each partition gets a different vector
+	 * of weights.
+	 *
+	 * Backends use the budget from it's "home" partition, so that a busy
+	 * partitions (with a lot of processes on that NUMA node etc.) spread
+	 * the allocations evenly.
+	 *
+	 * XXX Allocate a fixed-length array, to simplify working with array of
+	 * the structs, etc.
+	 */
+	uint8		balance[MAX_BUFFER_PARTITIONS];
 } ClockSweep;
 
 /*
@@ -140,7 +183,66 @@ static BufferDesc *GetBufferFromRing(BufferAccessStrategy strategy,
 									 uint64 *buf_state);
 static void AddBufferToRing(BufferAccessStrategy strategy,
 							BufferDesc *buf);
-static ClockSweep *ChooseClockSweep(void);
+static ClockSweep *ChooseClockSweep(bool balance);
+
+/*
+ * clocksweep allocation balancing
+ *
+ * To balance allocations from clocksweep partitions, each partition gets a
+ * budget for allocating buffers from other partitions. A process that
+ * "exhausts" a budget in it's home partition gets redirected to the other
+ * partitions, driven by the budgets.
+ *
+ * For example, a partition may have budget [25, 25, 25, 25], which means
+ * each of the 4 partitions should get 1/4 of allocations. Or the buget
+ * can be [50, 50, 0, 0], which means all allocations will go to the first
+ * two partitions (one of them being the "home" one);
+ *
+ * We could do that based on a random number generator, but for now we
+ * simply treat the values as a budget, i.e. a number of allocations to
+ * serve from other partitions, and move in round-robin way.
+ *
+ * This is very simple/cheap, and over many allocations it has the same
+ * effect. For periods of low activity it may diverge, but that does not
+ * matter much (we care about high-activity periods much more).
+ *
+ * We intentionally keep the "budget" fairly low, with the sum for a given
+ * partition 100. That means we get to the same partition after only 100
+ * allocations, keeping it more balanced. We can make the budgets higher
+ * (say, to match the expected number of allocations, i.e. bout the average
+ * number of allocations from the past interval). Or maybe configurable.
+ *
+ * XXX We should always start allocating from the "home" partition, i.e.
+ * from from it, and only then redirect to other partitions.
+ *
+ * XXX It probably is not great all the processes from that "home"
+ * partition are coordinated, and move to between partitions at about the
+ * same time. Not sure what to do about this.
+ *
+ * XXX We should also prefer other partitions from the same NUMA node (if
+ * there are some). Probably by setting the budgets.
+ *
+ * FIXME Explain at which point are the budgets recalculated, by which
+ * process, and how that affects other processes allocating buffers.
+ */
+
+/*
+ * The "optimal" clock-sweep partition. After a backend gets moved to a
+ * different NUMA node, we restart the balancing so that it uses the
+ * correct "budget" from the new home partition.
+ */
+static int clocksweep_partition_home = -1;
+
+/*
+ * The partition the backend is currently allocating from (either the
+ * home one, or one of the redirected ones).
+ */
+static int clocksweep_partition_current = -1;
+
+/*
+ * The number of buffers to allocate from the current partition.
+ */
+static int clocksweep_partition_budget = 0;
 
 /*
  * ClockSweepTick - Helper routine for StrategyGetBuffer()
@@ -152,7 +254,7 @@ static inline uint32
 ClockSweepTick(void)
 {
 	uint32		victim;
-	ClockSweep *sweep = ChooseClockSweep();
+	ClockSweep *sweep = ChooseClockSweep(true);
 
 	/*
 	 * Atomically move hand ahead one buffer - if there's several processes
@@ -300,11 +402,68 @@ ClockSweepPartitionIndex(void)
  * and that's cheaper. But how would that deal with odd number of nodes?
  */
 static ClockSweep *
-ChooseClockSweep(void)
+ChooseClockSweep(bool balance)
 {
+	/* What's the "optimal" partition for this backend? */
 	int			index = ClockSweepPartitionIndex();
+	ClockSweep *sweep = &StrategyControl->sweeps[index];
 
-	return &StrategyControl->sweeps[index];
+	/*
+	 * Was the process migrated to a different NUMA node? If the home partition
+	 * changed, we need to reset the budget and start over, so that we correctly
+	 * prefer "nearby" partitions etc.
+	 *
+	 * XXX Could this be a problem when processes move all the time? I don't
+	 * think so - if a process moves between many partitions, that alone will
+	 * spread the allocations over partitions. Similarly, if there are many
+	 * processes, that should make it even more even.
+	 */
+	if (clocksweep_partition_home != index)
+	{
+		clocksweep_partition_home = index;
+		clocksweep_partition_current = index;
+		clocksweep_partition_budget = sweep->balance[index];
+	}
+
+	/* we should have a valid partition */
+	Assert(clocksweep_partition_home != -1);
+	Assert(clocksweep_partition_current != -1);
+	Assert(clocksweep_partition_budget >= 0);
+
+	/*
+	 * When balancing allocations, redirect the allocations to other partitions
+	 * according to the budgets. We move through partitions in a round-robin way,
+	 * after allocating the "budget" of allocations from the current one.
+	 */
+	if (balance)
+	{
+		/*
+		 * Ran out of budget from the current partition? Move to the next one
+		 * with non-zero budget.
+		 */
+		while (clocksweep_partition_budget == 0)
+		{
+			/* wrap around at the end */
+			clocksweep_partition_current++;
+			if (clocksweep_partition_current >= StrategyControl->num_partitions)
+				clocksweep_partition_current = 0;
+
+			clocksweep_partition_budget
+				= sweep->balance[clocksweep_partition_current];
+		}
+
+		/* account for the current allocation */
+		--clocksweep_partition_budget;
+
+		/*
+		 * Account for the allocation in the "home" partition, so that the next
+		 * round of rebalancing (recalculating the budgets) knows about the
+		 * allocation traffic in various partitions.
+		 */
+		pg_atomic_fetch_add_u32(&sweep->numRequestedAllocs, 1);
+	}
+
+	return &StrategyControl->sweeps[clocksweep_partition_current];
 }
 
 /*
@@ -381,7 +540,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_r
 	 * between CPUs / NUMA nodes in between, these call may pick different
 	 * partitions, confusing the logic a bit.
 	 */
-	pg_atomic_fetch_add_u32(&ChooseClockSweep()->numBufferAllocs, 1);
+	pg_atomic_fetch_add_u32(&ChooseClockSweep(false)->numBufferAllocs, 1);
 
 	/*
 	 * Use the "clock sweep" algorithm to find a free buffer
@@ -482,6 +641,229 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_r
 				}
 			}
 		}
+	}
+}
+
+/*
+ * StrategySyncBalance
+ *		update partition budgets, to balance the buffer allocations
+ *
+ * We want to give preference to allocating buffers on the same NUMA node,
+ * but that might lead to imbalance - a single process would only use a
+ * fraction of shared buffers. We don't want that, we want to utilize the
+ * whole shared buffers. The number of allocations in each partition may
+ * also change over time, so we need to adapt to that.
+ *
+ * To allow this "adaptive balancing", each partition has a set of weights,
+ * determining what fraction of allocations to direct to other partitions.
+ * For simplicity the coefficients are integers 0-100, expressing the
+ * percentage of allocations redirected to that partition.
+ *
+ * Consider for example weights [50, 25, 25, 0] for one of 4 partitions.
+ * This means 50% of allocations will be redirected to partition 0, 25%
+ * to partitions 1 and 2, and no allocations will go to partition 3.
+ *
+ * This means an allocation may be requested in partition A (i.e. the
+ * home partition of the process requesting it), but end up allocating
+ * the buffer in partition B. We have a counter for both - the number of
+ * allocations requested in a partition, and the number of allocations
+ * actually handled by that partition. The former is used for calculating
+ * weights, the latter is used only for monitoring.
+ *
+ * The balancing happens in intervals - it adjusts future allocations
+ * based on stats about recent allocations, namely:
+ *
+ * - numBufferAllocs - number of allocations served by a partition
+ *
+ * - numRequestedAllocs - number of allocatios requested in a partition
+ *
+ * We're trying to smooth numBufferAllocs in the next interval, based on
+ * numRequestedAllocs measured in the last interval.
+ *
+ * The balancing algorithm works like this:
+ *
+ * - the target (average number of allocations per partition) is calculated
+ *   from total number of allocations requested in the last intervaal
+ *
+ * - partitions get divided into two groups - those with more allocation
+ *   requests than the target, and those with fewer requests
+ *
+ * - we "distribute" the delta (which is the same between the groups)
+ *   between the groups (one has more, the other fewer)
+ *
+ * Partitions with (nallocs > avg_nallocs) redirect the extra allocations,
+ * with each target allocation getting a proportional part (with respect
+ * to the total delta).
+ *
+ * XXX Currently this does not give preference to other partitions on the
+ * same NUMA node (redirect to it first), but it could.
+ */
+void
+StrategySyncBalance(void)
+{
+	/* snapshot of allocation requests for partitions */
+	uint32	allocs[MAX_BUFFER_PARTITIONS];
+
+	uint32	total_allocs = 0,	/* total number of allocations */
+			avg_allocs,			/* average allocations (per partition) */
+			delta_allocs = 0;	/* sum of allocs above average */
+
+	/*
+	 * Collect the number of allocations requested in the past interval.
+	 * While at it, reset the counter to start the new interval.
+	 *
+	 * XXX We lock the partitions one by one, so this is not a perfectly
+	 * consistent snapshot of the counts, and the resets happen before we
+	 * update the weights too. But we're only looking for heuristics, so
+	 * this should be good enough.
+	 *
+	 * XXX A similar issue applies to the counter reset later - we haven't
+	 * updated the weights yet, so some of the requests counted for the next
+	 * interval will be redirected per current weights. Should be fine, it's
+	 * just an approximate heuristics, and there should be very few requests in
+	 * between. Alternatively, we could reset the request counters when setting
+	 * the new weights, and just ignore the couple requests in between.
+	 *
+	 * XXX Does this need to worry about the completePasses too?
+	 */
+	for (int i = 0; i < StrategyControl->num_partitions; i++)
+	{
+		ClockSweep *sweep = &StrategyControl->sweeps[i];
+
+		/* no need for a spinlock */
+		allocs[i] = pg_atomic_exchange_u32(&sweep->numRequestedAllocs, 0);
+
+		/* add the allocs to running total */
+		pg_atomic_fetch_add_u64(&sweep->numTotalRequestedAllocs, allocs[i]);
+
+		total_allocs += allocs[i];
+	}
+
+	/* Calculate the "fair share" of allocations per partition. */
+	avg_allocs = (total_allocs / StrategyControl->num_partitions);
+
+	/*
+	 * Calculate the "delta" from balanced state for each partition, i.e. how
+	 * many more/fewer allocations it handled relative to the average.
+	 */
+	for (int i = 0; i < StrategyControl->num_partitions; i++)
+	{
+		if (allocs[i] > avg_allocs)
+			delta_allocs += (allocs[i] - avg_allocs);
+	}
+
+	/*
+	 * Skip rebalancing when there's not enough activity, and just keep the
+	 * current weights.
+	 *
+	 * XXX The threshold of 100 allocation is pretty arbitrary.
+	 *
+	 * XXX Maybe a better strategy would be to slowly return to the default
+	 * weights, with each partition allocation only from itself?
+	 *
+	 * XXX Maybe we shouldn't even reset the counters in this case? But it
+	 * should not matter, if the activity is low.
+	 */
+	if (avg_allocs < 100)
+	{
+		elog(DEBUG1, "rebalance skipped: not enough allocations (allocs: %u)",
+			 avg_allocs);
+		return;
+	}
+
+	/*
+	 * Likewise, skip rebalancing if the misbalance is not significant. We
+	 * consider it acceptable if the amount of allocations we'd need to
+	 * redistribute is less than 10% of the average.
+	 *
+	 * XXX Again, these threshold are rather arbitrary. And maybe we should
+	 * do the rabalancing in this case anyway, it's likely cheap and on a big
+	 * system 10% can be quite a lot.
+	 */
+	if (delta_allocs < (avg_allocs * 0.1))
+	{
+		elog(DEBUG1, "rebalance skipped: delta within limit (delta: %u, threshold: %u)",
+			 delta_allocs, (uint32) (avg_allocs * 0.1));
+		return;
+	}
+
+	/*
+	 * The actual rebalancing
+	 *
+	 * Partition with fewer than average allocations, should not redirect any
+	 * allocations to other partitions. So just use weights with a single
+	 * non-zero weight for the partition itself.
+	 *
+	 * Partition with more than average allocations, should not receive any
+	 * redirected allocations, and instead it should redirect excess allocations
+	 * to other partitions.
+	 *
+	 * The redistribution is "proportional" - if the excess allocations of a
+	 * partition represent 10% of the "delta", then each partition that
+	 * needs more allocations will get 10% of the gap from it.
+	 *
+	 * XXX We should add hysteresis, so that it does not oscillate or something
+	 * like that. Maybe CLOCKSWEEP_HISTORY_COEFF already does that?
+	 *
+	 * XXX Ideally, the alternative partitions to use first would be the other
+	 * partitions for the same node (if any).
+	 */
+	for (int i = 0; i < StrategyControl->num_partitions; i++)
+	{
+		ClockSweep *sweep = &StrategyControl->sweeps[i];
+		uint8		balance[MAX_BUFFER_PARTITIONS];
+
+		/* lock, we're going to modify the balance weights */
+		SpinLockAcquire(&sweep->clock_sweep_lock);
+
+		/* reset the weights to start from scratch */
+		memset(balance, 0, sizeof(uint8) * MAX_BUFFER_PARTITIONS);
+
+		/* does this partition has fewer or more than avg_allocs? */
+		if (allocs[i] < avg_allocs)
+		{
+			/* fewer - don't redirect any allocations elsewhere */
+			balance[i] = 100;
+		}
+		else
+		{
+			/*
+			 * more - redistribute the excess allocations
+			 *
+			 * Each "target" partition (with less than avg_allocs) should get
+			 * a fraction proportional to (excess/delta) from this one.
+			 */
+
+			/* fraction of the "total" delta */
+			double	delta_frac = (allocs[i] - avg_allocs) * 1.0 / delta_allocs;
+
+			/* keep just enough allocations to meet the target */
+			balance[i] = (100.0 * avg_allocs / allocs[i]);
+
+			/* redirect the extra allocations */
+			for (int j = 0; j < StrategyControl->num_partitions; j++)
+			{
+				/* How many allocations to receive from i-th partition? */
+				uint32	receive_allocs = delta_frac * (avg_allocs - allocs[j]);
+
+				/* ignore partitions that don't need additional allocations */
+				if (allocs[j] > avg_allocs)
+					continue;
+
+				/* fraction to redirect */
+				balance[j] = (100.0 * receive_allocs / allocs[i]) + 0.5;
+			}
+		}
+
+		/* combine the old and new weights (hysteresis) */
+		for (int j = 0; j < MAX_BUFFER_PARTITIONS; j++)
+		{
+			sweep->balance[j]
+				= CLOCKSWEEP_HISTORY_COEFF * sweep->balance[j] +
+				  (1.0 - CLOCKSWEEP_HISTORY_COEFF) * balance[j];
+		}
+
+		SpinLockRelease(&sweep->clock_sweep_lock);
 	}
 }
 
@@ -657,7 +1039,21 @@ StrategyCtlShmemInit(void *arg)
 		/* Clear statistics */
 		StrategyControl->sweeps[i].completePasses = 0;
 		pg_atomic_init_u32(&StrategyControl->sweeps[i].numBufferAllocs, 0);
+		pg_atomic_init_u32(&StrategyControl->sweeps[i].numRequestedAllocs, 0);
 		pg_atomic_init_u64(&StrategyControl->sweeps[i].numTotalAllocs, 0);
+		pg_atomic_init_u64(&StrategyControl->sweeps[i].numTotalRequestedAllocs, 0);
+
+		/*
+		 * Initialize the weights - start by allocating 100% buffers from
+		 * the current node / partition.
+		 */
+		for (int j = 0; j < MAX_BUFFER_PARTITIONS; j++)
+		{
+			if (i == j)
+				StrategyControl->sweeps[i].balance[i] = 100;
+			else
+				StrategyControl->sweeps[i].balance[j] = 0;
+		}
 	}
 
 	/* No pending notification */
@@ -1025,8 +1421,10 @@ StrategyRejectBuffer(BufferAccessStrategy strategy, BufferDesc *buf, bool from_r
 
 void
 ClockSweepPartitionGetInfo(int idx,
-						   uint32 *complete_passes, uint32 *next_victim_buffer,
-						   uint64 *buffer_total_allocs, uint32 *buffer_allocs)
+						 uint32 *complete_passes, uint32 *next_victim_buffer,
+						 uint64 *buffer_total_allocs, uint32 *buffer_allocs,
+						 uint64 *buffer_total_req_allocs, uint32 *buffer_req_allocs,
+						 int **weights)
 {
 	ClockSweep *sweep = &StrategyControl->sweeps[idx];
 
@@ -1034,11 +1432,21 @@ ClockSweepPartitionGetInfo(int idx,
 
 	/* get the clocksweep stats */
 	*complete_passes = sweep->completePasses;
-	*next_victim_buffer = pg_atomic_read_u32(&sweep->nextVictimBuffer);
-
-	*buffer_allocs = pg_atomic_read_u32(&sweep->numBufferAllocs);
-	*buffer_total_allocs = pg_atomic_read_u64(&sweep->numTotalAllocs);
 
 	/* calculate the actual buffer ID */
+	*next_victim_buffer = pg_atomic_read_u32(&sweep->nextVictimBuffer);
 	*next_victim_buffer = sweep->firstBuffer + (*next_victim_buffer % sweep->numBuffers);
+
+	*buffer_total_allocs = pg_atomic_read_u64(&sweep->numTotalAllocs);
+	*buffer_allocs = pg_atomic_read_u32(&sweep->numBufferAllocs);
+
+	*buffer_total_req_allocs = pg_atomic_read_u64(&sweep->numTotalRequestedAllocs);
+	*buffer_req_allocs = pg_atomic_read_u32(&sweep->numRequestedAllocs);
+
+	/* return the weights in a newly allocated array */
+	*weights = palloc_array(int, StrategyControl->num_partitions);
+	for (int i = 0; i < StrategyControl->num_partitions; i++)
+	{
+		(*weights)[i] = (int) sweep->balance[i];
+	}
 }

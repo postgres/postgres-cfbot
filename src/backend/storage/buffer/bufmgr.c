@@ -4149,6 +4149,9 @@ BgBufferSync(WritebackContext *wb_context)
 	/* assume we can hibernate, any partition can set to false */
 	bool		hibernate = true;
 
+	/* trigger partition rebalancing first */
+	StrategySyncBalance();
+
 	/* get the number of clocksweep partitions, and total alloc count */
 	StrategySyncPrepare(&num_partitions, &recent_alloc);
 
