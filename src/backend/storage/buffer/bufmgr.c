@@ -2606,6 +2606,7 @@ GetVictimBuffer(BufferAccessStrategy strategy, IOContext io_context)
 	Buffer		buf;
 	uint64		buf_state;
 	bool		from_ring;
+	bool		buf_valid;
 
 	/*
 	 * Ensure, before we pin a victim buffer, that there's a free refcount
@@ -2693,8 +2694,21 @@ again:
 									  &buf_hdr->tag);
 	}
 
+	/* Don't use a stale buf_state value after InvalidateVictimBuffer */
+	buf_valid = buf_state & BM_VALID;
 
-	if (buf_state & BM_VALID)
+	/*
+	 * If the buffer has an entry in the buffer mapping table, delete it. This
+	 * can fail because another backend could have pinned or dirtied the
+	 * buffer.
+	 */
+	if ((buf_state & BM_TAG_VALID) && !InvalidateVictimBuffer(buf_hdr))
+	{
+		UnpinBuffer(buf_hdr);
+		goto again;
+	}
+
+	if (buf_valid)
 	{
 		/*
 		 * When a BufferAccessStrategy is in use, blocks evicted from shared
@@ -2708,23 +2722,13 @@ again:
 		 * counted as IOOP_REUSE in the corresponding strategy context.
 		 *
 		 * At this point, we can accurately count evictions and reuses,
-		 * because we have successfully claimed the valid buffer. Previously,
-		 * we may have been forced to release the buffer due to concurrent
-		 * pinners or erroring out.
+		 * because we have successfully claimed the valid buffer and
+		 * invalidated its previous tenant. Previously, we may have been
+		 * forced to release the buffer due to concurrent pinners or erroring
+		 * out.
 		 */
 		pgstat_count_io_op(IOOBJECT_RELATION, io_context,
 						   from_ring ? IOOP_REUSE : IOOP_EVICT, 1, 0);
-	}
-
-	/*
-	 * If the buffer has an entry in the buffer mapping table, delete it. This
-	 * can fail because another backend could have pinned or dirtied the
-	 * buffer.
-	 */
-	if ((buf_state & BM_TAG_VALID) && !InvalidateVictimBuffer(buf_hdr))
-	{
-		UnpinBuffer(buf_hdr);
-		goto again;
 	}
 
 	/* a final set of sanity checks */
