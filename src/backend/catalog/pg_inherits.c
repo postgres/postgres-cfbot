@@ -237,6 +237,99 @@ find_inheritance_children_extended(Oid parentrelId, bool omit_detached,
 
 
 /*
+ * find_inheritance_parents
+ *
+ * Returns a list containing the OIDs of all relations that the relation with
+ * OID 'relid' inherits *directly* from, in inhseqno order (the order in which
+ * they should appear in an INHERITS clause).
+ *
+ * The specified lock type is acquired on each parent relation (but not on the
+ * given rel; caller should already have locked it).  If lockmode is NoLock
+ * then no locks are acquired, but caller must beware of race conditions
+ * against possible DROPs of parent relations.
+ *
+ * Partition children also have a pg_inherits entry pointing to the
+ * partitioned parent; callers that distinguish INHERITS from PARTITION OF
+ * must check relispartition themselves.
+ */
+List *
+find_inheritance_parents(Oid relid, LOCKMODE lockmode)
+{
+	List	   *list = NIL;
+	Relation	relation;
+	SysScanDesc scan;
+	ScanKeyData key[1];
+	HeapTuple	inheritsTuple;
+	Oid			inhparent;
+	Oid		   *oidarr;
+	int			maxoids,
+				numoids,
+				i;
+
+	/*
+	 * Scan pg_inherits via the (inhrelid, inhseqno) index so that the rows
+	 * come out in inhseqno order, which is the order required for the
+	 * INHERITS clause.
+	 */
+	maxoids = 8;
+	oidarr = (Oid *) palloc(maxoids * sizeof(Oid));
+	numoids = 0;
+
+	relation = table_open(InheritsRelationId, AccessShareLock);
+
+	ScanKeyInit(&key[0],
+				Anum_pg_inherits_inhrelid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(relid));
+
+	scan = systable_beginscan(relation, InheritsRelidSeqnoIndexId, true,
+							  NULL, 1, key);
+
+	while ((inheritsTuple = systable_getnext(scan)) != NULL)
+	{
+		inhparent = ((Form_pg_inherits) GETSTRUCT(inheritsTuple))->inhparent;
+		if (numoids >= maxoids)
+		{
+			maxoids *= 2;
+			oidarr = (Oid *) repalloc(oidarr, maxoids * sizeof(Oid));
+		}
+		oidarr[numoids++] = inhparent;
+	}
+
+	systable_endscan(scan);
+
+	table_close(relation, AccessShareLock);
+
+	/*
+	 * Acquire locks and build the result list.  Unlike
+	 * find_inheritance_children we do *not* sort by OID: callers need the
+	 * seqno-ordered traversal.
+	 */
+	for (i = 0; i < numoids; i++)
+	{
+		inhparent = oidarr[i];
+
+		if (lockmode != NoLock)
+		{
+			LockRelationOid(inhparent, lockmode);
+
+			if (!SearchSysCacheExists1(RELOID, ObjectIdGetDatum(inhparent)))
+			{
+				UnlockRelationOid(inhparent, lockmode);
+				continue;
+			}
+		}
+
+		list = lappend_oid(list, inhparent);
+	}
+
+	pfree(oidarr);
+
+	return list;
+}
+
+
+/*
  * find_all_inheritors -
  *		Returns a list of relation OIDs including the given rel plus
  *		all relations that inherit from it, directly or indirectly.
