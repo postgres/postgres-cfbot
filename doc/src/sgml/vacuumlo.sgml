@@ -217,6 +217,19 @@
    containing these types. Matching entries are removed from the temporary table.
    The remaining entries in the temporary table identify orphaned LOs.  These are removed.
   </para>
+
+  <caution>
+   <para>
+    Large object references stored in columns of other types, such as
+    <type>text</type> or <type>bigint</type>, are not recognized by
+    <application>vacuumlo</application> and will be treated as orphans,
+    resulting in data loss.  Using the <type>lo</type> type
+    from the <xref linkend="lo"/> extension is recommended for columns that
+    hold large object references, as it allows
+    <application>vacuumlo</application> to find them and the
+    <function>lo_manage</function> trigger to manage them.
+   </para>
+  </caution>
  </refsect1>
 
  <refsect1>
