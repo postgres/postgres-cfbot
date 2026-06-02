@@ -15,6 +15,7 @@
  */
 #include "postgres.h"
 
+#include "access/xlog.h"
 #include "pgstat.h"
 #include "port/atomics.h"
 #include "storage/buf_internals.h"
@@ -741,23 +742,36 @@ IOContextForStrategy(BufferAccessStrategy strategy)
  * StrategyRejectBuffer -- consider rejecting a dirty buffer
  *
  * When a nondefault strategy is used, the buffer manager calls this function
- * when it turns out that the buffer selected by StrategyGetBuffer needs to
- * be written out and doing so would require flushing WAL too.  This gives us
- * a chance to choose a different victim.
+ * when it turns out that the victim buffer selected needs to be written out
+ * and doing so would require flushing WAL too. This gives us a chance to
+ * choose a different victim.
  *
  * Returns true if buffer manager should ask for a new victim, and false
  * if this buffer should be written and re-used.
  */
 bool
-StrategyRejectBuffer(BufferAccessStrategy strategy, BufferDesc *buf, bool from_ring)
+StrategyRejectBuffer(BufferAccessStrategy strategy, BufferDesc *buf, uint64 buf_state)
 {
+	Assert(strategy);
+
 	/* We only do this in bulkread mode */
 	if (strategy->btype != BAS_BULKREAD)
 		return false;
 
 	/* Don't muck with behavior of normal buffer-replacement strategy */
-	if (!from_ring ||
-		strategy->buffers[strategy->current] != BufferDescriptorGetBuffer(buf))
+	if (strategy->buffers[strategy->current] != BufferDescriptorGetBuffer(buf))
+		return false;
+
+	/*
+	 * Rejecting a dirty ring buffer is only useful when reusing it would
+	 * require flushing WAL.  This only applies to permanent buffers; unlogged
+	 * buffers can have fake LSNs, so XLogNeedsFlush() is not meaningful for
+	 * them.
+	 */
+	if (!(buf_state & BM_PERMANENT))
+		return false;
+
+	if (!XLogNeedsFlush(BufferGetLSN(buf)))
 		return false;
 
 	/*
