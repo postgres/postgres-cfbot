@@ -18,6 +18,11 @@ $node_primary->adjust_conf('postgresql.conf', 'max_connections', '25');
 $node_primary->append_conf('postgresql.conf',
 	'max_prepared_transactions = 10');
 
+# The default is 1MB, which is not enough with clock-sweep partitioning.
+# Increase to 32MB, so that we don't get "no unpinned buffers".
+$node_primary->append_conf('postgresql.conf',
+	'shared_buffers = 32MB');
+
 # Enable pg_stat_statements to force tests to do query jumbling.
 # pg_stat_statements.max should be large enough to hold all the entries
 # of the regression database.
