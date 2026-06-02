@@ -3840,33 +3840,34 @@ BufferSync(int flags)
 }
 
 /*
- * BgBufferSync -- Write out some dirty buffers in the pool.
+ * Information saved between calls so we can determine the strategy point's
+ * advance rate and avoid scanning already-cleaned buffers.
  *
- * This is called periodically by the background writer process.
- *
- * Returns true if it's appropriate for the bgwriter process to go into
- * low-power hibernation mode.  (This happens if the strategy clock-sweep
- * has been "lapped" and no buffer allocations have occurred recently,
- * or if the bgwriter has been effectively disabled by setting
- * bgwriter_lru_maxpages to 0.)
+ * XXX Does it actually make sense to split all of this information per
+ * partition? For example, does per-partition advance rate mean anything?
+ * Maybe we should have a global advance rate? Although, if we want to
+ * keep enough clean buffers in each partition, maybe having per-partition
+ * rates makes sense.
  */
-bool
-BgBufferSync(WritebackContext *wb_context)
+typedef struct BufferSyncPartition
+{
+	int	prev_strategy_buf_id;
+	uint32 prev_strategy_passes;
+	int	next_to_clean;
+	uint32 next_passes;
+} BufferSyncPartition;
+
+static BufferSyncPartition *saved_info = NULL;
+static bool saved_info_valid = false;
+
+static bool
+BgBufferSyncPartition(WritebackContext *wb_context, int num_partitions,
+					  int partition, int recent_alloc_partition,
+					  BufferSyncPartition *saved)
 {
 	/* info obtained from freelist.c */
 	int			strategy_buf_id;
 	uint32		strategy_passes;
-	uint32		recent_alloc;
-
-	/*
-	 * Information saved between calls so we can determine the strategy
-	 * point's advance rate and avoid scanning already-cleaned buffers.
-	 */
-	static bool saved_info_valid = false;
-	static int	prev_strategy_buf_id;
-	static uint32 prev_strategy_passes;
-	static int	next_to_clean;
-	static uint32 next_passes;
 
 	/* Moving averages of allocation rate and clean-buffer density */
 	static float smoothed_alloc = 0;
@@ -3894,25 +3895,16 @@ BgBufferSync(WritebackContext *wb_context)
 	long		new_strategy_delta;
 	uint32		new_recent_alloc;
 
+	/* buffer range for the clocksweep partition */
+	int			first_buffer;
+	int			num_buffers;
+
 	/*
 	 * Find out where the clock-sweep currently is, and how many buffer
 	 * allocations have happened since our last call.
 	 */
-	strategy_buf_id = StrategySyncStart(&strategy_passes, &recent_alloc);
-
-	/* Report buffer alloc counts to pgstat */
-	PendingBgWriterStats.buf_alloc += recent_alloc;
-
-	/*
-	 * If we're not running the LRU scan, just stop after doing the stats
-	 * stuff.  We mark the saved state invalid so that we can recover sanely
-	 * if LRU scan is turned back on later.
-	 */
-	if (bgwriter_lru_maxpages <= 0)
-	{
-		saved_info_valid = false;
-		return true;
-	}
+	strategy_buf_id = StrategySyncStart(partition, &strategy_passes,
+										&first_buffer, &num_buffers);
 
 	/*
 	 * Compute strategy_delta = how many buffers have been scanned by the
@@ -3924,17 +3916,17 @@ BgBufferSync(WritebackContext *wb_context)
 	 */
 	if (saved_info_valid)
 	{
-		int32		passes_delta = strategy_passes - prev_strategy_passes;
+		int32		passes_delta = strategy_passes - saved->prev_strategy_passes;
 
-		strategy_delta = strategy_buf_id - prev_strategy_buf_id;
-		strategy_delta += (long) passes_delta * NBuffers;
+		strategy_delta = strategy_buf_id - saved->prev_strategy_buf_id;
+		strategy_delta += (long) passes_delta * num_buffers;
 
 		Assert(strategy_delta >= 0);
 
-		if ((int32) (next_passes - strategy_passes) > 0)
+		if ((int32) (saved->next_passes - strategy_passes) > 0)
 		{
 			/* we're one pass ahead of the strategy point */
-			bufs_to_lap = strategy_buf_id - next_to_clean;
+			bufs_to_lap = strategy_buf_id - saved->next_to_clean;
 #ifdef BGW_DEBUG
 			elog(DEBUG2, "bgwriter ahead: bgw %u-%u strategy %u-%u delta=%ld lap=%d",
 				 next_passes, next_to_clean,
@@ -3942,11 +3934,11 @@ BgBufferSync(WritebackContext *wb_context)
 				 strategy_delta, bufs_to_lap);
 #endif
 		}
-		else if (next_passes == strategy_passes &&
-				 next_to_clean >= strategy_buf_id)
+		else if (saved->next_passes == strategy_passes &&
+				 saved->next_to_clean >= strategy_buf_id)
 		{
 			/* on same pass, but ahead or at least not behind */
-			bufs_to_lap = NBuffers - (next_to_clean - strategy_buf_id);
+			bufs_to_lap = num_buffers - (saved->next_to_clean - strategy_buf_id);
 #ifdef BGW_DEBUG
 			elog(DEBUG2, "bgwriter ahead: bgw %u-%u strategy %u-%u delta=%ld lap=%d",
 				 next_passes, next_to_clean,
@@ -3966,9 +3958,9 @@ BgBufferSync(WritebackContext *wb_context)
 				 strategy_passes, strategy_buf_id,
 				 strategy_delta);
 #endif
-			next_to_clean = strategy_buf_id;
-			next_passes = strategy_passes;
-			bufs_to_lap = NBuffers;
+			saved->next_to_clean = strategy_buf_id;
+			saved->next_passes = strategy_passes;
+			bufs_to_lap = num_buffers;
 		}
 	}
 	else
@@ -3982,15 +3974,16 @@ BgBufferSync(WritebackContext *wb_context)
 			 strategy_passes, strategy_buf_id);
 #endif
 		strategy_delta = 0;
-		next_to_clean = strategy_buf_id;
-		next_passes = strategy_passes;
-		bufs_to_lap = NBuffers;
+		saved->next_to_clean = strategy_buf_id;
+		saved->next_passes = strategy_passes;
+		bufs_to_lap = num_buffers;
 	}
 
 	/* Update saved info for next time */
-	prev_strategy_buf_id = strategy_buf_id;
-	prev_strategy_passes = strategy_passes;
-	saved_info_valid = true;
+	saved->prev_strategy_buf_id = strategy_buf_id;
+	saved->prev_strategy_passes = strategy_passes;
+	/* XXX this needs to happen only after all partitions */
+	/* saved_info_valid = true; */
 
 	/*
 	 * Compute how many buffers had to be scanned for each new allocation, ie,
@@ -3998,9 +3991,9 @@ BgBufferSync(WritebackContext *wb_context)
 	 *
 	 * If the strategy point didn't move, we don't update the density estimate
 	 */
-	if (strategy_delta > 0 && recent_alloc > 0)
+	if (strategy_delta > 0 && recent_alloc_partition > 0)
 	{
-		scans_per_alloc = (float) strategy_delta / (float) recent_alloc;
+		scans_per_alloc = (float) strategy_delta / (float) recent_alloc_partition;
 		smoothed_density += (scans_per_alloc - smoothed_density) /
 			smoothing_samples;
 	}
@@ -4010,7 +4003,7 @@ BgBufferSync(WritebackContext *wb_context)
 	 * strategy point and where we've scanned ahead to, based on the smoothed
 	 * density estimate.
 	 */
-	bufs_ahead = NBuffers - bufs_to_lap;
+	bufs_ahead = num_buffers - bufs_to_lap;
 	reusable_buffers_est = (float) bufs_ahead / smoothed_density;
 
 	/*
@@ -4018,10 +4011,10 @@ BgBufferSync(WritebackContext *wb_context)
 	 * a true average we want a fast-attack, slow-decline behavior: we
 	 * immediately follow any increase.
 	 */
-	if (smoothed_alloc <= (float) recent_alloc)
-		smoothed_alloc = recent_alloc;
+	if (smoothed_alloc <= (float) recent_alloc_partition)
+		smoothed_alloc = recent_alloc_partition;
 	else
-		smoothed_alloc += ((float) recent_alloc - smoothed_alloc) /
+		smoothed_alloc += ((float) recent_alloc_partition - smoothed_alloc) /
 			smoothing_samples;
 
 	/* Scale the estimate by a GUC to allow more aggressive tuning. */
@@ -4048,7 +4041,7 @@ BgBufferSync(WritebackContext *wb_context)
 	 * the BGW will be called during the scan_whole_pool time; slice the
 	 * buffer pool into that many sections.
 	 */
-	min_scan_buffers = (int) (NBuffers / (scan_whole_pool_milliseconds / BgWriterDelay));
+	min_scan_buffers = (int) (num_buffers / (scan_whole_pool_milliseconds / BgWriterDelay));
 
 	if (upcoming_alloc_est < (min_scan_buffers + reusable_buffers_est))
 	{
@@ -4073,20 +4066,20 @@ BgBufferSync(WritebackContext *wb_context)
 	/* Execute the LRU scan */
 	while (num_to_scan > 0 && reusable_buffers < upcoming_alloc_est)
 	{
-		int			sync_state = SyncOneBuffer(next_to_clean, true,
+		int			sync_state = SyncOneBuffer(saved->next_to_clean, true,
 											   wb_context);
 
-		if (++next_to_clean >= NBuffers)
+		if (++saved->next_to_clean >= (first_buffer + num_buffers))
 		{
-			next_to_clean = 0;
-			next_passes++;
+			saved->next_to_clean = first_buffer;
+			saved->next_passes++;
 		}
 		num_to_scan--;
 
 		if (sync_state & BUF_WRITTEN)
 		{
 			reusable_buffers++;
-			if (++num_written >= bgwriter_lru_maxpages)
+			if (++num_written >= (bgwriter_lru_maxpages / num_partitions))
 			{
 				PendingBgWriterStats.maxwritten_clean++;
 				break;
@@ -4100,7 +4093,7 @@ BgBufferSync(WritebackContext *wb_context)
 
 #ifdef BGW_DEBUG
 	elog(DEBUG1, "bgwriter: recent_alloc=%u smoothed=%.2f delta=%ld ahead=%d density=%.2f reusable_est=%d upcoming_est=%d scanned=%d wrote=%d reusable=%d",
-		 recent_alloc, smoothed_alloc, strategy_delta, bufs_ahead,
+		 recent_alloc_partition, smoothed_alloc, strategy_delta, bufs_ahead,
 		 smoothed_density, reusable_buffers_est, upcoming_alloc_est,
 		 bufs_to_lap - num_to_scan,
 		 num_written,
@@ -4130,8 +4123,83 @@ BgBufferSync(WritebackContext *wb_context)
 #endif
 	}
 
+	/* can this partition hibernate */
+	return (bufs_to_lap == 0 && recent_alloc_partition == 0);
+}
+
+/*
+ * BgBufferSync -- Write out some dirty buffers in the pool.
+ *
+ * This is called periodically by the background writer process.
+ *
+ * Returns true if it's appropriate for the bgwriter process to go into
+ * low-power hibernation mode.  (This happens if the strategy clock-sweep
+ * has been "lapped" and no buffer allocations have occurred recently,
+ * or if the bgwriter has been effectively disabled by setting
+ * bgwriter_lru_maxpages to 0.)
+ */
+bool
+BgBufferSync(WritebackContext *wb_context)
+{
+	/* info obtained from freelist.c */
+	uint32		recent_alloc;
+	uint32		recent_alloc_partition;
+	int			num_partitions;
+
+	/* assume we can hibernate, any partition can set to false */
+	bool		hibernate = true;
+
+	/* get the number of clocksweep partitions, and total alloc count */
+	StrategySyncPrepare(&num_partitions, &recent_alloc);
+
+	/* allocate space for per-partition information between calls */
+	if (saved_info == NULL)
+	{
+		/*
+		 * XXX Not great it's using malloc(), but how else to allocate a
+		 * variable-length array?
+		 */
+		saved_info = malloc(sizeof(BufferSyncPartition) * num_partitions);
+	}
+
+	/* Report buffer alloc counts to pgstat */
+	PendingBgWriterStats.buf_alloc += recent_alloc;
+
+	/* average alloc buffers per partition */
+	recent_alloc_partition = (recent_alloc / num_partitions);
+
+	/*
+	 * If we're not running the LRU scan, just stop after doing the stats
+	 * stuff.  We mark the saved state invalid so that we can recover sanely
+	 * if LRU scan is turned back on later.
+	 */
+	if (bgwriter_lru_maxpages <= 0)
+	{
+		saved_info_valid = false;
+		return true;
+	}
+
+	/*
+	 * now process the clocksweep partitions, one by one, using the same
+	 * cleanup that we used for all buffers
+	 *
+	 * XXX Maybe we should randomize the order of partitions a bit, so that we
+	 * don't start from partition 0 all the time? Perhaps not entirely, but at
+	 * least pick a random starting point?
+	 */
+	for (int partition = 0; partition < num_partitions; partition++)
+	{
+		/* hibernate if all partitions can hibernate */
+		hibernate &= BgBufferSyncPartition(wb_context, num_partitions,
+										   partition, recent_alloc_partition,
+										   &saved_info[partition]);
+	}
+
+	/* now that we've scanned all partitions, mark the cached info as valid */
+	saved_info_valid = true;
+
 	/* Return true if OK to hibernate */
-	return (bufs_to_lap == 0 && recent_alloc == 0);
+	return hibernate;
 }
 
 /*

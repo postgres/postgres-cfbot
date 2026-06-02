@@ -449,6 +449,7 @@ ClientCertName
 ClientConnectionInfo
 ClientData
 ClientSocket
+ClockSweep
 ClonePtrType
 ClosePortalStmt
 ClosePtrType
