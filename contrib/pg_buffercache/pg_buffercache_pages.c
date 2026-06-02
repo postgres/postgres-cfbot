@@ -31,6 +31,7 @@
 #define NUM_BUFFERCACHE_MARK_DIRTY_ALL_ELEM 3
 
 #define NUM_BUFFERCACHE_OS_PAGES_ELEM	3
+#define NUM_BUFFERCACHE_PARTITIONS_ELEM	4
 
 PG_MODULE_MAGIC_EXT(
 					.name = "pg_buffercache",
@@ -77,6 +78,7 @@ PG_FUNCTION_INFO_V1(pg_buffercache_evict_all);
 PG_FUNCTION_INFO_V1(pg_buffercache_mark_dirty);
 PG_FUNCTION_INFO_V1(pg_buffercache_mark_dirty_relation);
 PG_FUNCTION_INFO_V1(pg_buffercache_mark_dirty_all);
+PG_FUNCTION_INFO_V1(pg_buffercache_partitions);
 
 
 /* Only need to touch memory once per backend process lifetime */
@@ -921,4 +923,88 @@ pg_buffercache_mark_dirty_all(PG_FUNCTION_ARGS)
 	result = HeapTupleGetDatum(tuple);
 
 	PG_RETURN_DATUM(result);
+}
+
+/*
+ * Inquire about partitioning of shared buffers.
+ */
+Datum
+pg_buffercache_partitions(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *funcctx;
+	MemoryContext oldcontext;
+	TupleDesc	tupledesc;
+	TupleDesc	expected_tupledesc;
+	HeapTuple	tuple;
+	Datum		result;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		funcctx = SRF_FIRSTCALL_INIT();
+
+		/* Switch context when allocating stuff to be used in later calls */
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		if (get_call_result_type(fcinfo, NULL, &expected_tupledesc) != TYPEFUNC_COMPOSITE)
+			elog(ERROR, "return type must be a row type");
+
+		if (expected_tupledesc->natts != NUM_BUFFERCACHE_PARTITIONS_ELEM)
+			elog(ERROR, "incorrect number of output arguments");
+
+		/* Construct a tuple descriptor for the result rows. */
+		tupledesc = CreateTemplateTupleDesc(expected_tupledesc->natts);
+		TupleDescInitEntry(tupledesc, (AttrNumber) 1, "partition",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupledesc, (AttrNumber) 2, "num_buffers",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupledesc, (AttrNumber) 3, "first_buffer",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupledesc, (AttrNumber) 4, "last_buffer",
+						   INT4OID, -1, 0);
+
+		funcctx->user_fctx = BlessTupleDesc(tupledesc);
+
+		/* Return to original context when allocating transient memory */
+		MemoryContextSwitchTo(oldcontext);
+
+		/* Set max calls and remember the user function context. */
+		funcctx->max_calls = BufferPartitionCount();
+	}
+
+	funcctx = SRF_PERCALL_SETUP();
+
+	if (funcctx->call_cntr < funcctx->max_calls)
+	{
+		uint32		i = funcctx->call_cntr;
+
+		int			num_buffers,
+					first_buffer,
+					last_buffer;
+
+		Datum		values[NUM_BUFFERCACHE_PARTITIONS_ELEM];
+		bool		nulls[NUM_BUFFERCACHE_PARTITIONS_ELEM];
+
+		BufferPartitionGet(i, &num_buffers,
+						   &first_buffer, &last_buffer);
+
+		values[0] = Int32GetDatum(i);
+		nulls[0] = false;
+
+		values[1] = Int32GetDatum(num_buffers);
+		nulls[1] = false;
+
+		values[2] = Int32GetDatum(first_buffer);
+		nulls[2] = false;
+
+		values[3] = Int32GetDatum(last_buffer);
+		nulls[3] = false;
+
+		/* Build and return the tuple. */
+		tuple = heap_form_tuple((TupleDesc) funcctx->user_fctx, values, nulls);
+		result = HeapTupleGetDatum(tuple);
+
+		SRF_RETURN_NEXT(funcctx, result);
+	}
+	else
+		SRF_RETURN_DONE(funcctx);
 }
