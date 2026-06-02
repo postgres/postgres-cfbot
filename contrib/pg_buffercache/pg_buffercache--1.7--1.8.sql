@@ -20,7 +20,10 @@ CREATE VIEW pg_buffercache_partitions AS
 	 num_passes bigint,			-- clocksweep passes
 	 next_buffer integer,		-- next victim buffer for clocksweep
 	 total_allocs bigint,		-- handled allocs (running total)
-	 num_allocs bigint);		-- handled allocs (current cycle)
+	 num_allocs bigint,			-- handled allocs (current cycle)
+	 total_req_allocs bigint,	-- requested allocs (running total)
+	 num_req_allocs bigint,		-- handled allocs (current cycle)
+	 weights int[]);			-- balancing weights
 
 -- Don't want these to be available to public.
 REVOKE ALL ON FUNCTION pg_buffercache_partitions() FROM PUBLIC;
