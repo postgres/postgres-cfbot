@@ -213,10 +213,9 @@
    First, <application>vacuumlo</application> builds a temporary table which contains all
    of the OIDs of the large objects in the selected database.  It then scans
    through all columns in the database that are of type
-   <type>oid</type> or <type>lo</type>, and removes matching entries from the temporary
-   table.  (Note: Only types with these names are considered; in particular,
-   domains over them are not considered.)  The remaining entries in the
-   temporary table identify orphaned LOs.  These are removed.
+   <type>oid</type> or <type>lo</type>, including domains, composite types, and arrays
+   containing these types. Matching entries are removed from the temporary table.
+   The remaining entries in the temporary table identify orphaned LOs.  These are removed.
   </para>
  </refsect1>
 
