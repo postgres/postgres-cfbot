@@ -71,11 +71,6 @@
 #include "utils/timestamp.h"
 #include "utils/wait_event.h"
 
-
-/* Note: these two macros only work on shared buffers, not local ones! */
-#define BufHdrGetBlock(bufHdr)	((Block) (BufferBlocks + ((Size) (bufHdr)->buf_id) * BLCKSZ))
-#define BufferGetLSN(bufHdr)	(PageGetLSN(BufHdrGetBlock(bufHdr)))
-
 /* Note: this macro only works on local buffers, not shared ones! */
 #define LocalBufHdrGetBlock(bufHdr) \
 	LocalBufferBlockPointers[-((bufHdr)->buf_id + 2)]
@@ -2678,9 +2673,7 @@ again:
 		 * inside StrategyGetBuffer().
 		 */
 		if (strategy && from_ring &&
-			buf_state & BM_PERMANENT &&
-			XLogNeedsFlush(BufferGetLSN(buf_hdr)) &&
-			StrategyRejectBuffer(strategy, buf_hdr, from_ring))
+			StrategyRejectBuffer(strategy, buf_hdr, buf_state))
 		{
 			UnlockReleaseBuffer(buf);
 			goto again;
