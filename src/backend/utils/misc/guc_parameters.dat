@@ -2746,6 +2746,12 @@
   max => 'INT_MAX / 2',
 },
 
+{ name => 'shared_buffers_numa', type => 'bool', context => 'PGC_POSTMASTER', group => 'RESOURCES_MEM',
+  short_desc => 'Locate partitions of shared buffers (and descriptors) to NUMA nodes.',
+  variable => 'shared_buffers_numa',
+  boot_val => 'false',
+},
+
 { name => 'shared_memory_size', type => 'int', context => 'PGC_INTERNAL', group => 'PRESET_OPTIONS',
   short_desc => 'Shows the size of the server\'s main shared memory area (rounded up to the nearest MB).',
   flags => 'GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE | GUC_UNIT_MB | GUC_RUNTIME_COMPUTED',
