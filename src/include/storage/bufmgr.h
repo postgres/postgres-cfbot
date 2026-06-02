@@ -155,6 +155,25 @@ struct ReadBuffersOperation
 
 typedef struct ReadBuffersOperation ReadBuffersOperation;
 
+/*
+ * information about one partition of shared buffers
+ *
+ * first/last buffer - the values are inclusive
+ */
+typedef struct BufferPartition
+{
+	int			num_buffers;	/* number of buffers */
+	int			first_buffer;	/* first buffer of partition */
+	int			last_buffer;	/* last buffer of partition */
+} BufferPartition;
+
+/* an array of information about all partitions */
+typedef struct BufferPartitions
+{
+	int			npartitions;	/* number of partitions */
+	BufferPartition partitions[FLEXIBLE_ARRAY_MEMBER];
+} BufferPartitions;
+
 /* to avoid having to expose buf_internals.h here */
 typedef struct WritebackContext WritebackContext;
 
