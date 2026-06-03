@@ -4,6 +4,7 @@
 #include "postgres.h"
 #include "btree_gist.h"
 #include "btree_utils_num.h"
+#include "catalog/pg_type.h"
 #include "common/int.h"
 #include "utils/rel.h"
 #include "utils/sortsupport.h"
@@ -74,7 +75,6 @@ gbt_int4_dist(const void *a, const void *b, FmgrInfo *flinfo)
 	return GET_FLOAT_DISTANCE(int32, a, b);
 }
 
-
 static const gbtree_ninfo tinfo =
 {
 	gbt_t_int4,
@@ -88,6 +88,74 @@ static const gbtree_ninfo tinfo =
 	gbt_int4key_cmp,
 	gbt_int4_dist
 };
+
+/*
+ * Cross-type GiST callbacks: the indexed key is int4, the query is int2 or
+ * int8.  Both reuse gbt_num_consistent()/gbt_num_distance() via a tinfo whose
+ * comparison/distance callbacks read the query (left) and key (right) sides at
+ * their own widths.  f_cmp is unused on these paths and left NULL.
+ */
+GBT_INT_CMP_FNS(gbt_int4_q2_, int16, int32)
+GBT_INT_CMP_FNS(gbt_int4_q8_, int64, int32)
+
+static const gbtree_ninfo tinfo_q2 =
+{
+	gbt_t_int4,
+	sizeof(int32),
+	8,
+	gbt_int4_q2_gt,
+	gbt_int4_q2_ge,
+	gbt_int4_q2_eq,
+	gbt_int4_q2_le,
+	gbt_int4_q2_lt,
+	NULL,
+	gbt_int4_q2_dist
+};
+
+static const gbtree_ninfo tinfo_q8 =
+{
+	gbt_t_int4,
+	sizeof(int32),
+	8,
+	gbt_int4_q8_gt,
+	gbt_int4_q8_ge,
+	gbt_int4_q8_eq,
+	gbt_int4_q8_le,
+	gbt_int4_q8_lt,
+	NULL,
+	gbt_int4_q8_dist
+};
+
+/*
+ * Cross-type dispatch shared by gbt_int4_consistent and gbt_int4_distance:
+ * select the tinfo for the query subtype and read the query value at its own
+ * width into caller-owned storage.
+ */
+static const gbtree_ninfo *
+gbt_int4_crosstype(Oid subtype, Datum d, gbt_intkey *q, const void **qp)
+{
+	switch (subtype)
+	{
+		case INT2OID:
+			q->i2 = DatumGetInt16(d);
+			*qp = &q->i2;
+			return &tinfo_q2;
+		case InvalidOid:		/* same-type: exclusion/temporal constraint
+								 * checks pass the native type with subtype 0 */
+		case INT4OID:
+			q->i4 = DatumGetInt32(d);
+			*qp = &q->i4;
+			return &tinfo;
+		case INT8OID:
+			q->i8 = DatumGetInt64(d);
+			*qp = &q->i8;
+			return &tinfo_q8;
+		default:
+			elog(ERROR, "unrecognized subtype %u for btree_gist int4 cross-type comparison",
+				 subtype);
+			return NULL;		/* keep compiler quiet */
+	}
+}
 
 
 PG_FUNCTION_INFO_V1(int4_dist);
@@ -108,6 +176,40 @@ int4_dist(PG_FUNCTION_ARGS)
 	ra = abs(r);
 
 	PG_RETURN_INT32(ra);
+}
+
+PG_FUNCTION_INFO_V1(int4_int2_dist);
+Datum
+int4_int2_dist(PG_FUNCTION_ARGS)
+{
+	int32		a = PG_GETARG_INT32(0);
+	int32		b = (int32) PG_GETARG_INT16(1);
+	int32		r;
+
+	if (pg_sub_s32_overflow(a, b, &r) ||
+		r == PG_INT32_MIN)
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("integer out of range")));
+
+	PG_RETURN_INT32(abs(r));
+}
+
+PG_FUNCTION_INFO_V1(int4_int8_dist);
+Datum
+int4_int8_dist(PG_FUNCTION_ARGS)
+{
+	int64		a = (int64) PG_GETARG_INT32(0);
+	int64		b = PG_GETARG_INT64(1);
+	int64		r;
+
+	if (pg_sub_s64_overflow(a, b, &r) ||
+		r == PG_INT64_MIN)
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("bigint out of range")));
+
+	PG_RETURN_INT64(i64abs(r));
 }
 
 
@@ -135,13 +237,14 @@ Datum
 gbt_int4_consistent(PG_FUNCTION_ARGS)
 {
 	GISTENTRY  *entry = (GISTENTRY *) PG_GETARG_POINTER(0);
-	int32		query = PG_GETARG_INT32(1);
+	Datum		queryDatum = PG_GETARG_DATUM(1);
 	StrategyNumber strategy = (StrategyNumber) PG_GETARG_UINT16(2);
-#ifdef NOT_USED
 	Oid			subtype = PG_GETARG_OID(3);
-#endif
 	bool	   *recheck = (bool *) PG_GETARG_POINTER(4);
 	int32KEY   *kkk = (int32KEY *) DatumGetPointer(entry->key);
+	const gbtree_ninfo *ti;
+	gbt_intkey	query;
+	const void *qp;
 	GBT_NUMKEY_R key;
 
 	/* All cases served by this function are exact */
@@ -150,26 +253,31 @@ gbt_int4_consistent(PG_FUNCTION_ARGS)
 	key.lower = (GBT_NUMKEY *) &kkk->lower;
 	key.upper = (GBT_NUMKEY *) &kkk->upper;
 
-	PG_RETURN_BOOL(gbt_num_consistent(&key, &query, strategy,
-									  GIST_LEAF(entry), &tinfo, fcinfo->flinfo));
+	ti = gbt_int4_crosstype(subtype, queryDatum, &query, &qp);
+
+	PG_RETURN_BOOL(gbt_num_consistent(&key, qp, strategy, GIST_LEAF(entry),
+									  ti, fcinfo->flinfo));
 }
 
 Datum
 gbt_int4_distance(PG_FUNCTION_ARGS)
 {
 	GISTENTRY  *entry = (GISTENTRY *) PG_GETARG_POINTER(0);
-	int32		query = PG_GETARG_INT32(1);
-#ifdef NOT_USED
+	Datum		queryDatum = PG_GETARG_DATUM(1);
 	Oid			subtype = PG_GETARG_OID(3);
-#endif
 	int32KEY   *kkk = (int32KEY *) DatumGetPointer(entry->key);
+	const gbtree_ninfo *ti;
+	gbt_intkey	query;
+	const void *qp;
 	GBT_NUMKEY_R key;
 
 	key.lower = (GBT_NUMKEY *) &kkk->lower;
 	key.upper = (GBT_NUMKEY *) &kkk->upper;
 
-	PG_RETURN_FLOAT8(gbt_num_distance(&key, &query, GIST_LEAF(entry),
-									  &tinfo, fcinfo->flinfo));
+	ti = gbt_int4_crosstype(subtype, queryDatum, &query, &qp);
+
+	PG_RETURN_FLOAT8(gbt_num_distance(&key, qp, GIST_LEAF(entry),
+									  ti, fcinfo->flinfo));
 }
 
 Datum
