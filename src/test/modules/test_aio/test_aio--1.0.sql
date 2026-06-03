@@ -45,6 +45,10 @@ CREATE FUNCTION make_blocks_unused_dirty_flushed(rel regclass, blocks int4[])
 RETURNS pg_catalog.void STRICT
 AS 'MODULE_PATHNAME' LANGUAGE C;
 
+CREATE FUNCTION eager_clean_rel_block(rel regclass, blockno int4)
+RETURNS pg_catalog.void STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
 CREATE FUNCTION rel_blocks_are_dirty(rel regclass, blocks int4[])
 RETURNS pg_catalog.bool[] STRICT
 AS 'MODULE_PATHNAME' LANGUAGE C;
