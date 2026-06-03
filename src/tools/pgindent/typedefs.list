@@ -3823,6 +3823,7 @@ foreign_glob_cxt
 foreign_loc_cxt
 freefunc
 fsec_t
+gbt_intkey
 gbt_vsrt_arg
 gbtree_ninfo
 gbtree_vinfo
