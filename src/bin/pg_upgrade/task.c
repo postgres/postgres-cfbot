@@ -189,7 +189,10 @@ start_conn(const ClusterInfo *cluster, UpgradeTaskSlot *slot)
 		appendConnStrVal(&conn_opts, cluster->sockdir);
 	}
 	if (!protocol_negotiation_supported(cluster))
+	{
 		appendPQExpBufferStr(&conn_opts, " max_protocol_version=3.0");
+		appendPQExpBufferStr(&conn_opts, " report_prep_stmt_dealloc=0");
+	}
 
 	slot->conn = PQconnectStart(conn_opts.data);
 

@@ -26,6 +26,9 @@
 #include "commands/explain_state.h"
 #include "commands/prepare.h"
 #include "funcapi.h"
+#include "libpq/libpq.h"
+#include "libpq/pqformat.h"
+#include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
 #include "parser/parse_coerce.h"
 #include "parser/parse_collate.h"
@@ -513,6 +516,26 @@ DeallocateQuery(DeallocateStmt *stmt)
 }
 
 /*
+ * Tell the client that a prepared statement has been deallocated (an empty
+ * string means all of them).  Only sent to clients that requested the
+ * _pq_.report_prep_stmt_dealloc protocol extension.
+ */
+static void
+SendStmtDeallocMsg(const char *name)
+{
+	StringInfoData buf;
+
+	if (whereToSendOutput != DestRemote)
+		return;
+	if (!MyProcPort || !MyProcPort->report_prep_stmt_dealloc)
+		return;
+
+	pq_beginmessage(&buf, PqMsg_PrepStmtDealloc);
+	pq_sendstring(&buf, name);
+	pq_endmessage(&buf);
+}
+
+/*
  * Internal version of DEALLOCATE
  *
  * If showError is false, dropping a nonexistent statement is a no-op.
@@ -532,6 +555,9 @@ DropPreparedStatement(const char *stmt_name, bool showError)
 
 		/* Now we can remove the hash table entry */
 		hash_search(prepared_queries, entry->stmt_name, HASH_REMOVE, NULL);
+
+		/* Alert the client */
+		SendStmtDeallocMsg(stmt_name);
 	}
 }
 
@@ -543,6 +569,7 @@ DropAllPreparedStatements(void)
 {
 	HASH_SEQ_STATUS seq;
 	PreparedStatement *entry;
+	bool		found = false;
 
 	/* nothing cached */
 	if (!prepared_queries)
@@ -552,12 +579,18 @@ DropAllPreparedStatements(void)
 	hash_seq_init(&seq, prepared_queries);
 	while ((entry = hash_seq_search(&seq)) != NULL)
 	{
+		found = true;
+
 		/* Release the plancache entry */
 		DropCachedPlan(entry->plansource);
 
 		/* Now we can remove the hash table entry */
 		hash_search(prepared_queries, entry->stmt_name, HASH_REMOVE, NULL);
 	}
+
+	/* Alert the client */
+	if (found)
+		SendStmtDeallocMsg("");
 }
 
 /*

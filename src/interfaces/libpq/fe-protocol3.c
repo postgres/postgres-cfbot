@@ -63,6 +63,30 @@ static size_t build_startup_packet(const PGconn *conn, char *packet,
 
 
 /*
+ * Read a PrepStmtDealloc message and invoke the registered callbacks.  Broken
+ * out as a subroutine since it can occur in several places.
+ *
+ * Entry: 'i' message type and length already consumed.
+ * Exit: 0 on success, EOF if not enough data.
+ */
+static int
+getPrepStmtDealloc(PGconn *conn)
+{
+	if (pqGets(&conn->workBuffer, conn))
+		return EOF;
+
+	for (int i = 0; i < conn->nPrepStmtDeallocCallbacks; i++)
+	{
+		PQprepStmtDeallocCallback cb = conn->prepStmtDeallocCallbacks[i];
+		void	   *arg = conn->prepStmtDeallocCallbackArgs[i];
+
+		cb(conn, arg, conn->workBuffer.data);
+	}
+
+	return 0;
+}
+
+/*
  * parseInput: if appropriate, parse input data from backend
  * until input is exhausted or a stopping state is reached.
  * Note that this function will NOT attempt to read more data from the backend.
@@ -185,6 +209,11 @@ pqParseInput3(PGconn *conn)
 				if (getParameterStatus(conn))
 					return;
 			}
+			else if (id == PqMsg_PrepStmtDealloc)
+			{
+				if (getPrepStmtDealloc(conn))
+					return;
+			}
 			else
 			{
 				/* Any other case is unexpected and we summarily skip it */
@@ -304,6 +333,10 @@ pqParseInput3(PGconn *conn)
 					break;
 				case PqMsg_ParameterStatus:
 					if (getParameterStatus(conn))
+						return;
+					break;
+				case PqMsg_PrepStmtDealloc:
+					if (getPrepStmtDealloc(conn))
 						return;
 					break;
 				case PqMsg_BackendKeyData:
@@ -1546,6 +1579,8 @@ pqGetNegotiateProtocolVersion3(PGconn *conn)
 		{
 			found_test_protocol_negotiation = true;
 		}
+		else if (strcmp(conn->workBuffer.data, "_pq_.report_prep_stmt_dealloc") == 0)
+			conn->prepStmtDeallocReporting = false;
 		else
 		{
 			libpq_append_conn_error(conn, "received invalid protocol negotiation message: server reported an unsupported parameter that was not requested (\"%s\")",
@@ -1905,6 +1940,10 @@ getCopyDataMessage(PGconn *conn)
 				break;
 			case PqMsg_ParameterStatus:
 				if (getParameterStatus(conn))
+					return 0;
+				break;
+			case PqMsg_PrepStmtDealloc:
+				if (getPrepStmtDealloc(conn))
 					return 0;
 				break;
 			case PqMsg_CopyData:
@@ -2418,6 +2457,10 @@ pqFunctionCall3(PGconn *conn, Oid fnid,
 				if (getParameterStatus(conn))
 					continue;
 				break;
+			case PqMsg_PrepStmtDealloc:
+				if (getPrepStmtDealloc(conn))
+					continue;
+				break;
 			default:
 				/* The backend violates the protocol. */
 				libpq_append_conn_error(conn, "protocol error: id=0x%x", id);
@@ -2465,6 +2508,15 @@ pqBuildStartupPacket3(PGconn *conn, int *packetlen,
 {
 	char	   *startpacket;
 	size_t		len;
+
+	/*
+	 * Initialize prepStmtDeallocReporting based on whether the client
+	 * requested the protocol extension.  pqGetNegotiateProtocolVersion3()
+	 * clears this if the server rejects it.
+	 */
+	if (conn->report_prep_stmt_dealloc &&
+		strcmp(conn->report_prep_stmt_dealloc, "1") == 0)
+		conn->prepStmtDeallocReporting = true;
 
 	len = build_startup_packet(conn, NULL, options);
 	if (len == 0 || len > INT_MAX)
@@ -2539,6 +2591,10 @@ build_startup_packet(const PGconn *conn, char *packet,
 
 	if (conn->client_encoding_initial && conn->client_encoding_initial[0])
 		ADD_STARTUP_OPTION("client_encoding", conn->client_encoding_initial);
+
+	/* Ask the server to report prepared statement deallocations. */
+	if (conn->prepStmtDeallocReporting)
+		ADD_STARTUP_OPTION("_pq_.report_prep_stmt_dealloc", "");
 
 	/*
 	 * Add the test_protocol_negotiation option when greasing, to test that

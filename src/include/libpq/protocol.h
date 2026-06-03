@@ -53,6 +53,7 @@
 #define PqMsg_FunctionCallResponse	'V'
 #define PqMsg_CopyBothResponse		'W'
 #define PqMsg_ReadyForQuery			'Z'
+#define PqMsg_PrepStmtDealloc		'i'
 #define PqMsg_NoData				'n'
 #define PqMsg_PortalSuspended		's'
 #define PqMsg_ParameterDescription	't'
