@@ -598,6 +598,9 @@ extern StartBufferIOResult StartSharedBufferIO(BufferDesc *buf, bool forInput, b
 extern void TerminateBufferIO(BufferDesc *buf, bool clear_dirty, uint64 set_flag_bits,
 							  bool forget_owner, bool release_aio);
 
+extern void WriteBufferAndNeighbors(Buffer bufnum, BufferDesc *buf_hdr, IOContext io_context,
+									WritebackContext *wb_context);
+
 
 /* freelist.c */
 extern IOContext IOContextForStrategy(BufferAccessStrategy strategy);
