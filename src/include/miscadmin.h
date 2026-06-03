@@ -213,6 +213,10 @@ extern PGDLLIMPORT Oid MyDatabaseTableSpace;
 
 extern PGDLLIMPORT bool MyDatabaseHasLoginEventTriggers;
 
+extern PGDLLIMPORT bool shmem_populate;
+extern PGDLLIMPORT bool shmem_interleave;
+
+
 /*
  * Date/Time Configuration
  *
