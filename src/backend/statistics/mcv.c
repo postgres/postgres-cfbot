@@ -2044,7 +2044,8 @@ mcv_clauselist_selectivity(PlannerInfo *root, StatisticExtInfo *stat,
 						   List *clauses, int varRelid,
 						   JoinType jointype, SpecialJoinInfo *sjinfo,
 						   RelOptInfo *rel,
-						   Selectivity *basesel, Selectivity *totalsel)
+						   Selectivity *basesel, Selectivity *totalsel,
+						   Selectivity *cap)
 {
 	MCVList    *mcv;
 	Selectivity s = 0.0;
@@ -2052,6 +2053,9 @@ mcv_clauselist_selectivity(PlannerInfo *root, StatisticExtInfo *stat,
 
 	/* match/mismatch bitmap for each MCV item */
 	bool	   *matches = NULL;
+
+	/* default: no cap on selectivity */
+	*cap = 1.0;
 
 	/* load the MCV list stored in the statistics object */
 	mcv = statext_mcv_load(stat->statOid, rte->inh);
@@ -2073,6 +2077,9 @@ mcv_clauselist_selectivity(PlannerInfo *root, StatisticExtInfo *stat,
 			s += mcv->items[i].frequency;
 		}
 	}
+
+	if (s == 0.0 && mcv->nitems > 0)
+		*cap = mcv->items[mcv->nitems - 1].frequency;
 
 	return s;
 }
