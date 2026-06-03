@@ -2597,7 +2597,7 @@ InvalidateVictimBuffer(BufferDesc *buf_hdr)
  * with it in a single write. The victim buffer must be already pinned and
  * locked and will remain pinned upon return.
  */
-static void
+void
 WriteBufferAndNeighbors(Buffer bufnum, BufferDesc *buf_hdr, IOContext io_context,
 						WritebackContext *wb_context)
 {
