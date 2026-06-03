@@ -2297,6 +2297,20 @@ postgresql://%2Fvar%2Flib%2Fpostgresql/dbname
       </listitem>
      </varlistentry>
 
+     <varlistentry id="libpq-connect-report-prep-stmt-dealloc" xreflabel="report_prep_stmt_dealloc">
+      <term><literal>report_prep_stmt_dealloc</literal></term>
+      <listitem>
+       <para>
+        If set to <literal>1</literal> (the default),
+        <application>libpq</application> requests the
+        <link linkend="protocol-extensions"><literal>_pq_.report_prep_stmt_dealloc</literal></link>
+        protocol extension, so that the server reports when prepared statements
+        are deallocated.  Set it to <literal>0</literal> to suppress the
+        request.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="libpq-connect-scram-client-key" xreflabel="scram_client_key">
       <term><literal>scram_client_key</literal></term>
       <listitem>
@@ -7136,6 +7150,83 @@ typedef struct pgNotify
    see if any notifications came in during the processing of the command.
   </para>
 
+ </sect1>
+
+ <sect1 id="libpq-prepstmt-dealloc">
+  <title>Prepared Statement Deallocation Notifications</title>
+
+  <indexterm zone="libpq-prepstmt-dealloc">
+   <primary>prepared statement deallocation</primary>
+   <secondary>in libpq</secondary>
+  </indexterm>
+
+  <para>
+   The server can notify the client whenever a named prepared statement is
+   deallocated by
+   <link linkend="sql-deallocate"><command>DEALLOCATE</command></link>,
+   <link linkend="sql-discard"><command>DISCARD</command></link>,
+   <xref linkend="libpq-PQclosePrepared"/>, or
+   <xref linkend="libpq-PQsendClosePrepared"/>.  This is useful when multiple
+   layers of client code share a connection and one drops a statement another
+   prepared.  This behavior is negotiated through the
+   <link linkend="protocol-extensions"><literal>_pq_.report_prep_stmt_dealloc</literal></link>
+   protocol extension, which is only available on servers running
+   <productname>PostgreSQL</productname> 20 and later.
+   By default, <application>libpq</application> requests this protocol
+   extension; this can be disabled with the
+   <xref linkend="libpq-connect-report-prep-stmt-dealloc"/> connection
+   parameter.
+  </para>
+
+  <para>
+   Notifications are delivered to callbacks registered with
+   <function>PQaddPrepStmtDeallocCallback</function>.
+
+   <variablelist>
+    <varlistentry id="libpq-PQaddPrepStmtDeallocCallback">
+     <term><function>PQaddPrepStmtDeallocCallback</function><indexterm><primary>PQaddPrepStmtDeallocCallback</primary></indexterm></term>
+     <listitem>
+      <para>
+       Registers a callback to be invoked immediately upon receiving a prepared
+       statement deallocation notification.  The value of
+       <parameter>arg</parameter> is passed unaltered to the callback.  The
+       <parameter>name</parameter> argument will contain the name of the
+       deallocated prepared statement, or an empty string if all were
+       deallocated.  Callbacks run while <application>libpq</application>
+       processes incoming data, so they must not call any
+       <application>libpq</application> functions on the same
+       <parameter>conn</parameter>, and they must not assume that
+       <parameter>name</parameter> survives after returning (copy it if it is
+       needed later).  Returns <literal>1</literal> on success or
+       <literal>0</literal> if the callback could not be registered (e.g., due
+       to running out of memory).
+
+<synopsis>
+typedef void (*PQprepStmtDeallocCallback) (PGconn *conn, void *arg, const char *name);
+
+int PQaddPrepStmtDeallocCallback(PGconn *conn, PQprepStmtDeallocCallback cb, void *arg);
+</synopsis>
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry id="libpq-PQprepStmtDeallocReporting">
+     <term><function>PQprepStmtDeallocReporting</function><indexterm><primary>PQprepStmtDeallocReporting</primary></indexterm></term>
+     <listitem>
+      <para>
+       Returns <literal>1</literal> if the server accepted the
+       <literal>_pq_.report_prep_stmt_dealloc</literal> protocol extension.
+       Otherwise, returns <literal>0</literal> to indicate that no prepared
+       statement deallocation notifications will be sent.
+
+<synopsis>
+int PQprepStmtDeallocReporting(PGconn *conn);
+</synopsis>
+      </para>
+     </listitem>
+    </varlistentry>
+   </variablelist>
+  </para>
  </sect1>
 
  <sect1 id="libpq-copy">

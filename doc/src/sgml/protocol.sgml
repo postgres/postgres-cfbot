@@ -346,8 +346,15 @@
 
      <tbody>
       <row>
-       <entry namest="last" align="center" valign="middle">
-        <emphasis>(No supported protocol extensions are currently defined.)</emphasis>
+       <entry><literal>_pq_.report_prep_stmt_dealloc</literal></entry>
+       <entry><emphasis>none</emphasis></entry>
+       <entry>PostgreSQL 20 and later</entry>
+       <entry>When negotiated, the server sends a
+        <link linkend="protocol-message-formats-PrepStmtDealloc">PrepStmtDealloc</link>
+        message whenever a named prepared statement is deallocated by
+        <link linkend="sql-deallocate"><command>DEALLOCATE</command></link>,
+        <link linkend="sql-discard"><command>DISCARD</command></link>, or a
+        <link linkend="protocol-message-formats-Close">Close</link> message.
        </entry>
       </row>
      </tbody>
@@ -1587,6 +1594,20 @@ SELCT 1/0;<!-- this typo is intentional -->
      point in the protocol.
     </para>
    </note>
+
+   <para>
+    If the client requested the
+    <link linkend="protocol-extensions"><literal>_pq_.report_prep_stmt_dealloc</literal></link>
+    protocol extension, the backend sends a PrepStmtDealloc message whenever a
+    named prepared statement is deallocated by
+    <link linkend="sql-deallocate"><command>DEALLOCATE</command></link>,
+    <link linkend="sql-discard"><command>DISCARD</command></link>, or a
+    <link linkend="protocol-message-formats-Close">Close</link> message.  This
+    alerts the client that a statement it prepared is gone (e.g., if another
+    layer of the client stack dropped it) and that it must be re-prepared
+    before reuse.  The message carries the deallocated statement's name, or an
+    empty string to mean that all prepared statements were deallocated.
+   </para>
   </sect2>
 
   <sect2 id="protocol-flow-canceling-requests">
@@ -5866,6 +5887,43 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
        <listitem>
         <para>
          Length of message contents in bytes, including self.
+        </para>
+       </listitem>
+      </varlistentry>
+     </variablelist>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="protocol-message-formats-PrepStmtDealloc">
+    <term>PrepStmtDealloc (B)</term>
+    <listitem>
+     <variablelist>
+      <varlistentry>
+       <term>Byte1('i')</term>
+       <listitem>
+        <para>
+         Identifies the message as a prepared statement deallocation
+         notification.  This is sent only if the client requested the
+         <literal>_pq_.report_prep_stmt_dealloc</literal> protocol extension.
+        </para>
+       </listitem>
+      </varlistentry>
+
+      <varlistentry>
+       <term>Int32</term>
+       <listitem>
+        <para>
+         Length of message contents in bytes, including self.
+        </para>
+       </listitem>
+      </varlistentry>
+
+      <varlistentry>
+       <term>String</term>
+       <listitem>
+        <para>
+         The name of the deallocated prepared statement.  An empty string
+         indicates that all prepared statements were deallocated.
         </para>
        </listitem>
       </varlistentry>

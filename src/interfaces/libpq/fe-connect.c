@@ -421,6 +421,10 @@ static const internalPQconninfoOption PQconninfoOptions[] = {
 		"SSL-Key-Log-File", "D", 64,
 	offsetof(struct pg_conn, sslkeylogfile)},
 
+	{"report_prep_stmt_dealloc", NULL, "1", NULL,
+		"Report-Prepared-Statement-Deallocations", "", 1,
+	offsetof(struct pg_conn, report_prep_stmt_dealloc)},
+
 	/* Terminating entry --- MUST BE LAST */
 	{NULL, NULL, NULL, NULL,
 	NULL, NULL, 0}
@@ -708,6 +712,7 @@ pqDropServerData(PGconn *conn)
 	free(conn->write_err_msg);
 	conn->write_err_msg = NULL;
 	conn->oauth_want_retry = false;
+	conn->prepStmtDeallocReporting = false;
 
 	/*
 	 * Cancel connections need to retain their be_pid and be_cancel_key across
@@ -5181,6 +5186,11 @@ freePGconn(PGconn *conn)
 	free(conn->rowBuf);
 	termPQExpBuffer(&conn->errorMessage);
 	termPQExpBuffer(&conn->workBuffer);
+	free(conn->report_prep_stmt_dealloc);
+	if (conn->prepStmtDeallocCallbacks)
+		free(conn->prepStmtDeallocCallbacks);
+	if (conn->prepStmtDeallocCallbackArgs)
+		free(conn->prepStmtDeallocCallbackArgs);
 
 	free(conn);
 }
@@ -8440,4 +8450,57 @@ PQgetThreadLock(void)
 {
 	Assert(pg_g_threadlock);
 	return pg_g_threadlock;
+}
+
+/*
+ * Registers a callback to be invoked whenever the server reports a prepared
+ * statement deallocation.  arg is passed through to the callback unaltered.
+ */
+int
+PQaddPrepStmtDeallocCallback(PGconn *conn, PQprepStmtDeallocCallback cb,
+							 void *arg)
+{
+	int			i;
+	PQprepStmtDeallocCallback *new_cbs;
+	void	  **new_args;
+
+	if (!conn)
+		return 0;
+
+	i = conn->nPrepStmtDeallocCallbacks;
+
+	new_cbs = realloc(conn->prepStmtDeallocCallbacks,
+					  (i + 1) * sizeof(PQprepStmtDeallocCallback));
+	if (!new_cbs)
+	{
+		libpq_append_conn_error(conn, "out of memory");
+		return 0;
+	}
+	conn->prepStmtDeallocCallbacks = new_cbs;
+
+	new_args = realloc(conn->prepStmtDeallocCallbackArgs,
+					   (i + 1) * sizeof(void *));
+	if (!new_args)
+	{
+		libpq_append_conn_error(conn, "out of memory");
+		return 0;
+	}
+	conn->prepStmtDeallocCallbackArgs = new_args;
+
+	new_cbs[i] = cb;
+	new_args[i] = arg;
+	conn->nPrepStmtDeallocCallbacks = i + 1;
+
+	return 1;
+}
+
+/*
+ * Returns true if the server accepted the _pq_.report_prep_stmt_dealloc
+ * extension.  If false, no notifications will arrive and the caller must
+ * re-prepare on error.
+ */
+int
+PQprepStmtDeallocReporting(PGconn *conn)
+{
+	return conn && conn->prepStmtDeallocReporting;
 }

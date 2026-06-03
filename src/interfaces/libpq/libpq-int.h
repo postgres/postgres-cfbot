@@ -432,6 +432,7 @@ struct pg_conn
 	char	   *scram_client_key;	/* base64-encoded SCRAM client key */
 	char	   *scram_server_key;	/* base64-encoded SCRAM server key */
 	char	   *sslkeylogfile;	/* where should the client write ssl keylogs */
+	char	   *report_prep_stmt_dealloc;	/* request pstmt dealloc reports */
 
 	bool		cancelRequest;	/* true if this connection is used to send a
 								 * cancel request, instead of being a normal
@@ -532,6 +533,11 @@ struct pg_conn
 	void		(*cleanup_async_auth) (PGconn *conn);
 	pgsocket	altsock;		/* alternative socket for client to poll */
 
+	/* prepared statement deallocation notifications */
+	bool		prepStmtDeallocReporting;
+	PQprepStmtDeallocCallback *prepStmtDeallocCallbacks;
+	void	  **prepStmtDeallocCallbackArgs;
+	int			nPrepStmtDeallocCallbacks;
 
 	/* Transient state needed while establishing connection */
 	PGTargetServerType target_server_type;	/* desired session properties */
