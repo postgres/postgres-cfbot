@@ -2932,6 +2932,54 @@ SELECT * FROM check_estimated_rows('SELECT * FROM mcv_lists_partial WHERE (a = 0
 (1 row)
 
 DROP TABLE mcv_lists_partial;
+-- After building MCV statistics the cap limits the combined estimate,
+-- eliminating most of the over-estimation.
+CREATE TABLE mcv_cap (a INT, b INT, c BOOL, d INTEGER[], e INT) WITH (autovacuum_enabled = off);
+INSERT INTO mcv_cap
+    SELECT 0, b, TRUE, '{}', 1 FROM generate_series(1, 99) b, generate_series(1, 100) r;
+INSERT INTO mcv_cap
+    SELECT a, 0, NULL, '{1, 2}', 2 FROM generate_series(1, 99) a, generate_series(1, 100) r;
+INSERT INTO mcv_cap
+    SELECT c, c, FALSE, '{1, 1}', 3 FROM generate_series(1, 100) c;
+ANALYZE mcv_cap;
+-- no MCV
+SELECT * FROM check_estimated_rows($$SELECT * FROM mcv_cap WHERE a = 0 AND b = 0 AND c = TRUE AND d = '{1, 2}'$$);
+ estimated | actual 
+-----------+--------
+      1219 |      0
+(1 row)
+
+CREATE STATISTICS mcv_cap_stats (mcv) ON a, b, c, d FROM mcv_cap;
+ANALYZE mcv_cap;
+-- MCV
+SELECT * FROM check_estimated_rows($$SELECT * FROM mcv_cap WHERE a = 0 AND b = 0 AND c = TRUE AND d = '{1, 2}'$$);
+ estimated | actual 
+-----------+--------
+       100 |      0
+(1 row)
+
+-- When a value IS in the MCV list, no cap path runs
+SELECT * FROM check_estimated_rows($$SELECT * FROM mcv_cap WHERE a = 0 AND b = 1 AND c = TRUE AND d = '{}'$$);
+ estimated | actual 
+-----------+--------
+       100 |    100
+(1 row)
+
+-- Capping does not apply when the query includes an inequality clause
+SELECT * FROM check_estimated_rows($$SELECT * FROM mcv_cap WHERE a >= 0 AND b = 0 AND c = TRUE AND d = '{1, 2}'$$);
+ estimated | actual 
+-----------+--------
+      2450 |      0
+(1 row)
+
+-- Capping does not apply when the query does not cover all MCV columns
+SELECT * FROM check_estimated_rows($$SELECT * FROM mcv_cap WHERE a = 0 AND b = 0 AND c = TRUE$$);
+ estimated | actual 
+-----------+--------
+      2450 |      0
+(1 row)
+
+DROP TABLE mcv_cap;
 -- check the ability to use multiple MCV lists
 CREATE TABLE mcv_lists_multi (
 	a INTEGER,
