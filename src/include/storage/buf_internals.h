@@ -600,6 +600,10 @@ extern void TerminateBufferIO(BufferDesc *buf, bool clear_dirty, uint64 set_flag
 
 extern void WriteBufferAndNeighbors(Buffer bufnum, BufferDesc *buf_hdr, IOContext io_context,
 									WritebackContext *wb_context);
+extern int	BgwriterWriteBuffers(int lru_maxpages, WritebackContext *wb_context,
+								 int *next_to_clean, uint32 *next_passes,
+								 int *num_to_scan, int *reusable_buffers,
+								 int upcoming_alloc_est, bool *maxwritten_clean);
 
 
 /* freelist.c */
