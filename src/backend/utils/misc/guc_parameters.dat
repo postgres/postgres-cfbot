@@ -740,6 +740,20 @@
   ifdef => 'DEBUG_NODE_TESTS_ENABLED',
 },
 
+{ name => 'debug_shmem_interleave', type => 'bool', context => 'PGC_SUSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Forces interleaving for the whole shared memory segment.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'shmem_interleave',
+  boot_val => 'false'
+},
+
+{ name => 'debug_shmem_populate', type => 'bool', context => 'PGC_SUSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Populates (faults) the whole shared memory segment using MAP_POPULATE.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'shmem_populate',
+  boot_val => 'false'
+},
+
 { name => 'debug_write_read_parse_plan_trees', type => 'bool', context => 'PGC_SUSET', group => 'DEVELOPER_OPTIONS',
   short_desc => 'Set this to force all parse and plan trees to be passed through outfuncs.c/readfuncs.c, to facilitate catching errors and omissions in those modules.',
   flags => 'GUC_NOT_IN_SAMPLE',
