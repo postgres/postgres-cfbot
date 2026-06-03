@@ -709,6 +709,29 @@ make_blocks_unused_dirty_flushed(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 
+PG_FUNCTION_INFO_V1(run_bgwriter_cleaner);
+Datum
+run_bgwriter_cleaner(PG_FUNCTION_ARGS)
+{
+	int			lru_maxpages = PG_GETARG_INT32(0);
+	WritebackContext wb_context;
+	int			next_to_clean = 0;
+	uint32		next_passes = 0;
+	int			num_to_scan = NBuffers;
+	int			reusable_buffers = 0;
+	bool		maxwritten_clean;
+	int			num_written;
+
+	WritebackContextInit(&wb_context, &bgwriter_flush_after);
+	num_written = BgwriterWriteBuffers(lru_maxpages, &wb_context,
+									   &next_to_clean, &next_passes,
+									   &num_to_scan, &reusable_buffers,
+									   NBuffers, &maxwritten_clean);
+	IssuePendingWritebacks(&wb_context, IOCONTEXT_NORMAL);
+
+	PG_RETURN_INT32(num_written);
+}
+
 PG_FUNCTION_INFO_V1(eager_clean_rel_block);
 Datum
 eager_clean_rel_block(PG_FUNCTION_ARGS)
@@ -787,6 +810,37 @@ rel_blocks_are_dirty(PG_FUNCTION_ARGS)
 								  TYPALIGN_CHAR);
 
 	PG_RETURN_ARRAYTYPE_P(dirty_array);
+}
+
+PG_FUNCTION_INFO_V1(pin_rel_block);
+Datum
+pin_rel_block(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	BlockNumber blkno = PG_GETARG_UINT32(1);
+	Relation	rel;
+	Buffer		buf;
+
+	rel = relation_open(relid, AccessShareLock);
+	buf = ReadBufferExtended(rel, MAIN_FORKNUM, blkno, RBM_NORMAL, NULL);
+	ResourceOwnerForgetBuffer(CurrentResourceOwner, buf);
+	ResourceOwnerRememberBuffer(TopTransactionResourceOwner, buf);
+	relation_close(rel, NoLock);
+
+	PG_RETURN_INT32(buf);
+}
+
+PG_FUNCTION_INFO_V1(release_buffer);
+Datum
+release_buffer(PG_FUNCTION_ARGS)
+{
+	Buffer		buf = PG_GETARG_INT32(0);
+
+	ResourceOwnerForgetBuffer(TopTransactionResourceOwner, buf);
+	ResourceOwnerRememberBuffer(CurrentResourceOwner, buf);
+	ReleaseBuffer(buf);
+
+	PG_RETURN_VOID();
 }
 
 PG_FUNCTION_INFO_V1(buffer_create_toy);
