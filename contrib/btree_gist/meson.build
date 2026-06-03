@@ -93,6 +93,7 @@ tests += {
       'bool',
       'partitions',
       'stratnum',
+      'int_crosstype',
       'without_overlaps',
     ],
   },

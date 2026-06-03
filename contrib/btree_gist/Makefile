@@ -41,7 +41,7 @@ PGFILEDESC = "btree_gist - B-tree equivalent GiST operator classes"
 REGRESS = init int2 int4 int8 float4 float8 cash oid timestamp timestamptz \
         time timetz date interval macaddr macaddr8 inet cidr text varchar char \
         bytea bit varbit numeric uuid not_equal enum bool partitions \
-        stratnum without_overlaps
+        stratnum int_crosstype without_overlaps
 
 SHLIB_LINK += $(filter -lm, $(LIBS))
 
