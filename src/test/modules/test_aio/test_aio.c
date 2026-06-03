@@ -709,6 +709,31 @@ make_blocks_unused_dirty_flushed(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 
+PG_FUNCTION_INFO_V1(eager_clean_rel_block);
+Datum
+eager_clean_rel_block(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	BlockNumber blkno = PG_GETARG_UINT32(1);
+	Relation	rel;
+	Buffer		buf;
+
+	rel = relation_open(relid, AccessShareLock);
+	if (RelationUsesLocalBuffers(rel))
+		ereport(ERROR,
+				(errmsg("cannot eager clean local buffers")));
+
+	buf = ReadBufferExtended(rel, MAIN_FORKNUM, blkno, RBM_NORMAL, NULL);
+	LockBuffer(buf, BUFFER_LOCK_SHARE_EXCLUSIVE);
+	WriteBufferAndNeighbors(buf, GetBufferDescriptor(buf - 1), IOCONTEXT_NORMAL,
+							&BackendWritebackContext);
+	ReleaseBuffer(buf);
+
+	relation_close(rel, NoLock);
+
+	PG_RETURN_VOID();
+}
+
 PG_FUNCTION_INFO_V1(rel_blocks_are_dirty);
 Datum
 rel_blocks_are_dirty(PG_FUNCTION_ARGS)
