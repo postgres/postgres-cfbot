@@ -78,6 +78,7 @@ OBJS_COMMON = \
 	rmtree.o \
 	saslprep.o \
 	scram-common.o \
+	system_identifier.o \
 	string.o \
 	stringinfo.o \
 	unicode_case.o \
