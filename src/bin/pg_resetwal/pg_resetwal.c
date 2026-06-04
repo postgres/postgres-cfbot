@@ -39,7 +39,6 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
-#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -54,6 +53,7 @@
 #include "common/logging.h"
 #include "common/restricted_token.h"
 #include "common/string.h"
+#include "common/system_identifier.h"
 #include "fe_utils/option_utils.h"
 #include "fe_utils/version.h"
 #include "getopt_long.h"
@@ -673,9 +673,6 @@ read_controlfile(void)
 static void
 GuessControlValues(void)
 {
-	uint64		sysidentifier;
-	struct timeval tv;
-
 	/*
 	 * Set up a completely default set of pg_control values.
 	 */
@@ -687,14 +684,9 @@ GuessControlValues(void)
 
 	/*
 	 * Create a new unique installation identifier, since we can no longer use
-	 * any old XLOG records.  See notes in xlog.c about the algorithm.
+	 * any old XLOG records.
 	 */
-	gettimeofday(&tv, NULL);
-	sysidentifier = ((uint64) tv.tv_sec) << 32;
-	sysidentifier |= ((uint64) tv.tv_usec) << 12;
-	sysidentifier |= getpid() & 0xFFF;
-
-	ControlFile.system_identifier = sysidentifier;
+	ControlFile.system_identifier = GenerateSystemIdentifier();
 
 	ControlFile.checkPointCopy.redo = SizeOfXLogLongPHD;
 	ControlFile.checkPointCopy.ThisTimeLineID = 1;
