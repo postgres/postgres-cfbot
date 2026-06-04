@@ -2615,11 +2615,10 @@ AddRelationNewConstraints(Relation rel,
 				else
 					colname = NULL;
 
-				ccname = ChooseConstraintName(RelationGetRelationName(rel),
-											  colname,
-											  "check",
-											  RelationGetNamespace(rel),
-											  checknames);
+				ccname = ChooseConstraintNameForRelation(RelationGetRelid(rel),
+														 colname,
+														 "check",
+														 checknames);
 
 				/* save name for future checks */
 				checknames = lappend(checknames, ccname);
@@ -2707,11 +2706,10 @@ AddRelationNewConstraints(Relation rel,
 				nnname = cdef->conname;
 			}
 			else
-				nnname = ChooseConstraintName(RelationGetRelationName(rel),
-											  strVal(linitial(cdef->keys)),
-											  "not_null",
-											  RelationGetNamespace(rel),
-											  nnnames);
+				nnname = ChooseConstraintNameForRelation(RelationGetRelid(rel),
+														 strVal(linitial(cdef->keys)),
+														 "not_null",
+														 nnnames);
 			nnnames = lappend(nnnames, nnname);
 
 			constrOid =
