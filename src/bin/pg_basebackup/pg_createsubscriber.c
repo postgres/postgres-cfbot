@@ -25,6 +25,7 @@
 #include "common/logging.h"
 #include "common/pg_prng.h"
 #include "common/restricted_token.h"
+#include "common/system_identifier.h"
 #include "datatype/timestamp.h"
 #include "fe_utils/recovery_gen.h"
 #include "fe_utils/simple_list.h"
@@ -709,7 +710,6 @@ modify_subscriber_sysid(const struct CreateSubscriberOptions *opt)
 {
 	ControlFileData *cf;
 	bool		crc_ok;
-	struct timeval tv;
 
 	char	   *out_file;
 	char	   *cmd_str;
@@ -722,13 +722,8 @@ modify_subscriber_sysid(const struct CreateSubscriberOptions *opt)
 
 	/*
 	 * Select a new system identifier.
-	 *
-	 * XXX this code was extracted from BootStrapXLOG().
 	 */
-	gettimeofday(&tv, NULL);
-	cf->system_identifier = ((uint64) tv.tv_sec) << 32;
-	cf->system_identifier |= ((uint64) tv.tv_usec) << 12;
-	cf->system_identifier |= getpid() & 0xFFF;
+	cf->system_identifier = GenerateSystemIdentifier();
 
 	if (dry_run)
 		pg_log_info("dry-run: would set system identifier to %" PRIu64 " on subscriber",
