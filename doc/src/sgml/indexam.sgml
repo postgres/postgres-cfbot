@@ -951,7 +951,7 @@ amgetbatch (IndexScanDesc scan,
    value in the batch and provides an <function>amgettransform</function>
    callback (see below), which the table AM invokes for each returned item to
    set <literal>scan-&gt;xs_recheck</literal> from that recorded state; GiST
-   works this way.
+   and SP-GiST work this way.
   </para>
 
   <para>
@@ -986,8 +986,8 @@ amgetbatch (IndexScanDesc scan,
       <literal>scan-&gt;xs_hitupdesc</literal>).  This gives the access method
       complete freedom to form that tuple from whatever it stored in
       <structfield>currTuples</structfield>, in whatever on-disk format suits
-      it.  GiST uses this path, because the representation it
-      stores differs from the indexed value and so could not satisfy the
+      it.  GiST and SP-GiST use this path, because the representation they
+      store differs from the indexed value and so could not satisfy the
       <literal>xs_itupdesc</literal> layout directly.
      </para>
     </listitem>
@@ -1031,10 +1031,10 @@ amunguardbatch (IndexScanDesc scan,
    is not even required to use the standard helper
    <function>indexam_util_unlock_batch</function> to manage it.  In practice,
    though, most or all index AMs will use that helper and hold the simplest
-   possible interlock: each guarded B-tree, hash, or GiST batch keeps a
-   single buffer pin on the one index page the batch came from.  (The
-   <quote>virtual</quote> nearest-neighbor batches that GiST uses for ordered
-   scans are not guarded, and hold no such pin.)  See <xref
+   possible interlock: each guarded B-tree, hash, GiST, or SP-GiST batch keeps
+   a single buffer pin on the one index page the batch came from.  (The
+   <quote>virtual</quote> nearest-neighbor batches that GiST and SP-GiST use
+   for ordered scans are not guarded, and hold no such pin.)  See <xref
     linkend="index-locking"/> for details on buffer pin management during
    index scans.  This function will be called at most once for each guarded
    batch; it is not called when the index AM has already unguarded the batch
@@ -1078,10 +1078,12 @@ amkillitemsbatch (IndexScanDesc scan,
    <function>amgetbatch</function> index AMs (those that don't can leave
    the field set to <literal>NULL</literal>), but doing so is recommended for
    performance, as it allows future scans to skip known-dead index entries.
-   All three core index access methods that currently support
-   <function>amgetbatch</function> (B-tree, hash, and GiST) implement
-   <literal>LP_DEAD</literal> marking, though third-party index access methods
-   are free to choose whether to implement this feature.  The table AM may
+   B-tree, hash, and GiST implement <literal>LP_DEAD</literal> marking; SP-GiST
+   is an example of a core <function>amgetbatch</function> access method that
+   leaves it unimplemented (it still holds the leaf-page interlock pin for
+   index-only scans, but never sets <literal>LP_DEAD</literal> bits), and
+   third-party index access methods are likewise free to choose whether to
+   implement this feature.  The table AM may
    call <function>tableam_util_scanpos_killitem</function> to mark dead items as
    the scan progresses.  If the batch contains any such dead items, the batch's
    <structfield>deadItems</structfield> array will have been sorted and
@@ -1188,9 +1190,9 @@ amgettransform (IndexScanDesc scan,
    property of the whole scan &mdash; or, for index-only scans, is the on-disk
    index tuple returned directly via <literal>scan-&gt;xs_itup</literal> &mdash;
    the field can be left <literal>NULL</literal>, as B-tree and hash do.  GiST
-   provides one because parts of its per-tuple output (the recheck flag, the
-   <literal>ORDER BY</literal> distances, and the reconstructed index-only
-   tuples) vary per matching item, as described above.
+   and SP-GiST provide one because parts of their per-tuple output (the recheck
+   flag, the <literal>ORDER BY</literal> distances, and the reconstructed
+   index-only tuples) vary per matching item, as described above.
   </para>
 
   <para>
@@ -1495,7 +1497,7 @@ amtranslatecmptype (CompareType cmptype, Oid opfamily, Oid opcintype);
    calls <function>amgettransform</function> as it returns each item to set
    <structfield>xs_orderbyvals</structfield> and
    <structfield>xs_recheckorderby</structfield> from that recorded state.  GiST
-   uses this for nearest-neighbor scans.  As with
+   and SP-GiST use this for nearest-neighbor scans.  As with
    <literal>scan-&gt;xs_recheck</literal>, these values cannot be set directly as
    items are returned.
   </para>
@@ -1503,10 +1505,10 @@ amtranslatecmptype (CompareType cmptype, Oid opfamily, Oid opcintype);
   <para>
    Scans that use ordering operators are never planned as index-only scans.
    Because an ordered scan can collect matching items from many index leaf
-   pages without retaining a buffer pin on any of them (GiST's
-   <quote>virtual</quote> nearest-neighbor batches work this way), it has no
-   pin to serve as the interlock against concurrent TID recycling that an
-   index-only scan depends on (see <xref linkend="index-locking"/>).  The
+   pages without retaining a buffer pin on any of them (the
+   <quote>virtual</quote> nearest-neighbor batches of GiST and SP-GiST work
+   this way), it has no pin to serve as the interlock against concurrent TID
+   recycling that an index-only scan depends on (see <xref linkend="index-locking"/>).  The
    planner therefore costs and executes such scans as plain index scans, which
    always fetch and recheck the heap tuple.
   </para>

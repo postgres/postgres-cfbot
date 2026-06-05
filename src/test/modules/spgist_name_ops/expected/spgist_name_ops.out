@@ -41,7 +41,7 @@ select * from t
 ---------------------------------------------------------------------------------------------------
  Sort
    Sort Key: f1
-   ->  Index Only Scan using t_f1_f2_f3_idx on t
+   ->  Index Scan using t_f1_f2_f3_idx on t
          Index Cond: ((f1 > 'binary_upgrade_set_n'::name) AND (f1 < 'binary_upgrade_set_p'::name))
 (4 rows)
 
@@ -90,7 +90,7 @@ select * from t
 ---------------------------------------------------------------------------------------------------
  Sort
    Sort Key: f1
-   ->  Index Only Scan using t_f1_f2_f3_idx on t
+   ->  Index Scan using t_f1_f2_f3_idx on t
          Index Cond: ((f1 > 'binary_upgrade_set_n'::name) AND (f1 < 'binary_upgrade_set_p'::name))
 (4 rows)
 
