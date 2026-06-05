@@ -208,7 +208,10 @@ extern void spgendscan(IndexScanDesc scan);
 extern void spgrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
 					  ScanKey orderbys, int norderbys);
 extern int64 spggetbitmap(IndexScanDesc scan, TIDBitmap *tbm);
-extern bool spggettuple(IndexScanDesc scan, ScanDirection dir);
+extern IndexScanBatch spggetbatch(IndexScanDesc scan, IndexScanBatch priorbatch,
+								  ScanDirection dir);
+extern void spgunguardbatch(IndexScanDesc scan, IndexScanBatch batch);
+extern void spggettransform(IndexScanDesc scan, IndexScanBatch batch, int item);
 extern bool spgcanreturn(Relation index, int attno);
 
 /* spgvacuum.c */

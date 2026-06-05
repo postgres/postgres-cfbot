@@ -352,8 +352,8 @@ target TID is not acceptable, so we have to extend the algorithm to cope
 with such cases.  We recognize that such a move might have occurred when
 we see a leaf-page REDIRECT tuple whose XID indicates it might have been
 created after the VACUUM scan started.  We add the redirection target TID
-to a "pending list" of places we need to recheck.  Between pages of the
-main sequential scan, we empty the pending list by visiting each listed
+to a "pending list" of places we need to recheck.  During the main
+sequential scan, we empty the pending list by visiting each listed
 TID.  If it points to an inner tuple (from a PickSplit), add each downlink
 TID to the pending list.  If it points to a leaf page, vacuum that page.
 (We could just vacuum the single pointed-to chain, but vacuuming the
@@ -364,6 +364,13 @@ concurrent index changes, we don't remove list entries immediately but
 only after we've completed all pending-list processing; instead we just
 mark items as done after processing them.  Adding a TID that's already in
 the list is a no-op, whether or not that item is marked done yet.
+
+On a leaf page, VACUUM takes a cleanup lock rather than a plain exclusive lock.
+This is the interlock that makes index-only scans safe against concurrent TID
+recycling: such a scan keeps a pin on the leaf page it read heap TIDs from until
+it has consulted the visibility map, and VACUUM cannot make any of that page's
+TIDs recyclable until spgbulkdelete returns, which it cannot do until it has
+cleanup-locked that page behind the scan's pin.
 
 spgbulkdelete also updates the index's free space map.
 
