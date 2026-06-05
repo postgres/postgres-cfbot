@@ -101,7 +101,7 @@ select prop,
  nulls_last         | t     | f    | f    | f            | f           | f   | f
  orderable          | t     | f    | f    | f            | f           | f   | f
  distance_orderable | f     | f    | t    | f            | t           | f   | f
- returnable         | t     | f    | f    | t            | t           | f   | f
+ returnable         | t     | f    | f    | f            | t           | f   | f
  search_array       | t     | f    | f    | f            | f           | f   | f
  search_nulls       | t     | f    | t    | t            | t           | f   | t
  bogus              |       |      |      |              |             |     | 

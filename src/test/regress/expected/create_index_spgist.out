@@ -602,10 +602,10 @@ FROM (VALUES (point '1,2'), (NULL), ('1234,5678')) pts(pt);
 
 EXPLAIN (COSTS OFF)
 SELECT count(*) FROM radix_text_tbl WHERE t = 'P0123456789abcdef';
-                         QUERY PLAN                         
-------------------------------------------------------------
+                      QUERY PLAN                       
+-------------------------------------------------------
  Aggregate
-   ->  Index Only Scan using sp_radix_ind on radix_text_tbl
+   ->  Index Scan using sp_radix_ind on radix_text_tbl
          Index Cond: (t = 'P0123456789abcdef'::text)
 (3 rows)
 
@@ -617,10 +617,10 @@ SELECT count(*) FROM radix_text_tbl WHERE t = 'P0123456789abcdef';
 
 EXPLAIN (COSTS OFF)
 SELECT count(*) FROM radix_text_tbl WHERE t = 'P0123456789abcde';
-                         QUERY PLAN                         
-------------------------------------------------------------
+                      QUERY PLAN                       
+-------------------------------------------------------
  Aggregate
-   ->  Index Only Scan using sp_radix_ind on radix_text_tbl
+   ->  Index Scan using sp_radix_ind on radix_text_tbl
          Index Cond: (t = 'P0123456789abcde'::text)
 (3 rows)
 
@@ -632,10 +632,10 @@ SELECT count(*) FROM radix_text_tbl WHERE t = 'P0123456789abcde';
 
 EXPLAIN (COSTS OFF)
 SELECT count(*) FROM radix_text_tbl WHERE t = 'P0123456789abcdefF';
-                         QUERY PLAN                         
-------------------------------------------------------------
+                      QUERY PLAN                       
+-------------------------------------------------------
  Aggregate
-   ->  Index Only Scan using sp_radix_ind on radix_text_tbl
+   ->  Index Scan using sp_radix_ind on radix_text_tbl
          Index Cond: (t = 'P0123456789abcdefF'::text)
 (3 rows)
 
@@ -650,7 +650,7 @@ SELECT count(*) FROM radix_text_tbl WHERE t <    'Aztec                         
                               QUERY PLAN                              
 ----------------------------------------------------------------------
  Aggregate
-   ->  Index Only Scan using sp_radix_ind on radix_text_tbl
+   ->  Index Scan using sp_radix_ind on radix_text_tbl
          Index Cond: (t < 'Aztec                         Ct  '::text)
 (3 rows)
 
@@ -665,7 +665,7 @@ SELECT count(*) FROM radix_text_tbl WHERE t ~<~  'Aztec                         
                                QUERY PLAN                               
 ------------------------------------------------------------------------
  Aggregate
-   ->  Index Only Scan using sp_radix_ind on radix_text_tbl
+   ->  Index Scan using sp_radix_ind on radix_text_tbl
          Index Cond: (t ~<~ 'Aztec                         Ct  '::text)
 (3 rows)
 
@@ -680,7 +680,7 @@ SELECT count(*) FROM radix_text_tbl WHERE t <=   'Aztec                         
                               QUERY PLAN                               
 -----------------------------------------------------------------------
  Aggregate
-   ->  Index Only Scan using sp_radix_ind on radix_text_tbl
+   ->  Index Scan using sp_radix_ind on radix_text_tbl
          Index Cond: (t <= 'Aztec                         Ct  '::text)
 (3 rows)
 
@@ -695,7 +695,7 @@ SELECT count(*) FROM radix_text_tbl WHERE t ~<=~ 'Aztec                         
                                QUERY PLAN                                
 -------------------------------------------------------------------------
  Aggregate
-   ->  Index Only Scan using sp_radix_ind on radix_text_tbl
+   ->  Index Scan using sp_radix_ind on radix_text_tbl
          Index Cond: (t ~<=~ 'Aztec                         Ct  '::text)
 (3 rows)
 
@@ -710,7 +710,7 @@ SELECT count(*) FROM radix_text_tbl WHERE t =    'Aztec                         
                               QUERY PLAN                              
 ----------------------------------------------------------------------
  Aggregate
-   ->  Index Only Scan using sp_radix_ind on radix_text_tbl
+   ->  Index Scan using sp_radix_ind on radix_text_tbl
          Index Cond: (t = 'Aztec                         Ct  '::text)
 (3 rows)
 
@@ -725,7 +725,7 @@ SELECT count(*) FROM radix_text_tbl WHERE t =    'Worth                         
                               QUERY PLAN                              
 ----------------------------------------------------------------------
  Aggregate
-   ->  Index Only Scan using sp_radix_ind on radix_text_tbl
+   ->  Index Scan using sp_radix_ind on radix_text_tbl
          Index Cond: (t = 'Worth                         St  '::text)
 (3 rows)
 
@@ -740,7 +740,7 @@ SELECT count(*) FROM radix_text_tbl WHERE t >=   'Worth                         
                               QUERY PLAN                               
 -----------------------------------------------------------------------
  Aggregate
-   ->  Index Only Scan using sp_radix_ind on radix_text_tbl
+   ->  Index Scan using sp_radix_ind on radix_text_tbl
          Index Cond: (t >= 'Worth                         St  '::text)
 (3 rows)
 
@@ -755,7 +755,7 @@ SELECT count(*) FROM radix_text_tbl WHERE t ~>=~ 'Worth                         
                                QUERY PLAN                                
 -------------------------------------------------------------------------
  Aggregate
-   ->  Index Only Scan using sp_radix_ind on radix_text_tbl
+   ->  Index Scan using sp_radix_ind on radix_text_tbl
          Index Cond: (t ~>=~ 'Worth                         St  '::text)
 (3 rows)
 
@@ -770,7 +770,7 @@ SELECT count(*) FROM radix_text_tbl WHERE t >    'Worth                         
                               QUERY PLAN                              
 ----------------------------------------------------------------------
  Aggregate
-   ->  Index Only Scan using sp_radix_ind on radix_text_tbl
+   ->  Index Scan using sp_radix_ind on radix_text_tbl
          Index Cond: (t > 'Worth                         St  '::text)
 (3 rows)
 
@@ -785,7 +785,7 @@ SELECT count(*) FROM radix_text_tbl WHERE t ~>~  'Worth                         
                                QUERY PLAN                               
 ------------------------------------------------------------------------
  Aggregate
-   ->  Index Only Scan using sp_radix_ind on radix_text_tbl
+   ->  Index Scan using sp_radix_ind on radix_text_tbl
          Index Cond: (t ~>~ 'Worth                         St  '::text)
 (3 rows)
 
@@ -797,10 +797,10 @@ SELECT count(*) FROM radix_text_tbl WHERE t ~>~  'Worth                         
 
 EXPLAIN (COSTS OFF)
 SELECT count(*) FROM radix_text_tbl WHERE t ^@	 'Worth';
-                         QUERY PLAN                         
-------------------------------------------------------------
+                      QUERY PLAN                       
+-------------------------------------------------------
  Aggregate
-   ->  Index Only Scan using sp_radix_ind on radix_text_tbl
+   ->  Index Scan using sp_radix_ind on radix_text_tbl
          Index Cond: (t ^@ 'Worth'::text)
 (3 rows)
 
@@ -812,10 +812,10 @@ SELECT count(*) FROM radix_text_tbl WHERE t ^@	 'Worth';
 
 EXPLAIN (COSTS OFF)
 SELECT count(*) FROM radix_text_tbl WHERE starts_with(t, 'Worth');
-                         QUERY PLAN                         
-------------------------------------------------------------
+                      QUERY PLAN                       
+-------------------------------------------------------
  Aggregate
-   ->  Index Only Scan using sp_radix_ind on radix_text_tbl
+   ->  Index Scan using sp_radix_ind on radix_text_tbl
          Index Cond: (t ^@ 'Worth'::text)
          Filter: starts_with(t, 'Worth'::text)
 (4 rows)
