@@ -158,6 +158,13 @@ select * from numrange_test2 where nr = 'empty'::numrange;
 select * from numrange_test2 where nr = numrange(1.1, 2.2);
 select * from numrange_test2 where nr = numrange(1.1, 2.3);
 
+-- numrange's subtype (numeric) is hashable, so NOT IN uses hashed evaluation
+explain (costs off)
+select * from numrange_test2
+where nr not in (numrange(1,2), numrange(2,3), numrange(3,4), numrange(4,5),
+                 numrange(5,6), numrange(6,7), numrange(7,8), numrange(8,9),
+                 numrange(9,10));
+
 set enable_nestloop=t;
 set enable_hashjoin=f;
 set enable_mergejoin=f;

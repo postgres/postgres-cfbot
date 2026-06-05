@@ -677,6 +677,18 @@ select * from numrange_test2 where nr = numrange(1.1, 2.3);
 ----
 (0 rows)
 
+-- numrange's subtype (numeric) is hashable, so NOT IN uses hashed evaluation
+explain (costs off)
+select * from numrange_test2
+where nr not in (numrange(1,2), numrange(2,3), numrange(3,4), numrange(4,5),
+                 numrange(5,6), numrange(6,7), numrange(7,8), numrange(8,9),
+                 numrange(9,10));
+                                                       QUERY PLAN                                                        
+-------------------------------------------------------------------------------------------------------------------------
+ Seq Scan on numrange_test2
+   Filter: (nr <> hashed ALL ('{"[1,2)","[2,3)","[3,4)","[4,5)","[5,6)","[6,7)","[7,8)","[8,9)","[9,10)"}'::numrange[]))
+(2 rows)
+
 set enable_nestloop=t;
 set enable_hashjoin=f;
 set enable_mergejoin=f;
