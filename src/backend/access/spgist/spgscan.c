@@ -28,10 +28,12 @@
 #include "utils/memutils.h"
 #include "utils/rel.h"
 
-typedef void (*storeRes_func) (SpGistScanOpaque so, ItemPointer heapPtr,
-							   Datum leafValue, bool isNull,
-							   SpGistLeafTuple leafTuple, bool recheck,
-							   bool recheckDistances, double *distances);
+static Buffer spgReadItemPage(IndexScanDesc scan, SpGistSearchItem *item,
+							  Buffer buffer);
+static void spgProcessInnerPage(IndexScanDesc scan, SpGistSearchItem *item,
+								Page page);
+static void spgProcessLeafPage(IndexScanDesc scan, SpGistSearchItem *item,
+							   Page page, IndexScanBatch batch);
 
 /*
  * Pairing heap comparison function for the SpGistSearchItem queue.
@@ -172,26 +174,6 @@ resetSpGistScanOpaque(SpGistScanOpaque so)
 		spgAddStartItem(so, false);
 
 	MemoryContextSwitchTo(oldCtx);
-
-	if (so->numberOfOrderBys > 0)
-	{
-		/* Must pfree distances to avoid memory leak */
-		int			i;
-
-		for (i = 0; i < so->nPtrs; i++)
-			if (so->distances[i])
-				pfree(so->distances[i]);
-	}
-
-	if (so->want_itup)
-	{
-		/* Must pfree reconstructed tuples to avoid memory leak */
-		int			i;
-
-		for (i = 0; i < so->nPtrs; i++)
-			pfree(so->reconTups[i]);
-	}
-	so->iPtr = so->nPtrs = 0;
 }
 
 /*
@@ -332,6 +314,9 @@ spgbeginscan(Relation rel, int keysz, int orderbysz)
 	 */
 	so->reconTupDesc = scan->xs_hitupdesc =
 		getSpGistTupleDesc(rel, &so->state.attType);
+	so->reconCxt = AllocSetContextCreate(CurrentMemoryContext,
+										 "SP-GiST reconstruction context",
+										 ALLOCSET_SMALL_SIZES);
 
 	/* Allocate various arrays needed for order-by scans */
 	if (scan->numberOfOrderBys > 0)
@@ -354,6 +339,27 @@ spgbeginscan(Relation rel, int keysz, int orderbysz)
 		scan->xs_orderbynulls = palloc_array(bool, scan->numberOfOrderBys);
 		memset(scan->xs_orderbynulls, true,
 			   sizeof(bool) * scan->numberOfOrderBys);
+
+		/*
+		 * Ordered scans fill a "virtual" batch by draining the
+		 * distance-ordered queue, so the batch size is a tuning knob with no
+		 * natural value. Testing has shown that a very small size will
+		 * increase per-batch overhead (and likely instruction-cache misses),
+		 * while a large size (such as MaxIndexTuplesPerPage) risks producing
+		 * many tuples that a LIMIT node never consumes.  This maxitemsbatch
+		 * is a compromise.
+		 */
+		scan->maxitemsbatch = MaxIndexTuplesPerPage / 32;
+	}
+	else
+	{
+		/*
+		 * A non-ordered batch holds all of the matches from a single leaf
+		 * page, so one page's worth of items is the natural cap.  Using
+		 * MaxIndexTuplesPerPage is a bit hokey since SpGistLeafTuples aren't
+		 * exactly IndexTuples; however, they are larger, so this is safe.
+		 */
+		scan->maxitemsbatch = MaxIndexTuplesPerPage;
 	}
 
 	fmgr_info_copy(&so->innerConsistentFn,
@@ -366,6 +372,9 @@ spgbeginscan(Relation rel, int keysz, int orderbysz)
 
 	so->indexCollation = rel->rd_indcollation[0];
 
+	scan->batch_index_opaque_static = MAXALIGN(sizeof(SpGistBatchData));
+	scan->batch_tuples_workspace = BLCKSZ;
+
 	scan->opaque = so;
 
 	return scan;
@@ -376,6 +385,11 @@ spgrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
 		  ScanKey orderbys, int norderbys)
 {
 	SpGistScanOpaque so = (SpGistScanOpaque) scan->opaque;
+
+	if (scan->numberOfOrderBys > 0 && !scan->batchImmediateUnguard)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("SP-GiST ordered index scans require a heap-fetching scan with an MVCC-compliant snapshot")));
 
 	/* copy scankeys into local storage */
 	if (scankey && scan->numberOfKeys > 0)
@@ -411,8 +425,30 @@ spgrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
 	/* preprocess scankeys, set up the representation in *so */
 	spgPrepareScanKeys(scan);
 
+	/*
+	 * Size the dynamic opaque area now that xs_want_itup is known.  Ordered
+	 * (virtual) batches need a full SpGistBatchItem array (each item's ORDER
+	 * BY distances included); non-ordered batches need only a recheck flag
+	 * per item.  Index-only scans (always non-ordered) need extra room after
+	 * the array for the reconstruction prefix (see SpGistBatchGetReconArea
+	 * and spgcanreturn).
+	 *
+	 * We do this here rather than in spgbeginscan because xs_want_itup is set
+	 * by index_beginscan only after ambeginscan returns.
+	 */
+	if (scan->numberOfOrderBys > 0)
+		scan->batch_index_opaque_dyn = SpGistBatchItemArraySize(scan);
+	else
+		scan->batch_index_opaque_dyn = SpGistBatchRecheckArraySize(scan);
+	if (scan->xs_want_itup)
+		scan->batch_index_opaque_dyn += SpGistBatchReconAreaSize;
+
 	/* set up starting queue entries */
 	resetSpGistScanOpaque(so);
+
+	/* discard any index-only tuple reconstructed by a previous scan */
+	MemoryContextReset(so->reconCxt);
+	scan->xs_hitup = NULL;
 
 	/* count an indexscan for stats */
 	pgstat_count_index_scan(scan->indexRelation);
@@ -427,6 +463,7 @@ spgendscan(IndexScanDesc scan)
 
 	MemoryContextDelete(so->tempCxt);
 	MemoryContextDelete(so->traversalCxt);
+	MemoryContextDelete(so->reconCxt);
 
 	if (so->keyData)
 		pfree(so->keyData);
@@ -455,10 +492,11 @@ spgendscan(IndexScanDesc scan)
  * Leaf SpGistSearchItem constructor, called in queue context
  */
 static SpGistSearchItem *
-spgNewHeapItem(SpGistScanOpaque so, int level, SpGistLeafTuple leafTuple,
+spgNewHeapItem(IndexScanDesc scan, int level, SpGistLeafTuple leafTuple,
 			   Datum leafValue, bool recheck, bool recheckDistances,
 			   bool isnull, double *distances)
 {
+	SpGistScanOpaque so = (SpGistScanOpaque) scan->opaque;
 	SpGistSearchItem *item = spgAllocSearchItem(so, isnull, distances);
 
 	item->level = level;
@@ -470,7 +508,7 @@ spgNewHeapItem(SpGistScanOpaque so, int level, SpGistLeafTuple leafTuple,
 	 * if we didn't ask it to, and mildly-broken methods might supply one of
 	 * the wrong type.  The correct leafValue type is attType not leafType.
 	 */
-	if (so->want_itup)
+	if (scan->xs_want_itup)
 	{
 		item->value = isnull ? (Datum) 0 :
 			datumCopy(leafValue, so->state.attType.attbyval,
@@ -502,16 +540,18 @@ spgNewHeapItem(SpGistScanOpaque so, int level, SpGistLeafTuple leafTuple,
 }
 
 /*
- * Test whether a leaf tuple satisfies all the scan keys
+ * Test whether a leaf tuple satisfies all the scan keys.
  *
- * *reportedSome is set to true if:
- *		the scan is not ordered AND the item satisfies the scankeys
+ * When a match is found, an ordered scan queues the heap tuple for later
+ * distance-ordered draining.  A non-ordered scan appends it to batch.
+ *
+ * 'batch' arg is NULL for ordered scans.
  */
 static bool
-spgLeafTest(SpGistScanOpaque so, SpGistSearchItem *item,
-			SpGistLeafTuple leafTuple, bool isnull,
-			bool *reportedSome, storeRes_func storeRes)
+spgLeafTest(IndexScanDesc scan, SpGistSearchItem *item,
+			SpGistLeafTuple leafTuple, bool isnull, IndexScanBatch batch)
 {
+	SpGistScanOpaque so = (SpGistScanOpaque) scan->opaque;
 	Datum		leafValue;
 	double	   *distances;
 	bool		result;
@@ -544,7 +584,7 @@ spgLeafTest(SpGistScanOpaque so, SpGistSearchItem *item,
 		in.reconstructedValue = item->value;
 		in.traversalValue = item->traversalValue;
 		in.level = item->level;
-		in.returnData = so->want_itup;
+		in.returnData = scan->xs_want_itup;
 		in.leafDatum = SGLTDATUM(leafTuple, &so->state);
 
 		out.leafValue = (Datum) 0;
@@ -567,17 +607,18 @@ spgLeafTest(SpGistScanOpaque so, SpGistSearchItem *item,
 	if (result)
 	{
 		/* item passes the scankeys */
-		if (so->numberOfNonNullOrderBys > 0)
+		if (scan->numberOfOrderBys > 0)
 		{
-			/* the scan is ordered -> add the item to the queue */
-			MemoryContext oldCxt = MemoryContextSwitchTo(so->traversalCxt);
-			SpGistSearchItem *heapItem = spgNewHeapItem(so, item->level,
-														leafTuple,
-														leafValue,
-														recheck,
-														recheckDistances,
-														isnull,
-														distances);
+			/* The scan is ordered; add the item to the queue */
+			MemoryContext oldCxt;
+			SpGistSearchItem *heapItem;
+
+			Assert(scan->batchImmediateUnguard);
+
+			oldCxt = MemoryContextSwitchTo(so->traversalCxt);
+			heapItem = spgNewHeapItem(scan, item->level, leafTuple, leafValue,
+									  recheck, recheckDistances, isnull,
+									  distances);
 
 			spgAddSearchItemToQueue(so, heapItem);
 
@@ -585,11 +626,41 @@ spgLeafTest(SpGistScanOpaque so, SpGistSearchItem *item,
 		}
 		else
 		{
-			/* non-ordered scan, so report the item right away */
+			/*
+			 * The scan is non-ordered; add the item to caller's batch
+			 * directly.
+			 */
+			int			i = ++batch->lastItem;
+
 			Assert(!recheckDistances);
-			storeRes(so, &leafTuple->heapPtr, leafValue, isnull,
-					 leafTuple, recheck, false, NULL);
-			*reportedSome = true;
+			Assert(i < scan->maxitemsbatch);
+
+			batch->items[i].tableTid = leafTuple->heapPtr;
+			batch->items[i].indexOffset = InvalidOffsetNumber;	/* meaningless */
+			batch->items[i].tupleOffset = 0;
+
+			SpGistBatchGetRecheck(scan, batch)[i] = recheck;
+
+			if (scan->xs_want_itup)
+			{
+				Size		sz = leafTuple->size;
+				int			off = 0;
+
+				if (i > batch->firstItem)
+				{
+					int			prev = batch->items[i - 1].tupleOffset;
+
+					/*
+					 * Copy tuple to point immediately after most recently
+					 * appended tuple
+					 */
+					off = prev + ((SpGistLeafTuple) (batch->currTuples + prev))->size;
+				}
+
+				batch->items[i].tupleOffset = off;
+				Assert(off + sz <= scan->batch_tuples_workspace);
+				memcpy(batch->currTuples + off, leafTuple, sz);
+			}
 		}
 	}
 
@@ -599,10 +670,12 @@ spgLeafTest(SpGistScanOpaque so, SpGistSearchItem *item,
 /* A bundle initializer for inner_consistent methods */
 static void
 spgInitInnerConsistentIn(spgInnerConsistentIn *in,
-						 SpGistScanOpaque so,
+						 IndexScanDesc scan,
 						 SpGistSearchItem *item,
 						 SpGistInnerTuple innerTuple)
 {
+	SpGistScanOpaque so = (SpGistScanOpaque) scan->opaque;
+
 	in->scankeys = so->keyData;
 	in->orderbys = so->orderByData;
 	in->nkeys = so->numberOfKeys;
@@ -612,7 +685,7 @@ spgInitInnerConsistentIn(spgInnerConsistentIn *in,
 	in->traversalMemoryContext = so->traversalCxt;
 	in->traversalValue = item->traversalValue;
 	in->level = item->level;
-	in->returnData = so->want_itup;
+	in->returnData = scan->xs_want_itup;
 	in->allTheSame = innerTuple->allTheSame;
 	in->hasPrefix = (innerTuple->prefixSize > 0);
 	in->prefixDatum = SGITDATUM(innerTuple, &so->state);
@@ -659,9 +732,10 @@ spgMakeInnerItem(SpGistScanOpaque so,
 }
 
 static void
-spgInnerTest(SpGistScanOpaque so, SpGistSearchItem *item,
+spgInnerTest(IndexScanDesc scan, SpGistSearchItem *item,
 			 SpGistInnerTuple innerTuple, bool isnull)
 {
+	SpGistScanOpaque so = (SpGistScanOpaque) scan->opaque;
 	MemoryContext oldCxt = MemoryContextSwitchTo(so->tempCxt);
 	spgInnerConsistentOut out;
 	int			nNodes = innerTuple->nNodes;
@@ -673,7 +747,7 @@ spgInnerTest(SpGistScanOpaque so, SpGistSearchItem *item,
 	{
 		spgInnerConsistentIn in;
 
-		spgInitInnerConsistentIn(&in, so, item, innerTuple);
+		spgInitInnerConsistentIn(&in, scan, item, innerTuple);
 
 		/* use user-defined inner consistent method */
 		FunctionCall2Coll(&so->innerConsistentFn,
@@ -755,12 +829,11 @@ enum SpGistSpecialOffsetNumbers
 };
 
 static OffsetNumber
-spgTestLeafTuple(SpGistScanOpaque so,
+spgTestLeafTuple(IndexScanDesc scan,
 				 SpGistSearchItem *item,
 				 Page page, OffsetNumber offset,
 				 bool isnull, bool isroot,
-				 bool *reportedSome,
-				 storeRes_func storeRes)
+				 IndexScanBatch batch)
 {
 	SpGistLeafTuple leafTuple = (SpGistLeafTuple)
 		PageGetItem(page, PageGetItemId(page, offset));
@@ -796,117 +869,97 @@ spgTestLeafTuple(SpGistScanOpaque so,
 
 	Assert(ItemPointerIsValid(&leafTuple->heapPtr));
 
-	spgLeafTest(so, item, leafTuple, isnull, reportedSome, storeRes);
+	spgLeafTest(scan, item, leafTuple, isnull, batch);
 
 	return SGLT_GET_NEXTOFFSET(leafTuple);
 }
 
 /*
- * Walk the tree and report all tuples passing the scan quals to the storeRes
- * subroutine.
+ * Walk the tree and return the next batch of matching tuples.
  *
- * If scanWholeIndex is true, we'll do just that.  If not, we'll stop at the
- * next page boundary once we have reported at least one tuple.
+ * Main driver of spggetbitmap and non-ordered spggetbatch scans.
  */
-static void
-spgWalk(Relation index, SpGistScanOpaque so, bool scanWholeIndex,
-		storeRes_func storeRes)
+static IndexScanBatch
+spgWalk(IndexScanDesc scan)
 {
+	SpGistScanOpaque so = (SpGistScanOpaque) scan->opaque;
+	IndexScanBatch batch;
 	Buffer		buffer = InvalidBuffer;
-	bool		reportedSome = false;
 
-	while (scanWholeIndex || !reportedSome)
+	batch = indexam_util_alloc_batch(scan);
+
+	/* SP-GiST only ever scans forward; set the batch's direction up front */
+	batch->dir = ForwardScanDirection;
+
+	/* Walk until a leaf page yields matches, or the index is exhausted */
+	while (batch->firstItem > batch->lastItem)
 	{
 		SpGistSearchItem *item = spgGetNextQueueItem(so);
+		Page		page;
 
 		if (item == NULL)
 			break;				/* No more items in queue -> done */
 
-redirect:
-		/* Check for interrupts, just in case of infinite loop */
-		CHECK_FOR_INTERRUPTS();
+		/* Heap items only occur in ordered scans (see spgWalkOrdered) */
+		Assert(!item->isLeaf);
 
-		if (item->isLeaf)
-		{
-			/* We store heap items in the queue only in case of ordered search */
-			Assert(so->numberOfNonNullOrderBys > 0);
-			storeRes(so, &item->heapPtr, item->value, item->isNull,
-					 item->leafTuple, item->recheck,
-					 item->recheckDistances, item->distances);
-			reportedSome = true;
-		}
+		/*
+		 * Navigate to the item's live page, then process its contents.
+		 *
+		 * Note: spgReadItemPage calls CHECK_FOR_INTERRUPTS().
+		 */
+		buffer = spgReadItemPage(scan, item, buffer);
+		page = BufferGetPage(buffer);
+
+		if (SpGistPageIsLeaf(page))
+			spgProcessLeafPage(scan, item, page, batch);
 		else
+			spgProcessInnerPage(scan, item, page);
+
+		if (batch->firstItem <= batch->lastItem)
 		{
-			BlockNumber blkno = ItemPointerGetBlockNumber(&item->heapPtr);
-			OffsetNumber offset = ItemPointerGetOffsetNumber(&item->heapPtr);
-			Page		page;
-			bool		isnull;
+			/* batch has matching items to return */
+			SpGistBatchData *sbatch = SpGistBatchGetData(scan, batch);
 
-			if (buffer == InvalidBuffer)
+			Assert(BufferIsValid(buffer));
+			Assert(SpGistPageIsLeaf(BufferGetPage(buffer)));
+
+			sbatch->buf = buffer;
+			sbatch->blkno = BufferGetBlockNumber(buffer);
+
+			if (scan->xs_want_itup)
 			{
-				buffer = ReadBuffer(index, blkno);
-				LockBuffer(buffer, BUFFER_LOCK_SHARE);
-			}
-			else if (blkno != BufferGetBlockNumber(buffer))
-			{
-				UnlockReleaseBuffer(buffer);
-				buffer = ReadBuffer(index, blkno);
-				LockBuffer(buffer, BUFFER_LOCK_SHARE);
-			}
+				/*
+				 * Stash the shared reconstruction prefix for spggettransform,
+				 * which runs after item is freed.  The prefix (item->value)
+				 * is the same for every match in the batch.  It can be NULL
+				 * when the opclass reconstructs entirely from the leaf datum
+				 * (e.g. quad/kd-tree) or at the root level.
+				 */
+				sbatch->level = item->level;
+				sbatch->isNull = item->isNull;
 
-			/* else new pointer points to the same page, no work needed */
-
-			page = BufferGetPage(buffer);
-
-			isnull = SpGistPageStoresNulls(page) ? true : false;
-
-			if (SpGistPageIsLeaf(page))
-			{
-				/* Page is a leaf - that is, all its tuples are heap items */
-				OffsetNumber max = PageGetMaxOffsetNumber(page);
-
-				if (SpGistBlockIsRoot(blkno))
+				if (so->state.attLeafType.attbyval || item->isNull ||
+					DatumGetPointer(item->value) == NULL)
 				{
-					/* When root is a leaf, examine all its tuples */
-					for (offset = FirstOffsetNumber; offset <= max; offset++)
-						(void) spgTestLeafTuple(so, item, page, offset,
-												isnull, true,
-												&reportedSome, storeRes);
+					sbatch->reconValue = item->value;
 				}
 				else
 				{
-					/* Normal case: just examine the chain we arrived at */
-					while (offset != InvalidOffsetNumber)
-					{
-						Assert(offset >= FirstOffsetNumber && offset <= max);
-						offset = spgTestLeafTuple(so, item, page, offset,
-												  isnull, false,
-												  &reportedSome, storeRes);
-						if (offset == SpGistRedirectOffsetNumber)
-							goto redirect;
-					}
-				}
-			}
-			else				/* page is inner */
-			{
-				SpGistInnerTuple innerTuple = (SpGistInnerTuple)
-					PageGetItem(page, PageGetItemId(page, offset));
+					/* pass-by-reference prefix: copy it into the recon area */
+					Size		sz = datumGetSize(item->value, false,
+												  so->state.attLeafType.attlen);
+					char	   *dest = SpGistBatchGetReconArea(scan, batch);
 
-				if (innerTuple->tupstate != SPGIST_LIVE)
-				{
-					if (innerTuple->tupstate == SPGIST_REDIRECT)
-					{
-						/* transfer attention to redirect point */
-						item->heapPtr = ((SpGistDeadTuple) innerTuple)->pointer;
-						Assert(ItemPointerGetBlockNumber(&item->heapPtr) !=
-							   SPGIST_METAPAGE_BLKNO);
-						goto redirect;
-					}
-					elog(ERROR, "unexpected SPGiST tuple state: %d",
-						 innerTuple->tupstate);
-				}
+					if (sz > SpGistBatchReconAreaSize)
+						ereport(ERROR,
+								(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+								 errmsg("SP-GiST reconstructed value size %zu exceeds maximum %d",
+										sz, SpGistBatchReconAreaSize)));
 
-				spgInnerTest(so, item, innerTuple, isnull);
+					memcpy(dest, DatumGetPointer(item->value), sz);
+					sbatch->reconValue = PointerGetDatum(dest);
+				}
 			}
 		}
 
@@ -916,175 +969,515 @@ redirect:
 		MemoryContextReset(so->tempCxt);
 	}
 
-	if (buffer != InvalidBuffer)
-		UnlockReleaseBuffer(buffer);
+	if (batch->firstItem > batch->lastItem)
+	{
+		/* queue exhausted without finding any matches: end of scan */
+		if (buffer != InvalidBuffer)
+			UnlockReleaseBuffer(buffer);
+		indexam_util_release_batch(scan, batch);
+		return NULL;
+	}
+
+	indexam_util_unlock_batch(scan, batch, buffer);
+
+	return batch;
 }
 
-
-/* storeRes subroutine for getbitmap case */
+/*
+ * Convert an ordered heap item's flattened distances into the batch item's
+ * IndexOrderByDistance array, honoring nonNullOrderByOffsets.
+ */
 static void
-storeBitmap(SpGistScanOpaque so, ItemPointer heapPtr,
-			Datum leafValue, bool isnull,
-			SpGistLeafTuple leafTuple, bool recheck,
-			bool recheckDistances, double *distances)
+spgFillBatchItemDistances(SpGistScanOpaque so, SpGistBatchItem *bitem,
+						  SpGistSearchItem *item)
 {
-	Assert(!recheckDistances && !distances);
-	tbm_add_tuples(so->tbm, heapPtr, 1, recheck);
-	so->ntids++;
+	if (item->isNull || so->numberOfNonNullOrderBys <= 0)
+	{
+		for (int i = 0; i < so->numberOfOrderBys; i++)
+		{
+			bitem->distances[i].value = 0.0;
+			bitem->distances[i].isnull = true;
+		}
+		return;
+	}
+
+	for (int i = 0; i < so->numberOfOrderBys; i++)
+	{
+		int			offset = so->nonNullOrderByOffsets[i];
+
+		if (offset >= 0)
+		{
+			bitem->distances[i].value = item->distances[offset];
+			bitem->distances[i].isnull = false;
+		}
+		else
+		{
+			bitem->distances[i].value = 0.0;
+			bitem->distances[i].isnull = true;
+		}
+	}
+}
+
+/*
+ * spgWalkOrdered() -- drain the distance queue into one virtual batch
+ *
+ * Pop items from so->scanQueue in (lower-bound) distance order: index pages are
+ * scanned (pushing children and matching heap tuples back onto the queue), heap
+ * tuples are appended to the batch, until the batch fills or the queue empties.
+ * The result is a "virtual" batch spanning many leaf pages, holding no pin (and
+ * never index-only, which the planner forbids for ordered scans).
+ */
+static IndexScanBatch
+spgWalkOrdered(IndexScanDesc scan)
+{
+	SpGistScanOpaque so = (SpGistScanOpaque) scan->opaque;
+	IndexScanBatch batch = indexam_util_alloc_batch(scan);
+	SpGistBatchData *sbatch;
+	Buffer		buffer = InvalidBuffer;
+	int			nitems = 0;
+
+	/* SP-GiST only ever scans forward; set the batch's direction up front */
+	batch->dir = ForwardScanDirection;
+
+	for (;;)
+	{
+		SpGistSearchItem *item = spgGetNextQueueItem(so);
+
+		if (item == NULL)
+			break;				/* queue exhausted (end of scan) */
+
+		if (item->isLeaf)
+		{
+			/* matching heap tuple: append to the batch in distance order */
+			SpGistBatchItem *bitem = SpGistBatchGetItem(scan, batch, nitems);
+
+			batch->items[nitems].tableTid = item->heapPtr;
+			batch->items[nitems].indexOffset = InvalidOffsetNumber;
+			batch->items[nitems].tupleOffset = 0;
+
+			bitem->recheck = item->recheck;
+			bitem->recheckDistances = item->recheckDistances;
+			spgFillBatchItemDistances(so, bitem, item);
+
+			spgFreeSearchItem(so, item);
+			MemoryContextReset(so->tempCxt);
+
+			if (++nitems == scan->maxitemsbatch)
+				break;			/* batch full; remaining items stay queued */
+		}
+		else
+		{
+			Page		page;
+
+			/*
+			 * Index page: scan it, pushing children/heap items onto the
+			 * queue.
+			 *
+			 * Note: spgReadItemPage calls CHECK_FOR_INTERRUPTS().
+			 */
+			buffer = spgReadItemPage(scan, item, buffer);
+			page = BufferGetPage(buffer);
+
+			if (SpGistPageIsLeaf(page))
+			{
+				/* leaf page: queue matching heap items (batch unused) */
+				spgProcessLeafPage(scan, item, page, NULL);
+			}
+			else
+				spgProcessInnerPage(scan, item, page);
+
+			spgFreeSearchItem(so, item);
+			MemoryContextReset(so->tempCxt);
+		}
+	}
+
+	if (buffer != InvalidBuffer)
+		UnlockReleaseBuffer(buffer);
+
+	if (nitems == 0)
+	{
+		/* no matching items remain: the scan is exhausted */
+		indexam_util_release_batch(scan, batch);
+		return NULL;
+	}
+
+	/* an ordered batch is "virtual" and holds no interlock pin */
+	sbatch = SpGistBatchGetData(scan, batch);
+	sbatch->buf = InvalidBuffer;
+	sbatch->blkno = InvalidBlockNumber;
+
+	batch->firstItem = 0;
+	batch->lastItem = nitems - 1;
+
+	Assert(!batch->isGuarded);
+
+	return batch;
+}
+
+/*
+ * Navigate to the live page that 'item' points at, following inner-tuple and
+ * leaf-head REDIRECTs.
+ *
+ * 'buffer' is the lock the caller is already holding (or InvalidBuffer).  We
+ * keep that lock while the item stays on the same block, releasing and
+ * re-acquiring only when the block changes.
+ *
+ * The returned buffer is pinned and share-locked, holding either a live inner
+ * tuple or a leaf page (whose chain head is not a redirect) at item->heapPtr.
+ */
+static Buffer
+spgReadItemPage(IndexScanDesc scan, SpGistSearchItem *item, Buffer buffer)
+{
+	Relation	index = scan->indexRelation;
+
+	Assert(!item->isLeaf);		/* heap items are handled by the caller */
+
+	for (;;)
+	{
+		BlockNumber blkno = ItemPointerGetBlockNumber(&item->heapPtr);
+		OffsetNumber offset = ItemPointerGetOffsetNumber(&item->heapPtr);
+		Page		page;
+
+		/* Release the page we hold if the item moved to a different block */
+		if (buffer != InvalidBuffer && blkno != BufferGetBlockNumber(buffer))
+		{
+			UnlockReleaseBuffer(buffer);
+			buffer = InvalidBuffer;
+		}
+
+		/* Acquire the page if we're not already holding it */
+		if (buffer == InvalidBuffer)
+		{
+			CHECK_FOR_INTERRUPTS();
+			buffer = ReadBuffer(index, blkno);
+			LockBuffer(buffer, BUFFER_LOCK_SHARE);
+		}
+
+		page = BufferGetPage(buffer);
+
+		if (SpGistPageIsLeaf(page))
+		{
+			ItemId		iid;
+			SpGistLeafTuple head;
+
+			/* When root is a leaf, all its tuples are live: no redirect */
+			if (SpGistBlockIsRoot(blkno))
+				return buffer;
+
+			/*
+			 * A leaf REDIRECT is always the head of its chain; follow it to
+			 * the live tuples' page before the caller reports any match.  A
+			 * live or dead head is left for spgProcessLeafPage to deal with.
+			 */
+			iid = PageGetItemId(page, offset);
+			head = (SpGistLeafTuple) PageGetItem(page, iid);
+
+			if (head->tupstate == SPGIST_REDIRECT)
+			{
+				item->heapPtr = ((SpGistDeadTuple) head)->pointer;
+				Assert(ItemPointerGetBlockNumber(&item->heapPtr) !=
+					   SPGIST_METAPAGE_BLKNO);
+				continue;
+			}
+
+			return buffer;
+		}
+		else					/* page is inner */
+		{
+			ItemId		iid;
+			SpGistInnerTuple innerTuple;
+
+			iid = PageGetItemId(page, offset);
+			innerTuple = (SpGistInnerTuple) PageGetItem(page, iid);
+
+			if (innerTuple->tupstate != SPGIST_LIVE)
+			{
+				if (innerTuple->tupstate == SPGIST_REDIRECT)
+				{
+					/* transfer attention to redirect point */
+					item->heapPtr = ((SpGistDeadTuple) innerTuple)->pointer;
+					Assert(ItemPointerGetBlockNumber(&item->heapPtr) !=
+						   SPGIST_METAPAGE_BLKNO);
+					continue;
+				}
+				elog(ERROR, "unexpected SPGiST tuple state: %d",
+					 innerTuple->tupstate);
+			}
+
+			return buffer;
+		}
+	}
+}
+
+/*
+ * Descend a live inner tuple reached by spgReadItemPage: run inner_consistent
+ * and push the matching child nodes onto the scan queue.
+ *
+ * When we're called, buffer containing 'page' is share-locked.  The tuple at
+ * item->heapPtr must be live.
+ */
+static void
+spgProcessInnerPage(IndexScanDesc scan, SpGistSearchItem *item, Page page)
+{
+	OffsetNumber offset = ItemPointerGetOffsetNumber(&item->heapPtr);
+	ItemId		iid;
+	SpGistInnerTuple innerTuple;
+
+	Assert(!SpGistPageIsLeaf(page));
+
+	iid = PageGetItemId(page, offset);
+	innerTuple = (SpGistInnerTuple) PageGetItem(page, iid);
+	Assert(innerTuple->tupstate == SPGIST_LIVE);
+
+	spgInnerTest(scan, item, innerTuple, SpGistPageStoresNulls(page));
+}
+
+/*
+ * Examine a leaf page reached by spgReadItemPage, acting on matching tuples:
+ * a non-ordered scan appends them to batch; an ordered scan queues them, with
+ * batch NULL.
+ *
+ * When we're called, buffer containing 'page' is share-locked.
+ * spgReadItemPage must have already followed any leaf-head redirect, so the
+ * chain examined here contains no redirect.
+ */
+static void
+spgProcessLeafPage(IndexScanDesc scan, SpGistSearchItem *item, Page page,
+				   IndexScanBatch batch)
+{
+	BlockNumber blkno = ItemPointerGetBlockNumber(&item->heapPtr);
+	OffsetNumber offset = ItemPointerGetOffsetNumber(&item->heapPtr);
+	bool		isnull = SpGistPageStoresNulls(page);
+	OffsetNumber max = PageGetMaxOffsetNumber(page);
+
+	Assert(SpGistPageIsLeaf(page));
+
+	if (SpGistBlockIsRoot(blkno))
+	{
+		/* When root is a leaf, examine all its tuples */
+		for (offset = FirstOffsetNumber; offset <= max; offset++)
+			(void) spgTestLeafTuple(scan, item, page, offset,
+									isnull, true, batch);
+	}
+	else
+	{
+		/* Normal case: just examine the chain we arrived at */
+		while (offset != InvalidOffsetNumber)
+		{
+			Assert(offset >= FirstOffsetNumber && offset <= max);
+			offset = spgTestLeafTuple(scan, item, page, offset,
+									  isnull, false, batch);
+			/* spgReadItemPage already resolved any leaf-head redirect */
+			Assert(offset != SpGistRedirectOffsetNumber);
+		}
+	}
 }
 
 int64
 spggetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 {
-	SpGistScanOpaque so = (SpGistScanOpaque) scan->opaque;
+	int64		ntids = 0;
+	IndexScanBatch batch;
 
-	/* Copy want_itup to *so so we don't need to pass it around separately */
-	so->want_itup = false;
-
-	so->tbm = tbm;
-	so->ntids = 0;
-
-	spgWalk(scan->indexRelation, so, true, storeBitmap);
-
-	return so->ntids;
-}
-
-/* storeRes subroutine for gettuple case */
-static void
-storeGettuple(SpGistScanOpaque so, ItemPointer heapPtr,
-			  Datum leafValue, bool isnull,
-			  SpGistLeafTuple leafTuple, bool recheck,
-			  bool recheckDistances, double *nonNullDistances)
-{
-	Assert(so->nPtrs < MaxIndexTuplesPerPage);
-	so->heapPtrs[so->nPtrs] = *heapPtr;
-	so->recheck[so->nPtrs] = recheck;
-	so->recheckDistances[so->nPtrs] = recheckDistances;
-
-	if (so->numberOfOrderBys > 0)
+	/*
+	 * Drive spgWalk one leaf page at a time, draining each batch into the
+	 * bitmap and releasing it before fetching the next, so only one batch is
+	 * ever live (cf. hashgetbitmap).
+	 */
+	while ((batch = spgWalk(scan)) != NULL)
 	{
-		if (isnull || so->numberOfNonNullOrderBys <= 0)
-			so->distances[so->nPtrs] = NULL;
-		else
+		bool	   *recheck = SpGistBatchGetRecheck(scan, batch);
+
+		for (int i = batch->firstItem; i <= batch->lastItem; i++)
 		{
-			IndexOrderByDistance *distances = palloc_array(IndexOrderByDistance,
-														   so->numberOfOrderBys);
-			int			i;
-
-			for (i = 0; i < so->numberOfOrderBys; i++)
-			{
-				int			offset = so->nonNullOrderByOffsets[i];
-
-				if (offset >= 0)
-				{
-					/* Copy non-NULL distance value */
-					distances[i].value = nonNullDistances[offset];
-					distances[i].isnull = false;
-				}
-				else
-				{
-					/* Set distance's NULL flag. */
-					distances[i].value = 0.0;
-					distances[i].isnull = true;
-				}
-			}
-
-			so->distances[so->nPtrs] = distances;
+			tbm_add_tuples(tbm, &batch->items[i].tableTid, 1, recheck[i]);
+			ntids++;
 		}
-	}
 
-	if (so->want_itup)
-	{
 		/*
-		 * Reconstruct index data.  We have to copy the datum out of the temp
-		 * context anyway, so we may as well create the tuple here.
+		 * Return the batch to the single-slot bitmap cache, to be reused by
+		 * the next spgWalk
 		 */
-		Datum		leafDatums[INDEX_MAX_KEYS];
-		bool		leafIsnulls[INDEX_MAX_KEYS];
-
-		/* We only need to deform the old tuple if it has INCLUDE attributes */
-		if (so->state.leafTupDesc->natts > 1)
-			spgDeformLeafTuple(leafTuple, so->state.leafTupDesc,
-							   leafDatums, leafIsnulls, isnull);
-
-		leafDatums[spgKeyColumn] = leafValue;
-		leafIsnulls[spgKeyColumn] = isnull;
-
-		so->reconTups[so->nPtrs] = heap_form_tuple(so->reconTupDesc,
-												   leafDatums,
-												   leafIsnulls);
+		indexam_util_release_batch(scan, batch);
 	}
-	so->nPtrs++;
+
+	return ntids;
 }
 
-bool
-spggettuple(IndexScanDesc scan, ScanDirection dir)
+IndexScanBatch
+spggetbatch(IndexScanDesc scan, IndexScanBatch priorbatch, ScanDirection dir)
 {
 	SpGistScanOpaque so = (SpGistScanOpaque) scan->opaque;
+	IndexScanBatch batch;
 
+	/*
+	 * Note: Persistent traversal state lives in so->scanQueue, so we have no
+	 * use for priorbatch here
+	 */
 	if (dir != ForwardScanDirection)
 		elog(ERROR, "SP-GiST only supports forward scan direction");
 
-	/* Copy want_itup to *so so we don't need to pass it around separately */
-	so->want_itup = scan->xs_want_itup;
+	if (scan->numberOfOrderBys > 0)
+		batch = spgWalkOrdered(scan);
+	else
+		batch = spgWalk(scan);
 
-	for (;;)
+	/*
+	 * When the scan queue was left empty, the scan already ended on the
+	 * returned batch; mark the batch accordingly
+	 */
+	if (batch && pairingheap_is_empty(so->scanQueue))
+		batch->knownEndForward = true;
+
+	return batch;
+}
+
+/*
+ * spgunguardbatch() -- Drop a batch's TID recycling interlock (buffer pin)
+ */
+void
+spgunguardbatch(IndexScanDesc scan, IndexScanBatch batch)
+{
+	SpGistBatchData *sbatch = SpGistBatchGetData(scan, batch);
+
+	/* Should be called exactly once iff !batchImmediateUnguard */
+	Assert(!scan->batchImmediateUnguard);
+	Assert(batch->isGuarded);
+
+	ReleaseBuffer(sbatch->buf);
+}
+
+/*
+ * spggettransform() -- Set up the scan's per-tuple output for one batch item
+ *
+ * Applies the item's recheck flag, and either reconstructs the index-only heap
+ * tuple (xs_hitup) or reports the item's ORDER BY distances.
+ */
+void
+spggettransform(IndexScanDesc scan, IndexScanBatch batch, int item)
+{
+	SpGistScanOpaque so = (SpGistScanOpaque) scan->opaque;
+
+	Assert(item >= batch->firstItem && item <= batch->lastItem);
+
+	/* Ordered (virtual) batch: recheck flag and distances live in the item */
+	if (scan->numberOfOrderBys > 0)
 	{
-		if (so->iPtr < so->nPtrs)
-		{
-			/* continuing to return reported tuples */
-			scan->xs_heaptid = so->heapPtrs[so->iPtr];
-			scan->xs_recheck = so->recheck[so->iPtr];
-			scan->xs_hitup = so->reconTups[so->iPtr];
+		SpGistBatchItem *bitem = SpGistBatchGetItem(scan, batch, item);
 
-			if (so->numberOfOrderBys > 0)
-				index_store_float8_orderby_distances(scan, so->orderByTypes,
-													 so->distances[so->iPtr],
-													 so->recheckDistances[so->iPtr]);
-			so->iPtr++;
-			return true;
-		}
+		Assert(!scan->xs_want_itup);
+		Assert(SpGistBatchGetData(scan, batch)->blkno == InvalidBlockNumber);
 
-		if (so->numberOfOrderBys > 0)
-		{
-			/* Must pfree distances to avoid memory leak */
-			int			i;
-
-			for (i = 0; i < so->nPtrs; i++)
-				if (so->distances[i])
-					pfree(so->distances[i]);
-		}
-
-		if (so->want_itup)
-		{
-			/* Must pfree reconstructed tuples to avoid memory leak */
-			int			i;
-
-			for (i = 0; i < so->nPtrs; i++)
-				pfree(so->reconTups[i]);
-		}
-		so->iPtr = so->nPtrs = 0;
-
-		spgWalk(scan->indexRelation, so, false, storeGettuple);
-
-		if (so->nPtrs == 0)
-			break;				/* must have completed scan */
+		scan->xs_recheck = bitem->recheck;
+		index_store_float8_orderby_distances(scan, so->orderByTypes,
+											 bitem->distances,
+											 bitem->recheckDistances);
+		return;
 	}
 
-	return false;
+	/* Non-ordered batch: recheck flags live in a bool array */
+	scan->xs_recheck = SpGistBatchGetRecheck(scan, batch)[item];
+
+	if (scan->xs_want_itup)
+	{
+		/* Index-only scan */
+		SpGistBatchData *sbatch = SpGistBatchGetData(scan, batch);
+		SpGistLeafTuple leafTuple;
+		Datum		leafDatums[INDEX_MAX_KEYS];
+		bool		leafIsnulls[INDEX_MAX_KEYS];
+		Datum		leafValue = (Datum) 0;
+		MemoryContext oldcxt;
+
+		Assert(scan->numberOfOrderBys == 0);
+		Assert(sbatch->blkno != InvalidBlockNumber);
+
+		/* Reconstruct the key value via leaf_consistent */
+		leafTuple = (SpGistLeafTuple) (batch->currTuples +
+									   batch->items[item].tupleOffset);
+		if (!sbatch->isNull)
+		{
+			spgLeafConsistentIn in;
+			spgLeafConsistentOut out;
+
+			oldcxt = MemoryContextSwitchTo(so->tempCxt);
+
+			in.scankeys = so->keyData;
+			in.orderbys = NULL;
+			in.nkeys = so->numberOfKeys;
+			in.norderbys = 0;
+			in.reconstructedValue = sbatch->reconValue;
+			in.traversalValue = NULL;
+			in.level = sbatch->level;
+			in.returnData = true;
+			in.leafDatum = SGLTDATUM(leafTuple, &so->state);
+
+			out.leafValue = (Datum) 0;
+			out.recheck = false;
+			out.distances = NULL;
+			out.recheckDistances = false;
+
+			(void) FunctionCall2Coll(&so->leafConsistentFn, so->indexCollation,
+									 PointerGetDatum(&in), PointerGetDatum(&out));
+			leafValue = out.leafValue;
+
+			MemoryContextSwitchTo(oldcxt);
+		}
+
+		/* free the previously returned reconstructed tuple, if any */
+		if (scan->xs_hitup)
+		{
+			pfree(scan->xs_hitup);
+			scan->xs_hitup = NULL;
+		}
+
+		/* build the returnable heap tuple in the scan-lifetime context */
+		oldcxt = MemoryContextSwitchTo(so->reconCxt);
+
+		/* Only deform the leaf tuple if it has INCLUDE attributes */
+		if (so->state.leafTupDesc->natts > 1)
+			spgDeformLeafTuple(leafTuple, so->state.leafTupDesc,
+							   leafDatums, leafIsnulls, sbatch->isNull);
+
+		leafDatums[spgKeyColumn] = leafValue;
+		leafIsnulls[spgKeyColumn] = sbatch->isNull;
+
+		scan->xs_hitup = heap_form_tuple(so->reconTupDesc,
+										 leafDatums, leafIsnulls);
+
+		MemoryContextSwitchTo(oldcxt);
+
+		/* clean up after the leaf_consistent call */
+		MemoryContextReset(so->tempCxt);
+	}
 }
 
 bool
 spgcanreturn(Relation index, int attno)
 {
-	SpGistCache *cache;
+	SpGistCache *cache = spgGetCache(index);
 
-	/* INCLUDE attributes can always be fetched for index-only scans */
+	/*
+	 * Forbid index-only scans for "long values" opclasses (e.g. text radix):
+	 * the key is reconstructed from the prefix accumulated during the descent
+	 * (see spggettransform) and is bounded only by the field-size limit, so
+	 * it won't fit the fixed per-batch reconstruction workspace
+	 * (spgbeginscan).
+	 */
+	if (cache->config.longValuesOK)
+		return false;
+
+	/*
+	 * else INCLUDE attributes can always be fetched for index-only scans.
+	 *
+	 * Note: We deliberately give up on INCLUDE-only index-only scans too,
+	 * even though an INCLUDE column comes straight from the bounded leaf
+	 * tuple and needs no key reconstruction: spggettransform reconstructs the
+	 * key unconditionally, and recheck of a key-column qual would need the
+	 * key value regardless.
+	 */
 	if (attno > 1)
 		return true;
 
 	/* We can do it if the opclass config function says so */
-	cache = spgGetCache(index);
-
 	return cache->config.canReturnData;
 }

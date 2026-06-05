@@ -2959,6 +2959,8 @@ SortSupportData
 SortTuple
 SortTupleComparator
 SortedPoint
+SpGistBatchData
+SpGistBatchItem
 SpGistBuildState
 SpGistCache
 SpGistDeadTuple
@@ -4339,7 +4341,6 @@ standard_qp_extra
 stemmer_module
 stmtCacheEntry
 storeInfo
-storeRes_func
 stream_stop_callback
 string
 substitute_actual_parameters_context
