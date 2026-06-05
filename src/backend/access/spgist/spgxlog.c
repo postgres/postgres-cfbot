@@ -771,7 +771,9 @@ spgRedoVacuumLeaf(XLogReaderState *record)
 	ptr += sizeof(OffsetNumber) * xldata->nChain;
 	chainDest = (OffsetNumber *) ptr;
 
-	if (XLogReadBufferForRedo(record, 0, &buffer) == BLK_NEEDS_REDO)
+	/* We must take a cleanup lock here, just like spgvacuumpage() */
+	if (XLogReadBufferForRedoExtended(record, 0, RBM_NORMAL, true, &buffer)
+		== BLK_NEEDS_REDO)
 	{
 		page = BufferGetPage(buffer);
 
@@ -834,7 +836,9 @@ spgRedoVacuumRoot(XLogReaderState *record)
 
 	toDelete = xldata->offsets;
 
-	if (XLogReadBufferForRedo(record, 0, &buffer) == BLK_NEEDS_REDO)
+	/* Take a cleanup lock, as in spgRedoVacuumLeaf() */
+	if (XLogReadBufferForRedoExtended(record, 0, RBM_NORMAL, true, &buffer)
+		== BLK_NEEDS_REDO)
 	{
 		page = BufferGetPage(buffer);
 
@@ -873,7 +877,9 @@ spgRedoVacuumRedirect(XLogReaderState *record)
 											locator);
 	}
 
-	if (XLogReadBufferForRedo(record, 0, &buffer) == BLK_NEEDS_REDO)
+	/* Take a cleanup lock, as in spgRedoVacuumLeaf() */
+	if (XLogReadBufferForRedoExtended(record, 0, RBM_NORMAL, true, &buffer)
+		== BLK_NEEDS_REDO)
 	{
 		Page		page = BufferGetPage(buffer);
 		SpGistPageOpaque opaque = SpGistPageGetOpaque(page);
