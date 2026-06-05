@@ -187,6 +187,26 @@ where i8 in (row(123,456)::int8_tbl, '(4567890123456789,123)');
 select * from int8_tbl i8
 where i8 in (row(123,456)::int8_tbl, '(4567890123456789,123)');
 
+-- A hashed SAOP is allowed when each column of the record is hashable
+explain (verbose, costs off)
+select * from int8_tbl i8
+where i8 = any (array[(1,2),(3,4),(5,6),(7,8),(9,10),
+                      (11,12),(13,14),(15,16),(17,18)]::int8_tbl[]);
+
+-- tsvector is comparable but not hashable, so this SAOP must not be hashed
+create temp table hash_ts_row (a int, b tsvector);
+explain (costs off)
+select * from hash_ts_row t
+where t = any (array['(1,w1)','(2,w2)','(3,w3)','(4,w4)','(5,w5)',
+                     '(6,w6)','(7,w7)','(8,w8)','(9,w9)']::hash_ts_row[]);
+drop table hash_ts_row;
+
+-- An anonymous record's column types can't be checked for hashing at plan time
+explain (costs off)
+select * from int8_tbl i8
+where (q1, q2) = any (array[(1,2),(3,4),(5,6),(7,8),(9,10),
+                            (11,12),(13,14),(15,16),(17,18)]);
+
 -- Check ability to select columns from an anonymous rowtype
 select (row(1, 2.0)).f1;
 select (row(1, 2.0)).f2;
