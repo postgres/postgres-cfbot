@@ -3446,6 +3446,15 @@
   boot_val => 'true',
 },
 
+{ name => 'wait_event_capture', type => 'enum', context => 'PGC_SUSET', group => 'STATS_CUMULATIVE',
+  short_desc => 'Controls collection of per-wait-event timing statistics.',
+  variable => 'wait_event_capture',
+  boot_val => 'WAIT_EVENT_CAPTURE_OFF',
+  options => 'wait_event_capture_options',
+  check_hook => 'check_wait_event_capture',
+  assign_hook => 'assign_wait_event_capture',
+},
+
 { name => 'wal_block_size', type => 'int', context => 'PGC_INTERNAL', group => 'PRESET_OPTIONS',
   short_desc => 'Shows the block size in the write ahead log.',
   flags => 'GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE',

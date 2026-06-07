@@ -169,6 +169,8 @@ extern bool check_transaction_isolation(int *newval, void **extra, GucSource sou
 extern bool check_transaction_read_only(bool *newval, void **extra, GucSource source);
 extern void assign_transaction_timeout(int newval, void *extra);
 extern const char *show_unix_socket_permissions(void);
+extern bool check_wait_event_capture(int *newval, void **extra, GucSource source);
+extern void assign_wait_event_capture(int newval, void *extra);
 extern bool check_wal_buffers(int *newval, void **extra, GucSource source);
 extern bool check_wal_consistency_checking(char **newval, void **extra,
 										   GucSource source);

@@ -3427,6 +3427,7 @@ WaitEvent
 WaitEventActivity
 WaitEventBuffer
 WaitEventClient
+WaitEventCaptureLevel
 WaitEventCustomEntryByInfo
 WaitEventCustomEntryByName
 WaitEventIO
