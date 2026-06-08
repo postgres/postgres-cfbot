@@ -561,6 +561,9 @@ typedef struct ApplySubXactData
 
 static ApplySubXactData subxact_data = {0, 0, InvalidTransactionId, NULL};
 
+/* Hook for plugins to get control in handling logical decoding messages */
+LogicalRepMessageHandle_hook_type LogicalRepMessageHandle_hook = NULL;
+
 static inline void subxact_filename(char *path, Oid subid, TransactionId xid);
 static inline void changes_filename(char *path, Oid subid, TransactionId xid);
 
@@ -1707,6 +1710,84 @@ apply_handle_origin(StringInfo s)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROTOCOL_VIOLATION),
 				 errmsg_internal("ORIGIN message sent out of order")));
+}
+
+/*
+ * Handle MESSAGE message.
+ *
+ * Invoke a hook function if set.
+ */
+static void
+apply_handle_message(StringInfo s)
+{
+	LogicalRepMessageData msg;
+
+	/*
+	 * The publisher must not send a message that this worker did not ask for;
+	 * see set_stream_options().
+	 */
+	if (!MySubscription->messages || am_tablesync_worker())
+		ereport(ERROR,
+				(errcode(ERRCODE_PROTOCOL_VIOLATION),
+				 errmsg_internal("MESSAGE message received but messages are not enabled for this worker")));
+
+	if (!LogicalRepMessageHandle_hook)
+		return;
+
+	if (is_skipping_changes() ||
+		handle_streamed_transaction(LOGICAL_REP_MSG_MESSAGE, s))
+		return;
+
+	begin_replication_step();
+
+	logicalrep_read_message(s, &msg);
+
+	/*
+	 * The publisher sends a non-transactional message on its own, never
+	 * inside a transaction or a streamed block; see
+	 * ReorderBufferQueueMessage(). Reject one that arrives inside a
+	 * transaction before calling the handler, as the commit below would
+	 * otherwise split the remote transaction in two.
+	 */
+	if (!msg.transactional &&
+		(in_remote_transaction || in_streamed_transaction))
+		ereport(ERROR,
+				(errcode(ERRCODE_PROTOCOL_VIOLATION),
+				 errmsg_internal("non-transactional MESSAGE message received inside a transaction")));
+
+	(*LogicalRepMessageHandle_hook) (&msg);
+
+	end_replication_step();
+
+	/*
+	 * A transactional message is applied as a step of the remote transaction
+	 * that emitted it, and is committed together with it when applying the
+	 * commit message. A non-transactional message belongs to no remote
+	 * transaction, so commit it here.
+	 */
+	if (!msg.transactional)
+	{
+		/*
+		 * The message doesn't belong to any remote transaction, so there is
+		 * no remote commit LSN nor timestamp to record. Clear the state left
+		 * over by the previously applied transaction so that this commit
+		 * doesn't inherit it.
+		 */
+		replorigin_xact_clear(false);
+
+		CommitTransactionCommand();
+
+		pgstat_report_stat(false);
+
+		/*
+		 * Report the flush position only after the local commit is durable.
+		 * Otherwise send_feedback() would report everything received so far
+		 * as flushed, the publisher would advance confirmed_flush_lsn past
+		 * this message, and a crash before the commit reaches disk would lose
+		 * the handler's work without the message ever being sent again.
+		 */
+		store_flush_position(msg.lsn, XactLastCommitEnd);
+	}
 }
 
 /*
@@ -3894,12 +3975,7 @@ apply_dispatch(StringInfo s)
 			break;
 
 		case LOGICAL_REP_MSG_MESSAGE:
-
-			/*
-			 * Logical replication does not use generic logical messages yet.
-			 * Although, it could be used by other applications that use this
-			 * output plugin.
-			 */
+			apply_handle_message(s);
 			break;
 
 		case LOGICAL_REP_MSG_STREAM_START:
@@ -5185,7 +5261,8 @@ maybe_reread_subscription(void)
 		newsub->passwordrequired != MySubscription->passwordrequired ||
 		strcmp(newsub->origin, MySubscription->origin) != 0 ||
 		newsub->owner != MySubscription->owner ||
-		!equal(newsub->publications, MySubscription->publications))
+		!equal(newsub->publications, MySubscription->publications) ||
+		newsub->messages != MySubscription->messages)
 	{
 		if (am_parallel_apply_worker())
 			ereport(LOG,
@@ -5676,6 +5753,15 @@ set_stream_options(WalRcvStreamOptions *options,
 
 	options->proto.logical.twophase = false;
 	options->proto.logical.origin = pstrdup(MySubscription->origin);
+
+	/*
+	 * Logical messages are relation-agnostic, so they don't map cleanly onto
+	 * the tablesync worker of a particular relation, and there would be no
+	 * well-defined ordering between a message and the initial copy. Leave
+	 * them to the (parallel) apply workers.
+	 */
+	options->proto.logical.messages = (MySubscription->messages &&
+									   !am_tablesync_worker());
 }
 
 /*
