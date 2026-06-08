@@ -1601,7 +1601,7 @@ generate_join_implied_equalities(PlannerInfo *root,
 	while ((i = bms_next_member(matching_ecs, i)) >= 0)
 	{
 		EquivalenceClass *ec = (EquivalenceClass *) list_nth(root->eq_classes, i);
-		List	   *sublist = NIL;
+		List	   *sublist;
 
 		/* ECs containing consts do not need any further enforcement */
 		if (ec->ec_has_const)
@@ -1631,6 +1631,7 @@ generate_join_implied_equalities(PlannerInfo *root,
 															  inner_rel);
 
 		result = list_concat(result, sublist);
+		list_free(sublist);
 	}
 
 	return result;
