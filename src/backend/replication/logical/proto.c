@@ -661,6 +661,43 @@ logicalrep_write_message(StringInfo out, TransactionId xid, XLogRecPtr lsn,
 }
 
 /*
+ * Read MESSAGE from stream.
+ */
+void
+logicalrep_read_message(StringInfo in, LogicalRepMessageData *msg_data)
+{
+	Size		len;
+	char	   *msg;
+	uint8		flags;
+
+	/* read and decode flags */
+	flags = pq_getmsgint(in, 1);
+	msg_data->transactional = (flags & MESSAGE_TRANSACTIONAL) != 0;
+
+	msg_data->lsn = pq_getmsgint64(in);
+	msg_data->prefix = pstrdup(pq_getmsgstring(in));
+
+	/* read message length */
+	len = pq_getmsgint(in, 4);
+	msg_data->message_size = len;
+
+	/* and data */
+	msg = palloc(len + 1);
+	pq_copymsgbytes(in, msg, len);
+
+	/*
+	 * The payload is an arbitrary string of bytes, so message_size, not
+	 * strlen(), is what gives its length. NULL-terminate it anyway, as
+	 * logicalrep_read_tuple() does for column values: that way it can be
+	 * handed to code expecting a C string without reading past the end, which
+	 * is convenient for logging and debugging. Such code will of course stop
+	 * at the first embedded null, if any.
+	 */
+	msg[len] = '\0';
+	msg_data->message = msg;
+}
+
+/*
  * Write relation description to the output stream.
  */
 void
