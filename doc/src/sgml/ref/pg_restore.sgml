@@ -96,7 +96,10 @@ PostgreSQL documentation
        <para>
        Specifies the location of the archive file (or directory, for a
        directory-format archive) to be restored.
-       If not specified, the standard input is used.
+       This option and <option>--pipe</option> can't be set
+       at the same time.
+       If neither this option nor <option>--pipe</option> is specified,
+       the standard input is used.
        </para>
       </listitem>
      </varlistentry>
@@ -828,6 +831,32 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
+      <term><option>--pipe</option></term>
+      <listitem>
+       <para>
+        This option is only supported with the directory output
+        format. It can be used to read from multiple streams which
+        otherwise would not be possible with the directory mode.
+        For each stream, it starts a process which runs the
+        specified command and pipes its output to the pg_restore process.
+        This option is not valid if <option>filename</option> is also specified.
+       </para>
+       <para>
+        The pipe can be used to perform operations like
+        decompress using a custom algorithm, filter, or read from
+        a cloud storage. When reading from the pg_dump output,
+        the user would need a way to read the correct file in each
+        stream. To handle that, the pipe command supports a format
+        specifier %f. And all the instances of %f in the command string
+        will be replaced with the corresponding file name which
+        would have been used in the directory mode with <option>filename</option>.
+        This is same as the <option>--pipe</option> of pg-dump.
+        See <xref linkend="app-pgrestore-examples"/> below.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
        <term><option>--section=<replaceable class="parameter">sectionname</replaceable></option></term>
        <listitem>
          <para>
@@ -1256,6 +1285,43 @@ CREATE DATABASE foo WITH TEMPLATE template0;
 <screen>
 <prompt>$</prompt> <userinput>pg_restore -L db.list db.dump</userinput>
 </screen></para>
+
+  <para>
+   To use pg_restore with pipe to recreate from a dump in
+   directory-archive format. The database should not exist beforehand.
+   Assume in this example that the dump in directory-archive format is
+   stored in <literal>dumpdir</literal>.
+
+<screen>
+<prompt>$</prompt> <userinput>pg_restore -C -Fd -d postgres --pipe="cat dumpdir/%f"</userinput>
+</screen>
+  </para>
+
+  <para>
+   To use pg_restore with pipe to first decompress and then
+   recreate from a dump in directory-archive format. The database
+   should not exist beforehand.
+   Assume in this example that the dump in directory-archive format is
+   stored in <literal>dumpdir</literal>. And all files are
+   <literal>gzip</literal> compressed.
+
+<screen>
+<prompt>$</prompt> <userinput>pg_restore -C -Fd -d postgres --pipe="cat dumpdir/%f.gz | gunzip"</userinput>
+</screen>
+  </para>
+
+  <para>
+   To use pipe along with <option>-L</option> to recreate only
+   selectd items from a dump in the directory-archive format.
+   The database should not exist beforehand.
+   Assume in this example that the dump in directory-archive format is
+   stored in dumpdir.
+   The <literal>db.list</literal> file is the same as one used in the previous example with <option>-L</option>
+
+<screen>
+<prompt>$</prompt> <userinput>pg_restore -C -Fd -d postgres --pipe="cat dumpdir/%f" -L db.list</userinput>
+</screen>
+  </para>
 
  </refsect1>
 
