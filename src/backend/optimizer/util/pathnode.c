@@ -632,6 +632,11 @@ add_path(RelOptInfo *parent_rel, Path *new_path)
 				list_free(mjpath->outersortkeys);
 				list_free(mjpath->jpath.path.pathkeys);
 			}
+			else if (IsA(old_path, HashPath))
+			{
+				HashPath  *hjpath = (HashPath *) old_path;
+				list_free(hjpath->path_hashclauses);
+			}
 			/*
 			 * Delete the data pointed-to by the deleted cell, if possible
 			 */
@@ -674,6 +679,11 @@ add_path(RelOptInfo *parent_rel, Path *new_path)
 			list_free(mjpath->innersortkeys);
 			list_free(mjpath->outersortkeys);
 			list_free(mjpath->jpath.path.pathkeys);
+		}
+		else if (IsA(new_path, HashPath))
+		{
+			HashPath  *hjpath = (HashPath *) new_path;
+			list_free(hjpath->path_hashclauses);
 		}
 
 		/* Reject and recycle the new path */
@@ -889,6 +899,11 @@ add_partial_path(RelOptInfo *parent_rel, Path *new_path)
 				list_free(mjpath->outersortkeys);
 				list_free(mjpath->jpath.path.pathkeys);
 			}
+			else if (IsA(old_path, HashPath))
+			{
+				HashPath  *hjpath = (HashPath *) old_path;
+				list_free(hjpath->path_hashclauses);
+			}
 
 			pfree(old_path);
 		}
@@ -929,6 +944,11 @@ add_partial_path(RelOptInfo *parent_rel, Path *new_path)
 			list_free(mjpath->innersortkeys);
 			list_free(mjpath->outersortkeys);
 			list_free(mjpath->jpath.path.pathkeys);
+		}
+		else if (IsA(new_path, HashPath))
+		{
+			HashPath  *hjpath = (HashPath *) new_path;
+			list_free(hjpath->path_hashclauses);
 		}
 
 		pfree(new_path);
@@ -2604,7 +2624,7 @@ create_hashjoin_path(PlannerInfo *root,
 	pathnode->jpath.outerjoinpath = outer_path;
 	pathnode->jpath.innerjoinpath = inner_path;
 	pathnode->jpath.joinrestrictinfo = restrict_clauses;
-	pathnode->path_hashclauses = hashclauses;
+	pathnode->path_hashclauses = list_copy(hashclauses);
 	/* final_cost_hashjoin will fill in pathnode->num_batches */
 
 	final_cost_hashjoin(root, pathnode, workspace, extra);
