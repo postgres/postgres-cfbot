@@ -379,6 +379,8 @@ add_paths_to_joinrel(PlannerInfo *root,
 	if (set_join_pathlist_hook)
 		set_join_pathlist_hook(root, joinrel, outerrel, innerrel,
 							   save_jointype, &extra);
+
+	list_free(extra.mergeclause_list);
 }
 
 /*
@@ -1519,7 +1521,7 @@ sort_inner_and_outer(PlannerInfo *root,
 							  list_delete_nth_cell(list_copy(all_pathkeys),
 												   foreach_current_index(l)));
 		else
-			outerkeys = all_pathkeys;	/* no work at first one... */
+			outerkeys = list_copy(all_pathkeys);	/* no work at first one... */
 
 		/* Sort the mergeclauses into the corresponding ordering */
 		cur_mergeclauses =
@@ -1573,7 +1575,15 @@ sort_inner_and_outer(PlannerInfo *root,
 									   innerkeys,
 									   jointype,
 									   extra);
+
+		list_free(cur_mergeclauses);
+		list_free(innerkeys);
+
+		if ((outerkeys != merge_pathkeys) && (innerkeys != merge_pathkeys))
+			list_free(outerkeys);
 	}
+
+	list_free(all_pathkeys);
 }
 
 /*
@@ -1634,7 +1644,10 @@ generate_mergejoin_paths(PlannerInfo *root,
 	}
 	if (useallclauses &&
 		list_length(mergeclauses) != list_length(extra->mergeclause_list))
+	{
+		list_free(mergeclauses);
 		return;
+	}
 
 	/* Compute the required ordering of the inner path */
 	innersortkeys = make_inner_pathkeys_for_merge(root,
@@ -1805,6 +1818,9 @@ generate_mergejoin_paths(PlannerInfo *root,
 		if (useallclauses)
 			break;
 	}
+
+	list_free(innersortkeys);
+	list_free(mergeclauses);
 }
 
 /*
