@@ -2281,7 +2281,10 @@ hash_inner_and_outer(PlannerInfo *root,
 		 */
 		if (PATH_PARAM_BY_REL(cheapest_total_outer, innerrel) ||
 			PATH_PARAM_BY_REL(cheapest_total_inner, outerrel))
+		{
+			list_free(hashclauses);
 			return;
+		}
 
 		/*
 		 * Consider the cheapest startup outer together with the cheapest
@@ -2403,6 +2406,8 @@ hash_inner_and_outer(PlannerInfo *root,
 										  false /* parallel_hash */ );
 		}
 	}
+
+	list_free(hashclauses);
 }
 
 /*
