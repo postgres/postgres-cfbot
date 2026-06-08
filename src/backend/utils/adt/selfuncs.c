@@ -3918,7 +3918,10 @@ estimate_num_groups(PlannerInfo *root, List *groupExprs, double input_rows,
 		if (varshere == NIL)
 		{
 			if (contain_volatile_functions(groupexpr))
+			{
+				list_free(varinfos);
 				return input_rows;
+			}
 			continue;
 		}
 
@@ -4036,6 +4039,7 @@ estimate_num_groups(PlannerInfo *root, List *groupExprs, double input_rows,
 				}
 
 				/* we're done with this relation */
+				list_free(relvarinfos);
 				relvarinfos = NIL;
 			}
 		}
@@ -4122,6 +4126,9 @@ estimate_num_groups(PlannerInfo *root, List *groupExprs, double input_rows,
 			numdistinct *= reldistinct;
 		}
 
+		list_free(varinfos);
+		list_free_deep(relvarinfos);
+
 		varinfos = newvarinfos;
 	} while (varinfos != NIL);
 
@@ -4136,6 +4143,8 @@ estimate_num_groups(PlannerInfo *root, List *groupExprs, double input_rows,
 		numdistinct = input_rows;
 	if (numdistinct < 1.0)
 		numdistinct = 1.0;
+
+	list_free(varinfos);
 
 	return numdistinct;
 }
