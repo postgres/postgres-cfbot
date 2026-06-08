@@ -1713,6 +1713,7 @@ generate_join_implied_equalities_for_ecs(PlannerInfo *root,
 															  inner_rel);
 
 		result = list_concat(result, sublist);
+		list_free(sublist);
 	}
 
 	return result;
