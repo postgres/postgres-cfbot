@@ -3455,6 +3455,15 @@
   assign_hook => 'assign_wait_event_capture',
 },
 
+{ name => 'wait_event_timing_max_tranches', type => 'int', context => 'PGC_POSTMASTER', group => 'STATS_CUMULATIVE',
+  short_desc => 'Sets the maximum number of distinct LWLock tranches whose timing is recorded per backend.',
+  long_desc => 'Each backend\'s wait-event-timing hash table can hold this many distinct LWLock tranches; subsequent tranches are not individually timed.  Sized at server start; raise this if your installation loads many extensions that register their own LWLock tranches.',
+  variable => 'wait_event_timing_max_tranches',
+  boot_val => '192',
+  min => '16',
+  max => '65534',
+},
+
 { name => 'wal_block_size', type => 'int', context => 'PGC_INTERNAL', group => 'PRESET_OPTIONS',
   short_desc => 'Shows the block size in the write ahead log.',
   flags => 'GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE',

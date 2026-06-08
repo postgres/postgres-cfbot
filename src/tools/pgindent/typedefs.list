@@ -1613,6 +1613,8 @@ LWLock
 LWLockHandle
 LWLockMode
 LWLockPadded
+LWLockTimingHash
+LWLockTimingHashEntry
 LWLockTrancheShmemData
 LZ4F_compressionContext_t
 LZ4F_decompressOptions_t
@@ -3432,6 +3434,8 @@ WaitEventIO
 WaitEventIPC
 WaitEventSet
 WaitEventTimeout
+WaitEventTimingEntry
+WaitEventTimingState
 WaitLSNProcInfo
 WaitLSNResult
 WaitLSNState

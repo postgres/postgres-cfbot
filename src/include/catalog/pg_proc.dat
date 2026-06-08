@@ -12776,4 +12776,14 @@
   proname => 'hashoid8extended', prorettype => 'int8',
   proargtypes => 'oid8 int8', prosrc => 'hashoid8extended' },
 
+{ oid => '9956',
+  descr => 'statistics: per-backend wait event timing (count, duration, histogram)',
+  proname => 'pg_stat_get_wait_event_timing', prorows => '1000',
+  proisstrict => 'f', proretset => 't', provolatile => 's', proparallel => 'r',
+  prorettype => 'record', proargtypes => 'int4',
+  proallargtypes => '{int4,int4,text,int4,text,text,int8,float8,float8,float8,_int8}',
+  proargmodes => '{i,o,o,o,o,o,o,o,o,o,o}',
+  proargnames => '{pid,pid,backend_type,procnumber,wait_event_type,wait_event,calls,total_time_ms,avg_time_us,max_time_us,histogram}',
+  prosrc => 'pg_stat_get_wait_event_timing' },
+
 ]

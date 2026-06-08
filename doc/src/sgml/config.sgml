@@ -9237,6 +9237,68 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-wait-event-capture" xreflabel="wait_event_capture">
+      <term><varname>wait_event_capture</varname> (<type>enum</type>)
+      <indexterm>
+       <primary><varname>wait_event_capture</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Controls collection of wait event timing instrumentation.  Requires
+        the server to be compiled with
+        <option>--enable-wait-event-timing</option>.  Possible values are
+        <literal>off</literal> (the default) and <literal>stats</literal>.
+       </para>
+       <para>
+        At <literal>stats</literal>, the server records per-backend wait
+        event statistics &mdash; counts, total and average durations, and a
+        log2 duration histogram &mdash; visible in the
+        <link linkend="monitoring-pg-stat-wait-event-timing-view">
+        <structname>pg_stat_wait_event_timing</structname></link> view.
+        Two <function>clock_gettime()</function>-grade timestamps are taken
+        around every wait event transition, costing roughly
+        40&ndash;100&nbsp;ns each on modern hardware; while
+        <varname>wait_event_capture</varname> is <literal>off</literal> the
+        hot path adds only a single predictable branch.
+       </para>
+       <para>
+        Only superusers and users with the appropriate <literal>SET</literal>
+        privilege can change this setting.  Read access to the resulting
+        statistics is controlled separately by membership in the
+        <link linkend="predefined-roles"><literal>pg_read_all_stats</literal></link>
+        role (which the <literal>pg_monitor</literal> role inherits).  To
+        delegate the ability to change the setting to a monitoring role,
+        use <command>GRANT SET ON PARAMETER</command>:
+<programlisting>
+GRANT SET ON PARAMETER wait_event_capture TO pg_monitor;
+</programlisting>
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-wait-event-timing-max-tranches" xreflabel="wait_event_timing_max_tranches">
+      <term><varname>wait_event_timing_max_tranches</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>wait_event_timing_max_tranches</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Sets the maximum number of distinct LWLock tranches whose timing is
+        recorded individually per backend.  PostgreSQL maintains a
+        per-backend hash table mapping each tranche the backend encounters
+        to its histogram; once the table fills, further tranches are not
+        individually timed.  Sized at server start; this parameter has no
+        effect on builds compiled without
+        <option>--enable-wait-event-timing</option>.  The default is
+        <literal>192</literal>; raise it if your installation loads many
+        extensions that register their own LWLock tranches.  This parameter
+        can only be set at server start.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-track-functions" xreflabel="track_functions">
       <term><varname>track_functions</varname> (<type>enum</type>)
       <indexterm>

@@ -125,6 +125,8 @@ do
 	test "$f" = src/include/nodes/nodetags.h && continue
 	test "$f" = src/backend/nodes/nodetags.h && continue
 	test "$f" = src/include/storage/checksum_block_internal.h && continue
+	test "$f" = src/include/utils/wait_event_timing_data.h && continue
+	test "$f" = src/backend/utils/wait_event_timing_data.h && continue
 
 	# These files are not meant to be included standalone, because
 	# they contain lists that might have multiple use-cases.
