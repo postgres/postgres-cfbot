@@ -571,6 +571,15 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
       </entry>
      </row>
 
+     <row>
+      <entry><structname>pg_stat_wait_event_timing</structname><indexterm><primary>pg_stat_wait_event_timing</primary></indexterm></entry>
+      <entry>One row per backend per wait event, showing accumulated timing
+       statistics.  See
+       <link linkend="monitoring-pg-stat-wait-event-timing-view">
+       <structname>pg_stat_wait_event_timing</structname></link> for details.
+      </entry>
+     </row>
+
      <!-- all "stat" for schema objects, by "importance" -->
 
      <row>
@@ -3994,6 +4003,265 @@ description | Waiting for a newly initialized WAL file to reach durable storage
   </table>
 
 </sect2>
+
+ <sect2 id="monitoring-pg-stat-wait-event-timing-view">
+  <title><structname>pg_stat_wait_event_timing</structname></title>
+
+  <indexterm>
+   <primary>pg_stat_wait_event_timing</primary>
+  </indexterm>
+
+  <para>
+   The <structname>pg_stat_wait_event_timing</structname> view contains one
+   row for each combination of backend and wait event that has a non-zero
+   call count.  It shows accumulated timing statistics collected when
+   <xref linkend="guc-wait-event-capture"/> is set to <literal>stats</literal>.  Requires the server to be compiled with
+   <option>--enable-wait-event-timing</option>.
+  </para>
+
+  <para>
+   Statistics are accumulated in each backend's own shared memory and are
+   reported only for backends that are currently connected, much like
+   <link linkend="monitoring-pg-stat-activity-view">
+   <structname>pg_stat_activity</structname></link>; a backend's rows
+   disappear when it disconnects, and they are reset to zero if its process
+   number is later reused by a new backend.  To study a short-lived
+   workload, query this view while that workload is still running rather
+   than after it finishes.
+  </para>
+
+  <table id="pg-stat-wait-event-timing-view" xreflabel="pg_stat_wait_event_timing">
+   <title><structname>pg_stat_wait_event_timing</structname> View</title>
+   <tgroup cols="1">
+    <thead>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       Column Type
+      </para>
+      <para>
+       Description
+      </para></entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>pid</structfield> <type>integer</type>
+      </para>
+      <para>
+       Process ID of the backend
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>backend_type</structfield> <type>text</type>
+      </para>
+      <para>
+       Type of the backend (e.g. <literal>client backend</literal>,
+       <literal>checkpointer</literal>, <literal>walwriter</literal>)
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>procnumber</structfield> <type>integer</type>
+      </para>
+      <para>
+       Internal slot number (0-based process number) of the backend.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>wait_event_type</structfield> <type>text</type>
+      </para>
+      <para>
+       Wait event type (e.g. <literal>IO</literal>, <literal>LWLock</literal>,
+       <literal>Timeout</literal>)
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>wait_event</structfield> <type>text</type>
+      </para>
+      <para>
+       Wait event name (e.g. <literal>DataFileRead</literal>,
+       <literal>WALWrite</literal>, <literal>PgSleep</literal>)
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>calls</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of times this wait event occurred
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>total_time_ms</structfield> <type>double precision</type>
+      </para>
+      <para>
+       Total time spent in this wait event, in milliseconds
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>avg_time_us</structfield> <type>double precision</type>
+      </para>
+      <para>
+       Average wait duration, in microseconds
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>max_time_us</structfield> <type>double precision</type>
+      </para>
+      <para>
+       Maximum single wait duration, in microseconds
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>histogram</structfield> <type>bigint[]</type>
+      </para>
+      <para>
+       Log2 histogram of wait durations with 32 buckets.  Bin edges are
+       powers of two on the nanosecond axis: bucket 0 covers
+       [0, 1024) ns, bucket <replaceable>k</replaceable> covers
+       [2^(<replaceable>k</replaceable>+9),
+       2^(<replaceable>k</replaceable>+10)) ns, and the last bucket covers
+       [2^40, &infin;) ns.  The boundaries approximate the
+       decimal-microsecond grid (1024 ns &asymp; 1 &mu;s, 2048 ns &asymp;
+       2 &mu;s, ...); the exact edges are chosen to let the hot path skip
+       a division by 1000.  The
+       <link linkend="monitoring-pg-wait-event-timing-histogram-buckets-view">
+       <structname>pg_wait_event_timing_histogram_buckets</structname></link>
+       view provides the numeric bin edges and human-readable labels for
+       each index; the canonical join pattern is:
+<programlisting>
+SELECT w.wait_event, b.label, h.count
+FROM   pg_stat_wait_event_timing w,
+       LATERAL unnest(w.histogram) WITH ORDINALITY AS h(count, idx)
+JOIN   pg_wait_event_timing_histogram_buckets b ON b.bucket_idx = h.idx - 1
+WHERE  w.wait_event = 'PgSleep'
+ORDER  BY b.bucket_idx;
+</programlisting>
+      </para></entry>
+     </row>
+
+    </tbody>
+   </tgroup>
+  </table>
+ </sect2>
+
+ <sect2 id="monitoring-pg-wait-event-timing-histogram-buckets-view">
+  <title><structname>pg_wait_event_timing_histogram_buckets</structname></title>
+
+  <indexterm>
+   <primary>pg_wait_event_timing_histogram_buckets</primary>
+  </indexterm>
+
+  <para>
+   The <structname>pg_wait_event_timing_histogram_buckets</structname>
+   view describes the 32 bins used by the
+   <structfield>histogram</structfield> column of
+   <link linkend="monitoring-pg-stat-wait-event-timing-view">
+   <structname>pg_stat_wait_event_timing</structname></link>.  It always
+   contains 32 rows in ascending order of
+   <structfield>bucket_idx</structfield>, and is independent of runtime
+   state; a join against it attaches numeric bin edges and human
+   labels to any histogram array.  Bins are powers of two on the
+   nanosecond axis: bin 0 covers <literal>[0,&nbsp;1us)</literal>, each
+   subsequent bin doubles its lower edge, and the final bin
+   (<structfield>bucket_idx</structfield> = 31) is open-ended at
+   approximately 1024&nbsp;seconds.
+  </para>
+
+  <para>
+   The 32-bin layout (rather than the more common 16-bin choice for
+   log-scale histograms) is deliberate: real-world wait-event
+   distributions have long tails routinely extending past 16&nbsp;ms
+   into multi-second territory (slow-disk
+   <literal>DataFileRead</literal>, lock contention waits, replication
+   apply waits, vacuum waits).  A 16-bin histogram would collapse all
+   of those into a single overflow bin, hiding the very signal that
+   wait-event timing exists to surface.  The 32-bin layout keeps the
+   long tail individually addressable up to about 17&nbsp;minutes
+   before the open-ended bin; single waits beyond that belong in
+   <link linkend="auto-explain"><structname>auto_explain</structname></link>
+   or <structname>pg_stat_activity</structname>, not a histogram.
+  </para>
+
+  <table id="pg-wait-event-timing-histogram-buckets-view" xreflabel="pg_wait_event_timing_histogram_buckets">
+   <title><structname>pg_wait_event_timing_histogram_buckets</structname> View</title>
+   <tgroup cols="1">
+    <thead>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       Column Type
+      </para>
+      <para>
+       Description
+      </para></entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>bucket_idx</structfield> <type>integer</type>
+      </para>
+      <para>
+       Zero-based bin index (0&ndash;31).  Matches the offset into the
+       <structfield>histogram</structfield> array of
+       <structname>pg_stat_wait_event_timing</structname>.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>lower_ns</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Inclusive lower edge of this bin in nanoseconds.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>upper_ns</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Exclusive upper edge of this bin in nanoseconds, or
+       <literal>NULL</literal> for the final bin which extends to
+       infinity.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>label</structfield> <type>text</type>
+      </para>
+      <para>
+       Short human-readable label for the bin (e.g.
+       <literal>&lt;1us</literal>, <literal>1-2us</literal>,
+       <literal>&gt;=1024s</literal>), expressed on the approximate
+       decimal-microsecond grid the bin edges are aligned to.
+      </para></entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+ </sect2>
 
  <sect2 id="monitoring-pg-stat-database-view">
   <title><structname>pg_stat_database</structname></title>

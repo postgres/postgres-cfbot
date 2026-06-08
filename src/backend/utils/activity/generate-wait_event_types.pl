@@ -5,6 +5,7 @@
 # - wait_event_types.h (if --code is passed)
 # - pgstat_wait_event.c (if --code is passed)
 # - wait_event_funcs_data.c (if --code is passed)
+# - wait_event_timing_data.h (if --code is passed)
 # - wait_event_types.sgml (if --docs is passed)
 #
 # Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
@@ -269,10 +270,186 @@ if ($gen_code)
 		}
 	}
 
+	# -----------------------------------------------------------
+	# Compute wait_event_timing class mapping data.
+	#
+	# The dense class table maps raw classId (0x00..max) to a
+	# dense index, with per-class slot counts rounded up to the
+	# next power of 2 (minimum 16).  Extension and InjectionPoint
+	# are fixed at 128 because extensions register custom events.
+	# LWLock uses a hash table (dense = -1).
+	# -----------------------------------------------------------
+
+	# Map section name -> raw classId (from wait_classes.h constants)
+	my %class_to_raw = (
+		'Lock'           => 0x03,
+		'Buffer'         => 0x04,
+		'Activity'       => 0x05,
+		'Client'         => 0x06,
+		'Extension'      => 0x07,
+		'IPC'            => 0x08,
+		'Timeout'        => 0x09,
+		'IO'             => 0x0A,
+		'InjectionPoint' => 0x0B,
+	);
+
+	# Classes that need fixed large slot counts (dynamically extensible)
+	my %fixed_slot_classes = (
+		'Extension'      => 128,
+		'InjectionPoint' => 128,
+	);
+
+	# Count events per class from the parsed data.
+	# Build a list of (className, rawId, actualCount) sorted by rawId.
+	my @timing_classes;
+	foreach my $waitclass (keys %hashwe)
+	{
+		my $short = $waitclass;
+		$short =~ s/^WaitEvent//;
+
+		# Skip LWLock -- uses hash table, not flat array
+		next unless exists $class_to_raw{$short};
+
+		my $raw_id = $class_to_raw{$short};
+		my $count = scalar @{ $hashwe{$waitclass} };
+
+		push @timing_classes, {
+			name     => $short,
+			raw_id   => $raw_id,
+			actual   => $count,
+		};
+	}
+
+	# InjectionPoint (0x0B) has no section in wait_event_names.txt
+	# because its events are dynamically registered at runtime.
+	# Add it explicitly with actual=0 and a fixed slot count.
+	if (!grep { $_->{name} eq 'InjectionPoint' } @timing_classes)
+	{
+		push @timing_classes, {
+			name     => 'InjectionPoint',
+			raw_id   => $class_to_raw{'InjectionPoint'},
+			actual   => 0,
+		};
+	}
+
+	# Sort by raw classId
+	@timing_classes = sort { $a->{raw_id} <=> $b->{raw_id} } @timing_classes;
+
+	# Compute slot counts: next power of 2, minimum 16, or fixed
+	foreach my $cls (@timing_classes)
+	{
+		if (exists $fixed_slot_classes{$cls->{name}})
+		{
+			$cls->{slots} = $fixed_slot_classes{$cls->{name}};
+		}
+		else
+		{
+			my $slots = 16;	# minimum
+			$slots *= 2 while $slots < $cls->{actual};
+			$cls->{slots} = $slots;
+		}
+	}
+
+	# Compute cumulative offsets
+	my $offset = 0;
+	foreach my $cls (@timing_classes)
+	{
+		$cls->{offset} = $offset;
+		$offset += $cls->{slots};
+	}
+	my $total_events = $offset;
+
+	# Determine max raw classId for array sizing
+	my $max_raw = 0;
+	foreach my $cls (@timing_classes)
+	{
+		$max_raw = $cls->{raw_id} if $cls->{raw_id} > $max_raw;
+	}
+	my $raw_classes = $max_raw + 1;
+	my $dense_classes = scalar @timing_classes;
+
+	# Emit timing defines into wait_event_types.h
+	printf $h "\n/* Wait event timing flat array sizing (generated) */\n";
+	printf $h "#define WAIT_EVENT_TIMING_RAW_CLASSES\t%d\n", $raw_classes;
+	printf $h "#define WAIT_EVENT_TIMING_DENSE_CLASSES\t%d\n", $dense_classes;
+	printf $h "#define WAIT_EVENT_TIMING_NUM_EVENTS\t%d\n\n", $total_events;
+
 	printf $h "#endif                          /* WAIT_EVENT_TYPES_H */\n";
 	close $h;
 	close $c;
 	close $wc;
+
+	# Generate wait_event_timing_data.h with the mapping arrays.
+	# A header (rather than a .c file) keeps the file-extension category
+	# straight: it is included into a single TU (wait_event_timing.c) and
+	# defines static const tables there.  The include guard makes the
+	# single-owner intent explicit and prevents accidental double inclusion.
+	my $ttmp = "$output_path/wait_event_timing_data.h.tmp$$";
+	open my $t, '>', $ttmp or die "Could not open $ttmp: $!";
+	printf $t $header_comment, 'wait_event_timing_data.h';
+
+	printf $t "#ifndef WAIT_EVENT_TIMING_DATA_H\n";
+	printf $t "#define WAIT_EVENT_TIMING_DATA_H\n\n";
+
+	# Emit wait_event_class_dense[]
+	printf $t "static const int8 wait_event_class_dense[WAIT_EVENT_TIMING_RAW_CLASSES] = {\n";
+	for (my $i = 0; $i < $raw_classes; $i++)
+	{
+		my $dense = -1;
+		my $comment = "unused";
+		for (my $d = 0; $d < $dense_classes; $d++)
+		{
+			if ($timing_classes[$d]->{raw_id} == $i)
+			{
+				$dense = $d;
+				$comment = $timing_classes[$d]->{name};
+				last;
+			}
+		}
+		# classId 0x01 is LWLock
+		if ($i == 0x01)
+		{
+			$comment = "LWLock (uses hash)";
+		}
+		my $comma = ($i < $raw_classes - 1) ? "," : "";
+		printf $t "\t%2d$comma\t\t/* 0x%02x: %s */\n", $dense, $i, $comment;
+	}
+	printf $t "};\n\n";
+
+	# Emit wait_event_class_nevents[]
+	printf $t "static const int wait_event_class_nevents[WAIT_EVENT_TIMING_DENSE_CLASSES] = {\n";
+	for (my $d = 0; $d < $dense_classes; $d++)
+	{
+		my $cls = $timing_classes[$d];
+		my $comma = ($d < $dense_classes - 1) ? "," : "";
+		printf $t "\t%d$comma\t\t/* %s (actual: %d) */\n",
+			$cls->{slots}, $cls->{name}, $cls->{actual};
+	}
+	printf $t "};\n\n";
+
+	# Emit wait_event_class_offset[]
+	printf $t "static const int wait_event_class_offset[WAIT_EVENT_TIMING_DENSE_CLASSES] = {\n";
+	for (my $d = 0; $d < $dense_classes; $d++)
+	{
+		my $cls = $timing_classes[$d];
+		my $comma = ($d < $dense_classes - 1) ? "," : "";
+		printf $t "\t%d$comma\t\t/* %s */\n", $cls->{offset}, $cls->{name};
+	}
+	printf $t "};\n\n";
+
+	# Emit wait_event_dense_to_classid[]
+	printf $t "static const uint8 wait_event_dense_to_classid[WAIT_EVENT_TIMING_DENSE_CLASSES] = {\n\t";
+	for (my $d = 0; $d < $dense_classes; $d++)
+	{
+		my $cls = $timing_classes[$d];
+		my $comma = ($d < $dense_classes - 1) ? ", " : "";
+		printf $t "0x%02x$comma", $cls->{raw_id};
+	}
+	printf $t "\n};\n\n";
+
+	printf $t "#endif                          /* WAIT_EVENT_TIMING_DATA_H */\n";
+
+	close $t;
 
 	rename($htmp, "$output_path/wait_event_types.h")
 	  || die "rename: $htmp to $output_path/wait_event_types.h: $!";
@@ -280,6 +457,8 @@ if ($gen_code)
 	  || die "rename: $ctmp to $output_path/pgstat_wait_event.c: $!";
 	rename($wctmp, "$output_path/wait_event_funcs_data.c")
 	  || die "rename: $wctmp to $output_path/wait_event_funcs_data.c: $!";
+	rename($ttmp, "$output_path/wait_event_timing_data.h")
+	  || die "rename: $ttmp to $output_path/wait_event_timing_data.h: $!";
 }
 # Generate the .sgml file.
 elsif ($gen_docs)

@@ -56,6 +56,7 @@
 #include "utils/timeout.h"
 #include "utils/timestamp.h"
 #include "utils/wait_event.h"
+#include "utils/wait_event_timing.h"
 
 /* GUC variables */
 int			DeadlockTimeout = 1000;
@@ -541,6 +542,7 @@ InitProcess(void)
 
 	/* now that we have a proc, report wait events to shared memory */
 	pgstat_set_wait_event_storage(&MyProc->wait_event_info);
+	pgstat_set_wait_event_timing_storage(MyProcNumber);
 
 	/*
 	 * We might be reusing a semaphore that belonged to a failed process. So
@@ -716,6 +718,7 @@ InitAuxiliaryProcess(void)
 
 	/* now that we have a proc, report wait events to shared memory */
 	pgstat_set_wait_event_storage(&MyProc->wait_event_info);
+	pgstat_set_wait_event_timing_storage(MyProcNumber);
 
 	/* Check that group locking fields are in a proper initial state. */
 	Assert(MyProc->lockGroupLeader == NULL);
@@ -1049,6 +1052,7 @@ ProcKill(int code, Datum arg)
 
 	/* See comment above, close to DisownLatch() */
 	pgstat_reset_wait_event_storage();
+	pgstat_reset_wait_event_timing_storage();
 
 	MyProc = NULL;
 	MyProcNumber = INVALID_PROC_NUMBER;
@@ -1111,6 +1115,7 @@ AuxiliaryProcKill(int code, Datum arg)
 	/* look at the equivalent ProcKill() code for comments */
 	SwitchBackToLocalLatch();
 	pgstat_reset_wait_event_storage();
+	pgstat_reset_wait_event_timing_storage();
 
 	/*
 	 * If this was one of the aux processes advertised in ProcGlobal, clear it
