@@ -191,6 +191,18 @@ typedef struct LogicalRepStreamAbortData
 	TimestampTz abort_time;
 } LogicalRepStreamAbortData;
 
+/*
+ * Logical decoding message information
+ */
+typedef struct LogicalRepMessageData
+{
+	XLogRecPtr	lsn;
+	bool		transactional;
+	const char *prefix;
+	Size		message_size;	/* length of message in bytes */
+	const char *message;		/* payload; may contain embedded nulls */
+} LogicalRepMessageData;
+
 extern void logicalrep_write_begin(StringInfo out, ReorderBufferTXN *txn);
 extern void logicalrep_read_begin(StringInfo in,
 								  LogicalRepBeginData *begin_data);
@@ -248,6 +260,7 @@ extern List *logicalrep_read_truncate(StringInfo in,
 									  bool *cascade, bool *restart_seqs);
 extern void logicalrep_write_message(StringInfo out, TransactionId xid, XLogRecPtr lsn,
 									 bool transactional, const char *prefix, Size sz, const char *message);
+extern void logicalrep_read_message(StringInfo in, LogicalRepMessageData *msg_data);
 extern void logicalrep_write_rel(StringInfo out, TransactionId xid,
 								 Relation rel, Bitmapset *columns,
 								 PublishGencolsType include_gencols_type);
