@@ -188,6 +188,7 @@ typedef struct
 									 * prepare time */
 			char	   *origin; /* Only publish data originating from the
 								 * specified origin */
+			bool		messages;	/* Logical messages */
 		}			logical;
 	}			proto;
 } WalRcvStreamOptions;
