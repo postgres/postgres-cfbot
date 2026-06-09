@@ -1,0 +1,297 @@
+--
+-- GLOBAL TEMP
+--
+CREATE SCHEMA global_temp_tests;
+GRANT USAGE ON SCHEMA global_temp_tests TO PUBLIC;
+SET search_path = global_temp_tests;
+CREATE ROLE regress_global_temp_user;
+GRANT CREATE ON SCHEMA global_temp_tests TO regress_global_temp_user;
+GRANT CREATE ON DATABASE regression TO regress_global_temp_user;
+SET ROLE regress_global_temp_user;
+-- Test table creation
+CREATE GLOBAL TEMP TABLE pg_temp.tmp1 (a int); -- fail
+ERROR:  cannot create global temporary relation in temporary schema
+LINE 1: CREATE GLOBAL TEMP TABLE pg_temp.tmp1 (a int);
+                                 ^
+CREATE GLOBAL TEMP TABLE tmp1 (a int);
+CREATE SCHEMA global_temp_xxx CREATE GLOBAL TEMP TABLE tmp2 (a int);
+CREATE SCHEMA global_temp_yyy;
+CREATE GLOBAL TEMP TABLE global_temp_yyy.tmp3 (a int);
+\d tmp1
+  Global temporary table "global_temp_tests.tmp1"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ a      | integer |           |          | 
+
+\dt+ global_temp_*.tmp*
+                                             List of tables
+      Schema       | Name | Type  |          Owner           |   Persistence    |  Size   | Description 
+-------------------+------+-------+--------------------------+------------------+---------+-------------
+ global_temp_tests | tmp1 | table | regress_global_temp_user | global temporary | 0 bytes | 
+ global_temp_xxx   | tmp2 | table | regress_global_temp_user | global temporary | 0 bytes | 
+ global_temp_yyy   | tmp3 | table | regress_global_temp_user | global temporary | 0 bytes | 
+(3 rows)
+
+-- Information schema
+SELECT table_catalog, table_schema, table_name, table_type
+FROM information_schema.tables
+WHERE table_name ~ 'tmp' AND table_schema ~ 'global_temp'
+ORDER BY table_name;
+ table_catalog |   table_schema    | table_name |    table_type    
+---------------+-------------------+------------+------------------
+ regression    | global_temp_tests | tmp1       | GLOBAL TEMPORARY
+ regression    | global_temp_xxx   | tmp2       | GLOBAL TEMPORARY
+ regression    | global_temp_yyy   | tmp3       | GLOBAL TEMPORARY
+(3 rows)
+
+DROP SCHEMA global_temp_xxx CASCADE;
+NOTICE:  drop cascades to table global_temp_xxx.tmp2
+DROP SCHEMA global_temp_yyy CASCADE;
+NOTICE:  drop cascades to table global_temp_yyy.tmp3
+-- Basic tests
+INSERT INTO tmp1 VALUES (1);
+SELECT * FROM tmp1;
+ a 
+---
+ 1
+(1 row)
+
+\c
+SET search_path = global_temp_tests;
+SELECT * FROM tmp1;
+ a 
+---
+(0 rows)
+
+-- Test ON COMMIT DELETE ROWS
+CREATE GLOBAL TEMP TABLE tmp2 (a int) ON COMMIT DELETE ROWS;
+BEGIN;
+INSERT INTO tmp2 VALUES (1);
+SELECT * FROM tmp2;
+ a 
+---
+ 1
+(1 row)
+
+COMMIT;
+SELECT * FROM tmp2;
+ a 
+---
+(0 rows)
+
+-- Repeat test in a new session
+\c
+SET search_path = global_temp_tests;
+BEGIN;
+INSERT INTO tmp2 VALUES (1);
+SELECT * FROM tmp2;
+ a 
+---
+ 1
+(1 row)
+
+COMMIT;
+SELECT * FROM tmp2;
+ a 
+---
+(0 rows)
+
+DROP TABLE tmp2;
+-- ON COMMIT DROP not allowed
+CREATE GLOBAL TEMP TABLE tmp2 (a int) ON COMMIT DROP; -- fail
+ERROR:  ON COMMIT DROP cannot be used on global temporary tables
+-- Two-phase commit not allowed with global temp tables
+BEGIN;
+SELECT * FROM tmp1;
+ a 
+---
+(0 rows)
+
+PREPARE TRANSACTION 'twophase'; -- fail
+ERROR:  cannot PREPARE a transaction that has operated on temporary objects
+-- Test partitioned global temp table
+CREATE GLOBAL TEMP TABLE tmp2 (a int) PARTITION BY LIST (a);
+CREATE GLOBAL TEMP TABLE tmp2_p1 PARTITION OF tmp2 FOR VALUES IN (1);
+CREATE GLOBAL TEMP TABLE tmp2_p2 (a int);
+ALTER TABLE tmp2 ATTACH PARTITION tmp2_p2 FOR VALUES IN (2);
+CREATE TEMP TABLE local_tmp PARTITION OF tmp2 FOR VALUES IN (3); -- fail
+ERROR:  cannot create a local temporary relation as partition of global temporary relation "tmp2"
+CREATE TEMP TABLE local_tmp (a int);
+ALTER TABLE tmp2 ATTACH PARTITION local_tmp FOR VALUES IN (3); -- fail
+ERROR:  cannot attach a local temporary relation as partition of global temporary relation "tmp2"
+CREATE TABLE perm PARTITION OF tmp2 FOR VALUES IN (3); -- fail
+ERROR:  cannot create a permanent relation as partition of global temporary relation "tmp2"
+CREATE TABLE perm (a int);
+ALTER TABLE tmp2 ATTACH PARTITION perm FOR VALUES IN (3); -- fail
+ERROR:  cannot attach a permanent relation as partition of global temporary relation "tmp2"
+INSERT INTO tmp2 VALUES (1), (2);
+SELECT tableoid::regclass, * FROM tmp2 ORDER BY a;
+ tableoid | a 
+----------+---
+ tmp2_p1  | 1
+ tmp2_p2  | 2
+(2 rows)
+
+\c
+SET search_path = global_temp_tests;
+SELECT tableoid::regclass, * FROM tmp2 ORDER BY a;
+ tableoid | a 
+----------+---
+(0 rows)
+
+DROP TABLE tmp2, perm;
+-- Test ALTER TABLE with rewrite
+CREATE GLOBAL TEMP TABLE tmp2 (a int);
+INSERT INTO tmp2 VALUES (1);
+ALTER TABLE tmp2 ALTER COLUMN a SET DATA TYPE numeric;
+SELECT a, pg_typeof(a) FROM tmp2;
+ a | pg_typeof 
+---+-----------
+ 1 | numeric
+(1 row)
+
+DROP TABLE tmp2;
+-- Test foreign keys
+CREATE TABLE perm_pk_rel (a int PRIMARY KEY);
+CREATE TEMP TABLE temp_pk_rel (a int PRIMARY KEY);
+CREATE GLOBAL TEMP TABLE tmp2 (a int REFERENCES perm_pk_rel); -- fail
+ERROR:  constraints on global temporary tables may reference only global temporary tables
+CREATE GLOBAL TEMP TABLE tmp2 (a int REFERENCES temp_pk_rel); -- fail
+ERROR:  constraints on global temporary tables may reference only global temporary tables
+DROP TABLE perm_pk_rel, temp_pk_rel;
+-- Test ALTER TABLE ... SET TABLESPACE
+CREATE GLOBAL TEMP TABLE tmp2 (a int);
+INSERT INTO tmp2 VALUES (1);
+SELECT * FROM tmp2;
+ a 
+---
+ 1
+(1 row)
+
+SELECT regexp_replace(pg_relation_filepath('tmp2'), '(\d+)', 'NNN', 'g');
+  regexp_replace   
+-------------------
+ base/NNN/tNNN_NNN
+(1 row)
+
+ALTER TABLE tmp2 SET TABLESPACE regress_tblspace;
+SELECT * FROM tmp2;
+ a 
+---
+ 1
+(1 row)
+
+SELECT regexp_replace(pg_relation_filepath('tmp2'), '(\d+)', 'NNN', 'g');
+            regexp_replace             
+---------------------------------------
+ pg_tblspc/NNN/PG_NNN_NNN/NNN/tNNN_NNN
+(1 row)
+
+DROP TABLE tmp2;
+-- Test dependency on tablespace
+SET allow_in_place_tablespaces = true;
+CREATE TABLESPACE regress_temp_test_tablespace LOCATION '';
+CREATE GLOBAL TEMP TABLE tmp2 (a int) TABLESPACE regress_temp_test_tablespace;
+\c
+SET search_path = global_temp_tests;
+DROP TABLESPACE regress_temp_test_tablespace; -- fail
+ERROR:  tablespace "regress_temp_test_tablespace" cannot be dropped because some objects depend on it
+DETAIL:  tablespace for table tmp2
+DROP TABLE tmp2;
+DROP TABLESPACE regress_temp_test_tablespace;
+SET allow_in_place_tablespaces = true;
+CREATE TABLESPACE regress_temp_test_tablespace LOCATION '';
+CREATE GLOBAL TEMP TABLE tmp2 (a int);
+ALTER TABLE tmp2 SET TABLESPACE regress_temp_test_tablespace;
+\c
+SET search_path = global_temp_tests;
+DROP TABLESPACE regress_temp_test_tablespace; -- fail
+ERROR:  tablespace "regress_temp_test_tablespace" cannot be dropped because some objects depend on it
+DETAIL:  tablespace for table tmp2
+DROP TABLE tmp2;
+DROP TABLESPACE regress_temp_test_tablespace;
+-- Test TRUNCATE
+INSERT INTO tmp1 VALUES (1);
+BEGIN;
+TRUNCATE tmp1;
+SELECT * FROM tmp1;
+ a 
+---
+(0 rows)
+
+ROLLBACK;
+SELECT * FROM tmp1;
+ a 
+---
+ 1
+(1 row)
+
+BEGIN;
+SAVEPOINT sp1;
+TRUNCATE tmp1;
+SELECT * FROM tmp1;
+ a 
+---
+(0 rows)
+
+RELEASE sp1;
+SELECT * FROM tmp1;
+ a 
+---
+(0 rows)
+
+ROLLBACK;
+SELECT * FROM tmp1;
+ a 
+---
+ 1
+(1 row)
+
+BEGIN;
+SAVEPOINT sp1;
+TRUNCATE tmp1;
+SELECT * FROM tmp1;
+ a 
+---
+(0 rows)
+
+ROLLBACK TO sp1;
+SELECT * FROM tmp1;
+ a 
+---
+ 1
+(1 row)
+
+COMMIT;
+SELECT * FROM tmp1;
+ a 
+---
+ 1
+(1 row)
+
+TRUNCATE tmp1;
+SELECT * FROM tmp1;
+ a 
+---
+(0 rows)
+
+-- Test view creation
+INSERT INTO tmp1 VALUES (1);
+CREATE VIEW v AS SELECT * FROM tmp1;
+SELECT * FROM v;
+ a 
+---
+ 1
+(1 row)
+
+DROP VIEW v;
+CREATE TEMP VIEW v AS SELECT * FROM tmp1;
+SELECT * FROM v;
+ a 
+---
+ 1
+(1 row)
+
+DROP VIEW v;
+CREATE GLOBAL TEMP VIEW v AS SELECT * FROM tmp1; -- fail
+ERROR:  views cannot be global temporary because they do not have storage

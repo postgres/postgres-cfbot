@@ -1952,6 +1952,7 @@ CREATE VIEW tables AS
 
            CAST(
              CASE WHEN nc.oid = pg_my_temp_schema() THEN 'LOCAL TEMPORARY'
+                  WHEN c.relpersistence = 'g' THEN 'GLOBAL TEMPORARY'
                   WHEN c.relkind IN ('r', 'p') THEN 'BASE TABLE'
                   WHEN c.relkind = 'v' THEN 'VIEW'
                   WHEN c.relkind = 'f' THEN 'FOREIGN'

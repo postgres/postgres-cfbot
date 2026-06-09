@@ -25,6 +25,7 @@
 #include "access/tableam.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
+#include "catalog/global_temp.h"
 #include "catalog/index.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
@@ -3402,6 +3403,11 @@ ReindexMultipleTables(const ReindexStmt *stmt, const ReindexParams *params)
 		/* Skip temp tables of other backends; we can't reindex them at all */
 		if (classtuple->relpersistence == RELPERSISTENCE_TEMP &&
 			!isTempNamespace(classtuple->relnamespace))
+			continue;
+
+		/* Skip global temporary tables not in use */
+		if (classtuple->relpersistence == RELPERSISTENCE_GLOBAL_TEMP &&
+			!IsGlobalTempRelationInUse(relid))
 			continue;
 
 		/*

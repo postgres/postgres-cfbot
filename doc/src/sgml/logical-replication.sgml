@@ -268,8 +268,9 @@
 
   <para>
    The schema definitions are not replicated, and the published tables must
-   exist on the subscriber.  Only regular tables may be
-   the target of replication.  For example, you can't replicate to a view.
+   exist on the subscriber.  Only permanent, regular tables may be the target
+   of replication.  For example, you can't replicate to a view or a temporary
+   table.
   </para>
 
   <para>

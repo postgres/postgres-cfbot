@@ -686,11 +686,19 @@ drop table boolspart;
 -- partitions mixing temporary and permanent relations
 create table perm_parted (a int) partition by list (a);
 create temporary table temp_parted (a int) partition by list (a);
+create global temporary table global_temp_parted (a int) partition by list (a);
 create table perm_part partition of temp_parted default; -- error
+create table perm_part partition of global_temp_parted default; -- error
+create table perm_part partition of perm_parted default; -- ok
 create temp table temp_part partition of perm_parted default; -- error
+create temp table temp_part partition of global_temp_parted default; -- error
 create temp table temp_part partition of temp_parted default; -- ok
+create global temp table global_temp_part partition of temp_parted default; -- error
+create global temp table global_temp_part partition of perm_parted default; -- error
+create global temp table global_temp_part partition of global_temp_parted default; -- ok
 drop table perm_parted cascade;
 drop table temp_parted cascade;
+drop table global_temp_parted cascade;
 
 -- check that adding partitions to a table while it is being used is prevented
 create table tab_part_create (a int) partition by list (a);

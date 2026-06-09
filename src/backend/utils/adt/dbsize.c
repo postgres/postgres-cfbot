@@ -1032,6 +1032,9 @@ pg_relation_filepath(PG_FUNCTION_ARGS)
 				Assert(backend != INVALID_PROC_NUMBER);
 			}
 			break;
+		case RELPERSISTENCE_GLOBAL_TEMP:
+			backend = ProcNumberForTempRelations();
+			break;
 		default:
 			elog(ERROR, "invalid relpersistence: %c", relform->relpersistence);
 			backend = INVALID_PROC_NUMBER;	/* placate compiler */

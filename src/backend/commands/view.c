@@ -477,6 +477,15 @@ DefineView(ViewStmt *stmt, const char *queryString,
 				 errmsg("views cannot be unlogged because they do not have storage")));
 
 	/*
+	 * Global temporary views are not sensible either.  This used to generate
+	 * a warning in the parser, but now we raise an error.
+	 */
+	if (stmt->view->relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("views cannot be global temporary because they do not have storage")));
+
+	/*
 	 * If the user didn't explicitly ask for a temporary view, check whether
 	 * we need one implicitly.  We allow TEMP to be inserted automatically as
 	 * long as the CREATE command is consistent with that --- no explicit

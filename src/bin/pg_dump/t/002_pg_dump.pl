@@ -4988,7 +4988,63 @@ my %tests = (
 			no_table_access_method => 1,
 			only_dump_measurement => 1,
 		},
-	});
+	},
+
+	# Global temporary tables
+	'CREATE GLOBAL TEMP TABLE regress_pg_dump_gtt' => {
+		create_sql => '
+			CREATE GLOBAL TEMP TABLE dump_test.regress_pg_dump_gtt (a text);
+			INSERT INTO dump_test.regress_pg_dump_gtt VALUES (\'data not dumped\');',
+		regexp => qr/^
+			\n\QCREATE GLOBAL TEMP TABLE dump_test.regress_pg_dump_gtt (\E\n
+			\s+\Qa text\E\n
+			\Q);\E\n/xm,
+		like => {
+			%full_runs, %dump_test_schema_runs, section_pre_data => 1,
+		},
+		unlike => {
+			exclude_dump_test_schema => 1,
+			only_dump_measurement => 1,
+		},
+	},
+
+	'CREATE GLOBAL TEMP TABLE regress_pg_dump_gtt_oc_pr ON COMMIT PRESERVE ROWS' => {
+		create_sql => '
+			CREATE GLOBAL TEMP TABLE dump_test.regress_pg_dump_gtt_oc_pr (a text)
+			  ON COMMIT PRESERVE ROWS;',
+		regexp => qr/^
+			\n\QCREATE GLOBAL TEMP TABLE dump_test.regress_pg_dump_gtt_oc_pr (\E\n
+			\s+\Qa text\E\n
+			\Q)\E\n
+			\QON COMMIT PRESERVE ROWS;\E\n/xm,
+		like => {
+			%full_runs, %dump_test_schema_runs, section_pre_data => 1,
+		},
+		unlike => {
+			exclude_dump_test_schema => 1,
+			only_dump_measurement => 1,
+		},
+	},
+
+	'CREATE GLOBAL TEMP TABLE regress_pg_dump_gtt_oc_dr ON COMMIT DELETE ROWS' => {
+		create_sql => '
+			CREATE GLOBAL TEMP TABLE dump_test.regress_pg_dump_gtt_oc_dr (a text)
+			  ON COMMIT DELETE ROWS;',
+		regexp => qr/^
+			\n\QCREATE GLOBAL TEMP TABLE dump_test.regress_pg_dump_gtt_oc_dr (\E\n
+			\s+\Qa text\E\n
+			\Q)\E\n
+			\QON COMMIT DELETE ROWS;\E\n/xm,
+		like => {
+			%full_runs, %dump_test_schema_runs, section_pre_data => 1,
+		},
+		unlike => {
+			exclude_dump_test_schema => 1,
+			only_dump_measurement => 1,
+		},
+	},
+
+);
 
 #########################################
 # Create a PG instance to test actually dumping from

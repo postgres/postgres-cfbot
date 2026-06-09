@@ -41,6 +41,7 @@
 #include "access/xact.h"
 #include "catalog/binary_upgrade.h"
 #include "catalog/catalog.h"
+#include "catalog/global_temp.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/partition.h"
@@ -1172,8 +1173,9 @@ retry:
 			else
 			{
 				/*
-				 * If it's a temp table, but not one of ours, we have to use
-				 * the slow, grotty method to figure out the owning backend.
+				 * If it's a local temp table, but not one of ours, we have to
+				 * use the slow, grotty method to figure out the owning
+				 * backend.
 				 *
 				 * Note: it's possible that rd_backend gets set to
 				 * MyProcNumber here, in case we are looking at a pg_class
@@ -1189,6 +1191,10 @@ retry:
 				Assert(relation->rd_backend != INVALID_PROC_NUMBER);
 				relation->rd_islocaltemp = false;
 			}
+			break;
+		case RELPERSISTENCE_GLOBAL_TEMP:
+			relation->rd_backend = ProcNumberForTempRelations();
+			relation->rd_islocaltemp = false;
 			break;
 		default:
 			elog(ERROR, "invalid relpersistence: %c",
@@ -2116,6 +2122,14 @@ RelationIdGetRelation(Oid relationId)
 			RelationRebuildRelation(rd);
 
 			/*
+			 * If it's a global temporary relation, make sure it has been
+			 * initialized for use in this backend (a prior initialization
+			 * might have been rolled back).
+			 */
+			if (RELATION_IS_GLOBAL_TEMP(rd))
+				InitGlobalTempRelation(rd);
+
+			/*
 			 * Normally entries need to be valid here, but before the relcache
 			 * has been initialized, not enough infrastructure exists to
 			 * perform pg_class lookups. The structure of such entries doesn't
@@ -2134,7 +2148,11 @@ RelationIdGetRelation(Oid relationId)
 	 */
 	rd = RelationBuildDesc(relationId, true);
 	if (RelationIsValid(rd))
+	{
 		RelationIncrementReferenceCount(rd);
+		if (RELATION_IS_GLOBAL_TEMP(rd))
+			InitGlobalTempRelation(rd);
+	}
 	return rd;
 }
 
@@ -2206,6 +2224,21 @@ RelationDecrementReferenceCount(Relation rel)
 	rel->rd_refcnt -= 1;
 	if (!IsBootstrapProcessingMode())
 		ResourceOwnerForgetRelationRef(CurrentResourceOwner, rel);
+}
+
+/*
+ * RelationMarkInvalid
+ *		Mark a relation as invalid, if it's in the relcache, forcing it to be
+ *		reloaded on next access.
+ */
+void
+RelationMarkInvalid(Oid relid)
+{
+	Relation	relation;
+
+	RelationIdCacheLookup(relid, relation);
+	if (RelationIsValid(relation) && relation->rd_isvalid)
+		RelationInvalidateRelation(relation);
 }
 
 /*
@@ -2957,6 +2990,9 @@ RelationCacheInvalidateEntry(Oid relationId)
 			if (in_progress_list[i].reloid == relationId)
 				in_progress_list[i].invalidated = true;
 	}
+
+	/* Additional processing required for global temporary relations */
+	InvalidateGlobalTempRelation(relationId);
 }
 
 /*
@@ -3101,6 +3137,9 @@ RelationCacheInvalidate(bool debug_discard)
 		/* Any RelationBuildDesc() on the stack must start over. */
 		for (i = 0; i < in_progress_list_len; i++)
 			in_progress_list[i].invalidated = true;
+
+	/* Invalidate all in-use global temporary relations */
+	InvalidateGlobalTempRelation(InvalidOid);
 }
 
 static void
@@ -3656,6 +3695,7 @@ RelationBuildLocalRelation(const char *relname,
 	{
 		case RELPERSISTENCE_UNLOGGED:
 		case RELPERSISTENCE_PERMANENT:
+			Assert(!isTempOrTempToastNamespace(relnamespace));
 			rel->rd_backend = INVALID_PROC_NUMBER;
 			rel->rd_islocaltemp = false;
 			break;
@@ -3663,6 +3703,11 @@ RelationBuildLocalRelation(const char *relname,
 			Assert(isTempOrTempToastNamespace(relnamespace));
 			rel->rd_backend = ProcNumberForTempRelations();
 			rel->rd_islocaltemp = true;
+			break;
+		case RELPERSISTENCE_GLOBAL_TEMP:
+			Assert(!isTempOrTempToastNamespace(relnamespace));
+			rel->rd_backend = ProcNumberForTempRelations();
+			rel->rd_islocaltemp = false;
 			break;
 		default:
 			elog(ERROR, "invalid relpersistence: %c", relpersistence);
@@ -3902,7 +3947,8 @@ RelationSetNewRelfilenumber(Relation relation, char persistence)
 		/* handle these directly, at least for now */
 		SMgrRelation srel;
 
-		srel = RelationCreateStorage(newrlocator, persistence, true);
+		srel = RelationCreateStorage(relation->rd_id, newrlocator,
+									 persistence, true);
 		smgrclose(srel);
 	}
 	else

@@ -4,6 +4,7 @@ backend_sources += files(
   'aclchk.c',
   'catalog.c',
   'dependency.c',
+  'global_temp.c',
   'heap.c',
   'index.c',
   'indexing.c',

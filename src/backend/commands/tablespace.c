@@ -1159,7 +1159,8 @@ GetDefaultTablespace(char relpersistence, bool partitioned)
 	Oid			result;
 
 	/* The temp-table case is handled elsewhere */
-	if (relpersistence == RELPERSISTENCE_TEMP)
+	if (relpersistence == RELPERSISTENCE_TEMP ||
+		relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
 	{
 		PrepareTempTablespaces();
 		return GetNextTempTableSpace();

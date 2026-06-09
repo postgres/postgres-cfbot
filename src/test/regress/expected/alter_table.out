@@ -3593,6 +3593,7 @@ FROM pg_class,
     pg_filenode_relation(reltablespace, pg_relation_filenode(oid)) AS mapped_oid
 WHERE relkind IN ('r', 'i', 'S', 't', 'm')
   AND relpersistence != 't'
+  AND relpersistence != 'g'
   AND mapped_oid IS DISTINCT FROM oid;
 SELECT m.* FROM filenode_mapping m LEFT JOIN pg_class c ON c.oid = m.oid
 WHERE c.oid IS NOT NULL OR m.mapped_oid IS NOT NULL;
@@ -4099,9 +4100,12 @@ DROP TABLE parent CASCADE;
 -- check any TEMP-ness
 CREATE TEMP TABLE temp_parted (a int) PARTITION BY LIST (a);
 CREATE TABLE perm_part (a int);
+CREATE GLOBAL TEMP TABLE global_temp_part (a int);
 ALTER TABLE temp_parted ATTACH PARTITION perm_part FOR VALUES IN (1);
-ERROR:  cannot attach a permanent relation as partition of temporary relation "temp_parted"
-DROP TABLE temp_parted, perm_part;
+ERROR:  cannot attach a permanent relation as partition of local temporary relation "temp_parted"
+ALTER TABLE temp_parted ATTACH PARTITION global_temp_part FOR VALUES IN (1);
+ERROR:  cannot attach a global temporary relation as partition of local temporary relation "temp_parted"
+DROP TABLE temp_parted, perm_part, global_temp_part;
 -- check that the table being attached is not a typed table
 CREATE TYPE mytype AS (a int);
 CREATE TABLE fail_part OF mytype;
@@ -4682,9 +4686,9 @@ create temp table temp_part_parent (a int) partition by list (a);
 create table perm_part_child (a int);
 create temp table temp_part_child (a int);
 alter table temp_part_parent attach partition perm_part_child default; -- error
-ERROR:  cannot attach a permanent relation as partition of temporary relation "temp_part_parent"
+ERROR:  cannot attach a permanent relation as partition of local temporary relation "temp_part_parent"
 alter table perm_part_parent attach partition temp_part_child default; -- error
-ERROR:  cannot attach a temporary relation as partition of permanent relation "perm_part_parent"
+ERROR:  cannot attach a local temporary relation as partition of permanent relation "perm_part_parent"
 alter table temp_part_parent attach partition temp_part_child default; -- ok
 drop table perm_part_parent cascade;
 drop table temp_part_parent cascade;

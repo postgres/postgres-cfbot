@@ -1018,14 +1018,25 @@ CreateSubscription(ParseState *pstate, CreateSubscriptionStmt *stmt,
 			{
 				Oid			relid;
 				char		relkind;
+				char		relpersistence;
 				RangeVar   *rv = pubrelinfo->rv;
 
 				relid = RangeVarGetRelid(rv, AccessShareLock, false);
 				relkind = get_rel_relkind(relid);
+				relpersistence = get_rel_persistence(relid);
 
 				/* Check for supported relkind. */
 				CheckSubscriptionRelkind(relkind, pubrelinfo->relkind,
 										 rv->schemaname, rv->relname);
+
+				/* Local relation must not be global temporary */
+				if (relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
+					ereport(ERROR,
+							errcode(ERRCODE_WRONG_OBJECT_TYPE),
+							errmsg("cannot use relation \"%s.%s\" as logical replication target",
+								   rv->schemaname, rv->relname),
+							errdetail("This operation is not supported for global temporary relations."));
+
 				has_tables |= (relkind != RELKIND_SEQUENCE);
 				AddSubscriptionRelState(subid, relid, relation_state,
 										InvalidXLogRecPtr, true);
@@ -1219,13 +1230,23 @@ AlterSubscription_refresh(Subscription *sub, bool copy_data,
 			RangeVar   *rv = pubrelinfo->rv;
 			Oid			relid;
 			char		relkind;
+			char		relpersistence;
 
 			relid = RangeVarGetRelid(rv, AccessShareLock, false);
 			relkind = get_rel_relkind(relid);
+			relpersistence = get_rel_persistence(relid);
 
 			/* Check for supported relkind. */
 			CheckSubscriptionRelkind(relkind, pubrelinfo->relkind,
 									 rv->schemaname, rv->relname);
+
+			/* Local relation must not be global temporary */
+			if (relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
+				ereport(ERROR,
+						errcode(ERRCODE_WRONG_OBJECT_TYPE),
+						errmsg("cannot use relation \"%s.%s\" as logical replication target",
+							   rv->schemaname, rv->relname),
+						errdetail("This operation is not supported for global temporary relations."));
 
 			pubrel_local_oids[off++] = relid;
 

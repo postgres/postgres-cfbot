@@ -192,6 +192,7 @@
 #include "access/xact.h"
 #include "access/xlog.h"
 #include "access/xloginsert.h"
+#include "catalog/global_temp.h"
 #include "catalog/indexing.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_database.h"
@@ -1692,6 +1693,11 @@ BuildRelationList(bool temp_relations, bool include_shared)
 			if (!temp_relations)
 				continue;
 		}
+		else if (pgc->relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
+		{
+			/* Deal with global temporary relations separately below */
+			continue;
+		}
 		else
 		{
 			/*
@@ -1714,6 +1720,23 @@ BuildRelationList(bool temp_relations, bool include_shared)
 	table_close(rel, AccessShareLock);
 
 	CommitTransactionCommand();
+
+	/*
+	 * If we were asked for temporary relations, include all global temporary
+	 * relations currently in use.  This list can be out of date as soon as it
+	 * is returned, but that doesn't matter because we only need to worry
+	 * about those that were in use when the "inprogress-on" state was set,
+	 * and are still in use now.  This does not require database access.
+	 */
+	if (temp_relations)
+	{
+		List	   *gtrs_in_use;
+
+		gtrs_in_use = GetAllGlobalTempRelationsInUse(MyDatabaseId);
+
+		RelationList = list_concat(RelationList, gtrs_in_use);
+		list_free(gtrs_in_use);
+	}
 
 	return RelationList;
 }

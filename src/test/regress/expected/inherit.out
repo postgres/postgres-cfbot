@@ -3142,7 +3142,7 @@ create table inh_perm_parent (a1 int);
 create temp table inh_temp_parent (a1 int);
 create temp table inh_temp_child () inherits (inh_perm_parent); -- ok
 create table inh_perm_child () inherits (inh_temp_parent); -- error
-ERROR:  cannot inherit from temporary relation "inh_temp_parent"
+ERROR:  permanent relation cannot inherit from local temporary relation "inh_temp_parent"
 create temp table inh_temp_child_2 () inherits (inh_temp_parent); -- ok
 insert into inh_perm_parent values (1);
 insert into inh_temp_parent values (2);
