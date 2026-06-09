@@ -493,7 +493,8 @@ generateSerialExtraStmts(CreateStmtContext *cxt, ColumnDef *column,
 	seqpersistence = cxt->rel ? cxt->rel->rd_rel->relpersistence : cxt->relation->relpersistence;
 	if (loggedEl)
 	{
-		if (seqpersistence == RELPERSISTENCE_TEMP)
+		if (seqpersistence == RELPERSISTENCE_TEMP ||
+			seqpersistence == RELPERSISTENCE_GLOBAL_TEMP)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
 					 errmsg("cannot set logged status of a temporary sequence"),

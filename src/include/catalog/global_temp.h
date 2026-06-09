@@ -17,7 +17,8 @@
 #include "utils/rel.h"
 
 extern void TrackGlobalTempRelationStorage(Oid relid, RelFileLocator rlocator,
-										   ProcNumber backend, bool create);
+										   ProcNumber backend, bool create,
+										   bool register_delete);
 extern void ReassignGlobalTempRelationStorage(RelFileLocator rlocator,
 											  Oid newRelid);
 extern void InitGlobalTempRelation(Relation relation);

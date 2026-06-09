@@ -13,16 +13,17 @@ CREATE GLOBAL TEMP TABLE pg_temp.tmp1 (a int); -- fail
 ERROR:  cannot create global temporary relation in temporary schema
 LINE 1: CREATE GLOBAL TEMP TABLE pg_temp.tmp1 (a int);
                                  ^
-CREATE GLOBAL TEMP TABLE tmp1 (a int PRIMARY KEY, b text);
+CREATE GLOBAL TEMP TABLE tmp1 (a int PRIMARY KEY, b text, c serial);
 CREATE SCHEMA global_temp_xxx CREATE GLOBAL TEMP TABLE tmp2 (a int);
 CREATE SCHEMA global_temp_yyy;
 CREATE GLOBAL TEMP TABLE global_temp_yyy.tmp3 (a int);
 \d tmp1
-  Global temporary table "global_temp_tests.tmp1"
- Column |  Type   | Collation | Nullable | Default 
---------+---------+-----------+----------+---------
+              Global temporary table "global_temp_tests.tmp1"
+ Column |  Type   | Collation | Nullable |             Default             
+--------+---------+-----------+----------+---------------------------------
  a      | integer |           | not null | 
  b      | text    |           |          | 
+ c      | integer |           | not null | nextval('tmp1_c_seq'::regclass)
 Indexes:
     "tmp1_pkey" PRIMARY KEY, btree (a)
 
@@ -54,16 +55,16 @@ NOTICE:  drop cascades to table global_temp_yyy.tmp3
 -- Basic tests
 INSERT INTO tmp1 VALUES (1, 'xxx');
 SELECT * FROM tmp1;
- a |  b  
----+-----
- 1 | xxx
+ a |  b  | c 
+---+-----+---
+ 1 | xxx | 1
 (1 row)
 
 \c
 SET search_path = global_temp_tests;
 SELECT * FROM tmp1;
- a | b 
----+---
+ a | b | c 
+---+---+---
 (0 rows)
 
 -- Test index
@@ -78,9 +79,9 @@ SELECT * FROM tmp1 WHERE a = 1;
 (2 rows)
 
 SELECT * FROM tmp1 WHERE a = 1;
- a |  b  
----+-----
- 1 | xxx
+ a |  b  | c 
+---+-----+---
+ 1 | xxx | 1
 (1 row)
 
 RESET enable_seqscan;
@@ -96,9 +97,9 @@ SELECT * FROM tmp1 WHERE b = 'xxx';
 (2 rows)
 
 SELECT * FROM tmp1 WHERE b = 'xxx';
- a |  b  
----+-----
- 1 | xxx
+ a |  b  | c 
+---+-----+---
+ 1 | xxx | 1
 (1 row)
 
 RESET enable_seqscan;
@@ -145,8 +146,8 @@ ERROR:  ON COMMIT DROP cannot be used on global temporary tables
 -- Two-phase commit not allowed with global temp tables
 BEGIN;
 SELECT * FROM tmp1;
- a | b 
----+---
+ a | b | c 
+---+---+---
 (0 rows)
 
 PREPARE TRANSACTION 'twophase'; -- fail
@@ -279,83 +280,210 @@ INSERT INTO tmp1 VALUES (1, 'xxx');
 BEGIN;
 TRUNCATE tmp1;
 SELECT * FROM tmp1;
- a | b 
----+---
+ a | b | c 
+---+---+---
 (0 rows)
 
 ROLLBACK;
 SELECT * FROM tmp1;
- a |  b  
----+-----
- 1 | xxx
+ a |  b  | c 
+---+-----+---
+ 1 | xxx | 1
 (1 row)
 
 BEGIN;
 SAVEPOINT sp1;
 TRUNCATE tmp1;
 SELECT * FROM tmp1;
- a | b 
----+---
+ a | b | c 
+---+---+---
 (0 rows)
 
 RELEASE sp1;
 SELECT * FROM tmp1;
- a | b 
----+---
+ a | b | c 
+---+---+---
 (0 rows)
 
 ROLLBACK;
 SELECT * FROM tmp1;
- a |  b  
----+-----
- 1 | xxx
+ a |  b  | c 
+---+-----+---
+ 1 | xxx | 1
 (1 row)
 
 BEGIN;
 SAVEPOINT sp1;
 TRUNCATE tmp1;
 SELECT * FROM tmp1;
- a | b 
----+---
+ a | b | c 
+---+---+---
 (0 rows)
 
 ROLLBACK TO sp1;
 SELECT * FROM tmp1;
- a |  b  
----+-----
- 1 | xxx
+ a |  b  | c 
+---+-----+---
+ 1 | xxx | 1
 (1 row)
 
 COMMIT;
 SELECT * FROM tmp1;
- a |  b  
----+-----
- 1 | xxx
+ a |  b  | c 
+---+-----+---
+ 1 | xxx | 1
 (1 row)
 
 TRUNCATE tmp1;
 SELECT * FROM tmp1;
- a | b 
----+---
+ a | b | c 
+---+---+---
 (0 rows)
 
 -- Test view creation
 INSERT INTO tmp1 VALUES (1, 'xxx');
 CREATE VIEW v AS SELECT * FROM tmp1;
 SELECT * FROM v;
- a |  b  
----+-----
- 1 | xxx
+ a |  b  | c 
+---+-----+---
+ 1 | xxx | 2
 (1 row)
 
 DROP VIEW v;
 CREATE TEMP VIEW v AS SELECT * FROM tmp1;
 SELECT * FROM v;
- a |  b  
----+-----
- 1 | xxx
+ a |  b  | c 
+---+-----+---
+ 1 | xxx | 2
 (1 row)
 
 DROP VIEW v;
 CREATE GLOBAL TEMP VIEW v AS SELECT * FROM tmp1; -- fail
 ERROR:  views cannot be global temporary because they do not have storage
+-- Test global temp sequence
+CREATE GLOBAL TEMP SEQUENCE s MINVALUE 100 MAXVALUE 130 INCREMENT 10 START WITH 110 CYCLE;
+\d s
+         Global temporary sequence "global_temp_tests.s"
+  Type  | Start | Minimum | Maximum | Increment | Cycles? | Cache 
+--------+-------+---------+---------+-----------+---------+-------
+ bigint |   110 |     100 |     130 |        10 | yes     |     1
+
+SELECT nextval('s') FROM generate_series(1, 5);
+ nextval 
+---------
+     110
+     120
+     130
+     100
+     110
+(5 rows)
+
+\c
+SET search_path = global_temp_tests;
+SELECT nextval('s') FROM generate_series(1, 5);
+ nextval 
+---------
+     110
+     120
+     130
+     100
+     110
+(5 rows)
+
+-- Test that sequence initialization survives ROLLBACK
+\c
+SET search_path = global_temp_tests;
+BEGIN;
+SELECT nextval('s') FROM generate_series(1, 2);
+ nextval 
+---------
+     110
+     120
+(2 rows)
+
+ROLLBACK;
+SELECT nextval('s') FROM generate_series(1, 2);
+ nextval 
+---------
+     130
+     100
+(2 rows)
+
+\c
+SET search_path = global_temp_tests;
+BEGIN;
+SAVEPOINT sp;
+SELECT nextval('s') FROM generate_series(1, 2);
+ nextval 
+---------
+     110
+     120
+(2 rows)
+
+ROLLBACK TO sp;
+SELECT nextval('s') FROM generate_series(1, 3);
+ nextval 
+---------
+     130
+     100
+     110
+(3 rows)
+
+ROLLBACK;
+SELECT nextval('s') FROM generate_series(1, 2);
+ nextval 
+---------
+     120
+     130
+(2 rows)
+
+-- Test lastval() after ROLLBACK of sequence initialization
+\c
+SET search_path = global_temp_tests;
+BEGIN;
+SELECT nextval('s') FROM generate_series(1, 2);
+ nextval 
+---------
+     110
+     120
+(2 rows)
+
+ROLLBACK;
+SELECT lastval();
+ lastval 
+---------
+     120
+(1 row)
+
+\c
+SET search_path = global_temp_tests;
+BEGIN;
+SAVEPOINT sp;
+SELECT nextval('s') FROM generate_series(1, 2);
+ nextval 
+---------
+     110
+     120
+(2 rows)
+
+ROLLBACK TO sp;
+SELECT lastval();
+ lastval 
+---------
+     120
+(1 row)
+
+ROLLBACK;
+SELECT lastval();
+ lastval 
+---------
+     120
+(1 row)
+
+SELECT nextval('s') FROM generate_series(1, 2);
+ nextval 
+---------
+     130
+     100
+(2 rows)
+
