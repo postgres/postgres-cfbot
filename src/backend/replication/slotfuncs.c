@@ -53,7 +53,7 @@ create_physical_replication_slot(char *name, bool immediately_reserve,
 	/* acquire replication slot, this will check for conflicting names */
 	ReplicationSlotCreate(name, false,
 						  temporary ? RS_TEMPORARY : RS_PERSISTENT, false,
-						  false, false, false);
+						  false, false, false, true);
 
 	if (immediately_reserve)
 	{
@@ -146,7 +146,7 @@ create_logical_replication_slot(char *name, char *plugin,
 	 */
 	ReplicationSlotCreate(name, true,
 						  temporary ? RS_TEMPORARY : RS_EPHEMERAL, two_phase,
-						  false, failover, false);
+						  false, failover, false, true);
 
 	/*
 	 * Ensure the logical decoding is enabled before initializing the logical
