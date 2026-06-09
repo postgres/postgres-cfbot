@@ -373,11 +373,17 @@ IsSlotForConflictCheck(const char *name)
  * failover: If enabled, allows the slot to be synced to standbys so
  *     that logical replication can be resumed after failover.
  * synced: True if the slot is synchronized from the primary server.
+ * error_if_full: If true, raise an error when no slot is free; if false,
+ *     return false instead so the caller can degrade gracefully.
+ *
+ * Returns true if a slot was created, false only when error_if_full is false
+ * and the slot pool is exhausted.
  */
-void
+bool
 ReplicationSlotCreate(const char *name, bool db_specific,
 					  ReplicationSlotPersistency persistency,
-					  bool two_phase, bool repack, bool failover, bool synced)
+					  bool two_phase, bool repack, bool failover, bool synced,
+					  bool error_if_full)
 {
 	ReplicationSlot *slot = NULL;
 	int			startpoint,
@@ -458,11 +464,18 @@ ReplicationSlotCreate(const char *name, bool db_specific,
 
 	/* If all slots are in use, we're out of luck. */
 	if (slot == NULL)
+	{
+		if (!error_if_full)
+		{
+			LWLockRelease(ReplicationSlotAllocationLock);
+			return false;
+		}
 		ereport(ERROR,
 				(errcode(ERRCODE_CONFIGURATION_LIMIT_EXCEEDED),
 				 errmsg("all replication slots are in use"),
 				 errhint("Free one or increase \"%s\".",
 						 repack ? "max_repack_replication_slots" : "max_replication_slots")));
+	}
 
 	/*
 	 * Since this slot is not in use, nobody should be looking at any part of
@@ -539,6 +552,8 @@ ReplicationSlotCreate(const char *name, bool db_specific,
 
 	/* Let everybody know we've modified this slot */
 	ConditionVariableBroadcast(&slot->active_cv);
+
+	return true;
 }
 
 /*
