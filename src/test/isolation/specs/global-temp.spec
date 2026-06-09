@@ -1,7 +1,7 @@
 # Test global temporary relations
 
 setup {
-  CREATE GLOBAL TEMP TABLE tmp (key int PRIMARY KEY, val text);
+  CREATE GLOBAL TEMP TABLE tmp (key int PRIMARY KEY, val text, seq serial);
 
   CREATE GLOBAL TEMP TABLE tmp_parted (key int PRIMARY KEY, val text) PARTITION BY LIST (key);
   CREATE GLOBAL TEMP TABLE tmp_p1 PARTITION OF tmp_parted FOR VALUES IN (1);

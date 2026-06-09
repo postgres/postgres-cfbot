@@ -11,7 +11,7 @@ SET ROLE regress_global_temp_user;
 
 -- Test table creation
 CREATE GLOBAL TEMP TABLE pg_temp.tmp1 (a int); -- fail
-CREATE GLOBAL TEMP TABLE tmp1 (a int PRIMARY KEY, b text);
+CREATE GLOBAL TEMP TABLE tmp1 (a int PRIMARY KEY, b text, c serial);
 CREATE SCHEMA global_temp_xxx CREATE GLOBAL TEMP TABLE tmp2 (a int);
 CREATE SCHEMA global_temp_yyy;
 CREATE GLOBAL TEMP TABLE global_temp_yyy.tmp3 (a int);
@@ -347,3 +347,57 @@ SELECT EXISTS (SELECT 1 FROM pg_class t WHERE t.oid = c.reltoastrelid),
        EXISTS (SELECT 1 FROM pg_gtrs_in_use() t WHERE t.oid = c.reltoastrelid) AS used
 FROM pg_class c
 WHERE oid = 'tmp1'::regclass;
+
+-- Test global temp sequence
+CREATE GLOBAL TEMP SEQUENCE s MINVALUE 100 MAXVALUE 130 INCREMENT 10 START WITH 110 CYCLE;
+\d s
+SELECT nextval('s') FROM generate_series(1, 5);
+\c
+SET search_path = global_temp_tests;
+SELECT nextval('s') FROM generate_series(1, 5);
+
+-- Test that sequence initialization survives ROLLBACK
+\c
+SET search_path = global_temp_tests;
+BEGIN;
+SELECT nextval('s') FROM generate_series(1, 2);
+ROLLBACK;
+SELECT nextval('s') FROM generate_series(1, 2);
+
+\c
+SET search_path = global_temp_tests;
+BEGIN;
+SAVEPOINT sp;
+SELECT nextval('s') FROM generate_series(1, 2);
+ROLLBACK TO sp;
+SELECT nextval('s') FROM generate_series(1, 3);
+ROLLBACK;
+SELECT nextval('s') FROM generate_series(1, 2);
+
+-- Test lastval() after ROLLBACK of sequence initialization
+\c
+SET search_path = global_temp_tests;
+BEGIN;
+SELECT nextval('s') FROM generate_series(1, 2);
+ROLLBACK;
+SELECT lastval();
+
+\c
+SET search_path = global_temp_tests;
+BEGIN;
+SAVEPOINT sp;
+SELECT nextval('s') FROM generate_series(1, 2);
+ROLLBACK TO sp;
+SELECT lastval();
+ROLLBACK;
+SELECT lastval();
+SELECT nextval('s') FROM generate_series(1, 2);
+
+-- Test rollback of sequence creation
+\c
+SET search_path = global_temp_tests;
+BEGIN;
+CREATE GLOBAL TEMP SEQUENCE s2;
+SELECT oid::regclass FROM pg_gtrs_in_use();
+ROLLBACK;
+SELECT oid::regclass FROM pg_gtrs_in_use();

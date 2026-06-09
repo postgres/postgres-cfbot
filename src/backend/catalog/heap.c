@@ -1003,7 +1003,7 @@ InsertPgClassTuple(Relation pg_class_desc,
 
 	/* If it's a global temporary relation, track our use of it */
 	if (RELATION_IS_GLOBAL_TEMP(new_rel_desc))
-		TrackGlobalTempRelation(new_rel_desc);
+		TrackGlobalTempRelation(new_rel_desc, true);
 }
 
 /* --------------------------------
