@@ -19362,7 +19362,9 @@ dumpSequence(Archive *fout, const TableInfo *tbinfo)
 		appendPQExpBuffer(query,
 						  "CREATE %sSEQUENCE %s\n",
 						  tbinfo->relpersistence == RELPERSISTENCE_UNLOGGED ?
-						  "UNLOGGED " : "",
+						  "UNLOGGED " :
+						  tbinfo->relpersistence == RELPERSISTENCE_GLOBAL_TEMP ?
+						  "GLOBAL TEMP " : "",
 						  fmtQualifiedDumpable(tbinfo));
 
 		if (seq->seqtype != SEQTYPE_BIGINT)

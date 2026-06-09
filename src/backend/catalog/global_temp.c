@@ -60,6 +60,7 @@
 #include "access/xlogutils.h"
 #include "catalog/global_temp.h"
 #include "catalog/storage.h"
+#include "commands/sequence.h"
 #include "commands/tablecmds.h"
 #include "lib/dshash.h"
 #include "miscadmin.h"
@@ -531,7 +532,7 @@ gtr_init_usage_tables(void)
  *	have usage records for this relation.
  */
 static void
-gtr_record_usage(Oid relid)
+gtr_record_usage(Oid relid, char relkind)
 {
 	GtrUsageEntry *local_entry;
 	GtrSharedUsageKey key;
@@ -546,12 +547,22 @@ gtr_record_usage(Oid relid)
 	if (found)
 		return;					/* already recorded, nothing to do */
 
-	/* Record the usage as starting in the current subtransaction */
-	local_entry->started_subid = GetCurrentSubTransactionId();
+	/*
+	 * For a sequence, the storage is created non-transactionally, and isn't
+	 * deleted on (sub)rollback, and so the sequence is not invalidated and
+	 * reinitialized after (sub)rollback.  Do the same for the usage record,
+	 * so that we always regard a sequence with storage as in use.  Otherwise,
+	 * for any other relkind, record the usage as starting in the current
+	 * subtransaction, and flag it for eoxact cleanup.
+	 */
+	if (relkind == RELKIND_SEQUENCE)
+		local_entry->started_subid = InvalidSubTransactionId;
+	else
+	{
+		local_entry->started_subid = GetCurrentSubTransactionId();
+		EOXactUsageListAdd(relid);
+	}
 	local_entry->stopped_subid = InvalidSubTransactionId;
-
-	/* Flag the usage entry for eoxact cleanup */
-	EOXactUsageListAdd(relid);
 
 	/* Add/update shared usage entry */
 	key.dbid = MyDatabaseId;
@@ -700,12 +711,18 @@ AtEOSubXact_UsageCleanup(GtrUsageEntry *entry, bool isCommit,
  *	temporary relation, and arrange for all storage created to be deleted on
  *	backend exit.
  *
+ *	For about-to-be-created storage, if register_delete is true (the normal
+ *	case), the storage creation is transactional, and it will be deleted on
+ *	rollback.  If register_delete is false, the storage will not be deleted on
+ *	rollback (used for sequences).
+ *
  *	This is called for global temporary relations whenever storage is created
  *	using RelationCreateStorage() or deleted using RelationDropStorage().
  */
 void
 TrackGlobalTempRelationStorage(Oid relid, RelFileLocator rlocator,
-							   ProcNumber backend, bool create)
+							   ProcNumber backend, bool create,
+							   bool register_delete)
 {
 	GtrStorageEntry *entry;
 
@@ -734,9 +751,20 @@ TrackGlobalTempRelationStorage(Oid relid, RelFileLocator rlocator,
 			smgrdounlinkall(&srel, 1, false);
 		smgrclose(srel);
 
-		/* Mark the storage as created in the current subtransaction */
+		/*
+		 * If register_delete is true, mark the storage as created in the
+		 * current subtransaction, so that it is deleted on rollback, and flag
+		 * it for eoxact cleanup.
+		 */
 		entry->relid = relid;
-		entry->created_subid = GetCurrentSubTransactionId();
+		if (register_delete)
+		{
+			entry->created_subid = GetCurrentSubTransactionId();
+			EOXactStorageListAdd(rlocator);
+		}
+		else
+			entry->created_subid = InvalidSubTransactionId;
+
 		entry->dropped_subid = InvalidSubTransactionId;
 	}
 	else
@@ -748,10 +776,10 @@ TrackGlobalTempRelationStorage(Oid relid, RelFileLocator rlocator,
 			elog(ERROR, "Storage not found for relation %u", relid);
 
 		entry->dropped_subid = GetCurrentSubTransactionId();
-	}
 
-	/* Flag the storage for eoxact cleanup */
-	EOXactStorageListAdd(rlocator);
+		/* Flag the storage for eoxact cleanup */
+		EOXactStorageListAdd(rlocator);
+	}
 }
 
 /*
@@ -828,7 +856,13 @@ InitGlobalTempRelation(Relation relation)
 		 hash_search(gtr_local_storage,
 					 &relation->rd_locator, HASH_FIND, NULL) == NULL))
 	{
-		/* Create (and track) storage for the relation */
+		/*
+		 * Create (and track) storage for the relation.  For a sequence, the
+		 * storage is created non-transactionally, so that the initialization
+		 * survives rollback and, as for a permanent sequence, rollback
+		 * doesn't cause a sequence restart.  Otherwise, for other relkinds,
+		 * the storage is created transactionally.
+		 */
 		if (RELKIND_HAS_TABLE_AM(relation->rd_rel->relkind))
 			table_relation_set_new_filelocator(relation,
 											   &relation->rd_locator,
@@ -839,7 +873,7 @@ InitGlobalTempRelation(Relation relation)
 			RelationCreateStorage(relation->rd_id,
 								  relation->rd_locator,
 								  relation->rd_rel->relpersistence,
-								  true);
+								  relation->rd_rel->relkind != RELKIND_SEQUENCE);
 
 		/*
 		 * Register the relation's ON COMMIT action, if it's DELETE ROWS (may
@@ -878,6 +912,10 @@ InitGlobalTempRelation(Relation relation)
 			if (nblocks > 0)
 				relation->rd_index->indisvalid = false;
 		}
+
+		/* If it's a sequence, initialize it */
+		if (relation->rd_rel->relkind == RELKIND_SEQUENCE)
+			InitGlobalTempSequence(relation);
 	}
 
 	/* Track our use of the relation, if we haven't already done so */
@@ -899,7 +937,7 @@ void
 TrackGlobalTempRelation(Relation relation)
 {
 	/* Record our use of the relation */
-	gtr_record_usage(relation->rd_id);
+	gtr_record_usage(relation->rd_id, relation->rd_rel->relkind);
 }
 
 /*

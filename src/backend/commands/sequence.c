@@ -322,6 +322,72 @@ ResetSequence(Oid seq_relid)
 }
 
 /*
+ * InitGlobalTempSequence - initialize a global temporary sequence
+ *
+ * This is called the first time a global temporary sequence is accessed from
+ * a backend other than the backend that created it.  On entry, the sequence
+ * should have valid catalog entries, and its physical disk file should have
+ * been created, but be empty.
+ */
+void
+InitGlobalTempSequence(Relation seq_rel)
+{
+	Oid			seq_relid = RelationGetRelid(seq_rel);
+	SeqTable	elm;
+	HeapTuple	pgstuple;
+	Form_pg_sequence pgsform;
+	int64		startv;
+	int			i;
+	Datum		value[SEQ_COL_LASTCOL];
+	bool		null[SEQ_COL_LASTCOL];
+	TupleDesc	tupDesc;
+	HeapTuple	tuple;
+
+	/* Find or create a hash table entry for this sequence */
+	if (seqhashtab == NULL)
+		create_seq_hashtable();
+
+	elm = (SeqTable) hash_search(seqhashtab, &seq_relid, HASH_ENTER, NULL);
+
+	/* Initialize the sequence state */
+	elm->filenumber = seq_rel->rd_rel->relfilenode;
+	elm->lxid = InvalidLocalTransactionId;
+	elm->last_valid = false;
+	elm->last = elm->cached = 0;
+
+	/* Read the sequence definition from pg_sequence */
+	pgstuple = SearchSysCache1(SEQRELID, ObjectIdGetDatum(seq_relid));
+	if (!HeapTupleIsValid(pgstuple))
+		elog(ERROR, "cache lookup failed for sequence %u", seq_relid);
+	pgsform = (Form_pg_sequence) GETSTRUCT(pgstuple);
+	startv = pgsform->seqstart;
+	ReleaseSysCache(pgstuple);
+
+	/* Build a new sequence tuple */
+	for (i = SEQ_COL_FIRSTCOL; i <= SEQ_COL_LASTCOL; i++)
+	{
+		switch (i)
+		{
+			case SEQ_COL_LASTVAL:
+				value[i - 1] = Int64GetDatumFast(startv);
+				break;
+			case SEQ_COL_LOG:
+				value[i - 1] = Int64GetDatum((int64) 0);
+				break;
+			case SEQ_COL_CALLED:
+				value[i - 1] = BoolGetDatum(false);
+				break;
+		}
+		null[i - 1] = false;
+	}
+	tupDesc = RelationGetDescr(seq_rel);
+	tuple = heap_form_tuple(tupDesc, value, null);
+
+	/* Initialize the sequence's data */
+	fill_seq_with_data(seq_rel, tuple);
+}
+
+/*
  * Initialize a sequence's relation with the specified tuple as content
  *
  * This handles unlogged sequences by writing to both the main and the init

@@ -3813,14 +3813,17 @@ match_previous_words(int pattern_id,
 
 /* CREATE SEQUENCE --- is allowed inside CREATE SCHEMA, so use TailMatches */
 	else if (TailMatches("CREATE", "SEQUENCE", MatchAny) ||
-			 TailMatches("CREATE", "TEMP|TEMPORARY", "SEQUENCE", MatchAny))
+			 TailMatches("CREATE", "TEMP|TEMPORARY", "SEQUENCE", MatchAny) ||
+			 TailMatches("CREATE", "GLOBAL|LOCAL", "TEMP|TEMPORARY", "SEQUENCE", MatchAny))
 		COMPLETE_WITH("AS", "INCREMENT BY", "MINVALUE", "MAXVALUE", "NO",
 					  "CACHE", "CYCLE", "OWNED BY", "START WITH");
 	else if (TailMatches("CREATE", "SEQUENCE", MatchAny, "AS") ||
-			 TailMatches("CREATE", "TEMP|TEMPORARY", "SEQUENCE", MatchAny, "AS"))
+			 TailMatches("CREATE", "TEMP|TEMPORARY", "SEQUENCE", MatchAny, "AS") ||
+			 TailMatches("CREATE", "GLOBAL|LOCAL", "TEMP|TEMPORARY", "SEQUENCE", MatchAny, "AS"))
 		COMPLETE_WITH_CS("smallint", "integer", "bigint");
 	else if (TailMatches("CREATE", "SEQUENCE", MatchAny, "NO") ||
-			 TailMatches("CREATE", "TEMP|TEMPORARY", "SEQUENCE", MatchAny, "NO"))
+			 TailMatches("CREATE", "TEMP|TEMPORARY", "SEQUENCE", MatchAny, "NO") ||
+			 TailMatches("CREATE", "GLOBAL|LOCAL", "TEMP|TEMPORARY", "SEQUENCE", MatchAny, "NO"))
 		COMPLETE_WITH("MINVALUE", "MAXVALUE", "CYCLE");
 
 /* CREATE SERVER <name> */
@@ -3841,9 +3844,9 @@ match_previous_words(int pattern_id,
 	/* Complete "CREATE GLOBAL|LOCAL" with TEMP or TEMPORARY */
 	else if (TailMatches("CREATE", "GLOBAL|LOCAL"))
 		COMPLETE_WITH("TEMP", "TEMPORARY");
-	/* Complete "CREATE GLOBAL TEMP/TEMPORARY" with TABLE */
+	/* Complete "CREATE GLOBAL TEMP/TEMPORARY" with SEQUENCE or TABLE */
 	else if (TailMatches("CREATE", "GLOBAL", "TEMP|TEMPORARY"))
-		COMPLETE_WITH("TABLE");
+		COMPLETE_WITH("SEQUENCE", "TABLE");
 
 	/*
 	 * Complete "CREATE [ LOCAL ] TEMP/TEMPORARY" with SEQUENCE, TABLE, or

@@ -1807,6 +1807,12 @@ describeOneTableDetails(const char *schemaname,
 		if (tableinfo.relpersistence == RELPERSISTENCE_UNLOGGED)
 			printfPQExpBuffer(&title, _("Unlogged sequence \"%s.%s\""),
 							  schemaname, relationname);
+		else if (tableinfo.relpersistence == RELPERSISTENCE_TEMP)
+			printfPQExpBuffer(&title, _("Temporary sequence \"%s.%s\""),
+							  schemaname, relationname);
+		else if (tableinfo.relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
+			printfPQExpBuffer(&title, _("Global temporary sequence \"%s.%s\""),
+							  schemaname, relationname);
 		else
 			printfPQExpBuffer(&title, _("Sequence \"%s.%s\""),
 							  schemaname, relationname);

@@ -4,15 +4,15 @@ starting permutation: ins1 ins2 sel1 sel2
 step ins1: INSERT INTO tmp VALUES (1, 's1');
 step ins2: INSERT INTO tmp VALUES (1, 's2');
 step sel1: SELECT * FROM tmp;
-key|val
----+---
-  1|s1 
+key|val|seq
+---+---+---
+  1|s1 |  1
 (1 row)
 
 step sel2: SELECT * FROM tmp;
-key|val
----+---
-  1|s2 
+key|val|seq
+---+---+---
+  1|s2 |  1
 (1 row)
 
 
@@ -41,28 +41,28 @@ step ins1: INSERT INTO tmp VALUES (1, 's1');
 step b2: BEGIN;
 step ins2: INSERT INTO tmp VALUES (1, 's2');
 step sel1: SELECT * FROM tmp;
-key|val
----+---
-  1|s1 
+key|val|seq
+---+---+---
+  1|s1 |  1
 (1 row)
 
 step sel2: SELECT * FROM tmp;
-key|val
----+---
-  1|s2 
+key|val|seq
+---+---+---
+  1|s2 |  1
 (1 row)
 
 step c2: COMMIT;
 step sel1: SELECT * FROM tmp;
-key|val
----+---
-  1|s1 
+key|val|seq
+---+---+---
+  1|s1 |  1
 (1 row)
 
 step sel2: SELECT * FROM tmp;
-key|val
----+---
-  1|s2 
+key|val|seq
+---+---+---
+  1|s2 |  1
 (1 row)
 
 
@@ -71,27 +71,27 @@ step ins1: INSERT INTO tmp VALUES (1, 's1');
 step b2: BEGIN;
 step ins2: INSERT INTO tmp VALUES (1, 's2');
 step sel1: SELECT * FROM tmp;
-key|val
----+---
-  1|s1 
+key|val|seq
+---+---+---
+  1|s1 |  1
 (1 row)
 
 step sel2: SELECT * FROM tmp;
-key|val
----+---
-  1|s2 
+key|val|seq
+---+---+---
+  1|s2 |  1
 (1 row)
 
 step r2: ROLLBACK;
 step sel1: SELECT * FROM tmp;
-key|val
----+---
-  1|s1 
+key|val|seq
+---+---+---
+  1|s1 |  1
 (1 row)
 
 step sel2: SELECT * FROM tmp;
-key|val
----+---
+key|val|seq
+---+---+---
 (0 rows)
 
 
@@ -100,28 +100,28 @@ step ins1: INSERT INTO tmp VALUES (1, 's1');
 step b2: BEGIN;
 step ins2: INSERT INTO tmp VALUES (1, 's2');
 step sel1: SELECT * FROM tmp;
-key|val
----+---
-  1|s1 
+key|val|seq
+---+---+---
+  1|s1 |  1
 (1 row)
 
 step sel2: SELECT * FROM tmp;
-key|val
----+---
-  1|s2 
+key|val|seq
+---+---+---
+  1|s2 |  1
 (1 row)
 
 step sp2: SAVEPOINT sp;
 step r2: ROLLBACK;
 step sel1: SELECT * FROM tmp;
-key|val
----+---
-  1|s1 
+key|val|seq
+---+---+---
+  1|s1 |  1
 (1 row)
 
 step sel2: SELECT * FROM tmp;
-key|val
----+---
+key|val|seq
+---+---+---
 (0 rows)
 
 
@@ -131,39 +131,39 @@ step b2: BEGIN;
 step sp2: SAVEPOINT sp;
 step ins2: INSERT INTO tmp VALUES (1, 's2');
 step sel1: SELECT * FROM tmp;
-key|val
----+---
-  1|s1 
+key|val|seq
+---+---+---
+  1|s1 |  1
 (1 row)
 
 step sel2: SELECT * FROM tmp;
-key|val
----+---
-  1|s2 
+key|val|seq
+---+---+---
+  1|s2 |  1
 (1 row)
 
 step rsp2: ROLLBACK TO SAVEPOINT sp;
 step sel1: SELECT * FROM tmp;
-key|val
----+---
-  1|s1 
+key|val|seq
+---+---+---
+  1|s1 |  1
 (1 row)
 
 step sel2: SELECT * FROM tmp;
-key|val
----+---
+key|val|seq
+---+---+---
 (0 rows)
 
 step r2: ROLLBACK;
 step sel1: SELECT * FROM tmp;
-key|val
----+---
-  1|s1 
+key|val|seq
+---+---+---
+  1|s1 |  1
 (1 row)
 
 step sel2: SELECT * FROM tmp;
-key|val
----+---
+key|val|seq
+---+---+---
 (0 rows)
 
 
@@ -175,27 +175,27 @@ step sp2: SAVEPOINT sp;
 step t2: TRUNCATE tmp;
 step rsp2: ROLLBACK TO SAVEPOINT sp;
 step sel1: SELECT * FROM tmp;
-key|val
----+---
-  1|s1 
+key|val|seq
+---+---+---
+  1|s1 |  1
 (1 row)
 
 step sel2: SELECT * FROM tmp;
-key|val
----+---
-  1|s2 
+key|val|seq
+---+---+---
+  1|s2 |  1
 (1 row)
 
 step r2: ROLLBACK;
 step sel1: SELECT * FROM tmp;
-key|val
----+---
-  1|s1 
+key|val|seq
+---+---+---
+  1|s1 |  1
 (1 row)
 
 step sel2: SELECT * FROM tmp;
-key|val
----+---
+key|val|seq
+---+---+---
 (0 rows)
 
 
@@ -310,9 +310,9 @@ Index Scan using tmp_val_idx on tmp
   Index Cond: (val = 's1'::text)   
 (2 rows)
 
-key|val
----+---
-  1|s1 
+key|val|seq
+---+---+---
+  1|s1 |  1
 (1 row)
 
 step ins2: INSERT INTO tmp VALUES (1, 's2');
@@ -329,9 +329,9 @@ Index Scan using tmp_val_idx on tmp
   Index Cond: (val = 's2'::text)   
 (2 rows)
 
-key|val
----+---
-  1|s2 
+key|val|seq
+---+---+---
+  1|s2 |  1
 (1 row)
 
 
@@ -352,9 +352,9 @@ Index Scan using tmp_val_idx on tmp
   Index Cond: (val = 's1'::text)   
 (2 rows)
 
-key|val
----+---
-  1|s1 
+key|val|seq
+---+---+---
+  1|s1 |  1
 (1 row)
 
 step sel2_idx: 
@@ -371,9 +371,9 @@ Seq Scan on tmp
   Filter: (val = 's2'::text)
 (3 rows)
 
-key|val
----+---
-  1|s2 
+key|val|seq
+---+---+---
+  1|s2 |  1
 (1 row)
 
 
@@ -394,9 +394,9 @@ Index Scan using tmp_val_idx on tmp
   Index Cond: (val = 's1'::text)   
 (2 rows)
 
-key|val
----+---
-  1|s1 
+key|val|seq
+---+---+---
+  1|s1 |  1
 (1 row)
 
 step sel2_idx: 
@@ -413,9 +413,9 @@ Seq Scan on tmp
   Filter: (val = 's2'::text)
 (3 rows)
 
-key|val
----+---
-  1|s2 
+key|val|seq
+---+---+---
+  1|s2 |  1
 (1 row)
 
 step reidx2: REINDEX INDEX tmp_val_idx;
@@ -432,8 +432,8 @@ Index Scan using tmp_val_idx on tmp
   Index Cond: (val = 's2'::text)   
 (2 rows)
 
-key|val
----+---
-  1|s2 
+key|val|seq
+---+---+---
+  1|s2 |  1
 (1 row)
 

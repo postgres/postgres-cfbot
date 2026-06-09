@@ -18,18 +18,21 @@ my $node_subscriber = PostgreSQL::Test::Cluster->new('subscriber');
 $node_subscriber->init;
 $node_subscriber->start;
 
-# Create tables on publisher
+# Create relations on publisher
 $node_publisher->safe_psql('postgres', qq(
 	CREATE TABLE perm_test (a int);
 	CREATE TABLE gtt_test (a int);
 	INSERT INTO perm_test VALUES (1);
 	INSERT INTO gtt_test VALUES (1);
+	CREATE SEQUENCE gt_test_seq;
 ));
 
-# Create same tables on subscriber, except make gtt_test global temporary
+# Create same relations on subscriber, except make gtt_test and gt_test_seq
+# global temporary
 $node_subscriber->safe_psql('postgres', qq(
 	CREATE TABLE perm_test (a int);
 	CREATE GLOBAL TEMP TABLE gtt_test (a int);
+	CREATE GLOBAL TEMP SEQUENCE gt_test_seq;
 ));
 
 # Setup logical replication on publisher
@@ -37,6 +40,7 @@ my $publisher_connstr = $node_publisher->connstr . ' dbname=postgres';
 $node_publisher->safe_psql('postgres', qq(
 	CREATE PUBLICATION regress_perm_pub FOR TABLE perm_test;
 	CREATE PUBLICATION regress_gtt_pub FOR TABLE gtt_test;
+	CREATE PUBLICATION regress_gt_seq_pub FOR ALL SEQUENCES;
 ));
 
 # Setup logical replication for GTT on subscriber -- should fail
@@ -51,6 +55,18 @@ like(
 .*DETAIL:  This operation is not supported for global temporary relations\./,
 	"could not use global temporary table as subscriber");
 
+# Likewise for global temporary sequence
+($ret, $stdout, $stderr) =
+	$node_subscriber->psql('postgres', qq(
+		CREATE SUBSCRIPTION regress_sub
+			CONNECTION '$publisher_connstr' PUBLICATION regress_gt_seq_pub;
+));
+like(
+	$stderr,
+	qr/ERROR:  cannot use relation "public\.gt_test_seq" as logical replication target
+.*DETAIL:  This operation is not supported for global temporary relations\./,
+	"could not use global temporary sequence as subscriber");
+
 # Setup logical replication for permanent table -- OK
 $node_subscriber->safe_psql('postgres', qq(
 	CREATE SUBSCRIPTION regress_sub
@@ -64,6 +80,16 @@ $node_subscriber->safe_psql('postgres', qq(
 like(
 	$stderr,
 	qr/ERROR:  cannot use relation "public\.gtt_test" as logical replication target
+.*DETAIL:  This operation is not supported for global temporary relations\./,
+	"could not use global temporary table as subscriber");
+
+# Likewise for global temporary sequence
+($ret, $stdout, $stderr) =
+	$node_subscriber->psql('postgres',
+		"ALTER SUBSCRIPTION regress_sub SET PUBLICATION regress_gt_seq_pub;");
+like(
+	$stderr,
+	qr/ERROR:  cannot use relation "public\.gt_test_seq" as logical replication target
 .*DETAIL:  This operation is not supported for global temporary relations\./,
 	"could not use global temporary table as subscriber");
 
