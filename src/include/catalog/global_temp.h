@@ -62,11 +62,12 @@ typedef struct GtrInfo
 	} while (0)
 
 extern void TrackGlobalTempRelationStorage(Oid relid, RelFileLocator rlocator,
-										   ProcNumber backend, bool create);
+										   ProcNumber backend, bool create,
+										   bool register_delete);
 extern void ReassignGlobalTempRelationStorage(RelFileLocator rlocator,
 											  Oid newRelid);
 extern void InitGlobalTempRelation(Relation relation);
-extern void TrackGlobalTempRelation(Relation relation);
+extern void TrackGlobalTempRelation(Relation relation, bool isNew);
 extern void ForgetGlobalTempRelation(Oid relid);
 extern void InvalidateGlobalTempRelation(Oid relid);
 extern void ProcessInvalidatedGlobalTempRelations(void);

@@ -141,7 +141,8 @@ RelationCreateStorage(Oid relid, RelFileLocator rlocator, char relpersistence,
 		case RELPERSISTENCE_GLOBAL_TEMP:
 			/* Track storage created for global temporary relations */
 			procNumber = ProcNumberForTempRelations();
-			TrackGlobalTempRelationStorage(relid, rlocator, procNumber, true);
+			TrackGlobalTempRelationStorage(relid, rlocator, procNumber, true,
+										   register_delete);
 			needs_wal = false;
 			break;
 		case RELPERSISTENCE_UNLOGGED:
@@ -221,7 +222,7 @@ RelationDropStorage(Relation rel)
 	/* Track to-be-deleted storage for global temporary relations */
 	if (RELATION_IS_GLOBAL_TEMP(rel))
 		TrackGlobalTempRelationStorage(rel->rd_id, rel->rd_locator,
-									   rel->rd_backend, false);
+									   rel->rd_backend, false, false);
 
 	/* Add the relation to the list of stuff to delete at commit */
 	pending = (PendingRelDelete *)

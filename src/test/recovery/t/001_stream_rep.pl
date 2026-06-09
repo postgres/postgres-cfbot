@@ -106,8 +106,11 @@ like(
 	"Accessing GTT fails on standby 2");
 
 # Likewise, but for a sequence
-$node_primary->safe_psql('postgres',
-	"CREATE SEQUENCE seq1; SELECT nextval('seq1')");
+$node_primary->safe_psql('postgres', q{
+CREATE SEQUENCE seq1;
+SELECT nextval('seq1');
+CREATE GLOBAL TEMP SEQUENCE gtseq;
+});
 
 # Wait for standbys to catch up
 $node_primary->wait_for_replay_catchup($node_standby_1);
@@ -121,6 +124,20 @@ $result = $node_standby_2->safe_psql('postgres', "SELECT * FROM seq1");
 print "standby 2: $result\n";
 is($result, qq(33|0|t), 'check streamed sequence content on standby 2');
 
+($ret, $stdout, $stderr) = $node_standby_1->psql(
+	'postgres', 'SELECT * FROM gtseq');
+like(
+	$stderr,
+	qr/ERROR:  cannot access temporary or unlogged relations during recovery/,
+	"Accessing global temporary sequence fails on standby 1");
+
+($ret, $stdout, $stderr) = $node_standby_2->psql(
+	'postgres', 'SELECT * FROM gtseq');
+like(
+	$stderr,
+	qr/ERROR:  cannot access temporary or unlogged relations during recovery/,
+	"Accessing global temporary sequence fails on standby 2");
+
 # Check pg_sequence_last_value() returns NULL for unlogged sequence on standby
 $node_primary->safe_psql('postgres',
 	"CREATE UNLOGGED SEQUENCE ulseq; SELECT nextval('ulseq')");
@@ -130,6 +147,13 @@ is( $node_standby_1->safe_psql(
 		"SELECT pg_sequence_last_value('ulseq'::regclass) IS NULL"),
 	't',
 	'pg_sequence_last_value() on unlogged sequence on standby 1');
+
+# Likewise for global temporary sequence
+is( $node_standby_1->safe_psql(
+		'postgres',
+		"SELECT pg_sequence_last_value('gtseq'::regclass) IS NULL"),
+	't',
+	'pg_sequence_last_value() on global temporary sequence on standby 1');
 
 # Check that only READ-only queries can run on standbys
 is($node_standby_1->psql('postgres', 'INSERT INTO tab_int VALUES (1)'),
