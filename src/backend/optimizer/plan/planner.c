@@ -7269,6 +7269,7 @@ plan_create_index_workers(Oid tableOid, Oid indexOid)
 	 * safe.
 	 */
 	if (heap->rd_rel->relpersistence == RELPERSISTENCE_TEMP ||
+		heap->rd_rel->relpersistence == RELPERSISTENCE_GLOBAL_TEMP ||
 		!is_parallel_safe(root, (Node *) RelationGetIndexExpressions(index)) ||
 		!is_parallel_safe(root, (Node *) RelationGetIndexPredicate(index)))
 	{

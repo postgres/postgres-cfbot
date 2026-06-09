@@ -312,15 +312,20 @@ ambuild (Relation heapRelation,
    this flag set to <literal>false</literal>.
   </para>
 
-  <para>
+  <para id="indexam-ambuildempty">
 <programlisting>
 void
-ambuildempty (Relation indexRelation);
+ambuildempty (Relation indexRelation,
+              ForkNumber forknum);
 </programlisting>
-   Build an empty index, and write it to the initialization fork (<symbol>INIT_FORKNUM</symbol>)
-   of the given relation.  This method is called only for unlogged indexes; the
-   empty index written to the initialization fork will be copied over the main
-   relation fork on each server restart.
+   Build an empty index, and write it to the specified fork of the given
+   relation.  This method is called for global temporary indexes and for
+   unlogged indexes.  For global temporary indexes, the empty index is written
+   to the main relation fork (<symbol>MAIN_FORKNUM</symbol>) in session-local
+   storage the first time the index is accessed in the session.  For unlogged
+   indexes, the empty index is written to the initialization fork
+   (<symbol>INIT_FORKNUM</symbol>) and then copied over the main relation
+   fork on each server restart.
   </para>
 
   <para>

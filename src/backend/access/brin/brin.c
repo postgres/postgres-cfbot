@@ -1276,12 +1276,12 @@ brinbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 }
 
 void
-brinbuildempty(Relation index)
+brinbuildempty(Relation index, ForkNumber forknum)
 {
 	Buffer		metabuf;
 
 	/* An empty BRIN index has a metapage only. */
-	metabuf = ExtendBufferedRel(BMR_REL(index), INIT_FORKNUM, NULL,
+	metabuf = ExtendBufferedRel(BMR_REL(index), forknum, NULL,
 								EB_LOCK_FIRST | EB_SKIP_EXTENSION_LOCK);
 
 	/* Initialize and xlog metabuffer. */

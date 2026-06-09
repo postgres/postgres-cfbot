@@ -177,16 +177,16 @@ bthandler(PG_FUNCTION_ARGS)
 }
 
 /*
- *	btbuildempty() -- build an empty btree index in the initialization fork
+ *	btbuildempty() -- build an empty btree index in the specified fork
  */
 void
-btbuildempty(Relation index)
+btbuildempty(Relation index, ForkNumber forknum)
 {
 	bool		allequalimage = _bt_allequalimage(index, false);
 	BulkWriteState *bulkstate;
 	BulkWriteBuffer metabuf;
 
-	bulkstate = smgr_bulk_start_rel(index, INIT_FORKNUM);
+	bulkstate = smgr_bulk_start_rel(index, forknum);
 
 	/* Construct metapage. */
 	metabuf = smgr_bulk_get_buf(bulkstate);

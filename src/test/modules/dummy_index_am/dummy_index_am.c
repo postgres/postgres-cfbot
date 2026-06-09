@@ -166,10 +166,10 @@ dibuild(Relation heap, Relation index, IndexInfo *indexInfo)
 }
 
 /*
- * Build an empty index for the initialization fork.
+ * Build an empty index for the specified fork.
  */
 static void
-dibuildempty(Relation index)
+dibuildempty(Relation index, ForkNumber forknum)
 {
 	/* No need to build an init fork for a dummy index */
 }

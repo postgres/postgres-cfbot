@@ -15,6 +15,7 @@
 #include "access/cmptype.h"
 #include "access/genam.h"
 #include "access/stratnum.h"
+#include "common/relpath.h"
 #include "nodes/nodes.h"
 #include "nodes/pg_list.h"
 
@@ -115,7 +116,8 @@ typedef IndexBuildResult *(*ambuild_function) (Relation heapRelation,
 											   IndexInfo *indexInfo);
 
 /* build empty index */
-typedef void (*ambuildempty_function) (Relation indexRelation);
+typedef void (*ambuildempty_function) (Relation indexRelation,
+									   ForkNumber forknum);
 
 /* insert this tuple */
 typedef bool (*aminsert_function) (Relation indexRelation,

@@ -9835,8 +9835,9 @@ verifyNotNullPKCompatible(HeapTuple tuple, const char *colname)
  * ALTER TABLE ADD INDEX
  *
  * There is no such command in the grammar, but parse_utilcmd.c converts
- * UNIQUE and PRIMARY KEY constraints into AT_AddIndex subcommands.  This lets
- * us schedule creation of the index at the appropriate time during ALTER.
+ * UNIQUE, PRIMARY KEY, and EXCLUSION constraints into AT_AddIndex
+ * subcommands.  This lets us schedule creation of the index at the
+ * appropriate time during ALTER.
  *
  * Return value is the address of the new index.
  */
@@ -9854,6 +9855,26 @@ ATExecAddIndex(AlteredTableInfo *tab, Relation rel,
 
 	/* The IndexStmt has already been through transformIndexStmt */
 	Assert(stmt->transformed);
+
+	/*
+	 * Don't allow constraints to be added to global temporary tables that are
+	 * being used by other sessions, because we have no way to scan the local
+	 * storage of another backend to validate the constraint.
+	 *
+	 * XXX: Do we actually need to do this? Adding a PRIMARY KEY is already
+	 * blocked for an in-use GTT by the check in ATRewriteTables(), and maybe
+	 * it would be OK to allow UNIQUE and EXCLUSION constraints to be added,
+	 * since the indexes enforcing them would be marked invalid in any other
+	 * sessions with data in the table, so this would effectively just be
+	 * adding a NOT VALID constraint in those other sessions, which could be
+	 * validated by doing a REINDEX.
+	 */
+	if (RELATION_IS_GLOBAL_TEMP(rel) &&
+		IsOtherUsingGlobalTempRelation(RelationGetRelid(rel)))
+		ereport(ERROR,
+				errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				errmsg("cannot add or alter constraints of global temporary table \"%s\" because it is being used in another session",
+					   RelationGetRelationName(rel)));
 
 	/* suppress schema rights check when rebuilding existing index */
 	check_rights = !is_rebuild;

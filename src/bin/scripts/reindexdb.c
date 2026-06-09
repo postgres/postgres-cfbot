@@ -655,6 +655,8 @@ get_parallel_tables_list(PGconn *conn, ReindexType type,
 								 CppAsString2(RELKIND_MATVIEW) ")\n"
 								 "   AND c.relpersistence != "
 								 CppAsString2(RELPERSISTENCE_TEMP) "\n"
+								 "   AND c.relpersistence != "
+								 CppAsString2(RELPERSISTENCE_GLOBAL_TEMP) "\n"
 								 " ORDER BY c.relpages DESC;");
 			break;
 
@@ -678,6 +680,8 @@ get_parallel_tables_list(PGconn *conn, ReindexType type,
 									 CppAsString2(RELKIND_MATVIEW) ")\n"
 									 "   AND c.relpersistence != "
 									 CppAsString2(RELPERSISTENCE_TEMP) "\n"
+									 "   AND c.relpersistence != "
+									 CppAsString2(RELPERSISTENCE_GLOBAL_TEMP) "\n"
 									 " AND ns.nspname IN (");
 
 				for (cell = user_list->head; cell; cell = cell->next)

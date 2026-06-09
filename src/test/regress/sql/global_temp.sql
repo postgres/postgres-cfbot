@@ -11,7 +11,7 @@ SET ROLE regress_global_temp_user;
 
 -- Test table creation
 CREATE GLOBAL TEMP TABLE pg_temp.tmp1 (a int); -- fail
-CREATE GLOBAL TEMP TABLE tmp1 (a int);
+CREATE GLOBAL TEMP TABLE tmp1 (a int PRIMARY KEY, b text);
 CREATE SCHEMA global_temp_xxx CREATE GLOBAL TEMP TABLE tmp2 (a int);
 CREATE SCHEMA global_temp_yyy;
 CREATE GLOBAL TEMP TABLE global_temp_yyy.tmp3 (a int);
@@ -29,11 +29,30 @@ DROP SCHEMA global_temp_xxx CASCADE;
 DROP SCHEMA global_temp_yyy CASCADE;
 
 -- Basic tests
-INSERT INTO tmp1 VALUES (1);
+INSERT INTO tmp1 VALUES (1, 'xxx');
 SELECT * FROM tmp1;
 \c
 SET search_path = global_temp_tests;
 SELECT * FROM tmp1;
+
+-- Test index
+INSERT INTO tmp1 VALUES (1, 'xxx');
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+SELECT * FROM tmp1 WHERE a = 1;
+SELECT * FROM tmp1 WHERE a = 1;
+RESET enable_seqscan;
+
+-- Test concurrent index build -- CONCURRENTLY is ignored with temp tables
+CREATE INDEX CONCURRENTLY tmp1_b_idx ON tmp1(b);
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+SELECT * FROM tmp1 WHERE b = 'xxx';
+SELECT * FROM tmp1 WHERE b = 'xxx';
+RESET enable_seqscan;
+REINDEX INDEX CONCURRENTLY tmp1_b_idx;
+REINDEX TABLE CONCURRENTLY tmp1;
+DROP INDEX CONCURRENTLY tmp1_b_idx;
 
 -- Test ON COMMIT DELETE ROWS
 CREATE GLOBAL TEMP TABLE tmp2 (a int) ON COMMIT DELETE ROWS;
@@ -92,9 +111,21 @@ DROP TABLE tmp2;
 -- Test foreign keys
 CREATE TABLE perm_pk_rel (a int PRIMARY KEY);
 CREATE TEMP TABLE temp_pk_rel (a int PRIMARY KEY);
+CREATE GLOBAL TEMP TABLE gtemp_pk_rel (a int PRIMARY KEY);
+CREATE TABLE tmp2 (a int REFERENCES gtemp_pk_rel); -- fail
+CREATE TEMP TABLE tmp2 (a int REFERENCES gtemp_pk_rel); -- fail
 CREATE GLOBAL TEMP TABLE tmp2 (a int REFERENCES perm_pk_rel); -- fail
 CREATE GLOBAL TEMP TABLE tmp2 (a int REFERENCES temp_pk_rel); -- fail
-DROP TABLE perm_pk_rel, temp_pk_rel;
+CREATE GLOBAL TEMP TABLE tmp2 (a int REFERENCES gtemp_pk_rel);
+INSERT INTO gtemp_pk_rel VALUES (1);
+INSERT INTO tmp2 VALUES (1);
+INSERT INTO tmp2 VALUES (2); -- fail
+DELETE FROM gtemp_pk_rel WHERE a = 1; -- fail
+ALTER TABLE tmp2 DROP CONSTRAINT tmp2_a_fkey;
+ALTER TABLE tmp2 ADD FOREIGN KEY (a) REFERENCES gtemp_pk_rel ON DELETE CASCADE;
+DELETE FROM gtemp_pk_rel WHERE a = 1;
+SELECT * FROM tmp2;
+DROP TABLE perm_pk_rel, temp_pk_rel, tmp2;
 
 -- Test ALTER TABLE ... SET TABLESPACE
 CREATE GLOBAL TEMP TABLE tmp2 (a int);
@@ -127,7 +158,7 @@ DROP TABLE tmp2;
 DROP TABLESPACE regress_temp_test_tablespace;
 
 -- Test TRUNCATE
-INSERT INTO tmp1 VALUES (1);
+INSERT INTO tmp1 VALUES (1, 'xxx');
 BEGIN;
 TRUNCATE tmp1;
 SELECT * FROM tmp1;
@@ -156,7 +187,7 @@ TRUNCATE tmp1;
 SELECT * FROM tmp1;
 
 -- Test view creation
-INSERT INTO tmp1 VALUES (1);
+INSERT INTO tmp1 VALUES (1, 'xxx');
 CREATE VIEW v AS SELECT * FROM tmp1;
 SELECT * FROM v;
 DROP VIEW v;

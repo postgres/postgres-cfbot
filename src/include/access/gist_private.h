@@ -399,7 +399,7 @@ typedef struct GiSTOptions
 } GiSTOptions;
 
 /* gist.c */
-extern void gistbuildempty(Relation index);
+extern void gistbuildempty(Relation index, ForkNumber forknum);
 extern bool gistinsert(Relation r, Datum *values, bool *isnull,
 					   ItemPointer ht_ctid, Relation heapRel,
 					   IndexUniqueCheck checkUnique,
