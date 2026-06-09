@@ -1236,6 +1236,7 @@ PinBufferForBlock(Relation rel,
 
 	/* Persistence should be set before */
 	Assert((persistence == RELPERSISTENCE_TEMP ||
+			persistence == RELPERSISTENCE_GLOBAL_TEMP ||
 			persistence == RELPERSISTENCE_PERMANENT ||
 			persistence == RELPERSISTENCE_UNLOGGED));
 
@@ -1245,7 +1246,8 @@ PinBufferForBlock(Relation rel,
 									   smgr->smgr_rlocator.locator.relNumber,
 									   smgr->smgr_rlocator.backend);
 
-	if (persistence == RELPERSISTENCE_TEMP)
+	if (persistence == RELPERSISTENCE_TEMP ||
+		persistence == RELPERSISTENCE_GLOBAL_TEMP)
 		bufHdr = LocalBufferAlloc(smgr, forkNum, blockNum, foundPtr);
 	else
 		bufHdr = BufferAlloc(smgr, persistence, forkNum, blockNum,
@@ -1327,7 +1329,8 @@ ReadBuffer_common(Relation rel, SMgrRelation smgr, char smgr_persistence,
 		IOContext	io_context;
 		IOObject	io_object;
 
-		if (persistence == RELPERSISTENCE_TEMP)
+		if (persistence == RELPERSISTENCE_TEMP ||
+			persistence == RELPERSISTENCE_GLOBAL_TEMP)
 		{
 			io_context = IOCONTEXT_NORMAL;
 			io_object = IOOBJECT_TEMP_RELATION;
@@ -1391,7 +1394,8 @@ StartReadBuffersImpl(ReadBuffersOperation *operation,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot access temporary tables of other sessions")));
 
-	if (operation->persistence == RELPERSISTENCE_TEMP)
+	if (operation->persistence == RELPERSISTENCE_TEMP ||
+		operation->persistence == RELPERSISTENCE_GLOBAL_TEMP)
 	{
 		io_context = IOCONTEXT_NORMAL;
 		io_object = IOOBJECT_TEMP_RELATION;
@@ -1692,7 +1696,8 @@ TrackBufferHit(IOObject io_object, IOContext io_context,
 									  smgr->smgr_rlocator.backend,
 									  true);
 
-	if (persistence == RELPERSISTENCE_TEMP)
+	if (persistence == RELPERSISTENCE_TEMP ||
+		persistence == RELPERSISTENCE_GLOBAL_TEMP)
 		pgBufferUsage.local_blks_hit += 1;
 	else
 		pgBufferUsage.shared_blks_hit += 1;
@@ -1763,7 +1768,8 @@ WaitReadBuffers(ReadBuffersOperation *operation)
 	IOObject	io_object;
 	bool		needed_wait = false;
 
-	if (operation->persistence == RELPERSISTENCE_TEMP)
+	if (operation->persistence == RELPERSISTENCE_TEMP ||
+		operation->persistence == RELPERSISTENCE_GLOBAL_TEMP)
 	{
 		io_context = IOCONTEXT_NORMAL;
 		io_object = IOOBJECT_TEMP_RELATION;
@@ -1954,7 +1960,8 @@ AsyncReadBuffers(ReadBuffersOperation *operation, int *nblocks_progress)
 	instr_time	io_start;
 	StartBufferIOResult status;
 
-	if (persistence == RELPERSISTENCE_TEMP)
+	if (persistence == RELPERSISTENCE_TEMP ||
+		persistence == RELPERSISTENCE_GLOBAL_TEMP)
 	{
 		io_context = IOCONTEXT_NORMAL;
 		io_object = IOOBJECT_TEMP_RELATION;
@@ -1973,7 +1980,8 @@ AsyncReadBuffers(ReadBuffersOperation *operation, int *nblocks_progress)
 	if (flags & READ_BUFFERS_SYNCHRONOUSLY)
 		ioh_flags |= PGAIO_HF_SYNCHRONOUS;
 
-	if (persistence == RELPERSISTENCE_TEMP)
+	if (persistence == RELPERSISTENCE_TEMP ||
+		persistence == RELPERSISTENCE_GLOBAL_TEMP)
 		ioh_flags |= PGAIO_HF_REFERENCES_LOCAL;
 
 	/*
@@ -2133,7 +2141,8 @@ AsyncReadBuffers(ReadBuffersOperation *operation, int *nblocks_progress)
 	pgaio_io_set_handle_data_32(ioh, (uint32 *) io_buffers, io_buffers_len);
 
 	pgaio_io_register_callbacks(ioh,
-								persistence == RELPERSISTENCE_TEMP ?
+								persistence == RELPERSISTENCE_TEMP ||
+								persistence == RELPERSISTENCE_GLOBAL_TEMP ?
 								PGAIO_HCB_LOCAL_BUFFER_READV :
 								PGAIO_HCB_SHARED_BUFFER_READV,
 								flags);
@@ -2156,7 +2165,8 @@ AsyncReadBuffers(ReadBuffersOperation *operation, int *nblocks_progress)
 	pgstat_count_io_op_time(io_object, io_context, IOOP_READ,
 							io_start, 1, io_buffers_len * BLCKSZ);
 
-	if (persistence == RELPERSISTENCE_TEMP)
+	if (persistence == RELPERSISTENCE_TEMP ||
+		persistence == RELPERSISTENCE_GLOBAL_TEMP)
 		pgBufferUsage.local_blks_read += io_buffers_len;
 	else
 		pgBufferUsage.shared_blks_read += io_buffers_len;
@@ -2766,7 +2776,8 @@ ExtendBufferedRelCommon(BufferManagerRelation bmr,
 										 BMR_GET_SMGR(bmr)->smgr_rlocator.backend,
 										 extend_by);
 
-	if (bmr.relpersistence == RELPERSISTENCE_TEMP)
+	if (bmr.relpersistence == RELPERSISTENCE_TEMP ||
+		bmr.relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
 	{
 		/*
 		 * Reject attempts to extend non-local temporary relations; we have no
@@ -5500,9 +5511,10 @@ CreateAndCopyRelationData(RelFileLocator src_rlocator,
 	 * Create and copy all forks of the relation.  During create database we
 	 * have a separate cleanup mechanism which deletes complete database
 	 * directory.  Therefore, each individual relation doesn't need to be
-	 * registered for cleanup.
+	 * registered for cleanup.  Also, the relid isn't needed, since it's not a
+	 * global temporary relation.
 	 */
-	RelationCreateStorage(dst_rlocator, relpersistence, false);
+	RelationCreateStorage(InvalidOid, dst_rlocator, relpersistence, false);
 
 	/* copy main fork. */
 	RelationCopyStorageUsingBuffer(src_rlocator, dst_rlocator, MAIN_FORKNUM,

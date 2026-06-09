@@ -58,7 +58,7 @@ typedef struct RelationData
 	SMgrRelation rd_smgr;		/* cached file handle, or NULL */
 	int			rd_refcnt;		/* reference count */
 	ProcNumber	rd_backend;		/* owning backend's proc number, if temp rel */
-	bool		rd_islocaltemp; /* rel is a temp rel of this session */
+	bool		rd_islocaltemp; /* rel is a local temp rel of this session */
 	bool		rd_isnailed;	/* rel is nailed in cache */
 	bool		rd_isvalid;		/* relcache entry is valid */
 	bool		rd_indexvalid;	/* is rd_indexlist valid? (also rd_pkindex and
@@ -647,13 +647,15 @@ RelationCloseSmgr(Relation relation)
  *		True if relation's pages are stored in local buffers.
  */
 #define RelationUsesLocalBuffers(relation) \
-	((relation)->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
+	((relation)->rd_rel->relpersistence == RELPERSISTENCE_TEMP || \
+	 (relation)->rd_rel->relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
 
 /*
  * RELATION_IS_LOCAL
- *		If a rel is either temp or newly created in the current transaction,
- *		it can be assumed to be accessible only to the current backend.
- *		This is typically used to decide that we can skip acquiring locks.
+ *		If a rel is either local temp or newly created in the current
+ *		transaction, it can be assumed to be accessible only to the current
+ *		backend.  This is typically used to decide that we can skip acquiring
+ *		locks.
  *
  * Beware of multiple eval of argument
  */
@@ -663,7 +665,8 @@ RelationCloseSmgr(Relation relation)
 
 /*
  * RELATION_IS_OTHER_TEMP
- *		Test for a temporary relation that belongs to some other session.
+ *		Test for a local temporary relation that belongs to some other
+ *		session.
  *
  * Reading another session's temp-table data through never works right:
  * the owning session keeps the data in its private local buffer pool,
@@ -679,6 +682,13 @@ RelationCloseSmgr(Relation relation)
 #define RELATION_IS_OTHER_TEMP(relation) \
 	((relation)->rd_rel->relpersistence == RELPERSISTENCE_TEMP && \
 	 !(relation)->rd_islocaltemp)
+
+/*
+ * RELATION_IS_GLOBAL_TEMP
+ *		True if the relation is a global temporary relation.
+ */
+#define RELATION_IS_GLOBAL_TEMP(relation) \
+	((relation)->rd_rel->relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
 
 
 /*
@@ -728,5 +738,6 @@ RelationCloseSmgr(Relation relation)
 /* routines in utils/cache/relcache.c */
 extern void RelationIncrementReferenceCount(Relation rel);
 extern void RelationDecrementReferenceCount(Relation rel);
+extern void RelationMarkInvalid(Oid relid);
 
 #endif							/* REL_H */

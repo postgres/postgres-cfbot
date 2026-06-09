@@ -101,7 +101,8 @@ check_publication_add_relation(PublicationRelInfo *pri)
 				 errdetail("This operation is not supported for conflict log tables.")));
 
 	/* UNLOGGED and TEMP relations cannot be part of publication. */
-	if (targetrel->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
+	if (targetrel->rd_rel->relpersistence == RELPERSISTENCE_TEMP ||
+		targetrel->rd_rel->relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg(errormsg, relname),

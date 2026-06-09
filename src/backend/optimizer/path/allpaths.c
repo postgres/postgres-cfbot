@@ -649,6 +649,8 @@ static void
 set_rel_consider_parallel(PlannerInfo *root, RelOptInfo *rel,
 						  RangeTblEntry *rte)
 {
+	char		relpersistence;
+
 	/*
 	 * The flag has previously been initialized to false, so we can just
 	 * return if it becomes clear that we can't safely set it.
@@ -676,7 +678,9 @@ set_rel_consider_parallel(PlannerInfo *root, RelOptInfo *rel,
 			 * the rest of the necessary infrastructure right now anyway.  So
 			 * for now, bail out if we see a temporary table.
 			 */
-			if (get_rel_persistence(rte->relid) == RELPERSISTENCE_TEMP)
+			relpersistence = get_rel_persistence(rte->relid);
+			if (relpersistence == RELPERSISTENCE_TEMP ||
+				relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
 				return;
 
 			/*

@@ -30,6 +30,7 @@
 #include "access/xlog.h"
 #include "access/xloginsert.h"
 #include "catalog/catalog.h"
+#include "catalog/global_temp.h"
 #include "catalog/heap.h"
 #include "catalog/index.h"
 #include "catalog/namespace.h"
@@ -173,6 +174,7 @@ typedef struct AlteredTableInfo
 	Oid			relid;			/* Relation to work on */
 	char		relkind;		/* Its relkind */
 	TupleDesc	oldDesc;		/* Pre-modification tuple descriptor */
+	char		oldrelpersistence;	/* Pre-modification relpersistence */
 
 	/*
 	 * Transiently set during Phase 2, normally set to NULL.
@@ -820,11 +822,17 @@ DefineRelation(CreateStmt *stmt, char relkind, Oid ownerId,
 	/*
 	 * Check consistency of arguments
 	 */
-	if (stmt->oncommit != ONCOMMIT_NOOP
-		&& stmt->relation->relpersistence != RELPERSISTENCE_TEMP)
+	if (stmt->oncommit != ONCOMMIT_NOOP &&
+		stmt->relation->relpersistence != RELPERSISTENCE_TEMP &&
+		stmt->relation->relpersistence != RELPERSISTENCE_GLOBAL_TEMP)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
 				 errmsg("ON COMMIT can only be used on temporary tables")));
+	if (stmt->oncommit == ONCOMMIT_DROP &&
+		stmt->relation->relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+				 errmsg("ON COMMIT DROP cannot be used on global temporary tables")));
 
 	if (stmt->partspec != NULL)
 	{
@@ -1690,7 +1698,8 @@ RemoveRelations(DropStmt *drop)
 		 * callback retrieved the rel's persistence for us.
 		 */
 		if (drop->concurrent &&
-			state.actual_relpersistence != RELPERSISTENCE_TEMP)
+			state.actual_relpersistence != RELPERSISTENCE_TEMP &&
+			state.actual_relpersistence != RELPERSISTENCE_GLOBAL_TEMP)
 		{
 			Assert(list_length(drop->objects) == 1 &&
 				   drop->removeType == OBJECT_INDEX);
@@ -2520,6 +2529,133 @@ storage_name(char c)
 	}
 }
 
+/*
+ * check_child_persistence
+ *		Check whether a child relation with the specified relperistence is
+ *		allowed to inherit from or be a partition of the specified parent
+ *		relation.
+ */
+static void
+check_child_persistence(Relation parent, char child_persistence,
+						bool is_partition, bool is_attach)
+{
+	switch (parent->rd_rel->relpersistence)
+	{
+		case RELPERSISTENCE_TEMP:
+
+			/*
+			 * Children of local temporary tables must be local temporary,
+			 * since the parent will be dropped when the session ends, which
+			 * would leave any other type of child hanging.
+			 */
+			if (child_persistence == RELPERSISTENCE_GLOBAL_TEMP)
+			{
+				if (is_partition && is_attach)
+					ereport(ERROR,
+							errcode(ERRCODE_WRONG_OBJECT_TYPE),
+							errmsg("cannot attach a global temporary relation as partition of local temporary relation \"%s\"",
+								   RelationGetRelationName(parent)));
+				else if (is_partition)
+					ereport(ERROR,
+							errcode(ERRCODE_WRONG_OBJECT_TYPE),
+							errmsg("cannot create a global temporary relation as partition of local temporary relation \"%s\"",
+								   RelationGetRelationName(parent)));
+				else
+					ereport(ERROR,
+							errcode(ERRCODE_WRONG_OBJECT_TYPE),
+							errmsg("global temporary relation cannot inherit from local temporary relation \"%s\"",
+								   RelationGetRelationName(parent)));
+			}
+			else if (child_persistence != RELPERSISTENCE_TEMP)
+			{
+				if (is_partition && is_attach)
+					ereport(ERROR,
+							errcode(ERRCODE_WRONG_OBJECT_TYPE),
+							errmsg("cannot attach a permanent relation as partition of local temporary relation \"%s\"",
+								   RelationGetRelationName(parent)));
+				else if (is_partition)
+					ereport(ERROR,
+							errcode(ERRCODE_WRONG_OBJECT_TYPE),
+							errmsg("cannot create a permanent relation as partition of local temporary relation \"%s\"",
+								   RelationGetRelationName(parent)));
+				else
+					ereport(ERROR,
+							errcode(ERRCODE_WRONG_OBJECT_TYPE),
+							errmsg("permanent relation cannot inherit from local temporary relation \"%s\"",
+								   RelationGetRelationName(parent)));
+			}
+			break;
+
+		case RELPERSISTENCE_GLOBAL_TEMP:
+
+			/*
+			 * Partitions of global temporary tables must be global temporary,
+			 * but inheritance children may be of any kind.
+			 */
+			if (child_persistence == RELPERSISTENCE_TEMP && is_partition)
+			{
+				if (is_attach)
+					ereport(ERROR,
+							errcode(ERRCODE_WRONG_OBJECT_TYPE),
+							errmsg("cannot attach a local temporary relation as partition of global temporary relation \"%s\"",
+								   RelationGetRelationName(parent)));
+				else
+					ereport(ERROR,
+							errcode(ERRCODE_WRONG_OBJECT_TYPE),
+							errmsg("cannot create a local temporary relation as partition of global temporary relation \"%s\"",
+								   RelationGetRelationName(parent)));
+			}
+			else if (child_persistence != RELPERSISTENCE_GLOBAL_TEMP && is_partition)
+			{
+				if (is_attach)
+					ereport(ERROR,
+							errcode(ERRCODE_WRONG_OBJECT_TYPE),
+							errmsg("cannot attach a permanent relation as partition of global temporary relation \"%s\"",
+								   RelationGetRelationName(parent)));
+				else
+					ereport(ERROR,
+							errcode(ERRCODE_WRONG_OBJECT_TYPE),
+							errmsg("cannot create a permanent relation as partition of global temporary relation \"%s\"",
+								   RelationGetRelationName(parent)));
+			}
+			break;
+
+		default:
+
+			/*
+			 * Partitions of permanent tables must be permanent, but
+			 * inheritance children may be of any kind.
+			 */
+			if (child_persistence == RELPERSISTENCE_TEMP && is_partition)
+			{
+				if (is_attach)
+					ereport(ERROR,
+							errcode(ERRCODE_WRONG_OBJECT_TYPE),
+							errmsg("cannot attach a local temporary relation as partition of permanent relation \"%s\"",
+								   RelationGetRelationName(parent)));
+				else
+					ereport(ERROR,
+							errcode(ERRCODE_WRONG_OBJECT_TYPE),
+							errmsg("cannot create a local temporary relation as partition of permanent relation \"%s\"",
+								   RelationGetRelationName(parent)));
+			}
+			else if (child_persistence == RELPERSISTENCE_GLOBAL_TEMP && is_partition)
+			{
+				if (is_attach)
+					ereport(ERROR,
+							errcode(ERRCODE_WRONG_OBJECT_TYPE),
+							errmsg("cannot attach a global temporary relation as partition of permanent relation \"%s\"",
+								   RelationGetRelationName(parent)));
+				else
+					ereport(ERROR,
+							errcode(ERRCODE_WRONG_OBJECT_TYPE),
+							errmsg("cannot create a global temporary relation as partition of permanent relation \"%s\"",
+								   RelationGetRelationName(parent)));
+			}
+			break;
+	}
+}
+
 /*----------
  * MergeAttributes
  *		Returns new schema given initial schema and superclasses.
@@ -2755,27 +2891,8 @@ MergeAttributes(List *columns, const List *supers, char relpersistence,
 					 errmsg("inherited relation \"%s\" is not a table or foreign table",
 							RelationGetRelationName(relation))));
 
-		/*
-		 * If the parent is permanent, so must be all of its partitions.  Note
-		 * that inheritance allows that case.
-		 */
-		if (is_partition &&
-			relation->rd_rel->relpersistence != RELPERSISTENCE_TEMP &&
-			relpersistence == RELPERSISTENCE_TEMP)
-			ereport(ERROR,
-					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-					 errmsg("cannot create a temporary relation as partition of permanent relation \"%s\"",
-							RelationGetRelationName(relation))));
-
-		/* Permanent rels cannot inherit from temporary ones */
-		if (relpersistence != RELPERSISTENCE_TEMP &&
-			relation->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
-			ereport(ERROR,
-					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-					 errmsg(!is_partition
-							? "cannot inherit from temporary relation \"%s\""
-							: "cannot create a permanent relation as partition of temporary relation \"%s\"",
-							RelationGetRelationName(relation))));
+		/* Check if it's OK to create a child with this relpersistence */
+		check_child_persistence(relation, relpersistence, is_partition, false);
 
 		/* If existing rel is temp, it must belong to this session */
 		if (RELATION_IS_OTHER_TEMP(relation))
@@ -3833,10 +3950,12 @@ SetRelationTableSpace(Relation rel,
 	UnlockTuple(pg_class, &otid, InplaceUpdateTupleLock);
 
 	/*
-	 * Record dependency on tablespace.  This is only required for relations
-	 * that have no physical storage.
+	 * Record dependency on tablespace.  This is required for relations that
+	 * have no physical storage, and for global temporary relations whose
+	 * physical storage is temporary.
 	 */
-	if (!RELKIND_HAS_STORAGE(rel->rd_rel->relkind))
+	if (!RELKIND_HAS_STORAGE(rel->rd_rel->relkind) ||
+		RELATION_IS_GLOBAL_TEMP(rel))
 		changeDependencyOnTablespace(RelationRelationId, reloid,
 									 rd_rel->reltablespace);
 
@@ -5991,6 +6110,18 @@ ATRewriteTables(AlterTableStmt *parsetree, List **wqueue, LOCKMODE lockmode,
 						 errmsg("cannot rewrite temporary tables of other sessions")));
 
 			/*
+			 * Don't allow rewrite on global temporary tables, if they're
+			 * being used by other backends ... we have no way to rewrite
+			 * local storage of another backend.
+			 */
+			if (RELATION_IS_GLOBAL_TEMP(OldHeap) &&
+				IsOtherUsingGlobalTempRelation(RelationGetRelid(OldHeap)))
+				ereport(ERROR,
+						errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("cannot rewrite global temporary table \"%s\" because it is being used in another session",
+							   RelationGetRelationName(OldHeap)));
+
+			/*
 			 * Select destination tablespace (same as original unless user
 			 * requested a change)
 			 */
@@ -6086,11 +6217,22 @@ ATRewriteTables(AlterTableStmt *parsetree, List **wqueue, LOCKMODE lockmode,
 			/*
 			 * If required, test the current data within the table against new
 			 * constraints generated by ALTER TABLE commands, but don't
-			 * rebuild data.
+			 * rebuild data.  Don't allow this for global temporary tables, if
+			 * they're being used by other backends ... we have no way to scan
+			 * local storage of another backend.
 			 */
 			if (tab->constraints != NIL || tab->verify_new_notnull ||
 				tab->partition_constraint != NULL)
+			{
+				if (tab->oldrelpersistence == RELPERSISTENCE_GLOBAL_TEMP &&
+					IsOtherUsingGlobalTempRelation(tab->relid))
+					ereport(ERROR,
+							errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							errmsg("cannot add or alter constraints of global temporary table \"%s\" because it is being used in another session",
+								   get_rel_name(tab->relid)));
+
 				ATRewriteTable(tab, InvalidOid);
+			}
 
 			/*
 			 * If we had SET TABLESPACE but no reason to reconstruct tuples,
@@ -6652,6 +6794,7 @@ ATGetQueueEntry(List **wqueue, Relation rel)
 	tab->rel = NULL;			/* set later */
 	tab->relkind = rel->rd_rel->relkind;
 	tab->oldDesc = CreateTupleDescCopyConstr(RelationGetDescr(rel));
+	tab->oldrelpersistence = rel->rd_rel->relpersistence;
 	tab->newAccessMethod = InvalidOid;
 	tab->chgAccessMethod = false;
 	tab->newTableSpace = InvalidOid;
@@ -10248,11 +10391,17 @@ ATAddForeignKeyConstraint(List **wqueue, AlteredTableInfo *tab, Relation rel,
 			if (pkrel->rd_rel->relpersistence != RELPERSISTENCE_TEMP)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
-						 errmsg("constraints on temporary tables may reference only temporary tables")));
+						 errmsg("constraints on local temporary tables may reference only local temporary tables")));
 			if (!pkrel->rd_islocaltemp || !rel->rd_islocaltemp)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
-						 errmsg("constraints on temporary tables must involve temporary tables of this session")));
+						 errmsg("constraints on local temporary tables must involve local temporary tables of this session")));
+			break;
+		case RELPERSISTENCE_GLOBAL_TEMP:
+			if (!RELATION_IS_GLOBAL_TEMP(pkrel))
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+						 errmsg("constraints on global temporary tables may reference only global temporary tables")));
 			break;
 	}
 
@@ -17845,7 +17994,8 @@ index_copy_data(Relation rel, RelFileLocator newrlocator)
 	 * NOTE: any conflict in relfilenumber value will be caught in
 	 * RelationCreateStorage().
 	 */
-	dstrel = RelationCreateStorage(newrlocator, rel->rd_rel->relpersistence, true);
+	dstrel = RelationCreateStorage(rel->rd_id, newrlocator,
+								   rel->rd_rel->relpersistence, true);
 
 	/* copy main fork */
 	RelationCopyStorage(RelationGetSmgr(rel), dstrel, MAIN_FORKNUM,
@@ -19533,6 +19683,7 @@ ATPrepChangePersistence(AlteredTableInfo *tab, Relation rel, bool toLogged)
 	switch (rel->rd_rel->relpersistence)
 	{
 		case RELPERSISTENCE_TEMP:
+		case RELPERSISTENCE_GLOBAL_TEMP:
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
 					 errmsg("cannot change logged status of table \"%s\" because it is temporary",
@@ -21126,21 +21277,8 @@ ATExecAttachPartition(List **wqueue, Relation rel, PartitionCmd *cmd,
 						   RelationGetRelationName(rel),
 						   RelationGetRelationName(attachrel))));
 
-	/* If the parent is permanent, so must be all of its partitions. */
-	if (rel->rd_rel->relpersistence != RELPERSISTENCE_TEMP &&
-		attachrel->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
-		ereport(ERROR,
-				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("cannot attach a temporary relation as partition of permanent relation \"%s\"",
-						RelationGetRelationName(rel))));
-
-	/* Temp parent cannot have a partition that is itself not a temp */
-	if (rel->rd_rel->relpersistence == RELPERSISTENCE_TEMP &&
-		attachrel->rd_rel->relpersistence != RELPERSISTENCE_TEMP)
-		ereport(ERROR,
-				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("cannot attach a permanent relation as partition of temporary relation \"%s\"",
-						RelationGetRelationName(rel))));
+	/* Check if it's OK to attach a partition with this relpersistence */
+	check_child_persistence(rel, attachrel->rd_rel->relpersistence, true, true);
 
 	/* If the parent is temp, it must belong to this session */
 	if (RELATION_IS_OTHER_TEMP(rel))

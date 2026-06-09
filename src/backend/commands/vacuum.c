@@ -35,6 +35,7 @@
 #include "access/tableam.h"
 #include "access/transam.h"
 #include "access/xact.h"
+#include "catalog/global_temp.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_inherits.h"
@@ -1086,6 +1087,11 @@ get_all_vacuum_rels(MemoryContext vac_context, int options)
 		/* Skip temp relations belonging to other sessions */
 		if (classForm->relpersistence == RELPERSISTENCE_TEMP &&
 			!isTempOrTempToastNamespace(classForm->relnamespace))
+			continue;
+
+		/* Skip global temporary relations not in use */
+		if (classForm->relpersistence == RELPERSISTENCE_GLOBAL_TEMP &&
+			!IsGlobalTempRelationInUse(relid))
 			continue;
 
 		/* check permissions of relation */

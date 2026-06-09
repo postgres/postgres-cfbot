@@ -503,6 +503,9 @@ get_rel_infos_query(void)
 					  "         ON c.relnamespace = n.oid "
 					  "  WHERE relkind IN (" CppAsString2(RELKIND_RELATION) ", "
 					  CppAsString2(RELKIND_MATVIEW) "%s) AND "
+	/* exclude global temporary tables */
+					  "    relpersistence != "
+					  CppAsString2(RELPERSISTENCE_GLOBAL_TEMP) " AND "
 	/* exclude possible orphaned temp tables */
 					  "    ((n.nspname !~ '^pg_temp_' AND "
 					  "      n.nspname !~ '^pg_toast_temp_' AND "
