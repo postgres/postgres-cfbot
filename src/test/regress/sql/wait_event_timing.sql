@@ -51,4 +51,29 @@ WHERE pid = pg_backend_pid() AND wait_event = 'PgSleep';
 SELECT count(*) AS rows_for_bogus_pid
 FROM pg_stat_get_wait_event_timing(-1);
 
+-- Overflow/reset counters for this backend.  A simple test backend uses
+-- few LWLock tranches and no out-of-range classes, so both overflow
+-- counters are zero, and a fresh backend has not been reset.
+SELECT lwlock_overflow_count, flat_overflow_count, reset_count
+FROM pg_stat_wait_event_timing_overflow
+WHERE pid = pg_backend_pid();
+
+-- Resetting our own backend is synchronous: the PgSleep row is cleared and
+-- reset_count advances.  (We filter to PgSleep because inter-command waits
+-- such as ClientRead may be recorded again before the next statement runs.)
+SELECT pg_stat_reset_wait_event_timing(NULL);
+SELECT count(*) AS pgsleep_rows_after_reset
+FROM pg_stat_wait_event_timing
+WHERE pid = pg_backend_pid() AND wait_event = 'PgSleep';
+SELECT reset_count
+FROM pg_stat_wait_event_timing_overflow
+WHERE pid = pg_backend_pid();
+
+-- The pid argument defaults to NULL, so a no-argument call resets the
+-- caller's own backend.
+SELECT pg_stat_reset_wait_event_timing();
+
+-- Resetting an unknown pid is a silent no-op, not an error.
+SELECT pg_stat_reset_wait_event_timing(2147483647);
+
 RESET wait_event_capture;

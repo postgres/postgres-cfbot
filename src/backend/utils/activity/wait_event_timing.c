@@ -61,11 +61,41 @@ const struct config_enum_entry wait_event_capture_options[] = {
 #include "funcapi.h"
 
 Datum		pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS);
+Datum		pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS);
+Datum		pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS);
+Datum		pg_stat_reset_wait_event_timing_all(PG_FUNCTION_ARGS);
 
 Datum
 pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 {
 	InitMaterializedSRF(fcinfo, 0);
+	PG_RETURN_VOID();
+}
+
+Datum
+pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS)
+{
+	InitMaterializedSRF(fcinfo, 0);
+	PG_RETURN_VOID();
+}
+
+Datum
+pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("wait event capture is not supported by this build"),
+			 errhint("Compile PostgreSQL with --enable-wait-event-timing.")));
+	PG_RETURN_VOID();
+}
+
+Datum
+pg_stat_reset_wait_event_timing_all(PG_FUNCTION_ARGS)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("wait event capture is not supported by this build"),
+			 errhint("Compile PostgreSQL with --enable-wait-event-timing.")));
 	PG_RETURN_VOID();
 }
 
@@ -125,6 +155,7 @@ pgstat_reset_wait_event_timing_storage(void)
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "port/pg_bitutils.h"
+#include "storage/latch.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "storage/procnumber.h"
@@ -143,6 +174,14 @@ pgstat_reset_wait_event_timing_storage(void)
 
 /* Pointer to this backend's timing state in shared memory. */
 WaitEventTimingState *my_wait_event_timing = NULL;
+
+/*
+ * Backend-local copy of the last reset generation this backend acted on.
+ * Compared against the shared reset_generation at every wait_end; when they
+ * differ, the owning backend performs the reset of its own counters on
+ * behalf of whoever called pg_stat_reset_wait_event_timing(target).
+ */
+static uint32 my_last_reset_generation = 0;
 
 /*
  * Backend-local cached pointer to the start of the shared slot array, set
@@ -407,6 +446,7 @@ WaitEventTimingShmemInit(void *arg)
 		LWLockTimingHashEntry *entries;
 		int			j;
 
+		pg_atomic_init_u32(&slot->reset_generation, 0);
 		slot->lwlock_hash.num_used = 0;
 		slot->lwlock_hash.hash_size = wait_event_timing_hash_size;
 		slot->lwlock_hash.max_entries = wait_event_timing_max_entries;
@@ -449,8 +489,16 @@ pgstat_set_wait_event_timing_storage(int procNumber)
 	lwlock_timing_hash_clear(slot);
 	slot->lwlock_overflow_count = 0;
 	slot->flat_overflow_count = 0;
+	slot->reset_count = 0;
 	slot->current_event = 0;
 	INSTR_TIME_SET_ZERO(slot->wait_start);
+
+	/*
+	 * Adopt the current shared reset generation as our baseline; the
+	 * reset_generation counter persists across slot reuse, so a new backend
+	 * must not treat the prior occupant's resets as its own.
+	 */
+	my_last_reset_generation = pg_atomic_read_u32(&slot->reset_generation);
 
 	/* Publish only after the slot is fully initialised. */
 	my_wait_event_timing = slot;
@@ -524,6 +572,7 @@ void
 pgstat_report_wait_end_timing(int capture_level)
 {
 	uint32		event;
+	uint32		cur_reset_gen;
 
 	(void) capture_level;
 
@@ -531,6 +580,27 @@ pgstat_report_wait_end_timing(int capture_level)
 		return;
 
 	event = my_wait_event_timing->current_event;
+
+	/*
+	 * Service a pending cross-backend reset request.  A single relaxed atomic
+	 * load; when the shared generation has advanced past the value we last
+	 * acted on, clear our own counters on behalf of the requester and record
+	 * the reset.  wait_start is left untouched so the in-flight measurement
+	 * still lands (in the freshly-zeroed counters), and current_event is
+	 * zeroed so external readers do not see stale state.
+	 */
+	cur_reset_gen = pg_atomic_read_u32(&my_wait_event_timing->reset_generation);
+	if (cur_reset_gen != my_last_reset_generation)
+	{
+		memset(my_wait_event_timing->events, 0,
+			   sizeof(my_wait_event_timing->events));
+		lwlock_timing_hash_clear(my_wait_event_timing);
+		my_wait_event_timing->reset_count++;
+		my_wait_event_timing->lwlock_overflow_count = 0;
+		my_wait_event_timing->flat_overflow_count = 0;
+		my_wait_event_timing->current_event = 0;
+		my_last_reset_generation = cur_reset_gen;
+	}
 
 	if (event != 0 && !INSTR_TIME_IS_ZERO(my_wait_event_timing->wait_start))
 	{
@@ -754,6 +824,178 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 			}
 		}
 	}
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * SQL function: pg_stat_get_wait_event_timing_overflow(pid int4, OUT ...)
+ *
+ * Exposes the per-backend truncation counters that the recording path
+ * maintains: lwlock_overflow_count (LWLock waits dropped because the
+ * per-backend tranche hash was full), flat_overflow_count (events whose
+ * class index was out of range), and reset_count (resets the backend has
+ * observed and acted on).  pid has the same optional semantics as
+ * pg_stat_get_wait_event_timing().
+ */
+Datum
+pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	int			start_idx;
+	int			end_idx;
+	int			backend_idx;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	if (WaitEventTimingArray == NULL)
+		PG_RETURN_VOID();
+
+	if (!wait_event_timing_pid_range(fcinfo, &start_idx, &end_idx))
+		PG_RETURN_VOID();
+
+	for (backend_idx = start_idx; backend_idx < end_idx; backend_idx++)
+	{
+		WaitEventTimingState *state = wet_slot(backend_idx);
+		PgBackendStatus *beentry;
+		Datum		values[6];
+		bool		nulls[6];
+
+		beentry = pgstat_get_beentry_by_proc_number(backend_idx);
+		if (beentry == NULL)
+			continue;
+		if (!HAS_PGSTAT_PERMISSIONS(beentry->st_userid))
+			continue;
+
+		memset(nulls, 0, sizeof(nulls));
+
+		values[0] = Int32GetDatum(beentry->st_procpid);
+		values[1] = CStringGetTextDatum(GetBackendTypeDesc(beentry->st_backendType));
+		values[2] = Int32GetDatum(backend_idx);
+		values[3] = Int64GetDatum(state->lwlock_overflow_count);
+		values[4] = Int64GetDatum(state->flat_overflow_count);
+		values[5] = Int64GetDatum(state->reset_count);
+
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * Request a cross-backend self-reset on the given slot: bump the slot's
+ * reset_generation and wake the target so it promptly observes the change
+ * and clears its own counters at its next wait_end.  Lock-free: only the
+ * owning backend ever writes its statistics.
+ */
+static void
+wait_event_timing_request_reset(int slot_idx)
+{
+	Assert(slot_idx >= 0 && slot_idx < NUM_WAIT_EVENT_TIMING_SLOTS);
+
+	if (WaitEventTimingArray == NULL)
+		return;
+
+	pg_atomic_fetch_add_u32(&wet_slot(slot_idx)->reset_generation, 1);
+
+	/*
+	 * The slot index is also the PGPROC array index.  Waking the target
+	 * shortens the time before it completes its current wait and notices the
+	 * request; setting a latch on a slot with no live owner is harmless.
+	 */
+	if (ProcGlobal != NULL && ProcGlobal->allProcs != NULL)
+		SetLatch(&ProcGlobal->allProcs[slot_idx].procLatch);
+}
+
+/*
+ * SQL function: pg_stat_reset_wait_event_timing(pid int4)
+ *
+ *   NULL or own pid : reset the caller's own counters synchronously.
+ *   another pid     : request a cross-backend reset (pg_signal_backend).
+ *   unknown pid     : silent no-op.
+ *
+ * Cross-backend resets are asynchronous: the target clears its counters at
+ * its next wait_end.  Callers needing read-after-reset semantics should
+ * target their own backend, or poll reset_count in
+ * pg_stat_wait_event_timing_overflow until it increments.
+ */
+Datum
+pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
+{
+	int			target_pid;
+	PGPROC	   *proc;
+	int			procNumber;
+
+	if (PG_ARGISNULL(0) || PG_GETARG_INT32(0) == MyProcPid)
+	{
+		/*
+		 * Own backend: synchronous, no lock needed (single writer).
+		 * wait_start is already zero (every wait_end zeroes it and we cannot
+		 * be mid-wait while running this function), so there is no in-flight
+		 * measurement to preserve.
+		 */
+		if (my_wait_event_timing != NULL)
+		{
+			memset(my_wait_event_timing->events, 0,
+				   sizeof(my_wait_event_timing->events));
+			lwlock_timing_hash_clear(my_wait_event_timing);
+			my_wait_event_timing->reset_count++;
+			my_wait_event_timing->lwlock_overflow_count = 0;
+			my_wait_event_timing->flat_overflow_count = 0;
+			my_wait_event_timing->current_event = 0;
+		}
+		PG_RETURN_VOID();
+	}
+
+	/*
+	 * Cross-backend reset requires pg_signal_backend, matching
+	 * pg_stat_reset_backend_stats(pid): anyone who can terminate the target
+	 * backend can already destroy more forensic state than a counter wipe.
+	 */
+	if (!has_privs_of_role(GetUserId(), ROLE_PG_SIGNAL_BACKEND))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied to reset another backend's wait event timing"),
+				 errdetail("Only roles with privileges of the \"pg_signal_backend\" role may reset another backend's wait event timing.")));
+
+	target_pid = PG_GETARG_INT32(0);
+
+	proc = BackendPidGetProc(target_pid);
+	if (proc == NULL)
+		proc = AuxiliaryPidGetProc(target_pid);
+	if (proc == NULL)
+		PG_RETURN_VOID();		/* unknown/dead pid: silent no-op */
+
+	procNumber = GetNumberFromPGProc(proc);
+	if (procNumber < 0 || procNumber >= NUM_WAIT_EVENT_TIMING_SLOTS)
+		PG_RETURN_VOID();
+
+	wait_event_timing_request_reset(procNumber);
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * SQL function: pg_stat_reset_wait_event_timing_all()
+ *
+ * Request a reset on every backend.  Execution is revoked from PUBLIC by
+ * default (the blast radius is the whole cluster, a different decision
+ * from the per-backend variant); administrators can delegate with GRANT.
+ */
+Datum
+pg_stat_reset_wait_event_timing_all(PG_FUNCTION_ARGS)
+{
+	int			i;
+
+	/*
+	 * Execution is revoked from PUBLIC in system_views.sql; administrators
+	 * can delegate with GRANT EXECUTE.
+	 */
+	if (WaitEventTimingArray == NULL)
+		PG_RETURN_VOID();
+
+	for (i = 0; i < NUM_WAIT_EVENT_TIMING_SLOTS; i++)
+		wait_event_timing_request_reset(i);
 
 	PG_RETURN_VOID();
 }

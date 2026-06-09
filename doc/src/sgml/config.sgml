@@ -9288,13 +9288,17 @@ GRANT SET ON PARAMETER wait_event_capture TO pg_monitor;
         Sets the maximum number of distinct LWLock tranches whose timing is
         recorded individually per backend.  PostgreSQL maintains a
         per-backend hash table mapping each tranche the backend encounters
-        to its histogram; once the table fills, further tranches are not
-        individually timed.  Sized at server start; this parameter has no
-        effect on builds compiled without
+        to its histogram; once the table fills, further tranches are
+        counted against <structfield>lwlock_overflow_count</structfield> in
+        <link linkend="monitoring-pg-stat-wait-event-timing-overflow-view">
+        <structname>pg_stat_wait_event_timing_overflow</structname></link>
+        and not individually timed.  Sized at server start; this parameter
+        has no effect on builds compiled without
         <option>--enable-wait-event-timing</option>.  The default is
         <literal>192</literal>; raise it if your installation loads many
-        extensions that register their own LWLock tranches.  This parameter
-        can only be set at server start.
+        extensions that register their own LWLock tranches and you observe
+        a non-zero <structfield>lwlock_overflow_count</structfield>.  This
+        parameter can only be set at server start.
        </para>
       </listitem>
      </varlistentry>

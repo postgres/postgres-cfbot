@@ -2437,6 +2437,13 @@ pg_stat_wait_event_timing| SELECT pid,
     max_time_us,
     histogram
    FROM pg_stat_get_wait_event_timing(NULL::integer) t(pid, backend_type, procnumber, wait_event_type, wait_event, calls, total_time_ms, avg_time_us, max_time_us, histogram);
+pg_stat_wait_event_timing_overflow| SELECT pid,
+    backend_type,
+    procnumber,
+    lwlock_overflow_count,
+    flat_overflow_count,
+    reset_count
+   FROM pg_stat_get_wait_event_timing_overflow(NULL::integer) t(pid, backend_type, procnumber, lwlock_overflow_count, flat_overflow_count, reset_count);
 pg_stat_wal| SELECT wal_records,
     wal_fpi,
     wal_bytes,

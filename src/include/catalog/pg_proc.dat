@@ -12786,4 +12786,27 @@
   proargnames => '{pid,pid,backend_type,procnumber,wait_event_type,wait_event,calls,total_time_ms,avg_time_us,max_time_us,histogram}',
   prosrc => 'pg_stat_get_wait_event_timing' },
 
+{ oid => '9958',
+  descr => 'statistics: reset wait event timing counters for the given backend (NULL = own)',
+  proname => 'pg_stat_reset_wait_event_timing', proisstrict => 'f',
+  provolatile => 'v', prorettype => 'void', proargtypes => 'int4',
+  proargnames => '{pid}', proargdefaults => '{NULL}',
+  prosrc => 'pg_stat_reset_wait_event_timing' },
+
+{ oid => '9959',
+  descr => 'statistics: per-backend wait event timing overflow counters (rows lost to LWLock hash / flat array overflow)',
+  proname => 'pg_stat_get_wait_event_timing_overflow', prorows => '1000',
+  proisstrict => 'f', proretset => 't', provolatile => 's', proparallel => 'r',
+  prorettype => 'record', proargtypes => 'int4',
+  proallargtypes => '{int4,int4,text,int4,int8,int8,int8}',
+  proargmodes => '{i,o,o,o,o,o,o}',
+  proargnames => '{pid,pid,backend_type,procnumber,lwlock_overflow_count,flat_overflow_count,reset_count}',
+  prosrc => 'pg_stat_get_wait_event_timing_overflow' },
+
+{ oid => '9960',
+  descr => 'statistics: reset wait event timing counters for all backends (superuser only)',
+  proname => 'pg_stat_reset_wait_event_timing_all',
+  provolatile => 'v', prorettype => 'void', proargtypes => '',
+  prosrc => 'pg_stat_reset_wait_event_timing_all' },
+
 ]
