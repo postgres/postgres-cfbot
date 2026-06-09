@@ -329,10 +329,10 @@ extern PGDLLIMPORT char *synchronized_standby_slots;
 extern PGDLLIMPORT int idle_replication_slot_timeout_secs;
 
 /* management of individual slots */
-extern void ReplicationSlotCreate(const char *name, bool db_specific,
+extern bool ReplicationSlotCreate(const char *name, bool db_specific,
 								  ReplicationSlotPersistency persistency,
 								  bool two_phase, bool repack, bool failover,
-								  bool synced);
+								  bool synced, bool error_if_full);
 extern void ReplicationSlotPersist(void);
 extern void ReplicationSlotDrop(const char *name, bool nowait);
 extern void ReplicationSlotDropAcquired(bool try_disable);
