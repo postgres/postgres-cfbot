@@ -148,15 +148,15 @@ spgbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 }
 
 /*
- * Build an empty SPGiST index in the initialization fork
+ * Build an empty SPGiST index in the specified fork
  */
 void
-spgbuildempty(Relation index)
+spgbuildempty(Relation index, ForkNumber forknum)
 {
 	BulkWriteState *bulkstate;
 	BulkWriteBuffer buf;
 
-	bulkstate = smgr_bulk_start_rel(index, INIT_FORKNUM);
+	bulkstate = smgr_bulk_start_rel(index, forknum);
 
 	/* Construct metapage. */
 	buf = smgr_bulk_get_buf(bulkstate);

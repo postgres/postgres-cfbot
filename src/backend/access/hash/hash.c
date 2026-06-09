@@ -175,10 +175,10 @@ hashbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	 * metapage, nor the first bitmap page.
 	 */
 	sort_threshold = (maintenance_work_mem * (Size) 1024) / BLCKSZ;
-	if (index->rd_rel->relpersistence != RELPERSISTENCE_TEMP)
-		sort_threshold = Min(sort_threshold, NBuffers);
-	else
+	if (RelationUsesLocalBuffers(index))
 		sort_threshold = Min(sort_threshold, NLocBuffer);
+	else
+		sort_threshold = Min(sort_threshold, NBuffers);
 
 	if (num_buckets >= sort_threshold)
 		buildstate.spool = _h_spoolinit(heap, index, num_buckets);
@@ -215,12 +215,12 @@ hashbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 }
 
 /*
- *	hashbuildempty() -- build an empty hash index in the initialization fork
+ *	hashbuildempty() -- build an empty hash index in the specified fork
  */
 void
-hashbuildempty(Relation index)
+hashbuildempty(Relation index, ForkNumber forknum)
 {
-	_hash_init(index, 0, INIT_FORKNUM);
+	_hash_init(index, 0, forknum);
 }
 
 /*

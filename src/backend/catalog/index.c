@@ -2172,7 +2172,8 @@ index_drop(Oid indexId, bool concurrent, bool concurrent_lock_mode)
 	 * lock (see comments in RemoveRelations), and a non-concurrent DROP is
 	 * more efficient.
 	 */
-	Assert(get_rel_persistence(indexId) != RELPERSISTENCE_TEMP ||
+	Assert((get_rel_persistence(indexId) != RELPERSISTENCE_TEMP &&
+			get_rel_persistence(indexId) != RELPERSISTENCE_GLOBAL_TEMP) ||
 		   (!concurrent && !concurrent_lock_mode));
 
 	/*
@@ -3141,7 +3142,7 @@ index_build(Relation heapRelation,
 	{
 		smgrcreate(RelationGetSmgr(indexRelation), INIT_FORKNUM, false);
 		log_smgrcreate(&indexRelation->rd_locator, INIT_FORKNUM);
-		indexRelation->rd_indam->ambuildempty(indexRelation);
+		indexRelation->rd_indam->ambuildempty(indexRelation, INIT_FORKNUM);
 	}
 
 	/*

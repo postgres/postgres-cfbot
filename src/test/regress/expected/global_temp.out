@@ -13,7 +13,7 @@ CREATE GLOBAL TEMP TABLE pg_temp.tmp1 (a int); -- fail
 ERROR:  cannot create global temporary relation in temporary schema
 LINE 1: CREATE GLOBAL TEMP TABLE pg_temp.tmp1 (a int);
                                  ^
-CREATE GLOBAL TEMP TABLE tmp1 (a int);
+CREATE GLOBAL TEMP TABLE tmp1 (a int PRIMARY KEY, b text);
 CREATE SCHEMA global_temp_xxx CREATE GLOBAL TEMP TABLE tmp2 (a int);
 CREATE SCHEMA global_temp_yyy;
 CREATE GLOBAL TEMP TABLE global_temp_yyy.tmp3 (a int);
@@ -21,15 +21,18 @@ CREATE GLOBAL TEMP TABLE global_temp_yyy.tmp3 (a int);
   Global temporary table "global_temp_tests.tmp1"
  Column |  Type   | Collation | Nullable | Default 
 --------+---------+-----------+----------+---------
- a      | integer |           |          | 
+ a      | integer |           | not null | 
+ b      | text    |           |          | 
+Indexes:
+    "tmp1_pkey" PRIMARY KEY, btree (a)
 
 \dt+ global_temp_*.tmp*
-                                             List of tables
-      Schema       | Name | Type  |          Owner           |   Persistence    |  Size   | Description 
--------------------+------+-------+--------------------------+------------------+---------+-------------
- global_temp_tests | tmp1 | table | regress_global_temp_user | global temporary | 0 bytes | 
- global_temp_xxx   | tmp2 | table | regress_global_temp_user | global temporary | 0 bytes | 
- global_temp_yyy   | tmp3 | table | regress_global_temp_user | global temporary | 0 bytes | 
+                                              List of tables
+      Schema       | Name | Type  |          Owner           |   Persistence    |    Size    | Description 
+-------------------+------+-------+--------------------------+------------------+------------+-------------
+ global_temp_tests | tmp1 | table | regress_global_temp_user | global temporary | 8192 bytes | 
+ global_temp_xxx   | tmp2 | table | regress_global_temp_user | global temporary | 0 bytes    | 
+ global_temp_yyy   | tmp3 | table | regress_global_temp_user | global temporary | 0 bytes    | 
 (3 rows)
 
 -- Information schema
@@ -49,20 +52,59 @@ NOTICE:  drop cascades to table global_temp_xxx.tmp2
 DROP SCHEMA global_temp_yyy CASCADE;
 NOTICE:  drop cascades to table global_temp_yyy.tmp3
 -- Basic tests
-INSERT INTO tmp1 VALUES (1);
+INSERT INTO tmp1 VALUES (1, 'xxx');
 SELECT * FROM tmp1;
- a 
----
- 1
+ a |  b  
+---+-----
+ 1 | xxx
 (1 row)
 
 \c
 SET search_path = global_temp_tests;
 SELECT * FROM tmp1;
- a 
----
+ a | b 
+---+---
 (0 rows)
 
+-- Test index
+INSERT INTO tmp1 VALUES (1, 'xxx');
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+SELECT * FROM tmp1 WHERE a = 1;
+             QUERY PLAN             
+------------------------------------
+ Index Scan using tmp1_pkey on tmp1
+   Index Cond: (a = 1)
+(2 rows)
+
+SELECT * FROM tmp1 WHERE a = 1;
+ a |  b  
+---+-----
+ 1 | xxx
+(1 row)
+
+RESET enable_seqscan;
+-- Test concurrent index build -- CONCURRENTLY is ignored with temp tables
+CREATE INDEX CONCURRENTLY tmp1_b_idx ON tmp1(b);
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+SELECT * FROM tmp1 WHERE b = 'xxx';
+             QUERY PLAN              
+-------------------------------------
+ Index Scan using tmp1_b_idx on tmp1
+   Index Cond: (b = 'xxx'::text)
+(2 rows)
+
+SELECT * FROM tmp1 WHERE b = 'xxx';
+ a |  b  
+---+-----
+ 1 | xxx
+(1 row)
+
+RESET enable_seqscan;
+REINDEX INDEX CONCURRENTLY tmp1_b_idx;
+REINDEX TABLE CONCURRENTLY tmp1;
+DROP INDEX CONCURRENTLY tmp1_b_idx;
 -- Test ON COMMIT DELETE ROWS
 CREATE GLOBAL TEMP TABLE tmp2 (a int) ON COMMIT DELETE ROWS;
 BEGIN;
@@ -103,8 +145,8 @@ ERROR:  ON COMMIT DROP cannot be used on global temporary tables
 -- Two-phase commit not allowed with global temp tables
 BEGIN;
 SELECT * FROM tmp1;
- a 
----
+ a | b 
+---+---
 (0 rows)
 
 PREPARE TRANSACTION 'twophase'; -- fail
@@ -154,11 +196,33 @@ DROP TABLE tmp2;
 -- Test foreign keys
 CREATE TABLE perm_pk_rel (a int PRIMARY KEY);
 CREATE TEMP TABLE temp_pk_rel (a int PRIMARY KEY);
+CREATE GLOBAL TEMP TABLE gtemp_pk_rel (a int PRIMARY KEY);
+CREATE TABLE tmp2 (a int REFERENCES gtemp_pk_rel); -- fail
+ERROR:  constraints on permanent tables may reference only permanent tables
+CREATE TEMP TABLE tmp2 (a int REFERENCES gtemp_pk_rel); -- fail
+ERROR:  constraints on local temporary tables may reference only local temporary tables
 CREATE GLOBAL TEMP TABLE tmp2 (a int REFERENCES perm_pk_rel); -- fail
 ERROR:  constraints on global temporary tables may reference only global temporary tables
 CREATE GLOBAL TEMP TABLE tmp2 (a int REFERENCES temp_pk_rel); -- fail
 ERROR:  constraints on global temporary tables may reference only global temporary tables
-DROP TABLE perm_pk_rel, temp_pk_rel;
+CREATE GLOBAL TEMP TABLE tmp2 (a int REFERENCES gtemp_pk_rel);
+INSERT INTO gtemp_pk_rel VALUES (1);
+INSERT INTO tmp2 VALUES (1);
+INSERT INTO tmp2 VALUES (2); -- fail
+ERROR:  insert or update on table "tmp2" violates foreign key constraint "tmp2_a_fkey"
+DETAIL:  Key (a)=(2) is not present in table "gtemp_pk_rel".
+DELETE FROM gtemp_pk_rel WHERE a = 1; -- fail
+ERROR:  update or delete on table "gtemp_pk_rel" violates foreign key constraint "tmp2_a_fkey" on table "tmp2"
+DETAIL:  Key (a)=(1) is still referenced from table "tmp2".
+ALTER TABLE tmp2 DROP CONSTRAINT tmp2_a_fkey;
+ALTER TABLE tmp2 ADD FOREIGN KEY (a) REFERENCES gtemp_pk_rel ON DELETE CASCADE;
+DELETE FROM gtemp_pk_rel WHERE a = 1;
+SELECT * FROM tmp2;
+ a 
+---
+(0 rows)
+
+DROP TABLE perm_pk_rel, temp_pk_rel, tmp2;
 -- Test ALTER TABLE ... SET TABLESPACE
 CREATE GLOBAL TEMP TABLE tmp2 (a int);
 INSERT INTO tmp2 VALUES (1);
@@ -211,85 +275,85 @@ DETAIL:  tablespace for table tmp2
 DROP TABLE tmp2;
 DROP TABLESPACE regress_temp_test_tablespace;
 -- Test TRUNCATE
-INSERT INTO tmp1 VALUES (1);
+INSERT INTO tmp1 VALUES (1, 'xxx');
 BEGIN;
 TRUNCATE tmp1;
 SELECT * FROM tmp1;
- a 
----
+ a | b 
+---+---
 (0 rows)
 
 ROLLBACK;
 SELECT * FROM tmp1;
- a 
----
- 1
+ a |  b  
+---+-----
+ 1 | xxx
 (1 row)
 
 BEGIN;
 SAVEPOINT sp1;
 TRUNCATE tmp1;
 SELECT * FROM tmp1;
- a 
----
+ a | b 
+---+---
 (0 rows)
 
 RELEASE sp1;
 SELECT * FROM tmp1;
- a 
----
+ a | b 
+---+---
 (0 rows)
 
 ROLLBACK;
 SELECT * FROM tmp1;
- a 
----
- 1
+ a |  b  
+---+-----
+ 1 | xxx
 (1 row)
 
 BEGIN;
 SAVEPOINT sp1;
 TRUNCATE tmp1;
 SELECT * FROM tmp1;
- a 
----
+ a | b 
+---+---
 (0 rows)
 
 ROLLBACK TO sp1;
 SELECT * FROM tmp1;
- a 
----
- 1
+ a |  b  
+---+-----
+ 1 | xxx
 (1 row)
 
 COMMIT;
 SELECT * FROM tmp1;
- a 
----
- 1
+ a |  b  
+---+-----
+ 1 | xxx
 (1 row)
 
 TRUNCATE tmp1;
 SELECT * FROM tmp1;
- a 
----
+ a | b 
+---+---
 (0 rows)
 
 -- Test view creation
-INSERT INTO tmp1 VALUES (1);
+INSERT INTO tmp1 VALUES (1, 'xxx');
 CREATE VIEW v AS SELECT * FROM tmp1;
 SELECT * FROM v;
- a 
----
- 1
+ a |  b  
+---+-----
+ 1 | xxx
 (1 row)
 
 DROP VIEW v;
 CREATE TEMP VIEW v AS SELECT * FROM tmp1;
 SELECT * FROM v;
- a 
----
- 1
+ a |  b  
+---+-----
+ 1 | xxx
 (1 row)
 
 DROP VIEW v;

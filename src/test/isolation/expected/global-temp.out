@@ -199,13 +199,17 @@ key|val
 (0 rows)
 
 
-starting permutation: create1 ins1_2 alter1a alter1b alter1c alter1d ins2_2 seltype1 seltype2 drop1
-step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text);
+starting permutation: create1 ins1_2 alter1a alter1b alter1c alter1d alter1e alter1f alter1g alter1h ins2_2 seltype1 seltype2 drop1
+step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box);
 step ins1_2: INSERT INTO tmp2 VALUES (1, 's1');
 step alter1a: ALTER TABLE tmp2 ALTER COLUMN key SET DATA TYPE numeric;
 step alter1b: ALTER TABLE tmp2 ALTER COLUMN val SET NOT NULL;
 step alter1c: ALTER TABLE tmp2 ADD CONSTRAINT tmp2_nn NOT NULL key;
 step alter1d: ALTER TABLE tmp2 ADD CONSTRAINT tmp2_chk CHECK (key > 0);
+step alter1e: ALTER TABLE tmp2 ADD CONSTRAINT tmp2_pk PRIMARY KEY (key);
+step alter1f: ALTER TABLE tmp2 ADD CONSTRAINT tmp2_un UNIQUE (val);
+step alter1g: ALTER TABLE tmp2 ADD CONSTRAINT tmp2_fk FOREIGN KEY (icol) REFERENCES tmp;
+step alter1h: ALTER TABLE tmp2 ADD CONSTRAINT tmp2_ex EXCLUDE USING gist (bcol WITH &&);
 step ins2_2: INSERT INTO tmp2 VALUES (1, 's2');
 step seltype1: SELECT key, pg_typeof(key), val FROM tmp2;
 key|pg_typeof|val
@@ -221,8 +225,8 @@ key|pg_typeof|val
 
 step drop1: DROP TABLE tmp2;
 
-starting permutation: create1 ins1_2 ins2_2 alter1a alter1b alter1c alter1d seltype1 seltype2 drop1
-step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text);
+starting permutation: create1 ins1_2 ins2_2 alter1a alter1b alter1c alter1d alter1e alter1f alter1g alter1h uniq_idx1 seltype1 seltype2 drop1
+step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box);
 step ins1_2: INSERT INTO tmp2 VALUES (1, 's1');
 step ins2_2: INSERT INTO tmp2 VALUES (1, 's2');
 step alter1a: ALTER TABLE tmp2 ALTER COLUMN key SET DATA TYPE numeric;
@@ -233,6 +237,15 @@ step alter1c: ALTER TABLE tmp2 ADD CONSTRAINT tmp2_nn NOT NULL key;
 ERROR:  cannot add or alter constraints of global temporary table "tmp2" because it is being used in another session
 step alter1d: ALTER TABLE tmp2 ADD CONSTRAINT tmp2_chk CHECK (key > 0);
 ERROR:  cannot add or alter constraints of global temporary table "tmp2" because it is being used in another session
+step alter1e: ALTER TABLE tmp2 ADD CONSTRAINT tmp2_pk PRIMARY KEY (key);
+ERROR:  cannot add or alter constraints of global temporary table "tmp2" because it is being used in another session
+step alter1f: ALTER TABLE tmp2 ADD CONSTRAINT tmp2_un UNIQUE (val);
+ERROR:  cannot add or alter constraints of global temporary table "tmp2" because it is being used in another session
+step alter1g: ALTER TABLE tmp2 ADD CONSTRAINT tmp2_fk FOREIGN KEY (icol) REFERENCES tmp;
+ERROR:  cannot add or alter constraints of global temporary table "tmp2" because it is being used in another session
+step alter1h: ALTER TABLE tmp2 ADD CONSTRAINT tmp2_ex EXCLUDE USING gist (bcol WITH &&);
+ERROR:  cannot add or alter constraints of global temporary table "tmp2" because it is being used in another session
+step uniq_idx1: CREATE UNIQUE INDEX tmp2_un ON tmp2(val);
 step seltype1: SELECT key, pg_typeof(key), val FROM tmp2;
 key|pg_typeof|val
 ---+---------+---
@@ -258,14 +271,14 @@ step ins2_2: INSERT INTO tmp2 VALUES (1, 's2');
 step drop1: DROP TABLE tmp2;
 
 starting permutation: create1 drop2 b1 prep1 cprep1
-step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text);
+step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box);
 step drop2: DROP TABLE tmp2;
 step b1: BEGIN;
 step prep1: PREPARE TRANSACTION 'tx';
 step cprep1: COMMIT PREPARED 'tx';
 
 starting permutation: create1 ins1_2 b1 drop2 prep1 cprep1
-step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text);
+step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box);
 step ins1_2: INSERT INTO tmp2 VALUES (1, 's1');
 step b1: BEGIN;
 step drop2: DROP TABLE tmp2;
@@ -273,10 +286,154 @@ step prep1: PREPARE TRANSACTION 'tx';
 step cprep1: COMMIT PREPARED 'tx';
 
 starting permutation: create1 b1 ins1_2 drop2 prep1
-step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text);
+step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box);
 step b1: BEGIN;
 step ins1_2: INSERT INTO tmp2 VALUES (1, 's1');
 step drop2: DROP TABLE tmp2; <waiting ...>
 step prep1: PREPARE TRANSACTION 'tx';
 ERROR:  cannot PREPARE a transaction that has operated on temporary objects
 step drop2: <... completed>
+
+starting permutation: ins1 idx1 sel1_idx ins2 sel2_idx
+step ins1: INSERT INTO tmp VALUES (1, 's1');
+step idx1: CREATE INDEX tmp_val_idx ON tmp(val);
+step sel1_idx: 
+  SET enable_seqscan = off;
+  SET enable_bitmapscan = off;
+  EXPLAIN (COSTS OFF)
+  SELECT * FROM tmp WHERE val = 's1';
+  SELECT * FROM tmp WHERE val = 's1';
+
+QUERY PLAN                         
+-----------------------------------
+Index Scan using tmp_val_idx on tmp
+  Index Cond: (val = 's1'::text)   
+(2 rows)
+
+key|val
+---+---
+  1|s1 
+(1 row)
+
+step ins2: INSERT INTO tmp VALUES (1, 's2');
+step sel2_idx: 
+  SET enable_seqscan = off;
+  SET enable_bitmapscan = off;
+  EXPLAIN (COSTS OFF)
+  SELECT * FROM tmp WHERE val = 's2';
+  SELECT * FROM tmp WHERE val = 's2';
+
+QUERY PLAN                         
+-----------------------------------
+Index Scan using tmp_val_idx on tmp
+  Index Cond: (val = 's2'::text)   
+(2 rows)
+
+key|val
+---+---
+  1|s2 
+(1 row)
+
+
+starting permutation: ins1 ins2 idx1 sel1_idx sel2_idx
+step ins1: INSERT INTO tmp VALUES (1, 's1');
+step ins2: INSERT INTO tmp VALUES (1, 's2');
+step idx1: CREATE INDEX tmp_val_idx ON tmp(val);
+step sel1_idx: 
+  SET enable_seqscan = off;
+  SET enable_bitmapscan = off;
+  EXPLAIN (COSTS OFF)
+  SELECT * FROM tmp WHERE val = 's1';
+  SELECT * FROM tmp WHERE val = 's1';
+
+QUERY PLAN                         
+-----------------------------------
+Index Scan using tmp_val_idx on tmp
+  Index Cond: (val = 's1'::text)   
+(2 rows)
+
+key|val
+---+---
+  1|s1 
+(1 row)
+
+step sel2_idx: 
+  SET enable_seqscan = off;
+  SET enable_bitmapscan = off;
+  EXPLAIN (COSTS OFF)
+  SELECT * FROM tmp WHERE val = 's2';
+  SELECT * FROM tmp WHERE val = 's2';
+
+QUERY PLAN                  
+----------------------------
+Seq Scan on tmp             
+  Disabled: true            
+  Filter: (val = 's2'::text)
+(3 rows)
+
+key|val
+---+---
+  1|s2 
+(1 row)
+
+
+starting permutation: ins1 ins2 idx1 sel1_idx sel2_idx reidx2 sel2_idx
+step ins1: INSERT INTO tmp VALUES (1, 's1');
+step ins2: INSERT INTO tmp VALUES (1, 's2');
+step idx1: CREATE INDEX tmp_val_idx ON tmp(val);
+step sel1_idx: 
+  SET enable_seqscan = off;
+  SET enable_bitmapscan = off;
+  EXPLAIN (COSTS OFF)
+  SELECT * FROM tmp WHERE val = 's1';
+  SELECT * FROM tmp WHERE val = 's1';
+
+QUERY PLAN                         
+-----------------------------------
+Index Scan using tmp_val_idx on tmp
+  Index Cond: (val = 's1'::text)   
+(2 rows)
+
+key|val
+---+---
+  1|s1 
+(1 row)
+
+step sel2_idx: 
+  SET enable_seqscan = off;
+  SET enable_bitmapscan = off;
+  EXPLAIN (COSTS OFF)
+  SELECT * FROM tmp WHERE val = 's2';
+  SELECT * FROM tmp WHERE val = 's2';
+
+QUERY PLAN                  
+----------------------------
+Seq Scan on tmp             
+  Disabled: true            
+  Filter: (val = 's2'::text)
+(3 rows)
+
+key|val
+---+---
+  1|s2 
+(1 row)
+
+step reidx2: REINDEX INDEX tmp_val_idx;
+step sel2_idx: 
+  SET enable_seqscan = off;
+  SET enable_bitmapscan = off;
+  EXPLAIN (COSTS OFF)
+  SELECT * FROM tmp WHERE val = 's2';
+  SELECT * FROM tmp WHERE val = 's2';
+
+QUERY PLAN                         
+-----------------------------------
+Index Scan using tmp_val_idx on tmp
+  Index Cond: (val = 's2'::text)   
+(2 rows)
+
+key|val
+---+---
+  1|s2 
+(1 row)
+

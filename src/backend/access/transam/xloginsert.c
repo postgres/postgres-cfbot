@@ -560,7 +560,8 @@ XLogSimpleInsertInt64(RmgrId rmid, uint8 info, int64 value)
 XLogRecPtr
 XLogGetFakeLSN(Relation rel)
 {
-	if (rel->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
+	if (rel->rd_rel->relpersistence == RELPERSISTENCE_TEMP ||
+		rel->rd_rel->relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
 	{
 		/*
 		 * Temporary relations are only accessible in our session, so a simple
