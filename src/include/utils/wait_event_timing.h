@@ -25,6 +25,7 @@
 #ifndef WAIT_EVENT_TIMING_H
 #define WAIT_EVENT_TIMING_H
 
+#include "port/atomics.h"
 #include "portability/instr_time.h"
 #include "utils/wait_event_types.h"
 
@@ -136,11 +137,27 @@ extern PGDLLIMPORT int wait_event_timing_max_tranches;
  */
 typedef struct WaitEventTimingState
 {
+	/*
+	 * Generation counter for cross-backend reset requests.  Bumped atomically
+	 * by pg_stat_reset_wait_event_timing(target); the owning backend notices
+	 * the change at its next wait_end and clears its own counters.  This
+	 * keeps the hot path lock-free: only the owning backend ever writes its
+	 * statistics, so there is no writer/resetter race.
+	 */
+	pg_atomic_uint32 reset_generation;
+
 	/* Current wait start timestamp (set by pgstat_report_wait_start). */
 	instr_time	wait_start;
 
 	/* Current wait_event_info (cached for use in wait_end). */
 	uint32		current_event;
+
+	/*
+	 * Number of resets this backend has observed and acted on.  Own-backend
+	 * resets are synchronous (one bump per call); cross-backend resets
+	 * coalesce (multiple requests between two wait_ends count as one).
+	 */
+	int64		reset_count;
 
 	/* Per-event statistics: flat array for bounded classes. */
 	WaitEventTimingEntry events[WAIT_EVENT_TIMING_NUM_EVENTS];
@@ -150,8 +167,8 @@ typedef struct WaitEventTimingState
 
 	/*
 	 * Count of LWLock events dropped because the LWLock-timing hash reached
-	 * its cap (wait_event_timing_max_tranches).  Written here; a later commit
-	 * in the series exposes it via SQL.
+	 * its cap (wait_event_timing_max_tranches).  Exposed via
+	 * pg_stat_wait_event_timing_overflow.
 	 */
 	int64		lwlock_overflow_count;
 

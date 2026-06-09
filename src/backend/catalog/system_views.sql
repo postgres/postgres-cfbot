@@ -1630,3 +1630,20 @@ CREATE VIEW pg_stat_wait_event_timing AS
     FROM pg_stat_get_wait_event_timing(NULL) t;
 REVOKE ALL ON pg_stat_wait_event_timing FROM PUBLIC;
 GRANT SELECT ON pg_stat_wait_event_timing TO pg_read_all_stats;
+
+CREATE VIEW pg_stat_wait_event_timing_overflow AS
+    SELECT
+        t.pid,
+        t.backend_type,
+        t.procnumber,
+        t.lwlock_overflow_count,
+        t.flat_overflow_count,
+        t.reset_count
+    FROM pg_stat_get_wait_event_timing_overflow(NULL) t;
+REVOKE ALL ON pg_stat_wait_event_timing_overflow FROM PUBLIC;
+GRANT SELECT ON pg_stat_wait_event_timing_overflow TO pg_read_all_stats;
+
+-- Cluster-scope operations: revoked from PUBLIC (administrators can
+-- delegate with GRANT EXECUTE); not granted to pg_read_all_stats because
+-- they mutate state rather than read it.
+REVOKE EXECUTE ON FUNCTION pg_stat_reset_wait_event_timing_all() FROM PUBLIC;

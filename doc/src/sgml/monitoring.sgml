@@ -580,6 +580,15 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
       </entry>
      </row>
 
+     <row>
+      <entry><structname>pg_stat_wait_event_timing_overflow</structname><indexterm><primary>pg_stat_wait_event_timing_overflow</primary></indexterm></entry>
+      <entry>Per-backend truncation and reset counters for the wait-event
+       timing subsystem.  See
+       <link linkend="monitoring-pg-stat-wait-event-timing-overflow-view">
+       <structname>pg_stat_wait_event_timing_overflow</structname></link> for details.
+      </entry>
+     </row>
+
      <!-- all "stat" for schema objects, by "importance" -->
 
      <row>
@@ -4263,6 +4272,124 @@ ORDER  BY b.bucket_idx;
   </table>
  </sect2>
 
+ <sect2 id="monitoring-pg-stat-wait-event-timing-overflow-view">
+  <title><structname>pg_stat_wait_event_timing_overflow</structname></title>
+
+  <indexterm>
+   <primary>pg_stat_wait_event_timing_overflow</primary>
+  </indexterm>
+
+  <para>
+   The <structname>pg_stat_wait_event_timing_overflow</structname> view
+   exposes per-backend truncation counters for the wait-event timing
+   subsystem.  Each backend owns a bounded LWLock timing hash
+   (<xref linkend="guc-wait-event-timing-max-tranches"/> tranches) and a bounded flat event array; events that cannot
+   be mapped to a slot are counted here.  A non-zero value means the
+   corresponding row(s) in
+   <link linkend="monitoring-pg-stat-wait-event-timing-view">
+   <structname>pg_stat_wait_event_timing</structname></link>
+   are incomplete for that backend.  Requires the server to be
+   compiled with <option>--enable-wait-event-timing</option>.
+  </para>
+
+  <table id="pg-stat-wait-event-timing-overflow-view" xreflabel="pg_stat_wait_event_timing_overflow">
+   <title><structname>pg_stat_wait_event_timing_overflow</structname> View</title>
+   <tgroup cols="1">
+    <thead>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       Column Type
+      </para>
+      <para>
+       Description
+      </para></entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>pid</structfield> <type>integer</type>
+      </para>
+      <para>
+       Process ID of the backend
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>backend_type</structfield> <type>text</type>
+      </para>
+      <para>
+       Type of the backend (e.g. <literal>client backend</literal>,
+       <literal>checkpointer</literal>, <literal>walwriter</literal>)
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>procnumber</structfield> <type>integer</type>
+      </para>
+      <para>
+       Internal slot number (0-based process number) of the backend.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>lwlock_overflow_count</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of LWLock wait events dropped because the per-backend
+       LWLock timing hash was already full (more distinct tranches
+       observed in this session than
+       <xref linkend="guc-wait-event-timing-max-tranches"/> allows).
+       Zero means no LWLock truncation.  A one-time
+       <literal>WARNING</literal> is also emitted to the server log on
+       first overflow.  If you see this counter rising, raise
+       <varname>wait_event_timing_max_tranches</varname> at server
+       start (the per-backend memory cost is proportional and
+       described under that GUC).
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>flat_overflow_count</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of non-LWLock wait events dropped because the event
+       could not be mapped to a known class / index.  This almost
+       always indicates a code path emitting a wait event of a class
+       the timing infrastructure was not compiled for; it should be
+       zero in supported builds.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>reset_count</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of resets this backend has <emphasis>observed and acted
+       on</emphasis>; not a request counter.  Own-backend resets via
+       <function>pg_stat_reset_wait_event_timing(NULL)</function> (or
+       passing the caller's own PID) are synchronous and bump this
+       column once per call.  Cross-backend reset requests
+       <emphasis>coalesce</emphasis>: if several
+       <function>pg_stat_reset_wait_event_timing(<replaceable>pid</replaceable>)</function>
+       calls land between two of the target's wait events, the target
+       observes them as a single reset and increments
+       <structfield>reset_count</structfield> only once.  Callers
+       polling for asynchronous-reset acknowledgment should watch for
+       any <literal>N &rarr; N+1</literal> transition.
+      </para></entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+ </sect2>
+
  <sect2 id="monitoring-pg-stat-database-view">
   <title><structname>pg_stat_database</structname></title>
 
@@ -6316,6 +6443,57 @@ ORDER  BY b.bucket_idx;
        <para>
         This function is restricted to superusers by default, but other users
         can be granted EXECUTE to run the function.
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>pg_stat_reset_wait_event_timing</primary>
+        </indexterm>
+        <function>pg_stat_reset_wait_event_timing</function> ( <parameter>pid</parameter> <type>integer</type> <literal>DEFAULT</literal> <literal>NULL</literal> )
+        <returnvalue>void</returnvalue>
+       </para>
+       <para>
+        Resets wait event timing counters for a single backend, identified
+        by its process ID (see <structfield>pid</structfield> in
+        <link linkend="monitoring-pg-stat-activity-view">
+        <structname>pg_stat_activity</structname></link>).
+        Passing <literal>NULL</literal> (or the caller's own
+        <function>pg_backend_pid()</function>) resets the current session;
+        any user may do this.  Passing any other PID resets that backend
+        and requires membership in the
+        <link linkend="predefined-roles"><literal>pg_signal_backend</literal></link>
+        role &mdash; the same role required by
+        <function>pg_stat_reset_backend_stats</function>,
+        <function>pg_terminate_backend</function>, and
+        <function>pg_cancel_backend</function>.  Unknown or
+        already-exited PIDs are silent no-ops, matching the behavior of
+        <function>pg_stat_reset_backend_stats</function>.
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>pg_stat_reset_wait_event_timing_all</primary>
+        </indexterm>
+        <function>pg_stat_reset_wait_event_timing_all</function> ()
+        <returnvalue>void</returnvalue>
+       </para>
+       <para>
+        Resets wait event timing counters for every backend in the
+        cluster.  Requires superuser.  This is intentionally stricter
+        than the per-backend variant
+        <function>pg_stat_reset_wait_event_timing</function>(<parameter>pid</parameter>),
+        which only requires <literal>pg_signal_backend</literal>: the
+        cluster-wide form has unbounded blast radius (it affects every
+        backend in a single call) and would erase forensic patterns
+        that span multiple backends, so it is gated to the cluster
+        owner.  Returns before the resets have been observed by their
+        target backends; callers that need strict read-after-reset
+        semantics should poll each target's
+        <structfield>reset_count</structfield> column.
        </para></entry>
       </row>
 
