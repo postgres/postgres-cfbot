@@ -734,7 +734,8 @@ RangeVarGetCreationNamespace(const RangeVar *newRelation)
  * to a no-longer-existent namespace.
  *
  * As a further side-effect, if the selected namespace is a temporary namespace,
- * we mark the RangeVar as RELPERSISTENCE_TEMP.
+ * we mark the RangeVar as RELPERSISTENCE_TEMP, unless it was marked as
+ * RELPERSISTENCE_GLOBAL_TEMP, in which case an error is raised.
  */
 Oid
 RangeVarGetAndCheckCreationNamespace(RangeVar *relation,
@@ -858,8 +859,18 @@ RangeVarAdjustRelationPersistence(RangeVar *newRelation, Oid nspid)
 				else
 					ereport(ERROR,
 							(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
-							 errmsg("cannot create temporary relation in non-temporary schema")));
+							 errmsg("cannot create local temporary relation in non-temporary schema")));
 			}
+			break;
+		case RELPERSISTENCE_GLOBAL_TEMP:
+			if (isTempOrTempToastNamespace(nspid))
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+						 errmsg("cannot create global temporary relation in temporary schema")));
+			else if (isAnyTempNamespace(nspid))
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+						 errmsg("cannot create relations in temporary schemas of other sessions")));
 			break;
 		case RELPERSISTENCE_PERMANENT:
 			if (isTempOrTempToastNamespace(nspid))

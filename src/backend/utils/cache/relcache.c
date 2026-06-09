@@ -41,6 +41,7 @@
 #include "access/xact.h"
 #include "catalog/binary_upgrade.h"
 #include "catalog/catalog.h"
+#include "catalog/global_temp.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/partition.h"
@@ -337,6 +338,10 @@ static void unlink_initfile(const char *initfilename, int elevel);
  *		an attribute were to be added after scanning pg_class and before
  *		scanning pg_attribute, relnatts wouldn't match.
  *
+ *		If targetRelId is a global temporary relation, the returned pg_class
+ *		tuple is updated to reflect any session-local overrides from changes
+ *		made to the relation in this session.
+ *
  *		NB: the returned tuple has been copied into palloc'd storage
  *		and must eventually be freed with heap_freetuple.
  */
@@ -403,6 +408,25 @@ ScanPgRelation(Oid targetRelId, bool indexOK, bool force_non_historic)
 		UnregisterSnapshot(snapshot);
 
 	table_close(pg_class_desc, AccessShareLock);
+
+	/*
+	 * For a global temporary relation, update the pg_class tuple with any
+	 * session-local values.
+	 */
+	if (HeapTupleIsValid(pg_class_tuple))
+	{
+		Form_pg_class pg_class_form;
+
+		pg_class_form = (Form_pg_class) GETSTRUCT(pg_class_tuple);
+
+		if (pg_class_form->relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
+		{
+			GtrInfo    *gtr_info = GetGlobalTempRelationInfo(targetRelId);
+
+			if (gtr_info != NULL)
+				COPY_PG_CLASS_GTR_INFO(gtr_info, pg_class_form);
+		}
+	}
 
 	return pg_class_tuple;
 }
@@ -1172,8 +1196,9 @@ retry:
 			else
 			{
 				/*
-				 * If it's a temp table, but not one of ours, we have to use
-				 * the slow, grotty method to figure out the owning backend.
+				 * If it's a local temp table, but not one of ours, we have to
+				 * use the slow, grotty method to figure out the owning
+				 * backend.
 				 *
 				 * Note: it's possible that rd_backend gets set to
 				 * MyProcNumber here, in case we are looking at a pg_class
@@ -1189,6 +1214,10 @@ retry:
 				Assert(relation->rd_backend != INVALID_PROC_NUMBER);
 				relation->rd_islocaltemp = false;
 			}
+			break;
+		case RELPERSISTENCE_GLOBAL_TEMP:
+			relation->rd_backend = ProcNumberForTempRelations();
+			relation->rd_islocaltemp = false;
 			break;
 		default:
 			elog(ERROR, "invalid relpersistence: %c",
@@ -2119,6 +2148,14 @@ RelationIdGetRelation(Oid relationId)
 			RelationRebuildRelation(rd);
 
 			/*
+			 * If it's a global temporary relation, make sure it has been
+			 * initialized for use in this backend (a prior initialization
+			 * might have been rolled back).
+			 */
+			if (RELATION_IS_GLOBAL_TEMP(rd))
+				InitGlobalTempRelation(rd);
+
+			/*
 			 * Normally entries need to be valid here, but before the relcache
 			 * has been initialized, not enough infrastructure exists to
 			 * perform pg_class lookups. The structure of such entries doesn't
@@ -2137,7 +2174,11 @@ RelationIdGetRelation(Oid relationId)
 	 */
 	rd = RelationBuildDesc(relationId, true);
 	if (RelationIsValid(rd))
+	{
 		RelationIncrementReferenceCount(rd);
+		if (RELATION_IS_GLOBAL_TEMP(rd))
+			InitGlobalTempRelation(rd);
+	}
 	return rd;
 }
 
@@ -2209,6 +2250,21 @@ RelationDecrementReferenceCount(Relation rel)
 	rel->rd_refcnt -= 1;
 	if (!IsBootstrapProcessingMode())
 		ResourceOwnerForgetRelationRef(CurrentResourceOwner, rel);
+}
+
+/*
+ * RelationMarkInvalid
+ *		Mark a relation as invalid, if it's in the relcache, forcing it to be
+ *		reloaded on next access.
+ */
+void
+RelationMarkInvalid(Oid relid)
+{
+	Relation	relation;
+
+	RelationIdCacheLookup(relid, relation);
+	if (RelationIsValid(relation) && relation->rd_isvalid)
+		RelationInvalidateRelation(relation);
 }
 
 /*
@@ -2960,6 +3016,9 @@ RelationCacheInvalidateEntry(Oid relationId)
 			if (in_progress_list[i].reloid == relationId)
 				in_progress_list[i].invalidated = true;
 	}
+
+	/* Additional processing required for global temporary relations */
+	InvalidateGlobalTempRelation(relationId);
 }
 
 /*
@@ -3104,6 +3163,9 @@ RelationCacheInvalidate(bool debug_discard)
 		/* Any RelationBuildDesc() on the stack must start over. */
 		for (i = 0; i < in_progress_list_len; i++)
 			in_progress_list[i].invalidated = true;
+
+	/* Invalidate all in-use global temporary relations */
+	InvalidateGlobalTempRelation(InvalidOid);
 }
 
 static void
@@ -3660,6 +3722,7 @@ RelationBuildLocalRelation(const char *relname,
 	{
 		case RELPERSISTENCE_UNLOGGED:
 		case RELPERSISTENCE_PERMANENT:
+			Assert(!isTempOrTempToastNamespace(relnamespace));
 			rel->rd_backend = INVALID_PROC_NUMBER;
 			rel->rd_islocaltemp = false;
 			break;
@@ -3667,6 +3730,11 @@ RelationBuildLocalRelation(const char *relname,
 			Assert(isTempOrTempToastNamespace(relnamespace));
 			rel->rd_backend = ProcNumberForTempRelations();
 			rel->rd_islocaltemp = true;
+			break;
+		case RELPERSISTENCE_GLOBAL_TEMP:
+			Assert(!isTempOrTempToastNamespace(relnamespace));
+			rel->rd_backend = ProcNumberForTempRelations();
+			rel->rd_islocaltemp = false;
 			break;
 		default:
 			elog(ERROR, "invalid relpersistence: %c", relpersistence);
@@ -3786,6 +3854,7 @@ RelationSetNewRelfilenumber(Relation relation, char persistence)
 	ItemPointerData otid;
 	HeapTuple	tuple;
 	Form_pg_class classform;
+	GtrInfo    *gtr_info;
 	MultiXactId minmulti = InvalidMultiXactId;
 	TransactionId freezeXid = InvalidTransactionId;
 	RelFileLocator newrlocator;
@@ -3822,7 +3891,8 @@ RelationSetNewRelfilenumber(Relation relation, char persistence)
 				 errmsg("unexpected request for new relfilenumber in binary upgrade mode")));
 
 	/*
-	 * Get a writable copy of the pg_class tuple for the given relation.
+	 * Get a writable copy of the relation's pg_class tuple and, for a global
+	 * temporary relation, a writable copy of its GtrInfo.
 	 */
 	pg_class = table_open(RelationRelationId, RowExclusiveLock);
 
@@ -3833,6 +3903,11 @@ RelationSetNewRelfilenumber(Relation relation, char persistence)
 			 RelationGetRelid(relation));
 	otid = tuple->t_self;
 	classform = (Form_pg_class) GETSTRUCT(tuple);
+
+	if (classform->relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
+		gtr_info = GetGlobalTempRelationInfoForUpdate(RelationGetRelid(relation));
+	else
+		gtr_info = NULL;
 
 	/*
 	 * Schedule unlinking of the old storage at transaction commit, except
@@ -3889,7 +3964,8 @@ RelationSetNewRelfilenumber(Relation relation, char persistence)
 		/* handle these directly, at least for now */
 		SMgrRelation srel;
 
-		srel = RelationCreateStorage(newrlocator, persistence, true);
+		srel = RelationCreateStorage(relation->rd_id, newrlocator,
+									 persistence, true);
 		smgrclose(srel);
 	}
 	else
@@ -3937,8 +4013,8 @@ RelationSetNewRelfilenumber(Relation relation, char persistence)
 	}
 	else
 	{
-		/* Normal case, update the pg_class entry */
-		classform->relfilenode = newrelfilenumber;
+		/* Normal case, update the pg_class and GtrInfo */
+		SetEffective_relfilenode(classform, gtr_info, newrelfilenumber);
 
 		/* relpages etc. never change for sequences */
 		if (relation->rd_rel->relkind != RELKIND_SEQUENCE)
@@ -3961,8 +4037,8 @@ RelationSetNewRelfilenumber(Relation relation, char persistence)
 	table_close(pg_class, RowExclusiveLock);
 
 	/*
-	 * Make the pg_class row change or relation map change visible.  This will
-	 * cause the relcache entry to get updated, too.
+	 * Make the pg_class row, GtrInfo, or relation map change visible.  This
+	 * will cause the relcache entry to get updated, too.
 	 */
 	CommandCounterIncrement();
 

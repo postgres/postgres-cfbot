@@ -32,6 +32,7 @@
 #include "access/xlogrecovery.h"
 #include "access/xlogutils.h"
 #include "access/xlogwait.h"
+#include "catalog/global_temp.h"
 #include "catalog/index.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_enum.h"
@@ -2252,6 +2253,9 @@ StartTransaction(void)
 	 */
 	s->state = TRANS_INPROGRESS;
 
+	/* Process any invalidated global temporary relations */
+	ProcessInvalidatedGlobalTempRelations();
+
 	/* Schedule transaction timeout */
 	if (TransactionTimeout > 0)
 		enable_timeout_after(TRANSACTION_TIMEOUT, TransactionTimeout);
@@ -2344,6 +2348,14 @@ CommitTransaction(void)
 
 	/* Shut down the deferred-trigger manager */
 	AfterTriggerEndXact(true);
+
+	/*
+	 * Process any invalidated global temporary relations, dealing with any
+	 * that were dropped by other backends.  This needs to be done before any
+	 * ON COMMIT handling, so that we don't try to perform ON COMMIT actions
+	 * on deleted global temporary tables.
+	 */
+	ProcessInvalidatedGlobalTempRelations();
 
 	/*
 	 * Let ON COMMIT management do its thing (must happen after closing
@@ -2460,6 +2472,9 @@ CommitTransaction(void)
 
 	/* Clean up the relation cache */
 	AtEOXact_RelationCache(true);
+
+	/* Clean up storage and usage records for global temporary relations */
+	AtEOXact_GlobalTempRelation(true);
 
 	/* Clean up the type cache */
 	AtEOXact_TypeCache();
@@ -2607,6 +2622,14 @@ PrepareTransaction(void)
 
 	/* Shut down the deferred-trigger manager */
 	AfterTriggerEndXact(true);
+
+	/*
+	 * Process any invalidated global temporary relations, dealing with any
+	 * that were dropped by other backends.  This needs to be done before any
+	 * ON COMMIT handling, so that we don't try to perform ON COMMIT actions
+	 * on deleted global temporary tables.
+	 */
+	ProcessInvalidatedGlobalTempRelations();
 
 	/*
 	 * Let ON COMMIT management do its thing (must happen after closing
@@ -2769,6 +2792,9 @@ PrepareTransaction(void)
 
 	/* Clean up the relation cache */
 	AtEOXact_RelationCache(true);
+
+	/* Clean up storage and usage records for global temporary relations */
+	AtEOXact_GlobalTempRelation(true);
 
 	/* Clean up the type cache */
 	AtEOXact_TypeCache();
@@ -3020,6 +3046,7 @@ AbortTransaction(void)
 		AtEOXact_Aio(false);
 		AtEOXact_Buffers(false);
 		AtEOXact_RelationCache(false);
+		AtEOXact_GlobalTempRelation(false);
 		AtEOXact_TypeCache();
 		AtEOXact_Inval(false);
 		AtEOXact_MultiXact();
@@ -3125,14 +3152,15 @@ StartTransactionCommand(void)
 
 			/*
 			 * We are somewhere in a transaction block or subtransaction and
-			 * about to start a new command.  For now we do nothing, but
-			 * someday we may do command-local resource initialization. (Note
-			 * that any needed CommandCounterIncrement was done by the
-			 * previous CommitTransactionCommand.)
+			 * about to start a new command.  Check for shared-cache-inval
+			 * messages and process any invalidated global temporary
+			 * relations, as we did at the start of the transaction.
 			 */
 		case TBLOCK_INPROGRESS:
 		case TBLOCK_IMPLICIT_INPROGRESS:
 		case TBLOCK_SUBINPROGRESS:
+			AcceptInvalidationMessages();
+			ProcessInvalidatedGlobalTempRelations();
 			break;
 
 			/*
@@ -5215,6 +5243,8 @@ CommitSubTransaction(void)
 						 true, false);
 	AtEOSubXact_RelationCache(true, s->subTransactionId,
 							  s->parent->subTransactionId);
+	AtEOSubXact_GlobalTempRelation(true, s->subTransactionId,
+								   s->parent->subTransactionId);
 	AtEOSubXact_TypeCache();
 	AtEOSubXact_Inval(true);
 	AtSubCommit_smgr();
@@ -5401,6 +5431,8 @@ AbortSubTransaction(void)
 		AtEOXact_Aio(false);
 		AtEOSubXact_RelationCache(false, s->subTransactionId,
 								  s->parent->subTransactionId);
+		AtEOSubXact_GlobalTempRelation(false, s->subTransactionId,
+									   s->parent->subTransactionId);
 		AtEOSubXact_TypeCache();
 		AtEOSubXact_Inval(false);
 		ResourceOwnerRelease(s->curTransactionOwner,

@@ -12778,4 +12778,20 @@
   proname => 'hashoid8extended', prorettype => 'int8',
   proargtypes => 'oid8 int8', prosrc => 'hashoid8extended' },
 
+# Global temporary relation functions
+{ oid => '8082', descr => 'get information about an in-use global temporary relation',
+  proname => 'pg_gtr_info', provolatile => 's', proparallel => 'u',
+  proargtypes => 'oid', prorettype => 'record',
+  proallargtypes => '{oid,oid,oid}',
+  proargmodes => '{i,o,o}',
+  proargnames => '{oid,relfilenode,reltablespace}',
+  prosrc => 'pg_gtr_info' },
+{ oid => '8083', descr => 'get information about all in-use global temporary relations',
+  proname => 'pg_gtrs_in_use', provolatile => 's', proparallel => 'u',
+  proargtypes => '', proretset => 't', prorettype => 'record', prorows => '10',
+  proallargtypes => '{oid,oid,oid}',
+  proargmodes => '{o,o,o}',
+  proargnames => '{oid,relfilenode,reltablespace}',
+  prosrc => 'pg_gtrs_in_use' },
+
 ]

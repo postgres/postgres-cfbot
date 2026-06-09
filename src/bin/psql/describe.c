@@ -1949,13 +1949,23 @@ describeOneTableDetails(const char *schemaname,
 			if (tableinfo.relpersistence == RELPERSISTENCE_UNLOGGED)
 				printfPQExpBuffer(&title, _("Unlogged table \"%s.%s\""),
 								  schemaname, relationname);
+			else if (tableinfo.relpersistence == RELPERSISTENCE_TEMP)
+				printfPQExpBuffer(&title, _("Temporary table \"%s.%s\""),
+								  schemaname, relationname);
+			else if (tableinfo.relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
+				printfPQExpBuffer(&title, _("Global temporary table \"%s.%s\""),
+								  schemaname, relationname);
 			else
 				printfPQExpBuffer(&title, _("Table \"%s.%s\""),
 								  schemaname, relationname);
 			break;
 		case RELKIND_VIEW:
-			printfPQExpBuffer(&title, _("View \"%s.%s\""),
-							  schemaname, relationname);
+			if (tableinfo.relpersistence == RELPERSISTENCE_TEMP)
+				printfPQExpBuffer(&title, _("Temporary view \"%s.%s\""),
+								  schemaname, relationname);
+			else
+				printfPQExpBuffer(&title, _("View \"%s.%s\""),
+								  schemaname, relationname);
 			break;
 		case RELKIND_MATVIEW:
 			printfPQExpBuffer(&title, _("Materialized view \"%s.%s\""),
@@ -1992,6 +2002,12 @@ describeOneTableDetails(const char *schemaname,
 		case RELKIND_PARTITIONED_TABLE:
 			if (tableinfo.relpersistence == RELPERSISTENCE_UNLOGGED)
 				printfPQExpBuffer(&title, _("Unlogged partitioned table \"%s.%s\""),
+								  schemaname, relationname);
+			else if (tableinfo.relpersistence == RELPERSISTENCE_TEMP)
+				printfPQExpBuffer(&title, _("Temporary partitioned table \"%s.%s\""),
+								  schemaname, relationname);
+			else if (tableinfo.relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
+				printfPQExpBuffer(&title, _("Global temporary partitioned table \"%s.%s\""),
 								  schemaname, relationname);
 			else
 				printfPQExpBuffer(&title, _("Partitioned table \"%s.%s\""),
@@ -4108,10 +4124,12 @@ listTables(const char *tabtypes, const char *pattern, bool verbose, bool showSys
 						  ",\n  CASE c.relpersistence "
 						  "WHEN " CppAsString2(RELPERSISTENCE_PERMANENT) " THEN '%s' "
 						  "WHEN " CppAsString2(RELPERSISTENCE_TEMP) " THEN '%s' "
+						  "WHEN " CppAsString2(RELPERSISTENCE_GLOBAL_TEMP) " THEN '%s' "
 						  "WHEN " CppAsString2(RELPERSISTENCE_UNLOGGED) " THEN '%s' "
 						  "END as \"%s\"",
 						  gettext_noop("permanent"),
 						  gettext_noop("temporary"),
+						  gettext_noop("global temporary"),
 						  gettext_noop("unlogged"),
 						  gettext_noop("Persistence"));
 		translate_columns[cols_so_far] = true;

@@ -36,6 +36,7 @@
 #include "access/tableam.h"
 #include "catalog/binary_upgrade.h"
 #include "catalog/catalog.h"
+#include "catalog/global_temp.h"
 #include "catalog/heap.h"
 #include "catalog/index.h"
 #include "catalog/objectaccess.h"
@@ -408,7 +409,8 @@ heap_create(const char *relname,
 											   relpersistence,
 											   relfrozenxid, relminmxid);
 		else if (RELKIND_HAS_STORAGE(rel->rd_rel->relkind))
-			RelationCreateStorage(rel->rd_locator, relpersistence, true);
+			RelationCreateStorage(rel->rd_id, rel->rd_locator,
+								  relpersistence, true);
 		else
 			Assert(false);
 	}
@@ -417,8 +419,13 @@ heap_create(const char *relname,
 	 * If a tablespace is specified, removal of that tablespace is normally
 	 * protected by the existence of a physical file; but for relations with
 	 * no files, add a pg_shdepend entry to account for that.
+	 *
+	 * Note, however, that although global temporary relations may have files,
+	 * those files will go away at the end of the session, and so provide no
+	 * protection, and we must add a pg_shdepend entry in this case too.
 	 */
-	if (!create_storage && reltablespace != InvalidOid)
+	if ((!create_storage || relpersistence == RELPERSISTENCE_GLOBAL_TEMP) &&
+		reltablespace != InvalidOid)
 		recordDependencyOnTablespace(RelationRelationId, relid,
 									 reltablespace);
 
@@ -1011,6 +1018,10 @@ InsertPgClassTuple(Relation pg_class_desc,
 	CatalogTupleInsert(pg_class_desc, tup);
 
 	heap_freetuple(tup);
+
+	/* If it's a global temporary relation, track our use of it */
+	if (RELATION_IS_GLOBAL_TEMP(new_rel_desc))
+		TrackGlobalTempRelation(new_rel_desc);
 }
 
 /* --------------------------------
@@ -1618,6 +1629,7 @@ DeleteRelationTuple(Oid relid)
 {
 	Relation	pg_class_desc;
 	HeapTuple	tup;
+	char		relpersistence;
 
 	/* Grab an appropriate lock on the pg_class relation */
 	pg_class_desc = table_open(RelationRelationId, RowExclusiveLock);
@@ -1625,6 +1637,7 @@ DeleteRelationTuple(Oid relid)
 	tup = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
 	if (!HeapTupleIsValid(tup))
 		elog(ERROR, "cache lookup failed for relation %u", relid);
+	relpersistence = ((Form_pg_class) GETSTRUCT(tup))->relpersistence;
 
 	/* delete the relation tuple from pg_class, and finish up */
 	CatalogTupleDelete(pg_class_desc, &tup->t_self);
@@ -1632,6 +1645,10 @@ DeleteRelationTuple(Oid relid)
 	ReleaseSysCache(tup);
 
 	table_close(pg_class_desc, RowExclusiveLock);
+
+	/* If it's a global temporary relation, forget our use of it */
+	if (relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
+		ForgetGlobalTempRelation(relid);
 }
 
 /*

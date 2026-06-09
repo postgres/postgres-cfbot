@@ -213,7 +213,8 @@ RelidByRelfilenumber(Oid reltablespace, RelFileNumber relfilenumber)
 		{
 			Form_pg_class classform = (Form_pg_class) GETSTRUCT(ntp);
 
-			if (classform->relpersistence == RELPERSISTENCE_TEMP)
+			if (classform->relpersistence == RELPERSISTENCE_TEMP ||
+				classform->relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
 				continue;
 
 			if (found)
