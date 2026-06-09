@@ -4547,6 +4547,12 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
        <link linkend="sql-insert"><command>INSERT</command></link>/<link linkend="sql-update"><command>UPDATE</command></link> operations, but it cannot safely
        be used for queries. If it is unique, the uniqueness property is not
        guaranteed true either.
+      </para>
+      <para>
+       For an index on a global temporary table, the
+       <structfield>indisvalid</structfield> value returned by
+       <link linkend="pg-gtr-index-info"><function>pg_gtr_index_info()</function></link>,
+       if non-null, takes precedence over the value from this catalog.
       </para></entry>
      </row>
 
@@ -4570,6 +4576,12 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
        If true, the index is currently ready for inserts.  False means the
        index must be ignored by <link linkend="sql-insert"><command>INSERT</command></link>/<link linkend="sql-update"><command>UPDATE</command></link>
        operations.
+      </para>
+      <para>
+       For an index on a global temporary table, the
+       <structfield>indisready</structfield> value returned by
+       <link linkend="pg-gtr-index-info"><function>pg_gtr_index_info()</function></link>,
+       if non-null, takes precedence over the value from this catalog.
       </para></entry>
      </row>
 

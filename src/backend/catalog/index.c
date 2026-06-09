@@ -37,6 +37,7 @@
 #include "catalog/binary_upgrade.h"
 #include "catalog/catalog.h"
 #include "catalog/dependency.h"
+#include "catalog/global_temp.h"
 #include "catalog/heap.h"
 #include "catalog/index.h"
 #include "catalog/objectaccess.h"
@@ -120,7 +121,8 @@ static void UpdateIndexRelation(Oid indexoid, Oid heapoid,
 								bool isexclusion,
 								bool immediate,
 								bool isvalid,
-								bool isready);
+								bool isready,
+								char relpersistence);
 static void index_update_stats(Relation rel,
 							   bool hasindex,
 							   double reltuples);
@@ -572,7 +574,8 @@ UpdateIndexRelation(Oid indexoid,
 					bool isexclusion,
 					bool immediate,
 					bool isvalid,
-					bool isready)
+					bool isready,
+					char relpersistence)
 {
 	int2vector *indkey;
 	oidvector  *indcollation;
@@ -673,6 +676,20 @@ UpdateIndexRelation(Oid indexoid,
 	 */
 	table_close(pg_index, RowExclusiveLock);
 	heap_freetuple(tuple);
+
+	/*
+	 * For an index on a global temporary table, TrackGlobalTempRelation()
+	 * will have marked the index as valid and ready.  If that's not actually
+	 * the case, fix it now.
+	 */
+	if (relpersistence == RELPERSISTENCE_GLOBAL_TEMP && (!isvalid || !isready))
+	{
+		GtrInfo    *gtr_info;
+
+		gtr_info = GetGlobalTempRelationInfoForUpdate(indexoid);
+		gtr_info->indisvalid = isvalid;
+		gtr_info->indisready = isready;
+	}
 }
 
 
@@ -1061,7 +1078,8 @@ index_create(Relation heapRelation,
 						(constr_flags & INDEX_CONSTR_CREATE_DEFERRABLE) == 0 &&
 						(flags & INDEX_CREATE_DEFERRABLE) == 0,
 						!concurrent && !invalid,
-						!concurrent);
+						!concurrent,
+						relpersistence);
 
 	/*
 	 * Register relcache invalidation on the indexes' heap relation, to
@@ -2167,12 +2185,16 @@ index_drop(Oid indexId, bool concurrent, bool concurrent_lock_mode)
 	LOCKMODE	lockmode;
 
 	/*
-	 * A temporary relation uses a non-concurrent DROP.  Other backends can't
-	 * access a temporary relation, so there's no harm in grabbing a stronger
-	 * lock (see comments in RemoveRelations), and a non-concurrent DROP is
-	 * more efficient.
+	 * A temporary relation uses a non-concurrent DROP.  For global temporary
+	 * relations, CONCURRENTLY is explicitly rejected, while for local
+	 * temporary relations we force a non-concurrent DROP, even if
+	 * CONCURRENTLY was requested.  Other backends can't access a local
+	 * temporary relation, so there's no harm in grabbing a stronger lock (see
+	 * comments in RemoveRelations), and a non-concurrent DROP is more
+	 * efficient.
 	 */
-	Assert(get_rel_persistence(indexId) != RELPERSISTENCE_TEMP ||
+	Assert((get_rel_persistence(indexId) != RELPERSISTENCE_TEMP &&
+			get_rel_persistence(indexId) != RELPERSISTENCE_GLOBAL_TEMP) ||
 		   (!concurrent && !concurrent_lock_mode));
 
 	/*
@@ -3141,7 +3163,7 @@ index_build(Relation heapRelation,
 	{
 		smgrcreate(RelationGetSmgr(indexRelation), INIT_FORKNUM, false);
 		log_smgrcreate(&indexRelation->rd_locator, INIT_FORKNUM);
-		indexRelation->rd_indam->ambuildempty(indexRelation);
+		indexRelation->rd_indam->ambuildempty(indexRelation, INIT_FORKNUM);
 	}
 
 	/*
@@ -3556,6 +3578,9 @@ index_set_state_flags(Oid indexId, IndexStateFlagsAction action)
 	HeapTuple	indexTuple;
 	Form_pg_index indexForm;
 
+	/* This is not expected to be a global temporary index */
+	Assert(!rel_is_global_temp(indexId));
+
 	/* Open pg_index and fetch a writable copy of the index's tuple */
 	pg_index = table_open(IndexRelationId, RowExclusiveLock);
 
@@ -3899,8 +3924,14 @@ reindex_index(const ReindexStmt *stmt, Oid indexId,
 		Relation	pg_index;
 		HeapTuple	indexTuple;
 		Form_pg_index indexForm;
+		GtrInfo    *gtr_info;
 		bool		index_bad;
 
+		/*
+		 * For a global temporary index, we update indisvalid and indisready
+		 * in both pg_index and the session-local GtrInfo struct, so that the
+		 * changes apply to this session and all future sessions.
+		 */
 		pg_index = table_open(IndexRelationId, RowExclusiveLock);
 
 		indexTuple = SearchSysCacheCopy1(INDEXRELID,
@@ -3909,8 +3940,13 @@ reindex_index(const ReindexStmt *stmt, Oid indexId,
 			elog(ERROR, "cache lookup failed for index %u", indexId);
 		indexForm = (Form_pg_index) GETSTRUCT(indexTuple);
 
-		index_bad = (!indexForm->indisvalid ||
-					 !indexForm->indisready ||
+		if (RELATION_IS_GLOBAL_TEMP(iRel))
+			gtr_info = GetGlobalTempRelationInfoForUpdate(indexId);
+		else
+			gtr_info = NULL;
+
+		index_bad = (!GetEffective_indisvalid(indexForm, gtr_info) ||
+					 !GetEffective_indisready(indexForm, gtr_info) ||
 					 !indexForm->indislive);
 		if (index_bad ||
 			(indexForm->indcheckxmin && !indexInfo->ii_BrokenHotChain))
@@ -3920,7 +3956,11 @@ reindex_index(const ReindexStmt *stmt, Oid indexId,
 			else if (index_bad)
 				indexForm->indcheckxmin = true;
 			indexForm->indisvalid = true;
+			if (gtr_info != NULL)
+				gtr_info->indisvalid = true;
 			indexForm->indisready = true;
+			if (gtr_info != NULL)
+				gtr_info->indisready = true;
 			indexForm->indislive = true;
 			CatalogTupleUpdate(pg_index, &indexTuple->t_self, indexTuple);
 

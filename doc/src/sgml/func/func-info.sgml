@@ -347,6 +347,29 @@
       </row>
 
       <row>
+       <entry id="pg-gtr-index-info" role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>pg_gtr_index_info</primary>
+        </indexterm>
+        <function>pg_gtr_index_info</function> ( <type>oid</type> )
+        <returnvalue>record</returnvalue>
+        ( <parameter>indisvalid</parameter> <type>boolean</type>,
+        <parameter>indisready</parameter> <type>boolean</type> )
+       </para>
+       <para>
+        Returns information about a global temporary index relation being used
+        in the current session.  <structfield>indisvalid</structfield> is true
+        if the index is valid in the current session, and
+        <structfield>indisready</structfield> is true if it is ready for
+        inserts.  Otherwise the index is not valid or ready for inserts, and
+        <xref linkend="sql-reindex"/> needs to be run to make it usable.
+        If the input is not the OID of a global temporary index, or that index
+        has not yet been opened in the current session, then the return values
+        are <literal>NULL</literal>.
+       </para></entry>
+      </row>
+
+      <row>
        <entry id="pg-gtr-info" role="func_table_entry"><para role="func_signature">
         <indexterm>
          <primary>pg_gtr_info</primary>

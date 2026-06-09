@@ -11,7 +11,7 @@ SET ROLE regress_global_temp_user;
 
 -- Test table creation
 CREATE GLOBAL TEMP TABLE pg_temp.tmp1 (a int); -- fail
-CREATE GLOBAL TEMP TABLE tmp1 (a int);
+CREATE GLOBAL TEMP TABLE tmp1 (a int PRIMARY KEY, b text);
 CREATE SCHEMA global_temp_xxx CREATE GLOBAL TEMP TABLE tmp2 (a int);
 CREATE SCHEMA global_temp_yyy;
 CREATE GLOBAL TEMP TABLE global_temp_yyy.tmp3 (a int);
@@ -29,7 +29,7 @@ DROP SCHEMA global_temp_xxx CASCADE;
 DROP SCHEMA global_temp_yyy CASCADE;
 
 -- Basic tests
-INSERT INTO tmp1 VALUES (1);
+INSERT INTO tmp1 VALUES (1, 'xxx');
 SELECT * FROM tmp1;
 \c
 SET search_path = global_temp_tests;
@@ -55,6 +55,34 @@ SELECT c.relname,
        t.reltablespace = c.reltablespace
   FROM pg_gtrs_in_use() t LEFT JOIN pg_class c ON c.oid = t.oid
  ORDER BY c.relname;
+
+-- Test index
+INSERT INTO tmp1 VALUES (1, 'xxx');
+CREATE INDEX tmp1_b_idx ON tmp1(b);
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+SELECT * FROM tmp1 WHERE b = 'xxx';
+SELECT * FROM tmp1 WHERE b = 'xxx';
+RESET enable_seqscan;
+
+-- Concurrent index build/reindex/drop not allowed
+CREATE INDEX CONCURRENTLY tmp1_b_idx ON tmp1(b); -- fail
+REINDEX INDEX CONCURRENTLY tmp1_pkey; -- fail
+REINDEX TABLE CONCURRENTLY tmp1; -- fail
+REINDEX SCHEMA CONCURRENTLY global_temp_tests; -- skips with a warning
+DROP INDEX CONCURRENTLY tmp1_b_idx; -- fail
+
+-- Test REINDEX -- relfilenode only changes locally
+SELECT c.relfilenode AS global_relfilenode, t.relfilenode AS local_relfilenode
+  FROM pg_class c, LATERAL pg_gtr_info(c.oid) t
+ WHERE c.oid = 'tmp1_b_idx'::regclass \gset
+
+REINDEX INDEX tmp1_b_idx;
+SELECT CASE WHEN c.relfilenode = :global_relfilenode THEN 'unchanged' ELSE 'changed' END AS global_relfilenode,
+       CASE WHEN t.relfilenode = :local_relfilenode THEN 'unchange' ELSE 'changed' END AS local_relfilenode
+  FROM pg_class c, LATERAL pg_gtr_info(c.oid) t
+ WHERE c.oid = 'tmp1_b_idx'::regclass;
+DROP INDEX tmp1_b_idx;
 
 -- Test ON COMMIT DELETE ROWS
 CREATE GLOBAL TEMP TABLE tmp2 (a int) ON COMMIT DELETE ROWS;
@@ -103,6 +131,43 @@ SET search_path = global_temp_tests;
 SELECT tableoid::regclass, * FROM tmp2 ORDER BY a;
 DROP TABLE tmp2, perm;
 
+-- Test partitioned index validity
+CREATE GLOBAL TEMP TABLE tmp2 (a int) PARTITION BY LIST (a);
+CREATE GLOBAL TEMP TABLE tmp2_p1 PARTITION OF tmp2 FOR VALUES IN (1);
+CREATE INDEX tmp2_a_idx ON tmp2 (a);
+SELECT c.relname, i.indisvalid AS global_valid, i.indisready AS global_ready,
+       t.indisvalid AS local_valid, t.indisready AS local_ready
+  FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid,
+       LATERAL pg_gtr_index_info(c.oid) t
+ WHERE c.relname ~ 'tmp2(.*)_a_idx'
+ ORDER BY c.relname;
+\d tmp2
+\d tmp2_a_idx
+
+DROP INDEX tmp2_a_idx;
+CREATE INDEX tmp2_a_idx ON ONLY tmp2 (a);
+SELECT c.relname, i.indisvalid AS global_valid, i.indisready AS global_ready,
+       t.indisvalid AS local_valid, t.indisready AS local_ready
+  FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid,
+       LATERAL pg_gtr_index_info(c.oid) t
+ WHERE c.relname ~ 'tmp2(.*)_a_idx'
+ ORDER BY c.relname;
+\d tmp2
+\d tmp2_a_idx
+
+CREATE INDEX tmp2_p1_a_idx ON tmp2_p1 (a);
+ALTER INDEX tmp2_a_idx ATTACH PARTITION tmp2_p1_a_idx;
+SELECT c.relname, i.indisvalid AS global_valid, i.indisready AS global_ready,
+       t.indisvalid AS local_valid, t.indisready AS local_ready
+  FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid,
+       LATERAL pg_gtr_index_info(c.oid) t
+ WHERE c.relname ~ 'tmp2(.*)_a_idx'
+ ORDER BY c.relname;
+\d tmp2
+\d tmp2_a_idx
+\d tmp2_p1_a_idx
+DROP TABLE tmp2;
+
 -- Test ALTER TABLE with rewrite
 CREATE GLOBAL TEMP TABLE tmp2 (a int);
 INSERT INTO tmp2 VALUES (1);
@@ -113,9 +178,21 @@ DROP TABLE tmp2;
 -- Test foreign keys
 CREATE TABLE perm_pk_rel (a int PRIMARY KEY);
 CREATE TEMP TABLE temp_pk_rel (a int PRIMARY KEY);
+CREATE GLOBAL TEMP TABLE gtemp_pk_rel (a int PRIMARY KEY);
+CREATE TABLE tmp2 (a int REFERENCES gtemp_pk_rel); -- fail
+CREATE TEMP TABLE tmp2 (a int REFERENCES gtemp_pk_rel); -- fail
 CREATE GLOBAL TEMP TABLE tmp2 (a int REFERENCES perm_pk_rel); -- fail
 CREATE GLOBAL TEMP TABLE tmp2 (a int REFERENCES temp_pk_rel); -- fail
-DROP TABLE perm_pk_rel, temp_pk_rel;
+CREATE GLOBAL TEMP TABLE tmp2 (a int REFERENCES gtemp_pk_rel);
+INSERT INTO gtemp_pk_rel VALUES (1);
+INSERT INTO tmp2 VALUES (1);
+INSERT INTO tmp2 VALUES (2); -- fail
+DELETE FROM gtemp_pk_rel WHERE a = 1; -- fail
+ALTER TABLE tmp2 DROP CONSTRAINT tmp2_a_fkey;
+ALTER TABLE tmp2 ADD FOREIGN KEY (a) REFERENCES gtemp_pk_rel ON DELETE CASCADE;
+DELETE FROM gtemp_pk_rel WHERE a = 1;
+SELECT * FROM tmp2;
+DROP TABLE perm_pk_rel, temp_pk_rel, tmp2;
 
 -- Test ALTER TABLE ... SET TABLESPACE -- reltablespace changes locally and globally
 CREATE GLOBAL TEMP TABLE tmp2 (a int);
@@ -159,7 +236,7 @@ DROP TABLE tmp2;
 DROP TABLESPACE regress_temp_test_tablespace;
 
 -- Test TRUNCATE
-INSERT INTO tmp1 VALUES (1);
+INSERT INTO tmp1 VALUES (1, 'xxx');
 BEGIN;
 TRUNCATE tmp1;
 SELECT * FROM tmp1;
@@ -209,6 +286,17 @@ SELECT CASE WHEN c.relfilenode = :global_relfilenode THEN 'unchanged' ELSE 'chan
   FROM pg_class c, LATERAL pg_gtr_info(c.oid) t
  WHERE c.oid = 'tmp1'::regclass;
 
+-- Test CLUSTER -- relfilenode only changes locally
+SELECT c.relfilenode AS global_relfilenode, t.relfilenode AS local_relfilenode
+  FROM pg_class c, LATERAL pg_gtr_info(c.oid) t
+ WHERE c.oid = 'tmp1'::regclass \gset
+
+CLUSTER tmp1 USING tmp1_pkey;
+SELECT CASE WHEN c.relfilenode = :global_relfilenode THEN 'unchanged' ELSE 'changed' END AS global_relfilenode,
+       CASE WHEN t.relfilenode = :local_relfilenode THEN 'unchange' ELSE 'changed' END AS local_relfilenode
+  FROM pg_class c, LATERAL pg_gtr_info(c.oid) t
+ WHERE c.oid = 'tmp1'::regclass;
+
 -- Test subtransaction rollback of DROP
 \c
 SET search_path = global_temp_tests;
@@ -217,7 +305,7 @@ SELECT count(*) FROM tmp1;
 SAVEPOINT sp;
 DROP TABLE tmp1;
 ROLLBACK TO sp;
-INSERT INTO tmp1 VALUES (1);
+INSERT INTO tmp1 VALUES (1, 'xxx');
 COMMIT;
 
 -- Re-check pg_gtrs_in_use()
@@ -225,6 +313,7 @@ SELECT c.relname,
        t.relfilenode = c.relfilenode,
        t.reltablespace = c.reltablespace
   FROM pg_gtrs_in_use() t LEFT JOIN pg_class c ON c.oid = t.oid
+ WHERE c.relname !~ 'pg_toast_'
  ORDER BY c.relname;
 
 -- Test view creation
@@ -237,3 +326,25 @@ SELECT * FROM v;
 DROP VIEW v;
 
 CREATE GLOBAL TEMP VIEW v AS SELECT * FROM tmp1; -- fail
+
+-- VACUUM initializes toast tables
+\c
+SET search_path = global_temp_tests;
+SELECT EXISTS (SELECT 1 FROM pg_class t WHERE t.oid = c.reltoastrelid),
+       EXISTS (SELECT 1 FROM pg_gtrs_in_use() t WHERE t.oid = c.reltoastrelid) AS used
+FROM pg_class c
+WHERE oid = 'tmp1'::regclass;
+
+VACUUM tmp1;
+SELECT EXISTS (SELECT 1 FROM pg_class t WHERE t.oid = c.reltoastrelid),
+       EXISTS (SELECT 1 FROM pg_gtrs_in_use() t WHERE t.oid = c.reltoastrelid) AS used
+FROM pg_class c
+WHERE oid = 'tmp1'::regclass;
+
+\c
+SET search_path = global_temp_tests;
+VACUUM FULL tmp1;
+SELECT EXISTS (SELECT 1 FROM pg_class t WHERE t.oid = c.reltoastrelid),
+       EXISTS (SELECT 1 FROM pg_gtrs_in_use() t WHERE t.oid = c.reltoastrelid) AS used
+FROM pg_class c
+WHERE oid = 'tmp1'::regclass;

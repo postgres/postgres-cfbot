@@ -21,12 +21,18 @@
  *
  *	Structure holding information about a global temporary relation that is
  *	local to the current session.  These properties act as local overrides to
- *	the information stored in pg_class, allowing it to vary between backends.
+ *	the information stored in pg_class and pg_index, allowing it to vary
+ * between backends.
  */
 typedef struct GtrInfo
 {
+	/* pg_class info */
 	Oid			relfilenode;	/* the relation's physical storage file */
 	Oid			reltablespace;	/* the relation's tablespace identifier */
+
+	/* pg_index info */
+	bool		indisvalid;		/* is the index valid in this session? */
+	bool		indisready;		/* is the index ready for inserts? */
 } GtrInfo;
 
 /*
@@ -40,6 +46,19 @@ typedef struct GtrInfo
 	do { \
 		(target)->relfilenode = (source)->relfilenode; \
 		(target)->reltablespace = (source)->reltablespace; \
+	} while (0)
+
+/*
+ * Copy all pg_index attributes that may be session-local for a global
+ * temporary index relation from "source" to "target", where the source and
+ * target may be of type Form_pg_index or GtrInfo *.
+ *
+ * Beware of multiple evaluations of arguments!
+ */
+#define COPY_PG_INDEX_GTR_INFO(source, target) \
+	do { \
+		(target)->indisvalid = (source)->indisvalid; \
+		(target)->indisready = (source)->indisready; \
 	} while (0)
 
 extern void TrackGlobalTempRelationStorage(Oid relid, RelFileLocator rlocator,
@@ -61,6 +80,7 @@ extern List *GetAllGlobalTempRelationsInUse(Oid dbId);
 extern GtrInfo *GetGlobalTempRelationInfo(Oid relid);
 extern GtrInfo *GetGlobalTempRelationInfoForUpdate(Oid relid);
 extern HeapTuple GetEffectivePgClassTuple(Oid relid);
+extern HeapTuple GetEffectivePgIndexTuple(Oid indexrelid);
 
 /*
  * Get the effective value of relfilenode for a relation.  For a global
@@ -80,6 +100,26 @@ static inline Oid
 GetEffective_reltablespace(Form_pg_class class_form, GtrInfo *gtr_info)
 {
 	return gtr_info != NULL ? gtr_info->reltablespace : class_form->reltablespace;
+}
+
+/*
+ * Get the effective value of indisvalid for an index relation.  For a global
+ * temporary relation, the value from gtr_info (if present) takes precedence.
+ */
+static inline bool
+GetEffective_indisvalid(Form_pg_index index_form, GtrInfo *gtr_info)
+{
+	return gtr_info != NULL ? gtr_info->indisvalid : index_form->indisvalid;
+}
+
+/*
+ * Get the effective value of indisready for an index relation.  For a global
+ * temporary relation, the value from gtr_info (if present) takes precedence.
+ */
+static inline bool
+GetEffective_indisready(Form_pg_index index_form, GtrInfo *gtr_info)
+{
+	return gtr_info != NULL ? gtr_info->indisready : index_form->indisready;
 }
 
 /*

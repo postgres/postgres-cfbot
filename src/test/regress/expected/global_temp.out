@@ -13,7 +13,7 @@ CREATE GLOBAL TEMP TABLE pg_temp.tmp1 (a int); -- fail
 ERROR:  cannot create global temporary relation in temporary schema
 LINE 1: CREATE GLOBAL TEMP TABLE pg_temp.tmp1 (a int);
                                  ^
-CREATE GLOBAL TEMP TABLE tmp1 (a int);
+CREATE GLOBAL TEMP TABLE tmp1 (a int PRIMARY KEY, b text);
 CREATE SCHEMA global_temp_xxx CREATE GLOBAL TEMP TABLE tmp2 (a int);
 CREATE SCHEMA global_temp_yyy;
 CREATE GLOBAL TEMP TABLE global_temp_yyy.tmp3 (a int);
@@ -21,15 +21,18 @@ CREATE GLOBAL TEMP TABLE global_temp_yyy.tmp3 (a int);
   Global temporary table "global_temp_tests.tmp1"
  Column |  Type   | Collation | Nullable | Default 
 --------+---------+-----------+----------+---------
- a      | integer |           |          | 
+ a      | integer |           | not null | 
+ b      | text    |           |          | 
+Indexes:
+    "tmp1_pkey" PRIMARY KEY, btree (a)
 
 \dt+ global_temp_*.tmp*
-                                             List of tables
-      Schema       | Name | Type  |          Owner           |   Persistence    |  Size   | Description 
--------------------+------+-------+--------------------------+------------------+---------+-------------
- global_temp_tests | tmp1 | table | regress_global_temp_user | global temporary | 0 bytes | 
- global_temp_xxx   | tmp2 | table | regress_global_temp_user | global temporary | 0 bytes | 
- global_temp_yyy   | tmp3 | table | regress_global_temp_user | global temporary | 0 bytes | 
+                                              List of tables
+      Schema       | Name | Type  |          Owner           |   Persistence    |    Size    | Description 
+-------------------+------+-------+--------------------------+------------------+------------+-------------
+ global_temp_tests | tmp1 | table | regress_global_temp_user | global temporary | 8192 bytes | 
+ global_temp_xxx   | tmp2 | table | regress_global_temp_user | global temporary | 0 bytes    | 
+ global_temp_yyy   | tmp3 | table | regress_global_temp_user | global temporary | 0 bytes    | 
 (3 rows)
 
 -- Information schema
@@ -49,18 +52,18 @@ NOTICE:  drop cascades to table global_temp_xxx.tmp2
 DROP SCHEMA global_temp_yyy CASCADE;
 NOTICE:  drop cascades to table global_temp_yyy.tmp3
 -- Basic tests
-INSERT INTO tmp1 VALUES (1);
+INSERT INTO tmp1 VALUES (1, 'xxx');
 SELECT * FROM tmp1;
- a 
----
- 1
+ a |  b  
+---+-----
+ 1 | xxx
 (1 row)
 
 \c
 SET search_path = global_temp_tests;
 SELECT * FROM tmp1;
- a 
----
+ a | b 
+---+---
 (0 rows)
 
 -- Test pg_gtr_info() and pg_gtrs_in_use()
@@ -78,8 +81,8 @@ SELECT * FROM pg_gtrs_in_use();
 (0 rows)
 
 SELECT * FROM tmp1;
- a 
----
+ a | b 
+---+---
 (0 rows)
 
 SELECT c.relfilenode = c.oid,
@@ -98,11 +101,57 @@ SELECT c.relname,
        t.reltablespace = c.reltablespace
   FROM pg_gtrs_in_use() t LEFT JOIN pg_class c ON c.oid = t.oid
  ORDER BY c.relname;
- relname | ?column? | ?column? 
----------+----------+----------
- tmp1    | t        | t
+  relname  | ?column? | ?column? 
+-----------+----------+----------
+ tmp1      | t        | t
+ tmp1_pkey | t        | t
+(2 rows)
+
+-- Test index
+INSERT INTO tmp1 VALUES (1, 'xxx');
+CREATE INDEX tmp1_b_idx ON tmp1(b);
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+SELECT * FROM tmp1 WHERE b = 'xxx';
+             QUERY PLAN              
+-------------------------------------
+ Index Scan using tmp1_b_idx on tmp1
+   Index Cond: (b = 'xxx'::text)
+(2 rows)
+
+SELECT * FROM tmp1 WHERE b = 'xxx';
+ a |  b  
+---+-----
+ 1 | xxx
 (1 row)
 
+RESET enable_seqscan;
+-- Concurrent index build/reindex/drop not allowed
+CREATE INDEX CONCURRENTLY tmp1_b_idx ON tmp1(b); -- fail
+ERROR:  cannot create index on global temporary table "tmp1" concurrently
+REINDEX INDEX CONCURRENTLY tmp1_pkey; -- fail
+ERROR:  cannot reindex global temporary index "tmp1_pkey" concurrently
+REINDEX TABLE CONCURRENTLY tmp1; -- fail
+ERROR:  cannot reindex global temporary table "tmp1" concurrently
+REINDEX SCHEMA CONCURRENTLY global_temp_tests; -- skips with a warning
+WARNING:  cannot reindex global temporary tables concurrently, skipping all
+DROP INDEX CONCURRENTLY tmp1_b_idx; -- fail
+ERROR:  cannot drop global temporary index "tmp1_b_idx" concurrently
+-- Test REINDEX -- relfilenode only changes locally
+SELECT c.relfilenode AS global_relfilenode, t.relfilenode AS local_relfilenode
+  FROM pg_class c, LATERAL pg_gtr_info(c.oid) t
+ WHERE c.oid = 'tmp1_b_idx'::regclass \gset
+REINDEX INDEX tmp1_b_idx;
+SELECT CASE WHEN c.relfilenode = :global_relfilenode THEN 'unchanged' ELSE 'changed' END AS global_relfilenode,
+       CASE WHEN t.relfilenode = :local_relfilenode THEN 'unchange' ELSE 'changed' END AS local_relfilenode
+  FROM pg_class c, LATERAL pg_gtr_info(c.oid) t
+ WHERE c.oid = 'tmp1_b_idx'::regclass;
+ global_relfilenode | local_relfilenode 
+--------------------+-------------------
+ unchanged          | changed
+(1 row)
+
+DROP INDEX tmp1_b_idx;
 -- Test ON COMMIT DELETE ROWS
 CREATE GLOBAL TEMP TABLE tmp2 (a int) ON COMMIT DELETE ROWS;
 BEGIN;
@@ -143,8 +192,8 @@ ERROR:  ON COMMIT DROP cannot be used on global temporary tables
 -- Two-phase commit not allowed with global temp tables
 BEGIN;
 SELECT * FROM tmp1;
- a 
----
+ a | b 
+---+---
 (0 rows)
 
 PREPARE TRANSACTION 'twophase'; -- fail
@@ -180,6 +229,112 @@ SELECT tableoid::regclass, * FROM tmp2 ORDER BY a;
 (0 rows)
 
 DROP TABLE tmp2, perm;
+-- Test partitioned index validity
+CREATE GLOBAL TEMP TABLE tmp2 (a int) PARTITION BY LIST (a);
+CREATE GLOBAL TEMP TABLE tmp2_p1 PARTITION OF tmp2 FOR VALUES IN (1);
+CREATE INDEX tmp2_a_idx ON tmp2 (a);
+SELECT c.relname, i.indisvalid AS global_valid, i.indisready AS global_ready,
+       t.indisvalid AS local_valid, t.indisready AS local_ready
+  FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid,
+       LATERAL pg_gtr_index_info(c.oid) t
+ WHERE c.relname ~ 'tmp2(.*)_a_idx'
+ ORDER BY c.relname;
+    relname    | global_valid | global_ready | local_valid | local_ready 
+---------------+--------------+--------------+-------------+-------------
+ tmp2_a_idx    | t            | t            | t           | t
+ tmp2_p1_a_idx | t            | t            | t           | t
+(2 rows)
+
+\d tmp2
+Global temporary partitioned table "global_temp_tests.tmp2"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ a      | integer |           |          | 
+Partition key: LIST (a)
+Indexes:
+    "tmp2_a_idx" btree (a)
+Number of partitions: 1 (Use \d+ to list them.)
+
+\d tmp2_a_idx
+Partitioned index "global_temp_tests.tmp2_a_idx"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ a      | integer | yes  | a
+btree, for table "global_temp_tests.tmp2"
+Number of partitions: 1 (Use \d+ to list them.)
+
+DROP INDEX tmp2_a_idx;
+CREATE INDEX tmp2_a_idx ON ONLY tmp2 (a);
+SELECT c.relname, i.indisvalid AS global_valid, i.indisready AS global_ready,
+       t.indisvalid AS local_valid, t.indisready AS local_ready
+  FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid,
+       LATERAL pg_gtr_index_info(c.oid) t
+ WHERE c.relname ~ 'tmp2(.*)_a_idx'
+ ORDER BY c.relname;
+  relname   | global_valid | global_ready | local_valid | local_ready 
+------------+--------------+--------------+-------------+-------------
+ tmp2_a_idx | f            | t            | f           | t
+(1 row)
+
+\d tmp2
+Global temporary partitioned table "global_temp_tests.tmp2"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ a      | integer |           |          | 
+Partition key: LIST (a)
+Indexes:
+    "tmp2_a_idx" btree (a) INVALID
+Number of partitions: 1 (Use \d+ to list them.)
+
+\d tmp2_a_idx
+Partitioned index "global_temp_tests.tmp2_a_idx"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ a      | integer | yes  | a
+btree, for table "global_temp_tests.tmp2", invalid
+Number of partitions: 0
+
+CREATE INDEX tmp2_p1_a_idx ON tmp2_p1 (a);
+ALTER INDEX tmp2_a_idx ATTACH PARTITION tmp2_p1_a_idx;
+SELECT c.relname, i.indisvalid AS global_valid, i.indisready AS global_ready,
+       t.indisvalid AS local_valid, t.indisready AS local_ready
+  FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid,
+       LATERAL pg_gtr_index_info(c.oid) t
+ WHERE c.relname ~ 'tmp2(.*)_a_idx'
+ ORDER BY c.relname;
+    relname    | global_valid | global_ready | local_valid | local_ready 
+---------------+--------------+--------------+-------------+-------------
+ tmp2_a_idx    | t            | t            | t           | t
+ tmp2_p1_a_idx | t            | t            | t           | t
+(2 rows)
+
+\d tmp2
+Global temporary partitioned table "global_temp_tests.tmp2"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ a      | integer |           |          | 
+Partition key: LIST (a)
+Indexes:
+    "tmp2_a_idx" btree (a)
+Number of partitions: 1 (Use \d+ to list them.)
+
+\d tmp2_a_idx
+Partitioned index "global_temp_tests.tmp2_a_idx"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ a      | integer | yes  | a
+btree, for table "global_temp_tests.tmp2"
+Number of partitions: 1 (Use \d+ to list them.)
+
+\d tmp2_p1_a_idx
+Index "global_temp_tests.tmp2_p1_a_idx"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ a      | integer | yes  | a
+Partition of: tmp2_a_idx 
+btree, for table "global_temp_tests.tmp2_p1"
+
+DROP TABLE tmp2;
 -- Test ALTER TABLE with rewrite
 CREATE GLOBAL TEMP TABLE tmp2 (a int);
 INSERT INTO tmp2 VALUES (1);
@@ -194,11 +349,33 @@ DROP TABLE tmp2;
 -- Test foreign keys
 CREATE TABLE perm_pk_rel (a int PRIMARY KEY);
 CREATE TEMP TABLE temp_pk_rel (a int PRIMARY KEY);
+CREATE GLOBAL TEMP TABLE gtemp_pk_rel (a int PRIMARY KEY);
+CREATE TABLE tmp2 (a int REFERENCES gtemp_pk_rel); -- fail
+ERROR:  constraints on permanent tables may reference only permanent tables
+CREATE TEMP TABLE tmp2 (a int REFERENCES gtemp_pk_rel); -- fail
+ERROR:  constraints on local temporary tables may reference only local temporary tables
 CREATE GLOBAL TEMP TABLE tmp2 (a int REFERENCES perm_pk_rel); -- fail
 ERROR:  constraints on global temporary tables may reference only global temporary tables
 CREATE GLOBAL TEMP TABLE tmp2 (a int REFERENCES temp_pk_rel); -- fail
 ERROR:  constraints on global temporary tables may reference only global temporary tables
-DROP TABLE perm_pk_rel, temp_pk_rel;
+CREATE GLOBAL TEMP TABLE tmp2 (a int REFERENCES gtemp_pk_rel);
+INSERT INTO gtemp_pk_rel VALUES (1);
+INSERT INTO tmp2 VALUES (1);
+INSERT INTO tmp2 VALUES (2); -- fail
+ERROR:  insert or update on table "tmp2" violates foreign key constraint "tmp2_a_fkey"
+DETAIL:  Key (a)=(2) is not present in table "gtemp_pk_rel".
+DELETE FROM gtemp_pk_rel WHERE a = 1; -- fail
+ERROR:  update or delete on table "gtemp_pk_rel" violates foreign key constraint "tmp2_a_fkey" on table "tmp2"
+DETAIL:  Key (a)=(1) is still referenced from table "tmp2".
+ALTER TABLE tmp2 DROP CONSTRAINT tmp2_a_fkey;
+ALTER TABLE tmp2 ADD FOREIGN KEY (a) REFERENCES gtemp_pk_rel ON DELETE CASCADE;
+DELETE FROM gtemp_pk_rel WHERE a = 1;
+SELECT * FROM tmp2;
+ a 
+---
+(0 rows)
+
+DROP TABLE perm_pk_rel, temp_pk_rel, tmp2;
 -- Test ALTER TABLE ... SET TABLESPACE -- reltablespace changes locally and globally
 CREATE GLOBAL TEMP TABLE tmp2 (a int);
 INSERT INTO tmp2 VALUES (1);
@@ -261,68 +438,68 @@ DETAIL:  tablespace for table tmp2
 DROP TABLE tmp2;
 DROP TABLESPACE regress_temp_test_tablespace;
 -- Test TRUNCATE
-INSERT INTO tmp1 VALUES (1);
+INSERT INTO tmp1 VALUES (1, 'xxx');
 BEGIN;
 TRUNCATE tmp1;
 SELECT * FROM tmp1;
- a 
----
+ a | b 
+---+---
 (0 rows)
 
 ROLLBACK;
 SELECT * FROM tmp1;
- a 
----
- 1
+ a |  b  
+---+-----
+ 1 | xxx
 (1 row)
 
 BEGIN;
 SAVEPOINT sp1;
 TRUNCATE tmp1;
 SELECT * FROM tmp1;
- a 
----
+ a | b 
+---+---
 (0 rows)
 
 RELEASE sp1;
 SELECT * FROM tmp1;
- a 
----
+ a | b 
+---+---
 (0 rows)
 
 ROLLBACK;
 SELECT * FROM tmp1;
- a 
----
- 1
+ a |  b  
+---+-----
+ 1 | xxx
 (1 row)
 
 BEGIN;
 SAVEPOINT sp1;
 TRUNCATE tmp1;
 SELECT * FROM tmp1;
- a 
----
+ a | b 
+---+---
 (0 rows)
 
 ROLLBACK TO sp1;
 SELECT * FROM tmp1;
- a 
----
- 1
+ a |  b  
+---+-----
+ 1 | xxx
 (1 row)
 
 COMMIT;
 SELECT * FROM tmp1;
- a 
----
- 1
+ a |  b  
+---+-----
+ 1 | xxx
 (1 row)
 
 TRUNCATE tmp1;
 SELECT * FROM tmp1;
- a 
----
+ a | b 
+---+---
 (0 rows)
 
 -- Test REPACK -- relfilenode only changes locally
@@ -353,6 +530,20 @@ SELECT CASE WHEN c.relfilenode = :global_relfilenode THEN 'unchanged' ELSE 'chan
  unchanged          | changed
 (1 row)
 
+-- Test CLUSTER -- relfilenode only changes locally
+SELECT c.relfilenode AS global_relfilenode, t.relfilenode AS local_relfilenode
+  FROM pg_class c, LATERAL pg_gtr_info(c.oid) t
+ WHERE c.oid = 'tmp1'::regclass \gset
+CLUSTER tmp1 USING tmp1_pkey;
+SELECT CASE WHEN c.relfilenode = :global_relfilenode THEN 'unchanged' ELSE 'changed' END AS global_relfilenode,
+       CASE WHEN t.relfilenode = :local_relfilenode THEN 'unchange' ELSE 'changed' END AS local_relfilenode
+  FROM pg_class c, LATERAL pg_gtr_info(c.oid) t
+ WHERE c.oid = 'tmp1'::regclass;
+ global_relfilenode | local_relfilenode 
+--------------------+-------------------
+ unchanged          | changed
+(1 row)
+
 -- Test subtransaction rollback of DROP
 \c
 SET search_path = global_temp_tests;
@@ -366,35 +557,71 @@ SELECT count(*) FROM tmp1;
 SAVEPOINT sp;
 DROP TABLE tmp1;
 ROLLBACK TO sp;
-INSERT INTO tmp1 VALUES (1);
+INSERT INTO tmp1 VALUES (1, 'xxx');
 COMMIT;
 -- Re-check pg_gtrs_in_use()
 SELECT c.relname,
        t.relfilenode = c.relfilenode,
        t.reltablespace = c.reltablespace
   FROM pg_gtrs_in_use() t LEFT JOIN pg_class c ON c.oid = t.oid
+ WHERE c.relname !~ 'pg_toast_'
  ORDER BY c.relname;
- relname | ?column? | ?column? 
----------+----------+----------
- tmp1    | t        | t
-(1 row)
+  relname  | ?column? | ?column? 
+-----------+----------+----------
+ tmp1      | t        | t
+ tmp1_pkey | t        | t
+(2 rows)
 
 -- Test view creation
 CREATE VIEW v AS SELECT * FROM tmp1;
 SELECT * FROM v;
- a 
----
- 1
+ a |  b  
+---+-----
+ 1 | xxx
 (1 row)
 
 DROP VIEW v;
 CREATE TEMP VIEW v AS SELECT * FROM tmp1;
 SELECT * FROM v;
- a 
----
- 1
+ a |  b  
+---+-----
+ 1 | xxx
 (1 row)
 
 DROP VIEW v;
 CREATE GLOBAL TEMP VIEW v AS SELECT * FROM tmp1; -- fail
 ERROR:  views cannot be global temporary because they do not have storage
+-- VACUUM initializes toast tables
+\c
+SET search_path = global_temp_tests;
+SELECT EXISTS (SELECT 1 FROM pg_class t WHERE t.oid = c.reltoastrelid),
+       EXISTS (SELECT 1 FROM pg_gtrs_in_use() t WHERE t.oid = c.reltoastrelid) AS used
+FROM pg_class c
+WHERE oid = 'tmp1'::regclass;
+ exists | used 
+--------+------
+ t      | f
+(1 row)
+
+VACUUM tmp1;
+SELECT EXISTS (SELECT 1 FROM pg_class t WHERE t.oid = c.reltoastrelid),
+       EXISTS (SELECT 1 FROM pg_gtrs_in_use() t WHERE t.oid = c.reltoastrelid) AS used
+FROM pg_class c
+WHERE oid = 'tmp1'::regclass;
+ exists | used 
+--------+------
+ t      | t
+(1 row)
+
+\c
+SET search_path = global_temp_tests;
+VACUUM FULL tmp1;
+SELECT EXISTS (SELECT 1 FROM pg_class t WHERE t.oid = c.reltoastrelid),
+       EXISTS (SELECT 1 FROM pg_gtrs_in_use() t WHERE t.oid = c.reltoastrelid) AS used
+FROM pg_class c
+WHERE oid = 'tmp1'::regclass;
+ exists | used 
+--------+------
+ t      | t
+(1 row)
+

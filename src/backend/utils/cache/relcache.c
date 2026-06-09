@@ -1489,8 +1489,7 @@ RelationInitIndexAccessInfo(Relation relation)
 	 * contains variable-length and possibly-null fields, we have to do this
 	 * honestly rather than just treating it as a Form_pg_index struct.
 	 */
-	tuple = SearchSysCache1(INDEXRELID,
-							ObjectIdGetDatum(RelationGetRelid(relation)));
+	tuple = GetEffectivePgIndexTuple(RelationGetRelid(relation));
 	if (!HeapTupleIsValid(tuple))
 		elog(ERROR, "cache lookup failed for index %u",
 			 RelationGetRelid(relation));
@@ -1498,7 +1497,7 @@ RelationInitIndexAccessInfo(Relation relation)
 	relation->rd_indextuple = heap_copytuple(tuple);
 	relation->rd_index = (Form_pg_index) GETSTRUCT(relation->rd_indextuple);
 	MemoryContextSwitchTo(oldcontext);
-	ReleaseSysCache(tuple);
+	heap_freetuple(tuple);
 
 	/*
 	 * Look up the index's access method, save the OID of its handler function
@@ -2398,8 +2397,7 @@ RelationReloadIndexInfo(Relation relation)
 		HeapTuple	tuple;
 		Form_pg_index index;
 
-		tuple = SearchSysCache1(INDEXRELID,
-								ObjectIdGetDatum(RelationGetRelid(relation)));
+		tuple = GetEffectivePgIndexTuple(RelationGetRelid(relation));
 		if (!HeapTupleIsValid(tuple))
 			elog(ERROR, "cache lookup failed for index %u",
 				 RelationGetRelid(relation));
@@ -2427,7 +2425,7 @@ RelationReloadIndexInfo(Relation relation)
 		HeapTupleHeaderSetXmin(relation->rd_indextuple->t_data,
 							   HeapTupleHeaderGetXmin(tuple->t_data));
 
-		ReleaseSysCache(tuple);
+		heap_freetuple(tuple);
 	}
 
 	/* Okay, now it's valid again */
@@ -4963,6 +4961,7 @@ RelationGetIndexList(Relation relation)
 	while (HeapTupleIsValid(htup = systable_getnext(indscan)))
 	{
 		Form_pg_index index = (Form_pg_index) GETSTRUCT(htup);
+		bool		indisvalid;
 
 		/*
 		 * Ignore any indexes that are currently being dropped.  This will
@@ -4987,6 +4986,19 @@ RelationGetIndexList(Relation relation)
 			continue;
 
 		/*
+		 * Global temporary indexes may override indisvalid locally.
+		 */
+		indisvalid = index->indisvalid;
+		if (RELATION_IS_GLOBAL_TEMP(relation))
+		{
+			GtrInfo    *gtr_info;
+
+			gtr_info = GetGlobalTempRelationInfo(index->indexrelid);
+			if (gtr_info != NULL)
+				indisvalid = gtr_info->indisvalid;
+		}
+
+		/*
 		 * Remember primary key index, if any.  For regular tables we do this
 		 * only if the index is valid; but for partitioned tables, then we do
 		 * it even if it's invalid.
@@ -4997,7 +5009,7 @@ RelationGetIndexList(Relation relation)
 		 * partitioned tables.
 		 */
 		if (index->indisprimary &&
-			(index->indisvalid ||
+			(indisvalid ||
 			 relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE))
 		{
 			pkeyIndex = index->indexrelid;
@@ -5007,7 +5019,7 @@ RelationGetIndexList(Relation relation)
 		if (!index->indimmediate)
 			continue;
 
-		if (!index->indisvalid)
+		if (!indisvalid)
 			continue;
 
 		/* remember explicitly chosen replica index */

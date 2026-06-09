@@ -869,8 +869,15 @@ mark_index_clustered(Relation rel, Oid indexOid, bool is_internal)
 		}
 		else if (thisIndexOid == indexOid)
 		{
+			GtrInfo    *gtr_info;
+
+			if (RELATION_IS_GLOBAL_TEMP(rel))
+				gtr_info = GetGlobalTempRelationInfo(indexOid);
+			else
+				gtr_info = NULL;
+
 			/* this was checked earlier, but let's be real sure */
-			if (!indexForm->indisvalid)
+			if (!GetEffective_indisvalid(indexForm, gtr_info))
 				elog(ERROR, "cannot cluster on invalid index %u", indexOid);
 			indexForm->indisclustered = true;
 			CatalogTupleUpdate(pg_index, &indexTuple->t_self, indexTuple);
@@ -923,8 +930,14 @@ check_index_requirements(Relation rel, RepackCommand cmd)
 	while (HeapTupleIsValid(htup = systable_getnext(indscan)))
 	{
 		Form_pg_index index = (Form_pg_index) GETSTRUCT(htup);
+		GtrInfo    *gtr_info;
 
-		if (!index->indisvalid)
+		if (RELATION_IS_GLOBAL_TEMP(rel))
+			gtr_info = GetGlobalTempRelationInfo(index->indexrelid);
+		else
+			gtr_info = NULL;
+
+		if (!GetEffective_indisvalid(index, gtr_info))
 		{
 			if (num_invalid_idxs == 0)
 				appendStringInfo(&dest, _("\"%s\""), get_rel_name(index->indexrelid));

@@ -2414,6 +2414,17 @@ get_rel_persistence(Oid relid)
 }
 
 /*
+ * rel_is_global_temp
+ *
+ *		Returns true if the given relation is a global temporary relation.
+ */
+bool
+rel_is_global_temp(Oid relid)
+{
+	return get_rel_persistence(relid) == RELPERSISTENCE_GLOBAL_TEMP;
+}
+
+/*
  * get_rel_relam
  *
  *		Returns the relam associated with a given relation.
@@ -3925,13 +3936,13 @@ get_index_isvalid(Oid index_oid)
 	HeapTuple	tuple;
 	Form_pg_index rd_index;
 
-	tuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(index_oid));
+	tuple = GetEffectivePgIndexTuple(index_oid);
 	if (!HeapTupleIsValid(tuple))
 		elog(ERROR, "cache lookup failed for index %u", index_oid);
 
 	rd_index = (Form_pg_index) GETSTRUCT(tuple);
 	isvalid = rd_index->indisvalid;
-	ReleaseSysCache(tuple);
+	heap_freetuple(tuple);
 
 	return isvalid;
 }

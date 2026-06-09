@@ -174,8 +174,9 @@ REINDEX [ ( <replaceable class="parameter">option</replaceable> [, ...] ) ] { DA
       &mdash; see <xref linkend="sql-reindex-concurrently"/> below.
      </para>
      <para>
-      For temporary tables, <command>REINDEX</command> is always
-      non-concurrent, as no other session can access them, and
+      This option is not supported for global temporary tables.  For local
+      temporary tables, it is accepted, but <command>REINDEX</command>
+      is always non-concurrent, as no other session can access them, and
       non-concurrent reindex is cheaper.
      </para>
     </listitem>

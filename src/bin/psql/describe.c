@@ -2269,8 +2269,18 @@ describeOneTableDetails(const char *schemaname,
 
 		printfPQExpBuffer(&buf, "/* %s */\n", _("Get index details"));
 		appendPQExpBufferStr(&buf,
-							 "SELECT i.indisunique, i.indisprimary, i.indisclustered, "
-							 "i.indisvalid,\n"
+							 "SELECT i.indisunique, i.indisprimary, i.indisclustered, ");
+
+		if (pset.sversion >= 200000)
+			appendPQExpBufferStr(&buf,
+								 "CASE WHEN c.relpersistence = "
+								 CppAsString2(RELPERSISTENCE_GLOBAL_TEMP)
+								 " THEN COALESCE((pg_catalog.pg_gtr_index_info(c.oid)).indisvalid,"
+								 " i.indisvalid) ELSE i.indisvalid END,\n");
+		else
+			appendPQExpBufferStr(&buf, "i.indisvalid,\n");
+
+		appendPQExpBufferStr(&buf,
 							 "  (NOT i.indimmediate) AND "
 							 "EXISTS (SELECT 1 FROM pg_catalog.pg_constraint "
 							 "WHERE conrelid = i.indrelid AND "
@@ -2389,7 +2399,16 @@ describeOneTableDetails(const char *schemaname,
 			printfPQExpBuffer(&buf, "/* %s */\n", _("Get indexes for this table"));
 			appendPQExpBufferStr(&buf,
 								 "SELECT c2.relname, i.indisprimary, i.indisunique, "
-								 "i.indisclustered, i.indisvalid, "
+								 "i.indisclustered, ");
+			if (pset.sversion >= 200000)
+				appendPQExpBufferStr(&buf,
+									 "CASE WHEN c2.relpersistence = "
+									 CppAsString2(RELPERSISTENCE_GLOBAL_TEMP)
+									 " THEN COALESCE((pg_catalog.pg_gtr_index_info(c2.oid)).indisvalid,"
+									 " i.indisvalid) ELSE i.indisvalid END, ");
+			else
+				appendPQExpBufferStr(&buf, "i.indisvalid, ");
+			appendPQExpBufferStr(&buf,
 								 "pg_catalog.pg_get_indexdef(i.indexrelid, 0, true),\n  "
 								 "pg_catalog.pg_get_constraintdef(con.oid, true), "
 								 "contype, condeferrable, condeferred");
