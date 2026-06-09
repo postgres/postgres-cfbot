@@ -1144,6 +1144,7 @@ GistTsVectorOptions
 GistVacState
 GlobalChannelEntry
 GlobalChannelKey
+GlobalTempRelShmemControl
 GlobalTransaction
 GlobalTransactionData
 GlobalVisHorizonKind
@@ -1167,6 +1168,12 @@ GroupingSet
 GroupingSetData
 GroupingSetKind
 GroupingSetsPath
+GtrInfo
+GtrInfoHistory
+GtrSharedUsageEntry
+GtrSharedUsageKey
+GtrStorageEntry
+GtrUsageEntry
 GucAction
 GucBoolAssignHook
 GucBoolCheckHook

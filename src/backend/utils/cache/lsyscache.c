@@ -18,6 +18,7 @@
 #include "access/hash.h"
 #include "access/htup_details.h"
 #include "bootstrap/bootstrap.h"
+#include "catalog/global_temp.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_am.h"
 #include "catalog/pg_amop.h"
@@ -2374,6 +2375,15 @@ get_rel_tablespace(Oid relid)
 		Oid			result;
 
 		result = reltup->reltablespace;
+
+		/* Global temporary relations may override reltablespace locally */
+		if (reltup->relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
+		{
+			GtrInfo    *gtr_info = GetGlobalTempRelationInfo(relid);
+
+			if (gtr_info != NULL)
+				result = gtr_info->reltablespace;
+		}
 		ReleaseSysCache(tp);
 		return result;
 	}

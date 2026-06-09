@@ -3195,8 +3195,8 @@ transformCreateTableAsStmt(ParseState *pstate, CreateTableAsStmt *stmt)
 		if (query_uses_temp_object(query, &temp_object))
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("materialized views must not use temporary objects"),
-					 errdetail("This view depends on temporary %s.",
+					 errmsg("materialized views must not use local temporary objects"),
+					 errdetail("This view depends on local temporary %s.",
 							   getObjectDescription(&temp_object, false))));
 
 		/*

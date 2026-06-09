@@ -90,6 +90,7 @@ PG_LWLOCK(55, LogicalDecodingControl)
 PG_LWLOCK(56, DataChecksumsWorker)
 PG_LWLOCK(57, AioWorkerControl)
 PG_LWLOCK(58, DataChecksumTransition)
+PG_LWLOCK(59, GlobalTempRelControl)
 
 /*
  * There also exist several built-in LWLock tranches.  As with the predefined
@@ -141,3 +142,5 @@ PG_LWLOCKTRANCHE(XACT_SLRU, XactSLRU)
 PG_LWLOCKTRANCHE(PARALLEL_VACUUM_DSA, ParallelVacuumDSA)
 PG_LWLOCKTRANCHE(AIO_URING_COMPLETION, AioUringCompletion)
 PG_LWLOCKTRANCHE(SHMEM_INDEX, ShmemIndex)
+PG_LWLOCKTRANCHE(GLOBAL_TEMP_REL_DSA, GlobalTempRelDSA)
+PG_LWLOCKTRANCHE(GLOBAL_TEMP_REL_HASH, GlobalTempRelHash)
