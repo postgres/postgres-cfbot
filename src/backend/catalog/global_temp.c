@@ -51,8 +51,10 @@
  */
 #include "postgres.h"
 
+#include "access/amapi.h"
 #include "access/genam.h"
 #include "access/parallel.h"
+#include "access/table.h"
 #include "access/tableam.h"
 #include "access/xact.h"
 #include "access/xlogutils.h"
@@ -137,6 +139,7 @@ static bool eoxact_storage_list_overflowed = false;
 typedef struct GtrUsageEntry
 {
 	Oid			relid;			/* lookup key: OID of relation in use */
+	char		relkind;		/* relkind of the relation (immutable) */
 	GtrInfoHistory history;		/* history of rel's session-local info */
 	SubTransactionId started_subid; /* usage started in current xact */
 	SubTransactionId stopped_subid; /* usage ended with another subid set */
@@ -557,7 +560,7 @@ gtr_init_usage_tables(void)
  *	an existing entry was found.
  */
 static GtrUsageEntry *
-gtr_record_usage(Oid relid, bool *found)
+gtr_record_usage(Oid relid, char relkind, bool *found)
 {
 	GtrUsageEntry *local_entry;
 	GtrSharedUsageKey key;
@@ -578,6 +581,9 @@ gtr_record_usage(Oid relid, bool *found)
 
 	/* Flag the usage entry for eoxact cleanup */
 	EOXactUsageListAdd(relid);
+
+	/* Remember the relation's relkind */
+	local_entry->relkind = relkind;
 
 	/* Add/update shared usage entry */
 	key.dbid = MyDatabaseId;
@@ -944,6 +950,33 @@ InitGlobalTempRelation(Relation relation)
 
 		if (relation->rd_rel->reloncommit == RELONCOMMIT_DELETE_ROWS)
 			register_on_commit_action(relation->rd_id, ONCOMMIT_DELETE_ROWS);
+
+		/*
+		 * If it's an index, build an empty index in the main fork.
+		 *
+		 * If the table is not empty (can happen if another session added the
+		 * index after we populated the table), then mark it as invalid.  The
+		 * user will need to do a REINDEX to build it.
+		 *
+		 * Note that this check for a non-empty table, using the block count,
+		 * might give a false positive, if the table contains deleted tuples,
+		 * which would force an unnecessary reindex, but it doesn't seem worth
+		 * the effort to do a more thorough check.
+		 */
+		if (relation->rd_rel->relkind == RELKIND_INDEX)
+		{
+			Relation	heapRelation;
+			BlockNumber nblocks;
+
+			relation->rd_indam->ambuildempty(relation, MAIN_FORKNUM);
+
+			heapRelation = table_open(relation->rd_index->indrelid, AccessShareLock);
+			nblocks = RelationGetNumberOfBlocks(heapRelation);
+			table_close(heapRelation, AccessShareLock);
+
+			if (nblocks > 0)
+				relation->rd_index->indisvalid = false;
+		}
 	}
 
 	/* Track our use of the relation, if we haven't already done so */
@@ -968,7 +1001,8 @@ TrackGlobalTempRelation(Relation relation)
 	bool		found;
 
 	/* Record our use of the relation, if we haven't done so already */
-	entry = gtr_record_usage(relation->rd_id, &found);
+	entry = gtr_record_usage(relation->rd_id, relation->rd_rel->relkind,
+							 &found);
 
 	/*
 	 * For a new entry, fill out the session-local relation information, with
@@ -977,6 +1011,19 @@ TrackGlobalTempRelation(Relation relation)
 	if (!found)
 	{
 		COPY_PG_CLASS_GTR_INFO(relation->rd_rel, &entry->history.info);
+
+		/*
+		 * When creating a new index locally, relation->rd_index will be NULL
+		 * here.  Mark the index as valid for now --- UpdateIndexRelation()
+		 * will update it later, if it's not actually valid (e.g., CREATE
+		 * INDEX ... ON ONLY ...).  Otherwise, for an index created in another
+		 * session, relation->rd_index->indisvalid will accurately reflect
+		 * whether or not the index needs to be marked invalid locally (if our
+		 * instance of the index's table is not empty) --- see
+		 * InitGlobalTempRelation().
+		 */
+		entry->history.info.indisvalid = (relation->rd_index == NULL ||
+										  relation->rd_index->indisvalid);
 
 		entry->history.subid = GetCurrentSubTransactionId();
 		entry->history.prev = NULL;
@@ -1509,10 +1556,48 @@ GetEffectivePgClassTuple(Oid relid)
 }
 
 /*
+ * GetEffectivePgIndexTuple
+ *
+ *	Get the effective pg_index tuple for an index relation.
+ *
+ *	This will fetch the pg_index tuple for the relation and then, if it's an
+ *	in-use global temporary relation, fetch the corresponding GtrInfo and use
+ *	the values in it to override the corresponding values in the pg_index
+ *	tuple (currently just indisvalid).  Thus, the result represents the
+ *	effective state of the index relation in this session.
+ *
+ *	For a global temporary index relation that has not yet been opened in this
+ *	session, there will be no GtrInfo, and the pg_index tuple will be returned
+ *	unchanged.
+ *
+ *	Returns NULL if the pg_index tuple could not be found.  Otherwise, the
+ *	tuple returned should be freed with heap_freetuple().
+ */
+HeapTuple
+GetEffectivePgIndexTuple(Oid indexrelid)
+{
+	HeapTuple	tuple;
+
+	tuple = SearchSysCacheCopy1(INDEXRELID, ObjectIdGetDatum(indexrelid));
+	if (HeapTupleIsValid(tuple))
+	{
+		Form_pg_index index_form = (Form_pg_index) GETSTRUCT(tuple);
+		GtrInfo    *gtr_info = GetGlobalTempRelationInfo(indexrelid);
+
+		if (gtr_info != NULL)
+			index_form->indisvalid = gtr_info->indisvalid;
+	}
+	return tuple;
+}
+
+/*
  * pg_gtr_info
  *
  *	SQL-callable function to retrieve the session-local information about an
  *	in-use global temporary relation.
+ *
+ *	Note: This only includes information overriding pg_class values, not the
+ *	pg_index.indisvalid override.
  */
 Datum
 pg_gtr_info(PG_FUNCTION_ARGS)
@@ -1543,6 +1628,9 @@ pg_gtr_info(PG_FUNCTION_ARGS)
  *
  *	SQL-callable function to retrieve the session-local information about all
  *	in-use global temporary relations.
+ *
+ *	Note: This only includes information overriding pg_class values, not the
+ *	pg_index.indisvalid override.
  */
 Datum
 pg_gtrs_in_use(PG_FUNCTION_ARGS)
@@ -1580,4 +1668,27 @@ pg_gtrs_in_use(PG_FUNCTION_ARGS)
 		}
 	}
 	return (Datum) 0;
+}
+
+/*
+ * pg_gtr_index_is_valid
+ *
+ *	SQL-callable function to test if a global temporary index relation is
+ *	valid in the current session.
+ */
+Datum
+pg_gtr_index_is_valid(PG_FUNCTION_ARGS)
+{
+	Oid			indexrelid = PG_GETARG_OID(0);
+	GtrUsageEntry *entry;
+
+	entry = FIND_LOCAL_USAGE_ENTRY(indexrelid);
+	if (entry == NULL || entry->stopped_subid != InvalidSubTransactionId)
+		PG_RETURN_NULL();
+
+	if (entry->relkind != RELKIND_INDEX &&
+		entry->relkind != RELKIND_PARTITIONED_INDEX)
+		PG_RETURN_NULL();
+
+	PG_RETURN_BOOL(entry->history.info.indisvalid);
 }

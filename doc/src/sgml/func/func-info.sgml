@@ -347,6 +347,24 @@
       </row>
 
       <row>
+       <entry id="pg-gtr-index-is-valid" role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>pg_gtr_index_is_valid</primary>
+        </indexterm>
+        <function>pg_gtr_index_is_valid</function> ( <type>oid</type> )
+        <returnvalue>boolean</returnvalue>
+       </para>
+       <para>
+        Returns true if an index on a global temporary relation is valid in
+        the current session, and false if it is invalid
+        (<xref linkend="sql-reindex"/> needs to be run to make it usable).
+        If the input is not the OID of a global temporary index, or that index
+        has not yet been opened in the current session, <literal>NULL</literal>
+        is returned.
+       </para></entry>
+      </row>
+
+      <row>
        <entry id="pg-gtr-info" role="func_table_entry"><para role="func_signature">
         <indexterm>
          <primary>pg_gtr_info</primary>

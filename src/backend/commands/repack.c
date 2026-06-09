@@ -868,8 +868,15 @@ mark_index_clustered(Relation rel, Oid indexOid, bool is_internal)
 		}
 		else if (thisIndexOid == indexOid)
 		{
+			GtrInfo    *gtr_info;
+
+			if (RELATION_IS_GLOBAL_TEMP(rel))
+				gtr_info = GetGlobalTempRelationInfo(thisIndexOid);
+			else
+				gtr_info = NULL;
+
 			/* this was checked earlier, but let's be real sure */
-			if (!indexForm->indisvalid)
+			if (!GetEffective_indisvalid(indexForm, gtr_info))
 				elog(ERROR, "cannot cluster on invalid index %u", indexOid);
 			indexForm->indisclustered = true;
 			CatalogTupleUpdate(pg_index, &indexTuple->t_self, indexTuple);

@@ -806,18 +806,18 @@ ginbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 }
 
 /*
- *	ginbuildempty() -- build an empty gin index in the initialization fork
+ *	ginbuildempty() -- build an empty gin index in the specified fork
  */
 void
-ginbuildempty(Relation index)
+ginbuildempty(Relation index, ForkNumber forknum)
 {
 	Buffer		RootBuffer,
 				MetaBuffer;
 
 	/* An empty GIN index has two pages. */
-	MetaBuffer = ExtendBufferedRel(BMR_REL(index), INIT_FORKNUM, NULL,
+	MetaBuffer = ExtendBufferedRel(BMR_REL(index), forknum, NULL,
 								   EB_LOCK_FIRST | EB_SKIP_EXTENSION_LOCK);
-	RootBuffer = ExtendBufferedRel(BMR_REL(index), INIT_FORKNUM, NULL,
+	RootBuffer = ExtendBufferedRel(BMR_REL(index), forknum, NULL,
 								   EB_LOCK_FIRST | EB_SKIP_EXTENSION_LOCK);
 
 	/* Initialize and xlog metabuffer and root buffer. */

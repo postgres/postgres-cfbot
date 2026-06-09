@@ -12793,5 +12793,8 @@
   proargmodes => '{o,o,o}',
   proargnames => '{oid,relfilenode,reltablespace}',
   prosrc => 'pg_gtrs_in_use' },
+{ oid => '8084', descr => 'is an in-use global temporary index relation valid?',
+  proname => 'pg_gtr_index_is_valid', provolatile => 's', proparallel => 'u',
+  prorettype => 'bool', proargtypes => 'oid', prosrc => 'pg_gtr_index_is_valid' },
 
 ]

@@ -1,9 +1,9 @@
 # Test global temporary relations
 
 setup {
-  CREATE GLOBAL TEMP TABLE tmp (key int, val text);
+  CREATE GLOBAL TEMP TABLE tmp (key int PRIMARY KEY, val text);
 
-  CREATE GLOBAL TEMP TABLE tmp_parted (key int, val text) PARTITION BY LIST (key);
+  CREATE GLOBAL TEMP TABLE tmp_parted (key int PRIMARY KEY, val text) PARTITION BY LIST (key);
   CREATE GLOBAL TEMP TABLE tmp_p1 PARTITION OF tmp_parted FOR VALUES IN (1);
   CREATE GLOBAL TEMP TABLE tmp_p2 PARTITION OF tmp_parted FOR VALUES IN ((2), (3));
 }
@@ -35,14 +35,23 @@ step ins1p2 { INSERT INTO tmp_parted VALUES (2, 's1 p2'); }
 step sel1p { SELECT tableoid::regclass, * FROM tmp_parted; }
 
 # Test prevention of ALTER TABLE with rewrite, if in use
-step create1 { CREATE GLOBAL TEMP TABLE tmp2 (key int, val text); }
+step create1 { CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box); }
 step ins1_2 { INSERT INTO tmp2 VALUES (1, 's1'); }
 step alter1a { ALTER TABLE tmp2 ALTER COLUMN key SET DATA TYPE numeric; }
 step alter1b { ALTER TABLE tmp2 ALTER COLUMN val SET NOT NULL; }
 step alter1c { ALTER TABLE tmp2 ADD CONSTRAINT tmp2_nn NOT NULL key; }
 step alter1d { ALTER TABLE tmp2 ADD CONSTRAINT tmp2_chk CHECK (key > 0); }
+step alter1e { ALTER TABLE tmp2 ADD CONSTRAINT tmp2_pk PRIMARY KEY (key); }
+step alter1f { ALTER TABLE tmp2 ADD CONSTRAINT tmp2_un UNIQUE (val); }
+step alter1g { ALTER TABLE tmp2 ADD CONSTRAINT tmp2_fk FOREIGN KEY (icol) REFERENCES tmp; }
+step alter1h { ALTER TABLE tmp2 ADD CONSTRAINT tmp2_ex EXCLUDE USING gist (bcol WITH &&); }
 step seltype1 { SELECT key, pg_typeof(key), val FROM tmp2; }
 step drop1 { DROP TABLE tmp2; }
+step uniq_idx1 { CREATE UNIQUE INDEX tmp2_un ON tmp2(val); }
+step idx_valid1 {
+  SELECT indisvalid, pg_gtr_index_is_valid(indexrelid)
+    FROM pg_index WHERE indexrelid = 'tmp2_un'::regclass;
+}
 
 # Test DROP with ON COMMIT DELETE ROWS
 step create1dr { CREATE GLOBAL TEMP TABLE tmp2 (key int, val text) ON COMMIT DELETE ROWS; }
@@ -70,6 +79,16 @@ step used1 {
    ORDER BY 1;
 }
 
+# Test val index
+step idx1 { CREATE INDEX tmp_val_idx ON tmp(val); }
+step sel1_idx {
+  SET enable_seqscan = off;
+  SET enable_bitmapscan = off;
+  EXPLAIN (COSTS OFF)
+  SELECT * FROM tmp WHERE val = 's1';
+  SELECT * FROM tmp WHERE val = 's1';
+}
+
 session s2
 # Transaction control
 step b2 { BEGIN; }
@@ -88,6 +107,11 @@ step sel2p { SELECT tableoid::regclass, * FROM tmp_parted; }
 # Test prevention of ALTER TABLE with rewrite, if in use
 step ins2_2 { INSERT INTO tmp2 VALUES (1, 's2'); }
 step seltype2 { SELECT key, pg_typeof(key), val FROM tmp2; }
+step uniq_reidx2 { REINDEX INDEX tmp2_un; }
+step idx_valid2 {
+  SELECT indisvalid, pg_gtr_index_is_valid(indexrelid)
+    FROM pg_index WHERE indexrelid = 'tmp2_un'::regclass;
+}
 
 # Test GTT inval in prepared transaction
 step drop2 { DROP TABLE tmp2; }
@@ -106,6 +130,17 @@ step get_tblspace2 {
    WHERE c.relname = 'tmp';
 }
 
+# Test val index
+step sel2_idx {
+  SET enable_seqscan = off;
+  SET enable_bitmapscan = off;
+  EXPLAIN (COSTS OFF)
+  SELECT * FROM tmp WHERE val = 's2';
+  SELECT * FROM tmp WHERE val = 's2';
+}
+step reidx2 { REINDEX INDEX tmp_val_idx; }
+step analyze2 { ANALYZE tmp; }
+
 # Create test tablespace for remaining tests
 permutation create_tblspace list_tblspaces
 
@@ -122,11 +157,12 @@ permutation ins1 b2 ins2 sp2 t2 rsp2 sel1 sel2 r2 sel1 sel2
 
 # Test prevention of ALTER TABLE with rewrite, if in use
 permutation create1 ins1_2
-            alter1a alter1b alter1c alter1d
+            alter1a alter1b alter1c alter1d alter1e alter1f alter1g alter1h
             ins2_2 seltype1 seltype2 drop1
 permutation create1 ins1_2 ins2_2
-            alter1a alter1b alter1c alter1d
-            seltype1 seltype2 drop1
+            alter1a alter1b alter1c alter1d alter1e alter1f alter1g alter1h
+            uniq_idx1 seltype1 seltype2
+            idx_valid1 idx_valid2 uniq_reidx2 idx_valid2 drop1
 
 # Test DROP with ON COMMIT DELETE ROWS
 permutation create1dr ins1_2 ins2_2 drop1 create1dr ins1_2 ins2_2 drop1
@@ -148,6 +184,12 @@ permutation create1 ins1_2 used1 drop1 used1
 permutation create1 ins1_2 used1 drop2 used1
 permutation create1 ins1_2 used1 b1 drop2 used1 r1 used1
 permutation create1 ins1_2 b1 used1 sp1 drop2 used1 rsp1 used1 r1 used1
+
+# Test val index
+permutation ins1 idx1 sel1_idx ins2 sel2_idx
+permutation ins1 ins2 idx1 sel1_idx sel2_idx
+permutation ins1 ins2 idx1 sel1_idx sel2_idx reidx2 sel2_idx
+permutation ins1 ins2 idx1 sel1_idx sel2_idx analyze2 sel2_idx reidx2 sel2_idx
 
 # Tidy up
 permutation drop_tblspace list_tblspaces

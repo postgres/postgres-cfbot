@@ -4547,6 +4547,11 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
        <link linkend="sql-insert"><command>INSERT</command></link>/<link linkend="sql-update"><command>UPDATE</command></link> operations, but it cannot safely
        be used for queries. If it is unique, the uniqueness property is not
        guaranteed true either.
+      </para>
+      <para>
+       For an index on a global temporary table, the value from
+       <link linkend="pg-gtr-index-is-valid"><function>pg_gtr_index_is_valid()</function></link>,
+       if non-null, takes precedence over the value from this catalog.
       </para></entry>
      </row>
 

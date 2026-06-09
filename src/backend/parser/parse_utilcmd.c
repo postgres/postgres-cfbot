@@ -30,6 +30,7 @@
 #include "access/table.h"
 #include "access/toast_compression.h"
 #include "catalog/dependency.h"
+#include "catalog/global_temp.h"
 #include "catalog/heap.h"
 #include "catalog/index.h"
 #include "catalog/namespace.h"
@@ -1731,10 +1732,10 @@ generateClonedIndexStmt(RangeVar *heapRel, Relation source_idx,
 		*constraintOid = InvalidOid;
 
 	/*
-	 * Fetch pg_class tuple of source index.  We can't use the copy in the
-	 * relcache entry because it doesn't include optional fields.
+	 * Fetch effective pg_class tuple of source index.  We can't use the copy
+	 * in the relcache entry because it doesn't include optional fields.
 	 */
-	ht_idxrel = SearchSysCache1(RELOID, ObjectIdGetDatum(source_relid));
+	ht_idxrel = GetEffectivePgClassTuple(source_relid);
 	if (!HeapTupleIsValid(ht_idxrel))
 		elog(ERROR, "cache lookup failed for relation %u", source_relid);
 	idxrelrec = (Form_pg_class) GETSTRUCT(ht_idxrel);
@@ -2049,7 +2050,7 @@ generateClonedIndexStmt(RangeVar *heapRel, Relation source_idx,
 	}
 
 	/* Clean up */
-	ReleaseSysCache(ht_idxrel);
+	heap_freetuple(ht_idxrel);
 	ReleaseSysCache(ht_am);
 
 	return index;
