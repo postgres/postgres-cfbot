@@ -5,6 +5,7 @@ backend_sources += files(
   'catcache.c',
   'evtcache.c',
   'funccache.c',
+  'gtcatcache.c',
   'inval.c',
   'lsyscache.c',
   'partcache.c',

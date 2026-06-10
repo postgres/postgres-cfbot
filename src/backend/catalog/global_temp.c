@@ -59,6 +59,7 @@
 #include "access/xact.h"
 #include "access/xlogutils.h"
 #include "catalog/global_temp.h"
+#include "catalog/pg_temp_class.h"
 #include "catalog/storage.h"
 #include "commands/sequence.h"
 #include "commands/tablecmds.h"
@@ -68,6 +69,7 @@
 #include "storage/lwlock.h"
 #include "storage/shmem.h"
 #include "storage/subsystems.h"
+#include "utils/gtcatcache.h"
 #include "utils/memutils.h"
 #include "utils/syscache.h"
 #include "utils/tuplestore.h"
@@ -153,12 +155,17 @@ static bool eoxact_usage_list_overflowed = false;
  *		OIDs of global temporary relations that we were using, which have been
  *		dropped by another backend (excludes locally dropped relations).
  *
+ *	processing_invalidated_gtrs
+ *		True while processing invalidated global temporary relations (used to
+ *		prevent infinite recursion).
+ *
  *	processed_dropped_subid
  *		Subtransaction ID in which we processed global temporary relations
  *		dropped by other backends.
  */
 static List *gtrs_invalidated = NIL;
 static List *gtrs_dropped = NIL;
+static bool processing_invalidated_gtrs = false;
 static SubTransactionId processed_dropped_subid = InvalidSubTransactionId;
 
 /*
@@ -936,8 +943,20 @@ InitGlobalTempRelation(Relation relation)
 void
 TrackGlobalTempRelation(Relation relation)
 {
-	/* Record our use of the relation */
-	gtr_record_usage(relation->rd_id, relation->rd_rel->relkind);
+	/*
+	 * Record our use of the relation and insert a pg_temp_class tuple for it.
+	 * We arrange things so that the presence of a usage record implies the
+	 * presence of a pg_temp_class tuple and vice versa, so it's sufficient to
+	 * do just one hash table lookup.
+	 */
+	if (gtr_local_usage == NULL ||
+		hash_search(gtr_local_usage,
+					&relation->rd_id, HASH_FIND, NULL) == NULL)
+	{
+		gtr_record_usage(relation->rd_id, relation->rd_rel->relkind);
+		InsertPgTempClassTuple(relation);
+	}
+	Assert(PgTempClassTupleExists(relation->rd_id));
 }
 
 /*
@@ -961,6 +980,9 @@ ForgetGlobalTempRelation(Oid relid)
 
 	entry->stopped_subid = GetCurrentSubTransactionId();
 	EOXactUsageListAdd(relid);
+
+	/* Delete its pg_temp_class tuple */
+	DeletePgTempClassTuple(relid);
 }
 
 /*
@@ -1031,6 +1053,12 @@ InvalidateGlobalTempRelation(Oid relid)
 void
 ProcessInvalidatedGlobalTempRelations(void)
 {
+	/* Prevent infinite recursion */
+	if (processing_invalidated_gtrs)
+		return;
+
+	processing_invalidated_gtrs = true;
+
 	/*
 	 * Scan the list of invalidated global temporary relations for any more
 	 * relations dropped by other backends (may already have found some in a
@@ -1090,6 +1118,8 @@ ProcessInvalidatedGlobalTempRelations(void)
 	 */
 	if (gtrs_dropped && processed_dropped_subid == InvalidSubTransactionId)
 	{
+		bool		tuples_deleted = false;
+
 		/*
 		 * Delete and forget locally-created storage for dropped relations.
 		 * This is done non-transactionally, since gtrs_dropped contains only
@@ -1121,19 +1151,34 @@ ProcessInvalidatedGlobalTempRelations(void)
 		}
 
 		/*
-		 * Remove all usage records and forget any ON COMMIT actions for the
-		 * dropped relations.  The former is non-transactional, but the latter
-		 * may be undone by a (sub)rollback.
+		 * Remove all usage records, forget any ON COMMIT actions, and delete
+		 * any temporary catalog entries for the dropped relations.  The usage
+		 * record removal is non-transactional, but the rest may be undone by
+		 * (sub)rollback.
 		 */
 		foreach_oid(relid, gtrs_dropped)
 		{
 			gtr_remove_usage(relid);
 			remove_on_commit_action(relid);
+
+			/* Delete the relation's pg_temp_class tuple, if it has one */
+			if (PgTempClassTupleExists(relid))
+			{
+				DeletePgTempClassTuple(relid);
+				tuples_deleted = true;
+			}
 		}
+
+		/* If we deleted anything, make the changes visible */
+		if (tuples_deleted)
+			CommandCounterIncrement();
 
 		/* All dropped relations have been processed, as of this subxact */
 		processed_dropped_subid = GetCurrentSubTransactionId();
 	}
+
+	/* Done processing */
+	processing_invalidated_gtrs = false;
 }
 
 /*
@@ -1208,7 +1253,11 @@ AtEOXact_GlobalTempRelation(bool isCommit)
 		list_free(gtrs_dropped);
 		gtrs_dropped = NIL;
 	}
+	processing_invalidated_gtrs = false;
 	processed_dropped_subid = InvalidSubTransactionId;
+
+	/* Clean up global temporary catalog caches */
+	AtEOXact_GTCatCache(isCommit);
 }
 
 /*
@@ -1281,6 +1330,9 @@ AtEOSubXact_GlobalTempRelation(bool isCommit, SubTransactionId mySubid,
 		else
 			processed_dropped_subid = InvalidSubTransactionId;
 	}
+
+	/* Clean up global temporary catalog caches */
+	AtEOSubXact_GTCatCache(isCommit, mySubid, parentSubid);
 
 	/* Don't reset the lists; we still need more cleanup later */
 }

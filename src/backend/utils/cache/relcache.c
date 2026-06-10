@@ -62,6 +62,7 @@
 #include "catalog/pg_statistic_ext.h"
 #include "catalog/pg_subscription.h"
 #include "catalog/pg_tablespace.h"
+#include "catalog/pg_temp_class.h"
 #include "catalog/pg_trigger.h"
 #include "catalog/pg_type.h"
 #include "catalog/schemapg.h"
@@ -338,6 +339,10 @@ static void unlink_initfile(const char *initfilename, int elevel);
  *		an attribute were to be added after scanning pg_class and before
  *		scanning pg_attribute, relnatts wouldn't match.
  *
+ *		If targetRelId is a global temporary relation, pg_temp_class is
+ *		also scanned, and if a matching tuple is found, its attributes are
+ *		used to override the corresponding attributes from pg_class.
+ *
  *		NB: the returned tuple has been copied into palloc'd storage
  *		and must eventually be freed with heap_freetuple.
  */
@@ -404,6 +409,33 @@ ScanPgRelation(Oid targetRelId, bool indexOK, bool force_non_historic)
 		UnregisterSnapshot(snapshot);
 
 	table_close(pg_class_desc, AccessShareLock);
+
+	/*
+	 * For global temporary relations, also scan pg_temp_class and apply any
+	 * session-specific overrides to the pg_class tuple.
+	 */
+	if (HeapTupleIsValid(pg_class_tuple))
+	{
+		Form_pg_class pg_class_form;
+
+		pg_class_form = (Form_pg_class) GETSTRUCT(pg_class_tuple);
+
+		if (pg_class_form->relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
+		{
+			HeapTuple	pg_temp_class_tuple;
+
+			pg_temp_class_tuple = GetPgTempClassTuple(targetRelId);
+
+			if (HeapTupleIsValid(pg_temp_class_tuple))
+			{
+				Form_pg_temp_class pg_temp_class_form;
+
+				pg_temp_class_form = (Form_pg_temp_class) GETSTRUCT(pg_temp_class_tuple);
+				COPY_PG_TEMP_CLASS_ATTRS(pg_temp_class_form, pg_class_form);
+				heap_freetuple(pg_temp_class_tuple);
+			}
+		}
+	}
 
 	return pg_class_tuple;
 }
@@ -3843,7 +3875,9 @@ RelationSetNewRelfilenumber(Relation relation, char persistence)
 	Relation	pg_class;
 	ItemPointerData otid;
 	HeapTuple	tuple;
+	HeapTuple	temp_tuple;
 	Form_pg_class classform;
+	Form_pg_temp_class temp_classform;
 	MultiXactId minmulti = InvalidMultiXactId;
 	TransactionId freezeXid = InvalidTransactionId;
 	RelFileLocator newrlocator;
@@ -3880,17 +3914,19 @@ RelationSetNewRelfilenumber(Relation relation, char persistence)
 				 errmsg("unexpected request for new relfilenumber in binary upgrade mode")));
 
 	/*
-	 * Get a writable copy of the pg_class tuple for the given relation.
+	 * Get a writable copy of the relation's pg_class tuple and, for a global
+	 * temporary relation, its pg_temp_class tuple.
 	 */
 	pg_class = table_open(RelationRelationId, RowExclusiveLock);
 
-	tuple = SearchSysCacheLockedCopy1(RELOID,
-									  ObjectIdGetDatum(RelationGetRelid(relation)));
+	tuple = GetPgClassAndPgTempClassTuples(RelationGetRelid(relation), true,
+										   &temp_tuple, true);
 	if (!HeapTupleIsValid(tuple))
 		elog(ERROR, "could not find tuple for relation %u",
 			 RelationGetRelid(relation));
 	otid = tuple->t_self;
 	classform = (Form_pg_class) GETSTRUCT(tuple);
+	temp_classform = (Form_pg_temp_class) GETSTRUCT_SAFE(temp_tuple);
 
 	/*
 	 * Schedule unlinking of the old storage at transaction commit, except
@@ -3996,8 +4032,8 @@ RelationSetNewRelfilenumber(Relation relation, char persistence)
 	}
 	else
 	{
-		/* Normal case, update the pg_class entry */
-		classform->relfilenode = newrelfilenumber;
+		/* Normal case, update the pg_class and pg_temp_class entries */
+		SetEffective_relfilenode(classform, temp_classform, newrelfilenumber);
 
 		/* relpages etc. never change for sequences */
 		if (relation->rd_rel->relkind != RELKIND_SEQUENCE)
@@ -4012,6 +4048,11 @@ RelationSetNewRelfilenumber(Relation relation, char persistence)
 		classform->relpersistence = persistence;
 
 		CatalogTupleUpdate(pg_class, &otid, tuple);
+		if (HeapTupleIsValid(temp_tuple))
+		{
+			UpdatePgTempClassTuple(RelationGetRelid(relation), temp_tuple);
+			heap_freetuple(temp_tuple);
+		}
 	}
 
 	UnlockTuple(pg_class, &otid, InplaceUpdateTupleLock);
@@ -4020,8 +4061,8 @@ RelationSetNewRelfilenumber(Relation relation, char persistence)
 	table_close(pg_class, RowExclusiveLock);
 
 	/*
-	 * Make the pg_class row change or relation map change visible.  This will
-	 * cause the relcache entry to get updated, too.
+	 * Make the pg_class and pg_temp_class row changes or relation map change
+	 * visible.  This will cause the relcache entry to get updated, too.
 	 */
 	CommandCounterIncrement();
 
@@ -6914,6 +6955,15 @@ write_item(const void *data, Size len, FILE *fp)
  * of the latter. The special cases are relations where
  * RelationCacheInitializePhase2/3 chooses to nail for efficiency reasons, but
  * which do not support any syscache.
+ *
+ * Global temporary relations are never nailed (because that would required
+ * them to be mapped, and the relmapper does not support temporary relations),
+ * but they do all support syscaches.  Despite this, we intentionally do not
+ * cache global temporary relations, since we don't want to load them on
+ * startup, because doing so would result in temporary relation storage being
+ * created when it might not be needed.  Instead, all global temporary
+ * relations are lazily initialized, if and when they are needed.  See also
+ * InitCatalogCachePhase2().
  */
 bool
 RelationIdIsInInitFile(Oid relationId)
@@ -6930,6 +6980,8 @@ RelationIdIsInInitFile(Oid relationId)
 		Assert(!RelationSupportsSysCache(relationId));
 		return true;
 	}
+	if (IsGlobalTempCatalogRelation(relationId))
+		return false;
 	return RelationSupportsSysCache(relationId);
 }
 

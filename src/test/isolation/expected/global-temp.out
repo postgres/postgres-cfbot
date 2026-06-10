@@ -1,5 +1,16 @@
 Parsed test spec with 2 sessions
 
+starting permutation: create_tblspace list_tblspaces
+step create_tblspace: CREATE TABLESPACE regress_isolation_tablespace LOCATION '';
+step list_tblspaces: SELECT spcname FROM pg_tablespace ORDER BY 1;
+spcname                     
+----------------------------
+pg_default                  
+pg_global                   
+regress_isolation_tablespace
+(3 rows)
+
+
 starting permutation: ins1 ins2 sel1 sel2
 step ins1: INSERT INTO tmp VALUES (1, 's1');
 step ins2: INSERT INTO tmp VALUES (1, 's2');
@@ -436,4 +447,190 @@ key|val|seq
 ---+---+---
   1|s2 |  1
 (1 row)
+
+
+starting permutation: ins1 ins2 t2 sel1 sel2 ins2 t1 sel1 sel2 ins1 t2 sel1 sel2
+step ins1: INSERT INTO tmp VALUES (1, 's1');
+step ins2: INSERT INTO tmp VALUES (1, 's2');
+step t2: TRUNCATE tmp;
+step sel1: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s1 |  1
+(1 row)
+
+step sel2: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+(0 rows)
+
+step ins2: INSERT INTO tmp VALUES (1, 's2');
+step t1: TRUNCATE tmp;
+step sel1: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+(0 rows)
+
+step sel2: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s2 |  2
+(1 row)
+
+step ins1: INSERT INTO tmp VALUES (1, 's1');
+step t2: TRUNCATE tmp;
+step sel1: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s1 |  2
+(1 row)
+
+step sel2: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+(0 rows)
+
+
+starting permutation: ins1 ins2 alt_tblspace get_tblspace1 get_tblspace2 sel1 sel2 reset_tblspace
+step ins1: INSERT INTO tmp VALUES (1, 's1');
+step ins2: INSERT INTO tmp VALUES (1, 's2');
+step alt_tblspace: ALTER TABLE tmp SET TABLESPACE regress_isolation_tablespace;
+step get_tblspace1: 
+  SELECT s1.spcname, s2.spcname,
+         regexp_replace(pg_relation_filepath('tmp'), '(\d+)', 'NNN', 'g')
+    FROM pg_class c
+    JOIN pg_tablespace s1 ON s1.oid = c.reltablespace
+    LEFT JOIN pg_temp_class t ON t.oid = c.oid
+    JOIN pg_tablespace s2 ON s2.oid = t.reltablespace
+   WHERE c.relname = 'tmp';
+
+spcname                     |spcname                     |regexp_replace                       
+----------------------------+----------------------------+-------------------------------------
+regress_isolation_tablespace|regress_isolation_tablespace|pg_tblspc/NNN/PG_NNN_NNN/NNN/tNNN_NNN
+(1 row)
+
+step get_tblspace2: 
+  SELECT s1.spcname, s2.spcname,
+         regexp_replace(pg_relation_filepath('tmp'), '(\d+)', 'NNN', 'g')
+    FROM pg_class c
+    JOIN pg_tablespace s1 ON s1.oid = c.reltablespace
+    LEFT JOIN pg_temp_class t ON t.oid = c.oid
+    LEFT JOIN pg_tablespace s2 ON s2.oid = t.reltablespace
+   WHERE c.relname = 'tmp';
+
+spcname                     |spcname|regexp_replace   
+----------------------------+-------+-----------------
+regress_isolation_tablespace|       |base/NNN/tNNN_NNN
+(1 row)
+
+step sel1: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s1 |  1
+(1 row)
+
+step sel2: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s2 |  1
+(1 row)
+
+step reset_tblspace: ALTER TABLE tmp SET TABLESPACE pg_default;
+
+starting permutation: create1 cat1 drop1 cat1
+step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box);
+step cat1: SELECT count(*) FROM pg_temp_class WHERE oid >= 12000;
+count
+-----
+    3
+(1 row)
+
+step drop1: DROP TABLE tmp2;
+step cat1: SELECT count(*) FROM pg_temp_class WHERE oid >= 12000;
+count
+-----
+    0
+(1 row)
+
+
+starting permutation: create1 cat1 drop2 cat1
+step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box);
+step cat1: SELECT count(*) FROM pg_temp_class WHERE oid >= 12000;
+count
+-----
+    3
+(1 row)
+
+step drop2: DROP TABLE tmp2;
+step cat1: SELECT count(*) FROM pg_temp_class WHERE oid >= 12000;
+count
+-----
+    0
+(1 row)
+
+
+starting permutation: create1 cat1 b1 drop2 cat1 r1 cat1
+step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box);
+step cat1: SELECT count(*) FROM pg_temp_class WHERE oid >= 12000;
+count
+-----
+    3
+(1 row)
+
+step b1: BEGIN;
+step drop2: DROP TABLE tmp2;
+step cat1: SELECT count(*) FROM pg_temp_class WHERE oid >= 12000;
+count
+-----
+    0
+(1 row)
+
+step r1: ROLLBACK;
+step cat1: SELECT count(*) FROM pg_temp_class WHERE oid >= 12000;
+count
+-----
+    0
+(1 row)
+
+
+starting permutation: create1 b1 cat1 sp1 drop2 cat1 rsp1 cat1 r1 cat1
+step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box);
+step b1: BEGIN;
+step cat1: SELECT count(*) FROM pg_temp_class WHERE oid >= 12000;
+count
+-----
+    3
+(1 row)
+
+step sp1: SAVEPOINT sp;
+step drop2: DROP TABLE tmp2;
+step cat1: SELECT count(*) FROM pg_temp_class WHERE oid >= 12000;
+count
+-----
+    0
+(1 row)
+
+step rsp1: ROLLBACK TO SAVEPOINT sp;
+step cat1: SELECT count(*) FROM pg_temp_class WHERE oid >= 12000;
+count
+-----
+    0
+(1 row)
+
+step r1: ROLLBACK;
+step cat1: SELECT count(*) FROM pg_temp_class WHERE oid >= 12000;
+count
+-----
+    0
+(1 row)
+
+
+starting permutation: drop_tblspace list_tblspaces
+step drop_tblspace: DROP TABLESPACE regress_isolation_tablespace;
+step list_tblspaces: SELECT spcname FROM pg_tablespace ORDER BY 1;
+spcname   
+----------
+pg_default
+pg_global 
+(2 rows)
 

@@ -40,6 +40,7 @@
 #include "catalog/pg_range.h"
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_subscription.h"
+#include "catalog/pg_temp_class.h"
 #include "catalog/pg_transform.h"
 #include "catalog/pg_type.h"
 #include "miscadmin.h"
@@ -2376,6 +2377,19 @@ get_rel_tablespace(Oid relid)
 		Oid			result;
 
 		result = reltup->reltablespace;
+
+		/* Global temporary relations may override reltablespace locally */
+		if (reltup->relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
+		{
+			HeapTuple	temp_tp;
+
+			temp_tp = GetPgTempClassTuple(relid);
+			if (HeapTupleIsValid(temp_tp))
+			{
+				result = ((Form_pg_temp_class) GETSTRUCT(temp_tp))->reltablespace;
+				heap_freetuple(temp_tp);
+			}
+		}
 		ReleaseSysCache(tp);
 		return result;
 	}

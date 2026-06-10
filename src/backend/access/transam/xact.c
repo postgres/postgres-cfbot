@@ -65,6 +65,7 @@
 #include "storage/smgr.h"
 #include "utils/builtins.h"
 #include "utils/combocid.h"
+#include "utils/gtcatcache.h"
 #include "utils/guc.h"
 #include "utils/inval.h"
 #include "utils/memutils.h"
@@ -2350,9 +2351,12 @@ CommitTransaction(void)
 	 * Process any invalidated global temporary relations, dealing with any
 	 * that were dropped by other backends.  This needs to be done before any
 	 * ON COMMIT handling, so that we don't try to perform ON COMMIT actions
-	 * on deleted global temporary tables.
+	 * on deleted global temporary tables.  While at it, flush the global
+	 * temporary catalog caches, so that any new entries are written out
+	 * before we commit.
 	 */
 	ProcessInvalidatedGlobalTempRelations();
+	GTCatCacheFlush();
 
 	/*
 	 * Let ON COMMIT management do its thing (must happen after closing

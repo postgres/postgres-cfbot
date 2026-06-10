@@ -33,7 +33,13 @@ INSERT INTO tmp1 VALUES (1, 'xxx');
 SELECT * FROM tmp1;
 \c
 SET search_path = global_temp_tests;
+SELECT oid::regclass FROM pg_temp_class ORDER BY 1;
 SELECT * FROM tmp1;
+SELECT oid::regclass FROM pg_temp_class ORDER BY 1;
+
+-- Test pg_relation_filenode() matches global relfilenode
+SELECT relfilenode = pg_relation_filenode('tmp1'::regclass) AS ok
+  FROM pg_class WHERE oid = 'tmp1'::regclass;
 
 -- Test index
 INSERT INTO tmp1 VALUES (1, 'xxx');
@@ -52,7 +58,21 @@ SELECT * FROM tmp1 WHERE b = 'xxx';
 RESET enable_seqscan;
 REINDEX INDEX CONCURRENTLY tmp1_b_idx;
 REINDEX TABLE CONCURRENTLY tmp1;
+
+-- Test REINDEX -- relfilenode only changes locally
+SELECT c.relfilenode AS global_relfilenode, t.relfilenode AS local_relfilenode
+  FROM pg_class c LEFT JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.relname = 'tmp1_b_idx' \gset
+REINDEX INDEX tmp1_b_idx;
+SELECT CASE WHEN c.relfilenode = :global_relfilenode THEN 'unchanged' ELSE 'changed' END AS global_relfilenode,
+       CASE WHEN t.relfilenode = :local_relfilenode THEN 'unchange' ELSE 'changed' END AS local_relfilenode
+  FROM pg_class c LEFT JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.relname = 'tmp1_b_idx';
 DROP INDEX CONCURRENTLY tmp1_b_idx;
+
+-- REINDEX not allowed on pg_temp_class
+REINDEX INDEX pg_temp_class_oid_index;
+REINDEX TABLE pg_temp_class;
 
 -- Test ON COMMIT DELETE ROWS
 CREATE GLOBAL TEMP TABLE tmp2 (a int) ON COMMIT DELETE ROWS;
@@ -127,14 +147,25 @@ DELETE FROM gtemp_pk_rel WHERE a = 1;
 SELECT * FROM tmp2;
 DROP TABLE perm_pk_rel, temp_pk_rel, tmp2;
 
--- Test ALTER TABLE ... SET TABLESPACE
+-- Test ALTER TABLE ... SET TABLESPACE -- reltablespace changes locally and globally
 CREATE GLOBAL TEMP TABLE tmp2 (a int);
 INSERT INTO tmp2 VALUES (1);
 SELECT * FROM tmp2;
-SELECT regexp_replace(pg_relation_filepath('tmp2'), '(\d+)', 'NNN', 'g');
+SELECT c.reltablespace AS global_tablespace,
+       t.reltablespace AS local_tablespace,
+       regexp_replace(pg_relation_filepath('tmp2'), '(\d+)', 'NNN', 'g')
+  FROM pg_class c
+  LEFT JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.relname = 'tmp2';
 ALTER TABLE tmp2 SET TABLESPACE regress_tblspace;
 SELECT * FROM tmp2;
-SELECT regexp_replace(pg_relation_filepath('tmp2'), '(\d+)', 'NNN', 'g');
+SELECT s1.spcname AS global_tablespace, s2.spcname AS local_tablespace,
+       regexp_replace(pg_relation_filepath('tmp2'), '(\d+)', 'NNN', 'g')
+  FROM pg_class c
+  JOIN pg_tablespace s1 ON s1.oid = c.reltablespace
+  LEFT JOIN pg_temp_class t ON t.oid = c.oid
+  JOIN pg_tablespace s2 ON s2.oid = t.reltablespace
+ WHERE c.relname = 'tmp2';
 DROP TABLE tmp2;
 
 -- Test dependency on tablespace
@@ -186,8 +217,85 @@ SELECT * FROM tmp1;
 TRUNCATE tmp1;
 SELECT * FROM tmp1;
 
--- Test view creation
+-- Test CLUSTER -- relfilenode only changes locally
+SELECT c.relfilenode AS global_relfilenode, t.relfilenode AS local_relfilenode
+  FROM pg_class c LEFT JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.relname = 'tmp1' \gset
+CLUSTER tmp1 USING tmp1_pkey;
+SELECT CASE WHEN c.relfilenode = :global_relfilenode THEN 'unchanged' ELSE 'changed' END AS global_relfilenode,
+       CASE WHEN t.relfilenode = :local_relfilenode THEN 'unchange' ELSE 'changed' END AS local_relfilenode
+  FROM pg_class c LEFT JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.relname = 'tmp1';
+
+-- CLUSTER not allowed on pg_temp_class
+CLUSTER pg_temp_class; -- fail
+
+-- Test REPACK -- relfilenode only changes locally
+SELECT c.relfilenode AS global_relfilenode, t.relfilenode AS local_relfilenode
+  FROM pg_class c LEFT JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.relname = 'tmp1' \gset
+REPACK tmp1;
+SELECT CASE WHEN c.relfilenode = :global_relfilenode THEN 'unchanged' ELSE 'changed' END AS global_relfilenode,
+       CASE WHEN t.relfilenode = :local_relfilenode THEN 'unchange' ELSE 'changed' END AS local_relfilenode
+  FROM pg_class c LEFT JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.relname = 'tmp1';
+
+-- REPACK not allowed on pg_temp_class
+REPACK pg_temp_class; -- fail
+
+-- Test VACUUM FULL -- relfilenode only changes locally
+SELECT c.relfilenode AS global_relfilenode, t.relfilenode AS local_relfilenode
+  FROM pg_class c LEFT JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.relname = 'tmp1' \gset
+VACUUM FULL tmp1;
+SELECT CASE WHEN c.relfilenode = :global_relfilenode THEN 'unchanged' ELSE 'changed' END AS global_relfilenode,
+       CASE WHEN t.relfilenode = :local_relfilenode THEN 'unchange' ELSE 'changed' END AS local_relfilenode
+  FROM pg_class c LEFT JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.relname = 'tmp1';
+
+-- VACUUM FULL not allowed on pg_temp_class
+VACUUM FULL pg_temp_class; -- silently ignored
+
+-- Test pg_relation_filenode() now matches local relfilenode
+SELECT relfilenode = pg_relation_filenode('tmp1'::regclass) AS ok
+  FROM pg_temp_class WHERE oid = 'tmp1'::regclass;
+
+-- VACUUM initializes toast tables
+\c
+SET search_path = global_temp_tests;
+SELECT EXISTS (SELECT 1 FROM pg_class t WHERE t.oid = c.reltoastrelid),
+       EXISTS (SELECT 1 FROM pg_temp_class t WHERE t.oid = c.reltoastrelid)
+FROM pg_class c
+WHERE oid = 'tmp1'::regclass;
+
+VACUUM tmp1;
+SELECT EXISTS (SELECT 1 FROM pg_class t WHERE t.oid = c.reltoastrelid),
+       EXISTS (SELECT 1 FROM pg_temp_class t WHERE t.oid = c.reltoastrelid)
+FROM pg_class c
+WHERE oid = 'tmp1'::regclass;
+
+\c
+SET search_path = global_temp_tests;
+VACUUM FULL tmp1;
+SELECT EXISTS (SELECT 1 FROM pg_class t WHERE t.oid = c.reltoastrelid),
+       EXISTS (SELECT 1 FROM pg_temp_class t WHERE t.oid = c.reltoastrelid)
+FROM pg_class c
+WHERE oid = 'tmp1'::regclass;
+
+-- Test subtransaction rollback of pending pg_temp_class inserts
+\c
+SET search_path = global_temp_tests;
+BEGIN;
+SELECT count(*) FROM tmp1;
+SAVEPOINT sp;
+DROP TABLE tmp1;
+ROLLBACK TO sp;
 INSERT INTO tmp1 VALUES (1, 'xxx');
+COMMIT;
+SELECT oid::regclass FROM pg_temp_class ORDER BY 1;
+SELECT * FROM tmp1;
+
+-- Test view creation
 CREATE VIEW v AS SELECT * FROM tmp1;
 SELECT * FROM v;
 DROP VIEW v;

@@ -49,6 +49,7 @@
 #include "catalog/pg_opclass.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_tablespace.h"
+#include "catalog/pg_temp_class.h"
 #include "catalog/pg_trigger.h"
 #include "catalog/pg_type.h"
 #include "catalog/storage.h"
@@ -3673,6 +3674,23 @@ reindex_index(const ReindexStmt *stmt, Oid indexId,
 	bool		set_tablespace = false;
 
 	pg_rusage_init(&ru0);
+
+	/*
+	 * Special case: cannot recreate pg_temp_class_oid_index --- to do so
+	 * would require pg_temp_class to be a mapped relation (to avoid use of
+	 * the index while rebuilding it) and the relmapper does not support
+	 * temporary tables.  It might be possible to make this work, but it
+	 * doesn't seem worth the effort, so just punt.
+	 */
+	if (indexId == TempClassOidIndexId)
+	{
+		ereport(NOTICE,
+				errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				errmsg("cannot reindex temporary system index \"%s\", skipping",
+					   get_rel_name(indexId)));
+		RemoveReindexPending(indexId);
+		return;
+	}
 
 	/*
 	 * Open and lock the parent heap relation.  ShareLock is sufficient since

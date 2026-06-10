@@ -74,6 +74,7 @@ catalog_headers = [
   'pg_propgraph_label.h',
   'pg_propgraph_label_property.h',
   'pg_propgraph_property.h',
+  'pg_temp_class.h',
 ]
 
 # The .dat files we need can just be listed alphabetically.
