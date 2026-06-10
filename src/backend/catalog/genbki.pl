@@ -174,6 +174,7 @@ foreach my $header (@ARGV)
 			index_oid_macro => $index->{index_oid_macro},
 			key => $key,
 			nbuckets => $syscache->{syscache_nbuckets},
+			table_is_temp => $catalogs{$tblname}->{temp_relation} eq "" ? 0 : 1,
 		};
 
 		$syscache_catalogs{$catname} = 1;
@@ -518,6 +519,7 @@ EOM
 	# .bki CREATE command for this catalog
 	print $bki "create $catname $catalog->{relation_oid}"
 	  . $catalog->{shared_relation}
+	  . $catalog->{temp_relation}
 	  . $catalog->{bootstrap}
 	  . $catalog->{rowtype_oid_clause};
 
@@ -798,6 +800,8 @@ print_boilerplate($syscache_ids_fh, "syscache_ids.h", "SysCache identifiers");
 print $syscache_ids_fh "#ifndef SYSCACHE_IDS_H
 #define SYSCACHE_IDS_H
 
+#include \"catalog/pg_temp_class_d.h\"
+
 typedef enum SysCacheIdentifier
 {
 \tSYSCACHEID_INVALID = -1,\n";
@@ -837,6 +841,64 @@ foreach my $syscache (sort keys %syscaches)
 
 print $syscache_ids_fh "} SysCacheIdentifier;\n";
 print $syscache_ids_fh "#define SysCacheSize ($last_syscache + 1)\n\n";
+
+# Macro to test if a catalog relation is a global temporary table
+print $syscache_ids_fh "/* Is the specified catalog relation a global temporary table? */\n";
+print $syscache_ids_fh "#define IsGlobalTempCatalogTable(relid) \\\n";
+
+my $num_clauses = 0;
+foreach my $catname (sort keys %catalogs)
+{
+	my $catalog = $catalogs{$catname};
+
+	if ($catalog->{temp_relation})
+	{
+		print $syscache_ids_fh $num_clauses == 0 ? "\t(" : " || \\\n\t ";
+		print $syscache_ids_fh "(relid) == $catalog->{relation_oid_macro}";
+		$num_clauses++;
+	}
+}
+print $syscache_ids_fh $num_clauses == 0 ? "false\n\n" : ")\n\n";
+
+# Macro to test if a catalog relation is a global temporary table or index
+print $syscache_ids_fh "/* Is the specified catalog relation a global temporary table or index? */\n";
+print $syscache_ids_fh "#define IsGlobalTempCatalogRelation(relid) \\\n";
+
+$num_clauses = 0;
+foreach my $catname (sort keys %catalogs)
+{
+	my $catalog = $catalogs{$catname};
+
+	if ($catalog->{temp_relation})
+	{
+		print $syscache_ids_fh $num_clauses == 0 ? "\t(" : " || \\\n\t ";
+		print $syscache_ids_fh "(relid) == $catalog->{relation_oid_macro}";
+		$num_clauses++;
+
+		foreach my $index (@{ $catalog->{indexing} })
+		{
+			print $syscache_ids_fh " || \\\n\t (relid) == $index->{index_oid_macro}";
+			$num_clauses++;
+		}
+	}
+}
+print $syscache_ids_fh $num_clauses == 0 ? "false\n\n" : ")\n\n";
+
+# Macro to test if a syscache's catalog table is global temporary
+print $syscache_ids_fh "/* Does the specified SysCache use a global temporary table? */\n";
+print $syscache_ids_fh "#define SysCacheTableIsGlobalTemp(cacheId) \\\n";
+
+$num_clauses = 0;
+foreach my $syscache (sort keys %syscaches)
+{
+	if ($syscaches{$syscache}{table_is_temp})
+	{
+		print $syscache_ids_fh $num_clauses == 0 ? "\t(" : " || \\\n\t ";
+		print $syscache_ids_fh "(cacheId) == $syscache";
+		$num_clauses++;
+	}
+}
+print $syscache_ids_fh $num_clauses == 0 ? "false\n\n" : ")\n\n";
 
 # Closing boilerplate for syscache_ids.h
 print $syscache_ids_fh "#endif\t\t\t\t\t\t\t/* SYSCACHE_IDS_H */\n";

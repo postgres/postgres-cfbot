@@ -1819,9 +1819,13 @@ postgres=# SELECT '0/0'::pg_lsn + pd.segment_number * ps.setting::int + :offset 
         For most relations the result is the same as
         <structname>pg_class</structname>.<structfield>relfilenode</structfield>,
         but for certain system catalogs <structfield>relfilenode</structfield>
-        is zero and this function must be used to get the correct value.  The
-        function returns NULL if passed a relation that does not have storage,
-        such as a view.
+        is zero and this function must be used to get the correct value.  For
+        global temporary relations the result is
+        <structname>pg_temp_class</structname>.<structfield>relfilenode</structfield>,
+        if the relation has been used in the current session, and
+        <structname>pg_class</structname>.<structfield>relfilenode</structfield>
+        otherwise.  The function returns NULL if passed a relation that does
+        not have storage, such as a view.
        </para></entry>
       </row>
 

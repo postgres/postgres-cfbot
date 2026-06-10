@@ -86,7 +86,8 @@ CATALOG_HEADERS := \
 	pg_propgraph_element_label.h \
 	pg_propgraph_label.h \
 	pg_propgraph_label_property.h \
-	pg_propgraph_property.h
+	pg_propgraph_property.h \
+	pg_temp_class.h
 
 GENERATED_HEADERS := $(CATALOG_HEADERS:%.h=%_d.h)
 

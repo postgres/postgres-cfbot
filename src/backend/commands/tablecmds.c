@@ -53,6 +53,7 @@
 #include "catalog/pg_rewrite.h"
 #include "catalog/pg_statistic_ext.h"
 #include "catalog/pg_tablespace.h"
+#include "catalog/pg_temp_class.h"
 #include "catalog/pg_trigger.h"
 #include "catalog/pg_type.h"
 #include "catalog/storage.h"
@@ -3906,7 +3907,8 @@ CheckRelationTableSpaceMove(Relation rel, Oid newTableSpaceId)
 
 /*
  * SetRelationTableSpace
- *		Set new reltablespace and relfilenumber in pg_class entry.
+ *		Set new reltablespace and relfilenumber in pg_class (and/or
+ *		pg_temp_class for a global temporary relation).
  *
  * newTableSpaceId is the new tablespace for the relation, and
  * newRelFilenumber its new filenumber.  If newRelFilenumber is
@@ -3926,33 +3928,55 @@ SetRelationTableSpace(Relation rel,
 {
 	Relation	pg_class;
 	HeapTuple	tuple;
+	HeapTuple	temp_tuple;
 	ItemPointerData otid;
 	Form_pg_class rd_rel;
+	Form_pg_temp_class temp_rd_rel;
 	Oid			reloid = RelationGetRelid(rel);
 
 	Assert(CheckRelationTableSpaceMove(rel, newTableSpaceId));
 
-	/* Get a modifiable copy of the relation's pg_class row. */
+	/*
+	 * Get a modifiable copy of the relation's pg_class row and, for a global
+	 * temporary relation, its pg_temp_class row.
+	 */
 	pg_class = table_open(RelationRelationId, RowExclusiveLock);
 
-	tuple = SearchSysCacheLockedCopy1(RELOID, ObjectIdGetDatum(reloid));
+	tuple = GetPgClassAndPgTempClassTuples(reloid, true, &temp_tuple, true);
 	if (!HeapTupleIsValid(tuple))
 		elog(ERROR, "cache lookup failed for relation %u", reloid);
 	otid = tuple->t_self;
 	rd_rel = (Form_pg_class) GETSTRUCT(tuple);
+	temp_rd_rel = (Form_pg_temp_class) GETSTRUCT_SAFE(temp_tuple);
 
-	/* Update the pg_class row. */
-	rd_rel->reltablespace = (newTableSpaceId == MyDatabaseTableSpace) ?
-		InvalidOid : newTableSpaceId;
+	/*
+	 * Update the pg_class and/or pg_temp_class rows.  For global temporary
+	 * relations, the new tablespace is set in both pg_class and pg_temp_class
+	 * so that the change is made in the current session and for all future
+	 * sessions.  Other current sessions using the relation are not affected.
+	 */
+	SetEffective_reltablespace(rd_rel, temp_rd_rel,
+							   newTableSpaceId == MyDatabaseTableSpace ?
+							   InvalidOid : newTableSpaceId);
 	if (RelFileNumberIsValid(newRelFilenumber))
-		rd_rel->relfilenode = newRelFilenumber;
+		SetEffective_relfilenode(rd_rel, temp_rd_rel, newRelFilenumber);
+
 	CatalogTupleUpdate(pg_class, &otid, tuple);
 	UnlockTuple(pg_class, &otid, InplaceUpdateTupleLock);
+	if (HeapTupleIsValid(temp_tuple))
+	{
+		UpdatePgTempClassTuple(reloid, temp_tuple);
+		heap_freetuple(temp_tuple);
+	}
 
 	/*
 	 * Record dependency on tablespace.  This is required for relations that
 	 * have no physical storage, and for global temporary relations whose
-	 * physical storage is temporary.
+	 * physical storage is temporary.  Note that a global temporary relation
+	 * being used in another session will not see the change in tablespace,
+	 * and will continue to use the original tablespace until the session
+	 * exits, but its local temporary storage will prevent the old tablespace
+	 * from being dropped until then.
 	 */
 	if (!RELKIND_HAS_STORAGE(rel->rd_rel->relkind) ||
 		RELATION_IS_GLOBAL_TEMP(rel))

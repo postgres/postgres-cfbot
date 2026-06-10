@@ -82,6 +82,7 @@ create			{ yylval->kw = "create"; return XCREATE; }
 OID				{ yylval->kw = "OID"; return OBJ_ID; }
 bootstrap		{ yylval->kw = "bootstrap"; return XBOOTSTRAP; }
 shared_relation	{ yylval->kw = "shared_relation"; return XSHARED_RELATION; }
+temp_relation	{ yylval->kw = "temp_relation"; return XTEMP_RELATION; }
 rowtype_oid		{ yylval->kw = "rowtype_oid"; return XROWTYPE_OID; }
 
 insert			{ yylval->kw = "insert"; return INSERT_TUPLE; }

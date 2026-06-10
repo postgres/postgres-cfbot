@@ -22,13 +22,14 @@
 
 #include "access/relation.h"
 #include "access/xact.h"
+#include "catalog/global_temp.h"
 #include "catalog/namespace.h"
 #include "pgstat.h"
 #include "storage/lmgr.h"
 #include "storage/lock.h"
+#include "utils/gtcatcache.h"
 #include "utils/inval.h"
 #include "utils/syscache.h"
-
 
 /* ----------------
  *		relation_open - open any relation by relation OID
@@ -54,6 +55,17 @@ relation_open(Oid relationId, LOCKMODE lockmode)
 	/* Get the lock before trying to open the relcache entry */
 	if (lockmode != NoLock)
 		LockRelationOid(relationId, lockmode);
+
+	/*
+	 * Before opening a global temporary system catalog table, process any
+	 * invalidated global temporary relations and flush the global temporary
+	 * catalog caches, so that the contents of the catalogs are up to date.
+	 */
+	if (IsGlobalTempCatalogTable(relationId) && !IsBootstrapProcessingMode())
+	{
+		ProcessInvalidatedGlobalTempRelations();
+		GTCatCacheFlush();
+	}
 
 	/* The relcache does all the real work... */
 	r = RelationIdGetRelation(relationId);

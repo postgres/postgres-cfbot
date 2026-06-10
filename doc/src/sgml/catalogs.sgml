@@ -351,6 +351,11 @@
      </row>
 
      <row>
+      <entry><link linkend="catalog-pg-temp-class"><structname>pg_temp_class</structname></link></entry>
+      <entry>global temporary relations used in the current session</entry>
+     </row>
+
+     <row>
       <entry><link linkend="catalog-pg-transform"><structname>pg_transform</structname></link></entry>
       <entry>transforms (data type to procedural language conversions)</entry>
      </row>
@@ -2028,7 +2033,12 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
       <para>
        Name of the on-disk file of this relation; zero means this
        is a <quote>mapped</quote> relation whose disk file name is determined
-       by low-level state
+       by low-level state.
+      </para>
+      <para>
+       For a global temporary relation, the value from
+       <link linkend="catalog-pg-temp-class"><structname>pg_temp_class</structname></link>.<structfield>relfilenode</structfield>,
+       if any, takes precedence over the value from this catalog.
       </para></entry>
      </row>
 
@@ -2044,6 +2054,11 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
        except for partitioned tables, where this is the tablespace
        in which partitions will be created when one is not
        specified in the creation command.
+      </para>
+      <para>
+       For a global temporary relation, the value from
+       <link linkend="catalog-pg-temp-class"><structname>pg_temp_class</structname></link>.<structfield>reltablespace</structfield>,
+       if any, takes precedence over the value from this catalog.
       </para></entry>
      </row>
 
@@ -9018,6 +9033,94 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
     </tbody>
    </tgroup>
   </table>
+ </sect1>
+
+
+ <sect1 id="catalog-pg-temp-class">
+  <title><structname>pg_temp_class</structname></title>
+
+  <indexterm zone="catalog-pg-temp-class">
+   <primary>pg_temp_class</primary>
+  </indexterm>
+
+  <para>
+   The catalog <structname>pg_temp_class</structname> is a global temporary
+   table that stores information about all global temporary relations
+   (including <structname>pg_temp_class</structname> itself) in use in the
+   current session.
+  </para>
+
+  <para>
+   The attributes of <structname>pg_temp_class</structname> are a subset of
+   the attributes of
+   <link linkend="catalog-pg-class"><structname>pg_class</structname></link>,
+   used to store local overrides to the values from
+   <structname>pg_class</structname> for each session.
+  </para>
+
+  <table>
+   <title><structname>pg_temp_class</structname> Columns</title>
+   <tgroup cols="1">
+    <thead>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       Column Type
+      </para>
+      <para>
+       Description
+      </para></entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>oid</structfield> <type>oid</type>
+      </para>
+      <para>
+       Row identifier
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>relfilenode</structfield> <type>oid</type>
+      </para>
+      <para>
+       Name of the on-disk file of this relation in the current session,
+       overriding the value from
+       <link linkend="catalog-pg-class"><structname>pg_class</structname></link>.<structfield>relfilenode</structfield>.
+       This is always non-zero, because global temporary relations are never
+       <quote>mapped</quote>.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>reltablespace</structfield> <type>oid</type>
+       (references <link linkend="catalog-pg-tablespace"><structname>pg_tablespace</structname></link>.<structfield>oid</structfield>)
+      </para>
+      <para>
+       The tablespace in which this relation is stored in the current
+       session, overriding the value from
+       <link linkend="catalog-pg-class"><structname>pg_class</structname></link>.<structfield>reltablespace</structfield>.
+       If zero, the database's default tablespace is implied.
+       Not meaningful if the relation has no on-disk file,
+       except for partitioned tables, where this is the tablespace
+       in which partitions will be created when one is not
+       specified in the creation command.
+      </para></entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+
+  <note>
+   <para>
+    Tuples are only added to <structname>pg_temp_class</structname> for global
+    temporary relations that have been used in the current session.
+   </para>
+  </note>
  </sect1>
 
 

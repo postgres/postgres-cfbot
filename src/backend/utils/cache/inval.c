@@ -51,10 +51,11 @@
  *	PrepareToInvalidateCacheTuple() routine provides the knowledge of which
  *	catcaches may need invalidation for a given tuple.
  *
- *	Also, whenever we see an operation on a pg_class, pg_attribute, or
- *	pg_index tuple, we register a relcache flush operation for the relation
- *	described by that tuple (as specified in CacheInvalidateHeapTuple()).
- *	Likewise for pg_constraint tuples for foreign keys on relations.
+ *	Also, whenever we see an operation on a pg_class, pg_temp_class,
+ *	pg_attribute, or pg_index tuple, we register a relcache flush operation
+ *	for the relation described by that tuple (as specified in
+ *	CacheInvalidateHeapTuple()).  Likewise for pg_constraint tuples for
+ *	foreign keys on relations.
  *
  *	We keep the relcache flush requests in lists separate from the catcache
  *	tuple flush requests.  This allows us to issue all the pending catcache
@@ -119,6 +120,7 @@
 #include "access/xloginsert.h"
 #include "catalog/catalog.h"
 #include "catalog/pg_constraint.h"
+#include "catalog/pg_temp_class.h"
 #include "miscadmin.h"
 #include "storage/procnumber.h"
 #include "storage/sinval.h"
@@ -1492,6 +1494,13 @@ CacheInvalidateHeapTupleCommon(Relation relation,
 			databaseId = InvalidOid;
 		else
 			databaseId = MyDatabaseId;
+	}
+	else if (tupleRelId == TempRelationRelationId)
+	{
+		Form_pg_temp_class temp_classtup = (Form_pg_temp_class) GETSTRUCT(tuple);
+
+		relationId = temp_classtup->oid;
+		databaseId = MyDatabaseId;
 	}
 	else if (tupleRelId == AttributeRelationId)
 	{

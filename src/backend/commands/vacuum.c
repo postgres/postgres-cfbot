@@ -39,6 +39,7 @@
 #include "catalog/namespace.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_inherits.h"
+#include "catalog/pg_temp_class.h"
 #include "commands/async.h"
 #include "commands/defrem.h"
 #include "commands/progress.h"
@@ -2182,6 +2183,23 @@ vacuum_rel(Oid relid, RangeVar *relation, VacuumParams params,
 		PopActiveSnapshot();
 		CommitTransactionCommand();
 		return false;
+	}
+
+	/*
+	 * VACUUM FULL on pg_temp_class is not supported --- it does not support
+	 * relfilenode changes, because that would require it to be a mapped
+	 * relation, and the relmapper does not support temporary tables. It might
+	 * be possible to make this work, but it doesn't seem worth the effort, so
+	 * do an "aggressive" VACUUM FREEZE instead.
+	 */
+	if (relid == TempRelationRelationId && (params.options & VACOPT_FULL))
+	{
+		params.options &= ~VACOPT_FULL;
+		params.options |= VACOPT_FREEZE;
+		params.freeze_min_age = 0;
+		params.freeze_table_age = 0;
+		params.multixact_freeze_min_age = 0;
+		params.multixact_freeze_table_age = 0;
 	}
 
 	/*
