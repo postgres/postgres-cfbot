@@ -1678,6 +1678,17 @@ PerformWalRecovery(void)
 	CheckRecoveryConsistency();
 
 	/*
+	 * If already in standby mode, disable the startup progress timeout again,
+	 * since startup operations such as ResetUnloggedRelations() may have
+	 * re-enabled it after EnableStandbyMode().  WAL replay progress is not
+	 * reported in standby mode, so disable the timeout before reading the
+	 * first WAL record, which may require waiting for WAL to become
+	 * available.
+	 */
+	if (StandbyMode)
+		disable_startup_progress_timeout();
+
+	/*
 	 * Find the first record that logically follows the checkpoint --- it
 	 * might physically precede it, though.
 	 */
