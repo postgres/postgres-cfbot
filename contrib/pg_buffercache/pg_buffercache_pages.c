@@ -88,6 +88,7 @@ PG_FUNCTION_INFO_V1(pg_buffercache_mark_dirty);
 PG_FUNCTION_INFO_V1(pg_buffercache_mark_dirty_relation);
 PG_FUNCTION_INFO_V1(pg_buffercache_mark_dirty_all);
 PG_FUNCTION_INFO_V1(pg_buffercache_partitions);
+PG_FUNCTION_INFO_V1(pg_buffercache_set_partition);
 
 
 /* Only need to touch memory once per backend process lifetime */
@@ -1083,4 +1084,40 @@ pg_buffercache_partitions(PG_FUNCTION_ARGS)
 	}
 	else
 		SRF_RETURN_DONE(funcctx);
+}
+
+/*
+ * Set the clock-sweep balance weights for a single partition.
+ */
+Datum
+pg_buffercache_set_partition(PG_FUNCTION_ARGS)
+{
+	int			partition = PG_GETARG_INT32(0);
+	ArrayType  *array = PG_GETARG_ARRAYTYPE_P(1);
+	Datum	   *elems;
+	bool	   *nulls;
+	int			nelems;
+	int		   *weights;
+
+	if (ARR_NDIM(array) > 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("weights must be a one-dimensional array")));
+
+	deconstruct_array_builtin(array, INT4OID, &elems, &nulls, &nelems);
+
+	weights = palloc_array(int, nelems);
+	for (int i = 0; i < nelems; i++)
+	{
+		if (nulls[i])
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("weights must not contain NULL values")));
+
+		weights[i] = DatumGetInt32(elems[i]);
+	}
+
+	ClockSweepSetWeights(partition, weights, nelems);
+
+	PG_RETURN_VOID();
 }
