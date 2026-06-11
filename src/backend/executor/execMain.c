@@ -64,6 +64,7 @@
 #include "utils/partcache.h"
 #include "utils/rls.h"
 #include "utils/snapmgr.h"
+#include "utils/wait_event_timing.h"
 
 
 /* Hooks for plugins to get control in ExecutorStart/Run/Finish/End */
@@ -132,6 +133,8 @@ ExecutorStart(QueryDesc *queryDesc, int eflags)
 	 * reported.
 	 */
 	pgstat_report_query_id(queryDesc->plannedstmt->queryId, false);
+
+	wait_event_trace_exec_start(queryDesc->plannedstmt->queryId);
 
 	if (ExecutorStart_hook)
 		(*ExecutorStart_hook) (queryDesc, eflags);
@@ -476,6 +479,8 @@ standard_ExecutorFinish(QueryDesc *queryDesc)
 void
 ExecutorEnd(QueryDesc *queryDesc)
 {
+	wait_event_trace_exec_end(queryDesc->plannedstmt->queryId);
+
 	if (ExecutorEnd_hook)
 		(*ExecutorEnd_hook) (queryDesc);
 	else

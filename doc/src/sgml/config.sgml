@@ -9266,13 +9266,18 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
        </para>
        <para>
         At <literal>trace</literal>, the server additionally records every
-        individual wait event into a per-session ring buffer exposed via the
+        individual wait event, together with query-attribution markers,
+        into a per-session ring buffer exposed via the
         <link linkend="monitoring-pg-backend-wait-event-trace-view">
         <structname>pg_backend_wait_event_trace</structname></link> view.
         The ring is allocated lazily from dynamic shared memory on first
         use (default 4&nbsp;MB per backend; see
         <xref linkend="guc-wait-event-trace-ring-size"/>), so only
-        sessions that enable trace pay the per-ring memory cost.
+        sessions that enable trace pay the per-ring memory cost.  Query
+        attribution &mdash; matching each wait to the query that incurred
+        it &mdash; requires both <xref linkend="guc-track-activities"/> and
+        <xref linkend="guc-compute-query-id"/>; a warning is logged if
+        either is missing when trace is enabled.
        </para>
        <para>
         Only superusers and users with the appropriate <literal>SET</literal>

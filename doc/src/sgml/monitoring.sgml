@@ -4410,8 +4410,14 @@ ORDER  BY b.bucket_idx;
   <para>
    The <structname>pg_backend_wait_event_trace</structname> view shows
    individual wait event records from the <emphasis>current backend's</emphasis>
-   trace ring buffer.  Each record captures a single wait event
-   (with timestamp and duration).
+   trace ring buffer.  Each record captures either a single wait event
+   (with timestamp and duration) or a query-attribution marker.  Two
+   marker families exist: <literal>ExecStart</literal>/<literal>ExecEnd</literal>
+   bracket every executor invocation, and
+   <literal>QueryStart</literal>/<literal>QueryEnd</literal> mark
+   top-level query-id transitions and the transition to idle.  See
+   <xref linkend="guc-wait-event-capture"/> for the gating rules of
+   each marker family.
    Requires <xref linkend="guc-wait-event-capture"/> to be set to
    <literal>trace</literal>.  The ring buffer is sized by
    <xref linkend="guc-wait-event-trace-ring-size"/> (default 4&nbsp;MB =
@@ -4498,8 +4504,16 @@ ORDER  BY b.bucket_idx;
   <para>
    The ring buffer is designed as a lock-free transport mechanism for
    external consumption.  At high wait event rates (e.g., 220K events/sec),
-   the ring wraps in roughly 0.5&ndash;1 seconds.  Consumers should poll
-   the ring buffer before it wraps.
+   the ring wraps in roughly 0.5&ndash;1 seconds.  External consumers
+   (background workers, extensions) can attribute events to queries by
+   scanning for <literal>ExecStart</literal> markers (or, when the
+   executor markers are unavailable, <literal>QueryStart</literal>); if
+   both have been overwritten, events before the next visible marker are
+   unattributed.  Consumers should poll the ring buffer before it wraps
+   and can use the <structfield>query_id</structfield> column of
+   <link linkend="monitoring-pg-stat-activity-view">
+   <structname>pg_stat_activity</structname></link> as a fallback for the
+   current query context.
   </para>
 
   <para>
@@ -4519,6 +4533,28 @@ ORDER  BY b.bucket_idx;
    alone.
   </para>
 
+  <para>
+   <literal>QueryStart</literal>/<literal>QueryEnd</literal> markers are
+   emitted as matched pairs around each protocol phase that touches a
+   <structfield>query_id</structfield>.  In simple protocol that is one
+   pair per statement.  In extended protocol there is one pair around
+   each of <literal>Parse</literal>, <literal>Bind</literal>, and
+   <literal>Execute</literal> for the same
+   <structfield>query_id</structfield> &mdash; so a single parameterized
+   statement produces three nested pairs, plus the surrounding
+   <literal>ExecStart</literal>/<literal>ExecEnd</literal> pair from the
+   executor.  This per-phase pairing lets consumers measure how much
+   time a query spent in each protocol phase (parse vs. bind vs.
+   execute) by computing the duration between each pair, and lets a
+   total-time-per-query rollup be expressed as the sum of pair
+   durations rather than a single subtraction.  Consumers that just want
+   "how long did this query take in the executor" should use the
+   <literal>ExecStart</literal>/<literal>ExecEnd</literal> pair, which
+   brackets each executor invocation regardless of protocol.  (Statements
+   that invoke the executor recursively &mdash; for example via
+   <application>PL/pgSQL</application> or other server-side code &mdash;
+   produce one pair per invocation.)
+  </para>
 
   <table id="pg-backend-wait-event-trace-view" xreflabel="pg_backend_wait_event_trace">
    <title><structname>pg_backend_wait_event_trace</structname> View</title>
@@ -4558,7 +4594,7 @@ ORDER  BY b.bucket_idx;
        <structfield>wait_event_type</structfield> <type>text</type>
       </para>
       <para>
-       Wait event type
+       Wait event type, or <literal>Query</literal> for query markers
       </para></entry>
      </row>
 
@@ -4567,7 +4603,9 @@ ORDER  BY b.bucket_idx;
        <structfield>wait_event</structfield> <type>text</type>
       </para>
       <para>
-       Wait event name
+       Wait event name, or one of <literal>ExecStart</literal>,
+       <literal>ExecEnd</literal>, <literal>QueryStart</literal>,
+       <literal>QueryEnd</literal> for query-attribution markers.
       </para></entry>
      </row>
 
@@ -4576,7 +4614,7 @@ ORDER  BY b.bucket_idx;
        <structfield>duration_us</structfield> <type>double precision</type>
       </para>
       <para>
-       Wait duration in microseconds
+       Wait duration in microseconds (0 for query markers)
       </para></entry>
      </row>
 
@@ -4585,7 +4623,7 @@ ORDER  BY b.bucket_idx;
        <structfield>query_id</structfield> <type>bigint</type>
       </para>
       <para>
-       Reserved; always 0 for wait event records
+       Query identifier for query markers (0 for wait events)
       </para></entry>
      </row>
 
