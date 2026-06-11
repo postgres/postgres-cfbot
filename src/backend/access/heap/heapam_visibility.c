@@ -99,6 +99,24 @@ typedef enum SetHintBitsState
 } SetHintBitsState;
 
 /*
+ * Buffer value that tells SetHintBitsExt() to skip hint-bit maintenance
+ * entirely.  Private to this file; reached only via the NoHints wrapper
+ * functions below.  Not InvalidBuffer, and outside the range of valid
+ * buffer identifiers.
+ *
+ * Beware that it is not outside the range BufferIsLocal() accepts: that
+ * macro is just "buffer < 0", so this value looks like a local buffer to
+ * it, and anything that then indexes a local buffer array with
+ * -buffer - 1 will overflow and read wild memory.  SetHintBitsExt() must
+ * therefore test for this value before touching the buffer manager, and
+ * any code added to the HeapTupleSatisfies* functions that uses the
+ * buffer for something other than hint bits has to cope with it too --
+ * see HeapTupleSatisfiesVisibilityNoHints(), which rejects
+ * SNAPSHOT_HISTORIC_MVCC for exactly that reason.
+ */
+#define NoHintBitsBuffer	((Buffer) PG_INT32_MIN)
+
+/*
  * SetHintBitsExt()
  *
  * Set commit/abort hint bits on a tuple, if appropriate at this time.
@@ -142,6 +160,10 @@ static inline void
 SetHintBitsExt(HeapTupleHeader tuple, Buffer buffer,
 			   uint16 infomask, TransactionId xid, SetHintBitsState *state)
 {
+	/* Caller asked us not to touch the page; see NoHintBitsBuffer above. */
+	if (buffer == NoHintBitsBuffer)
+		return;
+
 	/*
 	 * In batched mode, if we previously did not get permission to set hint
 	 * bits, don't try again - in all likelihood IO is still going on.
@@ -733,6 +755,18 @@ HeapTupleSatisfiesUpdate(HeapTuple htup, CommandId curcid,
 		return TM_Updated;		/* updated by other */
 	else
 		return TM_Deleted;		/* deleted by other */
+}
+
+/*
+ * HeapTupleSatisfiesUpdateNoHints
+ *		Like HeapTupleSatisfiesUpdate(), but never writes hint bits.
+ *
+ * See HeapTupleSatisfiesVisibilityNoHints().
+ */
+TM_Result
+HeapTupleSatisfiesUpdateNoHints(HeapTuple htup, CommandId curcid)
+{
+	return HeapTupleSatisfiesUpdate(htup, curcid, NoHintBitsBuffer);
 }
 
 /*
@@ -1750,4 +1784,36 @@ HeapTupleSatisfiesVisibility(HeapTuple htup, Snapshot snapshot, Buffer buffer)
 	}
 
 	return false;				/* keep compiler quiet */
+}
+
+/*
+ * HeapTupleSatisfiesVisibilityNoHints
+ *		Like HeapTupleSatisfiesVisibility(), but never writes hint bits.
+ *
+ * For table AMs whose pages must not be modified outside their own WAL
+ * scheme (e.g. generic WAL).  The verdict is unaffected, since hint bits
+ * are only a cache of pg_xact state.
+ *
+ * SNAPSHOT_HISTORIC_MVCC is not supported here: HeapTupleSatisfiesHistoricMVCC()
+ * needs the buffer for more than hint bits, namely to recover the tuple's
+ * relfilelocator for the combo CID lookup in ResolveCminCmaxDuringDecoding().
+ * There is no buffer to give it, so reject that snapshot type rather than let
+ * NoHintBitsBuffer reach BufferGetTag().
+ *
+ * In practice a table AM's own tuple_satisfies_snapshot callback should
+ * never see SNAPSHOT_HISTORIC_MVCC: it is only installed by
+ * SetupHistoricSnapshot() for the logical-decoding catalog lookups that
+ * relcache.c performs to interpret schema changes mid-transaction, and
+ * those lookups are always against pg_catalog, which is always heap.
+ * Decoding itself reconstructs tuples from the WAL record rather than
+ * scanning the user's table.  The reject above is a backstop, not a
+ * restriction expected to fire.
+ */
+bool
+HeapTupleSatisfiesVisibilityNoHints(HeapTuple htup, Snapshot snapshot)
+{
+	if (snapshot->snapshot_type == SNAPSHOT_HISTORIC_MVCC)
+		elog(ERROR, "historic MVCC snapshots require a buffer");
+
+	return HeapTupleSatisfiesVisibility(htup, snapshot, NoHintBitsBuffer);
 }
