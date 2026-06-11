@@ -40,6 +40,7 @@
 
 #include "lib/ilist.h"
 #include "miscadmin.h"
+#include "pgstat.h"
 #include "port/atomics.h"
 #include "storage/aio.h"
 #include "storage/aio_internal.h"
@@ -458,6 +459,8 @@ pgaio_io_stage(PgAioHandle *ioh, PgAioOp op)
 				   "staged (synchronous: %d, in_batch: %d)",
 				   needs_synchronous, pgaio_my_backend->in_batchmode);
 
+	pgstat_count_backend_aio_start(needs_synchronous);
+
 	if (!needs_synchronous)
 	{
 		pgaio_my_backend->staged_ios[pgaio_my_backend->num_staged_ios++] = ioh;
@@ -543,6 +546,12 @@ pgaio_io_process_completion(PgAioHandle *ioh, int result)
 
 	/* condition variable broadcast ensures state is visible before wakeup */
 	ConditionVariableBroadcast(&ioh->cv);
+
+	/* Track AIO completion stats */
+	if (ioh->owner_procno == MyProcNumber)
+		pgstat_count_backend_aio_complete_self();
+	else
+		pgstat_count_backend_aio_complete_other();
 
 	/* contains call to pgaio_io_call_complete_local() */
 	if (ioh->owner_procno == MyProcNumber)
@@ -761,6 +770,8 @@ static void
 pgaio_io_wait_for_free(void)
 {
 	int			reclaimed = 0;
+
+	pgstat_count_backend_aio_handle_wait();
 
 	pgaio_debug(DEBUG2, "waiting for free IO with %d pending, %u in-flight, %u idle IOs",
 				pgaio_my_backend->num_staged_ios,
@@ -1149,6 +1160,8 @@ pgaio_submit_staged(void)
 	total_submitted += did_submit;
 
 	Assert(total_submitted == did_submit);
+
+	pgstat_count_backend_aio_submitted();
 
 	pgaio_my_backend->num_staged_ios = 0;
 
