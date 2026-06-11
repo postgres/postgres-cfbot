@@ -177,6 +177,31 @@ static Datum ExecJustHashOuterVarVirt(ExprState *state, ExprContext *econtext, b
 static Datum ExecJustHashInnerVarVirt(ExprState *state, ExprContext *econtext, bool *isnull);
 static Datum ExecJustHashOuterVarStrict(ExprState *state, ExprContext *econtext, bool *isnull);
 
+/*
+ * One step of a JSON_TRANSFORM target path.
+ *
+ * The standard restricts the path to a chain of member accessors (.key)
+ * and wildcard member accessors (.*).  We model each accessor as one of
+ * these structs; the JSON_TRANSFORM walker below consumes the array.
+ */
+typedef struct JsonTransformStep
+{
+	bool		wildcard;		/* true for '.*' (matches every member) */
+	char	   *key;			/* member name (valid only if !wildcard) */
+	int			keylen;			/* length of key (not NUL-terminated) */
+} JsonTransformStep;
+
+static void jtSetPath(JsonbIterator **it, JsonbInState *st,
+					  JsonTransformStep *steps, int nsteps, int level,
+					  JsonTransformOp op, JsonbValue *newval,
+					  JsonTransformBehavior on_existing, bool *matched);
+static void jtSetPathObject(JsonbIterator **it, JsonbInState *st,
+							JsonTransformStep *steps, int nsteps, int level,
+							JsonTransformOp op, JsonbValue *newval,
+							JsonTransformBehavior on_existing, bool *matched,
+							uint32 npairs);
+static void jtCopyValue(JsonbIterator **it, JsonbInState *st);
+
 /* execution helper functions */
 static pg_always_inline void ExecEvalArrayCompareInternal(FunctionCallInfo fcinfo,
 														  ArrayType *arr,
@@ -5111,29 +5136,6 @@ ExecEvalJsonExprPath(ExprState *state, ExprEvalStep *op,
 }
 
 /*
- * One step of a JSON_TRANSFORM target path.
- *
- * The standard restricts the path to a chain of member accessors (.key)
- * and wildcard member accessors (.*).  We model each accessor as one
- * of these structs; the walker below consumes the array.
- */
-typedef struct JsonTransformStep
-{
-	bool		wildcard;		/* true for '.*' (matches every member) */
-	char	   *key;			/* member name (valid only if !wildcard) */
-	int			keylen;			/* length of key (not NUL-terminated) */
-} JsonTransformStep;
-
-static void jtSetPath(JsonbIterator **it, JsonbInState *st,
-					  JsonTransformStep *steps, int nsteps, int level,
-					  JsonTransformOp op, JsonbValue *newval);
-static void jtSetPathObject(JsonbIterator **it, JsonbInState *st,
-							JsonTransformStep *steps, int nsteps, int level,
-							JsonTransformOp op, JsonbValue *newval,
-							uint32 npairs);
-static void jtCopyValue(JsonbIterator **it, JsonbInState *st);
-
-/*
  * Convert a JSON_TRANSFORM jsonpath into an array of JsonTransformStep.
  *
  * Per standard ,the path must begin with the context variable '$' and
@@ -5258,7 +5260,8 @@ jtCopyValue(JsonbIterator **it, JsonbInState *st)
 static void
 jtSetPathObject(JsonbIterator **it, JsonbInState *st,
 				JsonTransformStep *steps, int nsteps, int level,
-				JsonTransformOp op, JsonbValue *newval, uint32 npairs)
+				JsonTransformOp op, JsonbValue *newval,
+				JsonTransformBehavior on_existing, bool *matched, uint32 npairs)
 {
 	JsonTransformStep *step = &steps[level];
 	bool		is_last = (level == nsteps - 1);
@@ -5270,25 +5273,26 @@ jtSetPathObject(JsonbIterator **it, JsonbInState *st,
 		JsonbValue	k,
 					v;
 		JsonbIteratorToken r PG_USED_FOR_ASSERTS_ONLY;
-		bool		matched;
+		bool		is_match;
 
 		r = JsonbIteratorNext(it, &k, true);
 		Assert(r == WJB_KEY);
 
-		matched = step->wildcard ||
+		is_match = step->wildcard ||
 			(k.val.string.len == step->keylen &&
 			 memcmp(k.val.string.val, step->key, step->keylen) == 0);
 
-		if (matched && !step->wildcard)
+		if (is_match && !step->wildcard)
 			found = true;
 
-		if (matched && is_last)
+		if (is_match && is_last)
 		{
 			switch (op)
 			{
 				case TRANSFORM_REMOVE:
 					/* swallow the value; push nothing -> member removed */
 					(void) JsonbIteratorNext(it, &v, true);
+					*matched = true;
 					break;
 
 				case TRANSFORM_REPLACE:
@@ -5296,13 +5300,22 @@ jtSetPathObject(JsonbIterator **it, JsonbInState *st,
 					(void) JsonbIteratorNext(it, &v, true);
 					pushJsonbValue(st, WJB_KEY, &k);
 					pushJsonbValue(st, WJB_VALUE, newval);
+					*matched = true;
 					break;
 
 				case TRANSFORM_INSERT:
-					/* target key already present: standard default ERROR ON EXISTING */
-					ereport(ERROR,
-							errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-							errmsg("target in JSON_TRANSFORM already exists"));
+
+					/*
+					 * Target key already present.  ERROR (default) raises;
+					 * IGNORE keeps the existing member unchanged.
+					 */
+					if (on_existing == JSON_TRANSFORM_BEHAVIOR_ERROR)
+						ereport(ERROR,
+								errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+								errmsg("target in JSON_TRANSFORM already exists"));
+					(void) JsonbIteratorNext(it, &v, true);
+					pushJsonbValue(st, WJB_KEY, &k);
+					pushJsonbValue(st, WJB_VALUE, &v);
 					break;
 
 				case TRANSFORM_RENAME:
@@ -5323,17 +5336,19 @@ jtSetPathObject(JsonbIterator **it, JsonbInState *st,
 					(void) JsonbIteratorNext(it, &v, true);
 					pushJsonbValue(st, WJB_KEY, newval);
 					pushJsonbValue(st, WJB_VALUE, &v);
+					*matched = true;
 					break;
 
 				default:
 					elog(ERROR, "unexpected JsonTransformOp %d", (int) op);
 			}
 		}
-		else if (matched && !is_last)
+		else if (is_match && !is_last)
 		{
 			/* descend into this member's value to continue matching */
 			pushJsonbValue(st, WJB_KEY, &k);
-			jtSetPath(it, st, steps, nsteps, level + 1, op, newval);
+			jtSetPath(it, st, steps, nsteps, level + 1, op, newval,
+					  on_existing, matched);
 		}
 		else
 		{
@@ -5372,7 +5387,8 @@ jtSetPathObject(JsonbIterator **it, JsonbInState *st,
 static void
 jtSetPath(JsonbIterator **it, JsonbInState *st,
 		  JsonTransformStep *steps, int nsteps, int level,
-		  JsonTransformOp op, JsonbValue *newval)
+		  JsonTransformOp op, JsonbValue *newval,
+		  JsonTransformBehavior on_existing, bool *matched)
 {
 	JsonbValue	v;
 	JsonbIteratorToken r;
@@ -5385,7 +5401,7 @@ jtSetPath(JsonbIterator **it, JsonbInState *st,
 	{
 		pushJsonbValue(st, WJB_BEGIN_OBJECT, NULL);
 		jtSetPathObject(it, st, steps, nsteps, level, op, newval,
-						v.val.object.nPairs);
+						on_existing, matched, v.val.object.nPairs);
 		r = JsonbIteratorNext(it, &v, true);
 		Assert(r == WJB_END_OBJECT);
 		pushJsonbValue(st, WJB_END_OBJECT, NULL);
@@ -5428,12 +5444,10 @@ jtSetPath(JsonbIterator **it, JsonbInState *st,
  * (rather than delegating to jsonb_set/insert/delete_path on a text[] path)
  * is what lets us honor '.*', which can match many members at once.
  *
- * Behavior clauses (ON EXISTING / ON MISSING / ON NULL / ...) are not yet
- * parseable; we hardcode the standard's implicit defaults:
- *   - REMOVE  : IGNORE ON MISSING
- *   - REPLACE : IGNORE ON MISSING, NULL ON NULL
- *   - INSERT  : ERROR ON EXISTING, NULL ON NULL
- *   - RENAME  : IGNORE ON MISSING
+ * The per-action behaviors (action->on_existing / on_missing / on_null) are
+ * resolved during parse analysis from the user's clauses plus the standard's
+ * implicit defaults; here we just honor them.  ON EMPTY / ON ERROR are not
+ * yet supported (rejected at parse time).
  */
 void
 ExecEvalJsonTransform(ExprState *state, ExprEvalStep *op,
@@ -5450,6 +5464,8 @@ ExecEvalJsonTransform(ExprState *state, ExprEvalStep *op,
 	JsonbValue *newval = NULL;
 	JsonbIterator *it;
 	JsonbInState st = {0};
+	JsonTransformOp effop = action->op;
+	bool		matched = false;
 
 	/*
 	 * The JUMP_IF_NULL guards in the step array already skip us if
@@ -5464,16 +5480,40 @@ ExecEvalJsonTransform(ExprState *state, ExprEvalStep *op,
 	/* Validate path and break it into accessor steps. */
 	steps = JsonPathToTransformSteps(jp, action->op, &nsteps);
 
-	/* Build the value the action needs. */
+	/* Build the value the action needs, honoring ON NULL for INSERT/REPLACE. */
 	if (action->op == TRANSFORM_INSERT || action->op == TRANSFORM_REPLACE)
 	{
-		/* replacement/insertion value (NULL ON NULL -> JSON null) */
 		if (jtstate->action_value.isnull)
-			newvalbuf.type = jbvNull;
+		{
+			switch (action->on_null)
+			{
+				case JSON_TRANSFORM_BEHAVIOR_ERROR:
+					ereport(ERROR,
+							errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+							errmsg("null in replacement value of JSON_TRANSFORM not allowed"));
+					break;
+				case JSON_TRANSFORM_BEHAVIOR_IGNORE:
+					/* do not perform the action; return input unchanged */
+					*op->resvalue = JsonbPGetDatum(in);
+					*op->resnull = false;
+					return;
+				case JSON_TRANSFORM_BEHAVIOR_REMOVE:
+					/* delete the target instead of setting it (REPLACE only) */
+					effop = TRANSFORM_REMOVE;
+					break;
+				default:
+					/* NULL ON NULL: store a JSON null */
+					newvalbuf.type = jbvNull;
+					newval = &newvalbuf;
+					break;
+			}
+		}
 		else
+		{
 			JsonbToJsonbValue(DatumGetJsonbP(jtstate->action_value.value),
 							  &newvalbuf);
-		newval = &newvalbuf;
+			newval = &newvalbuf;
+		}
 	}
 	else if (action->op == TRANSFORM_RENAME)
 	{
@@ -5487,18 +5527,29 @@ ExecEvalJsonTransform(ExprState *state, ExprEvalStep *op,
 	}
 
 	/*
-	 * A top-level scalar has no members for a '.key'/'.* ' path to target, so
-	 * there is nothing to do; return the input unchanged.
+	 * A top-level scalar has no members for a '.key'/'.*' path to target, so
+	 * nothing matches: honor ON MISSING, else return the input unchanged.
 	 */
 	if (JB_ROOT_IS_SCALAR(in))
 	{
+		if (action->on_missing == JSON_TRANSFORM_BEHAVIOR_ERROR)
+			ereport(ERROR,
+					errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					errmsg("target in JSON_TRANSFORM does not exist"));
 		*op->resvalue = JsonbPGetDatum(in);
 		*op->resnull = false;
 		return;
 	}
 
 	it = JsonbIteratorInit(&in->root);
-	jtSetPath(&it, &st, steps, nsteps, 0, action->op, newval);
+	jtSetPath(&it, &st, steps, nsteps, 0, effop, newval,
+			  action->on_existing, &matched);
+
+	/* ON MISSING ERROR: the path matched no existing target. */
+	if (!matched && action->on_missing == JSON_TRANSFORM_BEHAVIOR_ERROR)
+		ereport(ERROR,
+				errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				errmsg("target in JSON_TRANSFORM does not exist"));
 
 	*op->resvalue = JsonbPGetDatum(JsonbValueToJsonb(st.result));
 	*op->resnull = false;
