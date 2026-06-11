@@ -12809,4 +12809,30 @@
   provolatile => 'v', prorettype => 'void', proargtypes => '',
   prosrc => 'pg_stat_reset_wait_event_timing_all' },
 
+{ oid => '9957',
+  descr => 'current backend wait event trace ring buffer',
+  proname => 'pg_get_backend_wait_event_trace', prorows => '1000',
+  proretset => 't', provolatile => 's', proparallel => 'r',
+  prorettype => 'record', proargtypes => '',
+  proallargtypes => '{int8,int8,text,text,float8,int8}',
+  proargmodes => '{o,o,o,o,o,o}',
+  proargnames => '{seq,timestamp_ns,wait_event_type,wait_event,duration_us,query_id}',
+  prosrc => 'pg_get_backend_wait_event_trace' },
+
+{ oid => '9962',
+  descr => 'wait event trace ring for the given procnumber slot, live or post-mortem',
+  proname => 'pg_get_wait_event_trace', prorows => '1000',
+  proretset => 't', provolatile => 'v', proparallel => 'r',
+  prorettype => 'record', proargtypes => 'int4',
+  proallargtypes => '{int4,int8,int8,text,text,float8,int8}',
+  proargmodes => '{i,o,o,o,o,o,o}',
+  proargnames => '{procnumber,seq,timestamp_ns,wait_event_type,wait_event,duration_us,query_id}',
+  prosrc => 'pg_get_wait_event_trace' },
+
+{ oid => '9961',
+  descr => 'statistics: free wait-event-trace rings whose owner backend has exited (superuser only); returns count freed',
+  proname => 'pg_stat_clear_orphaned_wait_event_rings',
+  provolatile => 'v', prorettype => 'int8', proargtypes => '',
+  prosrc => 'pg_stat_clear_orphaned_wait_event_rings' },
+
 ]

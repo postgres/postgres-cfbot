@@ -589,6 +589,15 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
       </entry>
      </row>
 
+     <row>
+      <entry><structname>pg_backend_wait_event_trace</structname><indexterm><primary>pg_backend_wait_event_trace</primary></indexterm></entry>
+      <entry>Individual wait event records from the current backend's trace
+       ring buffer.  See
+       <link linkend="monitoring-pg-backend-wait-event-trace-view">
+       <structname>pg_backend_wait_event_trace</structname></link> for details.
+      </entry>
+     </row>
+
      <!-- all "stat" for schema objects, by "importance" -->
 
      <row>
@@ -4020,7 +4029,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
    The <structname>pg_stat_wait_event_timing</structname> view contains one
    row for each combination of backend and wait event that has a non-zero
    call count.  It shows accumulated timing statistics collected when
-   <xref linkend="guc-wait-event-capture"/> is set to <literal>stats</literal>.  Requires the server to be compiled with
+   <xref linkend="guc-wait-event-capture"/> is set to <literal>stats</literal>
+   or <literal>trace</literal>.  Requires the server to be compiled with
    <option>--enable-wait-event-timing</option>.
   </para>
 
@@ -4381,6 +4391,200 @@ ORDER  BY b.bucket_idx;
        any <literal>N &rarr; N+1</literal> transition.
       </para></entry>
      </row>
+    </tbody>
+   </tgroup>
+  </table>
+ </sect2>
+
+ <sect2 id="monitoring-pg-backend-wait-event-trace-view">
+  <title><structname>pg_backend_wait_event_trace</structname></title>
+
+  <indexterm>
+   <primary>pg_backend_wait_event_trace</primary>
+  </indexterm>
+
+  <para>
+   The <structname>pg_backend_wait_event_trace</structname> view shows
+   individual wait event records from the <emphasis>current backend's</emphasis>
+   trace ring buffer.  Each record captures a single wait event
+   (with timestamp and duration).
+   Requires <xref linkend="guc-wait-event-capture"/> to be set to
+   <literal>trace</literal>.  The ring buffer is sized by
+   <xref linkend="guc-wait-event-trace-ring-size"/> (default 4&nbsp;MB =
+   131072 records of 32 bytes each); older records are overwritten in
+   FIFO order.  The view is session-local
+   and analogous in scope to
+   <link linkend="view-pg-backend-memory-contexts">
+   <structname>pg_backend_memory_contexts</structname></link>; querying it
+   from a superuser session still returns only that session's own
+   records, never another backend's.
+  </para>
+
+  <para>
+   The <structname>pg_backend_wait_event_trace</structname> view is
+   intended for <emphasis>session-local interactive diagnostics</emphasis>:
+   running ad-hoc <literal>SELECT</literal> queries against your own
+   session's trace from <application>psql</application> while
+   investigating wait-event behaviour.  The view materialises up to
+   one ring's worth of records (default ~4&nbsp;MB, controlled by
+   <xref linkend="guc-wait-event-trace-ring-size"/>) into a
+   tuplestore on each call, which is bounded and acceptable for that
+   use; for narrow result sets, append
+   <literal>ORDER BY seq DESC LIMIT <replaceable>N</replaceable></literal>
+   to get the most recent records.
+  </para>
+
+  <para>
+   Cross-backend monitoring tools &mdash; extensions and background
+   workers that read wait events losslessly from every backend's
+   ring &mdash; should <emphasis>not</emphasis> consume through this
+   view.  The in-tree cross-backend reader is
+   <function>pg_get_wait_event_trace</function>
+   (see <xref linkend="monitoring-stats-functions"/>); the underlying
+   per-session SQL function returns only the calling backend's own
+   ring, so a background worker invoking
+   <command>SELECT * FROM pg_backend_wait_event_trace</command> via
+   SPI would receive only its own (typically empty) ring, not the
+   target backend's data.  External tools that need cross-backend
+   access without going through SQL use the shared-memory snapshot
+   pattern documented on
+   <structname>WaitEventTraceControl</structname> in
+   <filename>src/include/utils/wait_event_timing.h</filename>:
+   snapshot <structfield>trace_slots[procNumber].generation</structfield>,
+   acquire <structname>WaitEventTraceCtl->lock</structname> in
+   <literal>LW_SHARED</literal>, resolve the target slot's
+   <structfield>ring_ptr</structfield> via
+   <function>dsa_get_address</function>, snapshot the relevant slice
+   of the ring into local memory, release the lock, re-snapshot
+   <structfield>generation</structfield> and discard the read if it
+   changed, then process the snapshot off the lock.  That bypasses
+   this view entirely and is the supported cross-backend interface
+   for monitoring extensions.
+  </para>
+
+  <para>
+   <emphasis>Slot lifecycle.</emphasis>  Per-backend trace rings are
+   not freed when their owner backend exits.  The ring stays
+   allocated in shared memory in an <quote>orphaned</quote> state
+   so the dying backend's final waits remain readable by the
+   cross-backend interface &mdash;
+   <function>pg_get_wait_event_trace</function>
+   (see <xref linkend="monitoring-stats-functions"/>) for in-tree
+   access, or external background workers that follow the
+   snapshot pattern documented above.
+   <emphasis>This does not change the behaviour of this view</emphasis>,
+   which always reads the calling backend's own ring and is
+   unaffected by orphan-state slots belonging to other
+   procnumbers.  The lifecycle change matters for short-lived
+   backends that exit before any monitoring tool has read their
+   data: parallel workers in particular exit in milliseconds at
+   end-of-parallel-query, well below typical reader polling
+   intervals, and without orphan-persistence their final waits
+   would be lost.  Orphaned rings are reclaimed automatically when a new
+   backend takes over the same <literal>procNumber</literal>
+   slot, and the DBA can force a sweep at any time via
+   <function>pg_stat_clear_orphaned_wait_event_rings</function>.
+   The worst-case orphan-memory footprint is bounded by the slot
+   count times ~4&nbsp;MB; see
+   <function>pg_stat_clear_orphaned_wait_event_rings</function>
+   under <xref linkend="monitoring-stats-functions"/> for details and
+   the deployment patterns where the function is most useful.
+  </para>
+
+  <para>
+   The ring buffer is designed as a lock-free transport mechanism for
+   external consumption.  At high wait event rates (e.g., 220K events/sec),
+   the ring wraps in roughly 0.5&ndash;1 seconds.  Consumers should poll
+   the ring buffer before it wraps.
+  </para>
+
+  <para>
+   The <structfield>seq</structfield> column is the absolute write
+   position of each record; it is monotonically increasing and never
+   resets while the ring is alive.  A consumer polling the ring
+   repeatedly can detect wraparound losses by tracking
+   <function>max(seq)</function> between successive scrapes: given two
+   consecutive polls returning <replaceable>N2</replaceable> rows with
+   maximum <structfield>seq</structfield> values
+   <replaceable>S1</replaceable> (previous poll) and
+   <replaceable>S2</replaceable> (current poll), the number of records
+   overwritten before the second poll could read them is
+   <literal>max(0, (S2 - S1) - N2)</literal>.  No separate
+   <quote>trace overflow</quote> counter is exposed because this
+   information is exact and derivable from <structfield>seq</structfield>
+   alone.
+  </para>
+
+
+  <table id="pg-backend-wait-event-trace-view" xreflabel="pg_backend_wait_event_trace">
+   <title><structname>pg_backend_wait_event_trace</structname> View</title>
+   <tgroup cols="1">
+    <thead>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       Column Type
+      </para>
+      <para>
+       Description
+      </para></entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>seq</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Sequence number of this record in the ring buffer
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>timestamp_ns</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Monotonic clock timestamp in nanoseconds
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>wait_event_type</structfield> <type>text</type>
+      </para>
+      <para>
+       Wait event type
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>wait_event</structfield> <type>text</type>
+      </para>
+      <para>
+       Wait event name
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>duration_us</structfield> <type>double precision</type>
+      </para>
+      <para>
+       Wait duration in microseconds
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>query_id</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Reserved; always 0 for wait event records
+      </para></entry>
+     </row>
+
     </tbody>
    </tgroup>
   </table>
@@ -6508,6 +6712,101 @@ ORDER  BY b.bucket_idx;
         target backends; callers that need strict read-after-reset
         semantics should poll each target's
         <structfield>reset_count</structfield> column.
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>pg_get_wait_event_trace</primary>
+        </indexterm>
+        <function>pg_get_wait_event_trace</function> ( <parameter>procnumber</parameter> <type>integer</type> )
+        <returnvalue>setof record</returnvalue>
+       </para>
+       <para>
+        Returns individual wait event records from the trace ring of
+        the backend that currently or previously occupied the slot
+        identified by <parameter>procnumber</parameter>.  Reads slots
+        in <literal>OWNED</literal> state (live writer) and
+        <literal>ORPHANED</literal> state (writer has exited but the
+        ring is preserved for post-mortem reading) uniformly.  An
+        empty result indicates the slot is in <literal>FREE</literal>
+        state (no ring) or no records have been written.  Concurrent
+        slot transitions cannot interrupt the read because the
+        function holds the cross-backend trace lock in
+        <literal>SHARED</literal> mode throughout the iteration; the
+        per-record seqlock protocol skips any record being written
+        by a concurrent live writer.
+       </para>
+       <para>
+        This is the canonical cross-backend reader.  External
+        monitoring extensions that need cross-backend access without
+        going through SQL should follow the same snapshot pattern
+        documented on <structname>WaitEventTraceControl</structname>
+        in <filename>src/include/utils/wait_event_timing.h</filename>;
+        this function serves as both the reference implementation and
+        a DBA-facing diagnostic tool.  The
+        <parameter>procnumber</parameter> argument can be obtained
+        from the <structfield>procnumber</structfield> column of
+        <function>pg_stat_get_wait_event_timing</function> or
+        <function>pg_stat_get_wait_event_timing_overflow</function>
+        for live backends.  For post-mortem reads of short-lived
+        backends (parallel workers, autovacuum, walsender) the
+        <parameter>procnumber</parameter> must be captured while the
+        backend is still alive, or discovered by iterating slots in a
+        monitoring background worker.  A pid-keyed lookup for live
+        backends only is one query away:
+
+<programlisting>
+SELECT * FROM pg_get_wait_event_trace(
+    (SELECT procnumber FROM pg_stat_get_wait_event_timing(<replaceable>target_pid</replaceable>)
+     WHERE pid = <replaceable>target_pid</replaceable> LIMIT 1));
+</programlisting>
+       </para>
+       <para>
+        Requires membership in <literal>pg_read_all_stats</literal>
+        (matching the privilege model of the session-local view
+        <structname>pg_backend_wait_event_trace</structname>).
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>pg_stat_clear_orphaned_wait_event_rings</primary>
+        </indexterm>
+        <function>pg_stat_clear_orphaned_wait_event_rings</function> ()
+        <returnvalue>bigint</returnvalue>
+       </para>
+       <para>
+        Frees every wait-event-trace ring whose owner backend has
+        exited.  Returns the number of rings released.  Requires
+        superuser.
+       </para>
+       <para>
+        When a backend that had <varname>wait_event_capture</varname> =
+        <literal>trace</literal> exits, its ~4 MB trace ring is
+        intentionally <emphasis>not</emphasis> freed at exit so that
+        cross-backend consumers
+        (<function>pg_get_wait_event_trace</function> and extensions
+        following the snapshot pattern) can still read the dying
+        backend's final waits.  The
+        memory is reclaimed lazily: in the common case, the ring is
+        freed automatically when a new backend takes over the same
+        <literal>procNumber</literal> slot.  This function is the
+        explicit DBA-driven sweep for the pathological case where
+        capture was briefly enabled, then disabled, on a cluster with
+        long-lived pooled connections that never recycle the
+        <literal>procNumber</literal>.  The maximum amount of memory
+        this can release is bounded by the slot count times the
+        per-ring size (~400 MB at <varname>max_connections</varname>
+        = 100, ~4 GB at 1000); on most deployments the function will
+        report 0 because connection churn already drained orphans
+        naturally.
+       </para>
+       <para>
+        Safe to call when capture is currently <literal>off</literal>
+        and even when no orphans exist (returns 0 in both cases).
        </para></entry>
       </row>
 
