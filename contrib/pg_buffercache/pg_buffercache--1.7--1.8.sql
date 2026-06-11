@@ -25,9 +25,16 @@ CREATE VIEW pg_buffercache_partitions AS
 	 num_req_allocs bigint,		-- handled allocs (current cycle)
 	 weights int[]);			-- balancing weights
 
+-- Register the function to set clock-sweep balance weights.
+CREATE FUNCTION pg_buffercache_set_partition(IN partition int, IN weights int[])
+RETURNS void
+AS 'MODULE_PATHNAME', 'pg_buffercache_set_partition'
+LANGUAGE C VOLATILE PARALLEL UNSAFE;
+
 -- Don't want these to be available to public.
 REVOKE ALL ON FUNCTION pg_buffercache_partitions() FROM PUBLIC;
 REVOKE ALL ON pg_buffercache_partitions FROM PUBLIC;
+REVOKE ALL ON FUNCTION pg_buffercache_set_partition(int, int[]) FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION pg_buffercache_partitions() TO pg_monitor;
 GRANT SELECT ON pg_buffercache_partitions TO pg_monitor;

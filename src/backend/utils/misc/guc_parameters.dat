@@ -632,6 +632,27 @@
   boot_val => 'DEFAULT_ASSERT_ENABLED',
 },
 
+{ name => 'debug_clocksweep_balance', type => 'bool', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Enables balancing of buffer allocations between clock-sweep partitions.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'clocksweep_balance',
+  boot_val => 'true'
+},
+
+{ name => 'debug_clocksweep_balance_recalc', type => 'bool', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Enables periodic recalculation of clock-sweep partition balance weights.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'clocksweep_balance_recalc',
+  boot_val => 'true'
+},
+
+{ name => 'debug_clocksweep_scan_all_partitions', type => 'bool', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Enables scanning all clock-sweep partitions when looking for a free buffer.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'clocksweep_scan_all_partitions',
+  boot_val => 'true'
+},
+
 { name => 'debug_copy_parse_plan_trees', type => 'bool', context => 'PGC_SUSET', group => 'DEVELOPER_OPTIONS',
   short_desc => 'Set this to force all parse and plan trees to be passed through copyObject(), to facilitate catching errors and omissions in copyObject().',
   flags => 'GUC_NOT_IN_SAMPLE',
@@ -682,6 +703,16 @@
   variable => 'debug_logical_replication_streaming',
   boot_val => 'DEBUG_LOGICAL_REP_STREAMING_BUFFERED',
   options => 'debug_logical_replication_streaming_options',
+},
+
+{ name => 'debug_numa_node', type => 'int', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Pins the backend to the given NUMA node at query start.',
+  long_desc => '-1 (the default) disables pinning.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'debug_numa_node',
+  boot_val => '-1',
+  min => '-1',
+  max => 'INT_MAX',
 },
 
 { name => 'debug_parallel_query', type => 'enum', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
