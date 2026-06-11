@@ -4411,6 +4411,101 @@ transformJsonSerializeExpr(ParseState *pstate, JsonSerializeExpr *expr)
 }
 
 /*
+ * Resolve the raw ON-clause list collected by the grammar into the
+ * on_existing / on_missing / on_null fields of an analyzed
+ * JSON_TRANSFORM action, applying the standard's implicit defaults for
+ * clauses the user omitted and validating the ones they specified.
+ */
+static void
+resolveJsonTransformBehaviors(ParseState *pstate,
+							  JsonTransformAction *raw,
+							  JsonTransformAction *action)
+{
+	ListCell   *lc;
+
+	/* Standard implicit defaults. */
+	switch (action->op)
+	{
+		case TRANSFORM_INSERT:
+			action->on_existing = JSON_TRANSFORM_BEHAVIOR_ERROR;
+			action->on_null = JSON_TRANSFORM_BEHAVIOR_NULL;
+			break;
+		case TRANSFORM_REPLACE:
+			action->on_missing = JSON_TRANSFORM_BEHAVIOR_IGNORE;
+			action->on_null = JSON_TRANSFORM_BEHAVIOR_NULL;
+			break;
+		case TRANSFORM_REMOVE:
+		case TRANSFORM_RENAME:
+			action->on_missing = JSON_TRANSFORM_BEHAVIOR_IGNORE;
+			break;
+	}
+
+	foreach(lc, raw->behaviors)
+	{
+		JsonTransformBehaviorClause *clause = lfirst_node(JsonTransformBehaviorClause, lc);
+		JsonTransformBehavior behavior = clause->behavior;
+
+		switch (clause->target)
+		{
+			case JSON_TRANSFORM_TARGET_EXISTING:
+				if (action->op != TRANSFORM_INSERT)
+					ereport(ERROR,
+							errcode(ERRCODE_SYNTAX_ERROR),
+							errmsg("ON EXISTING is only valid for JSON_TRANSFORM INSERT"),
+							parser_errposition(pstate, clause->location));
+				if (behavior != JSON_TRANSFORM_BEHAVIOR_ERROR &&
+					behavior != JSON_TRANSFORM_BEHAVIOR_IGNORE)
+					ereport(ERROR,
+							errcode(ERRCODE_SYNTAX_ERROR),
+							errmsg("ON EXISTING behavior must be ERROR or IGNORE"),
+							parser_errposition(pstate, clause->location));
+				action->on_existing = behavior;
+				break;
+
+			case JSON_TRANSFORM_TARGET_MISSING:
+				if (action->op == TRANSFORM_INSERT)
+					ereport(ERROR,
+							errcode(ERRCODE_SYNTAX_ERROR),
+							errmsg("ON MISSING is not valid for JSON_TRANSFORM INSERT"),
+							parser_errposition(pstate, clause->location));
+				if (behavior != JSON_TRANSFORM_BEHAVIOR_ERROR &&
+					behavior != JSON_TRANSFORM_BEHAVIOR_IGNORE)
+					ereport(ERROR,
+							errcode(ERRCODE_SYNTAX_ERROR),
+							errmsg("ON MISSING behavior must be ERROR or IGNORE"),
+							parser_errposition(pstate, clause->location));
+				action->on_missing = behavior;
+				break;
+
+			case JSON_TRANSFORM_TARGET_NULL:
+				if (action->op != TRANSFORM_INSERT &&
+					action->op != TRANSFORM_REPLACE)
+					ereport(ERROR,
+							errcode(ERRCODE_SYNTAX_ERROR),
+							errmsg("ON NULL is only valid for JSON_TRANSFORM INSERT and REPLACE"),
+							parser_errposition(pstate, clause->location));
+				/* REMOVE-on-null is disallowed for INSERT */
+				if (behavior == JSON_TRANSFORM_BEHAVIOR_REMOVE &&
+					action->op == TRANSFORM_INSERT)
+					ereport(ERROR,
+							errcode(ERRCODE_SYNTAX_ERROR),
+							errmsg("REMOVE ON NULL is not allowed for JSON_TRANSFORM INSERT"),
+							parser_errposition(pstate, clause->location));
+				action->on_null = behavior;
+				break;
+
+			case JSON_TRANSFORM_TARGET_EMPTY:
+			case JSON_TRANSFORM_TARGET_ERROR:
+				ereport(ERROR,
+						errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("ON EMPTY and ON ERROR clauses are not yet supported in JSON_TRANSFORM"),
+						parser_errposition(pstate, clause->location));
+				break;
+		}
+	}
+}
+
+/*
  * Transform JSON_VALUE, JSON_QUERY, JSON_EXISTS, JSON_TABLE functions into
  * a JsonExpr node.
  */
@@ -4697,6 +4792,10 @@ transformJsonFuncExpr(ParseState *pstate, JsonFuncExpr *func)
 							"jsonpath", format_type_be(pathspec_type)),
 					 parser_errposition(pstate, pathspec_loc)));
 		analyzed_jst_action->pathspec = coerced_path_spec;
+
+		/* Resolve ON EXISTING / ON MISSING / ON NULL clauses + defaults. */
+		resolveJsonTransformBehaviors(pstate, jst_action, analyzed_jst_action);
+
 		jsexpr->action = analyzed_jst_action;
 	}
 	else
