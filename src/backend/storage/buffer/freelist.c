@@ -56,6 +56,26 @@
 #define CLOCKSWEEP_HISTORY_COEFF	0.5
 
 /*
+ * GUCs controlling the NUMA-aware clock-sweep behavior.
+ *
+ * clocksweep_balance - when enabled, allocations may get redirected between
+ * clock-sweep partitions to keep them balanced (see StrategySyncBalance).
+ *
+ * clocksweep_balance_recalc - when enabled, the balance weights are
+ * periodically recalculated (see StrategySyncBalance). Disabling this keeps
+ * the current weights, e.g. ones configured manually using
+ * pg_buffercache_set_partition(), while still using them to balance
+ * allocations (if clocksweep_balance is enabled).
+ *
+ * clocksweep_scan_all_partitions - when enabled, looking for a free buffer
+ * scans all clock-sweep partitions (in a round-robin way), not just the
+ * backend's "home" partition.
+ */
+bool		clocksweep_balance = true;
+bool		clocksweep_balance_recalc = true;
+bool		clocksweep_scan_all_partitions = true;
+
+/*
  * Information about one partition of the ClockSweep (on a subset of buffers).
  *
  * XXX Should be careful to align this to cachelines, etc.
@@ -444,8 +464,11 @@ ChooseClockSweep(bool balance)
 	 * When balancing allocations, redirect the allocations to other partitions
 	 * according to the budgets. We move through partitions in a round-robin way,
 	 * after allocating the "budget" of allocations from the current one.
+	 *
+	 * Balancing can be disabled at runtime using the clocksweep_balance GUC, in
+	 * which case allocations always stay in the backend's "home" partition.
 	 */
-	if (balance)
+	if (balance && clocksweep_balance)
 	{
 		/*
 		 * Ran out of budget from the current partition? Move to the next one
@@ -559,6 +582,10 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_r
 	 * Start with the "preferred" partition, and then proceed in a round-robin
 	 * manner. If we cycle back to the starting partition, it means none of the
 	 * partitions has unpinned buffers.
+	 *
+	 * Scanning of the other partitions can be disabled at runtime using the
+	 * clocksweep_scan_all_partitions GUC. In that case we only scan the
+	 * backend's "home" partition, and fail if it has no unpinned buffers.
 	 */
 	sweep = ChooseClockSweep(true);
 	sweep_start = sweep;
@@ -569,6 +596,10 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_r
 		/* found a buffer in the "sweep" partition, we're done */
 		if (buf != NULL)
 			return buf;
+
+		/* don't look at other partitions unless allowed to */
+		if (!clocksweep_scan_all_partitions)
+			break;
 
 		/*
 		 * Try advancing to the next partition, round-robin (if last partition,
@@ -796,6 +827,9 @@ StrategySyncBalance(void)
 	uint32	total_allocs = 0,	/* total number of allocations */
 			avg_allocs,			/* average allocations (per partition) */
 			delta_allocs = 0;	/* sum of allocs above average */
+
+	if (!clocksweep_balance || !clocksweep_balance_recalc)
+		return;
 
 	/*
 	 * Collect the number of allocations requested in the past interval.
@@ -1561,4 +1595,54 @@ ClockSweepPartitionGetInfo(int idx,
 	{
 		(*weights)[i] = (int) sweep->balance[i];
 	}
+}
+
+/*
+ * ClockSweepSetWeights override the clock-sweep balance weights of a single
+ * partition.
+ */
+void
+ClockSweepSetWeights(int partition, int *weights, int nweights)
+{
+	ClockSweep *sweep;
+
+	/*
+	 * Disallow manual weights while the automatic recalculation is enabled, as
+	 * StrategySyncBalance would just recompute (and overwrite) them.
+	 */
+	if (clocksweep_balance_recalc)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("cannot set clock-sweep weights while debug_clocksweep_balance_recalc is enabled"),
+				 errhint("Set debug_clocksweep_balance_recalc to off before setting the weights manually.")));
+
+	if ((partition < 0) || (partition >= StrategyControl->num_partitions))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("clock-sweep partition %d out of range", partition),
+				 errhint("There are %d clock-sweep partitions, numbered from 0.",
+						 StrategyControl->num_partitions)));
+
+	if (nweights != StrategyControl->num_partitions)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("number of weights (%d) does not match number of clock-sweep partitions (%d)",
+						nweights, StrategyControl->num_partitions)));
+
+	for (int i = 0; i < nweights; i++)
+	{
+		if ((weights[i] < 0) || (weights[i] > 100))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("clock-sweep weight %d out of range",
+							weights[i]),
+					 errhint("Each weight must be between 0 and 100.")));
+	}
+
+	sweep = &StrategyControl->sweeps[partition];
+
+	SpinLockAcquire(&sweep->clock_sweep_lock);
+	for (int j = 0; j < nweights; j++)
+		sweep->balance[j] = (uint8) weights[j];
+	SpinLockRelease(&sweep->clock_sweep_lock);
 }
