@@ -24,6 +24,7 @@
 #include "common/pg_prng.h"
 #include "lib/qunique.h"
 #include "miscadmin.h"
+#include "pg_trace.h"
 #include "storage/lmgr.h"
 #include "storage/predicate.h"
 #include "utils/injection_point.h"
@@ -2107,6 +2108,8 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 		pfree(lefthighkey);
 
 	/* split's done */
+	TRACE_POSTGRESQL_NBTREE_PAGE_SPLIT(origpagenumber);
+
 	return rbuf;
 }
 

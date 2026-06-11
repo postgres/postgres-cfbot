@@ -24,6 +24,7 @@
 #include "common/int.h"
 #include "lib/qunique.h"
 #include "miscadmin.h"
+#include "pg_trace.h"
 #include "storage/lwlock.h"
 #include "storage/subsystems.h"
 #include "utils/datum.h"
@@ -737,6 +738,7 @@ _bt_truncate(Relation rel, IndexTuple lastleft, IndexTuple firstright,
 	if (keepnatts <= nkeyatts)
 	{
 		BTreeTupleSetNAtts(pivot, keepnatts, false);
+		TRACE_POSTGRESQL_NBTREE_PAGE_TRUNCATE(nkeyatts - keepnatts);
 		return pivot;
 	}
 

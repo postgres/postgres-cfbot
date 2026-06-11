@@ -97,4 +97,7 @@ provider postgresql {
 	probe wal__switch();
 	probe wal__buffer__write__dirty__start();
 	probe wal__buffer__write__dirty__done();
+
+	probe nbtree__page__split(BlockNumber);
+	probe nbtree__page__truncate(int);
 };
