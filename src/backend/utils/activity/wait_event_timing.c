@@ -9,10 +9,11 @@
  * nanoseconds, and a log2 duration histogram -- in shared memory.  Each
  * backend writes only to its own slot, so the hot path needs no locking.
  *
- * The per-backend slot array lives in the main shared memory segment,
- * sized at postmaster start from wait_event_timing_max_tranches, so it is
- * valid for the entire life of every backend -- no lazy attach and no
- * teardown gating are required.
+ * The per-backend slot array is allocated lazily in a DSA the first time
+ * any backend in the cluster enables capture, so a build that compiles the
+ * feature in but never enables it pays no per-backend memory.  Backends
+ * attach on their first wait event under capture; a before_shmem_exit gate
+ * keeps the hot path away from DSA mappings that proc_exit has torn down.
  *
  * Controlled by the wait_event_capture GUC (off | stats, default off) and
  * the compile-time option --enable-wait-event-timing.  In builds without
@@ -155,7 +156,9 @@ pgstat_reset_wait_event_timing_storage(void)
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "port/pg_bitutils.h"
+#include "storage/ipc.h"
 #include "storage/latch.h"
+#include "storage/lwlock.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "storage/procnumber.h"
@@ -163,6 +166,7 @@ pgstat_reset_wait_event_timing_storage(void)
 #include "utils/array.h"
 #include "utils/backend_status.h"
 #include "utils/builtins.h"
+#include "utils/dsa.h"
 #include "utils/tuplestore.h"
 #include "utils/wait_event.h"
 
@@ -184,10 +188,38 @@ WaitEventTimingState *my_wait_event_timing = NULL;
 static uint32 my_last_reset_generation = 0;
 
 /*
- * Backend-local cached pointer to the start of the shared slot array, set
- * at shmem init (postmaster) and, in EXEC_BACKEND mode, at attach.  Slots
- * are NOT a simple C array: each has a runtime-determined stride (header +
- * variable-size hash arrays); use wet_slot() to index.
+ * DSA-based control struct in fixed shared memory.  The large per-backend
+ * WaitEventTimingState array is allocated lazily in DSA the first time any
+ * backend in the cluster sets wait_event_capture != off, so a build that
+ * compiles the feature in but never enables it pays no per-backend memory.
+ */
+typedef struct WaitEventTimingControl
+{
+	LWLock		lock;			/* protects first-time DSA create + array
+								 * alloc */
+	dsa_handle	timing_dsa_handle;	/* DSA_HANDLE_INVALID until first enable */
+	dsa_pointer timing_array;	/* InvalidDsaPointer until first enable */
+} WaitEventTimingControl;
+
+static WaitEventTimingControl *WaitEventTimingCtl = NULL;
+static dsa_area *timing_dsa = NULL;
+
+/*
+ * Per-backend gate raised by the before_shmem_exit callback once proc_exit
+ * begins tearing down DSA mappings (dsm_backend_shutdown runs as a later
+ * on_shmem_exit callback).  Once set, the wait-event hot path skips all
+ * timing work -- including the lazy re-attach branch -- so it cannot
+ * dereference my_wait_event_timing or run DSA primitives on already-detached
+ * memory.  Per-backend (process-local), so the hot-path check is a single
+ * cache-warm load.
+ */
+static bool wait_event_timing_writes_disabled = false;
+
+/*
+ * Backend-local cached pointer to the start of the shared slot array, set on
+ * first lazy-attach.  Slots are NOT a simple C array: each has a
+ * runtime-determined stride (header + variable-size hash arrays); use
+ * wet_slot() to index.
  */
 static char *WaitEventTimingArray = NULL;
 
@@ -240,17 +272,183 @@ wait_event_timing_slot_size(int max_entries)
 							 mul_size(max_entries, sizeof(WaitEventTimingEntry))));
 }
 
-/* Cache the backend-local layout dimensions from the GUC (idempotent). */
+/*
+ * Ensure this backend is attached to the timing DSA.  The DSA is created by
+ * whichever backend first reaches here with an empty control struct;
+ * subsequent callers attach to the existing handle.  The backend-local
+ * dsa_area pointer is cached in timing_dsa for the backend's lifetime.
+ */
 static void
-wait_event_timing_init_local_dims(void)
+wait_event_timing_ensure_dsa(void)
 {
-	if (wait_event_timing_per_backend_stride != 0)
+	MemoryContext oldcontext;
+
+	if (timing_dsa != NULL)
 		return;
-	wait_event_timing_max_entries = wait_event_timing_max_tranches;
-	wait_event_timing_hash_size =
-		wait_event_timing_hash_size_for(wait_event_timing_max_entries);
-	wait_event_timing_per_backend_stride =
-		wait_event_timing_slot_size(wait_event_timing_max_entries);
+
+	if (WaitEventTimingCtl == NULL)
+		return;					/* pre-ShmemInit; nothing to attach to */
+
+	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+
+	LWLockAcquire(&WaitEventTimingCtl->lock, LW_EXCLUSIVE);
+
+	if (WaitEventTimingCtl->timing_dsa_handle == DSA_HANDLE_INVALID)
+	{
+		timing_dsa = dsa_create(LWTRANCHE_WAIT_EVENT_TIMING_DSA);
+		dsa_pin(timing_dsa);
+		dsa_pin_mapping(timing_dsa);
+		WaitEventTimingCtl->timing_dsa_handle = dsa_get_handle(timing_dsa);
+	}
+	else
+	{
+		timing_dsa = dsa_attach(WaitEventTimingCtl->timing_dsa_handle);
+		dsa_pin_mapping(timing_dsa);
+	}
+
+	LWLockRelease(&WaitEventTimingCtl->lock);
+
+	MemoryContextSwitchTo(oldcontext);
+}
+
+/*
+ * Attach this backend to the shared per-backend slot array, allocating it in
+ * DSA on first use when allocate_if_missing is true.  Returns true if the
+ * array is now available (WaitEventTimingArray non-NULL).  Readers pass
+ * false so a SELECT against an empty view does not force a big allocation;
+ * the hot path passes true so the first wait event under capture != off
+ * creates the storage.
+ *
+ * Re-entrancy guard: dsa_create / dsa_allocate / the LWLockAcquire inside
+ * ensure_dsa can themselves emit LWLock wait events, which feed back into
+ * the wait-end timing hot path, which lazy-attaches by calling this
+ * function.  The in_attach guard prevents deadlock on the control lock and
+ * recursion with a half-initialised pointer.
+ */
+static bool
+wait_event_timing_attach_array(bool allocate_if_missing)
+{
+	static bool in_attach = false;
+	bool		attached = false;
+
+	if (WaitEventTimingArray != NULL)
+		return true;
+
+	if (WaitEventTimingCtl == NULL)
+		return false;
+
+	/*
+	 * Reader fast path: if no backend has ever enabled capture, the DSA was
+	 * never created.  Return without calling ensure_dsa() so a plain SELECT
+	 * against an empty view does not create (and pin for the postmaster's
+	 * lifetime) an otherwise-unused DSA segment.  Only the first enabler
+	 * (allocate_if_missing) brings the DSA into existence.
+	 */
+	if (!allocate_if_missing &&
+		WaitEventTimingCtl->timing_dsa_handle == DSA_HANDLE_INVALID)
+		return false;
+
+	if (in_attach)
+		return false;
+
+	in_attach = true;
+	PG_TRY();
+	{
+		wait_event_timing_ensure_dsa();
+
+		if (WaitEventTimingCtl->timing_array == InvalidDsaPointer)
+		{
+			if (!allocate_if_missing)
+			{
+				attached = false;
+			}
+			else
+			{
+				int			max_entries;
+				int			hash_size;
+				Size		stride;
+				Size		total;
+
+				/*
+				 * Snapshot the GUC once for the cluster-wide first-enable
+				 * allocation; every slot shares these dimensions for the
+				 * cluster's lifetime (the GUC is PGC_POSTMASTER).
+				 */
+				max_entries = wait_event_timing_max_tranches;
+				hash_size = wait_event_timing_hash_size_for(max_entries);
+				stride = wait_event_timing_slot_size(max_entries);
+				total = mul_size(NUM_WAIT_EVENT_TIMING_SLOTS, stride);
+
+				LWLockAcquire(&WaitEventTimingCtl->lock, LW_EXCLUSIVE);
+
+				if (WaitEventTimingCtl->timing_array == InvalidDsaPointer)
+				{
+					dsa_pointer p;
+					char	   *region;
+					int			i;
+
+					p = dsa_allocate_extended(timing_dsa, total, DSA_ALLOC_ZERO);
+					region = (char *) dsa_get_address(timing_dsa, p);
+
+					for (i = 0; i < NUM_WAIT_EVENT_TIMING_SLOTS; i++)
+					{
+						WaitEventTimingState *slot;
+						LWLockTimingHashEntry *slot_entries;
+						int			j;
+
+						slot = (WaitEventTimingState *) (region + (Size) i * stride);
+
+						pg_atomic_init_u32(&slot->reset_generation, 0);
+						slot->lwlock_hash.num_used = 0;
+						slot->lwlock_hash.hash_size = hash_size;
+						slot->lwlock_hash.max_entries = max_entries;
+
+						/*
+						 * DSA_ALLOC_ZERO zeroed the region, but the empty
+						 * sentinel is 0xFFFF, not 0.
+						 */
+						slot_entries = (LWLockTimingHashEntry *)
+							((char *) slot + sizeof(WaitEventTimingState));
+						for (j = 0; j < hash_size; j++)
+							slot_entries[j].tranche_id = LWLOCK_TIMING_EMPTY_SLOT;
+					}
+
+					WaitEventTimingCtl->timing_array = p;
+				}
+
+				LWLockRelease(&WaitEventTimingCtl->lock);
+				attached = true;
+			}
+		}
+		else
+			attached = true;
+
+		if (attached)
+		{
+			WaitEventTimingState *first;
+
+			WaitEventTimingArray = (char *)
+				dsa_get_address(timing_dsa, WaitEventTimingCtl->timing_array);
+
+			/*
+			 * Recover the dimensions from the first slot's header (all slots
+			 * share them) and cache the stride so wet_slot() is a single
+			 * multiply-and-add.
+			 */
+			first = (WaitEventTimingState *) WaitEventTimingArray;
+			wait_event_timing_max_entries = first->lwlock_hash.max_entries;
+			wait_event_timing_hash_size = first->lwlock_hash.hash_size;
+			wait_event_timing_per_backend_stride =
+				wait_event_timing_slot_size(wait_event_timing_max_entries);
+		}
+	}
+	PG_FINALLY();
+	{
+		in_attach = false;
+	}
+	PG_END_TRY();
+
+	return WaitEventTimingArray != NULL;
 }
 
 /* Resolve the address of slot `idx` within WaitEventTimingArray. */
@@ -411,51 +609,25 @@ wait_event_timing_bucket(int64 duration_ns)
 }
 
 /*
- * ShmemRequest: reserve the per-backend slot array.  Sized from
- * wait_event_timing_max_tranches; the framework stores the allocated
- * address in WaitEventTimingArray before WaitEventTimingShmemInit runs.
+ * ShmemRequest/Init: reserve only the small control struct in fixed shmem.
+ * The large per-backend array is allocated lazily in DSA on first enable.
  */
 static void
 WaitEventTimingShmemRequest(void *arg)
 {
-	Size		stride;
-
-	wait_event_timing_init_local_dims();
-	stride = wait_event_timing_per_backend_stride;
-
-	ShmemRequestStruct(.name = "WaitEventTimingArray",
-					   .size = mul_size(NUM_WAIT_EVENT_TIMING_SLOTS, stride),
-					   .ptr = (void **) &WaitEventTimingArray);
+	ShmemRequestStruct(.name = "WaitEventTimingControl",
+					   .size = sizeof(WaitEventTimingControl),
+					   .ptr = (void **) &WaitEventTimingCtl);
 }
 
-/* ShmemInit: zero the array and initialise each slot's hash header. */
 static void
 WaitEventTimingShmemInit(void *arg)
 {
-	int			i;
-
-	wait_event_timing_init_local_dims();
-
-	memset(WaitEventTimingArray, 0,
-		   mul_size(NUM_WAIT_EVENT_TIMING_SLOTS,
-					wait_event_timing_per_backend_stride));
-
-	for (i = 0; i < NUM_WAIT_EVENT_TIMING_SLOTS; i++)
-	{
-		WaitEventTimingState *slot = wet_slot(i);
-		LWLockTimingHashEntry *entries;
-		int			j;
-
-		pg_atomic_init_u32(&slot->reset_generation, 0);
-		slot->lwlock_hash.num_used = 0;
-		slot->lwlock_hash.hash_size = wait_event_timing_hash_size;
-		slot->lwlock_hash.max_entries = wait_event_timing_max_entries;
-
-		/* The array was zeroed above, but the empty sentinel is 0xFFFF. */
-		entries = wet_lwlock_hash_entries(slot);
-		for (j = 0; j < wait_event_timing_hash_size; j++)
-			entries[j].tranche_id = LWLOCK_TIMING_EMPTY_SLOT;
-	}
+	LWLockInitialize(&WaitEventTimingCtl->lock,
+					 LWTRANCHE_WAIT_EVENT_TIMING_DSA);
+	WaitEventTimingCtl->timing_dsa_handle = DSA_HANDLE_INVALID;
+	WaitEventTimingCtl->timing_array = InvalidDsaPointer;
+	WaitEventTimingArray = NULL;
 }
 
 const ShmemCallbacks WaitEventTimingShmemCallbacks = {
@@ -464,50 +636,137 @@ const ShmemCallbacks WaitEventTimingShmemCallbacks = {
 };
 
 /*
- * Point my_wait_event_timing at this backend's slot.  Called from
- * InitProcess()/InitAuxiliaryProcess() once the backend has a procNumber.
- * The slot is cleared here so stats do not leak across slot reuse when a
- * new backend inherits a procNumber previously held by an exited one.
+ * before_shmem_exit callback: disable the inline hot path for the rest of
+ * proc_exit, so it does not dereference my_wait_event_timing or attempt a
+ * fresh lazy-attach after dsm_backend_shutdown has unmapped the DSA segment
+ * behind the slot.  We do NOT null my_wait_event_timing here: a NULL pointer
+ * would route the hot path through the lazy-attach branch, which then
+ * re-attaches using DSA primitives that operate on already-detached memory.
  */
-void
-pgstat_set_wait_event_timing_storage(int procNumber)
+static void
+pgstat_wait_event_timing_before_shmem_exit(int code, Datum arg)
 {
+	wait_event_timing_writes_disabled = true;
+}
+
+/*
+ * Point my_wait_event_timing at this backend's slot, allocating the DSA
+ * array on first call.  Reached from the hot path the first time this
+ * backend observes wait_event_capture != off; after the first successful
+ * attach the cached pointer stays valid for the backend's lifetime, so this
+ * is a cold branch.
+ */
+static void
+pgstat_wait_event_timing_lazy_attach(void)
+{
+	int			procNumber;
 	WaitEventTimingState *slot;
 
-	if (procNumber < 0 || procNumber >= NUM_WAIT_EVENT_TIMING_SLOTS ||
-		WaitEventTimingArray == NULL)
-	{
-		my_wait_event_timing = NULL;
+	if (my_wait_event_timing != NULL)
 		return;
-	}
 
-	wait_event_timing_init_local_dims();
+	if (MyProc == NULL)
+		return;
+
+	/*
+	 * Skip during backend startup.  InitPostgres runs in InitProcessing mode
+	 * (PostgresMain switches to NormalProcessing only after it returns), and a
+	 * wait event can fire from InitPostgres's own transaction cleanup --
+	 * CommitTransactionCommand -> LockReleaseAll -> LWLockAcquire -- while the
+	 * current resource owner is already mid-release.  The attach path's
+	 * dsm_create_descriptor() would then call ResourceOwnerEnlarge() after
+	 * release has started and FATAL.  Skipping here keeps the backend alive;
+	 * the first wait once it reaches normal processing attaches successfully.
+	 */
+	if (!IsNormalProcessingMode())
+		return;
+
+	/*
+	 * Lazy attach allocates memory (dsa_attach -> dsm_attach ->
+	 * MemoryContextAlloc), which Assert-fails inside a critical section.  A
+	 * backend's very first wait event after capture is enabled can land in
+	 * one (e.g. a parallel worker in XLogInsert).  Skipping silently drops
+	 * that in-flight event but keeps the backend alive; the next wait event
+	 * outside any critical section attaches successfully.
+	 */
+	if (CritSectionCount > 0)
+		return;
+
+	/*
+	 * Skip if MyProc is already on an LWLock wait queue: we run inside
+	 * LWLockAcquire after LWLockQueueSelf set MyProc->lwWaiting, and our
+	 * attach path's own LWLockAcquire would hit the "queueing while waiting
+	 * on another lock" PANIC.  The next wait outside an LWLock-wait context
+	 * retries successfully.
+	 */
+	if (MyProc->lwWaiting != LW_WS_NOT_WAITING)
+		return;
+
+	procNumber = GetNumberFromPGProc(MyProc);
+	if (procNumber < 0 || procNumber >= NUM_WAIT_EVENT_TIMING_SLOTS)
+		return;
+
+	if (!wait_event_timing_attach_array(true))
+		return;
 
 	slot = wet_slot(procNumber);
 
+	/*
+	 * Clear the slot before publishing it: the DSA region is zeroed at
+	 * creation, but a later backend may inherit a slot from an exited one.
+	 * Zero through the local `slot` first, THEN publish to
+	 * my_wait_event_timing, so a non-NULL pointer always means the slot is
+	 * ready for the very next store.
+	 */
 	memset(slot->events, 0, sizeof(slot->events));
 	lwlock_timing_hash_clear(slot);
+	slot->reset_count = 0;
 	slot->lwlock_overflow_count = 0;
 	slot->flat_overflow_count = 0;
-	slot->reset_count = 0;
 	slot->current_event = 0;
 	INSTR_TIME_SET_ZERO(slot->wait_start);
 
-	/*
-	 * Adopt the current shared reset generation as our baseline; the
-	 * reset_generation counter persists across slot reuse, so a new backend
-	 * must not treat the prior occupant's resets as its own.
-	 */
 	my_last_reset_generation = pg_atomic_read_u32(&slot->reset_generation);
 
 	/* Publish only after the slot is fully initialised. */
 	my_wait_event_timing = slot;
+
+	/*
+	 * Register a before_shmem_exit callback (once) to raise the
+	 * writes-disabled gate before the DSA mappings go away.  shmem_exit()
+	 * runs all before_shmem_exit callbacks (which sets the gate) and only
+	 * then calls dsm_backend_shutdown(), so the gate is guaranteed up before
+	 * any DSA segment is unmapped -- independent of callback ordering.
+	 */
+	{
+		static bool registered = false;
+
+		if (!registered)
+		{
+			before_shmem_exit(pgstat_wait_event_timing_before_shmem_exit,
+							  (Datum) 0);
+			registered = true;
+		}
+	}
 }
 
 /*
- * Detach from the timing slot on backend exit.  The slot itself stays in
- * shared memory; clearing the pointer keeps the late-shutdown wait-event
- * hot path from touching it.
+ * Called from InitProcess()/InitAuxiliaryProcess().  In the lazy-DSA design
+ * there is no slot to point at yet -- the slot attaches on the first wait
+ * event under capture != off (pgstat_wait_event_timing_lazy_attach) -- so a
+ * backend that never enables capture pays zero per-backend memory.  Just
+ * make sure the pointer starts NULL.
+ */
+void
+pgstat_set_wait_event_timing_storage(int procNumber)
+{
+	my_wait_event_timing = NULL;
+}
+
+/*
+ * Detach from the timing slot on backend exit.  The slot stays in DSA;
+ * clearing the local pointer keeps the late-shutdown hot path from touching
+ * already-detached memory.
  */
 void
 pgstat_reset_wait_event_timing_storage(void)
@@ -552,11 +811,31 @@ assign_wait_event_capture(int newval, void *extra)
 void
 pgstat_report_wait_start_timing(uint32 wait_event_info)
 {
-	if (my_wait_event_timing == NULL)
+	/*
+	 * Stay out of the timing path once proc_exit has begun tearing down DSA
+	 * mappings (see the before_shmem_exit callback).
+	 */
+	if (wait_event_timing_writes_disabled)
 		return;
 
-	INSTR_TIME_SET_CURRENT(my_wait_event_timing->wait_start);
-	my_wait_event_timing->current_event = wait_event_info;
+	if (my_wait_event_timing == NULL)
+	{
+		pgstat_wait_event_timing_lazy_attach();
+
+		/*
+		 * lazy_attach can dispatch nested wait events while it sets up DSA
+		 * (dsa_attach takes an internal LWLock); those nested wait_end calls
+		 * clear my_wait_event_info to 0.  Re-publish so the outer wait stays
+		 * visible in pg_stat_activity.  Only needed on the first-attach path.
+		 */
+		*(volatile uint32 *) my_wait_event_info = wait_event_info;
+	}
+
+	if (my_wait_event_timing != NULL)
+	{
+		INSTR_TIME_SET_CURRENT(my_wait_event_timing->wait_start);
+		my_wait_event_timing->current_event = wait_event_info;
+	}
 }
 
 /*
@@ -576,8 +855,15 @@ pgstat_report_wait_end_timing(int capture_level)
 
 	(void) capture_level;
 
-	if (my_wait_event_timing == NULL)
+	if (wait_event_timing_writes_disabled)
 		return;
+
+	if (my_wait_event_timing == NULL)
+	{
+		pgstat_wait_event_timing_lazy_attach();
+		if (my_wait_event_timing == NULL)
+			return;
+	}
 
 	event = my_wait_event_timing->current_event;
 
@@ -745,7 +1031,7 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 
 	InitMaterializedSRF(fcinfo, 0);
 
-	if (WaitEventTimingArray == NULL)
+	if (!wait_event_timing_attach_array(false))
 		PG_RETURN_VOID();
 
 	if (!wait_event_timing_pid_range(fcinfo, &start_idx, &end_idx))
@@ -848,7 +1134,7 @@ pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS)
 
 	InitMaterializedSRF(fcinfo, 0);
 
-	if (WaitEventTimingArray == NULL)
+	if (!wait_event_timing_attach_array(false))
 		PG_RETURN_VOID();
 
 	if (!wait_event_timing_pid_range(fcinfo, &start_idx, &end_idx))
@@ -893,7 +1179,7 @@ wait_event_timing_request_reset(int slot_idx)
 {
 	Assert(slot_idx >= 0 && slot_idx < NUM_WAIT_EVENT_TIMING_SLOTS);
 
-	if (WaitEventTimingArray == NULL)
+	if (!wait_event_timing_attach_array(false))
 		return;
 
 	pg_atomic_fetch_add_u32(&wet_slot(slot_idx)->reset_generation, 1);
@@ -991,7 +1277,7 @@ pg_stat_reset_wait_event_timing_all(PG_FUNCTION_ARGS)
 	 * Execution is revoked from PUBLIC in system_views.sql; administrators
 	 * can delegate with GRANT EXECUTE.
 	 */
-	if (WaitEventTimingArray == NULL)
+	if (!wait_event_timing_attach_array(false))
 		PG_RETURN_VOID();
 
 	for (i = 0; i < NUM_WAIT_EVENT_TIMING_SLOTS; i++)

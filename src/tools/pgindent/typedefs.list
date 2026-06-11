@@ -3434,6 +3434,7 @@ WaitEventIO
 WaitEventIPC
 WaitEventSet
 WaitEventTimeout
+WaitEventTimingControl
 WaitEventTimingEntry
 WaitEventTimingState
 WaitLSNProcInfo

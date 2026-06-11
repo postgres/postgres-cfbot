@@ -12,10 +12,13 @@
  * SRF) read lock-free and tolerate torn reads of 64-bit fields on 32-bit
  * platforms, which is acceptable for statistics.
  *
- * The per-backend slot array lives in the main shared memory segment,
- * sized at postmaster start (see WaitEventTimingShmemCallbacks).  It is
- * therefore valid for the entire life of every backend, including the
- * proc_exit cascade -- no lazy attach and no teardown gating are needed.
+ * The per-backend slot array is allocated lazily in a DSA the first time
+ * any backend in the cluster sets wait_event_capture != off, so a build
+ * that compiles the feature in but never enables it pays no per-backend
+ * memory.  Backends attach to the array on their first wait event under
+ * capture (pgstat_wait_event_timing_lazy_attach), and a before_shmem_exit
+ * gate stops the hot path from touching DSA mappings that proc_exit has
+ * already torn down.
  *
  * Copyright (c) 2026, PostgreSQL Global Development Group
  *
@@ -131,9 +134,9 @@ extern PGDLLIMPORT int wait_event_timing_max_tranches;
  *
  * where hash_size and max_entries are runtime-derived from the GUC
  * wait_event_timing_max_tranches and recorded in lwlock_hash.  Slots are
- * laid out contiguously in the main shared memory segment using a runtime
+ * laid out contiguously in the lazily-allocated DSA region using a runtime
  * stride rather than C array indexing, since the per-backend size is
- * determined at server start.
+ * determined at first enable.
  */
 typedef struct WaitEventTimingState
 {
