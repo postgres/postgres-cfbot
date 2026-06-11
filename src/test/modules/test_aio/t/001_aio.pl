@@ -1842,6 +1842,37 @@ read_buffers('$table', 0, 4)|,
 	$psql_c->quit();
 }
 
+# Test per-backend AIO statistics counters
+sub test_aio_stats
+{
+	my $io_method = shift;
+	my $node = shift;
+
+	my $psql = $node->background_psql('postgres', on_error_stop => 0);
+
+	# Reset backend stats, evict relation, then read it back to force
+	# physical IO through the AIO layer.
+	$psql->query_safe(qq(SELECT pg_stat_reset_backend_stats(pg_backend_pid())));
+	$psql->query_safe(qq(SELECT evict_rel('tbl_ok')));
+	$psql->query_safe(qq(SELECT count(*) FROM tbl_ok));
+	$psql->query_safe(qq(SELECT pg_stat_force_next_flush()));
+
+	# started must be > 0 after physical IO
+	my $started = $psql->query_safe(
+		qq(SELECT started FROM pg_stat_get_backend_aio(pg_backend_pid())));
+	cmp_ok($started, '>', 0,
+		"$io_method: AIO stats: started > 0 after physical IO");
+
+	# invariant: started = executed_sync + executed_async
+	my $consistent = $psql->query_safe(
+		qq(SELECT started = executed_sync + executed_async
+		   FROM pg_stat_get_backend_aio(pg_backend_pid())));
+	is($consistent, 't',
+		"$io_method: AIO stats: started = executed_sync + executed_async");
+
+	$psql->quit();
+}
+
 # Run all tests that for the specified node / io_method
 sub test_io_method
 {
@@ -1878,6 +1909,7 @@ CHECKPOINT;
 	test_ignore_checksum($io_method, $node);
 	test_checksum_createdb($io_method, $node);
 	test_read_buffers($io_method, $node);
+	test_aio_stats($io_method, $node);
 
 	# generic injection tests
   SKIP:
