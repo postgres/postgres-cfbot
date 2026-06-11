@@ -4,7 +4,7 @@
 -- Exercises the wait_event_capture instrumentation: the GUC, the stats
 -- surface (pg_stat_get_wait_event_timing(), the pg_stat_wait_event_timing
 -- and histogram-buckets views, overflow counters, resets), and the trace
--- surface (the per-session ring and its readers).
+-- surface (the per-session ring, its readers, and the query markers).
 --
 -- Two expected outputs are maintained:
 --   wait_event_timing.out    -- --enable-wait-event-timing builds
@@ -84,6 +84,7 @@ RESET wait_event_capture;
 -- (In a stub build SET trace errors and the trace readers stay empty;
 -- that is the documented difference between the two expected files.)
 --
+SET compute_query_id = on;
 SET wait_event_capture = trace;
 SELECT pg_sleep(0.1);
 
@@ -98,7 +99,15 @@ SELECT count(*) >= 1 AS view_has_pgsleep
 FROM pg_backend_wait_event_trace
 WHERE wait_event = 'PgSleep';
 
+-- Executor markers bracket the work and carry a non-zero query_id.
+SELECT count(*) >= 1 AS has_exec_markers,
+       coalesce(bool_and(query_id <> 0), true) AS markers_have_query_id
+FROM pg_get_backend_wait_event_trace()
+WHERE wait_event_type = 'Query'
+  AND wait_event IN ('ExecStart', 'ExecEnd');
+
 -- Clearing orphaned rings is a no-op here (no orphans) but must succeed.
 SELECT pg_stat_clear_orphaned_wait_event_rings() >= 0 AS clear_orphans_ok;
 
+RESET compute_query_id;
 RESET wait_event_capture;

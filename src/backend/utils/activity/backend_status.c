@@ -24,6 +24,7 @@
 #include "utils/ascii.h"
 #include "utils/guc.h"			/* for application_name */
 #include "utils/memutils.h"
+#include "utils/wait_event_timing.h"
 
 
 /* ----------
@@ -669,6 +670,18 @@ pgstat_report_query_id(int64 query_id, bool force)
 	 */
 	if (beentry->st_query_id != INT64CONST(0) && !force)
 		return;
+
+	/*
+	 * Emit trace markers for query-to-query transitions.  QUERY_END fires
+	 * here when st_query_id transitions from one non-zero value to another
+	 * (multi-statement simple protocol, pipelined extended protocol).  The
+	 * last-query-to-idle QUERY_END is emitted in PostgresMain() at
+	 * send_ready_for_query.
+	 */
+	if (beentry->st_query_id != 0 && beentry->st_query_id != query_id)
+		wait_event_trace_query_end(beentry->st_query_id);
+	if (query_id != 0 && query_id != beentry->st_query_id)
+		wait_event_trace_query_start(query_id);
 
 	/*
 	 * Update my status entry, following the protocol of bumping
