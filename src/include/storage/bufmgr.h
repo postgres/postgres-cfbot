@@ -190,6 +190,11 @@ extern PGDLLIMPORT int bgwriter_lru_maxpages;
 extern PGDLLIMPORT double bgwriter_lru_multiplier;
 extern PGDLLIMPORT bool track_io_timing;
 
+/* in freelist.c */
+extern PGDLLIMPORT bool clocksweep_balance;
+extern PGDLLIMPORT bool clocksweep_balance_recalc;
+extern PGDLLIMPORT bool clocksweep_scan_all_partitions;
+
 #define DEFAULT_EFFECTIVE_IO_CONCURRENCY 16
 #define DEFAULT_MAINTENANCE_IO_CONCURRENCY 16
 extern PGDLLIMPORT int effective_io_concurrency;
@@ -418,6 +423,7 @@ extern void ClockSweepPartitionGetInfo(int idx,
 									 uint64 *buffer_total_req_allocs,
 									 uint32 *buffer_req_allocs,
 									 int **weights);
+extern void ClockSweepSetWeights(int partition, int *weights, int nweights);
 
 /* inline functions */
 
