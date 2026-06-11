@@ -1,9 +1,10 @@
 --
 -- WAIT_EVENT_TIMING
 --
--- Exercises the wait_event_capture = stats instrumentation: the GUC, the
--- pg_stat_get_wait_event_timing() SRF, the pg_stat_wait_event_timing view,
--- and the pg_wait_event_timing_histogram_buckets taxonomy view.
+-- Exercises the wait_event_capture instrumentation: the GUC, the stats
+-- surface (pg_stat_get_wait_event_timing(), the pg_stat_wait_event_timing
+-- and histogram-buckets views, overflow counters, resets), and the trace
+-- surface (the per-session ring and its readers).
 --
 -- Two expected outputs are maintained:
 --   wait_event_timing.out    -- --enable-wait-event-timing builds
@@ -122,4 +123,46 @@ HINT:  Compile PostgreSQL with --enable-wait-event-timing.
 SELECT pg_stat_reset_wait_event_timing(2147483647);
 ERROR:  wait event capture is not supported by this build
 HINT:  Compile PostgreSQL with --enable-wait-event-timing.
+RESET wait_event_capture;
+--
+-- Trace level: per-session ring of individual waits + query markers.
+-- (In a stub build SET trace errors and the trace readers stay empty;
+-- that is the documented difference between the two expected files.)
+--
+SET wait_event_capture = trace;
+ERROR:  invalid value for parameter "wait_event_capture": "trace"
+DETAIL:  This build does not support wait event capture.
+HINT:  Compile PostgreSQL with --enable-wait-event-timing.
+SELECT pg_sleep(0.1);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- PgSleep is recorded in this backend's ring with a positive duration.
+SELECT count(*) >= 1 AS pgsleep_in_ring,
+       coalesce(bool_and(duration_us > 0), false) AS durations_positive
+FROM pg_get_backend_wait_event_trace()
+WHERE wait_event = 'PgSleep';
+ pgsleep_in_ring | durations_positive 
+-----------------+--------------------
+ f               | f
+(1 row)
+
+-- The same records are visible through the view.
+SELECT count(*) >= 1 AS view_has_pgsleep
+FROM pg_backend_wait_event_trace
+WHERE wait_event = 'PgSleep';
+ view_has_pgsleep 
+------------------
+ f
+(1 row)
+
+-- Clearing orphaned rings is a no-op here (no orphans) but must succeed.
+SELECT pg_stat_clear_orphaned_wait_event_rings() >= 0 AS clear_orphans_ok;
+ clear_orphans_ok 
+------------------
+ t
+(1 row)
+
 RESET wait_event_capture;

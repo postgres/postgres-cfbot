@@ -70,6 +70,7 @@
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 #include "utils/timeout.h"
+#include "utils/wait_event_timing.h"
 
 /* has this backend called EmitConnectionWarnings()? */
 static bool ConnectionWarningsEmitted;
@@ -1249,6 +1250,16 @@ InitPostgres(const char *in_dbname, Oid dboid,
 
 	/* Process pg_db_role_setting options */
 	process_settings(MyDatabaseId, GetSessionUserId());
+
+#ifdef USE_WAIT_EVENT_TIMING
+
+	/*
+	 * Attach trace ring if wait_event_capture = trace was set via
+	 * config/db/role settings
+	 */
+	if (wait_event_capture == WAIT_EVENT_CAPTURE_TRACE && my_trace_proc_number >= 0)
+		wait_event_trace_attach(my_trace_proc_number);
+#endif
 
 	/* Apply PostAuthDelay as soon as we've read all options */
 	if (PostAuthDelay > 0)

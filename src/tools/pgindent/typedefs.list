@@ -3439,6 +3439,11 @@ WaitEventTimeout
 WaitEventTimingControl
 WaitEventTimingEntry
 WaitEventTimingState
+WaitEventTraceControl
+WaitEventTraceRecord
+WaitEventTraceSlot
+WaitEventTraceSlotState
+WaitEventTraceState
 WaitLSNProcInfo
 WaitLSNResult
 WaitLSNState
@@ -3469,6 +3474,7 @@ WalUsage
 WalWriteMethod
 WalWriteMethodOps
 Walfile
+WetValidRecord
 WindowAgg
 WindowAggPath
 WindowAggState

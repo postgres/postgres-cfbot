@@ -3464,6 +3464,17 @@
   max => '65534',
 },
 
+{ name => 'wait_event_trace_ring_size', type => 'int', context => 'PGC_POSTMASTER', group => 'STATS_CUMULATIVE',
+  short_desc => 'Sets the size of each backend\'s wait-event-trace ring buffer.',
+  long_desc => 'Each backend that enables wait_event_capture = trace allocates a ring buffer of this size from a cluster-wide DSA.  The value must be a power of two and is fixed at server start.  Larger rings retain longer histories before wrapping.',
+  flags => 'GUC_UNIT_KB',
+  variable => 'wait_event_trace_ring_size',
+  boot_val => '4096',
+  min => '8',
+  max => '32768',
+  check_hook => 'check_wait_event_trace_ring_size',
+},
+
 { name => 'wal_block_size', type => 'int', context => 'PGC_INTERNAL', group => 'PRESET_OPTIONS',
   short_desc => 'Shows the block size in the write ahead log.',
   flags => 'GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE',

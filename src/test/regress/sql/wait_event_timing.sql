@@ -1,9 +1,10 @@
 --
 -- WAIT_EVENT_TIMING
 --
--- Exercises the wait_event_capture = stats instrumentation: the GUC, the
--- pg_stat_get_wait_event_timing() SRF, the pg_stat_wait_event_timing view,
--- and the pg_wait_event_timing_histogram_buckets taxonomy view.
+-- Exercises the wait_event_capture instrumentation: the GUC, the stats
+-- surface (pg_stat_get_wait_event_timing(), the pg_stat_wait_event_timing
+-- and histogram-buckets views, overflow counters, resets), and the trace
+-- surface (the per-session ring and its readers).
 --
 -- Two expected outputs are maintained:
 --   wait_event_timing.out    -- --enable-wait-event-timing builds
@@ -75,5 +76,29 @@ SELECT pg_stat_reset_wait_event_timing();
 
 -- Resetting an unknown pid is a silent no-op, not an error.
 SELECT pg_stat_reset_wait_event_timing(2147483647);
+
+RESET wait_event_capture;
+
+--
+-- Trace level: per-session ring of individual waits + query markers.
+-- (In a stub build SET trace errors and the trace readers stay empty;
+-- that is the documented difference between the two expected files.)
+--
+SET wait_event_capture = trace;
+SELECT pg_sleep(0.1);
+
+-- PgSleep is recorded in this backend's ring with a positive duration.
+SELECT count(*) >= 1 AS pgsleep_in_ring,
+       coalesce(bool_and(duration_us > 0), false) AS durations_positive
+FROM pg_get_backend_wait_event_trace()
+WHERE wait_event = 'PgSleep';
+
+-- The same records are visible through the view.
+SELECT count(*) >= 1 AS view_has_pgsleep
+FROM pg_backend_wait_event_trace
+WHERE wait_event = 'PgSleep';
+
+-- Clearing orphaned rings is a no-op here (no orphans) but must succeed.
+SELECT pg_stat_clear_orphaned_wait_event_rings() >= 0 AS clear_orphans_ok;
 
 RESET wait_event_capture;
