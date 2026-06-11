@@ -215,6 +215,7 @@ extern PGDLLIMPORT bool MyDatabaseHasLoginEventTriggers;
 
 extern PGDLLIMPORT bool shmem_populate;
 extern PGDLLIMPORT bool shmem_interleave;
+extern PGDLLIMPORT int debug_numa_node;
 
 
 /*

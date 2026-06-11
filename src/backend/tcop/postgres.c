@@ -87,6 +87,10 @@
 #include "utils/timestamp.h"
 #include "utils/varlena.h"
 
+#ifdef USE_LIBNUMA
+#include <numa.h>
+#endif
+
 /* ----------------
  *		global variables
  * ----------------
@@ -109,6 +113,9 @@ int			client_connection_check_interval = 0;
 
 /* flags for non-system relation kinds to restrict use */
 int			restrict_nonsystem_relation_kind;
+
+/* NUMA node to pin the backend to at query start; -1 disables pinning */
+int			debug_numa_node = -1;
 
 /*
  * Include signal sender PID/UID in the server log when available
@@ -1022,6 +1029,53 @@ pg_plan_queries(List *querytrees, const char *query_string, int cursorOptions,
 
 
 /*
+ * process_debug_numa_node
+ *
+ * If the debug_numa_node GUC is set (>= 0), pin this backend to run on the
+ * CPUs of the requested NUMA node.  -1 disables it (default)
+ */
+static void
+process_debug_numa_node(void)
+{
+#ifdef USE_LIBNUMA
+	static int	applied_numa_node = -1;
+
+	if (debug_numa_node == applied_numa_node)
+		return;
+
+	/* Nothing we can do if the kernel/library has no NUMA support. */
+	if (numa_available() < 0)
+	{
+		applied_numa_node = debug_numa_node;
+		return;
+	}
+
+	if (debug_numa_node < 0)
+	{
+		/* Pinning disabled: allow running on all nodes again. */
+		numa_run_on_node_mask(numa_all_nodes_ptr);
+	}
+	else if (debug_numa_node > numa_max_node())
+	{
+		ereport(WARNING,
+				(errmsg("debug_numa_node %d exceeds the highest available NUMA node %d, ignoring",
+						debug_numa_node, numa_max_node())));
+	}
+	else if (numa_run_on_node(debug_numa_node) != 0)
+	{
+		ereport(WARNING,
+				(errmsg("could not pin backend to NUMA node %d: %m",
+						debug_numa_node)));
+	}
+	else
+		elog(DEBUG1, "pinned backend to NUMA node %d", debug_numa_node);
+
+	applied_numa_node = debug_numa_node;
+#endif
+}
+
+
+/*
  * exec_simple_query
  *
  * Execute a "simple Query" protocol message.
@@ -1044,6 +1098,9 @@ exec_simple_query(const char *query_string)
 	debug_query_string = query_string;
 
 	pgstat_report_activity(STATE_RUNNING, query_string);
+
+	/* Pin the backend to the configured NUMA node, if requested. */
+	process_debug_numa_node();
 
 	TRACE_POSTGRESQL_QUERY_START(query_string);
 
@@ -2213,6 +2270,9 @@ exec_execute_message(const char *portal_name, long max_rows)
 	debug_query_string = sourceText;
 
 	pgstat_report_activity(STATE_RUNNING, sourceText);
+
+	/* Pin the backend to the configured NUMA node, if requested. */
+	process_debug_numa_node();
 
 	foreach(lc, portal->stmts)
 	{
