@@ -1097,6 +1097,10 @@ check_synchronous_standby_names(char **newval, void **extra, GucSource source)
 			return false;
 		}
 
+		/* Default to FIRST 1 (name ...) priority method if not specified */
+		if (syncrep_parse_result->syncrep_method == SYNC_REP_DEFAULT)
+			syncrep_parse_result->syncrep_method = SYNC_REP_PRIORITY;
+
 		/* GUC extra value must be guc_malloc'd, not palloc'd */
 		pconf = (SyncRepConfigData *)
 			guc_malloc(LOG, syncrep_parse_result->config_size);
