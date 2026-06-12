@@ -34,6 +34,7 @@
 /* syncrep_method of SyncRepConfigData */
 #define SYNC_REP_PRIORITY		0
 #define SYNC_REP_QUORUM		1
+#define SYNC_REP_DEFAULT	2	/* bare comma-separated list syntax */
 
 /*
  * SyncRepGetCandidateStandbys returns an array of these structs,
