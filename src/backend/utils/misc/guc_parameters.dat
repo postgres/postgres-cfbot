@@ -3523,7 +3523,7 @@
   options => 'wal_level_options',
 },
 
-{ name => 'wal_log_hints', type => 'bool', context => 'PGC_POSTMASTER', group => 'WAL_SETTINGS',
+{ name => 'wal_log_hints', type => 'bool', context => 'PGC_SIGHUP', group => 'WAL_SETTINGS',
   short_desc => 'Writes full pages to WAL when first modified after a checkpoint, even for a non-critical modification.',
   variable => 'wal_log_hints',
   boot_val => 'false',
