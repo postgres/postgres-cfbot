@@ -1503,6 +1503,12 @@ UpdateSharedMemoryConfig(void)
 	 */
 	UpdateFullPageWrites();
 
+	/*
+	 * If wal_log_hints has been changed by SIGHUP, we update pg_control and
+	 * write an XLOG_PARAMETER_CHANGE record.
+	 */
+	UpdateWalLogHints();
+
 	elog(DEBUG2, "checkpointer updated shared memory configuration values");
 }
 
