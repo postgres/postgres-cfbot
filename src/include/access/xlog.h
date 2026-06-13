@@ -133,7 +133,7 @@ extern PGDLLIMPORT bool XLogLogicalInfo;
  * of the bits make it to disk, but the checksum wouldn't match.  Also WAL-log
  * them if forced by wal_log_hints=on.
  */
-#define XLogHintBitIsNeeded() (wal_log_hints || DataChecksumsNeedWrite())
+extern bool XLogHintBitIsNeeded(void);
 
 /* Do we need to WAL-log information required only for Hot Standby and logical replication? */
 #define XLogStandbyInfoActive() (wal_level >= WAL_LEVEL_REPLICA)
@@ -288,6 +288,7 @@ extern void XLogPutNextOid(Oid nextOid);
 extern XLogRecPtr XLogRestorePoint(const char *rpName);
 extern XLogRecPtr XLogAssignLSN(void);
 extern void UpdateFullPageWrites(void);
+extern void UpdateWalLogHints(void);
 extern void GetFullPageWriteInfo(XLogRecPtr *RedoRecPtr_p, bool *doPageWrites_p);
 extern XLogRecPtr GetRedoRecPtr(void);
 extern XLogRecPtr GetInsertRecPtr(void);
