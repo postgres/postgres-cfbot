@@ -22,8 +22,10 @@
 #include "common/pg_prng.h"
 #include "executor/instrument.h"
 #include "nodes/makefuncs.h"
+#include "nodes/queryjumble.h"
 #include "nodes/value.h"
 #include "parser/scansup.h"
+#include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/varlena.h"
 
@@ -48,6 +50,7 @@ static int	auto_explain_log_level = LOG;
 static bool auto_explain_log_nested_statements = false;
 static double auto_explain_sample_rate = 1;
 static char *auto_explain_log_extension_options = NULL;
+static char *auto_explain_log_queryids = NULL;
 
 /*
  * Parsed form of one option from auto_explain.log_extension_options.
@@ -80,6 +83,17 @@ static const struct config_enum_entry format_options[] = {
 	{"yaml", EXPLAIN_FORMAT_YAML, false},
 	{NULL, 0, false}
 };
+
+/*
+ * parsed form of auto_explain.log_queryids.
+ */
+typedef struct auto_explain_queryids
+{
+	int		nqueryids;
+	int64	queryid[FLEXIBLE_ARRAY_MEMBER];
+} auto_explain_queryids;
+
+static auto_explain_queryids *queryid_filter = NULL;
 
 static const struct config_enum_entry loglevel_options[] = {
 	{"debug5", DEBUG5, false},
@@ -128,6 +142,9 @@ static char *auto_explain_scan_literal(char **endp, char **nextp);
 static int	auto_explain_split_options(char *rawstring,
 									   auto_explain_option *options,
 									   int maxoptions, char **errmsg);
+
+static bool check_log_queryids(char **newval, void **extra, GucSource source);
+static void assign_log_queryids(const char *newval, void *extra);
 
 /*
  * Module load callback
@@ -307,6 +324,16 @@ _PG_init(void)
 							 NULL,
 							 NULL);
 
+	DefineCustomStringVariable("auto_explain.log_queryids",
+							   "Only queries with queryid from list will be logged.",
+							   NULL,
+							   &auto_explain_log_queryids,
+							   NULL,
+							   PGC_SUSET, GUC_LIST_INPUT,
+							   check_log_queryids,
+							   assign_log_queryids,
+							   NULL);
+
 	MarkGUCPrefixReserved("auto_explain");
 
 	/* Install hooks. */
@@ -318,6 +345,9 @@ _PG_init(void)
 	ExecutorFinish_hook = explain_ExecutorFinish;
 	prev_ExecutorEnd = ExecutorEnd_hook;
 	ExecutorEnd_hook = explain_ExecutorEnd;
+
+	/* If compute_query_id = 'auto', we would like query IDs. */
+	EnableQueryId();
 }
 
 /*
@@ -415,6 +445,34 @@ explain_ExecutorFinish(QueryDesc *queryDesc)
 }
 
 /*
+ * queryid_filter_check - returns true, when queryid is in watched query IDs
+ * or when list of query IDs is empty (and log_queryids is not active.
+ */
+static bool
+queryid_filter_check(int64 queryid)
+{
+	if (queryid_filter)
+	{
+		if (queryid != INT64CONST(0))
+		{
+			/*
+			 * We expect only a few watched query IDs, so a linear search
+			 * is sufficient.
+			 */
+			for (int i = 0; i < queryid_filter->nqueryids; i++)
+			{
+				if (queryid_filter->queryid[i] == queryid)
+					return true;
+			}
+		}
+
+		return false;
+	}
+	else
+		return true;
+}
+
+/*
  * ExecutorEnd hook: log results if needed
  */
 static void
@@ -431,9 +489,10 @@ explain_ExecutorEnd(QueryDesc *queryDesc)
 		 */
 		oldcxt = MemoryContextSwitchTo(queryDesc->estate->es_query_cxt);
 
-		/* Log plan if duration is exceeded. */
+		/* Log plan if all constraints are satisfied  */
 		msec = INSTR_TIME_GET_MILLISEC(queryDesc->query_instr->total);
-		if (msec >= auto_explain_log_min_duration)
+		if (msec >= auto_explain_log_min_duration &&
+			queryid_filter_check(queryDesc->plannedstmt->queryId))
 		{
 			ExplainState *es = NewExplainState();
 
@@ -826,4 +885,97 @@ auto_explain_split_options(char *rawstring, auto_explain_option *options,
 	}
 
 	return noptions;
+}
+
+/*
+ * log_queryids
+ */
+static bool
+check_log_queryids(char **newval, void **extra, GucSource source)
+{
+	char	   *rawstring;
+	List	   *elemlist = NIL;
+	ListCell   *l;
+	Size		allocsize;
+	auto_explain_queryids *result;
+	int			i = 0;
+
+	if (*newval == NULL)
+	{
+		*extra = NULL;
+		return true;
+	}
+
+	/* need a modifiable copy of string */
+	rawstring = pstrdup(*newval);
+
+	if (!SplitGUCList(rawstring, ',', &elemlist))
+	{
+		pfree(rawstring);
+		list_free(elemlist);
+
+		/* syntax error in list */
+		GUC_check_errdetail("List syntax is invalid.");
+		return false;
+	}
+
+	if (list_length(elemlist) == 0)
+	{
+		pfree(rawstring);
+		list_free(elemlist);
+
+		*extra = NULL;
+		return true;
+	}
+
+	/* Try to allocate an auto_explain_queryids object. */
+	allocsize = offsetof(auto_explain_queryids, queryid) +
+		sizeof(int64) * list_length(elemlist);
+
+	result = (auto_explain_queryids *) guc_malloc(LOG, allocsize);
+	if (result == NULL)
+	{
+		pfree(rawstring);
+		list_free(elemlist);
+
+		return false;
+	}
+
+	foreach(l, elemlist)
+	{
+		char	   *tok = (char *) lfirst(l);
+		int64		queryid;
+		ErrorSaveContext escontext = {T_ErrorSaveContext};
+
+		queryid = pg_strtoint64_safe(tok, (Node *) &escontext);
+		if (escontext.error_occurred || queryid == INT64CONST(0))
+		{
+			GUC_check_errmsg("queryId \"%s\" is not valid", tok);
+
+			pfree(rawstring);
+			list_free(elemlist);
+			guc_free(result);
+
+			return false;
+		}
+
+		result->queryid[i++] = queryid;
+	}
+
+	result->nqueryids = i;
+
+	pfree(rawstring);
+	list_free(elemlist);
+
+	*extra = result;
+
+	return true;
+}
+
+static void
+assign_log_queryids(const char *newval, void *extra)
+{
+	auto_explain_queryids *myextra = (auto_explain_queryids *) extra;
+
+	queryid_filter = myextra;
 }
