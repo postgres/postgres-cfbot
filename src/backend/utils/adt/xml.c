@@ -523,6 +523,24 @@ xmlcomment(PG_FUNCTION_ARGS)
 }
 
 
+/*
+ * xmldocument implements the SQL/XML function XMLDocument (X030).
+ * Since our XML data type corresponds to XML(CONTENT(ANY)), any
+ * expression already validated by the input function is considered
+ * valid output for XMLDocument. As a result, this function simply
+ * returns its input value.
+ */
+Datum
+xmldocument(PG_FUNCTION_ARGS)
+{
+#ifdef USE_LIBXML
+	PG_RETURN_DATUM(PG_GETARG_DATUM(0));
+#else
+	NO_XML_SUPPORT();
+	return 0;
+#endif							/* not USE_LIBXML */
+}
+
 Datum
 xmltext(PG_FUNCTION_ARGS)
 {
