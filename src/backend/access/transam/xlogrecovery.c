@@ -1855,6 +1855,22 @@ PerformWalRecovery(void)
 					proc_exit(3);
 
 				case RECOVERY_TARGET_ACTION_PAUSE:
+
+					/*
+					 * recoveryPausesHere() does nothing if hot standby is
+					 * inactive. Shut down in that case instead of silently
+					 * promoting, so the user can choose a different recovery
+					 * target or action. However, honor any pending promotion
+					 * request by falling through to promote below.
+					 */
+					if (!LocalHotStandbyActive && !CheckForStandbyTrigger())
+					{
+						ereport(LOG,
+								(errmsg("recovery cannot pause at the recovery target because hot standby is not active"),
+								 errhint("Set \"recovery_target_action\" to \"promote\", or choose a recovery target at which hot standby can be enabled.")));
+						proc_exit(3);
+					}
+
 					SetRecoveryPause(true);
 					recoveryPausesHere(true);
 
