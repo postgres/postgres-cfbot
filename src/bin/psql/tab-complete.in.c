@@ -5329,11 +5329,26 @@ match_previous_words(int pattern_id,
 	/* Complete SET ROLE */
 	else if (Matches("SET", "ROLE"))
 		COMPLETE_WITH_QUERY(Query_for_list_of_roles);
-	/* Complete SET SESSION with AUTHORIZATION or CHARACTERISTICS... */
+	/* Complete SET LOCAL */
+	else if (Matches("SET", "LOCAL"))
+		COMPLETE_WITH_QUERY_VERBATIM_PLUS(Query_for_list_of_set_vars,
+										  "TIME ZONE",
+										  "ROLE",
+										  "SESSION AUTHORIZATION");
+	/* 
+	 * Complete SET SESSION. SESSION can be a modifier or part of 
+	 * "SESSION AUTHORIZATION" or "SESSION CHARACTERISTICS AS TRANSACTION"
+	 */
 	else if (Matches("SET", "SESSION"))
-		COMPLETE_WITH("AUTHORIZATION", "CHARACTERISTICS AS TRANSACTION");
-	/* Complete SET SESSION AUTHORIZATION with username */
-	else if (Matches("SET", "SESSION", "AUTHORIZATION"))
+		COMPLETE_WITH_QUERY_VERBATIM_PLUS(Query_for_list_of_set_vars,
+										  "TIME ZONE",
+										  "ROLE",
+										  "AUTHORIZATION",
+										  "SESSION AUTHORIZATION",
+										  "CHARACTERISTICS AS TRANSACTION");
+	/* Complete SET [LOCAL | SESSION] SESSION AUTHORIZATION with username */
+	else if (Matches("SET", "SESSION", "AUTHORIZATION") || 
+			 Matches("SET", "LOCAL|SESSION", "SESSION", "AUTHORIZATION"))
 		COMPLETE_WITH_QUERY_PLUS(Query_for_list_of_roles,
 								 "DEFAULT");
 	/* Complete RESET SESSION with AUTHORIZATION */
