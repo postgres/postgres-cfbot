@@ -17,6 +17,7 @@
 #include "access/nbtree.h"
 #include "access/tableam.h"
 #include "common/int.h"
+#include "pg_trace.h"
 
 typedef enum
 {
@@ -151,6 +152,8 @@ _bt_findsplitloc(Relation rel,
 	bool		usemult;
 	SplitPoint	leftpage,
 				rightpage;
+
+	TRACE_POSTGRESQL_NBTREE_PAGE_FINDSPLIT_START(origpage);
 
 	opaque = BTPageGetOpaque(origpage);
 	maxoff = PageGetMaxOffsetNumber(origpage);
@@ -424,6 +427,8 @@ _bt_findsplitloc(Relation rel,
 	firstrightoff = _bt_bestsplitloc(&state, perfectpenalty, newitemonleft,
 									 strategy);
 	pfree(state.splits);
+
+	TRACE_POSTGRESQL_NBTREE_PAGE_FINDSPLIT_DONE(origpage);
 
 	return firstrightoff;
 }
