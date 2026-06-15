@@ -4662,6 +4662,11 @@ restore_command = 'copy "C:\\server\\archivedir\\%f" "%p"'  # Windows
         This setting has no effect if no recovery target is set.
         If <xref linkend="guc-hot-standby"/> is not enabled, a setting of
         <literal>pause</literal> will act the same as <literal>shutdown</literal>.
+        Likewise, if recovery has reached a consistent state but hot standby
+        has not yet become active when the recovery target is reached,
+        a setting of <literal>pause</literal> will act the same as
+        <literal>shutdown</literal>. This can happen, for example, when the
+        replayed standby snapshots remain overflowed.
         If the recovery target is reached while a promotion is ongoing,
         a setting of <literal>pause</literal> will act the same as
         <literal>promote</literal>.
