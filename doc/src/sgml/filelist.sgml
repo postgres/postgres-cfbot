@@ -153,6 +153,7 @@
 <!ENTITY pgplanadvice    SYSTEM "pgplanadvice.sgml">
 <!ENTITY pgprewarm       SYSTEM "pgprewarm.sgml">
 <!ENTITY pgrowlocks      SYSTEM "pgrowlocks.sgml">
+<!ENTITY pgstatlog       SYSTEM "pgstatlog.sgml">
 <!ENTITY pgstatstatements SYSTEM "pgstatstatements.sgml">
 <!ENTITY pgstattuple     SYSTEM "pgstattuple.sgml">
 <!ENTITY pgsurgery       SYSTEM "pgsurgery.sgml">
