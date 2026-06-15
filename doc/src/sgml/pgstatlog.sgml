@@ -1,0 +1,318 @@
+<!-- doc/src/sgml/pgstatlog.sgml -->
+
+<sect1 id="pgstatlog" xreflabel="pg_stat_log">
+ <title>pg_stat_log &mdash; cumulative statistics about log messages</title>
+
+ <indexterm zone="pgstatlog">
+  <primary>pg_stat_log</primary>
+ </indexterm>
+
+ <para>
+  The <filename>pg_stat_log</filename> module provides a means for tracking
+  cumulative statistics about server log messages.  It hooks into the server's
+  logging system and counts emitted messages, grouped by backend type,
+  database, user, error severity level, and SQLSTATE code.
+ </para>
+
+ <para>
+  The module must be loaded by adding <literal>pg_stat_log</literal> to
+  <xref linkend="guc-shared-preload-libraries"/> in
+  <filename>postgresql.conf</filename>, because it requires additional shared
+  memory.  This means that a server restart is needed to add or remove the
+  module.
+ </para>
+
+ <para>
+  When <filename>pg_stat_log</filename> is loaded, it tracks statistics across
+  all databases of the cluster.  To access and manipulate these statistics,
+  the module provides the views <structname>pg_stat_log</structname> and a set
+  of functions.  These are not available globally but can be enabled for a
+  specific database with <command>CREATE EXTENSION pg_stat_log</command>.
+ </para>
+
+ <sect2 id="pgstatlog-views">
+  <title>The <structname>pg_stat_log</structname> View</title>
+
+  <para>
+   The statistics gathered by the module are made available via a view named
+   <structname>pg_stat_log</structname>.  This view contains one row for each
+   distinct combination of backend type, database, user, error level, and
+   SQLSTATE code observed since the statistics were last reset.  The columns of
+   the view are shown in <xref linkend="pgstatlog-columns"/>.
+  </para>
+
+  <table id="pgstatlog-columns">
+   <title><structname>pg_stat_log</structname> Columns</title>
+   <tgroup cols="1">
+    <thead>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       Column Type
+      </para>
+      <para>
+       Description
+      </para></entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>backend_type</structfield> <type>text</type>
+      </para>
+      <para>
+       Type of the backend that emitted the message (for example,
+       <literal>client backend</literal>, <literal>autovacuum worker</literal>,
+       <literal>checkpointer</literal>).
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>database_oid</structfield> <type>oid</type>
+      </para>
+      <para>
+       OID of the database the message was emitted in, or <literal>NULL</literal>
+       for shared objects or messages emitted before a database was selected.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>database_name</structfield> <type>text</type>
+      </para>
+      <para>
+       Name of the database, resolved from <structname>pg_database</structname>.
+       <literal>NULL</literal> if the database OID is unset or the database has
+       been dropped.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>user_oid</structfield> <type>oid</type>
+      </para>
+      <para>
+       OID of the role active when the message was emitted, or
+       <literal>NULL</literal> for background processes.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>user_name</structfield> <type>text</type>
+      </para>
+      <para>
+       Name of the role, resolved from <structname>pg_roles</structname>.
+       <literal>NULL</literal> if the role OID is unset or the role has been
+       dropped.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>elevel</structfield> <type>text</type>
+      </para>
+      <para>
+       Error severity level of the message (for example, <literal>WARNING</literal>,
+       <literal>ERROR</literal>, <literal>FATAL</literal>, <literal>PANIC</literal>).
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>sqlerrcode</structfield> <type>text</type>
+      </para>
+      <para>
+       Five-character SQLSTATE code associated with the message.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>sqlerrcode_name</structfield> <type>text</type>
+      </para>
+      <para>
+       Human-readable condition name for the SQLSTATE code (for example,
+       <literal>division_by_zero</literal>), or <literal>NULL</literal> if the
+       code has no associated name.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>count</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Cumulative number of messages observed for this combination.
+      </para></entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+
+  <para>
+   For security reasons, only superusers and roles with privileges of the
+   <literal>pg_read_all_stats</literal> role are allowed to read the
+   <structname>pg_stat_log</structname> view.
+  </para>
+ </sect2>
+
+ <sect2 id="pgstatlog-functions">
+  <title>Functions</title>
+
+  <variablelist>
+   <varlistentry>
+    <term>
+     <function>pg_stat_log_data() returns setof record</function>
+     <indexterm>
+      <primary>pg_stat_log_data</primary>
+     </indexterm>
+    </term>
+
+    <listitem>
+     <para>
+      The underlying function backing the <structname>pg_stat_log</structname>
+      view.  It returns one row per tracked combination, exposing the raw
+      <structfield>database_oid</structfield> and <structfield>user_oid</structfield>
+      values without resolving them to names.  Access is restricted to
+      superusers and members of <literal>pg_read_all_stats</literal>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <function>pg_stat_log_info() returns record</function>
+     <indexterm>
+      <primary>pg_stat_log_info</primary>
+     </indexterm>
+    </term>
+
+    <listitem>
+     <para>
+      Returns a single row of metadata about the tracking state:
+      <structfield>max_entries</structfield> (the configured capacity),
+      <structfield>num_entries</structfield> (combinations currently tracked),
+      <structfield>n_dropped</structfield> (messages that could not be tracked
+      because <varname>pg_stat_log.max_entries</varname> was reached), and
+      <structfield>stats_reset</structfield> (the time of the last reset, or of
+      shared-memory initialization).  Access is restricted to superusers and
+      members of <literal>pg_read_all_stats</literal>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <function>pg_stat_log_reset() returns void</function>
+     <indexterm>
+      <primary>pg_stat_log_reset</primary>
+     </indexterm>
+    </term>
+
+    <listitem>
+     <para>
+      Discards all statistics gathered so far and reclaims the tracking slots.
+      By default this function can only be executed by superusers.
+     </para>
+    </listitem>
+   </varlistentry>
+  </variablelist>
+ </sect2>
+
+ <sect2 id="pgstatlog-config">
+  <title>Configuration Parameters</title>
+
+  <variablelist>
+   <varlistentry>
+    <term>
+     <varname>pg_stat_log.enabled</varname> (<type>boolean</type>)
+     <indexterm>
+      <primary><varname>pg_stat_log.enabled</varname> configuration parameter</primary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Controls whether the module counts log messages.  The default is
+      <literal>on</literal>.  Only superusers can change this setting.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <varname>pg_stat_log.min_error_level</varname> (<type>enum</type>)
+     <indexterm>
+      <primary><varname>pg_stat_log.min_error_level</varname> configuration parameter</primary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Minimum message severity level that is counted.  The default is
+      <literal>warning</literal>.  Note that this is additionally bounded by
+      <xref linkend="guc-log-min-messages"/>, which determines what reaches the
+      server log in the first place.  Only superusers can change this setting.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <varname>pg_stat_log.max_entries</varname> (<type>integer</type>)
+     <indexterm>
+      <primary><varname>pg_stat_log.max_entries</varname> configuration parameter</primary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Maximum number of distinct combinations that can be tracked
+      simultaneously.  The default is <literal>1024</literal>.  Once this limit
+      is reached, new combinations are not tracked until
+      <function>pg_stat_log_reset()</function> is called; such drops are
+      counted in <structfield>n_dropped</structfield>.  Each tracked combination
+      consumes shared memory, so this value must be chosen with the overall
+      shared-memory budget in mind.  This parameter can only be set at server
+      start.
+     </para>
+    </listitem>
+   </varlistentry>
+  </variablelist>
+ </sect2>
+
+ <sect2 id="pgstatlog-notes">
+  <title>Notes</title>
+
+  <para>
+   Because the module hooks into the logging system, it only ever sees messages
+   that actually reach the server log.  Messages filtered out by
+   <xref linkend="guc-log-min-messages"/>, and exceptions caught within
+   <application>PL/pgSQL</application> <literal>BEGIN ... EXCEPTION</literal>
+   blocks, are never counted.
+  </para>
+
+  <para>
+   Statistics are kept in shared memory and persist across a clean server
+   restart, but are discarded after a crash, following the standard cumulative
+   statistics semantics.  The <structfield>n_dropped</structfield> and
+   <structfield>stats_reset</structfield> values reported by
+   <function>pg_stat_log_info()</function> are reinitialized at server startup.
+  </para>
+
+  <para>
+   The library remains active for as long as it is listed in
+   <varname>shared_preload_libraries</varname>; dropping the SQL extension with
+   <command>DROP EXTENSION</command> removes the views and functions but does
+   not stop the underlying collection.
+  </para>
+ </sect2>
+
+ <sect2 id="pgstatlog-author">
+  <title>Author</title>
+
+  <para>
+   Fabr&iacute;zio de Royes Mello <email>fabriziomello@gmail.com</email>
+  </para>
+ </sect2>
+
+</sect1>
