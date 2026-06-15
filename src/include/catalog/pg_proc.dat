@@ -9360,6 +9360,9 @@
 { oid => '3813', descr => 'generate XML text node',
   proname => 'xmltext', prorettype => 'xml', proargtypes => 'text',
   prosrc => 'xmltext' },
+{ oid => '3814', descr => 'generate XML document',
+  proname => 'xmldocument', prorettype => 'xml', proargtypes => 'xml',
+  prosrc => 'xmldocument' },
 
 { oid => '2923', descr => 'map table contents to XML',
   proname => 'table_to_xml', procost => '100', provolatile => 's',
