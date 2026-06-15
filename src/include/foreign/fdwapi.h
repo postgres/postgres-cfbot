@@ -113,6 +113,11 @@ typedef void (*BeginForeignInsert_function) (ModifyTableState *mtstate,
 typedef void (*EndForeignInsert_function) (EState *estate,
 										   ResultRelInfo *rinfo);
 
+typedef void (*ExecForeignBatchCopy_function) (EState *estate,
+											   ResultRelInfo *rinfo,
+											   TupleTableSlot **slots,
+											   int numSlots);
+
 typedef int (*IsForeignRelUpdatable_function) (Relation rel);
 
 typedef bool (*PlanDirectModify_function) (PlannerInfo *root,
@@ -241,6 +246,7 @@ typedef struct FdwRoutine
 	EndForeignModify_function EndForeignModify;
 	BeginForeignInsert_function BeginForeignInsert;
 	EndForeignInsert_function EndForeignInsert;
+	ExecForeignBatchCopy_function ExecForeignBatchCopy;
 	IsForeignRelUpdatable_function IsForeignRelUpdatable;
 	PlanDirectModify_function PlanDirectModify;
 	BeginDirectModify_function BeginDirectModify;
