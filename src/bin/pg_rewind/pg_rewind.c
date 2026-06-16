@@ -714,12 +714,20 @@ perform_rewind(filemap_t *filemap, rewind_source *source,
 		{
 			/*
 			 * Source is a production, non-standby, server. We must replay to
-			 * the last WAL insert location.
+			 * the last WAL flush location.
+			 *
+			 * Use the source's flush LSN as the target's minRecoveryPoint: every
+			 * WAL-logged page we copied has page-LSN <= source's flush LSN at
+			 * copy time (WAL-before-data), and flush LSN is monotonic. We avoid
+			 * using the insert LSN because it can sit one page-header past a
+			 * record's end at page boundaries (where no record will end), and
+			 * it is not durable, a source crash can leave flush LSN behind an
+			 * insert LSN we already pinned.
 			 */
 			if (ControlFile_source_after.state != DB_IN_PRODUCTION)
 				pg_fatal("source system was in unexpected state at end of rewind");
 
-			endrec = source->get_current_wal_insert_lsn(source);
+			endrec = source->get_current_wal_flush_lsn(source);
 			endtli = Max(ControlFile_source_after.checkPointCopy.ThisTimeLineID,
 						 ControlFile_source_after.minRecoveryPointTLI);
 		}
