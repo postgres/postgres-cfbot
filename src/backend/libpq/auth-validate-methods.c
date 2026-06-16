@@ -21,9 +21,14 @@
 
 #include "catalog/pg_authid.h"
 #include "libpq/auth-validate-methods.h"
+#include "libpq/auth-validate.h"
+#include "libpq/libpq-be.h"
 #include "miscadmin.h"
 #include "utils/syscache.h"
 #include "utils/timestamp.h"
+
+/* Function declarations for internal use */
+static bool validate_cert_credentials(void);
 
 /*
  * Initialize validation methods
@@ -31,7 +36,13 @@
 void
 InitializeValidationMethods(void)
 {
-	/* No method-specific validators are registered yet. */
+	/*
+	 * Register the method-specific validators.  Role-level validity
+	 * (rolvaliduntil and role existence) is checked for every authenticated
+	 * session by ValidateRoleValidity(), so password-based methods need no
+	 * separate validator of their own.
+	 */
+	RegisterCredentialValidator(CVT_CERT, validate_cert_credentials);
 }
 
 /*
@@ -72,4 +83,33 @@ ValidateRoleValidity(void)
 
 	ReleaseSysCache(tuple);
 	return result;
+}
+
+/*
+ * Validate TLS client certificate credentials.
+ *
+ * The client certificate presented at connection time is retained on the
+ * Port for the lifetime of the session, so its validity period can be
+ * re-checked cheaply without any network round-trip.  Returns false if the
+ * certificate's notAfter date has passed, true otherwise.
+ *
+ * If the session is not using a client certificate (which should not happen
+ * for a cert-authenticated session), there is nothing certificate-specific to
+ * validate, so the credentials are considered valid.
+ */
+static bool
+validate_cert_credentials(void)
+{
+#ifdef USE_SSL
+	Port	   *port = MyProcPort;
+
+	if (port == NULL || !port->ssl_in_use || port->peer == NULL)
+		return true;
+
+	/* The session is no longer valid once the client certificate expires */
+	if (be_tls_get_peer_cert_expired(port))
+		return false;
+#endif
+
+	return true;
 }
