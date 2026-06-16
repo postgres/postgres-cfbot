@@ -243,6 +243,9 @@ const TableFuncRoutine XmlTableRoutine =
 #define NAMESPACE_XSI "http://www.w3.org/2001/XMLSchema-instance"
 #define NAMESPACE_SQLXML "http://standards.iso.org/iso/9075/2003/sqlxml"
 
+/* reserved URIs for XMLNamespace() from SQL/XML:2023, 11.2 */
+#define NAMESPACE_XMLNS "http://www.w3.org/2000/xmlns/"
+#define NAMESPACE_XML "http://www.w3.org/XML/1998/namespace"
 
 #ifdef USE_LIBXML
 
@@ -902,6 +905,7 @@ xmlelement(XmlExpr *xexpr,
 	int			i;
 	ListCell   *arg;
 	ListCell   *narg;
+	ListCell   *nsarg;
 	PgXmlErrorContext *xmlerrcxt;
 	volatile xmlBufferPtr buf = NULL;
 	volatile xmlTextWriterPtr writer = NULL;
@@ -966,20 +970,68 @@ xmlelement(XmlExpr *xexpr,
 			xml_ereport(xmlerrcxt, ERROR, ERRCODE_INTERNAL_ERROR,
 						"could not start xml element");
 
-		forboth(arg, named_arg_strings, narg, xexpr->arg_names)
+		forthree(arg, named_arg_strings, narg, xexpr->arg_names, nsarg, xexpr->xmlnamespaces)
 		{
-			char	   *str = (char *) lfirst(arg);
-			char	   *argname = strVal(lfirst(narg));
+			char *str = (char *)lfirst(arg);
+			char *argname = strVal(lfirst(narg));
+			char *prefix = strVal(lfirst(nsarg));
 
-			if (str)
+			if (str && strlen(prefix) != 0)
 			{
-				if (xmlTextWriterWriteAttribute(writer,
-												(xmlChar *) argname,
-												(xmlChar *) str) < 0 ||
+				/*
+				 * SQL/XML:2023 - 11.2 <XML lexically scoped options>
+				 * Syntax Rule 6) No <XML namespace URI> shall be identical, as defined
+				 * in XML Namespaces, to http://www.w3.org/2000/xmlns/ or to
+				 * http://www.w3.org/XML/1998/namespace
+				 */
+				if (strcmp(str, NAMESPACE_XMLNS) == 0 || strcmp(str, NAMESPACE_XML) == 0)
+					ereport(ERROR,
+							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+							 errmsg("invalid XML namespace URI \"%s\"", str),
+						 errdetail("this URI is already bound to a standard namespace prefix")));
+				/*
+				 * SQL/XML:2023 - 11.2 <XML lexically scoped options>
+				 * Syntax Rule 7) The value of an <XML namespace URI> contained in an
+				 * <XML regular namespace declaration item> shall not be a zero-length string.
+				 */
+				if (strlen(argname) != 0 && strlen(str) == 0)
+					ereport(ERROR,
+							(errcode(ERRCODE_ZERO_LENGTH_CHARACTER_STRING),
+							 errmsg("invalid XML namespace URI for \"%s\"", argname),
+							 errdetail("a regular XML namespace cannot be a zero-length string")));
+
+				/*
+				 * Write the namespace declaration attribute.
+				 * For a prefixed namespace (argname non-empty), this emits:
+				 *   xmlns:<prefix>="<uri>"
+				 * For a default namespace (argname empty), this emits:
+				 *   xmlns="<uri>"
+				 *
+				 * xmlTextWriterWriteAttributeNS arguments:
+				 *   prefix       - "xmlns" for prefixed declarations, so the
+				 *                  attribute is rendered as xmlns:<name>; NULL
+				 *                  for the default namespace declaration.
+				 *   name         - the namespace prefix (e.g. "foo") for
+				 *                  prefixed declarations, or "xmlns" for the
+				 *                  default namespace declaration.
+				 *   namespaceURI - NULL (not used for namespace declarations).
+				 *   content      - the namespace URI value.
+				 */
+				if (xmlTextWriterWriteAttributeNS(writer,
+												  strlen(argname) == 0 ? NULL : (const xmlChar *)prefix,
+												  strlen(argname) != 0 ? (const xmlChar *)argname : (const xmlChar *)prefix,
+												  NULL,
+												  (const xmlChar *)str) < 0 ||
 					xmlerrcxt->err_occurred)
 					xml_ereport(xmlerrcxt, ERROR, ERRCODE_INTERNAL_ERROR,
 								"could not write xml attribute");
 			}
+			else if (str && (xmlTextWriterWriteAttribute(writer,
+														 (xmlChar *)argname,
+														 (xmlChar *)str) < 0 ||
+							 xmlerrcxt->err_occurred))
+				xml_ereport(xmlerrcxt, ERROR, ERRCODE_INTERNAL_ERROR,
+							"could not write xml attribute");
 		}
 
 		foreach(arg, arg_strings)
@@ -4842,7 +4894,11 @@ XmlTableSetNamespace(TableFuncScanState *state, const char *name, const char *ur
 #ifdef USE_LIBXML
 	XmlTableBuilderData *xtCxt;
 
-	if (name == NULL)
+	if (name == NULL && strlen(uri) == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("NO DEFAULT namespace is not supported")));
+	else if (name == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("DEFAULT namespace is not supported")));
