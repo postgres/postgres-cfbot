@@ -322,6 +322,12 @@ extern void be_tls_get_peer_issuer_name(Port *port, char *ptr, size_t len);
 extern void be_tls_get_peer_serial(Port *port, char *ptr, size_t len);
 
 /*
+ * Report whether the client certificate's validity period (notAfter) has
+ * already passed.  Returns false when no peer certificate is present.
+ */
+extern bool be_tls_get_peer_cert_expired(Port *port);
+
+/*
  * Get the server certificate hash for SCRAM channel binding type
  * tls-server-end-point.
  *
