@@ -432,11 +432,12 @@ postgres=# SELECT * from pg_logical_slot_get_changes('regression_slot', NULL, NU
      is expected when sending changes to logical subscribers due to the waiting
      on slots named in
      <link linkend="guc-synchronized-standby-slots"><varname>synchronized_standby_slots</varname></link>.
-     When <varname>synchronized_standby_slots</varname> is utilized, the
-     primary server will not completely shut down until the corresponding
-     standbys, associated with the physical replication slots specified
-     in <varname>synchronized_standby_slots</varname>, have confirmed
-     receiving the WAL up to the latest flushed position on the primary server.
+    When <varname>synchronized_standby_slots</varname> is utilized, the
+    primary server will not completely shut down until the corresponding
+    standbys, associated with the required physical replication slots
+    specified in <varname>synchronized_standby_slots</varname>, have
+    confirmed receiving the WAL up to the latest flushed position on the
+    primary server.
     </para>
 
     <note>

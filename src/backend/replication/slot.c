@@ -50,6 +50,7 @@
 #include "replication/logicallauncher.h"
 #include "replication/slotsync.h"
 #include "replication/slot.h"
+#include "replication/syncrep.h"
 #include "replication/walsender_private.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
@@ -91,17 +92,48 @@ typedef struct ReplicationSlotOnDisk
  * Note: this must be a flat representation that can be held in a single chunk
  * of guc_malloc'd memory, so that it can be stored as the "extra" data for the
  * synchronized_standby_slots GUC.
+ *
+ * The layout mirrors SyncRepConfigData so that the same quorum and priority
+ * semantics can be expressed.  The syncrep_method field uses the
+ * SYNC_REP_DEFAULT, SYNC_REP_PRIORITY, and SYNC_REP_QUORUM constants from
+ * syncrep.h.
  */
 typedef struct
 {
-	/* Number of slot names in the slot_names[] */
-	int			nslotnames;
+	int			config_size;	/* total size of this struct, in bytes */
+	int			num_sync;		/* number of slots that must confirm WAL
+								 * receipt before logical decoding proceeds */
+	uint8		syncrep_method; /* SYNC_REP_* method */
+	int			nslotnames;		/* number of slot names that follow */
 
 	/*
 	 * slot_names contains 'nslotnames' consecutive null-terminated C strings.
 	 */
 	char		slot_names[FLEXIBLE_ARRAY_MEMBER];
 } SyncStandbySlotsConfigData;
+
+/*
+ * State of a replication slot specified in synchronized_standby_slots GUC.
+ */
+typedef enum
+{
+	SS_SLOT_NOT_FOUND,			/* slot does not exist */
+	SS_SLOT_LOGICAL,			/* slot is logical, not physical */
+	SS_SLOT_INVALIDATED,		/* slot has been invalidated */
+	SS_SLOT_INACTIVE_LAGGING,	/* slot is inactive and behind wait_for_lsn */
+	SS_SLOT_ACTIVE_LAGGING,		/* slot is active and behind wait_for_lsn */
+}			SyncStandbySlotsState;
+
+/*
+ * Information about a synchronized standby slot's state.
+ */
+typedef struct
+{
+	const char *slot_name;		/* name of the slot */
+	SyncStandbySlotsState state;	/* state of the slot */
+	XLogRecPtr	restart_lsn;	/* current restart_lsn (valid for lagging
+								 * states) */
+}			SyncStandbySlotsStateInfo;
 
 /*
  * Lookup table for slot invalidation causes.
@@ -2973,94 +3005,207 @@ GetSlotInvalidationCauseName(ReplicationSlotInvalidationCause cause)
 }
 
 /*
- * A helper function to validate slots specified in GUC synchronized_standby_slots.
+ * Remove duplicate member names from a SyncRepConfigData object.
  *
- * The rawname will be parsed, and the result will be saved into *elemlist.
+ * The member_names array of SyncRepConfigData is compacted in place so
+ * that only the first occurrence of each member name is retained. The
+ * original ordering of retained names is preserved, and nmembers and
+ * config_size are updated to describe only the compacted portion of
+ * the array.
  */
-static bool
-validate_sync_standby_slots(char *rawname, List **elemlist)
+static void
+CompactSyncRepConfigMemberNames(SyncRepConfigData *config)
 {
-	/* Verify syntax and parse string into a list of identifiers */
-	if (!SplitIdentifierString(rawname, ',', elemlist))
-	{
-		GUC_check_errdetail("List syntax is invalid.");
-		return false;
-	}
+	char	   *src_name;
+	char	   *dst_name;
+	int			nunique_members = 0;
+	Size		unique_size = offsetof(SyncRepConfigData, member_names);
 
-	/* Iterate the list to validate each slot name */
-	foreach_ptr(char, name, *elemlist)
-	{
-		int			err_code;
-		char	   *err_msg = NULL;
-		char	   *err_hint = NULL;
+	src_name = config->member_names;
+	dst_name = config->member_names;
 
-		if (!ReplicationSlotValidateNameInternal(name, false, &err_code,
-												 &err_msg, &err_hint))
+	for (int i = 0; i < config->nmembers; i++)
+	{
+		char	   *unique_name;
+		size_t		name_size;
+		bool		duplicate = false;
+
+		name_size = strlen(src_name) + 1;
+
+		/*
+		 * Check whether src_name matches any previously retained unique name.
+		 * Only the first nunique_members entries in member_names need to be
+		 * examined for this.
+		 */
+		unique_name = config->member_names;
+		for (int j = 0; j < nunique_members; j++)
 		{
-			GUC_check_errcode(err_code);
-			GUC_check_errdetail("%s", err_msg);
-			if (err_hint != NULL)
-				GUC_check_errhint("%s", err_hint);
-			return false;
+			if (strcmp(unique_name, src_name) == 0)
+			{
+				duplicate = true;
+				break;
+			}
+
+			unique_name += strlen(unique_name) + 1;
 		}
+
+		if (!duplicate)
+		{
+			/*
+			 * This src_name is a new unique name. Copy it immediately after the
+			 * unique names retained so far.
+			 */
+			if (dst_name != src_name)
+				memmove(dst_name, src_name, name_size);
+
+			dst_name += name_size;
+			nunique_members++;
+			unique_size += name_size;
+		}
+
+		src_name += name_size;
 	}
 
-	return true;
+	config->nmembers = nunique_members;
+	config->config_size = (int) unique_size;
 }
 
 /*
  * GUC check_hook for synchronized_standby_slots
+ *
+ * This reuses the syncrep_yyparse/syncrep_scanner infrastructure that is
+ * also used for synchronous_standby_names, and accepts these forms:
+ *
+ *   slot1, slot2                   -- wait for ALL listed slots
+ *   ANY N (slot1, slot2, ...)      -- wait for any N-of-M (quorum)
+ *
+ * Note: Simple list syntax is interpreted as "wait for ALL" for this GUC,
+ * unlike synchronous_standby_names where it means "FIRST 1".
+ *
+ * After parsing, we validate every name as a legal replication slot name,
+ * omit duplicate entries while preserving first-occurrence order, and then
+ * apply the resulting unique list to the configured semantics.
  */
 bool
 check_synchronized_standby_slots(char **newval, void **extra, GucSource source)
 {
-	char	   *rawname;
-	char	   *ptr;
-	List	   *elemlist;
-	int			size;
-	bool		ok;
-	SyncStandbySlotsConfigData *config;
-
-	if ((*newval)[0] == '\0')
-		return true;
-
-	/* Need a modifiable copy of the GUC string */
-	rawname = pstrdup(*newval);
-
-	/* Now verify if the specified slots exist and have correct type */
-	ok = validate_sync_standby_slots(rawname, &elemlist);
-
-	if (!ok || elemlist == NIL)
+	if (*newval != NULL && (*newval)[0] != '\0')
 	{
-		pfree(rawname);
-		list_free(elemlist);
-		return ok;
+		yyscan_t	scanner;
+		int			parse_rc;
+		SyncStandbySlotsConfigData *config;
+		const char *mname;
+
+		/* Result of parsing is returned in one of these two variables */
+		SyncRepConfigData *syncrep_parse_result = NULL;
+		char	   *syncrep_parse_error_msg = NULL;
+
+		/* Parse the synchronized_standby_slots configuration */
+		syncrep_scanner_init(*newval, &scanner);
+		parse_rc = syncrep_yyparse(&syncrep_parse_result,
+								   &syncrep_parse_error_msg,
+								   scanner);
+		syncrep_scanner_finish(scanner);
+
+		if (parse_rc != 0 || syncrep_parse_result == NULL)
+		{
+			GUC_check_errcode(ERRCODE_SYNTAX_ERROR);
+			if (syncrep_parse_error_msg)
+				GUC_check_errdetail("%s", syncrep_parse_error_msg);
+			else
+				GUC_check_errdetail("\"%s\" parser failed.",
+									"synchronized_standby_slots");
+			return false;
+		}
+
+		if (syncrep_parse_result->syncrep_method == SYNC_REP_PRIORITY)
+		{
+			GUC_check_errcode(ERRCODE_INVALID_PARAMETER_VALUE);
+			GUC_check_errmsg("priority syntax is not supported for parameter \"%s\"",
+							 "synchronized_standby_slots");
+			return false;
+		}
+
+		if (syncrep_parse_result->num_sync <= 0)
+		{
+			GUC_check_errcode(ERRCODE_INVALID_PARAMETER_VALUE);
+			GUC_check_errmsg("invalid value for parameter \"%s\": required number of synchronized standby slots (%d) must be greater than zero",
+							 "synchronized_standby_slots",
+							 syncrep_parse_result->num_sync);
+			return false;
+		}
+
+		/* validate every member name as a slot name */
+		mname = syncrep_parse_result->member_names;
+
+		for (int i = 0; i < syncrep_parse_result->nmembers; i++)
+		{
+			int			err_code;
+			char	   *err_msg = NULL;
+			char	   *err_hint = NULL;
+
+			if (!ReplicationSlotValidateNameInternal(mname, false, &err_code,
+													 &err_msg, &err_hint))
+			{
+				GUC_check_errcode(err_code);
+				GUC_check_errdetail("%s", err_msg);
+				if (err_hint != NULL)
+					GUC_check_errhint("%s", err_hint);
+				return false;
+			}
+
+			mname += strlen(mname) + 1;
+		}
+
+		/* Omit duplicate slot names to ensure each slot is considered only once. */
+		CompactSyncRepConfigMemberNames(syncrep_parse_result);
+
+		/*
+		 * For synchronized_standby_slots, a comma-separated list means all
+		 * listed slots are required. The syncrep parser preserves this shape
+		 * as SYNC_REP_DEFAULT, so map num_sync to nmembers to enforce
+		 * all-mode semantics after removing duplicate names.
+		 */
+		if (syncrep_parse_result->syncrep_method == SYNC_REP_DEFAULT)
+			syncrep_parse_result->num_sync = syncrep_parse_result->nmembers;
+
+		/* Reject num_sync > nmembers after duplicates have been omitted. */
+		if (syncrep_parse_result->num_sync > syncrep_parse_result->nmembers)
+		{
+			GUC_check_errcode(ERRCODE_INVALID_PARAMETER_VALUE);
+			GUC_check_errmsg("invalid value for parameter \"%s\": synchronization requirement (%d) exceeds the number of unique listed slots (%d)",
+							 "synchronized_standby_slots",
+							 syncrep_parse_result->num_sync,
+							 syncrep_parse_result->nmembers);
+			return false;
+		}
+
+		/*
+		 * Build SyncStandbySlotsConfigData from the parsed SyncRepConfigData.
+		 * Since the structures have identical layout, we can use the same
+		 * config_size.
+		 */
+		config = (SyncStandbySlotsConfigData *)
+			guc_malloc(LOG, syncrep_parse_result->config_size);
+		if (!config)
+			return false;
+
+		config->config_size = syncrep_parse_result->config_size;
+		config->num_sync = syncrep_parse_result->num_sync;
+		config->syncrep_method = syncrep_parse_result->syncrep_method;
+		config->nslotnames = syncrep_parse_result->nmembers;
+
+		/* Copy all slot names in one operation */
+		memcpy(config->slot_names,
+			   syncrep_parse_result->member_names,
+			   syncrep_parse_result->config_size -
+			   offsetof(SyncRepConfigData, member_names));
+
+		*extra = config;
 	}
+	else
+		*extra = NULL;
 
-	/* Compute the size required for the SyncStandbySlotsConfigData struct */
-	size = offsetof(SyncStandbySlotsConfigData, slot_names);
-	foreach_ptr(char, slot_name, elemlist)
-		size += strlen(slot_name) + 1;
-
-	/* GUC extra value must be guc_malloc'd, not palloc'd */
-	config = (SyncStandbySlotsConfigData *) guc_malloc(LOG, size);
-	if (!config)
-		return false;
-
-	/* Transform the data into SyncStandbySlotsConfigData */
-	config->nslotnames = list_length(elemlist);
-
-	ptr = config->slot_names;
-	foreach_ptr(char, slot_name, elemlist)
-	{
-		strcpy(ptr, slot_name);
-		ptr += strlen(slot_name) + 1;
-	}
-
-	*extra = config;
-
-	pfree(rawname);
-	list_free(elemlist);
 	return true;
 }
 
@@ -3109,18 +3254,117 @@ SlotExistsInSyncStandbySlots(const char *slot_name)
 }
 
 /*
- * Return true if the slots specified in synchronized_standby_slots have caught up to
- * the given WAL location, false otherwise.
+ * Report problem states for synchronized_standby_slots that prevented the
+ * catch-up requirement from being met.
+ */
+static void
+ReportUnavailableSyncStandbySlots(SyncStandbySlotsStateInfo *slot_states,
+								  int num_slot_states, int elevel,
+								  XLogRecPtr wait_for_lsn)
+{
+	for (int i = 0; i < num_slot_states; i++)
+	{
+		const char *slot_name = slot_states[i].slot_name;
+
+		switch (slot_states[i].state)
+		{
+			case SS_SLOT_NOT_FOUND:
+				ereport(elevel,
+						errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						errmsg("replication slot \"%s\" specified in parameter \"%s\" does not exist",
+							   slot_name, "synchronized_standby_slots"),
+						errdetail("Logical replication is waiting on the standby associated with replication slot \"%s\".",
+								  slot_name),
+						errhint("Create the replication slot \"%s\" or amend parameter \"%s\".",
+								slot_name, "synchronized_standby_slots"));
+				break;
+
+			case SS_SLOT_LOGICAL:
+				ereport(elevel,
+						errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						errmsg("cannot specify logical replication slot \"%s\" in parameter \"%s\"",
+							   slot_name, "synchronized_standby_slots"),
+						errdetail("Logical replication is waiting for correction on replication slot \"%s\".",
+								  slot_name),
+						errhint("Remove the logical replication slot \"%s\" from parameter \"%s\".",
+								slot_name, "synchronized_standby_slots"));
+				break;
+
+			case SS_SLOT_INVALIDATED:
+				ereport(elevel,
+						errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						errmsg("physical replication slot \"%s\" specified in parameter \"%s\" has been invalidated",
+							   slot_name, "synchronized_standby_slots"),
+						errdetail("Logical replication is waiting on the standby associated with replication slot \"%s\".",
+								  slot_name),
+						errhint("Drop and recreate the replication slot \"%s\", or amend parameter \"%s\".",
+								slot_name, "synchronized_standby_slots"));
+				break;
+
+			case SS_SLOT_INACTIVE_LAGGING:
+				ereport(elevel,
+						errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						errmsg("replication slot \"%s\" specified in parameter \"%s\" does not have active_pid",
+							   slot_name, "synchronized_standby_slots"),
+						errdetail("Logical replication is waiting on the standby associated with replication slot \"%s\".",
+								  slot_name),
+						errhint("Start the standby associated with the replication slot \"%s\", or amend parameter \"%s\".",
+								slot_name, "synchronized_standby_slots"));
+				break;
+
+			case SS_SLOT_ACTIVE_LAGGING:
+				if (!XLogRecPtrIsValid(slot_states[i].restart_lsn))
+					ereport(DEBUG1,
+							errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+							errmsg("replication slot \"%s\" specified in parameter \"%s\" has not caught up",
+								   slot_name, "synchronized_standby_slots"),
+							errdetail("The slot's restart_lsn is not yet set; required LSN is %X/%X.",
+									  LSN_FORMAT_ARGS(wait_for_lsn)));
+				else
+					ereport(DEBUG1,
+							errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+							errmsg("replication slot \"%s\" specified in parameter \"%s\" has not caught up",
+								   slot_name, "synchronized_standby_slots"),
+							errdetail("The slot's restart_lsn %X/%X is behind the required %X/%X.",
+									  LSN_FORMAT_ARGS(slot_states[i].restart_lsn),
+									  LSN_FORMAT_ARGS(wait_for_lsn)));
+				break;
+
+			default:
+				/* Should not happen */
+				Assert(false);
+				break;
+		}
+	}
+}
+
+/*
+ * Return true if the required standby slots have caught up to the given WAL
+ * location, false otherwise.
  *
- * The elevel parameter specifies the error level used for logging messages
- * related to slots that do not exist, are invalidated, or are inactive.
+ * The behavior depends on the synchronized_standby_slots configuration:
+ *
+ *   Simple list (e.g., "slot1, slot2"):
+ *     ALL slots must have caught up. Returns false otherwise.
+ *
+ *   ANY N (e.g., "ANY 2 (slot1, slot2, slot3)"):
+ *     Wait for any N eligible slots. Skips missing, invalid, logical, and
+ *     lagging slots (inactive or active) to find N slots that have caught up.
+ *
+ * The elevel parameter specifies the error level used for reporting issues
+ * related to the slots specified in synchronized_standby_slots when the
+ * catch-up requirement is not met.
  */
 bool
 StandbySlotsHaveCaughtup(XLogRecPtr wait_for_lsn, int elevel)
 {
 	const char *name;
 	int			caught_up_slot_num = 0;
+	int			required;
 	XLogRecPtr	min_restart_lsn = InvalidXLogRecPtr;
+	bool		wait_for_all;
+	SyncStandbySlotsStateInfo *slot_states;
+	int			num_slot_states = 0;
 
 	/*
 	 * Don't need to wait for the standbys to catch up if there is no value in
@@ -3145,11 +3389,43 @@ StandbySlotsHaveCaughtup(XLogRecPtr wait_for_lsn, int elevel)
 		return true;
 
 	/*
+	 * Determine how many slots are required and whether we're in "wait for
+	 * ALL" mode versus "wait for N-of-M" mode.
+	 *
+	 * wait_for_all = true means we need ALL slots to be ready (simple list
+	 * syntax like "slot1, slot2"). In this mode, we stop checking on the
+	 * first slot that is missing/invalid/logical, or the first slot that is
+	 * lagging (inactive or active).
+	 *
+	 * wait_for_all = false means we select N from M candidates (ANY N syntax).
+	 * In this mode, slots already caught up are counted even if inactive, and
+	 * lagging slots are skipped until enough slots have caught up.
+	 * Duplicate configured slot names do not appear here because the check hook
+	 * compacts them out of the parsed configuration.
+	 */
+	required = synchronized_standby_slots_config->num_sync;
+	wait_for_all = (synchronized_standby_slots_config->syncrep_method == SYNC_REP_DEFAULT);
+
+	/*
+	 * Allocate array to track slot states. Size it to the total number of
+	 * configured slots since in the worst case all could have problem states.
+	 */
+	slot_states = palloc_array(SyncStandbySlotsStateInfo,
+							   synchronized_standby_slots_config->nslotnames);
+
+	/*
 	 * To prevent concurrent slot dropping and creation while filtering the
 	 * slots, take the ReplicationSlotControlLock outside of the loop.
 	 */
 	LWLockAcquire(ReplicationSlotControlLock, LW_SHARED);
 
+	/*
+	 * Iterate through configured slots, checking their state and tracking how
+	 * many have caught up. Problem states are recorded for deferred
+	 * reporting: missing/logical/invalidated slots, and lagging slots
+	 * (inactive or active). Messages are only emitted if the catch-up
+	 * requirement isn't met.
+	 */
 	name = synchronized_standby_slots_config->slot_names;
 	for (int i = 0; i < synchronized_standby_slots_config->nslotnames; i++)
 	{
@@ -3160,35 +3436,28 @@ StandbySlotsHaveCaughtup(XLogRecPtr wait_for_lsn, int elevel)
 
 		slot = SearchNamedReplicationSlot(name, false);
 
-		/*
-		 * If a slot name provided in synchronized_standby_slots does not
-		 * exist, report a message and exit the loop.
-		 */
 		if (!slot)
 		{
-			ereport(elevel,
-					errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					errmsg("replication slot \"%s\" specified in parameter \"%s\" does not exist",
-						   name, "synchronized_standby_slots"),
-					errdetail("Logical replication is waiting on the standby associated with replication slot \"%s\".",
-							  name),
-					errhint("Create the replication slot \"%s\" or amend parameter \"%s\".",
-							name, "synchronized_standby_slots"));
-			break;
+			/* Record Slot State */
+			slot_states[num_slot_states].slot_name = name;
+			slot_states[num_slot_states].state = SS_SLOT_NOT_FOUND;
+			num_slot_states++;
+
+			if (wait_for_all)
+				break;
+			goto next_slot;
 		}
 
-		/* Same as above: if a slot is not physical, exit the loop. */
 		if (SlotIsLogical(slot))
 		{
-			ereport(elevel,
-					errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					errmsg("cannot specify logical replication slot \"%s\" in parameter \"%s\"",
-						   name, "synchronized_standby_slots"),
-					errdetail("Logical replication is waiting for correction on replication slot \"%s\".",
-							  name),
-					errhint("Remove the logical replication slot \"%s\" from parameter \"%s\".",
-							name, "synchronized_standby_slots"));
-			break;
+			/* Record Slot State */
+			slot_states[num_slot_states].slot_name = name;
+			slot_states[num_slot_states].state = SS_SLOT_LOGICAL;
+			num_slot_states++;
+
+			if (wait_for_all)
+				break;
+			goto next_slot;
 		}
 
 		SpinLockAcquire(&slot->mutex);
@@ -3199,33 +3468,34 @@ StandbySlotsHaveCaughtup(XLogRecPtr wait_for_lsn, int elevel)
 
 		if (invalidated)
 		{
-			/* Specified physical slot has been invalidated */
-			ereport(elevel,
-					errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-					errmsg("physical replication slot \"%s\" specified in parameter \"%s\" has been invalidated",
-						   name, "synchronized_standby_slots"),
-					errdetail("Logical replication is waiting on the standby associated with replication slot \"%s\".",
-							  name),
-					errhint("Drop and recreate the replication slot \"%s\", or amend parameter \"%s\".",
-							name, "synchronized_standby_slots"));
-			break;
+			/* Record Slot State */
+			slot_states[num_slot_states].slot_name = name;
+			slot_states[num_slot_states].state = SS_SLOT_INVALIDATED;
+			num_slot_states++;
+
+			if (wait_for_all)
+				break;
+			goto next_slot;
 		}
 
 		if (!XLogRecPtrIsValid(restart_lsn) || restart_lsn < wait_for_lsn)
 		{
-			/* Log a message if no active_pid for this physical slot */
-			if (inactive)
-				ereport(elevel,
-						errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-						errmsg("replication slot \"%s\" specified in parameter \"%s\" does not have active_pid",
-							   name, "synchronized_standby_slots"),
-						errdetail("Logical replication is waiting on the standby associated with replication slot \"%s\".",
-								  name),
-						errhint("Start the standby associated with the replication slot \"%s\", or amend parameter \"%s\".",
-								name, "synchronized_standby_slots"));
+			/*
+			 * If a slot is inactive and lagging, report it as inactive. If it
+			 * is active and lagging, report it as lagging.
+			 *
+			 * In ALL mode: must wait for it. In ANY N (quorum) mode: skip and
+			 * use another slot.
+			 */
+			slot_states[num_slot_states].slot_name = name;
+			slot_states[num_slot_states].state =
+				inactive ? SS_SLOT_INACTIVE_LAGGING : SS_SLOT_ACTIVE_LAGGING;
+			slot_states[num_slot_states].restart_lsn = restart_lsn;
+			num_slot_states++;
 
-			/* Continue if the current slot hasn't caught up. */
-			break;
+			if (wait_for_all)
+				break;
+			goto next_slot;
 		}
 
 		Assert(restart_lsn >= wait_for_lsn);
@@ -3236,17 +3506,30 @@ StandbySlotsHaveCaughtup(XLogRecPtr wait_for_lsn, int elevel)
 
 		caught_up_slot_num++;
 
+		/* Stop processing if the required number of slots have caught up. */
+		if (caught_up_slot_num >= required)
+			break;
+
+next_slot:
 		name += strlen(name) + 1;
 	}
 
 	LWLockRelease(ReplicationSlotControlLock);
 
 	/*
-	 * Return false if not all the standbys have caught up to the specified
-	 * WAL location.
+	 * If the required number of slots have not caught up, report any recorded
+	 * problem states and return false.
+	 *
+	 * We only emit messages when the requirement is not met to avoid
+	 * misleading messages in quorum mode where other slots may have satisfied
+	 * the condition despite some slots having issues.
 	 */
-	if (caught_up_slot_num != synchronized_standby_slots_config->nslotnames)
+	if (caught_up_slot_num < required)
+	{
+		ReportUnavailableSyncStandbySlots(slot_states, num_slot_states, elevel, wait_for_lsn);
+		pfree(slot_states);
 		return false;
+	}
 
 	/* The ss_oldest_flush_lsn must not retreat. */
 	Assert(!XLogRecPtrIsValid(ss_oldest_flush_lsn) ||
@@ -3254,6 +3537,7 @@ StandbySlotsHaveCaughtup(XLogRecPtr wait_for_lsn, int elevel)
 
 	ss_oldest_flush_lsn = min_restart_lsn;
 
+	pfree(slot_states);
 	return true;
 }
 
@@ -3286,7 +3570,10 @@ WaitForStandbyConfirmation(XLogRecPtr wait_for_lsn)
 			ProcessConfigFile(PGC_SIGHUP);
 		}
 
-		/* Exit if done waiting for every slot. */
+		/*
+		 * Exit once the configured synchronized_standby_slots requirement is
+		 * met.
+		 */
 		if (StandbySlotsHaveCaughtup(wait_for_lsn, WARNING))
 			break;
 
