@@ -3050,6 +3050,8 @@ SyncRepStandbyData
 SyncRequestHandler
 SyncRequestType
 SyncStandbySlotsConfigData
+SyncStandbySlotsState
+SyncStandbySlotsStateInfo
 SyncingRelationsState
 SysCacheIdentifier
 SysFKRelationship
