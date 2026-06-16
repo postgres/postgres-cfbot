@@ -71,6 +71,7 @@ typedef struct
 	List	   *active_fns;
 	Node	   *case_val;
 	bool		estimate;
+	bool		is_qual;		/* true if simplifying a qual expression */
 } eval_const_expressions_context;
 
 typedef struct
@@ -2626,6 +2627,34 @@ eval_const_expressions(PlannerInfo *root, Node *node)
 	context.active_fns = NIL;	/* nothing being recursively simplified */
 	context.case_val = NULL;	/* no CASE being examined */
 	context.estimate = false;	/* safe transformations only */
+	context.is_qual = false;	/* not a qual expression */
+	return eval_const_expressions_mutator(node, &context);
+}
+
+/*--------------------
+ * eval_const_expressions_qual
+ *
+ * Same as eval_const_expressions, but informs the simplifier that the
+ * expression is used as a qual (i.e., in a context where NULL and false have
+ * the same effect).  This enables additional simplifications, such as folding
+ * a NOT IN / <> ALL expression to constant false when the array contains a
+ * NULL element and the operator is strict.
+ *--------------------
+ */
+Node *
+eval_const_expressions_qual(PlannerInfo *root, Node *node)
+{
+	eval_const_expressions_context context;
+
+	if (root)
+		context.boundParams = root->glob->boundParams;	/* bound Params */
+	else
+		context.boundParams = NULL;
+	context.root = root;		/* for inlined-function dependencies */
+	context.active_fns = NIL;	/* nothing being recursively simplified */
+	context.case_val = NULL;	/* no CASE being examined */
+	context.estimate = false;	/* safe transformations only */
+	context.is_qual = true;		/* expression is used as a qual */
 	return eval_const_expressions_mutator(node, &context);
 }
 
@@ -2768,6 +2797,7 @@ estimate_expression_value(PlannerInfo *root, Node *node)
 	context.active_fns = NIL;	/* nothing being recursively simplified */
 	context.case_val = NULL;	/* no CASE being examined */
 	context.estimate = true;	/* unsafe transformations OK */
+	context.is_qual = false;	/* not a qual expression */
 	return eval_const_expressions_mutator(node, &context);
 }
 
@@ -2806,6 +2836,13 @@ static Node *
 eval_const_expressions_mutator(Node *node,
 							   eval_const_expressions_context *context)
 {
+	/*
+	 * Save and reset is_qual so that recursive calls don't inherit it by
+	 * default.
+	 */
+	bool		this_node_is_qual = context->is_qual;
+
+	context->is_qual = false;
 
 	/* since this function recurses, it could be driven to stack overflow */
 	check_stack_depth();
@@ -3271,6 +3308,43 @@ eval_const_expressions_mutator(Node *node,
 
 				/* Make sure we know underlying function */
 				set_sa_opfuncid(saop);
+
+				/*
+				 * When simplifying a qual expression (!useOr means NOT IN or
+				 * <> ALL), check whether the array contains a NULL element.
+				 * If the operator is strict, a NULL in the array means the
+				 * expression can never be true.
+				 */
+				if (this_node_is_qual && !saop->useOr &&
+					func_strict(saop->opfuncid))
+				{
+					Node	   *arrayarg = lsecond(saop->args);
+
+					if (IsA(arrayarg, Const) &&
+						!((Const *) arrayarg)->constisnull)
+					{
+						/* Constant array: check for NULLs using bitmap */
+						ArrayType  *arrayval =
+							DatumGetArrayTypeP(((Const *) arrayarg)->constvalue);
+
+						if (array_contains_nulls(arrayval))
+							return makeBoolConst(false, false);
+					}
+					else if (IsA(arrayarg, ArrayExpr))
+					{
+						/* Non-const array: check each element */
+						ListCell   *lc2;
+
+						foreach(lc2, ((ArrayExpr *) arrayarg)->elements)
+						{
+							Node	   *elem = (Node *) lfirst(lc2);
+
+							if (IsA(elem, Const) &&
+								((Const *) elem)->constisnull)
+								return makeBoolConst(false, false);
+						}
+					}
+				}
 
 				/*
 				 * If all arguments are Consts, and it's a safe function, we
