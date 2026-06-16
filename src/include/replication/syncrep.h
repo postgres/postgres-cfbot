@@ -94,8 +94,9 @@ extern int	SyncRepGetCandidateStandbys(SyncRepStandbyData **standbys);
 extern void SyncRepUpdateSyncStandbysDefined(void);
 
 /*
- * Internal functions for parsing synchronous_standby_names grammar,
- * in syncrep_gram.y and syncrep_scanner.l
+ * Internal functions for parsing synchronous_standby_names grammar, also
+ * reused by synchronized_standby_slots, in syncrep_gram.y and
+ * syncrep_scanner.l
  */
 union YYSTYPE;
 typedef void *yyscan_t;
