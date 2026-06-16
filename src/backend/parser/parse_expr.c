@@ -2391,6 +2391,7 @@ transformXmlExpr(ParseState *pstate, XmlExpr *x)
 	XmlExpr    *newx;
 	ListCell   *lc;
 	int			i;
+	bool		has_default_xmlns = false;
 
 	newx = makeNode(XmlExpr);
 	newx->op = x->op;
@@ -2409,11 +2410,86 @@ transformXmlExpr(ParseState *pstate, XmlExpr *x)
 	 */
 	newx->named_args = NIL;
 	newx->arg_names = NIL;
+	newx->xmlnamespaces = NIL;
+
+	/*
+	 * this adds the xmlnamespaces into arg_names and named_args
+	 */
+	foreach(lc, x->xmlnamespaces)
+	{
+		ResTarget  *r = lfirst_node(ResTarget, lc);
+		Node	   *expr;
+		ListCell   *lc2;
+		ListCell   *lc3;
+		char	   *argname = NULL;
+
+		/*
+		 * SQL/XML:2023 - 11.2 <XML lexically scoped options>
+		 * Syntax Rule 2) <XML namespace declaration> shall contain at most one
+		 * <XML default namespace declaration item>.
+		 */
+		if (!r->name)
+		{
+			if (has_default_xmlns)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("XML elements can have only a single [NO] DEFAULT namespace"),
+						 parser_errposition(pstate, r->location)));
+
+			has_default_xmlns = true;
+		}
+		/*
+		 * SQL/XML:2023 - 11.2 <XML lexically scoped options>
+		 * Syntax Rule 5) No <XML namespace prefix> shall be equivalent to
+		 * "xml" or "xmlns".
+		 */
+		else if (strcmp(r->name, NAMESPACE_XMLNS_DEFAULT_PREFIX) == 0 ||
+				 strcmp(r->name, NAMESPACE_XML_DEFAULT_PREFIX) == 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid XML namespace prefix \"%s\"", r->name),
+					 errdetail("this prefix is already bound to a standard namespace URI"),
+					 parser_errposition(pstate, r->location)));
+		else if (r->name)
+			argname = map_sql_identifier_to_xml_name(r->name, false, false);
+
+		/*
+		 * SQL/XML:2023 - 11.2 <XML lexically scoped options>
+		 * Syntax Rule 4) No two <XML namespace prefix>es shall be equivalent.
+		 */
+		if (x->op == IS_XMLELEMENT && argname)
+		{
+			forboth(lc2, newx->arg_names, lc3, newx->xmlnamespaces)
+			{
+				/* Skip attribute entries; they have an empty xmlnamespaces tag */
+				if (*strVal(lfirst(lc3)) == '\0')
+					continue;
+
+				if (strcmp(argname, strVal(lfirst(lc2))) == 0)
+					ereport(ERROR,
+							(errcode(ERRCODE_SYNTAX_ERROR),
+							 errmsg("XML namespace name \"%s\" appears more than once",
+									argname),
+							 parser_errposition(pstate, r->location)));
+			}
+		}
+
+		if (r->val)
+			expr = transformExprRecurse(pstate, r->val);
+		else
+			expr = transformExprRecurse(pstate, makeStringConst("", newx->location));
+
+		newx->named_args = lappend(newx->named_args, expr);
+		newx->arg_names = lappend(newx->arg_names, makeString(!argname ? "" : argname));
+		newx->xmlnamespaces = lappend(newx->xmlnamespaces, makeString(NAMESPACE_XMLNS_DEFAULT_PREFIX));
+	}
 
 	foreach(lc, x->named_args)
 	{
 		ResTarget  *r = lfirst_node(ResTarget, lc);
 		Node	   *expr;
+		ListCell   *lc2;
+		ListCell   *lc3;
 		char	   *argname;
 
 		expr = transformExprRecurse(pstate, r->val);
@@ -2437,10 +2513,12 @@ transformXmlExpr(ParseState *pstate, XmlExpr *x)
 		/* reject duplicate argnames in XMLELEMENT only */
 		if (x->op == IS_XMLELEMENT)
 		{
-			ListCell   *lc2;
-
-			foreach(lc2, newx->arg_names)
+			forboth(lc2, newx->arg_names, lc3, newx->xmlnamespaces)
 			{
+				/* Skip namespace entries; they have a non-empty xmlnamespaces tag */
+				if (*strVal(lfirst(lc3)) != '\0')
+					continue;
+
 				if (strcmp(argname, strVal(lfirst(lc2))) == 0)
 					ereport(ERROR,
 							(errcode(ERRCODE_SYNTAX_ERROR),
@@ -2452,6 +2530,7 @@ transformXmlExpr(ParseState *pstate, XmlExpr *x)
 
 		newx->named_args = lappend(newx->named_args, expr);
 		newx->arg_names = lappend(newx->arg_names, makeString(argname));
+		newx->xmlnamespaces = lappend(newx->xmlnamespaces, makeString(""));
 	}
 
 	/* The other arguments are of varying types depending on the function */
