@@ -1180,7 +1180,7 @@ postgres=# SELECT '0/0'::pg_lsn + pd.segment_number * ps.setting::int + :offset 
         rows returned may be larger, since this limit is only checked after
         adding the rows produced when decoding each new transaction commit.
         If the specified slot is a logical failover slot then the function will
-        not return until all physical slots specified in
+        not return until the required physical slots specified in
         <link linkend="guc-synchronized-standby-slots"><varname>synchronized_standby_slots</varname></link>
         have confirmed WAL receipt.
        </para></entry>
@@ -1259,8 +1259,8 @@ postgres=# SELECT '0/0'::pg_lsn + pd.segment_number * ps.setting::int + :offset 
         The updated slot position information is written out at the next
         checkpoint if any advancing is done. So in the event of a crash, the
         slot may return to an earlier position. If the specified slot is a
-        logical failover slot then the function will not return until all
-        physical slots specified in
+        logical failover slot then the function will not return until the
+        required physical slots specified in
         <link linkend="guc-synchronized-standby-slots"><varname>synchronized_standby_slots</varname></link>
         have confirmed WAL receipt.
        </para></entry>

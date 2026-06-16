@@ -590,8 +590,7 @@ HINT:  The name "pg_conflict_detection" is reserved for the conflict detection s
 -- Cannot set synchronized_standby_slots to an invalid slot name
 ALTER SYSTEM SET synchronized_standby_slots='invalid*';
 ERROR:  invalid value for parameter "synchronized_standby_slots": "invalid*"
-DETAIL:  replication slot name "invalid*" contains invalid character
-HINT:  Replication slot names may only contain lower case letters, numbers, and the underscore character.
+DETAIL:  syntax error at or near "*"
 -- Can set synchronized_standby_slots to a non-existent slot name
 ALTER SYSTEM SET synchronized_standby_slots='missing';
 -- Reset the GUC
