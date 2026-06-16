@@ -45,6 +45,7 @@ static bool check_validator_hba_options(Port *port, const char **logdetail);
 
 static ValidatorModuleState *validator_module_state;
 static const OAuthValidatorCallbacks *ValidatorCallbacks;
+static int ValidatorABIVersion;		/* tracks V1 vs V2 module ABI */
 
 static MemoryContext ValidatorMemoryContext;
 static List *ValidatorOptions;
@@ -801,13 +802,22 @@ load_validator_library(const char *libname)
 	 * Check the magic number, to protect against break-glass scenarios where
 	 * the ABI must change within a major version. load_external_function()
 	 * already checks for compatibility across major versions.
+	 *
+	 * We accept both V1 and V2 magic numbers for backward compatibility.
+	 * V1 modules don't have the expire_cb field, so we track the version
+	 * to avoid accessing non-existent struct members.
 	 */
-	if (ValidatorCallbacks->magic != PG_OAUTH_VALIDATOR_MAGIC)
+	if (ValidatorCallbacks->magic == PG_OAUTH_VALIDATOR_MAGIC_V2)
+		ValidatorABIVersion = 2;
+	else if (ValidatorCallbacks->magic == PG_OAUTH_VALIDATOR_MAGIC_V1)
+		ValidatorABIVersion = 1;
+	else
 		ereport(ERROR,
-				errmsg("OAuth validator module \"%s\": magic number mismatch",
-					   libname),
-				errdetail("Server has magic number 0x%08X, module has 0x%08X.",
-						  PG_OAUTH_VALIDATOR_MAGIC, ValidatorCallbacks->magic));
+				errmsg("%s module \"%s\": magic number mismatch",
+					   "OAuth validator", libname),
+				errdetail("Server expects magic number 0x%08X or 0x%08X, module has 0x%08X.",
+						  PG_OAUTH_VALIDATOR_MAGIC_V2, PG_OAUTH_VALIDATOR_MAGIC_V1,
+						  ValidatorCallbacks->magic));
 
 	/*
 	 * Make sure all required callbacks are present in the ValidatorCallbacks
@@ -1133,4 +1143,25 @@ GetOAuthHBAOption(const ValidatorModuleState *state, const char *optname)
 	}
 
 	return ret;
+}
+
+/*
+ * Check if an OAuth token has expired.
+ * This is called from credential validation to check token validity.
+ */
+bool
+CheckOAuthValidatorExpiration(void)
+{
+	/*
+	 * Delegate to validator's expire_cb if available.  Only V2+ modules have
+	 * the expire_cb field, so we must check the ABI version before accessing
+	 * it to maintain backward compatibility with V1 modules.
+	 */
+	if (ValidatorCallbacks != NULL &&
+		ValidatorABIVersion >= 2 &&
+		ValidatorCallbacks->expire_cb != NULL)
+		return ValidatorCallbacks->expire_cb(validator_module_state);
+
+	/* V1 module or no expire_cb, assume token is valid */
+	return true;
 }

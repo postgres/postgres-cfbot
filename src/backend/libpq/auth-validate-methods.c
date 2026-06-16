@@ -23,11 +23,13 @@
 #include "libpq/auth-validate-methods.h"
 #include "libpq/auth-validate.h"
 #include "libpq/libpq-be.h"
+#include "libpq/oauth.h"
 #include "miscadmin.h"
 #include "utils/syscache.h"
 #include "utils/timestamp.h"
 
 /* Function declarations for internal use */
+static bool validate_oauth_credentials(void);
 static bool validate_cert_credentials(void);
 
 /*
@@ -42,6 +44,7 @@ InitializeValidationMethods(void)
 	 * session by ValidateRoleValidity(), so password-based methods need no
 	 * separate validator of their own.
 	 */
+	RegisterCredentialValidator(CVT_OAUTH, validate_oauth_credentials);
 	RegisterCredentialValidator(CVT_CERT, validate_cert_credentials);
 }
 
@@ -83,6 +86,24 @@ ValidateRoleValidity(void)
 
 	ReleaseSysCache(tuple);
 	return result;
+}
+
+/*
+ * Check if an OAuth token has expired.
+ *
+ * Returns true if the token is still valid, false if it has expired.
+ *
+ * Calls wrapper CheckOAuthValidatorExpiration() function
+ * to verify that the token hasn't expired.
+ */
+static bool
+validate_oauth_credentials(void)
+{
+	/* Call the validator's expire_cb to check token expiration */
+	if (!CheckOAuthValidatorExpiration())
+		return false;
+
+	return true;
 }
 
 /*
