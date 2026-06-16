@@ -5274,6 +5274,7 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
         sender processes must wait on before delivering decoded changes. This
         parameter uses the following syntax:
 <synopsis>
+  [FIRST] <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="parameter">slot_name</replaceable> [, ...] )
 ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="parameter">slot_name</replaceable> [, ...] )
 <replaceable class="parameter">slot_name</replaceable> [, ...]
 </synopsis>
@@ -5285,9 +5286,24 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
         <replaceable class="parameter">num_sync</replaceable>
         must be an integer value greater than zero and must not exceed the
         number of listed slots.
-        Other forms supported by
-        <xref linkend="guc-synchronous-standby-names"/>, such as priority
-        syntax, are not supported.
+        </para>
+        <para>
+         The keyword <literal>FIRST</literal>, coupled with
+         <replaceable class="parameter">num_sync</replaceable>, specifies
+         priority-based semantics. Logical decoding will wait for the first
+         <replaceable class="parameter">num_sync</replaceable> available
+         physical slots in priority order (the order they appear in the list).
+         Missing, logical, or invalidated slots are skipped. Inactive slots are
+         skipped only while they are lagging. However, if a slot exists and is
+         valid and active but has not yet caught up, the system will wait for it
+         rather than skipping to lower-priority slots. If, after skipping
+         unusable slots, fewer than
+         <replaceable class="parameter">num_sync</replaceable> usable slots
+         remain, logical decoding waits until enough slots become usable and
+         caught up, or until the configuration is changed. The keyword
+         <literal>FIRST</literal> is optional in this form, so
+         <literal>2 (slot1, slot2, slot3)</literal> and
+         <literal>FIRST 2 (slot1, slot2, slot3)</literal> are equivalent.
        </para>
        <para>
         A plain comma-separated list without a keyword specifies that
@@ -5324,19 +5340,26 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
          duplicate entries are ignored and only the first occurrence is used.
          The semantics of <varname>synchronized_standby_slots</varname> are
          therefore based on the unique set of listed slot names, preserving the
-         original order of first occurrence. This means that
-         <literal>ANY 2 (slot1, slot1, slot2, slot3)</literal> is treated the
-         same as <literal>ANY 2 (slot1, slot2, slot3)</literal>, and a plain
-         list such as <literal>(slot1, slot1, slot2)</literal> is treated the
-         same as <literal>(slot1, slot2)</literal>. In particular,
+         original order of first occurrence. This means that, in
+         priority-based forms, duplicates do not create additional priority
+         positions: for example,
+         <literal>FIRST 2 (slot1, slot1, slot2, slot3)</literal> is treated the
+         same as <literal>FIRST 2 (slot1, slot2, slot3)</literal>.
+         Likewise, <literal>ANY 2 (slot1, slot1, slot2, slot3)</literal> is
+         treated the same as <literal>ANY 2 (slot1, slot2, slot3)</literal>,
+         and a plain list such as <literal>(slot1, slot1, slot2)</literal>
+         is treated the same as <literal>(slot1, slot2)</literal>. In particular,
          <replaceable class="parameter">num_sync</replaceable> must not exceed
          the number of unique listed slots. Such a configuration results in an
          error to prevent indefinite waits in WAL sender processes due to a
          misconfigured <varname>synchronized_standby_slots</varname> setting.
         </para>
-      <para>
-       <literal>ANY</literal> is case-insensitive.
-      </para>
+        <para>
+         <literal>FIRST</literal> and <literal>ANY</literal> are case-insensitive.
+         If these keywords are used as the name of a replication slot,
+         the <replaceable class="parameter">slot_name</replaceable> must
+         be double-quoted.
+        </para>
        <para>
         The use of <varname>synchronized_standby_slots</varname> guarantees
         that logical replication
