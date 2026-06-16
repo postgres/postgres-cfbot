@@ -4,6 +4,7 @@
 # Test synchronized_standby_slots with different syntax modes:
 # - Plain list (ALL mode): slot1, slot2
 # - ANY N (quorum mode): ANY N (slot1, slot2, ...)
+# - FIRST N (priority mode): FIRST N (slot1, slot2, ...)
 #
 # Setup: a 3-node cluster with one primary, two physical standbys, and a
 # logical decoding client using a failover-enabled slot.
@@ -200,14 +201,166 @@ is($decoded_bc, '1',
 	'plain list: works when all standbys are up');
 
 ##################################################
-# PART D: ANY 2 waits on an active lagging slot
+# PART D: Verify FIRST N priority semantics
 ##################################################
 
-# Stop standby1 so sb1_slot can be controlled by a raw replication connection
-# that keeps the slot active while lagging.
+# FIRST N should:
+# 1. Select first N slots in priority order (list order)
+# 2. Skip missing/invalid/logical slots and inactive lagging slots to find
+#    N caught-up slots
+# 3. Wait for active lagging slots (not skip to lower priority)
+
+# Test FIRST 2 (sb1_slot, sb2_slot) with both up; should wait for both.
+$primary->adjust_conf('postgresql.conf', 'synchronized_standby_slots',
+	"'FIRST 2 (sb1_slot, sb2_slot)'");
+$primary->reload;
+
+$primary->safe_psql('postgres',
+	"SELECT pg_logical_emit_message(true, 'qtest', 'first_2_both_up');"
+);
+$primary->wait_for_replay_catchup($standby1);
+$primary->wait_for_replay_catchup($standby2);
+
+my $decoded_e2 = $primary->safe_psql('postgres',
+	q{SELECT count(*) FROM pg_logical_slot_get_changes('logical_failover', NULL, NULL)
+	  WHERE data LIKE '%first_2_both_up%';});
+is($decoded_e2, '1',
+	'FIRST 2: decoding works when all required slots are up');
+
+# Test FIRST 1 (sb1_slot, sb2_slot) with sb1_slot unavailable.
 $standby1->stop;
 
+$primary->adjust_conf('postgresql.conf', 'synchronized_standby_slots',
+	"'FIRST 1 (sb1_slot, sb2_slot)'");
+$primary->reload;
+
+$primary->safe_psql('postgres',
+	"SELECT pg_logical_emit_message(true, 'qtest', 'first_1_skip_unavailable');"
+);
+$primary->wait_for_replay_catchup($standby2);
+
+# FIRST 1 should skip sb1_slot (unavailable) and use sb2_slot.
+my $decoded_e1 = $primary->safe_psql('postgres',
+	q{SELECT count(*) FROM pg_logical_slot_get_changes('logical_failover', NULL, NULL)
+	  WHERE data LIKE '%first_1_skip_unavailable%';});
+is($decoded_e1, '1',
+	'FIRST 1: skips unavailable first slot, uses second slot');
+
+# Test shorthand priority syntax: N (...) means FIRST N (...).
+$primary->adjust_conf('postgresql.conf', 'synchronized_standby_slots',
+	"'1 (sb1_slot, sb2_slot)'");
+$primary->reload;
+
+$primary->safe_psql('postgres',
+	"SELECT pg_logical_emit_message(true, 'qtest', 'num_1_shorthand_priority');"
+);
+$primary->wait_for_replay_catchup($standby2);
+
+my $decoded_num1 = $primary->safe_psql('postgres',
+	q{SELECT count(*) FROM pg_logical_slot_get_changes('logical_failover', NULL, NULL)
+	  WHERE data LIKE '%num_1_shorthand_priority%';});
+is($decoded_num1, '1',
+	'1 (...): shorthand priority syntax behaves like FIRST 1');
+
+##################################################
+# PART E: FIRST 1 and ANY 2 wait on an active lagging slot
+##################################################
+
+# Bring standby1 back so sb1_slot is active and caught up.
+$standby1->start;
+$primary->wait_for_replay_catchup($standby1);
+
+# To test the active-but-lagging slot path deterministically, we open a raw
+# replication connection to sb1_slot starting from a deliberately old LSN.
+# psql in replication mode never sends Standby Status Update messages, so
+# the walsender keeps sb1_slot's active_pid set but restart_lsn never
+# advances.
+
+# Stop standby1 so its walsender releases sb1_slot, allowing our replication
+# connection below to acquire it.
+$standby1->stop;
+
+# Capture a safely old LSN to stream from, before the test WAL record.
 my $old_lsn = $primary->safe_psql('postgres',
+	"SELECT pg_current_wal_lsn();");
+
+# FIRST 1 must wait for the highest-priority slot when it is active but lagging.
+$primary->adjust_conf('postgresql.conf', 'synchronized_standby_slots',
+	"'FIRST 1 (sb1_slot, sb2_slot)'");
+$primary->reload;
+
+my $first_lag_lsn = $primary->safe_psql('postgres',
+	"SELECT pg_logical_emit_message(true, 'qtest', 'first_1_lagging_blocks');"
+);
+$primary->wait_for_replay_catchup($standby2);
+
+# Open a raw replication connection to sb1_slot starting from $old_lsn.
+# This activates the slot (active_pid IS NOT NULL) while keeping restart_lsn
+# frozen below $first_lag_lsn for the lifetime of the connection.
+my $repl_first = $primary->background_psql(
+	'postgres',
+	replication => 'database',
+	on_error_stop => 0,
+	timeout => $PostgreSQL::Test::Utils::timeout_default);
+
+$repl_first->query_until(
+	qr/^$/,
+	"START_REPLICATION SLOT sb1_slot PHYSICAL $old_lsn;\n");
+
+# Wait until sb1_slot shows active_pid, confirming the walsender is live.
+$primary->poll_query_until('postgres', q{
+	SELECT active_pid IS NOT NULL
+	FROM pg_replication_slots
+	WHERE slot_name = 'sb1_slot'
+}) or die "replication connection did not activate sb1_slot";
+
+# sb1_slot is now active and its restart_lsn is behind $first_lag_lsn.
+# Start logical decoding in the background; it must block.
+my $bg_first = $primary->background_psql(
+	'postgres',
+	on_error_stop => 0,
+	timeout => $PostgreSQL::Test::Utils::timeout_default);
+
+$bg_first->query_until(
+	qr/decode_start/, q(
+   \echo decode_start
+   SELECT pg_logical_slot_peek_changes('logical_failover', NULL, NULL);
+));
+
+ok( $primary->poll_query_until(
+		'postgres', q{
+SELECT EXISTS (
+	SELECT 1
+	FROM pg_stat_activity
+	WHERE wait_event = 'WaitForStandbyConfirmation'
+	  AND query LIKE '%pg_logical_slot_peek_changes(''logical_failover''%'
+);
+}),
+	'FIRST 1: decoding waits for active lagging higher-priority slot');
+
+$primary->adjust_conf('postgresql.conf', 'synchronized_standby_slots', "''");
+$primary->reload;
+$bg_first->quit;
+$repl_first->quit;
+
+# Ensure the previous replication connection has fully released sb1_slot
+# before reusing it in the next subtest.
+$primary->poll_query_until('postgres', q{
+	SELECT active_pid IS NULL
+	FROM pg_replication_slots
+	WHERE slot_name = 'sb1_slot'
+}) or die "replication connection did not release sb1_slot";
+
+# Consume the change so the slot is clean for the next test.
+$primary->safe_psql('postgres',
+	q{SELECT pg_logical_slot_get_changes('logical_failover', NULL, NULL);});
+
+# ANY 2 must also wait when only one of two required slots has caught up.
+# Reuse the same technique: open a raw replication connection to sb1_slot
+# from $old_lsn so it is active but its restart_lsn stays behind the target.
+
+# Capture another old LSN baseline before the next test WAL record.
+$old_lsn = $primary->safe_psql('postgres',
 	"SELECT pg_current_wal_lsn();");
 
 $primary->adjust_conf('postgresql.conf', 'synchronized_standby_slots',
@@ -272,7 +425,7 @@ $primary->wait_for_replay_catchup($standby1);
 
 
 ##################################################
-# PART E: Duplicate entries are ignored for quorum counting
+# PART F: Duplicate entries are ignored for quorum counting
 ##################################################
 
 # Stop standby2 so only sb1_slot can catch up.
@@ -317,13 +470,53 @@ $bg_dup->quit;
 $primary->safe_psql('postgres',
 	q{SELECT pg_logical_slot_get_changes('logical_failover', NULL, NULL);});
 
+# FIRST duplicates must also not create extra priority positions.
+$primary->adjust_conf('postgresql.conf', 'synchronized_standby_slots',
+	"'FIRST 2 (sb1_slot, sb1_slot, sb2_slot)'");
+$primary->reload;
+
+$primary->safe_psql('postgres',
+	"SELECT pg_logical_emit_message(true, 'qtest', 'first_duplicate_entries_ignored');"
+);
+$primary->wait_for_replay_catchup($standby1);
+
+my $bg_first_dup = $primary->background_psql(
+	'postgres',
+	on_error_stop => 0,
+	timeout => $PostgreSQL::Test::Utils::timeout_default);
+
+$bg_first_dup->query_until(
+	qr/decode_start/, q(
+   \echo decode_start
+   SELECT pg_logical_slot_peek_changes('logical_failover', NULL, NULL);
+));
+
+ok( $primary->poll_query_until(
+		'postgres', q{
+SELECT EXISTS (
+	SELECT 1
+	FROM pg_stat_activity
+	WHERE wait_event = 'WaitForStandbyConfirmation'
+	  AND query LIKE '%pg_logical_slot_peek_changes(''logical_failover''%'
+);
+}),
+	'FIRST duplicates are ignored when counting priority slots');
+
+$primary->adjust_conf('postgresql.conf', 'synchronized_standby_slots', "''");
+$primary->reload;
+$bg_first_dup->quit;
+
+# Consume the change for the next test.
+$primary->safe_psql('postgres',
+	q{SELECT pg_logical_slot_get_changes('logical_failover', NULL, NULL);});
+
 # Bring standby2 back up for validation tests.
 $standby2->start;
 $primary->wait_for_replay_catchup($standby2);
 
 
 ##################################################
-# PART F: Verify GUC validation rejects bad values
+# PART G: Verify GUC validation rejects bad values
 ##################################################
 
 my ($result, $stdout, $stderr);
@@ -339,18 +532,6 @@ like($stderr, qr/ERROR/,
 	"ALTER SYSTEM SET synchronized_standby_slots = 'ANY 1 (sb1_slot, sb2_slot';");
 like($stderr, qr/ERROR/,
 	'GUC rejects malformed ANY syntax');
-
-# Priority syntax is not supported by synchronized_standby_slots yet
-($result, $stdout, $stderr) = $primary->psql('postgres',
-	"ALTER SYSTEM SET synchronized_standby_slots = 'FIRST 1 (sb1_slot, sb2_slot)';");
-like($stderr, qr/priority syntax is not supported/,
-	'GUC rejects FIRST syntax');
-
-# Legacy priority syntax is not supported by synchronized_standby_slots yet
-($result, $stdout, $stderr) = $primary->psql('postgres',
-	"ALTER SYSTEM SET synchronized_standby_slots = '1 (sb1_slot, sb2_slot)';");
-like($stderr, qr/priority syntax is not supported/,
-	'GUC rejects legacy priority syntax');
 
 # Invalid slot name
 ($result, $stdout, $stderr) = $primary->psql('postgres',

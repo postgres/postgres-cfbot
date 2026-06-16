@@ -3078,6 +3078,8 @@ CompactSyncRepConfigMemberNames(SyncRepConfigData *config)
  *
  *   slot1, slot2                   -- wait for ALL listed slots
  *   ANY N (slot1, slot2, ...)      -- wait for any N-of-M (quorum)
+ *   FIRST N (slot1, slot2, ...)    -- wait for first N in priority order
+ *   N (slot1, slot2, ...)          -- shorthand for FIRST N
  *
  * Note: Simple list syntax is interpreted as "wait for ALL" for this GUC,
  * unlike synchronous_standby_names where it means "FIRST 1".
@@ -3115,14 +3117,6 @@ check_synchronized_standby_slots(char **newval, void **extra, GucSource source)
 			else
 				GUC_check_errdetail("\"%s\" parser failed.",
 									"synchronized_standby_slots");
-			return false;
-		}
-
-		if (syncrep_parse_result->syncrep_method == SYNC_REP_PRIORITY)
-		{
-			GUC_check_errcode(ERRCODE_INVALID_PARAMETER_VALUE);
-			GUC_check_errmsg("priority syntax is not supported for parameter \"%s\"",
-							 "synchronized_standby_slots");
 			return false;
 		}
 
@@ -3347,6 +3341,12 @@ ReportUnavailableSyncStandbySlots(SyncStandbySlotsStateInfo *slot_states,
  *   Simple list (e.g., "slot1, slot2"):
  *     ALL slots must have caught up. Returns false otherwise.
  *
+ *   FIRST N (e.g., "FIRST 2 (slot1, slot2, slot3)"):
+ *     Wait for the first N eligible slots in priority order. Skips missing,
+ *     invalid, logical, and inactive-lagging slots to find N eligible slots.
+ *     If an active slot is lagging, waits for it (does not skip to lower
+ *     priority slots).
+ *
  *   ANY N (e.g., "ANY 2 (slot1, slot2, slot3)"):
  *     Wait for any N eligible slots. Skips missing, invalid, logical, and
  *     lagging slots (inactive or active) to find N slots that have caught up.
@@ -3397,11 +3397,14 @@ StandbySlotsHaveCaughtup(XLogRecPtr wait_for_lsn, int elevel)
 	 * first slot that is missing/invalid/logical, or the first slot that is
 	 * lagging (inactive or active).
 	 *
-	 * wait_for_all = false means we select N from M candidates (ANY N syntax).
-	 * In this mode, slots already caught up are counted even if inactive, and
-	 * lagging slots are skipped until enough slots have caught up.
-	 * Duplicate configured slot names do not appear here because the check hook
-	 * compacts them out of the parsed configuration.
+	 * wait_for_all = false means we select N from M candidates (FIRST N or
+	 * ANY N syntax). In this mode, slots already caught up are counted even if
+	 * inactive. In FIRST N mode, we skip missing/invalid/logical slots and
+	 * lagging inactive slots, but wait for an active lagging slot with higher
+	 * priority. In ANY N mode, we skip lagging slots (inactive or active) to
+	 * find any N that have caught up. Duplicate configured slot names do not
+	 * appear here because the check hook compacts them out of the parsed
+	 * configuration.
 	 */
 	required = synchronized_standby_slots_config->num_sync;
 	wait_for_all = (synchronized_standby_slots_config->syncrep_method == SYNC_REP_DEFAULT);
@@ -3484,8 +3487,9 @@ StandbySlotsHaveCaughtup(XLogRecPtr wait_for_lsn, int elevel)
 			 * If a slot is inactive and lagging, report it as inactive. If it
 			 * is active and lagging, report it as lagging.
 			 *
-			 * In ALL mode: must wait for it. In ANY N (quorum) mode: skip and
-			 * use another slot.
+			 * In ALL mode: must wait for it. In FIRST N (priority) mode:
+			 * lagging active slots block, while inactive slots can be
+			 * skipped. In ANY N (quorum) mode: skip and use another slot.
 			 */
 			slot_states[num_slot_states].slot_name = name;
 			slot_states[num_slot_states].state =
@@ -3493,7 +3497,9 @@ StandbySlotsHaveCaughtup(XLogRecPtr wait_for_lsn, int elevel)
 			slot_states[num_slot_states].restart_lsn = restart_lsn;
 			num_slot_states++;
 
-			if (wait_for_all)
+			if (wait_for_all ||
+				(!inactive &&
+				 synchronized_standby_slots_config->syncrep_method == SYNC_REP_PRIORITY))
 				break;
 			goto next_slot;
 		}
@@ -3506,7 +3512,7 @@ StandbySlotsHaveCaughtup(XLogRecPtr wait_for_lsn, int elevel)
 
 		caught_up_slot_num++;
 
-		/* Stop processing if the required number of slots have caught up. */
+		/* Stop once the required number of slots have caught up. */
 		if (caught_up_slot_num >= required)
 			break;
 
@@ -3521,8 +3527,8 @@ next_slot:
 	 * problem states and return false.
 	 *
 	 * We only emit messages when the requirement is not met to avoid
-	 * misleading messages in quorum mode where other slots may have satisfied
-	 * the condition despite some slots having issues.
+	 * misleading messages in quorum/priority mode where other slots may have
+	 * satisfied the condition despite some slots having issues.
 	 */
 	if (caught_up_slot_num < required)
 	{
