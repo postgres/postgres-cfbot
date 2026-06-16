@@ -136,6 +136,12 @@ typedef struct KeyActions
 	KeyAction *deleteAction;
 } KeyActions;
 
+typedef struct XmlElementOpts
+{
+	List	   *xml_attributes;
+	List	   *xml_namespaces;
+} XmlElementOpts;
+
 /* ConstraintAttributeSpec yields an integer bitmask of these flags: */
 #define CAS_NOT_DEFERRABLE			0x01
 #define CAS_DEFERRABLE				0x02
@@ -186,7 +192,7 @@ static Node *makeNotExpr(Node *expr, int location);
 static Node *makeAArrayExpr(List *elements, int location, int location_end);
 static Node *makeSQLValueFunction(SQLValueFunctionOp op, int32 typmod,
 								  int location);
-static Node *makeXmlExpr(XmlExprOp op, char *name, List *named_args,
+static Node *makeXmlExpr(XmlExprOp op, char *name, XmlElementOpts *opts,
 						 List *args, int location);
 static List *mergeTableFuncParameters(List *func_args, List *columns, core_yyscan_t yyscanner);
 static TypeName *TableFuncTypeName(List *columns);
@@ -273,6 +279,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	MergeWhenClause *mergewhen;
 	struct KeyActions *keyactions;
 	struct KeyAction *keyaction;
+	struct XmlElementOpts *xmlelementopts;
 	ReturningClause *retclause;
 	ReturningOptionKind retoptionkind;
 }
@@ -631,8 +638,9 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %type <list>	xmltable_column_list xmltable_column_option_list
 %type <node>	xmltable_column_el
 %type <defelt>	xmltable_column_option_el
-%type <list>	xml_namespace_list
+%type <list>	xml_namespace_list xml_namespaces
 %type <target>	xml_namespace_el
+%type <xmlelementopts> xmlelement_opts
 
 %type <node>	func_application func_expr_common_subexpr
 %type <node>	func_expr func_expr_windowless
@@ -15179,6 +15187,15 @@ xml_namespace_el:
 					$$->val = $2;
 					$$->location = @1;
 				}
+			| NO DEFAULT
+				{
+					$$ = makeNode(ResTarget);
+					$$->name = NULL;
+					$$->indirection = NIL;
+					$$->val = NULL;
+					$$->location = @1;
+				}
+
 		;
 
 json_table:
@@ -16328,12 +16345,12 @@ a_expr:		c_expr									{ $$ = $1; }
 				}
 			| a_expr IS DOCUMENT_P					%prec IS
 				{
-					$$ = makeXmlExpr(IS_DOCUMENT, NULL, NIL,
+					$$ = makeXmlExpr(IS_DOCUMENT, NULL, NULL,
 									 list_make1($1), @2);
 				}
 			| a_expr IS NOT DOCUMENT_P				%prec IS
 				{
-					$$ = makeNotExpr(makeXmlExpr(IS_DOCUMENT, NULL, NIL,
+					$$ = makeNotExpr(makeXmlExpr(IS_DOCUMENT, NULL, NULL,
 												 list_make1($1), @2),
 									 @2);
 				}
@@ -16483,12 +16500,12 @@ b_expr:		c_expr
 				}
 			| b_expr IS DOCUMENT_P					%prec IS
 				{
-					$$ = makeXmlExpr(IS_DOCUMENT, NULL, NIL,
+					$$ = makeXmlExpr(IS_DOCUMENT, NULL, NULL,
 									 list_make1($1), @2);
 				}
 			| b_expr IS NOT DOCUMENT_P				%prec IS
 				{
-					$$ = makeNotExpr(makeXmlExpr(IS_DOCUMENT, NULL, NIL,
+					$$ = makeNotExpr(makeXmlExpr(IS_DOCUMENT, NULL, NULL,
 												 list_make1($1), @2),
 									 @2);
 				}
@@ -17024,21 +17041,21 @@ func_expr_common_subexpr:
 				}
 			| XMLCONCAT '(' expr_list ')'
 				{
-					$$ = makeXmlExpr(IS_XMLCONCAT, NULL, NIL, $3, @1);
+					$$ = makeXmlExpr(IS_XMLCONCAT, NULL, NULL, $3, @1);
 				}
 			| XMLELEMENT '(' NAME_P ColLabel ')'
 				{
-					$$ = makeXmlExpr(IS_XMLELEMENT, $4, NIL, NIL, @1);
+					$$ = makeXmlExpr(IS_XMLELEMENT, $4, NULL, NIL, @1);
 				}
-			| XMLELEMENT '(' NAME_P ColLabel ',' xml_attributes ')'
+			| XMLELEMENT '(' NAME_P ColLabel ',' xmlelement_opts ')'
 				{
 					$$ = makeXmlExpr(IS_XMLELEMENT, $4, $6, NIL, @1);
 				}
 			| XMLELEMENT '(' NAME_P ColLabel ',' expr_list ')'
 				{
-					$$ = makeXmlExpr(IS_XMLELEMENT, $4, NIL, $6, @1);
+					$$ = makeXmlExpr(IS_XMLELEMENT, $4, NULL, $6, @1);
 				}
-			| XMLELEMENT '(' NAME_P ColLabel ',' xml_attributes ',' expr_list ')'
+			| XMLELEMENT '(' NAME_P ColLabel ',' xmlelement_opts ',' expr_list ')'
 				{
 					$$ = makeXmlExpr(IS_XMLELEMENT, $4, $6, $8, @1);
 				}
@@ -17053,12 +17070,17 @@ func_expr_common_subexpr:
 				}
 			| XMLFOREST '(' labeled_expr_list ')'
 				{
-					$$ = makeXmlExpr(IS_XMLFOREST, NULL, $3, NIL, @1);
+					XmlElementOpts *opts = palloc(sizeof(XmlElementOpts));
+
+					opts->xml_attributes = $3;
+					opts->xml_namespaces = NIL;
+
+					$$ = makeXmlExpr(IS_XMLFOREST, NULL, opts, NIL, @1);
 				}
 			| XMLPARSE '(' document_or_content a_expr xml_whitespace_option ')'
 				{
 					XmlExpr *x = (XmlExpr *)
-						makeXmlExpr(IS_XMLPARSE, NULL, NIL,
+						makeXmlExpr(IS_XMLPARSE, NULL, NULL,
 									list_make2($4, makeBoolAConst($5, -1)),
 									@1);
 
@@ -17075,7 +17097,7 @@ func_expr_common_subexpr:
 				}
 			| XMLROOT '(' a_expr ',' xml_root_version opt_xml_root_standalone ')'
 				{
-					$$ = makeXmlExpr(IS_XMLROOT, NULL, NIL,
+					$$ = makeXmlExpr(IS_XMLROOT, NULL, NULL,
 									 list_make3($3, $5, $6), @1);
 				}
 			| XMLSERIALIZE '(' document_or_content a_expr AS SimpleTypename xml_indent_option ')'
@@ -17279,6 +17301,9 @@ opt_xml_root_standalone: ',' STANDALONE_P YES_P
 xml_attributes: XMLATTRIBUTES '(' labeled_expr_list ')'	{ $$ = $3; }
 		;
 
+xml_namespaces: XMLNAMESPACES '(' xml_namespace_list ')'	{ $$ = $3; }
+		;
+
 labeled_expr_list:	labeled_expr					{ $$ = list_make1($1); }
 			| labeled_expr_list ',' labeled_expr	{ $$ = lappend($1, $3); }
 		;
@@ -17313,6 +17338,44 @@ xml_indent_option: INDENT							{ $$ = true; }
 xml_whitespace_option: PRESERVE WHITESPACE_P		{ $$ = true; }
 			| STRIP_P WHITESPACE_P					{ $$ = false; }
 			| /*EMPTY*/								{ $$ = false; }
+		;
+
+xmlelement_opts: xml_attributes
+				{
+					XmlElementOpts *n = palloc(sizeof(XmlElementOpts));
+
+					n->xml_attributes = $1;
+					n->xml_namespaces = NIL;
+					$$ = n;
+				}
+			| xml_namespaces
+				{
+					XmlElementOpts *n = palloc(sizeof(XmlElementOpts));
+
+					n->xml_attributes = NIL;
+					n->xml_namespaces = $1;
+					$$ = n;
+				}
+			| xmlelement_opts ',' xml_attributes
+				{
+					if ($$->xml_attributes)
+						ereport(ERROR,
+							(errcode(ERRCODE_SYNTAX_ERROR),
+							 errmsg("duplicate XMLATTRIBUTES specified"),
+							 parser_errposition(@3)));
+
+					$$->xml_attributes = $3;
+				}
+			| xmlelement_opts ',' xml_namespaces
+				{
+					if ($$->xml_namespaces)
+						ereport(ERROR,
+							(errcode(ERRCODE_SYNTAX_ERROR),
+							 errmsg("duplicate XMLNAMESPACES specified"),
+							 parser_errposition(@3)));
+
+					$$->xml_namespaces = $3;
+				}
 		;
 
 /* We allow several variants for SQL and other compatibility. */
@@ -20505,7 +20568,7 @@ makeSQLValueFunction(SQLValueFunctionOp op, int32 typmod, int location)
 }
 
 static Node *
-makeXmlExpr(XmlExprOp op, char *name, List *named_args, List *args,
+makeXmlExpr(XmlExprOp op, char *name, XmlElementOpts *opts, List *args,
 			int location)
 {
 	XmlExpr    *x = makeNode(XmlExpr);
@@ -20517,7 +20580,12 @@ makeXmlExpr(XmlExprOp op, char *name, List *named_args, List *args,
 	 * named_args is a list of ResTarget; it'll be split apart into separate
 	 * expression and name lists in transformXmlExpr().
 	 */
-	x->named_args = named_args;
+	if (opts)
+	{
+		x->named_args = opts->xml_attributes;
+		x->xmlnamespaces = opts->xml_namespaces;
+	}
+
 	x->arg_names = NIL;
 	x->args = args;
 	/* xmloption, if relevant, must be filled in by caller */
