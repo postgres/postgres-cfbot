@@ -929,6 +929,12 @@
 #include_if_exists = '...'              # include file only if it exists
 #include = '...'                        # include file
 
+#------------------------------------------------------------------------------
+# CREDENTIAL VALIDATION
+#------------------------------------------------------------------------------
+
+#credential_validation_enabled = off    # re-validate session credentials periodically
+#credential_validation_interval = 60    # revalidation interval in seconds (5-3600)
 
 #------------------------------------------------------------------------------
 # CUSTOMIZED OPTIONS

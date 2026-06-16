@@ -52,6 +52,7 @@
 #include "common/scram-common.h"
 #include "jit/jit.h"
 #include "libpq/auth.h"
+#include "libpq/auth-validate.h"
 #include "libpq/libpq.h"
 #include "libpq/oauth.h"
 #include "libpq/scram.h"
