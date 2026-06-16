@@ -1474,7 +1474,12 @@ preprocess_expression(PlannerInfo *root, Node *expr, int kind)
 	 * with AND directly under AND, nor OR directly under OR.
 	 */
 	if (kind != EXPRKIND_RTFUNC)
-		expr = eval_const_expressions(root, expr);
+	{
+		if (kind == EXPRKIND_QUAL)
+			expr = eval_const_expressions_qual(root, expr);
+		else
+			expr = eval_const_expressions(root, expr);
+	}
 
 	/*
 	 * If it's a qual or havingQual, canonicalize it.
