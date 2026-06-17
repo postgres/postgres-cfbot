@@ -271,6 +271,38 @@ key|pg_typeof|val
 
 step drop1: DROP TABLE tmp2;
 
+starting permutation: create1dr b1 b2 ins1_2 ins2_2 sel1_2 sel2_2 c1 c2 sel1_2 sel2_2 drop1
+step create1dr: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text) ON COMMIT DELETE ROWS;
+step b1: BEGIN;
+step b2: BEGIN;
+step ins1_2: INSERT INTO tmp2 VALUES (1, 's1');
+step ins2_2: INSERT INTO tmp2 VALUES (1, 's2');
+step sel1_2: SELECT * FROM tmp2;
+key|val
+---+---
+  1|s1 
+(1 row)
+
+step sel2_2: SELECT * FROM tmp2;
+key|val
+---+---
+  1|s2 
+(1 row)
+
+step c1: COMMIT;
+step c2: COMMIT;
+step sel1_2: SELECT * FROM tmp2;
+key|val
+---+---
+(0 rows)
+
+step sel2_2: SELECT * FROM tmp2;
+key|val
+---+---
+(0 rows)
+
+step drop1: DROP TABLE tmp2;
+
 starting permutation: create1dr ins1_2 ins2_2 drop1 create1dr ins1_2 ins2_2 drop1
 step create1dr: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text) ON COMMIT DELETE ROWS;
 step ins1_2: INSERT INTO tmp2 VALUES (1, 's1');

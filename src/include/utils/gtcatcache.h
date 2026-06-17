@@ -32,6 +32,8 @@ extern void GTCatCacheTupleInsert(GTCatCacheIdentifier cacheId, Oid relid,
 								  const Datum *values, const bool *nulls);
 extern void GTCatCacheTupleUpdate(GTCatCacheIdentifier cacheId, Oid relid,
 								  HeapTuple newtuple);
+extern void GTCatCacheTupleUpdateInPlace(GTCatCacheIdentifier cacheId,
+										 Oid relid, HeapTuple newtuple);
 extern void GTCatCacheTupleDelete(GTCatCacheIdentifier cacheId, Oid relid);
 extern void GTCatCacheFlush(void);
 extern void AtEOXact_GTCatCache(bool isCommit);

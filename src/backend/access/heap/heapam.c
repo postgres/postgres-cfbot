@@ -42,6 +42,7 @@
 #include "access/xloginsert.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_database_d.h"
+#include "catalog/pg_temp_class.h"
 #include "commands/vacuum.h"
 #include "executor/instrument_node.h"
 #include "pgstat.h"
@@ -4395,6 +4396,9 @@ check_lock_if_inplace_updateable_rel(Relation relation,
 					return;
 			}
 			break;
+		case TempRelationRelationId:
+			/* No lock required -- temp tables are only accessible by us */
+			return;
 		default:
 			Assert(!IsInplaceUpdateRelation(relation));
 			return;

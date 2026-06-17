@@ -26,6 +26,7 @@ step sel1p { SELECT tableoid::regclass, * FROM tmp_parted; }
 step create1 { CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box); }
 step create1dr { CREATE GLOBAL TEMP TABLE tmp2 (key int, val text) ON COMMIT DELETE ROWS; }
 step ins1_2 { INSERT INTO tmp2 VALUES (1, 's1'); }
+step sel1_2 { SELECT * FROM tmp2; }
 step alter1a { ALTER TABLE tmp2 ALTER COLUMN key SET DATA TYPE numeric; }
 step alter1b { ALTER TABLE tmp2 ALTER COLUMN val SET NOT NULL; }
 step alter1c { ALTER TABLE tmp2 ADD CONSTRAINT tmp2_nn NOT NULL key; }
@@ -41,6 +42,7 @@ step r1 { ROLLBACK; }
 step sp1 { SAVEPOINT sp; }
 step rsp1 { ROLLBACK TO SAVEPOINT sp; }
 step drop1 { DROP TABLE tmp2; }
+step c1 { COMMIT; }
 step prep1 { PREPARE TRANSACTION 'tx'; }
 step cprep1 { COMMIT PREPARED 'tx'; }
 step idx1 { CREATE INDEX tmp_val_idx ON tmp(val); }
@@ -77,6 +79,7 @@ step r2 { ROLLBACK; }
 step sp2 { SAVEPOINT sp; }
 step rsp2 { ROLLBACK TO SAVEPOINT sp; }
 step ins2_2 { INSERT INTO tmp2 VALUES (1, 's2'); }
+step sel2_2 { SELECT * FROM tmp2; }
 step seltype2 { SELECT key, pg_typeof(key), val FROM tmp2; }
 step drop2 { DROP TABLE tmp2; }
 step sel2_idx {
@@ -118,6 +121,9 @@ permutation create1 ins1_2
 permutation create1 ins1_2 ins2_2
             alter1a alter1b alter1c alter1d alter1e alter1f alter1g alter1h
             uniq_idx1 seltype1 seltype2 drop1
+
+# Test concurrent ON COMMIT DELETE ROWS
+permutation create1dr b1 b2 ins1_2 ins2_2 sel1_2 sel2_2 c1 c2 sel1_2 sel2_2 drop1
 
 # Test DROP with ON COMMIT DELETE ROWS
 permutation create1dr ins1_2 ins2_2 drop1 create1dr ins1_2 ins2_2 drop1

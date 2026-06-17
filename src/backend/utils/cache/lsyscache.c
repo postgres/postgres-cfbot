@@ -2420,6 +2420,17 @@ get_rel_persistence(Oid relid)
 }
 
 /*
+ * rel_is_global_temp
+ *
+ *		Returns true if the given relation is a global temporary relation.
+ */
+bool
+rel_is_global_temp(Oid relid)
+{
+	return get_rel_persistence(relid) == RELPERSISTENCE_GLOBAL_TEMP;
+}
+
+/*
  * get_rel_relam
  *
  *		Returns the relam associated with a given relation.

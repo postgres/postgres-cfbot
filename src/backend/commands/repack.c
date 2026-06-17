@@ -1266,7 +1266,9 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 {
 	Relation	relRelation;
 	HeapTuple	reltup;
+	HeapTuple	temp_reltup;
 	Form_pg_class relform;
+	Form_pg_temp_class temp_relform;
 	TupleDesc	oldTupDesc PG_USED_FOR_ASSERTS_ONLY;
 	TupleDesc	newTupDesc PG_USED_FOR_ASSERTS_ONLY;
 	VacuumParams params;
@@ -1458,24 +1460,36 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 					   tups_recently_dead,
 					   pg_rusage_show(&ru0))));
 
-	/* Update pg_class to reflect the correct values of pages and tuples. */
+	/*
+	 * Update pg_class / pg_temp_class to reflect the correct values of pages
+	 * and tuples.
+	 */
 	relRelation = table_open(RelationRelationId, RowExclusiveLock);
 
-	reltup = SearchSysCacheCopy1(RELOID,
-								 ObjectIdGetDatum(RelationGetRelid(NewHeap)));
+	reltup = GetPgClassAndPgTempClassTuples(RelationGetRelid(NewHeap), false,
+											&temp_reltup, true);
 	if (!HeapTupleIsValid(reltup))
 		elog(ERROR, "cache lookup failed for relation %u",
 			 RelationGetRelid(NewHeap));
 	relform = (Form_pg_class) GETSTRUCT(reltup);
+	temp_relform = (Form_pg_temp_class) GETSTRUCT_SAFE(temp_reltup);
 
-	relform->relpages = num_pages;
-	relform->reltuples = num_tuples;
+	SetEffective_relpages(relform, temp_relform, num_pages, NULL, NULL);
+	SetEffective_reltuples(relform, temp_relform, num_tuples, NULL, NULL);
 
-	/* Don't update the stats for pg_class.  See swap_relation_files. */
-	if (RelationGetRelid(OldHeap) != RelationRelationId)
-		CatalogTupleUpdate(relRelation, &reltup->t_self, reltup);
+	if (HeapTupleIsValid(temp_reltup))
+	{
+		UpdatePgTempClassTuple(RelationGetRelid(NewHeap), temp_reltup);
+		heap_freetuple(temp_reltup);
+	}
 	else
-		CacheInvalidateRelcacheByTuple(reltup);
+	{
+		/* Don't update the stats for pg_class.  See swap_relation_files. */
+		if (RelationGetRelid(OldHeap) != RelationRelationId)
+			CatalogTupleUpdate(relRelation, &reltup->t_self, reltup);
+		else
+			CacheInvalidateRelcacheByTuple(reltup);
+	}
 
 	/* Clean up. */
 	heap_freetuple(reltup);
@@ -1702,21 +1716,29 @@ swap_relation_files(Oid r1, Oid r2, bool target_is_pg_class,
 		int32		swap_allvisible;
 		int32		swap_allfrozen;
 
-		swap_pages = relform1->relpages;
-		relform1->relpages = relform2->relpages;
-		relform2->relpages = swap_pages;
+		swap_pages = GetEffective_relpages(relform1, temp_relform1);
+		SetEffective_relpages(relform1, temp_relform1,
+							  GetEffective_relpages(relform2, temp_relform2),
+							  NULL, NULL);
+		SetEffective_relpages(relform2, temp_relform2, swap_pages, NULL, NULL);
 
-		swap_tuples = relform1->reltuples;
-		relform1->reltuples = relform2->reltuples;
-		relform2->reltuples = swap_tuples;
+		swap_tuples = GetEffective_reltuples(relform1, temp_relform1);
+		SetEffective_reltuples(relform1, temp_relform1,
+							   GetEffective_reltuples(relform2, temp_relform2),
+							   NULL, NULL);
+		SetEffective_reltuples(relform2, temp_relform2, swap_tuples, NULL, NULL);
 
-		swap_allvisible = relform1->relallvisible;
-		relform1->relallvisible = relform2->relallvisible;
-		relform2->relallvisible = swap_allvisible;
+		swap_allvisible = GetEffective_relallvisible(relform1, temp_relform1);
+		SetEffective_relallvisible(relform1, temp_relform1,
+								   GetEffective_relallvisible(relform2, temp_relform2),
+								   NULL, NULL);
+		SetEffective_relallvisible(relform2, temp_relform2, swap_allvisible, NULL, NULL);
 
-		swap_allfrozen = relform1->relallfrozen;
-		relform1->relallfrozen = relform2->relallfrozen;
-		relform2->relallfrozen = swap_allfrozen;
+		swap_allfrozen = GetEffective_relallfrozen(relform1, temp_relform1);
+		SetEffective_relallfrozen(relform1, temp_relform1,
+								  GetEffective_relallfrozen(relform2, temp_relform2),
+								  NULL, NULL);
+		SetEffective_relallfrozen(relform2, temp_relform2, swap_allfrozen, NULL, NULL);
 	}
 
 	/*
