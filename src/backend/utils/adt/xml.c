@@ -45,6 +45,8 @@
 
 #include "postgres.h"
 
+#include <math.h>
+
 #ifdef USE_LIBXML
 #include <libxml/chvalid.h>
 #include <libxml/entities.h>
@@ -99,6 +101,7 @@
 #include "utils/date.h"
 #include "utils/datetime.h"
 #include "utils/lsyscache.h"
+#include "utils/numeric.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
 #include "utils/xml.h"
@@ -1027,6 +1030,110 @@ xmlelement(XmlExpr *xexpr,
 #endif
 }
 
+/*
+ * Execute an IS_XMLCAST expression.
+ *
+ * sourceType is the OID of the input value's type; targetType is the OID of
+ * the requested output type.  Returns an xml Datum when targetType is XMLOID,
+ * or a text Datum otherwise.  For non-text targets (e.g., integer, interval),
+ * the text result is fed into an outer implicit cast node that the parser
+ * inserted to complete the conversion to the final target type.
+ */
+Datum
+exec_xmlcast(Datum value, Oid sourceType, Oid targetType)
+{
+#ifdef USE_LIBXML
+	switch (targetType)
+	{
+	case XMLOID:
+		/*
+		 * Certain SQL data types must be mapped to XML Schema types when
+		 * casting to XML.  These mappings are defined in SQL/XML:2023
+		 * (ISO/IEC 9075-14:2023), Subclause 6.7 "<XML cast specification>",
+		 * Syntax Rules, item 15.e.i-v.  The corresponding XML Schema lexical
+		 * formats are specified in W3C XML Schema Part 2: Primitive Datatypes.
+		 */
+		if (sourceType == TIMESTAMPOID || sourceType == TIMESTAMPTZOID ||
+			sourceType == DATEOID || sourceType == BYTEAOID || sourceType == BOOLOID ||
+			sourceType == FLOAT4OID || sourceType == FLOAT8OID || sourceType == NUMERICOID)
+		{
+			char *strdt = map_sql_value_to_xml_value(value, sourceType, false);
+			text *mapped_value = cstring_to_text(strdt);
+
+			pfree(strdt);
+			return PointerGetDatum(mapped_value);
+		}
+		else if (sourceType == INTERVALOID)
+		{
+			Interval *in = DatumGetIntervalP(value);
+			struct pg_itm tt,
+				*itm = &tt;
+			char buf[MAXDATELEN + 1];
+
+			/*
+			 * Infinity has no representation in the XSD lexical space for
+			 * xs:duration.
+			 */
+			if (INTERVAL_NOT_FINITE(in))
+				ereport(ERROR,
+						(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+						 errmsg("interval out of range"),
+						 errdetail("XML does not support infinite interval values.")));
+
+			interval2itm(*in, itm);
+			EncodeInterval(itm, INTSTYLE_ISO_8601, buf);
+
+			return PointerGetDatum(cstring_to_text(buf));
+		}
+		/* no need to escape the result, as the origin is also an XML */
+		else if (sourceType == XMLOID)
+			return PointerGetDatum(DatumGetXmlP(value));
+		/* make sure that predefined XML entities are escaped */
+		else
+			return PointerGetDatum(DatumGetXmlP(DirectFunctionCall1(xmltext, value)));
+	case TEXTOID:
+	case VARCHAROID:
+	case NAMEOID:
+	case BPCHAROID:
+	{
+		/*
+		 * When casting from XML to a character string, unescape any
+		 * predefined XML entities.
+		 */
+		char *str = text_to_cstring(DatumGetTextPP(value));
+		char *unescaped = unescape_xml(str);
+		Datum res = PointerGetDatum(cstring_to_text(unescaped));
+
+		pfree(unescaped);
+		pfree(str);
+		return res;
+	}
+
+	case INT2OID:
+	case INT4OID:
+	case INT8OID:
+	case NUMERICOID:
+	case FLOAT4OID:
+	case FLOAT8OID:
+	case BOOLOID:
+	case TIMESTAMPOID:
+	case TIMESTAMPTZOID:
+	case TIMEOID:
+	case TIMETZOID:
+	case DATEOID:
+	case BYTEAOID:
+	case INTERVALOID:
+		return PointerGetDatum(DatumGetTextP(value));
+
+	default:
+		elog(ERROR, "unsupported target data type for XMLCast");
+		pg_unreachable();
+	}
+#else
+	NO_XML_SUPPORT();
+	return (Datum)0;
+#endif
+}
 
 xmltype *
 xmlparse(text *data, XmlOptionType xmloption_arg, bool preserve_whitespace, Node *escontext)
@@ -2578,9 +2685,9 @@ map_sql_value_to_xml_value(Datum value, Oid type, bool xml_escape_strings)
 		{
 			case BOOLOID:
 				if (DatumGetBool(value))
-					return "true";
+					return pstrdup("true");
 				else
-					return "false";
+					return pstrdup("false");
 
 			case DATEOID:
 				{
@@ -2589,7 +2696,11 @@ map_sql_value_to_xml_value(Datum value, Oid type, bool xml_escape_strings)
 					char		buf[MAXDATELEN + 1];
 
 					date = DatumGetDateADT(value);
-					/* XSD doesn't support infinite values */
+
+					/*
+					 * Infinity has no representation in the XSD lexical
+					 * space for xs:date.
+					 */
 					if (DATE_NOT_FINITE(date))
 						ereport(ERROR,
 								(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
@@ -2611,7 +2722,10 @@ map_sql_value_to_xml_value(Datum value, Oid type, bool xml_escape_strings)
 
 					timestamp = DatumGetTimestamp(value);
 
-					/* XSD doesn't support infinite values */
+					/*
+					 * Infinity has no representation in the XSD lexical
+					 * space for xs:dateTime.
+					 */
 					if (TIMESTAMP_NOT_FINITE(timestamp))
 						ereport(ERROR,
 								(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
@@ -2638,7 +2752,10 @@ map_sql_value_to_xml_value(Datum value, Oid type, bool xml_escape_strings)
 
 					timestamp = DatumGetTimestamp(value);
 
-					/* XSD doesn't support infinite values */
+					/*
+					 * Infinity has no representation in the XSD lexical
+					 * space for xs:dateTime.
+					 */
 					if (TIMESTAMP_NOT_FINITE(timestamp))
 						ereport(ERROR,
 								(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
@@ -2710,8 +2827,60 @@ map_sql_value_to_xml_value(Datum value, Oid type, bool xml_escape_strings)
 				}
 #endif							/* USE_LIBXML */
 
-		}
+			case FLOAT4OID:
+				/*
+				 * Special handling for infinity values in floating-point and
+				 * numeric types. The XML Schema specification requires that
+				 * positive infinity be represented as "INF" and negative
+				 * infinity as "-INF" in XML documents for float and double
+				 * types. While decimal types in XML Schema do not support
+				 * infinity, PostgreSQL's NUMERIC type can represent it, so
+				 * we use the same representation for consistency.
+				 *
+				 * See: XML Schema Part 2: Datatypes Second Edition, sections
+				 * 3.2.4 (float) and 3.2.5 (double).
+				 */
+				{
+					float4		val = DatumGetFloat4(value);
 
+					if (isinf(val))
+					{
+						if (val < 0)
+							return pstrdup("-INF");
+						else
+							return pstrdup("INF");
+					}
+				}
+				break;
+
+			case FLOAT8OID:
+				{
+					float8		val = DatumGetFloat8(value);
+
+					if (isinf(val))
+					{
+						if (val < 0)
+							return pstrdup("-INF");
+						else
+							return pstrdup("INF");
+					}
+				}
+				break;
+
+			case NUMERICOID:
+				{
+					Numeric		num = DatumGetNumeric(value);
+
+					if (numeric_is_inf(num))
+					{
+						if (numeric_is_positive_inf(num))
+							return pstrdup("INF");
+						else
+							return pstrdup("-INF");
+					}
+				}
+				break;
+		}
 		/*
 		 * otherwise, just use the type's native text representation
 		 */
@@ -2766,6 +2935,67 @@ escape_xml(const char *str)
 	return buf.data;
 }
 
+/*
+ * Unescape XML escaped characters.
+ *
+ * In order to keep it consistent with "escape_xml(const char*)",
+ * this function intentionally does not depend on libxml2.
+ */
+char *
+unescape_xml(const char *str)
+{
+	StringInfoData buf;
+	size_t p = 0;
+	size_t len;
+
+	if (!str)
+		return NULL;
+
+	len = strlen(str);
+
+	initStringInfo(&buf);
+
+	while (p < len)
+	{
+		if (p + 4 <= len && strncmp(str + p, "&lt;", 4) == 0)
+		{
+			appendStringInfoChar(&buf, '<');
+			p += 4;
+		}
+		else if (p + 4 <= len && strncmp(str + p, "&gt;", 4) == 0)
+		{
+			appendStringInfoChar(&buf, '>');
+			p += 4;
+		}
+		else if (p + 5 <= len && strncmp(str + p, "&amp;", 5) == 0)
+		{
+			appendStringInfoChar(&buf, '&');
+			p += 5;
+		}
+		else if (p + 5 <= len && strncmp(str + p, "&#13;", 5) == 0)
+		{
+			appendStringInfoChar(&buf, '\r');
+			p += 5;
+		}
+		else if (p + 6 <= len && strncmp(str + p, "&quot;", 6) == 0)
+		{
+			appendStringInfoChar(&buf, '"');
+			p += 6;
+		}
+		else if (p + 6 <= len && strncmp(str + p, "&#x0D;", 6) == 0)
+		{
+			appendStringInfoChar(&buf, '\r');
+			p += 6;
+		}
+		else
+		{
+			appendStringInfoChar(&buf, *(str + p));
+			p++;
+		}
+	}
+
+	return buf.data;
+}
 
 static char *
 _SPI_strdup(const char *s)
@@ -4356,6 +4586,7 @@ xml_xpathobjtoxmlarray(xmlXPathObjectPtr xpathobj,
 	datum = PointerGetDatum(cstring_to_xmltype(result_str));
 	(void) accumArrayResult(astate, datum, false,
 							XMLOID, CurrentMemoryContext);
+	pfree(result_str);
 	return 1;
 }
 

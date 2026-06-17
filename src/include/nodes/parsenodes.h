@@ -896,6 +896,14 @@ typedef struct XmlSerialize
 	ParseLoc	location;		/* token location, or -1 if unknown */
 } XmlSerialize;
 
+typedef struct XmlCast
+{
+	NodeTag		type;
+	Node	   *expr;
+	TypeName   *targetType;
+	ParseLoc	location;		/* token location, or -1 if unknown */
+} XmlCast;
+
 /* Partitioning related definitions */
 
 /*
