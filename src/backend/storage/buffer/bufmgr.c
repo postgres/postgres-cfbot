@@ -146,7 +146,7 @@ typedef struct PrivateRefCountEntry
 
 /*
  * Status of buffers to checkpoint for a particular tablespace, used
- * internally in BufferSync.
+ * internally in CheckPointBuffers().
  */
 typedef struct CkptTsStatus
 {
@@ -646,7 +646,6 @@ static bool PinBuffer(BufferDesc *buf, BufferUsageCountChange usage_count_change
 static void PinBuffer_Locked(BufferDesc *buf);
 static void UnpinBuffer(BufferDesc *buf);
 static void UnpinBufferNoOwner(BufferDesc *buf);
-static void BufferSync(int flags);
 static int	SyncOneBuffer(int buf_id, bool skip_recently_used,
 						  WritebackContext *wb_context);
 static void WaitIO(BufferDesc *buf);
@@ -3587,7 +3586,7 @@ TrackNewBufferPin(Buffer buf)
 #include "lib/sort_template.h"
 
 /*
- * BufferSync -- Write out all dirty buffers in the pool.
+ * Write out all dirty buffers in the buffer pool.
  *
  * This is called at checkpoint time to write out all dirty shared buffers.
  * The checkpoint request flags should be passed in.  If CHECKPOINT_FAST is
@@ -3595,9 +3594,12 @@ TrackNewBufferPin(Buffer buf)
  * CHECKPOINT_END_OF_RECOVERY or CHECKPOINT_FLUSH_UNLOGGED is set, we write
  * even unlogged buffers, which are otherwise skipped.  The remaining flags
  * currently have no effect here.
+ *
+ * Note: temporary relations do not participate in checkpoints, so they don't
+ * need to be flushed.
  */
-static void
-BufferSync(int flags)
+void
+CheckPointBuffers(int flags)
 {
 	uint64		buf_state;
 	int			buf_id;
@@ -3847,8 +3849,8 @@ BufferSync(int flags)
 	}
 
 	/*
-	 * Issue all pending flushes. Only checkpointer calls BufferSync(), so
-	 * IOContext will always be IOCONTEXT_NORMAL.
+	 * Issue all pending flushes. Only the checkpointer calls
+	 * CheckPointBuffers(), so IOContext will always be IOCONTEXT_NORMAL.
 	 */
 	IssuePendingWritebacks(&wb_context, IOCONTEXT_NORMAL);
 
@@ -4467,20 +4469,6 @@ DebugPrintBufferRefcount(Buffer buffer)
 					  buf->tag.blockNum, buf_state & BUF_FLAG_MASK,
 					  BUF_STATE_GET_REFCOUNT(buf_state), loccount);
 	return result;
-}
-
-/*
- * CheckPointBuffers
- *
- * Flush all dirty blocks in buffer pool to disk at checkpoint time.
- *
- * Note: temporary relations do not participate in checkpoints, so they don't
- * need to be flushed.
- */
-void
-CheckPointBuffers(int flags)
-{
-	BufferSync(flags);
 }
 
 /*
@@ -5796,11 +5784,11 @@ MarkSharedBufferDirtyHint(Buffer buffer, BufferDesc *bufHdr, uint64 lockstate,
 
 		/*
 		 * We must mark the page dirty before we emit the WAL record, as per
-		 * the usual rules, to ensure that BufferSync()/SyncOneBuffer() try to
-		 * flush the buffer, even if we haven't inserted the WAL record yet.
-		 * As we hold at least a share-exclusive lock, checkpoints will wait
-		 * for this backend to be done with the buffer before continuing. If
-		 * we did it the other way round, a checkpoint could start between
+		 * the usual rules, to ensure that CheckPointBuffers()/BgBufferSync()
+		 * try to flush the buffer, even if we haven't inserted the WAL record
+		 * yet. As we hold at least a share-exclusive lock, checkpoints will
+		 * wait for this backend to be done with the buffer before continuing.
+		 * If we did it the other way round, a checkpoint could start between
 		 * writing the WAL record and marking the buffer dirty.
 		 */
 		buf_state = LockBufHdr(bufHdr);
