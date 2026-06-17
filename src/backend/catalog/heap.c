@@ -3595,10 +3595,10 @@ RemoveStatistics(Oid relid, AttrNumber attnum)
  * with the heap relation to zero tuples.
  *
  * The routine will truncate and then reconstruct the indexes on
- * the specified relation.  Caller must hold exclusive lock on rel.
+ * the specified relation.  Caller must hold the specified lock on rel.
  */
 static void
-RelationTruncateIndexes(Relation heapRelation)
+RelationTruncateIndexes(Relation heapRelation, LOCKMODE lockmode)
 {
 	ListCell   *indlist;
 
@@ -3609,8 +3609,8 @@ RelationTruncateIndexes(Relation heapRelation)
 		Relation	currentIndex;
 		IndexInfo  *indexInfo;
 
-		/* Open the index relation; use exclusive lock, just to be sure */
-		currentIndex = index_open(indexId, AccessExclusiveLock);
+		/* Open the index relation; use same lock as heap relation */
+		currentIndex = index_open(indexId, lockmode);
 
 		/*
 		 * Fetch info needed for index_build.  Since we know there are no
@@ -3652,13 +3652,23 @@ heap_truncate(List *relids)
 	List	   *relations = NIL;
 	ListCell   *cell;
 
-	/* Open relations for processing, and grab exclusive access on each */
+	/*
+	 * Open relations for processing.  For most relations, we must use
+	 * AccessExclusiveLock to prevent schema and data changes.  However, for
+	 * global temporary relations, we must use RowExclusiveLock, because two
+	 * backends trying to upgrade to an exclusive lock on the same relation
+	 * here would deadlock.  This is sufficient, because the relation's data
+	 * is session-local.
+	 */
 	foreach(cell, relids)
 	{
 		Oid			rid = lfirst_oid(cell);
+		LOCKMODE	lockmode;
 		Relation	rel;
 
-		rel = table_open(rid, AccessExclusiveLock);
+		lockmode = rel_is_global_temp(rid) ? RowExclusiveLock : AccessExclusiveLock;
+
+		rel = table_open(rid, lockmode);
 		relations = lappend(relations, rel);
 	}
 
@@ -3673,7 +3683,7 @@ heap_truncate(List *relids)
 		/* Truncate the relation */
 		heap_truncate_one_rel(rel);
 
-		/* Close the relation, but keep exclusive lock on it until commit */
+		/* Close the relation, but keep lock on it until commit */
 		table_close(rel, NoLock);
 	}
 }
@@ -3685,12 +3695,21 @@ heap_truncate(List *relids)
  *
  * This is not transaction-safe, because the truncation is done immediately
  * and cannot be rolled back later.  Caller is responsible for having
- * checked permissions etc, and must have obtained AccessExclusiveLock.
+ * checked permissions etc, and must have obtained the required lock, which is
+ * typically AccessExclusiveLock, except if it's a global temporary relation,
+ * in which case RowExclusiveLock is sufficient.
  */
 void
 heap_truncate_one_rel(Relation rel)
 {
+	LOCKMODE	lockmode;
 	Oid			toastrelid;
+
+	/*
+	 * For a global temporary relation, RowExclusiveLock is sufficient.
+	 * Otherwise must use AccessExclusiveLock.
+	 */
+	lockmode = RELATION_IS_GLOBAL_TEMP(rel) ? RowExclusiveLock : AccessExclusiveLock;
 
 	/*
 	 * Truncate the relation.  Partitioned tables have no storage, so there is
@@ -3703,16 +3722,16 @@ heap_truncate_one_rel(Relation rel)
 	table_relation_nontransactional_truncate(rel);
 
 	/* If the relation has indexes, truncate the indexes too */
-	RelationTruncateIndexes(rel);
+	RelationTruncateIndexes(rel, lockmode);
 
 	/* If there is a toast table, truncate that too */
 	toastrelid = rel->rd_rel->reltoastrelid;
 	if (OidIsValid(toastrelid))
 	{
-		Relation	toastrel = table_open(toastrelid, AccessExclusiveLock);
+		Relation	toastrel = table_open(toastrelid, lockmode);
 
 		table_relation_nontransactional_truncate(toastrel);
-		RelationTruncateIndexes(toastrel);
+		RelationTruncateIndexes(toastrel, lockmode);
 		/* keep the lock... */
 		table_close(toastrel, NoLock);
 	}

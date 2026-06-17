@@ -1281,7 +1281,9 @@ EXPLAIN ANALYZE SELECT * FROM tenk1 WHERE unique1 &lt; 100 AND unique2 &gt; 9000
    One component of the statistics is the total number of entries in
    each table and index, as well as the number of disk blocks occupied
    by each table and index.  This information is kept in the table
-   <link linkend="catalog-pg-class"><structname>pg_class</structname></link>,
+   <link linkend="catalog-pg-class"><structname>pg_class</structname></link>
+   (or <link linkend="catalog-pg-temp-class"><structname>pg_temp_class</structname></link>
+   for global temporary tables and indexes),
    in the columns <structfield>reltuples</structfield> and
    <structfield>relpages</structfield>.  We can look at it with
    queries similar to this one:
@@ -1318,6 +1320,7 @@ WHERE relname LIKE 'tenk1%';
    of the table it did scan, resulting in an approximate value.
    In any case, the planner
    will scale the values it finds in <structname>pg_class</structname>
+   and <structname>pg_temp_class</structname>
    to match the current physical table size, thus obtaining a closer
    approximation.
   </para>

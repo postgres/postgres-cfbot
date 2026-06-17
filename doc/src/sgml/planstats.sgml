@@ -49,7 +49,8 @@ EXPLAIN SELECT * FROM tenk1;
    How the planner determines the cardinality of <structname>tenk1</structname>
    is covered in <xref linkend="planner-stats"/>, but is repeated here for
    completeness. The number of pages and rows is looked up in
-   <structname>pg_class</structname>:
+   <structname>pg_class</structname> (or <structname>pg_temp_class</structname>
+   for a global temporary table):
 
 <programlisting>
 SELECT relpages, reltuples FROM pg_class WHERE relname = 'tenk1';
@@ -470,7 +471,8 @@ ANALYZE t;
 
     As explained in <xref linkend="planner-stats"/>, the planner can determine
     cardinality of <structname>t</structname> using the number of pages and
-    rows obtained from <structname>pg_class</structname>:
+    rows obtained from <structname>pg_class</structname> (or
+    <structname>pg_temp_class</structname> for a global temporary table):
 
 <programlisting>
 SELECT relpages, reltuples FROM pg_class WHERE relname = 't';

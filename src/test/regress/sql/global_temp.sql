@@ -295,6 +295,115 @@ COMMIT;
 SELECT oid::regclass FROM pg_temp_class ORDER BY 1;
 SELECT * FROM tmp1;
 
+-- Test stats updates applied by CREATE INDEX, ANALYZE, VACUUM, and REPACK
+CREATE GLOBAL TEMP TABLE tmp2 (a int);
+INSERT INTO tmp2 SELECT * FROM generate_series(1, 100);
+SELECT c.oid::regclass,
+       c.relpages AS global_relpages, c.reltuples AS global_reltuples,
+       CASE WHEN t.relpages = 0 THEN 'zero' ELSE 'non-zero' END AS local_relpages,
+       t.reltuples AS local_reltuples
+  FROM pg_class c JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.oid = 'tmp2'::regclass;
+
+CREATE INDEX tmp2_a_idx ON tmp2(a);
+SELECT c.oid::regclass,
+       c.relpages AS global_relpages, c.reltuples AS global_reltuples,
+       CASE WHEN t.relpages = 0 THEN 'zero' ELSE 'non-zero' END AS local_relpages,
+       t.reltuples AS local_reltuples
+  FROM pg_class c JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.oid = 'tmp2'::regclass OR c.oid = 'tmp2_a_idx'::regclass ORDER BY 1;
+
+INSERT INTO tmp2 SELECT * FROM generate_series(101, 300);
+ANALYZE tmp2;
+SELECT c.oid::regclass,
+       c.relpages AS global_relpages, c.reltuples AS global_reltuples,
+       CASE WHEN t.relpages = 0 THEN 'zero' ELSE 'non-zero' END AS local_relpages,
+       t.reltuples AS local_reltuples
+  FROM pg_class c JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.oid = 'tmp2'::regclass OR c.oid = 'tmp2_a_idx'::regclass ORDER BY 1;
+
+DELETE FROM tmp2 WHERE a % 2 = 0;
+VACUUM ANALYZE tmp2;
+SELECT c.oid::regclass,
+       c.relpages AS global_relpages, c.reltuples AS global_reltuples,
+       CASE WHEN t.relpages = 0 THEN 'zero' ELSE 'non-zero' END AS local_relpages,
+       t.reltuples AS local_reltuples
+  FROM pg_class c JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.oid = 'tmp2'::regclass OR c.oid = 'tmp2_a_idx'::regclass ORDER BY 1;
+
+DELETE FROM tmp2 WHERE a % 3 = 0;
+REPACK (ANALYZE) tmp2;
+SELECT c.oid::regclass,
+       c.relpages AS global_relpages, c.reltuples AS global_reltuples,
+       CASE WHEN t.relpages = 0 THEN 'zero' ELSE 'non-zero' END AS local_relpages,
+       t.reltuples AS local_reltuples
+  FROM pg_class c JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.oid = 'tmp2'::regclass OR c.oid = 'tmp2_a_idx'::regclass ORDER BY 1;
+
+-- Test stats usage
+CREATE FUNCTION row_estimate(query text) RETURNS int
+LANGUAGE plpgsql AS
+$$
+DECLARE
+  line text;
+BEGIN
+  FOR line IN EXECUTE FORMAT('EXPLAIN %s', query)
+  LOOP
+    RETURN (regexp_match(line, 'rows=(\d*)'))[1]::int;
+  END LOOP;
+END;
+$$;
+
+SELECT row_estimate('SELECT * FROM tmp2');
+
+-- Test in-place stats update (non-transactional)
+TRUNCATE tmp2;
+SELECT reltuples FROM pg_temp_class WHERE oid = 'tmp2'::regclass;
+SELECT row_estimate('SELECT * FROM tmp2');
+
+BEGIN;
+INSERT INTO tmp2 SELECT * FROM generate_series(1, 100);
+ANALYZE tmp2;
+SELECT reltuples FROM pg_temp_class WHERE oid = 'tmp2'::regclass;
+SELECT row_estimate('SELECT * FROM tmp2');
+ROLLBACK;
+
+SELECT reltuples FROM pg_temp_class WHERE oid = 'tmp2'::regclass;
+SELECT row_estimate('SELECT * FROM tmp2');
+
+-- Test in-place stats update after regular update (transactional)
+BEGIN;
+TRUNCATE tmp2;
+INSERT INTO tmp2 SELECT * FROM generate_series(1, 50);
+ANALYZE tmp2;
+SELECT reltuples FROM pg_temp_class WHERE oid = 'tmp2'::regclass;
+SELECT row_estimate('SELECT * FROM tmp2');
+ROLLBACK;
+
+SELECT reltuples FROM pg_temp_class WHERE oid = 'tmp2'::regclass;
+SELECT row_estimate('SELECT * FROM tmp2');
+
+-- Test manually updating stats
+SELECT pg_clear_relation_stats('global_temp_tests', 'tmp2');
+SELECT oid::regclass, relpages, reltuples, relallvisible, relallfrozen
+  FROM pg_class WHERE oid = 'tmp2'::regclass;
+SELECT oid::regclass, relpages, reltuples, relallvisible, relallfrozen
+  FROM pg_temp_class WHERE oid = 'tmp2'::regclass;
+
+SELECT pg_restore_relation_stats(
+  'schemaname', 'global_temp_tests',
+  'relname', 'tmp2',
+  'relpages', 5,
+  'reltuples', 150::real,
+  'relallvisible', 10,
+  'relallfrozen', 20);
+SELECT oid::regclass, relpages, reltuples, relallvisible, relallfrozen
+  FROM pg_class WHERE oid = 'tmp2'::regclass;
+SELECT oid::regclass, relpages, reltuples, relallvisible, relallfrozen
+  FROM pg_temp_class WHERE oid = 'tmp2'::regclass;
+
+DROP TABLE tmp2;
+
 -- Test view creation
 CREATE VIEW v AS SELECT * FROM tmp1;
 SELECT * FROM v;

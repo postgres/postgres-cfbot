@@ -4038,10 +4038,11 @@ RelationSetNewRelfilenumber(Relation relation, char persistence)
 		/* relpages etc. never change for sequences */
 		if (relation->rd_rel->relkind != RELKIND_SEQUENCE)
 		{
-			classform->relpages = 0;	/* it's empty until further notice */
-			classform->reltuples = -1;
-			classform->relallvisible = 0;
-			classform->relallfrozen = 0;
+			/* it's empty until further notice */
+			SetEffective_relpages(classform, temp_classform, 0, NULL, NULL);
+			SetEffective_reltuples(classform, temp_classform, -1, NULL, NULL);
+			SetEffective_relallvisible(classform, temp_classform, 0, NULL, NULL);
+			SetEffective_relallfrozen(classform, temp_classform, 0, NULL, NULL);
 		}
 		classform->relfrozenxid = freezeXid;
 		classform->relminmxid = minmulti;

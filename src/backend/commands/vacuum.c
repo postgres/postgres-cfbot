@@ -1419,9 +1419,10 @@ vac_estimate_reltuples(Relation relation,
  *	vac_update_relstats() -- update statistics for one relation
  *
  *		Update the whole-relation statistics that are kept in its pg_class
- *		row.  There are additional stats that will be updated if we are
- *		doing ANALYZE, but we always update these stats.  This routine works
- *		for both index and heap relation entries in pg_class.
+ *		row (and its pg_temp_class row, for a global temporary relation).
+ *		There are additional stats that will be updated if we are doing
+ *		ANALYZE, but we always update these stats. This routine works for both
+ *		index and heap relation entries in pg_class and pg_temp_class.
  *
  *		We violate transaction semantics here by overwriting the rel's
  *		existing pg_class tuple with the new values.  This is reasonably
@@ -1430,12 +1431,17 @@ vac_estimate_reltuples(Relation relation,
  *		we updated these tuples in the usual way, vacuuming pg_class itself
  *		wouldn't work very well --- by the time we got done with a vacuum
  *		cycle, most of the tuples in pg_class would've been obsoleted.  Of
- *		course, this only works for fixed-size not-null columns, but these are.
+ *		course, this only works for fixed-size not-null columns, but these
+ *		are.  Likewise for pg_temp_class, which is also updated for a global
+ *		temporary relation.
  *
  *		Another reason for doing it this way is that when we are in a lazy
  *		VACUUM and have PROC_IN_VACUUM set, we mustn't do any regular updates.
  *		Somebody vacuuming pg_class might think they could delete a tuple
- *		marked with xmin = our xid.
+ *		marked with xmin = our xid.  This isn't a problem for pg_temp_class
+ *		because no other session can see our copy of its data, but it still
+ *		makes sense to do an in-place update to avoid vacuumed pg_temp_class
+ *		tuples being obsoleted.
  *
  *		In addition to fundamentally nontransactional statistics such as
  *		relpages and relallvisible, we try to maintain certain lazily-updated
@@ -1450,8 +1456,8 @@ vac_estimate_reltuples(Relation relation,
  *		transaction.  This is OK since postponing the flag maintenance is
  *		always allowable.
  *
- *		Note: num_tuples should count only *live* tuples, since
- *		pg_class.reltuples is defined that way.
+ *		Note: num_tuples should count only *live* tuples, since reltuples in
+ *		pg_class and pg_temp_class is defined that way.
  *
  *		This routine is shared by VACUUM and ANALYZE.
  */
@@ -1469,17 +1475,37 @@ vac_update_relstats(Relation relation,
 	Relation	rd;
 	ScanKeyData key[1];
 	HeapTuple	ctup;
+	HeapTuple	temp_ctup;
 	void	   *inplace_state;
 	Form_pg_class pgcform;
+	Form_pg_temp_class temp_pgcform;
 	bool		dirty,
+				temp_dirty,
 				futurexid,
 				futuremxid;
 	TransactionId oldfrozenxid;
 	MultiXactId oldminmulti;
 
+	/*
+	 * For a global temporary relation, need a copy of its pg_temp_class
+	 * tuple.
+	 */
+	if (RELATION_IS_GLOBAL_TEMP(relation))
+	{
+		temp_ctup = GetPgTempClassTuple(relid);
+		if (!HeapTupleIsValid(temp_ctup))
+			elog(ERROR, "cache lookup failed for global temp relation %u", relid);
+		temp_pgcform = (Form_pg_temp_class) GETSTRUCT(temp_ctup);
+	}
+	else
+	{
+		temp_ctup = NULL;
+		temp_pgcform = NULL;
+	}
+
+	/* Fetch a copy of the pg_class tuple to scribble on */
 	rd = table_open(RelationRelationId, RowExclusiveLock);
 
-	/* Fetch a copy of the tuple to scribble on */
 	ScanKeyInit(&key[0],
 				Anum_pg_class_oid,
 				BTEqualStrategyNumber, F_OIDEQ,
@@ -1491,29 +1517,20 @@ vac_update_relstats(Relation relation,
 			 relid);
 	pgcform = (Form_pg_class) GETSTRUCT(ctup);
 
-	/* Apply statistical updates, if any, to copied tuple */
+	/* Apply statistical updates, if any, to copied tuple(s) */
 
 	dirty = false;
-	if (pgcform->relpages != (int32) num_pages)
-	{
-		pgcform->relpages = (int32) num_pages;
-		dirty = true;
-	}
-	if (pgcform->reltuples != (float4) num_tuples)
-	{
-		pgcform->reltuples = (float4) num_tuples;
-		dirty = true;
-	}
-	if (pgcform->relallvisible != (int32) num_all_visible_pages)
-	{
-		pgcform->relallvisible = (int32) num_all_visible_pages;
-		dirty = true;
-	}
-	if (pgcform->relallfrozen != (int32) num_all_frozen_pages)
-	{
-		pgcform->relallfrozen = (int32) num_all_frozen_pages;
-		dirty = true;
-	}
+	temp_dirty = false;
+	SetEffective_relpages(pgcform, temp_pgcform, (int32) num_pages,
+						  &dirty, &temp_dirty);
+	SetEffective_reltuples(pgcform, temp_pgcform, (float4) num_tuples,
+						   &dirty, &temp_dirty);
+	SetEffective_relallvisible(pgcform, temp_pgcform,
+							   (int32) num_all_visible_pages,
+							   &dirty, &temp_dirty);
+	SetEffective_relallfrozen(pgcform, temp_pgcform,
+							  (int32) num_all_frozen_pages,
+							  &dirty, &temp_dirty);
 
 	/* Apply DDL updates, but not inside an outer transaction (see above) */
 
@@ -1596,11 +1613,21 @@ vac_update_relstats(Relation relation,
 		}
 	}
 
-	/* If anything changed, write out the tuple. */
+	/* If anything changed, write out the tuple(s) */
 	if (dirty)
 		systable_inplace_update_finish(inplace_state, ctup);
 	else
 		systable_inplace_update_cancel(inplace_state);
+
+	if (HeapTupleIsValid(temp_ctup))
+	{
+		if (temp_dirty)
+			UpdatePgTempClassTupleInPlace(relid, temp_ctup);
+
+		heap_freetuple(temp_ctup);
+	}
+
+	heap_freetuple(ctup);
 
 	table_close(rd, RowExclusiveLock);
 

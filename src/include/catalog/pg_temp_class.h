@@ -45,6 +45,18 @@ CATALOG(pg_temp_class,8082,TempRelationRelationId) BKI_TEMP_RELATION
 
 	/* identifier of table space for relation (0 means default for database) */
 	Oid			reltablespace BKI_DEFAULT(0) BKI_LOOKUP_OPT(pg_tablespace);
+
+	/* # of blocks (not always up-to-date) */
+	int32		relpages BKI_DEFAULT(0);
+
+	/* # of tuples (not always up-to-date; -1 means "unknown") */
+	float4		reltuples BKI_DEFAULT(-1);
+
+	/* # of all-visible blocks (not always up-to-date) */
+	int32		relallvisible BKI_DEFAULT(0);
+
+	/* # of all-frozen blocks (not always up-to-date) */
+	int32		relallfrozen BKI_DEFAULT(0);
 } FormData_pg_temp_class;
 
 END_CATALOG_STRUCT
@@ -71,6 +83,10 @@ MAKE_SYSCACHE(TEMPRELOID, pg_temp_class_oid_index, 128);
 		(target)->oid = (source)->oid; \
 		(target)->relfilenode = (source)->relfilenode; \
 		(target)->reltablespace = (source)->reltablespace; \
+		(target)->relpages = (source)->relpages; \
+		(target)->reltuples = (source)->reltuples; \
+		(target)->relallvisible = (source)->relallvisible; \
+		(target)->relallfrozen = (source)->relallfrozen; \
 	} while (0)
 
 /*
@@ -91,6 +107,46 @@ static inline Oid
 GetEffective_reltablespace(Form_pg_class cf, Form_pg_temp_class tf)
 {
 	return tf != NULL ? tf->reltablespace : cf->reltablespace;
+}
+
+/*
+ * Get the effective value of relpages from pg_class and pg_temp_class tuple
+ * data.  The value from pg_temp_class (if present) takes precedence.
+ */
+static inline int32
+GetEffective_relpages(Form_pg_class cf, Form_pg_temp_class tf)
+{
+	return tf != NULL ? tf->relpages : cf->relpages;
+}
+
+/*
+ * Get the effective value of reltuples from pg_class and pg_temp_class tuple
+ * data.  The value from pg_temp_class (if present) takes precedence.
+ */
+static inline float4
+GetEffective_reltuples(Form_pg_class cf, Form_pg_temp_class tf)
+{
+	return tf != NULL ? tf->reltuples : cf->reltuples;
+}
+
+/*
+ * Get the effective value of relallvisible from pg_class and pg_temp_class
+ * tuple data.  The value from pg_temp_class (if present) takes precedence.
+ */
+static inline int32
+GetEffective_relallvisible(Form_pg_class cf, Form_pg_temp_class tf)
+{
+	return tf != NULL ? tf->relallvisible : cf->relallvisible;
+}
+
+/*
+ * Get the effective value of relallfrozen from pg_class and pg_temp_class
+ * tuple data.  The value from pg_temp_class (if present) takes precedence.
+ */
+static inline int32
+GetEffective_relallfrozen(Form_pg_class cf, Form_pg_temp_class tf)
+{
+	return tf != NULL ? tf->relallfrozen : cf->relallfrozen;
 }
 
 /*
@@ -121,10 +177,119 @@ SetEffective_reltablespace(Form_pg_class cf, Form_pg_temp_class tf, Oid val)
 		tf->reltablespace = val;
 }
 
+/*
+ * Set the effective value of relpages in tuple form data from pg_class or
+ * pg_temp_class.  The value is set in pg_temp_class instead of pg_class, if
+ * the pg_temp_class tuple form data is non-NULL.  If non-NULL, the cdirty or
+ * tdirty flag is updated, if the value actually changes.
+ */
+static inline void
+SetEffective_relpages(Form_pg_class cf, Form_pg_temp_class tf, int32 val,
+					  bool *cdirty, bool *tdirty)
+{
+	if (tf != NULL)
+	{
+		if (val != tf->relpages)
+		{
+			tf->relpages = val;
+			if (tdirty != NULL)
+				*tdirty = true;
+		}
+	}
+	else if (val != cf->relpages)
+	{
+		cf->relpages = val;
+		if (cdirty != NULL)
+			*cdirty = true;
+	}
+}
+
+/*
+ * Set the effective value of reltuples in tuple form data from pg_class or
+ * pg_temp_class.  The value is set in pg_temp_class instead of pg_class, if
+ * the pg_temp_class tuple form data is non-NULL.  If non-NULL, the cdirty or
+ * tdirty flag is updated, if the value actually changes.
+ */
+static inline void
+SetEffective_reltuples(Form_pg_class cf, Form_pg_temp_class tf, float4 val,
+					   bool *cdirty, bool *tdirty)
+{
+	if (tf != NULL)
+	{
+		if (val != tf->reltuples)
+		{
+			tf->reltuples = val;
+			if (tdirty != NULL)
+				*tdirty = true;
+		}
+	}
+	else if (val != cf->reltuples)
+	{
+		cf->reltuples = val;
+		if (cdirty != NULL)
+			*cdirty = true;
+	}
+}
+
+/*
+ * Set the effective value of relallvisible in tuple form data from pg_class
+ * or pg_temp_class.  The value is set in pg_temp_class instead of pg_class,
+ * if the pg_temp_class tuple form data is non-NULL.  If non-NULL, the cdirty
+ * or tdirty flag is updated, if the value actually changes.
+ */
+static inline void
+SetEffective_relallvisible(Form_pg_class cf, Form_pg_temp_class tf, int32 val,
+						   bool *cdirty, bool *tdirty)
+{
+	if (tf != NULL)
+	{
+		if (val != tf->relallvisible)
+		{
+			tf->relallvisible = val;
+			if (tdirty != NULL)
+				*tdirty = true;
+		}
+	}
+	else if (val != cf->relallvisible)
+	{
+		cf->relallvisible = val;
+		if (cdirty != NULL)
+			*cdirty = true;
+	}
+}
+
+/*
+ * Set the effective value of relallfrozen in tuple form data from pg_class or
+ * pg_temp_class.  The value is set in pg_temp_class instead of pg_class, if
+ * the pg_temp_class tuple form data is non-NULL.  If non-NULL, the cdirty or
+ * tdirty flag is updated, if the value actually changes.
+ */
+static inline void
+SetEffective_relallfrozen(Form_pg_class cf, Form_pg_temp_class tf, int32 val,
+						  bool *cdirty, bool *tdirty)
+{
+	if (tf != NULL)
+	{
+		if (val != tf->relallfrozen)
+		{
+			tf->relallfrozen = val;
+			if (tdirty != NULL)
+				*tdirty = true;
+		}
+	}
+	else if (val != cf->relallfrozen)
+	{
+		cf->relallfrozen = val;
+		if (cdirty != NULL)
+			*cdirty = true;
+	}
+}
+
 extern bool PgTempClassTupleExists(Oid relid);
 extern HeapTuple GetPgTempClassTuple(Oid relid);
 extern void InsertPgTempClassTuple(Relation rel);
 extern void UpdatePgTempClassTuple(Oid relid, HeapTuple newtuple);
+extern void UpdatePgTempClassTupleInPlace(Oid relid, HeapTuple newtuple);
 extern void DeletePgTempClassTuple(Oid relid);
 extern HeapTuple GetPgClassAndPgTempClassTuples(Oid relid, bool lock_tuple,
 												HeapTuple *temp_tuple,

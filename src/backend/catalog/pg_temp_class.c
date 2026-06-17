@@ -62,6 +62,18 @@ get_pg_temp_class_tupdesc(void)
 		TupleDescInitEntry(tupdesc,
 						   (AttrNumber) Anum_pg_temp_class_reltablespace,
 						   "reltablespace", OIDOID, -1, 0);
+		TupleDescInitEntry(tupdesc,
+						   (AttrNumber) Anum_pg_temp_class_relpages,
+						   "relpages", INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc,
+						   (AttrNumber) Anum_pg_temp_class_reltuples,
+						   "reltuples", FLOAT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc,
+						   (AttrNumber) Anum_pg_temp_class_relallvisible,
+						   "relallvisible", INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc,
+						   (AttrNumber) Anum_pg_temp_class_relallfrozen,
+						   "relallfrozen", INT4OID, -1, 0);
 		TupleDescFinalize(tupdesc);
 
 		MemoryContextSwitchTo(oldcontext);
@@ -120,6 +132,10 @@ InsertPgTempClassTuple(Relation rel)
 	values[Anum_pg_temp_class_oid - 1] = ObjectIdGetDatum(RelationGetRelid(rel));
 	values[Anum_pg_temp_class_relfilenode - 1] = ObjectIdGetDatum(form->relfilenode);
 	values[Anum_pg_temp_class_reltablespace - 1] = ObjectIdGetDatum(form->reltablespace);
+	values[Anum_pg_temp_class_relpages - 1] = Int32GetDatum(form->relpages);
+	values[Anum_pg_temp_class_reltuples - 1] = Float4GetDatum(form->reltuples);
+	values[Anum_pg_temp_class_relallvisible - 1] = Int32GetDatum(form->relallvisible);
+	values[Anum_pg_temp_class_relallfrozen - 1] = Int32GetDatum(form->relallfrozen);
 
 	GTCatCacheTupleInsert(PG_TEMP_CLASS,
 						  RelationGetRelid(rel),
@@ -137,6 +153,18 @@ void
 UpdatePgTempClassTuple(Oid relid, HeapTuple newtuple)
 {
 	GTCatCacheTupleUpdate(PG_TEMP_CLASS, relid, newtuple);
+}
+
+/*
+ * UpdatePgTempClassTupleInPlace
+ *
+ *	Do an in-place update of the pg_temp_class tuple for a global temporary
+ *	relation.
+ */
+void
+UpdatePgTempClassTupleInPlace(Oid relid, HeapTuple newtuple)
+{
+	GTCatCacheTupleUpdateInPlace(PG_TEMP_CLASS, relid, newtuple);
 }
 
 /*

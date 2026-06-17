@@ -2076,6 +2076,11 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
       <para>
        This is effectively an unsigned 32-bit integer; values larger than
        2<superscript>31</superscript>−1 are stored as negative values.
+      </para>
+      <para>
+       For a global temporary relation, the value from
+       <link linkend="catalog-pg-temp-class"><structname>pg_temp_class</structname></link>.<structfield>relpages</structfield>,
+       if any, takes precedence over the value from this catalog.
       </para></entry>
      </row>
 
@@ -2092,6 +2097,11 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
        analyzed, <structfield>reltuples</structfield>
        contains <literal>-1</literal> indicating that the row count is
        unknown.
+      </para>
+      <para>
+       For a global temporary relation, the value from
+       <link linkend="catalog-pg-temp-class"><structname>pg_temp_class</structname></link>.<structfield>reltuples</structfield>,
+       if any, takes precedence over the value from this catalog.
       </para></entry>
      </row>
 
@@ -2109,6 +2119,11 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
       <para>
        This is effectively an unsigned 32-bit integer; values larger than
        2<superscript>31</superscript>−1 are stored as negative values.
+      </para>
+      <para>
+       For a global temporary relation, the value from
+       <link linkend="catalog-pg-temp-class"><structname>pg_temp_class</structname></link>.<structfield>relallvisible</structfield>,
+       if any, takes precedence over the value from this catalog.
       </para></entry>
      </row>
 
@@ -2123,7 +2138,6 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
        scheduling manual vacuums and tuning <link
        linkend="runtime-config-vacuum-freezing">vacuum's freezing
        behavior</link>.
-
        It is updated by
        <link linkend="sql-vacuum"><command>VACUUM</command></link>,
        <link linkend="sql-analyze"><command>ANALYZE</command></link>,
@@ -2133,9 +2147,13 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
       <para>
        This is effectively an unsigned 32-bit integer; values larger than
        2<superscript>31</superscript>−1 are stored as negative values.
+      </para>
+      <para>
+       For a global temporary relation, the value from
+       <link linkend="catalog-pg-temp-class"><structname>pg_temp_class</structname></link>.<structfield>relallfrozen</structfield>,
+       if any, takes precedence over the value from this catalog.
       </para></entry>
      </row>
-
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
@@ -9109,6 +9127,71 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
        except for partitioned tables, where this is the tablespace
        in which partitions will be created when one is not
        specified in the creation command.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>relpages</structfield> <type>int4</type>
+      </para>
+      <para>
+       Size of the on-disk representation of this table in the current
+       session in pages (of size <symbol>BLCKSZ</symbol>).
+       This is only an estimate used by the planner.  It is updated by
+       <link linkend="sql-vacuum"><command>VACUUM</command></link>,
+       <link linkend="sql-analyze"><command>ANALYZE</command></link>,
+       and a few DDL commands such as
+       <link linkend="sql-createindex"><command>CREATE INDEX</command></link>.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>reltuples</structfield> <type>float4</type>
+      </para>
+      <para>
+       Number of live rows in the table in the current session.  This is only
+       an estimate used by the planner.  It is updated by
+       <link linkend="sql-vacuum"><command>VACUUM</command></link>,
+       <link linkend="sql-analyze"><command>ANALYZE</command></link>,
+       and a few DDL commands such as
+       <link linkend="sql-createindex"><command>CREATE INDEX</command></link>.
+       If the table has never yet been vacuumed or analyzed in the current
+       session, <structfield>reltuples</structfield> contains
+       <literal>-1</literal> indicating that the row count is unknown.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>relallvisible</structfield> <type>int4</type>
+      </para>
+      <para>
+       Number of pages that are marked all-visible in the table's visibility
+       map for the current session.  This is only an estimate used by the
+       planner.  It is updated by
+       <link linkend="sql-vacuum"><command>VACUUM</command></link>,
+       <link linkend="sql-analyze"><command>ANALYZE</command></link>,
+       and a few DDL commands such as
+       <link linkend="sql-createindex"><command>CREATE INDEX</command></link>.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>relallfrozen</structfield> <type>int4</type>
+      </para>
+      <para>
+       Number of pages that are marked all-frozen in the table's visibility
+       map for the current session.  This is only an estimate that can be
+       used along with <structfield>relallvisible</structfield> for
+       scheduling manual vacuums and tuning
+       <link linkend="runtime-config-vacuum-freezing">vacuum's freezing behavior</link>.
+       It is updated by
+       <link linkend="sql-vacuum"><command>VACUUM</command></link>,
+       <link linkend="sql-analyze"><command>ANALYZE</command></link>,
+       and a few DDL commands such as
+       <link linkend="sql-createindex"><command>CREATE INDEX</command></link>.
       </para></entry>
      </row>
     </tbody>

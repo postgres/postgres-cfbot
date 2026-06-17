@@ -22,6 +22,7 @@
 #include "access/heapam.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_temp_class.h"
 #include "nodes/makefuncs.h"
 #include "statistics/statistics.h"
 #include "statistics/stat_utils.h"
@@ -110,10 +111,10 @@ relation_statistics_update_internal(Oid reloid, FunctionCallInfo fcinfo)
 	Relation	crel;
 	HeapTuple	ctup;
 	Form_pg_class pgcform;
-	int			replaces[4] = {0};
-	Datum		values[4] = {0};
-	bool		nulls[4] = {0};
-	int			nreplaces = 0;
+	HeapTuple	temp_ctup;
+	Form_pg_temp_class temp_pgcform;
+	bool		dirty;
+	bool		temp_dirty;
 	bool		result = true;
 
 	if (!PG_ARGISNULL(RELPAGES_ARG))
@@ -161,52 +162,66 @@ relation_statistics_update_internal(Oid reloid, FunctionCallInfo fcinfo)
 	 */
 	crel = table_open(RelationRelationId, RowExclusiveLock);
 
-	ctup = SearchSysCache1(RELOID, ObjectIdGetDatum(reloid));
+	ctup = SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(reloid));
 	if (!HeapTupleIsValid(ctup))
 		elog(ERROR, "pg_class entry for relid %u not found", reloid);
 
 	pgcform = (Form_pg_class) GETSTRUCT(ctup);
 
-	if (update_relpages && relpages != pgcform->relpages)
+	/*
+	 * For a global temporary table, need to update the pg_temp_class tuple
+	 * instead.  Force it into existence by opening the relation.
+	 */
+	if (pgcform->relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
 	{
-		replaces[nreplaces] = Anum_pg_class_relpages;
-		values[nreplaces] = Int32GetDatum(relpages);
-		nreplaces++;
+		Relation	rel;
+
+		rel = relation_open(reloid, AccessShareLock);
+		relation_close(rel, AccessShareLock);
+
+		temp_ctup = GetPgTempClassTuple(reloid);
+		if (!HeapTupleIsValid(temp_ctup))
+			elog(ERROR, "pg_temp_class entry for relid %u not found", reloid);
+
+		temp_pgcform = (Form_pg_temp_class) GETSTRUCT(temp_ctup);
+	}
+	else
+	{
+		temp_ctup = NULL;
+		temp_pgcform = NULL;
 	}
 
-	if (update_reltuples && reltuples != pgcform->reltuples)
+	dirty = false;
+	temp_dirty = false;
+
+	if (update_relpages)
+		SetEffective_relpages(pgcform, temp_pgcform, relpages,
+							  &dirty, &temp_dirty);
+
+	if (update_reltuples)
+		SetEffective_reltuples(pgcform, temp_pgcform, reltuples,
+							   &dirty, &temp_dirty);
+
+	if (update_relallvisible)
+		SetEffective_relallvisible(pgcform, temp_pgcform, relallvisible,
+								   &dirty, &temp_dirty);
+
+	if (update_relallfrozen)
+		SetEffective_relallfrozen(pgcform, temp_pgcform, relallfrozen,
+								  &dirty, &temp_dirty);
+
+	if (dirty)
+		CatalogTupleUpdate(crel, &ctup->t_self, ctup);
+
+	if (HeapTupleIsValid(temp_ctup))
 	{
-		replaces[nreplaces] = Anum_pg_class_reltuples;
-		values[nreplaces] = Float4GetDatum(reltuples);
-		nreplaces++;
+		if (temp_dirty)
+			UpdatePgTempClassTuple(reloid, temp_ctup);
+
+		heap_freetuple(temp_ctup);
 	}
 
-	if (update_relallvisible && relallvisible != pgcform->relallvisible)
-	{
-		replaces[nreplaces] = Anum_pg_class_relallvisible;
-		values[nreplaces] = Int32GetDatum(relallvisible);
-		nreplaces++;
-	}
-
-	if (update_relallfrozen && relallfrozen != pgcform->relallfrozen)
-	{
-		replaces[nreplaces] = Anum_pg_class_relallfrozen;
-		values[nreplaces] = Int32GetDatum(relallfrozen);
-		nreplaces++;
-	}
-
-	if (nreplaces > 0)
-	{
-		TupleDesc	tupdesc = RelationGetDescr(crel);
-		HeapTuple	newtup;
-
-		newtup = heap_modify_tuple_by_cols(ctup, tupdesc, nreplaces,
-										   replaces, values, nulls);
-		CatalogTupleUpdate(crel, &newtup->t_self, newtup);
-		heap_freetuple(newtup);
-	}
-
-	ReleaseSysCache(ctup);
+	heap_freetuple(ctup);
 
 	/* release the lock, consistent with vac_update_relstats() */
 	table_close(crel, RowExclusiveLock);

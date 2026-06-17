@@ -208,7 +208,8 @@ initialize_cache(GTCatCache *cache)
  *	Find and update the cache entry tuple for the specified relation.
  */
 static GTCatCacheEntry *
-find_and_update_cache_entry(GTCatCache *cache, Oid relid, HeapTuple newtuple)
+find_and_update_cache_entry(GTCatCache *cache, Oid relid, HeapTuple newtuple,
+							bool update_in_place)
 {
 	SubTransactionId mySubid = GetCurrentSubTransactionId();
 	GTCatCacheEntry *entry;
@@ -225,10 +226,20 @@ find_and_update_cache_entry(GTCatCache *cache, Oid relid, HeapTuple newtuple)
 
 	Assert(HeapTupleIsValid(entry->tuple));
 
-	/* Update the cache entry, saving a copy for rollback, if necessary */
+	/*
+	 * Update the cache entry, saving a copy for rollback, if necessary.
+	 *
+	 * An in-place update of a database tuple is non-transactional (it isn't
+	 * affected by rollback), except if the tuple has already been updated in
+	 * the normal way in the same transaction, in which case rollback will
+	 * undo both the normal update and the in-place update.  Since we want to
+	 * keep our cache entry in sync with the database tuple, we must do an
+	 * in-place update of the cache entry in the same way, by updating the
+	 * most recent copy of the tuple, without saving a copy for rollback.
+	 */
 	oldcontext = MemoryContextSwitchTo(gt_cat_cache_tupctx);
 
-	if (entry->subid != mySubid)
+	if (entry->subid != mySubid && !update_in_place)
 	{
 		GTCatCacheEntry *save_entry;
 
@@ -685,7 +696,7 @@ GTCatCacheTupleUpdate(GTCatCacheIdentifier cacheId, Oid relid,
 	Relation	rel;
 
 	/* Find and update the cache entry for this relation */
-	entry = find_and_update_cache_entry(cache, relid, newtuple);
+	entry = find_and_update_cache_entry(cache, relid, newtuple, false);
 
 	/* Update the tuple in the database to match */
 	rel = table_open(cache->catalog_relid, RowExclusiveLock);
@@ -701,6 +712,59 @@ GTCatCacheTupleUpdate(GTCatCacheIdentifier cacheId, Oid relid,
 		CatalogTupleUpdate(rel, &oldtuple->t_self, newtuple);
 
 		ReleaseSysCache(oldtuple);
+	}
+	else
+	{
+		CatalogTupleInsert(rel, newtuple);
+		entry->written = true;
+	}
+
+	table_close(rel, RowExclusiveLock);
+}
+
+/*
+ * GTCatCacheTupleUpdateInPlace
+ *
+ *	Do an in-place update of a catalog tuple for the specified relation.
+ *
+ *	Note: This updates both the cache entry, and the tuple in the database
+ *	(inserting it, if it hasn't already been written out).  This should not be
+ *	called while the database is read-only.
+ */
+void
+GTCatCacheTupleUpdateInPlace(GTCatCacheIdentifier cacheId, Oid relid,
+							 HeapTuple newtuple)
+{
+	GTCatCache *cache = &gt_cat_cache[cacheId];
+	GTCatCacheEntry *entry;
+	Relation	rel;
+
+	/* Find and update in place the cache entry for this relation */
+	entry = find_and_update_cache_entry(cache, relid, newtuple, true);
+
+	/* Do an in-place update of the tuple in the database */
+	rel = table_open(cache->catalog_relid, RowExclusiveLock);
+
+	if (entry->written)
+	{
+		ScanKeyData key[1];
+		HeapTuple	oldtuple;
+		void	   *inplace_state;
+
+		ScanKeyInit(&key[0],
+					cache->key_attno,
+					BTEqualStrategyNumber, F_OIDEQ,
+					ObjectIdGetDatum(relid));
+
+		systable_inplace_update_begin(rel, cache->index_relid, true, NULL,
+									  1, key, &oldtuple, &inplace_state);
+		if (!HeapTupleIsValid(oldtuple))
+			elog(ERROR, "cache lookup failed for global temp relation %u", relid);
+
+		ItemPointerCopy(&oldtuple->t_self, &newtuple->t_self);
+		systable_inplace_update_finish(inplace_state, newtuple);
+
+		heap_freetuple(oldtuple);
 	}
 	else
 	{
@@ -730,7 +794,7 @@ GTCatCacheTupleDelete(GTCatCacheIdentifier cacheId, Oid relid)
 	 * Find and update the cache entry for this relation, setting its tuple to
 	 * NULL, and marking it as deleted.
 	 */
-	entry = find_and_update_cache_entry(cache, relid, NULL);
+	entry = find_and_update_cache_entry(cache, relid, NULL, false);
 	entry->deleted = true;
 
 	/*

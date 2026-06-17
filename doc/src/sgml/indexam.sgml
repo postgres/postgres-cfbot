@@ -450,7 +450,8 @@ amvacuumcleanup (IndexVacuumInfo *info,
    last <function>ambulkdelete</function> call returned, or NULL if
    <function>ambulkdelete</function> was not called because no tuples needed to be
    deleted.  If the result is not NULL it must be a palloc'd struct.
-   The statistics it contains will be used to update <structname>pg_class</structname>,
+   The statistics it contains will be used to update <structname>pg_class</structname>
+   (or <structname>pg_temp_class</structname> for an index on a global temporary table),
    and will be reported by <command>VACUUM</command> if <literal>VERBOSE</literal> is given.
    It is OK to return NULL if the index was not changed at all during the
    <command>VACUUM</command> operation, but otherwise correct stats should
