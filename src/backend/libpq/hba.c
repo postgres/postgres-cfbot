@@ -1969,6 +1969,22 @@ parse_hba_line(TokenizedAuthLine *tok_line, int elevel)
 			return NULL;
 
 		/*
+		 * The "host", "hostnossl", and "hostnogss" connection types permit
+		 * unencrypted connections, over which the bearer token would be sent
+		 * in cleartext (RFC 7628, Sec. 5; RFC 6750, Sec. 5.2). Warn about such
+		 * entries on load and when inspected via pg_hba_file_rules().
+		 */
+		if (parsedline->conntype == ctHost ||
+			parsedline->conntype == ctHostNoSSL ||
+			parsedline->conntype == ctHostNoGSS)
+			ereport(WARNING,
+					(errmsg("oauth authentication is enabled for a connection type that permits unencrypted connections"),
+					 errdetail("Bearer tokens may be transmitted in cleartext."),
+					 errhint("Use \"hostssl\" or \"hostgssenc\" to require an encrypted connection."),
+					 errcontext("line %d of configuration file \"%s\"",
+								line_num, file_name)));
+
+		/*
 		 * Supplying a usermap combined with the option to skip usermapping is
 		 * nonsensical and indicates a configuration error.
 		 */
