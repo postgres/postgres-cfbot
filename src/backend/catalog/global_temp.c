@@ -53,6 +53,7 @@
 
 #include "access/amapi.h"
 #include "access/genam.h"
+#include "access/multixact.h"
 #include "access/parallel.h"
 #include "access/table.h"
 #include "access/tableam.h"
@@ -67,6 +68,7 @@
 #include "miscadmin.h"
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
+#include "storage/proc.h"
 #include "storage/shmem.h"
 #include "storage/subsystems.h"
 #include "utils/gtcatcache.h"
@@ -167,6 +169,14 @@ static List *gtrs_invalidated = NIL;
 static List *gtrs_dropped = NIL;
 static bool processing_invalidated_gtrs = false;
 static SubTransactionId processed_dropped_subid = InvalidSubTransactionId;
+
+/*
+ * update_tempfrozenxids
+ *
+ *	Flag indicating that this backend's tempfrozenxid and tempminmxid need to
+ *	be updated on commit.  See comments in UpdateTempFrozenXids().
+ */
+static bool update_tempfrozenxids = false;
 
 /*
  * gtr_shared_usage
@@ -955,6 +965,17 @@ TrackGlobalTempRelation(Relation relation)
 	{
 		gtr_record_usage(relation->rd_id, relation->rd_rel->relkind);
 		InsertPgTempClassTuple(relation);
+
+		/*
+		 * If this backend's tempfrozenxid and tempminmxid haven't been set
+		 * yet (this is the first global temporary relation accessed in this
+		 * session), then update them to account for this relation.  If they
+		 * have been set, it must have been from an earlier transaction, so
+		 * this relation will not affect them.
+		 */
+		if (!TransactionIdIsValid(MyProc->tempfrozenxid) ||
+			!MultiXactIdIsValid(MyProc->tempminmxid))
+			UpdateTempFrozenXids();
 	}
 	Assert(PgTempClassTupleExists(relation->rd_id));
 }
@@ -983,6 +1004,9 @@ ForgetGlobalTempRelation(Oid relid)
 
 	/* Delete its pg_temp_class tuple */
 	DeletePgTempClassTuple(relid);
+
+	/* Update this backend's tempfrozenxid and tempminmxid */
+	UpdateTempFrozenXids();
 }
 
 /*
@@ -1173,12 +1197,34 @@ ProcessInvalidatedGlobalTempRelations(void)
 		if (tuples_deleted)
 			CommandCounterIncrement();
 
+		/* Update this backend's tempfrozenxid and tempminmxid */
+		UpdateTempFrozenXids();
+
 		/* All dropped relations have been processed, as of this subxact */
 		processed_dropped_subid = GetCurrentSubTransactionId();
 	}
 
 	/* Done processing */
 	processing_invalidated_gtrs = false;
+}
+
+/*
+ * UpdateTempFrozenXids
+ *
+ *	Update this backend's tempfrozenxid and tempminmxid values, setting them
+ *	to the minimum relfrozenxid and relminmxid values from pg_temp_class.
+ *
+ *	Note: the updates are deferred until main transaction commit.  This is
+ *	necessary, in case some or all of the changes made in this transaction are
+ *	rolled back (e.g., a DROP that makes it seem as though tempfrozenxid
+ *	and/or tempminmxid can be advanced, only to be rolled back).  Other
+ *	backends must only see the final state that we commit.
+ */
+void
+UpdateTempFrozenXids(void)
+{
+	/* Flag tempfrozenxid and tempminmxid as to-be-updated on commit */
+	update_tempfrozenxids = true;
 }
 
 /*
@@ -1258,6 +1304,23 @@ AtEOXact_GlobalTempRelation(bool isCommit)
 
 	/* Clean up global temporary catalog caches */
 	AtEOXact_GTCatCache(isCommit);
+
+	/*
+	 * Finally, on commit, update tempfrozenxid and tempminmxid, if requested.
+	 * This must be done after AtEOXact_GTCatCache(), so that it sees the
+	 * final state of pg_temp_class.
+	 */
+	if (update_tempfrozenxids && isCommit)
+	{
+		TransactionId min_relfrozenxid;
+		MultiXactId min_relminmxid;
+
+		GTCatCacheGetMinFrozenXids(&min_relfrozenxid, &min_relminmxid);
+
+		MyProc->tempfrozenxid = min_relfrozenxid;
+		MyProc->tempminmxid = min_relminmxid;
+	}
+	update_tempfrozenxids = false;
 }
 
 /*

@@ -70,6 +70,7 @@
 #include "commands/policy.h"
 #include "commands/publicationcmds.h"
 #include "commands/trigger.h"
+#include "commands/vacuum.h"
 #include "common/int.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
@@ -4032,7 +4033,7 @@ RelationSetNewRelfilenumber(Relation relation, char persistence)
 	}
 	else
 	{
-		/* Normal case, update the pg_class and pg_temp_class entries */
+		/* Normal case, update pg_class or pg_temp_class entry (not both) */
 		SetEffective_relfilenode(classform, temp_classform, newrelfilenumber);
 
 		/* relpages etc. never change for sequences */
@@ -4044,15 +4045,23 @@ RelationSetNewRelfilenumber(Relation relation, char persistence)
 			SetEffective_relallvisible(classform, temp_classform, 0, NULL, NULL);
 			SetEffective_relallfrozen(classform, temp_classform, 0, NULL, NULL);
 		}
-		classform->relfrozenxid = freezeXid;
-		classform->relminmxid = minmulti;
-		classform->relpersistence = persistence;
+		SetEffective_relfrozenxid(classform, temp_classform, freezeXid, NULL, NULL);
+		SetEffective_relminmxid(classform, temp_classform, minmulti, NULL, NULL);
 
-		CatalogTupleUpdate(pg_class, &otid, tuple);
+		/* relpersistence can only change for permanent relations */
 		if (HeapTupleIsValid(temp_tuple))
 		{
+			Assert(classform->relpersistence == persistence);
 			UpdatePgTempClassTuple(RelationGetRelid(relation), temp_tuple);
 			heap_freetuple(temp_tuple);
+
+			/* Update this backend's tempfrozenxid and tempminmxid */
+			UpdateTempFrozenXids();
+		}
+		else
+		{
+			classform->relpersistence = persistence;
+			CatalogTupleUpdate(pg_class, &otid, tuple);
 		}
 	}
 
@@ -4062,7 +4071,7 @@ RelationSetNewRelfilenumber(Relation relation, char persistence)
 	table_close(pg_class, RowExclusiveLock);
 
 	/*
-	 * Make the pg_class and pg_temp_class row changes or relation map change
+	 * Make the pg_class/pg_temp_class row change or relation map change
 	 * visible.  This will cause the relcache entry to get updated, too.
 	 */
 	CommandCounterIncrement();

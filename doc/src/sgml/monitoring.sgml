@@ -1022,6 +1022,34 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
       </para></entry>
      </row>
 
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>tempfrozenxid</structfield> <type>xid</type>
+      </para>
+      <para>
+       The minimum <literal>relfrozenxid</literal> over all global temporary
+       tables being used by this backend, or NULL if this backend hasn't used
+       any global temporary tables.  This can be used to determine which
+       backends need to vacuum or discard their global temporary tables, in
+       order to prevent transaction ID wraparound or to allow
+       <literal>pg_xact</literal> to be shrunk.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>tempminmxid</structfield> <type>xid</type>
+      </para>
+      <para>
+       The minimum <literal>relminmxid</literal> over all global temporary
+       tables being used by this backend, or NULL if this backend hasn't used
+       any global temporary tables.  This can be used to determine which
+       backends need to vacuum or discard their global temporary tables, in
+       order to prevent multixact ID wraparound or to allow
+       <literal>pg_multixact</literal> to be shrunk.
+      </para></entry>
+     </row>
+
     <row>
      <entry role="catalog_table_entry"><para role="column_definition">
       <structfield>query_id</structfield> <type>bigint</type>

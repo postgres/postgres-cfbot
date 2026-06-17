@@ -78,6 +78,7 @@
 
 #include "access/commit_ts.h"
 #include "access/htup_details.h"
+#include "access/multixact.h"
 #include "access/subtrans.h"
 #include "access/transam.h"
 #include "access/twophase.h"
@@ -485,6 +486,8 @@ MarkAsPreparingGuts(GlobalTransaction gxact, FullTransactionId fxid,
 	/* subxid data must be filled later by GXactLoadSubxactData */
 	proc->subxidStatus.overflowed = false;
 	proc->subxidStatus.count = 0;
+	proc->tempfrozenxid = InvalidTransactionId;
+	proc->tempminmxid = InvalidMultiXactId;
 
 	gxact->prepared_at = prepared_at;
 	gxact->fxid = fxid;

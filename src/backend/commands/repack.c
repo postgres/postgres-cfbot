@@ -260,6 +260,7 @@ ExecRepack(ParseState *pstate, RepackStmt *stmt, bool isTopLevel)
 	bool		verbose = false;
 	bool		analyze = false;
 	bool		concurrently = false;
+	bool		have_gtrs = false;
 
 	/* Parse option list */
 	foreach_node(DefElem, opt, stmt->params)
@@ -430,6 +431,9 @@ ExecRepack(ParseState *pstate, RepackStmt *stmt, bool isTopLevel)
 			continue;
 		}
 
+		if (RELATION_IS_GLOBAL_TEMP(rel))
+			have_gtrs = true;
+
 		/* functions in indexes may want a snapshot set */
 		PushActiveSnapshot(GetTransactionSnapshot());
 
@@ -443,6 +447,13 @@ ExecRepack(ParseState *pstate, RepackStmt *stmt, bool isTopLevel)
 
 	/* Start a new transaction for the cleanup work. */
 	StartTransactionCommand();
+
+	/*
+	 * Update this backend's tempfrozenxid and tempminmxid, if we processed
+	 * any global temporary relations.
+	 */
+	if (have_gtrs)
+		UpdateTempFrozenXids();
 
 	/* Clean up working storage */
 	MemoryContextDelete(repack_context);
@@ -1700,13 +1711,17 @@ swap_relation_files(Oid r1, Oid r2, bool target_is_pg_class,
 	 * and then fail to commit the pg_class update.
 	 */
 
-	/* set rel1's frozen Xid and minimum MultiXid */
+	/*
+	 * Set rel1's frozen Xid and minimum MultiXid.  For a global temporary
+	 * relation, the supplied values are set in pg_temp_class, instead of
+	 * pg_class.
+	 */
 	if (relform1->relkind != RELKIND_INDEX)
 	{
 		Assert(!TransactionIdIsValid(frozenXid) ||
 			   TransactionIdIsNormal(frozenXid));
-		relform1->relfrozenxid = frozenXid;
-		relform1->relminmxid = cutoffMulti;
+		SetEffective_relfrozenxid(relform1, temp_relform1, frozenXid, NULL, NULL);
+		SetEffective_relminmxid(relform1, temp_relform1, cutoffMulti, NULL, NULL);
 	}
 
 	/* swap size statistics too, since new rel has freshly-updated stats */
@@ -2560,6 +2575,7 @@ process_single_relation(RepackStmt *stmt, LOCKMODE lockmode, bool isTopLevel,
 	else
 	{
 		Oid			indexOid = InvalidOid;
+		bool		is_gtr = RELATION_IS_GLOBAL_TEMP(rel);
 
 		indexOid = determine_clustered_index(rel, stmt->usingindex,
 											 stmt->indexname);
@@ -2591,6 +2607,13 @@ process_single_relation(RepackStmt *stmt, LOCKMODE lockmode, bool isTopLevel,
 			PopActiveSnapshot();
 			CommandCounterIncrement();
 		}
+
+		/*
+		 * Update this backend's tempfrozenxid and tempminmxid, if it was a
+		 * global temporary relation.
+		 */
+		if (is_gtr)
+			UpdateTempFrozenXids();
 
 		return NULL;
 	}

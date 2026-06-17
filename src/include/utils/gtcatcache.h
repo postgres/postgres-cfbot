@@ -35,6 +35,8 @@ extern void GTCatCacheTupleUpdate(GTCatCacheIdentifier cacheId, Oid relid,
 extern void GTCatCacheTupleUpdateInPlace(GTCatCacheIdentifier cacheId,
 										 Oid relid, HeapTuple newtuple);
 extern void GTCatCacheTupleDelete(GTCatCacheIdentifier cacheId, Oid relid);
+extern void GTCatCacheGetMinFrozenXids(TransactionId *min_relfrozenxid,
+									   MultiXactId *min_relminmxid);
 extern void GTCatCacheFlush(void);
 extern void AtEOXact_GTCatCache(bool isCommit);
 extern void AtEOSubXact_GTCatCache(bool isCommit, SubTransactionId mySubid,

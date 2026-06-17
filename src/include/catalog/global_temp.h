@@ -26,6 +26,7 @@ extern void TrackGlobalTempRelation(Relation relation);
 extern void ForgetGlobalTempRelation(Oid relid);
 extern void InvalidateGlobalTempRelation(Oid relid);
 extern void ProcessInvalidatedGlobalTempRelations(void);
+extern void UpdateTempFrozenXids(void);
 extern void AtEOXact_GlobalTempRelation(bool isCommit);
 extern void AtEOSubXact_GlobalTempRelation(bool isCommit,
 										   SubTransactionId mySubid,
