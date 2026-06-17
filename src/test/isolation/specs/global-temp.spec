@@ -21,6 +21,7 @@ step drop_tblspace { DROP TABLESPACE regress_isolation_tablespace; }
 
 # Transaction control
 step b1 { BEGIN; }
+step c1 { COMMIT; }
 step r1 { ROLLBACK; }
 step sp1 { SAVEPOINT sp; }
 step rsp1 { ROLLBACK TO SAVEPOINT sp; }
@@ -55,8 +56,9 @@ step idx_info1 {
    WHERE i.indexrelid = 'tmp2_un'::regclass;
 }
 
-# Test DROP with ON COMMIT DELETE ROWS
+# Test concurrent ON COMMIT DELETE ROWS
 step create1dr { CREATE GLOBAL TEMP TABLE tmp2 (key int, val text) ON COMMIT DELETE ROWS; }
+step sel1_2 { SELECT * FROM tmp2; }
 
 # Test local TRUNCATE
 step t1 { TRUNCATE tmp; }
@@ -117,6 +119,9 @@ step idx_info2 {
    WHERE i.indexrelid = 'tmp2_un'::regclass;
 }
 
+# Test concurrent ON COMMIT DELETE ROWS
+step sel2_2 { SELECT * FROM tmp2; }
+
 # Test GTT inval in prepared transaction
 step drop2 { DROP TABLE tmp2; }
 
@@ -172,6 +177,9 @@ permutation create1 ins1_2 ins2_2 uniq_idx1
             idx_info1 idx_info2 uniq_reidx2 idx_info2 ins2_2 drop1
 permutation create1 ins1_2 ins2_2 uniq_idx1
             idx_info1 idx_info2 ins2_2 idx_info2 uniq_reidx2 drop1
+
+# Test concurrent ON COMMIT DELETE ROWS
+permutation create1dr b1 b2 ins1_2 ins2_2 sel1_2 sel2_2 c1 c2 sel1_2 sel2_2 drop1
 
 # Test DROP with ON COMMIT DELETE ROWS
 permutation create1dr ins1_2 ins2_2 drop1 create1dr ins1_2 ins2_2 drop1

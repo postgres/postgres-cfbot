@@ -124,6 +124,7 @@ static void UpdateIndexRelation(Oid indexoid, Oid heapoid,
 								bool isready,
 								char relpersistence);
 static void index_update_stats(Relation rel,
+							   bool isreindex,
 							   bool hasindex,
 							   double reltuples);
 static void IndexCheckExclusion(Relation heapRelation,
@@ -1299,6 +1300,7 @@ index_create(Relation heapRelation,
 		 * having an index.
 		 */
 		index_update_stats(heapRelation,
+						   false,
 						   true,
 						   -1.0);
 		/* Make the above update visible */
@@ -2853,17 +2855,23 @@ FormIndexDatum(IndexInfo *indexInfo,
 
 
 /*
- * index_update_stats --- update pg_class entry after CREATE INDEX or REINDEX
+ * index_update_stats --- update effective pg_class entry after CREATE INDEX
+ * or REINDEX
  *
- * This routine updates the pg_class row of either an index or its parent
- * relation after CREATE INDEX or REINDEX.  Its rather bizarre API is designed
- * to ensure we can do all the necessary work in just one update.
+ * This routine updates the effective pg_class row of either an index or its
+ * parent relation after CREATE INDEX or REINDEX.  Its rather bizarre API is
+ * designed to ensure we can do all the necessary work in just one update.
  *
+ * isreindex: recreated a previously-existing index
  * hasindex: set relhasindex to this value
  * reltuples: if >= 0, set reltuples to this value; else no change
  *
  * If reltuples >= 0, relpages, relallvisible, and relallfrozen are also
  * updated (using RelationGetNumberOfBlocks() and visibilitymap_count()).
+ *
+ * For a new index on a global temporary relation, relhasindex is set in
+ * pg_class and all the other fields are set in the session-local GtrInfo
+ * struct. For any other type of relation, all the fields are set in pg_class.
  *
  * NOTE: an important side-effect of this operation is that an SI invalidation
  * message is sent out to all backends --- including me --- causing relcache
@@ -2875,6 +2883,7 @@ FormIndexDatum(IndexInfo *indexInfo,
  */
 static void
 index_update_stats(Relation rel,
+				   bool isreindex,
 				   bool hasindex,
 				   double reltuples)
 {
@@ -2888,6 +2897,7 @@ index_update_stats(Relation rel,
 	HeapTuple	tuple;
 	void	   *state;
 	Form_pg_class rd_rel;
+	GtrInfo    *gtr_info;
 	bool		dirty;
 
 	/*
@@ -2972,28 +2982,50 @@ index_update_stats(Relation rel,
 	 * relallvisible) if the caller isn't providing an updated reltuples
 	 * count, because that would bollix the reltuples/relpages ratio which is
 	 * what's really important.
+	 *
+	 * If this is a reindex on a global temporary table, we don't need to set
+	 * pg_class.relhasindex, and all other fields go in the table's GtrInfo,
+	 * so we only need a read-only copy of the pg_class tuple.  Otherwise, we
+	 * need a writable copy of the pg_class tuple.
 	 */
+	if (isreindex && RELATION_IS_GLOBAL_TEMP(rel))
+	{
+		pg_class = NULL;
+		tuple = SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(relid));
+		state = NULL;
+	}
+	else
+	{
+		pg_class = table_open(RelationRelationId, RowExclusiveLock);
 
-	pg_class = table_open(RelationRelationId, RowExclusiveLock);
-
-	ScanKeyInit(&key[0],
-				Anum_pg_class_oid,
-				BTEqualStrategyNumber, F_OIDEQ,
-				ObjectIdGetDatum(relid));
-	systable_inplace_update_begin(pg_class, ClassOidIndexId, true, NULL,
-								  1, key, &tuple, &state);
+		ScanKeyInit(&key[0],
+					Anum_pg_class_oid,
+					BTEqualStrategyNumber, F_OIDEQ,
+					ObjectIdGetDatum(relid));
+		systable_inplace_update_begin(pg_class, ClassOidIndexId, true, NULL,
+									  1, key, &tuple, &state);
+	}
 
 	if (!HeapTupleIsValid(tuple))
 		elog(ERROR, "could not find tuple for relation %u", relid);
 	rd_rel = (Form_pg_class) GETSTRUCT(tuple);
 
+	/*
+	 * For a global temporary relation, do an in-place update of its GtrInfo
+	 * so that it behaves the same as a permanent relation.
+	 */
+	if (RELATION_IS_GLOBAL_TEMP(rel))
+		gtr_info = GetGlobalTempRelationInfoForInPlaceUpdate(relid);
+	else
+		gtr_info = NULL;
+
 	/* Should this be a more comprehensive test? */
 	Assert(rd_rel->relkind != RELKIND_PARTITIONED_INDEX);
 
-	/* Apply required updates, if any, to copied tuple */
+	/* Apply required updates, if any, to copied tuple / gtr_info */
 
 	dirty = false;
-	if (rd_rel->relhasindex != hasindex)
+	if (RelationIsValid(pg_class) && rd_rel->relhasindex != hasindex)
 	{
 		rd_rel->relhasindex = hasindex;
 		dirty = true;
@@ -3001,30 +3033,18 @@ index_update_stats(Relation rel,
 
 	if (update_stats)
 	{
-		if (rd_rel->relpages != (int32) relpages)
-		{
-			rd_rel->relpages = (int32) relpages;
-			dirty = true;
-		}
-		if (rd_rel->reltuples != (float4) reltuples)
-		{
-			rd_rel->reltuples = (float4) reltuples;
-			dirty = true;
-		}
-		if (rd_rel->relallvisible != (int32) relallvisible)
-		{
-			rd_rel->relallvisible = (int32) relallvisible;
-			dirty = true;
-		}
-		if (rd_rel->relallfrozen != (int32) relallfrozen)
-		{
-			rd_rel->relallfrozen = (int32) relallfrozen;
-			dirty = true;
-		}
+		SetEffective_relpages(rd_rel, gtr_info, (int32) relpages,
+							  &dirty, NULL);
+		SetEffective_reltuples(rd_rel, gtr_info, (float4) reltuples,
+							   &dirty, NULL);
+		SetEffective_relallvisible(rd_rel, gtr_info, (int32) relallvisible,
+								   &dirty, NULL);
+		SetEffective_relallfrozen(rd_rel, gtr_info, (int32) relallfrozen,
+								  &dirty, NULL);
 	}
 
 	/*
-	 * If anything changed, write out the tuple
+	 * If anything in pg_class changed, write out the tuple
 	 */
 	if (dirty)
 	{
@@ -3033,7 +3053,8 @@ index_update_stats(Relation rel,
 	}
 	else
 	{
-		systable_inplace_update_cancel(state);
+		if (state != NULL)
+			systable_inplace_update_cancel(state);
 
 		/*
 		 * While we didn't change relhasindex, CREATE INDEX needs a
@@ -3047,7 +3068,8 @@ index_update_stats(Relation rel,
 
 	heap_freetuple(tuple);
 
-	table_close(pg_class, RowExclusiveLock);
+	if (RelationIsValid(pg_class))
+		table_close(pg_class, RowExclusiveLock);
 }
 
 
@@ -3225,11 +3247,11 @@ index_build(Relation heapRelation,
 	 * Update heap and index pg_class rows
 	 */
 	index_update_stats(heapRelation,
-					   true,
+					   isreindex, true,
 					   stats->heap_tuples);
 
 	index_update_stats(indexRelation,
-					   false,
+					   isreindex, false,
 					   stats->index_tuples);
 
 	/* Make the updated catalog row versions visible */

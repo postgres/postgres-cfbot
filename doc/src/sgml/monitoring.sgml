@@ -6709,7 +6709,8 @@ FROM pg_stat_get_backend_idset() AS backendid;
      <row>
       <entry><literal>finalizing analyze</literal></entry>
       <entry>
-       The command is updating <structname>pg_class</structname>. When this
+       The command is updating <structname>pg_class</structname>, or the
+       in-memory statistics for a global temporary table. When this
        phase is completed, <command>ANALYZE</command> will end.
       </entry>
      </row>
@@ -8005,7 +8006,8 @@ FROM pg_stat_get_backend_idset() AS backendid;
      <entry>
        <command>VACUUM</command> is performing final cleanup.  During this phase,
        <command>VACUUM</command> will vacuum the free space map, update statistics
-       in <literal>pg_class</literal>, and report statistics to the cumulative
+       in <literal>pg_class</literal> (or in memory, for a global temporary table),
+       and report statistics to the cumulative
        statistics system. When this phase is completed, <command>VACUUM</command> will end.
      </entry>
     </row>
@@ -9205,6 +9207,21 @@ SELECT pg_relation_filepath(oid), relpages FROM pg_class WHERE relname = 'custom
  pg_relation_filepath | relpages
 ----------------------+----------
  base/16384/16806     |       60
+(1 row)
+</programlisting>
+    But for a global temporary table, you should use the statistical
+    information returned by
+    <link linkend="pg-gtr-info"><function>pg_gtr_info()</function></link>,
+    if it's non-null, instead of the values from
+    <structname>pg_class</structname>:
+<programlisting>
+SELECT pg_relation_filepath(oid), COALESCE(t.relpages, c.relpages) AS relpages
+FROM pg_class c, LATERAL pg_gtr_info(c.oid) t
+WHERE c.relname = 'customer';
+
+ pg_relation_filepath | relpages
+----------------------+----------
+ base/16384/t4_16398  |       46
 (1 row)
 </programlisting>
     Each page is typically 8 kilobytes. (Remember, <structfield>relpages</structfield>

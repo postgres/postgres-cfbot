@@ -973,7 +973,10 @@ vacuum threshold = Minimum(vacuum max threshold, vacuum base threshold + vacuum 
     the vacuum scale factor is
     <xref linkend="guc-autovacuum-vacuum-scale-factor"/>,
     and the number of tuples is
-    <structname>pg_class</structname>.<structfield>reltuples</structfield>.
+    <structname>pg_class</structname>.<structfield>reltuples</structfield>,
+    or the <structfield>reltuples</structfield> value returned by
+    <link linkend="pg-gtr-info"><function>pg_gtr_info()</function></link>,
+    for a global temporary table.
    </para>
 
    <para>
@@ -988,8 +991,14 @@ vacuum insert threshold = vacuum base insert threshold + vacuum insert scale fac
     <xref linkend="guc-autovacuum-vacuum-insert-scale-factor"/>,
     the number of tuples is
     <structname>pg_class</structname>.<structfield>reltuples</structfield>,
+    or the <structfield>reltuples</structfield> value returned by
+    <link linkend="pg-gtr-info"><function>pg_gtr_info()</function></link>,
+    for a global temporary table,
     and the percent of the table not frozen is
-    <literal>1 - pg_class.relallfrozen / pg_class.relpages</literal>.
+    <literal>1 - pg_class.relallfrozen / pg_class.relpages</literal>,
+    or the equivalent formula based on the values returned by
+    <link linkend="pg-gtr-info"><function>pg_gtr_info()</function></link>,
+    for a global temporary table.
     Such vacuums may allow portions of the table to be marked as
     <firstterm>all visible</firstterm> and also allow tuples to be frozen, which
     can reduce the work required in subsequent vacuums.

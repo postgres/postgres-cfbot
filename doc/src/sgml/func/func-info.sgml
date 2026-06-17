@@ -377,7 +377,11 @@
         <function>pg_gtr_info</function> ( <type>oid</type> )
         <returnvalue>record</returnvalue>
         ( <parameter>relfilenode</parameter> <type>oid</type>,
-        <parameter>reltablespace</parameter> <type>oid</type> )
+        <parameter>reltablespace</parameter> <type>oid</type>,
+        <parameter>relpages</parameter> <type>int4</type>,
+        <parameter>reltuples</parameter> <type>float4</type>,
+        <parameter>relallvisible</parameter> <type>int4</type>,
+        <parameter>relallfrozen</parameter> <type>int4</type> )
        </para>
        <para>
         Returns information about a global temporary relation being used in
@@ -402,7 +406,11 @@
         <returnvalue>setof record</returnvalue>
         ( <parameter>oid</parameter> <type>oid</type>,
         <parameter>relfilenode</parameter> <type>oid</type>,
-        <parameter>reltablespace</parameter> <type>oid</type> )
+        <parameter>reltablespace</parameter> <type>oid</type>,
+        <parameter>relpages</parameter> <type>int4</type>,
+        <parameter>reltuples</parameter> <type>float4</type>,
+        <parameter>relallvisible</parameter> <type>int4</type>,
+        <parameter>relallfrozen</parameter> <type>int4</type> )
        </para>
        <para>
         Returns information about all global temporary relations being used in
