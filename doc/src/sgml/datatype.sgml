@@ -4511,14 +4511,100 @@ XMLPARSE ( { DOCUMENT | CONTENT } <replaceable>value</replaceable>)
 XMLPARSE (DOCUMENT '<?xml version="1.0"?><book><title>Manual</title><chapter>...</chapter></book>')
 XMLPARSE (CONTENT 'abc<foo>bar</foo><bar>foo</bar>')
 ]]></programlisting>
-    While this is the only way to convert character strings into XML
-    values according to the SQL standard, the PostgreSQL-specific
-    syntaxes:
+
+    Another option for converting values to or from <type>xml</type> is the <function>xmlcast</function> function,<indexterm><primary>xmlcast</primary></indexterm>
+    which is designed to cast SQL data types into <type>xml</type>, and vice versa, in a standards-compliant way.
+<synopsis>
+XMLCAST ( <replaceable>expression</replaceable> AS <replaceable>type</replaceable> [ BY REF | BY VALUE ] )
+</synopsis>
+    Similar to the SQL function <function>CAST</function>, this function converts an <replaceable>expression</replaceable>
+    into the specified <replaceable>type</replaceable>. It is primarily used for converting between SQL values
+    and <type>xml</type> values in a standards-compliant way.
+
+    Unlike <function>CAST</function>, which may coerce SQL values into text or XML without enforcing a specific
+    lexical representation, <function>xmlcast</function> ensures that the conversion produces or expects a
+    standard XML Schema lexical form appropriate for the target type. For example, an <type>interval</type>
+    value is rendered as <literal>P1Y2M</literal> (<type>xs:duration</type>), and a <type>timestamp</type> as
+    <literal>2023-05-19T14:30:00</literal> (<type>xs:dateTime</type>). Similarly, when converting from XML to SQL types,
+    <function>xmlcast</function> validates that the input string conforms to the lexical format required by the
+    corresponding SQL type.
+
+    The function <function>xmlcast</function> follows these rules:
+
+     <itemizedlist>
+      <listitem>
+        <para>
+          Either <replaceable>expression</replaceable> or <replaceable>type</replaceable> must be of type <type>xml</type>.
+        </para>
+      </listitem>
+      <listitem>
+        <para>
+          Casting is supported between <type>xml</type> and <link linkend="datatype-character-table">character</link>,
+          <link linkend="datatype-numeric">numeric</link>, <link linkend="datatype-datetime">date/time</link>,
+          <link linkend="datatype-boolean">boolean</link> and <link linkend="datatype-binary">binary</link> data types.
+        </para>
+      </listitem>
+      <listitem>
+        <para>
+          Similar to the function <function>xmltext</function>, <replaceable>expression</replaceable>
+          values containing XML predefined entities will be escaped (see examples below).
+        </para>
+      </listitem>
+      <listitem>
+        <para>
+          Values of type <type>date</type>, <type>time with time zone</type>, <type>timestamp with time zone</type>,
+          and <type>interval</type> are converted to their corresponding XML Schema types: <type>xs:date</type>,
+          <type>xs:time</type>, <type>xs:dateTime</type>, and <type>xs:duration</type>, respectively.
+        </para>
+      </listitem>
+       <listitem>
+        <para>
+          The <literal>BY REF</literal> and <literal>BY VALUE</literal> clauses
+          are accepted but ignored, as discussed in
+          <xref linkend="functions-xml-limits-postgresql"/>.
+        </para>
+      </listitem>
+    </itemizedlist>
+
+     Examples:
+<screen><![CDATA[
+SELECT xmlcast('<foo&bar>'::text AS xml);
+       xmlcast
+---------------------
+ &lt;foo&amp;bar&gt;
+(1 row)
+
+SELECT xmlcast('&lt;foo&amp;bar&gt;'::xml AS text);
+  xmlcast
+-----------
+ <foo&bar>
+(1 row)
+
+SELECT xmlcast('2024-05-19 14:30:00'::timestamp AS xml);
+       xmlcast
+----------------------
+ 2024-05-19T14:30:00
+(1 row)
+
+SELECT xmlcast('P1Y2M3W4DT5H6M7S'::xml AS interval);
+            xmlcast
+--------------------------------
+ 1 year 2 mons 25 days 05:06:07
+(1 row)
+
+SELECT xmlcast('1 year 2 months 3 weeks 4 days 5 hours 6 minutes 7 seconds'::interval AS xml);
+     xmlcast
+-----------------
+ P1Y2M25DT5H6M7S
+(1 row)
+]]></screen>
+
+    Alternatively, it is also possible to convert character strings into XML using PostgreSQL-specific cast syntaxes:
 <programlisting><![CDATA[
 xml '<foo>bar</foo>'
 '<foo>bar</foo>'::xml
 ]]></programlisting>
-    can also be used.
+
    </para>
 
    <para>
