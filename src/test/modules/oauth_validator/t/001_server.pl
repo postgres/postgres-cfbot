@@ -744,6 +744,21 @@ $node->reload;
 $log_start =
   $node->wait_for_log(qr/reloading configuration files/, $log_start);
 
+# pg_hba_file_rules() re-parses the file on disk, surfacing the warning about
+# unencrypted connections to a superuser inspecting the configuration.
+unlink($node->data_dir . '/pg_hba.conf');
+$node->append_conf(
+	'pg_hba.conf', qq{
+local all test              oauth issuer="$issuer" scope="openid postgres"
+host  all test 127.0.0.1/32 oauth issuer="$issuer" scope="openid postgres"
+});
+my $rules_log_start = -s $node->logfile;
+$bgconn->query("SELECT NULL FROM pg_hba_file_rules;");
+ok( $node->wait_for_log(
+		qr/WARNING:\s+oauth authentication is enabled for a connection type that permits unencrypted connections/,
+		$rules_log_start),
+	"pg_hba_file_rules() warns about plaintext-capable OAuth entries");
+
 $bgconn->quit;    # the tests below restart the server
 
 #
@@ -879,6 +894,13 @@ $node->reload;
 
 $log_start =
   $node->wait_for_log(qr/reloading configuration files/, $log_start);
+
+# The "host" entry just loaded permits unencrypted connections, so the server
+# warns that the bearer token could be exposed in cleartext.
+ok( $node->wait_for_log(
+		qr/WARNING:\s+oauth authentication is enabled for a connection type that permits unencrypted connections/,
+		$log_start),
+	"plaintext-capable OAuth HBA entry warns on reload");
 
 $user = "test";
 my $tcp_connstr = "host=127.0.0.1 user=$user dbname=postgres"
