@@ -998,8 +998,18 @@ InsertPgClassTuple(Relation pg_class_desc,
 	values[Anum_pg_class_relreplident - 1] = CharGetDatum(rd_rel->relreplident);
 	values[Anum_pg_class_relispartition - 1] = BoolGetDatum(rd_rel->relispartition);
 	values[Anum_pg_class_relrewrite - 1] = ObjectIdGetDatum(rd_rel->relrewrite);
-	values[Anum_pg_class_relfrozenxid - 1] = TransactionIdGetDatum(rd_rel->relfrozenxid);
-	values[Anum_pg_class_relminmxid - 1] = MultiXactIdGetDatum(rd_rel->relminmxid);
+
+	/*
+	 * For a global temporary relation, relfrozenxid and relminmxid are kept
+	 * in memory, in its session-local GtrInfo struct.  Set them to Invalid in
+	 * the pg_class tuple.
+	 */
+	values[Anum_pg_class_relfrozenxid - 1] =
+		TransactionIdGetDatum(rd_rel->relpersistence == RELPERSISTENCE_GLOBAL_TEMP ?
+							  InvalidTransactionId : rd_rel->relfrozenxid);
+	values[Anum_pg_class_relminmxid - 1] =
+		MultiXactIdGetDatum(rd_rel->relpersistence == RELPERSISTENCE_GLOBAL_TEMP ?
+							InvalidMultiXactId : rd_rel->relminmxid);
 	if (relacl != (Datum) 0)
 		values[Anum_pg_class_relacl - 1] = relacl;
 	else
@@ -3706,6 +3716,56 @@ heap_truncate(List *relids)
 }
 
 /*
+ *	heap_nontransactional_truncate
+ *
+ *	Perform a non-transactional truncate of the specified relation.
+ */
+static void
+heap_nontransactional_truncate(Relation rel)
+{
+	TransactionId freezeXid;
+	MultiXactId minmulti;
+
+	table_relation_nontransactional_truncate(rel, &freezeXid, &minmulti);
+
+	/*
+	 * If rel is a global temporary relation, update its relfrozenxid and
+	 * relminmxid values in its session-local GtrInfo struct, and update this
+	 * backend's tempfrozenxid and tempminmxid.
+	 *
+	 * XXX: Should we update pg_class for other types of relation?  For a
+	 * permanent relation, it would probably be pointless, because in that
+	 * case, this function is only used when truncating a relation created or
+	 * assigned a new relfilenumber in the current (sub)transaction, so its
+	 * XIDs won't have changed.  However, maybe it is worth doing for a local
+	 * temporary table when doing ON COMMIT DELETE ROWS.
+	 */
+	if (RELATION_IS_GLOBAL_TEMP(rel))
+	{
+		Oid			relid = RelationGetRelid(rel);
+		GtrInfo    *gtr_info;
+
+		/*
+		 * Since the relation's storage was truncated non-transactionally, do
+		 * an in-place update of the relation's GtrInfo.
+		 */
+		gtr_info = GetGlobalTempRelationInfoForInPlaceUpdate(relid);
+		gtr_info->relfrozenxid = freezeXid;
+		gtr_info->relminmxid = minmulti;
+
+		/*
+		 * Schedule tempfrozenxid and tempminmxid to be updated on commit.  It
+		 * might seem as though we could do it immediately, because the change
+		 * to this relation cannot be rolled back.  However, there may have
+		 * been changes to other relations in the current transaction that can
+		 * be rolled back, if the transaction aborts, so we have to defer this
+		 * until commit.
+		 */
+		UpdateTempFrozenXids(false);
+	}
+}
+
+/*
  *	 heap_truncate_one_rel
  *
  *	 This routine deletes all data within the specified relation.
@@ -3736,7 +3796,7 @@ heap_truncate_one_rel(Relation rel)
 		return;
 
 	/* Truncate the underlying relation */
-	table_relation_nontransactional_truncate(rel);
+	heap_nontransactional_truncate(rel);
 
 	/* If the relation has indexes, truncate the indexes too */
 	RelationTruncateIndexes(rel, lockmode);
@@ -3747,7 +3807,7 @@ heap_truncate_one_rel(Relation rel)
 	{
 		Relation	toastrel = table_open(toastrelid, lockmode);
 
-		table_relation_nontransactional_truncate(toastrel);
+		heap_nontransactional_truncate(toastrel);
 		RelationTruncateIndexes(toastrel, lockmode);
 		/* keep the lock... */
 		table_close(toastrel, NoLock);

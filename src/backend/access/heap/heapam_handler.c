@@ -495,6 +495,9 @@ heapam_relation_set_new_filelocator(Relation rel,
 	 * Initialize to the minimum XID that could put tuples in the table. We
 	 * know that no xacts older than RecentXmin are still running, so that
 	 * will do.
+	 *
+	 * Note: Any change made to this or the way *minmulti is initialized
+	 * should be reflected in heapam_relation_nontransactional_truncate().
 	 */
 	*freezeXid = RecentXmin;
 
@@ -526,8 +529,18 @@ heapam_relation_set_new_filelocator(Relation rel,
 }
 
 static void
-heapam_relation_nontransactional_truncate(Relation rel)
+heapam_relation_nontransactional_truncate(Relation rel,
+										  TransactionId *freezeXid,
+										  MultiXactId *minmulti)
 {
+	/*
+	 * Initialize *freezeXid and *minmulti in the same way as
+	 * heapam_relation_set_new_filelocator().
+	 */
+	*freezeXid = RecentXmin;
+	*minmulti = GetOldestMultiXactId();
+
+	/* Truncate the relation's storage */
 	RelationTruncate(rel, 0);
 }
 

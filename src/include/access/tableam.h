@@ -647,9 +647,15 @@ typedef struct TableAmRoutine
 	 * made.  Often this can be implemented by truncating the underlying
 	 * storage to its minimal size.
 	 *
+	 * As output *freezeXid, *minmulti must be set to the same values that
+	 * relation_set_new_filelocator would return, if new storage were being
+	 * created.
+	 *
 	 * See also table_relation_nontransactional_truncate().
 	 */
-	void		(*relation_nontransactional_truncate) (Relation rel);
+	void		(*relation_nontransactional_truncate) (Relation rel,
+													   TransactionId *freezeXid,
+													   MultiXactId *minmulti);
 
 	/*
 	 * See table_relation_copy_data().
@@ -1722,11 +1728,17 @@ table_relation_set_new_filelocator(Relation rel,
  * Non-transactional meaning that there's no need to support rollbacks. This
  * commonly only is used to perform truncations for relation storage created in
  * the current transaction.
+ *
+ * *freezeXid and *minmulti are set in the same way as
+ * table_relation_set_new_filelocator().
  */
 static inline void
-table_relation_nontransactional_truncate(Relation rel)
+table_relation_nontransactional_truncate(Relation rel,
+										 TransactionId *freezeXid,
+										 MultiXactId *minmulti)
 {
-	rel->rd_tableam->relation_nontransactional_truncate(rel);
+	rel->rd_tableam->relation_nontransactional_truncate(rel, freezeXid,
+														minmulti);
 }
 
 /*

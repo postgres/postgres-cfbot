@@ -69,6 +69,7 @@
 #include "commands/policy.h"
 #include "commands/publicationcmds.h"
 #include "commands/trigger.h"
+#include "commands/vacuum.h"
 #include "common/int.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
@@ -4011,7 +4012,7 @@ RelationSetNewRelfilenumber(Relation relation, char persistence)
 	}
 	else
 	{
-		/* Normal case, update the pg_class and GtrInfo */
+		/* Normal case, update the pg_class or GtrInfo (not both) */
 		SetEffective_relfilenode(classform, gtr_info, newrelfilenumber);
 
 		/* relpages etc. never change for sequences */
@@ -4023,11 +4024,27 @@ RelationSetNewRelfilenumber(Relation relation, char persistence)
 			SetEffective_relallvisible(classform, gtr_info, 0, NULL, NULL);
 			SetEffective_relallfrozen(classform, gtr_info, 0, NULL, NULL);
 		}
-		classform->relfrozenxid = freezeXid;
-		classform->relminmxid = minmulti;
-		classform->relpersistence = persistence;
+		SetEffective_relfrozenxid(classform, gtr_info, freezeXid, NULL, NULL);
+		SetEffective_relminmxid(classform, gtr_info, minmulti, NULL, NULL);
 
-		CatalogTupleUpdate(pg_class, &otid, tuple);
+		/* relpersistence can only change for permanent relations */
+		if (gtr_info != NULL)
+		{
+			Assert(classform->relpersistence == persistence);
+
+			/* No pg_class update, but we still need a relcache inval */
+			CacheInvalidateRelcacheByTuple(tuple);
+
+			/*
+			 * Schedule tempfrozenxid and tempminmxid to be updated on commit.
+			 */
+			UpdateTempFrozenXids(false);
+		}
+		else
+		{
+			classform->relpersistence = persistence;
+			CatalogTupleUpdate(pg_class, &otid, tuple);
+		}
 	}
 
 	UnlockTuple(pg_class, &otid, InplaceUpdateTupleLock);

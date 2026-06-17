@@ -33,6 +33,8 @@ typedef struct GtrInfo
 	float4		reltuples;		/* rel stats: number of tuples */
 	int32		relallvisible;	/* rel stats: number of all-visible blocks */
 	int32		relallfrozen;	/* rel stats: number of all-frozen blocks */
+	TransactionId relfrozenxid; /* vac stats: all Xids < this are frozen */
+	MultiXactId relminmxid;		/* vac stats: all multixacts are >= this */
 
 	/* pg_index info */
 	bool		indisvalid;		/* is the index valid in this session? */
@@ -54,6 +56,8 @@ typedef struct GtrInfo
 		(target)->reltuples = (source)->reltuples; \
 		(target)->relallvisible = (source)->relallvisible; \
 		(target)->relallfrozen = (source)->relallfrozen; \
+		(target)->relfrozenxid = (source)->relfrozenxid; \
+		(target)->relminmxid = (source)->relminmxid; \
 	} while (0)
 
 /*
@@ -79,6 +83,7 @@ extern void TrackGlobalTempRelation(Relation relation, bool isNew);
 extern void ForgetGlobalTempRelation(Oid relid);
 extern void InvalidateGlobalTempRelation(Oid relid);
 extern void ProcessInvalidatedGlobalTempRelations(void);
+extern void UpdateTempFrozenXids(bool immediate);
 extern void AtEOXact_GlobalTempRelation(bool isCommit);
 extern void AtEOSubXact_GlobalTempRelation(bool isCommit,
 										   SubTransactionId mySubid,
@@ -150,6 +155,26 @@ static inline int32
 GetEffective_relallfrozen(Form_pg_class class_form, GtrInfo *gtr_info)
 {
 	return gtr_info != NULL ? gtr_info->relallfrozen : class_form->relallfrozen;
+}
+
+/*
+ * Get the effective value of relfrozenxid for a relation.  For a global
+ * temporary relation, the value from gtr_info (if present) takes precedence.
+ */
+static inline TransactionId
+GetEffective_relfrozenxid(Form_pg_class class_form, GtrInfo *gtr_info)
+{
+	return gtr_info != NULL ? gtr_info->relfrozenxid : class_form->relfrozenxid;
+}
+
+/*
+ * Get the effective value of relminmxid for a relation.  For a global
+ * temporary relation, the value from gtr_info (if present) takes precedence.
+ */
+static inline MultiXactId
+GetEffective_relminmxid(Form_pg_class class_form, GtrInfo *gtr_info)
+{
+	return gtr_info != NULL ? gtr_info->relminmxid : class_form->relminmxid;
 }
 
 /*
@@ -318,6 +343,66 @@ SetEffective_relallfrozen(Form_pg_class class_form, GtrInfo *gtr_info,
 	else if (newval != class_form->relallfrozen)
 	{
 		class_form->relallfrozen = newval;
+		if (class_dirty != NULL)
+			*class_dirty = true;
+	}
+}
+
+/*
+ * Set the effective value of relfrozenxid for a relation.  For a global
+ * temporary relation, GetGlobalTempRelationInfoFor[InPlace]Update() should
+ * have been used to obtain gtr_info, and it will be updated instead of the
+ * pg_class entry.  Otherwise, the value is set in the pg_class entry.
+ *
+ * If non-NULL, the class_dirty or gtr_dirty flag is set to true, if the value
+ * in pg_class or gtr_info actually changes.
+ */
+static inline void
+SetEffective_relfrozenxid(Form_pg_class class_form, GtrInfo *gtr_info,
+						  TransactionId newval, bool *class_dirty, bool *gtr_dirty)
+{
+	if (gtr_info != NULL)
+	{
+		if (newval != gtr_info->relfrozenxid)
+		{
+			gtr_info->relfrozenxid = newval;
+			if (gtr_dirty != NULL)
+				*gtr_dirty = true;
+		}
+	}
+	else if (newval != class_form->relfrozenxid)
+	{
+		class_form->relfrozenxid = newval;
+		if (class_dirty != NULL)
+			*class_dirty = true;
+	}
+}
+
+/*
+ * Set the effective value of relminmxid for a relation.  For a global
+ * temporary relation, GetGlobalTempRelationInfoFor[InPlace]Update() should
+ * have been used to obtain gtr_info, and it will be updated instead of the
+ * pg_class entry.  Otherwise, the value is set in the pg_class entry.
+ *
+ * If non-NULL, the class_dirty or gtr_dirty flag is set to true, if the value
+ * in pg_class or gtr_info actually changes.
+ */
+static inline void
+SetEffective_relminmxid(Form_pg_class class_form, GtrInfo *gtr_info,
+						MultiXactId newval, bool *class_dirty, bool *gtr_dirty)
+{
+	if (gtr_info != NULL)
+	{
+		if (newval != gtr_info->relminmxid)
+		{
+			gtr_info->relminmxid = newval;
+			if (gtr_dirty != NULL)
+				*gtr_dirty = true;
+		}
+	}
+	else if (newval != class_form->relminmxid)
+	{
+		class_form->relminmxid = newval;
 		if (class_dirty != NULL)
 			*class_dirty = true;
 	}

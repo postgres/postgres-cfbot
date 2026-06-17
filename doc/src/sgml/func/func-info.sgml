@@ -381,7 +381,9 @@
         <parameter>relpages</parameter> <type>int4</type>,
         <parameter>reltuples</parameter> <type>float4</type>,
         <parameter>relallvisible</parameter> <type>int4</type>,
-        <parameter>relallfrozen</parameter> <type>int4</type> )
+        <parameter>relallfrozen</parameter> <type>int4</type>,
+        <parameter>relfrozenxid</parameter> <type>xid</type>,
+        <parameter>relminmxid</parameter> <type>xid</type> )
        </para>
        <para>
         Returns information about a global temporary relation being used in
@@ -410,7 +412,9 @@
         <parameter>relpages</parameter> <type>int4</type>,
         <parameter>reltuples</parameter> <type>float4</type>,
         <parameter>relallvisible</parameter> <type>int4</type>,
-        <parameter>relallfrozen</parameter> <type>int4</type> )
+        <parameter>relallfrozen</parameter> <type>int4</type>,
+        <parameter>relfrozenxid</parameter> <type>xid</type>,
+        <parameter>relminmxid</parameter> <type>xid</type> )
        </para>
        <para>
         Returns information about all global temporary relations being used in

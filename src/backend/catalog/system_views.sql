@@ -957,6 +957,8 @@ CREATE VIEW pg_stat_activity AS
             S.state,
             S.backend_xid,
             S.backend_xmin,
+            S.tempfrozenxid,
+            S.tempminmxid,
             S.query_id,
             S.query,
             S.backend_type
