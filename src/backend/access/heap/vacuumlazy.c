@@ -918,7 +918,7 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 								 PROGRESS_VACUUM_PHASE_FINAL_CLEANUP);
 
 	/*
-	 * Prepare to update rel's pg_class entry.
+	 * Prepare to update rel's pg_class and/or pg_temp_class entries.
 	 *
 	 * Aggressive VACUUMs must always be able to advance relfrozenxid to a
 	 * value >= FreezeLimit, and relminmxid to a value >= MultiXactCutoff.
@@ -962,7 +962,7 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 		new_rel_allfrozen = new_rel_allvisible;
 
 	/*
-	 * Now actually update rel's pg_class entry.
+	 * Now actually update rel's pg_class and/or pg_temp_class entries.
 	 *
 	 * In principle new_live_tuples could be -1 indicating that we (still)
 	 * don't know the tuple count.  In practice that can't happen, since we

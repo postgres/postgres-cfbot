@@ -608,10 +608,13 @@
    <para>
     To track the age of the oldest unfrozen XIDs in a database,
     <command>VACUUM</command> stores XID
-    statistics in the system tables <structname>pg_class</structname> and
+    statistics in the system tables <structname>pg_class</structname>,
+    <structname>pg_temp_class</structname>, and
     <structname>pg_database</structname>.  In particular,
     the <structfield>relfrozenxid</structfield> column of a table's
-    <structname>pg_class</structname> row contains the oldest remaining unfrozen
+    <structname>pg_class</structname> row (or its
+    <structname>pg_temp_class</structname> row, for a global temporary
+    table) contains the oldest remaining unfrozen
     XID at the end of the most recent <command>VACUUM</command> that successfully
     advanced <structfield>relfrozenxid</structfield> (typically the most recent
     aggressive VACUUM).  Similarly, the
@@ -802,14 +805,16 @@ HINT:  Execute a database-wide VACUUM in that database.
      <xref linkend="guc-vacuum-multixact-freeze-min-age"/>
      by a different value, which can be the zero value, a single
      transaction ID, or a newer multixact ID.  For each table,
-     <structname>pg_class</structname>.<structfield>relminmxid</structfield> stores the oldest
+     <structname>pg_class</structname>.<structfield>relminmxid</structfield> or
+     <structname>pg_temp_class</structname>.<structfield>relminmxid</structfield> stores the oldest
      possible multixact ID still appearing in any tuple of that table.
      If this value is older than
      <xref linkend="guc-vacuum-multixact-freeze-table-age"/>, an aggressive
      vacuum is forced.  As discussed in the previous section, an aggressive
      vacuum means that only those pages which are known to be all-frozen will
      be skipped.  <function>mxid_age()</function> can be used on
-     <structname>pg_class</structname>.<structfield>relminmxid</structfield> to find its age.
+     <structname>pg_class</structname>.<structfield>relminmxid</structfield> or
+     <structname>pg_temp_class</structname>.<structfield>relminmxid</structfield> to find its age.
     </para>
 
     <para>
@@ -1112,7 +1117,8 @@ analyze threshold = analyze base threshold + analyze scale factor * number of tu
       <para>
        The <emphasis>transaction ID</emphasis> component measures the age in
        transactions of the table's
-       <structname>pg_class</structname>.<structfield>relfrozenxid</structfield>
+       <structname>pg_class</structname>.<structfield>relfrozenxid</structfield> or
+       <structname>pg_temp_class</structname>.<structfield>relfrozenxid</structfield>
        field as compared to <xref linkend="guc-autovacuum-freeze-max-age"/>.
        Furthermore, this component increases greatly once the age surpasses
        <xref linkend="guc-vacuum-failsafe-age"/>.  The final value for this
@@ -1128,7 +1134,8 @@ analyze threshold = analyze base threshold + analyze scale factor * number of tu
       <para>
        The <emphasis>multixact ID</emphasis> component measures the age in
        multixacts of the table's
-       <structname>pg_class</structname>.<structfield>relminmxid</structfield>
+       <structname>pg_class</structname>.<structfield>relminmxid</structfield> or
+       <structname>pg_temp_class</structname>.<structfield>relminmxid</structfield>
        field as compared to
        <xref linkend="guc-autovacuum-multixact-freeze-max-age"/>.  Furthermore,
        this component increases greatly once the age surpasses

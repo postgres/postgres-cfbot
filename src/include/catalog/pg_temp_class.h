@@ -57,6 +57,12 @@ CATALOG(pg_temp_class,8082,TempRelationRelationId) BKI_TEMP_RELATION
 
 	/* # of all-frozen blocks (not always up-to-date) */
 	int32		relallfrozen BKI_DEFAULT(0);
+
+	/* all Xids < this are frozen in this rel */
+	TransactionId relfrozenxid BKI_DEFAULT(3);	/* FirstNormalTransactionId */
+
+	/* all multixacts in this rel are >= this; it is really a MultiXactId */
+	TransactionId relminmxid BKI_DEFAULT(1);	/* FirstMultiXactId */
 } FormData_pg_temp_class;
 
 END_CATALOG_STRUCT
@@ -87,6 +93,8 @@ MAKE_SYSCACHE(TEMPRELOID, pg_temp_class_oid_index, 128);
 		(target)->reltuples = (source)->reltuples; \
 		(target)->relallvisible = (source)->relallvisible; \
 		(target)->relallfrozen = (source)->relallfrozen; \
+		(target)->relfrozenxid = (source)->relfrozenxid; \
+		(target)->relminmxid = (source)->relminmxid; \
 	} while (0)
 
 /*
@@ -147,6 +155,26 @@ static inline int32
 GetEffective_relallfrozen(Form_pg_class cf, Form_pg_temp_class tf)
 {
 	return tf != NULL ? tf->relallfrozen : cf->relallfrozen;
+}
+
+/*
+ * Get the effective value of relfrozenxid from pg_class and pg_temp_class
+ * tuple data.  The value from pg_temp_class (if present) takes precedence.
+ */
+static inline TransactionId
+GetEffective_relfrozenxid(Form_pg_class cf, Form_pg_temp_class tf)
+{
+	return tf != NULL ? tf->relfrozenxid : cf->relfrozenxid;
+}
+
+/*
+ * Get the effective value of relminmxid from pg_class and pg_temp_class tuple
+ * data.  The value from pg_temp_class (if present) takes precedence.
+ */
+static inline MultiXactId
+GetEffective_relminmxid(Form_pg_class cf, Form_pg_temp_class tf)
+{
+	return tf != NULL ? tf->relminmxid : cf->relminmxid;
 }
 
 /*
@@ -280,6 +308,60 @@ SetEffective_relallfrozen(Form_pg_class cf, Form_pg_temp_class tf, int32 val,
 	else if (val != cf->relallfrozen)
 	{
 		cf->relallfrozen = val;
+		if (cdirty != NULL)
+			*cdirty = true;
+	}
+}
+
+/*
+ * Set the effective value of relfrozenxid in tuple form data from pg_class or
+ * pg_temp_class.  The value is set in pg_temp_class instead of pg_class, if
+ * the pg_temp_class tuple form data is non-NULL.  If non-NULL, the cdirty or
+ * tdirty flag is updated, if the value actually changes.
+ */
+static inline void
+SetEffective_relfrozenxid(Form_pg_class cf, Form_pg_temp_class tf,
+						  TransactionId val, bool *cdirty, bool *tdirty)
+{
+	if (tf != NULL)
+	{
+		if (val != tf->relfrozenxid)
+		{
+			tf->relfrozenxid = val;
+			if (tdirty != NULL)
+				*tdirty = true;
+		}
+	}
+	else if (val != cf->relfrozenxid)
+	{
+		cf->relfrozenxid = val;
+		if (cdirty != NULL)
+			*cdirty = true;
+	}
+}
+
+/*
+ * Set the effective value of relminmxid in tuple form data from pg_class or
+ * pg_temp_class.  The value is set in pg_temp_class instead of pg_class, if
+ * the pg_temp_class tuple form data is non-NULL.  If non-NULL, the cdirty or
+ * tdirty flag is updated, if the value actually changes.
+ */
+static inline void
+SetEffective_relminmxid(Form_pg_class cf, Form_pg_temp_class tf,
+						MultiXactId val, bool *cdirty, bool *tdirty)
+{
+	if (tf != NULL)
+	{
+		if (val != tf->relminmxid)
+		{
+			tf->relminmxid = val;
+			if (tdirty != NULL)
+				*tdirty = true;
+		}
+	}
+	else if (val != cf->relminmxid)
+	{
+		cf->relminmxid = val;
 		if (cdirty != NULL)
 			*cdirty = true;
 	}

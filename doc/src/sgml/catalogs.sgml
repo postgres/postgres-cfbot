@@ -2362,6 +2362,11 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
        whether the table needs to be vacuumed in order to prevent transaction
        ID wraparound or to allow <literal>pg_xact</literal> to be shrunk.  Zero
        (<symbol>InvalidTransactionId</symbol>) if the relation is not a table.
+      </para>
+      <para>
+       For a global temporary relation, this value is always zero, and the value from
+       <link linkend="catalog-pg-temp-class"><structname>pg_temp_class</structname></link>.<structfield>relfrozenxid</structfield>
+       is used instead.
       </para></entry>
      </row>
 
@@ -2375,6 +2380,11 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
        whether the table needs to be vacuumed in order to prevent multixact ID
        wraparound or to allow <literal>pg_multixact</literal> to be shrunk.  Zero
        (<symbol>InvalidMultiXactId</symbol>) if the relation is not a table.
+      </para>
+      <para>
+       For a global temporary relation, this value is always zero, and the value from
+       <link linkend="catalog-pg-temp-class"><structname>pg_temp_class</structname></link>.<structfield>relminmxid</structfield>
+       is used instead.
       </para></entry>
      </row>
 
@@ -9192,6 +9202,43 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
        <link linkend="sql-analyze"><command>ANALYZE</command></link>,
        and a few DDL commands such as
        <link linkend="sql-createindex"><command>CREATE INDEX</command></link>.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>relfrozenxid</structfield> <type>xid</type>
+      </para>
+      <para>
+       All transaction IDs before this one have been replaced with a permanent
+       (<quote>frozen</quote>) transaction ID in this table in the current
+       session.  This is used to track whether the table needs to be vacuumed
+       in order to prevent transaction ID wraparound or to allow
+       <literal>pg_xact</literal> to be shrunk.  Zero
+       (<symbol>InvalidTransactionId</symbol>) if the relation is not a table.
+       The minimum <structfield>relfrozenxid</structfield> over all global
+       temporary tables being used in each session is included in the
+       <literal>tempfrozenxid</literal> column of the
+       <link linkend="monitoring-pg-stat-activity-view"><structname>pg_stat_activity</structname></link>
+       view.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>relminmxid</structfield> <type>xid</type>
+      </para>
+      <para>
+       All multixact IDs before this one have been replaced by a
+       transaction ID in this table in the current session.  This is used to
+       track whether the table needs to be vacuumed in order to prevent
+       multixact ID wraparound or to allow <literal>pg_multixact</literal> to
+       be shrunk.  Zero (<symbol>InvalidMultiXactId</symbol>) if the relation
+       is not a table.  The minimum <structfield>relminmxid</structfield>
+       over all global temporary tables being used in each session is
+       included in the <literal>tempminmxid</literal> column of the
+       <link linkend="monitoring-pg-stat-activity-view"><structname>pg_stat_activity</structname></link>
+       view.
       </para></entry>
      </row>
     </tbody>

@@ -130,7 +130,8 @@ static void vac_truncate_clog(TransactionId frozenXID,
 							  TransactionId lastSaneFrozenXid,
 							  MultiXactId lastSaneMinMulti);
 static bool vacuum_rel(Oid relid, RangeVar *relation, VacuumParams params,
-					   BufferAccessStrategy bstrategy, bool isTopLevel);
+					   BufferAccessStrategy bstrategy, bool isTopLevel,
+					   bool *isGtr);
 static double compute_parallel_delay(void);
 static VacOptValue get_vacoptval_from_boolean(DefElem *def);
 static bool vac_tid_reaped(ItemPointer itemptr, void *state);
@@ -503,6 +504,7 @@ vacuum(List *relations, const VacuumParams *params, BufferAccessStrategy bstrate
 	const char *stmttype;
 	volatile bool in_outer_xact,
 				use_own_xacts;
+	bool		have_gtrs = false;
 
 	stmttype = (params->options & VACOPT_VACUUM) ? "VACUUM" : "ANALYZE";
 
@@ -631,11 +633,16 @@ vacuum(List *relations, const VacuumParams *params, BufferAccessStrategy bstrate
 		foreach(cur, relations)
 		{
 			VacuumRelation *vrel = lfirst_node(VacuumRelation, cur);
+			bool		isGtr = false;
+			bool		doAnalyse;
 
 			if (params->options & VACOPT_VACUUM)
 			{
-				if (!vacuum_rel(vrel->oid, vrel->relation, *params, bstrategy,
-								isTopLevel))
+				doAnalyse = vacuum_rel(vrel->oid, vrel->relation, *params,
+									   bstrategy, isTopLevel, &isGtr);
+				if (isGtr)
+					have_gtrs = true;
+				if (!doAnalyse)
 					continue;
 			}
 
@@ -701,6 +708,17 @@ vacuum(List *relations, const VacuumParams *params, BufferAccessStrategy bstrate
 		 * PostgresMain().
 		 */
 		StartTransactionCommand();
+	}
+
+	if (params->options & VACOPT_VACUUM && !AmAutoVacuumWorkerProcess())
+	{
+		/*
+		 * Update this backend's tempfrozenxid and tempminmxid, if we vacuumed
+		 * any global temporary relations.  We skip this for autovacuum, which
+		 * cannot vacuum global temporary relations.
+		 */
+		if (have_gtrs)
+			UpdateTempFrozenXids();
 	}
 
 	if ((params->options & VACOPT_VACUUM) &&
@@ -1151,7 +1169,7 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	freeze_table_age = params->freeze_table_age;
 	multixact_freeze_table_age = params->multixact_freeze_table_age;
 
-	/* Set pg_class fields in cutoffs */
+	/* Set pg_class / pg_temp_class fields in cutoffs */
 	cutoffs->relfrozenxid = rel->rd_rel->relfrozenxid;
 	cutoffs->relminmxid = rel->rd_rel->relminmxid;
 
@@ -1567,8 +1585,14 @@ vac_update_relstats(Relation relation,
 	 * it's corrupt, and overwrite with the oldest remaining XID in the table.
 	 * This should match vac_update_datfrozenxid() concerning what we consider
 	 * to be "in the future".
+	 *
+	 * For a global temporary relation, frozenxid is only valid for the data
+	 * in our local instance of the relation, and is stored in pg_temp_class,
+	 * instead of pg_class.  This contributes towards tempfrozenxid for this
+	 * backend and allows vac_update_datfrozenxid() to advance datfrozenxid
+	 * once every backend accessing the relation has vacuumed it.
 	 */
-	oldfrozenxid = pgcform->relfrozenxid;
+	oldfrozenxid = GetEffective_relfrozenxid(pgcform, temp_pgcform);
 	futurexid = false;
 	if (frozenxid_updated)
 		*frozenxid_updated = false;
@@ -1583,15 +1607,15 @@ vac_update_relstats(Relation relation,
 
 		if (update)
 		{
-			pgcform->relfrozenxid = frozenxid;
-			dirty = true;
+			SetEffective_relfrozenxid(pgcform, temp_pgcform, frozenxid,
+									  &dirty, &temp_dirty);
 			if (frozenxid_updated)
 				*frozenxid_updated = true;
 		}
 	}
 
 	/* Similarly for relminmxid */
-	oldminmulti = pgcform->relminmxid;
+	oldminmulti = GetEffective_relminmxid(pgcform, temp_pgcform);
 	futuremxid = false;
 	if (minmulti_updated)
 		*minmulti_updated = false;
@@ -1606,8 +1630,8 @@ vac_update_relstats(Relation relation,
 
 		if (update)
 		{
-			pgcform->relminmxid = minmulti;
-			dirty = true;
+			SetEffective_relminmxid(pgcform, temp_pgcform, minmulti,
+									&dirty, &temp_dirty);
 			if (minmulti_updated)
 				*minmulti_updated = true;
 		}
@@ -1647,6 +1671,52 @@ vac_update_relstats(Relation relation,
 
 
 /*
+ *	vac_get_min_tempfrozenxids() -- get min temp XIDs over all backends
+ *
+ *		min_tempfrozenxid is set to the minimum tempfrozenxid from all
+ *		backends (including us) connected to our database.
+ *
+ *		min_tempminmxid is set to the minimum tempminmxid from all backends
+ *		(including us) connected to our database.
+ *
+ *		The values returned will be Invalid*Ids, if no backend is accessing
+ *		global temporary tables in our database.
+ */
+static void
+vac_get_min_tempfrozenxids(TransactionId *min_tempfrozenxid,
+						   MultiXactId *min_tempminmxid)
+{
+	/* Defaults, if no other backends found */
+	*min_tempfrozenxid = InvalidTransactionId;
+	*min_tempminmxid = InvalidMultiXactId;
+
+	LWLockAcquire(ProcArrayLock, LW_SHARED);
+	for (int i = 0; i < ProcGlobal->allProcCount; i++)
+	{
+		PGPROC	   *proc = GetPGProcByNumber(i);
+
+		/* Ignore backends not connected to our database */
+		if (proc->pid == 0)
+			continue;
+		if (proc->databaseId != MyDatabaseId)
+			continue;
+
+		/* Update the minimum return values */
+		if (TransactionIdIsValid(proc->tempfrozenxid) &&
+			(!TransactionIdIsValid(*min_tempfrozenxid) ||
+			 TransactionIdPrecedes(proc->tempfrozenxid, *min_tempfrozenxid)))
+			*min_tempfrozenxid = proc->tempfrozenxid;
+
+		if (MultiXactIdIsValid(proc->tempminmxid) &&
+			(!MultiXactIdIsValid(*min_tempminmxid) ||
+			 MultiXactIdPrecedes(proc->tempminmxid, *min_tempminmxid)))
+			*min_tempminmxid = proc->tempminmxid;
+	}
+	LWLockRelease(ProcArrayLock);
+}
+
+
+/*
  *	vac_update_datfrozenxid() -- update pg_database.datfrozenxid for our DB
  *
  *		Update pg_database's datfrozenxid entry for our database to be the
@@ -1680,6 +1750,8 @@ vac_update_datfrozenxid(void)
 	bool		dirty = false;
 	ScanKeyData key[1];
 	void	   *inplace_state;
+	TransactionId min_tempfrozenxid;
+	MultiXactId min_tempminmxid;
 
 	/*
 	 * Restrict this task to one backend per database.  This avoids race
@@ -1734,10 +1806,17 @@ vac_update_datfrozenxid(void)
 		/*
 		 * Only consider relations able to hold unfrozen XIDs (anything else
 		 * should have InvalidTransactionId in relfrozenxid anyway).
+		 *
+		 * We exclude global temporary relations here too because, although
+		 * they can hold unfrozen XIDs, their relfrozenxid and relminmxid
+		 * values are set in pg_temp_class, instead of pg_class, and those
+		 * values contribute to tempfrozenxid and tempminmxid, which we
+		 * account for below.
 		 */
-		if (classForm->relkind != RELKIND_RELATION &&
-			classForm->relkind != RELKIND_MATVIEW &&
-			classForm->relkind != RELKIND_TOASTVALUE)
+		if ((classForm->relkind != RELKIND_RELATION &&
+			 classForm->relkind != RELKIND_MATVIEW &&
+			 classForm->relkind != RELKIND_TOASTVALUE) ||
+			classForm->relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
 		{
 			Assert(!TransactionIdIsValid(relfrozenxid));
 			Assert(!MultiXactIdIsValid(relminmxid));
@@ -1793,6 +1872,31 @@ vac_update_datfrozenxid(void)
 	/* we're done with pg_class */
 	systable_endscan(scan);
 	table_close(relation, AccessShareLock);
+
+	/*
+	 * Account for tempfrozenxid and tempminmxid from all backends connected
+	 * to our database.  This amounts to min(pg_temp_class.relfrozenxid) and
+	 * min(pg_temp_class.relminmxid) over all those backends.
+	 */
+	vac_get_min_tempfrozenxids(&min_tempfrozenxid, &min_tempminmxid);
+
+	if (TransactionIdIsValid(min_tempfrozenxid))
+	{
+		Assert(TransactionIdIsNormal(min_tempfrozenxid));
+
+		if (TransactionIdPrecedes(lastSaneFrozenXid, min_tempfrozenxid))
+			bogus = true;
+		else if (TransactionIdPrecedes(min_tempfrozenxid, newFrozenXid))
+			newFrozenXid = min_tempfrozenxid;
+	}
+
+	if (MultiXactIdIsValid(min_tempminmxid))
+	{
+		if (MultiXactIdPrecedes(lastSaneMinMulti, min_tempminmxid))
+			bogus = true;
+		else if (MultiXactIdPrecedes(min_tempminmxid, newMinMulti))
+			newMinMulti = min_tempminmxid;
+	}
 
 	/* chicken out if bogus data found */
 	if (bogus)
@@ -2064,7 +2168,7 @@ vac_truncate_clog(TransactionId frozenXID,
  */
 static bool
 vacuum_rel(Oid relid, RangeVar *relation, VacuumParams params,
-		   BufferAccessStrategy bstrategy, bool isTopLevel)
+		   BufferAccessStrategy bstrategy, bool isTopLevel, bool *isGtr)
 {
 	LOCKMODE	lmode;
 	Relation	rel;
@@ -2151,6 +2255,10 @@ vacuum_rel(Oid relid, RangeVar *relation, VacuumParams params,
 		CommitTransactionCommand();
 		return false;
 	}
+
+	/* tell caller if it was a global temporary relation */
+	if (RELATION_IS_GLOBAL_TEMP(rel))
+		*isGtr = true;
 
 	/*
 	 * When recursing to a TOAST table, check privileges on the parent.  NB:
@@ -2439,7 +2547,7 @@ vacuum_rel(Oid relid, RangeVar *relation, VacuumParams params,
 		toast_vacuum_params.toast_parent = relid;
 
 		vacuum_rel(toast_relid, NULL, toast_vacuum_params, bstrategy,
-				   isTopLevel);
+				   isTopLevel, isGtr);
 	}
 
 	/*

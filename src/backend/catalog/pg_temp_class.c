@@ -74,6 +74,12 @@ get_pg_temp_class_tupdesc(void)
 		TupleDescInitEntry(tupdesc,
 						   (AttrNumber) Anum_pg_temp_class_relallfrozen,
 						   "relallfrozen", INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc,
+						   (AttrNumber) Anum_pg_temp_class_relfrozenxid,
+						   "relfrozenxid", XIDOID, -1, 0);
+		TupleDescInitEntry(tupdesc,
+						   (AttrNumber) Anum_pg_temp_class_relminmxid,
+						   "relminmxid", XIDOID, -1, 0);
 		TupleDescFinalize(tupdesc);
 
 		MemoryContextSwitchTo(oldcontext);
@@ -136,6 +142,8 @@ InsertPgTempClassTuple(Relation rel)
 	values[Anum_pg_temp_class_reltuples - 1] = Float4GetDatum(form->reltuples);
 	values[Anum_pg_temp_class_relallvisible - 1] = Int32GetDatum(form->relallvisible);
 	values[Anum_pg_temp_class_relallfrozen - 1] = Int32GetDatum(form->relallfrozen);
+	values[Anum_pg_temp_class_relfrozenxid - 1] = TransactionIdGetDatum(form->relfrozenxid);
+	values[Anum_pg_temp_class_relminmxid - 1] = MultiXactIdGetDatum(form->relminmxid);
 
 	GTCatCacheTupleInsert(PG_TEMP_CLASS,
 						  RelationGetRelid(rel),

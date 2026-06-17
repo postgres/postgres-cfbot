@@ -979,8 +979,17 @@ InsertPgClassTuple(Relation pg_class_desc,
 	values[Anum_pg_class_relreplident - 1] = CharGetDatum(rd_rel->relreplident);
 	values[Anum_pg_class_relispartition - 1] = BoolGetDatum(rd_rel->relispartition);
 	values[Anum_pg_class_relrewrite - 1] = ObjectIdGetDatum(rd_rel->relrewrite);
-	values[Anum_pg_class_relfrozenxid - 1] = TransactionIdGetDatum(rd_rel->relfrozenxid);
-	values[Anum_pg_class_relminmxid - 1] = MultiXactIdGetDatum(rd_rel->relminmxid);
+
+	/*
+	 * For global temporary relations, relfrozenxid and relminmxid are stored
+	 * in pg_temp_class.  Set them to Invalid in the pg_class tuple.
+	 */
+	values[Anum_pg_class_relfrozenxid - 1] =
+		TransactionIdGetDatum(rd_rel->relpersistence == RELPERSISTENCE_GLOBAL_TEMP ?
+							  InvalidTransactionId : rd_rel->relfrozenxid);
+	values[Anum_pg_class_relminmxid - 1] =
+		MultiXactIdGetDatum(rd_rel->relpersistence == RELPERSISTENCE_GLOBAL_TEMP ?
+							InvalidMultiXactId : rd_rel->relminmxid);
 	if (relacl != (Datum) 0)
 		values[Anum_pg_class_relacl - 1] = relacl;
 	else

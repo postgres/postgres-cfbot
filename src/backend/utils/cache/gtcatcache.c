@@ -826,6 +826,62 @@ GTCatCacheTupleDelete(GTCatCacheIdentifier cacheId, Oid relid)
 }
 
 /*
+ * GTCatCacheGetMinFrozenXids
+ *
+ *	Get the minimum relfrozenxid and relminmxid values from all pg_temp_class
+ *	cache entries.  If there are no pg_temp_class entries (no global temporary
+ *	relations have been used in this session), then Invalid*Ids are returned.
+ */
+void
+GTCatCacheGetMinFrozenXids(TransactionId *min_relfrozenxid,
+						   MultiXactId *min_relminmxid)
+{
+	GTCatCache *cache = &gt_cat_cache[PG_TEMP_CLASS];
+
+	/* Defaults, if no global temporary relations are being used */
+	*min_relfrozenxid = InvalidTransactionId;
+	*min_relminmxid = InvalidMultiXactId;
+
+	if (cache->hashtable != NULL)
+	{
+		HASH_SEQ_STATUS status;
+		GTCatCacheEntry *entry;
+
+		/* Scan all pg_temp_class entries and update the minimum xid values */
+		hash_seq_init(&status, cache->hashtable);
+		while ((entry = hash_seq_search(&status)) != NULL)
+		{
+			if (!entry->deleted)
+			{
+				Form_pg_temp_class temp_form;
+				TransactionId relfrozenxid;
+				MultiXactId relminmxid;
+
+				temp_form = (Form_pg_temp_class) GETSTRUCT(entry->tuple);
+				relfrozenxid = temp_form->relfrozenxid;
+				relminmxid = (MultiXactId) temp_form->relminmxid;
+
+				/* Ignore relations that don't hold unfrozen XIDs */
+				if (!TransactionIdIsValid(relfrozenxid) ||
+					!MultiXactIdIsValid(relminmxid))
+					continue;
+
+				/* Update the minimum xid values */
+				Assert(TransactionIdIsNormal(relfrozenxid));
+
+				if (!TransactionIdIsValid(*min_relfrozenxid) ||
+					TransactionIdPrecedes(relfrozenxid, *min_relfrozenxid))
+					*min_relfrozenxid = relfrozenxid;
+
+				if (!MultiXactIdIsValid(*min_relminmxid) ||
+					MultiXactIdPrecedes(relminmxid, *min_relminmxid))
+					*min_relminmxid = relminmxid;
+			}
+		}
+	}
+}
+
+/*
  * GTCatCacheFlush
  *
  *	Write out any new cache entries to the database, so that the database is

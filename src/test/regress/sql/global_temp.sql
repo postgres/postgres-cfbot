@@ -25,6 +25,24 @@ FROM information_schema.tables
 WHERE table_name ~ 'tmp' AND table_schema ~ 'global_temp'
 ORDER BY table_name;
 
+-- Check pg_stat_activity
+SELECT tempfrozenxid, tempminmxid -- not visible without privilege
+  FROM pg_stat_activity
+ WHERE pid = pg_backend_pid();
+
+RESET ROLE;
+GRANT pg_read_all_stats TO regress_global_temp_user;
+SET ROLE regress_global_temp_user;
+
+SELECT tempfrozenxid::text::bigint - (SELECT min(relfrozenxid::text::bigint)
+                                        FROM pg_temp_class
+                                       WHERE relfrozenxid::text != '0'),
+       tempminmxid::text::bigint - (SELECT min(relminmxid::text::bigint)
+                                      FROM pg_temp_class
+                                     WHERE relminmxid::text != '0')
+  FROM pg_stat_activity
+ WHERE pid = pg_backend_pid();
+
 DROP SCHEMA global_temp_xxx CASCADE;
 DROP SCHEMA global_temp_yyy CASCADE;
 
@@ -459,3 +477,51 @@ SELECT lastval();
 ROLLBACK;
 SELECT lastval();
 SELECT nextval('s') FROM generate_series(1, 2);
+
+-- Test tempfrozenxid/tempminmxid update on commit
+\c
+SET search_path = global_temp_tests;
+SELECT tempfrozenxid, tempminmxid FROM pg_stat_activity WHERE pid = pg_backend_pid();
+
+BEGIN;
+CREATE GLOBAL TEMP TABLE tmp2 (a int);
+SELECT tempfrozenxid, tempminmxid FROM pg_stat_activity WHERE pid = pg_backend_pid();
+ROLLBACK;
+SELECT tempfrozenxid, tempminmxid FROM pg_stat_activity WHERE pid = pg_backend_pid();
+
+BEGIN;
+SAVEPOINT sp;
+CREATE GLOBAL TEMP TABLE tmp2 (a int);
+SELECT tempfrozenxid, tempminmxid FROM pg_stat_activity WHERE pid = pg_backend_pid();
+ROLLBACK TO sp;
+SELECT tempfrozenxid, tempminmxid FROM pg_stat_activity WHERE pid = pg_backend_pid();
+COMMIT;
+SELECT tempfrozenxid, tempminmxid FROM pg_stat_activity WHERE pid = pg_backend_pid();
+
+CREATE GLOBAL TEMP TABLE tmp2 (a int);
+SELECT tempfrozenxid::text::bigint - (SELECT min(relfrozenxid::text::bigint)
+                                        FROM pg_temp_class
+                                       WHERE relfrozenxid::text != '0'),
+       tempminmxid::text::bigint - (SELECT min(relminmxid::text::bigint)
+                                      FROM pg_temp_class
+                                     WHERE relminmxid::text != '0')
+  FROM pg_stat_activity
+ WHERE pid = pg_backend_pid();
+
+VACUUM FREEZE pg_temp_class;
+BEGIN;
+SAVEPOINT sp;
+DROP TABLE tmp2;
+ROLLBACK TO SAVEPOINT sp;
+COMMIT;
+
+SELECT tempfrozenxid::text::bigint - (SELECT min(relfrozenxid::text::bigint)
+                                        FROM pg_temp_class
+                                       WHERE relfrozenxid::text != '0'),
+       tempminmxid::text::bigint - (SELECT min(relminmxid::text::bigint)
+                                      FROM pg_temp_class
+                                     WHERE relminmxid::text != '0')
+  FROM pg_stat_activity
+ WHERE pid = pg_backend_pid();
+
+DROP TABLE tmp2;

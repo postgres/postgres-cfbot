@@ -265,7 +265,7 @@ typedef struct VacuumParams
 struct VacuumCutoffs
 {
 	/*
-	 * Existing pg_class fields at start of VACUUM
+	 * Existing pg_class / pg_temp_class fields at start of VACUUM
 	 */
 	TransactionId relfrozenxid;
 	MultiXactId relminmxid;

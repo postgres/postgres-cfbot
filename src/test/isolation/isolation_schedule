@@ -131,3 +131,4 @@ test: ddl-dependency-locking
 test: pub-concurrent-drop
 test: drop-owned-grant
 test: global-temp
+test: vacuum-global-temp
