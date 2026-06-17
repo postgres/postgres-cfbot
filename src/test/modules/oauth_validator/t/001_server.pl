@@ -50,6 +50,8 @@ $node->append_conf('postgresql.conf',
 	"oauth_validator_libraries = 'validator'\n");
 # Needed to allow connect_fails to inspect postmaster log:
 $node->append_conf('postgresql.conf', "log_min_messages = debug2");
+# The plaintext-TCP enforcement tests below need a TCP listener.
+$node->append_conf('postgresql.conf', "listen_addresses = '127.0.0.1'\n");
 $node->start;
 
 $node->safe_psql('postgres', 'CREATE USER test;');
@@ -861,6 +863,49 @@ $node->connect_fails(
 	"user=$user dbname=postgres oauth_issuer=$issuer/.well-known/oauth-authorization-server/alternate oauth_client_id=f02c6361-0636",
 	"fail_validator is used for $user",
 	expected_stderr => qr/FATAL:\s+fail_validator: sentinel error/);
+
+#
+# Test that bearer tokens are refused over unencrypted TCP connections
+# unless the unsafe plaintext-server debug option is set.
+#
+
+unlink($node->data_dir . '/pg_hba.conf');
+$node->append_conf(
+	'pg_hba.conf', qq{
+local all test              oauth validator=validator issuer="$issuer" scope="openid postgres"
+host  all test 127.0.0.1/32 oauth validator=validator issuer="$issuer" scope="openid postgres"
+});
+$node->reload;
+
+$log_start =
+  $node->wait_for_log(qr/reloading configuration files/, $log_start);
+
+$user = "test";
+my $tcp_connstr = "host=127.0.0.1 user=$user dbname=postgres"
+  . " oauth_issuer=$issuer oauth_client_id=f02c6361-0635";
+
+# The PGOAUTHDEBUG value set above does not include plaintext-server, so
+# this must fail before any flow is run.
+$node->connect_fails(
+	$tcp_connstr,
+	"bearer tokens are not sent over unencrypted TCP",
+	expected_stderr =>
+	  qr@OAuth bearer authentication requires an encrypted connection@,
+	log_unlike => [qr/oauth_validator: token=/]);
+
+{
+	local $ENV{PGOAUTHDEBUG} = "$ENV{PGOAUTHDEBUG},plaintext-server";
+
+	$node->connect_ok(
+		$tcp_connstr,
+		"unencrypted TCP is allowed with plaintext-server",
+		expected_stderr =>
+		  qr@Visit https://example\.com/ and enter the code: postgresuser@,
+		log_like => [
+			qr/connection authenticated: identity="test" method=oauth/,
+			qr/connection authorized/,
+		]);
+}
 
 #
 # Test ABI compatibility magic marker
