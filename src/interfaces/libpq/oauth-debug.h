@@ -35,11 +35,13 @@
  */
 
 /* allow HTTP (unencrypted) connections */
-#define OAUTHDEBUG_UNSAFE_HTTP			(1<<0)
+#define OAUTHDEBUG_UNSAFE_HTTP				(1<<0)
 /* log HTTP traffic (exposes secrets) */
-#define OAUTHDEBUG_UNSAFE_TRACE			(1<<1)
+#define OAUTHDEBUG_UNSAFE_TRACE				(1<<1)
 /* allow zero-second retry intervals */
-#define OAUTHDEBUG_UNSAFE_DOS_ENDPOINT	(1<<2)
+#define OAUTHDEBUG_UNSAFE_DOS_ENDPOINT		(1<<2)
+/* allow sending the bearer token to the server over plaintext connections */
+#define OAUTHDEBUG_UNSAFE_PLAINTEXT_SERVER	(1<<3)
 
 /* mind the gap in values; see OAUTHDEBUG_UNSAFE_MASK below */
 
@@ -112,6 +114,8 @@ oauth_parse_debug_flags(void)
 			flag = OAUTHDEBUG_UNSAFE_TRACE;
 		else if (strcmp(option, "dos-endpoint") == 0)
 			flag = OAUTHDEBUG_UNSAFE_DOS_ENDPOINT;
+		else if (strcmp(option, "plaintext-server") == 0)
+			flag = OAUTHDEBUG_UNSAFE_PLAINTEXT_SERVER;
 		else if (strcmp(option, "call-count") == 0)
 			flag = OAUTHDEBUG_CALL_COUNT;
 		else if (strcmp(option, "plugin-errors") == 0)
