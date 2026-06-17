@@ -25,6 +25,26 @@ FROM information_schema.tables
 WHERE table_name ~ 'tmp' AND table_schema ~ 'global_temp'
 ORDER BY table_name;
 
+-- Check pg_stat_activity
+SELECT tempfrozenxid, tempminmxid -- not visible without privilege
+  FROM pg_stat_activity
+ WHERE pid = pg_backend_pid();
+
+RESET ROLE;
+GRANT pg_read_all_stats TO regress_global_temp_user;
+SET ROLE regress_global_temp_user;
+
+SELECT age(tempfrozenxid) - (SELECT max(age(t.relfrozenxid))
+                               FROM pg_class c, LATERAL pg_gtr_info(c.oid) t
+                              WHERE c.relpersistence = 'g'
+                                AND t.relfrozenxid != 0),
+       age(tempminmxid) - (SELECT max(age(t.relminmxid))
+                             FROM pg_class c, LATERAL pg_gtr_info(c.oid) t
+                            WHERE c.relpersistence = 'g'
+                              AND t.relminmxid != 0)
+  FROM pg_stat_activity
+ WHERE pid = pg_backend_pid();
+
 DROP SCHEMA global_temp_xxx CASCADE;
 DROP SCHEMA global_temp_yyy CASCADE;
 
@@ -50,7 +70,9 @@ SELECT c.relfilenode = c.oid,
        t.relpages = c.relpages,
        t.reltuples = c.reltuples,
        t.relallvisible = c.relallvisible,
-       t.relallfrozen = c.relallfrozen
+       t.relallfrozen = c.relallfrozen,
+       age(t.relfrozenxid) <= age(c.relfrozenxid),
+       age(t.relminmxid) <= age(c.relminmxid)
   FROM pg_class c, LATERAL pg_gtr_info(c.oid) t
  WHERE c.oid = 'tmp1'::regclass;
 
@@ -60,7 +82,9 @@ SELECT c.relname,
        t.relpages = c.relpages,
        t.reltuples = c.reltuples,
        t.relallvisible = c.relallvisible,
-       t.relallfrozen = c.relallfrozen
+       t.relallfrozen = c.relallfrozen,
+       age(t.relfrozenxid) <= age(c.relfrozenxid),
+       age(t.relminmxid) <= age(c.relminmxid)
   FROM pg_gtrs_in_use() t LEFT JOIN pg_class c ON c.oid = t.oid
  ORDER BY c.relname;
 
@@ -518,5 +542,56 @@ SELECT oid::regclass, relpages, reltuples, relallvisible, relallfrozen
 SELECT oid::regclass, t.relpages, t.reltuples, t.relallvisible, t.relallfrozen
   FROM pg_class c, LATERAL pg_gtr_info(c.oid) t
  WHERE c.oid = 'tmp2'::regclass;
+
+DROP TABLE tmp2;
+
+-- Test tempfrozenxid/tempminmxid update on commit
+\c
+SET search_path = global_temp_tests;
+SELECT tempfrozenxid, tempminmxid FROM pg_stat_activity WHERE pid = pg_backend_pid();
+
+BEGIN;
+CREATE GLOBAL TEMP TABLE tmp2 (a int);
+SELECT tempfrozenxid, tempminmxid FROM pg_stat_activity WHERE pid = pg_backend_pid();
+ROLLBACK;
+SELECT tempfrozenxid, tempminmxid FROM pg_stat_activity WHERE pid = pg_backend_pid();
+
+BEGIN;
+SAVEPOINT sp;
+CREATE GLOBAL TEMP TABLE tmp2 (a int);
+SELECT tempfrozenxid, tempminmxid FROM pg_stat_activity WHERE pid = pg_backend_pid();
+ROLLBACK TO sp;
+SELECT tempfrozenxid, tempminmxid FROM pg_stat_activity WHERE pid = pg_backend_pid();
+COMMIT;
+SELECT tempfrozenxid, tempminmxid FROM pg_stat_activity WHERE pid = pg_backend_pid();
+
+CREATE GLOBAL TEMP TABLE tmp2 (a int);
+SELECT age(tempfrozenxid) - (SELECT max(age(t.relfrozenxid))
+                               FROM pg_class c, LATERAL pg_gtr_info(c.oid) t
+                              WHERE c.relpersistence = 'g'
+                                AND t.relfrozenxid != 0),
+       age(tempminmxid) - (SELECT max(age(t.relminmxid))
+                             FROM pg_class c, LATERAL pg_gtr_info(c.oid) t
+                            WHERE c.relpersistence = 'g'
+                              AND t.relminmxid != 0)
+  FROM pg_stat_activity
+ WHERE pid = pg_backend_pid();
+
+BEGIN;
+SAVEPOINT sp;
+DROP TABLE tmp2;
+ROLLBACK TO SAVEPOINT sp;
+COMMIT;
+
+SELECT age(tempfrozenxid) - (SELECT max(age(t.relfrozenxid))
+                               FROM pg_class c, LATERAL pg_gtr_info(c.oid) t
+                              WHERE c.relpersistence = 'g'
+                                AND t.relfrozenxid != 0),
+       age(tempminmxid) - (SELECT max(age(t.relminmxid))
+                             FROM pg_class c, LATERAL pg_gtr_info(c.oid) t
+                            WHERE c.relpersistence = 'g'
+                              AND t.relminmxid != 0)
+  FROM pg_stat_activity
+ WHERE pid = pg_backend_pid();
 
 DROP TABLE tmp2;

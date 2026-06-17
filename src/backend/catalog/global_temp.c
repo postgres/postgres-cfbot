@@ -53,6 +53,7 @@
 
 #include "access/amapi.h"
 #include "access/genam.h"
+#include "access/multixact.h"
 #include "access/parallel.h"
 #include "access/table.h"
 #include "access/tableam.h"
@@ -67,6 +68,7 @@
 #include "miscadmin.h"
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
+#include "storage/proc.h"
 #include "storage/shmem.h"
 #include "storage/subsystems.h"
 #include "utils/fmgrprotos.h"
@@ -189,6 +191,14 @@ static bool eoxact_usage_list_overflowed = false;
 static List *gtrs_invalidated = NIL;
 static List *gtrs_dropped = NIL;
 static SubTransactionId processed_dropped_subid = InvalidSubTransactionId;
+
+/*
+ * update_tempfrozenxids
+ *
+ *	Flag indicating that this backend's tempfrozenxid and tempminmxid need to
+ *	be updated on commit.  See comments in UpdateTempFrozenXids().
+ */
+static bool update_tempfrozenxids = false;
 
 /*
  * gtr_shared_usage
@@ -1065,6 +1075,17 @@ TrackGlobalTempRelation(Relation relation, bool isNew)
 
 		entry->history.subid = entry->started_subid;
 		entry->history.prev = NULL;
+
+		/*
+		 * If this backend's tempfrozenxid and tempminmxid haven't been set
+		 * yet (this is the first global temporary relation accessed in this
+		 * session), then update them to account for this relation.  If they
+		 * have been set, it must have been from an earlier transaction, so
+		 * this relation will not affect them.
+		 */
+		if (!TransactionIdIsValid(MyProc->tempfrozenxid) ||
+			!MultiXactIdIsValid(MyProc->tempminmxid))
+			UpdateTempFrozenXids();
 	}
 }
 
@@ -1089,6 +1110,9 @@ ForgetGlobalTempRelation(Oid relid)
 
 	entry->stopped_subid = GetCurrentSubTransactionId();
 	EOXactUsageListAdd(relid);
+
+	/* Update this backend's tempfrozenxid and tempminmxid */
+	UpdateTempFrozenXids();
 }
 
 /*
@@ -1257,9 +1281,32 @@ ProcessInvalidatedGlobalTempRelations(void)
 			remove_on_commit_action(relid);
 		}
 
+		/* Update this backend's tempfrozenxid and tempminmxid */
+		UpdateTempFrozenXids();
+
 		/* All dropped relations have been processed, as of this subxact */
 		processed_dropped_subid = GetCurrentSubTransactionId();
 	}
+}
+
+/*
+ * UpdateTempFrozenXids
+ *
+ *	Update this backend's tempfrozenxid and tempminmxid values, setting them
+ *	to the minimum relfrozenxid and relminmxid values over all in-use global
+ *	temporary tables.
+ *
+ *	Note: the updates are deferred until main transaction commit.  This is
+ *	necessary, in case some or all of the changes made in this transaction are
+ *	rolled back (e.g., a DROP that makes it seem as though tempfrozenxid
+ *	and/or tempminmxid can be advanced, only to be rolled back).  Other
+ *	backends must only see the final state that we commit.
+ */
+void
+UpdateTempFrozenXids(void)
+{
+	/* Flag tempfrozenxid and tempminmxid as to-be-updated on commit */
+	update_tempfrozenxids = true;
 }
 
 /*
@@ -1332,6 +1379,53 @@ AtEOXact_GlobalTempRelation(bool isCommit)
 		gtrs_dropped = NIL;
 	}
 	processed_dropped_subid = InvalidSubTransactionId;
+
+	/*
+	 * Finally, on commit, update tempfrozenxid and tempminmxid, if requested.
+	 *
+	 * Note that any usage records for dropped relations will have been
+	 * removed by this point.
+	 */
+	if (update_tempfrozenxids && isCommit)
+	{
+		TransactionId min_relfrozenxid;
+		MultiXactId min_relminmxid;
+
+		/* Scan all usage records for the new minimum xid values */
+		min_relfrozenxid = InvalidTransactionId;
+		min_relminmxid = InvalidMultiXactId;
+
+		hash_seq_init(&status, gtr_local_usage);
+		while ((usage_entry = hash_seq_search(&status)) != NULL)
+		{
+			TransactionId relfrozenxid;
+			MultiXactId relminmxid;
+
+			relfrozenxid = usage_entry->history.info.relfrozenxid;
+			relminmxid = usage_entry->history.info.relminmxid;
+
+			/* Ignore relations that don't hold unfrozen XIDs */
+			if (!TransactionIdIsValid(relfrozenxid) ||
+				!MultiXactIdIsValid(relminmxid))
+				continue;
+
+			/* Update the minimum xid values */
+			Assert(TransactionIdIsNormal(relfrozenxid));
+
+			if (!TransactionIdIsValid(min_relfrozenxid) ||
+				TransactionIdPrecedes(relfrozenxid, min_relfrozenxid))
+				min_relfrozenxid = relfrozenxid;
+
+			if (!MultiXactIdIsValid(min_relminmxid) ||
+				MultiXactIdPrecedes(relminmxid, min_relminmxid))
+				min_relminmxid = relminmxid;
+		}
+
+		/* Store the new values in our PGPROC struct */
+		MyProc->tempfrozenxid = min_relfrozenxid;
+		MyProc->tempminmxid = min_relminmxid;
+	}
+	update_tempfrozenxids = false;
 }
 
 /*
@@ -1667,8 +1761,8 @@ pg_gtr_info(PG_FUNCTION_ARGS)
 	Oid			relid = PG_GETARG_OID(0);
 	TupleDesc	tupdesc;
 	GtrInfo    *gtr_info;
-	Datum		values[6];
-	bool		nulls[6];
+	Datum		values[8];
+	bool		nulls[8];
 
 	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
 		elog(ERROR, "return type must be a row type");
@@ -1683,6 +1777,8 @@ pg_gtr_info(PG_FUNCTION_ARGS)
 	values[3] = Float4GetDatum(gtr_info->reltuples);
 	values[4] = Int32GetDatum(gtr_info->relallvisible);
 	values[5] = Int32GetDatum(gtr_info->relallfrozen);
+	values[6] = TransactionIdGetDatum(gtr_info->relfrozenxid);
+	values[7] = MultiXactIdGetDatum(gtr_info->relminmxid);
 
 	memset(nulls, 0, sizeof(nulls));
 
@@ -1707,7 +1803,7 @@ pg_gtrs_in_use(PG_FUNCTION_ARGS)
 
 	if (gtr_local_usage != NULL)
 	{
-		bool		nulls[7];
+		bool		nulls[9];
 		HASH_SEQ_STATUS status;
 		GtrUsageEntry *entry;
 
@@ -1719,7 +1815,7 @@ pg_gtrs_in_use(PG_FUNCTION_ARGS)
 		while ((entry = hash_seq_search(&status)) != NULL)
 		{
 			GtrInfo    *gtr_info = &entry->history.info;
-			Datum		values[7];
+			Datum		values[9];
 
 			/* Ignore dropped relations */
 			if (entry->stopped_subid != InvalidSubTransactionId)
@@ -1732,6 +1828,8 @@ pg_gtrs_in_use(PG_FUNCTION_ARGS)
 			values[4] = Float4GetDatum(gtr_info->reltuples);
 			values[5] = Int32GetDatum(gtr_info->relallvisible);
 			values[6] = Int32GetDatum(gtr_info->relallfrozen);
+			values[7] = TransactionIdGetDatum(gtr_info->relfrozenxid);
+			values[8] = MultiXactIdGetDatum(gtr_info->relminmxid);
 
 			tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
 								 values, nulls);
