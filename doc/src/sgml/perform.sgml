@@ -1283,8 +1283,10 @@ EXPLAIN ANALYZE SELECT * FROM tenk1 WHERE unique1 &lt; 100 AND unique2 &gt; 9000
    by each table and index.  This information is kept in the table
    <link linkend="catalog-pg-class"><structname>pg_class</structname></link>,
    in the columns <structfield>reltuples</structfield> and
-   <structfield>relpages</structfield>.  We can look at it with
-   queries similar to this one:
+   <structfield>relpages</structfield> (except for global temporary relations,
+   for which it is kept in memory, and can be retrieved using
+   <link linkend="pg-gtr-info"><function>pg_gtr_info()</function></link>).
+   We can look at it with queries similar to this one:
 
 <screen>
 SELECT relname, relkind, reltuples, relpages
@@ -1317,7 +1319,7 @@ WHERE relname LIKE 'tenk1%';
    <structfield>reltuples</structfield> count on the basis of the part
    of the table it did scan, resulting in an approximate value.
    In any case, the planner
-   will scale the values it finds in <structname>pg_class</structname>
+   will scale the latest statistics values
    to match the current physical table size, thus obtaining a closer
    approximation.
   </para>

@@ -60,6 +60,7 @@
 #include "utils/guc.h"
 #include "utils/guc_hooks.h"
 #include "utils/injection_point.h"
+#include "utils/inval.h"
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
@@ -1418,7 +1419,8 @@ vac_estimate_reltuples(Relation relation,
  *	vac_update_relstats() -- update statistics for one relation
  *
  *		Update the whole-relation statistics that are kept in its pg_class
- *		row.  There are additional stats that will be updated if we are
+ *		row (and the session-local GtrInfo struct, for a global temporary
+ *		relation).  There are additional stats that will be updated if we are
  *		doing ANALYZE, but we always update these stats.  This routine works
  *		for both index and heap relation entries in pg_class.
  *
@@ -1470,7 +1472,9 @@ vac_update_relstats(Relation relation,
 	HeapTuple	ctup;
 	void	   *inplace_state;
 	Form_pg_class pgcform;
+	GtrInfo    *gtr_info;
 	bool		dirty,
+				gtr_dirty,
 				futurexid,
 				futuremxid;
 	TransactionId oldfrozenxid;
@@ -1490,29 +1494,27 @@ vac_update_relstats(Relation relation,
 			 relid);
 	pgcform = (Form_pg_class) GETSTRUCT(ctup);
 
-	/* Apply statistical updates, if any, to copied tuple */
+	/*
+	 * For a global temporary relation, do an in-place update of its GtrInfo
+	 * so that it behaves the same as a permanent relation.
+	 */
+	if (RELATION_IS_GLOBAL_TEMP(relation))
+		gtr_info = GetGlobalTempRelationInfoForInPlaceUpdate(relid);
+	else
+		gtr_info = NULL;
+
+	/* Apply statistical updates, if any, to copied tuple(s) */
 
 	dirty = false;
-	if (pgcform->relpages != (int32) num_pages)
-	{
-		pgcform->relpages = (int32) num_pages;
-		dirty = true;
-	}
-	if (pgcform->reltuples != (float4) num_tuples)
-	{
-		pgcform->reltuples = (float4) num_tuples;
-		dirty = true;
-	}
-	if (pgcform->relallvisible != (int32) num_all_visible_pages)
-	{
-		pgcform->relallvisible = (int32) num_all_visible_pages;
-		dirty = true;
-	}
-	if (pgcform->relallfrozen != (int32) num_all_frozen_pages)
-	{
-		pgcform->relallfrozen = (int32) num_all_frozen_pages;
-		dirty = true;
-	}
+	gtr_dirty = false;
+	SetEffective_relpages(pgcform, gtr_info, (int32) num_pages,
+						  &dirty, &gtr_dirty);
+	SetEffective_reltuples(pgcform, gtr_info, (float4) num_tuples,
+						   &dirty, &gtr_dirty);
+	SetEffective_relallvisible(pgcform, gtr_info, (int32) num_all_visible_pages,
+							   &dirty, &gtr_dirty);
+	SetEffective_relallfrozen(pgcform, gtr_info, (int32) num_all_frozen_pages,
+							  &dirty, &gtr_dirty);
 
 	/* Apply DDL updates, but not inside an outer transaction (see above) */
 
@@ -1595,11 +1597,23 @@ vac_update_relstats(Relation relation,
 		}
 	}
 
-	/* If anything changed, write out the tuple. */
+	/* If anything in pg_class changed, write out the tuple */
 	if (dirty)
+	{
 		systable_inplace_update_finish(inplace_state, ctup);
+		/* the above sends transactional and immediate cache inval messages */
+	}
 	else
+	{
 		systable_inplace_update_cancel(inplace_state);
+
+		/*
+		 * If anything changed in a global temporary relation, we must also do
+		 * a relcache inval, to cause the new values to be loaded.
+		 */
+		if (gtr_dirty)
+			CacheInvalidateRelcacheByTuple(ctup);
+	}
 
 	table_close(rd, RowExclusiveLock);
 

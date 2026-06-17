@@ -1556,6 +1556,30 @@ GetGlobalTempRelationInfoForUpdate(Oid relid)
 }
 
 /*
+ * GetGlobalTempRelationInfoForInPlaceUpdate
+ *
+ *	Returns an in-place updatable copy of the session-local information held
+ *	for a global temporary relation used in the current session.  The return
+ *	value is guaranteed to be non-NULL (it is an error to call this for
+ *	anything other than an in-use global temporary relation).
+ *
+ *	The caller may directly edit any fields of the returned struct, but any
+ *	edits made are non-transactional, like systable_inplace_update_*().
+ */
+GtrInfo *
+GetGlobalTempRelationInfoForInPlaceUpdate(Oid relid)
+{
+	GtrInfo    *gtr_info;
+
+	/* Just return the current relation info, without saving a copy */
+	gtr_info = GetGlobalTempRelationInfo(relid);
+	if (gtr_info == NULL)
+		elog(ERROR, "cache lookup failed for global temp relation %u", relid);
+
+	return gtr_info;
+}
+
+/*
  * GetEffectivePgClassTuple
  *
  *	Get the effective pg_class tuple for a relation.
@@ -1643,8 +1667,8 @@ pg_gtr_info(PG_FUNCTION_ARGS)
 	Oid			relid = PG_GETARG_OID(0);
 	TupleDesc	tupdesc;
 	GtrInfo    *gtr_info;
-	Datum		values[2];
-	bool		nulls[2];
+	Datum		values[6];
+	bool		nulls[6];
 
 	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
 		elog(ERROR, "return type must be a row type");
@@ -1655,6 +1679,10 @@ pg_gtr_info(PG_FUNCTION_ARGS)
 
 	values[0] = ObjectIdGetDatum(gtr_info->relfilenode);
 	values[1] = ObjectIdGetDatum(gtr_info->reltablespace);
+	values[2] = Int32GetDatum(gtr_info->relpages);
+	values[3] = Float4GetDatum(gtr_info->reltuples);
+	values[4] = Int32GetDatum(gtr_info->relallvisible);
+	values[5] = Int32GetDatum(gtr_info->relallfrozen);
 
 	memset(nulls, 0, sizeof(nulls));
 
@@ -1679,7 +1707,7 @@ pg_gtrs_in_use(PG_FUNCTION_ARGS)
 
 	if (gtr_local_usage != NULL)
 	{
-		bool		nulls[3];
+		bool		nulls[7];
 		HASH_SEQ_STATUS status;
 		GtrUsageEntry *entry;
 
@@ -1691,7 +1719,7 @@ pg_gtrs_in_use(PG_FUNCTION_ARGS)
 		while ((entry = hash_seq_search(&status)) != NULL)
 		{
 			GtrInfo    *gtr_info = &entry->history.info;
-			Datum		values[3];
+			Datum		values[7];
 
 			/* Ignore dropped relations */
 			if (entry->stopped_subid != InvalidSubTransactionId)
@@ -1700,6 +1728,10 @@ pg_gtrs_in_use(PG_FUNCTION_ARGS)
 			values[0] = ObjectIdGetDatum(entry->relid);
 			values[1] = ObjectIdGetDatum(gtr_info->relfilenode);
 			values[2] = ObjectIdGetDatum(gtr_info->reltablespace);
+			values[3] = Int32GetDatum(gtr_info->relpages);
+			values[4] = Float4GetDatum(gtr_info->reltuples);
+			values[5] = Int32GetDatum(gtr_info->relallvisible);
+			values[6] = Int32GetDatum(gtr_info->relallfrozen);
 
 			tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
 								 values, nulls);

@@ -29,6 +29,10 @@ typedef struct GtrInfo
 	/* pg_class info */
 	Oid			relfilenode;	/* the relation's physical storage file */
 	Oid			reltablespace;	/* the relation's tablespace identifier */
+	int32		relpages;		/* rel stats: number of blocks */
+	float4		reltuples;		/* rel stats: number of tuples */
+	int32		relallvisible;	/* rel stats: number of all-visible blocks */
+	int32		relallfrozen;	/* rel stats: number of all-frozen blocks */
 
 	/* pg_index info */
 	bool		indisvalid;		/* is the index valid in this session? */
@@ -45,6 +49,10 @@ typedef struct GtrInfo
 	do { \
 		(target)->relfilenode = (source)->relfilenode; \
 		(target)->reltablespace = (source)->reltablespace; \
+		(target)->relpages = (source)->relpages; \
+		(target)->reltuples = (source)->reltuples; \
+		(target)->relallvisible = (source)->relallvisible; \
+		(target)->relallfrozen = (source)->relallfrozen; \
 	} while (0)
 
 extern void TrackGlobalTempRelationStorage(Oid relid, RelFileLocator rlocator,
@@ -66,6 +74,7 @@ extern bool IsOtherUsingGlobalTempRelation(Oid relid);
 extern List *GetAllGlobalTempRelationsInUse(Oid dbId);
 extern GtrInfo *GetGlobalTempRelationInfo(Oid relid);
 extern GtrInfo *GetGlobalTempRelationInfoForUpdate(Oid relid);
+extern GtrInfo *GetGlobalTempRelationInfoForInPlaceUpdate(Oid relid);
 extern HeapTuple GetEffectivePgClassTuple(Oid relid);
 extern HeapTuple GetEffectivePgIndexTuple(Oid indexrelid);
 
@@ -87,6 +96,46 @@ static inline Oid
 GetEffective_reltablespace(Form_pg_class class_form, GtrInfo *gtr_info)
 {
 	return gtr_info != NULL ? gtr_info->reltablespace : class_form->reltablespace;
+}
+
+/*
+ * Get the effective value of relpages for a relation.  For a global temporary
+ * relation, the value from gtr_info (if present) takes precedence.
+ */
+static inline int32
+GetEffective_relpages(Form_pg_class class_form, GtrInfo *gtr_info)
+{
+	return gtr_info != NULL ? gtr_info->relpages : class_form->relpages;
+}
+
+/*
+ * Get the effective value of reltuples for a relation.  For a global
+ * temporary relation, the value from gtr_info (if present) takes precedence.
+ */
+static inline float4
+GetEffective_reltuples(Form_pg_class class_form, GtrInfo *gtr_info)
+{
+	return gtr_info != NULL ? gtr_info->reltuples : class_form->reltuples;
+}
+
+/*
+ * Get the effective value of relallvisible for a relation.  For a global
+ * temporary relation, the value from gtr_info (if present) takes precedence.
+ */
+static inline int32
+GetEffective_relallvisible(Form_pg_class class_form, GtrInfo *gtr_info)
+{
+	return gtr_info != NULL ? gtr_info->relallvisible : class_form->relallvisible;
+}
+
+/*
+ * Get the effective value of relallfrozen for a relation.  For a global
+ * temporary relation, the value from gtr_info (if present) takes precedence.
+ */
+static inline int32
+GetEffective_relallfrozen(Form_pg_class class_form, GtrInfo *gtr_info)
+{
+	return gtr_info != NULL ? gtr_info->relallfrozen : class_form->relallfrozen;
 }
 
 /*
@@ -128,6 +177,126 @@ SetEffective_reltablespace(Form_pg_class class_form, GtrInfo *gtr_info, Oid newv
 	if (gtr_info != NULL)
 		gtr_info->reltablespace = newval;
 	class_form->reltablespace = newval;
+}
+
+/*
+ * Set the effective value of relpages for a relation.  For a global temporary
+ * relation, GetGlobalTempRelationInfoFor[InPlace]Update() should have been
+ * used to obtain gtr_info, and it will be updated instead of the pg_class
+ * entry.  Otherwise, the value is set in the pg_class entry.
+ *
+ * If non-NULL, the class_dirty or gtr_dirty flag is set to true, if the value
+ * in pg_class or gtr_info actually changes.
+ */
+static inline void
+SetEffective_relpages(Form_pg_class class_form, GtrInfo *gtr_info,
+					  int32 newval, bool *class_dirty, bool *gtr_dirty)
+{
+	if (gtr_info != NULL)
+	{
+		if (newval != gtr_info->relpages)
+		{
+			gtr_info->relpages = newval;
+			if (gtr_dirty != NULL)
+				*gtr_dirty = true;
+		}
+	}
+	else if (newval != class_form->relpages)
+	{
+		class_form->relpages = newval;
+		if (class_dirty != NULL)
+			*class_dirty = true;
+	}
+}
+
+/*
+ * Set the effective value of reltuples for a relation.  For a global
+ * temporary relation, GetGlobalTempRelationInfoFor[InPlace]Update() should
+ * have been used to obtain gtr_info, and it will be updated instead of the
+ * pg_class entry.  Otherwise, the value is set in the pg_class entry.
+ *
+ * If non-NULL, the class_dirty or gtr_dirty flag is set to true, if the value
+ * in pg_class or gtr_info actually changes.
+ */
+static inline void
+SetEffective_reltuples(Form_pg_class class_form, GtrInfo *gtr_info,
+					   float4 newval, bool *class_dirty, bool *gtr_dirty)
+{
+	if (gtr_info != NULL)
+	{
+		if (newval != gtr_info->reltuples)
+		{
+			gtr_info->reltuples = newval;
+			if (gtr_dirty != NULL)
+				*gtr_dirty = true;
+		}
+	}
+	else if (newval != class_form->reltuples)
+	{
+		class_form->reltuples = newval;
+		if (class_dirty != NULL)
+			*class_dirty = true;
+	}
+}
+
+/*
+ * Set the effective value of relallvisible for a relation.  For a global
+ * temporary relation, GetGlobalTempRelationInfoFor[InPlace]Update() should
+ * have been used to obtain gtr_info, and it will be updated instead of the
+ * pg_class entry.  Otherwise, the value is set in the pg_class entry.
+ *
+ * If non-NULL, the class_dirty or gtr_dirty flag is set to true, if the value
+ * in pg_class or gtr_info actually changes.
+ */
+static inline void
+SetEffective_relallvisible(Form_pg_class class_form, GtrInfo *gtr_info,
+						   int32 newval, bool *class_dirty, bool *gtr_dirty)
+{
+	if (gtr_info != NULL)
+	{
+		if (newval != gtr_info->relallvisible)
+		{
+			gtr_info->relallvisible = newval;
+			if (gtr_dirty != NULL)
+				*gtr_dirty = true;
+		}
+	}
+	else if (newval != class_form->relallvisible)
+	{
+		class_form->relallvisible = newval;
+		if (class_dirty != NULL)
+			*class_dirty = true;
+	}
+}
+
+/*
+ * Set the effective value of relallfrozen for a relation.  For a global
+ * temporary relation, GetGlobalTempRelationInfoFor[InPlace]Update() should
+ * have been used to obtain gtr_info, and it will be updated instead of the
+ * pg_class entry.  Otherwise, the value is set in the pg_class entry.
+ *
+ * If non-NULL, the class_dirty or gtr_dirty flag is set to true, if the value
+ * in pg_class or gtr_info actually changes.
+ */
+static inline void
+SetEffective_relallfrozen(Form_pg_class class_form, GtrInfo *gtr_info,
+						  int32 newval, bool *class_dirty, bool *gtr_dirty)
+{
+	if (gtr_info != NULL)
+	{
+		if (newval != gtr_info->relallfrozen)
+		{
+			gtr_info->relallfrozen = newval;
+			if (gtr_dirty != NULL)
+				*gtr_dirty = true;
+		}
+	}
+	else if (newval != class_form->relallfrozen)
+	{
+		class_form->relallfrozen = newval;
+		if (class_dirty != NULL)
+			*class_dirty = true;
+	}
 }
 
 #endif							/* GLOBAL_TEMP_H */

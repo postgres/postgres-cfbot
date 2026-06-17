@@ -2037,7 +2037,10 @@ SELECT pg_restore_relation_stats(
          <type>integer</type>, <literal>reltuples</literal> with a value of
          type <type>real</type>, <literal>relallvisible</literal> with a value
          of type <type>integer</type>, and <literal>relallfrozen</literal>
-         with a value of type <type>integer</type>.
+         with a value of type <type>integer</type>.  For a global temporary
+         table, the values are not stored in <structname>pg_class</structname>,
+         but are instead held in memory, and may be retrieved using
+         <link linkend="pg-gtr-info"><function>pg_gtr_info()</function></link>.
         </para>
         <para>
          Additionally, this function accepts argument name
