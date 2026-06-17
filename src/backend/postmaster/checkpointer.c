@@ -781,8 +781,8 @@ FastCheckpointRequested(void)
 /*
  * CheckpointWriteDelay -- control rate of checkpoint
  *
- * This function is called after each page write performed by BufferSync().
- * It is responsible for throttling BufferSync()'s write rate to hit
+ * This function is called after each page write performed by
+ * CheckPointBuffers(). It is responsible for throttling its write rate to hit
  * checkpoint_completion_target.
  *
  * The checkpoint request flags should be passed in; currently the only one
