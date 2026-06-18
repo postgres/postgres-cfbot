@@ -1650,14 +1650,17 @@ get_relation_constraints(PlannerInfo *root,
  * The result is stored in stainfos list.
  */
 static void
-get_relation_statistics_worker(List **stainfos, RelOptInfo *rel,
+get_relation_statistics_worker(Oid relid, List **stainfos, RelOptInfo *rel,
 							   Oid statOid, bool inh,
 							   Bitmapset *keys, List *exprs)
 {
+	SysCacheIdentifier cacheId;
 	Form_pg_statistic_ext_data dataForm;
 	HeapTuple	dtup;
 
-	dtup = SearchSysCache2(STATEXTDATASTXOID,
+	cacheId = rel_is_global_temp(relid) ? TEMPSTATEXTDATASTXOID : STATEXTDATASTXOID;
+
+	dtup = SearchSysCache2(cacheId,
 						   ObjectIdGetDatum(statOid), BoolGetDatum(inh));
 	if (!HeapTupleIsValid(dtup))
 		return;
@@ -1822,9 +1825,11 @@ get_relation_statistics(PlannerInfo *root, RelOptInfo *rel,
 
 		/* extract statistics for possible values of stxdinherit flag */
 
-		get_relation_statistics_worker(&stainfos, rel, statOid, true, keys, exprs);
+		get_relation_statistics_worker(RelationGetRelid(relation), &stainfos,
+									   rel, statOid, true, keys, exprs);
 
-		get_relation_statistics_worker(&stainfos, rel, statOid, false, keys, exprs);
+		get_relation_statistics_worker(RelationGetRelid(relation), &stainfos,
+									   rel, statOid, false, keys, exprs);
 
 		ReleaseSysCache(htup);
 		bms_free(keys);

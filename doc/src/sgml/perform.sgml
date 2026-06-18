@@ -1457,6 +1457,10 @@ WHERE tablename = 'road';
     <primary>pg_statistic_ext_data</primary>
    </indexterm>
 
+   <indexterm>
+    <primary>pg_temp_statistic_ext_data</primary>
+   </indexterm>
+
    <para>
     It is common to see slow queries running bad execution plans because
     multiple columns used in the query clauses are correlated.
@@ -1486,7 +1490,9 @@ WHERE tablename = 'road';
     by <command>ANALYZE</command> (either a manual command, or background
     auto-analyze).  The collected values can be examined in the
     <link linkend="catalog-pg-statistic-ext-data"><structname>pg_statistic_ext_data</structname></link>
-    catalog.
+    catalog (or the
+    <link linkend="catalog-pg-temp-statistic-ext-data"><structname>pg_temp_statistic_ext_data</structname></link>
+    catalog, for global temporary tables).
    </para>
 
    <para>

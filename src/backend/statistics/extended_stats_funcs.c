@@ -24,6 +24,7 @@
 #include "catalog/pg_operator.h"
 #include "catalog/pg_statistic_ext.h"
 #include "catalog/pg_statistic_ext_data.h"
+#include "catalog/pg_temp_statistic_ext_data.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
@@ -125,7 +126,7 @@ static bool extended_statistics_update(FunctionCallInfo fcinfo);
 
 static HeapTuple get_pg_statistic_ext(Relation pg_stext, Oid nspoid,
 									  const char *stxname);
-static bool delete_pg_statistic_ext_data(Oid stxoid, bool inherited);
+static bool delete_pg_statistic_ext_data(Oid relid, Oid stxoid, bool inherited);
 
 /*
  * Track the extended statistics kinds expected for a pg_statistic_ext
@@ -140,7 +141,8 @@ typedef struct
 } StakindFlags;
 
 static void expand_stxkind(HeapTuple tup, StakindFlags *enabled);
-static void upsert_pg_statistic_ext_data(const Datum *values,
+static void upsert_pg_statistic_ext_data(Oid relid,
+										 const Datum *values,
 										 const bool *nulls,
 										 const bool *replaces);
 
@@ -265,16 +267,28 @@ expand_stxkind(HeapTuple tup, StakindFlags *enabled)
  * Perform the actual storage of a pg_statistic_ext_data tuple.
  */
 static void
-upsert_pg_statistic_ext_data(const Datum *values, const bool *nulls,
-							 const bool *replaces)
+upsert_pg_statistic_ext_data(Oid relid, const Datum *values,
+							 const bool *nulls, const bool *replaces)
 {
 	Relation	pg_stextdata;
+	SysCacheIdentifier cacheId;
 	HeapTuple	stxdtup;
 	HeapTuple	newtup;
 
-	pg_stextdata = table_open(StatisticExtDataRelationId, RowExclusiveLock);
+	if (rel_is_global_temp(relid))
+	{
+		pg_stextdata = table_open(TempStatisticExtDataRelationId,
+								  RowExclusiveLock);
+		cacheId = TEMPSTATEXTDATASTXOID;
+	}
+	else
+	{
+		pg_stextdata = table_open(StatisticExtDataRelationId,
+								  RowExclusiveLock);
+		cacheId = STATEXTDATASTXOID;
+	}
 
-	stxdtup = SearchSysCache2(STATEXTDATASTXOID,
+	stxdtup = SearchSysCache2(cacheId,
 							  values[Anum_pg_statistic_ext_data_stxoid - 1],
 							  values[Anum_pg_statistic_ext_data_stxdinherit - 1]);
 
@@ -749,7 +763,7 @@ extended_statistics_update(FunctionCallInfo fcinfo)
 			success = false;
 	}
 
-	upsert_pg_statistic_ext_data(values, nulls, replaces);
+	upsert_pg_statistic_ext_data(relid, values, nulls, replaces);
 
 cleanup:
 	if (HeapTupleIsValid(tup))
@@ -1689,14 +1703,26 @@ exprs_error:
  * row and "inherited" pair.
  */
 static bool
-delete_pg_statistic_ext_data(Oid stxoid, bool inherited)
+delete_pg_statistic_ext_data(Oid relid, Oid stxoid, bool inherited)
 {
-	Relation	sed = table_open(StatisticExtDataRelationId, RowExclusiveLock);
+	Relation	sed;
+	SysCacheIdentifier cacheId;
 	HeapTuple	oldtup;
 	bool		result = false;
 
+	if (rel_is_global_temp(relid))
+	{
+		sed = table_open(TempStatisticExtDataRelationId, RowExclusiveLock);
+		cacheId = TEMPSTATEXTDATASTXOID;
+	}
+	else
+	{
+		sed = table_open(StatisticExtDataRelationId, RowExclusiveLock);
+		cacheId = STATEXTDATASTXOID;
+	}
+
 	/* Is there already a pg_statistic_ext_data tuple for this attribute? */
-	oldtup = SearchSysCache2(STATEXTDATASTXOID,
+	oldtup = SearchSysCache2(cacheId,
 							 ObjectIdGetDatum(stxoid),
 							 BoolGetDatum(inherited));
 
@@ -1831,7 +1857,7 @@ pg_clear_extended_stats(PG_FUNCTION_ARGS)
 		PG_RETURN_VOID();
 	}
 
-	delete_pg_statistic_ext_data(stxform->oid, inherited);
+	delete_pg_statistic_ext_data(relid, stxform->oid, inherited);
 	heap_freetuple(tup);
 
 	table_close(pg_stext, RowExclusiveLock);

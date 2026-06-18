@@ -569,132 +569,147 @@ key|val|seq
 
 step reset_tblspace: ALTER TABLE tmp SET TABLESPACE pg_default;
 
-starting permutation: create1 ins1_2 analyze1 cat1 drop1 cat1
+starting permutation: create1 ext_stats1 ins1_2 analyze1 cat1 drop1 cat1
 step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box);
+step ext_stats1: CREATE STATISTICS tmp2_stats ON key, val FROM tmp2;
 step ins1_2: INSERT INTO tmp2 VALUES (1, 's1');
 step analyze1: ANALYZE tmp2;
 step cat1: 
   SELECT (SELECT count(*) FROM pg_temp_class WHERE oid >= 12000),
-         (SELECT count(*) FROM pg_temp_statistic);
+         (SELECT count(*) FROM pg_temp_statistic),
+         (SELECT count(*) FROM pg_temp_statistic_ext_data);
 
-count|count
------+-----
-    3|    4
+count|count|count
+-----+-----+-----
+    3|    4|    1
 (1 row)
 
 step drop1: DROP TABLE tmp2;
 step cat1: 
   SELECT (SELECT count(*) FROM pg_temp_class WHERE oid >= 12000),
-         (SELECT count(*) FROM pg_temp_statistic);
+         (SELECT count(*) FROM pg_temp_statistic),
+         (SELECT count(*) FROM pg_temp_statistic_ext_data);
 
-count|count
------+-----
-    0|    0
+count|count|count
+-----+-----+-----
+    0|    0|    0
 (1 row)
 
 
-starting permutation: create1 ins1_2 analyze1 cat1 drop2 cat1
+starting permutation: create1 ext_stats1 ins1_2 analyze1 cat1 drop2 cat1
 step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box);
+step ext_stats1: CREATE STATISTICS tmp2_stats ON key, val FROM tmp2;
 step ins1_2: INSERT INTO tmp2 VALUES (1, 's1');
 step analyze1: ANALYZE tmp2;
 step cat1: 
   SELECT (SELECT count(*) FROM pg_temp_class WHERE oid >= 12000),
-         (SELECT count(*) FROM pg_temp_statistic);
+         (SELECT count(*) FROM pg_temp_statistic),
+         (SELECT count(*) FROM pg_temp_statistic_ext_data);
 
-count|count
------+-----
-    3|    4
+count|count|count
+-----+-----+-----
+    3|    4|    1
 (1 row)
 
 step drop2: DROP TABLE tmp2;
 step cat1: 
   SELECT (SELECT count(*) FROM pg_temp_class WHERE oid >= 12000),
-         (SELECT count(*) FROM pg_temp_statistic);
+         (SELECT count(*) FROM pg_temp_statistic),
+         (SELECT count(*) FROM pg_temp_statistic_ext_data);
 
-count|count
------+-----
-    0|    0
+count|count|count
+-----+-----+-----
+    0|    0|    0
 (1 row)
 
 
-starting permutation: create1 ins1_2 analyze1 cat1 b1 drop2 cat1 r1 cat1
+starting permutation: create1 ext_stats1 ins1_2 analyze1 cat1 b1 drop2 cat1 r1 cat1
 step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box);
+step ext_stats1: CREATE STATISTICS tmp2_stats ON key, val FROM tmp2;
 step ins1_2: INSERT INTO tmp2 VALUES (1, 's1');
 step analyze1: ANALYZE tmp2;
 step cat1: 
   SELECT (SELECT count(*) FROM pg_temp_class WHERE oid >= 12000),
-         (SELECT count(*) FROM pg_temp_statistic);
+         (SELECT count(*) FROM pg_temp_statistic),
+         (SELECT count(*) FROM pg_temp_statistic_ext_data);
 
-count|count
------+-----
-    3|    4
+count|count|count
+-----+-----+-----
+    3|    4|    1
 (1 row)
 
 step b1: BEGIN;
 step drop2: DROP TABLE tmp2;
 step cat1: 
   SELECT (SELECT count(*) FROM pg_temp_class WHERE oid >= 12000),
-         (SELECT count(*) FROM pg_temp_statistic);
+         (SELECT count(*) FROM pg_temp_statistic),
+         (SELECT count(*) FROM pg_temp_statistic_ext_data);
 
-count|count
------+-----
-    0|    0
+count|count|count
+-----+-----+-----
+    0|    0|    0
 (1 row)
 
 step r1: ROLLBACK;
 step cat1: 
   SELECT (SELECT count(*) FROM pg_temp_class WHERE oid >= 12000),
-         (SELECT count(*) FROM pg_temp_statistic);
+         (SELECT count(*) FROM pg_temp_statistic),
+         (SELECT count(*) FROM pg_temp_statistic_ext_data);
 
-count|count
------+-----
-    0|    0
+count|count|count
+-----+-----+-----
+    0|    0|    0
 (1 row)
 
 
-starting permutation: create1 ins1_2 analyze1 b1 cat1 sp1 drop2 cat1 rsp1 cat1 r1 cat1
+starting permutation: create1 ext_stats1 ins1_2 analyze1 b1 cat1 sp1 drop2 cat1 rsp1 cat1 r1 cat1
 step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box);
+step ext_stats1: CREATE STATISTICS tmp2_stats ON key, val FROM tmp2;
 step ins1_2: INSERT INTO tmp2 VALUES (1, 's1');
 step analyze1: ANALYZE tmp2;
 step b1: BEGIN;
 step cat1: 
   SELECT (SELECT count(*) FROM pg_temp_class WHERE oid >= 12000),
-         (SELECT count(*) FROM pg_temp_statistic);
+         (SELECT count(*) FROM pg_temp_statistic),
+         (SELECT count(*) FROM pg_temp_statistic_ext_data);
 
-count|count
------+-----
-    3|    4
+count|count|count
+-----+-----+-----
+    3|    4|    1
 (1 row)
 
 step sp1: SAVEPOINT sp;
 step drop2: DROP TABLE tmp2;
 step cat1: 
   SELECT (SELECT count(*) FROM pg_temp_class WHERE oid >= 12000),
-         (SELECT count(*) FROM pg_temp_statistic);
+         (SELECT count(*) FROM pg_temp_statistic),
+         (SELECT count(*) FROM pg_temp_statistic_ext_data);
 
-count|count
------+-----
-    0|    0
+count|count|count
+-----+-----+-----
+    0|    0|    0
 (1 row)
 
 step rsp1: ROLLBACK TO SAVEPOINT sp;
 step cat1: 
   SELECT (SELECT count(*) FROM pg_temp_class WHERE oid >= 12000),
-         (SELECT count(*) FROM pg_temp_statistic);
+         (SELECT count(*) FROM pg_temp_statistic),
+         (SELECT count(*) FROM pg_temp_statistic_ext_data);
 
-count|count
------+-----
-    0|    0
+count|count|count
+-----+-----+-----
+    0|    0|    0
 (1 row)
 
 step r1: ROLLBACK;
 step cat1: 
   SELECT (SELECT count(*) FROM pg_temp_class WHERE oid >= 12000),
-         (SELECT count(*) FROM pg_temp_statistic);
+         (SELECT count(*) FROM pg_temp_statistic),
+         (SELECT count(*) FROM pg_temp_statistic_ext_data);
 
-count|count
------+-----
-    0|    0
+count|count|count
+-----+-----+-----
+    0|    0|    0
 (1 row)
 
 

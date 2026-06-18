@@ -30,6 +30,9 @@
  */
 BEGIN_CATALOG_STRUCT
 
+/*
+ * NB: Any changes made here must be reflected in pg_temp_statistic_ext_data.
+ */
 CATALOG(pg_statistic_ext_data,3429,StatisticExtDataRelationId)
 {
 	Oid			stxoid BKI_LOOKUP(pg_statistic_ext);	/* statistics object

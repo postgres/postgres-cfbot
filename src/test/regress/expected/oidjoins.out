@@ -298,3 +298,4 @@ NOTICE:  checking pg_temp_statistic {stacoll2} => pg_collation {oid}
 NOTICE:  checking pg_temp_statistic {stacoll3} => pg_collation {oid}
 NOTICE:  checking pg_temp_statistic {stacoll4} => pg_collation {oid}
 NOTICE:  checking pg_temp_statistic {stacoll5} => pg_collation {oid}
+NOTICE:  checking pg_temp_statistic_ext_data {stxoid} => pg_statistic_ext {oid}

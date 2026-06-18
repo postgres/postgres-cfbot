@@ -441,6 +441,47 @@ SELECT row_estimate('SELECT * FROM tmp2 WHERE b = 8');
 
 DROP TABLE tmp2;
 
+-- Test extended stats
+CREATE GLOBAL TEMP TABLE tmp2 (a int, b int, c int);
+INSERT INTO tmp2
+  SELECT x, floor(sqrt(x)), floor(sqrt(x)) + 100 FROM generate_series(36, 99) x;
+CREATE STATISTICS tmp2_stats ON b, c FROM tmp2;
+ANALYZE tmp2;
+
+SELECT stxname,
+       replace(d.stxdndistinct, '}, ', E'},\n') AS stxdndistinct,
+       replace(d.stxddependencies, '}, ', E'},\n') AS stxddependencies
+  FROM pg_statistic_ext s
+  LEFT JOIN pg_statistic_ext_data d ON d.stxoid = s.oid
+ WHERE s.stxname = 'tmp2_stats';
+
+SELECT stxname,
+       replace(d.stxdndistinct, '}, ', E'},\n') AS stxdndistinct,
+       replace(d.stxddependencies, '}, ', E'},\n') AS stxddependencies
+  FROM pg_statistic_ext s
+  LEFT JOIN pg_temp_statistic_ext_data d ON d.stxoid = s.oid
+ WHERE s.stxname = 'tmp2_stats';
+
+SELECT m.*
+  FROM pg_statistic_ext s, pg_statistic_ext_data d,
+       pg_mcv_list_items(d.stxdmcv) m
+ WHERE s.stxname = 'tmp2_stats'
+   AND d.stxoid = s.oid;
+
+SELECT m.*
+  FROM pg_statistic_ext s, pg_temp_statistic_ext_data d,
+       pg_mcv_list_items(d.stxdmcv) m
+ WHERE s.stxname = 'tmp2_stats'
+   AND d.stxoid = s.oid;
+
+SELECT most_common_vals FROM pg_stats_ext
+ WHERE schemaname = 'global_temp_tests' AND tablename = 'tmp2';
+
+SELECT COUNT(*) FROM tmp2 WHERE b = 8 AND c = 108;
+SELECT row_estimate('SELECT * FROM tmp2 WHERE b = 8 AND c = 108');
+
+DROP TABLE tmp2;
+
 -- Test view creation
 CREATE VIEW v AS SELECT * FROM tmp1;
 SELECT * FROM v;

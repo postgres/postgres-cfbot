@@ -361,6 +361,11 @@
      </row>
 
      <row>
+      <entry><link linkend="catalog-pg-temp-statistic-ext-data"><structname>pg_temp_statistic_ext_data</structname></link></entry>
+      <entry>extended planner statistics (built statistics) for global temporary tables</entry>
+     </row>
+
+     <row>
       <entry><link linkend="catalog-pg-transform"><structname>pg_transform</structname></link></entry>
       <entry>transforms (data type to procedural language conversions)</entry>
      </row>
@@ -8523,6 +8528,16 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
    information about tables the current user owns.
   </para>
 
+  <para>
+   Extended statistics data for global temporary tables is stored in
+   <link linkend="catalog-pg-temp-statistic-ext-data"><structname>pg_temp_statistic_ext_data</structname></link>,
+   instead of <structname>pg_statistic_ext_data</structname>, because the
+   contents of global temporary tables can vary between different sessions,
+   and so the statistical data needs to be local to each session
+   (<structname>pg_temp_statistic_ext_data</structname> is itself a global
+   temporary table).
+  </para>
+
   <table>
    <title><structname>pg_statistic_ext_data</structname> Columns</title>
    <tgroup cols="1">
@@ -9299,6 +9314,42 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
    For more information about the table structure, and how its contents are
    interpreted, see
    <link linkend="catalog-pg-statistic"><structname>pg_statistic</structname></link>.
+  </para>
+ </sect1>
+
+
+ <sect1 id="catalog-pg-temp-statistic-ext-data">
+  <title><structname>pg_temp_statistic_ext_data</structname></title>
+
+  <indexterm zone="catalog-pg-temp-statistic-ext-data">
+   <primary>pg_temp_statistic_ext_data</primary>
+  </indexterm>
+
+  <para>
+   The catalog <structname>pg_temp_statistic_ext_data</structname> is a global
+   temporary table that holds data for extended planner statistics defined in
+   <link linkend="catalog-pg-statistic-ext"><structname>pg_statistic_ext</structname></link>
+   for global temporary tables.  Each row in this catalog corresponds to a
+   <firstterm>statistics object</firstterm> created with
+   <link linkend="sql-createstatistics"><command>CREATE STATISTICS</command></link>
+   on a global temporary table.
+  </para>
+
+  <para>
+   <structname>pg_temp_statistic_ext_data</structname> has the same columns as
+   <structname>pg_statistic_ext_data</structname>, and its contents are created
+   and used by the planner in exactly the same way, except that they are local
+   to the current session, and are automatically deleted when the session exits.
+   Therefore, each session should run
+   <link linkend="sql-analyze"><command>ANALYZE</command></link> to create
+   its own extended statistics data for the contents of global temporary tables
+   with extended statistics defined, used in the session.
+  </para>
+
+  <para>
+   For more information about the table structure, and how its contents are
+   interpreted, see
+   <link linkend="catalog-pg-statistic-ext-data"><structname>pg_statistic_ext_data</structname></link>.
   </para>
  </sect1>
 
