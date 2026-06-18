@@ -16,6 +16,19 @@
 #include "nodes/pathnodes.h"
 #include "nodes/plannodes.h"
 
+/*
+ * The quals that are guaranteed to filter the rows on which the SubLinks at
+ * one jointree node are evaluated, and the Vars they force non-null.  The
+ * latter is computed on first use and then shared by every SubLink at that
+ * node.
+ */
+typedef struct SafeQualsInfo
+{
+	List	   *quals;			/* qual clauses, with implicit-AND semantics */
+	List	   *nonnullable_vars;	/* multibitmapset; valid if computed */
+	bool		computed;		/* have we computed nonnullable_vars yet? */
+} SafeQualsInfo;
+
 extern void SS_process_ctes(PlannerInfo *root);
 extern ScalarArrayOpExpr *convert_VALUES_to_ANY(PlannerInfo *root,
 												Node *testexpr,
@@ -23,7 +36,8 @@ extern ScalarArrayOpExpr *convert_VALUES_to_ANY(PlannerInfo *root,
 extern JoinExpr *convert_ANY_sublink_to_join(PlannerInfo *root,
 											 SubLink *sublink,
 											 bool under_not,
-											 Relids available_rels);
+											 Relids available_rels,
+											 SafeQualsInfo *sqinfo);
 extern JoinExpr *convert_EXISTS_sublink_to_join(PlannerInfo *root,
 												SubLink *sublink,
 												bool under_not,
