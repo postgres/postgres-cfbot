@@ -19,8 +19,8 @@ HEADERS_pg_plan_advice = pg_plan_advice.h
 
 PGFILEDESC = "pg_plan_advice - help the planner get the right plan"
 
-REGRESS = alternatives gather join_order join_strategy partitionwise \
-	prepared scan semijoin syntax
+REGRESS = alternatives gather join_order join_strategy no_join no_scan \
+	partitionwise prepared scan semijoin syntax
 
 TAP_TESTS = 1
 
