@@ -1327,6 +1327,7 @@ WHERE relname LIKE 'tenk1%';
 
   <indexterm>
    <primary>pg_statistic</primary>
+   <secondary>pg_temp_statistic</secondary>
   </indexterm>
 
   <para>
@@ -1338,7 +1339,10 @@ WHERE relname LIKE 'tenk1%';
    <literal>WHERE</literal> clause.  The information used for this task is
    stored in the
    <link linkend="catalog-pg-statistic"><structname>pg_statistic</structname></link>
-   system catalog.  Entries in <structname>pg_statistic</structname>
+   system catalog (or
+   <link linkend="catalog-pg-temp-statistic"><structname>pg_temp_statistic</structname></link>
+   for global temporary tables).  Entries in <structname>pg_statistic</structname>
+   and <structname>pg_temp_statistic</structname>
    are updated by the <command>ANALYZE</command> and <command>VACUUM
    ANALYZE</command> commands, and are always approximate even when freshly
    updated.
@@ -1349,13 +1353,15 @@ WHERE relname LIKE 'tenk1%';
   </indexterm>
 
   <para>
-   Rather than look at <structname>pg_statistic</structname> directly,
-   it's better to look at its view
+   Rather than look at <structname>pg_statistic</structname> and
+   <structname>pg_temp_statistic</structname> directly,
+   it's better to look at the view
    <link linkend="view-pg-stats"><structname>pg_stats</structname></link>
    when examining the statistics manually.  <structname>pg_stats</structname>
    is designed to be more easily readable.  Furthermore,
    <structname>pg_stats</structname> is readable by all, whereas
-   <structname>pg_statistic</structname> is only readable by a superuser.
+   <structname>pg_statistic</structname> and
+   <structname>pg_temp_statistic</structname> are only readable by a superuser.
    (This prevents unprivileged users from learning something about
    the contents of other people's tables from the statistics.  The
    <structname>pg_stats</structname> view is restricted to show only
@@ -1408,6 +1414,7 @@ WHERE tablename = 'road';
 
   <para>
    The amount of information stored in <structname>pg_statistic</structname>
+   and <structname>pg_temp_statistic</structname>
    by <command>ANALYZE</command>, in particular the maximum number of entries in the
    <structfield>most_common_vals</structfield> and <structfield>histogram_bounds</structfield>
    arrays for each column, can be set on a
@@ -1417,7 +1424,8 @@ WHERE tablename = 'road';
    The default limit is presently 100 entries.  Raising the limit
    might allow more accurate planner estimates to be made, particularly for
    columns with irregular data distributions, at the price of consuming
-   more space in <structname>pg_statistic</structname> and slightly more
+   more space in <structname>pg_statistic</structname> and
+   <structname>pg_temp_statistic</structname>, and slightly more
    time to compute the estimates.  Conversely, a lower limit might be
    sufficient for columns with simple data distributions.
   </para>

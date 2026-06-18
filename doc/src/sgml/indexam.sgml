@@ -1580,7 +1580,8 @@ cost_qual_eval(&amp;index_qual_cost, path-&gt;indexquals, root);
    <step>
     <para>
      Estimate the index correlation.  For a simple ordered index on a single
-     field, this can be retrieved from pg_statistic.  If the correlation
+     field, this can be retrieved from pg_statistic (or pg_temp_statistic,
+     for an index on a global temporary table).  If the correlation
      is not known, the conservative estimate is zero (no correlation).
     </para>
    </step>

@@ -53,6 +53,7 @@
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_subscription_rel.h"
 #include "catalog/pg_tablespace.h"
+#include "catalog/pg_temp_statistic.h"
 #include "catalog/pg_type.h"
 #include "catalog/storage.h"
 #include "commands/tablecmds.h"
@@ -3515,6 +3516,13 @@ CopyStatistics(Oid fromrelid, Oid torelid)
 	Relation	statrel;
 	CatalogIndexState indstate = NULL;
 
+	/*
+	 * Note: This is currently only used for concurrent index building, which
+	 * isn't supported on global temporary relations, so we never want
+	 * pg_temp_statistic here.
+	 */
+	Assert(!rel_is_global_temp(fromrelid) && !rel_is_global_temp(torelid));
+
 	statrel = table_open(StatisticRelationId, RowExclusiveLock);
 
 	/* Now search for stat records */
@@ -3563,12 +3571,22 @@ void
 RemoveStatistics(Oid relid, AttrNumber attnum)
 {
 	Relation	pgstatistic;
+	Oid			relidAttnumInhIndexId;
 	SysScanDesc scan;
 	ScanKeyData key[2];
 	int			nkeys;
 	HeapTuple	tuple;
 
-	pgstatistic = table_open(StatisticRelationId, RowExclusiveLock);
+	if (rel_is_global_temp(relid))
+	{
+		pgstatistic = table_open(TempStatisticRelationId, RowExclusiveLock);
+		relidAttnumInhIndexId = TempStatisticRelidAttnumInhIndexId;
+	}
+	else
+	{
+		pgstatistic = table_open(StatisticRelationId, RowExclusiveLock);
+		relidAttnumInhIndexId = StatisticRelidAttnumInhIndexId;
+	}
 
 	ScanKeyInit(&key[0],
 				Anum_pg_statistic_starelid,
@@ -3586,7 +3604,7 @@ RemoveStatistics(Oid relid, AttrNumber attnum)
 		nkeys = 2;
 	}
 
-	scan = systable_beginscan(pgstatistic, StatisticRelidAttnumInhIndexId, true,
+	scan = systable_beginscan(pgstatistic, relidAttnumInhIndexId, true,
 							  NULL, nkeys, key);
 
 	/* we must loop even when attnum != 0, in case of inherited stats */

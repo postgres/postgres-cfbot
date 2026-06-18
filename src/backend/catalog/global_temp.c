@@ -60,6 +60,7 @@
 #include "access/xact.h"
 #include "access/xlogutils.h"
 #include "catalog/global_temp.h"
+#include "catalog/indexing.h"
 #include "catalog/pg_temp_class.h"
 #include "catalog/storage.h"
 #include "commands/sequence.h"
@@ -71,6 +72,7 @@
 #include "storage/proc.h"
 #include "storage/shmem.h"
 #include "storage/subsystems.h"
+#include "utils/fmgroids.h"
 #include "utils/gtcatcache.h"
 #include "utils/memutils.h"
 #include "utils/syscache.h"
@@ -1143,6 +1145,7 @@ ProcessInvalidatedGlobalTempRelations(void)
 	if (gtrs_dropped && processed_dropped_subid == InvalidSubTransactionId)
 	{
 		bool		tuples_deleted = false;
+		Relation	statrel;
 
 		/*
 		 * Delete and forget locally-created storage for dropped relations.
@@ -1180,8 +1183,14 @@ ProcessInvalidatedGlobalTempRelations(void)
 		 * record removal is non-transactional, but the rest may be undone by
 		 * (sub)rollback.
 		 */
+		statrel = table_open(TempStatisticRelationId, RowExclusiveLock);
+
 		foreach_oid(relid, gtrs_dropped)
 		{
+			ScanKeyData key[1];
+			SysScanDesc scan;
+			HeapTuple	tuple;
+
 			gtr_remove_usage(relid);
 			remove_on_commit_action(relid);
 
@@ -1191,7 +1200,27 @@ ProcessInvalidatedGlobalTempRelations(void)
 				DeletePgTempClassTuple(relid);
 				tuples_deleted = true;
 			}
+
+			/* Delete any per-column statistics from pg_temp_statistic */
+			ScanKeyInit(&key[0],
+						Anum_pg_temp_statistic_starelid,
+						BTEqualStrategyNumber, F_OIDEQ,
+						ObjectIdGetDatum(relid));
+
+			scan = systable_beginscan(statrel,
+									  TempStatisticRelidAttnumInhIndexId,
+									  true, NULL, 1, key);
+
+			while (HeapTupleIsValid(tuple = systable_getnext(scan)))
+			{
+				CatalogTupleDelete(statrel, &tuple->t_self);
+				tuples_deleted = true;
+			}
+
+			systable_endscan(scan);
 		}
+
+		table_close(statrel, RowExclusiveLock);
 
 		/* If we deleted anything, make the changes visible */
 		if (tuples_deleted)
