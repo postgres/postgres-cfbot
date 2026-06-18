@@ -82,7 +82,8 @@ CATALOG_HEADERS := \
 	pg_publication_rel.h \
 	pg_subscription.h \
 	pg_subscription_rel.h \
-	pg_temp_statistic.h
+	pg_temp_statistic.h \
+	pg_temp_statistic_ext_data.h
 
 GENERATED_HEADERS := $(CATALOG_HEADERS:%.h=%_d.h)
 

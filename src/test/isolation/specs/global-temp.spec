@@ -77,12 +77,14 @@ step get_tblspace1 {
 step reset_tblspace { ALTER TABLE tmp SET TABLESPACE pg_default; }
 
 # Test DROP from other backend
+step ext_stats1 { CREATE STATISTICS tmp2_stats ON key, val FROM tmp2; }
 step analyze1 { ANALYZE tmp2; }
 step used1 {
   SELECT regexp_replace(oid::regclass::text, '_(\d+)', '_NNN', 'g')
     FROM pg_gtrs_in_use()
    ORDER BY 1;
   SELECT count(*) FROM pg_temp_statistic;
+  SELECT count(*) FROM pg_temp_statistic_ext_data;
 }
 
 # Test val index
@@ -199,10 +201,10 @@ permutation ins1 ins2 alt_tblspace1 get_tblspace1 get_tblspace2
             sel1 sel2 reset_tblspace
 
 # Test DROP from other backend
-permutation create1 ins1_2 analyze1 used1 drop1 used1
-permutation create1 ins1_2 analyze1 used1 drop2 used1
-permutation create1 ins1_2 analyze1 used1 b1 drop2 used1 r1 used1
-permutation create1 ins1_2 analyze1 b1 used1 sp1 drop2 used1 rsp1 used1 r1 used1
+permutation create1 ext_stats1 ins1_2 analyze1 used1 drop1 used1
+permutation create1 ext_stats1 ins1_2 analyze1 used1 drop2 used1
+permutation create1 ext_stats1 ins1_2 analyze1 used1 b1 drop2 used1 r1 used1
+permutation create1 ext_stats1 ins1_2 analyze1 b1 used1 sp1 drop2 used1 rsp1 used1 r1 used1
 
 # Test val index
 permutation ins1 idx1 sel1_idx ins2 sel2_idx
