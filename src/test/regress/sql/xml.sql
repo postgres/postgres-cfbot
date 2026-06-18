@@ -685,3 +685,56 @@ SELECT xmltext('  ');
 SELECT xmltext('foo `$_-+?=*^%!|/\()[]{}');
 SELECT xmltext('foo & <"bar">');
 SELECT xmltext('x'|| '<P>73</P>'::xml || .42 || true || 'j'::char);
+
+-- xmlcanonicalize
+CREATE TABLE xmlcanonicalize_test (doc xml);
+INSERT INTO xmlcanonicalize_test VALUES
+  ('<?xml version="1.0" encoding="ISO-8859-1"?>
+  <!DOCTYPE doc SYSTEM "doc.dtd" [
+                  <!ENTITY val "42">
+      <!ATTLIST xyz attr CDATA "default">
+  ]>
+
+  <!-- attributes and namespaces will be sorted -->
+  <foo a:attr="out" b:attr="sorted" attr2="all" attr="I am"
+      xmlns:b="http://www.ietf.org"
+      xmlns:a="http://www.w3.org"
+      xmlns="http://example.org">
+
+    <!-- Normalization of whitespace in start and end tags -->
+    <!-- Elimination of superfluous namespace declarations, as already declared in <foo> -->
+    <bar     xmlns="" xmlns:a="http://www.w3.org"     >&val;</bar     >
+
+    <!-- empty element will be converted to start-end tag pair -->
+    <empty/>
+
+    <!-- text will be transcoded to UTF-8 -->
+    <transcode>&#49;</transcode>
+
+    <!-- whitespace inside tag will be preserved -->
+    <whitespace> 321 </whitespace>
+
+    <!-- empty namespace will be removed of child tag -->
+    <emptyns  xmlns="" >
+       <emptyns_child xmlns=""></emptyns_child>
+    </emptyns>
+
+    <!-- CDATA section will be replaced by its value -->
+    <compute><![CDATA[value>"0" && value<"10" ?"valid":"error"]]></compute>
+  </foo>      <!-- comment outside root element -->          ');
+
+SELECT xmlcanonicalize(doc, true) FROM xmlcanonicalize_test;
+SELECT xmlcanonicalize(doc, false) FROM xmlcanonicalize_test;
+SELECT xmlcanonicalize(doc, true) = xmlcanonicalize(doc) FROM xmlcanonicalize_test;
+SELECT xmlcanonicalize(xmlcanonicalize(doc, true)::xml, true) = xmlcanonicalize(doc, true) FROM xmlcanonicalize_test;
+SELECT xmlcanonicalize(doc, NULL) FROM xmlcanonicalize_test;
+SELECT xmlcanonicalize(NULL, true);
+
+\set VERBOSITY terse
+SELECT xmlcanonicalize('', true);
+SELECT xmlcanonicalize('  ', true);
+SELECT xmlcanonicalize('foo', true);
+SELECT xmlcanonicalize('');
+SELECT xmlcanonicalize('  ');
+SELECT xmlcanonicalize('foo');
+\set VERBOSITY default
