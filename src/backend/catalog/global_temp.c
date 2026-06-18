@@ -1245,6 +1245,8 @@ ProcessInvalidatedGlobalTempRelations(void)
 		int			orig_xact_flags = MyXactFlags;
 		bool		tuples_deleted = false;
 		Relation	statrel;
+		SysScanDesc scan;
+		HeapTuple	tuple;
 
 		/*
 		 * Delete and forget locally-created storage for dropped relations.
@@ -1287,8 +1289,6 @@ ProcessInvalidatedGlobalTempRelations(void)
 		foreach_oid(relid, gtrs_dropped)
 		{
 			ScanKeyData key[1];
-			SysScanDesc scan;
-			HeapTuple	tuple;
 
 			gtr_remove_usage(relid);
 			remove_on_commit_action(relid);
@@ -1311,6 +1311,37 @@ ProcessInvalidatedGlobalTempRelations(void)
 
 			systable_endscan(scan);
 		}
+
+		table_close(statrel, RowExclusiveLock);
+
+		/*
+		 * Delete any orphaned extended stats data from
+		 * pg_temp_statistic_ext_data.  This requires a full table scan, since
+		 * there is no stxrelid column referring back to the relation.  That
+		 * also means that it's not strictly limited to gtrs_dropped, but
+		 * that's probably no bad thing --- it will tidy up *any* orphaned
+		 * global temporary extended stats data, though in theory, that should
+		 * be limited to gtrs_dropped.
+		 */
+		statrel = table_open(TempStatisticExtDataRelationId, RowExclusiveLock);
+
+		scan = systable_beginscan(statrel, InvalidOid, false, NULL, 0, NULL);
+
+		while (HeapTupleIsValid(tuple = systable_getnext(scan)))
+		{
+			Oid			stxoid;
+
+			stxoid = SysCacheGetAttrNotNull(TEMPSTATEXTDATASTXOID, tuple,
+											Anum_pg_temp_statistic_ext_data_stxoid);
+
+			if (!SearchSysCacheExists1(STATEXTOID, ObjectIdGetDatum(stxoid)))
+			{
+				CatalogTupleDelete(statrel, &tuple->t_self);
+				tuples_deleted = true;
+			}
+		}
+
+		systable_endscan(scan);
 
 		table_close(statrel, RowExclusiveLock);
 

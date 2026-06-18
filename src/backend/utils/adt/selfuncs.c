@@ -4678,7 +4678,7 @@ estimate_multivariate_ndistinct(PlannerInfo *root, RelOptInfo *rel,
 
 	Assert(nmatches_vars + nmatches_exprs > 1);
 
-	stats = statext_ndistinct_load(statOid, rte->inh);
+	stats = statext_ndistinct_load(rte->relid, statOid, rte->inh);
 
 	/*
 	 * If we have a match, search it for the specific item that matches (there
@@ -5936,7 +5936,8 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 					 * Now we just create a new copy every time.
 					 */
 					vardata->statsTuple =
-						statext_expressions_load(info->statOid, rte->inh, pos);
+						statext_expressions_load(rte->relid, info->statOid,
+												 rte->inh, pos);
 
 					/* Nothing to release if no data found */
 					if (vardata->statsTuple != NULL)

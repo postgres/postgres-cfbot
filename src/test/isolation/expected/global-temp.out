@@ -453,8 +453,9 @@ key|val|seq
 
 step reset_tblspace: ALTER TABLE tmp SET TABLESPACE pg_default;
 
-starting permutation: create1 ins1_2 analyze1 used1 drop1 used1
+starting permutation: create1 ext_stats1 ins1_2 analyze1 used1 drop1 used1
 step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box);
+step ext_stats1: CREATE STATISTICS tmp2_stats ON key, val FROM tmp2;
 step ins1_2: INSERT INTO tmp2 VALUES (1, 's1');
 step analyze1: ANALYZE tmp2;
 step used1: 
@@ -462,19 +463,27 @@ step used1:
     FROM pg_gtrs_in_use()
    ORDER BY 1;
   SELECT count(*) FROM pg_temp_statistic;
+  SELECT count(*) FROM pg_temp_statistic_ext_data;
 
-regexp_replace                       
--------------------------------------
-pg_temp_statistic                    
-pg_temp_statistic_relid_att_inh_index
-pg_toast.pg_toast_NNN                
-pg_toast.pg_toast_NNN_index          
-tmp2                                 
-(5 rows)
+regexp_replace                             
+-------------------------------------------
+pg_temp_statistic                          
+pg_temp_statistic_ext_data                 
+pg_temp_statistic_ext_data_stxoid_inh_index
+pg_temp_statistic_relid_att_inh_index      
+pg_toast.pg_toast_NNN                      
+pg_toast.pg_toast_NNN_index                
+tmp2                                       
+(7 rows)
 
 count
 -----
     4
+(1 row)
+
+count
+-----
+    1
 (1 row)
 
 step drop1: DROP TABLE tmp2;
@@ -483,12 +492,20 @@ step used1:
     FROM pg_gtrs_in_use()
    ORDER BY 1;
   SELECT count(*) FROM pg_temp_statistic;
+  SELECT count(*) FROM pg_temp_statistic_ext_data;
 
-regexp_replace                       
--------------------------------------
-pg_temp_statistic                    
-pg_temp_statistic_relid_att_inh_index
-(2 rows)
+regexp_replace                             
+-------------------------------------------
+pg_temp_statistic                          
+pg_temp_statistic_ext_data                 
+pg_temp_statistic_ext_data_stxoid_inh_index
+pg_temp_statistic_relid_att_inh_index      
+(4 rows)
+
+count
+-----
+    0
+(1 row)
 
 count
 -----
@@ -496,8 +513,9 @@ count
 (1 row)
 
 
-starting permutation: create1 ins1_2 analyze1 used1 drop2 used1
+starting permutation: create1 ext_stats1 ins1_2 analyze1 used1 drop2 used1
 step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box);
+step ext_stats1: CREATE STATISTICS tmp2_stats ON key, val FROM tmp2;
 step ins1_2: INSERT INTO tmp2 VALUES (1, 's1');
 step analyze1: ANALYZE tmp2;
 step used1: 
@@ -505,19 +523,27 @@ step used1:
     FROM pg_gtrs_in_use()
    ORDER BY 1;
   SELECT count(*) FROM pg_temp_statistic;
+  SELECT count(*) FROM pg_temp_statistic_ext_data;
 
-regexp_replace                       
--------------------------------------
-pg_temp_statistic                    
-pg_temp_statistic_relid_att_inh_index
-pg_toast.pg_toast_NNN                
-pg_toast.pg_toast_NNN_index          
-tmp2                                 
-(5 rows)
+regexp_replace                             
+-------------------------------------------
+pg_temp_statistic                          
+pg_temp_statistic_ext_data                 
+pg_temp_statistic_ext_data_stxoid_inh_index
+pg_temp_statistic_relid_att_inh_index      
+pg_toast.pg_toast_NNN                      
+pg_toast.pg_toast_NNN_index                
+tmp2                                       
+(7 rows)
 
 count
 -----
     4
+(1 row)
+
+count
+-----
+    1
 (1 row)
 
 step drop2: DROP TABLE tmp2;
@@ -526,12 +552,20 @@ step used1:
     FROM pg_gtrs_in_use()
    ORDER BY 1;
   SELECT count(*) FROM pg_temp_statistic;
+  SELECT count(*) FROM pg_temp_statistic_ext_data;
 
-regexp_replace                       
--------------------------------------
-pg_temp_statistic                    
-pg_temp_statistic_relid_att_inh_index
-(2 rows)
+regexp_replace                             
+-------------------------------------------
+pg_temp_statistic                          
+pg_temp_statistic_ext_data                 
+pg_temp_statistic_ext_data_stxoid_inh_index
+pg_temp_statistic_relid_att_inh_index      
+(4 rows)
+
+count
+-----
+    0
+(1 row)
 
 count
 -----
@@ -539,8 +573,9 @@ count
 (1 row)
 
 
-starting permutation: create1 ins1_2 analyze1 used1 b1 drop2 used1 r1 used1
+starting permutation: create1 ext_stats1 ins1_2 analyze1 used1 b1 drop2 used1 r1 used1
 step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box);
+step ext_stats1: CREATE STATISTICS tmp2_stats ON key, val FROM tmp2;
 step ins1_2: INSERT INTO tmp2 VALUES (1, 's1');
 step analyze1: ANALYZE tmp2;
 step used1: 
@@ -548,19 +583,27 @@ step used1:
     FROM pg_gtrs_in_use()
    ORDER BY 1;
   SELECT count(*) FROM pg_temp_statistic;
+  SELECT count(*) FROM pg_temp_statistic_ext_data;
 
-regexp_replace                       
--------------------------------------
-pg_temp_statistic                    
-pg_temp_statistic_relid_att_inh_index
-pg_toast.pg_toast_NNN                
-pg_toast.pg_toast_NNN_index          
-tmp2                                 
-(5 rows)
+regexp_replace                             
+-------------------------------------------
+pg_temp_statistic                          
+pg_temp_statistic_ext_data                 
+pg_temp_statistic_ext_data_stxoid_inh_index
+pg_temp_statistic_relid_att_inh_index      
+pg_toast.pg_toast_NNN                      
+pg_toast.pg_toast_NNN_index                
+tmp2                                       
+(7 rows)
 
 count
 -----
     4
+(1 row)
+
+count
+-----
+    1
 (1 row)
 
 step b1: BEGIN;
@@ -570,12 +613,20 @@ step used1:
     FROM pg_gtrs_in_use()
    ORDER BY 1;
   SELECT count(*) FROM pg_temp_statistic;
+  SELECT count(*) FROM pg_temp_statistic_ext_data;
 
-regexp_replace                       
--------------------------------------
-pg_temp_statistic                    
-pg_temp_statistic_relid_att_inh_index
-(2 rows)
+regexp_replace                             
+-------------------------------------------
+pg_temp_statistic                          
+pg_temp_statistic_ext_data                 
+pg_temp_statistic_ext_data_stxoid_inh_index
+pg_temp_statistic_relid_att_inh_index      
+(4 rows)
+
+count
+-----
+    0
+(1 row)
 
 count
 -----
@@ -588,12 +639,20 @@ step used1:
     FROM pg_gtrs_in_use()
    ORDER BY 1;
   SELECT count(*) FROM pg_temp_statistic;
+  SELECT count(*) FROM pg_temp_statistic_ext_data;
 
-regexp_replace                       
--------------------------------------
-pg_temp_statistic                    
-pg_temp_statistic_relid_att_inh_index
-(2 rows)
+regexp_replace                             
+-------------------------------------------
+pg_temp_statistic                          
+pg_temp_statistic_ext_data                 
+pg_temp_statistic_ext_data_stxoid_inh_index
+pg_temp_statistic_relid_att_inh_index      
+(4 rows)
+
+count
+-----
+    0
+(1 row)
 
 count
 -----
@@ -601,8 +660,9 @@ count
 (1 row)
 
 
-starting permutation: create1 ins1_2 analyze1 b1 used1 sp1 drop2 used1 rsp1 used1 r1 used1
+starting permutation: create1 ext_stats1 ins1_2 analyze1 b1 used1 sp1 drop2 used1 rsp1 used1 r1 used1
 step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box);
+step ext_stats1: CREATE STATISTICS tmp2_stats ON key, val FROM tmp2;
 step ins1_2: INSERT INTO tmp2 VALUES (1, 's1');
 step analyze1: ANALYZE tmp2;
 step b1: BEGIN;
@@ -611,19 +671,27 @@ step used1:
     FROM pg_gtrs_in_use()
    ORDER BY 1;
   SELECT count(*) FROM pg_temp_statistic;
+  SELECT count(*) FROM pg_temp_statistic_ext_data;
 
-regexp_replace                       
--------------------------------------
-pg_temp_statistic                    
-pg_temp_statistic_relid_att_inh_index
-pg_toast.pg_toast_NNN                
-pg_toast.pg_toast_NNN_index          
-tmp2                                 
-(5 rows)
+regexp_replace                             
+-------------------------------------------
+pg_temp_statistic                          
+pg_temp_statistic_ext_data                 
+pg_temp_statistic_ext_data_stxoid_inh_index
+pg_temp_statistic_relid_att_inh_index      
+pg_toast.pg_toast_NNN                      
+pg_toast.pg_toast_NNN_index                
+tmp2                                       
+(7 rows)
 
 count
 -----
     4
+(1 row)
+
+count
+-----
+    1
 (1 row)
 
 step sp1: SAVEPOINT sp;
@@ -633,12 +701,20 @@ step used1:
     FROM pg_gtrs_in_use()
    ORDER BY 1;
   SELECT count(*) FROM pg_temp_statistic;
+  SELECT count(*) FROM pg_temp_statistic_ext_data;
 
-regexp_replace                       
--------------------------------------
-pg_temp_statistic                    
-pg_temp_statistic_relid_att_inh_index
-(2 rows)
+regexp_replace                             
+-------------------------------------------
+pg_temp_statistic                          
+pg_temp_statistic_ext_data                 
+pg_temp_statistic_ext_data_stxoid_inh_index
+pg_temp_statistic_relid_att_inh_index      
+(4 rows)
+
+count
+-----
+    0
+(1 row)
 
 count
 -----
@@ -651,12 +727,20 @@ step used1:
     FROM pg_gtrs_in_use()
    ORDER BY 1;
   SELECT count(*) FROM pg_temp_statistic;
+  SELECT count(*) FROM pg_temp_statistic_ext_data;
 
-regexp_replace                       
--------------------------------------
-pg_temp_statistic                    
-pg_temp_statistic_relid_att_inh_index
-(2 rows)
+regexp_replace                             
+-------------------------------------------
+pg_temp_statistic                          
+pg_temp_statistic_ext_data                 
+pg_temp_statistic_ext_data_stxoid_inh_index
+pg_temp_statistic_relid_att_inh_index      
+(4 rows)
+
+count
+-----
+    0
+(1 row)
 
 count
 -----
@@ -669,12 +753,20 @@ step used1:
     FROM pg_gtrs_in_use()
    ORDER BY 1;
   SELECT count(*) FROM pg_temp_statistic;
+  SELECT count(*) FROM pg_temp_statistic_ext_data;
 
-regexp_replace                       
--------------------------------------
-pg_temp_statistic                    
-pg_temp_statistic_relid_att_inh_index
-(2 rows)
+regexp_replace                             
+-------------------------------------------
+pg_temp_statistic                          
+pg_temp_statistic_ext_data                 
+pg_temp_statistic_ext_data_stxoid_inh_index
+pg_temp_statistic_relid_att_inh_index      
+(4 rows)
+
+count
+-----
+    0
+(1 row)
 
 count
 -----
