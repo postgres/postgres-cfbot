@@ -1,0 +1,317 @@
+LOAD 'pg_plan_advice';
+SET max_parallel_workers_per_gather = 0;
+CREATE TABLE no_join_dim (id serial primary key, dim text)
+	WITH (autovacuum_enabled = false);
+INSERT INTO no_join_dim (dim) SELECT random()::text FROM generate_series(1,100) g;
+VACUUM ANALYZE no_join_dim;
+CREATE TABLE no_join_fact (
+	id int primary key,
+	dim_id integer not null references no_join_dim (id)
+) WITH (autovacuum_enabled = false);
+INSERT INTO no_join_fact
+	SELECT g, (g%3)+1 FROM generate_series(1,100000) g;
+CREATE INDEX no_join_fact_dim_id ON no_join_fact (dim_id);
+VACUUM ANALYZE no_join_fact;
+-- Baseline: hash join with d on the inner side.
+EXPLAIN (COSTS OFF, PLAN_ADVICE)
+	SELECT * FROM no_join_fact f JOIN no_join_dim d ON f.dim_id = d.id;
+              QUERY PLAN               
+---------------------------------------
+ Hash Join
+   Hash Cond: (f.dim_id = d.id)
+   ->  Seq Scan on no_join_fact f
+   ->  Hash
+         ->  Seq Scan on no_join_dim d
+ Generated Plan Advice:
+   JOIN_ORDER(f d)
+   HASH_JOIN(d)
+   SEQ_SCAN(f d)
+   NO_GATHER(f d)
+(10 rows)
+
+-- NO_HASH_JOIN(d): d stays inner, planner falls back to another method.
+BEGIN;
+SET LOCAL pg_plan_advice.advice = 'NO_HASH_JOIN(d)';
+EXPLAIN (COSTS OFF, PLAN_ADVICE)
+	SELECT * FROM no_join_fact f JOIN no_join_dim d ON f.dim_id = d.id;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Nested Loop
+   ->  Seq Scan on no_join_fact f
+   ->  Memoize
+         Cache Key: f.dim_id
+         Cache Mode: logical
+         ->  Index Scan using no_join_dim_pkey on no_join_dim d
+               Index Cond: (id = f.dim_id)
+ Supplied Plan Advice:
+   NO_HASH_JOIN(d) /* matched */
+ Generated Plan Advice:
+   JOIN_ORDER(f d)
+   NESTED_LOOP_MEMOIZE(d)
+   SEQ_SCAN(f)
+   INDEX_SCAN(d public.no_join_dim_pkey)
+   NO_GATHER(f d)
+(15 rows)
+
+COMMIT;
+-- NO_HASH_JOIN(f): the join-order constraint forces f to the inner side.
+BEGIN;
+SET LOCAL pg_plan_advice.advice = 'NO_HASH_JOIN(f)';
+EXPLAIN (COSTS OFF, PLAN_ADVICE)
+	SELECT * FROM no_join_fact f JOIN no_join_dim d ON f.dim_id = d.id;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Merge Join
+   Merge Cond: (d.id = f.dim_id)
+   ->  Index Scan using no_join_dim_pkey on no_join_dim d
+   ->  Index Scan using no_join_fact_dim_id on no_join_fact f
+ Supplied Plan Advice:
+   NO_HASH_JOIN(f) /* matched */
+ Generated Plan Advice:
+   JOIN_ORDER(d f)
+   MERGE_JOIN_PLAIN(f)
+   INDEX_SCAN(d public.no_join_dim_pkey f public.no_join_fact_dim_id)
+   NO_GATHER(f d)
+(11 rows)
+
+COMMIT;
+-- NO_NESTED_LOOP(f): f forced inner, all NL variants forbidden -> merge join.
+BEGIN;
+SET LOCAL pg_plan_advice.advice = 'NO_NESTED_LOOP(f)';
+EXPLAIN (COSTS OFF, PLAN_ADVICE)
+	SELECT * FROM no_join_fact f JOIN no_join_dim d ON f.dim_id = d.id;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Merge Join
+   Merge Cond: (d.id = f.dim_id)
+   ->  Index Scan using no_join_dim_pkey on no_join_dim d
+   ->  Index Scan using no_join_fact_dim_id on no_join_fact f
+ Supplied Plan Advice:
+   NO_NESTED_LOOP(f) /* matched */
+ Generated Plan Advice:
+   JOIN_ORDER(d f)
+   MERGE_JOIN_PLAIN(f)
+   INDEX_SCAN(d public.no_join_dim_pkey f public.no_join_fact_dim_id)
+   NO_GATHER(f d)
+(11 rows)
+
+COMMIT;
+-- NO_MERGE_JOIN(d): d already inner, hash join still allowed -> plan unchanged.
+BEGIN;
+SET LOCAL pg_plan_advice.advice = 'NO_MERGE_JOIN(d)';
+EXPLAIN (COSTS OFF, PLAN_ADVICE)
+	SELECT * FROM no_join_fact f JOIN no_join_dim d ON f.dim_id = d.id;
+              QUERY PLAN               
+---------------------------------------
+ Hash Join
+   Hash Cond: (f.dim_id = d.id)
+   ->  Seq Scan on no_join_fact f
+   ->  Hash
+         ->  Seq Scan on no_join_dim d
+ Supplied Plan Advice:
+   NO_MERGE_JOIN(d) /* matched */
+ Generated Plan Advice:
+   JOIN_ORDER(f d)
+   HASH_JOIN(d)
+   SEQ_SCAN(f d)
+   NO_GATHER(f d)
+(12 rows)
+
+COMMIT;
+-- Stacking: NO_HASH_JOIN(f) + NO_NESTED_LOOP(f) leaves only merge join.
+BEGIN;
+SET LOCAL pg_plan_advice.advice = 'NO_HASH_JOIN(f) NO_NESTED_LOOP(f)';
+EXPLAIN (COSTS OFF, PLAN_ADVICE)
+	SELECT * FROM no_join_fact f JOIN no_join_dim d ON f.dim_id = d.id;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Merge Join
+   Merge Cond: (d.id = f.dim_id)
+   ->  Index Scan using no_join_dim_pkey on no_join_dim d
+   ->  Index Scan using no_join_fact_dim_id on no_join_fact f
+ Supplied Plan Advice:
+   NO_HASH_JOIN(f) /* matched */
+   NO_NESTED_LOOP(f) /* matched */
+ Generated Plan Advice:
+   JOIN_ORDER(d f)
+   MERGE_JOIN_PLAIN(f)
+   INDEX_SCAN(d public.no_join_dim_pkey f public.no_join_fact_dim_id)
+   NO_GATHER(f d)
+(12 rows)
+
+COMMIT;
+-- Specific NO_ variants targeting d, already the inner side: forbidding any one
+-- NL or merge variant leaves hash join available, so the plan is unchanged.
+BEGIN;
+SET LOCAL pg_plan_advice.advice = 'NO_NESTED_LOOP_PLAIN(d)';
+EXPLAIN (COSTS OFF, PLAN_ADVICE)
+	SELECT * FROM no_join_fact f JOIN no_join_dim d ON f.dim_id = d.id;
+               QUERY PLAN                
+-----------------------------------------
+ Hash Join
+   Hash Cond: (f.dim_id = d.id)
+   ->  Seq Scan on no_join_fact f
+   ->  Hash
+         ->  Seq Scan on no_join_dim d
+ Supplied Plan Advice:
+   NO_NESTED_LOOP_PLAIN(d) /* matched */
+ Generated Plan Advice:
+   JOIN_ORDER(f d)
+   HASH_JOIN(d)
+   SEQ_SCAN(f d)
+   NO_GATHER(f d)
+(12 rows)
+
+SET LOCAL pg_plan_advice.advice = 'NO_NESTED_LOOP_MEMOIZE(d)';
+EXPLAIN (COSTS OFF, PLAN_ADVICE)
+	SELECT * FROM no_join_fact f JOIN no_join_dim d ON f.dim_id = d.id;
+                QUERY PLAN                 
+-------------------------------------------
+ Hash Join
+   Hash Cond: (f.dim_id = d.id)
+   ->  Seq Scan on no_join_fact f
+   ->  Hash
+         ->  Seq Scan on no_join_dim d
+ Supplied Plan Advice:
+   NO_NESTED_LOOP_MEMOIZE(d) /* matched */
+ Generated Plan Advice:
+   JOIN_ORDER(f d)
+   HASH_JOIN(d)
+   SEQ_SCAN(f d)
+   NO_GATHER(f d)
+(12 rows)
+
+SET LOCAL pg_plan_advice.advice = 'NO_NESTED_LOOP_MATERIALIZE(d)';
+EXPLAIN (COSTS OFF, PLAN_ADVICE)
+	SELECT * FROM no_join_fact f JOIN no_join_dim d ON f.dim_id = d.id;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Hash Join
+   Hash Cond: (f.dim_id = d.id)
+   ->  Seq Scan on no_join_fact f
+   ->  Hash
+         ->  Seq Scan on no_join_dim d
+ Supplied Plan Advice:
+   NO_NESTED_LOOP_MATERIALIZE(d) /* matched */
+ Generated Plan Advice:
+   JOIN_ORDER(f d)
+   HASH_JOIN(d)
+   SEQ_SCAN(f d)
+   NO_GATHER(f d)
+(12 rows)
+
+SET LOCAL pg_plan_advice.advice = 'NO_MERGE_JOIN_PLAIN(d)';
+EXPLAIN (COSTS OFF, PLAN_ADVICE)
+	SELECT * FROM no_join_fact f JOIN no_join_dim d ON f.dim_id = d.id;
+               QUERY PLAN               
+----------------------------------------
+ Hash Join
+   Hash Cond: (f.dim_id = d.id)
+   ->  Seq Scan on no_join_fact f
+   ->  Hash
+         ->  Seq Scan on no_join_dim d
+ Supplied Plan Advice:
+   NO_MERGE_JOIN_PLAIN(d) /* matched */
+ Generated Plan Advice:
+   JOIN_ORDER(f d)
+   HASH_JOIN(d)
+   SEQ_SCAN(f d)
+   NO_GATHER(f d)
+(12 rows)
+
+SET LOCAL pg_plan_advice.advice = 'NO_MERGE_JOIN_MATERIALIZE(d)';
+EXPLAIN (COSTS OFF, PLAN_ADVICE)
+	SELECT * FROM no_join_fact f JOIN no_join_dim d ON f.dim_id = d.id;
+                  QUERY PLAN                  
+----------------------------------------------
+ Hash Join
+   Hash Cond: (f.dim_id = d.id)
+   ->  Seq Scan on no_join_fact f
+   ->  Hash
+         ->  Seq Scan on no_join_dim d
+ Supplied Plan Advice:
+   NO_MERGE_JOIN_MATERIALIZE(d) /* matched */
+ Generated Plan Advice:
+   JOIN_ORDER(f d)
+   HASH_JOIN(d)
+   SEQ_SCAN(f d)
+   NO_GATHER(f d)
+(12 rows)
+
+COMMIT;
+-- Conflict: same method required and forbidden; both marked conflicting.
+BEGIN;
+SET LOCAL pg_plan_advice.advice = 'HASH_JOIN(f) NO_HASH_JOIN(f)';
+EXPLAIN (COSTS OFF, PLAN_ADVICE)
+	SELECT * FROM no_join_fact f JOIN no_join_dim d ON f.dim_id = d.id;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Merge Join
+   Merge Cond: (d.id = f.dim_id)
+   ->  Index Scan using no_join_dim_pkey on no_join_dim d
+   ->  Index Scan using no_join_fact_dim_id on no_join_fact f
+ Supplied Plan Advice:
+   HASH_JOIN(f) /* matched, conflicting, failed */
+   NO_HASH_JOIN(f) /* matched, conflicting */
+ Generated Plan Advice:
+   JOIN_ORDER(d f)
+   MERGE_JOIN_PLAIN(f)
+   INDEX_SCAN(d public.no_join_dim_pkey f public.no_join_fact_dim_id)
+   NO_GATHER(f d)
+(12 rows)
+
+COMMIT;
+-- No conflict: NO_HASH_JOIN(f) and a positive tag for a different method.
+BEGIN;
+SET LOCAL pg_plan_advice.advice = 'NO_HASH_JOIN(f) NESTED_LOOP_PLAIN(f)';
+EXPLAIN (COSTS OFF, PLAN_ADVICE)
+	SELECT * FROM no_join_fact f JOIN no_join_dim d ON f.dim_id = d.id;
+                          QUERY PLAN                          
+--------------------------------------------------------------
+ Nested Loop
+   ->  Seq Scan on no_join_dim d
+   ->  Index Scan using no_join_fact_dim_id on no_join_fact f
+         Index Cond: (dim_id = d.id)
+ Supplied Plan Advice:
+   NO_HASH_JOIN(f) /* matched */
+   NESTED_LOOP_PLAIN(f) /* matched */
+ Generated Plan Advice:
+   JOIN_ORDER(d f)
+   NESTED_LOOP_PLAIN(f)
+   SEQ_SCAN(d)
+   INDEX_SCAN(f public.no_join_fact_dim_id)
+   NO_GATHER(f d)
+(13 rows)
+
+COMMIT;
+-- A conflict on one method must not cancel enforcement of an unrelated NO_
+-- tag: MERGE_JOIN_PLAIN(d) conflicts with NO_MERGE_JOIN(d) here, but
+-- NO_HASH_JOIN(d) does not, so it still applies.
+BEGIN;
+SET LOCAL pg_plan_advice.advice = 'MERGE_JOIN_PLAIN(d) NO_MERGE_JOIN(d) NO_HASH_JOIN(d)';
+EXPLAIN (COSTS OFF, PLAN_ADVICE)
+	SELECT * FROM no_join_fact f JOIN no_join_dim d ON f.dim_id = d.id;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Nested Loop
+   ->  Seq Scan on no_join_fact f
+   ->  Memoize
+         Cache Key: f.dim_id
+         Cache Mode: logical
+         ->  Index Scan using no_join_dim_pkey on no_join_dim d
+               Index Cond: (id = f.dim_id)
+ Supplied Plan Advice:
+   MERGE_JOIN_PLAIN(d) /* matched, conflicting, failed */
+   NO_MERGE_JOIN(d) /* matched, conflicting */
+   NO_HASH_JOIN(d) /* matched */
+ Generated Plan Advice:
+   JOIN_ORDER(f d)
+   NESTED_LOOP_MEMOIZE(d)
+   SEQ_SCAN(f)
+   INDEX_SCAN(d public.no_join_dim_pkey)
+   NO_GATHER(f d)
+(17 rows)
+
+COMMIT;
+DROP TABLE no_join_fact;
+DROP TABLE no_join_dim;
