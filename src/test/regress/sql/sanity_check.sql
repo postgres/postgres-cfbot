@@ -39,3 +39,24 @@ WITH t1 AS (
 (SELECT * FROM t1 EXCEPT SELECT * FROM t2)
 UNION ALL
 (SELECT * FROM t2 EXCEPT SELECT * FROM t1);
+
+-- check that pg_statistic_ext_data and pg_temp_statistic_ext_data have the
+-- exact same columns
+WITH t1 AS (
+  SELECT attname, atttypid, attlen, attnum, atttypmod, attndims, attbyval,
+         attalign, attstorage, attcompression, attnotnull, atthasdef,
+         atthasmissing, attidentity, attgenerated, attisdropped, attislocal,
+         attinhcount, attcollation
+    FROM pg_attribute
+   WHERE attrelid = 'pg_statistic_ext_data'::regclass
+), t2 AS (
+  SELECT attname, atttypid, attlen, attnum, atttypmod, attndims, attbyval,
+         attalign, attstorage, attcompression, attnotnull, atthasdef,
+         atthasmissing, attidentity, attgenerated, attisdropped, attislocal,
+         attinhcount, attcollation
+    FROM pg_attribute
+   WHERE attrelid = 'pg_temp_statistic_ext_data'::regclass
+)
+(SELECT * FROM t1 EXCEPT SELECT * FROM t2)
+UNION ALL
+(SELECT * FROM t2 EXCEPT SELECT * FROM t1);

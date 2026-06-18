@@ -793,6 +793,77 @@ SELECT row_estimate('SELECT * FROM tmp2 WHERE b = 8');
 (1 row)
 
 DROP TABLE tmp2;
+-- Test extended stats
+CREATE GLOBAL TEMP TABLE tmp2 (a int, b int, c int);
+INSERT INTO tmp2
+  SELECT x, floor(sqrt(x)), floor(sqrt(x)) + 100 FROM generate_series(36, 99) x;
+CREATE STATISTICS tmp2_stats ON b, c FROM tmp2;
+ANALYZE tmp2;
+SELECT stxname,
+       replace(d.stxdndistinct, '}, ', E'},\n') AS stxdndistinct,
+       replace(d.stxddependencies, '}, ', E'},\n') AS stxddependencies
+  FROM pg_statistic_ext s
+  LEFT JOIN pg_statistic_ext_data d ON d.stxoid = s.oid
+ WHERE s.stxname = 'tmp2_stats';
+  stxname   | stxdndistinct | stxddependencies 
+------------+---------------+------------------
+ tmp2_stats |               | 
+(1 row)
+
+SELECT stxname,
+       replace(d.stxdndistinct, '}, ', E'},\n') AS stxdndistinct,
+       replace(d.stxddependencies, '}, ', E'},\n') AS stxddependencies
+  FROM pg_statistic_ext s
+  LEFT JOIN pg_temp_statistic_ext_data d ON d.stxoid = s.oid
+ WHERE s.stxname = 'tmp2_stats';
+  stxname   |              stxdndistinct               |                      stxddependencies                      
+------------+------------------------------------------+------------------------------------------------------------
+ tmp2_stats | [{"attributes": [2, 3], "ndistinct": 4}] | [{"attributes": [2], "dependency": 3, "degree": 1.000000},+
+            |                                          | {"attributes": [3], "dependency": 2, "degree": 1.000000}]
+(1 row)
+
+SELECT m.*
+  FROM pg_statistic_ext s, pg_statistic_ext_data d,
+       pg_mcv_list_items(d.stxdmcv) m
+ WHERE s.stxname = 'tmp2_stats'
+   AND d.stxoid = s.oid;
+ index | values | nulls | frequency | base_frequency 
+-------+--------+-------+-----------+----------------
+(0 rows)
+
+SELECT m.*
+  FROM pg_statistic_ext s, pg_temp_statistic_ext_data d,
+       pg_mcv_list_items(d.stxdmcv) m
+ WHERE s.stxname = 'tmp2_stats'
+   AND d.stxoid = s.oid;
+ index | values  | nulls | frequency | base_frequency 
+-------+---------+-------+-----------+----------------
+     0 | {9,109} | {f,f} |  0.296875 | 0.088134765625
+     1 | {8,108} | {f,f} |  0.265625 | 0.070556640625
+     2 | {7,107} | {f,f} |  0.234375 | 0.054931640625
+     3 | {6,106} | {f,f} |  0.203125 | 0.041259765625
+(4 rows)
+
+SELECT most_common_vals FROM pg_stats_ext
+ WHERE schemaname = 'global_temp_tests' AND tablename = 'tmp2';
+         most_common_vals          
+-----------------------------------
+ {{9,109},{8,108},{7,107},{6,106}}
+(1 row)
+
+SELECT COUNT(*) FROM tmp2 WHERE b = 8 AND c = 108;
+ count 
+-------
+    17
+(1 row)
+
+SELECT row_estimate('SELECT * FROM tmp2 WHERE b = 8 AND c = 108');
+ row_estimate 
+--------------
+           17
+(1 row)
+
+DROP TABLE tmp2;
 -- Test view creation
 CREATE VIEW v AS SELECT * FROM tmp1;
 SELECT * FROM v;

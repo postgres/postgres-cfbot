@@ -37,10 +37,12 @@ step alter1g { ALTER TABLE tmp2 ADD CONSTRAINT tmp2_fk FOREIGN KEY (icol) REFERE
 step alter1h { ALTER TABLE tmp2 ADD CONSTRAINT tmp2_ex EXCLUDE USING gist (bcol WITH &&); }
 step uniq_idx1 { CREATE UNIQUE INDEX tmp2_un ON tmp2(val); }
 step seltype1 { SELECT key, pg_typeof(key), val FROM tmp2; }
+step ext_stats1 { CREATE STATISTICS tmp2_stats ON key, val FROM tmp2; }
 step analyze1 { ANALYZE tmp2; }
 step cat1 {
   SELECT (SELECT count(*) FROM pg_temp_class WHERE oid >= 12000),
-         (SELECT count(*) FROM pg_temp_statistic);
+         (SELECT count(*) FROM pg_temp_statistic),
+         (SELECT count(*) FROM pg_temp_statistic_ext_data);
 }
 step r1 { ROLLBACK; }
 step sp1 { SAVEPOINT sp; }
@@ -149,10 +151,10 @@ permutation ins1 ins2 t2 sel1 sel2 ins2 t1 sel1 sel2 ins1 t2 sel1 sel2
 permutation ins1 ins2 alt_tblspace get_tblspace1 get_tblspace2 sel1 sel2 reset_tblspace
 
 # Test global temp catalog tidy-up after DROP
-permutation create1 ins1_2 analyze1 cat1 drop1 cat1
-permutation create1 ins1_2 analyze1 cat1 drop2 cat1
-permutation create1 ins1_2 analyze1 cat1 b1 drop2 cat1 r1 cat1
-permutation create1 ins1_2 analyze1 b1 cat1 sp1 drop2 cat1 rsp1 cat1 r1 cat1
+permutation create1 ext_stats1 ins1_2 analyze1 cat1 drop1 cat1
+permutation create1 ext_stats1 ins1_2 analyze1 cat1 drop2 cat1
+permutation create1 ext_stats1 ins1_2 analyze1 cat1 b1 drop2 cat1 r1 cat1
+permutation create1 ext_stats1 ins1_2 analyze1 b1 cat1 sp1 drop2 cat1 rsp1 cat1 r1 cat1
 
 # Tidy up
 permutation drop_tblspace list_tblspaces

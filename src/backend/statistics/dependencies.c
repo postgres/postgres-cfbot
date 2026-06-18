@@ -684,20 +684,23 @@ dependency_is_fully_matched(MVDependency *dependency, Bitmapset *attnums)
  *		Load the functional dependencies for the indicated pg_statistic_ext tuple
  */
 MVDependencies *
-statext_dependencies_load(Oid mvoid, bool inh)
+statext_dependencies_load(Oid relid, Oid mvoid, bool inh)
 {
+	SysCacheIdentifier cacheId;
 	MVDependencies *result;
 	bool		isnull;
 	Datum		deps;
 	HeapTuple	htup;
 
-	htup = SearchSysCache2(STATEXTDATASTXOID,
+	cacheId = rel_is_global_temp(relid) ? TEMPSTATEXTDATASTXOID : STATEXTDATASTXOID;
+
+	htup = SearchSysCache2(cacheId,
 						   ObjectIdGetDatum(mvoid),
 						   BoolGetDatum(inh));
 	if (!HeapTupleIsValid(htup))
 		elog(ERROR, "cache lookup failed for statistics object %u", mvoid);
 
-	deps = SysCacheGetAttr(STATEXTDATASTXOID, htup,
+	deps = SysCacheGetAttr(cacheId, htup,
 						   Anum_pg_statistic_ext_data_stxddependencies, &isnull);
 	if (isnull)
 		elog(ERROR,
@@ -1604,7 +1607,7 @@ dependencies_clauselist_selectivity(PlannerInfo *root,
 		if (nmatched + nexprs < 2)
 			continue;
 
-		deps = statext_dependencies_load(stat->statOid, rte->inh);
+		deps = statext_dependencies_load(rte->relid, stat->statOid, rte->inh);
 
 		/*
 		 * The expressions may be represented by different attnums in the

@@ -4641,10 +4641,13 @@ SELECT * FROM pg_locks pl LEFT JOIN pg_prepared_xacts ppx
    The view <structname>pg_stats_ext</structname> provides access to
    information about each extended statistics object in the database,
    combining information stored in the <link
-   linkend="catalog-pg-statistic-ext"><structname>pg_statistic_ext</structname></link>
-   and <link linkend="catalog-pg-statistic-ext-data"><structname>pg_statistic_ext_data</structname></link>
+   linkend="catalog-pg-statistic-ext"><structname>pg_statistic_ext</structname></link>,
+   <link linkend="catalog-pg-statistic-ext-data"><structname>pg_statistic_ext_data</structname></link>, and
+   <link linkend="catalog-pg-temp-statistic-ext-data"><structname>pg_temp_statistic_ext_data</structname></link>
    catalogs.  This view allows access only to rows of
-   <link linkend="catalog-pg-statistic-ext"><structname>pg_statistic_ext</structname></link> and <link linkend="catalog-pg-statistic-ext-data"><structname>pg_statistic_ext_data</structname></link>
+   <link linkend="catalog-pg-statistic-ext"><structname>pg_statistic_ext</structname></link>,
+   <link linkend="catalog-pg-statistic-ext-data"><structname>pg_statistic_ext_data</structname></link>, and
+   <link linkend="catalog-pg-temp-statistic-ext-data"><structname>pg_temp_statistic_ext_data</structname></link>
    that correspond to tables the user owns, and therefore
    it is safe to allow public read access to this view.
   </para>
@@ -4772,7 +4775,8 @@ SELECT * FROM pg_locks pl LEFT JOIN pg_prepared_xacts ppx
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
        <structfield>inherited</structfield> <type>bool</type>
-       (references <link linkend="catalog-pg-statistic-ext-data"><structname>pg_statistic_ext_data</structname></link>.<structfield>stxdinherit</structfield>)
+       (references <link linkend="catalog-pg-statistic-ext-data"><structname>pg_statistic_ext_data</structname></link>.<structfield>stxdinherit</structfield> or
+       <link linkend="catalog-pg-temp-statistic-ext-data"><structname>pg_temp_statistic_ext_data</structname></link>.<structfield>stxdinherit</structfield>)
       </para>
       <para>
        If true, the stats include values from child tables, not just the
@@ -4872,10 +4876,13 @@ SELECT * FROM pg_locks pl LEFT JOIN pg_prepared_xacts ppx
    The view <structname>pg_stats_ext_exprs</structname> provides access to
    information about all expressions included in extended statistics objects,
    combining information stored in the <link
-   linkend="catalog-pg-statistic-ext"><structname>pg_statistic_ext</structname></link>
-   and <link linkend="catalog-pg-statistic-ext-data"><structname>pg_statistic_ext_data</structname></link>
+   linkend="catalog-pg-statistic-ext"><structname>pg_statistic_ext</structname></link>,
+   <link linkend="catalog-pg-statistic-ext-data"><structname>pg_statistic_ext_data</structname></link>, and
+   <link linkend="catalog-pg-temp-statistic-ext-data"><structname>pg_temp_statistic_ext_data</structname></link>
    catalogs.  This view allows access only to rows of
-   <link linkend="catalog-pg-statistic-ext"><structname>pg_statistic_ext</structname></link> and <link linkend="catalog-pg-statistic-ext-data"><structname>pg_statistic_ext_data</structname></link>
+   <link linkend="catalog-pg-statistic-ext"><structname>pg_statistic_ext</structname></link>,
+   <link linkend="catalog-pg-statistic-ext-data"><structname>pg_statistic_ext_data</structname></link>, and
+   <link linkend="catalog-pg-temp-statistic-ext-data"><structname>pg_temp_statistic_ext_data</structname></link>
    that correspond to tables the user owns, and therefore
    it is safe to allow public read access to this view.
   </para>
@@ -4984,7 +4991,8 @@ SELECT * FROM pg_locks pl LEFT JOIN pg_prepared_xacts ppx
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
        <structfield>inherited</structfield> <type>bool</type>
-       (references <link linkend="catalog-pg-statistic-ext-data"><structname>pg_statistic_ext_data</structname></link>.<structfield>stxdinherit</structfield>)
+       (references <link linkend="catalog-pg-statistic-ext-data"><structname>pg_statistic_ext_data</structname></link>.<structfield>stxdinherit</structfield> or
+       <link linkend="catalog-pg-temp-statistic-ext-data"><structname>pg_temp_statistic_ext_data</structname></link>.<structfield>stxdinherit</structfield>)
       </para>
       <para>
        If true, the stats include values from child tables, not just the
