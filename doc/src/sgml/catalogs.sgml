@@ -356,6 +356,11 @@
      </row>
 
      <row>
+      <entry><link linkend="catalog-pg-temp-statistic"><structname>pg_temp_statistic</structname></link></entry>
+      <entry>planner statistics for global temporary relations</entry>
+     </row>
+
+     <row>
       <entry><link linkend="catalog-pg-transform"><structname>pg_transform</structname></link></entry>
       <entry>transforms (data type to procedural language conversions)</entry>
      </row>
@@ -8173,6 +8178,16 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
    about those tables that are readable by the current user.
   </para>
 
+  <para>
+   Statistical data about global temporary relations is stored in
+   <link linkend="catalog-pg-temp-statistic"><structname>pg_temp_statistic</structname></link>,
+   instead of <structname>pg_statistic</structname>, because the contents of
+   global temporary relations can vary greatly between different sessions,
+   and so the statistical data needs to be local to each session
+   (<structname>pg_temp_statistic</structname> is itself a global temporary
+   table).
+  </para>
+
   <table>
    <title><structname>pg_statistic</structname> Columns</title>
    <tgroup cols="1">
@@ -9251,6 +9266,40 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
     temporary relations that have been used in the current session.
    </para>
   </note>
+ </sect1>
+
+
+ <sect1 id="catalog-pg-temp-statistic">
+  <title><structname>pg_temp_statistic</structname></title>
+
+  <indexterm zone="catalog-pg-temp-statistic">
+   <primary>pg_temp_statistic</primary>
+  </indexterm>
+
+  <para>
+   The catalog <structname>pg_temp_statistic</structname> is a global
+   temporary table that stores statistical data about the contents of global
+   temporary relations in the database.  Entries are created by
+   <link linkend="sql-analyze"><command>ANALYZE</command></link>
+   and subsequently used by the query planner.
+  </para>
+
+  <para>
+   <structname>pg_temp_statistic</structname> has the same columns as
+   <structname>pg_statistic</structname>, and its contents are created and
+   used by the planner in exactly the same way, except that they are local to
+   the current session, and are automatically deleted when the session exits.
+   Therefore, each session should run
+   <link linkend="sql-analyze"><command>ANALYZE</command></link> to create
+   its own statistical data about the contents of global temporary relations
+   used by the session.
+  </para>
+
+  <para>
+   For more information about the table structure, and how its contents are
+   interpreted, see
+   <link linkend="catalog-pg-statistic"><structname>pg_statistic</structname></link>.
+  </para>
  </sect1>
 
 

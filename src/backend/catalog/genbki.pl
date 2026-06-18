@@ -801,6 +801,7 @@ print $syscache_ids_fh "#ifndef SYSCACHE_IDS_H
 #define SYSCACHE_IDS_H
 
 #include \"catalog/pg_temp_class_d.h\"
+#include \"catalog/pg_temp_statistic_d.h\"
 
 typedef enum SysCacheIdentifier
 {

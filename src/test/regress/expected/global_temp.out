@@ -88,11 +88,13 @@ SELECT * FROM tmp1;
 \c
 SET search_path = global_temp_tests;
 SELECT oid::regclass FROM pg_temp_class ORDER BY 1;
-           oid           
--------------------------
+                  oid                  
+---------------------------------------
  pg_temp_class
  pg_temp_class_oid_index
-(2 rows)
+ pg_temp_statistic
+ pg_temp_statistic_relid_att_inh_index
+(4 rows)
 
 SELECT * FROM tmp1;
  a | b | c 
@@ -100,13 +102,15 @@ SELECT * FROM tmp1;
 (0 rows)
 
 SELECT oid::regclass FROM pg_temp_class ORDER BY 1;
-           oid           
--------------------------
+                  oid                  
+---------------------------------------
  pg_temp_class
  pg_temp_class_oid_index
+ pg_temp_statistic
+ pg_temp_statistic_relid_att_inh_index
  tmp1
  tmp1_pkey
-(4 rows)
+(6 rows)
 
 -- Test pg_relation_filenode() matches global relfilenode
 SELECT relfilenode = pg_relation_filenode('tmp1'::regclass) AS ok
@@ -527,14 +531,16 @@ ROLLBACK TO sp;
 INSERT INTO tmp1 VALUES (1, 'xxx');
 COMMIT;
 SELECT oid::regclass FROM pg_temp_class ORDER BY 1;
-           oid           
--------------------------
+                  oid                  
+---------------------------------------
  pg_temp_class
  pg_temp_class_oid_index
+ pg_temp_statistic
+ pg_temp_statistic_relid_att_inh_index
  tmp1_c_seq
  tmp1
  tmp1_pkey
-(5 rows)
+(7 rows)
 
 SELECT * FROM tmp1;
  a |  b  | c 
@@ -747,6 +753,43 @@ SELECT oid::regclass, relpages, reltuples, relallvisible, relallfrozen
  oid  | relpages | reltuples | relallvisible | relallfrozen 
 ------+----------+-----------+---------------+--------------
  tmp2 |        5 |       150 |            10 |           20
+(1 row)
+
+DROP TABLE tmp2;
+-- Test column stats
+CREATE GLOBAL TEMP TABLE tmp2 (a int, b int);
+INSERT INTO tmp2 SELECT x, floor(sqrt(x)) FROM generate_series(36, 99) x;
+ANALYZE tmp2;
+SELECT stavalues1 FROM pg_statistic
+ WHERE starelid = 'tmp2'::regclass AND staattnum = 2;
+ stavalues1 
+------------
+(0 rows)
+
+SELECT stavalues1 FROM pg_temp_statistic
+ WHERE starelid = 'tmp2'::regclass AND staattnum = 2;
+ stavalues1 
+------------
+ {9,8,7,6}
+(1 row)
+
+SELECT most_common_vals FROM pg_stats
+ WHERE tablename = 'tmp2' AND attname = 'b';
+ most_common_vals 
+------------------
+ {9,8,7,6}
+(1 row)
+
+SELECT COUNT(*) FROM tmp2 WHERE b = 8;
+ count 
+-------
+    17
+(1 row)
+
+SELECT row_estimate('SELECT * FROM tmp2 WHERE b = 8');
+ row_estimate 
+--------------
+           17
 (1 row)
 
 DROP TABLE tmp2;
