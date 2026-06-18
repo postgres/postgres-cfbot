@@ -909,7 +909,7 @@ DROP TABLE hi_partpred;
 -- of column b build a chain whose prune reclaims the members whose change was
 -- superseded (a changed again) and keeps stubs for those that were not, so a
 -- root redirect ends up pointing at a stub and a later walk crosses mid-chain
--- stubs.  Reads through each index must stay correct across the
+-- stubs.  Reads through each index and amcheck must stay correct across the
 -- collapse, and a second round must walk the existing stubs without severing
 -- the chain.
 -- ---------------------------------------------------------------------------
@@ -928,10 +928,12 @@ SELECT id, a, b FROM hi_stubmix WHERE b = 101;  -- current b
 SELECT id FROM hi_stubmix WHERE a = 10;         -- stale a: 0 rows
 RESET enable_bitmapscan;
 RESET enable_seqscan;
+SELECT * FROM verify_heapam('hi_stubmix');      -- no corruption across stubs
 -- A second round must walk the existing stubs (no priorXmax sever).
 UPDATE hi_stubmix SET a = 13 WHERE id = 1;
 VACUUM hi_stubmix;
 SELECT id, a, b FROM hi_stubmix WHERE a = 13;
+SELECT * FROM verify_heapam('hi_stubmix');
 DROP TABLE hi_stubmix;
 
 -- ---------------------------------------------------------------------------
