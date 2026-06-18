@@ -187,6 +187,11 @@ CREATE VIEW pg_sequences AS
     WHERE NOT pg_is_other_temp_schema(N.oid)
           AND relkind = 'S';
 
+CREATE VIEW pg_all_statistic AS
+    SELECT * FROM pg_statistic
+    UNION ALL
+    SELECT * FROM pg_temp_statistic;
+
 CREATE VIEW pg_stats WITH (security_barrier) AS
     SELECT
         nspname AS schemaname,
@@ -268,7 +273,7 @@ CREATE VIEW pg_stats WITH (security_barrier) AS
             WHEN stakind4 = 7 THEN stavalues4
             WHEN stakind5 = 7 THEN stavalues5
             END AS range_bounds_histogram
-    FROM pg_statistic s JOIN pg_class c ON (c.oid = s.starelid)
+    FROM pg_all_statistic s JOIN pg_class c ON (c.oid = s.starelid)
          JOIN pg_attribute a ON (c.oid = attrelid AND attnum = s.staattnum)
          LEFT JOIN pg_namespace n ON (n.oid = c.relnamespace)
     WHERE NOT attisdropped
@@ -276,6 +281,8 @@ CREATE VIEW pg_stats WITH (security_barrier) AS
     AND (c.relrowsecurity = false OR NOT row_security_active(c.oid));
 
 REVOKE ALL ON pg_statistic FROM public;
+REVOKE ALL ON pg_temp_statistic FROM public;
+REVOKE ALL ON pg_all_statistic FROM public;
 
 CREATE VIEW pg_stats_ext WITH (security_barrier) AS
     SELECT cn.nspname AS schemaname,
