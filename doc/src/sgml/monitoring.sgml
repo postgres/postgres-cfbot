@@ -4620,6 +4620,19 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>n_tup_hot_indexed_upd</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of rows updated using the HOT-indexed path: the successor
+       version stays on the same page as a heap-only tuple even though it
+       changed one or more indexed columns, and only the affected indexes
+       receive a new entry.  Every such update is also counted in
+       <structfield>n_tup_hot_upd</structfield>.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
        <structfield>n_tup_newpage_upd</structfield> <type>bigint</type>
       </para>
       <para>
@@ -5085,6 +5098,27 @@ description | Waiting for a newly initialized WAL file to reach durable storage
       <para>
        Number of live table rows fetched by simple index scans using this
        index
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>n_tup_hot_indexed_upd_matched</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of HOT-indexed updates that inserted a new entry into this
+       index (the update changed one of this index's attributes)
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>n_tup_hot_indexed_upd_skipped</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of HOT-indexed updates that skipped this index (the update
+       changed no attribute of this index, so its existing entry continues
+       to resolve the HOT chain)
       </para></entry>
      </row>
 
@@ -5769,6 +5803,29 @@ description | Waiting for a newly initialized WAL file to reach durable storage
      </thead>
 
      <tbody>
+      <row>
+       <entry id="pg-relation-hot-indexed-stats" role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>pg_relation_hot_indexed_stats</primary>
+        </indexterm>
+        <function>pg_relation_hot_indexed_stats</function> ( <parameter>relation</parameter> <type>regclass</type> )
+        <returnvalue>record</returnvalue>
+        ( <parameter>n_hot_indexed</parameter> <type>bigint</type>,
+        <parameter>n_chains</parameter> <type>bigint</type>,
+        <parameter>avg_chain_len</parameter> <type>double precision</type>,
+        <parameter>max_chain_len</parameter> <type>bigint</type> )
+       </para>
+       <para>
+        Reports HOT-indexed structural statistics for a table by scanning
+        every page under <literal>AccessShareLock</literal>:
+        <parameter>n_hot_indexed</parameter> is the number of live
+        HOT-indexed tuple versions present, and
+        <parameter>n_chains</parameter>, <parameter>avg_chain_len</parameter>
+        and <parameter>max_chain_len</parameter> describe the HOT-indexed
+        chains.  Intended for diagnostics.
+       </para></entry>
+      </row>
+
       <row>
        <!-- See also the entry for this in func.sgml -->
        <entry role="func_table_entry"><para role="func_signature">

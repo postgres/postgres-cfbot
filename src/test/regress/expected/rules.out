@@ -1810,6 +1810,8 @@ pg_stat_all_indexes| SELECT c.oid AS relid,
     pg_stat_get_idx_lastscan(i.oid) AS last_idx_scan,
     pg_stat_get_idx_tuples_returned(i.oid) AS idx_tup_read,
     pg_stat_get_idx_tuples_fetched(i.oid) AS idx_tup_fetch,
+    pg_stat_get_tuples_hot_indexed_updated_skipped(i.oid) AS n_tup_hot_indexed_upd_skipped,
+    pg_stat_get_tuples_hot_indexed_updated_matched(i.oid) AS n_tup_hot_indexed_upd_matched,
     pg_stat_get_idx_stat_reset_time(i.oid) AS stats_reset
    FROM (((pg_class c
      JOIN pg_index x ON ((c.oid = x.indrelid)))
@@ -1829,6 +1831,7 @@ pg_stat_all_tables| SELECT c.oid AS relid,
     pg_stat_get_tuples_updated(c.oid) AS n_tup_upd,
     pg_stat_get_tuples_deleted(c.oid) AS n_tup_del,
     pg_stat_get_tuples_hot_updated(c.oid) AS n_tup_hot_upd,
+    pg_stat_get_tuples_hot_indexed_updated(c.oid) AS n_tup_hot_indexed_upd,
     pg_stat_get_tuples_newpage_updated(c.oid) AS n_tup_newpage_upd,
     pg_stat_get_live_tuples(c.oid) AS n_live_tup,
     pg_stat_get_dead_tuples(c.oid) AS n_dead_tup,
@@ -2339,6 +2342,8 @@ pg_stat_sys_indexes| SELECT relid,
     last_idx_scan,
     idx_tup_read,
     idx_tup_fetch,
+    n_tup_hot_indexed_upd_skipped,
+    n_tup_hot_indexed_upd_matched,
     stats_reset
    FROM pg_stat_all_indexes
   WHERE ((schemaname = ANY (ARRAY['pg_catalog'::name, 'information_schema'::name])) OR (schemaname ~ '^pg_toast'::text));
@@ -2355,6 +2360,7 @@ pg_stat_sys_tables| SELECT relid,
     n_tup_upd,
     n_tup_del,
     n_tup_hot_upd,
+    n_tup_hot_indexed_upd,
     n_tup_newpage_upd,
     n_live_tup,
     n_dead_tup,
@@ -2394,6 +2400,8 @@ pg_stat_user_indexes| SELECT relid,
     last_idx_scan,
     idx_tup_read,
     idx_tup_fetch,
+    n_tup_hot_indexed_upd_skipped,
+    n_tup_hot_indexed_upd_matched,
     stats_reset
    FROM pg_stat_all_indexes
   WHERE ((schemaname <> ALL (ARRAY['pg_catalog'::name, 'information_schema'::name])) AND (schemaname !~ '^pg_toast'::text));
@@ -2410,6 +2418,7 @@ pg_stat_user_tables| SELECT relid,
     n_tup_upd,
     n_tup_del,
     n_tup_hot_upd,
+    n_tup_hot_indexed_upd,
     n_tup_newpage_upd,
     n_live_tup,
     n_dead_tup,
@@ -2465,6 +2474,7 @@ pg_stat_xact_all_tables| SELECT c.oid AS relid,
     pg_stat_get_xact_tuples_updated(c.oid) AS n_tup_upd,
     pg_stat_get_xact_tuples_deleted(c.oid) AS n_tup_del,
     pg_stat_get_xact_tuples_hot_updated(c.oid) AS n_tup_hot_upd,
+    pg_stat_get_xact_tuples_hot_indexed_updated(c.oid) AS n_tup_hot_indexed_upd,
     pg_stat_get_xact_tuples_newpage_updated(c.oid) AS n_tup_newpage_upd
    FROM ((pg_class c
      LEFT JOIN pg_index i ON ((c.oid = i.indrelid)))
@@ -2482,6 +2492,7 @@ pg_stat_xact_sys_tables| SELECT relid,
     n_tup_upd,
     n_tup_del,
     n_tup_hot_upd,
+    n_tup_hot_indexed_upd,
     n_tup_newpage_upd
    FROM pg_stat_xact_all_tables
   WHERE ((schemaname = ANY (ARRAY['pg_catalog'::name, 'information_schema'::name])) OR (schemaname ~ '^pg_toast'::text));
@@ -2505,6 +2516,7 @@ pg_stat_xact_user_tables| SELECT relid,
     n_tup_upd,
     n_tup_del,
     n_tup_hot_upd,
+    n_tup_hot_indexed_upd,
     n_tup_newpage_upd
    FROM pg_stat_xact_all_tables
   WHERE ((schemaname <> ALL (ARRAY['pg_catalog'::name, 'information_schema'::name])) AND (schemaname !~ '^pg_toast'::text));
