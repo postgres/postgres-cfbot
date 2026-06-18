@@ -93,6 +93,41 @@ PG_STAT_GET_RELENTRY_INT64(tuples_fetched)
 /* pg_stat_get_tuples_hot_updated */
 PG_STAT_GET_RELENTRY_INT64(tuples_hot_updated)
 
+/* pg_stat_get_tuples_hot_indexed_updated */
+PG_STAT_GET_RELENTRY_INT64(tuples_hot_indexed_updated)
+
+/* pg_stat_get_tuples_hot_indexed_updated_skipped */
+Datum
+pg_stat_get_tuples_hot_indexed_upd_skipped(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	int64		result;
+	PgStat_StatIdxEntry *idxentry;
+
+	if ((idxentry = pgstat_fetch_stat_idxentry(relid)) == NULL)
+		result = 0;
+	else
+		result = (int64) (idxentry->tuples_hot_indexed_upd_skipped);
+
+	PG_RETURN_INT64(result);
+}
+
+/* pg_stat_get_tuples_hot_indexed_updated_matched */
+Datum
+pg_stat_get_tuples_hot_indexed_upd_matched(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	int64		result;
+	PgStat_StatIdxEntry *idxentry;
+
+	if ((idxentry = pgstat_fetch_stat_idxentry(relid)) == NULL)
+		result = 0;
+	else
+		result = (int64) (idxentry->tuples_hot_indexed_upd_matched);
+
+	PG_RETURN_INT64(result);
+}
+
 /* pg_stat_get_tuples_newpage_updated */
 PG_STAT_GET_RELENTRY_INT64(tuples_newpage_updated)
 
@@ -1950,6 +1985,9 @@ PG_STAT_GET_XACT_RELENTRY_INT64(counts, tuples_fetched)
 
 /* pg_stat_get_xact_tuples_hot_updated */
 PG_STAT_GET_XACT_RELENTRY_INT64(counts_xact, tuples_hot_updated)
+
+/* pg_stat_get_xact_tuples_hot_indexed_updated */
+PG_STAT_GET_XACT_RELENTRY_INT64(counts_xact, tuples_hot_indexed_updated)
 
 /* pg_stat_get_xact_tuples_newpage_updated */
 PG_STAT_GET_XACT_RELENTRY_INT64(counts_xact, tuples_newpage_updated)
