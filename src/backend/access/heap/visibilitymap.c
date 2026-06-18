@@ -162,6 +162,39 @@ static Buffer vm_readbuf(Relation rel, BlockNumber blkno, bool extend);
  * block may name different offsets (see amlocator.h).  Returns true if the bit
  * changed (was not already set).
  */
+/*
+ * visibilitymap_clear_locator_split
+ *		Clear VISIBILITYMAP_LOCATOR_SPLIT for heapBlk.
+ *
+ * Called by prune when the block is being set all-visible: the carve-outs in
+ * heap_page_would_be_all_visible guarantee no live selective-indexed row with
+ * a disagreeing entry remains, so the split bit is stale and can be dropped.
+ * Caller holds the VM buffer exclusive-locked in a critical section.  Returns
+ * true if the bit changed (was set).
+ */
+bool
+visibilitymap_clear_locator_split(BlockNumber heapBlk, Buffer vmBuf)
+{
+	BlockNumber mapBlock PG_USED_FOR_ASSERTS_ONLY = HEAPBLK_TO_MAPBLOCK(heapBlk);
+	uint32		mapByte = HEAPBLK_TO_MAPBYTE(heapBlk);
+	uint8		mapOffset = HEAPBLK_TO_OFFSET(heapBlk);
+	char	   *map;
+	bool		changed = false;
+
+	Assert(InRecovery || CritSectionCount > 0);
+	Assert(BufferIsValid(vmBuf));
+	Assert(BufferGetBlockNumber(vmBuf) == mapBlock);
+
+	map = PageGetContents(BufferGetPage(vmBuf));
+	if (((map[mapByte] >> mapOffset) & VISIBILITYMAP_LOCATOR_SPLIT) != 0)
+	{
+		map[mapByte] &= ~(VISIBILITYMAP_LOCATOR_SPLIT << mapOffset);
+		MarkBufferDirty(vmBuf);
+		changed = true;
+	}
+	return changed;
+}
+
 bool
 visibilitymap_set_locator_split(BlockNumber heapBlk, Buffer vmBuf)
 {

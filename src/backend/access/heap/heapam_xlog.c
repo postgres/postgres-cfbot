@@ -143,6 +143,8 @@ heap_xlog_prune_freeze(XLogReaderState *record)
 		Size		datalen;
 		xlhp_freeze_plan *plans;
 		OffsetNumber *frz_offsets;
+		OffsetNumber *stubs;
+		int			nstubs;
 		char	   *dataptr = XLogRecGetBlockData(record, 0, &datalen);
 		bool		do_prune;
 
@@ -150,9 +152,10 @@ heap_xlog_prune_freeze(XLogReaderState *record)
 											   &nplans, &plans, &frz_offsets,
 											   &nredirected, &redirected,
 											   &ndead, &nowdead,
-											   &nunused, &nowunused);
+											   &nunused, &nowunused,
+											   &nstubs, &stubs);
 
-		do_prune = nredirected > 0 || ndead > 0 || nunused > 0;
+		do_prune = nredirected > 0 || ndead > 0 || nunused > 0 || nstubs > 0;
 
 		/* Ensure the record does something */
 		Assert(do_prune || nplans > 0 || vmflags & VISIBILITYMAP_VALID_BITS);
@@ -166,7 +169,8 @@ heap_xlog_prune_freeze(XLogReaderState *record)
 									(xlrec.flags & XLHP_CLEANUP_LOCK) == 0,
 									redirected, nredirected,
 									nowdead, ndead,
-									nowunused, nunused);
+									nowunused, nunused,
+									stubs, nstubs);
 
 		/* Freeze tuples */
 		for (int p = 0; p < nplans; p++)
@@ -278,12 +282,17 @@ heap_xlog_prune_freeze(XLogReaderState *record)
 									  &vmbuffer) == BLK_NEEDS_REDO)
 	{
 		Page		vmpage = BufferGetPage(vmbuffer);
+		bool		vm_dirtied;
 
 		/* initialize the page if it was read as zeros */
 		if (PageIsNew(vmpage))
 			PageInit(vmpage, BLCKSZ, 0);
 
+		/* mirror the primary: a page going all-visible drops any split bit */
+		vm_dirtied = visibilitymap_clear_locator_split(blkno, vmbuffer);
 		if (visibilitymap_set(blkno, vmbuffer, vmflags, rlocator) != vmflags)
+			vm_dirtied = true;
+		if (vm_dirtied)
 			PageSetLSN(vmpage, lsn);
 	}
 

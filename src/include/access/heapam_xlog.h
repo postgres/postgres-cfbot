@@ -306,6 +306,10 @@ typedef struct xl_heap_update
  *		uint16				nunused
  *		OffsetNumber		nowunused[nunused]
  *
+ *	xlhp_prune_items
+ *		uint16				nstubs
+ *		OffsetNumber		stubs[2 * nstubs]
+ *
  *	OffsetNumber			frz_offsets[sum([plan.ntuples for plan in plans])]
  *-----------------------------------------------------------------------------
  *
@@ -373,6 +377,18 @@ typedef struct xl_heap_prune
  */
 #define		XLHP_VM_ALL_VISIBLE			(1 << 8)
 #define		XLHP_VM_ALL_FROZEN			(1 << 9)
+
+/*
+ * Indicates that an xlhp_prune_items sub-record with HOT-selectively-updated
+ * collapse-survivor stubs is present.  Each pair (offset, forward) names a
+ * line pointer to be rewritten in place into an xid-free forwarding stub
+ * (HEAP_XMIN_INVALID|HEAP_XMAX_INVALID, HEAP_ONLY_TUPLE|HEAP_INDEXED_UPDATED,
+ * natts==0) whose t_ctid.offnum is set to the forward offset.  The stub's
+ * modified-attrs bitmap is already present in the item on the page (it is the
+ * pre-prune tuple's inline bitmap, left undisturbed), so it is not carried in
+ * the WAL.
+ */
+#define		XLHP_HAS_HOT_INDEXED_STUBS	(1 << 10)
 
 /*
  * xlhp_freeze_plan describes how to freeze a group of one or more heap tuples
@@ -530,6 +546,7 @@ extern void heap_xlog_deserialize_prune_and_freeze(char *cursor, uint16 flags,
 												   OffsetNumber **frz_offsets,
 												   int *nredirected, OffsetNumber **redirected,
 												   int *ndead, OffsetNumber **nowdead,
-												   int *nunused, OffsetNumber **nowunused);
+												   int *nunused, OffsetNumber **nowunused,
+												   int *nstubs, OffsetNumber **stubs);
 
 #endif							/* HEAPAM_XLOG_H */
