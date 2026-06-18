@@ -60,6 +60,7 @@
 #include "access/xact.h"
 #include "access/xlogutils.h"
 #include "catalog/global_temp.h"
+#include "catalog/indexing.h"
 #include "catalog/storage.h"
 #include "commands/sequence.h"
 #include "commands/tablecmds.h"
@@ -71,6 +72,7 @@
 #include "storage/proc.h"
 #include "storage/shmem.h"
 #include "storage/subsystems.h"
+#include "utils/fmgroids.h"
 #include "utils/fmgrprotos.h"
 #include "utils/memutils.h"
 #include "utils/syscache.h"
@@ -1240,6 +1242,10 @@ ProcessInvalidatedGlobalTempRelations(void)
 	 */
 	if (gtrs_dropped && processed_dropped_subid == InvalidSubTransactionId)
 	{
+		int			orig_xact_flags = MyXactFlags;
+		bool		tuples_deleted = false;
+		Relation	statrel;
+
 		/*
 		 * Delete and forget locally-created storage for dropped relations.
 		 * This is done non-transactionally, since gtrs_dropped contains only
@@ -1271,15 +1277,54 @@ ProcessInvalidatedGlobalTempRelations(void)
 		}
 
 		/*
-		 * Remove all usage records and forget any ON COMMIT actions for the
-		 * dropped relations.  The former is non-transactional, but the latter
-		 * may be undone by a (sub)rollback.
+		 * Remove all usage records, forget any ON COMMIT actions, and delete
+		 * any temporary catalog entries for the dropped relations.  The usage
+		 * record removal is non-transactional, but the rest may be undone by
+		 * (sub)rollback.
 		 */
+		statrel = table_open(TempStatisticRelationId, RowExclusiveLock);
+
 		foreach_oid(relid, gtrs_dropped)
 		{
+			ScanKeyData key[1];
+			SysScanDesc scan;
+			HeapTuple	tuple;
+
 			gtr_remove_usage(relid);
 			remove_on_commit_action(relid);
+
+			/* Delete any per-column statistics from pg_temp_statistic */
+			ScanKeyInit(&key[0],
+						Anum_pg_temp_statistic_starelid,
+						BTEqualStrategyNumber, F_OIDEQ,
+						ObjectIdGetDatum(relid));
+
+			scan = systable_beginscan(statrel,
+									  TempStatisticRelidAttnumInhIndexId,
+									  true, NULL, 1, key);
+
+			while (HeapTupleIsValid(tuple = systable_getnext(scan)))
+			{
+				CatalogTupleDelete(statrel, &tuple->t_self);
+				tuples_deleted = true;
+			}
+
+			systable_endscan(scan);
 		}
+
+		table_close(statrel, RowExclusiveLock);
+
+		/* If we deleted anything, make the changes visible */
+		if (tuples_deleted)
+			CommandCounterIncrement();
+
+		/*
+		 * Reset XACT_FLAGS_ACCESSEDTEMPNAMESPACE, if it wasn't set on entry,
+		 * otherwise PREPARE TRANSACTION would fail for this transaction, even
+		 * if the user hadn't explicitly accessed any temporary relations.
+		 */
+		if ((orig_xact_flags & XACT_FLAGS_ACCESSEDTEMPNAMESPACE) == 0)
+			MyXactFlags &= ~XACT_FLAGS_ACCESSEDTEMPNAMESPACE;
 
 		/* Update this backend's tempfrozenxid and tempminmxid */
 		UpdateTempFrozenXids();

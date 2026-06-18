@@ -7024,6 +7024,15 @@ write_item(const void *data, Size len, FILE *fp)
  * of the latter. The special cases are relations where
  * RelationCacheInitializePhase2/3 chooses to nail for efficiency reasons, but
  * which do not support any syscache.
+ *
+ * Global temporary relations are never nailed (because that would required
+ * them to be mapped, and the relmapper does not support temporary relations),
+ * but they do all support syscaches.  Despite this, we intentionally do not
+ * cache global temporary relations, since we don't want to load them on
+ * startup, because doing so would result in temporary relation storage being
+ * created when it might not be needed.  Instead, all global temporary
+ * relations are lazily initialized, if and when they are needed.  See also
+ * InitCatalogCachePhase2().
  */
 bool
 RelationIdIsInInitFile(Oid relationId)
@@ -7040,6 +7049,8 @@ RelationIdIsInInitFile(Oid relationId)
 		Assert(!RelationSupportsSysCache(relationId));
 		return true;
 	}
+	if (IsGlobalTempCatalogRelation(relationId))
+		return false;
 	return RelationSupportsSysCache(relationId);
 }
 

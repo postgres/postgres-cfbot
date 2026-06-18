@@ -595,3 +595,22 @@ SELECT age(tempfrozenxid) - (SELECT max(age(t.relfrozenxid))
  WHERE pid = pg_backend_pid();
 
 DROP TABLE tmp2;
+
+-- Test column stats
+CREATE GLOBAL TEMP TABLE tmp2 (a int, b int);
+INSERT INTO tmp2 SELECT x, floor(sqrt(x)) FROM generate_series(36, 99) x;
+ANALYZE tmp2;
+
+SELECT stavalues1 FROM pg_statistic
+ WHERE starelid = 'tmp2'::regclass AND staattnum = 2;
+
+SELECT stavalues1 FROM pg_temp_statistic
+ WHERE starelid = 'tmp2'::regclass AND staattnum = 2;
+
+SELECT most_common_vals FROM pg_stats
+ WHERE tablename = 'tmp2' AND attname = 'b';
+
+SELECT COUNT(*) FROM tmp2 WHERE b = 8;
+SELECT row_estimate('SELECT * FROM tmp2 WHERE b = 8');
+
+DROP TABLE tmp2;

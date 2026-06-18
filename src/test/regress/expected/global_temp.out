@@ -141,11 +141,13 @@ SELECT c.relname,
        age(t.relminmxid) <= age(c.relminmxid)
   FROM pg_gtrs_in_use() t LEFT JOIN pg_class c ON c.oid = t.oid
  ORDER BY c.relname;
-  relname  | ?column? | ?column? | ?column? | ?column? | ?column? | ?column? | ?column? | ?column? 
------------+----------+----------+----------+----------+----------+----------+----------+----------
- tmp1      | t        | t        | t        | t        | t        | t        | t        | t
- tmp1_pkey | t        | t        | t        | t        | t        | t        | t        | t
-(2 rows)
+                relname                | ?column? | ?column? | ?column? | ?column? | ?column? | ?column? | ?column? | ?column? 
+---------------------------------------+----------+----------+----------+----------+----------+----------+----------+----------
+ pg_temp_statistic                     | t        | t        | t        | t        | t        | t        | t        | t
+ pg_temp_statistic_relid_att_inh_index | t        | t        | t        | t        | t        | t        | t        | t
+ tmp1                                  | t        | t        | t        | t        | t        | t        | t        | t
+ tmp1_pkey                             | t        | t        | t        | t        | t        | t        | t        | t
+(4 rows)
 
 -- Test index
 INSERT INTO tmp1 VALUES (1, 'xxx');
@@ -611,12 +613,14 @@ SELECT c.relname,
   FROM pg_gtrs_in_use() t LEFT JOIN pg_class c ON c.oid = t.oid
  WHERE c.relname !~ 'pg_toast_'
  ORDER BY c.relname;
-  relname   | ?column? | ?column? 
-------------+----------+----------
- tmp1       | t        | t
- tmp1_c_seq | t        | t
- tmp1_pkey  | t        | t
-(3 rows)
+                relname                | ?column? | ?column? 
+---------------------------------------+----------+----------
+ pg_temp_statistic                     | t        | t
+ pg_temp_statistic_relid_att_inh_index | t        | t
+ tmp1                                  | t        | t
+ tmp1_c_seq                            | t        | t
+ tmp1_pkey                             | t        | t
+(5 rows)
 
 -- Test view creation
 CREATE VIEW v AS SELECT * FROM tmp1;
@@ -1106,6 +1110,43 @@ SELECT age(tempfrozenxid) - (SELECT max(age(t.relfrozenxid))
  ?column? | ?column? 
 ----------+----------
         0 |        0
+(1 row)
+
+DROP TABLE tmp2;
+-- Test column stats
+CREATE GLOBAL TEMP TABLE tmp2 (a int, b int);
+INSERT INTO tmp2 SELECT x, floor(sqrt(x)) FROM generate_series(36, 99) x;
+ANALYZE tmp2;
+SELECT stavalues1 FROM pg_statistic
+ WHERE starelid = 'tmp2'::regclass AND staattnum = 2;
+ stavalues1 
+------------
+(0 rows)
+
+SELECT stavalues1 FROM pg_temp_statistic
+ WHERE starelid = 'tmp2'::regclass AND staattnum = 2;
+ stavalues1 
+------------
+ {9,8,7,6}
+(1 row)
+
+SELECT most_common_vals FROM pg_stats
+ WHERE tablename = 'tmp2' AND attname = 'b';
+ most_common_vals 
+------------------
+ {9,8,7,6}
+(1 row)
+
+SELECT COUNT(*) FROM tmp2 WHERE b = 8;
+ count 
+-------
+    17
+(1 row)
+
+SELECT row_estimate('SELECT * FROM tmp2 WHERE b = 8');
+ row_estimate 
+--------------
+           17
 (1 row)
 
 DROP TABLE tmp2;

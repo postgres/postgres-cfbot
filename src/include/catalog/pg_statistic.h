@@ -28,6 +28,9 @@
  */
 BEGIN_CATALOG_STRUCT
 
+/*
+ * NB: Any changes made here must be reflected in pg_temp_statistic.
+ */
 CATALOG(pg_statistic,2619,StatisticRelationId)
 {
 	/* These fields form the unique key for the entry: */
