@@ -130,7 +130,12 @@ xcinside		[^*/]+
 							 tag == PGPA_TAG_TID_SCAN ||
 							 tag == PGPA_TAG_BITMAP_HEAP_SCAN ||
 							 tag == PGPA_TAG_NO_GATHER ||
-							 tag == PGPA_TAG_DO_NOT_SCAN)
+							 tag == PGPA_TAG_DO_NOT_SCAN ||
+							 tag == PGPA_TAG_NO_SEQ_SCAN ||
+							 tag == PGPA_TAG_NO_TID_SCAN ||
+							 tag == PGPA_TAG_NO_BITMAP_HEAP_SCAN ||
+							 tag == PGPA_TAG_NO_INDEX_SCAN ||
+							 tag == PGPA_TAG_NO_INDEX_ONLY_SCAN)
 						return TOK_TAG_SIMPLE;
 					else
 						return TOK_TAG_GENERIC;
