@@ -52,11 +52,16 @@ PostgreSQL documentation
 
   <para>
    <application>pg_createsubscriber</application> creates a new logical
-   replica from a physical standby server.  All tables in the specified
-   database are included in the <link linkend="logical-replication">logical
-   replication</link> setup.  A pair of
-   publication and subscription objects are created for each database.  It
-   must be run at the target server.
+   replica from a physical standby server.  By default,
+   <application>pg_createsubscriber</application> configures
+   <link linkend="logical-replication">logical replication</link> by
+   automatically creating internal publication and subscription objects. When
+   using internally generated publications, a publication and subscription are
+   created for each database, and the publications include all tables and
+   sequences in their respective databases. When user-specified publications
+   are used, the subscriptions replicate only the objects included in those
+   publications. <application>pg_createsubscriber</application> must be run at
+   the target server.
   </para>
 
   <para>
@@ -65,7 +70,12 @@ PostgreSQL documentation
    replication setup and <application>pg_createsubscriber</application> is how
    the data synchronization is done. <application>pg_createsubscriber</application>
    does not copy the initial table data. It does only the synchronization phase,
-   which ensures each table is brought up to a synchronized state.
+   which ensures each table is brought up to a synchronized state. Internally
+   generated publications include all sequences in the database, but their
+   values are not automatically synchronized. For user-specified publications,
+   sequences are only replicated if they were explicitly added to those
+   publications prior to running the tool, and as with the default mode,
+   sequence values must be manually synchronized when needed.
   </para>
 
   <para>
@@ -79,7 +89,13 @@ PostgreSQL documentation
    synchronization.  For details, see the <command>CREATE SUBSCRIPTION</command>
    <link linkend="sql-createsubscription-params-with-copy-data">
    <literal>copy_data</literal></link> option.
+  </para>
 
+  <para>
+   To synchronize sequence values, run
+   <link linkend="sql-altersubscription-params-refresh-sequences">
+   <command>ALTER SUBSCRIPTION ... REFRESH SEQUENCES</command></link> on each
+   subscription at the target server.
   </para>
  </refsect1>
 
@@ -279,10 +295,10 @@ PostgreSQL documentation
         <listitem>
          <para>
           <literal>publications</literal>:
-          The <literal>FOR ALL TABLES</literal> publications established for this
-          subscriber are always dropped; specifying this object type causes all
-          other publications replicated from the source server to be dropped as
-          well.
+          The <literal>FOR ALL TABLES, ALL SEQUENCES</literal> publications
+          established for this subscriber are always dropped; specifying this
+          object type causes all other publications replicated from the source
+          server to be dropped as well.
          </para>
         </listitem>
        </itemizedlist>
@@ -327,7 +343,8 @@ PostgreSQL documentation
        If a specified publication already exists on the publisher, it is reused.
        It is useful to partially replicate the database if the specified
        publication includes a list of tables. If the publication does not exist,
-       it is automatically created with <literal>FOR ALL TABLES</literal>. Use
+       it is automatically created with
+       <literal>FOR ALL TABLES, ALL SEQUENCES</literal>. Use
        <option>--dry-run</option> option to preview which publications will be
        reused and which will be created.
       </para>
@@ -535,12 +552,17 @@ PostgreSQL documentation
 
     <step>
      <para>
-      Create a publication and replication slot for each specified database on
-      the source server.  Each publication is created using <link
-      linkend="sql-createpublication-params-for-all-tables"><literal>FOR ALL
-      TABLES</literal></link>.  If the <option>--publication</option> option
-      is not specified, the publication has the following name pattern:
-      <quote><literal>pg_createsubscriber_%u_%x</literal></quote> (parameter:
+      Create a publication and replication slot for each specified database
+      on the source server. If the <option>--publication</option> option is
+      specified, the user-specified publication is used, which includes the
+      objects defined by that publication. Otherwise,
+      <application>pg_createsubscriber</application> creates a publication
+      using <link linkend="sql-createpublication-params-for-all-tables">
+      <literal>FOR ALL TABLES</literal></link> and <link
+      linkend="sql-createpublication-params-for-all-sequences"><literal>ALL
+      SEQUENCES</literal></link>. These generated publications have the
+      following name pattern:
+      <quote><literal>pg_createsubscriber_%u_%x</literal></quote> (parameters:
       database <parameter>oid</parameter>, random <parameter>int</parameter>).
       If the <option>--replication-slot</option> option is not specified, the
       replication slot has the following name pattern:
