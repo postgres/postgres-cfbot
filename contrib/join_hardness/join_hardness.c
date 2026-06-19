@@ -109,6 +109,8 @@ typedef struct JoinEnumState
 static JoinGraph *build_join_graph(PlannerInfo *root, List *initial_rels);
 static void free_join_graph(JoinGraph *graph);
 static int64 join_ordering_upper_bound(int n, int64 budget);
+static int	count_join_graph_components(JoinGraph *graph);
+static int64 clauseless_combination_effort(int c, int64 budget);
 static Bitmapset *neighborhood(JoinEnumState *state, Bitmapset *s, Bitmapset *x);
 static void on_connected_subgraph(JoinEnumState *state, Bitmapset *s1);
 
@@ -212,6 +214,7 @@ estimate_join_search_effort(PlannerInfo *root, List *initial_rels,
 	int			n = list_length(initial_rels);
 	int			i;
 	int64		max_complexity;
+	int64		result;
 
 	TimestampTz	ts_start,
 				ts_end;
@@ -272,6 +275,27 @@ estimate_join_search_effort(PlannerInfo *root, List *initial_rels,
 		bms_free(x);
 	}
 
+	/*
+	 * DPccp counts only the csg-cmp pairs reachable through join-graph edges,
+	 * so it has not accounted for the clauseless Cartesian-product joins that
+	 * standard_join_search() must perform to glue together the connected
+	 * components of a disconnected graph.  Add that term on top of the
+	 * per-component pair count (it is zero for a connected graph), keeping the
+	 * total capped at the budget.  If the walk aborted, the work already
+	 * exceeded the budget and the answer is simply the budget.
+	 */
+	if (state.aborted)
+		result = budget;
+	else
+	{
+		int			components = count_join_graph_components(graph);
+		int64		cross = clauseless_combination_effort(components, budget);
+
+		result = state.ccp + cross;
+		if ((budget != 0) && (result > budget))
+			result = budget;
+	}
+
 	free_join_graph(graph);
 
 	ts_end = GetCurrentTimestamp();
@@ -281,10 +305,12 @@ estimate_join_search_effort(PlannerInfo *root, List *initial_rels,
 	 * If aborted, return the budget (to show we aborted), otherwise return
 	 * the number of ccp pairs.
 	 */
-	elog(WARNING, "estimate_join_search_effort: rels %d aborted %d ccp " INT64_FORMAT " budget " INT64_FORMAT " timing " INT64_FORMAT " us",
-		 n, state.aborted, state.ccp, budget, microsec);
+	elog(WARNING, "estimate_join_search_effort: rels %d aborted %d "
+				  "result " INT64_FORMAT " ccp " INT64_FORMAT
+				  " budget " INT64_FORMAT " timing " INT64_FORMAT " us",
+		 n, state.aborted, result, state.ccp, budget, microsec);
 
-	return (state.aborted ? budget : state.ccp);
+	return result;
 }
 
 /*
@@ -668,6 +694,99 @@ free_join_graph(JoinGraph *graph)
 
 	pfree(graph->neighbors);
 	pfree(graph);
+}
+
+/*
+ * count_join_graph_components
+ *		Return the number of connected components of the join graph.
+ *
+ * A connected graph has a single component; each additional component is a set
+ * of rels that share no join clause or join-order restriction with the rest of
+ * the query and can therefore only be combined with the others by a Cartesian
+ * product.  We find the components with a simple flood fill.
+ */
+static int
+count_join_graph_components(JoinGraph *graph)
+{
+	Bitmapset  *seen = NULL;
+	int			components = 0;
+	int			i;
+
+	for (i = 0; i < graph->n; i++)
+	{
+		Bitmapset  *stack;
+		int			v;
+
+		if (bms_is_member(i, seen))
+			continue;
+
+		/* Start a new component and flood fill it from vertex i. */
+		components++;
+		seen = bms_add_member(seen, i);
+		stack = bms_make_singleton(i);
+
+		while ((v = bms_next_member(stack, -1)) >= 0)
+		{
+			int			w = -1;
+
+			stack = bms_del_member(stack, v);
+			while ((w = bms_next_member(graph->neighbors[v], w)) >= 0)
+			{
+				if (!bms_is_member(w, seen))
+				{
+					seen = bms_add_member(seen, w);
+					stack = bms_add_member(stack, w);
+				}
+			}
+		}
+
+		bms_free(stack);
+	}
+
+	bms_free(seen);
+
+	return components;
+}
+
+/*
+ * clauseless_combination_effort
+ *		Estimate the make_join_rel() pairs forced by combining "c" connected
+ *		components purely through Cartesian products, saturated at "budget".
+ *
+ * standard_join_search() builds up each connected component using that
+ * component's join clauses, but when the join graph splits into several
+ * components it has to glue them together with clauseless (Cartesian-product)
+ * joins.  Treating each fully-built component as an atomic unit, the
+ * left-/right-sided clauseless joins that join_search_one_level() generates
+ * amount to
+ *
+ *		sum_{L=2..c} C(c, L-1) * (c-L+1)  =  c * (2^(c-1) - 1)
+ *
+ * candidate pairs, where C(n, k) is the binomial coefficient.  (Bushy
+ * clauseless joins are deliberately skipped by the join search, so this
+ * left-/right-sided count is the relevant figure.)  DPccp never traverses
+ * these cross-component edges, so the term is added on top of the
+ * per-component #ccp; otherwise a disconnected join graph would be
+ * mis-estimated as essentially free.  The result is zero for a connected graph
+ * (c <= 1).  The accumulation saturates at "budget" so it cannot overflow.
+ */
+static int64
+clauseless_combination_effort(int c, int64 budget)
+{
+	double		pow2 = 1.0;		/* will hold 2^(c-1) */
+	int			i;
+
+	if (c <= 1)
+		return 0.0;
+
+	for (i = 1; i <= c - 1; i++)
+	{
+		pow2 *= 2.0;
+		if ((budget != 0) && ((double) c * (pow2 - 1.0) >= budget))
+			return budget;
+	}
+
+	return (double) c * (pow2 - 1.0);
 }
 
 /*
