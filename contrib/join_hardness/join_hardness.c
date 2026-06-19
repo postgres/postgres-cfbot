@@ -67,6 +67,7 @@ PG_MODULE_MAGIC_EXT(
 /* GUCs */
 static bool	join_hardness_enabled = false;
 static bool	join_hardness_split = false;
+static bool	join_hardness_fast = false;
 static int	join_hardness_max_effort = 10000;
 
 static join_search_hook_type prev_join_search_hook = NULL;
@@ -107,6 +108,7 @@ typedef struct JoinEnumState
 
 static JoinGraph *build_join_graph(PlannerInfo *root, List *initial_rels);
 static void free_join_graph(JoinGraph *graph);
+static int64 join_ordering_upper_bound(int n, int64 budget);
 static Bitmapset *neighborhood(JoinEnumState *state, Bitmapset *s, Bitmapset *x);
 static void on_connected_subgraph(JoinEnumState *state, Bitmapset *s1);
 
@@ -156,6 +158,17 @@ _PG_init(void)
 							 NULL,
 							 NULL);
 
+	DefineCustomBoolVariable("join_hardness.fast",
+							 "allow fast-path for small joins",
+							 NULL,
+							 &join_hardness_fast,
+							 false,
+							 PGC_SUSET,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
+
 	DefineCustomIntVariable("join_hardness.threshold",
 							"maximum hardness before a join is considered too hard.",
 							NULL,
@@ -198,6 +211,8 @@ estimate_join_search_effort(PlannerInfo *root, List *initial_rels,
 	JoinGraph   *graph;
 	int			n = list_length(initial_rels);
 	int			i;
+	int64		max_complexity;
+
 	TimestampTz	ts_start,
 				ts_end;
 	uint64		microsec;
@@ -209,12 +224,13 @@ estimate_join_search_effort(PlannerInfo *root, List *initial_rels,
 		return 0;
 
 	/*
-	 * XXX We could check the simple n! * C(n-1) formula estimating the
-	 * number of join orderings, and return immediately if that's below
-	 * budget, so that we don't need to do anything for really small
-	 * problems, right? For small problems we know even need to do the
-	 * enumeration. There simply can't be enough orderings.
+	 * Calculate the (very loose) upper boundary from the number of relations.
+	 * This grows very fast - at 6 tables it's ~30k, at 8 it's already ~17M.
+	 * But for very small joins it allows us to do without the join graph.
 	 */
+	max_complexity = join_ordering_upper_bound(n, budget);
+	if (max_complexity < budget)
+		return max_complexity;
 
 	/* build the adjacency matrix representing the graph */
 	graph = build_join_graph(root, initial_rels);
@@ -548,6 +564,49 @@ join_search_hardness_hook(PlannerInfo *root, int levels_needed, List *initial_re
 		return geqo(root, levels_needed, initial_rels);
 	else
 		return standard_join_search(root, levels_needed, initial_rels);
+}
+
+/*
+ * join_ordering_upper_bound
+ *		Compute n! * C(n-1), saturated at "budget".
+ *
+ * This is the maximum number of binary join orderings for n base rels, where
+ * C(k) is the k-th Catalan number.  The value is an upper bound independent of
+ * join graph shape, so if it is below the caller's budget then no DPccp search
+ * is needed to prove the budget cannot be reached.
+ */
+static int64
+join_ordering_upper_bound(int n, int64 budget)
+{
+	int64		result = 1.0;
+	int			i;
+
+	/* disable fast-path (useful for testing the full estimation logic) */
+	if (!join_hardness_fast)
+		return budget;
+
+	/* Compute n!, stopping once it reaches the only threshold we care about. */
+	for (i = 2; i <= n; i++)
+	{
+		if ((budget != 0) && (result * i >= budget))
+			return budget;
+
+		result *= i;
+	}
+
+	/* Compute C(n-1) by recurrence: C_k = C_{k-1} * 2(2k-1)/(k+1). */
+	for (i = 1; i < n; i++)
+	{
+		double		factor = 2.0 * (2.0 * (double) i - 1.0) /
+			(double) (i + 1);
+
+		if ((budget != 0) && (result >= budget / factor))
+			return budget;
+
+		result *= factor;
+	}
+
+	return result;
 }
 
 /*
