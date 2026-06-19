@@ -25,6 +25,7 @@ SUBDIRS = \
 		intagg		\
 		intarray	\
 		isn		\
+		join_hardness	\
 		lo		\
 		ltree		\
 		oid2name	\
