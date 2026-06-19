@@ -51,6 +51,8 @@
  */
 #include "postgres.h"
 
+#include <limits.h>
+
 #include "optimizer/geqo.h"
 #include "optimizer/joininfo.h"
 #include "optimizer/paths.h"
@@ -64,6 +66,8 @@ PG_MODULE_MAGIC_EXT(
 
 /* GUCs */
 static bool	join_hardness_enabled = false;
+static bool	join_hardness_split = false;
+static int	join_hardness_max_effort = 10000;
 
 static join_search_hook_type prev_join_search_hook = NULL;
 
@@ -140,6 +144,29 @@ _PG_init(void)
 							 NULL,
 							 NULL,
 							 NULL);
+
+	DefineCustomBoolVariable("join_hardness.split",
+							 "allow splitting joins that are too hard to plan.",
+							 NULL,
+							 &join_hardness_split,
+							 false,
+							 PGC_SUSET,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
+
+	DefineCustomIntVariable("join_hardness.threshold",
+							"maximum hardness before a join is considered too hard.",
+							NULL,
+							&join_hardness_max_effort,
+							10000,
+							1, INT_MAX,
+							PGC_SUSET,
+							0,
+							NULL,
+							NULL,
+							NULL);
 
 	MarkGUCPrefixReserved("join_hardness");
 
@@ -244,12 +271,276 @@ estimate_join_search_effort(PlannerInfo *root, List *initial_rels,
 	return (state.aborted ? budget : state.ccp);
 }
 
+/*
+ * join_search_too_hard
+ *	  Decide whether to this join search is too hard to solve exhaustively.
+ *
+ * The traditional rule simply compares the number of jointree items against
+ * geqo_threshold.  That ignores the join graph's shape, even though the cost
+ * of the dynamic-programming search depends strongly on it (an n-way chain is
+ * cheap while an n-way clique or star explodes).
+ *
+ * When enable_join_search_estimate is set we instead estimate the actual
+ * search effort (the number of make_join_rel() candidate pairs) and switch to
+ * GEQO only when that estimate reaches join_search_effort_limit, so that large
+ * but sparse queries keep the benefit of exhaustive planning while dense queries
+ * are offloaded sooner.
+ */
+static bool
+join_search_too_hard(PlannerInfo *root, int levels_needed,
+					 List *initial_rels)
+{
+	if (join_hardness_enabled)
+	{
+		double		budget = (double) join_hardness_max_effort;
+		double		effort;
+
+		effort = estimate_join_search_effort(root, initial_rels, budget);
+		return effort >= budget;
+	}
+
+	return false;
+}
+
+/*
+ * subproblem_is_joinable
+ *	Can the given list of rels be joined into a single relation on its own?
+ *
+ * When make_rel_from_joinlist() splits a large join problem into smaller
+ * subproblems, each subproblem is solved independently with
+ * standard_join_search().  That only works if the subproblem's relations can
+ * actually be combined into a single join relation.  Inner joins place no
+ * restriction on this, but an outer join does: its relations must be joined
+ * in a particular order, so a relation set that includes one side of the
+ * outer join together with only part of the other side cannot be joined by
+ * itself.  Attempting to do so makes standard_join_search() fail with
+ * "failed to build any N-way joins".
+ *
+ * Return true only if, for every outer/special join, the set of relids in
+ * "rels" is "closed": if it touches both syntactic sides of the join it must
+ * contain the whole join.  Sets that stay entirely on one side of a join (or
+ * fully contain it) are fine.  In addition, every relation's LATERAL
+ * dependencies must be satisfied within the set, since a laterally-dependent
+ * relation likewise cannot be joined before the relations it references.
+ */
+static bool
+subproblem_is_joinable(PlannerInfo *root, List *rels)
+{
+	Relids	  relids = NULL;
+	ListCell   *lc;
+
+	foreach(lc, rels)
+	{
+		RelOptInfo *rel = (RelOptInfo *) lfirst(lc);
+
+		relids = bms_add_members(relids, rel->relids);
+	}
+
+	/*
+	* Every LATERAL reference of a relation in the set must point to another
+	* relation in the set, otherwise the dependency cannot be satisfied while
+	* joining the subproblem on its own.
+	*/
+	foreach(lc, rels)
+	{
+		RelOptInfo *rel = (RelOptInfo *) lfirst(lc);
+
+		if (!bms_is_subset(rel->lateral_relids, relids))
+		{
+			 bms_free(relids);
+			 return false;
+		}
+	}
+
+	foreach(lc, root->join_info_list)
+	{
+		SpecialJoinInfo *sjinfo = (SpecialJoinInfo *) lfirst(lc);
+		Relids	  ojspan;
+
+		/* full syntactic span of this join, including its own relid */
+		ojspan = bms_union(sjinfo->syn_lefthand, sjinfo->syn_righthand);
+		if (sjinfo->ojrelid != 0)
+			 ojspan = bms_add_member(ojspan, sjinfo->ojrelid);
+
+		/*
+		 * If the candidate set touches both sides of this join but does not
+		 * contain all of it, the join cannot be formed within the subproblem,
+		 * and so the relations cannot be joined into a single relation.
+		 */
+		if (bms_overlap(relids, sjinfo->syn_lefthand) &&
+			 bms_overlap(relids, sjinfo->syn_righthand) &&
+			 !bms_is_subset(ojspan, relids))
+		{
+			 bms_free(ojspan);
+			 bms_free(relids);
+			 return false;
+		}
+
+		bms_free(ojspan);
+	}
+
+	bms_free(relids);
+	return true;
+}
 
 static RelOptInfo *
 join_search_hardness_hook(PlannerInfo *root, int levels_needed, List *initial_rels)
 {
+	/*
+	 * With both the DPccp estimate and replanning enabled, see if this
+	 * join is too complex and try to be split it into smaller problems.
+	 * And then hand over the new join problem to standard_join_search
+	 * or whatever.
+	 */
 	if (join_hardness_enabled)
-		estimate_join_search_effort(root, initial_rels, 0);
+	{
+		/*
+		 * Without splitting large joins based on effort, just calculate
+		 * the estimate with no budget (so no aborts). Otherwise check if
+		 * the join is expected to be too hard, and maybe split.
+		 */
+		if (!join_hardness_split)
+		{
+			/* calculate the estimate */
+			estimate_join_search_effort(root, initial_rels, 0);
+		}
+		else if (join_search_too_hard(root, levels_needed, initial_rels))
+		{
+			List   *remaining_rels = NIL;
+
+			/*
+			 * Try removing rels from the join one by one, see if the rest is
+			 * still joinable. Stop once we're below the limit, or when we
+			 * fail to find a removable rel.
+			 *
+			 * XXX This is probably a bit too simple, and possibly also quite
+			 * expensive if we're calculating the estimate over and over.
+			 *
+			 * First, it's not clear if any single rel is removable, because
+			 * we may be doing something like (A join B) LEFT (C join D). So
+			 * maybe we should be splitting the list into two parts, until we
+			 * find a split that works. After all, that's inverse to how
+			 * deconstruct_recurse() builds the joinlist, by appending to it
+			 * (and hitting join_collapse_limit would split it like that too).
+			 *
+			 * Second, the estimate is quite cheap but not entirely free, so
+			 * maybe it's not a good idea to call it too often. If we're to
+			 * split the list, it seems best to split it about in half, which
+			 * has the best chance of reducing the hardness enough?
+			 *
+			 * XXX Alternative idea: deconstruct the jointree as if there
+			 * was join_collapse_limit=1, and now combine the subproblems,
+			 * as long as the hardness is below the budget. But then we have
+			 * to calculate the estimate over and over, which is not great.
+			 * However, we'd need to keep track of which "splits" were
+			 * forced by JOIN_FULL (and we can't undo those), and which were
+			 * just due to limit=1. But we already know the relids for full
+			 * joins, so that seems feasible?
+			 *
+			 * XXX If we knew about starjoin clusters (or other information
+			 * that reduces the join search complexity), we would consider it
+			 * here. E.g. we might prefer not to remove parts of the starjoin
+			 * cluster, as that has very little impact on the complexity,
+			 * if we enforce the canonical order). Or maybe we should postpone
+			 * those joins instead? In any case, the starjoin cluster should
+			 * not increase the hardness very much, so removing other rels has
+			 * more chance to meet the budget.
+			 */
+			while (true)
+			{
+				List   *new_initial_rels = initial_rels;
+				bool	removed = false;
+
+				for (int i = 0; i < list_length(new_initial_rels); i++)
+				{
+					RelOptInfo *rel = list_nth(new_initial_rels, i);
+					List *tmp_initial_rels = list_copy(new_initial_rels);
+
+					Assert(IsA(rel, RelOptInfo));
+
+					/* create a copy with the i-th rel removed */
+					tmp_initial_rels = list_delete_nth_cell(tmp_initial_rels, i);
+
+					root->initial_rels = tmp_initial_rels;
+					if (!subproblem_is_joinable(root, tmp_initial_rels))
+						continue;
+
+					/* we have a new subproblem */
+					new_initial_rels = tmp_initial_rels;
+					remaining_rels = lappend(remaining_rels, rel);
+					removed = true;
+
+					/*
+					 * is the problem simple enough now? small problems (with
+					 * less than 3 tables) are automatically OK, for larger
+					 * ones we re-calculate the difficulty
+					 *
+					 * XXX We should try to find a split that gets us the
+					 * closest to the target difficulty, not the first problem
+					 * that can be joined.
+					 */
+					if (list_length(new_initial_rels) > 3)
+					{
+						/* found a sufficiently simple subproblem, try it */
+						if (!join_search_too_hard(root, list_length(new_initial_rels),
+												  new_initial_rels))
+						{
+							RelOptInfo *joinrel;
+
+							/* do the join search for the subproblem */
+							root->initial_rels = new_initial_rels;
+							joinrel = standard_join_search(root, list_length(new_initial_rels), new_initial_rels);
+
+							Assert(IsA(joinrel, RelOptInfo));
+
+							/* replace the problem with the reduced one */
+							new_initial_rels = list_make1(joinrel);
+							new_initial_rels = list_concat(new_initial_rels, remaining_rels);
+							remaining_rels = NIL;
+
+							break;
+						}
+					}
+				}
+
+				/* failed to find a removable rel */
+				if (!removed)
+				{
+					/* we can't do better so plan with the current split */
+					if (remaining_rels != NIL)
+					{
+						RelOptInfo *joinrel;
+
+						/* do the join search for the subproblem */
+						root->initial_rels = new_initial_rels;
+						joinrel = standard_join_search(root, list_length(new_initial_rels), new_initial_rels);
+
+						Assert(IsA(joinrel, RelOptInfo));
+
+						/* replace the problem with the reduced one */
+						new_initial_rels = list_make1(joinrel);
+						new_initial_rels = list_concat(new_initial_rels, remaining_rels);
+						remaining_rels = NIL;
+					}
+
+					break;
+				}
+
+				/* how difficult is the new problem */
+				initial_rels = new_initial_rels;
+				levels_needed = list_length(initial_rels);
+
+				/*
+				 * The remaining problem is sufficiently simple, we're done.
+				 *
+				 * XXX In some cases we've already called join_search_too_hard() on
+				 * this join problem above, in which case we should not do that again.
+				 */
+				if (!join_search_too_hard(root, levels_needed, initial_rels))
+					break;
+			}
+		}
+	}
 
 	if (prev_join_search_hook)
 		return (*prev_join_search_hook) (root, levels_needed, initial_rels);
