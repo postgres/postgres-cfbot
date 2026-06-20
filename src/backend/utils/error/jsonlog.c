@@ -167,6 +167,14 @@ write_jsonlog(ErrorData *edata)
 			appendJSONKeyValue(&buf, "remote_port", MyProcPort->remote_port, false);
 	}
 
+	/* Proxy host and port */
+	if (MyProcPort && MyProcPort->proxy_host && MyProcPort->proxy_host[0] != '\0')
+	{
+		appendJSONKeyValue(&buf, "proxy_host", MyProcPort->proxy_host, true);
+		if (MyProcPort->proxy_port && MyProcPort->proxy_port[0] != '\0')
+			appendJSONKeyValue(&buf, "proxy_port", MyProcPort->proxy_port, false);
+	}
+
 	/* Session id */
 	appendJSONKeyValueFmt(&buf, "session_id", true, "%" PRIx64 ".%x",
 						  MyStartTime, MyProcPid);
