@@ -783,14 +783,16 @@ order by t1.a, t2.a;
                      Hash Cond: (t2.a = (t3.b + 1))
                      ->  Seq Scan on public.semijoin_unique_tbl t2
                            Output: t2.a, t2.b
+                           Bloom Filter 1: keys=(t2.a)
                      ->  Hash
                            Output: t3.a, t3.b
+                           Bloom Filter 1
                            ->  HashAggregate
                                  Output: t3.a, t3.b
                                  Group Key: (t3.a + 1), (t3.b + 1)
                                  ->  Seq Scan on public.semijoin_unique_tbl t3
                                        Output: t3.a, t3.b, (t3.a + 1), (t3.b + 1)
-(24 rows)
+(26 rows)
 
 -- encourage use of parallel plans
 set parallel_setup_cost=0;
@@ -1669,7 +1671,7 @@ select * from int4_tbl where
 ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop Semi Join
    Output: int4_tbl.f1
-   Join Filter: (CASE WHEN (ANY (int4_tbl.f1 = (hashed SubPlan any_1).col1)) THEN int4_tbl.f1 ELSE NULL::integer END = b.ten)
+   Join Filter: (b.ten = CASE WHEN (ANY (int4_tbl.f1 = (hashed SubPlan any_1).col1)) THEN int4_tbl.f1 ELSE NULL::integer END)
    ->  Seq Scan on public.int4_tbl
          Output: int4_tbl.f1
    ->  Seq Scan on public.tenk1 b
@@ -3525,9 +3527,11 @@ SELECT * FROM onek t1, lateral (SELECT * FROM onek t2 WHERE t2.ten IN (values (t
    ->  Hash Semi Join
          Hash Cond: (t2.ten = "*VALUES*".column1)
          ->  Seq Scan on onek t2
+               Bloom Filter 1: keys=(ten)
          ->  Hash
+               Bloom Filter 1
                ->  Values Scan on "*VALUES*"
-(7 rows)
+(9 rows)
 
 -- VtA causes the whole expression to be evaluated as a constant
 EXPLAIN (COSTS OFF)
@@ -3674,15 +3678,14 @@ WHERE id NOT IN (
    Hash Cond: (not_null_tab.id = t2.id)
    ->  Seq Scan on not_null_tab
    ->  Hash
-         ->  Merge Join
-               Merge Cond: (t1.id = t2.id)
-               ->  Sort
-                     Sort Key: t1.id
-                     ->  Seq Scan on not_null_tab t1
-               ->  Sort
-                     Sort Key: t2.id
+         ->  Hash Join
+               Hash Cond: (t1.id = t2.id)
+               ->  Seq Scan on not_null_tab t1
+                     Bloom Filter 1: keys=(id)
+               ->  Hash
+                     Bloom Filter 1
                      ->  Seq Scan on not_null_tab t2
-(12 rows)
+(11 rows)
 
 -- ANTI JOIN: outer side is defined NOT NULL, inner side is forced nonnullable
 -- by qual clause
@@ -3723,11 +3726,8 @@ WHERE id NOT IN (
 );
                    QUERY PLAN                    
 -------------------------------------------------
- Merge Anti Join
-   Merge Cond: (not_null_tab.id = t1.id)
-   ->  Sort
-         Sort Key: not_null_tab.id
-         ->  Seq Scan on not_null_tab
+ Merge Right Anti Join
+   Merge Cond: (t1.id = not_null_tab.id)
    ->  Nested Loop Left Join
          ->  Merge Join
                Merge Cond: (t1.id = t2.id)
@@ -3739,6 +3739,9 @@ WHERE id NOT IN (
                      ->  Seq Scan on null_tab t2
          ->  Materialize
                ->  Seq Scan on null_tab t3
+   ->  Sort
+         Sort Key: not_null_tab.id
+         ->  Seq Scan on not_null_tab
 (16 rows)
 
 -- ANTI JOIN: outer side is defined NOT NULL and is not nulled by outer join,

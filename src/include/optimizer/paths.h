@@ -104,6 +104,7 @@ extern void add_paths_to_joinrel(PlannerInfo *root, RelOptInfo *joinrel,
 								 RelOptInfo *outerrel, RelOptInfo *innerrel,
 								 JoinType jointype, SpecialJoinInfo *sjinfo,
 								 List *restrictlist);
+extern bool bloom_join_side_preserved(JoinType jointype, bool to_outer);
 
 /*
  * joinrels.c
@@ -198,6 +199,11 @@ extern List *generate_implied_equalities_for_column(PlannerInfo *root,
 													ec_matches_callback_type callback,
 													void *callback_arg,
 													Relids prohibited_rels);
+extern List *generate_implied_equalities_for_all_columns(PlannerInfo *root,
+														 RelOptInfo *rel,
+														 ec_matches_callback_type callback,
+														 void *callback_arg,
+														 Relids prohibited_rels);
 extern bool have_relevant_eclass_joinclause(PlannerInfo *root,
 											RelOptInfo *rel1, RelOptInfo *rel2);
 extern bool has_relevant_eclass_joinclause(PlannerInfo *root,

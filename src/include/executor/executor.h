@@ -515,6 +515,18 @@ ExecProject(ProjectionInfo *projInfo)
 #endif
 
 /*
+ * Bloom filter pushdown (see nodeHashjoin.c). Declared here so that
+ * scan nodes that act as recipients don't need to pull in hashjoin
+ * internals just to call these helpers from their ExecInit.
+ *
+ * XXX There's probably a better place for this. It should live in
+ * the executor somewhere, not in nodeHashjoin.c?
+ */
+extern bool ExecBloomFilters(List *filters, ExprContext *econtext);
+extern void ExecInitBloomFilters(PlanState *planstate,
+								 TupleTableSlot *output_slot);
+
+/*
  * ExecQual - evaluate a qual prepared with ExecInitQual (possibly via
  * ExecPrepareQual).  Returns true if qual is satisfied, else false.
  *

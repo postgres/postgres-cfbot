@@ -286,6 +286,16 @@ set_cheapest(RelOptInfo *parent_rel)
 		Path	   *path = (Path *) lfirst(p);
 		int			cmp;
 
+		/*
+		 * Paths that expect a pushed-down Bloom filter are speculative: their
+		 * rows/cost estimates assume a hash join above will build and push a
+		 * filter to them.  They must never be chosen as the cheapest startup,
+		 * total, or parameterized path; they are only consumed explicitly by
+		 * join path generation (see joinpath.c).  Skip them here.
+		 */
+		if (path->expected_filters != NIL)
+			continue;
+
 		if (path->param_info)
 		{
 			/* Parameterized path, so add it to parameterized_paths */
@@ -381,6 +391,129 @@ set_cheapest(RelOptInfo *parent_rel)
 	parent_rel->cheapest_startup_path = cheapest_startup_path;
 	parent_rel->cheapest_total_path = cheapest_total_path;
 	parent_rel->cheapest_parameterized_paths = parameterized_paths;
+}
+
+/*
+ * expected_filters_equal
+ *	  Return true if the two lists of ExpectedFilter nodes denote the same
+ *	  set of expected Bloom filters (order-independent).
+ */
+bool
+expected_filters_equal(List *a, List *b)
+{
+	ListCell   *lc;
+
+	if (a == NIL && b == NIL)
+		return true;
+	if (list_length(a) != list_length(b))
+		return false;
+
+	foreach(lc, a)
+	{
+		ExpectedFilter *fa = (ExpectedFilter *) lfirst(lc);
+		ListCell   *lc2;
+		bool		found = false;
+
+		foreach(lc2, b)
+		{
+			ExpectedFilter *fb = (ExpectedFilter *) lfirst(lc2);
+
+			if (fa->owner_relid == fb->owner_relid &&
+				bms_equal(fa->build_relids, fb->build_relids) &&
+				equal(fa->clauses, fb->clauses))
+			{
+				found = true;
+				break;
+			}
+		}
+		if (!found)
+			return false;
+	}
+	return true;
+}
+
+/*
+ * expected_filters_selectivity
+ *	  Combined surviving fraction of a set of expected filters, assuming
+ *	  independence.  Returns a value in (0, 1].
+ */
+double
+expected_filters_selectivity(List *filters)
+{
+	double		sel = 1.0;
+	ListCell   *lc;
+
+	foreach(lc, filters)
+	{
+		ExpectedFilter *f = (ExpectedFilter *) lfirst(lc);
+
+		sel *= f->selectivity;
+	}
+
+	/* clamp to a sane range */
+	if (sel < 0.0)
+		sel = 0.0;
+	if (sel > 1.0)
+		sel = 1.0;
+
+	return sel;
+}
+
+/*
+ * create_filtered_scan_path
+ *	  Build a copy of a base-relation scan path that additionally expects the
+ *	  given set of pushed-down Bloom filters.
+ *
+ * The clone shares all substructure with the original path (parent,
+ * pathtarget, clauses, etc.); only the rows estimate is reduced to reflect
+ * the filters' combined selectivity, and expected_filters is set.  This is
+ * safe because create_plan() treats the clone identically to the original
+ * (it ignores expected_filters), and add_path() may freely pfree the clone.
+ *
+ * Only the plain scan path node types that can receive a pushed-down filter
+ * are supported (matching find_bloom_filter_recipient in createplan.c).
+ * Returns NULL for unsupported path types.
+ *
+ * XXX This should probably adjust the CPU cost in some way. It assumes the
+ * filter checks are free, which does not seem right.
+ */
+Path *
+create_filtered_scan_path(PlannerInfo *root, Path *subpath, List *filters)
+{
+	Path	   *newpath;
+	size_t		sz;
+
+	switch (nodeTag(subpath))
+	{
+		case T_Path:
+			/* plain seqscan/samplescan etc. */
+			sz = sizeof(Path);
+			break;
+		case T_IndexPath:
+			sz = sizeof(IndexPath);
+			break;
+		case T_BitmapHeapPath:
+			sz = sizeof(BitmapHeapPath);
+			break;
+		case T_TidPath:
+			sz = sizeof(TidPath);
+			break;
+		case T_TidRangePath:
+			sz = sizeof(TidRangePath);
+			break;
+		default:
+			/* unsupported scan path type */
+			return NULL;
+	}
+
+	newpath = (Path *) palloc(sz);
+	memcpy(newpath, subpath, sz);
+
+	newpath->expected_filters = filters;
+	newpath->rows = clamp_row_est(subpath->rows *
+								  expected_filters_selectivity(filters));
+
+	return newpath;
 }
 
 /*
@@ -484,6 +617,17 @@ add_path(RelOptInfo *parent_rel, Path *new_path)
 		PathCostComparison costcmp;
 		PathKeysComparison keyscmp;
 		BMS_Comparison outercmp;
+
+		/*
+		 * Paths carrying different sets of expected Bloom filters serve
+		 * different purposes (each may be consumed by a different parent
+		 * join, or none at all), and their cost/row estimates aren't directly
+		 * comparable.  So if the two paths don't expect the same filters,
+		 * keep both and don't let either dominate the other.
+		 */
+		if (!expected_filters_equal(new_path->expected_filters,
+									old_path->expected_filters))
+			continue;
 
 		/*
 		 * Do a fuzzy cost comparison with standard fuzziness limit.
@@ -701,6 +845,20 @@ add_path_precheck(RelOptInfo *parent_rel, int disabled_nodes,
 	{
 		Path	   *old_path = (Path *) lfirst(p1);
 		PathKeysComparison keyscmp;
+
+		/*
+		 * Paths carrying expected Bloom filters serve a different purpose and
+		 * are not directly cost-comparable with ordinary paths, exactly as in
+		 * add_path (which keeps both when the expected filter sets differ).
+		 * The candidates submitted to this precheck never carry expected
+		 * filters of their own, so any filter-bearing old path is a
+		 * non-comparable speculative path and must not be allowed to dominate
+		 * (and thereby suppress) the new path.  Skipping them here also
+		 * guarantees that a join relation always retains at least one
+		 * ordinary, filter-free path to serve as cheapest_total_path.
+		 */
+		if (old_path->expected_filters != NIL)
+			continue;
 
 		/*
 		 * Since the pathlist is sorted by disabled_nodes and then by

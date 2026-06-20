@@ -57,20 +57,24 @@ EXPLAIN (COSTS OFF)
 SELECT * FROM aa_fact f LEFT JOIN aa_dim1 d1 ON f.dim1_id = d1.id
 	LEFT JOIN aa_dim2 d2 ON f.dim2_id = d2.id
 	WHERE val1 = 1 AND val2 = 1;
-                QUERY PLAN                
-------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Hash Join
-   Hash Cond: (f.dim1_id = d1.id)
+   Hash Cond: (f.dim2_id = d2.id)
    ->  Hash Join
-         Hash Cond: (f.dim2_id = d2.id)
+         Hash Cond: (f.dim1_id = d1.id)
          ->  Seq Scan on aa_fact f
+               Bloom Filter 1: keys=(dim1_id)
+               Bloom Filter 2: keys=(dim2_id)
          ->  Hash
-               ->  Seq Scan on aa_dim2 d2
-                     Filter: (val2 = 1)
+               Bloom Filter 1
+               ->  Seq Scan on aa_dim1 d1
+                     Filter: (val1 = 1)
    ->  Hash
-         ->  Seq Scan on aa_dim1 d1
-               Filter: (val1 = 1)
-(11 rows)
+         Bloom Filter 2
+         ->  Seq Scan on aa_dim2 d2
+               Filter: (val2 = 1)
+(15 rows)
 
 -- Force an index scan on dim1
 SELECT pg_set_stashed_advice('regress_stash', :'qid',
@@ -84,22 +88,26 @@ EXPLAIN (COSTS OFF) SELECT * FROM aa_fact f
 	LEFT JOIN aa_dim1 d1 ON f.dim1_id = d1.id
 	LEFT JOIN aa_dim2 d2 ON f.dim2_id = d2.id
 	WHERE val1 = 1 AND val2 = 1;
-                       QUERY PLAN                        
----------------------------------------------------------
+                          QUERY PLAN                           
+---------------------------------------------------------------
  Hash Join
-   Hash Cond: (f.dim1_id = d1.id)
+   Hash Cond: (f.dim2_id = d2.id)
    ->  Hash Join
-         Hash Cond: (f.dim2_id = d2.id)
+         Hash Cond: (f.dim1_id = d1.id)
          ->  Seq Scan on aa_fact f
+               Bloom Filter 1: keys=(dim1_id)
+               Bloom Filter 2: keys=(dim2_id)
          ->  Hash
-               ->  Seq Scan on aa_dim2 d2
-                     Filter: (val2 = 1)
+               Bloom Filter 1
+               ->  Index Scan using aa_dim1_pkey on aa_dim1 d1
+                     Filter: (val1 = 1)
    ->  Hash
-         ->  Index Scan using aa_dim1_pkey on aa_dim1 d1
-               Filter: (val1 = 1)
+         Bloom Filter 2
+         ->  Seq Scan on aa_dim2 d2
+               Filter: (val2 = 1)
  Supplied Plan Advice:
    INDEX_SCAN(d1 aa_dim1_pkey) /* matched */
-(13 rows)
+(17 rows)
 
 -- Force an alternative join order
 SELECT pg_set_stashed_advice('regress_stash', :'qid',
@@ -113,22 +121,26 @@ EXPLAIN (COSTS OFF) SELECT * FROM aa_fact f
 	LEFT JOIN aa_dim1 d1 ON f.dim1_id = d1.id
 	LEFT JOIN aa_dim2 d2 ON f.dim2_id = d2.id
 	WHERE val1 = 1 AND val2 = 1;
-                QUERY PLAN                
-------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Hash Join
    Hash Cond: (f.dim2_id = d2.id)
    ->  Hash Join
          Hash Cond: (f.dim1_id = d1.id)
          ->  Seq Scan on aa_fact f
+               Bloom Filter 1: keys=(dim1_id)
+               Bloom Filter 2: keys=(dim2_id)
          ->  Hash
+               Bloom Filter 1
                ->  Seq Scan on aa_dim1 d1
                      Filter: (val1 = 1)
    ->  Hash
+         Bloom Filter 2
          ->  Seq Scan on aa_dim2 d2
                Filter: (val2 = 1)
  Supplied Plan Advice:
    JOIN_ORDER(f d1 d2) /* matched */
-(13 rows)
+(17 rows)
 
 -- Force an alternative join strategy
 SELECT pg_set_stashed_advice('regress_stash', :'qid',
@@ -142,21 +154,22 @@ EXPLAIN (COSTS OFF) SELECT * FROM aa_fact f
 	LEFT JOIN aa_dim1 d1 ON f.dim1_id = d1.id
 	LEFT JOIN aa_dim2 d2 ON f.dim2_id = d2.id
 	WHERE val1 = 1 AND val2 = 1;
-                    QUERY PLAN                     
----------------------------------------------------
- Nested Loop
-   ->  Hash Join
-         Hash Cond: (f.dim2_id = d2.id)
-         ->  Seq Scan on aa_fact f
-         ->  Hash
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Hash Join
+   Hash Cond: ((f.dim1_id = d1.id) AND (f.dim2_id = d2.id))
+   ->  Seq Scan on aa_fact f
+         Bloom Filter 1: keys=(dim1_id, dim2_id)
+   ->  Hash
+         Bloom Filter 1
+         ->  Nested Loop
                ->  Seq Scan on aa_dim2 d2
                      Filter: (val2 = 1)
-   ->  Index Scan using aa_dim1_pkey on aa_dim1 d1
-         Index Cond: (id = f.dim1_id)
-         Filter: (val1 = 1)
+               ->  Seq Scan on aa_dim1 d1
+                     Filter: (val1 = 1)
  Supplied Plan Advice:
    NESTED_LOOP_PLAIN(d1) /* matched */
-(12 rows)
+(13 rows)
 
 -- Add a useless extra entry to our test stash. Shouldn't change the result
 -- from the previous test.
@@ -172,21 +185,22 @@ EXPLAIN (COSTS OFF) SELECT * FROM aa_fact f
 	LEFT JOIN aa_dim1 d1 ON f.dim1_id = d1.id
 	LEFT JOIN aa_dim2 d2 ON f.dim2_id = d2.id
 	WHERE val1 = 1 AND val2 = 1;
-                    QUERY PLAN                     
----------------------------------------------------
- Nested Loop
-   ->  Hash Join
-         Hash Cond: (f.dim2_id = d2.id)
-         ->  Seq Scan on aa_fact f
-         ->  Hash
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Hash Join
+   Hash Cond: ((f.dim1_id = d1.id) AND (f.dim2_id = d2.id))
+   ->  Seq Scan on aa_fact f
+         Bloom Filter 1: keys=(dim1_id, dim2_id)
+   ->  Hash
+         Bloom Filter 1
+         ->  Nested Loop
                ->  Seq Scan on aa_dim2 d2
                      Filter: (val2 = 1)
-   ->  Index Scan using aa_dim1_pkey on aa_dim1 d1
-         Index Cond: (id = f.dim1_id)
-         Filter: (val1 = 1)
+               ->  Seq Scan on aa_dim1 d1
+                     Filter: (val1 = 1)
  Supplied Plan Advice:
    NESTED_LOOP_PLAIN(d1) /* matched */
-(12 rows)
+(13 rows)
 
 -- Try an empty stash to be sure it does nothing
 SELECT pg_create_advice_stash('regress_empty_stash');
@@ -200,20 +214,24 @@ EXPLAIN (COSTS OFF) SELECT * FROM aa_fact f
 	LEFT JOIN aa_dim1 d1 ON f.dim1_id = d1.id
 	LEFT JOIN aa_dim2 d2 ON f.dim2_id = d2.id
 	WHERE val1 = 1 AND val2 = 1;
-                QUERY PLAN                
-------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Hash Join
-   Hash Cond: (f.dim1_id = d1.id)
+   Hash Cond: (f.dim2_id = d2.id)
    ->  Hash Join
-         Hash Cond: (f.dim2_id = d2.id)
+         Hash Cond: (f.dim1_id = d1.id)
          ->  Seq Scan on aa_fact f
+               Bloom Filter 1: keys=(dim1_id)
+               Bloom Filter 2: keys=(dim2_id)
          ->  Hash
-               ->  Seq Scan on aa_dim2 d2
-                     Filter: (val2 = 1)
+               Bloom Filter 1
+               ->  Seq Scan on aa_dim1 d1
+                     Filter: (val1 = 1)
    ->  Hash
-         ->  Seq Scan on aa_dim1 d1
-               Filter: (val1 = 1)
-(11 rows)
+         Bloom Filter 2
+         ->  Seq Scan on aa_dim2 d2
+               Filter: (val2 = 1)
+(15 rows)
 
 -- Test that we can list each stash individually and all of them together,
 -- but not a nonexistent stash.
@@ -263,20 +281,24 @@ EXPLAIN (COSTS OFF) SELECT * FROM aa_fact f
 	LEFT JOIN aa_dim1 d1 ON f.dim1_id = d1.id
 	LEFT JOIN aa_dim2 d2 ON f.dim2_id = d2.id
 	WHERE val1 = 1 AND val2 = 1;
-                QUERY PLAN                
-------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Hash Join
-   Hash Cond: (f.dim1_id = d1.id)
+   Hash Cond: (f.dim2_id = d2.id)
    ->  Hash Join
-         Hash Cond: (f.dim2_id = d2.id)
+         Hash Cond: (f.dim1_id = d1.id)
          ->  Seq Scan on aa_fact f
+               Bloom Filter 1: keys=(dim1_id)
+               Bloom Filter 2: keys=(dim2_id)
          ->  Hash
-               ->  Seq Scan on aa_dim2 d2
-                     Filter: (val2 = 1)
+               Bloom Filter 1
+               ->  Seq Scan on aa_dim1 d1
+                     Filter: (val1 = 1)
    ->  Hash
-         ->  Seq Scan on aa_dim1 d1
-               Filter: (val1 = 1)
-(11 rows)
+         Bloom Filter 2
+         ->  Seq Scan on aa_dim2 d2
+               Filter: (val2 = 1)
+(15 rows)
 
 SELECT * FROM pg_get_advice_stashes() ORDER BY stash_name;
      stash_name      | num_entries 

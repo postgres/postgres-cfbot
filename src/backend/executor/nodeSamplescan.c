@@ -147,6 +147,9 @@ ExecInitSampleScan(SampleScan *node, EState *estate, int eflags)
 	scanstate->repeatable =
 		ExecInitExpr(tsc->repeatable, (PlanState *) scanstate);
 
+	ExecInitBloomFilters((PlanState *) scanstate,
+						 scanstate->ss.ss_ScanTupleSlot);
+
 	/*
 	 * If we don't have a REPEATABLE clause, select a random seed.  We want to
 	 * do this just once, since the seed shouldn't change over rescans.

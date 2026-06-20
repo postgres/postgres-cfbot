@@ -169,7 +169,9 @@
 #include "executor/instrument.h"
 #include "executor/nodeHash.h"
 #include "executor/nodeHashjoin.h"
+#include "lib/bloomfilter.h"
 #include "miscadmin.h"
+#include "port/pg_bitutils.h"
 #include "utils/lsyscache.h"
 #include "utils/sharedtuplestore.h"
 #include "utils/tuplestore.h"
@@ -834,6 +836,7 @@ HashJoinState *
 ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 {
 	HashJoinState *hjstate;
+	HashState  *hashState;
 	Plan	   *outerNode;
 	Hash	   *hashNode;
 	TupleDesc	outerDesc,
@@ -875,10 +878,36 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	outerNode = outerPlan(node);
 	hashNode = (Hash *) innerPlan(node);
 
+	/*
+	 * Register ourselves as a bloom-filter producer in the EState before
+	 * recursing into the outer subtree, so the scan node (we pushed the
+	 * filter to) can find us. We do this only if we actually managed to push
+	 * down the filter to a scan node.
+	 */
+	if (node->bloom_consumer_count > 0)
+		ExecRegisterBloomFilterProducer(hjstate);
+
 	outerPlanState(hjstate) = ExecInitNode(outerNode, estate, eflags);
 	outerDesc = ExecGetResultType(outerPlanState(hjstate));
 	innerPlanState(hjstate) = ExecInitNode((Plan *) hashNode, estate, eflags);
 	innerDesc = ExecGetResultType(innerPlanState(hjstate));
+
+	/*
+	 * Tell the Hash child to actually build the bloom filter, and the ID
+	 * assigned to the filter.
+	 *
+	 * XXX Seems a bit ugly to manipulate the inner plan state like this.
+	 * Surely there's a better way. OTOH the two nodes are pretty tightly
+	 * coupled already, so maybe it's fine.
+	 *
+	 * XXX Also, this assumes the hash table is not built by ExecInitNode(),
+	 * which is true for now. But maybe we will relax that in the future (e.g.
+	 * so that the scan can push the filter to storage / to remote FDW node /
+	 * ...)?
+	 */
+	hashState = castNode(HashState, innerPlanState(hjstate));
+	hashState->want_bloom_filter = (node->bloom_consumer_count > 0);
+	hashState->bloom_filter_id = node->bloom_filter_id;
 
 	/*
 	 * Initialize result slot, type and projection.
@@ -1080,11 +1109,15 @@ ExecEndHashJoin(HashJoinState *node)
 
 	/*
 	 * Free hash table
+	 *
+	 * Clear the bloom_filter pointer. It lives in hashCxt, so it gets freed
+	 * by the ExecHashTableDestroy call.
 	 */
 	if (node->hj_HashTable)
 	{
 		ExecHashTableDestroy(node->hj_HashTable);
 		node->hj_HashTable = NULL;
+		hashNode->bloom_filter = NULL;
 	}
 
 	/*
@@ -1738,6 +1771,12 @@ ExecReScanHashJoin(HashJoinState *node)
 			node->hj_JoinState = HJ_BUILD_HASHTABLE;
 
 			/*
+			 * Clear the bloom_filter pointer. It lives in hashCxt, so it gets
+			 * freed by the ExecHashTableDestroy call.
+			 */
+			hashNode->bloom_filter = NULL;
+
+			/*
 			 * if chgParam of subnode is not null then plan will be re-scanned
 			 * by first ExecProcNode.
 			 */
@@ -1974,4 +2013,421 @@ ExecHashJoinInitializeWorker(HashJoinState *state,
 	hashNode->parallel_state = pstate;
 
 	ExecSetExecProcNode(&state->js.ps, ExecParallelHashJoin);
+}
+
+/*
+ * BLOOM FILTER PUSHDOWN
+ *
+ * The pushdown decision is done in try_push_bloom_filter, when constructing
+ * the plan from the selected paths. The input paths track filters "expected"
+ * by scan nodes included in that path (if any). The planner then ensures all
+ * expected filters are either satisfied (by matching joins) or propagated up.
+ * In a valid plan all expected filters are satisfied.
+ *
+ * Then at execution time:
+ *
+ *   - ExecInitHashJoin registers itself in EState.es_bloom_producers
+ *     before recursing into child plans, so by the time a recipient's
+ *     ExecInit runs, the producer is already discoverable by filter ID.
+ *     This registration only happens when there's at least one consumer.
+ *     It also sets want_bloom_filter for the Hash node.
+ *
+ *   - ExecHashTableCreate (in nodeHash.c) builds the actual bloom_filter
+ *     when HashState.want_bloom_filter is set (so no work happens when
+ *     nobody will probe).
+ *
+ *   - Nodes with non-NIL plan->bloom_filters (and supporting Bloom
+ *     filters) call ExecInitBloomFilters() during its own ExecInit,
+ *     which looks up the producer node (in the EState), compiles
+ *     ExprStates for the hash expressions, etc. The filter state
+ *     (BloomFilterState) gets added to ps->bloom_filters (a node may
+ *     have multiple Bloom filters from different hash joins).
+ *
+ *   - The per-tuple loop of the scan node calls ExecBloomFilters() (much
+ *     like ExecQual) to test the tuple against every attached filter,
+ *     dropping it on the first filter that excludes it. For scan nodes
+ *     this call happens in ExecScanExtended.
+ *
+ * The scan nodes reach the Bloom filter via the HashJoinState pointer
+ * added to EState.es_bloom_producers, so that the rescans etc. (filter
+ * freed + recreated when the hash table is destroyed and rebuilt) are
+ * transparent to the consumer. The Bloom filter gets reallocated after
+ * a rescan, so the pointer to it may change.
+ *
+ * XXX It's possible the Bloom filter gets pushed down to a node that
+ * fails to initialize/use it. It'll be added to the bloom_filters list,
+ * but if the node does not call ExecInitBloomFilters, the filter will
+ * be unused.
+ * ----------------------------------------------------------------
+ */
+
+/*
+ * Lookup the HashJoinState for a producer by plan_node_id in the
+ * EState's es_bloom_producers list.  Returns NULL if no matching
+ * producer has registered yet (which can happen for filters attached to
+ * recipients in trees where the producer hasn't ExecInit'd yet -- in
+ * normal execution we always register first).
+ */
+static HashJoinState *
+LookupBloomFilterProducer(EState *estate, int bloom_filter_id)
+{
+	ListCell   *lc;
+
+	foreach(lc, estate->es_bloom_producers)
+	{
+		HashJoinState *hjstate = (HashJoinState *) lfirst(lc);
+		HashJoin   *plan = (HashJoin *) hjstate->js.ps.plan;
+
+		if (plan->bloom_filter_id == bloom_filter_id)
+			return hjstate;
+	}
+	return NULL;
+}
+
+/*
+ * ExecBloomFilterHash
+ *		Calculate the hash value for a tuple in the recipient node.
+ *
+ * Uses the per-key ExprStates initialized by ExecInitBloomFilters. Mirrors the
+ * scheme used by the Hash node, so that it matches what was inserted into the
+ * hashtable (and filter).
+ *
+ * Returns false if a strict key is NULL: such a tuple can't match anything in
+ * the bloom filter, but we still must let it pass through to the upstream join
+ * so the join (rather than us) decides what to do with it (e.g. emit
+ * NULL-extended for an outer join).
+ *
+ * XXX I'm not sure about this strict/NULL business.
+ */
+static inline bool
+ExecBloomFilterHash(BloomFilterState *bfs, ExprContext *econtext,
+					uint32 *hashvalue)
+{
+	bool		isnull;
+	uint32		hash;
+
+	hash = DatumGetUInt32(ExecEvalExpr(bfs->keys, econtext, &isnull));
+
+	if (isnull)
+		return 0;				/* XXX correct? do we care about NULL values? */
+
+	*hashvalue = hash;
+	return true;
+}
+
+/*
+ * ADAPTIVE BEHAVIOR
+ *
+ * If the bloom filter lets through most (or all) tuples, it becomes somewhat
+ * useless - we're just wasting CPU cycles, getting nothing in return. We could
+ * simply stop using such filter. But we've already paid quite a bit to build
+ * it, and maybe the data set is not uniform and we'll get into a part where
+ * fewer tuples pass.
+ *
+ * So we're evaluating the match rate for windows of 1000 probes. If more than
+ * 90% match, we start sampling 1% of the probes (i.e. 99% it treated as a
+ * match without looking at the filter). And if the match rate drops below 80%,
+ * we stop the sampling and all probes go to the filter.
+ *
+ * XXX These are empirical values, picked based on experiments. "Perfect"
+ * values depend on hardware, number of keys, data types, ... and maybe even
+ * on how many hash joins / pushed-down filters there are, and how deep (the
+ * deeper the bigger the benefit).
+ *
+ * XXX Maybe we should sample more probes, or maybe the window should be a bit
+ * smaller? With 1% and 1000 probes per window, it'll take 100k probes to
+ * enable the filter again. That seems like a lot.
+ *
+ * XXX We should probably track the number of times we "disabled" the filter,
+ * and what fraction of entries were "let through" during sampling periods.
+ *
+ * XXX There's an intentional gap between low/high thresholds, to add a bit
+ * of hysteresis into the behavior, so it does not flap all the time.
+ */
+#define BLOOM_ADAPTIVE_WINDOW_SIZE			1000
+#define BLOOM_ADAPTIVE_HIGH_MATCH_PERCENT	90
+#define BLOOM_ADAPTIVE_LOW_MATCH_PERCENT	80
+#define BLOOM_ADAPTIVE_SAMPLE_RATE			100
+
+/*
+ * ExecBloomFilterShouldProbe
+ *		Decide if the next tuple should probe the bloom filter.
+ *
+ * Returns true if the next value should actually probe the bloom filter
+ * We sample 1/100 (1/BLOOM_ADAPTIVE_SAMPLE_RATE) probes, i.e. 1%.
+ */
+static inline bool
+ExecBloomFilterShouldProbe(BloomFilterState *bfs)
+{
+	if (!bfs->adaptiveSampling)
+		return true;
+
+	bfs->adaptiveSampleCounter++;
+
+	if (bfs->adaptiveSampleCounter >= BLOOM_ADAPTIVE_SAMPLE_RATE)
+	{
+		bfs->adaptiveSampleCounter = 0;
+		return true;
+	}
+
+	return false;
+}
+
+/*
+ * ExecBloomFilterUpdateAdaptiveState
+ *		Update the adaptive state for sampling the probes.
+ *
+ * Adjust the adaptive behavior every 1000 probes. If too many probes match,
+ * stop using the filter (and just sample 1% of probes instead). If we were
+ * sampling, and the fraction of matches drops enough, stop the sampling.
+ */
+static inline void
+ExecBloomFilterUpdateAdaptiveState(BloomFilterState *bfs, bool match)
+{
+	bfs->adaptiveWindowProbes++;
+	if (match)
+		bfs->adaptiveWindowMatches++;
+
+	/* have we done enough probes in this window? */
+	if (bfs->adaptiveWindowProbes >= BLOOM_ADAPTIVE_WINDOW_SIZE)
+	{
+		uint64		match_percent;
+
+		/* fraction of matches */
+		match_percent = (bfs->adaptiveWindowMatches * 100) /
+			bfs->adaptiveWindowProbes;
+
+		if (!bfs->adaptiveSampling &&
+			match_percent > BLOOM_ADAPTIVE_HIGH_MATCH_PERCENT)
+		{
+			/* Too many matches - start sampling. */
+			bfs->adaptiveSampling = true;
+			bfs->adaptiveSampleCounter = 0;
+		}
+		else if (bfs->adaptiveSampling &&
+				 match_percent < BLOOM_ADAPTIVE_LOW_MATCH_PERCENT)
+		{
+			/* Stop sampling if the match fraction got low enough. */
+			bfs->adaptiveSampling = false;
+			bfs->adaptiveSampleCounter = 0;
+		}
+
+		/* in any case, start a new window of probes */
+		bfs->adaptiveWindowProbes = 0;
+		bfs->adaptiveWindowMatches = 0;
+	}
+}
+
+/*
+ * ExecBloomFilters
+ *		Probe bloom filters for the current slot.
+ *
+ * Test the slot in the expression context (set by the scan node) against
+ * every bloom filter attached to the node. Returns true if the tuple matches
+ * all filters (some of which may have been skipped, because the hash table
+ * isn't built yet); false if at least one filter conclusively excludes it.
+ *
+ * 'filters' is a list of BloomFilterState for each filter, pushed to the
+ * node (stored in planstate->bloom_filters). It may be NIL, which means
+ * are no filters, and the function simply returns NULL.
+ *
+ * The caller is responsible for having set econtext->ecxt_scantuple to
+ * 'slot' first. We do not reset the per-tuple context here (it's up to the
+ * scan node).
+ *
+ * Designed to be called like ExecQual from the recipient's per-tuple
+ * loop. See ExecScanExtended for the scan-node integration point.
+ *
+ * XXX We're pushing filters to scan nodes, which set the scan slot. And
+ * setrefs.c is currently wired to do fix_scan_bloom_filters, called from
+ * set_plan_refs. If we decide to push filters to other nodes (e.g. joins),
+ * this may need some rework.
+ */
+bool
+ExecBloomFilters(List *filters, ExprContext *econtext)
+{
+	ListCell   *lc;
+
+	/* bail out if no filters */
+	if (filters == NIL)
+		return true;
+
+	foreach(lc, filters)
+	{
+		BloomFilterState *bfs = (BloomFilterState *) lfirst(lc);
+		HashJoinState *producer = bfs->producer;
+		HashState  *hashNode;
+		bloom_filter *bf;
+		uint32		hashvalue;
+
+		/* Producer should always exist (resolved at init time). */
+		Assert(producer != NULL);
+
+		/*
+		 * The hashtable (and the bloom filter) is built lazily the first time
+		 * it needs to do a lookup. Until then, assume everything matches
+		 * everything through. Once the filter is in place, start probing it.
+		 *
+		 * XXX It should only take a couple tuples (maybe just a single one)
+		 * from the scan node before the filter is available.
+		 */
+		hashNode = castNode(HashState, innerPlanState(&producer->js.ps));
+		bf = hashNode->bloom_filter;
+		if (bf == NULL)
+			continue;
+
+		/*
+		 * When recent bloom probes mostly pass through, probe only a sample
+		 * of values to avoid spending work on an ineffective filter. Sampled
+		 * probes keep updating the recent match fraction, so filtering
+		 * resumes for every value once the filter becomes selective again.
+		 */
+		if (!ExecBloomFilterShouldProbe(bfs))
+			continue;
+
+		/* NULL strict key: tuple cannot be in the filter, pass through. */
+		if (!ExecBloomFilterHash(bfs, econtext, &hashvalue))
+			continue;
+
+		/*
+		 * XXX It's a bit silly the counters are in two places. We should keep
+		 * just the hashNode counters, and get rid of bfs counters.
+		 */
+		bfs->checked++;
+		hashNode->bloomFilterChecked++;
+
+		/* If not matching, we're done - reject the tuple. */
+		if (bloom_lacks_element(bf,
+								(unsigned char *) &hashvalue,
+								sizeof(hashvalue)))
+		{
+			bfs->rejected++;
+			hashNode->bloomFilterRejected++;
+			ExecBloomFilterUpdateAdaptiveState(bfs, false);
+			return false;
+		}
+
+		ExecBloomFilterUpdateAdaptiveState(bfs, true);
+	}
+
+	return true;
+}
+
+/*
+ * ExecInitBloomFilters
+ *		Initialize state for pushed-down bloom filters.
+ *
+ * Called by nodes that want to act as a recipient of pushed-down filters,
+ * after the node's projection / scan-tuple slot are set up, just like
+ * for regular quals.
+ *
+ * Walks the plan's bloom_filters list and produces a list of BloomFilterState
+ * nodes, stored in planstate->bloom_filters. The producer HashJoinState node
+ * is resolved here, once, via EState.es_bloom_producers; so that no lookup is
+ * needed at probe time (the bloom_filter pointer may change on rescan, but
+ * that's not what we store).
+ *
+ * 'output_slot' is the slot whose values the filter expressions will be
+ * evaluated against (i.e. the same slot the surrounding qual evaluates
+ * against, post-setrefs).
+ *
+ * XXX For now this has to be the scan slot. See the comment about setrefs
+ * a bit earlier. Could be relaxed later, if we support to pushdown to
+ * other node types.
+ *
+ * XXX The filter states are initialized in es_query_cxt, but maybe that's
+ * too long-lived. The states live only as long as the recipient node.
+ */
+void
+ExecInitBloomFilters(PlanState *planstate, TupleTableSlot *output_slot)
+{
+	Plan	   *plan = planstate->plan;
+	EState	   *estate = planstate->state;
+	List	   *result = NIL;
+	ListCell   *lc;
+	MemoryContext oldctx;
+
+	/* bail out if there are no pushed-down filters */
+	if (plan->bloom_filters == NIL)
+		return;
+
+	oldctx = MemoryContextSwitchTo(estate->es_query_cxt);
+
+	foreach(lc, plan->bloom_filters)
+	{
+		BloomFilter *bf = lfirst_node(BloomFilter, lc);
+		BloomFilterState *bfs;
+		int			nkeys;
+
+		nkeys = list_length(bf->filter_exprs);
+		Assert(nkeys > 0);
+		Assert(nkeys == list_length(bf->hashops));
+		Assert(nkeys == list_length(bf->hashcollations));
+
+		bfs = makeNode(BloomFilterState);
+
+		/* XXX some of this is redundant */
+		bfs->filter = bf;
+		bfs->producer_id = bf->producer_id;
+		bfs->producer = LookupBloomFilterProducer(estate, bf->producer_id);
+
+		/* initialize the expression state for the hashvalue calculation */
+		{
+			Oid		   *outer_hashfuncid = palloc_array(Oid, nkeys);
+			Oid		   *inner_hashfuncid = palloc_array(Oid, nkeys);
+			bool	   *hash_strict = palloc_array(bool, nkeys);
+			ListCell   *lc2;
+
+			/*
+			 * Determine the hash function for each side of the join for the
+			 * given join operator, and detect whether the join operator is
+			 * strict.
+			 */
+			foreach(lc2, bf->hashops)
+			{
+				Oid			hashop = lfirst_oid(lc2);
+				int			i = foreach_current_index(lc2);
+
+				if (!get_op_hash_functions(hashop,
+										   &outer_hashfuncid[i],
+										   &inner_hashfuncid[i]))
+					elog(ERROR,
+						 "could not find hash function for hash operator %u",
+						 hashop);
+				hash_strict[i] = op_strict(hashop);
+			}
+
+			/* state for the hash value calculation */
+			bfs->keys = ExecBuildHash32Expr(output_slot->tts_tupleDescriptor,
+											output_slot->tts_ops,
+											outer_hashfuncid,
+											bf->hashcollations,
+											bf->filter_exprs,
+											hash_strict,
+											planstate,
+											0);
+		}
+
+		result = lappend(result, bfs);
+	}
+
+	planstate->bloom_filters = result;
+
+	MemoryContextSwitchTo(oldctx);
+}
+
+/*
+ * ExecRegisterBloomFilterProducer
+ *		Register the pushed downn bloom filter.
+ *
+ * Called by ExecInitHashJoin (before recursing into the outer subtree)
+ * to register this HashJoinState as a producer for the pushed-down filter.
+ * Recipients in the outer subtree will look us up here by plan_node_id.
+ */
+void
+ExecRegisterBloomFilterProducer(HashJoinState *hjstate)
+{
+	EState	   *estate = hjstate->js.ps.state;
+
+	estate->es_bloom_producers = lappend(estate->es_bloom_producers, hjstate);
 }

@@ -3610,17 +3610,16 @@ ANALYZE sb_1, sb_2;
 -- bucket size is quite big because there are possibly many correlations.
 EXPLAIN (COSTS OFF) -- Choose merge join
 SELECT * FROM sb_1 a, sb_2 b WHERE a.x = b.x AND a.y = b.y AND a.z = b.z;
-                         QUERY PLAN                          
--------------------------------------------------------------
- Merge Join
-   Merge Cond: ((a.z = b.z) AND (a.x = b.x) AND (a.y = b.y))
-   ->  Sort
-         Sort Key: a.z, a.x, a.y
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Hash Join
+   Hash Cond: ((b.x = a.x) AND (b.y = a.y) AND (b.z = a.z))
+   ->  Seq Scan on sb_2 b
+         Bloom Filter 1: keys=(x, y, z)
+   ->  Hash
+         Bloom Filter 1
          ->  Seq Scan on sb_1 a
-   ->  Sort
-         Sort Key: b.z, b.x, b.y
-         ->  Seq Scan on sb_2 b
-(8 rows)
+(7 rows)
 
 -- The ndistinct extended statistics on (x, y, z) provides more reliable value
 -- of bucket size.

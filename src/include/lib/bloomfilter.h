@@ -23,5 +23,7 @@ extern void bloom_add_element(bloom_filter *filter, unsigned char *elem,
 extern bool bloom_lacks_element(bloom_filter *filter, unsigned char *elem,
 								size_t len);
 extern double bloom_prop_bits_set(bloom_filter *filter);
+extern uint64 bloom_total_bits(bloom_filter *filter);
+extern int	bloom_hash_funcs(bloom_filter *filter);
 
 #endif							/* BLOOMFILTER_H */

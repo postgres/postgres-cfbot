@@ -587,11 +587,13 @@ MERGE INTO rw_view1 t
          Hash Cond: (base_tbl.a = generate_series.generate_series)
          ->  Bitmap Heap Scan on base_tbl
                Recheck Cond: (a > 0)
+               Bloom Filter 1: keys=(a)
                ->  Bitmap Index Scan on base_tbl_pkey
                      Index Cond: (a > 0)
          ->  Hash
+               Bloom Filter 1
                ->  Function Scan on generate_series
-(9 rows)
+(11 rows)
 
 EXPLAIN (costs off)
 MERGE INTO rw_view1 t
@@ -2777,12 +2779,14 @@ EXPLAIN (costs off) UPDATE rw_view1 SET a = a + 5;
    ->  Hash Join
          Hash Cond: (b.a = r.a)
          ->  Seq Scan on base_tbl b
+               Bloom Filter 1: keys=(a)
          ->  Hash
+               Bloom Filter 1
                ->  Seq Scan on ref_tbl r
    SubPlan exists_1
      ->  Index Only Scan using ref_tbl_pkey on ref_tbl r_1
            Index Cond: (a = b.a)
-(9 rows)
+(11 rows)
 
 DROP TABLE base_tbl, ref_tbl CASCADE;
 NOTICE:  drop cascades to view rw_view1
@@ -3522,18 +3526,17 @@ EXPLAIN (COSTS OFF) UPDATE v2 SET a = 1;
  Update on t1
    InitPlan exists_1
      ->  Result
-   ->  Merge Join
-         Merge Cond: (t1.a = v1.a)
-         ->  Sort
-               Sort Key: t1.a
-               ->  Seq Scan on t1
-         ->  Sort
-               Sort Key: v1.a
+   ->  Hash Join
+         Hash Cond: (t1.a = v1.a)
+         ->  Seq Scan on t1
+               Bloom Filter 1: keys=(a)
+         ->  Hash
+               Bloom Filter 1
                ->  Subquery Scan on v1
                      ->  Result
                            One-Time Filter: (InitPlan exists_1).col1
                            ->  Seq Scan on t1 t1_1
-(14 rows)
+(13 rows)
 
 DROP VIEW v2;
 DROP VIEW v1;

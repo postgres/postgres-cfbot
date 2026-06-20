@@ -456,6 +456,9 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 	scanstate->bitmapqualorig =
 		ExecInitQual(node->bitmapqualorig, (PlanState *) scanstate);
 
+	ExecInitBloomFilters((PlanState *) scanstate,
+						 scanstate->ss.ss_ScanTupleSlot);
+
 	scanstate->ss.ss_currentRelation = currentRelation;
 
 	/*

@@ -64,6 +64,11 @@ extern bool add_partial_path_precheck(RelOptInfo *parent_rel,
 									  int disabled_nodes, Cost startup_cost,
 									  Cost total_cost, List *pathkeys);
 
+extern bool expected_filters_equal(List *a, List *b);
+extern double expected_filters_selectivity(List *filters);
+extern Path *create_filtered_scan_path(PlannerInfo *root, Path *subpath,
+									   List *filters);
+
 extern Path *create_seqscan_path(PlannerInfo *root, RelOptInfo *rel,
 								 Relids required_outer, int parallel_workers);
 extern Path *create_samplescan_path(PlannerInfo *root, RelOptInfo *rel,

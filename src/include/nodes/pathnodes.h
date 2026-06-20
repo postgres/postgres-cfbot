@@ -244,6 +244,9 @@ typedef struct PlannerGlobal
 	/* highest plan node ID assigned */
 	int			lastPlanNodeId;
 
+	/* highest bloom-filter-producer ID assigned (see plannodes.h) */
+	int			lastBloomFilterId;
+
 	/* redo plan when TransactionXmin changes? */
 	bool		transientPlan;
 
@@ -1834,6 +1837,54 @@ typedef struct GroupByOrdering
 } GroupByOrdering;
 
 /*
+ * ExpectedFilter
+ *
+ * Represents the planner's assumption that a scan path will receive a Bloom
+ * filter pushed down at plan-creation time by some hash join above it (see
+ * the bloom filter pushdown logic in createplan.c and nodeHashjoin.c).  When
+ * a scan participates in a hashjoinable equality join, the hash join may build
+ * a Bloom filter on the inner ("build") side keys and push it to the scan on
+ * the outer ("probe") side, eliminating outer tuples that cannot match.
+ *
+ * Because that pushdown happens after path selection, the row/cost estimates
+ * of the affected paths would normally ignore the filter's selectivity.  To
+ * account for it during planning, we generate additional scan paths that carry
+ * one or more ExpectedFilter nodes and whose rows/cost reflect the expected
+ * elimination.  These filters are propagated up the join tree much like
+ * pathkeys, until the hash join that is their "source" realizes them.
+ *
+ * 'owner_relid' is the base relation the filter would be pushed down to.
+ * 'build_relids' is the set of base relids on the other (build) side of the
+ *		join clause(s); the filter is "sourced" by the join that first brings
+ *		those relids together with the owner.
+ * 'clauses' is the list of hashjoinable equality RestrictInfos defining the
+ *		filter keys (the owner side of each clause is a bare Var of owner_relid).
+ * 'selectivity' is the expected surviving fraction of owner rows (in (0,1]).
+ *
+ * XXX The "owner_relid" may be a bit misleading, particularly if we allow
+ * pushing a filter to multiple nodes (e.g. scans on a partition). In that case
+ * we'd have multiple "owners", but ownership suggests there's just one. And
+ * some places already use "consumer" when referencing to the scan nodes, so
+ * maybe we should just use that?
+ *
+ * XXX What if we allow pushdown to non-scan nodes, e.g. above a join when
+ * pushdown to a scan is not possible (e.g. because the join clause is complex
+ * and references multiple relations)? Or maybe we could push to ForeignScan,
+ * and I'm not sure if those have a valid relid in all cases.
+ */
+typedef struct ExpectedFilter
+{
+	pg_node_attr(no_read, no_query_jumble)
+
+	NodeTag		type;
+
+	Index		owner_relid;
+	Relids		build_relids;
+	List	   *clauses pg_node_attr(copy_as_scalar, equal_as_scalar);
+	Selectivity selectivity;
+} ExpectedFilter;
+
+/*
  * VolatileFunctionStatus -- allows nodes to cache their
  * contain_volatile_functions properties. VOLATILITY_UNKNOWN means not yet
  * determined.
@@ -2009,6 +2060,14 @@ typedef struct Path
 
 	/* sort ordering of path's output; a List of PathKey nodes; see above */
 	List	   *pathkeys;
+
+	/*
+	 * Bloom filters this path expects to receive from some hash join above it
+	 * (a List of ExpectedFilter nodes; see below).  An empty list means the
+	 * path makes no such assumption.  The path's rows/cost estimates already
+	 * reflect the expected selectivity of these filters.
+	 */
+	List	   *expected_filters;
 } Path;
 
 /* Macro for extracting a path's parameterization relids; beware double eval */
@@ -2490,6 +2549,16 @@ typedef struct HashPath
 	List	   *path_hashclauses;	/* join clauses used for hashing */
 	int			num_batches;	/* number of batches expected */
 	Cardinality inner_rows_total;	/* total inner rows expected */
+
+	/*
+	 * Bloom filters this hash join "realizes": expected filters (see
+	 * ExpectedFilter) carried by an input path for which this hash join is
+	 * the source, and which it can push down to the scan of the owner
+	 * relation. The pushdown decision is made here, while building paths;
+	 * create_plan() merely propagates it to the plan (see
+	 * create_hashjoin_plan).  NIL means this hash join pushes no filter.
+	 */
+	List	   *realized_filters;
 } HashPath;
 
 /*

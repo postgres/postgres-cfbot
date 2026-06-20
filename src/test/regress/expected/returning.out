@@ -713,29 +713,31 @@ UPDATE joinview SET f3 = f3 + 1 WHERE f3 = 57
    Update on pg_temp.foo foo_1
    ->  Hash Join
          Output: foo_2.f1, (foo_2.f3 + 1), joinme.ctid, foo_2.ctid, joinme_1.ctid, joinme.other, foo_1.tableoid, foo_1.ctid, foo_2.tableoid
-         Hash Cond: (foo_1.f2 = joinme.f2j)
-         ->  Hash Join
-               Output: foo_1.f2, foo_1.tableoid, foo_1.ctid, joinme_1.ctid, joinme_1.f2j
-               Hash Cond: (joinme_1.f2j = foo_1.f2)
-               ->  Seq Scan on pg_temp.joinme joinme_1
-                     Output: joinme_1.ctid, joinme_1.f2j
-               ->  Hash
-                     Output: foo_1.f2, foo_1.tableoid, foo_1.ctid
-                     ->  Seq Scan on pg_temp.foo foo_1
-                           Output: foo_1.f2, foo_1.tableoid, foo_1.ctid
+         Hash Cond: (joinme_1.f2j = foo_1.f2)
+         ->  Seq Scan on pg_temp.joinme joinme_1
+               Output: joinme_1.ctid, joinme_1.f2j
+               Bloom Filter 2: keys=(joinme_1.f2j)
          ->  Hash
-               Output: joinme.ctid, joinme.other, joinme.f2j, foo_2.f1, foo_2.f3, foo_2.ctid, foo_2.f2, foo_2.tableoid
+               Output: foo_1.f2, foo_1.tableoid, foo_1.ctid, joinme.ctid, joinme.other, joinme.f2j, foo_2.f1, foo_2.f3, foo_2.ctid, foo_2.f2, foo_2.tableoid
+               Bloom Filter 2
                ->  Hash Join
-                     Output: joinme.ctid, joinme.other, joinme.f2j, foo_2.f1, foo_2.f3, foo_2.ctid, foo_2.f2, foo_2.tableoid
-                     Hash Cond: (joinme.f2j = foo_2.f2)
+                     Output: foo_1.f2, foo_1.tableoid, foo_1.ctid, joinme.ctid, joinme.other, joinme.f2j, foo_2.f1, foo_2.f3, foo_2.ctid, foo_2.f2, foo_2.tableoid
+                     Hash Cond: (joinme.f2j = foo_1.f2)
                      ->  Seq Scan on pg_temp.joinme
                            Output: joinme.ctid, joinme.other, joinme.f2j
+                           Bloom Filter 1: keys=(joinme.f2j)
                      ->  Hash
-                           Output: foo_2.f1, foo_2.f3, foo_2.ctid, foo_2.f2, foo_2.tableoid
-                           ->  Seq Scan on pg_temp.foo foo_2
-                                 Output: foo_2.f1, foo_2.f3, foo_2.ctid, foo_2.f2, foo_2.tableoid
-                                 Filter: (foo_2.f3 = 57)
-(27 rows)
+                           Output: foo_1.f2, foo_1.tableoid, foo_1.ctid, foo_2.f1, foo_2.f3, foo_2.ctid, foo_2.f2, foo_2.tableoid
+                           Bloom Filter 1
+                           ->  Nested Loop
+                                 Output: foo_1.f2, foo_1.tableoid, foo_1.ctid, foo_2.f1, foo_2.f3, foo_2.ctid, foo_2.f2, foo_2.tableoid
+                                 Join Filter: (foo_1.f2 = foo_2.f2)
+                                 ->  Seq Scan on pg_temp.foo foo_2
+                                       Output: foo_2.f1, foo_2.f3, foo_2.ctid, foo_2.f2, foo_2.tableoid
+                                       Filter: (foo_2.f3 = 57)
+                                 ->  Seq Scan on pg_temp.foo foo_1
+                                       Output: foo_1.f2, foo_1.tableoid, foo_1.ctid
+(29 rows)
 
 UPDATE joinview SET f3 = f3 + 1 WHERE f3 = 57
   RETURNING old.*, new.*, *, new.f3 - old.f3 AS delta_f3;
@@ -793,12 +795,14 @@ UPDATE joinview SET f3 = f3 + 1, f4 = 7 WHERE f3 = 58
          Hash Cond: (joinme.f2j = foo.f2)
          ->  Seq Scan on pg_temp.joinme
                Output: joinme.other, joinme.ctid, joinme.f2j
+               Bloom Filter 1: keys=(joinme.f2j)
          ->  Hash
                Output: foo.f3, foo.f1, foo.f2, foo.f4, foo.ctid, foo.tableoid
+               Bloom Filter 1
                ->  Seq Scan on pg_temp.foo
                      Output: foo.f3, foo.f1, foo.f2, foo.f4, foo.ctid, foo.tableoid
                      Filter: (foo.f3 = 58)
-(12 rows)
+(14 rows)
 
 UPDATE joinview SET f3 = f3 + 1, f4 = 7 WHERE f3 = 58
   RETURNING old.*, new.*, *, new.f3 - old.f3 AS delta_f3;  -- should succeed

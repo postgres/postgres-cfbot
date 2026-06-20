@@ -384,6 +384,7 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 	glob->lastPHId = 0;
 	glob->lastRowMarkId = 0;
 	glob->lastPlanNodeId = 0;
+	glob->lastBloomFilterId = 0;
 	glob->transientPlan = false;
 	glob->dependsOnRole = false;
 	glob->partition_directory = NULL;

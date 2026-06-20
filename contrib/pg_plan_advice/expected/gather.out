@@ -18,23 +18,24 @@ VACUUM ANALYZE gt_fact;
 -- By default, we expect Gather Merge with a parallel hash join.
 EXPLAIN (COSTS OFF, PLAN_ADVICE)
 	SELECT * FROM gt_fact f JOIN gt_dim d ON f.dim_id = d.id ORDER BY d.id;
-                      QUERY PLAN                       
--------------------------------------------------------
+                    QUERY PLAN                    
+--------------------------------------------------
  Gather Merge
    Workers Planned: 1
-   ->  Sort
-         Sort Key: f.dim_id
-         ->  Parallel Hash Join
-               Hash Cond: (f.dim_id = d.id)
+   ->  Merge Join
+         Merge Cond: (f.dim_id = d.id)
+         ->  Sort
+               Sort Key: f.dim_id
                ->  Parallel Seq Scan on gt_fact f
-               ->  Parallel Hash
-                     ->  Parallel Seq Scan on gt_dim d
+         ->  Sort
+               Sort Key: d.id
+               ->  Seq Scan on gt_dim d
  Generated Plan Advice:
    JOIN_ORDER(f d)
-   HASH_JOIN(d)
+   MERGE_JOIN_PLAIN(d)
    SEQ_SCAN(f d)
    GATHER_MERGE((f d))
-(14 rows)
+(15 rows)
 
 -- Force Gather or Gather Merge of both relations together.
 BEGIN;
@@ -153,17 +154,18 @@ EXPLAIN (COSTS OFF, PLAN_ADVICE)
          ->  Sort
                Sort Key: f.dim_id
                ->  Parallel Seq Scan on gt_fact f
-   ->  Index Scan using gt_dim_pkey on gt_dim d
+   ->  Sort
+         Sort Key: d.id
+         ->  Seq Scan on gt_dim d
  Supplied Plan Advice:
    GATHER((d d/d.d)) /* partially matched */
  Generated Plan Advice:
    JOIN_ORDER(f d)
    MERGE_JOIN_PLAIN(d)
-   SEQ_SCAN(f)
-   INDEX_SCAN(d public.gt_dim_pkey)
+   SEQ_SCAN(f d)
    GATHER_MERGE(f)
    NO_GATHER(d)
-(17 rows)
+(18 rows)
 
 COMMIT;
 -- Force a Gather or Gather Merge on one relation but no parallelism on other.
@@ -180,18 +182,19 @@ EXPLAIN (COSTS OFF, PLAN_ADVICE)
          ->  Sort
                Sort Key: f.dim_id
                ->  Parallel Seq Scan on gt_fact f
-   ->  Index Scan using gt_dim_pkey on gt_dim d
+   ->  Sort
+         Sort Key: d.id
+         ->  Seq Scan on gt_dim d
  Supplied Plan Advice:
    GATHER_MERGE(f) /* matched */
    NO_GATHER(d) /* matched */
  Generated Plan Advice:
    JOIN_ORDER(f d)
    MERGE_JOIN_PLAIN(d)
-   SEQ_SCAN(f)
-   INDEX_SCAN(d public.gt_dim_pkey)
+   SEQ_SCAN(f d)
    GATHER_MERGE(f)
    NO_GATHER(d)
-(18 rows)
+(19 rows)
 
 SET LOCAL pg_plan_advice.advice = 'gather_merge(d) no_gather(f)';
 EXPLAIN (COSTS OFF, PLAN_ADVICE)

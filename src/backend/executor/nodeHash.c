@@ -35,6 +35,7 @@
 #include "executor/instrument.h"
 #include "executor/nodeHash.h"
 #include "executor/nodeHashjoin.h"
+#include "lib/bloomfilter.h"
 #include "miscadmin.h"
 #include "port/pg_bitutils.h"
 #include "utils/lsyscache.h"
@@ -183,6 +184,18 @@ MultiExecPrivateHash(HashState *node)
 			/* normal case with a non-null join key */
 			uint32		hashvalue = DatumGetUInt32(hashdatum);
 			int			bucketNumber;
+
+			/*
+			 * Add the tuple to the pushed-down bloom filter (if any). Do it
+			 * here (rather than in ExecHashTableInsert) so that each tuple is
+			 * added exactly once, even if it later gets shuffled between
+			 * batches by ExecHashIncreaseNumBatches. The filter would still
+			 * produce the same matches, but it costs CPU.
+			 */
+			if (node->bloom_filter != NULL)
+				bloom_add_element(node->bloom_filter,
+								  (unsigned char *) &hashvalue,
+								  sizeof(hashvalue));
 
 			bucketNumber = ExecHashGetSkewBucket(hashtable, hashvalue);
 			if (bucketNumber != INVALID_SKEW_BUCKET_NO)
@@ -663,6 +676,53 @@ ExecHashTableCreate(HashState *state)
 			ExecHashBuildSkewHash(state, hashtable, node, num_skew_mcvs);
 
 		MemoryContextSwitchTo(oldcxt);
+	}
+
+	/*
+	 * If we managed to push down a bloom filter to the outer side of the hash
+	 * join, allocate it with the hash table.
+	 *
+	 * Whether we build the filter is decided by try_push_bloom_filter at plan
+	 * time. If there's no recipient node, or when the GUC is set to off,
+	 * state->want_bloom_filter is false.
+	 *
+	 * XXX We don't do this for parallel hash joins, to keep the PoC simple.
+	 * The filter would need to live in shared memory, and the workers would
+	 * need to coordinate to build it. But it's doable.
+	 *
+	 * The filter lives in the HashState, in the hashCtx memory context. That
+	 * means it gets destroyed along with the hashtable, and it follows the
+	 * same lifecycle (during rescans, etc.).
+	 *
+	 * The size of the filter is bounded by both the estimated inner row count
+	 * and a fixed fraction of work_mem.  bloom_create() will round down to
+	 * the next power-of-two bitset and enforces a 1MB minimum.
+	 *
+	 * XXX This may need more thought. If we limit bloom_work_mem too much,
+	 * the false positive rate will get too bad, and we won't filter enough
+	 * tuples for the filter to pay for itself. The adaptive behavior will
+	 * eventually skip the filter, but we could just not build it at all? Or
+	 * do we want to take the chance, sometimes?
+	 */
+	if (state->want_bloom_filter)
+	{
+		MemoryContext oldctx;
+		int			bloom_work_mem;
+
+		/* only serial hashjoins for now, init only once */
+		Assert(hashtable->parallel_state == NULL);
+		Assert(state->bloom_filter == NULL);
+
+		state->bloomFilterChecked = 0;
+		state->bloomFilterRejected = 0;
+
+		/* Cap bloom filter at ~1/8 of work_mem, but not less than 1MB. */
+		bloom_work_mem = Max(1024, work_mem / 8);
+
+		oldctx = MemoryContextSwitchTo(hashtable->hashCxt);
+		state->bloom_filter = bloom_create((int64) Max(rows, 1.0),
+										   bloom_work_mem, 0);
+		MemoryContextSwitchTo(oldctx);
 	}
 
 	return hashtable;

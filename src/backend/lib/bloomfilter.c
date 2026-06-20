@@ -193,6 +193,25 @@ bloom_prop_bits_set(bloom_filter *filter)
 }
 
 /*
+ * Total bitset size, in bits.  Useful for EXPLAIN instrumentation:
+ * divide by 8 to get the bitset's memory footprint in bytes.
+ */
+uint64
+bloom_total_bits(bloom_filter *filter)
+{
+	return filter->m;
+}
+
+/*
+ * Number of hash functions in use.
+ */
+int
+bloom_hash_funcs(bloom_filter *filter)
+{
+	return filter->k_hash_funcs;
+}
+
+/*
  * Which element in the sequence of powers of two is less than or equal to
  * target_bitset_bits?
  *

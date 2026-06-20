@@ -56,39 +56,45 @@ EXPLAIN (COSTS OFF, PLAN_ADVICE)
 SET LOCAL pg_plan_advice.advice = 'MERGE_JOIN_MATERIALIZE(d)';
 EXPLAIN (COSTS OFF, PLAN_ADVICE)
 	SELECT * FROM join_fact f JOIN join_dim d ON f.dim_id = d.id;
-                           QUERY PLAN                           
-----------------------------------------------------------------
+                       QUERY PLAN                       
+--------------------------------------------------------
  Merge Join
    Disabled: true
    Merge Cond: (f.dim_id = d.id)
    ->  Index Scan using join_fact_dim_id on join_fact f
-   ->  Index Scan using join_dim_pkey on join_dim d
+   ->  Sort
+         Sort Key: d.id
+         ->  Seq Scan on join_dim d
  Supplied Plan Advice:
    MERGE_JOIN_MATERIALIZE(d) /* matched, failed */
  Generated Plan Advice:
    JOIN_ORDER(f d)
    MERGE_JOIN_PLAIN(d)
-   INDEX_SCAN(f public.join_fact_dim_id d public.join_dim_pkey)
+   SEQ_SCAN(d)
+   INDEX_SCAN(f public.join_fact_dim_id)
    NO_GATHER(f d)
-(12 rows)
+(15 rows)
 
 SET LOCAL pg_plan_advice.advice = 'MERGE_JOIN_PLAIN(d)';
 EXPLAIN (COSTS OFF, PLAN_ADVICE)
 	SELECT * FROM join_fact f JOIN join_dim d ON f.dim_id = d.id;
-                           QUERY PLAN                           
-----------------------------------------------------------------
+                       QUERY PLAN                       
+--------------------------------------------------------
  Merge Join
    Merge Cond: (f.dim_id = d.id)
    ->  Index Scan using join_fact_dim_id on join_fact f
-   ->  Index Scan using join_dim_pkey on join_dim d
+   ->  Sort
+         Sort Key: d.id
+         ->  Seq Scan on join_dim d
  Supplied Plan Advice:
    MERGE_JOIN_PLAIN(d) /* matched */
  Generated Plan Advice:
    JOIN_ORDER(f d)
    MERGE_JOIN_PLAIN(d)
-   INDEX_SCAN(f public.join_fact_dim_id d public.join_dim_pkey)
+   SEQ_SCAN(d)
+   INDEX_SCAN(f public.join_fact_dim_id)
    NO_GATHER(f d)
-(11 rows)
+(14 rows)
 
 SET LOCAL pg_plan_advice.advice = 'NESTED_LOOP_MATERIALIZE(d)';
 EXPLAIN (COSTS OFF, PLAN_ADVICE)
@@ -162,7 +168,9 @@ EXPLAIN (COSTS OFF, PLAN_ADVICE)
  Hash Join
    Hash Cond: (d.id = f.dim_id)
    ->  Seq Scan on join_dim d
+         Bloom Filter 1: keys=(id)
    ->  Hash
+         Bloom Filter 1
          ->  Seq Scan on join_fact f
  Supplied Plan Advice:
    HASH_JOIN(f) /* matched */
@@ -171,7 +179,7 @@ EXPLAIN (COSTS OFF, PLAN_ADVICE)
    HASH_JOIN(f)
    SEQ_SCAN(d f)
    NO_GATHER(f d)
-(12 rows)
+(14 rows)
 
 SET LOCAL pg_plan_advice.advice = 'MERGE_JOIN_MATERIALIZE(f)';
 EXPLAIN (COSTS OFF, PLAN_ADVICE)
@@ -301,19 +309,22 @@ EXPLAIN (COSTS OFF, PLAN_ADVICE)
 	SELECT * FROM join_fact f JOIN join_dim d ON f.dim_id = d.id;
                            QUERY PLAN                            
 -----------------------------------------------------------------
- Merge Join
-   Merge Cond: (d.id = f.dim_id)
-   ->  Index Scan using join_dim_pkey on join_dim d
-   ->  Index Scan using join_fact_dim_id on join_fact f
+ Hash Join
+   Hash Cond: (d.id = f.dim_id)
+   ->  Seq Scan on join_dim d
+         Bloom Filter 1: keys=(id)
+   ->  Hash
+         Bloom Filter 1
+         ->  Seq Scan on join_fact f
  Supplied Plan Advice:
    NESTED_LOOP_PLAIN(f) /* matched, conflicting, failed */
    NESTED_LOOP_MATERIALIZE(f) /* matched, conflicting, failed */
  Generated Plan Advice:
    JOIN_ORDER(d f)
-   MERGE_JOIN_PLAIN(f)
-   INDEX_SCAN(d public.join_dim_pkey f public.join_fact_dim_id)
+   HASH_JOIN(f)
+   SEQ_SCAN(d f)
    NO_GATHER(f d)
-(12 rows)
+(15 rows)
 
 SET LOCAL pg_plan_advice.advice = 'NESTED_LOOP_PLAIN(f d)';
 EXPLAIN (COSTS OFF, PLAN_ADVICE)

@@ -618,10 +618,12 @@ EXPLAIN (COSTS OFF) SELECT * FROM atest12 x, atest12 y
  Hash Join
    Hash Cond: (x.a = y.b)
    ->  Seq Scan on atest12 x
+         Bloom Filter 1: keys=(a)
    ->  Hash
+         Bloom Filter 1
          ->  Seq Scan on atest12 y
                Filter: (abs(a) <<< 5)
-(6 rows)
+(8 rows)
 
 -- clean up (regress_priv_user1's objects are all dropped later)
 DROP FUNCTION leak2(integer, integer) CASCADE;

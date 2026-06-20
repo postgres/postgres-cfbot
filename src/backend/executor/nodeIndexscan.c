@@ -970,6 +970,9 @@ ExecInitIndexScan(IndexScan *node, EState *estate, int eflags)
 	indexstate->indexorderbyorig =
 		ExecInitExprList(node->indexorderbyorig, (PlanState *) indexstate);
 
+	ExecInitBloomFilters((PlanState *) indexstate,
+						 indexstate->ss.ss_ScanTupleSlot);
+
 	/*
 	 * If we are just doing EXPLAIN (ie, aren't going to run the plan), stop
 	 * here.  This allows an index-advisor plugin to EXPLAIN a plan containing

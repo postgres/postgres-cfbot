@@ -582,10 +582,12 @@ WHERE my_int_eq(a.unique2, 42);
  Hash Join
    Hash Cond: (b.unique1 = a.unique1)
    ->  Seq Scan on tenk1 b
+         Bloom Filter 1: keys=(unique1)
    ->  Hash
+         Bloom Filter 1
          ->  Seq Scan on tenk1 a
                Filter: my_int_eq(unique2, 42)
-(6 rows)
+(8 rows)
 
 -- With support function that knows it's int4eq, we get a different plan
 CREATE FUNCTION test_support_func(internal)
@@ -612,14 +614,16 @@ CREATE FUNCTION my_gen_series(int, int) RETURNS SETOF integer
   SUPPORT test_support_func;
 EXPLAIN (COSTS OFF)
 SELECT * FROM tenk1 a JOIN my_gen_series(1,1000) g ON a.unique1 = g;
-               QUERY PLAN               
-----------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Hash Join
-   Hash Cond: (g.g = a.unique1)
-   ->  Function Scan on my_gen_series g
+   Hash Cond: (a.unique1 = g.g)
+   ->  Seq Scan on tenk1 a
+         Bloom Filter 1: keys=(unique1)
    ->  Hash
-         ->  Seq Scan on tenk1 a
-(5 rows)
+         Bloom Filter 1
+         ->  Function Scan on my_gen_series g
+(7 rows)
 
 EXPLAIN (COSTS OFF)
 SELECT * FROM tenk1 a JOIN my_gen_series(1,10) g ON a.unique1 = g;

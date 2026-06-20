@@ -25,6 +25,7 @@
 #include "commands/prepare.h"
 #include "foreign/fdwapi.h"
 #include "jit/jit.h"
+#include "lib/bloomfilter.h"
 #include "libpq/pqformat.h"
 #include "libpq/protocol.h"
 #include "nodes/extensible.h"
@@ -92,6 +93,8 @@ static void show_scan_qual(List *qual, const char *qlabel,
 static void show_upper_qual(List *qual, const char *qlabel,
 							PlanState *planstate, List *ancestors,
 							ExplainState *es);
+static void show_bloom_filter_info(PlanState *planstate, List *ancestors,
+								   ExplainState *es);
 static void show_sort_keys(SortState *sortstate, List *ancestors,
 						   ExplainState *es);
 static void show_incremental_sort_keys(IncrementalSortState *incrsortstate,
@@ -1978,6 +1981,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 			if (plan->qual)
 				show_instrumentation_count("Rows Removed by Filter", 1,
 										   planstate, es);
+			show_bloom_filter_info(planstate, ancestors, es);
 			show_indexsearches_info(planstate, es);
 			break;
 		case T_IndexOnlyScan:
@@ -1995,6 +1999,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 			if (es->analyze)
 				ExplainPropertyFloat("Heap Fetches", NULL,
 									 planstate->instrument->ntuples2, 0, es);
+			show_bloom_filter_info(planstate, ancestors, es);
 			show_indexsearches_info(planstate, es);
 			break;
 		case T_BitmapIndexScan:
@@ -2012,6 +2017,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 			if (plan->qual)
 				show_instrumentation_count("Rows Removed by Filter", 1,
 										   planstate, es);
+			show_bloom_filter_info(planstate, ancestors, es);
 			show_tidbitmap_info((BitmapHeapScanState *) planstate, es);
 			show_scan_io_usage((ScanState *) planstate, es);
 			break;
@@ -2030,6 +2036,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 			if (plan->qual)
 				show_instrumentation_count("Rows Removed by Filter", 1,
 										   planstate, es);
+			show_bloom_filter_info(planstate, ancestors, es);
 			if (IsA(plan, CteScan))
 				show_ctescan_info(castNode(CteScanState, planstate), es);
 			show_scan_io_usage((ScanState *) planstate, es);
@@ -2132,6 +2139,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 				if (plan->qual)
 					show_instrumentation_count("Rows Removed by Filter", 1,
 											   planstate, es);
+				show_bloom_filter_info(planstate, ancestors, es);
 			}
 			break;
 		case T_TidRangeScan:
@@ -2149,6 +2157,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 				if (plan->qual)
 					show_instrumentation_count("Rows Removed by Filter", 1,
 											   planstate, es);
+				show_bloom_filter_info(planstate, ancestors, es);
 				show_scan_io_usage((ScanState *) planstate, es);
 			}
 			break;
@@ -2576,6 +2585,135 @@ show_upper_qual(List *qual, const char *qlabel,
 
 	useprefix = (es->rtable_size > 1 || es->verbose);
 	show_qual(qual, qlabel, planstate, ancestors, useprefix, es);
+}
+
+/*
+ * show_bloom_filter_info
+ *		Show info about every Bloom filter pushed down to a scan node.
+ *
+ * In TEXT format each filter is rendered on a single line, e.g.
+ *
+ *   Bloom Filter N: keys=(a, b) checked=99999 rejected=99990
+ *
+ * The checked/rejected fields are omitted outside of ANALYZE). In structured
+ * formats we emit a group per filter with the same fields broken out as
+ * properties.
+ *
+ * Called from the per-recipient cases in ExplainNode; the recipient is expected
+ * to be a scan node, but nothing here depends on that. We may choose to push
+ * filters to other nodes in the plan.
+ *
+ * This only prints information about the keys, and the checked/rejected counts.
+ * Detailed information about the filter itself (number of bits, number of hash
+ * functions, ...) is available on the producer side.
+ *
+ * XXX It might be a good idea to show the expected filter selectivity too,
+ * not just the one actually observed during execution. That'd make it easier
+ * to reason about the decisions and review the plan changes.
+ *
+ * XXX If we choose other filter types, we'd need some general way to show the
+ * information. I don't know if we should have a "generic" information provided
+ * by all the filters, or if we would need a way to print custom information.
+ * Chances are we'd have a limited number of supported filter types, in which
+ * case we can have a show_ function for each type. Only if users could inject
+ * arbitrary filters, that'd be an issue. But that seems unlikely.
+ */
+static void
+show_bloom_filter_info(PlanState *planstate, List *ancestors,
+					   ExplainState *es)
+{
+	Plan	   *plan = planstate->plan;
+	ListCell   *lc1,
+			   *lc2;
+	List	   *deparse_cxt = NIL;
+	bool		useprefix = false;
+
+	if (plan->bloom_filters == NIL)
+		return;
+
+	deparse_cxt = set_deparse_context_plan(es->deparse_cxt,
+										   plan, ancestors);
+	useprefix = (IsA(plan, SubqueryScan) || es->verbose);
+
+	if (es->format != EXPLAIN_FORMAT_TEXT)
+		ExplainOpenGroup("Bloom Filters", "Bloom Filters", false, es);
+
+	/* print info about all the bloom filters */
+	forboth(lc1, plan->bloom_filters,
+			lc2, planstate->bloom_filters)
+	{
+		BloomFilter *bf = lfirst_node(BloomFilter, lc1);
+		BloomFilterState *bfs = (BloomFilterState *) lfirst(lc2);
+		ListCell   *lc;
+		StringInfoData keys;
+		bool		first = true;
+
+		initStringInfo(&keys);
+
+		/* deparse the filter expressions */
+		appendStringInfoChar(&keys, '(');
+		foreach(lc, bf->filter_exprs)
+		{
+			char	   *key;
+			Node	   *expr = (Node *) lfirst(lc);
+
+			if (!first)
+				appendStringInfoString(&keys, ", ");
+			key = deparse_expression(expr, deparse_cxt,
+									 useprefix, false);
+			appendStringInfoString(&keys, key);
+			first = false;
+		}
+		appendStringInfoChar(&keys, ')');
+
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			StringInfoData buf;
+
+			initStringInfo(&buf);
+
+			/* show the filter ID only when there are more filters */
+			appendStringInfo(&buf, "Bloom Filter %d: keys=%s",
+							 bf->producer_id, keys.data);
+
+			/* include the counts only during ANALYZE */
+			if (es->analyze && bfs != NULL)
+			{
+				/* rejected fraction */
+				double		frac = 100.0 * bfs->rejected / Max(1, bfs->checked);
+
+				appendStringInfo(&buf,
+								 " checked=" UINT64_FORMAT
+								 " rejected=" UINT64_FORMAT
+								 " (%.1f%%)",
+								 bfs->checked, bfs->rejected, frac);
+			}
+
+			ExplainIndentText(es);
+			appendStringInfoString(es->str, buf.data);
+			appendStringInfoChar(es->str, '\n');
+			pfree(buf.data);
+		}
+		else					/* non-text format */
+		{
+			ExplainOpenGroup("Bloom Filter", NULL, true, es);
+			ExplainPropertyText("Keys", keys.data, es);
+			ExplainPropertyInteger("ID", NULL, bf->producer_id, es);
+			if (es->analyze && bfs != NULL)
+			{
+				ExplainPropertyFloat("Checked", NULL,
+									 (double) bfs->checked, 0, es);
+				ExplainPropertyFloat("Rejected", NULL,
+									 (double) bfs->rejected, 0, es);
+			}
+			ExplainCloseGroup("Bloom Filter", NULL, true, es);
+		}
+
+		pfree(keys.data);
+	}
+
+	if (es->format != EXPLAIN_FORMAT_TEXT)
+		ExplainCloseGroup("Bloom Filters", "Bloom Filters", false, es);
 }
 
 /*
@@ -3472,6 +3610,84 @@ show_hash_info(HashState *hashstate, ExplainState *es)
 							 "Buckets: %d  Batches: %d  Memory Usage: " UINT64_FORMAT "kB\n",
 							 hinstrument.nbuckets, hinstrument.nbatch,
 							 spacePeakKb);
+		}
+	}
+
+	/*
+	 * Show infromation about the Bloom filter produced by this Hash node (if
+	 * any). For plain EXPLAIN, the filter is not initialized / built, but we
+	 * still show available plan-time metadata (at least the ID).
+	 *
+	 * Once the filter is built, we show the various filter parameters (number
+	 * of bits, hash functions, ...). Note that even with EXPLAIN ANALYZE the
+	 * filter may not be built, due to the hashjoin delaying the Hash build
+	 * until on the first outer tuple.
+	 *
+	 * XXX We don't show the keys, because those are always the join keys.
+	 *
+	 * XXX I think it makes sense to show the checked/rejected counters both
+	 * here and for the consumer. If/when we allow multiple consumers for the
+	 * filter, then this would show the "summary" while the scan node would
+	 * show just counters for that one consumer.
+	 */
+	if (hashstate->bloom_filter_id > 0)
+	{
+		int			producer_id = hashstate->bloom_filter_id;
+		uint64		nbits = 0;
+		int			nhashfns = 0;
+		uint64		bytes = 0;
+
+		if (hashstate->bloom_filter != NULL)
+		{
+			nbits = bloom_total_bits(hashstate->bloom_filter);
+			nhashfns = bloom_hash_funcs(hashstate->bloom_filter);
+			bytes = nbits / 8;
+		}
+
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			ExplainIndentText(es);
+			if (hashstate->bloom_filter != NULL)
+				appendStringInfo(es->str,
+								 "Bloom Filter %d: bits=" UINT64_FORMAT
+								 " hashes=%d memory=" UINT64_FORMAT "kB"
+								 " checked=" UINT64_FORMAT " rejected=" UINT64_FORMAT "\n",
+								 producer_id,
+								 nbits,
+								 nhashfns,
+								 BYTES_TO_KILOBYTES(bytes),
+								 hashstate->bloomFilterChecked,
+								 hashstate->bloomFilterRejected);
+			else if (es->analyze)
+				appendStringInfo(es->str,
+								 "Bloom Filter %d: (not initialized)\n",
+								 producer_id);
+			else
+				appendStringInfo(es->str,
+								 "Bloom Filter %d\n",
+								 producer_id);
+		}
+		else
+		{
+			/* there can be just one bloom filter per fproducer (for now) */
+			ExplainOpenGroup("Bloom Filter", "Bloom Filter", true, es);
+
+			ExplainPropertyInteger("Producer", NULL, producer_id, es);
+			ExplainPropertyBool("Initialized",
+								(hashstate->bloom_filter != NULL), es);
+
+			if (hashstate->bloom_filter != NULL)
+			{
+				ExplainPropertyUInteger("Bits", NULL, nbits, es);
+				ExplainPropertyInteger("Hash Functions", NULL, nhashfns, es);
+				ExplainPropertyUInteger("Memory Usage", "kB",
+										BYTES_TO_KILOBYTES(bytes), es);
+				ExplainPropertyFloat("Checked", NULL,
+									 (double) hashstate->bloomFilterChecked, 0, es);
+				ExplainPropertyFloat("Rejected", NULL,
+									 (double) hashstate->bloomFilterRejected, 0, es);
+			}
+			ExplainCloseGroup("Bloom Filter", "Bloom Filter", true, es);
 		}
 	}
 }

@@ -763,6 +763,14 @@ typedef struct EState
 	List	   *es_auxmodifytables; /* List of secondary ModifyTableStates */
 
 	/*
+	 * List of nodes producing pushed-down bloom filters. Each list element is
+	 * a HashJoinState with at least one filter pushed down to a scan node.
+	 * Scans look up their producer in this list (by plan_node_id) lazily on
+	 * first probe (and cache the result).
+	 */
+	List	   *es_bloom_producers;
+
+	/*
 	 * this ExprContext is for per-output-tuple operations, such as constraint
 	 * checks and index-value computations.  It will be reset for each output
 	 * tuple.  Note that it will be created only if needed.
@@ -1286,7 +1294,57 @@ typedef struct PlanState
 	bool		outeropsset;
 	bool		inneropsset;
 	bool		resultopsset;
+
+	/*
+	 * Bloom filters (BloomFilterState) pushed to this node (NIL if no filters
+	 * were pushed down to this node). Right now only some scan nodes expect
+	 * filters, but the list is in PlanState so that we can expand the feature
+	 * to more nodes in the future.
+	 */
+	List	   *bloom_filters;
 } PlanState;
+
+/*
+ * BloomFilterState
+ *
+ * State for executing (evaluating) a BloomFilter, pushed to a scan node.
+ *
+ * The producer is the HashJoinState this bloom filter is for. It's resolved
+ * at executor-init time using EState.es_bloom_producers (the producer always
+ * runs ExecInit before its recipients).
+ *
+ * 'checked' and 'rejected' are per-recipient counters reported by EXPLAIN
+ * ANALYZE. It's a bit redundant with the fields we have in the producer
+ * (see HashState). But if we ever end up with multiple consumers per filter,
+ * it'd be useful.
+ *
+ * The adaptive fields track the match fraction in recently checked probes.
+ * When most checks are passing through, the executor starts probing less
+ * frequently (and sampling probes instead), until the fraction of matches
+ * drops below some threshold.
+ */
+typedef struct BloomFilterState
+{
+	NodeTag		type;
+
+	/* producer HJ node and the filter */
+	int			producer_id;
+	struct HashJoinState *producer;
+	BloomFilter *filter;
+
+	int			nkeys;			/* number of hash keys */
+	ExprState  *keys;			/* ExprState for the hash calculation */
+
+	/* probe counters */
+	uint64		checked;
+	uint64		rejected;
+
+	/* adaptive probing */
+	uint64		adaptiveWindowProbes;
+	uint64		adaptiveWindowMatches;
+	uint64		adaptiveSampleCounter;
+	bool		adaptiveSampling;
+} BloomFilterState;
 
 /* ----------------
  *	these are defined to avoid confusion problems with "left"
@@ -2701,6 +2759,39 @@ typedef struct HashState
 
 	Tuplestorestate *null_tuple_store;	/* where to put null-keyed tuples */
 	bool		keep_null_tuples;	/* do we need to save such tuples? */
+
+	/*
+	 * True iff at we managed to push down the bloom filter to at least one
+	 * node on the HashJoin's outer side. It tells the Hash node to also build
+	 * a bloom filter next to the hash table.
+	 */
+	bool		want_bloom_filter;
+
+	/*
+	 * Mirror of the parent HashJoin's bloom_filter_id, copied here at
+	 * ExecInitHashJoin time so EXPLAIN's show_hash_info can label the filter
+	 * without traversing back up the plan-state tree (which is not easy, as
+	 * there's no parent in PlanState).
+	 */
+	int			bloom_filter_id;
+
+	/*
+	 * Bloom filter on hash values during the build phase. Probed by recipient
+	 * nodes (typically scans in the outer subtree).  NULL when pushdown is
+	 * disabled or no recipient was identified, and (transiently) before
+	 * ExecHashTableCreate runs (on the first outer tuple).
+	 *
+	 * Allocated in hashCxt, just like the hashtable itself. Reset on rescans.
+	 */
+	struct bloom_filter *bloom_filter;
+
+	/*
+	 * Counters with total per-filter instrumentation. Separate from the
+	 * per-recipient counters in BloomFilterState. Redundant, but will be
+	 * needed if we end up allowing multiple recipients.
+	 */
+	uint64		bloomFilterChecked;
+	uint64		bloomFilterRejected;
 
 	/*
 	 * In a parallelized hash join, the leader retains a pointer to the

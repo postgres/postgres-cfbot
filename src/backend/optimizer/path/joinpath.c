@@ -870,6 +870,271 @@ get_memoize_path(PlannerInfo *root, RelOptInfo *innerrel,
 }
 
 /*
+ * bloom_join_side_preserved
+ *		Can a pushed-down Bloom filter be applied below the given side of a
+ *		join of this type without changing the join's result?
+ *
+ * A Bloom filter removes tuples from the scan it is pushed to.  That is only
+ * safe on a side whose unmatched tuples the join would drop anyway: dropping
+ * a tuple early then matches the join's behaviour.  On a null-extended
+ * (preserved-other-side) input it is unsafe, because removing a tuple there
+ * could suppress, or spuriously emit, null-extended rows.
+ *
+ * This is the path-time counterpart of find_bloom_filter_recipient() in
+ * createplan.c, which descends a plan tree toward the recipient scan: it may
+ * only descend into a join's outer (resp. inner) child when this function
+ * returns true for to_outer = true (resp. false).  Keeping the two in sync is
+ * what guarantees that every filter we realize at path time has a reachable
+ * recipient at plan time.
+ */
+bool
+bloom_join_side_preserved(JoinType jointype, bool to_outer)
+{
+	switch (jointype)
+	{
+		case JOIN_INNER:
+			return true;
+		case JOIN_LEFT:
+		case JOIN_SEMI:
+		case JOIN_ANTI:
+			return to_outer;
+		case JOIN_RIGHT:
+		case JOIN_RIGHT_SEMI:
+		case JOIN_RIGHT_ANTI:
+			return !to_outer;
+		case JOIN_FULL:
+			return false;
+		default:
+			return false;
+	}
+}
+
+/*
+ * jointype_realizes_bloom_filter
+ *		Can a hash join of this type build and push a Bloom filter to its
+ *		outer (probe) side?
+ *
+ * This must match the join-type check in try_push_bloom_filter(), so that a
+ * filter we cost for is actually realized at plan time.  Only join types that
+ * drop unmatched outer (probe) tuples are safe, since the filter eliminates
+ * probe tuples lacking an inner match.
+ *
+ * Note JOIN_RIGHT qualifies: it preserves unmatched tuples of the inner (build)
+ * side, not the outer (probe) side, so dropping unmatched probe tuples is still
+ * correct.
+ */
+static bool
+jointype_realizes_bloom_filter(JoinType jointype)
+{
+	switch (jointype)
+	{
+		case JOIN_INNER:
+		case JOIN_RIGHT:
+		case JOIN_SEMI:
+		case JOIN_RIGHT_SEMI:
+		case JOIN_RIGHT_ANTI:
+			return true;
+		default:
+			return false;
+	}
+}
+
+/*
+ * hashjoin_pushes_filter_to
+ *		Would create_hashjoin_plan() be able to push a Bloom filter built from
+ *		these hash clauses down to the scan of owner_relid?
+ *
+ * This mirrors try_push_bloom_filter()'s requirement that every hash key on
+ * the outer side be a bare Var of a single base relation.  'outer_relids' is
+ * the set of relids on the outer (probe) side of the join.
+ */
+static bool
+hashjoin_pushes_filter_to(List *hashclauses, Relids outer_relids,
+						  Index owner_relid)
+{
+	ListCell   *lc;
+
+	if (hashclauses == NIL)
+		return false;
+
+	foreach(lc, hashclauses)
+	{
+		RestrictInfo *ri = (RestrictInfo *) lfirst(lc);
+		Node	   *outerside;
+		Var		   *var;
+
+		if (!is_opclause(ri->clause) ||
+			list_length(((OpExpr *) ri->clause)->args) != 2)
+			return false;
+
+		/* Pick the side that belongs to the outer relation. */
+		if (bms_is_subset(ri->left_relids, outer_relids))
+			outerside = get_leftop(ri->clause);
+		else if (bms_is_subset(ri->right_relids, outer_relids))
+			outerside = get_rightop(ri->clause);
+		else
+			return false;
+
+		if (!IsA(outerside, Var))
+			return false;
+		var = (Var *) outerside;
+		if (var->varno != owner_relid ||
+			var->varattno <= 0 ||
+			var->varlevelsup != 0)
+			return false;
+	}
+
+	return true;
+}
+
+/*
+ * compute_join_expected_filters
+ *		Determine the expected Bloom filters a prospective join path should
+ *		carry, applying the propagation and contradiction rules.
+ *
+ * Each filter expected by an input path is either:
+ *
+ *   - propagated upward (its build side is not yet fully joined in), or
+ *
+ *   - realized by this join (a hash join that is the filter's source and can
+ *     push the filter to its outer side): it is dropped from the result, since
+ *     it has now been applied.  When 'realized' is non-NULL, such filters are
+ *     appended to *realized so the caller can record them on the join path and
+ *     later propagate the pushdown decision to the plan, or
+ *
+ *   - contradicted: the join is the filter's source but cannot push it (it is
+ *     not a suitable hash join). In that case the input path cannot be used
+ *     for this join, so *contradicted is set true and NIL is returned.
+ *
+ * 'is_hashjoin'/'hashclauses' describe the join method; hashclauses is only
+ * meaningful for hash joins.
+ */
+static List *
+compute_join_expected_filters(PlannerInfo *root,
+							  Path *outer_path, Path *inner_path,
+							  JoinType jointype, bool is_hashjoin,
+							  List *hashclauses, bool *contradicted,
+							  List **realized)
+{
+	List	   *result = NIL;
+	Relids		outer_relids = outer_path->parent->relids;
+	Relids		inner_relids = inner_path->parent->relids;
+	Relids		join_relids;
+	int			pass;
+
+	*contradicted = false;
+	if (realized != NULL)
+		*realized = NIL;
+
+	/* Fast path: neither input expects any filter. */
+	if (outer_path->expected_filters == NIL &&
+		inner_path->expected_filters == NIL)
+		return NIL;
+
+	join_relids = bms_union(outer_relids, inner_relids);
+
+	/* Examine the filters from both inputs. */
+	for (pass = 0; pass < 2; pass++)
+	{
+		List	   *filters = (pass == 0) ? outer_path->expected_filters
+			: inner_path->expected_filters;
+		ListCell   *lc;
+
+		foreach(lc, filters)
+		{
+			ExpectedFilter *f = (ExpectedFilter *) lfirst(lc);
+			bool		owner_in_outer;
+			Relids		owner_relids;
+			Relids		other_relids;
+
+			owner_in_outer = bms_is_member(f->owner_relid, outer_relids);
+			owner_relids = owner_in_outer ? outer_relids : inner_relids;
+			other_relids = owner_in_outer ? inner_relids : outer_relids;
+
+			if (bms_is_subset(f->build_relids, owner_relids))
+			{
+				/*
+				 * Build side already sits with the owner; this shouldn't
+				 * normally happen (such a filter would have been resolved at
+				 * a lower join), but if it does, just propagate it unchanged.
+				 *
+				 * We still must be able to reach the owner's scan from above,
+				 * so the owner has to be on a side this join preserves (see
+				 * bloom_join_side_preserved); otherwise the filter could not
+				 * be pushed to a recipient and this path must be rejected.
+				 */
+				if (!bloom_join_side_preserved(jointype, owner_in_outer))
+					goto contradiction;
+				result = lappend(result, f);
+			}
+			else if (bms_is_subset(f->build_relids, join_relids))
+			{
+				/* This join is the source of the filter. */
+				if (is_hashjoin &&
+					owner_in_outer &&
+					bms_is_subset(f->build_relids, other_relids) &&
+					jointype_realizes_bloom_filter(jointype) &&
+					hashjoin_pushes_filter_to(hashclauses, outer_relids,
+											  f->owner_relid))
+				{
+					/* Realized by this hash join; drop from propagation. */
+					if (realized != NULL)
+						*realized = lappend(*realized, f);
+					continue;
+				}
+				else
+				{
+					/* Cannot realize the filter here: reject this path. */
+					goto contradiction;
+				}
+			}
+			else
+			{
+				/*
+				 * Build side not yet available; propagate.  As above, the
+				 * filter can only reach its recipient scan if the owner stays
+				 * on a side this join preserves; if not, reject this path so
+				 * we never realize a filter with no recipient at plan time.
+				 */
+				if (!bloom_join_side_preserved(jointype, owner_in_outer))
+					goto contradiction;
+				result = lappend(result, f);
+			}
+		}
+	}
+
+	bms_free(join_relids);
+	return result;
+
+contradiction:
+	*contradicted = true;
+	if (realized != NULL)
+	{
+		list_free(*realized);
+		*realized = NIL;
+	}
+	bms_free(join_relids);
+	list_free(result);
+	return NIL;
+}
+
+/*
+ * set_join_path_expected_filters
+ *		Attach the propagated expected filters to a freshly created join path
+ *		and reduce its row estimate to reflect their combined selectivity.
+ */
+static void
+set_join_path_expected_filters(Path *path, List *filters)
+{
+	if (filters == NIL)
+		return;
+
+	path->expected_filters = filters;
+	path->rows = clamp_row_est(path->rows *
+							   expected_filters_selectivity(filters));
+}
+
+/*
  * try_nestloop_path
  *	  Consider a nestloop join path; if it appears useful, push it into
  *	  the joinrel's pathlist via add_path().
@@ -967,26 +1232,72 @@ try_nestloop_path(PlannerInfo *root,
 						  nestloop_subtype | PGS_CONSIDER_NONPARTIAL,
 						  outer_path, inner_path, extra);
 
-	if (add_path_precheck(joinrel, workspace.disabled_nodes,
-						  workspace.startup_cost, workspace.total_cost,
-						  pathkeys, required_outer))
+	/*
+	 * Account for expected Bloom filters carried by the input paths.  A
+	 * nestloop never builds a Bloom filter, so if it is the source of any
+	 * expected filter the path is contradicted and must be rejected;
+	 * otherwise the filters propagate to the resulting path.
+	 */
 	{
-		add_path(joinrel, (Path *)
-				 create_nestloop_path(root,
-									  joinrel,
-									  jointype,
-									  &workspace,
-									  extra,
-									  outer_path,
-									  inner_path,
-									  extra->restrictlist,
-									  pathkeys,
-									  required_outer));
-	}
-	else
-	{
-		/* Waste no memory when we reject a path here */
-		bms_free(required_outer);
+		bool		contradicted;
+		List	   *jfilters;
+
+		jfilters = compute_join_expected_filters(root, outer_path, inner_path,
+												 jointype, false, NIL,
+												 &contradicted, NULL);
+
+		/*
+		 * Contradicted means the inner/outer paths expect this join to
+		 * realize one of the expected filters, but a nestloop can't do that.
+		 * So these input paths are incompatible with a nestloop.
+		 */
+		if (contradicted)
+		{
+			bms_free(required_outer);
+			return;
+		}
+
+		/*
+		 * If the path expects any filters, it's excluded from the cost
+		 * pruning performed by add_path (so don't bother with
+		 * add_path_precheck either). Once a path has all filters satisfied
+		 * (or there were no filters), do the pruning as usual.
+		 *
+		 * XXX We don't want the "regular" paths without filters to get
+		 * removed, because we need the option to pick from join algorithms.
+		 * Paths with filters would likely win (simply because there are fewer
+		 * rows), but they only work with hashjoins. However, maybe the
+		 * hashjoin won't work for some reason (e.g. it wouldn't fit into
+		 * work_mem).
+		 *
+		 * XXX Maybe it'd be cleaner to do this in add_path_precheck (i.e.
+		 * make it return true for paths with expected filters).
+		 */
+		if (jfilters != NIL ||
+			add_path_precheck(joinrel, workspace.disabled_nodes,
+							  workspace.startup_cost, workspace.total_cost,
+							  pathkeys, required_outer))
+		{
+			Path	   *nlpath;
+
+			nlpath = (Path *) create_nestloop_path(root,
+												   joinrel,
+												   jointype,
+												   &workspace,
+												   extra,
+												   outer_path,
+												   inner_path,
+												   extra->restrictlist,
+												   pathkeys,
+												   required_outer);
+			set_join_path_expected_filters(nlpath, jfilters);
+			add_path(joinrel, nlpath);
+		}
+		else
+		{
+			/* Waste no memory when we reject a path here */
+			bms_free(required_outer);
+		}
 	}
 }
 
@@ -1160,30 +1471,58 @@ try_mergejoin_path(PlannerInfo *root,
 						   outer_presorted_keys,
 						   extra);
 
-	if (add_path_precheck(joinrel, workspace.disabled_nodes,
-						  workspace.startup_cost, workspace.total_cost,
-						  pathkeys, required_outer))
+	/*
+	 * Account for expected Bloom filters carried by the input paths.  A
+	 * mergejoin never builds a Bloom filter, so it contradicts (and cannot
+	 * use) any input path for which it would be the filter's source.
+	 * Filter-bearing paths bypass the precheck, since their reduced cost
+	 * isn't comparable to ordinary paths.
+	 *
+	 * XXX see the comments in try_nestloop_path
+	 */
 	{
-		add_path(joinrel, (Path *)
-				 create_mergejoin_path(root,
-									   joinrel,
-									   jointype,
-									   &workspace,
-									   extra,
-									   outer_path,
-									   inner_path,
-									   extra->restrictlist,
-									   pathkeys,
-									   required_outer,
-									   mergeclauses,
-									   outersortkeys,
-									   innersortkeys,
-									   outer_presorted_keys));
-	}
-	else
-	{
-		/* Waste no memory when we reject a path here */
-		bms_free(required_outer);
+		bool		contradicted;
+		List	   *jfilters;
+
+		jfilters = compute_join_expected_filters(root, outer_path, inner_path,
+												 jointype, false, NIL,
+												 &contradicted, NULL);
+		if (contradicted)
+		{
+			bms_free(required_outer);
+			return;
+		}
+
+		if (jfilters != NIL ||
+			add_path_precheck(joinrel, workspace.disabled_nodes,
+							  workspace.startup_cost, workspace.total_cost,
+							  pathkeys, required_outer))
+		{
+			Path	   *mjpath;
+
+			mjpath = (Path *) create_mergejoin_path(root,
+													joinrel,
+													jointype,
+													&workspace,
+													extra,
+													outer_path,
+													inner_path,
+													extra->restrictlist,
+													pathkeys,
+													required_outer,
+													mergeclauses,
+													outersortkeys,
+													innersortkeys,
+													outer_presorted_keys);
+			set_join_path_expected_filters(mjpath, jfilters);
+			add_path(joinrel, mjpath);
+		}
+		else
+		{
+			/* Waste no memory when we reject a path here */
+			bms_free(required_outer);
+		}
+
 	}
 }
 
@@ -1314,27 +1653,63 @@ try_hashjoin_path(PlannerInfo *root,
 	initial_cost_hashjoin(root, &workspace, jointype, hashclauses,
 						  outer_path, inner_path, extra, false);
 
-	if (add_path_precheck(joinrel, workspace.disabled_nodes,
-						  workspace.startup_cost, workspace.total_cost,
-						  NIL, required_outer))
+	/*
+	 * Account for expected Bloom filters carried by the input paths.  A hash
+	 * join builds and pushes down a Bloom filter, so it realizes (and removes
+	 * from propagation) any expected filter for which it is the source; other
+	 * filters propagate upward.  Filter-bearing paths bypass the precheck.
+	 */
 	{
-		add_path(joinrel, (Path *)
-				 create_hashjoin_path(root,
-									  joinrel,
-									  jointype,
-									  &workspace,
-									  extra,
-									  outer_path,
-									  inner_path,
-									  false,	/* parallel_hash */
-									  extra->restrictlist,
-									  required_outer,
-									  hashclauses));
-	}
-	else
-	{
-		/* Waste no memory when we reject a path here */
-		bms_free(required_outer);
+		bool		contradicted;
+		List	   *jfilters;
+		List	   *realized;
+
+		jfilters = compute_join_expected_filters(root, outer_path, inner_path,
+												 jointype, true, hashclauses,
+												 &contradicted, &realized);
+
+		/* XXX Can a hashjoin contradict a filter? Probably not. */
+		if (contradicted)
+		{
+			bms_free(required_outer);
+			return;
+		}
+
+		if (jfilters != NIL ||
+			add_path_precheck(joinrel, workspace.disabled_nodes,
+							  workspace.startup_cost, workspace.total_cost,
+							  NIL, required_outer))
+		{
+			Path	   *hjpath;
+
+			hjpath = (Path *) create_hashjoin_path(root,
+												   joinrel,
+												   jointype,
+												   &workspace,
+												   extra,
+												   outer_path,
+												   inner_path,
+												   false,	/* parallel_hash */
+												   extra->restrictlist,
+												   required_outer,
+												   hashclauses);
+			set_join_path_expected_filters(hjpath, jfilters);
+
+			/*
+			 * Record the filters this hash join realizes, so
+			 * create_hashjoin_plan can push exactly those down (and no
+			 * others) at plan-creation time.
+			 */
+			((HashPath *) hjpath)->realized_filters = realized;
+
+			add_path(joinrel, hjpath);
+		}
+		else
+		{
+			/* Waste no memory when we reject a path here */
+			bms_free(required_outer);
+			return;
+		}
 	}
 }
 
@@ -2314,6 +2689,33 @@ hash_inner_and_outer(PlannerInfo *root,
 								  jointype,
 								  extra);
 			}
+		}
+
+		/*
+		 * Also consider outer paths that carry expected Bloom filters.  These
+		 * are deliberately excluded from cheapest_startup/total_path and from
+		 * cheapest_parameterized_paths (see set_cheapest), so we must iterate
+		 * the full outer pathlist to find them.  A hash join is able to build
+		 * and push down the filters, so these paths are useful here even when
+		 * they would be contradicted at a non-hash join.
+		 */
+		foreach(lc1, outerrel->pathlist)
+		{
+			Path	   *outerpath = (Path *) lfirst(lc1);
+
+			if (outerpath->expected_filters == NIL)
+				continue;
+
+			if (PATH_PARAM_BY_REL(outerpath, innerrel))
+				continue;
+
+			try_hashjoin_path(root,
+							  joinrel,
+							  outerpath,
+							  cheapest_total_inner,
+							  hashclauses,
+							  jointype,
+							  extra);
 		}
 
 		/*

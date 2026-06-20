@@ -39,18 +39,17 @@ USING source AS s
 ON t.tid = s.sid
 WHEN MATCHED THEN
 	DELETE;
-               QUERY PLAN               
-----------------------------------------
+                QUERY PLAN                
+------------------------------------------
  Merge on target t
-   ->  Merge Join
-         Merge Cond: (t.tid = s.sid)
-         ->  Sort
-               Sort Key: t.tid
-               ->  Seq Scan on target t
-         ->  Sort
-               Sort Key: s.sid
+   ->  Hash Join
+         Hash Cond: (t.tid = s.sid)
+         ->  Seq Scan on target t
+               Bloom Filter 1: keys=(tid)
+         ->  Hash
+               Bloom Filter 1
                ->  Seq Scan on source s
-(9 rows)
+(8 rows)
 
 --
 -- Errors
@@ -323,15 +322,17 @@ USING source AS s
 ON t.tid = s.sid
 WHEN MATCHED THEN
 	UPDATE SET balance = 0;
-               QUERY PLAN               
-----------------------------------------
+                QUERY PLAN                
+------------------------------------------
  Merge on target t
    ->  Hash Join
          Hash Cond: (s.sid = t.tid)
          ->  Seq Scan on source s
+               Bloom Filter 1: keys=(sid)
          ->  Hash
+               Bloom Filter 1
                ->  Seq Scan on target t
-(6 rows)
+(8 rows)
 
 EXPLAIN (COSTS OFF)
 MERGE INTO target t
@@ -339,15 +340,17 @@ USING source AS s
 ON t.tid = s.sid
 WHEN MATCHED THEN
 	DELETE;
-               QUERY PLAN               
-----------------------------------------
+                QUERY PLAN                
+------------------------------------------
  Merge on target t
    ->  Hash Join
          Hash Cond: (s.sid = t.tid)
          ->  Seq Scan on source s
+               Bloom Filter 1: keys=(sid)
          ->  Hash
+               Bloom Filter 1
                ->  Seq Scan on target t
-(6 rows)
+(8 rows)
 
 EXPLAIN (COSTS OFF)
 MERGE INTO target t
@@ -1636,42 +1639,38 @@ SELECT explain_merge('
 MERGE INTO ex_mtarget t USING ex_msource s ON t.a = s.a
 WHEN MATCHED THEN
 	UPDATE SET b = t.b + 1');
-                              explain_merge                              
--------------------------------------------------------------------------
+                                      explain_merge                                       
+------------------------------------------------------------------------------------------
  Merge on ex_mtarget t (actual rows=0.00 loops=1)
    Tuples: updated=50
-   ->  Merge Join (actual rows=50.00 loops=1)
-         Merge Cond: (t.a = s.a)
-         ->  Sort (actual rows=50.00 loops=1)
-               Sort Key: t.a
-               Sort Method: quicksort  Memory: xxx
-               ->  Seq Scan on ex_mtarget t (actual rows=50.00 loops=1)
-         ->  Sort (actual rows=100.00 loops=1)
-               Sort Key: s.a
-               Sort Method: quicksort  Memory: xxx
+   ->  Hash Join (actual rows=50.00 loops=1)
+         Hash Cond: (t.a = s.a)
+         ->  Seq Scan on ex_mtarget t (actual rows=50.00 loops=1)
+               Bloom Filter 1: keys=(a) checked=49 rejected=0 (0.0%)
+         ->  Hash (actual rows=100.00 loops=1)
+               Buckets: xxx  Batches: xxx  Memory Usage: xxx
+               Bloom Filter 1: bits=8388608 hashes=10 memory=1024kB checked=49 rejected=0
                ->  Seq Scan on ex_msource s (actual rows=100.00 loops=1)
-(12 rows)
+(10 rows)
 
 -- only updates to selected tuples
 SELECT explain_merge('
 MERGE INTO ex_mtarget t USING ex_msource s ON t.a = s.a
 WHEN MATCHED AND t.a < 10 THEN
 	UPDATE SET b = t.b + 1');
-                              explain_merge                              
--------------------------------------------------------------------------
+                                      explain_merge                                       
+------------------------------------------------------------------------------------------
  Merge on ex_mtarget t (actual rows=0.00 loops=1)
    Tuples: updated=5 skipped=45
-   ->  Merge Join (actual rows=50.00 loops=1)
-         Merge Cond: (t.a = s.a)
-         ->  Sort (actual rows=50.00 loops=1)
-               Sort Key: t.a
-               Sort Method: quicksort  Memory: xxx
-               ->  Seq Scan on ex_mtarget t (actual rows=50.00 loops=1)
-         ->  Sort (actual rows=100.00 loops=1)
-               Sort Key: s.a
-               Sort Method: quicksort  Memory: xxx
+   ->  Hash Join (actual rows=50.00 loops=1)
+         Hash Cond: (t.a = s.a)
+         ->  Seq Scan on ex_mtarget t (actual rows=50.00 loops=1)
+               Bloom Filter 1: keys=(a) checked=49 rejected=0 (0.0%)
+         ->  Hash (actual rows=100.00 loops=1)
+               Buckets: xxx  Batches: xxx  Memory Usage: xxx
+               Bloom Filter 1: bits=8388608 hashes=10 memory=1024kB checked=49 rejected=0
                ->  Seq Scan on ex_msource s (actual rows=100.00 loops=1)
-(12 rows)
+(10 rows)
 
 -- updates + deletes
 SELECT explain_merge('
@@ -1680,21 +1679,19 @@ WHEN MATCHED AND t.a < 10 THEN
 	UPDATE SET b = t.b + 1
 WHEN MATCHED AND t.a >= 10 AND t.a <= 20 THEN
 	DELETE');
-                              explain_merge                              
--------------------------------------------------------------------------
+                                      explain_merge                                       
+------------------------------------------------------------------------------------------
  Merge on ex_mtarget t (actual rows=0.00 loops=1)
    Tuples: updated=5 deleted=5 skipped=40
-   ->  Merge Join (actual rows=50.00 loops=1)
-         Merge Cond: (t.a = s.a)
-         ->  Sort (actual rows=50.00 loops=1)
-               Sort Key: t.a
-               Sort Method: quicksort  Memory: xxx
-               ->  Seq Scan on ex_mtarget t (actual rows=50.00 loops=1)
-         ->  Sort (actual rows=100.00 loops=1)
-               Sort Key: s.a
-               Sort Method: quicksort  Memory: xxx
+   ->  Hash Join (actual rows=50.00 loops=1)
+         Hash Cond: (t.a = s.a)
+         ->  Seq Scan on ex_mtarget t (actual rows=50.00 loops=1)
+               Bloom Filter 1: keys=(a) checked=49 rejected=0 (0.0%)
+         ->  Hash (actual rows=100.00 loops=1)
+               Buckets: xxx  Batches: xxx  Memory Usage: xxx
+               Bloom Filter 1: bits=8388608 hashes=10 memory=1024kB checked=49 rejected=0
                ->  Seq Scan on ex_msource s (actual rows=100.00 loops=1)
-(12 rows)
+(10 rows)
 
 -- only inserts
 SELECT explain_merge('
@@ -1791,21 +1788,20 @@ SELECT explain_merge('
 MERGE INTO ex_mtarget t USING ex_msource s ON t.a = s.a AND t.a < -1000
 WHEN MATCHED AND t.a < 10 THEN
 	DO NOTHING');
-                             explain_merge                             
------------------------------------------------------------------------
+                                      explain_merge                                      
+-----------------------------------------------------------------------------------------
  Merge on ex_mtarget t (actual rows=0.00 loops=1)
-   ->  Merge Join (actual rows=0.00 loops=1)
-         Merge Cond: (t.a = s.a)
-         ->  Sort (actual rows=0.00 loops=1)
-               Sort Key: t.a
-               Sort Method: quicksort  Memory: xxx
+   ->  Hash Join (actual rows=0.00 loops=1)
+         Hash Cond: (s.a = t.a)
+         ->  Seq Scan on ex_msource s (actual rows=1.00 loops=1)
+               Bloom Filter 1: keys=(a) checked=0 rejected=0 (0.0%)
+         ->  Hash (actual rows=0.00 loops=1)
+               Buckets: xxx  Batches: xxx  Memory Usage: xxx
+               Bloom Filter 1: bits=8388608 hashes=10 memory=1024kB checked=0 rejected=0
                ->  Seq Scan on ex_mtarget t (actual rows=0.00 loops=1)
                      Filter: (a < '-1000'::integer)
                      Rows Removed by Filter: 54
-         ->  Sort (never executed)
-               Sort Key: s.a
-               ->  Seq Scan on ex_msource s (never executed)
-(12 rows)
+(11 rows)
 
 DROP TABLE ex_msource, ex_mtarget;
 DROP FUNCTION explain_merge(text);
@@ -1831,8 +1827,10 @@ WHEN MATCHED AND t.c > s.cnt THEN
          Join Filter: (t.b < (SubPlan expr_1))
          ->  Seq Scan on public.tgt t
                Output: t.ctid, t.a, t.b
+               Bloom Filter 1: keys=(t.a)
          ->  Hash
                Output: s.a, s.b, s.c, s.d, s.ctid
+               Bloom Filter 1
                ->  Seq Scan on public.src s
                      Output: s.a, s.b, s.c, s.d, s.ctid
          SubPlan expr_1
@@ -1856,7 +1854,7 @@ WHEN MATCHED AND t.c > s.cnt THEN
                    ->  Seq Scan on public.ref r_1
                          Output: r_1.ab, r_1.cd
                          Filter: ((r_1.ab = (s.a + s.b)) AND (r_1.cd = (s.c - s.d)))
-(32 rows)
+(34 rows)
 
 DROP TABLE src, tgt, ref;
 -- Subqueries
