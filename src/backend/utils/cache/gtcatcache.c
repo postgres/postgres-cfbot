@@ -52,6 +52,7 @@
 #include "access/xact.h"
 #include "catalog/indexing.h"
 #include "catalog/pg_temp_class.h"
+#include "catalog/pg_temp_index.h"
 #include "utils/fmgroids.h"
 #include "utils/gtcatcache.h"
 #include "utils/hsearch.h"
@@ -139,6 +140,17 @@ static GTCatCache gt_cat_cache[NUM_GT_CAT_CACHES] = {
 		.index_relid = TempClassOidIndexId,
 		.key_attno = Anum_pg_temp_class_oid,
 		.cacheid = TEMPRELOID,
+		.hashtable = NULL,
+		.eoxact_list_len = 0,
+		.eoxact_list_overflowed = false,
+	},
+	/* PG_TEMP_INDEX */
+	{
+		.name = "pg_temp_index cache",
+		.catalog_relid = TempIndexRelationId,
+		.index_relid = TempIndexRelidIndexId,
+		.key_attno = Anum_pg_temp_index_indexrelid,
+		.cacheid = TEMPINDEXRELID,
 		.hashtable = NULL,
 		.eoxact_list_len = 0,
 		.eoxact_list_overflowed = false,

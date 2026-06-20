@@ -53,6 +53,7 @@
 #include "catalog/pg_constraint.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_temp_class.h"
+#include "catalog/pg_temp_index.h"
 #include "catalog/toasting.h"
 #include "commands/defrem.h"
 #include "commands/progress.h"
@@ -836,12 +837,15 @@ mark_index_clustered(Relation rel, Oid indexOid, bool is_internal)
 	foreach(index, RelationGetIndexList(rel))
 	{
 		Oid			thisIndexOid = lfirst_oid(index);
+		HeapTuple	temp_indexTuple;
+		Form_pg_temp_index temp_indexForm;
 
-		indexTuple = SearchSysCacheCopy1(INDEXRELID,
-										 ObjectIdGetDatum(thisIndexOid));
+		indexTuple = GetPgIndexAndPgTempIndexTuples(thisIndexOid,
+													&temp_indexTuple, false);
 		if (!HeapTupleIsValid(indexTuple))
 			elog(ERROR, "cache lookup failed for index %u", thisIndexOid);
 		indexForm = (Form_pg_index) GETSTRUCT(indexTuple);
+		temp_indexForm = (Form_pg_temp_index) GETSTRUCT_SAFE(temp_indexTuple);
 
 		/*
 		 * Unset the bit if set.  We know it's wrong because we checked this
@@ -855,7 +859,7 @@ mark_index_clustered(Relation rel, Oid indexOid, bool is_internal)
 		else if (thisIndexOid == indexOid)
 		{
 			/* this was checked earlier, but let's be real sure */
-			if (!indexForm->indisvalid)
+			if (!GetEffective_indisvalid(indexForm, temp_indexForm))
 				elog(ERROR, "cannot cluster on invalid index %u", indexOid);
 			indexForm->indisclustered = true;
 			CatalogTupleUpdate(pg_index, &indexTuple->t_self, indexTuple);
@@ -865,6 +869,8 @@ mark_index_clustered(Relation rel, Oid indexOid, bool is_internal)
 									 InvalidOid, is_internal);
 
 		heap_freetuple(indexTuple);
+		if (HeapTupleIsValid(temp_indexTuple))
+			heap_freetuple(temp_indexTuple);
 	}
 
 	table_close(pg_index, RowExclusiveLock);

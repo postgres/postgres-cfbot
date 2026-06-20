@@ -356,6 +356,11 @@
      </row>
 
      <row>
+      <entry><link linkend="catalog-pg-temp-index"><structname>pg_temp_index</structname></link></entry>
+      <entry>additional index information for indexes on global temporary tables</entry>
+     </row>
+
+     <row>
       <entry><link linkend="catalog-pg-temp-statistic"><structname>pg_temp_statistic</structname></link></entry>
       <entry>planner statistics for global temporary relations</entry>
      </row>
@@ -4614,6 +4619,11 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
        <link linkend="sql-insert"><command>INSERT</command></link>/<link linkend="sql-update"><command>UPDATE</command></link> operations, but it cannot safely
        be used for queries. If it is unique, the uniqueness property is not
        guaranteed true either.
+      </para>
+      <para>
+       For an index on a global temporary table, the value from
+       <link linkend="catalog-pg-temp-index"><structname>pg_temp_index</structname></link>.<structfield>indisvalid</structfield>,
+       if any, takes precedence over the value from this catalog.
       </para></entry>
      </row>
 
@@ -9279,6 +9289,82 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
    <para>
     Tuples are only added to <structname>pg_temp_class</structname> for global
     temporary relations that have been used in the current session.
+   </para>
+  </note>
+ </sect1>
+
+
+ <sect1 id="catalog-pg-temp-index">
+  <title><structname>pg_temp_index</structname></title>
+
+  <indexterm zone="catalog-pg-temp-index">
+   <primary>pg_temp_index</primary>
+  </indexterm>
+
+  <para>
+   The catalog <structname>pg_temp_index</structname> is a global temporary
+   table that stores information about indexes on global temporary tables in
+   use in the current session.
+  </para>
+
+  <para>
+   The attributes of <structname>pg_temp_index</structname> are a subset of
+   the attributes of
+   <link linkend="catalog-pg-index"><structname>pg_index</structname></link>,
+   used to store local overrides to the values from
+   <structname>pg_index</structname> for each session.  Currently, the only
+   attribute is <structfield>indisvalid</structfield>, used to indicate
+   whether an index is valid in the current session &mdash; a new index
+   created on a global temporary table will be marked invalid in all other
+   currently active sessions that have already added data to the table (see
+   <link linkend="sql-createindex"><command>CREATE INDEX</command></link>).
+  </para>
+
+  <table>
+   <title><structname>pg_temp_index</structname> Columns</title>
+   <tgroup cols="1">
+    <thead>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       Column Type
+      </para>
+      <para>
+       Description
+      </para></entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>indexrelid</structfield> <type>oid</type>
+       (references <link linkend="catalog-pg-class"><structname>pg_class</structname></link>.<structfield>oid</structfield>)
+      </para>
+      <para>
+       The OID of the <link linkend="catalog-pg-class"><structname>pg_class</structname></link> entry for this index
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>indisvalid</structfield> <type>bool</type>
+      </para>
+      <para>
+       If true, the index is currently valid for queries in the current session.
+       False means the index is possibly incomplete: it must still be modified by
+       <link linkend="sql-insert"><command>INSERT</command></link>/<link linkend="sql-update"><command>UPDATE</command></link> operations, but it cannot safely
+       be used for queries. If it is unique, the uniqueness property is not
+       guaranteed true either.
+      </para></entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+
+  <note>
+   <para>
+    Tuples are only added to <structname>pg_temp_index</structname> for indexes
+    on global temporary tables that have been used in the current session.
    </para>
   </note>
  </sect1>

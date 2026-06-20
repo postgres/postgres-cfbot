@@ -38,6 +38,7 @@
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_opclass.h"
 #include "catalog/pg_tablespace.h"
+#include "catalog/pg_temp_index.h"
 #include "catalog/pg_type.h"
 #include "commands/comment.h"
 #include "commands/defrem.h"
@@ -270,7 +271,7 @@ CheckIndexCompatible(Oid oldId,
 					  0, NULL);
 
 	/* Get the soon-obsolete pg_index tuple. */
-	tuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(oldId));
+	tuple = GetEffectivePgIndexTuple(oldId);
 	if (!HeapTupleIsValid(tuple))
 		elog(ERROR, "cache lookup failed for index %u", oldId);
 	indexForm = (Form_pg_index) GETSTRUCT(tuple);
@@ -283,7 +284,7 @@ CheckIndexCompatible(Oid oldId,
 		  heap_attisnull(tuple, Anum_pg_index_indexprs, NULL) &&
 		  indexForm->indisvalid))
 	{
-		ReleaseSysCache(tuple);
+		heap_freetuple(tuple);
 		return false;
 	}
 
@@ -300,7 +301,7 @@ CheckIndexCompatible(Oid oldId,
 	ret = (memcmp(old_indclass->values, opclassIds, old_natts * sizeof(Oid)) == 0 &&
 		   memcmp(old_indcollation->values, collationIds, old_natts * sizeof(Oid)) == 0);
 
-	ReleaseSysCache(tuple);
+	heap_freetuple(tuple);
 
 	if (!ret)
 		return false;
@@ -1598,19 +1599,36 @@ DefineIndex(ParseState *pstate,
 			{
 				Relation	pg_index = table_open(IndexRelationId, RowExclusiveLock);
 				HeapTuple	tup,
-							newtup;
+							temp_tup;
+				Form_pg_index form;
+				Form_pg_temp_index temp_form;
 
-				tup = SearchSysCache1(INDEXRELID,
-									  ObjectIdGetDatum(indexRelationId));
+				/*
+				 * For a global temporary index, we update indisvalid in both
+				 * pg_index and pg_temp_index, so that the change applies to
+				 * this session and all future sessions.
+				 */
+				tup = GetPgIndexAndPgTempIndexTuples(indexRelationId,
+													 &temp_tup, true);
 				if (!HeapTupleIsValid(tup))
 					elog(ERROR, "cache lookup failed for index %u",
 						 indexRelationId);
-				newtup = heap_copytuple(tup);
-				((Form_pg_index) GETSTRUCT(newtup))->indisvalid = false;
-				CatalogTupleUpdate(pg_index, &tup->t_self, newtup);
-				ReleaseSysCache(tup);
+				form = (Form_pg_index) GETSTRUCT(tup);
+				temp_form = (Form_pg_temp_index) GETSTRUCT_SAFE(temp_tup);
+
+				form->indisvalid = false;
+				if (temp_form != NULL)
+					temp_form->indisvalid = false;
+
+				CatalogTupleUpdate(pg_index, &tup->t_self, tup);
+				if (HeapTupleIsValid(temp_tup))
+				{
+					UpdatePgTempIndexTuple(indexRelationId, temp_tup);
+					heap_freetuple(temp_tup);
+				}
+
+				heap_freetuple(tup);
 				table_close(pg_index, RowExclusiveLock);
-				heap_freetuple(newtup);
 
 				/*
 				 * CCI here to make this update visible, in case this recurses

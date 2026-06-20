@@ -41,6 +41,7 @@
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_subscription.h"
 #include "catalog/pg_temp_class.h"
+#include "catalog/pg_temp_index.h"
 #include "catalog/pg_temp_statistic.h"
 #include "catalog/pg_transform.h"
 #include "catalog/pg_type.h"
@@ -3973,13 +3974,13 @@ get_index_isvalid(Oid index_oid)
 	HeapTuple	tuple;
 	Form_pg_index rd_index;
 
-	tuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(index_oid));
+	tuple = GetEffectivePgIndexTuple(index_oid);
 	if (!HeapTupleIsValid(tuple))
 		elog(ERROR, "cache lookup failed for index %u", index_oid);
 
 	rd_index = (Form_pg_index) GETSTRUCT(tuple);
 	isvalid = rd_index->indisvalid;
-	ReleaseSysCache(tuple);
+	heap_freetuple(tuple);
 
 	return isvalid;
 }

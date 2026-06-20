@@ -54,6 +54,7 @@
 #include "catalog/pg_statistic_ext.h"
 #include "catalog/pg_tablespace.h"
 #include "catalog/pg_temp_class.h"
+#include "catalog/pg_temp_index.h"
 #include "catalog/pg_trigger.h"
 #include "catalog/pg_type.h"
 #include "catalog/storage.h"
@@ -1838,7 +1839,7 @@ RangeVarCallbackForDropRelation(const RangeVar *rel, Oid relOid, Oid oldRelOid,
 		Form_pg_index indexform;
 		bool		indisvalid;
 
-		locTuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(relOid));
+		locTuple = GetEffectivePgIndexTuple(relOid);
 		if (!HeapTupleIsValid(locTuple))
 		{
 			ReleaseSysCache(tuple);
@@ -1847,7 +1848,7 @@ RangeVarCallbackForDropRelation(const RangeVar *rel, Oid relOid, Oid oldRelOid,
 
 		indexform = (Form_pg_index) GETSTRUCT(locTuple);
 		indisvalid = indexform->indisvalid;
-		ReleaseSysCache(locTuple);
+		heap_freetuple(locTuple);
 
 		/* Mark object as being an invalid index of system catalogs */
 		if (!indisvalid)
@@ -9883,7 +9884,10 @@ ATExecAddIndex(AlteredTableInfo *tab, Relation rel,
 	/*
 	 * Don't allow constraints to be added to global temporary tables that are
 	 * being used by other sessions, because we have no way to scan the local
-	 * storage of another backend to validate the constraint.
+	 * storage of another backend to validate the constraint.  Note, however,
+	 * that we do allow unique indexes to be created directly, even if another
+	 * session is using the table, by marking the index as invalid in the
+	 * other session.
 	 *
 	 * XXX: Do we actually need to do this? Adding a PRIMARY KEY is already
 	 * blocked for an in-use GTT by the check in ATRewriteTables(), and maybe
@@ -14085,7 +14089,7 @@ transformFkeyGetPrimaryKey(Relation pkrel, Oid *indexOid,
 	{
 		Oid			indexoid = lfirst_oid(indexoidscan);
 
-		indexTuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(indexoid));
+		indexTuple = GetEffectivePgIndexTuple(indexoid);
 		if (!HeapTupleIsValid(indexTuple))
 			elog(ERROR, "cache lookup failed for index %u", indexoid);
 		indexStruct = (Form_pg_index) GETSTRUCT(indexTuple);
@@ -14105,7 +14109,7 @@ transformFkeyGetPrimaryKey(Relation pkrel, Oid *indexOid,
 			*indexOid = indexoid;
 			break;
 		}
-		ReleaseSysCache(indexTuple);
+		heap_freetuple(indexTuple);
 	}
 
 	list_free(indexoidlist);
@@ -14143,7 +14147,7 @@ transformFkeyGetPrimaryKey(Relation pkrel, Oid *indexOid,
 
 	*pk_has_without_overlaps = indexStruct->indisexclusion;
 
-	ReleaseSysCache(indexTuple);
+	heap_freetuple(indexTuple);
 
 	return i;
 }
@@ -14206,7 +14210,7 @@ transformFkeyCheckAttrs(Relation pkrel,
 		Form_pg_index indexStruct;
 
 		indexoid = lfirst_oid(indexoidscan);
-		indexTuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(indexoid));
+		indexTuple = GetEffectivePgIndexTuple(indexoid);
 		if (!HeapTupleIsValid(indexTuple))
 			elog(ERROR, "cache lookup failed for index %u", indexoid);
 		indexStruct = (Form_pg_index) GETSTRUCT(indexTuple);
@@ -14282,7 +14286,7 @@ transformFkeyCheckAttrs(Relation pkrel,
 			if (found)
 				*pk_has_without_overlaps = indexStruct->indisexclusion;
 		}
-		ReleaseSysCache(indexTuple);
+		heap_freetuple(indexTuple);
 		if (found)
 			break;
 	}
@@ -22751,14 +22755,13 @@ validatePartitionedIndex(Relation partedIdx, Relation partedTbl)
 		HeapTuple	indTup;
 		Form_pg_index indexForm;
 
-		indTup = SearchSysCache1(INDEXRELID,
-								 ObjectIdGetDatum(inhForm->inhrelid));
+		indTup = GetEffectivePgIndexTuple(inhForm->inhrelid);
 		if (!HeapTupleIsValid(indTup))
 			elog(ERROR, "cache lookup failed for index %u", inhForm->inhrelid);
 		indexForm = (Form_pg_index) GETSTRUCT(indTup);
 		if (indexForm->indisvalid)
 			tuples += 1;
-		ReleaseSysCache(indTup);
+		heap_freetuple(indTup);
 	}
 
 	/* Done with pg_inherits */
@@ -22773,20 +22776,35 @@ validatePartitionedIndex(Relation partedIdx, Relation partedTbl)
 	{
 		Relation	idxRel;
 		HeapTuple	indTup;
+		HeapTuple	temp_indTup;
 		Form_pg_index indexForm;
+		Form_pg_temp_index temp_indexForm;
 
+		/*
+		 * For a global temporary index, we update indisvalid in both pg_index
+		 * and pg_temp_index, so that the change applies to this session and
+		 * all future sessions.
+		 */
 		idxRel = table_open(IndexRelationId, RowExclusiveLock);
-		indTup = SearchSysCacheCopy1(INDEXRELID,
-									 ObjectIdGetDatum(RelationGetRelid(partedIdx)));
+		indTup = GetPgIndexAndPgTempIndexTuples(RelationGetRelid(partedIdx),
+												&temp_indTup, true);
 		if (!HeapTupleIsValid(indTup))
 			elog(ERROR, "cache lookup failed for index %u",
 				 RelationGetRelid(partedIdx));
 		indexForm = (Form_pg_index) GETSTRUCT(indTup);
+		temp_indexForm = (Form_pg_temp_index) GETSTRUCT_SAFE(temp_indTup);
 
 		indexForm->indisvalid = true;
+		if (temp_indexForm != NULL)
+			temp_indexForm->indisvalid = true;
 		updated = true;
 
 		CatalogTupleUpdate(idxRel, &indTup->t_self, indTup);
+		if (HeapTupleIsValid(temp_indTup))
+		{
+			UpdatePgTempIndexTuple(RelationGetRelid(partedIdx), temp_indTup);
+			heap_freetuple(temp_indTup);
+		}
 
 		table_close(idxRel, RowExclusiveLock);
 		heap_freetuple(indTup);
