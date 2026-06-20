@@ -138,6 +138,12 @@ typedef struct Port
 	int			remote_hostname_resolv; /* see above */
 	int			remote_hostname_errcode;	/* see above */
 	char	   *remote_port;	/* text rep of remote port */
+	bool		proxy_protocol; /* whether this connection used the PROXY
+								   protocol */
+	SockAddr	proxy_addr;		/* real TCP peer (the proxy itself) */
+	char	   *proxy_host;		/* name (or ip addr) of the proxy */
+	char	   *proxy_hostname; /* name (not ip addr) of the proxy */
+	char	   *proxy_port;		/* text rep of the proxy's port */
 
 	/* local_host is filled only if needed (see log_status_format) */
 	char		local_host[64]; /* ip addr of local socket for client conn */
