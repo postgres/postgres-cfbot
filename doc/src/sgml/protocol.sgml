@@ -1682,6 +1682,22 @@ SELCT 1/0;<!-- this typo is intentional -->
    </para>
   </sect2>
 
+  <sect2 id="protocol-flow-proxy">
+   <title><acronym>PROXY</acronym> Protocol</title>
+
+   <para>
+    When a connection is forwarded by a proxy, the address the server sees is
+    the proxy's, not the real client's.  To preserve the
+    originating address, the proxy can prepend a header conforming to the
+    <ulink url="https://www.haproxy.org/download/2.9/doc/proxy-protocol.txt">PROXY
+    protocol</ulink> designed by <productname>HAProxy</productname>.  The
+    header carries the original source and destination addresses and ports.
+    The header is sent once, before any other data, ahead of the SSLRequest,
+    GSSENCRequest, or StartupMessage.  Both version 1 (text) and version 2
+    (binary) of the protocol are accepted.
+   </para>
+  </sect2>
+
   <sect2 id="protocol-flow-ssl">
    <title><acronym>SSL</acronym> Session Encryption</title>
 
