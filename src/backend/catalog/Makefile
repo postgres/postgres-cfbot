@@ -47,6 +47,7 @@ OBJS = \
 	pg_subscription.o \
 	pg_tablespace.o \
 	pg_temp_class.o \
+	pg_temp_index.o \
 	pg_type.o \
 	storage.o \
 	toasting.o

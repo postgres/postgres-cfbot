@@ -21,9 +21,10 @@
 typedef enum GTCatCacheIdentifier
 {
 	PG_TEMP_CLASS,
+	PG_TEMP_INDEX,
 } GTCatCacheIdentifier;
 
-#define NUM_GT_CAT_CACHES	((int) PG_TEMP_CLASS + 1)
+#define NUM_GT_CAT_CACHES	((int) PG_TEMP_INDEX + 1)
 
 extern bool GTCatCacheTupleExists(GTCatCacheIdentifier cacheId, Oid relid);
 extern HeapTuple GTCatCacheSearch(GTCatCacheIdentifier cacheId, Oid relid);

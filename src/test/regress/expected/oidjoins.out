@@ -287,6 +287,7 @@ NOTICE:  checking pg_propgraph_property {pgptypid} => pg_type {oid}
 NOTICE:  checking pg_propgraph_property {pgpcollation} => pg_collation {oid}
 NOTICE:  checking pg_temp_class {oid} => pg_class {oid}
 NOTICE:  checking pg_temp_class {reltablespace} => pg_tablespace {oid}
+NOTICE:  checking pg_temp_index {indexrelid} => pg_class {oid}
 NOTICE:  checking pg_temp_statistic {starelid} => pg_class {oid}
 NOTICE:  checking pg_temp_statistic {staop1} => pg_operator {oid}
 NOTICE:  checking pg_temp_statistic {staop2} => pg_operator {oid}

@@ -94,7 +94,9 @@ SELECT oid::regclass FROM pg_temp_class ORDER BY 1;
  pg_temp_class_oid_index
  pg_temp_statistic
  pg_temp_statistic_relid_att_inh_index
-(4 rows)
+ pg_temp_index
+ pg_temp_index_indexrelid_index
+(6 rows)
 
 SELECT * FROM tmp1;
  a | b | c 
@@ -108,9 +110,11 @@ SELECT oid::regclass FROM pg_temp_class ORDER BY 1;
  pg_temp_class_oid_index
  pg_temp_statistic
  pg_temp_statistic_relid_att_inh_index
+ pg_temp_index
+ pg_temp_index_indexrelid_index
  tmp1
  tmp1_pkey
-(6 rows)
+(8 rows)
 
 -- Test pg_relation_filenode() matches global relfilenode
 SELECT relfilenode = pg_relation_filenode('tmp1'::regclass) AS ok
@@ -255,6 +259,109 @@ SELECT tableoid::regclass, * FROM tmp2 ORDER BY a;
 (0 rows)
 
 DROP TABLE tmp2, perm;
+-- Test partitioned index validity
+CREATE GLOBAL TEMP TABLE tmp2 (a int) PARTITION BY LIST (a);
+CREATE GLOBAL TEMP TABLE tmp2_p1 PARTITION OF tmp2 FOR VALUES IN (1);
+CREATE INDEX tmp2_a_idx ON tmp2 (a);
+SELECT c.relname, i.indisvalid AS global_valid, t.indisvalid AS local_valid
+  FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
+  LEFT JOIN pg_temp_index t ON t.indexrelid = i.indexrelid
+ WHERE c.relname ~ 'tmp2(.*)_a_idx'
+ ORDER BY c.relname;
+    relname    | global_valid | local_valid 
+---------------+--------------+-------------
+ tmp2_a_idx    | t            | t
+ tmp2_p1_a_idx | t            | t
+(2 rows)
+
+\d tmp2
+Global temporary partitioned table "global_temp_tests.tmp2"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ a      | integer |           |          | 
+Partition key: LIST (a)
+Indexes:
+    "tmp2_a_idx" btree (a)
+Number of partitions: 1 (Use \d+ to list them.)
+
+\d tmp2_a_idx
+Partitioned index "global_temp_tests.tmp2_a_idx"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ a      | integer | yes  | a
+btree, for table "global_temp_tests.tmp2"
+Number of partitions: 1 (Use \d+ to list them.)
+
+DROP INDEX tmp2_a_idx;
+CREATE INDEX tmp2_a_idx ON ONLY tmp2 (a);
+SELECT c.relname, i.indisvalid AS global_valid, t.indisvalid AS local_valid
+  FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
+  LEFT JOIN pg_temp_index t ON t.indexrelid = i.indexrelid
+ WHERE c.relname ~ 'tmp2(.*)_a_idx'
+ ORDER BY c.relname;
+  relname   | global_valid | local_valid 
+------------+--------------+-------------
+ tmp2_a_idx | f            | f
+(1 row)
+
+\d tmp2
+Global temporary partitioned table "global_temp_tests.tmp2"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ a      | integer |           |          | 
+Partition key: LIST (a)
+Indexes:
+    "tmp2_a_idx" btree (a) INVALID
+Number of partitions: 1 (Use \d+ to list them.)
+
+\d tmp2_a_idx
+Partitioned index "global_temp_tests.tmp2_a_idx"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ a      | integer | yes  | a
+btree, for table "global_temp_tests.tmp2", invalid
+Number of partitions: 0
+
+CREATE INDEX tmp2_p1_a_idx ON tmp2_p1 (a);
+ALTER INDEX tmp2_a_idx ATTACH PARTITION tmp2_p1_a_idx;
+SELECT c.relname, i.indisvalid AS global_valid, t.indisvalid AS local_valid
+  FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
+  LEFT JOIN pg_temp_index t ON t.indexrelid = i.indexrelid
+ WHERE c.relname ~ 'tmp2(.*)_a_idx'
+ ORDER BY c.relname;
+    relname    | global_valid | local_valid 
+---------------+--------------+-------------
+ tmp2_a_idx    | t            | t
+ tmp2_p1_a_idx | t            | t
+(2 rows)
+
+\d tmp2
+Global temporary partitioned table "global_temp_tests.tmp2"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ a      | integer |           |          | 
+Partition key: LIST (a)
+Indexes:
+    "tmp2_a_idx" btree (a)
+Number of partitions: 1 (Use \d+ to list them.)
+
+\d tmp2_a_idx
+Partitioned index "global_temp_tests.tmp2_a_idx"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ a      | integer | yes  | a
+btree, for table "global_temp_tests.tmp2"
+Number of partitions: 1 (Use \d+ to list them.)
+
+\d tmp2_p1_a_idx
+Index "global_temp_tests.tmp2_p1_a_idx"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ a      | integer | yes  | a
+Partition of: tmp2_a_idx 
+btree, for table "global_temp_tests.tmp2_p1"
+
+DROP TABLE tmp2;
 -- Test ALTER TABLE with rewrite
 CREATE GLOBAL TEMP TABLE tmp2 (a int);
 INSERT INTO tmp2 VALUES (1);
@@ -537,10 +644,12 @@ SELECT oid::regclass FROM pg_temp_class ORDER BY 1;
  pg_temp_class_oid_index
  pg_temp_statistic
  pg_temp_statistic_relid_att_inh_index
+ pg_temp_index
+ pg_temp_index_indexrelid_index
  tmp1_c_seq
  tmp1
  tmp1_pkey
-(7 rows)
+(9 rows)
 
 SELECT * FROM tmp1;
  a |  b  | c 

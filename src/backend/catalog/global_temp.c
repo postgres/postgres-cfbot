@@ -62,6 +62,7 @@
 #include "catalog/global_temp.h"
 #include "catalog/indexing.h"
 #include "catalog/pg_temp_class.h"
+#include "catalog/pg_temp_index.h"
 #include "catalog/storage.h"
 #include "commands/sequence.h"
 #include "commands/tablecmds.h"
@@ -123,6 +124,7 @@ static bool eoxact_storage_list_overflowed = false;
 typedef struct GtrUsageEntry
 {
 	Oid			relid;			/* lookup key: OID of relation in use */
+	char		relkind;		/* relkind of the relation */
 	SubTransactionId started_subid; /* usage started in current xact */
 	SubTransactionId stopped_subid; /* usage ended with another subid set */
 } GtrUsageEntry;
@@ -583,6 +585,9 @@ gtr_record_usage(Oid relid, char relkind)
 	}
 	local_entry->stopped_subid = InvalidSubTransactionId;
 
+	/* Remember the relation's relkind */
+	local_entry->relkind = relkind;
+
 	/* Add/update shared usage entry */
 	key.dbid = MyDatabaseId;
 	key.relid = relid;
@@ -968,6 +973,24 @@ TrackGlobalTempRelation(Relation relation)
 		gtr_record_usage(relation->rd_id, relation->rd_rel->relkind);
 		InsertPgTempClassTuple(relation);
 
+		/* For an index, also insert a pg_temp_index tuple */
+		if (relation->rd_rel->relkind == RELKIND_INDEX ||
+			relation->rd_rel->relkind == RELKIND_PARTITIONED_INDEX)
+		{
+			/*
+			 * When creating a new index locally, relation->rd_index will be
+			 * NULL here.  Mark it as valid for now --- UpdateIndexRelation()
+			 * will update it later, if it's not actually valid (e.g., CREATE
+			 * INDEX ... ON ONLY ...).  Otherwise, for an index created in
+			 * another session, relation->rd_index->indisvalid will accurately
+			 * reflect whether or not the index needs to be marked invalid
+			 * locally (if our instance of the index's table is not empty).
+			 */
+			InsertPgTempIndexTuple(relation->rd_id,
+								   relation->rd_index == NULL ||
+								   relation->rd_index->indisvalid);
+		}
+
 		/*
 		 * If this backend's tempfrozenxid and tempminmxid haven't been set
 		 * yet (this is the first global temporary relation accessed in this
@@ -1004,8 +1027,12 @@ ForgetGlobalTempRelation(Oid relid)
 	entry->stopped_subid = GetCurrentSubTransactionId();
 	EOXactUsageListAdd(relid);
 
-	/* Delete its pg_temp_class tuple */
+	/* Delete its pg_temp_class and pg_temp_index tuples */
 	DeletePgTempClassTuple(relid);
+
+	if (entry->relkind == RELKIND_INDEX ||
+		entry->relkind == RELKIND_PARTITIONED_INDEX)
+		DeletePgTempIndexTuple(relid);
 
 	/* Update this backend's tempfrozenxid and tempminmxid */
 	UpdateTempFrozenXids();
@@ -1198,6 +1225,13 @@ ProcessInvalidatedGlobalTempRelations(void)
 			if (PgTempClassTupleExists(relid))
 			{
 				DeletePgTempClassTuple(relid);
+				tuples_deleted = true;
+			}
+
+			/* For an index, delete its pg_temp_index tuple, if it has one */
+			if (PgTempIndexTupleExists(relid))
+			{
+				DeletePgTempIndexTuple(relid);
 				tuples_deleted = true;
 			}
 

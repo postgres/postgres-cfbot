@@ -47,6 +47,9 @@ step cat1 {
 step r1 { ROLLBACK; }
 step sp1 { SAVEPOINT sp; }
 step rsp1 { ROLLBACK TO SAVEPOINT sp; }
+step idx_valid1 {
+  SELECT indisvalid FROM pg_temp_index WHERE indexrelid = 'tmp2_un'::regclass;
+}
 step drop1 { DROP TABLE tmp2; }
 step c1 { COMMIT; }
 step prep1 { PREPARE TRANSACTION 'tx'; }
@@ -87,6 +90,10 @@ step rsp2 { ROLLBACK TO SAVEPOINT sp; }
 step ins2_2 { INSERT INTO tmp2 VALUES (1, 's2'); }
 step sel2_2 { SELECT * FROM tmp2; }
 step seltype2 { SELECT key, pg_typeof(key), val FROM tmp2; }
+step idx_valid2 {
+  SELECT indisvalid FROM pg_temp_index WHERE indexrelid = 'tmp2_un'::regclass;
+}
+step uniq_reidx2 { REINDEX INDEX tmp2_un; }
 step drop2 { DROP TABLE tmp2; }
 step sel2_idx {
   SET enable_seqscan = off;
@@ -105,6 +112,7 @@ step get_tblspace2 {
     LEFT JOIN pg_tablespace s2 ON s2.oid = t.reltablespace
    WHERE c.relname = 'tmp';
 }
+step analyze2 { ANALYZE tmp; }
 
 # Create test tablespace for remaining tests
 permutation create_tblspace list_tblspaces
@@ -126,7 +134,8 @@ permutation create1 ins1_2
             ins2_2 seltype1 seltype2 drop1
 permutation create1 ins1_2 ins2_2
             alter1a alter1b alter1c alter1d alter1e alter1f alter1g alter1h
-            uniq_idx1 seltype1 seltype2 drop1
+            uniq_idx1 seltype1 seltype2
+            idx_valid1 idx_valid2 uniq_reidx2 idx_valid2 drop1
 
 # Test concurrent ON COMMIT DELETE ROWS
 permutation create1dr b1 b2 ins1_2 ins2_2 sel1_2 sel2_2 c1 c2 sel1_2 sel2_2 drop1
@@ -143,6 +152,7 @@ permutation create1 b1 ins1_2 drop2 prep1
 permutation ins1 idx1 sel1_idx ins2 sel2_idx
 permutation ins1 ins2 idx1 sel1_idx sel2_idx
 permutation ins1 ins2 idx1 sel1_idx sel2_idx reidx2 sel2_idx
+permutation ins1 ins2 idx1 sel1_idx sel2_idx analyze2 sel2_idx reidx2 sel2_idx
 
 # Test local TRUNCATE
 permutation ins1 ins2 t2 sel1 sel2 ins2 t1 sel1 sel2 ins1 t2 sel1 sel2

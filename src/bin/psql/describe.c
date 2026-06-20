@@ -2353,8 +2353,15 @@ describeOneTableDetails(const char *schemaname,
 
 		printfPQExpBuffer(&buf, "/* %s */\n", _("Get index details"));
 		appendPQExpBufferStr(&buf,
-							 "SELECT i.indisunique, i.indisprimary, i.indisclustered, "
-							 "i.indisvalid,\n"
+							 "SELECT i.indisunique, i.indisprimary, i.indisclustered, ");
+
+		if (pset.sversion >= 200000)
+			appendPQExpBufferStr(&buf,
+								 "COALESCE(ti.indisvalid, i.indisvalid),\n");
+		else
+			appendPQExpBufferStr(&buf, "i.indisvalid,\n");
+
+		appendPQExpBufferStr(&buf,
 							 "  (NOT i.indimmediate) AND "
 							 "EXISTS (SELECT 1 FROM pg_catalog.pg_constraint "
 							 "WHERE conrelid = i.indrelid AND "
@@ -2379,12 +2386,21 @@ describeOneTableDetails(const char *schemaname,
 		else
 			appendPQExpBufferStr(&buf, "false AS indnullsnotdistinct,\n");
 
-		appendPQExpBuffer(&buf, "  a.amname, c2.relname, "
-						  "pg_catalog.pg_get_expr(i.indpred, i.indrelid, true)\n"
-						  "FROM pg_catalog.pg_index i, pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a\n"
-						  "WHERE i.indexrelid = c.oid AND c.oid = '%s' AND c.relam = a.oid\n"
-						  "AND i.indrelid = c2.oid;",
-						  oid);
+		if (pset.sversion >= 200000)
+			appendPQExpBuffer(&buf, "  a.amname, c2.relname, "
+							  "pg_catalog.pg_get_expr(i.indpred, i.indrelid, true)\n"
+							  "FROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a, pg_catalog.pg_index i\n"
+							  "  LEFT JOIN pg_catalog.pg_temp_index ti ON ti.indexrelid = i.indexrelid\n"
+							  "WHERE i.indexrelid = c.oid AND c.oid = '%s' AND c.relam = a.oid\n"
+							  "AND i.indrelid = c2.oid;",
+							  oid);
+		else
+			appendPQExpBuffer(&buf, "  a.amname, c2.relname, "
+							  "pg_catalog.pg_get_expr(i.indpred, i.indrelid, true)\n"
+							  "FROM pg_catalog.pg_index i, pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a\n"
+							  "WHERE i.indexrelid = c.oid AND c.oid = '%s' AND c.relam = a.oid\n"
+							  "AND i.indrelid = c2.oid;",
+							  oid);
 
 		result = PSQLexec(buf.data);
 		if (!result)
@@ -2473,7 +2489,13 @@ describeOneTableDetails(const char *schemaname,
 			printfPQExpBuffer(&buf, "/* %s */\n", _("Get indexes for this table"));
 			appendPQExpBufferStr(&buf,
 								 "SELECT c2.relname, i.indisprimary, i.indisunique, "
-								 "i.indisclustered, i.indisvalid, "
+								 "i.indisclustered, ");
+			if (pset.sversion >= 200000)
+				appendPQExpBufferStr(&buf,
+									 "COALESCE(ti.indisvalid, i.indisvalid), ");
+			else
+				appendPQExpBufferStr(&buf, "i.indisvalid, ");
+			appendPQExpBufferStr(&buf,
 								 "pg_catalog.pg_get_indexdef(i.indexrelid, 0, true),\n  "
 								 "pg_catalog.pg_get_constraintdef(con.oid, true), "
 								 "contype, condeferrable, condeferred");
@@ -2483,15 +2505,27 @@ describeOneTableDetails(const char *schemaname,
 				appendPQExpBufferStr(&buf, ", con.conperiod");
 			else
 				appendPQExpBufferStr(&buf, ", false AS conperiod");
-			appendPQExpBuffer(&buf,
-							  "\nFROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i\n"
-							  "  LEFT JOIN pg_catalog.pg_constraint con ON (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ("
-							  CppAsString2(CONSTRAINT_PRIMARY) ","
-							  CppAsString2(CONSTRAINT_UNIQUE) ","
-							  CppAsString2(CONSTRAINT_EXCLUSION) "))\n"
-							  "WHERE c.oid = '%s' AND c.oid = i.indrelid AND i.indexrelid = c2.oid\n"
-							  "ORDER BY i.indisprimary DESC, c2.relname;",
-							  oid);
+			if (pset.sversion >= 200000)
+				appendPQExpBuffer(&buf,
+								  "\nFROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i\n"
+								  "  LEFT JOIN pg_catalog.pg_constraint con ON (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ("
+								  CppAsString2(CONSTRAINT_PRIMARY) ","
+								  CppAsString2(CONSTRAINT_UNIQUE) ","
+								  CppAsString2(CONSTRAINT_EXCLUSION) "))\n"
+								  "  LEFT JOIN pg_catalog.pg_temp_index ti ON ti.indexrelid = i.indexrelid\n"
+								  "WHERE c.oid = '%s' AND c.oid = i.indrelid AND i.indexrelid = c2.oid\n"
+								  "ORDER BY i.indisprimary DESC, c2.relname;",
+								  oid);
+			else
+				appendPQExpBuffer(&buf,
+								  "\nFROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i\n"
+								  "  LEFT JOIN pg_catalog.pg_constraint con ON (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ("
+								  CppAsString2(CONSTRAINT_PRIMARY) ","
+								  CppAsString2(CONSTRAINT_UNIQUE) ","
+								  CppAsString2(CONSTRAINT_EXCLUSION) "))\n"
+								  "WHERE c.oid = '%s' AND c.oid = i.indrelid AND i.indexrelid = c2.oid\n"
+								  "ORDER BY i.indisprimary DESC, c2.relname;",
+								  oid);
 			result = PSQLexec(buf.data);
 			if (!result)
 				goto error_return;

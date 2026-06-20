@@ -139,6 +139,40 @@ SET search_path = global_temp_tests;
 SELECT tableoid::regclass, * FROM tmp2 ORDER BY a;
 DROP TABLE tmp2, perm;
 
+-- Test partitioned index validity
+CREATE GLOBAL TEMP TABLE tmp2 (a int) PARTITION BY LIST (a);
+CREATE GLOBAL TEMP TABLE tmp2_p1 PARTITION OF tmp2 FOR VALUES IN (1);
+CREATE INDEX tmp2_a_idx ON tmp2 (a);
+SELECT c.relname, i.indisvalid AS global_valid, t.indisvalid AS local_valid
+  FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
+  LEFT JOIN pg_temp_index t ON t.indexrelid = i.indexrelid
+ WHERE c.relname ~ 'tmp2(.*)_a_idx'
+ ORDER BY c.relname;
+\d tmp2
+\d tmp2_a_idx
+
+DROP INDEX tmp2_a_idx;
+CREATE INDEX tmp2_a_idx ON ONLY tmp2 (a);
+SELECT c.relname, i.indisvalid AS global_valid, t.indisvalid AS local_valid
+  FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
+  LEFT JOIN pg_temp_index t ON t.indexrelid = i.indexrelid
+ WHERE c.relname ~ 'tmp2(.*)_a_idx'
+ ORDER BY c.relname;
+\d tmp2
+\d tmp2_a_idx
+
+CREATE INDEX tmp2_p1_a_idx ON tmp2_p1 (a);
+ALTER INDEX tmp2_a_idx ATTACH PARTITION tmp2_p1_a_idx;
+SELECT c.relname, i.indisvalid AS global_valid, t.indisvalid AS local_valid
+  FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
+  LEFT JOIN pg_temp_index t ON t.indexrelid = i.indexrelid
+ WHERE c.relname ~ 'tmp2(.*)_a_idx'
+ ORDER BY c.relname;
+\d tmp2
+\d tmp2_a_idx
+\d tmp2_p1_a_idx
+DROP TABLE tmp2;
+
 -- Test ALTER TABLE with rewrite
 CREATE GLOBAL TEMP TABLE tmp2 (a int);
 INSERT INTO tmp2 VALUES (1);

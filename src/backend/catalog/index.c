@@ -50,6 +50,7 @@
 #include "catalog/pg_operator.h"
 #include "catalog/pg_tablespace.h"
 #include "catalog/pg_temp_class.h"
+#include "catalog/pg_temp_index.h"
 #include "catalog/pg_trigger.h"
 #include "catalog/pg_type.h"
 #include "catalog/storage.h"
@@ -121,7 +122,8 @@ static void UpdateIndexRelation(Oid indexoid, Oid heapoid,
 								bool isexclusion,
 								bool immediate,
 								bool isvalid,
-								bool isready);
+								bool isready,
+								char relpersistence);
 static void index_update_stats(Relation rel,
 							   bool isreindex,
 							   bool hasindex,
@@ -574,7 +576,8 @@ UpdateIndexRelation(Oid indexoid,
 					bool isexclusion,
 					bool immediate,
 					bool isvalid,
-					bool isready)
+					bool isready,
+					char relpersistence)
 {
 	int2vector *indkey;
 	oidvector  *indcollation;
@@ -675,6 +678,23 @@ UpdateIndexRelation(Oid indexoid,
 	 */
 	table_close(pg_index, RowExclusiveLock);
 	heap_freetuple(tuple);
+
+	/*
+	 * For an index on a global temporary table, TrackGlobalTempRelation()
+	 * will have inserted a pg_temp_index tuple with indisvalid = true.  If
+	 * the index is actually not valid, fix that now.
+	 */
+	if (relpersistence == RELPERSISTENCE_GLOBAL_TEMP && !isvalid)
+	{
+		tuple = GetPgTempIndexTuple(indexoid);
+		if (!HeapTupleIsValid(tuple))
+			elog(ERROR, "cache lookup failed for global temp index %u", indexoid);
+
+		((Form_pg_temp_index) GETSTRUCT(tuple))->indisvalid = isvalid;
+
+		UpdatePgTempIndexTuple(indexoid, tuple);
+		heap_freetuple(tuple);
+	}
 }
 
 
@@ -1063,7 +1083,8 @@ index_create(Relation heapRelation,
 						(constr_flags & INDEX_CONSTR_CREATE_DEFERRABLE) == 0 &&
 						(flags & INDEX_CREATE_DEFERRABLE) == 0,
 						!concurrent && !invalid,
-						!concurrent);
+						!concurrent,
+						relpersistence);
 
 	/*
 	 * Register relcache invalidation on the indexes' heap relation, to
@@ -3609,6 +3630,9 @@ index_set_state_flags(Oid indexId, IndexStateFlagsAction action)
 	HeapTuple	indexTuple;
 	Form_pg_index indexForm;
 
+	/* This is not expected to be a global temporary index */
+	Assert(!rel_is_global_temp(indexId));
+
 	/* Open pg_index and fetch a writable copy of the index's tuple */
 	pg_index = table_open(IndexRelationId, RowExclusiveLock);
 
@@ -3968,18 +3992,26 @@ reindex_index(const ReindexStmt *stmt, Oid indexId,
 	{
 		Relation	pg_index;
 		HeapTuple	indexTuple;
+		HeapTuple	temp_indexTuple;
 		Form_pg_index indexForm;
+		Form_pg_temp_index temp_indexForm;
 		bool		index_bad;
 
+		/*
+		 * For a global temporary index, we update indisvalid in both pg_index
+		 * and pg_temp_index, so that the change applies to this session and
+		 * all future sessions.
+		 */
 		pg_index = table_open(IndexRelationId, RowExclusiveLock);
 
-		indexTuple = SearchSysCacheCopy1(INDEXRELID,
-										 ObjectIdGetDatum(indexId));
+		indexTuple = GetPgIndexAndPgTempIndexTuples(indexId, &temp_indexTuple,
+													true);
 		if (!HeapTupleIsValid(indexTuple))
 			elog(ERROR, "cache lookup failed for index %u", indexId);
 		indexForm = (Form_pg_index) GETSTRUCT(indexTuple);
+		temp_indexForm = (Form_pg_temp_index) GETSTRUCT_SAFE(temp_indexTuple);
 
-		index_bad = (!indexForm->indisvalid ||
+		index_bad = (!GetEffective_indisvalid(indexForm, temp_indexForm) ||
 					 !indexForm->indisready ||
 					 !indexForm->indislive);
 		if (index_bad ||
@@ -3990,9 +4022,13 @@ reindex_index(const ReindexStmt *stmt, Oid indexId,
 			else if (index_bad)
 				indexForm->indcheckxmin = true;
 			indexForm->indisvalid = true;
+			if (temp_indexForm != NULL)
+				temp_indexForm->indisvalid = true;
 			indexForm->indisready = true;
 			indexForm->indislive = true;
 			CatalogTupleUpdate(pg_index, &indexTuple->t_self, indexTuple);
+			if (HeapTupleIsValid(temp_indexTuple))
+				UpdatePgTempIndexTuple(indexId, temp_indexTuple);
 
 			/*
 			 * Invalidate the relcache for the table, so that after we commit

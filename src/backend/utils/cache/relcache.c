@@ -63,6 +63,7 @@
 #include "catalog/pg_subscription.h"
 #include "catalog/pg_tablespace.h"
 #include "catalog/pg_temp_class.h"
+#include "catalog/pg_temp_index.h"
 #include "catalog/pg_trigger.h"
 #include "catalog/pg_type.h"
 #include "catalog/schemapg.h"
@@ -1508,6 +1509,23 @@ RelationInitIndexAccessInfo(Relation relation)
 	ReleaseSysCache(tuple);
 
 	/*
+	 * For global temporary indexes, update indisvalid from pg_temp_index.
+	 * This won't work for system catalog indexes, because pg_temp_index may
+	 * not be loaded at this point, but they shouldn't be invalid anyway.
+	 */
+	if (RELATION_IS_GLOBAL_TEMP(relation) && !IsCatalogRelation(relation))
+	{
+		tuple = GetPgTempIndexTuple(RelationGetRelid(relation));
+		if (HeapTupleIsValid(tuple))
+		{
+			Form_pg_temp_index temp_form = (Form_pg_temp_index) GETSTRUCT(tuple);
+
+			relation->rd_index->indisvalid = temp_form->indisvalid;
+			heap_freetuple(tuple);
+		}
+	}
+
+	/*
 	 * Look up the index's access method, save the OID of its handler function
 	 */
 	Assert(relation->rd_rel->relam != InvalidOid);
@@ -2405,8 +2423,7 @@ RelationReloadIndexInfo(Relation relation)
 		HeapTuple	tuple;
 		Form_pg_index index;
 
-		tuple = SearchSysCache1(INDEXRELID,
-								ObjectIdGetDatum(RelationGetRelid(relation)));
+		tuple = GetEffectivePgIndexTuple(RelationGetRelid(relation));
 		if (!HeapTupleIsValid(tuple))
 			elog(ERROR, "cache lookup failed for index %u",
 				 RelationGetRelid(relation));
@@ -2434,7 +2451,7 @@ RelationReloadIndexInfo(Relation relation)
 		HeapTupleHeaderSetXmin(relation->rd_indextuple->t_data,
 							   HeapTupleHeaderGetXmin(tuple->t_data));
 
-		ReleaseSysCache(tuple);
+		heap_freetuple(tuple);
 	}
 
 	/* Okay, now it's valid again */
@@ -4997,6 +5014,8 @@ RelationGetIndexList(Relation relation)
 	while (HeapTupleIsValid(htup = systable_getnext(indscan)))
 	{
 		Form_pg_index index = (Form_pg_index) GETSTRUCT(htup);
+		HeapTuple	temp_htup;
+		bool		indisvalid;
 
 		/*
 		 * Ignore any indexes that are currently being dropped.  This will
@@ -5021,6 +5040,21 @@ RelationGetIndexList(Relation relation)
 			continue;
 
 		/*
+		 * Global temporary indexes may override indexisvalid locally.
+		 */
+		indisvalid = index->indisvalid;
+		if (RELATION_IS_GLOBAL_TEMP(relation))
+		{
+			temp_htup = GetPgTempIndexTuple(index->indexrelid);
+
+			if (HeapTupleIsValid(temp_htup))
+			{
+				indisvalid = ((Form_pg_temp_index) GETSTRUCT(temp_htup))->indisvalid;
+				heap_freetuple(temp_htup);
+			}
+		}
+
+		/*
 		 * Remember primary key index, if any.  For regular tables we do this
 		 * only if the index is valid; but for partitioned tables, then we do
 		 * it even if it's invalid.
@@ -5031,7 +5065,7 @@ RelationGetIndexList(Relation relation)
 		 * partitioned tables.
 		 */
 		if (index->indisprimary &&
-			(index->indisvalid ||
+			(indisvalid ||
 			 relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE))
 		{
 			pkeyIndex = index->indexrelid;
@@ -5041,7 +5075,7 @@ RelationGetIndexList(Relation relation)
 		if (!index->indimmediate)
 			continue;
 
-		if (!index->indisvalid)
+		if (!indisvalid)
 			continue;
 
 		/* remember explicitly chosen replica index */
