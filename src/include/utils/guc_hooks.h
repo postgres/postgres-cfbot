@@ -93,6 +93,9 @@ extern bool check_multixact_offset_buffers(int *newval, void **extra,
 extern bool check_notify_buffers(int *newval, void **extra, GucSource source);
 extern bool check_primary_slot_name(char **newval, void **extra,
 									GucSource source);
+extern bool check_proxy_networks(char **newval, void **extra,
+								 GucSource source);
+extern void assign_proxy_networks(const char *newval, void *extra);
 extern bool check_random_seed(double *newval, void **extra, GucSource source);
 extern void assign_random_seed(double newval, void *extra);
 extern const char *show_random_seed(void);

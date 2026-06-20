@@ -712,6 +712,51 @@ include_dir 'conf.d'
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-proxy-networks" xreflabel="proxy_networks">
+      <term><varname>proxy_networks</varname> (<type>string</type>)
+      <indexterm>
+       <primary><varname>proxy_networks</varname> configuration parameter</primary>
+      </indexterm>
+      <indexterm>
+       <primary>PROXY protocol</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Specifies the networks from which the server will accept a
+        PROXY protocol header.  When the server is reached through a
+        connection-forwarding proxy (like <productname>HAProxy</productname>),
+        the proxy can prepend a small header, as defined by the
+        <ulink url="https://www.haproxy.org/download/2.9/doc/proxy-protocol.txt">PROXY
+        protocol</ulink>, that declares the address of the real client.
+        When such a header is accepted, the declared client
+        address replaces the proxy's address for host-based authentication
+        (see <xref linkend="auth-pg-hba-conf"/>) and in the server log.
+       </para>
+       <para>
+        The value is a comma-separated list of CIDR networks or the special
+        token <literal>unix</literal> for Unix-domain socket (for example
+        <literal>10.0.0.0/8, 192.168.1.10, ::1/128, unix</literal>).  A
+        PROXY protocol header is honored only when the actual peer address
+        falls within one of these networks.  A header received from any
+        other address is rejected as an invalid connection attempt, so that
+        ordinary clients cannot spoof their address.  The default is an
+        empty string, which disables the PROXY protocol support entirely.
+        This parameter can only be set in the
+        <filename>postgresql.conf</filename> file or on the server command
+        line.
+       </para>
+       <para>
+        Because a peer within these networks is treated as a proxy rather than
+        a direct client, it is <emphasis>required</emphasis> to lead with a
+        PROXY protocol header.  A connection from one of these networks that
+        begins with an ordinary startup packet, or an SSL or GSS negotiation
+        request, instead of a PROXY header is rejected. This prevents the
+        proxy's own address from being mistaken for a client's.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-max-connections" xreflabel="max_connections">
       <term><varname>max_connections</varname> (<type>integer</type>)
       <indexterm>
@@ -8206,11 +8251,12 @@ local0.*    /var/log/postgresql
       <listitem>
        <para>
         By default, connection log messages only show the IP address of the
-        connecting host. Turning this parameter on causes logging of the
-        host name as well.  Note that depending on your host name resolution
-        setup this might impose a non-negligible performance penalty.
-        This parameter can only be set in the <filename>postgresql.conf</filename>
-        file or on the server command line.
+        connecting host and the proxy host if the connection came from a
+        trusted proxy.  Turning this parameter on causes logging of the host
+        names as well.  Note that depending on your host name resolution setup
+        this might impose a non-negligible performance penalty.  This parameter
+        can only be set in the <filename>postgresql.conf</filename> file or on
+        the server command line.
        </para>
       </listitem>
      </varlistentry>
@@ -8278,6 +8324,16 @@ local0.*    /var/log/postgresql
             <row>
              <entry><literal>%h</literal></entry>
              <entry>Remote host name or IP address</entry>
+             <entry>yes</entry>
+            </row>
+            <row>
+             <entry><literal>%H</literal></entry>
+             <entry>Proxy host name or IP address</entry>
+             <entry>yes</entry>
+            </row>
+            <row>
+             <entry><literal>%R</literal></entry>
+             <entry>Proxy host name or IP address, and proxy port</entry>
              <entry>yes</entry>
             </row>
             <row>
@@ -8768,6 +8824,7 @@ CREATE TABLE postgres_log
   backend_type text,
   leader_pid integer,
   query_id bigint,
+  proxy_connection text,
   PRIMARY KEY (session_id, session_line_num)
 );
 </programlisting>
@@ -8893,6 +8950,16 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
          <entry><literal>remote_port</literal></entry>
          <entry>number</entry>
          <entry>Client port</entry>
+        </row>
+        <row>
+         <entry><literal>proxy_host</literal></entry>
+         <entry>string</entry>
+         <entry>Proxy host</entry>
+        </row>
+        <row>
+         <entry><literal>proxy_port</literal></entry>
+         <entry>number</entry>
+         <entry>Proxy port</entry>
         </row>
         <row>
          <entry><literal>session_id</literal></entry>
