@@ -1735,6 +1735,18 @@ ident_inet(Port *port)
 				hints;
 
 	/*
+	 * Ident is incompatible with the PROXY protocol.  A proxied client
+	 * connected to the proxy, not to the server, so its ident server has no
+	 * record of any connection matching the address pair in the query.
+	 */
+	if (port->proxy_protocol)
+	{
+		ereport(LOG,
+				(errmsg("ident authentication is not supported over connections using the PROXY protocol")));
+		return STATUS_ERROR;
+	}
+
+	/*
 	 * Might look a little weird to first convert it to text and then back to
 	 * sockaddr, but it's protocol independent.
 	 */

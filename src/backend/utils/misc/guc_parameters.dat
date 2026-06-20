@@ -2430,6 +2430,16 @@
   check_hook => 'check_primary_slot_name',
 },
 
+{ name => 'proxy_networks', type => 'string', context => 'PGC_SIGHUP', group => 'CONN_AUTH_SETTINGS',
+  short_desc => 'Sets the networks from which PROXY protocol headers are accepted.',
+  long_desc => 'A comma-separated list of CIDR networks or the special token "unix" for Unix-domain socket. A connection whose peer address matches one of these networks must prepend a PROXY protocol header to declare the real client address. An empty string disables PROXY protocol support.',
+  flags => 'GUC_LIST_INPUT',
+  variable => 'ProxyNetworks',
+  boot_val => '""',
+  check_hook => 'check_proxy_networks',
+  assign_hook => 'assign_proxy_networks',
+},
+
 { name => 'quote_all_identifiers', type => 'bool', context => 'PGC_USERSET', group => 'COMPAT_OPTIONS_PREVIOUS',
   short_desc => 'When generating SQL fragments, quote all identifiers.',
   variable => 'quote_all_identifiers',
