@@ -2435,6 +2435,9 @@ ProjectionInfo
 ProjectionPath
 PromptInterruptContext
 ProtocolVersion
+ProxyNet
+ProxyNets
+ProxyProtocolResult
 PrsStorage
 PruneFreezeParams
 PruneFreezeResult
