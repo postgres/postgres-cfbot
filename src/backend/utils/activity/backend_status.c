@@ -52,6 +52,7 @@ PgBackendStatus *MyBEEntry = NULL;
 static PgBackendStatus *BackendStatusArray = NULL;
 static char *BackendAppnameBuffer = NULL;
 static char *BackendClientHostnameBuffer = NULL;
+static char *BackendProxyHostnameBuffer = NULL;
 static char *BackendActivityBuffer = NULL;
 static Size BackendActivityBufferSize = 0;
 #ifdef USE_SSL
@@ -106,6 +107,11 @@ BackendStatusShmemRequest(void *arg)
 					   .ptr = (void **) &BackendClientHostnameBuffer,
 		);
 
+	ShmemRequestStruct(.name = "Backend Proxy Host Name Buffer",
+					   .size = mul_size(NAMEDATALEN, NumBackendStatSlots),
+					   .ptr = (void **) &BackendProxyHostnameBuffer,
+		);
+
 	BackendActivityBufferSize = mul_size(pgstat_track_activity_query_size,
 										 NumBackendStatSlots);
 	ShmemRequestStruct(.name = "Backend Activity Buffer",
@@ -151,6 +157,14 @@ BackendStatusShmemInit(void *arg)
 	for (i = 0; i < NumBackendStatSlots; i++)
 	{
 		BackendStatusArray[i].st_clienthostname = buffer;
+		buffer += NAMEDATALEN;
+	}
+
+	/* Initialize st_proxyhostname pointers. */
+	buffer = BackendProxyHostnameBuffer;
+	for (i = 0; i < NumBackendStatSlots; i++)
+	{
+		BackendStatusArray[i].st_proxyhostname = buffer;
 		buffer += NAMEDATALEN;
 	}
 
@@ -279,6 +293,12 @@ pgstat_bestart_initial(void)
 	else
 		MemSet(&lbeentry.st_clientaddr, 0, sizeof(lbeentry.st_clientaddr));
 
+	if (MyProcPort && MyProcPort->proxy_protocol)
+		memcpy(&lbeentry.st_proxyaddr, &MyProcPort->proxy_addr,
+			   sizeof(lbeentry.st_proxyaddr));
+	else
+		MemSet(&lbeentry.st_proxyaddr, 0, sizeof(lbeentry.st_proxyaddr));
+
 	lbeentry.st_ssl = false;
 	lbeentry.st_gss = false;
 
@@ -319,10 +339,18 @@ pgstat_bestart_initial(void)
 				NAMEDATALEN);
 	else
 		lbeentry.st_clienthostname[0] = '\0';
+
+	if (MyProcPort && MyProcPort->proxy_hostname)
+		strlcpy(lbeentry.st_proxyhostname, MyProcPort->proxy_hostname,
+				NAMEDATALEN);
+	else
+		lbeentry.st_proxyhostname[0] = '\0';
+
 	lbeentry.st_activity_raw[0] = '\0';
 	/* Also make sure the last byte in each string area is always 0 */
 	lbeentry.st_appname[NAMEDATALEN - 1] = '\0';
 	lbeentry.st_clienthostname[NAMEDATALEN - 1] = '\0';
+	lbeentry.st_proxyhostname[NAMEDATALEN - 1] = '\0';
 	lbeentry.st_activity_raw[pgstat_track_activity_query_size - 1] = '\0';
 
 	/* These structs can just start from zeroes each time */
@@ -789,6 +817,7 @@ pgstat_read_current_status(void)
 	LocalPgBackendStatus *localentry;
 	char	   *localappname,
 			   *localclienthostname,
+			   *localproxyhostname,
 			   *localactivity;
 #ifdef USE_SSL
 	PgBackendSSLStatus *localsslstatus;
@@ -818,6 +847,9 @@ pgstat_read_current_status(void)
 		MemoryContextAlloc(backendStatusSnapContext,
 						   NAMEDATALEN * NumBackendStatSlots);
 	localclienthostname = (char *)
+		MemoryContextAlloc(backendStatusSnapContext,
+						   NAMEDATALEN * NumBackendStatSlots);
+	localproxyhostname = (char *)
 		MemoryContextAlloc(backendStatusSnapContext,
 						   NAMEDATALEN * NumBackendStatSlots);
 	localactivity = (char *)
@@ -873,6 +905,8 @@ pgstat_read_current_status(void)
 				localentry->backendStatus.st_appname = localappname;
 				strcpy(localclienthostname, beentry->st_clienthostname);
 				localentry->backendStatus.st_clienthostname = localclienthostname;
+				strcpy(localproxyhostname, beentry->st_proxyhostname);
+				localentry->backendStatus.st_proxyhostname = localproxyhostname;
 				strcpy(localactivity, beentry->st_activity_raw);
 				localentry->backendStatus.st_activity_raw = localactivity;
 #ifdef USE_SSL
@@ -920,6 +954,7 @@ pgstat_read_current_status(void)
 			localentry++;
 			localappname += NAMEDATALEN;
 			localclienthostname += NAMEDATALEN;
+			localproxyhostname += NAMEDATALEN;
 			localactivity += pgstat_track_activity_query_size;
 #ifdef USE_SSL
 			localsslstatus++;
