@@ -3595,6 +3595,55 @@ log_status_format(StringInfo buf, const char *format, ErrorData *edata)
 					appendStringInfoSpaces(buf,
 										   padding > 0 ? padding : -padding);
 				break;
+			case 'H':
+				if (MyProcPort && MyProcPort->proxy_host)
+				{
+					if (padding != 0)
+						appendStringInfo(buf, "%*s", padding, MyProcPort->proxy_host);
+					else
+						appendStringInfoString(buf, MyProcPort->proxy_host);
+				}
+				else if (padding != 0)
+					appendStringInfoSpaces(buf,
+										   padding > 0 ? padding : -padding);
+				break;
+			case 'R':
+				if (MyProcPort && MyProcPort->proxy_host)
+				{
+					if (padding != 0)
+					{
+						if (MyProcPort->proxy_port && MyProcPort->proxy_port[0] != '\0')
+						{
+							/*
+							 * As with remote port, the port number may be appended
+							 * appended onto the end, so build a single string
+							 * containing the proxy_host and optionally the
+							 * proxy_port (if set) so we can properly align
+							 * it.
+							 */
+							char	   *hostport;
+
+							hostport = psprintf("%s(%s)", MyProcPort->proxy_host, MyProcPort->proxy_port);
+							appendStringInfo(buf, "%*s", padding, hostport);
+							pfree(hostport);
+						}
+						else
+							appendStringInfo(buf, "%*s", padding, MyProcPort->proxy_host);
+					}
+					else
+					{
+						/* padding is 0, so we don't need a temp buffer */
+						appendStringInfoString(buf, MyProcPort->proxy_host);
+						if (MyProcPort->proxy_port &&
+							MyProcPort->proxy_port[0] != '\0')
+							appendStringInfo(buf, "(%s)",
+											 MyProcPort->proxy_port);
+					}
+				}
+				else if (padding != 0)
+					appendStringInfoSpaces(buf,
+										   padding > 0 ? padding : -padding);
+				break;
 			case 'q':
 				/* in postmaster and friends, stop if %q is seen */
 				/* in a backend, just ignore */
