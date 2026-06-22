@@ -766,7 +766,7 @@ retry:
  * Check all the unique indexes in 'recheckIndexes' for conflict with the
  * tuple in 'remoteslot' and report if found.
  */
-static void
+void
 CheckAndReportConflict(ResultRelInfo *resultRelInfo, EState *estate,
 					   ConflictType type, List *recheckIndexes,
 					   TupleTableSlot *searchslot, TupleTableSlot *remoteslot)
