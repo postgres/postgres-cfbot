@@ -3190,6 +3190,7 @@ Tcl_Obj
 Tcl_Size
 Tcl_Time
 TempNamespaceStatus
+TestCopyOptions
 TestDSMRegistryHashEntry
 TestDSMRegistryStruct
 TestDecodingData
