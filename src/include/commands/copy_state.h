@@ -178,6 +178,9 @@ typedef struct CopyFromStateData
 #define RAW_BUF_BYTES(cstate) ((cstate)->raw_buf_len - (cstate)->raw_buf_index)
 
 	uint64		bytes_processed;	/* number of bytes processed so far */
+
+	/* Custom format private data to store the state */
+	void	   *format_private;
 } CopyFromStateData;
 
 /*
@@ -248,6 +251,9 @@ typedef struct CopyToStateData
 	FmgrInfo   *out_functions;	/* lookup info for output functions */
 	MemoryContext rowcontext;	/* per-row evaluation context */
 	uint64		bytes_processed;	/* number of bytes processed so far */
+
+	/* Custom format private data to store the state */
+	void	   *format_private;
 } CopyToStateData;
 
 #endif							/* COPY_STATE_H */
