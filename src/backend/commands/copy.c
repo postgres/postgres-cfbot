@@ -1119,6 +1119,15 @@ ProcessCopyOptions(ParseState *pstate,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("COPY format \"%s\" cannot be used with COPY TO",
 							opts_out->custom_format_ent->name)));
+
+		/*
+		 * Let the format validate its fully-parsed options as a whole.  This
+		 * runs even when no format-specific options were given, so a format
+		 * can reject incompatible core options or enforce cross-option
+		 * constraints.
+		 */
+		if (opts_out->custom_format_ent->validate_fn != NULL)
+			opts_out->custom_format_ent->validate_fn(opts_out, is_from);
 	}
 }
 
