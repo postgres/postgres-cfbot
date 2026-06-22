@@ -184,7 +184,7 @@ ReceiveCopyBegin(CopyFromState cstate)
 	for (i = 0; i < natts; i++)
 		pq_sendint16(&buf, format); /* per-column formats */
 	pq_endmessage(&buf);
-	cstate->copy_src = COPY_FRONTEND;
+	cstate->copy_src = COPY_SOURCE_FRONTEND;
 	cstate->fe_msgbuf = makeStringInfo();
 	/* We *must* flush here to ensure FE knows it can send. */
 	pq_flush();
@@ -252,7 +252,7 @@ CopyGetData(CopyFromState cstate, void *databuf, int minread, int maxread)
 
 	switch (cstate->copy_src)
 	{
-		case COPY_FILE:
+		case COPY_SOURCE_FILE:
 			pgstat_report_wait_start(WAIT_EVENT_COPY_FROM_READ);
 			bytesread = fread(databuf, 1, maxread, cstate->copy_file);
 			pgstat_report_wait_end();
@@ -263,7 +263,7 @@ CopyGetData(CopyFromState cstate, void *databuf, int minread, int maxread)
 			if (bytesread == 0)
 				cstate->raw_reached_eof = true;
 			break;
-		case COPY_FRONTEND:
+		case COPY_SOURCE_FRONTEND:
 			while (maxread > 0 && bytesread < minread && !cstate->raw_reached_eof)
 			{
 				int			avail;
@@ -346,7 +346,7 @@ CopyGetData(CopyFromState cstate, void *databuf, int minread, int maxread)
 				bytesread += avail;
 			}
 			break;
-		case COPY_CALLBACK:
+		case COPY_SOURCE_CALLBACK:
 			bytesread = cstate->data_source_cb(databuf, minread, maxread);
 			break;
 	}
@@ -1259,7 +1259,7 @@ CopyReadLine(CopyFromState cstate, bool is_csv)
 		 * after \. up to the protocol end of copy data.  (XXX maybe better
 		 * not to treat \. as special?)
 		 */
-		if (cstate->copy_src == COPY_FRONTEND)
+		if (cstate->copy_src == COPY_SOURCE_FRONTEND)
 		{
 			int			inbytes;
 
