@@ -99,7 +99,7 @@ typedef struct CopyFormatOptions
 	List	   *convert_select; /* list of column names (can be NIL) */
 } CopyFormatOptions;
 
-/* These are private in commands/copy[from|to].c */
+/* These are defined in copy_state.h */
 typedef struct CopyFromStateData *CopyFromState;
 typedef struct CopyToStateData *CopyToState;
 
