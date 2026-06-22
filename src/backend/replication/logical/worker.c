@@ -248,6 +248,7 @@
 #include <unistd.h>
 
 #include "access/genam.h"
+#include "access/heapam.h"
 #include "access/commit_ts.h"
 #include "access/table.h"
 #include "access/tableam.h"
@@ -302,6 +303,13 @@
 #include "utils/wait_event.h"
 
 #define NAPTIME_PER_CYCLE 1000	/* max sleep time between cycles (1s) */
+
+/*
+ * Multi-insert buffer limits. Same as COPY FROM. MAX_BUFFERED_BYTES is compared
+ * against LogicalRepTupleData.datasize (real received value lengths).
+ */
+#define MAX_BUFFERED_TUPLES		1000
+#define MAX_BUFFERED_BYTES		(65535)
 
 typedef struct FlushPosition
 {
@@ -500,6 +508,29 @@ static List *on_commit_wakeup_workers_subids = NIL;
 
 bool		in_remote_transaction = false;
 
+/*
+ * Multi-insert buffer state. Consecutive INSERTs to the same eligible relation
+ * are accumulated here and flushed via table_multi_insert(). Kept alive across
+ * flushes; torn down on a non-INSERT message or relation change.
+ */
+typedef struct ApplyMultiInsertBuffer
+{
+	LogicalRepRelId relid;
+	LogicalRepRelMapEntry *rel;
+	ApplyExecutionData *edata;
+	TupleTableSlot **slots;
+	int			nslots_allocated;
+	int			nused;
+	Size		bytes;
+	bool		run_as_owner;
+	UserContext ucxt;
+	BulkInsertState bistate;
+	bool		indices_open;
+	MemoryContext batch_context;	/* reset on each flush */
+} ApplyMultiInsertBuffer;
+
+static ApplyMultiInsertBuffer *pending_multi_insert = NULL;
+
 /* fields valid only when processing streamed transaction */
 static bool in_streamed_transaction = false;
 
@@ -646,6 +677,12 @@ static TransApplyAction get_transaction_apply_action(TransactionId xid,
 static void set_wal_receiver_timeout(void);
 
 static void on_exit_clear_xact_state(int code, Datum arg);
+
+/* Multi-insert functions */
+static void apply_handle_insert(StringInfo s);
+static void apply_multi_insert_flush(void);
+static void apply_multi_insert_teardown(void);
+static bool rel_can_multi_insert(LogicalRepRelMapEntry *rel);
 
 /*
  * Form the origin name for the subscription.
@@ -2663,6 +2700,327 @@ TargetPrivilegesCheck(Relation rel, AclMode mode)
 }
 
 /*
+ * Check whether a relation is eligible for multi-insert.
+ *
+ * Fall back to the single-row path for cases the batch path can't reproduce:
+ * partitioned tables, BEFORE/INSTEAD ROW triggers, and stored generated columns.
+ */
+static bool
+rel_can_multi_insert(LogicalRepRelMapEntry *rel)
+{
+	Relation	localrel = rel->localrel;
+
+	if (localrel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+		return false;
+
+	if (localrel->trigdesc &&
+		(localrel->trigdesc->trig_insert_before_row ||
+		 localrel->trigdesc->trig_insert_instead_row))
+		return false;
+
+	if (localrel->rd_att->constr &&
+		localrel->rd_att->constr->has_generated_stored)
+		return false;
+
+	return true;
+}
+
+/*
+ * Flush the pending multi-insert buffer via table_multi_insert(). The buffer
+ * stays alive for reuse - only the row count and batch_context are reset.
+ */
+static void
+apply_multi_insert_flush(void)
+{
+	ApplyMultiInsertBuffer *buffer = pending_multi_insert;
+	ResultRelInfo *relinfo;
+	EState	   *estate;
+	int			nused;
+	MemoryContext oldctx_mi;
+
+	if (buffer == NULL || buffer->nused == 0)
+		return;
+
+	nused = buffer->nused;
+	relinfo = buffer->edata->targetRelInfo;
+	estate = buffer->edata->estate;
+
+	PushActiveSnapshot(GetTransactionSnapshot());
+
+	/* Parity with ExecSimpleRelationInsert() (no-op for CMD_INSERT today) */
+	CheckCmdReplicaIdentity(relinfo->ri_RelationDesc, CMD_INSERT);
+
+	TargetPrivilegesCheck(relinfo->ri_RelationDesc, ACL_INSERT);
+
+	/* Open indices once, keep open across flushes */
+	if (!buffer->indices_open)
+	{
+		ExecOpenIndices(relinfo, false);
+		InitConflictIndexes(relinfo);
+		buffer->indices_open = true;
+	}
+
+	/* Constraint checks before the bulk insert (gen cols/BR triggers excluded) */
+	if (relinfo->ri_RelationDesc->rd_att->constr)
+	{
+		for (int i = 0; i < nused; i++)
+			ExecConstraints(relinfo, buffer->slots[i], estate);
+	}
+	if (relinfo->ri_RelationDesc->rd_rel->relispartition)
+	{
+		for (int i = 0; i < nused; i++)
+			ExecPartitionCheck(relinfo, buffer->slots[i], estate, true);
+	}
+
+	/* table_multi_insert leaks HeapTuples; run in batch_context (reset below) */
+	oldctx_mi = MemoryContextSwitchTo(buffer->batch_context);
+	table_multi_insert(relinfo->ri_RelationDesc,
+						buffer->slots,
+						nused,
+						GetCurrentCommandId(true),
+						0,
+						buffer->bistate);
+	MemoryContextSwitchTo(oldctx_mi);
+
+	/* Per row: index entries, conflict report, AFTER triggers, clear slot */
+	for (int i = 0; i < nused; i++)
+	{
+		TupleTableSlot *slot = buffer->slots[i];
+		List	   *recheckIndexes = NIL;
+		List	   *conflictindexes;
+		bool		conflict = false;
+
+		conflictindexes = relinfo->ri_onConflictArbiterIndexes;
+
+		if (relinfo->ri_NumIndices > 0)
+		{
+			uint32		flags = (conflictindexes != NIL) ? EIIT_NO_DUPE_ERROR : 0;
+
+			recheckIndexes = ExecInsertIndexTuples(relinfo, estate, flags,
+												   slot, conflictindexes,
+												   &conflict);
+		}
+
+		/* Report conflict post-insert (see ExecSimpleRelationInsert()) */
+		if (conflict)
+			CheckAndReportConflict(relinfo, estate, CT_INSERT_EXISTS,
+								   recheckIndexes, NULL, slot);
+
+		/* AFTER ROW INSERT Triggers */
+		ExecARInsertTriggers(estate, relinfo, slot, recheckIndexes, NULL);
+
+		list_free(recheckIndexes);
+
+		slot->tts_flags &= ~TTS_FLAG_SHOULDFREE;
+		slot->tts_flags |= TTS_FLAG_EMPTY;
+		slot->tts_nvalid = 0;
+		ItemPointerSetInvalid(&slot->tts_tid);
+	}
+
+	/* Bulk-free datums, materialized slot data and HeapTuples in one reset */
+	MemoryContextReset(buffer->batch_context);
+
+	/* Reset for next batch - keep buffer alive */
+	buffer->nused = 0;
+	buffer->bytes = 0;
+
+	PopActiveSnapshot();
+	CommandCounterIncrement();
+}
+
+/*
+ * Flush any remaining rows and free the multi-insert buffer completely. Called
+ * on relation switch, non-INSERT message, or transaction end.
+ */
+static void
+apply_multi_insert_teardown(void)
+{
+	ApplyMultiInsertBuffer *buffer = pending_multi_insert;
+
+	if (buffer == NULL)
+		return;
+
+	/* Flush any remaining rows first */
+	if (buffer->nused > 0)
+		apply_multi_insert_flush();
+
+	if (buffer->indices_open)
+		ExecCloseIndices(buffer->edata->targetRelInfo);
+
+	if (buffer->bistate)
+		FreeBulkInsertState(buffer->bistate);
+
+	if (buffer->batch_context)
+		MemoryContextDelete(buffer->batch_context);
+
+	finish_edata(buffer->edata);
+
+	apply_error_callback_arg.rel = NULL;
+
+	if (!buffer->run_as_owner)
+		RestoreUserContext(&buffer->ucxt);
+
+	logicalrep_rel_close(buffer->rel, NoLock);
+
+	for (int i = 0; i < buffer->nslots_allocated && buffer->slots[i] != NULL; i++)
+		ExecDropSingleTupleTableSlot(buffer->slots[i]);
+	pfree(buffer->slots);
+	pfree(buffer);
+	pending_multi_insert = NULL;
+}
+
+/*
+ * Handle INSERT via multi-insert path, accumulating consecutive INSERTs to the
+ * same relation into a buffer that is flushed via table_multi_insert().
+ */
+static void
+apply_handle_multi_insert(StringInfo s)
+{
+	LogicalRepTupleData newtup;
+	LogicalRepRelId relid;
+	LogicalRepRelMapEntry *rel;
+	ApplyMultiInsertBuffer *buffer;
+	ApplyExecutionData *edata;
+	EState	   *estate;
+	TupleTableSlot *remoteslot;
+	MemoryContext oldctx;
+	bool		run_as_owner;
+	UserContext ucxt;
+
+	if (is_skipping_changes() ||
+		handle_streamed_transaction(LOGICAL_REP_MSG_INSERT, s))
+		return;
+
+	relid = logicalrep_read_insert(s, &newtup);
+
+	/* Fast path: same relation as the pending buffer - accumulate */
+	if (pending_multi_insert && pending_multi_insert->relid == relid)
+	{
+		buffer = pending_multi_insert;
+		rel = buffer->rel;
+		edata = buffer->edata;
+		estate = edata->estate;
+
+		apply_error_callback_arg.rel = rel;
+
+		/* Lazily create slot on first use, reused across flushes */
+		if (buffer->slots[buffer->nused] == NULL)
+		{
+			oldctx = MemoryContextSwitchTo(ApplyContext);
+			buffer->slots[buffer->nused] = MakeSingleTupleTableSlot(
+				RelationGetDescr(rel->localrel), &TTSOpsVirtual);
+			buffer->slots[buffer->nused]->tts_mcxt = buffer->batch_context;
+			MemoryContextSwitchTo(oldctx);
+		}
+		remoteslot = buffer->slots[buffer->nused];
+
+		/* Allocate datum values in batch context - reset on flush */
+		oldctx = MemoryContextSwitchTo(buffer->batch_context);
+		slot_store_data(remoteslot, rel, &newtup);
+		slot_fill_defaults(rel, estate, remoteslot);
+		MemoryContextSwitchTo(oldctx);
+
+		buffer->nused++;
+		buffer->bytes += newtup.datasize;
+
+		if (buffer->nused >= MAX_BUFFERED_TUPLES ||
+			buffer->bytes >= MAX_BUFFERED_BYTES)
+			apply_multi_insert_flush();
+
+		return;
+	}
+
+	/* Slow path: first INSERT, or a different relation */
+	begin_replication_step();
+
+	rel = logicalrep_rel_open(relid, RowExclusiveLock);
+
+	if (!should_apply_changes_for_rel(rel))
+	{
+		logicalrep_rel_close(rel, RowExclusiveLock);
+		end_replication_step();
+		return;
+	}
+
+	/* Tear down existing buffer if switching relations */
+	if (pending_multi_insert)
+		apply_multi_insert_teardown();
+
+	if (!rel_can_multi_insert(rel))
+	{
+		/* Fall back to single-row path */
+		logicalrep_rel_close(rel, NoLock);
+		end_replication_step();
+		apply_handle_insert(s);
+		return;
+	}
+
+	/* Set up new multi-insert buffer */
+	run_as_owner = MySubscription->runasowner;
+	if (!run_as_owner)
+		SwitchToUntrustedUser(rel->localrel->rd_rel->relowner, &ucxt);
+
+	apply_error_callback_arg.rel = rel;
+
+	oldctx = MemoryContextSwitchTo(ApplyContext);
+
+	edata = create_edata_for_relation(rel);
+
+	buffer = palloc0(sizeof(ApplyMultiInsertBuffer));
+	buffer->relid = relid;
+	buffer->rel = rel;
+	buffer->edata = edata;
+	buffer->run_as_owner = run_as_owner;
+	if (!run_as_owner)
+		buffer->ucxt = ucxt;
+
+	/* Slot array allocated as NULLs, slots created lazily */
+	buffer->nslots_allocated = MAX_BUFFERED_TUPLES;
+	buffer->slots = palloc0(sizeof(TupleTableSlot *) * MAX_BUFFERED_TUPLES);
+
+	buffer->bistate = GetBulkInsertState();
+	buffer->batch_context = AllocSetContextCreate(ApplyContext,
+													"multi-insert batch",
+													ALLOCSET_DEFAULT_SIZES);
+
+	MemoryContextSwitchTo(oldctx);
+
+	pending_multi_insert = buffer;
+
+	estate = edata->estate;
+
+	/* Lazily create first slot */
+	if (buffer->slots[0] == NULL)
+	{
+		oldctx = MemoryContextSwitchTo(ApplyContext);
+		buffer->slots[0] = MakeSingleTupleTableSlot(
+			RelationGetDescr(rel->localrel), &TTSOpsVirtual);
+		buffer->slots[0]->tts_mcxt = buffer->batch_context;
+		MemoryContextSwitchTo(oldctx);
+	}
+	remoteslot = buffer->slots[0];
+
+	/* Allocate datum values in batch context - reset on flush */
+	oldctx = MemoryContextSwitchTo(buffer->batch_context);
+	slot_store_data(remoteslot, rel, &newtup);
+	slot_fill_defaults(rel, estate, remoteslot);
+	MemoryContextSwitchTo(oldctx);
+
+	buffer->nused = 1;
+	buffer->bytes = newtup.datasize;
+
+	/*
+	 * Flush if this single tuple already fills the buffer. end_replication_step()
+	 * must run regardless to release our snapshot; the flush manages its own.
+	 */
+	if (buffer->nused >= MAX_BUFFERED_TUPLES ||
+		buffer->bytes >= MAX_BUFFERED_BYTES)
+		apply_multi_insert_flush();
+
+	end_replication_step();
+}
+
+/*
  * Handle INSERT message.
  */
 
@@ -3827,6 +4185,13 @@ apply_dispatch(StringInfo s)
 	saved_command = remote_ctx.command;
 	remote_ctx.command = action;
 
+	/*
+	 * Tear down pending multi-insert buffer before any non-INSERT message
+	 * to maintain correct ordering and visibility.
+	 */
+	if (action != LOGICAL_REP_MSG_INSERT && pending_multi_insert)
+		apply_multi_insert_teardown();
+
 	switch (action)
 	{
 		case LOGICAL_REP_MSG_BEGIN:
@@ -3838,7 +4203,7 @@ apply_dispatch(StringInfo s)
 			break;
 
 		case LOGICAL_REP_MSG_INSERT:
-			apply_handle_insert(s);
+			apply_handle_multi_insert(s);
 			break;
 
 		case LOGICAL_REP_MSG_UPDATE:
