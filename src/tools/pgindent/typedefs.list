@@ -544,6 +544,7 @@ ConvProcInfo
 ConversionLocation
 ConvertRowtypeExpr
 CookedConstraint
+CopyCustomFormatEntry
 CopyDest
 CopyFormat
 CopyFormatOptions

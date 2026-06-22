@@ -14,6 +14,7 @@
 #ifndef COPYAPI_H
 #define COPYAPI_H
 
+#include "commands/copy_state.h"
 #include "commands/copy.h"
 
 /*
@@ -101,5 +102,35 @@ typedef struct CopyFromRoutine
 	 */
 	void		(*CopyFromEnd) (CopyFromState cstate);
 } CopyFromRoutine;
+
+/*
+ * Optional callback to process one format-specific COPY option. Invoked
+ * from ProcessCopyOptions() once per option that core did not recognize, after
+ * every core option has been parsed (so 'opts' is fully populated).
+ *
+ * Returns true if the option belongs to the format and is valid. Returns false
+ * if the option is not one the format recognizes, in which case core raises the
+ * "not accepted" error; thus an unrecognized option always errors, whether or
+ * not the format supplies this callback. For a recognized option with an invalid
+ * value, the callback should ereport() itself.
+ */
+typedef bool (*ProcessOneCopyOptionFn) (CopyFormatOptions *opts, bool is_from,
+										DefElem *option);
+
+/*
+ * Sturct to store the registered custom format information.
+ */
+typedef struct CopyCustomFormatEntry
+{
+	const char *name;			/* constant string; never freed (see below) */
+	const CopyToRoutine *to_routine;
+	const CopyFromRoutine *from_routine;
+	ProcessOneCopyOptionFn option_fn;
+} CopyCustomFormatEntry;
+
+extern void RegisterCopyCustomFormat(const char *name, const CopyToRoutine *to,
+									 const CopyFromRoutine *from,
+									 ProcessOneCopyOptionFn option_fn);
+extern const CopyCustomFormatEntry *GetCopyCustomFormatRoutines(const char *name);
 
 #endif							/* COPYAPI_H */

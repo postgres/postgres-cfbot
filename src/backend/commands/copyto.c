@@ -130,7 +130,9 @@ static const CopyToRoutine CopyToRoutineBinary = {
 static const CopyToRoutine *
 CopyToGetRoutine(const CopyFormatOptions *opts)
 {
-	if (opts->format == COPY_FORMAT_CSV)
+	if (opts->format == COPY_FORMAT_CUSTOM)
+		return opts->custom_format_ent->to_routine;
+	else if (opts->format == COPY_FORMAT_CSV)
 		return &CopyToRoutineCSV;
 	else if (opts->format == COPY_FORMAT_BINARY)
 		return &CopyToRoutineBinary;
