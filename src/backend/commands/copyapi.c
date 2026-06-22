@@ -48,7 +48,8 @@ is_builtin_copy_format(const char *name)
  */
 void
 RegisterCopyCustomFormat(const char *name, const CopyToRoutine *to,
-						 const CopyFromRoutine *from, ProcessOneCopyOptionFn option_fn)
+						 const CopyFromRoutine *from, ProcessOneCopyOptionFn option_fn,
+						 ValidateCopyOptionsFn validate_fn)
 {
 	Assert(name != NULL && name[0] != '\0');
 
@@ -94,6 +95,7 @@ RegisterCopyCustomFormat(const char *name, const CopyToRoutine *to,
 	CopyCustomFormatArray[CopyCustomFormatsAssigned].to_routine = to;
 	CopyCustomFormatArray[CopyCustomFormatsAssigned].from_routine = from;
 	CopyCustomFormatArray[CopyCustomFormatsAssigned].option_fn = option_fn;
+	CopyCustomFormatArray[CopyCustomFormatsAssigned].validate_fn = validate_fn;
 	CopyCustomFormatsAssigned++;
 }
 

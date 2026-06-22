@@ -118,6 +118,15 @@ typedef bool (*ProcessOneCopyOptionFn) (CopyFormatOptions *opts, bool is_from,
 										DefElem *option);
 
 /*
+ * Optional callback to validate a custom format's fully-parsed options as a
+ * whole. Invoked once from ProcessCopyOptions() after all options have been
+ * processed, so it can enforce cross-option constraints and reject
+ * incompatible core options. It runs even when no format-specific options were
+ * supplied. Reports problems with ereport().
+ */
+typedef void (*ValidateCopyOptionsFn) (CopyFormatOptions *opts, bool is_from);
+
+/*
  * Sturct to store the registered custom format information.
  */
 typedef struct CopyCustomFormatEntry
@@ -126,11 +135,14 @@ typedef struct CopyCustomFormatEntry
 	const CopyToRoutine *to_routine;
 	const CopyFromRoutine *from_routine;
 	ProcessOneCopyOptionFn option_fn;
+	ValidateCopyOptionsFn validate_fn;
 } CopyCustomFormatEntry;
 
 extern void RegisterCopyCustomFormat(const char *name, const CopyToRoutine *to,
 									 const CopyFromRoutine *from,
-									 ProcessOneCopyOptionFn option_fn);
+									 ProcessOneCopyOptionFn option_fn,
+									 ValidateCopyOptionsFn validate_fn);
+
 extern const CopyCustomFormatEntry *GetCopyCustomFormatRoutines(const char *name);
 
 #endif							/* COPYAPI_H */
