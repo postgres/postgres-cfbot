@@ -276,9 +276,9 @@ set enable_seqscan to false;
 SELECT explain_one_or_more_row($$
 SELECT * FROM multi_column_unique WHERE a=1 AND b=1;
 $$);
-                                   explain_one_or_more_row                                    
-----------------------------------------------------------------------------------------------
- Index Scan using multi_column_unique_idx on multi_column_unique  (cost=N..N rows=>1 width=N)
+                                   explain_one_or_more_row                                   
+---------------------------------------------------------------------------------------------
+ Index Scan using multi_column_unique_idx on multi_column_unique  (cost=N..N rows=1 width=N)
    Index Cond: ((a = 1) AND (b = 1))
 (2 rows)
 
@@ -286,9 +286,9 @@ $$);
 SELECT explain_one_or_more_row($$
 SELECT * FROM multi_column_unique WHERE a=1 AND b=1 AND b=ANY('{1,2,3}');
 $$);
-                                   explain_one_or_more_row                                    
-----------------------------------------------------------------------------------------------
- Index Scan using multi_column_unique_idx on multi_column_unique  (cost=N..N rows=>1 width=N)
+                                   explain_one_or_more_row                                   
+---------------------------------------------------------------------------------------------
+ Index Scan using multi_column_unique_idx on multi_column_unique  (cost=N..N rows=1 width=N)
    Index Cond: ((a = 1) AND (b = ANY ('{1,2,3}'::integer[])) AND (b = 1))
 (2 rows)
 
@@ -355,9 +355,9 @@ $$);
 SELECT explain_one_or_more_row($$
 SELECT * FROM multi_column_unique_null_not_distinct WHERE a=1 AND b IS NULL;
 $$);
-                                                        explain_one_or_more_row                                                        
----------------------------------------------------------------------------------------------------------------------------------------
- Index Only Scan using multi_column_unique_null_not_distinct_idx on multi_column_unique_null_not_distinct  (cost=N..N rows=>1 width=N)
+                                                       explain_one_or_more_row                                                        
+--------------------------------------------------------------------------------------------------------------------------------------
+ Index Only Scan using multi_column_unique_null_not_distinct_idx on multi_column_unique_null_not_distinct  (cost=N..N rows=1 width=N)
    Index Cond: ((a = 1) AND (b IS NULL))
 (2 rows)
 
@@ -367,9 +367,9 @@ $$);
 SELECT explain_one_or_more_row($$
 SELECT * FROM multi_column_unique_deferred WHERE a=1 AND b=1;
 $$);
-                                               explain_one_or_more_row                                               
----------------------------------------------------------------------------------------------------------------------
- Index Only Scan using multi_column_unique_deferred_idx on multi_column_unique_deferred  (cost=N..N rows=>1 width=N)
+                                              explain_one_or_more_row                                               
+--------------------------------------------------------------------------------------------------------------------
+ Index Only Scan using multi_column_unique_deferred_idx on multi_column_unique_deferred  (cost=N..N rows=1 width=N)
    Index Cond: ((a = 1) AND (b = 1))
 (2 rows)
 
@@ -377,9 +377,9 @@ $$);
 SELECT explain_one_or_more_row($$
 SELECT * FROM multi_column_unique_partial WHERE a=1 AND b=11;
 $$);
-                                              explain_one_or_more_row                                              
--------------------------------------------------------------------------------------------------------------------
- Index Only Scan using multi_column_unique_partial_idx on multi_column_unique_partial  (cost=N..N rows=>1 width=N)
+                                             explain_one_or_more_row                                              
+------------------------------------------------------------------------------------------------------------------
+ Index Only Scan using multi_column_unique_partial_idx on multi_column_unique_partial  (cost=N..N rows=1 width=N)
    Index Cond: ((a = 1) AND (b = 11))
 (2 rows)
 
