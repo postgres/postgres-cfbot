@@ -2079,6 +2079,7 @@ typedef struct IndexPath
 	ScanDirection indexscandir;
 	Cost		indextotalcost;
 	Selectivity indexselectivity;
+	bool		unique_path;
 } IndexPath;
 
 /*
