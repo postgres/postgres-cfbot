@@ -146,23 +146,27 @@
 /*
  * In production builds, switch to hash-based MCV matching when the lists are
  * large enough to amortize hash setup cost.  (This threshold is compared to
- * the sum of the lengths of the two MCV lists.  This is simplistic but seems
+ * the sum of the lengths of the two lists.  This is simplistic but seems
  * to work well enough.)  In debug builds, we use a smaller threshold so that
  * the regression tests cover both paths well.
  */
 #ifndef USE_ASSERT_CHECKING
-#define EQJOINSEL_MCV_HASH_THRESHOLD 200
+#define MCV_HASH_THRESHOLD 200
 #else
-#define EQJOINSEL_MCV_HASH_THRESHOLD 20
+#define MCV_HASH_THRESHOLD 20
 #endif
 
-/* Entries in the simplehash hash table used by eqjoinsel_find_matches */
+/*
+ * Entries in the simplehash hash table used by
+ * eqjoinsel_find_matches and scalararray_mcv_hash_match
+ */
 typedef struct MCVHashEntry
 {
 	Datum		value;			/* the value represented by this entry */
 	int			index;			/* its index in the relevant AttStatsSlot */
 	uint32		hash;			/* hash code for the Datum */
 	char		status;			/* status code used by simplehash.h */
+	int			count;			/* number of occurrences of current value */
 } MCVHashEntry;
 
 /* private_data for the simplehash hash table */
@@ -184,6 +188,16 @@ get_relation_stats_hook_type get_relation_stats_hook = NULL;
 get_index_stats_hook_type get_index_stats_hook = NULL;
 
 static double eqsel_internal(PG_FUNCTION_ARGS, bool negate);
+static double scalararray_mcv_hash_match(VariableStatData *vardata, Oid operator,
+										 Oid collation, Selectivity nonconst_sel,
+										 Datum *elem_values, bool *elem_nulls,
+										 int num_elems, bool *elem_const,
+										 Oid nominal_element_type, bool useOr,
+										 bool isEquality, bool isInequality);
+static void accum_scalararray_prob(Selectivity elem_sel, int count, bool useOr,
+								   bool isEquality, bool isInequality,
+								   double nullfrac, bool invert,
+								   Selectivity *p_selec, Selectivity *p_selec_disjoint);
 static double eqjoinsel_inner(FmgrInfo *eqproc, Oid collation,
 							  Oid hashLeft, Oid hashRight,
 							  VariableStatData *vardata1, VariableStatData *vardata2,
@@ -1897,6 +1911,67 @@ strip_array_coercion(Node *node)
 }
 
 /*
+ * accum_scalararray_prob - combine selectivity for repeated elements
+ *
+ * Update the running selectivity for a ScalarArrayOpExpr by adding the
+ * contribution of 'count' identical elements with per-element selectivity.
+ *
+ * This is equivalent to applying the per-element update 'count' times:
+ *
+ *   OR (ANY):  P = P + s - P*s
+ *   AND (ALL): P = P * s
+ *
+ * but uses closed-form formulas:
+ *
+ *   OR:  P = 1 - (1 - P) * (1 - s)^count
+ *   AND: P = P * s^count
+ *
+ * The selec_disjoint accumulator tracks the alternative "disjoint events"
+ * estimate used for "= ANY" / "<> ALL".
+ */
+static void
+accum_scalararray_prob(Selectivity elem_sel, int count, bool useOr,
+					   bool isEquality, bool isInequality,
+					   double nullfrac, bool invert,
+					   Selectivity *p_selec, Selectivity *p_selec_disjoint)
+{
+	Selectivity selec;
+	Selectivity disjoint;
+
+	if (count <= 0)
+		return;
+
+	/* Convert to inequality probability if needed */
+	if (invert && isInequality)
+		elem_sel = 1.0 - elem_sel - nullfrac;
+
+	CLAMP_PROBABILITY(elem_sel);
+
+	selec = *p_selec;
+	disjoint = *p_selec_disjoint;
+
+	if (useOr)
+	{
+		/* ANY semantics: probability that at least one element matches */
+		selec = 1.0 - (1.0 - selec) * pow(1.0 - elem_sel, count);
+
+		if (isEquality)
+			disjoint += elem_sel * count;
+	}
+	else
+	{
+		/* ALL semantics: probability that all elements match */
+		selec *= pow(elem_sel, count);
+
+		if (isInequality)
+			disjoint += count * (elem_sel - 1.0);
+	}
+
+	*p_selec = selec;
+	*p_selec_disjoint = disjoint;
+}
+
+/*
  *		scalararraysel		- Selectivity of ScalarArrayOpExpr Node.
  */
 Selectivity
@@ -2037,6 +2112,45 @@ scalararraysel(PlannerInfo *root,
 						  elmlen, elmbyval, elmalign,
 						  &elem_values, &elem_nulls, &num_elems);
 
+		/* Try to avoid O(N^2) selectivity calculation */
+		if ((isEquality || isInequality) && !is_join_clause)
+		{
+			VariableStatData vardata;
+			Node	   *other_op = NULL;
+			bool		var_on_left;
+
+			/*
+			 * If the clause is of the form "var OP something" or "something
+			 * OP var", extract statistics for the variable. Otherwise, fall
+			 * back to a default per-element estimate.
+			 */
+			if (get_restriction_variable(root, clause->args, varRelid,
+										 &vardata, &other_op, &var_on_left))
+			{
+				bool	   *elem_const = palloc_array(bool, num_elems);
+
+				/*
+				 * All elements are constants here, since we deconstructed a
+				 * Const array.
+				 */
+				memset(elem_const, true, sizeof(bool) * num_elems);
+
+				s1 = scalararray_mcv_hash_match(&vardata, operator,
+												clause->inputcollid, -1.0,
+												elem_values, elem_nulls,
+												num_elems, elem_const,
+												nominal_element_type, useOr,
+												isEquality, isInequality);
+
+				pfree(elem_const);
+
+				ReleaseVariableStats(vardata);
+
+				if (s1 >= 0.0)
+					return s1;
+			}
+		}
+
 		/*
 		 * For generic operators, we assume the probability of success is
 		 * independent for each array element.  But for "= ANY" or "<> ALL",
@@ -2111,6 +2225,95 @@ scalararraysel(PlannerInfo *root,
 
 		get_typlenbyval(arrayexpr->element_typeid,
 						&elmlen, &elmbyval);
+
+		/* Try to avoid O(N^2) selectivity calculation */
+		if ((isEquality || isInequality) && !is_join_clause)
+		{
+			VariableStatData vardata;
+			Node	   *other_op = NULL;
+			bool		var_on_left;
+			int			num_elems = list_length(arrayexpr->elements);
+
+			/*
+			 * If expression is not variable = something or something =
+			 * variable, then fall back to default code path to compute
+			 * default selectivity.
+			 */
+			if (get_restriction_variable(root, clause->args, varRelid,
+										 &vardata, &other_op, &var_on_left))
+			{
+				Selectivity nonconst_sel;
+				Datum	   *elem_values;
+				bool	   *elem_nulls;
+				bool	   *elem_const;
+				ListCell   *lc;
+
+				/* Build arrays describing ARRAY[] elements */
+				elem_values = palloc_array(Datum, num_elems);
+				elem_nulls = palloc0_array(bool, num_elems);
+				elem_const = palloc0_array(bool, num_elems);
+
+				foreach(lc, arrayexpr->elements)
+				{
+					Node	   *elem_value = (Node *) lfirst(lc);
+					int			i = foreach_current_index(lc);
+
+					if (IsA(elem_value, Const))
+					{
+						elem_values[i] = ((Const *) elem_value)->constvalue;
+						elem_nulls[i] = ((Const *) elem_value)->constisnull;
+						elem_const[i] = true;
+					}
+					else
+					{
+						elem_nulls[i] = false;
+						elem_const[i] = false;
+					}
+
+					/*
+					 * When the array contains a NULL constant, same as
+					 * var_eq_const, we assume the operator is strict and
+					 * nothing will match, thus return 0.0.
+					 */
+					if (!useOr && elem_nulls[i])
+					{
+						pfree(elem_values);
+						pfree(elem_nulls);
+						pfree(elem_const);
+
+						ReleaseVariableStats(vardata);
+
+						return (Selectivity) 0.0;
+					}
+				}
+
+				/*
+				 * Non-Const elements cannot be matched against MCV entries so
+				 * estimate their selectivity separately using a fallback.
+				 */
+				nonconst_sel = var_eq_non_const(&vardata, operator,
+												clause->inputcollid,
+												other_op, var_on_left,
+												isInequality);
+
+				s1 = scalararray_mcv_hash_match(&vardata, operator,
+												clause->inputcollid,
+												nonconst_sel, elem_values,
+												elem_nulls, num_elems,
+												elem_const,
+												nominal_element_type, useOr,
+												isEquality, isInequality);
+
+				pfree(elem_values);
+				pfree(elem_nulls);
+				pfree(elem_const);
+
+				ReleaseVariableStats(vardata);
+
+				if (s1 >= 0.0)
+					return s1;
+			}
+		}
 
 		/*
 		 * We use the assumption of disjoint probabilities here too, although
@@ -2228,6 +2431,340 @@ scalararraysel(PlannerInfo *root,
 	CLAMP_PROBABILITY(s1);
 
 	return s1;
+}
+
+/*
+ * scalararray_mcv_hash_match - Selectivity of ScalarArrayOpExpr by O(N+M)
+ *
+ * This function matches IN-list elements against MCV entries of the variable,
+ * using either hashing (O(N+M)) or fallback nested-loop logic.  For matched
+ * elements, selectivity is taken from MCV frequencies; unmatched elements are
+ * handled using fallback estimates.
+ *
+ * The resulting probabilities are combined using the standard ANY/ALL
+ * selectivity model (independent or disjoint events), identical to the
+ * generic estimator.
+ *
+ * Inputs:
+ *   vardata: statistics for the variable
+ *   operator: equality or inequality operator
+ *   collation: collation to use
+ *   nonconst_sel: fallback selectivity for non-Const elements
+ *   elem_values: IN-list element values
+ *   elem_nulls: NULL flags for elements
+ *   elem_const: flags indicating Const elements
+ *   num_elems: number of elements
+ *   nominal_element_type: element type
+ *   useOr: OR (ANY) vs AND (ALL) semantics
+ *   isEquality: operator behaves like equality
+ *   isInequality: operator behaves like inequality
+ *
+ * Result:
+ *   Selectivity in [0,1], or -1.0 if MCV-based estimation is not applicable.
+ *
+ * Note:
+ *   Assumes eqsel()/neqsel semantics.  Each element is accounted for once,
+ *   either via MCV match or fallback estimation.
+ */
+static double
+scalararray_mcv_hash_match(VariableStatData *vardata, Oid operator,
+						   Oid collation, Selectivity nonconst_sel,
+						   Datum *elem_values, bool *elem_nulls, int num_elems,
+						   bool *elem_const, Oid nominal_element_type,
+						   bool useOr, bool isEquality, bool isInequality)
+{
+	Form_pg_statistic stats;
+	AttStatsSlot sslot;
+	FmgrInfo	eqproc;
+	double		selec = -1.0,
+				s1disjoint,
+				nullfrac = 0.0;
+	Oid			hashLeft = InvalidOid,
+				hashRight = InvalidOid,
+				opfuncoid;
+	bool		have_mcvs = false;
+
+	/*
+	 * If the variable is known to be unique, MCV statistics do not represent
+	 * a meaningful frequency distribution, so skip MCV-based estimation.
+	 */
+	if (vardata->isunique && vardata->rel && vardata->rel->tuples >= 1.0)
+		return -1.0;
+
+	/*
+	 * For inequality (<>, ALL), we compute probabilities using the negated
+	 * equality operator and later transform them as
+	 *
+	 * p(x <> c) = 1 - p(x = c) - nullfrac
+	 */
+	if (isInequality)
+	{
+		operator = get_negator(operator);
+		if (!OidIsValid(operator))
+			return -1.0;
+	}
+
+	opfuncoid = get_opcode(operator);
+	memset(&sslot, 0, sizeof(sslot));
+
+	if (HeapTupleIsValid(vardata->statsTuple))
+	{
+		if (statistic_proc_security_check(vardata, opfuncoid))
+			have_mcvs = get_attstatsslot(&sslot, vardata->statsTuple,
+										 STATISTIC_KIND_MCV, InvalidOid,
+										 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS);
+	}
+
+	if (have_mcvs)
+	{
+		/*
+		 * If the MCV list and IN-list are large enough, and the operator
+		 * supports hashing, attempt to use hash functions so that MCV–IN
+		 * matching can be done in O(N+M) instead of O(N×M).
+		 */
+		if (sslot.nvalues + num_elems >= MCV_HASH_THRESHOLD)
+		{
+			fmgr_info(opfuncoid, &eqproc);
+			(void) get_op_hash_functions_ext(operator, nominal_element_type,
+											 &hashLeft, &hashRight);
+		}
+	}
+
+	if (have_mcvs && OidIsValid(hashLeft) && OidIsValid(hashRight))
+	{
+		/* Use a hash table to speed up the matching */
+		LOCAL_FCINFO(fcinfo, 2);
+		LOCAL_FCINFO(hash_fcinfo, 1);
+		MCVHashTable_hash *hashTable;
+		FmgrInfo	hash_proc;
+		MCVHashContext hashContext;
+		Selectivity nonmcv_selec = 0.0;
+		double		sumallcommon = 0.0;
+		bool		isdefault;
+		bool		hash_mcv;
+		double		otherdistinct;
+		Datum	   *arrayHash;
+		Datum	   *arrayProbe;
+		int			nvaluesHash;
+		int			nvaluesProbe;
+		int			nonmcv_cnt = num_elems;
+		int			nonconst_cnt = 0;
+
+		/* Grab the nullfrac for use below. */
+		stats = (Form_pg_statistic) GETSTRUCT(vardata->statsTuple);
+		nullfrac = stats->stanullfrac;
+
+		selec = s1disjoint = (useOr ? 0.0 : 1.0);
+
+		InitFunctionCallInfoData(*fcinfo, &eqproc, 2, collation,
+								 NULL, NULL);
+		fcinfo->args[0].isnull = false;
+		fcinfo->args[1].isnull = false;
+
+		for (int i = 0; i < sslot.nvalues; i++)
+			sumallcommon += sslot.numbers[i];
+
+		/*
+		 * Compute the total probability mass of all non-MCV values. This is
+		 * the part of the column distribution not covered by MCVs.
+		 */
+		nonmcv_selec = 1.0 - sumallcommon - nullfrac;
+		CLAMP_PROBABILITY(nonmcv_selec);
+
+		/*
+		 * Approximate the per-value probability of a non-MCV constant by
+		 * dividing the remaining probability mass by the number of other
+		 * distinct values.
+		 */
+		otherdistinct = get_variable_numdistinct(vardata, &isdefault) - sslot.nnumbers;
+		if (otherdistinct > 1)
+			nonmcv_selec /= otherdistinct;
+
+		if (sslot.nnumbers > 0 && nonmcv_selec > sslot.numbers[sslot.nnumbers - 1])
+			nonmcv_selec = sslot.numbers[sslot.nnumbers - 1];
+
+		/* Make sure we build the hash table on the smaller array. */
+		if (sslot.nvalues <= num_elems)
+		{
+			hash_mcv = true;
+			nvaluesHash = sslot.nvalues;
+			nvaluesProbe = num_elems;
+			arrayHash = sslot.values;
+			arrayProbe = elem_values;
+		}
+		else
+		{
+			hash_mcv = false;
+			nvaluesHash = num_elems;
+			nvaluesProbe = sslot.nvalues;
+			arrayHash = elem_values;
+			arrayProbe = sslot.values;
+		}
+
+		fmgr_info(hash_mcv ? hashLeft : hashRight, &hash_proc);
+		InitFunctionCallInfoData(*hash_fcinfo, &hash_proc, 1, collation,
+								 NULL, NULL);
+		hash_fcinfo->args[0].isnull = false;
+
+		hashContext.equal_fcinfo = fcinfo;
+		hashContext.hash_fcinfo = hash_fcinfo;
+		hashContext.op_is_reversed = hash_mcv;
+		hashContext.insert_mode = true;
+
+		get_typlenbyval(hash_mcv ? sslot.valuetype : nominal_element_type,
+						&hashContext.hash_typlen,
+						&hashContext.hash_typbyval);
+
+		hashTable = MCVHashTable_create(CurrentMemoryContext,
+										nvaluesHash,
+										&hashContext);
+
+		/* Build a hash table over the smaller input side. */
+		for (int i = 0; i < nvaluesHash; i++)
+		{
+			bool		found = false;
+			MCVHashEntry *entry;
+
+			/*
+			 * When hashing IN-list values (hash_mcv == false), we only insert
+			 * constant, non-NULL elements.  NULL and non-Const elements are
+			 * counted separately, because they cannot participate in MCV
+			 * matching and must be handled later using generic selectivity
+			 * estimation.
+			 */
+			if (!hash_mcv)
+			{
+				if (elem_nulls[i])
+				{
+					Assert(useOr);
+					nonmcv_cnt--;
+					continue;
+				}
+
+				if (!elem_const[i])
+				{
+					nonmcv_cnt--;
+					nonconst_cnt++;
+					continue;
+				}
+			}
+
+			entry = MCVHashTable_insert(hashTable, arrayHash[i], &found);
+
+			/*
+			 * entry->count tracks how many times the same value appears, so
+			 * that duplicate IN-list elements can be folded into the
+			 * probability calculation.
+			 */
+			if (likely(!found))
+			{
+				entry->index = i;
+				entry->count = 1;
+			}
+			else
+				entry->count++;
+		}
+
+		hashContext.insert_mode = false;
+		if (hashLeft != hashRight)
+		{
+			fmgr_info(hash_mcv ? hashRight : hashLeft, &hash_proc);
+			/* Resetting hash_fcinfo is probably unnecessary, but be safe */
+			InitFunctionCallInfoData(*hash_fcinfo, &hash_proc, 1, collation,
+									 NULL, NULL);
+			hash_fcinfo->args[0].isnull = false;
+		}
+
+		for (int i = 0; i < nvaluesProbe; i++)
+		{
+			MCVHashEntry *entry;
+			Selectivity s1;
+			int			nvaluesmcv;
+
+			/*
+			 * When probing with IN-list elements, ignore NULLs and non-Const
+			 * expressions: they cannot be matched against MCVs and will be
+			 * accounted for later by generic estimation.
+			 */
+			if (hash_mcv)
+			{
+				if (elem_nulls[i])
+				{
+					Assert(useOr);
+					nonmcv_cnt--;
+					continue;
+				}
+
+				if (!elem_const[i])
+				{
+					nonmcv_cnt--;
+					nonconst_cnt++;
+					continue;
+				}
+			}
+
+			entry = MCVHashTable_lookup(hashTable, arrayProbe[i]);
+
+			/*
+			 * If found, obtain its MCV frequency and remember how many values
+			 * on the hashed side map to this entry.
+			 */
+			if (entry != NULL)
+			{
+				s1 = hash_mcv ? sslot.numbers[entry->index]
+					: sslot.numbers[i];
+
+				nvaluesmcv = entry->count;
+
+				accum_scalararray_prob(s1, nvaluesmcv, useOr, isEquality,
+									   isInequality, nullfrac, true, &selec,
+									   &s1disjoint);
+
+				/* Matched values are no longer considered non-MCV */
+				nonmcv_cnt -= nvaluesmcv;
+			}
+		}
+
+		nonmcv_cnt = Max(nonmcv_cnt, 0);
+
+		/*
+		 * Account for constant IN-list values that did not match any MCV.
+		 *
+		 * Each such value is assumed to have probability = nonmcv_selec,
+		 * derived from the remaining (non-MCV) probability mass.
+		 */
+		accum_scalararray_prob(nonmcv_selec, nonmcv_cnt, useOr, isEquality,
+							   isInequality, nullfrac, true,
+							   &selec, &s1disjoint);
+
+		/*
+		 * Account for non-Const IN-list elements.
+		 *
+		 * These values cannot be matched against MCVs, so we rely on the
+		 * operator's generic selectivity estimator for each of them.
+		 */
+		accum_scalararray_prob(nonconst_sel, nonconst_cnt, useOr, isEquality,
+							   isInequality, nullfrac, false,
+							   &selec, &s1disjoint);
+
+		/*
+		 * For = ANY or <> ALL, if the IN-list elements are assumed distinct,
+		 * the events are disjoint and the total probability is the sum of
+		 * individual probabilities.  Use that estimate if it lies in [0,1].
+		 */
+		if ((useOr ? isEquality : isInequality) &&
+			s1disjoint >= 0.0 && s1disjoint <= 1.0)
+			selec = s1disjoint;
+
+		CLAMP_PROBABILITY(selec);
+
+		MCVHashTable_destroy(hashTable);
+	}
+
+	if (have_mcvs)
+		free_attstatsslot(&sslot);
+
+	return selec;
 }
 
 /*
@@ -2478,7 +3015,7 @@ eqjoinsel(PG_FUNCTION_ARGS)
 		 * If the MCV lists are long enough to justify hashing, try to look up
 		 * hash functions for the join operator.
 		 */
-		if ((sslot1.nvalues + sslot2.nvalues) >= EQJOINSEL_MCV_HASH_THRESHOLD)
+		if ((sslot1.nvalues + sslot2.nvalues) >= MCV_HASH_THRESHOLD)
 			(void) get_op_hash_functions_ext(operator,
 											 exprType((Node *) linitial(args)),
 											 &hashLeft, &hashRight);
@@ -3120,6 +3657,7 @@ eqjoinsel_find_matches(FmgrInfo *eqproc, Oid collation,
 
 /*
  * Support functions for the hash tables used by eqjoinsel_find_matches
+ * and scalararray_mcv_hash_match
  */
 static uint32
 hash_mcv(MCVHashTable_hash *tab, Datum key)
