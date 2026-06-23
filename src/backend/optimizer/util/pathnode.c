@@ -1107,6 +1107,7 @@ create_samplescan_path(PlannerInfo *root, RelOptInfo *rel, Relids required_outer
  * 'loop_count' is the number of repetitions of the indexscan to factor into
  *		estimates of caching behavior.
  * 'partial_path' is true if constructing a parallel index scan path.
+ * 'unique_path' is true if path returns at most one row.
  *
  * Returns the new path node.
  */
@@ -1121,7 +1122,8 @@ create_index_path(PlannerInfo *root,
 				  bool indexonly,
 				  Relids required_outer,
 				  double loop_count,
-				  bool partial_path)
+				  bool partial_path,
+				  bool unique_path)
 {
 	IndexPath  *pathnode = makeNode(IndexPath);
 	RelOptInfo *rel = index->rel;
@@ -1141,6 +1143,7 @@ create_index_path(PlannerInfo *root,
 	pathnode->indexorderbys = indexorderbys;
 	pathnode->indexorderbycols = indexorderbycols;
 	pathnode->indexscandir = indexscandir;
+	pathnode->unique_path = unique_path;
 
 	cost_index(pathnode, root, loop_count, partial_path);
 
