@@ -7188,7 +7188,7 @@ plan_cluster_use_sort(Oid tableOid, Oid indexOid)
 	indexScanPath = create_index_path(root, indexInfo,
 									  NIL, NIL, NIL, NIL,
 									  ForwardScanDirection, false,
-									  NULL, 1.0, false);
+									  NULL, 1.0, false, false);
 
 	return (seqScanAndSortPath.total_cost < indexScanPath->path.total_cost);
 }
