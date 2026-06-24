@@ -1303,6 +1303,10 @@ heapam_index_start_prefetching(IndexScanDesc scan, IndexScanHeapData *hscan)
 		read_stream_begin_relation(READ_STREAM_NO_ADVICE, NULL,
 								   scan->heapRelation, MAIN_FORKNUM,
 								   heapam_index_prefetch_next_block, scan, 0);
+
+	if (scan->instrument)
+		read_stream_enable_stats(hscan->xs_read_stream,
+								 &scan->instrument->io);
 }
 
 /*
