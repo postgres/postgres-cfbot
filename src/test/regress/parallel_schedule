@@ -9,7 +9,7 @@
 # ----------
 
 # required setup steps
-test: test_setup
+test: test_setup port
 
 # ----------
 # The first group of parallel tests

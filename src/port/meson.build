@@ -14,6 +14,7 @@ pgport_sources = [
   'pg_popcount_aarch64.c',
   'pg_popcount_x86.c',
   'pg_strong_random.c',
+  'pg_threads.c',
   'pgcheckdir.c',
   'pgmkdirp.c',
   'pgsleep.c',
@@ -157,11 +158,11 @@ pgport_variants = {
     'dependencies': [backend_port_code],
   },
   '': default_lib_args + {
-    'dependencies': [frontend_port_code],
+    'dependencies': [frontend_port_code, thread_dep],
   },
   '_shlib': default_lib_args + {
     'pic': true,
-    'dependencies': [frontend_port_code],
+    'dependencies': [frontend_port_code, thread_dep],
   },
 }
 
