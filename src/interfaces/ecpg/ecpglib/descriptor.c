@@ -8,11 +8,11 @@
 #include "postgres_fe.h"
 
 #include "catalog/pg_type_d.h"
-#include "ecpg-pthread-win32.h"
 #include "ecpgerrno.h"
 #include "ecpglib.h"
 #include "ecpglib_extern.h"
 #include "ecpgtype.h"
+#include "port/pg_threads.h"
 #include "sql3types.h"
 #include "sqlca.h"
 #include "sqlda.h"
@@ -20,35 +20,9 @@
 static void descriptor_free(struct descriptor *desc);
 
 /* We manage descriptors separately for each thread. */
-static pthread_key_t descriptor_key;
-static pthread_once_t descriptor_once = PTHREAD_ONCE_INIT;
+static thread_local struct descriptor *descriptors_thread_local;
 
 static void descriptor_deallocate_all(struct descriptor *list);
-
-static void
-descriptor_destructor(void *arg)
-{
-	descriptor_deallocate_all(arg);
-}
-
-static void
-descriptor_key_init(void)
-{
-	pthread_key_create(&descriptor_key, descriptor_destructor);
-}
-
-static struct descriptor *
-get_descriptors(void)
-{
-	pthread_once(&descriptor_once, descriptor_key_init);
-	return (struct descriptor *) pthread_getspecific(descriptor_key);
-}
-
-static void
-set_descriptors(struct descriptor *value)
-{
-	pthread_setspecific(descriptor_key, value);
-}
 
 /* old internal convenience function that might go away later */
 static PGresult *
@@ -776,14 +750,14 @@ ECPGdeallocate_desc(int line, const char *name)
 	}
 
 	ecpg_init_sqlca(sqlca);
-	for (desc = get_descriptors(), prev = NULL; desc; prev = desc, desc = desc->next)
+	for (desc = descriptors_thread_local, prev = NULL; desc; prev = desc, desc = desc->next)
 	{
 		if (strcmp(name, desc->name) == 0)
 		{
 			if (prev)
 				prev->next = desc->next;
 			else
-				set_descriptors(desc->next);
+				descriptors_thread_local = desc->next;
 			descriptor_free(desc);
 			return true;
 		}
@@ -822,7 +796,7 @@ ECPGallocate_desc(int line, const char *name)
 	new = (struct descriptor *) ecpg_alloc(sizeof(struct descriptor), line);
 	if (!new)
 		return false;
-	new->next = get_descriptors();
+	new->next = descriptors_thread_local;
 	new->name = ecpg_alloc(strlen(name) + 1, line);
 	if (!new->name)
 	{
@@ -840,7 +814,7 @@ ECPGallocate_desc(int line, const char *name)
 		return false;
 	}
 	strcpy(new->name, name);
-	set_descriptors(new);
+	descriptors_thread_local = new;
 	return true;
 }
 
@@ -850,7 +824,7 @@ ecpg_find_desc(int line, const char *name)
 {
 	struct descriptor *desc;
 
-	for (desc = get_descriptors(); desc; desc = desc->next)
+	for (desc = descriptors_thread_local; desc; desc = desc->next)
 	{
 		if (strcmp(name, desc->name) == 0)
 			return desc;
@@ -1005,4 +979,10 @@ ECPGdescribe(int line, int compat, bool input, const char *connection_name, cons
 	va_end(args);
 
 	return ret;
+}
+
+void
+ecpg_descriptor_on_thread_exit(void)
+{
+	descriptor_deallocate_all(descriptors_thread_local);
 }

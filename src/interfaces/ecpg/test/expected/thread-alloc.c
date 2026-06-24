@@ -10,16 +10,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include "ecpg_config.h"
-
-#ifdef WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#include <process.h>
-#include <locale.h>
-#else
-#include <pthread.h>
-#endif
-#include <stdio.h>
+#include "port/pg_threads.h"
 
 #define THREADS		16
 #define REPEATS		50
@@ -93,7 +84,7 @@ struct sqlca_t *ECPGget_sqlca(void);
 
 #endif
 
-#line 18 "alloc.pgc"
+#line 9 "alloc.pgc"
 
 
 #line 1 "regression.h"
@@ -103,21 +94,17 @@ struct sqlca_t *ECPGget_sqlca(void);
 
 
 
-#line 19 "alloc.pgc"
+#line 10 "alloc.pgc"
 
 
 /* exec sql whenever sqlerror  sqlprint ; */
-#line 21 "alloc.pgc"
+#line 12 "alloc.pgc"
 
 /* exec sql whenever not found  sqlprint ; */
-#line 22 "alloc.pgc"
+#line 13 "alloc.pgc"
 
 
-#ifdef WIN32
-static unsigned __stdcall fn(void* arg)
-#else
-static void* fn(void* arg)
-#endif
+static int fn(void* arg)
 {
 	int i;
 
@@ -126,54 +113,54 @@ static void* fn(void* arg)
 	 
 	   
 	
-#line 33 "alloc.pgc"
+#line 20 "alloc.pgc"
  int value ;
  
-#line 34 "alloc.pgc"
+#line 21 "alloc.pgc"
  char name [ 100 ] ;
  
-#line 35 "alloc.pgc"
+#line 22 "alloc.pgc"
  char ** r = NULL ;
 /* exec sql end declare section */
-#line 36 "alloc.pgc"
+#line 23 "alloc.pgc"
 
 
 	value = (intptr_t) arg;
 	sprintf(name, "Connection: %d", value);
 
 	{ ECPGconnect(__LINE__, 0, "ecpg1_regression" , NULL, NULL , name, 0); 
-#line 41 "alloc.pgc"
+#line 28 "alloc.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 41 "alloc.pgc"
+#line 28 "alloc.pgc"
 
 	{ ECPGsetcommit(__LINE__, "on", NULL);
-#line 42 "alloc.pgc"
+#line 29 "alloc.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 42 "alloc.pgc"
+#line 29 "alloc.pgc"
 
 	for (i = 1; i <= REPEATS; ++i)
 	{
 		{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "select relname from pg_class where relname = 'pg_class'", ECPGt_EOIT, 
 	ECPGt_char,&(r),(long)0,(long)0,(1)*sizeof(char), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EORT);
-#line 45 "alloc.pgc"
+#line 32 "alloc.pgc"
 
 if (sqlca.sqlcode == ECPG_NOT_FOUND) sqlprint();
-#line 45 "alloc.pgc"
+#line 32 "alloc.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 45 "alloc.pgc"
+#line 32 "alloc.pgc"
 
 		free(r);
 		r = NULL;
 	}
 	{ ECPGdisconnect(__LINE__, name);
-#line 49 "alloc.pgc"
+#line 36 "alloc.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 49 "alloc.pgc"
+#line 36 "alloc.pgc"
 
 
 	return 0;
@@ -182,28 +169,12 @@ if (sqlca.sqlcode < 0) sqlprint();}
 int main(void)
 {
 	intptr_t i;
-#ifdef WIN32
-	HANDLE threads[THREADS];
-#else
-	pthread_t threads[THREADS];
-#endif
+	pg_thrd_t threads[THREADS];
 
-#ifdef WIN32
 	for (i = 0; i < THREADS; ++i)
-	{
-		unsigned id;
-		threads[i] = (HANDLE)_beginthreadex(NULL, 0, fn, (void*)i, 0, &id);
-	}
-
-	WaitForMultipleObjects(THREADS, threads, TRUE, INFINITE);
+		pg_thrd_create(&threads[i], fn, (void *) i);
 	for (i = 0; i < THREADS; ++i)
-		CloseHandle(threads[i]);
-#else
-	for (i = 0; i < THREADS; ++i)
-		pthread_create(&threads[i], NULL, fn, (void *) i);
-	for (i = 0; i < THREADS; ++i)
-		pthread_join(threads[i], NULL);
-#endif
+		pg_thrd_join(threads[i], NULL);
 
 	return 0;
 }
