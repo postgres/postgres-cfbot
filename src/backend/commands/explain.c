@@ -1981,6 +1981,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 				show_instrumentation_count("Rows Removed by Filter", 1,
 										   planstate, es);
 			show_indexscan_info(planstate, es);
+			show_scan_io_usage((ScanState *) planstate, es);
 			break;
 		case T_IndexOnlyScan:
 			show_scan_qual(((IndexOnlyScan *) plan)->indexqual,
@@ -1995,6 +1996,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 				show_instrumentation_count("Rows Removed by Filter", 1,
 										   planstate, es);
 			show_indexscan_info(planstate, es);
+			show_scan_io_usage((ScanState *) planstate, es);
 			break;
 		case T_BitmapIndexScan:
 			show_scan_qual(((BitmapIndexScan *) plan)->indexqualorig,
@@ -4188,6 +4190,18 @@ show_scan_io_usage(ScanState *planstate, ExplainState *es)
 	{
 		stats = planstate->ss_currentScanDesc->rs_instrument->io;
 	}
+	else if (IsA(planstate, IndexScanState))
+	{
+		IndexScanState *indexstate = ((IndexScanState *) planstate);
+
+		stats = indexstate->iss_Instrument->io;
+	}
+	else if (IsA(planstate, IndexOnlyScanState))
+	{
+		IndexOnlyScanState *indexstate = ((IndexOnlyScanState *) planstate);
+
+		stats = indexstate->ioss_Instrument->io;
+	}
 
 	/*
 	 * Accumulate data from parallel workers (if any).
@@ -4260,6 +4274,54 @@ show_scan_io_usage(ScanState *planstate, ExplainState *es)
 
 						ExplainOpenWorker(i, es);
 						print_io_usage(es, &winstrument->stats.io);
+						ExplainCloseWorker(i, es);
+					}
+				}
+
+				break;
+			}
+		case T_IndexScan:
+			{
+				SharedIndexScanInstrumentation *sinstrument
+				= ((IndexScanState *) planstate)->iss_SharedInfo;
+
+				if (sinstrument)
+				{
+					for (int i = 0; i < sinstrument->num_workers; ++i)
+					{
+						IndexScanInstrumentation *winstrument = &sinstrument->winstrument[i];
+
+						AccumulateIOStats(&stats, &winstrument->io);
+
+						if (!es->workers_state)
+							continue;
+
+						ExplainOpenWorker(i, es);
+						print_io_usage(es, &winstrument->io);
+						ExplainCloseWorker(i, es);
+					}
+				}
+
+				break;
+			}
+		case T_IndexOnlyScan:
+			{
+				SharedIndexScanInstrumentation *sinstrument
+				= ((IndexOnlyScanState *) planstate)->ioss_SharedInfo;
+
+				if (sinstrument)
+				{
+					for (int i = 0; i < sinstrument->num_workers; ++i)
+					{
+						IndexScanInstrumentation *winstrument = &sinstrument->winstrument[i];
+
+						AccumulateIOStats(&stats, &winstrument->io);
+
+						if (!es->workers_state)
+							continue;
+
+						ExplainOpenWorker(i, es);
+						print_io_usage(es, &winstrument->io);
 						ExplainCloseWorker(i, es);
 					}
 				}
