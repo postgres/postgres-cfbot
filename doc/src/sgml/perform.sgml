@@ -1049,6 +1049,102 @@ EXPLAIN (ANALYZE, BUFFERS OFF) SELECT * FROM tenk1 WHERE unique1 &lt; 100 AND un
    </para>
 
    <para>
+    <command>EXPLAIN</command> also has an <literal>IO</literal> option, which
+    reports statistics about the read-ahead, or <firstterm>prefetching</firstterm>,
+    of table data that takes place during execution.  Many scan nodes &mdash; such as
+    <literal>Seq Scan</literal>, <literal>Bitmap Heap Scan</literal>, and
+    <literal>Index Scan</literal> &mdash; prefetch the blocks of a table ahead
+    of the point the scan has reached, so that the blocks needed next are
+    already on their way in from storage (or already present in shared
+    buffers) by the time the scan asks for them; see
+    <xref linkend="guc-effective-io-concurrency"/>.  The <literal>IO</literal>
+    option exposes how effective this prefetching was.  It can only be used
+    together with <literal>ANALYZE</literal>, since it reports on work done
+    while actually running the query, and unlike <literal>BUFFERS</literal> it
+    is not enabled by default.  The tables in the regression test database are
+    too small for read-ahead to matter, so the example below instead uses a
+    table of one million rows (of roughly two hundred bytes each), indexed on
+    its <structfield>id</structfield> column and not in cache to begin with:
+
+<screen>
+EXPLAIN (ANALYZE, IO, BUFFERS OFF) SELECT * FROM tbl WHERE id &lt; 100000 AND id % 7 = 0;
+
+                                                          QUERY PLAN
+---------------------------------------------------------------------&zwsp;----------------------------------------------------------
+ Index Scan using tbl_id_idx on tbl  (cost=0.42..6497.39 rows=516 width=208) (actual time=0.335..24.695 rows=14285.00 loops=1)
+   Index Cond: (id &lt; 100000)
+   Filter: ((id % 7) = 0)
+   Rows Removed by Filter: 85714
+   Index Searches: 1
+   Prefetch: avg=82.24 max=92 capacity=94
+   I/O: count=187 waits=139 size=15.72 in-progress=4.81
+ Planning Time: 2.411 ms
+ Execution Time: 24.995 ms
+</screen>
+   </para>
+
+   <para>
+    The <literal>Prefetch</literal> line describes how far ahead of the scan the
+    read-ahead ran, measured in blocks: <literal>avg</literal> is the average
+    look-ahead distance maintained over the course of the scan,
+    <literal>max</literal> is the greatest distance reached, and
+    <literal>capacity</literal> is the maximum distance the scan was permitted to
+    use (which depends on <xref linkend="guc-effective-io-concurrency"/> and
+    <xref linkend="guc-io-combine-limit"/>, and is also capped by the number of
+    buffers the scan is allowed to keep pinned at once).
+    The <literal>I/O</literal> line describes the read I/O that the prefetching
+    performed: <literal>count</literal> is the number of read I/O operations issued
+    (a single operation can cover several consecutive blocks),
+    <literal>waits</literal> is the number of times the scan had to stop and wait
+    for an I/O to finish (because the needed block was not ready yet),
+    <literal>size</literal> is the average number of blocks read per I/O operation
+    (consecutive blocks are merged into a single larger I/O, up to
+    <xref linkend="guc-io-combine-limit"/>), and <literal>in-progress</literal>
+    is the average number of I/O operations outstanding at once, a measure of the
+    I/O concurrency that was achieved.  A small <literal>waits</literal> count
+    relative to <literal>count</literal> indicates that prefetching was
+    successful in hiding read latency behind useful work.  A large one is not
+    necessarily a problem: a scan that does little work per row, as in the
+    example above, repeatedly catches up with its own read-ahead and briefly
+    waits for the oldest I/O to complete; keeping many I/Os in flight is still
+    far faster than issuing them one at a time.  The
+    <literal>I/O</literal> line is shown only when the prefetching performed at
+    least one read I/O operation.  A scan that never started any read-ahead in
+    the first place, as happens when an index scan finds every table block it
+    needs already in shared buffers, shows neither line.
+   </para>
+
+   <para>
+    These statistics only ever describe I/O against the table itself (its heap),
+    never against indexes.  In particular, for an <literal>Index Scan</literal>
+    the <literal>Prefetch</literal> and <literal>I/O</literal> lines report on the
+    table blocks that the scan prefetches as it follows index entries back to the
+    table; the index's own pages are not prefetched in this way, and so index page
+    hits and reads are neither relevant to nor counted in these numbers.  (Index
+    page accesses are included under the <literal>BUFFERS</literal> option, though
+    there they are combined with table page accesses rather than reported
+    separately.)  For the same reason a <literal>Bitmap Heap Scan</literal> reports
+    these statistics on the heap scan node itself, rather than on its child
+    <literal>Bitmap Index Scan</literal> node.
+   </para>
+
+   <para>
+    An <literal>Index Only Scan</literal> can show these statistics too, which may
+    be unexpected: the whole point of an index-only scan is to answer the
+    query from the index alone, without reading the table at all (see
+    <xref linkend="indexes-index-only-scans"/>).  It can usually do so, but not
+    always.  When a table page has been modified recently enough that it is not
+    yet marked all-visible in the table's visibility map, an index-only scan must
+    read that one page from the table anyway, in order to confirm that the rows it
+    references are visible to the current transaction.  These occasional table
+    reads (the page reads behind the index-only scan's
+    <quote>Heap Fetches</quote> count) are prefetched as well, and they are the
+    only thing the <literal>Prefetch</literal> and <literal>I/O</literal> lines
+    describe for an index-only scan.  An index-only scan that never has to fall
+    back to the table will not show these lines at all.
+   </para>
+
+   <para>
     Keep in mind that because <command>EXPLAIN ANALYZE</command> actually
     runs the query, any side-effects will happen as usual, even though
     whatever results the query might output are discarded in favor of
