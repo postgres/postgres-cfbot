@@ -17,7 +17,7 @@ locale_t	ecpg_clocale = (locale_t) 0;
 static pthread_mutex_t connections_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_key_t actual_connection_key;
 static pthread_once_t actual_connection_key_once = PTHREAD_ONCE_INIT;
-static struct connection *actual_connection = NULL;
+static struct connection *actual_connection_global = NULL;
 static struct connection *all_connections = NULL;
 
 static void
@@ -50,7 +50,7 @@ ecpg_get_connection_nr(const char *connection_name)
 		 */
 		if (ret == NULL)
 			/* no TSD connection, going for global */
-			ret = actual_connection;
+			ret = actual_connection_global;
 	}
 	else
 	{
@@ -90,7 +90,7 @@ ecpg_get_connection(const char *connection_name)
 		 */
 		if (ret == NULL)
 			/* no TSD connection here either, using global */
-			ret = actual_connection;
+			ret = actual_connection_global;
 	}
 	else
 	{
@@ -134,8 +134,8 @@ ecpg_finish(struct connection *act)
 
 		if (pthread_getspecific(actual_connection_key) == act)
 			pthread_setspecific(actual_connection_key, all_connections);
-		if (actual_connection == act)
-			actual_connection = all_connections;
+		if (actual_connection_global == act)
+			actual_connection_global = all_connections;
 
 		ecpg_log("ecpg_finish: connection %s closed\n", act->name ? act->name : "(null)");
 
@@ -548,7 +548,7 @@ ECPGconnect(int lineno, int c, const char *name, const char *user, const char *p
 
 	all_connections = this;
 	pthread_setspecific(actual_connection_key, all_connections);
-	actual_connection = all_connections;
+	actual_connection_global = all_connections;
 
 	ecpg_log("ECPGconnect: opening database %s on %s port %s %s%s %s%s\n",
 			 realname ? realname : "<DEFAULT>",
