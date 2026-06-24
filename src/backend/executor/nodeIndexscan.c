@@ -821,6 +821,9 @@ ExecEndIndexScan(IndexScanState *node)
 		 */
 		winstrument->nsearches += node->iss_Instrument->nsearches;
 		Assert(node->iss_Instrument->ntabletuplefetches == 0);
+
+		/* Collect IO stats for this process into shared instrumentation */
+		AccumulateIOStats(&winstrument->io, &node->iss_Instrument->io);
 	}
 
 	/*
