@@ -79,10 +79,6 @@ replace_funcs_neg = [
   ['timingsafe_bcmp'],
 ]
 
-if host_system != 'windows'
-  replace_funcs_neg += [['pthread_barrier_wait']]
-endif
-
 # Replacement functionality to be built if corresponding configure symbol
 # is true
 replace_funcs_pos = [
