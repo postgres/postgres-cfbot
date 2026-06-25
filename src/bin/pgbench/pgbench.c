@@ -67,6 +67,7 @@
 #include "libpq-fe.h"
 #include "pgbench.h"
 #include "port/pg_bitutils.h"
+#include "port/pg_threads_ext.h"
 #include "portability/instr_time.h"
 
 /* X/Open (XSI) requires <math.h> to provide M_PI, but core POSIX does not */
@@ -113,49 +114,6 @@ typedef struct socket_set
 } socket_set;
 
 #endif							/* POLL_USING_SELECT */
-
-/*
- * Multi-platform thread implementations
- */
-
-#ifdef WIN32
-/* Use Windows threads */
-#include <windows.h>
-#define GETERRNO() (_dosmaperr(GetLastError()), errno)
-#define THREAD_T HANDLE
-#define THREAD_FUNC_RETURN_TYPE unsigned
-#define THREAD_FUNC_RETURN return 0
-#define THREAD_FUNC_CC __stdcall
-#define THREAD_CREATE(handle, function, arg) \
-	((*(handle) = (HANDLE) _beginthreadex(NULL, 0, (function), (arg), 0, NULL)) == 0 ? errno : 0)
-#define THREAD_JOIN(handle) \
-	(WaitForSingleObject(handle, INFINITE) != WAIT_OBJECT_0 ? \
-	GETERRNO() : CloseHandle(handle) ? 0 : GETERRNO())
-#define THREAD_BARRIER_T SYNCHRONIZATION_BARRIER
-#define THREAD_BARRIER_INIT(barrier, n) \
-	(InitializeSynchronizationBarrier((barrier), (n), 0) ? 0 : GETERRNO())
-#define THREAD_BARRIER_WAIT(barrier) \
-	EnterSynchronizationBarrier((barrier), \
-								SYNCHRONIZATION_BARRIER_FLAGS_BLOCK_ONLY)
-#define THREAD_BARRIER_DESTROY(barrier)
-#else
-/* Use POSIX threads */
-#include "port/pg_pthread.h"
-#define THREAD_T pthread_t
-#define THREAD_FUNC_RETURN_TYPE void *
-#define THREAD_FUNC_RETURN return NULL
-#define THREAD_FUNC_CC
-#define THREAD_CREATE(handle, function, arg) \
-	pthread_create((handle), NULL, (function), (arg))
-#define THREAD_JOIN(handle) \
-	pthread_join((handle), NULL)
-#define THREAD_BARRIER_T pthread_barrier_t
-#define THREAD_BARRIER_INIT(barrier, n) \
-	pthread_barrier_init((barrier), NULL, (n))
-#define THREAD_BARRIER_WAIT(barrier) pthread_barrier_wait((barrier))
-#define THREAD_BARRIER_DESTROY(barrier) pthread_barrier_destroy((barrier))
-#endif
-
 
 /********************************************************************
  * some configurable parameters */
@@ -486,7 +444,7 @@ typedef enum TStatus
 static pg_prng_state base_random_sequence;
 
 /* Synchronization barrier for start and connection */
-static THREAD_BARRIER_T barrier;
+static pg_thrd_barrier_t barrier;
 
 /*
  * Connection state machine states.
@@ -654,7 +612,7 @@ typedef struct
 typedef struct
 {
 	int			tid;			/* thread id */
-	THREAD_T	thread;			/* thread handle */
+	pg_thrd_t	thread;			/* thread handle */
 	CState	   *state;			/* array of CState */
 	int			nstate;			/* length of state[] */
 
@@ -839,7 +797,7 @@ static void doLog(TState *thread, CState *st,
 static void processXactStats(TState *thread, CState *st, pg_time_usec_t *now,
 							 bool skipped, StatsData *agg);
 static void addScript(const ParsedScript *script);
-static THREAD_FUNC_RETURN_TYPE THREAD_FUNC_CC threadRun(void *arg);
+static int	threadRun(void *arg);
 static void finishCon(CState *st);
 static void setalarm(int seconds);
 static socket_set *alloc_socket_set(int count);
@@ -7439,7 +7397,7 @@ main(int argc, char **argv)
 	if (duration > 0)
 		setalarm(duration);
 
-	errno = THREAD_BARRIER_INIT(&barrier, nthreads);
+	errno = pg_thrd_barrier_init(&barrier, nthreads);
 	if (errno != 0)
 		pg_fatal("could not initialize barrier: %m");
 
@@ -7449,7 +7407,7 @@ main(int argc, char **argv)
 		TState	   *thread = &threads[i];
 
 		thread->create_time = pg_time_now();
-		errno = THREAD_CREATE(&thread->thread, threadRun, thread);
+		errno = pg_thrd_create(&thread->thread, threadRun, thread);
 
 		if (errno != 0)
 			pg_fatal("could not create thread: %m");
@@ -7472,7 +7430,7 @@ main(int argc, char **argv)
 		TState	   *thread = &threads[i];
 
 		if (i > 0)
-			THREAD_JOIN(thread->thread);
+			pg_thrd_join(thread->thread, NULL);
 
 		for (int j = 0; j < thread->nstate; j++)
 			if (thread->state[j].state != CSTATE_FINISHED)
@@ -7513,7 +7471,7 @@ main(int argc, char **argv)
 	printResults(&stats, pg_time_now() - bench_start, conn_total_duration,
 				 bench_start - start_time, latency_late);
 
-	THREAD_BARRIER_DESTROY(&barrier);
+	pg_thrd_barrier_destroy(&barrier);
 
 	if (exit_code != 0)
 		pg_log_error("Run was aborted; the above results are incomplete.");
@@ -7521,7 +7479,7 @@ main(int argc, char **argv)
 	return exit_code;
 }
 
-static THREAD_FUNC_RETURN_TYPE THREAD_FUNC_CC
+static int
 threadRun(void *arg)
 {
 	TState	   *thread = (TState *) arg;
@@ -7558,7 +7516,7 @@ threadRun(void *arg)
 		state[i].state = CSTATE_CHOOSE_SCRIPT;
 
 	/* READY */
-	THREAD_BARRIER_WAIT(&barrier);
+	pg_thrd_barrier_wait(&barrier);
 
 	thread_start = pg_time_now();
 	thread->started_time = thread_start;
@@ -7582,7 +7540,7 @@ threadRun(void *arg)
 	}
 
 	/* GO */
-	THREAD_BARRIER_WAIT(&barrier);
+	pg_thrd_barrier_wait(&barrier);
 
 	start = pg_time_now();
 	thread->bench_start = start;
@@ -7818,7 +7776,8 @@ done:
 		thread->logfile = NULL;
 	}
 	free_socket_set(sockets);
-	THREAD_FUNC_RETURN;
+
+	return 0;
 }
 
 static void
