@@ -102,6 +102,8 @@ static void check_circularity(const Acl *old_acl, const AclItem *mod_aip,
 							  Oid ownerId);
 static Acl *recursive_revoke(Acl *acl, Oid grantee, AclMode revoke_privs,
 							 Oid ownerId, DropBehavior behavior);
+static AclMode aclmask_direct(const Acl *acl, Oid roleid, Oid ownerId,
+							  AclMode mask, AclMaskHow how);
 
 static AclMode convert_any_priv_string(text *priv_type_text,
 									   const priv_map *privileges);
@@ -1347,10 +1349,19 @@ recursive_revoke(Acl *acl,
 	if (grantee == ownerId)
 		return acl;
 
-	/* The grantee might still have some grant options via another grantor */
-	still_has = aclmask(acl, grantee, ownerId,
-						ACL_GRANT_OPTION_FOR(revoke_privs),
-						ACLMASK_ALL);
+	/*
+	 * The grantee might still have some grant options via another grantor,
+	 * keeping the chain intact for those privileges. And if _all_ of the
+	 * remaining privileges can still be granted by any role on the chain,
+	 * we're done.
+	 *
+	 * Indirectly held grant options cannot keep the chain alive, so consult
+	 * aclmask_direct() rather than aclmask(). (Otherwise, for example, a
+	 * chain could be broken wherever the grantee was a superuser).
+	 */
+	still_has = aclmask_direct(acl, grantee, ownerId,
+							   ACL_GRANT_OPTION_FOR(revoke_privs),
+							   ACLMASK_ALL);
 	revoke_privs &= ~ACL_OPTION_TO_PRIVS(still_has);
 	if (revoke_privs == ACL_NO_RIGHTS)
 		return acl;

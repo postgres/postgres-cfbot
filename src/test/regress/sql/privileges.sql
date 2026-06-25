@@ -1261,6 +1261,7 @@ CREATE TABLE atest4 (a int);
 GRANT SELECT ON atest4 TO regress_priv_user2 WITH GRANT OPTION;
 GRANT UPDATE ON atest4 TO regress_priv_user2;
 GRANT SELECT ON atest4 TO GROUP regress_priv_group1 WITH GRANT OPTION;
+GRANT SELECT ON atest4 TO PUBLIC WITH GRANT OPTION; -- fail
 
 SET SESSION AUTHORIZATION regress_priv_user2;
 
@@ -1278,6 +1279,48 @@ SELECT has_table_privilege('regress_priv_user3', 'atest4', 'SELECT'); -- false
 
 SELECT has_table_privilege('regress_priv_user1', 'atest4', 'SELECT WITH GRANT OPTION'); -- true
 
+-- Test GRANT OPTION chains where the intermediate grantor has the privileges of
+-- the owner (regress_priv_group1 -> regress_priv_user4 -> regress_priv_user2)
+-- or inherits the option (regress_priv_group2 -> regress_priv_user1 ->
+-- regress_priv_user3).
+
+-- pin the group membership that we rely on below
+SELECT pg_has_role('regress_priv_user4', 'regress_priv_group1', 'MEMBER'),
+	   pg_has_role('regress_priv_user1', 'regress_priv_group2', 'MEMBER');
+
+SET SESSION AUTHORIZATION regress_priv_group1;
+
+CREATE TABLE atest4_groupowned (a int);
+
+GRANT SELECT ON atest4_groupowned TO regress_priv_user4 WITH GRANT OPTION;
+GRANT UPDATE ON atest4_groupowned TO regress_priv_group2 WITH GRANT OPTION;
+GRANT UPDATE ON atest4_groupowned TO regress_priv_user1 WITH GRANT OPTION;
+
+SET SESSION AUTHORIZATION regress_priv_user4;
+
+GRANT SELECT ON atest4_groupowned TO regress_priv_user2;
+
+SET SESSION AUTHORIZATION regress_priv_user1;
+
+GRANT UPDATE ON atest4_groupowned TO regress_priv_user3;
+
+SET SESSION AUTHORIZATION regress_priv_group1;
+
+REVOKE SELECT ON atest4_groupowned FROM regress_priv_user4; -- fail
+SELECT has_table_privilege('regress_priv_user2', 'atest4_groupowned', 'SELECT'); -- true
+SELECT has_table_privilege('regress_priv_user4', 'atest4_groupowned', 'SELECT'); -- true
+REVOKE SELECT ON atest4_groupowned FROM regress_priv_user4 CASCADE; -- ok
+SELECT has_table_privilege('regress_priv_user2', 'atest4_groupowned', 'SELECT'); -- false
+SELECT has_table_privilege('regress_priv_user4', 'atest4_groupowned', 'SELECT'); -- still true (inherited)
+
+REVOKE UPDATE ON atest4_groupowned FROM regress_priv_user1; -- fail
+SELECT has_table_privilege('regress_priv_user3', 'atest4_groupowned', 'UPDATE'); -- true
+SELECT has_table_privilege('regress_priv_user1', 'atest4_groupowned', 'UPDATE'); -- true
+REVOKE UPDATE ON atest4_groupowned FROM regress_priv_user1 CASCADE; -- ok
+SELECT has_table_privilege('regress_priv_user3', 'atest4_groupowned', 'UPDATE'); -- false
+SELECT has_table_privilege('regress_priv_user1', 'atest4_groupowned', 'UPDATE'); -- still true (inherited)
+REVOKE UPDATE ON atest4_groupowned FROM regress_priv_group2 RESTRICT; -- ok
+SELECT has_table_privilege('regress_priv_user1', 'atest4_groupowned', 'UPDATE'); -- false
 
 -- security-restricted operations
 \c -
@@ -2012,6 +2055,7 @@ DROP TABLE atest1;
 DROP TABLE atest2;
 DROP TABLE atest3;
 DROP TABLE atest4;
+DROP TABLE atest4_groupowned;
 DROP TABLE atest5;
 DROP TABLE atest6;
 DROP TABLE atestc;
