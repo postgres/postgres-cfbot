@@ -1,3 +1,27 @@
+F	NN	StartupMessage	 3 2 "user" "SSSS" "database" "SSSS" "application_name" "SSSS"
+B	NN	ParameterStatus	 "IntervalStyle" "SSSS"
+B	NN	ParameterStatus	 "search_path" "SSSS"
+B	NN	ParameterStatus	 "is_superuser" "SSSS"
+B	NN	ParameterStatus	 "standard_conforming_strings" "SSSS"
+B	NN	ParameterStatus	 "session_authorization" "SSSS"
+B	NN	ParameterStatus	 "client_encoding" "SSSS"
+B	NN	ParameterStatus	 "server_version" "SSSS"
+B	NN	ParameterStatus	 "server_encoding" "SSSS"
+B	NN	ParameterStatus	 "in_hot_standby" "SSSS"
+B	NN	ParameterStatus	 "integer_datetimes" "SSSS"
+B	NN	ParameterStatus	 "TimeZone" "SSSS"
+B	NN	ParameterStatus	 "application_name" "SSSS"
+B	NN	ParameterStatus	 "default_transaction_read_only" "SSSS"
+B	NN	ParameterStatus	 "scram_iterations" "SSSS"
+B	NN	ParameterStatus	 "DateStyle" "SSSS"
+B	40	BackendKeyData	 NNNN 'BBBB'
+B	5	ReadyForQuery	 I
+F	27	Query	 "SET lc_messages TO "C""
+B	8	CommandComplete	 "SET"
+B	5	ReadyForQuery	 I
+F	35	Query	 "SET debug_parallel_query = off"
+B	8	CommandComplete	 "SET"
+B	5	ReadyForQuery	 I
 F	38	Parse	 "" "SELECT generate_series(42, $1)" 0
 F	20	Bind	 "" "" 0 1 2 '44' 1 0
 F	6	Describe	 P ""
