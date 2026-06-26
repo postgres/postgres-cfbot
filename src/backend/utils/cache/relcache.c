@@ -1955,6 +1955,7 @@ formrdesc(const char *relationName, Oid relationReltype,
 	relation->rd_rel->relallvisible = 0;
 	relation->rd_rel->relallfrozen = 0;
 	relation->rd_rel->relkind = RELKIND_RELATION;
+	relation->rd_rel->reloncommit = RELONCOMMIT_NONE;
 	relation->rd_rel->relnatts = (int16) natts;
 
 	/*
@@ -3526,7 +3527,8 @@ RelationBuildLocalRelation(const char *relname,
 						   bool shared_relation,
 						   bool mapped_relation,
 						   char relpersistence,
-						   char relkind)
+						   char relkind,
+						   char reloncommit)
 {
 	Relation	rel;
 	MemoryContext oldcxt;
@@ -3646,6 +3648,7 @@ RelationBuildLocalRelation(const char *relname,
 	rel->rd_rel->relnamespace = relnamespace;
 
 	rel->rd_rel->relkind = relkind;
+	rel->rd_rel->reloncommit = reloncommit;
 	rel->rd_rel->relnatts = natts;
 	rel->rd_rel->reltype = InvalidOid;
 	/* needed when bootstrapping: */

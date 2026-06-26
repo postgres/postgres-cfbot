@@ -295,12 +295,14 @@ heap_create(const char *relname,
 			char relpersistence,
 			bool shared_relation,
 			bool mapped_relation,
+			OnCommitAction oncommit,
 			bool allow_system_table_mods,
 			TransactionId *relfrozenxid,
 			MultiXactId *relminmxid,
 			bool create_storage)
 {
 	Relation	rel;
+	char		reloncommit = RELONCOMMIT_NONE;
 
 	/* The caller must have provided an OID for the relation. */
 	Assert(OidIsValid(relid));
@@ -359,6 +361,23 @@ heap_create(const char *relname,
 	if (reltablespace == MyDatabaseTableSpace)
 		reltablespace = InvalidOid;
 
+	/* Translate the ON COMMIT action to reloncommit for the pg_class entry */
+	switch (oncommit)
+	{
+		case ONCOMMIT_NOOP:
+			reloncommit = RELONCOMMIT_NONE;
+			break;
+		case ONCOMMIT_PRESERVE_ROWS:
+			reloncommit = RELONCOMMIT_PRESERVE_ROWS;
+			break;
+		case ONCOMMIT_DELETE_ROWS:
+			reloncommit = RELONCOMMIT_DELETE_ROWS;
+			break;
+		case ONCOMMIT_DROP:
+			reloncommit = RELONCOMMIT_DROP;
+			break;
+	}
+
 	/*
 	 * build the relcache entry.
 	 */
@@ -372,7 +391,8 @@ heap_create(const char *relname,
 									 shared_relation,
 									 mapped_relation,
 									 relpersistence,
-									 relkind);
+									 relkind,
+									 reloncommit);
 
 	/*
 	 * Have the storage manager create the relation's disk file, if needed.
@@ -959,6 +979,7 @@ InsertPgClassTuple(Relation pg_class_desc,
 	values[Anum_pg_class_relisshared - 1] = BoolGetDatum(rd_rel->relisshared);
 	values[Anum_pg_class_relpersistence - 1] = CharGetDatum(rd_rel->relpersistence);
 	values[Anum_pg_class_relkind - 1] = CharGetDatum(rd_rel->relkind);
+	values[Anum_pg_class_reloncommit - 1] = CharGetDatum(rd_rel->reloncommit);
 	values[Anum_pg_class_relnatts - 1] = Int16GetDatum(rd_rel->relnatts);
 	values[Anum_pg_class_relchecks - 1] = Int16GetDatum(rd_rel->relchecks);
 	values[Anum_pg_class_relhasrules - 1] = BoolGetDatum(rd_rel->relhasrules);
@@ -1340,6 +1361,7 @@ heap_create_with_catalog(const char *relname,
 							   relpersistence,
 							   shared_relation,
 							   mapped_relation,
+							   oncommit,
 							   allow_system_table_mods,
 							   &relfrozenxid,
 							   &relminmxid,
