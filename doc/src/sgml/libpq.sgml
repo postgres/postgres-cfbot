@@ -2407,6 +2407,34 @@ postgresql://%2Fvar%2Flib%2Fpostgresql/dbname
       </listitem>
      </varlistentry>
 
+     <varlistentry id="libpq-connect-trace-file" xreflabel="trace_file">
+      <term><literal>trace_file</literal></term>
+      <listitem>
+       <para>
+        If set, enables tracing of the client/server protocol exchange to
+        the named file. The special value <literal>-</literal> sends the
+        trace to <literal>stdout</literal>. Multiple connections using
+        the same trace file is currently not supported.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="libpq-connect-trace-flags" xreflabel="trace_flags">
+      <term><literal>trace_flags</literal></term>
+      <listitem>
+       <para>
+        Specifies the trace flags applied when
+        <xref linkend="libpq-connect-trace-file"/> is set.  The value is
+        an integer that is the bitwise OR of the flag values accepted by
+        <xref linkend="libpq-PQsetTraceFlags"/>:
+        <literal>1</literal> for <literal>PQTRACE_SUPPRESS_TIMESTAMPS</literal>,
+        <literal>2</literal> for <literal>PQTRACE_REGRESS_MODE</literal>.
+        The default is <literal>0</literal>.  This option has no effect
+        unless <literal>trace_file</literal> is also set.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="libpq-connect-load-balance-hosts" xreflabel="load_balance_hosts">
       <term><literal>load_balance_hosts</literal></term>
       <listitem>
@@ -9320,6 +9348,26 @@ myEventProc(PGEventId evtId, void *evtInfo, void *passThrough)
       </indexterm>
       <envar>PGOAUTHCAFILE</envar> behaves the same as the <xref
       linkend="libpq-connect-oauth-ca-file"/> connection parameter.
+     </para>
+    </listitem>
+
+    <listitem>
+     <para>
+      <indexterm>
+       <primary><envar>PQTRACE</envar></primary>
+      </indexterm>
+      <envar>PQTRACE</envar> behaves the same as the <xref
+      linkend="libpq-connect-trace-file"/> connection parameter.
+     </para>
+    </listitem>
+
+    <listitem>
+     <para>
+      <indexterm>
+       <primary><envar>PQTRACEFLAGS</envar></primary>
+      </indexterm>
+      <envar>PQTRACEFLAGS</envar> behaves the same as the <xref
+      linkend="libpq-connect-trace-flags"/> connection parameter.
      </para>
     </listitem>
    </itemizedlist>
