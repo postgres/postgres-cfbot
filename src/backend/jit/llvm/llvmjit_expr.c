@@ -2594,6 +2594,69 @@ llvm_compile_expr(ExprState *state)
 					break;
 				}
 
+			case EEOP_AGG_INPUT_RECEIVED:
+				{
+					LLVMValueRef v_aggstatep;
+					LLVMValueRef v_allpergroupsp;
+					LLVMValueRef v_pergroup_allaggs;
+					LLVMValueRef v_setoff;
+					LLVMValueRef v_transno;
+					LLVMValueRef v_pergroupp;
+					LLVMBasicBlockRef b_mark;
+
+					/*
+					 * Mark that the aggregate's per-group state has received
+					 * an input row (used by the ON EMPTY clause).  Matches
+					 * the interpreter's EEOP_AGG_INPUT_RECEIVED: skip
+					 * silently if the per-group pointer is NULL
+					 * (hashed/spilled case).
+					 */
+					v_aggstatep = LLVMBuildBitCast(b, v_parent,
+												   l_ptr(StructAggState), "");
+
+					v_allpergroupsp = l_load_struct_gep(b,
+														StructAggState,
+														v_aggstatep,
+														FIELDNO_AGGSTATE_ALL_PERGROUPS,
+														"aggstate.all_pergroups");
+
+					v_setoff = l_int32_const(lc, op->d.agg_input_received.setoff);
+					v_transno = l_int32_const(lc, op->d.agg_input_received.transno);
+
+					v_pergroup_allaggs = l_load_gep1(b, l_ptr(StructAggStatePerGroupData),
+													 v_allpergroupsp, v_setoff, "");
+
+					b_mark = l_bb_before_v(opblocks[opno + 1],
+										   "op.%d.inputreceived", opno);
+
+					LLVMBuildCondBr(b,
+									LLVMBuildICmp(b, LLVMIntEQ,
+												  LLVMBuildPtrToInt(b, v_pergroup_allaggs, TypeDatum, ""),
+												  l_datum_const(0), ""),
+									opblocks[opno + 1],
+									b_mark);
+
+					/* block that performs the store when pergroup is non-NULL */
+					LLVMPositionBuilderAtEnd(b, b_mark);
+
+					v_pergroupp =
+						l_gep(b,
+							  StructAggStatePerGroupData,
+							  v_pergroup_allaggs,
+							  &v_transno, 1, "");
+
+					LLVMBuildStore(b,
+								   l_sbool_const(1),
+								   l_struct_gep(b,
+												StructAggStatePerGroupData,
+												v_pergroupp,
+												FIELDNO_AGGSTATEPERGROUPDATA_INPUTRECEIVED,
+												"inputreceivedp"));
+
+					LLVMBuildBr(b, opblocks[opno + 1]);
+					break;
+				}
+
 			case EEOP_AGG_PLAIN_TRANS_INIT_STRICT_BYVAL:
 			case EEOP_AGG_PLAIN_TRANS_STRICT_BYVAL:
 			case EEOP_AGG_PLAIN_TRANS_BYVAL:
