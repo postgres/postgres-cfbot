@@ -88,6 +88,9 @@ CATALOG(pg_class,1259,RelationRelationId) BKI_BOOTSTRAP BKI_ROWTYPE_OID(83,Relat
 	/* see RELKIND_xxx constants below */
 	char		relkind BKI_DEFAULT(r);
 
+	/* see RELONCOMMIT_xxx constants below */
+	char		reloncommit BKI_DEFAULT(n);
+
 	/* number of user attributes */
 	int16		relnatts BKI_DEFAULT(0);	/* genbki.pl will fill this in */
 
@@ -183,6 +186,12 @@ MAKE_SYSCACHE(RELNAMENSP, pg_class_relname_nsp_index, 128);
 #define		  RELPERSISTENCE_PERMANENT	'p' /* regular table */
 #define		  RELPERSISTENCE_UNLOGGED	'u' /* unlogged permanent table */
 #define		  RELPERSISTENCE_TEMP		't' /* temporary table */
+
+/* on-commit action; only temporary tables support values other than 'n' */
+#define		  RELONCOMMIT_NONE			'n' /* default: no action */
+#define		  RELONCOMMIT_PRESERVE_ROWS 'p' /* keep table rows on commit */
+#define		  RELONCOMMIT_DELETE_ROWS	'd' /* delete table rows on commit */
+#define		  RELONCOMMIT_DROP			'D' /* drop table on commit */
 
 /* default selection for replica identity (primary key or nothing) */
 #define		  REPLICA_IDENTITY_DEFAULT	'd'
