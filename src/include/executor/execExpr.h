@@ -281,6 +281,7 @@ typedef enum ExprEvalOp
 	EEOP_AGG_STRICT_INPUT_CHECK_ARGS_1,
 	EEOP_AGG_STRICT_INPUT_CHECK_NULLS,
 	EEOP_AGG_PLAIN_PERGROUP_NULLCHECK,
+	EEOP_AGG_INPUT_RECEIVED,
 	EEOP_AGG_PLAIN_TRANS_INIT_STRICT_BYVAL,
 	EEOP_AGG_PLAIN_TRANS_STRICT_BYVAL,
 	EEOP_AGG_PLAIN_TRANS_BYVAL,
@@ -728,6 +729,13 @@ typedef struct ExprEvalStep
 			int			setoff;
 			int			jumpnull;
 		}			agg_plain_pergroup_nullcheck;
+
+		/* for EEOP_AGG_INPUT_RECEIVED */
+		struct
+		{
+			int			setoff;
+			int			transno;
+		}			agg_input_received;
 
 		/* for EEOP_AGG_PRESORTED_DISTINCT_{SINGLE,MULTI} */
 		struct

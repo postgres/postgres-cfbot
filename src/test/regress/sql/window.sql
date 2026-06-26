@@ -2301,3 +2301,58 @@ SELECT last_value FROM null_treatment_seq;
 
 --cleanup
 DROP TABLE planets CASCADE;
+
+
+-- Test ON EMPTY clause with window functions
+
+-- create a test table for ON EMPTY tests
+CREATE TABLE win_on_empty(id int, val int, grpid int);
+INSERT INTO win_on_empty VALUES (1, 10, 10), (2, 20, 10), (3, 30, 20), (4, NULL, 20), (5, 50, 30);
+
+-- Empty frames using ROWS (ON EMPTY value WILL be returned)
+-- On first row, "1 PRECEDING" frame is empty - should return ON EMPTY value
+SELECT id, val,
+  sum(val, -111 ON EMPTY) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 PRECEDING) AS sum_prev_row
+FROM win_on_empty ORDER BY id;
+
+-- Empty frames using ROWS FOLLOWING (ON EMPTY value WILL be returned)
+-- On last rows, FOLLOWING frame is empty - should return ON EMPTY value
+SELECT id, val,
+  sum(val, -222 ON EMPTY) OVER (ORDER BY id ASC ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING) AS sum_following
+FROM win_on_empty ORDER BY id;
+SELECT id, val,
+  sum(val, -222 ON EMPTY) OVER (ORDER BY id DESC ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING) AS sum_following
+FROM win_on_empty ORDER BY id;
+
+-- Frames with only NULL values (ON EMPTY value WILL NOT be returned)
+-- Row 4 has NULL, when frame contains only that row, should NOT return ON EMPTY value
+SELECT id, val,
+  sum(val, -333 ON EMPTY) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND CURRENT ROW) AS sum_current,
+  avg(val, -3.0 ON EMPTY) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND CURRENT ROW) AS avg_current
+FROM win_on_empty WHERE id = 4 ORDER BY id;
+
+-- Partition with only NULL values (ON EMPTY value WILL NOT be returned)
+-- Add more rows with NULLs to demonstrate
+INSERT INTO win_on_empty VALUES (6, NULL, 40), (7, NULL, 40);
+SELECT grpid, id, val,
+  sum(val, -444 ON EMPTY) OVER (PARTITION BY grpid ORDER BY id) as sum_nulls,
+  avg(val, -4.0 ON EMPTY) OVER (PARTITION BY grpid ORDER BY id) as avg_nulls,
+  max(val, -999 ON EMPTY) OVER (PARTITION BY grpid ORDER BY id) as max_nulls
+FROM win_on_empty WHERE grpid = 40 ORDER BY id;
+
+CREATE VIEW win_on_empty_vw AS
+  SELECT id, val,
+    sum(val, -111 ON EMPTY) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 PRECEDING) AS sum_prev_row
+  FROM win_on_empty ORDER BY id;
+
+\d+ win_on_empty_vw
+
+SELECT * FROM win_on_empty_vw ORDER BY id;
+
+-- ON EMPTY is only meaningful for aggregates; reject it for non-aggregate
+-- window functions (should fail)
+SELECT lag(val, 1, 0 ON EMPTY) OVER (ORDER BY id) FROM win_on_empty;
+
+-- clean up
+DROP VIEW win_on_empty_vw;
+DROP TABLE win_on_empty;

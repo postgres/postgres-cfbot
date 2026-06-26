@@ -171,6 +171,12 @@ typedef struct WindowStatePerAggData
 
 	/* Data local to eval_windowaggregates() */
 	bool		restart;		/* need to restart this agg in this cycle? */
+
+	/* ON EMPTY support */
+	bool		inputReceived;	/* true if any input row was received in
+								 * current frame */
+	/* ExprState for evaluating ON EMPTY default value, or NULL */
+	ExprState  *aggonemptystate;
 } WindowStatePerAggData;
 
 static void initialize_windowaggregate(WindowAggState *winstate,
@@ -278,6 +284,12 @@ initialize_windowaggregate(WindowAggState *winstate,
 	peraggstate->transValueCount = 0;
 	peraggstate->resultValue = (Datum) 0;
 	peraggstate->resultValueIsNull = true;
+
+	/*
+	 * Initialize the flag used for ON EMPTY to track whether any input rows
+	 * were received in this frame.
+	 */
+	peraggstate->inputReceived = false;
 }
 
 /*
@@ -324,6 +336,9 @@ advance_windowaggregate(WindowAggState *winstate,
 											 &fcinfo->args[i].isnull);
 		i++;
 	}
+
+	/* Mark that this aggregate received input (used for ON EMPTY) */
+	peraggstate->inputReceived = true;
 
 	if (peraggstate->transfn.fn_strict)
 	{
@@ -633,6 +648,25 @@ finalize_windowaggregate(WindowAggState *winstate,
 	MemoryContext oldContext;
 
 	oldContext = MemoryContextSwitchTo(winstate->ss.ps.ps_ExprContext->ecxt_per_tuple_memory);
+
+	/*
+	 * If the ON EMPTY clause is specified with a default value, evaluate and
+	 * return it in cases where no input rows were received in the current
+	 * frame.
+	 *
+	 * The inputReceived flag is used to detect the empty frame case (zero
+	 * rows processed in this frame).
+	 */
+	if (peraggstate->aggonemptystate != NULL && !peraggstate->inputReceived)
+	{
+		*result = ExecEvalExpr(peraggstate->aggonemptystate,
+							   winstate->ss.ps.ps_ExprContext,
+							   isnull);
+
+		MemoryContextSwitchTo(oldContext);
+
+		return;
+	}
 
 	/*
 	 * Apply the agg's finalfn if one is provided, else return transValue.
@@ -3163,6 +3197,13 @@ initialize_peragg(WindowAggState *winstate, WindowFunc *wfunc,
 	get_typlenbyval(aggtranstype,
 					&peraggstate->transtypeLen,
 					&peraggstate->transtypeByVal);
+
+	/* Build expression state for ON EMPTY default expression */
+	if (wfunc->aggonempty)
+		peraggstate->aggonemptystate = ExecInitExpr(wfunc->aggonempty,
+													(PlanState *) winstate);
+	else
+		peraggstate->aggonemptystate = NULL;
 
 	/*
 	 * initval is potentially null, so don't try to access it as a struct

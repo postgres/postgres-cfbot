@@ -2833,6 +2833,7 @@ eval_const_expressions_mutator(Node *node,
 				Oid			funcid = expr->winfnoid;
 				List	   *args;
 				Expr	   *aggfilter;
+				Expr	   *aggonempty;
 				HeapTuple	func_tuple;
 				WindowFunc *newexpr;
 
@@ -2862,6 +2863,10 @@ eval_const_expressions_mutator(Node *node,
 				aggfilter = (Expr *)
 					eval_const_expressions_mutator((Node *) expr->aggfilter,
 												   context);
+				/* ... and the ON EMPTY expression */
+				aggonempty = (Expr *)
+					eval_const_expressions_mutator((Node *) expr->aggonempty,
+												   context);
 
 				/* And build the replacement WindowFunc node */
 				newexpr = makeNode(WindowFunc);
@@ -2871,6 +2876,7 @@ eval_const_expressions_mutator(Node *node,
 				newexpr->inputcollid = expr->inputcollid;
 				newexpr->args = args;
 				newexpr->aggfilter = aggfilter;
+				newexpr->aggonempty = aggonempty;
 				newexpr->runCondition = expr->runCondition;
 				newexpr->winref = expr->winref;
 				newexpr->winstar = expr->winstar;
