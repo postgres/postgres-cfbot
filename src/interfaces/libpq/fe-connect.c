@@ -385,6 +385,15 @@ static const internalPQconninfoOption PQconninfoOptions[] = {
 		"Target-Session-Attrs", "", 15, /* sizeof("prefer-standby") = 15 */
 	offsetof(struct pg_conn, target_session_attrs)},
 
+	{"trace_file", "PQTRACE",
+		NULL, NULL,
+		"Trace-File", "D", 64,
+	offsetof(struct pg_conn, trace_file_str)},
+
+	{"trace_flags", "PQTRACEFLAGS", NULL, NULL,
+		"Trace-Flags", "D", 1,
+	offsetof(struct pg_conn, trace_flags_str)},
+
 	{"load_balance_hosts", "PGLOADBALANCEHOSTS",
 		DefaultLoadBalanceHosts, NULL,
 		"Load-Balance-Hosts", "", 8,	/* sizeof("disable") = 8 */
@@ -2059,6 +2068,45 @@ pqConnectOptions2(PGconn *conn)
 			libpq_append_conn_error(conn, "invalid SCRAM client key length: %d", len);
 			return false;
 		}
+	}
+
+	/*
+	 * If a trace file was provided and there's no active Pfdebug, enable
+	 * PQtrace
+	 */
+	if (conn->trace_file_str && !conn->Pfdebug)
+	{
+		int			trace_flags = 0;
+
+		if (conn->trace_flags_str)
+		{
+			if (!pqParseIntParam(conn->trace_flags_str, &trace_flags, conn,
+								 "trace_flags"))
+				return false;
+		}
+
+		if (strcmp(conn->trace_file_str, "-") == 0)
+			conn->trace_file = stdout;
+
+		/*
+		 * If the connection is created for a cancel request, and trace_file
+		 * is not stdout, don't try to trace it as the source connection has
+		 * already an opened fd on this trace file
+		 */
+		else if (!conn->cancelRequest)
+		{
+			conn->trace_file = fopen(conn->trace_file_str, "w");
+			if (conn->trace_file == NULL)
+			{
+				libpq_append_conn_error(conn, "could not open trace file \"%s\": %m", conn->trace_file_str);
+				return false;
+			}
+			/* Make it line-buffered */
+			setvbuf(conn->trace_file, NULL, PG_IOLBF, 0);
+		}
+
+		PQtrace(conn, conn->trace_file);
+		PQsetTraceFlags(conn, trace_flags);
 	}
 
 	if (conn->scram_server_key)
@@ -5046,6 +5094,7 @@ pqMakeEmptyPGconn(void)
 	conn->sock = PGINVALID_SOCKET;
 	conn->altsock = PGINVALID_SOCKET;
 	conn->Pfdebug = NULL;
+	conn->trace_file = NULL;
 
 	/*
 	 * We try to send at least 8K at a time, which is the usual size of pipe
@@ -5167,7 +5216,21 @@ freePGconn(PGconn *conn)
 	free(conn->oauth_client_secret);
 	free(conn->oauth_ca_file);
 	free(conn->oauth_scope);
-	/* Note that conn->Pfdebug is not ours to close or free */
+	free(conn->trace_file_str);
+	free(conn->trace_flags_str);
+
+	/* Untrace the connection to flush Pfdebug */
+	PQuntrace(conn);
+
+	/*
+	 * Note that conn->Pfdebug is not ours to close or free if provided
+	 * externally. However, if tracing was enabled through PQTRACE, we need to
+	 * close conn->trace_file.
+	 */
+	if (conn->trace_file && conn->trace_file != stdout)
+	{
+		fclose(conn->trace_file);
+	}
 	free(conn->events);
 	pqReleaseConnHosts(conn);
 	free(conn->connip);
