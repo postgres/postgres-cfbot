@@ -214,6 +214,7 @@ Boot_CreateStmt:
 												   RELPERSISTENCE_PERMANENT,
 												   shared_relation,
 												   mapped_relation,
+												   ONCOMMIT_NOOP,
 												   true,
 												   &relfrozenxid,
 												   &relminmxid,
