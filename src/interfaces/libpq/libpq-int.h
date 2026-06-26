@@ -449,6 +449,10 @@ struct pg_conn
 	char	   *oauth_ca_file;	/* CA file path */
 	bool		oauth_want_retry;	/* should we retry on failure? */
 
+	FILE	   *trace_file;
+	char	   *trace_file_str;
+	char	   *trace_flags_str;
+
 	/* Optional file to write trace info to */
 	FILE	   *Pfdebug;
 	int			traceFlags;
