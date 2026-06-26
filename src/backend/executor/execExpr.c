@@ -3736,6 +3736,70 @@ ExecBuildAggTrans(AggState *aggstate, AggStatePerPhase phase,
 		}
 
 		/*
+		 * If aggonempty present, emit step(s) to record that the group has
+		 * received an input row.  This is placed after any FILTER (so that
+		 * filtered-out rows do not count as input) but before the
+		 * strict-input NULL check emitted below (so that a row whose input is
+		 * NULL still counts as input).
+		 *
+		 * The step is emitted once per concurrently-evaluated grouping set,
+		 * mirroring the transition-function calls below.  We skip it entirely
+		 * for aggregates without ON EMPTY so the common case pays no
+		 * overhead.
+		 */
+		{
+			bool		has_aggonempty = false;
+
+			for (int aggno = 0; aggno < aggstate->numaggs; aggno++)
+			{
+				if (aggstate->peragg[aggno].transno == transno &&
+					aggstate->peragg[aggno].aggref->aggonempty != NULL)
+				{
+					has_aggonempty = true;
+					break;
+				}
+			}
+
+			if (has_aggonempty)
+			{
+				scratch.opcode = EEOP_AGG_INPUT_RECEIVED;
+				scratch.d.agg_input_received.transno = transno;
+
+				if (doSort)
+				{
+					int			processGroupingSets = Max(phase->numsets, 1);
+					int			setoff = 0;
+
+					for (int setno = 0; setno < processGroupingSets; setno++)
+					{
+						scratch.d.agg_input_received.setoff = setoff;
+						ExprEvalPushStep(state, &scratch);
+						setoff++;
+					}
+				}
+
+				if (doHash)
+				{
+					int			numHashes = aggstate->num_hashes;
+					int			setoff;
+
+					/* in MIXED mode, there'll be preceding transition values */
+					if (aggstate->aggstrategy != AGG_HASHED)
+						setoff = aggstate->maxsets;
+					else
+						setoff = 0;
+
+					for (int setno = 0; setno < numHashes; setno++)
+					{
+						scratch.d.agg_input_received.setoff = setoff;
+						ExprEvalPushStep(state, &scratch);
+						setoff++;
+					}
+				}
+			}
+		}
+
+		/*
 		 * Evaluate arguments to aggregate/combine function.
 		 */
 		argno = 0;

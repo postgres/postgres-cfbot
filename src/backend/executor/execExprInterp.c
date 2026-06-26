@@ -592,6 +592,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_AGG_STRICT_INPUT_CHECK_ARGS_1,
 		&&CASE_EEOP_AGG_STRICT_INPUT_CHECK_NULLS,
 		&&CASE_EEOP_AGG_PLAIN_PERGROUP_NULLCHECK,
+		&&CASE_EEOP_AGG_INPUT_RECEIVED,
 		&&CASE_EEOP_AGG_PLAIN_TRANS_INIT_STRICT_BYVAL,
 		&&CASE_EEOP_AGG_PLAIN_TRANS_STRICT_BYVAL,
 		&&CASE_EEOP_AGG_PLAIN_TRANS_BYVAL,
@@ -2102,6 +2103,27 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 
 			if (pergroup_allaggs == NULL)
 				EEO_JUMP(op->d.agg_plain_pergroup_nullcheck.jumpnull);
+
+			EEO_NEXT();
+		}
+
+		/*
+		 * Mark that an aggregate's per-group state has received an input row
+		 * (used by the ON EMPTY clause).  This is emitted once per row that
+		 * reaches the aggregate, after any FILTER but before the strict-input
+		 * NULL check, so that a row whose input is NULL still counts as
+		 * input. Only emitted for aggregates that actually carry an ON EMPTY
+		 * default.
+		 */
+		EEO_CASE(EEOP_AGG_INPUT_RECEIVED)
+		{
+			AggState   *aggstate = castNode(AggState, state->parent);
+			AggStatePerGroup pergroup_allaggs =
+				aggstate->all_pergroups[op->d.agg_input_received.setoff];
+
+			/* pergroup may be NULL in the hashed/spilled case; just skip */
+			if (pergroup_allaggs != NULL)
+				pergroup_allaggs[op->d.agg_input_received.transno].inputReceived = true;
 
 			EEO_NEXT();
 		}

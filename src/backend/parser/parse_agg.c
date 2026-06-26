@@ -21,6 +21,7 @@
 #include "common/int.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "optimizer/clauses.h"
 #include "optimizer/optimizer.h"
 #include "parser/parse_agg.h"
 #include "parser/parse_clause.h"
@@ -82,6 +83,9 @@ static Var *buildGroupedVar(int attnum, Index ressortgroupref,
 static void check_agglevels_and_constraints(ParseState *pstate, Node *expr);
 static List *expand_groupingset_node(GroupingSet *gs);
 static Node *make_agg_arg(Oid argtype, Oid argcollation);
+static Node *check_agg_on_empty(ParseState *pstate, Oid aggtype,
+								Expr *agg_on_empty, int location);
+static bool agg_on_empty_contains_var_walker(Node *node, void *context);
 
 
 /*
@@ -111,7 +115,8 @@ static Node *make_agg_arg(Oid argtype, Oid argcollation);
  */
 void
 transformAggregateCall(ParseState *pstate, Aggref *agg,
-					   List *args, List *aggorder, bool agg_distinct)
+					   List *args, List *aggorder, bool agg_distinct,
+					   Expr *agg_on_empty)
 {
 	List	   *argtypes = NIL;
 	List	   *tlist = NIL;
@@ -231,6 +236,8 @@ transformAggregateCall(ParseState *pstate, Aggref *agg,
 	agg->args = tlist;
 	agg->aggorder = torder;
 	agg->aggdistinct = tdistinct;
+	agg->aggonempty = (Expr *) check_agg_on_empty(pstate, agg->aggtype,
+												  agg_on_empty, agg->location);
 
 	/*
 	 * Now build the aggargtypes list with the type OIDs of the direct and
@@ -498,6 +505,14 @@ check_agglevels_and_constraints(ParseState *pstate, Node *expr)
 				err = _("aggregate functions are not allowed in DEFAULT expressions");
 			else
 				err = _("grouping operations are not allowed in DEFAULT expressions");
+
+			break;
+		case EXPR_KIND_AGG_ON_EMPTY:
+
+			if (isAgg)
+				err = _("aggregate functions are not allowed in ON EMPTY expressions");
+			else
+				err = _("grouping operations are not allowed in ON EMPTY expressions");
 
 			break;
 		case EXPR_KIND_INDEX_EXPRESSION:
@@ -892,7 +907,7 @@ check_agg_arguments_walker(Node *node,
  */
 void
 transformWindowFuncCall(ParseState *pstate, WindowFunc *wfunc,
-						WindowDef *windef)
+						WindowDef *windef, Expr *agg_on_empty)
 {
 	const char *err;
 	bool		errkind;
@@ -1002,6 +1017,9 @@ transformWindowFuncCall(ParseState *pstate, WindowFunc *wfunc,
 		case EXPR_KIND_COLUMN_DEFAULT:
 		case EXPR_KIND_FUNCTION_DEFAULT:
 			err = _("window functions are not allowed in DEFAULT expressions");
+			break;
+		case EXPR_KIND_AGG_ON_EMPTY:
+			err = _("window functions are not allowed in ON EMPTY expressions");
 			break;
 		case EXPR_KIND_INDEX_EXPRESSION:
 			err = _("window functions are not allowed in index expressions");
@@ -1140,6 +1158,9 @@ transformWindowFuncCall(ParseState *pstate, WindowFunc *wfunc,
 	}
 
 	pstate->p_hasWindowFuncs = true;
+	wfunc->aggonempty = (Expr *) check_agg_on_empty(pstate, wfunc->wintype,
+													agg_on_empty,
+													wfunc->location);
 }
 
 /*
@@ -2423,4 +2444,113 @@ make_agg_arg(Oid argtype, Oid argcollation)
 	argp->paramcollid = argcollation;
 	argp->location = -1;
 	return (Node *) argp;
+}
+
+/*
+ * check_agg_on_empty -
+ *		Checks the aggregate's ON EMPTY expression for correctness.
+ */
+static Node *
+check_agg_on_empty(ParseState *pstate, Oid aggtype, Expr *agg_on_empty,
+				   int location)
+{
+	Oid			defexprtype;
+
+	if (!agg_on_empty)
+		return NULL;
+
+	/*
+	 * default expression must be a constant - it cannot contain column
+	 * references (Var nodes), aggregates, or window functions.
+	 *
+	 * Note we cannot use contain_var_clause() here: it only detects Vars of
+	 * the current query level, so a correlated reference to an outer query's
+	 * column (varlevelsup > 0) would slip through and make the "constant"
+	 * default vary per outer row.  Reject Vars of any level.
+	 */
+	if (agg_on_empty_contains_var_walker((Node *) agg_on_empty, NULL))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("ON EMPTY expression must be a constant value"),
+				 parser_errposition(pstate, location)));
+
+	if (contain_agg_clause((Node *) agg_on_empty))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("ON EMPTY expression must not contain an aggregate function"),
+				 parser_errposition(pstate, location)));
+
+	if (contain_windowfuncs((Node *) agg_on_empty))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("ON EMPTY expression must not contain a window function"),
+				 parser_errposition(pstate, location)));
+
+	/*
+	 * Sub-selects are not constant and, more importantly, the ON EMPTY
+	 * expression is only run through ExecInitExpr() at execution time, never
+	 * the sub-plan setup that a normal target expression receives, so a
+	 * sub-select here would fail (or crash) at execution.  Reject it.
+	 */
+	if (checkExprHasSubLink((Node *) agg_on_empty))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("ON EMPTY expression must not contain a subquery"),
+				 parser_errposition(pstate, location)));
+
+	/*
+	 * The default is evaluated only once, for the empty-input case, so a
+	 * volatile expression would not behave like a per-row value.  Restrict it
+	 * to a stable/immutable, constant-like expression.
+	 */
+	if (contain_volatile_functions((Node *) agg_on_empty))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("ON EMPTY expression must not contain a volatile function"),
+				 parser_errposition(pstate, location)));
+
+	defexprtype = exprType((Node *) agg_on_empty);
+
+	/* default expression must be coercible to the aggregate's result type. */
+	agg_on_empty = (Expr *) coerce_to_target_type(pstate,
+												  (Node *) agg_on_empty,
+												  defexprtype,
+												  aggtype,
+												  -1,
+												  COERCION_ASSIGNMENT,
+												  COERCE_IMPLICIT_CAST,
+												  -1);
+
+	if (agg_on_empty == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("ON EMPTY expression type %s cannot be coerced to aggregate result type %s",
+						format_type_be(defexprtype),
+						format_type_be(aggtype)),
+				 parser_errposition(pstate, location)));
+
+	return (Node *) agg_on_empty;
+}
+
+/*
+ * agg_on_empty_contains_var_walker -
+ *		Returns true if the node tree contains any Var (a column reference) or
+ *		CurrentOfExpr, regardless of query level.
+ *
+ * Unlike contain_var_clause(), this also reports Vars belonging to outer
+ * query levels (varlevelsup > 0), which is what we need to ensure an ON EMPTY
+ * default really is constant.  Sub-selects are rejected separately, so there
+ * is no need to descend into them here.  This runs during parse analysis, so
+ * PlaceHolderVars (which the planner introduces) cannot appear; a Var inside
+ * one would be caught by the recursion anyway.
+ */
+static bool
+agg_on_empty_contains_var_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Var) || IsA(node, CurrentOfExpr))
+		return true;
+	return expression_tree_walker(node, agg_on_empty_contains_var_walker,
+								  context);
 }

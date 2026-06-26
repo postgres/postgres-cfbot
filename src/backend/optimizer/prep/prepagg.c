@@ -216,6 +216,18 @@ preprocess_aggref(Aggref *aggref, PlannerInfo *root)
 	ReleaseSysCache(aggTuple);
 
 	/*
+	 * An ON EMPTY default is returned only when the aggregate processes zero
+	 * input rows, which is detected via a per-group "input received" flag set
+	 * as the aggregate's input rows are processed.  Under partial aggregation
+	 * the leader sees only the workers' combined partial states (via the
+	 * combine function), not the original rows, so that flag cannot reliably
+	 * distinguish the empty-input case.  Disable partial aggregation for such
+	 * aggregates.
+	 */
+	if (aggref->aggonempty != NULL)
+		root->hasNonPartialAggs = true;
+
+	/*
 	 * 1. See if this is identical to another aggregate function call that
 	 * we've seen already.
 	 */

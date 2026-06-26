@@ -1555,6 +1555,10 @@ sqrt(2)
     <primary>FILTER</primary>
    </indexterm>
 
+   <indexterm zone="syntax-aggregates">
+    <primary>ON EMPTY</primary>
+   </indexterm>
+
    <para>
     An <firstterm>aggregate expression</firstterm> represents the
     application of an aggregate function across the rows selected by a
@@ -1564,6 +1568,7 @@ sqrt(2)
 
 <synopsis>
 <replaceable>aggregate_name</replaceable> (<replaceable>expression</replaceable> [ , ... ] [ <replaceable>order_by_clause</replaceable> ] ) [ FILTER ( WHERE <replaceable>filter_clause</replaceable> ) ]
+<replaceable>aggregate_name</replaceable> (<replaceable>expression</replaceable> [ , ... ] , <replaceable>default_expression</replaceable> ON EMPTY [ <replaceable>order_by_clause</replaceable> ] ) [ FILTER ( WHERE <replaceable>filter_clause</replaceable> ) ]
 <replaceable>aggregate_name</replaceable> (ALL <replaceable>expression</replaceable> [ , ... ] [ <replaceable>order_by_clause</replaceable> ] ) [ FILTER ( WHERE <replaceable>filter_clause</replaceable> ) ]
 <replaceable>aggregate_name</replaceable> (DISTINCT <replaceable>expression</replaceable> [ , ... ] [ <replaceable>order_by_clause</replaceable> ] ) [ FILTER ( WHERE <replaceable>filter_clause</replaceable> ) ]
 <replaceable>aggregate_name</replaceable> ( * ) [ FILTER ( WHERE <replaceable>filter_clause</replaceable> ) ]
@@ -1745,6 +1750,36 @@ FROM generate_series(1,10) AS s(i);
    </para>
 
    <para>
+    If <literal>ON EMPTY</literal> is specified, then
+    <replaceable>default_expression</replaceable> supplies the value of the
+    aggregate when it processes no input rows at all; in that case the
+    aggregate's normal final result (and its final function, if any) is not
+    computed.  This is distinct from null handling: it is triggered only by
+    an empty input set, not by null inputs that are merely ignored during
+    aggregation.  Note that when rows exist but are all removed by a
+    <replaceable>filter_clause</replaceable>, the input set is empty and the
+    <literal>ON EMPTY</literal> value is returned.  For example:
+<programlisting>
+SELECT sum(i) AS plain, sum(i, -1 ON EMPTY) AS defaulted
+FROM generate_series(1,10) AS s(i) WHERE i &gt; 100;
+ plain | defaulted
+-------+-----------
+       |        -1
+(1 row)
+</programlisting>
+    <replaceable>default_expression</replaceable> must be a constant-like
+    expression of a type coercible to the aggregate's result type: it may not
+    refer to columns or contain aggregates, window functions, subqueries, or
+    volatile functions.  <literal>ON EMPTY</literal> cannot be combined with
+    <literal>DISTINCT</literal>.  It may be used with an ordered-set
+    aggregate, written before the <literal>WITHIN GROUP</literal> clause.
+    Because a grouped query never produces empty groups,
+    <literal>ON EMPTY</literal> only takes effect for an ungrouped aggregate
+    over zero rows (or a group whose rows are all removed by
+    <replaceable>filter_clause</replaceable>).
+   </para>
+
+   <para>
     The predefined aggregate functions are described in <xref
     linkend="functions-aggregate"/>.  Other aggregate functions can be added
     by the user.
@@ -1841,6 +1876,17 @@ EXCLUDE NO OTHERS
     expression that does not itself contain window function calls. Some
     non-aggregate functions allow a <literal>null treatment</literal> clause,
     described in <xref linkend="functions-window"/>.
+   </para>
+
+   <para>
+    When an aggregate function is used as a window function, an
+    <literal>ON EMPTY</literal> clause may be given after its arguments
+    (using the same syntax as for a plain aggregate call, described in
+    <xref linkend="syntax-aggregates"/>).  The
+    <replaceable>default_expression</replaceable> is then returned for any
+    row whose window frame contains no rows, including a frame that becomes
+    empty as the frame moves.  <literal>ON EMPTY</literal> is not accepted for
+    non-aggregate window functions.
    </para>
 
    <para>
