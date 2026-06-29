@@ -531,7 +531,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %type <node>	TableElement TypedTableElement ConstraintElem DomainConstraintElem TableFuncElement
 %type <node>	columnDef columnOptions optionalPeriodName
 %type <defelt>	def_elem reloption_elem old_aggr_elem operator_def_elem
-%type <node>	def_arg columnElem where_clause where_or_current_clause
+%type <node>	def_arg columnElem where_clause qualify_clause where_or_current_clause
 				a_expr b_expr c_expr AexprConst indirection_el opt_slice_bound
 				columnref having_clause func_table xmltable array_expr
 				OptWhereClause operator_def_arg
@@ -816,7 +816,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	POSITION PRECEDING PRECISION PRESERVE PREPARE PREPARED PRIMARY
 	PRIOR PRIVILEGES PROCEDURAL PROCEDURE PROCEDURES PROGRAM PROPERTIES PROPERTY PUBLICATION
 
-	QUOTE QUOTES
+	QUALIFY QUOTE QUOTES
 
 	RANGE READ REAL REASSIGN RECURSIVE REF_P REFERENCES REFERENCING
 	REFRESH REINDEX RELATIONSHIP RELATIVE_P RELEASE RENAME REPACK REPEATABLE REPLACE REPLICA
@@ -13751,7 +13751,7 @@ select_clause:
 simple_select:
 			SELECT opt_all_clause opt_target_list
 			into_clause from_clause where_clause
-			group_clause having_clause window_clause
+			group_clause having_clause window_clause qualify_clause
 				{
 					SelectStmt *n = makeNode(SelectStmt);
 
@@ -13763,11 +13763,12 @@ simple_select:
 					n->groupDistinct = ($7)->distinct;
 					n->havingClause = $8;
 					n->windowClause = $9;
+					n->qualifyClause = $10;
 					$$ = (Node *) n;
 				}
 			| SELECT distinct_clause target_list
 			into_clause from_clause where_clause
-			group_clause having_clause window_clause
+			group_clause having_clause window_clause qualify_clause
 				{
 					SelectStmt *n = makeNode(SelectStmt);
 
@@ -13780,6 +13781,7 @@ simple_select:
 					n->groupDistinct = ($7)->distinct;
 					n->havingClause = $8;
 					n->windowClause = $9;
+					n->qualifyClause = $10;
 					$$ = (Node *) n;
 				}
 			| values_clause							{ $$ = $1; }
@@ -14954,6 +14956,11 @@ opt_ordinality: WITH_LA ORDINALITY					{ $$ = true; }
 
 where_clause:
 			WHERE a_expr							{ $$ = $2; }
+			| /*EMPTY*/								{ $$ = NULL; }
+		;
+
+qualify_clause:
+			QUALIFY a_expr							{ $$ = $2; }
 			| /*EMPTY*/								{ $$ = NULL; }
 		;
 
@@ -19429,6 +19436,7 @@ reserved_keyword:
 			| ORDER
 			| PLACING
 			| PRIMARY
+			| QUALIFY
 			| REFERENCES
 			| RETURNING
 			| SELECT
