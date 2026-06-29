@@ -52,6 +52,7 @@
 #include "parser/parse_target.h"
 #include "parser/parse_type.h"
 #include "parser/parsetree.h"
+#include "rewrite/rewriteManip.h"
 #include "utils/backend_status.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
@@ -69,6 +70,31 @@ typedef struct SelectStmtPassthrough
 	Node	   *target;			/* node representing the target variable */
 	List	   *indirection;	/* indirection yet to be applied to target */
 } SelectStmtPassthrough;
+
+/* State for the QUALIFY select-list alias resolution hook */
+typedef struct QualifyHookState
+{
+	List	   *targetList;		/* target list to match aliases against */
+	PostParseColumnRefHook prev_hook;	/* previously installed hook, if any */
+	void	   *prev_hook_state;	/* its state */
+} QualifyHookState;
+
+/* Working state for qualifyExtractMutator */
+typedef struct QualifyExtractContext
+{
+	List	  **innerTargetList;	/* inner query's target list (appended to) */
+	int			subquery_varno; /* varno of the subquery RTE in the outer
+								 * query */
+	int			next_resno;		/* next resno to assign to appended entries */
+} QualifyExtractContext;
+
+/* Working state for qualifyFixupVarattno */
+typedef struct QualifyVarmapContext
+{
+	int			subquery_varno; /* varno whose Vars are to be remapped */
+	AttrNumber *attmap;			/* map from old resno to new resno */
+} QualifyVarmapContext;
+
 
 /* Hook for plugins to get control at end of parse analysis */
 post_parse_analyze_hook_type post_parse_analyze_hook = NULL;
@@ -108,6 +134,10 @@ static Query *transformCallStmt(ParseState *pstate,
 								CallStmt *stmt);
 static void transformLockingClause(ParseState *pstate, Query *qry,
 								   LockingClause *lc, bool pushedDown);
+static Node *qualifyPostColumnRefHook(ParseState *pstate, ColumnRef *cref,
+									  Node *var);
+static Query *rewriteQualifyQuery(ParseState *pstate, Query *innerQuery,
+								  Node *qualifyExpr);
 #ifdef DEBUG_NODE_TESTS_ENABLED
 static bool test_raw_expression_coverage(Node *node, void *context);
 #endif
@@ -1723,6 +1753,427 @@ count_rowexpr_columns(ParseState *pstate, Node *expr)
 	return -1;
 }
 
+/*
+ * qualifyPostColumnRefHook
+ *	  Resolve a QUALIFY column references
+ *
+ * QUALIFY column references can reference table columns and target alias. A
+ * real column of the FROM tables take precedence over a select-list alias of
+ * the same name.
+ */
+static Node *
+qualifyPostColumnRefHook(ParseState *pstate, ColumnRef *cref, Node *var)
+{
+	QualifyHookState *qstate = (QualifyHookState *) pstate->p_ref_hook_state;
+	char	   *name;
+	TargetEntry *matched = NULL;
+	ListCell   *lc;
+
+	/* A real column of the FROM tables takes precedence over an alias. */
+	if (var != NULL)
+		return NULL;
+
+	/* Only unqualified (single-field) names can match a select-list alias. */
+	if (list_length(cref->fields) != 1 || !IsA(linitial(cref->fields), String))
+		return NULL;
+
+	name = strVal(linitial(cref->fields));
+
+	foreach(lc, qstate->targetList)
+	{
+		TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+		if (tle->resjunk || tle->resname == NULL || strcmp(tle->resname, name) != 0)
+			continue;
+
+		if (matched != NULL && !equal(matched->expr, tle->expr))
+			ereport(ERROR,
+					(errcode(ERRCODE_AMBIGUOUS_COLUMN),
+					 errmsg("column reference \"%s\" is ambiguous", name),
+					 parser_errposition(pstate, cref->location)));
+		matched = tle;
+	}
+
+	if (matched == NULL)
+		return NULL;
+
+	/*
+	 * XXX: an alias whose expression is non-deterministic would be evaluated
+	 * once for the select-list column and again in the outer filter built
+	 * from the QUALIFY condition, possibly producing different values.  Until
+	 * such references are resolved by the identity of the select-list entry
+	 * (projecting it once and referencing it by a single Var), reject
+	 * volatile alias expressions.
+	 */
+	if (contain_volatile_functions((Node *) matched->expr))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("QUALIFY cannot reference output column \"%s\" whose expression is non-deterministic",
+						name),
+				 parser_errposition(pstate, cref->location)));
+
+	return copyObject((Node*) matched->expr);
+}
+
+/*
+ * qualifyExtractMutator
+ *	  Rewrite a QUALIFY condition so it can serve as the WHERE clause of the
+ *	  outer query built by rewriteQualifyQuery.
+ *
+ * Every window function, aggregate, and Var of the inner query is computed by
+ * the inner query and referenced from the outer query by a plain Var: we find
+ * an existing target entry with an equal expression, or append a new resjunk
+ * one, and replace the node with an outer Var.  Comparisons and other
+ * operators are left in place at the outer level.  This reproduces the shape
+ * of a hand-written subquery, so the planner's existing optimizations for
+ * window functions in subqueries (run conditions and qual pushdown) apply
+ * unchanged.
+ */
+static Node *
+qualifyExtractMutator(Node *node, QualifyExtractContext *ctx)
+{
+	if (node == NULL)
+		return NULL;
+
+	if (IsA(node, WindowFunc) || IsA(node, Aggref)
+		|| (IsA(node, Var) && ((Var *) node)->varlevelsup == 0))
+	{
+		TargetEntry *tle = NULL;
+
+		/* Reuse a matching target entry so a value isn't projected twice. */
+		foreach_ptr(TargetEntry, cur, *ctx->innerTargetList)
+		{
+			if (equal(cur->expr, node))
+			{
+				tle = cur;
+				break;
+			}
+		}
+
+		/*
+		 * Did not find the target entry on target list so add it on inner
+		 * query target list so it can be referenced on the outer query.
+		 */
+		if (tle == NULL)
+		{
+			tle = makeTargetEntry((Expr *) copyObject(node),
+								  ctx->next_resno++,
+								  NULL,
+								  false);
+			*ctx->innerTargetList = lappend(*ctx->innerTargetList, tle);
+		}
+
+		/*
+		 * The entry is referenced from the outer query, so it must be a real
+		 * (non-resjunk) output column of the subquery. A reused entry might
+		 * be a resjunk grouping column or a junk ORDER BY/DISTINCT target, so
+		 * clear the flag here.
+		 */
+		tle->resjunk = false;
+
+		return (Node *) makeVarFromTargetEntry(ctx->subquery_varno, tle);
+	}
+
+	return expression_tree_mutator(node, qualifyExtractMutator, ctx);
+}
+
+/*
+ * qualifyFixupVarattno
+ *	  Remap the attribute numbers of Vars referencing the QUALIFY subquery,
+ *	  after the subquery's target list has been renumbered.
+ */
+static bool
+qualifyFixupVarattno(Node *node, QualifyVarmapContext *ctx)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, Var))
+	{
+		Var		   *var = (Var *) node;
+
+		if (var->varlevelsup == 0 && var->varno == ctx->subquery_varno)
+		{
+			var->varattno = ctx->attmap[var->varattno];
+			var->varattnosyn = var->varattno;
+		}
+		return false;
+	}
+
+	return expression_tree_walker(node, qualifyFixupVarattno, ctx);
+}
+
+/*
+ * rewriteQualifyQuery
+ *	  Implement the QUALIFY clause by rewriting the inner query in an outer
+ *	  query whose WHERE clause is the QUALIFY condition.
+ *
+ * 'innerQuery' is the fully-analyzed query for the table expression and select
+ * list, with the resolved QUALIFY condition appended to its target list as a
+ * resjunk entry.  We remove that entry, decompose the condition into the outer
+ * WHERE clause (extracting window functions, aggregates, and inner Vars into
+ * the inner target list), and process the deferred ORDER BY, DISTINCT, and
+ * LIMIT clauses against the outer query.
+ */
+static Query *
+rewriteQualifyQuery(ParseState *pstate, Query *innerQuery, Node *qualifyExpr)
+{
+	Query	   *outerQuery = makeNode(Query);
+	List	   *outerTargetList = NIL;
+	List	   *origTargetList = NIL;
+	List	   *nonjunk = NIL;
+	List	   *junk = NIL;
+	Bitmapset  *liftrefs = NULL;
+	ParseState *opstate;
+	ParseNamespaceItem *nsitem;
+	QualifyExtractContext ctx;
+	Node	   *outerQual;
+	List	   *outerSortClause;
+	List	   *outerDistinctClause;
+	bool		outerHasDistinctOn;
+	Node	   *outerLimitOffset;
+	Node	   *outerLimitCount;
+	LimitOption outerLimitOption;
+	ListCell   *lc;
+	int			resno;
+	int			ntargets;
+	AttrNumber *attmap;
+	QualifyVarmapContext mapctx;
+	AttrNumber	newresno;
+
+	/*
+	 * ORDER BY, DISTINCT, and LIMIT were transformed against the inner
+	 * query's scope  but are logically evaluated after QUALIFY, so they move
+	 * to the outer query. Detach them from the inner query; the sort and
+	 * distinct clauses are re-attached below after the columns they reference
+	 * are exposed as subquery outputs.
+	 */
+	outerSortClause = innerQuery->sortClause;
+	outerDistinctClause = innerQuery->distinctClause;
+	outerHasDistinctOn = innerQuery->hasDistinctOn;
+	outerLimitOffset = innerQuery->limitOffset;
+	outerLimitCount = innerQuery->limitCount;
+	outerLimitOption = innerQuery->limitOption;
+	innerQuery->sortClause = NIL;
+	innerQuery->distinctClause = NIL;
+	innerQuery->hasDistinctOn = false;
+	innerQuery->limitOffset = NULL;
+	innerQuery->limitCount = NULL;
+	innerQuery->limitOption = LIMIT_OPTION_COUNT;
+
+	/* Collect the sort/group refs that the lifted ORDER BY / DISTINCT use. */
+	foreach(lc, outerSortClause)
+		liftrefs = bms_add_member(liftrefs,
+								  ((SortGroupClause *) lfirst(lc))->tleSortGroupRef);
+	foreach(lc, outerDistinctClause)
+		liftrefs = bms_add_member(liftrefs,
+								  ((SortGroupClause *) lfirst(lc))->tleSortGroupRef);
+
+	/*
+	 * Remove the temporary resjunk QUALIFY entry from the inner target list
+	 * required by parseCheckAggregates.
+	 */
+	foreach(lc, innerQuery->targetList)
+	{
+		TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+		if (tle->expr == (Expr *) qualifyExpr)
+		{
+			Assert(tle->resjunk);
+			innerQuery->targetList = foreach_delete_current(innerQuery->targetList, lc);
+			break;
+		}
+	}
+
+	/*
+	 * Capture the original select-list output columns now, before extraction
+	 * and lifting may append further (non-resjunk) columns or un-junk
+	 * grouping/sort columns; these are what the outer query projects.
+	 */
+	foreach_ptr(TargetEntry, tle, innerQuery->targetList)
+	{
+		if (!tle->resjunk)
+			origTargetList = lappend(origTargetList, tle);
+	}
+
+	/*
+	 * Extract the QUALIFY condition into the outer WHERE clause, projecting
+	 * the inner-query expressions it needs through the subquery. The subquery
+	 * will be range-table entry 1 of the outer query.
+	 */
+	ctx.innerTargetList = &innerQuery->targetList;
+	ctx.subquery_varno = 1;
+	ctx.next_resno = list_length(innerQuery->targetList) + 1;
+	outerQual = qualifyExtractMutator(qualifyExpr, &ctx);
+
+	/*
+	 * Expose as non-resjunk subquery outputs, the inner columns that the
+	 * lifted ORDER BY / DISTINCT clauses reference, so the outer query can
+	 * refer to them.  Grouping columns not referenced by ORDER BY/DISTINCT
+	 * stay resjunk.
+	 */
+	foreach_ptr(TargetEntry, tle, innerQuery->targetList)
+	{
+		if (tle->ressortgroupref != 0 && bms_is_member(tle->ressortgroupref, liftrefs))
+			tle->resjunk = false;
+	}
+
+	/*
+	 * A subquery range table entry requires its non-resjunk columns to come
+	 * first with contiguous resnos, and every output column must have a name.
+	 * Reorder the inner target list accordingly, name any anonymous output
+	 * columns, and remap the resnos referenced by the outer WHERE clause.
+	 */
+	ntargets = list_length(innerQuery->targetList);
+	attmap = (AttrNumber *) palloc0((ntargets + 1) * sizeof(AttrNumber));
+
+	foreach(lc, innerQuery->targetList)
+	{
+		TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+		if (tle->resjunk)
+			junk = lappend(junk, tle);
+		else
+			nonjunk = lappend(nonjunk, tle);
+	}
+	innerQuery->targetList = list_concat(nonjunk, junk);
+
+	newresno = 1;
+	foreach(lc, innerQuery->targetList)
+	{
+		TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+		attmap[tle->resno] = newresno;
+		tle->resno = newresno;
+
+		/*
+		 * Output columns created by extraction are anonymous.  Give a Var the
+		 * name of its source column, so the lifted ORDER BY/DISTINCT and the
+		 * outer WHERE can reference an input column (e.g. "QUALIFY x > 0
+		 * ORDER BY x"); fall back to a generated name for non-Var
+		 * expressions.
+		 */
+		if (!tle->resjunk && tle->resname == NULL)
+		{
+			if (IsA(tle->expr, Var) && ((Var *) tle->expr)->varattno > 0)
+			{
+				Var		   *var = (Var *) tle->expr;
+
+				tle->resname = get_rte_attribute_name(rt_fetch(var->varno,
+															   innerQuery->rtable),
+													  var->varattno);
+			}
+			if (tle->resname == NULL)
+				tle->resname = psprintf("qualify%d", newresno);
+		}
+		newresno++;
+	}
+
+	/* Now fix the QUALIFY Var references */
+	mapctx.subquery_varno = ctx.subquery_varno;
+	mapctx.attmap = attmap;
+	qualifyFixupVarattno(outerQual, &mapctx);
+
+	/*
+	 * The inner query is now one level deeper than it was, so bump the level
+	 * of any outer references it contains.  The outer WHERE clause (and the
+	 * lifted clauses) stay at the current level.
+	 */
+	IncrementVarSublevelsUp((Node *) innerQuery, 1, 1);
+
+	/* Build the outer query's parse state, sharing the original parent. */
+	opstate = make_parsestate(pstate->parentParseState);
+	opstate->p_sourcetext = pstate->p_sourcetext;
+	opstate->p_pre_columnref_hook = pstate->p_pre_columnref_hook;
+	opstate->p_post_columnref_hook = pstate->p_post_columnref_hook;
+	opstate->p_paramref_hook = pstate->p_paramref_hook;
+	opstate->p_coerce_param_hook = pstate->p_coerce_param_hook;
+	opstate->p_ref_hook_state = pstate->p_ref_hook_state;
+
+	outerQuery->commandType = CMD_SELECT;
+
+	nsitem = addRangeTableEntryForSubquery(opstate, innerQuery,
+										   makeAlias("pg_qualify", NIL),
+										   false, true);
+	addNSItemToQuery(opstate, nsitem, true, true, true);
+
+	/* Outer target list: project the original select-list output columns. */
+	resno = 1;
+	foreach(lc, origTargetList)
+	{
+		TargetEntry *tle = (TargetEntry *) lfirst(lc);
+		Var		   *var = makeVarFromTargetEntry(ctx.subquery_varno, tle);
+
+		outerTargetList = lappend(outerTargetList,
+								  makeTargetEntry((Expr *) var,
+												  resno++,
+												  tle->resname ? pstrdup(tle->resname) : NULL,
+												  false));
+	}
+
+	/*
+	 * Re-attach the lifted ORDER BY / DISTINCT clauses.  For each inner
+	 * column they reference, give the outer target that projects it the same
+	 * sort/ group ref so the moved SortGroupClauses line up; a referenced
+	 * column not in the projection gets a resjunk outer target.
+	 */
+	foreach_ptr(TargetEntry, innerTle, innerQuery->targetList)
+	{
+		TargetEntry *out = NULL;
+
+		if (innerTle->ressortgroupref == 0 || !bms_is_member(innerTle->ressortgroupref, liftrefs))
+			continue;
+
+		foreach_ptr(TargetEntry, outerTle, outerTargetList)
+		{
+
+			if (IsA(outerTle->expr, Var) && ((Var *) outerTle->expr)->varattno == innerTle->resno)
+			{
+				out = outerTle;
+				break;
+			}
+		}
+
+		if (out == NULL)
+		{
+			Var		   *var = makeVarFromTargetEntry(ctx.subquery_varno, innerTle);
+
+			out = makeTargetEntry((Expr *) var,
+								  resno++,
+								  innerTle->resname ? pstrdup(innerTle->resname) : NULL,
+								  true);
+			outerTargetList = lappend(outerTargetList, out);
+		}
+		out->ressortgroupref = innerTle->ressortgroupref;
+	}
+
+	outerQuery->targetList = outerTargetList;
+	outerQuery->rtable = opstate->p_rtable;
+	outerQuery->rteperminfos = opstate->p_rteperminfos;
+	outerQuery->jointree = makeFromExpr(opstate->p_joinlist, outerQual);
+
+	outerQuery->sortClause = outerSortClause;
+	outerQuery->distinctClause = outerDistinctClause;
+	outerQuery->hasDistinctOn = outerHasDistinctOn;
+	outerQuery->limitOffset = outerLimitOffset;
+	outerQuery->limitCount = outerLimitCount;
+	outerQuery->limitOption = outerLimitOption;
+
+	/*
+	 * The outer query has no aggregates or window functions (those were
+	 * extracted into the subquery), so only sub-links need to be reported.
+	 */
+	outerQuery->hasSubLinks = checkExprHasSubLink(outerQual) ||
+		checkExprHasSubLink(outerLimitOffset) ||
+		checkExprHasSubLink(outerLimitCount);
+
+	assign_query_collations(opstate, outerQuery);
+
+	free_parsestate(opstate);
+
+	return outerQuery;
+}
+
 
 /*
  * transformSelectStmt -
@@ -1745,6 +2196,8 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt,
 	Query	   *qry = makeNode(Query);
 	Node	   *qual;
 	ListCell   *l;
+	bool		hasQualify = (stmt->qualifyClause != NULL);
+	Node	   *qualifyExpr = NULL;
 
 	qry->commandType = CMD_SELECT;
 
@@ -1801,6 +2254,13 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt,
 	 * transformGroupClause and transformDistinctClause need the results. Note
 	 * that these functions can also change the targetList, so it's passed to
 	 * them by reference.
+	 *
+	 * When a QUALIFY clause is present, ORDER BY/DISTINCT/LIMIT are logically
+	 * evaluated after QUALIFY and so belong to the outer query that
+	 * rewriteQualifyQuery() builds.  We still transform them here, against
+	 * the inner query's scope, so that they can reference input columns and
+	 * select-list aliases as in any other query; rewriteQualifyQuery() then
+	 * lifts the resulting clauses out to the outer query.
 	 */
 	qry->sortClause = transformSortClause(pstate,
 										  stmt->sortClause,
@@ -1850,6 +2310,42 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt,
 										   stmt->limitOption);
 	qry->limitOption = stmt->limitOption;
 
+	/*
+	 * Transform the QUALIFY condition, if any.  This must happen before
+	 * transformWindowDefinitions() so that window functions appearing only in
+	 * QUALIFY get their inline window specifications registered and turned
+	 * into WindowClauses.  QUALIFY may reference select-list aliases, so we
+	 * install a post-columnref hook that resolves a bare name to a
+	 * select-list alias.
+	 *
+	 * The resolved condition is appended to the target list as a resjunk
+	 * entry so that parseCheckAggregates() validates it like a select-list
+	 * item; it is removed and decomposed into the outer query's WHERE clause
+	 * by rewriteQualifyQuery() below.
+	 */
+	if (hasQualify)
+	{
+		QualifyHookState qstate;
+
+		qstate.targetList = qry->targetList;
+		qstate.prev_hook = pstate->p_post_columnref_hook;
+		qstate.prev_hook_state = pstate->p_ref_hook_state;
+		pstate->p_post_columnref_hook = qualifyPostColumnRefHook;
+		pstate->p_ref_hook_state = &qstate;
+
+		qualifyExpr = transformWhereClause(pstate, stmt->qualifyClause,
+										   EXPR_KIND_QUALIFY, "QUALIFY");
+
+		pstate->p_post_columnref_hook = qstate.prev_hook;
+		pstate->p_ref_hook_state = qstate.prev_hook_state;
+
+		qry->targetList = lappend(qry->targetList,
+								  makeTargetEntry((Expr *) qualifyExpr,
+												  list_length(qry->targetList) + 1,
+												  NULL,
+												  true));
+	}
+
 	/* transform window clauses after we have seen all window functions */
 	qry->windowClause = transformWindowDefinitions(pstate,
 												   pstate->p_windowdefs,
@@ -1879,6 +2375,14 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt,
 	/* this must be done after collations, for reliable comparison of exprs */
 	if (pstate->p_hasAggs || qry->groupClause || qry->groupingSets || qry->havingQual)
 		parseCheckAggregates(pstate, qry);
+
+	/*
+	 * If a QUALIFY clause was present, wrap the query just built (the inner
+	 * query) in an outer query whose WHERE clause is the QUALIFY condition,
+	 * and process the deferred ORDER BY/DISTINCT/LIMIT clauses against it.
+	 */
+	if (hasQualify)
+		return rewriteQualifyQuery(pstate, qry, qualifyExpr);
 
 	return qry;
 }
