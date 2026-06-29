@@ -80,11 +80,12 @@ struct auto_mem
 static pthread_key_t auto_mem_key;
 static pthread_once_t auto_mem_once = PTHREAD_ONCE_INIT;
 
+static void ecpg_clear_auto_mem_list(struct auto_mem *list);
+
 static void
 auto_mem_destructor(void *arg)
 {
-	(void) arg;					/* keep the compiler quiet */
-	ECPGfree_auto_mem();
+	ecpg_clear_auto_mem_list((struct auto_mem *) arg);
 }
 
 static void
@@ -159,8 +160,12 @@ ECPGfree_auto_mem(void)
 void
 ecpg_clear_auto_mem(void)
 {
-	struct auto_mem *am = get_auto_allocs();
+	ecpg_clear_auto_mem_list(get_auto_allocs());
+}
 
+static void
+ecpg_clear_auto_mem_list(struct auto_mem *am)
+{
 	/* only free our own structure */
 	if (am)
 	{
