@@ -4383,6 +4383,8 @@ raw_expression_tree_walker_impl(Node *node,
 					return true;
 				if (WALK(stmt->rarg))
 					return true;
+				if (WALK(stmt->qualifyClause))
+					return true;
 			}
 			break;
 		case T_PLAssignStmt:
