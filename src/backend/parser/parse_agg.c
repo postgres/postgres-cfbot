@@ -407,6 +407,9 @@ check_agglevels_and_constraints(ParseState *pstate, Node *expr)
 		case EXPR_KIND_WHERE:
 			errkind = true;
 			break;
+		case EXPR_KIND_QUALIFY:
+			/* okay */
+			break;
 		case EXPR_KIND_POLICY:
 			if (isAgg)
 				err = _("aggregate functions are not allowed in policy expressions");
@@ -964,6 +967,7 @@ transformWindowFuncCall(ParseState *pstate, WindowFunc *wfunc,
 			err = _("window functions are not allowed in window definitions");
 			break;
 		case EXPR_KIND_SELECT_TARGET:
+		case EXPR_KIND_QUALIFY:
 			/* okay */
 			break;
 		case EXPR_KIND_INSERT_TARGET:
