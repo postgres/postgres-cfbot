@@ -31,6 +31,7 @@
 /* Function declarations for internal use */
 static bool validate_oauth_credentials(void);
 static bool validate_cert_credentials(void);
+static bool validate_gss_credentials(void);
 
 /*
  * Initialize validation methods
@@ -46,6 +47,7 @@ InitializeValidationMethods(void)
 	 */
 	RegisterCredentialValidator(CVT_OAUTH, validate_oauth_credentials);
 	RegisterCredentialValidator(CVT_CERT, validate_cert_credentials);
+	RegisterCredentialValidator(CVT_GSS, validate_gss_credentials);
 }
 
 /*
@@ -129,6 +131,37 @@ validate_cert_credentials(void)
 
 	/* The session is no longer valid once the client certificate expires */
 	if (be_tls_get_peer_cert_expired(port))
+		return false;
+#endif
+
+	return true;
+}
+
+/*
+ * Validate GSSAPI (Kerberos) credentials.
+ *
+ * The GSS security context established at authentication time carries a
+ * lifetime derived from the Kerberos ticket the client presented at connection
+ * time.  Once that lifetime has elapsed, the credential that authenticated the
+ * session is no longer valid.  This is checked locally from the context
+ * retained on the Port, with no round-trip to the KDC.  Returns false once the
+ * context has expired, true otherwise.
+ *
+ * If the session is not using a GSS context (which should not happen for a
+ * GSS-authenticated session), there is nothing GSS-specific to validate, so
+ * the credentials are considered valid.
+ */
+static bool
+validate_gss_credentials(void)
+{
+#ifdef ENABLE_GSS
+	Port	   *port = MyProcPort;
+
+	if (port == NULL)
+		return true;
+
+	/* The session is no longer valid once the GSS context expires */
+	if (be_gssapi_get_context_expired(port))
 		return false;
 #endif
 

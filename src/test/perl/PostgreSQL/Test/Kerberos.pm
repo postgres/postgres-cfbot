@@ -8,6 +8,7 @@ package PostgreSQL::Test::Kerberos;
 
 use strict;
 use warnings FATAL => 'all';
+use File::Basename;
 use PostgreSQL::Test::Utils;
 use Test::More;
 
@@ -62,15 +63,22 @@ INIT
 		$krb5kdc = $krb5_sbin_dir . '/' . $krb5kdc;
 	}
 
-	$krb5_conf = "${PostgreSQL::Test::Utils::tmp_check}/krb5.conf";
-	$kdc_conf = "${PostgreSQL::Test::Utils::tmp_check}/kdc.conf";
-	$krb5_cache = "${PostgreSQL::Test::Utils::tmp_check}/krb5cc";
-	$krb5_log = "${PostgreSQL::Test::Utils::log_path}/krb5libs.log";
-	$kdc_log = "${PostgreSQL::Test::Utils::log_path}/krb5kdc.log";
+	# Derive a per-test prefix from the running script's name so that the KDC
+	# files, which live in the shared tmp_check/log directories, do not collide
+	# when more than one Kerberos test script is run in the same build (each
+	# script sets up its own KDC).  This mirrors how Cluster.pm namespaces node
+	# data directories.
+	my $prefix = basename($0);
+
+	$krb5_conf = "${PostgreSQL::Test::Utils::tmp_check}/${prefix}_krb5.conf";
+	$kdc_conf = "${PostgreSQL::Test::Utils::tmp_check}/${prefix}_kdc.conf";
+	$krb5_cache = "${PostgreSQL::Test::Utils::tmp_check}/${prefix}_krb5cc";
+	$krb5_log = "${PostgreSQL::Test::Utils::log_path}/${prefix}_krb5libs.log";
+	$kdc_log = "${PostgreSQL::Test::Utils::log_path}/${prefix}_krb5kdc.log";
 	$kdc_port = PostgreSQL::Test::Cluster::get_free_port();
-	$kdc_datadir = "${PostgreSQL::Test::Utils::tmp_check}/krb5kdc";
-	$kdc_pidfile = "${PostgreSQL::Test::Utils::tmp_check}/krb5kdc.pid";
-	$keytab = "${PostgreSQL::Test::Utils::tmp_check}/krb5.keytab";
+	$kdc_datadir = "${PostgreSQL::Test::Utils::tmp_check}/${prefix}_krb5kdc";
+	$kdc_pidfile = "${PostgreSQL::Test::Utils::tmp_check}/${prefix}_krb5kdc.pid";
+	$keytab = "${PostgreSQL::Test::Utils::tmp_check}/${prefix}_krb5.keytab";
 }
 
 =pod
@@ -102,7 +110,13 @@ Name of the Kerberos realm.
 sub new
 {
 	my $class = shift;
-	my ($host, $hostaddr, $realm) = @_;
+	my ($host, $hostaddr, $realm, %params) = @_;
+
+	# Optionally override the allowable clock skew.  The acceptor's GSS context
+	# lifetime is bounded by this value, so tests that need a GSS context to
+	# expire quickly can set a small clock skew.
+	my $clockskew_line =
+	  defined $params{clockskew} ? "clockskew = $params{clockskew}\n" : "";
 
 	my ($stdout, $krb5_version);
 	run_log [ $krb5_config, '--version' ], '>' => \$stdout
@@ -140,7 +154,8 @@ dns_lookup_kdc = false
 default_realm = $realm
 forwardable = false
 rdns = false
-
+dns_canonicalize_hostname = false
+$clockskew_line
 [realms]
 $realm = {
     kdc = $hostaddr:$kdc_port
@@ -221,6 +236,11 @@ sub create_ticket
 	my @cmd = ($kinit, $principal);
 
 	push @cmd, '-f' if ($params{forwardable});
+
+	# Request a specific ticket lifetime (e.g. '10s') when asked.  This is
+	# used to test behavior that depends on credentials expiring, such as
+	# continuous credential validation.
+	push @cmd, ('-l', $params{lifetime}) if (defined $params{lifetime});
 
 	run_log [@cmd], \$password or BAIL_OUT($?);
 	run_log [ $klist, '-f' ] or BAIL_OUT($?);

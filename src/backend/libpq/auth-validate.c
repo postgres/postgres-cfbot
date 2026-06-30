@@ -48,6 +48,8 @@ UserAuthToValidationType(UserAuth auth_method)
 			return CVT_OAUTH;
 		case uaCert:
 			return CVT_CERT;
+		case uaGSS:
+			return CVT_GSS;
 		default:
 			/*
 			 * No method-specific validator for other auth methods.  Password
