@@ -928,6 +928,20 @@ SELECT query_id IS NOT NULL AS qid_set FROM pg_stat_activity
 
 RESET track_activities;
 RESET compute_query_id;
+-- Test GUC_SHOW_IN_OCTAL
+SELECT name, min_val, max_val, boot_val
+FROM pg_settings
+WHERE name IN ('data_directory_mode', 'log_file_mode',
+               'unix_socket_permissions');
+          name           | min_val | max_val | boot_val 
+-------------------------+---------+---------+----------
+ data_directory_mode     | 0000    | 0777    | 0700
+ log_file_mode           | 0000    | 0777    | 0600
+ unix_socket_permissions | 0000    | 0777    | 0777
+(3 rows)
+
+ALTER SYSTEM SET log_file_mode = 0640;  -- decimal, so out of range
+ERROR:  01200 is outside the valid range for parameter "log_file_mode" (0000 .. 0777)
 -- Test GUC categories and flag patterns
 SELECT pg_settings_get_flags(NULL);
  pg_settings_get_flags 
