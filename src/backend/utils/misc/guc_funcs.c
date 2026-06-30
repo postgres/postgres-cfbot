@@ -682,24 +682,31 @@ GetConfigOptionValues(const struct config_generic *conf, const char **values)
 		case PGC_INT:
 			{
 				const struct config_int *lconf = &conf->_int;
+				const char *fmt;
+
+				/* choose display format */
+				if (conf->flags & GUC_SHOW_IN_OCTAL)
+					fmt = "0%03o";
+				else
+					fmt = "%d";
 
 				/* min_val */
-				snprintf(buffer, sizeof(buffer), "%d", lconf->min);
+				snprintf(buffer, sizeof(buffer), fmt, lconf->min);
 				values[9] = pstrdup(buffer);
 
 				/* max_val */
-				snprintf(buffer, sizeof(buffer), "%d", lconf->max);
+				snprintf(buffer, sizeof(buffer), fmt, lconf->max);
 				values[10] = pstrdup(buffer);
 
 				/* enumvals */
 				values[11] = NULL;
 
 				/* boot_val */
-				snprintf(buffer, sizeof(buffer), "%d", lconf->boot_val);
+				snprintf(buffer, sizeof(buffer), fmt, lconf->boot_val);
 				values[12] = pstrdup(buffer);
 
 				/* reset_val */
-				snprintf(buffer, sizeof(buffer), "%d", lconf->reset_val);
+				snprintf(buffer, sizeof(buffer), fmt, lconf->reset_val);
 				values[13] = pstrdup(buffer);
 			}
 			break;
