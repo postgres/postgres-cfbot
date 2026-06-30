@@ -353,6 +353,13 @@ extern bool be_gssapi_get_enc(Port *port);
 extern const char *be_gssapi_get_princ(Port *port);
 extern bool be_gssapi_get_delegation(Port *port);
 
+/*
+ * Report whether the GSSAPI security context established at authentication
+ * time has passed its expiration (derived from the client's Kerberos ticket
+ * lifetime).  Returns false when no GSS context is present.
+ */
+extern bool be_gssapi_get_context_expired(Port *port);
+
 /* Read and write to a GSSAPI-encrypted connection. */
 extern ssize_t be_gssapi_read(Port *port, void *ptr, size_t len);
 extern ssize_t be_gssapi_write(Port *port, const void *ptr, size_t len);
