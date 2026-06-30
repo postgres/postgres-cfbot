@@ -41,6 +41,26 @@ $node_standby->append_conf(
 archive_cleanup_command = 'echo archive_cleanup_done > $archive_cleanup_command_file'
 recovery_end_command = 'echo recovery_ended_done > $recovery_end_command_file'
 ));
+
+# Rename backup_label to verify that recovery will not start without it
+rename("$data_dir/backup_label", "$data_dir/backup_label.tmp")
+  or BAIL_OUT "could not move $data_dir/backup_label";
+
+my $res = run_log(
+	[
+		'pg_ctl', '-D', $node_standby->data_dir, '-l',
+		$node_standby->logfile, 'start'
+	]);
+ok(!$res, 'invalid recovery startup fails');
+
+my $logfile = slurp_file($node_standby->logfile());
+ok($logfile =~ qr/could not find backup_label required for recovery/,
+	'could not find backup_label required for recovery');
+
+# Restore backup_label so recovery proceeds normally
+rename("$data_dir/backup_label.tmp", "$data_dir/backup_label")
+  or BAIL_OUT "could not move $data_dir/backup_label";
+
 $node_standby->start;
 
 # Create some content on primary

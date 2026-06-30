@@ -3659,6 +3659,11 @@ acl      | {postgres=arwdDxtm/postgres,foo=r/postgres}
        <entry><type>boolean</type></entry>
       </row>
 
+      <row>
+       <entry><structfield>backup_label_required</structfield></entry>
+       <entry><type>boolean</type></entry>
+      </row>
+
      </tbody>
     </tgroup>
    </table>

@@ -23,6 +23,7 @@
 #include "backup/basebackup_incremental.h"
 #include "backup/basebackup_sink.h"
 #include "backup/basebackup_target.h"
+#include "catalog/pg_control.h"
 #include "catalog/pg_tablespace_d.h"
 #include "commands/defrem.h"
 #include "common/compression.h"
@@ -340,9 +341,9 @@ perform_base_backup(basebackup_options *opt, bbsink *sink,
 
 			if (ti->path == NULL)
 			{
-				struct stat statbuf;
 				bool		sendtblspclinks = true;
 				char	   *backup_label;
+				uint8		controlFile[PG_CONTROL_FILE_SIZE];
 
 				bbsink_begin_archive(sink, "base.tar");
 
@@ -365,14 +366,10 @@ perform_base_backup(basebackup_options *opt, bbsink *sink,
 						sendtblspclinks, &manifest, InvalidOid, ib);
 
 				/* ... and pg_control after everything else. */
-				if (lstat(XLOG_CONTROL_FILE, &statbuf) != 0)
-					ereport(ERROR,
-							(errcode_for_file_access(),
-							 errmsg("could not stat file \"%s\": %m",
-									XLOG_CONTROL_FILE)));
-				sendFile(sink, XLOG_CONTROL_FILE, XLOG_CONTROL_FILE, &statbuf,
-						 false, InvalidOid, InvalidOid,
-						 InvalidRelFileNumber, 0, &manifest, 0, NULL, 0);
+				backup_control_file(controlFile);
+				sendFileWithContent(sink, XLOG_CONTROL_FILE,
+									(char *)controlFile, PG_CONTROL_FILE_SIZE,
+									&manifest);
 			}
 			else
 			{
