@@ -422,6 +422,7 @@ typedef struct PgStat_StatReplSlotEntry
 	PgStat_Counter mem_exceeded_count;
 	PgStat_Counter total_txns;
 	PgStat_Counter total_bytes;
+	PgStat_Counter output_bytes;
 	PgStat_Counter slotsync_skip_count;
 	TimestampTz slotsync_last_skip;
 	TimestampTz stat_reset_timestamp;
