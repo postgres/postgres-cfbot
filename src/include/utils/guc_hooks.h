@@ -46,7 +46,6 @@ extern void assign_client_encoding(const char *newval, void *extra);
 extern bool check_cluster_name(char **newval, void **extra, GucSource source);
 extern bool check_commit_ts_buffers(int *newval, void **extra,
 									GucSource source);
-extern const char *show_data_directory_mode(void);
 extern bool check_datestyle(char **newval, void **extra, GucSource source);
 extern void assign_datestyle(const char *newval, void *extra);
 extern bool check_debug_io_direct(char **newval, void **extra, GucSource source);
@@ -77,7 +76,6 @@ extern void assign_locale_time(const char *newval, void *extra);
 extern bool check_log_destination(char **newval, void **extra,
 								  GucSource source);
 extern void assign_log_destination(const char *newval, void *extra);
-extern const char *show_log_file_mode(void);
 extern bool check_log_stats(bool *newval, void **extra, GucSource source);
 extern bool check_log_timezone(char **newval, void **extra, GucSource source);
 extern void assign_log_timezone(const char *newval, void *extra);
@@ -168,7 +166,6 @@ extern bool check_transaction_deferrable(bool *newval, void **extra, GucSource s
 extern bool check_transaction_isolation(int *newval, void **extra, GucSource source);
 extern bool check_transaction_read_only(bool *newval, void **extra, GucSource source);
 extern void assign_transaction_timeout(int newval, void *extra);
-extern const char *show_unix_socket_permissions(void);
 extern bool check_wal_buffers(int *newval, void **extra, GucSource source);
 extern bool check_wal_consistency_checking(char **newval, void **extra,
 										   GucSource source);
