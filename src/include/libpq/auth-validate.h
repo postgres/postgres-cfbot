@@ -21,6 +21,7 @@ typedef enum CredentialValidationType
 {
 	CVT_OAUTH = 0,				/* OAuth bearer token authentication */
 	CVT_CERT,					/* TLS client certificate authentication */
+	CVT_GSS,					/* GSSAPI/Kerberos authentication */
 	CVT_COUNT					/* Total number of credential validation types */
 } CredentialValidationType;
 
