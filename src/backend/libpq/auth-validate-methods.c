@@ -20,6 +20,7 @@
 #include "postgres.h"
 
 #include "catalog/pg_authid.h"
+#include "libpq/auth.h"
 #include "libpq/auth-validate-methods.h"
 #include "libpq/auth-validate.h"
 #include "libpq/libpq-be.h"
@@ -32,6 +33,7 @@
 static bool validate_oauth_credentials(void);
 static bool validate_cert_credentials(void);
 static bool validate_gss_credentials(void);
+static bool validate_ldap_credentials(void);
 
 /*
  * Initialize validation methods
@@ -48,6 +50,7 @@ InitializeValidationMethods(void)
 	RegisterCredentialValidator(CVT_OAUTH, validate_oauth_credentials);
 	RegisterCredentialValidator(CVT_CERT, validate_cert_credentials);
 	RegisterCredentialValidator(CVT_GSS, validate_gss_credentials);
+	RegisterCredentialValidator(CVT_LDAP, validate_ldap_credentials);
 }
 
 /*
@@ -162,6 +165,40 @@ validate_gss_credentials(void)
 
 	/* The session is no longer valid once the GSS context expires */
 	if (be_gssapi_get_context_expired(port))
+		return false;
+#endif
+
+	return true;
+}
+
+/*
+ * Validate LDAP credentials.
+ *
+ * Unlike OAuth/cert/GSS, an LDAP-authenticated session retains no credential
+ * with an intrinsic expiry: the password presented at connection time is used
+ * for the bind and then discarded.  What we can re-check is whether the
+ * account still exists (and still satisfies the configured search filter) in
+ * the directory.  This is delegated to CheckLDAPCredentialValidity(), which
+ * re-binds with the configured search credentials and re-runs the search
+ * filter; see the comment there for the details and limitations.
+ *
+ * Note that this check, by its nature, performs a network round-trip to the
+ * LDAP server on every validation cycle, so a larger
+ * credential_validation_interval is advisable for LDAP-authenticated sessions.
+ *
+ * Returns false if the user is gone from the directory, true otherwise.
+ */
+static bool
+validate_ldap_credentials(void)
+{
+#ifdef USE_LDAP
+	Port	   *port = MyProcPort;
+
+	if (port == NULL)
+		return true;
+
+	/* The session is no longer valid once the LDAP account disappears */
+	if (!CheckLDAPCredentialValidity(port))
 		return false;
 #endif
 
