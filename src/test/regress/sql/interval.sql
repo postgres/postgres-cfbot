@@ -257,6 +257,15 @@ SELECT interval '123 2:03 -2:04'; -- not ok, redundant hh:mm fields
 -- test syntaxes for restricted precision
 SELECT interval(0) '1 day 01:23:45.6789';
 SELECT interval(2) '1 day 01:23:45.6789';
+-- invalid typmods passed to the SQL-callable length-coercion function are
+-- user errors, not internal errors.  Use a DO block to verify the SQLSTATE.
+DO $$
+BEGIN
+  PERFORM pg_catalog.interval(interval '1 day', 1539);
+EXCEPTION WHEN invalid_parameter_value THEN
+  RAISE NOTICE 'invalid interval typmod rejected';
+END
+$$;
 SELECT interval '12:34.5678' minute to second(2);  -- per SQL spec
 SELECT interval '1.234' second;
 SELECT interval '1.234' second(2);
