@@ -9,6 +9,7 @@ tests += {
       't/001_auth.pl',
       't/002_bindpasswd.pl',
       't/003_ldap_connection_param_lookup.pl',
+      't/004_ldap_continuous_validation.pl',
     ],
     'env': {
       'with_ldap': ldap.found() ? 'yes' : 'no',
