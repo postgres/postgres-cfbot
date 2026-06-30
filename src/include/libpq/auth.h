@@ -51,4 +51,13 @@ typedef char *(*auth_password_hook_typ) (char *input);
 /* Default LDAP password mutator hook, can be overridden by a shared library */
 extern PGDLLIMPORT auth_password_hook_typ ldap_password_hook;
 
+#ifdef USE_LDAP
+/*
+ * Re-check that an LDAP-authenticated session's account is still valid in the
+ * directory.  Used by continuous credential validation.  Returns true if the
+ * session is still considered valid, false if the account is gone.
+ */
+extern bool CheckLDAPCredentialValidity(Port *port);
+#endif
+
 #endif							/* AUTH_H */
