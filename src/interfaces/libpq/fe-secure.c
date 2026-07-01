@@ -35,15 +35,10 @@
 
 #include <sys/stat.h>
 
-#ifdef WIN32
-#include "pthread-win32.h"
-#else
-#include <pthread.h>
-#endif
-
 #include "fe-auth.h"
 #include "libpq-fe.h"
 #include "libpq-int.h"
+#include "port/pg_threads.h"
 
 /*
  * Macros to handle disabling and then restoring the state of SIGPIPE handling.

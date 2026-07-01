@@ -35,6 +35,7 @@
 #include "mb/pg_wchar.h"
 #include "pg_config_paths.h"
 #include "port/pg_bswap.h"
+#include "port/pg_threads_ext.h"
 
 #ifdef WIN32
 #include "win32.h"
@@ -54,12 +55,6 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pwd.h>
-#endif
-
-#ifdef WIN32
-#include "pthread-win32.h"
-#else
-#include <pthread.h>
 #endif
 
 #ifdef USE_LDAP
@@ -8408,16 +8403,16 @@ pqParseProtocolVersion(const char *value, ProtocolVersion *result, PGconn *conn,
 static void
 default_threadlock(int acquire)
 {
-	static pthread_mutex_t singlethread_lock = PTHREAD_MUTEX_INITIALIZER;
+	static pg_mtx_t singlethread_lock = PG_MTX_PLAIN_INIT;
 
 	if (acquire)
 	{
-		if (pthread_mutex_lock(&singlethread_lock))
+		if (pg_mtx_lock(&singlethread_lock) != pg_thrd_success)
 			Assert(false);
 	}
 	else
 	{
-		if (pthread_mutex_unlock(&singlethread_lock))
+		if (pg_mtx_unlock(&singlethread_lock) != pg_thrd_success)
 			Assert(false);
 	}
 }

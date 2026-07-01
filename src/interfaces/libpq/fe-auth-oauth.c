@@ -28,6 +28,7 @@
 #include "mb/pg_wchar.h"
 #include "oauth-debug.h"
 #include "pg_config_paths.h"
+#include "port/pg_threads_ext.h"
 #include "utils/memdebug.h"
 
 static PostgresPollingStatusType do_async(fe_oauth_state *state,
@@ -869,7 +870,7 @@ static int
 use_builtin_flow(PGconn *conn, fe_oauth_state *state, PGoauthBearerRequestV2 *request)
 {
 	static bool initialized = false;
-	static pthread_mutex_t init_mutex = PTHREAD_MUTEX_INITIALIZER;
+	static pg_mtx_t init_mutex = PG_MTX_PLAIN_INIT;
 	int			lockerr;
 
 	void		(*init) (libpq_gettext_func gettext_impl);
@@ -946,7 +947,7 @@ use_builtin_flow(PGconn *conn, fe_oauth_state *state, PGoauthBearerRequestV2 *re
 		 * assigning them while another thread is executing the flows feels
 		 * like tempting fate.
 		 */
-		if ((lockerr = pthread_mutex_lock(&init_mutex)) != 0)
+		if ((lockerr = pg_mtx_lock(&init_mutex)) != pg_thrd_success)
 		{
 			/* Should not happen... but don't continue if it does. */
 			Assert(false);
@@ -972,7 +973,7 @@ use_builtin_flow(PGconn *conn, fe_oauth_state *state, PGoauthBearerRequestV2 *re
 			initialized = true;
 		}
 
-		pthread_mutex_unlock(&init_mutex);
+		pg_mtx_unlock(&init_mutex);
 	}
 
 	return (start_flow(conn, request) == 0) ? 1 : -1;
