@@ -31,6 +31,7 @@
 #include "fe-auth.h"
 #include "fe-secure-common.h"
 #include "libpq-int.h"
+#include "port/pg_threads_ext.h"
 
 #ifdef WIN32
 #include "win32.h"
@@ -44,12 +45,6 @@
 #endif
 
 #include <sys/stat.h>
-
-#ifdef WIN32
-#include "pthread-win32.h"
-#else
-#include <pthread.h>
-#endif
 
 /*
  * These SSL-related #includes must come after all system-provided headers.
@@ -84,7 +79,7 @@ static int	pgconn_bio_write(BIO *h, const char *buf, int size);
 static BIO_METHOD *pgconn_bio_method(void);
 static int	ssl_set_pgconn_bio(PGconn *conn);
 
-static pthread_mutex_t ssl_config_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pg_mtx_t ssl_config_mutex = PG_MTX_PLAIN_INIT;
 
 static PQsslKeyPassHook_OpenSSL_type PQsslKeyPassHook = NULL;
 static int	ssl_protocol_version_to_openssl(const char *protocol);
@@ -1900,7 +1895,7 @@ pgconn_bio_method(void)
 {
 	BIO_METHOD *res;
 
-	if (pthread_mutex_lock(&ssl_config_mutex))
+	if (pg_mtx_lock(&ssl_config_mutex) != pg_thrd_success)
 		return NULL;
 
 	res = pgconn_bio_method_ptr;
@@ -1930,13 +1925,13 @@ pgconn_bio_method(void)
 	}
 
 	pgconn_bio_method_ptr = res;
-	pthread_mutex_unlock(&ssl_config_mutex);
+	pg_mtx_unlock(&ssl_config_mutex);
 	return res;
 
 err:
 	if (res)
 		BIO_meth_free(res);
-	pthread_mutex_unlock(&ssl_config_mutex);
+	pg_mtx_unlock(&ssl_config_mutex);
 	return NULL;
 }
 
