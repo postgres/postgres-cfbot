@@ -275,6 +275,18 @@ extern "C++"
 #endif
 
 /*
+ * The malloc function attribute indicates that the function is malloc-like.
+ * Clang does not currently make use of this function attribute.
+ *
+ * https://gcc.gnu.org/onlinedocs/gcc/Common-Attributes.html#index-malloc
+ */
+#if __has_attribute(malloc) && !defined(__clang__)
+#define pg_attribute_malloc(...) __attribute__((malloc(__VA_ARGS__)))
+#else
+#define pg_attribute_malloc(...)
+#endif
+
+/*
  * pg_attribute_nonnull means the compiler should warn if the function is
  * called with the listed arguments set to NULL.  If no arguments are
  * listed, the compiler should warn if any pointer arguments are set to NULL.
