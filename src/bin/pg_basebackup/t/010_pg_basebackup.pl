@@ -1062,8 +1062,8 @@ is( $node->poll_query_until(
 
 ok( pump_until(
 		$sigchld_bb, $sigchld_bb_timeout,
-		\$sigchld_bb_stderr, qr/background process terminated unexpectedly/),
-	'background process exit message');
+		\$sigchld_bb_stderr, qr/background thread terminated unexpectedly/),
+	'background thread exit message');
 $sigchld_bb->finish();
 
 # Test that we can back up an in-place tablespace

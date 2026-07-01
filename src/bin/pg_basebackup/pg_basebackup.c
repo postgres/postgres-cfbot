@@ -36,6 +36,7 @@
 #include "fe_utils/recovery_gen.h"
 #include "getopt_long.h"
 #include "libpq/protocol.h"
+#include "port/pg_threads_ext.h"
 #include "receivelog.h"
 #include "streamutil.h"
 
@@ -170,26 +171,15 @@ static uint64 totaldone;
 static int	tablespacecount;
 static char *progress_filename = NULL;
 
-/* Pipe to communicate with background wal receiver process */
-#ifndef WIN32
-static int	bgpipe[2] = {-1, -1};
-#endif
+/* WAL streamer thread */
+static pg_thrd_t wal_streamer_thread;
 
-/* Handle to child process */
-static pid_t bgchild = -1;
-static bool in_log_streamer = false;
-
-/* Flag to indicate if child process exited unexpectedly */
-static volatile sig_atomic_t bgchild_exited = false;
+/* Flag set by WAL streamer thread if it exits early. */
+static volatile bool wal_streamer_thread_exited = false;
 
 /* End position for xlog streaming, empty string if unknown yet */
 static XLogRecPtr xlogendptr;
-
-#ifndef WIN32
-static int	has_xlogendptr = 0;
-#else
-static volatile LONG has_xlogendptr = 0;
-#endif
+static pg_mtx_t xlogendptr_lock = PG_MTX_PLAIN_INIT;
 
 /* Contents of configuration file to be generated */
 static PQExpBuffer recoveryconfcontents = NULL;
@@ -236,7 +226,7 @@ static void tablespace_list_append(const char *arg);
 static void
 cleanup_directories_atexit(void)
 {
-	if (success || in_log_streamer)
+	if (success)
 		return;
 
 	if (!noclean && !checksum_failure)
@@ -286,32 +276,6 @@ disconnect_atexit(void)
 	if (conn != NULL)
 		PQfinish(conn);
 }
-
-#ifndef WIN32
-/*
- * If the bgchild exits prematurely and raises a SIGCHLD signal, we can abort
- * processing rather than wait until the backup has finished and error out at
- * that time. On Windows, we use a background thread which can communicate
- * without the need for a signal handler.
- */
-static void
-sigchld_handler(SIGNAL_ARGS)
-{
-	bgchild_exited = true;
-}
-
-/*
- * On windows, our background thread dies along with the process. But on
- * Unix, if we have started a subprocess, we want to kill it off so it
- * doesn't remain running trying to stream data.
- */
-static void
-kill_bgchild_atexit(void)
-{
-	if (bgchild > 0 && !bgchild_exited)
-		kill(bgchild, SIGTERM);
-}
-#endif
 
 /*
  * Split argument into old_dir and new_dir and append to tablespace mapping
@@ -452,70 +416,27 @@ usage(void)
 
 
 /*
- * Called in the background process every time data is received.
- * On Unix, we check to see if there is any data on our pipe
- * (which would mean we have a stop position), and if it is, check if
- * it is time to stop.
- * On Windows, we are in a single process, so we can just check if it's
- * time to stop.
+ * Called in the background thread every time data is received.
  */
 static bool
 reached_end_position(XLogRecPtr segendpos, uint32 timeline,
 					 bool segment_finished)
 {
-	if (!has_xlogendptr)
+	static bool have_xlogendptr = false;
+
+	/*
+	 * Wait until xlogendptr has been set by the main thread.  After it has
+	 * been set, it is safe to read it without a lock.
+	 */
+	if (!have_xlogendptr)
 	{
-#ifndef WIN32
-		fd_set		fds;
-		struct timeval tv = {0};
-		int			r;
+		pg_mtx_lock(&xlogendptr_lock);
+		have_xlogendptr = xlogendptr != 0;
+		pg_mtx_unlock(&xlogendptr_lock);
 
-		/*
-		 * Don't have the end pointer yet - check our pipe to see if it has
-		 * been sent yet.
-		 */
-		FD_ZERO(&fds);
-		FD_SET(bgpipe[0], &fds);
-
-		r = select(bgpipe[0] + 1, &fds, NULL, NULL, &tv);
-		if (r == 1)
-		{
-			ssize_t		nread;
-			char		xlogend[64] = {0};
-			uint32		hi,
-						lo;
-
-			nread = read(bgpipe[0], xlogend, sizeof(xlogend) - 1);
-			if (nread < 0)
-				pg_fatal("could not read from ready pipe: %m");
-
-			if (sscanf(xlogend, "%X/%08X", &hi, &lo) != 2)
-				pg_fatal("could not parse write-ahead log location \"%s\"",
-						 xlogend);
-			xlogendptr = ((uint64) hi) << 32 | lo;
-			has_xlogendptr = 1;
-
-			/*
-			 * Fall through to check if we've reached the point further
-			 * already.
-			 */
-		}
-		else
-		{
-			/*
-			 * No data received on the pipe means we don't know the end
-			 * position yet - so just say it's not time to stop yet.
-			 */
+		/* If it's not set yet, we just go back and wait until it shows up. */
+		if (!have_xlogendptr)
 			return false;
-		}
-#else
-
-		/*
-		 * On win32, has_xlogendptr is set by the main thread, so if it's not
-		 * set here, we just go back and wait until it shows up.
-		 */
-		return false;
-#endif
 	}
 
 	/*
@@ -544,21 +465,16 @@ typedef struct
 } logstreamer_param;
 
 static int
-LogStreamerMain(logstreamer_param *param)
+LogStreamerMain(void *argument)
 {
+	logstreamer_param *param = argument;
 	StreamCtl	stream = {0};
-
-	in_log_streamer = true;
 
 	stream.startpos = param->startptr;
 	stream.timeline = param->timeline;
 	stream.sysidentifier = param->sysidentifier;
 	stream.stream_stop = reached_end_position;
-#ifndef WIN32
-	stream.stop_socket = bgpipe[0];
-#else
 	stream.stop_socket = PGINVALID_SOCKET;
-#endif
 	stream.standby_message_timeout = standby_message_timeout;
 	stream.synchronous = false;
 	/* fsync happens at the end of pg_basebackup for all data */
@@ -583,22 +499,14 @@ LogStreamerMain(logstreamer_param *param)
 		 * but we need to tell the parent that we didn't shutdown in a nice
 		 * way.
 		 */
-#ifdef WIN32
-		/*
-		 * In order to signal the main thread of an ungraceful exit we set the
-		 * same flag that we use on Unix to signal SIGCHLD.
-		 */
-		bgchild_exited = true;
-#endif
+		wal_streamer_thread_exited = true;
 		return 1;
 	}
 
 	if (!stream.walmethod->ops->finish(stream.walmethod))
 	{
 		pg_log_error("could not finish writing WAL files: %m");
-#ifdef WIN32
-		bgchild_exited = true;
-#endif
+		wal_streamer_thread_exited = true;
 		return 1;
 	}
 
@@ -623,6 +531,7 @@ StartLogStreamer(char *startpos, uint32 timeline, char *sysidentifier,
 	uint32		hi,
 				lo;
 	char		statusdir[MAXPGPATH];
+	int			error;
 
 	param = pg_malloc0_object(logstreamer_param);
 	param->timeline = timeline;
@@ -637,12 +546,6 @@ StartLogStreamer(char *startpos, uint32 timeline, char *sysidentifier,
 	param->startptr = ((uint64) hi) << 32 | lo;
 	/* Round off to even segment position */
 	param->startptr -= XLogSegmentOffset(param->startptr, WalSegSz);
-
-#ifndef WIN32
-	/* Create our background pipe */
-	if (pipe(bgpipe) < 0)
-		pg_fatal("could not create pipe for background process: %m");
-#endif
 
 	/* Get a second connection */
 	param->bgconn = GetConnection();
@@ -716,29 +619,12 @@ StartLogStreamer(char *startpos, uint32 timeline, char *sysidentifier,
 		}
 	}
 
-	/*
-	 * Start a child process and tell it to start streaming. On Unix, this is
-	 * a fork(). On Windows, we create a thread.
-	 */
-#ifndef WIN32
-	bgchild = fork();
-	if (bgchild == 0)
-	{
-		/* in child process */
-		exit(LogStreamerMain(param));
-	}
-	else if (bgchild < 0)
-		pg_fatal("could not create background process: %m");
-
-	/*
-	 * Else we are in the parent process and all is well.
-	 */
-	atexit(kill_bgchild_atexit);
-#else							/* WIN32 */
-	bgchild = _beginthreadex(NULL, 0, (void *) LogStreamerMain, param, 0, NULL);
-	if (bgchild == 0)
-		pg_fatal("could not create background thread: %m");
-#endif
+	/* Start a WAL streaming thread. */
+	if ((error = pg_thrd_create(&wal_streamer_thread,
+								LogStreamerMain,
+								param)) != pg_thrd_success)
+		pg_fatal("could not create background thread: %s",
+				 pg_thrd_error_string_with_detail(error));
 }
 
 /*
@@ -1042,8 +928,9 @@ ReceiveCopyData(PGconn *conn, WriteDataCallback callback,
 			pg_fatal("could not read COPY data: %s",
 					 PQerrorMessage(conn));
 
-		if (bgchild_exited)
-			pg_fatal("background process terminated unexpectedly");
+		/* Periodic check for early exit of WAL streamer thread. */
+		if (wal_streamer_thread_exited)
+			pg_fatal("background thread terminated unexpectedly");
 
 		(*callback) (r, copybuf, callback_data);
 
@@ -2203,69 +2090,41 @@ BaseBackup(char *compression_algorithm, char *compression_detail,
 		exit(1);
 	}
 
-	if (bgchild > 0)
+	if (includewal == STREAM_WAL)
 	{
-#ifndef WIN32
+		int			error;
 		int			status;
-		pid_t		r;
-#else
-		DWORD		status;
-
-		/*
-		 * get a pointer sized version of bgchild to avoid warnings about
-		 * casting to a different size on WIN64.
-		 */
-		intptr_t	bgchild_handle = bgchild;
 		uint32		hi,
 					lo;
-#endif
 
 		if (verbose)
-			pg_log_info("waiting for background process to finish streaming ...");
-
-#ifndef WIN32
-		if (write(bgpipe[1], xlogend, strlen(xlogend)) != strlen(xlogend))
-			pg_fatal("could not send command to background pipe: %m");
-
-		/* Just wait for the background process to exit */
-		r = waitpid(bgchild, &status, 0);
-		if (r == (pid_t) -1)
-			pg_fatal("could not wait for child process: %m");
-		if (r != bgchild)
-			pg_fatal("child %d died, expected %d", (int) r, (int) bgchild);
-		if (status != 0)
-			pg_fatal("%s", wait_result_to_str(status));
-		/* Exited normally, we're happy! */
-#else							/* WIN32 */
+			pg_log_info("waiting for WAL thread to finish streaming ...");
 
 		/*
-		 * On Windows, since we are in the same process, we can just store the
-		 * value directly in the variable, and then set the flag that says
-		 * it's there.
+		 * Since we are in the same process, we can just store the value
+		 * directly in the variable, and then set the flag that says it's
+		 * there.
 		 */
 		if (sscanf(xlogend, "%X/%08X", &hi, &lo) != 2)
 			pg_fatal("could not parse write-ahead log location \"%s\"",
 					 xlogend);
+
+		/*
+		 * XXX This could be done with atomics, once we can use those in
+		 * frontend code.
+		 */
+		pg_mtx_lock(&xlogendptr_lock);
 		xlogendptr = ((uint64) hi) << 32 | lo;
-		InterlockedIncrement(&has_xlogendptr);
+		pg_mtx_unlock(&xlogendptr_lock);
 
 		/* First wait for the thread to exit */
-		if (WaitForSingleObjectEx((HANDLE) bgchild_handle, INFINITE, FALSE) !=
-			WAIT_OBJECT_0)
-		{
-			_dosmaperr(GetLastError());
-			pg_fatal("could not wait for child thread: %m");
-		}
-		if (GetExitCodeThread((HANDLE) bgchild_handle, &status) == 0)
-		{
-			_dosmaperr(GetLastError());
-			pg_fatal("could not get child thread exit status: %m");
-		}
+		if ((error = pg_thrd_join(wal_streamer_thread,
+								  &status)) != pg_thrd_success)
+			pg_fatal("could not wait for child thread: %s",
+					 pg_thrd_error_string_with_detail(error));
 		if (status != 0)
-			pg_fatal("child thread exited with error %u",
-					 (unsigned int) status);
+			pg_fatal("child thread exited with error %d", status);
 		/* Exited normally, we're happy */
-#endif
 	}
 
 	/* Free the configuration file contents */
@@ -2801,19 +2660,6 @@ main(int argc, char **argv)
 		exit(1);
 	}
 	atexit(disconnect_atexit);
-
-#ifndef WIN32
-
-	/*
-	 * Trap SIGCHLD to be able to handle the WAL stream process exiting. There
-	 * is no SIGCHLD on Windows, there we rely on the background thread
-	 * setting the signal variable on unexpected but graceful exit. If the WAL
-	 * stream thread crashes on Windows it will bring down the entire process
-	 * as it's a thread, so there is nothing to catch should that happen. A
-	 * crash on UNIX will be caught by the signal handler.
-	 */
-	pqsignal(SIGCHLD, sigchld_handler);
-#endif
 
 	/*
 	 * Set umask so that directories/files are created with the same
