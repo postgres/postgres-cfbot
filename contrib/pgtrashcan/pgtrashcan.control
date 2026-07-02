@@ -1,0 +1,4 @@
+# pgtrashcan extension
+comment = 'PostgreSQL trash can for tables - intercepts DROP TABLE and allows recovery'
+default_version = '1.0'
+relocatable = false
