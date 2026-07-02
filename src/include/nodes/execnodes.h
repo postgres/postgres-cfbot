@@ -2786,6 +2786,21 @@ typedef struct HashState
 	struct bloom_filter *bloom_filter;
 
 	/*
+	 * Optional per-key bloom filters, built in addition to the combined
+	 * bloom_filter above when a recipient opted in (HashJoin.bloom_perkey).
+	 * perkey_filters has perkey_nfilters entries, one per join key, in
+	 * hashkey order; a recipient correlates them with
+	 * BloomFilter.filter_exprs by position.  perkey_hash holds the matching
+	 * per-key (single-key) hash ExprStates used to populate them during the
+	 * build.  All live in hashCxt and follow the same lifecycle as
+	 * bloom_filter.
+	 */
+	bool		want_perkey_bloom;
+	int			perkey_nfilters;
+	struct bloom_filter **perkey_filters;
+	ExprState **perkey_hash;
+
+	/*
 	 * Counters with total per-filter instrumentation. Separate from the
 	 * per-recipient counters in BloomFilterState. Redundant, but will be
 	 * needed if we end up allowing multiple recipients.

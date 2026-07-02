@@ -197,6 +197,25 @@ MultiExecPrivateHash(HashState *node)
 								  (unsigned char *) &hashvalue,
 								  sizeof(hashvalue));
 
+			/*
+			 * Likewise for the optional per-key filters, using the per-key
+			 * (single-key) hash ExprStates.  Same econtext as the combined
+			 * hash above (ecxt_outertuple is the just-fetched inner tuple).
+			 */
+			for (int k = 0; k < node->perkey_nfilters; k++)
+			{
+				bool		keyisnull;
+				uint32		keyhash;
+
+				keyhash = DatumGetUInt32(ExecEvalExprSwitchContext(node->perkey_hash[k],
+																   econtext,
+																   &keyisnull));
+				if (!keyisnull)
+					bloom_add_element(node->perkey_filters[k],
+									  (unsigned char *) &keyhash,
+									  sizeof(keyhash));
+			}
+
 			bucketNumber = ExecHashGetSkewBucket(hashtable, hashvalue);
 			if (bucketNumber != INVALID_SKEW_BUCKET_NO)
 			{
@@ -722,6 +741,22 @@ ExecHashTableCreate(HashState *state)
 		oldctx = MemoryContextSwitchTo(hashtable->hashCxt);
 		state->bloom_filter = bloom_create((int64) Max(rows, 1.0),
 										   bloom_work_mem, 0);
+
+		/*
+		 * If a recipient opted in, also build one filter per join key (in
+		 * addition to the combined one above).  These let a recipient test an
+		 * individual key column on its own; they are less selective than the
+		 * combined filter, so they are built only on demand.
+		 */
+		if (state->want_perkey_bloom)
+		{
+			state->perkey_filters = palloc_array(struct bloom_filter *,
+												 state->perkey_nfilters);
+			for (int i = 0; i < state->perkey_nfilters; i++)
+				state->perkey_filters[i] = bloom_create((int64) Max(rows, 1.0),
+														bloom_work_mem, 0);
+		}
+
 		MemoryContextSwitchTo(oldctx);
 	}
 

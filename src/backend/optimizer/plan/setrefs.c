@@ -1813,6 +1813,16 @@ set_customscan_references(PlannerInfo *root,
 		cscan->custom_exprs =
 			fix_scan_list(root, cscan->custom_exprs,
 						  rtoffset, NUM_EXEC_QUAL((Plan *) cscan));
+
+		/*
+		 * Bloom filters pushed down to a base-relation CustomScan: the key
+		 * expressions are plain Vars of the scanned relation, so they are
+		 * fixed up the same way as the scan qual.  (A CustomScan emitting a
+		 * custom_scan_tlist takes the branch above and would instead need
+		 * fix_upper_expr against the tlist index, like IndexOnlyScan; no
+		 * in-tree provider needs that yet.)
+		 */
+		fix_scan_bloom_filters(root, (Plan *) cscan, rtoffset);
 	}
 
 	/* Adjust child plan-nodes recursively, if needed */

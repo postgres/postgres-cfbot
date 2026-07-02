@@ -317,6 +317,18 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					 */
 					node->hj_FirstOuterTupleSlot = NULL;
 				}
+				else if (((HashJoin *) node->js.ps.plan)->bloom_eager)
+				{
+					/*
+					 * We pushed a bloom filter to a CustomScan on the outer
+					 * side that wants it at scan start (e.g. to skip row
+					 * groups before decompression).  Skip the empty-outer
+					 * prefetch and build the hash table -- and the filter --
+					 * first, so it is ready before the outer scan produces
+					 * its first tuple.
+					 */
+					node->hj_FirstOuterTupleSlot = NULL;
+				}
 				else if (HJ_FILL_OUTER(node) ||
 						 (outerNode->plan->startup_cost < hashNode->ps.plan->total_cost &&
 						  !node->hj_OuterNotEmpty))
@@ -908,6 +920,7 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	hashState = castNode(HashState, innerPlanState(hjstate));
 	hashState->want_bloom_filter = (node->bloom_consumer_count > 0);
 	hashState->bloom_filter_id = node->bloom_filter_id;
+	hashState->want_perkey_bloom = node->bloom_perkey;
 
 	/*
 	 * Initialize result slot, type and projection.
@@ -1031,6 +1044,28 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 								&hashstate->ps,
 								0);
 
+		/*
+		 * If a recipient opted in to per-key bloom filters, build one inner
+		 * (single-key) hash ExprState per join key, used by the Hash node to
+		 * populate the per-key filters.  The combined hash above cannot be
+		 * decomposed, so this is the extra cost a per-key consumer pays.
+		 */
+		if (hashstate->want_perkey_bloom)
+		{
+			hashstate->perkey_nfilters = nkeys;
+			hashstate->perkey_hash = palloc_array(ExprState *, nkeys);
+			for (int i = 0; i < nkeys; i++)
+				hashstate->perkey_hash[i] =
+					ExecBuildHash32Expr(hashstate->ps.ps_ResultTupleDesc,
+										hashstate->ps.resultops,
+										&inner_hashfuncid[i],
+										list_make1_oid(list_nth_oid(node->hashcollations, i)),
+										list_make1(list_nth(hash->hashkeys, i)),
+										&hash_strict[i],
+										&hashstate->ps,
+										0);
+		}
+
 		/* Remember whether we need to save tuples with null join keys */
 		hjstate->hj_KeepNullTuples = HJ_FILL_OUTER(hjstate);
 		hashstate->keep_null_tuples = HJ_FILL_INNER(hjstate);
@@ -1118,6 +1153,7 @@ ExecEndHashJoin(HashJoinState *node)
 		ExecHashTableDestroy(node->hj_HashTable);
 		node->hj_HashTable = NULL;
 		hashNode->bloom_filter = NULL;
+		hashNode->perkey_filters = NULL;
 	}
 
 	/*
@@ -1775,6 +1811,7 @@ ExecReScanHashJoin(HashJoinState *node)
 			 * freed by the ExecHashTableDestroy call.
 			 */
 			hashNode->bloom_filter = NULL;
+			hashNode->perkey_filters = NULL;
 
 			/*
 			 * if chgParam of subnode is not null then plan will be re-scanned

@@ -501,6 +501,17 @@ create_filtered_scan_path(PlannerInfo *root, Path *subpath, List *filters)
 		case T_TidRangePath:
 			sz = sizeof(TidRangePath);
 			break;
+		case T_CustomPath:
+
+			/*
+			 * A base-relation CustomScan provider that advertised
+			 * CUSTOMPATH_SUPPORT_BLOOM_FILTERS can receive a pushed-down
+			 * filter and apply it in its own scan loop
+			 * .generate_expected_filter_paths() only offers such paths here,
+			 * so we need not re-check the flag.
+			 */
+			sz = sizeof(CustomPath);
+			break;
 		default:
 			/* unsupported scan path type */
 			return NULL;

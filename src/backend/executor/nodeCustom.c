@@ -102,6 +102,17 @@ ExecInitCustomScan(CustomScan *cscan, EState *estate, int eflags)
 		ExecInitQual(cscan->scan.plan.qual, (PlanState *) css);
 
 	/*
+	 * Set up any bloom filters a hash join pushed down to this scan (see
+	 * nodeHashjoin.c).  This compiles the probe expressions against the scan
+	 * tuple slot; the provider is responsible for actually probing them with
+	 * ExecBloomFilters() from its ExecCustomScan callback, at whatever
+	 * granularity it supports.  A no-op unless the provider advertised
+	 * CUSTOMPATH_SUPPORT_BLOOM_FILTERS and the planner found a filter to
+	 * push.
+	 */
+	ExecInitBloomFilters((PlanState *) css, css->ss.ss_ScanTupleSlot);
+
+	/*
 	 * The callback of custom-scan provider applies the final initialization
 	 * of the custom-scan-state node according to its logic.
 	 */

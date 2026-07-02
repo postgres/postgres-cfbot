@@ -145,6 +145,7 @@ bloom_cs_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	cpath->path.total_cost = total_cost;
 	cpath->path.pathkeys = NIL;
 
+	cpath->flags = CUSTOMPATH_SUPPORT_BLOOM_FILTERS;
 	cpath->custom_paths = NIL;
 	cpath->custom_private = NIL;
 	cpath->methods = &bloom_cs_path_methods;
@@ -234,6 +235,10 @@ bloom_cs_maybe_inspect_perkey(BloomCSScanState * bcss)
 		if (hashNode->bloom_filter == NULL)
 			return;
 
+		if (hashNode->want_perkey_bloom &&
+			hashNode->perkey_nfilters > 0 &&
+			hashNode->perkey_filters != NULL)
+			test_bloom_cs_perkey_seen = true;
 	}
 
 	bcss->inspected = true;

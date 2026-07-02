@@ -4802,6 +4802,26 @@ find_bloom_filter_recipient(Plan *plan, Index target_relid)
 					return plan;
 				return NULL;
 			}
+		case T_CustomScan:
+			{
+				/*
+				 * A CustomScan on a base relation can act as a recipient, but
+				 * only if the provider advertised that it knows how to
+				 * consume a pushed-down bloom filter.  Unlike the stock
+				 * scans, the probe is not performed by ExecScanExtended() (a
+				 * CustomScan dispatches to the provider's own
+				 * ExecCustomScan); the provider is responsible for calling
+				 * ExecBloomFilters() at whatever granularity it likes.
+				 * Non-leaf custom nodes have scanrelid == 0 and so are
+				 * rejected by the relid test.
+				 */
+				CustomScan *cscan = (CustomScan *) plan;
+
+				if ((cscan->flags & CUSTOMPATH_SUPPORT_BLOOM_FILTERS) &&
+					cscan->scan.scanrelid == target_relid)
+					return plan;
+				return NULL;
+			}
 		case T_Sort:
 		case T_IncrementalSort:
 		case T_Material:
@@ -4930,6 +4950,32 @@ try_push_bloom_filter(PlannerInfo *root, HashJoin *hj, Plan *outer_plan,
 	bf->producer_id = hj->bloom_filter_id;
 
 	recipient->bloom_filters = lappend(recipient->bloom_filters, bf);
+
+	/*
+	 * A CustomScan recipient that opted in consumes the filter in its own
+	 * scan loop, possibly at the storage level, so it wants two things a
+	 * stock scan does not.
+	 */
+	if (IsA(recipient, CustomScan) &&
+		(((CustomScan *) recipient)->flags & CUSTOMPATH_SUPPORT_BLOOM_FILTERS))
+	{
+		/*
+		 * Build the hash table (and filter) before the outer scan starts, so
+		 * the filter is available on the first tuple request rather than
+		 * after a batch has already been scanned unfiltered.
+		 */
+		hj->bloom_eager = true;
+
+		/*
+		 * Also build a separate filter per join key, so the recipient can
+		 * test a single column on its own (e.g. against a per-column
+		 * dictionary or zone map).  The combined filter is always built and
+		 * is the more selective one for a per-row probe; there is nothing to
+		 * gain for a single-key join, where the two coincide.
+		 */
+		if (list_length(hj->hashkeys) > 1)
+			hj->bloom_perkey = true;
+	}
 
 	hj->bloom_consumer_count++;
 }

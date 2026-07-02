@@ -25,6 +25,7 @@
 #include "catalog/pg_proc.h"
 #include "foreign/fdwapi.h"
 #include "miscadmin.h"
+#include "nodes/extensible.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/supportnodes.h"
@@ -1304,6 +1305,19 @@ generate_expected_filter_paths(PlannerInfo *root, RelOptInfo *rel)
 			case T_TidPath:
 			case T_TidRangePath:
 				basepaths = lappend(basepaths, path);
+				break;
+			case T_CustomPath:
+
+				/*
+				 * A base-relation CustomScan can receive a pushed-down
+				 * filter, but only if the provider advertised that it knows
+				 * how to consume one (it probes the filter itself inside its
+				 * scan loop; see find_bloom_filter_recipient in createplan.c
+				 * and ExecInitCustomScan).  Providers that don't opt in, like
+				 * heap, are unaffected.
+				 */
+				if (((CustomPath *) path)->flags & CUSTOMPATH_SUPPORT_BLOOM_FILTERS)
+					basepaths = lappend(basepaths, path);
 				break;
 			default:
 				break;
