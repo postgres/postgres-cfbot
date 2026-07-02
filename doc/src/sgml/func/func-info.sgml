@@ -1878,6 +1878,22 @@ SELECT currval(pg_get_serial_sequence('sometable', 'id'));
       <row>
        <entry role="func_table_entry"><para role="func_signature">
         <indexterm>
+         <primary>pg_matview_is_populated</primary>
+        </indexterm>
+        <function>pg_matview_is_populated</function> ( <type>regclass</type> )
+        <returnvalue>boolean</returnvalue>
+       </para>
+       <para>
+        Returns true if the materialized view currently holds valid data,
+        false if it must be refreshed before use.  Returns
+        <literal>NULL</literal> for arguments that are not materialized
+        views.
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
          <primary>pg_options_to_table</primary>
         </indexterm>
         <function>pg_options_to_table</function> ( <parameter>options_array</parameter> <type>text[]</type> )

@@ -7253,8 +7253,26 @@ getTables(Archive *fout, int *numTables)
 		appendPQExpBufferStr(query,
 							 "c.relhasoids, ");
 
-	appendPQExpBufferStr(query,
-						 "c.relispopulated, ");
+	/*
+	 * A normal dump repopulates matviews with REFRESH, so any nonzero
+	 * relpopulated value (the user's intent to have the matview populated)
+	 * should dump as populated.  Binary upgrade instead transfers the heap
+	 * storage as-is, so it must use the effective state: an unlogged matview
+	 * whose epoch stamp went stale (storage reset by a crash and never
+	 * refreshed) has to be restored as unpopulated, or the new cluster would
+	 * present the transferred empty heap as valid data.
+	 */
+	if (fout->remoteVersion >= 190000 && fout->dopt->binary_upgrade)
+		appendPQExpBufferStr(query,
+							 "(CASE WHEN c.relkind = " CppAsString2(RELKIND_MATVIEW)
+							 " THEN pg_catalog.pg_matview_is_populated(c.oid) "
+							 "ELSE true END) AS relispopulated, ");
+	else if (fout->remoteVersion >= 190000)
+		appendPQExpBufferStr(query,
+							 "c.relpopulated <> 0 AS relispopulated, ");
+	else
+		appendPQExpBufferStr(query,
+							 "c.relispopulated, ");
 
 	appendPQExpBufferStr(query,
 						 "c.relreplident, ");
@@ -17803,21 +17821,20 @@ dumpTableSchema(Archive *fout, const TableInfo *tbinfo)
 		}
 
 		/*
-		 * In binary_upgrade mode, restore matviews' populated status by
-		 * poking pg_class directly.  This is pretty ugly, but we can't use
-		 * REFRESH MATERIALIZED VIEW since it's possible that some underlying
-		 * matview is not populated even though this matview is; in any case,
-		 * we want to transfer the matview's heap storage, not run REFRESH.
+		 * In binary_upgrade mode, restore matviews' populated status using
+		 * the binary_upgrade_set_matview_populated() support function.  We
+		 * can't use REFRESH MATERIALIZED VIEW since it's possible that some
+		 * underlying matview is not populated even though this matview is;
+		 * in any case, we want to transfer the matview's heap storage, not
+		 * run REFRESH.
 		 */
 		if (dopt->binary_upgrade && tbinfo->relkind == RELKIND_MATVIEW &&
 			tbinfo->relispopulated)
 		{
 			appendPQExpBufferStr(q, "\n-- For binary upgrade, mark materialized view as populated\n");
-			appendPQExpBufferStr(q, "UPDATE pg_catalog.pg_class\n"
-								 "SET relispopulated = 't'\n"
-								 "WHERE oid = ");
+			appendPQExpBufferStr(q, "SELECT pg_catalog.binary_upgrade_set_matview_populated(");
 			appendStringLiteralAH(q, qualrelname, fout);
-			appendPQExpBufferStr(q, "::pg_catalog.regclass;\n");
+			appendPQExpBufferStr(q, "::pg_catalog.regclass);\n");
 		}
 
 		/*

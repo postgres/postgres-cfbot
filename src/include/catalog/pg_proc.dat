@@ -12032,6 +12032,10 @@
   proname => 'binary_upgrade_set_next_pg_tablespace_oid', provolatile => 'v',
   proparallel => 'u', prorettype => 'void', proargtypes => 'oid',
   prosrc => 'binary_upgrade_set_next_pg_tablespace_oid' },
+{ oid => '8668', descr => 'for use by pg_upgrade',
+  proname => 'binary_upgrade_set_matview_populated', provolatile => 'v',
+  proparallel => 'u', prorettype => 'void', proargtypes => 'oid',
+  prosrc => 'binary_upgrade_set_matview_populated' },
 { oid => '6312', descr => 'for use by pg_upgrade',
   proname => 'binary_upgrade_check_logical_slot_pending_wal',
   provolatile => 'v', proparallel => 'u', prorettype => 'pg_lsn',
@@ -12400,6 +12404,10 @@
   proname => 'pg_relation_is_publishable', provolatile => 's',
   prorettype => 'bool', proargtypes => 'regclass',
   prosrc => 'pg_relation_is_publishable' },
+{ oid => '8667', descr => 'is materialized view populated',
+  proname => 'pg_matview_is_populated', provolatile => 's',
+  prorettype => 'bool', proargtypes => 'regclass',
+  prosrc => 'pg_matview_is_populated' },
 
 # rls
 { oid => '3298',
