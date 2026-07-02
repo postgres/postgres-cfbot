@@ -1,0 +1,395 @@
+<!--
+doc/src/sgml/pgtrashcan.sgml
+PostgreSQL documentation
+-->
+
+<sect1 id="pgtrashcan" xreflabel="pgtrashcan">
+ <title>pgtrashcan &mdash; recoverable DROP TABLE</title>
+
+ <indexterm zone="pgtrashcan">
+  <primary>pgtrashcan</primary>
+ </indexterm>
+
+ <para>
+  The <filename>pgtrashcan</filename> module intercepts
+  <command>DROP TABLE</command> and moves the relation to a reserved schema
+  named <literal>pgtrashcan</literal> instead of immediately destroying
+  it. The table can later be restored (<quote>flashed back</quote>) to its
+  original schema with <function>pgtrashcan_restore</function>, or
+  permanently deleted with <function>pgtrashcan_purge</function>.
+ </para>
+
+ <sect2 id="pgtrashcan-installation">
+  <title>Installation</title>
+
+  <para>
+   <filename>pgtrashcan</filename> installs a
+   <symbol>ProcessUtility_hook</symbol>, so the shared library must be
+   preloaded:
+<programlisting>
+shared_preload_libraries = 'pgtrashcan'
+</programlisting>
+   Restart the server, then run, in each database that should use it:
+<programlisting>
+CREATE EXTENSION pgtrashcan;
+</programlisting>
+  </para>
+ </sect2>
+
+ <sect2 id="pgtrashcan-config">
+  <title>Configuration parameters</title>
+
+  <variablelist>
+   <varlistentry>
+    <term><varname>pgtrashcan.enabled</varname> (<type>boolean</type>)</term>
+    <listitem>
+     <para>
+      Per-session opt-out. When <literal>off</literal>,
+      <command>DROP TABLE</command> behaves like stock PostgreSQL and the
+      relation is permanently destroyed. Existing entries in the
+      <literal>pgtrashcan</literal> schema remain protected.
+      Default is <literal>on</literal>. Scope: <literal>USERSET</literal>.
+     </para>
+    </listitem>
+   </varlistentry>
+  </variablelist>
+ </sect2>
+
+ <sect2 id="pgtrashcan-catalog">
+  <title>The catalog table</title>
+
+  <para>
+   Every dropped object is recorded in
+   <structname>pgtrashcan._trash_catalog</structname>:
+  </para>
+
+  <table id="pgtrashcan-catalog-columns">
+   <title><structname>pgtrashcan._trash_catalog</structname> columns</title>
+   <tgroup cols="3">
+    <thead>
+     <row><entry>Column</entry><entry>Type</entry><entry>Description</entry></row>
+    </thead>
+    <tbody>
+     <row>
+      <entry><structfield>trash_name</structfield></entry>
+      <entry><type>name</type></entry>
+      <entry>System-generated name in the <literal>pgtrashcan</literal> schema (<literal>trash_$&lt;oid&gt;</literal>). Primary key.</entry>
+     </row>
+     <row>
+      <entry><structfield>orig_name</structfield></entry>
+      <entry><type>name</type></entry>
+      <entry>Original relation name at drop time.</entry>
+     </row>
+     <row>
+      <entry><structfield>orig_schema</structfield></entry>
+      <entry><type>name</type></entry>
+      <entry>Original schema name at drop time.</entry>
+     </row>
+     <row>
+      <entry><structfield>orig_oid</structfield></entry>
+      <entry><type>oid</type></entry>
+      <entry>The relation's OID before it was moved.</entry>
+     </row>
+     <row>
+      <entry><structfield>orig_obj_type</structfield></entry>
+      <entry><type>text</type></entry>
+      <entry>One of <literal>table</literal>, <literal>index</literal>, <literal>sequence</literal>.</entry>
+     </row>
+     <row>
+      <entry><structfield>drop_time</structfield></entry>
+      <entry><type>timestamptz</type></entry>
+      <entry>When the drop ran.</entry>
+     </row>
+     <row>
+      <entry><structfield>dropped_by</structfield></entry>
+      <entry><type>name</type></entry>
+      <entry><function>current_user</function> at drop time.</entry>
+     </row>
+     <row>
+      <entry><structfield>dependent_on_oid</structfield></entry>
+      <entry><type>oid</type></entry>
+      <entry>For indexes and owned sequences, the parent table's <structfield>orig_oid</structfield>.</entry>
+     </row>
+     <row>
+      <entry><structfield>cascade_parent_oid</structfield></entry>
+      <entry><type>oid</type></entry>
+      <entry>For tables moved by <command>CASCADE</command>, the OID of the table that triggered the cascade.</entry>
+     </row>
+     <row>
+      <entry><structfield>metadata</structfield></entry>
+      <entry><type>jsonb</type></entry>
+      <entry>
+       Captured definitions of objects that could not safely follow the
+       table into the trash schema (foreign-key constraints, triggers,
+       views, materialized views, rules, RLS policies). Stored verbatim
+       so a user can recreate them manually after a restore.
+      </entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+
+  <para>
+   The table is protected by a row-level trigger that rejects any
+   <command>INSERT</command>, <command>UPDATE</command>, or
+   <command>DELETE</command> coming from outside the extension's own
+   <literal>SECURITY DEFINER</literal> functions. <command>TRUNCATE</command>
+   and <command>ALTER TABLE</command> on it are blocked from inside the
+   <symbol>ProcessUtility</symbol> hook.
+  </para>
+ </sect2>
+
+ <sect2 id="pgtrashcan-functions">
+  <title>SQL functions</title>
+
+  <variablelist>
+   <varlistentry>
+    <term>
+     <function>pgtrashcan_list_dropped()</function>
+    </term>
+    <listitem>
+     <para>
+      Returns a row per dropped table currently in the trash schema
+      with columns <structfield>trash_name</structfield>,
+      <structfield>orig_name</structfield>,
+      <structfield>orig_schema</structfield>,
+      <structfield>orig_oid</structfield>,
+      <structfield>obj_type</structfield>,
+      <structfield>drop_time</structfield>,
+      <structfield>dropped_by</structfield>,
+      <structfield>is_dependent</structfield>, and
+      <structfield>cascade_parent_oid</structfield>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <function>pgtrashcan_list_dropped_grouped()</function>
+    </term>
+    <listitem>
+     <para>
+      Same as <function>pgtrashcan_list_dropped</function>, but groups
+      cascade children under their parent table via a
+      <structfield>drop_group</structfield> column.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <function>pgtrashcan_restore</function>(<parameter>orig_name</parameter> <type>text</type>
+     <optional>, <parameter>orig_schema</parameter> <type>text</type></optional>
+     <optional>, <parameter>orig_oid_hint</parameter> <type>oid</type></optional>)
+     returns <type>text</type>
+    </term>
+    <listitem>
+     <para>
+      Restore the most recently dropped table whose original name matches
+      <parameter>orig_name</parameter>. If a schema is provided,
+      restoration is restricted to that schema. The optional OID hint
+      disambiguates among multiple drops of the same name. Indexes and
+      owned sequences come back with the table; captured definitions of
+      foreign keys, triggers, views, rules, and RLS policies are emitted
+      as <literal>NOTICE</literal> messages for manual reconstruction.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <function>pgtrashcan_restore_by_oid</function>(<parameter>orig_oid</parameter> <type>oid</type>)
+     returns <type>text</type>
+    </term>
+    <listitem>
+     <para>
+      Restore the table whose pre-drop OID equals <parameter>orig_oid</parameter>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <function>pgtrashcan_rename_in_trash</function>(<parameter>trash_name</parameter> <type>text</type>, <parameter>new_name</parameter> <type>text</type>)
+     returns <type>text</type>
+    </term>
+    <listitem>
+     <para>
+      Rename an object inside the trash schema. Useful to make room before
+      a restore that would otherwise collide with an existing table in the
+      original schema.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <function>pgtrashcan_move_to_schema</function>(<parameter>trash_name</parameter> <type>text</type>, <parameter>target_schema</parameter> <type>text</type>)
+     returns <type>text</type>
+    </term>
+    <listitem>
+     <para>
+      Move a trashed object out of the <literal>pgtrashcan</literal>
+      schema into <parameter>target_schema</parameter> (which must not
+      be <literal>pgtrashcan</literal>). The catalog entry is removed.
+      Useful when the original schema no longer exists.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <function>pgtrashcan_purge</function>(<parameter>orig_name</parameter> <type>text</type>
+     <optional>, <parameter>orig_schema</parameter> <type>text</type></optional>
+     <optional>, <parameter>orig_oid_hint</parameter> <type>oid</type></optional>)
+     returns <type>text</type>
+    </term>
+    <listitem>
+     <para>
+      Permanently delete a table from the trash schema, with its
+      indexes and owned sequences. Same name/schema/OID disambiguation
+      rules as <function>pgtrashcan_restore</function>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <function>pgtrashcan_purge_by_oid</function>(<parameter>orig_oid</parameter> <type>oid</type>)
+     returns <type>text</type>
+    </term>
+    <listitem>
+     <para>
+      Permanently delete the trashed table whose pre-drop OID equals
+      <parameter>orig_oid</parameter>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <function>pgtrashcan_purge_all</function>() returns <type>text</type></term>
+    <listitem>
+     <para>
+      Permanently delete every object in the trash schema and clear the
+      catalog. Returns a short summary.
+     </para>
+    </listitem>
+   </varlistentry>
+  </variablelist>
+ </sect2>
+
+ <sect2 id="pgtrashcan-behaviour">
+  <title>Behaviour</title>
+
+  <sect3 id="pgtrashcan-naming">
+   <title>Naming inside the trash schema</title>
+   <para>
+    Each moved relation is renamed to <literal>trash_$&lt;oid&gt;</literal>,
+    where <literal>&lt;oid&gt;</literal> is its OID at drop time. The
+    name is always at most 17 characters, never truncated, and unique
+    by construction. The original name is recovered from the catalog at
+    restore time.
+   </para>
+  </sect3>
+
+  <sect3 id="pgtrashcan-moved-objects">
+   <title>What follows the table into the trash schema</title>
+   <para>
+    These objects move with the table and are fully restored on
+    flashback:
+    <itemizedlist>
+     <listitem><para>The heap (including TOAST).</para></listitem>
+     <listitem><para>Indexes, including the primary key.</para></listitem>
+     <listitem><para>Sequences owned by the table (typically <type>SERIAL</type> or <literal>GENERATED ... AS IDENTITY</literal> columns).</para></listitem>
+    </itemizedlist>
+   </para>
+  </sect3>
+
+  <sect3 id="pgtrashcan-dropped-objects">
+   <title>What is permanently dropped</title>
+   <para>
+    The following are dropped at <command>DROP</command> time; their
+    definitions are captured into <structfield>metadata</structfield>
+    (JSONB) and reported as <literal>NOTICE</literal> on restore:
+    <itemizedlist>
+     <listitem><para>Foreign-key constraints (incoming and outgoing).</para></listitem>
+     <listitem><para>Triggers.</para></listitem>
+     <listitem><para>Views and materialized views that referenced the table.</para></listitem>
+     <listitem><para>Rules.</para></listitem>
+     <listitem><para>Row-level security policies.</para></listitem>
+    </itemizedlist>
+    These cannot safely stay attached to a relocated table because they
+    hold <structname>pg_depend</structname> references to live objects
+    (functions, other relations) that may be modified or dropped while
+    the table is in the trash schema.
+   </para>
+  </sect3>
+
+  <sect3 id="pgtrashcan-cascade">
+   <title>CASCADE and RESTRICT</title>
+   <para>
+    <command>DROP TABLE ... CASCADE</command> walks
+    <structname>pg_depend</structname> and
+    <structname>pg_constraint</structname> to also move tables whose
+    foreign keys reference the dropped table. View, matview, rule, and
+    RLS dependents are handled per the rules above (definitions captured,
+    objects dropped).
+   </para>
+   <para>
+    <command>DROP TABLE ... RESTRICT</command> (the default) errors out
+    if any dependent exists, exactly as in stock PostgreSQL.
+   </para>
+   <para>
+    A statement that mixes regular tables and objects already in the
+    <literal>pgtrashcan</literal> schema (for example
+    <literal>DROP TABLE public.foo, pgtrashcan.bar_$12345</literal>) is
+    rejected; the two cases must be issued separately.
+   </para>
+  </sect3>
+
+  <sect3 id="pgtrashcan-transactions">
+   <title>Transactions</title>
+   <para>
+    Every operation is normal DDL and participates in the surrounding
+    transaction. <literal>BEGIN; DROP TABLE t; ROLLBACK;</literal>
+    puts <literal>t</literal> back exactly where it was. The same
+    applies to restore and purge.
+   </para>
+  </sect3>
+
+  <sect3 id="pgtrashcan-protections">
+   <title>Protections on the trash schema</title>
+   <para>
+    While the extension is installed:
+    <itemizedlist>
+     <listitem><para>The <literal>pgtrashcan</literal> schema is created by <command>CREATE EXTENSION</command> and cannot be dropped.</para></listitem>
+     <listitem><para><command>CREATE TABLE</command> directly in the <literal>pgtrashcan</literal> schema is rejected.</para></listitem>
+     <listitem><para><command>ALTER TABLE ... SET SCHEMA</command> and <command>ALTER TABLE ... RENAME</command> on objects in the trash schema are blocked; use <function>pgtrashcan_move_to_schema</function> or <function>pgtrashcan_rename_in_trash</function>.</para></listitem>
+     <listitem><para>Direct DML on <structname>_trash_catalog</structname> is blocked.</para></listitem>
+    </itemizedlist>
+   </para>
+  </sect3>
+
+  <sect3 id="pgtrashcan-temp">
+   <title>Temporary tables</title>
+   <para>
+    Temporary tables are not moved to the trash schema; their drop
+    passes through with a <literal>NOTICE</literal>. A
+    <command>DROP</command> statement that mixes regular and temporary
+    tables is split: the regular tables are moved to the trash schema
+    and the temporary tables are dropped normally.
+   </para>
+  </sect3>
+ </sect2>
+
+ <sect2 id="pgtrashcan-limitations">
+  <title>Limitations</title>
+  <itemizedlist>
+   <listitem><para>Partitioned tables and partitions are not supported; <command>DROP</command> on them is rejected by the hook.</para></listitem>
+   <listitem><para>Foreign tables are not supported.</para></listitem>
+   <listitem><para>The trash schema has no automatic purge; operators are responsible for calling <function>pgtrashcan_purge</function> or <function>pgtrashcan_purge_all</function>.</para></listitem>
+   <listitem><para>Restoring a child table when its parent is still in the trash schema does not auto-restore the parent.</para></listitem>
+  </itemizedlist>
+ </sect2>
+</sect1>
