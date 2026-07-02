@@ -120,14 +120,24 @@ SetMatViewPopulatedState(Relation relation, bool newstate)
 /*
  * MatViewPopulatedValueIsValid
  *		Does this pg_class.relpopulated value denote currently valid data?
- *
- * This only distinguishes RELPOPULATED_NONE from everything else; any other
- * value, whether RELPOPULATED_ETERNAL or an epoch stamp, counts as valid.
  */
 bool
 MatViewPopulatedValueIsValid(int64 value)
 {
-	return value != RELPOPULATED_NONE;
+	if (value == RELPOPULATED_NONE)
+		return false;
+	if (value == RELPOPULATED_ETERNAL)
+		return true;
+
+	/*
+	 * Epoch stamp: valid only if it matches the current epoch.  During
+	 * recovery always treat it as invalid -- a standby never has the unlogged
+	 * data, and its node-local counters may collide with the primary's.
+	 */
+	if (RecoveryInProgress())
+		return false;
+
+	return (uint64) value == GetUnloggedPopulatedEpoch();
 }
 
 /*
@@ -138,6 +148,12 @@ MatViewPopulatedValueIsValid(int64 value)
 bool
 RelationIsPopulated(Relation relation)
 {
+	/* Only unlogged matviews may carry an epoch stamp. */
+	Assert(relation->rd_rel->relpopulated == RELPOPULATED_NONE ||
+		   relation->rd_rel->relpopulated == RELPOPULATED_ETERNAL ||
+		   (relation->rd_rel->relkind == RELKIND_MATVIEW &&
+			relation->rd_rel->relpersistence == RELPERSISTENCE_UNLOGGED));
+
 	return MatViewPopulatedValueIsValid(relation->rd_rel->relpopulated);
 }
 

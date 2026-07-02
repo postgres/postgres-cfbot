@@ -108,6 +108,71 @@ CREATE MATERIALIZED VIEW mvtest_temp_tm AS SELECT * FROM mvtest_temp_t;
 -- test join of mv and view
 SELECT type, m.totamt AS mtot, v.totamt AS vtot FROM mvtest_tm m LEFT JOIN mvtest_tv v USING (type) ORDER BY type;
 
+-- unlogged materialized view: storage is unlogged, REFRESH/SELECT work.
+-- The data is not WAL-logged (relpersistence 'u'); crash semantics that mark
+-- the matview unpopulated after a crash are handled separately.
+CREATE UNLOGGED MATERIALIZED VIEW mvtest_unlogged AS
+  SELECT type, sum(amt) AS totamt FROM mvtest_t GROUP BY type;
+SELECT relpersistence FROM pg_class WHERE oid = 'mvtest_unlogged'::regclass;
+SELECT pg_matview_is_populated('mvtest_unlogged'::regclass);
+-- the matview's toast table is unlogged too
+SELECT t.relpersistence FROM pg_class c JOIN pg_class t ON c.reltoastrelid = t.oid
+  WHERE c.oid = 'mvtest_unlogged'::regclass;
+SELECT * FROM mvtest_unlogged ORDER BY type;
+-- an index on an unlogged matview is unlogged as well
+CREATE UNIQUE INDEX mvtest_unlogged_type ON mvtest_unlogged (type);
+SELECT relpersistence FROM pg_class WHERE oid = 'mvtest_unlogged_type'::regclass;
+-- REFRESH still works and leaves the data intact
+REFRESH MATERIALIZED VIEW mvtest_unlogged;
+SELECT * FROM mvtest_unlogged ORDER BY type;
+DROP MATERIALIZED VIEW mvtest_unlogged;
+
+-- ALTER MATERIALIZED VIEW ... SET {LOGGED|UNLOGGED} rewrites persistence
+-- of the matview, its toast table and its indexes, preserving data.
+CREATE MATERIALIZED VIEW mvtest_setlog AS
+  SELECT type, sum(amt) AS totamt FROM mvtest_t GROUP BY type;
+CREATE UNIQUE INDEX mvtest_setlog_type ON mvtest_setlog (type);
+SELECT relpersistence FROM pg_class WHERE oid = 'mvtest_setlog'::regclass;  -- p
+SELECT count(*) FROM mvtest_setlog;
+ALTER MATERIALIZED VIEW mvtest_setlog SET UNLOGGED;
+SELECT relpersistence FROM pg_class WHERE oid = 'mvtest_setlog'::regclass;  -- u
+SELECT relpersistence FROM pg_class
+  WHERE oid = (SELECT reltoastrelid FROM pg_class WHERE oid = 'mvtest_setlog'::regclass);  -- u
+SELECT relpersistence FROM pg_class WHERE oid = 'mvtest_setlog_type'::regclass;  -- u
+SELECT pg_matview_is_populated('mvtest_setlog'::regclass);  -- t
+SELECT count(*) FROM mvtest_setlog;
+ALTER MATERIALIZED VIEW mvtest_setlog SET LOGGED;
+SELECT relpersistence FROM pg_class WHERE oid = 'mvtest_setlog'::regclass;  -- p
+SELECT relpersistence FROM pg_class WHERE oid = 'mvtest_setlog_type'::regclass;  -- p
+SELECT pg_matview_is_populated('mvtest_setlog'::regclass);  -- t
+SELECT count(*) FROM mvtest_setlog;
+-- cannot change persistence setting twice in one ALTER
+ALTER MATERIALIZED VIEW mvtest_setlog SET UNLOGGED, SET LOGGED;
+DROP MATERIALIZED VIEW mvtest_setlog;
+
+-- ALTER MATERIALIZED VIEW SET LOGGED / SET UNLOGGED converts the populated state
+CREATE UNLOGGED MATERIALIZED VIEW mvtest_persist AS SELECT 1 AS a;
+SELECT pg_matview_is_populated('mvtest_persist'::regclass);
+ALTER MATERIALIZED VIEW mvtest_persist SET LOGGED;
+SELECT relpersistence FROM pg_class WHERE oid = 'mvtest_persist'::regclass;
+SELECT relpopulated FROM pg_class WHERE oid = 'mvtest_persist'::regclass;  -- 1: eternal
+SELECT * FROM mvtest_persist;
+ALTER MATERIALIZED VIEW mvtest_persist SET UNLOGGED;
+SELECT relpersistence FROM pg_class WHERE oid = 'mvtest_persist'::regclass;
+SELECT relpopulated > 1 OR relpopulated < 0 AS is_epoch_stamp FROM pg_class WHERE oid = 'mvtest_persist'::regclass;
+SELECT pg_matview_is_populated('mvtest_persist'::regclass);
+SELECT * FROM mvtest_persist;
+DROP MATERIALIZED VIEW mvtest_persist;
+
+-- SET UNLOGGED on an unpopulated matview keeps it unpopulated
+CREATE MATERIALIZED VIEW mvtest_nodata AS SELECT 1 AS a WITH NO DATA;
+ALTER MATERIALIZED VIEW mvtest_nodata SET UNLOGGED;
+SELECT relpopulated FROM pg_class WHERE oid = 'mvtest_nodata'::regclass;  -- 0: none
+SELECT pg_matview_is_populated('mvtest_nodata'::regclass);
+REFRESH MATERIALIZED VIEW mvtest_nodata;
+SELECT pg_matview_is_populated('mvtest_nodata'::regclass);
+DROP MATERIALIZED VIEW mvtest_nodata;
+
 -- make sure that dependencies are reported properly when they block the drop
 DROP TABLE mvtest_t;
 

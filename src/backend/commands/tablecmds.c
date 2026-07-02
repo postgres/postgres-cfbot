@@ -5251,7 +5251,8 @@ ATPrepCmd(List **wqueue, Relation rel, AlterTableCmd *cmd,
 			break;
 		case AT_SetLogged:		/* SET LOGGED */
 		case AT_SetUnLogged:	/* SET UNLOGGED */
-			ATSimplePermissions(cmd->subtype, rel, ATT_TABLE | ATT_SEQUENCE);
+			ATSimplePermissions(cmd->subtype, rel,
+								ATT_TABLE | ATT_SEQUENCE | ATT_MATVIEW);
 			if (tab->chgPersistence)
 				ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
