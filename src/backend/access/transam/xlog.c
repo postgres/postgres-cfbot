@@ -469,6 +469,9 @@ typedef struct XLogCtlData
 	/* Fake LSN counter, for unlogged relations. */
 	pg_atomic_uint64 unloggedLSN;
 
+	/* Shared-memory mirror of ControlFile->unloggedResetGen. */
+	pg_atomic_uint64 unloggedResetGen;
+
 	/* Time and LSN of last xlog segment switch. Protected by WALWriteLock. */
 	pg_time_t	lastSegSwitchTime;
 	XLogRecPtr	lastSegSwitchLSN;
@@ -4280,6 +4283,7 @@ InitControlFile(uint64 sysidentifier, uint32 data_checksum_version)
 	memcpy(ControlFile->mock_authentication_nonce, mock_auth_nonce, MOCK_AUTH_NONCE_LEN);
 	ControlFile->state = DB_SHUTDOWNED;
 	ControlFile->unloggedLSN = FirstNormalUnloggedLSN;
+	ControlFile->unloggedResetGen = 0;
 
 	/* Set important parameter values for use when replaying WAL */
 	ControlFile->MaxConnections = MaxConnections;
@@ -5036,6 +5040,29 @@ GetFakeLSNForUnloggedRel(void)
 	return pg_atomic_fetch_add_u64(&XLogCtl->unloggedLSN, 1);
 }
 
+/* Cluster-wide unlogged-reset generation, read from the shmem mirror. */
+uint64
+GetUnloggedResetGeneration(void)
+{
+	return pg_atomic_read_u64(&XLogCtl->unloggedResetGen);
+}
+
+/*
+ * Epoch stamped into pg_class.relpopulated for a populated unlogged matview:
+ * (timeline << 32) | reset-gen.  Crash recovery bumps the gen and
+ * promotion/PITR changes the timeline, so either invalidates old stamps.
+ * tli >= 1 keeps the epoch above the reserved values 0 and 1.
+ */
+uint64
+GetUnloggedPopulatedEpoch(void)
+{
+	uint64		gen = GetUnloggedResetGeneration();
+	TimeLineID	tli = GetWALInsertionTimeLine();
+
+	Assert(tli >= 1);
+	return ((uint64) tli << 32) | (uint32) gen;
+}
+
 /*
  * Auto-tune the number of XLOG buffers.
  *
@@ -5463,6 +5490,7 @@ XLOGShmemInit(void *arg)
 	pg_atomic_init_u64(&XLogCtl->logFlushResult, InvalidXLogRecPtr);
 	pg_atomic_init_u64(&XLogCtl->unloggedLSN, InvalidXLogRecPtr);
 	pg_atomic_init_u64(&XLogCtl->lastChecksumChangeRecPtr, InvalidXLogRecPtr);
+	pg_atomic_init_u64(&XLogCtl->unloggedResetGen, 0);
 }
 
 /*
@@ -6101,6 +6129,10 @@ StartupXLOG(void)
 		pg_atomic_write_membarrier_u64(&XLogCtl->unloggedLSN,
 									   FirstNormalUnloggedLSN);
 
+	/* Mirror the durable unlogged-reset counter into shared memory. */
+	pg_atomic_write_membarrier_u64(&XLogCtl->unloggedResetGen,
+								   ControlFile->unloggedResetGen);
+
 	/*
 	 * Copy any missing timeline history files between 'now' and the recovery
 	 * target timeline from archive to pg_wal. While we don't need those files
@@ -6374,6 +6406,17 @@ StartupXLOG(void)
 	 */
 	if (InRecovery)
 		ResetUnloggedRelations(UNLOGGED_RELATION_INIT);
+
+	/*
+	 * Crash recovery reset all unlogged relations; bump the durable reset
+	 * generation and refresh the mirror.  ControlFile is persisted below.
+	 */
+	if (InRecovery)
+	{
+		ControlFile->unloggedResetGen++;
+		pg_atomic_write_membarrier_u64(&XLogCtl->unloggedResetGen,
+									   ControlFile->unloggedResetGen);
+	}
 
 	/*
 	 * Pre-scan prepared transactions to find out the range of XIDs present.
