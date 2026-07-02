@@ -1887,7 +1887,9 @@ SELECT currval(pg_get_serial_sequence('sometable', 'id'));
         Returns true if the materialized view currently holds valid data,
         false if it must be refreshed before use.  Returns
         <literal>NULL</literal> for arguments that are not materialized
-        views.
+        views.  Unlike reading <structname>pg_class</structname> directly,
+        this accounts for unlogged materialized views whose contents were
+        removed by a crash or are unavailable during recovery.
        </para></entry>
       </row>
 
