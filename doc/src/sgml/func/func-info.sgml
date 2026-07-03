@@ -3965,6 +3965,26 @@ acl      | {postgres=arwdDxtm/postgres,foo=r/postgres}
         is false, the <literal>OWNER</literal> clause is omitted.
        </para></entry>
       </row>
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>pg_get_trigger_ddl</primary>
+        </indexterm>
+        <function>pg_get_trigger_ddl</function>
+        ( <parameter>relation</parameter> <type>regclass</type>,
+        <parameter>trigger</parameter> <type>name</type>
+        <optional>, <parameter>pretty</parameter> <type>boolean</type>
+        <literal>DEFAULT</literal> false</optional> )
+        <returnvalue>setof text</returnvalue>
+       </para>
+       <para>
+        Reconstructs the <link linkend="sql-createtrigger"><command>CREATE
+        TRIGGER</command></link> statement for the specified trigger on the
+        specified relation.  The relation name is always schema-qualified.
+        When <parameter>pretty</parameter> is true, the output is
+        pretty-printed.
+       </para></entry>
+      </row>
      </tbody>
     </tgroup>
    </table>
