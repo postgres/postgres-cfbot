@@ -649,6 +649,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %type <str>		opt_existing_window_name
 %type <boolean> opt_if_not_exists
 %type <boolean> opt_unique_null_treatment
+%type <boolean> insert_by_clause
 %type <ival>	generated_when override_kind opt_virtual_or_stored
 %type <partspec>	PartitionSpec OptPartitionSpec
 %type <partelem>	part_elem
@@ -13049,6 +13050,29 @@ insert_rest:
 					$$->override = $2;
 					$$->selectStmt = $4;
 				}
+			| OVERRIDING override_kind VALUE_P insert_by_clause SelectStmt
+				{
+					$$ = makeNode(InsertStmt);
+					$$->cols = NIL;
+					$$->override = $2;
+					$$->byName = $4;
+					$$->selectStmt = $5;
+				}
+			| insert_by_clause SelectStmt
+				{
+					$$ = makeNode(InsertStmt);
+					$$->cols = NIL;
+					$$->byName = $1;
+					$$->selectStmt = $2;
+				}
+			| insert_by_clause OVERRIDING override_kind VALUE_P SelectStmt
+				{
+					$$ = makeNode(InsertStmt);
+					$$->cols = NIL;
+					$$->byName = $1;
+					$$->override = $3;
+					$$->selectStmt = $5;
+				}
 			| '(' insert_column_list ')' SelectStmt
 				{
 					$$ = makeNode(InsertStmt);
@@ -13062,10 +13086,40 @@ insert_rest:
 					$$->override = $5;
 					$$->selectStmt = $7;
 				}
+			| '(' insert_column_list ')' OVERRIDING override_kind VALUE_P insert_by_clause SelectStmt
+				{
+					$$ = makeNode(InsertStmt);
+					$$->cols = $2;
+					$$->override = $5;
+					$$->byName = $7;
+					$$->selectStmt = $8;
+				}
+			| '(' insert_column_list ')' insert_by_clause SelectStmt
+				{
+					$$ = makeNode(InsertStmt);
+					$$->cols = $2;
+					$$->byName = $4;
+					$$->selectStmt = $5;
+				}
+			| '(' insert_column_list ')' insert_by_clause OVERRIDING override_kind VALUE_P SelectStmt
+				{
+					$$ = makeNode(InsertStmt);
+					$$->cols = $2;
+					$$->byName = $4;
+					$$->override = $6;
+					$$->selectStmt = $8;
+				}
 			| DEFAULT VALUES
 				{
 					$$ = makeNode(InsertStmt);
 					$$->cols = NIL;
+					$$->selectStmt = NULL;
+				}
+			| insert_by_clause DEFAULT VALUES
+				{
+					$$ = makeNode(InsertStmt);
+					$$->cols = NIL;
+					$$->byName = $1;
 					$$->selectStmt = NULL;
 				}
 		;
@@ -13073,6 +13127,15 @@ insert_rest:
 override_kind:
 			USER		{ $$ = OVERRIDING_USER_VALUE; }
 			| SYSTEM_P	{ $$ = OVERRIDING_SYSTEM_VALUE; }
+		;
+
+/*
+ * BY NAME matches the source columns to the target columns by name; BY
+ * POSITION requests the default positional matching explicitly.
+ */
+insert_by_clause:
+			BY NAME_P		{ $$ = true; }
+			| BY POSITION	{ $$ = false; }
 		;
 
 insert_column_list:
