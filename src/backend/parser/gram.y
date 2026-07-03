@@ -514,7 +514,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %type <list>	OptSeqOptList SeqOptList OptParenthesizedSeqOptList
 %type <defelt>	SeqOptElem
 
-%type <istmt>	insert_rest
+%type <istmt>	insert_rest insert_by_options
 %type <infer>	opt_conf_expr
 %type <onconflict> opt_on_conflict
 %type <mergewhen>	merge_insert merge_update merge_delete
@@ -647,6 +647,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %type <str>		opt_existing_window_name
 %type <boolean> opt_if_not_exists
 %type <boolean> opt_unique_null_treatment
+%type <boolean> insert_by_clause
 %type <ival>	generated_when override_kind opt_virtual_or_stored
 %type <partspec>	PartitionSpec OptPartitionSpec
 %type <partelem>	part_elem
@@ -12548,6 +12549,11 @@ insert_rest:
 					$$->override = $2;
 					$$->selectStmt = $4;
 				}
+			| insert_by_options SelectStmt
+				{
+					$1->selectStmt = $2;
+					$$ = $1;
+				}
 			| '(' insert_column_list ')' SelectStmt
 				{
 					$$ = makeNode(InsertStmt);
@@ -12561,17 +12567,63 @@ insert_rest:
 					$$->override = $5;
 					$$->selectStmt = $7;
 				}
+			| '(' insert_column_list ')' insert_by_options SelectStmt
+				{
+					$4->cols = $2;
+					$4->selectStmt = $5;
+					$$ = $4;
+				}
 			| DEFAULT VALUES
 				{
 					$$ = makeNode(InsertStmt);
 					$$->cols = NIL;
 					$$->selectStmt = NULL;
 				}
+			| insert_by_clause DEFAULT VALUES
+				{
+					$$ = makeNode(InsertStmt);
+					$$->cols = NIL;
+					$$->byName = $1;
+					$$->selectStmt = NULL;
+				}
+		;
+
+/* BY and OVERRIDING can appear in either order. */
+insert_by_options:
+			insert_by_clause
+				{
+					$$ = makeNode(InsertStmt);
+					$$->cols = NIL;
+					$$->byName = $1;
+				}
+			| OVERRIDING override_kind VALUE_P insert_by_clause
+				{
+					$$ = makeNode(InsertStmt);
+					$$->cols = NIL;
+					$$->override = $2;
+					$$->byName = $4;
+				}
+			| insert_by_clause OVERRIDING override_kind VALUE_P
+				{
+					$$ = makeNode(InsertStmt);
+					$$->cols = NIL;
+					$$->byName = $1;
+					$$->override = $3;
+				}
 		;
 
 override_kind:
 			USER		{ $$ = OVERRIDING_USER_VALUE; }
 			| SYSTEM_P	{ $$ = OVERRIDING_SYSTEM_VALUE; }
+		;
+
+/*
+ * BY NAME matches the source columns to the target columns by name; BY
+ * POSITION requests the default positional matching explicitly.
+ */
+insert_by_clause:
+			BY NAME_P		{ $$ = true; }
+			| BY POSITION	{ $$ = false; }
 		;
 
 insert_column_list:
