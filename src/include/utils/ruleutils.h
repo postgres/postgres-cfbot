@@ -54,5 +54,6 @@ extern char *get_range_partbound_string(List *bound_datums);
 extern void get_reloptions(StringInfo buf, Datum reloptions);
 
 extern char *pg_get_statisticsobjdef_string(Oid statextid);
+extern char *pg_get_triggerdef_string(Oid trigid);
 
 #endif							/* RULEUTILS_H */
