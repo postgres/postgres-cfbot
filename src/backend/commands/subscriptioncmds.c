@@ -2670,19 +2670,48 @@ DropSubscription(DropSubscriptionStmt *stmt, bool isTopLevel)
 		return;
 	}
 
-	datum = SysCacheGetAttr(SUBSCRIPTIONOID, tup,
-							Anum_pg_subscription_subconninfo, &isnull);
-	if (!isnull)
-		subconninfo = TextDatumGetCString(datum);
-
 	form = (Form_pg_subscription) GETSTRUCT(tup);
 	subid = form->oid;
-	subowner = form->subowner;
-	subserver = form->subserver;
-	subconflictlogrelid = form->subconflictlogrelid;
-	must_use_password = !superuser_arg(subowner) && form->subpasswordrequired;
 
 	/* must be owner */
+	if (!object_ownercheck(SubscriptionRelationId, subid, GetUserId()))
+		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_SUBSCRIPTION,
+					   stmt->subname);
+
+	ReleaseSysCache(tup);
+
+	/*
+	 * Lock the subscription so nobody else can do anything with it (including
+	 * the replication workers).
+	 */
+	LockSharedObject(SubscriptionRelationId, subid, 0, AccessExclusiveLock);
+
+	/*
+	 * Re-read the subscription tuple after acquiring the lock. A concurrent
+	 * ALTER or DROP may have committed before we acquired the lock.
+	 */
+	tup = SearchSysCache1(SUBSCRIPTIONOID, ObjectIdGetDatum(subid));
+
+	if (!HeapTupleIsValid(tup))
+	{
+		UnlockSharedObject(SubscriptionRelationId, subid, 0,
+						   AccessExclusiveLock);
+		table_close(rel, NoLock);
+
+		if (!stmt->missing_ok)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_OBJECT),
+					 errmsg("subscription \"%s\" does not exist",
+							stmt->subname)));
+		else
+			ereport(NOTICE,
+					(errmsg("subscription \"%s\" does not exist, skipping",
+							stmt->subname)));
+
+		return;
+	}
+
+	/* must still be owner */
 	if (!object_ownercheck(SubscriptionRelationId, subid, GetUserId()))
 		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_SUBSCRIPTION,
 					   stmt->subname);
@@ -2690,11 +2719,18 @@ DropSubscription(DropSubscriptionStmt *stmt, bool isTopLevel)
 	/* DROP hook for the subscription being removed */
 	InvokeObjectDropHook(SubscriptionRelationId, subid, 0);
 
-	/*
-	 * Lock the subscription so nobody else can do anything with it (including
-	 * the replication workers).
-	 */
-	LockSharedObject(SubscriptionRelationId, subid, 0, AccessExclusiveLock);
+	form = (Form_pg_subscription) GETSTRUCT(tup);
+	subowner = form->subowner;
+	subserver = form->subserver;
+	subconflictlogrelid = form->subconflictlogrelid;
+	must_use_password = !superuser_arg(subowner) && form->subpasswordrequired;
+
+	datum = SysCacheGetAttr(SUBSCRIPTIONOID, tup,
+							Anum_pg_subscription_subconninfo, &isnull);
+	if (!isnull)
+		subconninfo = TextDatumGetCString(datum);
+	else
+		subconninfo = NULL;
 
 	/* Get subname */
 	datum = SysCacheGetAttrNotNull(SUBSCRIPTIONOID, tup,
