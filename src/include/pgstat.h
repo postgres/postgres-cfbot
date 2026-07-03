@@ -15,6 +15,7 @@
 #include "portability/instr_time.h"
 #include "postmaster/pgarch.h"	/* for MAX_XFN_CHARS */
 #include "replication/conflict.h"
+#include "replication/replslot_stats.h"
 #include "storage/locktag.h"
 #include "utils/backend_progress.h" /* for backward compatibility */	/* IWYU pragma: export */
 #include "utils/backend_status.h"	/* for backward compatibility */	/* IWYU pragma: export */
@@ -413,16 +414,7 @@ typedef struct PgStat_StatFuncEntry
 
 typedef struct PgStat_StatReplSlotEntry
 {
-	PgStat_Counter spill_txns;
-	PgStat_Counter spill_count;
-	PgStat_Counter spill_bytes;
-	PgStat_Counter stream_txns;
-	PgStat_Counter stream_count;
-	PgStat_Counter stream_bytes;
-	PgStat_Counter mem_exceeded_count;
-	PgStat_Counter total_txns;
-	PgStat_Counter total_bytes;
-	PgStat_Counter output_bytes;
+	PgStat_ReplSlotStats decoding_stats;
 	PgStat_Counter slotsync_skip_count;
 	TimestampTz slotsync_last_skip;
 	TimestampTz stat_reset_timestamp;
@@ -808,7 +800,7 @@ extern PgStat_StatIdxEntry *pgstat_fetch_stat_idxentry_ext(bool shared,
 
 extern void pgstat_reset_replslot(const char *name);
 struct ReplicationSlot;
-extern void pgstat_report_replslot(struct ReplicationSlot *slot, const PgStat_StatReplSlotEntry *repSlotStat);
+extern void pgstat_report_replslot(struct ReplicationSlot *slot, const PgStat_ReplSlotStats *repSlotStat);
 extern void pgstat_report_replslotsync(struct ReplicationSlot *slot);
 extern void pgstat_create_replslot(struct ReplicationSlot *slot);
 extern void pgstat_acquire_replslot(struct ReplicationSlot *slot);
