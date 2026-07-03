@@ -1,8 +1,8 @@
 
 # Copyright (c) 2026, PostgreSQL Global Development Group
 
-# Tests for pg_get_database_ddl(), pg_get_tablespace_ddl(), and
-# pg_get_role_ddl().  These are TAP tests rather than plain regression
+# Tests for pg_get_database_ddl(), pg_get_tablespace_ddl(), pg_get_role_ddl(),
+# and pg_get_trigger_ddl().  These are TAP tests rather than plain regression
 # tests because they create databases and tablespaces, which are
 # heavyweight operations that should run only once rather than being
 # repeated with every invocation of the core regression suite.
@@ -335,6 +335,162 @@ isnt($ret, 0, 'tablespace DDL denied without pg_tablespace access');
 $node->safe_psql(
 	'postgres', q{
 	GRANT SELECT ON pg_tablespace TO PUBLIC});
+
+########################################################################
+# pg_get_trigger_ddl tests
+########################################################################
+
+$node->safe_psql(
+	'postgres', q{
+	CREATE FUNCTION regress_trg_ddl_func() RETURNS trigger
+	  LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+	CREATE TABLE regress_trg_ddl_tab (id int, note text, "before" int);
+	CREATE TRIGGER regress_trg_ddl_basic
+	  BEFORE INSERT ON regress_trg_ddl_tab
+	  FOR EACH ROW EXECUTE FUNCTION regress_trg_ddl_func();
+	CREATE TRIGGER regress_trg_ddl_when
+	  BEFORE UPDATE OF id ON regress_trg_ddl_tab
+	  FOR EACH ROW WHEN (OLD.id IS DISTINCT FROM NEW.id)
+	  EXECUTE FUNCTION regress_trg_ddl_func()});
+
+my $trig_oid = $node->safe_psql(
+	'postgres', q{
+	SELECT t.oid FROM pg_trigger t
+	  JOIN pg_class c ON c.oid = t.tgrelid
+	  WHERE t.tgname = 'regress_trg_ddl_basic'
+	    AND c.relname = 'regress_trg_ddl_tab'});
+
+# Explicit pretty => false gives the canonical pg_get_triggerdef form
+# plus a trailing semicolon.
+$result = $node->safe_psql('postgres',
+	q{SELECT * FROM pg_get_trigger_ddl('regress_trg_ddl_tab', 'regress_trg_ddl_basic', false)});
+my $plain = $node->safe_psql('postgres',
+	qq{SELECT pg_get_triggerdef($trig_oid, false) || ';'});
+is($result, $plain, 'trigger DDL matches pg_get_triggerdef plus semicolon');
+like($result, qr/ ON public\.regress_trg_ddl_tab /,
+	'trigger DDL schema-qualifies the table');
+
+# Explicit regclass cast works too
+$result = $node->safe_psql('postgres',
+	q{SELECT * FROM pg_get_trigger_ddl('regress_trg_ddl_tab'::regclass, 'regress_trg_ddl_basic', false)});
+is($result, $plain, 'trigger DDL by regclass matches');
+
+# Omitting pretty defaults to false
+$result = $node->safe_psql('postgres',
+	q{SELECT * FROM pg_get_trigger_ddl('regress_trg_ddl_tab', 'regress_trg_ddl_basic')});
+is($result, $plain, 'omitting pretty defaults to false');
+
+# Non-existent trigger name errors
+($ret, $stdout, $stderr) = $node->psql('postgres',
+	q{SELECT * FROM pg_get_trigger_ddl('regress_trg_ddl_tab', 'regress_trg_ddl_missing')});
+isnt($ret, 0, 'non-existent trigger name errors');
+like($stderr, qr/does not exist/, 'non-existent trigger error message');
+
+# NULL inputs return no rows
+$result = $node->safe_psql('postgres',
+	q{SELECT count(*) FROM pg_get_trigger_ddl(NULL::regclass, 'regress_trg_ddl_basic')});
+is($result, '0', 'NULL relation returns no rows');
+$result = $node->safe_psql('postgres',
+	q{SELECT count(*) FROM pg_get_trigger_ddl('regress_trg_ddl_tab', NULL::name)});
+is($result, '0', 'NULL trigger name returns no rows');
+
+
+# --- pretty layout ---
+
+$node->safe_psql(
+	'postgres', q{
+	CREATE TABLE regress_trg_ddl_ref (id int PRIMARY KEY);
+	CREATE VIEW regress_trg_ddl_view AS SELECT * FROM regress_trg_ddl_tab;
+	CREATE TRIGGER regress_trg_ddl_trans
+	  AFTER INSERT ON regress_trg_ddl_tab
+	  REFERENCING NEW TABLE AS newtab
+	  FOR EACH STATEMENT EXECUTE FUNCTION regress_trg_ddl_func();
+	CREATE CONSTRAINT TRIGGER regress_trg_ddl_con
+	  AFTER INSERT ON regress_trg_ddl_tab
+	  FROM regress_trg_ddl_ref
+	  DEFERRABLE INITIALLY DEFERRED
+	  FOR EACH ROW EXECUTE FUNCTION regress_trg_ddl_func();
+	CREATE TRIGGER regress_trg_ddl_instead
+	  INSTEAD OF INSERT ON regress_trg_ddl_view
+	  FOR EACH ROW EXECUTE FUNCTION regress_trg_ddl_func();
+	CREATE TRIGGER "when"
+	  BEFORE UPDATE OF "before" ON regress_trg_ddl_tab
+	  FOR EACH ROW WHEN (NEW.note <> ' EXECUTE FUNCTION ')
+	  EXECUTE FUNCTION regress_trg_ddl_func('FOR EACH ')});
+
+# Exact pretty layout for a simple trigger
+$result = $node->safe_psql('postgres',
+	q{SELECT * FROM pg_get_trigger_ddl('regress_trg_ddl_tab', 'regress_trg_ddl_basic', true)});
+is( $result,
+	qq{CREATE TRIGGER regress_trg_ddl_basic
+    BEFORE INSERT ON public.regress_trg_ddl_tab
+    FOR EACH ROW
+    EXECUTE FUNCTION regress_trg_ddl_func();},
+	'pretty trigger DDL layout for simple trigger');
+
+# 'pretty' accepts an explicit false
+$result = $node->safe_psql('postgres',
+	q{SELECT * FROM pg_get_trigger_ddl('regress_trg_ddl_tab', 'regress_trg_ddl_basic', false)});
+is($result, $plain, 'pretty => false gives the single-line form');
+
+# Invariant: collapsing pretty whitespace reproduces the canonical form.
+# This holds for every trigger, so check it across all of them.
+foreach my $pair (
+	[ 'regress_trg_ddl_tab', 'regress_trg_ddl_basic' ],
+	[ 'regress_trg_ddl_tab', 'regress_trg_ddl_when' ],
+	[ 'regress_trg_ddl_tab', 'regress_trg_ddl_trans' ],
+	[ 'regress_trg_ddl_tab', 'regress_trg_ddl_con' ],
+	[ 'regress_trg_ddl_view', 'regress_trg_ddl_instead' ],
+	[ 'regress_trg_ddl_tab', 'when' ])
+{
+	my ($rel, $tg) = @$pair;
+	my $pretty = $node->safe_psql('postgres',
+		qq{SELECT * FROM pg_get_trigger_ddl('$rel', '$tg', true)});
+	my $single = $node->safe_psql('postgres',
+		qq{SELECT * FROM pg_get_trigger_ddl('$rel', '$tg', false)});
+	(my $collapsed = $pretty) =~ s/\n    / /g;
+	is($collapsed, $single, "pretty output for $tg collapses to canonical form");
+}
+
+# WHEN clause: the IS DISTINCT FROM inside parens must not be split
+$result = $node->safe_psql('postgres',
+	q{SELECT * FROM pg_get_trigger_ddl('regress_trg_ddl_tab', 'regress_trg_ddl_when', true)});
+like($result, qr/\n    WHEN \(/, 'pretty WHEN clause on its own line');
+like($result, qr/IS DISTINCT FROM new\.id/,
+	'FROM inside WHEN expression not split');
+
+# Transition tables and constraint trigger clauses each get a line
+$result = $node->safe_psql('postgres',
+	q{SELECT * FROM pg_get_trigger_ddl('regress_trg_ddl_tab', 'regress_trg_ddl_trans', true)});
+like($result, qr/\n    REFERENCING NEW TABLE AS newtab/,
+	'pretty REFERENCING clause on its own line');
+like($result, qr/\n    FOR EACH STATEMENT/,
+	'pretty FOR EACH STATEMENT on its own line');
+$result = $node->safe_psql('postgres',
+	q{SELECT * FROM pg_get_trigger_ddl('regress_trg_ddl_tab', 'regress_trg_ddl_con', true)});
+like($result, qr/\n    FROM .*regress_trg_ddl_ref/,
+	'pretty FROM clause on its own line');
+like($result, qr/\n    DEFERRABLE INITIALLY DEFERRED/,
+	'pretty DEFERRABLE clause on its own line');
+
+# INSTEAD OF triggers (on a view)
+$result = $node->safe_psql('postgres',
+	q{SELECT * FROM pg_get_trigger_ddl('regress_trg_ddl_view', 'regress_trg_ddl_instead', true)});
+like($result, qr/\n    INSTEAD OF INSERT ON public\.regress_trg_ddl_view/,
+	'pretty INSTEAD OF clause on its own line');
+
+# Adversarial: keyword-named identifiers are quoted and must not attract
+# breaks; clause keywords inside string literals must survive intact.
+$result = $node->safe_psql('postgres',
+	q{SELECT * FROM pg_get_trigger_ddl('regress_trg_ddl_tab', 'when', true)});
+like($result, qr/^CREATE TRIGGER "when"$/m,
+	'quoted keyword trigger name stays on the first line');
+like($result, qr/\n    BEFORE UPDATE OF before ON public\.regress_trg_ddl_tab/,
+	'lowercase unreserved-keyword column does not attract a line break');
+like($result, qr/ EXECUTE FUNCTION '/,
+	'marker text inside WHEN string literal not split');
+like($result, qr/\('FOR EACH '\)/,
+	'marker text inside trigger argument literal not split');
 
 $node->stop;
 
