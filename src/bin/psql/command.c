@@ -27,6 +27,7 @@
 #include "catalog/pg_class_d.h"
 #include "command.h"
 #include "common.h"
+#include "prompt.h"
 #include "common/logging.h"
 #include "common/string.h"
 #include "copy.h"
@@ -4337,6 +4338,7 @@ do_connect(enum trivalue reuse_previous_specification,
 	pset.db = n_conn;
 	SyncVariables();
 	connection_warnings(false); /* Must be after SyncVariables */
+	reset_prompt_status_after_connect();
 
 	/* Tell the user about the new connection */
 	if (!pset.quiet)
