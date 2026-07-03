@@ -16,6 +16,7 @@
 #include "common.h"
 #include "common/logging.h"
 #include "input.h"
+#include "prompt.h"
 #include "settings.h"
 #include "tab-complete.h"
 
@@ -55,7 +56,7 @@ static void finishInput(void);
  *
  * Gets a line of interactive input, using readline if desired.
  *
- * prompt: the prompt string to be used
+ * status, cstack: prompt state passed to get_prompt()
  * query_buf: buffer containing lines already read in the current command
  * (query_buf is not modified here, but may be consulted for tab completion)
  *
@@ -64,12 +65,14 @@ static void finishInput(void);
  * Caller *must* have set up sigint_interrupt_jmp before calling.
  */
 char *
-gets_interactive(const char *prompt, PQExpBuffer query_buf)
+gets_interactive(promptStatus_t status, ConditionalStack cstack,
+				 PQExpBuffer query_buf)
 {
 #ifdef USE_READLINE
 	if (useReadline)
 	{
 		char	   *result;
+		const char *prompt;
 
 		/*
 		 * Some versions of readline don't notice SIGWINCH signals that arrive
@@ -81,6 +84,15 @@ gets_interactive(const char *prompt, PQExpBuffer query_buf)
 #ifdef HAVE_RL_RESET_SCREEN_SIZE
 		rl_reset_screen_size();
 #endif
+
+		/*
+		 * Regenerate the prompt immediately before readline(), the same way
+		 * bash runs PROMPT_COMMAND and re-evaluates PS1.  Using
+		 * rl_pre_input_hook with readline("") leaves the prompt invisible
+		 * until the user presses a key.
+		 */
+		run_prompt_command();
+		prompt = get_prompt(status, cstack);
 
 		/* Make current query_buf available to tab completion callback */
 		tab_completion_query_buf = query_buf;
@@ -100,7 +112,8 @@ gets_interactive(const char *prompt, PQExpBuffer query_buf)
 	}
 #endif
 
-	fputs(prompt, stdout);
+	run_prompt_command();
+	fputs(get_prompt(status, cstack), stdout);
 	fflush(stdout);
 	return gets_fromFile(stdin);
 }

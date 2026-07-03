@@ -163,8 +163,7 @@ MainLoop(FILE *source)
 				need_redisplay = false;
 			}
 			/* Now we can fetch a line */
-			line = gets_interactive(get_prompt(prompt_status, cond_stack),
-									query_buf);
+			line = gets_interactive(prompt_status, cond_stack, query_buf);
 		}
 		else
 		{

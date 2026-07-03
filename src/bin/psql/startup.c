@@ -198,6 +198,7 @@ main(int argc, char *argv[])
 	/* Initialize variables for last error */
 	SetVariable(pset.vars, "LAST_ERROR_MESSAGE", "");
 	SetVariable(pset.vars, "LAST_ERROR_SQLSTATE", "00000");
+	SetVariable(pset.vars, "SHELL_EXIT", "0");
 
 	/* Default values for variables (that don't match the result of \unset) */
 	SetVariableBool(pset.vars, "AUTOCOMMIT");
