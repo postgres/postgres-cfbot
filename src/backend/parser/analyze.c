@@ -76,6 +76,9 @@ post_parse_analyze_hook_type post_parse_analyze_hook = NULL;
 static Query *transformOptionalSelectInto(ParseState *pstate, Node *parseTree);
 static Query *transformDeleteStmt(ParseState *pstate, DeleteStmt *stmt);
 static Query *transformInsertStmt(ParseState *pstate, InsertStmt *stmt);
+static void transformInsertColsByName(ParseState *pstate, List *srctlist,
+											 List **icolumns,
+									  List **attrnos);
 static OnConflictExpr *transformOnConflictClause(ParseState *pstate,
 												 OnConflictClause *onConflictClause);
 static ForPortionOfExpr *transformForPortionOfClause(ParseState *pstate,
@@ -764,6 +767,25 @@ transformInsertStmt(ParseState *pstate, InsertStmt *stmt)
 	Assert(list_length(icolumns) == list_length(attrnos));
 
 	/*
+	 * INSERT ... BY NAME matches the source columns to the target columns by
+	 * their names, so it requires a query source that produces named columns.
+	 * VALUES rows and DEFAULT VALUES have no column names to match against.
+	 */
+	if (stmt->byName)
+	{
+		if (selectStmt == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("cannot use BY NAME with DEFAULT VALUES"),
+					 errhint("BY NAME requires a query, such as a SELECT, as the data source.")));
+		if (selectStmt->valuesLists != NIL)
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("cannot use BY NAME with VALUES"),
+					 errhint("BY NAME requires a query, such as a SELECT, as the data source.")));
+	}
+
+	/*
 	 * Determine which variant of INSERT we have.
 	 */
 	if (selectStmt == NULL)
@@ -863,6 +885,17 @@ transformInsertStmt(ParseState *pstate, InsertStmt *stmt)
 			}
 			exprList = lappend(exprList, expr);
 		}
+
+		/*
+		 * For INSERT ... BY NAME, match the source columns to the target
+		 * columns by name and reorder the target column and attribute-number
+		 * lists so that they line up positionally with the source columns.
+		 * Target columns not named by the source are dropped here and will be
+		 * filled with their default values.
+		 */
+		if (stmt->byName)
+			transformInsertColsByName(pstate, selectQuery->targetList,
+									  &icolumns, &attrnos);
 
 		/* Prepare row for assignment to target table */
 		exprList = transformInsertRow(pstate, exprList,
@@ -1207,6 +1240,88 @@ transformInsertRow(ParseState *pstate, List *exprlist,
 	}
 
 	return result;
+}
+
+/*
+ * transformInsertColsByName -
+ *	  Reorder the INSERT target-column lists to match the source columns of an
+ *	  INSERT ... BY NAME by name.
+ *
+ * srctlist: transformed source target list
+ * icolumns: in/out; candidate target columns (list of ResTarget)
+ * attrnos: in/out; target attribute numbers, aligned with *icolumns
+ *
+ * On return, *icolumns and *attrnos are replaced with new lists that are
+ * aligned positionally with exprList: the Nth entry is the target column
+ * whose name matches the Nth source column.  Each source column must match
+ * exactly one target column.  Target columns that are not named by any source
+ * column are simply omitted, and will be assigned their default values when
+ * the target list is later expanded.
+ */
+static void
+transformInsertColsByName(ParseState *pstate, List *srctlist,
+						  List **icolumns, List **attrnos)
+{
+	List	   *new_icolumns = NIL;
+	List	   *new_attrnos = NIL;
+	ListCell   *icols;
+	ListCell   *lc;
+
+	foreach(icols, *icolumns)
+	{
+		ResTarget  *col = lfirst_node(ResTarget, icols);
+
+		if (col->indirection != NIL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot use BY NAME with subfield or array assignments"),
+					 parser_errposition(pstate, col->location)));
+	}
+
+	foreach(lc, srctlist)
+	{
+		TargetEntry *tle = lfirst_node(TargetEntry, lc);
+		char	   *sname = tle->resname;
+		ResTarget  *matchcol = NULL;
+		int			matchattno = 0;
+		ListCell   *attnos;
+
+		if (tle->resjunk)
+			continue;
+
+		forboth(icols, *icolumns, attnos, *attrnos)
+		{
+			ResTarget  *col = lfirst_node(ResTarget, icols);
+
+			if (sname != NULL && col->name != NULL &&
+				strcmp(sname, col->name) == 0)
+			{
+				matchcol = col;
+				matchattno = lfirst_int(attnos);
+				break;
+			}
+		}
+
+		if (matchcol == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_COLUMN),
+					 errmsg("source column \"%s\" has no matching target column",
+							sname ? sname : "?column?"),
+					 parser_errposition(pstate, exprLocation((Node *) tle->expr))));
+
+		if (list_member_int(new_attrnos, matchattno))
+			ereport(ERROR,
+					(errcode(ERRCODE_DUPLICATE_COLUMN),
+					 errmsg("column \"%s\" specified more than once",
+							matchcol->name),
+					 parser_errposition(pstate, exprLocation((Node *) tle->expr))));
+
+		new_icolumns = lappend(new_icolumns, matchcol);
+		new_attrnos = lappend_int(new_attrnos, matchattno);
+	}
+
+	*icolumns = new_icolumns;
+	*attrnos = new_attrnos;
 }
 
 /*
