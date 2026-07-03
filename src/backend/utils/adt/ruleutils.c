@@ -1176,6 +1176,17 @@ pg_get_triggerdef_worker(Oid trigid, bool pretty)
 	return buf.data;
 }
 
+/*
+ * pg_get_triggerdef_string
+ *		Return the CREATE TRIGGER statement for a trigger, as a
+ *		string, or NULL if there is no such trigger.
+ */
+char *
+pg_get_triggerdef_string(Oid trigid)
+{
+	return pg_get_triggerdef_worker(trigid, false);
+}
+
 /* ----------
  * pg_get_indexdef			- Get the definition of an index
  *
