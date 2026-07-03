@@ -1736,13 +1736,36 @@ AlterSubscription(ParseState *pstate, AlterSubscriptionStmt *stmt,
 	if (supported_opts > 0)
 		parse_subscription_options(pstate, stmt->options, supported_opts, &opts);
 
-	sub = GetSubscription(subid, false);
+	heap_freetuple(tup);
+
+	/* Lock the subscription so nobody else can do anything with it. */
+	LockSharedObject(SubscriptionRelationId, subid, 0, AccessExclusiveLock);
+
+	/*
+	 * Re-read the subscription tuple after acquiring the lock. A concurrent
+	 * DROP or ALTER may have committed before we acquired the lock.
+	 */
+	tup = SearchSysCacheCopy1(SUBSCRIPTIONOID, ObjectIdGetDatum(subid));
+
+	if (!HeapTupleIsValid(tup))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("subscription \"%s\" does not exist",
+						stmt->subname)));
+
+	form = (Form_pg_subscription) GETSTRUCT(tup);
+
+	/* must still be owner */
+	if (!object_ownercheck(SubscriptionRelationId, subid, GetUserId()))
+		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_SUBSCRIPTION,
+					   stmt->subname);
 
 	/*
 	 * Determine in advance whether we need the original conninfo or not, so
 	 * that errors are generated consistently in cases where we do need it;
 	 * and not generated at all if we don't.
 	 */
+	sub = GetSubscription(subid, false);
 
 	/* conninfo needed when refreshing */
 	switch (stmt->kind)
@@ -1794,11 +1817,6 @@ AlterSubscription(ParseState *pstate, AlterSubscriptionStmt *stmt,
 	if (orig_conninfo_needed)
 		orig_conninfo = SubscriptionConninfo(sub);
 
-	retain_dead_tuples = sub->retaindeadtuples;
-	origin = sub->origin;
-	max_retention = sub->maxretention;
-	retention_active = sub->retentionactive;
-
 	/*
 	 * Don't allow non-superuser modification of a subscription with
 	 * password_required=false.
@@ -1809,8 +1827,10 @@ AlterSubscription(ParseState *pstate, AlterSubscriptionStmt *stmt,
 				 errmsg("password_required=false is superuser-only"),
 				 errhint("Subscriptions with the password_required option set to false may only be created or modified by the superuser.")));
 
-	/* Lock the subscription so nobody else can do anything with it. */
-	LockSharedObject(SubscriptionRelationId, subid, 0, AccessExclusiveLock);
+	retain_dead_tuples = sub->retaindeadtuples;
+	origin = sub->origin;
+	max_retention = sub->maxretention;
+	retention_active = sub->retentionactive;
 
 	/* Form a new tuple. */
 	memset(values, 0, sizeof(values));
