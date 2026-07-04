@@ -19,6 +19,7 @@ extern "C" {
 #include "fmgr.h"
 #include "nodes/pg_list.h"
 #include "nodes/primnodes.h"
+#include "utils/hsearch.h"
 
 PG_MODULE_MAGIC;
 
@@ -57,6 +58,53 @@ test_cplusplus_add(PG_FUNCTION_ARGS)
 	list_free(list);
 	pfree(node);
 	pfree(copy);
+
+	/* Test hash macros compile under C++ */
+	{
+		typedef struct
+		{
+			Oid			oid;
+			int			data;
+		} OidEntry;
+
+		typedef struct
+		{
+			char		name[NAMEDATALEN];
+			int			value;
+		} NameEntry;
+
+		HTAB	   *htab;
+
+		StaticAssertStmt(!HASH_KEY_AS_STRING(OidEntry, oid),
+						 "Oid key should use HASH_BLOBS");
+		StaticAssertStmt(!HASH_TYPE_AS_STRING(Oid),
+						 "Oid hashset should use HASH_BLOBS");
+		StaticAssertStmt(HASH_KEY_AS_STRING(NameEntry, name),
+						 "char[] key should use HASH_STRINGS");
+		StaticAssertStmt(HASH_TYPE_AS_STRING(NameData),
+						 "NameData should use HASH_STRINGS");
+
+		htab = hash_make(OidEntry, oid, "C++ oid hash", 8);
+		foreach_hash(OidEntry, myOidEntry, htab)
+		{
+			(void) myOidEntry;
+		}
+		hash_destroy(htab);
+
+		htab = hash_make(NameEntry, name, "C++ name hash", 8);
+		hash_destroy(htab);
+
+		htab = hash_make(OidEntry, oid, "C++ cxt hash", 8,
+						 .mcxt = CurrentMemoryContext);
+		hash_destroy(htab);
+
+		htab = hash_make(OidEntry, oid, "C++ fn hash", 8,
+						 .hash = NULL, .match = NULL);
+		hash_destroy(htab);
+
+		htab = hashset_make(Oid, "C++ oid hashset", 8);
+		hash_destroy(htab);
+	}
 
 	switch (a)
 	{
