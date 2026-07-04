@@ -962,6 +962,8 @@ main(int argc, char **argv)
 	if (archiveFormat != archDirectory && numWorkers > 1)
 		pg_fatal("parallel backup only supported by the directory format");
 
+	quit_handler_setup();
+
 	/* Open the output file */
 	fout = CreateArchive(filename, archiveFormat, compression_spec,
 						 dosync, archiveMode, setupDumpWorker, sync_method);

@@ -92,12 +92,12 @@ static CompressFileHandle *SaveOutput(ArchiveHandle *AH);
 static void RestoreOutput(ArchiveHandle *AH, CompressFileHandle *savedOutput);
 
 static int	restore_toc_entry(ArchiveHandle *AH, TocEntry *te, bool is_parallel);
-static void restore_toc_entries_prefork(ArchiveHandle *AH,
-										TocEntry *pending_list);
+static void restore_toc_entries_prologue(ArchiveHandle *AH,
+										 TocEntry *pending_list);
 static void restore_toc_entries_parallel(ArchiveHandle *AH,
 										 ParallelState *pstate,
 										 TocEntry *pending_list);
-static void restore_toc_entries_postfork(ArchiveHandle *AH,
+static void restore_toc_entries_epilogue(ArchiveHandle *AH,
 										 TocEntry *pending_list);
 static void pending_list_header_init(TocEntry *l);
 static void pending_list_append(TocEntry *l, TocEntry *te);
@@ -735,16 +735,16 @@ RestoreArchive(Archive *AHX)
 		pending_list_header_init(&pending_list);
 
 		/* This runs PRE_DATA items and then disconnects from the database */
-		restore_toc_entries_prefork(AH, &pending_list);
+		restore_toc_entries_prologue(AH, &pending_list);
 		Assert(AH->connection == NULL);
 
-		/* ParallelBackupStart() will actually fork the processes */
+		/* ParallelBackupStart() will actually run the threads */
 		pstate = ParallelBackupStart(AH);
 		restore_toc_entries_parallel(AH, pstate, &pending_list);
 		ParallelBackupEnd(AH, pstate);
 
 		/* reconnect the leader and see if we missed something */
-		restore_toc_entries_postfork(AH, &pending_list);
+		restore_toc_entries_epilogue(AH, &pending_list);
 		Assert(AH->connection != NULL);
 	}
 	else
@@ -4356,12 +4356,12 @@ dumpTimestamp(ArchiveHandle *AH, const char *msg, time_t tim)
  * added to the pending_list for later phases to deal with.
  */
 static void
-restore_toc_entries_prefork(ArchiveHandle *AH, TocEntry *pending_list)
+restore_toc_entries_prologue(ArchiveHandle *AH, TocEntry *pending_list)
 {
 	bool		skipped_some;
 	TocEntry   *next_work_item;
 
-	pg_log_debug("entering restore_toc_entries_prefork");
+	pg_log_debug("entering restore_toc_entries_prologue");
 
 	/* Adjust dependency information */
 	fix_dependencies(AH);
@@ -4470,12 +4470,11 @@ restore_toc_entries_prefork(ArchiveHandle *AH, TocEntry *pending_list)
 /*
  * Main engine for parallel restore.
  *
- * Parallel restore is done in three phases.  In this second phase,
- * we process entries by dispatching them to parallel worker children
- * (processes on Unix, threads on Windows), each of which connects
- * separately to the database.  Inter-entry dependencies are respected,
- * and so is the RestorePass multi-pass structure.  When we can no longer
- * make any entries ready to process, we exit.  Normally, there will be
+ * Parallel restore is done in three phases.  In this second phase, we process
+ * entries by dispatching them to parallel worker threads, each of which
+ * connects separately to the database.  Inter-entry dependencies are
+ * respected, and so is the RestorePass multi-pass structure.  When we can no
+ * longer make any entries ready to process, we exit.  Normally, there will be
  * nothing left to do; but if there is, the third phase will mop up.
  */
 static void
@@ -4597,12 +4596,12 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate,
  * at least some chance of completing the restore successfully.
  */
 static void
-restore_toc_entries_postfork(ArchiveHandle *AH, TocEntry *pending_list)
+restore_toc_entries_epilogue(ArchiveHandle *AH, TocEntry *pending_list)
 {
 	RestoreOptions *ropt = AH->public.ropt;
 	TocEntry   *te;
 
-	pg_log_debug("entering restore_toc_entries_postfork");
+	pg_log_debug("entering restore_toc_entries_epilogue");
 
 	/*
 	 * Now reconnect the single parent connection.

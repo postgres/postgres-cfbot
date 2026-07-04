@@ -150,6 +150,7 @@ main(int argc, char **argv)
 	pg_logging_set_level(PG_LOG_WARNING);
 	set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN("pg_dump"));
 
+	quit_handler_setup();
 	init_parallel_dump_utils();
 
 	opts = NewRestoreOptions();
