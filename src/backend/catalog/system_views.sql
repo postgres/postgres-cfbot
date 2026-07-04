@@ -1573,6 +1573,9 @@ CREATE VIEW pg_stat_vfdcache AS
     SELECT
         pg_stat_get_vfd_hits() AS hits,
         pg_stat_get_vfd_misses() AS misses,
+        pg_stat_get_vfd_cache_open_entries() AS open_entries,
+        pg_stat_get_vfd_cache_allocated_entries() AS allocated_entries,
+        pg_stat_get_vfd_cache_bytes() AS cache_bytes,
         pg_stat_get_vfd_max_open_fds() AS max_open_fds,
         CASE
             WHEN pg_stat_get_vfd_hits() + pg_stat_get_vfd_misses() = 0

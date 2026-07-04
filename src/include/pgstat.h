@@ -286,6 +286,20 @@ typedef struct PgStat_VfdCacheStats
 	TimestampTz stat_reset_timestamp;
 } PgStat_VfdCacheStats;
 
+/* -------
+ * PgStat_BackendVfdCacheStats	Per-backend VFD cache gauges
+ *
+ * These are live gauges (not cumulative counters) snapshotted from each
+ * backend's fd.c variables during stats flush.
+ * -------
+ */
+typedef struct PgStat_BackendVfdCacheStats
+{
+	PgStat_Counter open_entries;	/* FDs currently open (= nfile) */
+	PgStat_Counter allocated_entries;	/* total allocated VFD slots */
+	PgStat_Counter cache_bytes;	/* memory footprint in bytes */
+} PgStat_BackendVfdCacheStats;
+
 /*
  * Types related to counting IO operations
  */
@@ -537,6 +551,7 @@ typedef struct PgStat_Backend
 	PgStat_BktypeIO io_stats;
 	PgStat_WalCounters wal_counters;
 	PgStat_PendingLock lock_stats;
+	PgStat_BackendVfdCacheStats vfdcache_stats;
 } PgStat_Backend;
 
 /* ---------

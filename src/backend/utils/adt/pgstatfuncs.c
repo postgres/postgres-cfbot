@@ -15,6 +15,7 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "access/xact.h"
 #include "access/xlog.h"
 #include "access/xlogprefetcher.h"
 #include "catalog/catalog.h"
@@ -1347,6 +1348,98 @@ Datum
 pg_stat_get_vfd_misses(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_INT64(pgstat_fetch_stat_vfdcache()->vfd_misses);
+}
+
+/*
+ * Sum per-backend VFD cache gauges across all currently active backends.
+ * Results are cached for the duration of the current SQL statement to
+ * avoid redundant scans when the view calls multiple getter functions.
+ */
+static void
+pgstat_get_vfd_backend_sums(PgStat_Counter *open_sum,
+							PgStat_Counter *alloc_sum,
+							PgStat_Counter *bytes_sum)
+{
+	static TimestampTz cached_stmt_start_ts = 0;
+	static PgStat_Counter cached_open_sum = 0;
+	static PgStat_Counter cached_alloc_sum = 0;
+	static PgStat_Counter cached_bytes_sum = 0;
+	TimestampTz stmt_start_ts = GetCurrentStatementStartTimestamp();
+	int			num_backends = pgstat_fetch_stat_numbackends();
+
+	if (cached_stmt_start_ts == stmt_start_ts)
+	{
+		*open_sum = cached_open_sum;
+		*alloc_sum = cached_alloc_sum;
+		*bytes_sum = cached_bytes_sum;
+		return;
+	}
+
+	*open_sum = 0;
+	*alloc_sum = 0;
+	*bytes_sum = 0;
+
+	for (int curr_backend = 1; curr_backend <= num_backends; curr_backend++)
+	{
+		LocalPgBackendStatus *local_beentry;
+		PgBackendStatus *beentry;
+		PgStat_Backend *backend_stats;
+
+		local_beentry = pgstat_get_local_beentry_by_index(curr_backend);
+		beentry = &local_beentry->backendStatus;
+
+		if (!pgstat_tracks_backend_bktype(beentry->st_backendType))
+			continue;
+
+		backend_stats = pgstat_fetch_stat_backend(local_beentry->proc_number);
+		if (!backend_stats)
+			continue;
+
+		*open_sum += backend_stats->vfdcache_stats.open_entries;
+		*alloc_sum += backend_stats->vfdcache_stats.allocated_entries;
+		*bytes_sum += backend_stats->vfdcache_stats.cache_bytes;
+	}
+
+	cached_open_sum = *open_sum;
+	cached_alloc_sum = *alloc_sum;
+	cached_bytes_sum = *bytes_sum;
+	cached_stmt_start_ts = stmt_start_ts;
+}
+
+Datum
+pg_stat_get_vfd_cache_open_entries(PG_FUNCTION_ARGS)
+{
+	PgStat_Counter open_sum;
+	PgStat_Counter alloc_sum;
+	PgStat_Counter bytes_sum;
+
+	pgstat_get_vfd_backend_sums(&open_sum, &alloc_sum, &bytes_sum);
+
+	PG_RETURN_INT64(open_sum);
+}
+
+Datum
+pg_stat_get_vfd_cache_allocated_entries(PG_FUNCTION_ARGS)
+{
+	PgStat_Counter open_sum;
+	PgStat_Counter alloc_sum;
+	PgStat_Counter bytes_sum;
+
+	pgstat_get_vfd_backend_sums(&open_sum, &alloc_sum, &bytes_sum);
+
+	PG_RETURN_INT64(alloc_sum);
+}
+
+Datum
+pg_stat_get_vfd_cache_bytes(PG_FUNCTION_ARGS)
+{
+	PgStat_Counter open_sum;
+	PgStat_Counter alloc_sum;
+	PgStat_Counter bytes_sum;
+
+	pgstat_get_vfd_backend_sums(&open_sum, &alloc_sum, &bytes_sum);
+
+	PG_RETURN_INT64(bytes_sum);
 }
 
 Datum

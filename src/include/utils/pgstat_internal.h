@@ -718,7 +718,11 @@ extern void pgstat_archiver_snapshot_cb(void);
 #define PGSTAT_BACKEND_FLUSH_IO		(1 << 0)	/* Flush I/O statistics */
 #define PGSTAT_BACKEND_FLUSH_WAL   (1 << 1) /* Flush WAL statistics */
 #define PGSTAT_BACKEND_FLUSH_LOCK  (1 << 2) /* Flush lock statistics */
-#define PGSTAT_BACKEND_FLUSH_ALL   (PGSTAT_BACKEND_FLUSH_IO | PGSTAT_BACKEND_FLUSH_WAL | PGSTAT_BACKEND_FLUSH_LOCK)
+#define PGSTAT_BACKEND_FLUSH_VFDCACHE (1 << 3)	/* Flush VFD cache gauges */
+#define PGSTAT_BACKEND_FLUSH_ALL   (PGSTAT_BACKEND_FLUSH_IO | \
+									 PGSTAT_BACKEND_FLUSH_WAL | \
+									 PGSTAT_BACKEND_FLUSH_LOCK | \
+									 PGSTAT_BACKEND_FLUSH_VFDCACHE)
 
 extern bool pgstat_flush_backend(bool nowait, uint32 flags);
 extern bool pgstat_backend_flush_cb(bool nowait);
