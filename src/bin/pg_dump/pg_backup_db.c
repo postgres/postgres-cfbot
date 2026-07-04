@@ -114,6 +114,8 @@ ConnectDatabaseAhx(Archive *AHX,
 	trivalue	prompt_password;
 	char	   *password;
 
+	Assert(!am_parallel_worker_thread());
+
 	if (AH->connection)
 		pg_fatal("already connected to a database");
 
@@ -153,7 +155,7 @@ ConnectDatabaseAhx(Archive *AHX,
 	PQsetNoticeProcessor(AH->connection, notice_processor, NULL);
 
 	/* arrange for SIGINT to issue a query cancel on this connection */
-	set_archive_cancel_info(AH, AH->connection);
+	quit_handler_add_connection(AH->connection);
 }
 
 /*
@@ -164,26 +166,21 @@ void
 DisconnectDatabase(Archive *AHX)
 {
 	ArchiveHandle *AH = (ArchiveHandle *) AHX;
-	char		errbuf[1];
+
+	Assert(!am_parallel_worker_thread());
 
 	if (!AH->connection)
 		return;
 
-	if (AH->connCancel)
-	{
-		/*
-		 * If we have an active query, send a cancel before closing, ignoring
-		 * any errors.  This is of no use for a normal exit, but might be
-		 * helpful during pg_fatal().
-		 */
-		if (PQtransactionStatus(AH->connection) == PQTRANS_ACTIVE)
-			(void) PQcancel(AH->connCancel, errbuf, sizeof(errbuf));
-
-		/*
-		 * Prevent signal handler from sending a cancel after this.
-		 */
-		set_archive_cancel_info(AH, NULL);
-	}
+	/*
+	 * If we have an active query, send a cancel before closing, ignoring any
+	 * errors.  This is of no use for a normal exit, but might be helpful
+	 * during pg_fatal().
+	 */
+	if (PQtransactionStatus(AH->connection) == PQTRANS_ACTIVE)
+		quit_handler_cancel_and_remove_connection(AH->connection);
+	else
+		quit_handler_remove_connection(AH->connection);
 
 	PQfinish(AH->connection);
 	AH->connection = NULL;
