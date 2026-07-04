@@ -80,6 +80,7 @@ tests += {
       't/030_pager.pl',
       't/040_interrupt.pl',
       't/041_singlestep_eof.pl',
+      't/042_singlestep.pl',
     ],
   },
 }
