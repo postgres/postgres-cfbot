@@ -26,6 +26,7 @@
 #include "pgstat.h"
 #include "postmaster/bgworker.h"
 #include "replication/logicallauncher.h"
+#include "storage/fd.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "utils/acl.h"
@@ -1336,6 +1337,47 @@ pg_stat_get_buf_alloc(PG_FUNCTION_ARGS)
 	PG_RETURN_INT64(pgstat_fetch_stat_bgwriter()->buf_alloc);
 }
 
+Datum
+pg_stat_get_vfd_hits(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT64(pgstat_fetch_stat_vfdcache()->vfd_hits);
+}
+
+Datum
+pg_stat_get_vfd_misses(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT64(pgstat_fetch_stat_vfdcache()->vfd_misses);
+}
+
+Datum
+pg_stat_get_vfd_max_open_fds(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT32(max_safe_fds);
+}
+
+Datum
+pg_stat_get_vfd_stat_reset_time(PG_FUNCTION_ARGS)
+{
+	TimestampTz ts = pgstat_fetch_stat_vfdcache()->stat_reset_timestamp;
+
+	if (ts == 0)
+		PG_RETURN_NULL();
+
+	PG_RETURN_TIMESTAMPTZ(ts);
+}
+
+/*
+ * pg_stat_reset_vfdcache
+ *		Reset shared VFD cache counters.
+ */
+Datum
+pg_stat_reset_vfdcache(PG_FUNCTION_ARGS)
+{
+	pgstat_reset_vfdcache();
+	PG_RETURN_VOID();
+}
+
+
 /*
  * When adding a new column to the pg_stat_io view and the
  * pg_stat_get_backend_io() function, add a new enum value here above
@@ -2001,6 +2043,7 @@ pg_stat_reset_shared(PG_FUNCTION_ARGS)
 		XLogPrefetchResetStats();
 		pgstat_reset_of_kind(PGSTAT_KIND_SLRU);
 		pgstat_reset_of_kind(PGSTAT_KIND_WAL);
+		pgstat_reset_of_kind(PGSTAT_KIND_VFDCACHE);
 
 		PG_RETURN_VOID();
 	}
@@ -2021,13 +2064,15 @@ pg_stat_reset_shared(PG_FUNCTION_ARGS)
 		XLogPrefetchResetStats();
 	else if (strcmp(target, "slru") == 0)
 		pgstat_reset_of_kind(PGSTAT_KIND_SLRU);
+	else if (strcmp(target, "vfdcache") == 0)
+		pgstat_reset_of_kind(PGSTAT_KIND_VFDCACHE);
 	else if (strcmp(target, "wal") == 0)
 		pgstat_reset_of_kind(PGSTAT_KIND_WAL);
 	else
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("unrecognized reset target: \"%s\"", target),
-				 errhint("Target must be \"archiver\", \"bgwriter\", \"checkpointer\", \"io\", \"lock\", \"recovery_prefetch\", \"slru\", or \"wal\".")));
+				 errhint("Target must be \"archiver\", \"bgwriter\", \"checkpointer\", \"io\", \"lock\", \"recovery_prefetch\", \"slru\", \"vfdcache\", or \"wal\".")));
 
 	PG_RETURN_VOID();
 }

@@ -500,6 +500,23 @@ static const PgStat_KindInfo pgstat_kind_builtin_infos[PGSTAT_KIND_BUILTIN_SIZE]
 		.reset_all_cb = pgstat_wal_reset_all_cb,
 		.snapshot_cb = pgstat_wal_snapshot_cb,
 	},
+
+	[PGSTAT_KIND_VFDCACHE] = {
+		.name = "vfdcache",
+
+		.fixed_amount = true,
+		.write_to_file = true,
+
+		.snapshot_ctl_off = offsetof(PgStat_Snapshot, vfdcache),
+		.shared_ctl_off = offsetof(PgStat_ShmemControl, vfdcache),
+		.shared_data_off = offsetof(PgStatShared_VfdCache, stats),
+		.shared_data_len = sizeof(((PgStatShared_VfdCache *) 0)->stats),
+
+		.flush_static_cb = pgstat_vfdcache_flush_cb,
+		.init_shmem_cb = pgstat_vfdcache_init_shmem_cb,
+		.reset_all_cb = pgstat_vfdcache_reset_all_cb,
+		.snapshot_cb = pgstat_vfdcache_snapshot_cb,
+	},
 };
 
 /*

@@ -2426,6 +2426,14 @@ pg_stat_user_tables| SELECT relid,
     stats_reset
    FROM pg_stat_all_tables
   WHERE ((schemaname <> ALL (ARRAY['pg_catalog'::name, 'information_schema'::name])) AND (schemaname !~ '^pg_toast'::text));
+pg_stat_vfdcache| SELECT pg_stat_get_vfd_hits() AS hits,
+    pg_stat_get_vfd_misses() AS misses,
+    pg_stat_get_vfd_max_open_fds() AS max_open_fds,
+        CASE
+            WHEN ((pg_stat_get_vfd_hits() + pg_stat_get_vfd_misses()) = 0) THEN NULL::double precision
+            ELSE ((pg_stat_get_vfd_hits())::double precision / ((pg_stat_get_vfd_hits() + pg_stat_get_vfd_misses()))::double precision)
+        END AS hit_ratio,
+    pg_stat_get_vfd_stat_reset_time() AS stats_reset;
 pg_stat_wal| SELECT wal_records,
     wal_fpi,
     wal_bytes,

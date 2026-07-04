@@ -18,6 +18,7 @@ backend_sources += files(
   'pgstat_shmem.c',
   'pgstat_slru.c',
   'pgstat_subscription.c',
+  'pgstat_vfdcache.c',
   'pgstat_wal.c',
   'pgstat_xact.c',
 )

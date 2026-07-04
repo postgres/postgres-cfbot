@@ -535,6 +535,11 @@ SELECT stats_reset AS wal_reset_ts FROM pg_stat_wal \gset
 SELECT pg_stat_reset_shared('wal');
 SELECT stats_reset > :'wal_reset_ts'::timestamptz FROM pg_stat_wal;
 
+-- Test that reset_shared with vfdcache specified as the stats type works
+SELECT stats_reset AS vfdcache_reset_ts FROM pg_stat_vfdcache \gset
+SELECT pg_stat_reset_shared('vfdcache');
+SELECT stats_reset > :'vfdcache_reset_ts'::timestamptz FROM pg_stat_vfdcache;
+
 -- Test error case for reset_shared with unknown stats type
 SELECT pg_stat_reset_shared('unknown');
 
