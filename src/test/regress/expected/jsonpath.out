@@ -507,6 +507,30 @@ select '$.split_part("~@~", 2)'::jsonpath;
  $.split_part("~@~",2)
 (1 row)
 
+select '$.split(",")'::jsonpath;
+   jsonpath   
+--------------
+ $.split(",")
+(1 row)
+
+select '$.join(",")'::jsonpath;
+  jsonpath   
+-------------
+ $.join(",")
+(1 row)
+
+select '$.join(",", "N/A")'::jsonpath;
+      jsonpath      
+--------------------
+ $.join(",", "N/A")
+(1 row)
+
+select '$.translate("hello","bye")'::jsonpath;
+          jsonpath          
+----------------------------
+ $.translate("hello","bye")
+(1 row)
+
 -- Parse errors
 select '$.replace("hello")'::jsonpath;
 ERROR:  syntax error at or near ")" of jsonpath input
@@ -572,6 +596,34 @@ select '$.trim("x", "y")'::jsonpath;
 ERROR:  syntax error at or near "(" of jsonpath input
 LINE 1: select '$.trim("x", "y")'::jsonpath;
                ^
+select '$.split()'::jsonpath;
+ERROR:  syntax error at or near ")" of jsonpath input
+LINE 1: select '$.split()'::jsonpath;
+               ^
+select '$.split(",", "null", "extra")'::jsonpath;
+ERROR:  syntax error at or near "," of jsonpath input
+LINE 1: select '$.split(",", "null", "extra")'::jsonpath;
+               ^
+select '$.split(1)'::jsonpath;
+ERROR:  syntax error at or near "1" of jsonpath input
+LINE 1: select '$.split(1)'::jsonpath;
+               ^
+select '$.split(",", 1)'::jsonpath;
+ERROR:  syntax error at or near "1" of jsonpath input
+LINE 1: select '$.split(",", 1)'::jsonpath;
+               ^
+select '$.translate("hello")'::jsonpath;
+ERROR:  syntax error at or near ")" of jsonpath input
+LINE 1: select '$.translate("hello")'::jsonpath;
+               ^
+select '$.translate()'::jsonpath;
+ERROR:  syntax error at or near ")" of jsonpath input
+LINE 1: select '$.translate()'::jsonpath;
+               ^
+select '$.translate("hello","bye","extra")'::jsonpath;
+ERROR:  syntax error at or near "," of jsonpath input
+LINE 1: select '$.translate("hello","bye","extra")'::jsonpath;
+               ^
 -- Verify method keywords work as object key names
 select '$.lower'::jsonpath;
  jsonpath  
@@ -619,6 +671,24 @@ select '$.btrim'::jsonpath;
  jsonpath  
 -----------
  $."btrim"
+(1 row)
+
+select '$.split'::jsonpath;
+ jsonpath  
+-----------
+ $."split"
+(1 row)
+
+select '$.join'::jsonpath;
+ jsonpath 
+----------
+ $."join"
+(1 row)
+
+select '$.translate'::jsonpath;
+   jsonpath    
+---------------
+ $."translate"
 (1 row)
 
 select '$.time()'::jsonpath;

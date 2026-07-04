@@ -123,6 +123,9 @@ typedef enum JsonPathItemType
 	jpiStrBtrim,				/* .btrim() item method */
 	jpiStrInitcap,				/* .initcap() item method */
 	jpiStrSplitPart,			/* .split_part() item method */
+	jpiStrSplit,				/* .split() item method */
+	jpiStrTranslate,			/* .translate() item method */
+	jpiStrJoin,					/* .join() item method */
 } JsonPathItemType;
 
 /* XQuery regex mode flags for LIKE_REGEX predicate */
