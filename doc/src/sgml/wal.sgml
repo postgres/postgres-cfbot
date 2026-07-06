@@ -360,7 +360,10 @@
     <para>
       Checkpoints have to be performed at certain points - both when enabling
       and disabling data checksums, which may generate of lot of writes due to
-      flushing dirty pages.
+      flushing dirty pages. The impact may be reduced by requresting spread
+      checkpoints using the <parameter>fast</parameter> parameter of the
+      <function>pg_enable_data_checksums()</function> and
+      <function>pg_disable_data_checksums()</function> functions.
     </para>
 
     <para>

@@ -118,6 +118,11 @@ If defined, the function will wait for the state defined in this parameter,
 waiting timing out, before returning.  The function will wait for
 $PostgreSQL::Test::Utils::timeout_default seconds before timing out.
 
+=item fast
+
+The B<fast> determines if checkpoints will be fast or spread, default is
+'true' (which means fast checkpoints).
+
 =back
 
 =cut
@@ -130,13 +135,14 @@ sub enable_data_checksums
 	# Set sane defaults for the parameters
 	$params{cost_delay} = 0 unless (defined($params{cost_delay}));
 	$params{cost_limit} = 100 unless (defined($params{cost_limit}));
+	$params{fast} = 'true' unless (defined($params{fast}));
 
 	my $query = <<'EOQ';
-SELECT pg_enable_data_checksums(%s, %s);
+SELECT pg_enable_data_checksums(%s, %s, %s);
 EOQ
 
 	$postgresnode->safe_psql('postgres',
-		sprintf($query, $params{cost_delay}, $params{cost_limit}));
+		sprintf($query, $params{cost_delay}, $params{cost_limit}, $params{fast}));
 
 	if (defined($params{wait}))
 	{
@@ -166,6 +172,11 @@ waiting timing out, before returning.  The function will wait for
 $PostgreSQL::Test::Utils::timeout_default seconds before timing out.
 Unlike in C<enable_data_checksums> the value of the parameter is discarded.
 
+=item fast
+
+The B<fast> determines if checkpoints will be fast or spread, default is
+'true' (which means fast checkpoints).
+
 =back
 
 =cut
@@ -175,8 +186,15 @@ sub disable_data_checksums
 	my $postgresnode = shift;
 	my %params = @_;
 
+	# Set sane defaults for the parameters
+	$params{fast} = 'true' unless (defined($params{fast}));
+
+	my $query = <<'EOQ';
+SELECT pg_disable_data_checksums(%s);
+EOQ
+
 	$postgresnode->safe_psql('postgres',
-		'SELECT pg_disable_data_checksums();');
+		sprintf($query, $params{fast}));
 
 	if (defined($params{wait}))
 	{
