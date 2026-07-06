@@ -30,6 +30,11 @@ install_data(
   kwargs: contrib_data_args,
 )
 
+bitcode_modules += {
+  'target': citext,
+  'srcfiles': citext_sources,
+}
+
 tests += {
   'name': 'citext',
   'sd': meson.current_source_dir(),
