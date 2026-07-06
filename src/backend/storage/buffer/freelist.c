@@ -22,6 +22,7 @@
 #include "storage/proc.h"
 #include "storage/shmem.h"
 #include "storage/subsystems.h"
+#include "port/pg_numa.h"
 
 #define INT_ACCESS_ONCE(var)	((int)(*((volatile int *)&(var))))
 
@@ -101,67 +102,109 @@ static void AddBufferToRing(BufferAccessStrategy strategy,
 							BufferDesc *buf);
 
 /*
+ * Per-backend state for the batched clock sweep.  Each backend claims a run
+ * of consecutive clock-hand values with a single atomic fetch-add and then
+ * iterates through them privately, so the contended nextVictimBuffer cache
+ * line is touched roughly 1/batch as often.  MyBatchPos is the next hand
+ * value to hand out; MyBatchEnd is one past the end of the claimed run.  Both
+ * are absolute (monotonically increasing) hand values; the buffer id is the
+ * value modulo NBuffers.
+ */
+static uint32 MyBatchPos = 0;
+static uint32 MyBatchEnd = 0;
+
+/*
+ * Number of clock-hand values a backend claims per atomic fetch-add,
+ * computed once at startup (see StrategyCtlShmemInit).  When batching is
+ * enabled it is one cache line's worth of hand advance, so concurrent
+ * backends sweep non-overlapping, cache-line-sized runs of the pool; the
+ * global sweep order is preserved (each buffer is still visited exactly once
+ * per pass).  Batching is enabled only on multi-node NUMA hardware; otherwise
+ * this stays 1 and the sweep is byte-identical to the stock clock.
+ */
+static uint32 ClockSweepBatchSize = 1;
+
+/*
  * ClockSweepTick - Helper routine for StrategyGetBuffer()
  *
- * Move the clock hand one buffer ahead of its current position and return the
- * id of the buffer now under the hand.
+ * Return the next buffer to consider for eviction.  Backends claim batches of
+ * consecutive buffer IDs from the shared clock hand, then iterate through
+ * them locally without further atomic operations.  This preserves the global
+ * sweep order while reducing contention on the shared counter.
  */
 static inline uint32
 ClockSweepTick(void)
 {
 	uint32		victim;
 
-	/*
-	 * Atomically move hand ahead one buffer - if there's several processes
-	 * doing this, this can lead to buffers being returned slightly out of
-	 * apparent order.
-	 */
-	victim =
-		pg_atomic_fetch_add_u32(&StrategyControl->nextVictimBuffer, 1);
-
-	if (victim >= NBuffers)
+	if (MyBatchPos >= MyBatchEnd)
 	{
-		uint32		originalVictim = victim;
-
-		/* always wrap what we look up in BufferDescriptors */
-		victim = victim % NBuffers;
-
 		/*
-		 * If we're the one that just caused a wraparound, force
-		 * completePasses to be incremented while holding the spinlock. We
-		 * need the spinlock so StrategySyncStart() can return a consistent
-		 * value consisting of nextVictimBuffer and completePasses.
+		 * Claim a fresh batch from the shared clock hand.  This is the only
+		 * atomic operation per batch, reducing contention by the batch size.
 		 */
-		if (victim == 0)
+		uint32		start;
+		uint32		batch_size = ClockSweepBatchSize;
+
+		start = pg_atomic_fetch_add_u32(&StrategyControl->nextVictimBuffer,
+										batch_size);
+
+		if (start >= (uint32) NBuffers)
 		{
-			uint32		expected;
-			uint32		wrapped;
-			bool		success = false;
+			start = start % NBuffers;
 
-			expected = originalVictim + 1;
-
-			while (!success)
+			/*
+			 * The counter has grown past NBuffers; try to wrap it back.  We
+			 * must hold the spinlock so StrategySyncStart() can read
+			 * nextVictimBuffer and completePasses consistently.
+			 *
+			 * With batching, multiple backends may each land a fetch-add
+			 * that returns a value past NBuffers in the same pass.  After
+			 * acquiring the spinlock we re-read the counter: if another
+			 * backend already wrapped it below NBuffers we are done.
+			 */
+			SpinLockAcquire(&StrategyControl->buffer_strategy_lock);
 			{
-				/*
-				 * Acquire the spinlock while increasing completePasses. That
-				 * allows other readers to read nextVictimBuffer and
-				 * completePasses in a consistent manner which is required for
-				 * StrategySyncStart().  In theory delaying the increment
-				 * could lead to an overflow of nextVictimBuffers, but that's
-				 * highly unlikely and wouldn't be particularly harmful.
-				 */
-				SpinLockAcquire(&StrategyControl->buffer_strategy_lock);
+				uint32		current;
+				uint32		wrapped;
 
-				wrapped = expected % NBuffers;
-
-				success = pg_atomic_compare_exchange_u32(&StrategyControl->nextVictimBuffer,
-														 &expected, wrapped);
-				if (success)
-					StrategyControl->completePasses++;
-				SpinLockRelease(&StrategyControl->buffer_strategy_lock);
+				current = pg_atomic_read_u32(&StrategyControl->nextVictimBuffer);
+				if (current >= (uint32) NBuffers)
+				{
+					wrapped = current % NBuffers;
+					if (pg_atomic_compare_exchange_u32(&StrategyControl->nextVictimBuffer,
+													   &current, wrapped))
+						StrategyControl->completePasses++;
+				}
 			}
+			SpinLockRelease(&StrategyControl->buffer_strategy_lock);
 		}
+		else if (start + batch_size > (uint32) NBuffers)
+		{
+			/*
+			 * The fetch-add returned a value below NBuffers, but this batch
+			 * spans the wrap point (start .. NBuffers-1 then 0 .. k are
+			 * iterated locally via "% NBuffers").  That crossing is a
+			 * complete pass too, but the wrap-and-increment path above only
+			 * fires when the fetch-add return is itself >= NBuffers, so
+			 * without this it would go uncounted and completePasses would
+			 * drift low (it feeds bgwriter pacing / StrategySyncStart, not
+			 * correctness).  The batch is capped at NBuffers, so a batch
+			 * spans the wrap at most once; count it under the spinlock for a
+			 * consistent (nextVictimBuffer, completePasses) pair.
+			 */
+			SpinLockAcquire(&StrategyControl->buffer_strategy_lock);
+			StrategyControl->completePasses++;
+			SpinLockRelease(&StrategyControl->buffer_strategy_lock);
+		}
+
+		MyBatchPos = start;
+		MyBatchEnd = start + batch_size;
 	}
+
+	victim = MyBatchPos % NBuffers;
+	MyBatchPos++;
+
 	return victim;
 }
 
@@ -408,6 +451,29 @@ StrategyCtlShmemInit(void *arg)
 
 	/* No pending notification */
 	StrategyControl->bgwprocno = -1;
+
+	/*
+	 * Decide whether to batch the clock sweep.
+	 *
+	 * Batching claims a run of consecutive buffer IDs per atomic fetch-add so
+	 * concurrent backends touch the shared nextVictimBuffer cache line ~1/batch
+	 * as often -- a win only when that line actually bounces across sockets,
+	 * i.e. on multi-node NUMA hardware.  On a single socket the atomic is
+	 * already node-local and batching would only make backends skip ahead for
+	 * no benefit, so we fall back to batch size 1 there (byte-identical to the
+	 * stock one-buffer-at-a-time clock sweep).
+	 *
+	 * Batch (> 1) only when libnuma reports more than one node
+	 * (pg_numa_get_max_node() >= 1); pg_numa_init() returns -1 when NUMA is
+	 * unavailable.  (Benchmarking showed the win holds with or without huge
+	 * pages, so huge-page availability is intentionally not part of the gate.)
+	 */
+	if (pg_numa_init() != -1 &&
+		pg_numa_get_max_node() >= 1)
+		ClockSweepBatchSize = Min(PG_CACHE_LINE_SIZE / (uint32) sizeof(uint32),
+								  (uint32) NBuffers);
+	else
+		ClockSweepBatchSize = 1;
 }
 
 
