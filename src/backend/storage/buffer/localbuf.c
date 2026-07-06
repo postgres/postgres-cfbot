@@ -167,7 +167,7 @@ LocalBufferAlloc(SMgrRelation smgr, ForkNumber forkNum, BlockNumber blockNum,
 
 		buf_state = pg_atomic_read_u64(&bufHdr->state);
 		buf_state &= ~(BUF_FLAG_MASK | BUF_USAGECOUNT_MASK);
-		buf_state |= BM_TAG_VALID | BUF_USAGECOUNT_ONE;
+		buf_state |= BM_TAG_VALID;	/* admit COOL (probation) */
 		pg_atomic_unlocked_write_u64(&bufHdr->state, buf_state);
 
 		*foundPtr = false;
@@ -248,9 +248,10 @@ GetLocalVictimBuffer(void)
 		{
 			uint64		buf_state = pg_atomic_read_u64(&bufHdr->state);
 
-			if (BUF_STATE_GET_USAGECOUNT(buf_state) > 0)
+			if (BUF_STATE_GET_COOLSTATE(buf_state) != BUF_COOLSTATE_COOL)
 			{
-				buf_state -= BUF_USAGECOUNT_ONE;
+				/* HOT: give it a second chance, cool it and keep scanning. */
+				buf_state -= BUF_COOLSTATE_ONE;
 				pg_atomic_unlocked_write_u64(&bufHdr->state, buf_state);
 				trycounter = NLocBuffer;
 			}
@@ -454,7 +455,7 @@ ExtendBufferedRelLocal(BufferManagerRelation bmr,
 
 			victim_buf_hdr->tag = tag;
 
-			buf_state |= BM_TAG_VALID | BUF_USAGECOUNT_ONE;
+			buf_state |= BM_TAG_VALID;	/* admit COOL (probation) */
 
 			pg_atomic_unlocked_write_u64(&victim_buf_hdr->state, buf_state);
 
@@ -839,9 +840,9 @@ PinLocalBuffer(BufferDesc *buf_hdr, bool adjust_usagecount)
 		NLocalPinnedBuffers++;
 		buf_state += BUF_REFCOUNT_ONE;
 		if (adjust_usagecount &&
-			BUF_STATE_GET_USAGECOUNT(buf_state) < BM_MAX_USAGE_COUNT)
+			BUF_STATE_GET_COOLSTATE(buf_state) < BUF_COOLSTATE_HOT)
 		{
-			buf_state += BUF_USAGECOUNT_ONE;
+			buf_state += BUF_COOLSTATE_ONE;
 		}
 		pg_atomic_unlocked_write_u64(&buf_hdr->state, buf_state);
 
