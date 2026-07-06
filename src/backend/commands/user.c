@@ -1778,6 +1778,8 @@ ReassignOwnedObjects(ReassignOwnedStmt *stmt)
  * roleSpecsToIds
  *
  * Given a list of RoleSpecs, generate a list of role OIDs in the same order.
+ * Each role is locked with AccessShareLock to prevent concurrent DROP ROLE
+ * from removing it between resolution and the caller's catalog update.
  *
  * ROLESPEC_PUBLIC is not allowed.
  */
@@ -1792,7 +1794,23 @@ roleSpecsToIds(List *memberNames)
 		RoleSpec   *rolespec = lfirst_node(RoleSpec, l);
 		Oid			roleid;
 
-		roleid = get_rolespec_oid(rolespec, false);
+		if (rolespec->roletype == ROLESPEC_CSTRING)
+			roleid = RoleNameGetOid(rolespec->rolename,
+									AccessShareLock, false,
+									NULL, NULL);
+		else
+		{
+			roleid = get_rolespec_oid(rolespec, false);
+			LockSharedObject(AuthIdRelationId, roleid, 0,
+							 AccessShareLock);
+
+			/* Recheck that the role still exists after locking. */
+			if (!SearchSysCacheExists1(AUTHOID, ObjectIdGetDatum(roleid)))
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_OBJECT),
+						 errmsg("role with OID %u does not exist", roleid)));
+		}
+
 		result = lappend_oid(result, roleid);
 	}
 	return result;
