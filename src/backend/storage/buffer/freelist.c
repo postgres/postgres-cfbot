@@ -632,12 +632,7 @@ StrategyGetBufferPartition(ClockSweep *sweep, BufferAccessStrategy strategy,
 		{
 			local_buf_state = old_buf_state;
 
-			/*
-			 * If the buffer is pinned or has a nonzero usage_count, we cannot
-			 * use it; decrement the usage_count (unless pinned) and keep
-			 * scanning.
-			 */
-
+			/* If the buffer is pinned we cannot use it; keep scanning. */
 			if (BUF_STATE_GET_REFCOUNT(local_buf_state) != 0)
 			{
 				if (--trycounter == 0)
@@ -661,9 +656,17 @@ StrategyGetBufferPartition(ClockSweep *sweep, BufferAccessStrategy strategy,
 				continue;
 			}
 
-			if (BUF_STATE_GET_USAGECOUNT(local_buf_state) != 0)
+			if (BUF_STATE_GET_COOLSTATE(local_buf_state) != BUF_COOLSTATE_COOL)
 			{
-				local_buf_state -= BUF_USAGECOUNT_ONE;
+				/*
+				 * HOT buffer: cool it in place this tick and keep scanning.  We
+				 * do NOT claim it now -- a demoted buffer only becomes a victim
+				 * on a later tick, so a HOT buffer always survives the pass that
+				 * cools it and gets a full sweep of grace in which a new access
+				 * can promote it back to HOT.  Cooling is progress toward a
+				 * victim, so reset trycounter.
+				 */
+				local_buf_state &= ~BUF_USAGECOUNT_MASK;	/* HOT -> COOL */
 
 				if (pg_atomic_compare_exchange_u64(&buf->state, &old_buf_state,
 												   local_buf_state))
@@ -674,7 +677,7 @@ StrategyGetBufferPartition(ClockSweep *sweep, BufferAccessStrategy strategy,
 			}
 			else
 			{
-				/* pin the buffer if the CAS succeeds */
+				/* COOL and unpinned: claim it.  Pin if the CAS succeeds. */
 				local_buf_state += BUF_REFCOUNT_ONE;
 
 				if (pg_atomic_compare_exchange_u64(&buf->state, &old_buf_state,
@@ -1398,14 +1401,17 @@ GetBufferFromRing(BufferAccessStrategy strategy, uint64 *buf_state)
 		/*
 		 * If the buffer is pinned we cannot use it under any circumstances.
 		 *
-		 * If usage_count is 0 or 1 then the buffer is fair game (we expect 1,
-		 * since our own previous usage of the ring element would have left it
-		 * there, but it might've been decremented by clock-sweep since then).
-		 * A higher usage_count indicates someone else has touched the buffer,
-		 * so we shouldn't re-use it.
+		 * If it is unpinned but has been promoted to HOT, another backend
+		 * touched it since we last cycled past this ring slot, so it has
+		 * joined the working set and we must not recycle it -- tell the caller
+		 * to get a fresh victim from the sweep instead.  This is the 1-bit
+		 * cooling-state analog of the stock ring's "usage_count > 1 means
+		 * someone else touched it" test: a slot the ring keeps reusing and
+		 * nobody else pins stays COOL, and an out-of-ring PinBuffer() is
+		 * exactly what promotes it to HOT.
 		 */
-		if (BUF_STATE_GET_REFCOUNT(local_buf_state) != 0
-			|| BUF_STATE_GET_USAGECOUNT(local_buf_state) > 1)
+		if (BUF_STATE_GET_REFCOUNT(local_buf_state) != 0 ||
+			BUF_STATE_GET_COOLSTATE(local_buf_state) != BUF_COOLSTATE_COOL)
 			break;
 
 		/* See equivalent code in PinBuffer() */
