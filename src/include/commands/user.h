@@ -21,6 +21,15 @@
 extern PGDLLIMPORT int Password_encryption; /* values from enum PasswordType */
 extern PGDLLIMPORT char *createrole_self_grant;
 
+/* Callback for RoleNameGetOid, invoked after name resolution but before locking */
+typedef void (*RoleNameGetOidCallback) (const char *rolename, Oid roleid,
+										Oid oldroleid, void *callback_arg);
+
+extern Oid	RoleNameGetOid(const char *rolename, LOCKMODE lockmode,
+						   bool missing_ok,
+						   RoleNameGetOidCallback callback,
+						   void *callback_arg);
+
 /* Hook to check passwords in CreateRole() and AlterRole() */
 typedef void (*check_password_hook_type) (const char *username, const char *shadow_pass, PasswordType password_type, Datum validuntil_time, bool validuntil_null);
 
