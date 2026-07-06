@@ -423,23 +423,16 @@ recurse_dir(const char *datadir, const char *parentpath,
 
 		snprintf(fullpath, sizeof(fullpath), "%s/%s", fullparentpath, xlde->d_name);
 
+		/*
+		 * We don't expect any file to vanish mid-scan: recurse_dir() runs
+		 * only over a stopped source data directory (in local mode) or the
+		 * target data directory, never over a running server (the
+		 * source-server case goes through libpq_traverse_files() instead).
+		 * So treat a failed lstat() as a hard error in all cases.
+		 */
 		if (lstat(fullpath, &fst) < 0)
-		{
-			if (errno == ENOENT)
-			{
-				/*
-				 * File doesn't exist anymore. This is ok, if the new primary
-				 * is running and the file was just removed. If it was a data
-				 * file, there should be a WAL record of the removal. If it
-				 * was something else, it couldn't have been anyway.
-				 *
-				 * TODO: But complain if we're processing the target dir!
-				 */
-			}
-			else
-				pg_fatal("could not stat file \"%s\": %m",
-						 fullpath);
-		}
+			pg_fatal("could not stat file \"%s\": %m",
+					 fullpath);
 
 		if (parentpath)
 			snprintf(path, sizeof(path), "%s/%s", parentpath, xlde->d_name);
