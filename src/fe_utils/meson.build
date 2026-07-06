@@ -8,6 +8,7 @@ fe_utils_sources = files(
   'astreamer_tar.c',
   'astreamer_zstd.c',
   'cancel.c',
+  'cancel_set.c',
   'conditional.c',
   'connect_utils.c',
   'mbprint.c',
