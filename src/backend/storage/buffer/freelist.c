@@ -50,6 +50,16 @@ typedef struct
 	pg_atomic_uint32 numBufferAllocs;	/* Buffers allocated since last reset */
 
 	/*
+	 * Number of clock-hand values a backend claims per atomic fetch-add.
+	 * Computed once at startup (see StrategyCtlShmemInit).  Kept in shared
+	 * memory rather than a backend-local static so that EXEC_BACKEND children
+	 * (which do not inherit the postmaster's statics) see the same value; a
+	 * backend-local copy would silently reset to 1 there, disabling batching
+	 * on Windows.
+	 */
+	uint32		batchSize;
+
+	/*
 	 * Bgworker process to be notified upon activity or -1 if none. See
 	 * StrategyNotifyBgWriter.
 	 */
@@ -114,17 +124,6 @@ static uint32 MyBatchPos = 0;
 static uint32 MyBatchEnd = 0;
 
 /*
- * Number of clock-hand values a backend claims per atomic fetch-add,
- * computed once at startup (see StrategyCtlShmemInit).  When batching is
- * enabled it is one cache line's worth of hand advance, so concurrent
- * backends sweep non-overlapping, cache-line-sized runs of the pool; the
- * global sweep order is preserved (each buffer is still visited exactly once
- * per pass).  Batching is enabled only on multi-node NUMA hardware; otherwise
- * this stays 1 and the sweep is byte-identical to the stock clock.
- */
-static uint32 ClockSweepBatchSize = 1;
-
-/*
  * ClockSweepTick - Helper routine for StrategyGetBuffer()
  *
  * Return the next buffer to consider for eviction.  Backends claim batches of
@@ -144,7 +143,7 @@ ClockSweepTick(void)
 		 * atomic operation per batch, reducing contention by the batch size.
 		 */
 		uint32		start;
-		uint32		batch_size = ClockSweepBatchSize;
+		uint32		batch_size = StrategyControl->batchSize;
 
 		start = pg_atomic_fetch_add_u32(&StrategyControl->nextVictimBuffer,
 										batch_size);
@@ -279,12 +278,30 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_r
 	 */
 	pg_atomic_fetch_add_u32(&StrategyControl->numBufferAllocs, 1);
 
-	/* Use the "clock sweep" algorithm to find a free buffer */
+	/*
+	 * Use the cooling-stage clock sweep to find a victim.
+	 *
+	 * A buffer is HOT (recently used) or COOL (an eviction candidate).  This
+	 * is a COOL-IN-PLACE sweep: every tick past a HOT buffer demotes it one
+	 * step toward COOL (respecting a single second-chance reference bit), and
+	 * a COOL, unpinned buffer is claimed as the victim.  Because every tick
+	 * makes cooling progress, the sweep is self-staging: it never needs a
+	 * background pre-cooler to keep COOL victims available, and it cannot get
+	 * stuck in a "no COOL victim anywhere" state that forces a foreground
+	 * escalation pass.  Newly loaded pages are admitted COOL (see
+	 * BufferAlloc), so scan resistance falls out of the algorithm.
+	 *
+	 * trycounter bounds the search: only a pinned buffer is "no progress".
+	 * Demoting or reclaiming is progress and resets it.  A full NBuffers pass
+	 * that finds every buffer pinned fails, matching the stock "no unpinned
+	 * buffers available" contract.
+	 */
 	trycounter = NBuffers;
 	for (;;)
 	{
 		uint64		old_buf_state;
 		uint64		local_buf_state;
+		bool		no_progress = false;
 
 		buf = GetBufferDescriptor(ClockSweepTick());
 
@@ -297,25 +314,10 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_r
 		{
 			local_buf_state = old_buf_state;
 
-			/*
-			 * If the buffer is pinned or has a nonzero usage_count, we cannot
-			 * use it; decrement the usage_count (unless pinned) and keep
-			 * scanning.
-			 */
-
+			/* If the buffer is pinned we cannot use it; keep scanning. */
 			if (BUF_STATE_GET_REFCOUNT(local_buf_state) != 0)
 			{
-				if (--trycounter == 0)
-				{
-					/*
-					 * We've scanned all the buffers without making any state
-					 * changes, so all the buffers are pinned (or were when we
-					 * looked at them). We could hope that someone will free
-					 * one eventually, but it's probably better to fail than
-					 * to risk getting stuck in an infinite loop.
-					 */
-					elog(ERROR, "no unpinned buffers available");
-				}
+				no_progress = true;
 				break;
 			}
 
@@ -326,9 +328,23 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_r
 				continue;
 			}
 
-			if (BUF_STATE_GET_USAGECOUNT(local_buf_state) != 0)
+			if (BUF_STATE_GET_COOLSTATE(local_buf_state) != BUF_COOLSTATE_COOL)
 			{
-				local_buf_state -= BUF_USAGECOUNT_ONE;
+				/*
+				 * HOT buffer: cool it in place this tick.  Apply a single
+				 * second-chance reference bit: a HOT buffer whose ref bit is
+				 * set (touched since it was last passed) has the ref bit
+				 * cleared and stays HOT; only a HOT buffer whose ref bit is
+				 * already clear is demoted HOT -> COOL.  Either transition is
+				 * progress toward a victim, so reset trycounter.  We do NOT
+				 * claim the buffer this tick -- a demoted buffer becomes a
+				 * candidate for a later tick, giving it one more full sweep of
+				 * grace before eviction.
+				 */
+				if (BUF_STATE_GET_REFBIT(local_buf_state))
+					local_buf_state &= ~BUF_REFBIT;			/* second chance: clear ref, stay HOT */
+				else
+					local_buf_state &= ~BUF_USAGECOUNT_MASK;	/* HOT -> COOL, clear ref bit */
 
 				if (pg_atomic_compare_exchange_u64(&buf->state, &old_buf_state,
 												   local_buf_state))
@@ -339,7 +355,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_r
 			}
 			else
 			{
-				/* pin the buffer if the CAS succeeds */
+				/* COOL and unpinned: claim it.  Pin if the CAS succeeds. */
 				local_buf_state += BUF_REFCOUNT_ONE;
 
 				if (pg_atomic_compare_exchange_u64(&buf->state, &old_buf_state,
@@ -356,6 +372,15 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_r
 				}
 			}
 		}
+
+		/*
+		 * Only a pinned buffer is no progress.  A full NBuffers pass that
+		 * makes no progress means every buffer is pinned, so fail rather than
+		 * spin forever.  (A failed CAS above is neither progress nor a full
+		 * miss: we simply retry the same buffer.)
+		 */
+		if (no_progress && --trycounter == 0)
+			elog(ERROR, "no unpinned buffers available");
 	}
 }
 
@@ -470,10 +495,10 @@ StrategyCtlShmemInit(void *arg)
 	 */
 	if (pg_numa_init() != -1 &&
 		pg_numa_get_max_node() >= 1)
-		ClockSweepBatchSize = Min(PG_CACHE_LINE_SIZE / (uint32) sizeof(uint32),
-								  (uint32) NBuffers);
+		StrategyControl->batchSize = Min(PG_CACHE_LINE_SIZE / (uint32) sizeof(uint32),
+										 (uint32) NBuffers);
 	else
-		ClockSweepBatchSize = 1;
+		StrategyControl->batchSize = 1;
 }
 
 
@@ -721,14 +746,17 @@ GetBufferFromRing(BufferAccessStrategy strategy, uint64 *buf_state)
 		/*
 		 * If the buffer is pinned we cannot use it under any circumstances.
 		 *
-		 * If usage_count is 0 or 1 then the buffer is fair game (we expect 1,
-		 * since our own previous usage of the ring element would have left it
-		 * there, but it might've been decremented by clock-sweep since then).
-		 * A higher usage_count indicates someone else has touched the buffer,
-		 * so we shouldn't re-use it.
+		 * If it is unpinned but has been promoted to HOT, another backend
+		 * touched it since we last cycled past this ring slot, so it has
+		 * joined the working set and we must not recycle it -- tell the caller
+		 * to get a fresh victim from the sweep instead.  This is the 1-bit
+		 * cooling-state analog of the stock ring's "usage_count > 1 means
+		 * someone else touched it" test: a slot the ring keeps reusing and
+		 * nobody else pins stays COOL, and an out-of-ring PinBuffer() is
+		 * exactly what promotes it to HOT.
 		 */
-		if (BUF_STATE_GET_REFCOUNT(local_buf_state) != 0
-			|| BUF_STATE_GET_USAGECOUNT(local_buf_state) > 1)
+		if (BUF_STATE_GET_REFCOUNT(local_buf_state) != 0 ||
+			BUF_STATE_GET_COOLSTATE(local_buf_state) != BUF_COOLSTATE_COOL)
 			break;
 
 		/* See equivalent code in PinBuffer() */
