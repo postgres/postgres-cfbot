@@ -620,6 +620,7 @@ StrategyGetBufferPartition(ClockSweep *sweep, BufferAccessStrategy strategy,
 	{
 		uint64		old_buf_state;
 		uint64		local_buf_state;
+		bool		no_progress = false;
 
 		buf = GetBufferDescriptor(ClockSweepTick(sweep));
 
@@ -632,12 +633,7 @@ StrategyGetBufferPartition(ClockSweep *sweep, BufferAccessStrategy strategy,
 		{
 			local_buf_state = old_buf_state;
 
-			/*
-			 * If the buffer is pinned or has a nonzero usage_count, we cannot
-			 * use it; decrement the usage_count (unless pinned) and keep
-			 * scanning.
-			 */
-
+			/* If the buffer is pinned we cannot use it; keep scanning. */
 			if (BUF_STATE_GET_REFCOUNT(local_buf_state) != 0)
 			{
 				if (--trycounter == 0)
@@ -661,9 +657,23 @@ StrategyGetBufferPartition(ClockSweep *sweep, BufferAccessStrategy strategy,
 				continue;
 			}
 
-			if (BUF_STATE_GET_USAGECOUNT(local_buf_state) != 0)
+			if (BUF_STATE_GET_COOLSTATE(local_buf_state) != BUF_COOLSTATE_COOL)
 			{
-				local_buf_state -= BUF_USAGECOUNT_ONE;
+				/*
+				 * HOT buffer: cool it in place this tick.  Apply a single
+				 * second-chance reference bit: a HOT buffer whose ref bit is
+				 * set (touched since it was last passed) has the ref bit
+				 * cleared and stays HOT; only a HOT buffer whose ref bit is
+				 * already clear is demoted HOT -> COOL.  Either transition is
+				 * progress toward a victim, so reset trycounter.  We do NOT
+				 * claim the buffer this tick -- a demoted buffer becomes a
+				 * candidate for a later tick, giving it one more full sweep of
+				 * grace before eviction.
+				 */
+				if (BUF_STATE_GET_REFBIT(local_buf_state))
+					local_buf_state &= ~BUF_REFBIT;			/* second chance: clear ref, stay HOT */
+				else
+					local_buf_state &= ~BUF_USAGECOUNT_MASK;	/* HOT -> COOL, clear ref bit */
 
 				if (pg_atomic_compare_exchange_u64(&buf->state, &old_buf_state,
 												   local_buf_state))
@@ -674,7 +684,7 @@ StrategyGetBufferPartition(ClockSweep *sweep, BufferAccessStrategy strategy,
 			}
 			else
 			{
-				/* pin the buffer if the CAS succeeds */
+				/* COOL and unpinned: claim it.  Pin if the CAS succeeds. */
 				local_buf_state += BUF_REFCOUNT_ONE;
 
 				if (pg_atomic_compare_exchange_u64(&buf->state, &old_buf_state,
@@ -691,6 +701,15 @@ StrategyGetBufferPartition(ClockSweep *sweep, BufferAccessStrategy strategy,
 				}
 			}
 		}
+
+		/*
+		 * Only a pinned buffer is no progress.  A full NBuffers pass that
+		 * makes no progress means every buffer is pinned, so fail rather than
+		 * spin forever.  (A failed CAS above is neither progress nor a full
+		 * miss: we simply retry the same buffer.)
+		 */
+		if (no_progress && --trycounter == 0)
+			elog(ERROR, "no unpinned buffers available");
 	}
 }
 
@@ -1398,14 +1417,17 @@ GetBufferFromRing(BufferAccessStrategy strategy, uint64 *buf_state)
 		/*
 		 * If the buffer is pinned we cannot use it under any circumstances.
 		 *
-		 * If usage_count is 0 or 1 then the buffer is fair game (we expect 1,
-		 * since our own previous usage of the ring element would have left it
-		 * there, but it might've been decremented by clock-sweep since then).
-		 * A higher usage_count indicates someone else has touched the buffer,
-		 * so we shouldn't re-use it.
+		 * If it is unpinned but has been promoted to HOT, another backend
+		 * touched it since we last cycled past this ring slot, so it has
+		 * joined the working set and we must not recycle it -- tell the caller
+		 * to get a fresh victim from the sweep instead.  This is the 1-bit
+		 * cooling-state analog of the stock ring's "usage_count > 1 means
+		 * someone else touched it" test: a slot the ring keeps reusing and
+		 * nobody else pins stays COOL, and an out-of-ring PinBuffer() is
+		 * exactly what promotes it to HOT.
 		 */
-		if (BUF_STATE_GET_REFCOUNT(local_buf_state) != 0
-			|| BUF_STATE_GET_USAGECOUNT(local_buf_state) > 1)
+		if (BUF_STATE_GET_REFCOUNT(local_buf_state) != 0 ||
+			BUF_STATE_GET_COOLSTATE(local_buf_state) != BUF_COOLSTATE_COOL)
 			break;
 
 		/* See equivalent code in PinBuffer() */
