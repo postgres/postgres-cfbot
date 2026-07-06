@@ -13,6 +13,7 @@ pgport_sources = [
   'pg_numa.c',
   'pg_popcount_aarch64.c',
   'pg_popcount_x86.c',
+  'pg_signal_processor.c',
   'pg_strong_random.c',
   'pg_threads.c',
   'pgcheckdir.c',
