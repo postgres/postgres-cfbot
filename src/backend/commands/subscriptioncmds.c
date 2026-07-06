@@ -51,6 +51,7 @@
 #include "replication/worker_internal.h"
 #include "storage/lmgr.h"
 #include "storage/lock.h"
+#include "storage/sinval.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
@@ -1672,23 +1673,67 @@ AlterSubscription(ParseState *pstate, AlterSubscriptionStmt *stmt,
 
 	rel = table_open(SubscriptionRelationId, RowExclusiveLock);
 
-	/* Fetch the existing tuple. */
-	tup = SearchSysCacheCopy2(SUBSCRIPTIONNAME, ObjectIdGetDatum(MyDatabaseId),
-							  CStringGetDatum(stmt->subname));
+	/*
+	 * Lock the subscription so nobody else can do anything with it.
+	 *
+	 * Like RangeVarGetRelidExtended() does for relations, we resolve the
+	 * name, check ownership, and lock inside a loop. If invalidation messages
+	 * arrive (indicating concurrent DDL), we retry. We keep the lock held
+	 * across retries and only release it if the name resolves to a different
+	 * OID on the next iteration.
+	 */
+	{
+		Oid			oldSubId = InvalidOid;
+		bool		retry = false;
 
-	if (!HeapTupleIsValid(tup))
-		ereport(ERROR,
-				(errcode(ERRCODE_UNDEFINED_OBJECT),
-				 errmsg("subscription \"%s\" does not exist",
-						stmt->subname)));
+		for (;;)
+		{
+			uint64		inval_count = SharedInvalidMessageCounter;
 
-	form = (Form_pg_subscription) GETSTRUCT(tup);
-	subid = form->oid;
+			tup = SearchSysCacheCopy2(SUBSCRIPTIONNAME,
+									  ObjectIdGetDatum(MyDatabaseId),
+									  CStringGetDatum(stmt->subname));
 
-	/* must be owner */
-	if (!object_ownercheck(SubscriptionRelationId, subid, GetUserId()))
-		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_SUBSCRIPTION,
-					   stmt->subname);
+			if (!HeapTupleIsValid(tup))
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_OBJECT),
+						 errmsg("subscription \"%s\" does not exist",
+								stmt->subname)));
+
+			form = (Form_pg_subscription) GETSTRUCT(tup);
+			subid = form->oid;
+
+			if (!object_ownercheck(SubscriptionRelationId, subid,
+								   GetUserId()))
+				aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_SUBSCRIPTION,
+							   stmt->subname);
+
+			/*
+			 * If upon retry we get the same OID, the invalidation messages
+			 * did not change the final answer. So we're done. If we got a
+			 * different OID, unlock the old one and lock the new one below.
+			 */
+			if (retry)
+			{
+				if (subid == oldSubId)
+					break;
+				UnlockSharedObject(SubscriptionRelationId, oldSubId, 0,
+								   AccessExclusiveLock);
+			}
+
+			LockSharedObject(SubscriptionRelationId, subid, 0,
+							 AccessExclusiveLock);
+
+			/* If no invalidation messages, we're done. */
+			if (inval_count == SharedInvalidMessageCounter)
+				break;
+
+			/* Something may have changed, retry. */
+			retry = true;
+			oldSubId = subid;
+			heap_freetuple(tup);
+		}
+	}
 
 	/* parse and check options */
 	switch (stmt->kind)
@@ -1735,30 +1780,6 @@ AlterSubscription(ParseState *pstate, AlterSubscriptionStmt *stmt,
 
 	if (supported_opts > 0)
 		parse_subscription_options(pstate, stmt->options, supported_opts, &opts);
-
-	heap_freetuple(tup);
-
-	/* Lock the subscription so nobody else can do anything with it. */
-	LockSharedObject(SubscriptionRelationId, subid, 0, AccessExclusiveLock);
-
-	/*
-	 * Re-read the subscription tuple after acquiring the lock. A concurrent
-	 * DROP or ALTER may have committed before we acquired the lock.
-	 */
-	tup = SearchSysCacheCopy1(SUBSCRIPTIONOID, ObjectIdGetDatum(subid));
-
-	if (!HeapTupleIsValid(tup))
-		ereport(ERROR,
-				(errcode(ERRCODE_UNDEFINED_OBJECT),
-				 errmsg("subscription \"%s\" does not exist",
-						stmt->subname)));
-
-	form = (Form_pg_subscription) GETSTRUCT(tup);
-
-	/* must still be owner */
-	if (!object_ownercheck(SubscriptionRelationId, subid, GetUserId()))
-		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_SUBSCRIPTION,
-					   stmt->subname);
 
 	/*
 	 * Determine in advance whether we need the original conninfo or not, so
@@ -2666,56 +2687,91 @@ DropSubscription(DropSubscriptionStmt *stmt, bool isTopLevel)
 		return;
 	}
 
-	form = (Form_pg_subscription) GETSTRUCT(tup);
-	subid = form->oid;
-
-	/* must be owner */
-	if (!object_ownercheck(SubscriptionRelationId, subid, GetUserId()))
-		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_SUBSCRIPTION,
-					   stmt->subname);
-
 	ReleaseSysCache(tup);
 
 	/*
 	 * Lock the subscription so nobody else can do anything with it (including
 	 * the replication workers).
+	 *
+	 * Like RangeVarGetRelidExtended() does for relations, we resolve the
+	 * name, check ownership, and lock inside a loop. If invalidation messages
+	 * arrive (indicating concurrent DDL), we retry. We keep the lock held
+	 * across retries and only release it if the name resolves to a different
+	 * OID on the next iteration.
 	 */
-	LockSharedObject(SubscriptionRelationId, subid, 0, AccessExclusiveLock);
-
-	/*
-	 * Re-read the subscription tuple after acquiring the lock. A concurrent
-	 * ALTER or DROP may have committed before we acquired the lock.
-	 */
-	tup = SearchSysCache1(SUBSCRIPTIONOID, ObjectIdGetDatum(subid));
-
-	if (!HeapTupleIsValid(tup))
 	{
-		UnlockSharedObject(SubscriptionRelationId, subid, 0,
-						   AccessExclusiveLock);
-		table_close(rel, NoLock);
+		Oid			oldSubId = InvalidOid;
+		bool		retry = false;
 
-		if (!stmt->missing_ok)
-			ereport(ERROR,
-					(errcode(ERRCODE_UNDEFINED_OBJECT),
-					 errmsg("subscription \"%s\" does not exist",
-							stmt->subname)));
-		else
-			ereport(NOTICE,
-					(errmsg("subscription \"%s\" does not exist, skipping",
-							stmt->subname)));
+		for (;;)
+		{
+			uint64		inval_count = SharedInvalidMessageCounter;
 
-		return;
+			tup = SearchSysCache2(SUBSCRIPTIONNAME,
+								  ObjectIdGetDatum(MyDatabaseId),
+								  CStringGetDatum(stmt->subname));
+
+			if (!HeapTupleIsValid(tup))
+			{
+				if (retry)
+					UnlockSharedObject(SubscriptionRelationId, oldSubId, 0,
+									   AccessExclusiveLock);
+				table_close(rel, NoLock);
+
+				if (!stmt->missing_ok)
+					ereport(ERROR,
+							(errcode(ERRCODE_UNDEFINED_OBJECT),
+							 errmsg("subscription \"%s\" does not exist",
+									stmt->subname)));
+				else
+					ereport(NOTICE,
+							(errmsg("subscription \"%s\" does not exist, skipping",
+									stmt->subname)));
+
+				return;
+			}
+
+			form = (Form_pg_subscription) GETSTRUCT(tup);
+			subid = form->oid;
+
+			if (!object_ownercheck(SubscriptionRelationId, subid,
+								   GetUserId()))
+			{
+				ReleaseSysCache(tup);
+				aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_SUBSCRIPTION,
+							   stmt->subname);
+			}
+
+			/*
+			 * If upon retry we get the same OID, the invalidation messages
+			 * did not change the final answer.  So we're done.  If we got a
+			 * different OID, unlock the old one and lock the new one below.
+			 */
+			if (retry)
+			{
+				if (subid == oldSubId)
+					break;
+				UnlockSharedObject(SubscriptionRelationId, oldSubId, 0,
+								   AccessExclusiveLock);
+			}
+
+			LockSharedObject(SubscriptionRelationId, subid, 0,
+							 AccessExclusiveLock);
+
+			/* If no invalidation messages, we're done. */
+			if (inval_count == SharedInvalidMessageCounter)
+				break;
+
+			/* Something may have changed, retry. */
+			retry = true;
+			oldSubId = subid;
+			ReleaseSysCache(tup);
+		}
 	}
-
-	/* must still be owner */
-	if (!object_ownercheck(SubscriptionRelationId, subid, GetUserId()))
-		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_SUBSCRIPTION,
-					   stmt->subname);
 
 	/* DROP hook for the subscription being removed */
 	InvokeObjectDropHook(SubscriptionRelationId, subid, 0);
 
-	form = (Form_pg_subscription) GETSTRUCT(tup);
 	subowner = form->subowner;
 	subserver = form->subserver;
 	subconflictlogrelid = form->subconflictlogrelid;
