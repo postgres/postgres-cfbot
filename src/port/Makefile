@@ -50,6 +50,7 @@ OBJS = \
 	pg_numa.o \
 	pg_popcount_aarch64.o \
 	pg_popcount_x86.o \
+	pg_signal_processor.o \
 	pg_strong_random.o \
 	pg_threads.o \
 	pgcheckdir.o \
