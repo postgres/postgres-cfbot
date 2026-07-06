@@ -27,6 +27,7 @@ OBJS = \
 	astreamer_tar.o \
 	astreamer_zstd.o \
 	cancel.o \
+	cancel_set.o \
 	conditional.o \
 	connect_utils.o \
 	mbprint.o \
