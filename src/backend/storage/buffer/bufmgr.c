@@ -2333,7 +2333,10 @@ BufferAlloc(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 	 * checkpoints, except for their "init" forks, which need to be treated
 	 * just like permanent relations.
 	 */
-	set_bits |= BM_TAG_VALID | BUF_USAGECOUNT_ONE;
+	set_bits |= BM_TAG_VALID;
+	/* Admit the newly loaded page COOL (probation); a second access via
+	 * PinBuffer promotes it to HOT.  This is what makes a one-touch scan
+	 * self-evicting -- see the cooling-state notes in buf_internals.h. */
 	if (relpersistence == RELPERSISTENCE_PERMANENT || forkNum == INIT_FORKNUM)
 		set_bits |= BM_PERMANENT;
 
@@ -3002,7 +3005,9 @@ ExtendBufferedRelShared(BufferManagerRelation bmr,
 
 			victim_buf_hdr->tag = tag;
 
-			set_bits |= BM_TAG_VALID | BUF_USAGECOUNT_ONE;
+			set_bits |= BM_TAG_VALID;
+			/* Admit COOL (probation); see the comment at the other admission
+			 * site and the cooling-state notes in buf_internals.h. */
 			if (bmr.relpersistence == RELPERSISTENCE_PERMANENT || fork == INIT_FORKNUM)
 				set_bits |= BM_PERMANENT;
 
@@ -3332,21 +3337,22 @@ PinBuffer(BufferDesc *buf, BufferAccessStrategy strategy,
 			/* increase refcount */
 			buf_state += BUF_REFCOUNT_ONE;
 
-			if (strategy == NULL)
-			{
-				/* Default case: increase usagecount unless already max. */
-				if (BUF_STATE_GET_USAGECOUNT(buf_state) < BM_MAX_USAGE_COUNT)
-					buf_state += BUF_USAGECOUNT_ONE;
-			}
-			else
-			{
-				/*
-				 * Ring buffers shouldn't evict others from pool.  Thus we
-				 * don't make usagecount more than 1.
-				 */
-				if (BUF_STATE_GET_USAGECOUNT(buf_state) == 0)
-					buf_state += BUF_USAGECOUNT_ONE;
-			}
+			/*
+			 * Accessing a resident buffer promotes it to HOT (the 2Q rescue): a
+			 * page admitted COOL on probation joins the hot working set on its
+			 * second touch.  The cooling state saturates at BUF_COOLSTATE_HOT,
+			 * so this never overflows the field.
+			 *
+			 * A strategy (ring) access deliberately does not promote, which is
+			 * the cooling-state form of the stock rule that ring buffers must
+			 * not evict others from the pool: a buffer the ring keeps recycling
+			 * stays COOL and so stays reusable by GetBufferFromRing(), while an
+			 * access from outside the ring promotes it to HOT and thereby takes
+			 * it out of the ring's reuse set.
+			 */
+			if (strategy == NULL &&
+				BUF_STATE_GET_COOLSTATE(buf_state) < BUF_COOLSTATE_HOT)
+				buf_state += BUF_COOLSTATE_ONE;
 
 			if (pg_atomic_compare_exchange_u64(&buf->state, &old_buf_state,
 											   buf_state))
@@ -4214,7 +4220,7 @@ BgBufferSync(WritebackContext *wb_context)
  * Returns a bitmask containing the following flag bits:
  *	BUF_WRITTEN: we wrote the buffer.
  *	BUF_REUSABLE: buffer is available for replacement, ie, it has
- *		pin count 0 and usage count 0.
+ *		pin count 0 and is COOL (an eviction candidate).
  *
  * (BUF_WRITTEN could be set in error if FlushBuffer finds the buffer clean
  * after locking it, but we don't care all that much.)
@@ -4243,7 +4249,7 @@ SyncOneBuffer(int buf_id, bool skip_recently_used, WritebackContext *wb_context)
 	buf_state = LockBufHdr(bufHdr);
 
 	if (BUF_STATE_GET_REFCOUNT(buf_state) == 0 &&
-		BUF_STATE_GET_USAGECOUNT(buf_state) == 0)
+		BUF_STATE_GET_COOLSTATE(buf_state) == BUF_COOLSTATE_COOL)
 	{
 		result |= BUF_REUSABLE;
 	}
