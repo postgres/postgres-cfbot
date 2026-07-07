@@ -224,6 +224,33 @@ pqTraceOutputNchar(FILE *pfdebug, int len, const char *data, int *cursor, bool s
 }
 
 /*
+ * pqTraceOutputNbyte: output bytes in hexadecimal of exactly len bytes to the log
+ *
+ * If 'suppress' is true, print a literal 'BBBB' instead of the actual bytes.
+ */
+static void
+pqTraceOutputNbyte(FILE *pfdebug, int len, const char *data, int *cursor, bool suppress)
+{
+	int			i;
+	const char *v = data + *cursor;
+
+	if (suppress)
+	{
+		fprintf(pfdebug, " 'BBBB'");
+		*cursor += len;
+		return;
+	}
+
+	fprintf(pfdebug, " \'");
+
+	for (i = 0; i < len; ++i)
+		fprintf(pfdebug, "\\x%02x", (unsigned char) v[i]);
+
+	fprintf(pfdebug, "\'");
+	*cursor += len;
+}
+
+/*
  * Output functions by protocol message type
  */
 
@@ -457,7 +484,7 @@ pqTraceOutput_BackendKeyData(FILE *f, const char *message, int *cursor, int leng
 {
 	fprintf(f, "BackendKeyData\t");
 	pqTraceOutputInt32(f, message, cursor, regress);
-	pqTraceOutputNchar(f, length - *cursor + 1, message, cursor, regress);
+	pqTraceOutputNbyte(f, length - *cursor + 1, message, cursor, regress);
 }
 
 static void
@@ -878,7 +905,7 @@ pqTraceOutputNoTypeByteMessage(PGconn *conn, const char *message)
 		pqTraceOutputInt16(conn->Pfdebug, message, &logCursor);
 		pqTraceOutputInt16(conn->Pfdebug, message, &logCursor);
 		pqTraceOutputInt32(conn->Pfdebug, message, &logCursor, regress);
-		pqTraceOutputNchar(conn->Pfdebug, length - logCursor, message,
+		pqTraceOutputNbyte(conn->Pfdebug, length - logCursor, message,
 						   &logCursor, regress);
 	}
 	else if (version == NEGOTIATE_SSL_CODE)
