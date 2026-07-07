@@ -443,6 +443,16 @@ RangeVarGetRelidExtended(const RangeVar *relation, LOCKMODE lockmode,
 						 uint32 flags,
 						 RangeVarGetRelidCallback callback, void *callback_arg)
 {
+	return RangeVarGetRelidExtendedSafe(relation, lockmode, flags,
+										callback, callback_arg,
+										NULL);
+}
+
+Oid
+RangeVarGetRelidExtendedSafe(const RangeVar *relation, LOCKMODE lockmode, uint32 flags,
+							 RangeVarGetRelidCallback callback, void *callback_arg,
+							 Node *escontext)
+{
 	uint64		inval_count;
 	Oid			relId;
 	Oid			oldRelId = InvalidOid;
@@ -458,7 +468,7 @@ RangeVarGetRelidExtended(const RangeVar *relation, LOCKMODE lockmode,
 	if (relation->catalogname)
 	{
 		if (strcmp(relation->catalogname, get_database_name(MyDatabaseId)) != 0)
-			ereport(ERROR,
+			ereturn(escontext, InvalidOid,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("cross-database references are not implemented: \"%s.%s.%s\"",
 							relation->catalogname, relation->schemaname,
@@ -515,7 +525,7 @@ RangeVarGetRelidExtended(const RangeVar *relation, LOCKMODE lockmode,
 					 * return InvalidOid.
 					 */
 					if (namespaceId != myTempNamespace)
-						ereport(ERROR,
+						ereturn(escontext, InvalidOid,
 								(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
 								 errmsg("temporary tables cannot specify a schema name")));
 				}
@@ -595,14 +605,20 @@ RangeVarGetRelidExtended(const RangeVar *relation, LOCKMODE lockmode,
 		{
 			int			elevel = (flags & RVR_SKIP_LOCKED) ? DEBUG1 : ERROR;
 
-			if (relation->schemaname)
+			if (escontext == NULL)
 				ereport(elevel,
 						(errcode(ERRCODE_LOCK_NOT_AVAILABLE),
+						 relation->schemaname ?
 						 errmsg("could not obtain lock on relation \"%s.%s\"",
-								relation->schemaname, relation->relname)));
+								relation->schemaname, relation->relname) :
+						 errmsg("could not obtain lock on relation \"%s\"",
+								relation->relname)));
 			else
-				ereport(elevel,
+				ereturn(escontext, InvalidOid,
 						(errcode(ERRCODE_LOCK_NOT_AVAILABLE),
+						 relation->schemaname ?
+						 errmsg("could not obtain lock on relation \"%s.%s\"",
+								relation->schemaname, relation->relname) :
 						 errmsg("could not obtain lock on relation \"%s\"",
 								relation->relname)));
 
@@ -628,14 +644,20 @@ RangeVarGetRelidExtended(const RangeVar *relation, LOCKMODE lockmode,
 	{
 		int			elevel = missing_ok ? DEBUG1 : ERROR;
 
-		if (relation->schemaname)
+		if (escontext == NULL)
 			ereport(elevel,
 					(errcode(ERRCODE_UNDEFINED_TABLE),
+					 relation->schemaname ?
 					 errmsg("relation \"%s.%s\" does not exist",
-							relation->schemaname, relation->relname)));
+							relation->schemaname, relation->relname) :
+					 errmsg("relation \"%s\" does not exist",
+							relation->relname)));
 		else
-			ereport(elevel,
+			ereturn(escontext, InvalidOid,
 					(errcode(ERRCODE_UNDEFINED_TABLE),
+					 relation->schemaname ?
+					 errmsg("relation \"%s.%s\" does not exist",
+							relation->schemaname, relation->relname) :
 					 errmsg("relation \"%s\" does not exist",
 							relation->relname)));
 	}
@@ -3625,6 +3647,12 @@ get_namespace_oid(const char *nspname, bool missing_ok)
 RangeVar *
 makeRangeVarFromNameList(const List *names)
 {
+	return makeRangeVarFromNameListSafe(names, NULL);
+}
+
+RangeVar *
+makeRangeVarFromNameListSafe(const List *names, Node *escontext)
+{
 	RangeVar   *rel = makeRangeVar(NULL, NULL, -1);
 
 	switch (list_length(names))
@@ -3642,7 +3670,7 @@ makeRangeVarFromNameList(const List *names)
 			rel->relname = strVal(lthird(names));
 			break;
 		default:
-			ereport(ERROR,
+			ereturn(escontext, NULL,
 					(errcode(ERRCODE_SYNTAX_ERROR),
 					 errmsg("improper relation name (too many dotted names): %s",
 							NameListToString(names))));
