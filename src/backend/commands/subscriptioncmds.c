@@ -15,6 +15,7 @@
 #include "postgres.h"
 
 #include "access/commit_ts.h"
+#include "access/genam.h"
 #include "access/htup_details.h"
 #include "access/table.h"
 #include "access/twophase.h"
@@ -28,6 +29,8 @@
 #include "catalog/pg_authid_d.h"
 #include "catalog/pg_database_d.h"
 #include "catalog/pg_foreign_server.h"
+#include "catalog/partition.h"
+#include "catalog/pg_inherits.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_subscription.h"
 #include "catalog/pg_subscription_rel.h"
@@ -53,10 +56,12 @@
 #include "storage/lock.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/pg_lsn.h"
+#include "utils/rel.h"
 #include "utils/syscache.h"
 
 /*
@@ -1485,6 +1490,413 @@ AlterSubscription_refresh_seq(Subscription *sub, char *conninfo)
 }
 
 /*
+ * Resynchronize one or more already-subscribed tables.
+ *
+ * Truncates the local copy of each named table and resets its
+ * pg_subscription_rel state back to init so that, once the subscription is
+ * enabled, a tablesync worker re-copies just those tables.  This is
+ * subscriber-local and does not touch publication membership, so sibling
+ * subscribers are unaffected.
+ *
+ * Every named relation is validated before any of them is reset, so the
+ * command is all-or-nothing: a bad table name aborts the whole command
+ * without touching the others.  The tables are truncated together, which lets
+ * a set connected by foreign keys be re-seeded as a unit.
+ *
+ * The caller must ensure the subscription is disabled: with no apply worker
+ * running there is no cached relation state to invalidate and no race against
+ * a concurrently launched tablesync worker.
+ */
+/*
+ * Refuse to re-synchronize relations that another subscription also populates.
+ *
+ * REFRESH TABLE discards a relation and relies on this subscription's table
+ * synchronization to refill it.  A relation is fed by any subscription that
+ * tracks it directly, and, when it is a partition, by any subscription that
+ * tracks a partitioned ancestor and routes tuples down into it.  If such
+ * another subscription exists, its rows would be discarded here while its
+ * state stays untouched, so nothing would ever copy them back.  We cannot
+ * reset another subscription's state on its behalf -- that would need its
+ * workers stopped and its own tablesync slots dropped over its own connection
+ * -- so this combination is rejected rather than silently losing data.
+ *
+ * subrelids is the set of relations named in the command, relids the full set
+ * that will be truncated, which additionally contains the partitions of any
+ * named partitioned table.
+ */
+static void
+CheckRefreshTableNotInOtherSubscriptions(Relation pgsubrel, Subscription *sub,
+										 List *subrelids, List *relids)
+{
+	foreach_oid(relid, relids)
+	{
+		List	   *feeders;
+
+		/*
+		 * Tuples reach a partition through its ancestors, so a subscription
+		 * tracking any of them keeps this relation populated too.  A named
+		 * relation's own entry belongs to this subscription and is skipped
+		 * below by the srsubid test.
+		 *
+		 * Only partitions have such feeders.  get_partition_ancestors() scans
+		 * pg_inherits without regard to relispartition, so for an inheritance
+		 * child it would return the parent as well, and a parent does not
+		 * route rows into its inheritance children.
+		 */
+		if (get_rel_relispartition(relid))
+			feeders = lappend_oid(get_partition_ancestors(relid), relid);
+		else
+			feeders = list_make1_oid(relid);
+
+		foreach_oid(feederid, feeders)
+		{
+			ScanKeyData skey;
+			SysScanDesc scan;
+			HeapTuple	tup;
+
+			ScanKeyInit(&skey, Anum_pg_subscription_rel_srrelid,
+						BTEqualStrategyNumber, F_OIDEQ,
+						ObjectIdGetDatum(feederid));
+
+			scan = systable_beginscan(pgsubrel,
+									  SubscriptionRelSrrelidSrsubidIndexId,
+									  true, NULL, 1, &skey);
+
+			while (HeapTupleIsValid(tup = systable_getnext(scan)))
+			{
+				Form_pg_subscription_rel subrel;
+				char	   *othername;
+
+				subrel = (Form_pg_subscription_rel) GETSTRUCT(tup);
+
+				if (subrel->srsubid == sub->oid)
+					continue;
+
+				othername = get_subscription_name(subrel->srsubid, false);
+
+				/*
+				 * Report the relation that is actually shared, which is not
+				 * necessarily the one that was named, together with why it is
+				 * in the truncation set.
+				 */
+				if (feederid != relid)
+					ereport(ERROR,
+							errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+							errmsg("table \"%s\" is a partition of \"%s\", which is part of the subscription \"%s\"",
+								   get_rel_name(relid), get_rel_name(feederid),
+								   othername),
+							errdetail("Re-synchronizing it would discard rows that subscription \"%s\" routes into the partition but would not copy again.",
+									  othername));
+				else if (list_member_oid(subrelids, relid))
+					ereport(ERROR,
+							errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+							errmsg("table \"%s\" is also part of the subscription \"%s\"",
+								   get_rel_name(relid), othername),
+							errdetail("Re-synchronizing it would discard rows that subscription \"%s\" maintains but would not copy again.",
+									  othername));
+				else
+					ereport(ERROR,
+							errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+							errmsg("table \"%s\" is also part of the subscription \"%s\"",
+								   get_rel_name(relid), othername),
+							errdetail("Re-synchronizing a partitioned table truncates its partitions, discarding rows that subscription \"%s\" maintains but would not copy again.",
+									  othername));
+			}
+
+			systable_endscan(scan);
+		}
+
+		list_free(feeders);
+	}
+}
+
+static void
+AlterSubscription_refresh_table(Subscription *sub, List *relations)
+{
+	Relation	rel;
+	ListCell   *lc;
+	List	   *subrelids = NIL;
+	List	   *rels = NIL;
+	List	   *relids = NIL;
+	List	   *relids_logged = NIL;
+	List	   *originrelids = NIL;
+	List	   *slotrelids = NIL;
+
+	/*
+	 * Lock pg_subscription_rel with RowExclusiveLock, the level its updates
+	 * below need.  AlterSubscription_refresh() takes AccessExclusiveLock, but
+	 * it never waits for a lock on a user relation while holding it, whereas
+	 * this command does, and AccessExclusiveLock here conflicts with the
+	 * AccessShareLock that a backend holding such a relation may go on to
+	 * request, closing a deadlock cycle.
+	 */
+	rel = table_open(SubscriptionRelRelationId, RowExclusiveLock);
+
+	/*
+	 * First pass: validate every named relation before changing anything, so
+	 * the command is all-or-nothing.  Duplicates in the list are ignored.
+	 *
+	 * Only AccessShareLock is taken here, and the level the truncate needs is
+	 * taken further down, once the relation set is known to be refreshable.
+	 * Taking it here would mean waiting for any tablesync worker copying one
+	 * of these relations for another subscription to finish, only to reject
+	 * the command because of that very subscription.
+	 */
+	foreach(lc, relations)
+	{
+		RangeVar   *rv = lfirst_node(RangeVar, lc);
+		Oid			relid;
+		char		relstate;
+		XLogRecPtr	relstatelsn;
+		Relation	userrel;
+		AclResult	aclresult;
+
+		relid = RangeVarGetRelid(rv, AccessShareLock, false);
+
+		if (get_rel_relkind(relid) == RELKIND_SEQUENCE)
+			ereport(ERROR,
+					errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					errmsg("cannot refresh sequence \"%s\" as a table",
+						   rv->relname),
+					errhint("Use ALTER SUBSCRIPTION ... REFRESH SEQUENCES instead."));
+
+		/* The relation must already be part of the subscription. */
+		relstate = GetSubscriptionRelState(sub->oid, relid, &relstatelsn);
+		if (relstate == SUBREL_STATE_UNKNOWN)
+		{
+			/*
+			 * A partitioned table is tracked in pg_subscription_rel only when
+			 * the publication uses publish_via_partition_root.  Otherwise its
+			 * partitions are tracked individually, and those are what can be
+			 * refreshed, so point the user at them.
+			 */
+			if (get_rel_relkind(relid) == RELKIND_PARTITIONED_TABLE)
+				ereport(ERROR,
+						errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						errmsg("table \"%s\" is not part of the subscription \"%s\"",
+							   rv->relname, sub->name),
+						errhint("The publication may publish its partitions individually; refresh those instead."));
+
+			ereport(ERROR,
+					errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					errmsg("table \"%s\" is not part of the subscription \"%s\"",
+						   rv->relname, sub->name));
+		}
+
+		/* Don't complain about "REFRESH TABLE foo, foo". */
+		if (list_member_oid(subrelids, relid))
+			continue;
+
+		/*
+		 * The local copy is discarded below, so require the same privilege
+		 * TRUNCATE itself would.
+		 */
+		aclresult = pg_class_aclcheck(relid, GetUserId(), ACL_TRUNCATE);
+		if (aclresult != ACLCHECK_OK)
+			aclcheck_error(aclresult, get_relkind_objtype(get_rel_relkind(relid)),
+						   rv->relname);
+
+		subrelids = lappend_oid(subrelids, relid);
+
+		/*
+		 * A relation that never reached READY may have left a tablesync
+		 * origin behind; for READY the tablesync worker already dropped it.
+		 */
+		if (relstate != SUBREL_STATE_READY)
+			originrelids = lappend_oid(originrelids, relid);
+
+		/*
+		 * Only a relation caught mid-sync has a tablesync slot on the
+		 * publisher; for READY and SYNCDONE the tablesync worker already
+		 * dropped it.
+		 */
+		if (relstate != SUBREL_STATE_READY && relstate != SUBREL_STATE_SYNCDONE)
+			slotrelids = lappend_oid(slotrelids, relid);
+
+		/* It may already be in the truncation set as another table's child. */
+		if (list_member_oid(relids, relid))
+			continue;
+
+		/* We already hold the lock RangeVarGetRelid() took above. */
+		userrel = table_open(relid, NoLock);
+
+		rels = lappend(rels, userrel);
+		relids = lappend_oid(relids, relid);
+		if (RelationIsLogicallyLogged(userrel))
+			relids_logged = lappend_oid(relids_logged, relid);
+
+		/*
+		 * A partitioned table holds no data itself, so its partitions have to
+		 * be truncated as well.  This mirrors apply_handle_truncate().
+		 *
+		 * Only partitions are followed here, never inheritance children.  The
+		 * rule is that we must not discard a relation unless we also reset
+		 * the state of whatever will refill it.  A tracked partitioned root
+		 * is tracked precisely because the publication uses
+		 * publish_via_partition_root, in which case its partitions are not
+		 * themselves in pg_subscription_rel and the root's re-copy refills
+		 * them through tuple routing.  An inheritance child, by contrast, is
+		 * an independent relation that may be a subscription member in its
+		 * own right, or may hold data that is not replicated at all;
+		 * truncating it here would destroy rows that nothing is going to copy
+		 * back.  Naming it in the command refreshes it.
+		 */
+		if (userrel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+		{
+			List	   *children;
+
+			children = find_all_inheritors(relid, AccessShareLock, NULL);
+
+			foreach_oid(childrelid, children)
+			{
+				Relation	childrel;
+
+				if (list_member_oid(relids, childrelid))
+					continue;
+
+				/* find_all_inheritors() already took the lock */
+				childrel = table_open(childrelid, NoLock);
+
+				/*
+				 * Ignore temp tables of other backends, as ExecuteTruncate()
+				 * does.
+				 */
+				if (RELATION_IS_OTHER_TEMP(childrel))
+				{
+					table_close(childrel, AccessShareLock);
+					continue;
+				}
+
+				rels = lappend(rels, childrel);
+				relids = lappend_oid(relids, childrelid);
+				if (RelationIsLogicallyLogged(childrel))
+					relids_logged = lappend_oid(relids_logged, childrelid);
+			}
+		}
+	}
+
+	/*
+	 * Everything that will be truncated has to be fed by this subscription
+	 * alone, otherwise we would discard rows that only some other
+	 * subscription would restore.  Check before touching anything, so this
+	 * stays all-or-nothing.
+	 */
+	CheckRefreshTableNotInOtherSubscriptions(rel, sub, subrelids, relids);
+
+	/*
+	 * The relation set is now known to be fed by this subscription alone, and
+	 * this subscription has no running workers, so nothing that replicates
+	 * into these relations is still holding them.  Take the level the
+	 * truncate needs.
+	 */
+	foreach_oid(relid, relids)
+		LockRelationOid(relid, AccessExclusiveLock);
+
+	/*
+	 * Check again, now that the relations are locked.  The check above runs
+	 * first only so that the common rejection does not have to wait for a
+	 * tablesync worker to finish copying, and it is not conclusive on its
+	 * own: pg_subscription_rel is held at RowExclusiveLock, which is also
+	 * what CREATE SUBSCRIPTION takes.  That command locks the relation itself
+	 * before registering it, though, so no further subscription can appear
+	 * for these relations once the locks above are held.  It matters because
+	 * CREATE SUBSCRIPTION ... WITH (copy_data = false) records the relation
+	 * as ready, and would therefore never copy back what the truncate
+	 * discards.
+	 */
+	CheckRefreshTableNotInOtherSubscriptions(rel, sub, subrelids, relids);
+
+	/*
+	 * Drop the tablesync origin of every relation that was caught mid-sync.
+	 * Pass missing_ok = true as the origin may not exist yet.
+	 */
+	foreach_oid(relid, originrelids)
+	{
+		char		originname[NAMEDATALEN];
+
+		ReplicationOriginNameForLogicalRep(sub->oid, relid, originname,
+										   sizeof(originname));
+		replorigin_drop_by_name(originname, true, false);
+	}
+
+	/*
+	 * Clear the local copies so the re-copy starts from empty.  Truncating
+	 * the tables together lets a set connected by foreign keys be re-seeded
+	 * as a unit.
+	 */
+	ExecuteTruncateGuts(rels, relids, relids_logged, DROP_RESTRICT, false,
+						false);
+
+	foreach(lc, rels)
+		table_close((Relation) lfirst(lc), NoLock);
+
+	/*
+	 * Reset each relation to init so that a tablesync worker re-copies it
+	 * once the subscription is enabled.
+	 */
+	foreach_oid(relid, subrelids)
+	{
+		UpdateSubscriptionRelState(sub->oid, relid, SUBREL_STATE_INIT,
+								   InvalidXLogRecPtr, false);
+
+		ereport(DEBUG1,
+				errmsg_internal("table \"%s.%s\" of subscription \"%s\" reset for resync",
+								get_namespace_name(get_rel_namespace(relid)),
+								get_rel_name(relid), sub->name));
+	}
+
+	/*
+	 * Finally, drop the tablesync slots left on the publisher by relations
+	 * that were caught mid-sync.
+	 *
+	 * This is deliberately last.  Dropping a remote slot is not
+	 * transactional, so it cannot be undone if a later step fails, and
+	 * everything above can still fail for ordinary reasons -- the truncate in
+	 * particular, on a foreign key reference or a lock timeout.  One
+	 * connection serves all of the slots, and the common case of re-seeding
+	 * relations that are all in ready state needs no publisher connection at
+	 * all.
+	 */
+	if (slotrelids != NIL)
+	{
+		char	   *err = NULL;
+		WalReceiverConn *wrconn;
+		bool		must_use_password;
+
+		/* Load the library providing us libpq calls. */
+		load_file("libpqwalreceiver", false);
+
+		must_use_password = sub->passwordrequired && !sub->ownersuperuser;
+		wrconn = walrcv_connect(SubscriptionConninfo(sub), true, true,
+								must_use_password, sub->name, &err);
+		if (!wrconn)
+			ereport(ERROR,
+					errcode(ERRCODE_CONNECTION_FAILURE),
+					errmsg("subscription \"%s\" could not connect to the publisher: %s",
+						   sub->name, err));
+
+		PG_TRY();
+		{
+			foreach_oid(relid, slotrelids)
+			{
+				char		syncslotname[NAMEDATALEN] = {0};
+
+				ReplicationSlotNameForTablesync(sub->oid, relid, syncslotname,
+												sizeof(syncslotname));
+				ReplicationSlotDropAtPubNode(wrconn, syncslotname, true);
+			}
+		}
+		PG_FINALLY();
+		{
+			walrcv_disconnect(wrconn);
+		}
+		PG_END_TRY();
+	}
+
+	table_close(rel, NoLock);
+}
+
+/*
  * Common checks for altering failover, two_phase, and retain_dead_tuples
  * options.
  */
@@ -2387,6 +2799,64 @@ AlterSubscription(ParseState *pstate, AlterSubscriptionStmt *stmt,
 								   "ALTER SUBSCRIPTION ... REFRESH SEQUENCES"));
 
 				AlterSubscription_refresh_seq(sub, orig_conninfo);
+
+				break;
+			}
+
+		case ALTER_SUBSCRIPTION_REFRESH_TABLE:
+			{
+				/*
+				 * The first version requires the subscription to be disabled.
+				 * With no apply worker running there is no cached relation
+				 * state to invalidate and no race against a concurrently
+				 * launched tablesync worker while we reset the relation.
+				 */
+				if (sub->enabled)
+					ereport(ERROR,
+							errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+							errmsg("%s is not allowed for enabled subscriptions",
+								   "ALTER SUBSCRIPTION ... REFRESH TABLE"),
+							errhint("Disable the subscription with ALTER SUBSCRIPTION ... DISABLE first."));
+
+				/*
+				 * The relations are re-initialized below, and that must not
+				 * happen once two_phase is enabled.  See
+				 * ALTER_SUBSCRIPTION_REFRESH_PUBLICATION for the details.
+				 * There is no copy_data = false exception here, as this
+				 * command exists precisely to copy the data again.
+				 */
+				if (sub->twophasestate == LOGICALREP_TWOPHASE_STATE_ENABLED)
+					ereport(ERROR,
+							errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+							errmsg("%s is not allowed when two_phase is enabled",
+								   "ALTER SUBSCRIPTION ... REFRESH TABLE"),
+							errhint("Use ALTER SUBSCRIPTION ... SET (two_phase = false), or use DROP/CREATE SUBSCRIPTION."));
+
+				/*
+				 * Being marked disabled is not the same as having stopped:
+				 * ALTER SUBSCRIPTION ... DISABLE only wakes the workers so
+				 * that they notice the change, and they exit asynchronously
+				 * afterwards.  An apply worker may still have the relation
+				 * state cached, and a tablesync worker outlives its apply
+				 * worker while it finishes a copy, so wait for all of them
+				 * rather than stopping any of them ourselves.
+				 *
+				 * only_running is false, as DROP SUBSCRIPTION does for the
+				 * same reason: a worker that is in_use but has not attached
+				 * yet is the dangerous one, since it is about to read the
+				 * relation state we are rewriting.
+				 */
+				if (logicalrep_workers_find(subid, false, true))
+					ereport(ERROR,
+							errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+							errmsg("cannot %s when logical replication worker is still running",
+								   "ALTER SUBSCRIPTION ... REFRESH TABLE"),
+							errhint("Try again after some time."));
+
+				PreventInTransactionBlock(isTopLevel,
+										  "ALTER SUBSCRIPTION ... REFRESH TABLE");
+
+				AlterSubscription_refresh_table(sub, stmt->relations);
 
 				break;
 			}

@@ -11627,6 +11627,16 @@ AlterSubscriptionStmt:
 					n->subname = $3;
 					$$ = (Node *) n;
 				}
+			| ALTER SUBSCRIPTION name REFRESH TABLE qualified_name_list
+				{
+					AlterSubscriptionStmt *n =
+						makeNode(AlterSubscriptionStmt);
+
+					n->kind = ALTER_SUBSCRIPTION_REFRESH_TABLE;
+					n->subname = $3;
+					n->relations = $6;
+					$$ = (Node *) n;
+				}
 			| ALTER SUBSCRIPTION name ADD_P PUBLICATION name_list opt_definition
 				{
 					AlterSubscriptionStmt *n =
