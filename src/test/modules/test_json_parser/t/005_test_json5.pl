@@ -33,7 +33,8 @@ my @features = (
 	},
 	{ name => 'trailing commas', file => 'json5_trailing_commas' },
 	{ name => 'unquoted keys', file => 'json5_keys' },
-	{ name => 'single-quoted strings', file => 'json5_strings' },);
+	{ name => 'single-quoted strings', file => 'json5_strings' },
+	{ name => 'numbers', file => 'json5_numbers' },);
 
 # Inputs that stay invalid even in json5 mode.
 my @json5_invalid = (
@@ -43,7 +44,45 @@ my @json5_invalid = (
 	[ 'identifier value in array', '[a]' ],
 	[ 'bare identifier', 'undefined' ],
 	[ 'dollar after number', '2$' ],
-	[ 'dollar after number in array', '[25$]' ],);
+	[ 'dollar after number in array', '[25$]' ],
+	[ 'bare 0x', '0x' ],
+	[ 'bare dot', '.' ],
+	[ 'missing value', '{"a":}' ],
+	[ 'missing colon and value', '{"a"}' ],
+	[ 'missing value after unquoted key', '{a:}' ],
+	[ 'reserved word key without value', '{true}' ],
+	[ 'missing colon and value after second key', '{"a":1,"b"}' ],
+	[ 'unterminated block comment after value', '1 /*' ],
+	[ 'unterminated block comment in array', '[1 /*' ],
+	[ 'unterminated block comment with content', '1 /*/ 2' ],
+	[ 'garbage after cr-terminated line comment', "1 // c\rx" ],
+	[ 'signed infinity key', '{-Infinity: 1}' ],
+	[ 'signed infinity with trailing junk', '-Infinityz' ],
+	[ 'signed infinity with trailing dollar', '-Infinity$' ],
+	[ 'signed nan with trailing junk', '+NaN5' ],);
+
+# Valid json5 whose parse must not depend on where chunk boundaries
+# fall (each caught a real bug: comment resume state, '$' in the
+# partial-token continuation, identifier handling of Infinity/NaN).
+my @json5_chunk_valid = (
+	[ 'block comment containing /*-like text', '/*/ */ 1' ],
+	[ 'dollar inside unquoted key', '{ab$c: 1}' ],
+	[ 'Infinity as unquoted key', '{Infinity: 1}' ],
+	[ 'NaN as unquoted key', '{NaN: 1}' ],
+	[ 'negative NaN', '-NaN' ],
+	[ 'positive NaN', '+NaN' ],
+	[ 'cr-terminated line comment', "[1, // c\r2\n]" ],);
+
+# Number extensions, each individually rejected without --json5.
+my @json_invalid_numbers = (
+	[ 'hex', '0x1F' ],
+	[ 'leading dot', '.5' ],
+	[ 'trailing dot', '5.' ],
+	[ 'plus sign', '+42' ],
+	[ 'infinity', 'Infinity' ],
+	[ 'negative infinity', '-Infinity' ],
+	[ 'positive infinity', '+Infinity' ],
+	[ 'nan', 'NaN' ],);
 
 # Write $content to a temp file and return the file name.
 sub inline_file
@@ -130,6 +169,50 @@ foreach my $exe (@exes)
 		}
 	}
 
+	foreach my $v (@json5_chunk_valid)
+	{
+		my ($label, $content) = @$v;
+		my $fname = inline_file($content);
+
+		my ($whole, $whole_err) =
+		  run_command([ @$exe, "-s", "--json5", $fname ]);
+
+		is($whole_err, "", "json5 mode, whole input: $label: no error");
+
+		for my $size (3, 1)
+		{
+			my ($stdout, $stderr) =
+			  run_command([ @$exe, "-s", "--json5", "-c", $size, $fname ]);
+
+			is($stderr, "",
+				"json5 mode, chunk size $size: $label: no error");
+			is($stdout, $whole,
+				"json5 mode, chunk size $size: $label: matches whole input");
+		}
+	}
+
+	# Specifically exercise a hex number split in the middle of its
+	# digit run (0x1|F) and a leading-dot number split right after the
+	# dot (.|5), at the chunk size that forces exactly that split.
+	my ($stdout, $stderr) =
+	  run_command([ @$exe, "-s", "--json5", "-c", 3, inline_file("0x1F") ]);
+
+	is($stdout, "0x1F", "json5 mode: 0x1|F split reassembles");
+	is($stderr, "", "json5 mode: 0x1|F split: no error output");
+
+	($stdout, $stderr) =
+	  run_command([ @$exe, "-s", "--json5", "-c", 1, inline_file(".5") ]);
+
+	is($stdout, ".5", "json5 mode: .|5 split reassembles");
+	is($stderr, "", "json5 mode: .|5 split: no error output");
+
+	foreach my $inv (@json_invalid_numbers)
+	{
+		my ($label, $content) = @$inv;
+
+		check_rejected($exe, inline_file($content),
+			"non-json5 mode: $label form");
+	}
 }
 
 done_testing();
