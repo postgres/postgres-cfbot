@@ -832,7 +832,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 
 	TABLE TABLES TABLESAMPLE TABLESPACE TARGET TEMP TEMPLATE TEMPORARY TEXT_P THEN
 	TIES TIME TIMESTAMP TO TRAILING TRANSACTION TRANSFORM
-	TREAT TRIGGER TRIM TRUE_P
+	TREAT TRIGGER TRIGGERS TRIM TRUE_P
 	TRUNCATE TRUSTED TYPE_P TYPES_P
 
 	UESCAPE UNBOUNDED UNCONDITIONAL UNCOMMITTED UNENCRYPTED UNION UNIQUE UNKNOWN
@@ -4363,6 +4363,7 @@ TableLikeOption:
 				| INDEXES			{ $$ = CREATE_TABLE_LIKE_INDEXES; }
 				| STATISTICS		{ $$ = CREATE_TABLE_LIKE_STATISTICS; }
 				| STORAGE			{ $$ = CREATE_TABLE_LIKE_STORAGE; }
+				| TRIGGERS			{ $$ = CREATE_TABLE_LIKE_TRIGGERS; }
 				| ALL				{ $$ = CREATE_TABLE_LIKE_ALL; }
 		;
 
@@ -6205,6 +6206,7 @@ CreateTrigStmt:
 					CreateTrigStmt *n = makeNode(CreateTrigStmt);
 
 					n->replace = $2;
+					n->tgenabled = TRIGGER_FIRES_ON_ORIGIN;
 					n->isconstraint = false;
 					n->trigname = $4;
 					n->relation = $8;
@@ -6219,6 +6221,8 @@ CreateTrigStmt:
 					n->deferrable = false;
 					n->initdeferred = false;
 					n->constrrel = NULL;
+					n->trigcomment = NULL;
+					n->transformed = false;
 					$$ = (Node *) n;
 				}
 		  | CREATE opt_or_replace CONSTRAINT TRIGGER name AFTER TriggerEvents ON
@@ -6254,6 +6258,7 @@ CreateTrigStmt:
 								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 								 errmsg("CREATE OR REPLACE CONSTRAINT TRIGGER is not supported"),
 								 parser_errposition(@1)));
+					n->tgenabled = TRIGGER_FIRES_ON_ORIGIN;
 					n->isconstraint = true;
 					n->trigname = $5;
 					n->relation = $9;
@@ -6269,6 +6274,8 @@ CreateTrigStmt:
 								   &n->deferrable, &n->initdeferred, &dummy,
 								   NULL, NULL, yyscanner);
 					n->constrrel = $10;
+					n->trigcomment = NULL;
+					n->transformed = false;
 					$$ = (Node *) n;
 				}
 		;
@@ -19213,6 +19220,7 @@ unreserved_keyword:
 			| TRANSACTION
 			| TRANSFORM
 			| TRIGGER
+			| TRIGGERS
 			| TRUNCATE
 			| TRUSTED
 			| TYPE_P
@@ -19878,6 +19886,7 @@ bare_label_keyword:
 			| TRANSFORM
 			| TREAT
 			| TRIGGER
+			| TRIGGERS
 			| TRIM
 			| TRUE_P
 			| TRUNCATE

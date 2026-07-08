@@ -31,6 +31,7 @@
 #include "catalog/pg_proc.h"
 #include "catalog/pg_trigger.h"
 #include "catalog/pg_type.h"
+#include "commands/comment.h"
 #include "commands/trigger.h"
 #include "executor/executor.h"
 #include "executor/instrument.h"
@@ -168,7 +169,7 @@ CreateTrigger(const CreateTrigStmt *stmt, const char *queryString,
 		CreateTriggerFiringOn(stmt, queryString, relOid, refRelOid,
 							  constraintOid, indexOid, funcoid,
 							  parentTriggerOid, whenClause, isInternal,
-							  in_partition, TRIGGER_FIRES_ON_ORIGIN);
+							  in_partition, stmt->tgenabled);
 }
 
 /*
@@ -603,13 +604,19 @@ CreateTriggerFiringOn(const CreateTrigStmt *stmt, const char *queryString,
 											   false, false);
 		addNSItemToQuery(pstate, nsitem, false, true, true);
 
-		/* Transform expression.  Copy to be sure we don't modify original */
-		whenClause = transformWhereClause(pstate,
-										  copyObject(stmt->whenClause),
-										  EXPR_KIND_TRIGGER_WHEN,
-										  "WHEN");
-		/* we have to fix its collations too */
-		assign_expr_collations(pstate, whenClause);
+		if (stmt->transformed)
+			whenClause = stmt->whenClause;
+		else
+		{
+			/* Transform expression.  Copy to be sure we don't modify original */
+			whenClause = transformWhereClause(pstate,
+											  copyObject(stmt->whenClause),
+											  EXPR_KIND_TRIGGER_WHEN,
+											  "WHEN");
+
+			/* we have to fix its collations too */
+			assign_expr_collations(pstate, whenClause);
+		}
 
 		/*
 		 * Check for disallowed references to OLD/NEW.
@@ -1229,6 +1236,11 @@ CreateTriggerFiringOn(const CreateTrigStmt *stmt, const char *queryString,
 
 	/* Keep lock on target rel until end of xact */
 	table_close(rel, NoLock);
+
+	/* Add any requested comment */
+	if (stmt->trigcomment != NULL)
+		CreateComments(trigoid, TriggerRelationId, 0,
+					   stmt->trigcomment);
 
 	return myself;
 }
@@ -6987,4 +6999,207 @@ int
 AfterTriggerCurrentQueryDepth(void)
 {
 	return afterTriggers.query_depth;
+}
+
+/*
+ * Duplicate the trigger definition for the new relation: Use the source trigger
+ * (source_trigid from source_rel) to initialize a CreateTrigStmt for the target
+ * relation (heapRel).
+ *
+ * Attribute numbers in expression Vars are adjusted according to attmap.
+ */
+CreateTrigStmt *
+generateClonedTriggerStmt(RangeVar *heapRel, Oid source_trigid,
+						  Relation source_rel, const AttrMap *attmap)
+{
+	HeapTuple	triggerTuple;
+	HeapTuple	proctup;
+	Form_pg_trigger trigForm;
+	Form_pg_proc procform;
+	Relation	pg_trigger;
+	RangeVar   *constrrel = NULL;
+	SysScanDesc tgscan;
+	ScanKeyData skey[1];
+	Datum		value;
+	bool		isnull;
+	Node	   *qual = NULL;
+	List	   *trigargs = NIL;
+	List	   *cols = NIL;
+	List	   *funcname = NIL;
+	List	   *transitionRels = NIL;
+	char	   *funcschema;
+	CreateTrigStmt *trigStmt;
+
+	pg_trigger = table_open(TriggerRelationId, AccessShareLock);
+
+	/* Find the trigger to copy */
+	ScanKeyInit(&skey[0],
+				Anum_pg_trigger_oid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(source_trigid));
+
+	tgscan = systable_beginscan(pg_trigger, TriggerOidIndexId, true,
+								NULL, 1, skey);
+
+	triggerTuple = systable_getnext(tgscan);
+	if (!HeapTupleIsValid(triggerTuple))
+		elog(ERROR, "could not find tuple for trigger %u", source_trigid);
+
+	trigForm = (Form_pg_trigger) GETSTRUCT(triggerTuple);
+
+	/* Reconstruct trigger function String list */
+	proctup = SearchSysCache1(PROCOID, ObjectIdGetDatum(trigForm->tgfoid));
+	if (!HeapTupleIsValid(proctup))
+		elog(ERROR, "cache lookup failed for function %u", trigForm->tgfoid);
+	procform = (Form_pg_proc) GETSTRUCT(proctup);
+
+	funcschema = get_namespace_name(procform->pronamespace);
+	funcname = list_make2(makeString(funcschema),
+						  makeString(pstrdup(NameStr(procform->proname))));
+	ReleaseSysCache(proctup);
+
+	/*
+	 * If there is a column list, transform it to a list of column names. Note
+	 * we don't need to map this list in any way ...
+	 */
+	if (trigForm->tgattr.dim1 > 0)
+	{
+		for (int i = 0; i < trigForm->tgattr.dim1; i++)
+		{
+			Form_pg_attribute col;
+
+			col = TupleDescAttr(RelationGetDescr(source_rel),
+								trigForm->tgattr.values[i] - 1);
+			cols = lappend(cols,
+						   makeString(pstrdup(NameStr(col->attname))));
+		}
+	}
+
+	/* Reconstruct trigger arguments list */
+	if (trigForm->tgnargs > 0)
+	{
+		bytea	   *val;
+		char	   *p;
+
+		val = DatumGetByteaPP(fastgetattr(triggerTuple,
+										  Anum_pg_trigger_tgargs,
+										  RelationGetDescr(pg_trigger),
+										  &isnull));
+		if (isnull)
+			elog(ERROR, "tgargs is null in trigger \"%s\" for relation \"%s\"",
+				 NameStr(trigForm->tgname),
+				 RelationGetRelationName(source_rel));
+
+		p = (char *) VARDATA_ANY(val);
+
+		for (int i = 0; i < trigForm->tgnargs; i++)
+		{
+			trigargs = lappend(trigargs, makeString(pstrdup(p)));
+			p += strlen(p) + 1;
+		}
+	}
+
+	/* If the trigger has a WHEN qualification, add that */
+	value = fastgetattr(triggerTuple, Anum_pg_trigger_tgqual,
+						RelationGetDescr(pg_trigger), &isnull);
+	if (!isnull)
+	{
+		bool		found_whole_row;
+
+		qual = stringToNode(TextDatumGetCString(value));
+
+		/* Adjust Vars to match new table's column numbering */
+		qual = map_variable_attnos(qual, PRS2_NEW_VARNO, 0,
+								   attmap,
+								   InvalidOid,
+								   &found_whole_row);
+
+		/* As in expandTableLikeClause, reject whole-row variables */
+		if (found_whole_row)
+			ereport(ERROR,
+					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("cannot convert whole-row table reference"),
+					errdetail("Trigger \"%s\" contains a whole-row table reference.",
+							  NameStr(trigForm->tgname)));
+
+		qual = map_variable_attnos(qual, PRS2_OLD_VARNO, 0,
+								   attmap,
+								   InvalidOid,
+								   &found_whole_row);
+
+		/* As in expandTableLikeClause, reject whole-row variables */
+		if (found_whole_row)
+			ereport(ERROR,
+					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("cannot convert whole-row table reference"),
+					errdetail("Trigger \"%s\" contains a whole-row table reference.",
+							  NameStr(trigForm->tgname)));
+	}
+
+	/* Reconstruct trigger old transition table */
+	value = fastgetattr(triggerTuple, Anum_pg_trigger_tgoldtable,
+						RelationGetDescr(pg_trigger), &isnull);
+	if (!isnull)
+	{
+		TriggerTransition *old = makeNode(TriggerTransition);
+
+		old->isNew = false;
+		old->name = pstrdup(NameStr(*DatumGetName(value)));
+		old->isTable = true;
+		transitionRels = lappend(transitionRels, old);
+	}
+
+	/* Reconstruct trigger new transition table */
+	value = fastgetattr(triggerTuple, Anum_pg_trigger_tgnewtable,
+						RelationGetDescr(pg_trigger),
+						&isnull);
+	if (!isnull)
+	{
+		TriggerTransition *new = makeNode(TriggerTransition);
+
+		new->isNew = true;
+		new->name = pstrdup(NameStr(*DatumGetName(value)));
+		new->isTable = true;
+		transitionRels = lappend(transitionRels, new);
+	}
+
+	/* Reconstruct trigger constraint's FROM table */
+	if (OidIsValid(trigForm->tgconstrrelid))
+	{
+		/*
+		 * Acquire the AccessShareLock lock on tgconstrrelid now, as it will
+		 * be required later in CreateTriggerFiringOn.
+		 */
+		LockRelationOid(trigForm->tgconstrrelid, AccessShareLock);
+
+		constrrel =
+			makeRangeVar(get_namespace_name(get_rel_namespace(trigForm->tgconstrrelid)),
+						 get_rel_name(trigForm->tgconstrrelid),
+						 -1);
+	}
+
+	trigStmt = makeNode(CreateTrigStmt);
+	trigStmt->replace = false;
+	trigStmt->tgenabled = trigForm->tgenabled;
+	trigStmt->isconstraint = OidIsValid(trigForm->tgconstraint);
+	trigStmt->trigname = pstrdup(NameStr(trigForm->tgname));
+	trigStmt->relation = heapRel;
+	trigStmt->funcname = funcname;
+	trigStmt->args = trigargs;
+	trigStmt->row = TRIGGER_FOR_ROW(trigForm->tgtype);
+	trigStmt->timing = trigForm->tgtype & TRIGGER_TYPE_TIMING_MASK;
+	trigStmt->events = trigForm->tgtype & TRIGGER_TYPE_EVENT_MASK;
+	trigStmt->columns = cols;
+	trigStmt->whenClause = qual;
+	trigStmt->transitionRels = transitionRels;
+	trigStmt->deferrable = trigForm->tgdeferrable;
+	trigStmt->initdeferred = trigForm->tginitdeferred;
+	trigStmt->constrrel = constrrel;
+	trigStmt->trigcomment = NULL;
+	trigStmt->transformed = true;
+
+	systable_endscan(tgscan);
+	table_close(pg_trigger, AccessShareLock);
+
+	return trigStmt;
 }
