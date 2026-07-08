@@ -662,7 +662,8 @@ json_errsave_error(JsonParseErrorType error, JsonLexContext *lex,
 	else
 		errsave(escontext,
 				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-				 errmsg("invalid input syntax for type %s", "json"),
+				 errmsg("invalid input syntax for type %s",
+						lex->json5 ? "json5" : "json"),
 				 errdetail_internal("%s", json_errdetail(error, lex)),
 				 report_json_context(lex)));
 }

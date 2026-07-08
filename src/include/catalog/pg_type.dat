@@ -135,6 +135,13 @@
 
 # OIDS 100 - 199
 
+{ oid => '9960', array_type_oid => '9961',
+  descr => 'JSON5 stored as text',
+  typname => 'json5', typlen => '-1', typbyval => 'f', typcategory => 'U',
+  typinput => 'json5_in', typoutput => 'json5_out',
+  typreceive => 'json5_recv', typsend => 'json5_send',
+  typalign => 'i', typstorage => 'x' },
+
 { oid => '114', array_type_oid => '199', descr => 'JSON stored as text',
   typname => 'json', typlen => '-1', typbyval => 'f', typcategory => 'U',
   typinput => 'json_in', typoutput => 'json_out', typreceive => 'json_recv',
