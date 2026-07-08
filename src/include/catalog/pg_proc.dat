@@ -12776,4 +12776,24 @@
   proname => 'hashoid8extended', prorettype => 'int8',
   proargtypes => 'oid8 int8', prosrc => 'hashoid8extended' },
 
+# json5
+{ oid => '9962', descr => 'I/O',
+  proname => 'json5_in', prorettype => 'json5', proargtypes => 'cstring',
+  prosrc => 'json5_in' },
+{ oid => '9963', descr => 'I/O',
+  proname => 'json5_out', prorettype => 'cstring', proargtypes => 'json5',
+  prosrc => 'json_out' },
+{ oid => '9964', descr => 'I/O',
+  proname => 'json5_recv', prorettype => 'json5', proargtypes => 'internal',
+  prosrc => 'json5_recv' },
+{ oid => '9965', descr => 'I/O',
+  proname => 'json5_send', prorettype => 'bytea', proargtypes => 'json5',
+  prosrc => 'json_send' },
+{ oid => '9966', descr => 'convert json5 to json',
+  proname => 'json5_to_json', prorettype => 'json', proargtypes => 'json5',
+  prosrc => 'json5_to_json' },
+{ oid => '9967', descr => 'convert json5 to jsonb',
+  proname => 'json5_to_jsonb', prorettype => 'jsonb', proargtypes => 'json5',
+  prosrc => 'json5_to_jsonb' },
+
 ]

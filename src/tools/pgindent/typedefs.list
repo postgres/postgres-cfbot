@@ -1434,6 +1434,7 @@ JoinType
 JsObject
 JsValue
 Json5CommentState
+Json5ToJsonState
 JsonAggConstructor
 JsonAggState
 JsonArgument
