@@ -10,8 +10,8 @@ This module contains two programs for testing the json parsers.
   alternative chunk size, "-r nn" runs a range of chunk sizes down to one byte
   on the same input (with output separated by null bytes), and "-s" specifies
   using semantic routines. The semantic routines re-output the json, although
-  not in a very pretty form. The required non-option argument is the input file
-  name.
+  not in a very pretty form. The option "--json5" makes the parser accept
+  JSON5 input. The required non-option argument is the input file name.
 - `test_json_parser_perf` is for speed testing both the standard
   recursive descent parser and the non-recursive incremental
   parser. If given the `-i` flag it uses the non-recursive parser,

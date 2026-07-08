@@ -552,7 +552,8 @@ makeJsonLexContext(JsonLexContext *lex, text *json, bool need_escapes)
 										VARDATA_ANY(json),
 										VARSIZE_ANY_EXHDR(json),
 										GetDatabaseEncoding(),
-										need_escapes);
+										need_escapes,
+										false);
 }
 
 /*
@@ -2791,7 +2792,7 @@ populate_array_json(PopulateArrayContext *ctx, const char *json, int len)
 	JsonSemAction sem;
 
 	state.lex = makeJsonLexContextCstringLen(NULL, json, len,
-											 GetDatabaseEncoding(), true);
+											 GetDatabaseEncoding(), true, false);
 	state.ctx = ctx;
 
 	memset(&sem, 0, sizeof(sem));
@@ -3829,7 +3830,7 @@ get_json_object_as_hash(const char *json, int len, const char *funcname,
 	state->function_name = funcname;
 	state->hash = tab;
 	state->lex = makeJsonLexContextCstringLen(NULL, json, len,
-											  GetDatabaseEncoding(), true);
+											  GetDatabaseEncoding(), true, false);
 
 	sem->semstate = state;
 	sem->array_start = hash_array_start;
