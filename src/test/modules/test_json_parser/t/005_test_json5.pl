@@ -32,7 +32,8 @@ my @features = (
 		error => qr/Token "\/" is invalid/,
 	},
 	{ name => 'trailing commas', file => 'json5_trailing_commas' },
-	{ name => 'unquoted keys', file => 'json5_keys' },);
+	{ name => 'unquoted keys', file => 'json5_keys' },
+	{ name => 'single-quoted strings', file => 'json5_strings' },);
 
 # Inputs that stay invalid even in json5 mode.
 my @json5_invalid = (
