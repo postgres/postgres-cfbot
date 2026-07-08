@@ -153,6 +153,16 @@ struct JsonParserStack
 	char	   *scalar_val;
 };
 
+/* json5 comment lexing state saved across incremental chunks */
+typedef enum Json5CommentState
+{
+	JSON5_COMMENT_NONE = 0,
+	JSON5_COMMENT_SLASH,		/* saw '/', comment kind not known yet */
+	JSON5_COMMENT_LINE,			/* inside a // comment */
+	JSON5_COMMENT_BLOCK,		/* inside a block comment */
+	JSON5_COMMENT_BLOCK_STAR,	/* inside a block comment, last byte was '*' */
+} Json5CommentState;
+
 /*
  * struct containing state used when there is a possible partial token at the
  * end of a json chunk when we are doing incremental parsing.
@@ -165,6 +175,8 @@ struct JsonIncrementalState
 	bool		is_last_chunk;
 	bool		partial_completed;
 	jsonapi_StrValType partial_token;
+	/* json5 comment resume state */
+	Json5CommentState comment_state;
 };
 
 /*
@@ -390,7 +402,8 @@ IsValidJsonNumber(const char *str, size_t len)
  */
 JsonLexContext *
 makeJsonLexContextCstringLen(JsonLexContext *lex, const char *json,
-							 size_t len, int encoding, bool need_escapes)
+							 size_t len, int encoding, bool need_escapes,
+							 bool json5)
 {
 	if (lex == NULL)
 	{
@@ -408,6 +421,7 @@ makeJsonLexContextCstringLen(JsonLexContext *lex, const char *json,
 	lex->input_length = len;
 	lex->input_encoding = encoding;
 	lex->need_escapes = need_escapes;
+	lex->json5 = json5;
 	if (need_escapes)
 	{
 		/*
@@ -496,7 +510,7 @@ allocate_incremental_state(JsonLexContext *lex)
  */
 JsonLexContext *
 makeJsonLexContextIncremental(JsonLexContext *lex, int encoding,
-							  bool need_escapes)
+							  bool need_escapes, bool json5)
 {
 	if (lex == NULL)
 	{
@@ -525,6 +539,7 @@ makeJsonLexContextIncremental(JsonLexContext *lex, int encoding,
 	}
 
 	lex->need_escapes = need_escapes;
+	lex->json5 = json5;
 	if (need_escapes)
 	{
 		/*
@@ -1809,6 +1824,7 @@ json_lex(JsonLexContext *lex)
 		dummy_lex.input_encoding = lex->input_encoding;
 		dummy_lex.incremental = false;
 		dummy_lex.need_escapes = lex->need_escapes;
+		dummy_lex.json5 = lex->json5;
 		dummy_lex.strval = lex->strval;
 
 		partial_result = json_lex(&dummy_lex);
@@ -1849,15 +1865,146 @@ json_lex(JsonLexContext *lex)
 		/* end of partial token processing */
 	}
 
-	/* Skip leading whitespace. */
-	while (s < end && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r'))
+	/*
+	 * Skip whitespace and, in json5 mode, comments.  Comments count as
+	 * whitespace, so this alternates between the two until neither matches.
+	 * At an incremental chunk boundary the comment state is saved in
+	 * inc_state and picked up again here, since the bytes deciding comment
+	 * kind and termination can open the next chunk.
+	 */
+	for (;;)
 	{
-		if (*s++ == '\n')
+		Json5CommentState cstate = JSON5_COMMENT_NONE;
+
+		if (lex->json5 && lex->incremental)
 		{
-			++lex->line_number;
-			lex->line_start = s;
+			cstate = lex->inc_state->comment_state;
+			lex->inc_state->comment_state = JSON5_COMMENT_NONE;
+		}
+
+		if (cstate == JSON5_COMMENT_NONE)
+		{
+			/* Skip leading whitespace. */
+			while (s < end && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r'))
+			{
+				if (*s++ == '\n')
+				{
+					++lex->line_number;
+					lex->line_start = s;
+				}
+			}
+
+			if (!lex->json5 || s >= end || *s != '/')
+				break;
+
+			if (s + 1 >= end)
+			{
+				/*
+				 * A lone '/' at the end of the chunk might start a comment;
+				 * ask for more input in incremental mode.  Otherwise fall
+				 * out and report the '/' as an invalid token.
+				 */
+				if (lex->incremental && !lex->inc_state->is_last_chunk)
+				{
+					lex->inc_state->comment_state = JSON5_COMMENT_SLASH;
+					return JSON_INCOMPLETE;
+				}
+				break;
+			}
+			if (*(s + 1) == '/')
+			{
+				s += 2;
+				cstate = JSON5_COMMENT_LINE;
+			}
+			else if (*(s + 1) == '*')
+			{
+				s += 2;
+				cstate = JSON5_COMMENT_BLOCK;
+			}
+			else
+				break;			/* '/' not a comment: invalid token */
+		}
+		else if (cstate == JSON5_COMMENT_SLASH)
+		{
+			/* '/' seen at the end of the previous chunk */
+			if (s < end && *s == '/')
+			{
+				s++;
+				cstate = JSON5_COMMENT_LINE;
+			}
+			else if (s < end && *s == '*')
+			{
+				s++;
+				cstate = JSON5_COMMENT_BLOCK;
+			}
+			else
+			{
+				if (s >= end && !lex->inc_state->is_last_chunk)
+				{
+					lex->inc_state->comment_state = JSON5_COMMENT_SLASH;
+					return JSON_INCOMPLETE;
+				}
+				lex->token_start = s;
+				lex->prev_token_terminator = lex->token_terminator;
+				lex->token_terminator = s;
+				return JSON_INVALID_TOKEN;
+			}
+		}
+
+		if (cstate == JSON5_COMMENT_LINE)
+		{
+			/* json5 line terminators are LF and CR */
+			while (s < end && *s != '\n' && *s != '\r')
+				s++;
+			if (s >= end && lex->incremental && !lex->inc_state->is_last_chunk)
+			{
+				lex->inc_state->comment_state = JSON5_COMMENT_LINE;
+				return JSON_INCOMPLETE;
+			}
+
+			/*
+			 * The terminator, if any, is consumed as whitespace on the next
+			 * round; at end of input the comment is implicitly closed.
+			 */
+		}
+		else
+		{
+			/* block comment body; star tracks a possible closing '*' */
+			bool		star = (cstate == JSON5_COMMENT_BLOCK_STAR);
+			bool		closed = false;
+
+			while (s < end)
+			{
+				char		c = *s++;
+
+				if (star && c == '/')
+				{
+					closed = true;
+					break;
+				}
+				star = (c == '*');
+				if (c == '\n')
+				{
+					++lex->line_number;
+					lex->line_start = s;
+				}
+			}
+			if (!closed)
+			{
+				if (lex->incremental && !lex->inc_state->is_last_chunk)
+				{
+					lex->inc_state->comment_state =
+						star ? JSON5_COMMENT_BLOCK_STAR : JSON5_COMMENT_BLOCK;
+					return JSON_INCOMPLETE;
+				}
+				lex->token_start = s;
+				lex->prev_token_terminator = lex->token_terminator;
+				lex->token_terminator = s;
+				return JSON_UNTERMINATED_COMMENT;
+			}
 		}
 	}
+
 	lex->token_start = s;
 
 	/* Determine token type. */
@@ -2551,6 +2698,8 @@ json_errdetail(JsonParseErrorType error, JsonLexContext *lex)
 			return _("Unicode high surrogate must not follow a high surrogate.");
 		case JSON_UNICODE_LOW_SURROGATE:
 			return _("Unicode low surrogate must follow a high surrogate.");
+		case JSON_UNTERMINATED_COMMENT:
+			return _("Block comment is not terminated.");
 		case JSON_SEM_ACTION_FAILED:
 			/* fall through to the error code after switch */
 			break;
