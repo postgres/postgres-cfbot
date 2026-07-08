@@ -745,7 +745,7 @@ extern void pgstat_checkpointer_snapshot_cb(void);
 
 extern void pgstat_report_disconnect(Oid dboid);
 extern void pgstat_update_dbstats(TimestampTz ts);
-extern void AtEOXact_PgStat_Database(bool isCommit, bool parallel);
+extern void AtEOXact_PgStat_Database(bool isCommit);
 
 extern PgStat_StatDBEntry *pgstat_prep_database_pending(Oid dboid);
 extern void pgstat_reset_database_timestamp(Oid dboid, TimestampTz ts);
