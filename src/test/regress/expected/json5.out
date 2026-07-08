@@ -1,0 +1,612 @@
+-- JSON5 type input validation
+--
+-- The json5 input function uses the non-incremental (recursive descent)
+-- parser, so this file is also what exercises that parser's JSON5
+-- handling; the incremental parser is covered by the test_json_parser
+-- module.
+-- valid JSON is valid JSON5
+SELECT '{"key": "value"}'::json5;
+      json5       
+------------------
+ {"key": "value"}
+(1 row)
+
+SELECT '[1, 2, 3]'::json5;
+   json5   
+-----------
+ [1, 2, 3]
+(1 row)
+
+SELECT '"hello"'::json5;
+  json5  
+---------
+ "hello"
+(1 row)
+
+SELECT '42'::json5;
+ json5 
+-------
+ 42
+(1 row)
+
+SELECT 'true'::json5;
+ json5 
+-------
+ true
+(1 row)
+
+SELECT 'null'::json5;
+ json5 
+-------
+ null
+(1 row)
+
+-- unquoted keys
+SELECT '{key: "value"}'::json5;
+     json5      
+----------------
+ {key: "value"}
+(1 row)
+
+SELECT '{_key: "value"}'::json5;
+      json5      
+-----------------
+ {_key: "value"}
+(1 row)
+
+SELECT '{$key: "value"}'::json5;
+      json5      
+-----------------
+ {$key: "value"}
+(1 row)
+
+-- reserved words as unquoted keys
+SELECT '{true: 1, false: 2, null: 3}'::json5;
+            json5             
+------------------------------
+ {true: 1, false: 2, null: 3}
+(1 row)
+
+-- trailing commas
+SELECT '{"key": "value",}'::json5;
+       json5       
+-------------------
+ {"key": "value",}
+(1 row)
+
+SELECT '[1, 2, 3,]'::json5;
+   json5    
+------------
+ [1, 2, 3,]
+(1 row)
+
+-- comments
+SELECT E'// line comment\n{"key": "value"}'::json5;
+      json5       
+------------------
+ // line comment +
+ {"key": "value"}
+(1 row)
+
+SELECT '/* block comment */ {"key": "value"}'::json5;
+                json5                 
+--------------------------------------
+ /* block comment */ {"key": "value"}
+(1 row)
+
+SELECT E'{"key": /* inline */ "value"}'::json5;
+             json5             
+-------------------------------
+ {"key": /* inline */ "value"}
+(1 row)
+
+-- single-quoted strings
+SELECT $json5${'key': 'value'}$json5$::json5;
+      json5       
+------------------
+ {'key': 'value'}
+(1 row)
+
+SELECT $json5$["single's quote"]$json5$::json5;
+       json5        
+--------------------
+ ["single's quote"]
+(1 row)
+
+-- number extensions
+SELECT '{"a": .5}'::json5;
+   json5   
+-----------
+ {"a": .5}
+(1 row)
+
+SELECT '{"a": 5.}'::json5;
+   json5   
+-----------
+ {"a": 5.}
+(1 row)
+
+SELECT '{"a": 0xFF}'::json5;
+    json5    
+-------------
+ {"a": 0xFF}
+(1 row)
+
+SELECT '{"a": +1}'::json5;
+   json5   
+-----------
+ {"a": +1}
+(1 row)
+
+SELECT '{"a": Infinity}'::json5;
+      json5      
+-----------------
+ {"a": Infinity}
+(1 row)
+
+SELECT '{"a": -Infinity}'::json5;
+      json5       
+------------------
+ {"a": -Infinity}
+(1 row)
+
+SELECT '{"a": NaN}'::json5;
+   json5    
+------------
+ {"a": NaN}
+(1 row)
+
+-- multi-line strings
+SELECT E'{"key": "line1\\\nline2"}'::json5;
+      json5      
+-----------------
+ {"key": "line1\+
+ line2"}
+(1 row)
+
+-- unquoted identifiers are only valid as keys, not values (all error)
+SELECT '{key: value}'::json5;
+ERROR:  invalid input syntax for type json5
+LINE 1: SELECT '{key: value}'::json5;
+               ^
+DETAIL:  Expected JSON value, but found "value".
+CONTEXT:  JSON data, line 1: {key: value...
+SELECT '{"key": undefined}'::json5;
+ERROR:  invalid input syntax for type json5
+LINE 1: SELECT '{"key": undefined}'::json5;
+               ^
+DETAIL:  Expected JSON value, but found "undefined".
+CONTEXT:  JSON data, line 1: {"key": undefined...
+SELECT '[a]'::json5;
+ERROR:  invalid input syntax for type json5
+LINE 1: SELECT '[a]'::json5;
+               ^
+DETAIL:  Expected JSON value, but found "a".
+CONTEXT:  JSON data, line 1: [a...
+SELECT 'undefined'::json5;
+ERROR:  invalid input syntax for type json5
+LINE 1: SELECT 'undefined'::json5;
+               ^
+DETAIL:  Expected JSON value, but found "undefined".
+CONTEXT:  JSON data, line 1: undefined
+-- invalid JSON5 (should error)
+SELECT '{"key": }'::json5;
+ERROR:  invalid input syntax for type json5
+LINE 1: SELECT '{"key": }'::json5;
+               ^
+DETAIL:  Expected JSON value, but found "}".
+CONTEXT:  JSON data, line 1: {"key": }
+SELECT ''::json5;
+ERROR:  invalid input syntax for type json5
+LINE 1: SELECT ''::json5;
+               ^
+DETAIL:  The input string ended unexpectedly.
+CONTEXT:  JSON data, line 1: 
+SELECT '[1,,]'::json5;
+ERROR:  invalid input syntax for type json5
+LINE 1: SELECT '[1,,]'::json5;
+               ^
+DETAIL:  Expected JSON value, but found ",".
+CONTEXT:  JSON data, line 1: [1,,...
+SELECT '{1a: 1}'::json5;
+ERROR:  invalid input syntax for type json5
+LINE 1: SELECT '{1a: 1}'::json5;
+               ^
+DETAIL:  Token "1a" is invalid.
+CONTEXT:  JSON data, line 1: {1a...
+SELECT '0x'::json5;
+ERROR:  invalid input syntax for type json5
+LINE 1: SELECT '0x'::json5;
+               ^
+DETAIL:  Token "0x" is invalid.
+CONTEXT:  JSON data, line 1: 0x
+SELECT '.'::json5;
+ERROR:  invalid input syntax for type json5
+LINE 1: SELECT '.'::json5;
+               ^
+DETAIL:  Token "." is invalid.
+CONTEXT:  JSON data, line 1: .
+SELECT '/* unterminated'::json5;
+ERROR:  invalid input syntax for type json5
+LINE 1: SELECT '/* unterminated'::json5;
+               ^
+DETAIL:  Block comment is not terminated.
+CONTEXT:  JSON data, line 1: /* unterminated
+SELECT $json5$'unterminated$json5$::json5;
+ERROR:  invalid input syntax for type json5
+LINE 1: SELECT $json5$'unterminated$json5$::json5;
+               ^
+DETAIL:  Token "'unterminated" is invalid.
+CONTEXT:  JSON data, line 1: 'unterminated
+-- unterminated block comments error even after a complete value
+SELECT '1 /*'::json5;
+ERROR:  invalid input syntax for type json5
+LINE 1: SELECT '1 /*'::json5;
+               ^
+DETAIL:  Block comment is not terminated.
+CONTEXT:  JSON data, line 1: 1 /*
+SELECT '1 /**'::json5;
+ERROR:  invalid input syntax for type json5
+LINE 1: SELECT '1 /**'::json5;
+               ^
+DETAIL:  Block comment is not terminated.
+CONTEXT:  JSON data, line 1: 1 /**
+SELECT '1 /*/'::json5;
+ERROR:  invalid input syntax for type json5
+LINE 1: SELECT '1 /*/'::json5;
+               ^
+DETAIL:  Block comment is not terminated.
+CONTEXT:  JSON data, line 1: 1 /*/
+SELECT '[1] /* {"garbage" [[['::json5;
+ERROR:  invalid input syntax for type json5
+LINE 1: SELECT '[1] /* {"garbage" [[['::json5;
+               ^
+DETAIL:  Block comment is not terminated.
+CONTEXT:  JSON data, line 1: [1] /* {"garbage" [[[
+SELECT '1 /**/ /*'::json5;
+ERROR:  invalid input syntax for type json5
+LINE 1: SELECT '1 /**/ /*'::json5;
+               ^
+DETAIL:  Block comment is not terminated.
+CONTEXT:  JSON data, line 1: 1 /**/ /*
+SELECT '1 /**/'::json5;
+ json5  
+--------
+ 1 /**/
+(1 row)
+
+-- line comments end at CR as well as LF
+SELECT E'[1, // c\r2\n]'::json5::jsonb;
+ jsonb  
+--------
+ [1, 2]
+(1 row)
+
+SELECT E'// c\r1'::json5::json;
+ json 
+------
+ 1
+(1 row)
+
+SELECT E'1 // c\rgarbage'::json5;
+ERROR:  invalid input syntax for type json5
+LINE 1: SELECT E'1 // c\rgarbage'::json5;
+               ^
+DETAIL:  Expected end of input, but found "garbage".
+CONTEXT:  JSON data, line 1: 1 // cgarbage
+-- signed NaN
+SELECT '-NaN'::json5;
+ json5 
+-------
+ -NaN
+(1 row)
+
+SELECT '+NaN'::json5;
+ json5 
+-------
+ +NaN
+(1 row)
+
+SELECT '{"a": -NaN}'::json5::json;   -- should ERROR
+ERROR:  cannot convert JSON5 value "-NaN" to JSON
+DETAIL:  JSON does not support Infinity or NaN numeric values.
+SELECT '{"a": +NaN}'::json5::jsonb;  -- should ERROR
+ERROR:  cannot convert JSON5 value "+NaN" to jsonb
+DETAIL:  The jsonb type does not support Infinity or NaN numeric values.
+-- Infinity and NaN are identifiers, so also valid as unquoted keys
+SELECT '{Infinity: 1, NaN: 2}'::json5;
+         json5         
+-----------------------
+ {Infinity: 1, NaN: 2}
+(1 row)
+
+SELECT '{Infinity: 1, NaN: 2}'::json5::json;
+          json          
+------------------------
+ {"Infinity":1,"NaN":2}
+(1 row)
+
+SELECT '{Infinity: 1, NaN: 2}'::json5::jsonb;
+           jsonb           
+---------------------------
+ {"NaN": 2, "Infinity": 1}
+(1 row)
+
+SELECT '{-Infinity: 1}'::json5;      -- should ERROR (not an identifier)
+ERROR:  invalid input syntax for type json5
+LINE 1: SELECT '{-Infinity: 1}'::json5;
+               ^
+DETAIL:  Expected string or "}", but found "-Infinity".
+CONTEXT:  JSON data, line 1: {-Infinity...
+-- \u0000 is valid json, so the json5 -> json cast must preserve it
+SELECT '"\u0000"'::json5::json;
+   json   
+----------
+ "\u0000"
+(1 row)
+
+SELECT '{"a": "\u0000"}'::json5::json;
+      json       
+-----------------
+ {"a": "\u0000"}
+(1 row)
+
+-- but combined with json5-only syntax the rebuild path still rejects it
+SELECT '{a: "\u0000"}'::json5::json; -- should ERROR
+ERROR:  unsupported Unicode escape sequence
+DETAIL:  \u0000 cannot be converted to text.
+CONTEXT:  JSON data, line 1: {a: "\u0000...
+-- jsonb rejects \u0000 itself, the cast stays consistent with that
+SELECT '"\u0000"'::json5::jsonb;     -- should ERROR
+ERROR:  unsupported Unicode escape sequence
+DETAIL:  \u0000 cannot be converted to text.
+CONTEXT:  JSON data, line 1: "\u0000...
+-- verbatim storage: output preserves original formatting
+SELECT $json5${key: 'value', /* comment */}$json5$::json5;
+             json5             
+-------------------------------
+ {key: 'value', /* comment */}
+(1 row)
+
+SELECT E'// comment\n[1, 2,]'::json5;
+   json5    
+------------
+ // comment+
+ [1, 2,]
+(1 row)
+
+-- cast: json5 -> json (normalizes)
+SELECT '{"key": "value"}'::json5::json;
+       json       
+------------------
+ {"key": "value"}
+(1 row)
+
+SELECT $json5${key: 'value'}$json5$::json5::json;
+      json       
+-----------------
+ {"key":"value"}
+(1 row)
+
+SELECT '{true: 1, null: 2}'::json5::json;
+        json         
+---------------------
+ {"true":1,"null":2}
+(1 row)
+
+SELECT '{"a": .5}'::json5::json;
+   json    
+-----------
+ {"a":0.5}
+(1 row)
+
+SELECT '{"a": 5.}'::json5::json;
+  json   
+---------
+ {"a":5}
+(1 row)
+
+SELECT '{"a": 0xFF}'::json5::json;
+   json    
+-----------
+ {"a":255}
+(1 row)
+
+SELECT '{"a": +1}'::json5::json;
+  json   
+---------
+ {"a":1}
+(1 row)
+
+SELECT '{"a": 6.022e23}'::json5::json;
+      json       
+-----------------
+ {"a": 6.022e23}
+(1 row)
+
+SELECT '[1, 2, 3,]'::json5::json;
+  json   
+---------
+ [1,2,3]
+(1 row)
+
+SELECT E'// c\n{"a": [1, /* c */ 2]}'::json5::json;
+    json     
+-------------
+ {"a":[1,2]}
+(1 row)
+
+SELECT E'{"key": "line1\\\nline2"}'::json5::json;
+         json         
+----------------------
+ {"key":"line1line2"}
+(1 row)
+
+-- containers as array elements need separating commas
+SELECT '[[1], [2], {"a": [3, {"b": 4}]}]'::json5::json;
+               json               
+----------------------------------
+ [[1], [2], {"a": [3, {"b": 4}]}]
+(1 row)
+
+SELECT '[{"a": 1}, {"b": 2}, 3, [4]]'::json5::json;
+             json             
+------------------------------
+ [{"a": 1}, {"b": 2}, 3, [4]]
+(1 row)
+
+SELECT '{"key": Infinity}'::json5::json;   -- should ERROR
+ERROR:  cannot convert JSON5 value "Infinity" to JSON
+DETAIL:  JSON does not support Infinity or NaN numeric values.
+SELECT '{"key": -Infinity}'::json5::json;  -- should ERROR
+ERROR:  cannot convert JSON5 value "-Infinity" to JSON
+DETAIL:  JSON does not support Infinity or NaN numeric values.
+SELECT '{"key": +Infinity}'::json5::json;  -- should ERROR
+ERROR:  cannot convert JSON5 value "+Infinity" to JSON
+DETAIL:  JSON does not support Infinity or NaN numeric values.
+SELECT '{"key": NaN}'::json5::json;        -- should ERROR
+ERROR:  cannot convert JSON5 value "NaN" to JSON
+DETAIL:  JSON does not support Infinity or NaN numeric values.
+-- cast: json5 -> jsonb
+SELECT '{"key": "value"}'::json5::jsonb;
+      jsonb       
+------------------
+ {"key": "value"}
+(1 row)
+
+SELECT $json5${key: 'value'}$json5$::json5::jsonb;
+      jsonb       
+------------------
+ {"key": "value"}
+(1 row)
+
+SELECT '{true: 1, null: 2}'::json5::jsonb;
+         jsonb          
+------------------------
+ {"null": 2, "true": 1}
+(1 row)
+
+SELECT '{"a": .5}'::json5::jsonb;
+   jsonb    
+------------
+ {"a": 0.5}
+(1 row)
+
+SELECT '{"a": 5.}'::json5::jsonb;
+  jsonb   
+----------
+ {"a": 5}
+(1 row)
+
+SELECT '{"a": 0xFF}'::json5::jsonb;
+   jsonb    
+------------
+ {"a": 255}
+(1 row)
+
+SELECT '[1, 2, 3,]'::json5::jsonb;
+   jsonb   
+-----------
+ [1, 2, 3]
+(1 row)
+
+SELECT '[[1], [2], {"a": [3, {"b": 4}]}]'::json5::jsonb;
+              jsonb               
+----------------------------------
+ [[1], [2], {"a": [3, {"b": 4}]}]
+(1 row)
+
+SELECT '{"key": Infinity}'::json5::jsonb;  -- should ERROR
+ERROR:  cannot convert JSON5 value "Infinity" to jsonb
+DETAIL:  The jsonb type does not support Infinity or NaN numeric values.
+SELECT '{"key": -Infinity}'::json5::jsonb; -- should ERROR
+ERROR:  cannot convert JSON5 value "-Infinity" to jsonb
+DETAIL:  The jsonb type does not support Infinity or NaN numeric values.
+SELECT '{"key": +Infinity}'::json5::jsonb; -- should ERROR
+ERROR:  cannot convert JSON5 value "+Infinity" to jsonb
+DETAIL:  The jsonb type does not support Infinity or NaN numeric values.
+SELECT '{"key": NaN}'::json5::jsonb;       -- should ERROR
+ERROR:  cannot convert JSON5 value "NaN" to jsonb
+DETAIL:  The jsonb type does not support Infinity or NaN numeric values.
+-- cast: json -> json5 (implicit)
+SELECT '{"key": "value"}'::json::json5;
+      json5       
+------------------
+ {"key": "value"}
+(1 row)
+
+-- cast: jsonb -> json5 (assignment; serializes then validates)
+SELECT '{"key": "value"}'::jsonb::json5;
+      json5       
+------------------
+ {"key": "value"}
+(1 row)
+
+SELECT '{"a": 0.5, "b": [1,2,3]}'::jsonb::json5;
+           json5            
+----------------------------
+ {"a": 0.5, "b": [1, 2, 3]}
+(1 row)
+
+-- cast: json5 -> text (assignment; verbatim)
+SELECT '{"key": "value"}'::json5::text;
+       text       
+------------------
+ {"key": "value"}
+(1 row)
+
+SELECT $json5${key: 'value', /* comment */}$json5$::json5::text;
+             text              
+-------------------------------
+ {key: 'value', /* comment */}
+(1 row)
+
+-- cast: text -> json5 (explicit; validates)
+SELECT CAST('{"key": "value"}' AS json5);
+      json5       
+------------------
+ {"key": "value"}
+(1 row)
+
+SELECT CAST($json5${key: 'value'}$json5$ AS json5);
+     json5      
+----------------
+ {key: 'value'}
+(1 row)
+
+SELECT 'not json5 {'::text::json5;         -- should ERROR (validated)
+ERROR:  invalid input syntax for type json5
+DETAIL:  Expected JSON value, but found "not".
+CONTEXT:  JSON data, line 1: not...
+-- deep nesting: json5 -> json must not impose an arbitrary depth cap
+-- (parity with json5 -> jsonb and plain json; 100 > old fixed limit of 64)
+SELECT (repeat('[', 100) || '1' || repeat(']', 100))::json5::json IS NOT NULL AS to_json_ok,
+       (repeat('[', 100) || '1' || repeat(']', 100))::json5::jsonb IS NOT NULL AS to_jsonb_ok,
+       (repeat('[', 100) || '1' || repeat(']', 100))::json IS NOT NULL AS json_ok;
+ to_json_ok | to_jsonb_ok | json_ok 
+------------+-------------+---------
+ t          | t           | t
+(1 row)
+
+-- table storage test
+CREATE TABLE json5_test(id serial, data json5);
+INSERT INTO json5_test(data) VALUES ($json5${key: 'value', /* comment */}$json5$);
+INSERT INTO json5_test(data) VALUES ('{"normal": "json"}');
+INSERT INTO json5_test(data) VALUES ('[1, 2, 3,]');
+SELECT * FROM json5_test;
+ id |             data              
+----+-------------------------------
+  1 | {key: 'value', /* comment */}
+  2 | {"normal": "json"}
+  3 | [1, 2, 3,]
+(3 rows)
+
+SELECT id, data::jsonb FROM json5_test;
+ id |        data        
+----+--------------------
+  1 | {"key": "value"}
+  2 | {"normal": "json"}
+  3 | [1, 2, 3]
+(3 rows)
+
+DROP TABLE json5_test;
