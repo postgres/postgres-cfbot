@@ -19,6 +19,11 @@
 #include "nodes/parsenodes.h"
 
 /*
+ * forward references in this file
+ */
+typedef struct AttrMap AttrMap;
+
+/*
  * TriggerData is the node type that is passed as fmgr "context" info
  * when a function is called by the trigger manager.
  */
@@ -268,6 +273,10 @@ extern void AfterTriggerBeginSubXact(void);
 extern void AfterTriggerEndSubXact(bool isCommit);
 extern void AfterTriggerSetState(ConstraintsSetStmt *stmt);
 extern bool AfterTriggerPendingOnRel(Oid relid);
+extern CreateTrigStmt *generateClonedTriggerStmt(RangeVar *heapRel,
+												 Oid source_trigid,
+												 Relation source_rel,
+												 const AttrMap *attmap);
 
 
 /*
