@@ -34,6 +34,7 @@ my @features = (
 	{ name => 'trailing commas', file => 'json5_trailing_commas' },
 	{ name => 'unquoted keys', file => 'json5_keys' },
 	{ name => 'single-quoted strings', file => 'json5_strings' },
+	{ name => 'multi-line strings', file => 'json5_multiline' },
 	{ name => 'numbers', file => 'json5_numbers' },);
 
 # Inputs that stay invalid even in json5 mode.
@@ -189,6 +190,43 @@ foreach my $exe (@exes)
 			is($stdout, $whole,
 				"json5 mode, chunk size $size: $label: matches whole input");
 		}
+	}
+
+	# Multi-line string continuations are also handled on the "not
+	# de-escaping" path (no -s flag), whole-input and byte-at-a-time.
+	my $ml_file = "$FindBin::RealBin/../json5_multiline.json5";
+	foreach my $copt ([], [ "-c", 1 ])
+	{
+		my ($stdout, $stderr) =
+		  run_command([ @$exe, "--json5", @$copt, $ml_file ]);
+
+		like($stdout, qr/SUCCESS/,
+			"json5 multi-line strings, no de-escaping (@$copt): parse succeeds"
+		);
+		is($stderr, "",
+			"json5 multi-line strings, no de-escaping (@$copt): no error output"
+		);
+	}
+
+	# A backslash-newline continuation in a quoted key's value exercises
+	# the gate directly: a quoted key rules out the unrelated
+	# unquoted-key rejection reached via the fixture file.
+	my $cont_file = inline_file("{ \"a\": \"line \\\nb\" }");
+	for my $size (64, 1)
+	{
+		my ($stdout, $stderr) =
+		  run_command([ @$exe, "-s", "--json5", "-c", $size, $cont_file ]);
+
+		is($stdout, "{\n\"a\": \"line b\"\n}",
+			"json5 mode, chunk size $size: backslash-newline continuation accepted"
+		);
+		is($stderr, "",
+			"json5 mode, chunk size $size: backslash-newline continuation no error"
+		);
+
+		check_rejected($exe, $cont_file,
+			"non-json5 mode, chunk size $size: backslash-newline continuation",
+			qr/Escape sequence.*is invalid/s, "-c", $size);
 	}
 
 	# Specifically exercise a hex number split in the middle of its
