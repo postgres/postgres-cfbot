@@ -38,7 +38,7 @@ static bool pgStatSkipXactCounters = false;
  * Called from access/transam/xact.c at top-level transaction commit/abort.
  */
 void
-AtEOXact_PgStat(bool isCommit, bool parallel)
+AtEOXact_PgStat(bool isCommit)
 {
 	PgStat_SubXactStatus *xact_state;
 	bool		skip_xact_counters = pgStatSkipXactCounters;
@@ -49,7 +49,7 @@ AtEOXact_PgStat(bool isCommit, bool parallel)
 	 */
 	pgStatSkipXactCounters = false;
 	if (!skip_xact_counters)
-		AtEOXact_PgStat_Database(isCommit, parallel);
+		AtEOXact_PgStat_Database(isCommit);
 
 	/* handle transactional stats information */
 	xact_state = pgStatXactStack;
