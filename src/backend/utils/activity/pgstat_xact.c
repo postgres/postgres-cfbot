@@ -31,6 +31,7 @@ static void AtEOSubXact_PgStat_DroppedStats(PgStat_SubXactStatus *xact_state,
 											bool isCommit, int nestDepth);
 
 static PgStat_SubXactStatus *pgStatXactStack = NULL;
+static bool pgStatSkipXactCounters = false;
 
 
 /*
@@ -40,8 +41,15 @@ void
 AtEOXact_PgStat(bool isCommit, bool parallel)
 {
 	PgStat_SubXactStatus *xact_state;
+	bool		skip_xact_counters = pgStatSkipXactCounters;
 
-	AtEOXact_PgStat_Database(isCommit, parallel);
+	/*
+	 * Consume the suppression flag.  Only the xact_commit/xact_rollback bump is
+	 * skipped; transactional stats below must still be processed.
+	 */
+	pgStatSkipXactCounters = false;
+	if (!skip_xact_counters)
+		AtEOXact_PgStat_Database(isCommit, parallel);
 
 	/* handle transactional stats information */
 	xact_state = pgStatXactStack;
@@ -57,6 +65,28 @@ AtEOXact_PgStat(bool isCommit, bool parallel)
 
 	/* Make sure any stats snapshot is thrown away */
 	pgstat_clear_snapshot();
+}
+
+/*
+ * Suppress the xact_commit/xact_rollback bump at the next top-level transaction
+ * end.  For internal aborts that don't represent a user-visible transaction
+ * outcome; see AbortCurrentTransactionWithoutXactCounters().
+ */
+void
+pgstat_suppress_xact_counters(void)
+{
+	Assert(!pgStatSkipXactCounters);
+	pgStatSkipXactCounters = true;
+}
+
+/*
+ * Clear the suppression flag set by pgstat_suppress_xact_counters(), in case
+ * the intervening abort never reached AtEOXact_PgStat() to consume it.
+ */
+void
+pgstat_clear_xact_counter_suppression(void)
+{
+	pgStatSkipXactCounters = false;
 }
 
 /*
