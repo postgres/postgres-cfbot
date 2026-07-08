@@ -2514,7 +2514,7 @@ CommitTransaction(void)
 	AtEOXact_ComboCid();
 	AtEOXact_HashTables(true);
 	AtEOXact_RI(true);
-	AtEOXact_PgStat(true, is_parallel_worker);
+	AtEOXact_PgStat(true);
 	AtEOXact_Snapshot(true, false);
 	AtEOXact_ApplyLauncher(true);
 	AtEOXact_LogicalRepWorkers(true);
@@ -3041,7 +3041,7 @@ AbortTransaction(void)
 		AtEOXact_ComboCid();
 		AtEOXact_HashTables(false);
 		AtEOXact_RI(false);
-		AtEOXact_PgStat(false, is_parallel_worker);
+		AtEOXact_PgStat(false);
 		AtEOXact_ApplyLauncher(false);
 		AtEOXact_LogicalRepWorkers(false);
 		AtEOXact_LogicalCtl();
