@@ -120,6 +120,18 @@ FOR EACH STATEMENT EXECUTE PROCEDURE trigger_func('before_ins_stmt');
 CREATE TRIGGER after_ins_stmt_trig AFTER INSERT ON main_table
 FOR EACH STATEMENT EXECUTE PROCEDURE trigger_func('after_ins_stmt');
 
+CREATE TRIGGER wholetrig BEFORE UPDATE ON main_table FOR EACH ROW
+WHEN (OLD IS NOT NULL)
+EXECUTE PROCEDURE trigger_func('modified_a');
+CREATE TABLE main_table1(LIKE main_table INCLUDING TRIGGERS); -- error, wholerow reference not allowed
+DROP TRIGGER wholetrig ON main_table;
+
+CREATE TRIGGER wholetrig BEFORE UPDATE ON main_table FOR EACH ROW
+WHEN (NEW IS NOT NULL)
+EXECUTE PROCEDURE trigger_func('modified_a');
+CREATE TABLE main_table1(LIKE main_table INCLUDING TRIGGERS); -- error, wholerow reference not allowed
+DROP TRIGGER wholetrig ON main_table;
+
 --
 -- if neither 'FOR EACH ROW' nor 'FOR EACH STATEMENT' was specified,
 -- CREATE TRIGGER should default to 'FOR EACH STATEMENT'
@@ -234,6 +246,24 @@ SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgrelid = 'main_table'::regc
 UPDATE main_table SET a = 50;
 UPDATE main_table SET b = 10;
 
+-- CREATE TABLE LIKE INCLUDING TRIGGERS tests
+COMMENT ON TRIGGER before_ins_stmt_trig ON main_table IS 'trigger before_ins_stmt_trig';
+CREATE TABLE main_table1(c int, LIKE main_table INCLUDING TRIGGERS INCLUDING COMMENTS);
+CREATE TABLE main_table2(c int, LIKE main_table EXCLUDING TRIGGERS INCLUDING COMMENTS);
+
+SELECT  pg_get_triggerdef(oid)
+FROM    pg_trigger
+WHERE NOT tgisinternal AND tgrelid IN ('main_table'::regclass, 'main_table1'::regclass, 'main_table2'::regclass)
+ORDER BY tgname, tgrelid::regclass::text COLLATE "C";
+
+SELECT  pc.relname, pd.tgname, obj_description(pd.oid, 'pg_trigger')
+FROM    pg_trigger pd JOIN pg_class pc
+ON      pc.oid = pd.tgrelid AND pd.tgname = 'before_ins_stmt_trig'
+ORDER BY 1;
+COMMENT ON TRIGGER before_ins_stmt_trig ON main_table IS NULL;
+
+DROP TABLE main_table1, main_table2;
+
 --
 -- Test case for bug with BEFORE trigger followed by AFTER trigger with WHEN
 --
@@ -258,7 +288,13 @@ INSERT INTO some_t VALUES (TRUE);
 UPDATE some_t SET some_col = TRUE;
 UPDATE some_t SET some_col = FALSE;
 UPDATE some_t SET some_col = TRUE;
+ALTER TABLE some_t ENABLE REPLICA TRIGGER some_trig_aftera;
+ALTER TABLE some_t DISABLE TRIGGER some_trig_afterb;
+ALTER TABLE some_t ENABLE ALWAYS TRIGGER some_trig_before;
+CREATE TABLE some_t1 (c INT, LIKE some_t INCLUDING TRIGGERS INCLUDING COMMENTS);
+\d+ some_t1
 DROP TABLE some_t;
+DROP TABLE some_t1;
 
 -- bogus cases
 CREATE TRIGGER error_upd_and_col BEFORE UPDATE OR UPDATE OF a ON main_table
@@ -620,6 +656,10 @@ FOR EACH ROW EXECUTE PROCEDURE view_trigger('instead_of_upd');
 
 CREATE TRIGGER instead_of_delete_trig INSTEAD OF DELETE ON main_view
 FOR EACH ROW EXECUTE PROCEDURE view_trigger('instead_of_del');
+
+CREATE TABLE main_view_table(LIKE main_view INCLUDING TRIGGERS); -- View triggers are not copied
+\d main_view_table
+DROP TABLE main_view_table;
 
 -- Valid BEFORE statement VIEW triggers
 CREATE TRIGGER before_ins_stmt_trig BEFORE INSERT ON main_view
@@ -1609,6 +1649,13 @@ create constraint trigger parted_trig_two after insert on parted_constr
   for each row when (bark(new.b) AND new.a % 2 = 1)
   execute procedure trigger_notice_ab();
 
+create table parted_constr_copy (c int, like parted_constr including all, d int);
+select  pg_get_triggerdef(oid)
+from    pg_trigger
+where   not tgisinternal and tgrelid in ('parted_constr_copy'::regclass, 'parted_constr'::regclass)
+order by tgname;
+drop table parted_constr_copy;
+
 -- The immediate constraint is fired immediately; the WHEN clause of the
 -- deferred constraint is also called immediately.  The deferred constraint
 -- is fired at commit time.
@@ -2283,6 +2330,10 @@ create trigger iocdu_tt_parted_update_trig
   after update on iocdu_tt_parted referencing old table as old_table new table as new_table
   for each statement execute procedure dump_update();
 
+CREATE TABLE iocdu_tt_parted_copy(LIKE iocdu_tt_parted INCLUDING TRIGGERS);
+\d iocdu_tt_parted_copy
+DROP TABLE iocdu_tt_parted_copy;
+
 -- inserts only
 insert into iocdu_tt_parted values (1, 'AAA'), (2, 'BBB')
   on conflict (a) do
@@ -2739,6 +2790,25 @@ begin
 end;
 $$;
 alter function whoami() owner to regress_fn_owner;
+
+-- CREATE TABLE LIKE INCLUDING TRIGGERS for constraint trigger
+create schema test_trig;
+create table test_trig.trig_t1 (id integer);
+create table test_trig.trig_t2 (id integer);
+alter function whoami() set schema test_trig;
+
+create constraint trigger con_trig_test after insert on test_trig.trig_t1
+from test_trig.trig_t2
+deferrable initially deferred
+for each row
+execute function test_trig.whoami();
+
+create table trig_t1_copy(like test_trig.trig_t1 including triggers);
+select pg_get_triggerdef(oid) from pg_trigger where tgrelid = 'trig_t1_copy'::regclass;
+
+alter function test_trig.whoami() set schema public;
+drop table test_trig.trig_t1, test_trig.trig_t2, trig_t1_copy;
+drop schema test_trig;
 
 create table defer_trig (id integer);
 grant insert on defer_trig to public;

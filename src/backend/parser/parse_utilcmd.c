@@ -39,12 +39,14 @@
 #include "catalog/pg_opclass.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_statistic_ext.h"
+#include "catalog/pg_trigger.h"
 #include "catalog/pg_type.h"
 #include "commands/comment.h"
 #include "commands/defrem.h"
 #include "commands/sequence.h"
 #include "commands/tablecmds.h"
 #include "commands/tablespace.h"
+#include "commands/trigger.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
@@ -1313,7 +1315,8 @@ transformTableLikeClause(CreateStmtContext *cxt, TableLikeClause *table_like_cla
 		 CREATE_TABLE_LIKE_GENERATED |
 		 CREATE_TABLE_LIKE_CONSTRAINTS |
 		 CREATE_TABLE_LIKE_INDEXES |
-		 CREATE_TABLE_LIKE_STATISTICS))
+		 CREATE_TABLE_LIKE_STATISTICS |
+		 CREATE_TABLE_LIKE_TRIGGERS))
 	{
 		table_like_clause->relationOid = RelationGetRelid(relation);
 		cxt->likeclauses = lappend(cxt->likeclauses, table_like_clause);
@@ -1625,6 +1628,93 @@ expandTableLikeClause(RangeVar *heapRel, TableLikeClause *table_like_clause)
 		}
 
 		list_free(parent_extstats);
+	}
+
+	/* Process triggers if required */
+	if ((table_like_clause->options & CREATE_TABLE_LIKE_TRIGGERS) &&
+		(relation->trigdesc != NULL) &&
+		(relation->rd_rel->relkind == RELKIND_RELATION ||
+		 relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE ||
+		 relation->rd_rel->relkind == RELKIND_FOREIGN_TABLE))
+	{
+		bool		include_comments;
+		List	   *cloned_trigs = NIL;
+
+		include_comments = (table_like_clause->options & CREATE_TABLE_LIKE_COMMENTS);
+
+		/*
+		 * generateClonedTriggerStmt() below does catalog accesses (e.g. a
+		 * syscache lookup on the trigger's function), and any such access can
+		 * cause AcceptInvalidationMessages() to run, which can rebuild
+		 * relation->trigdesc from scratch if a concurrent session has changed
+		 * the trigger set in the meantime.  CREATE TRIGGER only takes
+		 * ShareRowExclusiveLock on the relation, which is not conflict with
+		 * the AccessShareLock we're holding here, so this can really happen.
+		 * relation->trigdesc->triggers is also kept sorted by trigger name,
+		 * so a concurrently-added trigger can shuffle the array positions of
+		 * relation->trigdesc->triggers we've already visited.
+		 *
+		 * Because of that we need first collect the triggers OIDs to be
+		 * cloned, and only then clone each one.
+		 *
+		 * A trigger created by another session after we've taken this
+		 * snapshot will simply not be copied to the new table, which is fine.
+		 */
+		if (childrel->rd_rel->relkind == RELKIND_FOREIGN_TABLE)
+		{
+			for (int nt = 0; nt < relation->trigdesc->numtriggers; nt++)
+			{
+				Trigger    *trig = relation->trigdesc->triggers + nt;
+
+				/* We do not copy internal triggers to the new table */
+				if (trig->tgisinternal)
+					continue;
+
+				/*
+				 * Foreign table cannot have constraint triggers or triggers
+				 * with transition table
+				 */
+				if (OidIsValid(trig->tgconstraint))
+					continue;
+
+				if (trig->tgoldtable != NULL || trig->tgnewtable != NULL)
+					continue;
+
+				cloned_trigs = lappend_oid(cloned_trigs, trig->tgoid);
+			}
+		}
+		else
+		{
+			for (int nt = 0; nt < relation->trigdesc->numtriggers; nt++)
+			{
+				Trigger    *trig = relation->trigdesc->triggers + nt;
+
+				/* We do not copy internal triggers to the new table */
+				if (trig->tgisinternal)
+					continue;
+
+				cloned_trigs = lappend_oid(cloned_trigs, trig->tgoid);
+			}
+		}
+
+		foreach_oid(trigoid, cloned_trigs)
+		{
+			CreateTrigStmt *trig_stmt;
+
+			trig_stmt = generateClonedTriggerStmt(heapRel, trigoid,
+												  relation, attmap);
+
+			/* Copy comment on trigger, if requested */
+			if (include_comments)
+			{
+				comment = GetComment(trigoid, TriggerRelationId, 0);
+
+				/* We make use of CreateTrigStmt's trigcomment option */
+				trig_stmt->trigcomment = comment;
+			}
+
+			result = lappend(result, trig_stmt);
+		}
 	}
 
 	/* Done with child rel */
