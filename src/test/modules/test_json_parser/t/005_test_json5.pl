@@ -30,7 +30,22 @@ my @features = (
 		name => 'comments',
 		file => 'json5_comments',
 		error => qr/Token "\/" is invalid/,
-	},);
+	},
+	{ name => 'trailing commas', file => 'json5_trailing_commas' },);
+
+# Inputs that stay invalid even in json5 mode.
+my @json5_invalid = (
+	[ 'doubled trailing comma', '[1,,]' ],);
+
+# Write $content to a temp file and return the file name.
+sub inline_file
+{
+	my ($content) = @_;
+	my ($fh, $fname) = tempfile(DIR => $dir);
+	print $fh $content;
+	close($fh);
+	return $fname;
+}
 
 # Parse $file with --json5 and compare the semantic output against
 # $expected, whole-input and one byte at a time.
@@ -92,6 +107,19 @@ foreach my $exe (@exes)
 		check_accepted($exe, $file, $expected, "json5 $f->{name}");
 		check_rejected($exe, $file, "non-json5 mode: $f->{name}",
 			$f->{error});
+	}
+
+	foreach my $inv (@json5_invalid)
+	{
+		my ($label, $content) = @$inv;
+		my $fname = inline_file($content);
+
+		for my $size (64, 1)
+		{
+			check_rejected($exe, $fname,
+				"json5 mode, chunk size $size: $label",
+				undef, "--json5", "-c", $size);
+		}
 	}
 
 }
