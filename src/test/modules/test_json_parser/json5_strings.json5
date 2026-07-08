@@ -1,0 +1,8 @@
+{
+  a: 'single quoted',
+  b: 'embedded "double" quotes',
+  c: 'escaped \' apostrophe',
+  d: "double with 'single' inside",
+  e: 'line1\nline2',
+  arr: [ 'x', "y", 'z' ]
+}
