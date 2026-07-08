@@ -2033,3 +2033,50 @@ JsonbUnquote(Jsonb *jb)
 	else
 		return JsonbToCString(NULL, &jb->root, VARSIZE(jb));
 }
+
+/*
+ * json5_to_jsonb: convert json5 text to jsonb
+ *
+ * Same building blocks as jsonb_in, but lexes with json5 enabled and
+ * rejects Infinity/NaN, which jsonb has no representation for.
+ */
+static JsonParseErrorType
+json5_to_jsonb_scalar(void *pstate, char *token, JsonTokenType tokentype)
+{
+	if (tokentype == JSON_TOKEN_NUMBER && json5_nonfinite_number(token))
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("cannot convert JSON5 value \"%s\" to jsonb", token),
+				 errdetail("The jsonb type does not support Infinity or NaN numeric values.")));
+
+	return jsonb_in_scalar(pstate, token, tokentype);
+}
+
+Datum
+json5_to_jsonb(PG_FUNCTION_ARGS)
+{
+	text	   *json5 = PG_GETARG_TEXT_PP(0);
+	char	   *str = VARDATA_ANY(json5);
+	int			len = VARSIZE_ANY_EXHDR(json5);
+	JsonLexContext lex;
+	JsonbInState state;
+	JsonSemAction sem;
+
+	memset(&state, 0, sizeof(state));
+	memset(&sem, 0, sizeof(sem));
+	makeJsonLexContextCstringLen(&lex, str, len, GetDatabaseEncoding(),
+								 true, true);
+
+	sem.semstate = &state;
+	sem.object_start = jsonb_in_object_start;
+	sem.array_start = jsonb_in_array_start;
+	sem.object_end = jsonb_in_object_end;
+	sem.array_end = jsonb_in_array_end;
+	sem.scalar = json5_to_jsonb_scalar;
+	sem.object_field_start = jsonb_in_object_field_start;
+
+	pg_parse_json_or_ereport(&lex, &sem);
+	freeJsonLexContext(&lex);
+
+	PG_RETURN_POINTER(JsonbValueToJsonb(state.result));
+}
