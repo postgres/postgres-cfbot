@@ -467,6 +467,7 @@ extern void SaveTransactionCharacteristics(SavedTransactionCharacteristics *s);
 extern void RestoreTransactionCharacteristics(const SavedTransactionCharacteristics *s);
 extern void CommitTransactionCommand(void);
 extern void AbortCurrentTransaction(void);
+extern void AbortCurrentTransactionWithoutXactCounters(void);
 extern void BeginTransactionBlock(void);
 extern bool EndTransactionBlock(bool chain);
 extern bool PrepareTransactionBlock(const char *gid);
