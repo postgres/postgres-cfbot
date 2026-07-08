@@ -564,11 +564,11 @@ pqTraceOutput_Authentication(FILE *f, const char *message, int *cursor,
 }
 
 static void
-pqTraceOutput_ParameterStatus(FILE *f, const char *message, int *cursor)
+pqTraceOutput_ParameterStatus(FILE *f, const char *message, int *cursor, bool regress)
 {
 	fprintf(f, "ParameterStatus\t");
 	pqTraceOutputString(f, message, cursor, false);
-	pqTraceOutputString(f, message, cursor, false);
+	pqTraceOutputString(f, message, cursor, regress);
 }
 
 static void
@@ -673,12 +673,16 @@ pqTraceOutputMessage(PGconn *conn, const char *message, bool toServer)
 	logCursor += 4;
 
 	/*
-	 * In regress mode, suppress the length of ErrorResponse and
-	 * NoticeResponse.  The F (file name), L (line number) and R (routine
+	 * In regress mode, suppress the length of ErrorResponse, NoticeResponse
+	 * and ParameterStatus. The F (file name), L (line number) and R (routine
 	 * name) fields can change as server code is modified, and if their
-	 * lengths differ from the originals, that would break tests.
+	 * lengths differ from the originals, that would break tests. For
+	 * ParameterStatus, the size changes depending on the parameters' value,
+	 * whose values depend on the test environment.
 	 */
-	if (regress && !toServer && (id == PqMsg_ErrorResponse || id == PqMsg_NoticeResponse))
+	if (regress && !toServer && (id == PqMsg_ErrorResponse
+								 || id == PqMsg_NoticeResponse
+								 || id == PqMsg_ParameterStatus))
 		fprintf(conn->Pfdebug, "%s\tNN\t", prefix);
 	else
 		fprintf(conn->Pfdebug, "%s\t%d\t", prefix, length);
@@ -820,7 +824,7 @@ pqTraceOutputMessage(PGconn *conn, const char *message, bool toServer)
 			if (toServer)
 				fprintf(conn->Pfdebug, "Sync"); /* no message content */
 			else
-				pqTraceOutput_ParameterStatus(conn->Pfdebug, message, &logCursor);
+				pqTraceOutput_ParameterStatus(conn->Pfdebug, message, &logCursor, regress);
 			break;
 		case PqMsg_ParameterDescription:
 			pqTraceOutput_ParameterDescription(conn->Pfdebug, message, &logCursor, regress);
@@ -888,16 +892,26 @@ pqTraceOutputNoTypeByteMessage(PGconn *conn, const char *message)
 	length = (int) pg_ntoh32(length);
 	logCursor += 4;
 
-	fprintf(conn->Pfdebug, "F\t%d\t", length);
-
 	if (length < 8)
 	{
-		fprintf(conn->Pfdebug, "Unknown message\n");
+		fprintf(conn->Pfdebug, "F\t%d\tUnknown message\n", length);
 		return;
 	}
 
 	memcpy(&version, message + logCursor, 4);
 	version = (int) pg_ntoh32(version);
+
+	/*
+	 * In regress, suppress the length of StartupMessage. The parameter values
+	 * depend on the test environment, so the test may break depending on
+	 * where it's executed.
+	 */
+	if (regress && (version != CANCEL_REQUEST_CODE
+					&& version != NEGOTIATE_SSL_CODE
+					&& version != NEGOTIATE_GSS_CODE))
+		fprintf(conn->Pfdebug, "F\tNN\t");
+	else
+		fprintf(conn->Pfdebug, "F\t%d\t", length);
 
 	if (version == CANCEL_REQUEST_CODE && length >= 16)
 	{
@@ -927,9 +941,8 @@ pqTraceOutputNoTypeByteMessage(PGconn *conn, const char *message)
 		pqTraceOutputInt16(conn->Pfdebug, message, &logCursor);
 		while (message[logCursor] != '\0')
 		{
-			/* XXX should we suppress anything in regress mode? */
 			pqTraceOutputString(conn->Pfdebug, message, &logCursor, false);
-			pqTraceOutputString(conn->Pfdebug, message, &logCursor, false);
+			pqTraceOutputString(conn->Pfdebug, message, &logCursor, regress);
 		}
 	}
 
