@@ -151,6 +151,8 @@ struct JsonParserStack
 	bool	   *fnull;
 	JsonTokenType scalar_tok;
 	char	   *scalar_val;
+	/* json5: last matched terminal was a comma */
+	bool		json5_after_comma;
 };
 
 /* json5 comment lexing state saved across incremental chunks */
@@ -659,6 +661,27 @@ have_prediction(JsonParserStack *pstack)
 	return pstack->pred_index > 0;
 }
 
+/*
+ * json5 trailing comma support: discard predictions for an element that
+ * will never arrive, stopping at the enclosing close bracket/brace or the
+ * more-elements production that leads to it.
+ */
+static void
+json5_pop_to_closing(JsonParserStack *pstack)
+{
+	while (have_prediction(pstack))
+	{
+		char		next = next_prediction(pstack);
+
+		if (next == JSON_TOKEN_ARRAY_END ||
+			next == JSON_TOKEN_OBJECT_END ||
+			next == JSON_NT_MORE_ARRAY_ELEMENTS ||
+			next == JSON_NT_MORE_KEY_PAIRS)
+			break;
+		pop_prediction(pstack);
+	}
+}
+
 static inline void
 set_fname(JsonLexContext *lex, char *fname)
 {
@@ -920,8 +943,27 @@ pg_parse_json_incremental(JsonLexContext *lex,
 
 	while (have_prediction(pstack))
 	{
-		char		top = pop_prediction(pstack);
+		char		top;
 		td_entry	entry;
+
+		/*
+		 * json5 trailing comma: the last matched terminal was a comma and
+		 * the next token closes the array/object, so the predictions for the
+		 * expected next element are phantom.  Discard them down to the
+		 * enclosing MORE_* production, which accepts the close bracket.
+		 * Nothing else may unwind this way: a comma flanked by anything else
+		 * must fail like it does in strict mode.
+		 */
+		if (lex->json5 && pstack->json5_after_comma &&
+			(tok == JSON_TOKEN_ARRAY_END || tok == JSON_TOKEN_OBJECT_END))
+		{
+			json5_pop_to_closing(pstack);
+			pstack->json5_after_comma = false;
+			if (!have_prediction(pstack))
+				break;
+		}
+
+		top = pop_prediction(pstack);
 
 		/*
 		 * these first two branches are the guts of the Table Driven method
@@ -932,6 +974,8 @@ pg_parse_json_incremental(JsonLexContext *lex,
 			 * tok can only be a terminal symbol, so top must be too. the
 			 * token matches the top of the stack, so get the next token.
 			 */
+			if (lex->json5)
+				pstack->json5_after_comma = (top == JSON_TOKEN_COMMA);
 			if (tok < JSON_TOKEN_END)
 			{
 				result = json_lex(lex);
@@ -1451,6 +1495,8 @@ parse_object(JsonLexContext *lex, const JsonSemAction *sem)
 				result = json_lex(lex);
 				if (result != JSON_SUCCESS)
 					break;
+				if (lex->json5 && lex_peek(lex) == JSON_TOKEN_OBJECT_END)
+					break;
 				result = parse_object_field(lex, sem);
 			}
 			break;
@@ -1562,6 +1608,8 @@ parse_array(JsonLexContext *lex, const JsonSemAction *sem)
 		{
 			result = json_lex(lex);
 			if (result != JSON_SUCCESS)
+				break;
+			if (lex->json5 && lex_peek(lex) == JSON_TOKEN_ARRAY_END)
 				break;
 			result = parse_array_element(lex, sem);
 		}
