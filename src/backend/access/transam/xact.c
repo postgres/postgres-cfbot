@@ -3512,6 +3512,29 @@ AbortCurrentTransaction(void)
 }
 
 /*
+ * AbortCurrentTransactionWithoutXactCounters
+ *
+ * Like AbortCurrentTransaction(), but don't count the abort in
+ * pg_stat_database.xact_rollback.  For internal cleanup aborts that don't
+ * represent a user-visible transaction outcome.
+ */
+void
+AbortCurrentTransactionWithoutXactCounters(void)
+{
+	pgstat_suppress_xact_counters();
+	AbortCurrentTransaction();
+
+	/*
+	 * AbortCurrentTransaction() is a no-op when already idle (e.g. an abort at
+	 * TBLOCK_DEFAULT/TRANS_DEFAULT), in which case AtEOXact_PgStat() never runs
+	 * to consume the flag.  That can't happen at the current call sites, which
+	 * always abort a live transaction, but clear it unconditionally anyway so
+	 * set and clear stay paired defensively and the flag cannot leak.
+	 */
+	pgstat_clear_xact_counter_suppression();
+}
+
+/*
  *	AbortCurrentTransactionInternal - a function doing an iteration of work
  *		regarding handling the current transaction abort.  In the case of
  *		subtransactions more than one iterations could be required.  Returns
