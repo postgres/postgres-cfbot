@@ -109,6 +109,8 @@ typedef struct JsonLexContext
 	bool		incremental;
 	bool		json5;
 	JsonTokenType token_type;
+	/* current token is a json5 unquoted identifier, only legal as a key */
+	bool		token_is_identifier;
 	int			lex_level;
 	uint32		flags;
 	int			line_number;	/* line number, starting from 1 */
