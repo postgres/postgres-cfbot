@@ -908,6 +908,8 @@ extern PgStat_StatSubEntry *pgstat_fetch_stat_subscription(Oid subid);
  */
 
 extern void AtEOXact_PgStat(bool isCommit, bool parallel);
+extern void pgstat_suppress_xact_counters(void);
+extern void pgstat_clear_xact_counter_suppression(void);
 extern void AtEOSubXact_PgStat(bool isCommit, int nestDepth);
 extern void AtPrepare_PgStat(void);
 extern void PostPrepare_PgStat(void);
