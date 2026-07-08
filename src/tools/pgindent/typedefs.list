@@ -1410,6 +1410,7 @@ JoinTreeItem
 JoinType
 JsObject
 JsValue
+Json5CommentState
 JsonAggConstructor
 JsonAggState
 JsonArgument

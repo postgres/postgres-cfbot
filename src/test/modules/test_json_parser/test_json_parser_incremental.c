@@ -41,9 +41,9 @@
 
 #include "common/jsonapi.h"
 #include "common/logging.h"
+#include "getopt_long.h"
 #include "lib/stringinfo.h"
 #include "mb/pg_wchar.h"
-#include "pg_getopt.h"
 
 #define BUFSIZE 6000
 #define DEFAULT_CHUNK_SIZE 60
@@ -99,7 +99,13 @@ main(int argc, char **argv)
 	char	   *testfile;
 	int			c;
 	bool		need_strings = false;
+	bool		json5 = false;
 	int			ret = 0;
+
+	static const struct option long_options[] = {
+		{"json5", no_argument, NULL, '5'},
+		{NULL, 0, NULL, 0},
+	};
 
 	pg_logging_init(argv[0]);
 
@@ -107,7 +113,7 @@ main(int argc, char **argv)
 	if (!lex)
 		pg_fatal("out of memory");
 
-	while ((c = getopt(argc, argv, "r:c:os")) != -1)
+	while ((c = getopt_long(argc, argv, "r:c:os", long_options, NULL)) != -1)
 	{
 		switch (c)
 		{
@@ -128,6 +134,9 @@ main(int argc, char **argv)
 				((struct DoState *) sem.semstate)->lex = lex;
 				((struct DoState *) sem.semstate)->buf = makeStringInfo();
 				need_strings = true;
+				break;
+			case '5':			/* parse as json5 */
+				json5 = true;
 				break;
 		}
 	}
@@ -161,7 +170,7 @@ main(int argc, char **argv)
 		off_t		bytes_left = statbuf.st_size;
 		size_t		to_read = chunk_size;
 
-		makeJsonLexContextIncremental(lex, PG_UTF8, need_strings);
+		makeJsonLexContextIncremental(lex, PG_UTF8, need_strings, json5);
 		setJsonLexContextOwnsTokens(lex, lex_owns_tokens);
 
 		rewind(json_file);
@@ -406,5 +415,6 @@ usage(const char *progname)
 	fprintf(stderr, "  -c chunksize      size of piece fed to parser (default 64)\n");
 	fprintf(stderr, "  -o                set JSONLEX_CTX_OWNS_TOKENS for leak checking\n");
 	fprintf(stderr, "  -s                do semantic processing\n");
+	fprintf(stderr, "  --json5           parse input as json5\n");
 
 }

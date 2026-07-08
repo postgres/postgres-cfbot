@@ -56,6 +56,7 @@ typedef enum JsonParseErrorType
 	JSON_UNICODE_UNTRANSLATABLE,
 	JSON_UNICODE_HIGH_SURROGATE,
 	JSON_UNICODE_LOW_SURROGATE,
+	JSON_UNTERMINATED_COMMENT,
 	JSON_SEM_ACTION_FAILED,		/* error should already be reported */
 } JsonParseErrorType;
 
@@ -106,6 +107,7 @@ typedef struct JsonLexContext
 	const char *token_terminator;
 	const char *prev_token_terminator;
 	bool		incremental;
+	bool		json5;
 	JsonTokenType token_type;
 	int			lex_level;
 	uint32		flags;
@@ -219,7 +221,8 @@ extern JsonLexContext *makeJsonLexContextCstringLen(JsonLexContext *lex,
 													const char *json,
 													size_t len,
 													int encoding,
-													bool need_escapes);
+													bool need_escapes,
+													bool json5);
 
 /*
  * make a JsonLexContext suitable for incremental parsing.
@@ -228,7 +231,8 @@ extern JsonLexContext *makeJsonLexContextCstringLen(JsonLexContext *lex,
  */
 extern JsonLexContext *makeJsonLexContextIncremental(JsonLexContext *lex,
 													 int encoding,
-													 bool need_escapes);
+													 bool need_escapes,
+													 bool json5);
 
 /*
  * Sets whether tokens passed to semantic action callbacks are owned by the
