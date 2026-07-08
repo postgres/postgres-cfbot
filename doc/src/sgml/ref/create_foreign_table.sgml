@@ -60,7 +60,7 @@ CREATE FOREIGN TABLE [ IF NOT EXISTS ] <replaceable class="parameter">table_name
 
 <phrase>and <replaceable class="parameter">like_option</replaceable> is:</phrase>
 
-{ INCLUDING | EXCLUDING } { COMMENTS | CONSTRAINTS | DEFAULTS | GENERATED | STATISTICS | ALL }
+{ INCLUDING | EXCLUDING } { COMMENTS | CONSTRAINTS | DEFAULTS | GENERATED | STATISTICS | TRIGGERS | ALL }
 
 <phrase>and <replaceable class="parameter">partition_bound_spec</replaceable> is:</phrase>
 
@@ -232,7 +232,7 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
         <term><literal>INCLUDING COMMENTS</literal></term>
         <listitem>
          <para>
-          Comments for the copied columns, constraints, and extended statistics
+          Comments for the copied columns, constraints, extended statistics, and triggers
           will be copied.  The default behavior is to exclude comments,
           resulting in the corresponding objects in the new table having no
           comments.
@@ -280,6 +280,21 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
         <listitem>
          <para>
           Extended statistics are copied to the new table.
+         </para>
+        </listitem>
+       </varlistentry>
+
+       <varlistentry id="sql-createforeigntable-parms-like-opt-triggers">
+        <term><literal>INCLUDING TRIGGERS</literal></term>
+        <listitem>
+         <para>
+          All non-internal triggers are copied to the new table.
+          Because triggers on views differ significantly from those on tables, triggers from
+          source view are not be copied.
+          Furthermore constraint triggers and triggers that use transition tables
+          will not be copied because foreign tables do not support these.
+          The enabled state of each trigger (references <link linkend="catalog-pg-trigger"><structname>pg_trigger</structname></link>.<structfield>tgenabled</structfield>)
+          is preserved on the new table.
          </para>
         </listitem>
        </varlistentry>
