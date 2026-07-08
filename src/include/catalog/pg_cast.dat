@@ -594,4 +594,18 @@
 { castsource => 'tstzrange', casttarget => 'tstzmultirange',
   castfunc => 'tstzmultirange(tstzrange)', castcontext => 'e',
   castmethod => 'f' },
+
+# json5 casts
+{ castsource => 'json5', casttarget => 'json',
+  castfunc => 'json5_to_json', castcontext => 'a', castmethod => 'f' },
+{ castsource => 'json5', casttarget => 'jsonb',
+  castfunc => 'json5_to_jsonb', castcontext => 'a', castmethod => 'f' },
+{ castsource => 'json', casttarget => 'json5', castfunc => '0',
+  castcontext => 'i', castmethod => 'i' },
+{ castsource => 'json5', casttarget => 'text', castfunc => '0',
+  castcontext => 'a', castmethod => 'i' },
+{ castsource => 'text', casttarget => 'json5', castfunc => '0',
+  castcontext => 'e', castmethod => 'i' },
+{ castsource => 'jsonb', casttarget => 'json5', castfunc => '0',
+  castcontext => 'a', castmethod => 'i' },
 ]
