@@ -179,6 +179,57 @@
  * (DELETE row 1) and TX-2 (INSERT row 1) are applied in parallel, TX-2's INSERT
  * could be applied before TX-1's DELETE, resulting in a insert_conflict.
  *
+ * Beyond replica identity keys, we also track dependencies on transactions that
+ * modify the same local unique key. Even if the replica identity keys differ,
+ * unique indexes can still cause conflicts. This is necessary to prevent
+ * unexpected errors. For example:
+ *
+ *   TX-1: DELETE row (1,2) with replica identity key (1,2) and unique key (2)
+ *   TX-2: INSERT row (3,2) with replica identity key (3,2) and unique key (2)
+ *
+ * If applied in parallel, TX-2's INSERT could be applied before TX-1's DELETE,
+ * leading to a unique index violation error.
+ *
+ * We do not track dependencies for INSERT and UPDATE that conflict on a new
+ * unique key value, since such conflicts would cause an error even in serial
+ * mode. Instead, we only track dependencies involving old tuples (from DELETE
+ * or UPDATE) and require INSERT and UPDATE transactions that target the same
+ * unique key to wait for them.
+ *
+ * Note that the old tuple of an UPDATE or DELETE may not include the unique key
+ * column if that column is not part of the replica identity columns on the
+ * publisher. In such cases, we only use the unique columns that are part of the
+ * replica identity keys for dependency tracking, which may lead to false
+ * positives. For example, consider a unique index defined as UNIQUE (a, b),
+ * where only b is part of the replica identity keys:
+ *
+ *   TX-1: DELETE row (1,2) TX-2: INSERT row (3,2)
+ *
+ * If applied in parallel, both transactions will be treated as dependent
+ * because they modify the same unique key value (b=2), even though they
+ * actually modify different unique keys. This is acceptable because it is still
+ * better than completely disallowing parallelism for these transactions.
+ *
+ * In the worst case, if none of the unique index columns are part of the
+ * replica identity keys, we treat all transactions that modify the same table
+ * as dependent and disallow parallelism for that table.
+ *
+ * XXX We could consider requesting the publisher to include unique key columns
+ * in the old tuple of UPDATE or DELETE when they are not part of the replica
+ * identity keys. This would reduce false positives, but would require changes
+ * on the publisher side and increase disk (WAL size) and network data. For now,
+ * we choose not to implement this. An alternative approach is to provide an
+ * option to skip tracking dependencies on unique keys that are not part of the
+ * replica identity keys. This could be useful for users who prefer higher
+ * parallelism and experience few conflicts.
+ *
+ * Note that the local unique key could change after dependency checking and
+ * before applying the change. However, to centralize tracking and keep it
+ * simple, we still perform this check only in the leader apply worker. This is
+ * acceptable because in the worst case, the parallel worker will report an
+ * error and restart the transaction using the latest index information.
+ *
+ *
  * Commit order
  * ------------
  * We preserve publisher commit order for all transactions for two reasons:
@@ -423,6 +474,7 @@ pa_can_start(void)
 	 * It is better to do it before the below checks so that the latest values
 	 * of subscription can be used for the checks.
 	 */
+	AcceptInvalidationMessages();
 	maybe_reread_subscription();
 
 	/*
