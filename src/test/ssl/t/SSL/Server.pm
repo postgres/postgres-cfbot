@@ -103,6 +103,11 @@ sub new
 		$self->{flavor} = 'openssl';
 		$self->{backend} = SSL::Backend::OpenSSL->new();
 	}
+	elsif ($flavor =~ /\Alibressl\z/i)
+	{
+		$self->{flavor} = 'libressl';
+		$self->{backend} = SSL::Backend::OpenSSL->new();
+	}
 	else
 	{
 		die "SSL flavor $flavor unknown";
