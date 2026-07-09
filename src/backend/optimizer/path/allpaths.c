@@ -95,6 +95,7 @@ join_search_hook_type join_search_hook = NULL;
 static void set_base_rel_consider_startup(PlannerInfo *root);
 static void set_base_rel_sizes(PlannerInfo *root);
 static void setup_simple_grouped_rels(PlannerInfo *root);
+static void set_base_rel_uniquekeys(PlannerInfo *root);
 static void set_base_rel_pathlists(PlannerInfo *root);
 static void set_rel_size(PlannerInfo *root, RelOptInfo *rel,
 						 Index rti, RangeTblEntry *rte);
@@ -199,6 +200,11 @@ make_one_rel(PlannerInfo *root, List *joinlist)
 	 * relations) where possible.
 	 */
 	setup_simple_grouped_rels(root);
+
+	/*
+	 * Deduce the base rels' unique keys before the join search uses them.
+	 */
+	set_base_rel_uniquekeys(root);
 
 	/*
 	 * We should now have size estimates for every actual table involved in
@@ -371,6 +377,39 @@ setup_simple_grouped_rels(PlannerInfo *root)
 		Assert(IS_SIMPLE_REL(rel)); /* sanity check on rel */
 
 		(void) build_simple_grouped_rel(root, rel);
+	}
+}
+
+/*
+ * set_base_rel_uniquekeys
+ *	  Deduce the unique keys of each base relation's output.
+ *
+ * This needs to be done after EquivalenceClass merging and the EC-mutating
+ * steps (such as join removal) are complete, and after subqueries in FROM
+ * have been planned, since a subquery RTE's keys are translated from its
+ * final relation's uniquekeys.  It must run before the join search starts,
+ * which derives join relations' keys from the base rels'.
+ */
+static void
+set_base_rel_uniquekeys(PlannerInfo *root)
+{
+	Index		rti;
+
+	for (rti = 1; rti < root->simple_rel_array_size; rti++)
+	{
+		RelOptInfo *rel = root->simple_rel_array[rti];
+
+		/* there may be empty slots corresponding to non-baserel RTEs */
+		if (rel == NULL)
+			continue;
+
+		Assert(rel->relid == rti);	/* sanity check on array */
+
+		/* ignore RTEs that are "other rels" */
+		if (rel->reloptkind != RELOPT_BASEREL)
+			continue;
+
+		populate_baserel_uniquekeys(root, rel);
 	}
 }
 

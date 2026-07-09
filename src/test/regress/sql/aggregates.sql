@@ -529,18 +529,18 @@ create temp table t2 (x int, y int, z int, primary key (x, y));
 create temp table t3 (a int, b int, c int, primary key(a, b) deferrable);
 
 -- Non-primary-key columns can be removed from GROUP BY
-explain (costs off) select * from t1 group by a,b,c,d;
+explain (costs off) select count(*) from t1 group by a,b,c,d;
 
 -- No removal can happen if the complete PK is not present in GROUP BY
 explain (costs off) select a,c from t1 group by a,c,d;
 
 -- Test removal across multiple relations
-explain (costs off) select *
+explain (costs off) select count(*)
 from t1 inner join t2 on t1.a = t2.x and t1.b = t2.y
 group by t1.a,t1.b,t1.c,t1.d,t2.x,t2.y,t2.z;
 
 -- Test case where t1 can be optimized but not t2
-explain (costs off) select t1.*,t2.x,t2.z
+explain (costs off) select t1.*,t2.x,t2.z,count(*)
 from t1 inner join t2 on t1.a = t2.x and t1.b = t2.y
 group by t1.a,t1.b,t1.c,t1.d,t2.x,t2.z;
 
@@ -550,10 +550,10 @@ explain (costs off) select * from t3 group by a,b,c;
 create temp table t1c () inherits (t1);
 
 -- Ensure we don't remove any columns when t1 has a child table
-explain (costs off) select * from t1 group by a,b,c,d;
+explain (costs off) select count(*) from t1 group by a,b,c,d;
 
 -- Okay to remove columns if we're only querying the parent.
-explain (costs off) select * from only t1 group by a,b,c,d;
+explain (costs off) select count(*) from only t1 group by a,b,c,d;
 
 create temp table p_t1 (
   a int,
@@ -566,31 +566,31 @@ create temp table p_t1_1 partition of p_t1 for values in(1);
 create temp table p_t1_2 partition of p_t1 for values in(2);
 
 -- Ensure we can remove non-PK columns for partitioned tables.
-explain (costs off) select * from p_t1 group by a,b,c,d;
+explain (costs off) select count(*) from p_t1 group by a,b,c,d;
 
 create unique index t2_z_uidx on t2(z);
 
 -- Ensure we don't remove any columns from the GROUP BY for a unique
 -- index on a NULLable column.
-explain (costs off) select y,z from t2 group by y,z;
+explain (costs off) select y,z,count(*) from t2 group by y,z;
 
 -- Make the column NOT NULL and ensure we remove the redundant column
 alter table t2 alter column z set not null;
-explain (costs off) select y,z from t2 group by y,z;
+explain (costs off) select y,z,count(*) from t2 group by y,z;
 
 -- When there are multiple supporting unique indexes and the GROUP BY contains
 -- columns to cover all of those, ensure we pick the index with the least
 -- number of columns so that we can remove more columns from the GROUP BY.
-explain (costs off) select x,y,z from t2 group by x,y,z;
+explain (costs off) select x,y,z,count(*) from t2 group by x,y,z;
 
 -- As above but try ordering the columns differently to ensure we get the
 -- same result.
-explain (costs off) select x,y,z from t2 group by z,x,y;
+explain (costs off) select x,y,z,count(*) from t2 group by z,x,y;
 
 -- Ensure we don't use a partial index as proof of functional dependency
 drop index t2_z_uidx;
 create index t2_z_uidx on t2 (z) where z > 0;
-explain (costs off) select y,z from t2 group by y,z;
+explain (costs off) select y,z,count(*) from t2 group by y,z;
 
 -- A unique index defined as NULLS NOT DISTINCT does not need a supporting NOT
 -- NULL constraint on the indexed columns.  Ensure the redundant columns are
@@ -598,7 +598,7 @@ explain (costs off) select y,z from t2 group by y,z;
 drop index t2_z_uidx;
 alter table t2 alter column z drop not null;
 create unique index t2_z_uidx on t2(z) nulls not distinct;
-explain (costs off) select y,z from t2 group by y,z;
+explain (costs off) select y,z,count(*) from t2 group by y,z;
 
 drop table t1 cascade;
 drop table t2;
