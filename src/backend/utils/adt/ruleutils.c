@@ -551,6 +551,7 @@ static char *generate_qualified_type_name(Oid typid);
 static text *string_to_text(char *str);
 static char *flatten_reloptions(Oid relid);
 void		get_reloptions(StringInfo buf, Datum reloptions);
+static void get_json_transform_behavior(StringInfo buf, JsonTransformBehavior behavior, const char *label);
 static void get_json_path_spec(Node *path_spec, deparse_context *context,
 							   bool showimplicit);
 static void get_json_table_columns(TableFunc *tf, JsonTablePathScan *scan,
@@ -11129,6 +11130,9 @@ get_rule_expr(Node *node, deparse_context *context,
 					case JSON_VALUE_OP:
 						appendStringInfoString(buf, "JSON_VALUE(");
 						break;
+					case JSON_TRANSFORM_OP:
+						appendStringInfoString(buf, "JSON_TRANSFORM(");
+						break;
 					default:
 						elog(ERROR, "unrecognized JsonExpr op: %d",
 							 (int) jexpr->op);
@@ -11138,7 +11142,40 @@ get_rule_expr(Node *node, deparse_context *context,
 
 				appendStringInfoString(buf, ", ");
 
-				get_json_path_spec(jexpr->path_spec, context, showimplicit);
+				if(jexpr->action)
+				{
+					switch (jexpr->action->op)
+					{
+						case TRANSFORM_INSERT:
+							appendStringInfoString(buf, "INSERT ");
+							break;
+						case TRANSFORM_REMOVE:
+							appendStringInfoString(buf, "REMOVE ");
+							break;
+						case TRANSFORM_RENAME:
+							appendStringInfoString(buf, "RENAME ");
+							break;
+						case TRANSFORM_REPLACE:
+							appendStringInfoString(buf, "REPLACE ");
+							break;
+						default:
+							elog(ERROR, "unrecognized JsonTransform op: %d",
+								(int) jexpr->action->op);
+					}
+
+					get_json_path_spec(jexpr->action->pathspec, context, showimplicit);
+					if(jexpr->action->op != TRANSFORM_REMOVE)
+					{
+						appendStringInfoString(buf, " = ");
+						get_rule_expr(jexpr->action->value_expr, context, showimplicit);
+					}
+
+					get_json_transform_behavior(buf, jexpr->action->on_existing, "EXISTING");
+					get_json_transform_behavior(buf, jexpr->action->on_missing, "MISSING");
+					get_json_transform_behavior(buf, jexpr->action->on_null, "NULL");
+				}
+				else
+					get_json_path_spec(jexpr->path_spec, context, showimplicit);
 
 				if (jexpr->passing_values)
 				{
@@ -11161,12 +11198,15 @@ get_rule_expr(Node *node, deparse_context *context,
 					}
 				}
 
-				if (jexpr->op != JSON_EXISTS_OP ||
-					jexpr->returning->typid != BOOLOID)
+				/* JSON_TRANSFORM has no RETURNING or ON EMPTY/ERROR clauses */
+				if (jexpr->op != JSON_TRANSFORM_OP &&
+					(jexpr->op != JSON_EXISTS_OP ||
+					 jexpr->returning->typid != BOOLOID))
 					get_json_returning(jexpr->returning, context->buf,
 									   jexpr->op == JSON_QUERY_OP);
 
-				get_json_expr_options(jexpr, context,
+				if (jexpr->op != JSON_TRANSFORM_OP)
+					get_json_expr_options(jexpr, context,
 									  jexpr->op != JSON_EXISTS_OP ?
 									  JSON_BEHAVIOR_NULL :
 									  JSON_BEHAVIOR_FALSE);
@@ -12212,6 +12252,45 @@ get_json_path_spec(Node *path_spec, deparse_context *context, bool showimplicit)
 		get_const_expr((Const *) path_spec, context, -1);
 	else
 		get_rule_expr(path_spec, context, showimplicit);
+}
+
+/*
+ * get_json_transform_behavior	- deparse one JSON_TRANSFORM ON clause
+ *
+ * Emits " <behavior> ON <label>" (e.g. " IGNORE ON MISSING").  The resolved
+ * behavior is JSON_TRANSFORM_BEHAVIOR_UNSPECIFIED for clauses that do not
+ * apply to the operation, in which case nothing is emitted -- so the caller
+ * can invoke this unconditionally for EXISTING/MISSING/NULL for any operation.
+ */
+static void
+get_json_transform_behavior(StringInfo buf, JsonTransformBehavior behavior,
+							const char *label)
+{
+	const char *kw;
+
+	switch (behavior)
+	{
+		case JSON_TRANSFORM_BEHAVIOR_UNSPECIFIED:
+			return;
+		case JSON_TRANSFORM_BEHAVIOR_ERROR:
+			kw = "ERROR";
+			break;
+		case JSON_TRANSFORM_BEHAVIOR_IGNORE:
+			kw = "IGNORE";
+			break;
+		case JSON_TRANSFORM_BEHAVIOR_NULL:
+			kw = "NULL";
+			break;
+		case JSON_TRANSFORM_BEHAVIOR_REMOVE:
+			kw = "REMOVE";
+			break;
+		default:
+			elog(ERROR, "unrecognized JSON_TRANSFORM behavior: %d",
+				 (int) behavior);
+			kw = NULL;			/* keep compiler quiet */
+	}
+
+	appendStringInfo(buf, " %s ON %s", kw, label);
 }
 
 /*

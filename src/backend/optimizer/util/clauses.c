@@ -447,11 +447,17 @@ contain_mutable_functions_walker(Node *node, void *context)
 	{
 		JsonExpr   *jexpr = castNode(JsonExpr, node);
 		Const	   *cnst;
+		Node		*path_spec;
 
-		if (!IsA(jexpr->path_spec, Const))
+		if(jexpr->action)
+			path_spec = jexpr->action->pathspec;
+		else
+			path_spec = jexpr->path_spec;
+
+		if (!IsA(path_spec, Const))
 			return true;
 
-		cnst = castNode(Const, jexpr->path_spec);
+		cnst = castNode(Const, path_spec);
 
 		Assert(cnst->consttype == JSONPATHOID);
 		if (cnst->constisnull)
