@@ -460,12 +460,23 @@ DROP MATERIALIZED VIEW heapmv;
 -- shouldn't trigger a table_rewrite event
 alter table rewriteme alter column foo type numeric(12,4);
 begin;
+create domain d_ts as timestamp check(value is null);
+create domain d_tsnn as timestamp check(value is not null);
+create domain d_tstz as timestamptz check(value is null);
+savepoint s1;
+set timezone to 'UTC';
+alter table rewriteme alter column bar type d_tsnn; -- error, no table rewrite
+rollback to savepoint s1;
 set timezone to 'UTC';
 alter table rewriteme alter column bar type timestamp;
+alter table rewriteme alter column bar type d_ts;
 set timezone to '0';
 alter table rewriteme alter column bar type timestamptz;
+alter table rewriteme alter column bar type d_tstz;
+alter table rewriteme add column anotherone timestamptz;
 set timezone to 'Europe/London';
 alter table rewriteme alter column bar type timestamp; -- does rewrite
+alter table rewriteme alter column anotherone type d_ts; -- does rewrite
 rollback;
 
 -- typed tables are rewritten when their type changes.  Don't emit table

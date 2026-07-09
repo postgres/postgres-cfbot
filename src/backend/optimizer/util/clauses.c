@@ -116,6 +116,7 @@ static bool find_window_functions_walker(Node *node, WindowFuncLists *lists);
 static bool contain_subplans_walker(Node *node, void *context);
 static bool contain_mutable_functions_walker(Node *node, void *context);
 static bool contain_volatile_functions_walker(Node *node, void *context);
+static bool contain_user_defined_functions_walker(Node *node, void *context);
 static bool contain_volatile_functions_not_nextval_walker(Node *node, void *context);
 static bool max_parallel_hazard_walker(Node *node,
 									   max_parallel_hazard_context *context);
@@ -663,6 +664,42 @@ contain_volatile_functions_walker(Node *node, void *context)
 								 context, 0);
 	}
 	return expression_tree_walker(node, contain_volatile_functions_walker,
+								  context);
+}
+
+/*
+ * user_defined_func_checker
+ *		check_functions_in_node callback: true if funcid is user-defined.
+ */
+static bool
+user_defined_func_checker(Oid funcid, void *context)
+{
+	return (funcid >= FirstUnpinnedObjectId);
+}
+
+bool
+contain_user_defined_functions(Node *clause)
+{
+	return contain_user_defined_functions_walker(clause, NULL);
+}
+
+static bool
+contain_user_defined_functions_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+
+	if (exprType(node) >= FirstUnpinnedObjectId)
+		return false;
+
+	if (check_functions_in_node(node, user_defined_func_checker, NULL))
+		return false;
+
+	if (IsA(node, NextValueExpr))
+		return false;
+
+	return expression_tree_walker(node,
+								  contain_user_defined_functions_walker,
 								  context);
 }
 
@@ -4113,7 +4150,7 @@ eval_const_expressions_mutator(Node *node,
 				arg = eval_const_expressions_mutator((Node *) cdomain->arg,
 													 context);
 				if (context->estimate ||
-					!DomainHasConstraints(cdomain->resulttype, NULL))
+					!DomainHasConstraints(cdomain->resulttype, NULL, NULL))
 				{
 					/* Record dependency, if this isn't estimation mode */
 					if (context->root && !context->estimate)

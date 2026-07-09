@@ -1720,7 +1720,10 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
     if the <literal>USING</literal> clause does not change the column
     contents and the old type is either binary coercible to the new type
     or an unconstrained domain over the new type, a table rewrite is not
-    needed.  However, indexes will still be rebuilt unless the system
+    needed. If the new type is a constrained domain over the old type and
+    domain's CHECK constraint consists only of IMMUTABLE build-in functions,
+    table rewrite is not needed, however table scan is required.
+    Even if table rewrite is not needed, indexes will still be rebuilt unless the system
     can verify that the new index would be logically equivalent to the
     existing one.  For example, if the collation for a column has been
     changed, an index rebuild is required because the new sort
