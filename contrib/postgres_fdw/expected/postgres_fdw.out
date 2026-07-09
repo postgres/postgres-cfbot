@@ -4083,22 +4083,20 @@ select sum(c1%3), sum(distinct c1%3 order by c1%3) filter (where c1%3 < 2), c2 f
 -- Outer query is aggregation query
 explain (verbose, costs off)
 select distinct (select count(*) filter (where t2.c2 = 6 and t2.c1 < 10) from ft1 t1 where t1.c1 = 6) from ft2 t2 where t2.c2 % 6 = 0 order by 1;
-                                                          QUERY PLAN                                                          
-------------------------------------------------------------------------------------------------------------------------------
- Unique
+                                                       QUERY PLAN                                                       
+------------------------------------------------------------------------------------------------------------------------
+ Sort
    Output: ((SubPlan expr_1))
-   ->  Sort
-         Output: ((SubPlan expr_1))
-         Sort Key: ((SubPlan expr_1))
-         ->  Foreign Scan
-               Output: (SubPlan expr_1)
-               Relations: Aggregate on (public.ft2 t2)
-               Remote SQL: SELECT count(*) FILTER (WHERE ((c2 = 6) AND ("C 1" < 10))) FROM "S 1"."T 1" WHERE (((c2 % 6) = 0))
-               SubPlan expr_1
-                 ->  Foreign Scan on public.ft1 t1
-                       Output: (count(*) FILTER (WHERE ((t2.c2 = 6) AND (t2.c1 < 10))))
-                       Remote SQL: SELECT NULL FROM "S 1"."T 1" WHERE (("C 1" = 6))
-(13 rows)
+   Sort Key: ((SubPlan expr_1))
+   ->  Foreign Scan
+         Output: (SubPlan expr_1)
+         Relations: Aggregate on (public.ft2 t2)
+         Remote SQL: SELECT count(*) FILTER (WHERE ((c2 = 6) AND ("C 1" < 10))) FROM "S 1"."T 1" WHERE (((c2 % 6) = 0))
+         SubPlan expr_1
+           ->  Foreign Scan on public.ft1 t1
+                 Output: (count(*) FILTER (WHERE ((t2.c2 = 6) AND (t2.c1 < 10))))
+                 Remote SQL: SELECT NULL FROM "S 1"."T 1" WHERE (("C 1" = 6))
+(11 rows)
 
 select distinct (select count(*) filter (where t2.c2 = 6 and t2.c1 < 10) from ft1 t1 where t1.c1 = 6) from ft2 t2 where t2.c2 % 6 = 0 order by 1;
  count 
