@@ -18,7 +18,11 @@ backend_sources += files(
 )
 
 if ssl.found()
-  backend_sources += files('be-secure-openssl.c')
+  if ssl_library == 'openssl'
+    backend_sources += files('be-secure-openssl.c')
+  else
+    backend_sources += files('be-secure-libressl.c')
+  endif
 endif
 
 if gssapi.found()

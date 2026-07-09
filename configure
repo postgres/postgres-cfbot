@@ -12997,7 +12997,7 @@ fi
 #
 # SSL Library
 #
-# There is currently only one supported SSL/TLS library: OpenSSL.
+# The currently supported SSL/TLS libraries are: OpenSSL, LibreSSL
 #
 
 
@@ -13164,20 +13164,106 @@ else
 fi
 done
 
-  # Function introduced in OpenSSL 1.0.2, not in LibreSSL.
-  for ac_func in SSL_CTX_set_cert_cb
-do :
-  ac_fn_c_check_func "$LINENO" "SSL_CTX_set_cert_cb" "ac_cv_func_SSL_CTX_set_cert_cb"
-if test "x$ac_cv_func_SSL_CTX_set_cert_cb" = xyes; then :
+
+$as_echo "#define USE_OPENSSL 1" >>confdefs.h
+
+elif test "$with_ssl" = libressl ; then
+    { $as_echo "$as_me:${as_lineno-$LINENO}: checking for CRYPTO_new_ex_data in -lcrypto" >&5
+$as_echo_n "checking for CRYPTO_new_ex_data in -lcrypto... " >&6; }
+if ${ac_cv_lib_crypto_CRYPTO_new_ex_data+:} false; then :
+  $as_echo_n "(cached) " >&6
+else
+  ac_check_lib_save_LIBS=$LIBS
+LIBS="-lcrypto  $LIBS"
+cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+/* Override any GCC internal prototype to avoid an error.
+   Use char because int might match the return type of a GCC
+   builtin and then its argument prototype would still apply.  */
+#ifdef __cplusplus
+extern "C"
+#endif
+char CRYPTO_new_ex_data ();
+int
+main ()
+{
+return CRYPTO_new_ex_data ();
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_link "$LINENO"; then :
+  ac_cv_lib_crypto_CRYPTO_new_ex_data=yes
+else
+  ac_cv_lib_crypto_CRYPTO_new_ex_data=no
+fi
+rm -f core conftest.err conftest.$ac_objext \
+    conftest$ac_exeext conftest.$ac_ext
+LIBS=$ac_check_lib_save_LIBS
+fi
+{ $as_echo "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_crypto_CRYPTO_new_ex_data" >&5
+$as_echo "$ac_cv_lib_crypto_CRYPTO_new_ex_data" >&6; }
+if test "x$ac_cv_lib_crypto_CRYPTO_new_ex_data" = xyes; then :
   cat >>confdefs.h <<_ACEOF
-#define HAVE_SSL_CTX_SET_CERT_CB 1
+#define HAVE_LIBCRYPTO 1
 _ACEOF
 
-fi
-done
+  LIBS="-lcrypto $LIBS"
 
-  # Function introduced in OpenSSL 1.1.1, not in LibreSSL.
-  for ac_func in X509_get_signature_info SSL_CTX_set_num_tickets SSL_CTX_set_keylog_callback SSL_CTX_set_client_hello_cb
+else
+  as_fn_error $? "library 'crypto' is required for LibreSSL" "$LINENO" 5
+fi
+
+  { $as_echo "$as_me:${as_lineno-$LINENO}: checking for SSL_new in -lssl" >&5
+$as_echo_n "checking for SSL_new in -lssl... " >&6; }
+if ${ac_cv_lib_ssl_SSL_new+:} false; then :
+  $as_echo_n "(cached) " >&6
+else
+  ac_check_lib_save_LIBS=$LIBS
+LIBS="-lssl  $LIBS"
+cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+/* Override any GCC internal prototype to avoid an error.
+   Use char because int might match the return type of a GCC
+   builtin and then its argument prototype would still apply.  */
+#ifdef __cplusplus
+extern "C"
+#endif
+char SSL_new ();
+int
+main ()
+{
+return SSL_new ();
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_link "$LINENO"; then :
+  ac_cv_lib_ssl_SSL_new=yes
+else
+  ac_cv_lib_ssl_SSL_new=no
+fi
+rm -f core conftest.err conftest.$ac_objext \
+    conftest$ac_exeext conftest.$ac_ext
+LIBS=$ac_check_lib_save_LIBS
+fi
+{ $as_echo "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_ssl_SSL_new" >&5
+$as_echo "$ac_cv_lib_ssl_SSL_new" >&6; }
+if test "x$ac_cv_lib_ssl_SSL_new" = xyes; then :
+  cat >>confdefs.h <<_ACEOF
+#define HAVE_LIBSSL 1
+_ACEOF
+
+  LIBS="-lssl $LIBS"
+
+else
+  as_fn_error $? "library 'ssl' is required for LibreSSL" "$LINENO" 5
+fi
+
+  # Functions introduced in LibreSSL 3.4.1 (OpenBSD 7.0)
+  for ac_func in SSL_CTX_set_ciphersuites SSL_CTX_use_certificate_chain_mem
 do :
   as_ac_var=`$as_echo "ac_cv_func_$ac_func" | $as_tr_sh`
 ac_fn_c_check_func "$LINENO" "$ac_func" "$as_ac_var"
@@ -13186,14 +13272,16 @@ if eval test \"x\$"$as_ac_var"\" = x"yes"; then :
 #define `$as_echo "HAVE_$ac_func" | $as_tr_cpp` 1
 _ACEOF
 
+else
+  as_fn_error $? "LibreSSL version >= 3.4.1 is required for SSL support" "$LINENO" 5
 fi
 done
 
 
-$as_echo "#define USE_OPENSSL 1" >>confdefs.h
+$as_echo "#define USE_LIBRESSL 1" >>confdefs.h
 
 elif test "$with_ssl" != no ; then
-  as_fn_error $? "--with-ssl must specify openssl" "$LINENO" 5
+  as_fn_error $? "--with-ssl must specify openssl or libressl" "$LINENO" 5
 fi
 
 

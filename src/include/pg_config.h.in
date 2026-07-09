@@ -369,20 +369,12 @@
 /* Define to 1 if the system has the type `socklen_t'. */
 #undef HAVE_SOCKLEN_T
 
-/* Define to 1 if you have the `SSL_CTX_set_cert_cb' function. */
-#undef HAVE_SSL_CTX_SET_CERT_CB
-
 /* Define to 1 if you have the `SSL_CTX_set_ciphersuites' function. */
 #undef HAVE_SSL_CTX_SET_CIPHERSUITES
 
-/* Define to 1 if you have the `SSL_CTX_set_client_hello_cb' function. */
-#undef HAVE_SSL_CTX_SET_CLIENT_HELLO_CB
-
-/* Define to 1 if you have the `SSL_CTX_set_keylog_callback' function. */
-#undef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
-
-/* Define to 1 if you have the `SSL_CTX_set_num_tickets' function. */
-#undef HAVE_SSL_CTX_SET_NUM_TICKETS
+/* Define to 1 if you have the `SSL_CTX_use_certificate_chain_mem' function.
+   */
+#undef HAVE_SSL_CTX_USE_CERTIFICATE_CHAIN_MEM
 
 /* Define to 1 if you have the <stdint.h> header file. */
 #undef HAVE_STDINT_H
@@ -507,9 +499,6 @@
 
 /* Define to 1 if you have the `wcstombs_l' function. */
 #undef HAVE_WCSTOMBS_L
-
-/* Define to 1 if you have the `X509_get_signature_info' function. */
-#undef HAVE_X509_GET_SIGNATURE_INFO
 
 /* Define to 1 if the assembler supports X86_64's POPCNTQ instruction. */
 #undef HAVE_X86_64_POPCNTQ
@@ -703,6 +692,9 @@
 
 /* Define to build with NUMA support. (--with-libnuma) */
 #undef USE_LIBNUMA
+
+/* Define to 1 to build with LibreSSL support. (--with-ssl=libressl) */
+#undef USE_LIBRESSL
 
 /* Define to build with io_uring support. (--with-liburing) */
 #undef USE_LIBURING
