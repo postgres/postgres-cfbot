@@ -36,6 +36,11 @@ tests += {
     ],
     'regress_args': ['--dlpath', meson.project_build_root() / 'src/test/regress'],
   },
+  'isolation': {
+    'specs': [
+      'rewrite_stale_xmin',
+    ],
+  },
   'tap': {
     'tests': [
       't/001_auth_scram.pl',

@@ -105,11 +105,15 @@
 /* ----------
  * heap_toast_insert_or_update -
  *
- *	Called by heap_insert() and heap_update().
+ *	Called by heap_insert() and heap_update().  Returns NULL if the
+ *	insert/update could not be completed.
+ *
+ * See toast_helper.h for the values of "flags".
  * ----------
  */
 extern HeapTuple heap_toast_insert_or_update(Relation rel, HeapTuple newtup,
-											 HeapTuple oldtup, uint32 options);
+											 HeapTuple oldtup, uint32 options,
+											 uint32 flags);
 
 /* ----------
  * heap_toast_delete -
@@ -153,11 +157,15 @@ extern HeapTuple toast_build_flattened_tuple(TupleDesc tupleDesc,
 /* ----------
  * heap_fetch_toast_slice
  *
- *	Fetch a slice from a toast value stored in a heap table.
+ *	Fetch a slice from a toast value stored in a heap table.  Returns
+ *	false if the slice could not be fetched, otherwise true on success.
+ *
+ * See toast_helper.h for the values of "flags".
  * ----------
  */
-extern void heap_fetch_toast_slice(Relation toastrel, Oid8 valueid,
+extern bool heap_fetch_toast_slice(Relation toastrel, Oid8 valueid,
 								   int32 attrsize, int32 sliceoffset,
-								   int32 slicelength, varlena *result);
+								   int32 slicelength, varlena *result,
+								   uint32 flags);
 
 #endif							/* HEAPTOAST_H */

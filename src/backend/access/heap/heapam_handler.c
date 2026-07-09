@@ -19,6 +19,7 @@
  */
 #include "postgres.h"
 
+#include "access/detoast.h"
 #include "access/genam.h"
 #include "access/heapam.h"
 #include "access/heaptoast.h"
@@ -26,6 +27,7 @@
 #include "access/rewriteheap.h"
 #include "access/syncscan.h"
 #include "access/tableam.h"
+#include "access/toast_helper.h"
 #include "access/tsmapi.h"
 #include "access/visibilitymap.h"
 #include "access/xact.h"
@@ -36,6 +38,7 @@
 #include "commands/progress.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
+#include "optimizer/optimizer.h"
 #include "pgstat.h"
 #include "storage/bufmgr.h"
 #include "storage/bufpage.h"
@@ -48,9 +51,11 @@
 #include "utils/rel.h"
 #include "utils/tuplesort.h"
 
-static void reform_and_rewrite_tuple(HeapTuple tuple,
+/* See toast_helper.h for values of "flags" */
+static bool reform_and_rewrite_tuple(HeapTuple tuple,
 									 Relation OldHeap, Relation NewHeap,
-									 Datum *values, bool *isnull, RewriteState rwstate);
+									 Datum *values, bool *isnull, RewriteState rwstate,
+									 bool recently_dead);
 static void heap_insert_for_repack(HeapTuple tuple, Relation OldHeap,
 								   Relation NewHeap, Datum *values, bool *isnull,
 								   BulkInsertState bistate);
@@ -703,6 +708,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		HeapTuple	tuple;
 		Buffer		buf;
 		bool		isdead;
+		bool		recently_dead = false;
 
 		CHECK_FOR_INTERRUPTS();
 
@@ -789,6 +795,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 					break;
 				case HEAPTUPLE_RECENTLY_DEAD:
 					*tups_recently_dead += 1;
+					recently_dead = true;
 					pg_fallthrough;
 				case HEAPTUPLE_LIVE:
 					/* Live or recently dead, must copy it */
@@ -822,6 +829,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 							 RelationGetRelationName(OldHeap));
 					/* treat as recently dead */
 					*tups_recently_dead += 1;
+					recently_dead = true;
 					isdead = false;
 					break;
 				default:
@@ -850,6 +858,95 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		*num_tuples += 1;
 		if (tuplesort != NULL)
 		{
+			/*
+			 * For RECENTLY_DEAD tuples, retrieve TOAST data that's still
+			 * available before putting the tuple in the sort.  If a concurrent
+			 * VACUUM (or page prune) already reclaimed parts of that TOAST data,
+			 * we can skip the tuple.
+			 */
+			if (recently_dead && HeapTupleHasExternal(tuple))
+			{
+				Bitmapset  *detoasted = NULL;
+				bool		skip = false;
+				HeapTuple	produced;
+
+				heap_deform_tuple(tuple, oldTupDesc, values, isnull);
+
+				for (int i = 0; i < oldTupDesc->natts; i++)
+				{
+					Form_pg_attribute att = TupleDescAttr(oldTupDesc, i);
+					varlena    *d;
+
+					/* ignore non-varlena, dropped, and  */
+					if (att->attlen != -1)
+						continue;
+					/* Set to NULL to avoid including it in serialization later on, if relevant */
+					if (att->attisdropped)
+					{
+						isnull[i] = true;
+						continue;
+					}
+
+					if (isnull[i])
+						continue;
+
+					d = DatumGetPointer(values[i]);
+
+					/* not external means no toast cleanup race */
+					if (!VARATT_IS_EXTERNAL_ONDISK(d))
+						continue;
+
+					/* actually detoast the value */
+					d = detoast_external_attr_extended(d);
+
+					if (d == NULL)
+					{
+						skip = true;
+						break;
+					}
+					detoasted = bms_add_member(detoasted, i);
+					values[i] = PointerGetDatum(d);
+				}
+
+				if (skip)
+				{
+					*num_tuples -= 1;
+					*tups_vacuumed += 1;
+					*tups_recently_dead -= 1;
+
+					goto cleanup_and_next;
+				}
+
+				/* no new resources allocated, store unprocessed tuple as normal */
+				if (bms_is_empty(detoasted))
+					goto normal_put;
+
+				/* the tuple contained visible externally toasted attributes.  */
+				produced = heap_form_tuple(oldTupDesc, values, isnull);
+				tuplesort_putheaptuple(tuplesort, produced);
+				pfree(produced);
+
+				/*
+				 * In scan-and-sort mode, report increase in number of tuples
+				 * scanned
+				 */
+				pgstat_progress_update_param(PROGRESS_REPACK_HEAP_TUPLES_SCANNED,
+											 *num_tuples);
+
+cleanup_and_next:
+				for (int i = bms_next_member(detoasted, -1);
+					 i >= 0;
+					 i = bms_prev_member(detoasted, i))
+				{
+					pfree(DatumGetPointer(values[i]));
+				}
+
+				bms_free(detoasted);
+				detoasted = NULL;
+				continue;
+			}
+
+normal_put:
 			tuplesort_putheaptuple(tuplesort, tuple);
 
 			/*
@@ -868,8 +965,22 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 			int64		ct_val[2];
 
 			if (!concurrent)
-				reform_and_rewrite_tuple(tuple, OldHeap, NewHeap,
-										 values, isnull, rwstate);
+			{
+				if (!reform_and_rewrite_tuple(tuple, OldHeap, NewHeap,
+											  values, isnull, rwstate,
+											  recently_dead))
+				{
+					Assert(recently_dead);
+					/*
+					 * Missing TOAST chunks for a recently-dead tuple. Treat
+					 * it as dead.
+					 */
+					*tups_vacuumed += 1;
+					*num_tuples -= 1;
+					*tups_recently_dead -= 1;
+					continue;
+				}
+			}
 			else
 				heap_insert_for_repack(tuple, OldHeap, NewHeap,
 									   values, isnull, bistate);
@@ -921,10 +1032,12 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 
 			n_tuples += 1;
 			if (!concurrent)
-				reform_and_rewrite_tuple(tuple,
-										 OldHeap, NewHeap,
-										 values, isnull,
-										 rwstate);
+			{
+				(void) reform_and_rewrite_tuple(tuple,
+												OldHeap, NewHeap,
+												values, isnull,
+												rwstate, false);
+			}
 			else
 				heap_insert_for_repack(tuple, OldHeap, NewHeap,
 									   values, isnull, bistate);
@@ -1156,6 +1269,7 @@ heapam_index_build_range_scan(Relation heapRelation,
 	BlockNumber previous_blkno = InvalidBlockNumber;
 	BlockNumber root_blkno = InvalidBlockNumber;
 	OffsetNumber root_offsets[MaxHeapTuplesPerPage];
+	Bitmapset  *detoast_index_attrs = NULL;
 
 	/*
 	 * sanity checks
@@ -1252,6 +1366,70 @@ heapam_index_build_range_scan(Relation heapRelation,
 		   !TransactionIdIsValid(OldestXmin));
 	Assert(snapshot == SnapshotAny || !anyvisible);
 
+	/*
+	 * Extract the set of attributes an index may need to detoast, including
+	 * expressions and predicates.
+	 */
+	for (int i = 0; i < indexInfo->ii_NumIndexAttrs; i++)
+	{
+		int			attnum = indexInfo->ii_IndexAttrNumbers[i];
+
+		if (attnum != 0)
+			detoast_index_attrs = bms_add_member(detoast_index_attrs,
+										 attnum - FirstLowInvalidHeapAttributeNumber);
+	}
+	pull_varattnos((Node *) indexInfo->ii_Expressions, 1, &detoast_index_attrs);
+	pull_varattnos((Node *) indexInfo->ii_Predicate, 1, &detoast_index_attrs);
+
+	/*
+	 * Post-process the attribute bitmap.
+	 *
+	 * We remove all non-varlena attributes (we don't need to check them
+	 * during detoasting), and add all varlena attributes if the index
+	 * contains a whole-row expression.
+	 */
+	if (bms_is_member(-FirstLowInvalidHeapAttributeNumber, detoast_index_attrs))
+	{
+		TupleDesc desc = RelationGetDescr(heapRelation);
+
+		for (AttrNumber i = RelationGetNumberOfAttributes(heapRelation); i > 0; i--)
+		{
+			AttrNumber	offset = i - FirstLowInvalidHeapAttributeNumber;
+			CompactAttribute *att = TupleDescCompactAttr(desc, i - 1);
+
+			/*
+			 * If the attribute is varlena, add it to the map, else remove
+			 * the attribute.
+			 * We work backwards to avoid reallocations.
+			 */
+			if (att->attlen == -1)
+				detoast_index_attrs = bms_add_member(detoast_index_attrs, offset);
+			else
+				detoast_index_attrs = bms_del_member(detoast_index_attrs, offset);
+		}
+
+		detoast_index_attrs = bms_del_member(detoast_index_attrs, -FirstLowInvalidHeapAttributeNumber);
+	}
+	else
+	{
+		TupleDesc desc = RelationGetDescr(heapRelation);
+
+		for (AttrNumber i = RelationGetNumberOfAttributes(heapRelation); i > 0; i--)
+		{
+			AttrNumber	offset = i - FirstLowInvalidHeapAttributeNumber;
+			CompactAttribute *att = TupleDescCompactAttr(desc, i - 1);
+
+			/*
+			 * If the attribute is not varlena, remove the attribute from
+			 * tracking.
+			 *
+			 * We work backwards to avoid reallocations.
+			 */
+			if (att->attlen != -1)
+				detoast_index_attrs = bms_del_member(detoast_index_attrs, offset);
+		}
+	}
+
 	/* Publish number of blocks to scan */
 	if (progress)
 	{
@@ -1289,6 +1467,7 @@ heapam_index_build_range_scan(Relation heapRelation,
 	while ((heapTuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
 	{
 		bool		tupleIsAlive;
+		Bitmapset  *detoasted_attrs = NULL;
 
 		CHECK_FOR_INTERRUPTS();
 
@@ -1590,6 +1769,61 @@ heapam_index_build_range_scan(Relation heapRelation,
 		/* Set up for predicate or expression evaluation */
 		ExecStoreBufferHeapTuple(heapTuple, slot, hscan->rs_cbuf);
 
+		/* For RECENTLY_DEAD tuples, pre-detoast external TOAST values. */
+		if (!tupleIsAlive && !bms_is_empty(detoast_index_attrs))
+		{
+			bool		skip = false;
+			int			attno;
+
+			/*
+			 * Only get the attributes up to the last attribute we want to
+			 * detoast.
+			 */
+			attno = bms_prev_member(detoast_index_attrs, -1);
+			slot_getsomeattrs(slot, attno + FirstLowInvalidHeapAttributeNumber);
+
+			/*
+			 * Iterate over the attributes which are now in tts_isnull/
+			 * tts_values slots, and detoast them where needed.
+			 */
+			attno = -1;
+			while ((attno = bms_next_member(detoast_index_attrs, attno)) >= 0)
+			{
+				int			attnum = attno + FirstLowInvalidHeapAttributeNumber;
+				varlena	   *toastptr;
+
+				if (attnum <= 0)
+					continue;	/* system column */
+
+				Assert(TupleDescCompactAttr(RelationGetDescr(heapRelation), attnum - 1)->attlen == -1);
+
+				if (slot->tts_isnull[attnum - 1])
+					continue;
+
+				toastptr = DatumGetPointer(slot->tts_values[attnum - 1]);
+
+				if (VARATT_IS_EXTERNAL_ONDISK(toastptr))
+				{
+					varlena    *detoasted;
+
+					detoasted = detoast_external_attr_extended(toastptr);
+
+					if (detoasted == NULL)
+					{
+						skip = true;
+						break;
+					}
+
+					slot->tts_values[attnum - 1] = PointerGetDatum(detoasted);
+
+					detoasted_attrs = bms_add_member(detoasted_attrs, attnum);
+				}
+			}
+
+			if (skip)
+				goto cleanup_and_next;
+		}
+
 		/*
 		 * In a partial index, discard tuples that don't satisfy the
 		 * predicate.
@@ -1597,7 +1831,7 @@ heapam_index_build_range_scan(Relation heapRelation,
 		if (predicate != NULL)
 		{
 			if (!ExecQual(predicate, econtext))
-				continue;
+				goto cleanup_and_next;
 		}
 
 		/*
@@ -1662,6 +1896,21 @@ heapam_index_build_range_scan(Relation heapRelation,
 			/* Call the AM's callback routine to process the tuple */
 			callback(indexRelation, &heapTuple->t_self, values, isnull,
 					 tupleIsAlive, callback_state);
+		}
+
+cleanup_and_next:
+		if (!bms_is_empty(detoasted_attrs))
+		{
+			int		attno = -1;
+
+			while ((attno = bms_next_member(detoasted_attrs, attno)) != -2)
+			{
+				Assert(attno > 0);
+				pfree(DatumGetPointer(slot->tts_values[attno - 1]));
+			}
+
+			bms_free(detoasted_attrs);
+			detoasted_attrs = NULL;
 		}
 	}
 
@@ -2334,20 +2583,29 @@ heapam_scan_sample_next_tuple(TableScanDesc scan, SampleScanState *scanstate,
  * SET WITHOUT OIDS.
  *
  * So, we must reconstruct the tuple from component Datums.
+ *
+ * Returns true on success, and false on failure if flags uses
+ * TOAST_MISSING_OK.  See toast_helper.h.
  */
-static void
+static bool
 reform_and_rewrite_tuple(HeapTuple tuple,
 						 Relation OldHeap, Relation NewHeap,
-						 Datum *values, bool *isnull, RewriteState rwstate)
+						 Datum *values, bool *isnull, RewriteState rwstate,
+						 bool recently_dead)
 {
 	HeapTuple	newtuple;
 
 	newtuple = reform_tuple(tuple, OldHeap, NewHeap, values, isnull);
 
 	/* The heap rewrite module does the rest */
-	rewrite_heap_tuple(rwstate, tuple, newtuple);
+	if (!rewrite_heap_tuple(rwstate, tuple, newtuple, recently_dead))
+	{
+		heap_freetuple(newtuple);
+		return false;
+	}
 
 	heap_freetuple(newtuple);
+	return true;
 }
 
 /*

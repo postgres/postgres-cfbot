@@ -101,7 +101,15 @@ typedef struct
 #define TOASTCOL_IGNORE						0x0010
 #define TOASTCOL_INCOMPRESSIBLE				0x0020
 
-extern void toast_tuple_init(ToastTupleContext *ttc);
+/*
+ * Flags for TOAST fetch operations.
+ *
+ * TOAST_MISSING_OK, when set, means that a TOAST fetch tolerates missing
+ * chunks and returns a failure state instead of raising an error.
+ */
+#define TOAST_MISSING_OK		(1 << 1)
+
+extern bool toast_tuple_init(ToastTupleContext *ttc, uint32 flags);
 extern int	toast_tuple_find_biggest_attribute(ToastTupleContext *ttc,
 											   bool for_compression,
 											   bool check_main);
