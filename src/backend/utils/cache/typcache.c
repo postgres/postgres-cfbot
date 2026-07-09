@@ -1500,12 +1500,14 @@ UpdateDomainConstraintRef(DomainConstraintRef *ref)
  *
  * Returns true if the domain has any constraints at all.  If has_volatile
  * is not NULL, also checks whether any CHECK constraint contains a volatile
- * expression and sets *has_volatile accordingly.
+ * expression and sets *has_volatile accordingly. If has_mutable
+ * is not NULL, also checks whether any CHECK constraint contains a mutable
+ * expression and sets *has_mutable accordingly.
  *
  * This is defined to return false, not fail, if type is not a domain.
  */
 bool
-DomainHasConstraints(Oid type_id, bool *has_volatile)
+DomainHasConstraints(Oid type_id, bool *has_volatile, bool *has_mutable)
 {
 	TypeCacheEntry *typentry;
 
@@ -1534,7 +1536,46 @@ DomainHasConstraints(Oid type_id, bool *has_volatile)
 		}
 	}
 
+	if (has_mutable)
+	{
+		*has_mutable = false;
+
+		foreach_node(DomainConstraintState, constrstate,
+					 typentry->domainData->constraints)
+		{
+			if (constrstate->constrainttype == DOM_CONSTRAINT_CHECK &&
+				contain_mutable_functions((Node *) constrstate->check_expr))
+			{
+				*has_mutable = true;
+				break;
+			}
+		}
+	}
+
 	return true;
+}
+
+bool
+DomainConstrContainUserDefinedFunc(Oid type_id)
+{
+	TypeCacheEntry *typentry;
+
+	typentry = lookup_type_cache(type_id, TYPECACHE_DOMAIN_CONSTR_INFO);
+
+	if (typentry->domainData == NULL)
+		return false;
+
+	foreach_node(DomainConstraintState, constrstate,
+					typentry->domainData->constraints)
+	{
+		if (constrstate->constrainttype == DOM_CONSTRAINT_CHECK &&
+			contain_user_defined_functions((Node *) constrstate->check_expr))
+		{
+			return true;
+		}
+	}
+
+	return false;
 }
 
 
