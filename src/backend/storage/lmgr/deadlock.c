@@ -33,7 +33,6 @@
 #include "storage/procnumber.h"
 #include "utils/memutils.h"
 
-
 /*
  * One edge in the waits-for graph.
  *

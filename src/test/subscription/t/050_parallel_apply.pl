@@ -637,4 +637,269 @@ $result =
   $node_subscriber->safe_psql('postgres', "SELECT count(1) FROM regress_tab");
 is ($result, 2, 'inserts are replicated to subscriber');
 
+##################################################
+# Test that the dependency tracking works correctly for local unique indexes on
+# subscriber during parallel apply.
+##################################################
+
+# Truncate the data for upcoming tests
+$node_publisher->safe_psql('postgres', "TRUNCATE TABLE regress_tab;");
+$node_publisher->wait_for_catchup('regress_sub');
+
+# Define an unique index on subscriber
+$node_subscriber->safe_psql('postgres',
+    "CREATE UNIQUE INDEX local_unique_idx ON regress_tab (value);");
+
+$node_publisher->safe_psql('postgres',
+    "INSERT INTO regress_tab VALUES (1, 'would conflict');");
+
+$node_publisher->wait_for_catchup('regress_sub');
+
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT count(1) FROM regress_tab");
+is ($result, 1, 'the insert is replicated to subscriber');
+
+# Attach an injection_point. Parallel workers would wait before the commit
+$node_subscriber->safe_psql('postgres',
+	"SELECT injection_points_attach('parallel-worker-before-commit','wait');"
+);
+
+# Delete the tuple on publisher.
+$node_publisher->safe_psql('postgres',
+    "DELETE FROM regress_tab WHERE id = 1;");
+
+# Wait until the parallel worker enters the injection point.
+$node_subscriber->wait_for_event('logical replication parallel worker',
+	'parallel-worker-before-commit');
+
+$offset = -s $node_subscriber->logfile;
+
+# Insert tuples. This should conflict with the DELETE transaction, as both
+# transactions modify the same key. The parallel worker will wait for the
+# preceding transaction to finish.
+$node_publisher->safe_psql('postgres',
+    "INSERT INTO regress_tab VALUES (2, 'would conflict');");
+
+# Verify the dependency is detected for the insert
+$str = $node_subscriber->wait_for_log(qr/found conflicting local unique key change on table [1-9][0-9]+ from ([1-9][0-9]+)/, $offset);
+$xid = $str =~ /found conflicting local unique key change on table [1-9][0-9]+ from ([1-9][0-9]+)/;
+
+# Verify the parallel worker waits for the same transaction
+$node_subscriber->wait_for_log(qr/wait for depended xid $xid/, $offset);
+
+ok(1, "local unique key dependency detected for parallel apply");
+
+# Wakeup the parallel worker
+$node_subscriber->safe_psql('postgres', qq[
+    SELECT injection_points_detach('parallel-worker-before-commit');
+    SELECT injection_points_wakeup('parallel-worker-before-commit');
+]);
+
+# Verify the streamed transaction can be applied
+$node_subscriber->wait_for_log(qr/finish waiting for depended xid $xid/, $offset);
+
+$node_publisher->wait_for_catchup('regress_sub');
+
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT count(1) FROM regress_tab");
+is ($result, 1, 'inserts are replicated to subscriber');
+
+# Test that the dependency tracking works correctly for local unique indexes on
+# subscriber during parallel apply when the unique index has expression.
+$node_subscriber->safe_psql('postgres', "DROP INDEX local_unique_idx;");
+$node_subscriber->safe_psql('postgres',
+    "CREATE UNIQUE INDEX local_unique_idx_expr ON regress_tab ((LOWER(value)));");
+
+# Attach an injection_point. Parallel workers would wait before the commit
+$node_subscriber->safe_psql('postgres',
+	"SELECT injection_points_attach('parallel-worker-before-commit','wait');"
+);
+
+# Insert a tuple on publisher. Parallel worker would wait at the injection
+# point
+$node_publisher->safe_psql('postgres',
+    "DELETE FROM regress_tab WHERE id = 2;");
+
+# Wait until the parallel worker enters the injection point.
+$node_subscriber->wait_for_event('logical replication parallel worker',
+	'parallel-worker-before-commit');
+
+$offset = -s $node_subscriber->logfile;
+
+# Insert tuples. This should conflict with the DELETE transaction, as both
+# transactions modify the same key value. The parallel worker will wait for the
+# preceding transaction to finish.
+$node_publisher->safe_psql('postgres',
+    "INSERT INTO regress_tab VALUES (3, 'WOULD CONFLICT');");
+
+# Verify the dependency is detected for the insert
+$str = $node_subscriber->wait_for_log(qr/found conflicting local unique key change on table [1-9][0-9]+ from ([1-9][0-9]+)/, $offset);
+$xid = $str =~ /found conflicting local unique key change on table [1-9][0-9]+ from ([1-9][0-9]+)/;
+
+# Verify the parallel worker waits for the same transaction
+$node_subscriber->wait_for_log(qr/wait for depended xid $xid/, $offset);
+
+ok(1, "local unique key dependency from index expression detected for parallel apply");
+
+# Wakeup the parallel worker
+$node_subscriber->safe_psql('postgres', qq[
+    SELECT injection_points_detach('parallel-worker-before-commit');
+    SELECT injection_points_wakeup('parallel-worker-before-commit');
+]);
+
+# Verify the streamed transaction can be applied
+$node_subscriber->wait_for_log(qr/finish waiting for depended xid $xid/, $offset);
+
+$node_publisher->wait_for_catchup('regress_sub');
+
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT count(1) FROM regress_tab");
+is ($result, 1, 'inserts are replicated to subscriber');
+
+# Cleanup
+$node_subscriber->safe_psql('postgres', "DROP INDEX local_unique_idx_expr;");
+$node_publisher->safe_psql('postgres', "TRUNCATE TABLE regress_tab;");
+$node_publisher->wait_for_catchup('regress_sub');
+
+##################################################
+# Test that the dependency tracking works correctly when a local unique index
+# exists only on a child (leaf) partition of a partitioned table.
+#
+# The publisher has a regular (non-partitioned) table.
+# Table design:
+#
+# (publiser-side)         (subscriber-side)
+# regress_part_tab ------ regress_part_tab
+#                            |
+#                            +----- regress_part_tab_1
+#                                   (has an unique index on 'value', with
+#                                    columns in a different order from root)
+##################################################
+
+# Publisher: plain table.
+$node_publisher->safe_psql('postgres', qq[
+    CREATE TABLE regress_part_tab (id int PRIMARY KEY, value text, marker text);
+    ALTER TABLE regress_part_tab REPLICA IDENTITY FULL;
+]);
+
+# Subscriber: partitioned table with a leaf-only unique index on 'value'.  The
+# leaf's physical column order differs from the root table's column order.
+$node_subscriber->safe_psql('postgres', qq[
+    CREATE TABLE regress_part_tab (id int PRIMARY KEY, value text, marker text)
+        PARTITION BY RANGE (id);
+    CREATE TABLE regress_part_tab_1 (value text, marker text, id int PRIMARY KEY);
+    ALTER TABLE regress_part_tab ATTACH PARTITION regress_part_tab_1
+        FOR VALUES FROM (1) TO (100);
+    CREATE UNIQUE INDEX regress_part_tab_1_value_idx
+        ON regress_part_tab_1 (value);
+]);
+
+$node_subscriber->safe_psql('postgres',
+    "ALTER SUBSCRIPTION regress_sub REFRESH PUBLICATION WITH (copy_data = false);");
+
+# Insert a row that will become the conflict anchor.
+$node_publisher->safe_psql('postgres',
+    "INSERT INTO regress_part_tab VALUES (1, 'leaf_unique_val', 'leaf_marker_val');");
+$node_publisher->wait_for_catchup('regress_sub');
+
+$result = $node_subscriber->safe_psql('postgres',
+	"SELECT count(1) FROM regress_part_tab");
+is($result, '1', 'initial row inserted into partitioned subscriber table');
+
+$node_subscriber->safe_psql('postgres',
+	"SELECT injection_points_attach('parallel-worker-before-commit','wait');");
+
+# Tx-1: Delete the row.  The parallel worker records a dependency using the
+# leaf partition's local unique index metadata and then pauses at the injection
+# point.
+$node_publisher->safe_psql('postgres',
+	"DELETE FROM regress_part_tab WHERE id = 1;");
+
+$node_subscriber->wait_for_event('logical replication parallel worker',
+	'parallel-worker-before-commit');
+
+$offset = -s $node_subscriber->logfile;
+
+# Tx-2: Insert a new row reusing value='leaf_unique_val'.  If applied before
+# Tx-1 commits, the leaf's unique index would be violated.  The dependency
+# tracking must detect this conflict and make Tx-2 wait for Tx-1.
+$node_publisher->safe_psql('postgres',
+    "INSERT INTO regress_part_tab VALUES (2, 'leaf_unique_val', 'leaf_marker_val');");
+
+# Verify the dependency is detected via the leaf partition's unique index.
+$str = $node_subscriber->wait_for_log(
+	qr/found conflicting local unique key change on table [1-9][0-9]+ from ([1-9][0-9]+)/,
+	$offset);
+$xid = $str =~ /found conflicting local unique key change on table [1-9][0-9]+ from ([1-9][0-9]+)/;
+
+$node_subscriber->wait_for_log(qr/wait for depended xid $xid/, $offset);
+
+ok(1,
+   "leaf-only unique key dependency with reordered leaf columns detected for partitioned table parallel apply");
+
+$node_subscriber->safe_psql('postgres', qq[
+    SELECT injection_points_detach('parallel-worker-before-commit');
+    SELECT injection_points_wakeup('parallel-worker-before-commit');
+]);
+
+$node_subscriber->wait_for_log(qr/finish waiting for depended xid $xid/, $offset);
+$node_publisher->wait_for_catchup('regress_sub');
+
+# Net result: the DELETE (id=1) and INSERT (id=2) both commit; one row remains.
+$result = $node_subscriber->safe_psql('postgres',
+	"SELECT count(1) FROM regress_part_tab");
+is($result, '1',
+	'changes to partitioned subscriber table are replicated correctly');
+
+# Replace the leaf-only unique index after the root relation's partitioned-table
+# information has already been cached.  The leaf relcache invalidation must also
+# invalidate the root relmap entry so the next dependency check uses the new
+# leaf index metadata.
+$node_subscriber->safe_psql('postgres', qq[
+    DROP INDEX regress_part_tab_1_value_idx;
+    CREATE UNIQUE INDEX regress_part_tab_1_marker_idx
+        ON regress_part_tab_1 (marker);
+]);
+
+$node_subscriber->safe_psql('postgres',
+    "SELECT injection_points_attach('parallel-worker-before-commit','wait');");
+
+# Tx-1: Delete the row.  With a refreshed root cache, this records a dependency
+# using the replacement leaf-only unique index on 'marker'.
+$node_publisher->safe_psql('postgres',
+    "DELETE FROM regress_part_tab WHERE id = 2;");
+
+$node_subscriber->wait_for_event('logical replication parallel worker',
+    'parallel-worker-before-commit');
+
+$offset = -s $node_subscriber->logfile;
+
+# Tx-2: Use a different value but reuse the marker.  A stale root cache would
+# still track the dropped 'value' index and miss this dependency.
+$node_publisher->safe_psql('postgres',
+    "INSERT INTO regress_part_tab VALUES (3, 'different_leaf_val', 'leaf_marker_val');");
+
+$str = $node_subscriber->wait_for_log(
+    qr/found conflicting local unique key change on table [1-9][0-9]+ from ([1-9][0-9]+)/,
+    $offset);
+$xid = $str =~ /found conflicting local unique key change on table [1-9][0-9]+ from ([1-9][0-9]+)/;
+
+$node_subscriber->wait_for_log(qr/wait for depended xid $xid/, $offset);
+
+ok(1,
+   "leaf relcache invalidation refreshes partitioned table local unique keys");
+
+$node_subscriber->safe_psql('postgres', qq[
+    SELECT injection_points_detach('parallel-worker-before-commit');
+    SELECT injection_points_wakeup('parallel-worker-before-commit');
+]);
+
+$node_subscriber->wait_for_log(qr/finish waiting for depended xid $xid/, $offset);
+$node_publisher->wait_for_catchup('regress_sub');
+
+$result = $node_subscriber->safe_psql('postgres',
+    "SELECT count(1) FROM regress_part_tab");
+is($result, '1',
+    'changes after leaf unique index replacement are replicated correctly');
+
 done_testing();

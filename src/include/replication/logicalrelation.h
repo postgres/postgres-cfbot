@@ -56,6 +56,10 @@ typedef struct LogicalRepRelMapEntry
 	 */
 	TransactionId last_depended_xid;
 
+	/* Local unique indexes. Used for dependency tracking */
+	List	   *local_unique_indexes;
+	bool		local_unique_indexes_valid;
+
 	/*
 	 * Per-operation safety cache for parallel apply. If
 	 * parallel_global_unsafe[action] is true, that action cannot be applied in
@@ -74,6 +78,17 @@ typedef struct LogicalRepRelMapEntry
 	bool		parallel_global_unsafe[LRPA_ACTION_COUNT];
 } LogicalRepRelMapEntry;
 
+/*
+ * Subscriber side unique index information.  This is used to track dependencies
+ * between transactions that modify the same unique key value.
+ */
+typedef struct LogicalRepSubUniqueIndex
+{
+	Oid			indexoid;	/* OID of the local key */
+	Bitmapset  *indexkeys;	/* Bitmap of key columns *on remote* */
+	bool		nulls_distinct;	/* Whether NULLs are considered distinct */
+} LogicalRepSubUniqueIndex;
+
 extern void logicalrep_relmap_update(LogicalRepRelation *remoterel);
 extern void logicalrep_partmap_reset_relmap(LogicalRepRelation *remoterel);
 
@@ -84,6 +99,7 @@ extern LogicalRepRelMapEntry *logicalrep_partition_open(LogicalRepRelMapEntry *r
 extern void logicalrep_rel_close(LogicalRepRelMapEntry *rel,
 								 LOCKMODE lockmode);
 extern void logicalrep_rel_check_parallel_safety(LogicalRepRelMapEntry *entry);
+extern void logicalrep_build_dependent_unique_indexes(LogicalRepRelMapEntry *entry);
 extern bool IsIndexUsableForReplicaIdentityFull(Relation idxrel, AttrMap *attrmap);
 extern Oid	GetRelationIdentityOrPK(Relation rel);
 extern void logicalrep_write_all_internal_rels(StringInfo out, int *num_rels);

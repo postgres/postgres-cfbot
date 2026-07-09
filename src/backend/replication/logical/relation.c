@@ -21,6 +21,7 @@
 #include "access/genam.h"
 #include "access/table.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_inherits.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_subscription_rel.h"
 #include "catalog/pg_trigger.h"
@@ -131,6 +132,7 @@ logicalrep_relmap_invalidate_cb(Datum arg, Oid reloid)
 			{
 				entry->localrelvalid = false;
 				entry->parallel_safety_valid = false;
+				entry->local_unique_indexes_valid = false;
 				hash_seq_term(&status);
 				break;
 			}
@@ -147,6 +149,7 @@ logicalrep_relmap_invalidate_cb(Datum arg, Oid reloid)
 		{
 			entry->localrelvalid = false;
 			entry->parallel_safety_valid = false;
+			entry->local_unique_indexes_valid = false;
 		}
 	}
 }
@@ -179,6 +182,21 @@ logicalrep_relmap_init(void)
 }
 
 /*
+ * Release local index list
+ */
+static void
+free_local_unique_indexes(LogicalRepRelMapEntry *entry)
+{
+	Assert(am_leader_apply_worker());
+
+	foreach_ptr(LogicalRepSubUniqueIndex, idxinfo, entry->local_unique_indexes)
+		bms_free(idxinfo->indexkeys);
+
+	list_free_deep(entry->local_unique_indexes);
+	entry->local_unique_indexes = NIL;
+}
+
+/*
  * Free the entry of a relation map cache.
  */
 static void
@@ -205,6 +223,9 @@ logicalrep_relmap_free_entry(LogicalRepRelMapEntry *entry)
 
 	if (entry->attrmap)
 		free_attrmap(entry->attrmap);
+
+	if (entry->local_unique_indexes != NIL)
+		free_local_unique_indexes(entry);
 }
 
 /*
@@ -266,6 +287,13 @@ logicalrep_relmap_update(LogicalRepRelation *remoterel)
 		(remoterel->relkind == 0) ? RELKIND_RELATION : remoterel->relkind;
 
 	entry->remoterel.attkeys = bms_copy(remoterel->attkeys);
+
+	/*
+	 * Rebuild the key info using the latest replica identity, which may have
+	 * changed.
+	 */
+	entry->local_unique_indexes_valid = false;
+
 	MemoryContextSwitchTo(oldctx);
 }
 
@@ -452,6 +480,7 @@ logicalrep_rel_open(LogicalRepRelId remoteid, LOCKMODE lockmode)
 			/* Table was renamed or dropped. */
 			entry->localrelvalid = false;
 			entry->parallel_safety_valid = false;
+			entry->local_unique_indexes_valid = false;
 		}
 		else if (!entry->localrelvalid)
 		{
@@ -674,6 +703,233 @@ logicalrep_rel_check_parallel_safety(LogicalRepRelMapEntry *entry)
 }
 
 /*
+ * Append a new unique index to the list if it is not a duplicate of, or a
+ * superset of, an existing index. If it is a subset of an existing index,
+ * replace the existing one with the new one.
+ */
+static void
+maybe_append_unique_index(Oid indexoid, Bitmapset *indexkeys,
+						  bool nulls_distinct, List **unique_indexes)
+{
+	LogicalRepSubUniqueIndex *newinfo;
+	MemoryContext oldctx;
+
+	foreach_ptr(LogicalRepSubUniqueIndex, oldinfo, *unique_indexes)
+	{
+		BMS_Comparison cmp;
+
+		if (oldinfo->nulls_distinct != nulls_distinct)
+			continue;
+
+		cmp = bms_subset_compare(oldinfo->indexkeys, indexkeys);
+
+		/* Duplicate index, no need to add */
+		if (cmp == BMS_EQUAL || cmp == BMS_SUBSET2)
+			return;
+
+		/* New index is a subset of an existing one, replace the old one */
+		if (cmp == BMS_SUBSET1)
+		{
+			oldinfo->indexoid = indexoid;
+			oldinfo->indexkeys = indexkeys;
+			oldinfo->nulls_distinct = nulls_distinct;
+			return;
+		}
+	}
+
+	oldctx = MemoryContextSwitchTo(LogicalRepRelMapContext);
+
+	newinfo = palloc(sizeof(LogicalRepSubUniqueIndex));
+	newinfo->indexoid = indexoid;
+	newinfo->indexkeys = bms_copy(indexkeys);
+	newinfo->nulls_distinct = nulls_distinct;
+	*unique_indexes = lappend(*unique_indexes, newinfo);
+
+	MemoryContextSwitchTo(oldctx);
+}
+
+/*
+ * Collect all local unique indexes that can be used for dependency tracking
+ *
+ * This function collects all types of unique indexes, including those with
+ * index expressions and partial indexes. However, to avoid the overhead and
+ * complexity of executing expressions, we do not evaluate them during
+ * dependency tracking.
+ *
+ * For indexes with expressions, only the non-expression columns are recorded in
+ * the bitmap. The dependency tracking function will use only these columns,
+ * which may lead to false dependency detection. For example, consider a unique
+ * index defined as UNIQUE (a, func(b)), where b is an expression column. Rows
+ * (1, 2) and (1, 3) will be treated as dependent even though they are not. This
+ * is acceptable, as it is still better than disabling parallelism for all
+ * relations that have expression indexes.
+ *
+ * Similarly, partial indexes may also cause false dependencies due to predicate
+ * expressions. For the same reason, we consider this acceptable as well.
+ *
+ * To avoid redundant dependency tracking, indexes whose key columns are the
+ * same as, or a superset of, the replica identity key or an already collected
+ * unique index are skipped, as their scope is already covered.
+ *
+ * Columns not in the replica identity key are excluded from the unique column
+ * set. Since the old tuple of an UPDATE or DELETE contains only replica
+ * identity key columns, any other columns would be missing and thus unavailable
+ * for dependency tracking.
+ */
+static void
+get_unique_indexes(LogicalRepRelMapEntry *entry, List **local_unique_indexes)
+{
+	List	   *idxlist;
+
+	idxlist = RelationGetIndexList(entry->localrel);
+
+	/* Iterate indexes to list all usable indexes */
+	foreach_oid(idxoid, idxlist)
+	{
+		Relation	idxrel;
+		AttrMap    *attrmap;
+		Bitmapset  *indexkeys = NULL;
+		BMS_Comparison cmp;
+		int			indnkeys;
+		bool		nulls_distinct;
+
+		idxrel = index_open(idxoid, AccessShareLock);
+
+		/*
+		 * Only unique indexes are considered. Indexes backing a deferrable
+		 * unique constraint are skipped: their uniqueness is checked at
+		 * commit time and commit order is preserved, so they cannot cause
+		 * an apply-time conflict.
+		 */
+		if (!idxrel->rd_index->indisunique ||
+			!idxrel->rd_index->indimmediate)
+		{
+			index_close(idxrel, AccessShareLock);
+			continue;
+		}
+
+		indnkeys = idxrel->rd_index->indnkeyatts;
+		nulls_distinct = !idxrel->rd_index->indnullsnotdistinct;
+		attrmap = entry->attrmap;
+
+		Assert(indnkeys);
+
+		/* Seek each attributes and add to a Bitmap */
+		for (int i = 0; i < indnkeys; i++)
+		{
+			AttrNumber	localcol = idxrel->rd_index->indkey.values[i];
+			AttrNumber	remotecol;
+
+			/* Skip expression */
+			if (!AttributeNumberIsValid(localcol))
+				continue;
+
+			/*
+			 * Skip generated columns. The subscriber recomputes generated
+			 * values using its own expression, so the value sent by the
+			 * publisher (if published at all) does not necessarily match
+			 * the local one and cannot be used for dependency tracking.
+			 * Dropping the column may degenerate the index to table-level
+			 * serialization, which is safe.
+			 */
+			if (TupleDescCompactAttr(RelationGetDescr(entry->localrel),
+									 AttrNumberGetAttrOffset(localcol))->attgenerated)
+				continue;
+
+			remotecol = attrmap->attnums[AttrNumberGetAttrOffset(localcol)];
+
+			/* Skip if the column does not exist on publisher node */
+			if (remotecol < 0)
+				continue;
+
+			/* Skip columns that are not part of the replica identity key */
+			if (!bms_is_member(remotecol, entry->remoterel.attkeys))
+				continue;
+
+			/* Checks are passed, remember the attribute */
+			indexkeys = bms_add_member(indexkeys, remotecol);
+		}
+
+		index_close(idxrel, AccessShareLock);
+
+		/*
+		 * Skip indexes whose key columns are a superset of the replica identity
+		 * key.
+		 */
+		cmp = bms_subset_compare(entry->remoterel.attkeys, indexkeys);
+		if (cmp == BMS_EQUAL || cmp == BMS_SUBSET1)
+			continue;
+
+		maybe_append_unique_index(idxoid, indexkeys, nulls_distinct,
+								  local_unique_indexes);
+	}
+
+	list_free(idxlist);
+}
+
+/*
+ * Collect all local unique indexes that can be used for dependency tracking.
+ * For partitioned tables, this also collects unique indexes from all leaf
+ * partitions.
+ *
+ * See get_unique_indexes() for details on how unique indexes are collected.
+ */
+void
+logicalrep_build_dependent_unique_indexes(LogicalRepRelMapEntry *entry)
+{
+	List	   *partitions;
+
+	if (entry->local_unique_indexes_valid)
+		return;
+
+	free_local_unique_indexes(entry);
+
+	/* For non-partitioned tables, simply get the unique indexes and return */
+	if (entry->localrel->rd_rel->relkind == RELKIND_RELATION)
+	{
+		get_unique_indexes(entry, &entry->local_unique_indexes);
+		entry->local_unique_indexes_valid = true;
+		return;
+	}
+
+	/*
+	 * Collect unique indexes from all leaf partitions of this partitioned
+	 * table.
+	 */
+	partitions = find_all_inheritors(entry->localreloid, AccessShareLock,
+									 NULL);
+
+	foreach_oid(relid, partitions)
+	{
+		LogicalRepRelMapEntry *part_entry;
+		Relation	partrel;
+		AttrMap    *root_to_part_attrmap;
+
+		/* Only check leaf partitions */
+		if (get_rel_relkind(relid) == RELKIND_PARTITIONED_TABLE)
+			continue;
+
+		partrel = table_open(relid, AccessShareLock);
+
+		root_to_part_attrmap =
+			build_attrmap_by_name_if_req(RelationGetDescr(entry->localrel),
+										 RelationGetDescr(partrel), false);
+
+		part_entry = logicalrep_partition_open(entry, partrel,
+											   root_to_part_attrmap);
+
+		if (root_to_part_attrmap)
+			free_attrmap(root_to_part_attrmap);
+
+		get_unique_indexes(part_entry, &entry->local_unique_indexes);
+
+		table_close(partrel, AccessShareLock);
+	}
+
+	entry->local_unique_indexes_valid = true;
+}
+
+/*
  * Partition cache: look up partition LogicalRepRelMapEntry's
  *
  * Unlike relation map cache, this is keyed by partition OID, not remote
@@ -704,8 +960,21 @@ logicalrep_partmap_invalidate_cb(Datum arg, Oid reloid)
 		entry = hash_search(LogicalRepPartMap, &reloid, HASH_FIND, NULL);
 		if (entry != NULL)
 		{
+			LogicalRepRelMapEntry  *parent;
+
 			entry->relmapentry.localrelvalid = false;
 			entry->relmapentry.parallel_safety_valid = false;
+
+			/*
+			 * Invalidating a leaf partition makes the parent table's collected
+			 * all partition's index information stale.
+			 */
+			parent = hash_search(LogicalRepRelMap,
+								 &entry->relmapentry.remoterel.remoteid,
+								 HASH_FIND, NULL);
+
+			if (parent)
+				parent->local_unique_indexes_valid = false;
 		}
 	}
 	else
