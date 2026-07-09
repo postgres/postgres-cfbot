@@ -1,7 +1,7 @@
 /*-------------------------------------------------------------------------
  *
- * fe-secure-openssl.c
- *	  OpenSSL support
+ * fe-secure-libressl.c
+ *	  LibreSSL support
  *
  *
  * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
@@ -9,7 +9,7 @@
  *
  *
  * IDENTIFICATION
- *	  src/interfaces/libpq/fe-secure-openssl.c
+ *	  src/interfaces/libpq/fe-secure-libressl.c
  *
  * NOTES
  *
@@ -68,7 +68,7 @@
 
 static int	verify_cb(int ok, X509_STORE_CTX *ctx);
 static int	openssl_verify_peer_name_matches_certificate_name(PGconn *conn,
-															  const ASN1_STRING *name_entry,
+															  ASN1_STRING *name_entry,
 															  char **store_name);
 static int	openssl_verify_peer_name_matches_certificate_ip(PGconn *conn,
 															ASN1_OCTET_STRING *addr_entry,
@@ -248,7 +248,7 @@ pgtls_bytes_pending(PGconn *conn)
 	{
 		/* shouldn't be possible */
 		Assert(false);
-		libpq_append_conn_error(conn, "OpenSSL reports negative bytes pending");
+		libpq_append_conn_error(conn, "LibreSSL reports negative bytes pending");
 		return -1;
 	}
 	else if (pending == INT_MAX)
@@ -260,12 +260,13 @@ pgtls_bytes_pending(PGconn *conn)
 		 * SSL_read() should be bounded to the size of a single TLS record,
 		 * and conn->inBuffer can't currently go past INT_MAX in size anyway.
 		 */
-		libpq_append_conn_error(conn, "OpenSSL reports INT_MAX bytes pending");
+		libpq_append_conn_error(conn, "LibreSSL reports INT_MAX bytes pending");
 		return -1;
 	}
 
 	return (ssize_t) pending;
 }
+
 
 ssize_t
 pgtls_write(PGconn *conn, const void *ptr, size_t len)
@@ -371,12 +372,7 @@ char *
 pgtls_get_peer_certificate_hash(PGconn *conn, size_t *len)
 {
 	X509	   *peer_cert;
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
-	EVP_MD	   *algo_type;
-	const char *algo_name;
-#else
 	const EVP_MD *algo_type;
-#endif
 	unsigned char hash[EVP_MAX_MD_SIZE];	/* size for SHA-512 */
 	unsigned int hash_size;
 	int			algo_nid;
@@ -393,7 +389,8 @@ pgtls_get_peer_certificate_hash(PGconn *conn, size_t *len)
 	 * Get the signature algorithm of the certificate to determine the hash
 	 * algorithm to use for the result.
 	 */
-	if (!X509_get_signature_info(peer_cert, &algo_nid, NULL, NULL, NULL))
+	if (!OBJ_find_sigid_algs(X509_get_signature_nid(peer_cert),
+							 &algo_nid, NULL))
 	{
 		libpq_append_conn_error(conn, "could not determine server certificate signature algorithm");
 		return NULL;
@@ -405,31 +402,6 @@ pgtls_get_peer_certificate_hash(PGconn *conn, size_t *len)
 	 * (https://tools.ietf.org/html/rfc5929#section-4.1).  If something else
 	 * is used, the same hash as the signature algorithm is used.
 	 */
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
-	switch (algo_nid)
-	{
-		case NID_md5:
-		case NID_sha1:
-			algo_name = "SHA256";
-			break;
-		default:
-			algo_name = OBJ_nid2sn(algo_nid);
-			if (algo_name == NULL)
-			{
-				libpq_append_conn_error(conn, "could not find digest for NID %d",
-										algo_nid);
-				return NULL;
-			}
-			break;
-	}
-
-	algo_type = EVP_MD_fetch(NULL, algo_name, NULL);
-	if (algo_type == NULL)
-	{
-		libpq_append_conn_error(conn, "could not fetch digest \"%s\"", algo_name);
-		return NULL;
-	}
-#else
 	switch (algo_nid)
 	{
 		case NID_md5:
@@ -446,20 +418,12 @@ pgtls_get_peer_certificate_hash(PGconn *conn, size_t *len)
 			}
 			break;
 	}
-#endif
 
 	if (!X509_digest(peer_cert, algo_type, hash, &hash_size))
 	{
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
-		EVP_MD_free(algo_type);
-#endif
 		libpq_append_conn_error(conn, "could not generate peer certificate hash");
 		return NULL;
 	}
-
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
-	EVP_MD_free(algo_type);
-#endif
 
 	/* save result */
 	cert_hash = malloc(hash_size);
@@ -496,40 +460,12 @@ verify_cb(int ok, X509_STORE_CTX *ctx)
 }
 
 /*
- * Certificate selection callback
- *
- * This callback lets us choose the client certificate we send to the server
- * after seeing its CertificateRequest.  We only support sending a single
- * hard-coded certificate via sslcert, so we don't actually set any certificates
- * here; we just use it to record whether or not the server has actually asked
- * for one and whether we have one to send.
- */
-static int
-cert_cb(SSL *ssl, void *arg)
-{
-	PGconn	   *conn = arg;
-
-	conn->ssl_cert_requested = true;
-
-	/* Do we have a certificate loaded to send back? */
-	if (SSL_get_certificate(ssl))
-		conn->ssl_cert_sent = true;
-
-	/*
-	 * Tell OpenSSL that the callback succeeded; we're not required to
-	 * actually make any changes to the SSL handle.
-	 */
-	return 1;
-}
-
-/*
  * OpenSSL-specific wrapper around
  * pq_verify_peer_name_matches_certificate_name(), converting the ASN1_STRING
  * into a plain C string.
  */
 static int
-openssl_verify_peer_name_matches_certificate_name(PGconn *conn,
-												  const ASN1_STRING *name_entry,
+openssl_verify_peer_name_matches_certificate_name(PGconn *conn, ASN1_STRING *name_entry,
 												  char **store_name)
 {
 	int			len;
@@ -712,14 +648,14 @@ pgtls_verify_peer_name_matches_certificate_guts(PGconn *conn,
 	 */
 	if (check_cn)
 	{
-		const X509_NAME *subject_name;
+		X509_NAME  *subject_name;
 
 		subject_name = X509_get_subject_name(conn->peer);
 		if (subject_name != NULL)
 		{
 			int			cn_index;
 
-			cn_index = X509_NAME_get_index_by_NID(unconstify(X509_NAME *, subject_name),
+			cn_index = X509_NAME_get_index_by_NID(subject_name,
 												  NID_commonName, -1);
 			if (cn_index >= 0)
 			{
@@ -746,46 +682,6 @@ pgtls_verify_peer_name_matches_certificate_guts(PGconn *conn,
 
 /* See pqcomm.h comments on OpenSSL implementation of ALPN (RFC 7301) */
 static unsigned char alpn_protos[] = PG_ALPN_PROTOCOL_VECTOR;
-
-/*
- * SSL Key Logging callback
- *
- * This callback lets the user store all key material to a file for debugging
- * purposes.  The file will be written using the NSS keylog format.
- *
- * Error messages added to the connection object won't be printed anywhere if
- * the connection is successful.  Errors in processing keylogging are printed
- * to stderr to overcome this.
- */
-static void
-SSL_CTX_keylog_cb(const SSL *ssl, const char *line)
-{
-	int			fd;
-	ssize_t		rc;
-	PGconn	   *conn = SSL_get_app_data(ssl);
-
-	if (conn == NULL)
-		return;
-
-	fd = open(conn->sslkeylogfile, O_WRONLY | O_APPEND | O_CREAT, 0600);
-
-	if (fd == -1)
-	{
-		fprintf(stderr, libpq_gettext("WARNING: could not open SSL key logging file \"%s\": %m\n"),
-				conn->sslkeylogfile);
-		return;
-	}
-
-	/* line is guaranteed by OpenSSL to be NUL terminated */
-	rc = write(fd, line, strlen(line));
-	if (rc < 0)
-		fprintf(stderr, libpq_gettext("WARNING: could not write to SSL key logging file \"%s\": %m\n"),
-				conn->sslkeylogfile);
-	else
-		rc = write(fd, "\n", 1);
-	(void) rc;					/* silence compiler warnings */
-	close(fd);
-}
 
 /*
  *	Create per-connection SSL object, and load the client certificate,
@@ -826,7 +722,7 @@ initialize_SSL(PGconn *conn)
 	 * complicated if connections used different certificates. So now we
 	 * create a separate context for each connection, and accept the overhead.
 	 */
-	SSL_context = SSL_CTX_new(TLS_method());
+	SSL_context = SSL_CTX_new(SSLv23_method());
 	if (!SSL_context)
 	{
 		char	   *err = SSLerrmessage(ERR_get_error());
@@ -854,9 +750,6 @@ initialize_SSL(PGconn *conn)
 		SSL_CTX_set_default_passwd_cb(SSL_context, PQssl_passwd_cb);
 		SSL_CTX_set_default_passwd_cb_userdata(SSL_context, conn);
 	}
-
-	/* Set up a certificate selection callback. */
-	SSL_CTX_set_cert_cb(SSL_context, cert_cb, conn);
 
 	/* Disable old protocol versions */
 	SSL_CTX_set_options(SSL_context, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3);
@@ -1106,13 +999,7 @@ initialize_SSL(PGconn *conn)
 	 * version of OpenSSL is used and libpq was compiled to support it.
 	 */
 	if (conn->sslkeylogfile && strlen(conn->sslkeylogfile) > 0)
-	{
-#ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
-		SSL_CTX_set_keylog_callback(SSL_context, SSL_CTX_keylog_cb);
-#else
-		fprintf(stderr, libpq_gettext("WARNING: libpq was not built with sslkeylogfile support\n"));
-#endif
-	}
+		fprintf(stderr, libpq_gettext("WARNING: sslkeylogfile support requires OpenSSL\n"));
 
 	/*
 	 * SSL contexts are reference counted by OpenSSL. We can free it as soon
@@ -1567,6 +1454,7 @@ pgtls_close(PGconn *conn)
 			SSL_free(conn->ssl);
 			conn->ssl = NULL;
 			conn->ssl_in_use = false;
+			conn->ssl_handshake_started = false;
 		}
 
 		if (conn->peer)
@@ -1635,21 +1523,6 @@ SSLerrmessage(unsigned long ecode)
 		ERR_GET_REASON(ecode) == SSL_AD_REASON_OFFSET + SSL_AD_NO_APPLICATION_PROTOCOL)
 	{
 		snprintf(errbuf, SSL_ERR_LEN, "no application protocol");
-		return errbuf;
-	}
-#endif
-
-	/*
-	 * In OpenSSL 3.0.0 and later, ERR_reason_error_string does not map system
-	 * errno values anymore.  (See OpenSSL source code for the explanation.)
-	 * We can cover that shortcoming with this bit of code.  Older OpenSSL
-	 * versions don't have the ERR_SYSTEM_ERROR macro, but that's okay because
-	 * they don't have the shortcoming either.
-	 */
-#ifdef ERR_SYSTEM_ERROR
-	if (ERR_SYSTEM_ERROR(ecode))
-	{
-		strerror_r(ERR_GET_REASON(ecode), errbuf, SSL_ERR_LEN);
 		return errbuf;
 	}
 #endif
@@ -1791,7 +1664,7 @@ pgconn_bio_read(BIO *h, char *buf, int size)
 	PGconn	   *conn = (PGconn *) BIO_get_data(h);
 	int			res;
 
-	res = (int) pqsecure_raw_read(conn, buf, size);
+	res = pqsecure_raw_read(conn, buf, size);
 	BIO_clear_retry_flags(h);
 	conn->last_read_was_eof = res == 0;
 	if (res < 0)
@@ -1814,6 +1687,9 @@ pgconn_bio_read(BIO *h, char *buf, int size)
 		}
 	}
 
+	if (res > 0)
+		conn->ssl_handshake_started = true;
+
 	return res;
 }
 
@@ -1822,7 +1698,7 @@ pgconn_bio_write(BIO *h, const char *buf, int size)
 {
 	int			res;
 
-	res = (int) pqsecure_raw_write((PGconn *) BIO_get_data(h), buf, size);
+	res = pqsecure_raw_write((PGconn *) BIO_get_data(h), buf, size);
 	BIO_clear_retry_flags(h);
 	if (res < 0)
 	{
@@ -2007,22 +1883,20 @@ PQssl_passwd_cb(char *buf, int size, int rwflag, void *userdata)
 static int
 ssl_protocol_version_to_openssl(const char *protocol)
 {
-#ifndef OPENSSL_NO_TLS1
 	if (pg_strcasecmp("TLSv1", protocol) == 0)
 		return TLS1_VERSION;
-#endif
 
-#ifndef OPENSSL_NO_TLS1_1
+#ifdef TLS1_1_VERSION
 	if (pg_strcasecmp("TLSv1.1", protocol) == 0)
 		return TLS1_1_VERSION;
 #endif
 
-#ifndef OPENSSL_NO_TLS1_2
+#ifdef TLS1_2_VERSION
 	if (pg_strcasecmp("TLSv1.2", protocol) == 0)
 		return TLS1_2_VERSION;
 #endif
 
-#ifndef OPENSSL_NO_TLS1_3
+#ifdef TLS1_3_VERSION
 	if (pg_strcasecmp("TLSv1.3", protocol) == 0)
 		return TLS1_3_VERSION;
 #endif

@@ -1627,8 +1627,8 @@ if sslopt == 'auto' and auto_features.disabled()
   sslopt = 'none'
 endif
 
-if sslopt in ['auto', 'openssl']
-  openssl_required = (sslopt == 'openssl')
+if sslopt in ['auto', 'openssl', 'libressl']
+  ssl_library_required = (sslopt != 'auto')
 
   # Try to find openssl via pkg-config et al, if that doesn't work
   # (e.g. because it's provided as part of the OS, like on FreeBSD), look for
@@ -1646,16 +1646,16 @@ if sslopt in ['auto', 'openssl']
       dirs: test_lib_d,
       header_include_directories: postgres_inc,
       has_headers: ['openssl/ssl.h', 'openssl/err.h'],
-      required: openssl_required)
+      required: ssl_library_required)
     crypto_lib = cc.find_library('crypto',
       dirs: test_lib_d,
-      required: openssl_required)
+      required: ssl_library_required)
     if ssl_lib.found() and crypto_lib.found()
       ssl_int = [ssl_lib, crypto_lib]
       ssl = declare_dependency(dependencies: ssl_int, include_directories: postgres_inc)
     endif
-  elif cc.has_header('openssl/ssl.h', args: test_c_args, dependencies: ssl, required: openssl_required) and \
-       cc.has_header('openssl/err.h', args: test_c_args, dependencies: ssl, required: openssl_required)
+  elif cc.has_header('openssl/ssl.h', args: test_c_args, dependencies: ssl, required: ssl_library_required) and \
+       cc.has_header('openssl/err.h', args: test_c_args, dependencies: ssl, required: ssl_library_required)
     ssl_int = [ssl]
   else
     ssl = not_found_dep
@@ -1666,41 +1666,52 @@ if sslopt in ['auto', 'openssl']
       ['CRYPTO_new_ex_data', {'required': true}],
       ['SSL_new', {'required': true}],
 
-      # Functions introduced in OpenSSL 1.1.1.
+      # Functions introduced in OpenSSL 1.1.1 and present in LibreSSL
       ['SSL_CTX_set_ciphersuites', {'required': true}],
 
-      # Function introduced in OpenSSL 1.0.2, not in LibreSSL.
-      ['SSL_CTX_set_cert_cb'],
+      # Functions for optionally supported functionality in OpenSSL
+      ['SSL_CTX_set_keylog_callback', {'optional': true}],
 
-      # Function introduced in OpenSSL 1.1.1, not in LibreSSL.
-      ['X509_get_signature_info'],
-      ['SSL_CTX_set_num_tickets'],
-      ['SSL_CTX_set_keylog_callback'],
-      ['SSL_CTX_set_client_hello_cb'],
+      # Function introduced in OpenSSL 1.0.2, not in LibreSSL.
+      ['SSL_CTX_set_cert_cb', {'openssl': true}],
+
+      # Function present in LibreSSL 3.4, not in OpenSSL
+      ['SSL_CTX_use_certificate_chain_mem', {'libressl': true}],
     ]
 
-    are_openssl_funcs_complete = true
+    are_ssl_funcs_complete = true
     foreach c : check_funcs
       func = c.get(0)
       val = cc.has_function(func, args: test_c_args, dependencies: ssl_int)
       required = c.get(1, {}).get('required', false)
+      optional = c.get(1, {}).get('optional', false)
+      openssl_lib = c.get(1, {}).get('openssl', false)
+      libressl_lib = c.get(1, {}).get('libressl', false)
       if required and not val
-        are_openssl_funcs_complete = false
-        if openssl_required
-          error('openssl function @0@ is required'.format(func))
+        are_ssl_funcs_complete = false
+        if ssl_library_required
+          error('ssl function @0@ is required'.format(func))
         endif
         break
-      elif not required
+      elif optional
         cdata.set('HAVE_' + func.to_upper(), val ? 1 : false)
+      elif openssl_lib and val
+        ssl_library = 'openssl'
+      elif libressl_lib and val
+        ssl_library = 'libressl'
       endif
     endforeach
 
-    if are_openssl_funcs_complete
-      cdata.set('USE_OPENSSL', 1,
-                description: 'Define to 1 to build with OpenSSL support. (-Dssl=openssl)')
-      cdata.set('OPENSSL_API_COMPAT', '0x10101000L',
-                description: 'Define to the OpenSSL API version in use. This avoids deprecation warnings from newer OpenSSL versions.')
-      ssl_library = 'openssl'
+    if are_ssl_funcs_complete
+      if sslopt == 'openssl' and ssl_library == 'openssl'
+        cdata.set('USE_OPENSSL', 1,
+                  description: 'Define to 1 to build with OpenSSL support. (-Dssl=openssl)')
+        cdata.set('OPENSSL_API_COMPAT', '0x10101000L',
+                  description: 'Define to the OpenSSL API version in use. This avoids deprecation warnings from newer OpenSSL versions.')
+      elif sslopt == 'libressl' and ssl_library == 'libressl'
+        cdata.set('USE_LIBRESSL', 1,
+                  description: 'Define to 1 to build with LibreSSL support. (-Dssl=libressl)')
+      endif
     else
       ssl = not_found_dep
     endif
@@ -4322,13 +4333,13 @@ summary(
     'llvm': llvm,
     'lz4': lz4,
     'nls': libintl,
-    'openssl': ssl,
     'pam': pam,
     'plperl': [perl_dep, perlversion],
     'plpython': python3_dep,
     'pltcl': tcl_dep,
     'readline': readline,
     'selinux': selinux,
+    'ssl': [ssl_library, ssl],
     'systemd': systemd,
     'uuid': uuid,
     'zlib': zlib,
