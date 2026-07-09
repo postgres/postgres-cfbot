@@ -148,9 +148,9 @@ option('readline', type: 'feature', value: 'auto',
 option('selinux', type: 'feature', value: 'auto',
   description: 'SELinux support')
 
-option('ssl', type: 'combo', choices: ['auto', 'none', 'openssl'],
+option('ssl', type: 'combo', choices: ['auto', 'none', 'openssl', 'libressl'],
   value: 'auto',
-  description: 'Use LIB for SSL/TLS support (openssl)')
+  description: 'Use LIB for SSL/TLS support')
 
 option('systemd', type: 'feature', value: 'auto',
   description: 'systemd support')
