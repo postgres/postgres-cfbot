@@ -173,7 +173,7 @@
  * USE_SSL code should be compiled only when compiling with an SSL
  * implementation.
  */
-#ifdef USE_OPENSSL
+#if defined(USE_OPENSSL) || defined(USE_LIBRESSL)
 #define USE_SSL
 #endif
 

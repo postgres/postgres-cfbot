@@ -391,15 +391,9 @@ pgtls_get_peer_certificate_hash(PGconn *conn, size_t *len)
 
 	/*
 	 * Get the signature algorithm of the certificate to determine the hash
-	 * algorithm to use for the result.  Prefer X509_get_signature_info(),
-	 * introduced in OpenSSL 1.1.1, which can handle RSA-PSS signatures.
+	 * algorithm to use for the result.
 	 */
-#if HAVE_X509_GET_SIGNATURE_INFO
 	if (!X509_get_signature_info(peer_cert, &algo_nid, NULL, NULL, NULL))
-#else
-	if (!OBJ_find_sigid_algs(X509_get_signature_nid(peer_cert),
-							 &algo_nid, NULL))
-#endif
 	{
 		libpq_append_conn_error(conn, "could not determine server certificate signature algorithm");
 		return NULL;
@@ -501,7 +495,6 @@ verify_cb(int ok, X509_STORE_CTX *ctx)
 	return ok;
 }
 
-#ifdef HAVE_SSL_CTX_SET_CERT_CB
 /*
  * Certificate selection callback
  *
@@ -528,7 +521,6 @@ cert_cb(SSL *ssl, void *arg)
 	 */
 	return 1;
 }
-#endif
 
 /*
  * OpenSSL-specific wrapper around
@@ -755,14 +747,11 @@ pgtls_verify_peer_name_matches_certificate_guts(PGconn *conn,
 /* See pqcomm.h comments on OpenSSL implementation of ALPN (RFC 7301) */
 static unsigned char alpn_protos[] = PG_ALPN_PROTOCOL_VECTOR;
 
-#ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
 /*
  * SSL Key Logging callback
  *
  * This callback lets the user store all key material to a file for debugging
- * purposes.  The file will be written using the NSS keylog format.  LibreSSL
- * 3.5 introduced stub function to set the callback for OpenSSL compatibility
- * but the callback is never invoked.
+ * purposes.  The file will be written using the NSS keylog format.
  *
  * Error messages added to the connection object won't be printed anywhere if
  * the connection is successful.  Errors in processing keylogging are printed
@@ -797,7 +786,6 @@ SSL_CTX_keylog_cb(const SSL *ssl, const char *line)
 	(void) rc;					/* silence compiler warnings */
 	close(fd);
 }
-#endif
 
 /*
  *	Create per-connection SSL object, and load the client certificate,
@@ -867,10 +855,8 @@ initialize_SSL(PGconn *conn)
 		SSL_CTX_set_default_passwd_cb_userdata(SSL_context, conn);
 	}
 
-#ifdef HAVE_SSL_CTX_SET_CERT_CB
 	/* Set up a certificate selection callback. */
 	SSL_CTX_set_cert_cb(SSL_context, cert_cb, conn);
-#endif
 
 	/* Disable old protocol versions */
 	SSL_CTX_set_options(SSL_context, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3);
@@ -1124,11 +1110,7 @@ initialize_SSL(PGconn *conn)
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
 		SSL_CTX_set_keylog_callback(SSL_context, SSL_CTX_keylog_cb);
 #else
-#ifdef LIBRESSL_VERSION_NUMBER
-		fprintf(stderr, libpq_gettext("WARNING: sslkeylogfile support requires OpenSSL\n"));
-#else
 		fprintf(stderr, libpq_gettext("WARNING: libpq was not built with sslkeylogfile support\n"));
-#endif
 #endif
 	}
 
