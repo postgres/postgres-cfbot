@@ -583,7 +583,8 @@ LookupTupleHashEntry_internal(TupleHashTable hashtable, TupleTableSlot *slot,
 			 * TupleHashEntryData or allocate an additional chunk.
 			 */
 			entry->firstTuple = ExecCopySlotMinimalTupleExtra(slot,
-															  hashtable->additionalsize);
+															  hashtable->additionalsize,
+															  -1 /* natts */);
 		}
 	}
 	else

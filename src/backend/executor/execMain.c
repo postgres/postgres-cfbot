@@ -2658,6 +2658,10 @@ ExecBuildAuxRowMark(ExecRowMark *erm, List *targetlist)
 													   resname);
 		if (!AttributeNumberIsValid(aerm->ctidAttNo))
 			elog(ERROR, "could not find junk %s column", resname);
+//fdwproblem
+			snprintf(resname, sizeof(resname), "tableoid%u", erm->rowmarkId);
+		aerm->toidAttNo = ExecFindJunkAttributeInTlist(targetlist,
+													   resname);
 	}
 	else
 	{

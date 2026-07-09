@@ -794,10 +794,17 @@ HeapTupleClearHeapOnly(const HeapTupleData *tuple)
 /* prototypes for functions in common/heaptuple.c */
 extern Size heap_compute_data_size(TupleDesc tupleDesc,
 								   const Datum *values, const bool *isnull);
+extern Size heap_compute_data_size_ext(TupleDesc tupleDesc,
+									   const Datum *values, const bool *isnull,
+									   int natts);
 extern void heap_fill_tuple(TupleDesc tupleDesc,
 							const Datum *values, const bool *isnull,
 							char *data, Size data_size,
 							uint16 *infomask, uint8 *bit);
+extern void heap_fill_tuple_ext(TupleDesc tupleDesc,
+								const Datum *values, const bool *isnull,
+								char *data, Size data_size,
+								uint16 *infomask, uint8 *bit, int natts);
 extern bool heap_attisnull(HeapTuple tup, int attnum, TupleDesc tupleDesc);
 extern Datum nocachegetattr(HeapTuple tup, int attnum,
 							TupleDesc tupleDesc);
@@ -806,10 +813,20 @@ extern Datum heap_getsysattr(HeapTuple tup, int attnum, TupleDesc tupleDesc,
 extern Datum getmissingattr(TupleDesc tupleDesc,
 							int attnum, bool *isnull);
 extern HeapTuple heap_copytuple(HeapTuple tuple);
+
+struct TupleTableSlot;
+extern HeapTuple heap_copytuple_ext(HeapTuple tuple,
+									struct TupleTableSlot *slot,
+									int dstnatts);
+
 extern void heap_copytuple_with_tuple(HeapTuple src, HeapTuple dest);
 extern Datum heap_copy_tuple_as_datum(HeapTuple tuple, TupleDesc tupleDesc);
 extern HeapTuple heap_form_tuple(TupleDesc tupleDescriptor,
 								 const Datum *values, const bool *isnull);
+extern HeapTuple heap_form_tuple_ext(TupleDesc tupleDescriptor,
+									 const Datum *values,
+									 const bool *isnull,
+									 int natts);
 extern HeapTuple heap_modify_tuple(HeapTuple tuple,
 								   TupleDesc tupleDesc,
 								   const Datum *replValues,
@@ -827,6 +844,11 @@ extern void heap_freetuple(HeapTuple htup);
 extern MinimalTuple heap_form_minimal_tuple(TupleDesc tupleDescriptor,
 											const Datum *values, const bool *isnull,
 											Size extra);
+extern MinimalTuple heap_form_minimal_tuple_ext(TupleDesc tupleDescriptor,
+												const Datum *values,
+												const bool *isnull,
+												Size extra,
+												int natts);
 extern void heap_free_minimal_tuple(MinimalTuple mtup);
 extern MinimalTuple heap_copy_minimal_tuple(MinimalTuple mtup, Size extra);
 extern HeapTuple heap_tuple_from_minimal_tuple(MinimalTuple mtup);

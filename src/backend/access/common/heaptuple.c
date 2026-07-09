@@ -61,6 +61,7 @@
 #include "access/sysattr.h"
 #include "access/tupdesc_details.h"
 #include "common/hashfn.h"
+#include "executor/tuptable.h"
 #include "utils/datum.h"
 #include "utils/expandeddatum.h"
 #include "utils/hsearch.h"
@@ -220,9 +221,28 @@ heap_compute_data_size(TupleDesc tupleDesc,
 					   const Datum *values,
 					   const bool *isnull)
 {
+	return heap_compute_data_size_ext(tupleDesc, values, isnull,
+									  - 1 /* take natts from tupleDesc */);
+}
+
+/*
+ * heap_compute_data_size_ext
+ *		Same as above, but allows to specify number of attributes explicitly.
+ *
+ * If "natts" <= 0, then number of attributes is taken from the TupleDesc.
+ */
+Size
+heap_compute_data_size_ext(TupleDesc tupleDesc,
+ 					   const Datum *values,
+					   const bool *isnull,
+					   int natts)
+{
 	Size		data_length = 0;
 	int			i;
 	int			numberOfAttributes = tupleDesc->natts;
+
+	if (natts > 0)
+		numberOfAttributes = natts;
 
 	for (i = 0; i < numberOfAttributes; i++)
 	{
@@ -403,6 +423,22 @@ heap_fill_tuple(TupleDesc tupleDesc,
 				char *data, Size data_size,
 				uint16 *infomask, uint8 *bit)
 {
+	heap_fill_tuple_ext(tupleDesc, values, isnull,  data, data_size, infomask,
+						bit, -1 /* take natts from tupleDesc */);
+}
+
+/*
+ * heap_fill_tuple_ext
+ *             Same as above, but allows to specify number of attributes explicitly.
+ *
+ * If "natts" <= 0, then number of attributes is taken from the TupleDesc.
+ */
+void
+heap_fill_tuple_ext(TupleDesc tupleDesc,
+					const Datum *values, const bool *isnull,
+					char *data, Size data_size,
+					uint16 *infomask, uint8 *bit, int natts)
+{
 	uint8	   *bitP;
 	int			bitmask;
 	int			i;
@@ -411,6 +447,9 @@ heap_fill_tuple(TupleDesc tupleDesc,
 #ifdef USE_ASSERT_CHECKING
 	char	   *start = data;
 #endif
+
+	if (natts > 0)
+		numberOfAttributes = natts;
 
 	if (bit != NULL)
 	{
@@ -685,17 +724,47 @@ heap_getsysattr(HeapTuple tup, int attnum, TupleDesc tupleDesc, bool *isnull)
 HeapTuple
 heap_copytuple(HeapTuple tuple)
 {
+	return heap_copytuple_ext(tuple, NULL, -1);
+}
+
+/* ----------------
+ *		heap_copytuple_ext
+ *
+ *		returns a copy of a tuple consists of attnum atts of original
+ *
+ * The HeapTuple struct, tuple header, and tuple data are all allocated
+ * as a single palloc() block.
+ * ----------------
+ */
+HeapTuple
+heap_copytuple_ext(HeapTuple tuple, TupleTableSlot *slot, int dstnatts)
+{
 	HeapTuple	newTuple;
+	Size		tuplen;
 
 	if (!HeapTupleIsValid(tuple) || tuple->t_data == NULL)
 		return NULL;
 
-	newTuple = (HeapTuple) palloc(HEAPTUPLESIZE + tuple->t_len);
-	newTuple->t_len = tuple->t_len;
+	tuplen = tuple->t_len;
+
+	if (slot != NULL)
+	{
+		if (dstnatts < 0)
+			dstnatts = slot->tts_tupleDescriptor->natts;
+
+		if (dstnatts < slot->tts_tupleDescriptor->natts)
+			tuplen = heap_compute_data_size_ext(slot->tts_tupleDescriptor,
+												slot->tts_values,
+												slot->tts_isnull,
+												dstnatts);
+	}
+
+	newTuple = (HeapTuple) palloc(HEAPTUPLESIZE + tuplen);
+	newTuple->t_len = tuplen;
 	newTuple->t_self = tuple->t_self;
 	newTuple->t_tableOid = tuple->t_tableOid;
 	newTuple->t_data = (HeapTupleHeader) ((char *) newTuple + HEAPTUPLESIZE);
-	memcpy(newTuple->t_data, tuple->t_data, tuple->t_len);
+	memcpy(newTuple->t_data, tuple->t_data, tuplen);
 	return newTuple;
 }
 
@@ -1026,6 +1095,21 @@ heap_form_tuple(TupleDesc tupleDescriptor,
 				const Datum *values,
 				const bool *isnull)
 {
+	return heap_form_tuple_ext(tupleDescriptor, values, isnull, -1);
+}
+
+/*
+ * heap_form_tuple_ext
+ *		Same as above, but allows to specify number of attributes explicitly.
+ *
+ * If "natts" <= 0, then number of attributes is taken from the TupleDesc.
+ */
+HeapTuple
+heap_form_tuple_ext(TupleDesc tupleDescriptor,
+					const Datum *values,
+					const bool *isnull,
+					int natts)
+{
 	HeapTuple	tuple;			/* return tuple */
 	HeapTupleHeader td;			/* tuple data */
 	Size		len,
@@ -1034,6 +1118,9 @@ heap_form_tuple(TupleDesc tupleDescriptor,
 	bool		hasnull = false;
 	int			numberOfAttributes = tupleDescriptor->natts;
 	int			i;
+
+	if(natts > 0)
+		numberOfAttributes = natts;
 
 	if (numberOfAttributes > MaxTupleAttributeNumber)
 		ereport(ERROR,
@@ -1063,7 +1150,7 @@ heap_form_tuple(TupleDesc tupleDescriptor,
 
 	hoff = len = MAXALIGN(len); /* align user data safely */
 
-	data_len = heap_compute_data_size(tupleDescriptor, values, isnull);
+	data_len = heap_compute_data_size_ext(tupleDescriptor, values, isnull, natts);
 
 	len += data_len;
 
@@ -1092,13 +1179,14 @@ heap_form_tuple(TupleDesc tupleDescriptor,
 	HeapTupleHeaderSetNatts(td, numberOfAttributes);
 	td->t_hoff = hoff;
 
-	heap_fill_tuple(tupleDescriptor,
+	heap_fill_tuple_ext(tupleDescriptor,
 					values,
 					isnull,
 					(char *) td + hoff,
 					data_len,
 					&td->t_infomask,
-					(hasnull ? td->t_bits : NULL));
+					(hasnull ? td->t_bits : NULL),
+					natts);
 
 	return tuple;
 }
@@ -1392,6 +1480,23 @@ heap_form_minimal_tuple(TupleDesc tupleDescriptor,
 						const bool *isnull,
 						Size extra)
 {
+	return heap_form_minimal_tuple_ext(tupleDescriptor, values, isnull, extra,
+									   -1 /* take natts from tupleDesc */);
+}
+
+/*
+ * heap_form_minimal_tuple_ext
+ *		Same as above, but allows to specify number of attributes explicitly.
+ *
+ * If "natts" <= 0, then number of attributes is taken from the TupleDesc.
+ */
+MinimalTuple
+heap_form_minimal_tuple_ext(TupleDesc tupleDescriptor,
+ 							const Datum *values,
+							const bool *isnull,
+							Size extra,
+							int natts)
+{
 	MinimalTuple tuple;			/* return tuple */
 	char	   *mem;
 	Size		len,
@@ -1400,6 +1505,9 @@ heap_form_minimal_tuple(TupleDesc tupleDescriptor,
 	bool		hasnull = false;
 	int			numberOfAttributes = tupleDescriptor->natts;
 	int			i;
+
+	if (natts > 0)
+		numberOfAttributes = natts;
 
 	Assert(extra == MAXALIGN(extra));
 
@@ -1431,7 +1539,7 @@ heap_form_minimal_tuple(TupleDesc tupleDescriptor,
 
 	hoff = len = MAXALIGN(len); /* align user data safely */
 
-	data_len = heap_compute_data_size(tupleDescriptor, values, isnull);
+	data_len = heap_compute_data_size_ext(tupleDescriptor, values, isnull, natts);
 
 	len += data_len;
 
@@ -1448,13 +1556,14 @@ heap_form_minimal_tuple(TupleDesc tupleDescriptor,
 	HeapTupleHeaderSetNatts(tuple, numberOfAttributes);
 	tuple->t_hoff = hoff + MINIMAL_TUPLE_OFFSET;
 
-	heap_fill_tuple(tupleDescriptor,
+	heap_fill_tuple_ext(tupleDescriptor,
 					values,
 					isnull,
 					(char *) tuple + hoff,
 					data_len,
 					&tuple->t_infomask,
-					(hasnull ? tuple->t_bits : NULL));
+					(hasnull ? tuple->t_bits : NULL),
+					natts);
 
 	return tuple;
 }
