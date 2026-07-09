@@ -1,0 +1,218 @@
+PostgreSQL contrib module int16
+===================================
+
+This module provides the int16 data type, a 128-bit signed integer with a
+range of approximately -1.7e38 to +1.7e38.
+
+DESCRIPTION
+-----------
+
+The int16 extension adds a 128-bit signed integer data type to PostgreSQL,
+extending the built-in int8 (bigint) type. It is designed for applications
+that require integer values beyond the 64-bit range.
+
+Key features:
+- Storage: 16 bytes, passed by reference, aligned on 8-byte boundary
+- Full arithmetic: +, -, *, /, %, unary -, unary +, abs()
+- Full comparison: =, <>, <, >, <=, >=, and 3-way cmp()
+- Bitwise operators: &, |, #, ~, <<, >>
+- Cross-type operations with int2, int4, int8 (arithmetic and comparison)
+- Type casts: implicit from int2/int4/int8/numeric, assignment to int2/int4/int8/numeric
+- B-tree and Hash index support (including deduplication and skip scan)
+- Aggregates: sum(), avg(), min(), max() (parallel-safe)
+- Window functions: RANGE support via in_range()
+- generate_series() for int16 ranges
+- Mathematical functions: gcd(), lcm(), factorial()
+
+
+BUILDING
+--------
+
+To build the module from the PostgreSQL source tree:
+
+    cd contrib/int16
+    make USE_PGXS=1
+    make USE_PGXS=1 install
+
+After installation, enable the extension in your database:
+
+    CREATE EXTENSION int16;
+
+USAGE
+-----
+
+Once installed, the int16 type is available in all schemas.
+
+Basic usage:
+
+    SELECT '123456789012345678901234567890'::int16;
+
+Create tables with int16 columns:
+
+    CREATE TABLE t (id serial PRIMARY KEY, value int16);
+    INSERT INTO t (value) VALUES ('170141183460469231731687303715884105727'::int16);
+    SELECT * FROM t WHERE value > '100000000000000000000'::int16;
+
+FUNCTIONS AND OPERATORS
+-----------------------
+
+Input/Output:
+    int16in(cstring)       - Parse string to int16
+    int16out(int16)        - Convert int16 to string
+    int16recv(internal)    - Receive binary data (16 bytes, network byte order)
+    int16send(int16)       - Send binary data
+
+Arithmetic (int16 op int16):
+    +   int16pl   - Addition
+    -   int16mi   - Subtraction
+    *   int16mul  - Multiplication
+    /   int16div  - Integer division
+    %   int16mod  - Remainder
+    -   int16um   - Unary minus
+    +   int16up   - Unary plus
+    @   int16abs  - Absolute value
+
+Comparison (int16 op int16):
+    =   int16eq  - Equal
+    <>  int16ne  - Not equal
+    <   int16lt  - Less than
+    >   int16gt  - Greater than
+    <=  int16le  - Less than or equal
+    >=  int16ge  - Greater than or equal
+    int16_cmp(a,b) - Three-way comparison (-1, 0, 1)
+
+Bitwise:
+    &   int16and - Bitwise AND
+    |   int16or  - Bitwise OR
+    #   int16xor - Bitwise XOR
+    ~   int16not - Bitwise NOT
+    <<  int16shl - Left shift (n is int4)
+    >>  int16shr - Arithmetic right shift (n is int4)
+
+Cross-type arithmetic (int16 with int8/int4/int2, both directions):
+    +, -, *, /   - Functions: int168pl, int816pl, int164pl, int416pl, etc.
+
+Cross-type comparison (int16 with int8/int4/int2, both directions):
+    =, <>, <, >, <=, >=  - Functions: int168eq, int816eq, int164eq, etc.
+    _cmp functions       - int168cmp, int816cmp, int164cmp, etc.
+
+Type casts:
+    int8/int4/int2 -> int16          IMPLICIT (widening)
+    int16 -> int8/int4/int2          ASSIGNMENT (narrowing)
+    int16 -> numeric                 IMPLICIT (widening)
+    numeric -> int16                 ASSIGNMENT (narrowing)
+
+Aggregates (parallel-safe):
+    sum(int16)    -> int16      - Sum (error on overflow)
+    avg(int16)    -> numeric    - Average
+    min(int16)    -> int16      - Minimum
+    max(int16)    -> int16      - Maximum
+
+Mathematical functions:
+    gcd(int16, int16)    - Greatest common divisor
+    lcm(int16, int16)    - Least common multiple
+    factorial(int16)     - Factorial (returns numeric)
+
+generate_series:
+    generate_series(start int16, stop int16)                     - Step 1
+    generate_series(start int16, stop int16, step int16)         - Custom step
+
+Window functions:
+    in_range(val int16, base int16, offset int16, ...) - RANGE frame support
+
+Index support:
+    B-tree  - int16_ops (includes sortsupport, in_range, equalimage, skipsupport)
+    Hash    - int16_ops
+
+EXAMPLES
+--------
+
+1. Basic arithmetic:
+
+    SELECT '100000000000000000000'::int16 + '1'::int16;
+    -- 100000000000000000001
+
+    SELECT '100000000000000000000'::int16 * '2'::int16;
+    -- 200000000000000000000
+
+    SELECT '100000000000000000000'::int16 / '3'::int16;
+    -- 33333333333333333333
+
+    SELECT @('-100000000000000000000'::int16);
+    -- 100000000000000000000
+
+2. Cross-type operations:
+
+    SELECT '100'::int16 + 50;        -- int16 + int4 -> int16
+    SELECT 50 + '100'::int16;        -- int4 + int16 -> int16
+    SELECT '100'::int16 + 50::int8;  -- int16 + int8 -> int16
+    SELECT '100'::int16 = 100;       -- true
+
+3. Aggregates:
+
+    CREATE TABLE big_values (val int16);
+    INSERT INTO big_values VALUES
+        ('100000000000000000000'::int16),
+        ('200000000000000000000'::int16),
+        ('300000000000000000000'::int16);
+
+    SELECT sum(val) FROM big_values;   -- 600000000000000000000
+    SELECT avg(val) FROM big_values;   -- 200000000000000000000.0000000000000000
+
+4. generate_series:
+
+    SELECT * FROM generate_series('1'::int16, '5'::int16);
+    SELECT * FROM generate_series('5'::int16, '1'::int16, '-1'::int16);
+
+5. Window functions with RANGE:
+
+    SELECT id, amount, count(*) OVER (
+        ORDER BY amount
+        RANGE BETWEEN '10'::int16 PRECEDING AND '10'::int16 FOLLOWING
+    ) FROM sales;
+
+6. B-tree and Hash indexes:
+
+    CREATE TABLE t (val int16);
+    CREATE INDEX ON t USING btree (val);
+    CREATE INDEX ON t USING hash (val);
+
+LIMITATIONS
+-----------
+
+- Passed by reference: int16 is 16 bytes and passed by reference (like uuid),
+  not by value (like int8). This may introduce slight overhead compared to int8.
+
+- Missing functions: ceil(), floor(), round(), sign(), sqrt(), width_bucket()
+  are not provided. Cast to numeric for these operations:
+    SELECT round('123'::int16::numeric);
+
+- avg() returns numeric: Average is computed in numeric because int16 cannot
+  always represent the exact division result.
+
+- sum() can overflow: Sum is computed as int16 and raises an error on overflow
+  (unlike sum(int8) which uses numeric internally).
+
+- factorial() limited to 32177: For n > 32177, the result overflows numeric.
+
+- No GiST, GIN, SP-GiST, BRIN support: Only B-tree and Hash indexes are
+  implemented.
+
+- Binary protocol: int16recv expects exactly 16 bytes in network byte order
+  (most significant 64-bit block first).
+
+- gcd and lcm with INT16_MIN:
+    gcd(INT16_MIN, 0), gcd(INT16_MIN, INT16_MIN), and lcm(INT16_MAX, 2)
+    raise overflow errors because the absolute value of INT16_MIN is not
+    representable in 128 bits. gcd(INT16_MIN, -1) returns 1.
+
+
+TESTING
+-------
+
+Run the regression tests (requires a running PostgreSQL server):
+
+    cd contrib/int16
+    make installcheck
+
+Test files are located in sql/, expected results in expected/.
