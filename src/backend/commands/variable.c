@@ -1268,7 +1268,7 @@ check_ssl_sni(bool *newval, void **extra, GucSource source)
 		return false;
 	}
 #else
-#ifndef HAVE_SSL_CTX_SET_CLIENT_HELLO_CB
+#ifdef USE_LIBRESSL
 	if (*newval)
 	{
 		GUC_check_errmsg("SNI requires OpenSSL 1.1.1 or later");

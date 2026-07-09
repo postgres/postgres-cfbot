@@ -14,7 +14,7 @@
 #ifndef COMMON_OPENSSL_H
 #define COMMON_OPENSSL_H
 
-#ifdef USE_OPENSSL
+#if defined(USE_OPENSSL) || defined(USE_LIBRESSL)
 #include <openssl/ssl.h>
 
 /*
@@ -38,6 +38,6 @@
 #define MAX_OPENSSL_TLS_VERSION  "TLSv1"
 #endif
 
-#endif							/* USE_OPENSSL */
+#endif							/* USE_OPENSSL, USE_LIBRESSL */
 
 #endif							/* COMMON_OPENSSL_H */

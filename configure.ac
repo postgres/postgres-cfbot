@@ -1420,7 +1420,7 @@ fi
 #
 # SSL Library
 #
-# There is currently only one supported SSL/TLS library: OpenSSL.
+# The currently supported SSL/TLS libraries are: OpenSSL, LibreSSL
 #
 PGAC_ARG_REQ(with, ssl, [LIB], [use LIB for SSL/TLS support (openssl)])
 if test x"$with_ssl" = x"" ; then
@@ -1440,13 +1440,16 @@ if test "$with_ssl" = openssl ; then
   AC_CHECK_LIB(ssl,    SSL_new, [], [AC_MSG_ERROR([library 'ssl' is required for OpenSSL])])
   # Functions introduced in OpenSSL 1.1.1.
   AC_CHECK_FUNCS([SSL_CTX_set_ciphersuites], [], [AC_MSG_ERROR([OpenSSL version >= 1.1.1 is required for SSL support])])
-  # Function introduced in OpenSSL 1.0.2, not in LibreSSL.
-  AC_CHECK_FUNCS([SSL_CTX_set_cert_cb])
-  # Function introduced in OpenSSL 1.1.1, not in LibreSSL.
-  AC_CHECK_FUNCS([X509_get_signature_info SSL_CTX_set_num_tickets SSL_CTX_set_keylog_callback SSL_CTX_set_client_hello_cb])
   AC_DEFINE([USE_OPENSSL], 1, [Define to 1 to build with OpenSSL support. (--with-ssl=openssl)])
+elif test "$with_ssl" = libressl ; then
+  dnl Order matters!
+  AC_CHECK_LIB(crypto, CRYPTO_new_ex_data, [], [AC_MSG_ERROR([library 'crypto' is required for LibreSSL])])
+  AC_CHECK_LIB(ssl,    SSL_new, [], [AC_MSG_ERROR([library 'ssl' is required for LibreSSL])])
+  # Functions introduced in LibreSSL 3.4.1 (OpenBSD 7.0)
+  AC_CHECK_FUNCS([SSL_CTX_set_ciphersuites SSL_CTX_use_certificate_chain_mem], [], [AC_MSG_ERROR([LibreSSL version >= 3.4.1 is required for SSL support])])
+  AC_DEFINE([USE_LIBRESSL], 1, [Define to 1 to build with LibreSSL support. (--with-ssl=libressl)])
 elif test "$with_ssl" != no ; then
-  AC_MSG_ERROR([--with-ssl must specify openssl])
+  AC_MSG_ERROR([--with-ssl must specify openssl or libressl])
 fi
 AC_SUBST(with_ssl)
 
