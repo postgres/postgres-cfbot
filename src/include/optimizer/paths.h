@@ -74,6 +74,8 @@ extern void create_partial_bitmap_paths(PlannerInfo *root, RelOptInfo *rel,
 										Path *bitmapqual);
 extern void generate_partitionwise_join_paths(PlannerInfo *root,
 											  RelOptInfo *rel);
+extern void add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
+									List *live_childrels);
 
 /*
  * indxpath.c
@@ -245,6 +247,7 @@ extern List *build_expression_pathkey(PlannerInfo *root, Expr *expr,
 extern List *convert_subquery_pathkeys(PlannerInfo *root, RelOptInfo *rel,
 									   List *subquery_pathkeys,
 									   List *subquery_tlist);
+extern Var *find_var_for_subquery_tle(RelOptInfo *rel, TargetEntry *tle);
 extern List *build_join_pathkeys(PlannerInfo *root,
 								 RelOptInfo *joinrel,
 								 JoinType jointype,
@@ -283,7 +286,38 @@ extern List *append_pathkeys(List *target, List *source);
 extern PathKey *make_canonical_pathkey(PlannerInfo *root,
 									   EquivalenceClass *eclass, Oid opfamily,
 									   CompareType cmptype, bool nulls_first);
-extern void add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
-									List *live_childrels);
+
+/*
+ * uniquekeys.c
+ *	  routines to deduce what expression sets a relation is distinct over
+ */
+extern void populate_baserel_uniquekeys(PlannerInfo *root, RelOptInfo *rel);
+extern void populate_joinrel_uniquekeys(PlannerInfo *root, RelOptInfo *joinrel,
+										RelOptInfo *outerrel,
+										RelOptInfo *innerrel,
+										SpecialJoinInfo *sjinfo,
+										List *restrictlist);
+extern void populate_grouped_rel_uniquekeys(PlannerInfo *root,
+											RelOptInfo *grouped_rel,
+											RelOptInfo *input_rel,
+											bool is_noop);
+extern void populate_distinct_rel_uniquekeys(PlannerInfo *root,
+											 RelOptInfo *distinct_rel,
+											 RelOptInfo *input_rel,
+											 bool is_noop);
+extern void populate_unique_rel_uniquekeys(PlannerInfo *root,
+										   RelOptInfo *unique_rel,
+										   RelOptInfo *input_rel,
+										   SpecialJoinInfo *sjinfo,
+										   bool is_noop);
+extern bool uniquekeys_distinct_is_noop(PlannerInfo *root,
+										RelOptInfo *input_rel);
+extern bool uniquekeys_grouping_is_noop(PlannerInfo *root,
+										RelOptInfo *input_rel);
+extern bool uniquekeys_match_join_clauses(PlannerInfo *root, RelOptInfo *rel,
+										  List *clause_list);
+extern bool uniquekeys_uniquification_is_noop(PlannerInfo *root,
+											  RelOptInfo *rel,
+											  SpecialJoinInfo *sjinfo);
 
 #endif							/* PATHS_H */
