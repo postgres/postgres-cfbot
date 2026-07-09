@@ -10,4 +10,5 @@ backend_sources += files(
   'joinrels.c',
   'pathkeys.c',
   'tidpath.c',
+  'uniquekeys.c',
 )
