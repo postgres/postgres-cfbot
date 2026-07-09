@@ -101,9 +101,7 @@ static const char *SSLerrmessage(unsigned long ecode);
 static bool init_host_context(HostsLine *host, bool isServerStart, bool *hasWarned)
 			pg_attribute_nonnull(3);
 static void host_context_cleanup_cb(void *arg);
-#ifdef HAVE_SSL_CTX_SET_CLIENT_HELLO_CB
 static int	sni_clienthello_cb(SSL *ssl, int *al, void *arg);
-#endif
 
 static char *X509_NAME_to_cstring(const X509_NAME *name);
 
@@ -212,17 +210,6 @@ be_tls_init(bool isServerStart)
 	 */
 	if (ssl_sni)
 	{
-		/*
-		 * The GUC check hook should have already blocked this but to be on
-		 * the safe side we double-check here.
-		 */
-#ifndef HAVE_SSL_CTX_SET_CLIENT_HELLO_CB
-		ereport(isServerStart ? FATAL : LOG,
-				errcode(ERRCODE_CONFIG_FILE_ERROR),
-				errmsg("ssl_sni is not supported with LibreSSL"));
-		goto error;
-#endif
-
 		/* Attempt to load configuration from pg_hosts.conf */
 		res = load_hosts(&pg_hosts, &err_msg);
 
@@ -386,8 +373,6 @@ be_tls_init(bool isServerStart)
 		goto error;
 	}
 
-#ifdef HAVE_SSL_CTX_SET_CLIENT_HELLO_CB
-
 	/*
 	 * Create a new SSL context into which we'll load all the configuration
 	 * settings.  If we fail partway through, we can avoid memory leakage by
@@ -401,22 +386,6 @@ be_tls_init(bool isServerStart)
 						SSLerrmessage(ERR_get_error()))));
 		goto error;
 	}
-#else
-
-	/*
-	 * If the client hello callback isn't supported we want to use the default
-	 * context as the one to drive the handshake so avoid creating a new one
-	 * and use the already existing default one instead.
-	 */
-	context = new_hosts->default_host->ssl_ctx;
-
-	/*
-	 * Since we don't allocate a new SSL_CTX here like we do when SNI has been
-	 * enabled we need to bump the reference count on context to avoid double
-	 * free of the context when using the same cleanup logic across the cases.
-	 */
-	SSL_CTX_up_ref(context);
-#endif
 
 	/*
 	 * Disable OpenSSL's moving-write-buffer sanity check, because it causes
@@ -493,15 +462,10 @@ be_tls_init(bool isServerStart)
 	/*
 	 * Disallow SSL session tickets. OpenSSL use both stateful and stateless
 	 * tickets for TLSv1.3, and stateless ticket for TLSv1.2. SSL_OP_NO_TICKET
-	 * is available since 0.9.8f but only turns off stateless tickets. In
-	 * order to turn off stateful tickets we need SSL_CTX_set_num_tickets,
-	 * which is available since OpenSSL 1.1.1.  LibreSSL 3.5.4 (from OpenBSD
-	 * 7.1) introduced this API for compatibility, but doesn't support session
-	 * tickets at all so it's a no-op there.
+	 * only turns off stateless tickets, In order to turn off stateful tickets
+	 * we need SSL_CTX_set_num_tickets.
 	 */
-#ifdef HAVE_SSL_CTX_SET_NUM_TICKETS
 	SSL_CTX_set_num_tickets(context, 0);
-#endif
 	SSL_CTX_set_options(context, SSL_OP_NO_TICKET);
 
 	/* disallow SSL session caching, too */
@@ -513,17 +477,8 @@ be_tls_init(bool isServerStart)
 	/*
 	 * Disallow SSL renegotiation.  This concerns only TLSv1.2 and older
 	 * protocol versions, as TLSv1.3 has no support for renegotiation.
-	 * SSL_OP_NO_RENEGOTIATION is available in OpenSSL since 1.1.0h (via a
-	 * backport from 1.1.1). SSL_OP_NO_CLIENT_RENEGOTIATION is available in
-	 * LibreSSL since 2.5.1 disallowing all client-initiated renegotiation
-	 * (this is usually on by default).
 	 */
-#ifdef SSL_OP_NO_RENEGOTIATION
 	SSL_CTX_set_options(context, SSL_OP_NO_RENEGOTIATION);
-#endif
-#ifdef SSL_OP_NO_CLIENT_RENEGOTIATION
-	SSL_CTX_set_options(context, SSL_OP_NO_CLIENT_RENEGOTIATION);
-#endif
 
 	/* set up ephemeral DH and ECDH keys */
 	if (!initialize_dh(context, isServerStart))
@@ -921,36 +876,14 @@ be_tls_open_server(Port *port)
 	}
 
 	/*
-	 * If the underlying TLS library supports the client hello callback we use
-	 * that in order to support host based configuration using the SNI TLS
-	 * extension.  If the user has disabled SNI via the ssl_sni GUC we still
-	 * make use of the callback in order to have consistent handling of
-	 * OpenSSL contexts, except in that case the callback will install the
-	 * default configuration regardless of the hostname sent by the user in
-	 * the handshake.
-	 *
-	 * In case the TLS library does not support the client hello callback, as
-	 * of this writing LibreSSL does not, we need to install the client cert
-	 * verification callback here (if the user configured a CA) since we
-	 * cannot use the OpenSSL context update functionality.
+	 * We use tje clienthello callback in order to support host based
+	 * configuration using the SNI TLS extension.  If the user has disabled SNI
+	 * via the ssl_sni GUC we still make use of the callback in order to have
+	 * consistent handling of OpenSSL contexts, except in that case the
+	 * callback will install the default configuration regardless of the
+	 * hostname sent by the user in the handshake.
 	 */
-#ifdef HAVE_SSL_CTX_SET_CLIENT_HELLO_CB
 	SSL_CTX_set_client_hello_cb(SSL_context, sni_clienthello_cb, NULL);
-#else
-	if (SSL_hosts->default_host->ssl_ca && SSL_hosts->default_host->ssl_ca[0])
-	{
-		/*
-		 * Always ask for SSL client cert, but don't fail if it's not
-		 * presented.  We might fail such connections later, depending on what
-		 * we find in pg_hba.conf.
-		 */
-		SSL_set_verify(port->ssl,
-					   (SSL_VERIFY_PEER | SSL_VERIFY_CLIENT_ONCE),
-					   verify_cb);
-
-		ssl_loaded_verify_locations = true;
-	}
-#endif
 
 	err_context.cert_errdetail = NULL;
 	SSL_set_ex_data(port->ssl, 0, &err_context);
@@ -1038,12 +971,8 @@ aloop:
 					case SSL_R_WRONG_SSL_VERSION:
 					case SSL_R_WRONG_VERSION_NUMBER:
 					case SSL_R_TLSV1_ALERT_PROTOCOL_VERSION:
-#ifdef SSL_R_VERSION_TOO_HIGH
 					case SSL_R_VERSION_TOO_HIGH:
-#endif
-#ifdef SSL_R_VERSION_TOO_LOW
 					case SSL_R_VERSION_TOO_LOW:
-#endif
 						give_proto_hint = true;
 						break;
 					default:
@@ -1860,7 +1789,6 @@ alpn_cb(SSL *ssl,
 	}
 }
 
-#ifdef HAVE_SSL_CTX_SET_CLIENT_HELLO_CB
 /*
  * ssl_update_ssl
  *
@@ -2109,7 +2037,6 @@ found:
 
 	return SSL_CLIENT_HELLO_SUCCESS;
 }
-#endif							/* HAVE_SSL_CTX_SET_CLIENT_HELLO_CB */
 
 /*
  * Set DH parameters for generating ephemeral DH keys.  The
@@ -2339,15 +2266,9 @@ be_tls_get_certificate_hash(Port *port, size_t *len)
 
 	/*
 	 * Get the signature algorithm of the certificate to determine the hash
-	 * algorithm to use for the result.  Prefer X509_get_signature_info(),
-	 * introduced in OpenSSL 1.1.1, which can handle RSA-PSS signatures.
+	 * algorithm to use for the result.
 	 */
-#if HAVE_X509_GET_SIGNATURE_INFO
 	if (!X509_get_signature_info(server_cert, &algo_nid, NULL, NULL, NULL))
-#else
-	if (!OBJ_find_sigid_algs(X509_get_signature_nid(server_cert),
-							 &algo_nid, NULL))
-#endif
 		elog(ERROR, "could not determine server certificate signature algorithm");
 
 	/*
