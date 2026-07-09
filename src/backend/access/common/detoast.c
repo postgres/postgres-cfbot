@@ -17,13 +17,14 @@
 #include "access/table.h"
 #include "access/tableam.h"
 #include "access/toast_compression.h"
+#include "access/toast_helper.h"
 #include "access/toast_internals.h"
 #include "common/int.h"
 #include "common/pg_lzcompress.h"
 #include "utils/expandeddatum.h"
 #include "utils/rel.h"
 
-static varlena *toast_fetch_datum(varlena *attr);
+static varlena *toast_fetch_datum(varlena *attr, uint32 flags);
 static varlena *toast_fetch_datum_slice(varlena *attr,
 										int32 sliceoffset,
 										int32 slicelength);
@@ -52,7 +53,7 @@ detoast_external_attr(varlena *attr)
 		/*
 		 * This is an external stored plain value
 		 */
-		result = toast_fetch_datum(attr);
+		result = toast_fetch_datum(attr, 0);
 	}
 	else if (VARATT_IS_EXTERNAL_INDIRECT(attr))
 	{
@@ -104,6 +105,23 @@ detoast_external_attr(varlena *attr)
 
 
 /* ----------
+ * detoast_external_attr_extended -
+ *
+ *	Like detoast_external_attr, but returns NULL if toast chunks are
+ *	missing for external pointers.
+ * ----------
+ */
+varlena *
+detoast_external_attr_extended(varlena *attr)
+{
+	if (VARATT_IS_EXTERNAL_ONDISK(attr))
+		return toast_fetch_datum(attr, TOAST_MISSING_OK);
+	else
+		return detoast_external_attr(attr);
+}
+
+
+/* ----------
  * detoast_attr -
  *
  *	Public entry point to get back a toasted value from compression
@@ -121,7 +139,7 @@ detoast_attr(varlena *attr)
 		/*
 		 * This is an externally stored datum --- fetch it back from there
 		 */
-		attr = toast_fetch_datum(attr);
+		attr = toast_fetch_datum(attr, 0);
 		/* If it's compressed, decompress it */
 		if (VARATT_IS_COMPRESSED(attr))
 		{
@@ -268,7 +286,7 @@ detoast_attr_slice(varlena *attr,
 			preslice = toast_fetch_datum_slice(attr, 0, max_size);
 		}
 		else
-			preslice = toast_fetch_datum(attr);
+			preslice = toast_fetch_datum(attr, 0);
 	}
 	else if (VARATT_IS_EXTERNAL_INDIRECT(attr))
 	{
@@ -343,10 +361,12 @@ detoast_attr_slice(varlena *attr,
  *
  *	Reconstruct an in memory Datum from the chunks saved
  *	in the toast relation
+ *
+ *	If flags uses TOAST_MISSING_OK, returns NULL when chunks are missing.
  * ----------
  */
 static varlena *
-toast_fetch_datum(varlena *attr)
+toast_fetch_datum(varlena *attr, uint32 flags)
 {
 	Relation	toastrel;
 	varlena    *result;
@@ -380,8 +400,14 @@ toast_fetch_datum(varlena *attr)
 	toastrel = table_open(toastrelid, AccessShareLock);
 
 	/* Fetch all chunks */
-	table_relation_fetch_toast_slice(toastrel, valueid,
-									 attrsize, 0, attrsize, result);
+	if (!table_relation_fetch_toast_slice(toastrel, valueid,
+										  attrsize, 0, attrsize, result,
+										  flags))
+	{
+		pfree(result);
+		table_close(toastrel, AccessShareLock);
+		return NULL;
+	}
 
 	/* Close toast table */
 	table_close(toastrel, AccessShareLock);
@@ -466,7 +492,7 @@ toast_fetch_datum_slice(varlena *attr, int32 sliceoffset,
 	/* Fetch all chunks */
 	table_relation_fetch_toast_slice(toastrel, valueid,
 									 attrsize, sliceoffset, slicelength,
-									 result);
+									 result, 0);
 
 	/* Close toast table */
 	table_close(toastrel, AccessShareLock);

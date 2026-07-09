@@ -13,6 +13,8 @@ PGFILEDESC = "dblink - connect to other PostgreSQL databases"
 
 REGRESS = dblink
 REGRESS_OPTS = --dlpath=$(top_builddir)/src/test/regress
+ISOLATION = rewrite_stale_xmin
+ISOLATION_OPTS = --load-extension=dblink
 TAP_TESTS = 1
 
 ifdef USE_PGXS

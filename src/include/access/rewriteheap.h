@@ -25,8 +25,10 @@ extern RewriteState begin_heap_rewrite(Relation old_heap, Relation new_heap,
 									   TransactionId oldest_xmin, TransactionId freeze_xid,
 									   MultiXactId cutoff_multi);
 extern void end_heap_rewrite(RewriteState state);
-extern void rewrite_heap_tuple(RewriteState state, HeapTuple old_tuple,
-							   HeapTuple new_tuple);
+
+/* See toast_helper.h for the values of "flags" */
+extern bool rewrite_heap_tuple(RewriteState state, HeapTuple old_tuple,
+							   HeapTuple new_tuple, bool recently_dead);
 extern bool rewrite_heap_dead_tuple(RewriteState state, HeapTuple old_tuple);
 
 /*
