@@ -2146,6 +2146,13 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 	final_rel->fdwroutine = current_rel->fdwroutine;
 
 	/*
+	 * LockRows/Limit/ModifyTable never duplicate rows, so the final rel is
+	 * distinct over whatever the current rel was.  Carrying the keys here
+	 * lets a parent query reuse them.
+	 */
+	final_rel->uniquekeys = current_rel->uniquekeys;
+
+	/*
 	 * Generate paths for the final_rel.  Insert all surviving paths, with
 	 * LockRows, Limit, and/or ModifyTable steps added if needed.
 	 */
@@ -4045,6 +4052,7 @@ create_grouping_paths(PlannerInfo *root,
 	RelOptInfo *grouped_rel;
 	RelOptInfo *partially_grouped_rel;
 	AggClauseCosts agg_costs;
+	bool		grouping_is_noop;
 
 	MemSet(&agg_costs, 0, sizeof(AggClauseCosts));
 	get_agg_clause_costs(root, AGGSPLIT_SIMPLE, &agg_costs);
@@ -4056,14 +4064,38 @@ create_grouping_paths(PlannerInfo *root,
 	grouped_rel = make_grouping_rel(root, input_rel, target,
 									target_parallel_safe, parse->havingQual);
 
-	/*
-	 * Create either paths for a degenerate grouping or paths for ordinary
-	 * grouping, as appropriate.
-	 */
-	if (is_degenerate_grouping(root))
+	grouping_is_noop = uniquekeys_grouping_is_noop(root, input_rel);
+
+	if (grouping_is_noop)
+	{
+		/*
+		 * The input relation is provably distinct over the grouping columns
+		 * and no aggregation work is needed, each input row forms a group all
+		 * by itself, so grouping is a no-op: just use the input paths as they
+		 * are, projecting the desired target.
+		 */
+		foreach_ptr(Path, path, input_rel->pathlist)
+		{
+			/*
+			 * The input paths may already be ProjectionPaths, and we mustn't
+			 * stack another rel's ProjectionPath atop one.  Just project
+			 * directly from the input's subpath.
+			 */
+			if (IsA(path, ProjectionPath))
+				path = ((ProjectionPath *) path)->subpath;
+
+			add_path(grouped_rel, (Path *)
+					 create_projection_path(root, grouped_rel, path, target));
+		}
+	}
+	else if (is_degenerate_grouping(root))
+	{
+		/* Create paths for a degenerate grouping */
 		create_degenerate_grouping_paths(root, input_rel, grouped_rel);
+	}
 	else
 	{
+		/* Create paths for ordinary grouping */
 		int			flags = 0;
 		GroupPathExtraData extra;
 
@@ -4136,6 +4168,11 @@ create_grouping_paths(PlannerInfo *root,
 	}
 
 	set_cheapest(grouped_rel);
+
+	/* Deduce the grouped rel's unique keys */
+	populate_grouped_rel_uniquekeys(root, grouped_rel, input_rel,
+									grouping_is_noop);
+
 	return grouped_rel;
 }
 
@@ -4813,6 +4850,12 @@ create_window_paths(PlannerInfo *root,
 	window_rel->fdwroutine = input_rel->fdwroutine;
 
 	/*
+	 * Window functions don't change the set of rows, so uniqueness carries
+	 * over.
+	 */
+	window_rel->uniquekeys = input_rel->uniquekeys;
+
+	/*
 	 * Consider computing window functions starting from the existing
 	 * cheapest-total path (which will likely require a sort) as well as any
 	 * existing paths that satisfy or partially satisfy root->window_pathkeys.
@@ -5042,6 +5085,7 @@ create_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 					  PathTarget *target)
 {
 	RelOptInfo *distinct_rel;
+	bool		distinct_is_noop;
 
 	/* For now, do all work in the (DISTINCT, NULL) upperrel */
 	distinct_rel = fetch_upper_rel(root, UPPERREL_DISTINCT, NULL);
@@ -5063,11 +5107,37 @@ create_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	distinct_rel->useridiscurrent = input_rel->useridiscurrent;
 	distinct_rel->fdwroutine = input_rel->fdwroutine;
 
-	/* build distinct paths based on input_rel's pathlist */
-	create_final_distinct_paths(root, input_rel, distinct_rel);
+	distinct_is_noop = uniquekeys_distinct_is_noop(root, input_rel);
 
-	/* now build distinct paths based on input_rel's partial_pathlist */
-	create_partial_distinct_paths(root, input_rel, distinct_rel, target);
+	if (distinct_is_noop)
+	{
+		/*
+		 * The input relation is provably distinct over the DISTINCT columns
+		 * already, so no de-duplication step is required: just use the input
+		 * paths as they are, projecting the desired target.
+		 */
+		foreach_ptr(Path, path, input_rel->pathlist)
+		{
+			/*
+			 * The input paths may already be ProjectionPaths, and we mustn't
+			 * stack another rel's ProjectionPath atop one.  Just project
+			 * directly from the input's subpath.
+			 */
+			if (IsA(path, ProjectionPath))
+				path = ((ProjectionPath *) path)->subpath;
+
+			add_path(distinct_rel, (Path *)
+					 create_projection_path(root, distinct_rel, path, target));
+		}
+	}
+	else
+	{
+		/* build distinct paths based on input_rel's pathlist */
+		create_final_distinct_paths(root, input_rel, distinct_rel);
+
+		/* now build distinct paths based on input_rel's partial_pathlist */
+		create_partial_distinct_paths(root, input_rel, distinct_rel, target);
+	}
 
 	/* Give a helpful error if we failed to create any paths */
 	if (distinct_rel->pathlist == NIL)
@@ -5095,6 +5165,10 @@ create_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 
 	/* Now choose the best path(s) */
 	set_cheapest(distinct_rel);
+
+	/* Deduce the distinct rel's unique keys */
+	populate_distinct_rel_uniquekeys(root, distinct_rel, input_rel,
+									 distinct_is_noop);
 
 	return distinct_rel;
 }
@@ -5587,6 +5661,11 @@ create_ordered_paths(PlannerInfo *root,
 	ordered_rel->userid = input_rel->userid;
 	ordered_rel->useridiscurrent = input_rel->useridiscurrent;
 	ordered_rel->fdwroutine = input_rel->fdwroutine;
+
+	/*
+	 * Sorting doesn't change the set of rows, so uniqueness carries over.
+	 */
+	ordered_rel->uniquekeys = input_rel->uniquekeys;
 
 	foreach(lc, input_rel->pathlist)
 	{
@@ -6890,6 +6969,9 @@ adjust_paths_for_srfs(PlannerInfo *root, RelOptInfo *rel,
 	/* If no SRFs appear at this plan level, nothing to do */
 	if (list_length(targets) == 1)
 		return;
+
+	/* The ProjectSet steps added below duplicate rows, voiding any keys */
+	rel->uniquekeys = NIL;
 
 	/*
 	 * Stack SRF-evaluation nodes atop each path for the rel.
@@ -8654,6 +8736,7 @@ create_unique_paths(PlannerInfo *root, RelOptInfo *rel, SpecialJoinInfo *sjinfo)
 	List	   *sortPathkeys = NIL;
 	List	   *groupClause = NIL;
 	MemoryContext oldcontext;
+	bool		unique_is_noop;
 
 	/* Caller made a mistake if SpecialJoinInfo is the wrong one */
 	Assert(sjinfo->jointype == JOIN_SEMI);
@@ -8700,6 +8783,11 @@ create_unique_paths(PlannerInfo *root, RelOptInfo *rel, SpecialJoinInfo *sjinfo)
 	unique_rel->cheapest_startup_path = NULL;
 	unique_rel->cheapest_total_path = NULL;
 	unique_rel->cheapest_parameterized_paths = NIL;
+
+	/*
+	 * clear unique keys
+	 */
+	unique_rel->uniquekeys = NIL;
 
 	/*
 	 * Build the target list for the unique rel.  We also build the pathkeys
@@ -8885,16 +8973,50 @@ create_unique_paths(PlannerInfo *root, RelOptInfo *rel, SpecialJoinInfo *sjinfo)
 		unique_rel->reltarget = create_pathtarget(root, newtlist);
 	}
 
-	/* build unique paths based on input rel's pathlist */
-	create_final_unique_paths(root, rel, sortPathkeys, groupClause,
-							  sjinfo, unique_rel);
+	unique_is_noop = uniquekeys_uniquification_is_noop(root, rel, sjinfo);
 
-	/* build unique paths based on input rel's partial_pathlist */
-	create_partial_unique_paths(root, rel, sortPathkeys, groupClause,
-								sjinfo, unique_rel);
+	if (unique_is_noop)
+	{
+		/*
+		 * The input relation is already provably distinct over the columns to
+		 * be unique-ified, so no de-duplication step is required: just use
+		 * the input paths as they are, projecting the new target.
+		 */
+		Path	   *cheapest_input_path = rel->cheapest_total_path;
+
+		unique_rel->rows = rel->rows;
+
+		foreach_ptr(Path, input_path, rel->pathlist)
+		{
+			/*
+			 * Ignore parameterized paths that are not the cheapest-total
+			 * path, as in create_final_unique_paths.
+			 */
+			if (input_path->param_info &&
+				input_path != cheapest_input_path)
+				continue;
+
+			add_path(unique_rel, (Path *)
+					 create_projection_path(root, unique_rel, input_path,
+											unique_rel->reltarget));
+		}
+	}
+	else
+	{
+		/* build unique paths based on input rel's pathlist */
+		create_final_unique_paths(root, rel, sortPathkeys, groupClause,
+								  sjinfo, unique_rel);
+
+		/* build unique paths based on input rel's partial_pathlist */
+		create_partial_unique_paths(root, rel, sortPathkeys, groupClause,
+									sjinfo, unique_rel);
+	}
 
 	/* Now choose the best path(s) */
 	set_cheapest(unique_rel);
+
+	populate_unique_rel_uniquekeys(root, unique_rel, rel, sjinfo,
+								   unique_is_noop);
 
 	/*
 	 * There shouldn't be any partial paths for the unique relation;
@@ -9074,6 +9196,11 @@ create_partial_unique_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	partial_unique_rel->cheapest_startup_path = NULL;
 	partial_unique_rel->cheapest_total_path = NULL;
 	partial_unique_rel->cheapest_parameterized_paths = NIL;
+
+	/*
+	 * clear unique keys
+	 */
+	partial_unique_rel->uniquekeys = NIL;
 
 	/* Estimate number of output rows */
 	partial_unique_rel->rows = estimate_num_groups(root,

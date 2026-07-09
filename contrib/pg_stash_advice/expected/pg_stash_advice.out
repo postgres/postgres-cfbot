@@ -142,21 +142,20 @@ EXPLAIN (COSTS OFF) SELECT * FROM aa_fact f
 	LEFT JOIN aa_dim1 d1 ON f.dim1_id = d1.id
 	LEFT JOIN aa_dim2 d2 ON f.dim2_id = d2.id
 	WHERE val1 = 1 AND val2 = 1;
-                    QUERY PLAN                     
----------------------------------------------------
- Nested Loop
-   ->  Hash Join
-         Hash Cond: (f.dim2_id = d2.id)
-         ->  Seq Scan on aa_fact f
-         ->  Hash
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Hash Join
+   Hash Cond: ((f.dim1_id = d1.id) AND (f.dim2_id = d2.id))
+   ->  Seq Scan on aa_fact f
+   ->  Hash
+         ->  Nested Loop
                ->  Seq Scan on aa_dim2 d2
                      Filter: (val2 = 1)
-   ->  Index Scan using aa_dim1_pkey on aa_dim1 d1
-         Index Cond: (id = f.dim1_id)
-         Filter: (val1 = 1)
+               ->  Seq Scan on aa_dim1 d1
+                     Filter: (val1 = 1)
  Supplied Plan Advice:
    NESTED_LOOP_PLAIN(d1) /* matched */
-(12 rows)
+(11 rows)
 
 -- Add a useless extra entry to our test stash. Shouldn't change the result
 -- from the previous test.
@@ -172,21 +171,20 @@ EXPLAIN (COSTS OFF) SELECT * FROM aa_fact f
 	LEFT JOIN aa_dim1 d1 ON f.dim1_id = d1.id
 	LEFT JOIN aa_dim2 d2 ON f.dim2_id = d2.id
 	WHERE val1 = 1 AND val2 = 1;
-                    QUERY PLAN                     
----------------------------------------------------
- Nested Loop
-   ->  Hash Join
-         Hash Cond: (f.dim2_id = d2.id)
-         ->  Seq Scan on aa_fact f
-         ->  Hash
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Hash Join
+   Hash Cond: ((f.dim1_id = d1.id) AND (f.dim2_id = d2.id))
+   ->  Seq Scan on aa_fact f
+   ->  Hash
+         ->  Nested Loop
                ->  Seq Scan on aa_dim2 d2
                      Filter: (val2 = 1)
-   ->  Index Scan using aa_dim1_pkey on aa_dim1 d1
-         Index Cond: (id = f.dim1_id)
-         Filter: (val1 = 1)
+               ->  Seq Scan on aa_dim1 d1
+                     Filter: (val1 = 1)
  Supplied Plan Advice:
    NESTED_LOOP_PLAIN(d1) /* matched */
-(12 rows)
+(11 rows)
 
 -- Try an empty stash to be sure it does nothing
 SELECT pg_create_advice_stash('regress_empty_stash');
