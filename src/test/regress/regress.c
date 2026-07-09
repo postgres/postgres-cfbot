@@ -651,6 +651,10 @@ test_spinlock(void)
 	 *
 	 * We embed the spinlock in a struct with other members to test that the
 	 * spinlock operations don't perform too wide writes.
+	 *
+	 * Note: slock_t is pg_atomic_uint32 (4 bytes) in the stdatomic path vs
+	 * potentially smaller (e.g., unsigned char) in the traditional path. This
+	 * test verifies no over-wide writes regardless of slock_t size.
 	 */
 	{
 		struct test_lock_struct
@@ -668,15 +672,22 @@ test_spinlock(void)
 		SpinLockAcquire(&struct_w_lock.lock);
 		SpinLockRelease(&struct_w_lock.lock);
 
+#ifndef USE_STDATOMIC_H
 		/* test basic operations via underlying S_* API */
 		S_INIT_LOCK(&struct_w_lock.lock);
 		S_LOCK(&struct_w_lock.lock);
 		S_UNLOCK(&struct_w_lock.lock);
+#endif
 
 		/* and that "contended" acquisition works */
 		s_lock(&struct_w_lock.lock, "testfile", 17, "testfunc");
+#ifdef USE_STDATOMIC_H
+		SpinLockRelease(&struct_w_lock.lock);
+#else
 		S_UNLOCK(&struct_w_lock.lock);
+#endif
 
+#ifndef USE_STDATOMIC_H
 		/*
 		 * Check, using TAS directly, that a single spin cycle doesn't block
 		 * when acquiring an already acquired lock.
@@ -694,6 +705,7 @@ test_spinlock(void)
 
 		S_UNLOCK(&struct_w_lock.lock);
 #endif							/* defined(TAS) */
+#endif							/* !USE_STDATOMIC_H */
 
 		/*
 		 * Verify that after all of this the non-lock contents are still
