@@ -194,12 +194,13 @@ typedef struct JsonTransformStep
 static void jtSetPath(JsonbIterator **it, JsonbInState *st,
 					  JsonTransformStep *steps, int nsteps, int level,
 					  JsonTransformOp op, JsonbValue *newval,
-					  JsonTransformBehavior on_existing, bool *matched);
+					  JsonTransformBehavior on_existing, bool strict,
+					  bool unwrap, bool *matched);
 static void jtSetPathObject(JsonbIterator **it, JsonbInState *st,
 							JsonTransformStep *steps, int nsteps, int level,
 							JsonTransformOp op, JsonbValue *newval,
-							JsonTransformBehavior on_existing, bool *matched,
-							uint32 npairs);
+							JsonTransformBehavior on_existing, bool strict,
+							bool *matched, uint32 npairs);
 static void jtCopyValue(JsonbIterator **it, JsonbInState *st);
 
 /* execution helper functions */
@@ -5261,7 +5262,8 @@ static void
 jtSetPathObject(JsonbIterator **it, JsonbInState *st,
 				JsonTransformStep *steps, int nsteps, int level,
 				JsonTransformOp op, JsonbValue *newval,
-				JsonTransformBehavior on_existing, bool *matched, uint32 npairs)
+				JsonTransformBehavior on_existing, bool strict,
+				bool *matched, uint32 npairs)
 {
 	JsonTransformStep *step = &steps[level];
 	bool		is_last = (level == nsteps - 1);
@@ -5348,7 +5350,7 @@ jtSetPathObject(JsonbIterator **it, JsonbInState *st,
 			/* descend into this member's value to continue matching */
 			pushJsonbValue(st, WJB_KEY, &k);
 			jtSetPath(it, st, steps, nsteps, level + 1, op, newval,
-					  on_existing, matched);
+					  on_existing, strict, !strict, matched);
 		}
 		else
 		{
@@ -5380,15 +5382,20 @@ jtSetPathObject(JsonbIterator **it, JsonbInState *st,
  * Dispatcher: read the container/value currently at the front of *it and
  * rebuild it into *st, recursing through objects along the path.
  *
- * If the path still has steps to match but the current value is an array or
- * scalar (our paths can only address object members), we can't descend, so we
- * copy it verbatim -- effectively IGNORE ON MISSING.
+ * 'strict' is the path's global mode; 'unwrap' says whether an array at this
+ * position should be lax-unwrapped -- true at a primary position in lax mode,
+ * false when recursing into an already-unwrapped array (keeping unwrapping one
+ * level deep).  A '.key'/'.*' accessor needs an object: applied to an array we
+ * unwrap it (lax) or raise a structural error (strict); applied to a scalar we
+ * skip it (lax) or raise a structural error (strict).  This matches the
+ * SQL/JSON path engine used by jsonb_path_query().
  */
 static void
 jtSetPath(JsonbIterator **it, JsonbInState *st,
 		  JsonTransformStep *steps, int nsteps, int level,
 		  JsonTransformOp op, JsonbValue *newval,
-		  JsonTransformBehavior on_existing, bool *matched)
+		  JsonTransformBehavior on_existing, bool strict, bool unwrap,
+		  bool *matched)
 {
 	JsonbValue	v;
 	JsonbIteratorToken r;
@@ -5401,13 +5408,51 @@ jtSetPath(JsonbIterator **it, JsonbInState *st,
 	{
 		pushJsonbValue(st, WJB_BEGIN_OBJECT, NULL);
 		jtSetPathObject(it, st, steps, nsteps, level, op, newval,
-						on_existing, matched, v.val.object.nPairs);
+						on_existing, strict, matched, v.val.object.nPairs);
 		r = JsonbIteratorNext(it, &v, true);
 		Assert(r == WJB_END_OBJECT);
 		pushJsonbValue(st, WJB_END_OBJECT, NULL);
 	}
+	else if (r == WJB_BEGIN_ARRAY && unwrap)
+	{
+		/*
+		 * Lax mode: a '.key'/'.*' accessor applied to an array auto-unwraps it.
+		 * Rebuild the array, re-applying the *current* step to each element.
+		 * Per the path language this unwrapping is one level deep, so we recurse
+		 * with unwrap=false: a nested array element is then handled as a plain
+		 * value (copied through), not unwrapped again.  This mirrors
+		 * jsonb_path_query()'s lax behavior.
+		 */
+		uint32		nelems = v.val.array.nElems;
+		uint32		i;
+
+		pushJsonbValue(st, WJB_BEGIN_ARRAY, NULL);
+		for (i = 0; i < nelems; i++)
+			jtSetPath(it, st, steps, nsteps, level, op, newval,
+					  on_existing, strict, false, matched);
+		r = JsonbIteratorNext(it, &v, true);
+		Assert(r == WJB_END_ARRAY);
+		pushJsonbValue(st, WJB_END_ARRAY, NULL);
+	}
+	else if (strict)
+	{
+		/*
+		 * A '.key'/'.*' accessor requires an object, but here the value is an
+		 * array we are not unwrapping, or a scalar.  In strict mode this is a
+		 * structural error, matching the SQL/JSON path engine.
+		 */
+		if (steps[level].wildcard)
+			ereport(ERROR,
+					errcode(ERRCODE_SQL_JSON_OBJECT_NOT_FOUND),
+					errmsg("jsonpath wildcard member accessor can only be applied to an object"));
+		else
+			ereport(ERROR,
+					errcode(ERRCODE_SQL_JSON_MEMBER_NOT_FOUND),
+					errmsg("jsonpath member accessor can only be applied to an object"));
+	}
 	else if (r == WJB_BEGIN_ARRAY)
 	{
+		/* lax, but not unwrapping (nested array): nothing matches, copy it */
 		int			walking_level = 1;
 
 		pushJsonbValue(st, WJB_BEGIN_ARRAY, NULL);
@@ -5423,7 +5468,7 @@ jtSetPath(JsonbIterator **it, JsonbInState *st,
 	}
 	else
 	{
-		/* scalar at a point the path wants to descend into: leave as-is */
+		/* lax scalar: nothing matches, leave as-is */
 		pushJsonbValue(st, r, &v);
 	}
 }
@@ -5466,6 +5511,7 @@ ExecEvalJsonTransform(ExprState *state, ExprEvalStep *op,
 	JsonbInState st = {0};
 	JsonTransformOp effop = action->op;
 	bool		matched = false;
+	bool		strict;
 
 	/*
 	 * The JUMP_IF_NULL guards in the step array already skip us if
@@ -5476,6 +5522,7 @@ ExecEvalJsonTransform(ExprState *state, ExprEvalStep *op,
 
 	in = DatumGetJsonbP(jtstate->formatted_expr.value);
 	jp = DatumGetJsonPathP(jtstate->pathspec.value);
+	strict = (jp->header & JSONPATH_LAX) == 0;
 
 	/* Validate path and break it into accessor steps. */
 	steps = JsonPathToTransformSteps(jp, action->op, &nsteps);
@@ -5543,7 +5590,7 @@ ExecEvalJsonTransform(ExprState *state, ExprEvalStep *op,
 
 	it = JsonbIteratorInit(&in->root);
 	jtSetPath(&it, &st, steps, nsteps, 0, effop, newval,
-			  action->on_existing, &matched);
+			  action->on_existing, strict, !strict, &matched);
 
 	/* ON MISSING ERROR: the path matched no existing target. */
 	if (!matched && action->on_missing == JSON_TRANSFORM_BEHAVIOR_ERROR)
