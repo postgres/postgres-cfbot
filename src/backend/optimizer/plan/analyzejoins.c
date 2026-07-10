@@ -2552,7 +2552,8 @@ remove_self_joins_recurse(PlannerInfo *root, List *joinlist, Relids toRemove)
 			 * Query->mergeTargetRelation associated rel cannot be eliminated.
 			 */
 			if (rte->rtekind == RTE_RELATION &&
-				rte->relkind == RELKIND_RELATION &&
+				(rte->relkind == RELKIND_RELATION ||
+				 rte->relkind == RELKIND_PARTITIONED_TABLE) &&
 				rte->tablesample == NULL &&
 				varno != root->parse->resultRelation &&
 				varno != root->parse->mergeTargetRelation)
