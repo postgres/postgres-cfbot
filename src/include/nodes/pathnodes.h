@@ -1814,6 +1814,16 @@ typedef struct PathKey
 	Oid			pk_opfamily;	/* index opfamily defining the ordering */
 	CompareType pk_cmptype;		/* sort direction (ASC or DESC) */
 	bool		pk_nulls_first; /* do NULLs come before normal values? */
+
+	/*
+	 * SLOPE: innermost source of variation, filled by
+	 * precompute_slope_pathkeys().  NULL if this pathkey is a plain Var or
+	 * cannot benefit from SLOPE.  pk_slope stores a MonotonicFunction value
+	 * (from plannodes.h) as int to avoid a header dependency.
+	 */
+	Expr	   *pk_var pg_node_attr(read_write_ignore, equal_ignore);
+	Index		pk_varrelid pg_node_attr(read_write_ignore, equal_ignore);
+	int			pk_slope pg_node_attr(read_write_ignore, equal_ignore);
 } PathKey;
 
 /*
