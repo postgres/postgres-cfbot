@@ -1709,6 +1709,24 @@ EventTriggerUndoInhibitCommandCollection(void)
 }
 
 /*
+ * Return the commands collected for the complete query now running, a list of
+ * CollectedCommand.
+ *
+ * This is the C-level counterpart of pg_event_trigger_ddl_commands(), for
+ * consumers that need the commands as they are rather than as a set of rows;
+ * deparsing them is the motivating case.  The list belongs to the event
+ * trigger state and is only valid until the current complete query ends.
+ */
+List *
+EventTriggerGetCollectedCommands(void)
+{
+	if (!currentEventTriggerState)
+		return NIL;
+
+	return currentEventTriggerState->commandList;
+}
+
+/*
  * EventTriggerCollectSimpleCommand
  *		Save data about a simple DDL command that was just executed
  *
