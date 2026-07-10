@@ -3899,6 +3899,9 @@ standard_qp_callback(PlannerInfo *root, void *extra)
 		root->query_pathkeys = root->setop_pathkeys;
 	else
 		root->query_pathkeys = NIL;
+
+	/* Annotate query pathkeys with variation sources for SLOPE */
+	precompute_slope_pathkeys(root);
 }
 
 /*

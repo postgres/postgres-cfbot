@@ -1033,6 +1033,14 @@
   boot_val => 'true',
 },
 
+{ name => 'enable_slope', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
+  short_desc => 'Enables the planner\'s slope analysis.',
+  long_desc => 'By employing slope analysis the planner can take advantage of an index order of a monotonic expression of an index key, eliminating unnecessary sort nodes.',
+  flags => 'GUC_EXPLAIN',
+  variable => 'enable_slope',
+  boot_val => 'true',
+},
+
 { name => 'enable_sort', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
   short_desc => 'Enables the planner\'s use of explicit sort steps.',
   flags => 'GUC_EXPLAIN',

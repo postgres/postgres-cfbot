@@ -47,8 +47,9 @@ test: create_index create_index_spgist create_view index_including index_includi
 
 # ----------
 # Another group of parallel tests
+# (20 tests)
 # ----------
-test: create_aggregate create_function_sql create_cast constraints triggers select inherit typed_table vacuum drop_if_exists updatable_views roleattributes create_am hash_func errors infinite_recurse create_property_graph for_portion_of slope_catalog
+test: create_aggregate create_function_sql create_cast constraints triggers select inherit typed_table vacuum drop_if_exists updatable_views roleattributes create_am hash_func errors infinite_recurse create_property_graph for_portion_of slope_catalog slope
 
 # ----------
 # sanity_check does a vacuum, affecting the sort order of SELECT *
@@ -60,11 +61,13 @@ test: sanity_check
 # Another group of parallel tests
 # aggregates depends on create_aggregate
 # join depends on create_misc
+# (20 tests)
 # ----------
 test: select_into select_distinct select_distinct_on select_implicit select_having subselect union case join aggregates transactions random portals arrays btree_index hash_index update delete namespace prepared_xacts
 
 # ----------
 # Another group of parallel tests
+# (20 tests)
 # ----------
 test: brin gin gist spgist privileges init_privs security_label collate matview lock replica_identity rowsecurity object_address tablesample groupingsets drop_operator password identity generated_stored join_hash
 
@@ -75,6 +78,7 @@ test: brin_bloom brin_multi
 
 # ----------
 # Another group of parallel tests
+# (20 tests)
 # ----------
 test: create_table_like alter_generic alter_operator misc async dbsize merge misc_functions nls sysviews tsrf tid tidscan tidrangescan collate.utf8 collate.icu.utf8 incremental_sort create_role without_overlaps generated_virtual
 
