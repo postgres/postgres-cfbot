@@ -10,11 +10,18 @@
  */
 #include "postgres.h"
 
+#include "access/xact.h"
+#include "commands/ddl_deparse.h"
+#include "commands/event_trigger.h"
 #include "funcapi.h"
 #include "nodes/execnodes.h"
 #include "tcop/deparse_utility.h"
+#include "tcop/tcopprot.h"
 #include "tcop/utility.h"
 #include "utils/builtins.h"
+#include "utils/guc.h"
+#include "utils/memutils.h"
+#include "utils/resowner.h"
 #include "utils/tuplestore.h"
 
 PG_MODULE_MAGIC;
@@ -22,6 +29,474 @@ PG_MODULE_MAGIC;
 PG_FUNCTION_INFO_V1(get_command_type);
 PG_FUNCTION_INFO_V1(get_command_tag);
 PG_FUNCTION_INFO_V1(get_altertable_subcmdinfo);
+PG_FUNCTION_INFO_V1(capture_deparsed_ddl);
+
+typedef struct TestDDLDeparseErrorInfo
+{
+	const char *orig_ddl;
+	const char *deparsed_ddl;
+} TestDDLDeparseErrorInfo;
+
+typedef enum
+{
+	PRINT_DEPARSED_OFF,
+	PRINT_DEPARSED_JSON,
+	PRINT_DEPARSED_TEXT,
+	PRINT_DEPARSED_BOTH,
+} PrintDeparsedDDL;
+
+static const struct config_enum_entry print_deparsed_ddl_options[] = {
+	{"off", PRINT_DEPARSED_OFF, false},
+	{"json", PRINT_DEPARSED_JSON, false},
+	{"text", PRINT_DEPARSED_TEXT, false},
+	{"both", PRINT_DEPARSED_BOTH, false},
+	{NULL, 0, false}
+};
+
+/* GUCs */
+static bool execute_deparsed_ddl = false;
+static int	print_deparsed_ddl = PRINT_DEPARSED_OFF;
+static bool log_declined_commands = false;
+
+static ProcessUtility_hook_type next_ProcessUtility_hook = NULL;
+
+/*
+ * Is a statement being captured?  Together with capture_depth, this tells the
+ * event trigger which statement it is firing for.
+ */
+static bool capturing = false;
+
+/*
+ * JSON deparsed for that statement, in TopTransactionContext so that it
+ * survives the rollback of the trial run's subtransaction.  Valid only while
+ * capturing is set.  There is at most one, since the statement fires the event
+ * trigger once.
+ */
+static char *captured_json = NULL;
+
+/*
+ * Nesting depth of ProcessUtility calls through this module, and the depth of
+ * the captured statement.  DDL that user code runs during the statement fires
+ * the event trigger at a deeper level.
+ */
+static int	utility_depth = 0;
+static int	capture_depth = 0;
+
+/* Are we re-executing a deparsed command ourselves? */
+static bool in_roundtrip = false;
+
+static void test_ddl_deparse_utility_command(PlannedStmt *pstmt,
+											 const char *queryString,
+											 bool readOnlyTree,
+											 ProcessUtilityContext context,
+											 ParamListInfo params,
+											 QueryEnvironment *queryEnv,
+											 DestReceiver *dest,
+											 QueryCompletion *qc);
+static void test_ddl_deparse_error_callback(void *arg);
+static void report_declined_command(Node *stmt, const char *queryString);
+static bool noop_allowed(Node *stmt);
+
+void
+_PG_init(void)
+{
+	DefineCustomBoolVariable("test_ddl_deparse.execute_deparsed_ddl",
+							 "Replace supported DDL commands with their deparsed version.",
+							 NULL,
+							 &execute_deparsed_ddl,
+							 false,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+
+	DefineCustomEnumVariable("test_ddl_deparse.print_deparsed_ddl",
+							 "Report the deparsed DDL command as a NOTICE, in the given form.",
+							 NULL,
+							 &print_deparsed_ddl,
+							 PRINT_DEPARSED_OFF,
+							 print_deparsed_ddl_options,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+
+	DefineCustomBoolVariable("test_ddl_deparse.log_declined_commands",
+							 "Log DDL commands the deparser declined to reproduce.",
+							 NULL,
+							 &log_declined_commands,
+							 false,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+
+	MarkGUCPrefixReserved("test_ddl_deparse");
+
+	next_ProcessUtility_hook = ProcessUtility_hook;
+	ProcessUtility_hook = test_ddl_deparse_utility_command;
+}
+
+/*
+ * ddl_command_end event trigger: deparse the statement being captured and keep
+ * the result for replay.  The result is copied into TopTransactionContext,
+ * since this runs in the trial run's subtransaction.  With print_deparsed_ddl,
+ * also report it as a NOTICE.
+ */
+Datum
+capture_deparsed_ddl(PG_FUNCTION_ARGS)
+{
+	char	   *json;
+
+	if (!CALLED_AS_EVENT_TRIGGER(fcinfo))
+		elog(ERROR, "not fired by event trigger manager");
+
+	/* Do nothing unless a statement of ours is being captured */
+	if (!capturing)
+		PG_RETURN_NULL();
+
+	/*
+	 * Ignore DDL that user code runs during the statement; replaying the
+	 * statement runs it again anyway.
+	 */
+	if (utility_depth != capture_depth)
+		PG_RETURN_NULL();
+
+	/* The captured statement fires the trigger only once */
+	if (captured_json != NULL)
+		elog(ERROR, "multiple DDL deparse captures for a single statement");
+
+	json = deparse_ddl_command(EventTriggerGetParsetree(),
+							   EventTriggerGetCollectedCommands());
+	if (json == NULL)
+		PG_RETURN_NULL();
+
+	if (print_deparsed_ddl == PRINT_DEPARSED_JSON ||
+		print_deparsed_ddl == PRINT_DEPARSED_BOTH)
+		ereport(NOTICE,
+				(errmsg("deparsed JSON: %s", json),
+				 errhidestmt(true),
+				 errhidecontext(true)));
+
+	if (print_deparsed_ddl == PRINT_DEPARSED_TEXT ||
+		print_deparsed_ddl == PRINT_DEPARSED_BOTH)
+		ereport(NOTICE,
+				(errmsg("deparsed DDL: %s", deparse_ddl_json_to_string(json)),
+				 errhidestmt(true),
+				 errhidecontext(true)));
+
+	captured_json = MemoryContextStrdup(TopTransactionContext, json);
+
+	PG_RETURN_NULL();
+}
+
+/*
+ * Continue with the rest of the ProcessUtility hook chain, so that other
+ * modules' hooks are not bypassed.  in_roundtrip keeps us from intercepting
+ * our own replay.
+ */
+static void
+call_next_ProcessUtility(PlannedStmt *pstmt,
+						 const char *queryString,
+						 bool readOnlyTree,
+						 ProcessUtilityContext context,
+						 ParamListInfo params,
+						 QueryEnvironment *queryEnv,
+						 DestReceiver *dest, QueryCompletion *qc)
+{
+	utility_depth++;
+	PG_TRY();
+	{
+		if (next_ProcessUtility_hook)
+			next_ProcessUtility_hook(pstmt, queryString, readOnlyTree,
+									 context, params, queryEnv, dest, qc);
+		else
+			standard_ProcessUtility(pstmt, queryString, readOnlyTree,
+									context, params, queryEnv, dest, qc);
+	}
+	PG_FINALLY();
+	{
+		utility_depth--;
+	}
+	PG_END_TRY();
+}
+
+/*
+ * Parse and execute one deparsed DDL command.  It's an error if the string is
+ * not exactly one utility command.
+ */
+static void
+execute_deparsed_command(const char *sql,
+						 ProcessUtilityContext context,
+						 ParamListInfo params,
+						 QueryEnvironment *queryEnv,
+						 DestReceiver *dest, QueryCompletion *qc)
+{
+	List	   *parsetree_list;
+	RawStmt    *rs;
+	List	   *querytree_list;
+	PlannedStmt *pstmt;
+	Query	   *query;
+	int			save_nestlevel;
+
+	save_nestlevel = NewGUCNestLevel();
+
+	/*
+	 * Messages that the replayed command would emit have already been emitted
+	 * by the original execution, so suppress them.
+	 */
+	(void) set_config_option("client_min_messages", "error",
+							 PGC_USERSET, PGC_S_SESSION,
+							 GUC_ACTION_SAVE, true, 0, false);
+
+	/*
+	 * Run the deparsed command under a restricted search_path, so that a name
+	 * the deparser failed to qualify causes an error.  The GUC nest level
+	 * undoes this below.
+	 */
+	RestrictSearchPath();
+
+	parsetree_list = pg_parse_query(sql);
+	if (list_length(parsetree_list) != 1)
+		elog(ERROR, "deparsed DDL is not a single command: %s", sql);
+
+	rs = linitial_node(RawStmt, parsetree_list);
+	querytree_list = pg_analyze_and_rewrite_fixedparams(rs, sql, NULL, 0,
+														NULL);
+	if (list_length(querytree_list) != 1)
+		elog(ERROR, "deparsed DDL did not analyze to a single query: %s", sql);
+
+	query = linitial_node(Query, querytree_list);
+	if (query->commandType != CMD_UTILITY)
+		elog(ERROR, "deparsed DDL is not a utility command: %s", sql);
+
+	pstmt = makeNode(PlannedStmt);
+	pstmt->commandType = CMD_UTILITY;
+	pstmt->canSetTag = true;
+	pstmt->utilityStmt = query->utilityStmt;
+	pstmt->stmt_location = rs->stmt_location;
+	pstmt->stmt_len = rs->stmt_len;
+
+	call_next_ProcessUtility(pstmt, sql, false,
+							 context, params, queryEnv,
+							 dest, qc);
+
+	AtEOXact_GUC(true, save_nestlevel);
+}
+
+/*
+ * Is it legitimate for this statement to have collected nothing?
+ *
+ * A command that names a missing object under IF EXISTS, or an existing one
+ * under IF NOT EXISTS, does nothing, so nothing is collected and the deparser
+ * has nothing to produce.  Any other empty result is a deparser bug, and is
+ * reported as one by the caller.
+ *
+ * Every statement type ddl_deparse_command_supported() accepts is listed
+ * here, as in report_declined_command(): the guard field sits in a different
+ * place in each node, and a type that has no such clause must not be excused.
+ */
+static bool
+noop_allowed(Node *stmt)
+{
+	switch (nodeTag(stmt))
+	{
+		case T_CreateStmt:
+			return ((CreateStmt *) stmt)->if_not_exists;
+		default:
+			return false;
+	}
+}
+
+/*
+ * ProcessUtility hook: capture supported DDL commands, and with
+ * execute_deparsed_ddl, replace each with its deparsed form.  The original
+ * runs in a subtransaction that is rolled back, the capture trigger deparses
+ * it, and the deparsed command is executed for real, so a wrong deparse shows
+ * up as a regression diff.
+ */
+static void
+test_ddl_deparse_utility_command(PlannedStmt *pstmt,
+								 const char *queryString,
+								 bool readOnlyTree,
+								 ProcessUtilityContext context,
+								 ParamListInfo params,
+								 QueryEnvironment *queryEnv,
+								 DestReceiver *dest, QueryCompletion *qc)
+{
+	/*
+	 * Capture only top-level statements, only if the result is used, and not
+	 * our own replay.
+	 */
+	if (context != PROCESS_UTILITY_TOPLEVEL || in_roundtrip ||
+		(!execute_deparsed_ddl && print_deparsed_ddl == PRINT_DEPARSED_OFF))
+	{
+		call_next_ProcessUtility(pstmt, queryString, readOnlyTree,
+								 context, params, queryEnv, dest, qc);
+		return;
+	}
+
+	/*
+	 * A command the deparser declines runs unchanged, so it is not tested.
+	 * Log it so that the TAP test can list such commands.
+	 */
+	if (!ddl_deparse_command_supported(pstmt->utilityStmt))
+	{
+		report_declined_command(pstmt->utilityStmt, queryString);
+		call_next_ProcessUtility(pstmt, queryString, readOnlyTree,
+								 context, params, queryEnv, dest, qc);
+		return;
+	}
+
+	captured_json = NULL;
+	capturing = true;
+	capture_depth = utility_depth + 1;
+
+	PG_TRY();
+	{
+		if (!execute_deparsed_ddl)
+		{
+			/*
+			 * Run the command for real; it is captured only to print its
+			 * deparsed form.
+			 */
+			call_next_ProcessUtility(pstmt, queryString, readOnlyTree,
+									 context, params, queryEnv, dest, qc);
+		}
+		else
+		{
+			MemoryContext oldcontext = CurrentMemoryContext;
+			ResourceOwner oldowner = CurrentResourceOwner;
+
+			/*
+			 * Run the trial in an internal subtransaction, restoring the
+			 * memory context and resource owner afterwards as plpgsql does.
+			 */
+			BeginInternalSubTransaction("test_ddl_deparse");
+			MemoryContextSwitchTo(oldcontext);
+			PG_TRY(2);
+			{
+				/*
+				 * Keep pstmt unmodified, as the original command may have to
+				 * be executed again below.
+				 */
+				call_next_ProcessUtility(pstmt, queryString, true,
+										 context, params, queryEnv, dest, qc);
+
+				RollbackAndReleaseCurrentSubTransaction();
+				MemoryContextSwitchTo(oldcontext);
+				CurrentResourceOwner = oldowner;
+			}
+			PG_CATCH(2);
+			{
+				RollbackAndReleaseCurrentSubTransaction();
+				MemoryContextSwitchTo(oldcontext);
+				CurrentResourceOwner = oldowner;
+				PG_RE_THROW();
+			}
+			PG_END_TRY(2);
+
+			/*
+			 * The capture ends with the trial run; DDL from here on,
+			 * including the replay, is not this statement's.
+			 */
+			capturing = false;
+
+			if (captured_json == NULL)
+			{
+				/*
+				 * The deparser produced nothing.  That's expected if the
+				 * command did nothing; otherwise warn and execute the
+				 * original.
+				 */
+				if (!noop_allowed(pstmt->utilityStmt))
+				{
+					ereport(WARNING,
+							(errmsg("could not deparse DDL command, executing the original"),
+							 errdetail("Command: %s", queryString)));
+					call_next_ProcessUtility(pstmt, queryString, readOnlyTree,
+											 context, params, queryEnv, dest, qc);
+				}
+			}
+			else
+			{
+				ErrorContextCallback errcallback;
+				TestDDLDeparseErrorInfo errinfo;
+				char	   *sql;
+
+				sql = deparse_ddl_json_to_string(captured_json);
+
+				errinfo.orig_ddl = queryString;
+				errinfo.deparsed_ddl = sql;
+
+				errcallback.callback = test_ddl_deparse_error_callback;
+				errcallback.previous = error_context_stack;
+				errcallback.arg = &errinfo;
+				error_context_stack = &errcallback;
+
+				in_roundtrip = true;
+				PG_TRY(2);
+				{
+					execute_deparsed_command(sql, context, params, queryEnv,
+											 dest, qc);
+				}
+				PG_FINALLY(2);
+				{
+					in_roundtrip = false;
+				}
+				PG_END_TRY(2);
+
+				error_context_stack = errcallback.previous;
+			}
+		}
+	}
+	PG_FINALLY();
+	{
+		capturing = false;
+		/* don't leave a dangling pointer into transaction-lifetime memory */
+		captured_json = NULL;
+	}
+	PG_END_TRY();
+}
+
+/*
+ * Report a command the deparser declined.  Only statement types that
+ * deparse_ddl_command() handles are reported.  Declining one of them is not
+ * necessarily a bug (e.g. ALTER FUNCTION ... RENAME), but the TAP test lists
+ * them so that unexpected ones can be noticed.
+ *
+ * This goes to the server log so that the regression output is not affected.
+ */
+static void
+report_declined_command(Node *stmt, const char *queryString)
+{
+	if (!log_declined_commands)
+		return;
+
+	switch (nodeTag(stmt))
+	{
+		case T_CreateStmt:
+		case T_AlterTableStmt:
+		case T_RenameStmt:
+		case T_AlterObjectSchemaStmt:
+			break;
+		default:
+			return;
+	}
+
+	ereport(LOG,
+			(errmsg("test_ddl_deparse: declined %s: %s",
+					CreateCommandName(stmt), queryString),
+			 errhidestmt(true),
+			 errhidecontext(true)));
+}
+
+static void
+test_ddl_deparse_error_callback(void *arg)
+{
+	TestDDLDeparseErrorInfo *errinfo = (TestDDLDeparseErrorInfo *) arg;
+
+	errcontext("original DDL \"%s\", deparsed DDL \"%s\"",
+			   errinfo->orig_ddl,
+			   errinfo->deparsed_ddl ? errinfo->deparsed_ddl : "(none)");
+}
 
 /*
  * Return the textual representation of the struct type used to represent a
