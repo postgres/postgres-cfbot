@@ -72,6 +72,7 @@ extern void EventTriggerSQLDropAddObject(const ObjectAddress *object,
 
 extern void EventTriggerInhibitCommandCollection(void);
 extern void EventTriggerUndoInhibitCommandCollection(void);
+extern List *EventTriggerGetCollectedCommands(void);
 
 extern void EventTriggerCollectSimpleCommand(ObjectAddress address,
 											 ObjectAddress secondaryObject,
