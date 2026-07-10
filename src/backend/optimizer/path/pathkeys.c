@@ -17,26 +17,42 @@
  */
 #include "postgres.h"
 
+#include "access/nbtree.h"
 #include "access/stratnum.h"
+#include "access/transam.h"
+#include "catalog/pg_am.h"
 #include "catalog/pg_opfamily.h"
+#include "catalog/pg_type.h"
+#include "commands/defrem.h"
+#include "fmgr.h"
 #include "nodes/nodeFuncs.h"
+#include "nodes/supportnodes.h"
 #include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
+#include "parser/parse_oper.h"
 #include "partitioning/partbounds.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/lsyscache.h"
+#include "utils/typcache.h"
 
 /* Consider reordering of GROUP BY keys? */
 bool		enable_group_by_reordering = true;
 
+/* Perform slope analysis to identify indirectly sorted data */
+bool		enable_slope = true;
 static bool pathkey_is_redundant(PathKey *new_pathkey, List *pathkeys);
 static bool matches_boolean_partition_clause(RestrictInfo *rinfo,
 											 RelOptInfo *partrel,
 											 int partkeycol);
 static Var *find_var_for_subquery_tle(RelOptInfo *rel, TargetEntry *tle);
 static bool right_merge_direction(PlannerInfo *root, PathKey *pathkey);
+static MonotonicFunction get_expr_slope_wrt(Expr *expr, Expr *target);
+static bool indexcol_is_equalimage(IndexOptInfo *index, int colno);
+static PathKey *slope_emit_pathkey(PlannerInfo *root, PathKey *pk,
+								   Expr *indexkey, bool reverse_sort,
+								   bool nulls_first);
 
 
 /****************************************************************************
@@ -738,7 +754,6 @@ get_cheapest_fractional_path_for_pathkeys(List *paths,
 	return matched_path;
 }
 
-
 /*
  * get_cheapest_parallel_safe_total_inner
  *	  Find the unparameterized parallel-safe path with the least total cost.
@@ -758,6 +773,386 @@ get_cheapest_parallel_safe_total_inner(List *paths)
 	}
 
 	return NULL;
+}
+
+/*
+ * get_variation_source
+ *	  Find the source of variation in an expression.
+ *
+ * Descends through function calls to find the innermost non-constant
+ * expression that determines the variation of the whole expression.
+ * For f(x) returns x.  For f(g(x)) returns x.  For f(x, y) returns f(x, y).
+ * For a plain Var, returns the Var itself.
+ *
+ * This is a cheap extraction that doesn't check monotonicity - that's
+ * deferred until we find an index column matching the variation source.
+ * Also extracts the relid if all Vars are from the same table.
+ */
+static void
+get_variation_source(Expr *expr, PathKey *pk)
+{
+	pk->pk_var = NULL;
+	pk->pk_varrelid = 0;
+
+	for (;;)
+	{
+		List	   *args;
+		Expr	   *non_const_arg = NULL;
+		int			non_const_count = 0;
+		ListCell   *lc;
+
+		/* Stop at RelabelType (no-op coercion) */
+		if (IsA(expr, RelabelType))
+		{
+			pk->pk_var = expr;
+			pk->pk_varrelid = 0;
+			return;
+		}
+
+		/*
+		 * Handle FuncExpr, implicit casts are considered safe all the rest is
+		 * subject to prosupport checks
+		 */
+		if (IsA(expr, FuncExpr))
+			args = ((FuncExpr *) expr)->args;
+		else if (IsA(expr, OpExpr))
+			args = ((OpExpr *) expr)->args;
+		else if (IsA(expr, Var))
+		{
+			/* Reached a Var - this is our inner expression */
+			pk->pk_var = expr;
+			pk->pk_varrelid = ((Var *) expr)->varno;
+			return;
+		}
+		else
+		{
+			/* Unsupported node type */
+			return;
+		}
+
+		/* Find non-constant arguments */
+		foreach(lc, args)
+		{
+			Expr	   *arg = (Expr *) lfirst(lc);
+
+			if (!IsA(arg, Const))
+			{
+				non_const_count++;
+				if (non_const_count > 1)
+				{
+					/* Multivariate - return this expression as inner */
+					pk->pk_var = expr;
+					pk->pk_varrelid = 0;	/* unknown, will use equal() */
+					return;
+				}
+				non_const_arg = arg;
+			}
+		}
+
+		if (non_const_arg == NULL)
+		{
+			/* All constant - no inner expression */
+			return;
+		}
+
+		expr = non_const_arg;
+	}
+}
+
+
+/*
+ * Returns true if the expression's type may hold NaN values.
+ */
+static bool
+expr_can_nan(Expr *target)
+{
+
+	Oid			expr_type;
+
+	/* Unwrap RelabelType (no-op coercion) */
+	while (target != NULL && IsA(target, RelabelType))
+		target = (Expr *) ((RelabelType *) target)->arg;
+
+	/* Extract type from the node */
+	if (IsA(target, Var))
+		expr_type = ((Var *) target)->vartype;
+	else if (IsA(target, FuncExpr))
+		expr_type = ((FuncExpr *) target)->funcresulttype;
+	else if (IsA(target, OpExpr))
+		expr_type = ((OpExpr *) target)->opresulttype;
+	else
+		return false;
+
+	/* Get the base type for domains */
+	if (expr_type >= FirstNormalObjectId)
+		expr_type = getBaseType(expr_type);
+
+	/* Check if the type can hold NaN values */
+	switch (expr_type)
+	{
+		case FLOAT4OID:
+		case FLOAT8OID:
+		case NUMERICOID:
+			return true;
+		default:
+			return false;
+	}
+}
+
+/*
+ * get_expr_slope_wrt
+ *	  Determine the monotonicity slope of an expression with respect to
+ *	  a specific target subexpression, under each type's default btree
+ *	  order.  Callers that match this to a PathKey / index must separately
+ *	  verify those use the corresponding default opfamilies.
+ *
+ * Returns the slope of 'expr' with respect to 'target'
+ *   MONOTONICFUNC_INCREASING: monotonically increasing
+ *   MONOTONICFUNC_DECREASING: monotonically decreasing
+ *   MONOTONICFUNC_BOTH:       independent of target (constant)
+ *   MONOTONICFUNC_NONE:       cannot determine monotonicity
+ */
+static MonotonicFunction
+get_expr_slope_wrt(Expr *expr, Expr *target)
+{
+	MonotonicFunction slope = MONOTONICFUNC_INCREASING;
+
+	for (;;)
+	{
+		Oid			funcid;
+		List	   *args;
+		Oid			prosupport;
+		SupportRequestMonotonic req;
+		ListCell   *lc;
+		int			i;
+		Expr	   *next_expr = NULL;
+		MonotonicFunction func_arg_slope = MONOTONICFUNC_INCREASING;
+
+		/* Check if we've reached the target */
+		if (equal(expr, target))
+		{
+			if (slope == MONOTONICFUNC_INCREASING)
+				return slope;
+
+			/*
+			 * A decreasing function does not relocate NaN values, so index
+			 * scan ordering (forward or backward) cannot match ORDER BY f(x)
+			 * on float/numeric columns.
+			 */
+			if (expr_can_nan(target))
+			{
+				if (slope == MONOTONICFUNC_DECREASING)
+					return MONOTONICFUNC_NONE;
+				else if (slope == MONOTONICFUNC_BOTH)
+					return MONOTONICFUNC_INCREASING;
+			}
+			return slope;
+		}
+
+		/*
+		 * RelabelType, casts with 'b' cast method, are bit-preserving, but
+		 * types might have different semantic.
+		 */
+		if (IsA(expr, RelabelType))
+			return MONOTONICFUNC_NONE;
+
+		/*
+		 * Handle FuncExpr and OpExpr this covers explicit function calls,
+		 * operators, and casts with 'f' cast method. (both implicit and
+		 * explicit), requires slope analysis
+		 */
+		if (IsA(expr, FuncExpr))
+		{
+			FuncExpr   *fexpr = (FuncExpr *) expr;
+
+			funcid = fexpr->funcid;
+			args = fexpr->args;
+		}
+		else if (IsA(expr, OpExpr))
+		{
+			OpExpr	   *opexpr = (OpExpr *) expr;
+
+			set_opfuncid(opexpr);
+			funcid = opexpr->opfuncid;
+			args = opexpr->args;
+		}
+		else
+		{
+			/* Reached a leaf without finding target */
+			return MONOTONICFUNC_NONE;
+		}
+
+		/* Check for prosupport function */
+		prosupport = get_func_support(funcid);
+		if (!OidIsValid(prosupport))
+			return MONOTONICFUNC_NONE;
+
+		/* Call prosupport to get slope pattern */
+		req.type = T_SupportRequestMonotonic;
+		req.expr = (Node *) expr;
+		req.slopes = NULL;
+		req.nslopes = 0;
+
+		if (DatumGetPointer(OidFunctionCall1(prosupport, PointerGetDatum(&req))) == NULL)
+			return MONOTONICFUNC_NONE;
+
+		if (req.slopes == NULL || req.nslopes <= 0)
+			return MONOTONICFUNC_NONE;
+
+		/* Find the single non-constant argument */
+		i = 0;
+		foreach(lc, args)
+		{
+			Expr	   *arg = (Expr *) lfirst(lc);
+
+			if (!IsA(arg, Const))
+			{
+				if (next_expr != NULL)
+				{
+					/* Multivariate - check if this is the target */
+					return equal(expr, target) ? slope : MONOTONICFUNC_NONE;
+				}
+				next_expr = arg;
+				if (likely(i < req.nslopes))
+				{
+					if (req.slopes[i] == MONOTONICFUNC_DECREASING)
+						func_arg_slope = MONOTONICFUNC_DECREASING;
+					else if (req.slopes[i] != MONOTONICFUNC_INCREASING)
+						return MONOTONICFUNC_NONE;
+				}
+				else
+					return MONOTONICFUNC_NONE;
+			}
+			i++;
+		}
+
+		if (next_expr == NULL)
+			return MONOTONICFUNC_NONE;	/* all constant */
+
+		/* Compose slopes */
+		if (func_arg_slope == MONOTONICFUNC_DECREASING)
+		{
+			slope = (slope == MONOTONICFUNC_INCREASING) ?
+				MONOTONICFUNC_DECREASING : MONOTONICFUNC_INCREASING;
+		}
+
+		expr = next_expr;
+	}
+}
+
+/*
+ * indexcol_is_equalimage
+ *	  Does btree equality on this index column imply image equality?
+ */
+static bool
+indexcol_is_equalimage(IndexOptInfo *index, int colno)
+{
+	Oid			equalimageproc;
+
+	/*
+	 * equalimage(opcintype oid) returns bool returns static information about
+	 * an operator class and collation.
+	 *
+	 */
+	equalimageproc = get_opfamily_proc(index->sortopfamily[colno],
+									   index->opcintype[colno],
+									   index->opcintype[colno],
+									   BTEQUALIMAGE_PROC);
+
+	/*
+	 * Returning true indicates that the the order function for the operator
+	 * class is guaranteed to only return 0 if the values being compared are
+	 * interchangeable. Not registering an equalimage function or returning
+	 * false indicates that this condition cannot be assumed to hold.
+	 */
+	if (!OidIsValid(equalimageproc))
+		return false;
+
+	return DatumGetBool(OidFunctionCall1Coll(
+											 equalimageproc,
+											 index->indexcollations[colno],
+											 ObjectIdGetDatum(index->opcintype[colno])
+											 ));
+}
+
+/*
+ * precompute_slope_pathkeys
+ *	  For each query pathkey, extract the source of variation and store
+ *	  it directly on the PathKey (pk_var, pk_varrelid).
+ *
+ * Called once after query_pathkeys is set.  Pathkeys whose expression
+ * is a plain Var or that have no usable variation source are left with
+ * pk_var = NULL.  Monotonicity (pk_slope) is computed lazily on first
+ * index match.
+ */
+void
+precompute_slope_pathkeys(PlannerInfo *root)
+{
+	ListCell   *lc;
+
+	foreach(lc, root->query_pathkeys)
+	{
+		PathKey    *pk = lfirst_node(PathKey, lc);
+		EquivalenceMember *em;
+
+		pk->pk_var = NULL;
+		pk->pk_varrelid = 0;
+		pk->pk_slope = MONOTONICFUNC_UNSET;
+
+		if (!enable_slope)
+			continue;
+
+		if (pk->pk_eclass->ec_has_volatile ||
+			pk->pk_eclass->ec_members == NIL)
+			continue;
+
+		em = linitial(pk->pk_eclass->ec_members);
+
+		if (IsA(em->em_expr, Var))
+			continue;
+
+		get_variation_source(em->em_expr, pk);
+	}
+}
+
+/*
+ * slope_emit_pathkey
+ *	  Return the canonical pathkey for what a forward index scan actually
+ *	  produces for an expression that is monotonic in the index column.
+ *
+ *	  The result reflects both the direction and null ordering that the
+ *	  forward scan generates.  f(NULL) is NULL, so nulls appear at the
+ *	  position dictated by the index's null ordering.
+ *
+ *	  Returns NULL if pk_slope indicates no monotonicity.
+ *
+ *	   index   function   pathkey
+ *	   ASC     ASC        ASC
+ *	   ASC     DESC       DESC
+ *	   DESC    ASC        DESC
+ *	   DESC    DESC       ASC
+ */
+static PathKey *
+slope_emit_pathkey(PlannerInfo *root,
+				   PathKey *pk,
+				   Expr *indexkey,
+				   bool reverse_sort,
+				   bool nulls_first)
+{
+	MonotonicFunction slope;
+	bool		produces_desc;
+
+	slope = (MonotonicFunction) pk->pk_slope;
+	if (slope == MONOTONICFUNC_NONE)
+		return NULL;
+
+	produces_desc = (reverse_sort != (slope == MONOTONICFUNC_DECREASING));
+
+	return make_canonical_pathkey(root,
+								  pk->pk_eclass,
+								  pk->pk_opfamily,
+								  produces_desc ? COMPARE_GT : COMPARE_LT,
+								  nulls_first);
 }
 
 /****************************************************************************
@@ -790,10 +1185,17 @@ build_index_pathkeys(PlannerInfo *root,
 {
 	List	   *retval = NIL;
 	ListCell   *lc;
+	ListCell   *query_pk_cell;
+	bool		slope_match;
 	int			i;
 
 	if (index->sortopfamily == NULL)
 		return NIL;				/* non-orderable index */
+
+	slope_match = (enable_slope &&
+				   index->rel->reloptkind == RELOPT_BASEREL &&
+				   root->query_pathkeys != NIL);
+	query_pk_cell = slope_match ? list_head(root->query_pathkeys) : NULL;
 
 	i = 0;
 	foreach(lc, index->indextlist)
@@ -803,6 +1205,11 @@ build_index_pathkeys(PlannerInfo *root,
 		bool		reverse_sort;
 		bool		nulls_first;
 		PathKey    *cpathkey;
+		PathKey    *spk;
+		bool		column_pinned = false;
+		bool		pathkey_emitted = false;
+		bool		pinned_is_equalimage = false;
+
 
 		/*
 		 * INCLUDE columns are stored in index unordered, so they don't
@@ -832,7 +1239,122 @@ build_index_pathkeys(PlannerInfo *root,
 											  index->rel->relids,
 											  false);
 
-		if (cpathkey)
+		/*
+		 * If the first unmatched query pathkey is a monotonic function of
+		 * this index column, use that pathkey instead of the column's own
+		 * pathkey so the index can satisfy the query ordering without a Sort.
+		 *
+		 * If the pathkey is a monotonic function of the index key, add it to
+		 * the result list and move to a non-unique prefix state.
+		 *
+		 * If the index key itself appear as a pathkey (could be relaxed to
+		 * being an injective function of the index key), declare go back to
+		 * unique prefix state.
+		 */
+		for ( /* continue from first unmatched query pathkey */ ;
+			 query_pk_cell != NULL;
+			 query_pk_cell = lnext(root->query_pathkeys, query_pk_cell))
+		{
+			PathKey    *qpk = lfirst_node(PathKey, query_pk_cell);
+
+			if (pathkey_is_redundant(qpk, retval))
+				continue;
+
+			if (cpathkey && qpk->pk_eclass == cpathkey->pk_eclass)
+			{
+				column_pinned = true;
+				if (!pathkey_is_redundant(cpathkey, retval))
+					retval = lappend(retval, cpathkey);
+				continue;
+			}
+
+			if (qpk->pk_var != NULL &&
+				!qpk->pk_eclass->ec_has_volatile &&
+				qpk->pk_varrelid == index->rel->relid &&
+				equal(qpk->pk_var, indexkey))
+			{
+				/*
+				 * ORDER BY x, f(x), g(x) can be satisfied by an index on x
+				 * alone for non-volatile functions when btree-equal values of
+				 * x are interchangeable (equalimage).  Within each such
+				 * group, f(x) is then constant for any deterministic f, so no
+				 * monotonicity check is needed.
+				 */
+				if (column_pinned && (pinned_is_equalimage || indexcol_is_equalimage(index, i)))
+				{
+					if (!pathkey_is_redundant(qpk, retval))
+						retval = lappend(retval, qpk);
+					pathkey_emitted = true;
+					/* skip the call ntext time */
+					pinned_is_equalimage = true;
+					continue;
+				}
+
+				if (qpk->pk_slope == MONOTONICFUNC_UNSET)
+				{
+					EquivalenceMember *em;
+
+					em = linitial(qpk->pk_eclass->ec_members);
+					qpk->pk_slope = get_expr_slope_wrt(em->em_expr,
+													   qpk->pk_var);
+				}
+
+				/*
+				 * Monotonic claims assume default btree order on both sides:
+				 * the index column's input type and the pathkey's expression
+				 * type (after domain -> base).  Refuse when either uses a
+				 * non-default opfamily - e.g. a custom domain opclass on
+				 * ORDER BY x::domain USING <op>, or int4::oid where the
+				 * eclass kept only the int4 Var but the pathkey is oid_ops.
+				 */
+				if (qpk->pk_slope != MONOTONICFUNC_NONE)
+				{
+					EquivalenceMember *em;
+					Oid			idx_default_opclass;
+					Oid			idx_default_opfamily;
+					Oid			qpk_default_opclass;
+					Oid			qpk_default_opfamily;
+
+					/* Check if the index column uses the default opfamily */
+					idx_default_opclass = GetDefaultOpClass(index->opcintype[i],
+															BTREE_AM_OID);
+					idx_default_opfamily = OidIsValid(idx_default_opclass)
+						? get_opclass_family(idx_default_opclass) : InvalidOid;
+					if (index->sortopfamily[i] != idx_default_opfamily)
+						continue;
+
+					/*
+					 * Check if the query pathkey uses the default opfamily
+					 */
+					em = linitial(qpk->pk_eclass->ec_members);
+					qpk_default_opclass =
+						GetDefaultOpClass(getBaseType(exprType((Node *) em->em_expr)),
+										  BTREE_AM_OID);
+					qpk_default_opfamily = OidIsValid(qpk_default_opclass)
+						? get_opclass_family(qpk_default_opclass) : InvalidOid;
+					if (qpk->pk_opfamily != qpk_default_opfamily)
+						continue;
+
+					/* Emit the slope pathkey */
+					spk = slope_emit_pathkey(root, qpk, indexkey,
+											 reverse_sort,
+											 nulls_first);
+					if (spk && !pathkey_is_redundant(spk, retval))
+						retval = lappend(retval, spk);
+					pathkey_emitted = true;
+				}
+				continue;
+			}
+
+			/*
+			 * Index can't satisfy query pathkeys any further
+			 */
+			query_pk_cell = NULL;
+			break;
+		}
+
+
+		if (cpathkey && !pathkey_emitted)
 		{
 			/*
 			 * We found the sort key in an EquivalenceClass, so it's relevant
@@ -840,8 +1362,10 @@ build_index_pathkeys(PlannerInfo *root,
 			 */
 			if (!pathkey_is_redundant(cpathkey, retval))
 				retval = lappend(retval, cpathkey);
+			column_pinned = true;
 		}
-		else
+
+		if (!column_pinned)
 		{
 			/*
 			 * Boolean index keys might be redundant even if they do not
@@ -856,7 +1380,6 @@ build_index_pathkeys(PlannerInfo *root,
 			if (!indexcol_is_bool_constant_for_query(root, index, i))
 				break;
 		}
-
 		i++;
 	}
 
