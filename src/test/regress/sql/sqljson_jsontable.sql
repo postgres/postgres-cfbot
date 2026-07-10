@@ -1052,3 +1052,15 @@ SELECT * FROM JSON_TABLE(jsonb '{}', '$' AS p0
 \sv json_table_view_on_empty;
 
 DROP VIEW json_table_view_on_empty;
+
+-- Test that JSON_TABLE with an explicit CROSS plan is correctly reproduced
+-- in a view definition.
+CREATE VIEW jt_plan_outer_cross AS
+SELECT * FROM JSON_TABLE(
+    jsonb 'null', '$' AS p
+    COLUMNS (NESTED PATH '$[*]' AS p1 COLUMNS (a int),
+             NESTED PATH '$[*]' AS p2 COLUMNS (b int))
+    PLAN (p OUTER (p1 CROSS p2))
+);
+\sv jt_plan_outer_cross
+DROP VIEW jt_plan_outer_cross;
