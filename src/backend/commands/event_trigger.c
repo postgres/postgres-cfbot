@@ -1736,6 +1736,22 @@ EventTriggerGetParsetree(void)
 }
 
 /*
+ * Return the list of CollectedCommand for the current complete query.
+ *
+ * This is the C-level counterpart of pg_event_trigger_ddl_commands().  The
+ * list belongs to the event trigger state and is valid only until the
+ * complete query ends.
+ */
+List *
+EventTriggerGetCollectedCommands(void)
+{
+	if (!currentEventTriggerState)
+		return NIL;
+
+	return currentEventTriggerState->commandList;
+}
+
+/*
  * EventTriggerCollectSimpleCommand
  *		Save data about a simple DDL command that was just executed
  *
