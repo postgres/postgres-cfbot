@@ -7,35 +7,18 @@
  * atomically and dealing with cache coherency. Used to implement locking
  * facilities and lockless algorithms/data structures.
  *
- * IMPLEMENTATION SELECTION:
+ * IMPLEMENTATION:
  *
- * PostgreSQL's atomic operations can be implemented using either:
+ * PostgreSQL's atomic operations are implemented on top of C11
+ * <stdatomic.h> (see stdatomic_impl.h).  This standard header supplies all
+ * atomic types and operations, so no architecture-specific assembly or
+ * compiler intrinsics are required here.  A working C11 stdatomic.h is a
+ * hard build requirement (USE_STDATOMIC_H is always defined); the former
+ * platform-specific implementations (arch-*.h, generic-*.h, fallback.h)
+ * have been removed.
  *
- * 1. C11 stdatomic.h (when USE_STDATOMIC_H is defined)
- *    - Uses standard C11 <stdatomic.h> for all atomic operations
- *    - Better portability and compiler optimizations
- *    - Requires MSVC 2022+ or GCC 4.9+/Clang 3.1+
- *
- * 2. Traditional platform-specific implementations (when USE_STDATOMIC_H is not defined)
- *    - Uses battle-tested PostgreSQL implementations
- *    - Architecture-specific: arch-x86.h, arch-arm.h, arch-ppc.h
- *    - Compiler intrinsics: generic-gcc.h, generic-msvc.h
- *    - Fallback implementations: generic.h, fallback.h
- *
- * Both implementations provide identical public API and semantics.
- * Selection is made at build time via -Duse_stdatomic=auto/yes/no.
- *
- * PORTING NOTES:
- *
- * To bring up postgres on a platform/compiler at the very least
- * implementations for the following operations should be provided:
- * * pg_compiler_barrier(), pg_write_barrier(), pg_read_barrier()
- * * pg_atomic_compare_exchange_u32(), pg_atomic_fetch_add_u32()
- * * pg_atomic_test_set_flag(), pg_atomic_init_flag(), pg_atomic_clear_flag()
- * * PG_HAVE_8BYTE_SINGLE_COPY_ATOMICITY should be defined if appropriate.
- *
- * For new platforms, prefer using stdatomic.h if available, as it reduces
- * maintenance burden and leverages compiler-provided implementations.
+ * The only remaining hand-written platform hint is the CPU spin-delay
+ * instruction in port/spin_delay.h, which stdatomic.h does not cover.
  *
  * Use higher level functionality (lwlocks, spinlocks, heavyweight locks)
  * whenever possible. Writing correct code using these facilities is hard.
@@ -54,21 +37,10 @@
 #define ATOMICS_H
 
 /*
- * Frontend code restriction
- *
- * Traditionally, atomics.h could not be included from frontend code because
- * the platform-specific implementations often relied on backend-only features.
- *
- * With the stdatomic.h implementation, this restriction is no longer necessary
- * since stdatomic.h is a standard header. However, we keep the restriction for
- * the traditional implementation path to maintain compatibility.
+ * With the stdatomic.h implementation there is no longer any restriction on
+ * including atomics.h from frontend code, since stdatomic.h is a standard
+ * header with no backend-only dependencies.
  */
-#ifdef FRONTEND
-#ifndef USE_STDATOMIC_H
-#error "atomics.h may not be included from frontend code (use -Duse_stdatomic=yes if atomics are needed)"
-#endif
-#endif
-
 #define INSIDE_ATOMICS_H
 
 /*
@@ -83,125 +55,14 @@
 #include <limits.h>
 
 /*
- * PostgreSQL atomics can be implemented using either C11 stdatomic.h
- * or platform-specific implementations. The choice is made at build
- * configuration time via the USE_STDATOMIC_H preprocessor definition.
- *
- * When USE_STDATOMIC_H is defined, we use C11 <stdatomic.h> for all
- * atomic operations. This provides better portability and potentially
- * better compiler optimizations.
- *
- * When USE_STDATOMIC_H is not defined (default initially), we use
- * traditional platform-specific implementations (arch-*.h, generic-*.h)
- * that have been battle-tested in PostgreSQL for many years.
- *
- * Both paths provide identical public API and semantics.
+ * All atomic types and _impl operations come from C11 <stdatomic.h>, wrapped
+ * in stdatomic_impl.h.
  */
-
-#ifdef USE_STDATOMIC_H
-
-/*
- * C11 stdatomic.h implementation path
- *
- * This uses the standard C11 <stdatomic.h> header for atomic operations.
- * The type definitions and implementations are in stdatomic_impl.h.
- */
-
 #include "port/atomics/stdatomic_impl.h"
 
 /*
- * The public API is provided by static inline functions in the common code
- * section below. Those functions call _impl functions, which are provided by
- * stdatomic_impl.h for this path.
- */
-
-#else							/* !USE_STDATOMIC_H */
-
-/*
- * Traditional platform-specific implementation path
- *
- * This is the original PostgreSQL atomics implementation using
- * architecture-specific headers and compiler intrinsics.
- *
- * First a set of architecture specific files is included.
- *
- * These files can provide the full set of atomics or can do pretty much
- * nothing if all the compilers commonly used on these platforms provide
- * usable generics.
- *
- * Don't add an inline assembly of the actual atomic operations if all the
- * common implementations of your platform provide intrinsics. Intrinsics are
- * much easier to understand and potentially support more architectures.
- *
- * It will often make sense to define memory barrier semantics here, since
- * e.g. generic compiler intrinsics for x86 memory barriers can't know that
- * postgres doesn't need x86 read/write barriers do anything more than a
- * compiler barrier.
- *
- */
-#if defined(__arm__) || defined(__aarch64__)
-#include "port/atomics/arch-arm.h"
-#elif defined(__i386__) || defined(__x86_64__)
-#include "port/atomics/arch-x86.h"
-#elif defined(__powerpc__) || defined(__powerpc64__)
-#include "port/atomics/arch-ppc.h"
-#endif
-
-/*
- * Compiler specific, but architecture independent implementations.
- *
- * Provide architecture independent implementations of the atomic
- * facilities. At the very least compiler barriers should be provided, but a
- * full implementation of
- * * pg_compiler_barrier(), pg_write_barrier(), pg_read_barrier()
- * * pg_atomic_compare_exchange_u32(), pg_atomic_fetch_add_u32()
- * using compiler intrinsics are a good idea.
- */
-/*
- * gcc or compatible, including clang and icc.
- */
-#if defined(__GNUC__) || defined(__INTEL_COMPILER)
-#include "port/atomics/generic-gcc.h"
-#elif defined(_MSC_VER)
-#include "port/atomics/generic-msvc.h"
-#else
-/* Unknown compiler. */
-#endif
-
-/* Fail if we couldn't find implementations of required facilities. */
-#if !defined(PG_HAVE_ATOMIC_U32_SUPPORT)
-#error "could not find an implementation of pg_atomic_uint32"
-#endif
-#if !defined(pg_compiler_barrier_impl)
-#error "could not find an implementation of pg_compiler_barrier"
-#endif
-#if !defined(pg_memory_barrier_impl)
-#error "could not find an implementation of pg_memory_barrier_impl"
-#endif
-
-
-/*
- * Provide a spinlock-based implementation of the 64 bit variants, if
- * necessary.
- */
-#include "port/atomics/fallback.h"
-
-/*
- * Provide additional operations using supported infrastructure. These are
- * expected to be efficient if the underlying atomic operations are efficient.
- */
-#include "port/atomics/generic.h"
-
-#endif							/* USE_STDATOMIC_H */
-
-/*
- * Common code for both stdatomic.h and traditional implementations.
- *
- * The following definitions provide the public API that works identically
- * regardless of which implementation is used. The static inline functions
- * below call _impl functions which are provided by either stdatomic_impl.h
- * (when USE_STDATOMIC_H is defined) or the traditional implementation files
- * (generic.h, etc.) otherwise.
+ * The public API below is provided by static inline functions that call the
+ * _impl functions supplied by stdatomic_impl.h.
  */
 
 /*

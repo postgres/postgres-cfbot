@@ -52,11 +52,6 @@ option('PG_TEST_EXTRA', type: 'string', value: '',
 option('PG_GIT_REVISION', type: 'string', value: 'HEAD',
   description: 'git revision to be packaged by pgdist target')
 
-option('use_stdatomic', type: 'combo',
-  choices: ['auto', 'yes', 'no'],
-  value: 'no',
-  description: 'Use C11 stdatomic.h for atomic operations (auto, yes, no)')
-
 
 # Compilation options
 
