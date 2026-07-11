@@ -1945,6 +1945,21 @@ _bt_readnextpage(IndexScanDesc scan, BlockNumber blkno,
 		/* no matching tuples on this page */
 		_bt_relbuf(rel, so->currPos.buf);
 		seized = false;			/* released by _bt_readpage (or by us) */
+
+		/*
+		 * Give up if an opted-in planner scan (selfuncs.c) has now read too
+		 * many leaf pages without a match.  This bounds planning time when
+		 * the scanned end of the index is full of LP_DEAD-marked items.
+		 * (numNoMatchPages is only ever incremented here, so the first leaf
+		 * page, read by _bt_readfirstpage, never counts against the limit.)
+		 */
+		if (unlikely(scan->xs_index_pages_limit > 0) &&
+			++so->numNoMatchPages >= scan->xs_index_pages_limit)
+		{
+			BTScanPosInvalidate(so->currPos);
+			_bt_parallel_done(scan);
+			return false;
+		}
 	}
 
 	/*

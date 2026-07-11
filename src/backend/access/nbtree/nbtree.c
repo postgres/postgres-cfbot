@@ -363,6 +363,7 @@ btbeginscan(Relation rel, int nkeys, int norderbys)
 	so->arrayKeys = NULL;
 	so->orderProcs = NULL;
 	so->arrayContext = NULL;
+	so->numNoMatchPages = 0;
 
 	so->killedItems = NULL;		/* until needed */
 	so->numKilled = 0;
