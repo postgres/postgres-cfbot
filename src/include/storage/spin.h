@@ -28,10 +28,9 @@
  *	for a CHECK_FOR_INTERRUPTS() to occur while holding a spinlock, and so
  *	it is not necessary to do HOLD/RESUME_INTERRUPTS() in these functions.
  *
- *	These functions are implemented in terms of hardware-dependent macros
- *	supplied by s_lock.h.  There is not currently any extra functionality
- *	added by this header, but there has been in the past and may someday
- *	be again.
+ *	These functions are implemented on top of the C11 <stdatomic.h> atomic
+ *	operations in port/atomics.h; the contended-acquire slow path lives in
+ *	s_lock() in s_lock.c.
  *
  *
  * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
@@ -44,19 +43,17 @@
 #ifndef SPIN_H
 #define SPIN_H
 
-#ifdef USE_STDATOMIC_H
-
 /*
  * Atomics-based spinlocks.
  *
- * When stdatomic.h is available, spinlocks are implemented on top of a plain
- * 32-bit atomic rather than platform-specific TAS assembly.  We deliberately
- * do NOT use pg_atomic_flag: that type uses 1==unlocked so it can offer a
- * relaxed "unlocked test", whereas a spinlock must be usable when its memory
- * has merely been zeroed (much shared-memory state is set up with
+ * Spinlocks are implemented directly on top of a plain 32-bit atomic rather
+ * than platform-specific TAS assembly.  We deliberately do NOT use
+ * pg_atomic_flag: that type uses 1==unlocked so it can offer a relaxed
+ * "unlocked test", whereas a spinlock must be usable when its memory has
+ * merely been zeroed (a great deal of shared-memory state is set up with
  * memset(...,0,...) and then relies on embedded spinlocks reading as free).
  * So slock_t uses the traditional convention: 0 == unlocked, 1 == locked,
- * making a zero-initialized slock_t a valid, free lock.
+ * which makes a zero-initialized slock_t a valid, free lock.
  */
 #include "port/atomics.h"
 
@@ -111,33 +108,5 @@ SpinLockRelease(volatile slock_t *lock)
 	pg_write_barrier();
 	pg_atomic_write_u32(lock, 0);
 }
-
-#else							/* !USE_STDATOMIC_H */
-
-/*
- * Traditional spinlock implementation using platform-specific TAS assembly.
- * This branch is kept byte-for-byte equivalent to the pre-stdatomic spin.h.
- */
-#include "storage/s_lock.h"
-
-static inline void
-SpinLockInit(volatile slock_t *lock)
-{
-	S_INIT_LOCK(lock);
-}
-
-static inline void
-SpinLockAcquire(volatile slock_t *lock)
-{
-	S_LOCK(lock);
-}
-
-static inline void
-SpinLockRelease(volatile slock_t *lock)
-{
-	S_UNLOCK(lock);
-}
-
-#endif							/* USE_STDATOMIC_H */
 
 #endif							/* SPIN_H */

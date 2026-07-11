@@ -51,13 +51,9 @@
 #include <unistd.h>
 
 #include "common/pg_prng.h"
-#ifdef USE_STDATOMIC_H
 #include "port/atomics.h"
 #include "port/spin_delay.h"
 #include "storage/spin.h"
-#else
-#include "storage/s_lock.h"
-#endif
 #include "utils/wait_event.h"
 
 #define MIN_SPINS_PER_DELAY 10
@@ -65,17 +61,6 @@
 #define NUM_DELAYS			1000
 #define MIN_DELAY_USEC		1000L
 #define MAX_DELAY_USEC		1000000L
-
-#ifndef USE_STDATOMIC_H
-#ifdef S_LOCK_TEST
-/*
- * These are needed by pgstat_report_wait_start in the standalone compile of
- * s_lock_test.
- */
-static uint32 local_my_wait_event_info;
-uint32	   *my_wait_event_info = &local_my_wait_event_info;
-#endif
-#endif							/* !USE_STDATOMIC_H */
 
 static int	spins_per_delay = DEFAULT_SPINS_PER_DELAY;
 
@@ -88,18 +73,10 @@ s_lock_stuck(const char *file, int line, const char *func)
 {
 	if (!func)
 		func = "(unknown)";
-#if !defined(USE_STDATOMIC_H) && defined(S_LOCK_TEST)
-	fprintf(stderr,
-			"\nStuck spinlock detected at %s, %s:%d.\n",
-			func, file, line);
-	exit(1);
-#else
 	elog(PANIC, "stuck spinlock detected at %s, %s:%d",
 		 func, file, line);
-#endif
 }
 
-#ifdef USE_DEFAULT_S_LOCK
 /*
  * s_lock(lock) - platform-independent portion of waiting for a spinlock.
  */
@@ -110,7 +87,6 @@ s_lock(volatile slock_t *lock, const char *file, int line, const char *func)
 
 	init_spin_delay(&delayStatus, file, line, func);
 
-#ifdef USE_STDATOMIC_H
 	for (;;)
 	{
 		bool		try_to_set;
@@ -130,28 +106,11 @@ s_lock(volatile slock_t *lock, const char *file, int line, const char *func)
 			break;
 		perform_spin_delay(&delayStatus);
 	}
-#else							/* !USE_STDATOMIC_H */
-	while (TAS_SPIN(lock))
-	{
-		perform_spin_delay(&delayStatus);
-	}
-#endif							/* USE_STDATOMIC_H */
 
 	finish_spin_delay(&delayStatus);
 
 	return delayStatus.delays;
 }
-#endif
-
-#ifndef USE_STDATOMIC_H
-#ifdef USE_DEFAULT_S_UNLOCK
-void
-s_unlock(volatile slock_t *lock)
-{
-	*lock = 0;
-}
-#endif
-#endif							/* !USE_STDATOMIC_H */
 
 /*
  * Wait while spinning on a contended spinlock.
@@ -160,11 +119,7 @@ void
 perform_spin_delay(SpinDelayStatus *status)
 {
 	/* CPU-specific delay each time through the loop */
-#ifdef USE_STDATOMIC_H
 	pg_spin_delay();
-#else
-	SPIN_DELAY();
-#endif
 
 	/* Block the process every spins_per_delay tries */
 	if (++(status->spins) >= spins_per_delay)
@@ -186,11 +141,6 @@ perform_spin_delay(SpinDelayStatus *status)
 		pgstat_report_wait_start(WAIT_EVENT_SPIN_DELAY);
 		pg_usleep(status->cur_delay);
 		pgstat_report_wait_end();
-
-#if !defined(USE_STDATOMIC_H) && defined(S_LOCK_TEST)
-		fprintf(stdout, "*");
-		fflush(stdout);
-#endif
 
 		/* increase delay by a random fraction between 1X and 2X */
 		status->cur_delay += (int) (status->cur_delay *
@@ -267,74 +217,3 @@ update_spins_per_delay(int shared_spins_per_delay)
 	 */
 	return (shared_spins_per_delay * 15 + spins_per_delay) / 16;
 }
-
-
-/*****************************************************************************/
-#ifndef USE_STDATOMIC_H
-#if defined(S_LOCK_TEST)
-
-/*
- * test program for verifying a port's spinlock support.
- */
-
-struct test_lock_struct
-{
-	char		pad1;
-	slock_t		lock;
-	char		pad2;
-};
-
-volatile struct test_lock_struct test_lock;
-
-int
-main()
-{
-	pg_prng_seed(&pg_global_prng_state, (uint64) time(NULL));
-
-	test_lock.pad1 = test_lock.pad2 = 0x44;
-
-	S_INIT_LOCK(&test_lock.lock);
-
-	if (test_lock.pad1 != 0x44 || test_lock.pad2 != 0x44)
-	{
-		printf("S_LOCK_TEST: failed, declared datatype is wrong size\n");
-		return 1;
-	}
-
-	S_LOCK(&test_lock.lock);
-
-	if (test_lock.pad1 != 0x44 || test_lock.pad2 != 0x44)
-	{
-		printf("S_LOCK_TEST: failed, declared datatype is wrong size\n");
-		return 1;
-	}
-
-	S_UNLOCK(&test_lock.lock);
-
-	if (test_lock.pad1 != 0x44 || test_lock.pad2 != 0x44)
-	{
-		printf("S_LOCK_TEST: failed, declared datatype is wrong size\n");
-		return 1;
-	}
-
-	S_LOCK(&test_lock.lock);
-
-	if (test_lock.pad1 != 0x44 || test_lock.pad2 != 0x44)
-	{
-		printf("S_LOCK_TEST: failed, declared datatype is wrong size\n");
-		return 1;
-	}
-
-	printf("S_LOCK_TEST: this will print %d stars and then\n", NUM_DELAYS);
-	printf("             exit with a 'stuck spinlock' message\n");
-	printf("             if S_LOCK() and TAS() are working.\n");
-	fflush(stdout);
-
-	S_LOCK(&test_lock.lock);
-
-	printf("S_LOCK_TEST: failed, lock not locked\n");
-	return 1;
-}
-
-#endif							/* S_LOCK_TEST */
-#endif							/* !USE_STDATOMIC_H */
