@@ -146,6 +146,12 @@
       </row>
 
       <row>
+       <entry><type>json5</type></entry>
+       <entry></entry>
+       <entry>textual JSON5 data</entry>
+      </row>
+
+      <row>
        <entry><type>jsonb</type></entry>
        <entry></entry>
        <entry>binary JSON data, decomposed</entry>
