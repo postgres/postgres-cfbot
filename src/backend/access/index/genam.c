@@ -134,6 +134,7 @@ RelationGetIndexScan(Relation indexRelation, int nkeys, int norderbys)
 	scan->xs_name_cstring_cxt = NULL;
 
 	scan->xs_visited_pages_limit = 0;
+	scan->xs_index_pages_limit = 0;
 
 	return scan;
 }
