@@ -210,6 +210,7 @@
 #include "storage/lmgr.h"
 #include "storage/lwlock.h"
 #include "storage/procarray.h"
+#include "storage/read_stream.h"
 #include "storage/smgr.h"
 #include "storage/subsystems.h"
 #include "tcop/tcopprot.h"
@@ -710,6 +711,9 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 	BlockNumber numblocks = RelationGetNumberOfBlocksInFork(reln, forkNum);
 	char		activity[NAMEDATALEN * 2 + 128];
 	char	   *relns;
+	bool		success = true;
+	BlockRangeReadStreamPrivate p;
+	ReadStream *stream;
 
 	relns = get_namespace_name(RelationGetNamespace(reln));
 
@@ -738,9 +742,26 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 	 * start, which is safe since new blocks are created with checksums set
 	 * already due to the state being "inprogress-on".
 	 */
+	p.current_blocknum = 0;
+	p.last_exclusive = numblocks;
+
+	/*
+	 * It is safe to use batchmode as block_range_read_stream_cb takes no
+	 * locks.
+	 */
+	stream = read_stream_begin_relation(READ_STREAM_MAINTENANCE |
+										READ_STREAM_FULL |
+										READ_STREAM_USE_BATCHING,
+										strategy,
+										reln,
+										forkNum,
+										block_range_read_stream_cb,
+										&p,
+										0);
+
 	for (BlockNumber blknum = 0; blknum < numblocks; blknum++)
 	{
-		Buffer		buf = ReadBufferExtended(reln, forkNum, blknum, RBM_NORMAL, strategy);
+		Buffer		buf = read_stream_next_buffer(stream, NULL);
 
 		/* Need to get an exclusive lock to mark the buffer as dirty */
 		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
@@ -779,7 +800,10 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 		Assert(operation == ENABLE_DATACHECKSUMS);
 		CHECK_FOR_WORKER_ABORT_REQUEST();
 		if (abort_requested)
-			return false;
+		{
+			success = false;
+			break;
+		}
 
 		/* update the block counter */
 		pgstat_progress_update_param(PROGRESS_DATACHECKSUMS_BLOCKS_DONE,
@@ -792,7 +816,12 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 		vacuum_delay_point(false);
 	}
 
-	return true;
+	if (success)
+		Assert(read_stream_next_buffer(stream, NULL) == InvalidBuffer);
+
+	read_stream_end(stream);
+
+	return success;
 }
 
 /*
