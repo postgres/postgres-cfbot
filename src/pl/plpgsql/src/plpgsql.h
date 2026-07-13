@@ -435,6 +435,16 @@ typedef struct PLpgSQL_rec
 
 	/* We always store record variables as "expanded" records */
 	ExpandedRecordHeader *erh;
+
+	/*
+	 * Snapshot of tupDesc_identifier values for all composite types reachable
+	 * from the record's declared type (or, for RECORDOID variables, from the
+	 * type adopted from the assigned value).  Used to detect mid-transaction
+	 * ALTER TYPE.  Empty for anonymous rowtypes that cannot be versioned.
+	 */
+	int			nCompTypes;
+	Oid		   *compTypeOids;
+	uint64	   *compTypeVersions;
 } PLpgSQL_rec;
 
 /*
