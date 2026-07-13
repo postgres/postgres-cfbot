@@ -631,6 +631,7 @@ AggregateCreate(const char *aggName,
 							 PROVOLATILE_IMMUTABLE, /* volatility (not needed
 													 * for agg) */
 							 proparallel,
+							 false,	/* proerrorsafe */
 							 parameterTypes,	/* paramTypes */
 							 allParameterTypes, /* allParamTypes */
 							 parameterModes,	/* parameterModes */

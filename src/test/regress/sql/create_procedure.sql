@@ -1,6 +1,9 @@
 CALL nonexistent();  -- error
 CALL random();  -- error
 
+CREATE PROCEDURE ptest1(x text) LANGUAGE SQL ERROR SAFE AS $$ $$;
+CREATE PROCEDURE ptest1s(x text) LANGUAGE SQL ERROR SAFE BEGIN ATOMIC END;
+
 CREATE FUNCTION cp_testfunc1(a int) RETURNS int LANGUAGE SQL AS $$ SELECT a $$;
 
 CREATE TABLE cp_test (a int, b text);
@@ -244,6 +247,7 @@ CREATE PROCEDURE ptestx(a int DEFAULT 42, b OUT int) LANGUAGE SQL
   AS $$ SELECT a $$;
 
 ALTER PROCEDURE ptest1(text) STRICT;
+ALTER PROCEDURE ptest1(text) ERROR SAFE;
 ALTER FUNCTION ptest1(text) VOLATILE;  -- error: not a function
 ALTER PROCEDURE cp_testfunc1(int) VOLATILE;  -- error: not a procedure
 ALTER PROCEDURE nonexistent() VOLATILE;
