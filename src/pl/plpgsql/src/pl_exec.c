@@ -478,7 +478,6 @@ static void snapshot_record_composite_types(PLpgSQL_execstate *estate,
 											PLpgSQL_rec *rec);
 static void refresh_erh_tupdesc_id(ExpandedRecordHeader *erh);
 
-
 /* ----------
  * plpgsql_exec_function	Called by the call handler for
  *				function execution.
@@ -5490,9 +5489,9 @@ exec_eval_datum(PLpgSQL_execstate *estate,
 				else
 				{
 					/*
-					 * Check if the record's composite type was altered since
-					 * the record was populated.  This catches all output
-					 * paths: RETURN, RAISE, EXECUTE USING, etc.
+					 * Check if the record's composite type was altered
+					 * since the record was populated.  This catches all
+					 * output paths: RETURN, RAISE, EXECUTE USING, etc.
 					 */
 					if (!ExpandedRecordIsEmpty(rec->erh))
 						check_record_type_not_altered(rec);
@@ -9290,7 +9289,7 @@ format_preparedparamsdata(PLpgSQL_execstate *estate,
 										 convert_value_to_string(estate,
 																 prm->value,
 																 prm->ptype),
-											 -1);
+										 -1);
 	}
 
 	MemoryContextSwitchTo(oldcontext);
@@ -9421,27 +9420,64 @@ collect_composite_type_versions(Oid typid,
 	{
 		Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
 		Oid			attrtypid;
-		char		typtype;
 
 		if (attr->attisdropped)
 			continue;
 
 		attrtypid = attr->atttypid;
-		if (attrtypid == RECORDOID)
-			continue;
 
-		typtype = get_typtype(attrtypid);
-
-		/* Resolve domain types to their base type */
-		if (typtype == TYPTYPE_DOMAIN)
+		/*
+		 * A record field can reference a composite type directly, or wrap
+		 * one inside a domain or a container type (array, range, or
+		 * multirange).  ALTER TYPE on such an indirectly-referenced
+		 * composite must still be detected, so peel off domain and
+		 * container layers until we reach a composite type (which we
+		 * snapshot) or something that cannot contain one (which we skip).
+		 * This terminates because each peel step yields a strictly
+		 * "smaller" type.  Container element types cannot be self-referential.
+		 */
+		for (;;)
 		{
-			attrtypid = getBaseType(attrtypid);
-			typtype = get_typtype(attrtypid);
-		}
+			char		typtype = get_typtype(attrtypid);
+			Oid			elemtypid;
 
-		if (typtype == TYPTYPE_COMPOSITE)
-			collect_composite_type_versions(attrtypid,
-											oids, versions, n, alloc);
+			if (attrtypid == RECORDOID)
+				break;			/* anonymous rowtype: not versionable */
+
+			if (typtype == TYPTYPE_DOMAIN)
+			{
+				attrtypid = getBaseType(attrtypid);
+				continue;
+			}
+
+			if (typtype == TYPTYPE_COMPOSITE)
+			{
+				collect_composite_type_versions(attrtypid,
+												oids, versions, n, alloc);
+				break;
+			}
+
+			/* Array element type? */
+			elemtypid = get_element_type(attrtypid);
+
+			/* Otherwise a range's subtype? */
+			if (!OidIsValid(elemtypid))
+				elemtypid = get_range_subtype(attrtypid);
+
+			/* Otherwise a multirange's range's subtype? */
+			if (!OidIsValid(elemtypid) && typtype == TYPTYPE_MULTIRANGE)
+			{
+				Oid			rangetypid = get_multirange_range(attrtypid);
+
+				if (OidIsValid(rangetypid))
+					elemtypid = get_range_subtype(rangetypid);
+			}
+
+			if (!OidIsValid(elemtypid))
+				break;			/* not a composite-bearing type */
+
+			attrtypid = elemtypid;
+		}
 	}
 }
 
