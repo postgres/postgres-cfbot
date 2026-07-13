@@ -735,3 +735,61 @@ $$ language plpgsql;
 select bug19382_test_outer_reassign();
 drop function bug19382_test_outer_reassign();
 drop type bug19382_foo_outer_reassign cascade;
+
+-- Case 10: Generic RECORD variable assigned via ROW::foo cast
+-- The declared type is RECORDOID; effective type is discovered from the
+-- assigned value's er_typeid.  Must error, not crash.
+create type bug19382_foo6 as (a int, b int);
+create function bug19382_test_generic_record() returns record as $$
+declare r record;
+begin
+    r := row(123, power(2, 30)::int4)::bug19382_foo6;
+    alter type bug19382_foo6 alter attribute b type text;
+    return r;
+end;
+$$ language plpgsql;
+select bug19382_test_generic_record();
+drop function bug19382_test_generic_record();
+drop type bug19382_foo6 cascade;
+
+-- Case 11: Generic RECORD with nested composite alter
+create type bug19382_inner2 as (x int, y int);
+create type bug19382_outer2 as (a int, b bug19382_inner2);
+create function bug19382_test_generic_nested() returns record as $$
+declare r record;
+begin
+    r := row(1, row(10, power(2, 30)::int4)::bug19382_inner2)::bug19382_outer2;
+    alter type bug19382_inner2 alter attribute y type text;
+    return r;
+end;
+$$ language plpgsql;
+select bug19382_test_generic_nested();
+drop function bug19382_test_generic_nested();
+drop type bug19382_outer2 cascade;
+drop type bug19382_inner2 cascade;
+
+-- Case 12: Anonymous rowtype baseline (RECORDOID with no ::foo cast).
+-- Non-versionable rowtypes must not trigger a false positive.
+create function bug19382_test_anon_baseline() returns record as $$
+declare r record;
+begin
+    select 1 as a, 2 as b into r;
+    return r;
+end;
+$$ language plpgsql;
+select bug19382_test_anon_baseline();
+drop function bug19382_test_anon_baseline();
+
+-- Case 13: RAISE NOTICE with generic RECORD (RECORDOID + reader path).
+create type bug19382_foo7 as (a int, b int);
+create function bug19382_test_generic_raise() returns void as $$
+declare r record;
+begin
+    r := row(1, power(2, 30)::int4)::bug19382_foo7;
+    alter type bug19382_foo7 alter attribute b type text;
+    raise notice 'r = %', r;
+end;
+$$ language plpgsql;
+select bug19382_test_generic_raise();
+drop function bug19382_test_generic_raise();
+drop type bug19382_foo7 cascade;
