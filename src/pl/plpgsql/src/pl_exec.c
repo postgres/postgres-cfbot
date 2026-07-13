@@ -3305,7 +3305,7 @@ exec_stmt_return(PLpgSQL_execstate *estate, PLpgSQL_stmt_return *stmt)
 					 * the record was populated. If so, raise an error to
 					 * prevent crashes when outputting the record.
 					 */
-					if (rec->rectypeid != RECORDOID && rec->erh != NULL &&
+					if (rec->erh != NULL &&
 						!ExpandedRecordIsEmpty(rec->erh))
 						check_record_type_not_altered(rec);
 
@@ -3469,7 +3469,7 @@ exec_stmt_return_next(PLpgSQL_execstate *estate,
 					 * the record was populated. If so, raise an error to
 					 * prevent crashes when storing to the tuplestore.
 					 */
-					if (rec->rectypeid != RECORDOID && rec->erh != NULL)
+					if (rec->erh != NULL && !ExpandedRecordIsEmpty(rec->erh))
 						check_record_type_not_altered(rec);
 
 					/* If rec is null, try to convert it to a row of nulls */
@@ -5494,8 +5494,7 @@ exec_eval_datum(PLpgSQL_execstate *estate,
 					 * the record was populated.  This catches all output
 					 * paths: RETURN, RAISE, EXECUTE USING, etc.
 					 */
-					if (rec->rectypeid != RECORDOID &&
-						!ExpandedRecordIsEmpty(rec->erh))
+					if (!ExpandedRecordIsEmpty(rec->erh))
 						check_record_type_not_altered(rec);
 
 					if (ExpandedRecordIsEmpty(rec->erh))
@@ -9321,8 +9320,17 @@ check_record_type_not_altered(PLpgSQL_rec *rec)
 	Oid			check_typid;
 	int			i;
 
-	/* Nothing to do for anonymous RECORD type */
-	if (rec->rectypeid == RECORDOID)
+	/*
+	 * Determine the effective type to check.  For a variable declared as
+	 * generic RECORD, use the ExpandedRecord's actual type once it's been
+	 * assigned.  If that too is RECORDOID (truly anonymous rowtype), there
+	 * is nothing to check because such rowtypes are not versioned.
+	 */
+	if (rec->rectypeid != RECORDOID)
+		check_typid = rec->rectypeid;
+	else if (rec->erh != NULL && rec->erh->er_typeid != RECORDOID)
+		check_typid = rec->erh->er_typeid;
+	else
 		return;
 
 	/*
@@ -9331,7 +9339,6 @@ check_record_type_not_altered(PLpgSQL_rec *rec)
 	 * because er_tupdesc_id is set when the ExpandedRecord is created.
 	 * Resolve domain types to their base composite type first.
 	 */
-	check_typid = rec->rectypeid;
 	if (get_typtype(check_typid) == TYPTYPE_DOMAIN)
 		check_typid = getBaseType(check_typid);
 
@@ -9445,19 +9452,34 @@ collect_composite_type_versions(Oid typid,
  * reachable from the record's declared type.  Called when a record variable
  * is assigned a new value, so that check_record_type_not_altered() can
  * detect mid-transaction ALTER TYPE at RETURN time.
+ *
+ * For a variable declared as generic RECORD (rectypeid == RECORDOID), the
+ * effective root type is taken from the ExpandedRecord's er_typeid, which
+ * reflects the actual composite type adopted from the assigned value.  If
+ * that too is RECORDOID (truly anonymous rowtype), no snapshot is taken
+ * because such rowtypes are not versioned by the type cache.
  */
 static void
 snapshot_record_composite_types(PLpgSQL_execstate *estate,
 								PLpgSQL_rec *rec)
 {
 	MemoryContext oldcxt;
+	Oid			root_typid;
 	int			alloc = 8;
 	int			n = 0;
 	Oid		   *oids;
 	uint64	   *versions;
 
-	/* Nothing to do for anonymous RECORD type */
-	if (rec->rectypeid == RECORDOID)
+	/*
+	 * Determine the effective root type.  For a variable declared as generic
+	 * RECORD, use the ExpandedRecord's actual type once it's been assigned.
+	 * Truly anonymous rowtypes (er_typeid still RECORDOID) cannot be tracked.
+	 */
+	if (rec->rectypeid != RECORDOID)
+		root_typid = rec->rectypeid;
+	else if (rec->erh != NULL && rec->erh->er_typeid != RECORDOID)
+		root_typid = rec->erh->er_typeid;
+	else
 	{
 		rec->nCompTypes = 0;
 		return;
@@ -9467,7 +9489,7 @@ snapshot_record_composite_types(PLpgSQL_execstate *estate,
 	oids = palloc(alloc * sizeof(Oid));
 	versions = palloc(alloc * sizeof(uint64));
 
-	collect_composite_type_versions(rec->rectypeid,
+	collect_composite_type_versions(root_typid,
 									&oids, &versions, &n, &alloc);
 
 	MemoryContextSwitchTo(oldcxt);
