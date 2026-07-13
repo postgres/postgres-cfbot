@@ -698,3 +698,40 @@ select bug19382_test_var_copy();
 drop function bug19382_test_var_copy();
 drop type bug19382_outer4 cascade;
 drop type bug19382_inner4 cascade;
+
+-- Case 9: Whole-record reassignment after inner-type alter.
+-- The second assignment builds fresh data matching the post-ALTER type;
+-- the snapshot must refresh so the reassignment succeeds.
+create type bug19382_inner3 as (x int, y int);
+create type bug19382_outer3 as (a int, b bug19382_inner3);
+create function bug19382_test_reassign() returns bug19382_outer3 as $$
+declare r bug19382_outer3;
+begin
+    r := row(1, row(10, 20)::bug19382_inner3)::bug19382_outer3;
+    alter type bug19382_inner3 alter attribute y type text;
+    r := row(1, row(10, 'hello')::bug19382_inner3)::bug19382_outer3;
+    return r;
+end;
+$$ language plpgsql;
+select bug19382_test_reassign();
+drop function bug19382_test_reassign();
+drop type bug19382_outer3 cascade;
+drop type bug19382_inner3 cascade;
+
+-- Case 9 (outer-type variant): Whole-record reassignment after ALTER TYPE on
+-- the record's own type.  The reassigned bytes match the post-ALTER definition;
+-- the outer-type identifier (er_tupdesc_id) on the ExpandedRecord must be
+-- refreshed so check_record_type_not_altered() does not falsely reject.
+create type bug19382_foo_outer_reassign as (a int, b int);
+create function bug19382_test_outer_reassign() returns bug19382_foo_outer_reassign as $$
+declare r bug19382_foo_outer_reassign;
+begin
+    r := row(1, 2)::bug19382_foo_outer_reassign;
+    alter type bug19382_foo_outer_reassign alter attribute b type text;
+    r := row(1, 'hello')::bug19382_foo_outer_reassign;
+    return r;
+end;
+$$ language plpgsql;
+select bug19382_test_outer_reassign();
+drop function bug19382_test_outer_reassign();
+drop type bug19382_foo_outer_reassign cascade;
