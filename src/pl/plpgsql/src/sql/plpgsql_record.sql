@@ -577,3 +577,124 @@ insert into two_int8s_tab values (compresult(42));
 -- reconnect so we lose any local knowledge of anonymous record types
 \c -
 table two_int8s_tab;
+-- Tests for bug #19382: server crash when ALTER TYPE is used mid-transaction
+-- in PL/pgSQL. Record variables populated before ALTER TYPE must not be
+-- returned, as the stored data no longer matches the current type definition.
+
+-- Case 1: Direct composite type change (INT -> TEXT)
+create type bug19382_foo as (a int, b int);
+create function bug19382_test_direct() returns record as $$
+declare r bug19382_foo := row(123, power(2, 30));
+begin
+    alter type bug19382_foo alter attribute b type text;
+    return r;
+end;
+$$ language plpgsql;
+select bug19382_test_direct();
+drop function bug19382_test_direct();
+drop type bug19382_foo cascade;
+
+-- Case 2: Nested composite type change
+create type bug19382_inner as (x int, y int);
+create type bug19382_outer as (a int, b bug19382_inner);
+create function bug19382_test_nested() returns record as $$
+declare r bug19382_outer;
+begin
+    r := row(1, row(10, power(2, 30)::int4)::bug19382_inner)::bug19382_outer;
+    alter type bug19382_inner alter attribute y type text;
+    return r;
+end;
+$$ language plpgsql;
+select bug19382_test_nested();
+drop function bug19382_test_nested();
+drop type bug19382_outer cascade;
+drop type bug19382_inner cascade;
+
+-- Case 3: OUT parameter
+create type bug19382_foo1 as (a int, b int);
+create function bug19382_test_out(out r1 bug19382_foo1) as $$
+begin
+    r1 := row(1, 2);
+    alter type bug19382_foo1 alter attribute b type text;
+    return;
+end;
+$$ language plpgsql;
+select bug19382_test_out();
+drop function bug19382_test_out();
+drop type bug19382_foo1 cascade;
+
+-- Case 4: No ALTER TYPE (baseline — must not error)
+create type bug19382_foo2 as (a int, b int);
+create function bug19382_test_baseline() returns bug19382_foo2 as $$
+declare r bug19382_foo2 := row(1, 2);
+begin
+    return r;
+end;
+$$ language plpgsql;
+select bug19382_test_baseline();
+drop function bug19382_test_baseline();
+drop type bug19382_foo2;
+
+-- Case 5: Field-by-field assignment (dot notation)
+create type bug19382_foo3 as (a int, b int);
+create function bug19382_test_field_assign() returns record as $$
+declare r bug19382_foo3;
+begin
+    r.a := 123;
+    r.b := power(2, 30)::int4;
+    alter type bug19382_foo3 alter attribute b type text;
+    return r;
+end;
+$$ language plpgsql;
+select bug19382_test_field_assign();
+drop function bug19382_test_field_assign();
+drop type bug19382_foo3 cascade;
+
+-- Case 6: SELECT INTO individual fields
+create type bug19382_foo4 as (a int, b int);
+create table bug19382_tbl (a int, b int);
+insert into bug19382_tbl values (123, power(2, 30)::int4);
+create function bug19382_test_select_into_field() returns record as $$
+declare r bug19382_foo4;
+begin
+    select a, b into r.a, r.b from bug19382_tbl;
+    alter type bug19382_foo4 alter attribute b type text;
+    return r;
+end;
+$$ language plpgsql;
+select bug19382_test_select_into_field();
+drop function bug19382_test_select_into_field();
+drop table bug19382_tbl;
+drop type bug19382_foo4 cascade;
+
+-- Case 7: RAISE NOTICE with record variable (exec_eval_datum path)
+create type bug19382_foo5 as (a int, b int);
+create function bug19382_test_eval_datum() returns void as $$
+declare r bug19382_foo5;
+begin
+    r.b := power(2, 30)::int4;
+    alter type bug19382_foo5 alter attribute b type text;
+    raise notice 'r = %', r;
+end;
+$$ language plpgsql;
+select bug19382_test_eval_datum();
+drop function bug19382_test_eval_datum();
+drop type bug19382_foo5 cascade;
+
+-- Case 8: Variable-to-variable copy after inner-type alter.
+-- Reading r1 as an rvalue must detect the stale nested type.
+create type bug19382_inner4 as (x int, y int);
+create type bug19382_outer4 as (a int, b bug19382_inner4);
+create function bug19382_test_var_copy() returns bug19382_outer4 as $$
+declare r1 bug19382_outer4; r2 bug19382_outer4;
+begin
+    r1 := row(1, row(10, power(2, 30)::int4)::bug19382_inner4)::bug19382_outer4;
+    alter type bug19382_inner4 alter attribute y type text;
+    r2 := r1;
+    return r2;
+end;
+$$ language plpgsql;
+select bug19382_test_var_copy();
+drop function bug19382_test_var_copy();
+drop type bug19382_outer4 cascade;
+drop type bug19382_inner4 cascade;
