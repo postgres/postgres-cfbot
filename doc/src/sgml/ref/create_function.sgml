@@ -33,6 +33,7 @@ CREATE [ OR REPLACE ] FUNCTION
     | { CALLED ON NULL INPUT | RETURNS NULL ON NULL INPUT | STRICT }
     | { [ EXTERNAL ] SECURITY INVOKER | [ EXTERNAL ] SECURITY DEFINER }
     | PARALLEL { UNSAFE | RESTRICTED | SAFE }
+    | ERROR { UNSAFE | SAFE }
     | COST <replaceable class="parameter">execution_cost</replaceable>
     | ROWS <replaceable class="parameter">result_rows</replaceable>
     | SUPPORT <replaceable class="parameter">support_function</replaceable>
@@ -462,6 +463,21 @@ CREATE [ OR REPLACE ] FUNCTION
      </para>
     </listitem>
    </varlistentry>
+
+    <varlistentry>
+     <term><literal>ERROR</literal></term>
+
+     <listitem>
+      <para>
+       <literal>ERROR UNSAFE</literal> indicates that the function aborts the
+       transaction when an error is encountered. This is the default behavior.
+       <literal>ERROR SAFE</literal> indicates that the function can report an
+       invalid result as a <quote>soft</quote> error instead of aborting the
+       transaction. Otherwise, an invalid result causes the transaction to
+       abort, just as it would if the function were processed normally.
+      </para>
+     </listitem>
+    </varlistentry>
 
     <varlistentry>
      <term><literal>COST</literal> <replaceable class="parameter">execution_cost</replaceable></term>
