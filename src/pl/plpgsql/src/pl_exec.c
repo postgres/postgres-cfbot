@@ -476,6 +476,7 @@ static void collect_composite_type_versions(Oid typid,
 											int *n, int *alloc);
 static void snapshot_record_composite_types(PLpgSQL_execstate *estate,
 											PLpgSQL_rec *rec);
+static void refresh_erh_tupdesc_id(ExpandedRecordHeader *erh);
 
 
 /* ----------
@@ -7799,6 +7800,16 @@ exec_move_row_from_datum(PLpgSQL_execstate *estate,
 			{
 				expanded_record_set_tuple(rec->erh, erh->fvalue,
 										  true, !estate->atomic);
+				/*
+				 * The tuple bytes were replaced in place.  Refresh the
+				 * outer-type identifier and the composite-type snapshot so
+				 * that check_record_type_not_altered() compares against the
+				 * current type cache: a whole-record reassignment installs
+				 * bytes built under the current type, so any residual stale
+				 * versioning from ER creation would produce false positives.
+				 */
+				refresh_erh_tupdesc_id(rec->erh);
+				snapshot_record_composite_types(estate, rec);
 				return;
 			}
 
@@ -7913,6 +7924,9 @@ exec_move_row_from_datum(PLpgSQL_execstate *estate,
 			{
 				expanded_record_set_tuple(rec->erh, &tmptup,
 										  true, !estate->atomic);
+				/* See comment in the analogous branch above. */
+				refresh_erh_tupdesc_id(rec->erh);
+				snapshot_record_composite_types(estate, rec);
 				return;
 			}
 
@@ -9478,4 +9492,36 @@ snapshot_record_composite_types(PLpgSQL_execstate *estate,
 		rec->compTypeOids = NULL;
 		rec->compTypeVersions = NULL;
 	}
+}
+
+/*
+ * refresh_erh_tupdesc_id
+ *
+ * When an ExpandedRecord's tuple bytes are replaced in place (via
+ * expanded_record_set_tuple) with fresh data built under the current type
+ * definition, its er_tupdesc_id is left at the value assigned when the ER was
+ * created.  That value becomes stale after mid-transaction ALTER TYPE, causing
+ * check_record_type_not_altered() to falsely reject the freshly-installed
+ * bytes as if they still reflected the old definition.
+ *
+ * Refresh er_tupdesc_id from the current type cache so the subsequent outer-
+ * type check compares current-vs-current.  Only whole-record replacement paths
+ * should call this; field-level writes must leave er_tupdesc_id stale so the
+ * check still fires on the unwritten fields that hold pre-ALTER bytes.
+ */
+static void
+refresh_erh_tupdesc_id(ExpandedRecordHeader *erh)
+{
+	Oid			resolved;
+	TypeCacheEntry *typentry;
+
+	if (erh->er_typeid == RECORDOID)
+		return;					/* anonymous rowtype: not versionable */
+
+	resolved = erh->er_typeid;
+	if (get_typtype(resolved) == TYPTYPE_DOMAIN)
+		resolved = getBaseType(resolved);
+
+	typentry = lookup_type_cache(resolved, TYPECACHE_TUPDESC);
+	erh->er_tupdesc_id = typentry->tupDesc_identifier;
 }
