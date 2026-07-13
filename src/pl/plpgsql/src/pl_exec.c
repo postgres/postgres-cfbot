@@ -470,6 +470,13 @@ static char *format_preparedparamsdata(PLpgSQL_execstate *estate,
 static PLpgSQL_variable *make_callstmt_target(PLpgSQL_execstate *estate,
 											  PLpgSQL_expr *expr);
 
+static void check_record_type_not_altered(PLpgSQL_rec *rec);
+static void collect_composite_type_versions(Oid typid,
+											Oid **oids, uint64 **versions,
+											int *n, int *alloc);
+static void snapshot_record_composite_types(PLpgSQL_execstate *estate,
+											PLpgSQL_rec *rec);
+
 
 /* ----------
  * plpgsql_exec_function	Called by the call handler for
@@ -3287,8 +3294,30 @@ exec_stmt_return(PLpgSQL_execstate *estate, PLpgSQL_stmt_return *stmt)
 				}
 				break;
 
-			case PLPGSQL_DTYPE_ROW:
 			case PLPGSQL_DTYPE_REC:
+				{
+					PLpgSQL_rec *rec = (PLpgSQL_rec *) retvar;
+					int32		rettypmod;
+
+					/*
+					 * Check if the record's composite type was altered since
+					 * the record was populated. If so, raise an error to
+					 * prevent crashes when outputting the record.
+					 */
+					if (rec->rectypeid != RECORDOID && rec->erh != NULL &&
+						!ExpandedRecordIsEmpty(rec->erh))
+						check_record_type_not_altered(rec);
+
+					exec_eval_datum(estate,
+									retvar,
+									&estate->rettype,
+									&rettypmod,
+									&estate->retval,
+									&estate->retisnull);
+				}
+				break;
+
+			case PLPGSQL_DTYPE_ROW:
 				{
 					/* exec_eval_datum can handle these cases */
 					int32		rettypmod;
@@ -3433,6 +3462,14 @@ exec_stmt_return_next(PLpgSQL_execstate *estate,
 					PLpgSQL_rec *rec = (PLpgSQL_rec *) retvar;
 					TupleDesc	rec_tupdesc;
 					TupleConversionMap *tupmap;
+
+					/*
+					 * Check if the record's composite type was altered since
+					 * the record was populated. If so, raise an error to
+					 * prevent crashes when storing to the tuplestore.
+					 */
+					if (rec->rectypeid != RECORDOID && rec->erh != NULL)
+						check_record_type_not_altered(rec);
 
 					/* If rec is null, try to convert it to a row of nulls */
 					if (rec->erh == NULL)
@@ -5451,6 +5488,15 @@ exec_eval_datum(PLpgSQL_execstate *estate,
 				}
 				else
 				{
+					/*
+					 * Check if the record's composite type was altered since
+					 * the record was populated.  This catches all output
+					 * paths: RETURN, RAISE, EXECUTE USING, etc.
+					 */
+					if (rec->rectypeid != RECORDOID &&
+						!ExpandedRecordIsEmpty(rec->erh))
+						check_record_type_not_altered(rec);
+
 					if (ExpandedRecordIsEmpty(rec->erh))
 					{
 						/* Empty record is also a NULL */
@@ -7042,6 +7088,14 @@ exec_move_row(PLpgSQL_execstate *estate,
 				if (rec->erh)
 					DeleteExpandedObject(ExpandedRecordGetDatum(rec->erh));
 				rec->erh = NULL;
+				/* Clear composite type snapshot */
+				if (rec->compTypeOids)
+					pfree(rec->compTypeOids);
+				if (rec->compTypeVersions)
+					pfree(rec->compTypeVersions);
+				rec->nCompTypes = 0;
+				rec->compTypeOids = NULL;
+				rec->compTypeVersions = NULL;
 			}
 			return;
 		}
@@ -7925,6 +7979,9 @@ instantiate_empty_record_variable(PLpgSQL_execstate *estate, PLpgSQL_rec *rec)
 	/* OK, do it */
 	rec->erh = make_expanded_record_from_typeid(rec->rectypeid, -1,
 												estate->datum_context);
+
+	/* Snapshot composite type versions for ALTER TYPE detection */
+	snapshot_record_composite_types(estate, rec);
 }
 
 /* ----------
@@ -8975,6 +9032,9 @@ assign_record_var(PLpgSQL_execstate *estate, PLpgSQL_rec *rec,
 
 	/* ... and install the new */
 	rec->erh = erh;
+
+	/* Snapshot composite type versions for ALTER TYPE detection */
+	snapshot_record_composite_types(estate, rec);
 }
 
 /*
@@ -9217,10 +9277,205 @@ format_preparedparamsdata(PLpgSQL_execstate *estate,
 										 convert_value_to_string(estate,
 																 prm->value,
 																 prm->ptype),
-										 -1);
+											 -1);
 	}
 
 	MemoryContextSwitchTo(oldcontext);
 
 	return paramstr.data;
+}
+
+/*
+ * check_record_type_not_altered
+ *
+ * Check if any composite type reachable from this record's type has been
+ * altered since the record was populated.  If so, raise an error to prevent
+ * crashes that would occur when outputting data that no longer matches the
+ * current type definition.
+ *
+ * The outermost type is always checked using er_tupdesc_id (which is set
+ * when the ExpandedRecord is created and works regardless of how the record
+ * was populated, whether by whole assignment, field assignment, etc.).
+ *
+ * Nested composite types are checked against the snapshot taken at record
+ * assignment time, if available.
+ */
+static void
+check_record_type_not_altered(PLpgSQL_rec *rec)
+{
+	TypeCacheEntry *typentry;
+	Oid			check_typid;
+	int			i;
+
+	/* Nothing to do for anonymous RECORD type */
+	if (rec->rectypeid == RECORDOID)
+		return;
+
+	/*
+	 * Always check outermost type using er_tupdesc_id.  This works for all
+	 * code paths (whole assignment, field assignment, SELECT INTO, etc.)
+	 * because er_tupdesc_id is set when the ExpandedRecord is created.
+	 * Resolve domain types to their base composite type first.
+	 */
+	check_typid = rec->rectypeid;
+	if (get_typtype(check_typid) == TYPTYPE_DOMAIN)
+		check_typid = getBaseType(check_typid);
+
+	typentry = lookup_type_cache(check_typid, TYPECACHE_TUPDESC);
+
+	if (rec->erh->er_tupdesc_id != typentry->tupDesc_identifier)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("cannot return record variable \"%s\" after composite type \"%s\" was altered",
+						rec->refname,
+						format_type_be(check_typid))));
+
+	/*
+	 * If we have a snapshot of nested composite types (taken at whole-record
+	 * assignment time), check those too.  Skip index 0 since that's the
+	 * outermost type we already checked above.
+	 */
+	for (i = 1; i < rec->nCompTypes; i++)
+	{
+		typentry = lookup_type_cache(rec->compTypeOids[i], TYPECACHE_TUPDESC);
+
+		if (typentry->tupDesc_identifier != rec->compTypeVersions[i])
+			ereport(ERROR,
+					(errcode(ERRCODE_DATATYPE_MISMATCH),
+					 errmsg("cannot return record variable \"%s\" after composite type \"%s\" was altered",
+							rec->refname,
+							format_type_be(rec->compTypeOids[i]))));
+	}
+}
+
+/*
+ * collect_composite_type_versions
+ *
+ * Recursively collect tupDesc_identifier values for a composite type and
+ * all composite types reachable from its attributes.  Skips anonymous
+ * RECORD types and types already recorded (to prevent infinite recursion).
+ *
+ * oids/versions arrays are repalloc'd as needed; n/alloc updated in place.
+ */
+static void
+collect_composite_type_versions(Oid typid,
+								Oid **oids, uint64 **versions,
+								int *n, int *alloc)
+{
+	TypeCacheEntry *typentry;
+	TupleDesc	tupdesc;
+	int			i;
+
+	/* Resolve domain types to their base composite type */
+	if (get_typtype(typid) == TYPTYPE_DOMAIN)
+		typid = getBaseType(typid);
+
+	/* Skip if already recorded */
+	for (i = 0; i < *n; i++)
+	{
+		if ((*oids)[i] == typid)
+			return;
+	}
+
+	typentry = lookup_type_cache(typid, TYPECACHE_TUPDESC);
+
+	/* Grow arrays if needed */
+	if (*n >= *alloc)
+	{
+		*alloc *= 2;
+		*oids = repalloc(*oids, *alloc * sizeof(Oid));
+		*versions = repalloc(*versions, *alloc * sizeof(uint64));
+	}
+
+	(*oids)[*n] = typid;
+	(*versions)[*n] = typentry->tupDesc_identifier;
+	(*n)++;
+
+	tupdesc = typentry->tupDesc;
+	if (tupdesc == NULL)
+		return;
+
+	/* Recurse into composite-type attributes */
+	for (i = 0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+		Oid			attrtypid;
+		char		typtype;
+
+		if (attr->attisdropped)
+			continue;
+
+		attrtypid = attr->atttypid;
+		if (attrtypid == RECORDOID)
+			continue;
+
+		typtype = get_typtype(attrtypid);
+
+		/* Resolve domain types to their base type */
+		if (typtype == TYPTYPE_DOMAIN)
+		{
+			attrtypid = getBaseType(attrtypid);
+			typtype = get_typtype(attrtypid);
+		}
+
+		if (typtype == TYPTYPE_COMPOSITE)
+			collect_composite_type_versions(attrtypid,
+											oids, versions, n, alloc);
+	}
+}
+
+/*
+ * snapshot_record_composite_types
+ *
+ * Take a snapshot of tupDesc_identifier values for all composite types
+ * reachable from the record's declared type.  Called when a record variable
+ * is assigned a new value, so that check_record_type_not_altered() can
+ * detect mid-transaction ALTER TYPE at RETURN time.
+ */
+static void
+snapshot_record_composite_types(PLpgSQL_execstate *estate,
+								PLpgSQL_rec *rec)
+{
+	MemoryContext oldcxt;
+	int			alloc = 8;
+	int			n = 0;
+	Oid		   *oids;
+	uint64	   *versions;
+
+	/* Nothing to do for anonymous RECORD type */
+	if (rec->rectypeid == RECORDOID)
+	{
+		rec->nCompTypes = 0;
+		return;
+	}
+
+	oldcxt = MemoryContextSwitchTo(estate->datum_context);
+	oids = palloc(alloc * sizeof(Oid));
+	versions = palloc(alloc * sizeof(uint64));
+
+	collect_composite_type_versions(rec->rectypeid,
+									&oids, &versions, &n, &alloc);
+
+	MemoryContextSwitchTo(oldcxt);
+
+	if (n > 0)
+	{
+		/* Free previous snapshot if any */
+		if (rec->compTypeOids)
+			pfree(rec->compTypeOids);
+		if (rec->compTypeVersions)
+			pfree(rec->compTypeVersions);
+
+		rec->nCompTypes = n;
+		rec->compTypeOids = oids;
+		rec->compTypeVersions = versions;
+	}
+	else
+	{
+		pfree(oids);
+		pfree(versions);
+		rec->nCompTypes = 0;
+		rec->compTypeOids = NULL;
+		rec->compTypeVersions = NULL;
+	}
 }
