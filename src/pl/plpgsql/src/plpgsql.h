@@ -437,10 +437,9 @@ typedef struct PLpgSQL_rec
 	ExpandedRecordHeader *erh;
 
 	/*
-	 * Snapshot of tupDesc_identifier values for all composite types reachable
-	 * from the record's declared type (or, for RECORDOID variables, from the
-	 * type adopted from the assigned value).  Used to detect mid-transaction
-	 * ALTER TYPE.  Empty for anonymous rowtypes that cannot be versioned.
+	 * Composite type version snapshot for ALTER TYPE detection.
+	 * Populated when the record is assigned; checked at RETURN time.
+	 * Includes the outermost type and all nested composite types.
 	 */
 	int			nCompTypes;
 	Oid		   *compTypeOids;

@@ -1127,3 +1127,45 @@ ERROR:  cannot return record variable "r" after composite type "bug19382_foo7" w
 CONTEXT:  PL/pgSQL function bug19382_test_generic_raise() line 6 at RAISE
 drop function bug19382_test_generic_raise();
 drop type bug19382_foo7 cascade;
+-- Case 14: composite type reachable through an array attribute.
+-- The element composite type must be tracked even though the attribute's
+-- own type is an array; otherwise ALTER TYPE on the element goes undetected
+-- and record_out() crashes reinterpreting the stored bytes.
+create type bug19382_elem as (f1 int);
+create type bug19382_arrparent as (arr bug19382_elem[]);
+create function bug19382_test_array_elem() returns bug19382_arrparent as $$
+declare r bug19382_arrparent;
+begin
+    r := row(array[row(power(2, 30)::int4)::bug19382_elem]::bug19382_elem[])::bug19382_arrparent;
+    alter type bug19382_elem alter attribute f1 type text;
+    return r;
+end;
+$$ language plpgsql;
+select bug19382_test_array_elem();
+ERROR:  cannot return record variable "r" after composite type "bug19382_elem" was altered
+CONTEXT:  PL/pgSQL function bug19382_test_array_elem() line 6 at RETURN
+drop function bug19382_test_array_elem();
+drop type bug19382_arrparent cascade;
+drop type bug19382_elem cascade;
+-- Case 15: array element composite, whole-record reassignment after ALTER
+-- with fresh matching data must succeed (no false positive on arrays).
+create type bug19382_elem2 as (f1 int);
+create type bug19382_arrparent2 as (arr bug19382_elem2[]);
+create function bug19382_test_array_reassign() returns bug19382_arrparent2 as $$
+declare r bug19382_arrparent2;
+begin
+    r := row(array[row(1)::bug19382_elem2]::bug19382_elem2[])::bug19382_arrparent2;
+    alter type bug19382_elem2 add attribute f2 text;
+    r := row(array[row(1, 'hi')::bug19382_elem2]::bug19382_elem2[])::bug19382_arrparent2;
+    return r;
+end;
+$$ language plpgsql;
+select bug19382_test_array_reassign();
+ bug19382_test_array_reassign 
+------------------------------
+ ("{""(1,hi)""}")
+(1 row)
+
+drop function bug19382_test_array_reassign();
+drop type bug19382_arrparent2 cascade;
+drop type bug19382_elem2 cascade;
