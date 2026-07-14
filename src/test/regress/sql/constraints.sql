@@ -166,6 +166,23 @@ CREATE TABLE SYS_COL_CHECK_TBL (city text, state text, is_capital bool,
 				  CHECK (NOT (is_capital AND ctid::text = 'sys_col_check_tbl')));
 
 --
+-- Drop column should also drop all check constraints that contains whole-row references
+--
+-- Change column data type should fail since whole-row referenced check constraint still exists
+--
+-- No need to worry about partitioned tables, since the whole-row check constraint
+-- can not span multi relations
+CREATE TABLE wholerow_check_tbl (
+    city int,
+    state int,
+    CONSTRAINT cc0 CHECK (wholerow_check_tbl is null) NOT ENFORCED,
+    CONSTRAINT cc1 CHECK (wholerow_check_tbl is not null) NOT ENFORCED);
+ALTER TABLE wholerow_check_tbl ALTER COLUMN city SET DATA TYPE INT8; -- error
+ALTER TABLE wholerow_check_tbl DROP COLUMN city; -- ok
+\d wholerow_check_tbl
+DROP TABLE wholerow_check_tbl;
+
+--
 -- Check inheritance of defaults and constraints
 --
 
