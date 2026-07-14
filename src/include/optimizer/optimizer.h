@@ -206,6 +206,7 @@ extern SortGroupClause *get_sortgroupref_clause_noerr(Index sortref,
 extern Bitmapset *pull_varnos(PlannerInfo *root, Node *node);
 extern Bitmapset *pull_varnos_of_level(PlannerInfo *root, Node *node, int levelsup);
 extern void pull_varattnos(Node *node, Index varno, Bitmapset **varattnos);
+extern bool expr_contain_wholerow(Node *node, Oid reltypid);
 extern List *pull_vars_of_level(Node *node, int levelsup);
 extern bool contain_var_clause(Node *node);
 extern bool contain_vars_of_level(Node *node, int levelsup);
