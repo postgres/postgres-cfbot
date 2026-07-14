@@ -5121,6 +5121,110 @@ WHERE ...
    </para>
   </sect1>
 
+  <sect1 id="datatype-copy_error_saving">
+   <title><type>copy_error_saving</type> Type</title>
+   <indexterm zone="datatype-copy_error_saving">
+    <primary>copy_error_saving</primary>
+   </indexterm>
+
+   <para>
+    The built-in composite type <type>copy_error_saving</type> is used by the
+    <link linkend="sql-copy"><command>COPY FROM</command></link> command.
+    It contains the following fields, which are used to store information when <command>COPY FROM</command>
+    encounters an error converting a column’s input value to its data type.
+  </para>
+
+   <para>
+<informaltable>
+    <tgroup cols="3">
+     <thead>
+      <row>
+       <entry>Column name</entry>
+       <entry>Data type</entry>
+       <entry>Description</entry>
+      </row>
+     </thead>
+
+      <tbody>
+       <row>
+       <entry> <literal>userid</literal> </entry>
+       <entry><type>oid</type></entry>
+       <entry>The <command>COPY FROM</command> operation user.
+       Reference <link linkend="catalog-pg-authid"><structname>pg_authid</structname></link>.<structfield>oid</structfield>,
+       however there is no hard dependency with catalog <literal>pg_authid</literal>.
+       If the corresponding row on <literal>pg_authid</literal> is deleted, this value becomes stale.
+    </entry>
+       </row>
+
+       <row>
+       <entry> <literal>copy_tbl</literal> </entry>
+       <entry><type>oid</type></entry>
+       <entry>The <command>COPY FROM</command> operation destination table.
+        Reference <link linkend="catalog-pg-class"><structname>pg_class</structname></link>.<structfield>oid</structfield>,
+        however there is no hard dependency with catalog <literal>pg_class</literal>.
+        If the corresponding row on <literal>pg_class</literal> is deleted, this value becomes stale.
+        </entry>
+       </row>
+
+       <row>
+       <entry> <literal>filename</literal> </entry>
+       <entry><type>text</type></entry>
+       <entry>The path name of the <command>COPY FROM</command> input</entry>
+       </row>
+
+       <row>
+       <entry> <literal>lineno</literal> </entry>
+       <entry><type>bigint</type></entry>
+       <entry>Line number where the error occurred, counting from 1</entry>
+       </row>
+
+       <row>
+       <entry> <literal>line</literal> </entry>
+       <entry><type>text</type></entry>
+       <entry>Raw content of the error occurred line</entry>
+       </row>
+
+       <row>
+       <entry> <literal>colname</literal> </entry>
+       <entry><type>text</type></entry>
+       <entry>Field where the error occurred</entry>
+       </row>
+
+       <row>
+       <entry> <literal>raw_field_value</literal> </entry>
+       <entry><type>text</type></entry>
+       <entry>Raw content of the error occurred field</entry>
+       </row>
+
+       <row>
+       <entry> <literal>err_message </literal> </entry>
+       <entry><type>text</type></entry>
+       <entry>The primary error message,
+          see <link linkend="error-message-reporting">ereport</link></entry>
+       </row>
+
+       <row>
+       <entry> <literal>err_detail</literal> </entry>
+       <entry><type>text</type></entry>
+       <entry>The optionally detailed error message,
+          see <link linkend="error-message-reporting">ereport</link> </entry>
+       </row>
+
+       <row>
+       <entry> <literal>errorcode </literal> </entry>
+       <entry><type>text</type></entry>
+       <entry>The SQLSTATE error identifier code for the error condition,
+          see <link linkend="errcodes-appendix">Error Codes</link>
+       </entry>
+       </row>
+
+      </tbody>
+     </tgroup>
+   </informaltable>
+     </para>
+  </sect1>
+
+
   <sect1 id="datatype-pg-lsn">
    <title><type>pg_lsn</type> Type</title>
 
