@@ -188,7 +188,6 @@ plpython3_call_handler(PG_FUNCTION_ARGS)
 		IsA(fcinfo->context, CallContext) &&
 		!castNode(CallContext, fcinfo->context)->atomic;
 
-	/* Note: SPI_finish() happens in plpy_exec.c, which is dubious design */
 	SPI_connect_ext(nonatomic ? SPI_OPT_NONATOMIC : 0);
 
 	/*
@@ -236,18 +235,16 @@ plpython3_call_handler(PG_FUNCTION_ARGS)
 		else
 			retval = PLy_exec_function(fcinfo, pcache);
 	}
-	PG_CATCH();
+	PG_FINALLY();
 	{
-		/* Destroy the execution context */
+		/* Destroy the execution context on both success and error paths */
 		PLy_pop_execution_context();
 		PyErr_Clear();
-
-		PG_RE_THROW();
 	}
 	PG_END_TRY();
 
-	/* Destroy the execution context */
-	PLy_pop_execution_context();
+	if (SPI_finish() != SPI_OK_FINISH)
+		elog(ERROR, "SPI_finish failed");
 
 	return retval;
 }
@@ -263,7 +260,6 @@ plpython3_inline_handler(PG_FUNCTION_ARGS)
 	PLyExecutionContext *exec_ctx;
 	ErrorContextCallback plerrcontext;
 
-	/* Note: SPI_finish() happens in plpy_exec.c, which is dubious design */
 	SPI_connect_ext(codeblock->atomic ? 0 : SPI_OPT_NONATOMIC);
 
 	MemSet(fcinfo, 0, SizeForFunctionCallInfo(0));
@@ -313,20 +309,17 @@ plpython3_inline_handler(PG_FUNCTION_ARGS)
 		exec_ctx->curr_proc = &proc;
 		PLy_exec_function(fake_fcinfo, &pcache);
 	}
-	PG_CATCH();
+	PG_FINALLY();
 	{
+		/* Destroy the execution context on both success and error paths */
 		PLy_pop_execution_context();
-		PLy_procedure_delete(&proc);
 		PyErr_Clear();
-		PG_RE_THROW();
+		PLy_procedure_delete(&proc);
 	}
 	PG_END_TRY();
 
-	/* Destroy the execution context */
-	PLy_pop_execution_context();
-
-	/* Now clean up the transient procedure we made */
-	PLy_procedure_delete(&proc);
+	if (SPI_finish() != SPI_OK_FINISH)
+		elog(ERROR, "SPI_finish failed");
 
 	PG_RETURN_VOID();
 }
