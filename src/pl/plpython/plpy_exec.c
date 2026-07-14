@@ -172,13 +172,13 @@ PLy_exec_function(FunctionCallInfo fcinfo, PLyProcedureCache *pcache)
 		}
 
 		/*
-		 * Disconnect from SPI manager and then create the return values datum
+		 * Switch out of SPI's memory context and then create the return values
+		 * datum
 		 * (if the input function does a palloc for it this must not be
-		 * allocated in the SPI memory context because SPI_finish would free
-		 * it).
+		 * allocated in the SPI memory context because the upper caller would
+		 * call SPI_finish to free it).
 		 */
-		if (SPI_finish() != SPI_OK_FINISH)
-			elog(ERROR, "SPI_finish failed");
+		MemoryContextSwitchTo(fcinfo->flinfo->fn_mcxt);
 
 		plerrcontext.callback = plpython_return_error_callback;
 		plerrcontext.previous = error_context_stack;
@@ -439,10 +439,10 @@ PLy_exec_trigger(FunctionCallInfo fcinfo, PLyProcedure *proc)
 		Assert(plrv != NULL);
 
 		/*
-		 * Disconnect from SPI manager
+		 * Switch out of SPI's memory context so that trigger result
+		 * processing doesn't allocate inside SPI's procedure context.
 		 */
-		if (SPI_finish() != SPI_OK_FINISH)
-			elog(ERROR, "SPI_finish failed");
+		MemoryContextSwitchTo(fcinfo->flinfo->fn_mcxt);
 
 		/*
 		 * return of None means we're happy with the tuple
@@ -527,9 +527,6 @@ PLy_exec_event_trigger(FunctionCallInfo fcinfo, PLyProcedure *proc)
 		Py_DECREF(plttag);
 
 		PLy_procedure_call(proc, "TD", pltdata);
-
-		if (SPI_finish() != SPI_OK_FINISH)
-			elog(ERROR, "SPI_finish() failed");
 	}
 	PG_FINALLY();
 	{
