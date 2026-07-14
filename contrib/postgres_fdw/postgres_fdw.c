@@ -183,7 +183,7 @@ typedef struct PgFdwScanState
 	PGconn	   *conn;			/* connection for the scan */
 	PgFdwConnState *conn_state; /* extra per-connection state */
 	unsigned int cursor_number; /* quasi-unique ID for my cursor */
-	bool		cursor_exists;	/* have we created the cursor? */
+	bool		scan_in_progress;	/* is there a scan in progress? */
 	int			numParams;		/* number of parameters passed to query */
 	FmgrInfo   *param_flinfo;	/* output conversion functions for them */
 	List	   *param_exprs;	/* executable expressions for param values */
@@ -1758,7 +1758,7 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 
 	/* Assign a unique ID for my cursor */
 	fsstate->cursor_number = GetCursorNumber(fsstate->conn);
-	fsstate->cursor_exists = false;
+	fsstate->scan_in_progress = false;
 
 	/* Get private info created by planner functions. */
 	fsstate->query = strVal(list_nth(fsplan->fdw_private,
@@ -1838,7 +1838,7 @@ postgresIterateForeignScan(ForeignScanState *node)
 	 * already created the cursor before we get here, even if this is the
 	 * first call after Begin or ReScan.
 	 */
-	if (!fsstate->cursor_exists)
+	if (!fsstate->scan_in_progress)
 		create_cursor(node);
 
 	/*
@@ -1878,8 +1878,8 @@ postgresReScanForeignScan(ForeignScanState *node)
 	char		sql[64];
 	PGresult   *res;
 
-	/* If we haven't created the cursor yet, nothing to do. */
-	if (!fsstate->cursor_exists)
+	/* If no scan is in progress, nothing to do. */
+	if (!fsstate->scan_in_progress)
 		return;
 
 	/*
@@ -1900,7 +1900,7 @@ postgresReScanForeignScan(ForeignScanState *node)
 	 */
 	if (node->ss.ps.chgParam != NULL)
 	{
-		fsstate->cursor_exists = false;
+		fsstate->scan_in_progress = false;
 		snprintf(sql, sizeof(sql), "CLOSE c%u",
 				 fsstate->cursor_number);
 	}
@@ -1911,7 +1911,7 @@ postgresReScanForeignScan(ForeignScanState *node)
 					 fsstate->cursor_number);
 		else
 		{
-			fsstate->cursor_exists = false;
+			fsstate->scan_in_progress = false;
 			snprintf(sql, sizeof(sql), "CLOSE c%u",
 					 fsstate->cursor_number);
 		}
@@ -1950,7 +1950,7 @@ postgresEndForeignScan(ForeignScanState *node)
 		return;
 
 	/* Close the cursor if open, to prevent accumulation of cursors */
-	if (fsstate->cursor_exists)
+	if (fsstate->scan_in_progress)
 		close_cursor(fsstate->conn, fsstate->cursor_number,
 					 fsstate->conn_state);
 
@@ -4098,8 +4098,8 @@ create_cursor(ForeignScanState *node)
 		pgfdw_report_error(res, conn, fsstate->query);
 	PQclear(res);
 
-	/* Mark the cursor as created, and show no tuples have been retrieved */
-	fsstate->cursor_exists = true;
+	/* Mark the scan as started, and show no tuples have been retrieved */
+	fsstate->scan_in_progress = true;
 	fsstate->tuples = NULL;
 	fsstate->num_tuples = 0;
 	fsstate->next_tuple = 0;
@@ -8782,7 +8782,7 @@ fetch_more_data_begin(AsyncRequest *areq)
 	Assert(!fsstate->conn_state->pendingAreq);
 
 	/* Create the cursor synchronously. */
-	if (!fsstate->cursor_exists)
+	if (!fsstate->scan_in_progress)
 		create_cursor(node);
 
 	/* We will send this query, but not wait for the response. */
