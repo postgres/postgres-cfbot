@@ -16,6 +16,7 @@
 
 #include "commands/copy.h"
 #include "commands/trigger.h"
+#include "executor/nodeModifyTable.h"
 #include "nodes/miscnodes.h"
 
 /*
@@ -73,6 +74,7 @@ typedef struct CopyFromStateData
 
 	/* parameters from the COPY command */
 	Relation	rel;			/* relation to copy from */
+	Relation	error_rel;		/* relation for copy from error saving */
 	List	   *attnumlist;		/* integer list of attnums to copy */
 	char	   *filename;		/* filename, or NULL for STDIN */
 	bool		is_program;		/* is 'filename' a program to popen? */
@@ -189,6 +191,13 @@ typedef struct CopyFromStateData
 #define RAW_BUF_BYTES(cstate) ((cstate)->raw_buf_len - (cstate)->raw_buf_index)
 
 	uint64		bytes_processed;	/* number of bytes processed so far */
+
+	/*
+	 * INSERT operation context for inserting COPY FROM input conversion
+	 * failure error information to error_table. Populated only when ON_ERROR
+	 * is specified as 'TABLE'.
+	 */
+	ModifyTableContext *mtcontext;
 } CopyFromStateData;
 
 extern void ReceiveCopyBegin(CopyFromState cstate);

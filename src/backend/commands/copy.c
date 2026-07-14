@@ -494,6 +494,8 @@ defGetCopyOnErrorChoice(DefElem *def, ParseState *pstate, bool is_from)
 		return COPY_ON_ERROR_IGNORE;
 	if (pg_strcasecmp(sval, "set_null") == 0)
 		return COPY_ON_ERROR_SET_NULL;
+	if (pg_strcasecmp(sval, "table") == 0)
+		return COPY_ON_ERROR_TABLE;
 
 	ereport(ERROR,
 			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -587,6 +589,7 @@ ProcessCopyOptions(ParseState *pstate,
 	bool		freeze_specified = false;
 	bool		header_specified = false;
 	bool		on_error_specified = false;
+	bool		error_rel_specified = false;
 	bool		log_verbosity_specified = false;
 	bool		reject_limit_specified = false;
 	bool		force_array_specified = false;
@@ -774,6 +777,13 @@ ProcessCopyOptions(ParseState *pstate,
 			reject_limit_specified = true;
 			opts_out->reject_limit = defGetCopyRejectLimitOption(defel);
 		}
+		else if (strcmp(defel->defname, "error_table") == 0)
+		{
+			if (error_rel_specified)
+				errorConflictingDefElem(defel, pstate);
+			error_rel_specified = true;
+			opts_out->error_table = defGetString(defel);
+		}
 		else
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
@@ -781,6 +791,19 @@ ProcessCopyOptions(ParseState *pstate,
 							defel->defname),
 					 parser_errposition(pstate, defel->location)));
 	}
+
+	if (opts_out->on_error == COPY_ON_ERROR_TABLE)
+	{
+		if (opts_out->error_table == NULL)
+			ereport(ERROR,
+					errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					errmsg("cannot set option %s to \"%s\" when \"%s\" is not specified", "ON_ERROR", "TABLE", "ERROR_TABLE"),
+					errhint("\"%s\" option is required", "ERROR_TABLE"));
+	}
+	else if (opts_out->error_table != NULL)
+		ereport(ERROR,
+				errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				errmsg("COPY %s can only be used when option %s is set to \"%s\"", "ERROR_TABLE", "ON_ERROR", "TABLE"));
 
 	/*
 	 * Check for incompatible options (must do these three before inserting

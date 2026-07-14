@@ -687,7 +687,169 @@ a	{7}	7
 10	{10}	10
 \.
 
+-- Tests for on_error table, save COPY FROM input data type conversion error
+-- information to a user-defined table
+
+-- Direct modification of system catalog composite type copy_error_saving is
+-- not allowed
+ALTER TYPE copy_error_saving ADD ATTRIBUTE b text;
+ALTER TYPE copy_error_saving DROP ATTRIBUTE userid;
+ALTER TYPE copy_error_saving RENAME ATTRIBUTE userid to userid1;
+ALTER TYPE copy_error_saving ALTER ATTRIBUTE userid SET DATA TYPE OID8;
+
+CREATE TABLE t_on_error_table(a jsonb, b int, c int, d dcheck_ign_err2);
+CREATE TABLE err_tbl OF copy_error_saving;
+CREATE TABLE err_tbl1 OF copy_error_saving;
+CREATE TABLE err_tbl2 OF copy_error_saving PARTITION BY RANGE (lineno);
+CREATE UNIQUE INDEX err_tbl_idx ON err_tbl(colname);
+CREATE TYPE t_copy_typ AS (a int, b int, c int);
+CREATE TABLE t_copy_tbl1 OF t_copy_typ;
+CREATE TEMP VIEW t_copy_v1 AS SELECT * FROM t_on_error_table;
+
+-- all of the following should fail
+COPY t_on_error_table FROM STDIN WITH (format binary, on_error table, error_table err_tbl);
+COPY t_on_error_table FROM STDIN WITH (on_error table, error_table t_on_error_table);
+COPY t_on_error_table FROM STDIN WITH (on_error table, error_table t_copy_tbl1);
+COPY t_on_error_table FROM STDIN WITH (on_error table, error_table t_copy_v1);
+COPY t_on_error_table FROM STDIN WITH (on_error table, reject_limit 10, error_table err_tbl);
+COPY t_on_error_table FROM STDIN WITH (on_error table, error_table not_existsx);
+COPY t_on_error_table FROM STDIN WITH (on_error table);
+COPY t_on_error_table FROM STDIN WITH (error_table err_tbl);
+COPY t_on_error_table TO STDIN WITH (on_error table);
+-- all of the above should fail
+
+-- error, error_table cannot be partitioned table
+COPY t_on_error_table(a,b) FROM STDIN WITH (on_error table, error_table err_tbl2);
+CREATE RULE regtest_test_rule AS ON INSERT TO err_tbl1 DO ALSO NOTHING;
+-- error, error_table cannot be have rules
+COPY t_on_error_table(a,b) FROM STDIN WITH (on_error table, error_table err_tbl1);
+DROP RULE regtest_test_rule ON err_tbl1;
+
+CREATE POLICY p1 ON err_tbl1 FOR SELECT USING (true);
+ALTER TABLE err_tbl1 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE err_tbl1 FORCE ROW LEVEL SECURITY;
+-- error, error_table cannot be have RLS policies
+COPY t_on_error_table(a,b) FROM STDIN WITH (on_error table, error_table err_tbl1);
+DROP POLICY IF EXISTS p1 ON err_tbl1;
+ALTER TABLE err_tbl1 DISABLE ROW LEVEL SECURITY;
+
+ALTER TABLE err_tbl ADD CONSTRAINT cc2 CHECK(lineno > 0);
+ALTER TABLE err_tbl ADD CONSTRAINT cc3 NOT NULL userid;
+-- ok, constraints on table err_tbl1 will be verified
+COPY t_on_error_table(b, a) FROM STDIN WITH (DELIMITER ',', on_error table, error_table err_tbl);
+a,b
+\.
+ALTER TABLE err_tbl DROP CONSTRAINT cc2;
+ALTER TABLE err_tbl DROP CONSTRAINT cc3;
+TRUNCATE err_tbl;
+
+-- foreign key on error_table is supported
+BEGIN;
+CREATE TABLE pktest(lineno int8 primary key);
+INSERT INTO pktest VALUES (2);
+ALTER TABLE err_tbl ADD CONSTRAINT cc4 FOREIGN KEY (lineno) REFERENCES pktest;
+COPY t_on_error_table(b, a) FROM STDIN WITH (DELIMITER ',', on_error table, error_table err_tbl); -- ok
+1,null
+a,b
+\.
+COPY t_on_error_table(b, c) FROM STDIN WITH (DELIMITER ',', on_error table, error_table err_tbl); -- error
+1,c
+\.
+ROLLBACK;
+
+-- fail, copied data have extra columns
+COPY t_on_error_table(a,b) FROM STDIN WITH (DELIMITER ',', on_error table, error_table err_tbl);
+1,2,3,4,5
+\.
+
+-- fail, copied data have less columns
+COPY t_on_error_table(a,b) FROM STDIN WITH (DELIMITER ',', on_error table, error_table err_tbl);
+1,2,3
+\.
+
+-- permission check
+BEGIN;
+CREATE USER regress_user30;
+GRANT INSERT(userid, copy_tbl, filename, lineno, line, colname, raw_field_value, err_message, err_detail)
+	ON TABLE err_tbl TO regress_user30;
+GRANT INSERT ON TABLE t_on_error_table TO regress_user30;
+GRANT SELECT ON TABLE err_tbl TO regress_user30;
+SAVEPOINT s1;
+
+SET ROLE regress_user30;
+COPY t_on_error_table FROM STDIN WITH (on_error table, error_table err_tbl); -- error, insufficient privilege
+\.
+ROLLBACK TO SAVEPOINT s1;
+
+RESET ROLE;
+GRANT INSERT on TABLE err_tbl to regress_user30;
+GRANT INSERT(errorcode) ON TABLE err_tbl TO regress_user30;
+SET ROLE regress_user30;
+COPY t_on_error_table FROM STDIN WITH (DELIMITER ',', on_error table, error_table err_tbl, log_verbosity verbose); -- ok
+a,b,3,4
+\.
+
+SELECT copy_tbl::regclass, filename, lineno, line, colname, raw_field_value, err_message, err_detail, errorcode
+FROM err_tbl;
+
+-- error, unique constraint violation on table err_tbl
+COPY t_on_error_table FROM STDIN WITH (DELIMITER ',', on_error table, error_table err_tbl);
+a,b,3,4
+\.
+ROLLBACK;
+DROP INDEX err_tbl_idx;
+
+CREATE FUNCTION trig_copy_error_saving_insert()
+RETURNS TRIGGER LANGUAGE plpgsql AS
+$$
+BEGIN
+  if (TG_LEVEL = 'STATEMENT' and TG_WHEN = 'AFTER') then
+    RAISE NOTICE E'trigger name: %, % % FOR EACH %\n', TG_NAME,  TG_WHEN, TG_OP, TG_LEVEL;
+  else
+    RAISE NOTICE 'trigger name: %, % % FOR EACH %', TG_NAME,  TG_WHEN, TG_OP, TG_LEVEL;
+  end if;
+  if TG_LEVEL = 'ROW' then
+    RAISE NOTICE 'NEW raw_field_value: %, err_message: %', NEW.raw_field_value, NEW.err_message;
+  end if;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER err_tbl_after_ins_row
+  AFTER INSERT ON err_tbl
+  FOR EACH ROW EXECUTE PROCEDURE trig_copy_error_saving_insert();
+CREATE TRIGGER err_tbl_before_ins_row
+  BEFORE INSERT ON err_tbl
+  FOR EACH ROW EXECUTE PROCEDURE trig_copy_error_saving_insert();
+CREATE TRIGGER err_tbl_bfore_ins_stmt
+  BEFORE INSERT ON err_tbl
+  FOR EACH STATEMENT EXECUTE PROCEDURE trig_copy_error_saving_insert();
+CREATE TRIGGER err_tbl_after_ins_stmt
+  AFTER INSERT ON err_tbl
+  REFERENCING NEW TABLE AS new_rows
+  FOR EACH STATEMENT EXECUTE PROCEDURE trig_copy_error_saving_insert();
+
+-- Each insert on the error_table invokes both the statement-level and row-level triggers.
+COPY t_on_error_table FROM STDIN WITH (DELIMITER ',', on_error table, error_table err_tbl);
+1,2,a,1
+1,2,3,\N
+1,_junk,test,11
+cola,colb,colc,12
+4,5,6,1111
+1,11,4238679732489879879,2
+\.
+SELECT copy_tbl::regclass, filename, lineno, line, colname ,raw_field_value, err_message, err_detail, errorcode
+FROM err_tbl;
+
 -- clean up
+DROP TABLE err_tbl;
+DROP TABLE err_tbl1;
+DROP TABLE err_tbl2;
+DROP VIEW t_copy_v1;
+DROP TABLE t_on_error_table;
+DROP TABLE t_copy_tbl1;
+DROP TYPE t_copy_typ;
+DROP FUNCTION trig_copy_error_saving_insert();
 DROP TABLE forcetest;
 DROP TABLE vistest;
 DROP FUNCTION truncate_in_subxact();
