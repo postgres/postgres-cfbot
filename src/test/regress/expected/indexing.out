@@ -759,6 +759,38 @@ alter table idxpart2 drop column c;
  b      | integer |           |          | 
 
 drop table idxpart, idxpart2;
+-- Drop column should also drop all indexes that contains whole-row references
+-- Change column data type should fail if whole-row referenced indexes exists
+create table idxpart (a int, b int, c int) partition by range (a);
+create table idxpart1 partition of idxpart for values from (2000) to (3000);
+create index idxpart_idx1 on idxpart1((idxpart1 is not null));
+alter table idxpart alter column b set data type bigint; -- error
+ERROR:  cannot alter table "idxpart1" because index idxpart_idx1 uses its row type
+HINT:  You might need to drop index idxpart_idx1 first
+drop index idxpart_idx1;
+create index idxpart_idx2 on idxpart1(a) where idxpart1 is not null;
+alter table idxpart alter column c set data type bigint; -- error
+ERROR:  cannot alter table "idxpart1" because index idxpart_idx2 uses its row type
+HINT:  You might need to drop index idxpart_idx2 first
+alter table idxpart drop column c; -- ok
+\d idxpart
+        Partitioned table "public.idxpart"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ a      | integer |           |          | 
+ b      | integer |           |          | 
+Partition key: RANGE (a)
+Number of partitions: 1 (Use \d+ to list them.)
+
+\d idxpart1
+              Table "public.idxpart1"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ a      | integer |           |          | 
+ b      | integer |           |          | 
+Partition of: idxpart FOR VALUES FROM (2000) TO (3000)
+
+drop table idxpart;
 -- Verify that expression indexes inherit correctly
 create table idxpart (a int, b int) partition by range (a);
 create table idxpart1 (like idxpart);
