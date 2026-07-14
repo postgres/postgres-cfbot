@@ -354,6 +354,23 @@ alter table idxpart2 drop column c;
 \d idxpart2
 drop table idxpart, idxpart2;
 
+-- Drop column should also drop all indexes that contains whole-row references
+-- Change column data type should fail if whole-row referenced indexes exists
+create table idxpart (a int, b int, c int) partition by range (a);
+create table idxpart1 partition of idxpart for values from (2000) to (3000);
+
+create index idxpart_idx1 on idxpart1((idxpart1 is not null));
+alter table idxpart alter column b set data type bigint; -- error
+drop index idxpart_idx1;
+
+create index idxpart_idx2 on idxpart1(a) where idxpart1 is not null;
+alter table idxpart alter column c set data type bigint; -- error
+alter table idxpart drop column c; -- ok
+
+\d idxpart
+\d idxpart1
+drop table idxpart;
+
 -- Verify that expression indexes inherit correctly
 create table idxpart (a int, b int) partition by range (a);
 create table idxpart1 (like idxpart);
