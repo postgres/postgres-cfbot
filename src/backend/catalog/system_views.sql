@@ -667,6 +667,11 @@ CREATE VIEW pg_hba_file_rules AS
 
 REVOKE ALL ON pg_hba_file_rules FROM PUBLIC;
 
+CREATE VIEW pg_hosts_file_rules AS
+   SELECT * FROM pg_hosts_file_rules() AS A;
+
+REVOKE ALL ON pg_hosts_file_rules FROM PUBLIC;
+
 CREATE VIEW pg_ident_file_mappings AS
    SELECT * FROM pg_ident_file_mappings() AS A;
 
