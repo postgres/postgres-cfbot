@@ -3789,16 +3789,17 @@ EXPLAIN (COSTS OFF)
 SELECT * FROM not_null_tab t1
 LEFT JOIN not_null_tab t2
 ON t1.id NOT IN (SELECT id FROM not_null_tab);
-                            QUERY PLAN                            
-------------------------------------------------------------------
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
  Nested Loop Left Join
-   Join Filter: (NOT (ANY (t1.id = (hashed SubPlan any_1).col1)))
    ->  Seq Scan on not_null_tab t1
-   ->  Materialize
-         ->  Seq Scan on not_null_tab t2
-   SubPlan any_1
-     ->  Seq Scan on not_null_tab
-(7 rows)
+   ->  Result
+         One-Time Filter: (NOT (ANY (t1.id = (hashed SubPlan any_1).col1)))
+         ->  Materialize
+               ->  Seq Scan on not_null_tab t2
+         SubPlan any_1
+           ->  Seq Scan on not_null_tab
+(8 rows)
 
 -- ANTI JOIN: outer side is defined NOT NULL and is not nulled by outer join,
 -- inner side is defined NOT NULL

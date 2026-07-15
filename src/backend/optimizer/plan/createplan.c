@@ -4200,8 +4200,11 @@ create_nestloop_plan(PlannerInfo *root,
 	Plan	   *inner_plan;
 	Relids		outerrelids;
 	Relids		ojrelids;
+	Relids		joinrelids = best_path->jpath.path.parent->relids;
 	List	   *tlist = build_path_tlist(root, &best_path->jpath.path);
 	List	   *joinrestrictclauses = best_path->jpath.joinrestrictinfo;
+	List	   *gating_clauses = NIL;
+	bool		keep_inner_rewind = false;
 	List	   *joinclauses;
 	List	   *otherclauses;
 	List	   *nestParams;
@@ -4247,8 +4250,24 @@ create_nestloop_plan(PlannerInfo *root,
 	if (IS_OUTER_JOIN(best_path->jpath.jointype))
 	{
 		extract_actual_join_clauses(joinrestrictclauses,
-									best_path->jpath.path.parent->relids,
+									joinrelids,
 									&joinclauses, &otherclauses);
+
+		/*
+		 * Collect the join clauses that reference only the outer rel: they are
+		 * constant for a given outer tuple, so the loop further down can gate
+		 * the inner side with them instead of re-checking them per inner row.
+		 */
+		foreach_node(RestrictInfo, rinfo, joinrestrictclauses)
+		{
+			if (bms_is_empty(rinfo->clause_relids) ||
+				!bms_is_subset(rinfo->clause_relids, outerrelids))
+				continue;
+
+			Assert(!RINFO_IS_PUSHED_DOWN(rinfo, joinrelids));
+
+			gating_clauses = lappend(gating_clauses, rinfo->clause);
+		}
 	}
 	else
 	{
@@ -4256,6 +4275,14 @@ create_nestloop_plan(PlannerInfo *root,
 		joinclauses = extract_actual_clauses(joinrestrictclauses, false);
 		otherclauses = NIL;
 	}
+
+	/*
+	 * Pull the outer-only clauses out of joinclauses; they become a gating
+	 * qual on the inner side below.  Do this before parameterization, while
+	 * the expressions are still un-parameterized.
+	 */
+	if (gating_clauses != NIL)
+		joinclauses = list_difference_ptr(joinclauses, gating_clauses);
 
 	/* Replace any outer-relation variables with nestloop params */
 	if (best_path->jpath.path.param_info)
@@ -4270,6 +4297,68 @@ create_nestloop_plan(PlannerInfo *root,
 	ojrelids = bms_difference(best_path->jpath.path.parent->relids,
 							  bms_union(best_path->jpath.outerjoinpath->parent->relids,
 										best_path->jpath.innerjoinpath->parent->relids));
+
+	/*
+	 * The gating clauses must be parameterized so the gating Result can
+	 * evaluate them against the current outer tuple.
+	 */
+	if (gating_clauses != NIL)
+	{
+		Relids	tmpOuterRels = root->curOuterRels;
+		Plan   *subplan = inner_plan;
+
+		/*
+		 * Keep the inner side rewindable across rescans, but only when this
+		 * gate is the sole source of nestloop parameters.
+		 */
+		keep_inner_rewind =
+					!bms_overlap(PATH_REQ_OUTER(best_path->jpath.innerjoinpath),
+												outerrelids);
+
+		Assert(bms_is_subset(pull_varnos(root, (Node *) gating_clauses),
+							  outerrelids));
+
+		/*
+		 * replace_nestloop_params only converts Vars in curOuterRels, which
+		 * was restored above and no longer covers this join's outer relids,
+		 * so re-add them across the call.
+		 */
+		root->curOuterRels = bms_union(root->curOuterRels, outerrelids);
+		gating_clauses = (List *)
+			replace_nestloop_params(root, (Node *) gating_clauses);
+		bms_free(root->curOuterRels);
+		root->curOuterRels = tmpOuterRels;
+
+		/*
+		 * Avoid stacking Result nodes.  If the inner plan is already a Result,
+		 * merge our parameterized clauses into its resconstantqual.  This
+		 * mirrors create_gating_plan()'s logic.
+		 */
+		if (IsA(subplan, Result))
+		{
+			Result *existing = (Result *) subplan;
+			List   *clauses = (List *) existing->resconstantqual;
+
+			Assert(clauses == NULL || IsA(clauses, List));
+
+			clauses = list_concat(gating_clauses, clauses);
+			clauses = order_qual_clauses(root, clauses);
+			existing->resconstantqual = (Node *) clauses;
+
+			/* Gating quals could be unsafe, so use the Path's safety flag */
+			existing->plan.parallel_safe = best_path->jpath.path.parallel_safe;
+		}
+		else
+		{
+			inner_plan = (Plan *) make_gating_result(subplan->targetlist,
+													 (Node *) gating_clauses,
+													 subplan);
+			copy_plan_costsize(inner_plan, subplan);
+
+			/* Gating quals could be unsafe, so use the Path's safety flag */
+			inner_plan->parallel_safe = best_path->jpath.path.parallel_safe;
+		}
+	}
 
 	/*
 	 * Identify any nestloop parameters that should be supplied by this join
@@ -4344,6 +4433,8 @@ create_nestloop_plan(PlannerInfo *root,
 							  best_path->jpath.jointype,
 							  ojrelids,
 							  best_path->jpath.inner_unique);
+
+	join_plan->keep_inner_rewind = keep_inner_rewind;
 
 	copy_generic_path_info(&join_plan->join.plan, &best_path->jpath.path);
 
