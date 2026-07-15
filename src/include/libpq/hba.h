@@ -194,6 +194,7 @@ extern int	check_usermap(const char *usermap_name,
 						  const char *pg_user, const char *system_user,
 						  bool case_insensitive);
 extern HbaLine *parse_hba_line(TokenizedAuthLine *tok_line, int elevel);
+extern HostsLine *parse_hosts_line(TokenizedAuthLine *tok_line, int elevel);
 extern IdentLine *parse_ident_line(TokenizedAuthLine *tok_line, int elevel);
 extern FILE *open_auth_file(const char *filename, int elevel, int depth,
 							char **err_msg);
