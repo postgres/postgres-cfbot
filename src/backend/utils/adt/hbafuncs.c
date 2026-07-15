@@ -30,6 +30,12 @@ static void fill_hba_line(Tuplestorestate *tuple_store, TupleDesc tupdesc,
 						  int rule_number, char *filename, int lineno,
 						  HbaLine *hba, const char *err_msg);
 static void fill_hba_view(Tuplestorestate *tuple_store, TupleDesc tupdesc);
+#ifdef HAVE_SSL_CTX_SET_CLIENT_HELLO_CB
+static void fill_hosts_line(Tuplestorestate *tuple_store, TupleDesc tupdesc,
+							const char *filename, int lineno,
+							HostsLine *host, const char *err_msg);
+#endif
+static void fill_hosts_view(Tuplestorestate *tuple_store, TupleDesc tupdesc);
 static void fill_ident_line(Tuplestorestate *tuple_store, TupleDesc tupdesc,
 							int map_number, char *filename, int lineno,
 							IdentLine *ident, const char *err_msg);
@@ -444,6 +450,156 @@ pg_hba_file_rules(PG_FUNCTION_ARGS)
 	/* Fill the tuplestore */
 	rsi = (ReturnSetInfo *) fcinfo->resultinfo;
 	fill_hba_view(rsi->setResult, rsi->setDesc);
+
+	PG_RETURN_NULL();
+}
+
+/* Number of columns in pg_hosts_file_rules view */
+#define NUM_PG_HOSTS_FILE_RULES_ATTS	 9
+
+#ifdef HAVE_SSL_CTX_SET_CLIENT_HELLO_CB
+/*
+ * fill_hosts_line
+ *		Build one row of pg_hosts_file_rules view, add it to tuplestore.
+ *
+ * filename, lineno: always valid
+ * host: parsed entry (NULL when err_msg is set)
+ * err_msg: error message (NULL if none)
+ */
+static void
+fill_hosts_line(Tuplestorestate *tuple_store, TupleDesc tupdesc,
+				const char *filename, int lineno,
+				HostsLine *host, const char *err_msg)
+{
+	Datum		values[NUM_PG_HOSTS_FILE_RULES_ATTS];
+	bool		nulls[NUM_PG_HOSTS_FILE_RULES_ATTS];
+	HeapTuple	tuple;
+	int			index;
+
+	Assert(tupdesc->natts == NUM_PG_HOSTS_FILE_RULES_ATTS);
+
+	memset(values, 0, sizeof(values));
+	memset(nulls, 0, sizeof(nulls));
+	index = 0;
+
+	/* file_name */
+	values[index++] = CStringGetTextDatum(filename);
+
+	/* line_number */
+	values[index++] = Int32GetDatum(lineno);
+
+	if (host != NULL)
+	{
+		/* hostnames text[] */
+		if (host->hostnames)
+			values[index++] = PointerGetDatum(strlist_to_textarray(host->hostnames));
+		else
+			nulls[index++] = true;
+
+		/* ssl_certificate */
+		if (host->ssl_cert)
+			values[index++] = CStringGetTextDatum(host->ssl_cert);
+		else
+			nulls[index++] = true;
+
+		/* ssl_key */
+		if (host->ssl_key)
+			values[index++] = CStringGetTextDatum(host->ssl_key);
+		else
+			nulls[index++] = true;
+
+		/* ssl_ca */
+		if (host->ssl_ca)
+			values[index++] = CStringGetTextDatum(host->ssl_ca);
+		else
+			nulls[index++] = true;
+
+		/* passphrase_command */
+		if (host->ssl_passphrase_cmd)
+			values[index++] = CStringGetTextDatum(host->ssl_passphrase_cmd);
+		else
+			nulls[index++] = true;
+
+		/* passphrase_command_reload */
+		values[index++] = BoolGetDatum(host->ssl_passphrase_reload);
+	}
+	else
+	{
+		/* no parse result: null the per-host columns (indexes 2..7) */
+		memset(&nulls[2], true, (NUM_PG_HOSTS_FILE_RULES_ATTS - 3) * sizeof(bool));
+	}
+
+	/* error */
+	if (err_msg)
+		values[NUM_PG_HOSTS_FILE_RULES_ATTS - 1] = CStringGetTextDatum(err_msg);
+	else
+		nulls[NUM_PG_HOSTS_FILE_RULES_ATTS - 1] = true;
+
+	tuple = heap_form_tuple(tupdesc, values, nulls);
+	tuplestore_puttuple(tuple_store, tuple);
+}
+#endif							/* HAVE_SSL_CTX_SET_CLIENT_HELLO_CB */
+
+/*
+ * fill_hosts_view
+ *		Read the pg_hosts file and fill the tuplestore with view records.
+ *
+ * Builds without SNI support never read the hosts file, so leave the view
+ * empty there rather than report on a file which cannot be used.
+ */
+static void
+fill_hosts_view(Tuplestorestate *tuple_store, TupleDesc tupdesc)
+{
+#ifdef HAVE_SSL_CTX_SET_CLIENT_HELLO_CB
+	FILE	   *file;
+	List	   *hosts_lines = NIL;
+	ListCell   *line;
+	MemoryContext hostscxt;
+	MemoryContext oldcxt;
+
+	file = open_auth_file(HostsFileName, DEBUG3, 0, NULL);
+	if (file == NULL)
+		return;
+
+	tokenize_auth_file(HostsFileName, file, &hosts_lines, DEBUG3, 0);
+
+	hostscxt = AllocSetContextCreate(CurrentMemoryContext,
+									 "hosts parser context",
+									 ALLOCSET_SMALL_SIZES);
+	oldcxt = MemoryContextSwitchTo(hostscxt);
+	foreach(line, hosts_lines)
+	{
+		TokenizedAuthLine *tok_line = (TokenizedAuthLine *) lfirst(line);
+		HostsLine  *hostsline = NULL;
+
+		if (tok_line->err_msg == NULL)
+			hostsline = parse_hosts_line(tok_line, DEBUG3);
+
+		fill_hosts_line(tuple_store, tupdesc,
+						tok_line->file_name, tok_line->line_num, hostsline,
+						tok_line->err_msg);
+	}
+
+	free_auth_file(file, 0);
+	MemoryContextSwitchTo(oldcxt);
+	MemoryContextDelete(hostscxt);
+#endif							/* HAVE_SSL_CTX_SET_CLIENT_HELLO_CB */
+}
+
+/*
+ * pg_hosts_file_rules
+ *
+ * SQL-accessible SRF returning all entries in the pg_hosts configuration file.
+ */
+Datum
+pg_hosts_file_rules(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsi;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	rsi = (ReturnSetInfo *) fcinfo->resultinfo;
+	fill_hosts_view(rsi->setResult, rsi->setDesc);
 
 	PG_RETURN_NULL();
 }

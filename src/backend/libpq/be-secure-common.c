@@ -29,8 +29,6 @@
 #include "utils/builtins.h"
 #include "utils/guc.h"
 
-static HostsLine *parse_hosts_line(TokenizedAuthLine *tok_line, int elevel);
-
 /*
  * Run ssl_passphrase_command
  *
@@ -191,10 +189,11 @@ check_ssl_key_file_permissions(const char *ssl_key_file, bool isServerStart)
  * the TLS backend. Validation of the parsed values is left for the TLS backend
  * to implement.
  */
-static HostsLine *
+HostsLine *
 parse_hosts_line(TokenizedAuthLine *tok_line, int elevel)
 {
 	HostsLine  *parsedline;
+	char	  **err_msg = &tok_line->err_msg;
 	List	   *tokens;
 	ListCell   *field;
 	AuthToken  *token;
@@ -217,6 +216,7 @@ parse_hosts_line(TokenizedAuthLine *tok_line, int elevel)
 		if ((tokens->length > 1) &&
 			(strcmp(hostname->string, "*") == 0 || strcmp(hostname->string, "/no_sni/") == 0))
 		{
+			*err_msg = "default and non-SNI entries cannot be mixed with other entries";
 			ereport(elevel,
 					errcode(ERRCODE_CONFIG_FILE_ERROR),
 					errmsg("default and non-SNI entries cannot be mixed with other entries"),
@@ -232,6 +232,7 @@ parse_hosts_line(TokenizedAuthLine *tok_line, int elevel)
 	field = lnext(tok_line->fields, field);
 	if (!field)
 	{
+		*err_msg = "missing entry at end of line";
 		ereport(elevel,
 				errcode(ERRCODE_CONFIG_FILE_ERROR),
 				errmsg("missing entry at end of line"),
@@ -242,6 +243,7 @@ parse_hosts_line(TokenizedAuthLine *tok_line, int elevel)
 	tokens = lfirst(field);
 	if (tokens->length > 1)
 	{
+		*err_msg = "multiple values specified for SSL certificate";
 		ereport(elevel,
 				errcode(ERRCODE_CONFIG_FILE_ERROR),
 				errmsg("multiple values specified for SSL certificate"),
@@ -256,6 +258,7 @@ parse_hosts_line(TokenizedAuthLine *tok_line, int elevel)
 	field = lnext(tok_line->fields, field);
 	if (!field)
 	{
+		*err_msg = "missing entry at end of line";
 		ereport(elevel,
 				errcode(ERRCODE_CONFIG_FILE_ERROR),
 				errmsg("missing entry at end of line"),
@@ -266,6 +269,7 @@ parse_hosts_line(TokenizedAuthLine *tok_line, int elevel)
 	tokens = lfirst(field);
 	if (tokens->length > 1)
 	{
+		*err_msg = "multiple values specified for SSL key";
 		ereport(elevel,
 				errcode(ERRCODE_CONFIG_FILE_ERROR),
 				errmsg("multiple values specified for SSL key"),
@@ -283,6 +287,7 @@ parse_hosts_line(TokenizedAuthLine *tok_line, int elevel)
 	tokens = lfirst(field);
 	if (tokens->length > 1)
 	{
+		*err_msg = "multiple values specified for SSL CA";
 		ereport(elevel,
 				errcode(ERRCODE_CONFIG_FILE_ERROR),
 				errmsg("multiple values specified for SSL CA"),
@@ -300,6 +305,7 @@ parse_hosts_line(TokenizedAuthLine *tok_line, int elevel)
 		tokens = lfirst(field);
 		if (tokens->length > 1)
 		{
+			*err_msg = "multiple values specified for SSL passphrase command";
 			ereport(elevel,
 					errcode(ERRCODE_CONFIG_FILE_ERROR),
 					errmsg("multiple values specified for SSL passphrase command"),
@@ -328,6 +334,7 @@ parse_hosts_line(TokenizedAuthLine *tok_line, int elevel)
 			 */
 			if (lnext(tok_line->fields, field))
 			{
+				*err_msg = "extra fields at end of line";
 				ereport(elevel,
 						errcode(ERRCODE_CONFIG_FILE_ERROR),
 						errmsg("extra fields at end of line"),
@@ -338,6 +345,7 @@ parse_hosts_line(TokenizedAuthLine *tok_line, int elevel)
 
 			if (tokens->length > 1 || !parse_bool(token->string, &parsedline->ssl_passphrase_reload))
 			{
+				*err_msg = "incorrect syntax for boolean value SSL_passphrase_cmd_reload";
 				ereport(elevel,
 						errcode(ERRCODE_CONFIG_FILE_ERROR),
 						errmsg("incorrect syntax for boolean value SSL_passphrase_cmd_reload"),
