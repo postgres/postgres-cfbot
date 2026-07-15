@@ -23,6 +23,7 @@
 #include "catalog/pg_propgraph_label.h"
 #include "catalog/pg_propgraph_label_property.h"
 #include "catalog/pg_propgraph_property.h"
+#include "catalog/pg_type_d.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
@@ -35,6 +36,7 @@
 #include "parser/parse_relation.h"
 #include "parser/parsetree.h"
 #include "parser/parse_graphtable.h"
+#include "postgres_ext.h"
 #include "rewrite/rewriteGraphTable.h"
 #include "rewrite/rewriteHandler.h"
 #include "rewrite/rewriteManip.h"
@@ -44,6 +46,7 @@
 #include "utils/lsyscache.h"
 #include "utils/ruleutils.h"
 #include "utils/syscache.h"
+#include "utils/rel.h"
 
 
 /*
@@ -101,6 +104,8 @@ static Query *generate_union_from_pathqueries(List **pathqueries);
 static List *get_path_elements_for_path_factor(Oid propgraphid, struct path_factor *pf);
 static bool is_property_associated_with_label(Oid labeloid, Oid propoid);
 static Node *get_element_property_expr(Oid elemoid, Oid propoid, int rtindex);
+static Query *generate_undirected_edge_union_query(struct path_element *pe);
+static Node *build_edge_self_loop_filter(TupleDesc tupdesc, int nkeys, int16 *src_key_attnums, int16 *dest_key_attnums, Oid *eq_ops);
 
 /*
  * Convert GRAPH_TABLE clause into a subquery using relational
@@ -158,6 +163,16 @@ rewriteGraphTable(Query *parsetree, int rt_index)
  * adjacent vertex is naturally computed as an equi-join between edge and vertex
  * table on their respective keys. Hence the query representing one path
  * consists of JOINs between edge and vertex tables.
+ *
+ * For undirected edge patterns (-[e]-), when the edge's source and destination vertex patterns are different path
+ * factors, but same path element, the edge relation is replaced
+ * by a UNION ALL subquery that duplicates and reverses the key columns, so that
+ * a single equi-join can match edges traversed in either direction.  If the
+ * source and destination vertex patterns share the same path factor (e.g.
+ * (p)-[k]-(p)), either of the two orientations is satisfied by a single equi-join, so the
+ * UNION ALL is skipped.  When the UNION ALL is used, the backward branch
+ * carries a NOT(srckey = destkey) filter so that self-loop edges are not
+ * returned twice.
  *
  * generate_queries_for_path_pattern() starts the recursion but actual work is
  * done by generate_queries_for_path_pattern_recurse().
@@ -433,6 +448,7 @@ generate_query_for_graph_path(RangeTblEntry *rte, List *graph_path)
 		RangeTblRef *rtr;
 		Relation	rel;
 		ParseNamespaceItem *pni;
+		bool		use_union_all = false;
 
 		Assert(pf->kind == VERTEX_PATTERN || IS_EDGE_PATTERN(pf->kind));
 
@@ -460,30 +476,32 @@ generate_query_for_graph_path(RangeTblEntry *rte, List *graph_path)
 
 			/*
 			 * An edge pattern in any direction matches edges in both
-			 * directions, try swapping source and destination. When the
-			 * source and destination is the same vertex table, quals
-			 * corresponding to either direction may get satisfied. Hence OR
-			 * the quals corresponding to both the directions.
+			 * directions. When the source and destination is the same vertex
+			 * table, we will replace the edge relation with a UNION ALL
+			 * subquery that duplicates and reverses the edge table keys.
 			 */
 			if (pf->kind == EDGE_PATTERN_ANY &&
 				dest_pe->elemoid == pe->srcvertexid &&
 				src_pe->elemoid == pe->destvertexid)
 			{
-				List	   *src_quals = copyObject(pe->dest_quals);
-				List	   *dest_quals = copyObject(pe->src_quals);
-				Expr	   *rev_edge_qual;
-
-				/* Swap the source and destination varnos in the quals. */
-				ChangeVarNodes((Node *) dest_quals, pe->path_factor->src_pf->factorpos + 1,
-							   pe->path_factor->dest_pf->factorpos + 1, 0);
-				ChangeVarNodes((Node *) src_quals, pe->path_factor->dest_pf->factorpos + 1,
-							   pe->path_factor->src_pf->factorpos + 1, 0);
-
-				rev_edge_qual = makeBoolExpr(AND_EXPR, list_concat(src_quals, dest_quals), -1);
 				if (edge_qual)
-					edge_qual = makeBoolExpr(OR_EXPR, list_make2(edge_qual, rev_edge_qual), -1);
+				{
+					if (pf->src_pf != pf->dest_pf)
+						use_union_all = true;
+				}
 				else
-					edge_qual = rev_edge_qual;
+				{
+					List	   *src_quals = copyObject(pe->dest_quals);
+					List	   *dest_quals = copyObject(pe->src_quals);
+
+					/* Swap the source and destination varnos in the quals. */
+					ChangeVarNodes((Node *) dest_quals, pe->path_factor->src_pf->factorpos + 1,
+								   pe->path_factor->dest_pf->factorpos + 1, 0);
+					ChangeVarNodes((Node *) src_quals, pe->path_factor->dest_pf->factorpos + 1,
+								   pe->path_factor->src_pf->factorpos + 1, 0);
+
+					edge_qual = makeBoolExpr(AND_EXPR, list_concat(src_quals, dest_quals), -1);
+				}
 			}
 
 			/*
@@ -509,13 +527,31 @@ generate_query_for_graph_path(RangeTblEntry *rte, List *graph_path)
 		 * unprivileged data access through a property graph. This is inline
 		 * with the views being security_invoker by default.
 		 */
-		rel = table_open(pe->reloid, AccessShareLock);
-		pni = addRangeTableEntryForRelation(make_parsestate(NULL), rel, AccessShareLock,
-											NULL, true, false);
-		table_close(rel, NoLock);
-		path_query->rtable = lappend(path_query->rtable, pni->p_rte);
-		path_query->rteperminfos = lappend(path_query->rteperminfos, pni->p_perminfo);
-		pni->p_rte->perminfoindex = list_length(path_query->rteperminfos);
+		if (IS_EDGE_PATTERN(pf->kind) && use_union_all)
+		{
+			Query	   *union_query = generate_undirected_edge_union_query(pe);
+
+			pni = addRangeTableEntryForSubquery(make_parsestate(NULL), union_query, makeAlias("edge_union", NIL), true, false);
+			path_query->rtable = lappend(path_query->rtable, pni->p_rte);
+
+			/*
+			 * RTE_SUBQUERY does not have rteperminfo, but relations within
+			 * the subquery already have their perminfos evaluated by
+			 * executor.
+			 */
+
+			pni->p_rte->perminfoindex = 0;
+		}
+		else
+		{
+			rel = table_open(pe->reloid, AccessShareLock);
+			pni = addRangeTableEntryForRelation(make_parsestate(NULL), rel, AccessShareLock,
+												NULL, true, false);
+			table_close(rel, NoLock);
+			path_query->rtable = lappend(path_query->rtable, pni->p_rte);
+			path_query->rteperminfos = lappend(path_query->rteperminfos, pni->p_perminfo);
+			pni->p_rte->perminfoindex = list_length(path_query->rteperminfos);
+		}
 		rtr = makeNode(RangeTblRef);
 		rtr->rtindex = list_length(path_query->rtable);
 		fromlist = lappend(fromlist, rtr);
@@ -564,8 +600,17 @@ generate_query_for_graph_path(RangeTblEntry *rte, List *graph_path)
 	vars = pull_vars_of_level((Node *) list_make2(qual_exprs, path_query->targetList), 0);
 	foreach_node(Var, var, vars)
 	{
-		RTEPermissionInfo *perminfo = getRTEPermissionInfo(path_query->rteperminfos,
-														   rt_fetch(var->varno, path_query->rtable));
+		RangeTblEntry *var_rte = rt_fetch(var->varno, path_query->rtable);
+		RTEPermissionInfo *perminfo;
+
+		/*
+		 * Subqueries handle their own permissions, in this case anything
+		 * below the UNION ALL subquery.
+		 */
+		if (var_rte->rtekind == RTE_SUBQUERY)
+			continue;
+
+		perminfo = getRTEPermissionInfo(path_query->rteperminfos, var_rte);
 
 		/* Must offset the attnum to fit in a bitmapset */
 		perminfo->selectedCols = bms_add_member(perminfo->selectedCols,
@@ -573,6 +618,242 @@ generate_query_for_graph_path(RangeTblEntry *rte, List *graph_path)
 	}
 
 	return path_query;
+}
+
+/*
+ * Construct a UNION ALL subquery over the edge relation that presents each
+ * edge row in both its forward orientation (srckey, destkey) and its backward
+ * orientation (destkey, srckey).  This is used for undirected edge patterns
+ * (-[e]-) when the source and destination vertex patterns are different path
+ * factors.  A NOT(srckey = destkey) filter on the backward branch prevents
+ * self-loop edges from being returned twice.
+ */
+static Query *
+generate_undirected_edge_union_query(struct path_element *pe)
+{
+	Query	   *subquery = makeNode(Query);
+	Query	   *fwd_query = makeNode(Query);
+	Query	   *bwd_query = makeNode(Query);
+	Relation	rel;
+	HeapTuple	eletup;
+	Datum		datum;
+	Datum	   *d1,
+			   *d2;
+	int			n1,
+				n2;
+	int16	   *src_key_attnums;
+	int16	   *dest_key_attnums;
+	Oid		   *eq_ops;
+	ParseNamespaceItem *fwd_pni;
+	ParseNamespaceItem *bwd_pni;
+	SetOperationStmt *sostmt;
+	TupleDesc	tupdesc;
+	RangeTblRef *fwd_rtr;
+	RangeTblRef *bwd_rtr;
+	int			resno = 0;
+
+	subquery->commandType = CMD_SELECT;
+	fwd_query->commandType = CMD_SELECT;
+	bwd_query->commandType = CMD_SELECT;
+
+	rel = table_open(pe->reloid, AccessShareLock);
+
+	eletup = SearchSysCache1(PROPGRAPHELOID, ObjectIdGetDatum(pe->elemoid));
+	if (!eletup)
+		elog(ERROR, "cache lookup failed for property graph element %u", pe->elemoid);
+
+	datum = SysCacheGetAttrNotNull(PROPGRAPHELOID, eletup, Anum_pg_propgraph_element_pgesrckey);
+	deconstruct_array_builtin(DatumGetArrayTypeP(datum), INT2OID, &d1, NULL, &n1);
+	datum = SysCacheGetAttrNotNull(PROPGRAPHELOID, eletup, Anum_pg_propgraph_element_pgedestkey);
+	deconstruct_array_builtin(DatumGetArrayTypeP(datum), INT2OID, &d2, NULL, &n2);
+
+	{
+		Datum	   *d3;
+		int			n3;
+
+		datum = SysCacheGetAttrNotNull(PROPGRAPHELOID, eletup, Anum_pg_propgraph_element_pgesrceqop);
+		deconstruct_array_builtin(DatumGetArrayTypeP(datum), OIDOID, &d3, NULL, &n3);
+		Assert(n1 == n3);
+		eq_ops = palloc(n1 * sizeof(Oid));
+		for (int i = 0; i < n1; i++)
+			eq_ops[i] = DatumGetObjectId(d3[i]);
+	}
+
+	Assert(n1 == n2);
+	src_key_attnums = palloc(n1 * sizeof(int16));
+	dest_key_attnums = palloc(n1 * sizeof(int16));
+	for (int i = 0; i < n1; i++)
+	{
+		src_key_attnums[i] = DatumGetInt16(d1[i]);
+		dest_key_attnums[i] = DatumGetInt16(d2[i]);
+	}
+
+	ReleaseSysCache(eletup);
+
+	fwd_pni = addRangeTableEntryForRelation(make_parsestate(NULL), rel, AccessShareLock, NULL, true, false);
+	fwd_query->rtable = list_make1(fwd_pni->p_rte);
+	fwd_query->rteperminfos = list_make1(fwd_pni->p_perminfo);
+	fwd_pni->p_rte->perminfoindex = 1;
+	{
+		RangeTblRef *rtr = makeNode(RangeTblRef);
+
+		rtr->rtindex = 1;
+		fwd_query->jointree = makeFromExpr(list_make1(rtr), NULL);
+	}
+
+	bwd_pni = addRangeTableEntryForRelation(make_parsestate(NULL), rel, AccessShareLock, NULL, true, false);
+	bwd_query->rtable = list_make1(bwd_pni->p_rte);
+	bwd_query->rteperminfos = list_make1(bwd_pni->p_perminfo);
+	bwd_pni->p_rte->perminfoindex = 1;
+	{
+		RangeTblRef *rtr = makeNode(RangeTblRef);
+
+		rtr->rtindex = 1;
+		bwd_query->jointree = makeFromExpr(list_make1(rtr), NULL);
+	}
+
+	sostmt = makeNode(SetOperationStmt);
+	sostmt->op = SETOP_UNION;
+	sostmt->all = true;
+
+	tupdesc = RelationGetDescr(rel);
+
+	bwd_query->jointree->quals = build_edge_self_loop_filter(tupdesc, n1, src_key_attnums, dest_key_attnums, eq_ops);
+
+	for (int i = 0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute att = TupleDescAttr(tupdesc, i);
+		RTEPermissionInfo *fwd_perminfo;
+		RTEPermissionInfo *bwd_perminfo;
+		TargetEntry *tle1,
+				   *tle2,
+				   *out_tle;
+		Var		   *fwd_var,
+				   *bwd_var,
+				   *out_var;
+		int			bwd_attnum;
+		Form_pg_attribute bwd_att;
+
+		if (att->attisdropped)
+			continue;
+
+		resno++;
+
+		fwd_perminfo = getRTEPermissionInfo(fwd_query->rteperminfos, fwd_pni->p_rte);
+		bwd_perminfo = getRTEPermissionInfo(bwd_query->rteperminfos, bwd_pni->p_rte);
+
+		/*
+		 * Mark each column as selected in both perminfos.  The backward
+		 * query reads bwd_attnum rather than att->attnum, since key
+		 * columns are swapped; non-key columns are identical in both.
+		 */
+		fwd_var = makeVar(1, att->attnum, att->atttypid, att->atttypmod, att->attcollation, 0);
+		tle1 = makeTargetEntry((Expr *) fwd_var, resno, pstrdup(NameStr(att->attname)), false);
+		fwd_query->targetList = lappend(fwd_query->targetList, tle1);
+		fwd_perminfo->selectedCols = bms_add_member(fwd_perminfo->selectedCols,
+													att->attnum - FirstLowInvalidHeapAttributeNumber);
+
+		bwd_attnum = att->attnum;
+		for (int k = 0; k < n1; k++)
+		{
+			if (src_key_attnums[k] == att->attnum)
+				bwd_attnum = dest_key_attnums[k];
+			else if (dest_key_attnums[k] == att->attnum)
+				bwd_attnum = src_key_attnums[k];
+		}
+		bwd_att = TupleDescAttr(tupdesc, bwd_attnum - 1);
+		bwd_var = makeVar(1, bwd_attnum, bwd_att->atttypid, bwd_att->atttypmod, bwd_att->attcollation, 0);
+		tle2 = makeTargetEntry((Expr *) bwd_var, resno, pstrdup(NameStr(att->attname)), false);
+		bwd_query->targetList = lappend(bwd_query->targetList, tle2);
+		bwd_perminfo->selectedCols = bms_add_member(bwd_perminfo->selectedCols,
+													bwd_attnum - FirstLowInvalidHeapAttributeNumber);
+
+		sostmt->colTypes = lappend_oid(sostmt->colTypes, att->atttypid);
+		sostmt->colTypmods = lappend_int(sostmt->colTypmods, att->atttypmod);
+		sostmt->colCollations = lappend_oid(sostmt->colCollations, att->attcollation);
+
+		out_var = makeVar(1, resno, att->atttypid, att->atttypmod, att->attcollation, 0);
+		out_tle = makeTargetEntry((Expr *) out_var, resno, pstrdup(NameStr(att->attname)), false);
+		subquery->targetList = lappend(subquery->targetList, out_tle);
+	}
+
+	table_close(rel, NoLock);
+
+	fwd_rtr = makeNode(RangeTblRef);
+	fwd_rtr->rtindex = 1;
+	bwd_rtr = makeNode(RangeTblRef);
+	bwd_rtr->rtindex = 2;
+	sostmt->larg = (Node *) fwd_rtr;
+	sostmt->rarg = (Node *) bwd_rtr;
+
+	fwd_pni = addRangeTableEntryForSubquery(make_parsestate(NULL), fwd_query, NULL, false, false);
+	bwd_pni = addRangeTableEntryForSubquery(make_parsestate(NULL), bwd_query, NULL, false, false);
+
+	subquery->rtable = list_make2(fwd_pni->p_rte, bwd_pni->p_rte);
+	subquery->setOperations = (Node *) sostmt;
+	subquery->jointree = makeFromExpr(NIL, NULL);
+
+	return subquery;
+}
+
+/*
+ * Generate a qualification expression to filter out self-loop edges.
+ */
+static Node *
+build_edge_self_loop_filter(TupleDesc tupdesc, int nkeys,
+							int16 *src_key_attnums, int16 *dest_key_attnums,
+							Oid *eq_ops)
+{
+	List	   *quals = NIL;
+	Expr	   *eq_all;
+	Node	   *qual;
+	ParseState *pstate = make_parsestate(NULL);
+
+	for (int i = 0; i < nkeys; i++)
+	{
+		Form_pg_attribute src_att = TupleDescAttr(tupdesc, src_key_attnums[i] - 1);
+		Form_pg_attribute dest_att = TupleDescAttr(tupdesc, dest_key_attnums[i] - 1);
+		Var		   *src_var = makeVar(1, src_key_attnums[i], src_att->atttypid, src_att->atttypmod, src_att->attcollation, 0);
+		Var		   *dest_var = makeVar(1, dest_key_attnums[i], dest_att->atttypid, dest_att->atttypmod, dest_att->attcollation, 0);
+		List	   *args;
+		Oid			actual_arg_types[2];
+		Oid			declared_arg_types[2];
+		HeapTuple	tup;
+		Form_pg_operator opform;
+		OpExpr	   *linkqual;
+
+		tup = SearchSysCache1(OPEROID, ObjectIdGetDatum(eq_ops[i]));
+		if (!HeapTupleIsValid(tup))
+			elog(ERROR, "cache lookup failed for operator %u", eq_ops[i]);
+		opform = (Form_pg_operator) GETSTRUCT(tup);
+
+		args = list_make2(src_var, dest_var);
+		actual_arg_types[0] = exprType((Node *) src_var);
+		actual_arg_types[1] = exprType((Node *) dest_var);
+		declared_arg_types[0] = opform->oprleft;
+		declared_arg_types[1] = opform->oprright;
+		make_fn_arguments(pstate, args, actual_arg_types, declared_arg_types);
+
+		linkqual = makeNode(OpExpr);
+		linkqual->opno = opform->oid;
+		linkqual->opfuncid = opform->oprcode;
+		linkqual->opresulttype = opform->oprresult;
+		linkqual->opretset = false;
+		/* opcollid and inputcollid will be set by parse_collate.c */
+		linkqual->args = args;
+		linkqual->location = -1;
+
+		ReleaseSysCache(tup);
+		quals = lappend(quals, linkqual);
+	}
+
+	eq_all = (list_length(quals) > 1
+			  ? (Expr *) makeBoolExpr(AND_EXPR, quals, -1)
+			  : (Expr *) linitial(quals));
+	qual = (Node *) makeBoolExpr(NOT_EXPR, list_make1(eq_all), -1);
+
+	assign_expr_collations(pstate, qual);
+	return qual;
 }
 
 /*
