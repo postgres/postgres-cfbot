@@ -11117,6 +11117,31 @@ get_rule_expr(Node *node, deparse_context *context,
 			}
 			break;
 
+		case T_SafeTypeCastExpr:
+			{
+				SafeTypeCastExpr *stcexpr = castNode(SafeTypeCastExpr, node);
+
+				/*
+				 * Cannot deparse castexpr directly, becuase transformTypeCast
+				 * may have already constant-folded the cast expression into a
+				 * constant. Instead, use "source" and "defexpr" to
+				 * reconstruct the clause.
+				 */
+				appendStringInfoString(buf, "CAST(");
+				get_rule_expr((Node *) stcexpr->source, context, showimplicit);
+
+				appendStringInfo(buf, " AS %s ",
+								 format_type_with_typemod(stcexpr->resulttype,
+														  stcexpr->resulttypmod));
+
+				appendStringInfoString(buf, "DEFAULT ");
+
+				get_rule_expr((Node *) stcexpr->defexpr, context, showimplicit);
+
+				appendStringInfoString(buf, " ON CONVERSION ERROR)");
+			}
+			break;
+
 		case T_JsonExpr:
 			{
 				JsonExpr   *jexpr = (JsonExpr *) node;

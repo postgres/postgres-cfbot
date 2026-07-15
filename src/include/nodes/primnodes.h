@@ -761,6 +761,44 @@ typedef enum CoercionForm
 } CoercionForm;
 
 /*
+ * SafeTypeCastExpr -
+ *		Transformed representation of
+ * 		CAST(expr AS typename DEFAULT expr ON CONVERSION ERROR)
+ */
+typedef struct SafeTypeCastExpr
+{
+	Expr		xpr;
+
+	/*
+	 * The transformed source expression.
+	 *
+	 * Cases like ``CAST(1 AS date DEFAULT NULL ON CONVERSION ERROR)`` where
+	 * the castexpr evaluates to NULL, we need this field to reconstruct the
+	 * original query.
+	 */
+	Expr	   *source;
+
+	/*
+	 * transformed cast expression, NULL means cannot coerce to target type.
+	 *
+	 * For query jumbling, ignore this node because castexpr expression may
+	 * contain the "source" expression. Including it would cause the same
+	 * expression to be jumbled twice.
+	 */
+	Expr	   *castexpr pg_node_attr(query_jumble_ignore);
+	/* Fall-back to the default expression if cast evaluation fails */
+	Expr	   *defexpr;
+	/* target type Oid */
+	Oid			resulttype;
+	/* target type modifier */
+	int32		resulttypmod;
+	/* OID of collation, or InvalidOid if none */
+	Oid			resultcollid;
+	/* token location, or -1 if unknown */
+	ParseLoc	location;
+} SafeTypeCastExpr;
+
+/*
  * FuncExpr - expression node for a function call
  */
 typedef struct FuncExpr

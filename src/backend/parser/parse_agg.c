@@ -600,6 +600,13 @@ check_agglevels_and_constraints(ParseState *pstate, Node *expr)
 
 			break;
 
+		case EXPR_KIND_TYPECAST_DEFAULT:
+			if (isAgg)
+				err = _("aggregate functions are not allowed in CAST DEFAULT expressions");
+			else
+				err = _("grouping operations are not allowed in CAST DEFAULT expressions");
+			break;
+
 			/*
 			 * There is intentionally no default: case here, so that the
 			 * compiler will warn if we add a new ParseExprKind without
@@ -1044,6 +1051,9 @@ transformWindowFuncCall(ParseState *pstate, WindowFunc *wfunc,
 			break;
 		case EXPR_KIND_FOR_PORTION:
 			err = _("window functions are not allowed in FOR PORTION OF expressions");
+			break;
+		case EXPR_KIND_TYPECAST_DEFAULT:
+			err = _("window functions are not allowed in CAST DEFAULT expressions");
 			break;
 
 			/*
