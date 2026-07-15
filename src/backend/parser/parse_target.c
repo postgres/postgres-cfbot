@@ -845,7 +845,8 @@ transformAssignmentIndirection(ParseState *pstate,
 										COERCION_IMPLICIT,
 										COERCE_IMPLICIT_CAST,
 										location,
-										false);
+										false,
+										NULL);
 
 			return (Node *) fstore;
 		}

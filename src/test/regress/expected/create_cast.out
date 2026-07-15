@@ -88,6 +88,18 @@ SELECT 1234::int4::casttesttype; -- Should work now
  bar1234
 (1 row)
 
+SELECT CAST(1234::int4 AS casttesttype DEFAULT NULL ON CONVERSION ERROR); -- error
+ERROR:  cannot cast type integer to casttesttype with DEFAULT expression in CAST ... ON CONVERSION ERROR
+LINE 1: SELECT CAST(1234::int4 AS casttesttype DEFAULT NULL ON CONVE...
+                    ^
+DETAIL:  Explicit cast is defined but definition is not error safe.
+ALTER FUNCTION bar_int4_text(int4) ERROR SAFE;
+SELECT CAST(1234::int4 AS casttesttype DEFAULT NULL ON CONVERSION ERROR); -- ok
+ casttesttype 
+--------------
+ bar1234
+(1 row)
+
 -- check dependencies generated for that
 SELECT pg_describe_object(classid, objid, objsubid) as obj,
        pg_describe_object(refclassid, refobjid, refobjsubid) as objref,

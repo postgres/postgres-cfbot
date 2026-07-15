@@ -265,6 +265,7 @@ typedef enum ExprEvalOp
 	EEOP_XMLEXPR,
 	EEOP_JSON_CONSTRUCTOR,
 	EEOP_IS_JSON,
+	EEOP_SAFETYPE_CAST,
 	EEOP_JSONEXPR_PATH,
 	EEOP_JSONEXPR_COERCION,
 	EEOP_JSONEXPR_COERCION_FINISH,
@@ -753,6 +754,12 @@ typedef struct ExprEvalStep
 		{
 			JsonIsPredicate *pred;	/* original expression node */
 		}			is_json;
+
+		/* for EEOP_SAFETYPE_CAST */
+		struct
+		{
+			struct SafeTypeCastState *stcstate;
+		}			stcexpr;
 
 		/* for EEOP_JSONEXPR_PATH */
 		struct

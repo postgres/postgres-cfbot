@@ -157,6 +157,8 @@ static void updateRawStmtEnd(RawStmt *rs, int end_location);
 static Node *makeColumnRef(char *colname, List *indirection,
 						   int location, core_yyscan_t yyscanner);
 static Node *makeTypeCast(Node *arg, TypeName *typename, int location);
+static Node *makeTypeCastOpt(Node *arg, TypeName *typename,
+							 Node *raw_default, int location);
 static Node *makeStringConstCast(char *str, int location, TypeName *typename);
 static Node *makeIntConst(int val, int location);
 static Node *makeFloatConst(char *str, int location);
@@ -16875,6 +16877,10 @@ func_expr_common_subexpr:
 				}
 			| CAST '(' a_expr AS Typename ')'
 				{ $$ = makeTypeCast($3, $5, @1); }
+			| CAST '(' a_expr AS Typename ERROR_P ON CONVERSION_P ERROR_P ')'
+				{ $$ = makeTypeCast($3, $5, @1); }
+			| CAST '(' a_expr AS Typename DEFAULT a_expr ON CONVERSION_P ERROR_P ')'
+				{ $$ = makeTypeCastOpt($3, $5, $7, @1); }
 			| EXTRACT '(' extract_list ')'
 				{
 					$$ = (Node *) makeFuncCall(SystemFuncName("extract"),
@@ -20037,7 +20043,22 @@ makeTypeCast(Node *arg, TypeName *typename, int location)
 
 	n->arg = arg;
 	n->typeName = typename;
+	n->defexpr = NULL;
 	n->location = location;
+	return (Node *) n;
+}
+
+static Node *
+makeTypeCastOpt(Node *arg, TypeName *typename,
+				Node *defexpr, int location)
+{
+	TypeCast   *n = makeNode(TypeCast);
+
+	n->arg = arg;
+	n->typeName = typename;
+	n->defexpr = defexpr;
+	n->location = location;
+
 	return (Node *) n;
 }
 

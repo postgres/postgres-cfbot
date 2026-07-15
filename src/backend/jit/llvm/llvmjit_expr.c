@@ -2258,6 +2258,62 @@ llvm_compile_expr(ExprState *state)
 				LLVMBuildBr(b, opblocks[opno + 1]);
 				break;
 
+			case EEOP_SAFETYPE_CAST:
+				{
+					SafeTypeCastState *stcstate = op->d.stcexpr.stcstate;
+					LLVMBasicBlockRef b_noerror;
+					LLVMBasicBlockRef b_error;
+					LLVMValueRef v_error_occurred_p;
+					LLVMValueRef v_details_wanted_p;
+					LLVMValueRef v_error_occurred;
+
+					b_noerror = l_bb_before_v(opblocks[opno + 1],
+											  "op.%d.noerror", opno);
+					b_error = l_bb_before_v(opblocks[opno + 1],
+											"op.%d.error", opno);
+
+					/* Get pointer to error_occurred field */
+					v_error_occurred_p = l_ptr_const(&stcstate->escontext.error_occurred,
+													 l_ptr(TypeStorageBool));
+
+					/* Load error_occurred at runtime */
+					v_error_occurred = l_load(b, TypeStorageBool, v_error_occurred_p, "");
+
+					/* Branch based on error_occurred: no error -> jump_end */
+					LLVMBuildCondBr(b,
+									LLVMBuildICmp(b, LLVMIntEQ, v_error_occurred,
+												  l_sbool_const(0), ""),
+									b_noerror,
+									b_error);
+
+					/* No error: jump to end */
+					LLVMPositionBuilderAtEnd(b, b_noerror);
+					LLVMBuildBr(b, opblocks[stcstate->jump_end]);
+
+					/* Error occurred: set null, reset flags, evaluate default */
+					LLVMPositionBuilderAtEnd(b, b_error);
+
+					/* set resnull to true */
+					LLVMBuildStore(b, l_sbool_const(1), v_resnullp);
+
+					/* reset resvalue */
+					LLVMBuildStore(b, l_datum_const(0), v_resvaluep);
+
+					/*
+					 * Reset for next use such as for catching errors when
+					 * coercing a expression.
+					 */
+					LLVMBuildStore(b, l_sbool_const(0), v_error_occurred_p);
+
+					v_details_wanted_p = l_ptr_const(&stcstate->escontext.details_wanted,
+													 l_ptr(TypeStorageBool));
+					LLVMBuildStore(b, l_sbool_const(0), v_details_wanted_p);
+
+					LLVMBuildBr(b, opblocks[opno + 1]);
+
+					break;
+				}
+
 			case EEOP_JSONEXPR_PATH:
 				{
 					JsonExprState *jsestate = op->d.jsonexpr.jsestate;

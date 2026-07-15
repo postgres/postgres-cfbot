@@ -661,6 +661,28 @@ stringTypeDatum(Type tp, char *string, int32 atttypmod)
 }
 
 /*
+ * Error-safe version of stringTypeDatum.
+ *
+ * Returns true if "string" is a valid representation of type "tp".
+ * On success, the internal Datum representation is written to "result".
+ */
+bool
+stringTypeDatumSafe(Type tp, char *string, int32 atttypmod,
+					Node *escontext, Datum *result)
+{
+	FmgrInfo	flinfo;
+
+	Form_pg_type typform = (Form_pg_type) GETSTRUCT(tp);
+	Oid			typinput = typform->typinput;
+	Oid			typioparam = getTypeIOParam(tp);
+
+	fmgr_info(typinput, &flinfo);
+
+	return InputFunctionCallSafe(&flinfo, string, typioparam, atttypmod,
+								 escontext, result);
+}
+
+/*
  * Given a typeid, return the type's typrelid (associated relation), if any.
  * Returns InvalidOid if type is not a composite type.
  */

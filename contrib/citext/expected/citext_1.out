@@ -10,6 +10,11 @@ WHERE opc.oid >= 16384 AND NOT amvalidate(opc.oid);
 --------+---------
 (0 rows)
 
+SELECT CAST('abc'::bpchar AS citext DEFAULT NULL ON CONVERSION ERROR); -- error
+ERROR:  cannot cast type character to citext with DEFAULT expression in CAST ... ON CONVERSION ERROR
+LINE 1: SELECT CAST('abc'::bpchar AS citext DEFAULT NULL ON CONVERSI...
+                    ^
+DETAIL:  Explicit cast is defined but definition is not error safe.
 -- Test the operators and indexing functions
 -- Test = and <>.
 SELECT 'a'::citext = 'a'::citext AS t;

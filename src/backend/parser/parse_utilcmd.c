@@ -680,6 +680,7 @@ transformColumnDefinition(CreateStmtContext *cxt, ColumnDef *column)
 		castnode = makeNode(TypeCast);
 		castnode->typeName = SystemTypeName("regclass");
 		castnode->arg = (Node *) snamenode;
+		castnode->defexpr = NULL;
 		castnode->location = -1;
 		funccallnode = makeFuncCall(SystemFuncName("nextval"),
 									list_make1(castnode),
@@ -5222,7 +5223,7 @@ transformPartitionBoundValue(ParseState *pstate, Node *val,
 		assign_expr_collations(pstate, value);
 		value = (Node *) expression_planner((Expr *) value);
 		value = (Node *) evaluate_expr((Expr *) value, colType, colTypmod,
-									   partCollation);
+									   partCollation, NULL);
 		if (!IsA(value, Const))
 			elog(ERROR, "could not evaluate partition bound expression");
 	}
