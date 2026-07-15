@@ -334,7 +334,7 @@ gin_check_posting_tree_parent_keys_consistency(Relation rel, BlockNumber posting
 				{
 					PostingItem *previous_posting_item = GinDataPageGetPostingItem(page, i - 1);
 
-					if (ItemPointerCompare(&posting_item->key, &previous_posting_item->key) < 0)
+					if (ItemPointerCompare(&posting_item->key, &previous_posting_item->key) <= 0)
 						ereport(ERROR,
 								(errcode(ERRCODE_INDEX_CORRUPTED),
 								 errmsg("index \"%s\" has wrong tuple order in posting tree, block %u, offset %u",
