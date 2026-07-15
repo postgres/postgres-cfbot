@@ -1373,6 +1373,16 @@ pg_hba_file_rules| SELECT rule_number,
     options,
     error
    FROM pg_hba_file_rules() a(rule_number, file_name, line_number, type, database, user_name, address, netmask, auth_method, options, error);
+pg_hosts_file_rules| SELECT file_name,
+    line_number,
+    hostnames,
+    ssl_certificate,
+    ssl_key,
+    ssl_ca,
+    passphrase_command,
+    passphrase_command_reload,
+    error
+   FROM pg_hosts_file_rules() a(file_name, line_number, hostnames, ssl_certificate, ssl_key, ssl_ca, passphrase_command, passphrase_command_reload, error);
 pg_ident_file_mappings| SELECT map_number,
     file_name,
     line_number,
