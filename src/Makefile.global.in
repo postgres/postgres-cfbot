@@ -737,6 +737,22 @@ pg_isolation_regress_installcheck = \
     --bindir='$(bindir)' \
     $(pg_regress_locale_flags) $(EXTRA_REGRESS_OPTS)
 
+pg_trace_regress_check = \
+    echo "\# +++ trace check in $(subdir) +++" && \
+    $(with_temp_install) \
+    $(top_builddir)/src/test/trace/pg_trace_regress \
+    --temp-instance=./tmp_check \
+    --inputdir=$(srcdir) \
+    --bindir= \
+    $(TEMP_CONF) \
+    $(pg_regress_locale_flags) $(EXTRA_REGRESS_OPTS)
+pg_trace_regress_installcheck = \
+    echo "\# +++ trace install-check in $(subdir) +++" && \
+    $(top_builddir)/src/test/trace/pg_trace_regress \
+    --inputdir=$(srcdir) \
+    --bindir='$(bindir)' \
+    $(pg_regress_locale_flags) $(EXTRA_REGRESS_OPTS)
+
 ##########################################################################
 #
 # Customization

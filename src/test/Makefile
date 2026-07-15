@@ -20,7 +20,8 @@ SUBDIRS = \
 	postmaster \
 	recovery \
 	regress \
-	subscription
+	subscription \
+	trace
 
 ifeq ($(with_icu),yes)
 SUBDIRS += icu
