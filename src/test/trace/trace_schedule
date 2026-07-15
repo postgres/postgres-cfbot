@@ -1,0 +1,8 @@
+# ----------
+# src/test/trace/trace_schedule
+#
+# Each test here is run through psql with PQTRACE enabled, and the
+# resulting protocol trace is compared against expected/<test>.trace.
+# ----------
+
+test:
