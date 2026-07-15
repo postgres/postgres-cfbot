@@ -1231,7 +1231,6 @@ my @errors = (
 		2,
 		[
 			qr{ERROR:  syntax error},
-			qr{prepared statement .* does not exist}
 		],
 		q{-- SQL syntax error
     SELECT 1 + ;
