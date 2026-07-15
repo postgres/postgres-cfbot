@@ -2260,19 +2260,20 @@ EXPLAIN (COSTS OFF)
 SELECT count(*) FROM tenk1 LEFT JOIN tenk2 ON
   tenk1.hundred = 42 AND (tenk2.thousand = 42 OR tenk2.thousand = 41 OR tenk2.tenthous = 2) AND
   tenk2.hundred = tenk1.hundred;
-                                     QUERY PLAN                                     
-------------------------------------------------------------------------------------
+                                        QUERY PLAN                                        
+------------------------------------------------------------------------------------------
  Aggregate
    ->  Nested Loop Left Join
-         Join Filter: (tenk1.hundred = 42)
          ->  Index Only Scan using tenk1_hundred on tenk1
-         ->  Memoize
-               Cache Key: tenk1.hundred
-               Cache Mode: logical
-               ->  Index Scan using tenk2_hundred on tenk2
-                     Index Cond: (hundred = tenk1.hundred)
-                     Filter: ((thousand = 42) OR (thousand = 41) OR (tenthous = 2))
-(10 rows)
+         ->  Result
+               One-Time Filter: (tenk1.hundred = 42)
+               ->  Memoize
+                     Cache Key: tenk1.hundred
+                     Cache Mode: logical
+                     ->  Index Scan using tenk2_hundred on tenk2
+                           Index Cond: (hundred = tenk1.hundred)
+                           Filter: ((thousand = 42) OR (thousand = 41) OR (tenthous = 2))
+(11 rows)
 
 --
 -- Check behavior with duplicate index column contents
