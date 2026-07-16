@@ -64,6 +64,12 @@ CREATE FUNCTION read_stream_for_blocks(rel regclass, blocks int4[], check_per_bu
 RETURNS SETOF record STRICT
 AS 'MODULE_PATHNAME' LANGUAGE C;
 
+-- Benchmarking helper (not for committing): streams the given blocks nruns
+-- times without materializing an SRF, returning the total buffers streamed.
+CREATE FUNCTION read_stream_bench(rel regclass, blocks int4[], nruns int4 DEFAULT 1)
+RETURNS int8 STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
 
 /*
  * Handle related functions
