@@ -465,8 +465,9 @@ returns bool
       equality</quote>) support functions, registered under support
      function number 4.  These functions allow the core code to
      determine when it is safe to apply the btree deduplication
-     optimization.  Currently, <function>equalimage</function>
-     functions are only called when building or rebuilding an index.
+     optimization.  <function>equalimage</function> functions might
+     be called when building or rebuilding an index, or planning an
+     index scan.
     </para>
     <para>
      An <function>equalimage</function> function must have the
