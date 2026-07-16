@@ -413,8 +413,9 @@ BufFileClose(BufFile *file)
 {
 	int			i;
 
-	/* flush any unwritten data */
-	BufFileFlush(file);
+	/* flush any unwritten data if it will not be deleted on close */
+	if (file->fileset != NULL)
+		BufFileFlush(file);
 	/* close and delete the underlying file(s) */
 	for (i = 0; i < file->numFiles; i++)
 		FileClose(file->files[i]);
