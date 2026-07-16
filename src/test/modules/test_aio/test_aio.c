@@ -947,6 +947,74 @@ read_stream_for_blocks(PG_FUNCTION_ARGS)
 }
 
 
+/*
+ * Benchmarking helper (NOT for committing).
+ *
+ * Like read_stream_for_blocks(), but streams the given blocks nruns times
+ * without materializing an SRF/tuplestore, pinning and immediately releasing
+ * each buffer.  This isolates the CPU cost of the read stream machinery
+ * itself (e.g. the backward I/O combining bookkeeping) from the per-row SRF
+ * overhead, so timing differences between forward and backward block arrays
+ * reflect read-stream overhead rather than result materialization.
+ *
+ * Returns the total number of buffers streamed across all runs.
+ */
+PG_FUNCTION_INFO_V1(read_stream_bench);
+Datum
+read_stream_bench(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	ArrayType  *blocksarray = PG_GETARG_ARRAYTYPE_P(1);
+	int32		nruns = PG_GETARG_INT32(2);
+	Relation	rel;
+	BlocksReadStreamData stream_data;
+	int64		total = 0;
+
+	if (nruns < 1)
+		elog(ERROR, "nruns must be >= 1");
+
+	if (ARR_NDIM(blocksarray) != 1 ||
+		ARR_HASNULL(blocksarray) ||
+		ARR_ELEMTYPE(blocksarray) != INT4OID)
+		elog(ERROR, "expected 1 dimensional int4 array");
+
+	stream_data.nblocks = ARR_DIMS(blocksarray)[0];
+	stream_data.blocks = (uint32 *) ARR_DATA_PTR(blocksarray);
+
+	rel = relation_open(relid, AccessShareLock);
+
+	for (int run = 0; run < nruns; run++)
+	{
+		ReadStream *stream;
+		Buffer		buf;
+
+		stream_data.curblock = 0;
+
+		stream = read_stream_begin_relation(READ_STREAM_FULL,
+											NULL,
+											rel,
+											MAIN_FORKNUM,
+											read_stream_for_blocks_cb,
+											&stream_data,
+											0);
+
+		while ((buf = read_stream_next_buffer(stream, NULL)) != InvalidBuffer)
+		{
+			ReleaseBuffer(buf);
+			total++;
+		}
+
+		read_stream_end(stream);
+
+		CHECK_FOR_INTERRUPTS();
+	}
+
+	relation_close(rel, NoLock);
+
+	PG_RETURN_INT64(total);
+}
+
+
 PG_FUNCTION_INFO_V1(handle_get);
 Datum
 handle_get(PG_FUNCTION_ARGS)
