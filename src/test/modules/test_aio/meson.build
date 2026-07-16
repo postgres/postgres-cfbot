@@ -34,6 +34,7 @@ tests += {
       't/002_io_workers.pl',
       't/003_initdb.pl',
       't/004_read_stream.pl',
+      't/005_read_stream_backward.pl',
     ],
   },
 }
