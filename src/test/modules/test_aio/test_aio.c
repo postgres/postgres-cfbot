@@ -843,10 +843,22 @@ read_stream_for_blocks_cb(ReadStream *stream,
 						  void *per_buffer_data)
 {
 	BlocksReadStreamData *stream_data = callback_private_data;
+	BlockNumber blocknum;
 
 	if (stream_data->curblock >= stream_data->nblocks)
 		return InvalidBlockNumber;
-	return stream_data->blocks[stream_data->curblock++];
+
+	blocknum = stream_data->blocks[stream_data->curblock++];
+
+	/*
+	 * Stash the block number in the per-buffer data so that
+	 * read_stream_for_blocks() can verify that each buffer is handed back
+	 * paired with the per-buffer data the callback populated for it.
+	 */
+	if (per_buffer_data)
+		*((BlockNumber *) per_buffer_data) = blocknum;
+
+	return blocknum;
 }
 
 PG_FUNCTION_INFO_V1(read_stream_for_blocks);
@@ -855,6 +867,7 @@ read_stream_for_blocks(PG_FUNCTION_ARGS)
 {
 	Oid			relid = PG_GETARG_OID(0);
 	ArrayType  *blocksarray = PG_GETARG_ARRAYTYPE_P(1);
+	bool		check_per_buffer_data = PG_GETARG_BOOL(2);
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	Relation	rel;
 	BlocksReadStreamData stream_data;
@@ -878,22 +891,40 @@ read_stream_for_blocks(PG_FUNCTION_ARGS)
 
 	rel = relation_open(relid, AccessShareLock);
 
+	/*
+	 * When asked to check per-buffer data, request room for one block number
+	 * per buffer. The callback stores each emitted block number there so we
+	 * can verify below that the stream hands every buffer back paired with
+	 * the per-buffer data the callback populated for it.
+	 */
 	stream = read_stream_begin_relation(READ_STREAM_FULL,
 										NULL,
 										rel,
 										MAIN_FORKNUM,
 										read_stream_for_blocks_cb,
 										&stream_data,
-										0);
+										check_per_buffer_data ?
+										sizeof(BlockNumber) : 0);
 
 	for (int i = 0; i < stream_data.nblocks; i++)
 	{
-		Buffer		buf = read_stream_next_buffer(stream, NULL);
+		void	   *per_buffer_data = NULL;
+		Buffer		buf = read_stream_next_buffer(stream,
+												  check_per_buffer_data ?
+												  &per_buffer_data : NULL);
 		Datum		values[3] = {0};
 		bool		nulls[3] = {0};
 
 		if (!BufferIsValid(buf))
 			elog(ERROR, "read_stream_next_buffer() call %d is unexpectedly invalid", i);
+
+		if (check_per_buffer_data)
+		{
+			if (*((BlockNumber *) per_buffer_data) != BufferGetBlockNumber(buf))
+				elog(ERROR, "read_stream_next_buffer() call %d paired block %u with per-buffer data for block %u",
+					 i, BufferGetBlockNumber(buf),
+					 *((BlockNumber *) per_buffer_data));
+		}
 
 		values[0] = Int32GetDatum(i);
 		values[1] = UInt32GetDatum(stream_data.blocks[i]);
