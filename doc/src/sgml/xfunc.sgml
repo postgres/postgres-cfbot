@@ -4134,10 +4134,10 @@ extern PgStat_Kind pgstat_register_kind(PgStat_Kind kind,
   <sect1 id="xfunc-optimization">
    <title>Function Optimization Information</title>
 
-  <indexterm zone="xfunc-optimization">
-   <primary>optimization information</primary>
-   <secondary>for functions</secondary>
-  </indexterm>
+   <indexterm zone="xfunc-optimization">
+    <primary>optimization information</primary>
+    <secondary>for functions</secondary>
+   </indexterm>
 
    <para>
     By default, a function is just a <quote>black box</quote> that the
@@ -4193,6 +4193,12 @@ supportfn(internal) returns internal
     so more things might be possible in future versions.
    </para>
 
+   <sect2 id="support-request-simplify">
+   <title>Simplification</title>
+   <indexterm>
+    <primary>optimization information</primary>
+    <secondary>for simplification</secondary>
+   </indexterm>
    <para>
     Some function calls can be simplified during planning based on
     properties specific to the function.  For example,
@@ -4240,6 +4246,11 @@ supportfn(internal) returns internal
     function's responsibility that the replacement Query be equivalent to
     normal execution of the target function.
    </para>
+   </sect2>
+
+
+   <sect2 id="support-request-selectivity">
+   <title>Selectivity</title>
 
    <para>
     For target functions that return <type>boolean</type>, it is often useful to estimate
@@ -4247,21 +4258,42 @@ supportfn(internal) returns internal
     function.  This can be done by a support function that implements
     the <literal>SupportRequestSelectivity</literal> request type.
    </para>
+   </sect2>
 
+   <sect2 id="support-request-cost">
+   <title>Variable Cost</title>
+   <indexterm>
+    <primary>optimization information</primary>
+    <secondary>for functions with variable cost</secondary>
+   </indexterm>
    <para>
     If the target function's run time is highly dependent on its inputs,
     it may be useful to provide a non-constant cost estimate for it.
     This can be done by a support function that implements
     the <literal>SupportRequestCost</literal> request type.
    </para>
+   </sect2>
 
+   <sect2 id="support-request-rows">
+   <title>Rows</title>
+   <indexterm>
+    <primary>optimization information</primary>
+    <secondary>for functions returning sets</secondary>
+   </indexterm>
    <para>
     For target functions that return sets, it is often useful to provide
     a non-constant estimate for the number of rows that will be returned.
     This can be done by a support function that implements
     the <literal>SupportRequestRows</literal> request type.
    </para>
+   </sect2>
 
+   <sect2 id="support-request-index-condition">
+   <title>Index condition</title>
+   <indexterm>
+    <primary>optimization information</primary>
+    <secondary>for functions in index condition</secondary>
+   </indexterm>
    <para>
     For target functions that return <type>boolean</type>, it may be possible to
     convert a function call appearing in <literal>WHERE</literal> into an indexable operator
@@ -4275,4 +4307,62 @@ supportfn(internal) returns internal
     To create such conditions, the support function must implement
     the <literal>SupportRequestIndexCondition</literal> request type.
    </para>
+   </sect2>
+
+   <sect2 id="support-request-monotonic">
+   <title>Monotonic functions</title>
+   <indexterm>
+    <primary>optimization information</primary>
+    <secondary>for monotonic functions</secondary>
+   </indexterm>
+   <para>
+    For target functions <literal>f(x)</literal> for which
+    <literal>f(x1) &lt; f(x2)</literal> and <literal>x1 &lt; x2 </literal> are defined,
+    <literal>SupportRequestMonotonic</literal> can be used to specify how
+    the order of <literal>f(x)</literal> can be infeered from the order of
+    <literal>x</literal>. For function with multiple parameters it can
+    specify how the function varies with respect to any number of parameters.
+    The function can depending on each parameter:
+
+    <itemizedlist>
+     <listitem>
+      <para>
+       <varname>MONOTONICFUNC_INCREASING</varname>: <literal>x1 &lt; x2</literal>
+       implies <literal>f(x1) &lt;= f(x2)</literal>
+      </para>
+     </listitem>
+     <listitem>
+      <para>
+       <varname>MONOTONICFUNC_DECREASING</varname>: <literal>x1 &lt; x2</literal>
+       implies <literal>f(x1) &gt;= f(x2)</literal>
+      </para>
+     </listitem>
+     <listitem>
+      <para>
+       <varname>MONOTONICFUNC_BOTH</varname>: both
+       <varname>MONOTONICFUNC_DECREASING</varname> and
+       <varname>MONOTONICFUNC_INCREASING</varname>, so
+       <literal>f(x1) = f(x2)</literal> for any valid
+       <literal>x1</literal> and <literal>x2</literal>.
+      </para>
+     </listitem>
+     <listitem>
+      <para>
+       <varname>MONOTONICFUNC_NONE</varname>: the order of <literal>f(x)</literal>
+       cannot be inferred from the order of <literal>x</literal>
+      </para>
+     </listitem>
+    </itemizedlist>
+
+    A plan using a monotonic function on clauses such as
+    <literal>DISTINCT</literal>,
+    <literal>GROUP BY</literal>, <literal>ORDER BY</literal>,
+    <literal>PARTITION BY</literal>
+    can derive plans based on the order of one function argument
+   </para>
+
+   <para>
+    See also <xref linkend="guc-enable-slope"/>.
+   </para>
+   </sect2>
   </sect1>
