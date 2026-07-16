@@ -603,6 +603,7 @@ refresh_by_match_merge(Oid matviewOid, Oid tempOid, Oid relowner,
 	char	   *nsp;
 	TupleDesc	tupdesc;
 	bool		foundUniqueIndex;
+	bool		addedAnyQuals;
 	List	   *indexoidlist;
 	ListCell   *indexoidscan;
 	int16		relnatts;
@@ -681,6 +682,7 @@ refresh_by_match_merge(Oid matviewOid, Oid tempOid, Oid relowner,
 	foundUniqueIndex = false;
 	initStringInfo(&precheck_cond_buf);
 	precheck_has_cond = false;
+	addedAnyQuals = false;
 
 	indexoidlist = RelationGetIndexList(matviewRel);
 
@@ -697,12 +699,38 @@ refresh_by_match_merge(Oid matviewOid, Oid tempOid, Oid relowner,
 			oidvector  *indclass;
 			Datum		indclassDatum;
 			int			i;
+			bool		index_has_nonnull;
+
+			foundUniqueIndex = true;
 
 			/* Must get indclass the hard way. */
 			indclassDatum = SysCacheGetAttrNotNull(INDEXRELID,
 												   indexRel->rd_indextuple,
 												   Anum_pg_index_indclass);
 			indclass = (oidvector *) DatumGetPointer(indclassDatum);
+
+			/*
+			 * Pre-scan: check whether this index has at least one NOT NULL
+			 * column.  If it does, we can safely skip nullable columns in the
+			 * join condition below (the NOT NULL column(s) uniquely identify
+			 * rows, so omitting nullable columns does not introduce join
+			 * ambiguity).  If all columns are nullable we must include all of
+			 * them to preserve correctness: skipping everything and relying
+			 * on *= alone can cause join ambiguity or data loss because *=
+			 * treats NULL as equal to NULL.
+			 */
+			index_has_nonnull = false;
+			for (i = 0; i < indnkeyatts; i++)
+			{
+				Form_pg_attribute attr_check =
+					TupleDescAttr(tupdesc, indexStruct->indkey.values[i] - 1);
+
+				if (attr_check->attnotnull)
+				{
+					index_has_nonnull = true;
+					break;
+				}
+			}
 
 			/* Add quals for all columns from this index. */
 			for (i = 0; i < indnkeyatts; i++)
@@ -718,6 +746,24 @@ refresh_by_match_merge(Oid matviewOid, Oid tempOid, Oid relowner,
 				Oid			op;
 				const char *leftop;
 				const char *rightop;
+
+				/*
+				 * Skip nullable columns when this index has at least one NOT
+				 * NULL column.  Nullable columns in unique indexes allow
+				 * multiple NULLs and NULL = NULL evaluates to NULL (false) in
+				 * the join, making unchanged NULL-containing rows appear as
+				 * changed on every refresh.  The NOT NULL column(s) are
+				 * sufficient to identify matching rows, so we can safely omit
+				 * nullable ones without introducing join ambiguity.
+				 *
+				 * When all columns are nullable we must not skip any of them:
+				 * with no per-column conditions only *= would remain, which
+				 * can cause join ambiguity or data loss (see pre-scan comment
+				 * above).  We fall back to including all columns so the join
+				 * behaves as in the original code.
+				 */
+				if (index_has_nonnull && !attr->attnotnull)
+					continue;
 
 				/*
 				 * Identify the equality operator associated with this index
@@ -754,7 +800,7 @@ refresh_by_match_merge(Oid matviewOid, Oid tempOid, Oid relowner,
 				/*
 				 * Actually add the qual, ANDed with any others.
 				 */
-				if (foundUniqueIndex)
+				if (addedAnyQuals)
 					appendStringInfoString(&querybuf, " AND ");
 
 				leftop = quote_qualified_identifier("newdata",
@@ -767,7 +813,7 @@ refresh_by_match_merge(Oid matviewOid, Oid tempOid, Oid relowner,
 										 op,
 										 rightop, attrtype);
 
-				foundUniqueIndex = true;
+				addedAnyQuals = true;
 
 				/*
 				 * Also accumulate the same condition for the duplicate-row
@@ -782,9 +828,9 @@ refresh_by_match_merge(Oid matviewOid, Oid tempOid, Oid relowner,
 					appendStringInfoString(&precheck_cond_buf, " AND ");
 
 				leftop = quote_qualified_identifier("newdata2",
-														NameStr(attr->attname));
+													NameStr(attr->attname));
 				rightop = quote_qualified_identifier("newdata",
-														 NameStr(attr->attname));
+													 NameStr(attr->attname));
 
 				generate_operator_clause(&precheck_cond_buf,
 										 leftop, attrtype,
@@ -816,30 +862,37 @@ refresh_by_match_merge(Oid matviewOid, Oid tempOid, Oid relowner,
 				errmsg("could not find suitable unique index on materialized view \"%s\"",
 					   RelationGetRelationName(matviewRel)));
 
+	/*
+	 * The record equality operator (*=) is always included in the join
+	 * predicate.  It handles all columns correctly including nullable ones
+	 * that were skipped above, since *=  treats NULL as equal to NULL.
+	 */
+	if (addedAnyQuals)
+		appendStringInfoString(&querybuf, " AND ");
+
 	appendStringInfoString(&querybuf,
-						   " AND newdata.* OPERATOR(pg_catalog.*=) mv.*) "
+						   "newdata.* OPERATOR(pg_catalog.*=) mv.*) "
 						   "WHERE newdata.* IS NULL OR mv.* IS NULL "
 						   "ORDER BY tid");
 
 	/*
-	 * Before populating the diff table, check for duplicate rows in the
-	 * new data set.  We look for rows that are equal in all unique index
-	 * columns (using the same operators as the join above, where
-	 * NULL = NULL is false) AND are also *=-equal overall.  Such rows
-	 * would both match the same materialized view row in the join,
-	 * producing an ambiguous diff.
+	 * Before populating the diff table, check for duplicate rows in the new
+	 * data set.  We look for rows that are equal in all unique index columns
+	 * (using the same operators as the join above, where NULL = NULL is
+	 * false) AND are also *=-equal overall.  Such rows would both match the
+	 * same materialized view row in the join, producing an ambiguous diff.
 	 *
 	 * Using index column operators rather than *= alone is important: it
-	 * correctly excludes rows whose indexed columns are NULL, because
-	 * unique indexes treat NULLs as distinct so those rows do not cause
-	 * join ambiguity.
+	 * correctly excludes rows whose indexed columns are NULL, because unique
+	 * indexes treat NULLs as distinct so those rows do not cause join
+	 * ambiguity.
 	 *
-	 * Note: here and below, we use "tablename.*::tablerowtype" as a hack
-	 * to keep ".*" from being expanded into multiple columns in a SELECT
-	 * list.  Compare ruleutils.c's get_variable().
+	 * Note: here and below, we use "tablename.*::tablerowtype" as a hack to
+	 * keep ".*" from being expanded into multiple columns in a SELECT list.
+	 * Compare ruleutils.c's get_variable().
 	 *
-	 * Even after we pass this test, a unique index on the materialized
-	 * view may find a duplicate key problem.
+	 * Even after we pass this test, a unique index on the materialized view
+	 * may find a duplicate key problem.
 	 */
 	{
 		StringInfoData precheck_querybuf;
@@ -861,10 +914,10 @@ refresh_by_match_merge(Oid matviewOid, Oid tempOid, Oid relowner,
 			/*
 			 * Note that this ereport() is returning data to the user.
 			 * Generally, we would want to make sure that the user has been
-			 * granted access to this data.  However, REFRESH MAT VIEW is
-			 * only able to be run by the owner of the mat view (or a
-			 * superuser) and therefore there is no need to check for access
-			 * to data in the mat view.
+			 * granted access to this data.  However, REFRESH MAT VIEW is only
+			 * able to be run by the owner of the mat view (or a superuser)
+			 * and therefore there is no need to check for access to data in
+			 * the mat view.
 			 */
 			ereport(ERROR,
 					(errcode(ERRCODE_CARDINALITY_VIOLATION),
@@ -872,7 +925,7 @@ refresh_by_match_merge(Oid matviewOid, Oid tempOid, Oid relowner,
 							RelationGetRelationName(matviewRel)),
 					 errdetail("Row: %s",
 							   SPI_getvalue(SPI_tuptable->vals[0],
-										   SPI_tuptable->tupdesc, 1))));
+											SPI_tuptable->tupdesc, 1))));
 		}
 	}
 
