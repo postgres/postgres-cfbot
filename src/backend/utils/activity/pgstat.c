@@ -479,6 +479,12 @@ static const PgStat_KindInfo pgstat_kind_builtin_infos[PGSTAT_KIND_BUILTIN_SIZE]
 		.init_shmem_cb = pgstat_lock_init_shmem_cb,
 		.reset_all_cb = pgstat_lock_reset_all_cb,
 		.snapshot_cb = pgstat_lock_snapshot_cb,
+
+		.per_backend_entry_size = sizeof(PgStatShared_LockBackendEntry),
+		.per_backend_data_off = offsetof(PgStatShared_LockBackendEntry, stats),
+		.per_backend_data_len = sizeof(PgStat_Lock),
+		.per_backend_shared_lock_off = offsetof(PgStatShared_Lock, lock),
+		.per_backend_acc_cb = pgstat_lock_per_backend_acc_cb,
 	},
 
 	[PGSTAT_KIND_SLRU] = {
