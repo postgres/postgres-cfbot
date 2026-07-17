@@ -393,7 +393,6 @@ static const PgStat_KindInfo pgstat_kind_builtin_infos[PGSTAT_KIND_BUILTIN_SIZE]
 		.shared_data_off = offsetof(PgStatShared_Backend, stats),
 		.shared_data_len = sizeof(((PgStatShared_Backend *) 0)->stats),
 
-		.flush_static_cb = pgstat_backend_flush_cb,
 		.reset_timestamp_cb = pgstat_backend_reset_timestamp_cb,
 	},
 
@@ -462,6 +461,12 @@ static const PgStat_KindInfo pgstat_kind_builtin_infos[PGSTAT_KIND_BUILTIN_SIZE]
 		.init_shmem_cb = pgstat_io_init_shmem_cb,
 		.reset_all_cb = pgstat_io_reset_all_cb,
 		.snapshot_cb = pgstat_io_snapshot_cb,
+
+		.per_backend_entry_size = sizeof(PgStatShared_IOBackendEntry),
+		.per_backend_data_off = offsetof(PgStatShared_IOBackendEntry, stats),
+		.per_backend_data_len = sizeof(PgStat_BackendIO),
+		.per_backend_shared_lock_off = offsetof(PgStatShared_IO, lock),
+		.per_backend_acc_cb = pgstat_io_per_backend_acc_cb,
 	},
 
 	[PGSTAT_KIND_LOCK] = {
