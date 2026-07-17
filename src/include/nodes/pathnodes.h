@@ -693,6 +693,19 @@ struct PlannerInfo
 	/* PartitionPruneInfos added in this query's plan. */
 	List	   *partPruneInfos;
 
+	/*
+	 * Cache for Bloom-filter pushdown build-side enumeration (see
+	 * find_interesting_bloom_filters in allpaths.c and
+	 * enumerate_bloom_filter_build_relids in joinrels.c).  This is a list of
+	 * Relids, each identifying a legal join relation (or single base
+	 * relation) that could serve as the build side of a pushed-down hash-join
+	 * Bloom filter.  Computed lazily and reused across all base relations, so
+	 * a separate "valid" flag distinguishes "not yet computed" from
+	 * "computed, no candidates".
+	 */
+	List	   *bloom_build_relids pg_node_attr(read_write_ignore);
+	bool		bloom_build_relids_valid pg_node_attr(read_write_ignore);
+
 	/* extension state */
 	void	  **extension_state pg_node_attr(read_write_ignore);
 	int			extension_state_allocated;

@@ -2343,7 +2343,7 @@ where b.f1 = t.thousand and a.f1 = b.f1 and (a.f1+b.f1+999) = t.tenthous;
 -----------------------------------------------------------------------------------------------------------------
  Nested Loop
    ->  Nested Loop
-         Join Filter: ((sum(i4b.f1)) = ((sum(i4a.f1) + 1)))
+         Join Filter: (((sum(i4a.f1) + 1)) = (sum(i4b.f1)))
          ->  Aggregate
                ->  Seq Scan on int4_tbl i4a
          ->  Aggregate
@@ -8265,7 +8265,7 @@ ON sj_t1.id = _t2t3t4.id;
  Nested Loop
    Join Filter: (sj_t1.id = sj_t3.id)
    ->  Nested Loop
-         Join Filter: (sj_t3.id = sj_t2_1.id)
+         Join Filter: (sj_t2_1.id = sj_t3.id)
          ->  Nested Loop
                Join Filter: (sj_t2.id = sj_t3.id)
                ->  Nested Loop

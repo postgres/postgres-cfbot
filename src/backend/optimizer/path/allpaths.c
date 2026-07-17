@@ -110,6 +110,10 @@ static void set_plain_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 								   RangeTblEntry *rte);
 static List *find_interesting_bloom_filters(PlannerInfo *root,
 											RelOptInfo *rel);
+static Selectivity bloom_build_side_join_ratio(PlannerInfo *root,
+											   RelOptInfo *rel,
+											   Relids build_relids,
+											   List **ec_all);
 static void generate_expected_filter_paths(PlannerInfo *root, RelOptInfo *rel);
 static void set_tablesample_rel_size(PlannerInfo *root, RelOptInfo *rel,
 									 RangeTblEntry *rte);
@@ -1008,6 +1012,251 @@ bloom_filter_recipient_reachable(PlannerInfo *root, Index owner_relid,
 }
 
 /*
+ * bloom_build_side_join_ratio
+ *	  Estimate the fraction of owner (probe) rows that survive a Bloom filter
+ *	  built over the join relation 'build_relids'.
+ *
+ * The per-owner-clause semijoin estimate used elsewhere only looks at the
+ * clauses that directly join the owner to a build relation, using each build
+ * relation's base statistics.  It therefore ignores selectivity contributed by
+ * the rest of the build side: restrictions on build relations (possibly ones
+ * that have no direct join clause to the owner at all) and the join clauses
+ * among the build relations.
+ *
+ * Consider a join on a snowflake schema with a fact table and two dimensions.
+ *
+ * SELECT * FROM fact_table
+ *          JOIN dim_1 ON (fact_table.id1 = dim_1.id)
+ *          JOIN dim_2 ON (dim_1.id2 = dim_2.id)
+ *          WHERE dim_2.x = 10;
+ *
+ * The dimension table dim_2 is filtered by a WHERE clause and only reaches the
+ * fact table through another dimension table. The direct estimate is 1.0 (for
+ * the join between fact_table and dim_1), even though the join may eliminate
+ * almost every fact row (depending on how many tuples survive the WHERE).
+ *
+ * We approximate the surviving fraction as the estimated cardinality of the
+ * join of {owner} + build_relids divided by the owner's cardinality.  Since a
+ * join emits at least one row per surviving owner row, this ratio is an upper
+ * bound on the true surviving fraction and so never makes the filter look more
+ * selective than it is.
+ *
+ * The join cardinality is the product of the build relations' (restriction
+ * reduced) row estimates times the selectivity of a non-redundant set of
+ * hashjoinable equality join clauses spanning the relation set.
+ *
+ * XXX We can't call generate_join_implied_equalities(), because all of this
+ * happens before we get to create the RelOptInfos for joins. So we assemble
+ * that clause set on our own.  Only JOIN_INNER selectivity is used, so no
+ * join-relation lookup is needed either.
+ *
+ * XXX The RelOptInfo for baserels however already exist, and so we can use
+ * those without any issue.
+ *
+ * XXX What about RelOptInfos representing joins from previous join planning
+ * cycle (for queries above join_collapse_limit)? Those should also exist,
+ * no? We should still be able to access the baserels one by one.
+ */
+static Selectivity
+bloom_build_side_join_ratio(PlannerInfo *root, RelOptInfo *rel,
+							Relids build_relids, List **ec_all)
+{
+	Relids		setrelids = bms_union(rel->relids, build_relids);
+	List	   *clauses = NIL;
+	List	   *ec_clauses = NIL;
+	List	   *ecs = NIL;
+	int		   *dsu;
+	double		nrows = 1.0;
+	Selectivity clausesel;
+	SpecialJoinInfo sjinfo;
+	ListCell   *lc;
+	int			i;
+
+	/*
+	 * Product of the build relations' restriction-reduced row estimates. That
+	 * means it already reflects WHERE clauses on some of the rels (if any).
+	 */
+	i = -1;
+	while ((i = bms_next_member(build_relids, i)) >= 0)
+	{
+		RelOptInfo *br = root->simple_rel_array[i];
+
+		/* XXX paranoia */
+		Assert(br != NULL);
+
+		nrows *= br->rows;
+	}
+
+	/*
+	 * Collect candidate hashjoinable equality join clauses fully contained in
+	 * the relation set.  Ordinary (non-EC) join clauses are all applied;
+	 * EC-derived clauses are gathered separately and later reduced to a
+	 * non-redundant spanning set per EquivalenceClass.
+	 *
+	 * XXX I think this needs to be careful about using the RestrictInfo for
+	 * the reason explained in find_interesting_bloom_filters, because we
+	 * don't want to interfere with the regular selectivity estimation (by
+	 * chaching our - possibly incorrect - estimate in the RestrictInfo). So
+	 * we should strip the RestrictInfo, just like in
+	 * find_interesting_bloom_filters, or make sure the estimate is correct
+	 * (same as for regular planning). But we can strip that only after
+	 * deduplicating the EC clauses etc.
+	 */
+	i = -1;
+	while ((i = bms_next_member(setrelids, i)) >= 0)
+	{
+		RelOptInfo *r = root->simple_rel_array[i];
+		ListCell   *lc2;
+
+		/* XXX paranoia */
+		Assert(r != NULL);
+		Assert(r->reloptkind == RELOPT_BASEREL);
+
+		/*
+		 * EC-derived clauses involving this rel (cached across build sides)
+		 *
+		 * XXX This caching is imperfect, in that 'empty list' is the same as
+		 * 'not cached', so empty lists are recalculated over and over. Maybe
+		 * we should split those two concepts, and remember when we got NIL?
+		 * Unless calculating empty filter is very cheap, not sure.
+		 */
+		if (ec_all[i] == NIL)
+			ec_all[i] = generate_implied_equalities_for_all_columns(root, r,
+																	bloom_em_matches_anybarevar,
+																	NULL, NULL);
+		foreach(lc2, ec_all[i])
+		{
+			RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc2);
+
+			if (rinfo->parent_ec == NULL)
+				continue;
+
+			if (bms_is_subset(rinfo->clause_relids, setrelids))
+			{
+				ec_clauses = list_append_unique_ptr(ec_clauses, rinfo);
+				ecs = list_append_unique_ptr(ecs, rinfo->parent_ec);
+			}
+		}
+
+		/* Ordinary (non-EC) join clauses involving this rel. */
+		foreach(lc2, r->joininfo)
+		{
+			RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc2);
+
+			if (rinfo->parent_ec != NULL)
+				continue;
+
+			/* XXX Can this actually happen for join clauses? */
+			if (bms_membership(rinfo->clause_relids) != BMS_MULTIPLE)
+				continue;
+
+			if (bms_is_subset(rinfo->clause_relids, setrelids))
+				clauses = list_append_unique_ptr(clauses, rinfo);
+		}
+	}
+
+	/*
+	 * Reduce the EC-derived clauses to a non-redundant spanning set.
+	 *
+	 * Within each EquivalenceClass, several of the collected clauses may
+	 * enforce the same equality transitively (e.g. a=b, a=c and b=c when
+	 * three relations of the set share a class); keeping them all would
+	 * multiply the same selectivity more than once.
+	 *
+	 * We use a small union-find (aka DSU) over the relids of the set, reset
+	 * per class, and keep a clause only when it connects two so-far
+	 * unconnected relations.
+	 *
+	 * The DSU tracks "parent" representative for each entry. We start with
+	 * each entry being it's own parent, and gradually merge disjoint sets
+	 * connected by the EC clauses.
+	 *
+	 * see https://en.wikipedia.org/wiki/Disjoint-set_data_structure
+	 */
+	dsu = palloc_array(int, root->simple_rel_array_size);
+	foreach(lc, ecs)
+	{
+		EquivalenceClass *ec = (EquivalenceClass *) lfirst(lc);
+		ListCell   *lc2;
+
+		/* reset the DSU, each relation is a separate group */
+		for (i = 0; i < root->simple_rel_array_size; i++)
+			dsu[i] = i;
+
+		foreach(lc2, ec_clauses)
+		{
+			RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc2);
+			int			first = -1;
+			bool		merged = false;
+			int			m;
+
+			/* skip clauses that don't belong to this EC */
+			if (rinfo->parent_ec != ec)
+				continue;
+
+			/* Union all set members referenced by this clause. */
+			m = -1;
+			while ((m = bms_next_member(rinfo->clause_relids, m)) >= 0)
+			{
+				int			ra,
+							rb;
+
+				Assert(m < root->simple_rel_array_size);
+
+				/* first rel in this EC clause */
+				if (first < 0)
+				{
+					first = m;
+					continue;
+				}
+
+				/* find (first) - representative of the first rel */
+				for (ra = first; dsu[ra] != ra; ra = dsu[ra])
+					 /* nothing */ ;
+
+				/* find (m) - representative of the current rel */
+				for (rb = m; dsu[rb] != rb; rb = dsu[rb])
+					 /* nothing */ ;
+
+				/* different representatives = disjoint sets, merge them */
+				if (ra != rb)
+				{
+					dsu[rb] = ra;
+					merged = true;
+				}
+			}
+
+			/*
+			 * If the clause connected two previously disconnected sets of
+			 * relations, it's not redundant. So use it for estimating filter
+			 * selectivity.
+			 */
+			if (merged)
+				clauses = lappend(clauses, rinfo);
+		}
+	}
+	pfree(dsu);
+
+	/* no clauses, no filtering */
+	if (clauses == NIL)
+	{
+		bms_free(setrelids);
+		return 1.0;
+	}
+
+	/*
+	 * XXX find_interesting_bloom_filters uses JOIN_SEMI, so maybe we should
+	 * use the same thing here?
+	 */
+	init_dummy_sjinfo(&sjinfo, rel->relids, build_relids);
+	clausesel = clauselist_selectivity(root, clauses, 0, JOIN_INNER, &sjinfo);
+
+	bms_free(setrelids);
+
+	return nrows * clausesel;
+}
+
+/*
  * find_interesting_bloom_filters
  *	  Identify Bloom filters that a hash join above this scan could push down,
  *	  and that are selective enough to be worth costing for.
@@ -1037,9 +1286,14 @@ static List *
 find_interesting_bloom_filters(PlannerInfo *root, RelOptInfo *rel)
 {
 	List	   *candidates;
-	List	   *group_relids = NIL; /* parallel: Relids per group */
-	List	   *group_clauses = NIL;	/* parallel: List of clauses */
+	List	  **clauses_by_rel; /* clauses per build relations */
+	double	   *sel_by_rel;		/* selectivity per build relation */
+	bool	   *has_rel;		/* XXX redundant with (clauses_by_rel[r] !=
+								 * NIL) */
+	List	  **ec_all;
+	List	   *build_sides;
 	List	   *result = NIL;
+	int			i;
 	ListCell   *lc;
 
 	if (!enable_hashjoin_bloom)
@@ -1067,7 +1321,27 @@ find_interesting_bloom_filters(PlannerInfo *root, RelOptInfo *rel)
 		candidates = lappend(candidates, rinfo->clause);
 	}
 
-	/* Group candidate clauses by their build-side relids. */
+	/*
+	 * Group usable candidate clauses by the base relation on the build side.
+	 *
+	 * A clause is usable only if its owner side is a bare Var of this
+	 * relation and its build side is a single base relation; that keeps the
+	 * per-relation selectivity estimate below well-defined (a semijoin
+	 * selectivity with a multi-relation inner side would require a join
+	 * RelOptInfo that does not exist yet at this stage of planning).
+	 *
+	 * A build side spanning several relations is still supported, but it is
+	 * assembled from several such single-relation clauses (see below), not
+	 * from a single clause referencing many relations.
+	 *
+	 * XXX Is the comment about not having join RelOptInfo accurate, even with
+	 * the enumerate_bloom_filter_build_relids below? Couldn't we use that to
+	 * calculate the correct semijoin selectivity using that, even for clauses
+	 * referencing multiple relations? But it's fairly rare case.
+	 */
+	clauses_by_rel = palloc0_array(List *, root->simple_rel_array_size);
+	has_rel = palloc0_array(bool, root->simple_rel_array_size);
+
 	foreach(lc, candidates)
 	{
 		Node	   *clause = (Node *) lfirst(lc);
@@ -1078,9 +1352,6 @@ find_interesting_bloom_filters(PlannerInfo *root, RelOptInfo *rel)
 		Relids		clause_relids;
 		Relids		build_relids;
 		int			buildrel;
-		ListCell   *lc2;
-		ListCell   *lc3;
-		bool		found;
 
 		/* strip RestrictInfo (see comment above) */
 		if (IsA(clause, RestrictInfo))
@@ -1119,52 +1390,235 @@ find_interesting_bloom_filters(PlannerInfo *root, RelOptInfo *rel)
 		if (!op_hashjoinable(opno, exprType(ownerexpr)))
 			continue;
 
-		/*
-		 * The build side must be a single base relation; that's what the
-		 * recipient lookup and our selectivity estimate can handle.
-		 *
-		 * XXX I don't think this restriction is necessary. We can allow the
-		 * build side to be a join. I don't see why that would be a problem.
-		 */
+		/* The build side of a usable clause must be one base relation. */
 		clause_relids = pull_varnos(root, (Node *) clause);
 		build_relids = bms_difference(clause_relids, rel->relids);
 		if (!bms_get_singleton_member(build_relids, &buildrel) ||
-			buildrel >= root->simple_rel_array_size ||
 			root->simple_rel_array[buildrel] == NULL ||
 			root->simple_rel_array[buildrel]->reloptkind != RELOPT_BASEREL)
 		{
 			bms_free(build_relids);
 			continue;
 		}
+		bms_free(build_relids);
 
-		/* Add to an existing group, or start a new one. */
+		Assert(root->simple_rel_array[buildrel]->reloptkind == RELOPT_BASEREL);
+
+		clauses_by_rel[buildrel] = lappend(clauses_by_rel[buildrel], clause);
+		has_rel[buildrel] = true;
+	}
+
+	/*
+	 * Pre-compute the per-build-relation semijoin selectivity.
+	 *
+	 * XXX I think we could calculate the selectivity only for semijoin-like
+	 * joins (semijoin, inner join), and ignore the rest. We don't even need
+	 * to calculate interesting filters for those cases.
+	 */
+	sel_by_rel = palloc_array(double, root->simple_rel_array_size);
+	for (i = 0; i < root->simple_rel_array_size; i++)
+	{
+		SpecialJoinInfo sjinfo;
+		Relids		build_relids;
+
+		/* ignore relations without join clauses */
+		if (!has_rel[i])
+			continue;
+
+		build_relids = bms_make_singleton(i);
+		init_dummy_sjinfo(&sjinfo, rel->relids, build_relids);
+		sjinfo.jointype = JOIN_SEMI;
+
+		sel_by_rel[i] = clauselist_selectivity(root, clauses_by_rel[i], 0,
+											   JOIN_SEMI, &sjinfo);
+		bms_free(build_relids);
+	}
+
+	/*
+	 * Generate the set of possible join relations on the build side.
+	 *
+	 * This performs a minimal subset of the join planning - construct joins
+	 * as set of relids, for which we can build filters. We don't bother with
+	 * generating paths or even constructing RelOptInfos for joins, all that
+	 * will happen later during the "full" join search. We only care about
+	 * which joins would be valid, and calculating the selectivity.
+	 *
+	 * There are various other limits and heuristics intended to minimize the
+	 * cost, see enumerate_bloom_filter_build_relids for details.
+	 *
+	 * The list of valid join relids is calculated once, on the first call,
+	 * and cached in PlannerInfo.
+	 *
+	 * XXX We could invent additional heuristics for when to calculate the
+	 * join relids, so that we don't do that in cases where it's obviously
+	 * useless (for queries touching only tiny amounts of rows, ...). We
+	 * should also give CustomScan to decide whether to do this (so that it
+	 * can request it in more cases, if it can leverage it in some way, e.g.
+	 * to scan storage more efficiently).
+	 */
+	build_sides = enumerate_bloom_filter_build_relids(root);
+
+	/* Cache of per-relation EC-derived clauses, filled lazily below. */
+	ec_all = palloc0_array(List *, root->simple_rel_array_size);
+
+	/*
+	 * Consider each legal join relation (or single base relation) that could
+	 * serve as a build side.  For a build side B we combine the per-relation
+	 * clauses of every build relation in B that has a direct join clause to
+	 * the owner; those clauses define the filter keys.  At least one such
+	 * relation must exist, otherwise the filter would have no keys.
+	 *
+	 * We estimate the surviving fraction two ways and keep the smaller (more
+	 * selective) one, since both are upper bounds on the true value:
+	 *
+	 * - the product of the per-relation semijoin selectivities (assuming
+	 * independence), which uses each build relation's base statistics but
+	 * ignores the rest of the build side; and
+	 *
+	 * - the build-side join-cardinality ratio (see
+	 * bloom_build_side_join_ratio), which accounts for restrictions on build
+	 * relations and the join clauses among them -- including build relations
+	 * with no direct join clause to the owner.
+	 *
+	 * The whole connected set B is used as the filter's build side, so the
+	 * filter is sourced by the join that first brings all of B together with
+	 * the owner (after any restriction on B's members has been applied).
+	 *
+	 * XXX Isn't there a better way to estimate the selectivity of the filter?
+	 * The two alternative formulas seem a bit strange / suspicious. Shouldn't
+	 * we really multiply all of this together, somehow?
+	 */
+	foreach(lc, build_sides)
+	{
+		Relids		bset = (Relids) lfirst(lc); /* relids on build side */
+		List	   *clauses = NIL;
+		Selectivity sel = 1.0;
+		ListCell   *lce;
+		bool		add;
+		int			r;
+
+		/* The owner cannot be on the build side of the filter. */
+		if (bms_is_member(rel->relid, bset))
+			continue;
 
 		/*
-		 * XXX Maybe we sould have a HTAB with the relids as a key? But the
-		 * lists should not be that long, I think.
+		 * Collect the owner-side clauses (the filter keys) and the product of
+		 * the per-relation semijoin selectivities.
 		 */
-		found = false;
-		forboth(lc2, group_relids, lc3, group_clauses)
+		r = -1;
+		while ((r = bms_next_member(bset, r)) >= 0)
 		{
-			Relids		grelids = (Relids) lfirst(lc2);
+			if (!has_rel[r])
+				continue;
 
-			if (bms_equal(grelids, build_relids))
+			clauses = list_concat(clauses, list_copy(clauses_by_rel[r]));
+			sel *= sel_by_rel[r];
+		}
+
+		/*
+		 * Have a clause to the filter "owner" (where we push the filter) for
+		 * this set of build relids? If not, it's a crossproduct, and that
+		 * can't filter anything.
+		 */
+		if (clauses == NIL)
+			continue;
+
+		/*
+		 * For a build side that spans several relations, refine the estimate
+		 * with the build-side join-cardinality ratio and keep whichever bound
+		 * is tighter.  This is what accounts for restrictions on build
+		 * relations and for join clauses among them -- including build
+		 * relations that have no direct join clause to the owner.  A
+		 * single-relation build side has no such internal structure, so the
+		 * per-relation semijoin estimate already covers it.
+		 */
+		if (bms_membership(bset) == BMS_MULTIPLE)
+		{
+			Selectivity join_ratio;
+
+			join_ratio = bloom_build_side_join_ratio(root, rel, bset, ec_all);
+
+			if (join_ratio < sel)
+				sel = join_ratio;
+		}
+
+		Assert((sel >= 0.0) && (sel <= 1.0));
+
+		/*
+		 * A candidate we would not emit anyway (not selective enough, or not
+		 * reachable at the owner's scan) must not influence the filters we
+		 * have already collected, so test those conditions before the
+		 * de-duplication below.
+		 */
+		if (!(sel <= 1.0 - bloom_filter_pushdown_threshold && sel > 0.0) ||
+			!bloom_filter_recipient_reachable(root, rel->relid, bset))
+		{
+			list_free(clauses);
+			continue;
+		}
+
+		/*
+		 * De-duplicate against the filters produced so far.  Beyond dropping
+		 * an exact duplicate build side, we keep a larger filter only when it
+		 * is strictly more selective (discards more tuples) than a smaller
+		 * one it contains: a smaller build side is sourced no later and costs
+		 * no more, so it dominates a larger build side that does not discard
+		 * more.
+		 *
+		 * - If an existing filter has the same build side, keep the existing
+		 * filter and drop this candidate.
+		 *
+		 * - If an existing filter's build side is a subset of this one (the
+		 * candidate is larger), keep the candidate only if it is strictly
+		 * more selective than that existing filter.
+		 *
+		 * - If an existing filter's build side is a superset of this one (the
+		 * candidate is smaller), drop that existing filter unless it is
+		 * strictly more selective than the candidate.
+		 *
+		 * XXX Can we actually see the same set of build relids twice? I don't
+		 * think that should be possible, we only generate a single list, and
+		 * that should not contain duplicate relids.
+		 */
+		add = true;
+		foreach(lce, result)
+		{
+			ExpectedFilter *f = (ExpectedFilter *) lfirst(lce);
+
+			if (bms_equal(f->build_relids, bset))
 			{
-				lfirst(lc3) = lappend((List *) lfirst(lc3), clause);
-				found = true;
-
-				/* added to an existing group, don't keep the relids around */
-				bms_free(build_relids);
-
+				add = false;
 				break;
+			}
+			else if (bms_is_subset(f->build_relids, bset))
+			{
+				/* existing (smaller) dominates unless candidate is better */
+				if (f->selectivity <= sel)
+				{
+					add = false;
+					break;
+				}
+			}
+			else if (bms_is_subset(bset, f->build_relids))
+			{
+				/* candidate (smaller) dominates the existing larger filter */
+				if (sel <= f->selectivity)
+					result = foreach_delete_current(result, lce);
 			}
 		}
 
-		if (!found)				/* new group */
+		if (add)
 		{
-			group_relids = lappend(group_relids, build_relids);
-			group_clauses = lappend(group_clauses, list_make1(clause));
+			ExpectedFilter *f = makeNode(ExpectedFilter);
+
+			f->owner_relid = rel->relid;
+			f->build_relids = bms_copy(bset);
+			f->clauses = clauses;
+			f->selectivity = sel;
+			result = lappend(result, f);
 		}
+		else
+			list_free(clauses);
 	}
 
 	/*
@@ -1172,42 +1626,7 @@ find_interesting_bloom_filters(PlannerInfo *root, RelOptInfo *rel)
 	 * selectivity of each group and keep only the most interesting filters.
 	 * Filters have to eliminate at least bloom_filter_pushdown_threshold
 	 * tuples, and we keep only bloom_filter_pushdown_max most selective ones.
-	 */
-	{
-		ListCell   *lcr = list_head(group_relids);
-		ListCell   *lcc = list_head(group_clauses);
-
-		while (lcr != NULL && lcc != NULL)
-		{
-			Relids		build_relids = (Relids) lfirst(lcr);
-			List	   *clauses = (List *) lfirst(lcc);
-			SpecialJoinInfo sjinfo;
-			Selectivity sel;
-
-			init_dummy_sjinfo(&sjinfo, rel->relids, build_relids);
-			sjinfo.jointype = JOIN_SEMI;
-
-			sel = clauselist_selectivity(root, clauses, 0, JOIN_SEMI, &sjinfo);
-
-			if ((sel <= 1.0 - bloom_filter_pushdown_threshold) &&
-				(sel > 0.0) &&	/* XXX seems unnecessary */
-				bloom_filter_recipient_reachable(root, rel->relid, build_relids))
-			{
-				ExpectedFilter *f = makeNode(ExpectedFilter);
-
-				f->owner_relid = rel->relid;
-				f->build_relids = build_relids;
-				f->clauses = clauses;
-				f->selectivity = sel;
-				result = lappend(result, f);
-			}
-
-			lcr = lnext(group_relids, lcr);
-			lcc = lnext(group_clauses, lcc);
-		}
-	}
-
-	/*
+	 *
 	 * We only connsider a limited number of interesting filters, to prevent
 	 * path explosion. If we found too many, keep only the most selective ones
 	 * (with smallest surviving fraction of tuples), to bound the number of
@@ -1345,6 +1764,8 @@ generate_expected_filter_paths(PlannerInfo *root, RelOptInfo *rel)
 	for (combo = 1; combo < ((uint32) 1 << nfilters); combo++)
 	{
 		List	   *subset = NIL;
+		Relids		used = NULL;
+		bool		overlap = false;
 		int			i = 0;
 		ListCell   *lcf;
 
@@ -1353,6 +1774,32 @@ generate_expected_filter_paths(PlannerInfo *root, RelOptInfo *rel)
 			if (combo & ((uint32) 1 << i))
 				subset = lappend(subset, lfirst(lcf));
 			i++;
+		}
+
+		/*
+		 * Skip combinations that mix filters with overlapping build sides.
+		 * Such filters would be sourced from joins that share build
+		 * relations, so their selectivities are not independent and applying
+		 * them together at the same scan wrong - the result would be correct,
+		 * but the estimates would get smaller.
+		 */
+		foreach(lcf, subset)
+		{
+			ExpectedFilter *f = (ExpectedFilter *) lfirst(lcf);
+
+			if (bms_overlap(used, f->build_relids))
+			{
+				overlap = true;
+				break;
+			}
+			used = bms_add_members(used, f->build_relids);
+		}
+		bms_free(used);
+
+		if (overlap)
+		{
+			list_free(subset);
+			continue;
 		}
 
 		/*
