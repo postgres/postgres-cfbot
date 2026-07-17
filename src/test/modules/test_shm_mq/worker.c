@@ -19,6 +19,7 @@
 
 #include "postgres.h"
 
+#include "executor/instrument.h"
 #include "miscadmin.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
@@ -27,6 +28,7 @@
 #include "storage/shm_mq.h"
 #include "storage/shm_toc.h"
 #include "tcop/tcopprot.h"
+#include "utils/pgstat_internal.h"
 
 #include "test_shm_mq.h"
 
@@ -184,6 +186,14 @@ copy_messages(shm_mq_handle *inqh, shm_mq_handle *outqh)
 		res = shm_mq_receive(inqh, &len, &data, false);
 		if (res != SHM_MQ_SUCCESS)
 			break;
+
+		if (len == strlen(PG_TEST_SHM_MQ_STATS_MESSAGE) &&
+			memcmp(data, PG_TEST_SHM_MQ_STATS_MESSAGE, len) == 0)
+		{
+			pgWalUsage.wal_records += PG_TEST_SHM_MQ_STATS_RECORDS;
+			pgstat_report_fixed = true;
+			(void) pgstat_report_stat(false);
+		}
 
 		/* Send it back out. */
 		res = shm_mq_send(outqh, len, data, false, true);
