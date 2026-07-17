@@ -1,6 +1,6 @@
 # ext_vacuum_statistics
 
-Extended vacuum statistics extension for PostgreSQL. It collects and exposes detailed per-table and per-index vacuum statistics via convenient views in the `ext_vacuum_statistics` schema.
+Extended vacuum statistics extension for PostgreSQL. It collects and exposes detailed per-table, per-index, and per-database vacuum statistics (buffer I/O, WAL, general, timing) via convenient views in the `ext_vacuum_statistics` schema.
 
 ## Installation
 
@@ -37,14 +37,17 @@ SELECT * FROM ext_vacuum_statistics.pg_stats_vacuum_tables;
 
 -- Per-index vacuum statistics
 SELECT * FROM ext_vacuum_statistics.pg_stats_vacuum_indexes;
+
+-- Per-database aggregate vacuum statistics
+SELECT * FROM ext_vacuum_statistics.pg_stats_vacuum_database;
 ```
 
 Example output:
 
 ```
- relname   | tuples_deleted | pages_removed
------------+----------------+---------------
- mytable   |            500 |            10
+ relname   | wal_records | tuples_deleted | pages_removed
+-----------+-------------+----------------+---------------
+ mytable   |          15 |            500 |            10
 ```
 
 Reset statistics when needed:
@@ -79,6 +82,7 @@ SET vacuum_statistics.enabled = off;
 |------|-------------|
 | `ext_vacuum_statistics.pg_stats_vacuum_tables` | Per-table heap vacuum stats (pages scanned, tuples deleted, dead tuples, etc.) |
 | `ext_vacuum_statistics.pg_stats_vacuum_indexes` | Per-index vacuum stats |
+| `ext_vacuum_statistics.pg_stats_vacuum_database` | Per-database aggregate vacuum stats |
 
 ## Limitations
 
