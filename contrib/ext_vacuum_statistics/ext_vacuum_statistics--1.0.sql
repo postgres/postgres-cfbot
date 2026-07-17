@@ -25,12 +25,18 @@ RETURNS boolean
 AS 'MODULE_PATHNAME', 'extvac_reset_entry'
 LANGUAGE C STRICT PARALLEL SAFE;
 
+CREATE OR REPLACE FUNCTION ext_vacuum_statistics.extvac_reset_db_entry(dboid oid)
+RETURNS bigint
+AS 'MODULE_PATHNAME', 'extvac_reset_db_entry'
+LANGUAGE C STRICT PARALLEL SAFE;
+
 CREATE OR REPLACE FUNCTION ext_vacuum_statistics.vacuum_statistics_reset()
 RETURNS bigint
 AS 'MODULE_PATHNAME', 'vacuum_statistics_reset'
 LANGUAGE C STRICT PARALLEL SAFE;
 
 REVOKE ALL ON FUNCTION ext_vacuum_statistics.extvac_reset_entry(oid, oid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ext_vacuum_statistics.extvac_reset_db_entry(oid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ext_vacuum_statistics.vacuum_statistics_reset() FROM PUBLIC;
 
 -- Internal C function to fetch table vacuum stats
@@ -38,6 +44,9 @@ CREATE OR REPLACE FUNCTION ext_vacuum_statistics.pg_stats_get_vacuum_tables(
     IN  dboid oid,
     IN  reloid oid,
     OUT relid oid,
+    OUT wal_records bigint,
+    OUT wal_fpi bigint,
+    OUT wal_bytes numeric,
     OUT tuples_deleted bigint,
     OUT pages_scanned bigint,
     OUT pages_removed bigint,
@@ -55,11 +64,26 @@ CREATE OR REPLACE FUNCTION ext_vacuum_statistics.pg_stats_get_vacuum_indexes(
     IN  dboid oid,
     IN  reloid oid,
     OUT relid oid,
+    OUT wal_records bigint,
+    OUT wal_fpi bigint,
+    OUT wal_bytes numeric,
     OUT tuples_deleted bigint,
     OUT pages_deleted bigint
 )
 RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'pg_stats_get_vacuum_indexes'
+LANGUAGE C STRICT STABLE;
+
+-- Internal C function to fetch database vacuum stats
+CREATE OR REPLACE FUNCTION ext_vacuum_statistics.pg_stats_get_vacuum_database(
+    IN  dboid oid,
+    OUT dbid oid,
+    OUT wal_records bigint,
+    OUT wal_fpi bigint,
+    OUT wal_bytes numeric
+)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'pg_stats_get_vacuum_database'
 LANGUAGE C STRICT STABLE;
 
 -- View: vacuum statistics per table (heap)
@@ -69,6 +93,9 @@ SELECT
   ns.nspname AS schema,
   rel.relname AS relname,
   db.datname AS dbname,
+  stats.wal_records,
+  stats.wal_fpi,
+  stats.wal_bytes,
   stats.tuples_deleted,
   stats.pages_scanned,
   stats.pages_removed,
@@ -95,6 +122,9 @@ SELECT
   ns.nspname AS schema,
   rel.relname AS indexrelname,
   db.datname AS dbname,
+  stats.wal_records,
+  stats.wal_fpi,
+  stats.wal_bytes,
   stats.tuples_deleted,
   stats.pages_deleted
 FROM pg_database db,
@@ -108,3 +138,17 @@ WHERE db.datname = current_database()
 
 COMMENT ON VIEW ext_vacuum_statistics.pg_stats_vacuum_indexes IS
   'Extended vacuum statistics per index';
+
+-- View: vacuum statistics per database (aggregate)
+CREATE VIEW ext_vacuum_statistics.pg_stats_vacuum_database AS
+SELECT
+  db.oid AS dboid,
+  db.datname AS dbname,
+  stats.wal_records AS db_wal_records,
+  stats.wal_fpi AS db_wal_fpi,
+  stats.wal_bytes AS db_wal_bytes
+FROM pg_database db
+LEFT JOIN LATERAL ext_vacuum_statistics.pg_stats_get_vacuum_database(db.oid) stats ON db.oid = stats.dbid;
+
+COMMENT ON VIEW ext_vacuum_statistics.pg_stats_vacuum_database IS
+  'Extended vacuum statistics per database (aggregate)';
