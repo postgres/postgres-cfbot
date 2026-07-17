@@ -2083,7 +2083,6 @@ WalSndWaitForWal(XLogRecPtr loc)
 									   WALSENDER_STATS_FLUSH_INTERVAL))
 		{
 			pgstat_flush_io(false);
-			(void) pgstat_flush_backend(false, PGSTAT_BACKEND_FLUSH_IO);
 			last_flush = now;
 		}
 
@@ -3200,7 +3199,6 @@ WalSndLoop(WalSndSendDataCallback send_data)
 										   WALSENDER_STATS_FLUSH_INTERVAL))
 			{
 				pgstat_flush_io(false);
-				(void) pgstat_flush_backend(false, PGSTAT_BACKEND_FLUSH_IO);
 				last_flush = now;
 			}
 

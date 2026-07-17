@@ -2302,6 +2302,7 @@ PgStatShared_Function
 PgStatShared_HashEntry
 PgStatShared_Index
 PgStatShared_IO
+PgStatShared_IOBackendEntry
 PgStatShared_Lock
 PgStatShared_LockBackendEntry
 PgStatShared_PerBackendEntry
@@ -2313,7 +2314,7 @@ PgStatShared_Wal
 PgStatShared_WalBackendEntry
 PgStat_ArchiverStats
 PgStat_Backend
-PgStat_BackendPending
+PgStat_BackendIO
 PgStat_BackendSubEntry
 PgStat_BgWriterStats
 PgStat_BktypeIO
