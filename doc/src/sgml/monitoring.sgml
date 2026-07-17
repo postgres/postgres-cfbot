@@ -5797,12 +5797,6 @@ description | Waiting for a newly initialized WAL file to reach durable storage
         Returns I/O statistics about the backend with the specified
         process ID. The output fields are exactly the same as the ones in the
         <structname>pg_stat_io</structname> view.
-       </para>
-       <para>
-        The function does not return I/O statistics for the checkpointer,
-        the background writer, the startup process and the autovacuum launcher
-        as they are already visible in the <structname>pg_stat_io</structname>
-        view and there is only one of each.
        </para></entry>
       </row>
 
@@ -5982,7 +5976,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
         <listitem>
          <para>
           <literal>io</literal>: Reset all the counters shown in the
-          <structname>pg_stat_io</structname> view.
+          <structname>pg_stat_io</structname> view, as well as per-backend
+          I/O statistics returned by <function>pg_stat_get_backend_io</function>.
          </para>
         </listitem>
         <listitem>
