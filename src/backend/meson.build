@@ -223,12 +223,12 @@ pg_test_mod_args = pg_mod_args + {
 
 
 ###############################################################
-# Define a .pc file used when emitting LLVM JIT bitcode
+# Define a .pc file for building extensions (also used
+# internally when emitting LLVM JIT bitcode)
 ###############################################################
 
-# Versioned name, so we don't claim a too-general name before there's
-# agreement on a stable interface for building extensions.
-pg_bitcode_pc_name = 'postgresql-@0@-llvm-jit-bitcode'.format(pg_version_major)
+# Versioned name, so extensions can build against a specific major version.
+pg_ext_pc_name = 'postgresql-@0@-extension'.format(pg_version_major)
 
 pg_ext_vars = []
 pg_ext_vars_inst = []
@@ -324,10 +324,10 @@ if mod_link_args_fmt.length() != 0
   endforeach
 endif
 
-# main .pc used to emit LLVM JIT bitcode
+# main .pc used to build extensions (and internally to emit LLVM JIT bitcode)
 pkgconfig.generate(
-  name: pg_bitcode_pc_name,
-  description: 'PostgreSQL LLVM JIT Bitcode Support',
+  name: pg_ext_pc_name,
+  description: 'PostgreSQL Extension Build Support',
   url: pg_url,
 
   subdirs: pg_ext_subdirs,
@@ -340,9 +340,9 @@ pkgconfig.generate(
 
 # a .pc depending on the above, but with all our warnings enabled
 pkgconfig.generate(
-  name: pg_bitcode_pc_name + '-warnings',
-  description: 'PostgreSQL LLVM JIT Bitcode Support with compiler warnings the same as core code',
-  requires: pg_bitcode_pc_name,
+  name: pg_ext_pc_name + '-warnings',
+  description: 'PostgreSQL Extension Build Support with compiler warnings the same as core code',
+  requires: pg_ext_pc_name,
   url: pg_url,
   extra_cflags: pg_ext_cflags_warn,
 
