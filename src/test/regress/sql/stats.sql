@@ -878,8 +878,10 @@ SELECT sum(evictions) + sum(reuses) + sum(extends) + sum(fsyncs) + sum(reads) + 
 SELECT :io_stats_post_reset < :io_stats_pre_reset;
 SELECT sum(evictions) + sum(reuses) + sum(extends) + sum(fsyncs) + sum(reads) + sum(writes) + sum(writebacks) + sum(hits) AS my_io_stats_post_reset
   FROM pg_stat_get_backend_io(pg_backend_pid()) \gset
--- pg_stat_reset_shared() did not reset backend IO stats
-SELECT :my_io_stats_pre_reset <= :my_io_stats_post_reset;
+-- pg_stat_reset_shared() also resets per-backend IO stats
+SELECT :my_io_stats_pre_reset > :my_io_stats_post_reset;
+SELECT bool_and(stats_reset IS NOT NULL) AS backend_io_reset_timestamp_set
+  FROM pg_stat_get_backend_io(pg_backend_pid());
 -- but pg_stat_reset_backend_stats() does
 SELECT pg_stat_reset_backend_stats(pg_backend_pid());
 SELECT sum(evictions) + sum(reuses) + sum(extends) + sum(fsyncs) + sum(reads) + sum(writes) + sum(writebacks) + sum(hits) AS my_io_stats_post_backend_reset
@@ -889,8 +891,9 @@ SELECT :my_io_stats_pre_reset > :my_io_stats_post_backend_reset;
 -- Check invalid input for pg_stat_get_backend_io()
 SELECT pg_stat_get_backend_io(NULL);
 SELECT pg_stat_get_backend_io(0);
--- Auxiliary processes return no data.
-SELECT pg_stat_get_backend_io(:checkpointer_pid);
+-- Auxiliary processes now return data
+SELECT count(*) > 0 AS checkpointer_has_io_stats
+  FROM pg_stat_get_backend_io(:checkpointer_pid);
 
 -- test BRIN index doesn't block HOT update
 CREATE TABLE brin_hot (

@@ -118,12 +118,11 @@ pgstat_dsa_init_size(void)
 	/*
 	 * The dshash header / initial buckets array needs to fit into "plain"
 	 * shared memory, but it's beneficial to not need dsm segments
-	 * immediately. A size of 256kB seems works well and is not
-	 * disproportional compared to other constant sized shared memory
-	 * allocations. NB: To avoid DSMs further, the user can configure
-	 * min_dynamic_shared_memory.
+	 * immediately. A size of 1MB works well and is not disproportional
+	 * compared to other constant sized shared memory allocations. NB: To
+	 * avoid DSMs further, the user can configure min_dynamic_shared_memory.
 	 */
-	sz = 256 * 1024;
+	sz = 1024 * 1024;
 	Assert(dsa_minimum_size() <= sz);
 	return MAXALIGN(sz);
 }

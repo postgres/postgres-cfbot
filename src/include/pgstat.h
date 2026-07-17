@@ -251,7 +251,7 @@ typedef struct PgStat_TableXactStatus
  * ------------------------------------------------------------
  */
 
-#define PGSTAT_FILE_FORMAT_ID	0x01A5BCBD
+#define PGSTAT_FILE_FORMAT_ID	0x01A5BCBE
 
 typedef struct PgStat_ArchiverStats
 {
@@ -365,6 +365,12 @@ typedef struct PgStat_BktypeIO
 	PgStat_Counter counts[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
 	PgStat_Counter times[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
 } PgStat_BktypeIO;
+
+typedef struct PgStat_BackendIO
+{
+	TimestampTz stat_reset_timestamp;
+	PgStat_BktypeIO stats;
+} PgStat_BackendIO;
 
 typedef struct PgStat_PendingIO
 {
@@ -568,20 +574,7 @@ typedef struct PgStat_WalStats
 typedef struct PgStat_Backend
 {
 	TimestampTz stat_reset_timestamp;
-	PgStat_BktypeIO io_stats;
 } PgStat_Backend;
-
-/* ---------
- * PgStat_BackendPending	Non-flushed backend stats.
- * ---------
- */
-typedef struct PgStat_BackendPending
-{
-	/*
-	 * Backend statistics store the same amount of IO data as PGSTAT_KIND_IO.
-	 */
-	PgStat_PendingIO pending_io;
-} PgStat_BackendPending;
 
 /*
  * Functions in pgstat.c
@@ -623,17 +616,6 @@ extern PgStat_ArchiverStats *pgstat_fetch_stat_archiver(void);
  * Functions in pgstat_backend.c
  */
 
-/* used by pgstat_io.c for I/O stats tracked in backends */
-extern void pgstat_count_backend_io_op_time(IOObject io_object,
-											IOContext io_context,
-											IOOp io_op,
-											instr_time io_time);
-extern void pgstat_count_backend_io_op(IOObject io_object,
-									   IOContext io_context,
-									   IOOp io_op, uint32 cnt,
-									   uint64 bytes);
-
-
 extern PgStat_Backend *pgstat_fetch_stat_backend(ProcNumber procNumber);
 extern PgStat_Backend *pgstat_fetch_stat_backend_by_pid(int pid,
 														BackendType *bktype);
@@ -670,6 +652,8 @@ extern void pgstat_count_io_op_time(IOObject io_object, IOContext io_context,
 									uint32 cnt, uint64 bytes);
 
 extern PgStat_IO *pgstat_fetch_stat_io(void);
+extern PgStat_BackendIO *pgstat_fetch_stat_backend_io(ProcNumber procnum);
+extern void pgstat_io_reset_backend_cb(ProcNumber procnum, TimestampTz ts);
 extern const char *pgstat_get_io_context_name(IOContext io_context);
 extern const char *pgstat_get_io_object_name(IOObject io_object);
 
