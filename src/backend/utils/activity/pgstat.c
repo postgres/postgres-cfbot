@@ -395,7 +395,6 @@ static const PgStat_KindInfo pgstat_kind_builtin_infos[PGSTAT_KIND_BUILTIN_SIZE]
 		.shared_data_off = offsetof(PgStatShared_Backend, stats),
 		.shared_data_len = sizeof(((PgStatShared_Backend *) 0)->stats),
 
-		.flush_static_cb = pgstat_backend_flush_cb,
 		.reset_timestamp_cb = pgstat_backend_reset_timestamp_cb,
 	},
 
@@ -464,6 +463,11 @@ static const PgStat_KindInfo pgstat_kind_builtin_infos[PGSTAT_KIND_BUILTIN_SIZE]
 		.init_shmem_cb = pgstat_io_init_shmem_cb,
 		.reset_all_cb = pgstat_io_reset_all_cb,
 		.snapshot_cb = pgstat_io_snapshot_cb,
+
+		.per_backend_data_off = offsetof(PgStatShared_IOBackendEntry, stats),
+		.per_backend_data_len = sizeof(PgStat_BackendIO),
+		.per_backend_hash_handle_off = offsetof(PgStatShared_IO, backend_hash_handle),
+		.per_backend_acc_cb = pgstat_io_per_backend_acc_cb,
 	},
 
 	[PGSTAT_KIND_LOCK] = {
@@ -640,6 +644,7 @@ pgstat_before_server_shutdown(int code, Datum arg)
 		/* Transfer all live per-backend stats before writing the stats file. */
 		pgstat_wal_acc_all_backends();
 		pgstat_lock_acc_all_backends();
+		pgstat_io_acc_all_backends();
 
 		pgStatLocal.shmem->is_shutdown = true;
 		pgstat_write_statsfile();
@@ -687,6 +692,7 @@ pgstat_shutdown_hook(int code, Datum arg)
 	/* Accumulate per-backend stats into the global stats */
 	pgstat_wal_acc_backend_cb();
 	pgstat_lock_acc_backend_cb();
+	pgstat_io_acc_backend_cb();
 
 	pgstat_detach_shmem();
 
@@ -715,6 +721,7 @@ pgstat_initialize(void)
 	 */
 	pgstat_wal_acc_backend_cb();
 	pgstat_lock_acc_backend_cb();
+	pgstat_io_acc_backend_cb();
 
 	/*
 	 * Create and cache per-backend statistics entries here. This also covers
