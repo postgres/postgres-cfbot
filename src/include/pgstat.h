@@ -107,6 +107,9 @@ typedef enum ExtVacReportType
 
 typedef struct PgStat_CommonCounts
 {
+	int64		wal_records;
+	int64		wal_fpi;
+	uint64		wal_bytes;
 	int64		tuples_deleted;
 }			PgStat_CommonCounts;
 

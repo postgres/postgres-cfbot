@@ -416,6 +416,13 @@ typedef struct LVRelState
 	BlockNumber eager_scan_remaining_fails;
 
 	/*
+	 * Resource usage of the index passes this process ran, subtracted from
+	 * the heap report to avoid double-counting (see
+	 * accumulate_heap_vacuum_statistics).
+	 */
+	PgStat_VacuumRelationCounts extVacReportIdx;
+
+	/*
 	 * We need to accumulate index statistics for later subtraction from heap
 	 * stats.
 	 */
@@ -497,6 +504,33 @@ static void restore_vacuum_error_info(LVRelState *vacrel,
 /* Extended vacuum statistics functions */
 
 /*
+ * extvac_stats_start - Snapshot resource usage before a vacuum phase.
+ */
+void
+extvac_stats_start(Relation rel, LVExtStatCounters * counters)
+{
+	memset(counters, 0, sizeof(LVExtStatCounters));
+	counters->walusage = pgWalUsage;
+}
+
+/*
+ * extvac_stats_end - Diff resource usage since extvac_stats_start into report.
+ */
+void
+extvac_stats_end(Relation rel, LVExtStatCounters * counters,
+				 PgStat_CommonCounts * report)
+{
+	WalUsage	walusage;
+
+	memset(&walusage, 0, sizeof(WalUsage));
+	WalUsageAccumDiff(&walusage, &pgWalUsage, &counters->walusage);
+
+	report->wal_records = walusage.wal_records;
+	report->wal_fpi = walusage.wal_fpi;
+	report->wal_bytes = walusage.wal_bytes;
+}
+
+/*
  * Build the heap-specific part of the extended vacuum report from the
  * counters gathered in vacrel.
  */
@@ -513,12 +547,27 @@ accumulate_heap_vacuum_statistics(LVRelState *vacrel, PgStat_VacuumRelationCount
 	extVacStats->table.missed_dead_pages = vacrel->missed_dead_pages;
 
 	/*
-	 * The wraparound failsafe is reported as a per-relation flag (0/1): did
-	 * the latest vacuum of this relation engage it?  Consumers can sum the
-	 * flags to build a per-database total.
+	 * Subtract the resource usage of the index passes this process ran: they
+	 * are reported per index, and the database-wide aggregate would count
+	 * them twice otherwise.  Parallel workers report their own usage with
+	 * their index passes, so it never enters the leader's counters.
 	 */
+	extVacStats->common.wal_records -= vacrel->extVacReportIdx.common.wal_records;
+	extVacStats->common.wal_fpi -= vacrel->extVacReportIdx.common.wal_fpi;
+	extVacStats->common.wal_bytes -= vacrel->extVacReportIdx.common.wal_bytes;
+}
 
-	/* Hook is invoked from pgstat_report_vacuum() when extstats is passed */
+/*
+ * Accumulate an index pass report into the running total that is later
+ * subtracted from the heap report.
+ */
+static void
+accumulate_idxs_vacuum_statistics(LVRelState *vacrel,
+								  PgStat_VacuumRelationCounts * extVacIdxStats)
+{
+	vacrel->extVacReportIdx.common.wal_records += extVacIdxStats->common.wal_records;
+	vacrel->extVacReportIdx.common.wal_fpi += extVacIdxStats->common.wal_fpi;
+	vacrel->extVacReportIdx.common.wal_bytes += extVacIdxStats->common.wal_bytes;
 }
 
 /*
@@ -674,6 +723,7 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 	PgStat_Counter startreadtime = 0,
 				startwritetime = 0;
 	double		startdelaytime;
+	LVExtStatCounters extVacCounters;
 	WalUsage	startwalusage = pgWalUsage;
 	BufferUsage startbufferusage = pgBufferUsage;
 	ErrorContextCallback errcallback;
@@ -698,6 +748,9 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 	/* Used for instrumentation and stats report */
 	starttime = GetCurrentTimestamp();
 	startdelaytime = VacuumDelayTime;
+
+	if (set_report_vacuum_hook)
+		extvac_stats_start(rel, &extVacCounters);
 
 	pgstat_progress_start_command(PROGRESS_COMMAND_VACUUM,
 								  RelationGetRelid(rel));
@@ -1032,6 +1085,7 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 	 */
 	if (set_report_vacuum_hook)
 	{
+		extvac_stats_end(rel, &extVacCounters, &extVacReport.common);
 		accumulate_heap_vacuum_statistics(vacrel, &extVacReport);
 
 		pgstat_report_vacuum_ext(rel,
@@ -3108,6 +3162,7 @@ lazy_vacuum_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 	double		startdelaytime = VacuumDelayTime;
 	double		prev_tuples_removed = 0;
 	BlockNumber prev_pages_deleted = 0;
+	LVExtStatCounters extVacCounters;
 	PgStat_VacuumRelationCounts extVacReport;
 
 	/*
@@ -3119,6 +3174,8 @@ lazy_vacuum_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 		prev_tuples_removed = istat->tuples_removed;
 		prev_pages_deleted = istat->pages_deleted;
 	}
+	if (set_report_vacuum_hook)
+		extvac_stats_start(indrel, &extVacCounters);
 	ivinfo.index = indrel;
 	ivinfo.heaprel = vacrel->rel;
 	ivinfo.analyze_only = false;
@@ -3156,6 +3213,7 @@ lazy_vacuum_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 	if (set_report_vacuum_hook)
 	{
 		memset(&extVacReport, 0, sizeof(extVacReport));
+		extvac_stats_end(indrel, &extVacCounters, &extVacReport.common);
 		extVacReport.type = PGSTAT_EXTVAC_INDEX;
 		if (istat != NULL)
 		{
@@ -3165,6 +3223,7 @@ lazy_vacuum_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 				istat->pages_deleted - prev_pages_deleted;
 		}
 		pgstat_report_vacuum_ext(indrel, -1, -1, 0, 0, false, &extVacReport);
+		accumulate_idxs_vacuum_statistics(vacrel, &extVacReport);
 	}
 
 	/* Revert to the previous phase information for error traceback */
@@ -3195,6 +3254,7 @@ lazy_cleanup_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 	double		startdelaytime = VacuumDelayTime;
 	double		prev_tuples_removed = 0;
 	BlockNumber prev_pages_deleted = 0;
+	LVExtStatCounters extVacCounters;
 	PgStat_VacuumRelationCounts extVacReport;
 
 	/*
@@ -3206,6 +3266,8 @@ lazy_cleanup_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 		prev_tuples_removed = istat->tuples_removed;
 		prev_pages_deleted = istat->pages_deleted;
 	}
+	if (set_report_vacuum_hook)
+		extvac_stats_start(indrel, &extVacCounters);
 	ivinfo.index = indrel;
 	ivinfo.heaprel = vacrel->rel;
 	ivinfo.analyze_only = false;
@@ -3242,6 +3304,7 @@ lazy_cleanup_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 	if (set_report_vacuum_hook)
 	{
 		memset(&extVacReport, 0, sizeof(extVacReport));
+		extvac_stats_end(indrel, &extVacCounters, &extVacReport.common);
 		extVacReport.type = PGSTAT_EXTVAC_INDEX;
 		if (istat != NULL)
 		{
@@ -3251,6 +3314,7 @@ lazy_cleanup_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 				istat->pages_deleted - prev_pages_deleted;
 		}
 		pgstat_report_vacuum_ext(indrel, -1, -1, 0, 0, false, &extVacReport);
+		accumulate_idxs_vacuum_statistics(vacrel, &extVacReport);
 	}
 
 	/* Revert to the previous phase information for error traceback */

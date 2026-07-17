@@ -1082,6 +1082,7 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 	double		startdelaytime = VacuumDelayTime;
 	double		prev_tuples_removed = 0;
 	BlockNumber prev_pages_deleted = 0;
+	LVExtStatCounters extVacCounters;
 	PgStat_VacuumRelationCounts extVacReport;
 
 	/*
@@ -1100,6 +1101,8 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 		prev_tuples_removed = istat->tuples_removed;
 		prev_pages_deleted = istat->pages_deleted;
 	}
+	if (set_report_vacuum_hook)
+		extvac_stats_start(indrel, &extVacCounters);
 	ivinfo.index = indrel;
 	ivinfo.heaprel = pvs->heaprel;
 	ivinfo.analyze_only = false;
@@ -1131,6 +1134,7 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 	if (set_report_vacuum_hook)
 	{
 		memset(&extVacReport, 0, sizeof(extVacReport));
+		extvac_stats_end(indrel, &extVacCounters, &extVacReport.common);
 		extVacReport.type = PGSTAT_EXTVAC_INDEX;
 		if (istat_res != NULL)
 		{

@@ -21,6 +21,7 @@
 #include "catalog/pg_class.h"
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_type.h"
+#include "executor/instrument.h"
 #include "parser/parse_node.h"
 #include "storage/buf.h"
 #include "utils/relcache.h"
@@ -362,6 +363,16 @@ extern PGDLLIMPORT double vacuum_max_eager_freeze_failure_rate;
 extern PGDLLIMPORT pg_atomic_uint32 *VacuumSharedCostBalance;
 extern PGDLLIMPORT pg_atomic_uint32 *VacuumActiveNWorkers;
 extern PGDLLIMPORT int VacuumCostBalanceLocal;
+
+/* Snapshots of resource usage taken before a vacuum phase */
+typedef struct LVExtStatCounters
+{
+	WalUsage	walusage;
+} LVExtStatCounters;
+
+extern void extvac_stats_start(Relation rel, LVExtStatCounters *counters);
+extern void extvac_stats_end(Relation rel, LVExtStatCounters *counters,
+							 PgStat_CommonCounts *report);
 
 extern PGDLLIMPORT bool VacuumFailsafeActive;
 extern PGDLLIMPORT double vacuum_cost_delay;
