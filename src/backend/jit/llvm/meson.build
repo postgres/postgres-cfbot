@@ -91,6 +91,6 @@ backend_targets += llvmjit_types
 # dependencies
 pkg_config = find_program(['pkg-config', 'pkgconf'], required: true)
 r = run_command(pkg_config,
-  ['--cflags-only-I', meson.project_build_root() / 'meson-uninstalled/postgresql-@0@-llvm-jit-bitcode-uninstalled.pc'.format(pg_version_major)],
+  ['--cflags-only-I', meson.project_build_root() / 'meson-uninstalled/postgresql-@0@-extension-uninstalled.pc'.format(pg_version_major)],
   check: true)
 bitcode_cflags += r.stdout().split()
