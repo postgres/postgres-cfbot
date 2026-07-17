@@ -1872,19 +1872,36 @@ pg_stat_get_backend_lock(PG_FUNCTION_ARGS)
 {
 	int			pid;
 	ReturnSetInfo *rsinfo;
-	PgStat_Backend *backend_stats;
+	PGPROC	   *proc;
+	ProcNumber	procnum;
+	PgBackendStatus *beentry;
+	PgStat_Lock *lock_stats;
 
 	InitMaterializedSRF(fcinfo, 0);
 	rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 
 	pid = PG_GETARG_INT32(0);
-	backend_stats = pgstat_fetch_stat_backend_by_pid(pid, NULL);
 
-	if (!backend_stats)
+	proc = BackendPidGetProc(pid);
+
+	if (!proc)
+		proc = AuxiliaryPidGetProc(pid);
+	if (!proc)
 		return (Datum) 0;
 
-	pg_stat_lock_build_tuples(rsinfo, backend_stats->lock_stats.stats,
-							  backend_stats->stat_reset_timestamp);
+	procnum = GetNumberFromPGProc(proc);
+	beentry = pgstat_get_beentry_by_proc_number(procnum);
+
+	if (!beentry || beentry->st_procpid != pid)
+		return (Datum) 0;
+
+	lock_stats = pgstat_fetch_stat_backend_lock(procnum);
+
+	if (!lock_stats)
+		return (Datum) 0;
+
+	pg_stat_lock_build_tuples(rsinfo, lock_stats->stats,
+							  lock_stats->stat_reset_timestamp);
 
 	return (Datum) 0;
 }
@@ -2212,13 +2229,14 @@ pg_stat_reset_backend_stats(PG_FUNCTION_ARGS)
 		PG_RETURN_VOID();
 
 	/*
-	 * Accumulate the backend's WAL stats into the global stats, then zero the
-	 * entry.
+	 * Accumulate the backend's WAL and lock stats into the global stats, then
+	 * zero the entries.
 	 */
 	ts = GetCurrentTimestamp();
 	pgstat_wal_reset_backend_cb(procNumber, ts);
+	pgstat_lock_reset_backend_cb(procNumber, ts);
 
-	/* Reset IO and Lock stats still in PGSTAT_KIND_BACKEND */
+	/* Reset IO stats still in PGSTAT_KIND_BACKEND */
 	pgstat_reset(PGSTAT_KIND_BACKEND, InvalidOid, procNumber);
 
 	PG_RETURN_VOID();
