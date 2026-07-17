@@ -493,10 +493,10 @@ typedef struct PgStatShared_Checkpointer
 typedef struct PgStatShared_IO
 {
 	/*
-	 * locks[i] protects stats.stats[i]. locks[0] also protects
-	 * stats.stat_reset_timestamp.
+	 * The lock protects global stats and serializes snapshots and resets with
+	 * transfers from per-backend entries.
 	 */
-	LWLock		locks[BACKEND_NUM_TYPES];
+	LWLock		lock;
 	PgStat_IO	stats;
 } PgStatShared_IO;
 
@@ -534,6 +534,16 @@ typedef struct PgStatShared_PerBackendEntry
 	LWLock		lock;
 	BackendType backend_type;
 } PgStatShared_PerBackendEntry;
+
+/*
+ * Per-backend entry for I/O statistics, stored in an array indexed by
+ * ProcNumber.
+ */
+typedef struct PgStatShared_IOBackendEntry
+{
+	PgStatShared_PerBackendEntry header;
+	PgStat_BackendIO stats;
+} PgStatShared_IOBackendEntry;
 
 /*
  * Per-backend entry for lock statistics, stored in an array indexed by
@@ -822,12 +832,6 @@ extern void pgstat_archiver_snapshot_cb(void);
  * Functions in pgstat_backend.c
  */
 
-/* flags for pgstat_flush_backend() */
-#define PGSTAT_BACKEND_FLUSH_IO		(1 << 0)	/* Flush I/O statistics */
-#define PGSTAT_BACKEND_FLUSH_ALL   (PGSTAT_BACKEND_FLUSH_IO)
-
-extern bool pgstat_flush_backend(bool nowait, uint32 flags);
-extern bool pgstat_backend_flush_cb(bool nowait);
 extern void pgstat_backend_reset_timestamp_cb(PgStatShared_Common *header,
 											  TimestampTz ts);
 
@@ -881,6 +885,9 @@ extern bool pgstat_io_flush_cb(bool nowait);
 extern void pgstat_io_init_shmem_cb(void *stats);
 extern void pgstat_io_reset_all_cb(TimestampTz ts);
 extern void pgstat_io_snapshot_cb(void);
+extern void pgstat_io_acc_backend_cb(void);
+extern void pgstat_io_acc_all_backends(void);
+extern void pgstat_io_per_backend_acc_cb(void *dst, void *entry);
 
 /*
  * Functions in pgstat_lock.c
