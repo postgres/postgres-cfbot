@@ -596,6 +596,55 @@ insert into parted_conflict_test (a, b) values (3, 'l') on conflict (a) do selec
 
 drop table parted_conflict_test;
 
+-- check that a cached index parent is invalidated when its partition is
+-- detached and attached to another partitioned table
+create table reparent_conflict_a (i int primary key) partition by range (i);
+create table reparent_conflict_b (i int primary key) partition by range (i);
+create table reparent_conflict_child partition of reparent_conflict_a
+  for values from (0) to (10);
+insert into reparent_conflict_a values (1)
+  on conflict (i) do update set i = excluded.i;
+begin;
+alter table reparent_conflict_a detach partition reparent_conflict_child;
+alter table reparent_conflict_b attach partition reparent_conflict_child
+  for values from (0) to (10);
+insert into reparent_conflict_b values (1)
+  on conflict (i) do update set i = excluded.i;
+commit;
+
+-- check the reverse invalidation when reparenting is rolled back
+begin;
+savepoint reparent_conflict_savepoint;
+alter table reparent_conflict_b detach partition reparent_conflict_child;
+alter table reparent_conflict_a attach partition reparent_conflict_child
+  for values from (0) to (10);
+insert into reparent_conflict_a values (1)
+  on conflict (i) do update set i = excluded.i;
+rollback to reparent_conflict_savepoint;
+insert into reparent_conflict_b values (1)
+  on conflict (i) do update set i = excluded.i;
+commit;
+drop table reparent_conflict_a, reparent_conflict_b;
+
+-- A leaf index caches its *full* ancestor list; re-parenting an
+-- intermediate partitioned index must invalidate the leaf, else arbiter
+-- resolution below uses a stale ancestor and fails with "invalid arbiter
+-- index list".
+create table reparent3_a (i int primary key) partition by range (i);
+create table reparent3_mid partition of reparent3_a
+  for values from (0) to (100) partition by range (i);
+create table reparent3_leaf partition of reparent3_mid
+  for values from (0) to (10);
+create table reparent3_b (i int primary key) partition by range (i);
+insert into reparent3_a values (1) on conflict (i) do nothing;
+alter table reparent3_a detach partition reparent3_mid;
+alter table reparent3_b attach partition reparent3_mid
+  for values from (0) to (100);
+insert into reparent3_b values (1) on conflict (i) do update set i = excluded.i;
+insert into reparent3_b values (2) on conflict (i) do update set i = excluded.i;
+select * from reparent3_b order by i;
+drop table reparent3_a, reparent3_b;
+
 -- test behavior of inserting a conflicting tuple into an intermediate
 -- partitioning level
 create table parted_conflict (a int primary key, b text) partition by range (a);

@@ -27,6 +27,7 @@
 #include "optimizer/optimizer.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/fmgroids.h"
+#include "utils/memutils.h"
 #include "utils/partcache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
@@ -35,6 +36,7 @@ static Oid	get_partition_parent_worker(Relation inhRel, Oid relid,
 										bool *detach_pending);
 static void get_partition_ancestors_worker(Relation inhRel, Oid relid,
 										   List **ancestors);
+static void RelationCachePartitionIndexAncestors(Relation indexRel);
 
 /*
  * get_partition_parent
@@ -165,6 +167,90 @@ get_partition_ancestors_worker(Relation inhRel, Oid relid, List **ancestors)
 
 	*ancestors = lappend_oid(*ancestors, parentOid);
 	get_partition_ancestors_worker(inhRel, parentOid, ancestors);
+}
+
+/*
+ * get_partition_index_ancestors
+ *		Return the OIDs of the partition-index ancestors of 'indexRel', from
+ *		its immediate parent up to the topmost partitioned index, or NIL if
+ *		'indexRel' is not a partition.
+ *
+ * The list is cached on the relcache entry (as a single OID or a
+ * CacheMemoryContext array) and recomputed only after an invalidation.
+ * For that to be safe, re-parenting an index must invalidate its whole
+ * descendant-index subtree, which IndexSetParentIndex() arranges.
+ *
+ * The caller must have 'indexRel' open and locked.  A freshly allocated
+ * list is returned, so the caller may free it.
+ */
+List *
+get_partition_index_ancestors(Relation indexRel)
+{
+	List	   *result = NIL;
+
+	Assert(indexRel->rd_rel->relkind == RELKIND_INDEX);
+
+	/* Compute and cache the ancestor list on first use since (re)build. */
+	if (indexRel->rd_partancestorcount == -1)
+		RelationCachePartitionIndexAncestors(indexRel);
+
+	/* Rebuild a list from the cached representation. */
+	if (indexRel->rd_partancestorcount == 1)
+		result = list_make1_oid(indexRel->rd_partancestors.single);
+	else
+	{
+		for (int i = 0; i < indexRel->rd_partancestorcount; i++)
+			result = lappend_oid(result, indexRel->rd_partancestors.array[i]);
+	}
+
+	return result;
+}
+
+/*
+ * RelationCachePartitionIndexAncestors
+ *		Compute and store the partition-index ancestor list of 'indexRel' on
+ *		its relcache entry.
+ *
+ * Stored as a single OID for one ancestor, or a palloc'd CacheMemoryContext
+ * array for several; rd_partancestorcount holds the count (0 when 'indexRel'
+ * is not a partition).  Reset to -1, and the array freed, whenever the
+ * relcache entry is rebuilt or reloaded.
+ */
+static void
+RelationCachePartitionIndexAncestors(Relation indexRel)
+{
+	List	   *ancestors;
+	int			count;
+
+	if (!indexRel->rd_rel->relispartition)
+	{
+		indexRel->rd_partancestorcount = 0;
+		return;
+	}
+
+	ancestors = get_partition_ancestors(RelationGetRelid(indexRel));
+	count = list_length(ancestors);
+
+	if (count == 1)
+		indexRel->rd_partancestors.single = linitial_oid(ancestors);
+	else if (count > 1)
+	{
+		MemoryContext oldcxt;
+		Oid		   *array;
+		ListCell   *lc;
+		int			i = 0;
+
+		oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
+		array = (Oid *) palloc(count * sizeof(Oid));
+		MemoryContextSwitchTo(oldcxt);
+
+		foreach(lc, ancestors)
+			array[i++] = lfirst_oid(lc);
+		indexRel->rd_partancestors.array = array;
+	}
+
+	indexRel->rd_partancestorcount = count;
+	list_free(ancestors);
 }
 
 /*
