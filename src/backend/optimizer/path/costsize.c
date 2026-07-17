@@ -184,6 +184,22 @@ double		bloom_filter_pushdown_threshold = 0.3;
  */
 int			bloom_filter_pushdown_max = 3;
 
+/*
+ * Maximum number of base relations allowed in an enumerated Bloom-filter build
+ * side.  Bloom filters over larger joins are unlikely to be worthwhile and
+ * enumerating them would inflate planning time, so we keep this small.  This
+ * bounds the *size* of each candidate build side, which is distinct from
+ * bloom_filter_pushdown_max that bounds how many interesting filters are
+ * ultimately kept per probe relation.
+ */
+int			bloom_filter_pushdown_max_build_relids = 3;
+
+/*
+ * Overall cap on the number of enumerated build-side relid sets, as a safety
+ * valve against pathological join graphs.
+ */
+int			bloom_filter_pushdown_max_build_sets = 100;
+
 typedef struct
 {
 	PlannerInfo *root;

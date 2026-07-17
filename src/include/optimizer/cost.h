@@ -74,6 +74,8 @@ extern PGDLLIMPORT bool enable_presorted_aggregate;
 extern PGDLLIMPORT bool enable_async_append;
 extern PGDLLIMPORT double bloom_filter_pushdown_threshold;
 extern PGDLLIMPORT int bloom_filter_pushdown_max;
+extern PGDLLIMPORT int bloom_filter_pushdown_max_build_relids;
+extern PGDLLIMPORT int bloom_filter_pushdown_max_build_sets;
 extern PGDLLIMPORT int constraint_exclusion;
 
 extern double index_pages_fetched(double tuples_fetched, BlockNumber pages,
