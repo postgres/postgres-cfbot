@@ -25,8 +25,9 @@
 PG_MODULE_MAGIC;
 #endif
 
-/* Custom stats kind for per-relation vacuum statistics */
+/* Two kinds: relations (tables/indexes) and database aggregates */
 #define PGSTAT_KIND_EXTVAC_RELATION	24
+#define PGSTAT_KIND_EXTVAC_DB		25
 
 #define SJ_NODENAME		"vacuum_statistics"
 
@@ -63,9 +64,25 @@ static const PgStat_KindInfo extvac_relation_kind_info = {
 	.flush_pending_cb = NULL,
 };
 
+/* PgStat kind for per-database aggregated vacuum statistics */
+static const PgStat_KindInfo extvac_db_kind_info = {
+	.name = "ext_vacuum_statistics_db",
+	.fixed_amount = false,
+	.accessed_across_databases = true,
+	.write_to_file = true,
+	.shared_size = sizeof(PgStatShared_ExtVacEntry),
+	.shared_data_off = offsetof(PgStatShared_ExtVacEntry, stats),
+	.shared_data_len = sizeof(PgStat_VacuumRelationCounts),
+	.pending_size = 0,
+	.flush_pending_cb = NULL,
+};
+
 static inline void
 pgstat_accumulate_common(PgStat_CommonCounts * dst, const PgStat_CommonCounts * src)
 {
+	dst->wal_records += src->wal_records;
+	dst->wal_fpi += src->wal_fpi;
+	dst->wal_bytes += src->wal_bytes;
 	dst->tuples_deleted += src->tuples_deleted;
 }
 
@@ -113,6 +130,7 @@ _PG_init(void)
 	MarkGUCPrefixReserved(SJ_NODENAME);
 
 	pgstat_register_kind(PGSTAT_KIND_EXTVAC_RELATION, &extvac_relation_kind_info);
+	pgstat_register_kind(PGSTAT_KIND_EXTVAC_DB, &extvac_db_kind_info);
 
 	prev_report_vacuum_hook = set_report_vacuum_hook;
 	set_report_vacuum_hook = pgstat_report_vacuum_extstats;
@@ -162,13 +180,23 @@ extvac_object_access(ObjectAccessType access, Oid classId, Oid objectId,
 	}
 }
 
+/* Accumulate common counts for database-level stats. */
+static inline void
+pgstat_accumulate_common_for_db(PgStat_CommonCounts * dst,
+								const PgStat_CommonCounts * src)
+{
+	pgstat_accumulate_common(dst, src);
+}
+
 /*
- * Store incoming vacuum stats into a per-relation pgstat custom statistics
- * entry.  Uses pgstat_get_entry_ref_locked and pgstat_accumulate_* for
- * atomic updates.
+ * Store incoming vacuum stats into pgstat custom statistics.
+ * store_relation: create/update per-relation entry
+ * store_db: accumulate into database-level entry (dboid, objid=0).
+ * Uses pgstat_get_entry_ref_locked and pgstat_accumulate_* for atomic updates.
  */
 static void
-extvac_store(Oid dboid, Oid relid, PgStat_VacuumRelationCounts * params)
+extvac_store(Oid dboid, Oid relid, PgStat_VacuumRelationCounts * params,
+			 bool store_relation, bool store_db)
 {
 	PgStat_EntryRef *entry_ref;
 	PgStatShared_ExtVacEntry *shared;
@@ -176,23 +204,42 @@ extvac_store(Oid dboid, Oid relid, PgStat_VacuumRelationCounts * params)
 	if (!evs_enabled)
 		return;
 
-	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_EXTVAC_RELATION, dboid, relid, false);
-	if (entry_ref)
+	if (store_relation)
 	{
-		shared = (PgStatShared_ExtVacEntry *) entry_ref->shared_stats;
-		if (shared->stats.type == PGSTAT_EXTVAC_INVALID)
+		entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_EXTVAC_RELATION, dboid, relid, false);
+		if (entry_ref)
 		{
-			memset(&shared->stats, 0, sizeof(shared->stats));
-			shared->stats.type = params->type;
+			shared = (PgStatShared_ExtVacEntry *) entry_ref->shared_stats;
+			if (shared->stats.type == PGSTAT_EXTVAC_INVALID)
+			{
+				memset(&shared->stats, 0, sizeof(shared->stats));
+				shared->stats.type = params->type;
+			}
+			pgstat_accumulate_extvac_stats(&shared->stats, params);
+			pgstat_unlock_entry(entry_ref);
 		}
-		pgstat_accumulate_extvac_stats(&shared->stats, params);
-		pgstat_unlock_entry(entry_ref);
+	}
+
+	if (store_db)
+	{
+		entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_EXTVAC_DB, dboid, InvalidOid, false);
+		if (entry_ref)
+		{
+			shared = (PgStatShared_ExtVacEntry *) entry_ref->shared_stats;
+			if (shared->stats.type == PGSTAT_EXTVAC_INVALID)
+			{
+				memset(&shared->stats, 0, sizeof(shared->stats));
+				shared->stats.type = PGSTAT_EXTVAC_DB;
+			}
+			pgstat_accumulate_common_for_db(&shared->stats.common, &params->common);
+			pgstat_unlock_entry(entry_ref);
+		}
 	}
 }
 
 /*
- * Vacuum report hook: called when vacuum finishes. Stores stats per-relation,
- * then chains to previous hook.
+ * Vacuum report hook: called when vacuum finishes. Stores stats per-relation
+ * and per-database, then chains to previous hook.
  */
 static void
 pgstat_report_vacuum_extstats(Oid tableoid, bool shared,
@@ -201,7 +248,7 @@ pgstat_report_vacuum_extstats(Oid tableoid, bool shared,
 	Oid			dboid = shared ? InvalidOid : MyDatabaseId;
 
 	if (evs_enabled)
-		extvac_store(dboid, tableoid, params);
+		extvac_store(dboid, tableoid, params, true, true);
 	if (prev_report_vacuum_hook)
 		prev_report_vacuum_hook(tableoid, shared, params);
 }
@@ -214,16 +261,38 @@ extvac_reset_by_relid(Oid dboid, Oid relid)
 	return true;
 }
 
-/* Reset all vacuum statistics. */
+/* Callback for pgstat_reset_matching_entries: match relation entries for given db */
+static bool
+match_extvac_relations_for_db(PgStatShared_HashEntry *entry, Datum match_data)
+{
+	return entry->key.kind == PGSTAT_KIND_EXTVAC_RELATION &&
+		entry->key.dboid == DatumGetObjectId(match_data);
+}
+
+/*
+ * Reset statistics for a database (aggregate entry) and all its relations.
+ */
+static int64
+extvac_database_reset(Oid dboid)
+{
+	pgstat_reset_matching_entries(match_extvac_relations_for_db,
+								  ObjectIdGetDatum(dboid), 0);
+	pgstat_reset_entry(PGSTAT_KIND_EXTVAC_DB, dboid, 0, 0);
+	return 1;
+}
+
+/* Reset all vacuum statistics (both relation and database entries). */
 static int64
 extvac_stat_reset(void)
 {
 	pgstat_reset_of_kind(PGSTAT_KIND_EXTVAC_RELATION);
+	pgstat_reset_of_kind(PGSTAT_KIND_EXTVAC_DB);
 	return 0;					/* count not available */
 }
 
 PG_FUNCTION_INFO_V1(vacuum_statistics_reset);
 PG_FUNCTION_INFO_V1(extvac_reset_entry);
+PG_FUNCTION_INFO_V1(extvac_reset_db_entry);
 
 Datum
 vacuum_statistics_reset(PG_FUNCTION_ARGS)
@@ -240,11 +309,38 @@ extvac_reset_entry(PG_FUNCTION_ARGS)
 	PG_RETURN_BOOL(extvac_reset_by_relid(dboid, relid));
 }
 
+Datum
+extvac_reset_db_entry(PG_FUNCTION_ARGS)
+{
+	Oid			dboid = PG_GETARG_OID(0);
+
+	PG_RETURN_INT64(extvac_database_reset(dboid));
+}
+
 /*
- * Output vacuum statistics (tables or indexes).
+ * Output vacuum statistics (tables, indexes, or per-database aggregates).
  */
-#define EXTVAC_HEAP_STAT_COLS	8
-#define EXTVAC_IDX_STAT_COLS	3
+#define EXTVAC_COMMON_STAT_COLS 3
+
+static void
+tuplestore_put_common(PgStat_CommonCounts * vacuum_ext,
+					  Datum *values, bool *nulls, int *i)
+{
+	char		buf[256];
+	const int	base PG_USED_FOR_ASSERTS_ONLY = *i;
+
+	values[(*i)++] = Int64GetDatum(vacuum_ext->wal_records);
+	values[(*i)++] = Int64GetDatum(vacuum_ext->wal_fpi);
+	snprintf(buf, sizeof buf, UINT64_FORMAT, vacuum_ext->wal_bytes);
+	values[(*i)++] = DirectFunctionCall3(numeric_in,
+										 CStringGetDatum(buf),
+										 ObjectIdGetDatum(0),
+										 Int32GetDatum(-1));
+	Assert((*i - base) == EXTVAC_COMMON_STAT_COLS);
+}
+
+#define EXTVAC_HEAP_STAT_COLS	11
+#define EXTVAC_IDX_STAT_COLS	6
 #define EXTVAC_MAX_STAT_COLS	Max(EXTVAC_HEAP_STAT_COLS, EXTVAC_IDX_STAT_COLS)
 
 static void
@@ -257,6 +353,8 @@ tuplestore_put_for_relation(Oid relid, Tuplestorestate *tupstore,
 
 	memset(nulls, 0, sizeof(nulls));
 	values[i++] = ObjectIdGetDatum(relid);
+
+	tuplestore_put_common(&vacuum_ext->common, values, nulls, &i);
 
 	if (vacuum_ext->type == PGSTAT_EXTVAC_TABLE)
 	{
@@ -329,6 +427,30 @@ pg_stats_vacuum(FunctionCallInfo fcinfo, int type)
 		if (stats && stats->type == type)
 			tuplestore_put_for_relation(relid, tupstore, tupdesc, stats);
 	}
+	else if (type == PGSTAT_EXTVAC_DB)
+	{
+		if (OidIsValid(dbid))
+		{
+#define EXTVAC_DB_STAT_COLS 4
+			Datum		values[EXTVAC_DB_STAT_COLS];
+			bool		nulls[EXTVAC_DB_STAT_COLS];
+			int			i = 0;
+			PgStat_VacuumRelationCounts *stats;
+
+			stats = (PgStat_VacuumRelationCounts *)
+				pgstat_fetch_entry(PGSTAT_KIND_EXTVAC_DB, dbid,
+								   InvalidOid, NULL);
+			if (stats && stats->type == PGSTAT_EXTVAC_DB)
+			{
+				memset(nulls, 0, sizeof(nulls));
+				values[i++] = ObjectIdGetDatum(dbid);
+				tuplestore_put_common(&stats->common, values, nulls, &i);
+				Assert(i == EXTVAC_DB_STAT_COLS);
+				tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+			}
+		}
+		/* invalid dbid: return empty set */
+	}
 	else
 		elog(PANIC, "ext_vacuum_statistics: invalid type %d", type);
 
@@ -337,6 +459,7 @@ pg_stats_vacuum(FunctionCallInfo fcinfo, int type)
 
 PG_FUNCTION_INFO_V1(pg_stats_get_vacuum_tables);
 PG_FUNCTION_INFO_V1(pg_stats_get_vacuum_indexes);
+PG_FUNCTION_INFO_V1(pg_stats_get_vacuum_database);
 
 Datum
 pg_stats_get_vacuum_tables(PG_FUNCTION_ARGS)
@@ -348,4 +471,10 @@ Datum
 pg_stats_get_vacuum_indexes(PG_FUNCTION_ARGS)
 {
 	return pg_stats_vacuum(fcinfo, PGSTAT_EXTVAC_INDEX);
+}
+
+Datum
+pg_stats_get_vacuum_database(PG_FUNCTION_ARGS)
+{
+	return pg_stats_vacuum(fcinfo, PGSTAT_EXTVAC_DB);
 }

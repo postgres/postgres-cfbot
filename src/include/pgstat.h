@@ -107,6 +107,9 @@ typedef enum ExtVacReportType
 
 typedef struct PgStat_CommonCounts
 {
+	int64		wal_records;
+	int64		wal_fpi;
+	uint64		wal_bytes;
 	int64		tuples_deleted;
 }			PgStat_CommonCounts;
 
@@ -314,7 +317,7 @@ typedef struct PgStat_TableXactStatus
  * ------------------------------------------------------------
  */
 
-#define PGSTAT_FILE_FORMAT_ID	0x01A5BCC1
+#define PGSTAT_FILE_FORMAT_ID	0x01A5BCC2
 
 typedef struct PgStat_ArchiverStats
 {

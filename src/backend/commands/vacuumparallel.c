@@ -208,6 +208,13 @@ typedef struct PVIndStats
 	 */
 	bool		istat_updated;	/* are the stats updated? */
 	IndexBulkDeleteResult istat;
+
+	/*
+	 * Resource usage reported for all passes over this index.  Only the
+	 * process handling the index writes this; the leader reads it after
+	 * workers have finished, before destroying the parallel context.
+	 */
+	PgStat_CommonCounts extvac_usage;
 } PVIndStats;
 
 /*
@@ -521,7 +528,8 @@ parallel_vacuum_init(Relation rel, Relation *indrels, int nindexes,
  * context, but that won't be safe (see ExitParallelMode).
  */
 void
-parallel_vacuum_end(ParallelVacuumState *pvs, IndexBulkDeleteResult **istats)
+parallel_vacuum_end(ParallelVacuumState *pvs, IndexBulkDeleteResult **istats,
+					PgStat_CommonCounts *index_usage)
 {
 	Assert(!IsParallelWorker());
 
@@ -537,6 +545,8 @@ parallel_vacuum_end(ParallelVacuumState *pvs, IndexBulkDeleteResult **istats)
 		}
 		else
 			istats[i] = NULL;
+
+		extvac_accumulate_index_usage(index_usage, &indstats->extvac_usage);
 	}
 
 	TidStoreDestroy(pvs->dead_items);
@@ -1127,6 +1137,7 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 	double		startdelaytime = VacuumDelayTime;
 	double		prev_tuples_removed = 0;
 	BlockNumber prev_pages_newly_deleted = 0;
+	LVExtStatCounters extVacCounters;
 	PgStat_VacuumRelationCounts extVacReport;
 	const int	progress_index[] = {
 		PROGRESS_VACUUM_PHASE,
@@ -1158,6 +1169,8 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 		prev_tuples_removed = istat->tuples_removed;
 		prev_pages_newly_deleted = istat->pages_newly_deleted;
 	}
+	if (set_report_vacuum_hook)
+		extvac_stats_start(indrel, &extVacCounters);
 	ivinfo.index = indrel;
 	ivinfo.heaprel = pvs->heaprel;
 	ivinfo.analyze_only = false;
@@ -1197,6 +1210,7 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 	if (set_report_vacuum_hook)
 	{
 		memset(&extVacReport, 0, sizeof(extVacReport));
+		extvac_stats_end(indrel, &extVacCounters, &extVacReport.common);
 		extVacReport.type = PGSTAT_EXTVAC_INDEX;
 		if (istat_res != NULL)
 		{
@@ -1205,6 +1219,8 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 			extVacReport.index.pages_deleted =
 				istat_res->pages_newly_deleted - prev_pages_newly_deleted;
 		}
+		extvac_accumulate_index_usage(&indstats->extvac_usage,
+									  &extVacReport.common);
 		pgstat_report_vacuum_ext(indrel, -1, -1, 0, 0, false, &extVacReport);
 	}
 	pgstat_progress_update_multi_param(3, reset_index, reset_val);
