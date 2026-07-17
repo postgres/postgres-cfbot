@@ -1455,10 +1455,10 @@ include $(PGXS)
     When <productname>PostgreSQL</productname> is built with
     <productname>Meson</productname>, it also installs a
     <literal>pkg-config</literal> file,
-    <literal>postgresql-&majorversion;-llvm-jit-bitcode.pc</literal>
-    (<xref linkend="extend-pkg-config"/>).  This file is used internally to
-    emit <acronym>LLVM</acronym> <acronym>JIT</acronym> bitcode; it is not
-    (yet) a stable, supported interface for building extensions.
+    <literal>postgresql-&majorversion;-extension.pc</literal>
+    (<xref linkend="extend-pkg-config"/>).  This file collects the
+    compilation flags needed to build server code, so that extensions built
+    with <productname>Meson</productname> can compile against the server.
    </para>
 
   </sect1>
@@ -1943,35 +1943,36 @@ make VPATH=/path/to/extension/source/tree install
   </sect1>
 
   <sect1 id="extend-pkg-config">
-   <title>postgresql-&majorversion;-llvm-jit-bitcode.pc</title>
+   <title>postgresql-&majorversion;-extension.pc</title>
 
    <para>
     When <productname>PostgreSQL</productname> is built with
     <productname>Meson</productname>, it installs a
     <literal>pkg-config</literal> file named
-    <literal>postgresql-&majorversion;-llvm-jit-bitcode.pc</literal>.  It is
-    used internally to emit <acronym>LLVM</acronym> <acronym>JIT</acronym>
-    bitcode for the server and for selected
-    <filename>contrib</filename> modules, and it collects the same
-    compilation flags that are used to build the server itself.
+    <literal>postgresql-&majorversion;-extension.pc</literal>.  It provides
+    the same compilation flags that are used to build the server itself, so
+    that extensions can be built with <productname>Meson</productname>
+    against a given <productname>PostgreSQL</productname> installation.  It is
+    also used internally to emit <acronym>LLVM</acronym> <acronym>JIT</acronym>
+    bitcode for the server and for selected <filename>contrib</filename>
+    modules.
    </para>
 
    <para>
-    The file is deliberately versioned and named after its bitcode purpose
-    because there is not yet agreement on a stable, general-purpose interface
-    for building extensions.  It is therefore <emphasis>not</emphasis> a
-    supported replacement for <acronym>PGXS</acronym>
-    (<xref linkend="extend-pgxs"/>), and its name and contents may change
-    between major releases.
+    The file is versioned by major release, so an extension can build against
+    a specific <productname>PostgreSQL</productname> major version.  It offers
+    a <productname>Meson</productname>-based alternative to
+    <acronym>PGXS</acronym> (<xref linkend="extend-pgxs"/>), which uses
+    <application>make</application>.
    </para>
 
    <para>
     To use the
-    <literal>postgresql-&majorversion;-llvm-jit-bitcode.pc</literal>
+    <literal>postgresql-&majorversion;-extension.pc</literal>
     infrastructure for your extension, you must write a simple
     <filename>meson.build</filename> file. In the
     <filename>meson.build</filename> file, you need to include the
-    <literal>postgresql-&majorversion;-llvm-jit-bitcode.pc</literal>
+    <literal>postgresql-&majorversion;-extension.pc</literal>
     <literal>pkg-config</literal> file. Here is an example that builds an
     extension module named <literal>isbn_issn</literal>, consisting of a
     shared library containing some C code, an extension control file, an
@@ -1981,7 +1982,7 @@ make VPATH=/path/to/extension/source/tree install
 <programlisting>
 project('isbn_issn', 'c')
 
-pg_ext = dependency('postgresql-&majorversion;-llvm-jit-bitcode-warnings')
+pg_ext = dependency('postgresql-&majorversion;-extension-warnings')
 
 isbn_issn_sources = files('isbn_issn.c')
 
