@@ -1156,8 +1156,9 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 					continue;
 
 				appendStringInfo(&buf,
-								 _("index \"%s\": pages: %u in total, %u newly deleted, %u currently deleted, %u reusable\n"),
+								 _("index \"%s\": tuples: %.0f removed; pages: %u in total, %u newly deleted, %u currently deleted, %u reusable\n"),
 								 indnames[i],
+								 istat->tuples_removed,
 								 istat->num_pages,
 								 istat->pages_newly_deleted,
 								 istat->pages_deleted,
