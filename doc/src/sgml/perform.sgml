@@ -540,8 +540,8 @@ WHERE t1.unique1 &lt; 100 AND t1.unique2 = t2.unique2;
     Merge join requires its input data to be sorted on the join keys.  In this
     example each input is sorted by using an index scan to visit the rows
     in the correct order; but a sequential scan and sort could also be used.
-    (Sequential-scan-and-sort frequently beats an index scan for sorting many rows,
-    because of the nonsequential disk access required by the index scan.)
+    (Sequential-scan-overview-and-sort frequently beats an index scan for sorting many rows,
+    because of the non-sequential disk access required by the index scan.)
    </para>
 
    <para>
@@ -1769,6 +1769,2263 @@ SELECT m.* FROM pg_statistic_ext join pg_statistic_ext_data on (oid = stxoid),
 
   </sect2>
  </sect1>
+ <sect1 id="planner-nodes">
+ <title>Planner Nodes</title>
+
+ <indexterm>
+  <primary>planner nodes</primary>
+  <secondary>optimizer nodes</secondary>
+ </indexterm>
+
+ <para>
+  This section summarizes the plan nodes returned by the
+  <link linkend="sql-explain">
+   <command>EXPLAIN</command>
+  </link>
+  command.
+ </para>
+ <note>
+  <para>
+   For information on parallel scan nodes, see
+   <xref linkend="parallel-scans" />.
+  </para>
+ </note>
+
+ <sect2 id="planner-nodes-scan-overviews">
+  <title>Scan Nodes</title>
+
+  <para>
+   Scan nodes fetch data from indexes, tables, and table-compatible structures,
+   such as <link linkend="functions-srf">set-returning functions</link>.
+  </para>
+
+  <sect3 id="base-scan-overviews">
+   <title>Base Scans</title>
+
+   <para>Common scans that fetch data from tables and indexes.</para>
+
+   <variablelist>
+    <varlistentry id="seq-scan-overview">
+     <term>
+      <varname>Seq Scan</varname>
+      <indexterm>
+       <primary>
+        <varname>Sequential Scan</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       A <literal>Sequential Scan</literal> reads every table row in its
+       physical order on disk from start to end, returning results based on
+       query-provided filters.
+      </para>
+<screen>
+EXPLAIN SELECT * FROM tab1 WHERE id &gt; 1;
+
+                        QUERY PLAN
+-------------------------------------------------------------
+Seq Scan on tab1  (cost=0.00..25.88 rows=423 width=36)
+  Filter: (id &gt; 1)
+</screen>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry id="index-scan-overview">
+     <term>
+      <varname>Index Scan</varname>
+      <indexterm>
+       <primary>
+        <varname>Index Scan</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       Traverses an <link linkend="indexes-intro">index</link> to find the exact
+       <link linkend="datatype-oid">tuple identifiers (TIDs)</link>
+       matching the index conditions and fetches those specific entries directly
+       from the table heap.
+      </para>
+
+<screen>
+EXPLAIN SELECT id, message FROM tab1 WHERE id = 1;
+
+                        QUERY PLAN
+-------------------------------------------------------------
+Index Scan using tab1_pkey on tab1  (cost=0.15..2.37 rows=1 width=36)
+  Index Cond: (id = 1)
+</screen>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry id="index-only-scan-overview">
+     <term>
+      <varname>Index Only Scan</varname>
+      <indexterm>
+       <primary>
+        <varname>index only scan</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       Fetches data directly from an <link linkend="indexes-intro">index</link>,
+       avoiding the need to scan over table pages.
+      </para>
+      <para>
+       Because indexes do not store transaction visibility information directly,
+       an index-only scan references a table's
+       <link linkend="storage-vm">visibility map</link> when it finds a match.
+       If a page is marked as not all-visible, such as when one of its rows was
+       recently modified but not yet committed, the scan must still check the
+       corresponding page (<literal>Heap Fetch</literal>) to ensure
+       <link linkend="mvcc-intro">MVCC</link>
+       compliance.
+      </para>
+
+<screen>
+EXPLAIN ANALYZE SELECT id FROM tab1 WHERE id = 5;
+
+                                                    QUERY PLAN                                                      
+---------------------------------------------------------------------------------------------------------------------
+Index Only Scan using tab1_pkey on tab1  (cost=0.29..1.40 rows=1 width=4) (actual time=0.052..0.053 rows=1 loops=1)
+  Index Cond: (id = 5)
+  Heap Fetches: 1
+</screen>
+     </listitem>
+    </varlistentry>
+   </variablelist>
+
+   <sect4 id="bitmap-scan-overviews">
+    <title>Bitmap Scans</title>
+    <para>
+     Bitmap scans are performed using several nodes in multiple stages:
+    </para>
+    <orderedlist>
+     <listitem>
+      <para>
+       <link linkend="bitmap-index-scan-overview">Bitmap Index Scans</link>
+      </para>
+     </listitem>
+     <listitem>
+      <para>
+       (optional) <link linkend="bitmap-or-overview">BitmapORs</link> and/or
+       <link linkend="bitmap-or-overview">BitmapANDs</link>
+      </para>
+     </listitem>
+     <listitem>
+      <para>
+       <link linkend="bitmap-heap-scan-overview">Bitmap Heap Scan</link>
+      </para>
+     </listitem>
+    </orderedlist>
+
+<screen>
+EXPLAIN ANALYZE SELECT id FROM tab1 WHERE id &gt; 1;
+
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
+Bitmap Heap Scan on tab1  (cost=2156.51..5931.51 rows=199999 width=4) (actual time=9.558..36.428 rows=199999 loops=1)
+  Recheck Cond: (id &gt; 1)
+  Rows Removed by Index Recheck: 1
+  Heap Blocks: exact=758 lossy=517
+  -&gt;  Bitmap Index Scan on tab1_pkey  (cost=0.00..2106.51 rows=199999 width=0) (actual time=9.450..9.451 rows=199999 loops=1)
+        Index Cond: (id &gt; 1)
+</screen>
+
+    <variablelist>
+     <varlistentry id="bitmap-index-scan-overview">
+      <term>
+       <varname>Bitmap Index Scan</varname>
+       <indexterm>
+        <primary>
+         <varname>Bitmap Index Scan</varname>
+        </primary>
+       </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Scans an index to find references to matching rows in the corresponding
+        table. However, unlike an
+        <link linkend="index-scan-overview">Index Scan</link>, which immediately
+        fetches those rows, it instead uses the information to build a bitmap
+        (an array of 1s and 0s). Each bit in the map represents a row or page of
+        the table.
+       </para>
+       <para>
+        If possible, it will create an <literal>exact</literal>
+        bitmap: each element corresponds to a specific tuple in the heap.
+       </para>
+       <para>
+        If the bitmap cannot fit into the memory space allocated by
+        <link linkend="guc-work-mem">work_mem</link>, it will transition to
+        creating a <literal>lossy</literal> bitmap, which tracks not the exact
+        tuples, but the table pages containing them. Lossy bitmaps require the
+        database to <literal>Recheck</literal> rows based on a
+        <literal>Recheck Condition</literal> during a
+        <link linkend="bitmap-heap-scan-overview">Bitmap Heap Scan</link>.
+       </para>
+      </listitem>
+     </varlistentry>
+    </variablelist>
+
+    <variablelist>
+     <varlistentry id="bitmap-or-overview">
+      <term>
+       <varname>BitmapOR</varname>
+       <indexterm>
+        <primary>
+         <varname>BitmapOR</varname>
+        </primary>
+       </indexterm>
+      </term>
+      <listitem>
+       <para>
+        An intermediate operation that combines bitmaps from
+        <link linkend="bitmap-index-scan-overview">Bitmap Index Scans</link> by
+        bitwise ORing them together.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="bitmap-and-overview">
+      <term>
+       <varname>BitmapAND</varname>
+       <indexterm>
+        <primary>
+         <varname>BitmapAND</varname>
+        </primary>
+       </indexterm>
+      </term>
+      <listitem>
+       <para>
+        An intermediate operation that combines bitmaps from
+        <link linkend="bitmap-index-scan-overview">Bitmap Index Scans</link>
+        by bitwise ANDing them together.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="bitmap-heap-scan-overview">
+      <term>
+       <varname>Bitmap Heap Scan</varname>
+       <indexterm>
+        <primary>
+         <varname>bitmap heap scan</varname>
+        </primary>
+       </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Retrieves a bitmap produced by a
+        <link linkend="bitmap-index-scan-overview">Bitmap Index Scan</link> or
+        bitwise operation (<link linkend="bitmap-or-overview">BitmapOR</link> or
+        <link linkend="bitmap-and-overview">BitmapAND</link>).
+       </para>
+       <para>
+        For an exact bitmap, it fetches the matching tuples directly from the
+        table. For a lossy bitmap, it reads the referenced heap pages and
+        rechecks their tuples to find matches.
+       </para>
+       <para>
+        Values are read in bitmap order, reducing random I/O and improving
+        performance, predominantly on spinning hard drives.
+       </para>
+      </listitem>
+     </varlistentry>
+    </variablelist>
+   </sect4>
+  </sect3>
+
+  <sect3 id="Other-scan-overviews">
+   <title>Other Scans</title>
+
+   <para>
+    These are scans that rely on specialized Postgres features or review data
+    outside the typical table/index structure.
+   </para>
+
+   <variablelist>
+    <varlistentry id="result-scan-overview">
+     <term>
+      <varname>Result</varname>
+      <indexterm>
+       <primary>
+        <varname>Result</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       Returns constants or fixed calculations.
+<screen>
+EXPLAIN SELECT 1;
+
+                QUERY PLAN                
+------------------------------------------
+ Result  (cost=0.00..0.01 rows=1 width=4)
+</screen>
+      </para>
+      <para>
+       Furthermore, if the planner determines that a mandatory filter condition
+       is based on constant values, such as <literal>1 = 2</literal>, the node
+       may be able to evaluate it as a <literal>One-Time Filter</literal>. If
+       the filter returns <literal>false</literal>, the planner can skip
+       operations within child nodes.
+      </para>
+
+<screen>
+EXPLAIN SELECT * FROM tab1 WHERE 1 = 2;
+
+                        QUERY PLAN
+-------------------------------------------------------------
+Result (cost=0.00..0.00 rows=0 width=0)
+  One-Time Filter: false
+</screen>
+     </listitem>
+    </varlistentry>
+    <varlistentry id="foreign-scan-overview">
+     <term>
+      <varname>Foreign Scan</varname>
+      <indexterm>
+       <primary>
+        <varname>Foreign Scan</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       Fetches data from a foreign table, defined by a foreign data wrapper (see
+       <xref linkend="ddl-foreign-data" />).
+      </para>
+
+<screen>
+EXPLAIN SELECT * FROM some_foreign_table;
+
+                          QUERY PLAN                           
+----------------------------------------------------------------
+Foreign Scan on some_foreign_table  (cost=100.00..410.30 rows=1365 width=36)
+</screen>
+     </listitem>
+    </varlistentry>
+    <varlistentry id="custom-scan-overview">
+     <term>
+      <varname>Custom Scan</varname>
+      <indexterm>
+       <primary>
+        <varname>Custom Scan</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       A non-native scan implemented by an extension (see
+       <xref linkend="custom-scan" />).
+      </para>
+     </listitem>
+    </varlistentry>
+    <varlistentry id="function-scan-overview">
+     <term>
+      <varname>Function Scan</varname>
+      <indexterm>
+       <primary>
+        <varname>Function Scan</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       Used when a <link linkend="functions">function</link> is referenced in
+       the
+       <link linkend="queries-from">
+        <command>FROM</command>
+       </link>
+       clause as if it were a table:
+      </para>
+
+<screen>
+EXPLAIN SELECT * FROM generate_series(1, 1000);
+
+                              QUERY PLAN                               
+------------------------------------------------------------------------
+Function Scan on generate_series  (cost=0.00..10.00 rows=1000 width=4)
+</screen>
+      <note>
+       <para>
+        A function may utilize other nodes internally, such as sequential scans.
+        These are omitted in the planner's output. To view the internal
+        operations, you would have to load and configure the
+        <link linkend="auto-explain">auto_explain module</link>
+        with
+        <link linkend="auto-explain-configuration-parameters-log-nested-statements">
+         auto_explain.log_nested_statements
+        </link>
+        enabled.
+       </para>
+      </note>
+     </listitem>
+    </varlistentry>
+    <varlistentry id="project-set">
+     <term>
+      <varname>ProjectSet</varname>
+      <indexterm>
+       <primary>
+        <varname>ProjectSet</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       Referenced when a
+       <link linkend="functions-srf">set returning function</link>, such as
+       <link linkend="functions-srf">
+        <function>generate_series()</function>
+       </link>
+       , is used in a
+       <link linkend="sql-select">
+        <command>SELECT</command>
+       </link>
+       list or an <command>ORDER BY</command> clause instead of as a table
+       source in the
+       <command>FROM</command> clause.
+<screen>
+EXPLAIN SELECT generate_series(1, 1000);
+                  QUERY PLAN                    
+-------------------------------------------------
+ProjectSet  (cost=0.00..5.02 rows=1000 width=4)
+  -&gt;  Result  (cost=0.00..0.01 rows=1 width=0)
+</screen>
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry id="value-scan-overview">
+     <term>
+      <varname>Values Scan</varname>
+      <indexterm>
+       <primary>
+        <varname>Values Scan</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       Reads a "constant table" defined with a
+       <link linkend="queries-values">
+        <command>VALUES</command>
+       </link>
+       list.
+<screen>
+EXPLAIN SELECT *
+FROM (
+    VALUES
+        ('Optimism', 'Production bugs'),
+        ('Trust', 'Rickrolled'),
+        ('Leeroy Jenkins', 'Defeat')
+) AS outcome(cause, outcome);
+
+                          QUERY PLAN                          
+--------------------------------------------------------------
+Values Scan on "*VALUES*"  (cost=0.00..0.04 rows=3 width=64)
+</screen>
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry id="cte-scan-overview">
+     <term>
+      <varname>CTE Scan</varname>
+      <indexterm>
+       <primary>
+        <varname>CTE Scan</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       Fetches data from a Common Table Expression (see
+       <xref linkend="queries-with" />).
+       <note>
+        <para>
+         The CTE must be sufficiently complex. If possible, the planner may
+         instead opt to collapse it into the broader query with a different scan
+         (see
+         <xref linkend="queries-with-cte-materialization" />).
+         The planner can be forced to evaluate the subquery separately with
+         the <command>MATERIALIZED</command> keyword.
+        </para>
+       </note>
+      </para>
+<screen>
+EXPLAIN WITH example_cte AS MATERIALIZED (
+       SELECT * FROM tab1
+)
+SELECT * FROM example_cte;
+
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ CTE Scan on example_cte  (cost=35.50..86.50 rows=2550 width=4)
+   CTE example_cte
+     -&gt;  Seq Scan on tab1  (cost=0.00..35.50 rows=2550 width=4)
+</screen>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry id="subquery-scan-overview">
+     <term>
+      <varname>Subquery Scan</varname>
+      <indexterm>
+       <primary>
+        <varname>Subquery Scan</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       Fetches data from a <link linkend="functions-subquery">subquery</link>
+       that is presented as a table.
+       <note>
+        <para>
+         The subquery must be sufficiently complex. If possible, the planner may
+         instead opt to integrate it into the broader query with a different
+         scan (see
+         <xref linkend="explicit-joins" />).
+        </para>
+       </note>
+      </para>
+     </listitem>
+    </varlistentry>
+    <varlistentry id="tid-scan-overview">
+     <term>
+      <varname>TID Scan</varname>
+      <indexterm>
+       <primary>
+        <varname>TID Scan</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       Every version of a row has a
+       <link linkend="ddl-system-columns-ctid">CTID</link>
+       (current tuple ID). It defines what table page a row is on and its
+       relative order within the page. For instance, a tuple ID of
+       <literal>(0, 5)</literal>
+       translates to "the fifth row (tuple) on the 0th page of a table".
+      </para>
+      <para>
+       This scan is used when filtering directly for a <literal>CTID</literal>.
+      </para>
+      <para>
+<screen>
+EXPLAIN SELECT * FROM tab1 WHERE ctid = '(0, 1)'::tid;
+
+                    QUERY PLAN                      
+-----------------------------------------------------
+Tid Scan on tab1  (cost=0.00..1.11 rows=1 width=22)
+  TID Cond: (ctid = '(0,1)'::tid)
+</screen>
+      </para>
+     </listitem>
+    </varlistentry>
+    <varlistentry id="range-tid-scan-overview">
+     <term>
+      <varname>Range TID Scan</varname>
+      <indexterm>
+       <primary>
+        <varname>Range TID Scan</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       Same as a <link linkend="tid-scan-overview">TID Scan</link>, but instead
+       of looking for a specific tuple, it retrieves tuples based on a range.
+      </para>
+
+<screen>
+EXPLAIN SELECT ctid, * FROM tab1 WHERE ctid &gt;= '(0, 1)'::tid AND ctid &lt; '(1, 1)'::tid;
+
+                          QUERY PLAN                           
+----------------------------------------------------------------
+Tid Range Scan on tab1  (cost=0.01..1.11 rows=1 width=28)
+  TID Cond: ((ctid &gt;= '(0,1)'::tid) AND (ctid &lt; '(1,1)'::tid))
+</screen>
+     </listitem>
+    </varlistentry>
+    <varlistentry id="worktable-scan-overview">
+     <term>
+      <varname>WorkTable Scan</varname>
+      <indexterm>
+       <primary>
+        <varname>WorkTable Scan</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       A scan on a CTE (see <xref linkend="queries-with" />) generated within a
+       <command>
+        <link linkend="queries-with-recursive">RECURSIVE</link>
+       </command>
+       query.
+<screen>
+EXPLAIN WITH RECURSIVE cte_name (id) AS (
+    SELECT 1
+
+    UNION ALL
+    
+    SELECT id + 1
+    FROM cte_name
+    WHERE id &lt; 5
+)
+SELECT * FROM cte_name;
+
+                                      QUERY PLAN                                       
+---------------------------------------------------------------------------------------
+CTE Scan on cte_name  (cost=2.65..3.27 rows=31 width=4)
+  CTE cte_name
+    -&gt;  Recursive Union  (cost=0.00..2.65 rows=31 width=4)
+          -&gt;  Result  (cost=0.00..0.01 rows=1 width=4)
+          -&gt;  WorkTable Scan on cte_name cte_name_1  (cost=0.00..0.23 rows=3 width=4)
+                Filter: (id &lt; 5)
+</screen>
+      </para>
+     </listitem>
+    </varlistentry>
+    <varlistentry id="table-function-scan-overview">
+     <term>
+      <varname>Table Function Scan</varname>
+      <indexterm>
+       <primary>
+        <varname>Table Function Scan</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       When one uses either the
+       <link linkend="functions-sqljson-table">JSON_TABLE</link>
+       or
+       <link linkend="functions-xml-processing-xmltable">XMLTABLE</link>
+       functions, it will result in a Table Function Scan.
+      </para>
+
+<screen>
+EXPLAIN SELECT *
+FROM JSON_TABLE(
+  '{"name":"Alice"}',
+  '$'
+  COLUMNS (
+    name TEXT PATH '$.name'
+  )
+) AS jt;
+
+                                QUERY PLAN                                  
+-----------------------------------------------------------------------------
+Table Function Scan on "json_table" jt  (cost=0.01..1.00 rows=100 width=32)
+</screen>
+     </listitem>
+    </varlistentry>
+    <varlistentry id="sample-scan-overview">
+     <term>
+      <varname>Sample Scan</varname>
+      <indexterm>
+       <primary>
+        <varname>Sample Scan</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       Returns a random sample of rows from a table when a
+       <command>TABLESAMPLE</command>
+       clause is present (see
+       <xref linkend="runtime-config-query-constants" />)
+      </para>
+
+<screen>
+EXPLAIN SELECT * FROM tab1 TABLESAMPLE SYSTEM (10);
+
+                          QUERY PLAN                          
+--------------------------------------------------------------
+Sample Scan on tab1  (cost=0.00..340.80 rows=20000 width=22)
+  Sampling: system ('10'::real)
+</screen>
+     </listitem>
+    </varlistentry>
+    <varlistentry id="named-tuplestore-scan-overview">
+     <term>
+      <varname>Named Tuplestore Scan</varname>
+      <indexterm>
+       <primary>
+        <varname>Named Tuplestore Scan</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       When a <link linkend="sql-createtrigger">trigger</link> is defined with
+       the
+       <command>
+        REFERENCING ... TABLE
+        <replaceable>transition_relation_name</replaceable>
+       </command>
+       clause, PostgreSQL creates a temporary table containing the
+       <literal>OLD</literal> and/or <literal>NEW</literal> rows produced by the
+       statement.
+      </para>
+      <para>
+       <literal>transition_relations</literal> are commonly used with triggers
+       that rely on
+       <command>FOR EACH STATEMENT</command> definitions rather than
+       <command>FOR EACH ROW</command> definitions.
+      </para>
+      <para>
+       When a query within a trigger's function reads from a
+       <literal>transition_relation</literal>, the planner returns a
+       <literal>Named Tuplestore Scan</literal>.
+      </para>
+
+<screen>
+CREATE OR REPLACE FUNCTION process_rows()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    row RECORD;
+BEGIN
+    FOR row IN
+        SELECT * FROM new_rows --&lt;------ reference to transition_relation "new_rows"
+    LOOP
+        NULL;
+    END LOOP;
+
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER process_rows_trigger
+AFTER UPDATE ON tab1
+REFERENCING NEW TABLE AS new_rows --&lt;---- declaring the transition_relation "new_rows"
+FOR EACH STATEMENT
+EXECUTE FUNCTION process_rows();
+</screen>
+      <para>
+       Because nodes within functions are not directly returned by
+       <link linkend="sql-explain">
+        <command>EXPLAIN</command>
+       </link>
+       , the scan node can only observed with the
+       <link linkend="auto-explain">auto_explain module</link>
+       when
+       <link linkend="auto-explain-configuration-parameters-log-nested-statements">
+        auto_explain.log_nested_statements.
+       </link>
+       is enabled.
+      </para>
+      <para>
+       The example output below was generated with
+       <link linkend="auto-explain-configuration-parameters-log-nested-statements">
+        auto_explain.log_nested_statements
+       </link>
+       and was modified to be consistent with the other examples.
+      </para>
+
+<screen>
+-- "new_rows" is defined as a transition_relation within a trigger function
+EXPLAIN SELECT * FROM new_rows;
+
+                          QUERY PLAN                          
+-----------------------------------------------------------------------------
+SELECT * FROM new_rows Named Tuplestore Scan (cost=0.00..0.04 rows=2 width=4)
+</screen>
+     </listitem>
+    </varlistentry>
+   </variablelist>
+  </sect3>
+ </sect2>
+
+ <sect2 id="planner-nodes-join-overviews">
+  <title>Join Nodes</title>
+
+  <para>
+   Joins together rows from tables or cross-references multiple tables to
+   satisfy a filter.
+  </para>
+
+  <sect3 id="join-overviews">
+   <title>Joins</title>
+
+   <para>Combines two tables together by comparing join key columns</para>
+
+   <variablelist>
+    <varlistentry id="nested-loop-overview">
+     <term>
+      <varname>Nested Loop</varname>
+      <indexterm>
+       <primary>
+        <varname>nested loop</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       Compares every join column value in one table to every join key value in
+       the other to find matches.
+      </para>
+      <para>
+       For example, if a scan on a <literal>TABLE 1</literal>
+       returns 10 rows and a scan on a <literal>TABLE 2</literal> returns 100
+       rows, the join compares the first row from
+       <literal>TABLE 1</literal> to all 100 rows in
+       <literal>TABLE 2</literal>, then the second row to all 100 rows, and so
+       on until every combination has been checked. In this example, that
+       results in
+       <literal>10 * 100</literal>
+       comparisons.
+      </para>
+      <para>
+       When one or both sides of the join are small, the strategy may be
+       preferred because of its low startup cost, which may outweigh the
+       overhead of more sophisticated join methods.
+      </para>
+      <para>
+       However, the join is often used as a fallback strategy when other methods
+       seem untenable, or the database lacks enough statistics to make better
+       decisions (see <xref linkend="planner-stats" />).
+      </para>
+      <para>
+       The node can also be presented with modifiers:
+       <itemizedlist>
+        <listitem>
+         <para>
+          <literal>Nested Loop Left Join</literal>
+         </para>
+        </listitem>
+
+        <listitem>
+         <para>
+          <literal>Nested Loop Right Join</literal>
+         </para>
+        </listitem>
+
+        <listitem>
+         <para>
+          <literal>Nested Loop Full Join</literal>
+         </para>
+        </listitem>
+       </itemizedlist>
+      </para>
+
+<screen>
+EXPLAIN SELECT tab1.id FROM tab1
+JOIN tab2 ON tab2.id = tab1.id;
+
+                                    QUERY PLAN                                     
+-----------------------------------------------------------------------------------
+Nested Loop  (cost=0.28..328.50 rows=1000 width=4)
+  -&gt;  Seq Scan on tab1  (cost=0.00..15.00 rows=1000 width=4)
+  -&gt;  Index Only Scan using tab2_id_idx on tab2  (cost=0.28..0.30 rows=1 width=4)
+        Index Cond: (id = tab1.id)
+</screen>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry id="hash-join-overview">
+     <term>
+      <varname>Hash Join</varname>
+      <indexterm>
+       <primary>
+        <varname>hash join</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>A Hash Join uses a hash table to find matching columns.</para>
+      <para>
+       One side's join key column is hashed into an in-memory hash table. The
+       other side's join key column is then hashed and fed into the hash table
+       to find matches.
+      </para>
+      <para>
+       The node can also be presented with modifiers:
+       <itemizedlist>
+        <listitem>
+         <para>
+          <literal>Hash Left Join</literal>
+         </para>
+        </listitem>
+
+        <listitem>
+         <para>
+          <literal>Hash Right Join</literal>
+         </para>
+        </listitem>
+
+        <listitem>
+         <para>
+          <literal>Hash Full Join</literal>
+         </para>
+        </listitem>
+       </itemizedlist>
+      </para>
+
+<screen>
+EXPLAIN SELECT tab1.id FROM tab1
+JOIN tab2 ON tab2.id = tab1.id;
+
+                            QUERY PLAN                             
+--------------------------------------------------------------------
+Hash Join  (cost=27.50..56.25 rows=1000 width=4)
+  Hash Cond: (tab1.id = tab2.id)
+  -&gt;  Seq Scan on tab1  (cost=0.00..15.00 rows=1000 width=4)
+  -&gt;  Hash  (cost=15.00..15.00 rows=1000 width=4)
+        -&gt;  Seq Scan on tab2  (cost=0.00..15.00 rows=1000 width=4)
+</screen>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry id="merge-join-overview">
+     <term>
+      <varname>Merge Join</varname>
+      <indexterm>
+       <primary>
+        <varname>merge join</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       A merge join works by comparing two join key columns in lockstep.
+      </para>
+      <para>
+       Before the join begins, both sides must be sorted on the join column,
+       either because an index already provides that ordering, or because the
+       planner has added an explicit
+       <link linkend="sort-nodes-overview">sort</link> step.
+      </para>
+      <para>
+       The algorithm then compares the first values from
+       <literal>JOIN_COL_1</literal> against the values in
+       <literal>JOIN_COL_2</literal>. If the values match, the corresponding
+       rows are joined.
+      </para>
+      <para>
+       When they do not match, the side with the smaller value advances, since
+       no future row on the larger side can match a value that has already been
+       passed. This continues until one side is exhausted.
+      </para>
+      <para>
+       The planner is more likely to pick merge joins when the join columns are
+       already ordered by an index, or when the inputs are large enough that the
+       memory overhead of a hash join is not practical.
+      </para>
+      <para>
+       The node can also be presented with modifiers:
+       <itemizedlist>
+        <listitem>
+         <para>
+          <literal>Merge Left Join</literal>
+         </para>
+        </listitem>
+
+        <listitem>
+         <para>
+          <literal>Merge Right Join</literal>
+         </para>
+        </listitem>
+
+        <listitem>
+         <para>
+          <literal>Merge Full Join</literal>
+         </para>
+        </listitem>
+       </itemizedlist>
+      </para>
+
+<screen>
+EXPLAIN SELECT tab1.id FROM tab1
+JOIN tab2 ON tab2.id = tab1.id;
+
+                                      QUERY PLAN                                       
+---------------------------------------------------------------------------------------
+Merge Join  (cost=0.55..66.75 rows=1000 width=8)
+  Merge Cond: (tab1.id = tab2.id)
+  -&gt;  Index Only Scan using tab1_id_idx on tab1  (cost=0.28..25.88 rows=100000 width=8)
+  -&gt;  Index Only Scan using tab2_id_idx on tab2  (cost=0.28..25.88 rows=100000 width=8)
+</screen>
+     </listitem>
+    </varlistentry>
+   </variablelist>
+  </sect3>
+
+  <sect3 id="join-like-nodes-overview">
+   <title>Join-Like Nodes</title>
+
+   <para>
+    Some nodes, although not explicitly joins, are similar in that they can
+    compare rows between independent tables.
+   </para>
+   <variablelist>
+    <varlistentry id="semi-join-overview">
+     <term>
+      <varname>Semi Join</varname>
+      <indexterm>
+       <primary>
+        <varname>Semi Join</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       When a query uses a <link linkend="functions-subquery">subquery</link>
+       with an
+       <link linkend="functions-subquery-in">
+        <command>IN</command>
+       </link>
+       ,
+       <link linkend="functions-subquery-exists">
+        <command>EXISTS</command>
+       </link>
+       , or their equivalent operator, PostgreSQL does not need to produce a
+       combined row from both sides. It only needs to confirm that at least one
+       matching row exists in the
+       <link linkend="functions-subquery">subquery</link>.
+      </para>
+<programlisting>
+SELECT col1 FROM tab1 
+WHERE EXISTS (
+      SELECT 1 FROM tab2 WHERE col2 =tab1.col2
+);
+</programlisting>
+
+      <para>
+       To do this, PostgreSQL may use a semi-join: it compares the join column
+       from the outer query against the join column from the subquery. For each
+       outer row, as soon as a match is found, that row is returned, and the
+       remaining subquery rows are skipped. Allowing an early escape for
+       reviewing rows can also reduce execution time.
+      </para>
+      <para>
+       Semi-joins correspond to their join counterparts:
+       <itemizedlist>
+        <listitem>
+         <para>
+          <literal>Nested Loop Semi Join</literal>
+         </para>
+        </listitem>
+
+        <listitem>
+         <para>
+          <literal>Hash Semi Join</literal>
+         </para>
+        </listitem>
+
+        <listitem>
+         <para>
+          <literal>Merge Semi Join</literal>
+         </para>
+        </listitem>
+       </itemizedlist>
+      </para>
+
+<screen>
+EXPLAIN SELECT tab1.id FROM tab1
+WHERE id IN (SELECT id FROM tab2);
+
+                            QUERY PLAN                             
+--------------------------------------------------------------------
+Hash Semi Join  (cost=27.50..56.25 rows=1000 width=4)
+  Hash Cond: (tab1.id = tab2.id)
+  -&gt;  Seq Scan on tab1  (cost=0.00..15.00 rows=1000 width=4)
+  -&gt;  Hash  (cost=15.00..15.00 rows=1000 width=4)
+        -&gt;  Seq Scan on tab2  (cost=0.00..15.00 rows=1000 width=4)
+</screen>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry id="anti-join-overview">
+     <term>
+      <varname>Anti Join</varname>
+      <indexterm>
+       <primary>
+        <varname>Anti Join</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       Comparable to the <link linkend="semi-join-overview">Semi-Joins</link>,
+       but correspond to
+       <link linkend="functions-subquery">subqueries</link>
+       with a
+       <link linkend="functions-subquery-in">
+        <command>NOT IN</command>
+       </link>
+       ,
+       <link linkend="functions-subquery-exists">
+        <command>NOT EXISTS</command>
+       </link>
+       , or equivalent operator.
+      </para>
+      <para>
+       Like semi-joins, anti-joins correspond to their join counterparts:
+       <itemizedlist>
+        <listitem>
+         <para>
+          <literal>Nested Loop Anti Join</literal>
+         </para>
+        </listitem>
+
+        <listitem>
+         <para>
+          <literal>Hash Anti Join</literal>
+         </para>
+        </listitem>
+
+        <listitem>
+         <para>
+          <literal>Merge Anti Join</literal>
+         </para>
+        </listitem>
+       </itemizedlist>
+      </para>
+
+<screen>
+EXPLAIN SELECT tab1.id FROM tab1
+WHERE NOT EXISTS (SELECT 1 FROM tab2 WHERE tab1.id = tab2.id);
+
+                            QUERY PLAN                             
+--------------------------------------------------------------------
+Hash Anti Join  (cost=27.50..46.25 rows=1 width=4)
+  Hash Cond: (tab1.id = tab2.id)
+  -&gt;  Seq Scan on tab1  (cost=0.00..15.00 rows=1000 width=4)
+  -&gt;  Hash  (cost=15.00..15.00 rows=1000 width=4)
+        -&gt;  Seq Scan on tab2  (cost=0.00..15.00 rows=1000 width=4)
+</screen>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry id="hash-setop-overview">
+     <term>
+      <varname>HashSetOp</varname>
+      <indexterm>
+       <primary>
+        <varname>HashSetOp</varname>
+       </primary>
+      </indexterm>
+     </term>
+
+     <listitem>
+      <para>
+       Like <link linkend="hash-join-overview">Hash Joins</link>, it relies on
+       hashing to compare rows between tables. It is used specifically with the
+       <link linkend="queries-union">
+        <command>INTERSECT</command>
+       </link>
+       and
+       <link linkend="queries-union">
+        <command>EXCEPT</command>
+       </link>
+       commands.
+      </para>
+
+<screen>
+EXPLAIN SELECT * FROM tab1
+INTERSECT
+SELECT * FROM tab2;
+
+                                  QUERY PLAN                                    
+---------------------------------------------------------------------------------
+HashSetOp Intersect  (cost=0.00..65.00 rows=1000 width=8)
+  -&gt;  Append  (cost=0.00..60.00 rows=2000 width=8)
+        -&gt;  Subquery Scan on "*SELECT* 1"  (cost=0.00..25.00 rows=1000 width=8)
+              -&gt;  Seq Scan on tab1  (cost=0.00..15.00 rows=1000 width=4)
+        -&gt;  Subquery Scan on "*SELECT* 2"  (cost=0.00..25.00 rows=1000 width=8)
+              -&gt;  Seq Scan on tab2  (cost=0.00..15.00 rows=1000 width=4)
+</screen>
+     </listitem>
+    </varlistentry>
+    <varlistentry id="setop-overview">
+     <term>
+      <varname>SetOp</varname>
+      <indexterm>
+       <primary>
+        <varname>SetOp</varname>
+       </primary>
+      </indexterm>
+     </term>
+
+     <listitem>
+      <para>
+       Like <link linkend="merge-join-overview">Merge Joins</link>, it relies on
+       sorting to compare rows between tables. It is used specifically with the
+       <link linkend="queries-union">
+        <command>INTERSECT</command>
+       </link>
+       and
+       <link linkend="queries-union">
+        <command>EXCEPT</command>
+       </link>
+       commands.
+      </para>
+
+<screen>
+EXPLAIN SELECT * FROM tab1
+EXCEPT
+SELECT * FROM tab2;
+
+                                        QUERY PLAN                                        
+------------------------------------------------------------------------------------------
+SetOp Except  (cost=25261.35..26155.35 rows=89400 width=8)
+  -&gt;  Sort  (cost=25261.35..25708.35 rows=178800 width=8)
+        Sort Key: "*SELECT* 1".id
+        -&gt;  Append  (cost=0.00..5364.00 rows=178800 width=8)
+              -&gt;  Subquery Scan on "*SELECT* 1"  (cost=0.00..2235.00 rows=89400 width=8)
+                    -&gt;  Seq Scan on tab1  (cost=0.00..1341.00 rows=89400 width=4)
+              -&gt;  Subquery Scan on "*SELECT* 2"  (cost=0.00..2235.00 rows=89400 width=8)
+                    -&gt;  Seq Scan on tab2  (cost=0.00..1341.00 rows=89400 width=4)
+</screen>
+     </listitem>
+    </varlistentry>
+   </variablelist>
+  </sect3>
+ </sect2>
+
+ <sect2 id="planner-nodes-aggregate-overviews">
+  <title>Aggregate Nodes</title>
+
+  <para>
+   Aggregate nodes take a collection of values from a column and combine them
+   into a single result. There are many
+   <link linkend="functions-aggregate">aggregate functions</link>, such as
+   <literal>COUNT</literal>, <literal>AVG</literal>, and
+   <literal>SUM</literal>.
+  </para>
+
+  <variablelist>
+   <varlistentry id="aggregate-overview">
+    <term>
+     <varname>Aggregate</varname>
+     <indexterm>
+      <primary>
+       <varname>aggregate</varname>
+      </primary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Takes column values and runs an aggregate function against them while
+      adding them to a running state. When all the values are reviewed, the
+      final state is returned.
+     </para>
+     <para>
+      For example, if a <literal>SUM</literal> aggregate function were used
+      against the values
+      <literal>1</literal>, <literal>2</literal>, and
+      <literal>3</literal>, it would first add
+      <literal>1</literal> to the running state. Then it would add
+      <literal>2</literal>, and finally
+      <literal>3</literal>. The running state would then be
+      <literal>6</literal>, which would be returned by the node.
+     </para>
+
+<screen>
+EXPLAIN SELECT SUM(amount) FROM tab1;
+
+                            QUERY PLAN                            
+------------------------------------------------------------------
+Aggregate  (cost=2502.00..2502.01 rows=1 width=8)
+  -&gt;  Seq Scan on tab1  (cost=0.00..2252.00 rows=100000 width=8)
+</screen>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="hash-aggregate-overview">
+    <term>
+     <varname>HashAggregate</varname>
+     <indexterm>
+      <primary>
+       <varname>HashAggregate</varname>
+      </primary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      When a
+      <link linkend="sql-groupby">
+       <command>GROUP BY</command>
+      </link>
+      clause is present, PostgreSQL must first collect rows that share the same
+      grouping values.
+     </para>
+
+     <para>
+      A <command>HashAggregate</command> hashes each
+      <literal>Group Key</literal> as it reviews a row. It then looks for a
+      matching hash value in a hash table that it has populated with the groups
+      it has already seen.
+     </para>
+
+     <para>
+      If it finds a matching entry, it executes the aggregate function and
+      updates that group's aggregate state.
+     </para>
+
+     <para>
+      If no matching entry exists, it creates a new aggregate state for the
+      group, adds it to the hash table, and then executes the aggregate
+      function.
+     </para>
+     <para>
+      The node is also used to find unique values for certain modifiers, such as
+      <link linkend="sql-distinct">
+       <command>DISTINCT</command>
+      </link>
+      .
+     </para>
+
+<screen>
+EXPLAIN SELECT COUNT(category), users FROM tab1 GROUP BY users;
+
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+HashAggregate  (cost=2224.88..2226.88 rows=200 width=12)
+  Group Key: users
+  -&gt;  Seq Scan on tab1  (cost=0.00..1665.92 rows=111792 width=12)
+</screen>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="group-aggregate-overview">
+    <term>
+     <varname>GroupAggregate</varname>
+     <indexterm>
+      <primary>
+       <varname>GroupAggregate</varname>
+      </primary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Similar to a <literal>HashAggregate</literal>, but instead of hashing the
+      <link linkend="sql-groupby">
+       <literal>GROUP BY</literal>
+      </link>
+      keys,
+      <literal>GroupAggregate</literal> relies on the input being sorted. Once
+      rows are ordered, either by an index scan or by an explicit
+      <link linkend="sort-nodes-overview">sort</link> step, the node identifies
+      each group by comparing adjacent grouping values. As it reviews a row, it
+      applies the aggregate function and updates the group's state.
+     </para>
+
+<screen>
+EXPLAIN SELECT COUNT(category), users FROM tab1 GROUP BY users;
+
+                              QUERY PLAN                                
+-------------------------------------------------------------------------
+GroupAggregate  (cost=12860.17..14610.17 rows=100000 width=12)
+  Group Key: users
+  -&gt;  Sort  (cost=12860.17..13110.17 rows=100000 width=12)
+        Sort Key: users
+        -&gt;  Seq Scan on tab1  (cost=0.00..1548.00 rows=100000 width=12)
+</screen>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="mixed-aggregate-overview">
+    <term>
+     <varname>MixedAggregate</varname>
+     <indexterm>
+      <primary>
+       <varname>MixedAggregate</varname>
+      </primary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      May be used when the
+      <link linkend="queries-grouping-sets">
+       <command>ROLLUP</command>, <command>CUBE</command>, or
+       <command>GROUPING SETS</command>
+      </link>
+      clauses are present.
+     </para>
+     <para></para>
+     <para>
+      A <literal>MixedAggregate</literal> node is triggered when multiple group
+      keys are evaluated using varying grouping strategies:
+      <variablelist>
+       <varlistentry>
+        <term>
+         <literal>Hash</literal>
+        </term>
+        <listitem>
+         <para>Runs entries through a hash table to evaluate groups.</para>
+        </listitem>
+       </varlistentry>
+       <varlistentry>
+        <term>
+         <literal>Sort</literal>
+        </term>
+        <listitem>
+         <para>Groups rows sequentially from sorted data.</para>
+        </listitem>
+       </varlistentry>
+       <varlistentry>
+        <term>
+         <literal>Plain</literal>
+        </term>
+        <listitem>
+         <para>
+          Applies a global aggregate against the entire table to compute the
+          empty grouping set <literal>()</literal>.
+         </para>
+        </listitem>
+       </varlistentry>
+      </variablelist>
+     </para>
+
+     <para>
+      The query below computes one set of groups using a <literal>brand</literal>
+      column, another using a 
+      <literal>size</literal> column, and a final group representing the entire
+      table:
+     </para>
+
+<screen>
+SELECT brand, size, sum(sales) FROM items_sold GROUP BY GROUPING SETS ((brand), (size), ());
+
+    brand | size | sum
+    -------+------+-----
+    Foo   |      |  30
+    Bar   |      |  20
+          | L    |  15
+          | M    |  35
+          |      |  50
+
+EXPLAIN SELECT brand, size, sum(sales) FROM items_sold GROUP BY GROUPING SETS ((brand), (size), ());
+
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+MixedAggregate  (cost=0.00..230.73 rows=401 width=44)
+  Hash Key: brand
+  Hash Key: size
+  Group Key: ()
+  -&gt;  Seq Scan on items_sold  (cost=0.00..136.32 rows=7232 width=44)
+</screen>
+     <para>
+      Because separate internal <literal>Hash</literal> operations are paired
+      with a <literal>Plain</literal> (<literal>Group Key: ()</literal>), the
+      planner used a <literal>MixedAggregate</literal> node.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="window-aggregate-overview">
+    <term>
+     <varname>WindowAgg</varname>
+     <indexterm>
+      <primary>
+       <varname>WindowAgg</varname>
+      </primary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Used when
+      <link linkend="functions-window">window functions</link>, such as
+      <function>row_number</function>, <function>rank</function>, and
+      <function>lead</function>, are present in a query.
+     </para>
+
+     <para>
+      The node requires its inputs to be ordered according to the window
+      definition, which is achieved when an index scan already provides the
+      required order or by an explicit
+      <link linkend="sort-nodes-overview">sort</link> step. The window
+      definition’s
+      <command>PARTITION BY</command> columns must be used as major sort keys,
+      while the
+      <command>ORDER BY</command> columns act as minor sort keys.
+     </para>
+
+     <para>
+      Once ordered, PostgreSQL evaluates each window function over the frame of
+      rows associated with each input row.
+     </para>
+
+<screen>
+EXPLAIN SELECT
+  RANK() OVER (ORDER BY score DESC) AS player_ranking,
+  score,
+  participants
+FROM players;
+
+                              QUERY PLAN                               
+------------------------------------------------------------------------
+WindowAgg  (cost=163.06..198.74 rows=2040 width=20)
+  -&gt;  Sort  (cost=163.04..168.14 rows=2040 width=12)
+        Sort Key: score DESC
+        -&gt;  Seq Scan on players  (cost=0.00..30.40 rows=2040 width=12)
+</screen>
+    </listitem>
+   </varlistentry>
+  </variablelist>
+ </sect2>
+
+ <sect2 id="data-modification-nodes-overview">
+  <title>Data Modification</title>
+  <para>Changes row data.</para>
+
+  <variablelist>
+   <varlistentry id="delete-overview">
+    <term>
+     <varname>Delete</varname>
+     <indexterm>
+      <primary>
+       <varname>Delete</varname>
+      </primary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Occurs when someone runs a
+      <link linkend="sql-delete">
+       <command>DELETE</command>
+      </link>
+      command.
+     </para>
+
+<screen>
+EXPLAIN DELETE FROM characters
+WHERE name = 'Saruman'
+
+                          QUERY PLAN                            
+-----------------------------------------------------------------
+Delete on characters  (cost=0.00..27.00 rows=0 width=0)
+  -&gt;  Seq Scan on characters  (cost=0.00..27.00 rows=7 width=6)
+        Filter: (name = 'Saruman'::text)
+</screen>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="insert-overview">
+    <term>
+     <varname>Insert</varname>
+     <indexterm>
+      <primary>
+       <varname>Insert</varname>
+      </primary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Inserts new rows via an
+      <link linkend="sql-insert">
+       <command>INSERT</command>
+      </link>
+      command.
+     </para>
+
+<screen>
+EXPLAIN INSERT INTO characters (name) VALUES ('Gandalf the Gray');
+
+                      QUERY PLAN                       
+--------------------------------------------------------
+Insert on characters  (cost=0.00..0.01 rows=0 width=0)
+  -&gt;  Result  (cost=0.00..0.01 rows=1 width=32)
+</screen>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="update-overview">
+    <term>
+     <varname>Update</varname>
+     <indexterm>
+      <primary>
+       <varname>Update</varname>
+      </primary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Applies when someone runs an
+      <link linkend="sql-update">
+       <command>UPDATE</command>
+      </link>
+      command.
+     </para>
+
+<screen>
+EXPLAIN UPDATE characters
+SET name = 'Gandalf the White'
+WHERE name = 'Gandalf the Grey';
+
+                            QUERY PLAN                            
+------------------------------------------------------------------
+Update on characters  (cost=0.00..27.00 rows=0 width=0)
+  -&gt;  Seq Scan on characters  (cost=0.00..27.00 rows=7 width=38)
+        Filter: (name = 'Gandalf the Grey'::text)
+</screen>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="merge-overview">
+    <term>
+     <varname>Merge</varname>
+     <indexterm>
+      <primary>
+       <varname>Merge</varname>
+      </primary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Appears when a
+      <link linkend="sql-merge">
+       <command>MERGE</command>
+      </link>
+      command is used.
+     </para>
+
+<screen>
+EXPLAIN MERGE INTO characters AS c
+USING (
+    VALUES
+        ('Smeagol', 'cursed'),
+        ('Sauron', 'defeat'),
+        ('Bilbo', 'victory')
+) AS outcome(name, fate)
+ON outcome.name = c.name
+
+WHEN MATCHED AND outcome.fate = 'cursed' THEN
+    UPDATE SET
+        name = 'Gollum'
+WHEN MATCHED AND outcome.fate = 'defeat' THEN
+    DELETE
+WHEN NOT MATCHED AND outcome.fate = 'victory' THEN
+    INSERT (name)
+    VALUES ('Gandalf the White');
+
+                                  QUERY PLAN                                    
+---------------------------------------------------------------------------------
+Merge on characters c  (cost=0.08..28.97 rows=0 width=0)
+  -&gt;  Hash Right Join  (cost=0.08..28.97 rows=20 width=126)
+        Hash Cond: (c.name = "*VALUES*".column1)
+        -&gt;  Seq Scan on characters c  (cost=0.00..23.60 rows=1360 width=38)
+        -&gt;  Hash  (cost=0.04..0.04 rows=3 width=152)
+              -&gt;  Values Scan on "*VALUES*"  (cost=0.00..0.04 rows=3 width=152)
+</screen>
+    </listitem>
+   </varlistentry>
+  </variablelist>
+ </sect2>
+
+ <sect2 id="gather-nodes-overview">
+  <title>Gather Nodes</title>
+  <para>
+   When running <link linkend="parallel-plans">parallel plans</link> (e.g.,
+   parallel scans or parallel joins), a gather node collects the values from
+   each operation and stitches them together into a single output.
+  </para>
+  <variablelist>
+   <varlistentry id="gather-overview">
+    <term>
+     <varname>Gather</varname>
+     <indexterm>
+      <primary>
+       <varname>Gather</varname>
+      </primary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Combines parallel operations, but does not preserve sort order.
+     </para>
+
+<screen>
+EXPLAIN SELECT * FROM tab1;
+
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ Gather  (cost=0.00..69292.77 rows=9999510 width=4)
+   Workers Planned: 4
+   -&gt;  Parallel Seq Scan on tab1  (cost=0.00..69282.77 rows=2499878 width=4)
+</screen>
+    </listitem>
+   </varlistentry>
+   <varlistentry id="gather-merge-overview">
+    <term>
+     <varname>Gather Merge</varname>
+     <indexterm>
+      <primary>
+       <varname>Gather Merge</varname>
+      </primary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>Combines parallel operations, but preserves sort order.</para>
+<screen>
+EXPLAIN SELECT * FROM tab1 ORDER BY id; 
+
+                                    QUERY PLAN                                     
+-----------------------------------------------------------------------------------
+ Gather Merge  (cost=374978.30..522327.98 rows=9999510 width=4)
+   Workers Planned: 4
+   -&gt;  Sort  (cost=374978.24..381227.93 rows=2499878 width=4)
+         Sort Key: id
+         -&gt;  Parallel Seq Scan on tab1  (cost=0.00..69282.77 rows=2499878 width=4)
+</screen>
+    </listitem>
+   </varlistentry>
+  </variablelist>
+ </sect2>
+
+ <sect2 id="append-nodes-overview">
+  <title>Append Nodes</title>
+  <para>
+   They combine rows obtained by different partitions. Also used to help with
+   certain operations that combine rows, such as
+   <command>UNION</command> and <command>INTERSECT</command>.
+  </para>
+
+  <variablelist>
+   <varlistentry id="append-overview">
+    <term>
+     <varname>Append</varname>
+     <indexterm>
+      <primary>
+       <varname>Append</varname>
+      </primary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Combines rows from scans against partitions, or for operations that stack
+      rows, such as <command>UNION</command> and <command>INTERSECT</command>.
+      Does not take into account sort order.
+     </para>
+<screen>
+EXPLAIN SELECT * FROM partitioned_table;
+
+                                    QUERY PLAN                                     
+------------------------------------------------------------------------------------
+Append  (cost=0.00..53.90 rows=2260 width=44)
+  -&gt;  Seq Scan on part_1 partitioned_table_1  (cost=0.00..21.30 rows=1130 width=44)
+  -&gt;  Seq Scan on part_2 partitioned_table_2  (cost=0.00..21.30 rows=1130 width=44)
+</screen>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="merge-append-overview">
+    <term>
+     <varname>Merge Append</varname>
+     <indexterm>
+      <primary>
+       <varname>Merge Append</varname>
+      </primary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Same as <link linkend="append-overview">Append</link>, but preserves sort
+      order.
+     </para>
+<screen>
+EXPLAIN SELECT * FROM partitioned_table ORDER BY id;
+
+                                              QUERY PLAN                                               
+--------------------------------------------------------------------------------------------------------
+Merge Append  (cost=0.32..83.22 rows=2260 width=44)
+  Sort Key: partitiond_table.id
+  -&gt;  Index Scan using part_1_pkey on part_1 partitioned_table_1  (cost=0.15..30.30 rows=1130 width=44)
+  -&gt;  Index Scan using part_2_pkey on part_2 partitioned_table_2  (cost=0.15..30.30 rows=1130 width=44)
+</screen>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="recursive-union-overview">
+    <term>
+     <varname>Recursive Union</varname>
+     <indexterm>
+      <primary>
+       <varname>Recursive Union</varname>
+      </primary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Combines sets produced within
+      <link linkend="queries-with-recursive">
+       <command>RECURSIVE</command>
+      </link>
+      queries.
+     </para>
+
+<screen>
+EXPLAIN WITH RECURSIVE cte_name (id) AS (
+    SELECT 1
+
+    UNION ALL
+    
+    SELECT id + 1
+    FROM cte_name
+    WHERE id &lt; 5
+)
+SELECT * FROM cte_name;
+
+                                      QUERY PLAN                                       
+---------------------------------------------------------------------------------------
+CTE Scan on cte_name  (cost=2.65..3.27 rows=31 width=4)
+  CTE cte_name
+    -&gt;  Recursive Union  (cost=0.00..2.65 rows=31 width=4)
+          -&gt;  Result  (cost=0.00..0.01 rows=1 width=4)
+          -&gt;  WorkTable Scan on cte_name cte_name_1  (cost=0.00..0.23 rows=3 width=4)
+                Filter: (id &lt; 5)
+</screen>
+    </listitem>
+   </varlistentry>
+  </variablelist>
+ </sect2>
+
+ <sect2 id="planner-nodes-other-categories">
+  <title>Other Planner Nodes</title>
+
+  <sect3 id="hash-nodes-overview">
+   <title>Hash Nodes</title>
+   <para>
+    These nodes perform hashes to support downstream operations, such as
+    <link linkend="hash-join-overview">
+     <varname>Hash Joins</varname>
+    </link>
+    .
+   </para>
+
+   <variablelist>
+    <varlistentry id="hash-overview">
+     <term>
+      <varname>Hash</varname>
+      <indexterm>
+       <primary>
+        <varname>Hash</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>Performs a hash against row data</para>
+
+<screen>
+EXPLAIN SELECT tab1.id FROM tab1
+JOIN tab2 ON tab2.id = tab1.id;
+
+                            QUERY PLAN                             
+--------------------------------------------------------------------
+Hash Join  (cost=27.50..56.25 rows=1000 width=4)
+  Hash Cond: (tab1.id = tab2.id)
+  -&gt;  Seq Scan on tab1  (cost=0.00..15.00 rows=1000 width=4)
+  -&gt;  Hash  (cost=15.00..15.00 rows=1000 width=4)
+        -&gt;  Seq Scan on tab2  (cost=0.00..15.00 rows=1000 width=4)
+</screen>
+     </listitem>
+    </varlistentry>
+   </variablelist>
+  </sect3>
+
+  <sect3 id="sort-nodes-overview">
+   <title>Sort Nodes</title>
+   <para>
+    These nodes perform sorting, typically to support an
+    <link linkend="queries-order">
+     <command>ORDER BY</command>
+    </link>
+    clause or to enable downstream nodes, such as
+    <link linkend="window-aggregate-overview">
+     <literal>WindowAggs</literal>
+    </link>
+    , that depend on ordered input.
+   </para>
+
+   <variablelist>
+    <varlistentry id="sort-overview">
+     <term>
+      <varname>Sort</varname>
+      <indexterm>
+       <primary>
+        <varname>Sort</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       In memory, PostgreSQL can use the quicksort algorithm or, if only a few
+       rows from the set are needed, the top-N heapsort algorithm to order
+       values. For large enough entries, Postgres may opt to perform an external
+       merge sort on disk.
+      </para>
+
+<screen>
+EXPLAIN SELECT * FROM tab1 ORDER BY amount
+
+                          QUERY PLAN                          
+--------------------------------------------------------------
+Sort  (cost=179.78..186.16 rows=2550 width=4)
+  Sort Key: amount
+  -&gt;  Seq Scan on tab1  (cost=0.00..35.50 rows=2550 width=4)
+</screen>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry id="incremental-sort-overview">
+     <term>
+      <varname>Incremental Sort</varname>
+      <indexterm>
+       <primary>
+        <varname>Incremental Sort</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       If multiple columns are being sorted, such as in an
+       <command>ORDER BY</command> clause:
+      </para>
+      <programlisting>ORDER BY category, amount;</programlisting>
+      <para>
+       and if one or more leading columns are already ordered, for example, due
+       to an index or a previous operation, PostgreSQL can perform an
+       incremental sort.
+      </para>
+      <para>
+       Instead of sorting the entire dataset at once, an incremental sort relies
+       on the existing order of the leading columns (
+       <literal>Presorted Keys</literal>) to group the data into smaller
+       sections. PostgreSQL then isolates these sections and sorts only the
+       remaining unsorted columns within each group.
+      </para>
+
+<screen>
+[ amount: UNSORTED ]                    [ amount: SORTED ]
+
+category (pre-sorted) | amount          category (pre-sorted) | amount
+----------------------+-------          ----------------------+-------
+A                     |     30   ===&gt;   A                     |     20
+A                     |     20   ===&gt;   A                     |     30
+A                     |     50   ===&gt;   A                     |     50
+                                                              
+B                     |     30   ===&gt;   B                     |     15
+B                     |     15   ===&gt;   B                     |     30
+                                                              
+C                     |      5   ===&gt;   C                     |      5
+C                     |     25   ===&gt;   C                     |     10
+C                     |     10   ===&gt;   C                     |     25
+</screen>
+
+<screen>
+EXPLAIN SELECT * FROM sales ORDER BY category, amount;
+
+                                        QUERY PLAN                                          
+---------------------------------------------------------------------------------------------
+Incremental Sort  (cost=0.33..6851.99 rows=100000 width=12)
+  Sort Key: category, amount
+  Presorted Key: category
+  -&gt;  Index Scan using sales_category_idx on sales  (cost=0.29..2351.99 rows=100000 width=12)
+</screen>
+     </listitem>
+    </varlistentry>
+   </variablelist>
+  </sect3>
+
+  <sect3 id="caching-nodes-overview">
+   <title>Caching</title>
+   <para>
+    Postgres can cache some of its results for future operations within session
+    memory rather than shared memory (<literal>Shared Buffers</literal>) to
+    improve performance.
+   </para>
+
+   <variablelist>
+    <varlistentry id="memoize-overview">
+     <term>
+      <varname>Memoize</varname>
+      <indexterm>
+       <primary>
+        <varname>Memoize</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       Optimizes <varname>Nested Loop</varname> joins by caching inner scan
+       results. When the outer side of the join contains many duplicate keys
+       (for example,
+       <literal>1, 1, 1, 2</literal>), a standard nested loop would redundantly
+       rescan the inner relation for the value <literal>1</literal> multiple
+       times.
+      </para>
+      <para>
+       A <literal>Memoize</literal> node eliminates this redundancy by acting as
+       a local cache. If there is a cache hit, it can then refer to the cache for
+       the matching rows rather than rescanning the inner node for them in that
+       loop.
+      </para>
+<screen>
+EXPLAIN (ANALYZE, COSTS FALSE)
+SELECT tab1.id FROM tab1
+JOIN tab2 ON tab2.id = tab1.id;
+
+                                          QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+Nested Loop (actual time=0.028..5.184 rows=9045 loops=1)
+  -&gt;  Seq Scan on tab1 (actual time=0.011..0.743 rows=10000 loops=1)
+  -&gt;  Memoize (actual time=0.000..0.000 rows=1 loops=10000)
+        Cache Key: tab1.id
+        Cache Mode: logical
+        Hits: 9994  Misses: 6  Evictions: 0  Overflows: 0  Memory Usage: 1kB
+        -&gt;  Index Only Scan using tab2_id_idx on tab2 (actual time=0.003..0.003 rows=1 loops=6)
+              Index Cond: (id = tab1.id)
+              Heap Fetches: 0
+</screen>
+      <para>
+       In the above example, the <literal>Seq Scan</literal> compared its
+       entries to the values from the <literal>Index Only Scan</literal>.
+       However, instead of performing a full comparison every time, it would
+       check the cache from the <literal>Memoize</literal> node. In 9,994
+       situations, it was able to determine that the comparison had already been
+       made by a duplicate value in an earlier iteration of the loop and
+       received its matches from the cache. In 6 cases, the cache check missed,
+       and the index scan had to be repeated.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry id="materialize-overview">
+     <term>
+      <varname>Materialize</varname>
+      <indexterm>
+       <primary>
+        <varname>Materialize</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       PostgreSQL may need to receive the results of a node multiple times to
+       complete an operation. The amount of times a node is executed is denoted
+       by its <literal>loops</literal> field, which is returned in an
+       <command>EXPLAIN ANALYZE</command> operation. For example, the node below
+       was re-executed 4 times.
+      </para>
+<programlisting>
+-&gt; Seq Scan on tab1 (actual time=0.001..0.095 rows=100 loops=4)
+</programlisting>
+      <para>
+       Instead of rerunning the same node, PostgreSQL can cache the results for
+       the duration of the query in session memory or within a temporary file.
+       This operation is denoted by the
+       <literal>Materialize</literal> node.
+      </para>
+
+<screen>
+EXPLAIN (ANALYZE, COSTS FALSE) SELECT tab1.id FROM tab1
+JOIN tab2 ON tab2.id = tab1.id;
+
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
+Nested Loop (actual time=0.023..1.444 rows=100 loops=1)
+  Join Filter: (tab1.id = tab2.id)
+  Rows Removed by Join Filter: 9900
+  -&gt;  Seq Scan on tab1 (actual time=0.011..0.019 rows=100 loops=1)
+  -&gt;  Materialize (actual time=0.000..0.007 rows=100 loops=100)
+        -&gt;  Seq Scan on tab2 (actual time=0.006..0.013 rows=100 loops=1)
+</screen>
+      <para>
+       In the example, the <literal>Seq Scan</literal> was run only once (
+       <literal>loops=1</literal>). Its return set was cached as shown by the
+       <literal>Materialize</literal> node, which was then rereferenced 100
+       times (<literal>loops=100</literal>) by its parent node:
+       <literal>Nested Loop</literal>.
+      </para>
+     </listitem>
+    </varlistentry>
+    <varlistentry id="init-plan-overview">
+     <term>
+      <varname>InitPlan</varname>
+      <indexterm>
+       <primary>
+        <varname>InitPlan</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       An <literal>InitPlan</literal> is not a planner node, but instead
+       indicates internal planner behavior. It is notable enough that it is
+       worth mentioning as a standalone.
+      </para>
+      <para>
+       It indicates that PostgreSQL executed a
+       <link linkend="functions-subquery">subquery</link> or portion of a
+       <link linkend="queries-with">CTE</link> once, cached its result, and
+       reused it whenever parent nodes needed it again.
+      </para>
+<screen>
+EXPLAIN ANALYZE
+SELECT * FROM tab1
+WHERE tab1.id = (SELECT id FROM tab2 WHERE tab2.id = 10 LIMIT 1);
+
+                                                               QUERY PLAN                                                               
+----------------------------------------------------------------------------------------------------------------------------------------
+ Seq Scan on tab1  (cost=4.30..5.43 rows=1 width=4) (actual time=0.035..0.036 rows=1.00 loops=1)
+   Filter: (id = (InitPlan 1).col1)
+   Rows Removed by Filter: 9
+   Buffers: shared hit=5
+   InitPlan 1
+     -&gt;  Limit  (cost=0.29..4.30 rows=1 width=4) (actual time=0.014..0.014 rows=1.00 loops=1)
+           Buffers: shared hit=4
+           -&gt;  Index Only Scan using tab2_id_idx on tab2  (cost=0.29..4.30 rows=1 width=4) (actual time=0.013..0.013 rows=1.00 loops=1)
+                 Index Cond: (id = 10)
+                 Heap Fetches: 0
+                 Index Searches: 1
+                 Buffers: shared hit=4
+</screen>
+     </listitem>
+    </varlistentry>
+   </variablelist>
+  </sect3>
+
+  <sect3 id="misc-nodes-overview">
+   <title>Misc</title>
+   <para>These are operations that do not fit into a specific category.</para>
+
+   <variablelist>
+    <varlistentry id="lockrows-overview">
+     <term>
+      <varname>LockRows</varname>
+      <indexterm>
+       <primary>
+        <varname>LockRows</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       Emerges when a row lock is explicitly requested by a query. Appears when
+       a <link linkend="sql-for-update-share">locking clause</link>, such as
+       <literal>FOR SHARE</literal> is present in a <command>SELECT</command>
+       query.
+      </para>
+
+<screen>
+SELECT * FROM tab1 FOR KEY SHARE;
+
+                          QUERY PLAN                           
+---------------------------------------------------------------
+LockRows  (cost=0.00..123.00 rows=5000 width=12)
+  -&gt;  Seq Scan on tab1  (cost=0.00..73.00 rows=5000 width=12)
+</screen>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry id="limit-overview">
+     <term>
+      <varname>Limit</varname>
+      <indexterm>
+       <primary>
+        <varname>Limit</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       Allows a child node to escape early once it has returned a certain number
+       of values.
+      </para>
+
+<screen>
+EXPLAIN SELECT * FROM tab1 LIMIT 1;
+
+                          QUERY PLAN                          
+--------------------------------------------------------------
+Limit  (cost=0.00..0.01 rows=1 width=4)
+  -&gt;  Seq Scan on tab1  (cost=0.00..35.50 rows=2550 width=4)
+</screen>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry id="group-overview">
+     <term>
+      <varname>Group</varname>
+      <indexterm>
+       <primary>
+        <varname>Group</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       May be used when the <command>GROUP BY</command> clause is present
+       without an aggregate function. It filters out duplicates with matching
+       <command>GROUP BY</command> keys.
+      </para>
+      <para>
+       It requires the group keys to be pre-sorted, either through an index that
+       already provides the ordering or through an explicit
+       <link linkend="sort-nodes-overview">sort</link> step.
+      </para>
+
+<screen>
+EXPLAIN SELECT rank FROM tab1 GROUP BY category, rank;
+
+                            QUERY PLAN                             
+--------------------------------------------------------------------
+Group  (cost=380.19..417.69 rows=5000 width=6)
+  Group Key: category, rank
+  -&gt;  Sort  (cost=380.19..392.69 rows=5000 width=6)
+        Sort Key: category, rank
+        -&gt;  Seq Scan on tab1  (cost=0.00..73.00 rows=5000 width=6)
+</screen>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry id="unique-overview">
+     <term>
+      <varname>Unique</varname>
+      <indexterm>
+       <primary>
+        <varname>Unique</varname>
+       </primary>
+      </indexterm>
+     </term>
+     <listitem>
+      <para>
+       Often used in conjunction with
+       <command>DISTINCT</command> and
+       <command>UNION</command> commands, it removes duplicate rows from a scan.
+       It requires the group keys to be pre-sorted, either through an index that
+       already provides the ordering or through an explicit
+       <link linkend="sort-nodes-overview">sort</link> step.
+      </para>
+
+<screen>
+EXPLAIN SELECT DISTINCT rank, category FROM tab1;
+
+                            QUERY PLAN                             
+--------------------------------------------------------------------
+Unique  (cost=380.19..417.69 rows=5000 width=6)
+  -&gt;  Sort  (cost=380.19..392.69 rows=5000 width=6)
+        Sort Key: rank, category
+        -&gt;  Seq Scan on tab1  (cost=0.00..73.00 rows=5000 width=6)
+</screen>
+     </listitem>
+    </varlistentry>
+   </variablelist>
+  </sect3>
+ </sect2>
+</sect1>
 
  <sect1 id="explicit-joins">
   <title>Controlling the Planner with Explicit <literal>JOIN</literal> Clauses</title>
@@ -2324,5 +4581,4 @@ SELECT * FROM x, y, a, b, c WHERE something AND somethingelse;
     </itemizedlist>
    </para>
   </sect1>
-
  </chapter>
