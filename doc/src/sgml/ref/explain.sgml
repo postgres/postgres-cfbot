@@ -366,7 +366,7 @@ ROLLBACK;
     The command's result is a textual description of the plan selected
     for the <replaceable class="parameter">statement</replaceable>,
     optionally annotated with execution statistics.
-    <xref linkend="using-explain"/> describes the information provided.
+    <xref linkend="using-explain"/> and <xref linkend="planner-nodes"/> describe the information provided.
    </para>
  </refsect1>
 
