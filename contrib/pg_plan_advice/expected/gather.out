@@ -153,18 +153,17 @@ EXPLAIN (COSTS OFF, PLAN_ADVICE)
          ->  Sort
                Sort Key: f.dim_id
                ->  Parallel Seq Scan on gt_fact f
-   ->  Sort
-         Sort Key: d.id
-         ->  Seq Scan on gt_dim d
+   ->  Index Scan using gt_dim_pkey on gt_dim d
  Supplied Plan Advice:
    GATHER((d d/d.d)) /* partially matched */
  Generated Plan Advice:
    JOIN_ORDER(f d)
    MERGE_JOIN_PLAIN(d)
-   SEQ_SCAN(f d)
+   SEQ_SCAN(f)
+   INDEX_SCAN(d public.gt_dim_pkey)
    GATHER_MERGE(f)
    NO_GATHER(d)
-(18 rows)
+(17 rows)
 
 COMMIT;
 -- Force a Gather or Gather Merge on one relation but no parallelism on other.
@@ -181,19 +180,18 @@ EXPLAIN (COSTS OFF, PLAN_ADVICE)
          ->  Sort
                Sort Key: f.dim_id
                ->  Parallel Seq Scan on gt_fact f
-   ->  Sort
-         Sort Key: d.id
-         ->  Seq Scan on gt_dim d
+   ->  Index Scan using gt_dim_pkey on gt_dim d
  Supplied Plan Advice:
    GATHER_MERGE(f) /* matched */
    NO_GATHER(d) /* matched */
  Generated Plan Advice:
    JOIN_ORDER(f d)
    MERGE_JOIN_PLAIN(d)
-   SEQ_SCAN(f d)
+   SEQ_SCAN(f)
+   INDEX_SCAN(d public.gt_dim_pkey)
    GATHER_MERGE(f)
    NO_GATHER(d)
-(19 rows)
+(18 rows)
 
 SET LOCAL pg_plan_advice.advice = 'gather_merge(d) no_gather(f)';
 EXPLAIN (COSTS OFF, PLAN_ADVICE)

@@ -9958,16 +9958,14 @@ create index j2_id1_idx on j2 (id1) where id1 % 1000 = 1;
 explain (costs off) select * from j1
 inner join j2 on j1.id1 = j2.id1 and j1.id2 = j2.id2
 where j1.id1 % 1000 = 1 and j2.id1 % 1000 = 1;
-                        QUERY PLAN                        
-----------------------------------------------------------
- Nested Loop
-   Disabled: true
-   Join Filter: ((j2.id1 = j1.id1) AND (j2.id2 = j1.id2))
-   ->  Seq Scan on j1
-         Filter: ((id1 % 1000) = 1)
-   ->  Seq Scan on j2
-         Filter: ((id1 % 1000) = 1)
-(7 rows)
+               QUERY PLAN                
+-----------------------------------------
+ Merge Join
+   Merge Cond: (j1.id1 = j2.id1)
+   Join Filter: (j2.id2 = j1.id2)
+   ->  Index Scan using j1_id1_idx on j1
+   ->  Index Scan using j2_id1_idx on j2
+(5 rows)
 
 select * from j1
 inner join j2 on j1.id1 = j2.id1 and j1.id2 = j2.id2
@@ -9982,16 +9980,15 @@ where j1.id1 % 1000 = 1 and j2.id1 % 1000 = 1;
 explain (costs off) select * from j1
 inner join j2 on j1.id1 = j2.id1 and j1.id2 = j2.id2
 where j1.id1 % 1000 = 1 and j2.id1 % 1000 = 1 and j2.id1 = any (array[1]);
-                               QUERY PLAN                                
--------------------------------------------------------------------------
- Nested Loop
-   Disabled: true
-   Join Filter: ((j2.id1 = j1.id1) AND (j2.id2 = j1.id2))
-   ->  Seq Scan on j1
-         Filter: ((id1 % 1000) = 1)
-   ->  Seq Scan on j2
-         Filter: ((id1 = ANY ('{1}'::integer[])) AND ((id1 % 1000) = 1))
-(7 rows)
+                     QUERY PLAN                     
+----------------------------------------------------
+ Merge Join
+   Merge Cond: (j1.id1 = j2.id1)
+   Join Filter: (j2.id2 = j1.id2)
+   ->  Index Scan using j1_id1_idx on j1
+   ->  Index Scan using j2_id1_idx on j2
+         Index Cond: (id1 = ANY ('{1}'::integer[]))
+(6 rows)
 
 select * from j1
 inner join j2 on j1.id1 = j2.id1 and j1.id2 = j2.id2
@@ -10006,16 +10003,15 @@ where j1.id1 % 1000 = 1 and j2.id1 % 1000 = 1 and j2.id1 = any (array[1]);
 explain (costs off) select * from j1
 inner join j2 on j1.id1 = j2.id1 and j1.id2 = j2.id2
 where j1.id1 % 1000 = 1 and j2.id1 % 1000 = 1 and j2.id1 >= any (array[1,5]);
-                                 QUERY PLAN                                 
-----------------------------------------------------------------------------
- Nested Loop
-   Disabled: true
-   Join Filter: ((j2.id1 = j1.id1) AND (j2.id2 = j1.id2))
-   ->  Seq Scan on j1
-         Filter: ((id1 % 1000) = 1)
-   ->  Seq Scan on j2
-         Filter: ((id1 >= ANY ('{1,5}'::integer[])) AND ((id1 % 1000) = 1))
-(7 rows)
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Merge Join
+   Merge Cond: (j1.id1 = j2.id1)
+   Join Filter: (j2.id2 = j1.id2)
+   ->  Index Scan using j1_id1_idx on j1
+   ->  Index Scan using j2_id1_idx on j2
+         Index Cond: (id1 >= ANY ('{1,5}'::integer[]))
+(6 rows)
 
 select * from j1
 inner join j2 on j1.id1 = j2.id1 and j1.id2 = j2.id2

@@ -634,6 +634,21 @@ get_cheapest_path_for_pathkeys(List *paths, List *pathkeys,
 			continue;
 
 		/*
+		 * XXX We should really make this useful with pushed-down filters,
+		 * when possible. But we have to disable that for now (by default),
+		 * because otherwise it'd confuse merge joins - those simply get the
+		 * cheapest sorted paths, and that's it. So we'd need to make sure to
+		 * only consider paths that don't have conflicting filters (which the
+		 * merge join can't satisfy).
+		 *
+		 * Furthermore, it'd mean the join has to consider combinations of
+		 * inner/outer paths, while now it simply picks the cheapest ones and
+		 * that's it.
+		 */
+		if (path->expected_filters != NIL)
+			continue;
+
+		/*
 		 * Since cost comparison is a lot cheaper than pathkey comparison, do
 		 * that first.  (XXX is that still true?)
 		 */
@@ -674,6 +689,21 @@ get_cheapest_fractional_path_for_pathkeys(List *paths,
 	foreach(l, paths)
 	{
 		Path	   *path = (Path *) lfirst(l);
+
+		/*
+		 * XXX We should really make this useful with pushed-down filters,
+		 * when possible. But we have to disable that for now (by default),
+		 * because otherwise it'd confuse merge joins - those simply get the
+		 * cheapest sorted paths, and that's it. So we'd need to make sure to
+		 * only consider paths that don't have conflicting filters (which the
+		 * merge join can't satisfy).
+		 *
+		 * Furthermore, it'd mean the join has to consider combinations of
+		 * inner/outer paths, while now it simply picks the cheapest ones and
+		 * that's it.
+		 */
+		if (path->expected_filters != NIL)
+			continue;
 
 		/*
 		 * Since cost comparison is a lot cheaper than pathkey comparison, do

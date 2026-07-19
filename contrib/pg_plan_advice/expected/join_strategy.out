@@ -56,45 +56,39 @@ EXPLAIN (COSTS OFF, PLAN_ADVICE)
 SET LOCAL pg_plan_advice.advice = 'MERGE_JOIN_MATERIALIZE(d)';
 EXPLAIN (COSTS OFF, PLAN_ADVICE)
 	SELECT * FROM join_fact f JOIN join_dim d ON f.dim_id = d.id;
-                       QUERY PLAN                       
---------------------------------------------------------
+                           QUERY PLAN                           
+----------------------------------------------------------------
  Merge Join
    Disabled: true
    Merge Cond: (f.dim_id = d.id)
    ->  Index Scan using join_fact_dim_id on join_fact f
-   ->  Sort
-         Sort Key: d.id
-         ->  Seq Scan on join_dim d
+   ->  Index Scan using join_dim_pkey on join_dim d
  Supplied Plan Advice:
    MERGE_JOIN_MATERIALIZE(d) /* matched, failed */
  Generated Plan Advice:
    JOIN_ORDER(f d)
    MERGE_JOIN_PLAIN(d)
-   SEQ_SCAN(d)
-   INDEX_SCAN(f public.join_fact_dim_id)
+   INDEX_SCAN(f public.join_fact_dim_id d public.join_dim_pkey)
    NO_GATHER(f d)
-(15 rows)
+(12 rows)
 
 SET LOCAL pg_plan_advice.advice = 'MERGE_JOIN_PLAIN(d)';
 EXPLAIN (COSTS OFF, PLAN_ADVICE)
 	SELECT * FROM join_fact f JOIN join_dim d ON f.dim_id = d.id;
-                       QUERY PLAN                       
---------------------------------------------------------
+                           QUERY PLAN                           
+----------------------------------------------------------------
  Merge Join
    Merge Cond: (f.dim_id = d.id)
    ->  Index Scan using join_fact_dim_id on join_fact f
-   ->  Sort
-         Sort Key: d.id
-         ->  Seq Scan on join_dim d
+   ->  Index Scan using join_dim_pkey on join_dim d
  Supplied Plan Advice:
    MERGE_JOIN_PLAIN(d) /* matched */
  Generated Plan Advice:
    JOIN_ORDER(f d)
    MERGE_JOIN_PLAIN(d)
-   SEQ_SCAN(d)
-   INDEX_SCAN(f public.join_fact_dim_id)
+   INDEX_SCAN(f public.join_fact_dim_id d public.join_dim_pkey)
    NO_GATHER(f d)
-(14 rows)
+(11 rows)
 
 SET LOCAL pg_plan_advice.advice = 'NESTED_LOOP_MATERIALIZE(d)';
 EXPLAIN (COSTS OFF, PLAN_ADVICE)
