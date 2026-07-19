@@ -157,7 +157,6 @@ static bool xml_doctype_in_content(const xmlChar *str);
 static xmlDocPtr xml_parse(text *data, XmlOptionType xmloption_arg,
 						   bool preserve_whitespace, int encoding,
 						   XmlOptionType *parsed_xmloptiontype,
-						   xmlNodePtr *parsed_nodes,
 						   Node *escontext);
 static text *xml_xmlnodetoxmltype(xmlNodePtr cur, PgXmlErrorContext *xmlerrcxt);
 static int	xml_xpathobjtoxmlarray(xmlXPathObjectPtr xpathobj,
@@ -285,7 +284,7 @@ xml_in(PG_FUNCTION_ARGS)
 	 * Note: we don't need to worry about whether a soft error is detected.
 	 */
 	doc = xml_parse(vardata, xmloption, true, GetDatabaseEncoding(),
-					NULL, NULL, fcinfo->context);
+					NULL, fcinfo->context);
 	if (doc != NULL)
 		xmlFreeDoc(doc);
 
@@ -413,7 +412,7 @@ xml_recv(PG_FUNCTION_ARGS)
 	 * Parse the data to check if it is well-formed XML data.  Assume that
 	 * xml_parse will throw ERROR if not.
 	 */
-	doc = xml_parse(result, xmloption, true, encoding, NULL, NULL, NULL);
+	doc = xml_parse(result, xmloption, true, encoding, NULL, NULL);
 	xmlFreeDoc(doc);
 
 	/* Now that we know what we're dealing with, convert to server encoding */
@@ -681,7 +680,6 @@ xmltotext_with_options(xmltype *data, XmlOptionType xmloption_arg, bool indent)
 	text	   *volatile result;
 	xmlDocPtr	doc;
 	XmlOptionType parsed_xmloptiontype;
-	xmlNodePtr	content_nodes;
 	volatile xmlBufferPtr buf = NULL;
 	volatile xmlSaveCtxtPtr ctxt = NULL;
 	ErrorSaveContext escontext = {T_ErrorSaveContext};
@@ -707,7 +705,7 @@ xmltotext_with_options(xmltype *data, XmlOptionType xmloption_arg, bool indent)
 	 * libxml2 will fail to indent elements that have whitespace between them.
 	 */
 	doc = xml_parse(data, xmloption_arg, !indent, GetDatabaseEncoding(),
-					&parsed_xmloptiontype, &content_nodes,
+					&parsed_xmloptiontype,
 					(Node *) &escontext);
 	if (doc == NULL || escontext.error_occurred)
 	{
@@ -772,35 +770,16 @@ xmltotext_with_options(xmltype *data, XmlOptionType xmloption_arg, bool indent)
 				xml_ereport(xmlerrcxt, ERROR, ERRCODE_OUT_OF_MEMORY,
 							"could not save document to xmlBuffer");
 		}
-		else if (content_nodes != NULL)
+		else
 		{
 			/*
-			 * Deal with the case where we have non-singly-rooted XML.
-			 * libxml's dump functions don't work well for that without help.
-			 * We build a fake root node that serves as a container for the
-			 * content nodes, and then iterate over the nodes.
+			 * When we have non-singly-rooted XML, we need to insert newlines
+			 * between the content nodes, else the output is ugly.
 			 */
-			xmlNodePtr	root;
-			xmlNodePtr	oldroot;
+			xmlNodePtr	root = xmlDocGetRootElement(doc);
 			xmlNodePtr	newline;
 
-			root = xmlNewNode(NULL, (const xmlChar *) "content-root");
-			if (root == NULL || xmlerrcxt->err_occurred)
-				xml_ereport(xmlerrcxt, ERROR, ERRCODE_OUT_OF_MEMORY,
-							"could not allocate xml node");
-
-			/*
-			 * This attaches root to doc, so we need not free it separately...
-			 * but instead, we have to free the old root if there was one.
-			 */
-			oldroot = xmlDocSetRootElement(doc, root);
-			if (oldroot != NULL)
-				xmlFreeNode(oldroot);
-
-			if (xmlAddChildList(root, content_nodes) == NULL ||
-				xmlerrcxt->err_occurred)
-				xml_ereport(xmlerrcxt, ERROR, ERRCODE_INTERNAL_ERROR,
-							"could not append xml node list");
+			Assert(root != NULL);
 
 			/*
 			 * We use this node to insert newlines in the dump.  Note: in at
@@ -1035,7 +1014,7 @@ xmlparse(text *data, XmlOptionType xmloption_arg, bool preserve_whitespace, Node
 	xmlDocPtr	doc;
 
 	doc = xml_parse(data, xmloption_arg, preserve_whitespace,
-					GetDatabaseEncoding(), NULL, NULL, escontext);
+					GetDatabaseEncoding(), NULL, escontext);
 	if (doc)
 		xmlFreeDoc(doc);
 
@@ -1179,7 +1158,7 @@ xml_is_document(xmltype *arg)
 	 * We'll report "true" if no soft error is reported by xml_parse().
 	 */
 	doc = xml_parse((text *) arg, XMLOPTION_DOCUMENT, true,
-					GetDatabaseEncoding(), NULL, NULL, (Node *) &escontext);
+					GetDatabaseEncoding(), NULL, (Node *) &escontext);
 	if (doc)
 		xmlFreeDoc(doc);
 
@@ -1772,9 +1751,8 @@ xml_doctype_in_content(const xmlChar *str)
  * XmlOptionType actually used to parse the input (typically the same as
  * xmloption_arg, but a DOCTYPE node in the input can force DOCUMENT mode).
  *
- * If parsed_nodes isn't NULL and we parse in CONTENT mode, the list
- * of parsed nodes from the xmlParseBalancedChunkMemory call will be returned
- * to *parsed_nodes.  (It is caller's responsibility to free that.)
+ * When we parse in CONTENT mode, the resulting document has a dummy root
+ * node with zero or more child nodes, reflecting the contents found.
  *
  * Errors normally result in ereport(ERROR), but if escontext is an
  * ErrorSaveContext, then "safe" errors are reported there instead, and the
@@ -1790,7 +1768,7 @@ xml_doctype_in_content(const xmlChar *str)
 static xmlDocPtr
 xml_parse(text *data, XmlOptionType xmloption_arg,
 		  bool preserve_whitespace, int encoding,
-		  XmlOptionType *parsed_xmloptiontype, xmlNodePtr *parsed_nodes,
+		  XmlOptionType *parsed_xmloptiontype,
 		  Node *escontext)
 {
 	int32		len;
@@ -1799,7 +1777,6 @@ xml_parse(text *data, XmlOptionType xmloption_arg,
 	PgXmlErrorContext *xmlerrcxt;
 	volatile xmlParserCtxtPtr ctxt = NULL;
 	volatile xmlDocPtr doc = NULL;
-	volatile int save_keep_blanks = -1;
 
 	/*
 	 * This step looks annoyingly redundant, but we must do it to have a
@@ -1827,10 +1804,10 @@ xml_parse(text *data, XmlOptionType xmloption_arg,
 	PG_TRY();
 	{
 		bool		parse_as_document = false;
-		int			res_code;
 		size_t		count = 0;
 		xmlChar    *version = NULL;
 		int			standalone = 0;
+		int			options;
 
 		/* Any errors here are reported as hard ereport's */
 		xmlInitParser();
@@ -1841,6 +1818,8 @@ xml_parse(text *data, XmlOptionType xmloption_arg,
 		else
 		{
 			/* Parse and skip over the XML declaration, if any */
+			int			res_code;
+
 			res_code = parse_xml_decl(utf8string,
 									  &count, &version, NULL, &standalone);
 			if (res_code != 0)
@@ -1857,34 +1836,30 @@ xml_parse(text *data, XmlOptionType xmloption_arg,
 				parse_as_document = true;
 		}
 
-		/* initialize output parameters */
+		/*
+		 * Select parse options.
+		 *
+		 * Note that here we try to apply DTD defaults (XML_PARSE_DTDATTR)
+		 * according to SQL/XML:2008 GR 10.16.7.d: 'Default values defined by
+		 * internal DTD are applied'.  As for external DTDs, we try to support
+		 * them too (see SQL/XML:2008 GR 10.16.7.e), but that doesn't really
+		 * happen because xmlPgEntityLoader prevents it.
+		 */
+		options = XML_PARSE_NOENT | XML_PARSE_DTDATTR
+			| (preserve_whitespace ? 0 : XML_PARSE_NOBLANKS);
+
+		/* initialize output parameter */
 		if (parsed_xmloptiontype != NULL)
 			*parsed_xmloptiontype = parse_as_document ? XMLOPTION_DOCUMENT :
 				XMLOPTION_CONTENT;
-		if (parsed_nodes != NULL)
-			*parsed_nodes = NULL;
 
 		if (parse_as_document)
 		{
-			int			options;
-
 			/* set up parser context used by xmlCtxtReadDoc */
 			ctxt = xmlNewParserCtxt();
 			if (ctxt == NULL || xmlerrcxt->err_occurred)
 				xml_ereport(xmlerrcxt, ERROR, ERRCODE_OUT_OF_MEMORY,
 							"could not allocate parser context");
-
-			/*
-			 * Select parse options.
-			 *
-			 * Note that here we try to apply DTD defaults (XML_PARSE_DTDATTR)
-			 * according to SQL/XML:2008 GR 10.16.7.d: 'Default values defined
-			 * by internal DTD are applied'.  As for external DTDs, we try to
-			 * support them too (see SQL/XML:2008 GR 10.16.7.e), but that
-			 * doesn't really happen because xmlPgEntityLoader prevents it.
-			 */
-			options = XML_PARSE_NOENT | XML_PARSE_DTDATTR
-				| (preserve_whitespace ? 0 : XML_PARSE_NOBLANKS);
 
 			doc = xmlCtxtReadDoc(ctxt, utf8string,
 								 NULL,	/* no URL */
@@ -1907,7 +1882,12 @@ xml_parse(text *data, XmlOptionType xmloption_arg,
 		}
 		else
 		{
-			/* set up document that xmlParseBalancedChunkMemory will add to */
+			xmlNodePtr	root;
+
+			/*
+			 * Create our result document and set up its dummy root node,
+			 * which we'll use as the context node for xmlParseInNodeContext.
+			 */
 			doc = xmlNewDoc(version);
 			if (doc == NULL || xmlerrcxt->err_occurred)
 				xml_ereport(xmlerrcxt, ERROR, ERRCODE_OUT_OF_MEMORY,
@@ -1920,16 +1900,40 @@ xml_parse(text *data, XmlOptionType xmloption_arg,
 							"could not allocate XML document");
 			doc->standalone = standalone;
 
-			/* set parse options --- have to do this the ugly way */
-			save_keep_blanks = xmlKeepBlanksDefault(preserve_whitespace ? 1 : 0);
+			root = xmlNewNode(NULL, (const xmlChar *) "content-root");
+			if (root == NULL || xmlerrcxt->err_occurred)
+				xml_ereport(xmlerrcxt, ERROR, ERRCODE_OUT_OF_MEMORY,
+							"could not allocate xml node");
+			xmlDocSetRootElement(doc, root);
 
 			/* allow empty content */
 			if (*(utf8string + count))
 			{
-				res_code = xmlParseBalancedChunkMemory(doc, NULL, NULL, 0,
-													   utf8string + count,
-													   parsed_nodes);
-				if (res_code != 0 || xmlerrcxt->err_occurred)
+				/* for some reason we need "char *" not "xmlChar *" here */
+				const char *data = (const char *) (utf8string + count);
+				xmlNodePtr	nodelist = NULL;
+				xmlParserErrors res_code;
+
+				res_code = xmlParseInNodeContext(root,
+												 data,
+												 strlen(data),
+												 options,
+												 &nodelist);
+
+				/* immediately attach the resulting nodelist to the root */
+				if (nodelist)
+				{
+					if (xmlAddChildList(root, nodelist) == NULL)
+					{
+						/* don't leak the nodelist if we can't attach it */
+						xmlFreeNodeList(nodelist);
+						xml_ereport(xmlerrcxt, ERROR, ERRCODE_INTERNAL_ERROR,
+									"could not append xml node list");
+					}
+					/* now, freeing the document will release the nodelist */
+				}
+
+				if (res_code != XML_ERR_OK || xmlerrcxt->err_occurred)
 				{
 					xml_errsave(escontext, xmlerrcxt,
 								ERRCODE_INVALID_XML_CONTENT,
@@ -1944,8 +1948,6 @@ fail:
 	}
 	PG_CATCH();
 	{
-		if (save_keep_blanks != -1)
-			xmlKeepBlanksDefault(save_keep_blanks);
 		if (doc != NULL)
 			xmlFreeDoc(doc);
 		if (ctxt != NULL)
@@ -1956,9 +1958,6 @@ fail:
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-
-	if (save_keep_blanks != -1)
-		xmlKeepBlanksDefault(save_keep_blanks);
 
 	if (ctxt != NULL)
 		xmlFreeParserCtxt(ctxt);
@@ -4648,7 +4647,7 @@ wellformed_xml(text *data, XmlOptionType xmloption_arg)
 	 * We'll report "true" if no soft error is reported by xml_parse().
 	 */
 	doc = xml_parse(data, xmloption_arg, true,
-					GetDatabaseEncoding(), NULL, NULL, (Node *) &escontext);
+					GetDatabaseEncoding(), NULL, (Node *) &escontext);
 	if (doc)
 		xmlFreeDoc(doc);
 
