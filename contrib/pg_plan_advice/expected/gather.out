@@ -18,24 +18,23 @@ VACUUM ANALYZE gt_fact;
 -- By default, we expect Gather Merge with a parallel hash join.
 EXPLAIN (COSTS OFF, PLAN_ADVICE)
 	SELECT * FROM gt_fact f JOIN gt_dim d ON f.dim_id = d.id ORDER BY d.id;
-                    QUERY PLAN                    
---------------------------------------------------
+                      QUERY PLAN                       
+-------------------------------------------------------
  Gather Merge
    Workers Planned: 1
-   ->  Merge Join
-         Merge Cond: (f.dim_id = d.id)
-         ->  Sort
-               Sort Key: f.dim_id
+   ->  Sort
+         Sort Key: f.dim_id
+         ->  Parallel Hash Join
+               Hash Cond: (f.dim_id = d.id)
                ->  Parallel Seq Scan on gt_fact f
-         ->  Sort
-               Sort Key: d.id
-               ->  Seq Scan on gt_dim d
+               ->  Parallel Hash
+                     ->  Parallel Seq Scan on gt_dim d
  Generated Plan Advice:
    JOIN_ORDER(f d)
-   MERGE_JOIN_PLAIN(d)
+   HASH_JOIN(d)
    SEQ_SCAN(f d)
    GATHER_MERGE((f d))
-(15 rows)
+(14 rows)
 
 -- Force Gather or Gather Merge of both relations together.
 BEGIN;

@@ -1363,23 +1363,68 @@ try_partial_nestloop_path(PlannerInfo *root,
 	 */
 	initial_cost_nestloop(root, &workspace, jointype, nestloop_subtype,
 						  outer_path, inner_path, extra);
-	if (!add_partial_path_precheck(joinrel, workspace.disabled_nodes,
-								   workspace.startup_cost,
-								   workspace.total_cost, pathkeys))
-		return;
 
-	/* Might be good enough to be worth trying, so let's try it. */
-	add_partial_path(joinrel, (Path *)
-					 create_nestloop_path(root,
-										  joinrel,
-										  jointype,
-										  &workspace,
-										  extra,
-										  outer_path,
-										  inner_path,
-										  extra->restrictlist,
-										  pathkeys,
-										  NULL));
+	/*
+	 * Account for expected Bloom filters carried by the input paths.  A
+	 * nestloop never builds a Bloom filter, so if it is the source of any
+	 * expected filter the path is contradicted and must be rejected;
+	 * otherwise the filters propagate to the resulting path.
+	 */
+	{
+		bool		contradicted;
+		List	   *jfilters;
+
+		jfilters = compute_join_expected_filters(root, outer_path, inner_path,
+												 jointype, false, NIL,
+												 &contradicted, NULL);
+
+		/*
+		 * Contradicted means the inner/outer paths expect this join to
+		 * realize one of the expected filters, but a nestloop can't do that.
+		 * So these input paths are incompatible with a nestloop.
+		 */
+		if (contradicted)
+		{
+			return;
+		}
+
+		/*
+		 * If the path expects any filters, it's excluded from the cost
+		 * pruning performed by add_path (so don't bother with
+		 * add_path_precheck either). Once a path has all filters satisfied
+		 * (or there were no filters), do the pruning as usual.
+		 *
+		 * XXX We don't want the "regular" paths without filters to get
+		 * removed, because we need the option to pick from join algorithms.
+		 * Paths with filters would likely win (simply because there are fewer
+		 * rows), but they only work with hashjoins. However, maybe the
+		 * hashjoin won't work for some reason (e.g. it wouldn't fit into
+		 * work_mem).
+		 *
+		 * XXX Maybe it'd be cleaner to do this in add_path_precheck (i.e.
+		 * make it return true for paths with expected filters).
+		 */
+		if (jfilters != NIL ||
+			add_partial_path_precheck(joinrel, workspace.disabled_nodes,
+									  workspace.startup_cost,
+									  workspace.total_cost, pathkeys))
+		{
+			Path	   *nlpath;
+
+			nlpath = (Path *) create_nestloop_path(root,
+												   joinrel,
+												   jointype,
+												   &workspace,
+												   extra,
+												   outer_path,
+												   inner_path,
+												   extra->restrictlist,
+												   pathkeys,
+												   NULL);
+			set_join_path_expected_filters(nlpath, jfilters);
+			add_partial_path(joinrel, nlpath);
+		}
+	}
 }
 
 /*
@@ -1581,27 +1626,53 @@ try_partial_mergejoin_path(PlannerInfo *root,
 						   outer_presorted_keys,
 						   extra);
 
-	if (!add_partial_path_precheck(joinrel, workspace.disabled_nodes,
-								   workspace.startup_cost,
-								   workspace.total_cost, pathkeys))
-		return;
+	/*
+	 * Account for expected Bloom filters carried by the input paths.  A
+	 * mergejoin never builds a Bloom filter, so it contradicts (and cannot
+	 * use) any input path for which it would be the filter's source.
+	 * Filter-bearing paths bypass the precheck, since their reduced cost
+	 * isn't comparable to ordinary paths.
+	 *
+	 * XXX see the comments in try_nestloop_path
+	 */
+	{
+		bool		contradicted;
+		List	   *jfilters;
 
-	/* Might be good enough to be worth trying, so let's try it. */
-	add_partial_path(joinrel, (Path *)
-					 create_mergejoin_path(root,
-										   joinrel,
-										   jointype,
-										   &workspace,
-										   extra,
-										   outer_path,
-										   inner_path,
-										   extra->restrictlist,
-										   pathkeys,
-										   NULL,
-										   mergeclauses,
-										   outersortkeys,
-										   innersortkeys,
-										   outer_presorted_keys));
+		jfilters = compute_join_expected_filters(root, outer_path, inner_path,
+												 jointype, false, NIL,
+												 &contradicted, NULL);
+		if (contradicted)
+		{
+			return;
+		}
+
+		if (jfilters != NIL ||
+			add_partial_path_precheck(joinrel, workspace.disabled_nodes,
+									  workspace.startup_cost,
+									  workspace.total_cost, pathkeys))
+		{
+			Path	   *mjpath;
+
+			/* Might be good enough to be worth trying, so let's try it. */
+			mjpath = (Path *) create_mergejoin_path(root,
+													joinrel,
+													jointype,
+													&workspace,
+													extra,
+													outer_path,
+													inner_path,
+													extra->restrictlist,
+													pathkeys,
+													NULL,
+													mergeclauses,
+													outersortkeys,
+													innersortkeys,
+													outer_presorted_keys);
+			set_join_path_expected_filters(mjpath, jfilters);
+			add_partial_path(joinrel, mjpath);
+		}
+	}
 }
 
 /*
@@ -1750,24 +1821,58 @@ try_partial_hashjoin_path(PlannerInfo *root,
 	 */
 	initial_cost_hashjoin(root, &workspace, jointype, hashclauses,
 						  outer_path, inner_path, extra, parallel_hash);
-	if (!add_partial_path_precheck(joinrel, workspace.disabled_nodes,
-								   workspace.startup_cost,
-								   workspace.total_cost, NIL))
-		return;
 
-	/* Might be good enough to be worth trying, so let's try it. */
-	add_partial_path(joinrel, (Path *)
-					 create_hashjoin_path(root,
-										  joinrel,
-										  jointype,
-										  &workspace,
-										  extra,
-										  outer_path,
-										  inner_path,
-										  parallel_hash,
-										  extra->restrictlist,
-										  NULL,
-										  hashclauses));
+	/*
+	 * Account for expected Bloom filters carried by the input paths.  A hash
+	 * join builds and pushes down a Bloom filter, so it realizes (and removes
+	 * from propagation) any expected filter for which it is the source; other
+	 * filters propagate upward.  Filter-bearing paths bypass the precheck.
+	 */
+	{
+		bool		contradicted;
+		List	   *jfilters;
+		List	   *realized;
+
+		jfilters = compute_join_expected_filters(root, outer_path, inner_path,
+												 jointype, true, hashclauses,
+												 &contradicted, &realized);
+
+		/* XXX Can a hashjoin contradict a filter? Probably not. */
+		if (contradicted)
+		{
+			return;
+		}
+
+		if (jfilters != NIL ||
+			add_partial_path_precheck(joinrel, workspace.disabled_nodes,
+									  workspace.startup_cost,
+									  workspace.total_cost, NIL))
+		{
+			Path	   *hjpath;
+
+			hjpath = (Path *) create_hashjoin_path(root,
+												   joinrel,
+												   jointype,
+												   &workspace,
+												   extra,
+												   outer_path,
+												   inner_path,
+												   parallel_hash,
+												   extra->restrictlist,
+												   NULL,
+												   hashclauses);
+			set_join_path_expected_filters(hjpath, jfilters);
+
+			/*
+			 * Record the filters this hash join realizes, so
+			 * create_hashjoin_plan can push exactly those down (and no
+			 * others) at plan-creation time.
+			 */
+			((HashPath *) hjpath)->realized_filters = realized;
+
+			add_partial_path(joinrel, hjpath);
+		}
+	}
 }
 
 /*
