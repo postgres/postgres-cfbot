@@ -3751,6 +3751,13 @@ generate_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_rows)
 	add_path(rel, simple_gather_path);
 
 	/*
+	 * The cheapest partial path must not have any pushed-down filters. Maybe
+	 * in the future we'll be able to push those to parallel workers, but for
+	 * now that's not possible/allowed.
+	 */
+	Assert(cheapest_partial_path->expected_filters == NULL);
+
+	/*
 	 * For each useful ordering, we can consider an order-preserving Gather
 	 * Merge.
 	 */
@@ -3760,6 +3767,10 @@ generate_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_rows)
 		GatherMergePath *path;
 
 		if (subpath->pathkeys == NIL)
+			continue;
+
+		/* ignore paths with filters (not supported) */
+		if (subpath->expected_filters != NULL)
 			continue;
 
 		rows = compute_gather_rows(subpath);
