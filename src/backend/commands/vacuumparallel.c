@@ -35,6 +35,8 @@
  */
 #include "postgres.h"
 
+#include <math.h>
+
 #include "access/amapi.h"
 #include "access/table.h"
 #include "access/xact.h"
@@ -1121,6 +1123,8 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 	IndexBulkDeleteResult *istat = NULL;
 	IndexBulkDeleteResult *istat_res;
 	IndexVacuumInfo ivinfo;
+	TimestampTz istarttime = GetCurrentTimestamp();
+	double		startdelaytime = VacuumDelayTime;
 	const int	progress_index[] = {
 		PROGRESS_VACUUM_PHASE,
 		PROGRESS_VACUUM_CURRENT_INDEX_RELID
@@ -1177,6 +1181,18 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 	}
 
 	pgstat_progress_update_multi_param(3, reset_index, reset_val);
+
+	/*
+	 * Accumulate this pass into the index's cumulative vacuum times.  Use the
+	 * leader's DSM flag to classify autovacuum: a parallel worker of an
+	 * autovacuum leader is a regular background worker.
+	 */
+	pgstat_report_index_vacuum_time(indrel,
+									TimestampDifferenceMilliseconds(istarttime,
+																	GetCurrentTimestamp()),
+									(PgStat_Counter) rint(VacuumDelayTime -
+														  startdelaytime),
+									pvs->shared->is_autovacuum);
 
 	/*
 	 * Copy the index bulk-deletion result returned from ambulkdelete and
