@@ -129,6 +129,8 @@
  */
 #include "postgres.h"
 
+#include <math.h>
+
 #include "access/genam.h"
 #include "access/heapam.h"
 #include "access/htup_details.h"
@@ -638,6 +640,7 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 	TimestampTz starttime = 0;
 	PgStat_Counter startreadtime = 0,
 				startwritetime = 0;
+	double		startdelaytime;
 	WalUsage	startwalusage = pgWalUsage;
 	BufferUsage startbufferusage = pgBufferUsage;
 	ErrorContextCallback errcallback;
@@ -659,6 +662,7 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 
 	/* Used for instrumentation and stats report */
 	starttime = GetCurrentTimestamp();
+	startdelaytime = VacuumDelayTime;
 
 	pgstat_progress_start_command(PROGRESS_COMMAND_VACUUM,
 								  RelationGetRelid(rel));
@@ -984,11 +988,18 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 	 * soon in cases where the failsafe prevented significant amounts of heap
 	 * vacuuming.
 	 */
+	/*
+	 * The delay counter covers the whole heap_vacuum_rel() run, matching the
+	 * scope of total_vacuum_time.  In a parallel vacuum it covers the
+	 * leader's sleeps only; parallel workers account their own sleeps to the
+	 * indexes they process.
+	 */
 	pgstat_report_vacuum(rel,
 						 Max(vacrel->new_live_tuples, 0),
 						 vacrel->recently_dead_tuples +
 						 vacrel->missed_dead_tuples,
-						 starttime);
+						 starttime,
+						 (PgStat_Counter) rint(VacuumDelayTime - startdelaytime));
 	pgstat_progress_end_command();
 
 	if (instrument)
@@ -3039,6 +3050,8 @@ lazy_vacuum_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 {
 	IndexVacuumInfo ivinfo;
 	LVSavedErrInfo saved_err_info;
+	TimestampTz istarttime = GetCurrentTimestamp();
+	double		startdelaytime = VacuumDelayTime;
 
 	ivinfo.index = indrel;
 	ivinfo.heaprel = vacrel->rel;
@@ -3065,6 +3078,14 @@ lazy_vacuum_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 	istat = vac_bulkdel_one_index(&ivinfo, istat, vacrel->dead_items,
 								  vacrel->dead_items_info);
 
+	/* Accumulate this pass into the index's cumulative vacuum times */
+	pgstat_report_index_vacuum_time(indrel,
+									TimestampDifferenceMilliseconds(istarttime,
+																	GetCurrentTimestamp()),
+									(PgStat_Counter) rint(VacuumDelayTime -
+														  startdelaytime),
+									AmAutoVacuumWorkerProcess());
+
 	/* Revert to the previous phase information for error traceback */
 	restore_vacuum_error_info(vacrel, &saved_err_info);
 	pfree(vacrel->indname);
@@ -3089,6 +3110,8 @@ lazy_cleanup_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 {
 	IndexVacuumInfo ivinfo;
 	LVSavedErrInfo saved_err_info;
+	TimestampTz istarttime = GetCurrentTimestamp();
+	double		startdelaytime = VacuumDelayTime;
 
 	ivinfo.index = indrel;
 	ivinfo.heaprel = vacrel->rel;
@@ -3113,6 +3136,14 @@ lazy_cleanup_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 							 InvalidBlockNumber, InvalidOffsetNumber);
 
 	istat = vac_cleanup_one_index(&ivinfo, istat);
+
+	/* Accumulate this pass into the index's cumulative vacuum times */
+	pgstat_report_index_vacuum_time(indrel,
+									TimestampDifferenceMilliseconds(istarttime,
+																	GetCurrentTimestamp()),
+									(PgStat_Counter) rint(VacuumDelayTime -
+														  startdelaytime),
+									AmAutoVacuumWorkerProcess());
 
 	/* Revert to the previous phase information for error traceback */
 	restore_vacuum_error_info(vacrel, &saved_err_info);
