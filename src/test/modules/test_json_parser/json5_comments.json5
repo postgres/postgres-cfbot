@@ -1,0 +1,12 @@
+// leading line comment
+{
+    /* block comment before key */ "key1": "value1", // trailing line comment on a pair
+    "key2": /* inline block comment */ "value2",
+    "arr": [
+        1,
+        /* mid-array block comment */
+        2,
+        3
+    ]
+}
+/* trailing block comment */
