@@ -332,6 +332,17 @@ lex_expect(JsonParseContext ctx, JsonLexContext *lex, JsonTokenType token)
 	 IS_HIGHBIT_SET(c))
 
 /*
+ * Same, for the characters that json5 folds into a number token as trailing
+ * garbage.  A non-ASCII character can be json5 whitespace ending the token,
+ * so only ASCII counts here; '$' is added as it can start an identifier.
+ */
+#define JSON5_NUMBER_TRAILING_CHAR(c)  \
+	(((c) >= 'a' && (c) <= 'z') || \
+	 ((c) >= 'A' && (c) <= 'Z') || \
+	 ((c) >= '0' && (c) <= '9') || \
+	 (c) == '_' || (c) == '$')
+
+/*
  * Decode the UTF-8 character at s into *c, returning its length in bytes, or
  * 0 if the input isn't UTF-8 or s doesn't start a valid UTF-8 character.
  * json5 only gives meaning to non-ASCII characters outside of strings when
@@ -639,6 +650,13 @@ json5_lex_identifier(JsonLexContext *lex, const char *s)
 		lex->token_type = JSON_TOKEN_NULL;
 	else if (!escaped && p - s == 5 && memcmp(s, "false", 5) == 0)
 		lex->token_type = JSON_TOKEN_FALSE;
+	else if (!escaped && ((p - s == 8 && memcmp(s, "Infinity", 8) == 0) ||
+						  (p - s == 3 && memcmp(s, "NaN", 3) == 0)))
+	{
+		/* numbers, but also identifiers, so usable as unquoted keys */
+		lex->token_type = JSON_TOKEN_NUMBER;
+		lex->token_is_identifier = true;
+	}
 	else
 	{
 		lex->token_type = JSON_TOKEN_STRING;
@@ -963,7 +981,11 @@ have_prediction(JsonParserStack *pstack)
 	return pstack->pred_index > 0;
 }
 
-/* reserved words that json5 accepts as unquoted object keys */
+/*
+ * Keywords that json5 accepts as unquoted object keys: the reserved words
+ * true/false/null, plus Infinity/NaN, which lex as numbers but are ordinary
+ * identifiers too.
+ */
 static inline bool
 json5_keyword_key(const JsonLexContext *lex, JsonTokenType tok)
 {
@@ -1947,6 +1969,156 @@ parse_array(JsonLexContext *lex, const JsonSemAction *sem)
 }
 
 /*
+ * json5 counterpart of json_lex_number(), which hands over to this when the
+ * json5 flag is set; s points after any sign, as there.  Besides the JSON
+ * grammar this accepts hex integers (0x1F, with no fraction or exponent
+ * part), a leading decimal point (.5) and a bare trailing decimal point
+ * (5.), and the trailing garbage folded into the token includes '$' but not
+ * non-ASCII characters, which can be whitespace that ends the token.
+ *
+ * Kept out of line, so that the strict JSON number lexer stays small enough
+ * to be inlined into json_lex() as before.  json5 is never lexed
+ * incrementally and never reaches IsValidJsonNumber(), so there is no
+ * partial token or num_err handling here.
+ */
+static pg_noinline JsonParseErrorType
+json5_lex_unsigned_number(JsonLexContext *lex, const char *s)
+{
+	const char *const end = lex->input + lex->input_length;
+	bool		error = false;
+	bool		is_hex = false;
+
+	if (s + 1 < end && *s == '0' && (s[1] == 'x' || s[1] == 'X'))
+	{
+		/* hex integer */
+		is_hex = true;
+		s += 2;
+		if (s >= end || !((*s >= '0' && *s <= '9') ||
+						  (*s >= 'a' && *s <= 'f') ||
+						  (*s >= 'A' && *s <= 'F')))
+			error = true;
+		else
+		{
+			do
+			{
+				s++;
+			} while (s < end && ((*s >= '0' && *s <= '9') ||
+								 (*s >= 'a' && *s <= 'f') ||
+								 (*s >= 'A' && *s <= 'F')));
+		}
+	}
+	else if (s < end && *s == '.')
+	{
+		/* leading decimal point, the digits after it are required */
+		s++;
+		if (s >= end || *s < '0' || *s > '9')
+			error = true;
+		else
+		{
+			do
+			{
+				s++;
+			} while (s < end && *s >= '0' && *s <= '9');
+		}
+	}
+	else
+	{
+		/* main digit string, as in JSON */
+		if (s < end && *s == '0')
+			s++;
+		else if (s < end && *s >= '1' && *s <= '9')
+		{
+			do
+			{
+				s++;
+			} while (s < end && *s >= '0' && *s <= '9');
+		}
+		else
+			error = true;
+
+		/* optional decimal part, which may be a bare decimal point */
+		if (s < end && *s == '.')
+		{
+			s++;
+			while (s < end && *s >= '0' && *s <= '9')
+				s++;
+		}
+	}
+
+	/* optional exponent, as in JSON; hex integers have none */
+	if (!is_hex && s < end && (*s == 'e' || *s == 'E'))
+	{
+		s++;
+		if (s < end && (*s == '+' || *s == '-'))
+			s++;
+		if (s >= end || *s < '0' || *s > '9')
+			error = true;
+		else
+		{
+			do
+			{
+				s++;
+			} while (s < end && *s >= '0' && *s <= '9');
+		}
+	}
+
+	/* trailing garbage becomes part of the token, for error reporting */
+	for (; s < end && JSON5_NUMBER_TRAILING_CHAR(*s); s++)
+		error = true;
+
+	lex->prev_token_terminator = lex->token_terminator;
+	lex->token_terminator = s;
+	return error ? JSON_INVALID_TOKEN : JSON_SUCCESS;
+}
+
+/*
+ * Lex a json5 signed Infinity/NaN.  s points at the '+' or '-' and a letter
+ * follows.  The whole identifier word after the sign is scanned, so trailing
+ * identifier characters make the whole word one invalid token instead of
+ * leaving a prefix match behind.  Sets token_type on success.
+ */
+static JsonParseErrorType
+json5_lex_signed_word(JsonLexContext *lex, const char *s)
+{
+	const char *const end = lex->input + lex->input_length;
+	const char *p;
+
+	for (p = s + 1; p < end && JSON5_NUMBER_TRAILING_CHAR(*p); p++)
+		 /* skip */ ;
+
+	lex->prev_token_terminator = lex->token_terminator;
+	lex->token_terminator = p;
+
+	if ((p - s == 9 && memcmp(s + 1, "Infinity", 8) == 0) ||
+		(p - s == 4 && memcmp(s + 1, "NaN", 3) == 0))
+	{
+		lex->token_type = JSON_TOKEN_NUMBER;
+		return JSON_SUCCESS;
+	}
+	return JSON_INVALID_TOKEN;
+}
+
+/*
+ * Lex a json5 number that starts with a sign or a decimal point, including
+ * signed Infinity/NaN.  Kept out of line, so that json_lex_number() isn't
+ * inlined into json_lex() more often than in strict JSON.
+ */
+static pg_noinline JsonParseErrorType
+json5_lex_number(JsonLexContext *lex, const char *s)
+{
+	const char *const end = lex->input + lex->input_length;
+	JsonParseErrorType result;
+
+	if (*s != '.' && s + 1 < end && (*(s + 1) == 'I' || *(s + 1) == 'N'))
+		return json5_lex_signed_word(lex, s);
+
+	result = json_lex_number(lex, *s == '.' ? s : s + 1, NULL, NULL);
+	if (result == JSON_SUCCESS)
+		lex->token_type = JSON_TOKEN_NUMBER;
+	return result;
+}
+
+/*
  * Lex one token from the input stream.
  *
  * When doing incremental parsing, we can reach the end of the input string
@@ -2314,12 +2486,34 @@ json_lex(JsonLexContext *lex)
 				lex->token_type = JSON_TOKEN_STRING;
 				break;
 			case '-':
+				if (unlikely(lex->json5) && s + 1 < end &&
+					(*(s + 1) == 'I' || *(s + 1) == 'N'))
+				{
+					/* signed Infinity/NaN */
+					result = json5_lex_number(lex, s);
+					if (result != JSON_SUCCESS)
+						return result;
+					break;
+				}
 				/* Negative number. */
 				result = json_lex_number(lex, s + 1, NULL, NULL);
 				if (result != JSON_SUCCESS)
 					return result;
 				lex->token_type = JSON_TOKEN_NUMBER;
 				break;
+			case '+':
+			case '.':
+				if (lex->json5)
+				{
+					/* explicit plus sign or leading decimal point */
+					result = json5_lex_number(lex, s);
+					if (result != JSON_SUCCESS)
+						return result;
+					break;
+				}
+				lex->prev_token_terminator = lex->token_terminator;
+				lex->token_terminator = s + 1;
+				return JSON_INVALID_TOKEN;
 			case '0':
 			case '1':
 			case '2':
@@ -2387,7 +2581,11 @@ json_lex(JsonLexContext *lex)
 						else if (memcmp(s, "null", 4) == 0)
 							lex->token_type = JSON_TOKEN_NULL;
 						else if (lex->json5)
-							goto json5_identifier;
+						{
+							result = json5_lex_identifier(lex, s);
+							if (result != JSON_SUCCESS)
+								return result;
+						}
 						else
 							return JSON_INVALID_TOKEN;
 					}
@@ -2395,8 +2593,6 @@ json_lex(JsonLexContext *lex)
 						lex->token_type = JSON_TOKEN_FALSE;
 					else if (lex->json5)
 					{
-						/* Infinity/NaN handled with number extensions */
-json5_identifier:
 						result = json5_lex_identifier(lex, s);
 						if (result != JSON_SUCCESS)
 							return result;
@@ -2692,6 +2888,8 @@ json_lex_string(JsonLexContext *lex)
  * If num_err is not NULL, we return an error flag to *num_err rather than
  * raising an error for a badly-formed number.  Also, if total_len is not NULL
  * the distance from lex->input to the token end+1 is returned to *total_len.
+ *
+ * json5 numbers follow a wider grammar, see json5_lex_unsigned_number().
  */
 static inline JsonParseErrorType
 json_lex_number(JsonLexContext *lex, const char *s,
@@ -2699,6 +2897,9 @@ json_lex_number(JsonLexContext *lex, const char *s,
 {
 	bool		error = false;
 	int			len = s - lex->input;
+
+	if (unlikely(lex->json5))
+		return json5_lex_unsigned_number(lex, s);
 
 	/* Part (1): leading sign indicator. */
 	/* Caller already did this for us; so do nothing. */
@@ -2762,11 +2963,9 @@ json_lex_number(JsonLexContext *lex, const char *s,
 	/*
 	 * Check for trailing garbage.  As in json_lex(), any alphanumeric stuff
 	 * here should be considered part of the token for error-reporting
-	 * purposes; in json5 that includes '$'.
+	 * purposes.
 	 */
-	for (; len < lex->input_length &&
-		 (JSON_ALPHANUMERIC_CHAR(*s) || (lex->json5 && *s == '$'));
-		 s++, len++)
+	for (; len < lex->input_length && JSON_ALPHANUMERIC_CHAR(*s); s++, len++)
 		error = true;
 
 	if (total_len != NULL)
