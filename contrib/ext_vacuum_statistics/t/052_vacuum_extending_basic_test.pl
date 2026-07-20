@@ -263,16 +263,22 @@ sub fetch_error_base_db_vacuum_statistics {
     # fetch actual base database vacuum statistics
     my $base_statistics = $node->safe_psql(
     $database_name,
-    "SELECT db_wal_records, db_wal_fpi, db_wal_bytes
+    "SELECT db_blks_hit, db_blks_dirtied,
+            db_blks_written, db_wal_records,
+            db_wal_fpi, db_wal_bytes
        FROM ext_vacuum_statistics.pg_stats_vacuum_database, pg_database
       WHERE pg_database.datname = '$dbname'
             AND pg_database.oid = ext_vacuum_statistics.pg_stats_vacuum_database.dboid;"
     );
     $base_statistics =~ s/\s*\|\s*/ /g;   # transform " | " in space
-    my ($wal_records, $wal_fpi, $wal_bytes) = split /\s+/, $base_statistics;
+    my ($db_blks_hit, $total_blks_dirtied, $total_blks_written,
+        $wal_records, $wal_fpi, $wal_bytes) = split /\s+/, $base_statistics;
 
     diag(
             "BASE STATS MISMATCH FOR DATABASE $dbname:\n" .
+            "    db_blks_hit        = $db_blks_hit\n" .
+            "    total_blks_dirtied = $total_blks_dirtied\n" .
+            "    total_blks_written = $total_blks_written\n" .
             "    wal_records        = $wal_records\n" .
             "    wal_fpi            = $wal_fpi\n" .
             "    wal_bytes          = $wal_bytes\n"
@@ -617,19 +623,28 @@ is($base_stats, 0, 'vacuum stats per all index objects from another database are
 #--------------------------------------------------------------------------------------
 subtest 'Test 9: Check database-level vacuum statistics from the current and another database' => sub
 {
+my $db_blk_hit = 0;
+my $total_blks_dirtied = 0;
+my $total_blks_written = 0;
 my $wal_records = 0;
 my $wal_fpi = 0;
 my $wal_bytes = 0;
 $base_stats = $node->safe_psql(
     $dbname,
-    "SELECT db_wal_records, db_wal_fpi, db_wal_bytes
+    "SELECT db_blks_hit, db_blks_dirtied,
+            db_blks_written, db_wal_records,
+            db_wal_fpi, db_wal_bytes
      FROM ext_vacuum_statistics.pg_stats_vacuum_database, pg_database
      WHERE pg_database.datname = '$dbname'
             AND pg_database.oid = ext_vacuum_statistics.pg_stats_vacuum_database.dboid;"
 );
 $base_stats =~ s/\s*\|\s*/ /g;   # transform " | " into space
-    ($wal_records, $wal_fpi, $wal_bytes) = split /\s+/, $base_stats;
+    ($db_blk_hit, $total_blks_dirtied, $total_blks_written, $wal_records, $wal_fpi, $wal_bytes)
+        = split /\s+/, $base_stats;
 
+ok($db_blk_hit > 0, 'db_blks_hit is more than 0');
+ok($total_blks_dirtied > 0, 'total_blks_dirtied is more than 0');
+ok($total_blks_written > 0, 'total_blks_written is more than 0');
 ok($wal_records > 0, 'wal_records is more than 0');
 ok($wal_fpi > 0, 'wal_fpi is more than 0');
 ok($wal_bytes > 0, 'wal_bytes is more than 0');

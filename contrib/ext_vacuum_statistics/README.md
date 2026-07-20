@@ -45,9 +45,9 @@ SELECT * FROM ext_vacuum_statistics.pg_stats_vacuum_database;
 Example output:
 
 ```
- relname   | wal_records | tuples_deleted | pages_removed
------------+-------------+----------------+---------------
- mytable   |          15 |            500 |            10
+ relname   | total_blks_read | total_blks_hit | wal_records | tuples_deleted | pages_removed
+-----------+-----------------+----------------+-------------+----------------+---------------
+ mytable   |             120 |            340 |          15 |            500 |            10
 ```
 
 Reset statistics when needed:
