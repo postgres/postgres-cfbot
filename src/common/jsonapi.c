@@ -18,6 +18,7 @@
 #endif
 
 #include "common/jsonapi.h"
+#include "common/unicode_category.h"
 #include "mb/pg_wchar.h"
 #include "port/pg_lfind.h"
 
@@ -331,6 +332,140 @@ lex_expect(JsonParseContext ctx, JsonLexContext *lex, JsonTokenType token)
 	 IS_HIGHBIT_SET(c))
 
 /*
+ * Decode the UTF-8 character at s into *c, returning its length in bytes, or
+ * 0 if the input isn't UTF-8 or s doesn't start a valid UTF-8 character.
+ * json5 only gives meaning to non-ASCII characters outside of strings when
+ * it can decode them.
+ */
+static int
+json5_decode_utf8(const JsonLexContext *lex, const char *s, const char *end,
+				  char32_t *c)
+{
+	int			len;
+
+	if (lex->input_encoding != PG_UTF8)
+		return 0;
+	len = pg_utf_mblen((const unsigned char *) s);
+	if (len > end - s || !pg_utf8_islegal((const unsigned char *) s, len))
+		return 0;
+	*c = utf8_to_unicode((const unsigned char *) s);
+	return len;
+}
+
+/*
+ * Is the character at s a json5 line terminator other than LF or CR, that
+ * is U+2028 LINE SEPARATOR or U+2029 PARAGRAPH SEPARATOR?  Returns its
+ * length in bytes, or 0.
+ */
+static inline int
+json5_line_separator_len(const JsonLexContext *lex, const char *s,
+						 const char *end)
+{
+	if (lex->input_encoding == PG_UTF8 && end - s >= 3 &&
+		(unsigned char) s[0] == 0xE2 && (unsigned char) s[1] == 0x80 &&
+		((unsigned char) s[2] == 0xA8 || (unsigned char) s[2] == 0xA9))
+		return 3;
+	return 0;
+}
+
+/*
+ * Skip json5 whitespace and comments starting at s, returning the position
+ * after them, or NULL after setting up lex to report an unterminated block
+ * comment.  Returning the position rather than taking a pointer to the
+ * caller's lexing cursor lets json_lex() keep that in a register.
+ *
+ * Besides the JSON whitespace characters, json5 allows vertical tab, form
+ * feed, U+FEFF, any Unicode space separator (Zs) and the line terminators
+ * U+2028 and U+2029.  Comments count as whitespace, so this alternates
+ * between the two until neither matches.  json5 is never used with
+ * incremental parsing, so a comment can't span chunks.
+ */
+static pg_noinline const char *
+json5_skip_whitespace(JsonLexContext *lex, const char *s)
+{
+	const char *const end = lex->input + lex->input_length;
+
+	while (s < end)
+	{
+		char32_t	c;
+		int			len;
+
+		if (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\v' ||
+			*s == '\f')
+			s++;
+		else if (*s == '\n')
+		{
+			s++;
+			++lex->line_number;
+			lex->line_start = s;
+		}
+		else if (IS_HIGHBIT_SET(*s))
+		{
+			len = json5_decode_utf8(lex, s, end, &c);
+			if (len == 0)
+				break;
+			if (c != 0xFEFF)
+			{
+				pg_unicode_category cat = unicode_category(c);
+
+				if (cat != PG_U_SPACE_SEPARATOR &&
+					cat != PG_U_LINE_SEPARATOR &&
+					cat != PG_U_PARAGRAPH_SEPARATOR)
+					break;
+			}
+			s += len;
+		}
+		else if (*s == '/' && s + 1 < end && *(s + 1) == '/')
+		{
+			/*
+			 * Line comment.  The terminator, if any, is consumed as
+			 * whitespace on the next round; at end of input the comment is
+			 * implicitly closed.
+			 */
+			s += 2;
+			while (s < end && *s != '\n' && *s != '\r' &&
+				   json5_line_separator_len(lex, s, end) == 0)
+				s++;
+		}
+		else if (*s == '/' && s + 1 < end && *(s + 1) == '*')
+		{
+			/* block comment; star tracks a possible closing '*' */
+			bool		star = false;
+			bool		closed = false;
+
+			s += 2;
+			while (s < end)
+			{
+				char		ch = *s++;
+
+				if (star && ch == '/')
+				{
+					closed = true;
+					break;
+				}
+				star = (ch == '*');
+				if (ch == '\n')
+				{
+					++lex->line_number;
+					lex->line_start = s;
+				}
+			}
+			if (!closed)
+			{
+				lex->token_start = s;
+				lex->prev_token_terminator = lex->token_terminator;
+				lex->token_terminator = s;
+				return NULL;
+			}
+		}
+		else
+			break;				/* includes a lone '/', an invalid token */
+	}
+
+	return s;
+}
+
+/*
  * Utility function to check if a string is a valid JSON number.
  *
  * str is of length len, and need not be null-terminated.
@@ -390,7 +525,8 @@ IsValidJsonNumber(const char *str, size_t len)
  */
 JsonLexContext *
 makeJsonLexContextCstringLen(JsonLexContext *lex, const char *json,
-							 size_t len, int encoding, bool need_escapes)
+							 size_t len, int encoding, bool need_escapes,
+							 bool json5)
 {
 	if (lex == NULL)
 	{
@@ -408,6 +544,7 @@ makeJsonLexContextCstringLen(JsonLexContext *lex, const char *json,
 	lex->input_length = len;
 	lex->input_encoding = encoding;
 	lex->need_escapes = need_escapes;
+	lex->json5 = json5;
 	if (need_escapes)
 	{
 		/*
@@ -739,26 +876,31 @@ freeJsonLexContext(JsonLexContext *lex)
  * JSON parser. This is a useful way to validate that it's doing the right
  * thing at least for non-incremental cases. If this is on we expect to see
  * regression diffs relating to error messages about stack depth, but no
- * other differences.
+ * other differences.  json5 input is exempt, as only the recursive descent
+ * parser knows that syntax.
  */
 JsonParseErrorType
 pg_parse_json(JsonLexContext *lex, const JsonSemAction *sem)
 {
-#ifdef FORCE_JSON_PSTACK
-	/*
-	 * We don't need partial token processing, there is only one chunk. But we
-	 * still need to init the partial token string so that freeJsonLexContext
-	 * works, so perform the full incremental initialization.
-	 */
-	if (!allocate_incremental_state(lex))
-		return JSON_OUT_OF_MEMORY;
-
-	return pg_parse_json_incremental(lex, sem, lex->input, lex->input_length, true);
-
-#else
-
 	JsonTokenType tok;
 	JsonParseErrorType result;
+
+#ifdef FORCE_JSON_PSTACK
+	if (!lex->json5)
+	{
+		/*
+		 * We don't need partial token processing, there is only one chunk.
+		 * But we still need to init the partial token string so that
+		 * freeJsonLexContext works, so perform the full incremental
+		 * initialization.
+		 */
+		if (!allocate_incremental_state(lex))
+			return JSON_OUT_OF_MEMORY;
+
+		return pg_parse_json_incremental(lex, sem, lex->input,
+										 lex->input_length, true);
+	}
+#endif
 
 	if (lex == &failed_oom)
 		return JSON_OUT_OF_MEMORY;
@@ -789,7 +931,6 @@ pg_parse_json(JsonLexContext *lex, const JsonSemAction *sem)
 		result = lex_expect(JSON_PARSE_END, lex, JSON_TOKEN_END);
 
 	return result;
-#endif
 }
 
 /*
@@ -1858,6 +1999,15 @@ json_lex(JsonLexContext *lex)
 			lex->line_start = s;
 		}
 	}
+
+	/* json5 also allows more whitespace characters, and comments */
+	if (unlikely(lex->json5))
+	{
+		s = json5_skip_whitespace(lex, s);
+		if (s == NULL)
+			return JSON_UNTERMINATED_COMMENT;
+	}
+
 	lex->token_start = s;
 
 	/* Determine token type. */
@@ -2551,6 +2701,8 @@ json_errdetail(JsonParseErrorType error, JsonLexContext *lex)
 			return _("Unicode high surrogate must not follow a high surrogate.");
 		case JSON_UNICODE_LOW_SURROGATE:
 			return _("Unicode low surrogate must follow a high surrogate.");
+		case JSON_UNTERMINATED_COMMENT:
+			return _("Block comment is not terminated.");
 		case JSON_SEM_ACTION_FAILED:
 			/* fall through to the error code after switch */
 			break;
