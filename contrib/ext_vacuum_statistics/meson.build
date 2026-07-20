@@ -38,6 +38,7 @@ tests += {
       't/053_index_pages_deleted.pl',
       't/054_vacuum_extending_gucs_test.pl',
       't/056_vacuum_stats_gc.pl',
+      't/057_parallel_usage_and_privileges.pl',
     ],
   },
 }
