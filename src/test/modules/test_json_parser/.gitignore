@@ -2,3 +2,5 @@ tmp_check
 test_json_parser_perf
 test_json_parser_incremental
 test_json_parser_incremental_shlib
+test_json_parser_standalone
+test_json_parser_standalone_shlib

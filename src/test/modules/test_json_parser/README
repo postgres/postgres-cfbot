@@ -1,7 +1,7 @@
 Module `test_json_parser`
 =========================
 
-This module contains two programs for testing the json parsers.
+This module contains three programs for testing the json parsers.
 
 - `test_json_parser_incremental` is for testing the incremental parser, It
   reads in a file and passes it in very small chunks (default is 60 bytes at a
@@ -12,6 +12,12 @@ This module contains two programs for testing the json parsers.
   using semantic routines. The semantic routines re-output the json, although
   not in a very pretty form. The required non-option argument is the input file
   name.
+- `test_json_parser_standalone` is for testing the standalone (recursive
+  descent) parser. It reads the whole input file and parses it in a single
+  call. The option "--json5" makes the parser accept JSON5 input; only this
+  parser supports JSON5. The "-s" and "-o" options work as for
+  `test_json_parser_incremental`. The required non-option argument is the
+  input file name.
 - `test_json_parser_perf` is for speed testing both the standard
   recursive descent parser and the non-recursive incremental
   parser. If given the `-i` flag it uses the non-recursive parser,
