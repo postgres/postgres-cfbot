@@ -1080,6 +1080,8 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 	IndexVacuumInfo ivinfo;
 	TimestampTz istarttime = GetCurrentTimestamp();
 	double		startdelaytime = VacuumDelayTime;
+	double		prev_tuples_removed = 0;
+	PgStat_VacuumRelationCounts extVacReport;
 
 	/*
 	 * Update the pointer to the corresponding bulk-deletion result if someone
@@ -1088,6 +1090,12 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 	if (indstats->istat_updated)
 		istat = &(indstats->istat);
 
+	/*
+	 * Snapshot the running bulkdelete totals: an index may be processed
+	 * several times per vacuum, and the report below covers this pass only.
+	 */
+	if (istat != NULL)
+		prev_tuples_removed = istat->tuples_removed;
 	ivinfo.index = indrel;
 	ivinfo.heaprel = pvs->heaprel;
 	ivinfo.analyze_only = false;
@@ -1114,6 +1122,16 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 			elog(ERROR, "unexpected parallel vacuum index status %d for index \"%s\"",
 				 indstats->status,
 				 RelationGetRelationName(indrel));
+	}
+
+	if (set_report_vacuum_hook)
+	{
+		memset(&extVacReport, 0, sizeof(extVacReport));
+		extVacReport.type = PGSTAT_EXTVAC_INDEX;
+		if (istat_res != NULL)
+			extVacReport.common.tuples_deleted =
+				istat_res->tuples_removed - prev_tuples_removed;
+		pgstat_report_vacuum_ext(indrel, -1, -1, 0, 0, false, &extVacReport);
 	}
 
 	/*
