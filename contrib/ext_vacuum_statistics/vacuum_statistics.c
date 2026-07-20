@@ -80,6 +80,14 @@ static const PgStat_KindInfo extvac_db_kind_info = {
 static inline void
 pgstat_accumulate_common(PgStat_CommonCounts * dst, const PgStat_CommonCounts * src)
 {
+	dst->total_blks_read += src->total_blks_read;
+	dst->total_blks_hit += src->total_blks_hit;
+	dst->total_blks_dirtied += src->total_blks_dirtied;
+	dst->total_blks_written += src->total_blks_written;
+	dst->blks_fetched += src->blks_fetched;
+	dst->blks_hit += src->blks_hit;
+	dst->blk_read_time += src->blk_read_time;
+	dst->blk_write_time += src->blk_write_time;
 	dst->wal_records += src->wal_records;
 	dst->wal_fpi += src->wal_fpi;
 	dst->wal_bytes += src->wal_bytes;
@@ -320,7 +328,7 @@ extvac_reset_db_entry(PG_FUNCTION_ARGS)
 /*
  * Output vacuum statistics (tables, indexes, or per-database aggregates).
  */
-#define EXTVAC_COMMON_STAT_COLS 3
+#define EXTVAC_COMMON_STAT_COLS 9
 
 static void
 tuplestore_put_common(PgStat_CommonCounts * vacuum_ext,
@@ -329,6 +337,10 @@ tuplestore_put_common(PgStat_CommonCounts * vacuum_ext,
 	char		buf[256];
 	const int	base PG_USED_FOR_ASSERTS_ONLY = *i;
 
+	values[(*i)++] = Int64GetDatum(vacuum_ext->total_blks_read);
+	values[(*i)++] = Int64GetDatum(vacuum_ext->total_blks_hit);
+	values[(*i)++] = Int64GetDatum(vacuum_ext->total_blks_dirtied);
+	values[(*i)++] = Int64GetDatum(vacuum_ext->total_blks_written);
 	values[(*i)++] = Int64GetDatum(vacuum_ext->wal_records);
 	values[(*i)++] = Int64GetDatum(vacuum_ext->wal_fpi);
 	snprintf(buf, sizeof buf, UINT64_FORMAT, vacuum_ext->wal_bytes);
@@ -336,11 +348,13 @@ tuplestore_put_common(PgStat_CommonCounts * vacuum_ext,
 										 CStringGetDatum(buf),
 										 ObjectIdGetDatum(0),
 										 Int32GetDatum(-1));
+	values[(*i)++] = Float8GetDatum(vacuum_ext->blk_read_time);
+	values[(*i)++] = Float8GetDatum(vacuum_ext->blk_write_time);
 	Assert((*i - base) == EXTVAC_COMMON_STAT_COLS);
 }
 
-#define EXTVAC_HEAP_STAT_COLS	11
-#define EXTVAC_IDX_STAT_COLS	6
+#define EXTVAC_HEAP_STAT_COLS	19
+#define EXTVAC_IDX_STAT_COLS	14
 #define EXTVAC_MAX_STAT_COLS	Max(EXTVAC_HEAP_STAT_COLS, EXTVAC_IDX_STAT_COLS)
 
 static void
@@ -355,6 +369,8 @@ tuplestore_put_for_relation(Oid relid, Tuplestorestate *tupstore,
 	values[i++] = ObjectIdGetDatum(relid);
 
 	tuplestore_put_common(&vacuum_ext->common, values, nulls, &i);
+	values[i++] = Int64GetDatum(vacuum_ext->common.blks_fetched - vacuum_ext->common.blks_hit);
+	values[i++] = Int64GetDatum(vacuum_ext->common.blks_hit);
 
 	if (vacuum_ext->type == PGSTAT_EXTVAC_TABLE)
 	{
@@ -431,7 +447,7 @@ pg_stats_vacuum(FunctionCallInfo fcinfo, int type)
 	{
 		if (OidIsValid(dbid))
 		{
-#define EXTVAC_DB_STAT_COLS 4
+#define EXTVAC_DB_STAT_COLS 10
 			Datum		values[EXTVAC_DB_STAT_COLS];
 			bool		nulls[EXTVAC_DB_STAT_COLS];
 			int			i = 0;

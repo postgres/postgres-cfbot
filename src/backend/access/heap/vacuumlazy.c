@@ -504,6 +504,30 @@ static void restore_vacuum_error_info(LVRelState *vacrel,
 /* Extended vacuum statistics functions */
 
 /*
+ * extvac_pending_blocks - Read the pending block counters of a relation.
+ *
+ * Tables and indexes keep those counters in different members of their
+ * pending stats entry, so pick the one matching the entry's stats kind.
+ */
+static void
+extvac_pending_blocks(Relation rel, PgStat_Counter *fetched,
+					  PgStat_Counter *hit)
+{
+	PgStat_RelationStatus *pgstat_info = rel->pgstat_info;
+
+	if (pgstat_info->kind == PGSTAT_KIND_INDEX)
+	{
+		*fetched = pgstat_info->idx.blocks_fetched;
+		*hit = pgstat_info->idx.blocks_hit;
+	}
+	else
+	{
+		*fetched = pgstat_info->tab.counts.blocks_fetched;
+		*hit = pgstat_info->tab.counts.blocks_hit;
+	}
+}
+
+/*
  * extvac_stats_start - Snapshot resource usage before a vacuum phase.
  */
 void
@@ -511,6 +535,11 @@ extvac_stats_start(Relation rel, LVExtStatCounters * counters)
 {
 	memset(counters, 0, sizeof(LVExtStatCounters));
 	counters->walusage = pgWalUsage;
+	counters->bufusage = pgBufferUsage;
+
+	if (rel->pgstat_info && pgstat_track_counts)
+		extvac_pending_blocks(rel, &counters->blocks_fetched,
+							  &counters->blocks_hit);
 }
 
 /*
@@ -521,13 +550,34 @@ extvac_stats_end(Relation rel, LVExtStatCounters * counters,
 				 PgStat_CommonCounts * report)
 {
 	WalUsage	walusage;
+	BufferUsage bufusage;
 
 	memset(&walusage, 0, sizeof(WalUsage));
 	WalUsageAccumDiff(&walusage, &pgWalUsage, &counters->walusage);
+	memset(&bufusage, 0, sizeof(BufferUsage));
+	BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &counters->bufusage);
 
+	report->total_blks_read = bufusage.local_blks_read + bufusage.shared_blks_read;
+	report->total_blks_hit = bufusage.local_blks_hit + bufusage.shared_blks_hit;
+	report->total_blks_dirtied = bufusage.local_blks_dirtied + bufusage.shared_blks_dirtied;
+	report->total_blks_written = bufusage.shared_blks_written;
+	report->blk_read_time = INSTR_TIME_GET_MILLISEC(bufusage.local_blk_read_time) +
+		INSTR_TIME_GET_MILLISEC(bufusage.shared_blk_read_time);
+	report->blk_write_time = INSTR_TIME_GET_MILLISEC(bufusage.local_blk_write_time) +
+		INSTR_TIME_GET_MILLISEC(bufusage.shared_blk_write_time);
 	report->wal_records = walusage.wal_records;
 	report->wal_fpi = walusage.wal_fpi;
 	report->wal_bytes = walusage.wal_bytes;
+
+	if (rel->pgstat_info && pgstat_track_counts)
+	{
+		PgStat_Counter blocks_fetched;
+		PgStat_Counter blocks_hit;
+
+		extvac_pending_blocks(rel, &blocks_fetched, &blocks_hit);
+		report->blks_fetched = blocks_fetched - counters->blocks_fetched;
+		report->blks_hit = blocks_hit - counters->blocks_hit;
+	}
 }
 
 /*
@@ -552,6 +602,12 @@ accumulate_heap_vacuum_statistics(LVRelState *vacrel, PgStat_VacuumRelationCount
 	 * them twice otherwise.  Parallel workers report their own usage with
 	 * their index passes, so it never enters the leader's counters.
 	 */
+	extVacStats->common.total_blks_read -= vacrel->extVacReportIdx.common.total_blks_read;
+	extVacStats->common.total_blks_hit -= vacrel->extVacReportIdx.common.total_blks_hit;
+	extVacStats->common.total_blks_dirtied -= vacrel->extVacReportIdx.common.total_blks_dirtied;
+	extVacStats->common.total_blks_written -= vacrel->extVacReportIdx.common.total_blks_written;
+	extVacStats->common.blk_read_time -= vacrel->extVacReportIdx.common.blk_read_time;
+	extVacStats->common.blk_write_time -= vacrel->extVacReportIdx.common.blk_write_time;
 	extVacStats->common.wal_records -= vacrel->extVacReportIdx.common.wal_records;
 	extVacStats->common.wal_fpi -= vacrel->extVacReportIdx.common.wal_fpi;
 	extVacStats->common.wal_bytes -= vacrel->extVacReportIdx.common.wal_bytes;
@@ -565,6 +621,12 @@ static void
 accumulate_idxs_vacuum_statistics(LVRelState *vacrel,
 								  PgStat_VacuumRelationCounts * extVacIdxStats)
 {
+	vacrel->extVacReportIdx.common.total_blks_read += extVacIdxStats->common.total_blks_read;
+	vacrel->extVacReportIdx.common.total_blks_hit += extVacIdxStats->common.total_blks_hit;
+	vacrel->extVacReportIdx.common.total_blks_dirtied += extVacIdxStats->common.total_blks_dirtied;
+	vacrel->extVacReportIdx.common.total_blks_written += extVacIdxStats->common.total_blks_written;
+	vacrel->extVacReportIdx.common.blk_read_time += extVacIdxStats->common.blk_read_time;
+	vacrel->extVacReportIdx.common.blk_write_time += extVacIdxStats->common.blk_write_time;
 	vacrel->extVacReportIdx.common.wal_records += extVacIdxStats->common.wal_records;
 	vacrel->extVacReportIdx.common.wal_fpi += extVacIdxStats->common.wal_fpi;
 	vacrel->extVacReportIdx.common.wal_bytes += extVacIdxStats->common.wal_bytes;
