@@ -385,6 +385,9 @@ REPACK (ANALYZE) clstr_tst (a);
 REPACK (ANALYZE) clstr_tst;
 REPACK (VERBOSE) clstr_tst (a);
 
+-- The ANALYZE option is for REPACK only
+CLUSTER (ANALYZE) clstr_tst USING clstr_tst_c;
+
 -- REPACK w/o argument performs no ordering, so we can only check which tables
 -- have the relfilenode changed.
 RESET SESSION AUTHORIZATION;
