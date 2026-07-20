@@ -26,6 +26,7 @@
 #include "access/multixact.h"
 #include "access/rewriteheap.h"
 #include "access/syncscan.h"
+#include "access/sysattr.h"
 #include "access/tableam.h"
 #include "access/tsmapi.h"
 #include "access/visibilitymap.h"
@@ -46,6 +47,7 @@
 #include "storage/procarray.h"
 #include "storage/smgr.h"
 #include "utils/builtins.h"
+#include "utils/datum.h"
 #include "utils/rel.h"
 #include "utils/tuplesort.h"
 
@@ -290,6 +292,92 @@ heapam_tuple_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 		pfree(tuple);
 
 	return result;
+}
+
+/*
+ * heapam_modified_attrs
+ *
+ * Table-AM callback (see table_modified_attrs()): given a candidate set of
+ * attribute numbers and the old/new versions of a row in two slots, return
+ * the subset whose values actually changed.  The executor uses the result to
+ * maintain only the indexes whose attributes overlap it.
+ *
+ * This is the heap AM's notion of "did this attribute change?", moved here
+ * from the executor so the executor stays agnostic of heap specifics (the
+ * system-column semantics below and the FirstLowInvalidHeapAttributeNumber
+ * offset convention are heap concepts).  The input 'attrs' bitmap is modified
+ * in place (bms_del_member may pfree it) and the surviving set is returned;
+ * the caller must use only the returned pointer.
+ */
+static Bitmapset *
+heapam_modified_attrs(Relation rel, Bitmapset *attrs,
+					  TupleTableSlot *oldslot, TupleTableSlot *newslot)
+{
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+	int			attidx = -1;
+
+	while ((attidx = bms_next_member(attrs, attidx)) >= 0)
+	{
+		/* attidx is zero-based, attrnum is the normal attribute number */
+		AttrNumber	attrnum = attidx + FirstLowInvalidHeapAttributeNumber;
+		Datum		value1,
+					value2;
+		bool		null1,
+					null2;
+		CompactAttribute *att;
+
+		/*
+		 * If it's a whole-tuple reference, say "not equal".  It's not really
+		 * worth supporting this case, since it could only succeed after a
+		 * no-op update, which is hardly a case worth optimizing for.
+		 */
+		if (attrnum == 0)
+			continue;
+
+		/*
+		 * Likewise, automatically say "not equal" for any system attribute
+		 * other than tableOID; we cannot expect these to be consistent in a
+		 * HOT chain, or even to be set correctly yet in the new tuple.
+		 */
+		if (attrnum < 0)
+		{
+			if (attrnum == TableOidAttributeNumber)
+				attrs = bms_del_member(attrs, attidx);
+			continue;
+		}
+
+		att = TupleDescCompactAttr(tupdesc, attrnum - 1);
+		value1 = slot_getattr(oldslot, attrnum, &null1);
+		value2 = slot_getattr(newslot, attrnum, &null2);
+
+		/* A change to/from NULL, so not equal */
+		if (null1 != null2)
+			continue;
+
+		/* Both NULL, no change/unmodified */
+		if (null2)
+		{
+			attrs = bms_del_member(attrs, attidx);
+			continue;
+		}
+
+		/*
+		 * Compare with datum_image_eq, NOT datumIsEqual (the comparator
+		 * heap_attr_equals uses on the simple_heap_update path).  This runs on
+		 * TupleTableSlots whose Datums are the logical, in-memory values of the
+		 * new/old tuple, before any storage path has run, so no slot value can
+		 * be TOASTed here and the "two physically different varlena encodings
+		 * of the same value" case that would distinguish the two comparators
+		 * cannot arise.  datum_image_eq is the image-identity test appropriate
+		 * for slot Datums; erring toward "changed" is the safe direction for
+		 * this decision (a redundant fresh index entry is tolerated, a skipped
+		 * one is not).  See README.HOT-INDEXED section 6.
+		 */
+		if (datum_image_eq(value1, value2, att->attbyval, att->attlen))
+			attrs = bms_del_member(attrs, attidx);
+	}
+
+	return attrs;
 }
 
 static TM_Result
@@ -2727,6 +2815,7 @@ static const TableAmRoutine heapam_methods = {
 	.multi_insert = heap_multi_insert,
 	.tuple_delete = heapam_tuple_delete,
 	.tuple_update = heapam_tuple_update,
+	.modified_attrs = heapam_modified_attrs,
 	.tuple_lock = heapam_tuple_lock,
 
 	.fetch_tid = heapam_fetch_tid,
