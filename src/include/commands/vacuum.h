@@ -368,6 +368,9 @@ extern PGDLLIMPORT int VacuumCostBalanceLocal;
 typedef struct LVExtStatCounters
 {
 	WalUsage	walusage;
+	BufferUsage bufusage;
+	PgStat_Counter blocks_fetched;
+	PgStat_Counter blocks_hit;
 } LVExtStatCounters;
 
 extern void extvac_stats_start(Relation rel, LVExtStatCounters *counters);
