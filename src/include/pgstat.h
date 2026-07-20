@@ -93,6 +93,38 @@ typedef struct PgStat_FunctionCounts
 /*
  * Working state needed to accumulate per-function-call timing statistics.
  */
+/*
+ * Extended vacuum statistics - passed to extensions via set_report_vacuum_hook.
+ * Type of entry: table (heap), index, or database aggregate.
+ */
+typedef enum ExtVacReportType
+{
+	PGSTAT_EXTVAC_INVALID = 0,
+	PGSTAT_EXTVAC_TABLE = 1,
+	PGSTAT_EXTVAC_INDEX = 2,
+	PGSTAT_EXTVAC_DB = 3,
+}			ExtVacReportType;
+
+typedef struct PgStat_CommonCounts
+{
+	int64		tuples_deleted;
+}			PgStat_CommonCounts;
+
+typedef struct PgStat_VacuumRelationCounts
+{
+	PgStat_CommonCounts common;
+	ExtVacReportType type;
+	union
+	{
+		struct
+		{
+			int64		tuples_frozen;
+			int64		recently_dead_tuples;
+			int64		missed_dead_tuples;
+		}			table;
+	};
+}			PgStat_VacuumRelationCounts;
+
 typedef struct PgStat_FunctionCallUsage
 {
 	/* Link to function's hashtable entry (must still be there at exit!) */
@@ -839,6 +871,20 @@ extern void pgstat_report_index_vacuum_time(Relation rel,
 											PgStat_Counter delaytime,
 											bool is_autovacuum);
 extern void pgstat_count_vacuum_error(bool shared);
+
+extern void pgstat_report_vacuum_ext(Relation rel,
+									 PgStat_Counter livetuples,
+									 PgStat_Counter deadtuples,
+									 TimestampTz starttime,
+									 PgStat_Counter delaytime,
+									 bool failsafe,
+									 PgStat_VacuumRelationCounts * extstats);
+
+/* Hook for extensions to receive extended vacuum statistics */
+typedef void (*set_report_vacuum_hook_type) (Oid tableoid, bool shared,
+											 PgStat_VacuumRelationCounts * params);
+extern PGDLLIMPORT set_report_vacuum_hook_type set_report_vacuum_hook;
+
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								  bool resetcounter, TimestampTz starttime);

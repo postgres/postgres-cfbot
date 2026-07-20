@@ -24,6 +24,7 @@
 #include "parser/parse_node.h"
 #include "storage/buf.h"
 #include "utils/relcache.h"
+#include "pgstat.h"
 
 /*
  * Flags for amparallelvacuumoptions to control the participation of bulkdelete
