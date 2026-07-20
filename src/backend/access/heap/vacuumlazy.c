@@ -285,6 +285,8 @@ typedef struct LVRelState
 	/* Error reporting state */
 	char	   *dbname;
 	char	   *relnamespace;
+	Oid			reloid;
+	Oid			indoid;
 	char	   *relname;
 	char	   *indname;		/* Current index name */
 	BlockNumber blkno;			/* used only for heap operations */
@@ -412,6 +414,11 @@ typedef struct LVRelState
 	 * been permanently disabled.
 	 */
 	BlockNumber eager_scan_remaining_fails;
+
+	/*
+	 * We need to accumulate index statistics for later subtraction from heap
+	 * stats.
+	 */
 } LVRelState;
 
 
@@ -487,6 +494,29 @@ static void restore_vacuum_error_info(LVRelState *vacrel,
 									  const LVSavedErrInfo *saved_vacrel);
 
 
+/* Extended vacuum statistics functions */
+
+/*
+ * Build the heap-specific part of the extended vacuum report from the
+ * counters gathered in vacrel.
+ */
+static void
+accumulate_heap_vacuum_statistics(LVRelState *vacrel, PgStat_VacuumRelationCounts * extVacStats)
+{
+	extVacStats->type = PGSTAT_EXTVAC_TABLE;
+	extVacStats->common.tuples_deleted = vacrel->tuples_deleted;
+	extVacStats->table.tuples_frozen = vacrel->tuples_frozen;
+	extVacStats->table.recently_dead_tuples = vacrel->recently_dead_tuples;
+	extVacStats->table.missed_dead_tuples = vacrel->missed_dead_tuples;
+
+	/*
+	 * The wraparound failsafe is reported as a per-relation flag (0/1): did
+	 * the latest vacuum of this relation engage it?  Consumers can sum the
+	 * flags to build a per-database total.
+	 */
+
+	/* Hook is invoked from pgstat_report_vacuum() when extstats is passed */
+}
 
 /*
  * Helper to set up the eager scanning state for vacuuming a single relation.
@@ -646,7 +676,9 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 	ErrorContextCallback errcallback;
 	char	  **indnames = NULL;
 	Size		dead_items_max_bytes = 0;
+	PgStat_VacuumRelationCounts extVacReport;
 
+	memset(&extVacReport, 0, sizeof(extVacReport));
 	verbose = (params->options & VACOPT_VERBOSE) != 0;
 	instrument = (verbose || (AmAutoVacuumWorkerProcess() &&
 							  params->log_vacuum_min_duration >= 0));
@@ -691,6 +723,7 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 	vacrel->dbname = get_database_name(MyDatabaseId);
 	vacrel->relnamespace = get_namespace_name(RelationGetNamespace(rel));
 	vacrel->relname = pstrdup(RelationGetRelationName(rel));
+	vacrel->reloid = RelationGetRelid(rel);
 	vacrel->indname = NULL;
 	vacrel->phase = VACUUM_ERRCB_PHASE_UNKNOWN;
 	vacrel->verbose = verbose;
@@ -994,13 +1027,30 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 	 * leader's sleeps only; parallel workers account their own sleeps to the
 	 * indexes they process.
 	 */
-	pgstat_report_vacuum(rel,
-						 Max(vacrel->new_live_tuples, 0),
-						 vacrel->recently_dead_tuples +
-						 vacrel->missed_dead_tuples,
-						 starttime,
-						 (PgStat_Counter) rint(VacuumDelayTime - startdelaytime),
-						 VacuumFailsafeActive);
+	if (set_report_vacuum_hook)
+	{
+		accumulate_heap_vacuum_statistics(vacrel, &extVacReport);
+
+		pgstat_report_vacuum_ext(rel,
+								 Max(vacrel->new_live_tuples, 0),
+								 vacrel->recently_dead_tuples +
+								 vacrel->missed_dead_tuples,
+								 starttime,
+								 (PgStat_Counter) rint(VacuumDelayTime -
+													   startdelaytime),
+								 VacuumFailsafeActive,
+								 &extVacReport);
+	}
+	else
+		pgstat_report_vacuum_ext(rel,
+								 Max(vacrel->new_live_tuples, 0),
+								 vacrel->recently_dead_tuples +
+								 vacrel->missed_dead_tuples,
+								 starttime,
+								 (PgStat_Counter) rint(VacuumDelayTime -
+													   startdelaytime),
+								 VacuumFailsafeActive,
+								 NULL);
 	pgstat_progress_end_command();
 
 	if (instrument)
@@ -3053,7 +3103,15 @@ lazy_vacuum_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 	LVSavedErrInfo saved_err_info;
 	TimestampTz istarttime = GetCurrentTimestamp();
 	double		startdelaytime = VacuumDelayTime;
+	double		prev_tuples_removed = 0;
+	PgStat_VacuumRelationCounts extVacReport;
 
+	/*
+	 * Snapshot the running bulkdelete totals: an index may be processed
+	 * several times per vacuum, and the report below covers this pass only.
+	 */
+	if (istat != NULL)
+		prev_tuples_removed = istat->tuples_removed;
 	ivinfo.index = indrel;
 	ivinfo.heaprel = vacrel->rel;
 	ivinfo.analyze_only = false;
@@ -3072,6 +3130,7 @@ lazy_vacuum_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 	 */
 	Assert(vacrel->indname == NULL);
 	vacrel->indname = pstrdup(RelationGetRelationName(indrel));
+	vacrel->indoid = RelationGetRelid(indrel);
 	update_vacuum_error_info(vacrel, &saved_err_info,
 							 VACUUM_ERRCB_PHASE_VACUUM_INDEX,
 							 InvalidBlockNumber, InvalidOffsetNumber);
@@ -3087,6 +3146,16 @@ lazy_vacuum_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 									(PgStat_Counter) rint(VacuumDelayTime -
 														  startdelaytime),
 									AmAutoVacuumWorkerProcess());
+
+	if (set_report_vacuum_hook)
+	{
+		memset(&extVacReport, 0, sizeof(extVacReport));
+		extVacReport.type = PGSTAT_EXTVAC_INDEX;
+		if (istat != NULL)
+			extVacReport.common.tuples_deleted =
+				istat->tuples_removed - prev_tuples_removed;
+		pgstat_report_vacuum_ext(indrel, -1, -1, 0, 0, false, &extVacReport);
+	}
 
 	/* Revert to the previous phase information for error traceback */
 	restore_vacuum_error_info(vacrel, &saved_err_info);
@@ -3114,7 +3183,15 @@ lazy_cleanup_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 	LVSavedErrInfo saved_err_info;
 	TimestampTz istarttime = GetCurrentTimestamp();
 	double		startdelaytime = VacuumDelayTime;
+	double		prev_tuples_removed = 0;
+	PgStat_VacuumRelationCounts extVacReport;
 
+	/*
+	 * Snapshot the running bulkdelete totals: an index may be processed
+	 * several times per vacuum, and the report below covers this pass only.
+	 */
+	if (istat != NULL)
+		prev_tuples_removed = istat->tuples_removed;
 	ivinfo.index = indrel;
 	ivinfo.heaprel = vacrel->rel;
 	ivinfo.analyze_only = false;
@@ -3134,6 +3211,7 @@ lazy_cleanup_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 	 */
 	Assert(vacrel->indname == NULL);
 	vacrel->indname = pstrdup(RelationGetRelationName(indrel));
+	vacrel->indoid = RelationGetRelid(indrel);
 	update_vacuum_error_info(vacrel, &saved_err_info,
 							 VACUUM_ERRCB_PHASE_INDEX_CLEANUP,
 							 InvalidBlockNumber, InvalidOffsetNumber);
@@ -3147,6 +3225,16 @@ lazy_cleanup_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 									(PgStat_Counter) rint(VacuumDelayTime -
 														  startdelaytime),
 									AmAutoVacuumWorkerProcess());
+
+	if (set_report_vacuum_hook)
+	{
+		memset(&extVacReport, 0, sizeof(extVacReport));
+		extVacReport.type = PGSTAT_EXTVAC_INDEX;
+		if (istat != NULL)
+			extVacReport.common.tuples_deleted =
+				istat->tuples_removed - prev_tuples_removed;
+		pgstat_report_vacuum_ext(indrel, -1, -1, 0, 0, false, &extVacReport);
+	}
 
 	/* Revert to the previous phase information for error traceback */
 	restore_vacuum_error_info(vacrel, &saved_err_info);
