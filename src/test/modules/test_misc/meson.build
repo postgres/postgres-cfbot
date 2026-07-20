@@ -26,6 +26,7 @@ tests += {
       't/015_temp_schema_exit_deferrable.pl',
       't/016_index_vacuum_time.pl',
       't/017_vacuum_failsafe.pl',
+      't/018_vacuum_interrupts.pl',
     ],
     # The injection points are cluster-wide, so disable installcheck
     'runningcheck': false,

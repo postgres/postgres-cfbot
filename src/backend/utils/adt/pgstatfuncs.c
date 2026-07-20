@@ -1192,6 +1192,9 @@ PG_STAT_GET_DBENTRY_INT64(conflict_tablespace)
 /* pg_stat_get_db_deadlocks */
 PG_STAT_GET_DBENTRY_INT64(deadlocks)
 
+/* pg_stat_get_db_vacuum_interrupt_count */
+PG_STAT_GET_DBENTRY_INT64(vacuum_interrupt_count)
+
 /* pg_stat_get_db_sessions */
 PG_STAT_GET_DBENTRY_INT64(sessions)
 
