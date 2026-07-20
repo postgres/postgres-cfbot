@@ -40,9 +40,17 @@ CREATE OR REPLACE FUNCTION ext_vacuum_statistics.pg_stats_get_vacuum_tables(
     IN  dboid oid,
     IN  reloid oid,
     OUT relid oid,
+    OUT total_blks_read bigint,
+    OUT total_blks_hit bigint,
+    OUT total_blks_dirtied bigint,
+    OUT total_blks_written bigint,
     OUT wal_records bigint,
     OUT wal_fpi bigint,
     OUT wal_bytes numeric,
+    OUT blk_read_time double precision,
+    OUT blk_write_time double precision,
+    OUT rel_blks_read bigint,
+    OUT rel_blks_hit bigint,
     OUT tuples_deleted bigint,
     OUT pages_scanned bigint,
     OUT pages_removed bigint,
@@ -60,9 +68,17 @@ CREATE OR REPLACE FUNCTION ext_vacuum_statistics.pg_stats_get_vacuum_indexes(
     IN  dboid oid,
     IN  reloid oid,
     OUT relid oid,
+    OUT total_blks_read bigint,
+    OUT total_blks_hit bigint,
+    OUT total_blks_dirtied bigint,
+    OUT total_blks_written bigint,
     OUT wal_records bigint,
     OUT wal_fpi bigint,
     OUT wal_bytes numeric,
+    OUT blk_read_time double precision,
+    OUT blk_write_time double precision,
+    OUT rel_blks_read bigint,
+    OUT rel_blks_hit bigint,
     OUT tuples_deleted bigint,
     OUT pages_deleted bigint
 )
@@ -74,9 +90,15 @@ LANGUAGE C STRICT STABLE;
 CREATE OR REPLACE FUNCTION ext_vacuum_statistics.pg_stats_get_vacuum_database(
     IN  dboid oid,
     OUT dbid oid,
+    OUT total_blks_read bigint,
+    OUT total_blks_hit bigint,
+    OUT total_blks_dirtied bigint,
+    OUT total_blks_written bigint,
     OUT wal_records bigint,
     OUT wal_fpi bigint,
-    OUT wal_bytes numeric
+    OUT wal_bytes numeric,
+    OUT blk_read_time double precision,
+    OUT blk_write_time double precision
 )
 RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'pg_stats_get_vacuum_database'
@@ -89,9 +111,17 @@ SELECT
   ns.nspname AS schema,
   rel.relname AS relname,
   db.datname AS dbname,
+  stats.total_blks_read,
+  stats.total_blks_hit,
+  stats.total_blks_dirtied,
+  stats.total_blks_written,
   stats.wal_records,
   stats.wal_fpi,
   stats.wal_bytes,
+  stats.blk_read_time,
+  stats.blk_write_time,
+  stats.rel_blks_read,
+  stats.rel_blks_hit,
   stats.tuples_deleted,
   stats.pages_scanned,
   stats.pages_removed,
@@ -118,9 +148,17 @@ SELECT
   ns.nspname AS schema,
   rel.relname AS indexrelname,
   db.datname AS dbname,
+  stats.total_blks_read,
+  stats.total_blks_hit,
+  stats.total_blks_dirtied,
+  stats.total_blks_written,
   stats.wal_records,
   stats.wal_fpi,
   stats.wal_bytes,
+  stats.blk_read_time,
+  stats.blk_write_time,
+  stats.rel_blks_read,
+  stats.rel_blks_hit,
   stats.tuples_deleted,
   stats.pages_deleted
 FROM pg_database db,
@@ -140,9 +178,15 @@ CREATE VIEW ext_vacuum_statistics.pg_stats_vacuum_database AS
 SELECT
   db.oid AS dboid,
   db.datname AS dbname,
+  stats.total_blks_read AS db_blks_read,
+  stats.total_blks_hit AS db_blks_hit,
+  stats.total_blks_dirtied AS db_blks_dirtied,
+  stats.total_blks_written AS db_blks_written,
   stats.wal_records AS db_wal_records,
   stats.wal_fpi AS db_wal_fpi,
-  stats.wal_bytes AS db_wal_bytes
+  stats.wal_bytes AS db_wal_bytes,
+  stats.blk_read_time AS db_blk_read_time,
+  stats.blk_write_time AS db_blk_write_time
 FROM pg_database db
 LEFT JOIN LATERAL ext_vacuum_statistics.pg_stats_get_vacuum_database(db.oid) stats ON db.oid = stats.dbid;
 
