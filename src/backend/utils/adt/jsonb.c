@@ -245,7 +245,7 @@ jsonb_from_cstring(char *json, int len, bool unique_keys, Node *escontext)
 
 	memset(&state, 0, sizeof(state));
 	memset(&sem, 0, sizeof(sem));
-	makeJsonLexContextCstringLen(&lex, json, len, GetDatabaseEncoding(), true);
+	makeJsonLexContextCstringLen(&lex, json, len, GetDatabaseEncoding(), true, false);
 
 	state.unique_keys = unique_keys;
 	state.escontext = escontext;

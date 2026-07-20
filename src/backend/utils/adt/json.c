@@ -159,7 +159,7 @@ json_recv(PG_FUNCTION_ARGS)
 
 	/* Validate it. */
 	makeJsonLexContextCstringLen(&lex, str, nbytes, GetDatabaseEncoding(),
-								 false);
+								 false, false);
 	pg_parse_json_or_ereport(&lex, &nullSemAction);
 
 	PG_RETURN_TEXT_P(cstring_to_text_with_len(str, nbytes));
