@@ -31,5 +31,6 @@ extern Datum json_build_object_worker(int nargs, const Datum *args, const bool *
 extern Datum json_build_array_worker(int nargs, const Datum *args, const bool *nulls,
 									 const Oid *types, bool absent_on_null);
 extern bool json_validate(text *json, bool check_unique_keys, bool throw_error);
+extern bool json5_nonfinite_number(const char *token);
 
 #endif							/* JSON_H */
