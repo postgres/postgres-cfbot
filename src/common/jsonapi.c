@@ -2293,6 +2293,19 @@ json_lex(JsonLexContext *lex)
 				lex->token_terminator = s + 1;
 				lex->token_type = JSON_TOKEN_COLON;
 				break;
+			case '\'':
+				if (!lex->json5)
+				{
+					lex->prev_token_terminator = lex->token_terminator;
+					lex->token_terminator = s + 1;
+					return JSON_INVALID_TOKEN;
+				}
+
+				/*
+				 * json5 single-quoted string.  Share the call below, so that
+				 * json_lex_string() still gets inlined.
+				 */
+				pg_fallthrough;
 			case '"':
 				/* string */
 				result = json_lex_string(lex);
@@ -2417,6 +2430,7 @@ json_lex_string(JsonLexContext *lex)
 	const char *s;
 	const char *const end = lex->input + lex->input_length;
 	int			hi_surrogate = -1;
+	char		quote_char = *lex->token_start;
 	JsonParseErrorType result;
 
 	/* Convenience macros for error exits */
@@ -2460,7 +2474,7 @@ json_lex_string(JsonLexContext *lex)
 		/* Premature end of the string. */
 		if (s >= end)
 			FAIL_OR_INCOMPLETE_AT_CHAR_START(JSON_INVALID_TOKEN);
-		else if (*s == '"')
+		else if (*s == quote_char)
 			break;
 		else if (*s == '\\')
 		{
@@ -2539,6 +2553,14 @@ json_lex_string(JsonLexContext *lex)
 					case '/':
 						jsonapi_appendStringInfoChar(lex->strval, *s);
 						break;
+					case '\'':
+						if (!lex->json5)
+						{
+							lex->token_start = s;
+							FAIL_AT_CHAR_END(JSON_ESCAPING_INVALID);
+						}
+						jsonapi_appendStringInfoChar(lex->strval, *s);
+						break;
 					case 'b':
 						jsonapi_appendStringInfoChar(lex->strval, '\b');
 						break;
@@ -2565,7 +2587,8 @@ json_lex_string(JsonLexContext *lex)
 						FAIL_AT_CHAR_END(JSON_ESCAPING_INVALID);
 				}
 			}
-			else if (strchr("\"\\/bfnrt", *s) == NULL)
+			else if (strchr("\"\\/bfnrt", *s) == NULL &&
+					 !(lex->json5 && *s == '\''))
 			{
 				/*
 				 * Simpler processing if we're not bothered about de-escaping
@@ -2591,13 +2614,13 @@ json_lex_string(JsonLexContext *lex)
 			 */
 			while (p < end - sizeof(Vector8) &&
 				   !pg_lfind8('\\', (const uint8 *) p, sizeof(Vector8)) &&
-				   !pg_lfind8('"', (const uint8 *) p, sizeof(Vector8)) &&
+				   !pg_lfind8(quote_char, (const uint8 *) p, sizeof(Vector8)) &&
 				   !pg_lfind8_le(31, (const uint8 *) p, sizeof(Vector8)))
 				p += sizeof(Vector8);
 
 			for (; p < end; p++)
 			{
-				if (*p == '\\' || *p == '"')
+				if (*p == '\\' || *p == quote_char)
 					break;
 				else if ((unsigned char) *p <= 31)
 				{
