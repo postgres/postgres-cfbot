@@ -46,7 +46,25 @@ my @json5_inline_cases = (
 		"[1, // c\xe2\x80\xa9 2]", "[\n1,\n2\n]"
 	],
 	[ 'non-space symbol outside strings', "[1,\xe2\x80\xa6 2]", undef ],
-	[ 'invalid UTF-8 outside strings', "[1,\xc2 2]", undef ],);
+	[ 'invalid UTF-8 outside strings', "[1,\xc2 2]", undef ],
+	[
+		'no-break space around unquoted key',
+		"{\xc2\xa0a\xc2\xa0: 1}", "{\n\"a\": 1\n}"
+	],
+	[ 'non-ASCII letter in key', "{\xc3\xa9t\xc3\xa9: 1}", "{\n\"\xc3\xa9t\xc3\xa9\": 1\n}" ],
+	[ 'combining mark after first key char', "{a\xcc\x81: 1}", "{\n\"a\xcc\x81\": 1\n}" ],
+	[ 'combining mark as first key char', "{\xcc\x81a: 1}", undef ],
+	[ 'zero width non-joiner in key', "{a\xe2\x80\x8cb: 1}", "{\n\"a\xe2\x80\x8cb\": 1\n}" ],
+	[ 'non-identifier symbol in key', "{a\xe2\x80\xa6b: 1}", undef ],
+	[ 'escaped key characters', "{\\u0061b\\u0063: 1}", "{\n\"abc\": 1\n}" ],
+	[ 'escaped non-ASCII key character', "{\\u00e9: 1}", "{\n\"\xc3\xa9\": 1\n}" ],
+	[ 'escaped space in key', "{a\\u0020b: 1}", undef ],
+	[ 'malformed escape in key', "{a\\u00zz: 1}", undef ],
+	[ 'escaped surrogate pair in key', "{\\ud83d\\ude00: 1}", undef ],
+	[ 'keyword continued by escape', "{true\\u0061: 1}", "{\n\"truea\": 1\n}" ],
+	[ 'escaped keyword as key', "{\\u0074rue: 1}", "{\n\"true\": 1\n}" ],
+	[ 'escaped keyword as value', "[\\u0074rue]", undef ],
+	[ 'keyword followed by no-break space', "[true\xc2\xa0]", "[\ntrue\n]" ],);
 
 # One entry per feature: fixture basename plus, where the failing token
 # is predictable, a regex for the error reported without --json5.
@@ -56,7 +74,8 @@ my @features = (
 		file => 'json5_comments',
 		error => qr/Token "\/" is invalid/,
 	},
-	{ name => 'trailing commas', file => 'json5_trailing_commas' },);
+	{ name => 'trailing commas', file => 'json5_trailing_commas' },
+	{ name => 'unquoted keys', file => 'json5_keys' },);
 
 # Inputs that stay invalid even in json5 mode.
 my @json5_invalid = (
@@ -67,7 +86,19 @@ my @json5_invalid = (
 	[ 'lone comma', '[,]' ],
 	[ 'lone comma in object', '{,}' ],
 	[ 'missing comma', '[true false]' ],
-	[ 'missing comma in object', '{"a":1 "b":2}' ],);
+	[ 'missing comma in object', '{"a":1 "b":2}' ],
+	[ 'digit-led key', '{ 1a: 1 }' ],
+	[ 'identifier value in object', '{ a: b }' ],
+	[ 'identifier value in array', '[a]' ],
+	[ 'bare identifier', 'undefined' ],
+	[ 'dollar after number', '2$' ],
+	[ 'dollar after number in array', '[25$]' ],
+	[ 'digit as first key', '{1: 1}' ],
+	[ 'hyphen inside unquoted key', '{multi-word: 1}' ],);
+
+# Valid json5 corner cases not covered by the feature fixtures.
+my @json5_misc_valid = (
+	[ 'reserved word as first key', '{true: 1, a: 2}' ],);
 
 # Write $content to a temp file and return the file name.  The file is
 # written in binary mode, so that CR and LF in $content reach the parser
@@ -174,6 +205,17 @@ foreach my $exe (@exes)
 		my $fname = inline_file($content);
 
 		check_rejected($exe, $fname, "json5 mode: $label", undef, "--json5");
+	}
+
+	foreach my $v (@json5_misc_valid)
+	{
+		my ($label, $content) = @$v;
+		my $fname = inline_file($content);
+
+		my ($stdout, $stderr) = run_parser($exe, "--json5", $fname);
+
+		like($stdout, qr/SUCCESS/, "json5 mode: $label: parse succeeds");
+		is($stderr, "", "json5 mode: $label: no error output");
 	}
 }
 
