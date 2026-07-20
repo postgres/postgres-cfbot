@@ -466,6 +466,188 @@ json5_skip_whitespace(JsonLexContext *lex, const char *s)
 }
 
 /*
+ * Can c appear in a json5 unquoted object key?  json5 follows the
+ * IdentifierName production of ECMAScript 5.1: the first character must be
+ * a Unicode letter, '$' or '_', later ones may also be combining marks,
+ * decimal digits, connector punctuation, ZWNJ or ZWJ.
+ */
+static bool
+json5_identifier_char(char32_t c, bool first)
+{
+	if (c < 0x80)
+		return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			c == '$' || c == '_' || (!first && c >= '0' && c <= '9');
+
+	if (!first && (c == 0x200C || c == 0x200D))
+		return true;
+
+	switch (unicode_category(c))
+	{
+		case PG_U_UPPERCASE_LETTER:
+		case PG_U_LOWERCASE_LETTER:
+		case PG_U_TITLECASE_LETTER:
+		case PG_U_MODIFIER_LETTER:
+		case PG_U_OTHER_LETTER:
+		case PG_U_LETTER_NUMBER:
+			return true;
+		case PG_U_NONSPACING_MARK:
+		case PG_U_SPACING_MARK:
+		case PG_U_DECIMAL_NUMBER:
+		case PG_U_CONNECTOR_PUNCTUATION:
+			return !first;
+		default:
+			return false;
+	}
+}
+
+/*
+ * Append the character with code point ch to lex->strval, converting it to
+ * the input encoding.  In the backend, pg_unicode_to_server_noerror() handles
+ * any required character set conversion; in frontend, we can only deal with
+ * trivial conversions.
+ */
+static JsonParseErrorType
+append_codepoint(JsonLexContext *lex, char32_t ch)
+{
+#ifndef FRONTEND
+	char		cbuf[MAX_UNICODE_EQUIVALENT_STRING + 1];
+
+	if (!pg_unicode_to_server_noerror(ch, (unsigned char *) cbuf))
+		return JSON_UNICODE_UNTRANSLATABLE;
+	appendStringInfoString(lex->strval, cbuf);
+#else
+	if (lex->input_encoding == PG_UTF8)
+	{
+		char		utf8str[5];
+
+		unicode_to_utf8(ch, (unsigned char *) utf8str);
+		jsonapi_appendBinaryStringInfo(lex->strval, utf8str,
+									   pg_utf_mblen((unsigned char *) utf8str));
+	}
+	else if (ch <= 0x007f)
+		jsonapi_appendStringInfoChar(lex->strval, (char) ch);
+	else
+		return JSON_UNICODE_HIGH_ESCAPE;
+#endif
+	return JSON_SUCCESS;
+}
+
+/*
+ * Lex a json5 unquoted object key starting at s.
+ *
+ * The key may contain \uXXXX escapes, each of which must denote an
+ * identifier character itself.  Raw non-ASCII characters are only accepted
+ * in UTF-8 input, as we can't classify them otherwise; other encodings have
+ * to spell those with escapes.  The key ends at the first character that
+ * can't continue it, which is left for the next token.
+ *
+ * The caller has already matched the common case of a keyword taking up the
+ * whole alphanumeric word, but the key can end earlier, e.g. at a Unicode
+ * space, so keywords are recognized here too.  Escaped keywords are plain
+ * identifiers, as in ECMAScript.
+ *
+ * On success the token is a string with token_is_identifier set, or a
+ * keyword token.  If s doesn't start an identifier, the caller's
+ * token_terminator is kept for the error report.
+ */
+static pg_noinline JsonParseErrorType
+json5_lex_identifier(JsonLexContext *lex, const char *s)
+{
+	const char *const end = lex->input + lex->input_length;
+	const char *p = s;
+	bool		escaped = false;
+
+	if (lex->need_escapes)
+	{
+#ifdef JSONAPI_USE_PQEXPBUFFER
+		/* make sure initialization succeeded */
+		if (lex->strval == NULL)
+			return JSON_OUT_OF_MEMORY;
+#endif
+		jsonapi_resetStringInfo(lex->strval);
+	}
+
+	while (p < end)
+	{
+		char32_t	c = 0;
+		int			len;
+
+		if (*p == '\\')
+		{
+			int			i;
+
+			if (end - p < 6 || p[1] != 'u')
+				break;
+			for (i = 2; i < 6; i++)
+			{
+				if (p[i] >= '0' && p[i] <= '9')
+					c = (c * 16) + (p[i] - '0');
+				else if (p[i] >= 'a' && p[i] <= 'f')
+					c = (c * 16) + (p[i] - 'a') + 10;
+				else if (p[i] >= 'A' && p[i] <= 'F')
+					c = (c * 16) + (p[i] - 'A') + 10;
+				else
+					break;
+			}
+			if (i < 6)
+				break;
+			len = 6;
+		}
+		else if (IS_HIGHBIT_SET(*p))
+		{
+			len = json5_decode_utf8(lex, p, end, &c);
+			if (len == 0)
+				break;
+		}
+		else
+		{
+			c = (unsigned char) *p;
+			len = 1;
+		}
+
+		if (!json5_identifier_char(c, p == s))
+			break;
+
+		if (*p == '\\')
+		{
+			escaped = true;
+			if (lex->need_escapes)
+			{
+				JsonParseErrorType result = append_codepoint(lex, c);
+
+				if (result != JSON_SUCCESS)
+				{
+					lex->token_terminator = p + len;
+					return result;
+				}
+			}
+		}
+		else if (lex->need_escapes)
+			jsonapi_appendBinaryStringInfo(lex->strval, p, len);
+
+		p += len;
+	}
+
+	if (p == s)
+		return JSON_INVALID_TOKEN;
+
+	lex->token_terminator = p;
+
+	if (!escaped && p - s == 4 && memcmp(s, "true", 4) == 0)
+		lex->token_type = JSON_TOKEN_TRUE;
+	else if (!escaped && p - s == 4 && memcmp(s, "null", 4) == 0)
+		lex->token_type = JSON_TOKEN_NULL;
+	else if (!escaped && p - s == 5 && memcmp(s, "false", 5) == 0)
+		lex->token_type = JSON_TOKEN_FALSE;
+	else
+	{
+		lex->token_type = JSON_TOKEN_STRING;
+		lex->token_is_identifier = true;
+	}
+	return JSON_SUCCESS;
+}
+
+/*
  * Utility function to check if a string is a valid JSON number.
  *
  * str is of length len, and need not be null-terminated.
@@ -779,6 +961,33 @@ static inline bool
 have_prediction(JsonParserStack *pstack)
 {
 	return pstack->pred_index > 0;
+}
+
+/* reserved words that json5 accepts as unquoted object keys */
+static inline bool
+json5_keyword_key(const JsonLexContext *lex, JsonTokenType tok)
+{
+	return tok == JSON_TOKEN_TRUE || tok == JSON_TOKEN_FALSE ||
+		tok == JSON_TOKEN_NULL ||
+		(tok == JSON_TOKEN_NUMBER && lex->token_is_identifier);
+}
+
+/*
+ * Copy the current token's raw lexeme into a NUL-terminated string.
+ * Returns NULL on allocation failure.
+ */
+static char *
+copy_token_lexeme(JsonLexContext *lex)
+{
+	size_t		len = lex->token_terminator - lex->token_start;
+	char	   *val = ALLOC(len + 1);
+
+	if (val != NULL)
+	{
+		memcpy(val, lex->token_start, len);
+		val[len] = '\0';
+	}
+	return val;
 }
 
 static inline void
@@ -1404,6 +1613,10 @@ parse_scalar(JsonLexContext *lex, const JsonSemAction *sem)
 		tok != JSON_TOKEN_NULL)
 		return report_parse_error(JSON_PARSE_VALUE, lex);
 
+	/* json5 unquoted identifiers are lexed as strings but can't be values */
+	if (unlikely(lex->token_is_identifier) && tok == JSON_TOKEN_STRING)
+		return report_parse_error(JSON_PARSE_VALUE, lex);
+
 	/* if no semantic function, just consume the token */
 	if (sfunc == NULL)
 		return json_lex(lex);
@@ -1420,14 +1633,9 @@ parse_scalar(JsonLexContext *lex, const JsonSemAction *sem)
 	}
 	else
 	{
-		int			len = (lex->token_terminator - lex->token_start);
-
-		val = ALLOC(len + 1);
+		val = copy_token_lexeme(lex);
 		if (val == NULL)
 			return JSON_OUT_OF_MEMORY;
-
-		memcpy(val, lex->token_start, len);
-		val[len] = '\0';
 	}
 
 	/* consume the token */
@@ -1466,15 +1674,28 @@ parse_object_field(JsonLexContext *lex, const JsonSemAction *sem)
 	JsonTokenType tok;
 	JsonParseErrorType result;
 
-	if (lex_peek(lex) != JSON_TOKEN_STRING)
-		return report_parse_error(JSON_PARSE_STRING, lex);
-	if ((ostart != NULL || oend != NULL) && lex->need_escapes)
+	if (lex_peek(lex) == JSON_TOKEN_STRING)
 	{
-		/* fname is NULL if need_escapes is false */
-		fname = STRDUP(lex->strval->data);
-		if (fname == NULL)
-			return JSON_OUT_OF_MEMORY;
+		if ((ostart != NULL || oend != NULL) && lex->need_escapes)
+		{
+			/* fname is NULL if need_escapes is false */
+			fname = STRDUP(lex->strval->data);
+			if (fname == NULL)
+				return JSON_OUT_OF_MEMORY;
+		}
 	}
+	else if (lex->json5 && json5_keyword_key(lex, lex_peek(lex)))
+	{
+		if ((ostart != NULL || oend != NULL) && lex->need_escapes)
+		{
+			/* the lexer only fills strval for real strings */
+			fname = copy_token_lexeme(lex);
+			if (fname == NULL)
+				return JSON_OUT_OF_MEMORY;
+		}
+	}
+	else
+		return report_parse_error(JSON_PARSE_STRING, lex);
 	result = json_lex(lex);
 	if (result != JSON_SUCCESS)
 	{
@@ -1570,6 +1791,16 @@ parse_object(JsonLexContext *lex, const JsonSemAction *sem)
 	tok = lex_peek(lex);
 	switch (tok)
 	{
+		case JSON_TOKEN_TRUE:
+		case JSON_TOKEN_FALSE:
+		case JSON_TOKEN_NULL:
+		case JSON_TOKEN_NUMBER:
+			if (!lex->json5 || !json5_keyword_key(lex, tok))
+			{
+				result = report_parse_error(JSON_PARSE_OBJECT_START, lex);
+				break;
+			}
+			pg_fallthrough;
 		case JSON_TOKEN_STRING:
 			result = parse_object_field(lex, sem);
 			while (result == JSON_SUCCESS && lex_peek(lex) == JSON_TOKEN_COMMA)
@@ -2007,9 +2238,14 @@ json_lex(JsonLexContext *lex)
 	/* json5 also allows more whitespace characters, and comments */
 	if (unlikely(lex->json5))
 	{
-		s = json5_skip_whitespace(lex, s);
-		if (s == NULL)
-			return JSON_UNTERMINATED_COMMENT;
+		lex->token_is_identifier = false;
+		if (s < end && (*s == '/' || *s == '\v' || *s == '\f' ||
+						IS_HIGHBIT_SET(*s)))
+		{
+			s = json5_skip_whitespace(lex, s);
+			if (s == NULL)
+				return JSON_UNTERMINATED_COMMENT;
+		}
 	}
 
 	lex->token_start = s;
@@ -2100,7 +2336,9 @@ json_lex(JsonLexContext *lex)
 					 * the whole word as an unexpected token, rather than just
 					 * some unintuitive prefix thereof.
 					 */
-					for (p = s; p < end && JSON_ALPHANUMERIC_CHAR(*p); p++)
+					for (p = s; p < end && (JSON_ALPHANUMERIC_CHAR(*p) ||
+											(lex->json5 &&
+											 (*p == '$' || *p == '\\'))); p++)
 						 /* skip */ ;
 
 					/*
@@ -2135,11 +2373,21 @@ json_lex(JsonLexContext *lex)
 							lex->token_type = JSON_TOKEN_TRUE;
 						else if (memcmp(s, "null", 4) == 0)
 							lex->token_type = JSON_TOKEN_NULL;
+						else if (lex->json5)
+							goto json5_identifier;
 						else
 							return JSON_INVALID_TOKEN;
 					}
 					else if (p - s == 5 && memcmp(s, "false", 5) == 0)
 						lex->token_type = JSON_TOKEN_FALSE;
+					else if (lex->json5)
+					{
+						/* Infinity/NaN handled with number extensions */
+json5_identifier:
+						result = json5_lex_identifier(lex, s);
+						if (result != JSON_SUCCESS)
+							return result;
+					}
 					else
 						return JSON_INVALID_TOKEN;
 				}
@@ -2169,6 +2417,7 @@ json_lex_string(JsonLexContext *lex)
 	const char *s;
 	const char *const end = lex->input + lex->input_length;
 	int			hi_surrogate = -1;
+	JsonParseErrorType result;
 
 	/* Convenience macros for error exits */
 #define FAIL_OR_INCOMPLETE_AT_CHAR_START(code) \
@@ -2272,39 +2521,10 @@ json_lex_string(JsonLexContext *lex)
 						FAIL_AT_CHAR_END(JSON_UNICODE_CODE_POINT_ZERO);
 					}
 
-					/*
-					 * Add the represented character to lex->strval.  In the
-					 * backend, we can let pg_unicode_to_server_noerror()
-					 * handle any required character set conversion; in
-					 * frontend, we can only deal with trivial conversions.
-					 */
-#ifndef FRONTEND
-					{
-						char		cbuf[MAX_UNICODE_EQUIVALENT_STRING + 1];
-
-						if (!pg_unicode_to_server_noerror(ch, (unsigned char *) cbuf))
-							FAIL_AT_CHAR_END(JSON_UNICODE_UNTRANSLATABLE);
-						appendStringInfoString(lex->strval, cbuf);
-					}
-#else
-					if (lex->input_encoding == PG_UTF8)
-					{
-						/* OK, we can map the code point to UTF8 easily */
-						char		utf8str[5];
-						int			utf8len;
-
-						unicode_to_utf8(ch, (unsigned char *) utf8str);
-						utf8len = pg_utf_mblen((unsigned char *) utf8str);
-						jsonapi_appendBinaryStringInfo(lex->strval, utf8str, utf8len);
-					}
-					else if (ch <= 0x007f)
-					{
-						/* The ASCII range is the same in all encodings */
-						jsonapi_appendStringInfoChar(lex->strval, (char) ch);
-					}
-					else
-						FAIL_AT_CHAR_END(JSON_UNICODE_HIGH_ESCAPE);
-#endif							/* FRONTEND */
+					/* Add the represented character to lex->strval. */
+					result = append_codepoint(lex, ch);
+					if (result != JSON_SUCCESS)
+						FAIL_AT_CHAR_END(result);
 				}
 			}
 			else if (lex->need_escapes)
@@ -2519,9 +2739,11 @@ json_lex_number(JsonLexContext *lex, const char *s,
 	/*
 	 * Check for trailing garbage.  As in json_lex(), any alphanumeric stuff
 	 * here should be considered part of the token for error-reporting
-	 * purposes.
+	 * purposes; in json5 that includes '$'.
 	 */
-	for (; len < lex->input_length && JSON_ALPHANUMERIC_CHAR(*s); s++, len++)
+	for (; len < lex->input_length &&
+		 (JSON_ALPHANUMERIC_CHAR(*s) || (lex->json5 && *s == '$'));
+		 s++, len++)
 		error = true;
 
 	if (total_len != NULL)
