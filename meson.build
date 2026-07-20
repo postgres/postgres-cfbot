@@ -3382,6 +3382,10 @@ tests = []
 
 # Default options for targets
 
+# Test timeout for all regress, isolation, TAP suites. Can be raised for an
+# individual test by setting the 'timeout' key in its test_kwargs.
+test_timeout = 1000
+
 # First identify rpaths
 bin_install_rpaths = []
 lib_install_rpaths = []
@@ -4016,7 +4020,7 @@ foreach test_dir : tests
       test_kwargs = {
         'protocol': 'tap',
         'priority': 10,
-        'timeout': 1000,
+        'timeout': test_timeout,
         'depends': test_deps + t.get('deps', []),
         'env': env,
       } + t.get('test_kwargs', {})
@@ -4089,7 +4093,7 @@ foreach test_dir : tests
       test_kwargs = {
         'protocol': 'tap',
         'suite': test_group,
-        'timeout': 1000,
+        'timeout': test_timeout,
         'depends': test_deps + t.get('deps', []),
         'env': env,
       } + t.get('test_kwargs', {})

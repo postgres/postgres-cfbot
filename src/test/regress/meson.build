@@ -52,7 +52,7 @@ tests += {
     'schedule': files('parallel_schedule'),
     'test_kwargs': {
       'priority': 50,
-      'timeout': 1000,
+      'timeout': test_timeout,
     },
     'dbname': 'regression',
   },
