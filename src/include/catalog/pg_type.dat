@@ -457,6 +457,14 @@
   typreceive => 'jsonpath_recv', typsend => 'jsonpath_send', typalign => 'i',
   typstorage => 'x' },
 
+# json5
+{ oid => '9960', array_type_oid => '9961',
+  descr => 'JSON5 stored as text',
+  typname => 'json5', typlen => '-1', typbyval => 'f', typcategory => 'U',
+  typinput => 'json5_in', typoutput => 'json5_out',
+  typreceive => 'json5_recv', typsend => 'json5_send',
+  typalign => 'i', typstorage => 'x' },
+
 { oid => '2970', array_type_oid => '2949', descr => 'transaction snapshot',
   typname => 'txid_snapshot', typlen => '-1', typbyval => 'f',
   typcategory => 'U', typinput => 'txid_snapshot_in',
