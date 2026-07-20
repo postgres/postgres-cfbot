@@ -662,7 +662,8 @@ json_errsave_error(JsonParseErrorType error, JsonLexContext *lex,
 	else
 		errsave(escontext,
 				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-				 errmsg("invalid input syntax for type %s", "json"),
+				 errmsg("invalid input syntax for type %s",
+						lex->json5 ? "json5" : "json"),
 				 errdetail_internal("%s", json_errdetail(error, lex)),
 				 report_json_context(lex)));
 }
@@ -6014,6 +6015,16 @@ json_categorize_type(Oid typoid, bool is_jsonb,
 		case JSONBOID:
 			getTypeOutputInfo(typoid, outfuncoid, &typisvarlena);
 			*tcategory = is_jsonb ? JSONTYPE_JSONB : JSONTYPE_JSON;
+			break;
+
+		case JSON5OID:
+
+			/*
+			 * json5 text isn't valid JSON, so go through the json5 -> json
+			 * cast, as for a non-builtin type with a cast to json.
+			 */
+			*outfuncoid = F_JSON5_TO_JSON;
+			*tcategory = JSONTYPE_CAST;
 			break;
 
 		default:
