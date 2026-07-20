@@ -2610,6 +2610,116 @@ json_lex(JsonLexContext *lex)
 }
 
 /*
+ * Lex a json5 escape sequence that JSON doesn't have, for json_lex_string().
+ *
+ * json5 escapes follow ECMAScript 5.1.  Besides the JSON ones, there are
+ * \', \v, \0 and \xHH; a backslash before a line terminator continues the
+ * string on the next line; and any other character except a digit stands
+ * for itself.  If that is a multibyte character, only its first byte is
+ * consumed here, the caller copies the rest as ordinary string content.
+ *
+ * s points at the character after the backslash.  Returns the position of
+ * the last character of the sequence, or NULL after setting *err and the
+ * error position in lex.  This is kept out of line so that it doesn't weigh
+ * on the strict JSON string lexing it is inlined into, and returns the
+ * position so that the caller's cursor can stay in a register.
+ */
+static pg_noinline const char *
+json5_lex_escape(JsonLexContext *lex, const char *s, JsonParseErrorType *err)
+{
+	const char *const end = lex->input + lex->input_length;
+	int			lslen = 0;
+
+	/* like json_lex_string()'s FAIL_AT_CHAR_END */
+#define FAIL_AT_CHAR_END(code) \
+	do { \
+		ptrdiff_t	remaining = end - s; \
+		int			charlen; \
+		charlen = pg_encoding_mblen_or_incomplete(lex->input_encoding, \
+												  s, remaining); \
+		lex->token_terminator = (charlen <= remaining) ? s + charlen : end; \
+		*err = (code); \
+		return NULL; \
+	} while (0)
+
+	if (*s == '\n' || *s == '\r' ||
+		(lslen = json5_line_separator_len(lex, s, end)) > 0)
+	{
+		if (*s == '\r' && s + 1 < end && *(s + 1) == '\n')
+			s++;
+		if (*s == '\n' || *s == '\r')
+		{
+			++lex->line_number;
+			lex->line_start = s + 1;
+		}
+		else
+			s += lslen - 1;
+	}
+	else if (*s == 'x')
+	{
+		const char *x = s;
+		char32_t	ch = 0;
+		int			i;
+
+		for (i = 1; i <= 2; i++)
+		{
+			s++;
+			if (s >= end)
+			{
+				/* json5 is never lexed incrementally */
+				lex->token_terminator = s;
+				*err = JSON_INVALID_TOKEN;
+				return NULL;
+			}
+			else if (*s >= '0' && *s <= '9')
+				ch = (ch * 16) + (*s - '0');
+			else if (*s >= 'a' && *s <= 'f')
+				ch = (ch * 16) + (*s - 'a') + 10;
+			else if (*s >= 'A' && *s <= 'F')
+				ch = (ch * 16) + (*s - 'A') + 10;
+			else
+			{
+				lex->token_start = x;
+				FAIL_AT_CHAR_END(JSON_ESCAPING_INVALID);
+			}
+		}
+		if (lex->need_escapes)
+		{
+			JsonParseErrorType result;
+
+			/* same restriction as for \u0000 */
+			if (ch == 0)
+				FAIL_AT_CHAR_END(JSON_UNICODE_CODE_POINT_ZERO);
+			result = append_codepoint(lex, ch);
+			if (result != JSON_SUCCESS)
+				FAIL_AT_CHAR_END(result);
+		}
+	}
+	else if (*s == '0' && !(s + 1 < end && *(s + 1) >= '0' && *(s + 1) <= '9'))
+	{
+		if (lex->need_escapes)
+			FAIL_AT_CHAR_END(JSON_UNICODE_CODE_POINT_ZERO);
+	}
+	else if ((*s >= '0' && *s <= '9') || *s == '\0')
+	{
+		/* octal-looking escapes aren't allowed, nor is a raw NUL */
+		lex->token_start = s;
+		FAIL_AT_CHAR_END(JSON_ESCAPING_INVALID);
+	}
+	else if (lex->need_escapes)
+	{
+		if (*s == 'v')
+			jsonapi_appendStringInfoChar(lex->strval, '\v');
+		else
+			jsonapi_appendStringInfoChar(lex->strval, *s);
+	}
+
+	return s;
+
+#undef FAIL_AT_CHAR_END
+}
+
+/*
  * The next token in the input stream is known to be a string; lex it.
  *
  * If lex->strval isn't NULL, fill it with the decoded string.
@@ -2737,6 +2847,16 @@ json_lex_string(JsonLexContext *lex)
 						FAIL_AT_CHAR_END(result);
 				}
 			}
+			else if (unlikely(lex->json5) &&
+					 (*s == '\0' || strchr("\"\\/bfnrt", *s) == NULL))
+			{
+				/* json5-only escape; the JSON ones are handled below */
+				if (hi_surrogate != -1)
+					FAIL_AT_CHAR_END(JSON_UNICODE_LOW_SURROGATE);
+				s = json5_lex_escape(lex, s, &result);
+				if (s == NULL)
+					return result;
+			}
 			else if (lex->need_escapes)
 			{
 				if (hi_surrogate != -1)
@@ -2747,14 +2867,6 @@ json_lex_string(JsonLexContext *lex)
 					case '"':
 					case '\\':
 					case '/':
-						jsonapi_appendStringInfoChar(lex->strval, *s);
-						break;
-					case '\'':
-						if (!lex->json5)
-						{
-							lex->token_start = s;
-							FAIL_AT_CHAR_END(JSON_ESCAPING_INVALID);
-						}
 						jsonapi_appendStringInfoChar(lex->strval, *s);
 						break;
 					case 'b':
@@ -2783,8 +2895,7 @@ json_lex_string(JsonLexContext *lex)
 						FAIL_AT_CHAR_END(JSON_ESCAPING_INVALID);
 				}
 			}
-			else if (strchr("\"\\/bfnrt", *s) == NULL &&
-					 !(lex->json5 && *s == '\''))
+			else if (strchr("\"\\/bfnrt", *s) == NULL)
 			{
 				/*
 				 * Simpler processing if we're not bothered about de-escaping
@@ -2820,7 +2931,16 @@ json_lex_string(JsonLexContext *lex)
 					break;
 				else if ((unsigned char) *p <= 31)
 				{
+					/*
+					 * json5 allows raw control characters other than line
+					 * breaks.  NUL is still rejected, as a token can't hold
+					 * it.
+					 */
+					if (lex->json5 && *p != '\n' && *p != '\r' && *p != '\0')
+						continue;
+
 					/* Per RFC4627, these characters MUST be escaped. */
+
 					/*
 					 * Since *p isn't printable, exclude it from the context
 					 * string

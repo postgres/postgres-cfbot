@@ -39,34 +39,82 @@ my @json5_inline_cases = (
 	[ 'line comment only', "// c", undef ],
 	[
 		'line comment ended by U+2028',
-		"[1, // c\xe2\x80\xa8 2]", "[\n1,\n2\n]"
+		"[1, // c\xe2\x80\xa8 2]",
+		"[\n1,\n2\n]"
 	],
 	[
 		'line comment ended by U+2029',
-		"[1, // c\xe2\x80\xa9 2]", "[\n1,\n2\n]"
+		"[1, // c\xe2\x80\xa9 2]",
+		"[\n1,\n2\n]"
 	],
 	[ 'non-space symbol outside strings', "[1,\xe2\x80\xa6 2]", undef ],
 	[ 'invalid UTF-8 outside strings', "[1,\xc2 2]", undef ],
 	[
 		'no-break space around unquoted key',
-		"{\xc2\xa0a\xc2\xa0: 1}", "{\n\"a\": 1\n}"
+		"{\xc2\xa0a\xc2\xa0: 1}",
+		"{\n\"a\": 1\n}"
 	],
-	[ 'non-ASCII letter in key', "{\xc3\xa9t\xc3\xa9: 1}", "{\n\"\xc3\xa9t\xc3\xa9\": 1\n}" ],
-	[ 'combining mark after first key char', "{a\xcc\x81: 1}", "{\n\"a\xcc\x81\": 1\n}" ],
+	[
+		'non-ASCII letter in key',
+		"{\xc3\xa9t\xc3\xa9: 1}",
+		"{\n\"\xc3\xa9t\xc3\xa9\": 1\n}"
+	],
+	[
+		'combining mark after first key char',
+		"{a\xcc\x81: 1}",
+		"{\n\"a\xcc\x81\": 1\n}"
+	],
 	[ 'combining mark as first key char', "{\xcc\x81a: 1}", undef ],
-	[ 'zero width non-joiner in key', "{a\xe2\x80\x8cb: 1}", "{\n\"a\xe2\x80\x8cb\": 1\n}" ],
+	[
+		'zero width non-joiner in key',
+		"{a\xe2\x80\x8cb: 1}",
+		"{\n\"a\xe2\x80\x8cb\": 1\n}"
+	],
 	[ 'non-identifier symbol in key', "{a\xe2\x80\xa6b: 1}", undef ],
 	[ 'escaped key characters', "{\\u0061b\\u0063: 1}", "{\n\"abc\": 1\n}" ],
-	[ 'escaped non-ASCII key character', "{\\u00e9: 1}", "{\n\"\xc3\xa9\": 1\n}" ],
+	[
+		'escaped non-ASCII key character',
+		"{\\u00e9: 1}",
+		"{\n\"\xc3\xa9\": 1\n}"
+	],
 	[ 'escaped space in key', "{a\\u0020b: 1}", undef ],
 	[ 'malformed escape in key', "{a\\u00zz: 1}", undef ],
 	[ 'escaped surrogate pair in key', "{\\ud83d\\ude00: 1}", undef ],
-	[ 'keyword continued by escape', "{true\\u0061: 1}", "{\n\"truea\": 1\n}" ],
+	[
+		'keyword continued by escape',
+		"{true\\u0061: 1}",
+		"{\n\"truea\": 1\n}"
+	],
 	[ 'escaped keyword as key', "{\\u0074rue: 1}", "{\n\"true\": 1\n}" ],
 	[ 'escaped keyword as value', "[\\u0074rue]", undef ],
 	[ 'keyword followed by no-break space', "[true\xc2\xa0]", "[\ntrue\n]" ],
-	[ 'Infinity followed by no-break space', "[Infinity\xc2\xa0]", "[\nInfinity\n]" ],
-	[ 'NaN key followed by no-break space', "{NaN\xc2\xa0: 1}", "{\n\"NaN\": 1\n}" ],);
+	[
+		'Infinity followed by no-break space', "[Infinity\xc2\xa0]",
+		"[\nInfinity\n]"
+	],
+	[
+		'NaN key followed by no-break space',
+		"{NaN\xc2\xa0: 1}",
+		"{\n\"NaN\": 1\n}"
+	],
+	[ 'vertical tab escape', "['\\v']", "[\n\"\\u000b\"\n]" ],
+	[ 'hex escapes', "['\\x41\\x6a\\xe9']", "[\n\"Aj\xc3\xa9\"\n]" ],
+	[ 'malformed hex escape', "['\\x4g']", undef ],
+	[ 'truncated hex escape', "['\\x4", undef ],
+	[ 'zero escape before digit', "['\\01']", undef ],
+	[ 'decimal digit escape', "['\\1']", undef ],
+	[ 'escaped non-escape characters', "['\\a\\q\\\"']", "[\n\"aq\\\"\"\n]" ],
+	[ 'escaped non-ASCII character', "['\\\xc3\xa9']", "[\n\"\xc3\xa9\"\n]" ],
+	[
+		'line continuation with U+2028', "['a\\\xe2\x80\xa8b']",
+		"[\n\"ab\"\n]"
+	],
+	[ 'line continuation with CRLF', "['a\\\r\nb']", "[\n\"ab\"\n]" ],
+	[ 'raw tab in string', "['a\tb']", "[\n\"a\\tb\"\n]" ],
+	[ 'raw newline in string', "['a\nb']", undef ],
+	[ 'raw NUL in string', "['a\0b']", undef ],
+	[ 'escaped raw NUL in string', "['a\\\0b']", undef ],
+	[ 'high surrogate before hex escape', "['\\ud83d\\x41']", undef ],);
 
 # One entry per feature: fixture basename plus, where the failing token
 # is predictable, a regex for the error reported without --json5.
@@ -79,6 +127,7 @@ my @features = (
 	{ name => 'trailing commas', file => 'json5_trailing_commas' },
 	{ name => 'unquoted keys', file => 'json5_keys' },
 	{ name => 'single-quoted strings', file => 'json5_strings' },
+	{ name => 'multi-line strings', file => 'json5_multiline' },
 	{ name => 'numbers', file => 'json5_numbers' },);
 
 # Inputs that stay invalid even in json5 mode.
@@ -232,8 +281,8 @@ foreach my $exe (@exes)
 		}
 		else
 		{
-			check_rejected($exe, $fname, "json5 mode: $label", undef,
-				"--json5");
+			check_rejected($exe, $fname, "json5 mode: $label",
+				undef, "--json5");
 		}
 	}
 
@@ -273,6 +322,43 @@ foreach my $exe (@exes)
 		check_rejected($exe, inline_file($content),
 			"non-json5 mode: $label form");
 	}
+
+	# Multi-line string continuations are also handled on the "not
+	# de-escaping" path (no -s flag).
+	my $ml_file = "$FindBin::RealBin/../json5_multiline.json5";
+	my ($ml_out, $ml_err) = run_parser($exe, "--json5", $ml_file);
+
+	like($ml_out, qr/SUCCESS/,
+		"json5 multi-line strings, no de-escaping: parse succeeds");
+	is($ml_err, "",
+		"json5 multi-line strings, no de-escaping: no error output");
+
+	# A backslash-newline continuation in a quoted key's value exercises
+	# the gate directly: a quoted key rules out the unrelated
+	# unquoted-key rejection reached via the fixture file.
+	my $cont_file = inline_file("{ \"a\": \"line \\\nb\" }");
+	my ($cont_out, $cont_err) =
+	  run_parser($exe, "-s", "--json5", $cont_file);
+
+	is( $cont_out,
+		"{\n\"a\": \"line b\"\n}",
+		"json5 mode: backslash-newline continuation accepted");
+	is($cont_err, "", "json5 mode: backslash-newline continuation no error");
+
+	check_rejected(
+		$exe, $cont_file,
+		"non-json5 mode: backslash-newline continuation",
+		qr/Escape sequence.*is invalid/s);
+
+	# Same continuation with a lone CR (no LF) as the line terminator.
+	my $cr_file = inline_file("{ \"a\": \"line \\\rb\" }");
+	my ($cr_out, $cr_err) =
+	  run_parser($exe, "-s", "--json5", $cr_file);
+
+	is( $cr_out,
+		"{\n\"a\": \"line b\"\n}",
+		"json5 mode: backslash-cr continuation accepted");
+	is($cr_err, "", "json5 mode: backslash-cr continuation no error");
 }
 
 done_testing();
