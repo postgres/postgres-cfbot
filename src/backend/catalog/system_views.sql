@@ -1184,6 +1184,7 @@ CREATE VIEW pg_stat_database AS
             pg_stat_get_db_total_vacuum_delay_time(D.oid) AS total_vacuum_delay_time,
             pg_stat_get_db_total_autovacuum_delay_time(D.oid) AS total_autovacuum_delay_time,
             pg_stat_get_db_vacuum_failsafe_count(D.oid) AS vacuum_failsafe_count,
+            pg_stat_get_db_vacuum_interrupt_count(D.oid) AS vacuum_interrupt_count,
             pg_stat_get_db_session_time(D.oid) AS session_time,
             pg_stat_get_db_active_time(D.oid) AS active_time,
             pg_stat_get_db_idle_in_transaction_time(D.oid) AS idle_in_transaction_time,
