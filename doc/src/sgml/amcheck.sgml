@@ -61,7 +61,7 @@
   <variablelist>
    <varlistentry>
     <term>
-     <function>bt_index_check(index regclass, heapallindexed boolean, checkunique boolean) returns void</function>
+     <function>bt_index_check(index regclass, heapallindexed boolean, checkunique boolean, indexallkeysmatch boolean) returns void</function>
      <indexterm>
       <primary>bt_index_check</primary>
      </indexterm>
@@ -118,7 +118,10 @@ ORDER BY c.relpages DESC LIMIT 10;
       that span child/parent relationships, but will verify the
       presence of all heap tuples as index tuples within the index
       when <parameter>heapallindexed</parameter> is
-      <literal>true</literal>.  When <parameter>checkunique</parameter>
+      <literal>true</literal>.  When <parameter>indexallkeysmatch</parameter>
+      is <literal>true</literal>, it verifies that each index tuple
+      points to a heap tuple with the same key (the reverse of
+      <parameter>heapallindexed</parameter>).  When <parameter>checkunique</parameter>
       is <literal>true</literal> <function>bt_index_check</function> will
       check that no more than one among duplicate entries in unique
       index is visible.  When a routine, lightweight test for
@@ -132,7 +135,7 @@ ORDER BY c.relpages DESC LIMIT 10;
 
    <varlistentry>
     <term>
-     <function>bt_index_parent_check(index regclass, heapallindexed boolean, rootdescend boolean, checkunique boolean) returns void</function>
+     <function>bt_index_parent_check(index regclass, heapallindexed boolean, rootdescend boolean, checkunique boolean, indexallkeysmatch boolean) returns void</function>
      <indexterm>
       <primary>bt_index_parent_check</primary>
      </indexterm>
@@ -145,7 +148,9 @@ ORDER BY c.relpages DESC LIMIT 10;
       Optionally, when the <parameter>heapallindexed</parameter>
       argument is <literal>true</literal>, the function verifies the
       presence of all heap tuples that should be found within the
-      index.  When <parameter>checkunique</parameter>
+      index.  When <parameter>indexallkeysmatch</parameter> is
+      <literal>true</literal>, it verifies that each index tuple
+      points to a heap tuple with the same key.  When <parameter>checkunique</parameter>
       is <literal>true</literal> <function>bt_index_parent_check</function> will
       check that no more than one among duplicate entries in unique
       index is visible.  When the optional <parameter>rootdescend</parameter>
@@ -413,6 +418,57 @@ SET client_min_messages = DEBUG1;
   single absent or malformed tuple has a new opportunity to be
   detected with each new verification attempt.
  </para>
+ <para>
+  When both <parameter>heapallindexed</parameter> and
+  <parameter>indexallkeysmatch</parameter> are enabled, two Bloom
+  filters are allocated, each up to <varname>maintenance_work_mem</varname>.
+ </para>
+
+ </sect2>
+
+ <sect2 id="amcheck-optional-indexallkeysmatch-verification">
+  <title>Optional <parameter>indexallkeysmatch</parameter> Verification</title>
+ <para>
+  When the <parameter>indexallkeysmatch</parameter> argument to B-Tree
+  verification functions is <literal>true</literal>, an additional
+  phase verifies that each index tuple points to a heap tuple with the
+  same key.  This is the reverse of <parameter>heapallindexed</parameter>:
+  <parameter>heapallindexed</parameter> checks that every heap tuple is
+  in the index, while <parameter>indexallkeysmatch</parameter> checks
+  that every index tuple points to a matching heap tuple.
+ </para>
+ <para>
+  The implementation uses a Bloom filter to amortize random heap
+  lookups.  A sequential heap scan first fingerprints all visible
+  (key, tid) pairs.  During the index scan, each leaf tuple is probed
+  against this filter.  Only when the filter says &quot;not present&quot; does
+  an actual heap fetch and key comparison occur.  Corruption is
+  reported when the heap tuple's key (as computed by
+  <function>FormIndexDatum</function>) differs from the index tuple's
+  key, or when an index tuple points to a heap block beyond the end of
+  the table.  Additionally, <function>bt_index_parent_check</function>
+  reports index tuples pointing to unused heap slots; under the weaker
+  lock taken by <function>bt_index_check</function> such slots cannot
+  be reliably distinguished from tuples concurrently removed by
+  <command>VACUUM</command>, so they are skipped.
+ </para>
+ <para>
+  Like <parameter>heapallindexed</parameter>, this check requires an
+  MVCC snapshot to obtain a consistent view of the heap and index.
+  The heap lookup follows <acronym>HOT</acronym> chains the same way a
+  regular index scan does; index tuples that point to dead heap tuples
+  (not visible to the snapshot) are skipped.
+ </para>
+ <para>
+  The summarizing structure is bound in size by
+  <varname>maintenance_work_mem</varname>, using the same sizing
+  approach as <parameter>heapallindexed</parameter>.  In order to ensure
+  that there is no more than a 2% probability of failure to detect an
+  inconsistency for each index tuple that should match a heap tuple,
+  approximately 2 bytes of memory are needed per tuple.  As less memory
+  is made available per tuple, the probability of missing an
+  inconsistency slowly increases.
+ </para>
 
  </sect2>
 
@@ -457,12 +513,15 @@ SET client_min_messages = DEBUG1;
    <listitem>
     <para>
      Structural inconsistencies between indexes and the heap relations
-     that are indexed (when <parameter>heapallindexed</parameter>
-     verification is performed).
+     that are indexed (when <parameter>heapallindexed</parameter> or
+     <parameter>indexallkeysmatch</parameter> verification is performed).
     </para>
     <para>
      There is no cross-checking of indexes against their heap relation
      during normal operation.  Symptoms of heap corruption can be subtle.
+     <parameter>indexallkeysmatch</parameter> detects cases where an index
+     tuple stores a different key than the heap tuple it points to, or
+     points to a non-existent heap slot.
     </para>
    </listitem>
    <listitem>
