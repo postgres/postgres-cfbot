@@ -81,5 +81,8 @@ extern void ExplainPrintJITSummary(ExplainState *es,
 extern void ExplainQueryText(ExplainState *es, QueryDesc *queryDesc);
 extern void ExplainQueryParameters(ExplainState *es,
 								   ParamListInfo params, int maxlen);
+extern void ExplainStringAssemble(ExplainState *es, QueryDesc *queryDesc,
+								  int logFormat, bool logTriggers,
+								  int logParameterMaxLength);
 
 #endif							/* EXPLAIN_H */
