@@ -224,7 +224,7 @@ describeTablespaces(const char *pattern, bool verbose)
 	appendPQExpBuffer(&buf,
 					  "SELECT spcname AS \"%s\",\n"
 					  "  pg_catalog.pg_get_userbyid(spcowner) AS \"%s\",\n"
-					  "  pg_catalog.pg_tablespace_location(oid) AS \"%s\"",
+					  "  pg_catalog.pg_tablespace_location(tblspc.oid) AS \"%s\"",
 					  gettext_noop("Name"),
 					  gettext_noop("Owner"),
 					  gettext_noop("Location"));
@@ -235,15 +235,34 @@ describeTablespaces(const char *pattern, bool verbose)
 		printACLColumn(&buf, "spcacl");
 		appendPQExpBuffer(&buf,
 						  ",\n  spcoptions AS \"%s\""
-						  ",\n  pg_catalog.pg_size_pretty(pg_catalog.pg_tablespace_size(oid)) AS \"%s\""
-						  ",\n  pg_catalog.shobj_description(oid, 'pg_tablespace') AS \"%s\"",
+						  ",\n  CASE WHEN dbsub.dattablespace OPERATOR(pg_catalog.=) tblspc.oid OR\n"
+						  "               pg_catalog.has_tablespace_privilege(tblspc.oid, 'CREATE') OR\n"
+						  "               pg_catalog.pg_has_role('pg_read_all_stats', 'USAGE')\n"
+						  "       THEN pg_catalog.pg_size_pretty(pg_catalog.pg_tablespace_size(tblspc.oid))\n"
+						  "       ELSE 'No Access'"
+						  "  END as \"%s\"",
 						  gettext_noop("Options"),
-						  gettext_noop("Size"),
+						  gettext_noop("Size"));
+		if (pset.sversion >= 200000)
+			appendPQExpBuffer(&buf,
+							  ",\n  CASE WHEN dbsub.dattablespace OPERATOR(pg_catalog.=) tblspc.oid OR\n"
+							  "               pg_catalog.has_tablespace_privilege(tblspc.oid, 'CREATE') OR\n"
+							  "               pg_catalog.pg_has_role('pg_read_all_stats', 'USAGE')\n"
+							  "       THEN pg_catalog.pg_size_pretty(pg_catalog.pg_tablespace_avail(tblspc.oid))\n"
+							  "       ELSE 'No Access'"
+							  "  END as \"%s\"",
+							  gettext_noop("Free"));
+		appendPQExpBuffer(&buf,
+						  ",\n  pg_catalog.shobj_description(tblspc.oid, 'pg_tablespace') AS \"%s\"",
 						  gettext_noop("Description"));
 	}
 
 	appendPQExpBufferStr(&buf,
-						 "\nFROM pg_catalog.pg_tablespace\n");
+						 "\nFROM pg_catalog.pg_tablespace tblspc\n");
+	if (verbose)
+		appendPQExpBufferStr(&buf,
+							 "CROSS JOIN (SELECT dattablespace FROM pg_catalog.pg_database db\n"
+							 "  WHERE db.datname OPERATOR(pg_catalog.=) pg_catalog.current_database()) dbsub\n");
 
 	if (!validateSQLNamePattern(&buf, pattern, false, false,
 								NULL, "spcname", NULL,

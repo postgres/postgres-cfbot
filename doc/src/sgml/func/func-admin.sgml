@@ -1758,6 +1758,27 @@ postgres=# SELECT '0/0'::pg_lsn + pd.segment_number * ps.setting::int + :offset 
       <row>
        <entry role="func_table_entry"><para role="func_signature">
         <indexterm>
+         <primary>pg_tablespace_avail</primary>
+        </indexterm>
+        <function>pg_tablespace_avail</function> ( <type>name</type> )
+        <returnvalue>bigint</returnvalue>
+       </para>
+       <para role="func_signature">
+        <function>pg_tablespace_avail</function> ( <type>oid</type> )
+        <returnvalue>bigint</returnvalue>
+       </para>
+       <para>
+        Returns the available disk space in the file system hosting the tablespace with the
+        specified name or OID. To use this function, you must
+        have <literal>CREATE</literal> privilege on the specified tablespace
+        or have privileges of the <literal>pg_read_all_stats</literal> role,
+        unless it is the default tablespace for the current database.
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
          <primary>pg_total_relation_size</primary>
         </indexterm>
         <function>pg_total_relation_size</function> ( <type>regclass</type> )
