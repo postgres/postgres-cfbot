@@ -2061,8 +2061,9 @@ DROP TYPE test_type_empty;
 -- Cached plans for queries that scan a set-returning function returning a
 -- named composite type must be invalidated when ALTER TYPE ADD ATTRIBUTE
 -- widens that type.  The fix records the composite's underlying relation OID
--- (pg_type.typrelid) in the plan's invalItems so the relcache invalidation
--- broadcast by ALTER TYPE reaches the cached plan.
+-- (pg_type.typrelid) in the plan's list of referenced relations
+-- (glob->relationOids, checked by PlanCacheRelCallback) so the relcache
+-- invalidation broadcast by ALTER TYPE reaches the cached plan.
 --
 -- Without the fix the plan is never marked stale.  A PL/pgSQL function whose
 -- RETURN QUERY calls such an SRF raises "structure of query does not match
@@ -2070,9 +2071,10 @@ DROP TYPE test_type_empty;
 -- count while the SRF (independently replanned via table relcache) already
 -- returns the new one.
 --
--- SECURITY DEFINER prevents inlining; without inlining the outer plan holds
--- only the proc OID in invalItems, so only the typrelid dependency added by
--- the fix triggers its invalidation.
+-- SECURITY DEFINER prevents inlining; without inlining the outer plan tracks
+-- only the proc OID (in glob->invalItems, checked by PlanCacheObjectCallback),
+-- so only the typrelid relation dependency added by the fix triggers its
+-- invalidation.
 --
 CREATE TYPE planinv_ct AS (a int, b int);
 CREATE TABLE planinv_tbl (a int, b int);
