@@ -27,6 +27,7 @@ install_data(
   'amcheck--1.2--1.3.sql',
   'amcheck--1.3--1.4.sql',
   'amcheck--1.4--1.5.sql',
+  'amcheck--1.5--1.6.sql',
   kwargs: contrib_data_args,
 )
 
@@ -50,6 +51,7 @@ tests += {
       't/004_verify_nbtree_unique.pl',
       't/005_pitr.pl',
       't/006_verify_gin.pl',
+      't/007_verify_nbtree_indexallkeysmatch.pl',
     ],
   },
 }
