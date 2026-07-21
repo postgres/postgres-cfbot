@@ -12,6 +12,12 @@
 #include "postgres.h"
 
 #include <sys/stat.h>
+#ifdef WIN32
+#include <fileapi.h>
+#include <errhandlingapi.h>
+#else
+#include <sys/statvfs.h>
+#endif
 
 #include "access/htup_details.h"
 #include "access/relation.h"
@@ -313,6 +319,110 @@ pg_tablespace_size_name(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 
 	PG_RETURN_INT64(size);
+}
+
+
+/*
+ * Return available disk space for tablespace. Returns -1 if the tablespace
+ * directory cannot be found.
+ */
+static int64
+calculate_tablespace_avail(Oid tblspcOid)
+{
+	char		tblspcPath[MAXPGPATH];
+	AclResult	aclresult;
+#ifdef WIN32
+	ULARGE_INTEGER lpFreeBytesAvailable;
+#else
+	struct statvfs fst;
+#endif
+
+	/*
+	 * User must have privileges of pg_read_all_stats or have CREATE privilege
+	 * for target tablespace, either explicitly granted or implicitly because
+	 * it is default for current database.
+	 */
+	if (tblspcOid != MyDatabaseTableSpace &&
+		!has_privs_of_role(GetUserId(), ROLE_PG_READ_ALL_STATS))
+	{
+		aclresult = object_aclcheck(TableSpaceRelationId, tblspcOid, GetUserId(), ACL_CREATE);
+		if (aclresult != ACLCHECK_OK)
+			aclcheck_error(aclresult, OBJECT_TABLESPACE,
+						   get_tablespace_name(tblspcOid));
+	}
+
+	if (tblspcOid == DEFAULTTABLESPACE_OID)
+		snprintf(tblspcPath, MAXPGPATH, "base");
+	else if (tblspcOid == GLOBALTABLESPACE_OID)
+		snprintf(tblspcPath, MAXPGPATH, "global");
+	else
+		snprintf(tblspcPath, MAXPGPATH, "%s/%u/%s", PG_TBLSPC_DIR, tblspcOid,
+				 TABLESPACE_VERSION_DIRECTORY);
+
+#ifdef WIN32
+	if (! GetDiskFreeSpaceEx(tblspcPath, &lpFreeBytesAvailable, NULL, NULL))
+	{
+		_dosmaperr(GetLastError());
+		if (errno == ENOENT)
+			return -1;
+		else
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not get free disk space in tablespace directory \"%s\": %m", tblspcPath)));
+	}
+
+	return lpFreeBytesAvailable.QuadPart; /* ULONGLONG part of ULARGE_INTEGER */
+#else
+	if (statvfs(tblspcPath, &fst) < 0)
+	{
+		if (errno == ENOENT)
+			return -1;
+		else
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not get free disk space in tablespace directory \"%s\": %m", tblspcPath)));
+	}
+
+	return (int64) fst.f_bavail * fst.f_frsize; /* available blocks times fragment size */
+#endif
+}
+
+Datum
+pg_tablespace_avail_oid(PG_FUNCTION_ARGS)
+{
+	Oid			tblspcOid = PG_GETARG_OID(0);
+	int64		avail;
+
+	/*
+	 * Not needed for correctness, but avoid non-user-facing error message
+	 * later if the tablespace doesn't exist.
+	 */
+	if (!SearchSysCacheExists1(TABLESPACEOID, ObjectIdGetDatum(tblspcOid)))
+		ereport(ERROR,
+				errcode(ERRCODE_UNDEFINED_OBJECT),
+				errmsg("tablespace with OID %u does not exist", tblspcOid));
+
+	avail = calculate_tablespace_avail(tblspcOid);
+
+	if (avail < 0)
+		PG_RETURN_NULL();
+
+	PG_RETURN_INT64(avail);
+}
+
+Datum
+pg_tablespace_avail_name(PG_FUNCTION_ARGS)
+{
+	Name		tblspcName = PG_GETARG_NAME(0);
+	Oid			tblspcOid = get_tablespace_oid(NameStr(*tblspcName), false);
+	int64		avail;
+
+	avail = calculate_tablespace_avail(tblspcOid);
+
+	if (avail < 0)
+		PG_RETURN_NULL();
+
+	PG_RETURN_INT64(avail);
 }
 
 
