@@ -80,6 +80,21 @@ COMMIT;
 \echo ddl_done
 ]);
 
+# The concurrent DDL must now be blocked: the in-progress RETURN QUERY holds
+# AccessShareLock on the composite type's relation, so ALTER TYPE waits for
+# AccessExclusiveLock on the same relid.  Verify the lock directly via the DDL
+# backend pid, rather than only observing the row-shape symptom below.
+$node->poll_query_until('postgres', qq[
+SELECT EXISTS (
+  SELECT 1
+  FROM pg_locks
+  WHERE pid = $ddl_pid
+    AND NOT granted
+    AND locktype = 'relation'
+    AND relation = (SELECT typrelid FROM pg_type WHERE typname = 'planinv_ct')
+);
+]) or die 'concurrent DDL is not waiting on the composite type lock';
+
 $node->safe_psql('postgres',
 	"SELECT injection_points_wakeup('plpgsql-return-query-before-exec');");
 
