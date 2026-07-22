@@ -983,6 +983,17 @@ add_partial_path(RelOptInfo *parent_rel, Path *new_path)
 		Path	   *old_path = (Path *) lfirst(p1);
 		bool		remove_old = false; /* unless new proves superior */
 		PathKeysComparison keyscmp;
+		bool		filters_match;
+
+		/*
+		 * Paths carrying different sets of expected Bloom filters serve
+		 * different purposes (each may be consumed by a different parent
+		 * join, or none at all), and their cost/row estimates aren't directly
+		 * comparable.  So if the two paths don't expect the same filters,
+		 * keep both and don't let either dominate the other.
+		 */
+		filters_match = expected_filters_equal(new_path->expected_filters,
+											   old_path->expected_filters);
 
 		/* Compare pathkeys. */
 		keyscmp = compare_pathkeys(new_path->pathkeys, old_path->pathkeys);
@@ -991,8 +1002,11 @@ add_partial_path(RelOptInfo *parent_rel, Path *new_path)
 		 * Unless pathkeys are incompatible, see if one of the paths dominates
 		 * the other (both in startup and total cost). It may happen that one
 		 * path has lower startup cost, the other has lower total cost.
+		 *
+		 * Treat expected filters just like pathkeys - if the paths expect
+		 * different filters, they can't dominate each other.
 		 */
-		if (keyscmp != PATHKEYS_DIFFERENT)
+		if (keyscmp != PATHKEYS_DIFFERENT && filters_match)
 		{
 			PathCostComparison costcmp;
 
@@ -1039,10 +1053,15 @@ add_partial_path(RelOptInfo *parent_rel, Path *new_path)
 			/*
 			 * new belongs after this old path if it has more disabled nodes
 			 * or if it has the same number of nodes but a greater total cost
+			 *
+			 * Compare the number of filters first, so that the initial path
+			 * has no filters (there always has to be such path).
 			 */
-			if (new_path->disabled_nodes > old_path->disabled_nodes ||
-				(new_path->disabled_nodes == old_path->disabled_nodes &&
-				 new_path->total_cost >= old_path->total_cost))
+			if ((list_length(new_path->expected_filters) > list_length(old_path->expected_filters)) ||
+				((list_length(new_path->expected_filters) == list_length(old_path->expected_filters)) &&
+				 (new_path->disabled_nodes > old_path->disabled_nodes ||
+				  (new_path->disabled_nodes == old_path->disabled_nodes &&
+				   new_path->total_cost >= old_path->total_cost))))
 				insert_at = foreach_current_index(p1) + 1;
 		}
 
