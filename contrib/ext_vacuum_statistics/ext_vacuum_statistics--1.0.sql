@@ -36,8 +36,11 @@ CREATE OR REPLACE FUNCTION ext_vacuum_statistics.pg_stats_get_vacuum_tables(
     IN  reloid oid,
     OUT relid oid,
     OUT tuples_deleted bigint,
+    OUT pages_scanned bigint,
+    OUT pages_removed bigint,
     OUT tuples_frozen bigint,
     OUT recently_dead_tuples bigint,
+    OUT missed_dead_pages bigint,
     OUT missed_dead_tuples bigint
 )
 RETURNS SETOF record
@@ -49,7 +52,8 @@ CREATE OR REPLACE FUNCTION ext_vacuum_statistics.pg_stats_get_vacuum_indexes(
     IN  dboid oid,
     IN  reloid oid,
     OUT relid oid,
-    OUT tuples_deleted bigint
+    OUT tuples_deleted bigint,
+    OUT pages_deleted bigint
 )
 RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'pg_stats_get_vacuum_indexes'
@@ -63,8 +67,11 @@ SELECT
   rel.relname AS relname,
   db.datname AS dbname,
   stats.tuples_deleted,
+  stats.pages_scanned,
+  stats.pages_removed,
   stats.tuples_frozen,
   stats.recently_dead_tuples,
+  stats.missed_dead_pages,
   stats.missed_dead_tuples
 FROM pg_database db,
      pg_class rel,
@@ -85,7 +92,8 @@ SELECT
   ns.nspname AS schema,
   rel.relname AS indexrelname,
   db.datname AS dbname,
-  stats.tuples_deleted
+  stats.tuples_deleted,
+  stats.pages_deleted
 FROM pg_database db,
      pg_class rel,
      pg_namespace ns,
