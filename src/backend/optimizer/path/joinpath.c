@@ -1051,21 +1051,21 @@ compute_join_expected_filters(PlannerInfo *root,
 			owner_relids = owner_in_outer ? outer_relids : inner_relids;
 			other_relids = owner_in_outer ? inner_relids : outer_relids;
 
-			if (bms_is_subset(f->build_relids, owner_relids))
+			/*
+			 * Build side already sits with the owner; this shouldn't
+			 * normally happen (such a filter would have been resolved or
+			 * discarded at a lower join).
+			 */
+			Assert(!bms_is_subset(f->build_relids, owner_relids));
+
+			if (bms_overlap(f->build_relids, owner_relids))
 			{
 				/*
-				 * Build side already sits with the owner; this shouldn't
-				 * normally happen (such a filter would have been resolved at
-				 * a lower join), but if it does, just propagate it unchanged.
-				 *
-				 * We still must be able to reach the owner's scan from above,
-				 * so the owner has to be on a side this join preserves (see
-				 * bloom_join_side_preserved); otherwise the filter could not
-				 * be pushed to a recipient and this path must be rejected.
+				 * We should not see a filter intersecting with the owner
+				 * We need all the build relids on the other side of the join,
+				 * and if the owner already has some, that can't happen.
 				 */
-				if (!bloom_join_side_preserved(jointype, owner_in_outer))
-					goto contradiction;
-				result = lappend(result, f);
+				goto contradiction;
 			}
 			else if (bms_is_subset(f->build_relids, join_relids))
 			{
