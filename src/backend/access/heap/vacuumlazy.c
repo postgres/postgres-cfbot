@@ -504,10 +504,13 @@ static void
 accumulate_heap_vacuum_statistics(LVRelState *vacrel, PgStat_VacuumRelationCounts * extVacStats)
 {
 	extVacStats->type = PGSTAT_EXTVAC_TABLE;
+	extVacStats->table.pages_scanned = vacrel->scanned_pages;
+	extVacStats->table.pages_removed = vacrel->removed_pages;
 	extVacStats->common.tuples_deleted = vacrel->tuples_deleted;
 	extVacStats->table.tuples_frozen = vacrel->tuples_frozen;
 	extVacStats->table.recently_dead_tuples = vacrel->recently_dead_tuples;
 	extVacStats->table.missed_dead_tuples = vacrel->missed_dead_tuples;
+	extVacStats->table.missed_dead_pages = vacrel->missed_dead_pages;
 
 	/*
 	 * The wraparound failsafe is reported as a per-relation flag (0/1): did
@@ -3104,6 +3107,7 @@ lazy_vacuum_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 	TimestampTz istarttime = GetCurrentTimestamp();
 	double		startdelaytime = VacuumDelayTime;
 	double		prev_tuples_removed = 0;
+	BlockNumber prev_pages_deleted = 0;
 	PgStat_VacuumRelationCounts extVacReport;
 
 	/*
@@ -3111,7 +3115,10 @@ lazy_vacuum_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 	 * several times per vacuum, and the report below covers this pass only.
 	 */
 	if (istat != NULL)
+	{
 		prev_tuples_removed = istat->tuples_removed;
+		prev_pages_deleted = istat->pages_deleted;
+	}
 	ivinfo.index = indrel;
 	ivinfo.heaprel = vacrel->rel;
 	ivinfo.analyze_only = false;
@@ -3151,8 +3158,12 @@ lazy_vacuum_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 		memset(&extVacReport, 0, sizeof(extVacReport));
 		extVacReport.type = PGSTAT_EXTVAC_INDEX;
 		if (istat != NULL)
+		{
 			extVacReport.common.tuples_deleted =
 				istat->tuples_removed - prev_tuples_removed;
+			extVacReport.index.pages_deleted =
+				istat->pages_deleted - prev_pages_deleted;
+		}
 		pgstat_report_vacuum_ext(indrel, -1, -1, 0, 0, false, &extVacReport);
 	}
 
@@ -3183,6 +3194,7 @@ lazy_cleanup_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 	TimestampTz istarttime = GetCurrentTimestamp();
 	double		startdelaytime = VacuumDelayTime;
 	double		prev_tuples_removed = 0;
+	BlockNumber prev_pages_deleted = 0;
 	PgStat_VacuumRelationCounts extVacReport;
 
 	/*
@@ -3190,7 +3202,10 @@ lazy_cleanup_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 	 * several times per vacuum, and the report below covers this pass only.
 	 */
 	if (istat != NULL)
+	{
 		prev_tuples_removed = istat->tuples_removed;
+		prev_pages_deleted = istat->pages_deleted;
+	}
 	ivinfo.index = indrel;
 	ivinfo.heaprel = vacrel->rel;
 	ivinfo.analyze_only = false;
@@ -3229,8 +3244,12 @@ lazy_cleanup_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 		memset(&extVacReport, 0, sizeof(extVacReport));
 		extVacReport.type = PGSTAT_EXTVAC_INDEX;
 		if (istat != NULL)
+		{
 			extVacReport.common.tuples_deleted =
 				istat->tuples_removed - prev_tuples_removed;
+			extVacReport.index.pages_deleted =
+				istat->pages_deleted - prev_pages_deleted;
+		}
 		pgstat_report_vacuum_ext(indrel, -1, -1, 0, 0, false, &extVacReport);
 	}
 

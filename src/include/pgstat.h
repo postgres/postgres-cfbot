@@ -121,7 +121,14 @@ typedef struct PgStat_VacuumRelationCounts
 			int64		tuples_frozen;
 			int64		recently_dead_tuples;
 			int64		missed_dead_tuples;
+			int64		pages_scanned;
+			int64		pages_removed;
+			int64		missed_dead_pages;
 		}			table;
+		struct
+		{
+			int64		pages_deleted;
+		}			index;
 	};
 }			PgStat_VacuumRelationCounts;
 

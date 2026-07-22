@@ -1081,6 +1081,7 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 	TimestampTz istarttime = GetCurrentTimestamp();
 	double		startdelaytime = VacuumDelayTime;
 	double		prev_tuples_removed = 0;
+	BlockNumber prev_pages_deleted = 0;
 	PgStat_VacuumRelationCounts extVacReport;
 
 	/*
@@ -1095,7 +1096,10 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 	 * several times per vacuum, and the report below covers this pass only.
 	 */
 	if (istat != NULL)
+	{
 		prev_tuples_removed = istat->tuples_removed;
+		prev_pages_deleted = istat->pages_deleted;
+	}
 	ivinfo.index = indrel;
 	ivinfo.heaprel = pvs->heaprel;
 	ivinfo.analyze_only = false;
@@ -1129,8 +1133,12 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 		memset(&extVacReport, 0, sizeof(extVacReport));
 		extVacReport.type = PGSTAT_EXTVAC_INDEX;
 		if (istat_res != NULL)
+		{
 			extVacReport.common.tuples_deleted =
 				istat_res->tuples_removed - prev_tuples_removed;
+			extVacReport.index.pages_deleted =
+				istat_res->pages_deleted - prev_pages_deleted;
+		}
 		pgstat_report_vacuum_ext(indrel, -1, -1, 0, 0, false, &extVacReport);
 	}
 
