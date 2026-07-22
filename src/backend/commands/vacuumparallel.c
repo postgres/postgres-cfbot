@@ -1126,6 +1126,7 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 	TimestampTz istarttime = GetCurrentTimestamp();
 	double		startdelaytime = VacuumDelayTime;
 	double		prev_tuples_removed = 0;
+	BlockNumber prev_pages_newly_deleted = 0;
 	PgStat_VacuumRelationCounts extVacReport;
 	const int	progress_index[] = {
 		PROGRESS_VACUUM_PHASE,
@@ -1149,9 +1150,14 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 	/*
 	 * Snapshot the running bulkdelete totals: an index may be processed
 	 * several times per vacuum, and the report below covers this pass only.
+	 * pages_deleted also includes pages deleted by earlier vacuums, so use
+	 * pages_newly_deleted, which accumulates only this vacuum's deletions.
 	 */
 	if (istat != NULL)
+	{
 		prev_tuples_removed = istat->tuples_removed;
+		prev_pages_newly_deleted = istat->pages_newly_deleted;
+	}
 	ivinfo.index = indrel;
 	ivinfo.heaprel = pvs->heaprel;
 	ivinfo.analyze_only = false;
@@ -1193,8 +1199,12 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 		memset(&extVacReport, 0, sizeof(extVacReport));
 		extVacReport.type = PGSTAT_EXTVAC_INDEX;
 		if (istat_res != NULL)
+		{
 			extVacReport.common.tuples_deleted =
 				istat_res->tuples_removed - prev_tuples_removed;
+			extVacReport.index.pages_deleted =
+				istat_res->pages_newly_deleted - prev_pages_newly_deleted;
+		}
 		pgstat_report_vacuum_ext(indrel, -1, -1, 0, 0, false, &extVacReport);
 	}
 	pgstat_progress_update_multi_param(3, reset_index, reset_val);
