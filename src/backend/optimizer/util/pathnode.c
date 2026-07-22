@@ -613,6 +613,27 @@ add_path(RelOptInfo *parent_rel, Path *new_path)
 	 */
 	CHECK_FOR_INTERRUPTS();
 
+	/*
+	 * If the new path expects filters, none of the filters can intersect
+	 * with the rel. Relids of the relation must have no overlap with the
+	 * build relids of the filter.
+	 *
+	 * XXX Do it here, because all paths have to go either through add_path
+	 * or add_partial_path. But maybe there's a better place.
+	 */
+#if USE_ASSERT_CHECKING
+	{
+		ListCell *lc;
+
+		foreach (lc, new_path->expected_filters)
+		{
+			ExpectedFilter *f = (ExpectedFilter *) lfirst(lc);
+
+			Assert(!bms_overlap(f->build_relids, parent_rel->relids));
+		}
+	}
+#endif
+
 	/* Pretend parameterized paths have no pathkeys, per comment above */
 	new_path_pathkeys = new_path->param_info ? NIL : new_path->pathkeys;
 
@@ -973,6 +994,27 @@ add_partial_path(RelOptInfo *parent_rel, Path *new_path)
 
 	/* Relation should be OK for parallelism, too. */
 	Assert(parent_rel->consider_parallel);
+
+	/*
+	 * If the new path expects filters, none of the filters can intersect
+	 * with the rel. Relids of the relation must have no overlap with the
+	 * build relids of the filter.
+	 *
+	 * XXX Do it here, because all paths have to go either through add_path
+	 * or add_partial_path. But maybe there's a better place.
+	 */
+#if USE_ASSERT_CHECKING
+	{
+		ListCell *lc;
+
+		foreach (lc, new_path->expected_filters)
+		{
+			ExpectedFilter *f = (ExpectedFilter *) lfirst(lc);
+
+			Assert(!bms_overlap(f->build_relids, parent_rel->relids));
+		}
+	}
+#endif
 
 	/*
 	 * As in add_path, throw out any paths which are dominated by the new

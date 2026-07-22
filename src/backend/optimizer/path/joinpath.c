@@ -1088,6 +1088,15 @@ compute_join_expected_filters(PlannerInfo *root,
 					goto contradiction;
 				}
 			}
+			else if (bms_overlap(f->build_relids, join_relids))
+			{
+				/*
+				 * We have some relids needed to build the filter, but not all
+				 * of them. We can't apply filters incrementally, either we
+				 * have all the relids in other_relids, or none of them.
+				 */
+				goto contradiction;
+			}
 			else
 			{
 				/*
