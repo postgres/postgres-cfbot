@@ -517,6 +517,49 @@ LOG:  Grand total: 1651920 bytes in 201 blocks; 622360 free (88 chunks); 1029560
       <row>
        <entry role="func_table_entry"><para role="func_signature">
         <indexterm>
+         <primary>pg_wal_preallocate</primary>
+        </indexterm>
+        <function>pg_wal_preallocate</function> ( <parameter>bytes</parameter> <type>bigint</type> <literal>DEFAULT</literal> <literal>NULL</literal> )
+        <returnvalue>bigint</returnvalue>
+       </para>
+       <para>
+        Eagerly pre-creates
+        <literal>ceil(<parameter>bytes</parameter> / wal_segment_size)</literal>
+        write-ahead log segment files, starting with the first unused segment
+        at or after the current WAL insertion location, and returns the number
+        of files that were actually created.  Segments that already exist are
+        not recreated, so this tops up the pool of ready future segments rather
+        than adding unconditionally, and the returned count may be smaller than
+        requested, possibly zero.  If <parameter>bytes</parameter> is omitted or
+        <literal>NULL</literal>, the value of <xref linkend="guc-min-wal-size"/>
+        is used, which keeps roughly that much ready ahead of the current
+        insertion location.  This can be used to warm up the pool of future WAL
+        files before a burst of write activity, such as a benchmark run or a
+        bulk load, so that foreground WAL insertion does not have to create and
+        initialize new segment files itself.  A call cannot request more than
+        <xref linkend="guc-max-wal-size"/> worth of WAL segment files.
+       </para>
+       <para>
+        The current WAL insertion location is sampled when the function starts,
+        so concurrent WAL insertion can advance beyond that location while the
+        function runs.  Preallocated files lie ahead of that location, so a
+        checkpoint does not remove them; they are reclaimed only once WAL
+        advances into them and a later checkpoint recycles or removes them.
+        On copy-on-write file systems (see <xref linkend="guc-wal-recycle"/>),
+        preallocation is most useful when
+        <xref linkend="guc-wal-init-zero"/> is enabled, since that is when
+        creating a segment does the full initialization write.  This function
+        cannot be executed during recovery.
+       </para>
+       <para>
+        This function is restricted to superusers by default, but other users
+        can be granted EXECUTE to run the function.
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
          <primary>pg_walfile_name</primary>
         </indexterm>
         <function>pg_walfile_name</function> ( <parameter>lsn</parameter> <type>pg_lsn</type> )
