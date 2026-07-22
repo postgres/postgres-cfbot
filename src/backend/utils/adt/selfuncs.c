@@ -7532,6 +7532,7 @@ genericcostestimate(PlannerInfo *root,
 	double		qual_arg_cost;
 	List	   *selectivityQuals;
 	ListCell   *l;
+	bool		needCalcIndexSelectivity = false;
 
 	/*
 	 * If the index is partial, AND the index predicate with the explicitly
@@ -7596,9 +7597,20 @@ genericcostestimate(PlannerInfo *root,
 	 * indexSelectivity estimate is tiny.
 	 */
 	if (numIndexTuples > index->tuples)
+	{
 		numIndexTuples = index->tuples;
+		needCalcIndexSelectivity = true;
+	}
+	/* Recalculate indexSelectivity based on the estimated numIndexTuples */
 	if (numIndexTuples < 1.0)
+	{
 		numIndexTuples = 1.0;
+		indexSelectivity = 0.0;
+	}
+	else if (needCalcIndexSelectivity && index->rel->tuples > 0)
+	{
+		indexSelectivity = numIndexTuples / index->rel->tuples;
+	}
 
 	/*
 	 * Estimate the number of index pages that will be retrieved.
@@ -7740,10 +7752,10 @@ add_predicate_to_index_quals(IndexOptInfo *index, List *indexQuals)
 	List	   *predExtraQuals = NIL;
 	ListCell   *lc;
 
-	if (index->indpred == NIL)
+	if (index->indpredExpand == NIL)
 		return indexQuals;
 
-	foreach(lc, index->indpred)
+	foreach(lc, index->indpredExpand)
 	{
 		Node	   *predQual = (Node *) lfirst(lc);
 		List	   *oneQual = list_make1(predQual);

@@ -298,9 +298,13 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 	indexInfo->ii_IndexAttrNumbers[0] = 1;
 	indexInfo->ii_IndexAttrNumbers[1] = 2;
 	indexInfo->ii_Expressions = NIL;
+	indexInfo->ii_ExpressionsExpand = NIL;
 	indexInfo->ii_ExpressionsState = NIL;
+	indexInfo->ii_ExpressionsExpandState = NIL;
 	indexInfo->ii_Predicate = NIL;
+	indexInfo->ii_PredicateExpand = NIL;
 	indexInfo->ii_PredicateState = NULL;
+	indexInfo->ii_PredicateExpandState = NULL;
 	indexInfo->ii_ExclusionOps = NULL;
 	indexInfo->ii_ExclusionProcs = NULL;
 	indexInfo->ii_ExclusionStrats = NULL;

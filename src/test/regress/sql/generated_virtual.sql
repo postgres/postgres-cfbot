@@ -431,40 +431,62 @@ ALTER TABLE gtestnn_parent ADD COLUMN c int NOT NULL GENERATED ALWAYS AS (nullif
 
 -- index constraints
 CREATE TABLE gtest22a (a int PRIMARY KEY, b int GENERATED ALWAYS AS (a / 2) VIRTUAL UNIQUE);
---INSERT INTO gtest22a VALUES (2);
---INSERT INTO gtest22a VALUES (3);
---INSERT INTO gtest22a VALUES (4);
+INSERT INTO gtest22a VALUES (2);  -- ok
+INSERT INTO gtest22a VALUES (3);  -- error
+INSERT INTO gtest22a VALUES (4);  -- ok
 CREATE TABLE gtest22b (a int, b int GENERATED ALWAYS AS (a / 2) VIRTUAL, PRIMARY KEY (a, b));
---INSERT INTO gtest22b VALUES (2);
---INSERT INTO gtest22b VALUES (2);
+INSERT INTO gtest22b VALUES (2);  -- ok
+INSERT INTO gtest22b VALUES (2);  -- error
 
 -- indexes
 CREATE TABLE gtest22c (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL);
---CREATE INDEX gtest22c_b_idx ON gtest22c (b);
---CREATE INDEX gtest22c_expr_idx ON gtest22c ((b * 3));
---CREATE INDEX gtest22c_pred_idx ON gtest22c (a) WHERE b > 0;
---\d gtest22c
+CREATE INDEX gtest22c_b_idx ON gtest22c (b);  -- ok
+CREATE INDEX gtest22c_expr_idx ON gtest22c ((b * 3));  -- ok
+CREATE INDEX gtest22c_pred_idx ON gtest22c (a) WHERE b > 0;  -- ok
+\d gtest22c
 
---INSERT INTO gtest22c VALUES (1), (2), (3);
---SET enable_seqscan TO off;
---SET enable_bitmapscan TO off;
---EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE b = 4;
---SELECT * FROM gtest22c WHERE b = 4;
---EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE b * 3 = 6;
---SELECT * FROM gtest22c WHERE b * 3 = 6;
---EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE a = 1 AND b > 0;
---SELECT * FROM gtest22c WHERE a = 1 AND b > 0;
+INSERT INTO gtest22c VALUES (1), (2), (3);
+SET enable_seqscan TO off;
+SET enable_bitmapscan TO off;
+EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE b = 4;
+SELECT * FROM gtest22c WHERE b = 4;
+EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE b * 3 = 6;
+SELECT * FROM gtest22c WHERE b * 3 = 6;
+EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE a = 1 AND b > 0;
+SELECT * FROM gtest22c WHERE a = 1 AND b > 0;
 
---ALTER TABLE gtest22c ALTER COLUMN b SET EXPRESSION AS (a * 4);
---ANALYZE gtest22c;
---EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE b = 8;
---SELECT * FROM gtest22c WHERE b = 8;
---EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE b * 3 = 12;
---SELECT * FROM gtest22c WHERE b * 3 = 12;
---EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE a = 1 AND b > 0;
---SELECT * FROM gtest22c WHERE a = 1 AND b > 0;
---RESET enable_seqscan;
---RESET enable_bitmapscan;
+ALTER TABLE gtest22c ALTER COLUMN b SET EXPRESSION AS (a * 4);
+ANALYZE gtest22c;
+EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE b = 8;
+SELECT * FROM gtest22c WHERE b = 8;
+EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE b * 3 = 12;
+SELECT * FROM gtest22c WHERE b * 3 = 12;
+EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE a = 1 AND b > 0;
+SELECT * FROM gtest22c WHERE a = 1 AND b > 0;
+
+CREATE TABLE gtest22d (a int
+  ,v1 int GENERATED ALWAYS AS (a * 11) VIRTUAL
+  ,v2 int GENERATED ALWAYS AS (a * 22) VIRTUAL
+  ,v3 int GENERATED ALWAYS AS (a * 33) VIRTUAL
+  ,v4 int GENERATED ALWAYS AS (a * 44) VIRTUAL
+);  -- ok
+insert into gtest22d select oid from pg_catalog.pg_class union all select -1;  -- ok
+CREATE INDEX gtest22d_vgc_idx ON gtest22d(a,v1,abs(v2)) Include(v3) WHERE v4 < 100;  -- ok
+\d gtest22d
+analyze gtest22d;
+EXPLAIN (COSTS OFF) SELECT * FROM gtest22d WHERE v4 < 100;  --Index Only Scan or Index Scan
+SELECT * FROM gtest22d WHERE v4 < 100;
+EXPLAIN (COSTS OFF) SELECT * FROM gtest22d WHERE v4 * 5 < 100;  --Seq Scan
+SELECT * FROM gtest22d WHERE v4 * 5 < 100;
+EXPLAIN (COSTS OFF) SELECT * FROM gtest22d WHERE a * 44 < 100;  --Index Only Scan or Index Scan
+SELECT * FROM gtest22d WHERE a * 44 < 100;
+EXPLAIN (COSTS OFF) SELECT * FROM gtest22d WHERE (a * 44) < 100;  --Index Only Scan or Index Scan
+SELECT * FROM gtest22d WHERE (a * 44) < 100;
+EXPLAIN (COSTS OFF) SELECT * FROM gtest22d WHERE (a * 33) < 100;  --Seq Scan
+SELECT * FROM gtest22d WHERE (a * 33) < 100;
+
+RESET enable_seqscan;
+RESET enable_bitmapscan;
 
 -- foreign keys
 CREATE TABLE gtest23a (x int PRIMARY KEY, y int);
@@ -485,11 +507,11 @@ CREATE TABLE gtest23b (a int PRIMARY KEY, b int GENERATED ALWAYS AS (a * 2) VIRT
 --DROP TABLE gtest23a;
 
 CREATE TABLE gtest23p (x int, y int GENERATED ALWAYS AS (x * 2) VIRTUAL, PRIMARY KEY (y));
---INSERT INTO gtest23p VALUES (1), (2), (3);
+INSERT INTO gtest23p VALUES (1), (2), (3);  -- ok
 
 CREATE TABLE gtest23q (a int PRIMARY KEY, b int REFERENCES gtest23p (y));
---INSERT INTO gtest23q VALUES (1, 2);  -- ok
---INSERT INTO gtest23q VALUES (2, 5);  -- error
+INSERT INTO gtest23q VALUES (1, 2);  -- ok
+INSERT INTO gtest23q VALUES (2, 5);  -- error
 
 -- domains
 CREATE DOMAIN gtestdomain1 AS int CHECK (VALUE < 10);
