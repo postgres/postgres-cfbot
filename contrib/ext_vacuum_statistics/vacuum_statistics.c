@@ -83,9 +83,16 @@ pgstat_accumulate_extvac_stats(PgStat_VacuumRelationCounts * dst,
 
 	if (dst->type == PGSTAT_EXTVAC_TABLE)
 	{
+		dst->table.pages_scanned += src->table.pages_scanned;
+		dst->table.pages_removed += src->table.pages_removed;
 		dst->table.tuples_frozen += src->table.tuples_frozen;
 		dst->table.recently_dead_tuples += src->table.recently_dead_tuples;
+		dst->table.missed_dead_pages += src->table.missed_dead_pages;
 		dst->table.missed_dead_tuples += src->table.missed_dead_tuples;
+	}
+	else if (dst->type == PGSTAT_EXTVAC_INDEX)
+	{
+		dst->index.pages_deleted += src->index.pages_deleted;
 	}
 }
 
@@ -236,8 +243,8 @@ extvac_reset_entry(PG_FUNCTION_ARGS)
 /*
  * Output vacuum statistics (tables or indexes).
  */
-#define EXTVAC_HEAP_STAT_COLS	5
-#define EXTVAC_IDX_STAT_COLS	2
+#define EXTVAC_HEAP_STAT_COLS	8
+#define EXTVAC_IDX_STAT_COLS	3
 #define EXTVAC_MAX_STAT_COLS	Max(EXTVAC_HEAP_STAT_COLS, EXTVAC_IDX_STAT_COLS)
 
 static void
@@ -254,13 +261,17 @@ tuplestore_put_for_relation(Oid relid, Tuplestorestate *tupstore,
 	if (vacuum_ext->type == PGSTAT_EXTVAC_TABLE)
 	{
 		values[i++] = Int64GetDatum(vacuum_ext->common.tuples_deleted);
+		values[i++] = Int64GetDatum(vacuum_ext->table.pages_scanned);
+		values[i++] = Int64GetDatum(vacuum_ext->table.pages_removed);
 		values[i++] = Int64GetDatum(vacuum_ext->table.tuples_frozen);
 		values[i++] = Int64GetDatum(vacuum_ext->table.recently_dead_tuples);
+		values[i++] = Int64GetDatum(vacuum_ext->table.missed_dead_pages);
 		values[i++] = Int64GetDatum(vacuum_ext->table.missed_dead_tuples);
 	}
 	else if (vacuum_ext->type == PGSTAT_EXTVAC_INDEX)
 	{
 		values[i++] = Int64GetDatum(vacuum_ext->common.tuples_deleted);
+		values[i++] = Int64GetDatum(vacuum_ext->index.pages_deleted);
 	}
 
 	Assert(i == ((vacuum_ext->type == PGSTAT_EXTVAC_TABLE) ? EXTVAC_HEAP_STAT_COLS : EXTVAC_IDX_STAT_COLS));

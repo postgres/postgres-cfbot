@@ -118,6 +118,22 @@
      </row>
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>pages_scanned</structfield> <type>int8</type>
+      </para>
+      <para>
+       Number of pages examined by vacuum operations
+      </para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>pages_removed</structfield> <type>int8</type>
+      </para>
+      <para>
+       Number of pages removed from physical storage by vacuum operations
+      </para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
        <structfield>tuples_frozen</structfield> <type>int8</type>
       </para>
       <para>
@@ -130,6 +146,14 @@
       </para>
       <para>
        Number of dead tuples left due to visibility in transactions
+      </para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>missed_dead_pages</structfield> <type>int8</type>
+      </para>
+      <para>
+       Number of pages that had at least one missed dead tuple
       </para></entry>
      </row>
      <row>
@@ -212,6 +236,14 @@
       <para>
        Number of index entries removed by the bulkdelete passes of vacuums
        of the parent table
+      </para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>pages_deleted</structfield> <type>int8</type>
+      </para>
+      <para>
+       Number of index pages marked deleted by vacuum operations
       </para></entry>
      </row>
     </tbody>
