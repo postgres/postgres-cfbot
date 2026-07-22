@@ -234,6 +234,7 @@ extern bool XLogBackgroundFlush(void);
 extern bool XLogNeedsFlush(XLogRecPtr record);
 extern int	XLogFileInit(XLogSegNo logsegno, TimeLineID logtli);
 extern int	XLogFileOpen(XLogSegNo segno, TimeLineID tli);
+extern int64 PreallocNXlogFiles(int64 nsegs);
 #ifdef WAL_DEBUG
 extern void InitWalDebug(void);
 #endif
