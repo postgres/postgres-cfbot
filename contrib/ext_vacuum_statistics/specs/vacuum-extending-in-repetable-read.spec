@@ -40,7 +40,7 @@ step s2_checkpoint              { CHECKPOINT; }
 step s2_print_vacuum_stats_table
 {
     SELECT
-        vt.relname, vt.tuples_deleted, vt.recently_dead_tuples, vt.missed_dead_tuples, vt.tuples_frozen
+        vt.relname, vt.tuples_deleted, vt.recently_dead_tuples, vt.missed_dead_tuples, vt.missed_dead_pages, vt.tuples_frozen
     FROM ext_vacuum_statistics.pg_stats_vacuum_tables vt, pg_class c
     WHERE vt.relname = 'test_vacuum_stat_isolation' AND vt.relid = c.oid;
 }

@@ -88,7 +88,7 @@ subtest 'vacuum_statistics.enabled' => sub {
 
     my $sums = $node->safe_psql($dbname, q{
         SELECT COALESCE(SUM(tuples_deleted), 0)
-             + COALESCE(SUM(tuples_frozen), 0)
+             + COALESCE(SUM(pages_scanned), 0)
           FROM ext_vacuum_statistics.pg_stats_vacuum_tables
          WHERE relname = 'guc_test'
     });
