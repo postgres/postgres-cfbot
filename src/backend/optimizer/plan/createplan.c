@@ -3348,7 +3348,7 @@ create_bitmap_subplan(PlannerInfo *root, Path *bitmapqual,
 				subindexECs = lappend(subindexECs, rinfo->parent_ec);
 		}
 		/* We can add any index predicate conditions, too */
-		foreach(l, ipath->indexinfo->indpred)
+		foreach(l, ipath->indexinfo->indpredExpand)
 		{
 			Expr	   *pred = (Expr *) lfirst(l);
 
@@ -5171,7 +5171,7 @@ fix_indexqual_operand(Node *node, IndexOptInfo *index, int indexcol)
 	}
 
 	/* It's an index expression, so find and cross-check the expression */
-	indexpr_item = list_head(index->indexprs);
+	indexpr_item = list_head(index->indexprsExpand);
 	for (pos = 0; pos < index->ncolumns; pos++)
 	{
 		if (index->indexkeys[pos] == 0)
@@ -5196,7 +5196,7 @@ fix_indexqual_operand(Node *node, IndexOptInfo *index, int indexcol)
 				else
 					elog(ERROR, "index key does not match expected index column");
 			}
-			indexpr_item = lnext(index->indexprs, indexpr_item);
+			indexpr_item = lnext(index->indexprsExpand, indexpr_item);
 		}
 	}
 

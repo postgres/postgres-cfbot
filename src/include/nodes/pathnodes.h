@@ -1403,8 +1403,10 @@ typedef struct IndexOptInfo
 	 * print indextlist
 	 */
 	List	   *indexprs pg_node_attr(read_write_ignore);
+	List	   *indexprsExpand pg_node_attr(read_write_ignore);
 	/* predicate if a partial index, else NIL */
 	List	   *indpred;
+	List	   *indpredExpand;
 
 	/* targetlist representing index columns */
 	List	   *indextlist;

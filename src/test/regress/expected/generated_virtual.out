@@ -814,39 +814,202 @@ ERROR:  column "c" of relation "gtestnn_child" contains null values
 ALTER TABLE gtestnn_parent ADD COLUMN c int NOT NULL GENERATED ALWAYS AS (nullif(f1, 4) + nullif(f2, 6)) VIRTUAL;  -- ok
 -- index constraints
 CREATE TABLE gtest22a (a int PRIMARY KEY, b int GENERATED ALWAYS AS (a / 2) VIRTUAL UNIQUE);
-ERROR:  unique constraints on virtual generated columns are not supported
---INSERT INTO gtest22a VALUES (2);
---INSERT INTO gtest22a VALUES (3);
---INSERT INTO gtest22a VALUES (4);
+INSERT INTO gtest22a VALUES (2);  -- ok
+INSERT INTO gtest22a VALUES (3);  -- error
+ERROR:  duplicate key value violates unique constraint "gtest22a_b_key"
+DETAIL:  Key (b)=(1) already exists.
+INSERT INTO gtest22a VALUES (4);  -- ok
 CREATE TABLE gtest22b (a int, b int GENERATED ALWAYS AS (a / 2) VIRTUAL, PRIMARY KEY (a, b));
-ERROR:  primary keys on virtual generated columns are not supported
---INSERT INTO gtest22b VALUES (2);
---INSERT INTO gtest22b VALUES (2);
+INSERT INTO gtest22b VALUES (2);  -- ok
+INSERT INTO gtest22b VALUES (2);  -- error
+ERROR:  duplicate key value violates unique constraint "gtest22b_pkey"
+DETAIL:  Key (a, b)=(2, 1) already exists.
 -- indexes
 CREATE TABLE gtest22c (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL);
---CREATE INDEX gtest22c_b_idx ON gtest22c (b);
---CREATE INDEX gtest22c_expr_idx ON gtest22c ((b * 3));
---CREATE INDEX gtest22c_pred_idx ON gtest22c (a) WHERE b > 0;
---\d gtest22c
---INSERT INTO gtest22c VALUES (1), (2), (3);
---SET enable_seqscan TO off;
---SET enable_bitmapscan TO off;
---EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE b = 4;
---SELECT * FROM gtest22c WHERE b = 4;
---EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE b * 3 = 6;
---SELECT * FROM gtest22c WHERE b * 3 = 6;
---EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE a = 1 AND b > 0;
---SELECT * FROM gtest22c WHERE a = 1 AND b > 0;
---ALTER TABLE gtest22c ALTER COLUMN b SET EXPRESSION AS (a * 4);
---ANALYZE gtest22c;
---EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE b = 8;
---SELECT * FROM gtest22c WHERE b = 8;
---EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE b * 3 = 12;
---SELECT * FROM gtest22c WHERE b * 3 = 12;
---EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE a = 1 AND b > 0;
---SELECT * FROM gtest22c WHERE a = 1 AND b > 0;
---RESET enable_seqscan;
---RESET enable_bitmapscan;
+CREATE INDEX gtest22c_b_idx ON gtest22c (b);  -- ok
+CREATE INDEX gtest22c_expr_idx ON gtest22c ((b * 3));  -- ok
+CREATE INDEX gtest22c_pred_idx ON gtest22c (a) WHERE b > 0;  -- ok
+\d gtest22c
+               Table "generated_virtual_tests.gtest22c"
+ Column |  Type   | Collation | Nullable |           Default           
+--------+---------+-----------+----------+-----------------------------
+ a      | integer |           |          | 
+ b      | integer |           |          | generated always as (a * 2)
+Indexes:
+    "gtest22c_b_idx" btree (b)
+    "gtest22c_expr_idx" btree ((b * 3))
+    "gtest22c_pred_idx" btree (a) WHERE b > 0
+
+INSERT INTO gtest22c VALUES (1), (2), (3);
+SET enable_seqscan TO off;
+SET enable_bitmapscan TO off;
+EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE b = 4;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Index Only Scan using gtest22c_pred_idx on gtest22c
+   Filter: ((a * 2) = 4)
+(2 rows)
+
+SELECT * FROM gtest22c WHERE b = 4;
+ a | b 
+---+---
+ 2 | 4
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE b * 3 = 6;
+                   QUERY PLAN                   
+------------------------------------------------
+ Index Scan using gtest22c_expr_idx on gtest22c
+   Index Cond: (((a * 2) * 3) = 6)
+(2 rows)
+
+SELECT * FROM gtest22c WHERE b * 3 = 6;
+ a | b 
+---+---
+ 1 | 2
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE a = 1 AND b > 0;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Index Only Scan using gtest22c_pred_idx on gtest22c
+   Index Cond: (a = 1)
+(2 rows)
+
+SELECT * FROM gtest22c WHERE a = 1 AND b > 0;
+ a | b 
+---+---
+ 1 | 2
+(1 row)
+
+ALTER TABLE gtest22c ALTER COLUMN b SET EXPRESSION AS (a * 4);
+ANALYZE gtest22c;
+EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE b = 8;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Index Only Scan using gtest22c_pred_idx on gtest22c
+   Filter: ((a * 4) = 8)
+(2 rows)
+
+SELECT * FROM gtest22c WHERE b = 8;
+ a | b 
+---+---
+ 2 | 8
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE b * 3 = 12;
+                   QUERY PLAN                   
+------------------------------------------------
+ Index Scan using gtest22c_expr_idx on gtest22c
+   Index Cond: (((a * 4) * 3) = 12)
+(2 rows)
+
+SELECT * FROM gtest22c WHERE b * 3 = 12;
+ a | b 
+---+---
+ 1 | 4
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE a = 1 AND b > 0;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Index Only Scan using gtest22c_pred_idx on gtest22c
+   Index Cond: (a = 1)
+(2 rows)
+
+SELECT * FROM gtest22c WHERE a = 1 AND b > 0;
+ a | b 
+---+---
+ 1 | 4
+(1 row)
+
+CREATE TABLE gtest22d (a int
+  ,v1 int GENERATED ALWAYS AS (a * 11) VIRTUAL
+  ,v2 int GENERATED ALWAYS AS (a * 22) VIRTUAL
+  ,v3 int GENERATED ALWAYS AS (a * 33) VIRTUAL
+  ,v4 int GENERATED ALWAYS AS (a * 44) VIRTUAL
+);  -- ok
+insert into gtest22d select oid from pg_catalog.pg_class union all select -1;  -- ok
+CREATE INDEX gtest22d_vgc_idx ON gtest22d(a,v1,abs(v2)) Include(v3) WHERE v4 < 100;  -- ok
+\d gtest22d
+                Table "generated_virtual_tests.gtest22d"
+ Column |  Type   | Collation | Nullable |           Default            
+--------+---------+-----------+----------+------------------------------
+ a      | integer |           |          | 
+ v1     | integer |           |          | generated always as (a * 11)
+ v2     | integer |           |          | generated always as (a * 22)
+ v3     | integer |           |          | generated always as (a * 33)
+ v4     | integer |           |          | generated always as (a * 44)
+Indexes:
+    "gtest22d_vgc_idx" btree (a, v1, abs(v2)) INCLUDE (v3) WHERE v4 < 100
+
+analyze gtest22d;
+EXPLAIN (COSTS OFF) SELECT * FROM gtest22d WHERE v4 < 100;  --Index Only Scan or Index Scan
+                     QUERY PLAN                     
+----------------------------------------------------
+ Index Only Scan using gtest22d_vgc_idx on gtest22d
+(1 row)
+
+SELECT * FROM gtest22d WHERE v4 < 100;
+ a  | v1  | v2  | v3  | v4  
+----+-----+-----+-----+-----
+ -1 | -11 | -22 | -33 | -44
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT * FROM gtest22d WHERE v4 * 5 < 100;  --Seq Scan
+            QUERY PLAN            
+----------------------------------
+ Seq Scan on gtest22d
+   Disabled: true
+   Filter: (((a * 44) * 5) < 100)
+(3 rows)
+
+SELECT * FROM gtest22d WHERE v4 * 5 < 100;
+ a  | v1  | v2  | v3  | v4  
+----+-----+-----+-----+-----
+ -1 | -11 | -22 | -33 | -44
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT * FROM gtest22d WHERE a * 44 < 100;  --Index Only Scan or Index Scan
+                     QUERY PLAN                     
+----------------------------------------------------
+ Index Only Scan using gtest22d_vgc_idx on gtest22d
+(1 row)
+
+SELECT * FROM gtest22d WHERE a * 44 < 100;
+ a  | v1  | v2  | v3  | v4  
+----+-----+-----+-----+-----
+ -1 | -11 | -22 | -33 | -44
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT * FROM gtest22d WHERE (a * 44) < 100;  --Index Only Scan or Index Scan
+                     QUERY PLAN                     
+----------------------------------------------------
+ Index Only Scan using gtest22d_vgc_idx on gtest22d
+(1 row)
+
+SELECT * FROM gtest22d WHERE (a * 44) < 100;
+ a  | v1  | v2  | v3  | v4  
+----+-----+-----+-----+-----
+ -1 | -11 | -22 | -33 | -44
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT * FROM gtest22d WHERE (a * 33) < 100;  --Seq Scan
+         QUERY PLAN         
+----------------------------
+ Seq Scan on gtest22d
+   Disabled: true
+   Filter: ((a * 33) < 100)
+(3 rows)
+
+SELECT * FROM gtest22d WHERE (a * 33) < 100;
+ a  | v1  | v2  | v3  | v4  
+----+-----+-----+-----+-----
+ -1 | -11 | -22 | -33 | -44
+(1 row)
+
+RESET enable_seqscan;
+RESET enable_bitmapscan;
 -- foreign keys
 CREATE TABLE gtest23a (x int PRIMARY KEY, y int);
 --INSERT INTO gtest23a VALUES (1, 11), (2, 22), (3, 33);
@@ -864,12 +1027,12 @@ ERROR:  foreign key constraints on virtual generated columns are not supported
 --DROP TABLE gtest23b;
 --DROP TABLE gtest23a;
 CREATE TABLE gtest23p (x int, y int GENERATED ALWAYS AS (x * 2) VIRTUAL, PRIMARY KEY (y));
-ERROR:  primary keys on virtual generated columns are not supported
---INSERT INTO gtest23p VALUES (1), (2), (3);
+INSERT INTO gtest23p VALUES (1), (2), (3);  -- ok
 CREATE TABLE gtest23q (a int PRIMARY KEY, b int REFERENCES gtest23p (y));
-ERROR:  relation "gtest23p" does not exist
---INSERT INTO gtest23q VALUES (1, 2);  -- ok
---INSERT INTO gtest23q VALUES (2, 5);  -- error
+INSERT INTO gtest23q VALUES (1, 2);  -- ok
+INSERT INTO gtest23q VALUES (2, 5);  -- error
+ERROR:  insert or update on table "gtest23q" violates foreign key constraint "gtest23q_b_fkey"
+DETAIL:  Key (b)=(5) is not present in table "gtest23p".
 -- domains
 CREATE DOMAIN gtestdomain1 AS int CHECK (VALUE < 10);
 CREATE TABLE gtest24 (a int PRIMARY KEY, b gtestdomain1 GENERATED ALWAYS AS (a * 2) VIRTUAL);

@@ -58,8 +58,10 @@ extern List *RelationGetStatExtList(Relation relation);
 extern Oid	RelationGetPrimaryKeyIndex(Relation relation, bool deferrable_ok);
 extern Oid	RelationGetReplicaIndex(Relation relation);
 extern List *RelationGetIndexExpressions(Relation relation);
+extern List *RelationGetIndexExpressionsExpand(Relation relation);
 extern List *RelationGetDummyIndexExpressions(Relation relation);
 extern List *RelationGetIndexPredicate(Relation relation);
+extern List *RelationGetIndexPredicateExpand(Relation relation);
 extern bytea **RelationGetIndexAttOptions(Relation relation, bool copy);
 
 /*
@@ -160,5 +162,7 @@ extern PGDLLIMPORT bool criticalRelcachesBuilt;
 
 /* should be used only by relcache.c and postinit.c */
 extern PGDLLIMPORT bool criticalSharedRelcachesBuilt;
+
+extern List *ExpandVirtualGeneratedColumns(List *list, Relation heapRelation, Oid heapRelId);
 
 #endif							/* RELCACHE_H */

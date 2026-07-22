@@ -828,7 +828,11 @@ make_ands_implicit(Expr *clause)
 
 /*
  * makeIndexInfo
- *	  create an IndexInfo node
+ *	  create an IndexInfo node.
+ * Upon returning from this function, callers must apply 
+ * ExpandVirtualGeneratedColumns() or RelationGetIndexExpressionsExpand 
+ * or RelationGetIndexPredicateExpand() to  ii_ExpressionsExpand and
+ * ii_PredicateExpand as needed for actual expansion when they are not NIL or dummy.
  */
 IndexInfo *
 makeIndexInfo(int numattrs, int numkeyattrs, Oid amoid, List *expressions,
@@ -856,11 +860,15 @@ makeIndexInfo(int numattrs, int numkeyattrs, Oid amoid, List *expressions,
 
 	/* expressions */
 	n->ii_Expressions = expressions;
+	n->ii_ExpressionsExpand = copyObject(expressions);
 	n->ii_ExpressionsState = NIL;
+	n->ii_ExpressionsExpandState = NIL;
 
 	/* predicates  */
 	n->ii_Predicate = predicates;
+	n->ii_PredicateExpand = copyObject(predicates);
 	n->ii_PredicateState = NULL;
+	n->ii_PredicateExpandState = NULL;
 
 	/* exclusion constraints */
 	n->ii_ExclusionOps = NULL;

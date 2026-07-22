@@ -1418,6 +1418,10 @@ index_create_copy(Relation heapRelation, uint16 flags,
 							concurrently,	/* concurrent */
 							indexRelation->rd_indam->amsummarizing,
 							oldInfo->ii_WithoutOverlaps);
+	newInfo->ii_ExpressionsExpand =
+		ExpandVirtualGeneratedColumns(newInfo->ii_ExpressionsExpand, heapRelation, InvalidOid);
+	newInfo->ii_PredicateExpand =
+		ExpandVirtualGeneratedColumns(newInfo->ii_PredicateExpand, heapRelation, InvalidOid);
 
 	/* fetch exclusion constraint info if any */
 	if (indexRelation->rd_index->indisexclusion)
@@ -2486,6 +2490,8 @@ BuildIndexInfo(Relation index)
 					   false,
 					   index->rd_indam->amsummarizing,
 					   indexStruct->indisexclusion && indexStruct->indisunique);
+	ii->ii_ExpressionsExpand = (List *)RelationGetIndexExpressionsExpand(index);
+	ii->ii_PredicateExpand = (List *)RelationGetIndexPredicateExpand(index);
 
 	/* fill in attribute numbers */
 	for (i = 0; i < numAtts; i++)
@@ -2778,7 +2784,7 @@ FormIndexDatum(IndexInfo *indexInfo,
 			   Datum *values,
 			   bool *isnull)
 {
-	ListCell   *indexpr_item;
+	ListCell   *indexprExpand_item;
 	int			i;
 
 	if (indexInfo->ii_Expressions != NIL &&
@@ -2787,10 +2793,12 @@ FormIndexDatum(IndexInfo *indexInfo,
 		/* First time through, set up expression evaluation state */
 		indexInfo->ii_ExpressionsState =
 			ExecPrepareExprList(indexInfo->ii_Expressions, estate);
+		indexInfo->ii_ExpressionsExpandState =
+			ExecPrepareExprList(indexInfo->ii_ExpressionsExpand, estate);
 		/* Check caller has set up context correctly */
 		Assert(GetPerTupleExprContext(estate)->ecxt_scantuple == slot);
 	}
-	indexpr_item = list_head(indexInfo->ii_ExpressionsState);
+	indexprExpand_item = list_head(indexInfo->ii_ExpressionsExpandState);
 
 	for (i = 0; i < indexInfo->ii_NumIndexAttrs; i++)
 	{
@@ -2802,29 +2810,59 @@ FormIndexDatum(IndexInfo *indexInfo,
 			iDatum = slot_getsysattr(slot, keycol, &isNull);
 		else if (keycol != 0)
 		{
-			/*
-			 * Plain index column; get the value we need directly from the
-			 * heap tuple.
-			 */
-			iDatum = slot_getattr(slot, keycol, &isNull);
+			TupleDesc			tupdesc = slot->tts_tupleDescriptor;
+			Form_pg_attribute 	att = TupleDescAttr(tupdesc, keycol - 1);
+
+			if (att->attgenerated != ATTRIBUTE_GENERATED_VIRTUAL)
+			{
+				/*
+				 * Plain index column; get the value we need directly from the
+				 * heap tuple.
+				*/
+				iDatum = slot_getattr(slot, keycol, &isNull);
+			}
+			else
+			{
+				TupleConstr 	*constr = tupdesc->constr;
+				int				 j;
+				AttrDefault		*defval;
+				Expr			*expr;
+				ExprState		*exprstate;
+
+				Assert(constr->num_defval > 0);
+				for (j = 0; j < constr->num_defval; j++)
+				{
+					defval = &constr->defval[j];
+					if (defval->adnum != keycol)
+						continue;
+
+					expr = stringToNode(defval->adbin);
+					exprstate = ExecPrepareExpr(expr, estate);
+					iDatum = ExecEvalExprSwitchContext(exprstate,
+														GetPerTupleExprContext(estate),
+														&isNull);
+					break;
+				}
+				Assert(j < constr->num_defval);
+			}
 		}
 		else
 		{
 			/*
 			 * Index expression --- need to evaluate it.
 			 */
-			if (indexpr_item == NULL)
+			if (indexprExpand_item == NULL)
 				elog(ERROR, "wrong number of index expressions");
-			iDatum = ExecEvalExprSwitchContext((ExprState *) lfirst(indexpr_item),
+			iDatum = ExecEvalExprSwitchContext((ExprState *) lfirst(indexprExpand_item),
 											   GetPerTupleExprContext(estate),
 											   &isNull);
-			indexpr_item = lnext(indexInfo->ii_ExpressionsState, indexpr_item);
+			indexprExpand_item = lnext(indexInfo->ii_ExpressionsExpandState, indexprExpand_item);
 		}
 		values[i] = iDatum;
 		isnull[i] = isNull;
 	}
 
-	if (indexpr_item != NULL)
+	if (indexprExpand_item != NULL)
 		elog(ERROR, "wrong number of index expressions");
 }
 
@@ -3248,7 +3286,7 @@ IndexCheckExclusion(Relation heapRelation,
 	TableScanDesc scan;
 	Datum		values[INDEX_MAX_KEYS];
 	bool		isnull[INDEX_MAX_KEYS];
-	ExprState  *predicate;
+	ExprState  *predicateExpand;
 	TupleTableSlot *slot;
 	EState	   *estate;
 	ExprContext *econtext;
@@ -3274,7 +3312,7 @@ IndexCheckExclusion(Relation heapRelation,
 	econtext->ecxt_scantuple = slot;
 
 	/* Set up execution state for predicate, if any. */
-	predicate = ExecPrepareQual(indexInfo->ii_Predicate, estate);
+	predicateExpand = ExecPrepareQual(indexInfo->ii_PredicateExpand, estate);
 
 	/*
 	 * Scan all live tuples in the base relation.
@@ -3294,9 +3332,9 @@ IndexCheckExclusion(Relation heapRelation,
 		/*
 		 * In a partial index, ignore tuples that don't satisfy the predicate.
 		 */
-		if (predicate != NULL)
+		if (predicateExpand != NULL)
 		{
-			if (!ExecQual(predicate, econtext))
+			if (!ExecQual(predicateExpand, econtext))
 				continue;
 		}
 
@@ -3329,7 +3367,9 @@ IndexCheckExclusion(Relation heapRelation,
 
 	/* These may have been pointing to the now-gone estate */
 	indexInfo->ii_ExpressionsState = NIL;
+	indexInfo->ii_ExpressionsExpandState = NIL;
 	indexInfo->ii_PredicateState = NULL;
+	indexInfo->ii_PredicateExpandState = NULL;
 }
 
 /*
