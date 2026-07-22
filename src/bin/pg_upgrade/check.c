@@ -27,6 +27,7 @@ static void check_for_user_defined_postfix_ops(ClusterInfo *cluster);
 static void check_for_incompatible_polymorphics(ClusterInfo *cluster);
 static void check_for_tables_with_oids(ClusterInfo *cluster);
 static void check_for_not_null_inheritance(ClusterInfo *cluster);
+static void check_for_duplicate_fk_names(ClusterInfo *cluster);
 static void check_for_gist_inet_ops(ClusterInfo *cluster);
 static void check_for_new_tablespace_dir(void);
 static void check_for_user_defined_encoding_conversions(ClusterInfo *cluster);
@@ -634,6 +635,16 @@ check_and_dump_old_cluster(void)
 	 */
 	if (GET_MAJOR_VERSION(old_cluster.major_version) <= 1800)
 		check_for_not_null_inheritance(&old_cluster);
+
+	/*
+	 * Pre-PG 18 left NOT VALID foreign keys on partitions unlinked to the
+	 * parent (conparentid = 0).  If such a constraint shares its name with
+	 * a foreign key on the parent, schema restore may fail due to a name
+	 * conflict.  The check starts from PG 11, when conparentid was introduced.
+	 */
+	if (GET_MAJOR_VERSION(old_cluster.major_version) >= 1100 &&
+		GET_MAJOR_VERSION(old_cluster.major_version) <= 1700)
+		check_for_duplicate_fk_names(&old_cluster);
 
 	/*
 	 * The btree_gist extension contains gist_inet_ops and gist_cidr_ops
@@ -1694,6 +1705,101 @@ check_for_not_null_inheritance(ClusterInfo *cluster)
 				 "You can fix this by running\n"
 				 "    ALTER TABLE tablename ALTER column SET NOT NULL;\n"
 				 "on each column listed in the file:\n"
+				 "    %s", report.path);
+	}
+	else
+		check_ok();
+}
+
+/*
+ * Callback function for processing results of query for
+ * check_for_duplicate_fk_names.
+ */
+static void
+process_duplicate_fk_names(DbInfo *dbinfo, PGresult *res, void *arg)
+{
+	UpgradeTaskReport *report = (UpgradeTaskReport *) arg;
+	int			ntups = PQntuples(res);
+	int			i_nspname = PQfnumber(res, "nspname");
+	int			i_relname = PQfnumber(res, "relname");
+	int			i_conname = PQfnumber(res, "conname");
+
+	if (ntups == 0)
+		return;
+
+	if (report->file == NULL &&
+		(report->file = fopen_priv(report->path, "w")) == NULL)
+		pg_fatal("could not open file \"%s\": %m", report->path);
+
+	fprintf(report->file, "In database: %s\n", dbinfo->db_name);
+
+	for (int rowno = 0; rowno < ntups; rowno++)
+	{
+		fprintf(report->file, "  %s.%s.%s\n",
+				PQgetvalue(res, rowno, i_nspname),
+				PQgetvalue(res, rowno, i_relname),
+				PQgetvalue(res, rowno, i_conname));
+	}
+}
+
+/*
+ * check_for_duplicate_fk_names()
+ *
+ * Check for NOT VALID foreign keys on partitions that have the same name as
+ * a foreign key on the parent partitioned table and were not linked to it
+ * (conparentid = 0).  Such constraints may cause a name conflict during
+ * restore, because pg_dump emits them as separate ALTER TABLE ADD CONSTRAINT
+ * statements for both the parent and the partition.
+ */
+static void
+check_for_duplicate_fk_names(ClusterInfo *cluster)
+{
+	UpgradeTaskReport report;
+	UpgradeTask *task;
+	const char *query;
+
+	prep_status("Checking for foreign keys on partitions with duplicate names");
+
+	report.file = NULL;
+	snprintf(report.path, sizeof(report.path), "%s/%s",
+			 log_opts.basedir,
+			 "duplicate_fk_names.txt");
+
+	query = "SELECT n.nspname, c.relname, con.conname "
+		"FROM pg_constraint con "
+		"JOIN pg_class c ON con.conrelid = c.oid "
+		"JOIN pg_namespace n ON c.relnamespace = n.oid "
+		"JOIN pg_inherits i ON i.inhrelid = c.oid "
+		"JOIN pg_class p ON i.inhparent = p.oid "
+		"JOIN pg_constraint pcon ON pcon.conrelid = p.oid "
+		"WHERE con.conparentid = 0 "
+		"      AND pcon.conname = con.conname "
+		"      AND pcon.contype = con.contype "
+		"      AND con.contype = 'f' "
+		"      AND NOT con.convalidated "
+		"      AND c.relispartition";
+
+	task = upgrade_task_create();
+	upgrade_task_add_step(task, query,
+						  process_duplicate_fk_names,
+						  true, &report);
+	upgrade_task_run(task, cluster);
+	upgrade_task_free(task);
+
+	if (report.file)
+	{
+		fclose(report.file);
+		pg_log(PG_REPORT, "fatal");
+		pg_fatal("Your installation contains NOT VALID foreign keys on partitions that have\n"
+				 "the same name as a foreign key on the parent partitioned table.\n"
+				 "The upgrade may fail because the parent foreign key is inherited by\n"
+				 "the partition during restore, causing a name conflict.\n"
+				 "You can fix this by dropping or renaming the foreign key on the\n"
+				 "partition, using:\n"
+				 "    ALTER TABLE ONLY partition_name DROP CONSTRAINT constraint_name;\n"
+				 "or\n"
+				 "    ALTER TABLE ONLY partition_name RENAME CONSTRAINT constraint_name TO new_name;\n"
+				 "A list of the problem constraints is in the file:\n"
 				 "    %s", report.path);
 	}
 	else
