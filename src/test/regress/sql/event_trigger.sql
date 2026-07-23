@@ -301,6 +301,15 @@ DROP EVENT TRIGGER regress_event_trigger_drop_objects;
 DROP EVENT TRIGGER undroppable;
 
 -- Event triggers on relations.
+CREATE TABLE evttrig_pub_tbl (a int);
+CREATE TABLE evttrig_pub_tbl2 (a int);
+CREATE TABLE evttrig_pub_tbl3 (a int);
+CREATE SCHEMA evttrig_pub_schema;
+CREATE SCHEMA evttrig_pub_schema2;
+CREATE PUBLICATION evttrig_pub FOR TABLE evttrig_pub_tbl,
+  evttrig_pub_tbl2, evttrig_pub_tbl3, TABLES IN SCHEMA evttrig_pub_schema,
+  evttrig_pub_schema2;
+
 CREATE OR REPLACE FUNCTION event_trigger_report_dropped()
  RETURNS event_trigger
  LANGUAGE plpgsql
@@ -334,6 +343,10 @@ BEGIN
 END; $$;
 CREATE EVENT TRIGGER regress_event_trigger_report_end ON ddl_command_end
   EXECUTE PROCEDURE event_trigger_report_end();
+
+ALTER PUBLICATION evttrig_pub DROP TABLE evttrig_pub_tbl;
+ALTER PUBLICATION evttrig_pub DROP TABLES IN SCHEMA evttrig_pub_schema;
+ALTER PUBLICATION evttrig_pub SET TABLE evttrig_pub_tbl2;
 
 CREATE SCHEMA evttrig
 	CREATE TABLE one (col_a SERIAL PRIMARY KEY, col_b text DEFAULT 'forty two', col_c SERIAL)
@@ -416,6 +429,13 @@ CREATE OPERATOR CLASS evttrigopclass FOR TYPE int USING btree AS STORAGE int;
 
 DROP EVENT TRIGGER regress_event_trigger_report_dropped;
 DROP EVENT TRIGGER regress_event_trigger_report_end;
+
+DROP PUBLICATION evttrig_pub;
+DROP TABLE evttrig_pub_tbl;
+DROP TABLE evttrig_pub_tbl2;
+DROP TABLE evttrig_pub_tbl3;
+DROP SCHEMA evttrig_pub_schema;
+DROP SCHEMA evttrig_pub_schema2;
 
 -- only allowed from within an event trigger function, should fail
 select pg_event_trigger_table_rewrite_oid();
