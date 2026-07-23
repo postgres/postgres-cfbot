@@ -3293,6 +3293,7 @@ ExecOnConflictSelect(ModifyTableContext *context,
 	ExprState  *onConflictSelectWhere = resultRelInfo->ri_onConflict->oc_WhereClause;
 	TupleTableSlot *existing = resultRelInfo->ri_onConflict->oc_Existing;
 	LockClauseStrength lockStrength = resultRelInfo->ri_onConflict->oc_LockStrength;
+	bool		fetched = false;
 
 	/*
 	 * Parse analysis should have blocked ON CONFLICT for all system
@@ -3301,10 +3302,33 @@ ExecOnConflictSelect(ModifyTableContext *context,
 	 */
 	Assert(!resultRelInfo->ri_needLockTagTuple);
 
+	/*
+	 * At SERIALIZABLE, read the tuple with the query snapshot first: a read
+	 * only becomes visible to SSI when it is made through an MVCC snapshot,
+	 * and none of the other reads here qualifies -- the arbiter index probe
+	 * uses a dirty snapshot, the fetch below SnapshotAny, and the tuple lock
+	 * checks no snapshot at all -- while the SELECT path writes nothing that
+	 * would make the conflict visible from the writer's side.  This read
+	 * must precede the tuple lock: the lock can succeed without noticing a
+	 * concurrent writer, as FOR KEY SHARE does not conflict with a non-key
+	 * update.
+	 *
+	 * A tuple invisible to the query snapshot was written either by this
+	 * transaction, which needs no conflict detection against itself, or by
+	 * a concurrent one, which ExecCheckTupleVisible below turns into a
+	 * serialization failure.
+	 */
+	if (IsolationIsSerializable())
+		fetched = table_tuple_fetch_row_version(relation,
+												conflictTid,
+												context->estate->es_snapshot,
+												existing);
+
 	/* Fetch/lock existing tuple, according to the requested lock strength */
 	if (lockStrength == LCS_NONE)
 	{
-		if (!table_tuple_fetch_row_version(relation,
+		if (!fetched &&
+			!table_tuple_fetch_row_version(relation,
 										   conflictTid,
 										   SnapshotAny,
 										   existing))
