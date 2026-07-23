@@ -1852,6 +1852,7 @@ pg_stat_all_tables| SELECT c.oid AS relid,
     pg_stat_get_total_autoanalyze_time(c.oid) AS total_autoanalyze_time,
     pg_stat_get_total_vacuum_delay_time(c.oid) AS total_vacuum_delay_time,
     pg_stat_get_total_autovacuum_delay_time(c.oid) AS total_autovacuum_delay_time,
+    pg_stat_get_vacuum_failsafe_count(c.oid) AS vacuum_failsafe_count,
     pg_stat_get_stat_reset_time(c.oid) AS stats_reset
    FROM ((pg_class c
      LEFT JOIN pg_index i ON ((c.oid = i.indrelid)))
@@ -1923,6 +1924,7 @@ pg_stat_database| SELECT oid AS datid,
     pg_stat_get_db_total_autovacuum_time(oid) AS total_autovacuum_time,
     pg_stat_get_db_total_vacuum_delay_time(oid) AS total_vacuum_delay_time,
     pg_stat_get_db_total_autovacuum_delay_time(oid) AS total_autovacuum_delay_time,
+    pg_stat_get_db_vacuum_failsafe_count(oid) AS vacuum_failsafe_count,
     pg_stat_get_db_session_time(oid) AS session_time,
     pg_stat_get_db_active_time(oid) AS active_time,
     pg_stat_get_db_idle_in_transaction_time(oid) AS idle_in_transaction_time,
@@ -2385,6 +2387,7 @@ pg_stat_sys_tables| SELECT relid,
     total_autoanalyze_time,
     total_vacuum_delay_time,
     total_autovacuum_delay_time,
+    vacuum_failsafe_count,
     stats_reset
    FROM pg_stat_all_tables
   WHERE ((schemaname = ANY (ARRAY['pg_catalog'::name, 'information_schema'::name])) OR (schemaname ~ '^pg_toast'::text));
@@ -2446,6 +2449,7 @@ pg_stat_user_tables| SELECT relid,
     total_autoanalyze_time,
     total_vacuum_delay_time,
     total_autovacuum_delay_time,
+    vacuum_failsafe_count,
     stats_reset
    FROM pg_stat_all_tables
   WHERE ((schemaname <> ALL (ARRAY['pg_catalog'::name, 'information_schema'::name])) AND (schemaname !~ '^pg_toast'::text));
