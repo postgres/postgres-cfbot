@@ -108,6 +108,9 @@ PG_STAT_GET_RELENTRY_INT64(tuples_updated)
 /* pg_stat_get_vacuum_count */
 PG_STAT_GET_RELENTRY_INT64(vacuum_count)
 
+/* pg_stat_get_vacuum_failsafe_count */
+PG_STAT_GET_RELENTRY_INT64(vacuum_failsafe_count)
+
 /*
  * Accessor macro for index stats entries (PgStat_StatIdxEntry).
  */
@@ -1349,6 +1352,9 @@ PG_STAT_GET_DBENTRY_FLOAT8_MS(total_vacuum_delay_time)
 
 /* pg_stat_get_db_total_autovacuum_delay_time */
 PG_STAT_GET_DBENTRY_FLOAT8_MS(total_autovacuum_delay_time)
+
+/* pg_stat_get_db_vacuum_failsafe_count */
+PG_STAT_GET_DBENTRY_INT64(vacuum_failsafe_count)
 
 /* pg_stat_get_db_session_time */
 PG_STAT_GET_DBENTRY_FLOAT8_MS(session_time)
