@@ -1647,9 +1647,14 @@ AlterPublicationAllFlags(AlterPublicationStmt *stmt, Relation rel,
 		CatalogTupleUpdate(rel, &tup->t_self, tup);
 		CommandCounterIncrement();
 
+		pubform = (Form_pg_publication) GETSTRUCT(tup);
+
 		/* For ALL TABLES, we must invalidate all relcache entries */
 		if (replaces[Anum_pg_publication_puballtables - 1])
 			CacheInvalidateRelcacheAll();
+
+		InvokeObjectPostAlterHook(PublicationRelationId,
+								  pubform->oid, 0);
 	}
 
 	return dirty;
