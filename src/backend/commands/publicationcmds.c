@@ -1607,7 +1607,7 @@ CheckAlterPublication(AlterPublicationStmt *stmt, HeapTuple tup,
 /*
  * Update FOR ALL TABLES / FOR ALL SEQUENCES flags of a publication.
  */
-static void
+static bool
 AlterPublicationAllFlags(AlterPublicationStmt *stmt, Relation rel,
 						 HeapTuple tup)
 {
@@ -1618,7 +1618,7 @@ AlterPublicationAllFlags(AlterPublicationStmt *stmt, Relation rel,
 	bool		dirty = false;
 
 	if (!stmt->for_all_tables && !stmt->for_all_sequences)
-		return;
+		return false;
 
 	pubform = (Form_pg_publication) GETSTRUCT(tup);
 
@@ -1651,6 +1651,8 @@ AlterPublicationAllFlags(AlterPublicationStmt *stmt, Relation rel,
 		if (replaces[Anum_pg_publication_puballtables - 1])
 			CacheInvalidateRelcacheAll();
 	}
+
+	return dirty;
 }
 
 /*
@@ -1694,6 +1696,7 @@ AlterPublication(ParseState *pstate, AlterPublicationStmt *stmt)
 		Oid			pubid = pubform->oid;
 		bool		tables_dropped;
 		bool		schemas_dropped;
+		bool		all_flags_changed;
 
 		ObjectsInPublicationToOids(stmt->pubobjects, pstate, &relations,
 								   &exceptrelations, &schemaidlist);
@@ -1724,9 +1727,9 @@ AlterPublication(ParseState *pstate, AlterPublicationStmt *stmt)
 			AlterPublicationTables(stmt, tup, relations, pstate->p_sourcetext,
 								   schemaidlist != NIL);
 		schemas_dropped = AlterPublicationSchemas(stmt, tup, schemaidlist);
-		AlterPublicationAllFlags(stmt, rel, tup);
+		all_flags_changed = AlterPublicationAllFlags(stmt, rel, tup);
 
-		if (tables_dropped || schemas_dropped)
+		if (tables_dropped || schemas_dropped || all_flags_changed)
 		{
 			ObjectAddress obj;
 
