@@ -21,6 +21,7 @@
 #include "access/twophase_rmgr.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
+#include "utils/injection_point.h"
 #include "utils/inval.h"
 #include "utils/memutils.h"
 #include "utils/pgstat_internal.h"
@@ -448,6 +449,7 @@ pgstat_report_skipped_vacuum_analyze(Oid relid, int flags)
 	isshared = classForm->relisshared;
 	relkind = classForm->relkind;
 	ReleaseSysCache(classTup);
+	INJECTION_POINT("skipped-vacuum-analyze-before-entry-lock", NULL);
 
 	/*
 	 * Only track skipped vacuum/analyze activity for relkinds exposed by
