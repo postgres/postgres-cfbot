@@ -452,6 +452,14 @@ ALTER PUBLICATION evttrig_pub SET TABLE evttrig_pub_tbl2;
 NOTICE:  NORMAL: orig=t normal=f istemp=f type=publication namespace identity=evttrig_pub_schema2 in publication evttrig_pub schema=<NULL> name=<NULL> addr={evttrig_pub_schema2} args={evttrig_pub}
 NOTICE:  NORMAL: orig=t normal=f istemp=f type=publication relation identity=public.evttrig_pub_tbl3 in publication evttrig_pub schema=<NULL> name=<NULL> addr={public,evttrig_pub_tbl3} args={evttrig_pub}
 NOTICE:  END: command_tag=ALTER PUBLICATION type=publication identity=evttrig_pub
+CREATE PUBLICATION evttrig_all_pub;
+NOTICE:  END: command_tag=CREATE PUBLICATION type=publication identity=evttrig_all_pub
+ALTER PUBLICATION evttrig_all_pub SET ALL TABLES EXCEPT (TABLE evttrig_pub_tbl);
+NOTICE:  END: command_tag=ALTER PUBLICATION type=publication relation identity=public.evttrig_pub_tbl in publication evttrig_all_pub
+NOTICE:  END: command_tag=ALTER PUBLICATION type=publication identity=evttrig_all_pub
+ALTER PUBLICATION evttrig_all_pub SET ALL SEQUENCES;
+NOTICE:  NORMAL: orig=t normal=f istemp=f type=publication relation identity=public.evttrig_pub_tbl in publication evttrig_all_pub schema=<NULL> name=<NULL> addr={public,evttrig_pub_tbl} args={evttrig_all_pub}
+NOTICE:  END: command_tag=ALTER PUBLICATION type=publication identity=evttrig_all_pub
 CREATE SCHEMA evttrig
 	CREATE TABLE one (col_a SERIAL PRIMARY KEY, col_b text DEFAULT 'forty two', col_c SERIAL)
 	CREATE INDEX one_idx ON one (col_b)
@@ -609,6 +617,7 @@ NOTICE:  END: command_tag=CREATE OPERATOR CLASS type=operator class identity=pub
 DROP EVENT TRIGGER regress_event_trigger_report_dropped;
 DROP EVENT TRIGGER regress_event_trigger_report_end;
 DROP PUBLICATION evttrig_pub;
+DROP PUBLICATION evttrig_all_pub;
 DROP TABLE evttrig_pub_tbl;
 DROP TABLE evttrig_pub_tbl2;
 DROP TABLE evttrig_pub_tbl3;

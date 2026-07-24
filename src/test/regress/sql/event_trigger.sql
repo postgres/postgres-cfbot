@@ -348,6 +348,10 @@ ALTER PUBLICATION evttrig_pub DROP TABLE evttrig_pub_tbl;
 ALTER PUBLICATION evttrig_pub DROP TABLES IN SCHEMA evttrig_pub_schema;
 ALTER PUBLICATION evttrig_pub SET TABLE evttrig_pub_tbl2;
 
+CREATE PUBLICATION evttrig_all_pub;
+ALTER PUBLICATION evttrig_all_pub SET ALL TABLES EXCEPT (TABLE evttrig_pub_tbl);
+ALTER PUBLICATION evttrig_all_pub SET ALL SEQUENCES;
+
 CREATE SCHEMA evttrig
 	CREATE TABLE one (col_a SERIAL PRIMARY KEY, col_b text DEFAULT 'forty two', col_c SERIAL)
 	CREATE INDEX one_idx ON one (col_b)
@@ -431,6 +435,7 @@ DROP EVENT TRIGGER regress_event_trigger_report_dropped;
 DROP EVENT TRIGGER regress_event_trigger_report_end;
 
 DROP PUBLICATION evttrig_pub;
+DROP PUBLICATION evttrig_all_pub;
 DROP TABLE evttrig_pub_tbl;
 DROP TABLE evttrig_pub_tbl2;
 DROP TABLE evttrig_pub_tbl3;
