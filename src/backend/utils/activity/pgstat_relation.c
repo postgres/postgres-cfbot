@@ -21,6 +21,7 @@
 #include "access/twophase_rmgr.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
+#include "utils/injection_point.h"
 #include "utils/inval.h"
 #include "utils/memutils.h"
 #include "utils/pgstat_internal.h"
@@ -444,6 +445,7 @@ pgstat_report_skipped_vacuum_analyze(Oid relid, int flags)
 		return;					/* somebody deleted the rel, forget it */
 	isshared = ((Form_pg_class) GETSTRUCT(classTup))->relisshared;
 	ReleaseSysCache(classTup);
+	INJECTION_POINT("skipped-vacuum-analyze-before-entry-lock", NULL);
 
 	/* Store the data in the table's hash table entry. */
 	ts = GetCurrentTimestamp();
