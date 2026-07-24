@@ -37,6 +37,7 @@
 #include "fe_utils/recovery_gen.h"
 #include "getopt_long.h"
 #include "libpq/protocol.h"
+#include "portability/instr_time.h"
 #include "receivelog.h"
 #include "streamutil.h"
 
@@ -1790,6 +1791,8 @@ BaseBackup(char *compression_algorithm, char *compression_detail,
 	int			writing_to_stdout;
 	bool		use_new_option_syntax = false;
 	PQExpBufferData buf;
+	instr_time	transfer_start;
+	instr_time	transfer_elapsed;
 
 	Assert(conn != NULL);
 	initPQExpBuffer(&buf);
@@ -2145,6 +2148,9 @@ BaseBackup(char *compression_algorithm, char *compression_detail,
 						 wal_compress_level);
 	}
 
+	/* Start timing the data transfer, for the average rate report. */
+	INSTR_TIME_SET_CURRENT(transfer_start);
+
 	if (serverMajor >= 1500)
 	{
 		/* Receive a single tar stream with everything. */
@@ -2196,6 +2202,13 @@ BaseBackup(char *compression_algorithm, char *compression_detail,
 		if (!writing_to_stdout && manifest)
 			ReceiveBackupManifest(conn);
 	}
+
+	/*
+	 * All backup data has been received, so measure how long the transfer
+	 * took for the average rate report shown at completion.
+	 */
+	INSTR_TIME_SET_CURRENT(transfer_elapsed);
+	INSTR_TIME_SUBTRACT(transfer_elapsed, transfer_start);
 
 	if (showprogress)
 	{
@@ -2365,7 +2378,22 @@ BaseBackup(char *compression_algorithm, char *compression_detail,
 	}
 
 	if (verbose)
-		pg_log_info("base backup completed");
+	{
+		double		elapsed_sec = INSTR_TIME_GET_DOUBLE(transfer_elapsed);
+
+		/*
+		 * Avoids potential division by zero.
+		 *
+		 * Timing does not include potential fsync()/syncfs(), so data might be
+		 * still in-flight from pagecache when total_done was calculated, therefore
+		 * we make it clear to the user what we are measuring.
+		 */
+		if (elapsed_sec > 0.0)
+			pg_log_info("base backup completed (avg %.1f MB/s)",
+						(double) totaldone / (1024 * 1024) / elapsed_sec);
+		else
+			pg_log_info("base backup completed");
+	}
 }
 
 
@@ -2422,6 +2450,7 @@ main(int argc, char **argv)
 	pg_logging_init(argv[0]);
 	progname = get_progname(argv[0]);
 	set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN("pg_basebackup"));
+	pg_initialize_timing();
 
 	if (argc > 1)
 	{
