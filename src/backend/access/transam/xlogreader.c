@@ -171,6 +171,10 @@ XLogReaderFree(XLogReaderState *state)
 	pfree(state->errormsg_buf);
 	if (state->readRecordBuf)
 		pfree(state->readRecordBuf);
+#ifdef USE_ZSTD
+	if (state->fpi_dctx)
+		ZSTD_freeDCtx((ZSTD_DCtx *) state->fpi_dctx);
+#endif
 	pfree(state->readBuf);
 	pfree(state);
 }
@@ -2177,9 +2181,24 @@ RestoreBlockImage(XLogReaderState *record, uint8 block_id, char *page)
 		else if ((bkpb->bimg_info & BKPIMAGE_COMPRESS_ZSTD) != 0)
 		{
 #ifdef USE_ZSTD
-			size_t		decomp_result = ZSTD_decompress(tmp.data,
-														BLCKSZ - bkpb->hole_length,
-														ptr, bkpb->bimg_len);
+			size_t		decomp_result;
+
+			if (record->fpi_dctx == NULL)
+			{
+				record->fpi_dctx = ZSTD_createDCtx();
+				if (record->fpi_dctx == NULL)
+				{
+					report_invalid_record(record, "out of memory while restoring image at %X/%08X, block %d",
+										  LSN_FORMAT_ARGS(record->ReadRecPtr),
+										  block_id);
+					return false;
+				}
+			}
+
+			decomp_result = ZSTD_decompressDCtx((ZSTD_DCtx *) record->fpi_dctx,
+												tmp.data,
+												BLCKSZ - bkpb->hole_length,
+												ptr, bkpb->bimg_len);
 
 			if (ZSTD_isError(decomp_result))
 				decomp_success = false;

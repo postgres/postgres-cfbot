@@ -116,6 +116,20 @@ static uint8 curinsert_flags = 0;
 static XLogRecData hdr_rdt;
 static char *hdr_scratch = NULL;
 
+#ifdef USE_ZSTD
+/*
+ * Compression context reused across all block images compressed by this
+ * backend.  zstd keeps its match tables and window in here, roughly 1.3MB at
+ * the default level, and allocates them on first use.  Creating a context per
+ * call would repeat that allocation for every full-page image.
+ *
+ * It is deliberately not freed when wal_compression changes: a backend that
+ * compressed once is likely to do it again, and the context is only reachable
+ * from here.
+ */
+static ZSTD_CCtx *zstd_cctx = NULL;
+#endif
+
 #define SizeOfXlogOrigin	(sizeof(ReplOriginId) + sizeof(char))
 #define SizeOfXLogTransactionId	(sizeof(TransactionId) + sizeof(char))
 
@@ -1063,10 +1077,18 @@ XLogCompressBackupBlock(const PageData *page, uint16 hole_offset, uint16 hole_le
 
 		case WAL_COMPRESSION_ZSTD:
 #ifdef USE_ZSTD
-			len = ZSTD_compress(dest, COMPRESS_BUFSIZE, source, orig_len,
-								ZSTD_CLEVEL_DEFAULT);
-			if (ZSTD_isError(len))
-				len = -1;		/* failure */
+			if (zstd_cctx == NULL)
+				zstd_cctx = ZSTD_createCCtx();
+
+			if (zstd_cctx == NULL)
+				len = -1;		/* out of memory; store the image as is */
+			else
+			{
+				len = ZSTD_compressCCtx(zstd_cctx, dest, COMPRESS_BUFSIZE,
+										source, orig_len, ZSTD_CLEVEL_DEFAULT);
+				if (ZSTD_isError(len))
+					len = -1;	/* failure */
+			}
 #else
 			elog(ERROR, "zstd is not supported by this build");
 #endif
