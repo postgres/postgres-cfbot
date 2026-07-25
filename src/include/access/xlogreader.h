@@ -228,6 +228,13 @@ struct XLogReaderState
 	 * requested starting position.
 	 */
 	XLogRecPtr	DecodeRecPtr;	/* start of last record decoded */
+
+	/*
+	 * Kept across calls so that decompressing a full page image does not
+	 * create and destroy a decompression context every time.  Void because
+	 * this header is included where zstd.h is not.
+	 */
+	void	   *fpi_dctx;
 	XLogRecPtr	NextRecPtr;		/* end+1 of last record decoded */
 	XLogRecPtr	PrevRecPtr;		/* start of previous record decoded */
 
