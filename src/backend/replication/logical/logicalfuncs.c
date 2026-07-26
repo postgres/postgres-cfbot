@@ -243,7 +243,8 @@ pg_logical_slot_get_changes_guts(FunctionCallInfo fcinfo, bool confirm, bool bin
 		 * xacts that committed after the slot's confirmed_flush can be
 		 * accumulated into reorder buffers.
 		 */
-		XLogBeginRead(ctx->reader, MyReplicationSlot->data.restart_lsn);
+		XLogBeginReadStreamed(ctx->reader,
+							  MyReplicationSlot->data.restart_lsn, NULL);
 
 		/* invalidate non-timetravel entries */
 		InvalidateSystemCaches();

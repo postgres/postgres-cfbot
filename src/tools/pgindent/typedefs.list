@@ -3379,6 +3379,8 @@ VolatileFunctionStatus
 Vsrt
 WAIT_ORDER
 WALAvailability
+WALCompressionSlot
+WALCompressionSlotPadded
 WALInsertLock
 WALInsertLockPadded
 WALOpenSegment

@@ -1061,12 +1061,13 @@ SummarizeWAL(TimeLineID tli, XLogRecPtr start_lsn, bool exact,
 		 * file is less than the start LSN of the next file. When only a page
 		 * header is skipped, nothing has been missed.
 		 */
-		XLogBeginRead(xlogreader, start_lsn);
+		XLogBeginReadStreamed(xlogreader, start_lsn, NULL);
 		summary_start_lsn = start_lsn;
 	}
 	else
 	{
-		summary_start_lsn = XLogFindNextRecord(xlogreader, start_lsn, &errormsg);
+		summary_start_lsn = XLogBeginReadStreamed(xlogreader, start_lsn,
+												  &errormsg);
 		if (!XLogRecPtrIsValid(summary_start_lsn))
 		{
 			/*

@@ -53,7 +53,10 @@ sub start_of_page
 }
 
 my $primary = PostgreSQL::Test::Cluster->new('primary');
-$primary->init(allows_streaming => 1, has_archiving => 1);
+# This test computes the size of a record so that it overflows a WAL page, so
+# the record has to reach WAL at the size asked for.
+$primary->init(allows_streaming => 1, has_archiving => 1,
+	no_wal_compression => 1);
 
 # The configuration is chosen here to minimize the friction with
 # concurrent WAL activity.  checkpoint_timeout avoids noise with
