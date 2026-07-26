@@ -205,10 +205,43 @@ typedef struct XLogCompressionHeader
 	XLogRecord	record_header;
 	uint32		decompressed_length;
 	uint8		method;			/* XLR_COMPRESS_* */
-	/* 3 bytes of padding here, initialize to zero */
+	uint8		stream;			/* stream slot, or XLR_NO_STREAM */
+	uint8		stream_flags;	/* XLR_STREAM_* */
+	/* 1 byte of padding here, initialize to zero */
 } XLogCompressionHeader;
 
+/*
+ * A record compressed on its own carries XLR_NO_STREAM.  Otherwise "stream"
+ * names the compression stream it belongs to, and the record can only be
+ * decompressed after every earlier record of that stream.  XLR_STREAM_RESET
+ * says the stream starts here, so the reader must discard what it had.
+ */
+#define XLR_MAX_STREAMS		255
+#define XLR_NO_STREAM		0xFF
+#define XLR_STREAM_RESET	0x01
+
 #define SizeOfXLogCompressedRecord	sizeof(XLogCompressionHeader)
+
+/*
+ * Every stream starts over at fixed WAL_COMPRESSION_STREAM_RESET boundaries.
+ * That is what lets a reader begin in the middle of WAL: it rewinds to the
+ * last boundary below the record it wants and reads forward from there, since
+ * every stream begins again at or after such a boundary.  The distance is
+ * therefore what a reader has to re-read, and what a replication slot has to
+ * keep beyond the WAL it needs for itself.
+ *
+ * A fixed distance rather than the WAL segment size, so that how far a reader
+ * rewinds does not change when a cluster is initialised with a different
+ * segment size.  Compression is insensitive to the value -- pgbench emits the
+ * same WAL per transaction to within 2% anywhere between 1MB and 64MB -- so it
+ * is chosen for the readers, not for the ratio.
+ */
+#define WAL_COMPRESSION_STREAM_RESET	(UINT64CONST(4) * 1024 * 1024)
+
+/* Must a stream that last wrote at "from" start over to write at "to"? */
+#define XLogCompressionStreamCrosses(from, to) \
+	((uint64) (from) / WAL_COMPRESSION_STREAM_RESET != \
+	 (uint64) (to) / WAL_COMPRESSION_STREAM_RESET)
 
 /*
  * Maximum size of the header for a block reference. This is used to size a

@@ -1412,8 +1412,14 @@ main(int argc, char **argv)
 	atexit(cleanup_tmpwal_dir_atexit);
 	xlogreader_state_cleanup = xlogreader_state;
 
-	/* first find a valid recptr to start from */
-	first_record = XLogFindNextRecord(xlogreader_state, private.startptr, &errormsg);
+	/*
+	 * Find a valid recptr to start from.  A record can be compressed against
+	 * earlier records of its stream, so this backs up to where the streams
+	 * start over and decodes from there; those earlier records rebuild the
+	 * decompressors and are not printed.
+	 */
+	first_record = XLogBeginReadStreamed(xlogreader_state, private.startptr,
+										 &errormsg);
 
 	if (!XLogRecPtrIsValid(first_record))
 	{

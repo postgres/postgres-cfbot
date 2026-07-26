@@ -267,6 +267,10 @@
                                         # of zstd, lz4 and pglz, supported by the build)
 #wal_compression_threshold = 512        # min 32, smallest record compressed as a whole;
                                         # whole-record compression needs lz4 or zstd
+#wal_compression_streams = 0            # 0 disables compressing a record against
+                                        # earlier ones; a positive value is the
+                                        # number of shared compression streams
+                                        # (change requires restart)
 #wal_init_zero = on                     # zero-fill new WAL files
 #wal_recycle = on                       # recycle WAL files
 #wal_buffers = -1                       # min 32kB, -1 sets based on shared_buffers

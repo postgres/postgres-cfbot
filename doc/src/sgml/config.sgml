@@ -3703,6 +3703,33 @@ include_dir 'conf.d'
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-wal-compression-streams" xreflabel="wal_compression_streams">
+      <term><varname>wal_compression_streams</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>wal_compression_streams</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Sets the number of shared WAL compression streams.  The default is
+        zero, which disables stream compression.  When this is nonzero and
+        <xref linkend="guc-wal-compression"/> is <literal>zstd</literal>,
+        records can be compressed using the history of earlier records in
+        the same stream.  This can reduce the size of small records that do
+        not compress well individually.  The maximum is 64.  This parameter
+        can only be set at server start.
+       </para>
+       <para>
+        Compression history restarts at 4MB WAL boundaries.  A reader
+        starting within WAL may need to read from an earlier boundary to
+        rebuild that history, and replication slots retain WAL back to
+        that boundary.  Each reader needs a separate decompression context
+        for every stream it encounters.  More streams can therefore increase
+        memory use during recovery, logical decoding and WAL inspection.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-wal-compression-threshold" xreflabel="wal_compression_threshold">
       <term><varname>wal_compression_threshold</varname> (<type>integer</type>)
       <indexterm>

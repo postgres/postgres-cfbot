@@ -230,6 +230,21 @@ struct XLogReaderState
 	 * requested starting position.
 	 */
 	XLogRecPtr	DecodeRecPtr;	/* start of last record decoded */
+
+	/*
+	 * Records below this are decoded to rebuild the decompressors and then
+	 * dropped rather than returned; see XLogBeginReadStreamed().
+	 */
+	XLogRecPtr	warmupEndPtr;
+
+	/*
+	 * Frame records without decoding them: the caller only wants to know
+	 * where a record ends and to have its page in readBuf.  A record that
+	 * belongs to a compression stream cannot be decoded twice anyway, since
+	 * the decompressor has already consumed it.
+	 */
+	bool		framing_only;
+
 	XLogRecPtr	NextRecPtr;		/* end+1 of last record decoded */
 	XLogRecPtr	PrevRecPtr;		/* start of previous record decoded */
 
@@ -265,6 +280,16 @@ struct XLogReaderState
 	/* Buffer for decompressing whole-record compressed WAL records */
 	char	   *decompression_buffer;
 	uint32		decompression_buffer_size;
+
+#ifdef USE_ZSTD
+	/* One zstd decompression context per stream, indexed by stream ID. */
+	void	  **stream_dctx;
+	/* Whether a reset record has established each stream's history. */
+	bool	   *stream_ready;
+#ifndef FRONTEND
+	MemoryContextCallback stream_dctx_cb;
+#endif
+#endif
 
 	/*
 	 * Queue of records that have been decoded.  This is a linked list that
@@ -368,6 +393,8 @@ extern void XLogReaderSetDecodeBuffer(XLogReaderState *state,
 
 /* Position the XLogReader to given record */
 extern void XLogBeginRead(XLogReaderState *state, XLogRecPtr RecPtr);
+extern XLogRecPtr XLogBeginReadStreamed(XLogReaderState *state,
+										XLogRecPtr RecPtr, char **errormsg);
 extern XLogRecPtr XLogFindNextRecord(XLogReaderState *state, XLogRecPtr RecPtr,
 									 char **errormsg);
 
