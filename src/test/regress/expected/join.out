@@ -9602,16 +9602,16 @@ select * from fkest f1
                           QUERY PLAN                           
 ---------------------------------------------------------------
  Hash Join
-   Hash Cond: ((f2.x = f1.x) AND (f2.x10b = f1.x10))
+   Hash Cond: ((f1.x = f2.x) AND (f1.x10 = f2.x10b))
    ->  Nested Loop
-         ->  Seq Scan on fkest f2
+         ->  Seq Scan on fkest f1
                Filter: (x100 = 2)
-               Bloom Filter 1: keys=(x, x10b)
+               Bloom Filter 1: keys=(x, x10)
          ->  Index Scan using fkest_x_x10_x100_idx on fkest f3
-               Index Cond: (x = f2.x)
+               Index Cond: (x = f1.x)
    ->  Hash
          Bloom Filter 1
-         ->  Seq Scan on fkest f1
+         ->  Seq Scan on fkest f2
                Filter: (x100 = 2)
 (12 rows)
 

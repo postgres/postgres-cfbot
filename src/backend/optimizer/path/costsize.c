@@ -227,11 +227,6 @@ static double calc_joinrel_size_estimate(PlannerInfo *root,
 										 double inner_rows,
 										 SpecialJoinInfo *sjinfo,
 										 List *restrictlist);
-static Selectivity get_foreign_key_join_selectivity(PlannerInfo *root,
-													Relids outer_relids,
-													Relids inner_relids,
-													SpecialJoinInfo *sjinfo,
-													List **restrictlist);
 static Cost append_nonpartial_cost(List *subpaths, int numpaths,
 								   int parallel_workers);
 static void set_rel_width(PlannerInfo *root, RelOptInfo *rel);
@@ -5848,7 +5843,7 @@ calc_joinrel_size_estimate(PlannerInfo *root,
  * able to get a better answer when the pg_statistic stats are missing or out
  * of date.
  */
-static Selectivity
+Selectivity
 get_foreign_key_join_selectivity(PlannerInfo *root,
 								 Relids outer_relids,
 								 Relids inner_relids,

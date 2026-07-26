@@ -1068,6 +1068,7 @@ bloom_build_side_join_ratio(PlannerInfo *root, RelOptInfo *rel,
 	int		   *dsu;
 	double		nrows = 1.0;
 	Selectivity clausesel;
+	Selectivity fkselec;
 	SpecialJoinInfo sjinfo;
 	ListCell   *lc;
 	int			i;
@@ -1249,7 +1250,21 @@ bloom_build_side_join_ratio(PlannerInfo *root, RelOptInfo *rel,
 	 * use the same thing here?
 	 */
 	init_dummy_sjinfo(&sjinfo, rel->relids, build_relids);
-	clausesel = clauselist_selectivity(root, clauses, 0, JOIN_INNER, &sjinfo);
+
+	/*
+	 * Just like calc_joinrel_size_estimate (and also
+	 * find_interesting_bloom_filters for the per-relation estimates), match
+	 * the clauses to foreign keys and estimate those using FK semantics.
+	 * Without this, joins matching a multi-column foreign key get badly
+	 * underestimated, because each of the join clauses applies the
+	 * selectivity of the restrictions on the referenced relation.
+	 */
+	fkselec = get_foreign_key_join_selectivity(root, rel->relids, build_relids,
+											   &sjinfo, &clauses);
+
+	clausesel = fkselec * clauselist_selectivity(root, clauses, 0,
+												 JOIN_INNER, &sjinfo);
+	CLAMP_PROBABILITY(clausesel);
 
 	bms_free(setrelids);
 
@@ -1318,7 +1333,7 @@ find_interesting_bloom_filters(PlannerInfo *root, RelOptInfo *rel)
 		if (rinfo->parent_ec != NULL)
 			continue;
 
-		candidates = lappend(candidates, rinfo->clause);
+		candidates = lappend(candidates, rinfo);
 	}
 
 	/*
@@ -1345,6 +1360,7 @@ find_interesting_bloom_filters(PlannerInfo *root, RelOptInfo *rel)
 	foreach(lc, candidates)
 	{
 		Node	   *clause = (Node *) lfirst(lc);
+		RestrictInfo *rinfo = NULL;
 		Node	   *left;
 		Node	   *right;
 		Node	   *ownerexpr;
@@ -1353,9 +1369,16 @@ find_interesting_bloom_filters(PlannerInfo *root, RelOptInfo *rel)
 		Relids		build_relids;
 		int			buildrel;
 
-		/* strip RestrictInfo (see comment above) */
+		/*
+		 * Strip RestrictInfo (see comment above), but remember it - we need
+		 * it to match the clauses to foreign keys when estimating the filter
+		 * selectivity below.
+		 */
 		if (IsA(clause, RestrictInfo))
-			clause = (Node *) ((RestrictInfo *) clause)->clause;
+		{
+			rinfo = (RestrictInfo *) clause;
+			clause = (Node *) rinfo->clause;
+		}
 
 		/*
 		 * Only care about (Expr op Expr) clauses. We know one side has to be
@@ -1404,12 +1427,25 @@ find_interesting_bloom_filters(PlannerInfo *root, RelOptInfo *rel)
 
 		Assert(root->simple_rel_array[buildrel]->reloptkind == RELOPT_BASEREL);
 
-		clauses_by_rel[buildrel] = lappend(clauses_by_rel[buildrel], clause);
+		/* all the candidate clauses come from RestrictInfos */
+		Assert(rinfo != NULL);
+
+		clauses_by_rel[buildrel] = lappend(clauses_by_rel[buildrel], rinfo);
 		has_rel[buildrel] = true;
 	}
 
 	/*
 	 * Pre-compute the per-build-relation semijoin selectivity.
+	 *
+	 * A build relation may be joined by multiple clauses (e.g. when the join
+	 * matches a multi-column key). Simply multiplying the per-clause
+	 * selectivities assumes the columns are independent, which is badly wrong
+	 * for such joins - it applies the selectivity of restrictions on the
+	 * build relation once per join clause. So we first match the clauses to
+	 * foreign keys (the same way join size estimates do in
+	 * calc_joinrel_size_estimate), and estimate those using FK semantics.
+	 * Only the clauses not matched to any foreign key are then estimated the
+	 * regular way.
 	 *
 	 * XXX I think we could calculate the selectivity only for semijoin-like
 	 * joins (semijoin, inner join), and ignore the rest. We don't even need
@@ -1420,6 +1456,10 @@ find_interesting_bloom_filters(PlannerInfo *root, RelOptInfo *rel)
 	{
 		SpecialJoinInfo sjinfo;
 		Relids		build_relids;
+		List	   *worklist;
+		List	   *clauses = NIL;
+		Selectivity fkselec;
+		ListCell   *lc2;
 
 		/* ignore relations without join clauses */
 		if (!has_rel[i])
@@ -1429,8 +1469,28 @@ find_interesting_bloom_filters(PlannerInfo *root, RelOptInfo *rel)
 		init_dummy_sjinfo(&sjinfo, rel->relids, build_relids);
 		sjinfo.jointype = JOIN_SEMI;
 
-		sel_by_rel[i] = clauselist_selectivity(root, clauses_by_rel[i], 0,
-											   JOIN_SEMI, &sjinfo);
+		/*
+		 * Estimate clauses matching a foreign key using FK semantics. This
+		 * removes the matched clauses from the worklist (which is a copy, the
+		 * original list is left alone).
+		 */
+		worklist = clauses_by_rel[i];
+		fkselec = get_foreign_key_join_selectivity(root, rel->relids,
+												   build_relids, &sjinfo,
+												   &worklist);
+
+		/* strip RestrictInfo from the remaining clauses (see comment above) */
+		foreach(lc2, worklist)
+			clauses = lappend(clauses, ((RestrictInfo *) lfirst(lc2))->clause);
+
+		sel_by_rel[i] = fkselec * clauselist_selectivity(root, clauses, 0,
+														 JOIN_SEMI, &sjinfo);
+
+		CLAMP_PROBABILITY(sel_by_rel[i]);
+
+		list_free(clauses);
+		if (worklist != clauses_by_rel[i])
+			list_free(worklist);
 		bms_free(build_relids);
 	}
 

@@ -209,6 +209,11 @@ extern double get_parameterized_joinrel_size(PlannerInfo *root,
 											 Path *inner_path,
 											 SpecialJoinInfo *sjinfo,
 											 List *restrict_clauses);
+extern Selectivity get_foreign_key_join_selectivity(PlannerInfo *root,
+													Relids outer_relids,
+													Relids inner_relids,
+													SpecialJoinInfo *sjinfo,
+													List **restrictlist);
 extern void set_joinrel_size_estimates(PlannerInfo *root, RelOptInfo *rel,
 									   RelOptInfo *outer_rel,
 									   RelOptInfo *inner_rel,
