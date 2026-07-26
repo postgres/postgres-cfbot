@@ -143,6 +143,7 @@ int			max_slot_wal_keep_size_mb = -1;
 int			wal_decode_buffer_size = 512 * 1024;
 bool		track_wal_io_timing = false;
 int			wal_compression_threshold = 512;
+int			wal_compression_streams = 0;
 
 #ifdef WAL_DEBUG
 bool		XLOG_DEBUG = false;
@@ -398,6 +399,22 @@ typedef union WALInsertLockPadded
  */
 static SessionBackupState sessionBackupState = SESSION_BACKUP_NONE;
 
+typedef struct WALCompressionSlot
+{
+	LWLock		lock;			/* held across compress + insert */
+	int			owner;			/* ProcNumber holding the lease, or -1 */
+	uint64		generation;		/* bumped whenever the stream restarts */
+	XLogRecPtr	redo;			/* RedoRecPtr the stream started under */
+	XLogRecPtr	last_write;		/* end of the last record in this stream */
+	bool		restart;		/* next record has to restart the stream */
+} WALCompressionSlot;
+
+typedef union WALCompressionSlotPadded
+{
+	WALCompressionSlot s;
+	char		pad[PG_CACHE_LINE_SIZE];
+} WALCompressionSlotPadded;
+
 /*
  * Shared state data for WAL insertion.
  */
@@ -450,6 +467,12 @@ typedef struct XLogCtlInsert
 	 * WAL insertion locks.
 	 */
 	WALInsertLockPadded *WALInsertLocks;
+
+	/*
+	 * The compression stream slots, kept here so that a process which only
+	 * attaches to shared memory, rather than inheriting it, can find them.
+	 */
+	WALCompressionSlotPadded *WALCompressionSlots;
 } XLogCtlInsert;
 
 /*
@@ -582,6 +605,28 @@ typedef enum
 } WalInsertClass;
 
 static XLogCtlData *XLogCtl = NULL;
+
+/*
+ * State of one WAL compression stream.
+ *
+ * The compressor itself cannot live here: it is a libzstd object full of
+ * pointers, and shared memory is not mapped at the same address in every
+ * process under EXEC_BACKEND.  So a backend keeps its own compressor and
+ * leases the stream: while it owns the slot it may compress against what it
+ * put there before, and a backend taking the slot over has to start the
+ * stream afresh, which it announces with XLR_STREAM_RESET.
+ */
+
+static WALCompressionSlotPadded *WALCompressionSlots = NULL;
+
+/*
+ * The stream this backend is holding between XLogCompressionStreamAcquire()
+ * and XLogCompressionStreamRelease(), and whether the record it compressed
+ * starts that stream over.  XLogInsertRecord() needs both to tell whether the
+ * position it is about to reserve is one the record may be placed at.
+ */
+static int	insert_stream_slot = -1;
+static bool insert_stream_restarted = false;
 
 /* a private copy of XLogCtl->Insert.WALInsertLocks, for convenience */
 static WALInsertLockPadded *WALInsertLocks = NULL;
@@ -743,8 +788,9 @@ static void CopyXLogRecordToWAL(int write_len, bool isLogSwitch,
 								XLogRecData *rdata,
 								XLogRecPtr StartPos, XLogRecPtr EndPos,
 								TimeLineID tli);
-static void ReserveXLogInsertLocation(int size, XLogRecPtr *StartPos,
-									  XLogRecPtr *EndPos, XLogRecPtr *PrevPtr);
+static bool ReserveXLogInsertLocation(int size, XLogRecPtr *StartPos,
+									  XLogRecPtr *EndPos, XLogRecPtr *PrevPtr,
+									  uint64 startbefore);
 static bool ReserveXLogSwitch(XLogRecPtr *StartPos, XLogRecPtr *EndPos,
 							  XLogRecPtr *PrevPtr);
 static XLogRecPtr WaitXLogInsertionsToFinish(XLogRecPtr upto);
@@ -775,6 +821,114 @@ XLogGetRecordTotalLen(XLogRecord *record)
 	return record->xl_tot_len;
 }
 #endif
+
+/*
+ * Take a compression stream, or report that none is worth taking.
+ *
+ * "preferred" is the slot this backend used last, or -1.  Returns the slot to
+ * use and sets *restart if its stream has to start over, or returns -1, which
+ * means the caller should compress this record on its own.  The lock is held
+ * until XLogCompressionStreamRelease(), so that records enter a stream in the
+ * same order they are given their LSNs.
+ *
+ * Keeping a stream is what makes it pay, so a backend that keeps writing
+ * keeps its slot, and we never take one away from a backend that is still
+ * feeding it.  A slot is up for grabs only if nobody owns it, or if its last
+ * record fell below the latest reset boundary: such a stream has to start over
+ * anyway, so taking it costs its owner nothing.  This also returns the slots
+ * of backends that went idle or died, without needing to be told that they
+ * did.
+ */
+int
+XLogCompressionStreamAcquire(int preferred, XLogRecPtr redo, bool *restart)
+{
+	XLogRecPtr	insert_at;
+	int			i;
+
+	/* Fast path: the slot we had, if it is still ours. */
+	if (preferred >= 0)
+	{
+		WALCompressionSlot *s = &WALCompressionSlots[preferred].s;
+
+		LWLockAcquire(&s->lock, LW_EXCLUSIVE);
+		if (s->owner == MyProcNumber)
+		{
+			*restart = (s->restart || s->redo != redo);
+			if (*restart)
+			{
+				s->generation++;
+				s->redo = redo;
+				s->restart = false;
+			}
+			insert_stream_slot = preferred;
+			insert_stream_restarted = *restart;
+			return preferred;
+		}
+		LWLockRelease(&s->lock);
+	}
+
+	/*
+	 * Slow path.  Reading the insert position takes a spinlock, which is why
+	 * it is only done here, when we have no slot of our own.
+	 */
+	insert_at = GetXLogInsertRecPtr();
+
+	for (i = 0; i < wal_compression_streams; i++)
+	{
+		WALCompressionSlot *s = &WALCompressionSlots[i].s;
+
+		if (!LWLockConditionalAcquire(&s->lock, LW_EXCLUSIVE))
+			continue;			/* busy; its owner is clearly active */
+
+		if (s->owner == -1 ||
+			XLogCompressionStreamCrosses(s->last_write, insert_at))
+		{
+			s->owner = MyProcNumber;
+			s->generation++;
+			s->redo = redo;
+			s->restart = false;
+			s->last_write = insert_at;
+			*restart = true;
+			insert_stream_slot = i;
+			insert_stream_restarted = true;
+			return i;
+		}
+		LWLockRelease(&s->lock);
+	}
+
+	return -1;
+}
+
+/*
+ * Release the lease.  "failed" means the record never made it into WAL, so
+ * whatever we fed the compressor has to be thrown away by everyone.
+ */
+void
+XLogCompressionStreamRelease(int slot, XLogRecPtr end_pos, bool restarted,
+							 bool failed)
+{
+	WALCompressionSlot *s = &WALCompressionSlots[slot].s;
+
+	insert_stream_slot = -1;
+
+	if (failed)
+	{
+		s->owner = -1;
+		s->restart = true;
+	}
+	else if (XLogRecPtrIsValid(end_pos))
+	{
+		/*
+		 * A record that crossed a boundary is of no use to a reader starting
+		 * at that boundary, which skips it as continuation data.  So the next
+		 * record has to start over even when this one already did.
+		 */
+		if (XLogCompressionStreamCrosses(s->last_write, end_pos - 1))
+			s->restart = true;
+		s->last_write = end_pos - 1;	/* where this stream last wrote */
+	}
+	LWLockRelease(&s->lock);
+}
 
 /*
  * Insert an XLOG record represented by an already-constructed chain of data
@@ -819,8 +973,9 @@ XLogInsertRecord(XLogRecData *rdata,
 	XLogRecord *rechdr = (XLogRecord *) rdata->data;
 	uint8		info = rechdr->xl_info & ~XLR_INFO_MASK;
 	WalInsertClass class = WALINSERT_NORMAL;
-	XLogRecPtr	StartPos;
-	XLogRecPtr	EndPos;
+	XLogRecPtr	StartPos = InvalidXLogRecPtr;
+	XLogRecPtr	EndPos = InvalidXLogRecPtr;
+	uint64		startbefore;
 	bool		prevDoPageWrites = doPageWrites;
 	TimeLineID	insertTLI;
 
@@ -878,6 +1033,24 @@ XLogInsertRecord(XLogRecData *rdata,
 	 *
 	 *----------
 	 */
+	/*
+	 * A record that continues a stream has to stay below the next reset
+	 * boundary, since every stream starts over there and a reader beginning
+	 * at the boundary keeps nothing from before it.  Convert the boundary to
+	 * a byte position here, where no lock is held; the reservation itself
+	 * then costs one comparison.
+	 */
+	startbefore = PG_UINT64_MAX;
+	if (insert_stream_slot >= 0 && !insert_stream_restarted)
+	{
+		XLogRecPtr	last_write = WALCompressionSlots[insert_stream_slot].s.last_write;
+		XLogRecPtr	boundary;
+
+		boundary = (last_write / WAL_COMPRESSION_STREAM_RESET + 1) *
+			WAL_COMPRESSION_STREAM_RESET;
+		startbefore = XLogRecPtrToBytePos(boundary);
+	}
+
 	START_CRIT_SECTION();
 
 	if (likely(class == WALINSERT_NORMAL))
@@ -905,6 +1078,21 @@ XLogInsertRecord(XLogRecData *rdata,
 			Assert(RedoRecPtr < Insert->RedoRecPtr);
 			RedoRecPtr = Insert->RedoRecPtr;
 		}
+
+		/*
+		 * A stream must not span a checkpoint's redo point either: recovery
+		 * begins there with nothing earlier to decompress against.  Streams
+		 * do start over when RedoRecPtr moves, but the copy this record was
+		 * compressed under was read before the lock was taken and may already
+		 * have been stale, so check it now that it cannot be.
+		 */
+		if (insert_stream_slot >= 0 && !insert_stream_restarted &&
+			WALCompressionSlots[insert_stream_slot].s.redo != RedoRecPtr)
+		{
+			WALInsertLockRelease();
+			END_CRIT_SECTION();
+			return InvalidXLogRecPtr;
+		}
 		doPageWrites = (Insert->fullPageWrites || Insert->runningBackups > 0);
 
 		if (doPageWrites &&
@@ -924,8 +1112,20 @@ XLogInsertRecord(XLogRecData *rdata,
 		 * Reserve space for the record in the WAL. This also sets the xl_prev
 		 * pointer.
 		 */
-		ReserveXLogInsertLocation(rechdr->xl_tot_len, &StartPos, &EndPos,
-								  &rechdr->xl_prev);
+		if (!ReserveXLogInsertLocation(rechdr->xl_tot_len, &StartPos, &EndPos,
+									   &rechdr->xl_prev, startbefore))
+		{
+			/*
+			 * The record would land past a stream reset boundary while
+			 * continuing a stream that began below it.  A reader starting at
+			 * that boundary would have nothing to decompress it against, so
+			 * throw the record away and let the caller build it again against
+			 * a stream that starts over.
+			 */
+			WALInsertLockRelease();
+			END_CRIT_SECTION();
+			return InvalidXLogRecPtr;
+		}
 
 		/* Normal records are always inserted. */
 		inserted = true;
@@ -960,8 +1160,9 @@ XLogInsertRecord(XLogRecData *rdata,
 		 */
 		Assert(!XLogRecPtrIsValid(fpw_lsn));
 		WALInsertLockAcquireExclusive();
-		ReserveXLogInsertLocation(rechdr->xl_tot_len, &StartPos, &EndPos,
-								  &rechdr->xl_prev);
+		(void) ReserveXLogInsertLocation(rechdr->xl_tot_len, &StartPos,
+										 &EndPos, &rechdr->xl_prev,
+										 PG_UINT64_MAX);
 		RedoRecPtr = Insert->RedoRecPtr = StartPos;
 		inserted = true;
 	}
@@ -1170,9 +1371,9 @@ XLogInsertRecord(XLogRecData *rdata,
  * however, because there are two call sites, the compiler is reluctant to
  * inline. We use pg_always_inline here to try to convince it.
  */
-static pg_always_inline void
+static pg_always_inline bool
 ReserveXLogInsertLocation(int size, XLogRecPtr *StartPos, XLogRecPtr *EndPos,
-						  XLogRecPtr *PrevPtr)
+						  XLogRecPtr *PrevPtr, uint64 startbefore)
 {
 	XLogCtlInsert *Insert = &XLogCtl->Insert;
 	uint64		startbytepos;
@@ -1197,6 +1398,18 @@ ReserveXLogInsertLocation(int size, XLogRecPtr *StartPos, XLogRecPtr *EndPos,
 	SpinLockAcquire(&Insert->insertpos_lck);
 
 	startbytepos = Insert->CurrBytePos;
+
+	/*
+	 * The caller may only place this record below startbefore.  Comparing
+	 * byte positions rather than LSNs is what keeps this to one test: the
+	 * caller converted the boundary once, outside the lock.
+	 */
+	if (startbytepos >= startbefore)
+	{
+		SpinLockRelease(&Insert->insertpos_lck);
+		return false;
+	}
+
 	endbytepos = startbytepos + size;
 	prevbytepos = Insert->PrevBytePos;
 	Insert->CurrBytePos = endbytepos;
@@ -1215,6 +1428,8 @@ ReserveXLogInsertLocation(int size, XLogRecPtr *StartPos, XLogRecPtr *EndPos,
 	Assert(XLogRecPtrToBytePos(*StartPos) == startbytepos);
 	Assert(XLogRecPtrToBytePos(*EndPos) == endbytepos);
 	Assert(XLogRecPtrToBytePos(*PrevPtr) == prevbytepos);
+
+	return true;
 }
 
 /*
@@ -5368,6 +5583,11 @@ XLOGShmemRequest(void *arg)
 
 	/* WAL insertion locks, plus alignment */
 	size = add_size(size, mul_size(sizeof(WALInsertLockPadded), NUM_XLOGINSERT_LOCKS + 1));
+
+	/* WAL compression stream slots, plus alignment slack */
+	if (wal_compression_streams > 0)
+		size = add_size(size, mul_size(sizeof(WALCompressionSlotPadded),
+									   wal_compression_streams + 1));
 	/* xlblocks array */
 	size = add_size(size, mul_size(sizeof(pg_atomic_uint64), XLOGbuffers));
 	/* extra alignment padding for XLOG I/O buffers */
@@ -5451,6 +5671,27 @@ XLOGShmemInit(void *arg)
 		WALInsertLocks[i].l.lastImportantAt = InvalidXLogRecPtr;
 	}
 
+	/* WAL compression streams, likewise aligned to their padded size */
+	if (wal_compression_streams > 0)
+	{
+		allocptr += sizeof(WALCompressionSlotPadded) -
+			((uintptr_t) allocptr) % sizeof(WALCompressionSlotPadded);
+		WALCompressionSlots = XLogCtl->Insert.WALCompressionSlots =
+			(WALCompressionSlotPadded *) allocptr;
+		allocptr += sizeof(WALCompressionSlotPadded) * wal_compression_streams;
+
+		for (i = 0; i < wal_compression_streams; i++)
+		{
+			LWLockInitialize(&WALCompressionSlots[i].s.lock,
+							 LWTRANCHE_WAL_COMPRESSION_STREAM);
+			WALCompressionSlots[i].s.owner = -1;
+			WALCompressionSlots[i].s.generation = 0;
+			WALCompressionSlots[i].s.redo = InvalidXLogRecPtr;
+			WALCompressionSlots[i].s.last_write = InvalidXLogRecPtr;
+			WALCompressionSlots[i].s.restart = true;
+		}
+	}
+
 	/*
 	 * Align the start of the page buffers to a full xlog block size boundary.
 	 * This simplifies some calculations in XLOG insertion. It is also
@@ -5483,12 +5724,13 @@ XLOGShmemInit(void *arg)
 }
 
 /*
- * XLOGShmemAttach - re-establish WALInsertLocks pointer after attaching.
+ * XLOGShmemAttach - re-establish pointers into shared memory after attaching.
  */
 static void
 XLOGShmemAttach(void *arg)
 {
 	WALInsertLocks = XLogCtl->Insert.WALInsertLocks;
+	WALCompressionSlots = XLogCtl->Insert.WALCompressionSlots;
 }
 
 /*
@@ -8561,6 +8803,14 @@ KeepLogSeg(XLogRecPtr recptr, XLogSegNo *logSegNo)
 	keep = XLogGetReplicationSlotMinimumLSN();
 	if (XLogRecPtrIsValid(keep) && keep < recptr)
 	{
+		/*
+		 * A reader starting where the slot needs it rewinds to the stream
+		 * reset boundary below that, so keep the WAL from there on.  Done
+		 * whatever wal_compression_streams says, since the slot may well point
+		 * into WAL written while it said something else.
+		 */
+		keep -= keep % WAL_COMPRESSION_STREAM_RESET;
+
 		XLByteToSeg(keep, segno, wal_segment_size);
 
 		/*

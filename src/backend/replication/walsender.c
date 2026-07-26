@@ -1578,9 +1578,6 @@ StartLogicalReplication(StartReplicationCmd *cmd)
 	pq_endmessage(&buf);
 	pq_flush();
 
-	/* Start reading WAL from the oldest required WAL. */
-	XLogBeginRead(logical_decoding_ctx->reader,
-				  MyReplicationSlot->data.restart_lsn);
 
 	/*
 	 * Report the location after which we'll send out further commits as the
@@ -1596,6 +1593,14 @@ StartLogicalReplication(StartReplicationCmd *cmd)
 	replication_active = true;
 
 	SyncRepInitConfig();
+
+	/*
+	 * Start reading WAL from the oldest required WAL.  Done once the walsender
+	 * is otherwise ready, because rebuilding the decompressors reads WAL
+	 * through the same callback the main loop uses.
+	 */
+	XLogBeginReadStreamed(logical_decoding_ctx->reader,
+						  MyReplicationSlot->data.restart_lsn, NULL);
 
 	/* Main loop of walsender */
 	WalSndLoop(XLogSendLogical);

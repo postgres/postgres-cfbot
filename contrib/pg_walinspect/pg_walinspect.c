@@ -126,8 +126,12 @@ InitXLogReaderState(XLogRecPtr lsn)
 				 errmsg("out of memory"),
 				 errdetail("Failed while allocating a WAL reading processor.")));
 
-	/* first find a valid recptr to start from */
-	first_valid_record = XLogFindNextRecord(xlogreader, lsn, &errormsg);
+	/*
+	 * Find a valid recptr to start from.  A record can be compressed against
+	 * earlier records of its stream, so this backs up to where the streams
+	 * start over and reads forward from there to rebuild the decompressors.
+	 */
+	first_valid_record = XLogBeginReadStreamed(xlogreader, lsn, &errormsg);
 
 	if (!XLogRecPtrIsValid(first_valid_record))
 	{

@@ -731,8 +731,14 @@ sub init
 	# This is printed after TEMP_CONFIG on purpose.  It is a correctness
 	# requirement of the test, not a preference, so it must win over whatever
 	# the buildfarm animal supplies.
-	print $conf "wal_compression_threshold = " . (1024 * 1024 * 1024) . "\n"
-	  if $params{no_wal_compression};
+	if ($params{no_wal_compression})
+	{
+		print $conf "wal_compression_threshold = " . (1024 * 1024 * 1024) . "\n";
+
+		# Streams ignore the threshold on purpose -- reaching small records is
+		# what they are for -- so they have to be turned off separately.
+		print $conf "wal_compression_streams = 0\n";
+	}
 
 	if ($params{allows_streaming})
 	{

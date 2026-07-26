@@ -3476,6 +3476,18 @@
   assign_hook => 'assign_wal_compression',
 },
 
+{ name => 'wal_compression_streams', type => 'int', context => 'PGC_POSTMASTER', group => 'WAL_SETTINGS',
+  short_desc => 'Number of WAL compression streams shared by all backends.',
+  long_desc => 'Zero compresses every record on its own. A positive value lets a record '
+             . 'be compressed against the records that preceded it in the same stream, '
+             . 'which compresses small records much better, at the cost of one '
+             . 'decompression context per stream in every process that reads WAL records.',
+  variable => 'wal_compression_streams',
+  boot_val => '0',
+  min => '0',
+  max => '64',
+},
+
 { name => 'wal_compression_threshold', type => 'int', context => 'PGC_SUSET', group => 'WAL_SETTINGS',
   short_desc => 'Minimum WAL record length to engage whole-record compression.',
   long_desc => 'Records at least this large are compressed as a single unit instead of '
