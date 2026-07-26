@@ -132,6 +132,68 @@ SELECT * FROM generate_series(25.0, 2.0, 0.0) g(s);$$,
 false, true, false, true);
 
 --
+-- A partial-index predicate proved only by join clauses must not affect
+-- base-relation estimates.
+--
+
+CREATE TEMP TABLE partial_unique_parent (id int);
+CREATE TEMP TABLE partial_unique_child (parent_id int, code int);
+CREATE UNIQUE INDEX partial_unique_child_code_idx
+  ON partial_unique_child (code)
+  WHERE parent_id IS NOT NULL;
+
+INSERT INTO partial_unique_parent VALUES (1);
+INSERT INTO partial_unique_child
+  SELECT NULL, 42 FROM generate_series(1, 1000);
+INSERT INTO partial_unique_child VALUES (1, 42);
+
+ANALYZE partial_unique_parent;
+ANALYZE partial_unique_child;
+
+BEGIN;
+SET LOCAL enable_indexscan = off;
+SET LOCAL enable_indexonlyscan = off;
+SET LOCAL enable_bitmapscan = off;
+SET LOCAL enable_mergejoin = off;
+SET LOCAL enable_nestloop = off;
+
+SELECT explain_mask_costs($$
+SELECT *
+FROM partial_unique_parent p
+JOIN partial_unique_child c ON c.parent_id = p.id
+WHERE c.code = 42;$$,
+false, true, false, true);
+
+-- Check the same rule for expression keys.
+CREATE UNIQUE INDEX partial_unique_child_expr_idx
+  ON partial_unique_child ((code + 0))
+  WHERE parent_id IS NOT NULL;
+
+SELECT explain_mask_costs($$
+SELECT *
+FROM partial_unique_parent p
+JOIN partial_unique_child c ON c.parent_id = p.id
+WHERE c.code + 0 = 42;$$,
+false, true, false, true);
+
+-- Base restrictions can still prove a simple key unique.
+CREATE TEMP TABLE partial_unique_base (included int, code int);
+CREATE UNIQUE INDEX partial_unique_base_code_idx
+  ON partial_unique_base (code)
+  WHERE included IS NOT NULL;
+INSERT INTO partial_unique_base
+  SELECT 1, g FROM generate_series(1, 1000) g;
+-- Keep the estimate above 1 when uniqueness is not inferred.
+ALTER TABLE partial_unique_base ALTER COLUMN code SET (n_distinct = 10);
+ANALYZE partial_unique_base;
+
+SELECT explain_mask_costs($$
+SELECT * FROM partial_unique_base
+WHERE included IS NOT NULL AND code = 42;$$,
+true, true, false, true);
+COMMIT;
+
+--
 -- Test ScalarArrayOpExpr row estimates for <> ALL for arrays with NULLs.  We
 -- expect the planner to estimate 1 row will match in both of the following
 -- tests.

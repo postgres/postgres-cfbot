@@ -5808,7 +5808,7 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 						if (index->unique &&
 							index->nkeycolumns == 1 &&
 							pos == 0 &&
-							(index->indpred == NIL || index->predOK))
+							(index->indpred == NIL || index->predOKBase))
 							vardata->isunique = true;
 
 						/*
