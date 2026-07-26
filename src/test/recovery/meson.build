@@ -7,6 +7,7 @@ tests += {
   'pytest': {
     'test_kwargs': {'priority': 40}, # recovery tests are slow, start early
     'tests': [
+      'pyt/test_029_stats_restart.py',
       'pyt/test_049_wait_for_lsn.py',
     ],
   },
@@ -43,7 +44,6 @@ tests += {
       't/026_overwrite_contrecord.pl',
       't/027_stream_regress.pl',
       't/028_pitr_timelines.pl',
-      't/029_stats_restart.pl',
       't/030_stats_cleanup_replica.pl',
       't/031_recovery_conflict.pl',
       't/032_relfilenode_reuse.pl',
