@@ -171,6 +171,29 @@ static int	compression_buf_offset; /* fill level for FPI packing */
 static char *compressed_data = NULL;
 #endif
 
+#ifdef USE_ZSTD
+/*
+ * One compressor per stream slot we currently hold a lease on.  These stay in
+ * the backend because a zstd context cannot live in shared memory; a backend
+ * taking a slot over therefore has to restart the stream.
+ */
+static ZSTD_CCtx **stream_cctx = NULL;
+
+/*
+ * The stream slot this backend is using, or -1.  Holding on to it is the
+ * whole point: a stream only pays once it has seen some records.
+ *
+ * When every slot is held by a backend that is still writing, there is
+ * nothing to take, and we compress records on their own instead.  Looking
+ * for a slot costs a spinlock read, so after a failed search we do not look
+ * again for a while.
+ */
+static int	my_stream_slot = -1;
+static int	stream_scan_backoff = 0;
+
+#define STREAM_SCAN_BACKOFF_RECORDS 1000
+#endif
+
 /*
  * An array of XLogRecData structs, to hold registered data.
  */
@@ -514,6 +537,43 @@ XLogSetRecordFlags(uint8 flags)
 	curinsert_flags |= flags;
 }
 
+#ifdef USE_ZSTD
+
+/*
+ * May this record be compressed against earlier ones?
+ *
+ * The rule is not about the resource manager but about who reads the record:
+ * anything that someone looks up by LSN, without replaying what comes before
+ * it, has to stay readable on its own.  Recovery finds the checkpoint record
+ * from pg_control, and twophase.c reads a PREPARE record from a stored LSN.
+ * XLOG_SWITCH is looked for by anything scanning WAL, and is tiny anyway.
+ * XLOG_CHECKPOINT_REDO marks the point recovery starts from, and is read
+ * before anything that could have preceded it in a stream.
+ */
+static bool
+XLogRecordJoinsStream(RmgrId rmid, uint8 info)
+{
+	if (rmid == RM_XLOG_ID)
+	{
+		uint8		xlinfo = info & ~XLR_INFO_MASK;
+
+		if (xlinfo == XLOG_CHECKPOINT_SHUTDOWN ||
+			xlinfo == XLOG_CHECKPOINT_ONLINE ||
+			xlinfo == XLOG_CHECKPOINT_REDO ||
+			xlinfo == XLOG_END_OF_RECOVERY ||
+			xlinfo == XLOG_SWITCH)
+			return false;
+	}
+	else if (rmid == RM_XACT_ID)
+	{
+		if ((info & XLOG_XACT_OPMASK) == XLOG_XACT_PREPARE)
+			return false;
+	}
+	return true;
+}
+
+#endif							/* USE_ZSTD */
+
 /* Compress the assembled record; NULL if that did not pay off */
 static XLogRecData *
 XLogCompressRdt(XLogRecData *rdt)
@@ -553,6 +613,7 @@ XLogCompressRdt(XLogRecData *rdt)
 
 	compressed_header->record_header = *src_header;
 	compressed_header->decompressed_length = flat_len;
+	compressed_header->stream = XLR_NO_STREAM;
 
 	orig_len = src_header->xl_tot_len - SizeOfXLogRecord;
 
@@ -627,6 +688,139 @@ XLogCompressRdt(XLogRecData *rdt)
 #endif
 }
 
+#ifdef USE_ZSTD
+/*
+ * Compress a record into stream "slot", against everything this stream has
+ * compressed since it last restarted.
+ *
+ * The output has to be complete when we return: the record is about to be
+ * given an LSN and copied into WAL, so nothing of it may stay inside the
+ * compressor.  That is what ZSTD_e_flush buys, and it is also why the
+ * compressed length is known before the space is reserved.
+ *
+ * Returns NULL if the record did not compress into the space we have.  The
+ * stream is unusable after that, because part of the record was consumed, so
+ * the caller must restart it.
+ */
+static XLogRecData *
+XLogCompressRdtStream(XLogRecData *rdt, int slot, bool restart, bool *poisoned)
+{
+	static XLogRecData compressed_rdt_hdr;
+	XLogCompressionHeader *compressed_header;
+	XLogRecord *src_header;
+	uint32		flat_len = 0;
+	uint32		skipped;
+	ZSTD_CCtx  *cctx;
+	ZSTD_inBuffer in;
+	ZSTD_outBuffer out;
+	size_t		rem;
+
+	*poisoned = false;
+
+	if (stream_cctx[slot] == NULL)
+	{
+		stream_cctx[slot] = ZSTD_createCCtx();
+		if (stream_cctx[slot] == NULL)
+			return NULL;
+		ZSTD_CCtx_setParameter(stream_cctx[slot], ZSTD_c_compressionLevel,
+							   ZSTD_CLEVEL_DEFAULT);
+		restart = true;
+	}
+	cctx = stream_cctx[slot];
+
+	if (restart)
+		ZSTD_CCtx_reset(cctx, ZSTD_reset_session_only);
+
+	for (const XLogRecData *r = rdt; r != NULL; r = r->next)
+		flat_len += r->len;
+
+	/* The first chunk is the record header; see XLogInsertRecord(). */
+	src_header = (XLogRecord *) rdt->data;
+	compressed_header = (XLogCompressionHeader *) compressed_data;
+
+	/* Zero it first: the padding in the header reaches disk */
+	memset(compressed_header, 0, SizeOfXLogCompressedRecord);
+	compressed_header->record_header = *src_header;
+	compressed_header->decompressed_length = flat_len;
+	compressed_header->method = XLR_COMPRESS_ZSTD;
+	compressed_header->stream = (uint8) slot;
+	compressed_header->stream_flags = restart ? XLR_STREAM_RESET : 0;
+
+	out.dst = (char *) &compressed_header[1];
+	out.size = WAL_COMPRESSION_BUFSIZE - SizeOfXLogCompressedRecord;
+	out.pos = 0;
+
+	/*
+	 * Feed the chain as it stands.  Flattening it first would have to write
+	 * somewhere, and the only buffer large enough is the one holding the
+	 * compressed page images this very chain points into.
+	 */
+	skipped = 0;
+	for (const XLogRecData *r = rdt; r != NULL; r = r->next)
+	{
+		const char *data = r->data;
+		uint32		len = r->len;
+
+		/* The record header travels in the clear, ahead of the payload. */
+		if (skipped < SizeOfXLogRecord)
+		{
+			uint32		skip = Min(len, SizeOfXLogRecord - skipped);
+
+			data += skip;
+			len -= skip;
+			skipped += skip;
+		}
+		if (len == 0)
+			continue;
+
+		in.src = data;
+		in.size = len;
+		in.pos = 0;
+		while (in.pos < in.size)
+		{
+			rem = ZSTD_compressStream2(cctx, &out, &in, ZSTD_e_continue);
+			if (ZSTD_isError(rem) || out.pos == out.size)
+			{
+				/* no room left, and the compressor has eaten part of it */
+				*poisoned = true;
+				return NULL;
+			}
+		}
+	}
+
+	/* End the block, so a reader gets this record back on its own. */
+	in.src = NULL;
+	in.size = 0;
+	in.pos = 0;
+	do
+	{
+		rem = ZSTD_compressStream2(cctx, &out, &in, ZSTD_e_flush);
+		if (ZSTD_isError(rem) || (rem != 0 && out.pos == out.size))
+		{
+			*poisoned = true;
+			return NULL;
+		}
+	} while (rem != 0);
+
+	/*
+	 * A record that did not come out smaller is still used.  Dropping it
+	 * would mean restarting the stream, since the compressor has already
+	 * consumed it, and a cold stream costs far more than the few bytes this
+	 * record loses.
+	 */
+
+	compressed_header->record_header.xl_tot_len =
+		SizeOfXLogCompressedRecord + out.pos;
+	compressed_header->record_header.xl_info |= XLR_COMPRESSED;
+
+	compressed_rdt_hdr.data = compressed_data;
+	compressed_rdt_hdr.len = compressed_header->record_header.xl_tot_len;
+	compressed_rdt_hdr.next = NULL;
+
+	return &compressed_rdt_hdr;
+}
+#endif							/* USE_ZSTD */
+
 /* Checksum assembled record (which may be compressed). */
 static void
 XLogChecksumRecord(XLogRecData *rdt)
@@ -676,6 +870,20 @@ XLogInsert(RmgrId rmid, uint8 info)
 									 wal_compression == WAL_COMPRESSION_ZSTD) &&
 									wal_compression_threshold <
 									WAL_COMPRESSION_BUFSIZE);
+
+	/*
+	 * Streams are zstd only for now, and only for records nobody reads out of
+	 * order.  One slot per backend, so that a backend usually finds its own
+	 * compressor still in place.
+	 */
+#ifdef USE_ZSTD
+	bool		use_stream;
+
+	use_stream = (wal_compression_streams > 0 &&
+				  wal_compression == WAL_COMPRESSION_ZSTD &&
+				  stream_cctx != NULL &&
+				  XLogRecordJoinsStream(rmid, info));
+#endif
 
 	/* XLogBeginInsert() must have been called. */
 	if (!begininsert_called)
@@ -734,6 +942,67 @@ XLogInsert(RmgrId rmid, uint8 info)
 		 * record is not compressed as a whole after all, reassemble it to get
 		 * the per-FPI compression back.
 		 */
+#ifdef USE_ZSTD
+		{
+			int			slot = -1;
+			bool		restart = false;
+			bool		poisoned;
+			XLogRecData *rdt_compressed;
+
+			/*
+			 * Take a stream, unless a recent look found every one of them
+			 * held by a backend that is still writing.  Then hold it while we
+			 * compress and while the record is given its LSN, so the order
+			 * records enter the stream is the order a reader will meet them
+			 * in.
+			 */
+			if (use_stream && rec_size <= WAL_COMPRESSION_BUFSIZE &&
+				(my_stream_slot >= 0 || stream_scan_backoff-- <= 0))
+			{
+				slot = XLogCompressionStreamAcquire(my_stream_slot, RedoRecPtr,
+													&restart);
+				my_stream_slot = slot;
+				if (slot < 0)
+					stream_scan_backoff = STREAM_SCAN_BACKOFF_RECORDS;
+			}
+
+			if (slot < 0)
+				goto no_stream;
+
+			rdt_compressed = XLogCompressRdtStream(rdt, slot, restart,
+												   &poisoned);
+			if (rdt_compressed != NULL)
+			{
+				XLogChecksumRecord(rdt_compressed);
+				EndPos = XLogInsertRecord(rdt_compressed, fpw_lsn,
+										  curinsert_flags, num_fpi,
+										  fpi_bytes, topxid_included);
+				XLogCompressionStreamRelease(slot, EndPos, restart,
+											 !XLogRecPtrIsValid(EndPos));
+				if (XLogRecPtrIsValid(EndPos))
+					break;
+				continue;		/* retry, with the stream restarted */
+			}
+
+			/* Could not compress; the stream may have eaten part of it */
+			XLogCompressionStreamRelease(slot, InvalidXLogRecPtr,
+										 restart, poisoned);
+			if (num_fpi > 0)
+			{
+				compression_buf_offset = 0;
+				rdt = XLogRecordAssemble(rmid, info, RedoRecPtr, doPageWrites,
+										 &fpw_lsn, &num_fpi, &fpi_bytes,
+										 &topxid_included, &rec_size,
+										 false);
+			}
+			XLogChecksumRecord(rdt);
+			EndPos = XLogInsertRecord(rdt, fpw_lsn, curinsert_flags, num_fpi,
+									  fpi_bytes, topxid_included);
+			continue;
+		}
+no_stream:
+#endif
+
 		if (try_whole_record)
 		{
 			bool		whole_record_compressed = false;
@@ -856,6 +1125,12 @@ AllocCompressionBuffers(void)
 #ifdef WAL_WHOLE_RECORD_COMPRESSION
 	compressed_data = MemoryContextAlloc(xloginsert_cxt,
 										 WAL_COMPRESSION_BUFSIZE);
+#endif
+#ifdef USE_ZSTD
+	if (wal_compression_streams > 0)
+		stream_cctx = MemoryContextAllocZero(xloginsert_cxt,
+											 sizeof(ZSTD_CCtx *) *
+											 wal_compression_streams);
 #endif
 }
 

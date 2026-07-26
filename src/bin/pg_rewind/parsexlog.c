@@ -79,7 +79,7 @@ extractPageMap(const char *datadir, XLogRecPtr startpoint, int tliIndex,
 	if (xlogreader == NULL)
 		pg_fatal("out of memory while allocating a WAL reading processor");
 
-	XLogBeginRead(xlogreader, startpoint);
+	XLogBeginReadStreamed(xlogreader, startpoint, NULL);
 	do
 	{
 		record = XLogReadRecord(xlogreader, &errormsg);
@@ -138,7 +138,12 @@ readOneRecord(const char *datadir, XLogRecPtr ptr, int tliIndex,
 	if (xlogreader == NULL)
 		pg_fatal("out of memory while allocating a WAL reading processor");
 
+	/*
+	 * Only the extent of the record is wanted, so there is no need to decode
+	 * it -- which also means no need to rewind for a compression stream.
+	 */
 	XLogBeginRead(xlogreader, ptr);
+	xlogreader->framing_only = true;
 	record = XLogReadRecord(xlogreader, &errormsg);
 	if (record == NULL)
 	{
@@ -205,7 +210,13 @@ findLastCheckpoint(const char *datadir, XLogRecPtr forkptr, int tliIndex,
 	{
 		uint8		info;
 
+		/*
+		 * Walking back only needs each record's header, so decode nothing:
+		 * rewinding to rebuild a decompressor at every step would make this
+		 * loop cost the whole distance walked, over and over.
+		 */
 		XLogBeginRead(xlogreader, searchptr);
+		xlogreader->framing_only = true;
 		record = XLogReadRecord(xlogreader, &errormsg);
 
 		if (record == NULL)
@@ -250,6 +261,17 @@ findLastCheckpoint(const char *datadir, XLogRecPtr forkptr, int tliIndex,
 			 info == XLOG_CHECKPOINT_ONLINE))
 		{
 			CheckPoint	checkPoint;
+
+			/*
+			 * This one is wanted whole.  A checkpoint record never joins a
+			 * compression stream, so it reads on its own.
+			 */
+			XLogBeginRead(xlogreader, searchptr);
+			xlogreader->framing_only = false;
+			record = XLogReadRecord(xlogreader, &errormsg);
+			if (record == NULL)
+				pg_fatal("could not read checkpoint record at %X/%08X",
+						 LSN_FORMAT_ARGS(searchptr));
 
 			memcpy(&checkPoint, XLogRecGetData(xlogreader), sizeof(CheckPoint));
 			*lastchkptrec = searchptr;
