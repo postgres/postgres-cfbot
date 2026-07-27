@@ -4948,6 +4948,7 @@ try_push_bloom_filter(PlannerInfo *root, HashJoin *hj, Plan *outer_plan,
 	bf->hashops = list_copy(hj->hashoperators);
 	bf->hashcollations = list_copy(hj->hashcollations);
 	bf->producer_id = hj->bloom_filter_id;
+	bf->selectivity = f->selectivity;
 
 	recipient->bloom_filters = lappend(recipient->bloom_filters, bf);
 

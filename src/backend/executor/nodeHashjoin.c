@@ -2350,6 +2350,28 @@ ExecBloomFilters(List *filters, ExprContext *econtext)
 	return true;
 }
 
+static int
+list_filter_selectivity_cmp(const ListCell *p1, const ListCell *p2)
+{
+	struct BloomFilter *bf1 = lfirst(p1);
+	struct BloomFilter *bf2 = lfirst(p2);
+
+	/* compare by selectivity first (prefer more selective) */
+	if (bf1->selectivity < bf2->selectivity)
+		return -1;
+	else if (bf1->selectivity > bf2->selectivity)
+		return 1;
+
+	/* then by the producer ID, as a tie break */
+	if (bf1->producer_id < bf2->producer_id)
+		return -1;
+	else if (bf1->producer_id > bf2->producer_id)
+		return 1;
+
+	/* should be the same filter */
+	return 0;
+}
+
 /*
  * ExecInitBloomFilters
  *		Initialize state for pushed-down bloom filters.
@@ -2387,6 +2409,13 @@ ExecInitBloomFilters(PlanState *planstate, TupleTableSlot *output_slot)
 	/* bail out if there are no pushed-down filters */
 	if (plan->bloom_filters == NIL)
 		return;
+
+	/*
+	 * XXX Sort filters from the most to least selective ones. Ideally,
+	 * we'd consider how expensive it's to evaluate the filter, i.e. how
+	 * many keys/clauses it has, how large it is, etc. Left for future.
+	 */
+	list_sort(plan->bloom_filters, list_filter_selectivity_cmp);
 
 	oldctx = MemoryContextSwitchTo(estate->es_query_cxt);
 

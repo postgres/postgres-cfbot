@@ -286,6 +286,7 @@ typedef struct BloomFilter
 	List	   *hashops;
 	List	   *hashcollations;
 	int			producer_id;
+	Selectivity	selectivity;	/* estimates selectivity */
 } BloomFilter;
 
 /* ----------------

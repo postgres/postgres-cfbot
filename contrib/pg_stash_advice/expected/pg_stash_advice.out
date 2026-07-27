@@ -64,8 +64,8 @@ SELECT * FROM aa_fact f LEFT JOIN aa_dim1 d1 ON f.dim1_id = d1.id
    ->  Hash Join
          Hash Cond: (f.dim1_id = d1.id)
          ->  Seq Scan on aa_fact f
-               Bloom Filter 1: keys=(dim1_id)
                Bloom Filter 2: keys=(dim2_id)
+               Bloom Filter 1: keys=(dim1_id)
          ->  Hash
                Bloom Filter 1
                ->  Seq Scan on aa_dim1 d1
@@ -95,8 +95,8 @@ EXPLAIN (COSTS OFF) SELECT * FROM aa_fact f
    ->  Hash Join
          Hash Cond: (f.dim1_id = d1.id)
          ->  Seq Scan on aa_fact f
-               Bloom Filter 1: keys=(dim1_id)
                Bloom Filter 2: keys=(dim2_id)
+               Bloom Filter 1: keys=(dim1_id)
          ->  Hash
                Bloom Filter 1
                ->  Index Scan using aa_dim1_pkey on aa_dim1 d1
@@ -128,8 +128,8 @@ EXPLAIN (COSTS OFF) SELECT * FROM aa_fact f
    ->  Hash Join
          Hash Cond: (f.dim1_id = d1.id)
          ->  Seq Scan on aa_fact f
-               Bloom Filter 1: keys=(dim1_id)
                Bloom Filter 2: keys=(dim2_id)
+               Bloom Filter 1: keys=(dim1_id)
          ->  Hash
                Bloom Filter 1
                ->  Seq Scan on aa_dim1 d1
@@ -221,8 +221,8 @@ EXPLAIN (COSTS OFF) SELECT * FROM aa_fact f
    ->  Hash Join
          Hash Cond: (f.dim1_id = d1.id)
          ->  Seq Scan on aa_fact f
-               Bloom Filter 1: keys=(dim1_id)
                Bloom Filter 2: keys=(dim2_id)
+               Bloom Filter 1: keys=(dim1_id)
          ->  Hash
                Bloom Filter 1
                ->  Seq Scan on aa_dim1 d1
@@ -288,8 +288,8 @@ EXPLAIN (COSTS OFF) SELECT * FROM aa_fact f
    ->  Hash Join
          Hash Cond: (f.dim1_id = d1.id)
          ->  Seq Scan on aa_fact f
-               Bloom Filter 1: keys=(dim1_id)
                Bloom Filter 2: keys=(dim2_id)
+               Bloom Filter 1: keys=(dim1_id)
          ->  Hash
                Bloom Filter 1
                ->  Seq Scan on aa_dim1 d1
