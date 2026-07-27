@@ -1133,7 +1133,7 @@ explain (costs off, verbose)
          Hash Cond: ((a.unique1 = b.unique1) AND (a.two = (row_number() OVER w1)))
          ->  Seq Scan on public.tenk1 a
                Output: a.unique1, a.unique2, a.two, a.four, a.ten, a.twenty, a.hundred, a.thousand, a.twothousand, a.fivethous, a.tenthous, a.odd, a.even, a.stringu1, a.stringu2, a.string4
-               Bloom Filter 1: keys=(a.unique1, a.two)
+               Bloom Filter 1: keys=(a.unique1, a.two) expected=0.5%
          ->  Hash
                Output: b.unique1, (row_number() OVER w1)
                Bloom Filter 1

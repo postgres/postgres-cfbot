@@ -2676,6 +2676,10 @@ show_bloom_filter_info(PlanState *planstate, List *ancestors,
 			appendStringInfo(&buf, "Bloom Filter %d: keys=%s",
 							 bf->producer_id, keys.data);
 
+			if (es->verbose || es->analyze)
+				appendStringInfo(&buf, " expected=%.1f%%",
+								 bf->selectivity * 100.0);
+
 			/* include the counts only during ANALYZE */
 			if (es->analyze && bfs != NULL)
 			{
