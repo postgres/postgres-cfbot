@@ -3935,6 +3935,7 @@ do_connect(enum trivalue reuse_previous_specification,
 	PQconninfoOption *cinfo;
 	int			nconnopts = 0;
 	bool		same_host = false;
+	bool		same_port = false;
 	char	   *password = NULL;
 	char	   *client_encoding;
 	bool		success = true;
@@ -4026,8 +4027,8 @@ do_connect(enum trivalue reuse_previous_specification,
 						/*
 						 * Check whether connstring provides options affecting
 						 * password re-use.  While any change in user, host,
-						 * hostaddr, or port causes us to ignore the old
-						 * connection's password, we don't force that for
+						 * hostaddr, port, or portaddr causes us to ignore
+						 * the old connection's password, we don't force that for
 						 * dbname, since passwords aren't database-specific.
 						 */
 						if (replci->val == NULL ||
@@ -4036,7 +4037,8 @@ do_connect(enum trivalue reuse_previous_specification,
 							if (strcmp(replci->keyword, "user") == 0 ||
 								strcmp(replci->keyword, "host") == 0 ||
 								strcmp(replci->keyword, "hostaddr") == 0 ||
-								strcmp(replci->keyword, "port") == 0)
+								strcmp(replci->keyword, "port") == 0 ||
+								strcmp(replci->keyword, "portaddr") == 0)
 								keep_password = false;
 						}
 						/* Also note whether connstring contains a password. */
@@ -4103,7 +4105,7 @@ do_connect(enum trivalue reuse_previous_specification,
 			 * management issues: PQconninfoFree would misbehave on Windows.)
 			 * However, to avoid dependencies on the order in which parameters
 			 * appear in the array, make a preliminary scan to set
-			 * keep_password and same_host correctly.
+			 * keep_password, same_host and same_port correctly.
 			 *
 			 * While any change in user, host, or port causes us to ignore the
 			 * old connection's password, we don't force that for dbname,
@@ -4127,7 +4129,9 @@ do_connect(enum trivalue reuse_previous_specification,
 				}
 				else if (port && strcmp(ci->keyword, "port") == 0)
 				{
-					if (!(ci->val && strcmp(port, ci->val) == 0))
+					if (ci->val && strcmp(port, ci->val) == 0)
+						same_port = true;
+					else
 						keep_password = false;
 				}
 			}
@@ -4213,6 +4217,16 @@ do_connect(enum trivalue reuse_previous_specification,
 			}
 			else if (port && strcmp(ci->keyword, "port") == 0)
 				values[paramnum++] = port;
+			else if (((host && !same_host) || (port && !same_port)) &&
+					 strcmp(ci->keyword, "portaddr") == 0)
+			{
+				/*
+				 * An old portaddr describes where to reach a particular
+				 * server, so drop it if either the host or the port value is
+				 * changing.
+				 */
+				values[paramnum++] = NULL;
+			}
 			/* If !keep_password, we unconditionally drop old password */
 			else if ((password || !keep_password) &&
 					 strcmp(ci->keyword, "password") == 0)

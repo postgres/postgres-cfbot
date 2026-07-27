@@ -56,6 +56,12 @@ my @tests = (
 		q{host='example.com' hostaddr='63.1.2.4' (inet)},
 		q{},
 	],
+	[
+		q{postgresql://host:12345/db?portaddr=6000},
+		q{dbname='db' host='host' port='12345' portaddr='6000' (inet)},
+		q{},
+	],
+	[ q{postgresql://?portaddr=6000}, q{portaddr='6000' (local)}, q{}, ],
 	[ q{postgresql://%68ost/}, q{host='host' (inet)}, q{}, ],
 	[
 		q{postgresql://host/db?user=uri-user},

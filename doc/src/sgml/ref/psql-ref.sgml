@@ -990,9 +990,13 @@ INSERT INTO tbls1 VALUES ($1, $2) \parse stmt1
         exception is that if the <replaceable>host</replaceable> setting
         is changed from its previous value using the positional syntax,
         any <replaceable>hostaddr</replaceable> setting present in the
-        existing connection's parameters is dropped.
+        existing connection's parameters is dropped; likewise, if either the
+        <replaceable>host</replaceable> or the <replaceable>port</replaceable>
+        setting is changed that way, any <replaceable>portaddr</replaceable>
+        setting is dropped.
         Also, any password used for the existing connection will be re-used
-        only if the user, host, and port settings are not changed.
+        only if the user, host, hostaddr, port, and portaddr settings are not
+        changed.
         When the command neither specifies nor reuses a particular parameter,
         the <application>libpq</application> default is used.
         </para>
