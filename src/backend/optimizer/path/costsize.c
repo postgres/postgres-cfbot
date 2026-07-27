@@ -227,6 +227,14 @@ static double calc_joinrel_size_estimate(PlannerInfo *root,
 										 double inner_rows,
 										 SpecialJoinInfo *sjinfo,
 										 List *restrictlist);
+static double simple_calc_joinrel_size_estimate(PlannerInfo *root,
+												SimpleRelOptInfo *joinrel,
+												SimpleRelOptInfo *outer_rel,
+												SimpleRelOptInfo *inner_rel,
+												double outer_rows,
+												double inner_rows,
+												SpecialJoinInfo *sjinfo,
+												List *restrictlist);
 static Cost append_nonpartial_cost(List *subpaths, int numpaths,
 								   int parallel_workers);
 static void set_rel_width(PlannerInfo *root, RelOptInfo *rel);
@@ -5637,6 +5645,23 @@ set_joinrel_size_estimates(PlannerInfo *root, RelOptInfo *rel,
 										   restrictlist);
 }
 
+void
+simple_set_joinrel_size_estimates(PlannerInfo *root, SimpleRelOptInfo *rel,
+						   SimpleRelOptInfo *outer_rel,
+						   SimpleRelOptInfo *inner_rel,
+						   SpecialJoinInfo *sjinfo,
+						   List *restrictlist)
+{
+	rel->rows = simple_calc_joinrel_size_estimate(root,
+										   rel,
+										   outer_rel,
+										   inner_rel,
+										   outer_rel->rows,
+										   inner_rel->rows,
+										   sjinfo,
+										   restrictlist);
+}
+
 /*
  * get_parameterized_joinrel_size
  *		Make a size estimate for a parameterized scan of a join relation.
@@ -5698,6 +5723,150 @@ calc_joinrel_size_estimate(PlannerInfo *root,
 						   RelOptInfo *joinrel,
 						   RelOptInfo *outer_rel,
 						   RelOptInfo *inner_rel,
+						   double outer_rows,
+						   double inner_rows,
+						   SpecialJoinInfo *sjinfo,
+						   List *restrictlist)
+{
+	JoinType	jointype = sjinfo->jointype;
+	Selectivity fkselec;
+	Selectivity jselec;
+	Selectivity pselec;
+	double		nrows;
+
+	/*
+	 * Compute joinclause selectivity.  Note that we are only considering
+	 * clauses that become restriction clauses at this join level; we are not
+	 * double-counting them because they were not considered in estimating the
+	 * sizes of the component rels.
+	 *
+	 * First, see whether any of the joinclauses can be matched to known FK
+	 * constraints.  If so, drop those clauses from the restrictlist, and
+	 * instead estimate their selectivity using FK semantics.  (We do this
+	 * without regard to whether said clauses are local or "pushed down".
+	 * Probably, an FK-matching clause could never be seen as pushed down at
+	 * an outer join, since it would be strict and hence would be grounds for
+	 * join strength reduction.)  fkselec gets the net selectivity for
+	 * FK-matching clauses, or 1.0 if there are none.
+	 */
+	fkselec = get_foreign_key_join_selectivity(root,
+											   outer_rel->relids,
+											   inner_rel->relids,
+											   sjinfo,
+											   &restrictlist);
+
+	/*
+	 * For an outer join, we have to distinguish the selectivity of the join's
+	 * own clauses (JOIN/ON conditions) from any clauses that were "pushed
+	 * down".  For inner joins we just count them all as joinclauses.
+	 */
+	if (IS_OUTER_JOIN(jointype))
+	{
+		List	   *joinquals = NIL;
+		List	   *pushedquals = NIL;
+		ListCell   *l;
+
+		/* Grovel through the clauses to separate into two lists */
+		foreach(l, restrictlist)
+		{
+			RestrictInfo *rinfo = lfirst_node(RestrictInfo, l);
+
+			if (RINFO_IS_PUSHED_DOWN(rinfo, joinrel->relids))
+				pushedquals = lappend(pushedquals, rinfo);
+			else
+				joinquals = lappend(joinquals, rinfo);
+		}
+
+		/* Get the separate selectivities */
+		jselec = clauselist_selectivity(root,
+										joinquals,
+										0,
+										jointype,
+										sjinfo);
+		pselec = clauselist_selectivity(root,
+										pushedquals,
+										0,
+										jointype,
+										sjinfo);
+
+		/* Avoid leaking a lot of ListCells */
+		list_free(joinquals);
+		list_free(pushedquals);
+	}
+	else
+	{
+		jselec = clauselist_selectivity(root,
+										restrictlist,
+										0,
+										jointype,
+										sjinfo);
+		pselec = 0.0;			/* not used, keep compiler quiet */
+	}
+
+	/*
+	 * Basically, we multiply size of Cartesian product by selectivity.
+	 *
+	 * If we are doing an outer join, take that into account: the joinqual
+	 * selectivity has to be clamped using the knowledge that the output must
+	 * be at least as large as the non-nullable input.  However, any
+	 * pushed-down quals are applied after the outer join, so their
+	 * selectivity applies fully.
+	 *
+	 * For JOIN_SEMI and JOIN_ANTI, the selectivity is defined as the fraction
+	 * of LHS rows that have matches, and we apply that straightforwardly.
+	 */
+	switch (jointype)
+	{
+		case JOIN_INNER:
+			nrows = outer_rows * inner_rows * fkselec * jselec;
+			/* pselec not used */
+			break;
+		case JOIN_LEFT:
+			nrows = outer_rows * inner_rows * fkselec * jselec;
+			if (nrows < outer_rows)
+				nrows = outer_rows;
+			nrows *= pselec;
+			break;
+		case JOIN_FULL:
+			nrows = outer_rows * inner_rows * fkselec * jselec;
+			if (nrows < outer_rows)
+				nrows = outer_rows;
+			if (nrows < inner_rows)
+				nrows = inner_rows;
+			nrows *= pselec;
+			break;
+		case JOIN_SEMI:
+			nrows = outer_rows * fkselec * jselec;
+			/* pselec not used */
+			break;
+		case JOIN_ANTI:
+			nrows = outer_rows * (1.0 - fkselec * jselec);
+			nrows *= pselec;
+			break;
+		default:
+			/* other values not expected here */
+			elog(ERROR, "unrecognized join type: %d", (int) jointype);
+			nrows = 0;			/* keep compiler quiet */
+			break;
+	}
+
+	return clamp_row_est(nrows);
+}
+
+/*
+ * calc_joinrel_size_estimate
+ *		Workhorse for set_joinrel_size_estimates and
+ *		get_parameterized_joinrel_size.
+ *
+ * outer_rel/inner_rel are the relations being joined, but they should be
+ * assumed to have sizes outer_rows/inner_rows; those numbers might be less
+ * than what rel->rows says, when we are considering parameterized paths.
+ */
+static double
+simple_calc_joinrel_size_estimate(PlannerInfo *root,
+						   SimpleRelOptInfo *joinrel,
+						   SimpleRelOptInfo *outer_rel,
+						   SimpleRelOptInfo *inner_rel,
 						   double outer_rows,
 						   double inner_rows,
 						   SpecialJoinInfo *sjinfo,

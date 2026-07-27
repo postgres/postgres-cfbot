@@ -423,8 +423,8 @@ SELECT * FROM GRAPH_TABLE (g1 MATCH (a IS vl1 | vl2) COLUMNS (a.vname, a.vprop1)
 SELECT src, conn, dest, lprop1, vprop2, vprop1 FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[b IS el1]->(c IS vl2 | vl3) COLUMNS (a.vname AS src, b.ename AS conn, c.vname AS dest, c.lprop1, c.vprop2, c.vprop1));
  src | conn | dest |  lprop1  | vprop2 | vprop1 
 -----+------+------+----------+--------+--------
- v12 | e122 | v21  | vl2_prop |   1100 |   1010
  v11 | e121 | v22  | vl2_prop |   1200 |   1020
+ v12 | e122 | v21  | vl2_prop |   1100 |   1010
  v11 | e131 | v33  | vl3_prop |        |   2030
  v11 | e132 | v31  | vl3_prop |        |   2010
 (4 rows)
@@ -510,8 +510,8 @@ LINE 1: SELECT * FROM GRAPH_TABLE (g1 MATCH (WHERE b.eprop1 = 10001)...
 SELECT * FROM GRAPH_TABLE (g1 MATCH (src)-[conn]->(dest) COLUMNS (src.vname AS svname, conn.ename AS cename, dest.vname AS dvname, src.vprop1 AS svp1, src.vprop2 AS svp2, src.lprop1 AS slp1, dest.vprop1 AS dvp1, dest.vprop2 AS dvp2, dest.lprop1 AS dlp1, conn.eprop1 AS cep1, conn.lprop2 AS clp2));
  svname | cename | dvname | svp1 | svp2 |   slp1   | dvp1 | dvp2 |   dlp1   | cep1  |  clp2  
 --------+--------+--------+------+------+----------+------+------+----------+-------+--------
- v12    | e122   | v21    |   20 |      |          | 1010 | 1100 | vl2_prop | 10002 |       
  v11    | e121   | v22    |   10 |      |          | 1020 | 1200 | vl2_prop | 10001 |       
+ v12    | e122   | v21    |   20 |      |          | 1010 | 1100 | vl2_prop | 10002 |       
  v11    | e131   | v33    |   10 |      |          | 2030 |      | vl3_prop | 10003 |       
  v11    | e132   | v31    |   10 |      |          | 2010 |      | vl3_prop | 10004 |       
  v22    | e231   | v32    | 1020 | 1200 | vl2_prop | 2020 |      | vl3_prop |       | 100050
@@ -521,8 +521,8 @@ SELECT * FROM GRAPH_TABLE (g1 MATCH (src)-[conn]->(dest) COLUMNS (src.vname AS s
 SELECT * FROM GRAPH_TABLE (g1 MATCH (src IS vl1 | vl2 | vl3)-[conn]->(dest) COLUMNS (src.vname AS svname, conn.ename AS cename, dest.vname AS dvname));
  svname | cename | dvname 
 --------+--------+--------
- v12    | e122   | v21
  v11    | e121   | v22
+ v12    | e122   | v21
  v11    | e131   | v33
  v11    | e132   | v31
  v22    | e231   | v32
@@ -542,8 +542,8 @@ SELECT vn FROM all_vertices EXCEPT (SELECT svn FROM all_connected_vertices UNION
 SELECT sn, cn, dn FROM GRAPH_TABLE (g1 MATCH (src IS l1)-[conn IS l1]->(dest IS l1) COLUMNS (src.elname AS sn, conn.elname AS cn, dest.elname AS dn));
  sn  |  cn  | dn  
 -----+------+-----
- v12 | e122 | v21
  v11 | e121 | v22
+ v12 | e122 | v21
  v11 | e131 | v33
  v11 | e132 | v31
  v22 | e231 | v32

@@ -1646,6 +1646,98 @@ generate_join_implied_equalities(PlannerInfo *root,
 	return result;
 }
 
+List *
+simple_generate_join_implied_equalities(PlannerInfo *root,
+										Relids join_relids,
+										Relids outer_relids,
+										SimpleRelOptInfo *inner_rel,
+										SpecialJoinInfo *sjinfo)
+{
+	List	   *result = NIL;
+	Relids		inner_relids = inner_rel->relids;
+	Relids		nominal_inner_relids;
+	Relids		nominal_join_relids;
+	Bitmapset  *matching_ecs;
+	int			i;
+
+	/* If inner rel is a child, extra setup work is needed */
+//	if (IS_OTHER_REL(inner_rel))
+//	{
+//		Assert(!bms_is_empty(inner_rel->top_parent_relids));
+//
+//		/* Fetch relid set for the topmost parent rel */
+//		nominal_inner_relids = inner_rel->top_parent_relids;
+//		/* ECs will be marked with the parent's relid, not the child's */
+//		nominal_join_relids = bms_union(outer_relids, nominal_inner_relids);
+//		nominal_join_relids = add_outer_joins_to_relids(root,
+//														nominal_join_relids,
+//														sjinfo,
+//														NULL);
+//	}
+//	else
+	{
+		nominal_inner_relids = inner_relids;
+		nominal_join_relids = join_relids;
+	}
+
+	/*
+	 * Examine all potentially-relevant eclasses.
+	 *
+	 * If we are considering an outer join, we must include "join" clauses
+	 * that mention either input rel plus the outer join's relid; these
+	 * represent post-join filter clauses that have to be applied at this
+	 * join.  We don't have infrastructure that would let us identify such
+	 * eclasses cheaply, so just fall back to considering all eclasses
+	 * mentioning anything in nominal_join_relids.
+	 *
+	 * At inner joins, we can be smarter: only consider eclasses mentioning
+	 * both input rels.
+	 */
+	if (sjinfo && sjinfo->ojrelid != 0)
+		matching_ecs = get_eclass_indexes_for_relids(root, nominal_join_relids);
+	else
+		matching_ecs = get_common_eclass_indexes(root, nominal_inner_relids,
+												 outer_relids);
+
+	i = -1;
+	while ((i = bms_next_member(matching_ecs, i)) >= 0)
+	{
+		EquivalenceClass *ec = (EquivalenceClass *) list_nth(root->eq_classes, i);
+		List	   *sublist = NIL;
+
+		/* ECs containing consts do not need any further enforcement */
+		if (ec->ec_has_const)
+			continue;
+
+		/* Single-member ECs won't generate any deductions */
+		if (list_length(ec->ec_members) <= 1)
+			continue;
+
+		/* Sanity check that this eclass overlaps the join */
+		Assert(bms_overlap(ec->ec_relids, nominal_join_relids));
+
+		if (!ec->ec_broken)
+			sublist = generate_join_implied_equalities_normal(root,
+															  ec,
+															  join_relids,
+															  outer_relids,
+															  inner_relids);
+
+		/* Recover if we failed to generate required derived clauses */
+//		if (ec->ec_broken)
+//			sublist = generate_join_implied_equalities_broken(root,
+//															  ec,
+//															  nominal_join_relids,
+//															  outer_relids,
+//															  nominal_inner_relids,
+//															  inner_rel);
+
+		result = list_concat(result, sublist);
+	}
+
+	return result;
+}
+
 /*
  * generate_join_implied_equalities_for_ecs
  *	  As above, but consider only the listed ECs.

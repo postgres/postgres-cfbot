@@ -392,4 +392,14 @@ extern RelOptInfo *build_child_join_rel(PlannerInfo *root,
 
 extern RelAggInfo *create_rel_agg_info(PlannerInfo *root, RelOptInfo *rel,
 									   bool calculate_grouped_rows);
+
+extern List *simple_build_joinrel_restrictlist(PlannerInfo *root,
+											   SimpleRelOptInfo *joinrel,
+											   SimpleRelOptInfo *outer_rel,
+											   SimpleRelOptInfo *inner_rel,
+											   SpecialJoinInfo *sjinfo);
+extern void simple_build_joinrel_joinlist(SimpleRelOptInfo *joinrel,
+										  SimpleRelOptInfo *outer_rel,
+										  SimpleRelOptInfo *inner_rel);
+
 #endif							/* PATHNODE_H */

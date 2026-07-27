@@ -269,9 +269,7 @@ SELECT * FROM generate_series(1,1000) g
  Hash Right Semi Join
    Hash Cond: (sj_narrow.val1 = g.g)
    ->  Seq Scan on sj_narrow
-         Bloom Filter 1: keys=(val1)
    ->  Hash
-         Bloom Filter 1
          ->  Function Scan on generate_series g
  Supplied Plan Advice:
    SEMIJOIN_NON_UNIQUE(sj_narrow) /* matched */
@@ -282,7 +280,7 @@ SELECT * FROM generate_series(1,1000) g
    SEQ_SCAN(sj_narrow)
    SEMIJOIN_NON_UNIQUE(sj_narrow)
    NO_GATHER(g sj_narrow)
-(16 rows)
+(14 rows)
 
 COMMIT;
 -- However, mentioning the wrong side of the join should result in an advice
@@ -369,21 +367,20 @@ EXPLAIN (COSTS OFF, PLAN_ADVICE)
 SELECT * FROM generate_series(1,1000) g, sj_narrow s WHERE g = s.val1;
                         QUERY PLAN                        
 ----------------------------------------------------------
- Hash Join
-   Hash Cond: (s.val1 = g.g)
-   ->  Seq Scan on sj_narrow s
-         Bloom Filter 1: keys=(val1)
-   ->  Hash
-         Bloom Filter 1
+ Merge Join
+   Merge Cond: (s.val1 = g.g)
+   ->  Index Scan using sj_narrow_val1_idx on sj_narrow s
+   ->  Sort
+         Sort Key: g.g
          ->  Function Scan on generate_series g
  Supplied Plan Advice:
    SEMIJOIN_UNIQUE(g) /* matched, inapplicable, failed */
  Generated Plan Advice:
    JOIN_ORDER(s g)
-   HASH_JOIN(g)
-   SEQ_SCAN(s)
+   MERGE_JOIN_PLAIN(g)
+   INDEX_SCAN(s public.sj_narrow_val1_idx)
    NO_GATHER(g s)
-(14 rows)
+(13 rows)
 
 COMMIT;
 -- Test the case where the subquery containing a semijoin is removed from
@@ -411,28 +408,27 @@ SELECT 1 FROM generate_series(1, 1000) g WHERE EXISTS
 	(SELECT 1 FROM
 		(SELECT 1 FROM (SELECT 1) LEFT JOIN sj_narrow ON true) s,
 		sj_narrow t2 WHERE g = t2.id);
-                                  QUERY PLAN                                  
-------------------------------------------------------------------------------
- Merge Join
-   Merge Cond: (g.g = t2.id)
-   ->  Sort
-         Sort Key: g.g
-         ->  Function Scan on generate_series g
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Hash Join
+   Hash Cond: (t2.id = g.g)
    ->  Unique
-         ->  Nested Loop Left Join
-               ->  Nested Loop
-                     ->  Index Only Scan using sj_narrow_pkey on sj_narrow t2
-                     ->  Materialize
-                           ->  Result
+         ->  Nested Loop
+               ->  Index Only Scan using sj_narrow_pkey on sj_narrow t2
                ->  Materialize
-                     ->  Seq Scan on sj_narrow
+                     ->  Nested Loop Left Join
+                           ->  Result
+                           ->  Seq Scan on sj_narrow
+   ->  Hash
+         ->  Function Scan on generate_series g
  Generated Plan Advice:
-   JOIN_ORDER(g (t2 "*RESULT*" sj_narrow))
-   MERGE_JOIN_PLAIN((t2 sj_narrow "*RESULT*"))
-   NESTED_LOOP_MATERIALIZE("*RESULT*" sj_narrow)
+   JOIN_ORDER(t2 ("*RESULT*" sj_narrow) g)
+   NESTED_LOOP_PLAIN(sj_narrow)
+   NESTED_LOOP_MATERIALIZE((sj_narrow "*RESULT*"))
+   HASH_JOIN(g)
    SEQ_SCAN(sj_narrow)
    INDEX_ONLY_SCAN(t2 public.sj_narrow_pkey)
    SEMIJOIN_UNIQUE((t2 sj_narrow "*RESULT*"))
    NO_GATHER(g t2 sj_narrow "*RESULT*")
-(21 rows)
+(20 rows)
 

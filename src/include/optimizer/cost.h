@@ -219,6 +219,11 @@ extern void set_joinrel_size_estimates(PlannerInfo *root, RelOptInfo *rel,
 									   RelOptInfo *inner_rel,
 									   SpecialJoinInfo *sjinfo,
 									   List *restrictlist);
+extern void simple_set_joinrel_size_estimates(PlannerInfo *root, SimpleRelOptInfo *rel,
+											  SimpleRelOptInfo *outer_rel,
+											  SimpleRelOptInfo *inner_rel,
+											  SpecialJoinInfo *sjinfo,
+											  List *restrictlist);
 extern void set_subquery_size_estimates(PlannerInfo *root, RelOptInfo *rel);
 extern void set_function_size_estimates(PlannerInfo *root, RelOptInfo *rel);
 extern void set_values_size_estimates(PlannerInfo *root, RelOptInfo *rel);

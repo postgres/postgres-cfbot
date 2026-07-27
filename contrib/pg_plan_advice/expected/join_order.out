@@ -221,9 +221,7 @@ SELECT * FROM jo_fact f
    Hash Cond: (d2.id = f.dim2_id)
    ->  Seq Scan on jo_dim2 d2
          Filter: (val2 = 1)
-         Bloom Filter 2: keys=(id)
    ->  Hash
-         Bloom Filter 2
          ->  Hash Join
                Hash Cond: (f.dim1_id = d1.id)
                ->  Seq Scan on jo_fact f
@@ -239,7 +237,7 @@ SELECT * FROM jo_fact f
    HASH_JOIN(d1 (f d1))
    SEQ_SCAN(d2 f d1)
    NO_GATHER(f d1 d2)
-(22 rows)
+(20 rows)
 
 SET LOCAL pg_plan_advice.advice = 'join_order(d2 d1)';
 EXPLAIN (COSTS OFF, PLAN_ADVICE)

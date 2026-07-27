@@ -756,6 +756,9 @@ simple_min_join_parameterization(PlannerInfo *root, Relids joinrelids,
  * realizable is later rejected by compute_join_expected_filters(), so it is
  * safe for this test to be conservative (an over-permissive or over-strict
  * answer only affects planning effort, never correctness).
+ *
+ * XXX This could/shoult be adopted to use SimpleRelOptInfo instead of the
+ * raw relids (and also the lateral_relids/direct_lateral_relids fields).
  */
 static bool
 simple_join_is_legal(PlannerInfo *root, Relids relids1, Relids relids2,
@@ -1089,6 +1092,21 @@ simple_have_relevant_joinclause(PlannerInfo *root, Relids relids1,
 	return false;
 }
 
+static SimpleRelOptInfo *
+make_simple_join_rel(Relids relids, double rows)
+{
+	SimpleRelOptInfo *rel = palloc0(sizeof(SimpleRelOptInfo));
+
+	rel->relids = relids;
+	rel->rows = rows;
+
+	rel->direct_lateral_relids = NULL;
+	rel->lateral_relids = NULL;
+	rel->joininfo = NIL;
+
+	return rel;
+}
+
 /*
  * enumerate_bloom_filter_build_relids
  *	  Enumerate the legal join relations (and single base relations) that
@@ -1172,12 +1190,15 @@ enumerate_bloom_filter_build_relids(PlannerInfo *root)
 	for (i = 1; i < root->simple_rel_array_size; i++)
 	{
 		RelOptInfo *rel = root->simple_rel_array[i];
+		SimpleRelOptInfo *srel;
 
 		if (rel == NULL || rel->reloptkind != RELOPT_BASEREL)
 			continue;
 
 		nbaserels++;
-		levels[1] = lappend(levels[1], bms_make_singleton(i));
+		srel = make_simple_join_rel(bms_make_singleton(i), rel->rows);
+
+		levels[1] = lappend(levels[1], srel);
 	}
 
 	/*
@@ -1210,33 +1231,36 @@ enumerate_bloom_filter_build_relids(PlannerInfo *root)
 
 		foreach(lc, levels[level - 1])
 		{
-			Relids		oldrelids = (Relids) lfirst(lc);
+			SimpleRelOptInfo *oldrel = (SimpleRelOptInfo *) lfirst(lc);
 			ListCell   *lc2;
 
 			foreach(lc2, levels[1])
 			{
-				Relids		singleton = (Relids) lfirst(lc2);
-				int			addrel = bms_singleton_member(singleton);
+				SimpleRelOptInfo *joinrel;
+				SimpleRelOptInfo *singleton = (SimpleRelOptInfo *) lfirst(lc2);
+				int			addrel = bms_singleton_member(singleton->relids);
 				Relids		joinrelids;
 				ListCell   *lc3;
 				bool		dup;
 
 				/* The added rel must not already be part of the set. */
-				if (bms_is_member(addrel, oldrelids))
+				if (bms_is_member(addrel, oldrel->relids))
 					continue;
 
 				/* Must be connected by a join clause or order restriction. */
-				if (!simple_have_relevant_joinclause(root, oldrelids,
-													 singleton))
+				if (!simple_have_relevant_joinclause(root, oldrel->relids,
+													 singleton->relids))
 					continue;
 
-				joinrelids = bms_union(oldrelids, singleton);
+				joinrelids = bms_union(oldrel->relids, singleton->relids);
 
 				/* Skip if we already produced this set at this level. */
+				/* XXX should use a hash table with relids as a key, probably */
 				dup = false;
 				foreach(lc3, levels[level])
 				{
-					if (bms_equal((Relids) lfirst(lc3), joinrelids))
+					SimpleRelOptInfo *tmp = (SimpleRelOptInfo *) lfirst(lc3);
+					if (bms_equal(tmp->relids, joinrelids))
 					{
 						dup = true;
 						break;
@@ -1249,15 +1273,37 @@ enumerate_bloom_filter_build_relids(PlannerInfo *root)
 				}
 
 				/* Must form a legal join relation. */
-				if (!simple_join_is_legal(root, oldrelids, singleton,
+				if (!simple_join_is_legal(root, oldrel->relids, singleton->relids,
 										  joinrelids))
 				{
 					bms_free(joinrelids);
 					continue;
 				}
 
-				levels[level] = lappend(levels[level], joinrelids);
-				result = lappend(result, joinrelids);
+				joinrel = make_simple_join_rel(joinrelids, 0);
+
+				/* XXX copied from build_join_rel */
+				{
+					List *restrictlist;
+					SpecialJoinInfo sjinfo_data;
+					SpecialJoinInfo *sjinfo;
+
+					sjinfo = &sjinfo_data;
+					init_dummy_sjinfo(sjinfo, oldrel->relids, singleton->relids);
+
+					restrictlist = simple_build_joinrel_restrictlist(root, joinrel,
+																	 oldrel, singleton,
+																	 sjinfo);
+
+					simple_build_joinrel_joinlist(joinrel, oldrel, singleton);
+
+					simple_set_joinrel_size_estimates(root, joinrel,
+													  oldrel, singleton,
+													  sjinfo, restrictlist);
+				}
+
+				levels[level] = lappend(levels[level], joinrel);
+				result = lappend(result, joinrel);
 
 				/*
 				 * Stop generating joins once we hit the maximum allowed

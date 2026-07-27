@@ -15,6 +15,7 @@
 
 #include "postgres.h"
 
+#include <float.h>
 #include <limits.h>
 #include <math.h>
 
@@ -111,9 +112,9 @@ static void set_plain_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 static List *find_interesting_bloom_filters(PlannerInfo *root,
 											RelOptInfo *rel);
 static Selectivity bloom_build_side_join_ratio(PlannerInfo *root,
+											   List *build_sides,
 											   RelOptInfo *rel,
-											   Relids build_relids,
-											   List **ec_all);
+											   Relids build_relids);
 static void generate_expected_filter_paths(PlannerInfo *root, RelOptInfo *rel);
 static void set_tablesample_rel_size(PlannerInfo *root, RelOptInfo *rel,
 									 RangeTblEntry *rte);
@@ -1058,217 +1059,29 @@ bloom_filter_recipient_reachable(PlannerInfo *root, Index owner_relid,
  * no? We should still be able to access the baserels one by one.
  */
 static Selectivity
-bloom_build_side_join_ratio(PlannerInfo *root, RelOptInfo *rel,
-							Relids build_relids, List **ec_all)
+bloom_build_side_join_ratio(PlannerInfo *root, List *build_sides,
+							RelOptInfo *rel, Relids build_relids)
 {
-	Relids		setrelids = bms_union(rel->relids, build_relids);
-	List	   *clauses = NIL;
-	List	   *ec_clauses = NIL;
-	List	   *ecs = NIL;
-	int		   *dsu;
-	double		nrows = 1.0;
-	Selectivity clausesel;
-	Selectivity fkselec;
-	SpecialJoinInfo sjinfo;
-	ListCell   *lc;
-	int			i;
+	double	nrows = DBL_MAX;
+	Relids	relids;
 
-	/*
-	 * Product of the build relations' restriction-reduced row estimates. That
-	 * means it already reflects WHERE clauses on some of the rels (if any).
-	 */
-	i = -1;
-	while ((i = bms_next_member(build_relids, i)) >= 0)
+	ListCell *lc;
+
+	relids = bms_copy(build_relids);
+	relids = bms_add_member(relids, rel->relid);
+
+	foreach (lc, build_sides)
 	{
-		RelOptInfo *br = root->simple_rel_array[i];
+		SimpleRelOptInfo *rel = (SimpleRelOptInfo *) lfirst(lc);
 
-		/* XXX paranoia */
-		Assert(br != NULL);
-
-		nrows *= br->rows;
-	}
-
-	/*
-	 * Collect candidate hashjoinable equality join clauses fully contained in
-	 * the relation set.  Ordinary (non-EC) join clauses are all applied;
-	 * EC-derived clauses are gathered separately and later reduced to a
-	 * non-redundant spanning set per EquivalenceClass.
-	 *
-	 * XXX I think this needs to be careful about using the RestrictInfo for
-	 * the reason explained in find_interesting_bloom_filters, because we
-	 * don't want to interfere with the regular selectivity estimation (by
-	 * chaching our - possibly incorrect - estimate in the RestrictInfo). So
-	 * we should strip the RestrictInfo, just like in
-	 * find_interesting_bloom_filters, or make sure the estimate is correct
-	 * (same as for regular planning). But we can strip that only after
-	 * deduplicating the EC clauses etc.
-	 */
-	i = -1;
-	while ((i = bms_next_member(setrelids, i)) >= 0)
-	{
-		RelOptInfo *r = root->simple_rel_array[i];
-		ListCell   *lc2;
-
-		/* XXX paranoia */
-		Assert(r != NULL);
-		Assert(r->reloptkind == RELOPT_BASEREL);
-
-		/*
-		 * EC-derived clauses involving this rel (cached across build sides)
-		 *
-		 * XXX This caching is imperfect, in that 'empty list' is the same as
-		 * 'not cached', so empty lists are recalculated over and over. Maybe
-		 * we should split those two concepts, and remember when we got NIL?
-		 * Unless calculating empty filter is very cheap, not sure.
-		 */
-		if (ec_all[i] == NIL)
-			ec_all[i] = generate_implied_equalities_for_all_columns(root, r,
-																	bloom_em_matches_anybarevar,
-																	NULL, NULL);
-		foreach(lc2, ec_all[i])
+		if (bms_equal(rel->relids, relids))
 		{
-			RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc2);
-
-			if (rinfo->parent_ec == NULL)
-				continue;
-
-			if (bms_is_subset(rinfo->clause_relids, setrelids))
-			{
-				ec_clauses = list_append_unique_ptr(ec_clauses, rinfo);
-				ecs = list_append_unique_ptr(ecs, rinfo->parent_ec);
-			}
-		}
-
-		/* Ordinary (non-EC) join clauses involving this rel. */
-		foreach(lc2, r->joininfo)
-		{
-			RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc2);
-
-			if (rinfo->parent_ec != NULL)
-				continue;
-
-			/* XXX Can this actually happen for join clauses? */
-			if (bms_membership(rinfo->clause_relids) != BMS_MULTIPLE)
-				continue;
-
-			if (bms_is_subset(rinfo->clause_relids, setrelids))
-				clauses = list_append_unique_ptr(clauses, rinfo);
+			nrows = rel->rows;
+			break;
 		}
 	}
 
-	/*
-	 * Reduce the EC-derived clauses to a non-redundant spanning set.
-	 *
-	 * Within each EquivalenceClass, several of the collected clauses may
-	 * enforce the same equality transitively (e.g. a=b, a=c and b=c when
-	 * three relations of the set share a class); keeping them all would
-	 * multiply the same selectivity more than once.
-	 *
-	 * We use a small union-find (aka DSU) over the relids of the set, reset
-	 * per class, and keep a clause only when it connects two so-far
-	 * unconnected relations.
-	 *
-	 * The DSU tracks "parent" representative for each entry. We start with
-	 * each entry being it's own parent, and gradually merge disjoint sets
-	 * connected by the EC clauses.
-	 *
-	 * see https://en.wikipedia.org/wiki/Disjoint-set_data_structure
-	 */
-	dsu = palloc_array(int, root->simple_rel_array_size);
-	foreach(lc, ecs)
-	{
-		EquivalenceClass *ec = (EquivalenceClass *) lfirst(lc);
-		ListCell   *lc2;
-
-		/* reset the DSU, each relation is a separate group */
-		for (i = 0; i < root->simple_rel_array_size; i++)
-			dsu[i] = i;
-
-		foreach(lc2, ec_clauses)
-		{
-			RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc2);
-			int			first = -1;
-			bool		merged = false;
-			int			m;
-
-			/* skip clauses that don't belong to this EC */
-			if (rinfo->parent_ec != ec)
-				continue;
-
-			/* Union all set members referenced by this clause. */
-			m = -1;
-			while ((m = bms_next_member(rinfo->clause_relids, m)) >= 0)
-			{
-				int			ra,
-							rb;
-
-				Assert(m < root->simple_rel_array_size);
-
-				/* first rel in this EC clause */
-				if (first < 0)
-				{
-					first = m;
-					continue;
-				}
-
-				/* find (first) - representative of the first rel */
-				for (ra = first; dsu[ra] != ra; ra = dsu[ra])
-					 /* nothing */ ;
-
-				/* find (m) - representative of the current rel */
-				for (rb = m; dsu[rb] != rb; rb = dsu[rb])
-					 /* nothing */ ;
-
-				/* different representatives = disjoint sets, merge them */
-				if (ra != rb)
-				{
-					dsu[rb] = ra;
-					merged = true;
-				}
-			}
-
-			/*
-			 * If the clause connected two previously disconnected sets of
-			 * relations, it's not redundant. So use it for estimating filter
-			 * selectivity.
-			 */
-			if (merged)
-				clauses = lappend(clauses, rinfo);
-		}
-	}
-	pfree(dsu);
-
-	/* no clauses, no filtering */
-	if (clauses == NIL)
-	{
-		bms_free(setrelids);
-		return 1.0;
-	}
-
-	/*
-	 * XXX find_interesting_bloom_filters uses JOIN_SEMI, so maybe we should
-	 * use the same thing here?
-	 */
-	init_dummy_sjinfo(&sjinfo, rel->relids, build_relids);
-
-	/*
-	 * Just like calc_joinrel_size_estimate (and also
-	 * find_interesting_bloom_filters for the per-relation estimates), match
-	 * the clauses to foreign keys and estimate those using FK semantics.
-	 * Without this, joins matching a multi-column foreign key get badly
-	 * underestimated, because each of the join clauses applies the
-	 * selectivity of the restrictions on the referenced relation.
-	 */
-	fkselec = get_foreign_key_join_selectivity(root, rel->relids, build_relids,
-											   &sjinfo, &clauses);
-
-	clausesel = fkselec * clauselist_selectivity(root, clauses, 0,
-												 JOIN_INNER, &sjinfo);
-	CLAMP_PROBABILITY(clausesel);
-
-	bms_free(setrelids);
-
-	return nrows * clausesel;
+	return Min(1.0, Max(0.0, nrows / rel->rows));
 }
 
 /*
@@ -1302,13 +1115,8 @@ find_interesting_bloom_filters(PlannerInfo *root, RelOptInfo *rel)
 {
 	List	   *candidates;
 	List	  **clauses_by_rel; /* clauses per build relations */
-	double	   *sel_by_rel;		/* selectivity per build relation */
-	bool	   *has_rel;		/* XXX redundant with (clauses_by_rel[r] !=
-								 * NIL) */
-	List	  **ec_all;
 	List	   *build_sides;
 	List	   *result = NIL;
-	int			i;
 	ListCell   *lc;
 
 	if (!enable_hashjoin_bloom)
@@ -1355,7 +1163,6 @@ find_interesting_bloom_filters(PlannerInfo *root, RelOptInfo *rel)
 	 * referencing multiple relations? But it's fairly rare case.
 	 */
 	clauses_by_rel = palloc0_array(List *, root->simple_rel_array_size);
-	has_rel = palloc0_array(bool, root->simple_rel_array_size);
 
 	foreach(lc, candidates)
 	{
@@ -1431,67 +1238,6 @@ find_interesting_bloom_filters(PlannerInfo *root, RelOptInfo *rel)
 		Assert(rinfo != NULL);
 
 		clauses_by_rel[buildrel] = lappend(clauses_by_rel[buildrel], rinfo);
-		has_rel[buildrel] = true;
-	}
-
-	/*
-	 * Pre-compute the per-build-relation semijoin selectivity.
-	 *
-	 * A build relation may be joined by multiple clauses (e.g. when the join
-	 * matches a multi-column key). Simply multiplying the per-clause
-	 * selectivities assumes the columns are independent, which is badly wrong
-	 * for such joins - it applies the selectivity of restrictions on the
-	 * build relation once per join clause. So we first match the clauses to
-	 * foreign keys (the same way join size estimates do in
-	 * calc_joinrel_size_estimate), and estimate those using FK semantics.
-	 * Only the clauses not matched to any foreign key are then estimated the
-	 * regular way.
-	 *
-	 * XXX I think we could calculate the selectivity only for semijoin-like
-	 * joins (semijoin, inner join), and ignore the rest. We don't even need
-	 * to calculate interesting filters for those cases.
-	 */
-	sel_by_rel = palloc_array(double, root->simple_rel_array_size);
-	for (i = 0; i < root->simple_rel_array_size; i++)
-	{
-		SpecialJoinInfo sjinfo;
-		Relids		build_relids;
-		List	   *worklist;
-		List	   *clauses = NIL;
-		Selectivity fkselec;
-		ListCell   *lc2;
-
-		/* ignore relations without join clauses */
-		if (!has_rel[i])
-			continue;
-
-		build_relids = bms_make_singleton(i);
-		init_dummy_sjinfo(&sjinfo, rel->relids, build_relids);
-		sjinfo.jointype = JOIN_SEMI;
-
-		/*
-		 * Estimate clauses matching a foreign key using FK semantics. This
-		 * removes the matched clauses from the worklist (which is a copy, the
-		 * original list is left alone).
-		 */
-		worklist = clauses_by_rel[i];
-		fkselec = get_foreign_key_join_selectivity(root, rel->relids,
-												   build_relids, &sjinfo,
-												   &worklist);
-
-		/* strip RestrictInfo from the remaining clauses (see comment above) */
-		foreach(lc2, worklist)
-			clauses = lappend(clauses, ((RestrictInfo *) lfirst(lc2))->clause);
-
-		sel_by_rel[i] = fkselec * clauselist_selectivity(root, clauses, 0,
-														 JOIN_SEMI, &sjinfo);
-
-		CLAMP_PROBABILITY(sel_by_rel[i]);
-
-		list_free(clauses);
-		if (worklist != clauses_by_rel[i])
-			list_free(worklist);
-		bms_free(build_relids);
 	}
 
 	/*
@@ -1517,9 +1263,6 @@ find_interesting_bloom_filters(PlannerInfo *root, RelOptInfo *rel)
 	 * to scan storage more efficiently).
 	 */
 	build_sides = enumerate_bloom_filter_build_relids(root);
-
-	/* Cache of per-relation EC-derived clauses, filled lazily below. */
-	ec_all = palloc0_array(List *, root->simple_rel_array_size);
 
 	/*
 	 * Consider each legal join relation (or single base relation) that could
@@ -1550,15 +1293,15 @@ find_interesting_bloom_filters(PlannerInfo *root, RelOptInfo *rel)
 	 */
 	foreach(lc, build_sides)
 	{
-		Relids		bset = (Relids) lfirst(lc); /* relids on build side */
+		SimpleRelOptInfo   *brel = (SimpleRelOptInfo *) lfirst(lc); /* relids on build side */
 		List	   *clauses = NIL;
-		Selectivity sel = 1.0;
+		Selectivity sel;
 		ListCell   *lce;
 		bool		add;
 		int			r;
 
 		/* The owner cannot be on the build side of the filter. */
-		if (bms_is_member(rel->relid, bset))
+		if (bms_is_member(rel->relid, brel->relids))
 			continue;
 
 		/*
@@ -1566,13 +1309,9 @@ find_interesting_bloom_filters(PlannerInfo *root, RelOptInfo *rel)
 		 * the per-relation semijoin selectivities.
 		 */
 		r = -1;
-		while ((r = bms_next_member(bset, r)) >= 0)
+		while ((r = bms_next_member(brel->relids, r)) >= 0)
 		{
-			if (!has_rel[r])
-				continue;
-
 			clauses = list_concat(clauses, list_copy(clauses_by_rel[r]));
-			sel *= sel_by_rel[r];
 		}
 
 		/*
@@ -1591,16 +1330,14 @@ find_interesting_bloom_filters(PlannerInfo *root, RelOptInfo *rel)
 		 * relations that have no direct join clause to the owner.  A
 		 * single-relation build side has no such internal structure, so the
 		 * per-relation semijoin estimate already covers it.
+		 *
+		 * XXX I think we could just do this for all build sides, and not
+		 * calculate the clause selectivity at all. One effect is that we
+		 * would automatically consider only filters pushed down from the
+		 * smaller to the larger relation (which is one of the heuristics
+		 * suggested by the paper anyway).
 		 */
-		if (bms_membership(bset) == BMS_MULTIPLE)
-		{
-			Selectivity join_ratio;
-
-			join_ratio = bloom_build_side_join_ratio(root, rel, bset, ec_all);
-
-			if (join_ratio < sel)
-				sel = join_ratio;
-		}
+		sel = bloom_build_side_join_ratio(root, build_sides, rel, brel->relids);
 
 		Assert((sel >= 0.0) && (sel <= 1.0));
 
@@ -1611,7 +1348,7 @@ find_interesting_bloom_filters(PlannerInfo *root, RelOptInfo *rel)
 		 * de-duplication below.
 		 */
 		if (!(sel <= 1.0 - bloom_filter_pushdown_threshold && sel > 0.0) ||
-			!bloom_filter_recipient_reachable(root, rel->relid, bset))
+			!bloom_filter_recipient_reachable(root, rel->relid, brel->relids))
 		{
 			list_free(clauses);
 			continue;
@@ -1645,12 +1382,12 @@ find_interesting_bloom_filters(PlannerInfo *root, RelOptInfo *rel)
 		{
 			ExpectedFilter *f = (ExpectedFilter *) lfirst(lce);
 
-			if (bms_equal(f->build_relids, bset))
+			if (bms_equal(f->build_relids, brel->relids))
 			{
 				add = false;
 				break;
 			}
-			else if (bms_is_subset(f->build_relids, bset))
+			else if (bms_is_subset(f->build_relids, brel->relids))
 			{
 				/* existing (smaller) dominates unless candidate is better */
 				if (f->selectivity <= sel)
@@ -1659,7 +1396,7 @@ find_interesting_bloom_filters(PlannerInfo *root, RelOptInfo *rel)
 					break;
 				}
 			}
-			else if (bms_is_subset(bset, f->build_relids))
+			else if (bms_is_subset(brel->relids, f->build_relids))
 			{
 				/* candidate (smaller) dominates the existing larger filter */
 				if (sel <= f->selectivity)
@@ -1672,7 +1409,7 @@ find_interesting_bloom_filters(PlannerInfo *root, RelOptInfo *rel)
 			ExpectedFilter *f = makeNode(ExpectedFilter);
 
 			f->owner_relid = rel->relid;
-			f->build_relids = bms_copy(bset);
+			f->build_relids = bms_copy(brel->relids);
 			f->clauses = clauses;
 			f->selectivity = sel;
 			result = lappend(result, f);
