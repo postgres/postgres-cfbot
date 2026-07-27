@@ -146,3 +146,6 @@ test: fast_default
 # run tablespace test at the end because it drops the tablespace created during
 # setup that other tests may use.
 test: tablespace
+
+# tests for hashjoin bloom filter pushdown
+test: hashjoin_bloom hashjoin_bloom_star hashjoin_bloom_snowflake
