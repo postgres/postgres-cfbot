@@ -2462,6 +2462,30 @@ getHostaddr(PGconn *conn, char *host_addr, int host_addr_len)
 		host_addr[0] = '\0';
 }
 
+/* ----------
+ * getPortaddr -
+ * Form the port number of the current connection, in the same way that
+ * getHostaddr() forms its IP address.  conn->raddr must be valid.  Nothing
+ * is reported for Unix-domain sockets, which have no port number.
+ * ----------
+ */
+static void
+getPortaddr(PGconn *conn, char *port_str, int port_str_len)
+{
+	struct sockaddr_storage *addr = &conn->raddr.addr;
+
+	if (addr->ss_family == AF_INET || addr->ss_family == AF_INET6)
+	{
+		if (pg_getnameinfo_all(addr, conn->raddr.salen,
+							   NULL, 0,
+							   port_str, port_str_len,
+							   NI_NUMERICSERV) != 0)
+			port_str[0] = '\0';
+	}
+	else
+		port_str[0] = '\0';
+}
+
 /*
  * emitHostIdentityInfo -
  * Speculatively append "connection to server so-and-so failed: " to
@@ -3321,6 +3345,7 @@ keep_going:						/* We will come back to here until there is
 				 */
 				{
 					char		host_addr[NI_MAXHOST];
+					char		port_str[NI_MAXSERV];
 					int			sock_type;
 					AddrInfo   *addr_cur;
 
@@ -3376,8 +3401,8 @@ keep_going:						/* We will come back to here until there is
 						goto error_return;
 
 					/*
-					 * Set connip, too.  Note we purposely ignore strdup
-					 * failure; not a big problem if it fails.
+					 * Set connip and connport, too.  Note we purposely ignore
+					 * strdup failure; not a big problem if it fails.
 					 */
 					if (conn->connip != NULL)
 					{
@@ -3387,6 +3412,15 @@ keep_going:						/* We will come back to here until there is
 					getHostaddr(conn, host_addr, NI_MAXHOST);
 					if (host_addr[0])
 						conn->connip = strdup(host_addr);
+
+					if (conn->connport != NULL)
+					{
+						free(conn->connport);
+						conn->connport = NULL;
+					}
+					getPortaddr(conn, port_str, NI_MAXSERV);
+					if (port_str[0])
+						conn->connport = strdup(port_str);
 
 					/* Try to create the socket */
 					sock_type = SOCK_STREAM;
@@ -5242,6 +5276,7 @@ freePGconn(PGconn *conn)
 	free(conn->events);
 	pqReleaseConnHosts(conn);
 	free(conn->connip);
+	free(conn->connport);
 	release_conn_addrinfo(conn);
 	free(conn->scram_client_key_binary);
 	free(conn->scram_server_key_binary);
@@ -7740,6 +7775,19 @@ PQport(const PGconn *conn)
 		return conn->connhost[conn->whichhost].port;
 
 	return DEF_PGPORT_STR;
+}
+
+char *
+PQportaddr(const PGconn *conn)
+{
+	if (!conn)
+		return NULL;
+
+	/* Return the port actually connected to */
+	if (conn->connhost != NULL && conn->connport != NULL)
+		return conn->connport;
+
+	return "";
 }
 
 /*

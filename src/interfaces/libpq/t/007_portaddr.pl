@@ -48,6 +48,32 @@ $node->connect_ok(
 	sql => "\\echo :PORT",
 	expected_stdout => qr/^$unusedport$/);
 
+# PQportaddr() reports the port actually connected to, and psql shows it in
+# \conninfo when it differs from the port identifying the server.
+my ($ret, $stdout, $stderr) = $node->psql(
+	'postgres',
+	"\\conninfo",
+	extra_params => ['-w'],
+	connstr => "host=127.0.0.1 port=$unusedport portaddr=$realport",
+	on_error_stop => 0);
+is($ret, 0, "\\conninfo with portaddr succeeds");
+like($stdout, qr/^Server Port\|$unusedport$/m,
+	"\\conninfo reports port as the server port");
+like($stdout, qr/^Port Address\|$realport$/m,
+	"\\conninfo reports portaddr as the port address");
+
+($ret, $stdout, $stderr) = $node->psql(
+	'postgres',
+	"\\conninfo",
+	extra_params => ['-w'],
+	connstr => "host=127.0.0.1 port=$realport",
+	on_error_stop => 0);
+is($ret, 0, "\\conninfo without portaddr succeeds");
+like($stdout, qr/^Server Port\|$realport$/m,
+	"\\conninfo without portaddr reports the port");
+unlike($stdout, qr/Port Address/,
+	"\\conninfo omits the port address when it matches port");
+
 # An empty portaddr means "connect to port", the historical behavior.
 $node->connect_ok(
 	"host=127.0.0.1 port=$realport portaddr=",

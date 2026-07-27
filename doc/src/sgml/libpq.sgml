@@ -2863,6 +2863,30 @@ char *PQport(const PGconn *conn);
      </listitem>
     </varlistentry>
 
+    <varlistentry id="libpq-PQportaddr">
+     <term><function>PQportaddr</function><indexterm><primary>PQportaddr</primary></indexterm></term>
+
+     <listitem>
+      <para>
+       Returns the port that the active connection was actually made to.
+       This can be the port given by the <literal>port</literal> parameter,
+       or a port provided through the <literal>portaddr</literal> parameter.
+<synopsis>
+char *PQportaddr(const PGconn *conn);
+</synopsis>
+      </para>
+
+      <para>
+       <xref linkend="libpq-PQportaddr"/> returns <symbol>NULL</symbol> if the
+       <parameter>conn</parameter> argument is <symbol>NULL</symbol>.
+       Otherwise, if there is an error producing the port information (perhaps
+       if the connection has not been fully established or there was an
+       error), or if the connection is made over a Unix-domain socket, it
+       returns an empty string.
+      </para>
+     </listitem>
+    </varlistentry>
+
     <varlistentry id="libpq-PQtty">
      <term><function>PQtty</function><indexterm><primary>PQtty</primary></indexterm></term>
 

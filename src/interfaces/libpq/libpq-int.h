@@ -490,6 +490,7 @@ struct pg_conn
 	int			whichhost;		/* host we're currently trying/connected to */
 	pg_conn_host *connhost;		/* details about each named host */
 	char	   *connip;			/* IP address for current network connection */
+	char	   *connport;		/* port number for current network connection */
 
 	/*
 	 * The pending command queue as a singly-linked list.  Head is the command

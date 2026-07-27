@@ -796,6 +796,9 @@ exec_command_conninfo(PsqlScanState scan_state, bool active_branch)
 	char	   *host;
 	bool		print_hostaddr;
 	char	   *hostaddr;
+	bool		print_portaddr;
+	char	   *port,
+			   *portaddr;
 	char	   *protocol_version,
 			   *backend_pid;
 	int			ssl_in_use,
@@ -817,6 +820,8 @@ exec_command_conninfo(PsqlScanState scan_state, bool active_branch)
 	/* Get values for the parameters */
 	host = PQhost(pset.db);
 	hostaddr = PQhostaddr(pset.db);
+	port = PQport(pset.db);
+	portaddr = PQportaddr(pset.db);
 	version_num = PQfullProtocolVersion(pset.db);
 	protocol_version = psprintf("%d.%d", version_num / 10000,
 								version_num % 10000);
@@ -829,12 +834,22 @@ exec_command_conninfo(PsqlScanState scan_state, bool active_branch)
 	print_hostaddr = (!is_unixsock_path(host) &&
 					  hostaddr && *hostaddr && strcmp(host, hostaddr) != 0);
 
+	/*
+	 * Likewise for the port actually connected to.  No is_unixsock_path()
+	 * test is needed here: PQportaddr() returns an empty string for
+	 * Unix-domain socket connections, and a TCP connection can be made even
+	 * with a socket-path host when hostaddr forces it.
+	 */
+	print_portaddr = (portaddr && *portaddr && strcmp(port, portaddr) != 0);
+
 	/* Determine the exact number of rows to print */
 	rows = 12;
 	cols = 2;
 	if (ssl_in_use)
 		rows += 6;
 	if (print_hostaddr)
+		rows++;
+	if (print_portaddr)
 		rows++;
 
 	/* Set it all up */
@@ -878,7 +893,12 @@ exec_command_conninfo(PsqlScanState scan_state, bool active_branch)
 
 	/* Server Port */
 	printTableAddCell(&cont, _("Server Port"), false, false);
-	printTableAddCell(&cont, PQport(pset.db), false, false);
+	printTableAddCell(&cont, port, false, false);
+	if (print_portaddr)
+	{
+		printTableAddCell(&cont, _("Port Address"), false, false);
+		printTableAddCell(&cont, portaddr, false, false);
+	}
 
 	/* Options */
 	printTableAddCell(&cont, _("Options"), false, false);
@@ -4361,13 +4381,30 @@ do_connect(enum trivalue reuse_previous_specification,
 		{
 			char	   *connhost = PQhost(pset.db);
 			char	   *hostaddr = PQhostaddr(pset.db);
+			char	   *portaddr = PQportaddr(pset.db);
+			bool		show_portaddr;
+
+			/*
+			 * Show the port actually connected to when it differs from the
+			 * port that identifies the server.  PQportaddr() returns an
+			 * empty string for Unix-domain socket connections, so this
+			 * cannot fire for them.
+			 */
+			show_portaddr = (portaddr && *portaddr &&
+							 strcmp(PQport(pset.db), portaddr) != 0);
 
 			if (is_unixsock_path(connhost))
 			{
 				/* hostaddr overrides connhost */
 				if (hostaddr && *hostaddr)
-					printf(_("You are now connected to database \"%s\" as user \"%s\" on address \"%s\" at port \"%s\".\n"),
-						   PQdb(pset.db), PQuser(pset.db), hostaddr, PQport(pset.db));
+				{
+					if (show_portaddr)
+						printf(_("You are now connected to database \"%s\" as user \"%s\" on address \"%s\" at port \"%s\" (port address \"%s\").\n"),
+							   PQdb(pset.db), PQuser(pset.db), hostaddr, PQport(pset.db), portaddr);
+					else
+						printf(_("You are now connected to database \"%s\" as user \"%s\" on address \"%s\" at port \"%s\".\n"),
+							   PQdb(pset.db), PQuser(pset.db), hostaddr, PQport(pset.db));
+				}
 				else
 					printf(_("You are now connected to database \"%s\" as user \"%s\" via socket in \"%s\" at port \"%s\".\n"),
 						   PQdb(pset.db), PQuser(pset.db), connhost, PQport(pset.db));
@@ -4375,11 +4412,23 @@ do_connect(enum trivalue reuse_previous_specification,
 			else
 			{
 				if (hostaddr && *hostaddr && strcmp(connhost, hostaddr) != 0)
-					printf(_("You are now connected to database \"%s\" as user \"%s\" on host \"%s\" (address \"%s\") at port \"%s\".\n"),
-						   PQdb(pset.db), PQuser(pset.db), connhost, hostaddr, PQport(pset.db));
+				{
+					if (show_portaddr)
+						printf(_("You are now connected to database \"%s\" as user \"%s\" on host \"%s\" (address \"%s\") at port \"%s\" (port address \"%s\").\n"),
+							   PQdb(pset.db), PQuser(pset.db), connhost, hostaddr, PQport(pset.db), portaddr);
+					else
+						printf(_("You are now connected to database \"%s\" as user \"%s\" on host \"%s\" (address \"%s\") at port \"%s\".\n"),
+							   PQdb(pset.db), PQuser(pset.db), connhost, hostaddr, PQport(pset.db));
+				}
 				else
-					printf(_("You are now connected to database \"%s\" as user \"%s\" on host \"%s\" at port \"%s\".\n"),
-						   PQdb(pset.db), PQuser(pset.db), connhost, PQport(pset.db));
+				{
+					if (show_portaddr)
+						printf(_("You are now connected to database \"%s\" as user \"%s\" on host \"%s\" at port \"%s\" (port address \"%s\").\n"),
+							   PQdb(pset.db), PQuser(pset.db), connhost, PQport(pset.db), portaddr);
+					else
+						printf(_("You are now connected to database \"%s\" as user \"%s\" on host \"%s\" at port \"%s\".\n"),
+							   PQdb(pset.db), PQuser(pset.db), connhost, PQport(pset.db));
+				}
 			}
 		}
 		else
