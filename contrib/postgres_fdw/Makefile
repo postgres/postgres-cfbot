@@ -16,7 +16,7 @@ SHLIB_LINK_INTERNAL = $(libpq)
 EXTENSION = postgres_fdw
 DATA = postgres_fdw--1.0.sql postgres_fdw--1.0--1.1.sql postgres_fdw--1.1--1.2.sql postgres_fdw--1.2--1.3.sql
 
-REGRESS = postgres_fdw query_cancel
+REGRESS = postgres_fdw remote_plans_formats query_cancel
 ISOLATION = eval_plan_qual
 ISOLATION_OPTS = --load-extension=postgres_fdw
 TAP_TESTS = 1

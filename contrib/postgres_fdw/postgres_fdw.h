@@ -155,6 +155,7 @@ typedef enum PgFdwSamplingMethod
 extern int	set_transmission_modes(void);
 extern void reset_transmission_modes(int nestlevel);
 extern void process_pending_request(AsyncRequest *areq);
+extern void postgres_fdw_explain_init(void);
 
 /* in connection.c */
 extern PGconn *GetConnection(UserMapping *user, bool will_prep_stmt,

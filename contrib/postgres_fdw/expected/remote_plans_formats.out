@@ -1,0 +1,114 @@
+-- ===================================================================
+-- test EXPLAIN (REMOTE_PLANS) in the non-text output formats
+-- ===================================================================
+-- The behaviour of REMOTE_PLANS itself is tested in postgres_fdw.sql, next
+-- to the tests for the plans it reports on.  This file only covers how the
+-- collected remote plans are embedded in each output format.
+-- This runs after postgres_fdw.sql in the same database and reuses the
+-- server, user mapping and foreign tables created there.
+LOAD 'postgres_fdw';
+EXPLAIN (REMOTE_PLANS, FORMAT JSON, COSTS OFF)
+SELECT c1 FROM ft1 t1 WHERE t1.c1 = 101;
+                  QUERY PLAN                   
+-----------------------------------------------
+ [                                            +
+   {                                          +
+     "Plan": {                                +
+       "Node Type": "Foreign Scan",           +
+       "Operation": "Select",                 +
+       "Parallel Aware": false,               +
+       "Async Capable": false,                +
+       "Relation Name": "ft1",                +
+       "Alias": "t1",                         +
+       "Disabled": false,                     +
+       "Plan Node ID": 0                      +
+     },                                       +
+     "Remote Plans": {                        +
+       "Plan Node ID 0": [                    +
+         [                                    +
+           {                                  +
+             "Plan": {                        +
+               "Node Type": "Index Only Scan",+
+               "Parallel Aware": false,       +
+               "Async Capable": false,        +
+               "Scan Direction": "Forward",   +
+               "Index Name": "t1_pkey",       +
+               "Relation Name": "T 1",        +
+               "Alias": "T 1",                +
+               "Disabled": false,             +
+               "Index Cond": "(\"C 1\" = 101)"+
+             }                                +
+           }                                  +
+         ]                                    +
+       ]                                      +
+     }                                        +
+   }                                          +
+ ]
+(1 row)
+
+EXPLAIN (REMOTE_PLANS, FORMAT XML, COSTS OFF)
+SELECT c1 FROM ft1 t1 WHERE t1.c1 = 101;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ <explain xmlns="http://www.postgresql.org/2009/explain">        +
+   <Query>                                                       +
+     <Plan>                                                      +
+       <Node-Type>Foreign Scan</Node-Type>                       +
+       <Operation>Select</Operation>                             +
+       <Parallel-Aware>false</Parallel-Aware>                    +
+       <Async-Capable>false</Async-Capable>                      +
+       <Relation-Name>ft1</Relation-Name>                        +
+       <Alias>t1</Alias>                                         +
+       <Disabled>false</Disabled>                                +
+       <Plan-Node-ID>0</Plan-Node-ID>                            +
+     </Plan>                                                     +
+     <Remote-Plans>                                              +
+       <Plan-Node-ID-0>                                          +
+         <explain xmlns="http://www.postgresql.org/2009/explain">+
+           <Query>                                               +
+             <Plan>                                              +
+               <Node-Type>Index Only Scan</Node-Type>            +
+               <Parallel-Aware>false</Parallel-Aware>            +
+               <Async-Capable>false</Async-Capable>              +
+               <Scan-Direction>Forward</Scan-Direction>          +
+               <Index-Name>t1_pkey</Index-Name>                  +
+               <Relation-Name>T 1</Relation-Name>                +
+               <Alias>T 1</Alias>                                +
+               <Disabled>false</Disabled>                        +
+               <Index-Cond>("C 1" = 101)</Index-Cond>            +
+             </Plan>                                             +
+           </Query>                                              +
+         </explain>                                              +
+       </Plan-Node-ID-0>                                         +
+     </Remote-Plans>                                             +
+   </Query>                                                      +
+ </explain>
+(1 row)
+
+EXPLAIN (REMOTE_PLANS, FORMAT YAML, COSTS OFF)
+SELECT c1 FROM ft1 t1 WHERE t1.c1 = 101;
+               QUERY PLAN                
+-----------------------------------------
+ - Plan:                                +
+     Node Type: "Foreign Scan"          +
+     Operation: "Select"                +
+     Parallel Aware: false              +
+     Async Capable: false               +
+     Relation Name: "ft1"               +
+     Alias: "t1"                        +
+     Disabled: false                    +
+     Plan Node ID: 0                    +
+   Remote Plans:                        +
+     Plan Node ID 0:                    +
+       - Plan:                          +
+           Node Type: "Index Only Scan" +
+           Parallel Aware: false        +
+           Async Capable: false         +
+           Scan Direction: "Forward"    +
+           Index Name: "t1_pkey"        +
+           Relation Name: "T 1"         +
+           Alias: "T 1"                 +
+           Disabled: false              +
+           Index Cond: "(\"C 1\" = 101)"
+(1 row)
+
