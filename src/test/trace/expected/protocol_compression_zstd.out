@@ -1,0 +1,114 @@
+ ?column? 
+----------
+        1
+(1 row)
+
+WARNING:  SET LOCAL can only be used in transaction blocks
+ ?column? 
+----------
+        1
+(1 row)
+
+ ?column? 
+----------
+        1
+(1 row)
+
+ text | ?column? | numeric | interval 
+------+----------+---------+----------
+ 1    | 42       |       1 | @ 1 sec
+(1 row)
+
+1	                                                                                
+2	                                                                                
+3	                                                                                
+ ?column? 
+----------
+        1
+(1 row)
+
+                                                repeat                                                
+------------------------------------------------------------------------------------------------------
+ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+(1 row)
+
+ERROR:  division by zero
+ERROR:  division by zero
+ ?column? 
+----------
+        1
+(1 row)
+
+ generate_series 
+-----------------
+               1
+               2
+               3
+               4
+               5
+               6
+               7
+               8
+               9
+              10
+(10 rows)
+
+ ?column? 
+----------
+        1
+(1 row)
+
+                  repeat                  
+------------------------------------------
+ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+(1 row)
+
+                  repeat                  
+------------------------------------------
+ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+(1 row)
+
+                  repeat                  
+------------------------------------------
+ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+(1 row)
+
+ ?column? 
+----------
+        1
+(1 row)
+
+ generate_series 
+-----------------
+               1
+               2
+               3
+               4
+               5
+               6
+               7
+               8
+               9
+              10
+(10 rows)
+
+ ?column? 
+----------
+        1
+(1 row)
+
+                  repeat                  
+------------------------------------------
+ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+(1 row)
+
+                  repeat                  
+------------------------------------------
+ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+(1 row)
+
+                  repeat                  
+------------------------------------------
+ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+(1 row)
+

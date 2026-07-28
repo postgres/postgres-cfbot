@@ -1,0 +1,27 @@
+F	NN	StartupMessage	 3 0 "user" "SSSS" "database" "SSSS" "options" "SSSS" "application_name" "SSSS" "_pq_.supported_compressions" "SSSS" "datestyle" "SSSS" "timezone" "SSSS"
+B	NN	ParameterStatus	 "IntervalStyle" "SSSS"
+B	NN	ParameterStatus	 "search_path" "SSSS"
+B	NN	ParameterStatus	 "is_superuser" "SSSS"
+B	NN	ParameterStatus	 "standard_conforming_strings" "SSSS"
+B	NN	ParameterStatus	 "session_authorization" "SSSS"
+B	NN	ParameterStatus	 "client_encoding" "SSSS"
+B	NN	ParameterStatus	 "server_version" "SSSS"
+B	NN	ParameterStatus	 "server_encoding" "SSSS"
+B	NN	ParameterStatus	 "in_hot_standby" "SSSS"
+B	NN	ParameterStatus	 "integer_datetimes" "SSSS"
+B	NN	ParameterStatus	 "TimeZone" "SSSS"
+B	NN	ParameterStatus	 "application_name" "SSSS"
+B	NN	ParameterStatus	 "default_transaction_read_only" "SSSS"
+B	NN	ParameterStatus	 "scram_iterations" "SSSS"
+B	NN	ParameterStatus	 "DateStyle" "SSSS"
+B	12	BackendKeyData	 NNNN 'BBBB'
+B	5	ReadyForQuery	 I
+F	70	Query	 "SET protocol_backend_compression_allowed_algorithms = 'zstd,lz4';"
+B	NN	ErrorResponse	 S "ERROR" V "ERROR" C "22023" M "invalid value for parameter "protocol_backend_compression_allowed_algorithms": "zstd,lz4"" D "zstd compression is not supported by this build" F "SSSS" L "SSSS" R "SSSS" \x00
+B	5	ReadyForQuery	 I
+F	104	Query	 "SELECT current_setting('protocol_backend_compression_allowed_algorithms')!='zstd,lz4' AS skip_test "
+B	34	RowDescription	 1 "skip_test" NNNN 0 NNNN 1 -1 0
+B	11	DataRow	 1 1 't'
+B	13	CommandComplete	 "SELECT 1"
+B	5	ReadyForQuery	 I
+F	4	Terminate
