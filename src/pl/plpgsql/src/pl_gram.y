@@ -1996,7 +1996,12 @@ loop_body		: proc_sect K_END K_LOOP opt_label ';'
  * assignment.  Give an appropriate complaint for that, instead of letting
  * the core parser throw an unhelpful "syntax error".
  */
-stmt_execsql	: K_IMPORT
+stmt_execsql	: K_FROM
+					{
+						/* a FROM-first SELECT */
+						$$ = make_execsql_stmt(K_FROM, @1, NULL, &yylval, &yylloc, yyscanner);
+					}
+				| K_IMPORT
 					{
 						$$ = make_execsql_stmt(K_IMPORT, @1, NULL, &yylval, &yylloc, yyscanner);
 					}
