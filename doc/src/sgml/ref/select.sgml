@@ -1775,6 +1775,52 @@ SELECT * FROM (SELECT * FROM mytable FOR UPDATE) ss ORDER BY column1;
   </caution>
   </refsect2>
 
+  <refsect2 id="sql-select-last" xreflabel="Select List Last">
+   <title>Writing the Select List Last</title>
+
+   <para>
+    The clauses of a query may be written in the order in which they are
+    logically evaluated, that is with the <literal>FROM</literal> clause first
+    and the select list last of all:
+<programlisting>
+FROM <replaceable class="parameter">from_item</replaceable> [, ...] [ <replaceable class="parameter">other_clauses</replaceable> ] SELECT <replaceable class="parameter">select_list</replaceable>
+</programlisting>
+    This means the same as the usual spelling of the same query, so
+<programlisting>
+FROM films WHERE len &gt; '02:00' GROUP BY kind SELECT kind, count(*)
+</programlisting>
+    is another way of writing
+<programlisting>
+SELECT kind, count(*) FROM films WHERE len &gt; '02:00' GROUP BY kind
+</programlisting>
+    The <literal>WHERE</literal>, <literal>GROUP BY</literal>,
+    <literal>HAVING</literal> and <literal>WINDOW</literal> clauses keep their
+    order relative to each other, and all of them come before the select list.
+    The clauses that follow the select list in the usual spelling, that is
+    <literal>ORDER BY</literal>, <literal>LIMIT</literal> and the locking
+    clauses, keep their place at the end of the query.
+   </para>
+
+   <para>
+    The <literal>SELECT</literal> clause can also be left out entirely, which
+    is equivalent to writing <literal>SELECT *</literal>; so
+    <literal>FROM films</literal> is much like <literal>TABLE films</literal>,
+    except that the other clauses, such as <literal>WHERE</literal>, can still
+    be used with it.
+   </para>
+
+   <para>
+    This form is accepted wherever an ordinary <command>SELECT</command> is,
+    for example in a sub-<command>SELECT</command>, in a
+    <literal>WITH</literal> query, or in <command>INSERT</command> ...
+    <command>SELECT</command>.  It names the data the query is computed from
+    before the expressions computed from it.  That is convenient when a query
+    is composed interactively, since a client can then complete the column
+    names of the select list, which it has no way to do while the select list
+    comes first.
+   </para>
+  </refsect2>
+
   <refsect2 id="sql-table">
    <title><literal>TABLE</literal> Command</title>
 
@@ -2054,6 +2100,21 @@ SELECT 2+2;
     Some other <acronym>SQL</acronym> databases cannot do this except
     by introducing a dummy one-row table from which to do the
     <command>SELECT</command>.
+   </para>
+  </refsect2>
+
+  <refsect2>
+   <title>Writing the Select List Last</title>
+
+   <para>
+    Writing the select list after the other clauses, or leaving the
+    <literal>SELECT</literal> clause out altogether, is a
+    <productname>PostgreSQL</productname> extension; the SQL standard
+    requires a query specification to begin with <literal>SELECT</literal>.
+    Some other database systems accept a similar extension.  A query written
+    this way is stored and displayed in the standard form, for example when a
+    view definition is shown by <function>pg_get_viewdef</function>.
+    (See <xref linkend="sql-select-last"/> above.)
    </para>
   </refsect2>
 
