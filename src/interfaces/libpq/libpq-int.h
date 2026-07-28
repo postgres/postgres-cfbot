@@ -448,6 +448,8 @@ struct pg_conn
 	char	   *scram_client_key;	/* base64-encoded SCRAM client key */
 	char	   *scram_server_key;	/* base64-encoded SCRAM server key */
 	char	   *sslkeylogfile;	/* where should the client write ssl keylogs */
+	char	   *supported_compressions; /* supported compressions to send to
+										 * the server */
 
 	bool		cancelRequest;	/* true if this connection is used to send a
 								 * cancel request, instead of being a normal

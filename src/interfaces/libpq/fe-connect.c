@@ -140,6 +140,7 @@ static int	ldapServiceLookup(const char *purl, PQconninfoOption *options,
 #else
 #define DefaultGSSMode "disable"
 #endif
+#define DefaultSupportedCompressions	"auto"
 
 /* ----------
  * Definition of the conninfo parameters and their fallback resources.
@@ -428,6 +429,10 @@ static const internalPQconninfoOption PQconninfoOptions[] = {
 	{"sslkeylogfile", NULL, NULL, NULL,
 		"SSL-Key-Log-File", "D", 64,
 	offsetof(struct pg_conn, sslkeylogfile)},
+
+	{"supported_compressions", NULL, DefaultSupportedCompressions, NULL,
+		"Supported-Compressions", "D", 64,
+	offsetof(struct pg_conn, supported_compressions)},
 
 	/* Terminating entry --- MUST BE LAST */
 	{NULL, NULL, NULL, NULL,
@@ -2230,6 +2235,36 @@ pqConnectOptions2(PGconn *conn)
 		if (!conn->client_encoding_initial)
 			goto oom_error;
 	}
+
+	/*
+	 * Resolve supported compressions
+	 */
+	if (conn->supported_compressions && strcmp(conn->supported_compressions, "auto") == 0)
+	{
+		PQExpBufferData buf;
+
+		free(conn->supported_compressions);
+		initPQExpBuffer(&buf);
+
+#ifdef USE_LZ4
+		appendPQExpBuffer(&buf, "lz4");
+#endif
+
+#ifdef USE_ZSTD
+		if (buf.len > 0)
+			appendPQExpBufferChar(&buf, ',');
+		appendPQExpBuffer(&buf, "zstd");
+#endif
+
+		if (PQExpBufferDataBroken(buf))
+			goto oom_error;
+		conn->supported_compressions = strdup(buf.data);
+		if (!conn->supported_compressions)
+			goto oom_error;
+
+		termPQExpBuffer(&buf);
+	}
+
 
 	/*
 	 * Only if we get this far is it appropriate to try to connect. (We need a
@@ -5193,6 +5228,7 @@ freePGconn(PGconn *conn)
 	free(conn->scram_client_key);
 	free(conn->scram_server_key);
 	free(conn->sslkeylogfile);
+	free(conn->supported_compressions);
 	free(conn->oauth_issuer);
 	free(conn->oauth_issuer_id);
 	free(conn->oauth_discovery_uri);

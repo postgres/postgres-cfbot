@@ -13,6 +13,7 @@
  *-------------------------------------------------------------------------
  */
 #include "postgres_fe.h"
+#include "pqexpbuffer.h"
 
 #include <ctype.h>
 #include <fcntl.h>
@@ -2652,6 +2653,9 @@ build_startup_packet(const PGconn *conn, char *packet,
 
 	if (conn->client_encoding_initial && conn->client_encoding_initial[0])
 		ADD_STARTUP_OPTION("client_encoding", conn->client_encoding_initial);
+
+	if (conn->supported_compressions && conn->supported_compressions[0])
+		ADD_STARTUP_OPTION("_pq_.supported_compressions", conn->supported_compressions);
 
 	/* Add any environment-driven GUC settings needed */
 	for (next_eo = options; next_eo->envName; next_eo++)

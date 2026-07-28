@@ -60,7 +60,7 @@ for my $testname (@tests)
 	$node->command_ok(
 		[
 			'libpq_pipeline', @extraargs, $testname,
-			$node->connstr('postgres') . " max_protocol_version=latest"
+			$node->connstr('postgres') . " max_protocol_version=latest supported_compressions=''"
 		],
 		"libpq_pipeline $testname");
 
@@ -84,7 +84,7 @@ for my $testname (@tests)
 $node->command_ok(
 	[
 		'libpq_pipeline', 'cancel',
-		$node->connstr('postgres') . " max_protocol_version=3.0"
+		$node->connstr('postgres') . " max_protocol_version=3.0 supported_compressions=''"
 	],
 	"libpq_pipeline cancel with protocol 3.0");
 
