@@ -553,6 +553,130 @@ WHERE pos &lt; 3;
    </para>
 
    <para>
+    Row Pattern Common Syntax can be used to perform Row Pattern Recognition
+    in a query. The Row Pattern Common Syntax includes two sub
+    clauses: <literal>DEFINE</literal>
+    and <literal>PATTERN</literal>. <literal>DEFINE</literal> defines
+    row pattern variables along with an expression. The expression must be a
+    logical expression, which means it must
+    return <literal>TRUE</literal>, <literal>FALSE</literal>
+    or <literal>NULL</literal>. The expression may comprise column references
+    and functions. Window functions, aggregate functions and subqueries are
+    not allowed. An example of <literal>DEFINE</literal> is as follows.
+
+<programlisting>
+DEFINE
+ LOWPRICE AS price &lt;= 100,
+ UP AS price &gt; PREV(price),
+ DOWN AS price &lt; PREV(price)
+</programlisting>
+
+    Note that <function>PREV</function> returns the <literal>price</literal>
+    column in the previous row if it's called in a context of row pattern
+    recognition. Thus in the second line the row pattern variable "UP"
+    is <literal>TRUE</literal> when the price column in the current row is
+    greater than the price column in the previous row. Likewise, "DOWN"
+    is <literal>TRUE</literal> when the
+    <literal>price</literal> column in the current row is lower than
+    the <literal>price</literal> column in the previous row.
+   </para>
+   <para>
+    Once <literal>DEFINE</literal> exists, <literal>PATTERN</literal> can be
+    used. <literal>PATTERN</literal> defines a sequence of rows that satisfies
+    conditions defined in the <literal>DEFINE</literal> clause.  For example
+    the following <literal>PATTERN</literal> defines a sequence of rows starting
+    with a row satisfying "LOWPRICE", then one or more rows satisfying
+    "UP" and finally one or more rows satisfying "DOWN". Pattern variables can
+    be followed by quantifiers: "+" means one or more matches, "*" means zero
+    or more matches, "?" means zero or one match, "{n}" (n &gt; 0) means exactly
+    n matches, "{n,}" (n &gt;= 0) means at least n matches, "{,m}" (m &gt; 0) means
+    at most m matches, and "{n,m}" (0 &lt;= n &lt;= m, 0 &lt; m) means between n and m
+    matches.  Patterns can be grouped using parentheses and combined using
+    alternation (the vertical bar "|" for OR). For example, "(UP DOWN)+"
+    matches one or more repetitions of UP followed by DOWN.  If a sequence of
+    rows which satisfies the PATTERN is found, in the starting row all columns
+    or functions are shown in the target list. Note that aggregations only
+    look into the matched rows, rather than the whole frame. On the second or
+    subsequent rows all window functions are shown as NULL. Aggregates on
+    non-starting rows return their initial value: for example,
+    <function>count()</function> returns 0 and <function>sum()</function>
+    returns NULL. For rows that do not match the PATTERN, window functions
+    are likewise shown as NULL and aggregates return their initial value.
+    Example of a <literal>SELECT</literal> using
+    the <literal>DEFINE</literal> and <literal>PATTERN</literal> clause is as
+    follows.
+
+<programlisting>
+SELECT company, tdate, price,
+ first_value(price) OVER w,
+ max(price) OVER w,
+ count(price) OVER w
+FROM stock
+ WINDOW w AS (
+ PARTITION BY company
+ ORDER BY tdate
+ ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING
+ AFTER MATCH SKIP PAST LAST ROW
+ INITIAL
+ PATTERN (LOWPRICE UP+ DOWN+)
+ DEFINE
+  LOWPRICE AS price &lt;= 100,
+  UP AS price &gt; PREV(price),
+  DOWN AS price &lt; PREV(price)
+);
+</programlisting>
+<screen>
+ company  |   tdate    | price | first_value | max | count 
+----------+------------+-------+-------------+-----+-------
+ company1 | 2023-07-01 |   100 |         100 | 200 |     4
+ company1 | 2023-07-02 |   200 |             |     |     0
+ company1 | 2023-07-03 |   150 |             |     |     0
+ company1 | 2023-07-04 |   140 |             |     |     0
+ company1 | 2023-07-05 |   150 |             |     |     0
+ company1 | 2023-07-06 |    90 |          90 | 130 |     4
+ company1 | 2023-07-07 |   110 |             |     |     0
+ company1 | 2023-07-08 |   130 |             |     |     0
+ company1 | 2023-07-09 |   120 |             |     |     0
+ company1 | 2023-07-10 |   130 |             |     |     0
+(10 rows)
+</screen>
+   </para>
+
+   <para>
+    Row Pattern Recognition internally uses a nondeterministic finite
+    automaton (NFA) to match patterns. For patterns with unbounded
+    quantifiers (e.g., <literal>A+</literal> or <literal>(A B)+</literal>),
+    the NFA may need to track many active matching contexts simultaneously,
+    which could potentially lead to O(n<superscript>2</superscript>)
+    complexity as the number of rows increases.
+   </para>
+
+   <para>
+    Before execution, <productname>PostgreSQL</productname> automatically
+    optimizes patterns to simplify their structure. This includes flattening
+    nested sequences and alternations, merging consecutive identical variables
+    (e.g., <literal>A{2,3} A{1,2}</literal> becomes <literal>A{3,5}</literal>),
+    removing duplicate alternatives
+    (e.g., <literal>(A | B | A)</literal> becomes <literal>(A | B)</literal>),
+    and simplifying nested quantifiers
+    (e.g., <literal>(A*)*</literal> becomes <literal>A*</literal>).
+    These optimizations reduce pattern complexity and also decrease
+    nesting depth, making the 253-level depth limit rarely encountered.
+    They are applied transparently and can be observed
+    in <command>EXPLAIN</command> output.
+   </para>
+
+   <para>
+    To mitigate the O(n<superscript>2</superscript>) complexity described
+    above, <productname>PostgreSQL</productname> also employs
+    a context absorption optimization. When a pattern starts with a greedy
+    unbounded element, newer matching contexts cannot produce longer matches
+    than older contexts. By detecting and eliminating these redundant
+    contexts, the matching complexity is reduced from
+    O(n<superscript>2</superscript>) to O(n) for many common patterns.
+   </para>
+
+   <para>
     When a query involves multiple window functions, it is possible to write
     out each one with a separate <literal>OVER</literal> clause, but this is
     duplicative and error-prone if the same windowing behavior is wanted
