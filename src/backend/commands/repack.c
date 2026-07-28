@@ -204,6 +204,7 @@ static void rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHea
 											   Oid identIdx,
 											   TransactionId frozenXid,
 											   MultiXactId cutoffMulti);
+static List *filter_indexes_to_rebuild(Relation OldHeap);
 static List *build_new_indexes(Relation NewHeap, Relation OldHeap, List *OldIndexes);
 static void copy_index_constraints(Relation old_index, Oid new_index_id,
 								   Oid new_heap_id);
@@ -3205,7 +3206,7 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	List	   *ind_oids_new;
 	Oid			old_table_oid = RelationGetRelid(OldHeap);
 	Oid			new_table_oid = RelationGetRelid(NewHeap);
-	List	   *ind_oids_old = RelationGetIndexList(OldHeap);
+	List	   *ind_oids_old = filter_indexes_to_rebuild(OldHeap);
 	ListCell   *lc,
 			   *lc2;
 	char		relpersistence;
@@ -3401,6 +3402,35 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 					 false,		/* reindex */
 					 frozenXid, cutoffMulti,
 					 relpersistence);
+}
+
+/*
+ * Return the indexes to copy over to the new heap, that is, all of them except
+ * the ones that are neither valid nor ready for inserts.  See the matching
+ * comment in reindex_relation().
+ */
+static List *
+filter_indexes_to_rebuild(Relation OldHeap)
+{
+	List	   *result = NIL;
+
+	foreach_oid(indexoid, RelationGetIndexList(OldHeap))
+	{
+		if (!get_index_isvalid(indexoid) && !get_index_isready(indexoid))
+		{
+			ereport(WARNING,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("skipping invalid index \"%s.%s\"",
+							get_namespace_name(get_rel_namespace(indexoid)),
+							get_rel_name(indexoid)),
+					 errhint("Use DROP INDEX or REINDEX INDEX.")));
+			continue;
+		}
+
+		result = lappend_oid(result, indexoid);
+	}
+
+	return result;
 }
 
 /*
