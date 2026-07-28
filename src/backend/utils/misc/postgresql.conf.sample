@@ -826,6 +826,13 @@
 #createrole_self_grant = ''             # set and/or inherit
 #event_triggers = on
 
+# - Protocol Compression -
+#protocol_backend_compression = 'none';                    # none, zstd or lz4
+#protocol_backend_compression_allowed_algorithms = 'none'; # command-separated list of algorithms
+#protocol_backend_compression_threshold = 50;
+#protocol_backend_compression_number_messages = 0;
+#protocol_backend_compression_transaction_frame = false;
+
 # - Locale and Formatting -
 
 #datestyle = 'iso, mdy'
