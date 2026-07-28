@@ -1,0 +1,47 @@
+-- Tests for how a heap rewrite treats an invalid index
+CREATE EXTENSION injection_points;
+SELECT injection_points_set_local();
+ injection_points_set_local 
+----------------------------
+ 
+(1 row)
+
+-- A CREATE INDEX CONCURRENTLY that fails after the index became ready for
+-- inserts leaves it invalid, but maintained by DML, so a rewrite has to
+-- rebuild it.
+SELECT injection_points_attach('define-index-before-set-valid', 'error');
+ injection_points_attach 
+-------------------------
+ 
+(1 row)
+
+CREATE TABLE index_inj_tbl (i int);
+INSERT INTO index_inj_tbl VALUES (1), (2);
+CREATE INDEX CONCURRENTLY index_inj_idx ON index_inj_tbl (i);
+ERROR:  error triggered for injection point define-index-before-set-valid
+SELECT injection_points_detach('define-index-before-set-valid');
+ injection_points_detach 
+-------------------------
+ 
+(1 row)
+
+SELECT indisvalid, indisready FROM pg_index
+WHERE indexrelid = 'index_inj_idx'::regclass;
+ indisvalid | indisready 
+------------+------------
+ f          | t
+(1 row)
+
+SELECT relfilenode AS inj_idx_node FROM pg_class
+WHERE oid = 'index_inj_idx'::regclass \gset
+VACUUM FULL index_inj_tbl;
+SELECT relfilenode = :inj_idx_node FROM pg_class
+WHERE oid = 'index_inj_idx'::regclass;
+ ?column? 
+----------
+ f
+(1 row)
+
+-- Cleanup
+DROP TABLE index_inj_tbl;
+DROP EXTENSION injection_points;
