@@ -60,6 +60,15 @@
  */
 #define READ_BUF_SIZE (2 * PIPE_CHUNK_SIZE)
 
+/*
+ * Capacity we ask the kernel for on the syslogger pipe.  Writers block once
+ * the pipe is full, so its capacity is what lets them run ahead of the
+ * syslogger across a burst.  The request is subject to a system limit and can
+ * fail, hence the retry with smaller values, stopping before we would shrink
+ * the pipe below the capacity the kernel already gave it.
+ */
+#define SYSLOGGER_PIPE_SIZE			(1024 * 1024)
+
 /* Log rotation signal file path, relative to $PGDATA */
 #define LOGROTATE_SIGNAL_FILE	"logrotate"
 
@@ -643,6 +652,28 @@ SysLogger_Start(int child_slot)
 			ereport(FATAL,
 					(errcode_for_socket_access(),
 					 errmsg("could not create pipe for syslog: %m")));
+
+#if defined(F_GETPIPE_SZ) && defined(F_SETPIPE_SZ)
+		/*
+		 * Best effort only.  Increase the pipe capacity where allowed, but
+		 * never reduce the capacity selected by the kernel.
+		 */
+		{
+			int			current_size;
+
+			current_size = fcntl(syslogPipe[0], F_GETPIPE_SZ);
+			if (current_size > 0)
+			{
+				for (int size = SYSLOGGER_PIPE_SIZE;
+					 size > current_size;
+					 size /= 2)
+				{
+					if (fcntl(syslogPipe[0], F_SETPIPE_SZ, size) >= 0)
+						break;
+				}
+			}
+		}
+#endif
 	}
 #else
 	if (!syslogPipe[0])
