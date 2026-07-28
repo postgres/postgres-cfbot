@@ -619,6 +619,8 @@ int			huge_pages_status = HUGE_PAGES_UNKNOWN;
 static char *syslog_ident_str;
 static double phony_random_seed;
 static char *client_encoding_string;
+static char *protocol_backend_compression;
+static char *protocol_backend_compression_allowed_algorithms_string;
 static char *datestyle_string;
 static char *server_encoding_string;
 static char *server_version_string;
