@@ -17,6 +17,7 @@ backend_sources += files(
   'parse_oper.c',
   'parse_param.c',
   'parse_relation.c',
+  'parse_rpr.c',
   'parse_target.c',
   'parse_type.c',
   'parse_utilcmd.c',

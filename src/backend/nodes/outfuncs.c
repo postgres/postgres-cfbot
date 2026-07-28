@@ -23,6 +23,7 @@
 #include "nodes/bitmapset.h"
 #include "nodes/nodes.h"
 #include "nodes/pg_list.h"
+#include "nodes/plannodes.h"
 #include "utils/datum.h"
 
 /* State flag that determines how nodeToStringInternal() should treat location fields */
@@ -725,6 +726,52 @@ _outA_Const(StringInfo str, const A_Const *node)
 		outNode(str, &node->val);
 	}
 	WRITE_LOCATION_FIELD(location);
+}
+
+static void
+_outRPRPattern(StringInfo str, const RPRPattern *node)
+{
+	WRITE_NODE_TYPE("RPRPATTERN");
+
+	WRITE_INT_FIELD(numVars);
+	WRITE_INT_FIELD(maxDepth);
+	WRITE_INT_FIELD(numElements);
+
+	/* Write varNames array as list of strings */
+	appendStringInfoString(str, " :varNames");
+	if (node->numVars > 0 && node->varNames != NULL)
+	{
+		appendStringInfoString(str, " (");
+		for (int i = 0; i < node->numVars; i++)
+		{
+			if (i > 0)
+				appendStringInfoChar(str, ' ');
+			outToken(str, node->varNames[i]);
+		}
+		appendStringInfoChar(str, ')');
+	}
+	else
+		appendStringInfoString(str, " <>");
+
+	/* Write elements array (makeRPRPattern guarantees numElements >= 2) */
+	appendStringInfoString(str, " :elements");
+	Assert(node->numElements > 0 && node->elements != NULL);
+	appendStringInfoChar(str, ' ');
+	for (int i = 0; i < node->numElements; i++)
+	{
+		const RPRPatternElement *elem = &node->elements[i];
+
+		appendStringInfo(str, "(%d %d %u %d %d %d %d)",
+						 (int) elem->varId,
+						 (int) elem->depth,
+						 (unsigned) elem->flags,
+						 (int) elem->min,
+						 (int) elem->max,
+						 (int) elem->next,
+						 (int) elem->jump);
+	}
+
+	WRITE_BOOL_FIELD(isAbsorbable);
 }
 
 
