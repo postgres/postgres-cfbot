@@ -129,6 +129,9 @@ llvm_compile_expr(ExprState *state)
 	LLVMValueRef v_aggvalues;
 	LLVMValueRef v_aggnulls;
 
+	/* RPR navigation: when true, EEOP_OUTER_VAR reloads from econtext */
+	bool		has_rpr_nav;
+
 	instr_time	starttime;
 	instr_time	deform_starttime;
 	instr_time	endtime;
@@ -298,6 +301,36 @@ llvm_compile_expr(ExprState *state)
 								   FIELDNO_EXPRCONTEXT_AGGNULLS,
 								   "v.econtext.aggnulls");
 
+	/*
+	 * RPR navigation opcodes (PREV/NEXT) swap ecxt_outertuple to a different
+	 * row mid-expression.  The JIT code loads v_outervalues and v_outernulls
+	 * once in the entry block and reuses them for all EEOP_OUTER_VAR steps.
+	 * After a slot swap, these cached pointers become stale because the new
+	 * slot has its own tts_values/tts_isnull arrays.
+	 *
+	 * When RPR navigation opcodes are present, EEOP_OUTER_VAR reloads the
+	 * slot pointer from econtext->ecxt_outertuple on every access instead of
+	 * using the cached entry-block values.  This avoids the SSA/PHI
+	 * complexity while keeping the rest of the expression JIT-compiled.
+	 * Expressions without RPR navigation use the cached values as before.
+	 */
+	has_rpr_nav = false;
+	if (parent && IsA(parent, WindowAggState) &&
+		((WindowAgg *) parent->plan)->rpPattern != NULL)
+	{
+		for (int opno = 0; opno < state->steps_len; opno++)
+		{
+			ExprEvalOp	opcode = ExecEvalStepOp(state, &state->steps[opno]);
+
+			if (opcode == EEOP_RPR_NAV_SET ||
+				opcode == EEOP_RPR_NAV_RESTORE)
+			{
+				has_rpr_nav = true;
+				break;
+			}
+		}
+	}
+
 	/* allocate blocks for each op upfront, so we can do jumps easily */
 	opblocks = palloc_array(LLVMBasicBlockRef, state->steps_len);
 	for (int opno = 0; opno < state->steps_len; opno++)
@@ -460,8 +493,37 @@ llvm_compile_expr(ExprState *state)
 					}
 					else if (opcode == EEOP_OUTER_VAR)
 					{
-						v_values = v_outervalues;
-						v_nulls = v_outernulls;
+						if (has_rpr_nav)
+						{
+							/*
+							 * RPR navigation swaps ecxt_outertuple
+							 * mid-expression.  Reload slot pointer from
+							 * econtext on every access so we read from the
+							 * current (possibly swapped) slot.
+							 */
+							LLVMValueRef v_tmpslot;
+
+							v_tmpslot = l_load_struct_gep(b,
+														  StructExprContext,
+														  v_econtext,
+														  FIELDNO_EXPRCONTEXT_OUTERTUPLE,
+														  "v_outerslot_reload");
+							v_values = l_load_struct_gep(b,
+														 StructTupleTableSlot,
+														 v_tmpslot,
+														 FIELDNO_TUPLETABLESLOT_VALUES,
+														 "v_outervalues_reload");
+							v_nulls = l_load_struct_gep(b,
+														StructTupleTableSlot,
+														v_tmpslot,
+														FIELDNO_TUPLETABLESLOT_ISNULL,
+														"v_outernulls_reload");
+						}
+						else
+						{
+							v_values = v_outervalues;
+							v_nulls = v_outernulls;
+						}
 					}
 					else if (opcode == EEOP_SCAN_VAR)
 					{
@@ -2430,6 +2492,18 @@ llvm_compile_expr(ExprState *state)
 
 			case EEOP_SUBPLAN:
 				build_EvalXFunc(b, mod, "ExecEvalSubPlan",
+								v_state, op, v_econtext);
+				LLVMBuildBr(b, opblocks[opno + 1]);
+				break;
+
+			case EEOP_RPR_NAV_SET:
+				build_EvalXFunc(b, mod, "ExecEvalRPRNavSet",
+								v_state, op, v_econtext);
+				LLVMBuildBr(b, opblocks[opno + 1]);
+				break;
+
+			case EEOP_RPR_NAV_RESTORE:
+				build_EvalXFunc(b, mod, "ExecEvalRPRNavRestore",
 								v_state, op, v_econtext);
 				LLVMBuildBr(b, opblocks[opno + 1]);
 				break;
