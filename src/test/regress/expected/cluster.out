@@ -829,6 +829,66 @@ ORDER BY o.relname;
  clstr_3
 (2 rows)
 
+-- An index that a failed CREATE INDEX CONCURRENTLY left neither valid nor
+-- ready is skipped by a rewrite; rebuilding this one would fail on the row
+-- its expression rejects.
+CREATE TABLE clstr_invalid (i int PRIMARY KEY, j int);
+INSERT INTO clstr_invalid VALUES (1, 0), (2, 1);
+CREATE INDEX CONCURRENTLY clstr_invalid_expr ON clstr_invalid ((1/j));
+ERROR:  division by zero
+SELECT indisvalid, indisready FROM pg_index
+WHERE indexrelid = 'clstr_invalid_expr'::regclass;
+ indisvalid | indisready 
+------------+------------
+ f          | f
+(1 row)
+
+SELECT relfilenode AS invalid_expr_node FROM pg_class
+WHERE oid = 'clstr_invalid_expr'::regclass \gset
+VACUUM FULL clstr_invalid;
+WARNING:  skipping invalid index "public.clstr_invalid_expr"
+HINT:  Use DROP INDEX or REINDEX INDEX.
+CLUSTER clstr_invalid USING clstr_invalid_pkey;
+WARNING:  skipping invalid index "public.clstr_invalid_expr"
+HINT:  Use DROP INDEX or REINDEX INDEX.
+REPACK clstr_invalid;
+WARNING:  skipping invalid index "public.clstr_invalid_expr"
+HINT:  Use DROP INDEX or REINDEX INDEX.
+ALTER TABLE clstr_invalid ALTER COLUMN i TYPE bigint;
+WARNING:  skipping invalid index "public.clstr_invalid_expr"
+HINT:  Use DROP INDEX or REINDEX INDEX.
+-- the index storage is untouched, and the rows are still there
+SELECT relfilenode = :invalid_expr_node FROM pg_class
+WHERE oid = 'clstr_invalid_expr'::regclass;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT * FROM clstr_invalid ORDER BY i;
+ i | j 
+---+---
+ 1 | 0
+ 2 | 1
+(2 rows)
+
+-- changing persistence has to rebuild the index, which fails here
+ALTER TABLE clstr_invalid SET UNLOGGED;
+ERROR:  division by zero
+-- REINDEX INDEX still rebuilds it, and fails on the same row
+REINDEX INDEX clstr_invalid_expr;
+ERROR:  division by zero
+-- once that row is gone it makes the index valid again
+DELETE FROM clstr_invalid WHERE j = 0;
+REINDEX INDEX clstr_invalid_expr;
+SELECT indisvalid, indisready FROM pg_index
+WHERE indexrelid = 'clstr_invalid_expr'::regclass;
+ indisvalid | indisready 
+------------+------------
+ t          | t
+(1 row)
+
+DROP TABLE clstr_invalid;
 -- clean up
 DROP TABLE clustertest;
 DROP TABLE clstr_1;
