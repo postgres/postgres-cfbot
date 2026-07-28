@@ -34,6 +34,7 @@ tests += {
     'sql': [
       'injection_points',
       'hashagg',
+      'index_invalid',
       'reindex_conc',
       'vacuum',
     ],
