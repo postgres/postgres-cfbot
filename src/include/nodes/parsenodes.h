@@ -3646,6 +3646,10 @@ typedef struct IndexStmt
 	SubTransactionId oldCreateSubid;	/* rd_createSubid of oldNumber */
 	SubTransactionId oldFirstRelfilelocatorSubid;	/* rd_firstRelfilelocatorSubid
 													 * of oldNumber */
+	List	   *oldPartIndexRelids; /* table OIDs of partitions owning old
+									 * indexes */
+	List	   *oldPartIndexNames;	/* corresponding old index names to
+									 * preserve */
 	bool		unique;			/* is index unique? */
 	bool		nulls_not_distinct; /* null treatment for UNIQUE constraints */
 	bool		primary;		/* is index a primary key? */

@@ -706,6 +706,8 @@ static void ATPostAlterTypeParse(Oid oldId, Oid oldRelId, Oid refRelId, Oid owne
 static void RebuildConstraintComment(AlteredTableInfo *tab, AlterTablePass pass,
 									 Oid objid, Relation rel, List *domname,
 									 const char *conname);
+static void RememberPartitionIndexNamesForRebuilding(Oid indoid,
+													 IndexStmt *stmt);
 static void TryReuseIndex(Oid oldId, IndexStmt *stmt);
 static void TryReuseForeignKey(Oid oldId, Constraint *con);
 static ObjectAddress ATExecAlterColumnGenericOptions(Relation rel, const char *colName,
@@ -16433,6 +16435,7 @@ ATPostAlterTypeParse(Oid oldId, Oid oldRelId, Oid refRelId, Oid ownerId,
 			IndexStmt  *stmt = (IndexStmt *) stm;
 			AlterTableCmd *newcmd;
 
+			RememberPartitionIndexNamesForRebuilding(oldId, stmt);
 			if (!rewrite)
 				TryReuseIndex(oldId, stmt);
 			stmt->reset_default_tblspc = true;
@@ -16462,6 +16465,7 @@ ATPostAlterTypeParse(Oid oldId, Oid oldRelId, Oid refRelId, Oid ownerId,
 					indstmt = castNode(IndexStmt, cmd->def);
 					indoid = get_constraint_index(oldId);
 
+					RememberPartitionIndexNamesForRebuilding(indoid, indstmt);
 					if (!rewrite)
 						TryReuseIndex(indoid, indstmt);
 					/* keep any comment on the index */
@@ -16612,6 +16616,40 @@ RebuildConstraintComment(AlteredTableInfo *tab, AlterTablePass pass, Oid objid,
 	newcmd->subtype = AT_ReAddComment;
 	newcmd->def = (Node *) cmd;
 	tab->subcmds[pass] = lappend(tab->subcmds[pass], newcmd);
+}
+
+/*
+ * Save the names of child indexes before dropping a partitioned index.
+ * DefineIndex() will use them when it recursively rebuilds the hierarchy.
+ */
+static void
+RememberPartitionIndexNamesForRebuilding(Oid indoid, IndexStmt *stmt)
+{
+	List	   *indexOids;
+
+	if (get_rel_relkind(indoid) != RELKIND_PARTITIONED_INDEX)
+		return;
+
+	/*
+	 * ALTER TABLE has already locked all the partition tables, so the index
+	 * hierarchy cannot change underneath us.
+	 */
+	indexOids = find_all_inheritors(indoid, NoLock, NULL);
+	foreach_oid(indexOid, indexOids)
+	{
+		Oid			relid;
+
+		if (indexOid == indoid)
+			continue;
+
+		relid = IndexGetRelation(indexOid, false);
+		stmt->oldPartIndexRelids =
+			lappend_oid(stmt->oldPartIndexRelids, relid);
+		stmt->oldPartIndexNames =
+			lappend(stmt->oldPartIndexNames,
+					makeString(get_rel_name(indexOid)));
+	}
+	list_free(indexOids);
 }
 
 /*

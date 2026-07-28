@@ -109,6 +109,8 @@ static List *ChooseIndexColumnNames(Relation rel, const List *indexElems);
 static char *ChooseIndexExpressionName(Relation rel, Node *indexExpr);
 static bool ChooseIndexExpressionName_walker(Node *node,
 											 CIEN_context *context);
+static const char *GetRebuildPartitionIndexName(const IndexStmt *stmt,
+												Oid relid);
 static void ReindexIndex(const ReindexStmt *stmt, const ReindexParams *params,
 						 bool isTopLevel);
 static void RangeVarCallbackForReindexIndex(const RangeVar *relation,
@@ -1533,6 +1535,7 @@ DefineIndex(ParseState *pstate,
 				{
 					IndexStmt  *childStmt;
 					ObjectAddress childAddr;
+					const char *childIndexName;
 
 					/*
 					 * Build an IndexStmt describing the desired child index
@@ -1541,10 +1544,16 @@ DefineIndex(ParseState *pstate,
 					 * a search-path-independent representation, which the
 					 * original IndexStmt might not be.
 					 */
+					childIndexName =
+						GetRebuildPartitionIndexName(stmt, childRelid);
 					childStmt = generateClonedIndexStmt(NULL,
 														parentIndex,
 														attmap,
 														NULL);
+					if (childIndexName != NULL)
+						childStmt->idxname = pstrdup(childIndexName);
+					childStmt->oldPartIndexRelids = stmt->oldPartIndexRelids;
+					childStmt->oldPartIndexNames = stmt->oldPartIndexNames;
 
 					/*
 					 * Recurse as the starting user ID.  Callee will use that
@@ -2993,6 +3002,25 @@ ChooseIndexExpressionName_walker(Node *node,
 
 	return expression_tree_walker(node, ChooseIndexExpressionName_walker,
 								  context);
+}
+
+/*
+ * Find the old name of a partition index that is being rebuilt.
+ */
+static const char *
+GetRebuildPartitionIndexName(const IndexStmt *stmt, Oid relid)
+{
+	ListCell   *relid_item;
+	ListCell   *name_item;
+
+	forboth(relid_item, stmt->oldPartIndexRelids,
+			name_item, stmt->oldPartIndexNames)
+	{
+		if (lfirst_oid(relid_item) == relid)
+			return strVal(lfirst(name_item));
+	}
+
+	return NULL;
 }
 
 /*
