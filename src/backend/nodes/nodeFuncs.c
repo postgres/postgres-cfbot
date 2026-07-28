@@ -69,6 +69,9 @@ exprType(const Node *expr)
 		case T_MergeSupportFunc:
 			type = ((const MergeSupportFunc *) expr)->msftype;
 			break;
+		case T_RPRNavExpr:
+			type = ((const RPRNavExpr *) expr)->resulttype;
+			break;
 		case T_SubscriptingRef:
 			type = ((const SubscriptingRef *) expr)->refrestype;
 			break;
@@ -389,6 +392,9 @@ exprTypmod(const Node *expr)
 			return ((const ArrayCoerceExpr *) expr)->resulttypmod;
 		case T_CollateExpr:
 			return exprTypmod((Node *) ((const CollateExpr *) expr)->arg);
+		case T_RPRNavExpr:
+			/* result has the same type/typmod as the argument expression */
+			return exprTypmod((Node *) ((const RPRNavExpr *) expr)->arg);
 		case T_CaseExpr:
 			{
 				/*
@@ -853,6 +859,9 @@ exprCollation(const Node *expr)
 		case T_MergeSupportFunc:
 			coll = ((const MergeSupportFunc *) expr)->msfcollid;
 			break;
+		case T_RPRNavExpr:
+			coll = ((const RPRNavExpr *) expr)->resultcollid;
+			break;
 		case T_SubscriptingRef:
 			coll = ((const SubscriptingRef *) expr)->refcollid;
 			break;
@@ -1162,6 +1171,9 @@ exprSetCollation(Node *expr, Oid collation)
 		case T_MergeSupportFunc:
 			((MergeSupportFunc *) expr)->msfcollid = collation;
 			break;
+		case T_RPRNavExpr:
+			((RPRNavExpr *) expr)->resultcollid = collation;
+			break;
 		case T_SubscriptingRef:
 			((SubscriptingRef *) expr)->refcollid = collation;
 			break;
@@ -1436,6 +1448,12 @@ exprLocation(const Node *expr)
 			break;
 		case T_MergeSupportFunc:
 			loc = ((const MergeSupportFunc *) expr)->location;
+			break;
+		case T_RPRNavExpr:
+			loc = ((const RPRNavExpr *) expr)->location;
+			break;
+		case T_RPRPatternNode:
+			loc = ((const RPRPatternNode *) expr)->location;
 			break;
 		case T_SubscriptingRef:
 			/* just use container argument's location */
@@ -2199,6 +2217,18 @@ expression_tree_walker_impl(Node *node,
 					return true;
 			}
 			break;
+		case T_RPRNavExpr:
+			{
+				RPRNavExpr *expr = (RPRNavExpr *) node;
+
+				if (WALK(expr->arg))
+					return true;
+				if (expr->offset_arg && WALK(expr->offset_arg))
+					return true;
+				if (expr->compound_offset_arg && WALK(expr->compound_offset_arg))
+					return true;
+			}
+			break;
 		case T_SubscriptingRef:
 			{
 				SubscriptingRef *sbsref = (SubscriptingRef *) node;
@@ -2431,6 +2461,8 @@ expression_tree_walker_impl(Node *node,
 				if (WALK(wc->startOffset))
 					return true;
 				if (WALK(wc->endOffset))
+					return true;
+				if (WALK(wc->defineClause))
 					return true;
 			}
 			break;
@@ -2826,6 +2858,8 @@ query_tree_walker_impl(Query *query,
 				return true;
 			if (WALK(wc->endOffset))
 				return true;
+			if (WALK(wc->defineClause))
+				return true;
 		}
 	}
 
@@ -3145,6 +3179,18 @@ expression_tree_mutator_impl(Node *node,
 
 				FLATCOPY(newnode, wfuncrc, WindowFuncRunCondition);
 				MUTATE(newnode->arg, wfuncrc->arg, Expr *);
+				return (Node *) newnode;
+			}
+			break;
+		case T_RPRNavExpr:
+			{
+				RPRNavExpr *nav = (RPRNavExpr *) node;
+				RPRNavExpr *newnode;
+
+				FLATCOPY(newnode, nav, RPRNavExpr);
+				MUTATE(newnode->arg, nav->arg, Expr *);
+				MUTATE(newnode->offset_arg, nav->offset_arg, Expr *);
+				MUTATE(newnode->compound_offset_arg, nav->compound_offset_arg, Expr *);
 				return (Node *) newnode;
 			}
 			break;
@@ -3570,6 +3616,7 @@ expression_tree_mutator_impl(Node *node,
 				MUTATE(newnode->orderClause, wc->orderClause, List *);
 				MUTATE(newnode->startOffset, wc->startOffset, Node *);
 				MUTATE(newnode->endOffset, wc->endOffset, Node *);
+				MUTATE(newnode->defineClause, wc->defineClause, List *);
 				return (Node *) newnode;
 			}
 			break;
@@ -3943,6 +3990,7 @@ query_tree_mutator_impl(Query *query,
 			FLATCOPY(newnode, wc, WindowClause);
 			MUTATE(newnode->startOffset, wc->startOffset, Node *);
 			MUTATE(newnode->endOffset, wc->endOffset, Node *);
+			MUTATE(newnode->defineClause, wc->defineClause, List *);
 
 			resultlist = lappend(resultlist, (Node *) newnode);
 		}
@@ -4599,6 +4647,8 @@ raw_expression_tree_walker_impl(Node *node,
 					return true;
 				if (WALK(wd->endOffset))
 					return true;
+				if (WALK(wd->rpCommonSyntax))
+					return true;
 			}
 			break;
 		case T_RangeSubselect:
@@ -4851,6 +4901,24 @@ raw_expression_tree_walker_impl(Node *node,
 				if (WALK(gp->path_pattern_list))
 					return true;
 				if (WALK(gp->whereClause))
+					return true;
+			}
+			break;
+		case T_RPCommonSyntax:
+			{
+				RPCommonSyntax *rc = (RPCommonSyntax *) node;
+
+				if (WALK(rc->rpPattern))
+					return true;
+				if (WALK(rc->rpDefs))
+					return true;
+			}
+			break;
+		case T_RPRPatternNode:
+			{
+				RPRPatternNode *rp = (RPRPatternNode *) node;
+
+				if (WALK(rp->children))
 					return true;
 			}
 			break;

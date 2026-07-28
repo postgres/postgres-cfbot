@@ -18,6 +18,7 @@
 #include "access/stratnum.h"
 #include "nodes/bitmapset.h"
 #include "nodes/lockoptions.h"
+#include "nodes/parsenodes.h"
 #include "nodes/primnodes.h"
 
 
@@ -1249,6 +1250,84 @@ typedef struct Agg
 } Agg;
 
 /* ----------------
+ *		Row Pattern Recognition compiled pattern types
+ * ----------------
+ */
+
+/* Type definitions for RPR pattern elements */
+typedef uint8 RPRVarId;			/* pattern variable ID */
+typedef uint8 RPRElemFlags;		/* element flags */
+typedef uint8 RPRDepth;			/* group nesting depth */
+typedef int32 RPRQuantity;		/* quantifier min/max */
+typedef int16 RPRElemIdx;		/* element array index */
+
+/*
+ * RPRPatternElement - flat element for NFA pattern matching (16 bytes)
+ *
+ * Layout optimized for alignment (no padding holes):
+ *   varId(1) + depth(1) + flags(1) + reserved(1) + min(4) + max(4) + next(2) + jump(2)
+ */
+typedef struct RPRPatternElement
+{
+	RPRVarId	varId;			/* variable ID, or special value for control */
+	RPRDepth	depth;			/* group nesting depth */
+	RPRElemFlags flags;			/* flags (reluctant, etc.) */
+	uint8		reserved;		/* reserved padding byte */
+	RPRQuantity min;			/* quantifier minimum */
+	RPRQuantity max;			/* quantifier maximum */
+	RPRElemIdx	next;			/* next element index */
+	RPRElemIdx	jump;			/* jump target (for ALT/GROUP) */
+} RPRPatternElement;
+
+/*
+ * RPRPattern - compiled pattern for NFA execution
+ *
+ * Requires custom copy/out/read functions due to elements array.
+ */
+typedef struct RPRPattern
+{
+	/*
+	 * RPRPattern is a plan/exec-only node with arrays that need a
+	 * hand-written copy (custom_copy_equal).  It is never compared with
+	 * equal(): equal() routines are generated only for parse/rewrite-level
+	 * nodes, not for plan nodes, so there is nothing to compare it against
+	 * and equal support is suppressed with no_equal.
+	 */
+	pg_node_attr(custom_copy_equal, custom_read_write, no_equal)
+
+	NodeTag		type;			/* T_RPRPattern */
+	int			numVars;		/* number of pattern variables */
+	char	  **varNames;		/* array of variable names (DEFINE order
+								 * first) */
+	RPRDepth	maxDepth;		/* maximum group nesting depth */
+	int			numElements;	/* number of elements */
+	RPRPatternElement *elements;	/* array of pattern elements */
+
+	/*----------------
+	 * Context absorption optimization.
+	 *
+	 * Absorption is only safe when later matches are guaranteed to be
+	 * suffixes of earlier matches, which requires the pattern to start with
+	 * an unbounded greedy element.  Phase-1 normalization (consecutive
+	 * variable / group / ALT merging and prefix/suffix merging) rewrites the
+	 * pattern toward that form first -- so e.g. A B (A B)+ is merged to
+	 * (A B){2,} and then judged absorbable.
+	 *
+	 * computeAbsorbability() marks the absorbable cases (see isUnboundedStart):
+	 *   - simple unbounded VAR at the start:                    A+ B C
+	 *   - unbounded GROUP with fixed-length children:           (A B)+, (A B{2})+
+	 *   - top-level ALT with independently absorbable branches: A+ | B+
+	 *     (handled in computeAbsorbabilityRecursive)
+	 *
+	 * Not absorbable: an unbounded element not at the start (A B+), a
+	 * reluctant quantifier (A+?), or an ALT inside a group ((A|B)+) -- there
+	 * different start positions yield different match contents, so later
+	 * matches are not suffixes of earlier ones.
+	 */
+	bool		isAbsorbable;	/* true if pattern supports context absorption */
+} RPRPattern;
+
+/* ----------------
  *		window aggregate node
  * ----------------
  */
@@ -1317,6 +1396,44 @@ typedef struct WindowAgg
 
 	/* nulls sort first for in_range tests? */
 	bool		inRangeNullsFirst;
+
+	/* Row Pattern Recognition AFTER MATCH SKIP clause */
+	RPSkipTo	rpSkipTo;		/* Row Pattern Skip To type */
+
+	/* Compiled Row Pattern for NFA execution */
+	struct RPRPattern *rpPattern;
+
+	/* Row Pattern DEFINE clause (list of TargetEntry) */
+	List	   *defineClause;
+
+	/*
+	 * Bitmapset of DEFINE variable indices whose expressions depend on
+	 * match_start (contain FIRST, LAST-with-offset, or compound
+	 * PREV_FIRST/NEXT_FIRST/PREV_LAST/NEXT_LAST with offset).  Variables in
+	 * this set require per-context re-evaluation during NFA processing.
+	 */
+	Bitmapset  *defineMatchStartDependent;
+
+	/*
+	 * Navigation offset status and values for tuplestore mark optimization.
+	 * See RPRNavOffsetKind in nodes/parsenodes.h.
+	 *
+	 * navMaxOffset: maximum backward reach from currentpos (contributed by
+	 * PREV, LAST-with-offset, compound PREV_LAST/NEXT_LAST).  Only valid when
+	 * navMaxOffsetKind == RPR_NAV_OFFSET_FIXED.
+	 *
+	 * navFirstOffset: minimum forward offset from match_start (contributed by
+	 * FIRST, compound PREV_FIRST/NEXT_FIRST).  Can be negative for compound
+	 * PREV_FIRST.  Only valid when navFirstOffsetKind == RPR_NAV_OFFSET_FIXED
+	 * and hasFirstNav == true.
+	 */
+	RPRNavOffsetKind navMaxOffsetKind;
+	int64		navMaxOffset;
+
+	/* true if FIRST-based navigation (FIRST, PREV_FIRST, NEXT_FIRST) is used */
+	bool		hasFirstNav;
+	RPRNavOffsetKind navFirstOffsetKind;
+	int64		navFirstOffset;
 
 	/*
 	 * false for all apart from the WindowAgg that's closest to the root of
