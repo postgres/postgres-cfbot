@@ -5,4 +5,4 @@
 # resulting protocol trace is compared against expected/<test>.trace.
 # ----------
 
-test:
+test: protocol_compression_switch protocol_compression_lz4 protocol_compression_zstd
