@@ -72,6 +72,7 @@ typedef struct SyncRepConfigData
 } SyncRepConfigData;
 
 extern PGDLLIMPORT SyncRepConfigData *SyncRepConfig;
+extern PGDLLIMPORT bool SyncRepWaitOnQueryCancel;
 extern PGDLLIMPORT int post_recovery_sync_level;
 
 /* user-settable parameters for synchronous replication */
