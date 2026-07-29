@@ -1071,6 +1071,16 @@ typedef struct RelOptInfo
 	List	   *cheapest_parameterized_paths;
 
 	/*
+	 * Cache of the interesting Bloom filters this rel could receive from a
+	 * hash join above it. Computed lazily and reused, since both core path
+	 * generation and a CustomScan provider may ask for it, and recomputing it
+	 * is not free. A separate "valid" flag distinguishes "not yet computed"
+	 * from "computed, no filters".
+	 */
+	List	   *bloom_filters pg_node_attr(read_write_ignore);
+	bool		bloom_filters_valid pg_node_attr(read_write_ignore);
+
+	/*
 	 * parameterization information needed for both base rels and join rels
 	 * (see also lateral_vars and lateral_referencers)
 	 */

@@ -9594,20 +9594,20 @@ select * from fkest f1
   join fkest f2 on (f1.x = f2.x and f1.x10 = f2.x10b and f1.x100 = f2.x100)
   join fkest f3 on f1.x = f3.x
   where f1.x100 = 2;
-                     QUERY PLAN                      
------------------------------------------------------
+                           QUERY PLAN                            
+-----------------------------------------------------------------
  Hash Join
-   Hash Cond: ((f1.x = f2.x) AND (f1.x10 = f2.x10b))
-   ->  Seq Scan on fkest f1
-         Filter: (x100 = 2)
+   Hash Cond: (f3.x = f1.x)
+   ->  Seq Scan on fkest f3
+         Bloom Filter 1: keys=(x)
    ->  Hash
+         Bloom Filter 1
          ->  Hash Join
-               Hash Cond: (f3.x = f2.x)
-               ->  Seq Scan on fkest f3
-                     Bloom Filter 1: keys=(x)
+               Hash Cond: ((f2.x = f1.x) AND (f2.x10b = f1.x10))
+               ->  Seq Scan on fkest f2
+                     Filter: (x100 = 2)
                ->  Hash
-                     Bloom Filter 1
-                     ->  Seq Scan on fkest f2
+                     ->  Seq Scan on fkest f1
                            Filter: (x100 = 2)
 (13 rows)
 
@@ -9797,52 +9797,44 @@ select * from j1 natural join j2;
 explain (verbose, costs off)
 select * from j1
 inner join (select distinct id from j3) j3 on j1.id = j3.id;
-                     QUERY PLAN                      
------------------------------------------------------
- Hash Join
+               QUERY PLAN                
+-----------------------------------------
+ Nested Loop
    Output: j1.id, j3.id
    Inner Unique: true
-   Hash Cond: (j1.id = j3.id)
+   Join Filter: (j1.id = j3.id)
+   ->  Unique
+         Output: j3.id
+         ->  Sort
+               Output: j3.id
+               Sort Key: j3.id
+               ->  Seq Scan on public.j3
+                     Output: j3.id
    ->  Seq Scan on public.j1
          Output: j1.id
-         Bloom Filter 1: keys=(j1.id) expected=33.3%
-   ->  Hash
-         Output: j3.id
-         Bloom Filter 1
-         ->  Unique
-               Output: j3.id
-               ->  Sort
-                     Output: j3.id
-                     Sort Key: j3.id
-                     ->  Seq Scan on public.j3
-                           Output: j3.id
-(17 rows)
+(13 rows)
 
 -- ensure group by clause allows the inner to become unique
 explain (verbose, costs off)
 select * from j1
 inner join (select id from j3 group by id) j3 on j1.id = j3.id;
-                     QUERY PLAN                      
------------------------------------------------------
- Hash Join
+               QUERY PLAN                
+-----------------------------------------
+ Nested Loop
    Output: j1.id, j3.id
    Inner Unique: true
-   Hash Cond: (j1.id = j3.id)
+   Join Filter: (j1.id = j3.id)
+   ->  Group
+         Output: j3.id
+         Group Key: j3.id
+         ->  Sort
+               Output: j3.id
+               Sort Key: j3.id
+               ->  Seq Scan on public.j3
+                     Output: j3.id
    ->  Seq Scan on public.j1
          Output: j1.id
-         Bloom Filter 1: keys=(j1.id) expected=33.3%
-   ->  Hash
-         Output: j3.id
-         Bloom Filter 1
-         ->  Group
-               Output: j3.id
-               Group Key: j3.id
-               ->  Sort
-                     Output: j3.id
-                     Sort Key: j3.id
-                     ->  Seq Scan on public.j3
-                           Output: j3.id
-(18 rows)
+(14 rows)
 
 drop table j1;
 drop table j2;

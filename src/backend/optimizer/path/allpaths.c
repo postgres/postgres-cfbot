@@ -877,7 +877,7 @@ set_plain_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 		return;
 
 	/* Consider sequential scan */
-	add_path(rel, create_seqscan_path(root, rel, required_outer, 0));
+	add_path(rel, create_seqscan_path(root, rel, required_outer, 0, NIL));
 
 	/* If appropriate, consider parallel sequential scan */
 	if (rel->consider_parallel && required_outer == NULL)
@@ -904,7 +904,7 @@ create_plain_partial_paths(PlannerInfo *root, RelOptInfo *rel)
 		return;
 
 	/* Add an unordered partial path based on a parallel sequential scan. */
-	add_partial_path(rel, create_seqscan_path(root, rel, NULL, parallel_workers));
+	add_partial_path(rel, create_seqscan_path(root, rel, NULL, parallel_workers, NIL));
 }
 
 /*
@@ -1096,9 +1096,10 @@ bloom_build_side_join_ratio(PlannerInfo *root, List *build_sides,
  * fraction is estimated as the semijoin selectivity of those clauses.
  *
  * A candidate is "interesting" only if it is expected to eliminate at least
- * bloom_filter_pushdown_threshold of the rel's tuples.  We keep at most
- * bloom_filter_pushdown_max of the most selective candidates, and return them
- * as a list of ExpectedFilter nodes.
+ * bloom_filter_pushdown_threshold of the rel's tuples.  Every candidate that
+ * clears that bar is returned as an ExpectedFilter node; deciding which of
+ * them to actually combine into a scan path (and how many) is left to
+ * find_bloom_filter_combinations().
  *
  * XXX This needs to be careful to not interfere with the general selectivity
  * estimation, performed by clauselist_selectivity(). We'll estimate the filter
@@ -1127,6 +1128,15 @@ find_interesting_bloom_filters(PlannerInfo *root, RelOptInfo *rel)
 
 	if (rel->reloptkind != RELOPT_BASEREL)
 		return NIL;
+
+	/*
+	 * Return the cached result if we've already computed the interesting
+	 * filters for this rel. Both core path generation and a CustomScan
+	 * provider may ask for them, and the enumeration/selectivity work below
+	 * is not free, so we do it only once per base relation.
+	 */
+	if (rel->bloom_filters_valid)
+		return rel->bloom_filters;
 
 	/* Collect candidate hashjoinable equality clauses for this rel. */
 	candidates = generate_implied_equalities_for_all_columns(root, rel,
@@ -1419,34 +1429,13 @@ find_interesting_bloom_filters(PlannerInfo *root, RelOptInfo *rel)
 	}
 
 	/*
-	 * We have collected all potentially intresting filters. Evaluate
-	 * selectivity of each group and keep only the most interesting filters.
-	 * Filters have to eliminate at least bloom_filter_pushdown_threshold
-	 * tuples, and we keep only bloom_filter_pushdown_max most selective ones.
-	 *
-	 * We only connsider a limited number of interesting filters, to prevent
-	 * path explosion. If we found too many, keep only the most selective ones
-	 * (with smallest surviving fraction of tuples), to bound the number of
-	 * generated paths.
-	 *
-	 * XXX This also aligns with good join orders - those tend to perform the
-	 * most selective joins first. So we get to build the filters soon, even
-	 * if the hashjoin optimization is not disabled.
+	 * Return every candidate that clears bloom_filter_pushdown_threshold.
+	 * Which of them to combine into a scan path, and how many, is decided by
+	 * find_bloom_filter_combinations(); a filter that is weak on its own can
+	 * still be useful combined with others, or to a smart consumer.
 	 */
-	while (list_length(result) > bloom_filter_pushdown_max)
-	{
-		ExpectedFilter *worst = NULL;
-		ListCell   *lcw;
-
-		foreach(lcw, result)
-		{
-			ExpectedFilter *f = (ExpectedFilter *) lfirst(lcw);
-
-			if (worst == NULL || f->selectivity > worst->selectivity)
-				worst = f;
-		}
-		result = list_delete_ptr(result, worst);
-	}
+	rel->bloom_filters = result;
+	rel->bloom_filters_valid = true;
 
 	return result;
 }
@@ -1456,59 +1445,40 @@ find_interesting_bloom_filters(PlannerInfo *root, RelOptInfo *rel)
  *		Generate additional scan paths that anticipate one or more pushed-down
  *		Bloom filters.
  *
- * For each non-empty subset of the interesting filters, we clone every eligible
- * existing scan path, reducing its row estimate by the combined selectivity and
- * attaching the corresponding ExpectedFilter nodes.
+ * For each combination of the interesting filters (see
+ * find_bloom_filter_combinations), we build a new path via the real
+ * constructor for that path's type, passing the filters in so the
+ * constructor's apply_expected_filters() call charges a per-tuple probe cost.
+ *
+ * IndexPath is the one exception: it goes through create_filtered_scan_path,
+ * which clones the source path, because create_index_path() would re-derive
+ * its indexclauses/pathkeys from scratch for no benefit (see the comment on
+ * create_filtered_scan_path).
  *
  * These paths are kept alongside the regular paths (add_path keeps paths with
  * differing expected_filters) and are consumed by join path generation;
  * set_cheapest never selects them.
  *
- * XXX We must not clone paths that already have expected filters.
- *
- * XXX The cloning is a rather dirty way to copy paths. It does not readjust the
- * cost in a reasonable way. For example custom scans could do something smart
- * with the filters, so it should have a chance to deal with that. A cleaner
- * solution might be to actually pass the filters to the various "create"
- * function, like create_seqscan_path/... For CustomScan nodes we can probably
- * do most of this in the set_rel_pathlist_hook, somewhere. Maybe that needs
- * some helper methods, though. And maybe it will need to pass some of the info
- * through the callbacks? Not sure, someone has to try that.
- *
- * XXX This may need some major changes to work with custom scans. Right now we
- * only consider filters exactly matching the hash keys, so if the hashjoin is
- * on (t1.a = t2.a AND t1.b = t2.b), then the filter will be on (a,b). But a
- * custom scan may prefer "split" filters on each column independently. We'd
- * need a way for the custom scan to indicate that, and we'd need to apply this
- * only to the "matching" scan paths (and not to any other scan paths). But
- * we only look at the paths after selecting the "interesting" filters, so we'd
- * need to rethink that - we'd need to make the "interesting" filters specific
- * to a path, or something like that.
+ * CustomPath is not handled here at all.  Core cannot safely copy or construct
+ * a CustomPath, so a provider that wants filter-aware CustomPaths must build
+ * them itself, inside its own set_rel_pathlist_hook, by calling
+ * find_bloom_filter_combinations() directly and costing the result however it
+ * likes -- with real smart costing, or by calling apply_expected_filters() on
+ * its own freshly-built CustomPath if it doesn't want to be smart.
  */
 static void
 generate_expected_filter_paths(PlannerInfo *root, RelOptInfo *rel)
 {
-	List	   *filters;
+	List	   *combinations;
 	List	   *basepaths = NIL;
-	int			nfilters;
-	uint32		combo;
-	ListCell   *lc;
-
-	filters = find_interesting_bloom_filters(root, rel);
-	if (filters == NIL)
-		return;
-
-	nfilters = list_length(filters);
 
 	/*
 	 * Snapshot the existing unparameterized, non-partial scan paths of a
 	 * supported type.  We must snapshot before calling add_path(), which
 	 * mutates rel->pathlist.
 	 */
-	foreach(lc, rel->pathlist)
+	foreach_ptr(Path, path, rel->pathlist)
 	{
-		Path	   *path = (Path *) lfirst(lc);
-
 		/* XXX Is parameterization really a problem? Always? */
 		if (path->param_info != NULL || path->expected_filters != NIL)
 			continue;
@@ -1522,19 +1492,6 @@ generate_expected_filter_paths(PlannerInfo *root, RelOptInfo *rel)
 			case T_TidRangePath:
 				basepaths = lappend(basepaths, path);
 				break;
-			case T_CustomPath:
-
-				/*
-				 * A base-relation CustomScan can receive a pushed-down
-				 * filter, but only if the provider advertised that it knows
-				 * how to consume one (it probes the filter itself inside its
-				 * scan loop; see find_bloom_filter_recipient in createplan.c
-				 * and ExecInitCustomScan).  Providers that don't opt in, like
-				 * heap, are unaffected.
-				 */
-				if (((CustomPath *) path)->flags & CUSTOMPATH_SUPPORT_BLOOM_FILTERS)
-					basepaths = lappend(basepaths, path);
-				break;
 			default:
 				break;
 		}
@@ -1543,77 +1500,153 @@ generate_expected_filter_paths(PlannerInfo *root, RelOptInfo *rel)
 	if (basepaths == NIL)
 		return;
 
+	combinations = find_bloom_filter_combinations(root, rel);
+	if (combinations == NIL)
+		return;
+
 	/*
-	 * Generate all combinations of the interesting filters. We do that by
-	 * iterating 1 to (2^n-1), which generates all bitmask in between. Those
-	 * are the subsets.
-	 *
-	 * XXX This is a good demonstration why we need to keep the number of
-	 * filters low
-	 *
-	 * XXX Maybe we should also stop adding filters once the other filters
-	 * already eliminate enought tuples. Say, we know F1 alone eliminates 99%
-	 * tuples. Does it make sense to also consider [F1,F2]? Probably not. We
-	 * could track "maximum" sets, and reject combinations containing one of
-	 * those. We'd need to generate sets of increasing size, the iteration
-	 * does not do that. But that's not hard.
+	 * For each combination, build a fresh path from each eligible base path
+	 * via that base path's real constructor (except IndexPath, see the
+	 * function comment above).
 	 */
-	for (combo = 1; combo < ((uint32) 1 << nfilters); combo++)
+	foreach_ptr(List, combo, combinations)
 	{
-		List	   *subset = NIL;
-		Relids		used = NULL;
-		bool		overlap = false;
-		int			i = 0;
-		ListCell   *lcf;
-
-		foreach(lcf, filters)
+		foreach_ptr(Path, base, basepaths)
 		{
-			if (combo & ((uint32) 1 << i))
-				subset = lappend(subset, lfirst(lcf));
-			i++;
-		}
+			Path	   *newpath = NULL;
 
-		/*
-		 * Skip combinations that mix filters with overlapping build sides.
-		 * Such filters would be sourced from joins that share build
-		 * relations, so their selectivities are not independent and applying
-		 * them together at the same scan wrong - the result would be correct,
-		 * but the estimates would get smaller.
-		 */
-		foreach(lcf, subset)
-		{
-			ExpectedFilter *f = (ExpectedFilter *) lfirst(lcf);
-
-			if (bms_overlap(used, f->build_relids))
+			switch (nodeTag(base))
 			{
-				overlap = true;
-				break;
+				case T_Path:
+					if (base->pathtype == T_SeqScan)
+						newpath = create_seqscan_path(root, rel, NULL,
+													  base->parallel_workers,
+													  combo);
+					else if (base->pathtype == T_SampleScan)
+						newpath = create_samplescan_path(root, rel, NULL,
+														 combo);
+					break;
+				case T_IndexPath:
+					newpath = create_filtered_scan_path(root, base, combo);
+					break;
+				case T_BitmapHeapPath:
+					newpath = (Path *)
+						create_bitmap_heap_path(root, rel,
+												((BitmapHeapPath *) base)->bitmapqual,
+												NULL, 1.0,
+												base->parallel_workers,
+												combo);
+					break;
+				case T_TidPath:
+					newpath = (Path *)
+						create_tidscan_path(root, rel,
+											((TidPath *) base)->tidquals,
+											NULL, combo);
+					break;
+				case T_TidRangePath:
+					newpath = (Path *)
+						create_tidrangescan_path(root, rel,
+												 ((TidRangePath *) base)->tidrangequals,
+												 NULL, base->parallel_workers,
+												 combo);
+					break;
+				default:
+					break;
 			}
-			used = bms_add_members(used, f->build_relids);
-		}
-		bms_free(used);
 
-		if (overlap)
-		{
-			list_free(subset);
-			continue;
-		}
-
-		/*
-		 * All filtered paths for this combo share the same expected_filters
-		 * list.  That's safe: the list is never modified, and add_path() only
-		 * ever frees the Path node itself, not its expected_filters.
-		 */
-		foreach(lc, basepaths)
-		{
-			Path	   *base = (Path *) lfirst(lc);
-			Path	   *newpath;
-
-			newpath = create_filtered_scan_path(root, base, subset);
 			if (newpath != NULL)
 				add_path(rel, newpath);
 		}
 	}
+}
+
+/*
+ * expected_filter_selectivity_cmp
+ *	  list_sort comparator ordering ExpectedFilters by ascending selectivity,
+ *	  i.e. the most selective filter (smallest surviving fraction) first.
+ */
+static int
+expected_filter_selectivity_cmp(const ListCell *a, const ListCell *b)
+{
+	Selectivity sa = ((ExpectedFilter *) lfirst(a))->selectivity;
+	Selectivity sb = ((ExpectedFilter *) lfirst(b))->selectivity;
+
+	if (sa < sb)
+		return -1;
+	if (sa > sb)
+		return 1;
+	return 0;
+}
+
+/*
+ * find_bloom_filter_combinations
+ *	  Find the interesting Bloom filters rel could receive from a hash join
+ *	  above it (see find_interesting_bloom_filters), and return the combination
+ *	  of them worth building a path for, as a list of lists of ExpectedFilter.
+ *
+ * Following the "apply all candidates simultaneously" heuristic (Heuristic 4
+ * of the bottom-up Bloom filter paper), we build a single combination that
+ * applies as many candidates as possible at once.  We take the interesting
+ * filters most selective first and add each one whose build side does not
+ * overlap the build sides already chosen, stopping once
+ * bloom_filter_pushdown_max filters have been collected.
+ *
+ * Overlapping build sides are skipped because such filters would be sourced
+ * from joins sharing build relations, so their selectivities are not
+ * independent and applying them together would under-estimate the surviving
+ * rows.  On such a conflict we keep the more selective filter, since it sorts
+ * first.  bloom_filter_pushdown_max bounds how many filters are applied at
+ * once, which bounds the per-tuple probe cost.
+ *
+ * The result is a list of combinations (each a list of ExpectedFilter); this
+ * heuristic produces at most one combination.
+ *
+ * Note: A CustomScan provider can call it directly from its own
+ * set_rel_pathlist_hook (see generate_expected_filter_paths above).
+ */
+List *
+find_bloom_filter_combinations(PlannerInfo *root, RelOptInfo *rel)
+{
+	List	   *filters = find_interesting_bloom_filters(root, rel);
+	List	   *sorted;
+	List	   *combo = NIL;
+	Relids		used = NULL;
+	ListCell   *lc;
+
+	if (filters == NIL)
+		return NIL;
+
+	/*
+	 * Consider the most selective filters first, so that on a build-side
+	 * conflict we keep the one that discards more rows, and so that the
+	 * bloom_filter_pushdown_max cap retains the most useful filters.  Sort a
+	 * copy: "filters" is cached on the RelOptInfo and must not be reordered.
+	 */
+	sorted = list_copy(filters);
+	list_sort(sorted, expected_filter_selectivity_cmp);
+
+	foreach(lc, sorted)
+	{
+		ExpectedFilter *f = (ExpectedFilter *) lfirst(lc);
+
+		if (list_length(combo) >= bloom_filter_pushdown_max)
+			break;
+
+		/* skip a filter whose build side overlaps one already chosen */
+		if (bms_overlap(used, f->build_relids))
+			continue;
+
+		combo = lappend(combo, f);
+		used = bms_add_members(used, f->build_relids);
+	}
+
+	list_free(sorted);
+	bms_free(used);
+
+	if (combo == NIL)
+		return NIL;
+
+	return list_make1(combo);
 }
 
 /*
@@ -1674,7 +1707,7 @@ set_tablesample_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *
 	required_outer = rel->lateral_relids;
 
 	/* Consider sampled scan */
-	path = create_samplescan_path(root, rel, required_outer);
+	path = create_samplescan_path(root, rel, required_outer, NIL);
 
 	/*
 	 * If the sampling method does not support repeatable scans, we must avoid
@@ -5690,7 +5723,7 @@ create_partial_bitmap_paths(PlannerInfo *root, RelOptInfo *rel,
 		return;
 
 	add_partial_path(rel, (Path *) create_bitmap_heap_path(root, rel,
-														   bitmapqual, rel->lateral_relids, 1.0, parallel_workers));
+														   bitmapqual, rel->lateral_relids, 1.0, parallel_workers, NIL));
 }
 
 /*

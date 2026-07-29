@@ -176,11 +176,11 @@ bool		enable_async_append = true;
 double		bloom_filter_pushdown_threshold = 0.3;
 
 /*
- * Upper bound on the number of distinct interesting Bloom filters considered
- * for a single scan relation.  This bounds the number of additional paths
- * generated per scan (the planner enumerates non-empty subsets of the
- * interesting filters, i.e. up to 2^bloom_filter_pushdown_max - 1 extra
- * paths per base scan path).
+ * Upper bound on the number of interesting Bloom filters that may be
+ * combined into a single filter-aware scan path variant for a base
+ * relation.  This does not limit how many candidate filters are considered
+ * (see bloom_filter_pushdown_threshold) -- only how large a combination of
+ * them the planner is willing to build a path for.
  */
 int			bloom_filter_pushdown_max = 3;
 
@@ -189,8 +189,8 @@ int			bloom_filter_pushdown_max = 3;
  * side.  Bloom filters over larger joins are unlikely to be worthwhile and
  * enumerating them would inflate planning time, so we keep this small.  This
  * bounds the *size* of each candidate build side, which is distinct from
- * bloom_filter_pushdown_max that bounds how many interesting filters are
- * ultimately kept per probe relation.
+ * bloom_filter_pushdown_max, which bounds how many filters are applied
+ * together in a single scan.
  */
 int			bloom_filter_pushdown_max_build_relids = 3;
 

@@ -443,29 +443,29 @@ JOIN bloom_snowflake_multi_dim_1_2 d12 ON (d1.id12a = d12.a AND d1.id12b = d12.b
 WHERE d11.r < 0.45 AND d12.r < 0.55;
                                                                    QUERY PLAN                                                                   
 ------------------------------------------------------------------------------------------------------------------------------------------------
- Hash Join  (cost=76.27..2292.04 rows=24628 width=101) (actual rows=23530.00 loops=1)
+ Hash Join  (cost=78.07..2418.84 rows=24628 width=101) (actual rows=23530.00 loops=1)
    Hash Cond: ((f.id1a = d1.a) AND (f.id1b = d1.b))
-   ->  Seq Scan on bloom_snowflake_multi_fact f  (cost=0.00..2031.00 rows=24628 width=49) (actual rows=23531.00 loops=1)
+   ->  Seq Scan on bloom_snowflake_multi_fact f  (cost=0.00..2156.00 rows=24628 width=49) (actual rows=23531.00 loops=1)
          Bloom Filter 3: keys=(id1a, id1b) expected=24.6% checked=99999 rejected=76469 (76.5%)
-   ->  Hash  (cost=72.58..72.58 rows=246 width=52) (actual rows=234.00 loops=1)
+   ->  Hash  (cost=74.38..74.38 rows=246 width=52) (actual rows=234.00 loops=1)
          Buckets: 1024  Batches: 1  Memory Usage: 28kB
-         Bloom Filter 3: bits=8388608 hashes=10 memory=1024kB checked=99999 rejected=76469
-         ->  Hash Join  (cost=52.00..72.58 rows=246 width=52) (actual rows=234.00 loops=1)
+         Bloom Filter 3: bits=8192 hashes=4 memory=1kB checked=99999 rejected=76469
+         ->  Hash Join  (cost=52.00..74.38 rows=246 width=52) (actual rows=234.00 loops=1)
                Hash Cond: ((d1.id12a = d12.a) AND (d1.id12b = d12.b))
-               ->  Hash Join  (cost=25.09..44.38 rows=246 width=40) (actual rows=234.00 loops=1)
+               ->  Hash Join  (cost=25.09..46.18 rows=246 width=40) (actual rows=235.00 loops=1)
                      Hash Cond: ((d1.id11a = d11.a) AND (d1.id11b = d11.b))
-                     ->  Seq Scan on bloom_snowflake_multi_dim_1 d1  (cost=0.00..18.00 rows=246 width=28) (actual rows=235.00 loops=1)
+                     ->  Seq Scan on bloom_snowflake_multi_dim_1 d1  (cost=0.00..19.80 rows=246 width=28) (actual rows=236.00 loops=1)
                            Bloom Filter 1: keys=(id11a, id11b) expected=43.9% checked=996 rejected=569 (57.1%)
-                           Bloom Filter 2: keys=(id12a, id12b) expected=56.1% checked=431 rejected=196 (45.5%)
+                           Bloom Filter 2: keys=(id12a, id12b) expected=56.1% checked=431 rejected=195 (45.2%)
                      ->  Hash  (cost=18.50..18.50 rows=439 width=12) (actual rows=440.00 loops=1)
                            Buckets: 1024  Batches: 1  Memory Usage: 27kB
-                           Bloom Filter 1: bits=8388608 hashes=10 memory=1024kB checked=996 rejected=569
+                           Bloom Filter 1: bits=8192 hashes=4 memory=1kB checked=996 rejected=569
                            ->  Seq Scan on bloom_snowflake_multi_dim_1_1 d11  (cost=0.00..18.50 rows=439 width=12) (actual rows=440.00 loops=1)
                                  Filter: (r < '0.45'::double precision)
                                  Rows Removed by Filter: 560
                ->  Hash  (cost=18.50..18.50 rows=561 width=12) (actual rows=562.00 loops=1)
                      Buckets: 1024  Batches: 1  Memory Usage: 33kB
-                     Bloom Filter 2: bits=8388608 hashes=10 memory=1024kB checked=431 rejected=196
+                     Bloom Filter 2: bits=8192 hashes=4 memory=1kB checked=431 rejected=195
                      ->  Seq Scan on bloom_snowflake_multi_dim_1_2 d12  (cost=0.00..18.50 rows=561 width=12) (actual rows=562.00 loops=1)
                            Filter: (r < '0.55'::double precision)
                            Rows Removed by Filter: 438
@@ -480,13 +480,13 @@ JOIN bloom_snowflake_multi_dim_1_2 d12 ON (d1.id12a = d12.a AND d1.id12b = d12.b
 WHERE d11.r < 0.75 AND d12.r < 0.75;
                                                                    QUERY PLAN                                                                   
 ------------------------------------------------------------------------------------------------------------------------------------------------
- Hash Join  (cost=94.81..2542.85 rows=55564 width=101) (actual rows=55598.00 loops=1)
+ Hash Join  (cost=94.81..2667.85 rows=55564 width=101) (actual rows=55598.00 loops=1)
    Hash Cond: ((f.id1a = d1.a) AND (f.id1b = d1.b))
-   ->  Seq Scan on bloom_snowflake_multi_fact f  (cost=0.00..2031.00 rows=55564 width=49) (actual rows=55598.00 loops=1)
-         Bloom Filter 1: keys=(id1a, id1b) expected=55.6% checked=99999 rejected=44402 (44.4%)
+   ->  Seq Scan on bloom_snowflake_multi_fact f  (cost=0.00..2156.00 rows=55564 width=49) (actual rows=55694.00 loops=1)
+         Bloom Filter 1: keys=(id1a, id1b) expected=55.6% checked=99999 rejected=44306 (44.3%)
    ->  Hash  (cost=86.47..86.47 rows=556 width=52) (actual rows=555.00 loops=1)
          Buckets: 1024  Batches: 1  Memory Usage: 54kB
-         Bloom Filter 1: bits=8388608 hashes=10 memory=1024kB checked=99999 rejected=44402
+         Bloom Filter 1: bits=8192 hashes=4 memory=1kB checked=99999 rejected=44306
          ->  Hash Join  (cost=59.36..86.47 rows=556 width=52) (actual rows=555.00 loops=1)
                Hash Cond: ((d1.id12a = d12.a) AND (d1.id12b = d12.b))
                ->  Hash Join  (cost=29.51..52.76 rows=734 width=40) (actual rows=737.00 loops=1)
@@ -516,12 +516,12 @@ JOIN bloom_snowflake_multi_dim_2_2 d22 ON (d2.id22a = d22.a AND d2.id22b = d22.b
 WHERE d11.r < 0.75 AND d12.r < 0.75;
                                                                                              QUERY PLAN                                                                                              
 -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Hash Join  (cost=331.99..3197.32 rows=55564 width=153) (actual rows=55598.00 loops=1)
+ Hash Join  (cost=331.99..3322.32 rows=55564 width=153) (actual rows=55598.00 loops=1)
    Hash Cond: ((f.id1a = d1.a) AND (f.id1b = d1.b))
-   ->  Hash Join  (cost=237.18..2685.47 rows=55564 width=101) (actual rows=55598.00 loops=1)
+   ->  Hash Join  (cost=237.18..2810.47 rows=55564 width=101) (actual rows=55694.00 loops=1)
          Hash Cond: ((f.id2a = d2.a) AND (f.id2b = d2.b))
-         ->  Seq Scan on bloom_snowflake_multi_fact f  (cost=0.00..2031.00 rows=55564 width=49) (actual rows=55598.00 loops=1)
-               Bloom Filter 1: keys=(id1a, id1b) expected=55.6% checked=100000 rejected=44402 (44.4%)
+         ->  Seq Scan on bloom_snowflake_multi_fact f  (cost=0.00..2156.00 rows=55564 width=49) (actual rows=55694.00 loops=1)
+               Bloom Filter 1: keys=(id1a, id1b) expected=55.6% checked=100000 rejected=44306 (44.3%)
          ->  Hash  (cost=222.18..222.18 rows=1000 width=52) (actual rows=1000.00 loops=1)
                Buckets: 1024  Batches: 1  Memory Usage: 91kB
                ->  Merge Join  (cost=170.18..222.18 rows=1000 width=52) (actual rows=1000.00 loops=1)
@@ -541,7 +541,7 @@ WHERE d11.r < 0.75 AND d12.r < 0.75;
                                        ->  Seq Scan on bloom_snowflake_multi_dim_2 d2  (cost=0.00..18.00 rows=1000 width=28) (actual rows=1000.00 loops=1)
    ->  Hash  (cost=86.47..86.47 rows=556 width=52) (actual rows=555.00 loops=1)
          Buckets: 1024  Batches: 1  Memory Usage: 54kB
-         Bloom Filter 1: bits=8388608 hashes=10 memory=1024kB checked=100000 rejected=44402
+         Bloom Filter 1: bits=8192 hashes=4 memory=1kB checked=100000 rejected=44306
          ->  Hash Join  (cost=59.36..86.47 rows=556 width=52) (actual rows=555.00 loops=1)
                Hash Cond: ((d1.id12a = d12.a) AND (d1.id12b = d12.b))
                ->  Hash Join  (cost=29.51..52.76 rows=734 width=40) (actual rows=737.00 loops=1)

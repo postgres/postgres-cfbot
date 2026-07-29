@@ -64,6 +64,8 @@ typedef struct BloomCSScanState
 }			BloomCSScanState;
 
 /* forward declarations */
+static void bloom_cs_add_path(RelOptInfo *rel, Cost startup_cost,
+							  Cost total_cost, List *filters);
 static Plan *bloom_cs_plan_custom_path(PlannerInfo *root, RelOptInfo *rel,
 									   CustomPath *best_path, List *tlist,
 									   List *clauses, List *custom_plans);
@@ -93,18 +95,57 @@ static const CustomExecMethods bloom_cs_exec_methods = {
 };
 
 /*
- * set_rel_pathlist_hook: offer a bloom-filter-capable CustomPath for plain
+ * bloom_cs_add_path
+ *	  Build and add one bloom-filter-capable CustomPath, optionally expecting
+ *	  the given set of pushed-down filters.  We don't do anything smart with
+ *	  the filters ourselves, so apply_expected_filters() supplies the same
+ *	  generic per-tuple probe cost and row-count adjustment core uses for
+ *	  stock scan types.
+ */
+static void
+bloom_cs_add_path(RelOptInfo *rel, Cost startup_cost, Cost total_cost,
+				  List *filters)
+{
+	CustomPath *cpath = makeNode(CustomPath);
+
+	cpath->path.pathtype = T_CustomScan;
+	cpath->path.parent = rel;
+	cpath->path.pathtarget = rel->reltarget;
+	cpath->path.param_info = NULL;
+	cpath->path.parallel_aware = false;
+	cpath->path.parallel_safe = false;
+	cpath->path.parallel_workers = 0;
+	cpath->path.rows = rel->rows;
+	cpath->path.startup_cost = startup_cost;
+	cpath->path.total_cost = total_cost;
+	cpath->path.pathkeys = NIL;
+
+	cpath->flags = CUSTOMPATH_SUPPORT_BLOOM_FILTERS;
+	cpath->custom_paths = NIL;
+	cpath->custom_private = NIL;
+	cpath->methods = &bloom_cs_path_methods;
+
+	apply_expected_filters(&cpath->path, filters);
+
+	add_path(rel, (Path *) cpath);
+}
+
+/*
+ * set_rel_pathlist_hook: offer bloom-filter-capable CustomPaths for plain
  * heap base relations.  We copy the cost of the existing sequential scan path
- * so join costing stays sane; the test forces the custom scan to be chosen
- * with "SET enable_seqscan = off" (the CustomPath keeps disabled_nodes = 0).
+ * so join costing stays sane.
+ *
+ * Besides the plain, filter-oblivious path, we also offer one CustomPath per
+ * combination of interesting Bloom filters this rel could receive from a
+ * hash join above it.
  */
 static void
 bloom_cs_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 						  RangeTblEntry *rte)
 {
-	CustomPath *cpath;
 	Cost		startup_cost = 0;
 	Cost		total_cost = 0;
+	List	   *combinations;
 	ListCell   *lc;
 
 	if (prev_set_rel_pathlist_hook)
@@ -132,25 +173,16 @@ bloom_cs_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 		}
 	}
 
-	cpath = makeNode(CustomPath);
-	cpath->path.pathtype = T_CustomScan;
-	cpath->path.parent = rel;
-	cpath->path.pathtarget = rel->reltarget;
-	cpath->path.param_info = NULL;
-	cpath->path.parallel_aware = false;
-	cpath->path.parallel_safe = false;
-	cpath->path.parallel_workers = 0;
-	cpath->path.rows = rel->rows;
-	cpath->path.startup_cost = startup_cost;
-	cpath->path.total_cost = total_cost;
-	cpath->path.pathkeys = NIL;
+	bloom_cs_add_path(rel, startup_cost, total_cost, NIL);
 
-	cpath->flags = CUSTOMPATH_SUPPORT_BLOOM_FILTERS;
-	cpath->custom_paths = NIL;
-	cpath->custom_private = NIL;
-	cpath->methods = &bloom_cs_path_methods;
+	combinations = find_bloom_filter_combinations(root, rel);
 
-	add_path(rel, (Path *) cpath);
+	foreach(lc, combinations)
+	{
+		List	   *combo = (List *) lfirst(lc);
+
+		bloom_cs_add_path(rel, startup_cost, total_cost, combo);
+	}
 }
 
 static Plan *

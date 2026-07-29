@@ -113,13 +113,13 @@ JOIN bloom_multi_dim d ON (f.id1 = d.id1 AND f.id2 = d.id2)
 WHERE d.r < 0.5;
                                                   QUERY PLAN                                                  
 --------------------------------------------------------------------------------------------------------------
- Hash Join  (cost=25.98..685.58 rows=14970 width=53) (actual rows=14970.00 loops=1)
+ Hash Join  (cost=25.98..723.08 rows=14970 width=53) (actual rows=14970.00 loops=1)
    Hash Cond: ((f.id1 = d.id1) AND (f.id2 = d.id2))
-   ->  Seq Scan on bloom_multi_fact f  (cost=0.00..581.00 rows=14970 width=41) (actual rows=14970.00 loops=1)
-         Bloom Filter 1: keys=(id1, id2) expected=49.9% checked=29999 rejected=15030 (50.1%)
+   ->  Seq Scan on bloom_multi_fact f  (cost=0.00..618.50 rows=14970 width=41) (actual rows=15000.00 loops=1)
+         Bloom Filter 1: keys=(id1, id2) expected=49.9% checked=29999 rejected=15000 (50.0%)
    ->  Hash  (cost=18.50..18.50 rows=499 width=12) (actual rows=499.00 loops=1)
          Buckets: 1024  Batches: 1  Memory Usage: 30kB
-         Bloom Filter 1: bits=8388608 hashes=10 memory=1024kB checked=29999 rejected=15030
+         Bloom Filter 1: bits=8192 hashes=4 memory=1kB checked=29999 rejected=15000
          ->  Seq Scan on bloom_multi_dim d  (cost=0.00..18.50 rows=499 width=12) (actual rows=499.00 loops=1)
                Filter: (r < '0.5'::double precision)
                Rows Removed by Filter: 501

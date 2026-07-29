@@ -59,8 +59,57 @@ SELECT count(*) FROM cs_fact f JOIN cs_dim d ON f.a = d.id AND f.b = d.id2;
 SELECT test_bloom_cs_perkey_built() AS perkey_filters_built;
 SELECT test_bloom_cs_rejected_rows() > 0 AS filter_rejected_rows;
 
--- cleanup
+-- Two independent joins: the provider should offer, and the planner should
+-- choose, a CustomPath expecting a combined filter from both joins.
+-- cpu_operator_cost is lowered so combining is robustly cheaper rather than a
+-- near-tie.
+CREATE TABLE cs_wide_a (id int, label text);
+CREATE TABLE cs_wide_b (id int, label text);
+INSERT INTO cs_wide_a SELECT g, 'a' || g FROM generate_series(1, 400) g;
+INSERT INTO cs_wide_b SELECT g, 'b' || g FROM generate_series(1, 400) g;
+ANALYZE cs_wide_a;
+ANALYZE cs_wide_b;
+
+SET test_bloom_customscan.enable = on;
+SET enable_seqscan = off;
+SET cpu_operator_cost = 0.0001;
+
+EXPLAIN (COSTS OFF, VERBOSE)
+SELECT count(*) FROM cs_fact f
+  JOIN cs_wide_a wa ON f.a = wa.id
+  JOIN cs_wide_b wb ON f.b = wb.id;
+
+SELECT test_bloom_cs_reset();
+SELECT count(*) FROM cs_fact f
+  JOIN cs_wide_a wa ON f.a = wa.id
+  JOIN cs_wide_b wb ON f.b = wb.id;
+SELECT test_bloom_cs_rejected_rows() > 0 AS filter_rejected_rows;
+
+-- Correctness: the result must be identical with and without the filters.
+SET test_bloom_customscan.enable = on;
+SET enable_seqscan = off;
+CREATE TEMP TABLE r_cs2 AS
+  SELECT f.a, count(*) AS n FROM cs_fact f
+    JOIN cs_wide_a wa ON f.a = wa.id
+    JOIN cs_wide_b wb ON f.b = wb.id
+  GROUP BY f.a;
+
 SET test_bloom_customscan.enable = off;
 SET enable_seqscan = on;
-DROP TABLE cs_fact, cs_dim;
+CREATE TEMP TABLE r_plain2 AS
+  SELECT f.a, count(*) AS n FROM cs_fact f
+    JOIN cs_wide_a wa ON f.a = wa.id
+    JOIN cs_wide_b wb ON f.b = wb.id
+  GROUP BY f.a;
+
+SELECT count(*) AS cs_minus_plain
+  FROM (SELECT * FROM r_cs2 EXCEPT SELECT * FROM r_plain2) x;
+SELECT count(*) AS plain_minus_cs
+  FROM (SELECT * FROM r_plain2 EXCEPT SELECT * FROM r_cs2) x;
+
+-- cleanup
+RESET cpu_operator_cost;
+SET test_bloom_customscan.enable = off;
+SET enable_seqscan = on;
+DROP TABLE cs_fact, cs_dim, cs_wide_a, cs_wide_b;
 DROP EXTENSION test_bloom_customscan;

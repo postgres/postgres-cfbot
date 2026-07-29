@@ -381,8 +381,8 @@
 },
 
 { name => 'bloom_filter_pushdown_max', type => 'int', context => 'PGC_USERSET', group => 'QUERY_TUNING_OTHER',
-  short_desc => 'Maximum number of pushed-down hash join bloom filters considered per scan.',
-  long_desc => 'Bounds how many interesting bloom filters the planner enumerates subsets of when building filter-aware scan paths.',
+  short_desc => 'Maximum number of hash join bloom filters combined into a single pushed-down filter set.',
+  long_desc => 'Bounds how many interesting bloom filters the planner will combine together when building filter-aware scan path variants for a base relation.',
   flags => 'GUC_EXPLAIN',
   variable => 'bloom_filter_pushdown_max',
   boot_val => '3',

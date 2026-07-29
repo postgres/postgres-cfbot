@@ -614,16 +614,14 @@ CREATE FUNCTION my_gen_series(int, int) RETURNS SETOF integer
   SUPPORT test_support_func;
 EXPLAIN (COSTS OFF)
 SELECT * FROM tenk1 a JOIN my_gen_series(1,1000) g ON a.unique1 = g;
-                  QUERY PLAN                  
-----------------------------------------------
+               QUERY PLAN               
+----------------------------------------
  Hash Join
-   Hash Cond: (a.unique1 = g.g)
-   ->  Seq Scan on tenk1 a
-         Bloom Filter 1: keys=(unique1)
+   Hash Cond: (g.g = a.unique1)
+   ->  Function Scan on my_gen_series g
    ->  Hash
-         Bloom Filter 1
-         ->  Function Scan on my_gen_series g
-(7 rows)
+         ->  Seq Scan on tenk1 a
+(5 rows)
 
 EXPLAIN (COSTS OFF)
 SELECT * FROM tenk1 a JOIN my_gen_series(1,10) g ON a.unique1 = g;
