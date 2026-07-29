@@ -83,6 +83,7 @@
 #include "replication/slot.h"
 #include "replication/slotsync.h"
 #include "replication/snapbuild.h"
+#include "replication/syncrep.h"
 #include "replication/walreceiver.h"
 #include "replication/walsender.h"
 #include "storage/bufmgr.h"
@@ -6314,6 +6315,7 @@ StartupXLOG(void)
 	 */
 	endOfRecoveryInfo = FinishWalRecovery();
 	EndOfLog = endOfRecoveryInfo->endOfLog;
+	SyncRepInitPostRecovery(EndOfLog);
 	EndOfLogTLI = endOfRecoveryInfo->endOfLogTLI;
 	abortedRecPtr = endOfRecoveryInfo->abortedRecPtr;
 	missingContrecPtr = endOfRecoveryInfo->missingContrecPtr;
