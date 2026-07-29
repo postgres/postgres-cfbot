@@ -514,6 +514,12 @@ static const PgStat_KindInfo pgstat_kind_builtin_infos[PGSTAT_KIND_BUILTIN_SIZE]
 		.init_shmem_cb = pgstat_wal_init_shmem_cb,
 		.reset_all_cb = pgstat_wal_reset_all_cb,
 		.snapshot_cb = pgstat_wal_snapshot_cb,
+
+		.per_backend_entry_size = sizeof(PgStatShared_WalBackendEntry),
+		.per_backend_data_off = offsetof(PgStatShared_WalBackendEntry, stats),
+		.per_backend_data_len = sizeof(PgStat_WalStats),
+		.per_backend_shared_lock_off = offsetof(PgStatShared_Wal, lock),
+		.per_backend_acc_cb = pgstat_wal_per_backend_acc_cb,
 	},
 };
 
