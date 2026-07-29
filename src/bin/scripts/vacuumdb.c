@@ -60,6 +60,7 @@ main(int argc, char *argv[])
 		{"buffer-usage-limit", required_argument, NULL, 13},
 		{"missing-stats-only", no_argument, NULL, 14},
 		{"dry-run", no_argument, NULL, 15},
+		{"continue", no_argument, NULL, 16},
 		{NULL, 0, NULL, 0}
 	};
 
@@ -211,6 +212,9 @@ main(int argc, char *argv[])
 			case 15:
 				vacopts.dry_run = true;
 				break;
+			case 16:
+				vacopts.conn_fail_ok = true;
+				break;
 			default:
 				/* getopt_long already emitted a complaint */
 				pg_log_error_hint("Try \"%s --help\" for more information.", progname);
@@ -307,6 +311,11 @@ main(int argc, char *argv[])
 		pg_fatal("cannot use the \"%s\" option without \"%s\" or \"%s\"",
 				 "missing-stats-only", "analyze-only", "analyze-in-stages");
 
+	/* Prohibit --continue without --all: it only governs the database loop. */
+	if (vacopts.conn_fail_ok && !(vacopts.objfilter & OBJFILTER_ALL_DBS))
+		pg_fatal("cannot use the \"%s\" option without \"%s\"",
+				 "continue", "all");
+
 	if (vacopts.dry_run && !vacopts.quiet)
 	{
 		pg_log_info("executing in dry-run mode");
@@ -353,6 +362,8 @@ help(const char *progname)
 	printf(_("\nOptions:\n"));
 	printf(_("  -a, --all                       vacuum all databases\n"));
 	printf(_("      --buffer-usage-limit=SIZE   size of ring buffer used for vacuum\n"));
+	printf(_("      --continue                  with --all, skip databases that cannot be\n"
+			 "                                  connected to instead of exiting\n"));
 	printf(_("  -d, --dbname=DBNAME             database to vacuum\n"));
 	printf(_("      --disable-page-skipping     disable all page-skipping behavior\n"));
 	printf(_("      --dry-run                   show the commands that would be sent to the server\n"));
