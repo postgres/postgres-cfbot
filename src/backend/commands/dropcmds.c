@@ -508,6 +508,7 @@ does_not_exist_skipping(ObjectType objtype, Node *object)
 		case OBJECT_PUBLICATION_REL:
 		case OBJECT_TABCONSTRAINT:
 		case OBJECT_USER_MAPPING:
+		case OBJECT_WHOLE_ROW:
 			/* These are currently not used or needed. */
 			elog(ERROR, "unsupported object type: %d", (int) objtype);
 			break;
