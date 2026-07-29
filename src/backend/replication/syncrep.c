@@ -89,6 +89,7 @@
 
 /* User-settable parameters for sync rep */
 char	   *SyncRepStandbyNames;
+bool		SyncRepWaitOnQueryCancel = false;
 int			post_recovery_sync_level = SYNCHRONOUS_COMMIT_OFF;
 
 #define SyncStandbysDefined() \
@@ -150,6 +151,7 @@ void
 SyncRepWaitForLSN(XLogRecPtr lsn, bool commit)
 {
 	int			mode;
+	bool		query_cancel_reported = false;
 
 	/*
 	 * This should be called while holding interrupts during a transaction
@@ -320,19 +322,29 @@ SyncRepWaitForLSN(XLogRecPtr lsn, bool commit)
 		}
 
 		/*
-		 * It's unclear what to do if a query cancel interrupt arrives.  We
-		 * can't actually abort at this point, but ignoring the interrupt
-		 * altogether is not helpful, so we just terminate the wait with a
-		 * suitable warning.
+		 * We can't actually abort at this point.  By default, terminate the
+		 * wait with a suitable warning.  If configured otherwise, continue
+		 * waiting so that query cancellation cannot make locally committed
+		 * data visible before it has been replicated.
 		 */
 		if (QueryCancelPending)
 		{
 			QueryCancelPending = false;
-			ereport(WARNING,
-					(errmsg("canceling wait for synchronous replication due to user request"),
-					 errdetail("The transaction has already committed locally, but might not have been replicated to the standby.")));
-			SyncRepCancelWait();
-			break;
+			if (!SyncRepWaitOnQueryCancel)
+			{
+				ereport(WARNING,
+						(errmsg("canceling wait for synchronous replication due to user request"),
+						 errdetail("The transaction has already committed locally, but might not have been replicated to the standby.")));
+				SyncRepCancelWait();
+				break;
+			}
+			if (!query_cancel_reported)
+			{
+				ereport(WARNING,
+						(errmsg("ignoring request to cancel wait for synchronous replication"),
+						 errdetail_internal("The locally written WAL record has not been replicated according to \"synchronous_standby_names\".")));
+				query_cancel_reported = true;
+			}
 		}
 
 		/*
