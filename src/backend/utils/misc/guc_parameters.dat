@@ -2984,6 +2984,12 @@
   assign_hook => 'assign_synchronous_commit',
 },
 
+{ name => 'synchronous_replication_wait_on_query_cancel', type => 'bool', context => 'PGC_SIGHUP', group => 'REPLICATION_PRIMARY',
+  short_desc => 'Continues waiting for synchronous replication after query cancellation.',
+  variable => 'SyncRepWaitOnQueryCancel',
+  boot_val => 'false',
+},
+
 { name => 'synchronous_standby_names', type => 'string', context => 'PGC_SIGHUP', group => 'REPLICATION_PRIMARY',
   short_desc => 'Number of synchronous standbys and list of names of potential synchronous ones.',
   flags => 'GUC_LIST_INPUT',
