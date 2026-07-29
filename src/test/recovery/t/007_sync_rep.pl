@@ -218,4 +218,82 @@ standby4|1|quorum),
 	'all standbys are considered as candidates for quorum sync standbys',
 	'ANY 2(*)');
 
+# Check that ordinary connections are rejected after crash recovery until
+# the end-of-recovery LSN reaches the configured synchronous standby.
+for my $standby (
+	$node_standby_1, $node_standby_2, $node_standby_3, $node_standby_4)
+{
+	$standby->stop;
+}
+
+$node_primary->safe_psql(
+	'postgres', q[
+	SET synchronous_commit = 'local';
+	CREATE ROLE post_recovery_bypass LOGIN;
+	ALTER ROLE post_recovery_bypass
+		SET post_recovery_sync_level = 'off';
+	ALTER SYSTEM SET post_recovery_sync_level = 'remote_write';
+	ALTER SYSTEM SET synchronous_standby_names =
+		'ANY 2 (standby1, standby2)';
+	CREATE TABLE post_recovery_sync_test (a int);
+	INSERT INTO post_recovery_sync_test VALUES (1);]);
+$node_primary->stop('immediate');
+$node_primary->start;
+
+my $startup_stderr = '';
+isnt(
+	$node_primary->psql(
+		'postgres', 'SELECT 1', stderr => \$startup_stderr),
+	0,
+	'connection is rejected while post-recovery sync is pending');
+like(
+	$startup_stderr,
+	qr/cannot connect until synchronous replication is established/,
+	'post-recovery sync rejection reports the reason');
+
+is(
+	$node_primary->safe_psql(
+		'postgres', 'SELECT 1', connstr => 'user=post_recovery_bypass'),
+	'1',
+	'role with post-recovery synchronization disabled can connect');
+
+$node_standby_1->start;
+$node_standby_1->poll_query_until(
+	'postgres', 'SELECT count(*) = 1 FROM post_recovery_sync_test')
+  or die "first standby did not catch up";
+pass('first standby replays WAL generated before primary restart');
+
+$startup_stderr = '';
+isnt(
+	$node_primary->psql(
+		'postgres', 'SELECT 1', stderr => \$startup_stderr),
+	0,
+	'ordinary connection remains rejected with only one standby caught up');
+
+$node_standby_2->start;
+$node_primary->poll_query_until(
+	'postgres', 'SELECT count(*) = 1 FROM post_recovery_sync_test')
+  or die "ordinary connections did not open after quorum caught up";
+pass('ordinary connections open after standby quorum catches up');
+
+$node_standby_2->poll_query_until(
+	'postgres', 'SELECT count(*) = 1 FROM post_recovery_sync_test')
+  or die "second standby did not catch up";
+pass('second standby replays WAL generated before primary restart');
+
+# An empty synchronous_standby_names is an explicit way for an operator to
+# bypass the startup check when no standby can catch up.
+$node_primary->safe_psql(
+	'postgres', q[
+	ALTER SYSTEM SET synchronous_standby_names = '';
+	SELECT pg_reload_conf();]);
+$node_standby_1->stop;
+$node_standby_2->stop;
+$node_primary->stop('immediate');
+$node_primary->start;
+is(
+	$node_primary->safe_psql('postgres', 'SELECT 1'),
+	'1',
+	'empty synchronous_standby_names bypasses post-recovery sync');
+
 done_testing();
