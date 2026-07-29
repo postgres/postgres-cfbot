@@ -3130,37 +3130,52 @@ select indexrelid::regclass, indisclustered from pg_index
   order by indexrelid::regclass::text;
 drop table alttype_cluster;
 
--- A partition index keeps its name when rebuilt through the parent.
+-- Partition indexes keep their names and clustered status when rebuilt
+-- through the parent.
 create table alttype_part (a int not null, b int) partition by range (a);
 create table alttype_part_child (a int not null, b int);
 create index alttype_part_child_custom_idx on alttype_part_child (a, b);
 create index alttype_part_idx on alttype_part (a, b);
 alter table alttype_part attach partition alttype_part_child
   for values from (0) to (10);
+create index alttype_part_other_idx on alttype_part (b);
+alter table alttype_part_child cluster on alttype_part_child_custom_idx;
 alter table alttype_part alter column b type bigint;
-select indexrelid::regclass
-  from pg_index where indrelid = 'alttype_part_child'::regclass;
+select indexrelid::regclass, indisclustered
+  from pg_index where indrelid = 'alttype_part_child'::regclass
+  order by indexrelid::regclass::text;
 drop table alttype_part;
 
--- Names are preserved throughout a multi-level partition index hierarchy.
+-- Names and clustered status are preserved throughout a multi-level
+-- partition index hierarchy.
 create table alttype_part_multi (a int, b int) partition by range (a);
 create index alttype_part_multi_idx on alttype_part_multi (a, b);
 create table alttype_part_multi_mid (a int, b int)
   partition by range (a);
 create index alttype_part_multi_mid_custom_idx
   on alttype_part_multi_mid (a, b);
-create table alttype_part_multi_leaf (a int, b int);
-create index alttype_part_multi_leaf_custom_idx
-  on alttype_part_multi_leaf (a, b);
-alter table alttype_part_multi_mid attach partition alttype_part_multi_leaf
+create table alttype_part_multi_cluster (a int, b int);
+create index alttype_part_multi_cluster_custom_idx
+  on alttype_part_multi_cluster (a, b);
+alter table alttype_part_multi_mid attach partition alttype_part_multi_cluster
   for values from (0) to (10);
+create table alttype_part_multi_repack (a int, b int);
+create index alttype_part_multi_repack_custom_idx
+  on alttype_part_multi_repack (a, b);
+alter table alttype_part_multi_mid attach partition alttype_part_multi_repack
+  for values from (10) to (20);
 alter table alttype_part_multi attach partition alttype_part_multi_mid
   for values from (0) to (100);
+cluster alttype_part_multi_cluster
+  using alttype_part_multi_cluster_custom_idx;
+repack alttype_part_multi_repack
+  using index alttype_part_multi_repack_custom_idx;
 alter table alttype_part_multi alter column b type bigint;
-select indexrelid::regclass
+select indexrelid::regclass, indisclustered
   from pg_index
   where indrelid in ('alttype_part_multi_mid'::regclass,
-                     'alttype_part_multi_leaf'::regclass)
+                     'alttype_part_multi_cluster'::regclass,
+                     'alttype_part_multi_repack'::regclass)
   order by indexrelid::regclass::text;
 drop table alttype_part_multi;
 
