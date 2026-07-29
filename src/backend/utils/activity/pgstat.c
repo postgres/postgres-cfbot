@@ -69,6 +69,7 @@
  * To keep things manageable, stats handling is split across several
  * files. Infrastructure pieces are in:
  * - pgstat.c - this file, to tie it all together
+ * - pgstat_per_backend.c - generic per-backend statistics infrastructure
  * - pgstat_shmem.c - nearly everything dealing with shared memory, including
  *   the maintenance of hashtable entries
  * - pgstat_xact.c - transactional integration, including the transactional
@@ -189,7 +190,6 @@ static void pgstat_reset_after_failure(void);
 
 static bool pgstat_flush_pending_entries(bool nowait);
 
-static void pgstat_prep_snapshot(void);
 static void pgstat_build_snapshot(void);
 static void pgstat_build_snapshot_fixed(PgStat_Kind kind);
 
@@ -688,6 +688,13 @@ pgstat_initialize(void)
 
 	pgstat_attach_shmem();
 
+	/*
+	 * Activate per-backend statistics entries here. This also covers
+	 * processes that never call InitPostgres(), such as shared-memory-only
+	 * background workers.
+	 */
+	pgstat_create_my_per_backend_entries();
+
 	pgstat_init_snapshot_fixed();
 
 	/* Backend initialization callbacks */
@@ -1155,7 +1162,12 @@ pgstat_init_snapshot_fixed(void)
 	}
 }
 
-static void
+/*
+ * Prepare the backend-local statistics snapshot.
+ *
+ * Clear invalidated snapshot state first. NONE mode does not need a cache.
+ */
+void
 pgstat_prep_snapshot(void)
 {
 	if (force_stats_snapshot_clear)
@@ -1174,6 +1186,57 @@ pgstat_prep_snapshot(void)
 		pgstat_snapshot_create(pgStatLocal.snapshot.context,
 							   PGSTAT_SNAPSHOT_HASH_SIZE,
 							   NULL);
+}
+
+/*
+ * Look up an entry in the backend-local statistics snapshot.
+ *
+ * The snapshot must have been prepared by pgstat_prep_snapshot(). Set *found
+ * for both entries containing data and cached negative lookups.
+ */
+void *
+pgstat_lookup_snapshot_entry(const PgStat_HashKey *key, bool *found)
+{
+	PgStat_SnapshotEntry *entry;
+
+	Assert(pgstat_fetch_consistency > PGSTAT_FETCH_CONSISTENCY_NONE);
+	Assert(pgStatLocal.snapshot.stats != NULL);
+
+	entry = pgstat_snapshot_lookup(pgStatLocal.snapshot.stats, *key);
+	*found = entry != NULL;
+
+	return entry != NULL ? entry->data : NULL;
+}
+
+/*
+ * Copy an entry into the backend-local statistics snapshot.
+ *
+ * A NULL data pointer records a negative lookup. Return an existing entry
+ * without replacing it if the key was already cached.
+ */
+void *
+pgstat_cache_snapshot_entry(const PgStat_HashKey *key, const void *data,
+							Size data_len)
+{
+	PgStat_SnapshotEntry *entry;
+	bool		found;
+
+	Assert(pgstat_fetch_consistency > PGSTAT_FETCH_CONSISTENCY_NONE);
+	Assert(pgStatLocal.snapshot.stats != NULL);
+
+	entry = pgstat_snapshot_insert(pgStatLocal.snapshot.stats, *key, &found);
+	if (found)
+		return entry->data;
+
+	if (data != NULL)
+	{
+		entry->data = MemoryContextAlloc(pgStatLocal.snapshot.context, data_len);
+		memcpy(entry->data, data, data_len);
+	}
+	else
+		entry->data = NULL;
+
+	return entry->data;
 }
 
 static void
@@ -1559,6 +1622,11 @@ pgstat_register_kind(PgStat_Kind kind, const PgStat_KindInfo *kind_info)
 				(errmsg("failed to register custom cumulative statistics \"%s\" with ID %u", kind_info->name, kind),
 				 errdetail("Custom cumulative statistics must be registered while initializing modules in \"%s\".",
 						   "shared_preload_libraries")));
+
+	if (kind_info->per_backend_entry_size != 0)
+		ereport(ERROR,
+				(errmsg("failed to register custom cumulative statistics \"%s\" with ID %u", kind_info->name, kind),
+				 errdetail("Per-backend statistics are not supported for custom cumulative statistics.")));
 
 	/*
 	 * Check some data for fixed-numbered stats.
