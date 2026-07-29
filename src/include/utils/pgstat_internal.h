@@ -380,6 +380,26 @@ typedef struct PgStat_KindInfo
 	 */
 	void		(*snapshot_cb) (void);
 
+	/*
+	 * Per-backend dshash support for built-in fixed-numbered statistics kinds
+	 * that also maintain per-backend entries in a dedicated dshash. If
+	 * per_backend_data_len is non-zero, the generic infrastructure handles
+	 * attach, fetch, accumulate, and snapshot pre-caching automatically.
+	 *
+	 * Each entry starts with PgStatShared_PerBackendEntry, followed by the
+	 * kind-specific statistics payload.
+	 */
+	uint32		per_backend_data_off;	/* offset of stats data in entry */
+	uint32		per_backend_data_len;	/* size of stats data in entry */
+	/* offset of dshash_table_handle in shared struct */
+	uint32		per_backend_hash_handle_off;
+
+	/*
+	 * Callback to accumulate one per-backend entry into a destination of the
+	 * kind's statistics type. Called with the entry's content lock held.
+	 */
+	void		(*per_backend_acc_cb) (void *dst, void *entry);
+
 	/* name of the kind of stats */
 	const char *const name;
 } PgStat_KindInfo;
@@ -478,6 +498,17 @@ typedef struct PgStatShared_SLRU
 	LWLock		lock;
 	PgStat_SLRUStats stats[SLRU_NUM_ELEMENTS];
 } PgStatShared_SLRU;
+
+/*
+ * Common header for entries in per-backend statistics dshashes. The
+ * ProcNumber key must be the first field for dshash.
+ */
+typedef struct PgStatShared_PerBackendEntry
+{
+	ProcNumber	key;
+	BackendType backend_type;
+	LWLock		lock;
+} PgStatShared_PerBackendEntry;
 
 typedef struct PgStatShared_Wal
 {
@@ -623,6 +654,9 @@ typedef struct PgStat_Snapshot
 
 	PgStat_WalStats wal;
 
+	/* Per-backend snapshot hash */
+	struct pgstat_per_backend_snapshot_hash *per_backend_stats;
+
 	/*
 	 * Data in snapshot for custom fixed-numbered statistics, indexed by
 	 * (PgStat_Kind - PGSTAT_KIND_CUSTOM_MIN).  Each entry is allocated in
@@ -696,6 +730,17 @@ extern PgStat_EntryRef *pgstat_fetch_pending_entry(PgStat_Kind kind,
 extern void *pgstat_fetch_entry(PgStat_Kind kind, Oid dboid, uint64 objid,
 								bool *may_free);
 extern void pgstat_snapshot_fixed(PgStat_Kind kind);
+extern void pgstat_maybe_clear_snapshot(void);
+
+/* Generic per-backend helpers */
+extern void pgstat_create_my_per_backend_entries(void);
+extern dshash_table *pgstat_per_backend_attach(PgStat_Kind kind);
+extern void *pgstat_lock_my_per_backend_entry(PgStat_Kind kind, bool nowait);
+extern void pgstat_per_backend_snapshot(PgStat_Kind kind, dshash_table *hash,
+										void *snap);
+extern void *pgstat_fetch_per_backend(PgStat_Kind kind, ProcNumber procnum);
+extern void pgstat_acc_my_per_backend(PgStat_Kind kind, LWLock *lock);
+extern void pgstat_acc_all_per_backend(PgStat_Kind kind, LWLock *lock);
 
 
 /*

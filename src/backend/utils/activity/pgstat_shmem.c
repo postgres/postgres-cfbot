@@ -169,6 +169,47 @@ StatsShmemRequest(void *arg)
 }
 
 /*
+ * Create a dshash for each built-in kind that stores per-backend statistics.
+ * Derive the entry size and handle location from the kind metadata, just as
+ * attachment does.
+ */
+static void
+pgstat_create_per_backend_hashes(dsa_area *dsa, PgStat_ShmemControl *ctl)
+{
+	dshash_parameters params = {
+		sizeof(ProcNumber),
+		0,
+		dshash_memcmp,
+		dshash_memhash,
+		dshash_memcpy,
+		LWTRANCHE_PGSTATS_HASH
+	};
+
+	for (PgStat_Kind kind = PGSTAT_KIND_BUILTIN_MIN;
+		 kind <= PGSTAT_KIND_BUILTIN_MAX; kind++)
+	{
+		const PgStat_KindInfo *kind_info = pgstat_get_kind_info(kind);
+		char	   *shared_struct;
+		dshash_table_handle *handle_ptr;
+		dshash_table *dsh;
+
+		if (kind_info == NULL || kind_info->per_backend_data_len == 0)
+			continue;
+
+		shared_struct = (char *) ctl + kind_info->shared_ctl_off;
+		handle_ptr = (dshash_table_handle *)
+			(shared_struct + kind_info->per_backend_hash_handle_off);
+
+		params.entry_size = kind_info->per_backend_data_off +
+			kind_info->per_backend_data_len;
+
+		dsh = dshash_create(dsa, &params, NULL);
+		*handle_ptr = dshash_get_hash_table_handle(dsh);
+		dshash_detach(dsh);
+	}
+}
+
+/*
  * Initialize cumulative statistics system during startup
  */
 static void
@@ -209,6 +250,11 @@ StatsShmemInit(void *arg)
 
 	/* lift limit set above */
 	dsa_set_size_limit(dsa, -1);
+
+	/*
+	 * Create per-backend hashes while the local DSA reference is available.
+	 */
+	pgstat_create_per_backend_hashes(dsa, ctl);
 
 	/*
 	 * Postmaster will never access these again, thus free the local
