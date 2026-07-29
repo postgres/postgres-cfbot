@@ -5132,6 +5132,47 @@ HINT:  If it is safe for all REPLICATION users to use this library as an output 
 
     <variablelist>
 
+     <varlistentry id="guc-post-recovery-sync-level"
+                   xreflabel="post_recovery_sync_level">
+      <term><varname>post_recovery_sync_level</varname> (<type>enum</type>)
+      <indexterm>
+       <primary><varname>post_recovery_sync_level</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Specifies how far the end-of-recovery WAL location must be processed
+        by the synchronous standbys before ordinary client connections are
+        allowed after server startup.  Valid values are
+        <literal>remote_apply</literal>, <literal>on</literal>,
+        <literal>remote_write</literal>, <literal>local</literal>, and
+        <literal>off</literal> (the default).  The meanings of these values
+        are the same as for <xref linkend="guc-synchronous-commit"/>.
+        Values <literal>local</literal> and <literal>off</literal> disable
+        this check.
+       </para>
+       <para>
+        WAL sender connections are allowed while the check is pending, so
+        that standbys can connect and make progress.  Once a synchronization
+        level has been reached, sessions requiring that level or a weaker
+        level remain able to connect until the next server start, even if
+        those standbys subsequently disconnect.  Setting
+        <xref linkend="guc-synchronous-standby-names"/> to an empty value
+        explicitly bypasses the check.
+       </para>
+       <para>
+        This parameter can be set differently for individual roles or
+        databases.  For example, a role configured with
+        <literal>remote_apply</literal> can remain unable to connect after a
+        role configured with <literal>remote_write</literal> is allowed.
+        Only superusers and users with the appropriate <literal>SET</literal>
+        privilege can change this setting.  The value is consulted during
+        connection establishment; changing it in an established session does
+        not affect that session.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-synchronous-standby-names" xreflabel="synchronous_standby_names">
       <term><varname>synchronous_standby_names</varname> (<type>string</type>)
       <indexterm>
