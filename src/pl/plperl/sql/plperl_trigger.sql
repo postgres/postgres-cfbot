@@ -258,3 +258,41 @@ FOR EACH ROW EXECUTE PROCEDURE generated_test_func1();
 TRUNCATE trigger_test_generated;
 INSERT INTO trigger_test_generated (i) VALUES (1);
 SELECT * FROM trigger_test_generated;
+
+-- test FOR PORTION OF
+
+CREATE TABLE trigger_test_temporal (
+    id int,
+    valid_at daterange,
+    v varchar
+);
+INSERT INTO trigger_test_temporal VALUES (1, '[2018-01-01,2020-01-01)', 'one');
+
+CREATE FUNCTION for_portion_of_trigger() RETURNS trigger LANGUAGE plperl AS $$
+    my $name = $_TD->{period_name};
+    my $bounds = $_TD->{period_bounds};
+    elog(NOTICE, "$_TD->{when} $_TD->{event}: period_name = "
+                 . (defined $name ? "'$name'" : 'undef')
+                 . ", period_bounds = "
+                 . (defined $bounds ? "'$bounds'" : 'undef'));
+    return;
+$$;
+
+CREATE TRIGGER for_portion_of_trig
+BEFORE INSERT OR UPDATE OR DELETE ON trigger_test_temporal
+FOR EACH ROW EXECUTE PROCEDURE for_portion_of_trigger();
+
+UPDATE trigger_test_temporal
+    FOR PORTION OF valid_at FROM '2019-01-01' TO '2019-06-01'
+    SET v = 'updated';
+SELECT * FROM trigger_test_temporal ORDER BY valid_at;
+
+DELETE FROM trigger_test_temporal
+    FOR PORTION OF valid_at FROM '2018-06-01' TO '2018-09-01';
+SELECT * FROM trigger_test_temporal ORDER BY valid_at;
+
+-- no FOR PORTION OF, so the variables are undef
+UPDATE trigger_test_temporal SET v = 'all of it';
+
+DROP TABLE trigger_test_temporal;
+DROP FUNCTION for_portion_of_trigger();
