@@ -93,8 +93,6 @@ SELECT customer_name FROM GRAPH_TABLE (myshop MATCH (c IS customers WHERE c.addr
 ERROR:  syntax error at or near "COLUMNS"
 LINE 1: ...mers WHERE c.address = 'US')-[IS customer_orders] COLUMNS (c...
                                                              ^
-SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers), (o IS orders) COLUMNS (c.name AS customer_name));  -- error
-ERROR:  multiple path patterns in one GRAPH_TABLE clause not supported
 SELECT * FROM GRAPH_TABLE (myshop MATCH COLUMNS (1 AS col));  -- error, empty match clause
 ERROR:  syntax error at or near "COLUMNS"
 LINE 1: SELECT * FROM GRAPH_TABLE (myshop MATCH COLUMNS (1 AS col));
@@ -1149,5 +1147,282 @@ SELECT * FROM GRAPH_TABLE (g1 MATCH (src IS vl1) COLUMNS (src.vname)) gt FOR UPD
  v12
  v13
 (3 rows)
+
+-- Multi-pattern path tests (comma-separated path patterns in MATCH)
+-- disconnected patterns: cross product of customers and orders
+-- (3 customers x 3 orders = 9 rows, projecting c.name only)
+SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers), (o IS orders) COLUMNS (c.name AS customer_name));
+ customer_name 
+---------------
+ customer1
+ customer2
+ customer3
+ customer1
+ customer2
+ customer3
+ customer1
+ customer2
+ customer3
+(9 rows)
+
+-- disconnected patterns: one side yields no match -> empty result
+SELECT * FROM GRAPH_TABLE (myshop
+    MATCH (c IS customers WHERE c.address = 'NONEXISTENT'), (o IS orders)
+    COLUMNS (c.name AS customer_name));
+ customer_name 
+---------------
+(0 rows)
+
+-- Basic multi-pattern: (a)->(b), (b)->(c) where b is shared
+SELECT a_name, b_name, c_name FROM GRAPH_TABLE (g1
+    MATCH (a IS vl1)-[e1 IS el1]->(b IS vl2),
+          (b)-[e2 IS el2]->(c IS vl3)
+    COLUMNS (a.vname AS a_name, b.vname AS b_name, c.vname AS c_name)
+) ORDER BY a_name, b_name, c_name;
+ a_name | b_name | c_name 
+--------+--------+--------
+ v11    | v22    | v32
+(1 row)
+
+-- Multi-pattern with same start vertex reaching different destinations
+SELECT a_name, b_name, c_name FROM GRAPH_TABLE (g1
+    MATCH (a IS vl1)-[]->(b IS vl2),
+          (a)-[]->(c IS vl3)
+    COLUMNS (a.vname AS a_name, b.vname AS b_name, c.vname AS c_name)
+) ORDER BY a_name, b_name, c_name;
+ a_name | b_name | c_name 
+--------+--------+--------
+ v11    | v22    | v22
+ v11    | v22    | v31
+ v11    | v22    | v33
+ v12    | v21    | v21
+ v13    | v23    | v23
+(5 rows)
+
+-- Multi-pattern: two patterns joined via shared start vertex 'a'
+SELECT a_name, b2_name, b3_name FROM GRAPH_TABLE (g1
+    MATCH (a IS vl1)-[]->(b2 IS vl2),
+          (a)-[]->(b3 IS vl3)
+    COLUMNS (a.vname AS a_name, b2.vname AS b2_name, b3.vname AS b3_name)
+) ORDER BY a_name, b2_name, b3_name;
+ a_name | b2_name | b3_name 
+--------+---------+---------
+ v11    | v22     | v22
+ v11    | v22     | v31
+ v11    | v22     | v33
+ v12    | v21     | v21
+ v13    | v23     | v23
+(5 rows)
+
+-- Same variable with same label (should work)
+SELECT a_name, b_name, c_name FROM GRAPH_TABLE (g1
+    MATCH (a IS vl1)-[]->(b IS vl2),
+          (b IS vl2)-[]->(c IS vl3)
+    COLUMNS (a.vname AS a_name, b.vname AS b_name, c.vname AS c_name)
+) ORDER BY 1, 2, 3;
+ a_name | b_name | c_name 
+--------+--------+--------
+ v11    | v22    | v32
+(1 row)
+
+-- Same variable with different label expressions
+SELECT a_name, b_name, c_name FROM GRAPH_TABLE (g1
+    MATCH (a IS vl1)-[]->(b IS vl2),
+          (b IS vl3)-[]->(c IS vl3)
+    COLUMNS (a.vname AS a_name, b.vname AS b_name, c.vname AS c_name)
+) ORDER BY 1, 2, 3;
+ERROR:  element patterns with same variable name "b" but different label expressions are not supported
+-- Same variable with label OR expression (b IS vl2|vl3)
+SELECT a_name, b_name, c_name FROM GRAPH_TABLE (g1
+    MATCH (a IS vl1)-[]->(b IS vl2|vl3),
+          (b)-[]->(c IS vl3)
+    COLUMNS (a.vname AS a_name, b.vname AS b_name, c.vname AS c_name)
+) ORDER BY 1, 2, 3;
+ a_name | b_name | c_name 
+--------+--------+--------
+ v11    | v22    | v32
+ v11    | v33    | v33
+ v11    | v33    | v33
+(3 rows)
+
+-- Disconnected patterns (no shared variables) - should produce cross product
+-- (a)->(b) and (c)->(d) are independent, result is Cartesian product
+SELECT a_name, b_name, c_name, d_name FROM GRAPH_TABLE (g1
+    MATCH (a IS vl1)-[]->(b IS vl2),
+          (c IS vl1)-[]->(d IS vl3)
+    COLUMNS (a.vname AS a_name, b.vname AS b_name,
+             c.vname AS c_name, d.vname AS d_name)
+) ORDER BY 1, 2, 3, 4;
+ a_name | b_name | c_name | d_name 
+--------+--------+--------+--------
+ v11    | v22    | v11    | v22
+ v11    | v22    | v11    | v31
+ v11    | v22    | v11    | v33
+ v11    | v22    | v12    | v21
+ v11    | v22    | v13    | v23
+ v12    | v21    | v11    | v22
+ v12    | v21    | v11    | v31
+ v12    | v21    | v11    | v33
+ v12    | v21    | v12    | v21
+ v12    | v21    | v13    | v23
+ v13    | v23    | v11    | v22
+ v13    | v23    | v11    | v31
+ v13    | v23    | v11    | v33
+ v13    | v23    | v12    | v21
+ v13    | v23    | v13    | v23
+(15 rows)
+
+-- Disconnected patterns: verify cross join by checking row count equals product
+-- vl1->vl2 gives 3 paths; vl1->vl3 gives 5 paths (v2 also carries vl3);
+-- cross product = 3 x 5 = 15 rows
+SELECT count(*) FROM GRAPH_TABLE (g1
+    MATCH (a IS vl1)-[]->(b IS vl2),
+          (c IS vl1)-[]->(d IS vl3)
+    COLUMNS (1 AS one)
+);
+ count 
+-------
+    15
+(1 row)
+
+-- Disconnected patterns: single vertex patterns (no edges)
+-- vl1 has 3 rows (v1), vl3 has 6 rows (v2+v3), cross product = 18 rows
+SELECT a_name, b_name FROM GRAPH_TABLE (g1
+    MATCH (a IS vl1), (b IS vl3)
+    COLUMNS (a.vname AS a_name, b.vname AS b_name)
+) ORDER BY 1, 2;
+ a_name | b_name 
+--------+--------
+ v11    | v21
+ v11    | v22
+ v11    | v23
+ v11    | v31
+ v11    | v32
+ v11    | v33
+ v12    | v21
+ v12    | v22
+ v12    | v23
+ v12    | v31
+ v12    | v32
+ v12    | v33
+ v13    | v21
+ v13    | v22
+ v13    | v23
+ v13    | v31
+ v13    | v32
+ v13    | v33
+(18 rows)
+
+-- Disconnected patterns: three independent patterns (3-way cross product)
+-- vl1 has 3 rows, vl2 has 3 rows, vl3 has 6 rows = 54 rows
+SELECT a_name, b_name, c_name FROM GRAPH_TABLE (g1
+    MATCH (a IS vl1), (b IS vl2), (c IS vl3)
+    COLUMNS (a.vname AS a_name, b.vname AS b_name, c.vname AS c_name)
+) ORDER BY 1, 2, 3;
+ a_name | b_name | c_name 
+--------+--------+--------
+ v11    | v21    | v21
+ v11    | v21    | v22
+ v11    | v21    | v23
+ v11    | v21    | v31
+ v11    | v21    | v32
+ v11    | v21    | v33
+ v11    | v22    | v21
+ v11    | v22    | v22
+ v11    | v22    | v23
+ v11    | v22    | v31
+ v11    | v22    | v32
+ v11    | v22    | v33
+ v11    | v23    | v21
+ v11    | v23    | v22
+ v11    | v23    | v23
+ v11    | v23    | v31
+ v11    | v23    | v32
+ v11    | v23    | v33
+ v12    | v21    | v21
+ v12    | v21    | v22
+ v12    | v21    | v23
+ v12    | v21    | v31
+ v12    | v21    | v32
+ v12    | v21    | v33
+ v12    | v22    | v21
+ v12    | v22    | v22
+ v12    | v22    | v23
+ v12    | v22    | v31
+ v12    | v22    | v32
+ v12    | v22    | v33
+ v12    | v23    | v21
+ v12    | v23    | v22
+ v12    | v23    | v23
+ v12    | v23    | v31
+ v12    | v23    | v32
+ v12    | v23    | v33
+ v13    | v21    | v21
+ v13    | v21    | v22
+ v13    | v21    | v23
+ v13    | v21    | v31
+ v13    | v21    | v32
+ v13    | v21    | v33
+ v13    | v22    | v21
+ v13    | v22    | v22
+ v13    | v22    | v23
+ v13    | v22    | v31
+ v13    | v22    | v32
+ v13    | v22    | v33
+ v13    | v23    | v21
+ v13    | v23    | v22
+ v13    | v23    | v23
+ v13    | v23    | v31
+ v13    | v23    | v32
+ v13    | v23    | v33
+(54 rows)
+
+-- Mixed: partially connected + disconnected patterns
+-- (a)->(b), (b)->(c) are connected via 'b', but (d) is disconnected
+SELECT a_name, b_name, c_name, d_name FROM GRAPH_TABLE (g1
+    MATCH (a IS vl1)-[]->(b IS vl2),
+          (b)-[]->(c IS vl3),
+          (d IS vl1)
+    COLUMNS (a.vname AS a_name, b.vname AS b_name,
+             c.vname AS c_name, d.vname AS d_name)
+) ORDER BY 1, 2, 3, 4;
+ a_name | b_name | c_name | d_name 
+--------+--------+--------+--------
+ v11    | v22    | v32    | v11
+ v11    | v22    | v32    | v12
+ v11    | v22    | v32    | v13
+(3 rows)
+
+-- Disconnected patterns: verify row count with different sizes
+-- Using WHERE to filter one side: (a IS vl1 WHERE vprop1 = 10) has 1 row
+-- Cross with (b IS vl3) which has 6 rows = 6 rows
+SELECT a_name, b_name FROM GRAPH_TABLE (g1
+    MATCH (a IS vl1 WHERE a.vprop1 = 10), (b IS vl3)
+    COLUMNS (a.vname AS a_name, b.vname AS b_name)
+) ORDER BY 1, 2;
+ a_name | b_name 
+--------+--------
+ v11    | v21
+ v11    | v22
+ v11    | v23
+ v11    | v31
+ v11    | v32
+ v11    | v33
+(6 rows)
+
+-- Star pattern: three patterns with shared hub 'a' (A->B, A->C, D->A)
+-- All joined via 'a', NOT a cross product
+SELECT a_name, b_name, c_name, d_name FROM GRAPH_TABLE (g1
+    MATCH (a IS vl1)-[]->(b IS vl2),
+          (a)-[]->(c IS vl3),
+          (d IS vl2)-[]->(a)
+    COLUMNS (a.vname AS a_name, b.vname AS b_name,
+             c.vname AS c_name, d.vname AS d_name)
+) ORDER BY 1, 2, 3, 4;
+ a_name | b_name | c_name | d_name 
+--------+--------+--------+--------
+ v12    | v21    | v21    | v21
+ v13    | v23    | v23    | v23
+(2 rows)
 
 -- leave the objects behind for pg_upgrade/pg_dump tests
