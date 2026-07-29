@@ -72,6 +72,7 @@ typedef struct SyncRepConfigData
 } SyncRepConfigData;
 
 extern PGDLLIMPORT SyncRepConfigData *SyncRepConfig;
+extern PGDLLIMPORT int post_recovery_sync_level;
 
 /* user-settable parameters for synchronous replication */
 extern PGDLLIMPORT char *SyncRepStandbyNames;
@@ -103,5 +104,8 @@ extern int	syncrep_yylex(union YYSTYPE *yylval_param, char **syncrep_parse_error
 extern void syncrep_yyerror(SyncRepConfigData **syncrep_parse_result_p, char **syncrep_parse_error_msg_p, yyscan_t yyscanner, const char *message);
 extern void syncrep_scanner_init(const char *str, yyscan_t *yyscannerp);
 extern void syncrep_scanner_finish(yyscan_t yyscanner);
+
+extern void SyncRepInitPostRecovery(XLogRecPtr recovery_end_lsn);
+extern bool SyncRepPostRecoveryComplete(void);
 
 #endif							/* _SYNCREP_H */
