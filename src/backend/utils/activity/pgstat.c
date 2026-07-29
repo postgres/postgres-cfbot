@@ -70,6 +70,7 @@
  * To keep things manageable, stats handling is split across several
  * files. Infrastructure pieces are in:
  * - pgstat.c - this file, to tie it all together
+ * - pgstat_per_backend.c - generic per-backend statistics infrastructure
  * - pgstat_shmem.c - nearly everything dealing with shared memory, including
  *   the maintenance of hashtable entries
  * - pgstat_xact.c - transactional integration, including the transactional
@@ -689,6 +690,13 @@ pgstat_initialize(void)
 
 	pgstat_attach_shmem();
 
+	/*
+	 * Create and cache per-backend statistics entries here. This also covers
+	 * processes that never call InitPostgres(), such as shared-memory-only
+	 * background workers.
+	 */
+	pgstat_create_my_per_backend_entries();
+
 	pgstat_init_snapshot_fixed();
 
 	/* Backend initialization callbacks */
@@ -962,6 +970,7 @@ pgstat_clear_snapshot(void)
 
 		/* Reset variables */
 		pgStatLocal.snapshot.context = NULL;
+		pgStatLocal.snapshot.per_backend_stats = NULL;
 	}
 
 	/*
@@ -973,6 +982,13 @@ pgstat_clear_snapshot(void)
 
 	/* Reset this flag, as it may be possible that a cleanup was forced. */
 	force_stats_snapshot_clear = false;
+}
+
+void
+pgstat_maybe_clear_snapshot(void)
+{
+	if (force_stats_snapshot_clear)
+		pgstat_clear_snapshot();
 }
 
 void *
@@ -1555,6 +1571,11 @@ pgstat_register_kind(PgStat_Kind kind, const PgStat_KindInfo *kind_info)
 				(errmsg("failed to register custom cumulative statistics \"%s\" with ID %u", kind_info->name, kind),
 				 errdetail("Custom cumulative statistics must be registered while initializing modules in \"%s\".",
 						   "shared_preload_libraries")));
+
+	if (kind_info->per_backend_data_len != 0)
+		ereport(ERROR,
+				(errmsg("failed to register custom cumulative statistics \"%s\" with ID %u", kind_info->name, kind),
+				 errdetail("Per-backend statistics are not supported for custom cumulative statistics.")));
 
 	/*
 	 * Check some data for fixed-numbered stats.

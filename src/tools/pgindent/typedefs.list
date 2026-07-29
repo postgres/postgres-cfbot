@@ -2326,6 +2326,7 @@ PgStatShared_HashEntry
 PgStatShared_Index
 PgStatShared_IO
 PgStatShared_Lock
+PgStatShared_PerBackendEntry
 PgStatShared_Relation
 PgStatShared_ReplSlot
 PgStatShared_SLRU
@@ -2351,6 +2352,9 @@ PgStat_KindInfo
 PgStat_LocalState
 PgStat_Lock
 PgStat_LockEntry
+PgStat_PerBackendLocalState
+PgStat_PerBackendSnapshotEntry
+PgStat_PerBackendSnapshotKey
 PgStat_PendingDroppedStatsItem
 PgStat_PendingIO
 PgStat_PendingLock
