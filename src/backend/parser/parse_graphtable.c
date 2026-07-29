@@ -337,15 +337,6 @@ transformPathPatternList(ParseState *pstate, List *path_pattern)
 	Assert(list_length(path_pattern) > 0);
 
 	/*
-	 * We do not support multiple path patterns in one GRAPH_TABLE clause
-	 * right now. But we may do so in future.
-	 */
-	if (list_length(path_pattern) != 1)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("multiple path patterns in one GRAPH_TABLE clause not supported")));
-
-	/*
 	 * Collect all the variables in the path pattern into the
 	 * GraphTableParseState so that we can detect any non-local element
 	 * variable references. We need to do this before transforming the path
