@@ -164,6 +164,21 @@ StatsShmemSize(void)
 		sz = add_size(sz, MAXALIGN(kind_info->shared_size));
 	}
 
+	/* Add the per-backend arrays for built-in fixed-numbered kinds */
+	for (PgStat_Kind kind = PGSTAT_KIND_BUILTIN_MIN; kind <= PGSTAT_KIND_BUILTIN_MAX; kind++)
+	{
+		const PgStat_KindInfo *kind_info = pgstat_get_kind_info(kind);
+
+		if (!kind_info || kind_info->per_backend_entry_size == 0)
+			continue;
+
+		Assert(kind_info->fixed_amount);
+		Assert(kind_info->per_backend_acc_cb != NULL);
+
+		sz = add_size(sz, MAXALIGN(mul_size(NumPerBackendStatSlots,
+											kind_info->per_backend_entry_size)));
+	}
+
 	return sz;
 }
 
@@ -295,6 +310,36 @@ StatsShmemInit(void *arg)
 
 			kind_info->init_shmem_cb(ptr);
 		}
+	}
+
+	/*
+	 * Allocate and initialize arrays for built-in fixed-numbered kinds that
+	 * keep per-backend statistics.
+	 */
+	memset(ctl->per_backend_arrays, 0, sizeof(ctl->per_backend_arrays));
+
+	for (PgStat_Kind kind = PGSTAT_KIND_BUILTIN_MIN; kind <= PGSTAT_KIND_BUILTIN_MAX; kind++)
+	{
+		const PgStat_KindInfo *kind_info = pgstat_get_kind_info(kind);
+		Size		array_size;
+
+		if (!kind_info || kind_info->per_backend_entry_size == 0)
+			continue;
+
+		array_size = mul_size(NumPerBackendStatSlots, kind_info->per_backend_entry_size);
+
+		ctl->per_backend_arrays[kind] = p;
+
+		for (ProcNumber procnum = 0; procnum < NumPerBackendStatSlots; procnum++)
+		{
+			PgStatShared_PerBackendEntry *entry;
+
+			entry = (PgStatShared_PerBackendEntry *) (p + procnum * kind_info->per_backend_entry_size);
+			LWLockInitialize(&entry->lock, LWTRANCHE_PGSTATS_DATA);
+			entry->backend_type = B_INVALID;
+		}
+
+		p += MAXALIGN(array_size);
 	}
 }
 
