@@ -391,3 +391,58 @@ SELECT * FROM trigger_test_generated;
 ---+---+---
 (0 rows)
 
+-- test FOR PORTION OF
+CREATE TABLE trigger_test_temporal (
+    id int,
+    valid_at daterange,
+    v varchar
+);
+INSERT INTO trigger_test_temporal VALUES (1, '[2018-01-01,2020-01-01)', 'one');
+CREATE FUNCTION for_portion_of_trigger() RETURNS trigger LANGUAGE plperl AS $$
+    my $name = $_TD->{period_name};
+    my $bounds = $_TD->{period_bounds};
+    elog(NOTICE, "$_TD->{when} $_TD->{event}: period_name = "
+                 . (defined $name ? "'$name'" : 'undef')
+                 . ", period_bounds = "
+                 . (defined $bounds ? "'$bounds'" : 'undef'));
+    return;
+$$;
+CREATE TRIGGER for_portion_of_trig
+BEFORE INSERT OR UPDATE OR DELETE ON trigger_test_temporal
+FOR EACH ROW EXECUTE PROCEDURE for_portion_of_trigger();
+UPDATE trigger_test_temporal
+    FOR PORTION OF valid_at FROM '2019-01-01' TO '2019-06-01'
+    SET v = 'updated';
+NOTICE:  BEFORE UPDATE: period_name = 'valid_at', period_bounds = '[01-01-2019,06-01-2019)'
+NOTICE:  BEFORE INSERT: period_name = 'valid_at', period_bounds = '[01-01-2019,06-01-2019)'
+NOTICE:  BEFORE INSERT: period_name = 'valid_at', period_bounds = '[01-01-2019,06-01-2019)'
+SELECT * FROM trigger_test_temporal ORDER BY valid_at;
+ id |        valid_at         |    v    
+----+-------------------------+---------
+  1 | [01-01-2018,01-01-2019) | one
+  1 | [01-01-2019,06-01-2019) | updated
+  1 | [06-01-2019,01-01-2020) | one
+(3 rows)
+
+DELETE FROM trigger_test_temporal
+    FOR PORTION OF valid_at FROM '2018-06-01' TO '2018-09-01';
+NOTICE:  BEFORE DELETE: period_name = 'valid_at', period_bounds = '[06-01-2018,09-01-2018)'
+NOTICE:  BEFORE INSERT: period_name = 'valid_at', period_bounds = '[06-01-2018,09-01-2018)'
+NOTICE:  BEFORE INSERT: period_name = 'valid_at', period_bounds = '[06-01-2018,09-01-2018)'
+SELECT * FROM trigger_test_temporal ORDER BY valid_at;
+ id |        valid_at         |    v    
+----+-------------------------+---------
+  1 | [01-01-2018,06-01-2018) | one
+  1 | [09-01-2018,01-01-2019) | one
+  1 | [01-01-2019,06-01-2019) | updated
+  1 | [06-01-2019,01-01-2020) | one
+(4 rows)
+
+-- no FOR PORTION OF, so the variables are undef
+UPDATE trigger_test_temporal SET v = 'all of it';
+NOTICE:  BEFORE UPDATE: period_name = undef, period_bounds = undef
+NOTICE:  BEFORE UPDATE: period_name = undef, period_bounds = undef
+NOTICE:  BEFORE UPDATE: period_name = undef, period_bounds = undef
+NOTICE:  BEFORE UPDATE: period_name = undef, period_bounds = undef
+DROP TABLE trigger_test_temporal;
+DROP FUNCTION for_portion_of_trigger();
