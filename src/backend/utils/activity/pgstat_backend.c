@@ -42,14 +42,6 @@ static bool backend_has_iostats = false;
 static bool backend_has_lockstats = false;
 
 /*
- * WAL usage counters saved from pgWalUsage at the previous call to
- * pgstat_flush_backend().  This is used to calculate how much WAL usage
- * happens between pgstat_flush_backend() calls, by subtracting the
- * previous counters from the current ones.
- */
-static WalUsage prevBackendWalUsage;
-
-/*
  * Utility routines to report I/O stats for backends, kept here to avoid
  * exposing PendingBackendStats to the outside world.
  */
@@ -245,58 +237,6 @@ pgstat_flush_backend_entry_io(PgStat_EntryRef *entry_ref)
 }
 
 /*
- * To determine whether WAL usage happened.
- */
-static inline bool
-pgstat_backend_wal_have_pending(void)
-{
-	return (pgWalUsage.wal_records != prevBackendWalUsage.wal_records);
-}
-
-/*
- * Flush out locally pending backend WAL statistics.  Locking is managed
- * by the caller.
- */
-static void
-pgstat_flush_backend_entry_wal(PgStat_EntryRef *entry_ref)
-{
-	PgStatShared_Backend *shbackendent;
-	PgStat_WalCounters *bktype_shstats;
-	WalUsage	wal_usage_diff = {0};
-
-	/*
-	 * This function can be called even if nothing at all has happened for WAL
-	 * statistics.  In this case, avoid unnecessarily modifying the stats
-	 * entry.
-	 */
-	if (!pgstat_backend_wal_have_pending())
-		return;
-
-	shbackendent = (PgStatShared_Backend *) entry_ref->shared_stats;
-	bktype_shstats = &shbackendent->stats.wal_counters;
-
-	/*
-	 * Calculate how much WAL usage counters were increased by subtracting the
-	 * previous counters from the current ones.
-	 */
-	WalUsageAccumDiff(&wal_usage_diff, &pgWalUsage, &prevBackendWalUsage);
-
-#define WALSTAT_ACC(fld, var_to_add) \
-	(bktype_shstats->fld += var_to_add.fld)
-	WALSTAT_ACC(wal_buffers_full, wal_usage_diff);
-	WALSTAT_ACC(wal_records, wal_usage_diff);
-	WALSTAT_ACC(wal_fpi, wal_usage_diff);
-	WALSTAT_ACC(wal_bytes, wal_usage_diff);
-	WALSTAT_ACC(wal_fpi_bytes, wal_usage_diff);
-#undef WALSTAT_ACC
-
-	/*
-	 * Save the current counters for the subsequent calculation of WAL usage.
-	 */
-	prevBackendWalUsage = pgWalUsage;
-}
-
-/*
  * Flush out locally pending backend lock statistics.  Locking is managed
  * by the caller.
  */
@@ -345,11 +285,6 @@ pgstat_flush_backend(bool nowait, uint32 flags)
 	if ((flags & PGSTAT_BACKEND_FLUSH_IO) && backend_has_iostats)
 		has_pending_data = true;
 
-	/* Some WAL data pending? */
-	if ((flags & PGSTAT_BACKEND_FLUSH_WAL) &&
-		pgstat_backend_wal_have_pending())
-		has_pending_data = true;
-
 	/* Some lock data pending? */
 	if ((flags & PGSTAT_BACKEND_FLUSH_LOCK) && backend_has_lockstats)
 		has_pending_data = true;
@@ -365,9 +300,6 @@ pgstat_flush_backend(bool nowait, uint32 flags)
 	/* Flush requested statistics */
 	if (flags & PGSTAT_BACKEND_FLUSH_IO)
 		pgstat_flush_backend_entry_io(entry_ref);
-
-	if (flags & PGSTAT_BACKEND_FLUSH_WAL)
-		pgstat_flush_backend_entry_wal(entry_ref);
 
 	if (flags & PGSTAT_BACKEND_FLUSH_LOCK)
 		pgstat_flush_backend_entry_lock(entry_ref);
@@ -411,13 +343,6 @@ pgstat_create_backend(ProcNumber procnum)
 	MemSet(&PendingBackendStats, 0, sizeof(PgStat_BackendPending));
 	backend_has_iostats = false;
 	backend_has_lockstats = false;
-
-	/*
-	 * Initialize prevBackendWalUsage with pgWalUsage so that
-	 * pgstat_backend_flush_cb() can calculate how much pgWalUsage counters
-	 * are increased by subtracting prevBackendWalUsage from pgWalUsage.
-	 */
-	prevBackendWalUsage = pgWalUsage;
 }
 
 /*
