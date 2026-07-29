@@ -1769,19 +1769,33 @@ Datum
 pg_stat_get_backend_wal(PG_FUNCTION_ARGS)
 {
 	int			pid;
-	PgStat_Backend *backend_stats;
-	PgStat_WalCounters bktype_stats;
+	PGPROC	   *proc;
+	ProcNumber	procnum;
+	PgBackendStatus *beentry;
+	PgStat_WalStats *wal_stats;
 
 	pid = PG_GETARG_INT32(0);
-	backend_stats = pgstat_fetch_stat_backend_by_pid(pid, NULL);
 
-	if (!backend_stats)
+	proc = BackendPidGetProc(pid);
+
+	if (!proc)
+		proc = AuxiliaryPidGetProc(pid);
+	if (!proc)
 		PG_RETURN_NULL();
 
-	bktype_stats = backend_stats->wal_counters;
+	procnum = GetNumberFromPGProc(proc);
+	beentry = pgstat_get_beentry_by_proc_number(procnum);
 
-	/* save tuples with data from this PgStat_WalCounters */
-	return (pg_stat_wal_build_tuple(bktype_stats, backend_stats->stat_reset_timestamp));
+	if (!beentry || beentry->st_procpid != pid)
+		PG_RETURN_NULL();
+
+	wal_stats = pgstat_fetch_stat_backend_wal(procnum);
+
+	if (!wal_stats)
+		PG_RETURN_NULL();
+
+	return (pg_stat_wal_build_tuple(wal_stats->wal_counters,
+									wal_stats->stat_reset_timestamp));
 }
 
 /*
@@ -2175,6 +2189,7 @@ pg_stat_reset_backend_stats(PG_FUNCTION_ARGS)
 	PGPROC	   *proc;
 	PgBackendStatus *beentry;
 	ProcNumber	procNumber;
+	TimestampTz ts;
 	int			backend_pid = PG_GETARG_INT32(0);
 
 	proc = BackendPidGetProc(backend_pid);
@@ -2196,6 +2211,14 @@ pg_stat_reset_backend_stats(PG_FUNCTION_ARGS)
 	if (!pgstat_tracks_backend_bktype(beentry->st_backendType))
 		PG_RETURN_VOID();
 
+	/*
+	 * Accumulate the backend's WAL stats into the global stats, then zero the
+	 * entry.
+	 */
+	ts = GetCurrentTimestamp();
+	pgstat_wal_reset_backend_cb(procNumber, ts);
+
+	/* Reset IO and Lock stats still in PGSTAT_KIND_BACKEND */
 	pgstat_reset(PGSTAT_KIND_BACKEND, InvalidOid, procNumber);
 
 	PG_RETURN_VOID();
