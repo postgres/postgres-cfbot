@@ -1629,7 +1629,7 @@ plperl_trigger_build_args(FunctionCallInfo fcinfo)
 	HV		   *hv;
 
 	hv = newHV();
-	hv_ksplit(hv, 12);			/* pre-grow the hash */
+	hv_ksplit(hv, 14);			/* pre-grow the hash */
 
 	tdata = (TriggerData *) fcinfo->context;
 	tupdesc = tdata->tg_relation->rd_att;
@@ -1704,6 +1704,25 @@ plperl_trigger_build_args(FunctionCallInfo fcinfo)
 
 	hv_store_string(hv, "table_schema",
 					cstr2sv(SPI_getnspname(tdata->tg_relation)));
+
+	/*
+	 * If the query used FOR PORTION OF, report the column name and the
+	 * targeted bounds.  The bounds could be any range or multirange type, so
+	 * the best we can offer is their text representation.
+	 */
+	if (tdata->tg_temporal)
+	{
+		ForPortionOfState *fpo = tdata->tg_temporal;
+		Oid			funcid;
+		bool		varlena;
+
+		hv_store_string(hv, "period_name", cstr2sv(fpo->fp_rangeName));
+
+		getTypeOutputInfo(fpo->fp_rangeType, &funcid, &varlena);
+		hv_store_string(hv, "period_bounds",
+						cstr2sv(OidOutputFunctionCall(funcid,
+													  fpo->fp_targetRange)));
+	}
 
 	if (TRIGGER_FIRED_BEFORE(tdata->tg_event))
 		when = "BEFORE";
