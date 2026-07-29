@@ -414,6 +414,32 @@ select * from btree_bpchar where f1::bpchar like 'foo%';
 -- get test coverage for "single value" deduplication strategy:
 insert into btree_bpchar select 'foo' from generate_series(1,1500);
 
+-- Check that the two-argument form of regexp_like() gets the same index
+-- optimization as the equivalent ~ operator, via the planner support
+-- function attached to it.
+
+create temp table btree_regexp_like (f1 text collate "C");
+create index on btree_regexp_like(f1);
+insert into btree_regexp_like
+  select 'item' || g from generate_series(1, 1000) g;
+analyze btree_regexp_like;
+
+set enable_seqscan to false;
+explain (costs off)
+select * from btree_regexp_like where regexp_like(f1, '^item999');
+select * from btree_regexp_like where regexp_like(f1, '^item999') order by 1;
+-- must agree with the operator spelling
+select * from btree_regexp_like where f1 ~ '^item999' order by 1;
+reset enable_seqscan;
+
+-- a pattern with no fixed prefix yields no index condition
+explain (costs off)
+select * from btree_regexp_like where regexp_like(f1, 'item999$');
+-- the three-argument form has no support function, since some flags would
+-- make prefix extraction unsound
+explain (costs off)
+select * from btree_regexp_like where regexp_like(f1, '^item999', 'c');
+
 --
 -- Perform unique checking, with and without the use of deduplication
 --
