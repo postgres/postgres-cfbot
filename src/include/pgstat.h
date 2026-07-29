@@ -569,7 +569,6 @@ typedef struct PgStat_Backend
 {
 	TimestampTz stat_reset_timestamp;
 	PgStat_BktypeIO io_stats;
-	PgStat_WalCounters wal_counters;
 	PgStat_PendingLock lock_stats;
 } PgStat_Backend;
 
@@ -922,6 +921,8 @@ extern void pgstat_execute_transactional_drops(int ndrops, struct xl_xact_stats_
 
 extern void pgstat_report_wal(bool force);
 extern PgStat_WalStats *pgstat_fetch_stat_wal(void);
+extern PgStat_WalStats *pgstat_fetch_stat_backend_wal(ProcNumber procnum);
+extern void pgstat_wal_reset_backend_cb(ProcNumber procnum, TimestampTz ts);
 
 
 /*

@@ -5849,10 +5849,6 @@ description | Waiting for a newly initialized WAL file to reach durable storage
         Returns WAL statistics about the backend with the specified
         process ID. The output fields are exactly the same as the ones in the
         <structname>pg_stat_wal</structname> view.
-       </para>
-       <para>
-        The function does not return WAL statistics for the checkpointer,
-        the background writer, the startup process and the autovacuum launcher.
        </para></entry>
       </row>
 
@@ -6010,7 +6006,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
         <listitem>
          <para>
           <literal>wal</literal>: Reset all the counters shown in the
-          <structname>pg_stat_wal</structname> view.
+          <structname>pg_stat_wal</structname> view, as well as per-backend
+          WAL statistics returned by <function>pg_stat_get_backend_wal</function>.
          </para>
         </listitem>
         <listitem>
