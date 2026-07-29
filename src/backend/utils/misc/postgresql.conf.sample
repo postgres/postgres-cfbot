@@ -373,6 +373,8 @@
 
 # These settings are ignored on a standby server.
 
+#post_recovery_sync_level = off         # off, local, remote_write,
+                                # remote_apply, or on
 #synchronous_standby_names = '' # standby servers that provide sync rep
                                 # method to choose sync standbys, number of sync standbys,
                                 # and comma-separated list of application_name
