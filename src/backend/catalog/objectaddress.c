@@ -683,25 +683,49 @@ static const struct object_type_map
 		"table column", OBJECT_COLUMN
 	},
 	{
+		"table whole row", OBJECT_WHOLE_ROW
+	},							/* unmapped */
+	{
 		"index column", -1
+	},							/* unmapped */
+	{
+		"index whole row", -1
 	},							/* unmapped */
 	{
 		"sequence column", -1
 	},							/* unmapped */
 	{
+		"sequence whole row", -1
+	},							/* unmapped */
+	{
 		"toast table column", -1
+	},							/* unmapped */
+	{
+		"toast table whole row", -1
 	},							/* unmapped */
 	{
 		"view column", -1
 	},							/* unmapped */
 	{
+		"view whole row", -1
+	},							/* unmapped */
+	{
 		"materialized view column", -1
+	},							/* unmapped */
+	{
+		"materialized view whole row", -1
 	},							/* unmapped */
 	{
 		"composite type column", -1
 	},							/* unmapped */
 	{
+		"composite type whole row", -1
+	},							/* unmapped */
+	{
 		"foreign table column", OBJECT_COLUMN
+	},
+	{
+		"foreign table whole row", OBJECT_WHOLE_ROW
 	},
 	{
 		"aggregate", OBJECT_AGGREGATE
@@ -851,6 +875,9 @@ static ObjectAddress get_object_address_relobject(ObjectType objtype,
 static ObjectAddress get_object_address_attribute(ObjectType objtype,
 												  List *object, Relation *relp,
 												  LOCKMODE lockmode, bool missing_ok);
+static ObjectAddress get_object_address_wholerow(ObjectType objtype,
+												 List *object, Relation *relp,
+												 LOCKMODE lockmode, bool missing_ok);
 static ObjectAddress get_object_address_attrdef(ObjectType objtype,
 												List *object, Relation *relp, LOCKMODE lockmode,
 												bool missing_ok);
@@ -960,6 +987,12 @@ get_object_address(ObjectType objtype, Node *object,
 					get_object_address_attribute(objtype, castNode(List, object),
 												 &relation, lockmode,
 												 missing_ok);
+				break;
+			case OBJECT_WHOLE_ROW:
+				address =
+					get_object_address_wholerow(objtype, castNode(List, object),
+												&relation, lockmode,
+												missing_ok);
 				break;
 			case OBJECT_DEFAULT:
 				address =
@@ -1397,6 +1430,12 @@ get_relation_by_qualified_name(ObjectType objtype, List *object,
 						 errmsg("\"%s\" is not a foreign table",
 								RelationGetRelationName(relation))));
 			break;
+		case OBJECT_WHOLE_ROW:
+			/*
+			 * Whole row objects don't carry their underlying type, so
+			 * we assume it's OK
+			 */
+			break;
 		default:
 			elog(ERROR, "unrecognized object type: %d", (int) objtype);
 			break;
@@ -1540,6 +1579,37 @@ get_object_address_attribute(ObjectType objtype, List *object,
 	address.objectSubId = attnum;
 
 	*relp = relation;
+	return address;
+}
+
+/*
+ * Locate a relation by qualified name.
+ */
+static ObjectAddress
+get_object_address_wholerow(ObjectType objtype, List *object,
+							Relation *relp, LOCKMODE lockmode,
+							bool missing_ok)
+{
+	Relation	relation;
+	ObjectAddress address;
+
+	address.classId = RelationRelationId;
+	address.objectId = InvalidOid;
+	address.objectSubId = 0;
+
+	relation = relation_openrv_extended(makeRangeVarFromNameList(object),
+										lockmode, missing_ok);
+
+	if (!relation)
+		return address;
+
+	Assert(objtype == OBJECT_WHOLE_ROW);
+
+	/* Done. */
+	address.objectId = RelationGetRelid(relation);
+	address.objectSubId = WholeRowAttrNumber;
+	*relp = relation;
+
 	return address;
 }
 
@@ -2296,6 +2366,7 @@ pg_get_object_address(PG_FUNCTION_ARGS)
 		case OBJECT_TABCONSTRAINT:
 		case OBJECT_OPCLASS:
 		case OBJECT_OPFAMILY:
+		case OBJECT_WHOLE_ROW:
 			objnode = (Node *) name;
 			break;
 		case OBJECT_ACCESS_METHOD:
@@ -2557,6 +2628,7 @@ check_object_ownership(Oid roleid, ObjectType objtype, ObjectAddress address,
 		case OBJECT_PUBLICATION_NAMESPACE:
 		case OBJECT_PUBLICATION_REL:
 		case OBJECT_USER_MAPPING:
+		case OBJECT_WHOLE_ROW:
 			/* These are currently not supported or don't make sense here. */
 			elog(ERROR, "unsupported object type: %d", (int) objtype);
 			break;
@@ -2915,6 +2987,16 @@ getObjectDescription(const ObjectAddress *object, bool missing_ok)
 		case RelationRelationId:
 			if (object->objectSubId == 0)
 				getRelationDescription(&buffer, object->objectId, missing_ok);
+			else if (object->objectSubId == WholeRowAttrNumber)
+			{
+				StringInfoData rel;
+
+				initStringInfo(&rel);
+				getRelationDescription(&rel, object->objectId, missing_ok);
+				/* translator: %s is, e.g., "table %s" */
+				appendStringInfo(&buffer, _("whole row of %s"), rel.data);
+				pfree(rel.data);
+			}
 			else
 			{
 				/* column, not whole relation */
@@ -4732,8 +4814,14 @@ getRelationTypeDescription(StringInfo buffer, Oid relid, int32 objectSubId,
 			break;
 	}
 
-	if (objectSubId != 0)
+	if (objectSubId == WholeRowAttrNumber)
+	{
+		appendStringInfoString(buffer, " whole row");
+	}
+	else if (objectSubId != 0)
+	{
 		appendStringInfoString(buffer, " column");
+	}
 
 	ReleaseSysCache(relTup);
 }
@@ -4862,7 +4950,7 @@ getObjectIdentityParts(const ObjectAddress *object,
 				 * Check for the attribute first, so as if it is missing we
 				 * can skip the entire relation description.
 				 */
-				if (object->objectSubId != 0)
+				if (object->objectSubId != 0 && object->objectSubId != WholeRowAttrNumber)
 				{
 					attr = get_attname(object->objectId,
 									   object->objectSubId,
@@ -4883,6 +4971,10 @@ getObjectIdentityParts(const ObjectAddress *object,
 									 quote_identifier(attr));
 					if (objname)
 						*objname = lappend(*objname, attr);
+				}
+				else if (object->objectSubId == WholeRowAttrNumber)
+				{
+					appendStringInfo(&buffer, ".*");
 				}
 			}
 			break;

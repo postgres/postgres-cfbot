@@ -1782,6 +1782,20 @@ insert into test_pg_wholerow_index values (1, 'multiplication', 1.0);
 create index row_image_index
     on test_pg_wholerow_index ((row_image(test_pg_wholerow_index)));
 insert into test_pg_wholerow_index values (2, 'addition', 0);
+-- test shape changes invalidate an index with whole-row references
+select relfilenode as rfn_orig from pg_class where oid = 'row_image_index'::regclass \gset
+alter table test_pg_wholerow_index add column d int; -- add column
+select relfilenode as rfn_ac from pg_class where oid = 'row_image_index'::regclass \gset
+alter table test_pg_wholerow_index alter column d set data type bigint; -- alter column type
+select relfilenode as rfn_sdt from pg_class where oid = 'row_image_index'::regclass \gset
+alter table test_pg_wholerow_index drop column d; -- drop column
+-- Check that the relfilenode changed at every step
+select :rfn_orig != :rfn_ac AND :rfn_ac != :rfn_sdt AND :rfn_sdt != relfilenode from pg_class where oid = 'row_image_index'::regclass;
+ ?column? 
+----------
+ t
+(1 row)
+
 drop index row_image_index;
 drop function row_image(test_pg_wholerow_index);
 drop table test_pg_wholerow_index;
