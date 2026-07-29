@@ -673,3 +673,57 @@ NOTICE:  TD[event] => ddl_command_start ; TD[tag] => DROP TABLE
 NOTICE:  TD[event] => ddl_command_end ; TD[tag] => DROP TABLE
 DROP EVENT TRIGGER python_a_snitch;
 DROP EVENT TRIGGER python_b_snitch;
+-- FOR PORTION OF
+CREATE TABLE temporal_trigger_test (
+    id int,
+    valid_at daterange,
+    v text
+);
+INSERT INTO temporal_trigger_test VALUES (1, '[2018-01-01,2020-01-01)', 'one');
+CREATE FUNCTION for_portion_of_trigger_func() RETURNS trigger
+LANGUAGE plpython3u
+AS $$
+plpy.notice("TD[when] => " + TD["when"] + " ; TD[event] => " + TD["event"] +
+            " ; TD[period_name] => " + repr(TD.get("period_name")) +
+            " ; TD[period_bounds] => " + repr(TD.get("period_bounds")))
+return None
+$$;
+CREATE TRIGGER for_portion_of_trigger_trig
+  BEFORE INSERT OR UPDATE OR DELETE ON temporal_trigger_test
+  FOR EACH ROW EXECUTE PROCEDURE for_portion_of_trigger_func();
+UPDATE temporal_trigger_test
+  FOR PORTION OF valid_at FROM '2019-01-01' TO '2019-06-01'
+  SET v = 'updated';
+NOTICE:  TD[when] => BEFORE ; TD[event] => UPDATE ; TD[period_name] => 'valid_at' ; TD[period_bounds] => '[2019-01-01,2019-06-01)'
+NOTICE:  TD[when] => BEFORE ; TD[event] => INSERT ; TD[period_name] => 'valid_at' ; TD[period_bounds] => '[2019-01-01,2019-06-01)'
+NOTICE:  TD[when] => BEFORE ; TD[event] => INSERT ; TD[period_name] => 'valid_at' ; TD[period_bounds] => '[2019-01-01,2019-06-01)'
+SELECT * FROM temporal_trigger_test ORDER BY valid_at;
+ id |        valid_at         |    v    
+----+-------------------------+---------
+  1 | [2018-01-01,2019-01-01) | one
+  1 | [2019-01-01,2019-06-01) | updated
+  1 | [2019-06-01,2020-01-01) | one
+(3 rows)
+
+DELETE FROM temporal_trigger_test
+  FOR PORTION OF valid_at FROM '2018-06-01' TO '2018-09-01';
+NOTICE:  TD[when] => BEFORE ; TD[event] => DELETE ; TD[period_name] => 'valid_at' ; TD[period_bounds] => '[2018-06-01,2018-09-01)'
+NOTICE:  TD[when] => BEFORE ; TD[event] => INSERT ; TD[period_name] => 'valid_at' ; TD[period_bounds] => '[2018-06-01,2018-09-01)'
+NOTICE:  TD[when] => BEFORE ; TD[event] => INSERT ; TD[period_name] => 'valid_at' ; TD[period_bounds] => '[2018-06-01,2018-09-01)'
+SELECT * FROM temporal_trigger_test ORDER BY valid_at;
+ id |        valid_at         |    v    
+----+-------------------------+---------
+  1 | [2018-01-01,2018-06-01) | one
+  1 | [2018-09-01,2019-01-01) | one
+  1 | [2019-01-01,2019-06-01) | updated
+  1 | [2019-06-01,2020-01-01) | one
+(4 rows)
+
+-- no FOR PORTION OF, so the keys are absent
+UPDATE temporal_trigger_test SET v = 'all of it';
+NOTICE:  TD[when] => BEFORE ; TD[event] => UPDATE ; TD[period_name] => None ; TD[period_bounds] => None
+NOTICE:  TD[when] => BEFORE ; TD[event] => UPDATE ; TD[period_name] => None ; TD[period_bounds] => None
+NOTICE:  TD[when] => BEFORE ; TD[event] => UPDATE ; TD[period_name] => None ; TD[period_bounds] => None
+NOTICE:  TD[when] => BEFORE ; TD[event] => UPDATE ; TD[period_name] => None ; TD[period_bounds] => None
+DROP TABLE temporal_trigger_test;
+DROP FUNCTION for_portion_of_trigger_func();
