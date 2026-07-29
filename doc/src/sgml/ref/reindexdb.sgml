@@ -122,6 +122,26 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
+      <term><option>--continue</option></term>
+      <listitem>
+       <para>
+        When used with <option>--all</option>, report a database that cannot
+        be connected to as a warning and continue with the remaining
+        databases, instead of terminating with an error.  This option can
+        only be used together with <option>--all</option>.
+       </para>
+       <para>
+        This is chiefly of use with managed
+        <productname>PostgreSQL</productname> services, which commonly
+        include a database reserved for the provider that other users are not
+        permitted to connect to; without this option such a database prevents
+        <option>--all</option> from processing any of the databases that
+        follow it.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
       <term><option><optional>-d</optional> <replaceable class="parameter">dbname</replaceable></option></term>
       <term><option><optional>--dbname=</optional><replaceable class="parameter">dbname</replaceable></option></term>
       <listitem>
