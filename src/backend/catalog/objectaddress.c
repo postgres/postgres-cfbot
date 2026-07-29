@@ -3018,6 +3018,16 @@ getObjectDescription(const ObjectAddress *object, bool missing_ok)
 		case RelationRelationId:
 			if (object->objectSubId == 0)
 				getRelationDescription(&buffer, object->objectId, missing_ok);
+			else if (object->objectSubId == WholeRowAttrNumber)
+			{
+				StringInfoData rel;
+
+				initStringInfo(&rel);
+				getRelationDescription(&rel, object->objectId, missing_ok);
+				/* translator: %s is, e.g., "table %s" */
+				appendStringInfo(&buffer, _("whole row of %s"), rel.data);
+				pfree(rel.data);
+			}
 			else
 			{
 				/* column, not whole relation */
@@ -5009,8 +5019,14 @@ getRelationTypeDescription(StringInfo buffer, Oid relid, int32 objectSubId,
 			break;
 	}
 
-	if (objectSubId != 0)
+	if (objectSubId == WholeRowAttrNumber)
+	{
+		appendStringInfoString(buffer, " whole row");
+	}
+	else if (objectSubId != 0)
+	{
 		appendStringInfoString(buffer, " column");
+	}
 
 	ReleaseSysCache(relTup);
 }
@@ -5139,7 +5155,7 @@ getObjectIdentityParts(const ObjectAddress *object,
 				 * Check for the attribute first, so as if it is missing we
 				 * can skip the entire relation description.
 				 */
-				if (object->objectSubId != 0)
+				if (object->objectSubId != 0 && object->objectSubId != WholeRowAttrNumber)
 				{
 					attr = get_attname(object->objectId,
 									   object->objectSubId,
@@ -5160,6 +5176,10 @@ getObjectIdentityParts(const ObjectAddress *object,
 									 quote_identifier(attr));
 					if (objname)
 						*objname = lappend(*objname, attr);
+				}
+				else if (object->objectSubId == WholeRowAttrNumber)
+				{
+					appendStringInfo(&buffer, ".*");
 				}
 			}
 			break;
