@@ -1698,10 +1698,12 @@ collectDependenciesOfExpr(ObjectAddresses *addrs,
  * to depend on the table not vice versa.
  *
  * NOTE: the caller should ensure that a whole-table dependency on the
- * specified relation is created separately, if one is needed.  In particular,
- * a whole-row Var "relation.*" will not cause this routine to emit any
- * dependency item.  This is appropriate behavior for subexpressions of an
- * ordinary query, so other cases need to cope as necessary.
+ * specified relation is created separately, if one is needed.
+ * In particular, a whole-row Var "relation.*" will cause this routine
+ * to emit a dependency on the WholeRowAttrNumber subobject, not the
+ * whole object (subobj 0).
+ * This is appropriate behavior for expressions in ordinary indexes, so
+ * other cases need to cope as necessary.
  */
 void
 recordDependencyOnSingleRelExpr(const ObjectAddress *depender,
@@ -1890,6 +1892,7 @@ find_expr_references_walker(Node *node,
 	if (IsA(node, Var))
 	{
 		Var		   *var = (Var *) node;
+		AttrNumber	attno;
 		List	   *rtable;
 		RangeTblEntry *rte;
 
@@ -1902,29 +1905,29 @@ find_expr_references_walker(Node *node,
 		rte = rt_fetch(var->varno, rtable);
 
 		/*
-		 * A whole-row Var references no specific columns, so adds no new
-		 * dependency.  (We assume that there is a whole-table dependency
-		 * arising from each underlying rangetable entry.  While we could
-		 * record such a dependency when finding a whole-row Var that
-		 * references a relation directly, it's quite unclear how to extend
-		 * that to whole-row Vars for JOINs, so it seems better to leave the
-		 * responsibility with the range table.  Note that this poses some
-		 * risks for identifying dependencies of stand-alone expressions:
-		 * whole-table references may need to be created separately.)
+		 * A whole-row Var references no specific columns.  We could assume
+		 * that there is a whole-table dependency arising from each
+		 * underlying rangetable entry, and in doing so ignore the
+		 * whole-row var, but doing so would make it difficult to find the
+		 * objects that contain whole-row Vars which need to be checked,
+		 * invalidated, or rebuilt when the referenced table changes shape.
 		 */
 		if (var->varattno == InvalidAttrNumber)
-			return false;
+			attno = WholeRowAttrNumber;
+		else
+			attno = var->varattno;
+
 		if (rte->rtekind == RTE_RELATION)
 		{
 			/* If it's a plain relation, reference this column */
-			add_object_address(RelationRelationId, rte->relid, var->varattno,
+			add_object_address(RelationRelationId, rte->relid, attno,
 							   context->addrs);
 		}
 		else if (rte->rtekind == RTE_FUNCTION)
 		{
 			/* Might need to add a dependency on a composite type's column */
 			/* (done out of line, because it's a bit bulky) */
-			process_function_rte_ref(rte, var->varattno, context);
+			process_function_rte_ref(rte, attno, context);
 		}
 
 		/*
