@@ -625,6 +625,8 @@ NOTICE:  OLD: {}
 NOTICE:  TG_level: STATEMENT
 NOTICE:  TG_name: statement_trigger
 NOTICE:  TG_op: INSERT
+NOTICE:  TG_period_bounds: {}
+NOTICE:  TG_period_name: {}
 NOTICE:  TG_relatts: {{} i v {} test_skip test_return_null test_argisnull}
 NOTICE:  TG_relid: bogus:12345
 NOTICE:  TG_table_name: trigger_test
@@ -636,6 +638,8 @@ NOTICE:  OLD: {}
 NOTICE:  TG_level: ROW
 NOTICE:  TG_name: show_trigger_data_trig
 NOTICE:  TG_op: INSERT
+NOTICE:  TG_period_bounds: {}
+NOTICE:  TG_period_name: {}
 NOTICE:  TG_relatts: {{} i v {} test_skip test_return_null test_argisnull}
 NOTICE:  TG_relid: bogus:12345
 NOTICE:  TG_table_name: trigger_test
@@ -648,6 +652,8 @@ NOTICE:  OLD: {}
 NOTICE:  TG_level: ROW
 NOTICE:  TG_name: show_trigger_data_trig_before
 NOTICE:  TG_op: INSERT
+NOTICE:  TG_period_bounds: {}
+NOTICE:  TG_period_name: {}
 NOTICE:  TG_relatts: {{} i j k}
 NOTICE:  TG_relid: bogus:12345
 NOTICE:  TG_table_name: trigger_test_generated
@@ -659,6 +665,8 @@ NOTICE:  OLD: {}
 NOTICE:  TG_level: ROW
 NOTICE:  TG_name: show_trigger_data_trig_after
 NOTICE:  TG_op: INSERT
+NOTICE:  TG_period_bounds: {}
+NOTICE:  TG_period_name: {}
 NOTICE:  TG_relatts: {{} i j k}
 NOTICE:  TG_relid: bogus:12345
 NOTICE:  TG_table_name: trigger_test_generated
@@ -671,6 +679,8 @@ NOTICE:  OLD: {i: 1, j: 2}
 NOTICE:  TG_level: ROW
 NOTICE:  TG_name: show_trigger_data_trig_before
 NOTICE:  TG_op: UPDATE
+NOTICE:  TG_period_bounds: {}
+NOTICE:  TG_period_name: {}
 NOTICE:  TG_relatts: {{} i j k}
 NOTICE:  TG_relid: bogus:12345
 NOTICE:  TG_table_name: trigger_test_generated
@@ -682,6 +692,8 @@ NOTICE:  OLD: {i: 1, j: 2}
 NOTICE:  TG_level: ROW
 NOTICE:  TG_name: show_trigger_data_trig_after
 NOTICE:  TG_op: UPDATE
+NOTICE:  TG_period_bounds: {}
+NOTICE:  TG_period_name: {}
 NOTICE:  TG_relatts: {{} i j k}
 NOTICE:  TG_relid: bogus:12345
 NOTICE:  TG_table_name: trigger_test_generated
@@ -694,6 +706,8 @@ NOTICE:  OLD: {i: 11, j: 22}
 NOTICE:  TG_level: ROW
 NOTICE:  TG_name: show_trigger_data_trig_before
 NOTICE:  TG_op: DELETE
+NOTICE:  TG_period_bounds: {}
+NOTICE:  TG_period_name: {}
 NOTICE:  TG_relatts: {{} i j k}
 NOTICE:  TG_relid: bogus:12345
 NOTICE:  TG_table_name: trigger_test_generated
@@ -705,6 +719,8 @@ NOTICE:  OLD: {i: 11, j: 22}
 NOTICE:  TG_level: ROW
 NOTICE:  TG_name: show_trigger_data_trig_after
 NOTICE:  TG_op: DELETE
+NOTICE:  TG_period_bounds: {}
+NOTICE:  TG_period_name: {}
 NOTICE:  TG_relatts: {{} i j k}
 NOTICE:  TG_relid: bogus:12345
 NOTICE:  TG_table_name: trigger_test_generated
@@ -717,6 +733,8 @@ NOTICE:  OLD: {}
 NOTICE:  TG_level: ROW
 NOTICE:  TG_name: show_trigger_data_view_trig
 NOTICE:  TG_op: INSERT
+NOTICE:  TG_period_bounds: {}
+NOTICE:  TG_period_name: {}
 NOTICE:  TG_relatts: {{} i v}
 NOTICE:  TG_relid: bogus:12345
 NOTICE:  TG_table_name: trigger_test_view
@@ -729,6 +747,8 @@ NOTICE:  OLD: {i: 1, v: insert}
 NOTICE:  TG_level: ROW
 NOTICE:  TG_name: show_trigger_data_view_trig
 NOTICE:  TG_op: UPDATE
+NOTICE:  TG_period_bounds: {}
+NOTICE:  TG_period_name: {}
 NOTICE:  TG_relatts: {{} i v}
 NOTICE:  TG_relid: bogus:12345
 NOTICE:  TG_table_name: trigger_test_view
@@ -741,6 +761,8 @@ NOTICE:  OLD: {i: 1, v: insert}
 NOTICE:  TG_level: ROW
 NOTICE:  TG_name: show_trigger_data_view_trig
 NOTICE:  TG_op: DELETE
+NOTICE:  TG_period_bounds: {}
+NOTICE:  TG_period_name: {}
 NOTICE:  TG_relatts: {{} i v}
 NOTICE:  TG_relid: bogus:12345
 NOTICE:  TG_table_name: trigger_test_view
@@ -753,6 +775,8 @@ NOTICE:  OLD: {}
 NOTICE:  TG_level: STATEMENT
 NOTICE:  TG_name: statement_trigger
 NOTICE:  TG_op: UPDATE
+NOTICE:  TG_period_bounds: {}
+NOTICE:  TG_period_name: {}
 NOTICE:  TG_relatts: {{} i v {} test_skip test_return_null test_argisnull}
 NOTICE:  TG_relid: bogus:12345
 NOTICE:  TG_table_name: trigger_test
@@ -766,6 +790,8 @@ NOTICE:  OLD: {}
 NOTICE:  TG_level: STATEMENT
 NOTICE:  TG_name: statement_trigger
 NOTICE:  TG_op: UPDATE
+NOTICE:  TG_period_bounds: {}
+NOTICE:  TG_period_name: {}
 NOTICE:  TG_relatts: {{} i v {} test_skip test_return_null test_argisnull}
 NOTICE:  TG_relid: bogus:12345
 NOTICE:  TG_table_name: trigger_test
@@ -777,6 +803,8 @@ NOTICE:  OLD: {i: 1, test_argisnull: f, test_return_null: f, test_skip: f, v: in
 NOTICE:  TG_level: ROW
 NOTICE:  TG_name: show_trigger_data_trig
 NOTICE:  TG_op: UPDATE
+NOTICE:  TG_period_bounds: {}
+NOTICE:  TG_period_name: {}
 NOTICE:  TG_relatts: {{} i v {} test_skip test_return_null test_argisnull}
 NOTICE:  TG_relid: bogus:12345
 NOTICE:  TG_table_name: trigger_test
@@ -789,6 +817,8 @@ NOTICE:  OLD: {}
 NOTICE:  TG_level: STATEMENT
 NOTICE:  TG_name: statement_trigger
 NOTICE:  TG_op: DELETE
+NOTICE:  TG_period_bounds: {}
+NOTICE:  TG_period_name: {}
 NOTICE:  TG_relatts: {{} i v {} test_skip test_return_null test_argisnull}
 NOTICE:  TG_relid: bogus:12345
 NOTICE:  TG_table_name: trigger_test
@@ -800,6 +830,8 @@ NOTICE:  OLD: {i: 1, test_argisnull: f, test_return_null: f, test_skip: f, v: up
 NOTICE:  TG_level: ROW
 NOTICE:  TG_name: show_trigger_data_trig
 NOTICE:  TG_op: DELETE
+NOTICE:  TG_period_bounds: {}
+NOTICE:  TG_period_name: {}
 NOTICE:  TG_relatts: {{} i v {} test_skip test_return_null test_argisnull}
 NOTICE:  TG_relid: bogus:12345
 NOTICE:  TG_table_name: trigger_test
@@ -812,6 +844,8 @@ NOTICE:  OLD: {}
 NOTICE:  TG_level: STATEMENT
 NOTICE:  TG_name: statement_trigger
 NOTICE:  TG_op: TRUNCATE
+NOTICE:  TG_period_bounds: {}
+NOTICE:  TG_period_name: {}
 NOTICE:  TG_relatts: {{} i v {} test_skip test_return_null test_argisnull}
 NOTICE:  TG_relid: bogus:12345
 NOTICE:  TG_table_name: trigger_test
@@ -827,6 +861,8 @@ NOTICE:  OLD: {}
 NOTICE:  TG_level: STATEMENT
 NOTICE:  TG_name: statement_trigger
 NOTICE:  TG_op: INSERT
+NOTICE:  TG_period_bounds: {}
+NOTICE:  TG_period_name: {}
 NOTICE:  TG_relatts: {{} i v {} test_skip test_return_null test_argisnull}
 NOTICE:  TG_relid: bogus:12345
 NOTICE:  TG_table_name: trigger_test
@@ -841,6 +877,8 @@ NOTICE:  OLD: {}
 NOTICE:  TG_level: STATEMENT
 NOTICE:  TG_name: statement_trigger
 NOTICE:  TG_op: INSERT
+NOTICE:  TG_period_bounds: {}
+NOTICE:  TG_period_name: {}
 NOTICE:  TG_relatts: {{} i v {} test_skip test_return_null test_argisnull}
 NOTICE:  TG_relid: bogus:12345
 NOTICE:  TG_table_name: trigger_test
@@ -887,3 +925,55 @@ SELECT * FROM trigger_test_generated;
 ---+---+---
 (0 rows)
 
+-- test FOR PORTION OF
+CREATE TABLE temporal_trigger_test (
+    id int,
+    valid_at daterange,
+    v text
+);
+INSERT INTO temporal_trigger_test VALUES (1, '[2018-01-01,2020-01-01)', 'one');
+CREATE FUNCTION for_portion_of_trigger_func() RETURNS trigger
+LANGUAGE pltcl
+AS $$
+elog NOTICE "$TG_when $TG_op: TG_period_name = '$TG_period_name', TG_period_bounds = '$TG_period_bounds'"
+return OK
+$$;
+CREATE TRIGGER for_portion_of_trigger_trig
+  BEFORE INSERT OR UPDATE OR DELETE ON temporal_trigger_test
+  FOR EACH ROW EXECUTE PROCEDURE for_portion_of_trigger_func();
+UPDATE temporal_trigger_test
+  FOR PORTION OF valid_at FROM '2019-01-01' TO '2019-06-01'
+  SET v = 'updated';
+NOTICE:  BEFORE UPDATE: TG_period_name = 'valid_at', TG_period_bounds = '[01-01-2019,06-01-2019)'
+NOTICE:  BEFORE INSERT: TG_period_name = 'valid_at', TG_period_bounds = '[01-01-2019,06-01-2019)'
+NOTICE:  BEFORE INSERT: TG_period_name = 'valid_at', TG_period_bounds = '[01-01-2019,06-01-2019)'
+SELECT * FROM temporal_trigger_test ORDER BY valid_at;
+ id |        valid_at         |    v    
+----+-------------------------+---------
+  1 | [01-01-2018,01-01-2019) | one
+  1 | [01-01-2019,06-01-2019) | updated
+  1 | [06-01-2019,01-01-2020) | one
+(3 rows)
+
+DELETE FROM temporal_trigger_test
+  FOR PORTION OF valid_at FROM '2018-06-01' TO '2018-09-01';
+NOTICE:  BEFORE DELETE: TG_period_name = 'valid_at', TG_period_bounds = '[06-01-2018,09-01-2018)'
+NOTICE:  BEFORE INSERT: TG_period_name = 'valid_at', TG_period_bounds = '[06-01-2018,09-01-2018)'
+NOTICE:  BEFORE INSERT: TG_period_name = 'valid_at', TG_period_bounds = '[06-01-2018,09-01-2018)'
+SELECT * FROM temporal_trigger_test ORDER BY valid_at;
+ id |        valid_at         |    v    
+----+-------------------------+---------
+  1 | [01-01-2018,06-01-2018) | one
+  1 | [09-01-2018,01-01-2019) | one
+  1 | [01-01-2019,06-01-2019) | updated
+  1 | [06-01-2019,01-01-2020) | one
+(4 rows)
+
+-- no FOR PORTION OF, so the variables are empty
+UPDATE temporal_trigger_test SET v = 'all of it';
+NOTICE:  BEFORE UPDATE: TG_period_name = '', TG_period_bounds = ''
+NOTICE:  BEFORE UPDATE: TG_period_name = '', TG_period_bounds = ''
+NOTICE:  BEFORE UPDATE: TG_period_name = '', TG_period_bounds = ''
+NOTICE:  BEFORE UPDATE: TG_period_name = '', TG_period_bounds = ''
+DROP TABLE temporal_trigger_test;
+DROP FUNCTION for_portion_of_trigger_func();

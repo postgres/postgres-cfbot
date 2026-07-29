@@ -679,6 +679,37 @@ SELECT 'doesn''t' AS ret
       </varlistentry>
 
       <varlistentry>
+       <term><varname>$TG_period_name</varname></term>
+       <listitem>
+        <para>
+         The column name used in a <literal>FOR PORTION OF</literal> clause,
+         or else the empty string. Also set for the implicit
+         <command>INSERT</command> statements to add the
+         <glossterm linkend="glossary-temporal-leftovers">temporal
+         leftovers</glossterm>.
+        </para>
+       </listitem>
+      </varlistentry>
+
+      <varlistentry>
+       <term><varname>$TG_period_bounds</varname></term>
+       <listitem>
+        <para>
+         The range/multirange given as the bounds of a
+         <literal>FOR PORTION OF</literal> clause, either directly (with
+         parens syntax) or computed from the <literal>FROM</literal> and
+         <literal>TO</literal> bounds. The empty string if
+         <literal>FOR PORTION OF</literal> was not used. Also set for the
+         implicit <command>INSERT</command> statements to add the
+         <glossterm linkend="glossary-temporal-leftovers">temporal
+         leftovers</glossterm>. This is a text value based on the type's
+         output function, since the type can't be known at function creation
+         time.
+        </para>
+       </listitem>
+      </varlistentry>
+
+      <varlistentry>
        <term><varname>$NEW</varname></term>
        <listitem>
         <para>
