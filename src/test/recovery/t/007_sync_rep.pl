@@ -218,6 +218,70 @@ standby4|1|quorum),
 	'all standbys are considered as candidates for quorum sync standbys',
 	'ANY 2(*)');
 
+# Check that a query cancel does not release a transaction which has
+# committed locally but is still waiting for synchronous replication.
+$node_primary->safe_psql(
+	'postgres', q[
+	CREATE TABLE sync_rep_cancel_test (a int);
+	ALTER SYSTEM SET synchronous_replication_wait_on_query_cancel = on;
+	ALTER SYSTEM SET synchronous_standby_names = 'unavailable';
+	SELECT pg_reload_conf();]);
+
+my $cancel_session =
+  $node_primary->background_psql('postgres', on_error_stop => 0);
+$cancel_session->query_until(
+	qr/insert_started/, q[
+	SET application_name = 'sync_rep_cancel_test';
+	\echo insert_started
+	INSERT INTO sync_rep_cancel_test VALUES (1);
+]);
+
+$node_primary->poll_query_until(
+	'postgres',
+	q[SELECT count(*) = 1
+	  FROM pg_stat_activity
+	  WHERE application_name = 'sync_rep_cancel_test'
+	    AND wait_event = 'SyncRep'])
+  or die "backend did not start waiting for synchronous replication";
+
+is(
+	$node_primary->safe_psql(
+		'postgres',
+		q[SELECT pg_cancel_backend(pid)
+		  FROM pg_stat_activity
+		  WHERE application_name = 'sync_rep_cancel_test']),
+	't',
+	'cancel request was delivered to synchronous replication waiter');
+
+$node_primary->poll_query_until(
+	'postgres',
+	q[SELECT count(*) = 1
+	  FROM pg_stat_activity
+	  WHERE application_name = 'sync_rep_cancel_test'
+	    AND wait_event = 'SyncRep'])
+  or die "query cancel ended synchronous replication wait";
+
+is(
+	$node_primary->safe_psql('postgres',
+		'SELECT count(*) FROM sync_rep_cancel_test'),
+	'0',
+	'locally committed transaction remains invisible after query cancel');
+
+$node_primary->safe_psql(
+	'postgres', q[
+	ALTER SYSTEM RESET synchronous_standby_names;
+	SELECT pg_reload_conf();]);
+$cancel_session->quit;
+is(
+	$node_primary->safe_psql('postgres',
+		'SELECT count(*) FROM sync_rep_cancel_test'),
+	'1',
+	'transaction completes after synchronous replication is disabled');
+like(
+	$cancel_session->{stderr},
+	qr/ignoring request to cancel wait for synchronous replication/,
+	'ignored query cancel is reported');
+
 # Check that ordinary connections are rejected after crash recovery until
 # the end-of-recovery LSN reaches the configured synchronous standby.
 for my $standby (
