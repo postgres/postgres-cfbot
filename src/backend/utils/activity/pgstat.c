@@ -516,6 +516,11 @@ static const PgStat_KindInfo pgstat_kind_builtin_infos[PGSTAT_KIND_BUILTIN_SIZE]
 		.init_shmem_cb = pgstat_wal_init_shmem_cb,
 		.reset_all_cb = pgstat_wal_reset_all_cb,
 		.snapshot_cb = pgstat_wal_snapshot_cb,
+
+		.per_backend_data_off = offsetof(PgStatShared_WalBackendEntry, stats),
+		.per_backend_data_len = sizeof(PgStat_WalStats),
+		.per_backend_hash_handle_off = offsetof(PgStatShared_Wal, backend_hash_handle),
+		.per_backend_acc_cb = pgstat_wal_per_backend_acc_cb,
 	},
 };
 
@@ -627,6 +632,9 @@ pgstat_before_server_shutdown(int code, Datum arg)
 	 */
 	if (code == 0)
 	{
+		/* Transfer all live per-backend stats before writing the stats file. */
+		pgstat_wal_acc_all_backends();
+
 		pgStatLocal.shmem->is_shutdown = true;
 		pgstat_write_statsfile();
 	}
@@ -670,6 +678,9 @@ pgstat_shutdown_hook(int code, Datum arg)
 	if (!pgstat_drop_entry(PGSTAT_KIND_BACKEND, InvalidOid, MyProcNumber, false))
 		pgstat_request_entry_refs_gc();
 
+	/* Accumulate per-backend WAL stats into the global stats */
+	pgstat_wal_acc_backend_cb();
+
 	pgstat_detach_shmem();
 
 #ifdef USE_ASSERT_CHECKING
@@ -689,6 +700,13 @@ pgstat_initialize(void)
 	Assert(!pgstat_is_initialized);
 
 	pgstat_attach_shmem();
+
+	/*
+	 * NB: need to accept that there might be stats from an older backend that
+	 * used the same proc number. Accumulate them into the global stats before
+	 * we start using the entry.
+	 */
+	pgstat_wal_acc_backend_cb();
 
 	/*
 	 * Create and cache per-backend statistics entries here. This also covers

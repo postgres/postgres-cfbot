@@ -510,11 +510,25 @@ typedef struct PgStatShared_PerBackendEntry
 	LWLock		lock;
 } PgStatShared_PerBackendEntry;
 
+/*
+ * Per-backend entry for WAL statistics, stored in a dshash keyed by
+ * ProcNumber.
+ */
+typedef struct PgStatShared_WalBackendEntry
+{
+	PgStatShared_PerBackendEntry header;
+	PgStat_WalStats stats;
+} PgStatShared_WalBackendEntry;
+
 typedef struct PgStatShared_Wal
 {
-	/* lock protects ->stats */
 	LWLock		lock;
 	PgStat_WalStats stats;
+
+	/*
+	 * Per-backend dshash, keyed by ProcNumber.
+	 */
+	dshash_table_handle backend_hash_handle;
 } PgStatShared_Wal;
 
 
@@ -757,9 +771,8 @@ extern void pgstat_archiver_snapshot_cb(void);
 
 /* flags for pgstat_flush_backend() */
 #define PGSTAT_BACKEND_FLUSH_IO		(1 << 0)	/* Flush I/O statistics */
-#define PGSTAT_BACKEND_FLUSH_WAL   (1 << 1) /* Flush WAL statistics */
 #define PGSTAT_BACKEND_FLUSH_LOCK  (1 << 2) /* Flush lock statistics */
-#define PGSTAT_BACKEND_FLUSH_ALL   (PGSTAT_BACKEND_FLUSH_IO | PGSTAT_BACKEND_FLUSH_WAL | PGSTAT_BACKEND_FLUSH_LOCK)
+#define PGSTAT_BACKEND_FLUSH_ALL   (PGSTAT_BACKEND_FLUSH_IO | PGSTAT_BACKEND_FLUSH_LOCK)
 
 extern bool pgstat_flush_backend(bool nowait, uint32 flags);
 extern bool pgstat_backend_flush_cb(bool nowait);
@@ -907,6 +920,9 @@ extern bool pgstat_wal_flush_cb(bool nowait);
 extern void pgstat_wal_init_shmem_cb(void *stats);
 extern void pgstat_wal_reset_all_cb(TimestampTz ts);
 extern void pgstat_wal_snapshot_cb(void);
+extern void pgstat_wal_acc_backend_cb(void);
+extern void pgstat_wal_acc_all_backends(void);
+extern void pgstat_wal_per_backend_acc_cb(void *dst, void *entry);
 
 
 /*

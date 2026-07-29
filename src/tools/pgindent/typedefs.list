@@ -2333,6 +2333,7 @@ PgStatShared_ReplSlot
 PgStatShared_SLRU
 PgStatShared_Subscription
 PgStatShared_Wal
+PgStatShared_WalBackendEntry
 PgStat_ArchiverStats
 PgStat_Backend
 PgStat_BackendPending
