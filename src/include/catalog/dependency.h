@@ -97,6 +97,15 @@ typedef struct ObjectAddresses ObjectAddresses;
 #define PERFORM_DELETION_CONCURRENT_LOCK	0x0020	/* normal drop with
 													 * concurrent lock mode */
 
+/*
+ * Attribute number used to track whole-row references, to allow
+ * tracking of dependencies on the shape of the referenced relation.
+ *
+ * Without this, we'd have to scan all dependent objects' expressions
+ * every time a column is added, dropped, or modified.
+ */
+#define WholeRowAttrNumber		INT16_MIN
+
 
 /* in dependency.c */
 
