@@ -324,6 +324,24 @@ $node->command_ok(
 ok(-f "$tempdir/tarbackup/base.tar", 'backup tar was created');
 rmtree("$tempdir/tarbackup");
 
+# The "client-blackhole" target receives the whole backup but throws it away.
+$node->command_ok(
+	[
+		@pg_basebackup_defs,
+		'--target' => 'client-blackhole',
+		'--format' => 'plain',
+		'--wal-method' => 'none'
+	],
+	'client-blackhole target in plain format');
+$node->command_ok(
+	[
+		@pg_basebackup_defs,
+		'--target' => 'client-blackhole',
+		'--format' => 'tar',
+		'--wal-method' => 'fetch'
+	],
+	'client-blackhole target in tar format');
+
 $node->command_fails_like(
 	[
 		@pg_basebackup_defs,
