@@ -5327,10 +5327,14 @@ listSchemas(const char *pattern, bool verbose, bool showSystem)
 						  "SELECT pubname \n"
 						  "FROM pg_catalog.pg_publication p\n"
 						  "     JOIN pg_catalog.pg_publication_namespace pn ON p.oid = pn.pnpubid\n"
-						  "     JOIN pg_catalog.pg_namespace n ON n.oid = pn.pnnspid \n"
-						  "WHERE n.nspname = '%s'\n"
-						  "ORDER BY 1",
-						  pattern);
+						  "     JOIN pg_catalog.pg_namespace n ON n.oid = pn.pnnspid \n");
+
+		processSQLNamePattern(pset.db, &buf, pattern, false, false,
+							  NULL, "n.nspname", NULL,
+							  NULL, NULL, NULL);
+
+		appendPQExpBufferStr(&buf, "ORDER BY 1;");
+
 		result = PSQLexec(buf.data);
 		if (!result)
 			goto error_return;
