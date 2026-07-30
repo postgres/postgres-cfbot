@@ -268,9 +268,9 @@ PostgreSQL documentation
         <literal>/some/path</literal> directory. Storing a backup on the
         server requires superuser privileges or having privileges of the
         <literal>pg_write_server_files</literal> role. If the target is set to
-        <literal>blackhole</literal>, the contents are discarded and not
-        stored anywhere. This should only be used for testing purposes, as you
-        will not end up with an actual backup.
+        <literal>server-blackhole</literal>, the contents are discarded by the
+        server and not stored anywhere. This should only be used for testing
+        purposes, as you will not end up with an actual backup.
        </para>
 
        <para>
