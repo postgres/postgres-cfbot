@@ -3174,7 +3174,7 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
            sent to the client. If it is <literal>server</literal>, the backup
            data is written to the server at the pathname specified by the
            <literal>TARGET_DETAIL</literal> option. If it is
-           <literal>blackhole</literal>, the backup data is not sent
+           <literal>server-blackhole</literal>, the backup data is not sent
            anywhere; it is simply discarded.
           </para>
 
