@@ -37,6 +37,7 @@ typedef struct astreamer_extractor
 	void		(*report_output_file) (const char *);
 	char		filename[MAXPGPATH];
 	FILE	   *file;
+	bool		discard_backup;
 } astreamer_extractor;
 
 static void astreamer_plain_writer_content(astreamer *streamer,
@@ -60,7 +61,8 @@ static void astreamer_extractor_finalize(astreamer *streamer);
 static void astreamer_extractor_free(astreamer *streamer);
 static void extract_directory(const char *filename, mode_t mode);
 static void extract_link(const char *filename, const char *linktarget);
-static FILE *create_file_for_extract(const char *filename, mode_t mode);
+static FILE *create_file_for_extract(const char *filename, mode_t mode,
+									 bool discard_backup);
 
 static const astreamer_ops astreamer_extractor_ops = {
 	.content = astreamer_extractor_content,
@@ -181,11 +183,15 @@ astreamer_plain_writer_free(astreamer *streamer)
  * 'report_output_file' is a function that will be called each time we open a
  * new output file. The pathname to that file is passed as an argument. If
  * NULL, the call is skipped.
+ *
+ * If 'discard_backup' is true, the extracted archive is thrown away rather
+ * than written to the filesystem.
  */
 astreamer *
 astreamer_extractor_new(const char *basepath,
 						const char *(*link_map) (const char *),
-						void (*report_output_file) (const char *))
+						void (*report_output_file) (const char *),
+						bool discard_backup)
 {
 	astreamer_extractor *streamer;
 
@@ -195,6 +201,7 @@ astreamer_extractor_new(const char *basepath,
 	streamer->basepath = pstrdup(basepath);
 	streamer->link_map = link_map;
 	streamer->report_output_file = report_output_file;
+	streamer->discard_backup = discard_backup;
 
 	return &streamer->base;
 }
@@ -231,13 +238,19 @@ astreamer_extractor_content(astreamer *streamer, astreamer_member *member,
 			if (mystreamer->filename[fnamelen - 1] == '/')
 				mystreamer->filename[fnamelen - 1] = '\0';
 
-			/* Dispatch based on file type. */
+			/*
+			 * Dispatch based on file type.
+			 */
 			if (member->is_regular)
 				mystreamer->file =
 					create_file_for_extract(mystreamer->filename,
-											member->mode);
+											member->mode,
+											mystreamer->discard_backup);
 			else if (member->is_directory)
-				extract_directory(mystreamer->filename, member->mode);
+			{
+				if (!mystreamer->discard_backup)
+					extract_directory(mystreamer->filename, member->mode);
+			}
 			else if (member->is_symlink)
 			{
 				const char *linktarget = member->linktarget;
@@ -252,7 +265,8 @@ astreamer_extractor_content(astreamer *streamer, astreamer_member *member,
 							 member->linktarget);
 				}
 
-				extract_link(mystreamer->filename, linktarget);
+				if (!mystreamer->discard_backup)
+					extract_link(mystreamer->filename, linktarget);
 			}
 
 			/* Report output file change. */
@@ -369,9 +383,17 @@ extract_link(const char *filename, const char *linktarget)
  * Return the resulting handle so we can write the content to the file.
  */
 static FILE *
-create_file_for_extract(const char *filename, mode_t mode)
+create_file_for_extract(const char *filename, mode_t mode, bool discard_backup)
 {
 	FILE	   *file;
+
+	if (discard_backup)
+	{
+		file = fopen(DEVNULL, "wb");
+		if (file == NULL)
+			pg_fatal("could not open file \"%s\": %m", DEVNULL);
+		return file;
+	}
 
 	file = fopen(filename, "wb");
 	if (file == NULL)
