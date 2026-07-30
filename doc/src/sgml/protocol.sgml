@@ -181,8 +181,9 @@
 
    <para>
     Binary representations for integers use network byte order (most
-    significant byte first).  For other data types consult the documentation
-    or source code to learn about the binary representation.  Keep in mind
+    significant byte first).  The binary representation of each built-in
+    data type is documented in <xref linkend="binary-format"/>; for other
+    types, consult the type's documentation or source code.  Keep in mind
     that binary representations for complex data types might change across
     server versions; the text format is usually the more portable choice.
    </para>
