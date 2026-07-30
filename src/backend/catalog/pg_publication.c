@@ -960,13 +960,15 @@ GetRelationExcludedPublications(Oid relid)
  */
 static List *
 get_publication_relations(Oid pubid, PublicationPartOpt pub_partopt,
-						  bool except_flag)
+						  bool except_flag, char pubrelkind)
 {
 	List	   *result;
 	Relation	pubrelsrel;
 	ScanKeyData scankey;
 	SysScanDesc scan;
 	HeapTuple	tup;
+
+	Assert(pubrelkind == RELKIND_RELATION || pubrelkind == RELKIND_SEQUENCE);
 
 	/* Find all relations associated with the publication. */
 	pubrelsrel = table_open(PublicationRelRelationId, AccessShareLock);
@@ -987,8 +989,15 @@ get_publication_relations(Oid pubid, PublicationPartOpt pub_partopt,
 		pubrel = (Form_pg_publication_rel) GETSTRUCT(tup);
 
 		if (except_flag == pubrel->prexcept)
-			result = GetPubPartitionOptionRelations(result, pub_partopt,
-													pubrel->prrelid);
+		{
+			char		relkind = get_rel_relkind(pubrel->prrelid);
+
+			if ((pubrelkind == RELKIND_RELATION &&
+				 (relkind == RELKIND_RELATION || relkind == RELKIND_PARTITIONED_TABLE)) ||
+				(pubrelkind == RELKIND_SEQUENCE && relkind == RELKIND_SEQUENCE))
+				result = GetPubPartitionOptionRelations(result, pub_partopt,
+														pubrel->prrelid);
+		}
 	}
 
 	systable_endscan(scan);
@@ -1021,7 +1030,7 @@ GetIncludedPublicationRelations(Oid pubid, PublicationPartOpt pub_partopt)
 	if (GetPublication(pubid)->allsequences)
 		return NIL;
 
-	return get_publication_relations(pubid, pub_partopt, false);
+	return get_publication_relations(pubid, pub_partopt, false, RELKIND_RELATION);
 }
 
 /*
@@ -1029,7 +1038,8 @@ GetIncludedPublicationRelations(Oid pubid, PublicationPartOpt pub_partopt)
  * 'FOR ALL TABLES' or a 'FOR ALL SEQUENCES' publication.
  */
 List *
-GetExcludedPublicationRelations(Oid pubid, PublicationPartOpt pub_partopt)
+GetExcludedPublicationRelations(Oid pubid, PublicationPartOpt pub_partopt,
+								char pubrelkind)
 {
 #ifdef USE_ASSERT_CHECKING
 	Publication *pub = GetPublication(pubid);
@@ -1037,7 +1047,7 @@ GetExcludedPublicationRelations(Oid pubid, PublicationPartOpt pub_partopt)
 	Assert(pub->alltables || pub->allsequences);
 #endif
 
-	return get_publication_relations(pubid, pub_partopt, true);
+	return get_publication_relations(pubid, pub_partopt, true, pubrelkind);
 }
 
 /*
@@ -1092,7 +1102,7 @@ GetAllTablesPublications(void)
  * clause.
  */
 List *
-GetAllPublicationRelations(Oid pubid, char relkind, bool pubviaroot)
+GetAllPublicationRelations(Oid pubid, char pubrelkind, bool pubviaroot)
 {
 	Relation	classRel;
 	ScanKeyData key[1];
@@ -1101,18 +1111,19 @@ GetAllPublicationRelations(Oid pubid, char relkind, bool pubviaroot)
 	List	   *result = NIL;
 	List	   *exceptlist = NIL;
 
-	Assert(!(relkind == RELKIND_SEQUENCE && pubviaroot));
+	Assert(!(pubrelkind == RELKIND_SEQUENCE && pubviaroot));
 
 	exceptlist = GetExcludedPublicationRelations(pubid, pubviaroot ?
 												 PUBLICATION_PART_ROOT :
-												 PUBLICATION_PART_LEAF);
+												 PUBLICATION_PART_LEAF,
+												 pubrelkind);
 
 	classRel = table_open(RelationRelationId, AccessShareLock);
 
 	ScanKeyInit(&key[0],
 				Anum_pg_class_relkind,
 				BTEqualStrategyNumber, F_CHAREQ,
-				CharGetDatum(relkind));
+				CharGetDatum(pubrelkind));
 
 	scan = table_beginscan_catalog(classRel, 1, key);
 

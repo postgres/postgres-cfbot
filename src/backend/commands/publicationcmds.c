@@ -66,7 +66,7 @@ static void CloseRelationList(List *rels);
 static void LockSchemaList(List *schemalist);
 static void PublicationAddRelations(Oid pubid, List *rels, bool if_not_exists,
 									AlterPublicationStmt *stmt, char pubrelkind);
-static void PublicationDropTables(Oid pubid, List *rels, bool missing_ok);
+static void PublicationDropRelations(Oid pubid, List *rels, bool missing_ok);
 static void PublicationAddSchemas(Oid pubid, List *schemas, bool if_not_exists,
 								  AlterPublicationStmt *stmt);
 static void PublicationDropSchemas(Oid pubid, List *schemas, bool missing_ok);
@@ -1253,26 +1253,128 @@ InvalidatePublicationRels(List *relids)
 }
 
 /*
- * Add or remove table to/from publication.
+ * Return the list of tables/sequences to be removed from a publication during
+ * ALTER PUBLICATION ... SET.
+ *
+ * 'rels' contains the relations specified by the SET command, and 'oldrelids'
+ * contains the existing relations in the publication. The function returns the
+ * existing relations that are not present in 'rels' and therefore need to be
+ * removed.
+ */
+static List *
+get_delete_rels(Oid pubid, List *rels, List *oldrelids)
+{
+	List	   *delrels = NIL;
+
+	foreach_oid(oldrelid, oldrelids)
+	{
+		PublicationRelInfo *oldrel;
+		bool		found = false;
+		HeapTuple	rftuple;
+		Node	   *oldwhereexpr = NULL;
+		Bitmapset  *oldcolumns = NULL;
+
+		/* Look up the cache for the old relmap */
+		rftuple = SearchSysCache2(PUBLICATIONRELMAP,
+								  ObjectIdGetDatum(oldrelid),
+								  ObjectIdGetDatum(pubid));
+
+		/*
+		 * See if the existing relation currently has a WHERE clause or a
+		 * column list. We need to compare those too.
+		 */
+		if (HeapTupleIsValid(rftuple))
+		{
+			bool		isnull = true;
+			Datum		whereClauseDatum;
+			Datum		columnListDatum;
+
+			/* Load the WHERE clause for this table. */
+			whereClauseDatum = SysCacheGetAttr(PUBLICATIONRELMAP, rftuple,
+											   Anum_pg_publication_rel_prqual,
+											   &isnull);
+			if (!isnull)
+				oldwhereexpr = stringToNode(TextDatumGetCString(whereClauseDatum));
+
+			/* Transform the int2vector column list to a bitmap. */
+			columnListDatum = SysCacheGetAttr(PUBLICATIONRELMAP, rftuple,
+											  Anum_pg_publication_rel_prattrs,
+											  &isnull);
+
+			if (!isnull)
+				oldcolumns = pub_collist_to_bitmapset(NULL, columnListDatum, NULL);
+
+			ReleaseSysCache(rftuple);
+		}
+
+		/*
+		 * Check if any of the new set of relations matches with the existing
+		 * relations in the publication. Additionally, if the relation has an
+		 * associated WHERE clause, check the WHERE expressions also match.
+		 * Same for the column list. Drop the rest.
+		 */
+		foreach_ptr(PublicationRelInfo, newpubrel, rels)
+		{
+			Oid			newrelid = RelationGetRelid(newpubrel->relation);
+
+			if (newrelid == oldrelid &&
+				equal(oldwhereexpr, newpubrel->whereClause))
+			{
+				/*
+				 * Get the column list Bitmapset. Validation is a side effect
+				 * and will be duplicated inside PublicationAddRelations() if
+				 * the column list changed. That's cheap enough that it seems
+				 * harmless.
+				 */
+				Bitmapset  *newcolumns = pub_collist_validate(newpubrel->relation,
+															  newpubrel->columns);
+
+				if (bms_equal(oldcolumns, newcolumns))
+				{
+					found = true;
+					break;
+				}
+			}
+		}
+
+		/*
+		 * Add non-matching relations to the drop list. The relation will be
+		 * dropped irrespective of the column list and WHERE clause.
+		 */
+		if (!found)
+		{
+			oldrel = palloc0_object(PublicationRelInfo);
+			oldrel->relation = table_open(oldrelid,
+										  ShareUpdateExclusiveLock);
+			delrels = lappend(delrels, oldrel);
+		}
+	}
+
+	return delrels;
+}
+
+/*
+ * Add or remove table or sequence to/from publication.
  */
 static void
-AlterPublicationTables(AlterPublicationStmt *stmt, HeapTuple tup,
-					   List *tables, const char *queryString,
-					   bool publish_schema)
+AlterPublicationRelations(AlterPublicationStmt *stmt, HeapTuple tup,
+						  List *tables, List *sequences, const char *queryString,
+						  bool publish_schema)
 {
 	List	   *rels = NIL;
+	List	   *seqs = NIL;
 	Form_pg_publication pubform = (Form_pg_publication) GETSTRUCT(tup);
 	Oid			pubid = pubform->oid;
 
 	/*
-	 * Nothing to do if no objects, except in SET: for that it is quite
-	 * possible that user has not specified any tables in which case we need
-	 * to remove all the existing tables.
+	 * Nothing to do if no objects were specified, unless this is a SET
+	 * command, which may need to remove all existing tables and sequences.
 	 */
-	if (!tables && stmt->action != AP_SetObjects)
+	if (!tables && !sequences && stmt->action != AP_SetObjects)
 		return;
 
 	rels = OpenRelationList(tables);
+	seqs = OpenRelationList(sequences);
 
 	if (stmt->action == AP_AddObjects)
 	{
@@ -1286,32 +1388,38 @@ AlterPublicationTables(AlterPublicationStmt *stmt, HeapTuple tup,
 		PublicationAddRelations(pubid, rels, false, stmt, RELKIND_RELATION);
 	}
 	else if (stmt->action == AP_DropObjects)
-		PublicationDropTables(pubid, rels, false);
+		PublicationDropRelations(pubid, rels, false);
 	else						/* AP_SetObjects */
 	{
 		List	   *oldrelids = NIL;
+		List	   *oldseqids = NIL;
 		List	   *delrels = NIL;
-		ListCell   *oldlc;
 
 		if (stmt->for_all_tables || stmt->for_all_sequences)
 		{
 			/*
-			 * In FOR ALL TABLES mode, relations are tracked as exclusions
-			 * (EXCEPT clause). Fetch the current excluded relations so they
-			 * can be reconciled with the specified EXCEPT list.
+			 * In FOR ALL TABLES or FOR ALL SEQUENCES mode, relations are
+			 * tracked as exclusions (EXCEPT clause). Fetch the current
+			 * excluded relations so they can be reconciled with the specified
+			 * EXCEPT list.
 			 *
 			 * This applies only if the existing publication is already
-			 * defined as FOR ALL TABLES; otherwise, there are no exclusion
-			 * entries to process.
+			 * defined as FOR ALL TABLES or FOR ALL SEQUENCES; otherwise,
+			 * there are no exclusion entries to process.
 			 */
 			if (pubform->puballtables)
-			{
 				oldrelids = GetExcludedPublicationRelations(pubid,
-															PUBLICATION_PART_ROOT);
-			}
+															PUBLICATION_PART_ROOT,
+															RELKIND_RELATION);
+			if (pubform->puballsequences)
+				oldseqids = GetExcludedPublicationRelations(pubid,
+															PUBLICATION_PART_ROOT,
+															RELKIND_SEQUENCE);
 		}
 		else
 		{
+			Assert(!sequences);
+
 			oldrelids = GetIncludedPublicationRelations(pubid,
 														PUBLICATION_PART_ROOT);
 
@@ -1321,118 +1429,25 @@ AlterPublicationTables(AlterPublicationStmt *stmt, HeapTuple tup,
 									   pubform->pubviaroot);
 		}
 
-		/*
-		 * To recreate the relation list for the publication, look for
-		 * existing relations that do not need to be dropped.
-		 */
-		foreach(oldlc, oldrelids)
-		{
-			Oid			oldrelid = lfirst_oid(oldlc);
-			ListCell   *newlc;
-			PublicationRelInfo *oldrel;
-			bool		found = false;
-			HeapTuple	rftuple;
-			Node	   *oldrelwhereclause = NULL;
-			Bitmapset  *oldcolumns = NULL;
-
-			/* look up the cache for the old relmap */
-			rftuple = SearchSysCache2(PUBLICATIONRELMAP,
-									  ObjectIdGetDatum(oldrelid),
-									  ObjectIdGetDatum(pubid));
-
-			/*
-			 * See if the existing relation currently has a WHERE clause or a
-			 * column list. We need to compare those too.
-			 */
-			if (HeapTupleIsValid(rftuple))
-			{
-				bool		isnull = true;
-				Datum		whereClauseDatum;
-				Datum		columnListDatum;
-
-				/* Load the WHERE clause for this table. */
-				whereClauseDatum = SysCacheGetAttr(PUBLICATIONRELMAP, rftuple,
-												   Anum_pg_publication_rel_prqual,
-												   &isnull);
-				if (!isnull)
-					oldrelwhereclause = stringToNode(TextDatumGetCString(whereClauseDatum));
-
-				/* Transform the int2vector column list to a bitmap. */
-				columnListDatum = SysCacheGetAttr(PUBLICATIONRELMAP, rftuple,
-												  Anum_pg_publication_rel_prattrs,
-												  &isnull);
-
-				if (!isnull)
-					oldcolumns = pub_collist_to_bitmapset(NULL, columnListDatum, NULL);
-
-				ReleaseSysCache(rftuple);
-			}
-
-			foreach(newlc, rels)
-			{
-				PublicationRelInfo *newpubrel;
-				Oid			newrelid;
-				Bitmapset  *newcolumns = NULL;
-
-				newpubrel = (PublicationRelInfo *) lfirst(newlc);
-				newrelid = RelationGetRelid(newpubrel->relation);
-
-				/*
-				 * Validate the column list.  If the column list or WHERE
-				 * clause changes, then the validation done here will be
-				 * duplicated inside PublicationAddRelations().  The
-				 * validation is cheap enough that that seems harmless.
-				 */
-				newcolumns = pub_collist_validate(newpubrel->relation,
-												  newpubrel->columns);
-
-				/*
-				 * Check if any of the new set of relations matches with the
-				 * existing relations in the publication. Additionally, if the
-				 * relation has an associated WHERE clause, check the WHERE
-				 * expressions also match. Same for the column list. Drop the
-				 * rest.
-				 */
-				if (newrelid == oldrelid)
-				{
-					if (equal(oldrelwhereclause, newpubrel->whereClause) &&
-						bms_equal(oldcolumns, newcolumns))
-					{
-						found = true;
-						break;
-					}
-				}
-			}
-
-			/*
-			 * Add the non-matched relations to a list so that they can be
-			 * dropped.
-			 */
-			if (!found)
-			{
-				oldrel = palloc_object(PublicationRelInfo);
-				oldrel->whereClause = NULL;
-				oldrel->columns = NIL;
-				oldrel->except = false;
-				oldrel->relation = table_open(oldrelid,
-											  ShareUpdateExclusiveLock);
-				delrels = lappend(delrels, oldrel);
-			}
-		}
+		/* Get tables and sequences to be dropped */
+		delrels = get_delete_rels(pubid, rels, oldrelids);
+		delrels = list_concat(delrels, get_delete_rels(pubid, seqs, oldseqids));
 
 		/* And drop them. */
-		PublicationDropTables(pubid, delrels, true);
+		PublicationDropRelations(pubid, delrels, true);
 
 		/*
 		 * Don't bother calculating the difference for adding, we'll catch and
 		 * skip existing ones when doing catalog update.
 		 */
 		PublicationAddRelations(pubid, rels, true, stmt, RELKIND_RELATION);
+		PublicationAddRelations(pubid, seqs, true, stmt, RELKIND_SEQUENCE);
 
 		CloseRelationList(delrels);
 	}
 
 	CloseRelationList(rels);
+	CloseRelationList(seqs);
 }
 
 /*
@@ -1699,18 +1714,20 @@ AlterPublication(ParseState *pstate, AlterPublicationStmt *stmt)
 		AlterPublicationOptions(pstate, stmt, rel, tup);
 	else
 	{
-		List	   *relations = NIL;
+		List	   *tables = NIL;
 		List	   *excepttbls = NIL;
 		List	   *exceptseqs = NIL;
 		List	   *schemaidlist = NIL;
 		Oid			pubid = pubform->oid;
 
-		ObjectsInPublicationToOids(stmt->pubobjects, pstate, &relations,
+		ObjectsInPublicationToOids(stmt->pubobjects, pstate, &tables,
 								   &excepttbls, &exceptseqs, &schemaidlist);
 
-		Assert(exceptseqs == NIL);
+		/* EXCEPT clause is only supported for ALTER PUBLICATION ... SET */
+		Assert((excepttbls == NIL && exceptseqs == NIL) ||
+			   stmt->action == AP_SetObjects);
 
-		CheckAlterPublication(stmt, tup, relations, schemaidlist);
+		CheckAlterPublication(stmt, tup, tables, schemaidlist);
 
 		heap_freetuple(tup);
 
@@ -1731,9 +1748,9 @@ AlterPublication(ParseState *pstate, AlterPublicationStmt *stmt)
 					errmsg("publication \"%s\" does not exist",
 						   stmt->pubname));
 
-		relations = list_concat(relations, excepttbls);
-		AlterPublicationTables(stmt, tup, relations, pstate->p_sourcetext,
-							   schemaidlist != NIL);
+		tables = list_concat(tables, excepttbls);
+		AlterPublicationRelations(stmt, tup, tables, exceptseqs,
+								  pstate->p_sourcetext, schemaidlist != NIL);
 		AlterPublicationSchemas(stmt, tup, schemaidlist);
 		AlterPublicationAllFlags(stmt, rel, tup);
 	}
@@ -2085,10 +2102,10 @@ PublicationAddRelations(Oid pubid, List *rels, bool if_not_exists,
 }
 
 /*
- * Remove listed tables from the publication.
+ * Remove listed relations from the publication.
  */
 static void
-PublicationDropTables(Oid pubid, List *rels, bool missing_ok)
+PublicationDropRelations(Oid pubid, List *rels, bool missing_ok)
 {
 	ObjectAddress obj;
 	ListCell   *lc;

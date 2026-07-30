@@ -178,9 +178,11 @@ typedef enum PublicationPartOpt
 extern List *GetIncludedPublicationRelations(Oid pubid,
 											 PublicationPartOpt pub_partopt);
 extern List *GetExcludedPublicationRelations(Oid pubid,
-											 PublicationPartOpt pub_partopt);
+											 PublicationPartOpt pub_partopt,
+											 char pubrelkind);
 extern List *GetAllTablesPublications(void);
-extern List *GetAllPublicationRelations(Oid pubid, char relkind, bool pubviaroot);
+extern List *GetAllPublicationRelations(Oid pubid, char pubrelkind,
+										bool pubviaroot);
 extern List *GetPublicationSchemas(Oid pubid);
 extern List *GetSchemaPublications(Oid schemaid);
 extern List *GetSchemaPublicationRelations(Oid schemaid,
