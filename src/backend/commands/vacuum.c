@@ -1157,6 +1157,7 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	 * that only one vacuum process can be working on a particular table at
 	 * any time, and that each vacuum is always an independent transaction.
 	 */
+	INJECTION_POINT("vacuum-get-cutoffs-before-oldest-xmin", NULL);
 	cutoffs->OldestXmin = GetOldestNonRemovableTransactionId(rel);
 
 	Assert(TransactionIdIsNormal(cutoffs->OldestXmin));
