@@ -1573,8 +1573,20 @@ DELETE FROM temporal_rng WHERE id = '[5,6)' AND valid_at = daterange('2018-01-01
 --
 -- rng2rng test ON UPDATE/DELETE options
 --
+-- TOC:
+-- referenced updates CASCADE
+-- referenced deletes CASCADE
+-- referenced updates SET NULL
+-- referenced deletes SET NULL
+-- referenced updates SET DEFAULT
+-- referenced deletes SET DEFAULT
+-- referenced updates CASCADE (two scalar cols)
+-- referenced deletes CASCADE (two scalar cols)
 
+--
 -- test FK referenced updates CASCADE
+--
+
 TRUNCATE temporal_rng, temporal_fk_rng2rng;
 INSERT INTO temporal_rng (id, valid_at) VALUES ('[6,7)', daterange('2018-01-01', '2021-01-01'));
 INSERT INTO temporal_fk_rng2rng (id, valid_at, parent_id) VALUES ('[100,101)', daterange('2018-01-01', '2021-01-01'), '[6,7)');
@@ -1584,12 +1596,62 @@ ALTER TABLE temporal_fk_rng2rng
     FOREIGN KEY (parent_id, PERIOD valid_at)
     REFERENCES temporal_rng
     ON DELETE CASCADE ON UPDATE CASCADE;
+-- leftovers on both sides:
+UPDATE temporal_rng FOR PORTION OF valid_at FROM '2019-01-01' TO '2020-01-01' SET id = '[7,8)' WHERE id = '[6,7)';
+SELECT * FROM temporal_fk_rng2rng WHERE id = '[100,101)' ORDER BY id, valid_at;
+-- non-FPO update:
+-- change id and not valid_at: we cascade the whole history.
+UPDATE temporal_rng SET id = '[7,8)' WHERE id = '[6,7)';
+SELECT * FROM temporal_fk_rng2rng WHERE id = '[100,101)' ORDER BY id, valid_at;
+-- change id and valid_at: we cascade update some, delete some.
+UPDATE temporal_rng SET id = '[6,7)', valid_at = daterange('2018-01-01', '2018-03-01')
+WHERE id = '[7,8)' AND valid_at @> '2018-06-01'::date;
+SELECT * FROM temporal_fk_rng2rng WHERE id = '[100,101)' ORDER BY id, valid_at;
+-- change valid_at and not id: we cascade *delete* what was lost.
+UPDATE temporal_rng SET valid_at = daterange('2020-01-01', '2020-07-01')
+WHERE id = '[7,8)' AND valid_at @> '2020-06-01'::date;
+SELECT * FROM temporal_fk_rng2rng WHERE id = '[100,101)' ORDER BY id, valid_at;
+-- losing history at both ends gives two DELETEs:
+UPDATE temporal_rng SET valid_at = daterange('2019-04-01', '2019-07-01')
+WHERE id = '[7,8)' AND valid_at @> '2019-06-01'::date;
+SELECT * FROM temporal_fk_rng2rng WHERE id = '[100,101)' ORDER BY id, valid_at;
+-- growing the history changes nothing:
+UPDATE temporal_rng SET valid_at = daterange('2019-01-01', '2020-01-01')
+WHERE id = '[7,8)' AND valid_at @> '2019-06-01'::date;
+SELECT * FROM temporal_fk_rng2rng WHERE id = '[100,101)' ORDER BY id, valid_at;
+-- FK across two referenced rows:
+INSERT INTO temporal_rng (id, valid_at) VALUES ('[8,9)', daterange('2018-01-01', '2020-01-01'));
+INSERT INTO temporal_rng (id, valid_at) VALUES ('[8,9)', daterange('2020-01-01', '2021-01-01'));
+INSERT INTO temporal_fk_rng2rng (id, valid_at, parent_id) VALUES ('[200,201)', daterange('2018-01-01', '2021-01-01'), '[8,9)');
+UPDATE temporal_rng SET id = '[9,10)' WHERE id = '[8,9)' AND valid_at @> '2019-01-01'::date;
+SELECT * FROM temporal_fk_rng2rng WHERE id = '[200,201)' ORDER BY id, valid_at;
+
+--
+-- test FK referenced deletes CASCADE
+--
+
+TRUNCATE temporal_rng, temporal_fk_rng2rng;
+INSERT INTO temporal_rng (id, valid_at) VALUES ('[6,7)', daterange('2018-01-01', '2021-01-01'));
+INSERT INTO temporal_fk_rng2rng (id, valid_at, parent_id) VALUES ('[100,101)', daterange('2018-01-01', '2021-01-01'), '[6,7)');
+-- leftovers on both sides:
+DELETE FROM temporal_rng FOR PORTION OF valid_at FROM '2019-01-01' TO '2020-01-01' WHERE id = '[6,7)';
+SELECT * FROM temporal_fk_rng2rng WHERE id = '[100,101)' ORDER BY id, valid_at;
+-- non-FPO delete:
+DELETE FROM temporal_rng WHERE id = '[6,7)';
+SELECT * FROM temporal_fk_rng2rng WHERE id = '[100,101)' ORDER BY id, valid_at;
+-- FK across two referenced rows:
+INSERT INTO temporal_rng (id, valid_at) VALUES ('[8,9)', daterange('2018-01-01', '2020-01-01'));
+INSERT INTO temporal_rng (id, valid_at) VALUES ('[8,9)', daterange('2020-01-01', '2021-01-01'));
+INSERT INTO temporal_fk_rng2rng (id, valid_at, parent_id) VALUES ('[200,201)', daterange('2018-01-01', '2021-01-01'), '[8,9)');
+DELETE FROM temporal_rng WHERE id = '[8,9)' AND valid_at @> '2019-01-01'::date;
+SELECT * FROM temporal_fk_rng2rng WHERE id = '[200,201)' ORDER BY id, valid_at;
 
 -- test FK referenced updates SET NULL
 TRUNCATE temporal_rng, temporal_fk_rng2rng;
 INSERT INTO temporal_rng (id, valid_at) VALUES ('[6,7)', daterange('2018-01-01', '2021-01-01'));
 INSERT INTO temporal_fk_rng2rng (id, valid_at, parent_id) VALUES ('[100,101)', daterange('2018-01-01', '2021-01-01'), '[6,7)');
 ALTER TABLE temporal_fk_rng2rng
+  DROP CONSTRAINT temporal_fk_rng2rng_fk,
   ADD CONSTRAINT temporal_fk_rng2rng_fk
     FOREIGN KEY (parent_id, PERIOD valid_at)
     REFERENCES temporal_rng
@@ -1602,10 +1664,57 @@ INSERT INTO temporal_rng (id, valid_at) VALUES ('[6,7)', daterange('2018-01-01',
 INSERT INTO temporal_fk_rng2rng (id, valid_at, parent_id) VALUES ('[100,101)', daterange('2018-01-01', '2021-01-01'), '[6,7)');
 ALTER TABLE temporal_fk_rng2rng
   ALTER COLUMN parent_id SET DEFAULT '[-1,-1]',
+  DROP CONSTRAINT temporal_fk_rng2rng_fk,
   ADD CONSTRAINT temporal_fk_rng2rng_fk
     FOREIGN KEY (parent_id, PERIOD valid_at)
     REFERENCES temporal_rng
     ON DELETE SET DEFAULT ON UPDATE SET DEFAULT;
+
+--
+-- test FK referenced updates CASCADE (two scalar cols)
+--
+
+TRUNCATE temporal_rng2, temporal_fk2_rng2rng;
+INSERT INTO temporal_rng2 (id1, id2, valid_at) VALUES ('[6,7)', '[6,7)', daterange('2018-01-01', '2021-01-01'));
+INSERT INTO temporal_fk2_rng2rng (id, valid_at, parent_id1, parent_id2) VALUES ('[100,101)', daterange('2018-01-01', '2021-01-01'), '[6,7)', '[6,7)');
+ALTER TABLE temporal_fk2_rng2rng
+  DROP CONSTRAINT temporal_fk2_rng2rng_fk,
+  ADD CONSTRAINT temporal_fk2_rng2rng_fk
+    FOREIGN KEY (parent_id1, parent_id2, PERIOD valid_at)
+    REFERENCES temporal_rng2
+    ON DELETE CASCADE ON UPDATE CASCADE;
+-- leftovers on both sides:
+UPDATE temporal_rng2 FOR PORTION OF valid_at FROM '2019-01-01' TO '2020-01-01' SET id1 = '[7,8)' WHERE id1 = '[6,7)';
+SELECT * FROM temporal_fk2_rng2rng WHERE id = '[100,101)' ORDER BY id, valid_at;
+-- non-FPO update:
+UPDATE temporal_rng2 SET id1 = '[7,8)' WHERE id1 = '[6,7)';
+SELECT * FROM temporal_fk2_rng2rng WHERE id = '[100,101)' ORDER BY id, valid_at;
+-- FK across two referenced rows:
+INSERT INTO temporal_rng2 (id1, id2, valid_at) VALUES ('[8,9)', '[8,9)', daterange('2018-01-01', '2020-01-01'));
+INSERT INTO temporal_rng2 (id1, id2, valid_at) VALUES ('[8,9)', '[8,9)', daterange('2020-01-01', '2021-01-01'));
+INSERT INTO temporal_fk2_rng2rng (id, valid_at, parent_id1, parent_id2) VALUES ('[200,201)', daterange('2018-01-01', '2021-01-01'), '[8,9)', '[8,9)');
+UPDATE temporal_rng2 SET id1 = '[9,10)' WHERE id1 = '[8,9)' AND valid_at @> '2019-01-01'::date;
+SELECT * FROM temporal_fk2_rng2rng WHERE id = '[200,201)' ORDER BY id, valid_at;
+
+--
+-- test FK referenced deletes CASCADE (two scalar cols)
+--
+
+TRUNCATE temporal_rng2, temporal_fk2_rng2rng;
+INSERT INTO temporal_rng2 (id1, id2, valid_at) VALUES ('[6,7)', '[6,7)', daterange('2018-01-01', '2021-01-01'));
+INSERT INTO temporal_fk2_rng2rng (id, valid_at, parent_id1, parent_id2) VALUES ('[100,101)', daterange('2018-01-01', '2021-01-01'), '[6,7)', '[6,7)');
+-- leftovers on both sides:
+DELETE FROM temporal_rng2 FOR PORTION OF valid_at FROM '2019-01-01' TO '2020-01-01' WHERE id1 = '[6,7)';
+SELECT * FROM temporal_fk2_rng2rng WHERE id = '[100,101)' ORDER BY id, valid_at;
+-- non-FPO delete:
+DELETE FROM temporal_rng2 WHERE id1 = '[6,7)';
+SELECT * FROM temporal_fk2_rng2rng WHERE id = '[100,101)' ORDER BY id, valid_at;
+-- FK across two referenced rows:
+INSERT INTO temporal_rng2 (id1, id2, valid_at) VALUES ('[8,9)', '[8,9)', daterange('2018-01-01', '2020-01-01'));
+INSERT INTO temporal_rng2 (id1, id2, valid_at) VALUES ('[8,9)', '[8,9)', daterange('2020-01-01', '2021-01-01'));
+INSERT INTO temporal_fk2_rng2rng (id, valid_at, parent_id1, parent_id2) VALUES ('[200,201)', daterange('2018-01-01', '2021-01-01'), '[8,9)', '[8,9)');
+DELETE FROM temporal_rng2 WHERE id1 = '[8,9)' AND valid_at @> '2019-01-01'::date;
+SELECT * FROM temporal_fk2_rng2rng WHERE id = '[200,201)' ORDER BY id, valid_at;
 
 --
 -- test FOREIGN KEY, multirange references multirange
@@ -2132,6 +2241,128 @@ DELETE FROM temporal_fk_mltrng2mltrng WHERE id = '[3,4)';
 DELETE FROM temporal_mltrng WHERE id = '[5,6)' AND valid_at = datemultirange(daterange('2018-01-01', '2018-02-01'));
 
 --
+-- mltrng2mltrng test ON UPDATE/DELETE options
+--
+-- TOC:
+-- referenced updates CASCADE
+-- referenced deletes CASCADE
+-- referenced updates SET NULL
+-- referenced deletes SET NULL
+-- referenced updates SET DEFAULT
+-- referenced deletes SET DEFAULT
+-- referenced updates CASCADE (two scalar cols)
+-- referenced deletes CASCADE (two scalar cols)
+
+--
+-- test FK referenced updates CASCADE
+--
+
+TRUNCATE temporal_mltrng, temporal_fk_mltrng2mltrng;
+INSERT INTO temporal_mltrng (id, valid_at) VALUES ('[6,7)', datemultirange(daterange('2018-01-01', '2021-01-01')));
+INSERT INTO temporal_fk_mltrng2mltrng (id, valid_at, parent_id) VALUES ('[100,101)', datemultirange(daterange('2018-01-01', '2021-01-01')), '[6,7)');
+ALTER TABLE temporal_fk_mltrng2mltrng
+  DROP CONSTRAINT temporal_fk_mltrng2mltrng_fk,
+  ADD CONSTRAINT temporal_fk_mltrng2mltrng_fk
+    FOREIGN KEY (parent_id, PERIOD valid_at)
+    REFERENCES temporal_mltrng
+    ON DELETE CASCADE ON UPDATE CASCADE;
+-- leftovers on both sides:
+UPDATE temporal_mltrng FOR PORTION OF valid_at (datemultirange(daterange('2019-01-01', '2020-01-01'))) SET id = '[7,8)' WHERE id = '[6,7)';
+SELECT * FROM temporal_fk_mltrng2mltrng WHERE id = '[100,101)' ORDER BY id, valid_at;
+-- non-FPO update:
+-- change id and not valid_at: we cascade the whole history.
+UPDATE temporal_mltrng SET id = '[7,8)' WHERE id = '[6,7)';
+SELECT * FROM temporal_fk_mltrng2mltrng WHERE id = '[100,101)' ORDER BY id, valid_at;
+-- change id and valid_at: we cascade update some, delete some.
+UPDATE temporal_mltrng SET id = '[6,7)', valid_at = datemultirange(daterange('2018-01-01', '2018-03-01'))
+WHERE id = '[7,8)' AND valid_at @> '2018-06-01'::date;
+SELECT * FROM temporal_fk_mltrng2mltrng WHERE id = '[100,101)' ORDER BY id, valid_at;
+-- change valid_at and not id: we cascade *delete* what was lost.
+UPDATE temporal_mltrng SET valid_at = datemultirange(daterange('2020-01-01', '2020-07-01'))
+WHERE id = '[7,8)' AND valid_at @> '2020-06-01'::date;
+SELECT * FROM temporal_fk_mltrng2mltrng WHERE id = '[100,101)' ORDER BY id, valid_at;
+-- losing history at both ends deletes a discontiguous multirange:
+UPDATE temporal_mltrng SET valid_at = datemultirange(daterange('2019-04-01', '2019-07-01'))
+WHERE id = '[7,8)' AND valid_at @> '2019-06-01'::date;
+SELECT * FROM temporal_fk_mltrng2mltrng WHERE id = '[100,101)' ORDER BY id, valid_at;
+-- growing the history changes nothing:
+UPDATE temporal_mltrng SET valid_at = datemultirange(daterange('2019-01-01', '2020-01-01'))
+WHERE id = '[7,8)' AND valid_at @> '2019-06-01'::date;
+SELECT * FROM temporal_fk_mltrng2mltrng WHERE id = '[100,101)' ORDER BY id, valid_at;
+-- FK across two referenced rows:
+INSERT INTO temporal_mltrng (id, valid_at) VALUES ('[8,9)', datemultirange(daterange('2018-01-01', '2020-01-01')));
+INSERT INTO temporal_mltrng (id, valid_at) VALUES ('[8,9)', datemultirange(daterange('2020-01-01', '2021-01-01')));
+INSERT INTO temporal_fk_mltrng2mltrng (id, valid_at, parent_id) VALUES ('[200,201)', datemultirange(daterange('2018-01-01', '2021-01-01')), '[8,9)');
+UPDATE temporal_mltrng SET id = '[9,10)' WHERE id = '[8,9)' AND valid_at @> '2019-01-01'::date;
+SELECT * FROM temporal_fk_mltrng2mltrng WHERE id = '[200,201)' ORDER BY id, valid_at;
+
+--
+-- test FK referenced deletes CASCADE
+--
+
+TRUNCATE temporal_mltrng, temporal_fk_mltrng2mltrng;
+INSERT INTO temporal_mltrng (id, valid_at) VALUES ('[6,7)', datemultirange(daterange('2018-01-01', '2021-01-01')));
+INSERT INTO temporal_fk_mltrng2mltrng (id, valid_at, parent_id) VALUES ('[100,101)', datemultirange(daterange('2018-01-01', '2021-01-01')), '[6,7)');
+-- leftovers on both sides:
+DELETE FROM temporal_mltrng FOR PORTION OF valid_at (datemultirange(daterange('2019-01-01', '2020-01-01'))) WHERE id = '[6,7)';
+SELECT * FROM temporal_fk_mltrng2mltrng WHERE id = '[100,101)' ORDER BY id, valid_at;
+-- non-FPO delete:
+DELETE FROM temporal_mltrng WHERE id = '[6,7)';
+SELECT * FROM temporal_fk_mltrng2mltrng WHERE id = '[100,101)' ORDER BY id, valid_at;
+-- FK across two referenced rows:
+INSERT INTO temporal_mltrng (id, valid_at) VALUES ('[8,9)', datemultirange(daterange('2018-01-01', '2020-01-01')));
+INSERT INTO temporal_mltrng (id, valid_at) VALUES ('[8,9)', datemultirange(daterange('2020-01-01', '2021-01-01')));
+INSERT INTO temporal_fk_mltrng2mltrng (id, valid_at, parent_id) VALUES ('[200,201)', datemultirange(daterange('2018-01-01', '2021-01-01')), '[8,9)');
+DELETE FROM temporal_mltrng WHERE id = '[8,9)' AND valid_at @> '2019-01-01'::date;
+SELECT * FROM temporal_fk_mltrng2mltrng WHERE id = '[200,201)' ORDER BY id, valid_at;
+
+--
+-- test FK referenced updates CASCADE (two scalar cols)
+--
+
+TRUNCATE temporal_mltrng2, temporal_fk2_mltrng2mltrng;
+INSERT INTO temporal_mltrng2 (id1, id2, valid_at) VALUES ('[6,7)', '[6,7)', datemultirange(daterange('2018-01-01', '2021-01-01')));
+INSERT INTO temporal_fk2_mltrng2mltrng (id, valid_at, parent_id1, parent_id2) VALUES ('[100,101)', datemultirange(daterange('2018-01-01', '2021-01-01')), '[6,7)', '[6,7)');
+ALTER TABLE temporal_fk2_mltrng2mltrng
+  DROP CONSTRAINT temporal_fk2_mltrng2mltrng_fk,
+  ADD CONSTRAINT temporal_fk2_mltrng2mltrng_fk
+    FOREIGN KEY (parent_id1, parent_id2, PERIOD valid_at)
+    REFERENCES temporal_mltrng2
+    ON DELETE CASCADE ON UPDATE CASCADE;
+-- leftovers on both sides:
+UPDATE temporal_mltrng2 FOR PORTION OF valid_at (datemultirange(daterange('2019-01-01', '2020-01-01'))) SET id1 = '[7,8)' WHERE id1 = '[6,7)';
+SELECT * FROM temporal_fk2_mltrng2mltrng WHERE id = '[100,101)' ORDER BY id, valid_at;
+-- non-FPO update:
+UPDATE temporal_mltrng2 SET id1 = '[7,8)' WHERE id1 = '[6,7)';
+SELECT * FROM temporal_fk2_mltrng2mltrng WHERE id = '[100,101)' ORDER BY id, valid_at;
+-- FK across two referenced rows:
+INSERT INTO temporal_mltrng2 (id1, id2, valid_at) VALUES ('[8,9)', '[8,9)', datemultirange(daterange('2018-01-01', '2020-01-01')));
+INSERT INTO temporal_mltrng2 (id1, id2, valid_at) VALUES ('[8,9)', '[8,9)', datemultirange(daterange('2020-01-01', '2021-01-01')));
+INSERT INTO temporal_fk2_mltrng2mltrng (id, valid_at, parent_id1, parent_id2) VALUES ('[200,201)', datemultirange(daterange('2018-01-01', '2021-01-01')), '[8,9)', '[8,9)');
+UPDATE temporal_mltrng2 SET id1 = '[9,10)' WHERE id1 = '[8,9)' AND valid_at @> '2019-01-01'::date;
+SELECT * FROM temporal_fk2_mltrng2mltrng WHERE id = '[200,201)' ORDER BY id, valid_at;
+
+--
+-- test FK referenced deletes CASCADE (two scalar cols)
+--
+
+TRUNCATE temporal_mltrng2, temporal_fk2_mltrng2mltrng;
+INSERT INTO temporal_mltrng2 (id1, id2, valid_at) VALUES ('[6,7)', '[6,7)', datemultirange(daterange('2018-01-01', '2021-01-01')));
+INSERT INTO temporal_fk2_mltrng2mltrng (id, valid_at, parent_id1, parent_id2) VALUES ('[100,101)', datemultirange(daterange('2018-01-01', '2021-01-01')), '[6,7)', '[6,7)');
+-- leftovers on both sides:
+DELETE FROM temporal_mltrng2 FOR PORTION OF valid_at (datemultirange(daterange('2019-01-01', '2020-01-01'))) WHERE id1 = '[6,7)';
+SELECT * FROM temporal_fk2_mltrng2mltrng WHERE id = '[100,101)' ORDER BY id, valid_at;
+-- non-FPO delete:
+DELETE FROM temporal_mltrng2 WHERE id1 = '[6,7)';
+SELECT * FROM temporal_fk2_mltrng2mltrng WHERE id = '[100,101)' ORDER BY id, valid_at;
+-- FK across two referenced rows:
+INSERT INTO temporal_mltrng2 (id1, id2, valid_at) VALUES ('[8,9)', '[8,9)', datemultirange(daterange('2018-01-01', '2020-01-01')));
+INSERT INTO temporal_mltrng2 (id1, id2, valid_at) VALUES ('[8,9)', '[8,9)', datemultirange(daterange('2020-01-01', '2021-01-01')));
+INSERT INTO temporal_fk2_mltrng2mltrng (id, valid_at, parent_id1, parent_id2) VALUES ('[200,201)', datemultirange(daterange('2018-01-01', '2021-01-01')), '[8,9)', '[8,9)');
+DELETE FROM temporal_mltrng2 WHERE id1 = '[8,9)' AND valid_at @> '2019-01-01'::date;
+SELECT * FROM temporal_fk2_mltrng2mltrng WHERE id = '[200,201)' ORDER BY id, valid_at;
+
+--
 -- FK between partitioned tables: ranges
 --
 
@@ -2141,8 +2372,8 @@ CREATE TABLE temporal_partitioned_rng (
   name text,
   CONSTRAINT temporal_partitioned_rng_pk PRIMARY KEY (id, valid_at WITHOUT OVERLAPS)
 ) PARTITION BY LIST (id);
-CREATE TABLE tp1 partition OF temporal_partitioned_rng FOR VALUES IN ('[1,2)', '[3,4)', '[5,6)', '[7,8)', '[9,10)', '[11,12)');
-CREATE TABLE tp2 partition OF temporal_partitioned_rng FOR VALUES IN ('[2,3)', '[4,5)', '[6,7)', '[8,9)', '[10,11)', '[12,13)');
+CREATE TABLE tp1 PARTITION OF temporal_partitioned_rng FOR VALUES IN ('[1,2)', '[3,4)', '[5,6)', '[7,8)', '[9,10)', '[11,12)', '[13,14)', '[15,16)', '[17,18)', '[19,20)', '[21,22)', '[23,24)');
+CREATE TABLE tp2 PARTITION OF temporal_partitioned_rng FOR VALUES IN ('[0,1)', '[2,3)', '[4,5)', '[6,7)', '[8,9)', '[10,11)', '[12,13)', '[14,15)', '[16,17)', '[18,19)', '[20,21)', '[22,23)', '[24,25)');
 INSERT INTO temporal_partitioned_rng (id, valid_at, name) VALUES
   ('[1,2)', daterange('2000-01-01', '2000-02-01'), 'one'),
   ('[1,2)', daterange('2000-02-01', '2000-03-01'), 'one'),
@@ -2156,8 +2387,8 @@ CREATE TABLE temporal_partitioned_fk_rng2rng (
   CONSTRAINT temporal_partitioned_fk_rng2rng_fk FOREIGN KEY (parent_id, PERIOD valid_at)
     REFERENCES temporal_partitioned_rng (id, PERIOD valid_at)
 ) PARTITION BY LIST (id);
-CREATE TABLE tfkp1 partition OF temporal_partitioned_fk_rng2rng FOR VALUES IN ('[1,2)', '[3,4)', '[5,6)', '[7,8)', '[9,10)', '[11,12)');
-CREATE TABLE tfkp2 partition OF temporal_partitioned_fk_rng2rng FOR VALUES IN ('[2,3)', '[4,5)', '[6,7)', '[8,9)', '[10,11)', '[12,13)');
+CREATE TABLE tfkp1 PARTITION OF temporal_partitioned_fk_rng2rng FOR VALUES IN ('[1,2)', '[3,4)', '[5,6)', '[7,8)', '[9,10)', '[11,12)', '[13,14)', '[15,16)', '[17,18)', '[19,20)', '[21,22)', '[23,24)');
+CREATE TABLE tfkp2 PARTITION OF temporal_partitioned_fk_rng2rng FOR VALUES IN ('[0,1)', '[2,3)', '[4,5)', '[6,7)', '[8,9)', '[10,11)', '[12,13)', '[14,15)', '[16,17)', '[18,19)', '[20,21)', '[22,23)', '[24,25)');
 
 --
 -- partitioned FK referencing inserts
@@ -2216,16 +2447,41 @@ DELETE FROM temporal_partitioned_rng WHERE id = '[5,6)' AND valid_at = daterange
 -- partitioned FK referenced updates CASCADE
 --
 
+TRUNCATE temporal_partitioned_rng, temporal_partitioned_fk_rng2rng;
+INSERT INTO temporal_partitioned_rng (id, valid_at) VALUES ('[6,7)', daterange('2018-01-01', '2021-01-01'));
+INSERT INTO temporal_partitioned_fk_rng2rng (id, valid_at, parent_id) VALUES ('[4,5)', daterange('2018-01-01', '2021-01-01'), '[6,7)');
 ALTER TABLE temporal_partitioned_fk_rng2rng
   DROP CONSTRAINT temporal_partitioned_fk_rng2rng_fk,
   ADD CONSTRAINT temporal_partitioned_fk_rng2rng_fk
     FOREIGN KEY (parent_id, PERIOD valid_at)
     REFERENCES temporal_partitioned_rng
     ON DELETE CASCADE ON UPDATE CASCADE;
+UPDATE temporal_partitioned_rng FOR PORTION OF valid_at FROM '2019-01-01' TO '2020-01-01' SET id = '[7,8)' WHERE id = '[6,7)';
+SELECT * FROM temporal_partitioned_fk_rng2rng WHERE id = '[4,5)';
+UPDATE temporal_partitioned_rng SET id = '[7,8)' WHERE id = '[6,7)';
+SELECT * FROM temporal_partitioned_fk_rng2rng WHERE id = '[4,5)';
+INSERT INTO temporal_partitioned_rng (id, valid_at) VALUES ('[15,16)', daterange('2018-01-01', '2020-01-01'));
+INSERT INTO temporal_partitioned_rng (id, valid_at) VALUES ('[15,16)', daterange('2020-01-01', '2021-01-01'));
+INSERT INTO temporal_partitioned_fk_rng2rng (id, valid_at, parent_id) VALUES ('[10,11)', daterange('2018-01-01', '2021-01-01'), '[15,16)');
+UPDATE temporal_partitioned_rng SET id = '[16,17)' WHERE id = '[15,16)' AND valid_at @> '2019-01-01'::date;
+SELECT * FROM temporal_partitioned_fk_rng2rng WHERE id = '[10,11)';
 
 --
 -- partitioned FK referenced deletes CASCADE
 --
+
+TRUNCATE temporal_partitioned_rng, temporal_partitioned_fk_rng2rng;
+INSERT INTO temporal_partitioned_rng (id, valid_at) VALUES ('[8,9)', daterange('2018-01-01', '2021-01-01'));
+INSERT INTO temporal_partitioned_fk_rng2rng (id, valid_at, parent_id) VALUES ('[5,6)', daterange('2018-01-01', '2021-01-01'), '[8,9)');
+DELETE FROM temporal_partitioned_rng FOR PORTION OF valid_at FROM '2019-01-01' TO '2020-01-01' WHERE id = '[8,9)';
+SELECT * FROM temporal_partitioned_fk_rng2rng WHERE id = '[5,6)';
+DELETE FROM temporal_partitioned_rng WHERE id = '[8,9)';
+SELECT * FROM temporal_partitioned_fk_rng2rng WHERE id = '[5,6)';
+INSERT INTO temporal_partitioned_rng (id, valid_at) VALUES ('[17,18)', daterange('2018-01-01', '2020-01-01'));
+INSERT INTO temporal_partitioned_rng (id, valid_at) VALUES ('[17,18)', daterange('2020-01-01', '2021-01-01'));
+INSERT INTO temporal_partitioned_fk_rng2rng (id, valid_at, parent_id) VALUES ('[11,12)', daterange('2018-01-01', '2021-01-01'), '[17,18)');
+DELETE FROM temporal_partitioned_rng WHERE id = '[17,18)' AND valid_at @> '2019-01-01'::date;
+SELECT * FROM temporal_partitioned_fk_rng2rng WHERE id = '[11,12)';
 
 --
 -- partitioned FK referenced updates SET NULL
@@ -2257,6 +2513,27 @@ ALTER TABLE temporal_partitioned_fk_rng2rng
 --
 -- partitioned FK referenced deletes SET DEFAULT
 --
+
+--
+-- partitioned FK attach/detach with a temporal referential action
+--
+-- Attaching a partition that already has an equivalent foreign key drops the
+-- action triggers belonging to the partition's own constraint, so this
+-- exercises the temporal action trigger functions there.
+--
+
+CREATE TABLE tfkp3 (
+  id int4range,
+  valid_at daterange,
+  parent_id int4range,
+  CONSTRAINT tfkp3_pk PRIMARY KEY (id, valid_at WITHOUT OVERLAPS),
+  CONSTRAINT tfkp3_fk FOREIGN KEY (parent_id, PERIOD valid_at)
+    REFERENCES temporal_partitioned_rng
+    ON DELETE CASCADE ON UPDATE CASCADE
+);
+ALTER TABLE temporal_partitioned_fk_rng2rng ATTACH PARTITION tfkp3 FOR VALUES IN ('[25,26)');
+ALTER TABLE temporal_partitioned_fk_rng2rng DETACH PARTITION tfkp3;
+DROP TABLE tfkp3;
 
 DROP TABLE temporal_partitioned_fk_rng2rng;
 DROP TABLE temporal_partitioned_rng;
@@ -2346,16 +2623,41 @@ DELETE FROM temporal_partitioned_mltrng WHERE id = '[5,6)' AND valid_at = datemu
 -- partitioned FK referenced updates CASCADE
 --
 
+TRUNCATE temporal_partitioned_mltrng, temporal_partitioned_fk_mltrng2mltrng;
+INSERT INTO temporal_partitioned_mltrng (id, valid_at) VALUES ('[6,7)', datemultirange(daterange('2018-01-01', '2021-01-01')));
+INSERT INTO temporal_partitioned_fk_mltrng2mltrng (id, valid_at, parent_id) VALUES ('[4,5)', datemultirange(daterange('2018-01-01', '2021-01-01')), '[6,7)');
 ALTER TABLE temporal_partitioned_fk_mltrng2mltrng
   DROP CONSTRAINT temporal_partitioned_fk_mltrng2mltrng_fk,
   ADD CONSTRAINT temporal_partitioned_fk_mltrng2mltrng_fk
     FOREIGN KEY (parent_id, PERIOD valid_at)
     REFERENCES temporal_partitioned_mltrng
     ON DELETE CASCADE ON UPDATE CASCADE;
+UPDATE temporal_partitioned_mltrng FOR PORTION OF valid_at (datemultirange(daterange('2019-01-01', '2020-01-01'))) SET id = '[7,8)' WHERE id = '[6,7)';
+SELECT * FROM temporal_partitioned_fk_mltrng2mltrng WHERE id = '[4,5)';
+UPDATE temporal_partitioned_mltrng SET id = '[7,8)' WHERE id = '[6,7)';
+SELECT * FROM temporal_partitioned_fk_mltrng2mltrng WHERE id = '[4,5)';
+INSERT INTO temporal_partitioned_mltrng (id, valid_at) VALUES ('[15,16)', datemultirange(daterange('2018-01-01', '2020-01-01')));
+INSERT INTO temporal_partitioned_mltrng (id, valid_at) VALUES ('[15,16)', datemultirange(daterange('2020-01-01', '2021-01-01')));
+INSERT INTO temporal_partitioned_fk_mltrng2mltrng (id, valid_at, parent_id) VALUES ('[10,11)', datemultirange(daterange('2018-01-01', '2021-01-01')), '[15,16)');
+UPDATE temporal_partitioned_mltrng SET id = '[16,17)' WHERE id = '[15,16)' AND valid_at @> '2019-01-01'::date;
+SELECT * FROM temporal_partitioned_fk_mltrng2mltrng WHERE id = '[10,11)';
 
 --
 -- partitioned FK referenced deletes CASCADE
 --
+
+TRUNCATE temporal_partitioned_mltrng, temporal_partitioned_fk_mltrng2mltrng;
+INSERT INTO temporal_partitioned_mltrng (id, valid_at) VALUES ('[8,9)', datemultirange(daterange('2018-01-01', '2021-01-01')));
+INSERT INTO temporal_partitioned_fk_mltrng2mltrng (id, valid_at, parent_id) VALUES ('[5,6)', datemultirange(daterange('2018-01-01', '2021-01-01')), '[8,9)');
+DELETE FROM temporal_partitioned_mltrng FOR PORTION OF valid_at (datemultirange(daterange('2019-01-01', '2020-01-01'))) WHERE id = '[8,9)';
+SELECT * FROM temporal_partitioned_fk_mltrng2mltrng WHERE id = '[5,6)';
+DELETE FROM temporal_partitioned_mltrng WHERE id = '[8,9)';
+SELECT * FROM temporal_partitioned_fk_mltrng2mltrng WHERE id = '[5,6)';
+INSERT INTO temporal_partitioned_mltrng (id, valid_at) VALUES ('[17,18)', datemultirange(daterange('2018-01-01', '2020-01-01')));
+INSERT INTO temporal_partitioned_mltrng (id, valid_at) VALUES ('[17,18)', datemultirange(daterange('2020-01-01', '2021-01-01')));
+INSERT INTO temporal_partitioned_fk_mltrng2mltrng (id, valid_at, parent_id) VALUES ('[11,12)', datemultirange(daterange('2018-01-01', '2021-01-01')), '[17,18)');
+DELETE FROM temporal_partitioned_mltrng WHERE id = '[17,18)' AND valid_at @> '2019-01-01'::date;
+SELECT * FROM temporal_partitioned_fk_mltrng2mltrng WHERE id = '[11,12)';
 
 --
 -- partitioned FK referenced updates SET NULL
@@ -2390,5 +2692,67 @@ ALTER TABLE temporal_partitioned_fk_mltrng2mltrng
 
 DROP TABLE temporal_partitioned_fk_mltrng2mltrng;
 DROP TABLE temporal_partitioned_mltrng;
+
+RESET datestyle;
+
+--
+-- Temporal foreign keys use EXEC_FLAG_SKIP_TRIGGERS:
+--
+-- A foreign key must finish its own work before chained triggers fire.
+-- The foreign key action uses UPDATE/DELETE FOR PORTION OF, which inserts
+-- leftovers, which causes the foreign key to be checked again, but
+-- during an invalid intermediate state.
+--
+-- Whereas user-supplied FOR PORTION OF leftovers are treated as separate
+-- statements (per the SQL:2011 standard), the internal FOR PORTION OF
+-- commands used by foreign keys should fire all triggers chained off
+-- inserting leftovers as part of the user-submitted statement. Otherwise
+-- they can encounter referential integrity violations.
+--
+-- There are tests above that fail if ExecForPortionOfLeftovers ignores
+-- EXEC_FLAG_SKIP_TRIGGERS, but this test observes the trigger timing
+-- and transition tables directly.
+--
+
+CREATE TABLE temporal_rng4 (
+  id int4range,
+  valid_at daterange,
+  CONSTRAINT temporal_rng4_pk PRIMARY KEY (id, valid_at WITHOUT OVERLAPS)
+);
+CREATE TABLE temporal_fk_rng2rng4 (
+  id int4range,
+  valid_at daterange,
+  parent_id int4range,
+  CONSTRAINT temporal_fk_rng2rng4_pk PRIMARY KEY (id, valid_at WITHOUT OVERLAPS),
+  CONSTRAINT temporal_fk_rng2rng4_fk FOREIGN KEY (parent_id, PERIOD valid_at)
+    REFERENCES temporal_rng4 (id, PERIOD valid_at) ON DELETE CASCADE
+);
+CREATE FUNCTION temporal_report_leftovers() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  n bigint;
+BEGIN
+  SELECT count(*) INTO n FROM newtable;
+  RAISE NOTICE 'inserted % leftover(s)', n;
+  RETURN NULL;
+END;
+$$;
+CREATE TRIGGER temporal_fk_rng2rng4_leftovers
+  AFTER INSERT ON temporal_fk_rng2rng4
+  REFERENCING NEW TABLE AS newtable
+  FOR EACH STATEMENT EXECUTE FUNCTION temporal_report_leftovers();
+INSERT INTO temporal_rng4 (id, valid_at) VALUES ('[1,2)', daterange('2018-01-01', '2021-01-01'));
+INSERT INTO temporal_fk_rng2rng4 (id, valid_at, parent_id) VALUES
+  ('[1,2)', daterange('2018-01-01', '2021-01-01'), '[1,2)'),
+  ('[2,3)', daterange('2018-01-01', '2021-01-01'), '[1,2)');
+-- cascaded: both referencing rows are split, in one INSERT statement
+DELETE FROM temporal_rng4 FOR PORTION OF valid_at FROM '2019-01-01' TO '2020-01-01';
+SELECT * FROM temporal_fk_rng2rng4 ORDER BY id, valid_at;
+-- written out: one INSERT statement per leftover
+DELETE FROM temporal_fk_rng2rng4 FOR PORTION OF valid_at FROM '2018-06-01' TO '2018-07-01';
+SELECT * FROM temporal_fk_rng2rng4 ORDER BY id, valid_at;
+
+DROP TABLE temporal_fk_rng2rng4;
+DROP TABLE temporal_rng4;
+DROP FUNCTION temporal_report_leftovers();
 
 RESET datestyle;

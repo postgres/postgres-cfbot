@@ -3096,6 +3096,7 @@ TParserStateAction
 TParserStateActionItem
 TQueueDestReceiver
 TRGM
+TRI_CascadeDelContext
 TRI_SetContext
 TSAnyCacheEntry
 TSConfigCacheEntry
@@ -4367,6 +4368,7 @@ tree_mutator_callback
 tree_walker_callback
 trgm
 trgm_mb_char
+tri_lost_range_callback
 trivalue
 tsKEY
 ts_parserstate
