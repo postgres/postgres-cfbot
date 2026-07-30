@@ -11509,7 +11509,7 @@ pub_except_seq_list: PublicationExceptSeqSpec
  * pub_all_obj_type is one of:
  *
  *		ALL TABLES [ EXCEPT ( TABLE table_name [, ...] ) ]
- *		ALL SEQUENCES
+ *		ALL SEQUENCES [ EXCEPT ( SEQUENCE sequence_name [, ...] ) ]
  *
  *****************************************************************************/
 
