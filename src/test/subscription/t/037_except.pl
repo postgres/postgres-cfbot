@@ -289,6 +289,7 @@ $node_publisher->safe_psql(
 	'postgres', qq (
 	CREATE TABLE seq_test (v BIGINT);
 	CREATE SEQUENCE seq_excluded_in_pub1;
+	CREATE SEQUENCE seq_excluded_in_pub1_2;
 	CREATE SEQUENCE seq_excluded_in_pub2;
 	INSERT INTO seq_test SELECT nextval('seq_excluded_in_pub1') FROM generate_series(1,100);
 	INSERT INTO seq_test SELECT nextval('seq_excluded_in_pub2') FROM generate_series(1,100);
@@ -297,6 +298,7 @@ $node_publisher->safe_psql(
 $node_subscriber->safe_psql(
 	'postgres', qq(
 	CREATE SEQUENCE seq_excluded_in_pub1;
+	CREATE SEQUENCE seq_excluded_in_pub1_2;
 	CREATE SEQUENCE seq_excluded_in_pub2;
 	CREATE SUBSCRIPTION tap_sub_all_seq_except CONNECTION '$publisher_connstr' PUBLICATION tap_pub_all_seq_except1;
 ));
@@ -315,6 +317,24 @@ is($result, '1|f', 'sequences in the EXCEPT clause are excluded');
 $result = $node_subscriber->safe_psql('postgres',
 	"SELECT last_value, is_called FROM seq_excluded_in_pub2");
 is($result, '100|t', 'initial test data replicated for seq_excluded_in_pub2');
+
+# Check ALTER PUBLICATION ... SET ALL SEQUENCES EXCEPT (SEQUENCE ...)
+$node_publisher->safe_psql(
+	'postgres', qq(
+	ALTER PUBLICATION tap_pub_all_seq_except1 SET ALL SEQUENCES EXCEPT (SEQUENCE seq_excluded_in_pub1, seq_excluded_in_pub1_2);
+	INSERT INTO seq_test SELECT nextval('seq_excluded_in_pub1_2') FROM generate_series(1,100);
+));
+$node_subscriber->safe_psql(
+	'postgres', qq(
+	ALTER SUBSCRIPTION tap_sub_all_seq_except REFRESH PUBLICATION;
+	ALTER SUBSCRIPTION tap_sub_all_seq_except REFRESH SEQUENCES;
+));
+$node_subscriber->poll_query_until('postgres', $synced_query)
+  or die "Timed out while waiting for subscriber to synchronize data";
+
+$result = $node_subscriber->safe_psql('postgres',
+	"SELECT last_value, is_called FROM seq_excluded_in_pub1_2");
+is($result, '1|f', 'sequences in the EXCEPT clause are excluded');
 
 # ============================================
 # Test when a subscription is subscribing to multiple publications

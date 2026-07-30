@@ -271,6 +271,14 @@ CREATE PUBLICATION regress_pub_forallsequences_except FOR ALL SEQUENCES EXCEPT (
 ALTER SEQUENCE regress_seq2 SET SCHEMA pub_test;
 \dRp+ regress_pub_forallsequences_except
 
+-- Modify the sequence list in the EXCEPT clause
+ALTER PUBLICATION regress_pub_forallsequences_except SET ALL SEQUENCES EXCEPT (SEQUENCE regress_seq0);
+\dRp+ regress_pub_forallsequences_except
+
+-- Clear the sequence list in the EXCEPT clause
+ALTER PUBLICATION regress_pub_forallsequences_except SET ALL SEQUENCES;
+\dRp+ regress_pub_forallsequences_except
+
 -- Test combination of ALL SEQUENCES and ALL TABLES each with an EXCEPT clause
 CREATE TABLE regress_tab1(a int);
 CREATE PUBLICATION regress_pub_for_allsequences_alltables_except FOR ALL TABLES EXCEPT (TABLE regress_tab1), ALL SEQUENCES EXCEPT (SEQUENCE regress_seq0);
@@ -279,20 +287,25 @@ RESET client_min_messages;
 
 -- fail - EXCEPT (SEQUENCE) clause must have SEQUENCE keyword
 CREATE PUBLICATION regress_pub_should_fail FOR ALL TABLES EXCEPT (regress_seq0, pub_test.regress_seq1);
+ALTER PUBLICATION regress_pub_forallsequences_except SET ALL SEQUENCES EXCEPT (regress_seq0, pub_test.regress_seq1);
 
 -- fail - EXCEPT (SEQUENCE) clause specifies an unlogged sequence
 CREATE UNLOGGED SEQUENCE regress_seq_unlogged;
 CREATE PUBLICATION regress_pub_should_fail FOR ALL SEQUENCES EXCEPT (SEQUENCE regress_seq_unlogged);
+ALTER PUBLICATION regress_pub_forallsequences_except SET ALL SEQUENCES EXCEPT (SEQUENCE regress_seq_unlogged);
 
 -- fail - EXCEPT (SEQUENCE) clause specifies a temporary sequence
 CREATE TEMPORARY SEQUENCE regress_seq_temp;
 CREATE PUBLICATION regress_pub_should_fail FOR ALL SEQUENCES EXCEPT (SEQUENCE regress_seq_temp);
+ALTER PUBLICATION regress_pub_forallsequences_except SET ALL SEQUENCES EXCEPT (SEQUENCE regress_seq_temp);
 
 -- fail - EXCEPT (TABLE) clause specifies a sequence object
 CREATE PUBLICATION regress_pub_should_fail FOR ALL TABLES EXCEPT (TABLE regress_seq0);
+ALTER PUBLICATION regress_pub_forallsequences_except SET ALL TABLES EXCEPT (TABLE regress_seq0);
 
 -- fail - EXCEPT (SEQUENCE) clause specifies a table object
 CREATE PUBLICATION regress_pub_should_fail FOR ALL SEQUENCES EXCEPT (SEQUENCE regress_tab1);
+ALTER PUBLICATION regress_pub_forallsequences_except SET ALL SEQUENCES EXCEPT (SEQUENCE regress_tab1);
 
 DROP SEQUENCE regress_seq0, pub_test.regress_seq1, pub_test.regress_seq2, regress_seq_unlogged, regress_seq_temp;
 DROP PUBLICATION regress_pub_forallsequences1;
