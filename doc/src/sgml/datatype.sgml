@@ -28,6 +28,12 @@
    but are not listed here.
   </para>
 
+  <para>
+   For the binary (as opposed to textual) on-the-wire representation of
+   these types, used when transmitting values in binary format, see
+   <xref linkend="binary-format"/>.
+  </para>
+
    <table id="datatype-table">
     <title>Data Types</title>
     <tgroup cols="3">
