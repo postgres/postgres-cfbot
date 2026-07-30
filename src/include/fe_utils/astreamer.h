@@ -215,7 +215,8 @@ extern astreamer *astreamer_gzip_writer_new(char *pathname, FILE *file,
 											pg_compress_specification *compress);
 extern astreamer *astreamer_extractor_new(const char *basepath,
 										  const char *(*link_map) (const char *),
-										  void (*report_output_file) (const char *));
+										  void (*report_output_file) (const char *),
+										  bool discard_backup);
 
 extern astreamer *astreamer_gzip_decompressor_new(astreamer *next);
 extern astreamer *astreamer_lz4_compressor_new(astreamer *next,
