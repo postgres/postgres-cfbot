@@ -586,6 +586,25 @@ Except sequences:
     "pub_test.regress_seq2"
     "public.regress_seq0"
 
+-- Modify the sequence list in the EXCEPT clause
+ALTER PUBLICATION regress_pub_forallsequences_except SET ALL SEQUENCES EXCEPT (SEQUENCE regress_seq0);
+\dRp+ regress_pub_forallsequences_except
+                                                Publication regress_pub_forallsequences_except
+          Owner           | All tables | All sequences | Inserts | Updates | Deletes | Truncates | Generated columns | Via root | Description 
+--------------------------+------------+---------------+---------+---------+---------+-----------+-------------------+----------+-------------
+ regress_publication_user | f          | t             | t       | t       | t       | t         | none              | f        | 
+Except sequences:
+    "public.regress_seq0"
+
+-- Clear the sequence list in the EXCEPT clause
+ALTER PUBLICATION regress_pub_forallsequences_except SET ALL SEQUENCES;
+\dRp+ regress_pub_forallsequences_except
+                                                Publication regress_pub_forallsequences_except
+          Owner           | All tables | All sequences | Inserts | Updates | Deletes | Truncates | Generated columns | Via root | Description 
+--------------------------+------------+---------------+---------+---------+---------+-----------+-------------------+----------+-------------
+ regress_publication_user | f          | t             | t       | t       | t       | t         | none              | f        | 
+(1 row)
+
 -- Test combination of ALL SEQUENCES and ALL TABLES each with an EXCEPT clause
 CREATE TABLE regress_tab1(a int);
 CREATE PUBLICATION regress_pub_for_allsequences_alltables_except FOR ALL TABLES EXCEPT (TABLE regress_tab1), ALL SEQUENCES EXCEPT (SEQUENCE regress_seq0);
@@ -605,9 +624,16 @@ CREATE PUBLICATION regress_pub_should_fail FOR ALL TABLES EXCEPT (regress_seq0, 
 ERROR:  syntax error at or near "regress_seq0"
 LINE 1: ...ON regress_pub_should_fail FOR ALL TABLES EXCEPT (regress_se...
                                                              ^
+ALTER PUBLICATION regress_pub_forallsequences_except SET ALL SEQUENCES EXCEPT (regress_seq0, pub_test.regress_seq1);
+ERROR:  syntax error at or near "regress_seq0"
+LINE 1: ..._forallsequences_except SET ALL SEQUENCES EXCEPT (regress_se...
+                                                             ^
 -- fail - EXCEPT (SEQUENCE) clause specifies an unlogged sequence
 CREATE UNLOGGED SEQUENCE regress_seq_unlogged;
 CREATE PUBLICATION regress_pub_should_fail FOR ALL SEQUENCES EXCEPT (SEQUENCE regress_seq_unlogged);
+ERROR:  cannot specify "public.regress_seq_unlogged" in the publication EXCEPT (SEQUENCE) clause
+DETAIL:  This operation is not supported for unlogged sequences.
+ALTER PUBLICATION regress_pub_forallsequences_except SET ALL SEQUENCES EXCEPT (SEQUENCE regress_seq_unlogged);
 ERROR:  cannot specify "public.regress_seq_unlogged" in the publication EXCEPT (SEQUENCE) clause
 DETAIL:  This operation is not supported for unlogged sequences.
 -- fail - EXCEPT (SEQUENCE) clause specifies a temporary sequence
@@ -615,12 +641,21 @@ CREATE TEMPORARY SEQUENCE regress_seq_temp;
 CREATE PUBLICATION regress_pub_should_fail FOR ALL SEQUENCES EXCEPT (SEQUENCE regress_seq_temp);
 ERROR:  cannot specify "pg_temp.regress_seq_temp" in the publication EXCEPT (SEQUENCE) clause
 DETAIL:  This operation is not supported for temporary sequences.
+ALTER PUBLICATION regress_pub_forallsequences_except SET ALL SEQUENCES EXCEPT (SEQUENCE regress_seq_temp);
+ERROR:  cannot specify "pg_temp.regress_seq_temp" in the publication EXCEPT (SEQUENCE) clause
+DETAIL:  This operation is not supported for temporary sequences.
 -- fail - EXCEPT (TABLE) clause specifies a sequence object
 CREATE PUBLICATION regress_pub_should_fail FOR ALL TABLES EXCEPT (TABLE regress_seq0);
 ERROR:  cannot specify "public.regress_seq0" in the publication EXCEPT (TABLE) clause
 DETAIL:  This operation is not supported for sequences.
+ALTER PUBLICATION regress_pub_forallsequences_except SET ALL TABLES EXCEPT (TABLE regress_seq0);
+ERROR:  cannot specify "public.regress_seq0" in the publication EXCEPT (TABLE) clause
+DETAIL:  This operation is not supported for sequences.
 -- fail - EXCEPT (SEQUENCE) clause specifies a table object
 CREATE PUBLICATION regress_pub_should_fail FOR ALL SEQUENCES EXCEPT (SEQUENCE regress_tab1);
+ERROR:  cannot specify "public.regress_tab1" in the publication EXCEPT (SEQUENCE) clause
+DETAIL:  This operation is not supported for tables.
+ALTER PUBLICATION regress_pub_forallsequences_except SET ALL SEQUENCES EXCEPT (SEQUENCE regress_tab1);
 ERROR:  cannot specify "public.regress_tab1" in the publication EXCEPT (SEQUENCE) clause
 DETAIL:  This operation is not supported for tables.
 DROP SEQUENCE regress_seq0, pub_test.regress_seq1, pub_test.regress_seq2, regress_seq_unlogged, regress_seq_temp;
