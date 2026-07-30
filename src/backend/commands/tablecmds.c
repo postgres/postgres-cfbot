@@ -585,7 +585,7 @@ static ObjectAddress ATAddForeignKeyConstraint(List **wqueue, AlteredTableInfo *
 											   Relation rel, Constraint *fkconstraint,
 											   bool recurse, bool recursing,
 											   LOCKMODE lockmode);
-static int	validateFkOnDeleteSetColumns(int numfks, const int16 *fkattnums,
+static int	validateFkOnDeleteSetColumns(int numfks, const int16 *fkattnums, const int16 fkperiodattnum,
 										 int numfksetcols, int16 *fksetcolsattnums,
 										 List *fksetcols);
 static ObjectAddress addFkConstraint(addFkConstraintSides fkside,
@@ -10167,6 +10167,7 @@ ATAddForeignKeyConstraint(List **wqueue, AlteredTableInfo *tab, Relation rel,
 	int16		fkdelsetcols[INDEX_MAX_KEYS] = {0};
 	bool		with_period;
 	bool		pk_has_without_overlaps;
+	int16		fkperiodattnum = InvalidAttrNumber;
 	int			i;
 	int			numfks,
 				numpks,
@@ -10264,15 +10265,20 @@ ATAddForeignKeyConstraint(List **wqueue, AlteredTableInfo *tab, Relation rel,
 									 fkconstraint->fk_attrs,
 									 fkattnum, fktypoid, fkcolloid);
 	with_period = fkconstraint->fk_with_period || fkconstraint->pk_with_period;
-	if (with_period && !fkconstraint->fk_with_period)
-		ereport(ERROR,
-				errcode(ERRCODE_INVALID_FOREIGN_KEY),
-				errmsg("foreign key uses PERIOD on the referenced table but not the referencing table"));
+	if (with_period)
+	{
+		if (!fkconstraint->fk_with_period)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_FOREIGN_KEY),
+					 errmsg("foreign key uses PERIOD on the referenced table but not the referencing table")));
+		fkperiodattnum = fkattnum[numfks - 1];
+	}
 
 	numfkdelsetcols = transformColumnNameList(RelationGetRelid(rel),
 											  fkconstraint->fk_del_set_cols,
 											  fkdelsetcols, NULL, NULL);
 	numfkdelsetcols = validateFkOnDeleteSetColumns(numfks, fkattnum,
+												   fkperiodattnum,
 												   numfkdelsetcols,
 												   fkdelsetcols,
 												   fkconstraint->fk_del_set_cols);
@@ -10367,26 +10373,6 @@ ATAddForeignKeyConstraint(List **wqueue, AlteredTableInfo *tab, Relation rel,
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("foreign key constraints on virtual generated columns are not supported")));
-	}
-
-	/*
-	 * Some actions are currently unsupported for foreign keys using PERIOD.
-	 */
-	if (fkconstraint->fk_with_period)
-	{
-		if (fkconstraint->fk_upd_action == FKCONSTR_ACTION_SETNULL ||
-			fkconstraint->fk_upd_action == FKCONSTR_ACTION_SETDEFAULT)
-			ereport(ERROR,
-					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					errmsg("unsupported %s action for foreign key constraint using PERIOD",
-						   "ON UPDATE"));
-
-		if (fkconstraint->fk_del_action == FKCONSTR_ACTION_SETNULL ||
-			fkconstraint->fk_del_action == FKCONSTR_ACTION_SETDEFAULT)
-			ereport(ERROR,
-					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					errmsg("unsupported %s action for foreign key constraint using PERIOD",
-						   "ON DELETE"));
 	}
 
 	/*
@@ -10740,6 +10726,7 @@ ATAddForeignKeyConstraint(List **wqueue, AlteredTableInfo *tab, Relation rel,
  */
 static int
 validateFkOnDeleteSetColumns(int numfks, const int16 *fkattnums,
+							 const int16 fkperiodattnum,
 							 int numfksetcols, int16 *fksetcolsattnums,
 							 List *fksetcols)
 {
@@ -10749,6 +10736,16 @@ validateFkOnDeleteSetColumns(int numfks, const int16 *fkattnums,
 	{
 		int16		setcol_attnum = fksetcolsattnums[i];
 		bool		seen = false;
+
+		/* Make sure it isn't the PERIOD column */
+		if (fkperiodattnum == setcol_attnum)
+		{
+			char	   *col = strVal(list_nth(fksetcols, i));
+
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
+					 errmsg("column \"%s\" referenced in ON DELETE SET action cannot be PERIOD", col)));
+		}
 
 		/* Make sure it's in fkattnums[] */
 		for (int j = 0; j < numfks; j++)

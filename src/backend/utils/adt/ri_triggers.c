@@ -461,7 +461,9 @@ static void tri_foreach_lost_range(const RI_ConstraintInfo *riinfo,
 								   TupleTableSlot *newslot,
 								   tri_lost_range_callback callback, void *arg);
 static void tri_cascade_del_lost_range(Datum lostRange, void *arg);
+static void tri_set_lost_range(Datum lostRange, void *arg);
 static void ri_restrict_lost_range(Datum lostRange, void *arg);
+
 
 /*
  * RI_FKey_check -
@@ -720,6 +722,7 @@ RI_FKey_check(TriggerData *trigdata)
 	return PointerGetDatum(NULL);
 }
 
+
 /*
  * RI_FKey_check_ins -
  *
@@ -735,6 +738,7 @@ RI_FKey_check_ins(PG_FUNCTION_ARGS)
 	return RI_FKey_check((TriggerData *) fcinfo->context);
 }
 
+
 /*
  * RI_FKey_check_upd -
  *
@@ -749,6 +753,7 @@ RI_FKey_check_upd(PG_FUNCTION_ARGS)
 	/* Share code with INSERT case. */
 	return RI_FKey_check((TriggerData *) fcinfo->context);
 }
+
 
 /*
  * ri_Check_Pk_Match
@@ -880,6 +885,7 @@ ri_Check_Pk_Match(Relation pk_rel, Relation fk_rel,
 
 	return result;
 }
+
 
 /*
  * RI_FKey_noaction_del -
@@ -1216,6 +1222,7 @@ ri_restrict(TriggerData *trigdata, bool is_no_action)
 	return PointerGetDatum(NULL);
 }
 
+
 /*
  * RI_FKey_cascade_del -
  *
@@ -1338,6 +1345,7 @@ RI_FKey_cascade_del(PG_FUNCTION_ARGS)
 
 	return PointerGetDatum(NULL);
 }
+
 
 /*
  * RI_FKey_cascade_upd -
@@ -1505,6 +1513,7 @@ RI_FKey_cascade_upd(PG_FUNCTION_ARGS)
 	return PointerGetDatum(NULL);
 }
 
+
 /*
  * RI_FKey_setnull_del -
  *
@@ -1626,7 +1635,7 @@ ri_set(TriggerData *trigdata, bool is_set_null, int tgkind)
 		char		paramname[16];
 		const char *querysep;
 		const char *qualsep;
-		Oid			queryoids[RI_MAX_NUMKEYS];
+		Oid			queryoids[RI_MAX_NUMKEYS + 1];	/* +1 for FOR PORTION OF */
 		const char *fk_only;
 		int			num_cols_to_set;
 		const int16 *set_cols;
@@ -1634,7 +1643,12 @@ ri_set(TriggerData *trigdata, bool is_set_null, int tgkind)
 		switch (tgkind)
 		{
 			case RI_TRIGTYPE_UPDATE:
-				num_cols_to_set = riinfo->nkeys;
+
+				/*
+				 * For temporal keys, leave the range column to FOR PORTION
+				 * OF.
+				 */
+				num_cols_to_set = riinfo->hasperiod ? riinfo->nkeys - 1 : riinfo->nkeys;
 				set_cols = riinfo->fk_attnums;
 				break;
 			case RI_TRIGTYPE_DELETE:
@@ -1651,7 +1665,7 @@ ri_set(TriggerData *trigdata, bool is_set_null, int tgkind)
 				}
 				else
 				{
-					num_cols_to_set = riinfo->nkeys;
+					num_cols_to_set = riinfo->hasperiod ? riinfo->nkeys - 1 : riinfo->nkeys;
 					set_cols = riinfo->fk_attnums;
 				}
 				break;
@@ -1671,8 +1685,16 @@ ri_set(TriggerData *trigdata, bool is_set_null, int tgkind)
 		fk_only = fk_rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE ?
 			"" : "ONLY ";
 		quoteRelationName(fkrelname, fk_rel);
-		appendStringInfo(&querybuf, "UPDATE %s%s SET",
-						 fk_only, fkrelname);
+		if (riinfo->hasperiod)
+		{
+			quoteOneName(attname,
+						 RIAttName(fk_rel, riinfo->fk_attnums[riinfo->nkeys - 1]));
+			appendStringInfo(&querybuf, "UPDATE %s%s FOR PORTION OF %s ($%d) SET",
+							 fk_only, fkrelname, attname, riinfo->nkeys + 1);
+		}
+		else
+			appendStringInfo(&querybuf, "UPDATE %s%s SET",
+							 fk_only, fkrelname);
 
 		/*
 		 * Add assignment clauses
@@ -1709,21 +1731,65 @@ ri_set(TriggerData *trigdata, bool is_set_null, int tgkind)
 			queryoids[i] = pk_type;
 		}
 
+		/* For temporal keys, set a param for FOR PORTION OF TO/FROM */
+		if (riinfo->hasperiod)
+			queryoids[riinfo->nkeys] = RIAttType(pk_rel,
+												 riinfo->pk_attnums[riinfo->nkeys - 1]);
+
 		/* Prepare and save the plan */
-		qplan = ri_PlanCheck(querybuf.data, riinfo->nkeys, queryoids,
-							 &qkey, fk_rel, pk_rel);
+		qplan = ri_PlanCheck(querybuf.data,
+							 riinfo->hasperiod ? riinfo->nkeys + 1 : riinfo->nkeys,
+							 queryoids, &qkey, fk_rel, pk_rel);
 	}
 
 	/*
 	 * We have a plan now. Run it to update the existing references.
+	 *
+	 * For a non-temporal key we set every matching row.  For a temporal key
+	 * we only touch the history that changed: an UPDATE that kept the scalar
+	 * key loses history one span at a time (computed with the without_portion
+	 * SRF), while any other case targets the old row's application time
+	 * (possibly intersected with an original FOR PORTION OF).
 	 */
-	ri_PerformCheck(riinfo, &qkey, qplan,
-					fk_rel, pk_rel,
-					oldslot, NULL,
-					-1, (Datum) 0,
-					false,
-					true,		/* must detect new rows */
-					SPI_OK_UPDATE);
+	if (!riinfo->hasperiod)
+	{
+		ri_PerformCheck(riinfo, &qkey, qplan,
+						fk_rel, pk_rel,
+						oldslot, NULL,
+						-1, (Datum) 0,
+						false,
+						true,	/* must detect new rows */
+						SPI_OK_UPDATE);
+	}
+	else if (tgkind == RI_TRIGTYPE_UPDATE &&
+			 pk_scalar_keys_equal(riinfo, oldslot, trigdata->tg_newslot))
+	{
+		TRI_SetContext ctx;
+
+		ctx.riinfo = riinfo;
+		ctx.qkey = &qkey;
+		ctx.qplan = qplan;
+		ctx.fk_rel = fk_rel;
+		ctx.pk_rel = pk_rel;
+		ctx.oldslot = oldslot;
+
+		/* Update the referencing history, one lost span at a time */
+		tri_foreach_lost_range(riinfo, oldslot, trigdata->tg_newslot,
+							   tri_set_lost_range, &ctx);
+	}
+	else
+	{
+		Datum		targetRange = restrict_enforced_range(trigdata->tg_temporal,
+														  riinfo, oldslot);
+
+		ri_PerformCheck(riinfo, &qkey, qplan,
+						fk_rel, pk_rel,
+						oldslot, NULL,
+						riinfo->nkeys + 1, targetRange,
+						false,
+						true,	/* must detect new rows */
+						SPI_OK_UPDATE);
+	}
 
 	if (SPI_finish() != SPI_OK_FINISH)
 		elog(ERROR, "SPI_finish failed");
@@ -1750,6 +1816,7 @@ ri_set(TriggerData *trigdata, bool is_set_null, int tgkind)
 		return ri_restrict(trigdata, true);
 	}
 }
+
 
 /*
  * tri_cascade_del -
@@ -2582,10 +2649,12 @@ RI_PartitionRemove_Check(Trigger *trigger, Relation fk_rel, Relation pk_rel)
 	AtEOXact_GUC(true, save_nestlevel);
 }
 
+
 /* ----------
  * Local functions below
  * ----------
  */
+
 
 /*
  * quoteOneName --- safely quote a single SQL name
@@ -2770,6 +2839,7 @@ ri_CheckTrigger(FunctionCallInfo fcinfo, const char *funcname, int tgkind)
 			break;
 	}
 }
+
 
 /*
  * Fetch the RI_ConstraintInfo struct for the trigger's FK constraint.
@@ -3031,6 +3101,7 @@ InvalidateConstraintCacheCallBack(Datum arg, SysCacheIdentifier cacheid,
 		}
 	}
 }
+
 
 /*
  * Prepare execution plan for a query to enforce an RI restriction
@@ -4254,6 +4325,7 @@ ri_ReportViolation(const RI_ConstraintInfo *riinfo,
 				 errtableconstraint(fk_rel, NameStr(riinfo->conname))));
 }
 
+
 /*
  * ri_NullCheck -
  *
@@ -4292,6 +4364,7 @@ ri_NullCheck(TupleDesc tupDesc,
 	return RI_KEYS_SOME_NULL;
 }
 
+
 /*
  * ri_InitHashTables -
  *
@@ -4325,6 +4398,7 @@ ri_InitHashTables(void)
 								   RI_INIT_QUERYHASHSIZE,
 								   &ctl, HASH_ELEM | HASH_BLOBS);
 }
+
 
 /*
  * ri_FetchPreparedPlan -
@@ -4378,6 +4452,7 @@ ri_FetchPreparedPlan(RI_QueryKey *key)
 	return NULL;
 }
 
+
 /*
  * ri_HashPreparedPlan -
  *
@@ -4405,6 +4480,7 @@ ri_HashPreparedPlan(RI_QueryKey *key, SPIPlanPtr plan)
 	Assert(!found || entry->plan == NULL);
 	entry->plan = plan;
 }
+
 
 /*
  * ri_KeysEqual -
@@ -4496,6 +4572,7 @@ ri_KeysEqual(Relation rel, TupleTableSlot *oldslot, TupleTableSlot *newslot,
 
 	return true;
 }
+
 
 /*
  * ri_CompareWithCast -
@@ -4650,6 +4727,7 @@ ri_HashCompareOp(Oid eq_opr, Oid typeid)
 
 	return entry;
 }
+
 
 /*
  * Given a trigger function OID, determine whether it is an RI trigger,
@@ -5271,6 +5349,26 @@ tri_cascade_del_lost_range(Datum lostRange, void *arg)
 
 	tri_cascade_del(ctx->riinfo, ctx->fk_rel, ctx->pk_rel, ctx->oldslot,
 					lostRange);
+}
+
+/*
+ * tri_set_lost_range -
+ *
+ * tri_foreach_lost_range callback for ON UPDATE SET NULL/SET DEFAULT: runs the
+ * prepared UPDATE against one span the referenced row lost.
+ */
+static void
+tri_set_lost_range(Datum lostRange, void *arg)
+{
+	TRI_SetContext *ctx = (TRI_SetContext *) arg;
+
+	ri_PerformCheck(ctx->riinfo, ctx->qkey, ctx->qplan,
+					ctx->fk_rel, ctx->pk_rel,
+					ctx->oldslot, NULL,
+					ctx->riinfo->nkeys + 1, lostRange,
+					false,
+					true,		/* must detect new rows */
+					SPI_OK_UPDATE);
 }
 
 /*
