@@ -10374,16 +10374,14 @@ ATAddForeignKeyConstraint(List **wqueue, AlteredTableInfo *tab, Relation rel,
 	 */
 	if (fkconstraint->fk_with_period)
 	{
-		if (fkconstraint->fk_upd_action == FKCONSTR_ACTION_CASCADE ||
-			fkconstraint->fk_upd_action == FKCONSTR_ACTION_SETNULL ||
+		if (fkconstraint->fk_upd_action == FKCONSTR_ACTION_SETNULL ||
 			fkconstraint->fk_upd_action == FKCONSTR_ACTION_SETDEFAULT)
 			ereport(ERROR,
 					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					errmsg("unsupported %s action for foreign key constraint using PERIOD",
 						   "ON UPDATE"));
 
-		if (fkconstraint->fk_del_action == FKCONSTR_ACTION_CASCADE ||
-			fkconstraint->fk_del_action == FKCONSTR_ACTION_SETNULL ||
+		if (fkconstraint->fk_del_action == FKCONSTR_ACTION_SETNULL ||
 			fkconstraint->fk_del_action == FKCONSTR_ACTION_SETDEFAULT)
 			ereport(ERROR,
 					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),

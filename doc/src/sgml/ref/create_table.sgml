@@ -1341,7 +1341,12 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
          </para>
 
          <para>
-          In a temporal foreign key, this option is not supported.
+          In a temporal foreign key, the delete/update will use
+          <literal>FOR PORTION OF</literal> semantics to constrain the
+          effect to the bounds being deleted/updated in the referenced row.
+          If an update shortens the referenced row's application time, then
+          the referencing rows are deleted for the time that was lost, and
+          the new key values are cascaded to the time that was kept.
          </para>
         </listitem>
        </varlistentry>

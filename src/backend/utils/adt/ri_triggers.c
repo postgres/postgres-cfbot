@@ -232,6 +232,14 @@ typedef struct RI_CompareHashEntry
  */
 typedef void (*tri_lost_range_callback) (Datum lostRange, void *arg);
 
+typedef struct TRI_CascadeDelContext
+{
+	const RI_ConstraintInfo *riinfo;
+	Relation	fk_rel;
+	Relation	pk_rel;
+	TupleTableSlot *oldslot;
+} TRI_CascadeDelContext;
+
 typedef struct TRI_SetContext
 {
 	const RI_ConstraintInfo *riinfo;
@@ -438,10 +446,21 @@ static Datum kept_enforced_range(const ForPortionOfState *tg_temporal,
 								 const RI_ConstraintInfo *riinfo,
 								 TupleTableSlot *oldslot,
 								 TupleTableSlot *newslot);
+static bool pk_scalar_keys_equal(const RI_ConstraintInfo *riinfo,
+								 TupleTableSlot *oldslot,
+								 TupleTableSlot *newslot);
+static void tri_cascade_del(const RI_ConstraintInfo *riinfo,
+							Relation fk_rel, Relation pk_rel,
+							TupleTableSlot *oldslot, Datum targetRange);
+static void tri_cascade_upd(const RI_ConstraintInfo *riinfo,
+							Relation fk_rel, Relation pk_rel,
+							TupleTableSlot *oldslot, TupleTableSlot *newslot,
+							Datum targetRange);
 static void tri_foreach_lost_range(const RI_ConstraintInfo *riinfo,
 								   TupleTableSlot *oldslot,
 								   TupleTableSlot *newslot,
 								   tri_lost_range_callback callback, void *arg);
+static void tri_cascade_del_lost_range(Datum lostRange, void *arg);
 static void ri_restrict_lost_range(Datum lostRange, void *arg);
 
 /*
@@ -1231,6 +1250,27 @@ RI_FKey_cascade_del(PG_FUNCTION_ARGS)
 
 	SPI_connect();
 
+	/*
+	 * For a temporal foreign key, cascade only to the history the referenced
+	 * row actually had, trimmed by an original FOR PORTION OF if present,
+	 * using a DELETE FOR PORTION OF.
+	 */
+	if (riinfo->hasperiod)
+	{
+		Datum		targetRange;
+
+		targetRange = restrict_enforced_range(trigdata->tg_temporal, riinfo,
+											  oldslot);
+		tri_cascade_del(riinfo, fk_rel, pk_rel, oldslot, targetRange);
+
+		if (SPI_finish() != SPI_OK_FINISH)
+			elog(ERROR, "SPI_finish failed");
+
+		table_close(fk_rel, RowExclusiveLock);
+
+		return PointerGetDatum(NULL);
+	}
+
 	/* Fetch or prepare a saved plan for the cascaded delete */
 	ri_BuildQueryKey(&qkey, riinfo, RI_PLAN_CASCADE_ONDELETE);
 
@@ -1335,6 +1375,55 @@ RI_FKey_cascade_upd(PG_FUNCTION_ARGS)
 	oldslot = trigdata->tg_trigslot;
 
 	SPI_connect();
+
+	/*
+	 * A temporal foreign key must only touch the history that actually
+	 * changed.
+	 */
+	if (riinfo->hasperiod)
+	{
+		/*
+		 * If the UPDATE did not use FOR PORTION OF, then we have to compute
+		 * what history was lost/changed ourselves and apply the changes by
+		 * hand. If any application time was removed, we should DELETE
+		 * references to it. If the scalar part(s) of the key changed, we
+		 * should UPDATE references to it.
+		 */
+		if (!fpo_targets_pk_range(trigdata->tg_temporal, riinfo))
+		{
+			TRI_CascadeDelContext ctx;
+
+			ctx.riinfo = riinfo;
+			ctx.fk_rel = fk_rel;
+			ctx.pk_rel = pk_rel;
+			ctx.oldslot = oldslot;
+
+			/* Delete the referencing history, one lost span at a time */
+			tri_foreach_lost_range(riinfo, oldslot, newslot,
+								   tri_cascade_del_lost_range, &ctx);
+		}
+
+		/*
+		 * Cascade the new key to the history the PK row kept.  If the scalar
+		 * part of the key didn't change, referencing rows already agree with
+		 * it there, so there is nothing to cascade.
+		 */
+		if (!pk_scalar_keys_equal(riinfo, oldslot, newslot))
+		{
+			Datum		targetRange;
+
+			targetRange = kept_enforced_range(trigdata->tg_temporal, riinfo,
+											  oldslot, newslot);
+			tri_cascade_upd(riinfo, fk_rel, pk_rel, oldslot, newslot, targetRange);
+		}
+
+		if (SPI_finish() != SPI_OK_FINISH)
+			elog(ERROR, "SPI_finish failed");
+
+		table_close(fk_rel, RowExclusiveLock);
+
+		return PointerGetDatum(NULL);
+	}
 
 	/* Fetch or prepare a saved plan for the cascaded update */
 	ri_BuildQueryKey(&qkey, riinfo, RI_PLAN_CASCADE_ONUPDATE);
@@ -1660,6 +1749,193 @@ ri_set(TriggerData *trigdata, bool is_set_null, int tgkind)
 		 */
 		return ri_restrict(trigdata, true);
 	}
+}
+
+/*
+ * tri_cascade_del -
+ *
+ * Deletes the referencing rows' history within targetRange, with a DELETE FOR
+ * PORTION OF.  This is used by ON DELETE CASCADE for the history the
+ * referenced row had, and by ON UPDATE CASCADE for the history it lost.
+ *
+ * The caller must have connected to SPI already.
+ */
+static void
+tri_cascade_del(const RI_ConstraintInfo *riinfo, Relation fk_rel, Relation pk_rel,
+				TupleTableSlot *oldslot, Datum targetRange)
+{
+	RI_QueryKey qkey;
+	SPIPlanPtr	qplan;
+
+	/* Fetch or prepare a saved plan for the cascaded delete */
+	ri_BuildQueryKey(&qkey, riinfo, RI_PLAN_CASCADE_ONDELETE);
+
+	if ((qplan = ri_FetchPreparedPlan(&qkey)) == NULL)
+	{
+		StringInfoData querybuf;
+		char		fkrelname[MAX_QUOTED_REL_NAME_LEN];
+		char		attname[MAX_QUOTED_NAME_LEN];
+		char		paramname[16];
+		const char *querysep;
+		Oid			queryoids[RI_MAX_NUMKEYS + 1];
+		const char *fk_only;
+
+		/* ----------
+		 * The query string built is
+		 *  DELETE FROM [ONLY] <fktable>
+		 *  FOR PORTION OF $fkatt (${n+1})
+		 *  WHERE $1 = fkatt1 [AND ...]
+		 * The type id's for the $ parameters are those of the
+		 * corresponding PK attributes.
+		 * ----------
+		 */
+		initStringInfo(&querybuf);
+		fk_only = fk_rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE ?
+			"" : "ONLY ";
+		quoteRelationName(fkrelname, fk_rel);
+		quoteOneName(attname, RIAttName(fk_rel, riinfo->fk_attnums[riinfo->nkeys - 1]));
+
+		appendStringInfo(&querybuf, "DELETE FROM %s%s FOR PORTION OF %s ($%d)",
+						 fk_only, fkrelname, attname, riinfo->nkeys + 1);
+		querysep = "WHERE";
+		for (int i = 0; i < riinfo->nkeys; i++)
+		{
+			Oid			pk_type = RIAttType(pk_rel, riinfo->pk_attnums[i]);
+			Oid			fk_type = RIAttType(fk_rel, riinfo->fk_attnums[i]);
+
+			quoteOneName(attname,
+						 RIAttName(fk_rel, riinfo->fk_attnums[i]));
+			sprintf(paramname, "$%d", i + 1);
+			ri_GenerateQual(&querybuf, querysep,
+							paramname, pk_type,
+							riinfo->pf_eq_oprs[i],
+							attname, fk_type);
+			querysep = "AND";
+			queryoids[i] = pk_type;
+		}
+
+		/* Set a param for FOR PORTION OF TO/FROM */
+		queryoids[riinfo->nkeys] = RIAttType(pk_rel, riinfo->pk_attnums[riinfo->nkeys - 1]);
+
+		/* Prepare and save the plan */
+		qplan = ri_PlanCheck(querybuf.data, riinfo->nkeys + 1, queryoids,
+							 &qkey, fk_rel, pk_rel);
+	}
+
+	/*
+	 * We have a plan now. Build up the arguments from the key values in the
+	 * deleted PK tuple and delete the referencing rows
+	 */
+	ri_PerformCheck(riinfo, &qkey, qplan,
+					fk_rel, pk_rel,
+					oldslot, NULL,
+					riinfo->nkeys + 1, targetRange,
+					false,
+					true,		/* must detect new rows */
+					SPI_OK_DELETE);
+}
+
+/*
+ * tri_cascade_upd -
+ *
+ * Cascades the referenced row's new key to the referencing rows' history
+ * within targetRange, with an UPDATE FOR PORTION OF.
+ *
+ * The caller must have connected to SPI already.
+ */
+static void
+tri_cascade_upd(const RI_ConstraintInfo *riinfo, Relation fk_rel, Relation pk_rel,
+				TupleTableSlot *oldslot, TupleTableSlot *newslot, Datum targetRange)
+{
+	RI_QueryKey qkey;
+	SPIPlanPtr	qplan;
+
+	/* Fetch or prepare a saved plan for the cascaded update */
+	ri_BuildQueryKey(&qkey, riinfo, RI_PLAN_CASCADE_ONUPDATE);
+
+	if ((qplan = ri_FetchPreparedPlan(&qkey)) == NULL)
+	{
+		StringInfoData querybuf;
+		StringInfoData qualbuf;
+		char		fkrelname[MAX_QUOTED_REL_NAME_LEN];
+		char		attname[MAX_QUOTED_NAME_LEN];
+		char		paramname[16];
+		const char *querysep;
+		const char *qualsep;
+		Oid			queryoids[2 * RI_MAX_NUMKEYS + 1];
+		const char *fk_only;
+
+		/* ----------
+		 * The query string built is
+		 *  UPDATE [ONLY] <fktable>
+		 *		  FOR PORTION OF $fkatt (${2n+1})
+		 *		  SET fkatt1 = $1, [, ...]
+		 *		  WHERE $n = fkatt1 [AND ...]
+		 * The type id's for the $ parameters are those of the
+		 * corresponding PK attributes.  Note that we are assuming
+		 * there is an assignment cast from the PK to the FK type;
+		 * else the parser will fail.
+		 * ----------
+		 */
+		initStringInfo(&querybuf);
+		initStringInfo(&qualbuf);
+		fk_only = fk_rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE ?
+			"" : "ONLY ";
+		quoteRelationName(fkrelname, fk_rel);
+		quoteOneName(attname, RIAttName(fk_rel, riinfo->fk_attnums[riinfo->nkeys - 1]));
+
+		appendStringInfo(&querybuf, "UPDATE %s%s FOR PORTION OF %s ($%d) SET",
+						 fk_only, fkrelname, attname, 2 * riinfo->nkeys + 1);
+
+		querysep = "";
+		qualsep = "WHERE";
+		for (int i = 0, j = riinfo->nkeys; i < riinfo->nkeys; i++, j++)
+		{
+			Oid			pk_type = RIAttType(pk_rel, riinfo->pk_attnums[i]);
+			Oid			fk_type = RIAttType(fk_rel, riinfo->fk_attnums[i]);
+
+			quoteOneName(attname,
+						 RIAttName(fk_rel, riinfo->fk_attnums[i]));
+
+			/*
+			 * Don't set the temporal column(s). FOR PORTION OF will take care
+			 * of that.
+			 */
+			if (i < riinfo->nkeys - 1)
+				appendStringInfo(&querybuf,
+								 "%s %s = $%d",
+								 querysep, attname, i + 1);
+
+			sprintf(paramname, "$%d", j + 1);
+			ri_GenerateQual(&qualbuf, qualsep,
+							paramname, pk_type,
+							riinfo->pf_eq_oprs[i],
+							attname, fk_type);
+			querysep = ",";
+			qualsep = "AND";
+			queryoids[i] = pk_type;
+			queryoids[j] = pk_type;
+		}
+		appendBinaryStringInfo(&querybuf, qualbuf.data, qualbuf.len);
+
+		/* Set a param for FOR PORTION OF TO/FROM */
+		queryoids[2 * riinfo->nkeys] = RIAttType(pk_rel, riinfo->pk_attnums[riinfo->nkeys - 1]);
+
+		/* Prepare and save the plan */
+		qplan = ri_PlanCheck(querybuf.data, 2 * riinfo->nkeys + 1, queryoids,
+							 &qkey, fk_rel, pk_rel);
+	}
+
+	/*
+	 * We have a plan now. Run it to update the existing references.
+	 */
+	ri_PerformCheck(riinfo, &qkey, qplan,
+					fk_rel, pk_rel,
+					oldslot, newslot,
+					riinfo->nkeys * 2 + 1, targetRange,
+					false,
+					true,		/* must detect new rows */
+					SPI_OK_UPDATE);
 }
 
 /*
@@ -4869,6 +5145,46 @@ kept_enforced_range(const ForPortionOfState *tg_temporal, const RI_ConstraintInf
 }
 
 /*
+ * pk_scalar_keys_equal -
+ *
+ * Returns true iff an UPDATE left the non-PERIOD part of the referenced key
+ * alone.  When it did, referencing rows still agree with the referenced row
+ * wherever it kept its history, and only the history it lost needs a
+ * CASCADE/SET NULL/SET DEFAULT.
+ */
+static bool
+pk_scalar_keys_equal(const RI_ConstraintInfo *riinfo,
+					 TupleTableSlot *oldslot, TupleTableSlot *newslot)
+{
+	/* The last key column is the PERIOD, so the rest are the scalar part. */
+	for (int i = 0; i < riinfo->nkeys - 1; i++)
+	{
+		AttrNumber	attnum = riinfo->pk_attnums[i];
+		CompactAttribute *att;
+		Datum		oldvalue;
+		Datum		newvalue;
+		bool		oldisnull;
+		bool		newisnull;
+
+		oldvalue = slot_getattr(oldslot, attnum, &oldisnull);
+		newvalue = slot_getattr(newslot, attnum, &newisnull);
+		if (oldisnull || newisnull)
+			return false;
+
+		/*
+		 * Compare bytewise, just as ri_KeysEqual does for the PK table: we
+		 * must propagate a change to a value that "looks" different even if
+		 * it would compare equal.
+		 */
+		att = TupleDescCompactAttr(oldslot->tts_tupleDescriptor, attnum - 1);
+		if (!datum_image_eq(oldvalue, newvalue, att->attbyval, att->attlen))
+			return false;
+	}
+
+	return true;
+}
+
+/*
  * tri_foreach_lost_range -
  *
  * Computes the history a referenced row lost when it was updated, and invokes
@@ -4940,6 +5256,21 @@ tri_foreach_lost_range(const RI_ConstraintInfo *riinfo,
 	}
 
 	FreeExprContext(rsi.econtext, true);
+}
+
+/*
+ * tri_cascade_del_lost_range -
+ *
+ * tri_foreach_lost_range callback for ON UPDATE CASCADE: deletes the
+ * referencing rows' history for one span the referenced row lost.
+ */
+static void
+tri_cascade_del_lost_range(Datum lostRange, void *arg)
+{
+	TRI_CascadeDelContext *ctx = (TRI_CascadeDelContext *) arg;
+
+	tri_cascade_del(ctx->riinfo, ctx->fk_rel, ctx->pk_rel, ctx->oldslot,
+					lostRange);
 }
 
 /*
