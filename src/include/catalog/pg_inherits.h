@@ -58,6 +58,7 @@ extern List *find_inheritance_children_extended(Oid parentrelId, bool omit_detac
 
 extern List *find_all_inheritors(Oid parentrelId, LOCKMODE lockmode,
 								 List **numparents);
+extern List *find_all_inheritors_ordered(Oid parentrelId, LOCKMODE lockmode);
 extern bool has_subclass(Oid relationId);
 extern bool has_superclass(Oid relationId);
 extern bool typeInheritsFrom(Oid subclassTypeId, Oid superclassTypeId);
