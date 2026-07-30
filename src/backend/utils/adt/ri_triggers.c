@@ -366,6 +366,7 @@ static bool ri_PerformCheck(const RI_ConstraintInfo *riinfo,
 							RI_QueryKey *qkey, SPIPlanPtr qplan,
 							Relation fk_rel, Relation pk_rel,
 							TupleTableSlot *oldslot, TupleTableSlot *newslot,
+							int periodParam, Datum period,
 							bool is_restrict,
 							bool detectNewRows, int expect_OK);
 static void ri_FastPathCheck(RI_ConstraintInfo *riinfo,
@@ -655,6 +656,7 @@ RI_FKey_check(TriggerData *trigdata)
 	ri_PerformCheck(riinfo, &qkey, qplan,
 					fk_rel, pk_rel,
 					NULL, newslot,
+					-1, (Datum) 0,
 					false,
 					pk_rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE,
 					SPI_OK_SELECT);
@@ -820,6 +822,7 @@ ri_Check_Pk_Match(Relation pk_rel, Relation fk_rel,
 	result = ri_PerformCheck(riinfo, &qkey, qplan,
 							 fk_rel, pk_rel,
 							 oldslot, NULL,
+							 -1, (Datum) 0,
 							 false,
 							 true,	/* treat like update */
 							 SPI_OK_SELECT);
@@ -1096,6 +1099,7 @@ ri_restrict(TriggerData *trigdata, bool is_no_action)
 	ri_PerformCheck(riinfo, &qkey, qplan,
 					fk_rel, pk_rel,
 					oldslot, NULL,
+					-1, (Datum) 0,
 					!is_no_action,
 					true,		/* must detect new rows */
 					SPI_OK_SELECT);
@@ -1198,6 +1202,7 @@ RI_FKey_cascade_del(PG_FUNCTION_ARGS)
 	ri_PerformCheck(riinfo, &qkey, qplan,
 					fk_rel, pk_rel,
 					oldslot, NULL,
+					-1, (Datum) 0,
 					false,
 					true,		/* must detect new rows */
 					SPI_OK_DELETE);
@@ -1315,6 +1320,7 @@ RI_FKey_cascade_upd(PG_FUNCTION_ARGS)
 	ri_PerformCheck(riinfo, &qkey, qplan,
 					fk_rel, pk_rel,
 					oldslot, newslot,
+					-1, (Datum) 0,
 					false,
 					true,		/* must detect new rows */
 					SPI_OK_UPDATE);
@@ -1543,6 +1549,7 @@ ri_set(TriggerData *trigdata, bool is_set_null, int tgkind)
 	ri_PerformCheck(riinfo, &qkey, qplan,
 					fk_rel, pk_rel,
 					oldslot, NULL,
+					-1, (Datum) 0,
 					false,
 					true,		/* must detect new rows */
 					SPI_OK_UPDATE);
@@ -2723,6 +2730,7 @@ ri_PerformCheck(const RI_ConstraintInfo *riinfo,
 				RI_QueryKey *qkey, SPIPlanPtr qplan,
 				Relation fk_rel, Relation pk_rel,
 				TupleTableSlot *oldslot, TupleTableSlot *newslot,
+				int periodParam, Datum period,
 				bool is_restrict,
 				bool detectNewRows, int expect_OK)
 {
@@ -2735,8 +2743,8 @@ ri_PerformCheck(const RI_ConstraintInfo *riinfo,
 	int			spi_result;
 	Oid			save_userid;
 	int			save_sec_context;
-	Datum		vals[RI_MAX_NUMKEYS * 2];
-	char		nulls[RI_MAX_NUMKEYS * 2];
+	Datum		vals[RI_MAX_NUMKEYS * 2 + 1];
+	char		nulls[RI_MAX_NUMKEYS * 2 + 1];
 
 	/*
 	 * Use the query type code to determine whether the query is run against
@@ -2778,6 +2786,12 @@ ri_PerformCheck(const RI_ConstraintInfo *riinfo,
 	{
 		ri_ExtractValues(source_rel, oldslot, riinfo, source_is_pk,
 						 vals, nulls);
+	}
+	/* Add/replace a query param for the PERIOD if needed */
+	if (periodParam > 0)
+	{
+		vals[periodParam - 1] = period;
+		nulls[periodParam - 1] = ' ';
 	}
 
 	/*
