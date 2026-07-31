@@ -944,9 +944,24 @@ pqTraceOutputNoTypeByteMessage(PGconn *conn, const char *message)
 			pqTraceOutputString(conn->Pfdebug, message, &logCursor, false);
 			pqTraceOutputString(conn->Pfdebug, message, &logCursor, regress);
 		}
+
+		/*
+		 * Startup messages end with a trailing terminator, advance our cursor
+		 * to include it
+		 */
+		logCursor++;
 	}
 
 	fputc('\n', conn->Pfdebug);
+
+	/*
+	 * Verify the printing routine did it right. There's no one-byte message
+	 * identifier here, so logCursor should match the length
+	 */
+	if (logCursor != length)
+		fprintf(conn->Pfdebug,
+				"mismatched message length: consumed %d, expected %d\n",
+				logCursor, length);
 }
 
 /*
