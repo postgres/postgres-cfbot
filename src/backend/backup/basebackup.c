@@ -59,7 +59,7 @@
  * NB: The buffer size is required to be a multiple of the system block
  * size, so use that value instead if it's bigger than our preference.
  */
-#define SINK_BUFFER_LENGTH			Max(32768, BLCKSZ)
+#define SINK_BUFFER_LENGTH			Max(256 * 1024, BLCKSZ)
 
 typedef struct
 {
