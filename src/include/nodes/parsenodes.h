@@ -1024,7 +1024,15 @@ typedef struct GraphElementPattern
 	NodeTag		type;
 	GraphElementPatternKind kind;
 	const char *variable;
+
+	/*
+	 * If no label expression is specified, we will replace it with a non-NULL
+	 * expression in transformLabelExpr(). This flag indicates whether the
+	 * label expression was originally empty.
+	 */
+	bool		has_empty_labelexpr;
 	Node	   *labelexpr;
+
 	List	   *subexpr;
 	Node	   *whereClause;
 	List	   *quantifier;

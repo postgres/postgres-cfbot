@@ -872,6 +872,8 @@ EXECUTE loopstmt;
 (2 rows)
 
 -- inheritance and partitioning
+--
+-- Also test temporary property graphs, keywords NODE and RELATIONSHIP
 CREATE TABLE pv (id int, val int);
 CREATE TABLE cv1 () INHERITS (pv);
 CREATE TABLE cv2 () INHERITS (pv);
@@ -941,8 +943,12 @@ CREATE TABLE ptne1 PARTITION OF ptne FOR VALUES IN (1, 2);
 CREATE TABLE ptne2 PARTITION OF ptne FOR VALUES IN (3);
 INSERT INTO ptne VALUES (1, 1, 2, 100), (2, 2, 3, 200), (3, 3, 1, 300);
 CREATE PROPERTY GRAPH g4
-    VERTEX TABLES (ptnv)
-    EDGE TABLES (
+    VERTEX TABLES (ptnv);
+-- empty label expression which resolves to no labels
+SELECT * FROM GRAPH_TABLE (g4 MATCH (s is ptnv)-[e]-(d is ptnv) COLUMNS (s.val, e.val, d.val)) ORDER BY 1, 2, 3; -- error
+ERROR:  empty label expression does not resolve to any label
+ALTER PROPERTY GRAPH g4
+    ADD EDGE TABLES (
         ptne
             SOURCE KEY (src) REFERENCES ptnv(id)
             DESTINATION KEY (dest) REFERENCES ptnv(id)
@@ -999,6 +1005,17 @@ ALTER PROPERTY GRAPH myshop ALTER VERTEX TABLE products
 ERROR:  cannot drop property price of property graph myshop because other objects depend on it
 DETAIL:  view customers_us depends on property price of property graph myshop
 HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+-- Empty label expression creates a dependency between the view and the set of
+-- labels it resolves to
+CREATE VIEW v_empty_label AS SELECT * FROM GRAPH_TABLE (g1 MATCH (v WHERE v.vprop1 = 10) COLUMNS (v.elname));
+ALTER PROPERTY GRAPH g1 ALTER VERTEX TABLE v1 DROP LABEL vl1; -- error
+ERROR:  cannot drop label vl1 of property graph g1 because other objects depend on it
+DETAIL:  view v_empty_label depends on label vl1 of property graph g1
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+ALTER PROPERTY GRAPH g1 ALTER VERTEX TABLE v2 DROP LABEL vl2; -- error
+ERROR:  cannot drop label vl2 of property graph g1 because other objects depend on it
+DETAIL:  view v_empty_label depends on label vl2 of property graph g1
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.
 -- ruleutils reverse parsing
 SELECT pg_get_viewdef('customers_us'::regclass);
                                                                                                                                                                 pg_get_viewdef                                                                                                                                                                 
@@ -1029,6 +1046,13 @@ SELECT pg_get_viewdef('v_shared_label'::regclass);
 ------------------------------------------------------------------------
   SELECT elname                                                        +
     FROM GRAPH_TABLE (g1 MATCH (v IS l1) COLUMNS (v.elname AS elname));
+(1 row)
+
+SELECT pg_get_viewdef('v_empty_label'::regclass);
+                                              pg_get_viewdef                                              
+----------------------------------------------------------------------------------------------------------
+  SELECT elname                                                                                          +
+    FROM GRAPH_TABLE (g1 MATCH (v IS l1|vl1|vl2|vl3 WHERE (v.vprop1 = 10)) COLUMNS (v.elname AS elname));
 (1 row)
 
 -- test view/graph nesting

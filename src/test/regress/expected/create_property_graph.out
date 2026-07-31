@@ -978,6 +978,7 @@ DETAIL:  Table "v2tmp" is a temporary table.
 DROP TABLE g2;  -- error: wrong object type
 ERROR:  "g2" is not a table
 HINT:  Use DROP PROPERTY GRAPH to remove a property graph.
+ALTER PROPERTY GRAPH g1 ADD VERTEX TABLES (t1 KEY (a)); -- to make a valid graph query
 CREATE VIEW vg1 AS SELECT * FROM GRAPH_TABLE(g1 MATCH () COLUMNS (1 AS one));
 DROP PROPERTY GRAPH g1; -- error
 ERROR:  cannot drop property graph g1 because other objects depend on it

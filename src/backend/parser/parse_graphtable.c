@@ -18,6 +18,8 @@
 #include "access/genam.h"
 #include "access/htup_details.h"
 #include "access/table.h"
+#include "catalog/pg_propgraph_element.h"
+#include "catalog/pg_propgraph_element_label.h"
 #include "catalog/pg_propgraph_label.h"
 #include "catalog/pg_propgraph_property.h"
 #include "miscadmin.h"
@@ -152,6 +154,51 @@ transformGraphTablePropertyRef(ParseState *pstate, ColumnRef *cref)
 }
 
 /*
+ * Given the OID of a label and the kind of graph element pattern, return true if
+ * there exists at least one element matching the given kind associated with the
+ * label. Otherwise return false.
+ */
+static bool
+label_has_elements_of_kind(Oid labelid, GraphElementPatternKind gepkind)
+{
+	Relation	rel;
+	SysScanDesc scan;
+	ScanKeyData key[1];
+	HeapTuple	tup;
+	bool		result = false;
+
+	rel = table_open(PropgraphElementLabelRelationId, AccessShareLock);
+	ScanKeyInit(&key[0],
+				Anum_pg_propgraph_element_label_pgellabelid,
+				BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(labelid));
+	scan = systable_beginscan(rel, PropgraphElementLabelLabelIndexId,
+							  true, NULL, 1, key);
+	while (!result && HeapTupleIsValid(tup = systable_getnext(scan)))
+	{
+		Form_pg_propgraph_element_label element_label = (Form_pg_propgraph_element_label) GETSTRUCT(tup);
+		Oid			element_oid = element_label->pgelelid;
+		HeapTuple	element_tup = SearchSysCache1(PROPGRAPHELOID, ObjectIdGetDatum(element_oid));
+		Form_pg_propgraph_element element_form;
+
+		if (!HeapTupleIsValid(element_tup))
+			elog(ERROR, "cache lookup failed for property graph element %u", element_oid);
+
+		element_form = (Form_pg_propgraph_element) GETSTRUCT(element_tup);
+
+		if ((element_form->pgekind == PGEKIND_VERTEX && gepkind == VERTEX_PATTERN) ||
+			(element_form->pgekind == PGEKIND_EDGE && IS_EDGE_PATTERN(gepkind)))
+			result = true;
+
+		ReleaseSysCache(element_tup);
+	}
+
+	systable_endscan(scan);
+	table_close(rel, AccessShareLock);
+	return result;
+}
+
+/*
  * Transform a label expression.
  *
  * A label expression is parsed as either a ColumnRef with a single field or a
@@ -161,14 +208,66 @@ transformGraphTablePropertyRef(ParseState *pstate, ColumnRef *cref)
  * GraphLabelRef nodes corresponding to the names of the labels appearing in the
  * expression. If any label name cannot be resolved to a label in the property
  * graph, an error is raised.
+ *
+ * An empty label expression is treated as a special case. According to section
+ * 9.2 "Contextual inference of a set of labels" subclause 2.a.ii of SQL/PGQ
+ * standard, element pattern which does not have a label expression is
+ * considered to have label expression equivalent to '%|!%' which is set of all
+ * labels which have at least one element of the given element kind associated with it.
  */
 static Node *
-transformLabelExpr(GraphTableParseState *gpstate, Node *labelexpr)
+transformLabelExpr(GraphTableParseState *gpstate, Node *labelexpr, GraphElementPatternKind gepkind)
 {
 	Node	   *result;
 
-	if (labelexpr == NULL)
-		return NULL;
+	if (!labelexpr)
+	{
+		Relation	rel;
+		SysScanDesc scan;
+		ScanKeyData key[1];
+		HeapTuple	tup;
+		List	   *args = NIL;
+
+		rel = table_open(PropgraphLabelRelationId, AccessShareLock);
+		ScanKeyInit(&key[0],
+					Anum_pg_propgraph_label_pglpgid,
+					BTEqualStrategyNumber,
+					F_OIDEQ, ObjectIdGetDatum(gpstate->graphid));
+		scan = systable_beginscan(rel, PropgraphLabelGraphNameIndexId,
+								  true, NULL, 1, key);
+		while (HeapTupleIsValid(tup = systable_getnext(scan)))
+		{
+			Form_pg_propgraph_label label = (Form_pg_propgraph_label) GETSTRUCT(tup);
+			GraphLabelRef *lref;
+
+			if (!label_has_elements_of_kind(label->oid, gepkind))
+				continue;
+
+			lref = makeNode(GraphLabelRef);
+			lref->labelid = label->oid;
+			lref->location = -1;
+			args = lappend(args, lref);
+		}
+		systable_endscan(scan);
+		table_close(rel, AccessShareLock);
+
+		/*
+		 * If there are no labels with elements of the given kind, the set of
+		 * labels that this label expression resolves to is empty. There is no
+		 * way to represent an empty set of labels as a label expression since
+		 * we do not support label conjunction as well as negation. So we can
+		 * not dump a view containing such a label expression. Hence prohibit
+		 * it for now.
+		 */
+		if (!args)
+			ereport(ERROR,
+					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("empty label expression does not resolve to any label"));
+
+		result = (Node *) makeBoolExpr(OR_EXPR, args, -1);
+		return result;
+
+	}
 
 	check_stack_depth();
 
@@ -208,7 +307,7 @@ transformLabelExpr(GraphTableParseState *gpstate, Node *labelexpr)
 				{
 					Node	   *arg = (Node *) lfirst(lc);
 
-					arg = transformLabelExpr(gpstate, arg);
+					arg = transformLabelExpr(gpstate, arg, gepkind);
 					args = lappend(args, arg);
 				}
 
@@ -249,7 +348,8 @@ transformGraphElementPattern(ParseState *pstate, GraphElementPattern *gep)
 
 	gpstate->cur_gep = gep;
 
-	gep->labelexpr = transformLabelExpr(gpstate, gep->labelexpr);
+	gep->has_empty_labelexpr = !gep->labelexpr;
+	gep->labelexpr = transformLabelExpr(gpstate, gep->labelexpr, gep->kind);
 
 	gep->whereClause = transformExpr(pstate, gep->whereClause, EXPR_KIND_WHERE);
 

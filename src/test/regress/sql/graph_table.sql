@@ -483,6 +483,8 @@ ALTER PROPERTY GRAPH g1 ALTER EDGE TABLE e3_3 ALTER LABEL l2 ADD PROPERTIES ((en
 EXECUTE loopstmt;
 
 -- inheritance and partitioning
+--
+-- Also test temporary property graphs, keywords NODE and RELATIONSHIP
 CREATE TABLE pv (id int, val int);
 CREATE TABLE cv1 () INHERITS (pv);
 CREATE TABLE cv2 () INHERITS (pv);
@@ -529,8 +531,11 @@ CREATE TABLE ptne1 PARTITION OF ptne FOR VALUES IN (1, 2);
 CREATE TABLE ptne2 PARTITION OF ptne FOR VALUES IN (3);
 INSERT INTO ptne VALUES (1, 1, 2, 100), (2, 2, 3, 200), (3, 3, 1, 300);
 CREATE PROPERTY GRAPH g4
-    VERTEX TABLES (ptnv)
-    EDGE TABLES (
+    VERTEX TABLES (ptnv);
+-- empty label expression which resolves to no labels
+SELECT * FROM GRAPH_TABLE (g4 MATCH (s is ptnv)-[e]-(d is ptnv) COLUMNS (s.val, e.val, d.val)) ORDER BY 1, 2, 3; -- error
+ALTER PROPERTY GRAPH g4
+    ADD EDGE TABLES (
         ptne
             SOURCE KEY (src) REFERENCES ptnv(id)
             DESTINATION KEY (dest) REFERENCES ptnv(id)
@@ -561,8 +566,14 @@ ALTER PROPERTY GRAPH myshop ALTER VERTEX TABLE customers
     ALTER LABEL customers DROP PROPERTIES (address);  -- error
 ALTER PROPERTY GRAPH myshop ALTER VERTEX TABLE products
     ALTER LABEL products DROP PROPERTIES (price);  -- error
+-- Empty label expression creates a dependency between the view and the set of
+-- labels it resolves to
+CREATE VIEW v_empty_label AS SELECT * FROM GRAPH_TABLE (g1 MATCH (v WHERE v.vprop1 = 10) COLUMNS (v.elname));
+ALTER PROPERTY GRAPH g1 ALTER VERTEX TABLE v1 DROP LABEL vl1; -- error
+ALTER PROPERTY GRAPH g1 ALTER VERTEX TABLE v2 DROP LABEL vl2; -- error
 -- ruleutils reverse parsing
 SELECT pg_get_viewdef('customers_us'::regclass);
+SELECT pg_get_viewdef('v_empty_label'::regclass);
 
 -- l1 is shared by all vertex tables and edge tables.  Dropping it
 -- only from all vertex tables renders a view unusable.  It would
