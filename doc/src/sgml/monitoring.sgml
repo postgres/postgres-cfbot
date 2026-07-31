@@ -4796,6 +4796,51 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>toast_relid</structfield> <type>oid</type>
+      </para>
+      <para>
+       OID of this table's <acronym>TOAST</acronym> table, or NULL if none
+       (see <xref linkend="storage-toast"/>)
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>toast_n_dead_tup</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Estimated number of dead tuples in this table's
+       <acronym>TOAST</acronym> table (if any).  Note that
+       <acronym>TOAST</acronym> tuples are chunks of long values, so this
+       is not comparable to the number of dead rows in the table itself.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>toast_last_autovacuum</structfield> <type>timestamp with time zone</type>
+      </para>
+      <para>
+       Last time at which this table's <acronym>TOAST</acronym> table (if
+       any) was vacuumed by the autovacuum daemon.  The autovacuum daemon
+       processes a <acronym>TOAST</acronym> table independently of its main
+       table, so this can differ significantly from
+       <structfield>last_autovacuum</structfield>.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>toast_autovacuum_count</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of times this table's <acronym>TOAST</acronym> table (if any)
+       has been vacuumed by the autovacuum daemon
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
         <structfield>stats_reset</structfield> <type>timestamp with time zone</type>
        </para>
        <para>

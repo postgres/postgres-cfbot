@@ -1846,12 +1846,17 @@ pg_stat_all_tables| SELECT c.oid AS relid,
     pg_stat_get_total_autovacuum_time(c.oid) AS total_autovacuum_time,
     pg_stat_get_total_analyze_time(c.oid) AS total_analyze_time,
     pg_stat_get_total_autoanalyze_time(c.oid) AS total_autoanalyze_time,
+    NULLIF(c.reltoastrelid, (0)::oid) AS toast_relid,
+    pg_stat_get_dead_tuples(t.oid) AS toast_n_dead_tup,
+    pg_stat_get_last_autovacuum_time(t.oid) AS toast_last_autovacuum,
+    pg_stat_get_autovacuum_count(t.oid) AS toast_autovacuum_count,
     pg_stat_get_stat_reset_time(c.oid) AS stats_reset
-   FROM ((pg_class c
+   FROM (((pg_class c
      LEFT JOIN pg_index i ON ((c.oid = i.indrelid)))
+     LEFT JOIN pg_class t ON ((c.reltoastrelid = t.oid)))
      LEFT JOIN pg_namespace n ON ((n.oid = c.relnamespace)))
   WHERE (c.relkind = ANY (ARRAY['r'::"char", 't'::"char", 'm'::"char", 'p'::"char"]))
-  GROUP BY c.oid, n.nspname, c.relname;
+  GROUP BY c.oid, n.nspname, c.relname, t.oid;
 pg_stat_archiver| SELECT archived_count,
     last_archived_wal,
     last_archived_time,
@@ -2368,6 +2373,10 @@ pg_stat_sys_tables| SELECT relid,
     total_autovacuum_time,
     total_analyze_time,
     total_autoanalyze_time,
+    toast_relid,
+    toast_n_dead_tup,
+    toast_last_autovacuum,
+    toast_autovacuum_count,
     stats_reset
    FROM pg_stat_all_tables
   WHERE ((schemaname = ANY (ARRAY['pg_catalog'::name, 'information_schema'::name])) OR (schemaname ~ '^pg_toast'::text));
@@ -2423,6 +2432,10 @@ pg_stat_user_tables| SELECT relid,
     total_autovacuum_time,
     total_analyze_time,
     total_autoanalyze_time,
+    toast_relid,
+    toast_n_dead_tup,
+    toast_last_autovacuum,
+    toast_autovacuum_count,
     stats_reset
    FROM pg_stat_all_tables
   WHERE ((schemaname <> ALL (ARRAY['pg_catalog'::name, 'information_schema'::name])) AND (schemaname !~ '^pg_toast'::text));
