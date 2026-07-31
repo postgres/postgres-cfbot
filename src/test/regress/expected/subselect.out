@@ -3120,16 +3120,16 @@ select * from tenk1 A where exists
 (select 1 from tenk2 B
 where A.hundred in (select C.hundred FROM tenk2 C
 WHERE c.odd = b.odd));
-                       QUERY PLAN                        
----------------------------------------------------------
+                         QUERY PLAN                          
+-------------------------------------------------------------
  Nested Loop Semi Join
-   Join Filter: (ANY (a.hundred = (SubPlan any_1).col1))
    ->  Seq Scan on tenk1 a
-   ->  Materialize
+   ->  Hash Join
+         Hash Cond: (b.odd = c.odd)
          ->  Seq Scan on tenk2 b
-   SubPlan any_1
-     ->  Seq Scan on tenk2 c
-           Filter: (odd = b.odd)
+         ->  Hash
+               ->  Index Scan using tenk2_hundred on tenk2 c
+                     Index Cond: (hundred = a.hundred)
 (8 rows)
 
 -- we should only try to pull up the sublink into RHS of a left join
@@ -3229,6 +3229,460 @@ ON B.hundred in (SELECT min(c.hundred) FROM tenk2 C WHERE c.odd = b.odd);
                                                Index Cond: (hundred IS NOT NULL)
                                                Filter: (odd = b.odd)
 (17 rows)
+
+--
+-- Pull up sublinks that reference both sides of a semijoin we just made
+--
+-- the ANY sublink references both A and B; we pull it up into the RHS
+explain (costs off)
+select A.unique1, A.odd from tenk1 A where A.unique1 < 20 and exists
+(select 1 from onek B
+where B.unique1 in (select C.unique1 from onek C
+where C.hundred = A.odd)) order by 1;
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Sort
+   Sort Key: a.unique1
+   ->  Hash Join
+         Hash Cond: (a.odd = c.hundred)
+         ->  Bitmap Heap Scan on tenk1 a
+               Recheck Cond: (unique1 < 20)
+               ->  Bitmap Index Scan on tenk1_unique1
+                     Index Cond: (unique1 < 20)
+         ->  Hash
+               ->  HashAggregate
+                     Group Key: c.hundred
+                     ->  Hash Join
+                           Hash Cond: (c.unique1 = b.unique1)
+                           ->  Seq Scan on onek c
+                           ->  Hash
+                                 ->  Index Only Scan using onek_unique1 on onek b
+(16 rows)
+
+select A.unique1, A.odd from tenk1 A where A.unique1 < 20 and exists
+(select 1 from onek B
+where B.unique1 in (select C.unique1 from onek C
+where C.hundred = A.odd)) order by 1;
+ unique1 | odd 
+---------+-----
+       0 |   0
+       1 |   2
+       2 |   4
+       3 |   6
+       4 |   8
+(5 rows)
+
+-- likewise for a nested EXISTS
+explain (costs off)
+select A.unique1, A.odd from tenk1 A where A.unique1 < 20 and exists
+(select 1 from onek B
+where exists (select 1 from onek C
+where C.hundred = A.odd and C.unique1 = B.unique1)) order by 1;
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Sort
+   Sort Key: a.unique1
+   ->  Hash Join
+         Hash Cond: (a.odd = c.hundred)
+         ->  Bitmap Heap Scan on tenk1 a
+               Recheck Cond: (unique1 < 20)
+               ->  Bitmap Index Scan on tenk1_unique1
+                     Index Cond: (unique1 < 20)
+         ->  Hash
+               ->  HashAggregate
+                     Group Key: c.hundred
+                     ->  Hash Join
+                           Hash Cond: (c.unique1 = b.unique1)
+                           ->  Seq Scan on onek c
+                           ->  Hash
+                                 ->  Index Only Scan using onek_unique1 on onek b
+(16 rows)
+
+select A.unique1, A.odd from tenk1 A where A.unique1 < 20 and exists
+(select 1 from onek B
+where exists (select 1 from onek C
+where C.hundred = A.odd and C.unique1 = B.unique1)) order by 1;
+ unique1 | odd 
+---------+-----
+       0 |   0
+       1 |   2
+       2 |   4
+       3 |   6
+       4 |   8
+(5 rows)
+
+-- rels pulled into the RHS must be available to sublinks pulled up after
+-- them
+explain (costs off)
+select A.unique1, A.odd from tenk1 A where A.unique1 < 20 and exists
+(select 1 from onek B
+where exists (select 1 from onek C
+where C.hundred = A.odd and exists (select 1 from onek D
+where D.unique1 = C.unique1 and D.unique2 = B.unique2))) order by 1;
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Sort
+   Sort Key: a.unique1
+   ->  Hash Join
+         Hash Cond: (a.odd = c.hundred)
+         ->  Bitmap Heap Scan on tenk1 a
+               Recheck Cond: (unique1 < 20)
+               ->  Bitmap Index Scan on tenk1_unique1
+                     Index Cond: (unique1 < 20)
+         ->  Hash
+               ->  HashAggregate
+                     Group Key: c.hundred
+                     ->  Hash Join
+                           Hash Cond: (d.unique2 = b.unique2)
+                           ->  Hash Join
+                                 Hash Cond: (c.unique1 = d.unique1)
+                                 ->  Seq Scan on onek c
+                                 ->  Hash
+                                       ->  HashAggregate
+                                             Group Key: d.unique1, d.unique2
+                                             ->  Seq Scan on onek d
+                           ->  Hash
+                                 ->  Index Only Scan using onek_unique2 on onek b
+(22 rows)
+
+select A.unique1, A.odd from tenk1 A where A.unique1 < 20 and exists
+(select 1 from onek B
+where exists (select 1 from onek C
+where C.hundred = A.odd and exists (select 1 from onek D
+where D.unique1 = C.unique1 and D.unique2 = B.unique2))) order by 1;
+ unique1 | odd 
+---------+-----
+       0 |   0
+       1 |   2
+       2 |   4
+       3 |   6
+       4 |   8
+(5 rows)
+
+-- the qual we hand back can itself hold a sublink referencing both sides
+explain (costs off)
+select A.unique1, A.odd from tenk1 A where A.unique1 < 20 and exists
+(select 1 from onek B
+where exists (select 1 from onek C
+where C.unique1 = B.unique1 and exists (select 1 from onek D
+where D.hundred = A.odd and D.unique2 = C.unique2))) order by 1;
+                                       QUERY PLAN                                       
+----------------------------------------------------------------------------------------
+ Sort
+   Sort Key: a.unique1
+   ->  Hash Join
+         Hash Cond: (a.odd = d.hundred)
+         ->  Bitmap Heap Scan on tenk1 a
+               Recheck Cond: (unique1 < 20)
+               ->  Bitmap Index Scan on tenk1_unique1
+                     Index Cond: (unique1 < 20)
+         ->  Hash
+               ->  HashAggregate
+                     Group Key: d.hundred
+                     ->  Hash Join
+                           Hash Cond: (c.unique2 = d.unique2)
+                           ->  Hash Join
+                                 Hash Cond: (c.unique1 = b.unique1)
+                                 ->  Seq Scan on onek c
+                                 ->  Hash
+                                       ->  Index Only Scan using onek_unique1 on onek b
+                           ->  Hash
+                                 ->  Seq Scan on onek d
+(20 rows)
+
+select A.unique1, A.odd from tenk1 A where A.unique1 < 20 and exists
+(select 1 from onek B
+where exists (select 1 from onek C
+where C.unique1 = B.unique1 and exists (select 1 from onek D
+where D.hundred = A.odd and D.unique2 = C.unique2))) order by 1;
+ unique1 | odd 
+---------+-----
+       0 |   0
+       1 |   2
+       2 |   4
+       3 |   6
+       4 |   8
+(5 rows)
+
+-- the pulled-up subquery can't always be flattened; then it stays a lateral
+-- scan parameterized by the semijoin's LHS.
+explain (costs off)
+select A.unique1, A.odd from tenk1 A where A.unique1 < 20 and exists
+(select 1 from onek B
+where B.unique1 in (select C.unique1 from onek C
+where C.odd = A.odd offset 0)) order by 1;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Sort
+   Sort Key: a.unique1
+   ->  Nested Loop Semi Join
+         ->  Bitmap Heap Scan on tenk1 a
+               Recheck Cond: (unique1 < 20)
+               ->  Bitmap Index Scan on tenk1_unique1
+                     Index Cond: (unique1 < 20)
+         ->  Hash Join
+               Hash Cond: (b.unique1 = c.unique1)
+               ->  Index Only Scan using onek_unique1 on onek b
+               ->  Hash
+                     ->  Seq Scan on onek c
+                           Filter: (odd = a.odd)
+(13 rows)
+
+select A.unique1, A.odd from tenk1 A where A.unique1 < 20 and exists
+(select 1 from onek B
+where B.unique1 in (select C.unique1 from onek C
+where C.odd = A.odd offset 0)) order by 1;
+ unique1 | odd 
+---------+-----
+       0 |   0
+       1 |   2
+       2 |   4
+       3 |   6
+       4 |   8
+       5 |  10
+       6 |  12
+       7 |  14
+       8 |  16
+       9 |  18
+(10 rows)
+
+-- we don't do this when the enclosing join is an antijoin, although the
+-- same reasoning would hold there
+explain (costs off)
+select * from tenk1 A where not exists
+(select 1 from onek B
+where B.unique1 in (select C.unique1 from onek C
+where C.odd = A.odd));
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Nested Loop Anti Join
+   Join Filter: (ANY (b.unique1 = (SubPlan any_1).col1))
+   ->  Seq Scan on tenk1 a
+   ->  Materialize
+         ->  Index Only Scan using onek_unique1 on onek b
+   SubPlan any_1
+     ->  Seq Scan on onek c
+           Filter: (odd = a.odd)
+(8 rows)
+
+-- and we can't when the sublink itself is negated: the antijoin replacing it
+-- would have to keep its own qual, which then couldn't reference A
+explain (costs off)
+select * from tenk1 A where exists
+(select 1 from onek B
+where not exists (select 1 from onek C
+where C.odd = A.odd and C.hundred = B.hundred));
+                                                       QUERY PLAN                                                       
+------------------------------------------------------------------------------------------------------------------------
+ Nested Loop Semi Join
+   Join Filter: (NOT (ANY ((a.odd = (hashed SubPlan exists_2).col1) AND (b.hundred = (hashed SubPlan exists_2).col2))))
+   ->  Seq Scan on tenk1 a
+   ->  Materialize
+         ->  Index Only Scan using onek_hundred on onek b
+   SubPlan exists_2
+     ->  Seq Scan on onek c
+(7 rows)
+
+-- nor when the sublink isn't a top-level clause of the semijoin's qual
+explain (costs off)
+select * from tenk1 A where exists
+(select 1 from onek B
+where B.odd = A.odd or B.unique1 in (select C.unique1 from onek C
+where C.odd = A.odd));
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ Nested Loop Semi Join
+   Join Filter: ((b.odd = a.odd) OR (ANY (b.unique1 = (SubPlan any_1).col1)))
+   ->  Seq Scan on tenk1 a
+   ->  Materialize
+         ->  Seq Scan on onek b
+   SubPlan any_1
+     ->  Seq Scan on onek c
+           Filter: (odd = a.odd)
+(8 rows)
+
+-- nor when nothing in the sublink's qual joins it to the rels already in
+-- the semijoin's RHS
+explain (costs off)
+select * from tenk1 A where exists
+(select 1 from onek B
+where A.odd + B.odd in (select C.unique1 from onek C));
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Nested Loop Semi Join
+   Join Filter: (ANY ((a.odd + b.odd) = (hashed SubPlan any_1).col1))
+   ->  Seq Scan on tenk1 a
+   ->  Materialize
+         ->  Seq Scan on onek b
+   SubPlan any_1
+     ->  Index Only Scan using onek_unique1 on onek c
+(7 rows)
+
+-- likewise for an EXISTS sublink, which can be hashed too, by way of
+-- convert_EXISTS_to_ANY
+explain (costs off)
+select * from tenk1 A where exists
+(select 1 from onek B
+where exists (select 1 from onek C
+where C.unique1 = A.odd + B.odd));
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
+ Nested Loop Semi Join
+   Join Filter: (ANY ((a.odd + b.odd) = (hashed SubPlan exists_2).col1))
+   ->  Seq Scan on tenk1 a
+   ->  Materialize
+         ->  Seq Scan on onek b
+   SubPlan exists_2
+     ->  Index Only Scan using onek_unique1 on onek c
+(7 rows)
+
+-- a clause that doesn't mention the sub-select only restricts the RHS, so
+-- it doesn't count either
+explain (costs off)
+select * from tenk1 A where exists
+(select 1 from onek B
+where exists (select 1 from onek C
+where B.hundred = 5 and C.unique1 = A.odd + B.odd));
+                                                         QUERY PLAN                                                         
+----------------------------------------------------------------------------------------------------------------------------
+ Nested Loop Semi Join
+   Join Filter: (ANY ((b.hundred = (hashed SubPlan exists_2).col1) AND ((a.odd + b.odd) = (hashed SubPlan exists_2).col2)))
+   ->  Seq Scan on tenk1 a
+   ->  Materialize
+         ->  Seq Scan on onek b
+   SubPlan exists_2
+     ->  Index Only Scan using onek_unique1 on onek c
+(7 rows)
+
+-- but one clause that does is enough, alongside another that doesn't
+explain (costs off)
+select * from tenk1 A where exists
+(select 1 from onek B
+where (A.odd + B.odd, B.unique2) in (select C.unique1, C.unique2 from onek C));
+                    QUERY PLAN                    
+--------------------------------------------------
+ Nested Loop Semi Join
+   Join Filter: ((a.odd + b.odd) = c.unique1)
+   ->  Seq Scan on tenk1 a
+   ->  Materialize
+         ->  Hash Join
+               Hash Cond: (b.unique2 = c.unique2)
+               ->  Seq Scan on onek b
+               ->  Hash
+                     ->  Seq Scan on onek c
+(9 rows)
+
+-- the sub-select's own WHERE clause serves as well as the test expression,
+-- becoming a join clause once the sub-select is flattened
+explain (costs off)
+select A.unique1, A.odd from tenk1 A where A.unique1 < 20 and exists
+(select 1 from onek B
+where A.odd in (select C.unique1 from onek C where C.unique2 = B.unique2))
+order by 1;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Sort
+   Sort Key: a.unique1
+   ->  Nested Loop Semi Join
+         ->  Bitmap Heap Scan on tenk1 a
+               Recheck Cond: (unique1 < 20)
+               ->  Bitmap Index Scan on tenk1_unique1
+                     Index Cond: (unique1 < 20)
+         ->  Nested Loop
+               ->  Index Scan using onek_unique1 on onek c
+                     Index Cond: (unique1 = a.odd)
+               ->  Index Only Scan using onek_unique2 on onek b
+                     Index Cond: (unique2 = c.unique2)
+(12 rows)
+
+select A.unique1, A.odd from tenk1 A where A.unique1 < 20 and exists
+(select 1 from onek B
+where A.odd in (select C.unique1 from onek C where C.unique2 = B.unique2))
+order by 1;
+ unique1 | odd 
+---------+-----
+       0 |   0
+       1 |   2
+       2 |   4
+       3 |   6
+       4 |   8
+       5 |  10
+       6 |  12
+       7 |  14
+       8 |  16
+       9 |  18
+      10 |  20
+      11 |  22
+      12 |  24
+      13 |  26
+      14 |  28
+      15 |  30
+      16 |  32
+      17 |  34
+      18 |  36
+      19 |  38
+(20 rows)
+
+-- it's fine for all this to happen inside the nullable side of an outer
+-- join, since nothing gets moved out of that side
+explain (costs off)
+select X.unique1, A.unique1 from tenk1 X left join tenk1 A
+on X.unique1 = A.unique1
+and exists (select 1 from onek B
+where B.unique1 in (select C.unique1 from onek C
+where C.odd = A.odd))
+where X.unique1 < 20 order by 1;
+                                       QUERY PLAN                                       
+----------------------------------------------------------------------------------------
+ Sort
+   Sort Key: x.unique1
+   ->  Hash Right Join
+         Hash Cond: (a.unique1 = x.unique1)
+         ->  Hash Join
+               Hash Cond: (a.odd = c.odd)
+               ->  Seq Scan on tenk1 a
+               ->  Hash
+                     ->  HashAggregate
+                           Group Key: c.odd
+                           ->  Hash Join
+                                 Hash Cond: (c.unique1 = b.unique1)
+                                 ->  Seq Scan on onek c
+                                 ->  Hash
+                                       ->  Index Only Scan using onek_unique1 on onek b
+         ->  Hash
+               ->  Index Only Scan using tenk1_unique1 on tenk1 x
+                     Index Cond: (unique1 < 20)
+(18 rows)
+
+select X.unique1, A.unique1 from tenk1 X left join tenk1 A
+on X.unique1 = A.unique1
+and exists (select 1 from onek B
+where B.unique1 in (select C.unique1 from onek C
+where C.odd = A.odd))
+where X.unique1 < 20 order by 1;
+ unique1 | unique1 
+---------+---------
+       0 |       0
+       1 |       1
+       2 |       2
+       3 |       3
+       4 |       4
+       5 |       5
+       6 |       6
+       7 |       7
+       8 |       8
+       9 |       9
+      10 |        
+      11 |        
+      12 |        
+      13 |        
+      14 |        
+      15 |        
+      16 |        
+      17 |        
+      18 |        
+      19 |        
+(20 rows)
 
 --
 -- Test VALUES to ARRAY (VtA) transformation
