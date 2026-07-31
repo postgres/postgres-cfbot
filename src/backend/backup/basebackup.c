@@ -1607,6 +1607,14 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
 				 errmsg("could not open file \"%s\": %m", readfilename)));
 	}
 
+	/*
+	 * Let the OS know that we are going to read the whole file. It's just an
+	 * hint, but it helps avoid longer synchronous read stalls.
+	 */
+#if defined(USE_POSIX_FADVISE) && defined(POSIX_FADV_SEQUENTIAL)
+	(void) posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+#endif
+
 	_tarWriteHeader(sink, tarfilename, NULL, statbuf, false);
 
 	/*
