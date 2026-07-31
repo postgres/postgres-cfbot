@@ -15,6 +15,7 @@
 
 #include "postgres_fe.h"
 
+#include <fcntl.h>
 #include <unistd.h>
 
 #include "common/file_perm.h"
@@ -36,7 +37,7 @@ typedef struct astreamer_extractor
 	const char *(*link_map) (const char *);
 	void		(*report_output_file) (const char *);
 	char		filename[MAXPGPATH];
-	FILE	   *file;
+	int			fd;
 	bool		discard_backup;
 } astreamer_extractor;
 
@@ -61,8 +62,10 @@ static void astreamer_extractor_finalize(astreamer *streamer);
 static void astreamer_extractor_free(astreamer *streamer);
 static void extract_directory(const char *filename, mode_t mode);
 static void extract_link(const char *filename, const char *linktarget);
-static FILE *create_file_for_extract(const char *filename, mode_t mode,
-									 bool discard_backup);
+static int	create_file_for_extract(const char *filename, mode_t mode,
+									bool discard_backup);
+static void write_file_range(int fd, const char *filename,
+							 const char *data, int len);
 
 static const astreamer_ops astreamer_extractor_ops = {
 	.content = astreamer_extractor_content,
@@ -117,15 +120,7 @@ astreamer_plain_writer_content(astreamer *streamer,
 	if (len == 0)
 		return;
 
-	errno = 0;
-	if (fwrite(data, len, 1, mystreamer->file) != 1)
-	{
-		/* if write didn't set errno, assume problem is no disk space */
-		if (errno == 0)
-			errno = ENOSPC;
-		pg_fatal("could not write to file \"%s\": %m",
-				 mystreamer->pathname);
-	}
+	write_file_range(fileno(mystreamer->file), mystreamer->pathname, data, len);
 }
 
 /*
@@ -202,6 +197,7 @@ astreamer_extractor_new(const char *basepath,
 	streamer->link_map = link_map;
 	streamer->report_output_file = report_output_file;
 	streamer->discard_backup = discard_backup;
+	streamer->fd = -1;
 
 	return &streamer->base;
 }
@@ -223,7 +219,7 @@ astreamer_extractor_content(astreamer *streamer, astreamer_member *member,
 	switch (context)
 	{
 		case ASTREAMER_MEMBER_HEADER:
-			Assert(mystreamer->file == NULL);
+			Assert(mystreamer->fd == -1);
 
 			if (!path_is_safe_for_extraction(member->pathname))
 				pg_fatal("tar member has unsafe path name: \"%s\"",
@@ -242,7 +238,7 @@ astreamer_extractor_content(astreamer *streamer, astreamer_member *member,
 			 * Dispatch based on file type.
 			 */
 			if (member->is_regular)
-				mystreamer->file =
+				mystreamer->fd =
 					create_file_for_extract(mystreamer->filename,
 											member->mode,
 											mystreamer->discard_backup);
@@ -275,27 +271,21 @@ astreamer_extractor_content(astreamer *streamer, astreamer_member *member,
 			break;
 
 		case ASTREAMER_MEMBER_CONTENTS:
-			if (mystreamer->file == NULL)
+			if (mystreamer->fd == -1)
 				break;
 
-			errno = 0;
-			if (len > 0 && fwrite(data, len, 1, mystreamer->file) != 1)
-			{
-				/* if write didn't set errno, assume problem is no disk space */
-				if (errno == 0)
-					errno = ENOSPC;
-				pg_fatal("could not write to file \"%s\": %m",
-						 mystreamer->filename);
-			}
+			if (len > 0)
+				write_file_range(mystreamer->fd, mystreamer->filename,
+								 data, len);
 			break;
 
 		case ASTREAMER_MEMBER_TRAILER:
-			if (mystreamer->file == NULL)
+			if (mystreamer->fd == -1)
 				break;
-			if (fclose(mystreamer->file) != 0)
+			if (close(mystreamer->fd) != 0)
 				pg_fatal("could not close file \"%s\": %m",
 						 mystreamer->filename);
-			mystreamer->file = NULL;
+			mystreamer->fd = -1;
 			break;
 
 		case ASTREAMER_ARCHIVE_TRAILER:
@@ -380,23 +370,28 @@ extract_link(const char *filename, const char *linktarget)
 /*
  * Create a regular file.
  *
- * Return the resulting handle so we can write the content to the file.
+ * Return an open file descriptor so we can write the content to the file.
+ *
+ * We intentionally use a raw file descriptor to get unbuffered write()
+ * and avoid potentiall libc interference.
  */
-static FILE *
-create_file_for_extract(const char *filename, mode_t mode, bool discard_backup)
+static int
+create_file_for_extract(const char *filename, mode_t mode,
+						bool discard_backup)
 {
-	FILE	   *file;
+	int			fd;
 
 	if (discard_backup)
 	{
-		file = fopen(DEVNULL, "wb");
-		if (file == NULL)
+		fd = open(DEVNULL, O_WRONLY | PG_BINARY, 0);
+		if (fd < 0)
 			pg_fatal("could not open file \"%s\": %m", DEVNULL);
-		return file;
+		return fd;
 	}
 
-	file = fopen(filename, "wb");
-	if (file == NULL)
+	fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC | PG_BINARY,
+			  pg_file_create_mode);
+	if (fd < 0)
 		pg_fatal("could not create file \"%s\": %m", filename);
 
 #ifndef WIN32
@@ -405,7 +400,32 @@ create_file_for_extract(const char *filename, mode_t mode, bool discard_backup)
 				 filename);
 #endif
 
-	return file;
+	return fd;
+}
+
+/*
+ * Wrapper for safely writing chunk of archive. Single write() is not
+ * guaranteed to consume the whole, so we loop until all is on the disk.
+ */
+static void
+write_file_range(int fd, const char *filename, const char *data, int len)
+{
+	while (len > 0)
+	{
+		ssize_t		written;
+
+		errno = 0;
+		written = write(fd, data, len);
+		if (written <= 0)
+		{
+			if (errno == 0)
+				errno = ENOSPC;
+			pg_fatal("could not write to file \"%s\": %m", filename);
+		}
+
+		data += written;
+		len -= written;
+	}
 }
 
 /*
@@ -419,7 +439,7 @@ astreamer_extractor_finalize(astreamer *streamer)
 	astreamer_extractor *mystreamer PG_USED_FOR_ASSERTS_ONLY
 	= (astreamer_extractor *) streamer;
 
-	Assert(mystreamer->file == NULL);
+	Assert(mystreamer->fd == -1);
 }
 
 /*
