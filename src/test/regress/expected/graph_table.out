@@ -1016,6 +1016,19 @@ ALTER PROPERTY GRAPH g1 ALTER VERTEX TABLE v2 DROP LABEL vl2; -- error
 ERROR:  cannot drop label vl2 of property graph g1 because other objects depend on it
 DETAIL:  view v_empty_label depends on label vl2 of property graph g1
 HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+-- l1 is shared by all vertex tables and edge tables. Dropping it from all
+-- vertex tables only renders a view unusable. This is because the standard
+-- differentiates between a vertex label and an edge label even though they
+-- share the same name. Waiting for the standard to clarify the expected
+-- behavior in this case.
+CREATE VIEW v_shared_label AS SELECT * FROM GRAPH_TABLE (g1 MATCH (v IS l1) COLUMNS (v.elname));
+BEGIN;
+ALTER PROPERTY GRAPH g1 ALTER VERTEX TABLE v1 DROP LABEL l1;
+ALTER PROPERTY GRAPH g1 ALTER VERTEX TABLE v2 DROP LABEL l1;
+ALTER PROPERTY GRAPH g1 ALTER VERTEX TABLE v3 DROP LABEL l1;
+SELECT * FROM v_shared_label;
+ERROR:  no property graph element of type "vertex" has label "l1" associated with it in property graph "g1"
+ROLLBACK;
 -- ruleutils reverse parsing
 SELECT pg_get_viewdef('customers_us'::regclass);
                                                                                                                                                                 pg_get_viewdef                                                                                                                                                                 
@@ -1053,6 +1066,13 @@ SELECT pg_get_viewdef('v_empty_label'::regclass);
 ----------------------------------------------------------------------------------------------------------
   SELECT elname                                                                                          +
     FROM GRAPH_TABLE (g1 MATCH (v IS l1|vl1|vl2|vl3 WHERE (v.vprop1 = 10)) COLUMNS (v.elname AS elname));
+(1 row)
+
+SELECT pg_get_viewdef('v_shared_label'::regclass);
+                             pg_get_viewdef                             
+------------------------------------------------------------------------
+  SELECT elname                                                        +
+    FROM GRAPH_TABLE (g1 MATCH (v IS l1) COLUMNS (v.elname AS elname));
 (1 row)
 
 -- test view/graph nesting
