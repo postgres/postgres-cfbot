@@ -63,7 +63,7 @@ static void astreamer_extractor_free(astreamer *streamer);
 static void extract_directory(const char *filename, mode_t mode);
 static void extract_link(const char *filename, const char *linktarget);
 static int	create_file_for_extract(const char *filename, mode_t mode,
-									bool discard_backup);
+									bool discard_backup, pgoff_t size);
 static void write_file_range(int fd, const char *filename,
 							 const char *data, int len);
 
@@ -241,7 +241,8 @@ astreamer_extractor_content(astreamer *streamer, astreamer_member *member,
 				mystreamer->fd =
 					create_file_for_extract(mystreamer->filename,
 											member->mode,
-											mystreamer->discard_backup);
+											mystreamer->discard_backup,
+											member->size);
 			else if (member->is_directory)
 			{
 				if (!mystreamer->discard_backup)
@@ -377,7 +378,7 @@ extract_link(const char *filename, const char *linktarget)
  */
 static int
 create_file_for_extract(const char *filename, mode_t mode,
-						bool discard_backup)
+						bool discard_backup, pgoff_t size)
 {
 	int			fd;
 
@@ -398,6 +399,28 @@ create_file_for_extract(const char *filename, mode_t mode,
 	if (chmod(filename, mode))
 		pg_fatal("could not set permissions on file \"%s\": %m",
 				 filename);
+#endif
+
+	/*
+	 * Preallocate the file to its final size.  We know the size up front
+	 * from the tar member header, so this lets the filesystem allocate all
+	 * the blocks in one go rather than growing the file on every write.
+	 */
+#ifdef HAVE_POSIX_FALLOCATE
+	if (size > 0)
+	{
+		int			rc = posix_fallocate(fd, 0, size);
+
+		/*
+		 * This is just an optimization, so we ignore failures such as
+		 * EINVAL/EOPNOTSUPP, however we need to properly fail on ENOSPC.
+		 */
+		if (rc == ENOSPC)
+		{
+			errno = rc;
+			pg_fatal("could not preallocate file \"%s\": %m", filename);
+		}
+	}
 #endif
 
 	return fd;
