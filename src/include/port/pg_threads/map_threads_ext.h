@@ -22,11 +22,11 @@
 #ifndef PG_THREADS_MAP_THREADS_EXT_H
 #define PG_THREADS_MAP_THREADS_EXT_H
 
-#if !defined(_MSC_VER)
+#ifndef WIN32
 #include <pthread.h>
 #endif
 
-#if defined(_MSC_VER)
+#if defined(WIN32)
 /*
  * Visual Studio's <thread.h>: cnd_t and mtx_t can be zero-initialized per
  * published documentation and example code, so this is a supported deployment
