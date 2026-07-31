@@ -36,10 +36,12 @@
 
 #include "port/pg_threads.h"
 
-#if defined(PG_THREADS_USE_PTHREAD_H)
+#if   defined(PG_THREADS_USE_PTHREAD_H)
 #include "port/pg_threads/map_pthread_ext.h"
 #elif defined(PG_THREADS_USE_THREADS_H)
 #include "port/pg_threads/map_threads_ext.h"
+#elif defined(PG_THREADS_USE_WINDOWS_H)
+#include "port/pg_threads/map_windows_ext.h"
 #endif
 
 typedef pg_rwlock_impl pg_rwlock_t;

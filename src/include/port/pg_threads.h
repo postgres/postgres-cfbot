@@ -13,23 +13,23 @@
  * the same style, most usefully static initializers for mutexes.  This header
  * restricts itself to faithfully copying <threads.h>.
  *
- * Two implementations are available:
+ * Three implementations are available:
  *
- * (1) map_pthread.h for <pthread.h> on POSIX, Windows + MinGW
+ * (1) map_pthread.h for <pthread.h> on POSIX systems
  * (2) map_threads.h for <threads.h> on Windows + Visual Studio
+ * (3) map_windows.h for <windows.h> on Windows
  *
- * The choice is made automatically, but can be overridden for testing with
- * PG_THREADS_USE_THREADS_H.  That works on common POSIX systems, but such
- * builds are intended strictly for testing (see map_threads_ext.h for
- * details).
+ * The choice is made automatically, but can be overridden for testing.
+ * PG_THREADS_USE_THREADS_H works on common POSIX systems, but such builds are
+ * intended strictly for testing (see map_threads_ext.h for details).
  *
  * The following macros are defined to signal known failures to conform to the
  * <threads.h> specification on some systems.  See the implementation headers
  * for details.
  *
- * - PG_MTX_TIMED_NOT_SUPPORTED:		macOS (1)
- * - PG_THRD_CURRENT_NOT_DETACHABLE:	Windows (2)
- * - PG_THRD_CURRENT_NOT_JOINABLE:		Windows (2)
+ * - PG_MTX_TIMED_NOT_SUPPORTED:		macOS (1), Windows (3)
+ * - PG_THRD_CURRENT_NOT_DETACHABLE:	Windows (2 and 3)
+ * - PG_THRD_CURRENT_NOT_JOINABLE:		Windows (2 and 3)
  *
  * https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1548.pdf
  * https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/threads.h.html
@@ -47,11 +47,14 @@
 
 /* select implementation, if not defined manually for testing. */
 #if !defined(PG_THREADS_USE_PTHREAD_H) &&		\
-	!defined(PG_THREADS_USE_THREADS_H)
-#if !defined(_MSC_VER)
+	!defined(PG_THREADS_USE_THREADS_H) &&		\
+	!defined(PG_THREADS_USE_WINDOWS_H)
+#if !defined(WIN32)
 #define PG_THREADS_USE_PTHREAD_H
-#else
+#elif defined(_MSC_VER)
 #define PG_THREADS_USE_THREADS_H
+#else
+#define PG_THREADS_USE_WINDOWS_H
 #endif
 #endif
 
@@ -72,6 +75,8 @@ typedef void (*pg_tss_dtor_t) (void *);
 #include "port/pg_threads/map_pthread.h"
 #elif defined(PG_THREADS_USE_THREADS_H)
 #include "port/pg_threads/map_threads.h"
+#elif defined(PG_THREADS_USE_WINDOWS_H)
+#include "port/pg_threads/map_windows.h"
 #endif
 
 /* standard types with prefix */
