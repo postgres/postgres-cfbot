@@ -571,9 +571,22 @@ ALTER PROPERTY GRAPH myshop ALTER VERTEX TABLE products
 CREATE VIEW v_empty_label AS SELECT * FROM GRAPH_TABLE (g1 MATCH (v WHERE v.vprop1 = 10) COLUMNS (v.elname));
 ALTER PROPERTY GRAPH g1 ALTER VERTEX TABLE v1 DROP LABEL vl1; -- error
 ALTER PROPERTY GRAPH g1 ALTER VERTEX TABLE v2 DROP LABEL vl2; -- error
+-- l1 is shared by all vertex tables and edge tables. Dropping it from all
+-- vertex tables only renders a view unusable. This is because the standard
+-- differentiates between a vertex label and an edge label even though they
+-- share the same name. Waiting for the standard to clarify the expected
+-- behavior in this case.
+CREATE VIEW v_shared_label AS SELECT * FROM GRAPH_TABLE (g1 MATCH (v IS l1) COLUMNS (v.elname));
+BEGIN;
+ALTER PROPERTY GRAPH g1 ALTER VERTEX TABLE v1 DROP LABEL l1;
+ALTER PROPERTY GRAPH g1 ALTER VERTEX TABLE v2 DROP LABEL l1;
+ALTER PROPERTY GRAPH g1 ALTER VERTEX TABLE v3 DROP LABEL l1;
+SELECT * FROM v_shared_label;
+ROLLBACK;
 -- ruleutils reverse parsing
 SELECT pg_get_viewdef('customers_us'::regclass);
 SELECT pg_get_viewdef('v_empty_label'::regclass);
+SELECT pg_get_viewdef('v_shared_label'::regclass);
 
 -- test view/graph nesting
 
