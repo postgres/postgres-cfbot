@@ -747,6 +747,10 @@ CREATE VIEW pg_stat_all_tables AS
             pg_stat_get_total_autovacuum_time(C.oid) AS total_autovacuum_time,
             pg_stat_get_total_analyze_time(C.oid) AS total_analyze_time,
             pg_stat_get_total_autoanalyze_time(C.oid) AS total_autoanalyze_time,
+            NULLIF(C.reltoastrelid, 0) AS toast_relid,
+            pg_stat_get_dead_tuples(NULLIF(C.reltoastrelid, 0)) AS toast_n_dead_tup,
+            pg_stat_get_last_autovacuum_time(NULLIF(C.reltoastrelid, 0)) AS toast_last_autovacuum,
+            pg_stat_get_autovacuum_count(NULLIF(C.reltoastrelid, 0)) AS toast_autovacuum_count,
             pg_stat_get_stat_reset_time(C.oid) AS stats_reset
     FROM pg_class C LEFT JOIN
          pg_index I ON C.oid = I.indrelid
