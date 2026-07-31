@@ -58,6 +58,8 @@ struct path_factor
 {
 	GraphElementPatternKind kind;
 	const char *variable;
+	bool		has_empty_labelexpr;	/* Copied from the corresponding
+										 * GraphElementPattern */
 	Node	   *labelexpr;
 	Node	   *whereClause;
 	int			factorpos;		/* Position of this path factor in the list of
@@ -221,9 +223,12 @@ generate_queries_for_path_pattern(RangeTblEntry *rte, List *path_pattern)
 				 * expression itself. Hence if only one of the two element
 				 * patterns has a label expression use that expression.
 				 */
-				if (!other->labelexpr)
+				if (other->has_empty_labelexpr)
+				{
 					other->labelexpr = gep->labelexpr;
-				else if (gep->labelexpr && !equal(other->labelexpr, gep->labelexpr))
+					other->has_empty_labelexpr = gep->has_empty_labelexpr;
+				}
+				else if (!gep->has_empty_labelexpr && !equal(other->labelexpr, gep->labelexpr))
 					ereport(ERROR,
 							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 							 errmsg("element patterns with same variable name \"%s\" but different label expressions are not supported",
@@ -250,6 +255,7 @@ generate_queries_for_path_pattern(RangeTblEntry *rte, List *path_pattern)
 			pf = palloc0_object(struct path_factor);
 			pf->factorpos = factorpos++;
 			pf->kind = gep->kind;
+			pf->has_empty_labelexpr = gep->has_empty_labelexpr;
 			pf->labelexpr = gep->labelexpr;
 			pf->variable = gep->variable;
 			pf->whereClause = gep->whereClause;
@@ -832,37 +838,9 @@ get_labels_for_expr(Oid propgraphid, Node *labelexpr)
 {
 	List	   *label_oids;
 
-	if (!labelexpr)
-	{
-		Relation	rel;
-		SysScanDesc scan;
-		ScanKeyData key[1];
-		HeapTuple	tup;
+	Assert(labelexpr);
 
-		/*
-		 * According to section 9.2 "Contextual inference of a set of labels"
-		 * subclause 2.a.ii of SQL/PGQ standard, element pattern which does
-		 * not have a label expression is considered to have label expression
-		 * equivalent to '%|!%' which is set of all labels.
-		 */
-		label_oids = NIL;
-		rel = table_open(PropgraphLabelRelationId, AccessShareLock);
-		ScanKeyInit(&key[0],
-					Anum_pg_propgraph_label_pglpgid,
-					BTEqualStrategyNumber,
-					F_OIDEQ, ObjectIdGetDatum(propgraphid));
-		scan = systable_beginscan(rel, PropgraphLabelGraphNameIndexId,
-								  true, NULL, 1, key);
-		while (HeapTupleIsValid(tup = systable_getnext(scan)))
-		{
-			Form_pg_propgraph_label label = (Form_pg_propgraph_label) GETSTRUCT(tup);
-
-			label_oids = lappend_oid(label_oids, label->oid);
-		}
-		systable_endscan(scan);
-		table_close(rel, AccessShareLock);
-	}
-	else if (IsA(labelexpr, GraphLabelRef))
+	if (IsA(labelexpr, GraphLabelRef))
 	{
 		GraphLabelRef *glr = castNode(GraphLabelRef, labelexpr);
 
@@ -912,7 +890,6 @@ get_path_elements_for_path_factor(Oid propgraphid, struct path_factor *pf)
 	List	   *elem_oids_seen = NIL;
 	List	   *pf_elem_oids = NIL;
 	List	   *path_elements = NIL;
-	List	   *unresolved_labels = NIL;
 	Relation	rel;
 	SysScanDesc scan;
 	ScanKeyData key[1];
@@ -979,33 +956,26 @@ get_path_elements_for_path_factor(Oid propgraphid, struct path_factor *pf)
 		{
 			/*
 			 * We did not find any qualified element associated with this
-			 * label. The label or its properties can not be associated with
-			 * the given element pattern. Throw an error if the label was
-			 * explicitly specified in the element pattern. Otherwise remember
-			 * it for later use.
+			 * label. Throw an error.
+			 *
+			 * An empty label expression is replaced by all labels that are
+			 * associated with at least one element of the required kind. We
+			 * should not reach here in that case.
 			 */
-			if (!pf->labelexpr)
-				unresolved_labels = lappend_oid(unresolved_labels, labeloid);
-			else
-				ereport(ERROR,
-						(errcode(ERRCODE_UNDEFINED_OBJECT),
-						 errmsg("no property graph element of type \"%s\" has label \"%s\" associated with it in property graph \"%s\"",
-								pf->kind == VERTEX_PATTERN ? "vertex" : "edge",
-								get_propgraph_label_name(labeloid),
-								get_rel_name(propgraphid))));
+			Assert(!pf->has_empty_labelexpr);
+
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_OBJECT),
+					 errmsg("no property graph element of type \"%s\" has label \"%s\" associated with it in property graph \"%s\"",
+							pf->kind == VERTEX_PATTERN ? "vertex" : "edge",
+							get_propgraph_label_name(labeloid),
+							get_rel_name(propgraphid))));
 		}
 
 		systable_endscan(scan);
 	}
 	table_close(rel, AccessShareLock);
-
-	/*
-	 * Remove the labels which were not explicitly mentioned in the label
-	 * expression but do not have any qualified elements associated with them.
-	 * Properties associated with such labels may not be referenced. See
-	 * replace_property_refs_mutator() for more details.
-	 */
-	pf->labeloids = list_difference_oid(label_oids, unresolved_labels);
+	pf->labeloids = label_oids;
 
 	return path_elements;
 }
