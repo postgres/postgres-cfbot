@@ -664,7 +664,7 @@ ginbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 	 * cannot insert new tuples whose TIDs VACUUM needs us to remove.
 	 */
 	ginInsertCleanup(&gvs.ginstate, !AmAutoVacuumWorkerProcess(),
-					 false, true, stats);
+					 false, true, stats, info->strategy);
 
 	/* we'll re-count the tuples each time */
 	stats->num_index_tuples = 0;
@@ -778,7 +778,8 @@ ginvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 		if (AmAutoVacuumWorkerProcess())
 		{
 			initGinState(&ginstate, index);
-			ginInsertCleanup(&ginstate, false, true, true, stats);
+			ginInsertCleanup(&ginstate, false, true, true, stats,
+							 info->strategy);
 		}
 		return stats;
 	}
@@ -792,7 +793,7 @@ ginvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 		stats = palloc0_object(IndexBulkDeleteResult);
 		initGinState(&ginstate, index);
 		ginInsertCleanup(&ginstate, !AmAutoVacuumWorkerProcess(),
-						 false, true, stats);
+						 false, true, stats, info->strategy);
 	}
 
 	memset(&idxStat, 0, sizeof(idxStat));
