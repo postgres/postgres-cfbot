@@ -6437,7 +6437,7 @@ StartupXLOG(void)
 		 * To minimize the window for that, try to do as little as possible
 		 * between here and writing the end-of-recovery record.
 		 */
-		writeTimeLineHistory(newTLI, recoveryTargetTLI,
+		writeTimeLineHistory(newTLI, endOfRecoveryInfo->lastRecTLI,
 							 EndOfLog, endOfRecoveryInfo->recoveryStopReason);
 
 		ereport(LOG,

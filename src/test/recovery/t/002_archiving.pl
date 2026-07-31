@@ -100,6 +100,20 @@ $caughtup_query =
 $node_primary->poll_query_until('postgres', $caughtup_query)
   or die "Timed out while waiting for archiving of 00000002.history";
 
+# Generate and archive some WAL on timeline 2.  This ensures that standby2
+# actually reaches timeline 2, so that its history file is needed again when
+# standby2 is promoted.
+$node_standby->safe_psql('postgres', "CREATE TABLE timeline_2_marker (a int)");
+my $timeline_2_lsn =
+  $node_standby->safe_psql('postgres', "SELECT pg_current_wal_lsn()");
+my $timeline_2_walfile = $node_standby->safe_psql(
+	'postgres', "SELECT pg_walfile_name('$timeline_2_lsn')");
+$node_standby->safe_psql('postgres', "SELECT pg_switch_wal()");
+$caughtup_query =
+  "SELECT size IS NOT NULL FROM pg_stat_file('$primary_archive/$timeline_2_walfile', true)";
+$node_primary->poll_query_until('postgres', $caughtup_query)
+  or die "Timed out while waiting for archiving of $timeline_2_walfile";
+
 # recovery_end_command should have been triggered on promotion.
 ok( -f "$data_dir/$recovery_end_command_file",
 	'recovery_end_command executed after promotion');
