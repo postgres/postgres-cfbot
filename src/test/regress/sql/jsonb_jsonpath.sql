@@ -383,6 +383,15 @@ select jsonb_path_query('"10-03-2017T12:34:56"', '$.datetime("dd-mm-yyyy\"T\"HH2
 select jsonb_path_query('"10-03-2017t12:34:56"', '$.datetime("dd-mm-yyyy\"T\"HH24:MI:SS")');
 select jsonb_path_query('"10-03-2017 12:34:56"', '$.datetime("dd-mm-yyyy\"T\"HH24:MI:SS")');
 
+-- DCH cache recycle must preserve std vs lenient mode
+SELECT count(*) FROM (
+  SELECT jsonb_path_query(to_jsonb('x' || g::text || '1234'),
+						  format('$.datetime("\"x%s\"HH24MI")', g)::jsonpath)
+  FROM generate_series(1, 20) g
+) s;
+SELECT to_char(timestamp '2000-01-01 12:34:00', 'HH24zMI');
+SELECT jsonb_path_query('"12z34"'::jsonb, '$.datetime("HH24zMI")');
+
 -- Test .bigint()
 select jsonb_path_query('null', '$.bigint()');
 select jsonb_path_query('true', '$.bigint()');
