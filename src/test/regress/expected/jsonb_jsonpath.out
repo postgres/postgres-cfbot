@@ -1782,6 +1782,25 @@ select jsonb_path_query('"10-03-2017t12:34:56"', '$.datetime("dd-mm-yyyy\"T\"HH2
 ERROR:  unmatched format character "T"
 select jsonb_path_query('"10-03-2017 12:34:56"', '$.datetime("dd-mm-yyyy\"T\"HH24:MI:SS")');
 ERROR:  unmatched format character "T"
+-- DCH cache recycle must preserve std vs lenient mode
+SELECT count(*) FROM (
+  SELECT jsonb_path_query(to_jsonb('x' || g::text || '1234'),
+						  format('$.datetime("\"x%s\"HH24MI")', g)::jsonpath)
+  FROM generate_series(1, 20) g
+) s;
+ count 
+-------
+    20
+(1 row)
+
+SELECT to_char(timestamp '2000-01-01 12:34:00', 'HH24zMI');
+ to_char 
+---------
+ 12z34
+(1 row)
+
+SELECT jsonb_path_query('"12z34"'::jsonb, '$.datetime("HH24zMI")');
+ERROR:  invalid datetime format separator: "z"
 -- Test .bigint()
 select jsonb_path_query('null', '$.bigint()');
 ERROR:  jsonpath item method .bigint() can only be applied to a string or numeric value
