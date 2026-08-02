@@ -47,6 +47,7 @@
 #include "storage/smgr.h"
 #include "tcop/tcopprot.h"
 #include "utils/guc.h"
+#include "utils/injection_point.h"
 #include "utils/rel.h"
 #include "utils/relfilenumbermap.h"
 #include "utils/timestamp.h"
@@ -548,6 +549,8 @@ apw_prewarm_blocks(Relation rel, struct AutoPrewarmReadStreamData *p)
 			instr_time	elapsed;
 
 			blocks_since_check = 0;
+
+			INJECTION_POINT("autoprewarm-before-lock-check", NULL);
 
 			INSTR_TIME_SET_CURRENT(currenttime);
 			elapsed = currenttime;
