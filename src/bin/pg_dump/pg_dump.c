@@ -237,6 +237,35 @@ static int	nsequences = 0;
 	fmtQualifiedId((obj)->dobj.namespace->dobj.name, \
 				   (obj)->dobj.name)
 
+/*
+ * SQL expression that filters dangling role OIDs from a pg_init_privs
+ * aclitem[] column.  An aclitem is dangling when its grantor or non-PUBLIC
+ * grantee OID no longer exists in pg_roles.  We use pg_roles rather than
+ * pg_authid so that non-superuser pg_dump works.
+ *
+ * Applied only in queries that fetch pg_init_privs data (not in WHERE clauses
+ * of per-object queries) to avoid running this subquery per function/aggregate.
+ */
+#define SAFE_INITPRIVS(col) \
+	"NULLIF(\n" \
+	"  ARRAY(\n" \
+	"    SELECT elt FROM pg_catalog.unnest(" col ") AS elt\n" \
+	"    WHERE NOT EXISTS (\n" \
+	"      SELECT 1 FROM pg_catalog.aclexplode(ARRAY[elt]) ace\n" \
+	"      WHERE NOT EXISTS (\n" \
+	"        SELECT 1 FROM pg_catalog.pg_roles\n" \
+	"        WHERE oid = ace.grantor\n" \
+	"      )\n" \
+	"      OR (ace.grantee <> 0\n" \
+	"          AND NOT EXISTS (\n" \
+	"            SELECT 1 FROM pg_catalog.pg_roles\n" \
+	"            WHERE oid = ace.grantee\n" \
+	"          ))\n" \
+	"    )\n" \
+	"  ),\n" \
+	"  ARRAY[]::pg_catalog.aclitem[]\n" \
+	")"
+
 static void help(const char *progname);
 static void setup_connection(Archive *AH,
 							 const char *dumpencoding, const char *dumpsnapshot,
@@ -10748,8 +10777,9 @@ getAdditionalACLs(Archive *fout)
 
 	/* Fetch initial-privileges data */
 	printfPQExpBuffer(query,
-					  "SELECT objoid, classoid, objsubid, privtype, initprivs "
-					  "FROM pg_init_privs");
+					  "SELECT pip.objoid, pip.classoid, pip.objsubid, pip.privtype,\n"
+					  "  " SAFE_INITPRIVS("pip.initprivs") " AS initprivs\n"
+					  "FROM pg_catalog.pg_init_privs pip");
 
 	res = ExecuteSqlQuery(fout, query->data, PGRES_TUPLES_OK);
 
@@ -16892,7 +16922,8 @@ dumpTable(Archive *fout, const TableInfo *tbinfo)
 								 "SELECT at.attname, "
 								 "at.attacl, "
 								 "'{}' AS acldefault, "
-								 "pip.privtype, pip.initprivs "
+								 "pip.privtype,\n"
+								 "  " SAFE_INITPRIVS("pip.initprivs") " AS initprivs\n"
 								 "FROM pg_catalog.pg_attribute at "
 								 "LEFT JOIN pg_catalog.pg_init_privs pip ON "
 								 "(at.attrelid = pip.objoid "
