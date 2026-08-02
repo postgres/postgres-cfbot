@@ -174,8 +174,9 @@ gistvalidate(Oid opclassoid)
 		Form_pg_amop oprform = (Form_pg_amop) GETSTRUCT(oprtup);
 		Oid			op_rettype;
 
-		/* TODO: Check that only allowed strategy numbers exist */
-		if (oprform->amopstrategy < 1)
+		/* Check that only allowed strategy numbers exist */
+		if (oprform->amopstrategy < 1 ||
+			oprform->amopstrategy >= (GeoStrategyNumberOffset * (GeoMaxStrategyNumberGroup + 1)))
 		{
 			ereport(INFO,
 					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
