@@ -243,6 +243,30 @@ gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
 	bool		is_leaf = (GistPageIsLeaf(page)) ? true : false;
 	XLogRecPtr	recptr;
 	bool		is_split;
+	bool		has_skip = false;
+	OffsetNumber groupoff = InvalidOffsetNumber;
+	OffsetNumber *groupdeloffs = NULL;
+	int			ngroupdel = 0;
+	IndexTuple *groupwrite = NULL;
+	int			ngroupwrite = 0;
+
+	if (!is_leaf)
+	{
+		OffsetNumber maxoff = PageGetMaxOffsetNumber(page);
+
+		for (OffsetNumber off = FirstOffsetNumber; off <= maxoff;
+			 off = OffsetNumberNext(off))
+		{
+			IndexTuple	pageitup = (IndexTuple) PageGetItem(page,
+															PageGetItemId(page, off));
+
+			if (GistTupleIsSkip(pageitup))
+			{
+				has_skip = true;
+				break;
+			}
+		}
+	}
 
 	/*
 	 * Refuse to modify a page that's incompletely split. This should not
@@ -283,6 +307,102 @@ gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
 		is_split = gistnospace(page, itup, ntup, oldoffnum, freespace);
 	}
 
+	/* Rebuild only the skip group containing the replaced downlink. */
+	if (has_skip && OffsetNumberIsValid(oldoffnum))
+	{
+		OffsetNumber maxoff = PageGetMaxOffsetNumber(page);
+		int			groupcount = 0;
+
+		for (OffsetNumber off = FirstOffsetNumber; off <= maxoff;
+			 off = OffsetNumberNext(off))
+		{
+			IndexTuple	pageitup = (IndexTuple) PageGetItem(page,
+															PageGetItemId(page, off));
+
+			if (GistTupleIsSkip(pageitup))
+			{
+				int			count = GistTupleGetSkipCount(pageitup);
+
+				if (count > maxoff - off)
+					ereport(ERROR,
+							(errcode(ERRCODE_INDEX_CORRUPTED),
+							 errmsg("index \"%s\" contains an invalid GiST skip tuple",
+									RelationGetRelationName(rel))));
+				if (oldoffnum > off && oldoffnum <= off + count)
+				{
+					groupoff = off;
+					groupcount = count;
+					break;
+				}
+				off += count;
+			}
+		}
+
+		if (OffsetNumberIsValid(groupoff))
+		{
+			IndexTuple *members;
+			int			nmembers = 0;
+			IndexTupleData *newlist;
+			int			newlenlist;
+			char	   *data;
+			Size		required = freespace;
+
+			members = palloc_array(IndexTuple, groupcount - 1 + ntup);
+			for (OffsetNumber off = OffsetNumberNext(groupoff);
+				 off <= groupoff + groupcount; off = OffsetNumberNext(off))
+			{
+				if (off == oldoffnum)
+				{
+					for (int i = 0; i < ntup; i++)
+						members[nmembers++] = itup[i];
+				}
+				else
+					members[nmembers++] = (IndexTuple) PageGetItem(page,
+																   PageGetItemId(page, off));
+			}
+			Assert(nmembers == groupcount - 1 + ntup);
+
+			if (nmembers > 0 &&
+				gistFormSkipGroups(rel, page, members, nmembers, giststate,
+								   &newlist, &newlenlist, &ngroupwrite))
+			{
+				data = (char *) newlist;
+				groupwrite = palloc_array(IndexTuple, ngroupwrite);
+				for (int i = 0; i < ngroupwrite; i++)
+				{
+					groupwrite[i] = (IndexTuple) data;
+					data += IndexTupleSize(groupwrite[i]);
+				}
+				is_split = false;
+			}
+			else
+				is_split = true;
+
+			groupdeloffs = palloc_array(OffsetNumber, groupcount + 1);
+			for (OffsetNumber off = groupoff;
+				 off <= groupoff + groupcount; off = OffsetNumberNext(off))
+				groupdeloffs[ngroupdel++] = off;
+
+			if (!is_split)
+			{
+				for (OffsetNumber off = FirstOffsetNumber; off <= maxoff;
+					 off = OffsetNumberNext(off))
+				{
+					IndexTuple	pageitup;
+
+					if (off >= groupoff && off <= groupoff + groupcount)
+						continue;
+					pageitup = (IndexTuple) PageGetItem(page,
+														PageGetItemId(page, off));
+					required += IndexTupleSize(pageitup) + sizeof(ItemIdData);
+				}
+				for (int i = 0; i < ngroupwrite; i++)
+					required += IndexTupleSize(groupwrite[i]) + sizeof(ItemIdData);
+				is_split = (required > GiSTPageSize);
+			}
+		}
+	}
+
 	if (is_split)
 	{
 		/* no space for insertion */
@@ -303,17 +423,27 @@ gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
 		 * remove the old version from the vector.
 		 */
 		itvec = gistextractpage(page, &tlen);
-		if (OffsetNumberIsValid(oldoffnum))
+		if (has_skip || OffsetNumberIsValid(oldoffnum))
 		{
-			/* on inner page we should remove old tuple */
-			int			pos = oldoffnum - FirstOffsetNumber;
+			int			dst = 0;
 
-			tlen--;
-			if (pos != tlen)
-				memmove(itvec + pos, itvec + pos + 1, sizeof(IndexTuple) * (tlen - pos));
+			/* Remove derived metadata and the replaced real tuple. */
+			for (int src = 0; src < tlen; src++)
+			{
+				OffsetNumber off = src + FirstOffsetNumber;
+
+				if (GistTupleIsSkip(itvec[src]) || off == oldoffnum)
+					continue;
+				itvec[dst++] = itvec[src];
+			}
+			tlen = dst;
 		}
 		itvec = gistjoinvector(itvec, &tlen, itup, ntup);
-		dist = gistSplit(rel, page, itvec, tlen, giststate);
+		if (is_leaf)
+			dist = gistSplit(rel, page, itvec, tlen, giststate, 0);
+		else
+			dist = gistSplitPageWithSkipGroups(rel, page, itvec, tlen,
+											   giststate, true);
 
 		/*
 		 * Check that split didn't produce too many pages.
@@ -416,6 +546,41 @@ gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
 				si->buf = ptr->buffer;
 				si->downlink = ptr->itup;
 				*splitinfo = lappend(*splitinfo, si);
+			}
+		}
+
+		/*
+		 * Add derived intrapage indexes to internal pages.  The metadata is
+		 * optional for correctness, so keep the ordinary representation when
+		 * its extra tuples would no longer fit.
+		 */
+		for (ptr = dist; ptr; ptr = ptr->next)
+		{
+			if (ptr->block.blkno == GIST_ROOT_BLKNO && ptr->block.num > 0)
+			{
+				IndexTuple *pagevec;
+				char	   *data = (char *) ptr->list;
+				IndexTupleData *newlist;
+				int			newlenlist;
+				int			newlen;
+
+				pagevec = palloc_array(IndexTuple, ptr->block.num);
+				for (int i = 0; i < ptr->block.num; i++)
+				{
+					IndexTuple	pageitup = (IndexTuple) data;
+
+					pagevec[i] = pageitup;
+					data += IndexTupleSize(pageitup);
+				}
+
+				if (gistFormSkipGroups(rel, ptr->page, pagevec,
+									   ptr->block.num, giststate,
+									   &newlist, &newlenlist, &newlen))
+				{
+					ptr->list = newlist;
+					ptr->lenlist = newlenlist;
+					ptr->block.num = newlen;
+				}
 			}
 		}
 
@@ -538,16 +703,39 @@ gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
 	}
 	else
 	{
+		IndexTuple *writetup = itup;
+		int			nwritetup = ntup;
+		OffsetNumber *deloffs = NULL;
+		int			ndeloffs = 0;
+
 		/*
 		 * Enough space.  We always get here if ntup==0.
 		 */
+		if (OffsetNumberIsValid(groupoff))
+		{
+			writetup = groupwrite;
+			nwritetup = ngroupwrite;
+			deloffs = groupdeloffs;
+			ndeloffs = ngroupdel;
+		}
+
+		/* A group rewrite registers one WAL data segment per new tuple. */
+		if (OffsetNumberIsValid(groupoff) && !is_build && RelationNeedsWAL(rel))
+			XLogEnsureRecordSpace(BufferIsValid(leftchildbuf) ? 2 : 1,
+								  2 + nwritetup);
+
 		START_CRIT_SECTION();
 
 		/*
 		 * Delete old tuple if any, then insert new tuple(s) if any.  If
 		 * possible, use the fast path of PageIndexTupleOverwrite.
 		 */
-		if (OffsetNumberIsValid(oldoffnum))
+		if (OffsetNumberIsValid(groupoff))
+		{
+			PageIndexMultiDelete(page, deloffs, ndeloffs);
+			gistfillbuffer(page, writetup, nwritetup, InvalidOffsetNumber);
+		}
+		else if (OffsetNumberIsValid(oldoffnum))
 		{
 			if (ntup == 1)
 			{
@@ -580,17 +768,19 @@ gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
 		{
 			if (RelationNeedsWAL(rel))
 			{
-				OffsetNumber ndeloffs = 0,
-							deloffs[1];
+				OffsetNumber local_deloffs[1];
 
-				if (OffsetNumberIsValid(oldoffnum))
+				if (!OffsetNumberIsValid(groupoff) &&
+					OffsetNumberIsValid(oldoffnum))
 				{
-					deloffs[0] = oldoffnum;
+					local_deloffs[0] = oldoffnum;
+					deloffs = local_deloffs;
 					ndeloffs = 1;
 				}
 
 				recptr = gistXLogUpdate(buffer,
-										deloffs, ndeloffs, itup, ntup,
+										deloffs, ndeloffs,
+										writetup, nwritetup,
 										leftchildbuf);
 			}
 			else
@@ -990,6 +1180,8 @@ gistFindPath(Relation r, BlockNumber child, OffsetNumber *downlinkoffnum)
 		{
 			iid = PageGetItemId(page, i);
 			idxtuple = (IndexTuple) PageGetItem(page, iid);
+			if (GistTupleIsSkip(idxtuple))
+				continue;
 			blkno = ItemPointerGetBlockNumber(&(idxtuple->t_tid));
 			if (blkno == child)
 			{
@@ -1151,6 +1343,8 @@ gistformdownlink(Relation rel, Buffer buf, GISTSTATE *giststate,
 		IndexTuple	ituple = (IndexTuple)
 			PageGetItem(page, PageGetItemId(page, offset));
 
+		if (GistTupleIsSkip(ituple))
+			continue;
 		if (downlink == NULL)
 			downlink = CopyIndexTuple(ituple);
 		else
@@ -1451,7 +1645,8 @@ gistSplit(Relation r,
 		  Page page,
 		  IndexTuple *itup,		/* contains compressed entry */
 		  int len,
-		  GISTSTATE *giststate)
+		  GISTSTATE *giststate,
+		  int max_page_tuples)
 {
 	IndexTuple *lvectup,
 			   *rvectup;
@@ -1493,9 +1688,12 @@ gistSplit(Relation r,
 		rvectup[i] = itup[v.splitVector.spl_right[i] - 1];
 
 	/* finalize splitting (may need another split) */
-	if (!gistfitpage(rvectup, v.splitVector.spl_nright))
+	if (!gistfitpage(rvectup, v.splitVector.spl_nright) ||
+		(max_page_tuples > 0 &&
+		 v.splitVector.spl_nright > max_page_tuples))
 	{
-		res = gistSplit(r, page, rvectup, v.splitVector.spl_nright, giststate);
+		res = gistSplit(r, page, rvectup, v.splitVector.spl_nright,
+						giststate, max_page_tuples);
 	}
 	else
 	{
@@ -1505,12 +1703,16 @@ gistSplit(Relation r,
 		res->itup = gistFormTuple(giststate, r, v.spl_rattr, v.spl_risnull, false);
 	}
 
-	if (!gistfitpage(lvectup, v.splitVector.spl_nleft))
+	if (!gistfitpage(lvectup, v.splitVector.spl_nleft) ||
+		(max_page_tuples > 0 &&
+		 v.splitVector.spl_nleft > max_page_tuples))
 	{
 		SplitPageLayout *resptr,
 				   *subres;
 
-		resptr = subres = gistSplit(r, page, lvectup, v.splitVector.spl_nleft, giststate);
+		resptr = subres = gistSplit(r, page, lvectup,
+									v.splitVector.spl_nleft, giststate,
+									max_page_tuples);
 
 		/* install on list's tail */
 		while (resptr->next)
@@ -1528,6 +1730,141 @@ gistSplit(Relation r,
 	}
 
 	return res;
+}
+
+/*
+ * Form an intrapage index over an ordinary tuple vector.
+ *
+ * Skip tuples are derived metadata: each one is a union key followed by the
+ * real tuples that it summarizes.  If the metadata would make the vector no
+ * longer fit on a page, leave the caller's ordinary representation alone.
+ */
+bool
+gistFormSkipGroups(Relation rel, Page page, IndexTuple *itvec, int len,
+				   GISTSTATE *giststate, IndexTupleData **list, int *lenlist,
+				   int *newlen)
+{
+	SplitPageLayout *groups;
+	SplitPageLayout *group;
+	IndexTuple *grouped;
+	int			ngroups = 0;
+	int			pos = 0;
+
+	Assert(len > 0);
+
+	if (len <= GIST_SKIP_GROUP_SIZE)
+	{
+		groups = palloc0_object(SplitPageLayout);
+		groups->block.num = len;
+		groups->list = gistfillitupvec(itvec, len, &groups->lenlist);
+		groups->itup = gistunion(rel, itvec, len, giststate);
+	}
+	else
+		groups = gistSplit(rel, page, itvec, len, giststate,
+						   GIST_SKIP_GROUP_SIZE);
+
+	for (group = groups; group != NULL; group = group->next)
+		ngroups++;
+
+	grouped = palloc_array(IndexTuple, len + ngroups);
+	for (group = groups; group != NULL; group = group->next)
+	{
+		char	   *data = (char *) group->list;
+
+		GistTupleSetSkip(group->itup, group->block.num);
+		grouped[pos++] = group->itup;
+		for (int i = 0; i < group->block.num; i++)
+		{
+			IndexTuple	itup = (IndexTuple) data;
+
+			grouped[pos++] = itup;
+			data += IndexTupleSize(itup);
+		}
+	}
+	Assert(pos == len + ngroups);
+
+	if (!gistfitpage(grouped, pos))
+		return false;
+
+	*list = gistfillitupvec(grouped, pos, lenlist);
+	*newlen = pos;
+	return true;
+}
+
+/*
+ * Partition an ordinary tuple vector into pages that include skip groups.
+ * Metadata space participates in the fit decision, so this can produce more
+ * pages than gistSplit() would for the same real tuples.
+ */
+SplitPageLayout *
+gistSplitPageWithSkipGroups(Relation rel, Page page, IndexTuple *itvec,
+							int len, GISTSTATE *giststate, bool force_split)
+{
+	IndexTupleData *list;
+	int			lenlist;
+	int			newlen;
+	SplitPageLayout *result;
+
+	Assert(len > 0);
+
+	if (!force_split &&
+		gistFormSkipGroups(rel, page, itvec, len, giststate,
+						   &list, &lenlist, &newlen))
+	{
+		result = palloc0_object(SplitPageLayout);
+		result->block.blkno = InvalidBlockNumber;
+		result->buffer = InvalidBuffer;
+		result->block.num = newlen;
+		result->list = list;
+		result->lenlist = lenlist;
+		result->itup = gistunion(rel, itvec, len, giststate);
+		return result;
+	}
+
+	/* A singleton page cannot be split further; omit useless metadata. */
+	if (len == 1)
+	{
+		Assert(!force_split);
+		result = palloc0_object(SplitPageLayout);
+		result->block.blkno = InvalidBlockNumber;
+		result->buffer = InvalidBuffer;
+		result->block.num = 1;
+		result->list = gistfillitupvec(itvec, 1, &result->lenlist);
+		result->itup = gistunion(rel, itvec, 1, giststate);
+		return result;
+	}
+	else
+	{
+		SplitPageLayout *halves;
+		SplitPageLayout *newresult = NULL;
+		SplitPageLayout *tail = NULL;
+
+		halves = gistSplit(rel, page, itvec, len, giststate, 0);
+		for (SplitPageLayout *half = halves; half != NULL; half = half->next)
+		{
+			IndexTuple *halfvec;
+			char	   *data = (char *) half->list;
+			SplitPageLayout *partition;
+
+			halfvec = palloc_array(IndexTuple, half->block.num);
+			for (int i = 0; i < half->block.num; i++)
+			{
+				halfvec[i] = (IndexTuple) data;
+				data += IndexTupleSize(halfvec[i]);
+			}
+
+			partition = gistSplitPageWithSkipGroups(rel, page, halfvec,
+													half->block.num, giststate,
+													false);
+			if (newresult == NULL)
+				newresult = partition;
+			else
+				tail->next = partition;
+			for (tail = partition; tail->next != NULL; tail = tail->next)
+				;
+		}
+		return newresult;
+	}
 }
 
 /*
