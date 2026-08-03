@@ -1529,48 +1529,37 @@ pg_mcv_list_send(PG_FUNCTION_ARGS)
  * Optionally determines the collation.
  */
 static int
-mcv_match_expression(Node *expr, Bitmapset *keys, List *exprs, Oid *collid)
+mcv_match_expression(Node *expr, List *exprs, Oid *collid)
 {
-	int			idx;
+	bool		expr_is_var = IsA(expr, Var);
+	int			idx = 0;
+	ListCell   *lc;
 
-	if (IsA(expr, Var))
+	if (collid)
+		*collid = expr_is_var ? ((Var *) expr)->varcollid : exprCollation(expr);
+
+	foreach(lc, exprs)
 	{
-		/* simple Var, so just lookup using varattno */
-		Var		   *var = (Var *) expr;
+		Node	   *node = (Node *) lfirst(lc);
 
-		if (collid)
-			*collid = var->varcollid;
-
-		idx = bms_member_index(keys, var->varattno);
-
-		if (idx < 0)
-			elog(ERROR, "variable not found in statistics object");
-	}
-	else
-	{
-		/* expression - lookup in stats expressions */
-		ListCell   *lc;
-
-		if (collid)
-			*collid = exprCollation(expr);
-
-		/* expressions are stored after the simple columns */
-		idx = bms_num_members(keys);
-		foreach(lc, exprs)
+		if (expr_is_var)
 		{
-			Node	   *stat_expr = (Node *) lfirst(lc);
-
-			if (equal(expr, stat_expr))
-				break;
-
-			idx++;
+			if (IsA(node, Var) &&
+				((Var *) node)->varattno == ((Var *) expr)->varattno)
+				return idx;
 		}
+		else if (equal(expr, node))
+			return idx;
 
-		if (lc == NULL)
-			elog(ERROR, "expression not found in statistics object");
+		idx++;
 	}
 
-	return idx;
+	if (expr_is_var)
+		elog(ERROR, "variable not found in statistics object");
+	else
+		elog(ERROR, "expression not found in statistics object");
+
+	return -1;					/* keep compiler quiet */
 }
 
 /*
@@ -1594,7 +1583,7 @@ mcv_match_expression(Node *expr, Bitmapset *keys, List *exprs, Oid *collid)
  */
 static bool *
 mcv_get_match_bitmap(PlannerInfo *root, List *clauses,
-					 Bitmapset *keys, List *exprs,
+					 List *exprs,
 					 MCVList *mcvlist, bool is_or)
 {
 	ListCell   *l;
@@ -1644,7 +1633,7 @@ mcv_get_match_bitmap(PlannerInfo *root, List *clauses,
 				elog(ERROR, "incompatible clause");
 
 			/* match the attribute/expression to a dimension of the statistic */
-			idx = mcv_match_expression(clause_expr, keys, exprs, &collid);
+			idx = mcv_match_expression(clause_expr, exprs, &collid);
 
 			/*
 			 * Walk through the MCV items and evaluate the current clause. We
@@ -1751,7 +1740,7 @@ mcv_get_match_bitmap(PlannerInfo *root, List *clauses,
 			}
 
 			/* match the attribute/expression to a dimension of the statistic */
-			idx = mcv_match_expression(clause_expr, keys, exprs, &collid);
+			idx = mcv_match_expression(clause_expr, exprs, &collid);
 
 			/*
 			 * Walk through the MCV items and evaluate the current clause. We
@@ -1822,7 +1811,7 @@ mcv_get_match_bitmap(PlannerInfo *root, List *clauses,
 			Node	   *clause_expr = (Node *) (expr->arg);
 
 			/* match the attribute/expression to a dimension of the statistic */
-			int			idx = mcv_match_expression(clause_expr, keys, exprs, NULL);
+			int			idx = mcv_match_expression(clause_expr, exprs, NULL);
 
 			/*
 			 * Walk through the MCV items and evaluate the current clause. We
@@ -1864,7 +1853,7 @@ mcv_get_match_bitmap(PlannerInfo *root, List *clauses,
 			Assert(list_length(bool_clauses) >= 2);
 
 			/* build the match bitmap for the OR-clauses */
-			bool_matches = mcv_get_match_bitmap(root, bool_clauses, keys, exprs,
+			bool_matches = mcv_get_match_bitmap(root, bool_clauses, exprs,
 												mcvlist, is_orclause(clause));
 
 			/*
@@ -1891,7 +1880,7 @@ mcv_get_match_bitmap(PlannerInfo *root, List *clauses,
 			Assert(list_length(not_args) == 1);
 
 			/* build the match bitmap for the NOT-clause */
-			not_matches = mcv_get_match_bitmap(root, not_args, keys, exprs,
+			not_matches = mcv_get_match_bitmap(root, not_args, exprs,
 											   mcvlist, false);
 
 			/*
@@ -1911,7 +1900,7 @@ mcv_get_match_bitmap(PlannerInfo *root, List *clauses,
 			Var		   *var = (Var *) (clause);
 
 			/* match the attribute to a dimension of the statistic */
-			int			idx = bms_member_index(keys, var->varattno);
+			int			idx = mcv_match_expression((Node *) var, exprs, NULL);
 
 			Assert(var->vartype == BOOLOID);
 
@@ -1939,7 +1928,7 @@ mcv_get_match_bitmap(PlannerInfo *root, List *clauses,
 			int			idx;
 
 			/* match the expression to a dimension of the statistic */
-			idx = mcv_match_expression(clause, keys, exprs, NULL);
+			idx = mcv_match_expression(clause, exprs, NULL);
 
 			/*
 			 * Walk through the MCV items and evaluate the current clause. We
@@ -2057,7 +2046,7 @@ mcv_clauselist_selectivity(PlannerInfo *root, StatisticExtInfo *stat,
 	mcv = statext_mcv_load(stat->statOid, rte->inh);
 
 	/* build a match bitmap for the clauses */
-	matches = mcv_get_match_bitmap(root, clauses, stat->keys, stat->exprs,
+	matches = mcv_get_match_bitmap(root, clauses, stat->exprs,
 								   mcv, false);
 
 	/* sum frequencies for all the matching MCV items */
@@ -2130,8 +2119,8 @@ mcv_clause_selectivity_or(PlannerInfo *root, StatisticExtInfo *stat,
 		*or_matches = palloc0_array(bool, mcv->nitems);
 
 	/* build the match bitmap for the new clause */
-	new_matches = mcv_get_match_bitmap(root, list_make1(clause), stat->keys,
-									   stat->exprs, mcv, false);
+	new_matches = mcv_get_match_bitmap(root, list_make1(clause), stat->exprs,
+									   mcv, false);
 
 	/*
 	 * Sum the frequencies for all the MCV items matching this clause and also

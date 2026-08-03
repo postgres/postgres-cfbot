@@ -166,7 +166,6 @@ NOTICE:  checking pg_statistic {starelid,staattnum} => pg_attribute {attrelid,at
 NOTICE:  checking pg_statistic_ext {stxrelid} => pg_class {oid}
 NOTICE:  checking pg_statistic_ext {stxnamespace} => pg_namespace {oid}
 NOTICE:  checking pg_statistic_ext {stxowner} => pg_authid {oid}
-NOTICE:  checking pg_statistic_ext {stxrelid,stxkeys} => pg_attribute {attrelid,attnum}
 NOTICE:  checking pg_statistic_ext_data {stxoid} => pg_statistic_ext {oid}
 NOTICE:  checking pg_rewrite {ev_class} => pg_class {oid}
 NOTICE:  checking pg_trigger {tgrelid} => pg_class {oid}

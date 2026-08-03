@@ -2676,8 +2676,14 @@ describeOneTableDetails(const char *schemaname,
 							  "SELECT oid, "
 							  "stxrelid::pg_catalog.regclass, "
 							  "stxnamespace::pg_catalog.regnamespace::pg_catalog.text AS nsp, "
-							  "stxname,\n"
-							  "pg_catalog.pg_get_statisticsobjdef_columns(oid) AS columns,\n"
+							  "stxname,\n");
+			if (pset.sversion >= 200000)
+				appendPQExpBufferStr(&buf,
+									 "pg_catalog.array_to_string(pg_catalog.pg_get_statisticsobjdef_columns(oid), ', ') AS columns,\n");
+			else
+				appendPQExpBufferStr(&buf,
+									 "pg_catalog.pg_get_statisticsobjdef_columns(oid) AS columns,\n");
+			appendPQExpBuffer(&buf,
 							  "  " CppAsString2(STATS_EXT_NDISTINCT) " = any(stxkind) AS ndist_enabled,\n"
 							  "  " CppAsString2(STATS_EXT_DEPENDENCIES) " = any(stxkind) AS deps_enabled,\n"
 							  "  " CppAsString2(STATS_EXT_MCV) " = any(stxkind) AS mcv_enabled,\n"
@@ -4832,7 +4838,13 @@ listExtendedStats(const char *pattern, bool verbose)
 					  gettext_noop("Schema"),
 					  gettext_noop("Name"));
 
-	if (pset.sversion >= 140000)
+	if (pset.sversion >= 200000)
+		appendPQExpBuffer(&buf,
+						  "pg_catalog.format('%%s FROM %%s', \n"
+						  "  pg_catalog.array_to_string(pg_catalog.pg_get_statisticsobjdef_columns(es.oid), ', '), \n"
+						  "  es.stxrelid::pg_catalog.regclass) AS \"%s\"",
+						  gettext_noop("Definition"));
+	else if (pset.sversion >= 140000)
 		appendPQExpBuffer(&buf,
 						  "pg_catalog.format('%%s FROM %%s', \n"
 						  "  pg_catalog.pg_get_statisticsobjdef_columns(es.oid), \n"
