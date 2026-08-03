@@ -1440,6 +1440,50 @@ SELECT distance_taxicab('(2,2),(10,10)'::cube, '(0,0),(5,5)'::cube);
                 0
 (1 row)
 
+-- NaN coordinates propagate to a NaN distance, instead of being treated
+-- as a zero-distance (overlapping) projection
+SELECT distance_chebyshev('(nan,nan)'::cube, '(1,1)'::cube);
+ distance_chebyshev 
+--------------------
+                NaN
+(1 row)
+
+SELECT distance_chebyshev('(5,5)'::cube, '(1,nan)'::cube);
+ distance_chebyshev 
+--------------------
+                NaN
+(1 row)
+
+SELECT distance_taxicab('(nan)'::cube, '(1)'::cube);
+ distance_taxicab 
+------------------
+              NaN
+(1 row)
+
+SELECT cube_distance('(nan,nan)'::cube, '(1,1)'::cube);
+ cube_distance 
+---------------
+           NaN
+(1 row)
+
+SELECT '(nan,nan)'::cube <-> '(1,1)'::cube as d_e_nan;
+ d_e_nan 
+---------
+     NaN
+(1 row)
+
+SELECT '(5,5)'::cube <=> '(1,nan)'::cube as d_c_nan;
+ d_c_nan 
+---------
+     NaN
+(1 row)
+
+SELECT '(nan)'::cube <#> '(1)'::cube as d_t_nan;
+ d_t_nan 
+---------
+     NaN
+(1 row)
+
 -- coordinate access
 SELECT cube(array[10,20,30], array[40,50,60])->1;
  ?column? 
