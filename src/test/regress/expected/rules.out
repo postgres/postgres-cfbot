@@ -2734,7 +2734,10 @@ pg_stats_ext| SELECT cn.nspname AS schemaname,
             array_agg(pg_mcv_list_items.frequency) AS most_common_freqs,
             array_agg(pg_mcv_list_items.base_frequency) AS most_common_base_freqs
            FROM pg_mcv_list_items(sd.stxdmcv) pg_mcv_list_items(index, "values", nulls, frequency, base_frequency)) m ON ((sd.stxdmcv IS NOT NULL)))
-  WHERE (pg_has_role(c.relowner, 'USAGE'::text) AND ((c.relrowsecurity = false) OR (NOT row_security_active(c.oid))));
+  WHERE (pg_has_role(c.relowner, 'USAGE'::text) AND ((s.stxjoinrels IS NULL) OR (NOT (EXISTS ( SELECT 1
+           FROM (unnest(s.stxjoinrels) jr(oid)
+             JOIN pg_class jc ON ((jc.oid = jr.oid)))
+          WHERE (NOT pg_has_role(jc.relowner, 'USAGE'::text)))))) AND ((c.relrowsecurity = false) OR (NOT row_security_active(c.oid))));
 pg_stats_ext_exprs| SELECT cn.nspname AS schemaname,
     c.relname AS tablename,
     s.stxrelid AS tableid,

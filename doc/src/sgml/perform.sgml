@@ -1459,6 +1459,14 @@ WHERE tablename = 'road';
    </para>
 
    <para>
+    Correlation can likewise span a join: the values of a join column in one
+    table may be correlated with the data of the table it is joined to,
+    which per-table statistics cannot describe.  Here too,
+    <productname>PostgreSQL</productname> can compute multivariate statistics,
+    in this case over the result of the join, to capture the relationship.
+   </para>
+
+   <para>
     Because the number of possible column combinations is very large,
     it's impractical to compute multivariate statistics automatically.
     Instead, <firstterm>extended statistics objects</firstterm>, more often
@@ -1767,6 +1775,18 @@ SELECT m.* FROM pg_statistic_ext join pg_statistic_ext_data on (oid = stxoid),
      and for which misestimation of the number of groups is resulting in bad
      plans.  Otherwise, the <command>ANALYZE</command> and planning cycles
      are just wasted.
+    </para>
+
+    <para>
+     An <acronym>MCV</acronym> list can also be collected over the result of a
+     join rather than a single table, recording how often combinations of
+     values from the joined columns occur together in the join.  When a query
+     joins those tables and restricts the listed columns, the planner consults
+     the join MCV list instead of assuming the restrictions are independent of
+     the join.  This is created with the <literal>FROM ... JOIN ... ON</literal>
+     form of <link linkend="sql-createstatistics"><command>CREATE STATISTICS</command></link>,
+     which documents the joins it currently supports, the index it requires for
+     sampling, and a worked example.
     </para>
    </sect3>
 

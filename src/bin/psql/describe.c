@@ -2779,8 +2779,14 @@ describeOneTableDetails(const char *schemaname,
 							  "  " CppAsString2(STATS_EXT_NDISTINCT) " = any(stxkind) AS ndist_enabled,\n"
 							  "  " CppAsString2(STATS_EXT_DEPENDENCIES) " = any(stxkind) AS deps_enabled,\n"
 							  "  " CppAsString2(STATS_EXT_MCV) " = any(stxkind) AS mcv_enabled,\n"
-							  "stxstattarget\n"
-							  "FROM pg_catalog.pg_statistic_ext\n"
+							  "stxstattarget,\n");
+			if (pset.sversion >= 190000)
+				appendPQExpBufferStr(&buf,
+									 "pg_catalog.pg_get_statisticsobjdef_columns_from(oid) AS body\n");
+			else
+				appendPQExpBufferStr(&buf,
+									 "NULL AS body\n");
+			appendPQExpBuffer(&buf, "FROM pg_catalog.pg_statistic_ext\n"
 							  "WHERE stxrelid = '%s'\n"
 							  "ORDER BY nsp, stxname;",
 							  oid);
@@ -2851,9 +2857,18 @@ describeOneTableDetails(const char *schemaname,
 						appendPQExpBufferChar(&buf, ')');
 					}
 
-					appendPQExpBuffer(&buf, " ON %s FROM %s",
-									  PQgetvalue(result, i, 4),
-									  PQgetvalue(result, i, 1));
+					/*
+					 * Use pg_get_statisticsobjdef_columns_from() when available
+					 * (PG19+); fall back to simple column list for older
+					 * servers.
+					 */
+					if (!PQgetisnull(result, i, 9))
+						appendPQExpBuffer(&buf, " ON %s",
+										  PQgetvalue(result, i, 9));
+					else
+						appendPQExpBuffer(&buf, " ON %s FROM %s",
+										  PQgetvalue(result, i, 4),
+										  PQgetvalue(result, i, 1));
 
 					/* Show the stats target if it's not default */
 					if (!PQgetisnull(result, i, 8) &&
@@ -2884,9 +2899,15 @@ describeOneTableDetails(const char *schemaname,
 								 "  " CppAsString2(STATS_EXT_MCV) " = any(stxkind) AS mcv_enabled,\n");
 
 			if (pset.sversion >= 130000)
-				appendPQExpBufferStr(&buf, "  stxstattarget\n");
+				appendPQExpBufferStr(&buf, "  stxstattarget,\n");
 			else
-				appendPQExpBufferStr(&buf, "  -1 AS stxstattarget\n");
+				appendPQExpBufferStr(&buf, "  -1 AS stxstattarget,\n");
+			if (pset.sversion >= 190000)
+				appendPQExpBufferStr(&buf,
+									 "  pg_catalog.pg_get_statisticsobjdef_columns_from(oid) AS body\n");
+			else
+				appendPQExpBufferStr(&buf,
+									 "  NULL AS body\n");
 			appendPQExpBuffer(&buf, "FROM pg_catalog.pg_statistic_ext\n"
 							  "WHERE stxrelid = '%s'\n"
 							  "ORDER BY 1;",
@@ -2931,9 +2952,21 @@ describeOneTableDetails(const char *schemaname,
 						appendPQExpBuffer(&buf, "%smcv", gotone ? ", " : "");
 					}
 
-					appendPQExpBuffer(&buf, ") ON %s FROM %s",
-									  PQgetvalue(result, i, 4),
-									  PQgetvalue(result, i, 1));
+					/*
+					 * Use pg_get_statisticsobjdef_columns_from() when available
+					 * (PG19+); fall back to simple column list for older
+					 * servers.
+					 */
+					if (!PQgetisnull(result, i, 9))
+					{
+						appendPQExpBufferChar(&buf, ')');
+						appendPQExpBuffer(&buf, " ON %s",
+										  PQgetvalue(result, i, 9));
+					}
+					else
+						appendPQExpBuffer(&buf, ") ON %s FROM %s",
+										  PQgetvalue(result, i, 4),
+										  PQgetvalue(result, i, 1));
 
 					/* Show the stats target if it's not default */
 					if (strcmp(PQgetvalue(result, i, 8), "-1") != 0)
@@ -4956,9 +4989,7 @@ listExtendedStats(const char *pattern, bool verbose)
 	/* TODO: update threshold to 200000 when PG20 version is assigned */
 	if (pset.sversion >= 190000)
 		appendPQExpBuffer(&buf,
-						  "pg_catalog.format('%%s FROM %%s', \n"
-						  "  pg_catalog.array_to_string(pg_catalog.pg_get_statisticsobjdef_columns(es.oid), ', '), \n"
-						  "  es.stxrelid::pg_catalog.regclass) AS \"%s\"",
+						  "pg_catalog.pg_get_statisticsobjdef_columns_from(es.oid) AS \"%s\"",
 						  gettext_noop("Definition"));
 	else if (pset.sversion >= 140000)
 		appendPQExpBuffer(&buf,

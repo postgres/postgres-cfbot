@@ -65,12 +65,27 @@
 typedef struct StatExtEntry
 {
 	Oid			statOid;		/* OID of pg_statistic_ext entry */
+	Oid			stxowner;		/* statistics object's owner */
 	char	   *schema;			/* statistics object's schema */
 	char	   *name;			/* statistics object's name */
 	List	   *types;			/* 'char' list of enabled statistics kinds */
 	int			stattarget;		/* statistics target (-1 for default) */
 	List	   *exprs;			/* all columns and expressions in
 								 * user-declared order, mirroring stxexprs */
+
+	/*
+	 * Join statistics fields (NULL/invalid for single-table stats).
+	 *
+	 * For joins, the same attnum can appear from different relations, so we
+	 * keep a per-column mapping of each covered column's attnum to its source
+	 * relation varno.
+	 */
+	int16	   *attnums;		/* attribute numbers, one per stats column */
+	int			nattnums;		/* length of attnums[] and attref_varnos[] */
+	int16	   *attref_varnos;	/* source relation varno for each attnum */
+	Oid		   *joinrels;		/* participating relation OIDs, anchor first */
+	int			njoinrels;		/* number of participating relations */
+	List	   *joinconds;		/* List of OpExpr: join conditions */
 } StatExtEntry;
 
 
@@ -158,6 +173,7 @@ BuildRelationExtStatistics(Relation onerel, bool inh, double totalrows,
 		MCVList    *mcv = NULL;
 		Datum		exprstats = (Datum) 0;
 		VacAttrStats **stats;
+		VacAttrStats **mcv_stats = NULL;
 		ListCell   *lc2;
 		int			stattarget;
 		StatsBuildData *data;
@@ -165,9 +181,11 @@ BuildRelationExtStatistics(Relation onerel, bool inh, double totalrows,
 		/*
 		 * Check if we can build these stats based on the column analyzed. If
 		 * not, report this fact (except in autovacuum) and move on.
+		 *
+		 * For join stats this may return NULL; they are built separately.
 		 */
 		stats = lookup_var_attr_stats(stat->exprs, natts, vacattrstats);
-		if (!stats)
+		if (!stats && stat->njoinrels == 0)
 		{
 			if (!AmAutoVacuumWorkerProcess())
 				ereport(WARNING,
@@ -180,21 +198,66 @@ BuildRelationExtStatistics(Relation onerel, bool inh, double totalrows,
 			continue;
 		}
 
-		/* compute statistics target for this statistics object */
-		stattarget = statext_compute_stattarget(stat->stattarget,
-												list_length(stat->exprs),
-												stats);
+		/* Join stats are built separately later */
+		if (stat->njoinrels > 0)
+		{
+			bool		skip = false;
 
-		/*
-		 * Don't rebuild statistics objects with statistics target set to 0
-		 * (we just leave the existing values around, just like we do for
-		 * regular per-column statistics).
-		 */
-		if (stattarget == 0)
-			continue;
+			stattarget = stat->stattarget >= 0 ? stat->stattarget
+				: default_statistics_target;
 
-		/* evaluate expressions (if the statistics object has any) */
-		data = make_build_data(onerel, stat, numrows, rows, stats, stattarget);
+			/*
+			 * Don't rebuild statistics objects with statistics target set to
+			 * 0 (we just leave the existing values around, just like we do
+			 * for regular per-column statistics).
+			 */
+			if (stattarget == 0)
+				continue;
+
+			/*
+			 * Only refresh the statistics if the owner (not the user running
+			 * ANALYZE) still has SELECT on the joined relation(s); otherwise
+			 * skip, leaving any existing data in place.  joinrels[0] is the
+			 * anchor (the stat's home table); like single-table statistics,
+			 * we don't check it here -- only the other relations the stat
+			 * reads.
+			 */
+			for (int i = 1; i < stat->njoinrels; i++)
+			{
+				if (pg_class_aclcheck(stat->joinrels[i], stat->stxowner,
+									  ACL_SELECT) != ACLCHECK_OK)
+				{
+					ereport(WARNING,
+							(errmsg("skipping join statistics \"%s\": its owner lacks SELECT privilege on relation \"%s\"",
+									stat->name,
+									get_rel_name(stat->joinrels[i]))));
+					skip = true;
+					break;
+				}
+			}
+			if (skip)
+				continue;
+
+			data = NULL;
+		}
+		else
+		{
+			/* compute statistics target for this statistics object */
+			stattarget = statext_compute_stattarget(stat->stattarget,
+													list_length(stat->exprs),
+													stats);
+
+			/*
+			 * Don't rebuild statistics objects with statistics target set to
+			 * 0 (we just leave the existing values around, just like we do
+			 * for regular per-column statistics).
+			 */
+			if (stattarget == 0)
+				continue;
+
+			/* evaluate expressions (if the statistics object has any) */
+			data = make_build_data(onerel, stat, numrows, rows, stats, stattarget);
+		}
 
 		/* compute statistic of each requested type */
 		foreach(lc2, stat->types)
@@ -206,7 +269,80 @@ BuildRelationExtStatistics(Relation onerel, bool inh, double totalrows,
 			else if (t == STATS_EXT_DEPENDENCIES)
 				dependencies = statext_dependencies_build(data);
 			else if (t == STATS_EXT_MCV)
-				mcv = statext_mcv_build(data, totalrows, stattarget);
+			{
+				if (stat->njoinrels > 0)
+				{
+					VacAttrStats **join_mcv_stats = NULL;
+					int16		jleft[INDEX_MAX_KEYS];
+					int16		jright[INDEX_MAX_KEYS];
+					Oid			jops[INDEX_MAX_KEYS];
+					int			njq = 0;
+					ListCell   *jlc;
+
+					/*
+					 * Warn and skip n-way joins (not yet supported).
+					 * njoinrels includes the anchor, so 2-way == 2.
+					 */
+					if (stat->njoinrels > 2)
+					{
+						ereport(WARNING,
+								(errmsg("join statistics on more than two tables are not yet supported, skipping \"%s\"",
+										stat->name)));
+						break;
+					}
+
+					/*
+					 * Extract flat arrays from joinconds for the build
+					 * function.
+					 */
+					foreach(jlc, stat->joinconds)
+					{
+						OpExpr	   *op = (OpExpr *) lfirst(jlc);
+						Var		   *lv = (Var *) linitial(op->args);
+						Var		   *rv = (Var *) lsecond(op->args);
+
+						if (njq >= INDEX_MAX_KEYS)
+							break;
+
+						/*
+						 * Normalize: jleft = sampling side (lower varno),
+						 * jright = indexed/probed side (higher varno).
+						 */
+						if (lv->varno < rv->varno)
+						{
+							jleft[njq] = lv->varattno;
+							jright[njq] = rv->varattno;
+						}
+						else
+						{
+							jleft[njq] = rv->varattno;
+							jright[njq] = lv->varattno;
+						}
+						jops[njq] = op->opno;
+						njq++;
+					}
+
+					mcv = statext_join_mcv_build(
+												 onerel,
+												 stat->joinrels,
+												 stat->njoinrels,
+												 jleft, jright,
+												 jops, njq,
+												 stat->attnums,
+												 stat->attref_varnos,
+												 stat->nattnums,
+												 stattarget,
+												 numrows, rows, totalrows,
+												 &join_mcv_stats);
+					if (join_mcv_stats)
+						mcv_stats = join_mcv_stats;
+				}
+				else
+				{
+					mcv = statext_mcv_build(data, totalrows, stattarget);
+					mcv_stats = stats;
+				}
+			}
 			else if (t == STATS_EXT_EXPRESSIONS)
 			{
 				AnlExprData *exprdata;
@@ -250,7 +386,7 @@ BuildRelationExtStatistics(Relation onerel, bool inh, double totalrows,
 
 		/* store the statistics in the catalog */
 		statext_store(stat->statOid, inh,
-					  ndistinct, dependencies, mcv, exprstats, stats);
+					  ndistinct, dependencies, mcv, exprstats, mcv_stats);
 
 		/* for reporting progress */
 		pgstat_progress_update_param(PROGRESS_ANALYZE_EXT_STATS_COMPUTED,
@@ -647,6 +783,7 @@ fetch_statentries_for_relation(Relation pg_statext, Relation rel)
 		entry = palloc0_object(StatExtEntry);
 		staForm = (Form_pg_statistic_ext) GETSTRUCT(htup);
 		entry->statOid = staForm->oid;
+		entry->stxowner = staForm->stxowner;
 		entry->schema = get_namespace_name(staForm->stxnamespace);
 		entry->name = pstrdup(NameStr(staForm->stxname));
 
@@ -676,6 +813,76 @@ fetch_statentries_for_relation(Relation pg_statext, Relation rel)
 		 * order.
 		 */
 		entry->exprs = statext_get_stxexprs(htup, rel);
+
+		/*
+		 * Fetch join statistics fields.  These are all NULL for single-table
+		 * statistics.
+		 */
+		datum = SysCacheGetAttr(STATEXTOID, htup,
+								Anum_pg_statistic_ext_stxjoinrels, &isnull);
+		if (!isnull)
+		{
+			oidvector  *ov = (oidvector *) DatumGetPointer(datum);
+
+			entry->njoinrels = ov->dim1;
+			entry->joinrels = (Oid *) palloc(ov->dim1 * sizeof(Oid));
+			memcpy(entry->joinrels, ov->values, ov->dim1 * sizeof(Oid));
+
+			/* nattnums/attnums are populated below with attref_varnos */
+		}
+		else
+		{
+			entry->njoinrels = 0;
+			entry->joinrels = NULL;
+		}
+
+		/*
+		 * For join stats, extract per-column varnos from the plain-column Var
+		 * nodes in entry->exprs (in declared order).  Each Var's varno tells
+		 * which relation it belongs to (1=anchor, 2=first joined, etc.)
+		 */
+		if (entry->njoinrels > 0)
+		{
+			ListCell   *elc;
+			int			idx = 0;
+
+			entry->nattnums = 0;
+			foreach(elc, entry->exprs)
+			{
+				if (statext_is_column((Node *) lfirst(elc)))
+					entry->nattnums++;
+			}
+
+			entry->attnums = (int16 *) palloc(entry->nattnums * sizeof(int16));
+			entry->attref_varnos = (int16 *) palloc(entry->nattnums * sizeof(int16));
+			foreach(elc, entry->exprs)
+			{
+				Node	   *node = (Node *) lfirst(elc);
+				Var		   *var;
+
+				if (!statext_is_column(node))
+					continue;
+
+				var = (Var *) node;
+				entry->attnums[idx] = var->varattno;
+				entry->attref_varnos[idx] = var->varno;
+				idx++;
+			}
+		}
+		else
+			entry->attref_varnos = NULL;
+
+		datum = SysCacheGetAttr(STATEXTOID, htup,
+								Anum_pg_statistic_ext_stxjoinconds, &isnull);
+		if (!isnull)
+		{
+			char	   *str = TextDatumGetCString(datum);
+
+			entry->joinconds = (List *) stringToNode(str);
+			pfree(str);
+		}
+		else
+			entry->joinconds = NIL;
 
 		result = lappend(result, entry);
 	}
@@ -1009,7 +1216,7 @@ multi_sort_init(int ndims)
 {
 	MultiSortSupport mss;
 
-	Assert(ndims >= 2);
+	Assert(ndims >= 1);			/* join MCV stats may have a single column */
 
 	mss = (MultiSortSupport) palloc0(offsetof(MultiSortSupportData, ssup)
 									 + sizeof(SortSupportData) * ndims);
@@ -1395,6 +1602,14 @@ choose_best_statistics(List *stats, char requiredkind, bool inh,
 
 		/* skip statistics with mismatching inheritance flag */
 		if (info->inherit != inh)
+			continue;
+
+		/*
+		 * Skip join statistics.  These describe the distribution over the
+		 * join result, not the base table, so they must not be used to
+		 * estimate single-table clauses.
+		 */
+		if (info->joinrels != NIL)
 			continue;
 
 		/*
@@ -2132,6 +2347,67 @@ statext_mcv_clauselist_selectivity(PlannerInfo *root, List *clauses, int varReli
 	}
 
 	return sel;
+}
+
+/*
+ * statext_join_mcv_clauselist_selectivity
+ *		Estimate join clause selectivity using join MCV statistics.
+ *
+ * Iterates over the clause list and, for each join clause (Var = Var across
+ * different relations), extracts the baserel pair from the Vars and checks
+ * whether a join MCV stat for that pair can provide a better selectivity
+ * estimate.  This per baserel pair approach produces the same result
+ * regardless of which component rel pair is used to form the joinrel,
+ * because it goes directly to the baserels' statlists via Var.varno
+ * rather than inspecting the join tree structure.
+ *
+ * The selectivity for each baserel pair is adjusted to account for filter
+ * correlations: the raw MCV selectivity (P(join AND filter)) is divided by
+ * the filter selectivity (already reflected in base rel rows) to yield
+ * P(join | filter).
+ *
+ * Returns the product of estimated selectivities (1.0 for clauses without
+ * applicable stats).  'estimatedclauses' is populated with the 0-based list
+ * position indexes of clauses estimated here.
+ */
+Selectivity
+statext_join_mcv_clauselist_selectivity(PlannerInfo *root,
+										List *clauses,
+										int varRelid,
+										Bitmapset **estimatedclauses)
+{
+	Selectivity result = 1.0;
+	int			clause_idx = -1;
+	ListCell   *lc;
+
+	foreach(lc, clauses)
+	{
+		RestrictInfo *rinfo;
+		Selectivity selec;
+
+		clause_idx++;
+
+		if (!IsA(lfirst(lc), RestrictInfo))
+			continue;
+
+		rinfo = (RestrictInfo *) lfirst(lc);
+
+		/*
+		 * Skip clauses already estimated (e.g., filter clauses from a prior
+		 * join stat)
+		 */
+		if (bms_is_member(clause_idx, *estimatedclauses))
+			continue;
+
+		selec = join_mcv_clause_selectivity(root, rinfo);
+		if (selec <= 0)
+			continue;
+
+		result *= selec;
+		*estimatedclauses = bms_add_member(*estimatedclauses, clause_idx);
+	}
+
+	return result;
 }
 
 /*

@@ -158,4 +158,12 @@ extern bool import_attribute_statistics(Relation rel,
 extern bool delete_attribute_statistics(Relation rel,
 										AttrNumber attnum, bool inherited);
 
+/* Join MCV statistics functions */
+extern Selectivity join_mcv_clause_selectivity(PlannerInfo *root,
+											   RestrictInfo *rinfo);
+extern Selectivity statext_join_mcv_clauselist_selectivity(PlannerInfo *root,
+														   List *clauses,
+														   int varRelid,
+														   Bitmapset **estimatedclauses);
+
 #endif							/* STATISTICS_H */

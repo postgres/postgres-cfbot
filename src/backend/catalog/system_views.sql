@@ -306,6 +306,11 @@ CREATE VIEW pg_stats_ext WITH (security_barrier) AS
                      FROM pg_mcv_list_items(sd.stxdmcv)
                    ) m ON sd.stxdmcv IS NOT NULL
     WHERE pg_has_role(c.relowner, 'USAGE')
+    AND (s.stxjoinrels IS NULL OR NOT EXISTS (
+            SELECT 1 FROM unnest(s.stxjoinrels) AS jr(oid)
+            JOIN pg_class jc ON jc.oid = jr.oid
+            WHERE NOT pg_has_role(jc.relowner, 'USAGE')
+        ))
     AND (c.relrowsecurity = false OR NOT row_security_active(c.oid));
 
 CREATE VIEW pg_stats_ext_exprs WITH (security_barrier) AS

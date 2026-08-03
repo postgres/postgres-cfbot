@@ -29,6 +29,11 @@ CREATE STATISTICS [ [ IF NOT EXISTS ] <replaceable class="parameter">statistics_
     [ ( <replaceable class="parameter">statistics_kind</replaceable> [, ... ] ) ]
     ON { <replaceable class="parameter">column_name</replaceable> | ( <replaceable class="parameter">expression</replaceable> ) }, { <replaceable class="parameter">column_name</replaceable> | ( <replaceable class="parameter">expression</replaceable> ) } [, ...]
     FROM <replaceable class="parameter">table_name</replaceable>
+
+CREATE STATISTICS [ [ IF NOT EXISTS ] <replaceable class="parameter">statistics_name</replaceable> ]
+    ( <replaceable class="parameter">statistics_kind</replaceable> [, ... ] )
+    ON <replaceable class="parameter">table_name</replaceable>.<replaceable class="parameter">column_name</replaceable> [, ...]
+    FROM <replaceable class="parameter">table_name</replaceable> JOIN <replaceable class="parameter">table_name</replaceable> ON ( <replaceable class="parameter">join_condition</replaceable> )
 </synopsis>
 
  </refsynopsisdiv>
@@ -55,6 +60,16 @@ CREATE STATISTICS [ [ IF NOT EXISTS ] <replaceable class="parameter">statistics_
    collected, optionally specifying which statistics kinds to include.  This
    form will also automatically cause univariate statistics to be collected on
    any expressions and virtual generated columns included in the list.
+  </para>
+
+  <para>
+   The third form collects <firstterm>join statistics</firstterm>: a
+   multivariate <acronym>MCV</acronym> (most-common-values) list built over the
+   result of a join, describing how often combinations of values from the
+   joined columns occur together.  This captures correlations across the join
+   that per-table statistics cannot describe.  The columns the statistics are
+   computed on must be qualified with their table name.  See the notes below
+   for the joins this form currently supports.
   </para>
 
   <para>
@@ -160,6 +175,16 @@ CREATE STATISTICS [ [ IF NOT EXISTS ] <replaceable class="parameter">statistics_
       linkend="sql-analyze"/> for an explanation of the handling of
       inheritance and partitions.
      </para>
+     <para>
+      For join statistics, the <literal>FROM</literal> clause is a join,
+      written as <literal><replaceable
+      class="parameter">table_name</replaceable> JOIN <replaceable
+      class="parameter">table_name</replaceable> ON ( <replaceable
+      class="parameter">join_condition</replaceable> )</literal>.  The first
+      table listed is the one the statistics object is associated with and the
+      one that is sampled; the columns the statistics are computed on must all
+      be qualified with their table name.
+     </para>
     </listitem>
    </varlistentry>
 
@@ -176,6 +201,15 @@ CREATE STATISTICS [ [ IF NOT EXISTS ] <replaceable class="parameter">statistics_
   </para>
 
   <para>
+   For join statistics you must additionally have <literal>SELECT</literal>
+   privilege on the tables other than the first (which you must still own).
+   This <literal>SELECT</literal> privilege is rechecked for the statistics
+   object's owner each time <command>ANALYZE</command> runs; if it has been
+   revoked, <command>ANALYZE</command> skips refreshing the object, leaving any
+   existing data in place.
+  </para>
+
+  <para>
    Expression statistics are per-expression and are similar to creating an
    index on the expression, except that they avoid the overhead of index
    maintenance. Expression statistics are built automatically for each
@@ -185,9 +219,15 @@ CREATE STATISTICS [ [ IF NOT EXISTS ] <replaceable class="parameter">statistics_
   </para>
 
   <para>
-   Extended statistics are not currently used by the planner for selectivity
-   estimations made for table joins.  This limitation will likely be removed
-   in a future version of <productname>PostgreSQL</productname>.
+   Join statistics currently have several limitations that future releases may
+   lift: the <literal>FROM</literal> clause must be an inner join of two tables
+   with a single equality condition, and only the <literal>mcv</literal>
+   statistics kind is supported.  In addition, each table joined to the first
+   one must have an index on its join column; <command>ANALYZE</command> uses
+   the index to sample the join, and it is recorded as a dependency of the
+   statistics object.  Because of this dependency, dropping the index requires
+   <literal>CASCADE</literal> (which also drops the statistics object), so a
+   usable index always remains available for <command>ANALYZE</command>.
   </para>
  </refsect1>
 
@@ -324,6 +364,59 @@ EXPLAIN ANALYZE SELECT date_trunc('month', a), date_trunc('day', a)
    expression derived from ndistinct for the column. With such statistics, the
    planner recognizes that the conditions are correlated, and arrives at much
    more accurate estimates.
+  </para>
+
+  <para>
+   Create a dimension table <structname>dims</structname> and a fact table
+   <structname>facts</structname> whose foreign-key values are heavily skewed
+   toward one dimension row, then build a join MCV list over the join of the
+   two tables:
+
+<programlisting>
+CREATE TABLE dims (
+    id   int PRIMARY KEY,
+    kind text
+);
+
+CREATE TABLE facts (
+    id     int,
+    dim_id int
+);
+
+-- 100 dimension rows, only one of which has kind 'hot':
+INSERT INTO dims SELECT i, CASE WHEN i = 1 THEN 'hot' ELSE 'cold' END
+                 FROM generate_series(1, 100) s(i);
+
+-- 100000 fact rows, about 90% referencing the single 'hot' dimension row:
+INSERT INTO facts SELECT i, CASE WHEN i % 10 = 0 THEN 1 + (i % 100) ELSE 1 END
+                 FROM generate_series(1, 100000) s(i);
+
+ANALYZE facts, dims;
+
+-- the join row count is drastically underestimated, because the planner
+-- assumes fact rows are spread evenly over the dimension:
+EXPLAIN ANALYZE SELECT * FROM facts f JOIN dims d ON (f.dim_id = d.id)
+  WHERE d.kind = 'hot';
+
+-- build a join MCV list (dims.id is the primary key, and so is indexed):
+CREATE STATISTICS s4 (mcv) ON d.kind
+  FROM facts f JOIN dims d ON (f.dim_id = d.id);
+
+ANALYZE facts;
+
+-- now the join row count estimate reflects the skew:
+EXPLAIN ANALYZE SELECT * FROM facts f JOIN dims d ON (f.dim_id = d.id)
+  WHERE d.kind = 'hot';
+</programlisting>
+
+   Without join statistics, the planner has no information about how the fact
+   rows are distributed over the dimension, so it assumes the rows matching
+   <literal>d.kind = 'hot'</literal> join to only an average fraction of the
+   fact table, and badly underestimates the join.  The join MCV list records
+   how often each value of <literal>d.kind</literal> actually appears in the
+   join result, letting the planner recognize that most fact rows join to a
+   <literal>'hot'</literal> dimension row and arrive at a much more accurate
+   estimate.
   </para>
 
  </refsect1>

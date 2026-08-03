@@ -1654,7 +1654,8 @@ get_relation_constraints(PlannerInfo *root,
 static void
 get_relation_statistics_worker(List **stainfos, RelOptInfo *rel,
 							   Oid statOid, bool inh,
-							   List *exprs)
+							   List *exprs,
+							   List *joinrels, List *joinconds)
 {
 	Form_pg_statistic_ext_data dataForm;
 	HeapTuple	dtup;
@@ -1703,6 +1704,14 @@ get_relation_statistics_worker(List **stainfos, RelOptInfo *rel,
 		info->kind = STATS_EXT_MCV;
 		info->exprs = exprs;
 
+		/*
+		 * Only MCV carries the join fields: CREATE STATISTICS allows no other
+		 * kind yet for join stats, so the nodes above are never join stats.
+		 * For single-table stats these locals are NIL.
+		 */
+		info->joinrels = joinrels;
+		info->joinconds = joinconds;
+
 		*stainfos = lappend(*stainfos, info);
 	}
 
@@ -1746,6 +1755,11 @@ get_relation_statistics(PlannerInfo *root, RelOptInfo *rel,
 		Oid			statOid = lfirst_oid(l);
 		HeapTuple	htup;
 		List	   *exprs = NIL;
+		List	   *joinrels = NIL;
+		List	   *joinconds = NIL;
+		bool		isjoin;
+		bool		isnull;
+		Datum		datum;
 
 		htup = SearchSysCache1(STATEXTOID, ObjectIdGetDatum(statOid));
 		if (!HeapTupleIsValid(htup))
@@ -1763,36 +1777,69 @@ get_relation_statistics(PlannerInfo *root, RelOptInfo *rel,
 		exprs = statext_get_stxexprs(htup, relation);
 
 		/*
-		 * Modify the copies we obtain from the relcache to have the correct
-		 * varno for the parent relation, so that they match up correctly
-		 * against qual clauses.
-		 *
-		 * This must be done before const-simplification because
-		 * eval_const_expressions reduces NullTest for Vars based on varno.
+		 * Fetch the join statistics fields.  A non-null stxjoinrels marks a
+		 * join statistics object; these fields are all NULL for single-table
+		 * statistics.
 		 */
-		if (varno != 1)
-			ChangeVarNodes((Node *) exprs, 1, varno, 0);
+		datum = SysCacheGetAttr(STATEXTOID, htup,
+								Anum_pg_statistic_ext_stxjoinrels, &isnull);
+		isjoin = !isnull;
+		if (isjoin)
+		{
+			oidvector  *jrels = (oidvector *) DatumGetPointer(datum);
+			char	   *condstr;
+
+			for (int j = 0; j < jrels->dim1; j++)
+				joinrels = lappend_oid(joinrels, jrels->values[j]);
+
+			datum = SysCacheGetAttrNotNull(STATEXTOID, htup,
+										   Anum_pg_statistic_ext_stxjoinconds);
+			condstr = TextDatumGetCString(datum);
+			joinconds = (List *) stringToNode(condstr);
+			pfree(condstr);
+		}
 
 		/*
-		 * Run the columns and expressions through eval_const_expressions.
-		 * This is not just an optimization, but is necessary, because the
-		 * planner will be comparing them to similarly-processed qual clauses,
-		 * and may fail to detect valid matches without this.  We must not use
-		 * canonicalize_qual, however, since these aren't qual expressions.
-		 * Plain-column Vars are unaffected.  statext_get_stxexprs() already
-		 * const-folded these with a NULL root; we redo it here with the real
-		 * root so the varno-dependent reductions noted above can apply.
+		 * For single-table statistics, modify the copies we obtain from the
+		 * relcache to have the correct varno for the parent relation, so that
+		 * they match up correctly against qual clauses.  This must be done
+		 * before const-simplification because eval_const_expressions reduces
+		 * NullTest for Vars based on varno.
+		 *
+		 * Join statistics are never used to estimate single-table clauses
+		 * (see choose_best_statistics), and their Vars must keep the original
+		 * stxjoinrels-relative varnos (1 = anchor, 2 = other joined relation)
+		 * so the join estimator can map each column to its relation.  So a
+		 * join stat's exprs are left as statext_get_stxexprs() returned them.
 		 */
-		exprs = (List *) eval_const_expressions(root, (Node *) exprs);
+		if (!isjoin)
+		{
+			if (varno != 1)
+				ChangeVarNodes((Node *) exprs, 1, varno, 0);
 
-		/* May as well fix opfuncids too */
-		fix_opfuncids((Node *) exprs);
+			/*
+			 * Run the columns and expressions through eval_const_expressions.
+			 * This is not just an optimization, but is necessary, because the
+			 * planner will be comparing them to similarly-processed qual
+			 * clauses, and may fail to detect valid matches without this.  We
+			 * must not use canonicalize_qual, however, since these aren't
+			 * qual expressions.  statext_get_stxexprs() already const-folded
+			 * these with a NULL root; we redo it here with the real root so
+			 * the varno-dependent reductions noted above can apply.
+			 */
+			exprs = (List *) eval_const_expressions(root, (Node *) exprs);
+
+			/* May as well fix opfuncids too */
+			fix_opfuncids((Node *) exprs);
+		}
 
 		/* extract statistics for possible values of stxdinherit flag */
 
-		get_relation_statistics_worker(&stainfos, rel, statOid, true, exprs);
+		get_relation_statistics_worker(&stainfos, rel, statOid, true,
+									   exprs, joinrels, joinconds);
 
-		get_relation_statistics_worker(&stainfos, rel, statOid, false, exprs);
+		get_relation_statistics_worker(&stainfos, rel, statOid, false,
+									   exprs, joinrels, joinconds);
 
 		ReleaseSysCache(htup);
 	}
