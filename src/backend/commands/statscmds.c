@@ -46,7 +46,8 @@
 
 static char *ChooseExtendedStatisticName(const char *name1, const char *name2,
 										 const char *label, Oid namespaceid);
-static char *ChooseExtendedStatisticNameAddition(List *exprs);
+static char *ChooseExtendedStatisticNameAddition(List *exprs, Oid relid,
+												 List *joinrels);
 
 /*
  *		CREATE STATISTICS
@@ -500,10 +501,25 @@ CreateStatistics(CreateStatsStmt *stmt, bool check_rights)
 	else
 	{
 		namespaceId = RelationGetNamespace(rel);
-		namestr = ChooseExtendedStatisticName(RelationGetRelationName(rel),
-											  ChooseExtendedStatisticNameAddition(stmt->exprs),
-											  "stat",
-											  namespaceId);
+
+		/*
+		 * Join stats have no single relation to use as a name prefix, so the
+		 * qualified column list is the whole name.
+		 */
+		if (isjoin)
+			namestr = ChooseExtendedStatisticName(ChooseExtendedStatisticNameAddition(stmt->exprs,
+																					 relid,
+																					 stmt->stxjoinrels),
+												  NULL,
+												  "stat",
+												  namespaceId);
+		else
+			namestr = ChooseExtendedStatisticName(RelationGetRelationName(rel),
+												  ChooseExtendedStatisticNameAddition(stmt->exprs,
+																					  relid,
+																					  NIL),
+												  "stat",
+												  namespaceId);
 	}
 	namestrcpy(&stxname, namestr);
 
@@ -1161,6 +1177,10 @@ ChooseExtendedStatisticName(const char *name1, const char *name2,
  * names for it.  This will be passed to ChooseExtendedStatisticName along
  * with the parent table name and a suitable label.
  *
+ * For a join statistics object (joinrels != NIL) each column is qualified with
+ * its relation name and the result is used as "name1" instead, since a bare
+ * column name would not identify which relation it came from.
+ *
  * We know that less than NAMEDATALEN characters will actually be used,
  * so we can truncate the result once we've generated that many.
  *
@@ -1168,7 +1188,7 @@ ChooseExtendedStatisticName(const char *name1, const char *name2,
  * ChooseIndexNameAddition.
  */
 static char *
-ChooseExtendedStatisticNameAddition(List *exprs)
+ChooseExtendedStatisticNameAddition(List *exprs, Oid relid, List *joinrels)
 {
 	char		buf[NAMEDATALEN * 2];
 	int			buflen = 0;
@@ -1178,6 +1198,7 @@ ChooseExtendedStatisticNameAddition(List *exprs)
 	foreach(lc, exprs)
 	{
 		StatsElem  *selem = (StatsElem *) lfirst(lc);
+		char		qualbuf[NAMEDATALEN * 2];
 		const char *name;
 
 		/* It should be one of these, but just skip if it happens not to be */
@@ -1186,8 +1207,30 @@ ChooseExtendedStatisticNameAddition(List *exprs)
 
 		name = selem->name;
 
-		if (buflen > 0)
-			buf[buflen++] = '_';	/* insert _ between names */
+		/*
+		 * A simple column reference resolves to a bare Var; use the column
+		 * name, qualified with the relation name for a join object.
+		 */
+		if (!name && selem->expr && IsA(selem->expr, Var))
+		{
+			Var		   *var = (Var *) selem->expr;
+			Oid			colrelid = joinrels ? list_nth_oid(joinrels, var->varno - 1) : relid;
+
+			name = get_attname(colrelid, var->varattno, true);
+
+			if (name && joinrels)
+			{
+				char	   *relname = get_rel_name(colrelid);
+
+				if (relname)
+				{
+					snprintf(qualbuf, sizeof(qualbuf), "%s_%s", relname, name);
+					name = qualbuf;
+				}
+				else
+					name = NULL;	/* defensive: fall back to "expr" */
+			}
+		}
 
 		/*
 		 * We use fixed 'expr' for expressions, which have empty column names.
@@ -1197,6 +1240,9 @@ ChooseExtendedStatisticNameAddition(List *exprs)
 		 */
 		if (!name)
 			name = "expr";
+
+		if (buflen > 0)
+			buf[buflen++] = '_';	/* insert _ between names */
 
 		/*
 		 * At this point we have buflen <= NAMEDATALEN.  name should be less

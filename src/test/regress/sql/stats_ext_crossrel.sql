@@ -1480,3 +1480,25 @@ DROP OPERATOR <<< (int4, int4);
 DROP FUNCTION op_leak(int, int);
 DROP TABLE leak_anchor, leak_dim;
 DROP ROLE regress_join_leak_user;
+
+--
+-- Auto-generated statistics object name for a join statistics object.
+--
+-- A join statistics object qualifies each column with its relation name, since
+-- a bare column name would not say which relation it came from.  (Single-table
+-- naming is covered in stats_ext.)
+CREATE TABLE auto_t1 (a INTEGER, b INTEGER, c INTEGER);
+CREATE TABLE auto_t2 (d INTEGER, e INTEGER, f INTEGER);
+CREATE INDEX ON auto_t1 (a);
+CREATE INDEX ON auto_t2 (d);
+
+-- Every column is qualified with its relation, including two columns from the
+-- same relation.
+CREATE STATISTICS (mcv) ON auto_t1.b, auto_t1.c, auto_t2.e, auto_t2.f
+    FROM auto_t1 JOIN auto_t2 ON (auto_t1.a = auto_t2.d);
+
+SELECT stxname FROM pg_statistic_ext
+    WHERE stxrelid IN ('auto_t1'::regclass, 'auto_t2'::regclass)
+    ORDER BY stxname;
+
+DROP TABLE auto_t1, auto_t2;
