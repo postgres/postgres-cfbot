@@ -115,6 +115,36 @@ cases where a parent page's downlink key is "enlarged" after we look at it.
 Any such enlargement would be to add child items that we aren't interested
 in returning anyway.
 
+Intrapage Indexing
+------------------
+
+Internal pages can contain a second, page-local level of GiST keys.  A skip
+tuple stores the Union key of a group and is followed immediately by the real
+downlinks covered by that key.  Its TID has InvalidBlockNumber, distinguishing
+it from real downlinks, and its offset field stores the number of following
+tuples in the group.  Groups do not overlap or contain other skip tuples.
+
+A scan first applies Consistent to the skip tuple.  If it does not match, the
+whole group can be skipped.  If it matches, the scan examines each real tuple
+normally.  Skip tuples are never followed as downlinks or returned as heap
+TIDs.  Ordered searches use the same rule: the group key only rejects a group
+and does not contribute a queue item or distance.
+
+Insertion uses the same page-local level while choosing a subtree.  Once a
+candidate downlink has established the best penalty for the first key column,
+a group whose union key has a worse penalty is skipped.  Otherwise Penalty is
+evaluated for each member as usual.  Later key columns continue to break ties
+between individual downlinks in the normal way.
+
+Skip tuples are derived metadata.  Removing them must leave an ordinary valid
+GiST page with exactly the same downlinks.  Page updates rebuild the affected
+group from its real tuples, while page splits and both build methods account
+for metadata space.  Before VACUUM deletes a downlink, it moves that downlink
+out of its group and decrements the group count.  Existing pages without skip
+tuples therefore need no conversion.  The current implementation creates skip
+tuples only on internal pages; adding them to leaf pages would also require
+maintaining group boundaries during tuple-level vacuuming and LP_DEAD cleanup.
+
 
 Insert Algorithm
 ----------------
