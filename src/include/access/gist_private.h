@@ -288,6 +288,26 @@ typedef struct
 #define  GistTupleIsInvalid(itup)	( ItemPointerGetOffsetNumber( &((itup)->t_tid) ) == TUPLE_IS_INVALID )
 #define  GistTupleSetValid(itup)	ItemPointerSetOffsetNumber( &((itup)->t_tid), TUPLE_IS_VALID )
 
+/*
+ * A skip tuple summarizes a group of real tuples that immediately follows it
+ * on the same page.  Real heap TIDs and downlinks always have a valid block
+ * number, so use InvalidBlockNumber as the marker and store the group size in
+ * ip_posid.  This avoids consuming INDEX_AM_RESERVED_BIT, which is better
+ * left available for annotations of ordinary index tuples.
+ */
+#define GistTupleIsSkip(itup) \
+	(ItemPointerGetBlockNumberNoCheck(&((itup)->t_tid)) == InvalidBlockNumber && \
+	 OffsetNumberIsValid(ItemPointerGetOffsetNumberNoCheck(&((itup)->t_tid))))
+
+#define GistTupleSetSkip(itup, count) \
+	do { \
+		ItemPointerSetInvalid(&((itup)->t_tid)); \
+		ItemPointerSetOffsetNumber(&((itup)->t_tid), (count)); \
+	} while (0)
+
+#define GistTupleGetSkipCount(itup) \
+	ItemPointerGetOffsetNumberNoCheck(&((itup)->t_tid))
+
 
 
 
@@ -433,7 +453,16 @@ extern bool gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
 							bool is_build);
 
 extern SplitPageLayout *gistSplit(Relation r, Page page, IndexTuple *itup,
-								  int len, GISTSTATE *giststate);
+								  int len, GISTSTATE *giststate,
+								  int max_page_tuples);
+extern bool gistFormSkipGroups(Relation rel, Page page, IndexTuple *itvec,
+							   int len, GISTSTATE *giststate,
+							   IndexTupleData **list, int *lenlist,
+							   int *newlen);
+extern SplitPageLayout *gistSplitPageWithSkipGroups(Relation rel, Page page,
+													IndexTuple *itvec, int len,
+													GISTSTATE *giststate,
+													bool force_split);
 
 /* gistxlog.c */
 extern XLogRecPtr gistXLogPageDelete(Buffer buffer,
@@ -477,6 +506,9 @@ extern void gistadjustmembers(Oid opfamilyoid,
 
 #define GIST_MIN_FILLFACTOR			10
 #define GIST_DEFAULT_FILLFACTOR		90
+
+/* Maximum number of real tuples summarized by one skip tuple. */
+#define GIST_SKIP_GROUP_SIZE			16
 
 extern bytea *gistoptions(Datum reloptions, bool validate);
 extern bool gistproperty(Oid index_oid, int attno,

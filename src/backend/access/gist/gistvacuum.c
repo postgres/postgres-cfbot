@@ -51,6 +51,8 @@ static void gistvacuum_delete_empty_pages(IndexVacuumInfo *info,
 static bool gistdeletepage(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 						   Buffer parentBuffer, OffsetNumber downlink,
 						   Buffer leafBuffer);
+static void gistvacuumungroup(Relation rel, Buffer buffer,
+							  BlockNumber childblkno);
 
 /*
  * VACUUM bulkdelete stage: remove index entries.
@@ -554,6 +556,8 @@ gistvacuum_delete_empty_pages(IndexVacuumInfo *info, GistVacState *vstate)
 			IndexTuple	idxtuple = (IndexTuple) PageGetItem(page, iid);
 			BlockNumber leafblk;
 
+			if (GistTupleIsSkip(idxtuple))
+				continue;
 			leafblk = ItemPointerGetBlockNumber(&(idxtuple->t_tid));
 			if (intset_is_member(vstate->empty_leaf_set, leafblk))
 			{
@@ -669,8 +673,34 @@ gistdeletepage(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 		return false;
 	}
 
-	if (PageGetMaxOffsetNumber(parentPage) < downlink
-		|| PageGetMaxOffsetNumber(parentPage) <= FirstOffsetNumber)
+	/*
+	 * Removing a group member would invalidate its skip count.  Move this
+	 * downlink out of its group in a separate WAL-logged update before
+	 * deleting it.  Keeping the downlink as an ordinary tuple makes a crash
+	 * between the two records safe.
+	 */
+	gistvacuumungroup(info->index, parentBuffer,
+					  BufferGetBlockNumber(leafBuffer));
+	parentPage = BufferGetPage(parentBuffer);
+
+	/* Re-find the downlink, because removing skip tuples changed offsets. */
+	downlink = InvalidOffsetNumber;
+	for (OffsetNumber off = FirstOffsetNumber;
+		 off <= PageGetMaxOffsetNumber(parentPage);
+		 off = OffsetNumberNext(off))
+	{
+		iid = PageGetItemId(parentPage, off);
+		idxtuple = (IndexTuple) PageGetItem(parentPage, iid);
+		if (BufferGetBlockNumber(leafBuffer) ==
+			ItemPointerGetBlockNumber(&(idxtuple->t_tid)))
+		{
+			downlink = off;
+			break;
+		}
+	}
+
+	if (!OffsetNumberIsValid(downlink) ||
+		PageGetMaxOffsetNumber(parentPage) <= FirstOffsetNumber)
 		return false;
 
 	iid = PageGetItemId(parentPage, downlink);
@@ -713,4 +743,111 @@ gistdeletepage(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 	END_CRIT_SECTION();
 
 	return true;
+}
+
+/* Move one downlink out of its skip group, leaving other groups intact. */
+static void
+gistvacuumungroup(Relation rel, Buffer buffer, BlockNumber childblkno)
+{
+	Page		page = BufferGetPage(buffer);
+	OffsetNumber maxoff = PageGetMaxOffsetNumber(page);
+	OffsetNumber groupoff = InvalidOffsetNumber;
+	int			groupcount = 0;
+	IndexTuple *toinsert;
+	OffsetNumber *todelete;
+	int			ntoinsert = 0;
+
+	Assert(!GistPageIsLeaf(page));
+
+	for (OffsetNumber off = FirstOffsetNumber; off <= maxoff;
+		 off = OffsetNumberNext(off))
+	{
+		IndexTuple	marker = (IndexTuple) PageGetItem(page,
+													  PageGetItemId(page, off));
+		int			count;
+
+		if (!GistTupleIsSkip(marker))
+			continue;
+		count = GistTupleGetSkipCount(marker);
+		if (count > maxoff - off)
+			ereport(ERROR,
+					(errcode(ERRCODE_INDEX_CORRUPTED),
+					 errmsg("index \"%s\" contains an invalid GiST skip tuple",
+							RelationGetRelationName(rel))));
+
+		for (OffsetNumber member = OffsetNumberNext(off);
+			 member <= off + count; member = OffsetNumberNext(member))
+		{
+			IndexTuple	member_itup = (IndexTuple) PageGetItem(page,
+															   PageGetItemId(page, member));
+
+			if (ItemPointerGetBlockNumber(&member_itup->t_tid) == childblkno)
+			{
+				groupoff = off;
+				groupcount = count;
+				break;
+			}
+		}
+		if (OffsetNumberIsValid(groupoff))
+			break;
+		off += count;
+	}
+
+	if (!OffsetNumberIsValid(groupoff))
+		return;
+
+	todelete = palloc_array(OffsetNumber, groupcount + 1);
+	toinsert = palloc_array(IndexTuple, groupcount + 1);
+
+	/* Keep the target as an ungrouped ordinary downlink. */
+	for (OffsetNumber off = OffsetNumberNext(groupoff);
+		 off <= groupoff + groupcount; off = OffsetNumberNext(off))
+	{
+		IndexTuple	member = (IndexTuple) PageGetItem(page,
+													  PageGetItemId(page, off));
+
+		if (ItemPointerGetBlockNumber(&member->t_tid) == childblkno)
+		{
+			toinsert[ntoinsert++] = CopyIndexTuple(member);
+			break;
+		}
+	}
+
+	/* Retain the old union key as a safe superset for the smaller group. */
+	if (groupcount > 1)
+	{
+		IndexTuple	marker = CopyIndexTuple((IndexTuple) PageGetItem(page,
+																	 PageGetItemId(page, groupoff)));
+
+		GistTupleSetSkip(marker, groupcount - 1);
+		toinsert[ntoinsert++] = marker;
+		for (OffsetNumber off = OffsetNumberNext(groupoff);
+			 off <= groupoff + groupcount; off = OffsetNumberNext(off))
+		{
+			IndexTuple	member = (IndexTuple) PageGetItem(page,
+														  PageGetItemId(page, off));
+
+			if (ItemPointerGetBlockNumber(&member->t_tid) != childblkno)
+				toinsert[ntoinsert++] = CopyIndexTuple(member);
+		}
+	}
+	Assert(ntoinsert == (groupcount > 1 ? groupcount + 1 : 1));
+
+	for (int i = 0; i <= groupcount; i++)
+		todelete[i] = groupoff + i;
+
+	START_CRIT_SECTION();
+	MarkBufferDirty(buffer);
+	PageIndexMultiDelete(page, todelete, groupcount + 1);
+	gistfillbuffer(page, toinsert, ntoinsert, InvalidOffsetNumber);
+	if (RelationNeedsWAL(rel))
+	{
+		XLogRecPtr	recptr = gistXLogUpdate(buffer, todelete, groupcount + 1,
+											toinsert, ntoinsert, InvalidBuffer);
+
+		PageSetLSN(page, recptr);
+	}
+	else
+		PageSetLSN(page, XLogGetFakeLSN(rel));
+	END_CRIT_SECTION();
 }

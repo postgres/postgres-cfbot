@@ -441,6 +441,47 @@ gistchoose(Relation r, Page p, IndexTuple it,	/* it has compressed entry */
 		bool		zero_penalty;
 		int			j;
 
+		/*
+		 * A skip key summarizes the following downlinks.  Its penalty is a
+		 * lower-bound estimate for the penalties of the group members.  Once
+		 * a better first-column penalty has been found, none of those members
+		 * can improve the choice, so avoid evaluating them individually.
+		 */
+		if (GistTupleIsSkip(itup))
+		{
+			OffsetNumber count = GistTupleGetSkipCount(itup);
+			Datum		datum;
+			float		usize;
+			bool		IsNull;
+
+			if (count > maxoff - i)
+				ereport(ERROR,
+						(errcode(ERRCODE_INDEX_CORRUPTED),
+						 errmsg("index \"%s\" contains an invalid GiST skip tuple",
+								RelationGetRelationName(r))));
+			for (OffsetNumber member = OffsetNumberNext(i);
+				 member <= i + count; member = OffsetNumberNext(member))
+			{
+				IndexTuple	member_itup = (IndexTuple) PageGetItem(p,
+																   PageGetItemId(p, member));
+
+				if (GistTupleIsSkip(member_itup))
+					ereport(ERROR,
+							(errcode(ERRCODE_INDEX_CORRUPTED),
+							 errmsg("index \"%s\" contains an invalid GiST skip tuple",
+									RelationGetRelationName(r))));
+			}
+
+			datum = index_getattr(itup, 1, giststate->leafTupdesc, &IsNull);
+			gistdentryinit(giststate, 0, &entry, datum, r, p, i,
+						   false, IsNull);
+			usize = gistpenalty(giststate, 0, &entry, IsNull,
+								&identry[0], isnull[0]);
+			if (best_penalty[0] >= 0 && usize > best_penalty[0])
+				i += count;
+			continue;
+		}
+
 		zero_penalty = true;
 
 		/* Loop over index attributes. */
