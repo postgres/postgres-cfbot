@@ -33,6 +33,7 @@
 
 #include <ctype.h>
 
+#include "mb/pg_wchar.h"
 #include "parser/scansup.h"
 #include "pgcrypto.h"
 #include "px-crypt.h"
@@ -238,6 +239,9 @@ pg_crypt(PG_FUNCTION_ARGS)
 	res = cstring_to_text(cres);
 
 	pfree(resbuf);
+
+	/* Ensure text result is valid in the database encoding. */
+	pg_verifymbstr(VARDATA_ANY(res), VARSIZE_ANY_EXHDR(res), false);
 
 	PG_FREE_IF_COPY(arg0, 0);
 	PG_FREE_IF_COPY(arg1, 1);
