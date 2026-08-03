@@ -14,6 +14,7 @@
  */
 #include "postgres.h"
 
+#include "access/genam.h"
 #include "access/htup_details.h"
 #include "access/relation.h"
 #include "access/table.h"
@@ -23,6 +24,7 @@
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/objectaccess.h"
+#include "catalog/pg_inherits.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_statistic_ext.h"
 #include "catalog/pg_statistic_ext_data.h"
@@ -32,6 +34,7 @@
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/optimizer.h"
+#include "statistics/extended_stats_internal.h"
 #include "statistics/statistics.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
@@ -44,7 +47,16 @@
 
 static char *ChooseExtendedStatisticName(const char *name1, const char *name2,
 										 const char *label, Oid namespaceid);
-static char *ChooseExtendedStatisticNameAddition(List *exprs, Oid relid);
+static char *ChooseExtendedStatisticNameAddition(List *exprs, Oid relid,
+												 List *joinrels);
+static void check_join_stats_rel(Relation rel);
+static List *open_join_stats_rels(CreateStatsStmt *stmt, Oid stxowner,
+								  bool check_rights, Relation *anchor_rel);
+static void check_join_stats_indexes(CreateStatsStmt *stmt, List *other_rels);
+static void check_join_stats_columns(CreateStatsStmt *stmt, List *stxexprs);
+static void record_join_stats_dependencies(const ObjectAddress *myself,
+										   CreateStatsStmt *stmt,
+										   List *stxexprs);
 
 /*
  *		CREATE STATISTICS
@@ -52,8 +64,7 @@ static char *ChooseExtendedStatisticNameAddition(List *exprs, Oid relid);
  * relids is a list of OIDs of relations specified in the FROM clause, on which
  * the statistics object is defined. We identify the target by the passed-in
  * OID rather than re-resolving stmt->relations by name, so that we operate
- * on exactly the relation the caller looked up. Only a single relation is
- * supported for now.
+ * on exactly the relation the caller looked up.
  */
 ObjectAddress
 CreateStatistics(List *relids, CreateStatsStmt *stmt, bool check_rights)
@@ -87,135 +98,96 @@ CreateStatistics(List *relids, CreateStatsStmt *stmt, bool check_rights)
 	bool		requested_type = false;
 	ListCell   *cell;
 	ListCell   *cell2;
+	ListCell   *lc;
+	Node	   *rln;
+	bool		isjoin = false;
+	List	   *other_rels = NIL;
 
 	Assert(IsA(stmt, CreateStatsStmt));
 
 	/*
-	 * Currently, we only allow the FROM clause to be a single simple table,
-	 * but later we'll probably allow multiple tables and JOIN syntax.  The
-	 * grammar and the loop below are already prepared for that, but examining
-	 * the FROM clause is the caller's job, so all we do here is assert that
-	 * the caller rejected what we can't support.
+	 * Examine the FROM clause. We support either: 1. Single RangeVar for
+	 * single-table statistics 2. JoinExpr for join statistics
 	 */
-	Assert(list_length(relids) == 1);
+	Assert(list_length(stmt->relations) == 1);
 
-	foreach(cell, relids)
+	rln = (Node *) linitial(stmt->relations);
+
+	if (IsA(rln, RangeVar))
 	{
-		relid = lfirst_oid(cell);
+		Assert(list_length(relids) == 1);
 
-		/*
-		 * CREATE STATISTICS will influence future execution plans but does
-		 * not interfere with currently executing plans.  So it should be
-		 * enough to take only ShareUpdateExclusiveLock on relation,
-		 * conflicting with ANALYZE and other DDL that sets statistical
-		 * information, but not with normal queries.
-		 */
-		rel = relation_open(relid, ShareUpdateExclusiveLock);
-
-		/* Restrict to allowed relation types */
-		if (rel->rd_rel->relkind != RELKIND_RELATION &&
-			rel->rd_rel->relkind != RELKIND_MATVIEW &&
-			rel->rd_rel->relkind != RELKIND_FOREIGN_TABLE &&
-			rel->rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
-			ereport(ERROR,
-					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-					 errmsg("cannot define statistics for relation \"%s\"",
-							RelationGetRelationName(rel)),
-					 errdetail_relkind_not_supported(rel->rd_rel->relkind)));
-
-		/*
-		 * You must own the relation to create stats on it. Skip check if
-		 * caller doesn't want it.
-		 */
-		if (check_rights &&
-			!object_ownercheck(RelationRelationId, RelationGetRelid(rel), stxowner))
-			aclcheck_error(ACLCHECK_NOT_OWNER, get_relkind_objtype(rel->rd_rel->relkind),
-						   RelationGetRelationName(rel));
-
-		/*
-		 * Conflict log tables are system-managed tables used internally for
-		 * logical replication conflict logging. Unlike user tables, they are
-		 * not expected to have complex query usage, so to keep things simple,
-		 * user-defined extended statistics are not required or supported at
-		 * present.
-		 */
-		if (IsConflictLogTableClass(rel->rd_rel))
-			ereport(ERROR,
-					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-					 errmsg("cannot create statistics on conflict log table \"%s\"",
-							RelationGetRelationName(rel)),
-					 errdetail("Conflict log tables are system-managed tables for logical replication conflicts.")));
-
-		/* Creating statistics on system catalogs is not allowed */
-		if (!allowSystemTableMods && IsSystemRelation(rel))
-			ereport(ERROR,
-					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-					 errmsg("permission denied: \"%s\" is a system catalog",
-							RelationGetRelationName(rel))));
-	}
-
-	Assert(rel);
-
-	/*
-	 * If the node has a name, split it up and determine creation namespace.
-	 * If not, put the object in the same namespace as the relation, and cons
-	 * up a name for it.  (This can happen either via "CREATE STATISTICS ..."
-	 * or via "CREATE TABLE ... (LIKE)".)
-	 */
-	if (stmt->defnames)
-		namespaceId = QualifiedNameGetCreationNamespace(stmt->defnames,
-														&namestr);
-	else
-	{
-		namespaceId = RelationGetNamespace(rel);
-		namestr = ChooseExtendedStatisticName(RelationGetRelationName(rel),
-											  ChooseExtendedStatisticNameAddition(stmt->exprs,
-																				  relid),
-											  "stat",
-											  namespaceId);
-	}
-	namestrcpy(&stxname, namestr);
-
-	/*
-	 * Check we have creation rights in target namespace.  Skip check if
-	 * caller doesn't want it.
-	 */
-	if (check_rights)
-	{
-		AclResult	aclresult;
-
-		aclresult = object_aclcheck(NamespaceRelationId, namespaceId,
-									GetUserId(), ACL_CREATE);
-		if (aclresult != ACLCHECK_OK)
-			aclcheck_error(aclresult, OBJECT_SCHEMA,
-						   get_namespace_name(namespaceId));
-	}
-
-	/*
-	 * Deal with the possibility that the statistics object already exists.
-	 */
-	if (SearchSysCacheExists2(STATEXTNAMENSP,
-							  CStringGetDatum(namestr),
-							  ObjectIdGetDatum(namespaceId)))
-	{
-		if (stmt->if_not_exists)
+		foreach(cell, relids)
 		{
+			relid = lfirst_oid(cell);
+
 			/*
-			 * Since stats objects aren't members of extensions (see comments
-			 * below), no need for checkMembershipInCurrentExtension here.
+			 * CREATE STATISTICS will influence future execution plans but
+			 * does not interfere with currently executing plans.  So it
+			 * should be enough to take only ShareUpdateExclusiveLock on
+			 * relation, conflicting with ANALYZE and other DDL that sets
+			 * statistical information, but not with normal queries.
 			 */
-			ereport(NOTICE,
-					(errcode(ERRCODE_DUPLICATE_OBJECT),
-					 errmsg("statistics object \"%s\" already exists, skipping",
-							namestr)));
-			relation_close(rel, NoLock);
-			return InvalidObjectAddress;
+			rel = relation_open(relid, ShareUpdateExclusiveLock);
+
+			/* Restrict to allowed relation types */
+			if (rel->rd_rel->relkind != RELKIND_RELATION &&
+				rel->rd_rel->relkind != RELKIND_MATVIEW &&
+				rel->rd_rel->relkind != RELKIND_FOREIGN_TABLE &&
+				rel->rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
+				ereport(ERROR,
+						(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+						 errmsg("cannot define statistics for relation \"%s\"",
+								RelationGetRelationName(rel)),
+						 errdetail_relkind_not_supported(rel->rd_rel->relkind)));
+
+			/*
+			 * You must own the relation to create stats on it. Skip check if
+			 * caller doesn't want it.
+			 */
+			if (check_rights &&
+				!object_ownercheck(RelationRelationId, RelationGetRelid(rel), stxowner))
+				aclcheck_error(ACLCHECK_NOT_OWNER, get_relkind_objtype(rel->rd_rel->relkind),
+							   RelationGetRelationName(rel));
+
+			/*
+			 * Conflict log tables are system-managed tables used internally
+			 * for logical replication conflict logging. Unlike user tables,
+			 * they are not expected to have complex query usage, so to keep
+			 * things simple, user-defined extended statistics are not
+			 * required or supported at present.
+			 */
+			if (IsConflictLogTableClass(rel->rd_rel))
+				ereport(ERROR,
+						(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+						 errmsg("cannot create statistics on conflict log table \"%s\"",
+								RelationGetRelationName(rel)),
+						 errdetail("Conflict log tables are system-managed tables for logical replication conflicts.")));
+
+			/* Creating statistics on system catalogs is not allowed */
+			if (!allowSystemTableMods && IsSystemRelation(rel))
+				ereport(ERROR,
+						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+						 errmsg("permission denied: \"%s\" is a system catalog",
+								RelationGetRelationName(rel))));
 		}
 
-		ereport(ERROR,
-				(errcode(ERRCODE_DUPLICATE_OBJECT),
-				 errmsg("statistics object \"%s\" already exists", namestr)));
+		relid = RelationGetRelid(rel);
 	}
+	else if (IsA(rln, JoinExpr))
+	{
+		Assert(stmt->transformed);
+		isjoin = true;
+		relid = stmt->stxrelid;
+	}
+	else
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("only a single relation or JOIN is allowed in CREATE STATISTICS")));
+	}
+
+	Assert(rel || isjoin);
 
 	/*
 	 * Make sure no more than STATS_MAX_DIMENSIONS columns are used. There
@@ -252,6 +224,12 @@ CreateStatistics(List *relids, CreateStatsStmt *stmt, bool check_rights)
 			HeapTuple	atttuple;
 			Form_pg_attribute attForm;
 			TypeCacheEntry *type;
+
+			/* Join stats require table-qualified column names */
+			if (isjoin)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
+						 errmsg("join statistics require table-qualified column names")));
 
 			attname = selem->name;
 
@@ -308,18 +286,28 @@ CreateStatistics(List *relids, CreateStatsStmt *stmt, bool check_rights)
 
 			/*
 			 * Disallow data types without a less-than operator in
-			 * multivariate statistics.
+			 * multivariate statistics.  Join stats always need this because
+			 * the MCV builder requires a sort operator.
 			 */
-			if (numcols > 1)
+			if (isjoin || numcols > 1)
 			{
+				Oid			col_relid;
+
 				type = lookup_type_cache(var->vartype, TYPECACHE_LT_OPR);
 				if (type->lt_opr == InvalidOid)
+				{
+					if (isjoin)
+						col_relid = list_nth_oid(stmt->stxjoinrels,
+												 var->varno - 1);
+					else
+						col_relid = relid;
 					ereport(ERROR,
 							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 							 errmsg("cannot create multivariate statistics on column \"%s\"",
-									get_attname(relid, var->varattno, false)),
+									get_attname(col_relid, var->varattno, false)),
 							 errdetail("The type %s has no default btree operator class.",
 									   format_type_be(var->vartype))));
+				}
 			}
 
 			stxexprs = lappend(stxexprs, (Node *) var);
@@ -330,15 +318,21 @@ CreateStatistics(List *relids, CreateStatsStmt *stmt, bool check_rights)
 			Node	   *expr = selem->expr;
 			Oid			atttype;
 			TypeCacheEntry *type;
-			Bitmapset  *expr_attrs = NULL;
+			Bitmapset  *attnums = NULL;
 			int			k;
 
 			Assert(expr != NULL);
 
-			pull_varattnos(expr, 1, &expr_attrs);
+			/* Join stats only support simple column references */
+			if (isjoin)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("expressions are not supported in join statistics")));
+
+			pull_varattnos(expr, 1, &attnums);
 
 			k = -1;
-			while ((k = bms_next_member(expr_attrs, k)) >= 0)
+			while ((k = bms_next_member(attnums, k)) >= 0)
 			{
 				AttrNumber	attnum = k + FirstLowInvalidHeapAttributeNumber;
 
@@ -378,11 +372,99 @@ CreateStatistics(List *relids, CreateStatsStmt *stmt, bool check_rights)
 	}
 
 	/*
+	 * For join statistics, open and validate all participating relations. The
+	 * join info (stxrelid, stxjoinrels, stxjoinconds) was already resolved
+	 * and validated by transformStatsStmt().
+	 */
+	if (isjoin)
+	{
+		other_rels = open_join_stats_rels(stmt, stxowner, check_rights, &rel);
+		check_join_stats_indexes(stmt, other_rels);
+		check_join_stats_columns(stmt, stxexprs);
+	}
+
+	/*
+	 * Now determine namespace and name. Use rel (anchor table for joins).
+	 */
+	if (stmt->defnames)
+		namespaceId = QualifiedNameGetCreationNamespace(stmt->defnames,
+														&namestr);
+	else
+	{
+		namespaceId = RelationGetNamespace(rel);
+
+		/*
+		 * Join stats have no single relation to use as a name prefix, so the
+		 * qualified column list is the whole name.
+		 */
+		if (isjoin)
+			namestr = ChooseExtendedStatisticName(ChooseExtendedStatisticNameAddition(stmt->exprs,
+																					  relid,
+																					  stmt->stxjoinrels),
+												  NULL,
+												  "stat",
+												  namespaceId);
+		else
+			namestr = ChooseExtendedStatisticName(RelationGetRelationName(rel),
+												  ChooseExtendedStatisticNameAddition(stmt->exprs,
+																					  relid,
+																					  NIL),
+												  "stat",
+												  namespaceId);
+	}
+	namestrcpy(&stxname, namestr);
+
+	/*
+	 * Check we have creation rights in target namespace.  Skip check if
+	 * caller doesn't want it.
+	 */
+	if (check_rights)
+	{
+		AclResult	aclresult;
+
+		aclresult = object_aclcheck(NamespaceRelationId, namespaceId,
+									GetUserId(), ACL_CREATE);
+		if (aclresult != ACLCHECK_OK)
+			aclcheck_error(aclresult, OBJECT_SCHEMA,
+						   get_namespace_name(namespaceId));
+	}
+
+	/*
+	 * Deal with the possibility that the statistics object already exists.
+	 */
+	if (SearchSysCacheExists2(STATEXTNAMENSP,
+							  CStringGetDatum(namestr),
+							  ObjectIdGetDatum(namespaceId)))
+	{
+		if (stmt->if_not_exists)
+		{
+			/*
+			 * Since stats objects aren't members of extensions (see comments
+			 * below), no need for checkMembershipInCurrentExtension here.
+			 */
+			ereport(NOTICE,
+					(errcode(ERRCODE_DUPLICATE_OBJECT),
+					 errmsg("statistics object \"%s\" already exists, skipping",
+							namestr)));
+			/* Close relations */
+			relation_close(rel, NoLock);
+			foreach(lc, other_rels)
+				relation_close((Relation) lfirst(lc), NoLock);
+			return InvalidObjectAddress;
+		}
+
+		ereport(ERROR,
+				(errcode(ERRCODE_DUPLICATE_OBJECT),
+				 errmsg("statistics object \"%s\" already exists", namestr)));
+	}
+
+	/*
 	 * Check that at least two columns were specified in the statement, or
 	 * that we're building statistics on a single expression (or virtual
-	 * generated column).
+	 * generated column).  Join statistics are exempt since single-column MCV
+	 * over a join captures cross-relation frequency data.
 	 */
-	if (numcols == 1)
+	if (numcols == 1 && !isjoin)
 	{
 		Node	   *single = (Node *) linitial(stxexprs);
 
@@ -431,9 +513,12 @@ CreateStatistics(List *relids, CreateStatsStmt *stmt, bool check_rights)
 
 	/*
 	 * If no statistic type was specified, build them all (but only when the
-	 * statistics is defined on more than one column/expression).
+	 * statistics is defined on more than one column/expression).  Join
+	 * statistics support only MCV lists, on any number of columns.
 	 */
-	if ((!requested_type) && (numcols >= 2))
+	if (!requested_type && isjoin)
+		build_mcv = true;
+	else if (!requested_type && numcols >= 2)
 	{
 		build_ndistinct = true;
 		build_dependencies = true;
@@ -447,18 +532,22 @@ CreateStatistics(List *relids, CreateStatsStmt *stmt, bool check_rights)
 	 * like expressions they get no pg_statistic row, so they need
 	 * per-expression stats).  Plain columns are skipped, since they already
 	 * have univariate statistics in pg_statistic.  These give good estimates
-	 * where per-clause estimates matter (e.g. functional dependencies).
+	 * where per-clause estimates matter (e.g. functional dependencies). Join
+	 * statistics cover plain columns only, so they build none.
 	 */
 	build_expressions = false;
-	foreach(cell, stxexprs)
+	if (!isjoin)
 	{
-		Node	   *expr = (Node *) lfirst(cell);
-
-		if (!IsA(expr, Var) ||
-			get_attgenerated(relid, ((Var *) expr)->varattno) == ATTRIBUTE_GENERATED_VIRTUAL)
+		foreach(cell, stxexprs)
 		{
-			build_expressions = true;
-			break;
+			Node	   *expr = (Node *) lfirst(cell);
+
+			if (!IsA(expr, Var) ||
+				get_attgenerated(relid, ((Var *) expr)->varattno) == ATTRIBUTE_GENERATED_VIRTUAL)
+			{
+				build_expressions = true;
+				break;
+			}
 		}
 	}
 
@@ -503,6 +592,15 @@ CreateStatistics(List *relids, CreateStatsStmt *stmt, bool check_rights)
 					 errmsg("duplicate expression in statistics definition")));
 	}
 
+	/*
+	 * For join statistics, only MCV is currently supported.
+	 */
+	if (isjoin && (build_ndistinct || build_dependencies || build_expressions))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("only MCV statistics are supported for join statistics"),
+				 errhint("ndistinct, dependencies, and expression statistics require a single table.")));
+
 	/* construct the char array of enabled statistic types */
 	ntypes = 0;
 	if (build_ndistinct)
@@ -540,6 +638,35 @@ CreateStatistics(List *relids, CreateStatsStmt *stmt, bool check_rights)
 	values[Anum_pg_statistic_ext_stxkind - 1] = PointerGetDatum(stxkind);
 	values[Anum_pg_statistic_ext_stxexprs - 1] = exprsDatum;
 
+	/*
+	 * For join statistics, populate stxjoinrels and stxjoinconds. For
+	 * single-table statistics, these fields are NULL.
+	 */
+	if (isjoin)
+	{
+		int			njoinrels = list_length(stmt->stxjoinrels);
+		Oid		   *joinrel_arr;
+		int			idx;
+
+		/* stxjoinrels: anchor OID followed by the other relation OIDs */
+		joinrel_arr = palloc(njoinrels * sizeof(Oid));
+		idx = 0;
+		foreach(lc, stmt->stxjoinrels)
+			joinrel_arr[idx++] = lfirst_oid(lc);
+		values[Anum_pg_statistic_ext_stxjoinrels - 1] =
+			PointerGetDatum(buildoidvector(joinrel_arr, njoinrels));
+
+		/* stxjoinconds: serialize the join conditions */
+		values[Anum_pg_statistic_ext_stxjoinconds - 1] =
+			CStringGetTextDatum(nodeToString(stmt->stxjoinconds));
+	}
+	else
+	{
+		/* Join fields are NULL for single-table statistics */
+		nulls[Anum_pg_statistic_ext_stxjoinrels - 1] = true;
+		nulls[Anum_pg_statistic_ext_stxjoinconds - 1] = true;
+	}
+
 	/* insert it into pg_statistic_ext */
 	htup = heap_form_tuple(statrel->rd_att, values, nulls);
 	CatalogTupleInsert(statrel, htup);
@@ -556,17 +683,26 @@ CreateStatistics(List *relids, CreateStatsStmt *stmt, bool check_rights)
 	InvokeObjectPostCreateHook(StatisticExtRelationId, statoid, 0);
 
 	/*
-	 * Invalidate relcache so that others see the new statistics object.
+	 * Invalidate relcache so that others see the new statistics object. Only
+	 * the anchor relation needs invalidation, as planning finds the object
+	 * through its statlist.
 	 */
 	CacheInvalidateRelcache(rel);
 
+	/* Close relations */
 	relation_close(rel, NoLock);
+	foreach(lc, other_rels)
+		relation_close((Relation) lfirst(lc), NoLock);
 
 	/*
 	 * Add an AUTO dependency on each column used in the stats, so that the
 	 * stats object goes away if any or all of them get dropped.
 	 */
 	ObjectAddressSet(myself, StatisticExtRelationId, statoid);
+
+	/* For join statistics, record dependencies on the columns of every table */
+	if (isjoin)
+		record_join_stats_dependencies(&myself, stmt, stxexprs);
 
 	/*
 	 * If there are no dependencies on a column, give the statistics object an
@@ -587,16 +723,22 @@ CreateStatistics(List *relids, CreateStatsStmt *stmt, bool check_rights)
 
 	/*
 	 * Store dependencies on anything mentioned in statistics expressions,
-	 * just like we do for index expressions.
+	 * just like we do for index expressions.  For join stats, the explicit
+	 * dependency recording above handles columns across multiple relations;
+	 * recordDependencyOnSingleRelExpr only works for a single relation's
+	 * Vars.
 	 */
-	if (check_rights)
-		CheckUsageOnTypesInSingleRelExpr((Node *) stxexprs, relid, GetUserId());
+	if (!isjoin)
+	{
+		if (check_rights)
+			CheckUsageOnTypesInSingleRelExpr((Node *) stxexprs, relid, GetUserId());
 
-	recordDependencyOnSingleRelExpr(&myself,
-									(Node *) stxexprs,
-									relid,
-									DEPENDENCY_NORMAL,
-									DEPENDENCY_AUTO, false);
+		recordDependencyOnSingleRelExpr(&myself,
+										(Node *) stxexprs,
+										relid,
+										DEPENDENCY_NORMAL,
+										DEPENDENCY_AUTO, false);
+	}
 
 	/*
 	 * Also add dependencies on namespace and owner.  These are required
@@ -821,6 +963,230 @@ RemoveStatisticsById(Oid statsOid)
 }
 
 /*
+ * check_join_stats_rel -
+ *		Check that a relation can take part in join statistics.
+ */
+static void
+check_join_stats_rel(Relation rel)
+{
+	/*
+	 * XXX Partitioned tables are not supported yet: ANALYZE cannot probe one
+	 * through its index, and the planner does not choose between join
+	 * statistics with and without the partitions.
+	 */
+	if (rel->rd_rel->relkind != RELKIND_RELATION &&
+		rel->rd_rel->relkind != RELKIND_MATVIEW &&
+		rel->rd_rel->relkind != RELKIND_FOREIGN_TABLE)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("cannot define statistics for relation \"%s\"",
+						RelationGetRelationName(rel)),
+				 errdetail_relkind_not_supported(rel->rd_rel->relkind)));
+
+	/*
+	 * XXX Nor are tables with inheritance children, which the sampling would
+	 * not cover.  find_inheritance_children() rather than has_subclass(),
+	 * which stays true after the last child is dropped.
+	 */
+	if (find_inheritance_children(RelationGetRelid(rel), NoLock) != NIL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("join statistics do not support tables with inheritance children"),
+				 errdetail("Table \"%s\" has inheritance children.",
+						   RelationGetRelationName(rel))));
+
+	if (IsConflictLogTableClass(rel->rd_rel))
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("cannot create statistics on conflict log table \"%s\"",
+						RelationGetRelationName(rel)),
+				 errdetail("Conflict log tables are system-managed tables for logical replication conflicts.")));
+
+	if (!allowSystemTableMods && IsSystemRelation(rel))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied: \"%s\" is a system catalog",
+						RelationGetRelationName(rel))));
+}
+
+/*
+ * open_join_stats_rels -
+ *		Open the relations of a join statistics object and check that each
+ *		can take part in one.
+ *
+ * Returns the tables after the anchor in stxjoinrels order, the anchor in
+ * *anchor_rel.  The owner needs to own the anchor and have SELECT on the
+ * other tables, except when check_rights is false: ALTER TABLE re-creating
+ * the object for its existing owner.  NoLock, as parse analysis of the
+ * statement locked the tables.
+ */
+static List *
+open_join_stats_rels(CreateStatsStmt *stmt, Oid stxowner, bool check_rights,
+					 Relation *anchor_rel)
+{
+	Relation	rel;
+	List	   *other_rels = NIL;
+	ListCell   *lc;
+
+	rel = relation_open(stmt->stxrelid, NoLock);
+	check_join_stats_rel(rel);
+	if (check_rights &&
+		!object_ownercheck(RelationRelationId, RelationGetRelid(rel), stxowner))
+		aclcheck_error(ACLCHECK_NOT_OWNER,
+					   get_relkind_objtype(rel->rd_rel->relkind),
+					   RelationGetRelationName(rel));
+	*anchor_rel = rel;
+
+	foreach(lc, stmt->stxjoinrels)
+	{
+		Relation	jrel;
+		AclResult	aclresult;
+
+		/* stxjoinrels[0] is the anchor, opened above */
+		if (foreach_current_index(lc) == 0)
+			continue;
+
+		jrel = relation_open(lfirst_oid(lc), NoLock);
+		check_join_stats_rel(jrel);
+
+		/* Joined relations need only SELECT */
+		if (check_rights)
+		{
+			aclresult = pg_class_aclcheck(RelationGetRelid(jrel), stxowner,
+										  ACL_SELECT);
+			if (aclresult != ACLCHECK_OK)
+				aclcheck_error(aclresult,
+							   get_relkind_objtype(jrel->rd_rel->relkind),
+							   RelationGetRelationName(jrel));
+		}
+
+		other_rels = lappend(other_rels, jrel);
+	}
+
+	return other_rels;
+}
+
+/*
+ * check_join_stats_indexes -
+ *		Warn about a join condition whose probed table has no index to
+ *		sample with.
+ *
+ * Sampling probes the later table of each condition from the earlier one,
+ * so that table needs an index on its join column.  The object is created
+ * anyway: ANALYZE skips it while there is no index and uses any suitable
+ * one it finds, so no dependency on an index is recorded.
+ */
+static void
+check_join_stats_indexes(CreateStatsStmt *stmt, List *other_rels)
+{
+	ListCell   *lc;
+
+	foreach(lc, stmt->stxjoinconds)
+	{
+		OpExpr	   *opexpr = lfirst_node(OpExpr, lc);
+		Var		   *sampled_var;
+		Var		   *indexed_var;
+		bool		commuted;
+		Relation	indexed_rel;
+
+		join_stats_cond_sides(opexpr, &sampled_var, &indexed_var, &commuted);
+
+		/* other_rels starts at varno 2, as the anchor is never probed */
+		Assert(indexed_var->varno > 1);
+		indexed_rel = (Relation) list_nth(other_rels, indexed_var->varno - 2);
+
+		if (!OidIsValid(find_index_for_operator(indexed_rel,
+												indexed_var->varattno,
+												opexpr->opno)))
+			ereport(WARNING,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("no suitable index on \"%s\" column \"%s\" for join statistics",
+							RelationGetRelationName(indexed_rel),
+							get_attname(RelationGetRelid(indexed_rel),
+										indexed_var->varattno, false)),
+					 errdetail("ANALYZE skips the statistics object while the table has no suitable index."),
+					 errhint("Create an index on the join column to enable index-based join sampling.")));
+	}
+}
+
+/*
+ * check_join_stats_columns -
+ *		Refuse the columns join statistics cannot be built on.
+ */
+static void
+check_join_stats_columns(CreateStatsStmt *stmt, List *stxexprs)
+{
+	ListCell   *lc;
+
+	foreach(lc, stxexprs)
+	{
+		Var		   *var = lfirst_node(Var, lc);
+		Oid			key_relid;
+
+		key_relid = list_nth_oid(stmt->stxjoinrels, var->varno - 1);
+
+		if (get_attgenerated(key_relid, var->varattno) == ATTRIBUTE_GENERATED_VIRTUAL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("statistics creation on virtual generated columns is not supported")));
+	}
+}
+
+/*
+ * record_join_stats_dependencies -
+ *		Record AUTO dependencies on the columns a join statistics object
+ *		uses, in its join conditions and its column list.
+ *
+ * recordDependencyOnSingleRelExpr() cannot be used, as the Vars belong to
+ * several relations.  Join statistics have no expressions, so there are no
+ * other objects to depend on.
+ */
+static void
+record_join_stats_dependencies(const ObjectAddress *myself,
+							   CreateStatsStmt *stmt, List *stxexprs)
+{
+	ObjectAddresses *addrs;
+	ObjectAddress referenced;
+	ListCell   *lc;
+
+	addrs = new_object_addresses();
+
+	foreach(lc, stmt->stxjoinconds)
+	{
+		Var		   *vars[2];
+
+		if (!join_stats_cond_vars(lfirst(lc), &vars[0], &vars[1]))
+			elog(ERROR, "unexpected join statistics condition");
+		for (int j = 0; j < 2; j++)
+		{
+			/* varno N is stxjoinrels[N-1] (varno 1 is the anchor) */
+			Assert(vars[j]->varno >= 1 &&
+				   vars[j]->varno <= list_length(stmt->stxjoinrels));
+			ObjectAddressSubSet(referenced, RelationRelationId,
+								list_nth_oid(stmt->stxjoinrels,
+											 vars[j]->varno - 1),
+								vars[j]->varattno);
+			add_exact_object_address(&referenced, addrs);
+		}
+	}
+
+	foreach(lc, stxexprs)
+	{
+		Var		   *var = lfirst_node(Var, lc);
+
+		Assert(var->varno >= 1 &&
+			   var->varno <= list_length(stmt->stxjoinrels));
+		ObjectAddressSubSet(referenced, RelationRelationId,
+							list_nth_oid(stmt->stxjoinrels, var->varno - 1),
+							var->varattno);
+		add_exact_object_address(&referenced, addrs);
+	}
+
+	record_object_address_dependencies(myself, addrs, DEPENDENCY_AUTO);
+	free_object_addresses(addrs);
+}
+
+/*
  * Select a nonconflicting name for a new statistics object.
  *
  * name1, name2, and label are used the same way as for makeObjectName(),
@@ -872,6 +1238,12 @@ ChooseExtendedStatisticName(const char *name1, const char *name2,
  * names for it.  This will be passed to ChooseExtendedStatisticName along
  * with the parent table name and a suitable label.
  *
+ * For a join statistics object (joinrels != NIL) the columns are qualified
+ * with their relation name and the result is used as "name1" instead, since a
+ * bare column name would not identify which relation it came from.  The
+ * relation name is written only when it differs from the previous column's,
+ * so (t1.a, t1.b, t2.c, t2.d) gives t1_a_b_t2_c_d.
+ *
  * We know that less than NAMEDATALEN characters will actually be used,
  * so we can truncate the result once we've generated that many.
  *
@@ -879,16 +1251,18 @@ ChooseExtendedStatisticName(const char *name1, const char *name2,
  * ChooseIndexNameAddition.
  */
 static char *
-ChooseExtendedStatisticNameAddition(List *exprs, Oid relid)
+ChooseExtendedStatisticNameAddition(List *exprs, Oid relid, List *joinrels)
 {
 	char		buf[NAMEDATALEN * 2];
 	int			buflen = 0;
+	Oid			prevrelid = InvalidOid;
 	ListCell   *lc;
 
 	buf[0] = '\0';
 	foreach(lc, exprs)
 	{
 		StatsElem  *selem = (StatsElem *) lfirst(lc);
+		char		qualbuf[NAMEDATALEN * 2];
 		const char *name;
 
 		/* It should be one of these, but just skip if it happens not to be */
@@ -899,10 +1273,33 @@ ChooseExtendedStatisticNameAddition(List *exprs, Oid relid)
 
 		/*
 		 * A simple column reference resolves to a bare Var; use the column
-		 * name.
+		 * name.  For a join object, qualify it with the relation name when
+		 * the relation differs from the previous column's.
 		 */
 		if (!name && selem->expr && IsA(selem->expr, Var))
-			name = get_attname(relid, ((Var *) selem->expr)->varattno, true);
+		{
+			Var		   *var = (Var *) selem->expr;
+			Oid			colrelid = joinrels ? list_nth_oid(joinrels, var->varno - 1) : relid;
+
+			name = get_attname(colrelid, var->varattno, true);
+
+			if (name && joinrels && colrelid != prevrelid)
+			{
+				char	   *relname = get_rel_name(colrelid);
+
+				if (relname)
+				{
+					snprintf(qualbuf, sizeof(qualbuf), "%s_%s", relname, name);
+					name = qualbuf;
+				}
+				else
+					name = NULL;	/* defensive: fall back to "expr" */
+			}
+
+			prevrelid = name ? colrelid : InvalidOid;
+		}
+		else
+			prevrelid = InvalidOid;
 
 		/*
 		 * We use fixed 'expr' for expressions, which have empty column names.

@@ -159,4 +159,18 @@ extern bool import_attribute_statistics(Relation rel,
 extern bool delete_attribute_statistics(Relation rel,
 										AttrNumber attnum, bool inherited);
 
+/* Join MCV statistics functions */
+extern bool join_stats_cond_vars(Node *cond, Var **lvar, Var **rvar);
+extern void join_stats_cond_sides(OpExpr *cond, Var **sampled, Var **probed,
+								  bool *commuted);
+extern Selectivity join_mcv_join_selectivity(PlannerInfo *root,
+											 Relids outer_relids,
+											 Relids inner_relids,
+											 List *clauses,
+											 Selectivity join_sel);
+extern Selectivity join_mcv_restriction_selectivity(PlannerInfo *root,
+													RestrictInfo *rinfo,
+													int varRelid,
+													Selectivity sel);
+
 #endif							/* STATISTICS_H */

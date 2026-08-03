@@ -581,6 +581,23 @@ extended_statistics_update(FunctionCallInfo fcinfo)
 	if (has.mcv || has.expressions)
 	{
 		int			idx;
+		Datum		joinrels_datum;
+		bool		joinrels_isnull;
+		oidvector  *joinrels = NULL;
+
+		/*
+		 * The columns of join statistics can belong to any of the joined
+		 * tables: varno N refers to stxjoinrels[N-1].  stxjoinrels is NULL
+		 * for single-table statistics, whose columns all belong to relid.
+		 * The joined tables need no lock: changing the type of a column used
+		 * here makes ALTER TABLE drop and re-create these statistics, and
+		 * dropping them locks relid.
+		 */
+		joinrels_datum = SysCacheGetAttr(STATEXTOID, tup,
+										 Anum_pg_statistic_ext_stxjoinrels,
+										 &joinrels_isnull);
+		if (!joinrels_isnull)
+			joinrels = (oidvector *) DatumGetPointer(joinrels_datum);
 
 		atttypids = palloc0_array(Oid, numattrs);
 		atttypmods = palloc0_array(int32, numattrs);
@@ -598,11 +615,23 @@ extended_statistics_update(FunctionCallInfo fcinfo)
 
 			if (bms_is_member(foreach_current_index(lc), columns))
 			{
-				AttrNumber	attnum = ((Var *) node)->varattno;
-				HeapTuple	atup = SearchSysCache2(ATTNUM,
-												   ObjectIdGetDatum(relid),
-												   Int16GetDatum(attnum));
+				Var		   *var = (Var *) node;
+				AttrNumber	attnum = var->varattno;
+				Oid			colrelid = relid;
+				HeapTuple	atup;
 				Form_pg_attribute attr;
+
+				if (joinrels != NULL)
+				{
+					if (var->varno < 1 || var->varno > joinrels->dim1)
+						elog(ERROR, "stxexprs references invalid varno %d",
+							 var->varno);
+					colrelid = joinrels->values[var->varno - 1];
+				}
+
+				atup = SearchSysCache2(ATTNUM,
+									   ObjectIdGetDatum(colrelid),
+									   Int16GetDatum(attnum));
 
 				/* Attribute not found */
 				if (!HeapTupleIsValid(atup))

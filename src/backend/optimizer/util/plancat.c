@@ -1655,7 +1655,8 @@ get_relation_constraints(PlannerInfo *root,
 static void
 get_relation_statistics_worker(List **stainfos, RelOptInfo *rel,
 							   Oid statOid, bool inh,
-							   List *exprs, Bitmapset *columns)
+							   List *exprs, Bitmapset *columns,
+							   List *joinrels, List *joinconds)
 {
 	Form_pg_statistic_ext_data dataForm;
 	HeapTuple	dtup;
@@ -1707,6 +1708,14 @@ get_relation_statistics_worker(List **stainfos, RelOptInfo *rel,
 		info->exprs = exprs;
 		info->columns = columns;
 
+		/*
+		 * Only MCV carries the join fields: CREATE STATISTICS allows no other
+		 * kind yet for join stats, so the nodes above are never join stats.
+		 * For single-table stats these locals are NIL.
+		 */
+		info->joinrels = joinrels;
+		info->joinconds = joinconds;
+
 		*stainfos = lappend(*stainfos, info);
 	}
 
@@ -1752,6 +1761,11 @@ get_relation_statistics(PlannerInfo *root, RelOptInfo *rel,
 		HeapTuple	htup;
 		List	   *exprs = NIL;
 		Bitmapset  *columns = NULL;
+		List	   *joinrels = NIL;
+		List	   *joinconds = NIL;
+		bool		isjoin;
+		bool		isnull;
+		Datum		datum;
 
 		htup = SearchSysCache1(STATEXTOID, ObjectIdGetDatum(statOid));
 		if (!HeapTupleIsValid(htup))
@@ -1768,6 +1782,26 @@ get_relation_statistics(PlannerInfo *root, RelOptInfo *rel,
 		 */
 		exprs = statext_get_stxexprs(htup, relation, &columns);
 
+		datum = SysCacheGetAttr(STATEXTOID, htup,
+								Anum_pg_statistic_ext_stxjoinrels, &isnull);
+		isjoin = !isnull;
+		if (isjoin)
+		{
+			oidvector  *jrels = (oidvector *) DatumGetPointer(datum);
+			char	   *condstr;
+
+			for (int j = 0; j < jrels->dim1; j++)
+				joinrels = lappend_oid(joinrels, jrels->values[j]);
+
+			datum = SysCacheGetAttrNotNull(STATEXTOID, htup,
+										   Anum_pg_statistic_ext_stxjoinconds);
+			condstr = TextDatumGetCString(datum);
+			joinconds = (List *) stringToNode(condstr);
+			pfree(condstr);
+
+			root->hasJoinStats = true;
+		}
+
 		/*
 		 * Modify the copies we obtain from the relcache to have the correct
 		 * varno for the parent relation, so that they match up correctly
@@ -1775,8 +1809,10 @@ get_relation_statistics(PlannerInfo *root, RelOptInfo *rel,
 		 *
 		 * This must be done before const-simplification because
 		 * eval_const_expressions reduces NullTest for Vars based on varno.
+		 *
+		 * Join statistics keep their varnos, which index stxjoinrels.
 		 */
-		if (varno != 1)
+		if (varno != 1 && !isjoin)
 			ChangeVarNodes((Node *) exprs, 1, varno, 0);
 
 		/*
@@ -1797,10 +1833,10 @@ get_relation_statistics(PlannerInfo *root, RelOptInfo *rel,
 		/* extract statistics for possible values of stxdinherit flag */
 
 		get_relation_statistics_worker(&stainfos, rel, statOid, true,
-									   exprs, columns);
+									   exprs, columns, joinrels, joinconds);
 
 		get_relation_statistics_worker(&stainfos, rel, statOid, false,
-									   exprs, columns);
+									   exprs, columns, joinrels, joinconds);
 
 		ReleaseSysCache(htup);
 	}

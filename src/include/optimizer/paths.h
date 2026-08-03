@@ -202,6 +202,9 @@ extern List *generate_implied_equalities_for_column(PlannerInfo *root,
 													Relids prohibited_rels);
 extern bool have_relevant_eclass_joinclause(PlannerInfo *root,
 											RelOptInfo *rel1, RelOptInfo *rel2);
+extern int	count_relevant_eclass_joinclauses(PlannerInfo *root,
+											  RelOptInfo *rel1,
+											  RelOptInfo *rel2);
 extern bool has_relevant_eclass_joinclause(PlannerInfo *root,
 										   RelOptInfo *rel1);
 extern bool eclass_useful_for_merging(PlannerInfo *root,

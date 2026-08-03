@@ -2056,12 +2056,15 @@ DROP TABLE declared_order_grouping;
 -- Auto-generated statistics object names.
 --
 -- A simple column reference contributes the column name, whether written
--- unqualified or wrapped in parens; a more complex expression contributes a
--- fixed "expr".
+-- unqualified, table-qualified, or wrapped in parens; a more complex expression
+-- contributes a fixed "expr".
 CREATE TABLE auto_t1 (a INTEGER, b INTEGER, c INTEGER);
 
 -- Unqualified columns: bare column names.
 CREATE STATISTICS ON b, c FROM auto_t1;
+
+-- Table-qualified columns: still the column names.
+CREATE STATISTICS ON auto_t1.a, auto_t1.b FROM auto_t1;
 
 -- Table-qualified columns in parens: still the column names.
 CREATE STATISTICS ON (auto_t1.a), (auto_t1.b) FROM auto_t1;

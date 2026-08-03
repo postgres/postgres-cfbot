@@ -68,7 +68,6 @@ typedef struct StatsBuildData
 	bool	  **nulls;
 } StatsBuildData;
 
-
 extern MVNDistinct *statext_ndistinct_build(double totalrows, StatsBuildData *data);
 extern bytea *statext_ndistinct_serialize(MVNDistinct *ndistinct);
 extern MVNDistinct *statext_ndistinct_deserialize(bytea *data);
@@ -96,6 +95,22 @@ extern Datum statext_mcv_import(int elevel, int numattrs, Oid *atttypids,
 								bool *mcv_nulls, float8 *freqs,
 								float8 *base_freqs);
 
+extern Oid	find_index_for_operator(Relation rel, AttrNumber attnum,
+									Oid eq_op);
+
+extern MCVList *statext_join_mcv_build(Relation anchor_rel,
+									   Oid *joinrel_oids,
+									   int njoinrels,
+									   List *joinconds,
+									   Oid index_oid,
+									   int16 *stxkeys,
+									   int16 *keyrefs,
+									   int nkeys,
+									   int stattarget,
+									   int numrows, HeapTuple *rows,
+									   double totalrows,
+									   VacAttrStats ***result_stats);
+
 extern MultiSortSupport multi_sort_init(int ndims);
 extern void multi_sort_add_dimension(MultiSortSupport mss, int sortdim,
 									 Oid oper, Oid collation);
@@ -112,8 +127,17 @@ extern SortItem *build_sorted_items(StatsBuildData *data, int *nitems,
 									MultiSortSupport mss,
 									int numattrs, AttrNumber *attnums);
 
+extern bool statext_is_compatible_clause_internal(PlannerInfo *root,
+												  Node *clause, Index relid,
+												  Bitmapset **attnums,
+												  List **exprs,
+												  bool *leakproof);
+
 extern bool examine_opclause_args(List *args, Node **exprp,
 								  Const **cstp, bool *expronleftp);
+
+extern bool *mcv_get_match_bitmap(PlannerInfo *root, List *clauses,
+								  List *exprs, MCVList *mcvlist, bool is_or);
 
 extern Selectivity mcv_combine_selectivities(Selectivity simple_sel,
 											 Selectivity mcv_sel,

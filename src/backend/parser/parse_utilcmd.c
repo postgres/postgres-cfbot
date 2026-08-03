@@ -59,7 +59,9 @@
 #include "parser/parse_type.h"
 #include "parser/parse_utilcmd.h"
 #include "parser/parser.h"
+#include "parser/parsetree.h"
 #include "rewrite/rewriteManip.h"
+#include "statistics/statistics.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
@@ -1621,6 +1623,8 @@ expandTableLikeClause(RangeVar *heapRel, TableLikeClause *table_like_clause)
 													RelationGetRelid(childrel),
 													parent_stat_oid,
 													attmap);
+			if (stats_stmt == NULL)
+				continue;
 
 			/* Copy comment on statistics object, if requested */
 			if (table_like_clause->options & CREATE_TABLE_LIKE_COMMENTS)
@@ -2066,6 +2070,10 @@ generateClonedIndexStmt(RangeVar *heapRel, Relation source_idx,
  * relation.  Those attnums, along with the attribute numbers referenced by
  * Vars inside complex expressions, are remapped to the new relation's
  * numbering according to attmap.
+ *
+ * Returns NULL for a join statistics object: it describes a join of the
+ * parent relation with other relations, not the parent relation itself, so
+ * there is nothing to copy to the new relation.
  */
 static CreateStatsStmt *
 generateClonedExtStatsStmt(RangeVar *heapRel, Oid heapRelid,
@@ -2076,6 +2084,7 @@ generateClonedExtStatsStmt(RangeVar *heapRel, Oid heapRelid,
 	List	   *stat_types = NIL;
 	List	   *def_names = NIL;
 	Datum		datum;
+	bool		isnull;
 	ArrayType  *arr;
 	char	   *enabled;
 	int			i;
@@ -2092,6 +2101,15 @@ generateClonedExtStatsStmt(RangeVar *heapRel, Oid heapRelid,
 	ht_stats = SearchSysCache1(STATEXTOID, ObjectIdGetDatum(source_statsid));
 	if (!HeapTupleIsValid(ht_stats))
 		elog(ERROR, "cache lookup failed for statistics object %u", source_statsid);
+
+	/* Join statistics are not copied */
+	(void) SysCacheGetAttr(STATEXTOID, ht_stats,
+						   Anum_pg_statistic_ext_stxjoinrels, &isnull);
+	if (!isnull)
+	{
+		ReleaseSysCache(ht_stats);
+		return NULL;
+	}
 
 	/* Determine which statistics types exist */
 	datum = SysCacheGetAttrNotNull(STATEXTOID, ht_stats,
@@ -3170,11 +3188,182 @@ transformIndexStmt(Oid relid, IndexStmt *stmt, const char *queryString)
 }
 
 /*
+ * lock_join_stats_rels - lock the tables of a join statistics FROM clause
+ */
+static List *
+lock_join_stats_rels(Node *node, List *relids)
+{
+	JoinExpr   *j;
+
+	if (IsA(node, RangeVar))
+		return lappend_oid(relids,
+						   RangeVarGetRelid((RangeVar *) node,
+											ShareUpdateExclusiveLock, false));
+	if (!IsA(node, JoinExpr))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("unsupported FROM clause element in join statistics")));
+
+	j = (JoinExpr *) node;
+	relids = lock_join_stats_rels(j->larg, relids);
+	return lock_join_stats_rels(j->rarg, relids);
+}
+
+/*
+ * collect_join_stats_tree - collect the tables and conditions of a
+ *		transformed join tree
+ */
+static void
+collect_join_stats_tree(ParseState *pstate, Node *node,
+						List **rtindexes, List **conds)
+{
+	JoinExpr   *j;
+
+	if (IsA(node, RangeTblRef))
+	{
+		int			rtindex = ((RangeTblRef *) node)->rtindex;
+
+		/* lock_join_stats_rels() let through only table names and joins */
+		if (rt_fetch(rtindex, pstate->p_rtable)->rtekind != RTE_RELATION)
+			elog(ERROR, "unexpected rtekind: %d",
+				 (int) rt_fetch(rtindex, pstate->p_rtable)->rtekind);
+		*rtindexes = lappend_int(*rtindexes, rtindex);
+		return;
+	}
+	if (!IsA(node, JoinExpr))
+		elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node));
+
+	j = (JoinExpr *) node;
+	if (j->jointype != JOIN_INNER)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("join statistics are only supported for inner joins")));
+	collect_join_stats_tree(pstate, j->larg, rtindexes, conds);
+	collect_join_stats_tree(pstate, j->rarg, rtindexes, conds);
+	if (j->quals)
+	{
+		/* transformFromClause() leaves collation assignment to its caller */
+		assign_expr_collations(pstate, j->quals);
+		*conds = list_concat(*conds, make_ands_implicit((Expr *) j->quals));
+	}
+}
+
+/* mutator for renumber_join_stats_vars: renumber each Var's varno */
+static Node *
+renumber_join_stats_vars_mutator(Node *node, int *map)
+{
+	Var		   *var;
+
+	if (node == NULL)
+		return NULL;
+	if (!IsA(node, Var) || ((Var *) node)->varlevelsup != 0)
+		return expression_tree_mutator(node, renumber_join_stats_vars_mutator,
+									   map);
+
+	var = (Var *) copyObject(node);
+	var->varno = map[var->varno];
+	var->varnosyn = var->varno;
+	return (Node *) var;
+}
+
+/*
+ * renumber_join_stats_vars - renumber the Vars of a join statistics expression
+ *
+ * Replaces Vars that reference join outputs (e.g. a USING column) with the
+ * underlying table columns, then renumbers each Var's varno through map,
+ * which maps rangetable indexes to table positions (1 = anchor).
+ */
+static Node *
+renumber_join_stats_vars(Query *query, Node *node, int *map)
+{
+	node = flatten_join_alias_for_parser(query, node, 0);
+	return renumber_join_stats_vars_mutator(node, map);
+}
+
+/*
+ * is_join_stats_edge - is cond an equality between columns of two tables?
+ */
+static bool
+is_join_stats_edge(Node *cond)
+{
+	Var		   *lvar;
+	Var		   *rvar;
+
+	if (!join_stats_cond_vars(cond, &lvar, &rvar))
+		return false;
+	return lvar->varno != rvar->varno &&
+		AttrNumberIsForUserDefinedAttr(lvar->varattno) &&
+		AttrNumberIsForUserDefinedAttr(rvar->varattno) &&
+		get_mergejoin_opfamilies(((OpExpr *) cond)->opno) != NIL;
+}
+
+/*
+ * order_join_stats_tables - canonical order of the tables of a join statistics
+ * object
+ *
+ * Numbers the tables breadth-first from the anchor (position 1) over the
+ * edges, breaking ties by FROM order, so that every table after the anchor is
+ * joined to an earlier one.  Sets newpos[t] to the new position of the table
+ * at FROM position t (1..ntables).  Returns 0, or the FROM position of the
+ * first table that no edge connects to the anchor.
+ */
+static int
+order_join_stats_tables(List *edges, int ntables, int *newpos)
+{
+	int		   *order = palloc_array(int, ntables + 1);
+	int			norder = 1;
+	int			k;
+	int			t;
+	ListCell   *lc;
+
+	memset(newpos, 0, (ntables + 1) * sizeof(int));
+	order[1] = 1;
+	newpos[1] = 1;
+	for (k = 1; k <= norder; k++)
+	{
+		for (t = 1; t <= ntables; t++)
+		{
+			if (newpos[t] != 0)
+				continue;
+			foreach(lc, edges)
+			{
+				Var		   *lvar;
+				Var		   *rvar;
+				int			a;
+				int			b;
+
+				if (!join_stats_cond_vars(lfirst(lc), &lvar, &rvar))
+					elog(ERROR, "unexpected join statistics condition");
+				a = lvar->varno;
+				b = rvar->varno;
+				if ((a == order[k] && b == t) || (b == order[k] && a == t))
+				{
+					order[++norder] = t;
+					newpos[t] = norder;
+					break;
+				}
+			}
+		}
+	}
+	pfree(order);
+
+	for (t = 1; t <= ntables; t++)
+	{
+		if (newpos[t] == 0)
+			return t;
+	}
+	return 0;
+}
+
+/*
  * transformStatsStmt - parse analysis for CREATE STATISTICS
  *
- * To avoid race conditions, it's important that this function relies only on
- * the passed-in relid (and not on stmt->relation) to determine the target
- * relation.
+ * For single-relation statistics, to avoid race conditions, it's important
+ * that this function relies only on the passed-in relid (and not on
+ * stmt->relation) to determine the target relation.
+ *
+ * For join statistics, relid is InvalidOid and tables are resolved directly
+ * from stmt->relations.
  */
 CreateStatsStmt *
 transformStatsStmt(Oid relid, CreateStatsStmt *stmt, const char *queryString)
@@ -3182,7 +3371,11 @@ transformStatsStmt(Oid relid, CreateStatsStmt *stmt, const char *queryString)
 	ParseState *pstate;
 	ParseNamespaceItem *nsitem;
 	ListCell   *l;
-	Relation	rel;
+	Relation	rel = NULL;
+	bool		isjoin = (stmt->relations != NIL &&
+						  IsA(linitial(stmt->relations), JoinExpr));
+	int		   *rtmap = NULL;
+	Query	   *joinquery = NULL;
 
 	/* Nothing to do if statement already transformed. */
 	if (stmt->transformed)
@@ -3192,18 +3385,128 @@ transformStatsStmt(Oid relid, CreateStatsStmt *stmt, const char *queryString)
 	pstate = make_parsestate(NULL);
 	pstate->p_sourcetext = queryString;
 
-	/*
-	 * Put the parent table into the rtable so that the expressions can refer
-	 * to its fields without qualification.  Caller is responsible for locking
-	 * relation, but we still need to open it.
-	 */
-	rel = relation_open(relid, NoLock);
-	nsitem = addRangeTableEntryForRelation(pstate, rel,
-										   AccessShareLock,
-										   NULL, false, true);
+	if (isjoin)
+	{
+		List	   *lockedrelids;
+		ListCell   *lc2;
+		List	   *rtindexes = NIL;
+		List	   *conds = NIL;
+		List	   *edges = NIL;
+		int			ntables;
+		int		   *newpos;
+		Oid		   *relids_by_pos;
+		int			unconnected;
+		int			k;
 
-	/* no to join list, yes to namespaces */
-	addNSItemToQuery(pstate, nsitem, false, true, true);
+		/*
+		 * Parse the FROM clause as for a SELECT, so that names are resolved,
+		 * and USING, NATURAL and parenthesized joins handled, the same way.
+		 * Lock the tables first, so that the weaker lock
+		 * transformFromClause() takes is not upgraded later, and check
+		 * afterwards that each name still refers to the table we locked.
+		 */
+		lockedrelids = lock_join_stats_rels((Node *) linitial(stmt->relations),
+											NIL);
+		transformFromClause(pstate, stmt->relations);
+		/* a single JoinExpr in FROM yields a single jointree item */
+		Assert(list_length(pstate->p_joinlist) == 1);
+		collect_join_stats_tree(pstate, (Node *) linitial(pstate->p_joinlist),
+								&rtindexes, &conds);
+		ntables = list_length(rtindexes);
+		Assert(ntables >= 2);
+		if (list_length(lockedrelids) != ntables)
+			elog(ERROR, "unexpected number of tables in join statistics");
+		forboth(l, rtindexes, lc2, lockedrelids)
+		{
+			if (rt_fetch(lfirst_int(l), pstate->p_rtable)->relid != lfirst_oid(lc2))
+				ereport(ERROR,
+						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						 errmsg("table name \"%s\" was concurrently changed to refer to a different table",
+								get_rel_name(lfirst_oid(lc2)))));
+		}
+
+		/* number the tables 1..ntables in FROM order */
+		rtmap = palloc0_array(int, list_length(pstate->p_rtable) + 1);
+		foreach(l, rtindexes)
+			rtmap[lfirst_int(l)] = foreach_current_index(l) + 1;
+		joinquery = makeNode(Query);
+		joinquery->rtable = pstate->p_rtable;
+
+		/*
+		 * Every condition must be an equality between columns of two tables.
+		 * Anything else, such as a condition on a single table, would make
+		 * the statistics describe only the rows satisfying it.
+		 */
+		foreach(l, conds)
+		{
+			Node	   *cond = (Node *) lfirst(l);
+			Node	   *renumbered = renumber_join_stats_vars(joinquery, cond,
+															  rtmap);
+			int			ncondtables = bms_num_members(pull_varnos(NULL, renumbered));
+
+			if (ncondtables < 2 || !is_join_stats_edge(renumbered))
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("join statistics support only equality conditions between columns of two tables"),
+						 ncondtables < 2 ?
+						 errdetail("This condition does not refer to two tables.") :
+						 errdetail("This condition is not an equality between two columns."),
+						 parser_errposition(pstate, exprLocation(cond))));
+			edges = lappend(edges, renumbered);
+		}
+
+		/*
+		 * The conditions must connect all the tables; a cross product cannot
+		 * be sampled.  Renumber the tables in canonical order, so that every
+		 * table after the anchor is joined to an earlier one.
+		 */
+		newpos = palloc_array(int, ntables + 1);
+		unconnected = order_join_stats_tables(edges, ntables, newpos);
+		if (unconnected != 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("join conditions of join statistics must connect all the tables"),
+					 errdetail("No join condition connects \"%s\" to \"%s\".",
+							   rt_fetch(list_nth_int(rtindexes, unconnected - 1),
+										pstate->p_rtable)->eref->aliasname,
+							   rt_fetch(linitial_int(rtindexes),
+										pstate->p_rtable)->eref->aliasname)));
+		/* From here on, rtmap gives canonical positions */
+		foreach(l, rtindexes)
+			rtmap[lfirst_int(l)] = newpos[foreach_current_index(l) + 1];
+
+		/*
+		 * stxjoinrels lists the tables in canonical order (stxjoinrels[0] ==
+		 * stxrelid, the anchor), so Var.varno N references stxjoinrels[N-1].
+		 */
+		relids_by_pos = palloc_array(Oid, ntables + 1);
+		foreach(l, lockedrelids)
+			relids_by_pos[newpos[foreach_current_index(l) + 1]] = lfirst_oid(l);
+		for (k = 1; k <= ntables; k++)
+			stmt->stxjoinrels = lappend_oid(stmt->stxjoinrels, relids_by_pos[k]);
+		stmt->stxrelid = linitial_oid(stmt->stxjoinrels);
+		stmt->stxjoinconds = NIL;
+		foreach(l, conds)
+			stmt->stxjoinconds = lappend(stmt->stxjoinconds,
+										 renumber_join_stats_vars(joinquery,
+																  (Node *) lfirst(l),
+																  rtmap));
+	}
+	else
+	{
+		/*
+		 * Put the parent table into the rtable so that the expressions can
+		 * refer to its fields without qualification.  Caller is responsible
+		 * for locking relation, but we still need to open it.
+		 */
+		rel = relation_open(relid, NoLock);
+		nsitem = addRangeTableEntryForRelation(pstate, rel,
+											   AccessShareLock,
+											   NULL, false, true);
+
+		/* no to join list, yes to namespaces */
+		addNSItemToQuery(pstate, nsitem, false, true, true);
+	}
 
 	/* take care of any expressions */
 	foreach(l, stmt->exprs)
@@ -3218,22 +3521,30 @@ transformStatsStmt(Oid relid, CreateStatsStmt *stmt, const char *queryString)
 
 			/* We have to fix its collations too */
 			assign_expr_collations(pstate, selem->expr);
+
+			/* Join statistics columns use the canonical table positions */
+			if (isjoin)
+				selem->expr = renumber_join_stats_vars(joinquery, selem->expr,
+													   rtmap);
 		}
 	}
 
-	/*
-	 * Check that only the base rel is mentioned.  (This should be dead code
-	 * now that add_missing_from is history.)
-	 */
-	if (list_length(pstate->p_rtable) != 1)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
-				 errmsg("statistics expressions can refer only to the table being referenced")));
+	if (!isjoin)
+	{
+		/*
+		 * Check that only the base rel is mentioned.  (This should be dead
+		 * code now that add_missing_from is history.)
+		 */
+		if (list_length(pstate->p_rtable) != 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
+					 errmsg("statistics expressions can refer only to the table being referenced")));
+
+		/* Close relation */
+		table_close(rel, NoLock);
+	}
 
 	free_parsestate(pstate);
-
-	/* Close relation */
-	table_close(rel, NoLock);
 
 	/* Mark statement as successfully transformed */
 	stmt->transformed = true;

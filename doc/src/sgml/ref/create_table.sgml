@@ -778,7 +778,9 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
         <term><literal>INCLUDING STATISTICS</literal></term>
         <listitem>
          <para>
-          Extended statistics are copied to the new table.
+          Extended statistics are copied to the new table.  Join statistics
+          are not, as they describe a join of the table with other tables
+          rather than the table itself.
          </para>
         </listitem>
        </varlistentry>
