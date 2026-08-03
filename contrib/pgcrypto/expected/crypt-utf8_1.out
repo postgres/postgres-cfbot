@@ -1,0 +1,4 @@
+/* Needs UTF8; skip otherwise (truncated multibyte salt copy). */
+SELECT getdatabaseencoding() <> 'UTF8' AS skip_test \gset
+\if :skip_test
+\quit
