@@ -2592,13 +2592,12 @@ make_build_data(Relation rel, StatExtEntry *stat, int numrows, HeapTuple *rows,
 			ExprState  *exprstate = (ExprState *) lfirst(lc);
 
 			/*
-			 * XXX This probably leaks memory. Maybe we should use
-			 * ExecEvalExprSwitchContext but then we need to copy the result
-			 * somewhere else.
+			 * Avoid accumulating per-row evaluation memory in the
+			 * long-lived build context.
 			 */
-			datum = ExecEvalExpr(exprstate,
-								 GetPerTupleExprContext(estate),
-								 &isnull);
+			datum = ExecEvalExprSwitchContext(exprstate,
+											  GetPerTupleExprContext(estate),
+											  &isnull);
 			if (isnull)
 			{
 				result->values[idx][i] = (Datum) 0;
@@ -2606,7 +2605,10 @@ make_build_data(Relation rel, StatExtEntry *stat, int numrows, HeapTuple *rows,
 			}
 			else
 			{
-				result->values[idx][i] = datum;
+				result->values[idx][i] =
+					datumCopy(datum,
+							  result->stats[idx]->attrtype->typbyval,
+							  result->stats[idx]->attrtype->typlen);
 				result->nulls[idx][i] = false;
 			}
 
