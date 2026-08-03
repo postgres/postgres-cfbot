@@ -127,6 +127,11 @@ extern StatisticExtInfo *choose_best_statistics(List *stats, char requiredkind,
 												List **clause_exprs,
 												int nclauses);
 extern HeapTuple statext_expressions_load(Oid stxoid, bool inh, int idx);
+extern List *statext_get_stxexprs(HeapTuple htup, Relation rel);
+extern bool statext_is_column(Node *node);
+extern bool stat_covers_attnum(StatisticExtInfo *stat, AttrNumber attnum);
+extern int	stat_num_expressions(StatisticExtInfo *stat);
+extern Node *stat_nth_expression(StatisticExtInfo *stat, int n);
 
 extern bool import_relation_statistics(Relation rel,
 									   const NullableDatum *version,

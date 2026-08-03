@@ -31,6 +31,7 @@
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/optimizer.h"
+#include "rewrite/rewriteHandler.h"
 #include "statistics/statistics.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
@@ -45,26 +46,12 @@ static char *ChooseExtendedStatisticName(const char *name1, const char *name2,
 										 const char *label, Oid namespaceid);
 static char *ChooseExtendedStatisticNameAddition(List *exprs);
 
-
-/* qsort comparator for the attnums in CreateStatistics */
-static int
-compare_int16(const void *a, const void *b)
-{
-	int			av = *(const int16 *) a;
-	int			bv = *(const int16 *) b;
-
-	/* this can't overflow if int is wider than int16 */
-	return (av - bv);
-}
-
 /*
  *		CREATE STATISTICS
  */
 ObjectAddress
 CreateStatistics(CreateStatsStmt *stmt, bool check_rights)
 {
-	int16		attnums[STATS_MAX_DIMENSIONS];
-	int			nattnums = 0;
 	int			numcols;
 	char	   *namestr;
 	NameData	stxname;
@@ -74,8 +61,9 @@ CreateStatistics(CreateStatsStmt *stmt, bool check_rights)
 	HeapTuple	htup;
 	Datum		values[Natts_pg_statistic_ext];
 	bool		nulls[Natts_pg_statistic_ext];
-	int2vector *stxkeys;
 	List	   *stxexprs = NIL;
+	List	   *folded_exprs;
+	char	   *exprsString;
 	Datum		exprsDatum;
 	Relation	statrel;
 	Relation	rel = NULL;
@@ -89,8 +77,8 @@ CreateStatistics(CreateStatsStmt *stmt, bool check_rights)
 	bool		build_dependencies;
 	bool		build_mcv;
 	bool		build_expressions;
+	bool		has_simple_var = false;
 	bool		requested_type = false;
-	int			i;
 	ListCell   *cell;
 	ListCell   *cell2;
 
@@ -244,8 +232,8 @@ CreateStatistics(CreateStatsStmt *stmt, bool check_rights)
 						STATS_MAX_DIMENSIONS)));
 
 	/*
-	 * Convert the expression list to a simple array of attnums, but also keep
-	 * a list of more complex expressions.  While at it, enforce some
+	 * Convert the expression list to a list of expression trees.  Simple
+	 * column references are stored as Var nodes.  While at it, enforce some
 	 * constraints - we don't allow extended statistics on system attributes,
 	 * and we require the data type to have a less-than operator, if we're
 	 * building multivariate statistics.
@@ -300,24 +288,14 @@ CreateStatistics(CreateStatsStmt *stmt, bool check_rights)
 									   format_type_be(attForm->atttypid))));
 			}
 
-			/* Treat virtual generated columns as expressions */
-			if (attForm->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL)
-			{
-				Node	   *expr;
-
-				expr = (Node *) makeVar(1,
-										attForm->attnum,
-										attForm->atttypid,
-										attForm->atttypmod,
-										attForm->attcollation,
-										0);
-				stxexprs = lappend(stxexprs, expr);
-			}
-			else
-			{
-				attnums[nattnums] = attForm->attnum;
-				nattnums++;
-			}
+			stxexprs = lappend(stxexprs,
+							   (Node *) makeVar(1,
+												attForm->attnum,
+												attForm->atttypid,
+												attForm->atttypmod,
+												attForm->attcollation,
+												0));
+			has_simple_var = true;
 			ReleaseSysCache(atttuple);
 		}
 		else if (IsA(selem->expr, Var)) /* column reference in parens */
@@ -347,16 +325,8 @@ CreateStatistics(CreateStatsStmt *stmt, bool check_rights)
 									   format_type_be(var->vartype))));
 			}
 
-			/* Treat virtual generated columns as expressions */
-			if (get_attgenerated(relid, var->varattno) == ATTRIBUTE_GENERATED_VIRTUAL)
-			{
-				stxexprs = lappend(stxexprs, (Node *) var);
-			}
-			else
-			{
-				attnums[nattnums] = var->varattno;
-				nattnums++;
-			}
+			stxexprs = lappend(stxexprs, (Node *) var);
+			has_simple_var = true;
 		}
 		else					/* expression */
 		{
@@ -407,20 +377,23 @@ CreateStatistics(CreateStatsStmt *stmt, bool check_rights)
 	 * that we're building statistics on a single expression (or virtual
 	 * generated column).
 	 */
-	if (numcols < 2 && list_length(stxexprs) != 1)
-		ereport(ERROR,
-				errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-				errmsg("cannot create extended statistics on a single non-virtual column"),
-				errdetail("Univariate statistics are already built for each individual non-virtual table column."));
+	if (numcols == 1)
+	{
+		Node	   *single = (Node *) linitial(stxexprs);
 
-	/*
-	 * Parse the statistics kinds (not allowed when building univariate
-	 * statistics).
-	 */
-	if (numcols == 1 && stmt->stat_types != NIL)
-		ereport(ERROR,
-				errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				errmsg("cannot specify statistics kinds when building univariate statistics"));
+		if (IsA(single, Var) &&
+			get_attgenerated(relid, ((Var *) single)->varattno) != ATTRIBUTE_GENERATED_VIRTUAL)
+			ereport(ERROR,
+					errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+					errmsg("cannot create extended statistics on a single non-virtual column"),
+					errdetail("Univariate statistics are already built for each individual non-virtual table column."));
+
+		/* statistics kinds are not allowed with univariate statistics */
+		if (stmt->stat_types != NIL)
+			ereport(ERROR,
+					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("cannot specify statistics kinds when building univariate statistics"));
+	}
 
 	build_ndistinct = false;
 	build_dependencies = false;
@@ -463,50 +436,49 @@ CreateStatistics(CreateStatsStmt *stmt, bool check_rights)
 	}
 
 	/*
-	 * When there are non-trivial expressions, build the expression stats
-	 * automatically. This allows calculating good estimates for stats that
-	 * consider per-clause estimates (e.g. functional dependencies).
+	 * Build per-expression statistics automatically when the object covers
+	 * anything that has no pg_statistic entry of its own: complex
+	 * expressions, or virtual generated columns (stored as Var nodes, but
+	 * like expressions they get no pg_statistic row, so they need
+	 * per-expression stats).  Plain columns are skipped, since they already
+	 * have univariate statistics in pg_statistic.  These give good estimates
+	 * where per-clause estimates matter (e.g. functional dependencies).
 	 */
-	build_expressions = (stxexprs != NIL);
-
-	/*
-	 * Sort the attnums, which makes detecting duplicates somewhat easier, and
-	 * it does not hurt (it does not matter for the contents, unlike for
-	 * indexes, for example).
-	 */
-	qsort(attnums, nattnums, sizeof(int16), compare_int16);
-
-	/*
-	 * Check for duplicates in the list of columns. The attnums are sorted so
-	 * just check consecutive elements.
-	 */
-	for (i = 1; i < nattnums; i++)
+	build_expressions = false;
+	foreach(cell, stxexprs)
 	{
-		if (attnums[i] == attnums[i - 1])
-			ereport(ERROR,
-					(errcode(ERRCODE_DUPLICATE_COLUMN),
-					 errmsg("duplicate column name in statistics definition")));
+		Node	   *expr = (Node *) lfirst(cell);
+
+		if (!IsA(expr, Var) ||
+			get_attgenerated(relid, ((Var *) expr)->varattno) == ATTRIBUTE_GENERATED_VIRTUAL)
+		{
+			build_expressions = true;
+			break;
+		}
 	}
 
 	/*
-	 * Check for duplicate expressions. We do two loops, counting the
-	 * occurrences of each expression. This is O(N^2) but we only allow small
-	 * number of expressions and it's not executed often.
+	 * Check for duplicate entries. We do two loops, counting the occurrences
+	 * of each entry. This is O(N^2) but we only allow small number of entries
+	 * and it's not executed often.
 	 *
-	 * XXX We don't cross-check attributes and expressions, because it does
-	 * not seem worth it. In principle we could check that expressions don't
-	 * contain trivial attribute references like "(a)", but the reasoning is
-	 * similar to why we don't bother with extracting columns from
-	 * expressions. It's either expensive or very easy to defeat for
-	 * determined user, and there's no risk if we allow such statistics (the
-	 * statistics is useless, but harmless).
+	 * We compare the entries after expanding generated columns and
+	 * const-folding, so that an entry which resolves to a column already
+	 * listed is caught as a duplicate; a plain structural comparison would
+	 * miss it. References that are equivalent but do not fold to the same
+	 * node (e.g. "a" vs "(a+0)") are still not caught; such an object is
+	 * useless but harmless.
 	 */
-	foreach(cell, stxexprs)
+	folded_exprs = (List *) expand_generated_columns_in_expr((Node *) stxexprs,
+															 rel, 1);
+	folded_exprs = (List *) eval_const_expressions(NULL, (Node *) folded_exprs);
+
+	foreach(cell, folded_exprs)
 	{
 		Node	   *expr1 = (Node *) lfirst(cell);
 		int			cnt = 0;
 
-		foreach(cell2, stxexprs)
+		foreach(cell2, folded_exprs)
 		{
 			Node	   *expr2 = (Node *) lfirst(cell2);
 
@@ -514,17 +486,14 @@ CreateStatistics(CreateStatsStmt *stmt, bool check_rights)
 				cnt += 1;
 		}
 
-		/* every expression should find at least itself */
+		/* every entry should find at least itself */
 		Assert(cnt >= 1);
 
 		if (cnt > 1)
 			ereport(ERROR,
 					(errcode(ERRCODE_DUPLICATE_COLUMN),
-					 errmsg("duplicate expression in statistics definition")));
+					 errmsg("duplicate column or expression in statistics definition")));
 	}
-
-	/* Form an int2vector representation of the sorted column list */
-	stxkeys = buildint2vector(attnums, nattnums);
 
 	/* construct the char array of enabled statistic types */
 	ntypes = 0;
@@ -539,17 +508,10 @@ CreateStatistics(CreateStatsStmt *stmt, bool check_rights)
 	Assert(ntypes > 0 && ntypes <= lengthof(types));
 	stxkind = construct_array_builtin(types, ntypes, CHAROID);
 
-	/* convert the expressions (if any) to a text datum */
-	if (stxexprs != NIL)
-	{
-		char	   *exprsString;
-
-		exprsString = nodeToString(stxexprs);
-		exprsDatum = CStringGetTextDatum(exprsString);
-		pfree(exprsString);
-	}
-	else
-		exprsDatum = (Datum) 0;
+	/* convert the expression list to a text datum */
+	exprsString = nodeToString(stxexprs);
+	exprsDatum = CStringGetTextDatum(exprsString);
+	pfree(exprsString);
 
 	statrel = table_open(StatisticExtRelationId, RowExclusiveLock);
 
@@ -566,13 +528,9 @@ CreateStatistics(CreateStatsStmt *stmt, bool check_rights)
 	values[Anum_pg_statistic_ext_stxname - 1] = NameGetDatum(&stxname);
 	values[Anum_pg_statistic_ext_stxnamespace - 1] = ObjectIdGetDatum(namespaceId);
 	values[Anum_pg_statistic_ext_stxowner - 1] = ObjectIdGetDatum(stxowner);
-	values[Anum_pg_statistic_ext_stxkeys - 1] = PointerGetDatum(stxkeys);
 	nulls[Anum_pg_statistic_ext_stxstattarget - 1] = true;
 	values[Anum_pg_statistic_ext_stxkind - 1] = PointerGetDatum(stxkind);
-
 	values[Anum_pg_statistic_ext_stxexprs - 1] = exprsDatum;
-	if (exprsDatum == (Datum) 0)
-		nulls[Anum_pg_statistic_ext_stxexprs - 1] = true;
 
 	/* insert it into pg_statistic_ext */
 	htup = heap_form_tuple(statrel->rd_att, values, nulls);
@@ -602,13 +560,6 @@ CreateStatistics(CreateStatsStmt *stmt, bool check_rights)
 	 */
 	ObjectAddressSet(myself, StatisticExtRelationId, statoid);
 
-	/* add dependencies for plain column references */
-	for (i = 0; i < nattnums; i++)
-	{
-		ObjectAddressSubSet(parentobject, RelationRelationId, relid, attnums[i]);
-		recordDependencyOn(&myself, &parentobject, DEPENDENCY_AUTO);
-	}
-
 	/*
 	 * If there are no dependencies on a column, give the statistics object an
 	 * auto dependency on the whole table.  In most cases, this will be
@@ -620,7 +571,7 @@ CreateStatistics(CreateStatsStmt *stmt, bool check_rights)
 	 * dependency, because recordDependencyOnSingleRelExpr may not create any
 	 * dependencies for whole-row Vars.
 	 */
-	if (!nattnums)
+	if (!has_simple_var)
 	{
 		ObjectAddressSet(parentobject, RelationRelationId, relid);
 		recordDependencyOn(&myself, &parentobject, DEPENDENCY_AUTO);
@@ -630,12 +581,11 @@ CreateStatistics(CreateStatsStmt *stmt, bool check_rights)
 	 * Store dependencies on anything mentioned in statistics expressions,
 	 * just like we do for index expressions.
 	 */
-	if (stxexprs)
-		recordDependencyOnSingleRelExpr(&myself,
-										(Node *) stxexprs,
-										relid,
-										DEPENDENCY_NORMAL,
-										DEPENDENCY_AUTO, false);
+	recordDependencyOnSingleRelExpr(&myself,
+									(Node *) stxexprs,
+									relid,
+									DEPENDENCY_NORMAL,
+									DEPENDENCY_AUTO, false);
 
 	/*
 	 * Also add dependencies on namespace and owner.  These are required

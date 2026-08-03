@@ -178,6 +178,35 @@ SELECT * FROM check_estimated_rows('SELECT a, b FROM stxdinp GROUP BY 1, 2');
 SELECT * FROM check_estimated_rows('SELECT a + 1, b FROM ONLY stxdinp GROUP BY 1, 2');
 DROP TABLE stxdinp;
 
+-- a column-equivalent expression (one that const-folds to a plain column, or a
+-- passthrough virtual generated column) is treated as that column
+CREATE TABLE column_equivalent (a int, b int, g int GENERATED ALWAYS AS (a) VIRTUAL) WITH (autovacuum_enabled = off);
+INSERT INTO column_equivalent (a, b) SELECT i%100, i%10 FROM generate_series(1, 10000) i;
+-- a column-equivalent CASE between two complex expressions
+CREATE STATISTICS column_equivalent_middle ON (a + b), (CASE WHEN true THEN a ELSE b END), (a * b) FROM column_equivalent;
+-- only column-equivalent entries, which all fold to plain columns
+CREATE STATISTICS column_equivalent_all ON (CASE WHEN true THEN a END), b FROM column_equivalent;
+ANALYZE column_equivalent;
+-- a column-equivalent CASE is not reported as an expression; only the complex
+-- expressions appear, each with its own statistics
+SELECT statistics_name, expr, n_distinct
+FROM pg_stats_ext_exprs
+WHERE statistics_name IN ('column_equivalent_middle', 'column_equivalent_all')
+ORDER BY statistics_name, expr;
+-- each complex expression's GROUP BY estimate uses its own statistics
+SELECT * FROM check_estimated_rows('SELECT (a + b) FROM column_equivalent GROUP BY 1');
+SELECT * FROM check_estimated_rows('SELECT (a * b) FROM column_equivalent GROUP BY 1');
+-- column_equivalent_all is used for a GROUP BY on the plain columns a, b
+SELECT * FROM check_estimated_rows('SELECT COUNT(*) FROM column_equivalent GROUP BY a, b');
+-- an entry that reduces to a column already listed is rejected as a duplicate:
+-- a parenthesized column,
+CREATE STATISTICS column_equivalent_dup_paren ON a, (a) FROM column_equivalent;
+-- a constant-folding expression,
+CREATE STATISTICS column_equivalent_dup_case ON a, (CASE WHEN true THEN a END), b FROM column_equivalent;
+-- and a passthrough generated column
+CREATE STATISTICS column_equivalent_dup_vgen ON a, g FROM column_equivalent;
+DROP TABLE column_equivalent;
+
 -- basic test for statistics on expressions
 CREATE TABLE ab1 (a INTEGER, b INTEGER, c TIMESTAMP, d TIMESTAMPTZ);
 
@@ -1593,6 +1622,12 @@ ANALYZE virtual_gen_stats;
 SELECT * FROM check_estimated_rows('SELECT * FROM virtual_gen_stats WHERE c = 0 AND (3*b) = 0');
 SELECT * FROM check_estimated_rows('SELECT * FROM virtual_gen_stats WHERE d = 0 AND (d-2*a) = 0');
 
+SELECT expr FROM pg_stats_ext_exprs
+    WHERE statistics_name = 'virtual_gen_stats_1' AND NOT inherited;
+
+SELECT pg_get_statisticsobjdef(oid) FROM pg_statistic_ext
+    WHERE stxname = 'virtual_gen_stats_1';
+
 -- univariate statistics on individual virtual generated columns
 DROP STATISTICS virtual_gen_stats_1;
 
@@ -1901,10 +1936,50 @@ CREATE STATISTICS stats_ext_range (mcv)
    ON irange, (irange + '[4,10)'::int4range)
    FROM stats_ext_tbl_range;
 ANALYZE stats_ext_tbl_range;
-SELECT attnames, most_common_vals
+SELECT exprs, most_common_vals
    FROM pg_stats_ext
    WHERE statistics_name = 'stats_ext_range';
 SELECT range_length_histogram, range_empty_frac, range_bounds_histogram
    FROM pg_stats_ext_exprs
    WHERE statistics_name = 'stats_ext_range';
 DROP TABLE stats_ext_tbl_range;
+
+-- the order of columns and expressions in CREATE STATISTICS is preserved in the
+-- object definition and the MCV; left undropped for pg_upgrade testing
+CREATE TABLE declared_order_preserved (a int, c int) WITH (autovacuum_enabled = off);
+INSERT INTO declared_order_preserved SELECT 1, 100 FROM generate_series(1, 100) g;
+CREATE STATISTICS declared_order_preserved_stat ON c, (a + c), a FROM declared_order_preserved;
+ANALYZE declared_order_preserved;
+SELECT pg_get_statisticsobjdef(oid) FROM pg_statistic_ext
+    WHERE stxname = 'declared_order_preserved_stat';
+-- MCV values in CREATE STATISTICS order: c = 100, (a + c) = 101, a = 1
+SELECT m.values
+FROM pg_statistic_ext s
+JOIN pg_statistic_ext_data d ON (s.oid = d.stxoid)
+CROSS JOIN LATERAL pg_mcv_list_items(d.stxdmcv) m
+WHERE s.stxname = 'declared_order_preserved_stat';
+
+-- selectivity estimates are accurate regardless of the column order in CREATE
+-- STATISTICS (here b, a)
+CREATE TABLE declared_order_selectivity (a int, b int) WITH (autovacuum_enabled = off);
+-- correlated data: (a, b) is either (0, 1) or (1, 0)
+INSERT INTO declared_order_selectivity SELECT 0, 1 FROM generate_series(1, 9900);
+INSERT INTO declared_order_selectivity SELECT 1, 0 FROM generate_series(1, 100);
+CREATE STATISTICS declared_order_selectivity_stat ON b, a FROM declared_order_selectivity;
+ANALYZE declared_order_selectivity;
+-- estimate should track the actual 9900 rows
+SELECT * FROM check_estimated_rows('SELECT * FROM declared_order_selectivity WHERE a = 0 AND b = 1');
+-- estimate should track the actual 100 rows
+SELECT * FROM check_estimated_rows('SELECT * FROM declared_order_selectivity WHERE a = 1 AND b = 0');
+DROP TABLE declared_order_selectivity;
+
+-- grouping estimates are accurate regardless of the column order in CREATE
+-- STATISTICS (here b, a)
+CREATE TABLE declared_order_grouping (a int, b int) WITH (autovacuum_enabled = off);
+-- correlated data: a and b move together, so 100 distinct (a, b) groups
+INSERT INTO declared_order_grouping SELECT i%100, i%100 FROM generate_series(1, 10000) i;
+CREATE STATISTICS declared_order_grouping_stat ON b, a FROM declared_order_grouping;
+ANALYZE declared_order_grouping;
+-- estimate should track the 100 distinct groups, not ndistinct(a) * ndistinct(b)
+SELECT * FROM check_estimated_rows('SELECT COUNT(*) FROM declared_order_grouping GROUP BY a, b');
+DROP TABLE declared_order_grouping;

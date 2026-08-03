@@ -1525,10 +1525,7 @@ typedef struct StatisticExtInfo
 	/* statistics kind of this entry */
 	char		kind;
 
-	/* attnums of the columns covered */
-	Bitmapset  *keys;
-
-	/* expressions */
+	/* all columns and expressions the object is defined on, in declared order */
 	List	   *exprs;
 } StatisticExtInfo;
 

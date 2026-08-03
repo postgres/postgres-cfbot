@@ -17,6 +17,7 @@
 #include "postgres.h"
 
 #include "access/heapam.h"
+#include "access/table.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_collation_d.h"
@@ -146,10 +147,8 @@ static void upsert_pg_statistic_ext_data(const Datum *values,
 
 static bool check_mcvlist_array(const ArrayType *arr, int argindex,
 								int required_ndims, int mcv_length);
-static Datum import_expressions(Relation pgsd, int numexprs,
-								Oid *atttypids, int32 *atttypmods,
-								Oid *atttypcolls, Jsonb *exprs_jsonb,
-								bool *exprs_is_perfect);
+static Datum import_expressions(Relation pgsd, List *exprnodes,
+								Jsonb *exprs_jsonb, bool *exprs_is_perfect);
 static Datum import_mcv(const ArrayType *mcv_arr,
 						const ArrayType *freqs_arr,
 						const ArrayType *base_freqs_arr,
@@ -331,10 +330,10 @@ extended_statistics_update(FunctionCallInfo fcinfo)
 	bool		nulls[Natts_pg_statistic_ext_data] = {0};
 	bool		replaces[Natts_pg_statistic_ext_data] = {0};
 	bool		success = true;
-	Datum		exprdatum;
-	bool		isnull;
+	Relation	rel;
 	List	   *exprs = NIL;
-	int			numattnums = 0;
+	Bitmapset  *keys = NULL;
+	ListCell   *lc;
 	int			numexprs = 0;
 	int			numattrs = 0;
 
@@ -342,6 +341,9 @@ extended_statistics_update(FunctionCallInfo fcinfo)
 	Oid		   *atttypids = NULL;
 	int32	   *atttypmods = NULL;
 	Oid		   *atttypcolls = NULL;
+
+	/* the expressions (declared order), for import_expressions */
+	List	   *exprnodes = NIL;
 	Oid			relid;
 	Oid			locked_table = InvalidOid;
 
@@ -439,40 +441,25 @@ extended_statistics_update(FunctionCallInfo fcinfo)
 
 	/* Find out what extended statistics kinds we should expect. */
 	expand_stxkind(tup, &enabled);
-	numattnums = stxform->stxkeys.dim1;
 
-	/* decode expression (if any) */
-	exprdatum = SysCacheGetAttr(STATEXTOID,
-								tup,
-								Anum_pg_statistic_ext_stxexprs,
-								&isnull);
-	if (!isnull)
+	/*
+	 * Decode stxexprs, and collect the column attnums and expression count
+	 * needed to validate the ndistinct and dependencies inputs.
+	 */
+	rel = table_open(relid, NoLock);
+	exprs = statext_get_stxexprs(tup, rel);
+	table_close(rel, NoLock);
+
+	foreach(lc, exprs)
 	{
-		char	   *s;
+		Node	   *node = (Node *) lfirst(lc);
 
-		s = TextDatumGetCString(exprdatum);
-		exprs = (List *) stringToNode(s);
-		pfree(s);
-
-		/*
-		 * Run the expressions through eval_const_expressions().  This is not
-		 * just an optimization, but is necessary, because the planner will be
-		 * comparing them to similarly-processed qual clauses, and may fail to
-		 * detect valid matches without this.
-		 *
-		 * We must not use canonicalize_qual(), however, since these are not
-		 * qual expressions.
-		 */
-		exprs = (List *) eval_const_expressions(NULL, (Node *) exprs);
-
-		/* May as well fix opfuncids too */
-		fix_opfuncids((Node *) exprs);
-
-		/* Compute the number of expression, for input validation. */
-		numexprs = list_length(exprs);
+		if (statext_is_column(node))
+			keys = bms_add_member(keys, ((Var *) node)->varattno);
+		else
+			numexprs++;
 	}
-
-	numattrs = numattnums + numexprs;
+	numattrs = list_length(exprs);
 
 	/*
 	 * If the object cannot support ndistinct, we should not have data for it.
@@ -580,54 +567,53 @@ extended_statistics_update(FunctionCallInfo fcinfo)
 	 */
 	if (has.mcv || has.expressions)
 	{
+		int			idx;
+
 		atttypids = palloc0_array(Oid, numattrs);
 		atttypmods = palloc0_array(int32, numattrs);
 		atttypcolls = palloc0_array(Oid, numattrs);
 
 		/*
-		 * The leading stxkeys are attribute numbers up through numattnums.
-		 * These keys must be in ascending AttrNumber order, but we do not
-		 * rely on that.
+		 * Get the type info for each dimension, in the same declared order as
+		 * the stored MCV values.  import_expressions() needs only the
+		 * expressions, so collect those nodes as we go.
 		 */
-		for (int i = 0; i < numattnums; i++)
+		idx = 0;
+		foreach(lc, exprs)
 		{
-			AttrNumber	attnum = stxform->stxkeys.values[i];
-			HeapTuple	atup = SearchSysCache2(ATTNUM,
-											   ObjectIdGetDatum(relid),
-											   Int16GetDatum(attnum));
+			Node	   *node = (Node *) lfirst(lc);
 
-			Form_pg_attribute attr;
+			if (statext_is_column(node))
+			{
+				AttrNumber	attnum = ((Var *) node)->varattno;
+				HeapTuple	atup = SearchSysCache2(ATTNUM,
+												   ObjectIdGetDatum(relid),
+												   Int16GetDatum(attnum));
+				Form_pg_attribute attr;
 
-			/* Attribute not found */
-			if (!HeapTupleIsValid(atup))
-				elog(ERROR, "stxkeys references nonexistent attnum %d", attnum);
+				/* Attribute not found */
+				if (!HeapTupleIsValid(atup))
+					elog(ERROR, "stxexprs references nonexistent attnum %d", attnum);
 
-			attr = (Form_pg_attribute) GETSTRUCT(atup);
+				attr = (Form_pg_attribute) GETSTRUCT(atup);
 
-			if (attr->attisdropped)
-				elog(ERROR, "stxkeys references dropped attnum %d", attnum);
+				if (attr->attisdropped)
+					elog(ERROR, "stxexprs references dropped attnum %d", attnum);
 
-			atttypids[i] = attr->atttypid;
-			atttypmods[i] = attr->atttypmod;
-			atttypcolls[i] = attr->attcollation;
-			ReleaseSysCache(atup);
-		}
+				atttypids[idx] = attr->atttypid;
+				atttypmods[idx] = attr->atttypmod;
+				atttypcolls[idx] = attr->attcollation;
+				ReleaseSysCache(atup);
+			}
+			else
+			{
+				atttypids[idx] = exprType(node);
+				atttypmods[idx] = exprTypmod(node);
+				atttypcolls[idx] = exprCollation(node);
 
-		/*
-		 * After all the positive number attnums in stxkeys come the negative
-		 * numbers (if any) which represent expressions in the order that they
-		 * appear in stxdexpr.  Because the expressions are always
-		 * monotonically decreasing from -1, there is no point in looking at
-		 * the values in stxkeys, it's enough to know how many of them there
-		 * are.
-		 */
-		for (int i = numattnums; i < numattrs; i++)
-		{
-			Node	   *expr = list_nth(exprs, i - numattnums);
-
-			atttypids[i] = exprType(expr);
-			atttypmods[i] = exprTypmod(expr);
-			atttypcolls[i] = exprCollation(expr);
+				exprnodes = lappend(exprnodes, node);
+			}
+			idx++;
 		}
 	}
 
@@ -659,7 +645,7 @@ extended_statistics_update(FunctionCallInfo fcinfo)
 		bytea	   *data = DatumGetByteaPP(ndistinct_datum);
 		MVNDistinct *ndistinct = statext_ndistinct_deserialize(data);
 
-		if (statext_ndistinct_validate(ndistinct, &stxform->stxkeys,
+		if (statext_ndistinct_validate(ndistinct, keys,
 									   numexprs, WARNING))
 		{
 			values[Anum_pg_statistic_ext_data_stxdndistinct - 1] = ndistinct_datum;
@@ -678,7 +664,7 @@ extended_statistics_update(FunctionCallInfo fcinfo)
 		bytea	   *data = DatumGetByteaPP(dependencies_datum);
 		MVDependencies *dependencies = statext_dependencies_deserialize(data);
 
-		if (statext_dependencies_validate(dependencies, &stxform->stxkeys,
+		if (statext_dependencies_validate(dependencies, keys,
 										  numexprs, WARNING))
 		{
 			values[Anum_pg_statistic_ext_data_stxddependencies - 1] = dependencies_datum;
@@ -721,18 +707,7 @@ extended_statistics_update(FunctionCallInfo fcinfo)
 
 		pgsd = table_open(StatisticRelationId, RowExclusiveLock);
 
-		/*
-		 * Generate the expressions array.
-		 *
-		 * The atttypids, atttypmods, and atttypcolls arrays have all the
-		 * regular attributes listed first, so we can pass those arrays with a
-		 * start point after the last regular attribute.  There are numexprs
-		 * elements remaining.
-		 */
-		datum = import_expressions(pgsd, numexprs,
-								   &atttypids[numattnums],
-								   &atttypmods[numattnums],
-								   &atttypcolls[numattnums],
+		datum = import_expressions(pgsd, exprnodes,
 								   PG_GETARG_JSONB_P(EXPRESSIONS_ARG),
 								   &ok);
 
@@ -1559,11 +1534,10 @@ pg_statistic_error:
  * This datum is needed to fill out a complete pg_statistic_ext_data tuple.
  */
 static Datum
-import_expressions(Relation pgsd, int numexprs,
-				   Oid *atttypids, int32 *atttypmods,
-				   Oid *atttypcolls, Jsonb *exprs_jsonb,
-				   bool *exprs_is_perfect)
+import_expressions(Relation pgsd, List *exprnodes,
+				   Jsonb *exprs_jsonb, bool *exprs_is_perfect)
 {
+	int			numexprs = list_length(exprnodes);
 	const char *argname = extarginfo[EXPRESSIONS_ARG].argname;
 	Oid			pgstypoid = get_rel_type_id(StatisticRelationId);
 	ArrayBuildState *astate = NULL;
@@ -1625,12 +1599,13 @@ import_expressions(Relation pgsd, int numexprs,
 			case jbvBinary:
 				{
 					bool		sta_ok = false;
+					Node	   *node = (Node *) list_nth(exprnodes, i);
 
 					/* a real stats object */
 					pgstdat = import_pg_statistic(pgsd, elem->val.binary.data,
 												  exprattnum, &array_in_fn,
-												  atttypids[i], atttypmods[i],
-												  atttypcolls[i], &sta_ok);
+												  exprType(node), exprTypmod(node),
+												  exprCollation(node), &sta_ok);
 
 					/*
 					 * If some incorrect data has been found, assign NULL for

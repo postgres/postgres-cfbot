@@ -46,19 +46,15 @@ CATALOG(pg_statistic_ext,3381,StatisticExtRelationId)
 
 	Oid			stxowner BKI_LOOKUP(pg_authid); /* statistics object's owner */
 
-	/*
-	 * variable-length/nullable fields start here, but we allow direct access
-	 * to stxkeys
-	 */
-	int2vector	stxkeys BKI_FORCE_NOT_NULL; /* array of column keys */
-
 #ifdef CATALOG_VARLEN
 	int16		stxstattarget BKI_DEFAULT(_null_) BKI_FORCE_NULL;	/* statistics target */
 	char		stxkind[1] BKI_FORCE_NOT_NULL;	/* statistics kinds requested
 												 * to build */
-	pg_node_tree stxexprs;		/* A list of expression trees for stats
-								 * attributes that are not simple column
-								 * references. */
+	pg_node_tree stxexprs BKI_FORCE_NOT_NULL;	/* expression trees for the
+												 * columns and expressions the
+												 * statistics object is
+												 * defined on; simple columns
+												 * are Var nodes */
 #endif
 
 } FormData_pg_statistic_ext;
@@ -81,7 +77,6 @@ DECLARE_INDEX(pg_statistic_ext_relid_index, 3379, StatisticExtRelidIndexId, pg_s
 MAKE_SYSCACHE(STATEXTOID, pg_statistic_ext_oid_index, 4);
 MAKE_SYSCACHE(STATEXTNAMENSP, pg_statistic_ext_name_index, 4);
 
-DECLARE_ARRAY_FOREIGN_KEY((stxrelid, stxkeys), pg_attribute, (attrelid, attnum));
 
 #ifdef EXPOSE_TO_CLIENT_CODE
 

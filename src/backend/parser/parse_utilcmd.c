@@ -2042,9 +2042,9 @@ generateClonedIndexStmt(RangeVar *heapRel, Relation source_idx,
  * extended statistic "source_statsid", for the rel identified by heapRel and
  * heapRelid.
  *
- * stxkeys in the source statistic holds attribute numbers from the parent
+ * stxexprs in the source statistic holds Var nodes referencing the parent
  * relation.  Those attnums, along with the attribute numbers referenced by
- * Vars inside the expression tree, are remapped to the new relation's
+ * Vars inside complex expressions, are remapped to the new relation's
  * numbering according to attmap.
  */
 static CreateStatsStmt *
@@ -2052,15 +2052,16 @@ generateClonedExtStatsStmt(RangeVar *heapRel, Oid heapRelid,
 						   Oid source_statsid, const AttrMap *attmap)
 {
 	HeapTuple	ht_stats;
-	Form_pg_statistic_ext statsrec;
 	CreateStatsStmt *stats;
 	List	   *stat_types = NIL;
 	List	   *def_names = NIL;
-	bool		isnull;
 	Datum		datum;
 	ArrayType  *arr;
 	char	   *enabled;
 	int			i;
+	ListCell   *lc;
+	List	   *exprs = NIL;
+	char	   *exprsString;
 
 	Assert(OidIsValid(heapRelid));
 	Assert(heapRel != NULL);
@@ -2071,7 +2072,6 @@ generateClonedExtStatsStmt(RangeVar *heapRel, Oid heapRelid,
 	ht_stats = SearchSysCache1(STATEXTOID, ObjectIdGetDatum(source_statsid));
 	if (!HeapTupleIsValid(ht_stats))
 		elog(ERROR, "cache lookup failed for statistics object %u", source_statsid);
-	statsrec = (Form_pg_statistic_ext) GETSTRUCT(ht_stats);
 
 	/* Determine which statistics types exist */
 	datum = SysCacheGetAttrNotNull(STATEXTOID, ht_stats,
@@ -2097,44 +2097,31 @@ generateClonedExtStatsStmt(RangeVar *heapRel, Oid heapRelid,
 			elog(ERROR, "unrecognized statistics kind %c", enabled[i]);
 	}
 
-	/* Determine which columns the statistics are on */
-	for (i = 0; i < statsrec->stxkeys.dim1; i++)
-	{
-		StatsElem  *selem = makeNode(StatsElem);
-		AttrNumber	attnum = statsrec->stxkeys.values[i];
-
-		selem->name =
-			get_attname(heapRelid, attmap->attnums[attnum - 1], false);
-		selem->expr = NULL;
-
-		def_names = lappend(def_names, selem);
-	}
-
 	/*
-	 * Now handle expressions, if there are any. The order (with respect to
-	 * regular attributes) does not really matter for extended stats, so we
-	 * simply append them after simple column references.
-	 *
-	 * XXX Some places during build/estimation treat expressions as if they
-	 * are before attributes, but for the CREATE command that's entirely
-	 * irrelevant.
+	 * Decode stxexprs to reconstruct the list of columns and expressions.
+	 * Simple Var nodes represent plain column references; other nodes are
+	 * complex expressions.
 	 */
-	datum = SysCacheGetAttr(STATEXTOID, ht_stats,
-							Anum_pg_statistic_ext_stxexprs, &isnull);
+	datum = SysCacheGetAttrNotNull(STATEXTOID, ht_stats,
+								   Anum_pg_statistic_ext_stxexprs);
+	exprsString = TextDatumGetCString(datum);
+	exprs = (List *) stringToNode(exprsString);
 
-	if (!isnull)
+	foreach(lc, exprs)
 	{
-		ListCell   *lc;
-		List	   *exprs = NIL;
-		char	   *exprsString;
+		Node	   *expr = (Node *) lfirst(lc);
+		StatsElem  *selem = makeNode(StatsElem);
 
-		exprsString = TextDatumGetCString(datum);
-		exprs = (List *) stringToNode(exprsString);
-
-		foreach(lc, exprs)
+		if (IsA(expr, Var) && ((Var *) expr)->varattno > 0)
 		{
-			Node	   *expr = (Node *) lfirst(lc);
-			StatsElem  *selem = makeNode(StatsElem);
+			AttrNumber	attnum = ((Var *) expr)->varattno;
+
+			selem->name =
+				get_attname(heapRelid, attmap->attnums[attnum - 1], false);
+			selem->expr = NULL;
+		}
+		else
+		{
 			bool		found_whole_row;
 
 			/* Adjust Vars to match new table's column numbering */
@@ -2146,12 +2133,12 @@ generateClonedExtStatsStmt(RangeVar *heapRel, Oid heapRelid,
 
 			selem->name = NULL;
 			selem->expr = expr;
-
-			def_names = lappend(def_names, selem);
 		}
 
-		pfree(exprsString);
+		def_names = lappend(def_names, selem);
 	}
+
+	pfree(exprsString);
 
 	/* finally, build the output node */
 	stats = makeNode(CreateStatsStmt);

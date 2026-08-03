@@ -1541,30 +1541,32 @@ CREATE STATISTICS stts (dependencies) ON city, zip FROM zipcodes;
 
 ANALYZE zipcodes;
 
-SELECT stxkeys AS k, jsonb_pretty(stxddependencies::text::jsonb) AS dep
+SELECT jsonb_pretty(stxddependencies::text::jsonb) AS dep
   FROM pg_statistic_ext JOIN pg_statistic_ext_data ON (oid = stxoid)
   WHERE stxname = 'stts';
--[ RECORD 1 ]--------------------
-k   | 1 5
-dep | [                          +
-    |     {                      +
-    |         "degree": 1.000000,+
-    |         "attributes": [    +
-    |             1              +
-    |         ],                 +
-    |         "dependency": 5    +
-    |     },                     +
-    |     {                      +
-    |         "degree": 0.423130,+
-    |         "attributes": [    +
-    |             5              +
-    |         ],                 +
-    |         "dependency": 1    +
-    |     }                      +
-    | ]
+             dep
+-----------------------------
+ [                          +
+     {                      +
+         "degree": 1.000000,+
+         "attributes": [    +
+             1              +
+         ],                 +
+         "dependency": 5    +
+     },                     +
+     {                      +
+         "degree": 0.423130,+
+         "attributes": [    +
+             5              +
+         ],                 +
+         "dependency": 1    +
+     }                      +
+ ]
 (1 row)
 </programlisting>
-     Here it can be seen that column 1 (zip code) fully determines column
+     The dependency data identifies columns by attribute number: in this
+     table zip is attribute 1 and city is attribute 5.  It can then be seen
+     that column 1 (zip code) fully determines column
      5 (city) so the coefficient is 1.0, while city only determines zip code
      about 42% of the time, meaning that there are many cities (58%) that are
      represented by more than a single ZIP code.
@@ -1647,46 +1649,48 @@ CREATE STATISTICS stts2 (ndistinct) ON city, state, zip FROM zipcodes;
 
 ANALYZE zipcodes;
 
-SELECT stxkeys AS k, jsonb_pretty(stxdndistinct::text::jsonb) AS nd
+SELECT jsonb_pretty(stxdndistinct::text::jsonb) AS nd
   FROM pg_statistic_ext JOIN pg_statistic_ext_data on (oid = stxoid)
   WHERE stxname = 'stts2';
--[ RECORD 1 ]-------------------
-k  | 1 2 5
-nd | [                          +
-   |     {                      +
-   |         "ndistinct": 33178,+
-   |         "attributes": [    +
-   |             1,             +
-   |             2              +
-   |         ]                  +
-   |     },                     +
-   |     {                      +
-   |         "ndistinct": 33178,+
-   |         "attributes": [    +
-   |             1,             +
-   |             5              +
-   |         ]                  +
-   |     },                     +
-   |     {                      +
-   |         "ndistinct": 27435,+
-   |         "attributes": [    +
-   |             2,             +
-   |             5              +
-   |         ]                  +
-   |     },                     +
-   |     {                      +
-   |         "ndistinct": 33178,+
-   |         "attributes": [    +
-   |             1,             +
-   |             2,             +
-   |             5              +
-   |         ]                  +
-   |     }                      +
-   | ]
+             nd
+-----------------------------
+ [                          +
+     {                      +
+         "ndistinct": 33178,+
+         "attributes": [    +
+             1,             +
+             2              +
+         ]                  +
+     },                     +
+     {                      +
+         "ndistinct": 33178,+
+         "attributes": [    +
+             1,             +
+             5              +
+         ]                  +
+     },                     +
+     {                      +
+         "ndistinct": 27435,+
+         "attributes": [    +
+             2,             +
+             5              +
+         ]                  +
+     },                     +
+     {                      +
+         "ndistinct": 33178,+
+         "attributes": [    +
+             1,             +
+             2,             +
+             5              +
+         ]                  +
+     }                      +
+ ]
 (1 row)
 </programlisting>
-     This indicates that there are three combinations of columns that
-     have 33178 distinct values: ZIP code and state; ZIP code and city;
+     As above, the columns appear by attribute number: zip is 1, state is 2
+     and city is 5.  This indicates that there are three combinations of
+     columns that have 33178 distinct values: ZIP code and state; ZIP code
+     and city;
      and ZIP code, city and state (the fact that they are all equal is
      expected given that ZIP code alone is unique in this table).  On the
      other hand, the combination of city and state has only 27435 distinct

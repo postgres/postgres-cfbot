@@ -121,6 +121,12 @@ statext_ndistinct_build(double totalrows, StatsBuildData *data)
 				Assert(AttributeNumberIsValid(item->attributes[j]));
 			}
 
+			/*
+			 * Order the attnums the way dump and restore needs (see
+			 * compare_attnums).
+			 */
+			qsort(item->attributes, k, sizeof(AttrNumber), compare_attnums);
+
 			item->ndistinct =
 				ndistinct_for_combination(totalrows, data, k, combination);
 
@@ -342,13 +348,13 @@ statext_ndistinct_free(MVNDistinct *ndistinct)
  * attributes list correspond to attnums/expressions defined by the extended
  * statistics object.
  *
- * Positive attnums are attributes which must be found in the stxkeys,
- * while negative attnums correspond to an expression number, no attribute
+ * Positive attnums correspond to table columns (excluding virtual generated
+ * columns), while negative attnums correspond to expressions.  No attribute
  * number can be below (0 - numexprs).
  */
 bool
 statext_ndistinct_validate(const MVNDistinct *ndistinct,
-						   const int2vector *stxkeys,
+						   const Bitmapset *keys,
 						   int numexprs, int elevel)
 {
 	int			attnum_expr_lowbound = 0 - numexprs;
@@ -369,15 +375,8 @@ statext_ndistinct_validate(const MVNDistinct *ndistinct,
 
 			if (attnum > 0)
 			{
-				/* attribute number in stxkeys */
-				for (int k = 0; k < stxkeys->dim1; k++)
-				{
-					if (attnum == stxkeys->values[k])
-					{
-						ok = true;
-						break;
-					}
-				}
+				/* attribute number in keys */
+				ok = bms_is_member(attnum, keys);
 			}
 			else if ((attnum < 0) && (attnum >= attnum_expr_lowbound))
 			{
