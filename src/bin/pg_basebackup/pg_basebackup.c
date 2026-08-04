@@ -1029,7 +1029,13 @@ ReceiveCopyData(PGconn *conn, WriteDataCallback callback,
 		int			r;
 		char	   *copybuf;
 
-		r = PQgetCopyData(conn, &copybuf, 0);
+		/*
+		 * Use the no-copy optimization: copybuf points directly into libpq's
+		 * receive buffer and stays valid until the next call, which is all the
+		 * callback needs (this avoids memory copy which hurts at high transfer
+		 * rates).
+		 */
+		r = PQgetCopyDataInternalBuf(conn, &copybuf, 0);
 		if (r == -1)
 		{
 			/* End of chunk. */
@@ -1043,8 +1049,6 @@ ReceiveCopyData(PGconn *conn, WriteDataCallback callback,
 			pg_fatal("background process terminated unexpectedly");
 
 		(*callback) (r, copybuf, callback_data);
-
-		PQfreemem(copybuf);
 	}
 }
 

@@ -564,6 +564,7 @@ extern PGnotify *PQnotifies(PGconn *conn);
 extern int	PQputCopyData(PGconn *conn, const char *buffer, int nbytes);
 extern int	PQputCopyEnd(PGconn *conn, const char *errormsg);
 extern int	PQgetCopyData(PGconn *conn, char **buffer, int async);
+extern int	PQgetCopyDataInternalBuf(PGconn *conn, char **buffer, int async);
 
 /* Deprecated routines for copy in/out */
 extern int	PQgetline(PGconn *conn, char *buffer, int length);
