@@ -57,8 +57,11 @@
 
 #include <limits.h>
 
+#include "access/nbtree.h"
+#include "common/int.h"
 #include "utils/builtins.h"
 #include "utils/fmgrprotos.h"
+#include "utils/rel.h"
 #include "utils/skipsupport.h"
 #include "utils/sortsupport.h"
 
@@ -200,6 +203,143 @@ btint4cmp(PG_FUNCTION_ARGS)
 		PG_RETURN_INT32(0);
 	else
 		PG_RETURN_INT32(A_LESS_THAN_B);
+}
+
+static bool
+btint4pagecmp(Relation rel, BTScanInsert key, Page page, OffsetNumber offnum,
+			  int32 *result)
+{
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+	ScanKey		skey = key->scankeys;
+	int32		search = DatumGetInt32(skey->sk_argument);
+	ItemId		itemid = PageGetItemId(page, offnum);
+	IndexTuple	itup;
+	ItemPointer heapTid;
+	Datum		datum;
+	bool		isnull;
+
+	itup = (IndexTuple) PageGetItem(page, itemid);
+
+	if (likely(!IndexTupleHasNulls(itup)))
+	{
+		int32		value;
+
+		/* int4 is the first and only key, so its offset is fixed. */
+		memcpy(&value, (char *) itup + sizeof(IndexTupleData), sizeof(value));
+		datum = Int32GetDatum(value);
+		isnull = false;
+	}
+	else
+		datum = index_getattr(itup, 1, tupdesc, &isnull);
+
+	if (isnull)
+		*result = (skey->sk_flags & SK_BT_NULLS_FIRST) ? 1 : -1;
+	else if (skey->sk_flags & SK_BT_DESC)
+		*result = pg_cmp_s32(DatumGetInt32(datum), search);
+	else
+		*result = pg_cmp_s32(search, DatumGetInt32(datum));
+
+	if (*result != 0)
+		return true;
+
+	heapTid = BTreeTupleGetHeapTID(itup);
+	if (key->scantid == NULL)
+	{
+		if (!key->backward && heapTid == NULL && key->heapkeyspace)
+			*result = 1;
+		return true;
+	}
+
+	if (heapTid == NULL)
+	{
+		*result = 1;
+		return true;
+	}
+
+	*result = ItemPointerCompare(key->scantid, heapTid);
+	if (*result > 0 && BTreeTupleIsPosting(itup))
+	{
+		*result = ItemPointerCompare(key->scantid,
+									 BTreeTupleGetMaxHeapTID(itup));
+		if (*result <= 0)
+			*result = 0;
+	}
+
+	return true;
+}
+
+/* Nonincremental searches don't need a cached strict upper bound. */
+static inline bool
+btint4binsearch_uncached(Relation rel, BTScanInsert key, Page page,
+						 OffsetNumber low, OffsetNumber high, int32 cmpval,
+						 OffsetNumber *resultoff)
+{
+	while (high > low)
+	{
+		OffsetNumber mid = low + ((high - low) / 2);
+		int32		result;
+		bool		advance;
+
+		if (!btint4pagecmp(rel, key, page, mid, &result))
+			return false;
+		if (unlikely(result == 0 && key->scantid != NULL))
+			return false;
+
+		advance = result >= cmpval;
+		low = advance ? mid + 1 : low;
+		high = advance ? high : mid;
+	}
+
+	*resultoff = low;
+	return true;
+}
+
+/* Single-column page binary search for int4 opclasses. */
+static bool
+btint4binsearch(Relation rel, BTScanInsert key, Page page,
+				OffsetNumber low, OffsetNumber high, int32 cmpval,
+				OffsetNumber *resultoff, OffsetNumber *strictresult)
+{
+	OffsetNumber stricthigh = high;
+
+	if (strictresult == NULL)
+		return btint4binsearch_uncached(rel, key, page, low, high, cmpval,
+										resultoff);
+
+	while (high > low)
+	{
+		OffsetNumber mid = low + ((high - low) / 2);
+		int32		result;
+
+		if (!btint4pagecmp(rel, key, page, mid, &result))
+			return false;
+		if (unlikely(result == 0 && key->scantid != NULL))
+			return false;
+
+		if (result >= cmpval)
+			low = mid + 1;
+		else
+		{
+			high = mid;
+			if (result != 0)
+				stricthigh = high;
+		}
+	}
+
+	*resultoff = low;
+	*strictresult = stricthigh;
+	return true;
+}
+
+Datum
+btint4binsearchsupport(PG_FUNCTION_ARGS)
+{
+	BTBinSearchSupportData *support =
+		(BTBinSearchSupportData *) PG_GETARG_POINTER(0);
+
+	support->compare_tuple = btint4pagecmp;
+	support->binary_search = btint4binsearch;
+	PG_RETURN_VOID();
 }
 
 Datum

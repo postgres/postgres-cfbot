@@ -1374,6 +1374,23 @@ assignProcTypes(OpFamilyMember *member, Oid amoid, Oid typeoid,
 						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
 						 errmsg("btree skip support functions must not be cross-type")));
 		}
+		else if (member->number == BTBINSEARCH_PROC)
+		{
+			if (procform->pronargs != 1 ||
+				procform->proargtypes.values[0] != INTERNALOID)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+						 errmsg("btree binary search support functions must accept type \"internal\"")));
+			if (procform->prorettype != VOIDOID)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+						 errmsg("btree binary search support functions must return void")));
+
+			if (member->lefttype != member->righttype)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+						 errmsg("btree binary search support functions must not be cross-type")));
+		}
 	}
 	else if (GetIndexAmRoutineByAmId(amoid, false)->amcanhash)
 	{

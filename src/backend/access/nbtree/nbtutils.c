@@ -34,6 +34,7 @@
 static int	_bt_compare_int(const void *va, const void *vb);
 static int	_bt_keep_natts(Relation rel, IndexTuple lastleft,
 						   IndexTuple firstright, BTScanInsert itup_key);
+static const BTBinSearchSupportData no_binsearch_support = {0};
 
 
 /*
@@ -94,6 +95,8 @@ _bt_mkscankey(Relation rel, IndexTuple itup)
 	key->nextkey = false;		/* usual case, required by btinsert */
 	key->backward = false;		/* usual case, required by btinsert */
 	key->keysz = Min(indnkeyatts, tupnatts);
+	key->compare_tuple = NULL;
+	key->binary_search = NULL;
 	key->scantid = key->heapkeyspace && itup ?
 		BTreeTupleGetHeapTID(itup) : NULL;
 	skey = key->scankeys;
@@ -143,7 +146,60 @@ _bt_mkscankey(Relation rel, IndexTuple itup)
 	if (rel->rd_index->indnullsnotdistinct)
 		key->anynullkeys = false;
 
+	_bt_setup_binsearch(rel, key);
+
 	return key;
+}
+
+/* Set up an optional opclass-provided single-column page binary search. */
+void
+_bt_setup_binsearch(Relation rel, BTScanInsert key)
+{
+	Oid			proc;
+	FmgrInfo   *procinfo;
+	BTBinSearchSupportData *support;
+	ScanKey		skey;
+
+	key->compare_tuple = NULL;
+	key->binary_search = NULL;
+
+	if (IndexRelationGetNumberOfKeyAttributes(rel) != 1 || key->keysz != 1)
+		return;
+
+	skey = key->scankeys;
+	if (skey->sk_flags & (SK_ISNULL | SK_ROW_HEADER) ||
+		(skey->sk_subtype != InvalidOid &&
+		 skey->sk_subtype != rel->rd_opcintype[0]))
+		return;
+
+	/* Avoid repeating fmgr setup work for every tuple inserted. */
+	procinfo = &rel->rd_supportinfo[BTBINSEARCH_PROC - 1];
+	support = (BTBinSearchSupportData *) procinfo->fn_extra;
+	if (support != NULL)
+	{
+		key->compare_tuple = support->compare_tuple;
+		key->binary_search = support->binary_search;
+		return;
+	}
+
+	proc = index_getprocid(rel, 1, BTBINSEARCH_PROC);
+	if (!OidIsValid(proc))
+	{
+		/* Cache the absence of optional support for subsequent tuples. */
+		procinfo->fn_extra = (void *) &no_binsearch_support;
+		return;
+	}
+
+	procinfo = index_getprocinfo(rel, 1, BTBINSEARCH_PROC);
+	support = (BTBinSearchSupportData *) procinfo->fn_extra;
+	if (support == NULL)
+	{
+		support = MemoryContextAllocZero(procinfo->fn_mcxt, sizeof(*support));
+		FunctionCall1(procinfo, PointerGetDatum(support));
+		procinfo->fn_extra = support;
+	}
+	key->compare_tuple = support->compare_tuple;
+	key->binary_search = support->binary_search;
 }
 
 /*
