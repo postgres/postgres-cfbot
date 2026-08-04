@@ -1216,3 +1216,164 @@ SELECT row_estimate('SELECT * FROM tmp2 WHERE b = 8 AND c = 108');
 (1 row)
 
 DROP TABLE tmp2;
+-- Test DISCARD GLOBAL TEMP
+\c
+SET search_path = global_temp_tests;
+INSERT INTO tmp1 VALUES (1, 'xxx'), (10, 'yyy');
+SELECT * FROM tmp1;
+ a  |  b  | c 
+----+-----+---
+  1 | xxx | 1
+ 10 | yyy | 2
+(2 rows)
+
+CREATE GLOBAL TEMP TABLE tmp2 (a int PRIMARY KEY, b text) PARTITION BY LIST (a);
+CREATE GLOBAL TEMP TABLE tmp2_p1 PARTITION OF tmp2 FOR VALUES IN (1);
+CREATE GLOBAL TEMP TABLE tmp2_p2 PARTITION OF tmp2 FOR VALUES IN (2);
+INSERT INTO tmp2 VALUES (1, 'Row 1'), (2, 'Row 2');
+SELECT tableoid::regclass, * FROM tmp2;
+ tableoid | a |   b   
+----------+---+-------
+ tmp2_p1  | 1 | Row 1
+ tmp2_p2  | 2 | Row 2
+(2 rows)
+
+DISCARD GLOBAL TEMP;
+SELECT tempfrozenxid, tempminmxid
+  FROM pg_stat_activity
+ WHERE pid = pg_backend_pid();
+ tempfrozenxid | tempminmxid 
+---------------+-------------
+               |            
+(1 row)
+
+SELECT oid::regclass FROM pg_gtrs_in_use();
+ oid 
+-----
+(0 rows)
+
+SELECT relname, pg_relation_size(oid)
+  FROM pg_class
+ WHERE (relname ~ 'tmp1' OR relname ~ 'tmp2' OR relname ~ 'pg_temp_')
+   AND relpersistence = 'g' AND relkind IN ('r', 'p')
+ ORDER BY relname;
+          relname           | pg_relation_size 
+----------------------------+------------------
+ pg_temp_statistic          |                0
+ pg_temp_statistic_ext_data |                0
+ tmp1                       |                0
+ tmp2                       |                0
+ tmp2_p1                    |                0
+ tmp2_p2                    |                0
+(6 rows)
+
+-- Relfilenodes should revert back to their defaults after reopening
+SELECT * FROM tmp1;
+ a | b | c 
+---+---+---
+(0 rows)
+
+SELECT * FROM tmp2;
+ a | b 
+---+---
+(0 rows)
+
+SELECT c.relname,
+       t.relfilenode = c.relfilenode,
+       t.reltablespace = c.reltablespace
+  FROM pg_gtrs_in_use() t LEFT JOIN pg_class c ON c.oid = t.oid
+ WHERE c.relname ~ 'tmp1' OR c.relname ~ 'tmp2'
+ ORDER BY c.relname;
+   relname    | ?column? | ?column? 
+--------------+----------+----------
+ tmp1         | t        | t
+ tmp1_pkey    | t        | t
+ tmp2         | t        | t
+ tmp2_p1      | t        | t
+ tmp2_p1_pkey | t        | t
+ tmp2_p2      | t        | t
+ tmp2_p2_pkey | t        | t
+ tmp2_pkey    | t        | t
+(8 rows)
+
+-- Reopening in same transaction should give new relfilenodes
+INSERT INTO tmp1 VALUES (1, 'xxx'), (10, 'yyy');
+BEGIN;
+DISCARD GLOBAL TEMP;
+SELECT * FROM tmp1;
+ a | b | c 
+---+---+---
+(0 rows)
+
+INSERT INTO tmp1 VALUES (1, 'xxx'), (10, 'yyy');
+COMMIT;
+SELECT * FROM tmp1;
+ a  |  b  | c 
+----+-----+---
+  1 | xxx | 1
+ 10 | yyy | 2
+(2 rows)
+
+SELECT c.relname,
+       t.relfilenode = c.relfilenode,
+       t.reltablespace = c.reltablespace
+  FROM pg_gtrs_in_use() t LEFT JOIN pg_class c ON c.oid = t.oid
+ WHERE c.relname ~ 'tmp1' OR c.relname ~ 'tmp2'
+ ORDER BY c.relname;
+  relname   | ?column? | ?column? 
+------------+----------+----------
+ tmp1       | f        | t
+ tmp1_c_seq | f        | t
+ tmp1_pkey  | f        | t
+(3 rows)
+
+-- Test rollback of DISCARD GLOBAL TEMP
+BEGIN;
+DISCARD GLOBAL TEMP;
+ROLLBACK;
+SELECT * FROM tmp1;
+ a  |  b  | c 
+----+-----+---
+  1 | xxx | 1
+ 10 | yyy | 2
+(2 rows)
+
+BEGIN;
+DISCARD GLOBAL TEMP;
+SELECT * FROM tmp1;
+ a | b | c 
+---+---+---
+(0 rows)
+
+ROLLBACK;
+SELECT * FROM tmp1;
+ a  |  b  | c 
+----+-----+---
+  1 | xxx | 1
+ 10 | yyy | 2
+(2 rows)
+
+BEGIN;
+SAVEPOINT sp;
+DISCARD GLOBAL TEMP;
+SELECT * FROM tmp1;
+ a | b | c 
+---+---+---
+(0 rows)
+
+ROLLBACK TO sp;
+SELECT * FROM tmp1;
+ a  |  b  | c 
+----+-----+---
+  1 | xxx | 1
+ 10 | yyy | 2
+(2 rows)
+
+COMMIT;
+SELECT * FROM tmp1;
+ a  |  b  | c 
+----+-----+---
+  1 | xxx | 1
+ 10 | yyy | 2
+(2 rows)
+

@@ -4116,6 +4116,7 @@ typedef enum DiscardMode
 	DISCARD_PLANS,
 	DISCARD_SEQUENCES,
 	DISCARD_TEMP,
+	DISCARD_GLOBAL_TEMP,
 } DiscardMode;
 
 typedef struct DiscardStmt

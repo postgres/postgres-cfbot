@@ -656,3 +656,72 @@ SELECT COUNT(*) FROM tmp2 WHERE b = 8 AND c = 108;
 SELECT row_estimate('SELECT * FROM tmp2 WHERE b = 8 AND c = 108');
 
 DROP TABLE tmp2;
+
+-- Test DISCARD GLOBAL TEMP
+\c
+SET search_path = global_temp_tests;
+INSERT INTO tmp1 VALUES (1, 'xxx'), (10, 'yyy');
+SELECT * FROM tmp1;
+CREATE GLOBAL TEMP TABLE tmp2 (a int PRIMARY KEY, b text) PARTITION BY LIST (a);
+CREATE GLOBAL TEMP TABLE tmp2_p1 PARTITION OF tmp2 FOR VALUES IN (1);
+CREATE GLOBAL TEMP TABLE tmp2_p2 PARTITION OF tmp2 FOR VALUES IN (2);
+INSERT INTO tmp2 VALUES (1, 'Row 1'), (2, 'Row 2');
+SELECT tableoid::regclass, * FROM tmp2;
+
+DISCARD GLOBAL TEMP;
+SELECT tempfrozenxid, tempminmxid
+  FROM pg_stat_activity
+ WHERE pid = pg_backend_pid();
+SELECT oid::regclass FROM pg_gtrs_in_use();
+SELECT relname, pg_relation_size(oid)
+  FROM pg_class
+ WHERE (relname ~ 'tmp1' OR relname ~ 'tmp2' OR relname ~ 'pg_temp_')
+   AND relpersistence = 'g' AND relkind IN ('r', 'p')
+ ORDER BY relname;
+
+-- Relfilenodes should revert back to their defaults after reopening
+SELECT * FROM tmp1;
+SELECT * FROM tmp2;
+SELECT c.relname,
+       t.relfilenode = c.relfilenode,
+       t.reltablespace = c.reltablespace
+  FROM pg_gtrs_in_use() t LEFT JOIN pg_class c ON c.oid = t.oid
+ WHERE c.relname ~ 'tmp1' OR c.relname ~ 'tmp2'
+ ORDER BY c.relname;
+
+-- Reopening in same transaction should give new relfilenodes
+INSERT INTO tmp1 VALUES (1, 'xxx'), (10, 'yyy');
+BEGIN;
+DISCARD GLOBAL TEMP;
+SELECT * FROM tmp1;
+INSERT INTO tmp1 VALUES (1, 'xxx'), (10, 'yyy');
+COMMIT;
+SELECT * FROM tmp1;
+
+SELECT c.relname,
+       t.relfilenode = c.relfilenode,
+       t.reltablespace = c.reltablespace
+  FROM pg_gtrs_in_use() t LEFT JOIN pg_class c ON c.oid = t.oid
+ WHERE c.relname ~ 'tmp1' OR c.relname ~ 'tmp2'
+ ORDER BY c.relname;
+
+-- Test rollback of DISCARD GLOBAL TEMP
+BEGIN;
+DISCARD GLOBAL TEMP;
+ROLLBACK;
+SELECT * FROM tmp1;
+
+BEGIN;
+DISCARD GLOBAL TEMP;
+SELECT * FROM tmp1;
+ROLLBACK;
+SELECT * FROM tmp1;
+
+BEGIN;
+SAVEPOINT sp;
+DISCARD GLOBAL TEMP;
+SELECT * FROM tmp1;
+ROLLBACK TO sp;
+SELECT * FROM tmp1;
+COMMIT;
+SELECT * FROM tmp1;

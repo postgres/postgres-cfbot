@@ -96,6 +96,7 @@ extern GtrInfo *GetGlobalTempRelationInfoForUpdate(Oid relid);
 extern GtrInfo *GetGlobalTempRelationInfoForInPlaceUpdate(Oid relid);
 extern HeapTuple GetEffectivePgClassTuple(Oid relid);
 extern HeapTuple GetEffectivePgIndexTuple(Oid indexrelid);
+extern void DiscardGlobalTempRelations(void);
 
 /*
  * Get the effective value of relfilenode for a relation.  For a global
