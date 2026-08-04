@@ -55,6 +55,7 @@
 #include "access/genam.h"
 #include "access/multixact.h"
 #include "access/parallel.h"
+#include "access/relation.h"
 #include "access/table.h"
 #include "access/tableam.h"
 #include "access/xact.h"
@@ -201,6 +202,11 @@ static SubTransactionId processed_dropped_subid = InvalidSubTransactionId;
  *	be updated on commit.  See comments in UpdateTempFrozenXids().
  */
 static bool update_tempfrozenxids = false;
+
+/*
+ * Subtransaction ID in which we executed DISCARD GLOBAL TEMP.
+ */
+static SubTransactionId discard_subid = InvalidSubTransactionId;
 
 /*
  * gtr_shared_usage
@@ -1457,6 +1463,70 @@ AtEOXact_GlobalTempRelation(bool isCommit)
 	processed_dropped_subid = InvalidSubTransactionId;
 
 	/*
+	 * Are we committing a DISCARD GLOBAL TEMP?
+	 *
+	 * DiscardGlobalTempRelations() scheduled all storage for user-defined
+	 * relations to be deleted, and by this point, all hash table entries for
+	 * that storage will have been removed.  Now remove all usage records for
+	 * those relations, if they still have no storage (they may have new
+	 * storage, if they were reopened after the DISCARD).
+	 */
+	if (discard_subid != InvalidSubTransactionId && isCommit &&
+		gtr_local_usage != NULL)
+	{
+		hash_seq_init(&status, gtr_local_usage);
+		while ((usage_entry = hash_seq_search(&status)) != NULL)
+		{
+			GtrInfo    *gtr_info = &usage_entry->history.info;
+
+			/* Skip relations that have storage (new or reopened relations) */
+			if (RELKIND_HAS_STORAGE(usage_entry->relkind))
+			{
+				RelFileLocator rlocator;
+
+				if (gtr_info->reltablespace != 0)
+					rlocator.spcOid = gtr_info->reltablespace;
+				else
+					rlocator.spcOid = MyDatabaseTableSpace;
+				rlocator.dbOid = MyDatabaseId;
+				rlocator.relNumber = gtr_info->relfilenode;
+
+				if (FIND_LOCAL_STORAGE_ENTRY(rlocator) != NULL)
+					continue;
+			}
+
+			/*
+			 * Also skip relations with reltuples > 0.
+			 *
+			 * Since DiscardGlobalTempRelations() sets reltuples to 0, this
+			 * can only happen if the relation was created or reopened after
+			 * the DISCARD, and then analyzed.  Since it has no storage, it
+			 * must be a partitioned relation, and the updated reltuples value
+			 * is worth keeping.  Otherwise, if reltuples is 0 or -1 (the
+			 * initial defaults), then we can safely remove the usage record,
+			 * since it serves no other useful purpose for a partitioned
+			 * relation.
+			 */
+			if (gtr_info->reltuples > 0)
+			{
+				Assert(!RELKIND_HAS_STORAGE(usage_entry->relkind));
+				continue;
+			}
+
+			/*
+			 * Remove the usage record, and mark the relation as invalid in
+			 * the relcache, to force it to be reinitialized if it's reopened.
+			 */
+			gtr_remove_usage(usage_entry->relid);
+			RelationMarkInvalid(usage_entry->relid);
+		}
+
+		/* Trigger a recompute of tempfrozenxid and tempminmxid */
+		update_tempfrozenxids = true;
+	}
+	discard_subid = InvalidSubTransactionId;
+
+	/*
 	 * Finally, on commit, update tempfrozenxid and tempminmxid, if requested.
 	 *
 	 * Note that any usage records for dropped relations will have been
@@ -1570,6 +1640,15 @@ AtEOSubXact_GlobalTempRelation(bool isCommit, SubTransactionId mySubid,
 			processed_dropped_subid = parentSubid;
 		else
 			processed_dropped_subid = InvalidSubTransactionId;
+	}
+
+	/* Update discard_subid */
+	if (discard_subid == mySubid)
+	{
+		if (isCommit)
+			discard_subid = parentSubid;
+		else
+			discard_subid = InvalidSubTransactionId;
 	}
 
 	/* Don't reset the lists; we still need more cleanup later */
@@ -1820,6 +1899,101 @@ GetEffectivePgIndexTuple(Oid indexrelid)
 			index_form->indisvalid = gtr_info->indisvalid;
 	}
 	return tuple;
+}
+
+/*
+ * DiscardGlobalTempRelations
+ *
+ *	DISCARD GLOBAL TEMP/TEMPORARY --- delete all storage created for global
+ *	temporary relations and remove all usage records, restoring the session to
+ *	the state it had before any global temporary relations were opened.
+ */
+void
+DiscardGlobalTempRelations(void)
+{
+	/*
+	 * This is a two stage process.  In the first stage (here), we remove all
+	 * storage associated with global temporary relations, but we keep their
+	 * usage records and associated relation information.  In the second stage
+	 * (on main transaction commit), if the DISCARD has survived without
+	 * (sub)transaction rollback, the associated usage records are deleted.
+	 * This approach allows for rollback of the DISCARD and also reopening
+	 * (and hence reinitialization) of relations in the same transaction,
+	 * which then creates new storage and prevents the usage records from
+	 * being discarded.
+	 */
+	if (gtr_local_usage != NULL)
+	{
+		HASH_SEQ_STATUS status;
+		GtrUsageEntry *entry;
+
+		hash_seq_init(&status, gtr_local_usage);
+		while ((entry = hash_seq_search(&status)) != NULL)
+		{
+			Oid			relid = entry->relid;
+			Relation	rel;
+			RelFileNumber newrelfilenumber;
+			GtrInfo    *gtr_info;
+
+			/* Skip dropped relations */
+			if (entry->stopped_subid != InvalidSubTransactionId)
+				continue;
+
+			/* Skip relations that don't have storage */
+			if (!RELKIND_HAS_STORAGE(entry->relkind))
+				continue;
+
+			/*
+			 * Schedule the relation's current storage for deletion and
+			 * allocate a new relfilenumber, but don't actually create new
+			 * storage.  The new storage will be created if it is reopened.
+			 */
+			rel = relation_open(relid, AccessExclusiveLock);
+
+			newrelfilenumber = GetNewRelFileNumber(rel->rd_rel->reltablespace,
+												   NULL,
+												   rel->rd_rel->relpersistence);
+			RelationDropStorage(rel);
+
+			RelationAssumeNewRelfilelocator(rel);
+
+			relation_close(rel, NoLock);
+
+			/*
+			 * Update the session-local information for the relation to point
+			 * to the new storage, and reset all the other fields.
+			 */
+			gtr_info = GetGlobalTempRelationInfoForUpdate(relid);
+
+			gtr_info->relfilenode = newrelfilenumber;
+			gtr_info->relpages = 0;
+			gtr_info->reltuples = 0;
+			gtr_info->relallvisible = 0;
+			gtr_info->relallfrozen = 0;
+			gtr_info->relfrozenxid = InvalidTransactionId;
+			gtr_info->relminmxid = InvalidMultiXactId;
+
+			/*
+			 * Mark the relcache entry as invalid.  This will force a reload
+			 * and reinitialize with the new storage, if it is reopened in the
+			 * same transaction.  (If it is not reopened until after this
+			 * transaction commits, the above information will have been
+			 * deleted, along with the usage record, so it will reset back to
+			 * its original default relfilenode for reinitialization.)
+			 */
+			RelationMarkInvalid(relid);
+
+			/* Forget its ON COMMIT action */
+			remove_on_commit_action(relid);
+		}
+
+		/*
+		 * Make note of the subtransaction ID in which we did this, so we can
+		 * track whether it survives to the end of the main transaction.
+		 */
+		if (discard_subid == InvalidSubTransactionId)
+			discard_subid = GetCurrentSubTransactionId();
+	}
 }
 
 /*

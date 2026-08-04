@@ -2121,7 +2121,7 @@ CheckPointStmt:
 
 /*****************************************************************************
  *
- * DISCARD { ALL | TEMP | PLANS | SEQUENCES }
+ * DISCARD { ALL | TEMP | PLANS | SEQUENCES | GLOBAL TEMP }
  *
  *****************************************************************************/
 
@@ -2159,6 +2159,20 @@ DiscardStmt:
 					DiscardStmt *n = makeNode(DiscardStmt);
 
 					n->target = DISCARD_SEQUENCES;
+					$$ = (Node *) n;
+				}
+			| DISCARD GLOBAL TEMP
+				{
+					DiscardStmt *n = makeNode(DiscardStmt);
+
+					n->target = DISCARD_GLOBAL_TEMP;
+					$$ = (Node *) n;
+				}
+			| DISCARD GLOBAL TEMPORARY
+				{
+					DiscardStmt *n = makeNode(DiscardStmt);
+
+					n->target = DISCARD_GLOBAL_TEMP;
 					$$ = (Node *) n;
 				}
 
