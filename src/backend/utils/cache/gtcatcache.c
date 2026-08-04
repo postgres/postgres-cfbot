@@ -1003,3 +1003,36 @@ AtEOSubXact_GTCatCache(bool isCommit, SubTransactionId mySubid,
 		/* Don't reset eoxact_list; we still need more cleanup later */
 	}
 }
+
+/*
+ * GTCatCacheDiscard
+ *
+ *	Discard all global temporary catalog cache entries.
+ */
+void
+GTCatCacheDiscard(void)
+{
+	/* Blow away the hash tables */
+	for (int cacheId = 0; cacheId < NUM_GT_CAT_CACHES; cacheId++)
+	{
+		GTCatCache *cache = &gt_cat_cache[cacheId];
+
+		if (cache->hashtable != NULL)
+		{
+			hash_destroy(cache->hashtable);
+			cache->hashtable = NULL;
+		}
+		cache->eoxact_list_len = 0;
+		cache->eoxact_list_overflowed = false;
+	}
+
+	/* Delete the tuple memory context */
+	if (gt_cat_cache_tupctx != NULL)
+	{
+		MemoryContextDelete(gt_cat_cache_tupctx);
+		gt_cat_cache_tupctx = NULL;
+	}
+
+	/* No entries to flush */
+	have_entries_to_flush = false;
+}

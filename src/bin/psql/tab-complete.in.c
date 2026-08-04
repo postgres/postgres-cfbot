@@ -4390,7 +4390,7 @@ match_previous_words(int pattern_id,
 
 /* DISCARD */
 	else if (Matches("DISCARD"))
-		COMPLETE_WITH("ALL", "PLANS", "SEQUENCES", "TEMP");
+		COMPLETE_WITH("ALL", "GLOBAL TEMP", "PLANS", "SEQUENCES", "TEMP");
 
 /* DO */
 	else if (Matches("DO"))
