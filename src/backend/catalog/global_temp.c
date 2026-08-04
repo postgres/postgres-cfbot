@@ -55,6 +55,7 @@
 #include "access/genam.h"
 #include "access/multixact.h"
 #include "access/parallel.h"
+#include "access/relation.h"
 #include "access/table.h"
 #include "access/tableam.h"
 #include "access/xact.h"
@@ -181,6 +182,11 @@ static SubTransactionId processed_dropped_subid = InvalidSubTransactionId;
  *	be updated on commit.  See comments in UpdateTempFrozenXids().
  */
 static bool update_tempfrozenxids = false;
+
+/*
+ * Subtransaction ID in which we executed DISCARD GLOBAL TEMP.
+ */
+static SubTransactionId discard_subid = InvalidSubTransactionId;
 
 /*
  * gtr_shared_usage
@@ -652,6 +658,65 @@ gtr_remove_usage(Oid relid)
 		/* No more backends using it */
 		dshash_delete_entry(gtr_shared_usage, shared_entry);
 	}
+}
+
+/*
+ * gtr_finalize_discard
+ *
+ *	Final stage of DISCARD GLOBAL TEMP/TEMPORARY.  This is invoked on commit,
+ *	if no additional user global temporary relations were created or reopened
+ *	after the DISCARD --- see DiscardGlobalTempRelations().
+ */
+static void
+gtr_finalize_discard(void)
+{
+	HASH_SEQ_STATUS status;
+	GtrUsageEntry *usage_entry;
+
+	/*
+	 * By the time we get here, all storage for user-defined global temporary
+	 * relations should have been deleted.  Delete all remaining storage (for
+	 * global temporary system catalog relations).
+	 */
+	if (gtr_local_storage)
+	{
+		ProcNumber	backend;
+		GtrStorageEntry *storage_entry;
+
+		backend = ProcNumberForTempRelations();
+
+		hash_seq_init(&status, gtr_local_storage);
+		while ((storage_entry = hash_seq_search(&status)) != NULL)
+		{
+			SMgrRelation srel;
+
+			Assert(IsCatalogRelationOid(storage_entry->relid));
+
+			srel = smgropen(storage_entry->rlocator, backend);
+			smgrdounlinkall(&srel, 1, false);
+			smgrclose(srel);
+
+			(void) hash_search(gtr_local_storage, &storage_entry->rlocator,
+							   HASH_REMOVE, NULL);
+
+			RelationMarkInvalid(storage_entry->relid);
+		}
+	}
+
+	/* Remove all usage records */
+	hash_seq_init(&status, gtr_local_usage);
+	while ((usage_entry = hash_seq_search(&status)) != NULL)
+	{
+		gtr_remove_usage(usage_entry->relid);
+		RelationMarkInvalid(usage_entry->relid);
+	}
+
+	/* Discard all cached pg_temp_class and pg_temp_index tuples */
+	GTCatCacheDiscard();
+
+	/* Reset tempfrozenxid and tempminmxid for this backend */
+	MyProc->tempfrozenxid = InvalidTransactionId;
+	MyProc->tempminmxid = InvalidMultiXactId;
 }
 
 /*
@@ -1396,6 +1461,38 @@ AtEOXact_GlobalTempRelation(bool isCommit)
 	processing_invalidated_gtrs = false;
 	processed_dropped_subid = InvalidSubTransactionId;
 
+	/*
+	 * Are we committing a DISCARD GLOBAL TEMP?
+	 *
+	 * DiscardGlobalTempRelations() scheduled all storage for user-defined
+	 * relations to be deleted, and by this point, all hash table entries for
+	 * that storage will have been removed.  However, we must check if there
+	 * is any new storage for any user-defined relations, in case any global
+	 * temporary relations were created or reopened after the DISCARD.
+	 */
+	if (discard_subid != InvalidSubTransactionId && isCommit)
+	{
+		bool		discard_ok = true;
+
+		if (gtr_local_storage)
+		{
+			hash_seq_init(&status, gtr_local_storage);
+			while ((storage_entry = hash_seq_search(&status)) != NULL)
+			{
+				if (!IsCatalogRelationOid(storage_entry->relid))
+				{
+					discard_ok = false;
+					hash_seq_term(&status);
+					break;
+				}
+			}
+		}
+
+		if (discard_ok)
+			gtr_finalize_discard();
+	}
+	discard_subid = InvalidSubTransactionId;
+
 	/* Clean up global temporary catalog caches */
 	AtEOXact_GTCatCache(isCommit);
 
@@ -1488,6 +1585,15 @@ AtEOSubXact_GlobalTempRelation(bool isCommit, SubTransactionId mySubid,
 			processed_dropped_subid = InvalidSubTransactionId;
 	}
 
+	/* Update discard_subid */
+	if (discard_subid == mySubid)
+	{
+		if (isCommit)
+			discard_subid = parentSubid;
+		else
+			discard_subid = InvalidSubTransactionId;
+	}
+
 	/* Clean up global temporary catalog caches */
 	AtEOSubXact_GTCatCache(isCommit, mySubid, parentSubid);
 
@@ -1572,4 +1678,114 @@ GetAllGlobalTempRelationsInUse(Oid dbid)
 	dshash_seq_term(&status);
 
 	return rels_in_use;
+}
+
+/*
+ * DiscardGlobalTempRelations
+ *
+ *	DISCARD GLOBAL TEMP/TEMPORARY --- delete all storage created for global
+ *	temporary relations and remove all usage records, restoring the session to
+ *	the state it had before any global temporary relations were opened.
+ */
+void
+DiscardGlobalTempRelations(void)
+{
+	/*
+	 * This is a two stage process.  In the first stage (here), we remove all
+	 * storage associated with user-defined global temporary relations, but we
+	 * keep their usage records and global temporary system catalog entries.
+	 * In the second stage (on main transaction commit), if the DISCARD has
+	 * survived without (sub)transaction rollback, and all the user-defined
+	 * relations still have no storage (none were created or reopened), we
+	 * remove all remaining storage (the storage used by global temporary
+	 * system catalog relations) and delete all storage and usage records.
+	 */
+	if (gtr_local_usage != NULL)
+	{
+		List	   *relids = NIL;
+		HASH_SEQ_STATUS status;
+		GtrUsageEntry *entry;
+
+		hash_seq_init(&status, gtr_local_usage);
+		while ((entry = hash_seq_search(&status)) != NULL)
+		{
+			Oid			relid = entry->relid;
+			Relation	rel;
+			RelFileNumber newrelfilenumber;
+			HeapTuple	tuple;
+			Form_pg_temp_class form;
+
+			/* Skip system catalogs */
+			if (IsCatalogRelationOid(relid))
+				continue;
+
+			/* Skip dropped relations */
+			if (entry->stopped_subid != InvalidSubTransactionId)
+				continue;
+
+			/* Skip relations that don't have storage */
+			if (!RELKIND_HAS_STORAGE(entry->relkind))
+				continue;
+
+			/*
+			 * Schedule the relation's current storage for deletion and
+			 * allocate a new relfilenumber, but don't actually create new
+			 * storage.  The new storage will be created if it is reopened.
+			 */
+			rel = relation_open(relid, AccessExclusiveLock);
+
+			newrelfilenumber = GetNewRelFileNumber(rel->rd_rel->reltablespace,
+												   NULL,
+												   rel->rd_rel->relpersistence);
+			RelationDropStorage(rel);
+
+			RelationAssumeNewRelfilelocator(rel);
+
+			/* Forget its ON COMMIT action */
+			remove_on_commit_action(relid);
+
+			/* Update its pg_temp_class entry */
+			tuple = GetPgTempClassTuple(relid);
+			if (!HeapTupleIsValid(tuple))
+				elog(ERROR, "could not find tuple for relation %u", relid);
+
+			form = (Form_pg_temp_class) GETSTRUCT(tuple);
+			form->relfilenode = newrelfilenumber;
+			form->relpages = 0;
+			form->reltuples = 0;
+			form->relallvisible = 0;
+			form->relallfrozen = 0;
+
+			UpdatePgTempClassTuple(relid, tuple);
+
+			heap_freetuple(tuple);
+
+			relation_close(rel, NoLock);
+
+			relids = lappend_oid(relids, relid);
+		}
+
+		/*
+		 * Make the pg_temp_class changes visible.  This will cause the
+		 * relcache entries to get updated, too.
+		 */
+		CommandCounterIncrement();
+
+		/*
+		 * Mark all the relcache entries for the relations whose storage we
+		 * deleted as invalid.  This will force a reload and reinitialize with
+		 * new storage the next time they are opened.
+		 */
+		foreach_oid(relid, relids)
+		{
+			RelationMarkInvalid(relid);
+		}
+
+		/*
+		 * Make note of the subtransaction ID in which we did this, so we can
+		 * track whether it survives to the end of the main transaction.
+		 */
+		if (discard_subid == InvalidSubTransactionId)
+			discard_subid = GetCurrentSubTransactionId();
+	}
 }

@@ -42,5 +42,6 @@ extern void GTCatCacheFlush(void);
 extern void AtEOXact_GTCatCache(bool isCommit);
 extern void AtEOSubXact_GTCatCache(bool isCommit, SubTransactionId mySubid,
 								   SubTransactionId parentSubid);
+extern void GTCatCacheDiscard(void);
 
 #endif							/* GTCATCACHE_H */

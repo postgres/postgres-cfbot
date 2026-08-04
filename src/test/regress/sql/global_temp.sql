@@ -619,3 +619,29 @@ SELECT tempfrozenxid::text::bigint - (SELECT min(relfrozenxid::text::bigint)
  WHERE pid = pg_backend_pid();
 
 DROP TABLE tmp2;
+
+-- Test DISCARD GLOBAL TEMP
+\c
+SET search_path = global_temp_tests;
+INSERT INTO tmp1 VALUES (1, 'xxx'), (10, 'yyy');
+SELECT * FROM tmp1;
+CREATE GLOBAL TEMP TABLE tmp2 (a int PRIMARY KEY, b text) PARTITION BY LIST (a);
+CREATE GLOBAL TEMP TABLE tmp2_p1 PARTITION OF tmp2 FOR VALUES IN (1);
+CREATE GLOBAL TEMP TABLE tmp2_p2 PARTITION OF tmp2 FOR VALUES IN (2);
+INSERT INTO tmp2 VALUES (1, 'Row 1'), (2, 'Row 2');
+SELECT tableoid::regclass, * FROM tmp2;
+
+DISCARD GLOBAL TEMP;
+SELECT tempfrozenxid, tempminmxid
+  FROM pg_stat_activity
+ WHERE pid = pg_backend_pid();
+SELECT relname, pg_relation_size(oid)
+  FROM pg_class
+ WHERE (relname ~ 'tmp1' OR relname ~ 'tmp2' OR relname ~ 'pg_temp_')
+   AND relpersistence = 'g' AND relkind IN ('r', 'p')
+ ORDER BY relname;
+SELECT * FROM tmp1;
+SELECT * FROM tmp2;
+
+INSERT INTO tmp1 VALUES (1, 'xxx'), (10, 'yyy');
+SELECT * FROM tmp1;

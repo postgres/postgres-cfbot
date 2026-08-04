@@ -14,6 +14,7 @@
 #include "postgres.h"
 
 #include "access/xact.h"
+#include "catalog/global_temp.h"
 #include "catalog/namespace.h"
 #include "commands/async.h"
 #include "commands/discard.h"
@@ -26,7 +27,7 @@
 static void DiscardAll(bool isTopLevel);
 
 /*
- * DISCARD { ALL | SEQUENCES | TEMP | PLANS }
+ * DISCARD { ALL | SEQUENCES | TEMP | PLANS | GLOBAL TEMP }
  */
 void
 DiscardCommand(DiscardStmt *stmt, bool isTopLevel)
@@ -47,6 +48,10 @@ DiscardCommand(DiscardStmt *stmt, bool isTopLevel)
 
 		case DISCARD_TEMP:
 			ResetTempTableNamespace();
+			break;
+
+		case DISCARD_GLOBAL_TEMP:
+			DiscardGlobalTempRelations();
 			break;
 
 		default:
@@ -76,4 +81,5 @@ DiscardAll(bool isTopLevel)
 	ResetPlanCache();
 	ResetTempTableNamespace();
 	ResetSequenceCaches();
+	DiscardGlobalTempRelations();
 }

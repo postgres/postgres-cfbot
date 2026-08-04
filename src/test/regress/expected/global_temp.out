@@ -1200,3 +1200,69 @@ SELECT tempfrozenxid::text::bigint - (SELECT min(relfrozenxid::text::bigint)
 (1 row)
 
 DROP TABLE tmp2;
+-- Test DISCARD GLOBAL TEMP
+\c
+SET search_path = global_temp_tests;
+INSERT INTO tmp1 VALUES (1, 'xxx'), (10, 'yyy');
+SELECT * FROM tmp1;
+ a  |  b  | c 
+----+-----+---
+  1 | xxx | 1
+ 10 | yyy | 2
+(2 rows)
+
+CREATE GLOBAL TEMP TABLE tmp2 (a int PRIMARY KEY, b text) PARTITION BY LIST (a);
+CREATE GLOBAL TEMP TABLE tmp2_p1 PARTITION OF tmp2 FOR VALUES IN (1);
+CREATE GLOBAL TEMP TABLE tmp2_p2 PARTITION OF tmp2 FOR VALUES IN (2);
+INSERT INTO tmp2 VALUES (1, 'Row 1'), (2, 'Row 2');
+SELECT tableoid::regclass, * FROM tmp2;
+ tableoid | a |   b   
+----------+---+-------
+ tmp2_p1  | 1 | Row 1
+ tmp2_p2  | 2 | Row 2
+(2 rows)
+
+DISCARD GLOBAL TEMP;
+SELECT tempfrozenxid, tempminmxid
+  FROM pg_stat_activity
+ WHERE pid = pg_backend_pid();
+ tempfrozenxid | tempminmxid 
+---------------+-------------
+               |            
+(1 row)
+
+SELECT relname, pg_relation_size(oid)
+  FROM pg_class
+ WHERE (relname ~ 'tmp1' OR relname ~ 'tmp2' OR relname ~ 'pg_temp_')
+   AND relpersistence = 'g' AND relkind IN ('r', 'p')
+ ORDER BY relname;
+          relname           | pg_relation_size 
+----------------------------+------------------
+ pg_temp_class              |                0
+ pg_temp_index              |                0
+ pg_temp_statistic          |                0
+ pg_temp_statistic_ext_data |                0
+ tmp1                       |                0
+ tmp2                       |                0
+ tmp2_p1                    |                0
+ tmp2_p2                    |                0
+(8 rows)
+
+SELECT * FROM tmp1;
+ a | b | c 
+---+---+---
+(0 rows)
+
+SELECT * FROM tmp2;
+ a | b 
+---+---
+(0 rows)
+
+INSERT INTO tmp1 VALUES (1, 'xxx'), (10, 'yyy');
+SELECT * FROM tmp1;
+ a  |  b  | c 
+----+-----+---
+  1 | xxx | 1
+ 10 | yyy | 2
+(2 rows)
+

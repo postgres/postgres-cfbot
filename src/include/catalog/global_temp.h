@@ -34,5 +34,6 @@ extern void AtEOSubXact_GlobalTempRelation(bool isCommit,
 extern bool IsGlobalTempRelationInUse(Oid relid);
 extern bool IsOtherUsingGlobalTempRelation(Oid relid);
 extern List *GetAllGlobalTempRelationsInUse(Oid dbId);
+extern void DiscardGlobalTempRelations(void);
 
 #endif							/* GLOBAL_TEMP_H */
