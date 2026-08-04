@@ -908,11 +908,15 @@ CREATE TABLE btree_binsearch_control (k int4, v int4);
 INSERT INTO btree_binsearch_fast
 SELECT CASE WHEN g % 101 = 0 THEN NULL ELSE g % 257 - 128 END, g
 FROM generate_series(1, 20000) g;
+INSERT INTO btree_binsearch_fast
+SELECT g * 1000000, -10000 + g FROM generate_series(-2000, 2000) g;
+INSERT INTO btree_binsearch_fast VALUES
+  ('-2147483648', -20001), (2147483647, -20002);
 INSERT INTO btree_binsearch_control SELECT * FROM btree_binsearch_fast;
 CREATE INDEX btree_binsearch_fast_idx ON btree_binsearch_fast
-  (k DESC NULLS FIRST) WITH (deduplicate_items = on);
+  (k) WITH (deduplicate_items = on);
 CREATE INDEX btree_binsearch_control_idx ON btree_binsearch_control
-  (k btree_no_binsearch_ops DESC NULLS FIRST);
+  (k btree_no_binsearch_ops);
 -- Exercise insertion into a multilevel index, including duplicate keys.
 INSERT INTO btree_binsearch_fast
 SELECT g % 31 - 15, 20000 + g FROM generate_series(1, 2000) g;
@@ -952,6 +956,55 @@ SELECT
    WHERE k >= -10 AND k < 10) =
   (SELECT array_agg(v ORDER BY v) FROM btree_binsearch_control
    WHERE k >= -10 AND k < 10);
+ ?column? 
+----------
+ t
+(1 row)
+
+-- Compare exact boundary positions across duplicates, gaps, and int4 limits.
+WITH q(k) AS
+  (SELECT g::int4 FROM generate_series(-2000000000::bigint,
+                                       2000000000::bigint, 100000000) g
+   UNION ALL VALUES ('-2147483648'), (-129), (-128), (-1), (0), (1),
+                    (128), (129), (2147483647))
+SELECT bool_and(
+  ARRAY(SELECT v FROM btree_binsearch_fast
+        WHERE btree_binsearch_fast.k = q.k ORDER BY v) =
+  ARRAY(SELECT v FROM btree_binsearch_control
+        WHERE btree_binsearch_control.k = q.k ORDER BY v) AND
+  ARRAY(SELECT v FROM btree_binsearch_fast
+        WHERE btree_binsearch_fast.k >= q.k ORDER BY k, v LIMIT 10) =
+  ARRAY(SELECT v FROM btree_binsearch_control
+        WHERE btree_binsearch_control.k >= q.k ORDER BY k, v LIMIT 10) AND
+  ARRAY(SELECT v FROM btree_binsearch_fast
+        WHERE btree_binsearch_fast.k > q.k ORDER BY k, v LIMIT 10) =
+  ARRAY(SELECT v FROM btree_binsearch_control
+        WHERE btree_binsearch_control.k > q.k ORDER BY k, v LIMIT 10) AND
+  ARRAY(SELECT v FROM btree_binsearch_fast
+        WHERE btree_binsearch_fast.k <= q.k ORDER BY k DESC, v LIMIT 10) =
+  ARRAY(SELECT v FROM btree_binsearch_control
+        WHERE btree_binsearch_control.k <= q.k ORDER BY k DESC, v LIMIT 10) AND
+  ARRAY(SELECT v FROM btree_binsearch_fast
+        WHERE btree_binsearch_fast.k < q.k ORDER BY k DESC, v LIMIT 10) =
+  ARRAY(SELECT v FROM btree_binsearch_control
+        WHERE btree_binsearch_control.k < q.k ORDER BY k DESC, v LIMIT 10))
+FROM q;
+ bool_and 
+----------
+ t
+(1 row)
+
+-- Exercise the same boundary rules with descending physical key order.
+DROP INDEX btree_binsearch_fast_idx, btree_binsearch_control_idx;
+CREATE INDEX btree_binsearch_fast_idx ON btree_binsearch_fast
+  (k DESC NULLS FIRST);
+CREATE INDEX btree_binsearch_control_idx ON btree_binsearch_control
+  (k btree_no_binsearch_ops DESC NULLS FIRST);
+SELECT
+  (SELECT array_agg(v ORDER BY v) FROM btree_binsearch_fast
+   WHERE k >= -128 AND k <= 128) =
+  (SELECT array_agg(v ORDER BY v) FROM btree_binsearch_control
+   WHERE k >= -128 AND k <= 128);
  ?column? 
 ----------
  t
