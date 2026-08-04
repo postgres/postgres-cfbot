@@ -341,6 +341,9 @@ _bt_moveright(Relation rel,
  * This procedure is not responsible for walking right, it just examines
  * the given page.  _bt_binsrch() has no lock or refcount side effects
  * on the buffer.
+ *
+ * NB: Keep opclass binary_search callbacks in sync with changes to the
+ * search semantics here or in _bt_binsrch_insert().
  */
 static OffsetNumber
 _bt_binsrch(Relation rel,
@@ -391,6 +394,27 @@ _bt_binsrch(Relation rel,
 
 	cmpval = key->nextkey ? 0 : 1;	/* select comparison value */
 
+	/*
+	 * A specialized search may skip the minus-infinity first item on an
+	 * internal page.  It can decline at run time, in which case use the
+	 * generic comparison loop from its original bounds.
+	 */
+	if (key->binary_search != NULL)
+	{
+		OffsetNumber resultoff;
+		OffsetNumber searchlow = low;
+
+		if (!P_ISLEAF(opaque))
+			searchlow++;
+
+		if (key->binary_search(rel, key, page, searchlow, high, cmpval,
+							   &resultoff, NULL))
+		{
+			low = resultoff;
+			goto search_done;
+		}
+	}
+
 	while (high > low)
 	{
 		OffsetNumber mid = low + ((high - low) / 2);
@@ -404,6 +428,8 @@ _bt_binsrch(Relation rel,
 		else
 			high = mid;
 	}
+
+search_done:
 
 	/*
 	 * At this point we have high == low.
@@ -472,6 +498,9 @@ _bt_binsrch(Relation rel,
  * tuple matches (callers can use insertstate's postingoff field to
  * determine which existing heap TID will need to be replaced by a posting
  * list split).
+ *
+ * NB: Keep opclass binary_search callbacks in sync with changes to the
+ * search semantics here or in _bt_binsrch().
  */
 OffsetNumber
 _bt_binsrch_insert(Relation rel, BTInsertState insertstate)
@@ -530,6 +559,25 @@ _bt_binsrch_insert(Relation rel, BTInsertState insertstate)
 	stricthigh = high;			/* high initially strictly higher */
 
 	cmpval = 1;					/* !nextkey comparison value */
+
+	/*
+	 * Let an opclass complete the search using a specialized implementation.
+	 * It may decline at run time, in which case the generic loop starts from
+	 * the original bounds.
+	 */
+	if (!insertstate->bounds_valid && key->binary_search != NULL)
+	{
+		OffsetNumber keylow;
+		OffsetNumber keystricthigh;
+
+		if (key->binary_search(rel, key, page, low, high, cmpval,
+							   &keylow, &keystricthigh))
+		{
+			low = keylow;
+			high = keylow;
+			stricthigh = keystricthigh;
+		}
+	}
 
 	while (high > low)
 	{
@@ -685,6 +733,9 @@ _bt_binsrch_posting(BTScanInsert key, Page page, OffsetNumber offnum)
  * that isn't relied upon.  This allows us to implement the Lehman and
  * Yao convention that the first down-link pointer is before the first
  * key.  See backend/access/nbtree/README for details.
+ *
+ * NB: Keep opclass compare_tuple callbacks in sync with changes to the
+ * comparison semantics here.
  *----------
  */
 int32
@@ -712,6 +763,10 @@ _bt_compare(Relation rel,
 	 */
 	if (!P_ISLEAF(opaque) && offnum == P_FIRSTDATAKEY(opaque))
 		return 1;
+
+	if (key->compare_tuple != NULL &&
+		key->compare_tuple(rel, key, page, offnum, &result))
+		return result;
 
 	itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, offnum));
 	ntupatts = BTreeTupleGetNAtts(itup, rel);
@@ -1445,6 +1500,9 @@ _bt_first(IndexScanDesc scan, ScanDirection dir)
 	inskey.anynullkeys = false; /* unused */
 	inskey.scantid = NULL;
 	inskey.keysz = keysz;
+	inskey.compare_tuple = NULL;
+	inskey.binary_search = NULL;
+	_bt_setup_binsearch(rel, &inskey);
 	switch (strat_total)
 	{
 		case BTLessStrategyNumber:
