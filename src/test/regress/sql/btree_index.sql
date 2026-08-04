@@ -523,3 +523,73 @@ CREATE TABLE btree_part (id int4) PARTITION BY RANGE (id);
 CREATE INDEX btree_part_idx ON btree_part(id);
 ALTER INDEX btree_part_idx ALTER COLUMN id SET (n_distinct=100);
 DROP TABLE btree_part;
+
+-- Test the optional single-column page binary search support function.
+CREATE OPERATOR FAMILY btree_no_binsearch_family USING btree;
+CREATE OPERATOR CLASS btree_no_binsearch_ops
+FOR TYPE int4 USING btree FAMILY btree_no_binsearch_family AS
+  OPERATOR 1 < (int4, int4),
+  OPERATOR 2 <= (int4, int4),
+  OPERATOR 3 = (int4, int4),
+  OPERATOR 4 >= (int4, int4),
+  OPERATOR 5 > (int4, int4),
+  FUNCTION 1 btint4cmp(int4, int4);
+
+CREATE TABLE btree_binsearch_fast (k int4, v int4);
+CREATE TABLE btree_binsearch_control (k int4, v int4);
+INSERT INTO btree_binsearch_fast
+SELECT CASE WHEN g % 101 = 0 THEN NULL ELSE g % 257 - 128 END, g
+FROM generate_series(1, 20000) g;
+INSERT INTO btree_binsearch_control SELECT * FROM btree_binsearch_fast;
+CREATE INDEX btree_binsearch_fast_idx ON btree_binsearch_fast
+  (k DESC NULLS FIRST) WITH (deduplicate_items = on);
+CREATE INDEX btree_binsearch_control_idx ON btree_binsearch_control
+  (k btree_no_binsearch_ops DESC NULLS FIRST);
+
+-- Exercise insertion into a multilevel index, including duplicate keys.
+INSERT INTO btree_binsearch_fast
+SELECT g % 31 - 15, 20000 + g FROM generate_series(1, 2000) g;
+INSERT INTO btree_binsearch_control
+SELECT g % 31 - 15, 20000 + g FROM generate_series(1, 2000) g;
+ANALYZE btree_binsearch_fast;
+ANALYZE btree_binsearch_control;
+
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+
+-- Existing, missing, NULL, and range scan keys must give identical results.
+SELECT
+  (SELECT array_agg(v ORDER BY v) FROM btree_binsearch_fast WHERE k = 7) =
+  (SELECT array_agg(v ORDER BY v) FROM btree_binsearch_control WHERE k = 7);
+SELECT
+  (SELECT count(*) FROM btree_binsearch_fast WHERE k = 1000) =
+  (SELECT count(*) FROM btree_binsearch_control WHERE k = 1000);
+SELECT
+  (SELECT array_agg(v ORDER BY v) FROM btree_binsearch_fast WHERE k IS NULL) =
+  (SELECT array_agg(v ORDER BY v) FROM btree_binsearch_control WHERE k IS NULL);
+SELECT
+  (SELECT array_agg(v ORDER BY v) FROM btree_binsearch_fast
+   WHERE k >= -10 AND k < 10) =
+  (SELECT array_agg(v ORDER BY v) FROM btree_binsearch_control
+   WHERE k >= -10 AND k < 10);
+
+-- Check both scan directions across many leaf pages.
+SELECT
+  (SELECT array_agg(k) FROM
+     (SELECT k FROM btree_binsearch_fast
+      WHERE k IS NOT NULL ORDER BY k ASC) s) =
+  (SELECT array_agg(k) FROM
+     (SELECT k FROM btree_binsearch_control
+      WHERE k IS NOT NULL ORDER BY k ASC) s);
+SELECT
+  (SELECT array_agg(k) FROM
+     (SELECT k FROM btree_binsearch_fast
+      WHERE k IS NOT NULL ORDER BY k DESC) s) =
+  (SELECT array_agg(k) FROM
+     (SELECT k FROM btree_binsearch_control
+      WHERE k IS NOT NULL ORDER BY k DESC) s);
+
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+DROP TABLE btree_binsearch_fast, btree_binsearch_control;
+DROP OPERATOR FAMILY btree_no_binsearch_family USING btree;

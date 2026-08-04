@@ -406,7 +406,7 @@
 
   <para>
    B-trees require a comparison support function,
-   and allow four additional support functions to be
+   and allow six additional support functions to be
    supplied at the operator class author's option, as shown in <xref
    linkend="xindex-btree-support-table"/>.
    The requirements for these support functions are explained further in
@@ -467,6 +467,13 @@
         (optional)
        </entry>
        <entry>6</entry>
+      </row>
+      <row>
+       <entry>
+        Return the address of a C-callable index-page binary search function
+        (optional)
+       </entry>
+       <entry>7</entry>
       </row>
      </tbody>
     </tgroup>
@@ -1084,7 +1091,8 @@ DEFAULT FOR TYPE int4 USING btree FAMILY integer_ops AS
   FUNCTION 2 btint4sortsupport(internal) ,
   FUNCTION 3 in_range(int4, int4, int4, boolean, boolean) ,
   FUNCTION 4 btequalimage(oid) ,
-  FUNCTION 6 btint4skipsupport(internal) ;
+  FUNCTION 6 btint4skipsupport(internal) ,
+  FUNCTION 7 btint4binsearchsupport(internal) ;
 
 CREATE OPERATOR CLASS int2_ops
 DEFAULT FOR TYPE int2 USING btree FAMILY integer_ops AS
