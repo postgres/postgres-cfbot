@@ -1353,9 +1353,26 @@ CREATE VIEW pg_stat_progress_vacuum AS
         CASE S.param13 WHEN 1 THEN 'manual'
                        WHEN 2 THEN 'autovacuum'
                        WHEN 3 THEN 'autovacuum_wraparound'
-                       ELSE NULL END AS started_by
+                       ELSE NULL END AS started_by,
+        I.index_vacuum_pids AS index_vacuum_pids,
+        I.index_vacuum_oids AS index_vacuum_oids
     FROM pg_stat_get_progress_info('VACUUM') AS S
-        LEFT JOIN pg_database D ON S.datid = D.oid;
+        LEFT JOIN pg_database D ON S.datid = D.oid
+        LEFT JOIN pg_stat_activity A ON S.pid = A.pid,
+        LATERAL (
+            -- Aggregate the indexes being processed by this vacuum's leader
+            -- and its parallel workers (if any) into the single leader row.
+            -- Both arrays use the same ORDER BY so that they stay aligned by
+            -- position; the leader is listed first when it is itself
+            -- processing an index.
+            SELECT array_agg(W.pid ORDER BY W.pid <> S.pid, W.pid) AS index_vacuum_pids,
+                   array_agg(CAST(W.param14 AS oid) ORDER BY W.pid <> S.pid, W.pid) AS index_vacuum_oids
+            FROM pg_stat_get_progress_info('VACUUM') AS W
+                LEFT JOIN pg_stat_activity WA ON W.pid = WA.pid
+            WHERE COALESCE(WA.leader_pid, W.pid) = S.pid
+              AND W.param14 <> 0
+        ) I
+    WHERE A.leader_pid IS NULL;
 
 CREATE VIEW pg_stat_progress_repack AS
     SELECT
