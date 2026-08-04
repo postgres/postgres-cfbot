@@ -259,7 +259,7 @@
                                         #   fsync_writethrough
                                         #   open_sync
 #full_page_writes = on                  # recover from partial page writes
-#wal_log_hints = off                    # also do full page writes of non-critical updates
+#wal_log_hints = off                    # also log non-critical updates
                                         # (change requires restart)
 #wal_compression = off                  # enables compression of full-page writes;
                                         # off, on, zstd, lz4, or pglz (on means the first

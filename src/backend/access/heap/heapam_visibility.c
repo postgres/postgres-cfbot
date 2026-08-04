@@ -67,6 +67,7 @@
 #include "postgres.h"
 
 #include "access/heapam.h"
+#include "access/heapam_hint.h"
 #include "access/htup_details.h"
 #include "access/multixact.h"
 #include "access/tableam.h"
@@ -110,7 +111,7 @@ typedef enum SetHintBitsState
  * The right to set a hint bit can be acquired on a page level with
  * BufferBeginSetHintBits(). Only a single backend gets the right to set hint
  * bits at a time.  Alternatively, if called with a NULL SetHintBitsState*,
- * hint bits are set with BufferSetHintBits16().
+ * hint bits are set with BufferSetHintBits16WithWal().
  *
  * It is only safe to set a transaction-committed hint bit if we know the
  * transaction's commit record is guaranteed to be flushed to disk before the
@@ -166,15 +167,16 @@ SetHintBitsExt(HeapTupleHeader tuple, Buffer buffer,
 	}
 
 	/*
-	 * If we're not operating in batch mode, use BufferSetHintBits16() to mark
-	 * the page dirty, that's cheaper than
-	 * BufferBeginSetHintBits()/BufferFinishSetHintBits(). That's important
-	 * for cases where we set a lot of hint bits on a page individually.
+	 * If we're not operating in batch mode, use BufferSetHintBits16WithWal()
+	 * to mark the page dirty.  That's cheaper than BufferBeginSetHintBits() /
+	 * BufferFinishSetHintBitsWithWal(), which is important for cases where we
+	 * set a lot of hint bits on a page individually.
 	 */
 	if (!state)
 	{
-		BufferSetHintBits16(&tuple->t_infomask,
-							tuple->t_infomask | infomask, buffer);
+		BufferSetHintBits16WithWal(&tuple->t_infomask,
+								   tuple->t_infomask | infomask, buffer,
+								   log_heap_hint_bits);
 		return;
 	}
 
@@ -1713,7 +1715,8 @@ HeapTupleSatisfiesMVCCBatch(Snapshot snapshot, Buffer buffer,
 	}
 
 	if (state == SHB_ENABLED)
-		BufferFinishSetHintBits(buffer, true, true);
+		BufferFinishSetHintBitsWithWal(buffer, true, true,
+									   log_heap_hint_bits);
 
 	return nvis;
 }
