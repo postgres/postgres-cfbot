@@ -641,6 +641,13 @@ that includes the hint. We do this to avoid a partial page write, when we
 write the dirtied page. WAL is not written during recovery, so we simply skip
 dirtying blocks because of hints when in recovery.
 
+When wal_log_hints is enabled without checksums, heap tuple visibility hints
+are stored in compact WAL records containing tuple offsets and hint bits.
+Such a record deliberately does not advance the page LSN.  Its block reference
+is sufficient for pg_rewind, while leaving the LSN unchanged ensures that the
+next ordinary page change still generates the full-page image required after
+a checkpoint.  Other kinds of hints still use XLOG_FPI_FOR_HINT.
+
 If you do decide to optimise away a WAL record, then any calls to
 MarkBufferDirty() must be replaced by MarkBufferDirtyHint(),
 otherwise you will expose the risk of partial page writes.

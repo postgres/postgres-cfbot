@@ -17,6 +17,7 @@ OBJS = \
 	gindesc.o \
 	gistdesc.o \
 	hashdesc.o \
+	heap_hintdesc.o \
 	heapdesc.o \
 	logicalmsgdesc.o \
 	mxactdesc.o \

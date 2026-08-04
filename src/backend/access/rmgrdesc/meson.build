@@ -10,6 +10,7 @@ rmgr_desc_sources = files(
   'gindesc.c',
   'gistdesc.c',
   'hashdesc.c',
+  'heap_hintdesc.c',
   'heapdesc.c',
   'logicalmsgdesc.c',
   'mxactdesc.c',
