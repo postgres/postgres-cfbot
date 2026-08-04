@@ -2845,6 +2845,32 @@ PQgetCopyData(PGconn *conn, char **buffer, int async)
 }
 
 /*
+ * PQgetCopyDataInternalBuf - variant of PQgetCopyData which bypasses memcpy()
+ * for high data transfer rates.
+ *
+ * Set *buffer to point directly into the internal receive buffer rather
+ * allocate and copy memory on every call. The *buffer is valid only until the
+ * next PQgetCopyDataInternalBuf/PQgetCopyData call on this connection, and must
+ * not be passed to PQfreemem().  The returned payload is NOT null-terminated.
+ *
+ * Otherwise it is pretty much the same as the original PQgetCopyData.
+ */
+int
+PQgetCopyDataInternalBuf(PGconn *conn, char **buffer, int async)
+{
+	*buffer = NULL;				/* for all failure cases */
+	if (!conn)
+		return -2;
+	if (conn->asyncStatus != PGASYNC_COPY_OUT &&
+		conn->asyncStatus != PGASYNC_COPY_BOTH)
+	{
+		libpq_append_conn_error(conn, "no COPY in progress");
+		return -2;
+	}
+	return pqGetCopyDataInternalBuf3(conn, buffer, async);
+}
+
+/*
  * PQgetline - gets a newline-terminated string from the backend.
  *
  * Chiefly here so that applications can use "COPY <rel> to stdout"
