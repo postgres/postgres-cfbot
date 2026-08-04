@@ -205,6 +205,26 @@ btint4cmp(PG_FUNCTION_ARGS)
 		PG_RETURN_INT32(A_LESS_THAN_B);
 }
 
+static inline bool
+btint4tuplevalue(IndexTuple itup, int32 *value)
+{
+	if (IndexTupleHasNulls(itup))
+		return false;
+
+	/* int4 is the first and only key, so its offset is fixed. */
+	memcpy(value, (char *) itup + sizeof(IndexTupleData), sizeof(*value));
+	return true;
+}
+
+static inline bool
+btint4pagevalue(Page page, OffsetNumber offnum, int32 *value)
+{
+	IndexTuple	itup;
+
+	itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, offnum));
+	return btint4tuplevalue(itup, value);
+}
+
 static bool
 btint4pagecmp(Relation rel, BTScanInsert key, Page page, OffsetNumber offnum,
 			  int32 *result)
@@ -212,6 +232,7 @@ btint4pagecmp(Relation rel, BTScanInsert key, Page page, OffsetNumber offnum,
 	TupleDesc	tupdesc = RelationGetDescr(rel);
 	ScanKey		skey = key->scankeys;
 	int32		search = DatumGetInt32(skey->sk_argument);
+	int32		value;
 	ItemId		itemid = PageGetItemId(page, offnum);
 	IndexTuple	itup;
 	ItemPointer heapTid;
@@ -220,12 +241,8 @@ btint4pagecmp(Relation rel, BTScanInsert key, Page page, OffsetNumber offnum,
 
 	itup = (IndexTuple) PageGetItem(page, itemid);
 
-	if (likely(!IndexTupleHasNulls(itup)))
+	if (likely(btint4tuplevalue(itup, &value)))
 	{
-		int32		value;
-
-		/* int4 is the first and only key, so its offset is fixed. */
-		memcpy(&value, (char *) itup + sizeof(IndexTupleData), sizeof(value));
 		datum = Int32GetDatum(value);
 		isnull = false;
 	}
@@ -274,6 +291,64 @@ btint4binsearch_uncached(Relation rel, BTScanInsert key, Page page,
 						 OffsetNumber low, OffsetNumber high, int32 cmpval,
 						 OffsetNumber *resultoff)
 {
+	/*
+	 * Interpolation can find the boundary with at most four key reads.  Avoid
+	 * its division overhead when binary search is already about that short.
+	 */
+	if (high - low >= 32)
+	{
+		int32		lowval;
+		int32		highval;
+
+		if (btint4pagevalue(page, low, &lowval) &&
+			btint4pagevalue(page, high - 1, &highval) &&
+			lowval != highval)
+		{
+			int32		search = DatumGetInt32(key->scankeys->sk_argument);
+			bool		desc = key->scankeys->sk_flags & SK_BT_DESC;
+			int64		span = desc ? (int64) lowval - highval :
+				(int64) highval - lowval;
+			int64		delta = desc ? (int64) lowval - search :
+				(int64) search - lowval;
+
+			if (span > 0 && delta >= 0 && delta <= span)
+			{
+				OffsetNumber probe = low +
+					(delta * (high - low - 1)) / span;
+				OffsetNumber neighbor;
+				int32		result;
+				bool		advance;
+				bool		neighbor_advance;
+
+				if (!btint4pagecmp(rel, key, page, probe, &result))
+					return false;
+				advance = result >= cmpval;
+				if ((advance && OffsetNumberNext(probe) == high) ||
+					(!advance && probe == low))
+				{
+					*resultoff = advance ? high : low;
+					return true;
+				}
+
+				neighbor = advance ? OffsetNumberNext(probe) :
+					OffsetNumberPrev(probe);
+				if (!btint4pagecmp(rel, key, page, neighbor, &result))
+					return false;
+				neighbor_advance = result >= cmpval;
+				if (advance != neighbor_advance)
+				{
+					*resultoff = advance ? neighbor : probe;
+					return true;
+				}
+
+				if (advance)
+					low = OffsetNumberNext(neighbor);
+				else
+					high = probe;
+			}
+		}
+	}
+
 	while (high > low)
 	{
 		OffsetNumber mid = low + ((high - low) / 2);
@@ -281,8 +356,6 @@ btint4binsearch_uncached(Relation rel, BTScanInsert key, Page page,
 		bool		advance;
 
 		if (!btint4pagecmp(rel, key, page, mid, &result))
-			return false;
-		if (unlikely(result == 0 && key->scantid != NULL))
 			return false;
 
 		advance = result >= cmpval;
