@@ -210,13 +210,14 @@ astreamer_buffer_until(astreamer *streamer, const char **data, int *len,
  * Functions for creating astreamer objects of various types. See the header
  * comments for each of these functions for details.
  */
-extern astreamer *astreamer_plain_writer_new(char *pathname, FILE *file);
+extern astreamer *astreamer_plain_writer_new(char *pathname, FILE *file,
+											 bool verbose);
 extern astreamer *astreamer_gzip_writer_new(char *pathname, FILE *file,
 											pg_compress_specification *compress);
 extern astreamer *astreamer_extractor_new(const char *basepath,
 										  const char *(*link_map) (const char *),
 										  void (*report_output_file) (const char *),
-										  bool discard_backup);
+										  bool discard_backup, bool verbose);
 
 extern astreamer *astreamer_gzip_decompressor_new(astreamer *next);
 extern astreamer *astreamer_lz4_compressor_new(astreamer *next,
