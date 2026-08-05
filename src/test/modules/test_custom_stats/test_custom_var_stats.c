@@ -59,16 +59,34 @@ PG_MODULE_MAGIC_EXT(
 /*
  * Backend-local pending statistics before flush to shared memory.
  *
- * numcalls is non-transactional and is flushed on any flush, including an
- * in-transaction one.  numcalls_txn is transactional and becomes visible in
- * shared memory only at a transaction boundary; this demonstrates how a custom
- * kind can defer transaction-dependent counters (see the flush callback).
+ * numcalls and numcalls2 are non-transactional and are flushed on any flush,
+ * including an in-transaction one.  numcalls_txn and numcalls_txn2 are
+ * transactional and become visible in shared memory only at a transaction
+ * boundary; this demonstrates how a custom kind can defer
+ * transaction-dependent counters (see the flush callback).
+ *
+ * The flush callback below demonstrates the "clear what was just flushed"
+ * pattern described in pgstat_internal.h.  It does not keep a separate
+ * flushed baseline like the relation and function stats code does, but it
+ * does split the counters into nested groups so it can cheaply detect whether
+ * there is any non-transactional work to do before taking the lock.
  */
-typedef struct PgStat_StatCustomVarEntry
+typedef struct PgStat_StatCustomVarCountsNonTxn
 {
 	PgStat_Counter numcalls;	/* times statistic was incremented */
-	PgStat_Counter numcalls_txn;	/* likewise, but flushed only at a
-									 * transaction boundary */
+	PgStat_Counter numcalls2;	/* second non-transactional counter */
+}			PgStat_StatCustomVarCountsNonTxn;
+
+typedef struct PgStat_StatCustomVarCountsTxn
+{
+	PgStat_Counter numcalls_txn;	/* flushed only at a transaction boundary */
+	PgStat_Counter numcalls_txn2;	/* second transactional counter */
+}			PgStat_StatCustomVarCountsTxn;
+
+typedef struct PgStat_StatCustomVarEntry
+{
+	PgStat_StatCustomVarCountsNonTxn nontxn;
+	PgStat_StatCustomVarCountsTxn txn;
 } PgStat_StatCustomVarEntry;
 
 /* Shared memory statistics entry visible to all backends */
@@ -99,8 +117,9 @@ static dsa_area *custom_stats_description_dsa = NULL;
  */
 
 /* Flush callback: merge pending stats into shared memory */
-static bool test_custom_stats_var_flush_pending_cb(PgStat_EntryRef *entry_ref,
-												   bool nowait);
+static PgStat_FlushResult test_custom_stats_var_flush_pending_cb(PgStat_EntryRef *entry_ref,
+																 bool nowait,
+																 bool xact_boundary);
 
 /* Serialization callback: write auxiliary entry data */
 static bool test_custom_stats_var_to_serialized_data(const PgStat_HashKey *key,
@@ -160,26 +179,96 @@ _PG_init(void)
  * Called by pgstat collector to flush accumulated local statistics
  * to shared memory where other backends can read them.
  *
- * Returns false only if nowait=true and lock acquisition fails.
+ * This kind carries two non-transactional counters (numcalls, numcalls2) and
+ * two transactional ones (numcalls_txn, numcalls_txn2), to show how a custom
+ * kind can split small counter groups.  The non-transactional counters are
+ * always flushed, even during a transaction.  The transactional counters are
+ * merged into shared memory only at a transaction boundary; during a
+ * transaction they are left pending and PGSTAT_FLUSH_PARTIAL is returned so
+ * the entry is retained and flushed again at the boundary.
+ *
+ * This callback demonstrates the zero-clearing pattern allowed by the
+ * flush_pending_cb contract.  After flushing the non-transactional counter it
+ * clears the local pending field, so a later in-transaction flush does not
+ * need a separate flushed baseline to avoid double counting.
+ *
+ * Returns PGSTAT_FLUSH_LOCK_CONFLICT if nowait=true and lock acquisition
+ * fails.
  */
-static bool
-test_custom_stats_var_flush_pending_cb(PgStat_EntryRef *entry_ref, bool nowait)
+static PgStat_FlushResult
+test_custom_stats_var_flush_pending_cb(PgStat_EntryRef *entry_ref, bool nowait,
+									   bool xact_boundary)
 {
 	PgStat_StatCustomVarEntry *pending_entry;
 	PgStatShared_CustomVarEntry *shared_entry;
+	static const PgStat_StatCustomVarCountsNonTxn zero_nontxn = {0};
+	static const PgStat_StatCustomVarCountsTxn zero_txn = {0};
+	bool		nontxn_pending;
+	bool		txn_pending;
 
 	pending_entry = (PgStat_StatCustomVarEntry *) entry_ref->pending;
 	shared_entry = (PgStatShared_CustomVarEntry *) entry_ref->shared_stats;
 
-	if (!pgstat_lock_entry(entry_ref, nowait))
-		return false;
+	/*
+	 * If there is nothing non-transactional to push right now, avoid taking
+	 * the lock.  During a transaction the deferred counters may still need to
+	 * flush later at the transaction boundary, which is a partial.
+	 *
+	 * These byte compares are safe because the pending entry is zeroed on
+	 * allocation and no field write ever touches the padding.
+	 */
+	nontxn_pending =
+		memcmp(&pending_entry->nontxn, &zero_nontxn,
+			   sizeof(PgStat_StatCustomVarCountsNonTxn)) != 0;
+	txn_pending =
+		memcmp(&pending_entry->txn, &zero_txn,
+			   sizeof(PgStat_StatCustomVarCountsTxn)) != 0;
 
-	/* Add pending counts to shared totals */
-	shared_entry->stats.numcalls += pending_entry->numcalls;
+	if (!nontxn_pending)
+	{
+		if (!xact_boundary && txn_pending)
+			return PGSTAT_FLUSH_PARTIAL;
+		if (!txn_pending)
+			return PGSTAT_FLUSH_DONE;
+	}
+
+	if (!pgstat_lock_entry(entry_ref, nowait))
+		return PGSTAT_FLUSH_LOCK_CONFLICT;
+
+	/* Always flush the non-transactional counters. */
+	shared_entry->stats.nontxn.numcalls += pending_entry->nontxn.numcalls;
+	shared_entry->stats.nontxn.numcalls2 += pending_entry->nontxn.numcalls2;
+
+	/*
+	 * Flush the transactional counters only once we reach a transaction
+	 * boundary, so its effect is not visible to other backends before commit.
+	 */
+	if (xact_boundary)
+	{
+		shared_entry->stats.txn.numcalls_txn += pending_entry->txn.numcalls_txn;
+		shared_entry->stats.txn.numcalls_txn2 += pending_entry->txn.numcalls_txn2;
+	}
 
 	pgstat_unlock_entry(entry_ref);
 
-	return true;
+	/*
+	 * The pending entry is retained across in-transaction flushes (see
+	 * pgstat_flush_pending_entries()), so clear what was just flushed to
+	 * avoid counting it again on a later flush.  Nothing reads these stats
+	 * within the current transaction, so zeroing is correct.
+	 */
+	memset(&pending_entry->nontxn, 0, sizeof(PgStat_StatCustomVarCountsNonTxn));
+
+	if (!xact_boundary)
+	{
+		/* Transactional counters still pending; retain the entry. */
+		if (txn_pending)
+			return PGSTAT_FLUSH_PARTIAL;
+	}
+	else
+		memset(&pending_entry->txn, 0, sizeof(PgStat_StatCustomVarCountsTxn));
+
+	return PGSTAT_FLUSH_DONE;
 }
 
 /*
@@ -583,8 +672,8 @@ test_custom_stats_var_create(PG_FUNCTION_ARGS)
  * test_custom_stats_var_update
  *		Increment custom statistic counter
  *
- * Increments call count in backend-local memory.  Changes are flushed
- * to shared memory by the statistics collector.
+ * Increments the non-transactional counters in backend-local memory.
+ * Changes are flushed to shared memory by the statistics collector.
  */
 PG_FUNCTION_INFO_V1(test_custom_stats_var_update);
 Datum
@@ -599,7 +688,35 @@ test_custom_stats_var_update(PG_FUNCTION_ARGS)
 										  PGSTAT_CUSTOM_VAR_STATS_IDX(stat_name), NULL);
 
 	pending_entry = (PgStat_StatCustomVarEntry *) entry_ref->pending;
-	pending_entry->numcalls++;
+	pending_entry->nontxn.numcalls++;
+	pending_entry->nontxn.numcalls2++;
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * test_custom_stats_var_update_txn
+ *		Increment the transactional custom statistic counter
+ *
+ * Like test_custom_stats_var_update(), but increments the transactional
+ * counter, whose effect is made visible in shared memory only at a transaction
+ * boundary.
+ */
+PG_FUNCTION_INFO_V1(test_custom_stats_var_update_txn);
+Datum
+test_custom_stats_var_update_txn(PG_FUNCTION_ARGS)
+{
+	char	   *stat_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	PgStat_EntryRef *entry_ref;
+	PgStat_StatCustomVarEntry *pending_entry;
+
+	/* Get pending entry in local memory */
+	entry_ref = pgstat_prep_pending_entry(PGSTAT_KIND_TEST_CUSTOM_VAR_STATS, InvalidOid,
+										  PGSTAT_CUSTOM_VAR_STATS_IDX(stat_name), NULL);
+
+	pending_entry = (PgStat_StatCustomVarEntry *) entry_ref->pending;
+	pending_entry->txn.numcalls_txn++;
+	pending_entry->txn.numcalls_txn2++;
 
 	PG_RETURN_VOID();
 }
@@ -628,8 +745,9 @@ test_custom_stats_var_drop(PG_FUNCTION_ARGS)
  * test_custom_stats_var_report
  *		Retrieve custom statistic values
  *
- * Returns single row with statistic name, call count, and description if the
- * statistic exists, otherwise returns no rows.
+ * Returns single row with statistic name, the two non-transactional counters,
+ * the two transactional counters, and description if the statistic exists,
+ * otherwise returns no rows.
  */
 PG_FUNCTION_INFO_V1(test_custom_stats_var_report);
 Datum
@@ -662,8 +780,8 @@ test_custom_stats_var_report(PG_FUNCTION_ARGS)
 
 	if (funcctx->call_cntr < funcctx->max_calls)
 	{
-		Datum		values[3];
-		bool		nulls[3] = {false, false, false};
+		Datum		values[6];
+		bool		nulls[6] = {false, false, false, false, false, false};
 		HeapTuple	tuple;
 		PgStat_EntryRef *entry_ref;
 		PgStatShared_CustomVarEntry *shared_entry;
@@ -696,12 +814,15 @@ test_custom_stats_var_report(PG_FUNCTION_ARGS)
 			}
 
 			values[0] = PointerGetDatum(cstring_to_text(stat_name));
-			values[1] = Int64GetDatum(stat_entry->numcalls);
+			values[1] = Int64GetDatum(stat_entry->nontxn.numcalls);
+			values[2] = Int64GetDatum(stat_entry->nontxn.numcalls2);
+			values[3] = Int64GetDatum(stat_entry->txn.numcalls_txn);
+			values[4] = Int64GetDatum(stat_entry->txn.numcalls_txn2);
 
 			if (description)
-				values[2] = PointerGetDatum(cstring_to_text(description));
+				values[5] = PointerGetDatum(cstring_to_text(description));
 			else
-				nulls[2] = true;
+				nulls[5] = true;
 
 			tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
 			SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
