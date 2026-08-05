@@ -8456,6 +8456,32 @@ select * from grem1;
 (2 rows)
 
 delete from grem1;
+-- test that fdw also use COPY FROM as a remote sql
+alter foreign table grem1 options (add batch_size '10'); -- add batch size to enable COPY
+set client_min_messages to 'log';
+create function insert_or_copy() returns trigger as $$
+declare query text;
+begin
+    query := current_query();
+    raise notice '%', query;
+return new;
+end;
+$$ language plpgsql;
+CREATE TRIGGER trig_row_before
+BEFORE INSERT OR UPDATE OR DELETE ON gloc1
+FOR EACH ROW EXECUTE PROCEDURE insert_or_copy();
+copy grem1 from stdin;
+LOG:  received message via remote connection: NOTICE:  COPY public.gloc1(a) FROM STDIN (FORMAT TEXT)
+drop trigger trig_row_before on gloc1;
+reset client_min_messages;
+alter foreign table grem1 options (drop batch_size);
+-- test that copy does not fail with column_name alias
+create table gloc2(xxx int);
+create foreign table grem2(a int) server loopback options(table_name 'gloc2');
+alter foreign table grem2 alter column a options (column_name 'xxx');
+alter foreign table grem2 options (add batch_size '10'); -- enable COPY
+copy grem2 from stdin;
+alter foreign table grem2 options (drop batch_size);
 -- test batch insert
 alter server loopback options (add batch_size '10');
 explain (verbose, costs off)
@@ -8473,16 +8499,18 @@ insert into grem1 (a) values (1), (2);
 select * from gloc1;
  a | b | c 
 ---+---+---
+ 3 | 6 |  
  1 | 2 |  
  2 | 4 |  
-(2 rows)
+(3 rows)
 
 select * from grem1;
  a | b | c 
 ---+---+---
+ 3 | 6 | 9
  1 | 2 | 3
  2 | 4 | 6
-(2 rows)
+(3 rows)
 
 delete from grem1;
 -- batch insert with foreign partitions.
@@ -8507,6 +8535,12 @@ select count(*) from tab_batch_sharded;
 drop table tab_batch_local;
 drop table tab_batch_sharded;
 drop table tab_batch_sharded_p1_remote;
+-- test batch insert using copy
+set client_min_messages to 'debug1';
+copy grem1 from stdin;
+DEBUG:  postgres_fdw: COPY 10 rows into foreign table
+DEBUG:  postgres_fdw: COPY 2 rows into foreign table
+reset client_min_messages;
 alter server loopback options (drop batch_size);
 -- ===================================================================
 -- test local triggers
@@ -10389,6 +10423,18 @@ select * from rem2;
 (2 rows)
 
 delete from rem2;
+-- Test invalid data types to assert that COPY protocol is finished on
+-- transaction abort
+alter foreign table rem2 options (add batch_size '10'); -- enable COPY
+copy rem2 from stdin;
+ERROR:  invalid input syntax for type integer: "bar"
+CONTEXT:  COPY rem2, line 2, column f1: "bar"
+alter foreign table rem2 options (drop batch_size);
+select * from rem2;
+ f1 | f2 
+----+----
+(0 rows)
+
 -- Test check constraints
 alter table loc2 add constraint loc2_f1positive check (f1 >= 0);
 alter foreign table rem2 add constraint rem2_f1positive check (f1 >= 0);
@@ -10554,7 +10600,8 @@ copy rem2 from stdin;
 copy rem2 from stdin; -- ERROR
 ERROR:  new row for relation "loc2" violates check constraint "loc2_f1positive"
 DETAIL:  Failing row contains (-1, xyzzy).
-CONTEXT:  remote SQL command: INSERT INTO public.loc2(f1, f2) VALUES ($1, $2)
+CONTEXT:  COPY loc2, line 1: "-1	xyzzy"
+remote SQL command: COPY public.loc2(f1, f2) FROM STDIN (FORMAT TEXT)
 COPY rem2
 select * from rem2;
  f1 | f2  
@@ -10593,6 +10640,45 @@ select * from rem2;
 
 drop trigger trig_null on loc2;
 delete from rem2;
+-- Test COPY FROM with column list and special characters
+alter foreign table rem2 options (add batch_size '10'); -- add batch size to enable COPY
+copy rem2 (f1, f2) from stdin;
+select * from rem2;
+ f1 |  f2   
+----+-------
+  1 | hello+
+    | world
+(1 row)
+
+delete from rem2;
+-- Test COPY with NULL and special characters
+copy rem2 from stdin;
+select * from rem2;
+ f1 | f2  
+----+-----
+  1 | 
+    | bar
+  3 | a"b
+(3 rows)
+
+delete from rem2;
+alter foreign table rem2 options (drop batch_size);
+-- Test that float numbers do not loose precision when sending to the foreign
+-- server
+create table f(a float);
+create foreign table f_fdw(a float) server loopback options(table_name 'f');
+alter foreign table f_fdw options (add batch_size '10'); -- enable COPY
+set extra_float_digits = 0;
+copy f_fdw from stdin;
+reset extra_float_digits;
+alter foreign table f_fdw options (drop batch_size);
+select * from f;
+         a          
+--------------------
+ 1.0000000000000002
+(1 row)
+
+drop table f;
 -- Check with zero-column foreign table; batch insert will be disabled
 alter table loc2 drop column f1;
 alter table loc2 drop column f2;
