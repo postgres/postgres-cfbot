@@ -239,7 +239,9 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
    more frequently than once per <varname>PGSTAT_MIN_INTERVAL</varname>
    milliseconds (1 second unless altered while building the server); so a
    query or transaction still in progress does not affect the displayed totals
-   and the displayed information lags behind actual activity.  However,
+   and the displayed information lags behind actual activity, unless the process
+   is asked to flush its pending statistics by calling
+   <function>pg_stat_force_next_flush</function>.  However,
    current-query information collected by <varname>track_activities</varname>
    is always up-to-date.
   </para>
@@ -4536,7 +4538,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
       </para>
       <para>
        The time of the last sequential scan on this table, based on the
-       most recent transaction stop time
+       most recent transaction stop time, or the statement start time
+       when flushed during a transaction
       </para></entry>
      </row>
 
@@ -4564,7 +4567,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
       </para>
       <para>
        The time of the last index scan on this table, based on the
-       most recent transaction stop time
+       most recent transaction stop time, or the statement start time
+       when flushed during a transaction
       </para></entry>
      </row>
 
@@ -5065,7 +5069,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
       </para>
       <para>
        The time of the last scan on this index, based on the
-       most recent transaction stop time
+       most recent transaction stop time, or the statement start time
+       when flushed during a transaction
       </para></entry>
      </row>
 
@@ -5946,11 +5951,12 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        </para>
        <para>
         Forces the statistics accumulated by the current session to be
-        flushed to shared memory when the current transaction ends,
-        without waiting for the
-        <varname>PGSTAT_MIN_INTERVAL</varname> delay between flushes. This
-        is mainly useful in tests that need this flush to happen without
-        that delay.
+        flushed without waiting for the <varname>PGSTAT_MIN_INTERVAL</varname>
+        delay between flushes. When called within a transaction, counters
+        that should only be updated at the end of the transaction, such as
+        tuple inserts, updates, and deletes, are deferred until the
+        transaction ends. This is mainly useful in tests that need this
+        flush to happen without that delay.
        </para></entry>
       </row>
 
