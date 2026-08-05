@@ -61,6 +61,7 @@
 
 #include "access/transam.h"
 #include "catalog/namespace.h"
+#include "commands/extension.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
@@ -243,6 +244,7 @@ CreateCachedPlan(const RawStmt *raw_parse_tree,
 	plansource->rewriteRoleId = InvalidOid;
 	plansource->rewriteRowSecurity = false;
 	plansource->dependsOnRLS = false;
+	plansource->parsedInExtensionScript = false;
 	plansource->gplan = NULL;
 	plansource->is_oneshot = false;
 	plansource->is_complete = false;
@@ -342,6 +344,7 @@ CreateOneShotCachedPlan(RawStmt *raw_parse_tree,
 	plansource->rewriteRoleId = InvalidOid;
 	plansource->rewriteRowSecurity = false;
 	plansource->dependsOnRLS = false;
+	plansource->parsedInExtensionScript = false;
 	plansource->gplan = NULL;
 	plansource->is_oneshot = true;
 	plansource->is_complete = false;
@@ -461,6 +464,9 @@ CompleteCachedPlan(CachedPlanSource *plansource,
 		/* Update RLS info as well. */
 		plansource->rewriteRoleId = GetUserId();
 		plansource->rewriteRowSecurity = row_security;
+
+		/* Remember whether an extension script was running. */
+		plansource->parsedInExtensionScript = creating_extension;
 
 		/*
 		 * Also save the current search_path in the query_context.  (This
@@ -734,6 +740,20 @@ RevalidateCachedQuery(CachedPlanSource *plansource,
 	}
 
 	/*
+	 * Name resolution applies extra trust checks while an extension script
+	 * runs, so a tree analyzed outside one must not be reused inside it or
+	 * vice versa.  The search_path check above need not have caught this.
+	 */
+	if (plansource->is_valid &&
+		plansource->parsedInExtensionScript != creating_extension)
+	{
+		/* Invalidate the querytree and generic plan */
+		plansource->is_valid = false;
+		if (plansource->gplan)
+			plansource->gplan->is_valid = false;
+	}
+
+	/*
 	 * If the query rewrite phase had a possible RLS dependency, we must redo
 	 * it if either the role or the row_security setting has changed.
 	 */
@@ -917,6 +937,9 @@ RevalidateCachedQuery(CachedPlanSource *plansource,
 	/* Update RLS info as well. */
 	plansource->rewriteRoleId = GetUserId();
 	plansource->rewriteRowSecurity = row_security;
+
+	/* Remember whether an extension script was running. */
+	plansource->parsedInExtensionScript = creating_extension;
 
 	/*
 	 * Also save the current search_path in the query_context.  (This should
@@ -1498,6 +1521,7 @@ CachedPlanAllowsSimpleValidityCheck(CachedPlanSource *plansource,
 	Assert(plan == plansource->gplan);
 	Assert(plansource->search_path != NULL);
 	Assert(SearchPathMatchesCurrentEnvironment(plansource->search_path));
+	Assert(plansource->parsedInExtensionScript == creating_extension);
 
 	/* We don't support oneshot plans here. */
 	if (plansource->is_oneshot)
@@ -1623,6 +1647,10 @@ CachedPlanIsSimplyValid(CachedPlanSource *plansource, CachedPlan *plan,
 	if (!SearchPathMatchesCurrentEnvironment(plansource->search_path))
 		return false;
 
+	/* Are we in the same extension-script context as when we made it? */
+	if (plansource->parsedInExtensionScript != creating_extension)
+		return false;
+
 	/* It's still good.  Bump refcount if requested. */
 	if (owner)
 	{
@@ -1743,6 +1771,7 @@ CopyCachedPlan(CachedPlanSource *plansource)
 	newsource->rewriteRoleId = plansource->rewriteRoleId;
 	newsource->rewriteRowSecurity = plansource->rewriteRowSecurity;
 	newsource->dependsOnRLS = plansource->dependsOnRLS;
+	newsource->parsedInExtensionScript = plansource->parsedInExtensionScript;
 
 	newsource->gplan = NULL;
 

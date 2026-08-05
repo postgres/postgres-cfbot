@@ -34,6 +34,7 @@ extern PGDLLIMPORT Oid CurrentExtensionObject;
 
 extern void GetExtensionCreationState(bool *creating, Oid *extensionObject);
 extern void SetExtensionCreationState(bool creating, Oid extensionObject);
+extern bool CurrentExtensionRequires(Oid extensionId);
 
 
 extern ObjectAddress CreateExtension(ParseState *pstate, CreateExtensionStmt *stmt);

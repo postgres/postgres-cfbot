@@ -1,0 +1,3 @@
+comment = 'Test protection against overload capture during extension scripts'
+default_version = '1.0'
+relocatable = false
