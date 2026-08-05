@@ -1153,7 +1153,8 @@ CreateBackupStreamer(char *archive_name, char *spclocation,
 		streamer = astreamer_extractor_new(directory,
 										   get_tablespace_mapping,
 										   progress_update_filename,
-										   backup_target_clientblackhole);
+										   backup_target_clientblackhole,
+										   verbose);
 	}
 	else
 	{
@@ -1191,7 +1192,7 @@ CreateBackupStreamer(char *archive_name, char *spclocation,
 		 */
 		if (compress->algorithm == PG_COMPRESSION_NONE)
 			streamer = astreamer_plain_writer_new(archive_filename,
-												  archive_file);
+												  archive_file, verbose);
 		else if (compress->algorithm == PG_COMPRESSION_GZIP)
 		{
 			if (!backup_target_clientblackhole)
@@ -1204,7 +1205,7 @@ CreateBackupStreamer(char *archive_name, char *spclocation,
 			if (!backup_target_clientblackhole)
 				strlcat(archive_filename, ".lz4", sizeof(archive_filename));
 			streamer = astreamer_plain_writer_new(archive_filename,
-												  archive_file);
+												  archive_file, verbose);
 			streamer = astreamer_lz4_compressor_new(streamer, compress);
 		}
 		else if (compress->algorithm == PG_COMPRESSION_ZSTD)
@@ -1212,7 +1213,7 @@ CreateBackupStreamer(char *archive_name, char *spclocation,
 			if (!backup_target_clientblackhole)
 				strlcat(archive_filename, ".zst", sizeof(archive_filename));
 			streamer = astreamer_plain_writer_new(archive_filename,
-												  archive_file);
+												  archive_file, verbose);
 			streamer = astreamer_zstd_compressor_new(streamer, compress);
 		}
 		else
