@@ -1,0 +1,4 @@
+comment = 'extension whose script references a required extension''s objects'
+default_version = '1.0'
+relocatable = false
+requires = 'test_ext_overload_req_dep'
