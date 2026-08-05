@@ -250,6 +250,15 @@ static dlist_head pgStatPending = DLIST_STATIC_INIT(pgStatPending);
  */
 static bool pgStatForceNextFlush = false;
 
+/* Set while pgstat_report_stat() flushes pending entries. */
+static bool pgStatFlushInProgress = false;
+
+/* Current pending entry callback executing, or NULL when none is active. */
+static PgStat_EntryRef *pgStatCurrentFlushEntry = NULL;
+
+/* Generation number of the current pgstat_flush_pending_entries() pass. */
+static uint64 pgStatFlushGeneration = 0;
+
 /*
  * Force-clear existing snapshot before next use when stats_fetch_consistency
  * is changed.
@@ -342,7 +351,7 @@ static const PgStat_KindInfo pgstat_kind_builtin_infos[PGSTAT_KIND_BUILTIN_SIZE]
 		.shared_size = sizeof(PgStatShared_Function),
 		.shared_data_off = offsetof(PgStatShared_Function, stats),
 		.shared_data_len = sizeof(((PgStatShared_Function *) 0)->stats),
-		.pending_size = sizeof(PgStat_FunctionCounts),
+		.pending_size = sizeof(PgStat_FunctionStatus),
 
 		.flush_pending_cb = pgstat_function_flush_cb,
 		.reset_timestamp_cb = pgstat_function_reset_timestamp_cb,
@@ -732,8 +741,9 @@ pgstat_initialize(void)
  * a timeout after which to call pgstat_report_stat(true), but are not
  * required to do so.
  *
- * Note that this is called only when not within a transaction, so it is fair
- * to use transaction stop time as an approximation of current time.
+ * A nonforced flush only happens outside a transaction, so transaction stop
+ * time is close enough.  A forced flush can happen during a transaction and
+ * uses the current time instead.
  */
 long
 pgstat_report_stat(bool force)
@@ -745,7 +755,11 @@ pgstat_report_stat(bool force)
 	bool		nowait;
 
 	pgstat_assert_is_up();
-	Assert(!IsTransactionOrTransactionBlock());
+	Assert(force || !IsTransactionOrTransactionBlock());
+
+	/* a prior flush must have cleared this, even if it errored out */
+	Assert(!pgStatFlushInProgress);
+	Assert(pgStatCurrentFlushEntry == NULL);
 
 	/* "absorb" the forced flush even if there's nothing to flush */
 	if (pgStatForceNextFlush)
@@ -808,35 +822,45 @@ pgstat_report_stat(bool force)
 
 	partial_flush = false;
 
-	/* flush of variable-numbered stats tracked in pending entries list */
-	partial_flush |= pgstat_flush_pending_entries(nowait);
+	pgStatFlushInProgress = true;
 
-	/* flush of other stats kinds */
-	if (pgstat_report_fixed)
+	/* Clear flush-pass state before leaving this flush. */
+	PG_TRY();
 	{
-		for (PgStat_Kind kind = PGSTAT_KIND_MIN; kind <= PGSTAT_KIND_MAX; kind++)
+		/* flush of variable-numbered stats tracked in pending entries list */
+		partial_flush |= pgstat_flush_pending_entries(nowait);
+
+		/* flush of other stats kinds */
+		if (pgstat_report_fixed)
 		{
-			const PgStat_KindInfo *kind_info = pgstat_get_kind_info(kind);
+			for (PgStat_Kind kind = PGSTAT_KIND_MIN; kind <= PGSTAT_KIND_MAX; kind++)
+			{
+				const PgStat_KindInfo *kind_info = pgstat_get_kind_info(kind);
 
-			if (!kind_info)
-				continue;
-			if (!kind_info->flush_static_cb)
-				continue;
+				if (!kind_info)
+					continue;
+				if (!kind_info->flush_static_cb)
+					continue;
 
-			partial_flush |= kind_info->flush_static_cb(nowait);
+				partial_flush |= kind_info->flush_static_cb(nowait,
+															!IsTransactionOrTransactionBlock());
+			}
 		}
 	}
+	PG_FINALLY();
+	{
+		pgStatCurrentFlushEntry = NULL;
+		pgStatFlushInProgress = false;
+	}
+	PG_END_TRY();
 
 	last_flush = now;
 
-	/*
-	 * If some of the pending stats could not be flushed due to lock
-	 * contention, let the caller know when to retry.
-	 */
+	/* Let the caller know when to retry after a partial flush. */
 	if (partial_flush)
 	{
-		/* force should have prevented us from getting here */
-		Assert(!force);
+		/* with force, only active transaction state can cause a partial flush */
+		Assert(!force || IsTransactionOrTransactionBlock());
 
 		/* remember since when stats have been pending */
 		if (pending_since == 0)
@@ -858,6 +882,16 @@ pgstat_report_stat(bool force)
 void
 pgstat_force_next_flush(void)
 {
+	/*
+	 * A flush callback must not call this; doing so would recursively enter
+	 * pgstat_report_stat() while a flush is already in progress.
+	 */
+	Assert(!pgStatFlushInProgress);
+
+	/* During a transaction flush now unless a flush is already running. */
+	if (!pgStatFlushInProgress && IsTransactionOrTransactionBlock())
+		pgstat_report_stat(true);
+
 	pgStatForceNextFlush = true;
 }
 
@@ -1370,6 +1404,7 @@ pgstat_delete_pending_entry(PgStat_EntryRef *entry_ref)
 
 	pfree(pending_data);
 	entry_ref->pending = NULL;
+	entry_ref->flushed_generation = 0;
 
 	dlist_delete(&entry_ref->pending_node);
 }
@@ -1383,6 +1418,8 @@ pgstat_prep_pending_from_entry_ref(PgStat_EntryRef *entry_ref)
 	PgStat_Kind kind;
 
 	Assert(entry_ref != NULL);
+	/* The entry currently being flushed must not be made pending again. */
+	Assert(entry_ref != pgStatCurrentFlushEntry);
 
 	kind = entry_ref->shared_entry->key.kind;
 
@@ -1404,7 +1441,18 @@ pgstat_prep_pending_from_entry_ref(PgStat_EntryRef *entry_ref)
 		}
 
 		entry_ref->pending = MemoryContextAllocZero(pgStatPendingContext, entrysize);
+		entry_ref->flushed_generation = 0;
 		dlist_push_tail(&pgStatPending, &entry_ref->pending_node);
+	}
+	else if (pgStatFlushInProgress &&
+			 entry_ref->flushed_generation == pgStatFlushGeneration)
+	{
+		/*
+		 * The entry is already pending and was already visited in the current
+		 * flush pass.  Move it to the tail so the data just accumulated into
+		 * it is flushed again before the pass ends.
+		 */
+		dlist_move_tail(&pgStatPending, &entry_ref->pending_node);
 	}
 }
 
@@ -1422,12 +1470,19 @@ pgstat_flush_pending_entries(bool nowait)
 	 * Processing a pending entry may queue further pending entries to the end
 	 * of the list that we want to process, so a simple iteration won't do.
 	 * Further complicating matters is that we want to delete the current
-	 * entry in each iteration from the list if we flushed successfully.
+	 * entry in each iteration from the list if we flushed successfully,
+	 * though during a transaction a fully flushed entry is retained and only
+	 * deleted at a transaction boundary.
 	 *
-	 * So we just keep track of the next pointer in each loop iteration.
+	 * So we just keep track of the next pointer in each loop iteration, and
+	 * start a new flush-pass generation only when there are pending entries.
 	 */
+
 	if (!dlist_is_empty(&pgStatPending))
+	{
 		cur = dlist_head_node(&pgStatPending);
+		pgStatFlushGeneration++;
+	}
 
 	while (cur)
 	{
@@ -1436,25 +1491,56 @@ pgstat_flush_pending_entries(bool nowait)
 		PgStat_HashKey key = entry_ref->shared_entry->key;
 		PgStat_Kind kind = key.kind;
 		const PgStat_KindInfo *kind_info = pgstat_get_kind_info(kind);
-		bool		did_flush;
+		PgStat_FlushResult result;
+		bool		xact_boundary;
 		dlist_node *next;
+
+		CHECK_FOR_INTERRUPTS();
+
+		xact_boundary = !IsTransactionOrTransactionBlock();
 
 		Assert(!kind_info->fixed_amount);
 		Assert(kind_info->flush_pending_cb != NULL);
 
 		/* flush the stats, if possible */
-		did_flush = kind_info->flush_pending_cb(entry_ref, nowait);
+		pgStatCurrentFlushEntry = entry_ref;
+		result = kind_info->flush_pending_cb(entry_ref, nowait, xact_boundary);
+		pgStatCurrentFlushEntry = NULL;
 
-		Assert(did_flush || nowait);
+		/*
+		 * A lock conflict can only happen when we allowed the callback to
+		 * give up without waiting for a lock, and a partial flush can only
+		 * happen inside a transaction.
+		 */
+		Assert(result == PGSTAT_FLUSH_DONE ||
+			   (result == PGSTAT_FLUSH_LOCK_CONFLICT && nowait) ||
+			   (result == PGSTAT_FLUSH_PARTIAL && !xact_boundary));
 
-		/* determine next entry, before deleting the pending entry */
+		/*
+		 * Mark the entry visited, unless we could not flush it at all. If a
+		 * later callback adds more data to this entry in the same pass,
+		 * pgstat_prep_pending_from_entry_ref() then re-queues it to the tail
+		 * so the new data is flushed again before the pass ends.
+		 */
+		if (result != PGSTAT_FLUSH_LOCK_CONFLICT)
+			entry_ref->flushed_generation = pgStatFlushGeneration;
+
+		/*
+		 * Determine the next entry after the callback ran (it may have
+		 * re-queued an entry) and before possibly deleting the current one.
+		 */
 		if (dlist_has_next(&pgStatPending, cur))
 			next = dlist_next_node(&pgStatPending, cur);
 		else
 			next = NULL;
 
-		/* if successfully flushed, remove entry */
-		if (did_flush)
+		/*
+		 * Only delete a fully flushed entry at a transaction boundary.
+		 * Earlier in the transaction it may still be reused as more stats
+		 * accumulate, and code holding a pointer into it relies on the entry
+		 * staying put.
+		 */
+		if (result == PGSTAT_FLUSH_DONE && xact_boundary)
 			pgstat_delete_pending_entry(entry_ref);
 		else
 			have_pending = true;

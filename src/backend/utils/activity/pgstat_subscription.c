@@ -114,10 +114,13 @@ pgstat_fetch_stat_subscription(Oid subid)
  * Flush out pending stats for the entry
  *
  * If nowait is true and the lock could not be immediately acquired, returns
- * false without flushing the entry.  Otherwise returns true.
+ * PGSTAT_FLUSH_LOCK_CONFLICT without flushing the entry.  Subscription stats
+ * are not transactional, so this always flushes everything and returns
+ * PGSTAT_FLUSH_DONE.
  */
-bool
-pgstat_subscription_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
+PgStat_FlushResult
+pgstat_subscription_flush_cb(PgStat_EntryRef *entry_ref, bool nowait,
+							 bool xact_boundary)
 {
 	PgStat_BackendSubEntry *localent;
 	PgStatShared_Subscription *shsubent;
@@ -128,7 +131,7 @@ pgstat_subscription_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 	/* localent always has non-zero content */
 
 	if (!pgstat_lock_entry(entry_ref, nowait))
-		return false;
+		return PGSTAT_FLUSH_LOCK_CONFLICT;
 
 #define SUB_ACC(fld) shsubent->stats.fld += localent->fld
 	SUB_ACC(apply_error_count);
@@ -139,7 +142,10 @@ pgstat_subscription_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 #undef SUB_ACC
 
 	pgstat_unlock_entry(entry_ref);
-	return true;
+
+	memset(localent, 0, sizeof(*localent));
+
+	return PGSTAT_FLUSH_DONE;
 }
 
 void
