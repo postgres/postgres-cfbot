@@ -368,8 +368,14 @@ pgstat_report_analyze(Relation rel,
 			livetuples -= trans->tuples_inserted - trans->tuples_deleted;
 			deadtuples -= trans->tuples_updated + trans->tuples_deleted;
 		}
-		/* count stuff inserted by already-aborted subxacts, too */
-		deadtuples -= rel->pgstat_info->tab.counts.txn.delta_dead_tuples;
+
+		/*
+		 * Count stuff inserted by already-aborted subxacts, too, but only the
+		 * part not yet flushed to shared stats.
+		 */
+		deadtuples -= rel->pgstat_info->tab.counts.txn.delta_dead_tuples -
+			rel->pgstat_info->tab.flushed.txn.delta_dead_tuples;
+
 		/* Since ANALYZE's counts are estimates, we could have underflowed */
 		livetuples = Max(livetuples, 0);
 		deadtuples = Max(deadtuples, 0);
@@ -876,104 +882,154 @@ pgstat_twophase_postabort(FullTransactionId fxid, uint16 info,
 }
 
 /*
- * Flush out pending stats for the entry
+ * Flush pending stats for the entry.
  *
- * If nowait is true and the lock could not be immediately acquired, returns
- * false without flushing the entry.  Otherwise returns true.
+ * If nowait is true and the lock could not be acquired, return
+ * PGSTAT_FLUSH_LOCK_CONFLICT.
  *
- * Some of the stats are copied to the corresponding pending database stats
- * entry when successfully flushing.
+ * Transactional counters stay pending during a transaction, so that case
+ * returns PGSTAT_FLUSH_PARTIAL after flushing only the nontransactional
+ * group.
  */
-bool
-pgstat_relation_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
+PgStat_FlushResult
+pgstat_relation_flush_cb(PgStat_EntryRef *entry_ref, bool nowait, bool xact_boundary)
 {
 	Oid			dboid;
 	PgStat_RelationStatus *lstats;	/* pending stats entry  */
 	PgStatShared_Relation *shtabstats;
 	PgStat_StatTabEntry *tabentry;	/* table entry of shared stats */
 	PgStat_StatDBEntry *dbentry;	/* pending database entry */
+	bool		flush_txn;
+	bool		nontxn_changed;
 
 	dboid = entry_ref->shared_entry->key.dboid;
 	lstats = (PgStat_RelationStatus *) entry_ref->pending;
 	shtabstats = (PgStatShared_Relation *) entry_ref->shared_stats;
 
 	/*
-	 * Ignore entries that didn't accumulate any actual counts.  If the table
-	 * was truncated, we still need to flush the entry to reset the live/dead
-	 * counters and ins_since_vacuum even when no other counts were
-	 * accumulated.
+	 * Transactional counters can flush at a transaction boundary, or when
+	 * this relation has no active transaction state.
 	 */
-	if (!lstats->tab.truncdropped &&
-		pg_memory_is_all_zeros(&lstats->tab.counts,
-							   sizeof(struct PgStat_TableCounts)))
-		return true;
+	flush_txn = (xact_boundary || lstats->tab.trans == NULL);
+
+	/*
+	 * During a transaction only the nontransactional group can flush, so
+	 * compare that group on its own.  A change only in the transactional
+	 * group must not force a lock.
+	 *
+	 * counts and flushed are zeroed on allocation and no field write touches
+	 * padding.  StaticAssertDecl in pgstat.h checks that.
+	 */
+	nontxn_changed = memcmp(&lstats->tab.counts.nontxn, &lstats->tab.flushed.nontxn,
+							sizeof(PgStat_TableCountsNonTxn)) != 0;
+
+	if (!nontxn_changed)
+	{
+		/*
+		 * No nontransactional counters can flush now.  During a transaction
+		 * keep the entry pending for the boundary flush.  At the boundary
+		 * drop the entry only if nothing changed at all.
+		 */
+		if (!flush_txn)
+			return PGSTAT_FLUSH_PARTIAL;
+		if (!lstats->tab.truncdropped &&
+			memcmp(&lstats->tab.counts.txn, &lstats->tab.flushed.txn,
+				   sizeof(PgStat_TableCountsTxn)) == 0)
+			return PGSTAT_FLUSH_DONE;
+	}
 
 	if (!pgstat_lock_entry(entry_ref, nowait))
-		return false;
+		return PGSTAT_FLUSH_LOCK_CONFLICT;
 
-	/* add the values to the shared entry. */
+	/* Flush nontransactional counters using deltas from the baseline. */
 	tabentry = &shtabstats->stats;
 
-	tabentry->numscans += lstats->tab.counts.nontxn.numscans;
-	if (lstats->tab.counts.nontxn.numscans)
+	tabentry->numscans += lstats->tab.counts.nontxn.numscans - lstats->tab.flushed.nontxn.numscans;
+	if (lstats->tab.counts.nontxn.numscans > lstats->tab.flushed.nontxn.numscans)
 	{
-		TimestampTz t = GetCurrentTransactionStopTimestamp();
+		TimestampTz t = xact_boundary ?
+			GetCurrentTransactionStopTimestamp() :
+			GetCurrentStatementStartTimestamp();
 
 		if (t > tabentry->lastscan)
 			tabentry->lastscan = t;
 	}
-	tabentry->tuples_returned += lstats->tab.counts.nontxn.tuples_returned;
-	tabentry->tuples_fetched += lstats->tab.counts.nontxn.tuples_fetched;
-	tabentry->tuples_inserted += lstats->tab.counts.txn.tuples_inserted;
-	tabentry->tuples_updated += lstats->tab.counts.txn.tuples_updated;
-	tabentry->tuples_deleted += lstats->tab.counts.txn.tuples_deleted;
-	tabentry->tuples_hot_updated += lstats->tab.counts.txn.tuples_hot_updated;
-	tabentry->tuples_newpage_updated += lstats->tab.counts.txn.tuples_newpage_updated;
+	tabentry->tuples_returned += lstats->tab.counts.nontxn.tuples_returned - lstats->tab.flushed.nontxn.tuples_returned;
+	tabentry->tuples_fetched += lstats->tab.counts.nontxn.tuples_fetched - lstats->tab.flushed.nontxn.tuples_fetched;
+	tabentry->blocks_fetched += lstats->tab.counts.nontxn.blocks_fetched - lstats->tab.flushed.nontxn.blocks_fetched;
+	tabentry->blocks_hit += lstats->tab.counts.nontxn.blocks_hit - lstats->tab.flushed.nontxn.blocks_hit;
 
 	/*
-	 * If table was truncated/dropped, first reset the live/dead counters.
+	 * Flush transactional counters as a group at a transaction boundary.
+	 * Readers must not see only part of this group.
 	 */
-	if (lstats->tab.truncdropped)
+	if (flush_txn)
 	{
-		tabentry->live_tuples = 0;
-		tabentry->dead_tuples = 0;
-		tabentry->ins_since_vacuum = 0;
+		tabentry->tuples_inserted += lstats->tab.counts.txn.tuples_inserted - lstats->tab.flushed.txn.tuples_inserted;
+		tabentry->tuples_updated += lstats->tab.counts.txn.tuples_updated - lstats->tab.flushed.txn.tuples_updated;
+		tabentry->tuples_deleted += lstats->tab.counts.txn.tuples_deleted - lstats->tab.flushed.txn.tuples_deleted;
+		tabentry->tuples_hot_updated += lstats->tab.counts.txn.tuples_hot_updated - lstats->tab.flushed.txn.tuples_hot_updated;
+		tabentry->tuples_newpage_updated += lstats->tab.counts.txn.tuples_newpage_updated - lstats->tab.flushed.txn.tuples_newpage_updated;
+
+		/*
+		 * If the table was truncated, first reset live and dead counters and
+		 * ins_since_vacuum.  Commit zeroed delta_live_tuples and
+		 * delta_dead_tuples, so reset their flushed baselines too.
+		 */
+		if (lstats->tab.truncdropped)
+		{
+			tabentry->live_tuples = 0;
+			tabentry->dead_tuples = 0;
+			tabentry->ins_since_vacuum = 0;
+			lstats->tab.flushed.txn.delta_live_tuples = 0;
+			lstats->tab.flushed.txn.delta_dead_tuples = 0;
+		}
+
+		tabentry->live_tuples += lstats->tab.counts.txn.delta_live_tuples - lstats->tab.flushed.txn.delta_live_tuples;
+		tabentry->dead_tuples += lstats->tab.counts.txn.delta_dead_tuples - lstats->tab.flushed.txn.delta_dead_tuples;
+		tabentry->mod_since_analyze += lstats->tab.counts.txn.changed_tuples - lstats->tab.flushed.txn.changed_tuples;
+
+		/* This still counts aborted inserts in ins_since_vacuum. */
+		tabentry->ins_since_vacuum += lstats->tab.counts.txn.tuples_inserted - lstats->tab.flushed.txn.tuples_inserted;
+
+		/* Clamp live_tuples in case of negative delta_live_tuples */
+		tabentry->live_tuples = Max(tabentry->live_tuples, 0);
+		/* Likewise for dead_tuples */
+		tabentry->dead_tuples = Max(tabentry->dead_tuples, 0);
 	}
-
-	tabentry->live_tuples += lstats->tab.counts.txn.delta_live_tuples;
-	tabentry->dead_tuples += lstats->tab.counts.txn.delta_dead_tuples;
-	tabentry->mod_since_analyze += lstats->tab.counts.txn.changed_tuples;
-
-	/*
-	 * Using tuples_inserted to update ins_since_vacuum does mean that we'll
-	 * track aborted inserts too.  This isn't ideal, but otherwise probably
-	 * not worth adding an extra field for.  It may just amount to autovacuums
-	 * triggering for inserts more often than they maybe should, which is
-	 * probably not going to be common enough to be too concerned about here.
-	 */
-	tabentry->ins_since_vacuum += lstats->tab.counts.txn.tuples_inserted;
-
-	tabentry->blocks_fetched += lstats->tab.counts.nontxn.blocks_fetched;
-	tabentry->blocks_hit += lstats->tab.counts.nontxn.blocks_hit;
-
-	/* Clamp live_tuples in case of negative delta_live_tuples */
-	tabentry->live_tuples = Max(tabentry->live_tuples, 0);
-	/* Likewise for dead_tuples */
-	tabentry->dead_tuples = Max(tabentry->dead_tuples, 0);
 
 	pgstat_unlock_entry(entry_ref);
 
 	/* The entry was successfully flushed, add the same to database stats */
 	dbentry = pgstat_prep_database_pending(dboid);
-	dbentry->tuples_returned += lstats->tab.counts.nontxn.tuples_returned;
-	dbentry->tuples_fetched += lstats->tab.counts.nontxn.tuples_fetched;
-	dbentry->tuples_inserted += lstats->tab.counts.txn.tuples_inserted;
-	dbentry->tuples_updated += lstats->tab.counts.txn.tuples_updated;
-	dbentry->tuples_deleted += lstats->tab.counts.txn.tuples_deleted;
-	dbentry->blocks_fetched += lstats->tab.counts.nontxn.blocks_fetched;
-	dbentry->blocks_hit += lstats->tab.counts.nontxn.blocks_hit;
+	dbentry->tuples_returned += lstats->tab.counts.nontxn.tuples_returned - lstats->tab.flushed.nontxn.tuples_returned;
+	dbentry->tuples_fetched += lstats->tab.counts.nontxn.tuples_fetched - lstats->tab.flushed.nontxn.tuples_fetched;
+	dbentry->blocks_fetched += lstats->tab.counts.nontxn.blocks_fetched - lstats->tab.flushed.nontxn.blocks_fetched;
+	dbentry->blocks_hit += lstats->tab.counts.nontxn.blocks_hit - lstats->tab.flushed.nontxn.blocks_hit;
 
-	return true;
+	if (flush_txn)
+	{
+		dbentry->tuples_inserted += lstats->tab.counts.txn.tuples_inserted - lstats->tab.flushed.txn.tuples_inserted;
+		dbentry->tuples_updated += lstats->tab.counts.txn.tuples_updated - lstats->tab.flushed.txn.tuples_updated;
+		dbentry->tuples_deleted += lstats->tab.counts.txn.tuples_deleted - lstats->tab.flushed.txn.tuples_deleted;
+
+		/*
+		 * Record everything as flushed while the entry stays around to gather
+		 * more counts.  Clear truncdropped so the next truncate is seen as
+		 * new.  At a transaction boundary the entry is deleted.
+		 */
+		if (!xact_boundary)
+		{
+			lstats->tab.flushed = lstats->tab.counts;
+			lstats->tab.truncdropped = false;
+		}
+		return PGSTAT_FLUSH_DONE;
+	}
+
+	/* For a partial flush record only the nontransactional baseline. */
+	lstats->tab.flushed.nontxn = lstats->tab.counts.nontxn;
+
+	return PGSTAT_FLUSH_PARTIAL;
 }
 
 void

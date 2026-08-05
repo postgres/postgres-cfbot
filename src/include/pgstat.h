@@ -90,6 +90,33 @@ typedef struct PgStat_FunctionCounts
 	instr_time	self_time;
 } PgStat_FunctionCounts;
 
+/* Keep these counts in sync with the fields above. */
+#define PGSTAT_FUNCTIONCOUNTS_NUM_COUNTERS 1
+#define PGSTAT_FUNCTIONCOUNTS_NUM_INSTR_TIMES 2
+
+StaticAssertDecl(sizeof(instr_time) == sizeof(int64),
+				 "instr_time has padding");
+StaticAssertDecl(sizeof(PgStat_FunctionCounts) ==
+				 PGSTAT_FUNCTIONCOUNTS_NUM_COUNTERS * sizeof(PgStat_Counter) +
+				 PGSTAT_FUNCTIONCOUNTS_NUM_INSTR_TIMES * sizeof(instr_time),
+				 "PgStat_FunctionCounts has padding");
+
+/*
+ * Pending function stats stored in PgStat_EntryRef->pending.
+ *
+ * counts accumulates for the whole transaction (it is what
+ * pg_stat_xact_user_functions reports); flushed is the portion already written
+ * to shared memory.  A flush writes counts minus flushed and then sets flushed
+ * to counts, so counts survives an in-transaction flush intact and the shared
+ * totals are never double-counted.  The same counts/flushed scheme is used for
+ * relation stats; see PgStat_RelationStatus.
+ */
+typedef struct PgStat_FunctionStatus
+{
+	PgStat_FunctionCounts counts;
+	PgStat_FunctionCounts flushed;
+} PgStat_FunctionStatus;
+
 /*
  * Working state needed to accumulate per-function-call timing statistics.
  */
@@ -121,15 +148,14 @@ typedef struct PgStat_BackendSubEntry
 /* ----------
  * PgStat_TableCounts			The actual per-table counts kept by a backend
  *
- * The counters are split into two structs.  PgStat_TableCountsNonTxn holds
- * counters that are recorded whether the transaction commits or aborts, while
- * PgStat_TableCountsTxn holds counters whose effect depends on the transaction
- * outcome.  Both are combined in PgStat_TableCounts.
+ * Split per table counters into two groups.  PgStat_TableCountsNonTxn holds
+ * counters recorded whether the transaction commits or aborts.
+ * PgStat_TableCountsTxn holds counters whose effect depends on transaction
+ * outcome.
  *
- * These structs should contain only actual event counters, because we make use
- * of pg_memory_is_all_zeros() to detect whether there are any stats updates
- * to apply.  StaticAssertDecl() checks below ensure that these substructs
- * contain no padding.
+ * These structs contain only counters.  They are byte compared against zero
+ * and against the flushed baseline in PgStat_RelationStatus.
+ * StaticAssertDecl checks below ensure that they contain no padding.
  *
  * It is a component of PgStat_RelationStatus (within-backend state, for
  * table data).
@@ -168,7 +194,7 @@ typedef struct PgStat_TableCountsTxn
 	PgStat_Counter changed_tuples;
 } PgStat_TableCountsTxn;
 
-/* Keep these in sync with the fields in the corresponding counter structs. */
+/* Keep these counts in sync with the fields above. */
 #define PGSTAT_TABLECOUNTS_NON_TXN_NUM_COUNTERS 5
 #define PGSTAT_TABLECOUNTS_TXN_NUM_COUNTERS 8
 
@@ -206,6 +232,13 @@ typedef struct PgStat_IndexCounts
 	PgStat_Counter blocks_hit;
 } PgStat_IndexCounts;
 
+/* Keep this count in sync with the fields above. */
+#define PGSTAT_INDEXCOUNTS_NUM_COUNTERS 5
+
+StaticAssertDecl(sizeof(PgStat_IndexCounts) ==
+				 PGSTAT_INDEXCOUNTS_NUM_COUNTERS * sizeof(PgStat_Counter),
+				 "PgStat_IndexCounts has padding");
+
 /* ----------
  * PgStat_RelationStatus			Per-relation pending status within a backend
  *
@@ -238,10 +271,16 @@ typedef struct PgStat_RelationStatus
 			bool		truncdropped;	/* pending truncate/drop reset */
 			struct PgStat_TableXactStatus *trans;	/* lowest subxact's counts */
 			PgStat_TableCounts counts;	/* event counts to be sent */
+			PgStat_TableCounts flushed; /* Portion of counts already written
+										 * to shared memory */
 		}			tab;
 
 		/* index counters */
-		PgStat_IndexCounts idx;
+		struct
+		{
+			PgStat_IndexCounts counts;
+			PgStat_IndexCounts flushed;
+		}			idx;
 	};
 } PgStat_RelationStatus;
 
@@ -821,7 +860,7 @@ extern void pgstat_report_analyze(Relation rel,
 		if (pgstat_should_count_relation(rel))						\
 		{															\
 			if ((rel)->pgstat_info->kind == PGSTAT_KIND_INDEX)		\
-				(rel)->pgstat_info->idx.tuples_fetched++;			\
+				(rel)->pgstat_info->idx.counts.tuples_fetched++;	\
 			else													\
 				(rel)->pgstat_info->tab.counts.nontxn.tuples_fetched++; \
 		}															\
@@ -831,7 +870,7 @@ extern void pgstat_report_analyze(Relation rel,
 		if (pgstat_should_count_relation(rel))						\
 		{															\
 			Assert((rel)->pgstat_info->kind == PGSTAT_KIND_INDEX);	\
-			(rel)->pgstat_info->idx.numscans++;						\
+			(rel)->pgstat_info->idx.counts.numscans++;				\
 		}															\
 	} while (0)
 #define pgstat_count_index_tuples(rel, n)							\
@@ -839,7 +878,7 @@ extern void pgstat_report_analyze(Relation rel,
 		if (pgstat_should_count_relation(rel))						\
 		{															\
 			Assert((rel)->pgstat_info->kind == PGSTAT_KIND_INDEX);	\
-			(rel)->pgstat_info->idx.tuples_returned += (n);			\
+			(rel)->pgstat_info->idx.counts.tuples_returned += (n);	\
 		}															\
 	} while (0)
 #define pgstat_count_buffer_read(rel)								\
@@ -847,7 +886,7 @@ extern void pgstat_report_analyze(Relation rel,
 		if (pgstat_should_count_relation(rel))						\
 		{															\
 			if ((rel)->pgstat_info->kind == PGSTAT_KIND_INDEX)		\
-				(rel)->pgstat_info->idx.blocks_fetched++;			\
+				(rel)->pgstat_info->idx.counts.blocks_fetched++;	\
 			else													\
 				(rel)->pgstat_info->tab.counts.nontxn.blocks_fetched++; \
 		}															\
@@ -857,7 +896,7 @@ extern void pgstat_report_analyze(Relation rel,
 		if (pgstat_should_count_relation(rel))						\
 		{															\
 			if ((rel)->pgstat_info->kind == PGSTAT_KIND_INDEX)		\
-				(rel)->pgstat_info->idx.blocks_hit++;				\
+				(rel)->pgstat_info->idx.counts.blocks_hit++;		\
 			else													\
 				(rel)->pgstat_info->tab.counts.nontxn.blocks_hit++; \
 		}															\
