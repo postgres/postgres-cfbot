@@ -218,7 +218,7 @@ generate_queries_for_path_pattern(RangeTblEntry *rte, List *path_pattern)
 
 				/*
 				 * If both the element patterns have label expressions, they
-				 * need to be conjuncted, which is not supported right now.
+				 * need to be conjuncted.
 				 *
 				 * However, an empty label expression means all labels.
 				 * Conjunction of any label expression with all labels is the
@@ -231,10 +231,10 @@ generate_queries_for_path_pattern(RangeTblEntry *rte, List *path_pattern)
 					other->has_empty_labelexpr = gep->has_empty_labelexpr;
 				}
 				else if (!gep->has_empty_labelexpr && !equal(other->labelexpr, gep->labelexpr))
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("element patterns with same variable name \"%s\" but different label expressions are not supported",
-									gep->variable)));
+					other->labelexpr = (Node *) makeBoolExpr(AND_EXPR,
+															 list_make2(other->labelexpr,
+																		gep->labelexpr),
+															 -1);
 
 				/*
 				 * If two element patterns have the same variable name, they
@@ -872,49 +872,85 @@ get_path_elements_from_labelexpr(struct path_factor *pf, Node *labelexpr)
 	}
 	else if (IsA(labelexpr, BoolExpr))
 	{
-		BoolExpr   *be = castNode(BoolExpr, pf->labelexpr);
+		BoolExpr   *be = castNode(BoolExpr, labelexpr);
 		List	   *label_exprs = be->args;
 
-		/*
-		 * We only support label disjunction. So we just collect the distinct
-		 * elements merging element label OIDs of the elements with same OID.
-		 */
-		Assert(be->boolop == OR_EXPR);
+		Assert(be->boolop == OR_EXPR || be->boolop == AND_EXPR);
 
-		path_elements = NIL;
-		foreach_ptr(Node, label_expr, label_exprs)
+		if (be->boolop == OR_EXPR)
 		{
-			List	   *node_path_elements = get_path_elements_from_labelexpr(pf, label_expr);
-
-			if (path_elements == NIL)
-				path_elements = node_path_elements;
-			else
+			/*
+			 * Label disjunction: collect all distinct elements across all
+			 * sub-expressions, merging elem_label_oids for elements that
+			 * appear in more than one sub-expression.
+			 */
+			path_elements = NIL;
+			foreach_ptr(Node, label_expr, label_exprs)
 			{
-				foreach_ptr(struct path_element, npe, node_path_elements)
+				List	   *node_path_elements = get_path_elements_from_labelexpr(pf, label_expr);
+
+				if (path_elements == NIL)
+					path_elements = node_path_elements;
+				else
 				{
-					struct path_element *found = NULL;
-
-					foreach_ptr(struct path_element, pe, path_elements)
+					foreach_ptr(struct path_element, npe, node_path_elements)
 					{
-						if (npe->elemoid == pe->elemoid)
-						{
-							pe->elem_label_oids = list_concat(pe->elem_label_oids,
-															  npe->elem_label_oids);
-							found = pe;
-							break;
-						}
-					}
+						struct path_element *found = NULL;
 
-					if (!found)
-						path_elements = lappend(path_elements, npe);
+						foreach_ptr(struct path_element, pe, path_elements)
+						{
+							if (npe->elemoid == pe->elemoid)
+							{
+								pe->elem_label_oids = list_concat(pe->elem_label_oids,
+																  npe->elem_label_oids);
+								found = pe;
+								break;
+							}
+						}
+
+						if (!found)
+							path_elements = lappend(path_elements, npe);
+					}
 				}
 			}
 		}
+		else
+		{
+			List	   *left_elems;
+			List	   *right_elems;
+			List	   *intersection = NIL;
+
+			/*
+			 * Label conjunction (implicit, from same-variable element
+			 * patterns with different label expressions): recurse into each
+			 * child of the binary AND tree and keep only elements that appear
+			 * in both sides.  Merge elem_label_oids so that property
+			 * resolution can use labels from both sides of the conjunction.
+			 */
+			left_elems = get_path_elements_from_labelexpr(pf, linitial(label_exprs));
+			right_elems = get_path_elements_from_labelexpr(pf, lsecond(label_exprs));
+
+			foreach_ptr(struct path_element, pe, left_elems)
+			{
+				foreach_ptr(struct path_element, npe, right_elems)
+				{
+					if (pe->elemoid == npe->elemoid)
+					{
+						pe->elem_label_oids = list_concat(pe->elem_label_oids,
+														  npe->elem_label_oids);
+						intersection = lappend(intersection, pe);
+						break;
+					}
+				}
+			}
+			path_elements = intersection;
+		}
+
 	}
 	else
 	{
 		path_elements = NIL;	/* Keep compiler quiet */
-		elog(ERROR, "unsupported label expression node: %d", (int) nodeTag(pf->labelexpr));
+		elog(ERROR, "unsupported label expression node: %d", (int) nodeTag(labelexpr));
 	}
 
 	return path_elements;

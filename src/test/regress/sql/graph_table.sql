@@ -382,7 +382,9 @@ SELECT * FROM GRAPH_TABLE (g1 MATCH (a)->(b WHERE b.vprop1 > 20)->(a WHERE a.vpr
 SELECT * FROM GRAPH_TABLE (g1 MATCH (a WHERE a.vprop1 between 20 and 2000)->(b WHERE b.vprop1 > 20)->(a WHERE a.vprop1 between 20 and 2000) COLUMNS (a.vname AS self, b.vname AS through, a.vprop1 AS self_p1, b.vprop1 AS through_p1)) ORDER BY self, through;
 -- labels and elements kinds of element patterns with the same variable name
 SELECT * FROM GRAPH_TABLE (g1 MATCH (a IS l1)-[a IS l1]->(b IS l1) COLUMNS (a.elname AS aename, b.elname AS bename)) ORDER BY 1, 2; -- error
-SELECT * FROM GRAPH_TABLE (g1 MATCH (a IS vl1)->(b)->(a IS vl2) WHERE a.vname <> b.vname COLUMNS (a.vname AS self, b.vname AS through, a.vprop1 AS self_p1, b.vprop1 AS through_p1)) ORDER BY self, through;  -- error
+-- Implicit conjunction
+SELECT * FROM GRAPH_TABLE (g1 MATCH (a IS vl1)->(b)->(a IS vl2) WHERE a.vname <> b.vname COLUMNS (a.vname AS self, b.vname AS through, a.vprop1 AS self_p1, b.vprop1 AS through_p1)) ORDER BY self, through;
+SELECT * FROM GRAPH_TABLE (g1 MATCH (a IS vl2)->(b)->(a IS vl3) COLUMNS (a.vname AS self, b.vname AS through, a.vprop2 AS vl2_prop, a.vprop1 AS vl3_prop)) ORDER BY self, through;
 SELECT * FROM GRAPH_TABLE (g1 MATCH (a IS vl1)->(b)->(a) COLUMNS (a.vname AS self, b.vname AS through, a.vprop1 AS self_p1, b.vprop1 AS through_p1)) ORDER BY self, through;
 SELECT * FROM GRAPH_TABLE (g1 MATCH (a)->(b)->(a IS vl1) COLUMNS (a.vname AS self, b.vname AS through, a.vprop1 AS self_p1, b.vprop1 AS through_p1)) ORDER BY self, through;
 
