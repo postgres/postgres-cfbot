@@ -147,6 +147,8 @@ typedef struct PgFdwRelationInfo
 typedef struct PgFdwConnState
 {
 	AsyncRequest *pendingAreq;	/* pending async request */
+	bool		copy_in_progress;	/* true while a COPY FROM STDIN is open on
+									 * the connection */
 } PgFdwConnState;
 
 /*
@@ -216,6 +218,7 @@ extern void rebuildInsertSql(StringInfo buf, Relation rel,
 							 char *orig_query, List *target_attrs,
 							 int values_end_len, int num_params,
 							 int num_rows);
+extern void deparseCopySql(StringInfo buf, Relation rel, List *target_attrs);
 extern void deparseUpdateSql(StringInfo buf, RangeTblEntry *rte,
 							 Index rtindex, Relation rel,
 							 List *targetAttrs,

@@ -2283,6 +2283,61 @@ deparseInsertSql(StringInfo buf, RangeTblEntry *rte,
 }
 
 /*
+ *  Build a COPY FROM STDIN statement using the TEXT format
+ */
+void
+deparseCopySql(StringInfo buf, Relation rel, List *target_attrs)
+{
+	Oid			relid = RelationGetRelid(rel);
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+	bool		first = true;
+
+	appendStringInfo(buf, "COPY ");
+	deparseRelation(buf, rel);
+
+	/*
+	 * Emit the column list, skipping generated columns (which the remote
+	 * server fills in itself). The opening parenthesis is emitted lazily so
+	 * that a relation whose transmittable columns are all generated produces
+	 * no (empty) column list at all.
+	 */
+	foreach_int(attnum, target_attrs)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
+		char	   *colname;
+		List	   *options;
+		ListCell   *lc;
+
+		if (attr->attgenerated)
+			continue;
+
+		appendStringInfoString(buf, first ? "(" : ", ");
+		first = false;
+
+		/* Use attribute name or column_name option. */
+		colname = NameStr(attr->attname);
+		options = GetForeignColumnOptions(relid, attnum);
+		foreach(lc, options)
+		{
+			DefElem    *def = (DefElem *) lfirst(lc);
+
+			if (strcmp(def->defname, "column_name") == 0)
+			{
+				colname = defGetString(def);
+				break;
+			}
+		}
+
+		appendStringInfoString(buf, quote_identifier(colname));
+	}
+	if (!first)
+		appendStringInfoChar(buf, ')');
+
+	appendStringInfoString(buf, " FROM STDIN (FORMAT TEXT)");
+}
+
+
+/*
  * rebuild remote INSERT statement
  *
  * Provided a number of rows in a batch, builds INSERT statement with the
