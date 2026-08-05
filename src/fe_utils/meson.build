@@ -34,7 +34,7 @@ fe_utils = static_library('libpgfeutils',
   c_pch: pch_postgres_fe_h,
   include_directories: [postgres_inc, libpq_inc],
   c_args: host_system == 'windows' ? ['-DFD_SETSIZE=1024'] : [],
-  dependencies: frontend_common_code,
+  dependencies: [frontend_common_code, liburing],
   kwargs: default_lib_args + {
             'install': install_internal_static_lib,
           },
