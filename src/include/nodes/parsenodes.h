@@ -1052,9 +1052,9 @@ typedef struct GraphElementPattern
 	const char *variable;
 
 	/*
-	 * If no label expression is specified, we will replace it with a non-NULL
-	 * expression in transformLabelExpr(). This flag indicates whether the
-	 * label expression was originally empty.
+	 * An empty label expression gets replaced by disjunction of all labels
+	 * during transformation. But we need to remember if it was originally
+	 * empty for various purposes.
 	 */
 	bool		has_empty_labelexpr;
 	Node	   *labelexpr;

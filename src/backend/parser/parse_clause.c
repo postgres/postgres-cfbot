@@ -991,28 +991,60 @@ transformRangeGraphTable(ParseState *pstate, RangeGraphTable *rgt)
 		TargetEntry *te;
 		char	   *colname;
 
-		colexpr = transformExpr(pstate, rt->val, EXPR_KIND_SELECT_TARGET);
+		bool		is_all_props_ref;
 
-		if (rt->name)
-			colname = rt->name;
-		else
+		/*
+		 * Try resolving the expression as <variable>.* first. Those can only
+		 * appear directly in COLUMNs list. It gets expanded to a list of
+		 * GraphPropertyRef, which are added to the targetlist.
+		 *
+		 * If there are no properties associated with the variable, an empty
+		 * list is returned. In such a case, we don't add anything to the
+		 * targetlist.
+		 */
+		colexpr = transformGraphTableAllPropRef(pstate, rt->val, &is_all_props_ref);
+		if (is_all_props_ref)
 		{
-			if (IsA(colexpr, GraphPropertyRef))
-				colname = get_propgraph_property_name(castNode(GraphPropertyRef, colexpr)->propid);
-			else
+			if (colexpr)
 			{
-				ereport(ERROR,
-						errcode(ERRCODE_SYNTAX_ERROR),
-						errmsg("complex graph table column must specify an explicit column name"),
-						parser_errposition(pstate, rt->location));
-				colname = NULL;
+				List	   *property_list = castNode(List, colexpr);
+
+				Assert(!rt->name);
+
+				/* Process each GraphPropertyRef in the list */
+				foreach_node(GraphPropertyRef, gpr, property_list)
+				{
+					char	   *prop_colname = get_propgraph_property_name(gpr->propid);
+
+					colnames = lappend(colnames, makeString(prop_colname));
+					te = makeTargetEntry((Expr *) gpr, ++resno, prop_colname, false);
+					columns = lappend(columns, te);
+				}
 			}
 		}
+		else
+		{
+			colexpr = transformExpr(pstate, rt->val, EXPR_KIND_SELECT_TARGET);
+			if (rt->name)
+				colname = rt->name;
+			else
+			{
+				if (IsA(colexpr, GraphPropertyRef))
+					colname = get_propgraph_property_name(castNode(GraphPropertyRef, colexpr)->propid);
+				else
+				{
+					ereport(ERROR,
+							errcode(ERRCODE_SYNTAX_ERROR),
+							errmsg("complex graph table column must specify an explicit column name"),
+							parser_errposition(pstate, rt->location));
+					colname = NULL;
+				}
+			}
 
-		colnames = lappend(colnames, makeString(colname));
-
-		te = makeTargetEntry((Expr *) colexpr, ++resno, colname, false);
-		columns = lappend(columns, te);
+			colnames = lappend(colnames, makeString(colname));
+			te = makeTargetEntry((Expr *) colexpr, ++resno, colname, false);
+			columns = lappend(columns, te);
+		}
 	}
 
 	/* resolve any still-unresolved output columns as being type text */
