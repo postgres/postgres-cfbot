@@ -1510,6 +1510,30 @@ execute_extension_script(Oid extensionOid, ExtensionControlFile *control,
 }
 
 /*
+ * GetExtensionCreationState - report the current extension-script state
+ *
+ * Used by the parallel-query machinery to carry creating_extension and
+ * CurrentExtensionObject to workers, so a worker sees the same
+ * extension-script state as the leader.
+ */
+void
+GetExtensionCreationState(bool *creating, Oid *extensionObject)
+{
+	*creating = creating_extension;
+	*extensionObject = CurrentExtensionObject;
+}
+
+/*
+ * SetExtensionCreationState - restore extension-script state in a worker
+ */
+void
+SetExtensionCreationState(bool creating, Oid extensionObject)
+{
+	creating_extension = creating;
+	CurrentExtensionObject = extensionObject;
+}
+
+/*
  * Find or create an ExtensionVersionInfo for the specified version name
  *
  * Currently, we just use a List of the ExtensionVersionInfo's.  Searching
