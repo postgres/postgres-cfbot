@@ -140,7 +140,8 @@ compute_return_type(TypeName *returnType, Oid languageOid,
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("type \"%s\" does not exist",
-						TypeNameToString(returnType))));
+						TypeNameToString(returnType)),
+				 errdetail_untrusted_typename(returnType)));
 	}
 	else
 	{
@@ -282,6 +283,7 @@ interpret_function_parameter_list(ParseState *pstate,
 					(errcode(ERRCODE_UNDEFINED_OBJECT),
 					 errmsg("type %s does not exist",
 							TypeNameToString(t)),
+					 errdetail_untrusted_typename(t),
 					 parser_errposition(pstate, t->location)));
 			toid = InvalidOid;	/* keep compiler quiet */
 		}
