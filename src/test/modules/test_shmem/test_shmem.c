@@ -345,11 +345,9 @@ resizable_shmem_read(PG_FUNCTION_ARGS)
  * backend.
  *
  * The VMA containing our resizable_shmem pointer identifies the start of the
- * main shared-memory segment.
- *
- * mprotect() calls issued when the resizable structure grows and shrinks can
- * split the original mmap into several adjacent VMAs, so we sum the accounting
- * fields across the base VMA and any VMAs contiguous with it.
+ * main shared-memory segment.  mprotect() can split that mapping into adjacent
+ * VMAs, so include adjacent VMAs that share the same shared/private flag,
+ * inode, and pathname as the target VMA.
  */
 PG_FUNCTION_INFO_V1(test_shmem_usage);
 Datum
@@ -359,12 +357,15 @@ test_shmem_usage(PG_FUNCTION_ARGS)
 	char		line[256];
 	uintptr_t	target = (uintptr_t) resizable_shmem;
 	bool		in_target_vma = false;
+	bool		target_is_shared = false;
+	unsigned long target_inode = 0;
+	char		target_path[256] = "";
 	bool		use_hugetlb = (huge_pages_status == HUGE_PAGES_ON);
 	unsigned long prev_end = 0;
-	int64		total_rss_kb = 0;
-	int64		total_swap_kb = 0;
-	int64		total_shared_hugetlb_kb = 0;
-	int64		val;
+	long		total_rss_kb = 0;
+	long		total_swap_kb = 0;
+	long		total_shared_hugetlb_kb = 0;
+	long		val;
 	size_t		result;
 
 	f = AllocateFile("/proc/self/smaps", "r");
@@ -377,21 +378,36 @@ test_shmem_usage(PG_FUNCTION_ARGS)
 	{
 		unsigned long start;
 		unsigned long end;
+		unsigned long offset;
+		unsigned long inode;
+		char		perms[8];
+		char		dev[16];
+		char		path[256] = "";
 
-		if (sscanf(line, "%lx-%lx", &start, &end) == 2)
+		if (sscanf(line, "%lx-%lx %7s %lx %15s %lu %*[ \t]%255[^\n]",
+				   &start, &end, perms, &offset, dev, &inode, path) >= 6)
 		{
 			if (in_target_vma)
 			{
-				/*
-				 * Continue accumulating only across VMAs that are contiguous
-				 * with the previous one; stop as soon as we hit a gap or a
-				 * different mapping.
-				 */
-				if (start != prev_end)
+				if (start != prev_end
+					|| (perms[3] == 's') != target_is_shared
+					|| inode != target_inode
+					|| strcmp(path, target_path) != 0)
 					break;
+
+				elog(DEBUG1, "test_shmem smaps includes contiguous VMA: %.*s",
+					 (int) strcspn(line, "\n"), line);
 			}
-			else
-				in_target_vma = (target >= start && target < end);
+			else if (target >= start && target < end)
+			{
+				in_target_vma = true;
+				target_is_shared = (perms[3] == 's');
+				target_inode = inode;
+				strlcpy(target_path, path, sizeof(target_path));
+
+				elog(DEBUG1, "test_shmem smaps includes target VMA: %.*s",
+					 (int) strcspn(line, "\n"), line);
+			}
 
 			prev_end = end;
 		}
@@ -453,7 +469,7 @@ resizable_shmem_access_beyond_size(PG_FUNCTION_ARGS)
 	text	   *mode_txt = PG_GETARG_TEXT_PP(0);
 	const char *mode = text_to_cstring(mode_txt);
 	bool		do_write;
-	int32		sink = 0;
+	int32		sink = ~0;
 
 	if (!resizable_shmem)
 		ereport(ERROR,
@@ -482,18 +498,18 @@ resizable_shmem_access_beyond_size(PG_FUNCTION_ARGS)
 	ShmemProtectStruct("resizable_shmem");
 #endif
 
-	for (int i = resizable_shmem->num_entries; i < test_max_entries; i++)
+	if (do_write)
 	{
-		if (do_write)
+		for (int i = resizable_shmem->num_entries; i < test_max_entries; i++)
 			resizable_shmem->data[i] = 0xdead;
-		else
-			sink = resizable_shmem->data[i];
+	}
+	else
+	{
+		/* volatile cast prevents the compiler from eliding the loads. */
+		for (int i = resizable_shmem->num_entries; i < test_max_entries; i++)
+			sink &= *(volatile int32 *) &resizable_shmem->data[i];
 	}
 
-	/*
-	 * Return the last read value so that compiler doesn't optimize away the
-	 * assignment to sink.
-	 */
 	PG_RETURN_INT32(sink);
 }
 

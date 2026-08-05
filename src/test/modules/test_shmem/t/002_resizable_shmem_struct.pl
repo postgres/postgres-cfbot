@@ -85,6 +85,10 @@ sub test_fault_beyond_size
 
 	for my $mode ('write', 'read')
 	{
+		# Wait for crash recovery, not just a connection accepted before the
+		# postmaster has processed SIGCHLD for the crashed backend.
+		my $log_offset = -s $node->logfile;
+
 		my ($ret, $stdout, $stderr) = $node->psql('postgres',
 			"SELECT resizable_shmem_access_beyond_size('$mode');");
 		ok($ret != 0, "$prefix: $mode past current size crashes the backend");
@@ -92,8 +96,8 @@ sub test_fault_beyond_size
 			 qr/server closed the connection unexpectedly|connection to server was lost/,
 			 "$prefix: $mode crash reports lost connection");
 
-		$node->poll_query_until('postgres', 'SELECT 1', '1')
-		  or die "server did not come back after $mode crash";
+		$node->wait_for_log(qr/database system is ready to accept connections/,
+							$log_offset);
 	}
 
 	is($node->safe_psql('postgres',
@@ -277,6 +281,18 @@ $node->append_conf('postgresql.conf', 'max_prepared_transactions = 0');
 $node->append_conf('postgresql.conf', 'max_locks_per_transaction = 10');
 $node->append_conf('postgresql.conf', 'max_pred_locks_per_transaction = 10');
 $node->append_conf('postgresql.conf', 'wal_buffers = 32kB');
+
+# Skip if resizable shared memory isn't supported on this build (e.g. Windows,
+# or Linux without MADV_REMOVE / MADV_POPULATE_WRITE).
+$node->start;
+my $probe_have_resizable_shmem =
+  $node->safe_psql('postgres', 'SHOW have_resizable_shmem;');
+$node->stop;
+if ($probe_have_resizable_shmem ne 'on')
+{
+	plan skip_all =>
+	  'resizable shared memory is not supported on this build';
+}
 
 ###
 # Test 1: Startup allocation via shared_preload_libraries
