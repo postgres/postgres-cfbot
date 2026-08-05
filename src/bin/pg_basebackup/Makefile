@@ -42,7 +42,7 @@ BBOBJS = \
 all: pg_basebackup pg_createsubscriber pg_receivewal pg_recvlogical
 
 pg_basebackup: $(BBOBJS) $(OBJS) | submake-libpq submake-libpgport submake-libpgfeutils
-	$(CC) $(CFLAGS) $(BBOBJS) $(OBJS) $(LDFLAGS) $(LDFLAGS_EX) $(LIBS) -o $@$(X)
+	$(CC) $(CFLAGS) $(BBOBJS) $(OBJS) $(LDFLAGS) $(LDFLAGS_EX) $(LIBS) $(LIBURING_LIBS) -o $@$(X)
 
 pg_createsubscriber: pg_createsubscriber.o $(WIN32RES) | submake-libpq submake-libpgport submake-libpgfeutils
 	$(CC) $(CFLAGS) $^ $(LDFLAGS) $(LDFLAGS_EX) $(LIBS) -o $@$(X)
