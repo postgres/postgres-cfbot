@@ -73,7 +73,7 @@ pgstat_init_function_usage(FunctionCallInfo fcinfo,
 						   PgStat_FunctionCallUsage *fcu)
 {
 	PgStat_EntryRef *entry_ref;
-	PgStat_FunctionCounts *pending;
+	PgStat_FunctionStatus *pending;
 	bool		created_entry;
 
 	if (pgstat_track_functions <= fcinfo->flinfo->fn_stats)
@@ -121,10 +121,10 @@ pgstat_init_function_usage(FunctionCallInfo fcinfo,
 
 	pending = entry_ref->pending;
 
-	fcu->fs = pending;
+	fcu->fs = &pending->counts;
 
 	/* save stats for this function, later used to compensate for recursion */
-	fcu->save_f_total_time = pending->total_time;
+	fcu->save_f_total_time = pending->counts.total_time;
 
 	/* save current backend-wide total time */
 	fcu->save_total = total_func_time;
@@ -184,34 +184,48 @@ pgstat_end_function_usage(PgStat_FunctionCallUsage *fcu, bool finalize)
 }
 
 /*
- * Flush out pending stats for the entry
+ * Flush pending stats for the entry.
  *
- * If nowait is true and the lock could not be immediately acquired, returns
- * false without flushing the entry.  Otherwise returns true.
+ * If nowait is true and the lock could not be acquired, return
+ * PGSTAT_FLUSH_LOCK_CONFLICT.
+ *
+ * Function stats are not transactional, so this always returns
+ * PGSTAT_FLUSH_DONE.  The entry can flush more than once per transaction.
  */
-bool
-pgstat_function_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
+PgStat_FlushResult
+pgstat_function_flush_cb(PgStat_EntryRef *entry_ref, bool nowait,
+						 bool xact_boundary)
 {
-	PgStat_FunctionCounts *localent;
+	PgStat_FunctionStatus *localent;
 	PgStatShared_Function *shfuncent;
 
-	localent = (PgStat_FunctionCounts *) entry_ref->pending;
+	localent = (PgStat_FunctionStatus *) entry_ref->pending;
 	shfuncent = (PgStatShared_Function *) entry_ref->shared_stats;
 
-	/* localent always has non-zero content */
+	/* Nothing changed since the last flush. */
+	if (memcmp(&localent->counts, &localent->flushed,
+			   sizeof(PgStat_FunctionCounts)) == 0)
+		return PGSTAT_FLUSH_DONE;
 
 	if (!pgstat_lock_entry(entry_ref, nowait))
-		return false;
+		return PGSTAT_FLUSH_LOCK_CONFLICT;
 
-	shfuncent->stats.numcalls += localent->numcalls;
+	shfuncent->stats.numcalls +=
+		localent->counts.numcalls - localent->flushed.numcalls;
 	shfuncent->stats.total_time +=
-		INSTR_TIME_GET_MICROSEC(localent->total_time);
+		INSTR_TIME_GET_MICROSEC(localent->counts.total_time) -
+		INSTR_TIME_GET_MICROSEC(localent->flushed.total_time);
 	shfuncent->stats.self_time +=
-		INSTR_TIME_GET_MICROSEC(localent->self_time);
+		INSTR_TIME_GET_MICROSEC(localent->counts.self_time) -
+		INSTR_TIME_GET_MICROSEC(localent->flushed.self_time);
 
 	pgstat_unlock_entry(entry_ref);
 
-	return true;
+	/* Record the new baseline while counts keep accumulating. */
+	if (!xact_boundary)
+		localent->flushed = localent->counts;
+
+	return PGSTAT_FLUSH_DONE;
 }
 
 void
@@ -233,7 +247,7 @@ find_funcstat_entry(Oid func_id)
 	entry_ref = pgstat_fetch_pending_entry(PGSTAT_KIND_FUNCTION, MyDatabaseId, func_id);
 
 	if (entry_ref)
-		return entry_ref->pending;
+		return &((PgStat_FunctionStatus *) entry_ref->pending)->counts;
 	return NULL;
 }
 
