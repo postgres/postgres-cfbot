@@ -1,0 +1,3 @@
+comment = 'Test overload-capture protection when resolution runs in a parallel worker'
+default_version = '1.0'
+relocatable = false

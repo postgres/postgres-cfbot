@@ -29,6 +29,7 @@
 #include "catalog/pg_operator.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
+#include "commands/extension.h"
 #include "miscadmin.h"
 #include "parser/parse_oper.h"
 #include "utils/acl.h"
@@ -642,6 +643,23 @@ get_other_operator(List *otherOp, Oid otherLeftTypeId, Oid otherRightTypeId,
 
 	otherNamespace = QualifiedNameGetCreationNamespace(otherOp,
 													   &otherName);
+
+	/*
+	 * If the lookup failed only because the operator is untrusted during an
+	 * extension script, say so rather than colliding with it below.
+	 */
+	if (creating_extension &&
+		OidIsValid(OperatorGet(otherName, otherNamespace,
+							   otherLeftTypeId, otherRightTypeId,
+							   &otherDefined)))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_FUNCTION),
+				 errmsg("operator does not exist: %s",
+						op_signature_string(otherOp,
+											otherLeftTypeId,
+											otherRightTypeId)),
+				 errdetail("An operator of that name exists, but it is not trusted while an extension script runs."),
+				 errhint("Only objects in pg_catalog, owned by a superuser, or belonging to the extension or one it requires are trusted.")));
 
 	if (strcmp(otherName, operatorName) == 0 &&
 		otherNamespace == operatorNamespace &&
