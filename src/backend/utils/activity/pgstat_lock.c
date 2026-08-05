@@ -17,6 +17,7 @@
 
 #include "postgres.h"
 
+#include "access/xact.h"
 #include "utils/pgstat_internal.h"
 
 static PgStat_PendingLock PendingLockStats;
@@ -36,7 +37,7 @@ pgstat_fetch_stat_lock(void)
 void
 pgstat_lock_flush(bool nowait)
 {
-	(void) pgstat_lock_flush_cb(nowait);
+	(void) pgstat_lock_flush_cb(nowait, !IsTransactionOrTransactionBlock());
 }
 
 /*
@@ -48,7 +49,7 @@ pgstat_lock_flush(bool nowait)
  * acquired. Otherwise, return false.
  */
 bool
-pgstat_lock_flush_cb(bool nowait)
+pgstat_lock_flush_cb(bool nowait, bool xact_boundary)
 {
 	LWLock	   *lckstat_lock;
 	PgStatShared_Lock *shstats;

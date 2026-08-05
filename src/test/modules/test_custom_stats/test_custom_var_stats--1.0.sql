@@ -13,6 +13,11 @@ RETURNS void
 AS 'MODULE_PATHNAME', 'test_custom_stats_var_update'
 LANGUAGE C STRICT PARALLEL UNSAFE;
 
+CREATE FUNCTION test_custom_stats_var_update_txn(IN name TEXT)
+RETURNS void
+AS 'MODULE_PATHNAME', 'test_custom_stats_var_update_txn'
+LANGUAGE C STRICT PARALLEL UNSAFE;
+
 CREATE FUNCTION test_custom_stats_var_drop(IN name TEXT)
 RETURNS void
 AS 'MODULE_PATHNAME', 'test_custom_stats_var_drop'
@@ -20,6 +25,9 @@ LANGUAGE C STRICT PARALLEL UNSAFE;
 
 CREATE FUNCTION test_custom_stats_var_report(INOUT name TEXT,
                                              OUT calls BIGINT,
+                                             OUT calls2 BIGINT,
+                                             OUT calls_txn BIGINT,
+                                             OUT calls_txn2 BIGINT,
                                              OUT description TEXT)
 RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'test_custom_stats_var_report'
