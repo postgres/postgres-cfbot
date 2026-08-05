@@ -361,12 +361,12 @@ pgstat_attach_shmem(void)
 }
 
 void
-pgstat_detach_shmem(void)
+pgstat_detach_shmem(bool discard_pending)
 {
 	Assert(pgStatLocal.num_var_hashes > 0);
 
 	/* we shouldn't leave references to shared stats */
-	pgstat_release_all_entry_refs(false);
+	pgstat_release_all_entry_refs(discard_pending);
 
 	for (int h = 0; h < pgStatLocal.num_var_hashes; h++)
 	{
