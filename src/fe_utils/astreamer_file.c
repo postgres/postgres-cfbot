@@ -38,6 +38,7 @@
 #define DIO_NBUF		32				/* queue depth, XXX:expose it via getopt? */
 #define DIO_MIN_SIZE	DIO_BUFSZ		/* fsize threshold for activating O_DIRECT writes */
 #define DIO_SUBMIT_BATCH	8			/* how many SQEs to batch */
+#define DIO_PREALLOC_CHUNK	(128 * 1024 * 1024) /* grow step, unknown size */
 
 /*
  * State for the dio/io_uring writer. Used by plain(file) and tar extractors.
@@ -55,10 +56,12 @@ typedef struct dio_writer
 	const char *filename;		/* for error handling */
 	pgoff_t		offset;			/* offset of the next write */
 	pgoff_t		written;		/* bytes written */
+	pgoff_t		allocated;		/* file size space preallocated so far */
 	int			curidx;			/* buffer being filled, or -1 */
 	int			curlen;			/* bytes filled in current buffer */
 	int			inflight;		/* prepared writes not yet reaped */
 	int			unsubmitted;	/* SQEs prepared but not yet submitted */
+	bool		nofalloc;		/* fallocate unsupported */
 	bool		notified;		/* already logged a fall-back-to-buffered? */
 } dio_writer;
 #endif
@@ -707,6 +710,59 @@ dio_get_free_buf(dio_writer *dw)
 }
 
 /*
+ * Ensure the file has some space ahead allocated to avoid perofrmance issues
+ * with O_DIRECT writes. Returns false if space cannot be allocated and in such
+ * scenario DIO writes should not be used as the are *slower* than buffered
+ * writes (outcome of many performance runs). The reason is that at least on
+ * Linux, async O_DIRECT writes that extend current file size and may end up
+ * allocating space, are queued and the depth drops to 1 due to file extension
+ * /space allocation happening for 1 file.
+ *
+ * This is used from dio_writer_start() and from regular dio_submit().
+ *
+ * End-file size is known in case of plain files (tar format sends
+ * member->size), however in -Ft (tar) writing mode, we do knot know the
+ * final target tar file size, so we grow it by DIO_PREALLOC_CHUNK from time
+ * to time. In case file is overextended, we truncate it back to proper size
+ * in dio_writer_finish().
+ */
+static bool
+dio_fallocate(dio_writer *dw, pgoff_t end)
+{
+#ifdef HAVE_POSIX_FALLOCATE
+	pgoff_t		want;
+	int			rc;
+
+	if (end <= dw->allocated)
+		return true;
+	if (dw->nofalloc)
+		return false;
+
+	/* Round up to a whole chunk to reduce number of fallocate calls */
+	want = Max(end, dw->allocated + DIO_PREALLOC_CHUNK);
+
+	rc = posix_fallocate(dw->fd, dw->allocated, want - dw->allocated);
+	if (rc != 0)
+	{
+		/* posix_fallocate() does not set errno */
+		errno = rc;
+
+		if (rc == ENOSPC)
+			pg_fatal("could not preallocate file \"%s\": %m", dw->filename);
+
+		dw->nofalloc = true;
+		return false;
+	}
+
+	dw->allocated = want;
+	return true;
+#else
+	dw->nofalloc = true;
+	return false;
+#endif
+}
+
+/*
  * Prepare the SQE from the buffer with full O_DIRECT write. We really
  * submit the SQEs to the kernel only (flush them) only once every
  * couple of times to avoid constant syscall tax (AKA io_uring batching).
@@ -718,6 +774,12 @@ static void
 dio_submit(dio_writer *dw, int idx, size_t len)
 {
 	struct io_uring_sqe *sqe;
+
+	/*
+	 * Keep the allocation ahead of the write cursor.  This is no-op when the
+	 * file was already preallocated to its final size at open() time (plain format).
+	 */
+	dio_fallocate(dw, dw->offset + len);
 
 	sqe = io_uring_get_sqe(&dw->ring);
 	/* this should never happen? liburing/examples uses abort/asserts for this */
@@ -751,6 +813,9 @@ dio_writer_start(dio_writer *dw, const char *filename, pgoff_t prealloc_size, bo
 	int			fd;
 	int			ret;
 	struct stat st;
+	/* preallocation in case of DIO also have to be aligned to DIO size */
+	pgoff_t		prealloc_size_aligned = TYPEALIGN64(DIO_ALIGN, prealloc_size);
+	pgoff_t		prealloc_len = prealloc_size > 0 ? prealloc_size_aligned : DIO_PREALLOC_CHUNK;
 
 	fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC | O_DIRECT | PG_BINARY,
 			  pg_file_create_mode);
@@ -811,26 +876,30 @@ dio_writer_start(dio_writer *dw, const char *filename, pgoff_t prealloc_size, bo
 			pg_log_info("using O_DIRECT with io_uring for large file writes");
 	}
 
-	/* If size is known (in plain mode), preallocate the space */
-#ifdef HAVE_POSIX_FALLOCATE
-	if (prealloc_size > 0)
-	{
-		int			rc = posix_fallocate(fd, 0, prealloc_size);
-
-		if (rc == ENOSPC)
-		{
-			errno = rc;
-			pg_fatal("could not preallocate file \"%s\": %m", filename);
-		}
-	}
-#endif
-
 	dw->fd = fd;
 	dw->filename = filename;
 	dw->offset = 0;
 	dw->written = 0;
+	dw->allocated = 0;
 	dw->curidx = -1;
 	dw->curlen = 0;
+
+	/* Preallocate file to avoid O_DIRECT performance woes */
+	if (!dio_fallocate(dw, prealloc_len))
+	{
+		if (verbose && !dw->notified)
+		{
+			pg_log_info("could not preallocate \"%s\", using buffered I/O instead: %m",
+						filename);
+			dw->notified = true;
+		}
+		dw->fd = -1;
+		close(fd);
+		return false;
+	}
+
+	Assert(dw->inflight == 0);
+	Assert(dw->unsubmitted == 0);
 	return true;
 }
 
