@@ -151,6 +151,8 @@ SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers)-[IS customer_orders | c
 SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers)-[IS customer_orders | customer_wishlists ]->(l IS orders | wishlists)-[ IS list_items]->(p IS products) COLUMNS (c.name AS customer_name, p.name AS product_name, l.list_type)) ORDER BY 1, 2, 3;
 -- vertex to vertex connection abbreviation
 SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers)->(o IS orders) COLUMNS (c.name, o.ordered_when)) ORDER BY 1;
+-- all properties reference
+SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers WHERE c.address = 'US')-[IS customer_orders]->(o IS orders) COLUMNS (c.*));
 
 -- lateral test
 -- Use table with a column name same as a property in the property graph so as
@@ -302,9 +304,7 @@ SELECT * FROM GRAPH_TABLE (g1 MATCH (src)-[conn]->(dest) COLUMNS (conn.vname AS 
 -- el1 is associated with only edges, and cannot qualify a vertex
 SELECT * FROM GRAPH_TABLE (g1 MATCH (src IS el1)-[conn]->(dest) COLUMNS (conn.ename AS cename));
 SELECT * FROM GRAPH_TABLE (g1 MATCH (src IS el1 | vl1)-[conn]->(dest) COLUMNS (conn.ename AS cename));
--- star in COLUMNs is specified but not supported
-SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers WHERE c.address = 'US')-[IS customer_orders]->(o IS orders) COLUMNS (c.*));
--- star anywhere else is not allowed as a property reference
+-- all properties reference is not allowed outside COLUMNs
 SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers WHERE c.* IS NOT NULL)-[IS customer_orders]->(o IS orders) COLUMNS (c.name));
 -- aggregate, window, and set-returning functions are not supported in COLUMNS
 SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers) COLUMNS (count(*) AS num));
@@ -326,6 +326,9 @@ SELECT * FROM GRAPH_TABLE (g1 MATCH (WHERE b.eprop1 = 10001)-[b]->(c) COLUMNS (b
 SELECT * FROM GRAPH_TABLE (g1 MATCH (src)-[conn]->(dest) COLUMNS (src.vname AS svname, conn.ename AS cename, dest.vname AS dvname, src.vprop1 AS svp1, src.vprop2 AS svp2, src.lprop1 AS slp1, dest.vprop1 AS dvp1, dest.vprop2 AS dvp2, dest.lprop1 AS dlp1, conn.eprop1 AS cep1, conn.lprop2 AS clp2));
 -- three label disjunction
 SELECT * FROM GRAPH_TABLE (g1 MATCH (src IS vl1 | vl2 | vl3)-[conn]->(dest) COLUMNS (src.vname AS svname, conn.ename AS cename, dest.vname AS dvname));
+-- all properties reference with label disjunction
+SELECT * FROM GRAPH_TABLE (g1 MATCH (src IS vl1 | vl2 WHERE src.vprop1 = 10 OR src.vprop1 = 1020) COLUMNS (src.*));
+SELECT * FROM GRAPH_TABLE (g1 MATCH (src WHERE src.vprop1 = 10 OR src.vprop1 = 1020 OR src.vprop1 = 2030) COLUMNS (src.*));
 -- graph'ical query: find a vertex which is not connected to any other vertex as a source or a destination.
 WITH all_connected_vertices AS (SELECT svn, dvn FROM GRAPH_TABLE (g1 MATCH (src)-[conn]->(dest) COLUMNS (src.vname AS svn, dest.vname AS dvn))),
     all_vertices AS (SELECT vn FROM GRAPH_TABLE (g1 MATCH (vertex) COLUMNS (vertex.vname AS vn)))
@@ -378,7 +381,7 @@ SELECT * FROM GRAPH_TABLE (g1 MATCH (a WHERE a.vprop1 < 2000)->(b WHERE b.vprop1
 SELECT * FROM GRAPH_TABLE (g1 MATCH (a)->(b WHERE b.vprop1 > 20)->(a WHERE a.vprop1 between 20 and 2000) COLUMNS (a.vname AS self, b.vname AS through, a.vprop1 AS self_p1, b.vprop1 AS through_p1)) ORDER BY self, through;
 SELECT * FROM GRAPH_TABLE (g1 MATCH (a WHERE a.vprop1 between 20 and 2000)->(b WHERE b.vprop1 > 20)->(a WHERE a.vprop1 between 20 and 2000) COLUMNS (a.vname AS self, b.vname AS through, a.vprop1 AS self_p1, b.vprop1 AS through_p1)) ORDER BY self, through;
 -- labels and elements kinds of element patterns with the same variable name
-SELECT * FROM GRAPH_TABLE (g1 MATCH (a IS l1)-[a IS l1]->(b IS l1) COLUMNS (a.ename AS aename, b.ename AS bename)) ORDER BY 1, 2; -- error
+SELECT * FROM GRAPH_TABLE (g1 MATCH (a IS l1)-[a IS l1]->(b IS l1) COLUMNS (a.elname AS aename, b.elname AS bename)) ORDER BY 1, 2; -- error
 SELECT * FROM GRAPH_TABLE (g1 MATCH (a IS vl1)->(b)->(a IS vl2) WHERE a.vname <> b.vname COLUMNS (a.vname AS self, b.vname AS through, a.vprop1 AS self_p1, b.vprop1 AS through_p1)) ORDER BY self, through;  -- error
 SELECT * FROM GRAPH_TABLE (g1 MATCH (a IS vl1)->(b)->(a) COLUMNS (a.vname AS self, b.vname AS through, a.vprop1 AS self_p1, b.vprop1 AS through_p1)) ORDER BY self, through;
 SELECT * FROM GRAPH_TABLE (g1 MATCH (a)->(b)->(a IS vl1) COLUMNS (a.vname AS self, b.vname AS through, a.vprop1 AS self_p1, b.vprop1 AS through_p1)) ORDER BY self, through;
@@ -600,6 +603,10 @@ ALTER PROPERTY GRAPH g1 ALTER VERTEX TABLE v3 DROP LABEL l1;
 SELECT * FROM v_shared_label;
 ROLLBACK;
 SELECT pg_get_viewdef('v_shared_label'::regclass);
+
+-- property graph with no properties and empty all properties reference
+CREATE PROPERTY GRAPH gnoprop VERTEX TABLES (v1 NO PROPERTIES);
+SELECT * FROM GRAPH_TABLE (gnoprop MATCH (a IS v1) COLUMNS (a.*));
 
 -- test view/graph nesting
 

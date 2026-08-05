@@ -106,6 +106,12 @@ typedef Node *(*CoerceParamHook) (ParseState *pstate, Param *param,
  * patterns are transformed. This namespace is used to resolve label and property
  * references in the GRAPH_TABLE.
  */
+typedef struct GraphTableElementVariable
+{
+	const char *name;
+	List	   *properties;
+} GraphTableElementVariable;
+
 typedef struct GraphTableParseState
 {
 	Oid			graphid;		/* OID of the graph being referenced */

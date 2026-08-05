@@ -21,6 +21,7 @@
 #include "catalog/pg_propgraph_element.h"
 #include "catalog/pg_propgraph_element_label.h"
 #include "catalog/pg_propgraph_label.h"
+#include "catalog/pg_propgraph_label_property.h"
 #include "catalog/pg_propgraph_property.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
@@ -33,6 +34,169 @@
 #include "utils/relcache.h"
 #include "utils/syscache.h"
 
+
+static List *get_labelexpr_properties(Node *labelexpr);
+
+/*
+ * Find all properties associated with a label.
+ *
+ * We do not store the direct relationship between labels and properties in the
+ * catalog, but instead we link them through element labels. A label is
+ * associated with an element through an element_label and the element_label is associated with
+ * properties. Therefore, to find properties of a label, we first find an element_label
+ * associated with the label and then find properties associated with that
+ * element_label. Since all elements with the same label have the same set of
+ * properties, it does not matter which element_label we choose as long as there
+ * is at least one.
+ *
+ * `elem_label_oid` is the OID of the element_label associated with the label
+ * whose properties we want to find.
+ *
+ * Returns List of property OIDs.
+ */
+static List *
+get_propgraph_label_properties(Oid elem_label_oid)
+{
+	List	   *propids = NIL;
+	Relation	label_prop_rel;
+	SysScanDesc prop_scan;
+	ScanKeyData prop_key[1];
+	HeapTuple	prop_tup;
+
+	/* Find properties for this element_label */
+	label_prop_rel = table_open(PropgraphLabelPropertyRelationId, AccessShareLock);
+	ScanKeyInit(&prop_key[0],
+				Anum_pg_propgraph_label_property_plpellabelid,
+				BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(elem_label_oid));
+	prop_scan = systable_beginscan(label_prop_rel, PropgraphLabelPropertyLabelPropIndexId,
+								   true, NULL, 1, prop_key);
+
+	while (HeapTupleIsValid(prop_tup = systable_getnext(prop_scan)))
+	{
+		Form_pg_propgraph_label_property label_prop = (Form_pg_propgraph_label_property) GETSTRUCT(prop_tup);
+
+		propids = lappend_oid(propids, label_prop->plppropid);
+	}
+
+	systable_endscan(prop_scan);
+	table_close(label_prop_rel, AccessShareLock);
+
+	return propids;
+}
+
+/*
+ * Find the set of properties associated with the given label expression.
+ *
+ * Independent of the actual expression, the set of properties that can be
+ * projected by an element variable associated with the given expression is the
+ * union of the properties associated with each label that appears in the expression.
+ */
+List *
+get_labelexpr_properties(Node *labelexpr)
+{
+	List	   *propids = NIL;
+
+	Assert(labelexpr != NULL);
+
+	check_stack_depth();
+
+	switch (nodeTag(labelexpr))
+	{
+		case T_GraphLabelRef:
+			{
+				GraphLabelRef *lref = castNode(GraphLabelRef, labelexpr);
+
+				if (!lref->elem_labels)
+				{
+					/*
+					 * No element is associated with this label, return empty
+					 * property list.
+					 */
+					propids = NIL;
+				}
+				else
+					propids = get_propgraph_label_properties(linitial_oid(lref->elem_labels));
+
+				break;
+			}
+
+		case T_BoolExpr:
+			{
+				BoolExpr   *be = castNode(BoolExpr, labelexpr);
+
+				foreach_ptr(Node, arg, be->args)
+				{
+					List	   *arg_propids = get_labelexpr_properties(arg);
+
+					propids = list_concat_unique_oid(propids, arg_propids);
+				}
+				break;
+			}
+
+		default:
+			/* should not reach here for a transformed label expression */
+			elog(ERROR, "unsupported label expression node: %d", (int) nodeTag(labelexpr));
+			break;
+	}
+
+	return propids;
+}
+
+/*
+ * Find all elements that fit the given kind associated with the given label.
+ *
+ * Return the element OIDs through the output parameter `elements`. Often we
+ * will need the element_label OIDs corresponding to these elements as well, so
+ * we return them through the output parameter `elem_labels`.
+ */
+static void
+get_propgraph_label_elements(Oid labelid, GraphElementPatternKind gepkind,
+							 List **elements, List **elem_labels)
+{
+	List	   *element_oids = NIL;
+	List	   *elem_labels_oids = NIL;
+	Relation	rel;
+	SysScanDesc scan;
+	ScanKeyData key[1];
+	HeapTuple	tup;
+
+	rel = table_open(PropgraphElementLabelRelationId, AccessShareLock);
+	ScanKeyInit(&key[0],
+				Anum_pg_propgraph_element_label_pgellabelid,
+				BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(labelid));
+	scan = systable_beginscan(rel, PropgraphElementLabelLabelIndexId,
+							  true, NULL, 1, key);
+	while (HeapTupleIsValid(tup = systable_getnext(scan)))
+	{
+		Form_pg_propgraph_element_label element_label = (Form_pg_propgraph_element_label) GETSTRUCT(tup);
+		Oid			element_oid = element_label->pgelelid;
+		Oid			elem_label_oid = element_label->oid;
+		HeapTuple	element_tup = SearchSysCache1(PROPGRAPHELOID, ObjectIdGetDatum(element_oid));
+		Form_pg_propgraph_element element_form;
+
+		if (!HeapTupleIsValid(element_tup))
+			elog(ERROR, "cache lookup failed for property graph element %u", element_oid);
+
+		element_form = (Form_pg_propgraph_element) GETSTRUCT(element_tup);
+
+		if ((element_form->pgekind == PGEKIND_VERTEX && gepkind == VERTEX_PATTERN) ||
+			(element_form->pgekind == PGEKIND_EDGE && IS_EDGE_PATTERN(gepkind)))
+		{
+			element_oids = lappend_oid(element_oids, element_oid);
+			elem_labels_oids = lappend_oid(elem_labels_oids, elem_label_oid);
+		}
+
+		ReleaseSysCache(element_tup);
+	}
+
+	systable_endscan(scan);
+	table_close(rel, AccessShareLock);
+
+	*elements = element_oids;
+	*elem_labels = elem_labels_oids;
+}
 
 /*
  * Return human-readable name of the type of graph element pattern in
@@ -64,18 +228,102 @@ get_gep_kind_name(GraphElementPatternKind gepkind)
 }
 
 /*
+ * Transform a <variable>.* expression.
+ *
+ * If the column reference is of the form <variable>.*, return a list of
+ * GraphPropertyRef nodes representing the properties of the variable. When there
+ * are no properties associated with the variable, return an empty list. If the
+ * column reference is not of the form <variable>.*, return NULL.
+ *
+ * Since an empty list and NULL are both represented as a C NULL pointer, we use the
+ * output parameter `is_all_props_ref` to indicate whether the NULL pointer
+ * returned by this function means an empty list of properties or that the given
+ * column reference is not of the form <variable>.*.
+ */
+Node *
+transformGraphTableAllPropRef(ParseState *pstate, Node *node, bool *is_all_props_ref)
+{
+	GraphTableParseState *gpstate = pstate->p_graph_table_pstate;
+	ColumnRef  *cref;
+
+	*is_all_props_ref = false;
+
+	if (!gpstate)
+		return NULL;
+
+	if (!IsA(node, ColumnRef))
+		return NULL;
+
+	cref = castNode(ColumnRef, node);
+	if (list_length(cref->fields) == 2)
+	{
+		Node	   *field1 = linitial(cref->fields);
+		Node	   *field2 = lsecond(cref->fields);
+		char	   *elvarname = strVal(field1);
+
+		/* Find the variable in the graph pattern variables */
+		foreach_ptr(GraphTableElementVariable, var, gpstate->variables)
+		{
+			if (strcmp(var->name, elvarname) == 0)
+			{
+				GraphPropertyRef *gpr;
+				HeapTuple	pgptup;
+				Form_pg_propgraph_property pgpform;
+
+				if (IsA(field2, A_Star))
+				{
+					List	   *propref_list = NIL;
+
+					*is_all_props_ref = true;
+
+					foreach_oid(propid, var->properties)
+					{
+						gpr = makeNode(GraphPropertyRef);
+						pgptup = SearchSysCache1(PROPGRAPHPROPOID, ObjectIdGetDatum(propid));
+
+						if (!HeapTupleIsValid(pgptup))
+							elog(ERROR, "cache lookup failed for property %u", propid);
+						pgpform = (Form_pg_propgraph_property) GETSTRUCT(pgptup);
+
+						gpr->location = cref->location;
+						gpr->elvarname = elvarname;
+						gpr->propid = propid;
+						gpr->typeId = pgpform->pgptypid;
+						gpr->typmod = pgpform->pgptypmod;
+						gpr->collation = pgpform->pgpcollation;
+
+						ReleaseSysCache(pgptup);
+						propref_list = lappend(propref_list, gpr);
+					}
+
+					return (Node *) propref_list;
+				}
+			}
+		}
+	}
+
+	return NULL;
+}
+
+/*
  * Transform a property reference.
  *
  * A property reference is parsed as a ColumnRef of the form:
- * <variable>.<property>. If <variable> is one of the variables bound to an
+ * <variable>.<property>.
+ *
+ * If <variable> is one of the variables bound to an
  * element pattern in the graph pattern and <property> can be resolved as a
- * property of the property graph, then we return a GraphPropertyRef node
- * representing the property reference. If the <variable> exists in the graph
- * pattern but <property> does not exist in the property graph, we raise an
- * error. However, if <variable> does not exist in the graph pattern, we return
- * NULL to let the caller handle it as some other kind of ColumnRef. The
- * variables bound to the element patterns in the graph pattern are expected to
- * be collected in the GraphTableParseState.
+ * property of the property graph and is associated with the element variable,
+ * then we return a GraphPropertyRef node representing the property reference.
+ *
+ * If
+ * the <variable> exists in the graph pattern but <property> does not exist in
+ * the property graph, we raise an error.
+ *
+ * However, if <variable> does not exist
+ * in the graph pattern, we return NULL to let the caller handle it as some other
+ * kind of ColumnRef. The variables bound to the element patterns in the graph
+ * pattern are expected to be collected in the GraphTableParseState.
  */
 Node *
 transformGraphTablePropertyRef(ParseState *pstate, ColumnRef *cref)
@@ -94,109 +342,69 @@ transformGraphTablePropertyRef(ParseState *pstate, ColumnRef *cref)
 
 		if (IsA(field1, A_Star) || IsA(field2, A_Star))
 		{
-			if (pstate->p_expr_kind == EXPR_KIND_SELECT_TARGET)
-				ereport(ERROR,
-						errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("\"*\" is not supported here"),
-						parser_errposition(pstate, cref->location));
-			else
-				ereport(ERROR,
-						errcode(ERRCODE_SYNTAX_ERROR),
-						errmsg("\"*\" not allowed here"),
-						parser_errposition(pstate, cref->location));
+			ereport(ERROR,
+					errcode(ERRCODE_SYNTAX_ERROR),
+					errmsg("\"*\" not allowed here"),
+					parser_errposition(pstate, cref->location));
 		}
 
 		elvarname = strVal(field1);
 		propname = strVal(field2);
 
-		if (list_member(gpstate->variables, field1))
+		/* Find the variable in the graph pattern variables */
+		foreach_ptr(GraphTableElementVariable, var, gpstate->variables)
 		{
-			GraphPropertyRef *gpr;
-			HeapTuple	pgptup;
-			Form_pg_propgraph_property pgpform;
-
-			/*
-			 * If we are transforming expression in an element pattern,
-			 * property references containing only that variable are allowed.
-			 */
-			if (gpstate->cur_gep)
+			if (strcmp(var->name, elvarname) == 0)
 			{
-				if (!gpstate->cur_gep->variable ||
-					strcmp(elvarname, gpstate->cur_gep->variable) != 0)
+				GraphPropertyRef *gpr = makeNode(GraphPropertyRef);
+				HeapTuple	pgptup;
+				Form_pg_propgraph_property pgpform;
+
+				/*
+				 * If we are transforming expression in an element pattern,
+				 * property references containing only that variable are
+				 * allowed.
+				 */
+				if (gpstate->cur_gep)
+				{
+					if (!gpstate->cur_gep->variable ||
+						strcmp(elvarname, gpstate->cur_gep->variable) != 0)
+						ereport(ERROR,
+								errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								errmsg("non-local element variable reference is not supported"),
+								parser_errposition(pstate, cref->location));
+				}
+
+				pgptup = SearchSysCache2(PROPGRAPHPROPNAME, ObjectIdGetDatum(gpstate->graphid), CStringGetDatum(propname));
+				if (!HeapTupleIsValid(pgptup))
 					ereport(ERROR,
-							errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							errmsg("non-local element variable reference is not supported"),
-							parser_errposition(pstate, cref->location));
+							errcode(ERRCODE_SYNTAX_ERROR),
+							errmsg("property \"%s\" does not exist", propname));
+				pgpform = (Form_pg_propgraph_property) GETSTRUCT(pgptup);
+				/* Check if this property is available for this variable */
+				if (!list_member_oid(var->properties, pgpform->oid))
+					ereport(ERROR,
+							errcode(ERRCODE_UNDEFINED_COLUMN),
+							errmsg("property \"%s\" is not available for element variable \"%s\"",
+								   propname, elvarname));
+
+				gpr->location = cref->location;
+				gpr->elvarname = elvarname;
+				gpr->propid = pgpform->oid;
+				gpr->typeId = pgpform->pgptypid;
+				gpr->typmod = pgpform->pgptypmod;
+				gpr->collation = pgpform->pgpcollation;
+
+				ReleaseSysCache(pgptup);
+
+				return (Node *) gpr;
 			}
-
-			gpr = makeNode(GraphPropertyRef);
-			pgptup = SearchSysCache2(PROPGRAPHPROPNAME, ObjectIdGetDatum(gpstate->graphid), CStringGetDatum(propname));
-			if (!HeapTupleIsValid(pgptup))
-				ereport(ERROR,
-						errcode(ERRCODE_SYNTAX_ERROR),
-						errmsg("property \"%s\" does not exist", propname));
-			pgpform = (Form_pg_propgraph_property) GETSTRUCT(pgptup);
-
-			gpr->location = cref->location;
-			gpr->elvarname = elvarname;
-			gpr->propid = pgpform->oid;
-			gpr->typeId = pgpform->pgptypid;
-			gpr->typmod = pgpform->pgptypmod;
-			gpr->collation = pgpform->pgpcollation;
-
-			ReleaseSysCache(pgptup);
-
-			return (Node *) gpr;
 		}
 	}
 
 	return NULL;
 }
 
-/*
- * Given the OID of a label and the kind of graph element pattern, return true if
- * there exists at least one element matching the given kind associated with the
- * label. Otherwise return false.
- */
-static bool
-label_has_elements_of_kind(Oid labelid, GraphElementPatternKind gepkind)
-{
-	Relation	rel;
-	SysScanDesc scan;
-	ScanKeyData key[1];
-	HeapTuple	tup;
-	bool		result = false;
-
-	rel = table_open(PropgraphElementLabelRelationId, AccessShareLock);
-	ScanKeyInit(&key[0],
-				Anum_pg_propgraph_element_label_pgellabelid,
-				BTEqualStrategyNumber,
-				F_OIDEQ, ObjectIdGetDatum(labelid));
-	scan = systable_beginscan(rel, PropgraphElementLabelLabelIndexId,
-							  true, NULL, 1, key);
-	while (!result && HeapTupleIsValid(tup = systable_getnext(scan)))
-	{
-		Form_pg_propgraph_element_label element_label = (Form_pg_propgraph_element_label) GETSTRUCT(tup);
-		Oid			element_oid = element_label->pgelelid;
-		HeapTuple	element_tup = SearchSysCache1(PROPGRAPHELOID, ObjectIdGetDatum(element_oid));
-		Form_pg_propgraph_element element_form;
-
-		if (!HeapTupleIsValid(element_tup))
-			elog(ERROR, "cache lookup failed for property graph element %u", element_oid);
-
-		element_form = (Form_pg_propgraph_element) GETSTRUCT(element_tup);
-
-		if ((element_form->pgekind == PGEKIND_VERTEX && gepkind == VERTEX_PATTERN) ||
-			(element_form->pgekind == PGEKIND_EDGE && IS_EDGE_PATTERN(gepkind)))
-			result = true;
-
-		ReleaseSysCache(element_tup);
-	}
-
-	systable_endscan(scan);
-	table_close(rel, AccessShareLock);
-	return result;
-}
 
 /*
  * Transform a label expression.
@@ -222,6 +430,7 @@ transformLabelExpr(GraphTableParseState *gpstate, Node *labelexpr, GraphElementP
 
 	if (!labelexpr)
 	{
+		/* Empty label expression, transform into a disjunction of labels */
 		Relation	rel;
 		SysScanDesc scan;
 		ScanKeyData key[1];
@@ -235,16 +444,27 @@ transformLabelExpr(GraphTableParseState *gpstate, Node *labelexpr, GraphElementP
 					F_OIDEQ, ObjectIdGetDatum(gpstate->graphid));
 		scan = systable_beginscan(rel, PropgraphLabelGraphNameIndexId,
 								  true, NULL, 1, key);
+
 		while (HeapTupleIsValid(tup = systable_getnext(scan)))
 		{
 			Form_pg_propgraph_label label = (Form_pg_propgraph_label) GETSTRUCT(tup);
+			List	   *elements;
+			List	   *elem_labels;
 			GraphLabelRef *lref;
 
-			if (!label_has_elements_of_kind(label->oid, gepkind))
+			get_propgraph_label_elements(label->oid, gepkind, &elements, &elem_labels);
+
+			/*
+			 * Only include the labels which have elements associated with it.
+			 * Properties of the other labels do not matter.
+			 */
+			if (!elements)
 				continue;
 
 			lref = makeNode(GraphLabelRef);
 			lref->labelid = label->oid;
+			lref->elements = elements;
+			lref->elem_labels = elem_labels;
 			lref->location = -1;
 			args = lappend(args, lref);
 		}
@@ -293,6 +513,15 @@ transformLabelExpr(GraphTableParseState *gpstate, Node *labelexpr, GraphElementP
 				lref->labelid = labelid;
 				lref->location = cref->location;
 
+				get_propgraph_label_elements(labelid, gepkind, &lref->elements, &lref->elem_labels);
+				if (!lref->elements)
+					ereport(ERROR,
+							(errcode(ERRCODE_UNDEFINED_OBJECT),
+							 errmsg("no property graph element of type \"%s\" has label \"%s\" associated with it in property graph \"%s\"",
+									gepkind == VERTEX_PATTERN ? "vertex" : "edge",
+									get_propgraph_label_name(labelid),
+									get_rel_name(gpstate->graphid))));
+
 				result = (Node *) lref;
 				break;
 			}
@@ -329,10 +558,11 @@ transformLabelExpr(GraphTableParseState *gpstate, Node *labelexpr, GraphElementP
  * Transform a GraphElementPattern.
  *
  * Transform the label expression and the where clause in the element pattern
- * given by GraphElementPattern. The variable name in the GraphElementPattern is
- * added to the list of variables in the GraphTableParseState which is used to
- * resolve property references in this element pattern or elsewhere in the
- * GRAPH_TABLE.
+ * given by GraphElementPattern.
+ *
+ * While doing so build the namespace for the graph table, of which this element
+ * is a part. The namespace is saved in GraphTableParseState as a list of
+ * variables and their respective properties.
  */
 static Node *
 transformGraphElementPattern(ParseState *pstate, GraphElementPattern *gep)
@@ -348,8 +578,28 @@ transformGraphElementPattern(ParseState *pstate, GraphElementPattern *gep)
 
 	gpstate->cur_gep = gep;
 
+	/* Preserve empty label expression status. */
 	gep->has_empty_labelexpr = !gep->labelexpr;
 	gep->labelexpr = transformLabelExpr(gpstate, gep->labelexpr, gep->kind);
+
+	/*
+	 * Add the named element pattern to the namespace, squashing together
+	 * properties of element patterns with the same variable name. We need to
+	 * do this after the label expression is transformed, since we require
+	 * label expression to find the properties associated with variables. We
+	 * should do it before transforming the WHERE clause which might have
+	 * property references which are resolved using the variables.
+	 */
+	if (gep->variable)
+	{
+		foreach_ptr(GraphTableElementVariable, var, gpstate->variables)
+		{
+			if (strcmp(var->name, gep->variable) == 0)
+			{
+				var->properties = list_concat_unique_oid(var->properties, get_labelexpr_properties(gep->labelexpr));
+			}
+		}
+	}
 
 	gep->whereClause = transformExpr(pstate, gep->whereClause, EXPR_KIND_WHERE);
 
@@ -457,7 +707,26 @@ transformPathPatternList(ParseState *pstate, List *path_pattern)
 		foreach_node(GraphElementPattern, gep, path_term)
 		{
 			if (gep->variable)
-				gpstate->variables = list_append_unique(gpstate->variables, makeString(pstrdup(gep->variable)));
+			{
+				bool		found = false;
+
+				foreach_ptr(GraphTableElementVariable, var, gpstate->variables)
+				{
+					if (strcmp(var->name, gep->variable) == 0)
+					{
+						found = true;
+						break;
+					}
+				}
+				if (!found)
+				{
+					GraphTableElementVariable *new_var = palloc0_object(GraphTableElementVariable);
+
+					new_var->name = gep->variable;
+					new_var->properties = NIL;
+					gpstate->variables = lappend(gpstate->variables, new_var);
+				}
+			}
 		}
 	}
 

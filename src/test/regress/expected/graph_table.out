@@ -235,7 +235,7 @@ SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers)-[IS customer_orders | c
 
 -- property not associated with labels queried results in error
 SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers)-[IS customer_orders | customer_wishlists ]->(l IS orders | wishlists)-[ IS list_items]->(p IS products) COLUMNS (c.name AS customer_name, p.name AS product_name, l.list_type)) ORDER BY 1, 2, 3;
-ERROR:  property "list_type" for element variable "l" not found
+ERROR:  property "list_type" is not available for element variable "l"
 -- vertex to vertex connection abbreviation
 SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers)->(o IS orders) COLUMNS (c.name, o.ordered_when)) ORDER BY 1;
    name    | ordered_when 
@@ -243,6 +243,13 @@ SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers)->(o IS orders) COLUMNS 
  customer1 | 01-01-2024
  customer2 | 01-02-2024
 (2 rows)
+
+-- all properties reference
+SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers WHERE c.address = 'US')-[IS customer_orders]->(o IS orders) COLUMNS (c.*));
+   name    | customer_id | address 
+-----------+-------------+---------
+ customer1 |           1 | US
+(1 row)
 
 -- lateral test
 -- Use table with a column name same as a property in the property graph so as
@@ -449,24 +456,19 @@ SELECT * FROM GRAPH_TABLE (g1 MATCH (v1 IS vl2)-(v2) COLUMNS (v1.vname AS v1name
 -- Errors
 -- vl1 is not associated with property vprop2
 SELECT src, src_vprop2, conn, dest FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[b IS el1]->(c IS vl2 | vl3) COLUMNS (a.vname AS src, a.vprop2 AS src_vprop2, b.ename AS conn, c.vname AS dest));
-ERROR:  property "vprop2" for element variable "a" not found
+ERROR:  property "vprop2" is not available for element variable "a"
 -- property ename is associated with edge labels but not with a vertex label
 SELECT * FROM GRAPH_TABLE (g1 MATCH (src)-[conn]->(dest) COLUMNS (src.vname AS svname, src.ename AS sename));
-ERROR:  property "ename" for element variable "src" not found
+ERROR:  property "ename" is not available for element variable "src"
 -- vname is associated vertex labels but not with an edge label
 SELECT * FROM GRAPH_TABLE (g1 MATCH (src)-[conn]->(dest) COLUMNS (conn.vname AS cvname, conn.ename AS cename));
-ERROR:  property "vname" for element variable "conn" not found
+ERROR:  property "vname" is not available for element variable "conn"
 -- el1 is associated with only edges, and cannot qualify a vertex
 SELECT * FROM GRAPH_TABLE (g1 MATCH (src IS el1)-[conn]->(dest) COLUMNS (conn.ename AS cename));
 ERROR:  no property graph element of type "vertex" has label "el1" associated with it in property graph "g1"
 SELECT * FROM GRAPH_TABLE (g1 MATCH (src IS el1 | vl1)-[conn]->(dest) COLUMNS (conn.ename AS cename));
 ERROR:  no property graph element of type "vertex" has label "el1" associated with it in property graph "g1"
--- star in COLUMNs is specified but not supported
-SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers WHERE c.address = 'US')-[IS customer_orders]->(o IS orders) COLUMNS (c.*));
-ERROR:  "*" is not supported here
-LINE 1: ... = 'US')-[IS customer_orders]->(o IS orders) COLUMNS (c.*));
-                                                                 ^
--- star anywhere else is not allowed as a property reference
+-- all properties reference is not allowed outside COLUMNs
 SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers WHERE c.* IS NOT NULL)-[IS customer_orders]->(o IS orders) COLUMNS (c.name));
 ERROR:  "*" not allowed here
 LINE 1: ...M GRAPH_TABLE (myshop MATCH (c IS customers WHERE c.* IS NOT...
@@ -527,6 +529,22 @@ SELECT * FROM GRAPH_TABLE (g1 MATCH (src IS vl1 | vl2 | vl3)-[conn]->(dest) COLU
  v11    | e132   | v31
  v22    | e231   | v32
 (5 rows)
+
+-- all properties reference with label disjunction
+SELECT * FROM GRAPH_TABLE (g1 MATCH (src IS vl1 | vl2 WHERE src.vprop1 = 10 OR src.vprop1 = 1020) COLUMNS (src.*));
+ vname | vprop1 | vprop2 |  lprop1  
+-------+--------+--------+----------
+ v11   |     10 |        | 
+ v22   |   1020 |   1200 | vl2_prop
+(2 rows)
+
+SELECT * FROM GRAPH_TABLE (g1 MATCH (src WHERE src.vprop1 = 10 OR src.vprop1 = 1020 OR src.vprop1 = 2030) COLUMNS (src.*));
+ elname | vname | vprop1 | vprop2 |  lprop1  
+--------+-------+--------+--------+----------
+ v11    | v11   |     10 |        | 
+ v22    | v22   |   1020 |   1200 | vl2_prop
+ v33    | v33   |   2030 |        | vl3_prop
+(3 rows)
 
 -- graph'ical query: find a vertex which is not connected to any other vertex as a source or a destination.
 WITH all_connected_vertices AS (SELECT svn, dvn FROM GRAPH_TABLE (g1 MATCH (src)-[conn]->(dest) COLUMNS (src.vname AS svn, dest.vname AS dvn))),
@@ -633,7 +651,7 @@ SELECT * FROM GRAPH_TABLE (g1 MATCH (a WHERE a.vprop1 between 20 and 2000)->(b W
 (4 rows)
 
 -- labels and elements kinds of element patterns with the same variable name
-SELECT * FROM GRAPH_TABLE (g1 MATCH (a IS l1)-[a IS l1]->(b IS l1) COLUMNS (a.ename AS aename, b.ename AS bename)) ORDER BY 1, 2; -- error
+SELECT * FROM GRAPH_TABLE (g1 MATCH (a IS l1)-[a IS l1]->(b IS l1) COLUMNS (a.elname AS aename, b.elname AS bename)) ORDER BY 1, 2; -- error
 ERROR:  element patterns with same variable name "a" but different element pattern types
 SELECT * FROM GRAPH_TABLE (g1 MATCH (a IS vl1)->(b)->(a IS vl2) WHERE a.vname <> b.vname COLUMNS (a.vname AS self, b.vname AS through, a.vprop1 AS self_p1, b.vprop1 AS through_p1)) ORDER BY self, through;  -- error
 ERROR:  element patterns with same variable name "a" but different label expressions are not supported
@@ -862,7 +880,7 @@ EXECUTE loopstmt;
 
 ALTER PROPERTY GRAPH g1 ALTER EDGE TABLE e3_3 ALTER LABEL l2 DROP PROPERTIES (elname);
 EXECUTE loopstmt; -- error
-ERROR:  property "elname" for element variable "e" not found
+ERROR:  property "elname" is not available for element variable "e"
 ALTER PROPERTY GRAPH g1 ALTER EDGE TABLE e3_3 ALTER LABEL l2 ADD PROPERTIES ((ename || '_new')::varchar(10) AS elname);
 EXECUTE loopstmt;
    loop   
@@ -1027,7 +1045,19 @@ ALTER PROPERTY GRAPH g1 ALTER VERTEX TABLE v1 DROP LABEL l1;
 ALTER PROPERTY GRAPH g1 ALTER VERTEX TABLE v2 DROP LABEL l1;
 ALTER PROPERTY GRAPH g1 ALTER VERTEX TABLE v3 DROP LABEL l1;
 SELECT * FROM v_shared_label;
-ERROR:  no property graph element of type "vertex" has label "l1" associated with it in property graph "g1"
+ elname 
+--------
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+(9 rows)
+
 ROLLBACK;
 -- ruleutils reverse parsing
 SELECT pg_get_viewdef('customers_us'::regclass);
@@ -1074,6 +1104,12 @@ SELECT pg_get_viewdef('v_shared_label'::regclass);
   SELECT elname                                                        +
     FROM GRAPH_TABLE (g1 MATCH (v IS l1) COLUMNS (v.elname AS elname));
 (1 row)
+
+-- property graph with no properties and empty all properties reference
+CREATE PROPERTY GRAPH gnoprop VERTEX TABLES (v1 NO PROPERTIES);
+SELECT * FROM GRAPH_TABLE (gnoprop MATCH (a IS v1) COLUMNS (a.*));
+--
+(3 rows)
 
 -- test view/graph nesting
 CREATE VIEW customers_view AS SELECT customer_id, 'redacted' || customer_id AS name_redacted, address FROM customers;

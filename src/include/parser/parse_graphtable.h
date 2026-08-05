@@ -18,7 +18,7 @@
 #include "parser/parse_node.h"
 
 extern Node *transformGraphTablePropertyRef(ParseState *pstate, ColumnRef *cref);
-
+extern Node *transformGraphTableAllPropRef(ParseState *pstate, Node *node, bool *is_all_props_ref);
 extern Node *transformGraphPattern(ParseState *pstate, GraphPattern *graph_pattern);
 
 #endif							/* PARSE_GRAPHTABLE_H */
