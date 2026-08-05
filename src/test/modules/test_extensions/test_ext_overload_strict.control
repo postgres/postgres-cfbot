@@ -1,0 +1,3 @@
+comment = 'Test refusal to call an untrusted function during extension scripts'
+default_version = '1.0'
+relocatable = false
