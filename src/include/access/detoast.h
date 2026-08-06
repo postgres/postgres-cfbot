@@ -30,6 +30,9 @@ do { \
 /* Size of an EXTERNAL datum that contains a standard TOAST pointer */
 #define TOAST_OID_POINTER_SIZE (VARHDRSZ_EXTERNAL + sizeof(varatt_external_oid))
 
+/* Size of an EXTERNAL datum that contains an Oid8 TOAST pointer */
+#define TOAST_OID8_POINTER_SIZE (VARHDRSZ_EXTERNAL + sizeof(varatt_external_oid8))
+
 /* Size of an EXTERNAL datum that contains an indirection pointer */
 #define INDIRECT_POINTER_SIZE (VARHDRSZ_EXTERNAL + sizeof(varatt_indirect))
 

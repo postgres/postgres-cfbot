@@ -5169,12 +5169,14 @@ ReorderBufferToastReplace(ReorderBuffer *rb, ReorderBufferTXN *txn,
 
 		/* va_rawsize is the size of the original datum -- including header */
 		varatt_external_oid toast_pointer;
+		varatt_external_oid8 toast_pointer8;
 		varatt_indirect redirect_pointer;
 		varlena    *new_datum = NULL;
 		varlena    *reconstructed;
 		dlist_iter	it;
 		Size		data_done = 0;
 		Oid8		toast_valueid;
+		int32		rawsize;
 
 		if (attr->attisdropped)
 			continue;
@@ -5194,8 +5196,19 @@ ReorderBufferToastReplace(ReorderBuffer *rb, ReorderBufferTXN *txn,
 		if (!VARATT_IS_EXTERNAL(varlena_pointer))
 			continue;
 
-		VARATT_EXTERNAL_GET_POINTER(toast_pointer, varlena_pointer);
-		toast_valueid = toast_pointer.va_valueid;
+		/* Branch on vartag to handle both pointer types */
+		if (VARTAG_EXTERNAL(varlena_pointer) == VARTAG_ONDISK_OID8)
+		{
+			VARATT_EXTERNAL_GET_POINTER(toast_pointer8, varlena_pointer);
+			toast_valueid = VARATT_EXTERNAL_OID8_GET_VALUEID(toast_pointer8);
+			rawsize = toast_pointer8.va_rawsize;
+		}
+		else
+		{
+			VARATT_EXTERNAL_GET_POINTER(toast_pointer, varlena_pointer);
+			toast_valueid = toast_pointer.va_valueid;
+			rawsize = toast_pointer.va_rawsize;
+		}
 
 		/*
 		 * Check whether the toast tuple changed, replace if so.
@@ -5213,7 +5226,7 @@ ReorderBufferToastReplace(ReorderBuffer *rb, ReorderBufferTXN *txn,
 
 		free[natt] = true;
 
-		reconstructed = palloc0(toast_pointer.va_rawsize);
+		reconstructed = palloc0(rawsize);
 
 		ent->reconstructed = reconstructed;
 
@@ -5238,13 +5251,28 @@ ReorderBufferToastReplace(ReorderBuffer *rb, ReorderBufferTXN *txn,
 				   VARSIZE(chunk) - VARHDRSZ);
 			data_done += VARSIZE(chunk) - VARHDRSZ;
 		}
-		Assert(data_done == VARATT_EXTERNAL_OID_GET_EXTSIZE(toast_pointer));
 
-		/* make sure its marked as compressed or not */
-		if (VARATT_EXTERNAL_OID_IS_COMPRESSED(toast_pointer))
-			SET_VARSIZE_COMPRESSED(reconstructed, data_done + VARHDRSZ);
+		/* Verify size and set compression status based on pointer type */
+		if (VARTAG_EXTERNAL(varlena_pointer) == VARTAG_ONDISK_OID8)
+		{
+			Assert(data_done == VARATT_EXTERNAL_OID8_GET_EXTSIZE(toast_pointer8));
+
+			/* make sure its marked as compressed or not */
+			if (VARATT_EXTERNAL_OID8_IS_COMPRESSED(toast_pointer8))
+				SET_VARSIZE_COMPRESSED(reconstructed, data_done + VARHDRSZ);
+			else
+				SET_VARSIZE(reconstructed, data_done + VARHDRSZ);
+		}
 		else
-			SET_VARSIZE(reconstructed, data_done + VARHDRSZ);
+		{
+			Assert(data_done == VARATT_EXTERNAL_OID_GET_EXTSIZE(toast_pointer));
+
+			/* make sure its marked as compressed or not */
+			if (VARATT_EXTERNAL_OID_IS_COMPRESSED(toast_pointer))
+				SET_VARSIZE_COMPRESSED(reconstructed, data_done + VARHDRSZ);
+			else
+				SET_VARSIZE(reconstructed, data_done + VARHDRSZ);
+		}
 
 		memset(&redirect_pointer, 0, sizeof(redirect_pointer));
 		redirect_pointer.pointer = reconstructed;

@@ -579,7 +579,7 @@ static relopt_enum enumRelOpts[] =
 		},
 		StdRdOptToastValueTypes,
 		STDRD_OPTION_TOAST_VALUE_TYPE_OID,
-		gettext_noop("Valid values are \"oid\".")
+		gettext_noop("Valid values are \"oid\" and \"oid8\".")
 	},
 	{
 		{

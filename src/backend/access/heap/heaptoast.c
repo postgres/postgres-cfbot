@@ -650,7 +650,10 @@ heap_fetch_toast_slice(Relation toastrel, Oid8 valueid, int32 attrsize,
 
 	toast_typid = TupleDescAttr(toastrel->rd_att, 0)->atttypid;
 	Assert(toast_typid == OIDOID || toast_typid == OID8OID);
-	max_chunk_size = TOAST_OID_MAX_CHUNK_SIZE;
+	if (toast_typid == OID8OID)
+		max_chunk_size = TOAST_OID8_MAX_CHUNK_SIZE;
+	else
+		max_chunk_size = TOAST_OID_MAX_CHUNK_SIZE;
 
 	totalchunks = ((attrsize - 1) / max_chunk_size) + 1;
 	startchunk = sliceoffset / max_chunk_size;
