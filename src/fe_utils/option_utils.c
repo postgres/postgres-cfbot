@@ -84,6 +84,61 @@ option_parse_int(const char *optarg, const char *optname,
 }
 
 /*
+ * option_parse_uint32
+ *
+ * Parse unsigned integer value for an option.  If the parsing is successful,
+ * returns true and stores the result in *result if that's given;
+ * if parsing fails, returns false.
+ */
+bool
+option_parse_uint32(const char *optarg, const char *optname,
+				 uint32 min_range, uint32 max_range,
+				 uint32 *result)
+{
+	char	   		*endptr;
+	unsigned long	val;
+
+	/* Fail if there is a minus sign at the start of value */
+	while(isspace((unsigned char) *optarg))
+		optarg++;
+	if(*optarg == '-')
+	{
+		pg_log_error("value \"%s\" for option %s can not be negative",
+					optarg, optname);
+		return false;
+	}
+
+	errno = 0;
+	val = strtoul(optarg, &endptr, 10);
+
+	/*
+	 * Skip any trailing whitespace; if anything but whitespace remains before
+	 * the terminating character, fail.
+	 */
+	while (*endptr != '\0' && isspace((unsigned char) *endptr))
+		endptr++;
+
+	if (*endptr != '\0')
+	{
+		pg_log_error("invalid value \"%s\" for option %s",
+					 optarg, optname);
+		return false;
+	}
+
+	/* as min_range and max_range are uint32 then the range check will
+	 * catch the case where unsigned long val is outside 32 bit range */
+	if (errno == ERANGE || val < min_range || val > max_range)
+	{
+		pg_log_error("%s not in range %u..%u", optname, min_range, max_range);
+		return false;
+	}
+
+	if (result)
+		*result = (uint32) val;
+	return true;
+}
+
+/*
  * Provide strictly harmonized handling of the --sync-method option.
  */
 bool
