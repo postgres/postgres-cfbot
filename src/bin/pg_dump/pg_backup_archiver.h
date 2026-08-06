@@ -179,6 +179,13 @@ typedef enum
 	OUTPUT_OTHERDATA,			/* writing data as INSERT commands */
 } ArchiverOutput;
 
+typedef struct _DependencyList
+{
+	DumpId	   *dependencies;	/* dumpIds of objects this one depends on */
+	int			nDeps;			/* number of valid dependencies */
+	int			allocDeps;		/* allocated size of dependencies[] */
+} DependencyList;
+
 /*
  * For historical reasons, ACL items are interspersed with everything else in
  * a dump file's TOC; typically they're right after the object they're for.
@@ -311,6 +318,7 @@ struct _archiveHandle
 	/* arrays created after the TOC list is complete: */
 	struct _tocEntry **tocsByDumpId;	/* TOCs indexed by dumpId */
 	DumpId	   *tableDataId;	/* TABLE DATA ids, indexed by table dumpId */
+	DependencyList *tableDataChunkIds; /* dependencies indexed by dumpId */
 
 	struct _tocEntry *currToc;	/* Used when dumping data */
 	pg_compress_specification compression_spec; /* Requested specification for
@@ -377,7 +385,7 @@ struct _tocEntry
 	size_t		defnLen;		/* length of dumped definition */
 
 	/* working state while dumping/restoring */
-	pgoff_t		dataLength;		/* item's data size; 0 if none or unknown */
+	uint64		dataLength;		/* item's data size; 0 if none or unknown */
 	int			reqs;			/* do we need schema and/or data of object
 								 * (REQ_* bit mask) */
 	bool		created;		/* set for DATA member if TABLE was created */
@@ -435,6 +443,8 @@ extern void DeCloneArchive(ArchiveHandle *AH);
 extern int	TocIDRequired(ArchiveHandle *AH, DumpId id);
 TocEntry   *getTocEntryByDumpId(ArchiveHandle *AH, DumpId id);
 extern bool checkSeek(FILE *fp);
+
+extern void addStandaloneDependency(DependencyList *dobj, DumpId refId);
 
 #define appendStringLiteralAHX(buf,str,AH) \
 	appendStringLiteral(buf, str, (AH)->public.encoding, (AH)->public.std_strings)
