@@ -232,7 +232,7 @@ extern XLogRecPtr XLogInsertRecord(struct XLogRecData *rdata,
 extern void XLogFlush(XLogRecPtr record);
 extern bool XLogBackgroundFlush(void);
 extern bool XLogNeedsFlush(XLogRecPtr record);
-extern int	XLogFileInit(XLogSegNo logsegno, TimeLineID logtli);
+extern int	XLogFileInit(XLogSegNo logsegno, TimeLineID logtli, bool *created);
 extern int	XLogFileOpen(XLogSegNo segno, TimeLineID tli);
 
 extern void CheckXLogRemoved(XLogSegNo segno, TimeLineID tli);
