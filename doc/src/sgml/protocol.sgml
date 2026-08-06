@@ -2606,7 +2606,7 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
     </varlistentry>
 
     <varlistentry id="protocol-replication-start-replication">
-     <term><literal>START_REPLICATION</literal> [ <literal>SLOT</literal> <replaceable class="parameter">slot_name</replaceable> ] [ <literal>PHYSICAL</literal> ] <replaceable class="parameter">XXX/XXX</replaceable> [ <literal>TIMELINE</literal> <replaceable class="parameter">tli</replaceable> ]
+     <term><literal>START_REPLICATION</literal> [ <literal>SLOT</literal> <replaceable class="parameter">slot_name</replaceable> ] [ <literal>PHYSICAL</literal> ] <replaceable class="parameter">XXX/XXX</replaceable> [ <literal>TIMELINE</literal> <replaceable class="parameter">tli</replaceable> ] [ ( <replaceable class="parameter">option</replaceable> [, ...] ) ]
       <indexterm><primary>START_REPLICATION</primary></indexterm>
      </term>
      <listitem>
@@ -2620,6 +2620,24 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
        been recycled. On success, the server responds with a CopyBothResponse
        message, and then starts to stream WAL to the frontend.
       </para>
+
+      <para>
+       The following option is supported:
+      </para>
+
+      <variablelist>
+       <varlistentry>
+        <term><literal>SKIP_WAL_PADDING</literal> [ <replaceable class="parameter">boolean</replaceable> ]</term>
+        <listitem>
+         <para>
+          Requests that zero-filled padding after a WAL switch be represented
+          by a <literal>Zero WAL data</literal> message instead of being sent
+          as ordinary WAL data.  A client must not request this option unless
+          it supports that message type.
+         </para>
+        </listitem>
+       </varlistentry>
+      </variablelist>
 
       <para>
        If a slot's name is provided
@@ -2718,6 +2736,63 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
              already split using continuation records, it can be split at the page
              boundary. In other words, the first main WAL record and its
              continuation records can be sent in different WALData messages.
+            </para>
+           </listitem>
+          </varlistentry>
+         </variablelist>
+        </listitem>
+       </varlistentry>
+
+       <varlistentry id="protocol-replication-zero-wal-data">
+        <term>Zero WAL data (B)</term>
+        <listitem>
+         <variablelist>
+          <varlistentry>
+           <term>Byte1('z')</term>
+           <listitem>
+            <para>
+             Identifies zero-filled padding after a WAL switch record.  The
+             client may assume that the remainder of this WAL segment is also
+             zero-filled.  This message is sent only when the client requested
+             the <literal>SKIP_WAL_PADDING</literal> option of
+             <literal>START_REPLICATION</literal>.
+            </para>
+           </listitem>
+          </varlistentry>
+
+          <varlistentry>
+           <term>Int64</term>
+           <listitem>
+            <para>
+             The starting point of the zero-filled WAL data.
+            </para>
+           </listitem>
+          </varlistentry>
+
+          <varlistentry>
+           <term>Int64</term>
+           <listitem>
+            <para>
+             The current end of WAL on the server.
+            </para>
+           </listitem>
+          </varlistentry>
+
+          <varlistentry>
+           <term>Int64</term>
+           <listitem>
+            <para>
+             The server's system clock at the time of transmission, as
+             microseconds since midnight on 2000-01-01.
+            </para>
+           </listitem>
+          </varlistentry>
+
+          <varlistentry>
+           <term>Int64</term>
+           <listitem>
+            <para>
+             The number of zero bytes in this section.
             </para>
            </listitem>
           </varlistentry>
