@@ -3368,6 +3368,7 @@ XLogSendPhysical(void)
 	XLogSegNo	segno;
 	WALReadError errinfo;
 	Size		rbytes;
+	Size		hdrlen = 1 + sizeof(int64) + sizeof(int64) + sizeof(int64);
 
 	/* If requested switch the WAL sender to the stopping state. */
 	if (got_STOPPING)
@@ -3632,6 +3633,38 @@ retry:
 
 	output_message.len += nbytes;
 	output_message.data[output_message.len] = '\0';
+
+	/*
+	 * Avoid sending zero-filled WAL chunks.  XLOG_SWITCH commonly leaves
+	 * almost a whole segment of zeros.  Messages are cut only at WAL record or
+	 * page boundaries, where valid WAL pages have nonzero headers, so an
+	 * entirely zero message can only contain end-of-segment padding.  Detecting
+	 * the bytes rather than remembering the switch point also handles a sender
+	 * that starts in the middle of the padding.
+	 */
+	{
+		const char *p = output_message.data + hdrlen;
+		const char *end = output_message.data + output_message.len;
+
+		while (p < end && *p == '\0')
+			p++;
+
+		if (p == end)
+		{
+			XLogSegNo	zero_segno;
+			XLogRecPtr	segment_end;
+
+			/* The first zero page proves that this is switch padding. */
+			XLByteToSeg(sentPtr, zero_segno, wal_segment_size);
+			segment_end = (zero_segno + 1) * wal_segment_size;
+			endptr = Min(segment_end, SendRqstPtr);
+			WalSndCaughtUp = !sendTimeLineIsHistoric && endptr == SendRqstPtr;
+
+			output_message.data[0] = PqReplMsg_WALDataZeros;
+			output_message.len = hdrlen;
+			pq_sendint64(&output_message, endptr - sentPtr);
+		}
+	}
 
 	/*
 	 * Fill the send timestamp last, so that it is taken as late as possible.

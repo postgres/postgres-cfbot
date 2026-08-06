@@ -75,6 +75,7 @@
 #define PqReplMsg_Keepalive			'k'
 #define PqReplMsg_PrimaryStatusUpdate 's'
 #define PqReplMsg_WALData			'w'
+#define PqReplMsg_WALDataZeros		'z'
 
 
 /* Replication codes sent by the standby (wrapped in CopyData messages). */

@@ -42,6 +42,9 @@ static bool ProcessKeepaliveMsg(PGconn *conn, StreamCtl *stream, char *copybuf,
 								int len, XLogRecPtr blockpos, TimestampTz *last_status);
 static bool ProcessWALDataMsg(PGconn *conn, StreamCtl *stream, char *copybuf, int len,
 							  XLogRecPtr *blockpos);
+static bool ProcessWALDataZerosMsg(PGconn *conn, StreamCtl *stream,
+								   char *copybuf, int len,
+								   XLogRecPtr *blockpos);
 static PGresult *HandleEndOfCopyStream(PGconn *conn, StreamCtl *stream, char *copybuf,
 									   XLogRecPtr blockpos, XLogRecPtr *stoppos);
 static bool CheckCopyStreamStop(PGconn *conn, StreamCtl *stream, XLogRecPtr blockpos);
@@ -844,6 +847,14 @@ HandleCopyStream(PGconn *conn, StreamCtl *stream,
 				if (!CheckCopyStreamStop(conn, stream, blockpos))
 					goto error;
 			}
+			else if (copybuf[0] == PqReplMsg_WALDataZeros)
+			{
+				if (!ProcessWALDataZerosMsg(conn, stream, copybuf, r, &blockpos))
+					goto error;
+
+				if (!CheckCopyStreamStop(conn, stream, blockpos))
+					goto error;
+			}
 			else
 			{
 				pg_log_error("unrecognized streaming header: \"%c\"",
@@ -1170,6 +1181,87 @@ ProcessWALDataMsg(PGconn *conn, StreamCtl *stream, char *copybuf, int len,
 		}
 	}
 	/* No more data left to write, receive next copy packet */
+
+	return true;
+}
+
+/* Process a compact representation of a zero-filled WAL range. */
+static bool
+ProcessWALDataZerosMsg(PGconn *conn, StreamCtl *stream, char *copybuf,
+					   int len, XLogRecPtr *blockpos)
+{
+	uint64		bytes_left;
+	uint64		nbytes;
+	int			xlogoff;
+	int			hdr_len = 1 + 8 + 8 + 8 + 8;
+
+	if (!still_sending)
+		return true;
+
+	if (len != hdr_len)
+	{
+		pg_log_error("invalid zero WAL message size: %d", len);
+		return false;
+	}
+
+	*blockpos = fe_recvint64(&copybuf[1]);
+	nbytes = fe_recvint64(&copybuf[1 + 8 + 8 + 8]);
+	if (nbytes == 0 || nbytes > WalSegSz)
+	{
+		pg_log_error("invalid zero WAL range length: " UINT64_FORMAT, nbytes);
+		return false;
+	}
+
+	xlogoff = XLogSegmentOffset(*blockpos, WalSegSz);
+	if ((walfile == NULL && xlogoff != 0) ||
+		(walfile != NULL && walfile->currpos != xlogoff))
+	{
+		pg_log_error("got zero WAL data offset %08x, expected %08x",
+					 xlogoff, walfile == NULL ? 0 : (int) walfile->currpos);
+		return false;
+	}
+
+	bytes_left = nbytes;
+	while (bytes_left > 0)
+	{
+		size_t		bytes_to_write = Min(bytes_left, WalSegSz - xlogoff);
+
+		if (walfile == NULL && !open_walfile(stream, *blockpos))
+			return false;
+
+		if (stream->walmethod->ops->write_zeros(walfile, bytes_to_write) !=
+			bytes_to_write)
+		{
+			pg_log_error("could not write %zu zero bytes to WAL file \"%s\": %s",
+						 bytes_to_write, walfile->pathname,
+						 GetLastWalMethodError(stream->walmethod));
+			return false;
+		}
+
+		bytes_left -= bytes_to_write;
+		*blockpos += bytes_to_write;
+		xlogoff += bytes_to_write;
+
+		if (XLogSegmentOffset(*blockpos, WalSegSz) == 0)
+		{
+			if (!close_walfile(stream, *blockpos))
+				return false;
+
+			xlogoff = 0;
+			if (still_sending &&
+				stream->stream_stop(*blockpos, stream->timeline, true))
+			{
+				if (PQputCopyEnd(conn, NULL) <= 0 || PQflush(conn))
+				{
+					pg_log_error("could not send copy-end packet: %s",
+								 PQerrorMessage(conn));
+					return false;
+				}
+				still_sending = false;
+				return true;
+			}
+		}
+	}
 
 	return true;
 }
