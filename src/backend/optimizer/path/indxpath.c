@@ -15,6 +15,7 @@
  */
 #include "postgres.h"
 
+#include "access/cmptype.h"
 #include "access/stratnum.h"
 #include "access/sysattr.h"
 #include "access/transam.h"
@@ -33,9 +34,9 @@
 #include "optimizer/placeholder.h"
 #include "optimizer/prep.h"
 #include "optimizer/restrictinfo.h"
+#include "utils/array.h"
 #include "utils/lsyscache.h"
 #include "utils/selfuncs.h"
-
 
 /* XXX see PartCollMatchesExprColl */
 #define IndexCollMatchesExprColl(idxcollation, exprcollation) \
@@ -103,6 +104,23 @@ static bool eclass_already_used(EquivalenceClass *parent_ec, Relids oldrelids,
 static void get_index_paths(PlannerInfo *root, RelOptInfo *rel,
 							IndexOptInfo *index, IndexClauseSet *clauses,
 							List **bitindexpaths);
+static void consider_index_skip_merge_path(PlannerInfo *root, RelOptInfo *rel,
+											IndexOptInfo *index,
+											IndexClauseSet *clauses);
+static IndexClause *make_eq_indexclause_from_saop(PlannerInfo *root,
+												  IndexClause *saop_iclause,
+												  Datum prefix_value,
+												  bool prefix_isnull,
+												  IndexOptInfo *index);
+static List *expand_saop_to_eq_clauses(PlannerInfo *root,
+									   IndexClause *iclause,
+									   IndexOptInfo *index);
+static bool build_prefix_col_constraints(PlannerInfo *root,
+										 IndexOptInfo *index,
+										 IndexClauseSet *clauses,
+										 int suffix_indexcol,
+										 List ***col_eq_clauses_out,
+										 int *num_prefixes_out);
 static List *build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 							   IndexOptInfo *index, IndexClauseSet *clauses,
 							   bool useful_predicate,
@@ -769,6 +787,13 @@ get_index_paths(PlannerInfo *root, RelOptInfo *rel,
 									   NULL);
 		*bitindexpaths = list_concat(*bitindexpaths, indexpaths);
 	}
+
+
+	/*
+	 * Consider index suffix scan: expand IN-list on a prefix column into
+	 * per-value index scans merged with MergeAppend.
+	 */
+	consider_index_skip_merge_path(root, rel, index, clauses);
 }
 
 /*
@@ -826,7 +851,9 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 	bool		index_only_scan;
 	int			indexcol;
 
-	Assert(skip_nonnative_saop != NULL || scantype == ST_BITMAPSCAN);
+	Assert(skip_nonnative_saop != NULL ||
+		   scantype == ST_BITMAPSCAN ||
+		   scantype == ST_INDEXSCAN);
 
 	/*
 	 * Check that index supports the desired scan type(s)
@@ -4458,4 +4485,308 @@ is_pseudo_constant_for_index(PlannerInfo *root, Node *expr, IndexOptInfo *index)
 	if (contain_volatile_functions(expr))
 		return false;			/* no good, volatile comparison value */
 	return true;
+}
+
+/*
+ * make_eq_indexclause_from_saop
+ *	  Build an IndexClause for "leftop = value" from a ScalarArrayOpExpr.
+ */
+static IndexClause *
+make_eq_indexclause_from_saop(PlannerInfo *root,
+							  IndexClause *saop_iclause,
+							  Datum prefix_value,
+							  bool prefix_isnull,
+							  IndexOptInfo *index)
+{
+	ScalarArrayOpExpr *saop = (ScalarArrayOpExpr *) saop_iclause->rinfo->clause;
+	Node	   *leftop = (Node *) linitial(saop->args);
+	Oid			typid = exprType(leftop);
+	Expr	   *opexpr;
+	RestrictInfo *rinfo;
+	IndexClause *iclause;
+
+	opexpr = make_opclause(saop->opno, BOOLOID, false,
+						   (Expr *) copyObject(leftop),
+						   (Expr *) makeConst(typid, -1, saop->inputcollid,
+											  get_typlen(typid),
+											  prefix_value, prefix_isnull,
+											  get_typbyval(typid)),
+						   InvalidOid, saop->inputcollid);
+	rinfo = make_restrictinfo(root, opexpr,
+							  true, false, false, true, 0,
+							  index->rel->relids, NULL, NULL);
+
+	iclause = makeNode(IndexClause);
+	iclause->rinfo = rinfo;
+	iclause->indexquals = list_make1(rinfo);
+	iclause->lossy = false;
+	iclause->indexcol = saop_iclause->indexcol;
+	iclause->indexcols = NIL;
+
+	return iclause;
+}
+
+/*
+ * expand_saop_to_eq_clauses
+ *	  Expand a useOr ScalarArrayOpExpr into one equality IndexClause per
+ *	  array element.  Returns NIL unless the array is a non-null Const.
+ */
+static List *
+expand_saop_to_eq_clauses(PlannerInfo *root, IndexClause *iclause,
+						  IndexOptInfo *index)
+{
+	ScalarArrayOpExpr *saop = (ScalarArrayOpExpr *) iclause->rinfo->clause;
+	Node	   *arrayarg = (Node *) lsecond(saop->args);
+	Const	   *aconst;
+	ArrayType  *arr;
+	Datum	   *values;
+	bool	   *nulls;
+	int			nvalues;
+	int			i;
+	Oid			elemtype;
+	int16		elemlen;
+	bool		elembyval;
+	char		elemalign;
+	List	   *result = NIL;
+
+	Assert(saop->useOr);
+
+	if (!IsA(arrayarg, Const))
+		return NIL;
+
+	aconst = (Const *) arrayarg;
+	if (aconst->constisnull)
+		return NIL;
+
+	arr = DatumGetArrayTypeP(aconst->constvalue);
+	elemtype = ARR_ELEMTYPE(arr);
+	get_typlenbyvalalign(elemtype, &elemlen, &elembyval, &elemalign);
+	deconstruct_array(arr, elemtype, elemlen, elembyval, elemalign,
+					  &values, &nulls, &nvalues);
+
+	for (i = 0; i < nvalues; i++)
+		result = lappend(result,
+						 make_eq_indexclause_from_saop(root, iclause,
+													   values[i], nulls[i],
+													   index));
+
+	pfree(values);
+	pfree(nulls);
+	return result;
+}
+
+/*
+ * build_prefix_col_constraints
+ *	  For each index column before suffix_indexcol, collect equality
+ *	  IndexClauses (expanding IN-lists).  Returns false if any prefix column
+ *	  lacks a plan-time equality, or if the cartesian product size is outside
+ *	  [2, index_suffix_scan_max_prefixes].
+ */
+static bool
+build_prefix_col_constraints(PlannerInfo *root,
+							 IndexOptInfo *index,
+							 IndexClauseSet *clauses,
+							 int suffix_indexcol,
+							 List ***col_eq_clauses_out,
+							 int *num_prefixes_out)
+{
+	List	  **col_clauses;
+	int			col;
+	int			num_prefixes = 1;
+
+	col_clauses = palloc0(suffix_indexcol * sizeof(List *));
+
+	for (col = 0; col < suffix_indexcol; col++)
+	{
+		ListCell   *lc;
+		List	   *eq_clauses = NIL;
+
+		foreach(lc, clauses->indexclauses[col])
+		{
+			IndexClause *iclause = (IndexClause *) lfirst(lc);
+			RestrictInfo *rinfo = iclause->rinfo;
+
+			if (IsA(rinfo->clause, ScalarArrayOpExpr))
+			{
+				ScalarArrayOpExpr *saop = (ScalarArrayOpExpr *) rinfo->clause;
+
+				if (!saop->useOr)
+					continue;	/* try another clause on this column */
+
+				eq_clauses = expand_saop_to_eq_clauses(root, iclause, index);
+				if (eq_clauses == NIL)
+					goto fail;
+				break;
+			}
+			if (IsA(rinfo->clause, OpExpr))
+			{
+				/*
+				 * IndexClause is no_copy_equal; share the pointer.  We do not
+				 * mutate it, and planner memory context reclaims on failure.
+				 */
+				eq_clauses = list_make1(iclause);
+				break;
+			}
+		}
+
+		if (eq_clauses == NIL)
+			goto fail;
+
+		/* Reject early (and avoid int overflow) once over the GUC limit. */
+		if (list_length(eq_clauses) > max_index_merge_scans / num_prefixes)
+			goto fail;
+
+		col_clauses[col] = eq_clauses;
+		num_prefixes *= list_length(eq_clauses);
+	}
+
+	if (num_prefixes < 2)
+		goto fail;
+
+	*col_eq_clauses_out = col_clauses;
+	*num_prefixes_out = num_prefixes;
+	return true;
+
+fail:
+	/* Shallow free only: lists may share IndexClauses with the input set. */
+	for (col = 0; col < suffix_indexcol; col++)
+		list_free(col_clauses[col]);
+	pfree(col_clauses);
+	return false;
+}
+
+/*
+ * consider_index_skip_merge_path
+ *	  Build a MergeAppend of per-prefix IndexPaths when the query has
+ *	  equality/IN on leading index columns and ORDER BY on a later column.
+ */
+static void
+consider_index_skip_merge_path(PlannerInfo *root, RelOptInfo *rel,
+								IndexOptInfo *index, IndexClauseSet *clauses)
+{
+	List	   *subpaths = NIL;
+	List	  **col_eq_clauses;
+	PathKey    *query_first_pk;
+	int			suffix_indexcol;
+	int			num_prefixes;
+	int			indexcol;
+	int			i;
+	bool		forward;
+	ScanDirection scandirection;
+	MergeAppendPath *mapath;
+	double		total_matching_rows = 0;
+
+	if (!enable_index_skip_merge || !enable_indexscan)
+		return;
+
+	if (index->nkeycolumns < 2 ||
+		index->sortopfamily == NULL ||
+		!index->amhasgettuple ||
+		root->query_pathkeys == NIL ||
+		!bms_is_empty(rel->lateral_relids))
+		return;
+
+	/* First non-leading index key matching the leading ORDER BY pathkey. */
+	query_first_pk = (PathKey *) linitial(root->query_pathkeys);
+	suffix_indexcol = -1;
+	for (indexcol = 1; indexcol < index->nkeycolumns; indexcol++)
+	{
+		TargetEntry *indextle = (TargetEntry *) list_nth(index->indextlist,
+														 indexcol);
+
+		if (find_ec_member_matching_expr(query_first_pk->pk_eclass,
+										 indextle->expr,
+										 index->rel->relids) != NULL)
+		{
+			suffix_indexcol = indexcol;
+			break;
+		}
+	}
+
+	if (suffix_indexcol < 1)
+		return;
+
+	/* Match ASC/DESC and nulls ordering (as build_index_pathkeys does). */
+	forward = ((query_first_pk->pk_cmptype == COMPARE_GT) ==
+			   index->reverse_sort[suffix_indexcol]);
+	scandirection = forward ? ForwardScanDirection : BackwardScanDirection;
+	if (query_first_pk->pk_nulls_first !=
+		(forward ? index->nulls_first[suffix_indexcol]
+				 : !index->nulls_first[suffix_indexcol]))
+		return;
+
+	if (!build_prefix_col_constraints(root, index, clauses, suffix_indexcol,
+									  &col_eq_clauses, &num_prefixes))
+		return;
+
+	for (i = 0; i < num_prefixes; i++)
+	{
+		IndexClauseSet child_clauses = *clauses;
+		List	   *child_indexpaths;
+		IndexPath  *ipath;
+		int			idx = i;
+		int			col;
+
+		/* Fix each prefix column to one value of the cartesian product. */
+		for (col = suffix_indexcol - 1; col >= 0; col--)
+		{
+			int			n = list_length(col_eq_clauses[col]);
+
+			child_clauses.indexclauses[col] =
+				list_make1(list_nth(col_eq_clauses[col], idx % n));
+			idx /= n;
+		}
+
+		child_indexpaths = build_index_paths(root, rel, index, &child_clauses,
+											 index->predOK, ST_INDEXSCAN,
+											 NULL);
+		if (child_indexpaths == NIL)
+		{
+			subpaths = NIL;
+			break;
+		}
+
+		ipath = (IndexPath *) linitial(child_indexpaths);
+
+		/*
+		 * Prefix columns are fixed, so each child is ordered by the query's
+		 * suffix-first pathkeys even though the index is prefix-first.
+		 */
+		ipath->path.pathkeys = root->query_pathkeys;
+		ipath->indexscandir = scandirection;
+
+		subpaths = lappend(subpaths, ipath);
+		total_matching_rows += ipath->path.rows;
+	}
+
+	if (list_length(subpaths) < 2)
+	{
+		list_free_deep(subpaths);
+		return;
+	}
+
+	mapath = create_merge_append_path(root, rel, subpaths, NIL,
+									  root->query_pathkeys, NULL);
+
+	/*
+	 * With a LIMIT, a suffix scan reads at most (limit + K - 1) index tuples
+	 * across all branches, not every matching row.
+	 */
+	if (root->limit_tuples > 0)
+	{
+		double		merge_rows = root->limit_tuples + list_length(subpaths) - 1;
+
+		if (merge_rows < mapath->path.rows)
+		{
+			double		ratio = merge_rows / mapath->path.rows;
+
+			mapath->path.total_cost = mapath->path.startup_cost +
+				(mapath->path.total_cost - mapath->path.startup_cost) * ratio;
+			mapath->path.rows = merge_rows;
+		}
+	}
+	else
+		mapath->path.rows = Min(mapath->path.rows, total_matching_rows);
+
+	add_path(rel, (Path *) mapath);
 }
