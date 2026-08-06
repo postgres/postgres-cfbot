@@ -1666,6 +1666,8 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
       relation for this table.
       By default this parameter is <literal>oid</literal>, to assign
       <type>oid</type> as attribute type to <literal>chunk_id</literal>.
+      This parameter can be set to <type>oid8</type> to use <type>oid8</type>
+      as attribute type for <literal>chunk_id</literal>.
       This parameter cannot be set for TOAST tables.
      </para>
     </listitem>

@@ -553,6 +553,7 @@ static relopt_enum_elt_def StdRdOptToastValueTypes[] =
 {
 	/* no value for INVALID */
 	{"oid", STDRD_OPTION_TOAST_VALUE_TYPE_OID},
+	{"oid8", STDRD_OPTION_TOAST_VALUE_TYPE_OID8},
 	{(const char *) NULL}		/* list terminator */
 };
 
