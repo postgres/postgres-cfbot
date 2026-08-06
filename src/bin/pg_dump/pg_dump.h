@@ -16,6 +16,7 @@
 
 #include "pg_backup.h"
 #include "catalog/pg_publication_d.h"
+#include "storage/block.h"
 
 
 #define oidcmp(x,y) ( ((x) < (y) ? -1 : ((x) > (y)) ?  1 : 0) )
@@ -335,7 +336,11 @@ typedef struct _tableInfo
 	Oid			owning_tab;		/* OID of table owning sequence */
 	int			owning_col;		/* attr # of column owning sequence */
 	bool		is_identity_sequence;
-	int32		relpages;		/* table's size in pages (from pg_class) */
+	BlockNumber	relpages;		/* table's size in pages (from pg_class) 
+	                             * converted to unsigned integer
+								 * when --max-table-segment-pages is set
+								 * the computed from pg_relation_size()
+	                             */
 	int			toastpages;		/* toast table's size in pages, if any */
 
 	bool		interesting;	/* true if need to collect more data */
@@ -413,7 +418,20 @@ typedef struct _tableDataInfo
 	DumpableObject dobj;
 	TableInfo  *tdtable;		/* link to table to dump */
 	char	   *filtercond;		/* WHERE condition to limit rows dumped */
+	/* startPage and endPage to support segmented dump */
+	BlockNumber	startPage;		/* As we always know the lowest segment page
+								 * number we can use InvalidBlockNumber here
+								 * to recognize no segmenting case.
+								 * When 0 for the first page of first
+								 * segment we can omit in range query */
+	BlockNumber	endPage;		/* last page in segment for page-range dump,
+	                    		 * startPage+max_table_segment_pages-1 for 
+								 * most segments, but InvalidBlockNumber for
+								 * the last one to indicate open range
+								 */
 } TableDataInfo;
+
+#define is_segment(tdiptr) ((tdiptr)->startPage != InvalidBlockNumber)
 
 typedef struct _indxInfo
 {
@@ -449,7 +467,7 @@ typedef struct _relStatsInfo
 {
 	DumpableObject dobj;
 	Oid			relid;
-	int32		relpages;
+	BlockNumber	relpages;
 	char	   *reltuples;
 	int32		relallvisible;
 	int32		relallfrozen;
