@@ -2725,6 +2725,61 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
         </listitem>
        </varlistentry>
 
+       <varlistentry id="protocol-replication-zero-wal-data">
+        <term>Zero WAL data (B)</term>
+        <listitem>
+         <variablelist>
+          <varlistentry>
+           <term>Byte1('z')</term>
+           <listitem>
+            <para>
+             Identifies zero-filled padding after a WAL switch record.  The
+             client may assume that the remainder of this WAL segment is also
+             zero-filled.
+            </para>
+           </listitem>
+          </varlistentry>
+
+          <varlistentry>
+           <term>Int64</term>
+           <listitem>
+            <para>
+             The starting point of the zero-filled WAL data.
+            </para>
+           </listitem>
+          </varlistentry>
+
+          <varlistentry>
+           <term>Int64</term>
+           <listitem>
+            <para>
+             The current end of WAL on the server.
+            </para>
+           </listitem>
+          </varlistentry>
+
+          <varlistentry>
+           <term>Int64</term>
+           <listitem>
+            <para>
+             The server's system clock at the time of transmission, as
+             microseconds since midnight on 2000-01-01.
+            </para>
+           </listitem>
+          </varlistentry>
+
+          <varlistentry>
+           <term>Int64</term>
+           <listitem>
+            <para>
+             The number of zero bytes in this section.
+            </para>
+           </listitem>
+          </varlistentry>
+         </variablelist>
+        </listitem>
+       </varlistentry>
+
        <varlistentry id="protocol-replication-primary-keepalive-message">
         <term>Primary keepalive message (B)</term>
         <listitem>
