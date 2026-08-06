@@ -22,6 +22,9 @@ extern void handle_help_version_opts(int argc, char *argv[],
 extern bool option_parse_int(const char *optarg, const char *optname,
 							 int min_range, int max_range,
 							 int *result);
+extern bool option_parse_uint32(const char *optarg, const char *optname,
+								uint32 min_range, uint32 max_range,
+								uint32 *result);
 extern bool parse_sync_method(const char *optarg,
 							  DataDirSyncMethod *sync_method);
 extern void check_mut_excl_opts_internal(int n, ...);
