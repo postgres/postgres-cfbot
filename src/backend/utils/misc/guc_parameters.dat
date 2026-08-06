@@ -946,6 +946,12 @@
   variable => 'enable_indexscan',
   boot_val => 'true',
 },
+{ name => 'enable_indexskipmerge', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
+  short_desc => 'Enables the planer\'s use of index skip merge plans.',
+  flags => 'GUC_EXPLAIN',
+  variable => 'enable_index_skip_merge',
+  boot_val => 'true',
+},
 
 { name => 'enable_material', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
   short_desc => 'Enables the planner\'s use of materialization.',
@@ -2024,6 +2030,15 @@
   boot_val => 'INDEX_MAX_KEYS',
   min => 'INDEX_MAX_KEYS',
   max => 'INDEX_MAX_KEYS',
+},
+
+{ name => 'max_index_merge_scans', type => 'int', context => 'PGC_USERSET', group => 'QUERY_TUNING_COST',
+  short_desc => 'Set a limit for the number of scans created when considering a skip-merge plan.',
+  flags => 'GUC_EXPLAIN',
+  variable => 'max_index_merge_scans',
+  boot_val => '32',
+  min => '0',
+  max => 'INT_MAX',
 },
 
 # See also CheckRequiredParameterValues() if this parameter changes
