@@ -2276,7 +2276,7 @@ StoreRelCheck(Relation rel, const char *ccname, Node *expr,
 static Oid
 StoreRelNotNull(Relation rel, const char *nnname, AttrNumber attnum,
 				bool is_validated, bool is_local, int inhcount,
-				bool is_no_inherit)
+				bool is_no_inherit, bool is_enforced)
 {
 	Oid			constrOid;
 
@@ -2288,7 +2288,7 @@ StoreRelNotNull(Relation rel, const char *nnname, AttrNumber attnum,
 							  CONSTRAINT_NOTNULL,
 							  false,
 							  false,
-							  true, /* Is Enforced */
+							  is_enforced,	/* Is Enforced */
 							  is_validated,
 							  InvalidOid,
 							  RelationGetRelid(rel),
@@ -2665,17 +2665,19 @@ AddRelationNewConstraints(Relation rel,
 							   strVal(linitial(cdef->keys))));
 
 			Assert(cdef->initially_valid != cdef->skip_validation);
+			Assert(cdef->is_enforced || !cdef->initially_valid);
 
 			/*
 			 * If the column already has a not-null constraint, we don't want
 			 * to add another one; adjust inheritance status as needed.  This
 			 * also checks whether the existing constraint matches the
-			 * requested validity.
+			 * requested validity, enforceability.
 			 */
 			if (AdjustNotNullInheritance(RelationGetRelid(rel), colnum,
 										 cdef->conname,
 										 is_local, cdef->is_no_inherit,
-										 cdef->skip_validation))
+										 cdef->skip_validation,
+										 cdef->is_enforced))
 				continue;
 
 			/*
@@ -2706,7 +2708,8 @@ AddRelationNewConstraints(Relation rel,
 								cdef->initially_valid,
 								is_local,
 								inhcount,
-								cdef->is_no_inherit);
+								cdef->is_no_inherit,
+								cdef->is_enforced);
 
 			nncooked = palloc_object(CookedConstraint);
 			nncooked->contype = CONSTR_NOTNULL;
@@ -2714,7 +2717,7 @@ AddRelationNewConstraints(Relation rel,
 			nncooked->name = nnname;
 			nncooked->attnum = colnum;
 			nncooked->expr = NULL;
-			nncooked->is_enforced = true;
+			nncooked->is_enforced = cdef->is_enforced;
 			nncooked->skip_validation = cdef->skip_validation;
 			nncooked->is_local = is_local;
 			nncooked->inhcount = inhcount;
@@ -2990,7 +2993,7 @@ AddRelationNotNullConstraints(Relation rel, List *constraints,
 		/*
 		 * A column can only have one not-null constraint, so discard any
 		 * additional ones that appear for columns we already saw; but check
-		 * that the NO INHERIT flags match.
+		 * that the NO INHERIT, [NOT] ENFORCED flags match.
 		 */
 		for (int restpos = outerpos + 1; restpos < list_length(constraints);)
 		{
@@ -3004,6 +3007,12 @@ AddRelationNotNullConstraints(Relation rel, List *constraints,
 					ereport(ERROR,
 							errcode(ERRCODE_SYNTAX_ERROR),
 							errmsg("conflicting NO INHERIT declaration for not-null constraint on column \"%s\"",
+								   strVal(linitial(constr->keys))));
+
+				if (other->is_enforced != constr->is_enforced)
+					ereport(ERROR,
+							errcode(ERRCODE_SYNTAX_ERROR),
+							errmsg("conflicting NOT ENFORCED declaration for not-null constraint on column \"%s\"",
 								   strVal(linitial(constr->keys))));
 
 				/*
@@ -3051,6 +3060,17 @@ AddRelationNotNullConstraints(Relation rel, List *constraints,
 									strVal(linitial(constr->keys))),
 							 errdetail("The column has an inherited not-null constraint.")));
 
+				/*
+				 * If we get an ENFORCED constraint from the parent, having a
+				 * local NOT ENFORCED one doesn't work.
+				 */
+				if (old->is_enforced && !constr->is_enforced)
+					ereport(ERROR,
+							errcode(ERRCODE_DATATYPE_MISMATCH),
+							errmsg("cannot define not-null constraint with NOT ENFORCED on column \"%s\"",
+								   strVal(linitial(constr->keys))),
+							errdetail("The column has an inherited ENFORCED not-null constraint."));
+
 				inhcount++;
 				old_notnulls = foreach_delete_current(old_notnulls, old);
 			}
@@ -3085,11 +3105,16 @@ AddRelationNotNullConstraints(Relation rel, List *constraints,
 										   nnnames);
 		nnnames = lappend(nnnames, conname);
 
-		StoreRelNotNull(rel, conname,
-						attnum, true, true,
-						inhcount, constr->is_no_inherit);
+		Assert(constr->is_enforced || constr->skip_validation);
 
-		nncols = lappend_int(nncols, attnum);
+		/* CREATE TABLE will treat the NOT VALID not-null constraint as VALID */
+		StoreRelNotNull(rel, conname, attnum,
+						constr->is_enforced,
+						true, inhcount, constr->is_no_inherit,
+						constr->is_enforced);
+
+		if (constr->is_enforced)
+			nncols = lappend_int(nncols, attnum);
 	}
 
 	/*
@@ -3134,6 +3159,18 @@ AddRelationNotNullConstraints(Relation rel, List *constraints,
 					conname = other->name;
 
 				inhcount++;
+
+				/*
+				 * A column may inherit multiple NOT NULL constraints. If one
+				 * is marked NOT ENFORCED while another is ENFORCED, we
+				 * install the enforced one.
+				 */
+				if (other->is_enforced != cooked->is_enforced)
+				{
+					cooked->is_enforced = true;
+					cooked->skip_validation = false;
+				}
+
 				old_notnulls = list_delete_nth_cell(old_notnulls, restpos);
 			}
 			else
@@ -3164,10 +3201,13 @@ AddRelationNotNullConstraints(Relation rel, List *constraints,
 		nnnames = lappend(nnnames, conname);
 
 		/* ignore the origin constraint's is_local and inhcount */
-		StoreRelNotNull(rel, conname, cooked->attnum, true,
-						false, inhcount, false);
+		StoreRelNotNull(rel, conname, cooked->attnum,
+						cooked->is_enforced,
+						false, inhcount, false,
+						cooked->is_enforced);
 
-		nncols = lappend_int(nncols, cooked->attnum);
+		if (cooked->is_enforced)
+			nncols = lappend_int(nncols, cooked->attnum);
 	}
 
 	return nncols;

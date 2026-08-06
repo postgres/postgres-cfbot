@@ -315,6 +315,10 @@ transformCreateStmt(CreateStmt *stmt, const char *queryString)
 	{
 		char	   *colname = strVal(linitial(nn->keys));
 
+		/* Don't set is_not_null to true for not enforced not-null */
+		if (!nn->is_enforced)
+			continue;
+
 		foreach_node(ColumnDef, cd, cxt.columns)
 		{
 			/* not our column? */
@@ -595,6 +599,7 @@ transformColumnDefinition(CreateStmtContext *cxt, ColumnDef *column)
 	bool		saw_generated;
 	bool		need_notnull = false;
 	bool		disallow_noinherit_notnull = false;
+	bool		disallow_notenforced_notnull = false;
 	Constraint *notnull_constraint = NULL;
 
 	cxt->columns = lappend(cxt->columns, column);
@@ -695,6 +700,7 @@ transformColumnDefinition(CreateStmtContext *cxt, ColumnDef *column)
 		/* have a not-null constraint added later */
 		need_notnull = true;
 		disallow_noinherit_notnull = true;
+		disallow_notenforced_notnull = true;
 	}
 
 	/* Process column constraints, if any... */
@@ -711,8 +717,12 @@ transformColumnDefinition(CreateStmtContext *cxt, ColumnDef *column)
 	 * disallow it here as well.  Maybe AddRelationNotNullConstraints can be
 	 * improved someday, so that it doesn't complain, and then we can remove
 	 * the restriction for SERIAL and IDENTITY here as well.
+	 *
+	 * Also check if the added NOT NULL constraint is prohibited from being
+	 * NOT ENFORCED. This restriction applies to PRIMARY KEY, IDENTITY, and
+	 * SERIAL columns.
 	 */
-	if (!disallow_noinherit_notnull)
+	if (!disallow_noinherit_notnull || !disallow_notenforced_notnull)
 	{
 		foreach_node(Constraint, constraint, column->constraints)
 		{
@@ -721,6 +731,7 @@ transformColumnDefinition(CreateStmtContext *cxt, ColumnDef *column)
 				case CONSTR_IDENTITY:
 				case CONSTR_PRIMARY:
 					disallow_noinherit_notnull = true;
+					disallow_notenforced_notnull = true;
 					break;
 				default:
 					break;
@@ -769,6 +780,12 @@ transformColumnDefinition(CreateStmtContext *cxt, ColumnDef *column)
 					ereport(ERROR,
 							errcode(ERRCODE_SYNTAX_ERROR),
 							errmsg("conflicting NO INHERIT declarations for not-null constraints on column \"%s\"",
+								   column->colname));
+
+				if (disallow_notenforced_notnull && !constraint->is_enforced)
+					ereport(ERROR,
+							errcode(ERRCODE_SYNTAX_ERROR),
+							errmsg("conflicting NOT ENFORCED declarations for not-null constraints on column \"%s\"",
 								   column->colname));
 
 				/*
@@ -988,6 +1005,20 @@ transformColumnDefinition(CreateStmtContext *cxt, ColumnDef *column)
 										constraint->location)));
 	}
 
+
+	foreach_node(Constraint, constraint, column->constraints)
+	{
+		if (constraint->contype != CONSTR_NOTNULL)
+			continue;
+
+		/*
+		 * NOT ENFORCED not-null does not indicate data are all not-null,
+		 * therefore cannot set the column's pg_attribute.attnotnull to true.
+		 */
+		if (!constraint->is_enforced)
+			column->is_not_null = false;
+	}
+
 	/*
 	 * If we need a not-null constraint for PRIMARY KEY, SERIAL or IDENTITY,
 	 * and one was not explicitly specified, add one now.
@@ -1129,6 +1160,7 @@ transformTableLikeClause(CreateStmtContext *cxt, TableLikeClause *table_like_cla
 	AclResult	aclresult;
 	char	   *comment;
 	ParseCallbackState pcbstate;
+	List	   *lst = NIL;
 
 	setup_parser_errposition_callback(&pcbstate, cxt->pstate,
 									  table_like_clause->relation->location);
@@ -1270,33 +1302,41 @@ transformTableLikeClause(CreateStmtContext *cxt, TableLikeClause *table_like_cla
 	 * Reproduce not-null constraints, if any, by copying them.  We do this
 	 * regardless of options given.
 	 */
-	if (tupleDesc->constr && tupleDesc->constr->has_not_null)
+	lst = RelationGetNotNullConstraints(RelationGetRelid(relation), false,
+										true);
+	cxt->nnconstraints = list_concat(cxt->nnconstraints, lst);
+
+	/*
+	 * When creating a new relation, marking the not-null constraint as not
+	 * valid doesn't make sense, so we treat it as valid unconditionally.
+	 */
+	foreach_node(Constraint, nnconstr, lst)
 	{
-		List	   *lst;
-
-		lst = RelationGetNotNullConstraints(RelationGetRelid(relation), false,
-											true);
-		cxt->nnconstraints = list_concat(cxt->nnconstraints, lst);
-
-		/* Copy comments on not-null constraints */
-		if (table_like_clause->options & CREATE_TABLE_LIKE_COMMENTS)
+		if (nnconstr->is_enforced)
 		{
-			foreach_node(Constraint, nnconstr, lst)
-			{
-				if ((comment = GetComment(get_relation_constraint_oid(RelationGetRelid(relation),
-																	  nnconstr->conname, false),
-										  ConstraintRelationId,
-										  0)) != NULL)
-				{
-					CommentStmt *stmt = makeNode(CommentStmt);
+			nnconstr->skip_validation = false;
+			nnconstr->initially_valid = true;
+		}
+	}
 
-					stmt->objtype = OBJECT_TABCONSTRAINT;
-					stmt->object = (Node *) list_make3(makeString(cxt->relation->schemaname),
-													   makeString(cxt->relation->relname),
-													   makeString(nnconstr->conname));
-					stmt->comment = comment;
-					cxt->alist = lappend(cxt->alist, stmt);
-				}
+	/* Copy comments on not-null constraints */
+	if (table_like_clause->options & CREATE_TABLE_LIKE_COMMENTS)
+	{
+		foreach_node(Constraint, nnconstr, lst)
+		{
+			if ((comment = GetComment(get_relation_constraint_oid(RelationGetRelid(relation),
+																  nnconstr->conname, false),
+									  ConstraintRelationId,
+									  0)) != NULL)
+			{
+				CommentStmt *stmt = makeNode(CommentStmt);
+
+				stmt->objtype = OBJECT_TABCONSTRAINT;
+				stmt->object = (Node *) list_make3(makeString(cxt->relation->schemaname),
+												   makeString(cxt->relation->relname),
+												   makeString(nnconstr->conname));
+				stmt->comment = comment;
+				cxt->alist = lappend(cxt->alist, stmt);
 			}
 		}
 	}
@@ -4342,7 +4382,8 @@ transformConstraintAttrs(ParseState *pstate, List *constraintList)
 			case CONSTR_ATTR_ENFORCED:
 				if (lastprimarycon == NULL ||
 					(lastprimarycon->contype != CONSTR_CHECK &&
-					 lastprimarycon->contype != CONSTR_FOREIGN))
+					 lastprimarycon->contype != CONSTR_FOREIGN &&
+					 lastprimarycon->contype != CONSTR_NOTNULL))
 					ereport(ERROR,
 							(errcode(ERRCODE_SYNTAX_ERROR),
 							 errmsg("misplaced ENFORCED clause"),
@@ -4359,7 +4400,8 @@ transformConstraintAttrs(ParseState *pstate, List *constraintList)
 			case CONSTR_ATTR_NOT_ENFORCED:
 				if (lastprimarycon == NULL ||
 					(lastprimarycon->contype != CONSTR_CHECK &&
-					 lastprimarycon->contype != CONSTR_FOREIGN))
+					 lastprimarycon->contype != CONSTR_FOREIGN &&
+					 lastprimarycon->contype != CONSTR_NOTNULL))
 					ereport(ERROR,
 							(errcode(ERRCODE_SYNTAX_ERROR),
 							 errmsg("misplaced NOT ENFORCED clause"),

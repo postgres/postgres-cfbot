@@ -1018,6 +1018,39 @@ my %tests = (
 		},
 	},
 
+	'CONSTRAINT NOT NULL NOT ENFORCED' => {
+		create_sql => 'CREATE TABLE dump_test.test_table_nn0 (
+							col1 int, CONSTRAINT nn NOT NULL col1 NOT ENFORCED);
+						COMMENT ON CONSTRAINT nn ON dump_test.test_table_nn0 IS \'nn comment is not enfoced\';',
+		regexp => qr/^
+			\QCREATE TABLE dump_test.test_table_nn0 (\E\n
+			\s+\Qcol1 integer CONSTRAINT nn NOT NULL NOT ENFORCED\E\n
+			\);
+			/xm,
+		like => {
+			%full_runs, %dump_test_schema_runs, section_pre_data => 1,
+		},
+		unlike => {
+			exclude_dump_test_schema => 1,
+			only_dump_measurement => 1,
+		},
+	},
+
+	# The not-null constraint is dumped as part of CREATE TABLE, which is in
+	# SECTION_PRE_DATA, so its comment goes there too
+	'COMMENT ON CONSTRAINT ON test_table_nn0' => {
+		regexp => qr/^
+		\QCOMMENT ON CONSTRAINT nn ON dump_test.test_table_nn0 IS\E
+		/xm,
+		like => {
+			%full_runs, %dump_test_schema_runs, section_pre_data => 1,
+		},
+		unlike => {
+			exclude_dump_test_schema => 1,
+			only_dump_measurement => 1,
+		},
+	},
+
 	'CONSTRAINT NOT NULL / NOT VALID' => {
 		create_sql => 'CREATE TABLE dump_test.test_table_nn (
 							col1 int);

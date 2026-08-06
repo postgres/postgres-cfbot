@@ -4406,7 +4406,8 @@ ConstraintElem:
 					n->location = @1;
 					n->keys = list_make1(makeString($3));
 					processCASbits($4, @4, "NOT NULL",
-								   NULL, NULL, NULL, &n->skip_validation,
+								   NULL, NULL,
+								   &n->is_enforced, &n->skip_validation,
 								   &n->is_no_inherit, yyscanner);
 					n->initially_valid = !n->skip_validation;
 					$$ = (Node *) n;

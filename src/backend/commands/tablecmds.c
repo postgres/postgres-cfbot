@@ -552,7 +552,8 @@ static void set_attnotnull(List **wqueue, Relation rel, AttrNumber attnum,
 static ObjectAddress ATExecSetNotNull(List **wqueue, Relation rel,
 									  char *conName, char *colName,
 									  bool recurse, bool recursing,
-									  LOCKMODE lockmode);
+									  LOCKMODE lockmode,
+									  bool is_enforced);
 static bool NotNullImpliedByRelConstraints(Relation rel, Form_pg_attribute attr);
 static bool ConstraintImpliedByRelConstraint(Relation scanrel,
 											 List *testConstraint, List *provenConstraint);
@@ -2838,13 +2839,16 @@ MergeAttributes(List *columns, const List *supers, char relpersistence,
 		inherited_defaults = cols_with_defaults = NIL;
 
 		/*
-		 * Request attnotnull on columns that have a not-null constraint
-		 * that's not marked NO INHERIT (even if not valid).
+		 * Request attnotnull on columns that have an enforced not-null
+		 * constraint that's not marked NO INHERIT (even if not valid).
 		 */
 		nnconstrs = RelationGetNotNullConstraints(RelationGetRelid(relation),
 												  true, false);
 		foreach_ptr(CookedConstraint, cc, nnconstrs)
-			nncols = bms_add_member(nncols, cc->attnum);
+		{
+			if (cc->is_enforced)
+				nncols = bms_add_member(nncols, cc->attnum);
+		}
 
 		for (AttrNumber parent_attno = 1; parent_attno <= tupleDesc->natts;
 			 parent_attno++)
@@ -5525,7 +5529,7 @@ ATExecCmd(List **wqueue, AlteredTableInfo *tab,
 			break;
 		case AT_SetNotNull:		/* ALTER COLUMN SET NOT NULL */
 			address = ATExecSetNotNull(wqueue, rel, NULL, cmd->name,
-									   cmd->recurse, false, lockmode);
+									   cmd->recurse, false, lockmode, true);
 			break;
 		case AT_SetExpression:
 			address = ATExecSetExpression(tab, rel, cmd->name, cmd->def, lockmode);
@@ -7888,6 +7892,8 @@ add_column_collation_dependency(Oid relid, int32 attnum, Oid collid)
  *
  * Return the address of the modified column.  If the column was already
  * nullable, InvalidObjectAddress is returned.
+ *
+ * This will drop the not enforced not-null constraint too.
  */
 static ObjectAddress
 ATExecDropNotNull(Relation rel, const char *colName, bool recurse,
@@ -7916,11 +7922,22 @@ ATExecDropNotNull(Relation rel, const char *colName, bool recurse,
 	ObjectAddressSubSet(address, RelationRelationId,
 						RelationGetRelid(rel), attnum);
 
-	/* If the column is already nullable there's nothing to do. */
-	if (!attTup->attnotnull)
+	/*
+	 * Find the constraint that makes this column NOT NULL, and drop it.
+	 * dropconstraint_internal() resets attnotnull.
+	 */
+	conTup = findNotNullConstraintAttnum(RelationGetRelid(rel), attnum);
+	if (conTup == NULL)
 	{
-		table_close(attr_rel, RowExclusiveLock);
-		return InvalidObjectAddress;
+		if (attTup->attnotnull)
+			elog(ERROR, "cache lookup failed for not-null constraint on column \"%s\" of relation \"%s\"",
+				 colName, RelationGetRelationName(rel));
+		else
+		{
+			/* Skip if no NOT NULL constraint exists (including NOT ENFORCED). */
+			table_close(attr_rel, RowExclusiveLock);
+			return InvalidObjectAddress;
+		}
 	}
 
 	/* Prevent them from altering a system attribute */
@@ -7954,15 +7971,6 @@ ATExecDropNotNull(Relation rel, const char *colName, bool recurse,
 							colName)));
 		table_close(parent, AccessShareLock);
 	}
-
-	/*
-	 * Find the constraint that makes this column NOT NULL, and drop it.
-	 * dropconstraint_internal() resets attnotnull.
-	 */
-	conTup = findNotNullConstraintAttnum(RelationGetRelid(rel), attnum);
-	if (conTup == NULL)
-		elog(ERROR, "cache lookup failed for not-null constraint on column \"%s\" of relation \"%s\"",
-			 colName, RelationGetRelationName(rel));
 
 	/* The normal case: we have a pg_constraint row, remove it */
 	dropconstraint_internal(rel, conTup, DROP_RESTRICT, recurse, false,
@@ -8055,10 +8063,14 @@ set_attnotnull(List **wqueue, Relation rel, AttrNumber attnum,
  *
  * We must recurse to child tables during execution, rather than using
  * ALTER TABLE's normal prep-time recursion.
+ *
+ * When the is_enforced flag is false, the newly added NOT NULL constraint will
+ * be not enforced.  This supports potential future syntax such as
+ * ALTER TABLE ALTER COLUMN SET NOT NULL NOT ENFORCED.
  */
 static ObjectAddress
 ATExecSetNotNull(List **wqueue, Relation rel, char *conName, char *colName,
-				 bool recurse, bool recursing, LOCKMODE lockmode)
+				 bool recurse, bool recursing, LOCKMODE lockmode, bool is_enforced)
 {
 	HeapTuple	tuple;
 	AttrNumber	attnum;
@@ -8093,7 +8105,7 @@ ATExecSetNotNull(List **wqueue, Relation rel, char *conName, char *colName,
 				 errmsg("cannot alter system column \"%s\"",
 						colName)));
 
-	/* See if there's already a constraint */
+	/* See if there's already a constraint. It maybe not enforced! */
 	tuple = findNotNullConstraintAttnum(RelationGetRelid(rel), attnum);
 	if (HeapTupleIsValid(tuple))
 	{
@@ -8107,6 +8119,13 @@ ATExecSetNotNull(List **wqueue, Relation rel, char *conName, char *colName,
 			ereport(ERROR,
 					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					errmsg("cannot change NO INHERIT status of NOT NULL constraint \"%s\" on relation \"%s\"",
+						   NameStr(conForm->conname),
+						   RelationGetRelationName(rel)));
+
+		if (is_enforced && !conForm->conenforced)
+			ereport(ERROR,
+					errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					errmsg("cannot validate NOT ENFORCED constraint \"%s\" on relation \"%s\"",
 						   NameStr(conForm->conname),
 						   RelationGetRelationName(rel)));
 
@@ -8129,7 +8148,7 @@ ATExecSetNotNull(List **wqueue, Relation rel, char *conName, char *colName,
 			conForm->conislocal = true;
 			changed = true;
 		}
-		else if (!conForm->convalidated)
+		else if (is_enforced && !conForm->convalidated && conForm->conenforced)
 		{
 			/*
 			 * Flip attnotnull and convalidated, and also validate the
@@ -8190,6 +8209,9 @@ ATExecSetNotNull(List **wqueue, Relation rel, char *conName, char *colName,
 	constraint = makeNotNullConstraint(makeString(colName));
 	constraint->is_no_inherit = is_no_inherit;
 	constraint->conname = conName;
+	constraint->is_enforced = is_enforced;
+	constraint->initially_valid = is_enforced;
+	constraint->skip_validation = !is_enforced;
 
 	/* and do it */
 	cooked = AddRelationNewConstraints(rel, NIL, list_make1(constraint),
@@ -8198,7 +8220,8 @@ ATExecSetNotNull(List **wqueue, Relation rel, char *conName, char *colName,
 	ObjectAddressSet(address, ConstraintRelationId, ccon->conoid);
 
 	/* Mark pg_attribute.attnotnull for the column and queue validation */
-	set_attnotnull(wqueue, rel, attnum, true);
+	if (ccon->is_enforced)
+		set_attnotnull(wqueue, rel, attnum, true);
 
 	InvokeObjectPostAlterHook(RelationRelationId,
 							  RelationGetRelid(rel), attnum);
@@ -8220,7 +8243,7 @@ ATExecSetNotNull(List **wqueue, Relation rel, char *conName, char *colName,
 			CommandCounterIncrement();
 
 			ATExecSetNotNull(wqueue, childrel, conName, colName,
-							 recurse, true, lockmode);
+							 recurse, true, lockmode, is_enforced);
 			table_close(childrel, NoLock);
 		}
 	}
@@ -9738,7 +9761,7 @@ verifyNotNullPKCompatible(HeapTuple tuple, const char *colname)
 						"ALTER TABLE ... ALTER CONSTRAINT ... INHERIT"));
 
 	/* an unvalidated constraint is no good */
-	if (!conForm->convalidated)
+	if (!conForm->convalidated && conForm->conenforced)
 		ereport(ERROR,
 				errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				errmsg("cannot create primary key on column \"%s\"", colname),
@@ -9748,6 +9771,17 @@ verifyNotNullPKCompatible(HeapTuple tuple, const char *colname)
 						  get_rel_name(conForm->conrelid), "NOT VALID"),
 				errhint("You might need to validate it using %s.",
 						"ALTER TABLE ... VALIDATE CONSTRAINT"));
+
+	/* a not enforced constraint is no good */
+	if (!conForm->conenforced)
+		ereport(ERROR,
+				errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				errmsg("cannot create primary key on column \"%s\"", colname),
+		/*- translator: fourth %s is a constraint characteristic such as NOT ENFORCED */
+				errdetail("The constraint \"%s\" on column \"%s\" of table \"%s\", marked %s, is incompatible with a primary key.",
+						  NameStr(conForm->conname), colname,
+						  get_rel_name(conForm->conrelid), "NOT ENFORCED"),
+				errhint("You might need to ensure the existing constraint is enforced."));
 }
 
 /*
@@ -10121,9 +10155,9 @@ ATAddCheckNNConstraint(List **wqueue, AlteredTableInfo *tab, Relation rel,
 		 * If adding a valid not-null constraint, set the pg_attribute flag
 		 * and tell phase 3 to verify existing rows, if needed.  For an
 		 * invalid constraint, just set attnotnull, without queueing
-		 * verification.
+		 * verification. No need to set attnotnull for not enforced not-null.
 		 */
-		if (constr->contype == CONSTR_NOTNULL)
+		if (constr->contype == CONSTR_NOTNULL && ccon->is_enforced)
 			set_attnotnull(wqueue, rel, ccon->attnum,
 						   !constr->skip_validation);
 
@@ -13218,7 +13252,9 @@ ATExecAlterConstrInheritability(List **wqueue, ATAlterConstraint *cmdcon,
 			Relation	childrel = table_open(childoid, NoLock);
 
 			addr = ATExecSetNotNull(wqueue, childrel, NameStr(currcon->conname),
-									colName, true, true, lockmode);
+									colName, true, true,
+									lockmode,
+									currcon->conenforced);
 			if (OidIsValid(addr.objectId))
 				CommandCounterIncrement();
 			table_close(childrel, NoLock);
@@ -18283,9 +18319,29 @@ MergeAttributesIntoExisting(Relation child_rel, Relation parent_rel, bool ispart
 			if (parent_att->attnotnull && !child_att->attnotnull)
 			{
 				HeapTuple	contup;
+				HeapTuple	childcontup;
 
+				childcontup = findNotNullConstraintAttnum(RelationGetRelid(child_rel),
+														  child_att->attnum);
 				contup = findNotNullConstraintAttnum(RelationGetRelid(parent_rel),
 													 parent_att->attnum);
+
+				if (HeapTupleIsValid(childcontup) && HeapTupleIsValid(contup))
+				{
+					Form_pg_constraint child_con = (Form_pg_constraint) GETSTRUCT(childcontup);
+
+					Assert(!child_con->conenforced);
+
+					/*
+					 * An unenforced NOT NULL constraint on the child cannot
+					 * be merged with an enforced constraint on the parent.
+					 */
+					ereport(ERROR,
+							errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+							errmsg("constraint \"%s\" conflicts with NOT ENFORCED constraint on child table \"%s\"",
+								   NameStr(child_con->conname), RelationGetRelationName(child_rel)));
+				}
+
 				if (HeapTupleIsValid(contup) &&
 					!((Form_pg_constraint) GETSTRUCT(contup))->connoinherit)
 					ereport(ERROR,
@@ -18537,13 +18593,24 @@ MergeConstraintsIntoExisting(Relation child_rel, Relation parent_rel)
 		if (!found)
 		{
 			if (parent_con->contype == CONSTRAINT_NOTNULL)
-				ereport(ERROR,
-						errcode(ERRCODE_DATATYPE_MISMATCH),
-						errmsg("column \"%s\" in child table \"%s\" must be marked NOT NULL",
-							   get_attname(parent_relid,
-										   extractNotNullColumn(parent_tuple),
-										   false),
-							   RelationGetRelationName(child_rel)));
+			{
+				if (parent_con->conenforced)
+					ereport(ERROR,
+							errcode(ERRCODE_DATATYPE_MISMATCH),
+							errmsg("column \"%s\" in child table \"%s\" must be marked NOT NULL",
+								   get_attname(parent_relid,
+											   extractNotNullColumn(parent_tuple),
+											   false),
+								   RelationGetRelationName(child_rel)));
+				else
+					ereport(ERROR,
+							errcode(ERRCODE_DATATYPE_MISMATCH),
+							errmsg("column \"%s\" in child table \"%s\" must be marked NOT NULL NOT ENFORCED",
+								   get_attname(parent_relid,
+											   extractNotNullColumn(parent_tuple),
+											   false),
+								   RelationGetRelationName(child_rel)));
+			}
 
 			ereport(ERROR,
 					(errcode(ERRCODE_DATATYPE_MISMATCH),
@@ -23233,28 +23300,8 @@ createTableConstraints(List **wqueue, AlteredTableInfo *tab,
 
 	/* Don't need the cookedConstraints anymore. */
 	list_free_deep(cookedConstraints);
-
-	/* Reproduce not-null constraints. */
-	if (constr->has_not_null)
-	{
-		List	   *nnconstraints;
-
-		/*
-		 * The "include_noinh" argument is false because a partitioned table
-		 * can't have NO INHERIT constraint.
-		 */
-		nnconstraints = RelationGetNotNullConstraints(RelationGetRelid(parent_rel),
-													  false, false);
-
-		Assert(list_length(nnconstraints) > 0);
-
-		/*
-		 * We already set pg_attribute.attnotnull in createPartitionTable. No
-		 * need call set_attnotnull again.
-		 */
-		AddRelationNewConstraints(newRel, NIL, nnconstraints, false, true, false, NULL);
-	}
 }
+
 
 /*
  * createPartitionTable:
@@ -23280,6 +23327,7 @@ createPartitionTable(List **wqueue, RangeVar *newPartName,
 	Oid			namespaceId;
 	AlteredTableInfo *new_partrel_tab;
 	Form_pg_class parent_relform = parent_rel->rd_rel;
+	List	   *nnconstraints = NIL;
 
 	/* If the existing rel is temp, it must belong to this session. */
 	if (RELATION_IS_OTHER_TEMP(parent_rel))
@@ -23402,6 +23450,23 @@ createPartitionTable(List **wqueue, RangeVar *newPartName,
 
 	/* Create constraints, default values, and generated values. */
 	createTableConstraints(wqueue, new_partrel_tab, parent_rel, newRel);
+
+	/*
+	 * create not-null constraints for newRel based on parent_rel.
+	 *
+	 * The "include_noinh" argument is false because a partitioned table can't
+	 * have NO INHERIT constraint.
+	 */
+	nnconstraints = RelationGetNotNullConstraints(RelationGetRelid(parent_rel),
+												  false,
+												  false);
+
+	/*
+	 * We already set pg_attribute.attnotnull in createPartitionTable. No need
+	 * call set_attnotnull again.
+	 */
+	AddRelationNewConstraints(newRel, NIL, nnconstraints,
+							  false, true, false, NULL);
 
 	/*
 	 * Need to call CommandCounterIncrement, so a fresh relcache entry has
