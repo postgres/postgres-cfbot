@@ -86,7 +86,7 @@
 				create_replication_slot drop_replication_slot
 				alter_replication_slot identify_system read_replication_slot
 				timeline_history show upload_manifest
-%type <list>	generic_option_list
+%type <list>	generic_option_list opt_physical_options
 %type <defelt>	generic_option
 %type <uintval>	opt_timeline
 %type <list>	plugin_options plugin_opt_list
@@ -280,9 +280,10 @@ alter_replication_slot:
 
 /*
  * START_REPLICATION [SLOT slot] [PHYSICAL] %X/%08X [TIMELINE %u]
+ *     [( option [, ...] )]
  */
 start_replication:
-			K_START_REPLICATION opt_slot opt_physical RECPTR opt_timeline
+			K_START_REPLICATION opt_slot opt_physical RECPTR opt_timeline opt_physical_options
 				{
 					StartReplicationCmd *cmd;
 
@@ -291,9 +292,15 @@ start_replication:
 					cmd->slotname = $2;
 					cmd->startpoint = $4;
 					cmd->timeline = $5;
+					cmd->options = $6;
 					$$ = (Node *) cmd;
 				}
 			;
+
+opt_physical_options:
+			'(' generic_option_list ')' { $$ = $2; }
+			| /* EMPTY */					{ $$ = NIL; }
+		;
 
 /* START_REPLICATION SLOT slot LOGICAL %X/%08X options */
 start_logical_replication:

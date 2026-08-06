@@ -189,6 +189,9 @@ static XLogRecPtr sendTimeLineValidUpto = InvalidXLogRecPtr;
  */
 static XLogRecPtr sentPtr = InvalidXLogRecPtr;
 
+/* Can the physical replication client process Zero WAL data messages? */
+static bool sendZeroWALData = false;
+
 /* Buffers for constructing outgoing messages and processing reply messages. */
 static StringInfoData output_message;
 static StringInfoData reply_message;
@@ -862,6 +865,26 @@ StartReplication(StartReplicationCmd *cmd)
 	StringInfoData buf;
 	XLogRecPtr	FlushPtr;
 	TimeLineID	FlushTLI;
+	bool		o_skip_wal_padding = false;
+
+	sendZeroWALData = false;
+	foreach_ptr(DefElem, defel, cmd->options)
+	{
+		if (strcmp(defel->defname, "skip_wal_padding") == 0)
+		{
+			if (o_skip_wal_padding)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("duplicate option \"%s\"", defel->defname)));
+			sendZeroWALData = defGetBoolean(defel);
+			o_skip_wal_padding = true;
+		}
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("unrecognized START_REPLICATION option: \"%s\"",
+							defel->defname)));
+	}
 
 	/* create xlogreader for physical replication */
 	xlogreader =
@@ -3391,6 +3414,7 @@ XLogSendPhysical(void)
 	XLogSegNo	segno;
 	WALReadError errinfo;
 	Size		rbytes;
+	Size		hdrlen;
 
 	/* If requested switch the WAL sender to the stopping state. */
 	if (got_STOPPING)
@@ -3598,6 +3622,7 @@ XLogSendPhysical(void)
 	pq_sendint64(&output_message, startptr);	/* dataStart */
 	pq_sendint64(&output_message, SendRqstPtr); /* walEnd */
 	pq_sendint64(&output_message, 0);	/* sendtime, filled in last */
+	hdrlen = output_message.len;
 
 	/*
 	 * Read the log directly into the output buffer to avoid extra memcpy
@@ -3655,6 +3680,32 @@ retry:
 
 	output_message.len += nbytes;
 	output_message.data[output_message.len] = '\0';
+
+	/*
+	 * Avoid sending zero-filled WAL chunks.  XLOG_SWITCH commonly leaves
+	 * almost a whole segment of zeros.  Messages are cut only at WAL record
+	 * or page boundaries, where valid WAL pages have nonzero headers, so an
+	 * entirely zero message can only contain end-of-segment padding.
+	 * Detecting the bytes rather than remembering the switch point also
+	 * handles a sender that starts in the middle of the padding.
+	 */
+	if (sendZeroWALData &&
+		pg_memory_is_all_zeros(output_message.data + hdrlen,
+							   output_message.len - hdrlen))
+	{
+		XLogSegNo	zero_segno;
+		XLogRecPtr	segment_end;
+
+		/* The first zero page proves that this is switch padding. */
+		XLByteToSeg(sentPtr, zero_segno, wal_segment_size);
+		segment_end = (zero_segno + 1) * wal_segment_size;
+		endptr = Min(segment_end, SendRqstPtr);
+		WalSndCaughtUp = !sendTimeLineIsHistoric && endptr == SendRqstPtr;
+
+		output_message.data[0] = PqReplMsg_WALDataZeros;
+		output_message.len = hdrlen;
+		pq_sendint64(&output_message, endptr - sentPtr);
+	}
 
 	/*
 	 * Fill the send timestamp last, so that it is taken as late as possible.
