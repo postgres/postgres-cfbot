@@ -27,6 +27,7 @@
 #include "common/file_utils.h"
 #include "fe_utils/simple_list.h"
 #include "libpq-fe.h"
+#include "storage/block.h"
 
 
 typedef enum trivalue
@@ -179,6 +180,7 @@ typedef struct _dumpOptions
 	bool		aclsSkip;
 	const char *lockWaitTimeout;
 	int			dump_inserts;	/* 0 = COPY, otherwise rows per INSERT */
+	BlockNumber	max_table_segment_pages; /* chunk when relpages is above this */
 
 	/* flags for various command-line long options */
 	int			disable_dollar_quoting;
