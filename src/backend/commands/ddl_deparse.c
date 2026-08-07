@@ -83,8 +83,10 @@
 #include "access/toast_compression.h"
 #include "access/table.h"
 #include "catalog/namespace.h"
+#include "catalog/dependency.h"
 #include "catalog/objectaddress.h"
 #include "catalog/pg_attrdef.h"
+#include "catalog/pg_class.h"
 #include "catalog/pg_collation.h"
 #include "catalog/pg_constraint.h"
 #include "catalog/pg_index.h"
@@ -96,6 +98,7 @@
 #include "parser/parse_type.h"
 #include "tcop/deparse_utility.h"
 #include "tcop/utility.h"
+#include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/fmgrprotos.h"
@@ -305,7 +308,7 @@ new_jsonb_for_type(JsonbInState *state, char *parentKey,
 {
 	Oid			typnspid;
 	char	   *type_nsp;
-	char	   *type_name = NULL;
+	char	   *type_name;
 	char	   *typmodstr;
 	bool		type_array;
 
@@ -355,6 +358,30 @@ new_jsonb_for_qualname(JsonbInState *state, Oid nspid, char *objName,
 
 	append_jsonb_pair2(state,
 					   "schemaname", jbv_str(namespace),
+					   "objname", jbv_str(objName));
+
+	if (createObject)
+		end_jsonb_object(state);
+}
+
+/*
+ * Like new_jsonb_for_qualname, but the schema and object names are supplied
+ * directly rather than looked up from a namespace OID. Used for objects (such
+ * as a merged/split-away source partition) that no longer exist by deparse
+ * time and whose names were captured earlier.
+ */
+static void
+new_jsonb_for_qualname_str(JsonbInState *state, char *schemaName,
+						   char *objName, char *keyName, bool createObject)
+{
+	if (keyName)
+		insert_jsonb_key(state, keyName);
+
+	if (createObject)
+		begin_jsonb_object(state);
+
+	append_jsonb_pair2(state,
+					   "schemaname", jbv_str(schemaName),
 					   "objname", jbv_str(objName));
 
 	if (createObject)
@@ -1304,7 +1331,7 @@ split_exclusion_where(char *def, Oid indexId, Oid relationId)
  */
 static void
 deparse_one_constraint(JsonbInState *state, Oid conoid, List *cmds,
-					   List *typed_names)
+					   IndexStmt *idxstmt_override, List *typed_names)
 {
 	HeapTuple	tuple;
 	Form_pg_constraint constrForm;
@@ -1357,15 +1384,18 @@ deparse_one_constraint(JsonbInState *state, Oid conoid, List *cmds,
 	}
 
 	/*
-	 * For an index-backed constraint, find the collected CREATE INDEX
-	 * subcommand that created its index; it records the clauses that
-	 * execution honored for it.
+	 * For an index-backed constraint, we need the IndexStmt that created its
+	 * index, to know which of the clauses pg_get_constraintdef does not
+	 * render (index storage parameters, tablespace) were in effect. For ALTER
+	 * TABLE ADD the caller supplies it (the subcommand's own IndexStmt); for
+	 * CREATE TABLE it is a separately collected CREATE INDEX command.
 	 */
 	if (constrForm->contype == CONSTRAINT_PRIMARY ||
 		constrForm->contype == CONSTRAINT_UNIQUE ||
 		constrForm->contype == CONSTRAINT_EXCLUSION)
 	{
-		idxstmt = find_collected_index_stmt(cmds, constrForm->conindid);
+		idxstmt = idxstmt_override != NULL ? idxstmt_override :
+			find_collected_index_stmt(cmds, constrForm->conindid);
 
 		if (idxstmt == NULL)
 			elog(ERROR, "could not find collected CREATE INDEX command for index %u",
@@ -1545,9 +1575,22 @@ deparse_Constraints(JsonbInState *state, Oid relationId, List *typed_names,
 
 	qsort(conoids, nconstraints, sizeof(Oid), oid_cmp);
 
-	/* Emit each constraint, in creation (OID) order. */
+	/*
+	 * For each constraint, add a node to the list of table elements. In these
+	 * nodes we include not only the printable information ("fmt"), but also
+	 * separate attributes to indicate the type of constraint, for automatic
+	 * processing.
+	 *
+	 * pg_get_constraintdef appends the constraint attributes (DEFERRABLE and
+	 * friends) at the end of the definition, and for an exclusion constraint
+	 * the predicate before those, but the grammar admits USING INDEX
+	 * TABLESPACE only before both. Split those trailing clauses off the
+	 * definition -- their text is fully determined by the catalog flags, so
+	 * this is an exact operation, verified below -- and emit them through
+	 * their own slots, after the tablespace clause.
+	 */
 	for (int i = 0; i < nconstraints; i++)
-		deparse_one_constraint(state, conoids[i], cmds, typed_names);
+		deparse_one_constraint(state, conoids[i], cmds, NULL, typed_names);
 
 	pfree(conoids);
 
@@ -2070,6 +2113,1471 @@ deparse_CreateStmt(JsonbInState *state, Oid objectId, CreateStmt *stmt,
 }
 
 /*
+ * Return the raw ADD COLUMN column definition for the given column name from
+ * the user's original ALTER TABLE statement. The collected subcommand's
+ * ColumnDef has been transformed (its inline constraints/defaults stripped),
+ * so the raw one is needed to render the column as the user wrote it.
+ */
+static ColumnDef *
+find_raw_add_column(AlterTableStmt *rawstmt, const char *colname)
+{
+	ListCell   *lc;
+
+	foreach(lc, rawstmt->cmds)
+	{
+		AlterTableCmd *rawcmd = lfirst_node(AlterTableCmd, lc);
+
+		if (rawcmd->subtype == AT_AddColumn &&
+			rawcmd->def != NULL &&
+			IsA(rawcmd->def, ColumnDef) &&
+			strcmp(((ColumnDef *) rawcmd->def)->colname, colname) == 0)
+			return (ColumnDef *) rawcmd->def;
+	}
+
+	elog(ERROR, "could not find raw ADD COLUMN for column \"%s\"", colname);
+	return NULL;				/* keep compiler quiet */
+}
+
+/*
+ * Return the raw ALTER COLUMN subcommand of the given subtype for the named
+ * column from the user's original statement. Some subcommands (ADD/SET
+ * IDENTITY) are rewritten by parse analysis -- their options split out into a
+ * separate internal ALTER SEQUENCE -- so the raw subcommand is what carries
+ * the clause as the user wrote it.
+ */
+static AlterTableCmd *
+find_raw_alter_column(AlterTableStmt *rawstmt, AlterTableType subtype,
+					  const char *colname)
+{
+	ListCell   *lc;
+
+	foreach(lc, rawstmt->cmds)
+	{
+		AlterTableCmd *rawcmd = lfirst_node(AlterTableCmd, lc);
+
+		if (rawcmd->subtype == subtype &&
+			rawcmd->name != NULL &&
+			strcmp(rawcmd->name, colname) == 0)
+			return rawcmd;
+	}
+
+	elog(ERROR, "could not find raw ALTER COLUMN subcommand for column \"%s\"",
+		 colname);
+	return NULL;				/* keep compiler quiet */
+}
+
+/*
+ * Collect, from the raw ALTER TABLE statement, the set of constraint names the
+ * user specified, as a list of plain strings in the form
+ * deparse_one_constraint() expects for its "user named it" test.
+ *
+ * The collected subcommand cannot answer that question: execution fills the
+ * name it derived for an unnamed constraint into the very node that is later
+ * collected (see ATAddCheckNNConstraint and ATAddForeignKeyConstraint), so by
+ * then a derived name is indistinguishable from one the user wrote. Only the
+ * raw statement still has the difference.
+ *
+ * A constraint written as part of a column definition (ADD COLUMN c int
+ * CONSTRAINT name CHECK (...)) is split out into a subcommand of its own by
+ * parse analysis, so those names are collected too.
+ */
+static List *
+collect_raw_alter_constraint_names(AlterTableStmt *rawstmt)
+{
+	List	   *names = NIL;
+	ListCell   *lc;
+
+	foreach(lc, rawstmt->cmds)
+	{
+		AlterTableCmd *rawcmd = lfirst_node(AlterTableCmd, lc);
+		List	   *constraints = NIL;
+		ListCell   *lc2;
+
+		if (rawcmd->def == NULL)
+			continue;
+
+		if (rawcmd->subtype == AT_AddConstraint &&
+			IsA(rawcmd->def, Constraint))
+			constraints = list_make1(rawcmd->def);
+		else if (rawcmd->subtype == AT_AddColumn &&
+				 IsA(rawcmd->def, ColumnDef))
+			constraints = ((ColumnDef *) rawcmd->def)->constraints;
+
+		foreach(lc2, constraints)
+		{
+			Constraint *constraint = lfirst_node(Constraint, lc2);
+
+			if (constraint->conname != NULL)
+				names = lappend(names, constraint->conname);
+		}
+	}
+
+	return names;
+}
+
+/*
+ * Return the raw table-level NOT NULL constraint (ADD [CONSTRAINT name] NOT
+ * NULL col) the user wrote for the given column, or NULL if none. A collected
+ * NOT NULL AddConstraint with no matching raw one was generated internally (by
+ * ADD COLUMN ... NOT NULL or ALTER COLUMN ... SET NOT NULL) and is rendered
+ * elsewhere, so it is not emitted here.
+ */
+static Constraint *
+find_raw_table_notnull(AlterTableStmt *rawstmt, const char *colname)
+{
+	ListCell   *lc;
+
+	foreach(lc, rawstmt->cmds)
+	{
+		AlterTableCmd *rawcmd = lfirst_node(AlterTableCmd, lc);
+		Constraint *con;
+
+		if (rawcmd->subtype != AT_AddConstraint ||
+			rawcmd->def == NULL || !IsA(rawcmd->def, Constraint))
+			continue;
+
+		con = (Constraint *) rawcmd->def;
+		if (con->contype == CONSTR_NOTNULL && con->keys != NIL &&
+			strcmp(strVal(linitial(con->keys)), colname) == 0)
+			return con;
+	}
+	return NULL;
+}
+
+/*
+ * Return the raw ADD [CONSTRAINT name] {PRIMARY KEY | UNIQUE} USING INDEX
+ * constraint whose resulting constraint is named conname, or NULL.
+ *
+ * The user writes USING INDEX with the index's pre-adoption name (a bare name
+ * resolved against the table's schema), which the adoption may rename to the
+ * constraint name; that original name is gone from the catalog by deparse
+ * time, so it must come from this raw node. A constraint written without a
+ * name takes the index's name, so match on the constraint's final name:
+ * conname when the user gave one, else the index name.
+ */
+static Constraint *
+find_raw_index_constraint(AlterTableStmt *rawstmt, const char *conname)
+{
+	ListCell   *lc;
+
+	foreach(lc, rawstmt->cmds)
+	{
+		AlterTableCmd *rawcmd = lfirst_node(AlterTableCmd, lc);
+		Constraint *con;
+		const char *finalname;
+
+		if (rawcmd->subtype != AT_AddConstraint ||
+			rawcmd->def == NULL || !IsA(rawcmd->def, Constraint))
+			continue;
+
+		con = (Constraint *) rawcmd->def;
+		if (con->indexname == NULL)
+			continue;
+
+		finalname = con->conname != NULL ? con->conname : con->indexname;
+		if (strcmp(finalname, conname) == 0)
+			return con;
+	}
+	return NULL;
+}
+
+/*
+ * Did the user's original ALTER TABLE statement contain a subcommand of the
+ * given subtype?  Used to tell a user-written CLUSTER ON / SET WITHOUT
+ * CLUSTER / REPLICA IDENTITY apart from the same subcommand generated
+ * internally by ALTER COLUMN TYPE's index rebuild.
+ */
+static bool
+raw_has_subtype(AlterTableStmt *rawstmt, AlterTableType subtype)
+{
+	ListCell   *lc;
+
+	foreach(lc, rawstmt->cmds)
+	{
+		if (lfirst_node(AlterTableCmd, lc)->subtype == subtype)
+			return true;
+	}
+	return false;
+}
+
+/*
+ * Emit an "ADD %{constraint}s" subcommand for the constraint with the given
+ * OID, reusing deparse_one_constraint for the constraint body.
+ */
+static void
+emit_add_constraint(JsonbInState *state, Oid conoid, List *cmds,
+					IndexStmt *idxstmt, List *typed_names)
+{
+	begin_jsonb_object(state);
+	append_jsonb_pair1(state, "fmt", jbv_str("ADD %{constraint}s"));
+	insert_jsonb_key(state, "constraint");
+	deparse_one_constraint(state, conoid, cmds, idxstmt, typed_names);
+	end_jsonb_object(state);
+}
+
+/*
+ * Emit an "ADD [CONSTRAINT name] NOT NULL col" subcommand for the given column
+ * of the raw statement, and return true; or return false if the user wrote no
+ * such subcommand for that column, in which case the collected constraint was
+ * generated internally (by ADD COLUMN ... NOT NULL or ALTER COLUMN ... SET NOT
+ * NULL, which render it in their own subcommand) and produces no output here.
+ *
+ * Everything is taken from the raw node: its column name survives the drop of
+ * the pg_constraint row on replay, and a NOT NULL that merged with one the
+ * table already had leaves no pg_constraint row of its own to read.
+ */
+static bool
+deparse_AddTableNotNull(JsonbInState *state, AlterTableStmt *rawstmt,
+						const char *colname)
+{
+	Constraint *rawcon = find_raw_table_notnull(rawstmt, colname);
+
+	if (rawcon == NULL)
+		return false;
+
+	begin_jsonb_object(state);
+	append_jsonb_pair2(state,
+					   "fmt", jbv_str("ADD %{name}sNOT NULL %{column}I%{no_inherit}s%{not_valid}s"),
+					   "column", jbv_str(colname));
+	if (rawcon->conname != NULL)
+		new_jsonb_string_clause(state, "name", "CONSTRAINT %{conname}I ",
+								"conname", rawcon->conname);
+	else
+		new_jsonb_null(state, "name");
+	if (rawcon->is_no_inherit)
+		new_jsonb_clause(state, "no_inherit", " NO INHERIT");
+	else
+		new_jsonb_null(state, "no_inherit");
+	if (rawcon->skip_validation)
+		new_jsonb_clause(state, "not_valid", " NOT VALID");
+	else
+		new_jsonb_null(state, "not_valid");
+	end_jsonb_object(state);
+
+	return true;
+}
+
+/*
+ * Deparse one collected ALTER TABLE subcommand into the current subcommand
+ * array. Returns true if a subcommand element was emitted, false if the
+ * subcommand is an internal one that produces no output of its own.
+ *
+ * The collected list contains post-transform subcommands, which include
+ * internal subtypes the user never wrote; those we recognize are emitted as
+ * nothing (their effect is represented by a sibling subcommand or is
+ * re-derived on replay). A subtype that is neither emitted nor a known
+ * internal one is an error rather than a silent omission, so a gap between
+ * the supported-subtype whitelist and this switch fails loudly.
+ */
+static bool
+deparse_AlterTableSubcmd(JsonbInState *state, Oid relId, List *dpcontext,
+						 CollectedATSubcmd *sub, AlterTableCmd *subcmd,
+						 AlterTableStmt *rawstmt, List *cmds)
+{
+	switch (subcmd->subtype)
+	{
+		case AT_AddColumn:
+			{
+				/*
+				 * The collected column definition has been transformed --
+				 * inline constraints and defaults moved out into separate
+				 * subcommands -- so render from the raw column definition, as
+				 * CREATE TABLE does, matched by column name.
+				 */
+				ColumnDef  *coldef = castNode(ColumnDef, subcmd->def);
+				ColumnDef  *rawcoldef = find_raw_add_column(rawstmt,
+															coldef->colname);
+
+				begin_jsonb_object(state);
+				append_jsonb_pair1(state, "fmt",
+								   jbv_str("ADD COLUMN%{if_not_exists}s %{definition}s"));
+
+				if (subcmd->missing_ok)
+					new_jsonb_clause(state, "if_not_exists", " IF NOT EXISTS");
+				else
+					new_jsonb_null(state, "if_not_exists");
+
+				insert_jsonb_key(state, "definition");
+				deparse_ColumnDef(state, relId, dpcontext, rawcoldef);
+				end_jsonb_object(state);
+			}
+			return true;
+
+		case AT_DropColumn:
+			begin_jsonb_object(state);
+			append_jsonb_pair2(state,
+							   "fmt", jbv_str("DROP COLUMN%{if_exists}s %{column}I%{cascade}s"),
+							   "column", jbv_str(subcmd->name));
+
+			if (subcmd->missing_ok)
+				new_jsonb_clause(state, "if_exists", " IF EXISTS");
+			else
+				new_jsonb_null(state, "if_exists");
+
+			if (subcmd->behavior == DROP_CASCADE)
+				new_jsonb_clause(state, "cascade", " CASCADE");
+			else
+				new_jsonb_null(state, "cascade");
+
+			end_jsonb_object(state);
+			return true;
+
+		case AT_ColumnDefault:
+			begin_jsonb_object(state);
+			if (subcmd->def == NULL)
+				append_jsonb_pair2(state,
+								   "fmt", jbv_str("ALTER COLUMN %{column}I DROP DEFAULT"),
+								   "column", jbv_str(subcmd->name));
+			else
+			{
+				HeapTuple	atup = SearchSysCacheAttName(relId, subcmd->name);
+				char	   *defexpr;
+
+				if (!HeapTupleIsValid(atup))
+					elog(ERROR, "could not find column \"%s\" of relation %u",
+						 subcmd->name, relId);
+
+				/*
+				 * A DEFAULT whose cooked expression is a plain NULL constant
+				 * is not stored in pg_attrdef (see get_stored_default_expr),
+				 * so tolerate its absence and render it as written, exactly
+				 * as the CREATE TABLE path does in deparse_column_default().
+				 */
+				defexpr = get_stored_default_expr(relId,
+												  ((Form_pg_attribute) GETSTRUCT(atup))->attnum,
+												  dpcontext, true);
+				append_jsonb_pair2(state,
+								   "fmt", jbv_str("ALTER COLUMN %{column}I SET DEFAULT %{definition}s"),
+								   "column", jbv_str(subcmd->name));
+				append_jsonb_pair1(state, "definition",
+								   jbv_str(defexpr != NULL ? defexpr : "NULL"));
+				ReleaseSysCache(atup);
+			}
+			end_jsonb_object(state);
+			return true;
+
+		case AT_SetNotNull:
+			begin_jsonb_object(state);
+			append_jsonb_pair2(state,
+							   "fmt", jbv_str("ALTER COLUMN %{column}I SET NOT NULL"),
+							   "column", jbv_str(subcmd->name));
+			end_jsonb_object(state);
+			return true;
+
+		case AT_DropNotNull:
+			begin_jsonb_object(state);
+			append_jsonb_pair2(state,
+							   "fmt", jbv_str("ALTER COLUMN %{column}I DROP NOT NULL"),
+							   "column", jbv_str(subcmd->name));
+			end_jsonb_object(state);
+			return true;
+
+		case AT_DropExpression:
+			begin_jsonb_object(state);
+			append_jsonb_pair2(state,
+							   "fmt", jbv_str("ALTER COLUMN %{column}I DROP EXPRESSION%{if_exists}s"),
+							   "column", jbv_str(subcmd->name));
+
+			if (subcmd->missing_ok)
+				new_jsonb_clause(state, "if_exists", " IF EXISTS");
+			else
+				new_jsonb_null(state, "if_exists");
+
+			end_jsonb_object(state);
+			return true;
+
+		case AT_AddIdentity:
+			{
+				/*
+				 * Parse analysis rewrites the identity specification into a
+				 * ColumnDef and moves the sequence options into a separate
+				 * internal ALTER SEQUENCE, so render from the raw
+				 * subcommand's Constraint, which still carries GENERATED ...
+				 * AS IDENTITY and the options as the user wrote them.
+				 * deparse_ColumnIdentity emits them with a leading space,
+				 * under "identity".
+				 */
+				AlterTableCmd *rawcmd = find_raw_alter_column(rawstmt,
+															  AT_AddIdentity,
+															  subcmd->name);
+				Constraint *coldef = castNode(Constraint, rawcmd->def);
+
+				begin_jsonb_object(state);
+				append_jsonb_pair2(state,
+								   "fmt", jbv_str("ALTER COLUMN %{column}I ADD%{identity}s"),
+								   "column", jbv_str(subcmd->name));
+				deparse_ColumnIdentity(state, "identity", coldef);
+				end_jsonb_object(state);
+			}
+			return true;
+
+		case AT_SetIdentity:
+			{
+				/*
+				 * As with ADD IDENTITY, parse analysis splits the sequence
+				 * options out of the collected subcommand, so render from the
+				 * raw subcommand's option list. Each element mirrors the
+				 * grammar's alter_identity_column_option: SET GENERATED ...,
+				 * a bare RESTART, or SET <sequence option>.
+				 */
+				AlterTableCmd *rawcmd = find_raw_alter_column(rawstmt,
+															  AT_SetIdentity,
+															  subcmd->name);
+				ListCell   *lc;
+
+				begin_jsonb_object(state);
+				append_jsonb_pair2(state,
+								   "fmt", jbv_str("ALTER COLUMN %{column}I %{options: }s"),
+								   "column", jbv_str(subcmd->name));
+				insert_jsonb_key(state, "options");
+				begin_jsonb_array(state);
+				foreach(lc, (List *) rawcmd->def)
+				{
+					DefElem    *elem = lfirst_node(DefElem, lc);
+					JsonbValue	val;
+
+					if (strcmp(elem->defname, "generated") == 0)
+						val = jbv_str(psprintf("SET GENERATED %s",
+											   intVal(elem->arg) == ATTRIBUTE_IDENTITY_ALWAYS ?
+											   "ALWAYS" : "BY DEFAULT"));
+					else if (strcmp(elem->defname, "restart") == 0)
+						val = jbv_str(deparse_SeqOptElem(elem));
+					else
+						val = jbv_str(psprintf("SET %s", deparse_SeqOptElem(elem)));
+
+					pushJsonbValue(state, WJB_ELEM, &val);
+				}
+				end_jsonb_array(state);
+				end_jsonb_object(state);
+			}
+			return true;
+
+		case AT_DropIdentity:
+			begin_jsonb_object(state);
+			append_jsonb_pair2(state,
+							   "fmt", jbv_str("ALTER COLUMN %{column}I DROP IDENTITY%{if_exists}s"),
+							   "column", jbv_str(subcmd->name));
+
+			if (subcmd->missing_ok)
+				new_jsonb_clause(state, "if_exists", " IF EXISTS");
+			else
+				new_jsonb_null(state, "if_exists");
+
+			end_jsonb_object(state);
+			return true;
+
+		case AT_SetExpression:
+			{
+				HeapTuple	atup = SearchSysCacheAttName(relId, subcmd->name);
+
+				if (!HeapTupleIsValid(atup))
+					elog(ERROR, "could not find column \"%s\" of relation %u",
+						 subcmd->name, relId);
+
+				begin_jsonb_object(state);
+				append_jsonb_pair2(state,
+								   "fmt", jbv_str("ALTER COLUMN %{column}I SET EXPRESSION AS (%{expression}s)"),
+								   "column", jbv_str(subcmd->name));
+				append_jsonb_pair1(state, "expression",
+								   jbv_str(get_stored_default_expr(relId,
+																   ((Form_pg_attribute) GETSTRUCT(atup))->attnum,
+																   dpcontext, false)));
+				ReleaseSysCache(atup);
+				end_jsonb_object(state);
+			}
+			return true;
+
+		case AT_SetStatistics:
+			{
+				StringInfoData fmtbuf;
+				const char *colref;
+				char	   *colval;
+
+				/*
+				 * The column is normally given by name, but SET STATISTICS is
+				 * the one ALTER TABLE subcommand with a by-number grammar
+				 * form (used for an unnamed expression column of an index,
+				 * reached as ALTER TABLE naming that index): there
+				 * subcmd->name is NULL and subcmd->num holds the position.
+				 * Render whichever form the user wrote, a quoted identifier,
+				 * or the bare number, so the reconstruction is accepted the
+				 * same way.
+				 */
+				if (subcmd->name != NULL)
+				{
+					colref = "%{column}I";
+					colval = subcmd->name;
+				}
+				else
+				{
+					colref = "%{column}s";
+					colval = psprintf("%d", subcmd->num);
+				}
+
+				/*
+				 * SET STATISTICS DEFAULT leaves subcmd->def NULL (the
+				 * grammar's set_statistics_value for DEFAULT); render it back
+				 * as the DEFAULT keyword rather than dereferencing the
+				 * missing value.
+				 */
+				initStringInfo(&fmtbuf);
+				if (subcmd->def == NULL)
+					appendStringInfo(&fmtbuf,
+									 "ALTER COLUMN %s SET STATISTICS DEFAULT", colref);
+				else
+					appendStringInfo(&fmtbuf,
+									 "ALTER COLUMN %s SET STATISTICS %%{statistics}s", colref);
+
+				begin_jsonb_object(state);
+				append_jsonb_pair2(state, "fmt", jbv_str(fmtbuf.data),
+								   "column", jbv_str(colval));
+
+				if (subcmd->def != NULL)
+					append_jsonb_pair1(state, "statistics",
+									   jbv_str(psprintf("%d", intVal((Node *) subcmd->def))));
+
+				end_jsonb_object(state);
+			}
+			return true;
+
+		case AT_SetOptions:
+		case AT_ResetOptions:
+			{
+				ListCell   *opt;
+
+				begin_jsonb_object(state);
+				append_jsonb_pair2(state,
+								   "fmt", jbv_str(subcmd->subtype == AT_SetOptions ?
+												  "ALTER COLUMN %{column}I SET (%{options:, }s)" :
+												  "ALTER COLUMN %{column}I RESET (%{options:, }s)"),
+								   "column", jbv_str(subcmd->name));
+				insert_jsonb_key(state, "options");
+				begin_jsonb_array(state);
+
+				foreach(opt, (List *) subcmd->def)
+					deparse_DefElem(state, (DefElem *) lfirst(opt),
+									subcmd->subtype == AT_ResetOptions);
+
+				end_jsonb_array(state);
+				end_jsonb_object(state);
+			}
+			return true;
+
+		case AT_SetStorage:
+			begin_jsonb_object(state);
+			append_jsonb_pair2(state,
+							   "fmt", jbv_str("ALTER COLUMN %{column}I SET STORAGE %{storage}s"),
+							   "column", jbv_str(subcmd->name));
+			append_jsonb_pair1(state, "storage",
+							   jbv_str(strVal((Node *) subcmd->def)));
+			end_jsonb_object(state);
+			return true;
+
+		case AT_SetCompression:
+			begin_jsonb_object(state);
+			append_jsonb_pair2(state,
+							   "fmt", jbv_str("ALTER COLUMN %{column}I SET COMPRESSION %{compression}s"),
+							   "column", jbv_str(subcmd->name));
+			append_jsonb_pair1(state, "compression",
+							   jbv_str(strVal((Node *) subcmd->def)));
+			end_jsonb_object(state);
+			return true;
+
+		case AT_AlterColumnType:
+			{
+				ColumnDef  *coldef = castNode(ColumnDef, subcmd->def);
+				HeapTuple	atup;
+				Form_pg_attribute attr;
+
+				atup = SearchSysCacheAttName(relId, subcmd->name);
+				if (!HeapTupleIsValid(atup))
+					elog(ERROR, "could not find column \"%s\" of relation %u",
+						 subcmd->name, relId);
+
+				attr = (Form_pg_attribute) GETSTRUCT(atup);
+
+				begin_jsonb_object(state);
+				append_jsonb_pair2(state,
+								   "fmt", jbv_str("ALTER COLUMN %{column}I SET DATA TYPE "
+												  "%{datatype}T%{collation}s%{using}s"),
+								   "column", jbv_str(subcmd->name));
+				new_jsonb_for_type(state, "datatype", attr->atttypid, attr->atttypmod);
+
+				/* COLLATE, only if the user wrote it */
+				if (coldef->collClause != NULL)
+				{
+					begin_jsonb_clause(state, "collation", " COLLATE %{name}D");
+					new_jsonb_for_qualname_id(state, CollationRelationId,
+											  attr->attcollation, "name", true);
+					end_jsonb_clause(state);
+				}
+				else
+					new_jsonb_null(state, "collation");
+
+				/*
+				 * USING: prefer the text captured at prep time, before any
+				 * column the expression references could be dropped by a
+				 * sibling subcommand (see
+				 * EventTriggerCollectAlterColumnTypeUsing). Fall back to
+				 * rendering the cooked expression now, which is equivalent
+				 * whenever no referenced column was dropped.
+				 */
+				if (sub->using_text != NULL)
+				{
+					new_jsonb_string_clause(state, "using", " USING %{expression}s",
+											"expression", sub->using_text);
+				}
+				else if (coldef->cooked_default != NULL)
+				{
+					char	   *expr;
+
+					expr = TextDatumGetCString(DirectFunctionCall2(pg_get_expr,
+																   CStringGetTextDatum(nodeToString(coldef->cooked_default)),
+																   ObjectIdGetDatum(relId)));
+					new_jsonb_string_clause(state, "using", " USING %{expression}s",
+											"expression", expr);
+				}
+				else
+					new_jsonb_null(state, "using");
+
+				ReleaseSysCache(atup);
+				end_jsonb_object(state);
+			}
+			return true;
+
+		case AT_AddConstraint:
+			{
+				Constraint *con = (Constraint *) subcmd->def;
+				Oid			conoid = sub->address.objectId;
+
+				/*
+				 * A NOT NULL constraint reaches here both when the user wrote
+				 * a table-level one (ADD [CONSTRAINT name] NOT NULL col) and
+				 * when it was generated internally (by ADD COLUMN ... NOT
+				 * NULL or ALTER COLUMN ... SET NOT NULL, which render it in
+				 * their own subcommand). Only the former is emitted, and
+				 * entirely from the raw statement -- which is also what lets
+				 * a NOT NULL that merged with one the column already had be
+				 * emitted at all: the merge creates no pg_constraint row, and
+				 * unlike every other constraint type an unnamed one can merge
+				 * (any other unnamed constraint takes a freshly derived name,
+				 * and so a row of its own), leaving the recovery below
+				 * nothing to look up. Handle it before anything that needs
+				 * the catalog.
+				 */
+				if (con != NULL && IsA(con, Constraint) &&
+					con->contype == CONSTR_NOTNULL)
+				{
+					if (con->keys == NIL)
+						elog(ERROR, "NOT NULL constraint without a column in ALTER TABLE deparse");
+					return deparse_AddTableNotNull(state, rawstmt,
+												   strVal(linitial(con->keys)));
+				}
+
+				/*
+				 * ADD CONSTRAINT that merges with a constraint the table
+				 * already inherits creates no new catalog row, so the
+				 * collected address is invalid; recover the merged
+				 * constraint's OID by name so it is still emitted (the replay
+				 * merges again, to the same effect). If it is not on this
+				 * relation, the subcommand recursed to an inheritance child
+				 * and is re-derived by the replay, so skip it.
+				 */
+				if (!OidIsValid(conoid))
+				{
+					if (con == NULL || !IsA(con, Constraint) || con->conname == NULL)
+						return false;
+
+					conoid = get_relation_constraint_oid(relId, con->conname,
+														 true);
+					if (!OidIsValid(conoid))
+						return false;
+				}
+
+				/* CHECK and FOREIGN KEY are not index-backed. */
+				emit_add_constraint(state, conoid, cmds, NULL,
+									collect_raw_alter_constraint_names(rawstmt));
+			}
+			return true;
+
+		case AT_AddIndex:
+			{
+				IndexStmt  *istmt = castNode(IndexStmt, subcmd->def);
+				Oid			conoid;
+				List	   *typed_names = NIL;
+
+				/*
+				 * A PRIMARY KEY / UNIQUE / EXCLUDE constraint is collected as
+				 * an index addition; the constraint is what the user wrote. A
+				 * plain index (not backing a constraint) is collected as a
+				 * separate CREATE INDEX command, not here.
+				 */
+				if (!istmt->isconstraint || !OidIsValid(sub->address.objectId))
+					return false;
+
+				conoid = get_index_constraint(sub->address.objectId);
+				if (!OidIsValid(conoid))
+					return false;
+
+				/* The user named the constraint iff they named the index. */
+				if (istmt->idxname != NULL)
+					typed_names = list_make1(istmt->idxname);
+
+				emit_add_constraint(state, conoid, cmds, istmt, typed_names);
+			}
+			return true;
+
+		case AT_AddIndexConstraint:
+			{
+				/*
+				 * ADD [CONSTRAINT name] {PRIMARY KEY | UNIQUE} USING INDEX
+				 * adopts an existing unique index as a constraint's backing
+				 * index (renaming it to the constraint name if the two
+				 * differ). It must be emitted as USING INDEX -- deparsing the
+				 * constraint definition instead would build a fresh index on
+				 * replay, which collides with the one already there. The
+				 * index's pre-adoption name and the deferrability come from
+				 * the raw node (the adoption may have renamed the index by
+				 * now); the final constraint name comes from the catalog, to
+				 * match the raw node against.
+				 */
+				Oid			conoid = sub->address.objectId;
+				char	   *conname;
+				Constraint *rawcon;
+
+				if (!OidIsValid(conoid))
+					return false;
+
+				conname = get_constraint_name(conoid);
+				if (conname == NULL)
+					return false;
+
+				rawcon = find_raw_index_constraint(rawstmt, conname);
+				if (rawcon == NULL)
+					return false;
+
+				begin_jsonb_object(state);
+				append_jsonb_pair2(state,
+								   "fmt", jbv_str("ADD %{name}s%{contype}s USING INDEX %{index}I%{deferrable}s%{initdeferred}s"),
+								   "contype", jbv_str(rawcon->contype == CONSTR_PRIMARY ?
+													  "PRIMARY KEY" : "UNIQUE"));
+				append_jsonb_pair1(state, "index", jbv_str(rawcon->indexname));
+
+				/* Name the constraint only if the user did. */
+				if (rawcon->conname != NULL)
+					new_jsonb_string_clause(state, "name",
+											"CONSTRAINT %{conname}I ",
+											"conname", rawcon->conname);
+				else
+					new_jsonb_null(state, "name");
+
+				if (rawcon->deferrable)
+					new_jsonb_clause(state, "deferrable", " DEFERRABLE");
+				else
+					new_jsonb_null(state, "deferrable");
+
+				if (rawcon->initdeferred)
+					new_jsonb_clause(state, "initdeferred", " INITIALLY DEFERRED");
+				else
+					new_jsonb_null(state, "initdeferred");
+
+				end_jsonb_object(state);
+			}
+			return true;
+
+		case AT_AlterConstraint:
+			{
+				/*
+				 * ALTER CONSTRAINT changes deferrability, enforceability, or
+				 * inheritability; the ATAlterConstraint node (untransformed)
+				 * records which of those the user altered and their new
+				 * values, so build the clause from it. INITIALLY IMMEDIATE is
+				 * the default and left implicit.
+				 */
+				ATAlterConstraint *con = castNode(ATAlterConstraint,
+												  subcmd->def);
+				StringInfoData fmtbuf;
+
+				initStringInfo(&fmtbuf);
+				appendStringInfoString(&fmtbuf, "ALTER CONSTRAINT %{conname}I");
+				if (con->alterDeferrability)
+				{
+					appendStringInfoString(&fmtbuf,
+										   con->deferrable ? " DEFERRABLE" :
+										   " NOT DEFERRABLE");
+					if (con->initdeferred)
+						appendStringInfoString(&fmtbuf, " INITIALLY DEFERRED");
+				}
+
+				if (con->alterEnforceability)
+					appendStringInfoString(&fmtbuf,
+										   con->is_enforced ? " ENFORCED" :
+										   " NOT ENFORCED");
+				if (con->alterInheritability)
+					appendStringInfoString(&fmtbuf,
+										   con->noinherit ? " NO INHERIT" :
+										   " INHERIT");
+
+				begin_jsonb_object(state);
+				append_jsonb_pair2(state, "fmt", jbv_str(fmtbuf.data),
+								   "conname", jbv_str(con->conname));
+				end_jsonb_object(state);
+			}
+			return true;
+
+		case AT_ValidateConstraint:
+			begin_jsonb_object(state);
+			append_jsonb_pair2(state,
+							   "fmt", jbv_str("VALIDATE CONSTRAINT %{constraint}I"),
+							   "constraint", jbv_str(subcmd->name));
+			end_jsonb_object(state);
+			return true;
+
+		case AT_DropConstraint:
+			begin_jsonb_object(state);
+			append_jsonb_pair2(state,
+							   "fmt", jbv_str("DROP CONSTRAINT%{if_exists}s %{constraint}I%{cascade}s"),
+							   "constraint", jbv_str(subcmd->name));
+
+			if (subcmd->missing_ok)
+				new_jsonb_clause(state, "if_exists", " IF EXISTS");
+			else
+				new_jsonb_null(state, "if_exists");
+
+			if (subcmd->behavior == DROP_CASCADE)
+				new_jsonb_clause(state, "cascade", " CASCADE");
+			else
+				new_jsonb_null(state, "cascade");
+
+			end_jsonb_object(state);
+			return true;
+
+		case AT_DropOids:
+			begin_jsonb_object(state);
+			append_jsonb_pair1(state, "fmt", jbv_str("SET WITHOUT OIDS"));
+			end_jsonb_object(state);
+			return true;
+
+		case AT_ChangeOwner:
+			begin_jsonb_object(state);
+			append_jsonb_pair2(state,
+							   "fmt", jbv_str("OWNER TO %{owner}I"),
+							   "owner", jbv_str(get_rolespec_name(subcmd->newowner)));
+			end_jsonb_object(state);
+			return true;
+
+		case AT_SetLogged:
+		case AT_SetUnLogged:
+		case AT_DropOf:
+		case AT_EnableRowSecurity:
+		case AT_DisableRowSecurity:
+		case AT_ForceRowSecurity:
+		case AT_NoForceRowSecurity:
+		case AT_EnableTrigAll:
+		case AT_DisableTrigAll:
+		case AT_EnableTrigUser:
+		case AT_DisableTrigUser:
+			{
+				char	   *fmt;
+
+				switch (subcmd->subtype)
+				{
+					case AT_SetLogged:
+						fmt = "SET LOGGED";
+						break;
+					case AT_SetUnLogged:
+						fmt = "SET UNLOGGED";
+						break;
+					case AT_DropOf:
+						fmt = "NOT OF";
+						break;
+					case AT_EnableRowSecurity:
+						fmt = "ENABLE ROW LEVEL SECURITY";
+						break;
+					case AT_DisableRowSecurity:
+						fmt = "DISABLE ROW LEVEL SECURITY";
+						break;
+					case AT_ForceRowSecurity:
+						fmt = "FORCE ROW LEVEL SECURITY";
+						break;
+					case AT_NoForceRowSecurity:
+						fmt = "NO FORCE ROW LEVEL SECURITY";
+						break;
+					case AT_EnableTrigAll:
+						fmt = "ENABLE TRIGGER ALL";
+						break;
+					case AT_DisableTrigAll:
+						fmt = "DISABLE TRIGGER ALL";
+						break;
+					case AT_EnableTrigUser:
+						fmt = "ENABLE TRIGGER USER";
+						break;
+					default:
+						fmt = "DISABLE TRIGGER USER";
+						break;
+				}
+
+				begin_jsonb_object(state);
+				append_jsonb_pair1(state, "fmt", jbv_str(fmt));
+				end_jsonb_object(state);
+			}
+			return true;
+
+		case AT_SetAccessMethod:
+			begin_jsonb_object(state);
+			if (subcmd->name != NULL)
+				append_jsonb_pair2(state,
+								   "fmt", jbv_str("SET ACCESS METHOD %{access_method}I"),
+								   "access_method", jbv_str(subcmd->name));
+			else
+				append_jsonb_pair1(state, "fmt",
+								   jbv_str("SET ACCESS METHOD DEFAULT"));
+
+			end_jsonb_object(state);
+			return true;
+
+		case AT_SetTableSpace:
+			begin_jsonb_object(state);
+			append_jsonb_pair2(state,
+							   "fmt", jbv_str("SET TABLESPACE %{tablespace}I"),
+							   "tablespace", jbv_str(subcmd->name));
+			end_jsonb_object(state);
+			return true;
+
+		case AT_SetRelOptions:
+		case AT_ResetRelOptions:
+			{
+				ListCell   *opt;
+
+				begin_jsonb_object(state);
+				append_jsonb_pair1(state, "fmt",
+								   jbv_str(subcmd->subtype == AT_SetRelOptions ?
+										   "SET (%{options:, }s)" :
+										   "RESET (%{options:, }s)"));
+				insert_jsonb_key(state, "options");
+				begin_jsonb_array(state);
+				foreach(opt, (List *) subcmd->def)
+					deparse_DefElem(state, (DefElem *) lfirst(opt),
+									subcmd->subtype == AT_ResetRelOptions);
+				end_jsonb_array(state);
+				end_jsonb_object(state);
+			}
+			return true;
+
+		case AT_EnableTrig:
+		case AT_EnableAlwaysTrig:
+		case AT_EnableReplicaTrig:
+		case AT_DisableTrig:
+			{
+				char	   *fmt;
+
+				switch (subcmd->subtype)
+				{
+					case AT_EnableTrig:
+						fmt = "ENABLE TRIGGER %{trigger}I";
+						break;
+					case AT_EnableAlwaysTrig:
+						fmt = "ENABLE ALWAYS TRIGGER %{trigger}I";
+						break;
+					case AT_EnableReplicaTrig:
+						fmt = "ENABLE REPLICA TRIGGER %{trigger}I";
+						break;
+					default:
+						fmt = "DISABLE TRIGGER %{trigger}I";
+						break;
+				}
+
+				begin_jsonb_object(state);
+				append_jsonb_pair2(state, "fmt", jbv_str(fmt),
+								   "trigger", jbv_str(subcmd->name));
+				end_jsonb_object(state);
+			}
+			return true;
+
+		case AT_EnableRule:
+		case AT_EnableAlwaysRule:
+		case AT_EnableReplicaRule:
+		case AT_DisableRule:
+			{
+				char	   *fmt;
+
+				switch (subcmd->subtype)
+				{
+					case AT_EnableRule:
+						fmt = "ENABLE RULE %{rule}I";
+						break;
+					case AT_EnableAlwaysRule:
+						fmt = "ENABLE ALWAYS RULE %{rule}I";
+						break;
+					case AT_EnableReplicaRule:
+						fmt = "ENABLE REPLICA RULE %{rule}I";
+						break;
+					default:
+						fmt = "DISABLE RULE %{rule}I";
+						break;
+				}
+
+				begin_jsonb_object(state);
+				append_jsonb_pair2(state, "fmt", jbv_str(fmt),
+								   "rule", jbv_str(subcmd->name));
+				end_jsonb_object(state);
+			}
+			return true;
+
+		case AT_AddInherit:
+			begin_jsonb_object(state);
+			append_jsonb_pair1(state, "fmt", jbv_str("INHERIT %{parent}D"));
+			new_jsonb_for_qualname_id(state, RelationRelationId,
+									  sub->address.objectId, "parent", true);
+			end_jsonb_object(state);
+			return true;
+
+		case AT_DropInherit:
+			begin_jsonb_object(state);
+			append_jsonb_pair1(state, "fmt", jbv_str("NO INHERIT %{parent}D"));
+			new_jsonb_for_qualname_id(state, RelationRelationId,
+									  sub->address.objectId, "parent", true);
+			end_jsonb_object(state);
+			return true;
+
+		case AT_AddOf:
+			begin_jsonb_object(state);
+			append_jsonb_pair1(state, "fmt", jbv_str("OF %{type}T"));
+			new_jsonb_for_type(state, "type", sub->address.objectId, -1);
+			end_jsonb_object(state);
+			return true;
+
+		case AT_AttachPartition:
+			begin_jsonb_object(state);
+			append_jsonb_pair1(state, "fmt",
+							   jbv_str("ATTACH PARTITION %{partition}D %{bound}s"));
+			new_jsonb_for_qualname_id(state, RelationRelationId,
+									  sub->address.objectId, "partition", true);
+			append_jsonb_pair1(state, "bound",
+							   jbv_str(get_partbound_spec_string(sub->address.objectId)));
+			end_jsonb_object(state);
+			return true;
+
+		case AT_DetachPartition:
+			begin_jsonb_object(state);
+			append_jsonb_pair1(state, "fmt",
+							   jbv_str("DETACH PARTITION %{partition}D%{concurrent}s"));
+			new_jsonb_for_qualname_id(state, RelationRelationId,
+									  sub->address.objectId, "partition", true);
+			if (castNode(PartitionCmd, subcmd->def)->concurrent)
+				new_jsonb_clause(state, "concurrent", " CONCURRENTLY");
+			else
+				new_jsonb_null(state, "concurrent");
+			end_jsonb_object(state);
+			return true;
+
+		case AT_DetachPartitionFinalize:
+			begin_jsonb_object(state);
+			append_jsonb_pair1(state, "fmt",
+							   jbv_str("DETACH PARTITION %{partition}D FINALIZE"));
+			new_jsonb_for_qualname_id(state, RelationRelationId,
+									  sub->address.objectId, "partition", true);
+			end_jsonb_object(state);
+			return true;
+
+		case AT_MergePartitions:
+			{
+				ListCell   *lc;
+
+				begin_jsonb_object(state);
+				append_jsonb_pair1(state, "fmt",
+								   jbv_str("MERGE PARTITIONS (%{partitions:, }D) INTO %{target}D"));
+
+				/*
+				 * The source partitions are dropped by now; render them from
+				 * the names captured before the drop (see
+				 * EventTriggerCollectMergeSplitSources).
+				 */
+				insert_jsonb_key(state, "partitions");
+				begin_jsonb_array(state);
+				foreach(lc, sub->partition_sources)
+				{
+					CollectedPartitionName *pn = lfirst(lc);
+
+					new_jsonb_for_qualname_str(state, pn->schemaname,
+											   pn->objname, NULL, true);
+				}
+				end_jsonb_array(state);
+
+				/*
+				 * The merged-into partition still exists; name it from the
+				 * catalog by its captured OID (needs no search_path, unlike
+				 * the raw parse node's possibly unqualified name).
+				 */
+				Assert(list_length(sub->partition_created) == 1);
+				new_jsonb_for_qualname_id(state, RelationRelationId,
+										  linitial_oid(sub->partition_created),
+										  "target", true);
+				end_jsonb_object(state);
+				return true;
+			}
+
+		case AT_SplitPartition:
+			{
+				CollectedPartitionName *src;
+				ListCell   *lc;
+
+				begin_jsonb_object(state);
+				append_jsonb_pair1(state, "fmt",
+								   jbv_str("SPLIT PARTITION %{source}D INTO (%{partitions:, }s)"));
+
+				/*
+				 * The source partition is dropped by now; use its captured
+				 * name.
+				 */
+				Assert(list_length(sub->partition_sources) == 1);
+				src = linitial(sub->partition_sources);
+				new_jsonb_for_qualname_str(state, src->schemaname, src->objname,
+										   "source", true);
+
+				/*
+				 * Each split-off partition still exists; name it and take its
+				 * bound from the catalog by its captured OID (needs no
+				 * search_path).
+				 */
+				insert_jsonb_key(state, "partitions");
+				begin_jsonb_array(state);
+				foreach(lc, sub->partition_created)
+				{
+					Oid			partoid = lfirst_oid(lc);
+
+					begin_jsonb_object(state);
+					append_jsonb_pair1(state, "fmt",
+									   jbv_str("PARTITION %{name}D %{bound}s"));
+					new_jsonb_for_qualname_id(state, RelationRelationId, partoid,
+											  "name", true);
+					append_jsonb_pair1(state, "bound",
+									   jbv_str(get_partbound_spec_string(partoid)));
+					end_jsonb_object(state);
+				}
+
+				end_jsonb_array(state);
+				end_jsonb_object(state);
+				return true;
+			}
+
+			/*
+			 * CLUSTER ON, SET WITHOUT CLUSTER and REPLICA IDENTITY are also
+			 * generated internally when ALTER COLUMN TYPE rebuilds an index
+			 * and re-applies its marking. Emit only when the user wrote the
+			 * subcommand (the raw statement has it); otherwise it is internal
+			 * and the replayed ALTER COLUMN TYPE re-derives it.
+			 */
+		case AT_ClusterOn:
+			if (!raw_has_subtype(rawstmt, AT_ClusterOn))
+				return false;
+
+			begin_jsonb_object(state);
+			append_jsonb_pair2(state, "fmt", jbv_str("CLUSTER ON %{index}I"),
+							   "index", jbv_str(subcmd->name));
+			end_jsonb_object(state);
+			return true;
+
+		case AT_DropCluster:
+			if (!raw_has_subtype(rawstmt, AT_DropCluster))
+				return false;
+
+			begin_jsonb_object(state);
+			append_jsonb_pair1(state, "fmt", jbv_str("SET WITHOUT CLUSTER"));
+			end_jsonb_object(state);
+			return true;
+
+		case AT_ReplicaIdentity:
+			{
+				ReplicaIdentityStmt *ri = castNode(ReplicaIdentityStmt,
+												   subcmd->def);
+
+				if (!raw_has_subtype(rawstmt, AT_ReplicaIdentity))
+					return false;
+
+				begin_jsonb_object(state);
+				switch (ri->identity_type)
+				{
+					case REPLICA_IDENTITY_DEFAULT:
+						append_jsonb_pair1(state, "fmt",
+										   jbv_str("REPLICA IDENTITY DEFAULT"));
+						break;
+					case REPLICA_IDENTITY_FULL:
+						append_jsonb_pair1(state, "fmt",
+										   jbv_str("REPLICA IDENTITY FULL"));
+						break;
+					case REPLICA_IDENTITY_NOTHING:
+						append_jsonb_pair1(state, "fmt",
+										   jbv_str("REPLICA IDENTITY NOTHING"));
+						break;
+					case REPLICA_IDENTITY_INDEX:
+						append_jsonb_pair2(state,
+										   "fmt", jbv_str("REPLICA IDENTITY USING INDEX %{index}I"),
+										   "index", jbv_str(ri->name));
+						break;
+					default:
+						elog(ERROR, "unexpected replica identity type %c",
+							 ri->identity_type);
+				}
+
+				end_jsonb_object(state);
+			}
+			return true;
+
+			/*
+			 * Internal subtypes used for the execution machinery; they carry
+			 * no user-visible clause of their own.
+			 */
+		case AT_ReAddIndex:
+		case AT_ReAddConstraint:
+		case AT_ReAddDomainConstraint:
+		case AT_ReAddComment:
+		case AT_ReAddStatistics:
+		case AT_ReplaceRelOptions:
+			return false;
+
+		default:
+			elog(ERROR, "unexpected ALTER TABLE subtype %d in deparse",
+				 (int) subcmd->subtype);
+	}
+
+	return false;				/* keep compiler quiet */
+}
+
+/*
+ * Deparse an ALTER TABLE command.
+ *
+ * The subcommands collected for the statement -- across every SCT_AlterTable
+ * fragment it produced (see below) -- are emitted as a comma-separated list
+ * within a single ALTER TABLE statement, preserving the single-pass (single
+ * table-rewrite) semantics of the original. A subcommand that recursed to an
+ * inheritance child (collected alongside the parent's) is skipped: the
+ * replayed parent command re-derives it by recursion, exactly as the original
+ * did. Subcommands that legitimately name another relation, such as ATTACH
+ * PARTITION, are exempt; see the skip test below.
+ */
+static void
+deparse_AlterTableStmt(JsonbInState *state, CollectedCommand *cmd,
+					   AlterTableStmt *rawstmt, List *cmds)
+{
+	Oid			relId = cmd->d.alterTable.objectId;
+	Relation	rel;
+	List	   *dpcontext;
+	int			nsubcmds = 0;
+	ListCell   *cell;
+
+	Assert(IsA(rawstmt, AlterTableStmt));
+
+	rel = relation_open(relId, AccessShareLock);
+	dpcontext = deparse_context_for(RelationGetRelationName(rel), relId);
+
+	begin_jsonb_object(state);
+	append_jsonb_pair1(state, "fmt",
+					   jbv_str("ALTER TABLE%{only}s %{identity}D %{subcmds:, }s"));
+
+	/* ONLY, from the raw statement */
+	if (!rawstmt->relation->inh)
+		new_jsonb_clause(state, "only", " ONLY");
+	else
+		new_jsonb_null(state, "only");
+
+	/* IDENTITY (table name) */
+	new_jsonb_for_qualname(state, rel->rd_rel->relnamespace,
+						   RelationGetRelationName(rel), "identity", true);
+
+	/*
+	 * SUBCOMMANDS
+	 *
+	 * A single ALTER TABLE the user wrote can be split across more than one
+	 * collected command: a subcommand whose execution runs a nested internal
+	 * ALTER TABLE on the same relation -- ADD IDENTITY, which links an
+	 * identity sequence, is one -- opens its own SCT_AlterTable. Gather the
+	 * subcommands from every SCT_AlterTable collected for this relation, in
+	 * collection order, so the reconstruction is the one ALTER TABLE the user
+	 * issued rather than just its first fragment. (Nested DDL run by an event
+	 * trigger function is collected in a separate command list, so only this
+	 * statement's own fragments are seen here.)
+	 */
+	insert_jsonb_key(state, "subcmds");
+	begin_jsonb_array(state);
+	foreach(cell, cmds)
+	{
+		CollectedCommand *cc = (CollectedCommand *) lfirst(cell);
+		ListCell   *subcell;
+
+		if (cc->type != SCT_AlterTable ||
+			cc->d.alterTable.objectId != relId)
+			continue;
+
+		foreach(subcell, cc->d.alterTable.subcmds)
+		{
+			CollectedATSubcmd *sub = (CollectedATSubcmd *) lfirst(subcell);
+			AlterTableCmd *subcmd = (AlterTableCmd *) sub->parsetree;
+
+			Assert(IsA(subcmd, AlterTableCmd));
+
+			/*
+			 * Skip a subcommand that recursed to an inheritance child (its
+			 * address is a descendant table, collected alongside the
+			 * parent's); the replayed parent re-derives it.
+			 *
+			 * has_superclass() looks the address up in pg_inherits by
+			 * inhrelid, so it is only meaningful for an address that is a
+			 * relation; a constraint or type OID handed to it would be
+			 * matched against the wrong catalog, and a chance collision would
+			 * drop the subcommand from the reconstruction without a trace.
+			 * Hence the classId test. Among the relation-addressed subtypes,
+			 * exempt those that legitimately name a relation other than the
+			 * target -- attaching or detaching a partition, and
+			 * (un)inheriting a parent -- and CLUSTER ON, whose address is an
+			 * index (a leaf partition's index has a pg_inherits row, so
+			 * has_superclass() would spuriously match). None of these recurse
+			 * to children, so their single collected instance must always be
+			 * emitted.
+			 */
+			if (sub->address.classId == RelationRelationId &&
+				subcmd->subtype != AT_AttachPartition &&
+				subcmd->subtype != AT_DetachPartition &&
+				subcmd->subtype != AT_DetachPartitionFinalize &&
+				subcmd->subtype != AT_AddInherit &&
+				subcmd->subtype != AT_DropInherit &&
+				subcmd->subtype != AT_ClusterOn &&
+				OidIsValid(sub->address.objectId) &&
+				sub->address.objectId != relId &&
+				has_superclass(sub->address.objectId))
+				continue;
+
+			if (deparse_AlterTableSubcmd(state, relId, dpcontext, sub, subcmd,
+										 rawstmt, cmds))
+				nsubcmds++;
+		}
+	}
+
+	/*
+	 * Every ALTER TABLE that reaches here ran at least one subcommand the
+	 * user wrote, so at least one must have been emitted. Were that not so,
+	 * the command would expand to a bare "ALTER TABLE name" and fail to parse
+	 * on replay; report the gap instead of emitting something that cannot be
+	 * a command.
+	 */
+	if (nsubcmds == 0)
+		elog(ERROR, "no subcommand deparsed for ALTER TABLE on relation %u",
+			 relId);
+
+	end_jsonb_array(state);
+
+	end_jsonb_object(state);
+
+	relation_close(rel, AccessShareLock);
+}
+
+/*
+ * Deparse an ALTER TABLE ... RENAME command (a RenameStmt).
+ *
+ * The old name of the object is gone from the catalogs by the time we
+ * deparse, so it comes from the parse node; the schema (which cannot have
+ * changed) comes from the catalog.
+ */
+static void
+deparse_RenameStmt(JsonbInState *state, CollectedCommand *cmd)
+{
+	RenameStmt *node = castNode(RenameStmt, cmd->parsetree);
+	Oid			objectId = cmd->d.simple.address.objectId;
+
+	switch (node->renameType)
+	{
+		case OBJECT_TABLE:
+			begin_jsonb_object(state);
+			append_jsonb_pair2(state,
+							   "fmt", jbv_str("ALTER TABLE%{if_exists}s %{identity}D RENAME TO %{newname}I"),
+							   "newname", jbv_str(node->newname));
+
+			if (node->missing_ok)
+				new_jsonb_clause(state, "if_exists", " IF EXISTS");
+			else
+				new_jsonb_null(state, "if_exists");
+
+			new_jsonb_for_qualname(state, get_rel_namespace(objectId),
+								   node->relation->relname, "identity", true);
+			end_jsonb_object(state);
+			break;
+
+		case OBJECT_COLUMN:
+			begin_jsonb_object(state);
+			append_jsonb_pair3(state,
+							   "fmt", jbv_str("ALTER TABLE%{only}s %{identity}D "
+											  "RENAME COLUMN %{oldname}I TO %{newname}I"),
+							   "oldname", jbv_str(node->subname),
+							   "newname", jbv_str(node->newname));
+			if (!node->relation->inh)
+				new_jsonb_clause(state, "only", " ONLY");
+			else
+				new_jsonb_null(state, "only");
+
+			new_jsonb_for_qualname_id(state, RelationRelationId, objectId,
+									  "identity", true);
+			end_jsonb_object(state);
+			break;
+
+		case OBJECT_TABCONSTRAINT:
+			{
+				HeapTuple	tup = SearchSysCache1(CONSTROID,
+												  ObjectIdGetDatum(objectId));
+				Form_pg_constraint con;
+
+				if (!HeapTupleIsValid(tup))
+					elog(ERROR, "cache lookup failed for constraint %u",
+						 objectId);
+				con = (Form_pg_constraint) GETSTRUCT(tup);
+
+				begin_jsonb_object(state);
+				append_jsonb_pair3(state,
+								   "fmt", jbv_str("ALTER TABLE%{only}s %{identity}D "
+												  "RENAME CONSTRAINT %{oldname}I TO %{newname}I"),
+								   "oldname", jbv_str(node->subname),
+								   "newname", jbv_str(node->newname));
+				if (!node->relation->inh)
+					new_jsonb_clause(state, "only", " ONLY");
+				else
+					new_jsonb_null(state, "only");
+
+				new_jsonb_for_qualname_id(state, RelationRelationId,
+										  con->conrelid, "identity", true);
+				end_jsonb_object(state);
+				ReleaseSysCache(tup);
+			}
+			break;
+
+		default:
+			elog(ERROR, "unsupported rename type %d in deparse",
+				 (int) node->renameType);
+	}
+}
+
+/*
+ * Deparse an ALTER TABLE ... SET SCHEMA command (an AlterObjectSchemaStmt).
+ *
+ * The object's pre-move (old) schema is recorded as the command's secondary
+ * object; the object name (unchanged) comes from the catalog.
+ */
+static void
+deparse_AlterObjectSchemaStmt(JsonbInState *state, CollectedCommand *cmd)
+{
+	AlterObjectSchemaStmt *node = castNode(AlterObjectSchemaStmt,
+										   cmd->parsetree);
+	Oid			objectId = cmd->d.simple.address.objectId;
+	Oid			old_schema = cmd->d.simple.secondaryObject.objectId;
+
+	begin_jsonb_object(state);
+	append_jsonb_pair2(state,
+					   "fmt", jbv_str("ALTER TABLE %{identity}D SET SCHEMA %{newschema}I"),
+					   "newschema", jbv_str(node->newschema));
+	new_jsonb_for_qualname(state, old_schema, get_rel_name(objectId),
+						   "identity", true);
+	end_jsonb_object(state);
+}
+
+/*
  * Can the given raw statement be deparsed by deparse_ddl_command()?
  *
  * This is a pure parse-tree check that performs no catalog access, so it
@@ -2090,27 +3598,171 @@ ddl_deparse_command_supported(const Node *parsetree)
 {
 	ListCell   *lc;
 
-	if (parsetree == NULL || nodeTag(parsetree) != T_CreateStmt)
+	if (parsetree == NULL)
 		return false;
 
-	/*
-	 * A LIKE clause is expanded against the source table before the statement
-	 * executes. What it contributes to the table itself is recovered from the
-	 * catalogs (see deparse_ColumnDef_like), but the options below each copy
-	 * an object that needs a statement of its own -- CREATE INDEX, COMMENT
-	 * ON, CREATE STATISTICS -- and none of those is deparsable yet.
-	 */
-	foreach(lc, ((const CreateStmt *) parsetree)->tableElts)
+	switch (nodeTag(parsetree))
 	{
-		if (IsA(lfirst(lc), TableLikeClause) &&
-			(((TableLikeClause *) lfirst(lc))->options &
-			 (CREATE_TABLE_LIKE_INDEXES |
-			  CREATE_TABLE_LIKE_COMMENTS |
-			  CREATE_TABLE_LIKE_STATISTICS)))
+		case T_CreateStmt:
+
+			/*
+			 * A LIKE clause is expanded against the source table before the
+			 * statement executes. What it contributes to the table itself is
+			 * recovered from the catalogs (see deparse_ColumnDef_like), but
+			 * the options below each copy an object that needs a statement of
+			 * its own -- CREATE INDEX, COMMENT ON, CREATE STATISTICS -- and
+			 * none of those is deparsable yet.
+			 */
+			foreach(lc, ((const CreateStmt *) parsetree)->tableElts)
+			{
+				if (IsA(lfirst(lc), TableLikeClause) &&
+					(((TableLikeClause *) lfirst(lc))->options &
+					 (CREATE_TABLE_LIKE_INDEXES |
+					  CREATE_TABLE_LIKE_COMMENTS |
+					  CREATE_TABLE_LIKE_STATISTICS)))
+					return false;
+			}
+
+			return true;
+
+		case T_AlterTableStmt:
+			{
+				const AlterTableStmt *atstmt = (const AlterTableStmt *) parsetree;
+
+				/*
+				 * Only ordinary/partitioned tables are handled here; ALTER
+				 * INDEX/VIEW/etc. share the AlterTableStmt node but are out
+				 * of scope.
+				 */
+				if (atstmt->objtype != OBJECT_TABLE)
+					return false;
+
+				/*
+				 * Every subcommand the user wrote must be one we can deparse;
+				 * otherwise decline the whole statement (it executes normally
+				 * without being deparsed) rather than emit a partial command.
+				 */
+				foreach(lc, atstmt->cmds)
+				{
+					AlterTableCmd *cmd = lfirst_node(AlterTableCmd, lc);
+
+					switch (cmd->subtype)
+					{
+
+						case AT_AddColumn:
+						case AT_AlterColumnType:
+						case AT_DropColumn:
+						case AT_ColumnDefault:
+						case AT_SetNotNull:
+						case AT_DropNotNull:
+						case AT_DropExpression:
+						case AT_AddIdentity:
+						case AT_SetIdentity:
+						case AT_DropIdentity:
+						case AT_SetExpression:
+						case AT_SetStatistics:
+						case AT_SetOptions:
+						case AT_ResetOptions:
+						case AT_SetStorage:
+						case AT_SetCompression:
+						case AT_AlterConstraint:
+						case AT_ValidateConstraint:
+						case AT_DropConstraint:
+						case AT_ChangeOwner:
+						case AT_SetLogged:
+						case AT_SetUnLogged:
+						case AT_SetAccessMethod:
+						case AT_SetTableSpace:
+						case AT_SetRelOptions:
+						case AT_ResetRelOptions:
+						case AT_EnableTrig:
+						case AT_EnableAlwaysTrig:
+						case AT_EnableReplicaTrig:
+						case AT_DisableTrig:
+						case AT_EnableTrigAll:
+						case AT_DisableTrigAll:
+						case AT_EnableTrigUser:
+						case AT_DisableTrigUser:
+						case AT_EnableRule:
+						case AT_EnableAlwaysRule:
+						case AT_EnableReplicaRule:
+						case AT_DisableRule:
+						case AT_EnableRowSecurity:
+						case AT_DisableRowSecurity:
+						case AT_ForceRowSecurity:
+						case AT_NoForceRowSecurity:
+						case AT_AddInherit:
+						case AT_DropInherit:
+						case AT_AddOf:
+						case AT_DropOf:
+						case AT_ReplicaIdentity:
+						case AT_ClusterOn:
+						case AT_DropCluster:
+						case AT_DropOids:
+						case AT_AttachPartition:
+						case AT_DetachPartitionFinalize:
+						case AT_MergePartitions:
+						case AT_SplitPartition:
+							break;
+						case AT_DetachPartition:
+
+							/*
+							 * DETACH PARTITION CONCURRENTLY cannot run inside
+							 * a transaction block, so it cannot be replayed
+							 * the way the test module does; decline it.
+							 */
+							if (castNode(PartitionCmd, cmd->def)->concurrent)
+								return false;
+							break;
+						case AT_AddConstraint:
+
+							/*
+							 * Every constraint type is supported, including
+							 * table-level NOT NULL and ADD ... USING INDEX
+							 * (which adopts an existing index; the raw node
+							 * keeps its pre-adoption name for the deparser).
+							 */
+							break;
+						default:
+							return false;
+					}
+				}
+
+				return true;
+			}
+
+		case T_RenameStmt:
+			{
+				const RenameStmt *rn = (const RenameStmt *) parsetree;
+
+				switch (rn->renameType)
+				{
+					case OBJECT_TABLE:
+						return true;
+					case OBJECT_COLUMN:
+						/* only when the relation is an ordinary table */
+						return rn->relationType == OBJECT_TABLE;
+					case OBJECT_TABCONSTRAINT:
+
+						/*
+						 * The grammar produces this only from ALTER TABLE ...
+						 * RENAME CONSTRAINT (ALTER DOMAIN uses
+						 * OBJECT_DOMCONSTRAINT) and leaves relationType
+						 * unset, so there is nothing to gate on here.
+						 */
+						return true;
+					default:
+						return false;
+				}
+			}
+
+		case T_AlterObjectSchemaStmt:
+			return ((const AlterObjectSchemaStmt *) parsetree)->objectType ==
+				OBJECT_TABLE;
+
+		default:
 			return false;
 	}
-
-	return true;
 }
 
 /*
@@ -2118,7 +3770,7 @@ ddl_deparse_command_supported(const Node *parsetree)
  *
  * original_parsetree is the raw (untransformed) parse tree of the command;
  * cmds is the list of CollectedCommand its execution produced (see
- * ddl_collect.c), which supplies the OID of the created object. The result
+ * event_trigger.c), which supplies the OID of the created object. The result
  * is a JSON envelope of the form
  *
  *		{ "tag": <command tag>, "command": { <fmt object> } }
@@ -2147,7 +3799,7 @@ deparse_ddl_command(const Node *original_parsetree, List *cmds)
 {
 	MemoryContext oldcxt;
 	MemoryContext tmpcxt;
-	Oid			objectId = InvalidOid;
+	CollectedCommand *thiscmd = NULL;
 	char	   *command = NULL;
 	StringInfoData str;
 	Jsonb	   *jsonb;
@@ -2166,28 +3818,46 @@ deparse_ddl_command(const Node *original_parsetree, List *cmds)
 			 (int) nodeTag(original_parsetree));
 
 	/*
-	 * Find the object created by this command. The transformed parse trees in
-	 * the collected commands are used only for this; all deparsing works on
-	 * the raw tree and the catalogs.
+	 * Find the collected command that corresponds to the raw statement. The
+	 * transformed parse trees in the collected commands are used only for
+	 * this; all deparsing works on the raw tree and the catalogs.
 	 */
 	foreach(lc, cmds)
 	{
 		CollectedCommand *cmd = (CollectedCommand *) lfirst(lc);
 
-		if (cmd->type != SCT_Simple || cmd->parsetree == NULL ||
-			!IsA(cmd->parsetree, CreateStmt))
-			continue;
-
-		/* Commands run by extension scripts are not to be reproduced */
-		if (cmd->in_extension)
-			return NULL;
-
-		objectId = cmd->d.simple.address.objectId;
-		break;
+		if (nodeTag(original_parsetree) == T_AlterTableStmt)
+		{
+			if (cmd->type == SCT_AlterTable)
+			{
+				thiscmd = cmd;
+				break;
+			}
+		}
+		else if (cmd->type == SCT_Simple && cmd->parsetree != NULL &&
+				 nodeTag(cmd->parsetree) == nodeTag(original_parsetree))
+		{
+			/* CREATE TABLE, RENAME, and SET SCHEMA are SCT_Simple */
+			thiscmd = cmd;
+			break;
+		}
 	}
 
-	/* Nothing was created (e.g. IF NOT EXISTS on an existing table) */
-	if (!OidIsValid(objectId))
+	/*
+	 * Nothing was collected: for CREATE, the object was not created (e.g. IF
+	 * NOT EXISTS on an existing table, whose SCT_Simple carries an invalid
+	 * OID); for ALTER, there is no SCT_AlterTable (e.g. IF EXISTS on a
+	 * missing table). Either way there is nothing to reproduce.
+	 */
+	if (thiscmd == NULL)
+		return NULL;
+
+	if (thiscmd->type == SCT_Simple &&
+		!OidIsValid(thiscmd->d.simple.address.objectId))
+		return NULL;
+
+	/* Commands run by extension scripts are not to be reproduced */
+	if (thiscmd->in_extension)
 		return NULL;
 
 	/*
@@ -2215,8 +3885,27 @@ deparse_ddl_command(const Node *original_parsetree, List *cmds)
 	append_jsonb_pair1(&state, "tag",
 					   jbv_str(CreateCommandName((Node *) original_parsetree)));
 	insert_jsonb_key(&state, "command");
-	deparse_CreateStmt(&state, objectId, (CreateStmt *) original_parsetree,
-					   cmds);
+	switch (nodeTag(original_parsetree))
+	{
+		case T_CreateStmt:
+			deparse_CreateStmt(&state, thiscmd->d.simple.address.objectId,
+							   (CreateStmt *) original_parsetree, cmds);
+			break;
+		case T_AlterTableStmt:
+			deparse_AlterTableStmt(&state, thiscmd,
+								   (AlterTableStmt *) original_parsetree, cmds);
+			break;
+		case T_RenameStmt:
+			deparse_RenameStmt(&state, thiscmd);
+			break;
+		case T_AlterObjectSchemaStmt:
+			deparse_AlterObjectSchemaStmt(&state, thiscmd);
+			break;
+		default:
+			elog(ERROR, "unexpected node type %d in deparse",
+				 (int) nodeTag(original_parsetree));
+	}
+
 	end_jsonb_object(&state);
 
 	jsonb = JsonbValueToJsonb(state.result);

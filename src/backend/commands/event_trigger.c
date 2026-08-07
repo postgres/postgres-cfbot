@@ -21,6 +21,7 @@
 #include "catalog/catalog.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
+#include "catalog/namespace.h"
 #include "catalog/objectaccess.h"
 #include "catalog/pg_attrdef.h"
 #include "catalog/pg_authid.h"
@@ -79,8 +80,35 @@ typedef struct EventTriggerQueryState
 	CollectedCommand *currentCommand;
 	List	   *commandList;	/* list of CollectedCommand; see
 								 * deparse_utility.h */
+
+	/*
+	 * ALTER COLUMN TYPE USING clauses rendered to text at prep time, keyed by
+	 * column name, awaiting the collection of their subcommand at execution
+	 * time (see EventTriggerCollectAlterColumnTypeUsing).
+	 */
+	List	   *pendingColTypeUsing;
+
+	/*
+	 * Partitions of a MERGE PARTITIONS / SPLIT PARTITION subcommand, captured
+	 * during its execution and awaiting the collection of that subcommand
+	 * (see EventTriggerCollectMergeSplitSources /
+	 * EventTriggerCollectMergeSplitCreated). Sources are the schema-qualified
+	 * names of the partition(s) about to be dropped (a list of
+	 * CollectedPartitionName); created are the OIDs of the partition(s) just
+	 * created (a list of Oid).
+	 */
+	List	   *pendingMergeSplitSources;
+	List	   *pendingMergeSplitCreated;
+
 	struct EventTriggerQueryState *previous;
 } EventTriggerQueryState;
+
+/* One pending ALTER COLUMN TYPE USING text (see above). */
+typedef struct PendingColTypeUsing
+{
+	char	   *colname;
+	char	   *text;
+} PendingColTypeUsing;
 
 static EventTriggerQueryState *currentEventTriggerState = NULL;
 
@@ -1216,6 +1244,9 @@ EventTriggerBeginCompleteQuery(void)
 		currentEventTriggerState->commandCollectionInhibited : false;
 	state->currentCommand = NULL;
 	state->commandList = NIL;
+	state->pendingColTypeUsing = NIL;
+	state->pendingMergeSplitSources = NIL;
+	state->pendingMergeSplitCreated = NIL;
 	state->previous = currentEventTriggerState;
 	currentEventTriggerState = state;
 
@@ -1709,6 +1740,22 @@ EventTriggerUndoInhibitCommandCollection(void)
 }
 
 /*
+ * Is DDL command collection in effect?
+ *
+ * The EventTriggerCollect* routines below test this themselves and do nothing
+ * when it is false, so callers need not.  It is exported for the few callers
+ * that must do preparatory work of their own -- rendering an expression to
+ * text before the columns it references can disappear, for one -- which would
+ * otherwise be wasted.
+ */
+bool
+EventTriggerCommandCollectionActive(void)
+{
+	return currentEventTriggerState != NULL &&
+		!currentEventTriggerState->commandCollectionInhibited;
+}
+
+/*
  * Return the commands collected for the complete query now running, a list of
  * CollectedCommand.
  *
@@ -1822,6 +1869,151 @@ EventTriggerAlterTableRelid(Oid objectId)
 }
 
 /*
+ * Remember the text an ALTER COLUMN TYPE's USING clause deparses to.
+ *
+ * The caller (ATPrepAlterColumnType) renders the USING expression while all
+ * the columns it references still exist, because a sibling DROP COLUMN in the
+ * same statement may remove one of them before the command finishes -- by
+ * which time the deparser could no longer name it. The text is stashed here,
+ * keyed by column name, and picked up when the AT_AlterColumnType subcommand
+ * is collected during execution.
+ */
+void
+EventTriggerCollectAlterColumnTypeUsing(const char *colName, const char *usingText)
+{
+	MemoryContext oldcxt;
+	PendingColTypeUsing *pending;
+
+	/* ignore if event trigger context not set, or collection disabled */
+	if (!currentEventTriggerState ||
+		currentEventTriggerState->commandCollectionInhibited)
+		return;
+
+	oldcxt = MemoryContextSwitchTo(currentEventTriggerState->cxt);
+
+	pending = palloc_object(PendingColTypeUsing);
+	pending->colname = pstrdup(colName);
+	pending->text = pstrdup(usingText);
+	currentEventTriggerState->pendingColTypeUsing =
+		lappend(currentEventTriggerState->pendingColTypeUsing, pending);
+
+	MemoryContextSwitchTo(oldcxt);
+}
+
+/*
+ * Remember the schema-qualified names of the source partition(s) that a MERGE
+ * PARTITIONS or SPLIT PARTITION subcommand is about to drop.
+ *
+ * The caller (ATExecCmd) invokes this just before the subcommand executes,
+ * while the source partitions still exist, because execution drops them -- by
+ * which time the deparser could no longer name them. The names are stashed
+ * here and picked up when the subcommand is collected, a moment later, in
+ * EventTriggerCollectAlterTableSubcmd.
+ */
+void
+EventTriggerCollectMergeSplitSources(AlterTableType subtype, const PartitionCmd *pc)
+{
+	MemoryContext oldcxt;
+	List	   *sources = NIL;
+	List	   *rangevars;
+	ListCell   *lc;
+
+	/* ignore if event trigger context not set, or collection disabled */
+	if (!currentEventTriggerState ||
+		currentEventTriggerState->commandCollectionInhibited)
+		return;
+
+	/*
+	 * MERGE lists its sources in partlist (a list of RangeVar); SPLIT has the
+	 * single source in name.
+	 */
+	if (subtype == AT_MergePartitions)
+		rangevars = pc->partlist;
+	else
+	{
+		Assert(subtype == AT_SplitPartition);
+		rangevars = list_make1(pc->name);
+	}
+
+	oldcxt = MemoryContextSwitchTo(currentEventTriggerState->cxt);
+
+	foreach(lc, rangevars)
+	{
+		RangeVar   *rv = lfirst_node(RangeVar, lc);
+		Oid			partoid;
+		Oid			nspid;
+		CollectedPartitionName *pn;
+
+		/* Already locked (AccessExclusiveLock) by ALTER TABLE prep. */
+		partoid = RangeVarGetRelid(rv, NoLock, false);
+		nspid = get_rel_namespace(partoid);
+
+		pn = palloc_object(CollectedPartitionName);
+		/* Match new_jsonb_for_qualname's handling of temp schemas. */
+		pn->schemaname = isAnyTempNamespace(nspid) ?
+			pstrdup("pg_temp") : get_namespace_name(nspid);
+		pn->objname = get_rel_name(partoid);
+		sources = lappend(sources, pn);
+	}
+
+	currentEventTriggerState->pendingMergeSplitSources = sources;
+
+	MemoryContextSwitchTo(oldcxt);
+
+	if (subtype == AT_SplitPartition)
+		list_free(rangevars);
+}
+
+/*
+ * Remember the OIDs of the partition(s) a MERGE PARTITIONS or SPLIT PARTITION
+ * subcommand creates: the merged-into partition, or the split-off ones.
+ *
+ * The caller (ATExecCmd) invokes this just after the subcommand executes,
+ * once the new partitions exist. They survive to deparse time, so only their
+ * OIDs are recorded; the deparser reads their name and bound from the catalog,
+ * which needs no search_path. Picked up when the subcommand is collected, a
+ * moment later, in EventTriggerCollectAlterTableSubcmd.
+ */
+void
+EventTriggerCollectMergeSplitCreated(AlterTableType subtype, const PartitionCmd *pc)
+{
+	MemoryContext oldcxt;
+	List	   *created = NIL;
+
+	/* ignore if event trigger context not set, or collection disabled */
+	if (!currentEventTriggerState ||
+		currentEventTriggerState->commandCollectionInhibited)
+		return;
+
+	oldcxt = MemoryContextSwitchTo(currentEventTriggerState->cxt);
+
+	if (subtype == AT_MergePartitions)
+	{
+		/* The single merged-into partition. */
+		created = list_make1_oid(RangeVarGetRelid(pc->name, NoLock, false));
+	}
+	else
+	{
+		ListCell   *lc;
+
+		Assert(subtype == AT_SplitPartition);
+
+		/* The split-off partitions, in the order the user wrote them. */
+		foreach(lc, pc->partlist)
+		{
+			SinglePartitionSpec *sps = lfirst_node(SinglePartitionSpec, lc);
+
+			created = lappend_oid(created,
+								  RangeVarGetRelid(sps->name, NoLock, false));
+		}
+	}
+
+	currentEventTriggerState->pendingMergeSplitCreated = created;
+
+	MemoryContextSwitchTo(oldcxt);
+}
+
+/*
  * EventTriggerCollectAlterTableSubcmd
  *		Save data about a single part of an ALTER TABLE.
  *
@@ -1849,6 +2041,48 @@ EventTriggerCollectAlterTableSubcmd(const Node *subcmd, ObjectAddress address)
 	newsub = palloc_object(CollectedATSubcmd);
 	newsub->address = address;
 	newsub->parsetree = copyObject(subcmd);
+	newsub->using_text = NULL;
+	newsub->partition_sources = NIL;
+	newsub->partition_created = NIL;
+
+	/*
+	 * For ALTER COLUMN TYPE, attach the USING text rendered at prep time (if
+	 * any) that EventTriggerCollectAlterColumnTypeUsing() stashed for this
+	 * column.
+	 */
+	if (((const AlterTableCmd *) subcmd)->subtype == AT_AlterColumnType &&
+		((const AlterTableCmd *) subcmd)->name != NULL)
+	{
+		ListCell   *lc;
+
+		foreach(lc, currentEventTriggerState->pendingColTypeUsing)
+		{
+			PendingColTypeUsing *pending = (PendingColTypeUsing *) lfirst(lc);
+
+			if (strcmp(pending->colname,
+					   ((const AlterTableCmd *) subcmd)->name) == 0)
+			{
+				newsub->using_text = pending->text;
+				break;
+			}
+		}
+	}
+
+	/*
+	 * For MERGE PARTITIONS / SPLIT PARTITION, take the source partition names
+	 * that EventTriggerCollectMergeSplitSources() captured just before the
+	 * drop.
+	 */
+	if (((const AlterTableCmd *) subcmd)->subtype == AT_MergePartitions ||
+		((const AlterTableCmd *) subcmd)->subtype == AT_SplitPartition)
+	{
+		newsub->partition_sources =
+			currentEventTriggerState->pendingMergeSplitSources;
+		newsub->partition_created =
+			currentEventTriggerState->pendingMergeSplitCreated;
+		currentEventTriggerState->pendingMergeSplitSources = NIL;
+		currentEventTriggerState->pendingMergeSplitCreated = NIL;
+	}
 
 	currentEventTriggerState->currentCommand->d.alterTable.subcmds =
 		lappend(currentEventTriggerState->currentCommand->d.alterTable.subcmds, newsub);
