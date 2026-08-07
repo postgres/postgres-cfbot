@@ -168,7 +168,9 @@
  * key) as another ongoing transaction (see handle_dependency_on_change for
  * details). If so, the leader sends a list of dependent transaction IDs to the
  * parallel worker, indicating that the parallel apply worker must wait for
- * these transactions to commit before proceeding.
+ * these transactions to commit before proceeding. If transactions are streamed
+ * but leader deciedes not to assign parallel apply workers, dependencies are
+ * verified when the transaction is committed.
  *
  * Tracking dependencies is necessary even when commit order is preserved.
  * Consider two transactions: TX-1 (INSERT row 1) and TX-2 (DELETE row 1). If
@@ -1747,6 +1749,10 @@ pa_stream_abort(LogicalRepStreamAbortData *abort_data)
 {
 	TransactionId xid = abort_data->xid;
 	TransactionId subxid = abort_data->subxid;
+
+	/* Streamed transactions won't be registered */
+	Assert(!dshash_find(parallelized_txns, &xid, false) &&
+		   !dshash_find(parallelized_txns, &subxid, false));
 
 	/*
 	 * Update origin state so we can restart streaming from correct position

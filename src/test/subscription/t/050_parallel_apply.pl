@@ -493,4 +493,67 @@ $result =
   $node_subscriber->safe_psql('postgres', "SELECT count(1) FROM regress_tab");
 is ($result, 20, 'inserts are replicated to subscriber');
 
+##################################################
+# Test that streaming transactions respect commit order preservation when
+# non-streaming transactions are being applied in parallel workers.
+##################################################
+
+$node_publisher->append_conf('postgresql.conf',
+   "logical_decoding_work_mem = 64kB");
+$node_publisher->reload;
+
+# Truncate the data for upcoming tests
+$node_publisher->safe_psql('postgres', "TRUNCATE TABLE regress_tab;");
+$node_publisher->wait_for_catchup('regress_sub');
+
+# Attach the injection_point again
+$node_subscriber->safe_psql('postgres',
+	"SELECT injection_points_attach('parallel-worker-before-commit','wait');"
+);
+
+$node_publisher->safe_psql('postgres',
+    "INSERT INTO regress_tab VALUES (generate_series(71, 80), 'test');");
+
+# Wait until the parallel worker enters the injection point.
+$node_subscriber->wait_for_event('logical replication parallel worker',
+	'parallel-worker-before-commit');
+
+# Run a transaction which would be streamed
+my $h = $node_publisher->background_psql('postgres', on_error_stop => 0);
+
+$offset = -s $node_subscriber->logfile;
+
+$h->query_safe(
+	q{
+BEGIN;
+UPDATE regress_tab SET value = 'streamed-updated' WHERE id BETWEEN 71 AND 80;
+INSERT INTO regress_tab VALUES (generate_series(100, 5100), 'streamed');
+});
+
+# Verify the dependency is detected for the delete
+$str = $node_subscriber->wait_for_log(qr/found conflicting replica identity change on table [1-9][0-9]+ from ([1-9][0-9]+)/, $offset);
+$xid = $str =~ /found conflicting replica identity change on table [1-9][0-9]+ from ([1-9][0-9]+)/;
+
+# Verify the parallel worker waits for the same transaction
+$node_subscriber->wait_for_log(qr/wait for depended xid $xid/, $offset);
+
+ok(1, "replica identity dependency from streamed txn detected for parallel apply");
+
+# Wakeup the parallel worker
+$node_subscriber->safe_psql('postgres', qq[
+    SELECT injection_points_detach('parallel-worker-before-commit');
+    SELECT injection_points_wakeup('parallel-worker-before-commit');
+]);
+
+# Verify the streamed transaction can be applied
+$node_subscriber->wait_for_log(qr/finish waiting for depended xid $xid/, $offset);
+
+$h->query_safe("COMMIT;");
+
+$node_publisher->wait_for_catchup('regress_sub');
+
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT count(1) FROM regress_tab");
+is ($result, 5011, 'inserts are replicated to subscriber');
+
 done_testing();
