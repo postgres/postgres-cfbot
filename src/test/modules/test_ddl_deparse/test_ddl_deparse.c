@@ -419,16 +419,18 @@ test_ddl_deparse_utility_command(PlannedStmt *pstmt,
 
 				/*
 				 * The deparser produced nothing.  The benign case is an IF
-				 * NOT EXISTS command that did nothing (the trial execution
+				 * [NOT] EXISTS guard that did nothing (the trial execution
 				 * has already emitted the "skipping" notice), so there is
 				 * nothing to replay; anything else is unexpected, so warn and
 				 * run the original command for real rather than silently
-				 * losing it.  The IsA check matters: once more command types
-				 * are supported, if_not_exists must only be consulted on
-				 * statements that actually have the field.
+				 * losing it.  The IsA checks matter: the guard field must
+				 * only be consulted on a statement that actually has it.
 				 */
-				noop = (IsA(stmt, CreateStmt) &&
-						((CreateStmt *) stmt)->if_not_exists);
+				noop = (IsA(stmt, CreateStmt) && ((CreateStmt *) stmt)->if_not_exists) ||
+					(IsA(stmt, AlterTableStmt) && ((AlterTableStmt *) stmt)->missing_ok) ||
+					(IsA(stmt, RenameStmt) && ((RenameStmt *) stmt)->missing_ok) ||
+					(IsA(stmt, AlterObjectSchemaStmt) &&
+					 ((AlterObjectSchemaStmt *) stmt)->missing_ok);
 				if (!noop)
 				{
 					ereport(WARNING,
