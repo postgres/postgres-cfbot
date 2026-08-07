@@ -447,6 +447,15 @@ heap2_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 				DecodeMultiInsert(ctx, buf);
 			break;
 		case XLOG_HEAP2_NEW_CID:
+			/*
+			 * We only log new_cid's if a catalog tuple was modified, so mark the
+			 * transaction as containing catalog modifications.
+			 *
+			 * Note: we do this even in fast-forward mode, as we need to maintain
+			 * the snapshot correctly.
+			 */
+			ReorderBufferXidSetCatalogChanges(ctx->reorder, xid, buf->origptr);
+
 			if (!ctx->fast_forward)
 			{
 				xl_heap_new_cid *xlrec;
