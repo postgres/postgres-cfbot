@@ -50,6 +50,7 @@ tests += {
       'textsearch',
       'matviews',
       'deparse_create_table',
+      'deparse_alter_table',
     ],
   },
   'tap': {
