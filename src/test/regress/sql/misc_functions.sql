@@ -114,6 +114,37 @@ REVOKE EXECUTE ON FUNCTION pg_log_backend_memory_contexts(integer)
 DROP ROLE regress_log_memory;
 
 --
+-- pg_log_query_plan()
+--
+-- Plans are logged and they are not returned to the function.
+-- Furthermore, their contents can vary depending on the optimizer.
+-- Here we just verify that the permissions are set properly.
+--
+-- The test that verifies the backend's query plan is actually
+-- logged is implemented in
+-- src/test/modules/test_misc/t/015_pg_log_query_plan.pl.
+
+CREATE ROLE regress_log_plan;
+
+SELECT has_function_privilege('regress_log_plan',
+  'pg_log_query_plan(integer)', 'EXECUTE'); -- no
+
+GRANT EXECUTE ON FUNCTION pg_log_query_plan(integer)
+  TO regress_log_plan;
+
+SELECT has_function_privilege('regress_log_plan',
+  'pg_log_query_plan(integer)', 'EXECUTE'); -- yes
+
+SET ROLE regress_log_plan;
+SELECT pg_log_query_plan(pg_backend_pid());
+RESET ROLE;
+
+REVOKE EXECUTE ON FUNCTION pg_log_query_plan(integer)
+  FROM regress_log_plan;
+
+DROP ROLE regress_log_plan;
+
+--
 -- Test some built-in SRFs
 --
 -- The outputs of these are variable, so we can't just print their results

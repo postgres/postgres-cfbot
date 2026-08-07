@@ -72,6 +72,7 @@
  */
 #include "postgres.h"
 
+#include "commands/explain_running.h"
 #include "executor/executor.h"
 #include "executor/instrument.h"
 #include "executor/nodeAgg.h"
@@ -431,9 +432,10 @@ ExecSetExecProcNode(PlanState *node, ExecProcNodeMtd function)
 {
 	/*
 	 * Add a wrapper around the ExecProcNode callback that checks stack depth
-	 * during the first execution and maybe adds an instrumentation wrapper.
-	 * When the callback is changed after execution has already begun that
-	 * means we'll superfluously execute ExecProcNodeFirst, but that seems ok.
+	 * and query logging request during the execution and maybe adds an
+	 * instrumentation wrapper. When the callback is changed after execution
+	 * has already begun that means we'll superfluously execute
+	 * ExecProcNodeFirst, but that seems ok.
 	 */
 	node->ExecProcNodeReal = function;
 	node->ExecProcNode = ExecProcNodeFirst;
@@ -441,20 +443,36 @@ ExecSetExecProcNode(PlanState *node, ExecProcNodeMtd function)
 
 
 /*
- * ExecProcNode wrapper that performs some one-time checks, before calling
+ * ExecProcNode wrapper that performs some extra checks, before calling
  * the relevant node method (possibly via an instrumentation wrapper).
+ *
+ * Normally, this is just invoked once for the first call to any given node,
+ * and thereafter we arrange to call ExecProcNodeInstr or the relevant node
+ * method directly. However, it's legal to reset node->ExecProcNode back to
+ * this function at any time, and we do that whenever the query plan might
+ * need to be printed, so that we only incur the cost of checking for that
+ * case when required.
  */
 static TupleTableSlot *
 ExecProcNodeFirst(PlanState *node)
 {
 	/*
-	 * Perform stack depth check during the first execution of the node.  We
-	 * only do so the first time round because it turns out to not be cheap on
-	 * some common architectures (eg. x86).  This relies on the assumption
-	 * that ExecProcNode calls for a given plan node will always be made at
-	 * roughly the same stack depth.
+	 * Perform a stack depth check.  We don't want to do this all the time
+	 * because it turns out to not be cheap on some common architectures (eg.
+	 * x86).  This relies on the assumption that ExecProcNode calls for a
+	 * given plan node will always be made at roughly the same stack depth.
 	 */
 	check_stack_depth();
+
+	/*
+	 * If we have been asked to print the query plan, do that now. We dare not
+	 * try to do this directly from CHECK_FOR_INTERRUPTS() because we don't
+	 * really know what the executor state is at that point, but we assume
+	 * that when entering a node the state will be sufficiently consistent
+	 * that trying to print the plan makes sense.
+	 */
+	if (LogQueryPlanPending)
+		LogQueryPlan();
 
 	/*
 	 * If instrumentation is required, change the wrapper to one that just
@@ -526,7 +544,6 @@ MultiExecProcNode(PlanState *node)
 
 	return result;
 }
-
 
 /* ----------------------------------------------------------------
  *		ExecEndNode

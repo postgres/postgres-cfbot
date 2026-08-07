@@ -1093,6 +1093,43 @@ ExplainQueryParameters(ExplainState *es, ParamListInfo params, int maxlen)
 }
 
 /*
+ * ExplainStringAssemble -
+ *    Assemble es->str for logging according to specified options and format
+ */
+
+void
+ExplainStringAssemble(ExplainState *es, QueryDesc *queryDesc, int logFormat,
+					  bool logTriggers, int logParameterMaxLength)
+{
+	ExplainBeginOutput(es);
+	ExplainQueryText(es, queryDesc);
+	ExplainQueryParameters(es, queryDesc->params, logParameterMaxLength);
+	ExplainPrintPlan(es, queryDesc);
+	if (es->analyze && logTriggers)
+		ExplainPrintTriggers(es, queryDesc);
+	if (es->costs)
+		ExplainPrintJITSummary(es, queryDesc);
+	if (explain_per_plan_hook)
+		(*explain_per_plan_hook) (queryDesc->plannedstmt,
+								  NULL, es,
+								  queryDesc->sourceText,
+								  queryDesc->params,
+								  queryDesc->estate->es_queryEnv);
+	ExplainEndOutput(es);
+
+	/* Remove last line break */
+	if (es->str->len > 0 && es->str->data[es->str->len - 1] == '\n')
+		es->str->data[--es->str->len] = '\0';
+
+	/* Fix JSON to output an object */
+	if (logFormat == EXPLAIN_FORMAT_JSON)
+	{
+		es->str->data[0] = '{';
+		es->str->data[es->str->len - 1] = '}';
+	}
+}
+
+/*
  * report_triggers -
  *		report execution stats for a single relation's triggers
  */
@@ -1827,7 +1864,9 @@ ExplainNode(PlanState *planstate, List *ancestors,
 
 	/*
 	 * We have to forcibly clean up the instrumentation state because we
-	 * haven't done ExecutorEnd yet.  This is pretty grotty ...
+	 * haven't done ExecutorEnd yet.  This is pretty grotty ... This cleanup
+	 * should not be done when explaining a running query, as the target query
+	 * may use instrumentation and clean itself up.
 	 *
 	 * Note: contrib/auto_explain could cause instrumentation to be set up
 	 * even though we didn't ask for it here.  Be careful not to print any
@@ -1835,7 +1874,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 	 * InstrEndLoop call anyway, if possible, to reduce the number of cases
 	 * auto_explain has to contend with.
 	 */
-	if (planstate->instrument)
+	if (planstate->instrument && !es->running)
 		InstrEndLoop(planstate->instrument);
 
 	if (es->analyze &&
