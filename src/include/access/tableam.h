@@ -17,6 +17,7 @@
 #ifndef TABLEAM_H
 #define TABLEAM_H
 
+#include "access/amapi.h"
 #include "access/relscan.h"
 #include "access/sdir.h"
 #include "access/xact.h"
@@ -322,6 +323,37 @@ typedef struct TableAmRoutine
 {
 	/* this must be set to T_TableAmRoutine */
 	NodeTag		type;
+
+
+	/* ------------------------------------------------------------------------
+	 * Reloption parsing.
+	 * ------------------------------------------------------------------------
+	 */
+
+	/*
+	 * Parse and validate AM-specific reloptions.  Optional: when NULL, the
+	 * caller falls back to the standard heap reloption parser
+	 * (default_reloptions with RELOPT_KIND_HEAP) and the result is laid out
+	 * as StdRdOptions.
+	 *
+	 * When non-NULL, the AM owns the option set entirely.  It is free to
+	 * accept all standard heap options, only a subset, or to add its own. The
+	 * returned bytea must begin with a VARSIZE header and is stored in
+	 * Relation->rd_options, so the AM dictates the in-memory layout that its
+	 * other callbacks read.  Core code that reads StdRdOptions fields out of
+	 * rd_options (RelationGetFillFactor, RelationIsUsedAsCatalogTable, ...)
+	 * gates on RelationHasStdRdOptions(), so a custom layout will not be
+	 * misinterpreted.
+	 *
+	 * The callback validates user-supplied values but must not silently
+	 * rewrite them: a user inspecting pg_class.reloptions must see exactly
+	 * what they passed in.  Out-of-range or unknown options should be
+	 * reported with ereport(ERROR) when validate is true.
+	 *
+	 * Signature matches the index AM's amoptions callback so the same helper
+	 * machinery (add_string_reloption, add_int_reloption, etc.) can be used.
+	 */
+	amoptions_function amoptions;
 
 
 	/* ------------------------------------------------------------------------
