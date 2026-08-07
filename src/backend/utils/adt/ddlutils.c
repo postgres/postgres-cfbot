@@ -5,8 +5,8 @@
  *
  * This file contains the pg_get_*_ddl family of functions that generate
  * DDL statements to recreate database objects such as roles, tablespaces,
- * and databases, along with common infrastructure for option parsing and
- * pretty-printing.
+ * databases, and triggers, along with common infrastructure for option
+ * parsing and pretty-printing.
  *
  * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
@@ -28,6 +28,7 @@
 #include "catalog/pg_db_role_setting.h"
 #include "catalog/pg_tablespace.h"
 #include "commands/tablespace.h"
+#include "commands/trigger.h"
 #include "common/relpath.h"
 #include "funcapi.h"
 #include "mb/pg_wchar.h"
@@ -56,6 +57,8 @@ static List *pg_get_tablespace_ddl_internal(Oid tsid, bool pretty, bool no_owner
 static Datum pg_get_tablespace_ddl_srf(FunctionCallInfo fcinfo, Oid tsid);
 static List *pg_get_database_ddl_internal(Oid dbid, bool pretty,
 										  bool no_owner, bool no_tablespace);
+static char *pretty_format_trigger_ddl(const char *def);
+static List *pg_get_trigger_ddl_internal(Oid trigid, bool pretty);
 
 
 /*
@@ -952,6 +955,176 @@ pg_get_database_ddl(PG_FUNCTION_ARGS)
 
 		statements = pg_get_database_ddl_internal(dbid, pretty, no_owner,
 												  no_tablespace);
+		funcctx->user_fctx = statements;
+		funcctx->max_calls = list_length(statements);
+
+		MemoryContextSwitchTo(oldcontext);
+	}
+
+	funcctx = SRF_PERCALL_SETUP();
+	statements = (List *) funcctx->user_fctx;
+
+	if (funcctx->call_cntr < funcctx->max_calls)
+	{
+		char	   *stmt;
+
+		stmt = list_nth(statements, funcctx->call_cntr);
+
+		SRF_RETURN_NEXT(funcctx, CStringGetTextDatum(stmt));
+	}
+	else
+	{
+		list_free_deep(statements);
+		SRF_RETURN_DONE(funcctx);
+	}
+}
+
+/*
+ * pretty_format_trigger_ddl
+ *		Lay a deparsed CREATE TRIGGER statement out over multiple lines.
+ */
+static char *
+pretty_format_trigger_ddl(const char *def)
+{
+	static const char *const markers[] = {
+		"BEFORE",
+		"AFTER",
+		"INSTEAD OF",
+		"FROM",
+		"NOT DEFERRABLE",
+		"DEFERRABLE",
+		"REFERENCING",
+		"FOR EACH",
+		"WHEN",
+		"EXECUTE FUNCTION",
+	};
+	StringInfoData buf;
+	int			parendepth = 0;
+	const char *p = def;
+
+	initStringInfo(&buf);
+
+	while (*p)
+	{
+		char		c = *p;
+
+		if (c == '"' || c == '\'')
+		{
+			/* Copy verbatim; a doubled quote is an escape. */
+			appendStringInfoChar(&buf, c);
+			p++;
+			while (*p)
+			{
+				appendStringInfoChar(&buf, *p);
+				if (*p == c)
+				{
+					if (p[1] == c)
+					{
+						appendStringInfoChar(&buf, p[1]);
+						p += 2;
+						continue;
+					}
+					p++;
+					break;
+				}
+				p++;
+			}
+			continue;
+		}
+
+		if (c == '(')
+			parendepth++;
+		else if (c == ')' && parendepth > 0)
+			parendepth--;
+		else if (c == ' ' && parendepth == 0)
+		{
+			const char *marker = NULL;
+
+			for (int i = 0; i < lengthof(markers); i++)
+			{
+				size_t		len = strlen(markers[i]);
+
+				if (strncmp(p + 1, markers[i], len) == 0 &&
+					(p[len + 1] == ' ' || p[len + 1] == '('))
+				{
+					marker = markers[i];
+					break;
+				}
+			}
+
+			if (marker != NULL)
+			{
+				appendStringInfoString(&buf, "\n    ");
+				appendStringInfoString(&buf, marker);
+				p += strlen(marker) + 1;
+				continue;
+			}
+		}
+
+		appendStringInfoChar(&buf, c);
+		p++;
+	}
+
+	return buf.data;
+}
+
+/*
+ * pg_get_trigger_ddl_internal
+ *		Generate DDL statements to recreate a trigger.
+ *
+ * Returns a List of strings.  The single element is the CREATE
+ * TRIGGER statement, with a trailing semicolon.
+ */
+static List *
+pg_get_trigger_ddl_internal(Oid trigid, bool pretty)
+{
+	char	   *def;
+	char	   *pretty_def;
+
+	def = pg_get_triggerdef_string(trigid);
+	if (def == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("trigger with OID %u does not exist", trigid)));
+
+	if (pretty)
+	{
+		pretty_def = pretty_format_trigger_ddl(def);
+		pfree(def);
+		def = pretty_def;
+	}
+
+	return list_make1(psprintf("%s;", def));
+}
+
+/*
+ * pg_get_trigger_ddl
+ *		Return DDL to recreate a trigger, identified by relation and
+ *		trigger name.
+ */
+Datum
+pg_get_trigger_ddl(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *funcctx;
+	List	   *statements;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		MemoryContext oldcontext;
+		Oid			relid;
+		Name		trigname;
+		Oid			trigid;
+		bool		pretty;
+
+		funcctx = SRF_FIRSTCALL_INIT();
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		relid = PG_GETARG_OID(0);
+		trigname = PG_GETARG_NAME(1);
+		pretty = PG_GETARG_BOOL(2);
+		trigid = get_trigger_oid(relid, NameStr(*trigname), false);
+
+		statements = pg_get_trigger_ddl_internal(trigid, pretty);
 		funcctx->user_fctx = statements;
 		funcctx->max_calls = list_length(statements);
 
