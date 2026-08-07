@@ -19,6 +19,7 @@
 #include "access/nbtxlog.h"
 #include "access/tableam.h"
 #include "access/transam.h"
+#include "access/xact.h"
 #include "access/xloginsert.h"
 #include "common/int.h"
 #include "common/pg_prng.h"
@@ -27,6 +28,7 @@
 #include "storage/lmgr.h"
 #include "storage/predicate.h"
 #include "utils/injection_point.h"
+#include "utils/snapmgr.h"
 
 /* Minimum tree height for application of fastpath optimization */
 #define BTREE_FASTPATH_MIN_LEVEL	2
@@ -417,6 +419,7 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
 	ItemId		curitemid = NULL;
 	BTScanInsert itup_key = insertstate->itup_key;
 	SnapshotData SnapshotDirty;
+	TransactionId conflict_xid;
 	OffsetNumber offset;
 	OffsetNumber maxoff;
 	Page		page;
@@ -562,7 +565,10 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
 				 */
 				else if (table_index_fetch_tuple_check(heapRel, &htid,
 													   &SnapshotDirty,
-													   &all_dead))
+													   IsolationIsSerializable() &&
+													   ActiveSnapshotSet() ?
+													   GetActiveSnapshot() : NULL,
+													   &all_dead, &conflict_xid))
 				{
 					TransactionId xwait;
 
@@ -619,7 +625,8 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
 					 */
 					htid = itup->t_tid;
 					if (table_index_fetch_tuple_check(heapRel, &htid,
-													  SnapshotSelf, NULL))
+													  SnapshotSelf, NULL, NULL,
+													  &conflict_xid))
 					{
 						/* Normal case --- it's still live */
 					}
@@ -676,36 +683,43 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
 													RelationGetRelationName(rel))));
 					}
 				}
-				else if (all_dead && (!inposting ||
-									  (prevalldead &&
-									   curposti == BTreeTupleGetNPosting(curitup) - 1)))
+				else
 				{
-					/*
-					 * The conflicting tuple (or all HOT chains pointed to by
-					 * all posting list TIDs) is dead to everyone, so try to
-					 * mark the index entry killed. It's ok if we're not
-					 * allowed to, this isn't required for correctness.
-					 */
-					Buffer		buf;
+					if (checkUnique != UNIQUE_CHECK_EXISTING &&
+						TransactionIdIsValid(conflict_xid))
+						CheckForSerializableConflictOutToXid(conflict_xid);
 
-					/* Be sure to operate on the proper buffer */
-					if (nbuf != InvalidBuffer)
-						buf = nbuf;
-					else
-						buf = insertstate->buf;
-
-					/*
-					 * Use the hint bit infrastructure to check if we can
-					 * update the page while just holding a share lock.
-					 *
-					 * Can't use BufferSetHintBits16() here as we update two
-					 * different locations.
-					 */
-					if (BufferBeginSetHintBits(buf))
+					if (all_dead && (!inposting ||
+									 (prevalldead &&
+									  curposti == BTreeTupleGetNPosting(curitup) - 1)))
 					{
-						ItemIdMarkDead(curitemid);
-						opaque->btpo_flags |= BTP_HAS_GARBAGE;
-						BufferFinishSetHintBits(buf, true, true);
+						/*
+						 * The conflicting tuple (or all HOT chains pointed to by
+						 * all posting list TIDs) is dead to everyone, so try to
+						 * mark the index entry killed. It's ok if we're not
+						 * allowed to, this isn't required for correctness.
+						 */
+						Buffer		buf;
+
+						/* Be sure to operate on the proper buffer */
+						if (nbuf != InvalidBuffer)
+							buf = nbuf;
+						else
+							buf = insertstate->buf;
+
+						/*
+						 * Use the hint bit infrastructure to check if we can
+						 * update the page while just holding a share lock.
+						 *
+						 * Can't use BufferSetHintBits16() here as we update two
+						 * different locations.
+						 */
+						if (BufferBeginSetHintBits(buf))
+						{
+							ItemIdMarkDead(curitemid);
+							opaque->btpo_flags |= BTP_HAS_GARBAGE;
+							BufferFinishSetHintBits(buf, true, true);
+						}
 					}
 				}
 
