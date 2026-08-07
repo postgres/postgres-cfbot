@@ -474,6 +474,7 @@ CollateStrength
 CollectedATSubcmd
 CollectedCommand
 CollectedCommandType
+CollectedPartitionName
 ColorTrgm
 ColorTrgmInfo
 ColumnCompareData
@@ -2249,6 +2250,7 @@ PatternInfo
 PatternInfoArray
 Pattern_Prefix_Status
 Pattern_Type
+PendingColTypeUsing
 PendingFsyncEntry
 PendingListenAction
 PendingListenEntry
