@@ -319,6 +319,8 @@ execute_deparsed_command(const char *sql,
  * Every statement type ddl_deparse_command_supported() accepts is listed
  * here, as in report_declined_command(): the guard field sits in a different
  * place in each node, and a type that has no such clause must not be excused.
+ * A subcommand-level IF EXISTS needs no entry, since an ALTER TABLE
+ * subcommand is collected and deparsed even when it did nothing.
  */
 static bool
 noop_allowed(Node *stmt)
@@ -327,6 +329,12 @@ noop_allowed(Node *stmt)
 	{
 		case T_CreateStmt:
 			return ((CreateStmt *) stmt)->if_not_exists;
+		case T_AlterTableStmt:
+			return ((AlterTableStmt *) stmt)->missing_ok;
+		case T_RenameStmt:
+			return ((RenameStmt *) stmt)->missing_ok;
+		case T_AlterObjectSchemaStmt:
+			return ((AlterObjectSchemaStmt *) stmt)->missing_ok;
 		default:
 			return false;
 	}

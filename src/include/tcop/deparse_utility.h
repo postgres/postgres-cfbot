@@ -39,6 +39,13 @@ typedef struct CollectedATSubcmd
 {
 	ObjectAddress address;		/* affected column, constraint, index, ... */
 	Node	   *parsetree;
+
+	/*
+	 * For ALTER COLUMN TYPE, the USING expression rendered to text at prep
+	 * time (before any column it references can be dropped by a sibling
+	 * subcommand), or NULL.  See EventTriggerCollectAlterColumnTypeUsing().
+	 */
+	char	   *using_text;
 } CollectedATSubcmd;
 
 typedef struct CollectedCommand

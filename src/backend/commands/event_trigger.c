@@ -21,6 +21,7 @@
 #include "catalog/catalog.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
+#include "catalog/namespace.h"
 #include "catalog/objectaccess.h"
 #include "catalog/pg_attrdef.h"
 #include "catalog/pg_authid.h"
@@ -79,8 +80,23 @@ typedef struct EventTriggerQueryState
 	CollectedCommand *currentCommand;
 	List	   *commandList;	/* list of CollectedCommand; see
 								 * deparse_utility.h */
+
+	/*
+	 * ALTER COLUMN TYPE USING clauses rendered to text at prep time, keyed by
+	 * column name, awaiting the collection of their subcommand at execution
+	 * time (see EventTriggerCollectAlterColumnTypeUsing).
+	 */
+	List	   *pendingColTypeUsing;
+
 	struct EventTriggerQueryState *previous;
 } EventTriggerQueryState;
+
+/* One pending ALTER COLUMN TYPE USING text (see above). */
+typedef struct PendingColTypeUsing
+{
+	char	   *colname;
+	char	   *text;
+} PendingColTypeUsing;
 
 static EventTriggerQueryState *currentEventTriggerState = NULL;
 
@@ -1216,6 +1232,7 @@ EventTriggerBeginCompleteQuery(void)
 		currentEventTriggerState->commandCollectionInhibited : false;
 	state->currentCommand = NULL;
 	state->commandList = NIL;
+	state->pendingColTypeUsing = NIL;
 	state->previous = currentEventTriggerState;
 	currentEventTriggerState = state;
 
@@ -1709,6 +1726,22 @@ EventTriggerUndoInhibitCommandCollection(void)
 }
 
 /*
+ * Is DDL command collection in effect?
+ *
+ * The EventTriggerCollect* routines below test this themselves and do nothing
+ * when it is false, so callers need not.  This is exported for
+ * ATPrepAlterColumnType(), which has to render the USING expression to text
+ * before a sibling subcommand can drop a column it references, and would
+ * otherwise do that work for nothing.
+ */
+bool
+EventTriggerCommandCollectionActive(void)
+{
+	return currentEventTriggerState != NULL &&
+		!currentEventTriggerState->commandCollectionInhibited;
+}
+
+/*
  * Return the commands collected for the complete query now running, a list of
  * CollectedCommand.
  *
@@ -1822,6 +1855,38 @@ EventTriggerAlterTableRelid(Oid objectId)
 }
 
 /*
+ * Remember the text an ALTER COLUMN TYPE's USING clause deparses to.
+ *
+ * The caller (ATPrepAlterColumnType) renders the USING expression while all
+ * the columns it references still exist.  A sibling DROP COLUMN in the same
+ * statement may remove one of them before the command finishes, after which
+ * the deparser could no longer name it.  The text is stashed here, keyed by
+ * column name, and picked up when the AT_AlterColumnType subcommand is
+ * collected during execution.
+ */
+void
+EventTriggerCollectAlterColumnTypeUsing(const char *colName, const char *usingText)
+{
+	MemoryContext oldcxt;
+	PendingColTypeUsing *pending;
+
+	/* ignore if event trigger context not set, or collection disabled */
+	if (!currentEventTriggerState ||
+		currentEventTriggerState->commandCollectionInhibited)
+		return;
+
+	oldcxt = MemoryContextSwitchTo(currentEventTriggerState->cxt);
+
+	pending = palloc_object(PendingColTypeUsing);
+	pending->colname = pstrdup(colName);
+	pending->text = pstrdup(usingText);
+	currentEventTriggerState->pendingColTypeUsing =
+		lappend(currentEventTriggerState->pendingColTypeUsing, pending);
+
+	MemoryContextSwitchTo(oldcxt);
+}
+
+/*
  * EventTriggerCollectAlterTableSubcmd
  *		Save data about a single part of an ALTER TABLE.
  *
@@ -1849,6 +1914,30 @@ EventTriggerCollectAlterTableSubcmd(const Node *subcmd, ObjectAddress address)
 	newsub = palloc_object(CollectedATSubcmd);
 	newsub->address = address;
 	newsub->parsetree = copyObject(subcmd);
+	newsub->using_text = NULL;
+
+	/*
+	 * For ALTER COLUMN TYPE, attach the USING text rendered at prep time (if
+	 * any) that EventTriggerCollectAlterColumnTypeUsing() stashed for this
+	 * column.
+	 */
+	if (((const AlterTableCmd *) subcmd)->subtype == AT_AlterColumnType &&
+		((const AlterTableCmd *) subcmd)->name != NULL)
+	{
+		ListCell   *lc;
+
+		foreach(lc, currentEventTriggerState->pendingColTypeUsing)
+		{
+			PendingColTypeUsing *pending = (PendingColTypeUsing *) lfirst(lc);
+
+			if (strcmp(pending->colname,
+					   ((const AlterTableCmd *) subcmd)->name) == 0)
+			{
+				newsub->using_text = pending->text;
+				break;
+			}
+		}
+	}
 
 	currentEventTriggerState->currentCommand->d.alterTable.subcmds =
 		lappend(currentEventTriggerState->currentCommand->d.alterTable.subcmds, newsub);
