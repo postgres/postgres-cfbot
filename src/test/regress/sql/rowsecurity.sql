@@ -1250,6 +1250,23 @@ DROP POLICY p1 ON document;
 -- Just check everything went per plan
 SELECT * FROM document;
 
+-- check drop column (no CASCADE) or alter column data type will fail because of
+-- whole-row referenced security policy exists.
+DROP TABLE  part_document;
+ALTER TABLE document ADD COLUMN dummy INT4;
+CREATE POLICY p7 ON document AS PERMISSIVE
+    USING (cid IS NOT NULL AND
+    (WITH cte AS (SELECT TRUE FROM uaccount
+        WHERE EXISTS (SELECT document FROM uaccount WHERE uaccount IS NULL))
+    SELECT * FROM cte));
+ALTER TABLE uaccount ALTER COLUMN seclv SET DATA TYPE BIGINT; -- error
+ALTER TABLE document ALTER COLUMN dummy SET DATA TYPE BIGINT; -- error
+
+ALTER TABLE document DROP COLUMN dummy; -- error
+ALTER TABLE uaccount DROP COLUMN seclv; -- error
+ALTER TABLE uaccount DROP COLUMN seclv CASCADE; -- ok, policy p7 will be dropped
+ALTER TABLE document DROP COLUMN dummy CASCADE; -- ok
+
 --
 -- ROLE/GROUP
 --

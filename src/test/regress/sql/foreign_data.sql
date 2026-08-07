@@ -649,6 +649,16 @@ DROP TRIGGER trigtest_before_row ON foreign_schema.foreign_table_1;
 DROP TRIGGER trigtest_after_stmt ON foreign_schema.foreign_table_1;
 DROP TRIGGER trigtest_after_row ON foreign_schema.foreign_table_1;
 
+CREATE TRIGGER trigtest_before_stmt BEFORE INSERT OR UPDATE
+ON foreign_schema.foreign_table_1
+FOR EACH ROW
+WHEN (new IS NOT NULL)
+EXECUTE PROCEDURE dummy_trigger();
+
+ALTER FOREIGN TABLE foreign_schema.foreign_table_1 ALTER COLUMN c7 SET DATA TYPE bigint; -- error
+ALTER FOREIGN TABLE foreign_schema.foreign_table_1 DROP COLUMN c7; -- error
+ALTER FOREIGN TABLE foreign_schema.foreign_table_1 DROP COLUMN c7 CASCADE; -- ok
+
 DROP FUNCTION dummy_trigger();
 
 -- Table inheritance

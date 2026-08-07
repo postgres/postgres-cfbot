@@ -2768,6 +2768,32 @@ SELECT * FROM document;
   14 |  11 |      1 | regress_rls_bob   | new novel                        | 
 (16 rows)
 
+-- check drop column (no CASCADE) or alter column data type will fail because of
+-- whole-row referenced security policy exists.
+DROP TABLE  part_document;
+ALTER TABLE document ADD COLUMN dummy INT4;
+CREATE POLICY p7 ON document AS PERMISSIVE
+    USING (cid IS NOT NULL AND
+    (WITH cte AS (SELECT TRUE FROM uaccount
+        WHERE EXISTS (SELECT document FROM uaccount WHERE uaccount IS NULL))
+    SELECT * FROM cte));
+ALTER TABLE uaccount ALTER COLUMN seclv SET DATA TYPE BIGINT; -- error
+ERROR:  cannot alter table "uaccount" because policy p7 on table document uses its row type
+HINT:  You might need to drop policy p7 on table document first
+ALTER TABLE document ALTER COLUMN dummy SET DATA TYPE BIGINT; -- error
+ERROR:  cannot alter table "document" because policy p7 on table document uses its row type
+HINT:  You might need to drop policy p7 on table document first
+ALTER TABLE document DROP COLUMN dummy; -- error
+ERROR:  cannot drop column dummy of table document because other objects depend on it
+DETAIL:  policy p7 on table document depends on column dummy of table document
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+ALTER TABLE uaccount DROP COLUMN seclv; -- error
+ERROR:  cannot drop column seclv of table uaccount because other objects depend on it
+DETAIL:  policy p7 on table document depends on column seclv of table uaccount
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+ALTER TABLE uaccount DROP COLUMN seclv CASCADE; -- ok, policy p7 will be dropped
+NOTICE:  drop cascades to policy p7 on table document
+ALTER TABLE document DROP COLUMN dummy CASCADE; -- ok
 --
 -- ROLE/GROUP
 --
@@ -5236,12 +5262,11 @@ drop table rls_t, test_t;
 --
 RESET SESSION AUTHORIZATION;
 DROP SCHEMA regress_rls_schema CASCADE;
-NOTICE:  drop cascades to 30 other objects
+NOTICE:  drop cascades to 29 other objects
 DETAIL:  drop cascades to function f_leak(text)
 drop cascades to table uaccount
 drop cascades to table category
 drop cascades to table document
-drop cascades to table part_document
 drop cascades to table dependent
 drop cascades to table rec1
 drop cascades to table rec2
