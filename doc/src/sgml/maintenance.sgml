@@ -701,25 +701,33 @@ HINT:  Execute a database-wide VACUUM in that database.
 
     <orderedlist>
      <listitem>
-      <simpara>Resolve old prepared transactions. You can find these by checking
-       <link linkend="view-pg-prepared-xacts"><structname>pg_prepared_xacts</structname></link> for rows where
-       <literal>age(transactionid)</literal> is large. Such transactions should be
-       committed or rolled back.</simpara>
+      <simpara>Identify the source.  Query
+       <link linkend="view-pg-xmin-horizon"><structname>pg_xmin_horizon</structname></link>,
+       which reports one row per snapshot-holding backend, replication slot,
+       prepared transaction, or hot-standby-feedback sender with each row's
+       per-class <structfield>xmin</structfield> contribution.  Sort by
+       <literal>age(data_xmin)</literal> or
+       <literal>age(catalog_xmin)</literal> to find the oldest pinner,
+       considering only rows whose <structfield>datid</structfield> is the
+       affected database or null.  A backend connected to another database
+       pins only that database's data and catalog horizons, though its
+       <structfield>shared_xmin</structfield> still applies to shared
+       catalogs everywhere.</simpara>
      </listitem>
      <listitem>
-      <simpara>End long-running open transactions. You can find these by checking
-       <link linkend="monitoring-pg-stat-activity-view"><structname>pg_stat_activity</structname></link> for rows where
-       <literal>age(backend_xid)</literal> or <literal>age(backend_xmin)</literal> is
-       large. Such transactions should be committed or rolled back, or the session
-       can be terminated using <literal>pg_terminate_backend</literal>.</simpara>
+      <simpara>Resolve old prepared transactions by committing or rolling
+       back.</simpara>
      </listitem>
      <listitem>
-      <simpara>Drop any old replication slots. Use
-       <link linkend="view-pg-replication-slots"><structname>pg_replication_slots</structname></link> to
-       find slots where <literal>age(xmin)</literal> or <literal>age(catalog_xmin)</literal>
-       is large. In many cases, such slots were created for replication to servers that no
-       longer exist, or that have been down for a long time. If you drop a slot for a server
-       that still exists and might still try to connect to that slot, that replica may
+      <simpara>End long-running open transactions by committing, rolling back,
+       or terminating the session using
+       <literal>pg_terminate_backend</literal>.</simpara>
+     </listitem>
+     <listitem>
+      <simpara>Drop any old replication slots. In many cases, such slots were
+       created for replication to servers that no longer exist, or that have
+       been down for a long time. If you drop a slot for a server that still
+       exists and might still try to connect to that slot, that replica may
        need to be rebuilt.</simpara>
      </listitem>
      <listitem>
