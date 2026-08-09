@@ -110,6 +110,49 @@ bool		g_cube_internal_consistent(NDBOX *key, NDBOX *query, StrategyNumber strate
 static double distance_1D(double a1, double a2, double b1, double b2);
 static bool cube_is_point_internal(NDBOX *cube);
 
+/* Minimum accepted ratio of a GiST page split */
+#define CUBE_SPLIT_RATIO 0.3
+
+typedef struct
+{
+	double		lower,
+				upper;
+} CubeSplitInterval;
+
+typedef struct
+{
+	OffsetNumber index;
+	double		delta;
+} CubeCommonEntry;
+
+typedef struct
+{
+	int			entries_count;
+	double	   *bounding_lower;
+	double	   *bounding_upper;
+
+	bool		first;
+	double		left_upper;
+	double		right_lower;
+	float4		ratio;
+	float4		overlap;
+	int			dim;
+	double		range;
+} CubeSplitContext;
+
+static double cube_coord_low(const NDBOX *cube, int dim);
+static double cube_coord_high(const NDBOX *cube, int dim);
+static NDBOX *cube_copy(const NDBOX *cube);
+static double cube_penalty(const NDBOX *original, const NDBOX *new);
+static void cube_fallback_split(GistEntryVector *entryvec,
+								GIST_SPLITVEC *v);
+static int	cube_interval_cmp_lower(const void *i1, const void *i2);
+static int	cube_interval_cmp_upper(const void *i1, const void *i2);
+static int	cube_common_entry_cmp(const void *i1, const void *i2);
+static void cube_consider_split(CubeSplitContext *context, int dim,
+								double right_lower, int min_left_count,
+								double left_upper, int max_left_count);
+
 
 /*****************************************************************************
  * Input/Output functions
@@ -509,152 +552,422 @@ g_cube_penalty(PG_FUNCTION_ARGS)
 
 
 /*
- * The GiST PickSplit method for boxes
- * We use Guttman's poly time split algorithm
+ * Return the lower or upper coordinate of a cube projection.  Dimensions
+ * absent from a cube are implicitly zero throughout the cube data type.
+ */
+static double
+cube_coord_low(const NDBOX *cube, int dim)
+{
+	if (dim >= DIM(cube))
+		return 0.0;
+	return Min(LL_COORD(cube, dim), UR_COORD(cube, dim));
+}
+
+static double
+cube_coord_high(const NDBOX *cube, int dim)
+{
+	if (dim >= DIM(cube))
+		return 0.0;
+	return Max(LL_COORD(cube, dim), UR_COORD(cube, dim));
+}
+
+static NDBOX *
+cube_copy(const NDBOX *cube)
+{
+	NDBOX	   *result = palloc(VARSIZE(cube));
+
+	memcpy(result, cube, VARSIZE(cube));
+	return result;
+}
+
+static double
+cube_penalty(const NDBOX *original, const NDBOX *new)
+{
+	NDBOX	   *u;
+	double		original_size;
+	double		union_size;
+
+	/* An empty group can accept its first entry without enlargement. */
+	if (original == NULL)
+		return 0.0;
+
+	u = cube_union_v0(unconstify(NDBOX *, original),
+					  unconstify(NDBOX *, new));
+	rt_cube_size(unconstify(NDBOX *, original), &original_size);
+	rt_cube_size(u, &union_size);
+	return union_size - original_size;
+}
+
+static void
+cube_fallback_split(GistEntryVector *entryvec, GIST_SPLITVEC *v)
+{
+	OffsetNumber i;
+	OffsetNumber maxoff = entryvec->n - 1;
+	int			nentries = maxoff - FirstOffsetNumber + 1;
+	NDBOX	   *left_cube = NULL;
+	NDBOX	   *right_cube = NULL;
+
+	v->spl_left = palloc_array(OffsetNumber, nentries);
+	v->spl_right = palloc_array(OffsetNumber, nentries);
+	v->spl_nleft = v->spl_nright = 0;
+
+	for (i = FirstOffsetNumber; i <= maxoff; i = OffsetNumberNext(i))
+	{
+		NDBOX	   *cube = DatumGetNDBOXP(entryvec->vector[i].key);
+		NDBOX	  **group_cube;
+
+		if (i - FirstOffsetNumber < nentries / 2)
+		{
+			v->spl_left[v->spl_nleft++] = i;
+			group_cube = &left_cube;
+		}
+		else
+		{
+			v->spl_right[v->spl_nright++] = i;
+			group_cube = &right_cube;
+		}
+
+		if (*group_cube == NULL)
+			*group_cube = cube_copy(cube);
+		else
+			*group_cube = cube_union_v0(*group_cube, cube);
+	}
+
+	v->spl_ldatum = PointerGetDatum(left_cube);
+	v->spl_rdatum = PointerGetDatum(right_cube);
+}
+
+static int
+cube_interval_cmp_lower(const void *i1, const void *i2)
+{
+	const CubeSplitInterval *interval1 = i1;
+	const CubeSplitInterval *interval2 = i2;
+
+	return float8_cmp_internal(interval1->lower, interval2->lower);
+}
+
+static int
+cube_interval_cmp_upper(const void *i1, const void *i2)
+{
+	const CubeSplitInterval *interval1 = i1;
+	const CubeSplitInterval *interval2 = i2;
+
+	return float8_cmp_internal(interval1->upper, interval2->upper);
+}
+
+static int
+cube_common_entry_cmp(const void *i1, const void *i2)
+{
+	const CubeCommonEntry *entry1 = i1;
+	const CubeCommonEntry *entry2 = i2;
+
+	return float8_cmp_internal(entry1->delta, entry2->delta);
+}
+
+static inline float
+cube_non_negative(float val)
+{
+	return val >= 0.0f ? val : 0.0f;
+}
+
+static void
+cube_consider_split(CubeSplitContext *context, int dim,
+					double right_lower, int min_left_count,
+					double left_upper, int max_left_count)
+{
+	int			left_count;
+	int			right_count;
+	float4		ratio;
+	float4		overlap;
+	double		range;
+	bool		select_this = false;
+
+	/*
+	 * Common entries can be assigned to either group.  Estimate the most even
+	 * distribution possible for this pair of split boundaries.
+	 */
+	if (min_left_count >= (context->entries_count + 1) / 2)
+		left_count = min_left_count;
+	else if (max_left_count <= context->entries_count / 2)
+		left_count = max_left_count;
+	else
+		left_count = context->entries_count / 2;
+	right_count = context->entries_count - left_count;
+
+	ratio = float4_div(Min(left_count, right_count),
+					   context->entries_count);
+	if (ratio <= CUBE_SPLIT_RATIO)
+		return;
+
+	range = float8_mi(context->bounding_upper[dim],
+					  context->bounding_lower[dim]);
+	overlap = float8_div(float8_mi(left_upper, right_lower), range);
+
+	/*
+	 * Within one dimension, minimize overlap and then prefer a more even
+	 * split.  Across dimensions, compare non-negative overlap first and then
+	 * prefer the dimension with the wider range.  This is the same criterion
+	 * used by gist_box_picksplit().
+	 */
+	if (context->first)
+		select_this = true;
+	else if (context->dim == dim)
+	{
+		if (overlap < context->overlap ||
+			(overlap == context->overlap && ratio > context->ratio))
+			select_this = true;
+	}
+	else if (cube_non_negative(overlap) <
+			 cube_non_negative(context->overlap) ||
+			 (range > context->range &&
+			  cube_non_negative(overlap) <=
+			  cube_non_negative(context->overlap)))
+		select_this = true;
+
+	if (select_this)
+	{
+		context->first = false;
+		context->ratio = ratio;
+		context->range = range;
+		context->overlap = overlap;
+		context->right_lower = right_lower;
+		context->left_upper = left_upper;
+		context->dim = dim;
+	}
+}
+
+/*
+ * The GiST PickSplit method for cubes.
+ *
+ * This is the double sorting split algorithm used by the built-in box and
+ * point operator classes, generalized to an arbitrary number of dimensions.
+ * For details, see "A new double sorting-based node splitting algorithm for
+ * R-tree", A. Korotkov.
  */
 Datum
 g_cube_picksplit(PG_FUNCTION_ARGS)
 {
 	GistEntryVector *entryvec = (GistEntryVector *) PG_GETARG_POINTER(0);
 	GIST_SPLITVEC *v = (GIST_SPLITVEC *) PG_GETARG_POINTER(1);
-	OffsetNumber i,
-				j;
-	NDBOX	   *datum_alpha,
-			   *datum_beta;
-	NDBOX	   *datum_l,
-			   *datum_r;
-	NDBOX	   *union_d,
-			   *union_dl,
-			   *union_dr;
-	NDBOX	   *inter_d;
-	bool		firsttime;
-	double		size_alpha,
-				size_beta,
-				size_union,
-				size_inter;
-	double		size_waste,
-				waste;
-	double		size_l,
-				size_r;
-	int			nbytes;
-	OffsetNumber seed_1 = 1,
-				seed_2 = 2;
-	OffsetNumber *left,
-			   *right;
-	OffsetNumber maxoff;
+	OffsetNumber i;
+	OffsetNumber maxoff = entryvec->n - 1;
+	int			nentries = maxoff - FirstOffsetNumber + 1;
+	int			n_dims = 0;
+	int			dim;
+	CubeSplitContext context;
+	CubeSplitInterval *intervals_lower;
+	CubeSplitInterval *intervals_upper;
+	CubeCommonEntry *common_entries;
+	int			n_common = 0;
+	NDBOX	   *left_cube = NULL;
+	NDBOX	   *right_cube = NULL;
 
-	maxoff = entryvec->n - 2;
-	nbytes = (maxoff + 2) * sizeof(OffsetNumber);
-	v->spl_left = (OffsetNumber *) palloc(nbytes);
-	v->spl_right = (OffsetNumber *) palloc(nbytes);
+	memset(&context, 0, sizeof(context));
+	context.entries_count = nentries;
+	context.first = true;
 
-	firsttime = true;
-	waste = 0.0;
-
-	for (i = FirstOffsetNumber; i < maxoff; i = OffsetNumberNext(i))
+	for (i = FirstOffsetNumber; i <= maxoff; i = OffsetNumberNext(i))
 	{
-		datum_alpha = DatumGetNDBOXP(entryvec->vector[i].key);
-		for (j = OffsetNumberNext(i); j <= maxoff; j = OffsetNumberNext(j))
+		NDBOX	   *cube = DatumGetNDBOXP(entryvec->vector[i].key);
+
+		n_dims = Max(n_dims, DIM(cube));
+	}
+
+	if (n_dims == 0)
+	{
+		cube_fallback_split(entryvec, v);
+		PG_RETURN_POINTER(v);
+	}
+
+	context.bounding_lower = palloc_array(double, n_dims);
+	context.bounding_upper = palloc_array(double, n_dims);
+	intervals_lower = palloc_array(CubeSplitInterval, nentries);
+	intervals_upper = palloc_array(CubeSplitInterval, nentries);
+
+	for (dim = 0; dim < n_dims; dim++)
+	{
+		bool		first = true;
+
+		for (i = FirstOffsetNumber; i <= maxoff; i = OffsetNumberNext(i))
 		{
-			datum_beta = DatumGetNDBOXP(entryvec->vector[j].key);
+			NDBOX	   *cube = DatumGetNDBOXP(entryvec->vector[i].key);
+			double		lower = cube_coord_low(cube, dim);
+			double		upper = cube_coord_high(cube, dim);
 
-			/* compute the wasted space by unioning these guys */
-			/* size_waste = size_union - size_inter; */
-			union_d = cube_union_v0(datum_alpha, datum_beta);
-			rt_cube_size(union_d, &size_union);
-			inter_d = DatumGetNDBOXP(DirectFunctionCall2(cube_inter,
-														 entryvec->vector[i].key,
-														 entryvec->vector[j].key));
-			rt_cube_size(inter_d, &size_inter);
-			size_waste = size_union - size_inter;
-
-			/*
-			 * are these a more promising split than what we've already seen?
-			 */
-
-			if (size_waste > waste || firsttime)
+			if (first)
 			{
-				waste = size_waste;
-				seed_1 = i;
-				seed_2 = j;
-				firsttime = false;
+				context.bounding_lower[dim] = lower;
+				context.bounding_upper[dim] = upper;
+				first = false;
+			}
+			else
+			{
+				context.bounding_lower[dim] =
+					Min(context.bounding_lower[dim], lower);
+				context.bounding_upper[dim] =
+					Max(context.bounding_upper[dim], upper);
+			}
+
+			intervals_lower[i - FirstOffsetNumber].lower = lower;
+			intervals_lower[i - FirstOffsetNumber].upper = upper;
+		}
+
+		memcpy(intervals_upper, intervals_lower,
+			   sizeof(CubeSplitInterval) * nentries);
+		qsort(intervals_lower, nentries, sizeof(CubeSplitInterval),
+			  cube_interval_cmp_lower);
+		qsort(intervals_upper, nentries, sizeof(CubeSplitInterval),
+			  cube_interval_cmp_upper);
+
+		/* Consider each distinct lower bound as the right group boundary. */
+		{
+			int			i1 = 0;
+			int			i2 = 0;
+			double		right_lower = intervals_lower[i1].lower;
+			double		left_upper = intervals_upper[i2].lower;
+
+			while (true)
+			{
+				while (i1 < nentries &&
+					   float8_eq(right_lower, intervals_lower[i1].lower))
+				{
+					if (float8_lt(left_upper, intervals_lower[i1].upper))
+						left_upper = intervals_lower[i1].upper;
+					i1++;
+				}
+				if (i1 >= nentries)
+					break;
+				right_lower = intervals_lower[i1].lower;
+
+				while (i2 < nentries &&
+					   float8_le(intervals_upper[i2].upper, left_upper))
+					i2++;
+
+				cube_consider_split(&context, dim, right_lower, i1,
+									left_upper, i2);
+			}
+		}
+
+		/* Consider each distinct upper bound as the left group boundary. */
+		{
+			int			i1 = nentries - 1;
+			int			i2 = nentries - 1;
+			double		right_lower = intervals_lower[i1].upper;
+			double		left_upper = intervals_upper[i2].upper;
+
+			while (true)
+			{
+				while (i2 >= 0 &&
+					   float8_eq(left_upper, intervals_upper[i2].upper))
+				{
+					if (float8_gt(right_lower, intervals_upper[i2].lower))
+						right_lower = intervals_upper[i2].lower;
+					i2--;
+				}
+				if (i2 < 0)
+					break;
+				left_upper = intervals_upper[i2].upper;
+
+				while (i1 >= 0 &&
+					   float8_ge(intervals_lower[i1].lower, right_lower))
+					i1--;
+
+				cube_consider_split(&context, dim, right_lower, i1 + 1,
+									left_upper, i2 + 1);
 			}
 		}
 	}
 
-	left = v->spl_left;
-	v->spl_nleft = 0;
-	right = v->spl_right;
-	v->spl_nright = 0;
+	if (context.first)
+	{
+		cube_fallback_split(entryvec, v);
+		PG_RETURN_POINTER(v);
+	}
 
-	datum_alpha = DatumGetNDBOXP(entryvec->vector[seed_1].key);
-	datum_l = cube_union_v0(datum_alpha, datum_alpha);
-	rt_cube_size(datum_l, &size_l);
-	datum_beta = DatumGetNDBOXP(entryvec->vector[seed_2].key);
-	datum_r = cube_union_v0(datum_beta, datum_beta);
-	rt_cube_size(datum_r, &size_r);
+	v->spl_left = palloc_array(OffsetNumber, nentries);
+	v->spl_right = palloc_array(OffsetNumber, nentries);
+	v->spl_nleft = v->spl_nright = 0;
+	common_entries = palloc_array(CubeCommonEntry, nentries);
 
-	/*
-	 * Now split up the regions between the two seeds.  An important property
-	 * of this split algorithm is that the split vector v has the indices of
-	 * items to be split in order in its left and right vectors.  We exploit
-	 * this property by doing a merge in the code that actually splits the
-	 * page.
-	 *
-	 * For efficiency, we also place the new index tuple in this loop. This is
-	 * handled at the very end, when we have placed all the existing tuples
-	 * and i == maxoff + 1.
-	 */
+#define PLACE_LEFT(cube, off) \
+	do { \
+		if (left_cube == NULL) \
+			left_cube = cube_copy(cube); \
+		else \
+			left_cube = cube_union_v0(left_cube, cube); \
+		v->spl_left[v->spl_nleft++] = off; \
+	} while (0)
 
-	maxoff = OffsetNumberNext(maxoff);
+#define PLACE_RIGHT(cube, off) \
+	do { \
+		if (right_cube == NULL) \
+			right_cube = cube_copy(cube); \
+		else \
+			right_cube = cube_union_v0(right_cube, cube); \
+		v->spl_right[v->spl_nright++] = off; \
+	} while (0)
+
 	for (i = FirstOffsetNumber; i <= maxoff; i = OffsetNumberNext(i))
 	{
-		/*
-		 * If we've already decided where to place this item, just put it on
-		 * the right list.  Otherwise, we need to figure out which page needs
-		 * the least enlargement in order to store the item.
-		 */
+		NDBOX	   *cube = DatumGetNDBOXP(entryvec->vector[i].key);
+		double		lower = cube_coord_low(cube, context.dim);
+		double		upper = cube_coord_high(cube, context.dim);
 
-		if (i == seed_1)
+		if (float8_le(upper, context.left_upper))
 		{
-			*left++ = i;
-			v->spl_nleft++;
-			continue;
-		}
-		else if (i == seed_2)
-		{
-			*right++ = i;
-			v->spl_nright++;
-			continue;
-		}
-
-		/* okay, which page needs least enlargement? */
-		datum_alpha = DatumGetNDBOXP(entryvec->vector[i].key);
-		union_dl = cube_union_v0(datum_l, datum_alpha);
-		union_dr = cube_union_v0(datum_r, datum_alpha);
-		rt_cube_size(union_dl, &size_alpha);
-		rt_cube_size(union_dr, &size_beta);
-
-		/* pick which page to add it to */
-		if (size_alpha - size_l < size_beta - size_r)
-		{
-			datum_l = union_dl;
-			size_l = size_alpha;
-			*left++ = i;
-			v->spl_nleft++;
+			if (float8_ge(lower, context.right_lower))
+				common_entries[n_common++].index = i;
+			else
+				PLACE_LEFT(cube, i);
 		}
 		else
 		{
-			datum_r = union_dr;
-			size_r = size_beta;
-			*right++ = i;
-			v->spl_nright++;
+			Assert(float8_ge(lower, context.right_lower));
+			PLACE_RIGHT(cube, i);
 		}
 	}
-	*left = *right = FirstOffsetNumber; /* sentinel value */
 
-	v->spl_ldatum = PointerGetDatum(datum_l);
-	v->spl_rdatum = PointerGetDatum(datum_r);
+	if (n_common > 0)
+	{
+		int			minimum = ceil(CUBE_SPLIT_RATIO * nentries);
+		int			common_index;
+
+		for (common_index = 0; common_index < n_common; common_index++)
+		{
+			OffsetNumber off = common_entries[common_index].index;
+			NDBOX	   *cube = DatumGetNDBOXP(entryvec->vector[off].key);
+
+			common_entries[common_index].delta =
+				fabs(cube_penalty(left_cube, cube) -
+					 cube_penalty(right_cube, cube));
+		}
+
+		qsort(common_entries, n_common, sizeof(CubeCommonEntry),
+			  cube_common_entry_cmp);
+
+		for (common_index = 0; common_index < n_common; common_index++)
+		{
+			OffsetNumber off = common_entries[common_index].index;
+			NDBOX	   *cube = DatumGetNDBOXP(entryvec->vector[off].key);
+
+			if (v->spl_nleft + (n_common - common_index) <= minimum)
+				PLACE_LEFT(cube, off);
+			else if (v->spl_nright + (n_common - common_index) <= minimum)
+				PLACE_RIGHT(cube, off);
+			else if (cube_penalty(left_cube, cube) <
+					 cube_penalty(right_cube, cube))
+				PLACE_LEFT(cube, off);
+			else
+				PLACE_RIGHT(cube, off);
+		}
+	}
+
+#undef PLACE_LEFT
+#undef PLACE_RIGHT
+
+	Assert(left_cube != NULL && right_cube != NULL);
+	v->spl_ldatum = PointerGetDatum(left_cube);
+	v->spl_rdatum = PointerGetDatum(right_cube);
 
 	PG_RETURN_POINTER(v);
 }
