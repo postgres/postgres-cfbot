@@ -157,6 +157,7 @@ typedef enum AlterTablePass
 	AT_PASS_ADD_COL,			/* ADD COLUMN */
 	AT_PASS_SET_EXPRESSION,		/* ALTER SET EXPRESSION */
 	AT_PASS_OLD_INDEX,			/* re-add existing indexes */
+	AT_PASS_OLD_PARTITIONED_INDEX,	/* re-add existing partitioned indexes */
 	AT_PASS_OLD_CONSTR,			/* re-add existing constraints */
 	/* We could support a RENAME COLUMN pass here, but not currently used */
 	AT_PASS_ADD_CONSTR,			/* ADD constraints (initial examination) */
@@ -697,8 +698,7 @@ static void RememberWholeRowDependentForRebuilding(AlteredTableInfo *tab, AlterT
 static void RememberConstraintForRebuilding(Oid conoid, AlteredTableInfo *tab);
 static void RememberIndexForRebuilding(Oid indoid, AlteredTableInfo *tab);
 static void RememberStatisticsForRebuilding(Oid stxoid, AlteredTableInfo *tab);
-static void ATPostAlterTypeCleanup(List **wqueue, AlteredTableInfo *tab,
-								   LOCKMODE lockmode);
+static void ATPostAlterTypeCleanup(List **wqueue, ObjectAddresses *objects, AlteredTableInfo *tab, LOCKMODE lockmode);
 static void ATPostAlterTypeParse(Oid oldId, Oid oldRelId, Oid refRelId,
 								 char *cmd, List **wqueue, LOCKMODE lockmode,
 								 bool rewrite);
@@ -5416,6 +5416,8 @@ ATRewriteCatalogs(List **wqueue, LOCKMODE lockmode,
 	 */
 	for (AlterTablePass pass = 0; pass < AT_NUM_PASSES; pass++)
 	{
+		ObjectAddresses *todelete = new_object_addresses();
+
 		/* Go through each table that needs to be processed */
 		foreach(ltab, *wqueue)
 		{
@@ -5441,10 +5443,14 @@ ATRewriteCatalogs(List **wqueue, LOCKMODE lockmode,
 			/*
 			 * After the ALTER TYPE or SET EXPRESSION pass, do cleanup work
 			 * (this is not done in ATExecAlterColumnType since it should be
-			 * done only once if multiple columns of a table are altered).
+			 * done only once if multiple columns of a table are altered). The
+			 * objects pending deletion will be batched in the todelete list,
+			 * to be deleted at the end of the pass. Otherwise, we will drop
+			 * dependent objects before they are properly procesed. This is a
+			 * problem when we try to avoid rewrites for child indexes.
 			 */
 			if (pass == AT_PASS_ALTER_TYPE || pass == AT_PASS_SET_EXPRESSION)
-				ATPostAlterTypeCleanup(wqueue, tab, lockmode);
+				ATPostAlterTypeCleanup(wqueue, todelete, tab, lockmode);
 
 			if (tab->rel)
 			{
@@ -5452,6 +5458,20 @@ ATRewriteCatalogs(List **wqueue, LOCKMODE lockmode,
 				tab->rel = NULL;
 			}
 		}
+
+		/*
+		 * After the full pass, we drop all the objects that we accumulated,
+		 * then free the address list. It should be okay to use DROP_RESTRICT
+		 * here, since nothing else should be depending on these objects.
+		 */
+		performMultipleDeletions(todelete, DROP_RESTRICT, PERFORM_DELETION_INTERNAL);
+
+		free_object_addresses(todelete);
+
+		/*
+		 * The objects will get recreated during subsequent passes over the
+		 * work queue.
+		 */
 	}
 
 	/* Check to see if a toast table must be added. */
@@ -16123,24 +16143,17 @@ RememberStatisticsForRebuilding(Oid stxoid, AlteredTableInfo *tab)
 /*
  * Cleanup after we've finished all the ALTER TYPE or SET EXPRESSION
  * operations for a particular relation.  We have to drop and recreate all the
- * indexes and constraints that depend on the altered columns.  We do the
- * actual dropping here, but re-creation is managed by adding work queue
- * entries to do those steps later.
+ * indexes and constraints that depend on the altered columns. We record the 
+ * objects that need to be deleted here, so they can be dropped by the caller 
+ * in one go after this method has been called for each table. The re-creation,
+ * however, is managed by adding work queue entries to do those steps later.
  */
 static void
-ATPostAlterTypeCleanup(List **wqueue, AlteredTableInfo *tab, LOCKMODE lockmode)
+ATPostAlterTypeCleanup(List **wqueue, ObjectAddresses *objects, AlteredTableInfo *tab, LOCKMODE lockmode)
 {
 	ObjectAddress obj;
-	ObjectAddresses *objects;
 	ListCell   *def_item;
 	ListCell   *oid_item;
-
-	/*
-	 * Collect all the constraints and indexes to drop so we can process them
-	 * in a single call.  That way we don't have to worry about dependencies
-	 * among them.
-	 */
-	objects = new_object_addresses();
 
 	/*
 	 * Re-parse the index and constraint definitions, and attach them to the
@@ -16192,10 +16205,13 @@ ATPostAlterTypeCleanup(List **wqueue, AlteredTableInfo *tab, LOCKMODE lockmode)
 		 * If the constraint is inherited (only), we don't want to inject a
 		 * new definition here; it'll get recreated when
 		 * ATAddCheckNNConstraint recurses from adding the parent table's
-		 * constraint.  But we had to carry the info this far so that we can
-		 * drop the constraint below.
+		 * constraint. But we had to carry the info this far so that we can
+		 * drop the constraint below. The exception to this are primary key
+		 * or unique constraints: we need to process the child constraints
+		 * explicitly so we save the necessary information to avoid re-indexing.
 		 */
-		if (!conislocal)
+		if (!conislocal && con->contype != CONSTRAINT_PRIMARY 
+			&& con->contype != CONSTRAINT_UNIQUE)
 			continue;
 
 		/*
@@ -16298,16 +16314,10 @@ ATPostAlterTypeCleanup(List **wqueue, AlteredTableInfo *tab, LOCKMODE lockmode)
 	}
 
 	/*
-	 * It should be okay to use DROP_RESTRICT here, since nothing else should
-	 * be depending on these objects.
-	 */
-	performMultipleDeletions(objects, DROP_RESTRICT, PERFORM_DELETION_INTERNAL);
-
-	free_object_addresses(objects);
-
-	/*
-	 * The objects will get recreated during subsequent passes over the work
-	 * queue.
+	 * The caller will take care of deleting the objects. We need to batch
+	 * the deletions together instead of dropping here. Otherwise, child
+	 * indexes will be dropped when dropping their parent partitioned index,
+	 * which means they will never be tracked for rebuilding.
 	 */
 }
 
@@ -16391,6 +16401,7 @@ ATPostAlterTypeParse(Oid oldId, Oid oldRelId, Oid refRelId, char *cmd,
 		{
 			IndexStmt  *stmt = (IndexStmt *) stm;
 			AlterTableCmd *newcmd;
+			char		relkind = get_rel_relkind(oldId);
 
 			if (!rewrite)
 				TryReuseIndex(oldId, stmt);
@@ -16401,8 +16412,23 @@ ATPostAlterTypeParse(Oid oldId, Oid oldRelId, Oid refRelId, char *cmd,
 			newcmd = makeNode(AlterTableCmd);
 			newcmd->subtype = AT_ReAddIndex;
 			newcmd->def = (Node *) stmt;
-			tab->subcmds[AT_PASS_OLD_INDEX] =
-				lappend(tab->subcmds[AT_PASS_OLD_INDEX], newcmd);
+
+			/*
+			 * We process partitioned indexes at a later stage. This ensures
+			 * that we won't create duplicate indexes. We rely on postgres 
+			 * automatically attaching existing child indexes to a new 
+			 * partitioned index. 
+			 * 
+			 * We could choose to skip child indexes and let them be recreated
+			 * by the parent, but that would force a reindex that we can
+			 * potentially avoid. 
+			 */
+			if (relkind == RELKIND_PARTITIONED_INDEX)
+				tab->subcmds[AT_PASS_OLD_PARTITIONED_INDEX] =
+					lappend(tab->subcmds[AT_PASS_OLD_PARTITIONED_INDEX], newcmd);
+			else
+				tab->subcmds[AT_PASS_OLD_INDEX] =
+					lappend(tab->subcmds[AT_PASS_OLD_INDEX], newcmd);
 		}
 		else if (IsA(stm, AlterTableStmt))
 		{
@@ -16417,9 +16443,12 @@ ATPostAlterTypeParse(Oid oldId, Oid oldRelId, Oid refRelId, char *cmd,
 				{
 					IndexStmt  *indstmt;
 					Oid			indoid;
+					char		relkind;
+					AlterTablePass indexCreationPass;
 
 					indstmt = castNode(IndexStmt, cmd->def);
 					indoid = get_constraint_index(oldId);
+					relkind = get_rel_relkind(indoid);
 
 					if (!rewrite)
 						TryReuseIndex(indoid, indstmt);
@@ -16429,12 +16458,26 @@ ATPostAlterTypeParse(Oid oldId, Oid oldRelId, Oid refRelId, char *cmd,
 					indstmt->reset_default_tblspc = true;
 
 					cmd->subtype = AT_ReAddIndex;
-					tab->subcmds[AT_PASS_OLD_INDEX] =
-						lappend(tab->subcmds[AT_PASS_OLD_INDEX], cmd);
+
+					/*
+					 * We process constraints backed by a partitioned index at
+					 * a later stage. Otherwise, we might create the child 
+					 * indexes twice, which will error out. We mimic here
+					 * the behavior for partitioned indexes, although in here
+					 * the logic relies on parent constraints automatically 
+					 * reusing existing child constraints.
+					 */
+					if (relkind == RELKIND_PARTITIONED_INDEX)
+						indexCreationPass = AT_PASS_OLD_PARTITIONED_INDEX;
+					else
+						indexCreationPass = AT_PASS_OLD_INDEX;
+
+					tab->subcmds[indexCreationPass] =
+						lappend(tab->subcmds[indexCreationPass], cmd);
 
 					/* recreate any comment on the constraint */
 					RebuildConstraintComment(tab,
-											 AT_PASS_OLD_INDEX,
+											 indexCreationPass,
 											 oldId,
 											 rel,
 											 NIL,
