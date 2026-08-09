@@ -64,10 +64,17 @@ extern bool add_partial_path_precheck(RelOptInfo *parent_rel,
 									  int disabled_nodes, Cost startup_cost,
 									  Cost total_cost, List *pathkeys);
 
+extern bool expected_filters_equal(List *a, List *b);
+extern double expected_filters_selectivity(List *filters);
+extern void apply_expected_filters(Path *path, List *filters);
+extern Path *create_filtered_scan_path(PlannerInfo *root, Path *subpath,
+									   List *filters);
+
 extern Path *create_seqscan_path(PlannerInfo *root, RelOptInfo *rel,
-								 Relids required_outer, int parallel_workers);
+								 Relids required_outer, int parallel_workers,
+								 List *filters);
 extern Path *create_samplescan_path(PlannerInfo *root, RelOptInfo *rel,
-									Relids required_outer);
+									Relids required_outer, List *filters);
 extern IndexPath *create_index_path(PlannerInfo *root,
 									IndexOptInfo *index,
 									List *indexclauses,
@@ -84,7 +91,8 @@ extern BitmapHeapPath *create_bitmap_heap_path(PlannerInfo *root,
 											   Path *bitmapqual,
 											   Relids required_outer,
 											   double loop_count,
-											   int parallel_degree);
+											   int parallel_degree,
+											   List *filters);
 extern BitmapAndPath *create_bitmap_and_path(PlannerInfo *root,
 											 RelOptInfo *rel,
 											 List *bitmapquals);
@@ -92,12 +100,14 @@ extern BitmapOrPath *create_bitmap_or_path(PlannerInfo *root,
 										   RelOptInfo *rel,
 										   List *bitmapquals);
 extern TidPath *create_tidscan_path(PlannerInfo *root, RelOptInfo *rel,
-									List *tidquals, Relids required_outer);
+									List *tidquals, Relids required_outer,
+									List *filters);
 extern TidRangePath *create_tidrangescan_path(PlannerInfo *root,
 											  RelOptInfo *rel,
 											  List *tidrangequals,
 											  Relids required_outer,
-											  int parallel_workers);
+											  int parallel_workers,
+											  List *filters);
 
 extern AppendPath *create_append_path(PlannerInfo *root, RelOptInfo *rel,
 									  AppendPathInput input,
@@ -387,4 +397,14 @@ extern RelOptInfo *build_child_join_rel(PlannerInfo *root,
 
 extern RelAggInfo *create_rel_agg_info(PlannerInfo *root, RelOptInfo *rel,
 									   bool calculate_grouped_rows);
+
+extern List *simple_build_joinrel_restrictlist(PlannerInfo *root,
+											   SimpleRelOptInfo *joinrel,
+											   SimpleRelOptInfo *outer_rel,
+											   SimpleRelOptInfo *inner_rel,
+											   SpecialJoinInfo *sjinfo);
+extern void simple_build_joinrel_joinlist(SimpleRelOptInfo *joinrel,
+										  SimpleRelOptInfo *outer_rel,
+										  SimpleRelOptInfo *inner_rel);
+
 #endif							/* PATHNODE_H */

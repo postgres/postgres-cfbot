@@ -330,9 +330,11 @@ explain (costs off)
    ->  Hash Join
          Hash Cond: (r.id = s.id)
          ->  Seq Scan on simple r
+               Bloom Filter 1: keys=(id)
          ->  Hash
+               Bloom Filter 1
                ->  Seq Scan on bigger_than_it_looks s
-(6 rows)
+(8 rows)
 
 select count(*) FROM simple r JOIN bigger_than_it_looks s USING (id);
  count 
@@ -445,9 +447,11 @@ explain (costs off)
    ->  Hash Join
          Hash Cond: (r.id = s.id)
          ->  Seq Scan on simple r
+               Bloom Filter 1: keys=(id)
          ->  Hash
+               Bloom Filter 1
                ->  Seq Scan on extremely_skewed s
-(6 rows)
+(8 rows)
 
 select count(*) from simple r join extremely_skewed s using (id);
  count 
@@ -1149,9 +1153,11 @@ lateral (select t1.fivethous, i4.f1 from tenk1 t1 join int4_tbl i4
          ->  Hash Join
                Hash Cond: (t1.fivethous = (i4.f1 + i8.q2))
                ->  Seq Scan on tenk1 t1
+                     Bloom Filter 1: keys=(fivethous)
                ->  Hash
+                     Bloom Filter 1
                      ->  Seq Scan on int4_tbl i4
-(9 rows)
+(11 rows)
 
 select i8.q2, ss.* from
 int8_tbl i8,

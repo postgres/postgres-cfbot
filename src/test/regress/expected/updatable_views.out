@@ -587,11 +587,13 @@ MERGE INTO rw_view1 t
          Hash Cond: (base_tbl.a = generate_series.generate_series)
          ->  Bitmap Heap Scan on base_tbl
                Recheck Cond: (a > 0)
+               Bloom Filter 1: keys=(a)
                ->  Bitmap Index Scan on base_tbl_pkey
                      Index Cond: (a > 0)
          ->  Hash
+               Bloom Filter 1
                ->  Function Scan on generate_series
-(9 rows)
+(11 rows)
 
 EXPLAIN (costs off)
 MERGE INTO rw_view1 t

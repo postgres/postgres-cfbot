@@ -17,11 +17,17 @@ typedef struct bloom_filter bloom_filter;
 
 extern bloom_filter *bloom_create(int64 total_elems, int bloom_work_mem,
 								  uint64 seed);
+extern bloom_filter *bloom_create_custom(int64 total_elems, int bloom_work_mem,
+										 uint64 min_bitset_bytes,
+										 int max_hash_funcs,
+										 uint64 seed);
 extern void bloom_free(bloom_filter *filter);
 extern void bloom_add_element(bloom_filter *filter, unsigned char *elem,
 							  size_t len);
 extern bool bloom_lacks_element(bloom_filter *filter, unsigned char *elem,
 								size_t len);
 extern double bloom_prop_bits_set(bloom_filter *filter);
+extern uint64 bloom_total_bits(bloom_filter *filter);
+extern int	bloom_hash_funcs(bloom_filter *filter);
 
 #endif							/* BLOOMFILTER_H */

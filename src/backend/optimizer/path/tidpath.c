@@ -468,7 +468,7 @@ BuildParameterizedTidPaths(PlannerInfo *root, RelOptInfo *rel, List *clauses)
 		required_outer = bms_del_member(required_outer, rel->relid);
 
 		add_path(rel, (Path *) create_tidscan_path(root, rel, tidquals,
-												   required_outer));
+												   required_outer, NIL));
 	}
 }
 
@@ -520,7 +520,7 @@ create_tidscan_paths(PlannerInfo *root, RelOptInfo *rel)
 		Relids		required_outer = rel->lateral_relids;
 
 		add_path(rel, (Path *) create_tidscan_path(root, rel, tidquals,
-												   required_outer));
+												   required_outer, NIL));
 
 		/*
 		 * When the qual is CurrentOfExpr, the path that we just added is the
@@ -554,7 +554,7 @@ create_tidscan_paths(PlannerInfo *root, RelOptInfo *rel)
 		add_path(rel, (Path *) create_tidrangescan_path(root, rel,
 														tidrangequals,
 														required_outer,
-														0));
+														0, NIL));
 
 		/* If appropriate, consider parallel tid range scan. */
 		if (rel->consider_parallel && required_outer == NULL)
@@ -569,7 +569,7 @@ create_tidscan_paths(PlannerInfo *root, RelOptInfo *rel)
 																		rel,
 																		tidrangequals,
 																		required_outer,
-																		parallel_workers));
+																		parallel_workers, NIL));
 		}
 	}
 

@@ -35,6 +35,7 @@
 #include "executor/instrument.h"
 #include "executor/nodeHash.h"
 #include "executor/nodeHashjoin.h"
+#include "lib/bloomfilter.h"
 #include "miscadmin.h"
 #include "port/pg_bitutils.h"
 #include "utils/lsyscache.h"
@@ -81,6 +82,17 @@ static bool ExecParallelHashTuplePrealloc(HashJoinTable hashtable,
 static void ExecParallelHashMergeCounters(HashJoinTable hashtable);
 static void ExecParallelHashCloseBatchAccessors(HashJoinTable hashtable);
 
+static bloom_filter *bloom_create_probe(int64 total_elems, int bloom_work_mem, uint64 seed);
+
+
+/*
+ * Sizing for probe-oriented Bloom filters. A small bitset floor, so small
+ * build sides stay resident in CPU cache, and a low cap on the number of hash
+ * functions, since each is an independent (potentially cache-missing) bitset
+ * access on every probe.
+ */
+#define BLOOM_PROBE_MIN_BITSET_BYTES	1024
+#define BLOOM_PROBE_MAX_HASH_FUNCS		4
 
 /* ----------------------------------------------------------------
  *		ExecHash
@@ -183,6 +195,37 @@ MultiExecPrivateHash(HashState *node)
 			/* normal case with a non-null join key */
 			uint32		hashvalue = DatumGetUInt32(hashdatum);
 			int			bucketNumber;
+
+			/*
+			 * Add the tuple to the pushed-down bloom filter (if any). Do it
+			 * here (rather than in ExecHashTableInsert) so that each tuple is
+			 * added exactly once, even if it later gets shuffled between
+			 * batches by ExecHashIncreaseNumBatches. The filter would still
+			 * produce the same matches, but it costs CPU.
+			 */
+			if (node->bloom_filter != NULL)
+				bloom_add_element(node->bloom_filter,
+								  (unsigned char *) &hashvalue,
+								  sizeof(hashvalue));
+
+			/*
+			 * Likewise for the optional per-key filters, using the per-key
+			 * (single-key) hash ExprStates.  Same econtext as the combined
+			 * hash above (ecxt_outertuple is the just-fetched inner tuple).
+			 */
+			for (int k = 0; k < node->perkey_nfilters; k++)
+			{
+				bool		keyisnull;
+				uint32		keyhash;
+
+				keyhash = DatumGetUInt32(ExecEvalExprSwitchContext(node->perkey_hash[k],
+																   econtext,
+																   &keyisnull));
+				if (!keyisnull)
+					bloom_add_element(node->perkey_filters[k],
+									  (unsigned char *) &keyhash,
+									  sizeof(keyhash));
+			}
 
 			bucketNumber = ExecHashGetSkewBucket(hashtable, hashvalue);
 			if (bucketNumber != INVALID_SKEW_BUCKET_NO)
@@ -663,6 +706,71 @@ ExecHashTableCreate(HashState *state)
 			ExecHashBuildSkewHash(state, hashtable, node, num_skew_mcvs);
 
 		MemoryContextSwitchTo(oldcxt);
+	}
+
+	/*
+	 * If we managed to push down a bloom filter to the outer side of the hash
+	 * join, allocate it with the hash table.
+	 *
+	 * Whether we build the filter is decided by try_push_bloom_filter at plan
+	 * time. If there's no recipient node, or when the GUC is set to off,
+	 * state->want_bloom_filter is false.
+	 *
+	 * XXX We don't do this for parallel hash joins, to keep the PoC simple.
+	 * The filter would need to live in shared memory, and the workers would
+	 * need to coordinate to build it. But it's doable.
+	 *
+	 * The filter lives in the HashState, in the hashCtx memory context. That
+	 * means it gets destroyed along with the hashtable, and it follows the
+	 * same lifecycle (during rescans, etc.).
+	 *
+	 * The size of the filter is bounded by both the estimated inner row count
+	 * and a fixed fraction of work_mem.  We use bloom_create_probe(), which
+	 * (unlike bloom_create) sizes the bitset to the build side without a 1MB
+	 * floor and caps the hash-function count, so the filter stays small
+	 * enough to be cache-resident and cheap to probe per tuple.
+	 *
+	 * XXX This may need more thought. If we limit bloom_work_mem too much,
+	 * the false positive rate will get too bad, and we won't filter enough
+	 * tuples for the filter to pay for itself. The adaptive behavior will
+	 * eventually skip the filter, but we could just not build it at all? Or
+	 * do we want to take the chance, sometimes?
+	 */
+	if (state->want_bloom_filter)
+	{
+		MemoryContext oldctx;
+		int			bloom_work_mem;
+
+		/* only serial hashjoins for now, init only once */
+		Assert(hashtable->parallel_state == NULL);
+		Assert(state->bloom_filter == NULL);
+
+		state->bloomFilterChecked = 0;
+		state->bloomFilterRejected = 0;
+
+		/* Cap bloom filter at ~1/8 of work_mem, but not less than 1MB. */
+		bloom_work_mem = Max(1024, work_mem / 8);
+
+		oldctx = MemoryContextSwitchTo(hashtable->hashCxt);
+		state->bloom_filter = bloom_create_probe((int64) Max(rows, 1.0),
+												 bloom_work_mem, 0);
+
+		/*
+		 * If a recipient opted in, also build one filter per join key (in
+		 * addition to the combined one above).  These let a recipient test an
+		 * individual key column on its own; they are less selective than the
+		 * combined filter, so they are built only on demand.
+		 */
+		if (state->want_perkey_bloom)
+		{
+			state->perkey_filters = palloc_array(struct bloom_filter *,
+												 state->perkey_nfilters);
+			for (int i = 0; i < state->perkey_nfilters; i++)
+				state->perkey_filters[i] = bloom_create_probe((int64) Max(rows, 1.0),
+															  bloom_work_mem, 0);
+		}
+
+		MemoryContextSwitchTo(oldctx);
 	}
 
 	return hashtable;
@@ -3688,4 +3796,32 @@ get_hash_memory_limit(void)
 	mem_limit = Min(mem_limit, (double) SIZE_MAX);
 
 	return (size_t) mem_limit;
+}
+
+/*
+ * Create a Bloom filter tuned for repeated per-tuple probing within a query,
+ * rather than one built once and checked in bulk.
+ *
+ * bloom_create's sizing is a poor fit for that use in two ways, both of which
+ * make each probe expensive:
+ *
+ * - Size.  bloom_create enforces a 1MB minimum bitset, which for a typical
+ *   build side does not fit in the CPU's L2 cache, so every probe of a large
+ *   scan incurs cache misses.  Here we drop that floor and let the bitset be
+ *   sized to the build side, so small build sides yield cache-resident filters.
+ *
+ * - Hash functions.  Each of the k hash functions is an independent random
+ *   access into the bitset, so a high k means many (cache-missing) accesses per
+ *   probe.  We cap k well below MAX_HASH_FUNCS, trading a slightly higher
+ *   false-positive rate for much cheaper probes.
+ *
+ * This mirrors the "small fixed number of hash functions" and "keep the filter
+ * within the L2 cache" choices in the bottom-up Bloom filter paper.
+ */
+bloom_filter *
+bloom_create_probe(int64 total_elems, int bloom_work_mem, uint64 seed)
+{
+	return bloom_create_custom(total_elems, bloom_work_mem,
+							   BLOOM_PROBE_MIN_BITSET_BYTES,
+							   BLOOM_PROBE_MAX_HASH_FUNCS, seed);
 }

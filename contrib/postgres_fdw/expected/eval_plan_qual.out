@@ -49,7 +49,7 @@ LockRows
               Filter: (l.v = 'foo'::text)                                    
         ->  Foreign Scan on public.ft                                        
               Output: ft.*, ft.i                                             
-              Remote SQL: SELECT i, v FROM public.t WHERE ((i = $1::integer))
+              Remote SQL: SELECT i, v FROM public.t WHERE (($1::integer = i))
 (10 rows)
 
 i|v
@@ -73,7 +73,7 @@ LockRows
   Output: a.i, a.ctid, fb.*, fc.*                                                                                                                                                                                       
   ->  Nested Loop                                                                                                                                                                                                       
         Output: a.i, a.ctid, fb.*, fc.*                                                                                                                                                                                 
-        Join Filter: (fb.i = a.i)                                                                                                                                                                                       
+        Join Filter: (a.i = fb.i)                                                                                                                                                                                       
         ->  Foreign Scan                                                                                                                                                                                                
               Output: fb.*, fb.i, fc.*, fc.i                                                                                                                                                                            
               Relations: (public.fb) INNER JOIN (public.fc)                                                                                                                                                             

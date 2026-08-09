@@ -61,6 +61,7 @@ extern PGDLLIMPORT join_search_hook_type join_search_hook;
 extern RelOptInfo *make_one_rel(PlannerInfo *root, List *joinlist);
 extern RelOptInfo *standard_join_search(PlannerInfo *root, int levels_needed,
 										List *initial_rels);
+extern List *find_bloom_filter_combinations(PlannerInfo *root, RelOptInfo *rel);
 
 extern void generate_gather_paths(PlannerInfo *root, RelOptInfo *rel,
 								  bool override_rows);
@@ -104,6 +105,7 @@ extern void add_paths_to_joinrel(PlannerInfo *root, RelOptInfo *joinrel,
 								 RelOptInfo *outerrel, RelOptInfo *innerrel,
 								 JoinType jointype, SpecialJoinInfo *sjinfo,
 								 List *restrictlist);
+extern bool bloom_join_side_preserved(JoinType jointype, bool to_outer);
 
 /*
  * joinrels.c
@@ -117,6 +119,7 @@ extern Relids add_outer_joins_to_relids(PlannerInfo *root, Relids input_relids,
 										List **pushed_down_joins);
 extern bool have_join_order_restriction(PlannerInfo *root,
 										RelOptInfo *rel1, RelOptInfo *rel2);
+extern List *enumerate_bloom_filter_build_relids(PlannerInfo *root);
 extern void mark_dummy_rel(RelOptInfo *rel);
 extern void init_dummy_sjinfo(SpecialJoinInfo *sjinfo, Relids left_relids,
 							  Relids right_relids);
@@ -163,6 +166,11 @@ extern List *generate_join_implied_equalities(PlannerInfo *root,
 											  Relids outer_relids,
 											  RelOptInfo *inner_rel,
 											  SpecialJoinInfo *sjinfo);
+extern List *simple_generate_join_implied_equalities(PlannerInfo *root,
+													 Relids join_relids,
+													 Relids outer_relids,
+													 SimpleRelOptInfo *inner_rel,
+													 SpecialJoinInfo *sjinfo);
 extern List *generate_join_implied_equalities_for_ecs(PlannerInfo *root,
 													  List *eclasses,
 													  Relids join_relids,
@@ -198,6 +206,11 @@ extern List *generate_implied_equalities_for_column(PlannerInfo *root,
 													ec_matches_callback_type callback,
 													void *callback_arg,
 													Relids prohibited_rels);
+extern List *generate_implied_equalities_for_all_columns(PlannerInfo *root,
+														 RelOptInfo *rel,
+														 ec_matches_callback_type callback,
+														 void *callback_arg,
+														 Relids prohibited_rels);
 extern bool have_relevant_eclass_joinclause(PlannerInfo *root,
 											RelOptInfo *rel1, RelOptInfo *rel2);
 extern bool has_relevant_eclass_joinclause(PlannerInfo *root,

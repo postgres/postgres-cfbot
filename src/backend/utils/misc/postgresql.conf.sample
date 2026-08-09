@@ -451,6 +451,7 @@
 #enable_distinct_reordering = on
 #enable_self_join_elimination = on
 #enable_eager_aggregate = on
+#enable_hashjoin_bloom = on
 
 # - Planner Cost Constants -
 
@@ -487,6 +488,10 @@
 
 # - Other Planner Options -
 
+#bloom_filter_pushdown_max = 3                     # range 0-10
+#bloom_filter_pushdown_threshold = 0.3             # range 0.0-1.0
+#bloom_filter_pushdown_max_build_relids = 3      # range 1-100
+#bloom_filter_pushdown_max_build_sets = 100      # range 1-INT_MAX
 #default_statistics_target = 100        # range 1-10000
 #constraint_exclusion = partition       # on, off, or partition
 #cursor_tuple_fraction = 0.1            # range 0.0-1.0

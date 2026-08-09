@@ -27,25 +27,27 @@ SELECT * FROM jo_fact f
 	LEFT JOIN jo_dim1 d1 ON f.dim1_id = d1.id
 	LEFT JOIN jo_dim2 d2 ON f.dim2_id = d2.id
 	WHERE val1 = 1 AND val2 = 1;
-                QUERY PLAN                
-------------------------------------------
+                         QUERY PLAN                         
+------------------------------------------------------------
  Hash Join
-   Hash Cond: (f.dim1_id = d1.id)
-   ->  Hash Join
-         Hash Cond: (f.dim2_id = d2.id)
-         ->  Seq Scan on jo_fact f
-         ->  Hash
-               ->  Seq Scan on jo_dim2 d2
-                     Filter: (val2 = 1)
+   Hash Cond: ((f.dim1_id = d1.id) AND (f.dim2_id = d2.id))
+   ->  Seq Scan on jo_fact f
+         Bloom Filter 1: keys=(dim1_id, dim2_id)
    ->  Hash
-         ->  Seq Scan on jo_dim1 d1
-               Filter: (val1 = 1)
+         Bloom Filter 1
+         ->  Nested Loop
+               ->  Seq Scan on jo_dim1 d1
+                     Filter: (val1 = 1)
+               ->  Materialize
+                     ->  Seq Scan on jo_dim2 d2
+                           Filter: (val2 = 1)
  Generated Plan Advice:
-   JOIN_ORDER(f d2 d1)
-   HASH_JOIN(d2 d1)
-   SEQ_SCAN(f d2 d1)
+   JOIN_ORDER(f (d1 d2))
+   NESTED_LOOP_MATERIALIZE(d2)
+   HASH_JOIN((d1 d2))
+   SEQ_SCAN(f d1 d2)
    NO_GATHER(f d1 d2)
-(16 rows)
+(18 rows)
 
 -- Force a few different join orders. Some of these are very inefficient,
 -- but the planner considers them all viable.
@@ -145,7 +147,9 @@ SELECT * FROM jo_fact f
  Hash Join
    Hash Cond: ((f.dim1_id = d1.id) AND (f.dim2_id = d2.id))
    ->  Seq Scan on jo_fact f
+         Bloom Filter 1: keys=(dim1_id, dim2_id)
    ->  Hash
+         Bloom Filter 1
          ->  Nested Loop
                ->  Seq Scan on jo_dim1 d1
                      Filter: (val1 = 1)
@@ -160,7 +164,7 @@ SELECT * FROM jo_fact f
    HASH_JOIN((d1 d2))
    SEQ_SCAN(f d1 d2)
    NO_GATHER(f d1 d2)
-(18 rows)
+(20 rows)
 
 SET LOCAL pg_plan_advice.advice = 'join_order(f {d1 d2})';
 EXPLAIN (COSTS OFF, PLAN_ADVICE)
@@ -173,7 +177,9 @@ SELECT * FROM jo_fact f
  Hash Join
    Hash Cond: ((f.dim1_id = d1.id) AND (f.dim2_id = d2.id))
    ->  Seq Scan on jo_fact f
+         Bloom Filter 1: keys=(dim1_id, dim2_id)
    ->  Hash
+         Bloom Filter 1
          ->  Nested Loop
                ->  Seq Scan on jo_dim1 d1
                      Filter: (val1 = 1)
@@ -188,7 +194,7 @@ SELECT * FROM jo_fact f
    HASH_JOIN((d1 d2))
    SEQ_SCAN(f d1 d2)
    NO_GATHER(f d1 d2)
-(18 rows)
+(20 rows)
 
 COMMIT;
 -- Force a join order by mentioning just a prefix of the join list.
@@ -292,7 +298,7 @@ SELECT * FROM jo_fact f
 --------------------------------------------------------------
  Nested Loop
    Disabled: true
-   Join Filter: ((d1.id = f.dim1_id) AND (d2.id = f.dim2_id))
+   Join Filter: ((f.dim1_id = d1.id) AND (f.dim2_id = d2.id))
    ->  Nested Loop
          ->  Seq Scan on jo_dim1 d1
                Filter: (val1 = 1)

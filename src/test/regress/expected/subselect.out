@@ -3525,9 +3525,11 @@ SELECT * FROM onek t1, lateral (SELECT * FROM onek t2 WHERE t2.ten IN (values (t
    ->  Hash Semi Join
          Hash Cond: (t2.ten = "*VALUES*".column1)
          ->  Seq Scan on onek t2
+               Bloom Filter 1: keys=(ten)
          ->  Hash
+               Bloom Filter 1
                ->  Values Scan on "*VALUES*"
-(7 rows)
+(9 rows)
 
 -- VtA causes the whole expression to be evaluated as a constant
 EXPLAIN (COSTS OFF)

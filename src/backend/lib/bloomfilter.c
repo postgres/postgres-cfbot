@@ -84,7 +84,8 @@ static inline uint32 mod_m(uint32 val, uint64 m);
  * 0.  Callers can also use a pseudo-random seed, eg from pg_prng_uint64().
  */
 bloom_filter *
-bloom_create(int64 total_elems, int bloom_work_mem, uint64 seed)
+bloom_create_custom(int64 total_elems, int bloom_work_mem,
+					  uint64 min_bitset_bytes, int max_hash_funcs, uint64 seed)
 {
 	bloom_filter *filter;
 	int			bloom_power;
@@ -99,7 +100,7 @@ bloom_create(int64 total_elems, int bloom_work_mem, uint64 seed)
 	 * false positive rate still won't exceed 2% in almost all cases.
 	 */
 	bitset_bytes = Min(bloom_work_mem * UINT64CONST(1024), total_elems * 2);
-	bitset_bytes = Max(1024 * 1024, bitset_bytes);
+	bitset_bytes = Max(min_bitset_bytes, bitset_bytes);
 
 	/*
 	 * Size in bits should be the highest power of two <= target.  bitset_bits
@@ -112,11 +113,20 @@ bloom_create(int64 total_elems, int bloom_work_mem, uint64 seed)
 	/* Allocate bloom filter with unset bitset */
 	filter = palloc0(offsetof(bloom_filter, bitset) +
 					 sizeof(unsigned char) * bitset_bytes);
-	filter->k_hash_funcs = optimal_k(bitset_bits, total_elems);
+	filter->k_hash_funcs = Min(optimal_k(bitset_bits, total_elems),
+							   max_hash_funcs);
 	filter->seed = seed;
 	filter->m = bitset_bits;
 
 	return filter;
+}
+
+bloom_filter *
+bloom_create(int64 total_elems, int bloom_work_mem, uint64 seed)
+{
+	return bloom_create_custom(total_elems, bloom_work_mem,
+								 UINT64CONST(1024) * 1024, MAX_HASH_FUNCS,
+								 seed);
 }
 
 /*
@@ -190,6 +200,25 @@ bloom_prop_bits_set(bloom_filter *filter)
 	uint64		bits_set = pg_popcount((char *) filter->bitset, bitset_bytes);
 
 	return bits_set / (double) filter->m;
+}
+
+/*
+ * Total bitset size, in bits.  Useful for EXPLAIN instrumentation:
+ * divide by 8 to get the bitset's memory footprint in bytes.
+ */
+uint64
+bloom_total_bits(bloom_filter *filter)
+{
+	return filter->m;
+}
+
+/*
+ * Number of hash functions in use.
+ */
+int
+bloom_hash_funcs(bloom_filter *filter)
+{
+	return filter->k_hash_funcs;
 }
 
 /*

@@ -650,6 +650,680 @@ join_is_legal(PlannerInfo *root, RelOptInfo *rel1, RelOptInfo *rel2,
 }
 
 /*
+ * simple_lateral_relids
+ *	  Compute the lateral_relids of an arbitrary set of base relations, that
+ *	  is, the set of rels *outside* "relids" that members of "relids" have
+ *	  LATERAL references to.
+ *
+ * This mirrors how build_join_rel()/min_join_parameterization() derive a
+ * joinrel's lateral_relids from its inputs: take the union of the member base
+ * relations' (already transitively-closed) lateral_relids and remove the
+ * members themselves.  It lets join_is_legal_relids() reason about LATERAL
+ * without having a RelOptInfo for a multi-rel set.
+ */
+static Relids
+simple_lateral_relids(PlannerInfo *root, Relids relids)
+{
+	Relids		result = NULL;
+	int			i;
+
+	i = -1;
+	while ((i = bms_next_member(relids, i)) >= 0)
+	{
+		RelOptInfo *rel = root->simple_rel_array[i];
+
+		/*
+		 * Relids should contain base relations only, and those should all
+		 * have a valid RelOptInfo already.
+		 */
+		Assert(rel != NULL);
+
+		result = bms_add_members(result, rel->lateral_relids);
+	}
+
+	return bms_del_members(result, relids);
+}
+
+/*
+ * simple_direct_lateral_relids
+ *	  Like relids_lateral_relids(), but for direct_lateral_relids (references
+ *	  that are direct, i.e. not through an intermediate rel).  See
+ *	  build_join_rel(), which likewise unions the inputs' direct_lateral_relids
+ *	  and removes the join's own relids.
+ */
+static Relids
+simple_direct_lateral_relids(PlannerInfo *root, Relids relids)
+{
+	Relids		result = NULL;
+	int			i;
+
+	i = -1;
+	while ((i = bms_next_member(relids, i)) >= 0)
+	{
+		RelOptInfo *rel = root->simple_rel_array[i];
+
+		/*
+		 * Relids should contain base relations only, and those should all
+		 * have a valid RelOptInfo already.
+		 */
+		Assert(rel != NULL);
+
+		result = bms_add_members(result, rel->direct_lateral_relids);
+	}
+
+	return bms_del_members(result, relids);
+}
+
+/*
+ * simple_min_join_parameterization
+ *		Like min_join_parameterization(), but operates on Relids directly,
+ *		without having RelOptInfo.
+ */
+static Relids
+simple_min_join_parameterization(PlannerInfo *root, Relids joinrelids,
+								 Relids lateral_relids1, Relids lateral_relids2)
+{
+	Relids		result = NULL;
+
+	result = bms_union(lateral_relids1, lateral_relids2);
+	result = bms_del_members(result, joinrelids);
+
+	return result;
+}
+
+/*
+ * simple_join_is_legal
+ *	  Relids-only variant of join_is_legal(), used by the Bloom-filter
+ *	  build-side enumeration to decide whether a set of base relations can
+ *	  legally be joined into a single join relation, without building any
+ *	  RelOptInfo or generating paths.
+ *
+ * This mirrors the special-join and LATERAL legality logic of join_is_legal(),
+ * operating purely on relid sets.  One simplification is made relative to the
+ * real function:
+ *
+ *	- Semijoin unique-ification, which join_is_legal() probes via
+ *	  create_unique_paths(), is approximated by the sjinfo's semi_can_btree /
+ *	  semi_can_hash flags (create_unique_paths() ultimately succeeds only when
+ *	  one of those holds; see planner.c).
+ *
+ * LATERAL constraints are handled the same way as in join_is_legal(), using
+ * lateral_relids / direct_lateral_relids computed for the (possibly multi-rel)
+ * input sets by relids_lateral_relids() / relids_direct_lateral_relids().
+ *
+ * The result is purely advisory: it is only used to decide which build sides
+ * to consider for Bloom filters.  Any filter that turns out not to be
+ * realizable is later rejected by compute_join_expected_filters(), so it is
+ * safe for this test to be conservative (an over-permissive or over-strict
+ * answer only affects planning effort, never correctness).
+ *
+ * XXX This could/shoult be adopted to use SimpleRelOptInfo instead of the
+ * raw relids (and also the lateral_relids/direct_lateral_relids fields).
+ */
+static bool
+simple_join_is_legal(PlannerInfo *root, Relids relids1, Relids relids2,
+					 Relids joinrelids)
+{
+	SpecialJoinInfo *match_sjinfo;
+	bool		reversed;
+	bool		unique_ified;
+	bool		must_be_leftjoin;
+	ListCell   *l;
+
+	match_sjinfo = NULL;
+	reversed = false;
+	unique_ified = false;
+	must_be_leftjoin = false;
+
+	foreach(l, root->join_info_list)
+	{
+		SpecialJoinInfo *sjinfo = (SpecialJoinInfo *) lfirst(l);
+
+		/*
+		 * This special join is not relevant unless its RHS overlaps the
+		 * proposed join.  (Check this first as a fast path for dismissing
+		 * most irrelevant SJs quickly.)
+		 */
+		if (!bms_overlap(sjinfo->min_righthand, joinrelids))
+			continue;
+
+		/*
+		 * Also, not relevant if proposed join is fully contained within RHS
+		 * (ie, we're still building up the RHS).
+		 */
+		if (bms_is_subset(joinrelids, sjinfo->min_righthand))
+			continue;
+
+		/*
+		 * Also, not relevant if SJ is already done within either input.
+		 */
+		if (bms_is_subset(sjinfo->min_lefthand, relids1) &&
+			bms_is_subset(sjinfo->min_righthand, relids1))
+			continue;
+		if (bms_is_subset(sjinfo->min_lefthand, relids2) &&
+			bms_is_subset(sjinfo->min_righthand, relids2))
+			continue;
+
+		/*
+		 * If it's a semijoin and we already joined the RHS to any other rels
+		 * within either input, then we must have unique-ified the RHS at that
+		 * point (see below).  Therefore the semijoin is no longer relevant in
+		 * this join path.
+		 */
+		if (sjinfo->jointype == JOIN_SEMI)
+		{
+			if (bms_is_subset(sjinfo->syn_righthand, relids1) &&
+				!bms_equal(sjinfo->syn_righthand, relids1))
+				continue;
+			if (bms_is_subset(sjinfo->syn_righthand, relids2) &&
+				!bms_equal(sjinfo->syn_righthand, relids2))
+				continue;
+		}
+
+		/*
+		 * If one input contains min_lefthand and the other contains
+		 * min_righthand, then we can perform the SJ at this join.
+		 *
+		 * Reject if we get matches to more than one SJ; that implies we're
+		 * considering something that's not really valid.
+		 */
+		if (bms_is_subset(sjinfo->min_lefthand, relids1) &&
+			bms_is_subset(sjinfo->min_righthand, relids2))
+		{
+			if (match_sjinfo)
+				return false;	/* invalid join path */
+			match_sjinfo = sjinfo;
+			reversed = false;
+		}
+		else if (bms_is_subset(sjinfo->min_lefthand, relids2) &&
+				 bms_is_subset(sjinfo->min_righthand, relids1))
+		{
+			if (match_sjinfo)
+				return false;	/* invalid join path */
+			match_sjinfo = sjinfo;
+			reversed = true;
+		}
+		else if (sjinfo->jointype == JOIN_SEMI &&
+				 bms_equal(sjinfo->syn_righthand, relids2) &&
+				 (sjinfo->semi_can_btree || sjinfo->semi_can_hash)) /* XXX
+																	 * create_unique_paths */
+		{
+			/* Unique-ified semijoin RHS (see join_is_legal). */
+			/*----------
+			 * For a semijoin, we can join the RHS to anything else by
+			 * unique-ifying the RHS (if the RHS can be unique-ified).
+			 * We will only get here if we have the full RHS but less
+			 * than min_lefthand on the LHS.
+			 *
+			 * The reason to consider such a join path is exemplified by
+			 *	SELECT ... FROM a,b WHERE (a.x,b.y) IN (SELECT c1,c2 FROM c)
+			 * If we insist on doing this as a semijoin we will first have
+			 * to form the cartesian product of A*B.  But if we unique-ify
+			 * C then the semijoin becomes a plain innerjoin and we can join
+			 * in any order, eg C to A and then to B.  When C is much smaller
+			 * than A and B this can be a huge win.  So we allow C to be
+			 * joined to just A or just B here, and then make_join_rel has
+			 * to handle the case properly.
+			 *
+			 * Note that actually we'll allow unique-ified C to be joined to
+			 * some other relation D here, too.  That is legal, if usually not
+			 * very sane, and this routine is only concerned with legality not
+			 * with whether the join is good strategy.
+			 *----------
+			 */
+			if (match_sjinfo)
+				return false;	/* invalid join path */
+			match_sjinfo = sjinfo;
+			reversed = false;
+			unique_ified = true;
+		}
+		else if (sjinfo->jointype == JOIN_SEMI &&
+				 bms_equal(sjinfo->syn_righthand, relids1) &&
+				 (sjinfo->semi_can_btree || sjinfo->semi_can_hash)) /* XXX
+																	 * create_unique_paths */
+		{
+			/* Reversed unique-ified semijoin case. */
+			if (match_sjinfo)
+				return false;	/* invalid join path */
+			match_sjinfo = sjinfo;
+			reversed = true;
+			unique_ified = true;
+		}
+		else
+		{
+			/* See the corresponding branch in join_is_legal. */
+			/*
+			 * Otherwise, the proposed join overlaps the RHS but isn't a valid
+			 * implementation of this SJ.  But don't panic quite yet: the RHS
+			 * violation might have occurred previously, in one or both input
+			 * relations, in which case we must have previously decided that
+			 * it was OK to commute some other SJ with this one.  If we need
+			 * to perform this join to finish building up the RHS, rejecting
+			 * it could lead to not finding any plan at all.  (This can occur
+			 * because of the heuristics elsewhere in this file that postpone
+			 * clauseless joins: we might not consider doing a clauseless join
+			 * within the RHS until after we've performed other, validly
+			 * commutable SJs with one or both sides of the clauseless join.)
+			 * This consideration boils down to the rule that if both inputs
+			 * overlap the RHS, we can allow the join --- they are either
+			 * fully within the RHS, or represent previously-allowed joins to
+			 * rels outside it.
+			 */
+			if (bms_overlap(relids1, sjinfo->min_righthand) &&
+				bms_overlap(relids2, sjinfo->min_righthand))
+				continue;		/* assume valid previous violation of RHS */
+
+			/*
+			 * The proposed join could still be legal, but only if we're
+			 * allowed to associate it into the RHS of this SJ.  That means
+			 * this SJ must be a LEFT join (not SEMI or ANTI, and certainly
+			 * not FULL) and the proposed join must not overlap the LHS.
+			 */
+			if (sjinfo->jointype != JOIN_LEFT ||
+				bms_overlap(joinrelids, sjinfo->min_lefthand))
+				return false;	/* invalid join path */
+
+			/*
+			 * To be valid, the proposed join must be a LEFT join; otherwise
+			 * it can't associate into this SJ's RHS.  But we may not yet have
+			 * found the SpecialJoinInfo matching the proposed join, so we
+			 * can't test that yet.  Remember the requirement for later.
+			 */
+			must_be_leftjoin = true;
+		}
+	}
+
+	/*
+	 * Fail if we violated some SJ's RHS and didn't match to a strict LEFT SJ.
+	 */
+	if (must_be_leftjoin &&
+		(match_sjinfo == NULL ||
+		 match_sjinfo->jointype != JOIN_LEFT ||
+		 !match_sjinfo->lhs_strict))
+		return false;			/* invalid join path */
+
+	/*
+	 * We also have to check for constraints imposed by LATERAL references.
+	 * This mirrors the corresponding logic in join_is_legal(), except that we
+	 * derive the input sets' lateral_relids / direct_lateral_relids from
+	 * their member base relations rather than from a prebuilt RelOptInfo.
+	 */
+	if (root->hasLateralRTEs)
+	{
+		Relids		lateral_relids1 = simple_lateral_relids(root, relids1);
+		Relids		lateral_relids2 = simple_lateral_relids(root, relids2);
+		bool		lateral_fwd;
+		bool		lateral_rev;
+		Relids		join_lateral_rels;
+
+		/*
+		 * The proposed rels could each contain lateral references to the
+		 * other, in which case the join is impossible.  If there are lateral
+		 * references in just one direction, then the join has to be done with
+		 * a nestloop with the lateral referencer on the inside.  If the join
+		 * matches an SJ that cannot be implemented by such a nestloop, the
+		 * join is impossible.
+		 *
+		 * Also, if the lateral reference is only indirect, we should reject
+		 * the join; whatever rel(s) the reference chain goes through must be
+		 * joined to first.
+		 */
+		lateral_fwd = bms_overlap(relids1, lateral_relids2);
+		lateral_rev = bms_overlap(relids2, lateral_relids1);
+		if (lateral_fwd && lateral_rev)
+			return false;		/* have lateral refs in both directions */
+		if (lateral_fwd)
+		{
+			/* has to be implemented as nestloop with relids1 on left */
+			if (match_sjinfo &&
+				(reversed ||
+				 unique_ified ||
+				 match_sjinfo->jointype == JOIN_FULL))
+				return false;	/* not implementable as nestloop */
+			/* check there is a direct reference from relids2 to relids1 */
+			if (!bms_overlap(relids1,
+							 simple_direct_lateral_relids(root, relids2)))
+				return false;	/* only indirect refs, so reject */
+		}
+		else if (lateral_rev)
+		{
+			/* has to be implemented as nestloop with relids2 on left */
+			if (match_sjinfo &&
+				(!reversed ||
+				 unique_ified ||
+				 match_sjinfo->jointype == JOIN_FULL))
+				return false;	/* not implementable as nestloop */
+			/* check there is a direct reference from relids1 to relids2 */
+			if (!bms_overlap(relids2,
+							 simple_direct_lateral_relids(root, relids1)))
+				return false;	/* only indirect refs, so reject */
+		}
+
+		/*
+		 * LATERAL references could also cause problems later on if we accept
+		 * this join: if the join's minimum parameterization includes any rels
+		 * that would have to be on the inside of an outer join with this join
+		 * rel, then it's never going to be possible to build the complete
+		 * query using this join.  We should reject this join not only because
+		 * it'll save work, but because if we don't, the clauseless-join
+		 * heuristics might think that legality of this join means that some
+		 * other join rel need not be formed, and that could lead to failure
+		 * to find any plan at all.  We have to consider not only rels that
+		 * are directly on the inner side of an OJ with the joinrel, but also
+		 * ones that are indirectly so, so search to find all such rels.
+		 */
+		join_lateral_rels = simple_min_join_parameterization(root, joinrelids,
+															 lateral_relids1, lateral_relids2);
+		if (join_lateral_rels)
+		{
+			Relids		join_plus_rhs = bms_copy(joinrelids);
+			bool		more;
+
+			do
+			{
+				more = false;
+				foreach(l, root->join_info_list)
+				{
+					SpecialJoinInfo *sjinfo = (SpecialJoinInfo *) lfirst(l);
+
+					/* ignore full joins --- their ordering is predetermined */
+					if (sjinfo->jointype == JOIN_FULL)
+						continue;
+
+					if (bms_overlap(sjinfo->min_lefthand, join_plus_rhs) &&
+						!bms_is_subset(sjinfo->min_righthand, join_plus_rhs))
+					{
+						join_plus_rhs = bms_add_members(join_plus_rhs,
+														sjinfo->min_righthand);
+						more = true;
+					}
+				}
+			} while (more);
+			if (bms_overlap(join_plus_rhs, join_lateral_rels))
+				return false;	/* will not be able to join to some RHS rel */
+		}
+	}
+
+	/* Otherwise, it's a valid join */
+	return true;
+}
+
+/*
+ * simple_have_relevant_joinclause
+ *	  Is there a join clause (or join-order restriction) linking any base
+ *	  relation in relids1 to any base relation in relids2?
+ *
+ * This is a relids-level connectivity test built on top of the per-baserel
+ * have_relevant_joinclause() / have_join_order_restriction(), used by the
+ * Bloom-filter build-side enumeration.  It intentionally works pairwise over
+ * base relations, which may miss clauses that only become relevant once three
+ * or more relations are joined together; that merely causes the enumeration to
+ * under-generate candidate build sides, which is safe.
+ */
+static bool
+simple_have_relevant_joinclause(PlannerInfo *root, Relids relids1,
+								Relids relids2)
+{
+	int			r1;
+
+	r1 = -1;
+	while ((r1 = bms_next_member(relids1, r1)) >= 0)
+	{
+		RelOptInfo *rel1 = root->simple_rel_array[r1];
+		int			r2;
+
+		if (rel1 == NULL)
+			continue;
+
+		r2 = -1;
+		while ((r2 = bms_next_member(relids2, r2)) >= 0)
+		{
+			RelOptInfo *rel2 = root->simple_rel_array[r2];
+
+			if (rel2 == NULL)
+				continue;
+
+			if (have_relevant_joinclause(root, rel1, rel2) ||
+				have_join_order_restriction(root, rel1, rel2))
+				return true;
+		}
+	}
+
+	return false;
+}
+
+static SimpleRelOptInfo *
+make_simple_join_rel(Relids relids, double rows)
+{
+	SimpleRelOptInfo *rel = palloc0(sizeof(SimpleRelOptInfo));
+
+	rel->relids = relids;
+	rel->rows = rows;
+
+	rel->direct_lateral_relids = NULL;
+	rel->lateral_relids = NULL;
+	rel->joininfo = NIL;
+
+	return rel;
+}
+
+/*
+ * enumerate_bloom_filter_build_relids
+ *	  Enumerate the legal join relations (and single base relations) that
+ *	  could serve as the build side of a pushed-down hash-join Bloom filter.
+ *
+ * The result is a list of Relids.  Level-1 entries are the individual base
+ * relations; higher levels are unions that form a legal join relation and are
+ * connected by at least one join clause or join-order restriction.  This is a
+ * simplified, relids-only analogue of join_search_one_level() that builds no
+ * RelOptInfo and generates no paths.
+ *
+ * The list is cached in the PlannerInfo, since it is global to the query and
+ * is consulted once per base relation by find_interesting_bloom_filters().
+ *
+ * Returns NIL (and does no work) when the feature is disabled, when there are
+ * lateral references, or when the join problem is large enough that GEQO would
+ * be used, in order to bound planning cost.
+ *
+ * This is a simplified variant of the join search, and the generated list of
+ * join relids may be incomplete for several reasons. We don't even try to
+ * generate joins of more than BLOOM_MAX_BUILD_RELIDS baserels; in snowflake
+ * schemas this limits how many dimensions may push filter to the fact table.
+ * We also don't try to generate more than BLOOM_MAX_BUILD_SETS relids sets
+ * (this serves as a "budget").
+ *
+ * Furthermore, simple_have_relevant_joinclause considers only joins over
+ * pair-wise clauses. This will skip complex join clauses, i.e. clauses
+ * referencing three or more relations.
+ *
+ * XXX Should this use a different data structure other than a linked list?
+ * Preferably one that would allow (a) cheap duplicate detection, and (b)
+ * filtering by relid of a particular relation (joins it participates in).
+ * The list works well enough for small BLOOM_MAX_BUILD_SETS values, but
+ * with larger lists it might be expensive.
+ *
+ * XXX I think it might be possible to "prune" the enumerated joins by first
+ * checking which relations are worth receiving a pushed-down filter, and
+ * then only "building" filters for those "seeds". It does not matter if we
+ * join (F,D1,D2) or (F,(D1,D2)), what matters is the final relids set. So
+ * we could "add" the rels one by one to the fact table (and then we'd need
+ * to subtract it, to get the build side). Complex join clauses would break
+ * this logic (can't join tables one by one), but that case is not very
+ * common, I think. Seems like an acceptable trade off.
+ *
+ * XXX Could we "explore" the join graph a bit, and use that to determine
+ * interesting filters? Starjoin/snowflake joins should have fairly typical
+ * pattern, I think. Could help to "focus" which joins to enumerate. We
+ * might also calculate "join depth" for each "interesting" fact table,
+ * i.e. the maximum length of a join chain, or something. Could help as a
+ * heuristic to limit the enumeration.
+ */
+List *
+enumerate_bloom_filter_build_relids(PlannerInfo *root)
+{
+	List	  **levels;
+	List	   *result = NIL;
+	int			nbaserels = 0;
+	int			level;
+	int			i;
+
+	/* bail out if filter pushdown disabled */
+	if (!enable_hashjoin_bloom || bloom_filter_pushdown_max <= 0 ||
+		bloom_filter_pushdown_max_build_relids <= 0)
+		return NIL;
+
+	/* Return the cached answer if we've already computed it. */
+	if (root->bloom_build_relids_valid)
+		return root->bloom_build_relids;
+
+	root->bloom_build_relids_valid = true;
+	root->bloom_build_relids = NIL;
+
+	/*
+	 * Join levels, indexed by number of relids (starts at 1 for baserels,
+	 * same as in standard_join_search).
+	 */
+	levels = palloc0_array(List *, (bloom_filter_pushdown_max_build_relids + 1));
+
+	/* Level 1: each base relation on its own. */
+	levels[1] = NIL;
+	for (i = 1; i < root->simple_rel_array_size; i++)
+	{
+		RelOptInfo *rel = root->simple_rel_array[i];
+		SimpleRelOptInfo *srel;
+
+		if (rel == NULL || rel->reloptkind != RELOPT_BASEREL)
+			continue;
+
+		nbaserels++;
+		srel = make_simple_join_rel(bms_make_singleton(i), rel->rows);
+
+		levels[1] = lappend(levels[1], srel);
+	}
+
+	/*
+	 * Skip multi-rel enumeration for trivial or very large join problems, and
+	 * when there are LATERAL references (which complicate join legality in
+	 * ways simple_join_is_legal does not model yets).
+	 *
+	 * We still expose the level-1 singletons, so single-base-rel build sides
+	 * keep working as before; we simply don't combine them into join
+	 * relations.
+	 *
+	 * For large joins we would (a) spend too much effort here and (b) likely
+	 * fall back to GEQO, whose plans this speculative work would not help.
+	 */
+	if (nbaserels < 2 ||
+		(enable_geqo && nbaserels >= geqo_threshold))
+	{
+		root->bloom_build_relids = levels[1];
+		return root->bloom_build_relids;
+	}
+
+	result = list_copy(levels[1]);
+
+	/* Build higher levels by adding one base relation at a time. */
+	for (level = 2; level <= bloom_filter_pushdown_max_build_relids; level++)
+	{
+		ListCell   *lc;
+
+		levels[level] = NIL;
+
+		foreach(lc, levels[level - 1])
+		{
+			SimpleRelOptInfo *oldrel = (SimpleRelOptInfo *) lfirst(lc);
+			ListCell   *lc2;
+
+			foreach(lc2, levels[1])
+			{
+				SimpleRelOptInfo *joinrel;
+				SimpleRelOptInfo *singleton = (SimpleRelOptInfo *) lfirst(lc2);
+				int			addrel = bms_singleton_member(singleton->relids);
+				Relids		joinrelids;
+				ListCell   *lc3;
+				bool		dup;
+
+				/* The added rel must not already be part of the set. */
+				if (bms_is_member(addrel, oldrel->relids))
+					continue;
+
+				/* Must be connected by a join clause or order restriction. */
+				if (!simple_have_relevant_joinclause(root, oldrel->relids,
+													 singleton->relids))
+					continue;
+
+				joinrelids = bms_union(oldrel->relids, singleton->relids);
+
+				/* Skip if we already produced this set at this level. */
+				/* XXX should use a hash table with relids as a key, probably */
+				dup = false;
+				foreach(lc3, levels[level])
+				{
+					SimpleRelOptInfo *tmp = (SimpleRelOptInfo *) lfirst(lc3);
+					if (bms_equal(tmp->relids, joinrelids))
+					{
+						dup = true;
+						break;
+					}
+				}
+				if (dup)
+				{
+					bms_free(joinrelids);
+					continue;
+				}
+
+				/* Must form a legal join relation. */
+				if (!simple_join_is_legal(root, oldrel->relids, singleton->relids,
+										  joinrelids))
+				{
+					bms_free(joinrelids);
+					continue;
+				}
+
+				joinrel = make_simple_join_rel(joinrelids, 0);
+
+				/* XXX copied from build_join_rel */
+				{
+					List *restrictlist;
+					SpecialJoinInfo sjinfo_data;
+					SpecialJoinInfo *sjinfo;
+
+					sjinfo = &sjinfo_data;
+					init_dummy_sjinfo(sjinfo, oldrel->relids, singleton->relids);
+
+					restrictlist = simple_build_joinrel_restrictlist(root, joinrel,
+																	 oldrel, singleton,
+																	 sjinfo);
+
+					simple_build_joinrel_joinlist(joinrel, oldrel, singleton);
+
+					simple_set_joinrel_size_estimates(root, joinrel,
+													  oldrel, singleton,
+													  sjinfo, restrictlist);
+				}
+
+				levels[level] = lappend(levels[level], joinrel);
+				result = lappend(result, joinrel);
+
+				/*
+				 * Stop generating joins once we hit the maximum allowed
+				 * number of join relids (to keep the planning effort under
+				 * control).
+				 */
+				if (list_length(result) >= bloom_filter_pushdown_max_build_sets)
+				{
+					root->bloom_build_relids = result;
+					return result;
+				}
+			}
+		}
+	}
+
+	root->bloom_build_relids = result;
+	return result;
+}
+
+/*
  * init_dummy_sjinfo
  *    Populate the given SpecialJoinInfo for a plain inner join between the
  *    left and right relations specified by left_relids and right_relids

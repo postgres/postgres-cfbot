@@ -71,9 +71,17 @@ static List *subbuild_joinrel_restrictlist(PlannerInfo *root,
 										   RelOptInfo *input_rel,
 										   Relids both_input_relids,
 										   List *new_restrictlist);
+static List *simple_subbuild_joinrel_restrictlist(PlannerInfo *root,
+												  SimpleRelOptInfo *joinrel,
+												  SimpleRelOptInfo *input_rel,
+												  Relids both_input_relids,
+												  List *new_restrictlist);
 static List *subbuild_joinrel_joinlist(RelOptInfo *joinrel,
 									   List *joininfo_list,
 									   List *new_joininfo);
+static List *simple_subbuild_joinrel_joinlist(SimpleRelOptInfo *joinrel,
+											  List *joininfo_list,
+											  List *new_joininfo);
 static void set_foreign_rel_properties(RelOptInfo *joinrel,
 									   RelOptInfo *outer_rel, RelOptInfo *inner_rel);
 static void add_join_rel(PlannerInfo *root, RelOptInfo *joinrel);
@@ -1477,6 +1485,43 @@ build_joinrel_restrictlist(PlannerInfo *root,
 	return result;
 }
 
+List *
+simple_build_joinrel_restrictlist(PlannerInfo *root,
+								  SimpleRelOptInfo *joinrel,
+								  SimpleRelOptInfo *outer_rel,
+								  SimpleRelOptInfo *inner_rel,
+								  SpecialJoinInfo *sjinfo)
+{
+	List	   *result;
+	Relids		both_input_relids;
+
+	both_input_relids = bms_union(outer_rel->relids, inner_rel->relids);
+
+	/*
+	 * Collect all the clauses that syntactically belong at this level,
+	 * eliminating any duplicates (important since we will see many of the
+	 * same clauses arriving from both input relations).
+	 */
+	result = simple_subbuild_joinrel_restrictlist(root, joinrel, outer_rel,
+												  both_input_relids, NIL);
+	result = simple_subbuild_joinrel_restrictlist(root, joinrel, inner_rel,
+												  both_input_relids, result);
+
+	/*
+	 * Add on any clauses derived from EquivalenceClasses.  These cannot be
+	 * redundant with the clauses in the joininfo lists, so don't bother
+	 * checking.
+	 */
+	result = list_concat(result,
+						 simple_generate_join_implied_equalities(root,
+																 joinrel->relids,
+																 outer_rel->relids,
+																 inner_rel,
+																 sjinfo));
+
+	return result;
+}
+
 static void
 build_joinrel_joinlist(RelOptInfo *joinrel,
 					   RelOptInfo *outer_rel,
@@ -1491,6 +1536,24 @@ build_joinrel_joinlist(RelOptInfo *joinrel,
 	 */
 	result = subbuild_joinrel_joinlist(joinrel, outer_rel->joininfo, NIL);
 	result = subbuild_joinrel_joinlist(joinrel, inner_rel->joininfo, result);
+
+	joinrel->joininfo = result;
+}
+
+void
+simple_build_joinrel_joinlist(SimpleRelOptInfo *joinrel,
+							  SimpleRelOptInfo *outer_rel,
+							  SimpleRelOptInfo *inner_rel)
+{
+	List	   *result;
+
+	/*
+	 * Collect all the clauses that syntactically belong above this level,
+	 * eliminating any duplicates (important since we will see many of the
+	 * same clauses arriving from both input relations).
+	 */
+	result = simple_subbuild_joinrel_joinlist(joinrel, outer_rel->joininfo, NIL);
+	result = simple_subbuild_joinrel_joinlist(joinrel, inner_rel->joininfo, result);
 
 	joinrel->joininfo = result;
 }
@@ -1562,6 +1625,72 @@ subbuild_joinrel_restrictlist(PlannerInfo *root,
 }
 
 static List *
+simple_subbuild_joinrel_restrictlist(PlannerInfo *root,
+									 SimpleRelOptInfo *joinrel,
+									 SimpleRelOptInfo *input_rel,
+									 Relids both_input_relids,
+									 List *new_restrictlist)
+{
+	ListCell   *l;
+
+	foreach(l, input_rel->joininfo)
+	{
+		RestrictInfo *rinfo = (RestrictInfo *) lfirst(l);
+
+		if (bms_is_subset(rinfo->required_relids, joinrel->relids))
+		{
+			/*
+			 * This clause should become a restriction clause for the joinrel,
+			 * since it refers to no outside rels.  However, if it's a clone
+			 * clause then it might be too late to evaluate it, so we have to
+			 * check.  (If it is too late, just ignore the clause, taking it
+			 * on faith that another clone was or will be selected.)  Clone
+			 * clauses should always be outer-join clauses, so we compare
+			 * against both_input_relids.
+			 */
+			if (rinfo->has_clone || rinfo->is_clone)
+			{
+				Assert(!RINFO_IS_PUSHED_DOWN(rinfo, joinrel->relids));
+				if (!bms_is_subset(rinfo->required_relids, both_input_relids))
+					continue;
+				if (bms_overlap(rinfo->incompatible_relids, both_input_relids))
+					continue;
+			}
+			else
+			{
+				/*
+				 * For non-clone clauses, we just Assert it's OK.  These might
+				 * be either join or filter clauses; if it's a join clause
+				 * then it should not refer to the current join's output.
+				 * (There is little point in checking incompatible_relids,
+				 * because it'll be NULL.)
+				 */
+				Assert(RINFO_IS_PUSHED_DOWN(rinfo, joinrel->relids) ||
+					   bms_is_subset(rinfo->required_relids,
+									 both_input_relids));
+			}
+
+			/*
+			 * OK, so add it to the list, being careful to eliminate
+			 * duplicates.  (Since RestrictInfo nodes in different joinlists
+			 * will have been multiply-linked rather than copied, pointer
+			 * equality should be a sufficient test.)
+			 */
+			new_restrictlist = list_append_unique_ptr(new_restrictlist, rinfo);
+		}
+		else
+		{
+			/*
+			 * This clause is still a join clause at this level, so we ignore
+			 * it in this routine.
+			 */
+		}
+	}
+
+	return new_restrictlist;
+}
+
+static List *
 subbuild_joinrel_joinlist(RelOptInfo *joinrel,
 						  List *joininfo_list,
 						  List *new_joininfo)
@@ -1570,6 +1699,41 @@ subbuild_joinrel_joinlist(RelOptInfo *joinrel,
 
 	/* Expected to be called only for join between parent relations. */
 	Assert(joinrel->reloptkind == RELOPT_JOINREL);
+
+	foreach(l, joininfo_list)
+	{
+		RestrictInfo *rinfo = (RestrictInfo *) lfirst(l);
+
+		if (bms_is_subset(rinfo->required_relids, joinrel->relids))
+		{
+			/*
+			 * This clause becomes a restriction clause for the joinrel, since
+			 * it refers to no outside rels.  So we can ignore it in this
+			 * routine.
+			 */
+		}
+		else
+		{
+			/*
+			 * This clause is still a join clause at this level, so add it to
+			 * the new joininfo list, being careful to eliminate duplicates.
+			 * (Since RestrictInfo nodes in different joinlists will have been
+			 * multiply-linked rather than copied, pointer equality should be
+			 * a sufficient test.)
+			 */
+			new_joininfo = list_append_unique_ptr(new_joininfo, rinfo);
+		}
+	}
+
+	return new_joininfo;
+}
+
+static List *
+simple_subbuild_joinrel_joinlist(SimpleRelOptInfo *joinrel,
+						  List *joininfo_list,
+						  List *new_joininfo)
+{
+	ListCell   *l;
 
 	foreach(l, joininfo_list)
 	{

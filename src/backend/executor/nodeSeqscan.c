@@ -268,6 +268,9 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 	scanstate->ss.ps.qual =
 		ExecInitQual(node->scan.plan.qual, (PlanState *) scanstate);
 
+	ExecInitBloomFilters((PlanState *) scanstate,
+						 scanstate->ss.ss_ScanTupleSlot);
+
 	/*
 	 * When EvalPlanQual() is not in use, assign ExecProcNode for this node
 	 * based on the presence of qual and projection. Each ExecSeqScan*()

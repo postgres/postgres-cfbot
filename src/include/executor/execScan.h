@@ -170,10 +170,11 @@ ExecScanExtended(ScanState *node,
 	/* interrupt checks are in ExecScanFetch */
 
 	/*
-	 * If we have neither a qual to check nor a projection to do, just skip
-	 * all the overhead and return the raw scan tuple.
+	 * If we have neither a qual to check nor a projection to do nor any
+	 * pushed-down bloom filter to probe, just skip all the overhead and
+	 * return the raw scan tuple.
 	 */
-	if (!qual && !projInfo)
+	if (!qual && !projInfo && node->ps.bloom_filters == NIL)
 	{
 		ResetExprContext(econtext);
 		return ExecScanFetch(node, epqstate, accessMtd, recheckMtd);
@@ -213,6 +214,21 @@ ExecScanExtended(ScanState *node,
 		 * place the current tuple into the expr context
 		 */
 		econtext->ecxt_scantuple = slot;
+
+		/*
+		 * If runtime bloom filters have been pushed down to this scan, check
+		 * them first. A rejected tuple is dropped silently (no "Rows Removed
+		 * by Filter" instrumentation -- the per-filter counters in
+		 * BloomFilterState already capture this).
+		 *
+		 * XXX Maybe we should include this in "Rows Removed by Filter"?
+		 */
+		if (node->ps.bloom_filters != NIL &&
+			!ExecBloomFilters(node->ps.bloom_filters, econtext))
+		{
+			ResetExprContext(econtext);
+			continue;
+		}
 
 		/*
 		 * check that the current tuple satisfies the qual-clause

@@ -254,7 +254,40 @@ typedef struct Plan
 	 */
 	Bitmapset  *extParam;
 	Bitmapset  *allParam;
+
+	/*
+	 * List of BloomFilter nodes (or NIL).  When non-empty, this plan node is
+	 * a recipient of one or more runtime bloom filters pushed down at plan
+	 * time by some HashJoin ancestor; see nodeHashjoin.c.  Living on Plan
+	 * (rather than on a specific subtype like Scan) allows pushdown to any
+	 * node type that's prepared to call ExecBloomFilters on its output.
+	 */
+	List	   *bloom_filters;
 } Plan;
+
+/*
+ *	 BloomFilter -
+ *		One pushed-down bloom filter, attached to a recipient Plan node.
+ *
+ * 'filter_exprs', 'hashops' and 'hashcollations' are parallel lists, one
+ * entry per join key: the expression to hash, its hash operator (OID),
+ * and its input collation (OID).
+ *
+ * 'producer_id' is the bloom_filter_id of the producing HashJoin (resolved at
+ * executor init time via EState.es_bloom_producers).
+ * ----------------
+ */
+typedef struct BloomFilter
+{
+	pg_node_attr(no_query_jumble)
+
+	NodeTag		type;
+	List	   *filter_exprs;
+	List	   *hashops;
+	List	   *hashcollations;
+	int			producer_id;
+	Selectivity	selectivity;	/* estimates selectivity */
+} BloomFilter;
 
 /* ----------------
  *	these are defined to avoid confusion problems with "left"
@@ -1075,6 +1108,47 @@ typedef struct HashJoin
 	 * perform lookups in the hashtable over the inner plan.
 	 */
 	List	   *hashkeys;
+
+	/*
+	 * Number of plan nodes that consume this HashJoin's bloom filter via
+	 * pushdown.  Set at plan time by the bloom filter pushdown pass.
+	 *
+	 * At execution time, the HashJoin builds the bloom filter only when this
+	 * is non-zero (and the enable_hashjoin_bloom GUC is on).
+	 */
+	int			bloom_consumer_count;
+
+	/*
+	 * Identifier used by recipient nodes to find this producer at execution
+	 * time, via EState.es_bloom_producers. Assigned during
+	 * create_hashjoin_plan from PlannerGlobal.lastBloomFilterId. Each
+	 * BloomFilter on a recipient stores a copy in its producer_id field for
+	 * convenience.
+	 *
+	 * Zero when this HashJoin has no consumers.
+	 */
+	int			bloom_filter_id;
+
+	/*
+	 * Whether to also build one bloom filter per join key (in addition to the
+	 * combined-hash filter), so that a recipient can test an individual key
+	 * column on its own -- e.g. a column store probing a per-column
+	 * dictionary or zone map.  Set at plan time only when the recipient is a
+	 * CustomScan that advertised CUSTOMPATH_SUPPORT_BLOOM_FILTERS.  The
+	 * combined filter is always built and remains the more selective one;
+	 * per-key filters are an opt-in extra that nobody else pays for.
+	 */
+	bool		bloom_perkey;
+
+	/*
+	 * Whether to build the hash table (and bloom filter) before fetching the
+	 * first outer tuple, skipping the empty-outer prefetch optimization.  Set
+	 * at plan time when the filter is pushed to a CustomScan recipient, which
+	 * may want to apply the filter the moment its scan starts (e.g. a column
+	 * store skipping row groups before decompression) rather than after
+	 * having already produced a batch unfiltered.  See ExecHashJoinImpl.
+	 */
+	bool		bloom_eager;
 } HashJoin;
 
 /* ----------------

@@ -316,6 +316,7 @@ BlocksReadStreamData
 BlocktableEntry
 BloomBuildState
 BloomFilter
+BloomFilterState
 BloomMetaPageData
 BloomOpaque
 BloomOptions
@@ -802,6 +803,7 @@ ExpandedObjectMethods
 ExpandedRange
 ExpandedRecordFieldInfo
 ExpandedRecordHeader
+ExpectedFilter
 ExplainDirectModify_function
 ExplainExtensionOption
 ExplainForeignModify_function

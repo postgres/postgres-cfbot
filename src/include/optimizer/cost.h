@@ -63,6 +63,7 @@ extern PGDLLIMPORT bool enable_material;
 extern PGDLLIMPORT bool enable_memoize;
 extern PGDLLIMPORT bool enable_mergejoin;
 extern PGDLLIMPORT bool enable_hashjoin;
+extern PGDLLIMPORT bool enable_hashjoin_bloom;
 extern PGDLLIMPORT bool enable_gathermerge;
 extern PGDLLIMPORT bool enable_partitionwise_join;
 extern PGDLLIMPORT bool enable_partitionwise_aggregate;
@@ -71,6 +72,10 @@ extern PGDLLIMPORT bool enable_parallel_hash;
 extern PGDLLIMPORT bool enable_partition_pruning;
 extern PGDLLIMPORT bool enable_presorted_aggregate;
 extern PGDLLIMPORT bool enable_async_append;
+extern PGDLLIMPORT double bloom_filter_pushdown_threshold;
+extern PGDLLIMPORT int bloom_filter_pushdown_max;
+extern PGDLLIMPORT int bloom_filter_pushdown_max_build_relids;
+extern PGDLLIMPORT int bloom_filter_pushdown_max_build_sets;
 extern PGDLLIMPORT int constraint_exclusion;
 
 extern double index_pages_fetched(double tuples_fetched, BlockNumber pages,
@@ -204,11 +209,21 @@ extern double get_parameterized_joinrel_size(PlannerInfo *root,
 											 Path *inner_path,
 											 SpecialJoinInfo *sjinfo,
 											 List *restrict_clauses);
+extern Selectivity get_foreign_key_join_selectivity(PlannerInfo *root,
+													Relids outer_relids,
+													Relids inner_relids,
+													SpecialJoinInfo *sjinfo,
+													List **restrictlist);
 extern void set_joinrel_size_estimates(PlannerInfo *root, RelOptInfo *rel,
 									   RelOptInfo *outer_rel,
 									   RelOptInfo *inner_rel,
 									   SpecialJoinInfo *sjinfo,
 									   List *restrictlist);
+extern void simple_set_joinrel_size_estimates(PlannerInfo *root, SimpleRelOptInfo *rel,
+											  SimpleRelOptInfo *outer_rel,
+											  SimpleRelOptInfo *inner_rel,
+											  SpecialJoinInfo *sjinfo,
+											  List *restrictlist);
 extern void set_subquery_size_estimates(PlannerInfo *root, RelOptInfo *rel);
 extern void set_function_size_estimates(PlannerInfo *root, RelOptInfo *rel);
 extern void set_values_size_estimates(PlannerInfo *root, RelOptInfo *rel);

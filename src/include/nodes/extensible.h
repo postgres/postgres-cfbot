@@ -84,6 +84,8 @@ extern const ExtensibleNodeMethods *GetExtensibleNodeMethods(const char *extnode
 #define CUSTOMPATH_SUPPORT_BACKWARD_SCAN	0x0001
 #define CUSTOMPATH_SUPPORT_MARK_RESTORE		0x0002
 #define CUSTOMPATH_SUPPORT_PROJECTION		0x0004
+/* provider can accept a hashjoin bloom filter pushed down to its scan */
+#define CUSTOMPATH_SUPPORT_BLOOM_FILTERS	0x0008
 
 /*
  * Custom path methods.  Mostly, we just need to know how to convert a

@@ -3,6 +3,9 @@
 -- test the views defined in CREATE_VIEWS
 --
 
+-- disable bloom filter pushdown, to not interfere with calls to functions
+SET enable_hashjoin_bloom = off;
+
 SELECT * FROM street;
 
 SELECT name, #thepath FROM iexit ORDER BY name COLLATE "C", 2;

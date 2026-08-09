@@ -1,0 +1,5 @@
+# test_bloom_customscan extension
+comment = 'Test CustomScan provider that consumes a hashjoin bloom filter'
+default_version = '1.0'
+module_pathname = '$libdir/test_bloom_customscan'
+relocatable = true

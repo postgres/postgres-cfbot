@@ -434,6 +434,9 @@ ExecInitTidRangeScan(TidRangeScan *node, EState *estate, int eflags)
 	tidrangestate->ss.ps.qual =
 		ExecInitQual(node->scan.plan.qual, (PlanState *) tidrangestate);
 
+	ExecInitBloomFilters((PlanState *) tidrangestate,
+						 tidrangestate->ss.ss_ScanTupleSlot);
+
 	TidExprListCreate(tidrangestate);
 
 	/*

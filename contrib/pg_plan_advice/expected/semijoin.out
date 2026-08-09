@@ -75,7 +75,9 @@ SELECT * FROM sj_wide
  Hash Semi Join
    Hash Cond: ((sj_wide.id = "*VALUES*".column1) AND (sj_wide.val1 = "*VALUES*".column2))
    ->  Seq Scan on sj_wide
+         Bloom Filter 1: keys=(id, val1)
    ->  Hash
+         Bloom Filter 1
          ->  Values Scan on "*VALUES*"
  Supplied Plan Advice:
    SEMIJOIN_NON_UNIQUE("*VALUES*") /* matched */
@@ -85,7 +87,7 @@ SELECT * FROM sj_wide
    SEQ_SCAN(sj_wide)
    SEMIJOIN_NON_UNIQUE("*VALUES*")
    NO_GATHER(sj_wide "*VALUES*")
-(13 rows)
+(15 rows)
 
 COMMIT;
 -- Because this table is narrower than the previous one, a sequential scan
@@ -100,7 +102,9 @@ SELECT * FROM sj_narrow
  Hash Semi Join
    Hash Cond: ((sj_narrow.id = "*VALUES*".column1) AND (sj_narrow.val1 = "*VALUES*".column2))
    ->  Seq Scan on sj_narrow
+         Bloom Filter 1: keys=(id, val1)
    ->  Hash
+         Bloom Filter 1
          ->  Values Scan on "*VALUES*"
  Generated Plan Advice:
    JOIN_ORDER(sj_narrow "*VALUES*")
@@ -108,7 +112,7 @@ SELECT * FROM sj_narrow
    SEQ_SCAN(sj_narrow)
    SEMIJOIN_NON_UNIQUE("*VALUES*")
    NO_GATHER(sj_narrow "*VALUES*")
-(11 rows)
+(13 rows)
 
 -- Here, we expect advising a unique semijoin to swith to the same plan that
 -- we got with sj_wide, and advising a non-unique semijoin should not change
@@ -123,7 +127,9 @@ SELECT * FROM sj_narrow
  Hash Join
    Hash Cond: ((sj_narrow.id = "*VALUES*".column1) AND (sj_narrow.val1 = "*VALUES*".column2))
    ->  Seq Scan on sj_narrow
+         Bloom Filter 1: keys=(id, val1)
    ->  Hash
+         Bloom Filter 1
          ->  HashAggregate
                Group Key: "*VALUES*".column1, "*VALUES*".column2
                ->  Values Scan on "*VALUES*"
@@ -135,7 +141,7 @@ SELECT * FROM sj_narrow
    SEQ_SCAN(sj_narrow)
    SEMIJOIN_UNIQUE("*VALUES*")
    NO_GATHER(sj_narrow "*VALUES*")
-(15 rows)
+(17 rows)
 
 SET LOCAL pg_plan_advice.advice = 'semijoin_non_unique("*VALUES*")';
 EXPLAIN (COSTS OFF, PLAN_ADVICE)
@@ -146,7 +152,9 @@ SELECT * FROM sj_narrow
  Hash Semi Join
    Hash Cond: ((sj_narrow.id = "*VALUES*".column1) AND (sj_narrow.val1 = "*VALUES*".column2))
    ->  Seq Scan on sj_narrow
+         Bloom Filter 1: keys=(id, val1)
    ->  Hash
+         Bloom Filter 1
          ->  Values Scan on "*VALUES*"
  Supplied Plan Advice:
    SEMIJOIN_NON_UNIQUE("*VALUES*") /* matched */
@@ -156,7 +164,7 @@ SELECT * FROM sj_narrow
    SEQ_SCAN(sj_narrow)
    SEMIJOIN_NON_UNIQUE("*VALUES*")
    NO_GATHER(sj_narrow "*VALUES*")
-(13 rows)
+(15 rows)
 
 COMMIT;
 -- In the above example, we made the outer side of the join unique, but here,

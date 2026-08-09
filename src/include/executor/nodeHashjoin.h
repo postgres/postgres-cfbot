@@ -31,4 +31,13 @@ extern void ExecHashJoinInitializeWorker(HashJoinState *state,
 extern void ExecHashJoinSaveTuple(MinimalTuple tuple, uint32 hashvalue,
 								  BufFile **fileptr, HashJoinTable hashtable);
 
+/*
+ * Bloom filter pushdown producer-side helper (see nodeHashjoin.c).
+ *
+ * ExecBloomFilters and ExecInitBloomFilters live in executor.h so that
+ * scan nodes can call them from ExecInit without having to pull in
+ * hashjoin internals.
+ */
+extern void ExecRegisterBloomFilterProducer(HashJoinState *hjstate);
+
 #endif							/* NODEHASHJOIN_H */

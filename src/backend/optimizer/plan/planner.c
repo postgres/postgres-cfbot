@@ -384,6 +384,7 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 	glob->lastPHId = 0;
 	glob->lastRowMarkId = 0;
 	glob->lastPlanNodeId = 0;
+	glob->lastBloomFilterId = 0;
 	glob->transientPlan = false;
 	glob->dependsOnRole = false;
 	glob->partition_directory = NULL;
@@ -7178,7 +7179,7 @@ plan_cluster_use_sort(Oid tableOid, Oid indexOid)
 	comparisonCost = 2.0 * (indexExprCost.startup + indexExprCost.per_tuple);
 
 	/* Estimate the cost of seq scan + sort */
-	seqScanPath = create_seqscan_path(root, rel, NULL, 0);
+	seqScanPath = create_seqscan_path(root, rel, NULL, 0, NIL);
 	cost_sort(&seqScanAndSortPath, root, NIL,
 			  seqScanPath->disabled_nodes,
 			  seqScanPath->total_cost, rel->tuples, rel->reltarget->width,

@@ -1917,12 +1917,14 @@ where exists(select * from tenk1 c
    ->  Hash Join
          Hash Cond: (b.tenthous = a.tenthous)
          ->  Seq Scan on tenk1 b
+               Bloom Filter 1: keys=(tenthous)
          ->  Hash
+               Bloom Filter 1
                ->  Seq Scan on tenk1 a
                      Filter: (tenthous < 5000)
    ->  Hash
          ->  Seq Scan on tenk1 c
-(11 rows)
+(13 rows)
 
 --
 -- More complicated constructs
@@ -2341,7 +2343,7 @@ where b.f1 = t.thousand and a.f1 = b.f1 and (a.f1+b.f1+999) = t.tenthous;
 -----------------------------------------------------------------------------------------------------------------
  Nested Loop
    ->  Nested Loop
-         Join Filter: ((sum(i4b.f1)) = ((sum(i4a.f1) + 1)))
+         Join Filter: (((sum(i4a.f1) + 1)) = (sum(i4b.f1)))
          ->  Aggregate
                ->  Seq Scan on int4_tbl i4a
          ->  Aggregate
@@ -2378,9 +2380,11 @@ order by t1.unique1;
          Hash Cond: ((t1.two = t2.two) AND (t1.unique1 = (SubPlan expr_1)))
          ->  Bitmap Heap Scan on tenk1 t1
                Recheck Cond: (unique1 < 10)
+               Bloom Filter 1: keys=(two, unique1)
                ->  Bitmap Index Scan on tenk1_unique1
                      Index Cond: (unique1 < 10)
          ->  Hash
+               Bloom Filter 1
                ->  Bitmap Heap Scan on tenk1 t2
                      Recheck Cond: (unique1 < 10)
                      ->  Bitmap Index Scan on tenk1_unique1
@@ -2392,7 +2396,7 @@ order by t1.unique1;
                          ->  Limit
                                ->  Index Only Scan using tenk1_unique1 on tenk1
                                      Index Cond: ((unique1 IS NOT NULL) AND (unique1 = t2.unique1))
-(20 rows)
+(22 rows)
 
 -- Ensure we get the expected result
 select t1.unique1,t2.unique1 from tenk1 t1
@@ -5955,18 +5959,20 @@ explain (costs off)
 select a.unique1, b.unique2
   from onek a left join onek b on a.unique1 = b.unique2
   where (b.unique2, random() > 0) = any (select q1, random() > 0 from int8_tbl c where c.q1 < b.unique1);
-                                                        QUERY PLAN                                                        
---------------------------------------------------------------------------------------------------------------------------
+                                                           QUERY PLAN                                                           
+--------------------------------------------------------------------------------------------------------------------------------
  Hash Join
-   Hash Cond: (b.unique2 = a.unique1)
-   ->  Seq Scan on onek b
-         Filter: (ANY ((unique2 = (SubPlan any_1).col1) AND ((random() > '0'::double precision) = (SubPlan any_1).col2)))
-         SubPlan any_1
-           ->  Seq Scan on int8_tbl c
-                 Filter: (q1 < b.unique1)
+   Hash Cond: (a.unique1 = b.unique2)
+   ->  Index Only Scan using onek_unique1 on onek a
+         Bloom Filter 1: keys=(unique1)
    ->  Hash
-         ->  Index Only Scan using onek_unique1 on onek a
-(9 rows)
+         Bloom Filter 1
+         ->  Seq Scan on onek b
+               Filter: (ANY ((unique2 = (SubPlan any_1).col1) AND ((random() > '0'::double precision) = (SubPlan any_1).col2)))
+               SubPlan any_1
+                 ->  Seq Scan on int8_tbl c
+                       Filter: (q1 < b.unique1)
+(11 rows)
 
 select a.unique1, b.unique2
   from onek a left join onek b on a.unique1 = b.unique2
@@ -6933,23 +6939,27 @@ where exists (select 1 from t t4
                      Hash Cond: (t6.b = t4.b)
                      ->  Seq Scan on pg_temp.t t6
                            Output: t6.a, t6.b
+                           Bloom Filter 2: keys=(t6.b) expected=0.5%
                      ->  Hash
                            Output: t4.b, t5.b, t5.a
+                           Bloom Filter 2
                            ->  Hash Join
                                  Output: t4.b, t5.b, t5.a
                                  Inner Unique: true
                                  Hash Cond: (t5.b = t4.b)
                                  ->  Seq Scan on pg_temp.t t5
                                        Output: t5.a, t5.b
+                                       Bloom Filter 1: keys=(t5.b) expected=0.5%
                                  ->  Hash
                                        Output: t4.b, t4.a
+                                       Bloom Filter 1
                                        ->  Index Scan using t_a_key on pg_temp.t t4
                                              Output: t4.b, t4.a
                                              Index Cond: (t4.a = 1)
    ->  Index Only Scan using t_a_key on pg_temp.t t3
          Output: t3.a
          Index Cond: (t3.a = t5.a)
-(32 rows)
+(36 rows)
 
 select t1.a from t t1
   left join t t2 on t1.a = t2.a
@@ -8249,9 +8259,9 @@ ON sj_t1.id = _t2t3t4.id;
                                      QUERY PLAN                                      
 -------------------------------------------------------------------------------------
  Nested Loop
-   Join Filter: (sj_t3.id = sj_t1.id)
+   Join Filter: (sj_t1.id = sj_t3.id)
    ->  Nested Loop
-         Join Filter: (sj_t2.id = sj_t3.id)
+         Join Filter: (sj_t3.id = sj_t2.id)
          ->  Nested Loop Semi Join
                ->  Nested Loop
                      ->  HashAggregate
@@ -9568,12 +9578,14 @@ select * from fkest f1
          Hash Cond: ((f2.x = f1.x) AND (f2.x10b = f1.x10))
          ->  Seq Scan on fkest f2
                Filter: (x100 = 2)
+               Bloom Filter 1: keys=(x, x10b)
          ->  Hash
+               Bloom Filter 1
                ->  Seq Scan on fkest f1
                      Filter: (x100 = 2)
    ->  Index Scan using fkest_x_x10_x100_idx on fkest f3
          Index Cond: (x = f1.x)
-(10 rows)
+(12 rows)
 
 alter table fkest add constraint fk
   foreign key (x, x10b, x100) references fkest (x, x10, x100);
@@ -9582,20 +9594,22 @@ select * from fkest f1
   join fkest f2 on (f1.x = f2.x and f1.x10 = f2.x10b and f1.x100 = f2.x100)
   join fkest f3 on f1.x = f3.x
   where f1.x100 = 2;
-                     QUERY PLAN                      
------------------------------------------------------
+                           QUERY PLAN                            
+-----------------------------------------------------------------
  Hash Join
-   Hash Cond: ((f2.x = f1.x) AND (f2.x10b = f1.x10))
-   ->  Hash Join
-         Hash Cond: (f3.x = f2.x)
-         ->  Seq Scan on fkest f3
-         ->  Hash
+   Hash Cond: (f3.x = f1.x)
+   ->  Seq Scan on fkest f3
+         Bloom Filter 1: keys=(x)
+   ->  Hash
+         Bloom Filter 1
+         ->  Hash Join
+               Hash Cond: ((f2.x = f1.x) AND (f2.x10b = f1.x10))
                ->  Seq Scan on fkest f2
                      Filter: (x100 = 2)
-   ->  Hash
-         ->  Seq Scan on fkest f1
-               Filter: (x100 = 2)
-(11 rows)
+               ->  Hash
+                     ->  Seq Scan on fkest f1
+                           Filter: (x100 = 2)
+(13 rows)
 
 rollback;
 --
@@ -9681,19 +9695,20 @@ select * from j1 inner join j2 on j1.id > j2.id;
 -- ensure non-unique rel is not chosen as inner
 explain (verbose, costs off)
 select * from j1 inner join j3 on j1.id = j3.id;
-            QUERY PLAN             
------------------------------------
+                     QUERY PLAN                      
+-----------------------------------------------------
  Hash Join
    Output: j1.id, j3.id
-   Inner Unique: true
-   Hash Cond: (j3.id = j1.id)
-   ->  Seq Scan on public.j3
-         Output: j3.id
-   ->  Hash
+   Hash Cond: (j1.id = j3.id)
+   ->  Seq Scan on public.j1
          Output: j1.id
-         ->  Seq Scan on public.j1
-               Output: j1.id
-(10 rows)
+         Bloom Filter 1: keys=(j1.id) expected=66.7%
+   ->  Hash
+         Output: j3.id
+         Bloom Filter 1
+         ->  Seq Scan on public.j3
+               Output: j3.id
+(11 rows)
 
 -- ensure left join is marked as unique
 explain (verbose, costs off)

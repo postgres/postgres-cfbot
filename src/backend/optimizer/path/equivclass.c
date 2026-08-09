@@ -75,6 +75,15 @@ static RestrictInfo *create_join_clause(PlannerInfo *root,
 										EquivalenceMember *leftem,
 										EquivalenceMember *rightem,
 										EquivalenceClass *parent_ec);
+static int	generate_implied_equalities_for_column_ec(PlannerInfo *root,
+													  RelOptInfo *rel,
+													  EquivalenceClass *cur_ec,
+													  ec_matches_callback_type callback,
+													  void *callback_arg,
+													  Relids prohibited_rels,
+													  Relids parent_relids,
+													  bool is_child_rel,
+													  List **result);
 static bool reconsider_outer_join_clause(PlannerInfo *root,
 										 OuterJoinClauseInfo *ojcinfo,
 										 bool outer_on_left);
@@ -1630,6 +1639,98 @@ generate_join_implied_equalities(PlannerInfo *root,
 															  outer_relids,
 															  nominal_inner_relids,
 															  inner_rel);
+
+		result = list_concat(result, sublist);
+	}
+
+	return result;
+}
+
+List *
+simple_generate_join_implied_equalities(PlannerInfo *root,
+										Relids join_relids,
+										Relids outer_relids,
+										SimpleRelOptInfo *inner_rel,
+										SpecialJoinInfo *sjinfo)
+{
+	List	   *result = NIL;
+	Relids		inner_relids = inner_rel->relids;
+	Relids		nominal_inner_relids;
+	Relids		nominal_join_relids;
+	Bitmapset  *matching_ecs;
+	int			i;
+
+	/* If inner rel is a child, extra setup work is needed */
+//	if (IS_OTHER_REL(inner_rel))
+//	{
+//		Assert(!bms_is_empty(inner_rel->top_parent_relids));
+//
+//		/* Fetch relid set for the topmost parent rel */
+//		nominal_inner_relids = inner_rel->top_parent_relids;
+//		/* ECs will be marked with the parent's relid, not the child's */
+//		nominal_join_relids = bms_union(outer_relids, nominal_inner_relids);
+//		nominal_join_relids = add_outer_joins_to_relids(root,
+//														nominal_join_relids,
+//														sjinfo,
+//														NULL);
+//	}
+//	else
+	{
+		nominal_inner_relids = inner_relids;
+		nominal_join_relids = join_relids;
+	}
+
+	/*
+	 * Examine all potentially-relevant eclasses.
+	 *
+	 * If we are considering an outer join, we must include "join" clauses
+	 * that mention either input rel plus the outer join's relid; these
+	 * represent post-join filter clauses that have to be applied at this
+	 * join.  We don't have infrastructure that would let us identify such
+	 * eclasses cheaply, so just fall back to considering all eclasses
+	 * mentioning anything in nominal_join_relids.
+	 *
+	 * At inner joins, we can be smarter: only consider eclasses mentioning
+	 * both input rels.
+	 */
+	if (sjinfo && sjinfo->ojrelid != 0)
+		matching_ecs = get_eclass_indexes_for_relids(root, nominal_join_relids);
+	else
+		matching_ecs = get_common_eclass_indexes(root, nominal_inner_relids,
+												 outer_relids);
+
+	i = -1;
+	while ((i = bms_next_member(matching_ecs, i)) >= 0)
+	{
+		EquivalenceClass *ec = (EquivalenceClass *) list_nth(root->eq_classes, i);
+		List	   *sublist = NIL;
+
+		/* ECs containing consts do not need any further enforcement */
+		if (ec->ec_has_const)
+			continue;
+
+		/* Single-member ECs won't generate any deductions */
+		if (list_length(ec->ec_members) <= 1)
+			continue;
+
+		/* Sanity check that this eclass overlaps the join */
+		Assert(bms_overlap(ec->ec_relids, nominal_join_relids));
+
+		if (!ec->ec_broken)
+			sublist = generate_join_implied_equalities_normal(root,
+															  ec,
+															  join_relids,
+															  outer_relids,
+															  inner_relids);
+
+		/* Recover if we failed to generate required derived clauses */
+//		if (ec->ec_broken)
+//			sublist = generate_join_implied_equalities_broken(root,
+//															  ec,
+//															  nominal_join_relids,
+//															  outer_relids,
+//															  nominal_inner_relids,
+//															  inner_rel);
 
 		result = list_concat(result, sublist);
 	}
@@ -3212,6 +3313,107 @@ eclass_member_iterator_next(EquivalenceMemberIterator *it)
 }
 
 /*
+ * generate_implied_equalities_for_column_ec
+ *	  Workhorse for generate_implied_equalities_for_column() and
+ *	  generate_implied_equalities_for_all_columns().  Considers a single
+ *	  EquivalenceClass cur_ec: if it has a member matching the target column
+ *	  (as identified by the callback), generate EC-derived joinclauses
+ *	  equating that member to each other-relation member, appending them to
+ *	  *result.  Returns the number of clauses generated.
+ */
+static int
+generate_implied_equalities_for_column_ec(PlannerInfo *root,
+										  RelOptInfo *rel,
+										  EquivalenceClass *cur_ec,
+										  ec_matches_callback_type callback,
+										  void *callback_arg,
+										  Relids prohibited_rels,
+										  Relids parent_relids,
+										  bool is_child_rel,
+										  List **result)
+{
+	EquivalenceMemberIterator it;
+	EquivalenceMember *cur_em;
+	ListCell   *lc2;
+	int			ngenerated = 0;
+
+	/*
+	 * Won't generate joinclauses if const or single-member (the latter test
+	 * covers the volatile case too)
+	 */
+	if (cur_ec->ec_has_const || list_length(cur_ec->ec_members) <= 1)
+		return 0;
+
+	/*
+	 * Scan members, looking for a match to the target column.  Note that
+	 * child EC members are considered, but only when they belong to the
+	 * target relation.  (Unlike regular members, the same expression could be
+	 * a child member of more than one EC.  Therefore, it's potentially
+	 * order-dependent which EC a child relation's target column gets matched
+	 * to.  This is annoying but it only happens in corner cases, so for now
+	 * we live with just reporting the first match.  See also
+	 * get_eclass_for_sort_expr.)
+	 */
+	setup_eclass_member_iterator(&it, cur_ec, rel->relids);
+	while ((cur_em = eclass_member_iterator_next(&it)) != NULL)
+	{
+		if (bms_equal(cur_em->em_relids, rel->relids) &&
+			callback(root, rel, cur_ec, cur_em, callback_arg))
+			break;
+	}
+
+	if (!cur_em)
+		return 0;
+
+	/*
+	 * Found our match.  Scan the other EC members and attempt to generate
+	 * joinclauses.  Ignore children here.
+	 */
+	foreach(lc2, cur_ec->ec_members)
+	{
+		EquivalenceMember *other_em = (EquivalenceMember *) lfirst(lc2);
+		Oid			eq_op;
+		RestrictInfo *rinfo;
+
+		/* Child members should not exist in ec_members */
+		Assert(!other_em->em_is_child);
+
+		/* Make sure it'll be a join to a different rel */
+		if (other_em == cur_em ||
+			bms_overlap(other_em->em_relids, rel->relids))
+			continue;
+
+		/* Forget it if caller doesn't want joins to this rel */
+		if (bms_overlap(other_em->em_relids, prohibited_rels))
+			continue;
+
+		/*
+		 * Also, if this is a child rel, avoid generating a useless join to
+		 * its parent rel(s).
+		 */
+		if (is_child_rel &&
+			bms_overlap(parent_relids, other_em->em_relids))
+			continue;
+
+		eq_op = select_equality_operator(cur_ec,
+										 cur_em->em_datatype,
+										 other_em->em_datatype);
+		if (!OidIsValid(eq_op))
+			continue;
+
+		/* set parent_ec to mark as redundant with other joinclauses */
+		rinfo = create_join_clause(root, cur_ec, eq_op,
+								   cur_em, other_em,
+								   cur_ec);
+
+		*result = lappend(*result, rinfo);
+		ngenerated++;
+	}
+
+	return ngenerated;
+}
+
+/*
  * generate_implied_equalities_for_column
  *	  Create EC-derived joinclauses usable with a specific column.
  *
@@ -3233,6 +3435,10 @@ eclass_member_iterator_next(EquivalenceMemberIterator *it)
  *
  * The caller can pass a Relids set of rels we aren't interested in joining
  * to, so as to save the work of creating useless clauses.
+ *
+ * XXX This could reuse generate_implied_equalities_for_column_ec for the
+ * inner loop, similarly to generate_implied_equalities_for_all_columns, but I
+ * chose to not do that for now. Better keep this as is.
  */
 List *
 generate_implied_equalities_for_column(PlannerInfo *root,
@@ -3348,6 +3554,71 @@ generate_implied_equalities_for_column(PlannerInfo *root,
 		 */
 		if (result)
 			break;
+	}
+
+	return result;
+}
+
+/*
+ * generate_implied_equalities_for_all_columns
+ *	  Like generate_implied_equalities_for_column, but returns EC-derived
+ *	  joinclauses for *every* column of the relation, rather than stopping at
+ *	  the first column (EquivalenceClass) that yields any clauses.
+ *
+ * generate_implied_equalities_for_column() is designed for parameterized-path
+ * generation, where the goal is to find a single usable joinclause per column
+ * and there is no value in returning clauses for more than one column at a
+ * time.  Some callers, however, are interested in joinclauses on all of the
+ * relation's columns simultaneously (for example, the Bloom filter pushdown
+ * logic, which may push down filters derived from several different columns at
+ * once).  This variant therefore visits all of the relation's
+ * EquivalenceClasses and accumulates clauses from each.
+ *
+ * As with generate_implied_equalities_for_column(), the result for any single
+ * column is a redundant set of clauses equating that column to each of the
+ * other-relation values it is known to be equal to.
+ *
+ * XXX We don't really need the last two arguments, but we keep this as close
+ * to generate_implied_equalities_for_column as possible.
+ */
+List *
+generate_implied_equalities_for_all_columns(PlannerInfo *root,
+											RelOptInfo *rel,
+											ec_matches_callback_type callback,
+											void *callback_arg,
+											Relids prohibited_rels)
+{
+	List	   *result = NIL;
+	bool		is_child_rel = (rel->reloptkind == RELOPT_OTHER_MEMBER_REL);
+	Relids		parent_relids;
+	int			i;
+
+	/* Should be OK to rely on eclass_indexes */
+	Assert(root->ec_merging_done);
+
+	/* Indexes are available only on base or "other" member relations. */
+	Assert(IS_SIMPLE_REL(rel));
+
+	/* If it's a child rel, we'll need to know what its parent(s) are */
+	if (is_child_rel)
+		parent_relids = find_childrel_parents(root, rel);
+	else
+		parent_relids = NULL;	/* not used, but keep compiler quiet */
+
+	i = -1;
+	while ((i = bms_next_member(rel->eclass_indexes, i)) >= 0)
+	{
+		EquivalenceClass *cur_ec = (EquivalenceClass *) list_nth(root->eq_classes, i);
+
+		/* Sanity check eclass_indexes only contain ECs for rel */
+		Assert(is_child_rel || bms_is_subset(rel->relids, cur_ec->ec_relids));
+
+		(void) generate_implied_equalities_for_column_ec(root, rel, cur_ec,
+														 callback, callback_arg,
+														 prohibited_rels,
+														 parent_relids,
+														 is_child_rel,
+														 &result);
 	}
 
 	return result;

@@ -286,6 +286,16 @@ set_cheapest(RelOptInfo *parent_rel)
 		Path	   *path = (Path *) lfirst(p);
 		int			cmp;
 
+		/*
+		 * Paths that expect a pushed-down Bloom filter are speculative: their
+		 * rows/cost estimates assume a hash join above will build and push a
+		 * filter to them.  They must never be chosen as the cheapest startup,
+		 * total, or parameterized path; they are only consumed explicitly by
+		 * join path generation (see joinpath.c).  Skip them here.
+		 */
+		if (path->expected_filters != NIL)
+			continue;
+
 		if (path->param_info)
 		{
 			/* Parameterized path, so add it to parameterized_paths */
@@ -384,6 +394,157 @@ set_cheapest(RelOptInfo *parent_rel)
 }
 
 /*
+ * expected_filters_equal
+ *	  Return true if the two lists of ExpectedFilter nodes denote the same
+ *	  set of expected Bloom filters (order-independent).
+ */
+bool
+expected_filters_equal(List *a, List *b)
+{
+	ListCell   *lc;
+
+	if (a == NIL && b == NIL)
+		return true;
+	if (list_length(a) != list_length(b))
+		return false;
+
+	foreach(lc, a)
+	{
+		ExpectedFilter *fa = (ExpectedFilter *) lfirst(lc);
+		ListCell   *lc2;
+		bool		found = false;
+
+		foreach(lc2, b)
+		{
+			ExpectedFilter *fb = (ExpectedFilter *) lfirst(lc2);
+
+			if (fa->owner_relid == fb->owner_relid &&
+				bms_equal(fa->build_relids, fb->build_relids) &&
+				equal(fa->clauses, fb->clauses))
+			{
+				found = true;
+				break;
+			}
+		}
+		if (!found)
+			return false;
+	}
+	return true;
+}
+
+/*
+ * expected_filters_selectivity
+ *	  Combined surviving fraction of a set of expected filters, assuming
+ *	  independence.  Returns a value in (0, 1].
+ */
+double
+expected_filters_selectivity(List *filters)
+{
+	double		sel = 1.0;
+	ListCell   *lc;
+
+	foreach(lc, filters)
+	{
+		ExpectedFilter *f = (ExpectedFilter *) lfirst(lc);
+
+		sel *= f->selectivity;
+	}
+
+	/* clamp to a sane range */
+	if (sel < 0.0)
+		sel = 0.0;
+	if (sel > 1.0)
+		sel = 1.0;
+
+	return sel;
+}
+
+/*
+ * Estimated cost of probing one Bloom filter for one tuple.  A probe (a few
+ * hash evaluations and bit tests) is cheaper than a full hash-table lookup,
+ * so we charge less than cpu_operator_cost per probe; the bottom-up Bloom
+ * filter paper likewise sets its per-filter probe cost below a hash probe.
+ */
+#define BLOOM_FILTER_PROBE_COST (cpu_operator_cost * 0.5)
+
+/*
+ * apply_expected_filters
+ *	  Adjust an already-costed path to account for probing the given set of
+ *	  Bloom filters against the tuples it produces, and record them as the
+ *	  path's expected_filters.
+ *
+ * This is the generic, not-smart costing fallback.  Filters are probed most
+ * selective first (see find_bloom_filter_combinations and, at execution,
+ * ExecInitBloomFilters), and a tuple rejected by one filter is not probed by
+ * the later ones.  So the expected number of probes per input tuple is the
+ * sum, over the filters, of the fraction of tuples that survive all earlier
+ * filters -- far fewer than one probe per filter once the filters are
+ * selective.  We charge BLOOM_FILTER_PROBE_COST per probe, on top of shrinking
+ * the row estimate by the filters' combined selectivity.
+ *
+ * Callers that can do something smarter (e.g. a CustomScan skipping whole row
+ * groups via a zone map) should cost themselves instead of using this.
+ */
+void
+apply_expected_filters(Path *path, List *filters)
+{
+	double		probes = 0.0;
+	double		surviving = 1.0;
+	ListCell   *lc;
+
+	if (filters == NIL)
+		return;
+
+	foreach(lc, filters)
+	{
+		ExpectedFilter *f = (ExpectedFilter *) lfirst(lc);
+
+		probes += surviving;
+		surviving *= f->selectivity;
+	}
+
+	path->total_cost += probes * BLOOM_FILTER_PROBE_COST * path->rows;
+	path->rows = clamp_row_est(path->rows * surviving);
+	path->expected_filters = filters;
+}
+
+/*
+ * create_filtered_scan_path
+ *	  Build a copy of an IndexPath that additionally expects the given set of
+ *	  pushed-down Bloom filters.
+ *
+ * The clone shares all substructure with the original path (parent,
+ * pathtarget, indexclauses, pathkeys, etc.); we reuse the source path's
+ * already-derived indexclauses/pathkeys and its cost rather than rebuilding
+ * them, and then apply_expected_filters() makes the same cost/rows adjustment
+ * core makes for every other scan type -- charging the per-tuple probe cost
+ * and shrinking the row estimate.  This is safe because create_plan() treats
+ * the clone identically to the original (it ignores expected_filters), and
+ * add_path() may freely pfree the clone.
+ *
+ * Other base-relation scan path types are built directly by their real
+ * constructors with the filters passed in (see create_seqscan_path,
+ * create_bitmap_heap_path, etc.); IndexPath is the exception because
+ * create_index_path() would re-derive its indexclauses/pathkeys from scratch
+ * -- see the comment on the T_IndexScan/T_IndexOnlyScan case in
+ * reparameterize_path() for the same tradeoff made there.
+ */
+Path *
+create_filtered_scan_path(PlannerInfo *root, Path *subpath, List *filters)
+{
+	IndexPath  *newpath;
+
+	Assert(IsA(subpath, IndexPath));
+
+	newpath = (IndexPath *) palloc(sizeof(IndexPath));
+	memcpy(newpath, subpath, sizeof(IndexPath));
+
+	apply_expected_filters(&newpath->path, filters);
+
+	return (Path *) newpath;
+}
+
+/*
  * add_path
  *	  Consider a potential implementation path for the specified parent rel,
  *	  and add it to the rel's pathlist if it is worthy of consideration.
@@ -469,6 +630,27 @@ add_path(RelOptInfo *parent_rel, Path *new_path)
 	 */
 	CHECK_FOR_INTERRUPTS();
 
+	/*
+	 * If the new path expects filters, none of the filters can intersect
+	 * with the rel. Relids of the relation must have no overlap with the
+	 * build relids of the filter.
+	 *
+	 * XXX Do it here, because all paths have to go either through add_path
+	 * or add_partial_path. But maybe there's a better place.
+	 */
+#if USE_ASSERT_CHECKING
+	{
+		ListCell *lc;
+
+		foreach (lc, new_path->expected_filters)
+		{
+			ExpectedFilter *f = (ExpectedFilter *) lfirst(lc);
+
+			Assert(!bms_overlap(f->build_relids, parent_rel->relids));
+		}
+	}
+#endif
+
 	/* Pretend parameterized paths have no pathkeys, per comment above */
 	new_path_pathkeys = new_path->param_info ? NIL : new_path->pathkeys;
 
@@ -484,6 +666,17 @@ add_path(RelOptInfo *parent_rel, Path *new_path)
 		PathCostComparison costcmp;
 		PathKeysComparison keyscmp;
 		BMS_Comparison outercmp;
+
+		/*
+		 * Paths carrying different sets of expected Bloom filters serve
+		 * different purposes (each may be consumed by a different parent
+		 * join, or none at all), and their cost/row estimates aren't directly
+		 * comparable.  So if the two paths don't expect the same filters,
+		 * keep both and don't let either dominate the other.
+		 */
+		if (!expected_filters_equal(new_path->expected_filters,
+									old_path->expected_filters))
+			continue;
 
 		/*
 		 * Do a fuzzy cost comparison with standard fuzziness limit.
@@ -703,6 +896,20 @@ add_path_precheck(RelOptInfo *parent_rel, int disabled_nodes,
 		PathKeysComparison keyscmp;
 
 		/*
+		 * Paths carrying expected Bloom filters serve a different purpose and
+		 * are not directly cost-comparable with ordinary paths, exactly as in
+		 * add_path (which keeps both when the expected filter sets differ).
+		 * The candidates submitted to this precheck never carry expected
+		 * filters of their own, so any filter-bearing old path is a
+		 * non-comparable speculative path and must not be allowed to dominate
+		 * (and thereby suppress) the new path.  Skipping them here also
+		 * guarantees that a join relation always retains at least one
+		 * ordinary, filter-free path to serve as cheapest_total_path.
+		 */
+		if (old_path->expected_filters != NIL)
+			continue;
+
+		/*
 		 * Since the pathlist is sorted by disabled_nodes and then by
 		 * total_cost, we can stop looking once we reach a path with more
 		 * disabled nodes, or the same number of disabled nodes plus a
@@ -806,6 +1013,27 @@ add_partial_path(RelOptInfo *parent_rel, Path *new_path)
 	Assert(parent_rel->consider_parallel);
 
 	/*
+	 * If the new path expects filters, none of the filters can intersect
+	 * with the rel. Relids of the relation must have no overlap with the
+	 * build relids of the filter.
+	 *
+	 * XXX Do it here, because all paths have to go either through add_path
+	 * or add_partial_path. But maybe there's a better place.
+	 */
+#if USE_ASSERT_CHECKING
+	{
+		ListCell *lc;
+
+		foreach (lc, new_path->expected_filters)
+		{
+			ExpectedFilter *f = (ExpectedFilter *) lfirst(lc);
+
+			Assert(!bms_overlap(f->build_relids, parent_rel->relids));
+		}
+	}
+#endif
+
+	/*
 	 * As in add_path, throw out any paths which are dominated by the new
 	 * path, but throw out the new path if some existing path dominates it.
 	 */
@@ -814,6 +1042,17 @@ add_partial_path(RelOptInfo *parent_rel, Path *new_path)
 		Path	   *old_path = (Path *) lfirst(p1);
 		bool		remove_old = false; /* unless new proves superior */
 		PathKeysComparison keyscmp;
+		bool		filters_match;
+
+		/*
+		 * Paths carrying different sets of expected Bloom filters serve
+		 * different purposes (each may be consumed by a different parent
+		 * join, or none at all), and their cost/row estimates aren't directly
+		 * comparable.  So if the two paths don't expect the same filters,
+		 * keep both and don't let either dominate the other.
+		 */
+		filters_match = expected_filters_equal(new_path->expected_filters,
+											   old_path->expected_filters);
 
 		/* Compare pathkeys. */
 		keyscmp = compare_pathkeys(new_path->pathkeys, old_path->pathkeys);
@@ -822,8 +1061,11 @@ add_partial_path(RelOptInfo *parent_rel, Path *new_path)
 		 * Unless pathkeys are incompatible, see if one of the paths dominates
 		 * the other (both in startup and total cost). It may happen that one
 		 * path has lower startup cost, the other has lower total cost.
+		 *
+		 * Treat expected filters just like pathkeys - if the paths expect
+		 * different filters, they can't dominate each other.
 		 */
-		if (keyscmp != PATHKEYS_DIFFERENT)
+		if (keyscmp != PATHKEYS_DIFFERENT && filters_match)
 		{
 			PathCostComparison costcmp;
 
@@ -870,10 +1112,15 @@ add_partial_path(RelOptInfo *parent_rel, Path *new_path)
 			/*
 			 * new belongs after this old path if it has more disabled nodes
 			 * or if it has the same number of nodes but a greater total cost
+			 *
+			 * Compare the number of filters first, so that the initial path
+			 * has no filters (there always has to be such path).
 			 */
-			if (new_path->disabled_nodes > old_path->disabled_nodes ||
-				(new_path->disabled_nodes == old_path->disabled_nodes &&
-				 new_path->total_cost >= old_path->total_cost))
+			if ((list_length(new_path->expected_filters) > list_length(old_path->expected_filters)) ||
+				((list_length(new_path->expected_filters) == list_length(old_path->expected_filters)) &&
+				 (new_path->disabled_nodes > old_path->disabled_nodes ||
+				  (new_path->disabled_nodes == old_path->disabled_nodes &&
+				   new_path->total_cost >= old_path->total_cost))))
 				insert_at = foreach_current_index(p1) + 1;
 		}
 
@@ -1024,7 +1271,8 @@ add_partial_path_precheck(RelOptInfo *parent_rel, int disabled_nodes,
  */
 Path *
 create_seqscan_path(PlannerInfo *root, RelOptInfo *rel,
-					Relids required_outer, int parallel_workers)
+					Relids required_outer, int parallel_workers,
+					List *filters)
 {
 	Path	   *pathnode = makeNode(Path);
 
@@ -1039,6 +1287,7 @@ create_seqscan_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->pathkeys = NIL;	/* seqscan has unordered result */
 
 	cost_seqscan(pathnode, root, rel, pathnode->param_info);
+	apply_expected_filters(pathnode, filters);
 
 	return pathnode;
 }
@@ -1048,7 +1297,8 @@ create_seqscan_path(PlannerInfo *root, RelOptInfo *rel,
  *	  Creates a path node for a sampled table scan.
  */
 Path *
-create_samplescan_path(PlannerInfo *root, RelOptInfo *rel, Relids required_outer)
+create_samplescan_path(PlannerInfo *root, RelOptInfo *rel,
+					   Relids required_outer, List *filters)
 {
 	Path	   *pathnode = makeNode(Path);
 
@@ -1063,6 +1313,7 @@ create_samplescan_path(PlannerInfo *root, RelOptInfo *rel, Relids required_outer
 	pathnode->pathkeys = NIL;	/* samplescan has unordered result */
 
 	cost_samplescan(pathnode, root, rel, pathnode->param_info);
+	apply_expected_filters(pathnode, filters);
 
 	return pathnode;
 }
@@ -1151,7 +1402,8 @@ create_bitmap_heap_path(PlannerInfo *root,
 						Path *bitmapqual,
 						Relids required_outer,
 						double loop_count,
-						int parallel_degree)
+						int parallel_degree,
+						List *filters)
 {
 	BitmapHeapPath *pathnode = makeNode(BitmapHeapPath);
 
@@ -1170,6 +1422,7 @@ create_bitmap_heap_path(PlannerInfo *root,
 	cost_bitmap_heap_scan(&pathnode->path, root, rel,
 						  pathnode->path.param_info,
 						  bitmapqual, loop_count);
+	apply_expected_filters(&pathnode->path, filters);
 
 	return pathnode;
 }
@@ -1284,7 +1537,7 @@ create_bitmap_or_path(PlannerInfo *root,
  */
 TidPath *
 create_tidscan_path(PlannerInfo *root, RelOptInfo *rel, List *tidquals,
-					Relids required_outer)
+					Relids required_outer, List *filters)
 {
 	TidPath    *pathnode = makeNode(TidPath);
 
@@ -1302,6 +1555,7 @@ create_tidscan_path(PlannerInfo *root, RelOptInfo *rel, List *tidquals,
 
 	cost_tidscan(&pathnode->path, root, rel, tidquals,
 				 pathnode->path.param_info);
+	apply_expected_filters(&pathnode->path, filters);
 
 	return pathnode;
 }
@@ -1314,7 +1568,7 @@ create_tidscan_path(PlannerInfo *root, RelOptInfo *rel, List *tidquals,
 TidRangePath *
 create_tidrangescan_path(PlannerInfo *root, RelOptInfo *rel,
 						 List *tidrangequals, Relids required_outer,
-						 int parallel_workers)
+						 int parallel_workers, List *filters)
 {
 	TidRangePath *pathnode = makeNode(TidRangePath);
 
@@ -1332,6 +1586,7 @@ create_tidrangescan_path(PlannerInfo *root, RelOptInfo *rel,
 
 	cost_tidrangescan(&pathnode->path, root, rel, tidrangequals,
 					  pathnode->path.param_info);
+	apply_expected_filters(&pathnode->path, filters);
 
 	return pathnode;
 }
@@ -3946,9 +4201,9 @@ reparameterize_path(PlannerInfo *root, Path *path,
 	switch (path->pathtype)
 	{
 		case T_SeqScan:
-			return create_seqscan_path(root, rel, required_outer, 0);
+			return create_seqscan_path(root, rel, required_outer, 0, NIL);
 		case T_SampleScan:
-			return create_samplescan_path(root, rel, required_outer);
+			return create_samplescan_path(root, rel, required_outer, NIL);
 		case T_IndexScan:
 		case T_IndexOnlyScan:
 			{
@@ -3976,7 +4231,7 @@ reparameterize_path(PlannerInfo *root, Path *path,
 														rel,
 														bpath->bitmapqual,
 														required_outer,
-														loop_count, 0);
+														loop_count, 0, NIL);
 			}
 		case T_SubqueryScan:
 			{

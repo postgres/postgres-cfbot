@@ -15,6 +15,7 @@
 
 #include "postgres.h"
 
+#include <float.h>
 #include <limits.h>
 #include <math.h>
 
@@ -25,6 +26,7 @@
 #include "catalog/pg_proc.h"
 #include "foreign/fdwapi.h"
 #include "miscadmin.h"
+#include "nodes/extensible.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/supportnodes.h"
@@ -107,6 +109,13 @@ static void set_rel_consider_parallel(PlannerInfo *root, RelOptInfo *rel,
 									  RangeTblEntry *rte);
 static void set_plain_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 								   RangeTblEntry *rte);
+static List *find_interesting_bloom_filters(PlannerInfo *root,
+											RelOptInfo *rel);
+static Selectivity bloom_build_side_join_ratio(PlannerInfo *root,
+											   List *build_sides,
+											   RelOptInfo *rel,
+											   Relids build_relids);
+static void generate_expected_filter_paths(PlannerInfo *root, RelOptInfo *rel);
 static void set_tablesample_rel_size(PlannerInfo *root, RelOptInfo *rel,
 									 RangeTblEntry *rte);
 static void set_tablesample_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
@@ -607,6 +616,16 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 		!bms_equal(rel->relids, root->all_query_rels))
 		generate_useful_gather_paths(root, rel, false);
 
+	/*
+	 * For plain base relations, consider generating additional scan paths
+	 * that anticipate a Bloom filter being pushed down from a hash join above
+	 * (see find_interesting_bloom_filters).  These paths have reduced row
+	 * estimates and are consumed by join path generation.
+	 */
+	if (rel->reloptkind == RELOPT_BASEREL &&
+		rte->rtekind == RTE_RELATION)
+		generate_expected_filter_paths(root, rel);
+
 	/* Now find the cheapest of the paths for this rel */
 	set_cheapest(rel);
 
@@ -858,7 +877,7 @@ set_plain_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 		return;
 
 	/* Consider sequential scan */
-	add_path(rel, create_seqscan_path(root, rel, required_outer, 0));
+	add_path(rel, create_seqscan_path(root, rel, required_outer, 0, NIL));
 
 	/* If appropriate, consider parallel sequential scan */
 	if (rel->consider_parallel && required_outer == NULL)
@@ -885,7 +904,749 @@ create_plain_partial_paths(PlannerInfo *root, RelOptInfo *rel)
 		return;
 
 	/* Add an unordered partial path based on a parallel sequential scan. */
-	add_partial_path(rel, create_seqscan_path(root, rel, NULL, parallel_workers));
+	add_partial_path(rel, create_seqscan_path(root, rel, NULL, parallel_workers, NIL));
+}
+
+/*
+ * bloom_em_matches_anybarevar
+ *	  ec_matches_callback used by find_interesting_bloom_filters: accept any
+ *	  EquivalenceClass member that is a bare Var of the target relation.  The
+ *	  Bloom filter pushdown logic (createplan.c) only supports recipients whose
+ *	  join keys are bare Vars, so we mirror that requirement here.
+ */
+static bool
+bloom_em_matches_anybarevar(PlannerInfo *root, RelOptInfo *rel,
+							EquivalenceClass *ec, EquivalenceMember *em,
+							void *arg)
+{
+	Var		   *var;
+
+	/* We're looking only for bare Var expressions. */
+	if (!IsA(em->em_expr, Var))
+		return false;
+
+	/*
+	 * Is the Var referencing a normal (non-system) attribute in the relation
+	 * we're processing (generating scans for)?
+	 *
+	 * FIXME Can we have (varlevelsup != 0) for baserels? I don't think we can
+	 * have outer referecenses in that place.
+	 */
+	var = (Var *) em->em_expr;
+	if (var->varno != rel->relid ||
+		var->varattno <= 0 ||
+		var->varlevelsup != 0)
+		return false;
+
+	return true;
+}
+
+/*
+ * bloom_filter_recipient_reachable
+ *		Check that a Bloom filter owned by owner_relid and built from
+ *		build_relids could actually be pushed to the owner's scan.
+ *
+ * A pushed-down filter removes owner tuples that have no match on the build
+ * side, so it can only be applied where the join that realizes it drops such
+ * unmatched owner (probe) tuples.  If an outer join null-extends the owner
+ * before it can be joined to the build side, the filter would change the
+ * result and is therefore unusable: at plan time find_bloom_filter_recipient
+ * would refuse to descend into that side and find no recipient (see also
+ * bloom_join_side_preserved, which is checking for this situation).
+ *
+ * Picking such a filter only to throw it away later wastes planner effort,
+ * and we might also ignore some other filters because of that. It's better
+ * to eliminate it right away.
+ *
+ * This is primarily an optimization - we don't want to generate paths that
+ * would ultimately be useless, and possibly not generating paths for other
+ * filters. The correctness is still guaranteed by the propagation logic in
+ * compute_join_expected_filters(), which rejects cases that would carry a
+ * filter across a non-preserved join side. That guarantees we don't pick a
+ * plan with such filters, only to find about the issue in createplan.c.
+ */
+static bool
+bloom_filter_recipient_reachable(PlannerInfo *root, Index owner_relid,
+								 Relids build_relids)
+{
+	ListCell   *lc;
+
+	foreach(lc, root->join_info_list)
+	{
+		SpecialJoinInfo *sjinfo = (SpecialJoinInfo *) lfirst(lc);
+
+		switch (sjinfo->jointype)
+		{
+			case JOIN_LEFT:
+			case JOIN_ANTI:
+
+				/*
+				 * The syntactic RHS is null-extended.  If the owner is on it
+				 * but the build side is reached from the preserved LHS, the
+				 * owner must cross this outer join on its nullable side.
+				 */
+				if (bms_is_member(owner_relid, sjinfo->syn_righthand) &&
+					!bms_is_subset(build_relids, sjinfo->syn_righthand))
+					return false;
+				break;
+			case JOIN_FULL:
+
+				/*
+				 * Both sides are null-extended, so the filter is unusable
+				 * whenever the owner and the build side sit on opposite sides
+				 * of the join.
+				 */
+				if (bms_is_member(owner_relid, sjinfo->syn_lefthand) &&
+					!bms_is_subset(build_relids, sjinfo->syn_lefthand))
+					return false;
+				if (bms_is_member(owner_relid, sjinfo->syn_righthand) &&
+					!bms_is_subset(build_relids, sjinfo->syn_righthand))
+					return false;
+				break;
+			default:
+				/* INNER and SEMI joins never null-extend the owner. */
+				break;
+		}
+	}
+
+	return true;
+}
+
+/*
+ * bloom_build_side_join_ratio
+ *	  Estimate the fraction of owner (probe) rows that survive a Bloom filter
+ *	  built over the join relation 'build_relids'.
+ *
+ * The per-owner-clause semijoin estimate used elsewhere only looks at the
+ * clauses that directly join the owner to a build relation, using each build
+ * relation's base statistics.  It therefore ignores selectivity contributed by
+ * the rest of the build side: restrictions on build relations (possibly ones
+ * that have no direct join clause to the owner at all) and the join clauses
+ * among the build relations.
+ *
+ * Consider a join on a snowflake schema with a fact table and two dimensions.
+ *
+ * SELECT * FROM fact_table
+ *          JOIN dim_1 ON (fact_table.id1 = dim_1.id)
+ *          JOIN dim_2 ON (dim_1.id2 = dim_2.id)
+ *          WHERE dim_2.x = 10;
+ *
+ * The dimension table dim_2 is filtered by a WHERE clause and only reaches the
+ * fact table through another dimension table. The direct estimate is 1.0 (for
+ * the join between fact_table and dim_1), even though the join may eliminate
+ * almost every fact row (depending on how many tuples survive the WHERE).
+ *
+ * We approximate the surviving fraction as the estimated cardinality of the
+ * join of {owner} + build_relids divided by the owner's cardinality.  Since a
+ * join emits at least one row per surviving owner row, this ratio is an upper
+ * bound on the true surviving fraction and so never makes the filter look more
+ * selective than it is.
+ *
+ * The join cardinality is the product of the build relations' (restriction
+ * reduced) row estimates times the selectivity of a non-redundant set of
+ * hashjoinable equality join clauses spanning the relation set.
+ *
+ * XXX We can't call generate_join_implied_equalities(), because all of this
+ * happens before we get to create the RelOptInfos for joins. So we assemble
+ * that clause set on our own.  Only JOIN_INNER selectivity is used, so no
+ * join-relation lookup is needed either.
+ *
+ * XXX The RelOptInfo for baserels however already exist, and so we can use
+ * those without any issue.
+ *
+ * XXX What about RelOptInfos representing joins from previous join planning
+ * cycle (for queries above join_collapse_limit)? Those should also exist,
+ * no? We should still be able to access the baserels one by one.
+ */
+static Selectivity
+bloom_build_side_join_ratio(PlannerInfo *root, List *build_sides,
+							RelOptInfo *rel, Relids build_relids)
+{
+	double	nrows = DBL_MAX;
+	Relids	relids;
+
+	ListCell *lc;
+
+	relids = bms_copy(build_relids);
+	relids = bms_add_member(relids, rel->relid);
+
+	foreach (lc, build_sides)
+	{
+		SimpleRelOptInfo *rel = (SimpleRelOptInfo *) lfirst(lc);
+
+		if (bms_equal(rel->relids, relids))
+		{
+			nrows = rel->rows;
+			break;
+		}
+	}
+
+	return Min(1.0, Max(0.0, nrows / rel->rows));
+}
+
+/*
+ * find_interesting_bloom_filters
+ *	  Identify Bloom filters that a hash join above this scan could push down,
+ *	  and that are selective enough to be worth costing for.
+ *
+ * We look for hashjoinable equality join clauses where this rel's side is a
+ * bare Var, derived both from EquivalenceClasses and from non-EC joininfo
+ * clauses.  Clauses are grouped by the relids on the other ("build") side of
+ * the join; each group becomes a candidate filter whose expected surviving
+ * fraction is estimated as the semijoin selectivity of those clauses.
+ *
+ * A candidate is "interesting" only if it is expected to eliminate at least
+ * bloom_filter_pushdown_threshold of the rel's tuples.  Every candidate that
+ * clears that bar is returned as an ExpectedFilter node; deciding which of
+ * them to actually combine into a scan path (and how many) is left to
+ * find_bloom_filter_combinations().
+ *
+ * XXX This needs to be careful to not interfere with the general selectivity
+ * estimation, performed by clauselist_selectivity(). We'll estimate the filter
+ * selectivity using a made-up sjinfo with JOIN_INNER, which may not match
+ * the actual join. The selectivities must not leak - this is why this function
+ * does not collect the RestrictInfos but only the clauses. If we used the
+ * RestrictInfos, the clauselist_selectivity would cache the incorrect result
+ * in them, and it'd affect the planning in weird ways.
+ *
+ * FIXME Maybe there's a better way to calculate the filter selectivity?
+ */
+static List *
+find_interesting_bloom_filters(PlannerInfo *root, RelOptInfo *rel)
+{
+	List	   *candidates;
+	List	  **clauses_by_rel; /* clauses per build relations */
+	List	   *build_sides;
+	List	   *result = NIL;
+	ListCell   *lc;
+
+	if (!enable_hashjoin_bloom)
+		return NIL;
+
+	if (bloom_filter_pushdown_max <= 0)
+		return NIL;
+
+	if (rel->reloptkind != RELOPT_BASEREL)
+		return NIL;
+
+	/*
+	 * Return the cached result if we've already computed the interesting
+	 * filters for this rel. Both core path generation and a CustomScan
+	 * provider may ask for them, and the enumeration/selectivity work below
+	 * is not free, so we do it only once per base relation.
+	 */
+	if (rel->bloom_filters_valid)
+		return rel->bloom_filters;
+
+	/* Collect candidate hashjoinable equality clauses for this rel. */
+	candidates = generate_implied_equalities_for_all_columns(root, rel,
+															 bloom_em_matches_anybarevar,
+															 NULL, NULL);
+
+	foreach(lc, rel->joininfo)
+	{
+		RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
+
+		/* EC-derived clauses are already covered above. */
+		if (rinfo->parent_ec != NULL)
+			continue;
+
+		candidates = lappend(candidates, rinfo);
+	}
+
+	/*
+	 * Group usable candidate clauses by the base relation on the build side.
+	 *
+	 * A clause is usable only if its owner side is a bare Var of this
+	 * relation and its build side is a single base relation; that keeps the
+	 * per-relation selectivity estimate below well-defined (a semijoin
+	 * selectivity with a multi-relation inner side would require a join
+	 * RelOptInfo that does not exist yet at this stage of planning).
+	 *
+	 * A build side spanning several relations is still supported, but it is
+	 * assembled from several such single-relation clauses (see below), not
+	 * from a single clause referencing many relations.
+	 *
+	 * XXX Is the comment about not having join RelOptInfo accurate, even with
+	 * the enumerate_bloom_filter_build_relids below? Couldn't we use that to
+	 * calculate the correct semijoin selectivity using that, even for clauses
+	 * referencing multiple relations? But it's fairly rare case.
+	 */
+	clauses_by_rel = palloc0_array(List *, root->simple_rel_array_size);
+
+	foreach(lc, candidates)
+	{
+		Node	   *clause = (Node *) lfirst(lc);
+		RestrictInfo *rinfo = NULL;
+		Node	   *left;
+		Node	   *right;
+		Node	   *ownerexpr;
+		Oid			opno;
+		Relids		clause_relids;
+		Relids		build_relids;
+		int			buildrel;
+
+		/*
+		 * Strip RestrictInfo (see comment above), but remember it - we need
+		 * it to match the clauses to foreign keys when estimating the filter
+		 * selectivity below.
+		 */
+		if (IsA(clause, RestrictInfo))
+		{
+			rinfo = (RestrictInfo *) clause;
+			clause = (Node *) rinfo->clause;
+		}
+
+		/*
+		 * Only care about (Expr op Expr) clauses. We know one side has to be
+		 * a bare Var node, from the "owner" side (which is the scan node).
+		 * The other side can be arbitrary expression on the other relation.
+		 */
+		if (!is_opclause(clause) ||
+			list_length(((OpExpr *) clause)->args) != 2)
+			continue;
+
+		opno = ((OpExpr *) clause)->opno;
+		left = get_leftop(clause);
+		right = get_rightop(clause);
+
+		/* Identify which side is a bare Var of this rel (the owner side). */
+
+		/*
+		 * XXX replace this with a macro shared with
+		 * bloom_em_matches_anybarevar
+		 */
+		if (IsA(left, Var) && ((Var *) left)->varno == rel->relid &&
+			((Var *) left)->varattno > 0 && ((Var *) left)->varlevelsup == 0)
+			ownerexpr = left;
+		else if (IsA(right, Var) && ((Var *) right)->varno == rel->relid &&
+				 ((Var *) right)->varattno > 0 &&
+				 ((Var *) right)->varlevelsup == 0)
+			ownerexpr = right;
+		else
+			continue;
+
+		/* Operator must be hashjoinable on the owner's input type. */
+		if (!op_hashjoinable(opno, exprType(ownerexpr)))
+			continue;
+
+		/* The build side of a usable clause must be one base relation. */
+		clause_relids = pull_varnos(root, (Node *) clause);
+		build_relids = bms_difference(clause_relids, rel->relids);
+		if (!bms_get_singleton_member(build_relids, &buildrel) ||
+			root->simple_rel_array[buildrel] == NULL ||
+			root->simple_rel_array[buildrel]->reloptkind != RELOPT_BASEREL)
+		{
+			bms_free(build_relids);
+			continue;
+		}
+		bms_free(build_relids);
+
+		Assert(root->simple_rel_array[buildrel]->reloptkind == RELOPT_BASEREL);
+
+		/* all the candidate clauses come from RestrictInfos */
+		Assert(rinfo != NULL);
+
+		clauses_by_rel[buildrel] = lappend(clauses_by_rel[buildrel], rinfo);
+	}
+
+	/*
+	 * Generate the set of possible join relations on the build side.
+	 *
+	 * This performs a minimal subset of the join planning - construct joins
+	 * as set of relids, for which we can build filters. We don't bother with
+	 * generating paths or even constructing RelOptInfos for joins, all that
+	 * will happen later during the "full" join search. We only care about
+	 * which joins would be valid, and calculating the selectivity.
+	 *
+	 * There are various other limits and heuristics intended to minimize the
+	 * cost, see enumerate_bloom_filter_build_relids for details.
+	 *
+	 * The list of valid join relids is calculated once, on the first call,
+	 * and cached in PlannerInfo.
+	 *
+	 * XXX We could invent additional heuristics for when to calculate the
+	 * join relids, so that we don't do that in cases where it's obviously
+	 * useless (for queries touching only tiny amounts of rows, ...). We
+	 * should also give CustomScan to decide whether to do this (so that it
+	 * can request it in more cases, if it can leverage it in some way, e.g.
+	 * to scan storage more efficiently).
+	 */
+	build_sides = enumerate_bloom_filter_build_relids(root);
+
+	/*
+	 * Consider each legal join relation (or single base relation) that could
+	 * serve as a build side.  For a build side B we combine the per-relation
+	 * clauses of every build relation in B that has a direct join clause to
+	 * the owner; those clauses define the filter keys.  At least one such
+	 * relation must exist, otherwise the filter would have no keys.
+	 *
+	 * We estimate the surviving fraction two ways and keep the smaller (more
+	 * selective) one, since both are upper bounds on the true value:
+	 *
+	 * - the product of the per-relation semijoin selectivities (assuming
+	 * independence), which uses each build relation's base statistics but
+	 * ignores the rest of the build side; and
+	 *
+	 * - the build-side join-cardinality ratio (see
+	 * bloom_build_side_join_ratio), which accounts for restrictions on build
+	 * relations and the join clauses among them -- including build relations
+	 * with no direct join clause to the owner.
+	 *
+	 * The whole connected set B is used as the filter's build side, so the
+	 * filter is sourced by the join that first brings all of B together with
+	 * the owner (after any restriction on B's members has been applied).
+	 *
+	 * XXX Isn't there a better way to estimate the selectivity of the filter?
+	 * The two alternative formulas seem a bit strange / suspicious. Shouldn't
+	 * we really multiply all of this together, somehow?
+	 */
+	foreach(lc, build_sides)
+	{
+		SimpleRelOptInfo   *brel = (SimpleRelOptInfo *) lfirst(lc); /* relids on build side */
+		List	   *clauses = NIL;
+		Selectivity sel;
+		ListCell   *lce;
+		bool		add;
+		int			r;
+
+		/* The owner cannot be on the build side of the filter. */
+		if (bms_is_member(rel->relid, brel->relids))
+			continue;
+
+		/*
+		 * Collect the owner-side clauses (the filter keys) and the product of
+		 * the per-relation semijoin selectivities.
+		 */
+		r = -1;
+		while ((r = bms_next_member(brel->relids, r)) >= 0)
+		{
+			clauses = list_concat(clauses, list_copy(clauses_by_rel[r]));
+		}
+
+		/*
+		 * Have a clause to the filter "owner" (where we push the filter) for
+		 * this set of build relids? If not, it's a crossproduct, and that
+		 * can't filter anything.
+		 */
+		if (clauses == NIL)
+			continue;
+
+		/*
+		 * For a build side that spans several relations, refine the estimate
+		 * with the build-side join-cardinality ratio and keep whichever bound
+		 * is tighter.  This is what accounts for restrictions on build
+		 * relations and for join clauses among them -- including build
+		 * relations that have no direct join clause to the owner.  A
+		 * single-relation build side has no such internal structure, so the
+		 * per-relation semijoin estimate already covers it.
+		 *
+		 * XXX I think we could just do this for all build sides, and not
+		 * calculate the clause selectivity at all. One effect is that we
+		 * would automatically consider only filters pushed down from the
+		 * smaller to the larger relation (which is one of the heuristics
+		 * suggested by the paper anyway).
+		 */
+		sel = bloom_build_side_join_ratio(root, build_sides, rel, brel->relids);
+
+		Assert((sel >= 0.0) && (sel <= 1.0));
+
+		/*
+		 * A candidate we would not emit anyway (not selective enough, or not
+		 * reachable at the owner's scan) must not influence the filters we
+		 * have already collected, so test those conditions before the
+		 * de-duplication below.
+		 */
+		if (!(sel <= 1.0 - bloom_filter_pushdown_threshold && sel > 0.0) ||
+			!bloom_filter_recipient_reachable(root, rel->relid, brel->relids))
+		{
+			list_free(clauses);
+			continue;
+		}
+
+		/*
+		 * De-duplicate against the filters produced so far.  Beyond dropping
+		 * an exact duplicate build side, we keep a larger filter only when it
+		 * is strictly more selective (discards more tuples) than a smaller
+		 * one it contains: a smaller build side is sourced no later and costs
+		 * no more, so it dominates a larger build side that does not discard
+		 * more.
+		 *
+		 * - If an existing filter has the same build side, keep the existing
+		 * filter and drop this candidate.
+		 *
+		 * - If an existing filter's build side is a subset of this one (the
+		 * candidate is larger), keep the candidate only if it is strictly
+		 * more selective than that existing filter.
+		 *
+		 * - If an existing filter's build side is a superset of this one (the
+		 * candidate is smaller), drop that existing filter unless it is
+		 * strictly more selective than the candidate.
+		 *
+		 * XXX Can we actually see the same set of build relids twice? I don't
+		 * think that should be possible, we only generate a single list, and
+		 * that should not contain duplicate relids.
+		 */
+		add = true;
+		foreach(lce, result)
+		{
+			ExpectedFilter *f = (ExpectedFilter *) lfirst(lce);
+
+			if (bms_equal(f->build_relids, brel->relids))
+			{
+				add = false;
+				break;
+			}
+			else if (bms_is_subset(f->build_relids, brel->relids))
+			{
+				/* existing (smaller) dominates unless candidate is better */
+				if (f->selectivity <= sel)
+				{
+					add = false;
+					break;
+				}
+			}
+			else if (bms_is_subset(brel->relids, f->build_relids))
+			{
+				/* candidate (smaller) dominates the existing larger filter */
+				if (sel <= f->selectivity)
+					result = foreach_delete_current(result, lce);
+			}
+		}
+
+		if (add)
+		{
+			ExpectedFilter *f = makeNode(ExpectedFilter);
+
+			f->owner_relid = rel->relid;
+			f->build_relids = bms_copy(brel->relids);
+			f->clauses = clauses;
+			f->selectivity = sel;
+			result = lappend(result, f);
+		}
+		else
+			list_free(clauses);
+	}
+
+	/*
+	 * Return every candidate that clears bloom_filter_pushdown_threshold.
+	 * Which of them to combine into a scan path, and how many, is decided by
+	 * find_bloom_filter_combinations(); a filter that is weak on its own can
+	 * still be useful combined with others, or to a smart consumer.
+	 */
+	rel->bloom_filters = result;
+	rel->bloom_filters_valid = true;
+
+	return result;
+}
+
+/*
+ * generate_expected_filter_paths
+ *		Generate additional scan paths that anticipate one or more pushed-down
+ *		Bloom filters.
+ *
+ * For each combination of the interesting filters (see
+ * find_bloom_filter_combinations), we build a new path via the real
+ * constructor for that path's type, passing the filters in so the
+ * constructor's apply_expected_filters() call charges a per-tuple probe cost.
+ *
+ * IndexPath is the one exception: it goes through create_filtered_scan_path,
+ * which clones the source path, because create_index_path() would re-derive
+ * its indexclauses/pathkeys from scratch for no benefit (see the comment on
+ * create_filtered_scan_path).
+ *
+ * These paths are kept alongside the regular paths (add_path keeps paths with
+ * differing expected_filters) and are consumed by join path generation;
+ * set_cheapest never selects them.
+ *
+ * CustomPath is not handled here at all.  Core cannot safely copy or construct
+ * a CustomPath, so a provider that wants filter-aware CustomPaths must build
+ * them itself, inside its own set_rel_pathlist_hook, by calling
+ * find_bloom_filter_combinations() directly and costing the result however it
+ * likes -- with real smart costing, or by calling apply_expected_filters() on
+ * its own freshly-built CustomPath if it doesn't want to be smart.
+ */
+static void
+generate_expected_filter_paths(PlannerInfo *root, RelOptInfo *rel)
+{
+	List	   *combinations;
+	List	   *basepaths = NIL;
+
+	/*
+	 * Snapshot the existing unparameterized, non-partial scan paths of a
+	 * supported type.  We must snapshot before calling add_path(), which
+	 * mutates rel->pathlist.
+	 */
+	foreach_ptr(Path, path, rel->pathlist)
+	{
+		/* XXX Is parameterization really a problem? Always? */
+		if (path->param_info != NULL || path->expected_filters != NIL)
+			continue;
+
+		switch (nodeTag(path))
+		{
+			case T_Path:
+			case T_IndexPath:
+			case T_BitmapHeapPath:
+			case T_TidPath:
+			case T_TidRangePath:
+				basepaths = lappend(basepaths, path);
+				break;
+			default:
+				break;
+		}
+	}
+
+	if (basepaths == NIL)
+		return;
+
+	combinations = find_bloom_filter_combinations(root, rel);
+	if (combinations == NIL)
+		return;
+
+	/*
+	 * For each combination, build a fresh path from each eligible base path
+	 * via that base path's real constructor (except IndexPath, see the
+	 * function comment above).
+	 */
+	foreach_ptr(List, combo, combinations)
+	{
+		foreach_ptr(Path, base, basepaths)
+		{
+			Path	   *newpath = NULL;
+
+			switch (nodeTag(base))
+			{
+				case T_Path:
+					if (base->pathtype == T_SeqScan)
+						newpath = create_seqscan_path(root, rel, NULL,
+													  base->parallel_workers,
+													  combo);
+					else if (base->pathtype == T_SampleScan)
+						newpath = create_samplescan_path(root, rel, NULL,
+														 combo);
+					break;
+				case T_IndexPath:
+					newpath = create_filtered_scan_path(root, base, combo);
+					break;
+				case T_BitmapHeapPath:
+					newpath = (Path *)
+						create_bitmap_heap_path(root, rel,
+												((BitmapHeapPath *) base)->bitmapqual,
+												NULL, 1.0,
+												base->parallel_workers,
+												combo);
+					break;
+				case T_TidPath:
+					newpath = (Path *)
+						create_tidscan_path(root, rel,
+											((TidPath *) base)->tidquals,
+											NULL, combo);
+					break;
+				case T_TidRangePath:
+					newpath = (Path *)
+						create_tidrangescan_path(root, rel,
+												 ((TidRangePath *) base)->tidrangequals,
+												 NULL, base->parallel_workers,
+												 combo);
+					break;
+				default:
+					break;
+			}
+
+			if (newpath != NULL)
+				add_path(rel, newpath);
+		}
+	}
+}
+
+/*
+ * expected_filter_selectivity_cmp
+ *	  list_sort comparator ordering ExpectedFilters by ascending selectivity,
+ *	  i.e. the most selective filter (smallest surviving fraction) first.
+ */
+static int
+expected_filter_selectivity_cmp(const ListCell *a, const ListCell *b)
+{
+	Selectivity sa = ((ExpectedFilter *) lfirst(a))->selectivity;
+	Selectivity sb = ((ExpectedFilter *) lfirst(b))->selectivity;
+
+	if (sa < sb)
+		return -1;
+	if (sa > sb)
+		return 1;
+	return 0;
+}
+
+/*
+ * find_bloom_filter_combinations
+ *	  Find the interesting Bloom filters rel could receive from a hash join
+ *	  above it (see find_interesting_bloom_filters), and return the combination
+ *	  of them worth building a path for, as a list of lists of ExpectedFilter.
+ *
+ * Following the "apply all candidates simultaneously" heuristic (Heuristic 4
+ * of the bottom-up Bloom filter paper), we build a single combination that
+ * applies as many candidates as possible at once.  We take the interesting
+ * filters most selective first and add each one whose build side does not
+ * overlap the build sides already chosen, stopping once
+ * bloom_filter_pushdown_max filters have been collected.
+ *
+ * Overlapping build sides are skipped because such filters would be sourced
+ * from joins sharing build relations, so their selectivities are not
+ * independent and applying them together would under-estimate the surviving
+ * rows.  On such a conflict we keep the more selective filter, since it sorts
+ * first.  bloom_filter_pushdown_max bounds how many filters are applied at
+ * once, which bounds the per-tuple probe cost.
+ *
+ * The result is a list of combinations (each a list of ExpectedFilter); this
+ * heuristic produces at most one combination.
+ *
+ * Note: A CustomScan provider can call it directly from its own
+ * set_rel_pathlist_hook (see generate_expected_filter_paths above).
+ */
+List *
+find_bloom_filter_combinations(PlannerInfo *root, RelOptInfo *rel)
+{
+	List	   *filters = find_interesting_bloom_filters(root, rel);
+	List	   *sorted;
+	List	   *combo = NIL;
+	Relids		used = NULL;
+	ListCell   *lc;
+
+	if (filters == NIL)
+		return NIL;
+
+	/*
+	 * Consider the most selective filters first, so that on a build-side
+	 * conflict we keep the one that discards more rows, and so that the
+	 * bloom_filter_pushdown_max cap retains the most useful filters.  Sort a
+	 * copy: "filters" is cached on the RelOptInfo and must not be reordered.
+	 */
+	sorted = list_copy(filters);
+	list_sort(sorted, expected_filter_selectivity_cmp);
+
+	foreach(lc, sorted)
+	{
+		ExpectedFilter *f = (ExpectedFilter *) lfirst(lc);
+
+		if (list_length(combo) >= bloom_filter_pushdown_max)
+			break;
+
+		/* skip a filter whose build side overlaps one already chosen */
+		if (bms_overlap(used, f->build_relids))
+			continue;
+
+		combo = lappend(combo, f);
+		used = bms_add_members(used, f->build_relids);
+	}
+
+	list_free(sorted);
+	bms_free(used);
+
+	if (combo == NIL)
+		return NIL;
+
+	return list_make1(combo);
 }
 
 /*
@@ -946,7 +1707,7 @@ set_tablesample_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *
 	required_outer = rel->lateral_relids;
 
 	/* Consider sampled scan */
-	path = create_samplescan_path(root, rel, required_outer);
+	path = create_samplescan_path(root, rel, required_outer, NIL);
 
 	/*
 	 * If the sampling method does not support repeatable scans, we must avoid
@@ -3281,6 +4042,13 @@ generate_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_rows)
 	add_path(rel, simple_gather_path);
 
 	/*
+	 * The cheapest partial path must not have any pushed-down filters. Maybe
+	 * in the future we'll be able to push those to parallel workers, but for
+	 * now that's not possible/allowed.
+	 */
+	Assert(cheapest_partial_path->expected_filters == NULL);
+
+	/*
 	 * For each useful ordering, we can consider an order-preserving Gather
 	 * Merge.
 	 */
@@ -3290,6 +4058,10 @@ generate_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_rows)
 		GatherMergePath *path;
 
 		if (subpath->pathkeys == NIL)
+			continue;
+
+		/* ignore paths with filters (not supported) */
+		if (subpath->expected_filters != NULL)
 			continue;
 
 		rows = compute_gather_rows(subpath);
@@ -4951,7 +5723,7 @@ create_partial_bitmap_paths(PlannerInfo *root, RelOptInfo *rel,
 		return;
 
 	add_partial_path(rel, (Path *) create_bitmap_heap_path(root, rel,
-														   bitmapqual, rel->lateral_relids, 1.0, parallel_workers));
+														   bitmapqual, rel->lateral_relids, 1.0, parallel_workers, NIL));
 }
 
 /*

@@ -5685,10 +5685,12 @@ LIMIT 1;
          ->  Hash Join
                Hash Cond: (t1.unique1 = t2.tenthous)
                ->  Index Only Scan using tenk1_unique1 on tenk1 t1
+                     Bloom Filter 1: keys=(unique1)
                ->  Hash
+                     Bloom Filter 1
                      ->  Seq Scan on tenk1 t2
                            Filter: (two = 1)
-(9 rows)
+(11 rows)
 
 -- Ensure we get a cheap total plan.  This time use UNBOUNDED FOLLOWING, which
 -- needs to read all join rows to output the first WindowAgg row.

@@ -1,0 +1,749 @@
+-- tests to validate bloom filter pushdown
+-- no parallel query support for now
+SET max_parallel_workers_per_gather = 0;
+-- needed, because the filter pushdown eliminates one of the inputs for
+-- choosing join order (reduction of result size)
+SET join_collapse_limit = 1;
+-- simple starjoin queries (fact + up to 7 dimensions)
+CREATE TABLE bloom_star_dim_1 (id int, r real);
+CREATE TABLE bloom_star_dim_2 (id int, r real);
+CREATE TABLE bloom_star_dim_3 (id int, r real);
+CREATE TABLE bloom_star_dim_4 (id int, r real);
+CREATE TABLE bloom_star_dim_5 (id int, r real);
+CREATE TABLE bloom_star_dim_6 (id int, r real);
+CREATE TABLE bloom_star_dim_7 (id int, r real);
+CREATE TABLE bloom_star_fact (id1 int, id2 int, id3 int, id4 int, id5 int, id6 int, id7 int, padding text);
+INSERT INTO bloom_star_dim_1 SELECT i, random() FROM generate_series(1,10000) s(i);
+INSERT INTO bloom_star_dim_2 SELECT i, random() FROM generate_series(1,10000) s(i);
+INSERT INTO bloom_star_dim_3 SELECT i, random() FROM generate_series(1,10000) s(i);
+INSERT INTO bloom_star_dim_4 SELECT i, random() FROM generate_series(1,10000) s(i);
+INSERT INTO bloom_star_dim_5 SELECT i, random() FROM generate_series(1,10000) s(i);
+INSERT INTO bloom_star_dim_6 SELECT i, random() FROM generate_series(1,10000) s(i);
+INSERT INTO bloom_star_dim_7 SELECT i, random() FROM generate_series(1,10000) s(i);
+INSERT INTO bloom_star_fact
+SELECT
+    1 + mod(i, 10000),
+    1 + mod(i, 10000),
+    1 + mod(i, 10000),
+    1 + mod(i, 10000),
+    1 + mod(i, 10000),
+    1 + mod(i, 10000),
+    1 + mod(i, 10000),
+    md5(i::text)
+FROM generate_series(1,1000000) s(i);
+VACUUM ANALYZE;
+-- simple query, no join is selective enough for a filter
+EXPLAIN (COSTS OFF)
+SELECT *
+FROM bloom_star_fact f
+JOIN bloom_star_dim_1 d1 ON (f.id1 = d1.id)
+JOIN bloom_star_dim_2 d2 ON (f.id2 = d2.id)
+JOIN bloom_star_dim_3 d3 ON (f.id3 = d3.id)
+JOIN bloom_star_dim_4 d4 ON (f.id4 = d4.id)
+JOIN bloom_star_dim_5 d5 ON (f.id5 = d5.id)
+JOIN bloom_star_dim_6 d6 ON (f.id6 = d6.id)
+JOIN bloom_star_dim_7 d7 ON (f.id7 = d7.id);
+                                   QUERY PLAN                                    
+---------------------------------------------------------------------------------
+ Hash Join
+   Hash Cond: (f.id7 = d7.id)
+   ->  Hash Join
+         Hash Cond: (f.id6 = d6.id)
+         ->  Hash Join
+               Hash Cond: (f.id5 = d5.id)
+               ->  Hash Join
+                     Hash Cond: (f.id4 = d4.id)
+                     ->  Hash Join
+                           Hash Cond: (f.id3 = d3.id)
+                           ->  Hash Join
+                                 Hash Cond: (f.id2 = d2.id)
+                                 ->  Hash Join
+                                       Hash Cond: (f.id1 = d1.id)
+                                       ->  Seq Scan on bloom_star_fact f
+                                       ->  Hash
+                                             ->  Seq Scan on bloom_star_dim_1 d1
+                                 ->  Hash
+                                       ->  Seq Scan on bloom_star_dim_2 d2
+                           ->  Hash
+                                 ->  Seq Scan on bloom_star_dim_3 d3
+                     ->  Hash
+                           ->  Seq Scan on bloom_star_dim_4 d4
+               ->  Hash
+                     ->  Seq Scan on bloom_star_dim_5 d5
+         ->  Hash
+               ->  Seq Scan on bloom_star_dim_6 d6
+   ->  Hash
+         ->  Seq Scan on bloom_star_dim_7 d7
+(29 rows)
+
+-- last join is 75% selective (not enough for a filter to be created)
+EXPLAIN (COSTS OFF)
+SELECT *
+FROM bloom_star_fact f
+JOIN bloom_star_dim_1 d1 ON (f.id1 = d1.id)
+JOIN bloom_star_dim_2 d2 ON (f.id2 = d2.id)
+JOIN bloom_star_dim_3 d3 ON (f.id3 = d3.id)
+JOIN bloom_star_dim_4 d4 ON (f.id4 = d4.id)
+JOIN bloom_star_dim_5 d5 ON (f.id5 = d5.id)
+JOIN bloom_star_dim_6 d6 ON (f.id6 = d6.id)
+JOIN bloom_star_dim_7 d7 ON (f.id7 = d7.id)
+WHERE d7.r < 0.75;
+                                   QUERY PLAN                                    
+---------------------------------------------------------------------------------
+ Hash Join
+   Hash Cond: (f.id7 = d7.id)
+   ->  Hash Join
+         Hash Cond: (f.id6 = d6.id)
+         ->  Hash Join
+               Hash Cond: (f.id5 = d5.id)
+               ->  Hash Join
+                     Hash Cond: (f.id4 = d4.id)
+                     ->  Hash Join
+                           Hash Cond: (f.id3 = d3.id)
+                           ->  Hash Join
+                                 Hash Cond: (f.id2 = d2.id)
+                                 ->  Hash Join
+                                       Hash Cond: (f.id1 = d1.id)
+                                       ->  Seq Scan on bloom_star_fact f
+                                       ->  Hash
+                                             ->  Seq Scan on bloom_star_dim_1 d1
+                                 ->  Hash
+                                       ->  Seq Scan on bloom_star_dim_2 d2
+                           ->  Hash
+                                 ->  Seq Scan on bloom_star_dim_3 d3
+                     ->  Hash
+                           ->  Seq Scan on bloom_star_dim_4 d4
+               ->  Hash
+                     ->  Seq Scan on bloom_star_dim_5 d5
+         ->  Hash
+               ->  Seq Scan on bloom_star_dim_6 d6
+   ->  Hash
+         ->  Seq Scan on bloom_star_dim_7 d7
+               Filter: (r < '0.75'::double precision)
+(30 rows)
+
+-- last join is 50% selective (good enough for a filter push down)
+-- the join will be executed done last
+EXPLAIN (COSTS OFF)
+SELECT *
+FROM bloom_star_fact f
+JOIN bloom_star_dim_1 d1 ON (f.id1 = d1.id)
+JOIN bloom_star_dim_2 d2 ON (f.id2 = d2.id)
+JOIN bloom_star_dim_3 d3 ON (f.id3 = d3.id)
+JOIN bloom_star_dim_4 d4 ON (f.id4 = d4.id)
+JOIN bloom_star_dim_5 d5 ON (f.id5 = d5.id)
+JOIN bloom_star_dim_6 d6 ON (f.id6 = d6.id)
+JOIN bloom_star_dim_7 d7 ON (f.id7 = d7.id)
+WHERE d7.r < 0.5;
+                                   QUERY PLAN                                    
+---------------------------------------------------------------------------------
+ Hash Join
+   Hash Cond: (f.id7 = d7.id)
+   ->  Hash Join
+         Hash Cond: (f.id6 = d6.id)
+         ->  Hash Join
+               Hash Cond: (f.id5 = d5.id)
+               ->  Hash Join
+                     Hash Cond: (f.id4 = d4.id)
+                     ->  Hash Join
+                           Hash Cond: (f.id3 = d3.id)
+                           ->  Hash Join
+                                 Hash Cond: (f.id2 = d2.id)
+                                 ->  Hash Join
+                                       Hash Cond: (f.id1 = d1.id)
+                                       ->  Seq Scan on bloom_star_fact f
+                                             Bloom Filter 1: keys=(id7)
+                                       ->  Hash
+                                             ->  Seq Scan on bloom_star_dim_1 d1
+                                 ->  Hash
+                                       ->  Seq Scan on bloom_star_dim_2 d2
+                           ->  Hash
+                                 ->  Seq Scan on bloom_star_dim_3 d3
+                     ->  Hash
+                           ->  Seq Scan on bloom_star_dim_4 d4
+               ->  Hash
+                     ->  Seq Scan on bloom_star_dim_5 d5
+         ->  Hash
+               ->  Seq Scan on bloom_star_dim_6 d6
+   ->  Hash
+         Bloom Filter 1
+         ->  Seq Scan on bloom_star_dim_7 d7
+               Filter: (r < '0.5'::double precision)
+(32 rows)
+
+-- first join is 50% selective (good enough for a filter push down)
+-- the join will be executed done last
+EXPLAIN (COSTS OFF)
+SELECT *
+FROM bloom_star_fact f
+JOIN bloom_star_dim_1 d1 ON (f.id1 = d1.id)
+JOIN bloom_star_dim_2 d2 ON (f.id2 = d2.id)
+JOIN bloom_star_dim_3 d3 ON (f.id3 = d3.id)
+JOIN bloom_star_dim_4 d4 ON (f.id4 = d4.id)
+JOIN bloom_star_dim_5 d5 ON (f.id5 = d5.id)
+JOIN bloom_star_dim_6 d6 ON (f.id6 = d6.id)
+JOIN bloom_star_dim_7 d7 ON (f.id7 = d7.id)
+WHERE d1.r < 0.5;
+                                       QUERY PLAN                                        
+-----------------------------------------------------------------------------------------
+ Hash Join
+   Hash Cond: (f.id7 = d7.id)
+   ->  Hash Join
+         Hash Cond: (f.id6 = d6.id)
+         ->  Hash Join
+               Hash Cond: (f.id5 = d5.id)
+               ->  Hash Join
+                     Hash Cond: (f.id4 = d4.id)
+                     ->  Hash Join
+                           Hash Cond: (f.id3 = d3.id)
+                           ->  Hash Join
+                                 Hash Cond: (f.id2 = d2.id)
+                                 ->  Hash Join
+                                       Hash Cond: (f.id1 = d1.id)
+                                       ->  Seq Scan on bloom_star_fact f
+                                             Bloom Filter 1: keys=(id1)
+                                       ->  Hash
+                                             Bloom Filter 1
+                                             ->  Seq Scan on bloom_star_dim_1 d1
+                                                   Filter: (r < '0.5'::double precision)
+                                 ->  Hash
+                                       ->  Seq Scan on bloom_star_dim_2 d2
+                           ->  Hash
+                                 ->  Seq Scan on bloom_star_dim_3 d3
+                     ->  Hash
+                           ->  Seq Scan on bloom_star_dim_4 d4
+               ->  Hash
+                     ->  Seq Scan on bloom_star_dim_5 d5
+         ->  Hash
+               ->  Seq Scan on bloom_star_dim_6 d6
+   ->  Hash
+         ->  Seq Scan on bloom_star_dim_7 d7
+(32 rows)
+
+-- two joins 50% selective
+EXPLAIN (COSTS OFF)
+SELECT *
+FROM bloom_star_fact f
+JOIN bloom_star_dim_1 d1 ON (f.id1 = d1.id)
+JOIN bloom_star_dim_2 d2 ON (f.id2 = d2.id)
+JOIN bloom_star_dim_3 d3 ON (f.id3 = d3.id)
+JOIN bloom_star_dim_4 d4 ON (f.id4 = d4.id)
+JOIN bloom_star_dim_5 d5 ON (f.id5 = d5.id)
+JOIN bloom_star_dim_6 d6 ON (f.id6 = d6.id)
+JOIN bloom_star_dim_7 d7 ON (f.id7 = d7.id)
+WHERE d1.r < 0.4 AND d7.r < 0.5;
+                                       QUERY PLAN                                        
+-----------------------------------------------------------------------------------------
+ Hash Join
+   Hash Cond: (f.id7 = d7.id)
+   ->  Hash Join
+         Hash Cond: (f.id6 = d6.id)
+         ->  Hash Join
+               Hash Cond: (f.id5 = d5.id)
+               ->  Hash Join
+                     Hash Cond: (f.id4 = d4.id)
+                     ->  Hash Join
+                           Hash Cond: (f.id3 = d3.id)
+                           ->  Hash Join
+                                 Hash Cond: (f.id2 = d2.id)
+                                 ->  Hash Join
+                                       Hash Cond: (f.id1 = d1.id)
+                                       ->  Seq Scan on bloom_star_fact f
+                                             Bloom Filter 1: keys=(id1)
+                                             Bloom Filter 2: keys=(id7)
+                                       ->  Hash
+                                             Bloom Filter 1
+                                             ->  Seq Scan on bloom_star_dim_1 d1
+                                                   Filter: (r < '0.4'::double precision)
+                                 ->  Hash
+                                       ->  Seq Scan on bloom_star_dim_2 d2
+                           ->  Hash
+                                 ->  Seq Scan on bloom_star_dim_3 d3
+                     ->  Hash
+                           ->  Seq Scan on bloom_star_dim_4 d4
+               ->  Hash
+                     ->  Seq Scan on bloom_star_dim_5 d5
+         ->  Hash
+               ->  Seq Scan on bloom_star_dim_6 d6
+   ->  Hash
+         Bloom Filter 2
+         ->  Seq Scan on bloom_star_dim_7 d7
+               Filter: (r < '0.5'::double precision)
+(35 rows)
+
+-- all joins selective for a filter (more than how many we allow)
+EXPLAIN (COSTS OFF)
+SELECT *
+FROM bloom_star_fact f
+JOIN bloom_star_dim_1 d1 ON (f.id1 = d1.id)
+JOIN bloom_star_dim_2 d2 ON (f.id2 = d2.id)
+JOIN bloom_star_dim_3 d3 ON (f.id3 = d3.id)
+JOIN bloom_star_dim_4 d4 ON (f.id4 = d4.id)
+JOIN bloom_star_dim_5 d5 ON (f.id5 = d5.id)
+JOIN bloom_star_dim_6 d6 ON (f.id6 = d6.id)
+JOIN bloom_star_dim_7 d7 ON (f.id7 = d7.id)
+WHERE d1.r < 0.3 AND d2.r < 0.35 AND d3.r < 0.4 AND d4.r < 0.45 AND d5.r < 0.5 AND d6.r < 0.55 AND d7.r < 0.6;
+                                       QUERY PLAN                                        
+-----------------------------------------------------------------------------------------
+ Hash Join
+   Hash Cond: (f.id7 = d7.id)
+   ->  Hash Join
+         Hash Cond: (f.id6 = d6.id)
+         ->  Hash Join
+               Hash Cond: (f.id5 = d5.id)
+               ->  Hash Join
+                     Hash Cond: (f.id4 = d4.id)
+                     ->  Hash Join
+                           Hash Cond: (f.id3 = d3.id)
+                           ->  Hash Join
+                                 Hash Cond: (f.id2 = d2.id)
+                                 ->  Hash Join
+                                       Hash Cond: (f.id1 = d1.id)
+                                       ->  Seq Scan on bloom_star_fact f
+                                             Bloom Filter 1: keys=(id1)
+                                             Bloom Filter 2: keys=(id2)
+                                             Bloom Filter 3: keys=(id3)
+                                       ->  Hash
+                                             Bloom Filter 1
+                                             ->  Seq Scan on bloom_star_dim_1 d1
+                                                   Filter: (r < '0.3'::double precision)
+                                 ->  Hash
+                                       Bloom Filter 2
+                                       ->  Seq Scan on bloom_star_dim_2 d2
+                                             Filter: (r < '0.35'::double precision)
+                           ->  Hash
+                                 Bloom Filter 3
+                                 ->  Seq Scan on bloom_star_dim_3 d3
+                                       Filter: (r < '0.4'::double precision)
+                     ->  Hash
+                           ->  Seq Scan on bloom_star_dim_4 d4
+                                 Filter: (r < '0.45'::double precision)
+               ->  Hash
+                     ->  Seq Scan on bloom_star_dim_5 d5
+                           Filter: (r < '0.5'::double precision)
+         ->  Hash
+               ->  Seq Scan on bloom_star_dim_6 d6
+                     Filter: (r < '0.55'::double precision)
+   ->  Hash
+         ->  Seq Scan on bloom_star_dim_7 d7
+               Filter: (r < '0.6'::double precision)
+(42 rows)
+
+SET bloom_filter_pushdown_max = 10;
+-- all joins selective for a filter
+EXPLAIN (COSTS OFF)
+SELECT *
+FROM bloom_star_fact f
+JOIN bloom_star_dim_1 d1 ON (f.id1 = d1.id)
+JOIN bloom_star_dim_2 d2 ON (f.id2 = d2.id)
+JOIN bloom_star_dim_3 d3 ON (f.id3 = d3.id)
+JOIN bloom_star_dim_4 d4 ON (f.id4 = d4.id)
+JOIN bloom_star_dim_5 d5 ON (f.id5 = d5.id)
+JOIN bloom_star_dim_6 d6 ON (f.id6 = d6.id)
+JOIN bloom_star_dim_7 d7 ON (f.id7 = d7.id)
+WHERE d1.r < 0.3 AND d2.r < 0.35 AND d3.r < 0.4 AND d4.r < 0.45 AND d5.r < 0.5 AND d6.r < 0.55 AND d7.r < 0.6;
+                                       QUERY PLAN                                        
+-----------------------------------------------------------------------------------------
+ Hash Join
+   Hash Cond: (f.id7 = d7.id)
+   ->  Hash Join
+         Hash Cond: (f.id6 = d6.id)
+         ->  Hash Join
+               Hash Cond: (f.id5 = d5.id)
+               ->  Hash Join
+                     Hash Cond: (f.id4 = d4.id)
+                     ->  Hash Join
+                           Hash Cond: (f.id3 = d3.id)
+                           ->  Hash Join
+                                 Hash Cond: (f.id2 = d2.id)
+                                 ->  Hash Join
+                                       Hash Cond: (f.id1 = d1.id)
+                                       ->  Seq Scan on bloom_star_fact f
+                                             Bloom Filter 1: keys=(id1)
+                                             Bloom Filter 2: keys=(id2)
+                                             Bloom Filter 3: keys=(id3)
+                                             Bloom Filter 4: keys=(id4)
+                                             Bloom Filter 5: keys=(id5)
+                                             Bloom Filter 6: keys=(id6)
+                                             Bloom Filter 7: keys=(id7)
+                                       ->  Hash
+                                             Bloom Filter 1
+                                             ->  Seq Scan on bloom_star_dim_1 d1
+                                                   Filter: (r < '0.3'::double precision)
+                                 ->  Hash
+                                       Bloom Filter 2
+                                       ->  Seq Scan on bloom_star_dim_2 d2
+                                             Filter: (r < '0.35'::double precision)
+                           ->  Hash
+                                 Bloom Filter 3
+                                 ->  Seq Scan on bloom_star_dim_3 d3
+                                       Filter: (r < '0.4'::double precision)
+                     ->  Hash
+                           Bloom Filter 4
+                           ->  Seq Scan on bloom_star_dim_4 d4
+                                 Filter: (r < '0.45'::double precision)
+               ->  Hash
+                     Bloom Filter 5
+                     ->  Seq Scan on bloom_star_dim_5 d5
+                           Filter: (r < '0.5'::double precision)
+         ->  Hash
+               Bloom Filter 6
+               ->  Seq Scan on bloom_star_dim_6 d6
+                     Filter: (r < '0.55'::double precision)
+   ->  Hash
+         Bloom Filter 7
+         ->  Seq Scan on bloom_star_dim_7 d7
+               Filter: (r < '0.6'::double precision)
+(50 rows)
+
+RESET bloom_filter_pushdown_max;
+DROP TABLE bloom_star_dim_1;
+DROP TABLE bloom_star_dim_2;
+DROP TABLE bloom_star_dim_3;
+DROP TABLE bloom_star_dim_4;
+DROP TABLE bloom_star_dim_5;
+DROP TABLE bloom_star_dim_6;
+DROP TABLE bloom_star_dim_7;
+DROP TABLE bloom_star_fact;
+-- schema with multi-column FK joins
+CREATE TABLE bloom_star_multi_dim_1 (a int, b int, r real, primary key (a, b));
+CREATE TABLE bloom_star_multi_dim_2 (a int, b int, r real, primary key (a, b));
+CREATE TABLE bloom_star_multi_dim_3 (a int, b int, r real, primary key (a, b));
+CREATE TABLE bloom_star_multi_dim_4 (a int, b int, r real, primary key (a, b));
+CREATE TABLE bloom_star_multi_dim_5 (a int, b int, r real, primary key (a, b));
+CREATE TABLE bloom_star_multi_dim_6 (a int, b int, r real, primary key (a, b));
+CREATE TABLE bloom_star_multi_dim_7 (a int, b int, r real, primary key (a, b));
+CREATE TABLE bloom_star_multi_fact (
+	id1a int, id1b int,
+	id2a int, id2b int,
+	id3a int, id3b int,
+	id4a int, id4b int,
+	id5a int, id5b int,
+	id6a int, id6b int,
+	id7a int, id7b int,
+	FOREIGN KEY (id1a, id1b) REFERENCES bloom_star_multi_dim_1 (a, b),
+	FOREIGN KEY (id2a, id2b) REFERENCES bloom_star_multi_dim_2 (a, b),
+	FOREIGN KEY (id3a, id3b) REFERENCES bloom_star_multi_dim_3 (a, b),
+	FOREIGN KEY (id4a, id4b) REFERENCES bloom_star_multi_dim_4 (a, b),
+	FOREIGN KEY (id5a, id5b) REFERENCES bloom_star_multi_dim_5 (a, b),
+	FOREIGN KEY (id6a, id6b) REFERENCES bloom_star_multi_dim_6 (a, b),
+	FOREIGN KEY (id7a, id7b) REFERENCES bloom_star_multi_dim_7 (a, b),
+	padding text);
+SELECT setseed(1);
+ setseed 
+---------
+ 
+(1 row)
+
+INSERT INTO bloom_star_multi_dim_1 SELECT i, i, random() FROM generate_series(1,1000) s(i);
+INSERT INTO bloom_star_multi_dim_2 SELECT i, i, random() FROM generate_series(1,1000) s(i);
+INSERT INTO bloom_star_multi_dim_3 SELECT i, i, random() FROM generate_series(1,1000) s(i);
+INSERT INTO bloom_star_multi_dim_4 SELECT i, i, random() FROM generate_series(1,1000) s(i);
+INSERT INTO bloom_star_multi_dim_5 SELECT i, i, random() FROM generate_series(1,1000) s(i);
+INSERT INTO bloom_star_multi_dim_6 SELECT i, i, random() FROM generate_series(1,1000) s(i);
+INSERT INTO bloom_star_multi_dim_7 SELECT i, i, random() FROM generate_series(1,1000) s(i);
+WITH d AS (
+    SELECT
+        1 + mod((100000 * random())::int, 1000) AS id1,
+        1 + mod((100000 * random())::int, 1000) AS id2,
+        1 + mod((100000 * random())::int, 1000) AS id3,
+        1 + mod((100000 * random())::int, 1000) AS id4,
+        1 + mod((100000 * random())::int, 1000) AS id5,
+        1 + mod((100000 * random())::int, 1000) AS id6,
+        1 + mod((100000 * random())::int, 1000) AS id7,
+        md5(i::text) AS p
+    FROM generate_series(1,100000) s(i)
+)
+INSERT INTO bloom_star_multi_fact
+SELECT
+    id1, id1,
+    id2, id2,
+    id3, id3,
+    id4, id4,
+    id5, id5,
+    id6, id6,
+    id7, id7,
+    p
+FROM d;
+SET default_statistics_target = 1000;
+VACUUM ANALYZE;
+-- first join is 50% selective (good enough for a filter push down)
+-- the join will be executed done last
+EXPLAIN (ANALYZE, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM bloom_star_multi_fact f
+JOIN bloom_star_multi_dim_1 d1 ON (f.id1a = d1.a AND f.id1b = d1.b)
+JOIN bloom_star_multi_dim_2 d2 ON (f.id2a = d2.a AND f.id2b = d2.b)
+JOIN bloom_star_multi_dim_3 d3 ON (f.id3a = d3.a AND f.id3b = d3.b)
+JOIN bloom_star_multi_dim_4 d4 ON (f.id4a = d4.a AND f.id4b = d4.b)
+JOIN bloom_star_multi_dim_5 d5 ON (f.id5a = d5.a AND f.id5b = d5.b)
+JOIN bloom_star_multi_dim_6 d6 ON (f.id6a = d6.a AND f.id6b = d6.b)
+JOIN bloom_star_multi_dim_7 d7 ON (f.id7a = d7.a AND f.id7b = d7.b)
+WHERE d1.r < 0.5;
+                                                                        QUERY PLAN                                                                        
+----------------------------------------------------------------------------------------------------------------------------------------------------------
+ Hash Join  (cost=211.53..4599.11 rows=46900 width=173) (actual rows=46848.00 loops=1)
+   Hash Cond: ((f.id7a = d7.a) AND (f.id7b = d7.b))
+   ->  Hash Join  (cost=180.53..4321.89 rows=46900 width=161) (actual rows=46848.00 loops=1)
+         Hash Cond: ((f.id6a = d6.a) AND (f.id6b = d6.b))
+         ->  Hash Join  (cost=149.53..4044.66 rows=46900 width=149) (actual rows=46848.00 loops=1)
+               Hash Cond: ((f.id5a = d5.a) AND (f.id5b = d5.b))
+               ->  Hash Join  (cost=118.53..3767.43 rows=46900 width=137) (actual rows=46848.00 loops=1)
+                     Hash Cond: ((f.id4a = d4.a) AND (f.id4b = d4.b))
+                     ->  Hash Join  (cost=87.53..3490.21 rows=46900 width=125) (actual rows=46848.00 loops=1)
+                           Hash Cond: ((f.id3a = d3.a) AND (f.id3b = d3.b))
+                           ->  Hash Join  (cost=56.53..3212.98 rows=46900 width=113) (actual rows=46848.00 loops=1)
+                                 Hash Cond: ((f.id2a = d2.a) AND (f.id2b = d2.b))
+                                 ->  Hash Join  (cost=25.54..2935.76 rows=46900 width=101) (actual rows=46848.00 loops=1)
+                                       Hash Cond: ((f.id1a = d1.a) AND (f.id1b = d1.b))
+                                       ->  Seq Scan on bloom_star_multi_fact f  (cost=0.00..2664.00 rows=46900 width=89) (actual rows=46848.00 loops=1)
+                                             Bloom Filter 1: keys=(id1a, id1b) expected=46.9% checked=99999 rejected=53152 (53.2%)
+                                       ->  Hash  (cost=18.50..18.50 rows=469 width=12) (actual rows=470.00 loops=1)
+                                             Buckets: 1024  Batches: 1  Memory Usage: 29kB
+                                             Bloom Filter 1: bits=8192 hashes=4 memory=1kB checked=99999 rejected=53152
+                                             ->  Seq Scan on bloom_star_multi_dim_1 d1  (cost=0.00..18.50 rows=469 width=12) (actual rows=470.00 loops=1)
+                                                   Filter: (r < '0.5'::double precision)
+                                                   Rows Removed by Filter: 530
+                                 ->  Hash  (cost=16.00..16.00 rows=1000 width=12) (actual rows=1000.00 loops=1)
+                                       Buckets: 1024  Batches: 1  Memory Usage: 51kB
+                                       ->  Seq Scan on bloom_star_multi_dim_2 d2  (cost=0.00..16.00 rows=1000 width=12) (actual rows=1000.00 loops=1)
+                           ->  Hash  (cost=16.00..16.00 rows=1000 width=12) (actual rows=1000.00 loops=1)
+                                 Buckets: 1024  Batches: 1  Memory Usage: 51kB
+                                 ->  Seq Scan on bloom_star_multi_dim_3 d3  (cost=0.00..16.00 rows=1000 width=12) (actual rows=1000.00 loops=1)
+                     ->  Hash  (cost=16.00..16.00 rows=1000 width=12) (actual rows=1000.00 loops=1)
+                           Buckets: 1024  Batches: 1  Memory Usage: 51kB
+                           ->  Seq Scan on bloom_star_multi_dim_4 d4  (cost=0.00..16.00 rows=1000 width=12) (actual rows=1000.00 loops=1)
+               ->  Hash  (cost=16.00..16.00 rows=1000 width=12) (actual rows=1000.00 loops=1)
+                     Buckets: 1024  Batches: 1  Memory Usage: 51kB
+                     ->  Seq Scan on bloom_star_multi_dim_5 d5  (cost=0.00..16.00 rows=1000 width=12) (actual rows=1000.00 loops=1)
+         ->  Hash  (cost=16.00..16.00 rows=1000 width=12) (actual rows=1000.00 loops=1)
+               Buckets: 1024  Batches: 1  Memory Usage: 51kB
+               ->  Seq Scan on bloom_star_multi_dim_6 d6  (cost=0.00..16.00 rows=1000 width=12) (actual rows=1000.00 loops=1)
+   ->  Hash  (cost=16.00..16.00 rows=1000 width=12) (actual rows=1000.00 loops=1)
+         Buckets: 1024  Batches: 1  Memory Usage: 51kB
+         ->  Seq Scan on bloom_star_multi_dim_7 d7  (cost=0.00..16.00 rows=1000 width=12) (actual rows=1000.00 loops=1)
+(40 rows)
+
+-- two joins 50% selective
+EXPLAIN (ANALYZE, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM bloom_star_multi_fact f
+JOIN bloom_star_multi_dim_1 d1 ON (f.id1a = d1.a AND f.id1b = d1.b)
+JOIN bloom_star_multi_dim_2 d2 ON (f.id2a = d2.a AND f.id2b = d2.b)
+JOIN bloom_star_multi_dim_3 d3 ON (f.id3a = d3.a AND f.id3b = d3.b)
+JOIN bloom_star_multi_dim_4 d4 ON (f.id4a = d4.a AND f.id4b = d4.b)
+JOIN bloom_star_multi_dim_5 d5 ON (f.id5a = d5.a AND f.id5b = d5.b)
+JOIN bloom_star_multi_dim_6 d6 ON (f.id6a = d6.a AND f.id6b = d6.b)
+JOIN bloom_star_multi_dim_7 d7 ON (f.id7a = d7.a AND f.id7b = d7.b)
+WHERE d1.r < 0.4 AND d7.r < 0.5;
+                                                                        QUERY PLAN                                                                        
+----------------------------------------------------------------------------------------------------------------------------------------------------------
+ Hash Join  (cost=204.78..3573.04 rows=17888 width=173) (actual rows=17864.00 loops=1)
+   Hash Cond: ((f.id7a = d7.a) AND (f.id7b = d7.b))
+   ->  Hash Join  (cost=179.12..3453.47 rows=17888 width=161) (actual rows=17899.00 loops=1)
+         Hash Cond: ((f.id6a = d6.a) AND (f.id6b = d6.b))
+         ->  Hash Join  (cost=148.12..3328.56 rows=17888 width=149) (actual rows=17899.00 loops=1)
+               Hash Cond: ((f.id5a = d5.a) AND (f.id5b = d5.b))
+               ->  Hash Join  (cost=117.12..3203.65 rows=17888 width=137) (actual rows=17899.00 loops=1)
+                     Hash Cond: ((f.id4a = d4.a) AND (f.id4b = d4.b))
+                     ->  Hash Join  (cost=86.12..3078.74 rows=17888 width=125) (actual rows=17899.00 loops=1)
+                           Hash Cond: ((f.id3a = d3.a) AND (f.id3b = d3.b))
+                           ->  Hash Join  (cost=55.12..2953.82 rows=17888 width=113) (actual rows=17899.00 loops=1)
+                                 Hash Cond: ((f.id2a = d2.a) AND (f.id2b = d2.b))
+                                 ->  Hash Join  (cost=24.12..2828.91 rows=17888 width=101) (actual rows=17899.00 loops=1)
+                                       Hash Cond: ((f.id1a = d1.a) AND (f.id1b = d1.b))
+                                       ->  Seq Scan on bloom_star_multi_fact f  (cost=0.00..2710.88 rows=17888 width=89) (actual rows=17899.00 loops=1)
+                                             Bloom Filter 1: keys=(id1a, id1b) expected=37.5% checked=99999 rejected=62610 (62.6%)
+                                             Bloom Filter 2: keys=(id7a, id7b) expected=47.7% checked=37390 rejected=19491 (52.1%)
+                                       ->  Hash  (cost=18.50..18.50 rows=375 width=12) (actual rows=376.00 loops=1)
+                                             Buckets: 1024  Batches: 1  Memory Usage: 25kB
+                                             Bloom Filter 1: bits=8192 hashes=4 memory=1kB checked=99999 rejected=62610
+                                             ->  Seq Scan on bloom_star_multi_dim_1 d1  (cost=0.00..18.50 rows=375 width=12) (actual rows=376.00 loops=1)
+                                                   Filter: (r < '0.4'::double precision)
+                                                   Rows Removed by Filter: 624
+                                 ->  Hash  (cost=16.00..16.00 rows=1000 width=12) (actual rows=1000.00 loops=1)
+                                       Buckets: 1024  Batches: 1  Memory Usage: 51kB
+                                       ->  Seq Scan on bloom_star_multi_dim_2 d2  (cost=0.00..16.00 rows=1000 width=12) (actual rows=1000.00 loops=1)
+                           ->  Hash  (cost=16.00..16.00 rows=1000 width=12) (actual rows=1000.00 loops=1)
+                                 Buckets: 1024  Batches: 1  Memory Usage: 51kB
+                                 ->  Seq Scan on bloom_star_multi_dim_3 d3  (cost=0.00..16.00 rows=1000 width=12) (actual rows=1000.00 loops=1)
+                     ->  Hash  (cost=16.00..16.00 rows=1000 width=12) (actual rows=1000.00 loops=1)
+                           Buckets: 1024  Batches: 1  Memory Usage: 51kB
+                           ->  Seq Scan on bloom_star_multi_dim_4 d4  (cost=0.00..16.00 rows=1000 width=12) (actual rows=1000.00 loops=1)
+               ->  Hash  (cost=16.00..16.00 rows=1000 width=12) (actual rows=1000.00 loops=1)
+                     Buckets: 1024  Batches: 1  Memory Usage: 51kB
+                     ->  Seq Scan on bloom_star_multi_dim_5 d5  (cost=0.00..16.00 rows=1000 width=12) (actual rows=1000.00 loops=1)
+         ->  Hash  (cost=16.00..16.00 rows=1000 width=12) (actual rows=1000.00 loops=1)
+               Buckets: 1024  Batches: 1  Memory Usage: 51kB
+               ->  Seq Scan on bloom_star_multi_dim_6 d6  (cost=0.00..16.00 rows=1000 width=12) (actual rows=1000.00 loops=1)
+   ->  Hash  (cost=18.50..18.50 rows=477 width=12) (actual rows=478.00 loops=1)
+         Buckets: 1024  Batches: 1  Memory Usage: 29kB
+         Bloom Filter 2: bits=8192 hashes=4 memory=1kB checked=37390 rejected=19491
+         ->  Seq Scan on bloom_star_multi_dim_7 d7  (cost=0.00..18.50 rows=477 width=12) (actual rows=478.00 loops=1)
+               Filter: (r < '0.5'::double precision)
+               Rows Removed by Filter: 522
+(44 rows)
+
+-- all joins selective for a filter (more than how many we allow)
+EXPLAIN (ANALYZE, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM bloom_star_multi_fact f
+JOIN bloom_star_multi_dim_1 d1 ON (f.id1a = d1.a AND f.id1b = d1.b)
+JOIN bloom_star_multi_dim_2 d2 ON (f.id2a = d2.a AND f.id2b = d2.b)
+JOIN bloom_star_multi_dim_3 d3 ON (f.id3a = d3.a AND f.id3b = d3.b)
+JOIN bloom_star_multi_dim_4 d4 ON (f.id4a = d4.a AND f.id4b = d4.b)
+JOIN bloom_star_multi_dim_5 d5 ON (f.id5a = d5.a AND f.id5b = d5.b)
+JOIN bloom_star_multi_dim_6 d6 ON (f.id6a = d6.a AND f.id6b = d6.b)
+JOIN bloom_star_multi_dim_7 d7 ON (f.id7a = d7.a AND f.id7b = d7.b)
+WHERE d1.r < 0.3 AND d2.r < 0.35 AND d3.r < 0.4 AND d4.r < 0.45 AND d5.r < 0.5 AND d6.r < 0.55 AND d7.r < 0.6;
+                                                                        QUERY PLAN                                                                        
+----------------------------------------------------------------------------------------------------------------------------------------------------------
+ Hash Join  (cost=176.01..2991.80 rows=283 width=173) (actual rows=292.00 loops=1)
+   Hash Cond: ((f.id7a = d7.a) AND (f.id7b = d7.b))
+   ->  Hash Join  (cost=149.07..2962.22 rows=503 width=161) (actual rows=526.00 loops=1)
+         Hash Cond: ((f.id6a = d6.a) AND (f.id6b = d6.b))
+         ->  Hash Join  (cost=122.51..2930.75 rows=936 width=149) (actual rows=923.00 loops=1)
+               Hash Cond: ((f.id5a = d5.a) AND (f.id5b = d5.b))
+               ->  Hash Join  (cost=96.24..2895.00 rows=1806 width=137) (actual rows=1774.00 loops=1)
+                     Hash Cond: ((f.id4a = d4.a) AND (f.id4b = d4.b))
+                     ->  Hash Join  (cost=71.02..2848.61 rows=4032 width=125) (actual rows=3997.00 loops=1)
+                           Hash Cond: ((f.id3a = d3.a) AND (f.id3b = d3.b))
+                           ->  Hash Join  (cost=46.69..2803.11 rows=4032 width=113) (actual rows=4005.00 loops=1)
+                                 Hash Cond: ((f.id2a = d2.a) AND (f.id2b = d2.b))
+                                 ->  Hash Join  (cost=22.95..2758.20 rows=4032 width=101) (actual rows=4016.00 loops=1)
+                                       Hash Cond: ((f.id1a = d1.a) AND (f.id1b = d1.b))
+                                       ->  Seq Scan on bloom_star_multi_fact f  (cost=0.00..2714.08 rows=4032 width=89) (actual rows=4016.00 loops=1)
+                                             Bloom Filter 1: keys=(id1a, id1b) expected=29.7% checked=99991 rejected=70413 (70.4%)
+                                             Bloom Filter 2: keys=(id2a, id2b) expected=34.9% checked=29587 rejected=19372 (65.5%)
+                                             Bloom Filter 3: keys=(id3a, id3b) expected=38.9% checked=10215 rejected=6199 (60.7%)
+                                       ->  Hash  (cost=18.50..18.50 rows=297 width=12) (actual rows=298.00 loops=1)
+                                             Buckets: 1024  Batches: 1  Memory Usage: 21kB
+                                             Bloom Filter 1: bits=8192 hashes=4 memory=1kB checked=99991 rejected=70413
+                                             ->  Seq Scan on bloom_star_multi_dim_1 d1  (cost=0.00..18.50 rows=297 width=12) (actual rows=298.00 loops=1)
+                                                   Filter: (r < '0.3'::double precision)
+                                                   Rows Removed by Filter: 702
+                                 ->  Hash  (cost=18.50..18.50 rows=349 width=12) (actual rows=350.00 loops=1)
+                                       Buckets: 1024  Batches: 1  Memory Usage: 24kB
+                                       Bloom Filter 2: bits=8192 hashes=4 memory=1kB checked=29587 rejected=19372
+                                       ->  Seq Scan on bloom_star_multi_dim_2 d2  (cost=0.00..18.50 rows=349 width=12) (actual rows=350.00 loops=1)
+                                             Filter: (r < '0.35'::double precision)
+                                             Rows Removed by Filter: 650
+                           ->  Hash  (cost=18.50..18.50 rows=389 width=12) (actual rows=391.00 loops=1)
+                                 Buckets: 1024  Batches: 1  Memory Usage: 25kB
+                                 Bloom Filter 3: bits=8192 hashes=4 memory=1kB checked=10215 rejected=6199
+                                 ->  Seq Scan on bloom_star_multi_dim_3 d3  (cost=0.00..18.50 rows=389 width=12) (actual rows=391.00 loops=1)
+                                       Filter: (r < '0.4'::double precision)
+                                       Rows Removed by Filter: 609
+                     ->  Hash  (cost=18.50..18.50 rows=448 width=12) (actual rows=449.00 loops=1)
+                           Buckets: 1024  Batches: 1  Memory Usage: 28kB
+                           ->  Seq Scan on bloom_star_multi_dim_4 d4  (cost=0.00..18.50 rows=448 width=12) (actual rows=449.00 loops=1)
+                                 Filter: (r < '0.45'::double precision)
+                                 Rows Removed by Filter: 551
+               ->  Hash  (cost=18.50..18.50 rows=518 width=12) (actual rows=519.00 loops=1)
+                     Buckets: 1024  Batches: 1  Memory Usage: 31kB
+                     ->  Seq Scan on bloom_star_multi_dim_5 d5  (cost=0.00..18.50 rows=518 width=12) (actual rows=519.00 loops=1)
+                           Filter: (r < '0.5'::double precision)
+                           Rows Removed by Filter: 481
+         ->  Hash  (cost=18.50..18.50 rows=537 width=12) (actual rows=538.00 loops=1)
+               Buckets: 1024  Batches: 1  Memory Usage: 32kB
+               ->  Seq Scan on bloom_star_multi_dim_6 d6  (cost=0.00..18.50 rows=537 width=12) (actual rows=538.00 loops=1)
+                     Filter: (r < '0.55'::double precision)
+                     Rows Removed by Filter: 462
+   ->  Hash  (cost=18.50..18.50 rows=563 width=12) (actual rows=564.00 loops=1)
+         Buckets: 1024  Batches: 1  Memory Usage: 33kB
+         ->  Seq Scan on bloom_star_multi_dim_7 d7  (cost=0.00..18.50 rows=563 width=12) (actual rows=564.00 loops=1)
+               Filter: (r < '0.6'::double precision)
+               Rows Removed by Filter: 436
+(56 rows)
+
+SET bloom_filter_pushdown_max = 10;
+-- all joins selective for a filter
+EXPLAIN (ANALYZE, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM bloom_star_multi_fact f
+JOIN bloom_star_multi_dim_1 d1 ON (f.id1a = d1.a AND f.id1b = d1.b)
+JOIN bloom_star_multi_dim_2 d2 ON (f.id2a = d2.a AND f.id2b = d2.b)
+JOIN bloom_star_multi_dim_3 d3 ON (f.id3a = d3.a AND f.id3b = d3.b)
+JOIN bloom_star_multi_dim_4 d4 ON (f.id4a = d4.a AND f.id4b = d4.b)
+JOIN bloom_star_multi_dim_5 d5 ON (f.id5a = d5.a AND f.id5b = d5.b)
+JOIN bloom_star_multi_dim_6 d6 ON (f.id6a = d6.a AND f.id6b = d6.b)
+JOIN bloom_star_multi_dim_7 d7 ON (f.id7a = d7.a AND f.id7b = d7.b)
+WHERE d1.r < 0.3 AND d2.r < 0.35 AND d3.r < 0.4 AND d4.r < 0.45 AND d5.r < 0.5 AND d6.r < 0.55 AND d7.r < 0.6;
+                                                                        QUERY PLAN                                                                        
+----------------------------------------------------------------------------------------------------------------------------------------------------------
+ Hash Join  (cost=176.01..2909.59 rows=283 width=173) (actual rows=292.00 loops=1)
+   Hash Cond: ((f.id7a = d7.a) AND (f.id7b = d7.b))
+   ->  Hash Join  (cost=149.07..2881.16 rows=283 width=161) (actual rows=292.00 loops=1)
+         Hash Cond: ((f.id6a = d6.a) AND (f.id6b = d6.b))
+         ->  Hash Join  (cost=122.51..2853.12 rows=283 width=149) (actual rows=292.00 loops=1)
+               Hash Cond: ((f.id5a = d5.a) AND (f.id5b = d5.b))
+               ->  Hash Join  (cost=96.24..2825.37 rows=283 width=137) (actual rows=296.00 loops=1)
+                     Hash Cond: ((f.id4a = d4.a) AND (f.id4b = d4.b))
+                     ->  Hash Join  (cost=71.02..2798.66 rows=283 width=125) (actual rows=296.00 loops=1)
+                           Hash Cond: ((f.id3a = d3.a) AND (f.id3b = d3.b))
+                           ->  Hash Join  (cost=46.69..2772.84 rows=283 width=113) (actual rows=298.00 loops=1)
+                                 Hash Cond: ((f.id2a = d2.a) AND (f.id2b = d2.b))
+                                 ->  Hash Join  (cost=22.95..2747.62 rows=283 width=101) (actual rows=299.00 loops=1)
+                                       Hash Cond: ((f.id1a = d1.a) AND (f.id1b = d1.b))
+                                       ->  Seq Scan on bloom_star_multi_fact f  (cost=0.00..2723.18 rows=283 width=89) (actual rows=299.00 loops=1)
+                                             Bloom Filter 1: keys=(id1a, id1b) expected=29.7% checked=99991 rejected=70413 (70.4%)
+                                             Bloom Filter 2: keys=(id2a, id2b) expected=34.9% checked=29587 rejected=19372 (65.5%)
+                                             Bloom Filter 3: keys=(id3a, id3b) expected=38.9% checked=10215 rejected=6199 (60.7%)
+                                             Bloom Filter 4: keys=(id4a, id4b) expected=44.8% checked=4016 rejected=2234 (55.6%)
+                                             Bloom Filter 5: keys=(id5a, id5b) expected=51.8% checked=1782 rejected=848 (47.6%)
+                                             Bloom Filter 6: keys=(id6a, id6b) expected=53.7% checked=934 rejected=399 (42.7%)
+                                             Bloom Filter 7: keys=(id7a, id7b) expected=56.3% checked=535 rejected=236 (44.1%)
+                                       ->  Hash  (cost=18.50..18.50 rows=297 width=12) (actual rows=298.00 loops=1)
+                                             Buckets: 1024  Batches: 1  Memory Usage: 21kB
+                                             Bloom Filter 1: bits=8192 hashes=4 memory=1kB checked=99991 rejected=70413
+                                             ->  Seq Scan on bloom_star_multi_dim_1 d1  (cost=0.00..18.50 rows=297 width=12) (actual rows=298.00 loops=1)
+                                                   Filter: (r < '0.3'::double precision)
+                                                   Rows Removed by Filter: 702
+                                 ->  Hash  (cost=18.50..18.50 rows=349 width=12) (actual rows=350.00 loops=1)
+                                       Buckets: 1024  Batches: 1  Memory Usage: 24kB
+                                       Bloom Filter 2: bits=8192 hashes=4 memory=1kB checked=29587 rejected=19372
+                                       ->  Seq Scan on bloom_star_multi_dim_2 d2  (cost=0.00..18.50 rows=349 width=12) (actual rows=350.00 loops=1)
+                                             Filter: (r < '0.35'::double precision)
+                                             Rows Removed by Filter: 650
+                           ->  Hash  (cost=18.50..18.50 rows=389 width=12) (actual rows=391.00 loops=1)
+                                 Buckets: 1024  Batches: 1  Memory Usage: 25kB
+                                 Bloom Filter 3: bits=8192 hashes=4 memory=1kB checked=10215 rejected=6199
+                                 ->  Seq Scan on bloom_star_multi_dim_3 d3  (cost=0.00..18.50 rows=389 width=12) (actual rows=391.00 loops=1)
+                                       Filter: (r < '0.4'::double precision)
+                                       Rows Removed by Filter: 609
+                     ->  Hash  (cost=18.50..18.50 rows=448 width=12) (actual rows=449.00 loops=1)
+                           Buckets: 1024  Batches: 1  Memory Usage: 28kB
+                           Bloom Filter 4: bits=8192 hashes=4 memory=1kB checked=4016 rejected=2234
+                           ->  Seq Scan on bloom_star_multi_dim_4 d4  (cost=0.00..18.50 rows=448 width=12) (actual rows=449.00 loops=1)
+                                 Filter: (r < '0.45'::double precision)
+                                 Rows Removed by Filter: 551
+               ->  Hash  (cost=18.50..18.50 rows=518 width=12) (actual rows=519.00 loops=1)
+                     Buckets: 1024  Batches: 1  Memory Usage: 31kB
+                     Bloom Filter 5: bits=8192 hashes=4 memory=1kB checked=1782 rejected=848
+                     ->  Seq Scan on bloom_star_multi_dim_5 d5  (cost=0.00..18.50 rows=518 width=12) (actual rows=519.00 loops=1)
+                           Filter: (r < '0.5'::double precision)
+                           Rows Removed by Filter: 481
+         ->  Hash  (cost=18.50..18.50 rows=537 width=12) (actual rows=538.00 loops=1)
+               Buckets: 1024  Batches: 1  Memory Usage: 32kB
+               Bloom Filter 6: bits=8192 hashes=4 memory=1kB checked=934 rejected=399
+               ->  Seq Scan on bloom_star_multi_dim_6 d6  (cost=0.00..18.50 rows=537 width=12) (actual rows=538.00 loops=1)
+                     Filter: (r < '0.55'::double precision)
+                     Rows Removed by Filter: 462
+   ->  Hash  (cost=18.50..18.50 rows=563 width=12) (actual rows=564.00 loops=1)
+         Buckets: 1024  Batches: 1  Memory Usage: 33kB
+         Bloom Filter 7: bits=8192 hashes=4 memory=1kB checked=535 rejected=236
+         ->  Seq Scan on bloom_star_multi_dim_7 d7  (cost=0.00..18.50 rows=563 width=12) (actual rows=564.00 loops=1)
+               Filter: (r < '0.6'::double precision)
+               Rows Removed by Filter: 436
+(64 rows)
+
+RESET bloom_filter_pushdown_max;
+RESET join_collapse_limit;
+DROP TABLE bloom_star_multi_fact;
+DROP TABLE bloom_star_multi_dim_1;
+DROP TABLE bloom_star_multi_dim_2;
+DROP TABLE bloom_star_multi_dim_3;
+DROP TABLE bloom_star_multi_dim_4;
+DROP TABLE bloom_star_multi_dim_5;
+DROP TABLE bloom_star_multi_dim_6;
+DROP TABLE bloom_star_multi_dim_7;

@@ -2,6 +2,9 @@
 -- Test of Row-level security feature
 --
 
+-- disable bloom filter pushdown, to not interfere with calls to functions
+SET enable_hashjoin_bloom = off;
+
 -- Clean up in case a prior regression run failed
 
 -- Suppress NOTICE messages when users/groups don't exist
