@@ -1637,7 +1637,7 @@ SELECT c~>1, c FROM test_cube ORDER BY c~>1 LIMIT 15; -- ascending by left bound
       240 | (337, 455),(240, 359)
 (15 rows)
 
-SELECT c~>2, c FROM test_cube ORDER BY c~>2 LIMIT 15; -- ascending by right bound
+SELECT c~>2, c FROM test_cube ORDER BY c~>2, c LIMIT 15; -- ascending by right bound
  ?column? |             c             
 ----------+---------------------------
         0 | (0, 100000)
@@ -1651,8 +1651,8 @@ SELECT c~>2, c FROM test_cube ORDER BY c~>2 LIMIT 15; -- ascending by right boun
       167 | (167, 17214),(92, 17184)
       207 | (207, 40886),(179, 40879)
       259 | (259, 1850),(175, 1820)
-      270 | (270, 29508),(264, 29440)
       270 | (270, 32616),(226, 32607)
+      270 | (270, 29508),(264, 29440)
       288 | (288, 49588),(204, 49571)
       318 | (318, 31489),(235, 31404)
 (15 rows)
@@ -1832,7 +1832,7 @@ SELECT c~>1, c FROM test_cube ORDER BY c~>1 LIMIT 15; -- ascending by left bound
       240 | (337, 455),(240, 359)
 (15 rows)
 
-SELECT c~>2, c FROM test_cube ORDER BY c~>2 LIMIT 15; -- ascending by right bound
+SELECT c~>2, c FROM test_cube ORDER BY c~>2, c LIMIT 15; -- ascending by right bound
  ?column? |             c             
 ----------+---------------------------
         0 | (0, 100000)
@@ -1846,8 +1846,8 @@ SELECT c~>2, c FROM test_cube ORDER BY c~>2 LIMIT 15; -- ascending by right boun
       167 | (167, 17214),(92, 17184)
       207 | (207, 40886),(179, 40879)
       259 | (259, 1850),(175, 1820)
-      270 | (270, 29508),(264, 29440)
       270 | (270, 32616),(226, 32607)
+      270 | (270, 29508),(264, 29440)
       288 | (288, 49588),(204, 49571)
       318 | (318, 31489),(235, 31404)
 (15 rows)
@@ -1973,3 +1973,38 @@ SELECT c~>(-4), c FROM test_cube ORDER BY c~>(-4) LIMIT 15; -- descending by upp
 (15 rows)
 
 RESET enable_indexscan;
+-- Check that sorted input does not produce pathologically unbalanced splits.
+CREATE TABLE cube_picksplit_test (id int, c cube);
+CREATE INDEX cube_picksplit_test_idx ON cube_picksplit_test USING gist (c);
+INSERT INTO cube_picksplit_test
+SELECT g, cube(ARRAY[g::float8 / 400, g::float8 / 400 + 1])
+FROM generate_series(1, 400) g;
+SELECT pg_relation_size('cube_picksplit_test_idx') <
+       20 * current_setting('block_size')::int AS balanced;
+ balanced 
+----------
+ t
+(1 row)
+
+-- Exercise splits containing cubes with different dimensionalities.
+TRUNCATE cube_picksplit_test;
+INSERT INTO cube_picksplit_test
+SELECT g, cube(ARRAY(SELECT g::float8 / 20 + d
+                     FROM generate_series(1, dim) d),
+               ARRAY(SELECT g::float8 / 20 + d + 1
+                     FROM generate_series(1, dim) d))
+FROM unnest(ARRAY[1, 2, 3, 10, 100]) dim
+CROSS JOIN generate_series(1, 20) g;
+SET enable_seqscan = false;
+SELECT count(*) FROM cube_picksplit_test
+WHERE c <@ cube(ARRAY(SELECT -1000::float8
+                      FROM generate_series(1, 100)),
+                ARRAY(SELECT 1000::float8
+                      FROM generate_series(1, 100)));
+ count 
+-------
+   100
+(1 row)
+
+RESET enable_seqscan;
+DROP TABLE cube_picksplit_test;
