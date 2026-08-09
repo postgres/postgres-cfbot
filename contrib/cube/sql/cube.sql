@@ -411,7 +411,7 @@ SELECT *, c <#> '(100, 100),(500, 500)'::cube as dist FROM test_cube ORDER BY c 
 
 -- Test sorting by coordinates
 SELECT c~>1, c FROM test_cube ORDER BY c~>1 LIMIT 15; -- ascending by left bound
-SELECT c~>2, c FROM test_cube ORDER BY c~>2 LIMIT 15; -- ascending by right bound
+SELECT c~>2, c FROM test_cube ORDER BY c~>2, c LIMIT 15; -- ascending by right bound
 SELECT c~>3, c FROM test_cube ORDER BY c~>3 LIMIT 15; -- ascending by lower bound
 SELECT c~>4, c FROM test_cube ORDER BY c~>4 LIMIT 15; -- ascending by upper bound
 SELECT c~>(-1), c FROM test_cube ORDER BY c~>(-1) LIMIT 15; -- descending by left bound
@@ -428,7 +428,7 @@ RESET extra_float_digits;
 SELECT *, c <=> '(100, 100),(500, 500)'::cube as dist FROM test_cube ORDER BY c <=> '(100, 100),(500, 500)'::cube LIMIT 5;
 SELECT *, c <#> '(100, 100),(500, 500)'::cube as dist FROM test_cube ORDER BY c <#> '(100, 100),(500, 500)'::cube LIMIT 5;
 SELECT c~>1, c FROM test_cube ORDER BY c~>1 LIMIT 15; -- ascending by left bound
-SELECT c~>2, c FROM test_cube ORDER BY c~>2 LIMIT 15; -- ascending by right bound
+SELECT c~>2, c FROM test_cube ORDER BY c~>2, c LIMIT 15; -- ascending by right bound
 SELECT c~>3, c FROM test_cube ORDER BY c~>3 LIMIT 15; -- ascending by lower bound
 SELECT c~>4, c FROM test_cube ORDER BY c~>4 LIMIT 15; -- ascending by upper bound
 SELECT c~>(-1), c FROM test_cube ORDER BY c~>(-1) LIMIT 15; -- descending by left bound
@@ -436,3 +436,30 @@ SELECT c~>(-2), c FROM test_cube ORDER BY c~>(-2) LIMIT 15; -- descending by rig
 SELECT c~>(-3), c FROM test_cube ORDER BY c~>(-3) LIMIT 15; -- descending by lower bound
 SELECT c~>(-4), c FROM test_cube ORDER BY c~>(-4) LIMIT 15; -- descending by upper bound
 RESET enable_indexscan;
+
+-- Check that sorted input does not produce pathologically unbalanced splits.
+CREATE TABLE cube_picksplit_test (id int, c cube);
+CREATE INDEX cube_picksplit_test_idx ON cube_picksplit_test USING gist (c);
+INSERT INTO cube_picksplit_test
+SELECT g, cube(ARRAY[g::float8 / 400, g::float8 / 400 + 1])
+FROM generate_series(1, 400) g;
+SELECT pg_relation_size('cube_picksplit_test_idx') <
+       20 * current_setting('block_size')::int AS balanced;
+
+-- Exercise splits containing cubes with different dimensionalities.
+TRUNCATE cube_picksplit_test;
+INSERT INTO cube_picksplit_test
+SELECT g, cube(ARRAY(SELECT g::float8 / 20 + d
+                     FROM generate_series(1, dim) d),
+               ARRAY(SELECT g::float8 / 20 + d + 1
+                     FROM generate_series(1, dim) d))
+FROM unnest(ARRAY[1, 2, 3, 10, 100]) dim
+CROSS JOIN generate_series(1, 20) g;
+SET enable_seqscan = false;
+SELECT count(*) FROM cube_picksplit_test
+WHERE c <@ cube(ARRAY(SELECT -1000::float8
+                      FROM generate_series(1, 100)),
+                ARRAY(SELECT 1000::float8
+                      FROM generate_series(1, 100)));
+RESET enable_seqscan;
+DROP TABLE cube_picksplit_test;
