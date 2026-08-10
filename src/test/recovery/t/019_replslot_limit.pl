@@ -605,9 +605,11 @@ $primary5->backup($backup_name);
 my $standby5 = PostgreSQL::Test::Cluster->new('standby5');
 $standby5->init_from_backup($primary5, $backup_name, has_streaming => 1);
 
-# Testcase 1: an active physical slot (aged xmin) is invalidated by the
+# Testcase 1: an active physical slot (aged xmin) is skipped by the VACUUM
+# command, which never blocks on an active slot, and invalidated by the
 # checkpoint, which terminates its owner. A running standby keeps the slot
-# active; an open transaction there, reported via feedback, freezes its xmin.
+# active, with an open transaction there, reported via feedback, freezing its
+# xmin.
 $primary5->safe_psql('postgres',
 	"SELECT pg_create_physical_replication_slot('sb5_slot_a', true)");
 
@@ -640,6 +642,15 @@ my $held = $standby5->background_psql('postgres');
 $held->query_safe("BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT 1;");
 
 $primary5->safe_psql('postgres', qq{CALL consume_xid(2 * $slot_xid_age)});
+
+# Vacuum leaves the active slot for the checkpoint, so it stays valid
+$primary5->safe_psql('postgres', "VACUUM tbl_user5");
+is( $primary5->safe_psql(
+		'postgres',
+		qq[SELECT invalidation_reason IS NULL AND active FROM pg_replication_slots WHERE slot_name = 'sb5_slot_a';]
+	),
+	't',
+	'active physical slot not invalidated by VACUUM');
 
 # The checkpoint terminates the owner and invalidates the slot
 $primary5->safe_psql('postgres', "CHECKPOINT");
@@ -686,6 +697,129 @@ wait_for_xid_aged_invalidation($standby5, 'sb5_logical_slot');
 ok(1, "inactive logical slot on standby invalidated by restartpoint");
 
 $standby5->stop;
+
+# Restore the age limit on the primary, disabled earlier for the standby's
+# own logical slot.
+$primary5->safe_psql(
+	'postgres', q{
+ALTER SYSTEM RESET max_slot_xid_age;
+SELECT pg_reload_conf();
+});
+
+# Testcase 3: an inactive logical slot (aged catalog_xmin) is invalidated by
+# vacuuming a system catalog, whose horizon includes catalog_xmin. VACUUM is in
+# the foreground and the slot is inactive, so it is invalidated synchronously.
+$primary5->safe_psql('postgres',
+	"SELECT pg_create_logical_replication_slot('lsub5_slot', 'pgoutput')");
+$primary5->poll_query_until(
+	'postgres', qq[
+	SELECT catalog_xmin IS NOT NULL FROM pg_replication_slots
+		WHERE slot_name = 'lsub5_slot';
+]) or die "Timed out waiting for slot lsub5_slot catalog_xmin";
+
+$primary5->safe_psql('postgres', qq{CALL consume_xid(2 * $slot_xid_age)});
+
+$primary5->safe_psql('postgres', "VACUUM pg_class");
+is( $primary5->safe_psql(
+		'postgres',
+		qq[SELECT invalidation_reason = 'xid_aged' FROM pg_replication_slots WHERE slot_name = 'lsub5_slot';]
+	),
+	't',
+	'inactive logical slot invalidated by vacuuming a system catalog');
+
+# Testcase 4: an inactive physical slot (aged xmin) is invalidated by
+# autovacuum. hs_feedback gives the slot an xmin, and stopping the
+# standby freezes it. Autovacuum runs on dead tuples with naptime 1s.
+$standby5->append_conf('postgresql.conf', "hot_standby_feedback = on");
+$standby5->start;
+$primary5->wait_for_catchup($standby5);
+
+$primary5->poll_query_until(
+	'postgres', qq[
+	SELECT xmin IS NOT NULL FROM pg_replication_slots
+		WHERE slot_name = 'sb5_slot_b';
+]) or die "Timed out waiting for slot sb5_slot_b xmin from HS feedback";
+
+$standby5->stop;
+
+$primary5->safe_psql('postgres', qq{CALL consume_xid(2 * $slot_xid_age)});
+
+# Turn autovacuum on and give it a table with dead tuples
+$primary5->append_conf(
+	'postgresql.conf', q{
+autovacuum = on
+autovacuum_naptime = 1s
+log_autovacuum_min_duration = 0
+});
+$primary5->reload;
+$primary5->safe_psql(
+	'postgres', q{
+	CREATE TABLE tbl_dead5 (a int);
+	INSERT INTO tbl_dead5 SELECT generate_series(1, 10000);
+	DELETE FROM tbl_dead5;
+});
+wait_for_xid_aged_invalidation($primary5, 'sb5_slot_b');
+ok(1, "inactive physical slot invalidated by autovacuum");
+
+$primary5->append_conf('postgresql.conf', "autovacuum = off");
+$primary5->reload;
+
+# Testcase 5: with an aged physical slot (xmin) and an aged logical slot
+# (catalog_xmin) both present, vacuuming a user table invalidates only the
+# physical slot. A user table's horizon uses xmin, not catalog_xmin, so the
+# logical slot is left alone. Vacuuming a system catalog then invalidates it.
+$primary5->safe_psql('postgres',
+	"SELECT pg_create_logical_replication_slot('lsub5b_slot', 'pgoutput')");
+$primary5->poll_query_until(
+	'postgres', qq[
+	SELECT catalog_xmin IS NOT NULL FROM pg_replication_slots
+		WHERE slot_name = 'lsub5b_slot';
+]) or die "Timed out waiting for slot lsub5b_slot catalog_xmin";
+
+# A fresh physical slot for the standby, since the previous one was
+# invalidated. hs_feedback gives it an xmin, and stopping the standby
+# freezes it.
+$primary5->safe_psql('postgres',
+	"SELECT pg_create_physical_replication_slot('sb5_slot_c', true)");
+$standby5->append_conf('postgresql.conf', "primary_slot_name = 'sb5_slot_c'");
+$standby5->start;
+$primary5->wait_for_catchup($standby5);
+
+$primary5->poll_query_until(
+	'postgres', qq[
+	SELECT xmin IS NOT NULL FROM pg_replication_slots
+		WHERE slot_name = 'sb5_slot_c';
+]) or die "Timed out waiting for slot sb5_slot_c xmin from HS feedback";
+
+$standby5->stop;
+
+$primary5->safe_psql('postgres', qq{CALL consume_xid(2 * $slot_xid_age)});
+
+# Vacuum a user table, which invalidates the physical slot but leaves the
+# logical one alone
+$primary5->safe_psql('postgres', "VACUUM tbl_user5");
+is( $primary5->safe_psql(
+		'postgres',
+		qq[SELECT invalidation_reason = 'xid_aged' FROM pg_replication_slots WHERE slot_name = 'sb5_slot_c';]
+	),
+	't',
+	'physical slot invalidated by vacuuming a user table');
+is( $primary5->safe_psql(
+		'postgres',
+		qq[SELECT invalidation_reason IS NULL FROM pg_replication_slots WHERE slot_name = 'lsub5b_slot';]
+	),
+	't',
+	'logical slot not invalidated by vacuuming a user table');
+
+# Vacuum a system catalog, which now invalidates the logical slot
+$primary5->safe_psql('postgres', "VACUUM pg_class");
+is( $primary5->safe_psql(
+		'postgres',
+		qq[SELECT invalidation_reason = 'xid_aged' FROM pg_replication_slots WHERE slot_name = 'lsub5b_slot';]
+	),
+	't',
+	'logical slot invalidated by vacuuming a system catalog');
+
 $primary5->stop;
 
 done_testing();
