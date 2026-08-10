@@ -7921,7 +7921,7 @@ CreateCheckPoint(int flags)
 	if (InvalidateObsoleteReplicationSlots(slotInvalidationCauses,
 										   _logSegNo, InvalidOid,
 										   InvalidTransactionId,
-										   slotXidLimit))
+										   slotXidLimit, false, true))
 	{
 		/*
 		 * Some slots have been invalidated; recalculate the old-segment
@@ -8406,7 +8406,7 @@ CreateRestartPoint(int flags)
 	if (InvalidateObsoleteReplicationSlots(slotInvalidationCauses,
 										   _logSegNo, InvalidOid,
 										   InvalidTransactionId,
-										   slotXidLimit))
+										   slotXidLimit, false, true))
 	{
 		/*
 		 * Some slots have been invalidated; recalculate the old-segment
@@ -9305,7 +9305,8 @@ xlog_redo(XLogReaderState *record)
 				InvalidateObsoleteReplicationSlots(RS_INVAL_WAL_LEVEL,
 												   0, InvalidOid,
 												   InvalidTransactionId,
-												   InvalidTransactionId);
+												   InvalidTransactionId, false,
+												   true);
 			}
 			else if (sync_replication_slots)
 			{

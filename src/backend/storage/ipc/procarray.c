@@ -1930,6 +1930,31 @@ GlobalVisHorizonKindForRel(Relation rel)
 }
 
 /*
+ * A helper function to return the appropriate oldest non-removable
+ * TransactionId from the pre-computed horizons, based on the relation
+ * type.
+ */
+static inline TransactionId
+GetOldestNonRemovableTransactionIdFromHorizons(ComputeXidHorizonsResult *horizons,
+											   Relation rel)
+{
+	switch (GlobalVisHorizonKindForRel(rel))
+	{
+		case VISHORIZON_SHARED:
+			return horizons->shared_oldest_nonremovable;
+		case VISHORIZON_CATALOG:
+			return horizons->catalog_oldest_nonremovable;
+		case VISHORIZON_DATA:
+			return horizons->data_oldest_nonremovable;
+		case VISHORIZON_TEMP:
+			return horizons->temp_oldest_nonremovable;
+	}
+
+	/* just to prevent compiler warnings */
+	return InvalidTransactionId;
+}
+
+/*
  * Return the oldest XID for which deleted tuples must be preserved in the
  * passed table.
  *
@@ -1947,20 +1972,38 @@ GetOldestNonRemovableTransactionId(Relation rel)
 
 	ComputeXidHorizons(&horizons);
 
-	switch (GlobalVisHorizonKindForRel(rel))
-	{
-		case VISHORIZON_SHARED:
-			return horizons.shared_oldest_nonremovable;
-		case VISHORIZON_CATALOG:
-			return horizons.catalog_oldest_nonremovable;
-		case VISHORIZON_DATA:
-			return horizons.data_oldest_nonremovable;
-		case VISHORIZON_TEMP:
-			return horizons.temp_oldest_nonremovable;
-	}
+	return GetOldestNonRemovableTransactionIdFromHorizons(&horizons, rel);
+}
 
-	/* just to prevent compiler warnings */
-	return InvalidTransactionId;
+/*
+ * Same as GetOldestNonRemovableTransactionId(), but also returns the
+ * replication slot xmin and catalog_xmin from the same ComputeXidHorizons()
+ * call. This avoids a separate ProcArrayLock acquisition when the caller
+ * needs both values.
+ *
+ * *slot_catalog_xmin_relevant is set to whether a slot's catalog_xmin can
+ * hold this relation's cutoff back. That is true for catalog and shared
+ * relations, whose horizon is computed from both the slot xmin and
+ * catalog_xmin, and false for ordinary and temporary relations, whose horizon
+ * uses only the slot xmin.
+ */
+TransactionId
+GetOldestNonRemovableTransactionIdAndSlotXmins(Relation rel,
+											   TransactionId *slot_xmin,
+											   TransactionId *slot_catalog_xmin,
+											   bool *slot_catalog_xmin_relevant)
+{
+	ComputeXidHorizonsResult horizons;
+	GlobalVisHorizonKind kind = GlobalVisHorizonKindForRel(rel);
+
+	ComputeXidHorizons(&horizons);
+
+	*slot_xmin = horizons.slot_xmin;
+	*slot_catalog_xmin = horizons.slot_catalog_xmin;
+	*slot_catalog_xmin_relevant = (kind == VISHORIZON_CATALOG ||
+								   kind == VISHORIZON_SHARED);
+
+	return GetOldestNonRemovableTransactionIdFromHorizons(&horizons, rel);
 }
 
 /*

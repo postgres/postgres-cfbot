@@ -1958,7 +1958,8 @@ DetermineSlotInvalidationCause(uint32 possible_causes, ReplicationSlot *s,
 							   TimestampTz *inactive_since, TimestampTz now,
 							   TransactionId xidLimit,
 							   TransactionId *slot_xmin,
-							   TransactionId *slot_catalog_xmin)
+							   TransactionId *slot_catalog_xmin,
+							   bool check_catalog_xmin)
 {
 	Assert(possible_causes != RS_INVAL_NONE);
 
@@ -2039,12 +2040,19 @@ DetermineSlotInvalidationCause(uint32 possible_causes, ReplicationSlot *s,
 		 * so the invalidation message names the xid that actually triggered
 		 * it. Both can have aged in the rare case of a physical slot that
 		 * also holds a catalog_xmin for cascaded logical decoding.
+		 *
+		 * catalog_xmin is considered only when it is relevant for the
+		 * caller's relation. A slot holding only a catalog_xmin cannot block
+		 * a vacuum of a user table, so such a slot is left alone there; a
+		 * checkpoint or a vacuum of a catalog relation still invalidates it
+		 * later.
 		 */
 		if (TransactionIdIsValid(s->data.xmin) &&
 			TransactionIdPrecedes(s->data.xmin, xidLimit))
 			*slot_xmin = s->data.xmin;
 
-		if (TransactionIdIsValid(s->data.catalog_xmin) &&
+		if (check_catalog_xmin &&
+			TransactionIdIsValid(s->data.catalog_xmin) &&
 			TransactionIdPrecedes(s->data.catalog_xmin, xidLimit))
 			*slot_catalog_xmin = s->data.catalog_xmin;
 
@@ -2076,6 +2084,8 @@ InvalidatePossiblyObsoleteSlot(uint32 possible_causes,
 							   XLogRecPtr oldestLSN,
 							   Oid dboid, TransactionId snapshotConflictHorizon,
 							   TransactionId xidLimit,
+							   bool nowait,
+							   bool check_catalog_xmin,
 							   bool *released_lock_out)
 {
 	int			last_signaled_pid = 0;
@@ -2134,7 +2144,8 @@ InvalidatePossiblyObsoleteSlot(uint32 possible_causes,
 																now,
 																xidLimit,
 																&slot_xmin,
-																&slot_catalog_xmin);
+																&slot_catalog_xmin,
+																check_catalog_xmin);
 
 		/* if there's no invalidation, we're done */
 		if (invalidation_cause == RS_INVAL_NONE)
@@ -2199,6 +2210,10 @@ InvalidatePossiblyObsoleteSlot(uint32 possible_causes,
 
 		if (active_proc != INVALID_PROC_NUMBER)
 		{
+			/* A nowait caller leaves an active slot untouched. */
+			if (nowait)
+				break;
+
 			/*
 			 * Prepare the sleep on the slot's condition variable before
 			 * releasing the lock, to close a possible race condition if the
@@ -2315,6 +2330,11 @@ InvalidatePossiblyObsoleteSlot(uint32 possible_causes,
  * causes in a single pass, minimizing redundant iterations. The "cause"
  * parameter can be a MASK representing one or more of the defined causes.
  *
+ * If "nowait" is true, slots that are currently held by a live process are
+ * left untouched instead of terminating the owner and waiting for the slot to
+ * be released. Vacuum uses this for XID-age invalidation so it never blocks.
+ * Those slots are instead cleaned up by the checkpointer, which always waits.
+ *
  * If it invalidates the last logical slot in the cluster, it requests to
  * disable logical decoding.
  *
@@ -2324,7 +2344,9 @@ bool
 InvalidateObsoleteReplicationSlots(uint32 possible_causes,
 								   XLogSegNo oldestSegno, Oid dboid,
 								   TransactionId snapshotConflictHorizon,
-								   TransactionId xidLimit)
+								   TransactionId xidLimit,
+								   bool nowait,
+								   bool check_catalog_xmin)
 {
 	XLogRecPtr	oldestLSN;
 	bool		invalidated = false;
@@ -2364,7 +2386,7 @@ restart:
 
 		if (InvalidatePossiblyObsoleteSlot(possible_causes, s, oldestLSN,
 										   dboid, snapshotConflictHorizon,
-										   xidLimit,
+										   xidLimit, nowait, check_catalog_xmin,
 										   &released_lock))
 		{
 			Assert(released_lock);

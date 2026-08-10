@@ -5039,12 +5039,31 @@ HINT:  If it is safe for all REPLICATION users to use this library as an output 
        </para>
 
        <para>
-        Slot invalidation due to this limit occurs during checkpoint. Because
-        checkpoints happen at their own interval, there can be some lag between
-        when a slot's <literal>xmin</literal> or <literal>catalog_xmin</literal>
-        age exceeds <varname>max_slot_xid_age</varname> and when the slot
-        invalidation is actually triggered. To avoid such lags, users can force
-        a checkpoint to promptly invalidate the slot.
+        Slot invalidation due to XID age occurs during vacuum (both the
+        <command>VACUUM</command> command and autovacuum) and during checkpoint.
+        During vacuum, only inactive slots (i.e., not currently in use by a
+        replication connection) are invalidated, so that vacuum never waits
+        for a connection to release a slot; an active slot is left for the
+        next checkpoint, which invalidates it even while it is in use. Because
+        vacuum and checkpoints happen at their own intervals, there can be
+        some lag between when a slot's <literal>xmin</literal> or
+        <literal>catalog_xmin</literal> age exceeds
+        <varname>max_slot_xid_age</varname> and when the slot invalidation is
+        actually triggered. To avoid such lags, users can force a checkpoint to
+        promptly invalidate the slot.
+       </para>
+
+       <para>
+        During vacuum, a slot is invalidated only when it is holding vacuum
+        of the current relation back. A logical replication slot holds back
+        only the removal of system catalog rows (through its
+        <literal>catalog_xmin</literal>), so vacuuming a user table does
+        not invalidate it, even when its age has exceeded
+        <varname>max_slot_xid_age</varname>; such a slot is invalidated when a
+        system catalog is vacuumed or at the next checkpoint. A physical
+        replication slot holds back the removal of user table rows (through
+        its <literal>xmin</literal>) and so can be invalidated by vacuuming any
+        table.
        </para>
 
        <para>
