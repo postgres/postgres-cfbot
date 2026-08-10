@@ -117,6 +117,11 @@ SELECT * FROM rls_test_src FOR KEY SHARE;
 
 -- plain INSERT should apply INSERT CHECK policy clause
 INSERT INTO rls_test_tgt VALUES (1, 'tgt a');
+TRUNCATE rls_test_tgt;
+-- COPY FROM should also apply INSERT CHECK policy clause
+COPY rls_test_tgt FROM STDIN WITH (DELIMITER ',');
+1,tgt a,
+\.
 
 -- INSERT ... RETURNING should also apply SELECT USING policy clause
 TRUNCATE rls_test_tgt;
@@ -330,8 +335,15 @@ EXPLAIN (COSTS OFF) SELECT * FROM document NATURAL JOIN category WHERE f_leak(dt
 -- 44 would technically fail for both p2r and p1r, but we should get an error
 -- back from p1r for this because it sorts first
 INSERT INTO document VALUES (100, 44, 1, 'regress_rls_dave', 'testing sorting of policies'); -- fail
+COPY document FROM STDIN WITH (DELIMITER ','); -- fail
+100,44,1,regress_rls_dave,testing sorting of policies
+\.
+
 -- Just to see a p2r error
 INSERT INTO document VALUES (100, 55, 1, 'regress_rls_dave', 'testing sorting of policies'); -- fail
+COPY document FROM STDIN WITH (DELIMITER ','); -- fail
+100,55,1,regress_rls_dave,testing sorting of policies
+\.
 
 -- only owner can change policies
 ALTER POLICY p1 ON document USING (true);    --fail
@@ -375,10 +387,16 @@ INSERT INTO document VALUES (11, 33, 1, current_user, 'hoge');
 -- UNIQUE or PRIMARY KEY constraint violation DOES reveal presence of row
 SET SESSION AUTHORIZATION regress_rls_bob;
 INSERT INTO document VALUES (8, 44, 1, 'regress_rls_bob', 'my third manga'); -- Must fail with unique violation, revealing presence of did we can't see
+COPY document FROM STDIN WITH (DELIMITER ','); -- fail, COPY is equivalent to INSERT
+8,44,1,regress_rls_bob,my third manga
+\.
 SELECT * FROM document WHERE did = 8; -- and confirm we can't see it
 
 -- RLS policies are checked before constraints
 INSERT INTO document VALUES (8, 44, 1, 'regress_rls_carol', 'my third manga'); -- Should fail with RLS check violation, not duplicate key violation
+COPY document FROM STDIN WITH (DELIMITER ','); -- fail, COPY is equivalent to INSERT
+8,44,1,regress_rls_carol,my third manga
+\.
 UPDATE document SET did = 8, dauthor = 'regress_rls_carol' WHERE did = 5; -- Should fail with RLS check violation, not duplicate key violation
 
 -- database superuser does bypass RLS policy when enabled
@@ -565,14 +583,32 @@ EXPLAIN (COSTS OFF) SELECT * FROM part_document WHERE f_leak(dtitle);
 
 -- pp1 ERROR
 INSERT INTO part_document VALUES (100, 11, 5, 'regress_rls_dave', 'testing pp1'); -- fail
+COPY part_document(did, cid, dlevel, dauthor, dtitle) FROM STDIN WITH (DELIMITER ','); -- fail, COPY FROM is equivalent to INSERT
+100,11,5,regress_rls_dave,testing pp1
+\.
 -- pp1r ERROR
 INSERT INTO part_document VALUES (100, 99, 1, 'regress_rls_dave', 'testing pp1r'); -- fail
+COPY part_document(did, cid, dlevel, dauthor, dtitle) FROM STDIN WITH (DELIMITER ','); -- fail, COPY FROM is equivalent to INSERT
+100,99,1,regress_rls_dave,testing pp1r
+\.
 
 -- Show that RLS policy does not apply for direct inserts to children
 -- This should fail with RLS POLICY pp1r violation.
 INSERT INTO part_document VALUES (100, 55, 1, 'regress_rls_dave', 'testing RLS with partitions'); -- fail
+COPY part_document FROM STDIN WITH (DELIMITER ','); -- fail, COPY FROM is equivalent to INSERT
+100,55,1,regress_rls_dave,testing RLS with partitions
+\.
+
 -- But this should succeed.
 INSERT INTO part_document_satire VALUES (100, 55, 1, 'regress_rls_dave', 'testing RLS with partitions'); -- success
+
+-- COPY FROM should also succeed.
+BEGIN;
+COPY part_document_satire FROM STDIN WITH (DELIMITER ',');
+100, 55, 1, regress_rls_dave, testing RLS with partitions
+\.
+ROLLBACK;
+
 -- We still cannot see the row using the parent
 SELECT * FROM part_document WHERE f_leak(dtitle) ORDER BY did;
 -- But we can if we look directly
@@ -586,6 +622,9 @@ CREATE POLICY pp3 ON part_document_satire AS RESTRICTIVE
 -- This should fail with RLS violation now.
 SET SESSION AUTHORIZATION regress_rls_dave;
 INSERT INTO part_document_satire VALUES (101, 55, 1, 'regress_rls_dave', 'testing RLS with partitions'); -- fail
+COPY part_document_satire FROM STDIN WITH (DELIMITER ','); -- fail, COPY FROM is equivalent to INSERT
+101,55,1,regress_rls_dave,testing RLS with partitions
+\.
 -- And now we cannot see directly into the partition either, due to RLS
 SELECT * FROM part_document_satire WHERE f_leak(dtitle) ORDER BY did;
 -- The parent looks same as before
@@ -647,6 +686,17 @@ CREATE POLICY pp3 ON part_document AS RESTRICTIVE
 
 SET SESSION AUTHORIZATION regress_rls_carol;
 INSERT INTO part_document VALUES (100, 11, 5, 'regress_rls_carol', 'testing pp3'); -- fail
+COPY part_document FROM STDIN WITH (DELIMITER ','); -- fail, COPY FROM is equivalent to INSERT
+100,11,5,regress_rls_carol,testing pp3
+\.
+
+SET SESSION AUTHORIZATION regress_rls_bob;
+BEGIN;
+INSERT INTO part_document VALUES (1, 11, 1, 'regress_rls_bob', 'my second novel'); -- ok
+COPY part_document(did, cid, dlevel, dauthor, dtitle) FROM STDIN WITH (DELIMITER ','); -- ok
+1,11,1,regress_rls_bob,my second novel
+\.
+ROLLBACK;
 
 ----- Dependencies -----
 SET SESSION AUTHORIZATION regress_rls_alice;
@@ -729,6 +779,7 @@ CREATE TABLE s2 (x int, y text);
 INSERT INTO s2 (SELECT x, public.fipshash(x::text) FROM generate_series(-6,6) x);
 
 GRANT SELECT ON s1, s2 TO regress_rls_bob;
+GRANT INSERT ON s1 TO regress_rls_bob;
 
 CREATE POLICY p1 ON s1 USING (a in (select x from s2 where y like '%2f%'));
 CREATE POLICY p2 ON s2 USING (x in (select a from s1 where b like '%22%'));
@@ -742,6 +793,9 @@ CREATE VIEW v2 AS SELECT * FROM s2 WHERE y like '%af%';
 SELECT * FROM s1 WHERE f_leak(b); -- fail (infinite recursion)
 
 INSERT INTO s1 VALUES (1, 'foo'); -- fail (infinite recursion)
+COPY s1 FROM STDIN WITH (DELIMITER ','); -- fail, COPY FROM is equivalent to INSERT
+1,foo
+\.
 
 SET SESSION AUTHORIZATION regress_rls_alice;
 DROP POLICY p3 on s1;
@@ -873,6 +927,7 @@ SET SESSION AUTHORIZATION regress_rls_carol;
 EXPLAIN (COSTS OFF) SELECT * FROM bv1 WHERE f_leak(b);
 SELECT * FROM bv1 WHERE f_leak(b);
 
+-- COPY FROM does not support for view, not need COPY FROM tests here
 INSERT INTO bv1 VALUES (-1, 'xxx'); -- should fail view WCO
 INSERT INTO bv1 VALUES (11, 'xxx'); -- should fail RLS check
 INSERT INTO bv1 VALUES (12, 'xxx'); -- ok
@@ -1882,8 +1937,14 @@ COPY copy_t FROM STDIN; --ok
 SET SESSION AUTHORIZATION regress_rls_bob;
 SET row_security TO OFF;
 COPY copy_t FROM STDIN; --fail - would be affected by RLS.
+\.
 SET row_security TO ON;
-COPY copy_t FROM STDIN; --fail - COPY FROM not supported by RLS.
+COPY copy_t FROM STDIN WITH (DELIMITER ','); -- ok
+2,abc
+\.
+COPY copy_t FROM STDIN WITH (DELIMITER ','); -- error
+1,abc
+\.
 
 -- Check COPY FROM as user with permissions and BYPASSRLS
 SET SESSION AUTHORIZATION regress_rls_exempt_user;
@@ -1905,6 +1966,27 @@ COPY copy_t FROM STDIN; --fail - permission denied.
 RESET SESSION AUTHORIZATION;
 DROP TABLE copy_t;
 DROP TABLE copy_rel_to CASCADE;
+
+-- COPY FROM with multiple policies
+RESET SESSION AUTHORIZATION;
+CREATE TABLE copy_t (a integer, b text);
+CREATE POLICY p1 ON copy_t USING (a % 2 = 0) WITH CHECK (a > 8);
+CREATE POLICY p2 ON copy_t WITH CHECK (a > 10);
+ALTER TABLE copy_t ENABLE ROW LEVEL SECURITY;
+SET row_security TO ON;
+GRANT ALL ON copy_t TO regress_rls_bob, regress_rls_exempt_user;
+SET SESSION AUTHORIZATION regress_rls_bob;
+
+COPY copy_t FROM STDIN WITH (DELIMITER ','); -- fail
+6,abc
+\.
+COPY copy_t FROM STDIN WITH (DELIMITER ','); -- ok
+14,abc
+13,abc
+\.
+RESET SESSION AUTHORIZATION;
+DROP TABLE copy_t;
+
 
 -- Check WHERE CURRENT OF
 SET SESSION AUTHORIZATION regress_rls_alice;
@@ -2084,6 +2166,9 @@ SELECT * FROM r2;
 
 -- r2 is read-only
 INSERT INTO r2 VALUES (2); -- Not allowed
+COPY r2 FROM STDIN WITH (DELIMITER ','); -- fail
+2
+\.
 UPDATE r2 SET a = 2 RETURNING *; -- Updates nothing
 DELETE FROM r2 RETURNING *; -- Deletes nothing
 
@@ -2115,6 +2200,10 @@ TABLE r1;
 
 -- RLS error
 INSERT INTO r1 VALUES (1);
+COPY r1 FROM STDIN WITH (DELIMITER ','); -- fail
+1
+\.
+
 
 -- No error (unable to see any rows to update)
 UPDATE r1 SET a = 1;
@@ -2241,6 +2330,9 @@ ALTER TABLE r1 FORCE ROW LEVEL SECURITY;
 
 -- Works fine
 INSERT INTO r1 VALUES (10), (20);
+COPY r1 FROM STDIN; -- ok
+10
+\.
 
 -- No error, but no rows
 TABLE r1;
@@ -2318,9 +2410,15 @@ ALTER TABLE r1 FORCE ROW LEVEL SECURITY;
 
 -- Should fail p1
 INSERT INTO r1 VALUES (0);
+COPY r1 FROM STDIN WITH (DELIMITER ','); -- fail
+0
+\.
 
 -- Should fail p2
 INSERT INTO r1 VALUES (4);
+COPY r1 FROM STDIN WITH (DELIMITER ','); -- fail
+4
+\.
 
 -- OK
 INSERT INTO r1 VALUES (3);
