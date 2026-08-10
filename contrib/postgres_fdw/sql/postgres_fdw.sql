@@ -4301,6 +4301,52 @@ DROP TABLE ltable;
 DROP TABLE parent;
 DROP FUNCTION ftable_rowcount_trigf;
 
+-- Verify that DEBUG1 is emitted when batch_size is reduced to stay within
+-- the libpq 65535-parameter limit.
+SET client_min_messages = DEBUG1;
+CREATE TABLE batch_table ( x int, y int );
+CREATE FOREIGN TABLE ftable ( x int, y int )
+	SERVER loopback
+	OPTIONS (table_name 'batch_table', batch_size '33000');
+INSERT INTO ftable(x, y) VALUES (1, 1);
+
+-- Clean up
+DROP FOREIGN TABLE ftable;
+DROP TABLE batch_table;
+
+-- Verify that a WARNING is emitted when batch_size is set above the
+-- libpq 65535-parameter limit.
+CREATE TABLE batch_warn_table ( x int );
+CREATE FOREIGN TABLE ftable_warn ( x int )
+  SERVER loopback
+  OPTIONS (table_name 'batch_warn_table', batch_size '65536');
+INSERT INTO ftable_warn VALUES (1);
+-- Clean up
+DROP FOREIGN TABLE ftable_warn;
+DROP TABLE batch_warn_table;
+
+-- Verify that no WARNING is emitted when batch_size is within the
+-- libpq 65535-parameter limit.
+-- check for single column
+CREATE TABLE batch_nowarn_table ( x int );
+CREATE FOREIGN TABLE ftable_no_warn ( x int )
+  SERVER loopback
+  OPTIONS (table_name 'batch_nowarn_table', batch_size '65535');
+INSERT INTO ftable_no_warn VALUES (1);
+-- Clean up
+DROP FOREIGN TABLE ftable_no_warn;
+DROP TABLE batch_nowarn_table;
+
+-- check for more than one columns
+CREATE TABLE batch_table ( x int, y int );
+CREATE FOREIGN TABLE ftable ( x int, y int )
+	SERVER loopback
+	OPTIONS (table_name 'batch_table', batch_size '32767');
+INSERT INTO ftable(x, y) VALUES (1, 1);
+RESET client_min_messages;
+-- Clean up
+DROP FOREIGN TABLE ftable;
+DROP TABLE batch_table;
 -- ===================================================================
 -- test asynchronous execution
 -- ===================================================================
