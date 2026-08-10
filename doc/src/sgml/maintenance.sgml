@@ -729,7 +729,10 @@ HINT:  Execute a database-wide VACUUM in that database.
        is large. In many cases, such slots were created for replication to servers that no
        longer exist, or that have been down for a long time. If you drop a slot for a server
        that still exists and might still try to connect to that slot, that replica may
-       need to be rebuilt.</simpara>
+       need to be rebuilt. Setting <xref linkend="guc-max-slot-xid-age"/> makes the
+       server invalidate such slots automatically once their <literal>age(xmin)</literal>
+       or <literal>age(catalog_xmin)</literal> exceeds the configured limit,
+       preventing them from holding vacuum back indefinitely.</simpara>
      </listitem>
      <listitem>
       <simpara>Execute <command>VACUUM</command> in the target database. A database-wide

@@ -504,7 +504,8 @@ ResolveRecoveryConflictWithSnapshot(TransactionId snapshotConflictHorizon,
 	 */
 	if (IsLogicalDecodingEnabled() && isCatalogRel)
 		InvalidateObsoleteReplicationSlots(RS_INVAL_HORIZON, 0, locator.dbOid,
-										   snapshotConflictHorizon);
+										   snapshotConflictHorizon,
+										   InvalidTransactionId);
 }
 
 /*
