@@ -2699,7 +2699,9 @@ CONTEXT:  processing remote data for replication origin "pg_16395" during "INSER
 
    <para>
     Logical replication slots are also affected by
-    <link linkend="guc-idle-replication-slot-timeout"><varname>idle_replication_slot_timeout</varname></link>.
+    <link linkend="guc-idle-replication-slot-timeout"><varname>idle_replication_slot_timeout</varname></link>
+    and
+    <link linkend="guc-max-slot-xid-age"><varname>max_slot_xid_age</varname></link>.
    </para>
 
    <para>

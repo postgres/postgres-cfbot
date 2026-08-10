@@ -7689,6 +7689,8 @@ CreateCheckPoint(int flags)
 	VirtualTransactionId *vxids;
 	int			nvxids;
 	int			oldXLogAllowed = 0;
+	uint32		possible_causes = RS_INVAL_WAL_REMOVED |
+		RS_INVAL_IDLE_TIMEOUT | RS_INVAL_XID_AGE;
 
 	/*
 	 * An end-of-recovery checkpoint is really a shutdown checkpoint, just
@@ -8185,7 +8187,7 @@ CreateCheckPoint(int flags)
 	 */
 	XLByteToSeg(RedoRecPtr, _logSegNo, wal_segment_size);
 	KeepLogSeg(recptr, &_logSegNo);
-	if (InvalidateObsoleteReplicationSlots(RS_INVAL_WAL_REMOVED | RS_INVAL_IDLE_TIMEOUT,
+	if (InvalidateObsoleteReplicationSlots(possible_causes,
 										   _logSegNo, InvalidOid,
 										   InvalidTransactionId))
 	{
@@ -8486,6 +8488,8 @@ CreateRestartPoint(int flags)
 	uint32		checksum_state;
 	XLogRecPtr	checksum_lsn;
 	bool		checksum_is_local;
+	uint32		possible_causes = RS_INVAL_WAL_REMOVED |
+		RS_INVAL_IDLE_TIMEOUT | RS_INVAL_XID_AGE;
 
 	/* Concurrent checkpoint/restartpoint cannot happen */
 	Assert(!IsUnderPostmaster || MyBackendType == B_CHECKPOINTER);
@@ -8731,7 +8735,7 @@ CreateRestartPoint(int flags)
 
 	INJECTION_POINT("restartpoint-before-slot-invalidation", NULL);
 
-	if (InvalidateObsoleteReplicationSlots(RS_INVAL_WAL_REMOVED | RS_INVAL_IDLE_TIMEOUT,
+	if (InvalidateObsoleteReplicationSlots(possible_causes,
 										   _logSegNo, InvalidOid,
 										   InvalidTransactionId))
 	{
