@@ -93,24 +93,6 @@
 PQExpBuffer tab_completion_query_buf = NULL;
 
 /*
- * In some situations, the query to find out what names are available to
- * complete with must vary depending on server version.  We handle this by
- * storing a list of queries, each tagged with the minimum server version
- * it will work for.  Each list must be stored in descending server version
- * order, so that the first satisfactory query is the one to use.
- *
- * When the query string is otherwise constant, an array of VersionedQuery
- * suffices.  Terminate the array with an entry having min_server_version = 0.
- * That entry's query string can be a query that works in all supported older
- * server versions, or NULL to give up and do no completion.
- */
-typedef struct VersionedQuery
-{
-	int			min_server_version;
-	const char *query;
-} VersionedQuery;
-
-/*
  * This struct is used to define "schema queries", which are custom-built
  * to obtain possibly-schema-qualified names of database objects.  There is
  * enough similarity in the structure that we don't want to repeat it each
@@ -123,8 +105,7 @@ typedef struct VersionedQuery
  * objects we're completing might not have a schema of their own, but the
  * reference object almost always does (passed in completion_ref_schema).
  *
- * As with VersionedQuery, we can use an array of these if the query details
- * must vary across versions.
+ * We can use an array of these if the query details must vary across versions.
  */
 typedef struct SchemaQuery
 {
@@ -225,7 +206,6 @@ static int	completion_max_records;
 static char completion_last_char;	/* last char of input word */
 static const char *completion_charp;	/* to pass a string */
 static const char *const *completion_charpp;	/* to pass a list of strings */
-static const VersionedQuery *completion_vquery; /* to pass a VersionedQuery */
 static const SchemaQuery *completion_squery;	/* to pass a SchemaQuery */
 static char *completion_ref_object; /* name of reference object */
 static char *completion_ref_schema; /* schema name of reference object */
@@ -237,7 +217,6 @@ static bool completion_force_quote; /* true to force-quote filenames */
  * A few macros to ease typing. You can use these to complete the given
  * string with
  * 1) The result from a query you pass it. (Perhaps one of those below?)
- *	  We support both simple and versioned queries.
  * 2) The result from a schema query you pass it.
  *	  We support both simple and versioned schema queries.
  * 3) The items from a null-pointer-terminated list (with or without
@@ -286,23 +265,6 @@ do { \
 do { \
 	static const char *const list[] = { __VA_ARGS__, NULL }; \
 	COMPLETE_WITH_QUERY_VERBATIM_LIST(query, list); \
-} while (0)
-
-#define COMPLETE_WITH_VERSIONED_QUERY(query) \
-	COMPLETE_WITH_VERSIONED_QUERY_LIST(query, NULL)
-
-#define COMPLETE_WITH_VERSIONED_QUERY_LIST(query, list) \
-do { \
-	completion_vquery = query; \
-	completion_charpp = list; \
-	completion_verbatim = false; \
-	matches = rl_completion_matches(text, complete_from_versioned_query); \
-} while (0)
-
-#define COMPLETE_WITH_VERSIONED_QUERY_PLUS(query, ...) \
-do { \
-	static const char *const list[] = { __VA_ARGS__, NULL }; \
-	COMPLETE_WITH_VERSIONED_QUERY_LIST(query, list); \
 } while (0)
 
 #define COMPLETE_WITH_SCHEMA_QUERY(query) \
@@ -1278,9 +1240,8 @@ static const char *const sql_commands[] = {
 typedef struct
 {
 	const char *name;
-	/* Provide at most one of these three types of query: */
+	/* Provide at most one of these two types of query: */
 	const char *query;			/* simple query, or NULL */
-	const VersionedQuery *vquery;	/* versioned query, or NULL */
 	const SchemaQuery *squery;	/* schema query, or NULL */
 	const char *const *keywords;	/* keywords to be offered as well */
 	const uint32 flags;			/* visibility flags, see below */
@@ -1298,68 +1259,68 @@ static const char *const Keywords_for_user_thing[] = {
 };
 
 static const pgsql_thing_t words_after_create[] = {
-	{"ACCESS METHOD", NULL, NULL, NULL, NULL, THING_NO_ALTER},
-	{"AGGREGATE", NULL, NULL, Query_for_list_of_aggregates},
-	{"CAST", NULL, NULL, NULL}, /* Casts have complex structures for names, so
+	{"ACCESS METHOD", NULL, NULL, NULL, THING_NO_ALTER},
+	{"AGGREGATE", NULL, Query_for_list_of_aggregates},
+	{"CAST", NULL, NULL},		/* Casts have complex structures for names, so
 								 * skip it */
-	{"COLLATION", NULL, NULL, &Query_for_list_of_collations},
+	{"COLLATION", NULL, &Query_for_list_of_collations},
 
 	/*
 	 * CREATE CONSTRAINT TRIGGER is not supported here because it is designed
 	 * to be used only by pg_dump.
 	 */
-	{"CONFIGURATION", NULL, NULL, &Query_for_list_of_ts_configurations, NULL, THING_NO_SHOW},
+	{"CONFIGURATION", NULL, &Query_for_list_of_ts_configurations, NULL, THING_NO_SHOW},
 	{"CONVERSION", "SELECT conname FROM pg_catalog.pg_conversion WHERE conname LIKE '%s'"},
 	{"DATABASE", Query_for_list_of_databases},
-	{"DEFAULT PRIVILEGES", NULL, NULL, NULL, NULL, THING_NO_CREATE | THING_NO_DROP},
-	{"DICTIONARY", NULL, NULL, &Query_for_list_of_ts_dictionaries, NULL, THING_NO_SHOW},
-	{"DOMAIN", NULL, NULL, &Query_for_list_of_domains},
-	{"EVENT TRIGGER", NULL, NULL, NULL},
+	{"DEFAULT PRIVILEGES", NULL, NULL, NULL, THING_NO_CREATE | THING_NO_DROP},
+	{"DICTIONARY", NULL, &Query_for_list_of_ts_dictionaries, NULL, THING_NO_SHOW},
+	{"DOMAIN", NULL, &Query_for_list_of_domains},
+	{"EVENT TRIGGER", NULL, NULL},
 	{"EXTENSION", Query_for_list_of_extensions},
-	{"FOREIGN DATA WRAPPER", NULL, NULL, NULL},
-	{"FOREIGN TABLE", NULL, NULL, NULL},
-	{"FUNCTION", NULL, NULL, Query_for_list_of_functions},
+	{"FOREIGN DATA WRAPPER", NULL, NULL},
+	{"FOREIGN TABLE", NULL, NULL},
+	{"FUNCTION", NULL, Query_for_list_of_functions},
 	{"GROUP", Query_for_list_of_roles},
-	{"INDEX", NULL, NULL, &Query_for_list_of_indexes},
+	{"INDEX", NULL, &Query_for_list_of_indexes},
 	{"LANGUAGE", Query_for_list_of_languages},
-	{"LARGE OBJECT", NULL, NULL, NULL, NULL, THING_NO_CREATE | THING_NO_DROP},
-	{"MATERIALIZED VIEW", NULL, NULL, &Query_for_list_of_matviews},
-	{"OPERATOR", NULL, NULL, NULL}, /* Querying for this is probably not such
-									 * a good idea. */
-	{"OR REPLACE", NULL, NULL, NULL, NULL, THING_NO_DROP | THING_NO_ALTER},
-	{"OWNED", NULL, NULL, NULL, NULL, THING_NO_CREATE | THING_NO_ALTER},	/* for DROP OWNED BY ... */
-	{"PARSER", NULL, NULL, &Query_for_list_of_ts_parsers, NULL, THING_NO_SHOW},
-	{"POLICY", NULL, NULL, NULL},
-	{"PROCEDURE", NULL, NULL, Query_for_list_of_procedures},
-	{"PROPERTY GRAPH", NULL, NULL, &Query_for_list_of_propgraphs},
+	{"LARGE OBJECT", NULL, NULL, NULL, THING_NO_CREATE | THING_NO_DROP},
+	{"MATERIALIZED VIEW", NULL, &Query_for_list_of_matviews},
+	{"OPERATOR", NULL, NULL},	/* Querying for this is probably not such a
+								 * good idea. */
+	{"OR REPLACE", NULL, NULL, NULL, THING_NO_DROP | THING_NO_ALTER},
+	{"OWNED", NULL, NULL, NULL, THING_NO_CREATE | THING_NO_ALTER},	/* for DROP OWNED BY ... */
+	{"PARSER", NULL, &Query_for_list_of_ts_parsers, NULL, THING_NO_SHOW},
+	{"POLICY", NULL, NULL},
+	{"PROCEDURE", NULL, Query_for_list_of_procedures},
+	{"PROPERTY GRAPH", NULL, &Query_for_list_of_propgraphs},
 	{"PUBLICATION", Query_for_list_of_publications},
 	{"ROLE", Query_for_list_of_roles},
-	{"ROUTINE", NULL, NULL, &Query_for_list_of_routines, NULL, THING_NO_CREATE},
+	{"ROUTINE", NULL, &Query_for_list_of_routines, NULL, THING_NO_CREATE},
 	{"RULE", "SELECT rulename FROM pg_catalog.pg_rules WHERE rulename LIKE '%s'"},
 	{"SCHEMA", Query_for_list_of_schemas},
-	{"SEQUENCE", NULL, NULL, &Query_for_list_of_sequences},
+	{"SEQUENCE", NULL, &Query_for_list_of_sequences},
 	{"SERVER", Query_for_list_of_servers},
-	{"STATISTICS", NULL, NULL, &Query_for_list_of_statistics},
+	{"STATISTICS", NULL, &Query_for_list_of_statistics},
 	{"SUBSCRIPTION", Query_for_list_of_subscriptions},
-	{"SYSTEM", NULL, NULL, NULL, NULL, THING_NO_CREATE | THING_NO_DROP},
-	{"TABLE", NULL, NULL, &Query_for_list_of_tables},
+	{"SYSTEM", NULL, NULL, NULL, THING_NO_CREATE | THING_NO_DROP},
+	{"TABLE", NULL, &Query_for_list_of_tables},
 	{"TABLESPACE", Query_for_list_of_tablespaces},
-	{"TEMP", NULL, NULL, NULL, NULL, THING_NO_DROP | THING_NO_ALTER},	/* for CREATE TEMP TABLE
-																		 * ... */
-	{"TEMPLATE", NULL, NULL, &Query_for_list_of_ts_templates, NULL, THING_NO_SHOW},
-	{"TEMPORARY", NULL, NULL, NULL, NULL, THING_NO_DROP | THING_NO_ALTER},	/* for CREATE TEMPORARY
-																			 * TABLE ... */
-	{"TEXT SEARCH", NULL, NULL, NULL},
-	{"TRANSFORM", NULL, NULL, NULL, NULL, THING_NO_ALTER},
+	{"TEMP", NULL, NULL, NULL, THING_NO_DROP | THING_NO_ALTER}, /* for CREATE TEMP TABLE
+																 * ... */
+	{"TEMPLATE", NULL, &Query_for_list_of_ts_templates, NULL, THING_NO_SHOW},
+	{"TEMPORARY", NULL, NULL, NULL, THING_NO_DROP | THING_NO_ALTER},	/* for CREATE TEMPORARY
+																		 * TABLE ... */
+	{"TEXT SEARCH", NULL, NULL},
+	{"TRANSFORM", NULL, NULL, NULL, THING_NO_ALTER},
 	{"TRIGGER", "SELECT tgname FROM pg_catalog.pg_trigger WHERE tgname LIKE '%s' AND NOT tgisinternal"},
-	{"TYPE", NULL, NULL, &Query_for_list_of_datatypes},
-	{"UNIQUE", NULL, NULL, NULL, NULL, THING_NO_DROP | THING_NO_ALTER}, /* for CREATE UNIQUE
-																		 * INDEX ... */
-	{"UNLOGGED", NULL, NULL, NULL, NULL, THING_NO_DROP | THING_NO_ALTER},	/* for CREATE UNLOGGED
-																			 * TABLE ... */
-	{"USER", Query_for_list_of_roles, NULL, NULL, Keywords_for_user_thing},
-	{"USER MAPPING FOR", NULL, NULL, NULL},
-	{"VIEW", NULL, NULL, &Query_for_list_of_views},
+	{"TYPE", NULL, &Query_for_list_of_datatypes},
+	{"UNIQUE", NULL, NULL, NULL, THING_NO_DROP | THING_NO_ALTER},	/* for CREATE UNIQUE
+																	 * INDEX ... */
+	{"UNLOGGED", NULL, NULL, NULL, THING_NO_DROP | THING_NO_ALTER}, /* for CREATE UNLOGGED
+																	 * TABLE ... */
+	{"USER", Query_for_list_of_roles, NULL, Keywords_for_user_thing},
+	{"USER MAPPING FOR", NULL, NULL},
+	{"VIEW", NULL, &Query_for_list_of_views},
 	{NULL}						/* end of list */
 };
 
@@ -1475,7 +1436,6 @@ static char *create_command_generator(const char *text, int state);
 static char *drop_command_generator(const char *text, int state);
 static char *alter_command_generator(const char *text, int state);
 static char *complete_from_query(const char *text, int state);
-static char *complete_from_versioned_query(const char *text, int state);
 static char *complete_from_schema_query(const char *text, int state);
 static char *complete_from_versioned_schema_query(const char *text, int state);
 static char *_complete_from_query(const char *simple_query,
@@ -1967,7 +1927,6 @@ psql_completion(const char *text, int start, int end)
 	/* Clear a few things. */
 	completion_charp = NULL;
 	completion_charpp = NULL;
-	completion_vquery = NULL;
 	completion_squery = NULL;
 	completion_ref_object = NULL;
 	completion_ref_schema = NULL;
@@ -2098,9 +2057,6 @@ psql_completion(const char *text, int start, int end)
 				if (wac->query)
 					COMPLETE_WITH_QUERY_LIST(wac->query,
 											 wac->keywords);
-				else if (wac->vquery)
-					COMPLETE_WITH_VERSIONED_QUERY_LIST(wac->vquery,
-													   wac->keywords);
 				else if (wac->squery)
 					COMPLETE_WITH_VERSIONED_SCHEMA_QUERY_LIST(wac->squery,
 															  wac->keywords);
@@ -5928,22 +5884,6 @@ complete_from_query(const char *text, int state)
 {
 	/* query is assumed to work for any server version */
 	return _complete_from_query(completion_charp, NULL, completion_charpp,
-								completion_verbatim, text, state);
-}
-
-static char *
-complete_from_versioned_query(const char *text, int state)
-{
-	const VersionedQuery *vquery = completion_vquery;
-
-	/* Find appropriate array element */
-	while (pset.sversion < vquery->min_server_version)
-		vquery++;
-	/* Fail completion if server is too old */
-	if (vquery->query == NULL)
-		return NULL;
-
-	return _complete_from_query(vquery->query, NULL, completion_charpp,
 								completion_verbatim, text, state);
 }
 
