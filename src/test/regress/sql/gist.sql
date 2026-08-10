@@ -25,6 +25,24 @@ select g,        point(g*10, g*10) from generate_series(1, 10000) g;
 insert into gist_point_tbl (id, p)
 select g+100000, point(g*10+1, g*10+1) from generate_series(1, 10000) g;
 
+-- Check that sorted builds honor fillfactor
+create index gist_pointidx_ff90 on gist_point_tbl using gist(p) with (fillfactor = 90);
+create index gist_pointidx_ff40 on gist_point_tbl using gist(p) with (fillfactor = 40);
+select pg_relation_size('gist_pointidx_ff40') >
+       pg_relation_size('gist_pointidx_ff90') as fillfactor_honored;
+drop index gist_pointidx_ff90, gist_pointidx_ff40;
+
+-- Fillfactor must not force pages with fewer than two tuples
+create table gist_point_tbl_big(p point, payload text);
+insert into gist_point_tbl_big
+select point(g, g), string_agg(md5((g * 1000 + i)::text), '')
+from generate_series(1, 20) g,
+     generate_series(1, 40) i
+group by g;
+create index gist_pointidx_big on gist_point_tbl_big using gist(p)
+  include (payload) with (fillfactor = 10);
+drop table gist_point_tbl_big;
+
 -- To test vacuum, delete some entries from all over the index.
 delete from gist_point_tbl where id % 2 = 1;
 

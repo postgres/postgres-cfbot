@@ -2,7 +2,8 @@
 -- Use an unlogged index, so that the LSN is predictable.
 CREATE UNLOGGED TABLE test_gist AS SELECT point(i,i) p, i::text t FROM
     generate_series(1,1000) i;
-CREATE INDEX test_gist_idx ON test_gist USING gist (p);
+CREATE INDEX test_gist_idx ON test_gist USING gist (p)
+  WITH (fillfactor = 100);
 
 -- Page 0 is the root, the rest are leaf pages
 SELECT * FROM gist_page_opaque_info(get_raw_page('test_gist_idx', 0));
@@ -47,7 +48,7 @@ SELECT gist_page_opaque_info(decode(repeat('00', :block_size), 'hex'));
 -- the included attributes.
 ALTER TABLE test_gist ADD COLUMN i int DEFAULT NULL;
 CREATE INDEX test_gist_idx_inc ON test_gist
-  USING gist (p) INCLUDE (t, i);
+  USING gist (p) INCLUDE (t, i) WITH (fillfactor = 100);
 -- Mask the value of the key attribute to avoid alignment issues.
 SELECT regexp_replace(keys, '\(p\)=\("(.*?)"\)', '(p)=("<val>")') AS keys_nonleaf_1
   FROM gist_page_items(get_raw_page('test_gist_idx_inc', 0), 'test_gist_idx_inc')
