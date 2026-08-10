@@ -3103,6 +3103,14 @@ SELECT * FROM pg_locks pl LEFT JOIN pg_prepared_xacts ppx
           <xref linkend="guc-idle-replication-slot-timeout"/> duration.
          </para>
         </listitem>
+        <listitem>
+         <para>
+          <literal>xid_aged</literal> means that the slot's
+          <literal>xmin</literal> or <literal>catalog_xmin</literal>
+          has reached the transaction age specified by
+          <xref linkend="guc-max-slot-xid-age"/> parameter.
+         </para>
+        </listitem>
        </itemizedlist>
       </para></entry>
      </row>

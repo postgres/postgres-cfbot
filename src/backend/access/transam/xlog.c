@@ -7440,6 +7440,8 @@ CreateCheckPoint(int flags)
 	VirtualTransactionId *vxids;
 	int			nvxids;
 	int			oldXLogAllowed = 0;
+	uint32		slotInvalidationCauses;
+	TransactionId slotXidLimit;
 
 	/*
 	 * An end-of-recovery checkpoint is really a shutdown checkpoint, just
@@ -7879,9 +7881,20 @@ CreateCheckPoint(int flags)
 	 */
 	XLByteToSeg(RedoRecPtr, _logSegNo, wal_segment_size);
 	KeepLogSeg(recptr, &_logSegNo);
-	if (InvalidateObsoleteReplicationSlots(RS_INVAL_WAL_REMOVED | RS_INVAL_IDLE_TIMEOUT,
+
+	slotInvalidationCauses = RS_INVAL_WAL_REMOVED | RS_INVAL_IDLE_TIMEOUT;
+	slotXidLimit = InvalidTransactionId;
+	if (max_slot_xid_age > 0)
+	{
+		slotInvalidationCauses |= RS_INVAL_XID_AGE;
+		slotXidLimit = TransactionIdRetreatedBy(ReadNextTransactionId(),
+												max_slot_xid_age);
+	}
+
+	if (InvalidateObsoleteReplicationSlots(slotInvalidationCauses,
 										   _logSegNo, InvalidOid,
-										   InvalidTransactionId))
+										   InvalidTransactionId,
+										   slotXidLimit))
 	{
 		/*
 		 * Some slots have been invalidated; recalculate the old-segment
@@ -8175,6 +8188,8 @@ CreateRestartPoint(int flags)
 	XLogRecPtr	endptr;
 	XLogSegNo	_logSegNo;
 	TimestampTz xtime;
+	uint32		slotInvalidationCauses;
+	TransactionId slotXidLimit;
 
 	/* Concurrent checkpoint/restartpoint cannot happen */
 	Assert(!IsUnderPostmaster || MyBackendType == B_CHECKPOINTER);
@@ -8353,9 +8368,19 @@ CreateRestartPoint(int flags)
 
 	INJECTION_POINT("restartpoint-before-slot-invalidation", NULL);
 
-	if (InvalidateObsoleteReplicationSlots(RS_INVAL_WAL_REMOVED | RS_INVAL_IDLE_TIMEOUT,
+	slotInvalidationCauses = RS_INVAL_WAL_REMOVED | RS_INVAL_IDLE_TIMEOUT;
+	slotXidLimit = InvalidTransactionId;
+	if (max_slot_xid_age > 0)
+	{
+		slotInvalidationCauses |= RS_INVAL_XID_AGE;
+		slotXidLimit = TransactionIdRetreatedBy(ReadNextTransactionId(),
+												max_slot_xid_age);
+	}
+
+	if (InvalidateObsoleteReplicationSlots(slotInvalidationCauses,
 										   _logSegNo, InvalidOid,
-										   InvalidTransactionId))
+										   InvalidTransactionId,
+										   slotXidLimit))
 	{
 		/*
 		 * Some slots have been invalidated; recalculate the old-segment
@@ -9254,6 +9279,7 @@ xlog_redo(XLogReaderState *record)
 				 */
 				InvalidateObsoleteReplicationSlots(RS_INVAL_WAL_LEVEL,
 												   0, InvalidOid,
+												   InvalidTransactionId,
 												   InvalidTransactionId);
 			}
 			else if (sync_replication_slots)
