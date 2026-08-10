@@ -5020,6 +5020,63 @@ HINT:  If it is safe for all REPLICATION users to use this library as an output 
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-max-slot-xid-age" xreflabel="max_slot_xid_age">
+      <term><varname>max_slot_xid_age</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>max_slot_xid_age</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Invalidate replication slots whose <structfield>xmin</structfield> or
+        <structfield>catalog_xmin</structfield> transaction age in the
+        <link linkend="view-pg-replication-slots">pg_replication_slots</link>
+        view has exceeded the age specified by this setting.
+        A value of zero (the default) disables this feature. Users can set
+        this value anywhere from zero to 2.1 billion transactions. This parameter
+        can only be set in the <filename>postgresql.conf</filename> file or on
+        the server command line.
+       </para>
+
+       <para>
+        Slot invalidation due to this limit occurs during checkpoint. Because
+        checkpoints happen at their own interval, there can be some lag between
+        when a slot's <literal>xmin</literal> or <literal>catalog_xmin</literal>
+        age exceeds <varname>max_slot_xid_age</varname> and when the slot
+        invalidation is actually triggered. To avoid such lags, users can force
+        a checkpoint to promptly invalidate the slot.
+       </para>
+
+       <para>
+        The current age of a slot's <literal>xmin</literal> and
+        <literal>catalog_xmin</literal> can be monitored by applying the
+        <function>age</function> function to the corresponding columns in the
+        <link linkend="view-pg-replication-slots">pg_replication_slots</link>
+        view.
+       </para>
+
+       <para>
+        Inactive or forgotten replication slots can hold vacuum back from
+        freezing XIDs and from pruning dead rows. This can lead to table and
+        index bloat that holds disk space that vacuum would otherwise
+        reclaim, and eventually to transaction ID wraparound. Invalidating
+        such a slot removes one of these blockers, letting vacuum freeze XIDs
+        and reclaim disk space again. See <xref linkend="routine-vacuuming"/>
+        for more details.
+       </para>
+
+       <para>
+        Note that this invalidation mechanism is not applicable for slots
+        on the standby server that are being synced from the primary server
+        (i.e., standby slots having
+        <link linkend="view-pg-replication-slots">pg_replication_slots</link>.<structfield>synced</structfield>
+        value <literal>true</literal>). Synced slots are always considered to
+        be inactive because they don't perform logical decoding to produce
+        changes.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-wal-sender-timeout" xreflabel="wal_sender_timeout">
       <term><varname>wal_sender_timeout</varname> (<type>integer</type>)
       <indexterm>

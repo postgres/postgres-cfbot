@@ -555,4 +555,137 @@ is( $publisher4->safe_psql(
 $publisher4->stop;
 $subscriber4->stop;
 
+# Wait for the given slot to be invalidated due to its xid age
+sub wait_for_xid_aged_invalidation
+{
+	my ($node, $slot_name) = @_;
+	$node->poll_query_until(
+		'postgres', qq[
+		SELECT COUNT(slot_name) = 1 FROM pg_replication_slots
+			WHERE slot_name = '$slot_name' AND
+			invalidation_reason = 'xid_aged';
+	]) or die "Timed out waiting for slot $slot_name to be invalidated";
+}
+
+# A small age lets slots reach the limit after just a few XIDs
+my $slot_xid_age = 100;
+
+# Defines a procedure that consumes XIDs, one per committed transaction, to
+# age a slot's xmin or catalog_xmin. Created on each test primary below.
+my $consume_xid_proc = qq{
+	CREATE PROCEDURE consume_xid(cnt int)
+	AS \$\$
+	DECLARE
+	    i int;
+	BEGIN
+	    FOR i IN 1..cnt LOOP
+	        EXECUTE 'SELECT pg_current_xact_id()';
+	        COMMIT;
+	    END LOOP;
+	END;
+	\$\$ LANGUAGE plpgsql;
+};
+
+# Tests where a checkpoint or restartpoint invalidates the slot
+my $primary5 = PostgreSQL::Test::Cluster->new('primary5');
+$primary5->init(allows_streaming => 'logical');
+$primary5->append_conf(
+	'postgresql.conf', qq{
+max_slot_xid_age = $slot_xid_age
+autovacuum = off
+checkpoint_timeout = 1h
+});
+$primary5->start;
+$primary5->safe_psql('postgres', $consume_xid_proc);
+$primary5->safe_psql('postgres',
+	"CREATE TABLE tbl_user5 AS SELECT generate_series(1,10) AS a");
+$backup_name = 'backup5';
+$primary5->backup($backup_name);
+
+my $standby5 = PostgreSQL::Test::Cluster->new('standby5');
+$standby5->init_from_backup($primary5, $backup_name, has_streaming => 1);
+
+# Testcase 1: an active physical slot (aged xmin) is invalidated by the
+# checkpoint, which terminates its owner. A running standby keeps the slot
+# active; an open transaction there, reported via feedback, freezes its xmin.
+$primary5->safe_psql('postgres',
+	"SELECT pg_create_physical_replication_slot('sb5_slot_a', true)");
+
+$standby5->append_conf(
+	'postgresql.conf', q{
+primary_slot_name = 'sb5_slot_a'
+hot_standby_feedback = on
+wal_receiver_status_interval = 1
+});
+$standby5->start;
+$primary5->wait_for_catchup($standby5);
+
+# Confirm streaming works
+$primary5->safe_psql('postgres',
+	"INSERT INTO tbl_user5 SELECT generate_series(11,20)");
+$primary5->wait_for_replay_catchup($standby5);
+is( $standby5->safe_psql(
+		'postgres', "SELECT count(*) FROM tbl_user5"),
+	'20',
+	'check streamed content on standby');
+
+$primary5->poll_query_until(
+	'postgres', qq[
+	SELECT xmin IS NOT NULL FROM pg_replication_slots
+		WHERE slot_name = 'sb5_slot_a';
+]) or die "Timed out waiting for slot sb5_slot_a xmin from HS feedback";
+
+# Open a transaction on the standby to pin its reported xmin
+my $held = $standby5->background_psql('postgres');
+$held->query_safe("BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT 1;");
+
+$primary5->safe_psql('postgres', qq{CALL consume_xid(2 * $slot_xid_age)});
+
+# The checkpoint terminates the owner and invalidates the slot
+$primary5->safe_psql('postgres', "CHECKPOINT");
+wait_for_xid_aged_invalidation($primary5, 'sb5_slot_a');
+ok(1, "held physical slot invalidated by checkpoint");
+
+$held->quit;
+$standby5->stop;
+
+# Testcase 2: an inactive logical slot on a standby (aged catalog_xmin) is
+# invalidated by a restartpoint. The age limit is disabled on the primary so
+# only the standby's own logical slot ages out.
+$primary5->safe_psql(
+	'postgres', q{
+ALTER SYSTEM SET max_slot_xid_age = 0;
+SELECT pg_reload_conf();
+});
+$primary5->safe_psql('postgres',
+	"SELECT pg_create_physical_replication_slot('sb5_slot_b', true)");
+
+# Reuse the same standby, now with the age limit set on it
+$standby5->append_conf(
+	'postgresql.conf', qq{
+primary_slot_name = 'sb5_slot_b'
+hot_standby_feedback = off
+max_slot_xid_age = $slot_xid_age
+});
+$standby5->start;
+$primary5->wait_for_catchup($standby5);
+
+$standby5->create_logical_slot_on_standby($primary5, 'sb5_logical_slot',
+	'postgres');
+$standby5->poll_query_until(
+	'postgres', qq[
+	SELECT catalog_xmin IS NOT NULL FROM pg_replication_slots
+		WHERE slot_name = 'sb5_logical_slot';
+]) or die "Timed out waiting for sb5_logical_slot catalog_xmin";
+
+$primary5->safe_psql('postgres', qq{CALL consume_xid(2 * $slot_xid_age)});
+$primary5->safe_psql('postgres', "CHECKPOINT");
+$primary5->wait_for_replay_catchup($standby5);
+$standby5->safe_psql('postgres', "CHECKPOINT");
+wait_for_xid_aged_invalidation($standby5, 'sb5_logical_slot');
+ok(1, "inactive logical slot on standby invalidated by restartpoint");
+
+$standby5->stop;
+$primary5->stop;
+
 done_testing();
