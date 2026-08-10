@@ -76,15 +76,14 @@ gistnospace(Page page, IndexTuple *itvec, int len, OffsetNumber todelete, Size f
 }
 
 bool
-gistfitpage(IndexTuple *itvec, int len)
+gistfitpage(IndexTuple *itvec, int len, Size freespace)
 {
 	int			i;
-	Size		size = 0;
+	Size		size = freespace;
 
 	for (i = 0; i < len; i++)
 		size += IndexTupleSize(itvec[i]) + sizeof(ItemIdData);
 
-	/* TODO: Consider fillfactor */
 	return (size <= GiSTPageSize);
 }
 
