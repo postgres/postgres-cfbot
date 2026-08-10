@@ -2149,6 +2149,14 @@
   max => 'MAX_KILOBYTES',
 },
 
+{ name => 'max_slot_xid_age', type => 'int', context => 'PGC_SIGHUP', group => 'REPLICATION_SENDING',
+  short_desc => 'Sets the maximum transaction age of a replication slot\'s xmin or catalog_xmin before it is invalidated.',
+  variable => 'max_slot_xid_age',
+  boot_val => '0',
+  min => '0',
+  max => '2100000000',
+},
+
 # We use the hopefully-safely-small value of 100kB as the compiled-in
 # default for max_stack_depth.  InitializeGUCOptions will increase it
 # if possible, depending on the actual platform-specific stack limit.
