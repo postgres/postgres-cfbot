@@ -1977,8 +1977,11 @@ OpenTableList(List *tables)
 		}
 	}
 
-	list_free(relids);
-	list_free(relids_with_rf);
+	/*
+	 * No need to free the Lists here -- this function runs at most once per
+	 * DDL command, and the memory will be reclaimed when that command's
+	 * context is torn down.
+	 */
 
 	return rels;
 }
