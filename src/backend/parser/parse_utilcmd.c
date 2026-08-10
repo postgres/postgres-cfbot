@@ -2042,9 +2042,9 @@ generateClonedIndexStmt(RangeVar *heapRel, Relation source_idx,
  * extended statistic "source_statsid", for the rel identified by heapRel and
  * heapRelid.
  *
- * stxkeys in the source statistic holds attribute numbers from the parent
+ * stxexprs in the source statistic holds Var nodes referencing the parent
  * relation.  Those attnums, along with the attribute numbers referenced by
- * Vars inside the expression tree, are remapped to the new relation's
+ * Vars inside complex expressions, are remapped to the new relation's
  * numbering according to attmap.
  */
 static CreateStatsStmt *
@@ -2052,15 +2052,16 @@ generateClonedExtStatsStmt(RangeVar *heapRel, Oid heapRelid,
 						   Oid source_statsid, const AttrMap *attmap)
 {
 	HeapTuple	ht_stats;
-	Form_pg_statistic_ext statsrec;
 	CreateStatsStmt *stats;
 	List	   *stat_types = NIL;
 	List	   *def_names = NIL;
-	bool		isnull;
 	Datum		datum;
 	ArrayType  *arr;
 	char	   *enabled;
 	int			i;
+	ListCell   *lc;
+	List	   *exprs = NIL;
+	char	   *exprsString;
 
 	Assert(OidIsValid(heapRelid));
 	Assert(heapRel != NULL);
@@ -2071,7 +2072,6 @@ generateClonedExtStatsStmt(RangeVar *heapRel, Oid heapRelid,
 	ht_stats = SearchSysCache1(STATEXTOID, ObjectIdGetDatum(source_statsid));
 	if (!HeapTupleIsValid(ht_stats))
 		elog(ERROR, "cache lookup failed for statistics object %u", source_statsid);
-	statsrec = (Form_pg_statistic_ext) GETSTRUCT(ht_stats);
 
 	/* Determine which statistics types exist */
 	datum = SysCacheGetAttrNotNull(STATEXTOID, ht_stats,
@@ -2097,44 +2097,31 @@ generateClonedExtStatsStmt(RangeVar *heapRel, Oid heapRelid,
 			elog(ERROR, "unrecognized statistics kind %c", enabled[i]);
 	}
 
-	/* Determine which columns the statistics are on */
-	for (i = 0; i < statsrec->stxkeys.dim1; i++)
-	{
-		StatsElem  *selem = makeNode(StatsElem);
-		AttrNumber	attnum = statsrec->stxkeys.values[i];
-
-		selem->name =
-			get_attname(heapRelid, attmap->attnums[attnum - 1], false);
-		selem->expr = NULL;
-
-		def_names = lappend(def_names, selem);
-	}
-
 	/*
-	 * Now handle expressions, if there are any. The order (with respect to
-	 * regular attributes) does not really matter for extended stats, so we
-	 * simply append them after simple column references.
-	 *
-	 * XXX Some places during build/estimation treat expressions as if they
-	 * are before attributes, but for the CREATE command that's entirely
-	 * irrelevant.
+	 * Decode stxexprs to reconstruct the list of columns and expressions.
+	 * Simple Var nodes represent plain column references; other nodes are
+	 * complex expressions.
 	 */
-	datum = SysCacheGetAttr(STATEXTOID, ht_stats,
-							Anum_pg_statistic_ext_stxexprs, &isnull);
+	datum = SysCacheGetAttrNotNull(STATEXTOID, ht_stats,
+								   Anum_pg_statistic_ext_stxexprs);
+	exprsString = TextDatumGetCString(datum);
+	exprs = (List *) stringToNode(exprsString);
 
-	if (!isnull)
+	foreach(lc, exprs)
 	{
-		ListCell   *lc;
-		List	   *exprs = NIL;
-		char	   *exprsString;
+		Node	   *expr = (Node *) lfirst(lc);
+		StatsElem  *selem = makeNode(StatsElem);
 
-		exprsString = TextDatumGetCString(datum);
-		exprs = (List *) stringToNode(exprsString);
-
-		foreach(lc, exprs)
+		if (IsA(expr, Var) && ((Var *) expr)->varattno > 0)
 		{
-			Node	   *expr = (Node *) lfirst(lc);
-			StatsElem  *selem = makeNode(StatsElem);
+			AttrNumber	attnum = ((Var *) expr)->varattno;
+
+			selem->name =
+				get_attname(heapRelid, attmap->attnums[attnum - 1], false);
+			selem->expr = NULL;
+		}
+		else
+		{
 			bool		found_whole_row;
 
 			/* Adjust Vars to match new table's column numbering */
@@ -2146,12 +2133,12 @@ generateClonedExtStatsStmt(RangeVar *heapRel, Oid heapRelid,
 
 			selem->name = NULL;
 			selem->expr = expr;
-
-			def_names = lappend(def_names, selem);
 		}
 
-		pfree(exprsString);
+		def_names = lappend(def_names, selem);
 	}
+
+	pfree(exprsString);
 
 	/* finally, build the output node */
 	stats = makeNode(CreateStatsStmt);
@@ -3163,11 +3150,52 @@ transformIndexStmt(Oid relid, IndexStmt *stmt, const char *queryString)
 }
 
 /*
+ * flatten_join_tree - recursively flatten a JoinExpr tree
+ *
+ * Opens each RangeVar leaf, adds it to the parser namespace, and appends
+ * the opened Relation to *rels.  Appends each JoinExpr node to *joins.
+ * Both lists are in left-to-right tree order.
+ */
+static void
+flatten_join_tree(ParseState *pstate, Node *node,
+				  List **rels, List **joins)
+{
+	if (IsA(node, RangeVar))
+	{
+		RangeVar   *rv = (RangeVar *) node;
+		Relation	rel;
+		ParseNamespaceItem *nsitem;
+
+		rel = table_openrv(rv, ShareUpdateExclusiveLock);
+		nsitem = addRangeTableEntryForRelation(pstate, rel,
+											   AccessShareLock,
+											   rv->alias, false, true);
+		addNSItemToQuery(pstate, nsitem, false, true, true);
+		*rels = lappend(*rels, rel);
+	}
+	else if (IsA(node, JoinExpr))
+	{
+		JoinExpr   *j = (JoinExpr *) node;
+
+		flatten_join_tree(pstate, j->larg, rels, joins);
+		flatten_join_tree(pstate, j->rarg, rels, joins);
+		*joins = lappend(*joins, j);
+	}
+	else
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("unsupported FROM clause element in join statistics")));
+}
+
+/*
  * transformStatsStmt - parse analysis for CREATE STATISTICS
  *
- * To avoid race conditions, it's important that this function relies only on
- * the passed-in relid (and not on stmt->relation) to determine the target
- * relation.
+ * For single-relation statistics, to avoid race conditions, it's important
+ * that this function relies only on the passed-in relid (and not on
+ * stmt->relation) to determine the target relation.
+ *
+ * For join statistics, relid is InvalidOid and tables are resolved directly
+ * from stmt->relations.
  */
 CreateStatsStmt *
 transformStatsStmt(Oid relid, CreateStatsStmt *stmt, const char *queryString)
@@ -3175,7 +3203,9 @@ transformStatsStmt(Oid relid, CreateStatsStmt *stmt, const char *queryString)
 	ParseState *pstate;
 	ParseNamespaceItem *nsitem;
 	ListCell   *l;
-	Relation	rel;
+	Relation	rel = NULL;
+	bool		isjoin = (stmt->relations != NIL &&
+						  IsA(linitial(stmt->relations), JoinExpr));
 
 	/* Nothing to do if statement already transformed. */
 	if (stmt->transformed)
@@ -3185,18 +3215,128 @@ transformStatsStmt(Oid relid, CreateStatsStmt *stmt, const char *queryString)
 	pstate = make_parsestate(NULL);
 	pstate->p_sourcetext = queryString;
 
-	/*
-	 * Put the parent table into the rtable so that the expressions can refer
-	 * to its fields without qualification.  Caller is responsible for locking
-	 * relation, but we still need to open it.
-	 */
-	rel = relation_open(relid, NoLock);
-	nsitem = addRangeTableEntryForRelation(pstate, rel,
-										   AccessShareLock,
-										   NULL, false, true);
+	if (isjoin)
+	{
+		Node	   *fromNode = (Node *) linitial(stmt->relations);
+		List	   *rels = NIL;
+		List	   *joins = NIL;
+		int			nrels;
 
-	/* no to join list, yes to namespaces */
-	addNSItemToQuery(pstate, nsitem, false, true, true);
+		Assert(IsA(fromNode, JoinExpr));
+
+		/* Collect tables and join nodes from the JoinExpr node */
+		flatten_join_tree(pstate, fromNode, &rels, &joins);
+
+		nrels = list_length(rels);
+		Assert(nrels >= 2);
+
+		/*
+		 * Transform the join quals in each JoinExpr now that all tables are
+		 * in the namespace, and collect them into stmt->stxjoinconds.
+		 */
+		foreach(l, joins)
+		{
+			JoinExpr   *j = (JoinExpr *) lfirst(l);
+
+			if (j->jointype != JOIN_INNER)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("join statistics are only supported for inner joins")));
+
+			if (j->quals)
+			{
+				j->quals = transformExpr(pstate, j->quals,
+										 EXPR_KIND_JOIN_ON);
+				assign_expr_collations(pstate, j->quals);
+				stmt->stxjoinconds = lappend(stmt->stxjoinconds, j->quals);
+			}
+		}
+
+		/*
+		 * Validate join conditions.  Each qual must be a simple OpExpr with
+		 * Var operands using a mergejoinable equality operator.
+		 */
+		foreach(l, stmt->stxjoinconds)
+		{
+			OpExpr	   *opexpr;
+			Var		   *lvar;
+			Var		   *rvar;
+
+			if (!IsA(lfirst(l), OpExpr))
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("join statistics require a single equality join condition per pair of tables")));
+
+			opexpr = (OpExpr *) lfirst(l);
+
+			if (list_length(opexpr->args) != 2 ||
+				!IsA(linitial(opexpr->args), Var) ||
+				!IsA(lsecond(opexpr->args), Var))
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("join statistics require simple equality join conditions")));
+
+			lvar = (Var *) linitial(opexpr->args);
+			rvar = (Var *) lsecond(opexpr->args);
+
+			if (!AttrNumberIsForUserDefinedAttr(lvar->varattno) ||
+				!AttrNumberIsForUserDefinedAttr(rvar->varattno))
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("join statistics do not support whole-row references in join conditions")));
+
+			if (lvar->varno < 1 || lvar->varno > nrels ||
+				rvar->varno < 1 || rvar->varno > nrels)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("join condition references invalid relation")));
+
+			if (get_mergejoin_opfamilies(opexpr->opno) == NIL)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("join statistics require equality join conditions")));
+		}
+
+		/* Reject join stats without any join conditions (e.g. CROSS JOIN) */
+		if (stmt->stxjoinconds == NIL)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+					 errmsg("join statistics require at least one join condition"),
+					 errhint("Use JOIN ... ON instead of CROSS JOIN.")));
+
+		/*
+		 * Extract resolved table OIDs.  stxjoinrels lists all participating
+		 * tables anchor-first (stxjoinrels[0] == stxrelid), so Var.varno N
+		 * references stxjoinrels[N-1].
+		 */
+		stmt->stxrelid = RelationGetRelid((Relation) linitial(rels));
+		foreach(l, rels)
+		{
+			Relation	r = (Relation) lfirst(l);
+
+			stmt->stxjoinrels = lappend_oid(stmt->stxjoinrels,
+											RelationGetRelid(r));
+			table_close(r, NoLock);
+		}
+
+		list_free(rels);
+		list_free(joins);
+	}
+	else
+	{
+		/*
+		 * Put the parent table into the rtable so that the expressions can
+		 * refer to its fields without qualification.  Caller is responsible
+		 * for locking relation, but we still need to open it.
+		 */
+		rel = relation_open(relid, NoLock);
+		nsitem = addRangeTableEntryForRelation(pstate, rel,
+											   AccessShareLock,
+											   NULL, false, true);
+
+		/* no to join list, yes to namespaces */
+		addNSItemToQuery(pstate, nsitem, false, true, true);
+	}
 
 	/* take care of any expressions */
 	foreach(l, stmt->exprs)
@@ -3214,19 +3354,32 @@ transformStatsStmt(Oid relid, CreateStatsStmt *stmt, const char *queryString)
 		}
 	}
 
-	/*
-	 * Check that only the base rel is mentioned.  (This should be dead code
-	 * now that add_missing_from is history.)
-	 */
-	if (list_length(pstate->p_rtable) != 1)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
-				 errmsg("statistics expressions can refer only to the table being referenced")));
+	if (!isjoin)
+	{
+		/*
+		 * Check that only the base rel is mentioned.  (This should be dead
+		 * code now that add_missing_from is history.)
+		 */
+		if (list_length(pstate->p_rtable) != 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
+					 errmsg("statistics expressions can refer only to the table being referenced")));
+
+		/* Close relation */
+		table_close(rel, NoLock);
+	}
+	else
+	{
+		/*
+		 * For extended join stats, we need at least 2 tables in the rtable.
+		 */
+		if (list_length(pstate->p_rtable) < 2)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
+					 errmsg("extended join statistics must reference at least two tables")));
+	}
 
 	free_parsestate(pstate);
-
-	/* Close relation */
-	table_close(rel, NoLock);
 
 	/* Mark statement as successfully transformed */
 	stmt->transformed = true;

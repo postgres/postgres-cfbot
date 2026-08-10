@@ -129,19 +129,45 @@ clauselist_selectivity_ext(PlannerInfo *root,
 	int			listidx;
 
 	/*
-	 * If there's exactly one clause, just go directly to
-	 * clause_selectivity_ext(). None of what we might do below is relevant.
+	 * Determine if these clauses reference a single relation.
 	 */
-	if (list_length(clauses) == 1)
+	rel = find_single_rel_for_clauses(root, clauses);
+
+	/*
+	 * If there's exactly one clause that references a single relation, just
+	 * go directly to clause_selectivity_ext(). None of what we might do below
+	 * is relevant. If multiple relations are referenced, we must NOT
+	 * short-circuit because we need to detect join stats opportunities.
+	 */
+	if (list_length(clauses) == 1 && rel != NULL)
 		return clause_selectivity_ext(root, (Node *) linitial(clauses),
 									  varRelid, jointype, sjinfo,
 									  use_extended_stats);
 
 	/*
-	 * Determine if these clauses reference a single relation.  If so, and if
-	 * it has extended statistics, try to apply those.
+	 * Try applying extended statistics for joins/parameterized scans.
+	 *
+	 * Note: FK-based joins are already handled by
+	 * get_foreign_key_join_selectivity() which runs before
+	 * clauselist_selectivity().  This primarily benefits:
+	 *  - Parameterized path estimation (before FK selectivity runs)
+	 *  - Non-FK join path estimation
 	 */
-	rel = find_single_rel_for_clauses(root, clauses);
+	if (use_extended_stats && !rel)
+	{
+		/*
+		 * Estimate as many clauses as possible using extended statistics.
+		 *
+		 * 'estimatedclauses' is populated with the 0-based list position
+		 * index of clauses estimated here, and that should be ignored below.
+		 */
+		s1 *= statext_join_mcv_clauselist_selectivity(root, clauses, varRelid,
+													  &estimatedclauses);
+	}
+
+	/*
+	 * Try applying extended statistics for single table scans.
+	 */
 	if (use_extended_stats && rel && rel->rtekind == RTE_RELATION && rel->statlist != NIL)
 	{
 		/*
@@ -150,9 +176,9 @@ clauselist_selectivity_ext(PlannerInfo *root,
 		 * 'estimatedclauses' is populated with the 0-based list position
 		 * index of clauses estimated here, and that should be ignored below.
 		 */
-		s1 = statext_clauselist_selectivity(root, clauses, varRelid,
-											jointype, sjinfo, rel,
-											&estimatedclauses, false);
+		s1 *= statext_clauselist_selectivity(root, clauses, varRelid,
+											 jointype, sjinfo, rel,
+											 &estimatedclauses, false);
 	}
 
 	/*

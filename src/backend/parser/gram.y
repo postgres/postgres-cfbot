@@ -4934,6 +4934,13 @@ stats_param:	ColId
 					$$->name = $1;
 					$$->expr = NULL;
 				}
+			| ColId indirection
+				{
+					/* Table-qualified column reference (e.g., tbl.col) */
+					$$ = makeNode(StatsElem);
+					$$->name = NULL;
+					$$->expr = (Node *) makeColumnRef($1, $2, @1, yyscanner);
+				}
 			| func_expr_windowless
 				{
 					$$ = makeNode(StatsElem);

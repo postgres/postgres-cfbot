@@ -277,7 +277,7 @@ SELECT attname, attcompression FROM pg_attribute
   WHERE attrelid = 'ctl_foreign_table2'::regclass and attnum > 0 ORDER BY attnum;
 
 -- LIKE ... INCLUDING STATISTICS with dropped columns in the parent,
--- so stxkeys attnums are not contiguous.
+-- so column attnums are not contiguous.
 CREATE TABLE ctl_stats3_parent (a int, b int, c int);
 ALTER TABLE ctl_stats3_parent DROP COLUMN b;
 CREATE STATISTICS ctl_stats3_stat ON a, c FROM ctl_stats3_parent;
@@ -287,15 +287,10 @@ ALTER TABLE ctl_stats4_parent DROP COLUMN b;
 CREATE STATISTICS ctl_stats4_stat ON a, c FROM ctl_stats4_parent;
 CREATE TABLE ctl_stats4_child (LIKE ctl_stats4_parent INCLUDING STATISTICS);
 SELECT s.stxrelid::regclass AS relation,
-       array_agg(a.attname ORDER BY u.ord) AS stats_columns
+       pg_get_statisticsobjdef_columns(s.oid) AS stats_columns
 FROM pg_statistic_ext s
-CROSS JOIN LATERAL
-  unnest(s.stxkeys::int2[]) WITH ORDINALITY AS u(attnum, ord)
-JOIN pg_attribute a
-  ON a.attrelid = s.stxrelid AND a.attnum = u.attnum
 WHERE s.stxrelid IN ('ctl_stats3_child'::regclass,
                      'ctl_stats4_child'::regclass)
-GROUP BY s.stxrelid
 ORDER BY s.stxrelid::regclass::text;
 DROP TABLE ctl_stats3_parent;
 DROP TABLE ctl_stats3_child;

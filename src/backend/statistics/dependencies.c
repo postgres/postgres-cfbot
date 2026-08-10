@@ -393,11 +393,18 @@ statext_dependencies_build(StatsBuildData *data)
 			d = (MVDependency *) palloc0(offsetof(MVDependency, attributes)
 										 + k * sizeof(AttrNumber));
 
-			/* copy the dependency (and keep the indexes into stxkeys) */
+			/* copy the dependency */
 			d->degree = degree;
 			d->nattributes = k;
 			for (i = 0; i < k; i++)
 				d->attributes[i] = data->attnums[dependency[i]];
+
+			/*
+			 * Order the first (k-1) attnums the way dump and restore needs
+			 * (see compare_attnums); the last is the dependent attribute and
+			 * stays last.
+			 */
+			qsort(d->attributes, k - 1, sizeof(AttrNumber), compare_attnums);
 
 			/* initialize the list of dependencies */
 			if (dependencies == NULL)
@@ -596,13 +603,13 @@ statext_dependencies_free(MVDependencies *dependencies)
  * attributes list correspond to attnums/expressions defined by the
  * extended statistics object.
  *
- * Positive attnums are attributes which must be found in the stxkeys, while
- * negative attnums correspond to an expression number, no attribute number
- * can be below (0 - numexprs).
+ * Positive attnums correspond to table columns (excluding virtual generated
+ * columns), while negative attnums correspond to expressions.  No attribute
+ * number can be below (0 - numexprs).
  */
 bool
 statext_dependencies_validate(const MVDependencies *dependencies,
-							  const int2vector *stxkeys,
+							  const Bitmapset *keys,
 							  int numexprs, int elevel)
 {
 	int			attnum_expr_lowbound = 0 - numexprs;
@@ -623,15 +630,8 @@ statext_dependencies_validate(const MVDependencies *dependencies,
 
 			if (attnum > 0)
 			{
-				/* attribute number in stxkeys */
-				for (int k = 0; k < stxkeys->dim1; k++)
-				{
-					if (attnum == stxkeys->values[k])
-					{
-						ok = true;
-						break;
-					}
-				}
+				/* attribute number in keys */
+				ok = bms_is_member(attnum, keys);
 			}
 			else if ((attnum < 0) && (attnum >= attnum_expr_lowbound))
 			{
@@ -1308,6 +1308,9 @@ dependency_is_compatible_expression(Node *clause, Index relid, List *statlist, N
 		{
 			Node	   *stat_expr = (Node *) lfirst(lc2);
 
+			if (statext_is_column(stat_expr))
+				continue;
+
 			if (equal(clause_expr, stat_expr))
 			{
 				*expr = stat_expr;
@@ -1546,7 +1549,7 @@ dependencies_clauselist_selectivity(PlannerInfo *root,
 		StatisticExtInfo *stat = (StatisticExtInfo *) lfirst(l);
 		int			nmatched;
 		int			nexprs;
-		int			k;
+		ListCell   *lc_col;
 		MVDependencies *deps;
 
 		/* skip statistics that are not of the correct type */
@@ -1558,20 +1561,21 @@ dependencies_clauselist_selectivity(PlannerInfo *root,
 			continue;
 
 		/*
-		 * Count matching attributes - we have to undo the attnum offsets. The
-		 * input attribute numbers are not offset (expressions are not
-		 * included in stat->keys, so it's not necessary). But we need to
-		 * offset it before checking against clauses_attnums.
+		 * Count matching attributes.  We walk the covered plain columns
+		 * (expression entries are skipped) and offset each attnum before
+		 * checking it against clauses_attnums.
 		 */
 		nmatched = 0;
-		k = -1;
-		while ((k = bms_next_member(stat->keys, k)) >= 0)
+		foreach(lc_col, stat->exprs)
 		{
-			AttrNumber	attnum = (AttrNumber) k;
+			Node	   *node = (Node *) lfirst(lc_col);
+			AttrNumber	attnum;
 
-			/* skip expressions */
-			if (!AttrNumberIsForUserDefinedAttr(attnum))
+			/* only plain columns are counted here */
+			if (!statext_is_column(node))
 				continue;
+
+			attnum = ((Var *) node)->varattno;
 
 			/* apply the same offset as above */
 			attnum += attnum_offset;
@@ -1589,6 +1593,9 @@ dependencies_clauselist_selectivity(PlannerInfo *root,
 			foreach(lc, stat->exprs)
 			{
 				Node	   *stat_expr = (Node *) lfirst(lc);
+
+				if (statext_is_column(stat_expr))
+					continue;
 
 				/* try to match it */
 				if (equal(stat_expr, unique_exprs[i]))
@@ -1631,7 +1638,7 @@ dependencies_clauselist_selectivity(PlannerInfo *root,
 		 * it in a cheaper way (if there are no expr clauses, we can just
 		 * discard all negative attnums without any lookups).
 		 */
-		if (unique_exprs_cnt > 0 || stat->exprs != NIL)
+		if (unique_exprs_cnt > 0 || stat_num_expressions(stat) > 0)
 		{
 			uint32		ndeps = 0;
 
@@ -1686,9 +1693,9 @@ dependencies_clauselist_selectivity(PlannerInfo *root,
 					idx = -(1 + attnum);
 
 					/* Is the expression index is valid? */
-					Assert((idx >= 0) && (idx < list_length(stat->exprs)));
+					Assert((idx >= 0) && (idx < stat_num_expressions(stat)));
 
-					expr = (Node *) list_nth(stat->exprs, idx);
+					expr = stat_nth_expression(stat, idx);
 
 					/* try to find the expression in the unique list */
 					for (int m = 0; m < unique_exprs_cnt; m++)

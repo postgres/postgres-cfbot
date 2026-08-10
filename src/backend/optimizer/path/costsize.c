@@ -105,6 +105,7 @@
 #include "optimizer/plancat.h"
 #include "optimizer/restrictinfo.h"
 #include "parser/parsetree.h"
+#include "statistics/statistics.h"
 #include "utils/lsyscache.h"
 #include "utils/selfuncs.h"
 #include "utils/spccache.h"
@@ -5833,6 +5834,7 @@ get_foreign_key_join_selectivity(PlannerInfo *root,
 		bool		ref_is_outer;
 		List	   *removedlist;
 		ListCell   *cell;
+		RelOptInfo *ref_rel;
 
 		/*
 		 * This FK is not relevant unless it connects a baserel on one side of
@@ -5960,7 +5962,8 @@ get_foreign_key_join_selectivity(PlannerInfo *root,
 		/*
 		 * Finally we get to the payoff: estimate selectivity using the
 		 * knowledge that each referencing row will match exactly one row in
-		 * the referenced table.
+		 * the referenced table.  If join MCV statistics exist for this FK,
+		 * prefer the MCV-based selectivity over the default 1/ref_tuples.
 		 *
 		 * XXX that's not true in the presence of nulls in the referencing
 		 * column(s), so in principle we should derate the estimate for those.
@@ -5980,6 +5983,8 @@ get_foreign_key_join_selectivity(PlannerInfo *root,
 		 * work, it is uncommon in practice to have an FK referencing a parent
 		 * table.  So, at least for now, disregard inheritance here.
 		 */
+		ref_rel = find_base_rel(root, fkinfo->ref_relid);
+
 		if (jointype == JOIN_SEMI || jointype == JOIN_ANTI)
 		{
 			/*
@@ -5993,7 +5998,6 @@ get_foreign_key_join_selectivity(PlannerInfo *root,
 			 * restriction clauses, which is rows / tuples; but we must guard
 			 * against tuples == 0.
 			 */
-			RelOptInfo *ref_rel = find_base_rel(root, fkinfo->ref_relid);
 			double		ref_tuples = Max(ref_rel->tuples, 1.0);
 
 			fkselec *= ref_rel->rows / ref_tuples;
@@ -6001,14 +6005,28 @@ get_foreign_key_join_selectivity(PlannerInfo *root,
 		else
 		{
 			/*
-			 * Otherwise, selectivity is exactly 1/referenced-table-size; but
-			 * guard against tuples == 0.  Note we should use the raw table
-			 * tuple count, not any estimate of its filtered or joined size.
+			 * Try the removed FK clause for join MCV stats.  If a stat is
+			 * found for the baserel pair, use its selectivity; otherwise
+			 * fall back to the default FK selectivity
+			 * (1/referenced-table-size) applied once per FK constraint.
+			 *
+			 * XXX Currently join stats support only single-condition joins,
+			 * so skip the MCV lookup for multi-column FKs.
 			 */
-			RelOptInfo *ref_rel = find_base_rel(root, fkinfo->ref_relid);
 			double		ref_tuples = Max(ref_rel->tuples, 1.0);
+			Selectivity mcv_sel = 0.0;
 
-			fkselec *= 1.0 / ref_tuples;
+			if (list_length(removedlist) == 1)
+			{
+				RestrictInfo *fk_rinfo = (RestrictInfo *) linitial(removedlist);
+
+				mcv_sel = join_mcv_clause_selectivity(root, fk_rinfo);
+			}
+
+			if (mcv_sel > 0)
+				fkselec *= mcv_sel;
+			else
+				fkselec *= 1.0 / ref_tuples;
 		}
 
 		/*

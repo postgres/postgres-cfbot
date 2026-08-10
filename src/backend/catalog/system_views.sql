@@ -285,12 +285,7 @@ CREATE VIEW pg_stats_ext WITH (security_barrier) AS
            s.stxname AS statistics_name,
            s.oid AS statistics_id,
            pg_get_userbyid(s.stxowner) AS statistics_owner,
-           ( SELECT array_agg(a.attname ORDER BY a.attnum)
-             FROM unnest(s.stxkeys) k
-                  JOIN pg_attribute a
-                       ON (a.attrelid = s.stxrelid AND a.attnum = k)
-           ) AS attnames,
-           pg_get_statisticsobjdef_expressions(s.oid) as exprs,
+           pg_get_statisticsobjdef_columns(s.oid) AS exprs,
            s.stxkind AS kinds,
            sd.stxdinherit AS inherited,
            sd.stxdndistinct AS n_distinct,
@@ -311,6 +306,11 @@ CREATE VIEW pg_stats_ext WITH (security_barrier) AS
                      FROM pg_mcv_list_items(sd.stxdmcv)
                    ) m ON sd.stxdmcv IS NOT NULL
     WHERE pg_has_role(c.relowner, 'USAGE')
+    AND (s.stxjoinrels IS NULL OR NOT EXISTS (
+            SELECT 1 FROM unnest(s.stxjoinrels) AS jr(oid)
+            JOIN pg_class jc ON jc.oid = jr.oid
+            WHERE NOT pg_has_role(jc.relowner, 'USAGE')
+        ))
     AND (c.relrowsecurity = false OR NOT row_security_active(c.oid));
 
 CREATE VIEW pg_stats_ext_exprs WITH (security_barrier) AS

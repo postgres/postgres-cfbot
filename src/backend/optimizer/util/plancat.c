@@ -1654,7 +1654,8 @@ get_relation_constraints(PlannerInfo *root,
 static void
 get_relation_statistics_worker(List **stainfos, RelOptInfo *rel,
 							   Oid statOid, bool inh,
-							   Bitmapset *keys, List *exprs)
+							   List *exprs,
+							   List *joinrels, List *joinconds)
 {
 	Form_pg_statistic_ext_data dataForm;
 	HeapTuple	dtup;
@@ -1675,7 +1676,6 @@ get_relation_statistics_worker(List **stainfos, RelOptInfo *rel,
 		info->inherit = dataForm->stxdinherit;
 		info->rel = rel;
 		info->kind = STATS_EXT_NDISTINCT;
-		info->keys = bms_copy(keys);
 		info->exprs = exprs;
 
 		*stainfos = lappend(*stainfos, info);
@@ -1689,7 +1689,6 @@ get_relation_statistics_worker(List **stainfos, RelOptInfo *rel,
 		info->inherit = dataForm->stxdinherit;
 		info->rel = rel;
 		info->kind = STATS_EXT_DEPENDENCIES;
-		info->keys = bms_copy(keys);
 		info->exprs = exprs;
 
 		*stainfos = lappend(*stainfos, info);
@@ -1703,8 +1702,15 @@ get_relation_statistics_worker(List **stainfos, RelOptInfo *rel,
 		info->inherit = dataForm->stxdinherit;
 		info->rel = rel;
 		info->kind = STATS_EXT_MCV;
-		info->keys = bms_copy(keys);
 		info->exprs = exprs;
+
+		/*
+		 * Only MCV carries the join fields: CREATE STATISTICS allows no other
+		 * kind yet for join stats, so the nodes above are never join stats.
+		 * For single-table stats these locals are NIL.
+		 */
+		info->joinrels = joinrels;
+		info->joinconds = joinconds;
 
 		*stainfos = lappend(*stainfos, info);
 	}
@@ -1717,7 +1723,6 @@ get_relation_statistics_worker(List **stainfos, RelOptInfo *rel,
 		info->inherit = dataForm->stxdinherit;
 		info->rel = rel;
 		info->kind = STATS_EXT_EXPRESSIONS;
-		info->keys = bms_copy(keys);
 		info->exprs = exprs;
 
 		*stainfos = lappend(*stainfos, info);
@@ -1748,88 +1753,95 @@ get_relation_statistics(PlannerInfo *root, RelOptInfo *rel,
 	foreach(l, statoidlist)
 	{
 		Oid			statOid = lfirst_oid(l);
-		Form_pg_statistic_ext staForm;
 		HeapTuple	htup;
-		Bitmapset  *keys = NULL;
 		List	   *exprs = NIL;
-		int			i;
+		List	   *joinrels = NIL;
+		List	   *joinconds = NIL;
+		bool		isjoin;
+		bool		isnull;
+		Datum		datum;
 
 		htup = SearchSysCache1(STATEXTOID, ObjectIdGetDatum(statOid));
 		if (!HeapTupleIsValid(htup))
 			elog(ERROR, "cache lookup failed for statistics object %u", statOid);
-		staForm = (Form_pg_statistic_ext) GETSTRUCT(htup);
 
 		/*
-		 * First, build the array of columns covered.  This is ultimately
-		 * wasted if no stats within the object have actually been built, but
-		 * it doesn't seem worth troubling over that case.
-		 */
-		for (i = 0; i < staForm->stxkeys.dim1; i++)
-			keys = bms_add_member(keys, staForm->stxkeys.values[i]);
-
-		/*
-		 * Preprocess expressions (if any). We read the expressions, fix the
+		 * Preprocess the columns and expressions. We read them, fix the
 		 * varnos, and run them through eval_const_expressions.
 		 *
 		 * XXX We don't know yet if there are any data for this stats object,
 		 * with either stxdinherit value. But it's reasonable to assume there
 		 * is at least one of those, possibly both. So it's better to process
-		 * keys and expressions here.
+		 * columns and expressions here.
 		 */
+		exprs = statext_get_stxexprs(htup, relation);
+
+		/*
+		 * Fetch the join statistics fields.  A non-null stxjoinrels marks a
+		 * join statistics object; these fields are all NULL for single-table
+		 * statistics.
+		 */
+		datum = SysCacheGetAttr(STATEXTOID, htup,
+								Anum_pg_statistic_ext_stxjoinrels, &isnull);
+		isjoin = !isnull;
+		if (isjoin)
 		{
-			bool		isnull;
-			Datum		datum;
+			oidvector  *jrels = (oidvector *) DatumGetPointer(datum);
+			char	   *condstr;
 
-			/* decode expression (if any) */
-			datum = SysCacheGetAttr(STATEXTOID, htup,
-									Anum_pg_statistic_ext_stxexprs, &isnull);
+			for (int j = 0; j < jrels->dim1; j++)
+				joinrels = lappend_oid(joinrels, jrels->values[j]);
 
-			if (!isnull)
-			{
-				char	   *exprsString;
+			datum = SysCacheGetAttrNotNull(STATEXTOID, htup,
+										   Anum_pg_statistic_ext_stxjoinconds);
+			condstr = TextDatumGetCString(datum);
+			joinconds = (List *) stringToNode(condstr);
+			pfree(condstr);
+		}
 
-				exprsString = TextDatumGetCString(datum);
-				exprs = (List *) stringToNode(exprsString);
-				pfree(exprsString);
+		/*
+		 * For single-table statistics, modify the copies we obtain from the
+		 * relcache to have the correct varno for the parent relation, so that
+		 * they match up correctly against qual clauses.  This must be done
+		 * before const-simplification because eval_const_expressions reduces
+		 * NullTest for Vars based on varno.
+		 *
+		 * Join statistics are never used to estimate single-table clauses
+		 * (see choose_best_statistics), and their Vars must keep the original
+		 * stxjoinrels-relative varnos (1 = anchor, 2 = other joined relation)
+		 * so the join estimator can map each column to its relation.  So a
+		 * join stat's exprs are left as statext_get_stxexprs() returned them.
+		 */
+		if (!isjoin)
+		{
+			if (varno != 1)
+				ChangeVarNodes((Node *) exprs, 1, varno, 0);
 
-				/* Expand virtual generated columns in the expressions */
-				exprs = (List *) expand_generated_columns_in_expr((Node *) exprs, relation, 1);
+			/*
+			 * Run the columns and expressions through eval_const_expressions.
+			 * This is not just an optimization, but is necessary, because the
+			 * planner will be comparing them to similarly-processed qual
+			 * clauses, and may fail to detect valid matches without this.  We
+			 * must not use canonicalize_qual, however, since these aren't
+			 * qual expressions.  statext_get_stxexprs() already const-folded
+			 * these with a NULL root; we redo it here with the real root so
+			 * the varno-dependent reductions noted above can apply.
+			 */
+			exprs = (List *) eval_const_expressions(root, (Node *) exprs);
 
-				/*
-				 * Modify the copies we obtain from the relcache to have the
-				 * correct varno for the parent relation, so that they match
-				 * up correctly against qual clauses.
-				 *
-				 * This must be done before const-simplification because
-				 * eval_const_expressions reduces NullTest for Vars based on
-				 * varno.
-				 */
-				if (varno != 1)
-					ChangeVarNodes((Node *) exprs, 1, varno, 0);
-
-				/*
-				 * Run the expressions through eval_const_expressions. This is
-				 * not just an optimization, but is necessary, because the
-				 * planner will be comparing them to similarly-processed qual
-				 * clauses, and may fail to detect valid matches without this.
-				 * We must not use canonicalize_qual, however, since these
-				 * aren't qual expressions.
-				 */
-				exprs = (List *) eval_const_expressions(root, (Node *) exprs);
-
-				/* May as well fix opfuncids too */
-				fix_opfuncids((Node *) exprs);
-			}
+			/* May as well fix opfuncids too */
+			fix_opfuncids((Node *) exprs);
 		}
 
 		/* extract statistics for possible values of stxdinherit flag */
 
-		get_relation_statistics_worker(&stainfos, rel, statOid, true, keys, exprs);
+		get_relation_statistics_worker(&stainfos, rel, statOid, true,
+									   exprs, joinrels, joinconds);
 
-		get_relation_statistics_worker(&stainfos, rel, statOid, false, keys, exprs);
+		get_relation_statistics_worker(&stainfos, rel, statOid, false,
+									   exprs, joinrels, joinconds);
 
 		ReleaseSysCache(htup);
-		bms_free(keys);
 	}
 
 	list_free(statoidlist);

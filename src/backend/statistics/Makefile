@@ -17,6 +17,7 @@ OBJS = \
 	dependencies.o \
 	extended_stats.o \
 	extended_stats_funcs.o \
+	join_mcv.o \
 	mcv.o \
 	mvdistinct.o \
 	relation_stats.o \
