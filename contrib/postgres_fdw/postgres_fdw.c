@@ -2309,7 +2309,15 @@ postgresGetForeignModifyBatchSize(ResultRelInfo *resultRelInfo)
 	 * don't exceed this limit by using the maximum batch_size possible.
 	 */
 	if (fmstate && fmstate->p_nums > 0)
+	{
+		int			configured = batch_size;
+
 		batch_size = Min(batch_size, PQ_QUERY_PARAM_MAX_LIMIT / fmstate->p_nums);
+		if (batch_size < configured)
+			elog(DEBUG1, "batch_size reduced from %d to %d "
+				 "to stay within the libpq %d-parameter limit",
+				 configured, batch_size, PQ_QUERY_PARAM_MAX_LIMIT);
+	}
 
 	return batch_size;
 }
