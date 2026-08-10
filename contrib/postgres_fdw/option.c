@@ -179,6 +179,11 @@ postgres_fdw_validator(PG_FUNCTION_ARGS)
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 						 errmsg("\"%s\" must be an integer value greater than zero",
 								def->defname)));
+			if (strcmp(def->defname, "batch_size") == 0 &&
+				int_val > PQ_QUERY_PARAM_MAX_LIMIT)
+				ereport(WARNING,
+						errmsg("batch_size of %d exceeds protocol limit of %d", int_val, PQ_QUERY_PARAM_MAX_LIMIT),
+						errdetail("The batch_size for a query will be reduced to protocol limit divided by the number of columns in the query."));
 		}
 		else if (strcmp(def->defname, "password_required") == 0)
 		{
