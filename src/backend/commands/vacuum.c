@@ -49,6 +49,7 @@
 #include "postmaster/autovacuum.h"
 #include "postmaster/bgworker_internals.h"
 #include "postmaster/interrupt.h"
+#include "replication/slot.h"
 #include "storage/bufmgr.h"
 #include "storage/lmgr.h"
 #include "storage/pmsignal.h"
@@ -1159,7 +1160,11 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	 * that only one vacuum process can be working on a particular table at
 	 * any time, and that each vacuum is always an independent transaction.
 	 */
-	cutoffs->OldestXmin = GetOldestNonRemovableTransactionId(rel);
+	cutoffs->OldestXmin =
+		GetOldestNonRemovableTransactionIdAndSlotXmins(rel,
+													   &cutoffs->SlotXmin,
+													   &cutoffs->SlotCatalogXmin,
+													   &cutoffs->SlotCatalogXminRelevant);
 
 	Assert(TransactionIdIsNormal(cutoffs->OldestXmin));
 
@@ -2758,4 +2763,74 @@ vac_tid_reaped(ItemPointer itemptr, void *state)
 	TidStore   *dead_items = (TidStore *) state;
 
 	return TidStoreIsMember(dead_items, itemptr);
+}
+
+/*
+ * Invalidate replication slots whose XID age exceeds the limit.
+ *
+ * The caller passes the overall oldest xmin, plus the oldest slot xmin and
+ * catalog_xmin. If a replication slot is not what holds the oldest xmin back,
+ * or the horizon has not yet aged past the limit, there is nothing to do.
+ *
+ * slot_catalog_xmin_relevant tells whether a slot's catalog_xmin can hold this
+ * relation's oldest xmin back (true for catalog and shared relations). When
+ * it is false, a slot holding only a catalog_xmin cannot be blocking this
+ * vacuum, so such slots are neither considered here nor invalidated: even if
+ * one is aged, invalidating it would not advance this vacuum's cutoff, and it
+ * still has a chance to advance on its own before a vacuum of a catalog
+ * relation or a checkpoint acts on it.
+ *
+ * Returns true if at least one slot was invalidated.
+ */
+bool
+InvalidateXidAgedReplicationSlots(TransactionId oldest_xmin,
+								  TransactionId slot_xmin,
+								  TransactionId slot_catalog_xmin,
+								  bool slot_catalog_xmin_relevant)
+{
+	TransactionId xid_limit;
+	bool		slot_holds_oldest_xmin;
+
+	if (max_slot_xid_age == 0)
+		return false;
+
+	Assert(TransactionIdIsNormal(oldest_xmin));
+
+	/*
+	 * Check if a replication slot's xmin, or its catalog_xmin when that is
+	 * relevant for this relation, is what's holding the oldest xmin back. If
+	 * not, skip the unnecessary work.
+	 */
+	slot_holds_oldest_xmin =
+		(TransactionIdIsValid(slot_xmin) &&
+		 TransactionIdEquals(oldest_xmin, slot_xmin)) ||
+		(slot_catalog_xmin_relevant &&
+		 TransactionIdIsValid(slot_catalog_xmin) &&
+		 TransactionIdEquals(oldest_xmin, slot_catalog_xmin));
+
+	if (!slot_holds_oldest_xmin)
+		return false;
+
+	xid_limit = TransactionIdRetreatedBy(ReadNextTransactionId(),
+										 max_slot_xid_age);
+
+	/*
+	 * A replication slot holds the oldest xmin back, so invalidate any slot
+	 * that has aged past the limit. When catalog_xmin is not relevant for
+	 * this relation, only a slot's xmin is considered, so a slot holding only
+	 * a catalog_xmin (a logical slot) is left alone.
+	 *
+	 * Vacuum never blocks on this. It invalidates only the slots it can
+	 * acquire immediately and leaves any slot still in use to the
+	 * checkpointer, so that many vacuum processes never pile up waiting on
+	 * one slot.
+	 */
+	if (TransactionIdPrecedes(oldest_xmin, xid_limit))
+		return InvalidateObsoleteReplicationSlots(RS_INVAL_XID_AGE,
+												  0, InvalidOid,
+												  InvalidTransactionId,
+												  xid_limit,
+												  true, slot_catalog_xmin_relevant);
+
+	return false;
 }
