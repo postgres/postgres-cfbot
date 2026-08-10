@@ -195,8 +195,6 @@ typedef struct printQueryOpt
 } printQueryOpt;
 
 
-extern PGDLLIMPORT volatile sig_atomic_t cancel_pressed;
-
 extern PGDLLIMPORT const printTextFormat pg_asciiformat;
 extern PGDLLIMPORT const printTextFormat pg_asciiformat_old;
 extern PGDLLIMPORT printTextFormat pg_utf8format;	/* ideally would be const,
