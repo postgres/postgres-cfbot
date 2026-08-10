@@ -464,8 +464,8 @@ gist_indexsortbuild_levelstate_add(GISTBuildState *state,
 {
 	Size		sizeNeeded;
 
-	/* Check if tuple can be added to the current page */
-	sizeNeeded = IndexTupleSize(itup) + sizeof(ItemIdData); /* fillfactor ignored */
+	/* Check if tuple can be added to the current page. */
+	sizeNeeded = IndexTupleSize(itup) + sizeof(ItemIdData);
 	if (PageGetFreeSpace(levelstate->pages[levelstate->current_page]) < sizeNeeded)
 	{
 		Page		newPage;
@@ -520,8 +520,15 @@ gist_indexsortbuild_levelstate_flush(GISTBuildState *state,
 			pfree(itvec_local);
 		}
 
-		/* Apply picksplit to list of all collected tuples */
-		dist = gistSplit(state->indexrel, levelstate->pages[0], itvec, vect_len, state->giststate);
+		/* Apply picksplit to list of all collected tuples. */
+		dist = gistSplit(state->indexrel, levelstate->pages[0], itvec,
+						 vect_len, state->giststate, state->freespace);
+	}
+	else if (!gistfitpage(itvec, vect_len, state->freespace))
+	{
+		/* Split a single buffered page if it exceeds fillfactor. */
+		dist = gistSplit(state->indexrel, levelstate->pages[0], itvec,
+						 vect_len, state->giststate, state->freespace);
 	}
 	else
 	{
