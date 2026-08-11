@@ -950,8 +950,9 @@
    of times <function>XLogWrite</function> writes and
    <function>issue_xlog_fsync</function> syncs WAL data to disk are also
    counted as <varname>writes</varname> and <varname>fsyncs</varname>
-   in <structname>pg_stat_io</structname> for the <varname>object</varname>
-   <literal>wal</literal>, respectively.
+   in <structname>pg_stat_io</structname> and
+   <structname>pg_stat_io_histogram</structname> for the
+   <varname>object</varname> <literal>wal</literal>, respectively.
   </para>
 
   <para>

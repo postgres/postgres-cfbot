@@ -18,6 +18,7 @@
 #include "access/xlog.h"
 #include "access/xlogprefetcher.h"
 #include "catalog/catalog.h"
+#include "catalog/namespace.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_type.h"
 #include "common/ip.h"
@@ -30,6 +31,7 @@
 #include "storage/procarray.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
+#include "utils/rangetypes.h"
 #include "utils/timestamp.h"
 #include "utils/tuplestore.h"
 #include "utils/wait_event.h"
@@ -1635,6 +1637,164 @@ pg_stat_get_backend_io(PG_FUNCTION_ARGS)
 	/* save tuples with data from this PgStat_BktypeIO */
 	pg_stat_io_build_tuples(rsinfo, bktype_stats, bktype,
 							backend_stats->stat_reset_timestamp);
+	return (Datum) 0;
+}
+
+/*
+* When adding a new column to the pg_stat_io_histogram view and the
+* pg_stat_get_io_histogram() function, add a new enum value here above
+* HIST_IO_NUM_COLUMNS.
+*/
+typedef enum hist_io_stat_col
+{
+	HIST_IO_COL_INVALID = -1,
+	HIST_IO_COL_BACKEND_TYPE,
+	HIST_IO_COL_OBJECT,
+	HIST_IO_COL_CONTEXT,
+	HIST_IO_COL_IOTYPE,
+	HIST_IO_COL_BUCKET_US,
+	HIST_IO_COL_COUNT,
+	HIST_IO_COL_RESET_TIME,
+	HIST_IO_NUM_COLUMNS
+} histogram_io_stat_col;
+
+/*
+ * pg_stat_io_histogram_build_tuples
+ *
+ * Helper routine for pg_stat_get_io_histogram() and pg_stat_get_backend_io()
+ * filling a result tuplestore with one tuple for each object and each
+ * context supported by the caller, based on the contents of bktype_stats.
+ */
+static void
+pg_stat_io_histogram_build_tuples(ReturnSetInfo *rsinfo,
+								  PgStat_IO *backends_io_stats,
+								  PgStat_BktypeIO *bktype_stats,
+								  BackendType bktype,
+								  TimestampTz stat_reset_timestamp)
+{
+	/* Get OID for int4range type */
+	Datum		bktype_desc = CStringGetTextDatum(GetBackendTypeDesc(bktype));
+	Oid			range_typid = TypenameGetTypid("int4range");
+	TypeCacheEntry *typcache = lookup_type_cache(range_typid, TYPECACHE_RANGE_INFO);
+
+	for (int io_obj = 0; io_obj < IOOBJECT_NUM_TYPES; io_obj++)
+	{
+		const char *obj_name = pgstat_get_io_object_name(io_obj);
+
+		for (int io_context = 0; io_context < IOCONTEXT_NUM_TYPES; io_context++)
+		{
+			const char *context_name = pgstat_get_io_context_name(io_context);
+
+			/*
+			 * Some combinations of BackendType, IOObject, and IOContext are
+			 * not valid for any type of IOOp. In such cases, omit the entire
+			 * row from the view.
+			 */
+			if (!pgstat_tracks_io_object(bktype, io_obj, io_context))
+				continue;
+
+			for (int io_op = 0; io_op < IOOP_NUM_TYPES; io_op++)
+			{
+				const char *op_name = pgstat_get_io_op_name(io_op);
+				int			bktype_hist_time_bucket_off;
+
+				/*
+				 * The offset is the same for every histogram bucket of this
+				 * io_obj/io_context/io_op combination.
+				 */
+				bktype_hist_time_bucket_off = bktype_stats->hist_time_buckets_offsets[io_obj][io_context][io_op];
+				if (bktype_hist_time_bucket_off == -1)
+					continue;
+				Assert(bktype_hist_time_bucket_off < backends_io_stats->hist_time_buckets_slot_count);
+
+				for (int bucket = 0; bucket < PGSTAT_IO_HIST_BUCKETS; bucket++)
+				{
+					Datum		values[HIST_IO_NUM_COLUMNS] = {0};
+					bool		nulls[HIST_IO_NUM_COLUMNS] = {0};
+					RangeBound	lower,
+								upper;
+					RangeType  *range;
+					uint64		bktype_bucket;
+
+					values[HIST_IO_COL_BACKEND_TYPE] = bktype_desc;
+					values[HIST_IO_COL_OBJECT] = CStringGetTextDatum(obj_name);
+					values[HIST_IO_COL_CONTEXT] = CStringGetTextDatum(context_name);
+					values[HIST_IO_COL_IOTYPE] = CStringGetTextDatum(op_name);
+
+					/* bucket's maximum latency as range in microseconds */
+					if (bucket == 0)
+						lower.val = Int32GetDatum(0);
+					else
+						lower.val = Int32GetDatum(1 << (2 + bucket));
+					lower.infinite = false;
+					lower.inclusive = true;
+					lower.lower = true;
+
+					if (bucket == PGSTAT_IO_HIST_BUCKETS - 1)
+						upper.infinite = true;
+					else
+					{
+						upper.val = Int32GetDatum(1 << (2 + bucket + 1));
+						upper.infinite = false;
+					}
+					upper.inclusive = false;
+					upper.lower = false;
+
+					range = make_range(typcache, &lower, &upper, false, NULL);
+					values[HIST_IO_COL_BUCKET_US] = RangeTypePGetDatum(range);
+
+					/* get bucket count, access indirectly */
+					bktype_bucket = backends_io_stats->hist_time_buckets_slots[bktype_hist_time_bucket_off][bucket];
+					values[HIST_IO_COL_COUNT] = Int64GetDatum(bktype_bucket);
+
+					if (stat_reset_timestamp != 0)
+						values[HIST_IO_COL_RESET_TIME] = TimestampTzGetDatum(stat_reset_timestamp);
+					else
+						nulls[HIST_IO_COL_RESET_TIME] = true;
+
+					tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
+										 values, nulls);
+				}
+			}
+		}
+	}
+}
+
+Datum
+pg_stat_get_io_histogram(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo;
+	PgStat_IO  *backends_io_stats;
+
+	InitMaterializedSRF(fcinfo, 0);
+	rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+
+	backends_io_stats = pgstat_fetch_stat_io();
+
+	for (int bktype = 0; bktype < BACKEND_NUM_TYPES; bktype++)
+	{
+		PgStat_BktypeIO *bktype_stats = &backends_io_stats->stats[bktype];
+
+		/*
+		 * In Assert builds, we can afford an extra loop through all of the
+		 * counters (in pg_stat_io_build_tuples()), checking that only
+		 * expected stats are non-zero, since it keeps the non-Assert code
+		 * cleaner.
+		 */
+		Assert(pgstat_bktype_io_stats_valid(bktype_stats, bktype));
+
+		/*
+		 * For those BackendTypes without IO Operation stats, skip
+		 * representing them in the view altogether.
+		 */
+		if (!pgstat_tracks_io_bktype(bktype))
+			continue;
+
+		/* save tuples with data from this PgStat_BktypeIO */
+		pg_stat_io_histogram_build_tuples(rsinfo, backends_io_stats, bktype_stats, bktype,
+										  backends_io_stats->stat_reset_timestamp);
+	}
+
 	return (Datum) 0;
 }
 
