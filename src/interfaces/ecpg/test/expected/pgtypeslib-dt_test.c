@@ -150,6 +150,22 @@ if (sqlca.sqlcode < 0) sqlprint ( );}
 	PGTYPESchar_free(text);
 	free(out);
 
+	/* year 10000 does not fit the four-digit "yyyy" token */
+	{
+		date		big_year_date;
+		char	   *big_out;
+		int			fmt_rc;
+
+		errno = 0;
+		big_year_date = PGTYPESdate_from_asc("10000-01-01", NULL);
+		fmt = "yyyy";
+		big_out = (char *) malloc(strlen(fmt) + 1);
+		fmt_rc = PGTYPESdate_fmt_asc(big_year_date, fmt, big_out);
+		printf("date_fmt_asc yyyy year>=10000: rc=%d errno=%d\n",
+			   fmt_rc, errno);
+		free(big_out);
+	}
+
 	out = (char*) malloc(48);
 	i = PGTYPEStimestamp_fmt_asc(&ts1, out, 47, "Which is day number %j in %Y.");
 	printf("%s\n", out);
@@ -465,16 +481,16 @@ if (sqlca.sqlcode < 0) sqlprint ( );}
 	free(out);
 
 	{ ECPGtrans(__LINE__, NULL, "rollback");
-#line 393 "dt_test.pgc"
+#line 409 "dt_test.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint ( );}
-#line 393 "dt_test.pgc"
+#line 409 "dt_test.pgc"
 
         { ECPGdisconnect(__LINE__, "CURRENT");
-#line 394 "dt_test.pgc"
+#line 410 "dt_test.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint ( );}
-#line 394 "dt_test.pgc"
+#line 410 "dt_test.pgc"
 
 
 	return 0;
