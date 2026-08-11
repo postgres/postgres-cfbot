@@ -2679,6 +2679,8 @@ ReplOriginXactState
 ReplaceVarsFromTargetList_context
 ReplaceVarsNoMatchOption
 ReplaceWrapOption
+ReplicaIdentityEntry
+ReplicaIdentityKey
 ReplicaIdentityStmt
 ReplicationKind
 ReplicationSlot
@@ -2690,6 +2692,7 @@ ReplicationSlotPersistentData
 ReplicationState
 ReplicationStateCtl
 ReplicationStateOnDisk
+replica_identity_hash
 ResTarget
 ReservoirState
 ReservoirStateData

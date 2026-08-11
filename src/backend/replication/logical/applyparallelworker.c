@@ -2103,3 +2103,23 @@ pa_wait_for_depended_transaction(TransactionId xid)
 
 	elog(DEBUG1, "finish waiting for depended xid %u", xid);
 }
+
+/*
+ * Returns true if the given transaction is committed, false if it is still
+ * being applied in parallel. This can only be used by the leader apply worker.
+ */
+bool
+pa_transaction_committed(TransactionId xid)
+{
+	ParallelApplyWorkerEntry *entry;
+
+	Assert(am_leader_apply_worker());
+	Assert(TransactionIdIsValid(xid));
+	Assert(ParallelApplyTxnHash);
+
+	/* Find an entry for the requested transaction */
+	entry = hash_search(ParallelApplyTxnHash, &xid, HASH_FIND, NULL);
+
+	return !entry ||
+		   pa_get_xact_state(entry->winfo->shared) == PARALLEL_TRANS_FINISHED;
+}

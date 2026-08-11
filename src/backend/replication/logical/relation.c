@@ -224,7 +224,12 @@ logicalrep_relmap_update(LogicalRepRelation *remoterel)
 	if (found)
 		logicalrep_relmap_free_entry(entry);
 
-	memset(entry, 0, sizeof(LogicalRepRelMapEntry));
+	/*
+	 * Clear all fields except last_depended_xid, which tracks historical
+	 * dependency info that remains valid across schema changes.
+	 */
+	memset(entry, 0, found ? offsetof(LogicalRepRelMapEntry, last_depended_xid)
+		   : sizeof(LogicalRepRelMapEntry));
 
 	/* Make cached copy of the data */
 	oldctx = MemoryContextSwitchTo(LogicalRepRelMapContext);
@@ -996,4 +1001,28 @@ FindLogicalRepLocalIndex(Relation localrel, LogicalRepRelation *remoterel,
 	}
 
 	return InvalidOid;
+}
+
+/*
+ * Get the LogicalRepRelMapEntry corresponding to the given relid without
+ * opening the local relation.
+ */
+LogicalRepRelMapEntry *
+logicalrep_get_relentry(LogicalRepRelId remoteid)
+{
+	LogicalRepRelMapEntry *entry;
+	bool		found;
+
+	if (LogicalRepRelMap == NULL)
+		logicalrep_relmap_init();
+
+	/* Search for existing entry. */
+	entry = hash_search(LogicalRepRelMap, (void *) &remoteid,
+						HASH_FIND, &found);
+
+	if (!found)
+		elog(DEBUG1, "no relation map entry for remote relation ID %u",
+			 remoteid);
+
+	return entry;
 }
