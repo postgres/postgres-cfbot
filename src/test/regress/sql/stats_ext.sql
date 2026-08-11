@@ -1839,11 +1839,13 @@ CREATE TABLE stats_ext_tbl (a int, b int);
 ALTER TABLE stats_ext_tbl OWNER TO regress_relowner;
 CREATE STATISTICS tst ON a, b FROM stats_ext_tbl;
 ALTER STATISTICS tst OWNER TO regress_stxowner;
-SELECT stxowner::regrole FROM pg_statistic_ext WHERE stxname = 'tst';
+ALTER STATISTICS tst SET STATISTICS 1000;
+SELECT stxowner::regrole, stxstattarget FROM pg_statistic_ext WHERE stxname = 'tst';
 
--- re-creating statistics via ALTER TABLE preserve the statistics owner.
+-- re-creating statistics via ALTER TABLE preserve the statistics owner
+-- and target.
 ALTER TABLE stats_ext_tbl ALTER COLUMN a TYPE bigint;
-SELECT stxowner::regrole FROM pg_statistic_ext WHERE stxname = 'tst';
+SELECT stxowner::regrole, stxstattarget FROM pg_statistic_ext WHERE stxname = 'tst';
 
 -- Tidy up
 DROP TABLE stats_ext_tbl;
