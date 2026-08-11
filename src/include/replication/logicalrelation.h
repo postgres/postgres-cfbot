@@ -16,6 +16,16 @@
 #include "catalog/index.h"
 #include "replication/logicalproto.h"
 
+typedef enum LogicalRepParallelAction
+{
+	LRPA_INSERT,
+	LRPA_UPDATE,
+	LRPA_DELETE,
+	LRPA_TRUNCATE
+} LogicalRepParallelAction;
+
+#define LRPA_ACTION_COUNT (LRPA_TRUNCATE + 1)
+
 typedef struct LogicalRepRelMapEntry
 {
 	LogicalRepRelation remoterel;	/* key is remoterel.remoteid */
@@ -45,6 +55,23 @@ typedef struct LogicalRepRelMapEntry
 	 * applying (see check_dependency_on_rel).
 	 */
 	TransactionId last_depended_xid;
+
+	/*
+	 * Per-operation safety cache for parallel apply. If
+	 * parallel_global_unsafe[action] is true, that action cannot be applied in
+	 * parallel for this relation.
+	 *
+	 * This cache must be computed by the worker that actually applies changes
+	 * (via logicalrep_rel_check_parallel_safety), rather than solely by the
+	 * leader.
+	 *
+	 * Relying on the leader alone is unsafe because the table could be altered
+	 * before changes are dispatched to a parallel worker. Without re-validation
+	 * by the parallel worker, it might incorrectly assume that parallel apply
+	 * is safe for this relation.
+	 */
+	bool		parallel_safety_valid;
+	bool		parallel_global_unsafe[LRPA_ACTION_COUNT];
 } LogicalRepRelMapEntry;
 
 extern void logicalrep_relmap_update(LogicalRepRelation *remoterel);
@@ -56,6 +83,7 @@ extern LogicalRepRelMapEntry *logicalrep_partition_open(LogicalRepRelMapEntry *r
 														Relation partrel, AttrMap *map);
 extern void logicalrep_rel_close(LogicalRepRelMapEntry *rel,
 								 LOCKMODE lockmode);
+extern void logicalrep_rel_check_parallel_safety(LogicalRepRelMapEntry *entry);
 extern bool IsIndexUsableForReplicaIdentityFull(Relation idxrel, AttrMap *attrmap);
 extern Oid	GetRelationIdentityOrPK(Relation rel);
 extern void logicalrep_write_all_internal_rels(StringInfo out, int *num_rels);
