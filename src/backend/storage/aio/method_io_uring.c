@@ -802,6 +802,12 @@ pgaio_uring_sq_from_io(PgAioHandle *ioh, struct io_uring_sqe *sqe)
 
 			break;
 
+		case PGAIO_OP_FSYNC:
+			io_uring_prep_fsync(sqe,
+								ioh->op_data.fsync.fd,
+								ioh->op_data.fsync.datasync ? IORING_FSYNC_DATASYNC : 0);
+			break;
+
 		case PGAIO_OP_INVALID:
 			elog(ERROR, "trying to prepare invalid IO operation for execution");
 	}
