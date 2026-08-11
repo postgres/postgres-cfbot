@@ -585,6 +585,9 @@ typedef struct ReplicaIdentityKey
 {
 	Oid			relid;
 	LogicalRepTupleData *data;
+
+	/* estimated memory usage of this key, set by the key builders */
+	Size		keysize;
 } ReplicaIdentityKey;
 
 /* Hash table entry in replica_identity_table */
@@ -592,6 +595,9 @@ typedef struct ReplicaIdentityEntry
 {
 	ReplicaIdentityKey *keydata;
 	TransactionId remote_xid;
+
+	/* estimated memory usage of this entry (including the key) */
+	Size		entry_size;
 
 	/* needed for simplehash */
 	uint32		hash;
@@ -621,6 +627,13 @@ static bool hash_replica_identity_compare(ReplicaIdentityKey *a,
 #define REPLICA_IDENTITY_INITIAL_SIZE 128
 
 /*
+ * Maximum estimated memory that the leader apply worker may use for dependency
+ * tracking (replica_identity_table) before falling back to serial apply.
+ * Parallel apply resumes once the usage drops below half of this limit.
+ */
+#define PARALLEL_DEPENDENCY_MEMORY_LIMIT	(16 * 1024 * 1024)
+
+/*
  * Hash table storing replica identity values for changes being applied in
  * parallel, along with the latest transaction that modified each row.
  *
@@ -635,6 +648,13 @@ static bool hash_replica_identity_compare(ReplicaIdentityKey *a,
  * this hash table is accessed for every change in a transaction.
  */
 static replica_identity_hash *replica_identity_table = NULL;
+
+/*
+ * Estimated memory currently held by replica_identity_table entries. Kept
+ * exact by accounting the estimated entry size at insert/delete time (see
+ * check_and_record_ri_dependency and delete_replica_identity_entry).
+ */
+static Size dependency_mem_usage = 0;
 
 static inline void subxact_filename(char *path, Oid subid, TransactionId xid);
 static inline void changes_filename(char *path, Oid subid, TransactionId xid);
@@ -787,6 +807,56 @@ hash_replica_identity_compare(ReplicaIdentityKey *a, ReplicaIdentityKey *b)
 }
 
 /*
+ * Suspend parallel apply if dependency memory usage exceeds the limit.
+ *
+ * Return true if parallel apply is already suspended, or if it has just been
+ * suspended due to exceeding the memory limit, false otherwise.
+ */
+static bool
+maybe_suspend_parallel_apply(ParallelApplyWorkerInfo *winfo)
+{
+	if (parallel_apply_suspended)
+		return true;
+
+	if (dependency_mem_usage < PARALLEL_DEPENDENCY_MEMORY_LIMIT)
+		return false;
+
+	parallel_apply_suspended = true;
+
+	/*
+	 * Wait for preceding transactions to finish before processing remaining
+	 * changes, as dependencies will not be tracked for them.
+	 */
+	maintain_commit_order_dependency(winfo);
+
+	ereport(LOG,
+			errmsg("parallel apply suspended: dependency memory limit of %d bytes exceeded",
+				   PARALLEL_DEPENDENCY_MEMORY_LIMIT));
+
+	return true;
+}
+
+/*
+ * Resume parallel apply if the estimated dependency tracking memory has
+ * dropped to half of the limit or below.
+ */
+static void
+maybe_resume_parallel_apply(void)
+{
+	if (!parallel_apply_suspended)
+		return;
+
+	if (dependency_mem_usage > PARALLEL_DEPENDENCY_MEMORY_LIMIT / 2)
+		return;
+
+	parallel_apply_suspended = false;
+
+	ereport(LOG,
+			errmsg("parallel apply resumed: dependency memory usage drained to %zu bytes",
+				   dependency_mem_usage));
+}
+
+/*
  * Free resources associated with a replica identity key.
  */
 static void
@@ -808,6 +878,7 @@ delete_replica_identity_entry(ReplicaIdentityEntry *rientry)
 {
 	free_replica_identity_key(rientry->keydata);
 	replica_identity_delete_item(replica_identity_table, rientry);
+	dependency_mem_usage -= rientry->entry_size;
 }
 
 /*
@@ -831,6 +902,8 @@ delete_replica_identity_entries_for_txns(List *committed_xids)
 		/* Clean up the hash entry for committed transaction */
 		delete_replica_identity_entry(rientry);
 	}
+
+	maybe_resume_parallel_apply();
 }
 
 /*
@@ -909,6 +982,7 @@ check_and_record_ri_dependency(Oid relid, LogicalRepTupleData *original_data,
 	MemoryContext oldctx;
 	int			n_ri;
 	bool		found = false;
+	Size		keysize;
 
 	Assert(depends_on_xids);
 
@@ -949,6 +1023,10 @@ check_and_record_ri_dependency(Oid relid, LogicalRepTupleData *original_data,
 	ridata->colstatus = palloc0_array(char, n_ri);
 	ridata->ncols = n_ri;
 
+	/* Estimated memory usage so far: key, tuple data and column arrays */
+	keysize = sizeof(ReplicaIdentityKey) + sizeof(LogicalRepTupleData) +
+		n_ri * (sizeof(StringInfoData) + sizeof(char));
+
 	for (int i_original = 0, i_ri = 0; i_original < original_data->ncols; i_original++)
 	{
 		if (!bms_is_member(i_original, relentry->remoterel.attkeys))
@@ -981,6 +1059,8 @@ check_and_record_ri_dependency(Oid relid, LogicalRepTupleData *original_data,
 			appendBinaryStringInfo(&ridata->colvalues[i_ri],
 								   original_colvalue->data,
 								   original_colvalue->len);
+
+			keysize += original_colvalue->len + 1;
 		}
 
 		ridata->colstatus[i_ri] = original_data->colstatus[i_original];
@@ -990,6 +1070,7 @@ check_and_record_ri_dependency(Oid relid, LogicalRepTupleData *original_data,
 	rikey = palloc0_object(ReplicaIdentityKey);
 	rikey->relid = relid;
 	rikey->data = ridata;
+	rikey->keysize = keysize;
 
 	MemoryContextSwitchTo(oldctx);
 
@@ -1039,6 +1120,12 @@ check_and_record_ri_dependency(Oid relid, LogicalRepTupleData *original_data,
 
 			append_xid_dependency(rientry->remote_xid, depends_on_xids);
 		}
+	}
+	else
+	{
+		/* Account the estimated memory usage of the new entry */
+		rientry->entry_size = rikey->keysize + sizeof(ReplicaIdentityEntry);
+		dependency_mem_usage += rientry->entry_size;
 	}
 
 	/* Update the new depended xid into the entry */
@@ -1183,6 +1270,13 @@ handle_dependency_on_change(LogicalRepMsgType action, StringInfo s,
 														 REPLICA_IDENTITY_INITIAL_SIZE,
 														 NULL);
 	}
+
+	/*
+	 * If the estimated memory usage of dependency tracking exceeds the limit,
+	 * suspend parallel apply until the usage drops below half of the limit.
+	 */
+	if (maybe_suspend_parallel_apply(winfo))
+		return;
 
 	switch (action)
 	{
@@ -1982,6 +2076,13 @@ apply_handle_begin(StringInfo s)
 	switch (apply_action)
 	{
 		case TRANS_LEADER_APPLY:
+			/*
+			 * Parallel apply has been suspended, meaning we may have skipped
+			 * dependency tracking for the last parallelized transaction. Wait
+			 * for it to finish to avoid any dependency violation.
+			 */
+			if (parallel_apply_suspended)
+				maintain_commit_order_dependency(NULL);
 			break;
 
 		case TRANS_LEADER_SEND_TO_PARALLEL:
