@@ -230,6 +230,14 @@ $node_subscriber->wait_for_log(
 	qr/DEBUG: ( [A-Z0-9]+:)? applied [0-9]+ changes in the streaming chunk/,
 	$offset);
 
+# Non-streaming transactions are now also assigned to parallel apply
+# workers, so the first single-row transaction is handled by a parallel
+# apply worker (where it blocks on the unique index against the
+# uncommitted streamed changes) rather than by the leader.  Issue another
+# one so that it is applied by the leader itself (the worker pool is busy)
+# and blocks on the same conflict, recreating the leader-vs-parallel-worker
+# deadlock this test intends to exercise.
+$node_publisher->safe_psql('postgres', "INSERT INTO test_tab_2 values(1)");
 $node_publisher->safe_psql('postgres', "INSERT INTO test_tab_2 values(1)");
 
 $h->query_safe('COMMIT');
@@ -247,7 +255,7 @@ $node_publisher->wait_for_catchup($appname);
 
 $result =
   $node_subscriber->safe_psql('postgres', "SELECT count(*) FROM test_tab_2");
-is($result, qq(5001), 'data replicated to subscriber after dropping index');
+is($result, qq(5002), 'data replicated to subscriber after dropping index');
 
 # Clean up test data from the environment.
 $node_publisher->safe_psql('postgres', "TRUNCATE TABLE test_tab_2");

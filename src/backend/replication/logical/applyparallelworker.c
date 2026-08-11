@@ -14,6 +14,9 @@
  * ParallelApplyWorkerInfo which is required so the leader worker and parallel
  * apply workers can communicate with each other.
  *
+ * Streaming transactions
+ * ======================
+ *
  * The parallel apply workers are assigned (if available) as soon as xact's
  * first stream is received for subscriptions that have set their 'streaming'
  * option as parallel. The leader apply worker will send changes to this new
@@ -152,6 +155,80 @@
  * session-level locks because both locks could be acquired outside the
  * transaction, and the stream lock in the leader needs to persist across
  * transaction boundaries i.e. until the end of the streaming transaction.
+ *
+ * Non-streaming transactions
+ * ======================
+ * The handling is similar to streaming transactions, but including few
+ * differences:
+ *
+ * Transaction dependency
+ * ----------------------
+ * Before dispatching changes to a parallel worker, the leader verifies if the
+ * current modification affects the same row (identitied by replica identity
+ * key) as another ongoing transaction (see handle_dependency_on_change for
+ * details). If so, the leader sends a list of dependent transaction IDs to the
+ * parallel worker, indicating that the parallel apply worker must wait for
+ * these transactions to commit before proceeding.
+ *
+ * Tracking dependencies is necessary even when commit order is preserved.
+ * Consider two transactions: TX-1 (INSERT row 1) and TX-2 (DELETE row 1). If
+ * both are allowed to apply in parallel, TX-2's DELETE could be applied before
+ * TX-1's INSERT, resulting in a delete_missing conflict. Simiarly, if TX-1
+ * (DELETE row 1) and TX-2 (INSERT row 1) are applied in parallel, TX-2's INSERT
+ * could be applied before TX-1's DELETE, resulting in a insert_conflict.
+ *
+ * Commit order
+ * ------------
+ * We preserve publisher commit order for all transactions for two reasons:
+ *
+ * 1) User-visible consistency
+ *
+ * Out-of-order commits can expose states on the subscriber that were never
+ * visible on the publisher.
+ *
+ * For example, suppose a user updates table A and then updates table B on the
+ * publisher. If the subscriber commits those transactions out of order, a
+ * query that sees the latest row in B might still see stale data in A.
+ * Although eventual consistency would still be reached, that behavior may be
+ * unacceptable for some users. In the future, we could provide a subscription
+ * option to allow out-of-order commits for users who prefer higher parallelism.
+ *
+ * 2) Replication progress tracking
+ *
+ * We currently track replication progress using the last transaction's commit
+ * LSNs. With out-of-order commits, this becomes ambiguous after failures.
+ *
+ * For example, if TX-2 is applied before TX-1 and replication stops due to an
+ * error, we cannot reliably determine whether TX-1 was applied before restart.
+ * As a result, transactions that were already committed on the subscriber may
+ * be replayed.
+ *
+ * Worker interaction
+ * ------------
+ * After sending the COMMIT message for a transaction, the leader apply worker
+ * does not wait for the parallel apply worker to finish applying that
+ * transaction. Instead, it sends a PA_MSG_XACT_DEPENDENCY message to
+ * the parallel apply worker, instructing it to wait for the last transaction to
+ * commit. This allows the leader to remain busy receiving and dispatching
+ * changes to more parallel apply workers, enabling greater parallelism in
+ * transaction application.
+ *
+ * To maximize parallelism, we do not stop workers in the pool. This is
+ * important because non-streaming transactions can occur frequently.
+ *
+ * Locking considerations
+ * ----------------------
+ * When handling a PA_MSG_XACT_DEPENDENCY message, the worker attempts
+ * to acquire the transaction lock of the depended transaction and releases it
+ * immediately after acquisition (see pa_wait_for_depended_transaction). This
+ * allows deadlock detection when one worker (either leader or parallel apply
+ * worker) is waiting for a dependency on a transaction being applied by another
+ * worker, while that other worker is also blocked by a lock held by the first
+ * worker.
+ *
+ * The lock graph for the above example will look as follows: Worker_1 (waiting
+ * for depended transaction to finish) -> Worker_2 (waiting to acquire a
+ * relation lock) -> Worker_1
  *-------------------------------------------------------------------------
  */
 
@@ -469,6 +546,7 @@ pa_setup_dsm(ParallelApplyWorkerInfo *winfo)
 	shared = shm_toc_allocate(toc, sizeof(ParallelApplyWorkerShared));
 	SpinLockInit(&shared->mutex);
 
+	shared->xid = InvalidTransactionId;
 	shared->xact_state = PARALLEL_TRANS_UNKNOWN;
 	pg_atomic_init_u32(&(shared->pending_stream_count), 0);
 	shared->last_commit_end = InvalidXLogRecPtr;
@@ -526,6 +604,15 @@ pa_launch_parallel_worker(void)
 	}
 
 	/*
+	 * Quick check to avoid allocating shared memory (pa_setup_dsm) and the
+	 * LWLock overhead and worker array scanning in logicalrep_worker_launch
+	 * when the worker pool is already full.
+	 */
+	if (list_length(ParallelApplyWorkerPool) ==
+		max_parallel_apply_workers_per_subscription)
+		return NULL;
+
+	/*
 	 * Start a new parallel apply worker.
 	 *
 	 * The worker info can be used for the lifetime of the worker process, so
@@ -552,15 +639,14 @@ pa_launch_parallel_worker(void)
 										dsm_segment_handle(winfo->dsm_seg),
 										false);
 
-	if (launched)
+	if (!launched)
 	{
-		ParallelApplyWorkerPool = lappend(ParallelApplyWorkerPool, winfo);
-	}
-	else
-	{
+		MemoryContextSwitchTo(oldcontext);
 		pa_free_worker_info(winfo);
-		winfo = NULL;
+		return NULL;
 	}
+
+	ParallelApplyWorkerPool = lappend(ParallelApplyWorkerPool, winfo);
 
 	MemoryContextSwitchTo(oldcontext);
 
@@ -1377,7 +1463,6 @@ pa_send_data(ParallelApplyWorkerInfo *winfo, Size nbytes, const void *data)
 	shm_mq_result result;
 	TimestampTz startTime = 0;
 
-	Assert(!IsTransactionState());
 	Assert(!winfo->serialize_changes);
 
 	/*
@@ -2122,4 +2207,42 @@ pa_transaction_committed(TransactionId xid)
 
 	return !entry ||
 		   pa_get_xact_state(entry->winfo->shared) == PARALLEL_TRANS_FINISHED;
+}
+
+/*
+ * Mark the transaction state as finished and remove the shared hash entry.
+ */
+void
+pa_commit_transaction(void)
+{
+	TransactionId xid = MyParallelShared->xid;
+
+	SpinLockAcquire(&MyParallelShared->mutex);
+	MyParallelShared->xact_state = PARALLEL_TRANS_FINISHED;
+	SpinLockRelease(&MyParallelShared->mutex);
+
+	dshash_delete_key(parallelized_txns, &xid);
+	elog(DEBUG1, "xid %u committed", xid);
+}
+
+/*
+ * Register a transaction to the shared hash table.
+ *
+ * This function is called by the leader during the commit phase of non-streamed
+ * transactions. The parallel apply worker that applies the transaction will
+ * remove it from the hash table upon completion.
+ */
+void
+pa_add_parallelized_transaction(TransactionId xid)
+{
+	bool		found;
+	ParallelizedTxnEntry *txn_entry;
+
+	Assert(parallelized_txns);
+	Assert(TransactionIdIsValid(xid));
+	Assert(am_leader_apply_worker());
+
+	txn_entry = dshash_find_or_insert(parallelized_txns, &xid, &found);
+
+	dshash_release_lock(parallelized_txns, txn_entry);
 }
