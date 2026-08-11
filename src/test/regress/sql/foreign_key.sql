@@ -1449,14 +1449,14 @@ ALTER TABLE fk_partitioned_fk ATTACH PARTITION fk_partitioned_fk_1 FOR VALUES FR
 
 -- Child constraint will remain valid.
 SELECT conname, convalidated, conrelid::regclass FROM pg_constraint
-WHERE conrelid::regclass::text like 'fk_partitioned_fk%' ORDER BY oid::regclass::text;
+WHERE conrelid::regclass::text like 'fk_partitioned_fk%' ORDER BY conrelid::regclass::text, conname;
 
 -- Validate the constraint
 ALTER TABLE fk_partitioned_fk VALIDATE CONSTRAINT fk_partitioned_fk_a_b_fkey;
 
 -- All constraints are now valid.
 SELECT conname, convalidated, conrelid::regclass FROM pg_constraint
-WHERE conrelid::regclass::text like 'fk_partitioned_fk%' ORDER BY oid::regclass::text;
+WHERE conrelid::regclass::text like 'fk_partitioned_fk%' ORDER BY conrelid::regclass::text, conname;
 
 -- Attaching a child with a NOT VALID constraint.
 CREATE TABLE fk_partitioned_fk_2 (a int, b int);
@@ -1472,7 +1472,7 @@ ALTER TABLE fk_partitioned_fk ATTACH PARTITION fk_partitioned_fk_2 FOR VALUES FR
 
 -- The child constraint will also be valid.
 SELECT conname, convalidated FROM pg_constraint
-WHERE conrelid = 'fk_partitioned_fk_2'::regclass ORDER BY oid::regclass::text;
+WHERE conrelid = 'fk_partitioned_fk_2'::regclass ORDER BY conrelid::regclass::text, conname;
 
 -- Test case where the child constraint is invalid, the grandchild constraint
 -- is valid, and the validation for the grandchild should be skipped when a
@@ -1486,7 +1486,7 @@ ALTER TABLE fk_partitioned_fk ATTACH PARTITION fk_partitioned_fk_3 FOR VALUES FR
 
 -- All constraints are now valid.
 SELECT conname, convalidated, conrelid::regclass FROM pg_constraint
-WHERE conrelid::regclass::text like 'fk_partitioned_fk%' ORDER BY oid::regclass::text;
+WHERE conrelid::regclass::text like 'fk_partitioned_fk%' ORDER BY conrelid::regclass::text, conname;
 
 DROP TABLE fk_partitioned_fk, fk_notpartitioned_pk;
 
@@ -1505,14 +1505,14 @@ ALTER TABLE fk_notpartitioned_fk ADD CONSTRAINT fk_notpartitioned_fk_a_b_fkey2
 
 -- All constraints will be invalid, and _fkey2 constraints will not be enforced.
 SELECT conname, conenforced, convalidated FROM pg_constraint
-WHERE conrelid = 'fk_notpartitioned_fk'::regclass ORDER BY oid::regclass::text;
+WHERE conrelid = 'fk_notpartitioned_fk'::regclass ORDER BY conrelid::regclass::text, conname;
 
 ALTER TABLE fk_notpartitioned_fk VALIDATE CONSTRAINT fk_notpartitioned_fk_a_b_fkey;
 ALTER TABLE fk_notpartitioned_fk ALTER CONSTRAINT fk_notpartitioned_fk_a_b_fkey2 ENFORCED;
 
 -- All constraints are now valid and enforced.
 SELECT conname, conenforced, convalidated FROM pg_constraint
-WHERE conrelid = 'fk_notpartitioned_fk'::regclass ORDER BY oid::regclass::text;
+WHERE conrelid = 'fk_notpartitioned_fk'::regclass ORDER BY conrelid::regclass::text, conname;
 
 -- test a self-referential FK
 ALTER TABLE fk_partitioned_pk ADD CONSTRAINT selffk FOREIGN KEY (a, b) REFERENCES fk_partitioned_pk NOT VALID;
@@ -1521,12 +1521,12 @@ CREATE TABLE fk_partitioned_pk_3 PARTITION OF fk_partitioned_pk FOR VALUES FROM 
 CREATE TABLE fk_partitioned_pk_3_1 PARTITION OF fk_partitioned_pk_3 FOR VALUES FROM (2000) TO (2100);
 SELECT conname, conenforced, convalidated FROM pg_constraint
 WHERE conrelid = 'fk_partitioned_pk'::regclass AND contype = 'f'
-ORDER BY oid::regclass::text;
+ORDER BY conrelid::regclass::text, conname;
 ALTER TABLE fk_partitioned_pk_2 VALIDATE CONSTRAINT selffk;
 ALTER TABLE fk_partitioned_pk VALIDATE CONSTRAINT selffk;
 SELECT conname, conenforced, convalidated FROM pg_constraint
 WHERE conrelid = 'fk_partitioned_pk'::regclass AND contype = 'f'
-ORDER BY oid::regclass::text;
+ORDER BY conrelid::regclass::text, conname;
 
 DROP TABLE fk_notpartitioned_fk, fk_partitioned_pk;
 
