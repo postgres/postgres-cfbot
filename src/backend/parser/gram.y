@@ -4848,6 +4848,7 @@ CreateStatsStmt:
 					n->relations = $8;
 					n->stxcomment = NULL;
 					n->if_not_exists = false;
+					n->stxstattarget = -1;
 					$$ = (Node *) n;
 				}
 			| CREATE STATISTICS IF_P NOT EXISTS any_name
@@ -4861,6 +4862,7 @@ CreateStatsStmt:
 					n->relations = $11;
 					n->stxcomment = NULL;
 					n->if_not_exists = true;
+					n->stxstattarget = -1;
 					$$ = (Node *) n;
 				}
 			;

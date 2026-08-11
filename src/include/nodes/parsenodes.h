@@ -3647,6 +3647,7 @@ typedef struct CreateStatsStmt
 	bool		transformed;	/* true when transformStatsStmt is finished */
 	bool		if_not_exists;	/* do nothing if stats name already exists */
 	Oid			owner;			/* OID of owner, or InvalidOid for default */
+	int			stxstattarget;	/* statistics target, or -1 for default */
 } CreateStatsStmt;
 
 /*

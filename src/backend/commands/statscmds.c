@@ -563,7 +563,11 @@ CreateStatistics(List *relids, CreateStatsStmt *stmt, bool check_rights)
 	values[Anum_pg_statistic_ext_stxnamespace - 1] = ObjectIdGetDatum(namespaceId);
 	values[Anum_pg_statistic_ext_stxowner - 1] = ObjectIdGetDatum(stxowner);
 	values[Anum_pg_statistic_ext_stxkeys - 1] = PointerGetDatum(stxkeys);
-	nulls[Anum_pg_statistic_ext_stxstattarget - 1] = true;
+	if (stmt->stxstattarget >= 0)
+		values[Anum_pg_statistic_ext_stxstattarget - 1] =
+			Int16GetDatum(stmt->stxstattarget);
+	else
+		nulls[Anum_pg_statistic_ext_stxstattarget - 1] = true;
 	values[Anum_pg_statistic_ext_stxkind - 1] = PointerGetDatum(stxkind);
 
 	values[Anum_pg_statistic_ext_stxexprs - 1] = exprsDatum;
