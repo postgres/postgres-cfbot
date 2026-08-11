@@ -37,6 +37,14 @@ typedef struct LogicalRepRelMapEntry
 	/* Sync state. */
 	char		state;
 	XLogRecPtr	statelsn;
+
+	/*
+	 * The last remote transaction that modified the relation's schema or
+	 * truncated the relation. Used in dependency tracking to ensure subsequent
+	 * transactions modifying the same table wait for this transaction to finish
+	 * applying (see check_dependency_on_rel).
+	 */
+	TransactionId last_depended_xid;
 } LogicalRepRelMapEntry;
 
 extern void logicalrep_relmap_update(LogicalRepRelation *remoterel);
@@ -52,5 +60,6 @@ extern bool IsIndexUsableForReplicaIdentityFull(Relation idxrel, AttrMap *attrma
 extern Oid	GetRelationIdentityOrPK(Relation rel);
 extern void logicalrep_write_all_internal_rels(StringInfo out, int *num_rels);
 extern void logicalrep_write_one_internal_rel(StringInfo out, LogicalRepRelation *rel);
+extern LogicalRepRelMapEntry *logicalrep_get_relentry(LogicalRepRelId remoteid);
 
 #endif							/* LOGICALRELATION_H */
