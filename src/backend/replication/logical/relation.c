@@ -21,12 +21,17 @@
 #include "access/genam.h"
 #include "access/table.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_proc.h"
 #include "catalog/pg_subscription_rel.h"
+#include "catalog/pg_trigger.h"
+#include "commands/trigger.h"
 #include "executor/executor.h"
 #include "libpq/pqformat.h"
 #include "nodes/makefuncs.h"
+#include "optimizer/optimizer.h"
 #include "replication/logicalrelation.h"
 #include "replication/worker_internal.h"
+#include "rewrite/rewriteHandler.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
@@ -125,6 +130,7 @@ logicalrep_relmap_invalidate_cb(Datum arg, Oid reloid)
 			if (entry->localreloid == reloid)
 			{
 				entry->localrelvalid = false;
+				entry->parallel_safety_valid = false;
 				hash_seq_term(&status);
 				break;
 			}
@@ -138,7 +144,10 @@ logicalrep_relmap_invalidate_cb(Datum arg, Oid reloid)
 		hash_seq_init(&status, LogicalRepRelMap);
 
 		while ((entry = (LogicalRepRelMapEntry *) hash_seq_search(&status)) != NULL)
+		{
 			entry->localrelvalid = false;
+			entry->parallel_safety_valid = false;
+		}
 	}
 }
 
@@ -442,6 +451,7 @@ logicalrep_rel_open(LogicalRepRelId remoteid, LOCKMODE lockmode)
 		{
 			/* Table was renamed or dropped. */
 			entry->localrelvalid = false;
+			entry->parallel_safety_valid = false;
 		}
 		else if (!entry->localrelvalid)
 		{
@@ -569,6 +579,101 @@ logicalrep_rel_close(LogicalRepRelMapEntry *rel, LOCKMODE lockmode)
 }
 
 /*
+ * Check whether changes on this relation can be applied in parallel.
+ *
+ * Parallel apply is unsafe if the table has any user-defined functions that may
+ * be executed during change application (e.g., in triggers, defaults, stored
+ * generated expressions, or constraint expressions). In theory, we should check
+ * the volatility of all such functions.
+ *
+ * Note that we do not check user-defined CHECK constraints here, as PostgreSQL
+ * already assumes they are immutable; we follow that same rule.
+ *
+ * If any mutable function is found, the relation is marked as globally unsafe,
+ * and the result is cached.
+ */
+void
+logicalrep_rel_check_parallel_safety(LogicalRepRelMapEntry *entry)
+{
+	Relation	localrel = entry->localrel;
+	TriggerDesc *trigdesc = localrel->trigdesc;
+	int			ntriggers = trigdesc ? trigdesc->numtriggers : 0;
+	TupleDesc	desc = RelationGetDescr(localrel);
+
+	if (entry->parallel_safety_valid)
+		return;
+
+	memset(entry->parallel_global_unsafe, 0,
+		   sizeof(entry->parallel_global_unsafe));
+
+	/* Seek triggers one by one to see the volatility */
+	for (int i = 0; i < ntriggers; i++)
+	{
+		Trigger    *trigger = &trigdesc->triggers[i];
+
+		Assert(OidIsValid(trigger->tgfoid));
+
+		/* Skip if the trigger is internal (e.g., fkey triggers) */
+		if (trigger->tgisinternal)
+			continue;
+
+		/* Skip if the trigger is not enabled for logical replication */
+		if (trigger->tgenabled == TRIGGER_DISABLED ||
+			trigger->tgenabled == TRIGGER_FIRES_ON_ORIGIN)
+			continue;
+
+		/*
+		 * Check the volatility of the trigger. Exit if it is not immutable.
+		 * A multi-event trigger (e.g., BEFORE INSERT OR UPDATE) must mark
+		 * every action it fires for, so these checks are independent ifs
+		 * rather than an else-if chain.
+		 */
+		if (func_volatile(trigger->tgfoid) != PROVOLATILE_IMMUTABLE)
+		{
+			if (TRIGGER_FOR_INSERT(trigger->tgtype))
+				entry->parallel_global_unsafe[LRPA_INSERT] = true;
+			if (TRIGGER_FOR_UPDATE(trigger->tgtype))
+				entry->parallel_global_unsafe[LRPA_UPDATE] = true;
+			if (TRIGGER_FOR_DELETE(trigger->tgtype))
+				entry->parallel_global_unsafe[LRPA_DELETE] = true;
+			if (TRIGGER_FOR_TRUNCATE(trigger->tgtype))
+				entry->parallel_global_unsafe[LRPA_TRUNCATE] = true;
+		}
+	}
+
+	/*
+	 * Check column defaults and stored generated expressions for mutable
+	 * functions.
+	 */
+	for (int attnum = 0; attnum < desc->natts; attnum++)
+	{
+		Form_pg_attribute att = TupleDescAttr(desc, attnum);
+		Expr	   *defexpr;
+
+		if (att->attisdropped)
+			continue;
+
+		if (!att->atthasdef && att->attgenerated != ATTRIBUTE_GENERATED_STORED)
+			continue;
+
+		/* Skip columns whose values come from remote change */
+		if (entry->attrmap->attnums[attnum] >= 0)
+			continue;
+
+		defexpr = (Expr *) build_column_default(entry->localrel, attnum + 1);
+
+		if (contain_mutable_functions_after_planning(defexpr))
+		{
+			/* Only INSERT operations are affected by column defaults */
+			entry->parallel_global_unsafe[LRPA_INSERT] = true;
+			break;
+		}
+	}
+
+	entry->parallel_safety_valid = true;
+}
+
+/*
  * Partition cache: look up partition LogicalRepRelMapEntry's
  *
  * Unlike relation map cache, this is keyed by partition OID, not remote
@@ -598,7 +703,10 @@ logicalrep_partmap_invalidate_cb(Datum arg, Oid reloid)
 		 */
 		entry = hash_search(LogicalRepPartMap, &reloid, HASH_FIND, NULL);
 		if (entry != NULL)
+		{
 			entry->relmapentry.localrelvalid = false;
+			entry->relmapentry.parallel_safety_valid = false;
+		}
 	}
 	else
 	{
@@ -608,7 +716,10 @@ logicalrep_partmap_invalidate_cb(Datum arg, Oid reloid)
 		hash_seq_init(&status, LogicalRepPartMap);
 
 		while ((entry = (LogicalRepPartMapEntry *) hash_seq_search(&status)) != NULL)
+		{
 			entry->relmapentry.localrelvalid = false;
+			entry->relmapentry.parallel_safety_valid = false;
+		}
 	}
 }
 

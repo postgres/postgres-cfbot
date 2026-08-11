@@ -159,6 +159,15 @@ typedef struct ParallelApplyWorkerShared
 	TransactionId xid;
 
 	/*
+	 * The remote XID of the transaction received immediately before the
+	 * current one, or InvalidTransactionId if there is none. Parallel apply
+	 * workers use it to wait for all preceding transactions before applying
+	 * a change that is not safe for parallel apply (see
+	 * check_relation_parallel_apply_safety).
+	 */
+	TransactionId preceding_xid;
+
+	/*
 	 * State used to ensure commit ordering.
 	 *
 	 * The parallel apply worker will set it to PARALLEL_TRANS_FINISHED after
@@ -355,7 +364,7 @@ extern void apply_error_callback(void *arg);
 extern void set_apply_error_context_origin(char *originname);
 
 /* Parallel apply worker setup and interactions */
-extern void pa_allocate_worker(TransactionId xid);
+extern void pa_allocate_worker(TransactionId xid, TransactionId preceding_xid);
 extern ParallelApplyWorkerInfo *pa_find_worker(TransactionId xid);
 extern void pa_detach_all_error_mq(void);
 

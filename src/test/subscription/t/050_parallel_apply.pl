@@ -556,4 +556,85 @@ $result =
   $node_subscriber->safe_psql('postgres', "SELECT count(1) FROM regress_tab");
 is ($result, 5011, 'inserts are replicated to subscriber');
 
+##################################################
+# Test that mutable user-defined triggers force apply-time waiting so
+# conflicting trigger side effects are serialized.
+##################################################
+
+# Truncate the data for upcoming tests
+$node_publisher->safe_psql('postgres', "TRUNCATE TABLE regress_tab;");
+$node_publisher->wait_for_catchup('regress_sub');
+
+# The TRUNCATE invalidated the publisher's relmap entry for regress_tab, so
+# the next transaction touching the table carries a fresh RELATION message.
+# A RELATION message records a table-wide dependency, which would make TX-2
+# below wait for TX-1 before even applying its change, hiding the
+# unsafe-trigger wait this test exercises. Absorb the RELATION message with
+# a dummy transaction (net zero rows) and let it commit fully.
+$node_publisher->safe_psql('postgres',
+    "INSERT INTO regress_tab VALUES (100); DELETE FROM regress_tab WHERE id = 100;");
+$node_publisher->wait_for_catchup('regress_sub');
+
+$node_subscriber->safe_psql('postgres', qq[
+    CREATE OR REPLACE FUNCTION regress_trigger_guard_fn()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS \$\$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM public.regress_tab WHERE id = 1) THEN
+            UPDATE public.regress_tab SET id = 2 WHERE id = 1;
+        END IF;
+        RETURN NEW;
+    END;
+    \$\$;
+
+    CREATE TRIGGER regress_trigger_guard_tg
+    BEFORE INSERT ON regress_tab
+    FOR EACH ROW
+    EXECUTE FUNCTION regress_trigger_guard_fn();
+]);
+
+# Ensure trigger fires during logical replication apply.
+$node_subscriber->safe_psql('postgres',
+	"ALTER TABLE regress_tab ENABLE REPLICA TRIGGER regress_trigger_guard_tg;"
+);
+
+# Hold the first parallel worker just before commit.
+$node_subscriber->safe_psql('postgres',
+	"SELECT injection_points_attach('parallel-worker-before-commit','wait');"
+);
+
+# TX-1: first insert; worker pauses at before-commit injection point.
+$node_publisher->safe_psql('postgres',
+    "INSERT INTO regress_tab VALUES (1);");
+
+$node_subscriber->wait_for_event('logical replication parallel worker',
+	'parallel-worker-before-commit');
+
+$offset = -s $node_subscriber->logfile;
+
+# TX-2: second insert. For unsafe trigger tables, this must wait before apply.
+$node_publisher->safe_psql('postgres',
+    "INSERT INTO regress_tab VALUES (2);");
+
+$node_subscriber->wait_for_log(qr/found parallel unsafe change on table [1-9][0-9]* for action [0-9]+/, $offset);
+
+$str = $node_subscriber->wait_for_log(qr/wait for depended xid ([1-9][0-9]+)/, $offset);
+$xid = $str =~ /wait for depended xid ([1-9][0-9]+)/;
+
+ok(1, "mutable trigger relation waits before apply in parallel mode");
+
+# Resume workers.
+$node_subscriber->safe_psql('postgres', qq[
+    SELECT injection_points_detach('parallel-worker-before-commit');
+    SELECT injection_points_wakeup('parallel-worker-before-commit');
+]);
+
+$node_subscriber->wait_for_log(qr/finish waiting for depended xid $xid/, $offset);
+$node_publisher->wait_for_catchup('regress_sub');
+
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT count(1) FROM regress_tab");
+is ($result, 2, 'inserts are replicated to subscriber');
+
 done_testing();

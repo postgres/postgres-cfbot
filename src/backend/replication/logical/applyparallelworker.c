@@ -695,13 +695,16 @@ pa_launch_parallel_worker(void)
 /*
  * Allocate a parallel apply worker that will be used for the specified xid.
  *
+ * preceding_xid is the transaction received before the current one; pass
+ * InvalidTransactionId if none exists.
+ *
  * We first try to get an available worker from the pool, if any and then try
  * to launch a new worker. On successful allocation, remember the worker
  * information in the hash table so that we can get it later for processing the
  * streaming changes.
  */
 void
-pa_allocate_worker(TransactionId xid)
+pa_allocate_worker(TransactionId xid, TransactionId preceding_xid)
 {
 	bool		found;
 	ParallelApplyWorkerInfo *winfo = NULL;
@@ -738,6 +741,7 @@ pa_allocate_worker(TransactionId xid)
 	SpinLockAcquire(&winfo->shared->mutex);
 	winfo->shared->xact_state = PARALLEL_TRANS_UNKNOWN;
 	winfo->shared->xid = xid;
+	winfo->shared->preceding_xid = preceding_xid;
 	SpinLockRelease(&winfo->shared->mutex);
 
 	winfo->in_use = true;
