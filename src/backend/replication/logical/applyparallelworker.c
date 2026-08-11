@@ -860,6 +860,24 @@ ProcessParallelApplyInterrupts(void)
 }
 
 /*
+ * Handle internal dependency information.
+ *
+ * Wait for all transactions listed in the message to commit.
+ */
+static void
+apply_handle_internal_dependency(StringInfo s)
+{
+	int			nxids = pq_getmsgint(s, 4);
+
+	for (int i = 0; i < nxids; i++)
+	{
+		TransactionId xid = pq_getmsgint(s, 4);
+
+		pa_wait_for_depended_transaction(xid);
+	}
+}
+
+/*
  * Handle internal relation information.
  *
  * Update all relation details in the relation map cache.
@@ -895,6 +913,9 @@ apply_handle_internal_message(StringInfo s)
 
 	switch (action)
 	{
+		case PA_MSG_XACT_DEPENDENCY:
+			apply_handle_internal_dependency(s);
+			break;
 		case PA_MSG_RELMAP:
 			apply_handle_internal_relation(s);
 			break;
@@ -2022,4 +2043,63 @@ pa_attach_parallelized_txn_hash(dsa_handle *pa_dsa_handle,
 	}
 
 	MemoryContextSwitchTo(oldctx);
+}
+
+/*
+ * Wait for the given remote transaction to finish applying by a parallel apply
+ * worker.
+ *
+ * Both leader and parallel apply workers can call this function to wait for a
+ * parallelized transaction to finish.
+ */
+void
+pa_wait_for_depended_transaction(TransactionId xid)
+{
+	/*
+	 * Quick exit if parallelized_txns has not been initialized yet. This can
+	 * happen when the leader worker calls this function before any parallel
+	 * apply workers have been launched.
+	 */
+	if (!parallelized_txns)
+		return;
+
+	elog(DEBUG1, "wait for depended xid %u", xid);
+
+	for (;;)
+	{
+		ParallelizedTxnEntry *txn_entry;
+
+		txn_entry = dshash_find(parallelized_txns, &xid, false);
+
+		/* The entry is removed only if the transaction is committed */
+		if (txn_entry == NULL)
+			break;
+
+		dshash_release_lock(parallelized_txns, txn_entry);
+
+		/*
+		 * Wait for the parallel apply worker processing the given remote
+		 * transaction to finish applying and release its lock.
+		 */
+		pa_lock_transaction(xid, AccessShareLock);
+		pa_unlock_transaction(xid, AccessShareLock);
+
+		CHECK_FOR_INTERRUPTS();
+
+		/*
+		 * Acquiring the lock successfully does not guarantee we can proceed.
+		 * The worker may have errored out and released the lock while leaving
+		 * its shared hash entry intact, or it may not have acquired the lock
+		 * yet because it hasn't processed the BEGIN message. In either case, we
+		 * must continue waiting in the loop until the parallel apply worker
+		 * finishes applying the transaction, or until the leader notifies us of
+		 * a failure and restarts all workers.
+		 *
+		 * The above race window is small and infrequent, so we avoid WaitLatch
+		 * and just sleep briefly to prevent busy waiting.
+		 */
+		pg_usleep(1000L);
+	}
+
+	elog(DEBUG1, "finish waiting for depended xid %u", xid);
 }
