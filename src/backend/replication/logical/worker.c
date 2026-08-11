@@ -789,6 +789,14 @@ handle_streamed_transaction(LogicalRepMsgType action, StringInfo s)
 	TransApplyAction apply_action;
 	StringInfoData original_msg;
 
+	/*
+	 * Return early if not in a streamed transaction. The leader distributes
+	 * relation messages to all workers, but if the worker is not handling any
+	 * transaction, there is nothing to do here.
+	 */
+	if (!in_streamed_transaction)
+		return false;
+
 	apply_action = get_transaction_apply_action(stream_xid, &winfo);
 
 	/* not in streaming mode */
@@ -2590,6 +2598,8 @@ apply_handle_relation(StringInfo s)
 
 	/* Also reset all entries in the partition map that refer to remoterel. */
 	logicalrep_partmap_reset_relmap(rel);
+
+	pa_distribute_remote_rel_to_workers(rel);
 }
 
 /*
@@ -3889,6 +3899,10 @@ apply_dispatch(StringInfo s)
 
 		case LOGICAL_REP_MSG_STREAM_PREPARE:
 			apply_handle_stream_prepare(s);
+			break;
+
+		case LOGICAL_REP_MSG_INTERNAL_MESSAGE:
+			apply_handle_internal_message(s);
 			break;
 
 		default:

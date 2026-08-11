@@ -23,6 +23,7 @@
 #include "catalog/namespace.h"
 #include "catalog/pg_subscription_rel.h"
 #include "executor/executor.h"
+#include "libpq/pqformat.h"
 #include "nodes/makefuncs.h"
 #include "replication/logicalrelation.h"
 #include "replication/worker_internal.h"
@@ -57,6 +58,48 @@ typedef struct LogicalRepPartMapEntry
 
 static Oid	FindLogicalRepLocalIndex(Relation localrel, LogicalRepRelation *remoterel,
 									 AttrMap *attrMap);
+
+/*
+ * Write all the remote relation information from the LogicalRepRelMapEntry to
+ * the output stream. The number of relations is stored in the num_rels.
+ */
+void
+logicalrep_write_all_internal_rels(StringInfo out, int *num_rels)
+{
+	LogicalRepRelMapEntry *entry;
+	HASH_SEQ_STATUS status;
+
+	if (LogicalRepRelMap)
+		*num_rels = hash_get_num_entries(LogicalRepRelMap);
+	else
+		*num_rels = 0;
+
+	if (*num_rels == 0)
+		return;
+
+	pq_sendbyte(out, LOGICAL_REP_MSG_INTERNAL_MESSAGE);
+	pq_sendbyte(out, PA_MSG_RELMAP);
+	pq_sendint(out, *num_rels, 4);
+
+	hash_seq_init(&status, LogicalRepRelMap);
+
+	while ((entry = (LogicalRepRelMapEntry *) hash_seq_search(&status)) != NULL)
+		logicalrep_write_internal_rel(out, &entry->remoterel);
+}
+
+/*
+ * Similar to logicalrep_write_all_internal_rels but writes only the given
+ * relation.
+ */
+void
+logicalrep_write_one_internal_rel(StringInfo out, LogicalRepRelation *rel)
+{
+	pq_sendbyte(out, LOGICAL_REP_MSG_INTERNAL_MESSAGE);
+	pq_sendbyte(out, PA_MSG_RELMAP);
+	pq_sendint(out, 1, 4);
+
+	logicalrep_write_internal_rel(out, rel);
+}
 
 /*
  * Relcache invalidation callback for our relation map cache.

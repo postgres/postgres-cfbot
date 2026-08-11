@@ -692,6 +692,48 @@ logicalrep_write_rel(StringInfo out, TransactionId xid, Relation rel,
 }
 
 /*
+ * Write internal relation description to the output stream.
+ *
+ * This is similar to logicalrep_write_rel, but takes a LogicalRepRelation and
+ * deparses it into the same message format. The output can be used in contexts
+ * where a relation description is needed without a live relation object.
+ */
+void
+logicalrep_write_internal_rel(StringInfo out, LogicalRepRelation *rel)
+{
+	pq_sendint32(out, rel->remoteid);
+
+	/* Write relation name. */
+	pq_sendstring(out, rel->nspname);
+	pq_sendstring(out, rel->relname);
+
+	/* Write the replica identity. */
+	pq_sendbyte(out, rel->replident);
+
+	/* Write attribute description. */
+	pq_sendint16(out, rel->natts);
+
+	for (int i = 0; i < rel->natts; i++)
+	{
+		uint8		flags = 0;
+
+		if (bms_is_member(i, rel->attkeys))
+			flags |= LOGICALREP_IS_REPLICA_IDENTITY;
+
+		pq_sendbyte(out, flags);
+
+		/* Attribute name. */
+		pq_sendstring(out, rel->attnames[i]);
+
+		/* Attribute type ID. */
+		pq_sendint32(out, rel->atttyps[i]);
+
+		/* Ignore attribute mode for now. */
+		pq_sendint32(out, 0);
+	}
+}
+
+/*
  * Read the relation info from stream and return as LogicalRepRelation.
  */
 LogicalRepRelation *
@@ -1253,6 +1295,8 @@ logicalrep_message_type(LogicalRepMsgType action)
 			return "STREAM ABORT";
 		case LOGICAL_REP_MSG_STREAM_PREPARE:
 			return "STREAM PREPARE";
+		case LOGICAL_REP_MSG_INTERNAL_MESSAGE:
+			return "INTERNAL MESSAGE";
 	}
 
 	/*

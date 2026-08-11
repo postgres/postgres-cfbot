@@ -50,5 +50,7 @@ extern void logicalrep_rel_close(LogicalRepRelMapEntry *rel,
 								 LOCKMODE lockmode);
 extern bool IsIndexUsableForReplicaIdentityFull(Relation idxrel, AttrMap *attrmap);
 extern Oid	GetRelationIdentityOrPK(Relation rel);
+extern void logicalrep_write_all_internal_rels(StringInfo out, int *num_rels);
+extern void logicalrep_write_one_internal_rel(StringInfo out, LogicalRepRelation *rel);
 
 #endif							/* LOGICALRELATION_H */
