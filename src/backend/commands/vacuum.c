@@ -2463,6 +2463,13 @@ vacuum_delay_point(bool is_analyze)
 {
 	double		msec = 0;
 
+	/*
+	 * A delay point may sleep and must service query cancel, so it cannot be
+	 * reached while interrupts are held off (LWLock or buffer lock held).
+	 */
+	Assert(InterruptHoldoffCount == 0);
+	Assert(CritSectionCount == 0);
+
 	/* Always check for interrupts */
 	CHECK_FOR_INTERRUPTS();
 
