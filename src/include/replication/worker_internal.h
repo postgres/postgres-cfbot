@@ -390,6 +390,8 @@ extern void pa_bind_flush_position(TransactionId xid, XLogRecPtr *local_end);
 extern bool pa_get_last_commit_end(TransactionId xid, XLogRecPtr *local_end);
 extern void pa_wait_for_depended_transaction(TransactionId xid);
 extern bool pa_transaction_committed(TransactionId xid);
+extern void pa_commit_transaction(void);
+extern void pa_add_parallelized_transaction(TransactionId xid);
 
 #define isParallelApplyWorker(worker) ((worker)->in_use && \
 									   (worker)->type == WORKERTYPE_PARALLEL_APPLY)

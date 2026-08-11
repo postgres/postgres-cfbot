@@ -2692,7 +2692,6 @@ ReplicationSlotPersistentData
 ReplicationState
 ReplicationStateCtl
 ReplicationStateOnDisk
-replica_identity_hash
 ResTarget
 ReservoirState
 ReservoirStateData
@@ -4273,6 +4272,7 @@ rendezvousHashEntry
 rep
 replace_rte_variables_callback
 replace_rte_variables_context
+replica_identity_hash
 report_error_fn
 ret_type
 rewind_source
