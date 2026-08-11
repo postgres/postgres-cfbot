@@ -334,7 +334,9 @@ extern void SetupApplyOrSyncWorker(int worker_slot);
 
 extern void DisableSubscriptionAndExit(void);
 
-extern void store_flush_position(XLogRecPtr remote_lsn, XLogRecPtr local_lsn);
+extern void store_flush_position(XLogRecPtr remote_lsn, XLogRecPtr local_lsn,
+								 TransactionId pa_remote_xid);
+extern void update_flush_position(dlist_node *node, XLogRecPtr local_lsn);
 
 /* Function for apply error callback */
 extern void apply_error_callback(void *arg);
@@ -374,6 +376,8 @@ extern void pa_decr_and_wait_stream_block(void);
 extern void pa_xact_finish(ParallelApplyWorkerInfo *winfo,
 						   XLogRecPtr remote_lsn);
 extern void pa_distribute_remote_rel_to_workers(LogicalRepRelation *rel);
+extern void pa_bind_flush_position(TransactionId xid, XLogRecPtr *local_end);
+extern bool pa_get_last_commit_end(TransactionId xid, XLogRecPtr *local_end);
 
 #define isParallelApplyWorker(worker) ((worker)->in_use && \
 									   (worker)->type == WORKERTYPE_PARALLEL_APPLY)
