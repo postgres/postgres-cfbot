@@ -663,6 +663,8 @@ static void set_wal_receiver_timeout(void);
 
 static void on_exit_clear_xact_state(int code, Datum arg);
 
+static void maintain_commit_order_dependency(ParallelApplyWorkerInfo *winfo);
+
 /*
  * Form the origin name for the subscription.
  *
@@ -1305,6 +1307,8 @@ apply_handle_commit(StringInfo s)
 	 * any newly added tables or sequences.
 	 */
 	ProcessSyncingRelations(commit_data.end_lsn);
+
+	maintain_commit_order_dependency(NULL);
 
 	pgstat_report_activity(STATE_IDLE, NULL);
 	reset_apply_error_context_info();
@@ -6541,4 +6545,76 @@ get_transaction_apply_action(TransactionId xid, ParallelApplyWorkerInfo **winfo)
 	{
 		return TRANS_LEADER_APPLY;
 	}
+}
+
+/*
+ * Send an INTERNAL_DEPENDENCY message to a parallel apply worker.
+ */
+static void
+send_internal_dependencies(ParallelApplyWorkerInfo *winfo, List *depends_on_xids)
+{
+	StringInfoData dependencies;
+
+	initStringInfo(&dependencies);
+
+	pq_sendbyte(&dependencies, LOGICAL_REP_MSG_INTERNAL_MESSAGE);
+	pq_sendbyte(&dependencies, PA_MSG_XACT_DEPENDENCY);
+	pq_sendint32(&dependencies, list_length(depends_on_xids));
+
+	foreach_xid(xid, depends_on_xids)
+		pq_sendint32(&dependencies, xid);
+
+	if (!pa_send_data(winfo, dependencies.len, dependencies.data))
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("could not send data to the logical replication parallel apply worker")));
+
+	pfree(dependencies.data);
+}
+
+/*
+ * Ensure commit order is preserved for transactions applied by either a
+ * parallel worker or the leader.
+ *
+ * For parallelized transactions, the leader sends an internal dependency to the
+ * given parallel worker, instructing it to wait for the last parallelized
+ * transaction to finish before proceeding.
+ *
+ * For transactions applied directly by the leader (when winfo is NULL), the
+ * leader waits for the last parallelized transaction to commit here.
+ *
+ * Since each transaction waits for its immediate predecessor, waiting for the
+ * last parallelized transaction transitively means waiting for all preceding
+ * parallelized transactions, thereby preserving the publisher's commit order.
+ */
+static void
+maintain_commit_order_dependency(ParallelApplyWorkerInfo *winfo)
+{
+	FlushPosition *last_txn_node;
+	TransactionId last_pa_remote_xid;
+
+	/* Return early if there are no pending transactions */
+	if (dlist_is_empty(&lsn_mapping))
+		return;
+
+	/*
+	 * Get the last flush position entry, which could contain the XID of the
+	 * most recent parallelized transaction.
+	 */
+	last_txn_node = dlist_tail_element(FlushPosition, node, &lsn_mapping);
+	last_pa_remote_xid = last_txn_node->pa_remote_xid;
+
+	/*
+	 * Nothing to do if the last transaction was applied by the leader, or if it
+	 * is parallelized but has already committed. While on it, we also try to
+	 * update the local_end of the last transaction node.
+	 */
+	if (!TransactionIdIsValid(last_pa_remote_xid) ||
+		pa_get_last_commit_end(last_pa_remote_xid, &last_txn_node->local_end))
+		return;
+
+	if (winfo == NULL)
+		pa_wait_for_depended_transaction(last_pa_remote_xid);
+	else
+		send_internal_dependencies(winfo, list_make1_xid(last_pa_remote_xid));
 }

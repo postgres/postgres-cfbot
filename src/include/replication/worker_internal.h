@@ -251,6 +251,7 @@ typedef struct ParallelApplyWorkerInfo
  */
 typedef enum PAWorkerMsgType
 {
+	PA_MSG_XACT_DEPENDENCY = 'd',
 	PA_MSG_RELMAP = 'r',
 } PAWorkerMsgType;
 
@@ -387,6 +388,7 @@ extern void pa_xact_finish(ParallelApplyWorkerInfo *winfo,
 extern void pa_distribute_remote_rel_to_workers(LogicalRepRelation *rel);
 extern void pa_bind_flush_position(TransactionId xid, XLogRecPtr *local_end);
 extern bool pa_get_last_commit_end(TransactionId xid, XLogRecPtr *local_end);
+extern void pa_wait_for_depended_transaction(TransactionId xid);
 
 #define isParallelApplyWorker(worker) ((worker)->in_use && \
 									   (worker)->type == WORKERTYPE_PARALLEL_APPLY)
