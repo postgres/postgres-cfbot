@@ -379,6 +379,14 @@ static ParallelApplyWorkerInfo *stream_apply_worker = NULL;
 /* A list to maintain subtransactions, if any. */
 static List *subxactlist = NIL;
 
+/*
+ * When true, the leader does not assign new transactions to parallel apply
+ * workers because dependency tracking has hit the memory limit. Cleared
+ * once the estimated usage drops to half of the limit or below and no
+ * transaction with stopped dependency recording is still in flight.
+ */
+bool		parallel_apply_suspended = false;
+
 static void pa_free_worker_info(ParallelApplyWorkerInfo *winfo);
 static ParallelTransState pa_get_xact_state(ParallelApplyWorkerShared *wshared);
 static PartialFileSetState pa_get_fileset_state(void);
@@ -393,6 +401,15 @@ pa_can_start(void)
 {
 	/* Only leader apply workers can start parallel apply workers. */
 	if (!am_leader_apply_worker())
+		return false;
+
+	/*
+	 * Don't assign new transactions to parallel apply workers while the
+	 * dependency tracking memory limit is exceeded; the leader will apply
+	 * such transactions itself until the usage drops (see
+	 * handle_dependency_on_change).
+	 */
+	if (parallel_apply_suspended)
 		return false;
 
 	/*
