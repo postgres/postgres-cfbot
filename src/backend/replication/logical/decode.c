@@ -668,7 +668,12 @@ logicalmsg_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	if (!message->transactional)
 		snapshot = SnapBuildGetOrBuildSnapshot(builder);
 
-	ReorderBufferQueueMessage(ctx->reorder, xid, snapshot, buf->endptr,
+	/*
+	 * Non-transactional messages are processed as separate transactions on
+	 * the receiver, so use endptr as the confirmed flush position for them.
+	 */
+	ReorderBufferQueueMessage(ctx->reorder, xid, snapshot,
+							  message->transactional ? buf->origptr : buf->endptr,
 							  message->transactional,
 							  message->message, /* first part of message is
 												 * prefix */
