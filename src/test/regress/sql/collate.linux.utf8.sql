@@ -182,7 +182,15 @@ SELECT to_char(date '2010-02-01', 'DD TMMON YYYY' COLLATE "tr_TR");
 SELECT to_char(date '2010-04-01', 'DD TMMON YYYY');
 SELECT to_char(date '2010-04-01', 'DD TMMON YYYY' COLLATE "tr_TR");
 
+-- to_char
+SET lc_time TO 'cs_CZ';
+
+SELECT to_char(date '2010-02-01', 'DD TMMONTH');
+SELECT to_char(date '2010-02-01', 'TAMMONTH');
+SELECT to_char(date '2010-02-01', 'TAMMON');
+
 -- to_date
+SET lc_time TO 'tr_TR';
 
 SELECT to_date('01 ŞUB 2010', 'DD TMMON YYYY');
 SELECT to_date('01 Şub 2010', 'DD TMMON YYYY');
@@ -191,6 +199,12 @@ SELECT to_date('1234567890ab 2010', 'TMMONTH YYYY'); -- fail
 SELECT to_date('01 Aralık 2010', 'DD TMMONTH YYYY');
 SELECT to_date('01 aralık 2010', 'DD TMMONTH YYYY');
 SELECT to_date('2010 01 araLık', 'YYYY DD TMMONTH');
+
+SET lc_time TO 'cs_CZ';
+
+SELECT to_date('1 srpna 2010', 'DD TMMONTH YYYY');
+SELECT to_date('1 srp 2010', 'DD TAMMON YYYY');
+SELECT to_date('1 srpen 2010', 'DD TAMMONTH YYYY');
 
 -- backwards parsing
 
