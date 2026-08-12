@@ -1007,11 +1007,6 @@ ExecInitIncrementalSort(IncrementalSort *node, EState *estate, int eflags)
 	outerPlanState(incrsortstate) = ExecInitNode(outerPlan(node), estate, eflags);
 
 	/*
-	 * Initialize scan slot and type.
-	 */
-	ExecCreateScanSlotFromOuterPlan(estate, &incrsortstate->ss, &TTSOpsMinimalTuple);
-
-	/*
 	 * Initialize return slot and type. No need to initialize projection info
 	 * because we don't do any projections.
 	 */
