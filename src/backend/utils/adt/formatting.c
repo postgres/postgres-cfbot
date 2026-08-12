@@ -547,6 +547,7 @@ do { \
 #define DCH_SUFFIX_th	0x04
 #define DCH_SUFFIX_SP	0x08
 #define DCH_SUFFIX_TM	0x10
+#define DCH_SUFFIX_TAM	0x20
 
 /*
  * Suffix tests
@@ -588,16 +589,25 @@ IS_SUFFIX_TM(uint8 _s)
 	return (_s & DCH_SUFFIX_TM);
 }
 
+static inline bool
+IS_SUFFIX_TAM(uint8 _s)
+{
+	return (_s & DCH_SUFFIX_TAM);
+}
+
 /*
  * Suffixes definition for DATE-TIME TO/FROM CHAR
  */
 #define TM_SUFFIX_LEN	2
+#define TAM_SUFFIX_LEN	3
 
 static const KeySuffix DCH_suff[] = {
 	{"FM", 2, DCH_SUFFIX_FM, SUFFTYPE_PREFIX},
 	{"fm", 2, DCH_SUFFIX_FM, SUFFTYPE_PREFIX},
 	{"TM", TM_SUFFIX_LEN, DCH_SUFFIX_TM, SUFFTYPE_PREFIX},
+	{"TAM", TAM_SUFFIX_LEN, DCH_SUFFIX_TAM, SUFFTYPE_PREFIX},
 	{"tm", 2, DCH_SUFFIX_TM, SUFFTYPE_PREFIX},
+	{"tam", 3, DCH_SUFFIX_TAM, SUFFTYPE_PREFIX},
 	{"TH", 2, DCH_SUFFIX_TH, SUFFTYPE_POSTFIX},
 	{"th", 2, DCH_SUFFIX_th, SUFFTYPE_POSTFIX},
 	{"SP", 2, DCH_SUFFIX_SP, SUFFTYPE_POSTFIX},
@@ -2582,6 +2592,44 @@ from_char_seq_search(int *dest, const char **src, const char *const *array,
 }
 
 /*
+ * Allow to choose localized names or alternative localized names by
+ * usage prefix TM or TAM. Simple code, just reduction of repeated code.
+ */
+static char **
+get_localized_abbrev_months(uint8 suffix)
+{
+	if (IS_SUFFIX_TM(suffix))
+	{
+		return localized_abbrev_months;
+	}
+	else if (IS_SUFFIX_TAM(suffix))
+	{
+		return localized_alt_abbrev_months;
+	}
+	else
+	{
+		return NULL;
+	}
+}
+
+static char **
+get_localized_full_months(uint8 suffix)
+{
+	if (IS_SUFFIX_TM(suffix))
+	{
+		return localized_full_months;
+	}
+	else if (IS_SUFFIX_TAM(suffix))
+	{
+		return localized_alt_full_months;
+	}
+	else
+	{
+		return NULL;
+	}
+}
+
+/*
  * Process a TmToChar struct as denoted by a list of FormatNodes.
  * The formatted data is appended to 'out'.
  */
@@ -2769,8 +2817,13 @@ DCH_to_char(const FormatNode *node, bool is_interval, Oid collid,
 				INVALID_FOR_INTERVAL;
 				if (!tm->tm_mon)
 					break;
-				if (IS_SUFFIX_TM(n->suffix))
-					DCH_EMITS(str_toupper_z(localized_full_months[tm->tm_mon - 1], collid));
+				if (IS_SUFFIX_TM(n->suffix) || IS_SUFFIX_TAM(n->suffix))
+				{
+					char	   **localized_months;
+
+					localized_months = get_localized_full_months(n->suffix);
+					DCH_EMITS(str_toupper_z(localized_months[tm->tm_mon - 1], collid));
+				}
 				else
 					DCH_EMITF("%*s", IS_SUFFIX_FM(n->suffix) ? 0 : -9,
 							  asc_toupper_z(months_full[tm->tm_mon - 1]));
@@ -2779,8 +2832,13 @@ DCH_to_char(const FormatNode *node, bool is_interval, Oid collid,
 				INVALID_FOR_INTERVAL;
 				if (!tm->tm_mon)
 					break;
-				if (IS_SUFFIX_TM(n->suffix))
-					DCH_EMITS(str_initcap_z(localized_full_months[tm->tm_mon - 1], collid));
+				if (IS_SUFFIX_TM(n->suffix) || IS_SUFFIX_TAM(n->suffix))
+				{
+					char	   **localized_months;
+
+					localized_months = get_localized_full_months(n->suffix);
+					DCH_EMITS(str_initcap_z(localized_months[tm->tm_mon - 1], collid));
+				}
 				else
 					DCH_EMITF("%*s", IS_SUFFIX_FM(n->suffix) ? 0 : -9,
 							  months_full[tm->tm_mon - 1]);
@@ -2789,8 +2847,13 @@ DCH_to_char(const FormatNode *node, bool is_interval, Oid collid,
 				INVALID_FOR_INTERVAL;
 				if (!tm->tm_mon)
 					break;
-				if (IS_SUFFIX_TM(n->suffix))
-					DCH_EMITS(str_tolower_z(localized_full_months[tm->tm_mon - 1], collid));
+				if (IS_SUFFIX_TM(n->suffix) || IS_SUFFIX_TAM(n->suffix))
+				{
+					char	   **localized_months;
+
+					localized_months = get_localized_full_months(n->suffix);
+					DCH_EMITS(str_tolower_z(localized_months[tm->tm_mon - 1], collid));
+				}
 				else
 					DCH_EMITF("%*s", IS_SUFFIX_FM(n->suffix) ? 0 : -9,
 							  asc_tolower_z(months_full[tm->tm_mon - 1]));
@@ -2799,8 +2862,13 @@ DCH_to_char(const FormatNode *node, bool is_interval, Oid collid,
 				INVALID_FOR_INTERVAL;
 				if (!tm->tm_mon)
 					break;
-				if (IS_SUFFIX_TM(n->suffix))
-					DCH_EMITS(str_toupper_z(localized_abbrev_months[tm->tm_mon - 1], collid));
+				if (IS_SUFFIX_TM(n->suffix) || IS_SUFFIX_TAM(n->suffix))
+				{
+					char	   **localized_months;
+
+					localized_months = get_localized_abbrev_months(n->suffix);
+					DCH_EMITS(str_toupper_z(localized_months[tm->tm_mon - 1], collid));
+				}
 				else
 					DCH_EMITS(asc_toupper_z(months[tm->tm_mon - 1]));
 				break;
@@ -2808,8 +2876,13 @@ DCH_to_char(const FormatNode *node, bool is_interval, Oid collid,
 				INVALID_FOR_INTERVAL;
 				if (!tm->tm_mon)
 					break;
-				if (IS_SUFFIX_TM(n->suffix))
-					DCH_EMITS(str_initcap_z(localized_abbrev_months[tm->tm_mon - 1], collid));
+				if (IS_SUFFIX_TM(n->suffix) || IS_SUFFIX_TAM(n->suffix))
+				{
+					char	   **localized_months;
+
+					localized_months = get_localized_abbrev_months(n->suffix);
+					DCH_EMITS(str_initcap_z(localized_months[tm->tm_mon - 1], collid));
+				}
 				else
 					DCH_EMITS(months[tm->tm_mon - 1]);
 				break;
@@ -2817,8 +2890,13 @@ DCH_to_char(const FormatNode *node, bool is_interval, Oid collid,
 				INVALID_FOR_INTERVAL;
 				if (!tm->tm_mon)
 					break;
-				if (IS_SUFFIX_TM(n->suffix))
-					DCH_EMITS(str_tolower_z(localized_abbrev_months[tm->tm_mon - 1], collid));
+				if (IS_SUFFIX_TM(n->suffix) || IS_SUFFIX_TAM(n->suffix))
+				{
+					char	   **localized_months;
+
+					localized_months = get_localized_abbrev_months(n->suffix);
+					DCH_EMITS(str_tolower_z(localized_months[tm->tm_mon - 1], collid));
+				}
 				else
 					DCH_EMITS(asc_tolower_z(months[tm->tm_mon - 1]));
 				break;
@@ -3413,24 +3491,36 @@ DCH_from_char(FormatNode *node, const char *in, TmFromChar *out,
 			case DCH_MONTH:
 			case DCH_Month:
 			case DCH_month:
-				if (!from_char_seq_search(&value, &s, months_full,
-										  IS_SUFFIX_TM(n->suffix) ? localized_full_months : NULL,
-										  collid,
-										  n, escontext))
-					return;
-				if (!from_char_set_int(&out->mm, value + 1, n, escontext))
-					return;
+				{
+					char	  **localized_months;
+
+					localized_months = get_localized_full_months(n->suffix);
+
+					if (!from_char_seq_search(&value, &s, months_full,
+											  localized_months,
+											  collid,
+											  n, escontext))
+						return;
+					if (!from_char_set_int(&out->mm, value + 1, n, escontext))
+						return;
+				}
 				break;
 			case DCH_MON:
 			case DCH_Mon:
 			case DCH_mon:
-				if (!from_char_seq_search(&value, &s, months,
-										  IS_SUFFIX_TM(n->suffix) ? localized_abbrev_months : NULL,
-										  collid,
-										  n, escontext))
-					return;
-				if (!from_char_set_int(&out->mm, value + 1, n, escontext))
-					return;
+				{
+					char	   **localized_months;
+
+					localized_months = get_localized_abbrev_months(n->suffix);
+
+					if (!from_char_seq_search(&value, &s, months,
+											  localized_months,
+											  collid,
+											  n, escontext))
+						return;
+					if (!from_char_set_int(&out->mm, value + 1, n, escontext))
+						return;
+				}
 				break;
 			case DCH_MM:
 				if (from_char_parse_int(&out->mm, &s, n, escontext) < 0)

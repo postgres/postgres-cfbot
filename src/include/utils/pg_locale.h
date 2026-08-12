@@ -59,7 +59,9 @@ extern PGDLLIMPORT int icu_validation_level;
 extern PGDLLIMPORT char *localized_abbrev_days[];
 extern PGDLLIMPORT char *localized_full_days[];
 extern PGDLLIMPORT char *localized_abbrev_months[];
+extern PGDLLIMPORT char *localized_alt_abbrev_months[];
 extern PGDLLIMPORT char *localized_full_months[];
+extern PGDLLIMPORT char *localized_alt_full_months[];
 
 extern bool check_locale(int category, const char *locale, char **canonname);
 extern char *pg_perm_setlocale(int category, const char *locale);
