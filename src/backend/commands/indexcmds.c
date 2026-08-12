@@ -29,6 +29,7 @@
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_am.h"
+#include "catalog/pg_attribute.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_collation.h"
 #include "catalog/pg_constraint.h"
@@ -83,6 +84,7 @@ typedef struct CIEN_context
 /* non-export function prototypes */
 static bool CompareOpclassOptions(const Datum *opts1, const Datum *opts2, int natts);
 static void CheckPredicate(Expr *predicate);
+static void SetIndexStatTargets(Oid indexOid, List *stattargets);
 static void ComputeIndexAttrs(ParseState *pstate,
 							  IndexInfo *indexInfo,
 							  Oid *typeOids,
@@ -1324,6 +1326,10 @@ DefineIndex(ParseState *pstate,
 		CreateComments(indexRelationId, RelationRelationId, 0,
 					   stmt->idxcomment);
 
+	/* Apply any requested per-column statistics targets */
+	if (stmt->stattargets != NIL)
+		SetIndexStatTargets(indexRelationId, stmt->stattargets);
+
 	if (partitioned)
 	{
 		PartitionDesc partdesc;
@@ -1545,6 +1551,13 @@ DefineIndex(ParseState *pstate,
 														parentIndex,
 														attmap,
 														NULL);
+
+					/*
+					 * Propagate any per-column statistics targets to the
+					 * child index, matching the recursion that ALTER INDEX
+					 * ... SET STATISTICS performs on partitioned indexes.
+					 */
+					childStmt->stattargets = stmt->stattargets;
 
 					/*
 					 * Recurse as the starting user ID.  Callee will use that
@@ -1862,6 +1875,63 @@ DefineIndex(ParseState *pstate,
 	pgstat_progress_end_command();
 
 	return address;
+}
+
+/*
+ * SetIndexStatTargets
+ *		Apply per-column statistics targets to a just-created index.
+ *
+ * The list contains one integer per index column, with -1 meaning the
+ * target is not set for that column.  It is captured from a previous
+ * incarnation of the index by ATPostAlterTypeParse(), so the column
+ * structure is known to match.
+ */
+static void
+SetIndexStatTargets(Oid indexOid, List *stattargets)
+{
+	Relation	attrelation;
+	AttrNumber	attnum = 0;
+	ListCell   *lc;
+
+	attrelation = table_open(AttributeRelationId, RowExclusiveLock);
+
+	foreach(lc, stattargets)
+	{
+		int			target = lfirst_int(lc);
+		HeapTuple	tuple,
+					newtuple;
+		Datum		repl_val[Natts_pg_attribute];
+		bool		repl_null[Natts_pg_attribute];
+		bool		repl_repl[Natts_pg_attribute];
+
+		attnum++;
+
+		if (target < 0)
+			continue;
+
+		tuple = SearchSysCache2(ATTNUM,
+								ObjectIdGetDatum(indexOid),
+								Int16GetDatum(attnum));
+		if (!HeapTupleIsValid(tuple))
+			elog(ERROR, "cache lookup failed for attribute %d of relation %u",
+				 attnum, indexOid);
+
+		memset(repl_val, 0, sizeof(repl_val));
+		memset(repl_null, false, sizeof(repl_null));
+		memset(repl_repl, false, sizeof(repl_repl));
+
+		repl_val[Anum_pg_attribute_attstattarget - 1] = Int16GetDatum(target);
+		repl_repl[Anum_pg_attribute_attstattarget - 1] = true;
+
+		newtuple = heap_modify_tuple(tuple, RelationGetDescr(attrelation),
+									 repl_val, repl_null, repl_repl);
+		CatalogTupleUpdate(attrelation, &tuple->t_self, newtuple);
+
+		heap_freetuple(newtuple);
+		ReleaseSysCache(tuple);
+	}
+
+	table_close(attrelation, RowExclusiveLock);
 }
 
 
