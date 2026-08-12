@@ -4810,6 +4810,6 @@ set_indexsafe_procflags(void)
 
 	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
 	MyProc->statusFlags |= PROC_IN_SAFE_IC;
-	ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
+	ProcGlobal->statusFlags[ProcGetMyXactOff()] = MyProc->statusFlags;
 	LWLockRelease(ProcArrayLock);
 }
