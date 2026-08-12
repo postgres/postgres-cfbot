@@ -1823,13 +1823,10 @@ _mdfd_getseg(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 			 */
 			if (nblocks < ((BlockNumber) RELSEG_SIZE))
 			{
-				char	   *zerobuf = palloc_aligned(BLCKSZ, PG_IO_ALIGN_SIZE,
-													 MCXT_ALLOC_ZERO);
-
-				mdextend(reln, forknum,
-						 nextsegno * ((BlockNumber) RELSEG_SIZE) - 1,
-						 zerobuf, skipFsync);
-				pfree(zerobuf);
+				mdzeroextend(reln, forknum,
+							 (nextsegno - 1) * ((BlockNumber) RELSEG_SIZE) + nblocks,
+							 RELSEG_SIZE - nblocks,
+							 skipFsync);
 			}
 			flags = O_CREAT;
 		}

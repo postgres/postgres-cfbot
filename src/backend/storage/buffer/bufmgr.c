@@ -5379,7 +5379,6 @@ RelationCopyStorageUsingBuffer(RelFileLocator srclocator,
 	bool		use_wal;
 	BlockNumber nblocks;
 	BlockNumber blkno;
-	PGIOAlignedBlock buf;
 	BufferAccessStrategy bstrategy_src;
 	BufferAccessStrategy bstrategy_dst;
 	BlockRangeReadStreamPrivate p;
@@ -5405,9 +5404,8 @@ RelationCopyStorageUsingBuffer(RelFileLocator srclocator,
 	 * Bulk extend the destination relation of the same size as the source
 	 * relation before starting to copy block by block.
 	 */
-	memset(buf.data, 0, BLCKSZ);
-	smgrextend(smgropen(dstlocator, INVALID_PROC_NUMBER), forkNum, nblocks - 1,
-			   buf.data, true);
+	smgrzeroextend(smgropen(dstlocator, INVALID_PROC_NUMBER), forkNum, 0,
+				   nblocks, true);
 
 	/* This is a bulk operation, so use buffer access strategies. */
 	bstrategy_src = GetAccessStrategy(BAS_BULKREAD);
