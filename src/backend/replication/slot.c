@@ -59,6 +59,7 @@
 #include "utils/builtins.h"
 #include "utils/guc_hooks.h"
 #include "utils/injection_point.h"
+#include "utils/snapmgr.h"
 #include "utils/varlena.h"
 #include "utils/wait_event.h"
 
@@ -156,6 +157,13 @@ const ShmemCallbacks ReplicationSlotsShmemCallbacks = {
 
 /* My backend's replication slot in the shared memory array */
 ReplicationSlot *MyReplicationSlot = NULL;
+
+/*
+ * Subtransaction that acquired MyReplicationSlot, or invalid if none is held
+ * or it was acquired with no transaction in progress (as a walsender does).
+ * Used to release the slot when that subxact aborts.
+ */
+static SubTransactionId MyReplicationSlotSubId = InvalidSubTransactionId;
 
 /* GUC variables */
 int			max_replication_slots = 10; /* the maximum number of replication
@@ -519,6 +527,7 @@ ReplicationSlotCreate(const char *name, bool db_specific,
 	slot->active_proc = MyProcNumber;
 	SpinLockRelease(&slot->mutex);
 	MyReplicationSlot = slot;
+	MyReplicationSlotSubId = GetCurrentSubTransactionId();
 
 	LWLockRelease(ReplicationSlotControlLock);
 
@@ -724,6 +733,7 @@ retry:
 
 	/* We made this slot active, so it's ours now. */
 	MyReplicationSlot = s;
+	MyReplicationSlotSubId = GetCurrentSubTransactionId();
 
 	/*
 	 * We need to check for invalidation after making the slot ours to avoid
@@ -848,6 +858,80 @@ ReplicationSlotRelease(void)
 
 		pfree(slotname);
 	}
+
+	/* The slot is no longer acquired in any subxact. */
+	MyReplicationSlotSubId = InvalidSubTransactionId;
+}
+
+/*
+ * At subxact end, hand off or release MyReplicationSlot if it was acquired
+ * in this subxact. On commit, ownership passes to the parent subxact; on
+ * abort, the slot is released (and the session's temp slots dropped).
+ */
+void
+AtEOSubXact_ReplicationSlot(bool isCommit, SubTransactionId mySubid,
+							SubTransactionId parentSubid)
+{
+	/* Nothing to do unless the slot was acquired in this subxact. */
+	if (MyReplicationSlotSubId != mySubid)
+		return;
+
+	/*
+	 * On commit, hand the slot to the parent subxact. A slot held across a
+	 * subxact commit (acquired but not yet released by its caller) would
+	 * otherwise be attributed to a gone subxact, and we still want it
+	 * released if the parent, or an ancestor, later aborts.
+	 *
+	 * This acts as a safety check against a slot function that misses
+	 * releasing the slot before returning. Today none do, so the check above
+	 * returns early and we never get here with a slot still held. Handling it
+	 * anyway, the same way AtEOSubXact_LargeObject() and AtEOSubXact_Files()
+	 * do, keeps such a slot from being leaked.
+	 */
+	if (isCommit)
+	{
+		MyReplicationSlotSubId = parentSubid;
+		return;
+	}
+
+	/*
+	 * We must not get here while decoding is running. Decoding starts and
+	 * aborts an internal (sub)transaction while holding the slot, for each
+	 * decoded transaction (ReorderBufferProcessTXN()) and when executing
+	 * invalidations (ReorderBufferImmediateInvalidation()). However, those
+	 * subtransactions are always nested below the one that acquired the slot,
+	 * so their subtransaction ids are deeper and do not match here. Decoding
+	 * also runs with a historic snapshot set up, so assert that it is not.
+	 */
+	Assert(!HistoricSnapshotActive());
+
+	/*
+	 * The aborting subxact is the one that acquired the slot, so the slot is
+	 * still held and must be released. MyReplicationSlotSubId is set only
+	 * when a slot is held and cleared when it is released, so a matching
+	 * subxact id means the slot is ours.
+	 */
+	ReplicationSlotRelease();
+
+	/*
+	 * Also drop this session's temporary slots, as the top-level error
+	 * handler in PostgresMain() does (keep the two in sync). Otherwise a
+	 * temporary slot could be left behind holding back WAL removal and the
+	 * catalog xmin after an error.
+	 *
+	 * Note that this only runs when the aborting subxact held a slot. A
+	 * caught error that held no slot (for example an unrelated error caught
+	 * by a PL/pgSQL EXCEPTION clause) does not drop the session's temporary
+	 * slots, unlike a top-level error, which always does. Covering that too
+	 * would mean running the cleanup on every aborting subxact, which is
+	 * harder to reason about, so it is kept here after the release.
+	 *
+	 * Note also that we could instead keep the temporary slots and treat the
+	 * error as recoverable, since the subxact was caught and the session goes
+	 * on. But the error may be in the slot handling itself, leaving the slot
+	 * in a doubtful state, so dropping it is the safer choice.
+	 */
+	ReplicationSlotCleanup(false);
 }
 
 /*
@@ -1042,6 +1126,7 @@ ReplicationSlotDropAcquired(bool try_disable)
 
 	/* slot isn't acquired anymore */
 	MyReplicationSlot = NULL;
+	MyReplicationSlotSubId = InvalidSubTransactionId;
 
 	ReplicationSlotDropPtr(slot);
 
