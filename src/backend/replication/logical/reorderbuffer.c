@@ -385,15 +385,7 @@ ReorderBufferAllocate(void)
 	/* txn_heap is ordered by transaction size */
 	buffer->txn_heap = pairingheap_allocate(ReorderBufferTXNSizeCompare, NULL);
 
-	buffer->spillTxns = 0;
-	buffer->spillCount = 0;
-	buffer->spillBytes = 0;
-	buffer->streamTxns = 0;
-	buffer->streamCount = 0;
-	buffer->streamBytes = 0;
-	buffer->memExceededCount = 0;
-	buffer->totalTxns = 0;
-	buffer->totalBytes = 0;
+	MemSet(&buffer->stats, 0, sizeof(PgStat_ReplSlotStats));
 
 	buffer->current_restart_decoding_lsn = InvalidXLogRecPtr;
 
@@ -1469,7 +1461,7 @@ ReorderBufferIterTXNNext(ReorderBuffer *rb, ReorderBufferIterTXNState *state)
 		 * releasing the current set of changes and restoring the new set of
 		 * changes.
 		 */
-		rb->totalBytes += entry->txn->size;
+		rb->stats.total_bytes += entry->txn->size;
 		if (ReorderBufferRestoreChanges(rb, entry->txn, &entry->file,
 										&state->entries[off].segno))
 		{
@@ -2613,9 +2605,9 @@ ReorderBufferProcessTXN(ReorderBuffer *rb, ReorderBufferTXN *txn,
 		 * which we have already accounted in ReorderBufferIterTXNNext.
 		 */
 		if (!rbtxn_is_streamed(txn))
-			rb->totalTxns++;
+			rb->stats.total_txns++;
 
-		rb->totalBytes += txn->total_size;
+		rb->stats.total_bytes += txn->total_size;
 
 		/*
 		 * Done with current changes, send the last message for this set of
@@ -3925,7 +3917,7 @@ ReorderBufferCheckMemoryLimit(ReorderBuffer *rb)
 		 * update the slot statistics altogether while streaming or
 		 * serializing transactions in most cases.
 		 */
-		rb->memExceededCount += 1;
+		rb->stats.mem_exceeded_count += 1;
 	}
 	else if (debug_logical_replication_streaming == DEBUG_LOGICAL_REP_STREAMING_BUFFERED)
 	{
@@ -3996,7 +3988,7 @@ ReorderBufferCheckMemoryLimit(ReorderBuffer *rb)
 		Assert(txn->nentries_mem == 0);
 
 		/*
-		 * We've reported the memExceededCount update while streaming or
+		 * We've reported the mem_exceeded_count update while streaming or
 		 * serializing the transaction.
 		 */
 		update_stats = false;
@@ -4085,11 +4077,11 @@ ReorderBufferSerializeTXN(ReorderBuffer *rb, ReorderBufferTXN *txn)
 	/* update the statistics iff we have spilled anything */
 	if (spilled)
 	{
-		rb->spillCount += 1;
-		rb->spillBytes += size;
+		rb->stats.spill_count += 1;
+		rb->stats.spill_bytes += size;
 
 		/* don't consider already serialized transactions */
-		rb->spillTxns += (rbtxn_is_serialized(txn) || rbtxn_is_serialized_clear(txn)) ? 0 : 1;
+		rb->stats.spill_txns += (rbtxn_is_serialized(txn) || rbtxn_is_serialized_clear(txn)) ? 0 : 1;
 
 		/* update the decoding stats */
 		UpdateDecodingStats((LogicalDecodingContext *) rb->private_data);
@@ -4457,11 +4449,11 @@ ReorderBufferStreamTXN(ReorderBuffer *rb, ReorderBufferTXN *txn)
 	ReorderBufferProcessTXN(rb, txn, InvalidXLogRecPtr, snapshot_now,
 							command_id, true);
 
-	rb->streamCount += 1;
-	rb->streamBytes += stream_bytes;
+	rb->stats.stream_count += 1;
+	rb->stats.stream_bytes += stream_bytes;
 
 	/* Don't consider already streamed transaction. */
-	rb->streamTxns += (txn_is_streamed) ? 0 : 1;
+	rb->stats.stream_txns += (txn_is_streamed) ? 0 : 1;
 
 	/* update the decoding stats */
 	UpdateDecodingStats((LogicalDecodingContext *) rb->private_data);
