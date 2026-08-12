@@ -17,9 +17,13 @@
 
 #include "postgres.h"
 
+#include <limits.h>
+
 #include "fmgr.h"
 #include "miscadmin.h"
 #include "storage/shmem.h"
+#include "utils/guc.h"
+#include "utils/injection_point.h"
 
 
 PG_MODULE_MAGIC;
@@ -29,11 +33,14 @@ typedef struct TestShmemData
 	int			value;
 	bool		initialized;
 	int			attach_count;
+	char		variable_sized_array[FLEXIBLE_ARRAY_MEMBER];
 } TestShmemData;
 
 static TestShmemData *TestShmem;
 
 static bool attached_or_initialized = false;
+static int	test_shmem_area_size = sizeof(TestShmemData);
+static bool test_shmem_guc_defined = false;
 
 static void test_shmem_request(void *arg);
 static void test_shmem_init(void *arg);
@@ -52,7 +59,7 @@ test_shmem_request(void *arg)
 	elog(LOG, "test_shmem_request callback called");
 
 	ShmemRequestStruct(.name = "test_shmem area",
-					   .size = sizeof(TestShmemData),
+					   .size = test_shmem_area_size,
 					   .ptr = (void **) &TestShmem);
 }
 
@@ -60,6 +67,8 @@ static void
 test_shmem_init(void *arg)
 {
 	elog(LOG, "init callback called");
+	/* Induce an error while initializing shared structure. */
+	INJECTION_POINT("test-shmem-init", NULL);
 	if (TestShmem->initialized)
 		elog(ERROR, "shmem area already initialized");
 	TestShmem->initialized = true;
@@ -86,6 +95,21 @@ void
 _PG_init(void)
 {
 	elog(LOG, "test_shmem module's _PG_init called");
+
+	if (!test_shmem_guc_defined)
+	{
+		DefineCustomIntVariable("test_shmem.area_size",
+								"Size of the shmem area to request.",
+								NULL,
+								&test_shmem_area_size,
+								sizeof(TestShmemData),
+								sizeof(TestShmemData), INT_MAX,
+								PGC_USERSET,
+								GUC_UNIT_BYTE,
+								NULL, NULL, NULL);
+		MarkGUCPrefixReserved("test_shmem");
+		test_shmem_guc_defined = true;
+	}
 	RegisterShmemCallbacks(&TestShmemCallbacks);
 }
 
