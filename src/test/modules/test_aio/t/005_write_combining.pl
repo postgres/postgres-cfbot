@@ -29,6 +29,7 @@ my $block_size = $node->safe_psql('postgres',
 test_checkpointer_combines_writes($node, $block_size);
 test_regular_backend_combines_writes($node, $block_size);
 test_eager_clean_combines_writes($node, $block_size);
+test_copy_from_combines_writes($node, $block_size);
 
 $node->stop();
 
@@ -184,6 +185,33 @@ sub allocate_until_blocks_clean
 
 	note "$label: allocated $allocated buffers to reach regular backend victims";
 	$psql->query_safe('SELECT pg_stat_force_next_flush()');
+}
+
+sub test_copy_from_combines_writes
+{
+	my ($node, $block_size) = @_;
+
+	$node->safe_psql(
+		'postgres', qq(
+	CREATE UNLOGGED TABLE wc_copy (id int, payload text);
+	CHECKPOINT;
+	));
+
+	# Feed the rows to "COPY ... FROM STDIN" inline on psql's stdin.
+	my $rows = 200000;
+	my $payload = '0' x 200;
+	my $copy_data = '';
+	$copy_data .= "$_\t$payload\n" for (1 .. $rows);
+
+	$node->safe_psql('postgres', "SELECT pg_stat_reset_shared('io')");
+	$node->safe_psql('postgres',
+		"COPY wc_copy FROM STDIN;\n" . $copy_data . "\\.\n");
+	$node->safe_psql('postgres', 'SELECT pg_stat_force_next_flush()');
+
+	assert_combined_writes($node, 'copy from', 'client backend', 'bulkwrite',
+		$block_size);
+	is($node->safe_psql('postgres', "SELECT count(*) FROM wc_copy"),
+		$rows, 'copy from inserted rows');
 }
 
 sub test_checkpointer_combines_writes
