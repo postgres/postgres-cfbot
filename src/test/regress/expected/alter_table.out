@@ -4836,6 +4836,107 @@ select indexrelid::regclass, indisclustered from pg_index
 (2 rows)
 
 drop table alttype_cluster;
+-- Partition indexes keep their names and clustered status when rebuilt
+-- through the parent.
+create table alttype_part (a int not null, b int) partition by range (a);
+create table alttype_part_child (a int not null, b int);
+create index alttype_part_child_custom_idx on alttype_part_child (a, b);
+create index alttype_part_idx on alttype_part (a, b);
+alter table alttype_part attach partition alttype_part_child
+  for values from (0) to (10);
+create index alttype_part_other_idx on alttype_part (b);
+alter table alttype_part_child cluster on alttype_part_child_custom_idx;
+alter table alttype_part alter column b type bigint;
+select indexrelid::regclass, indisclustered
+  from pg_index where indrelid = 'alttype_part_child'::regclass
+  order by indexrelid::regclass::text;
+          indexrelid           | indisclustered 
+-------------------------------+----------------
+ alttype_part_child_b_idx      | f
+ alttype_part_child_custom_idx | t
+(2 rows)
+
+drop table alttype_part;
+-- Names and clustered status are preserved throughout a multi-level
+-- partition index hierarchy.
+create table alttype_part_multi (a int, b int) partition by range (a);
+create index alttype_part_multi_idx on alttype_part_multi (a, b);
+create table alttype_part_multi_mid (a int, b int)
+  partition by range (a);
+create index alttype_part_multi_mid_custom_idx
+  on alttype_part_multi_mid (a, b);
+create table alttype_part_multi_cluster (a int, b int);
+create index alttype_part_multi_cluster_custom_idx
+  on alttype_part_multi_cluster (a, b);
+alter table alttype_part_multi_mid attach partition alttype_part_multi_cluster
+  for values from (0) to (10);
+create table alttype_part_multi_repack (a int, b int);
+create index alttype_part_multi_repack_custom_idx
+  on alttype_part_multi_repack (a, b);
+alter table alttype_part_multi_mid attach partition alttype_part_multi_repack
+  for values from (10) to (20);
+alter table alttype_part_multi attach partition alttype_part_multi_mid
+  for values from (0) to (100);
+cluster alttype_part_multi_cluster
+  using alttype_part_multi_cluster_custom_idx;
+repack alttype_part_multi_repack
+  using index alttype_part_multi_repack_custom_idx;
+alter table alttype_part_multi alter column b type bigint;
+select indexrelid::regclass, indisclustered
+  from pg_index
+  where indrelid in ('alttype_part_multi_mid'::regclass,
+                     'alttype_part_multi_cluster'::regclass,
+                     'alttype_part_multi_repack'::regclass)
+  order by indexrelid::regclass::text;
+              indexrelid               | indisclustered 
+---------------------------------------+----------------
+ alttype_part_multi_cluster_custom_idx | t
+ alttype_part_multi_mid_custom_idx     | f
+ alttype_part_multi_repack_custom_idx  | t
+(3 rows)
+
+drop table alttype_part_multi;
+-- Custom names of constraint indexes are preserved.
+create table alttype_part_constr (a int, b int)
+  partition by range (a);
+alter table alttype_part_constr
+  add constraint alttype_part_constr_key unique (a, b);
+create table alttype_part_constr_child (a int, b int);
+alter table alttype_part_constr_child
+  add constraint alttype_part_constr_child_custom_key unique (a, b);
+alter table alttype_part_constr attach partition alttype_part_constr_child
+  for values from (0) to (10);
+alter table alttype_part_constr alter column b type bigint;
+select conname, conindid::regclass
+  from pg_constraint
+  where conrelid = 'alttype_part_constr_child'::regclass
+    and contype = 'u';
+               conname                |               conindid               
+--------------------------------------+--------------------------------------
+ alttype_part_constr_child_custom_key | alttype_part_constr_child_custom_key
+(1 row)
+
+drop table alttype_part_constr;
+-- SET EXPRESSION preserves custom partition index names too.
+create table alttype_part_expr
+  (a int, b int generated always as (a * 2) stored)
+  partition by range (a);
+create table alttype_part_expr_child
+  (a int, b int generated always as (a * 2) stored);
+create index alttype_part_expr_child_custom_idx
+  on alttype_part_expr_child (b);
+create index alttype_part_expr_idx on alttype_part_expr (b);
+alter table alttype_part_expr attach partition alttype_part_expr_child
+  for values from (0) to (10);
+alter table alttype_part_expr alter column b set expression as (a * 3);
+select indexrelid::regclass
+  from pg_index where indrelid = 'alttype_part_expr_child'::regclass;
+             indexrelid             
+------------------------------------
+ alttype_part_expr_child_custom_idx
+(1 row)
+
+drop table alttype_part_expr;
 --
 -- Check that attaching or detaching a partitioned partition correctly leads
 -- to its partitions' constraint being updated to reflect the parent's
