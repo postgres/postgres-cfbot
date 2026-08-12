@@ -676,6 +676,7 @@ static void RememberWholeRowDependentForRebuilding(AlteredTableInfo *tab, AlterT
 static void RememberConstraintForRebuilding(Oid conoid, AlteredTableInfo *tab);
 static void RememberIndexForRebuilding(Oid indoid, AlteredTableInfo *tab);
 static void RememberStatisticsForRebuilding(Oid stxoid, AlteredTableInfo *tab);
+static List *GetIndexStatTargets(Oid indexOid);
 static void ATPostAlterTypeCleanup(List **wqueue, AlteredTableInfo *tab,
 								   LOCKMODE lockmode);
 static void ATPostAlterTypeParse(Oid oldId, Oid oldRelId, Oid refRelId, Oid ownerId,
@@ -16301,6 +16302,61 @@ ATPostAlterTypeCleanup(List **wqueue, AlteredTableInfo *tab, LOCKMODE lockmode)
 }
 
 /*
+ * Subroutine for ATPostAlterTypeParse().  Fetch the per-column statistics
+ * targets of the given index, as a list of integers with -1 standing for
+ * columns whose target is not set.  Returns NIL if no column has a target,
+ * which is the common case.
+ */
+static List *
+GetIndexStatTargets(Oid indexOid)
+{
+	List	   *result = NIL;
+	bool		found = false;
+	HeapTuple	reltup;
+	int			natts;
+
+	reltup = SearchSysCache1(RELOID, ObjectIdGetDatum(indexOid));
+	if (!HeapTupleIsValid(reltup))
+		elog(ERROR, "cache lookup failed for relation %u", indexOid);
+	natts = ((Form_pg_class) GETSTRUCT(reltup))->relnatts;
+	ReleaseSysCache(reltup);
+
+	for (AttrNumber attnum = 1; attnum <= natts; attnum++)
+	{
+		HeapTuple	tuple;
+		Datum		dat;
+		bool		isnull;
+
+		tuple = SearchSysCache2(ATTNUM,
+								ObjectIdGetDatum(indexOid),
+								Int16GetDatum(attnum));
+		if (!HeapTupleIsValid(tuple))
+			elog(ERROR, "cache lookup failed for attribute %d of relation %u",
+				 attnum, indexOid);
+
+		dat = SysCacheGetAttr(ATTNUM, tuple,
+							  Anum_pg_attribute_attstattarget, &isnull);
+		if (isnull)
+			result = lappend_int(result, -1);
+		else
+		{
+			result = lappend_int(result, (int) DatumGetInt16(dat));
+			found = true;
+		}
+
+		ReleaseSysCache(tuple);
+	}
+
+	if (!found)
+	{
+		list_free(result);
+		return NIL;
+	}
+
+	return result;
+}
+
+/*
  * Parse the previously-saved definition string for a constraint, index or
  * statistics object against the newly-established column data type(s), and
  * queue up the resulting command parsetrees for execution.
@@ -16392,6 +16448,8 @@ ATPostAlterTypeParse(Oid oldId, Oid oldRelId, Oid refRelId, Oid ownerId,
 			stmt->reset_default_tblspc = true;
 			/* keep the index's comment */
 			stmt->idxcomment = GetComment(oldId, RelationRelationId, 0);
+			/* keep any per-column statistics targets */
+			stmt->stattargets = GetIndexStatTargets(oldId);
 
 			newcmd = makeNode(AlterTableCmd);
 			newcmd->subtype = AT_ReAddIndex;
@@ -16421,6 +16479,8 @@ ATPostAlterTypeParse(Oid oldId, Oid oldRelId, Oid refRelId, Oid ownerId,
 					/* keep any comment on the index */
 					indstmt->idxcomment = GetComment(indoid,
 													 RelationRelationId, 0);
+					/* keep any per-column statistics targets */
+					indstmt->stattargets = GetIndexStatTargets(indoid);
 					indstmt->reset_default_tblspc = true;
 
 					cmd->subtype = AT_ReAddIndex;
