@@ -20,7 +20,6 @@ OBJS = \
 	backend_status.o \
 	pgstat.o \
 	pgstat_archiver.o \
-	pgstat_backend.o \
 	pgstat_bgwriter.o \
 	pgstat_checkpointer.o \
 	pgstat_database.o \
