@@ -1321,7 +1321,12 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
          </para>
 
          <para>
-          In a temporal foreign key, this option is not supported.
+          In a temporal foreign key, only the portion of the referenced
+          row's application time that is actually changed/removed is checked, not
+          its entire period.  An update or delete that leaves the referenced
+          instants intact is therefore allowed, for example an update that grows
+          the period or a delete that shrinks it but without losing any
+          referenced instants.
          </para>
         </listitem>
        </varlistentry>

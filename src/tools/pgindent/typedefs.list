@@ -3097,6 +3097,7 @@ TParserStateAction
 TParserStateActionItem
 TQueueDestReceiver
 TRGM
+TRI_SetContext
 TSAnyCacheEntry
 TSConfigCacheEntry
 TSConfigInfo
