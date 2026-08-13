@@ -2039,20 +2039,54 @@ ALTER TYPE test_type2 RENAME ATTRIBUTE a TO aa CASCADE;
 DROP TABLE test_tbl2_subclass, test_tbl2;
 DROP TYPE test_type2;
 
+-- Dropping an attribute is refused once a relation with storage has a column
+-- of the type, whether or not anything else depends on the attribute, and
+-- CASCADE does not override it.
 CREATE TYPE test_typex AS (a int, b text);
 CREATE TABLE test_tblx (x int, y test_typex check ((y).a > 0));
 ALTER TYPE test_typex DROP ATTRIBUTE a; -- fails
-ALTER TYPE test_typex DROP ATTRIBUTE a CASCADE;
+ALTER TYPE test_typex DROP ATTRIBUTE a CASCADE; -- fails
 \d test_tblx
 DROP TABLE test_tblx;
 DROP TYPE test_typex;
 
+-- Values of a composite type record only its OID and typmod, never the shape
+-- they were built with, so a stored value is read back against whatever the
+-- type looks like at read time.  Dropping an attribute would therefore make it
+-- disappear from values written before the drop, which is refused: values that
+-- were distinct would become equal, and where the column carries a unique
+-- index the table would be left holding data that violates it and that the
+-- index can no longer be rebuilt from.
+CREATE TYPE test_stored AS (a int, b int);
+CREATE TABLE test_stored_tbl (v test_stored);
+CREATE UNIQUE INDEX test_stored_tbl_v ON test_stored_tbl (v);
+INSERT INTO test_stored_tbl VALUES (ROW(1, 2)::test_stored),
+                                   (ROW(1, 3)::test_stored);
+ALTER TYPE test_stored DROP ATTRIBUTE b; -- fails
+-- still two distinct values, and the index still rebuilds from them
+SELECT count(DISTINCT v) FROM test_stored_tbl;
+REINDEX INDEX test_stored_tbl_v;
+-- once nothing stores the type, dropping the attribute is allowed again
+DROP TABLE test_stored_tbl;
+ALTER TYPE test_stored DROP ATTRIBUTE b;
+DROP TYPE test_stored;
+
+-- The same applies to a table's row type, which is a composite type too.
+CREATE TABLE test_rowtype (a int, b int);
+CREATE TABLE test_rowtype_ref (v test_rowtype);
+ALTER TABLE test_rowtype DROP COLUMN b; -- fails
+DROP TABLE test_rowtype_ref;
+ALTER TABLE test_rowtype DROP COLUMN b;
+DROP TABLE test_rowtype;
+
 -- This test isn't that interesting on its own, but the purpose is to leave
 -- behind a table to test pg_upgrade with. The table has a composite type
--- column in it, and the composite type has a dropped attribute.
+-- column in it, and the composite type has a dropped attribute.  The attribute
+-- is dropped before the table is created, since it could not be dropped
+-- afterwards.
 CREATE TYPE test_type3 AS (a int);
-CREATE TABLE test_tbl3 (c) AS SELECT '(1)'::test_type3;
 ALTER TYPE test_type3 DROP ATTRIBUTE a, ADD ATTRIBUTE b int;
+CREATE TABLE test_tbl3 (c) AS SELECT '(1)'::test_type3;
 
 CREATE TYPE test_type_empty AS ();
 DROP TYPE test_type_empty;
