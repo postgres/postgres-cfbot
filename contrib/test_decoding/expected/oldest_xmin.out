@@ -10,7 +10,7 @@ f
 
 step s1_begin: BEGIN;
 step s1_insert: INSERT INTO harvest VALUES ((1, 2, 3));
-step s0_alter: ALTER TYPE basket DROP ATTRIBUTE mangos;
+step s0_alter: ALTER TYPE basket RENAME ATTRIBUTE mangos TO plums;
 step s0_commit: COMMIT;
 step s0_checkpoint: CHECKPOINT;
 step s0_get_changes: SELECT data FROM pg_logical_slot_get_changes('isolation_slot', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1');
@@ -49,7 +49,7 @@ f
 
 step s1_begin: BEGIN;
 step s1_insert: INSERT INTO harvest VALUES ((1, 2, 3));
-step s0_alter: ALTER TYPE basket DROP ATTRIBUTE mangos;
+step s0_alter: ALTER TYPE basket RENAME ATTRIBUTE mangos TO plums;
 step s0_commit: COMMIT;
 step s0_checkpoint: CHECKPOINT;
 step s0_advance_slot: SELECT slot_name FROM pg_replication_slot_advance('isolation_slot', pg_current_wal_lsn());
