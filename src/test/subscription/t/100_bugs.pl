@@ -79,6 +79,116 @@ $node_publisher->stop('fast');
 $node_subscriber->stop('fast');
 
 
+# Replicating changes to a partition whose concurrent detach never finished.
+
+# Between the two transactions of ALTER TABLE ... DETACH PARTITION ...
+# CONCURRENTLY, pg_class still says relispartition while
+# get_partition_ancestors() already reports nothing, and get_rel_sync_entry()
+# crashed on that; for a subscription that is a crash loop.  The state outlives
+# the command: only DETACH PARTITION ... FINALIZE clears it.
+
+$node_publisher->append_conf('postgresql.conf',
+	'max_prepared_transactions = 1');
+$node_publisher->rotate_logfile();
+$node_publisher->start();
+$node_subscriber->rotate_logfile();
+$node_subscriber->start();
+
+my $detach_ddl = q[
+	CREATE TABLE parted (a int, b int) PARTITION BY LIST (a);
+	CREATE TABLE part1 PARTITION OF parted FOR VALUES IN (1);
+	CREATE TABLE part2 PARTITION OF parted FOR VALUES IN (2);
+];
+$node_publisher->safe_psql('postgres', $detach_ddl);
+$node_subscriber->safe_psql('postgres', $detach_ddl);
+
+$node_publisher->safe_psql(
+	'postgres', q[
+	CREATE PUBLICATION pub_detach FOR ALL TABLES
+		WITH (publish_via_partition_root = true);
+]);
+$node_subscriber->safe_psql('postgres',
+	"CREATE SUBSCRIPTION sub_detach CONNECTION '$publisher_connstr' PUBLICATION pub_detach"
+);
+$node_subscriber->wait_for_subscription_sync($node_publisher, 'sub_detach');
+
+$node_publisher->safe_psql('postgres',
+	'INSERT INTO parted VALUES (1, 1), (2, 1)');
+$node_publisher->wait_for_catchup('sub_detach');
+
+is( $node_subscriber->safe_psql(
+		'postgres', 'SELECT * FROM parted ORDER BY a, b'),
+	"1|1\n2|1",
+	'both partitions replicate while attached');
+
+# Leave part1 pending detach: a prepared transaction holds the snapshot the
+# detach waits for, so the wait ends in the lock timeout.
+$node_publisher->safe_psql('postgres',
+	q[BEGIN; SELECT count(*) FROM parted; PREPARE TRANSACTION 'holder';]);
+{
+	local $ENV{PGOPTIONS} = '-c lock_timeout=1s';
+	$node_publisher->psql(
+		'postgres',
+		'ALTER TABLE parted DETACH PARTITION part1 CONCURRENTLY',
+		on_error_stop => 0);
+}
+$node_publisher->safe_psql('postgres', q[ROLLBACK PREPARED 'holder']);
+
+is( $node_publisher->safe_psql(
+		'postgres', q[
+		SELECT inhdetachpending FROM pg_inherits
+		WHERE inhrelid = 'part1'::regclass]),
+	't',
+	'the partition is marked as detaching');
+
+# Changes nothing; drops the walsender's cached mapping.
+$node_publisher->safe_psql('postgres',
+	'ALTER PUBLICATION pub_detach SET (publish_via_partition_root = true)');
+
+# Use another slot to check which changes pgoutput sends, independently of
+# whether the subscriber applies them.
+$node_publisher->safe_psql('postgres',
+	q[SELECT pg_create_logical_replication_slot('detach_slot', 'pgoutput')]);
+
+# This is what crashed.  The part1 change is sent using part1's identity, but
+# the subscriber skips it because only parted is registered in
+# pg_subscription_rel.  The following change shows decoding got past it.
+$node_publisher->safe_psql(
+	'postgres', q[
+	INSERT INTO part1 VALUES (1, 2);
+	INSERT INTO parted VALUES (2, 2);
+]);
+$node_publisher->wait_for_catchup('sub_detach');
+
+is( $node_subscriber->safe_psql(
+		'postgres', 'SELECT * FROM parted ORDER BY a, b'),
+	"1|1\n2|1\n2|2",
+	'replication got past the partition pending detach');
+
+# In protocol version 1, an Insert message starts with 'I' followed by the
+# relation OID.  Verify that pgoutput sends the change using part1's identity.
+is( $node_publisher->safe_psql(
+		'postgres', q[
+		SELECT count(*)
+		FROM pg_logical_slot_peek_binary_changes('detach_slot', NULL, NULL,
+			'proto_version', '1', 'publication_names', 'pub_detach')
+		WHERE get_byte(data, 0) = ascii('I')
+			AND substring(data FROM 2 FOR 4) = int4send('part1'::regclass::oid::int)]),
+	'1',
+	'the change is sent as the partition pending detach');
+$node_publisher->safe_psql('postgres',
+	q[SELECT pg_drop_replication_slot('detach_slot')]);
+
+# Drop replication state and the tables, as the tests below re-use the nodes.
+$node_subscriber->safe_psql('postgres', "DROP SUBSCRIPTION sub_detach");
+$node_publisher->safe_psql('postgres', "DROP PUBLICATION pub_detach");
+$node_publisher->safe_psql('postgres', "DROP TABLE parted, part1");
+$node_subscriber->safe_psql('postgres', "DROP TABLE parted");
+
+$node_publisher->stop('fast');
+$node_subscriber->stop('fast');
+
+
 # Handling of temporary and unlogged tables with FOR ALL TABLES publications
 
 # If a FOR ALL TABLES publication exists, temporary and unlogged
