@@ -120,15 +120,14 @@ SELECT id, name, fixed_amount,
   4 | function     | f            | f         | t
   5 | replslot     | f            | t         | t
   6 | subscription | f            | t         | t
-  7 | backend      | f            | t         | f
-  8 | archiver     | t            | f         | t
-  9 | bgwriter     | t            | f         | t
- 10 | checkpointer | t            | f         | t
- 11 | io           | t            | f         | t
- 12 | lock         | t            | f         | t
- 13 | slru         | t            | f         | t
- 14 | wal          | t            | f         | t
-(14 rows)
+  7 | archiver     | t            | f         | t
+  8 | bgwriter     | t            | f         | t
+  9 | checkpointer | t            | f         | t
+ 10 | io           | t            | f         | t
+ 11 | lock         | t            | f         | t
+ 12 | slru         | t            | f         | t
+ 13 | wal          | t            | f         | t
+(13 rows)
 
 -- ensure that both seqscan and indexscan plans are allowed
 SET enable_seqscan TO on;
