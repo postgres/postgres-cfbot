@@ -2688,7 +2688,7 @@ again:
 
 		/* OK, do the I/O */
 		FlushBuffer(buf_hdr, NULL, IOOBJECT_RELATION, io_context);
-		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+		BufferLockUnlock(buf, buf_hdr);
 
 		ScheduleBufferTagForWriteback(&BackendWritebackContext, io_context,
 									  &buf_hdr->tag);
@@ -7034,7 +7034,7 @@ LockBufferForCleanup(Buffer buffer)
 		if (buf_state & BM_PIN_COUNT_WAITER)
 		{
 			UnlockBufHdr(bufHdr);
-			LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
+			BufferLockUnlock(buffer, bufHdr);
 			elog(ERROR, "multiple backends attempting to wait for pincount 1");
 		}
 		bufHdr->wait_backend_pgprocno = MyProcNumber;
@@ -7065,7 +7065,7 @@ LockBufferForCleanup(Buffer buffer)
 		}
 
 		UnlockBufHdr(bufHdr);
-		LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
+		BufferLockUnlock(buffer, bufHdr);
 
 		/* Wait to be signaled by UnpinBuffer() */
 		if (InHotStandby)
@@ -7233,7 +7233,7 @@ ConditionalLockBufferForCleanup(Buffer buffer)
 
 	/* Failed, so release the lock */
 	UnlockBufHdr(bufHdr);
-	LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
+	BufferLockUnlock(buffer, bufHdr);
 	return false;
 }
 
