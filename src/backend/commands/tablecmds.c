@@ -507,11 +507,16 @@ static void ATTypedTableRecursion(List **wqueue, Relation rel, AlterTableCmd *cm
 								  AlterTableUtilityContext *context);
 static List *find_typed_table_dependencies(Oid typeOid, const char *typeName,
 										   DropBehavior behavior);
+static void find_composite_type_dependencies_ext(Oid typeOid, Relation origRelation,
+												 const char *origTypeName, bool for_drop);
 static void find_composite_type_dependencies_recurse(Oid typeOid, Relation origRelation,
-													 const char *origTypeName, HTAB *visited);
+													 const char *origTypeName, HTAB *visited,
+													 bool for_drop);
 static void check_composite_type_dependency(ObjectAddress *depobj, Oid typeOid,
 											Relation origRelation, const char *origTypeName,
-											HTAB *visited);
+											HTAB *visited, bool for_drop);
+static bool expr_holds_value_of_type(Node *expr, Oid typeOid);
+static bool expr_holds_value_of_type_walker(Node *node, Oid *typeOid);
 static void report_type_used_in_column(const char *relname, const char *attname,
 									   Relation origRelation, const char *origTypeName);
 static void report_type_used_in_expr(const ObjectAddress *obj, Relation origRelation,
@@ -7039,6 +7044,29 @@ void
 find_composite_type_dependencies(Oid typeOid, Relation origRelation,
 								 const char *origTypeName)
 {
+	find_composite_type_dependencies_ext(typeOid, origRelation, origTypeName,
+										 false);
+}
+
+/*
+ * find_composite_type_dependencies_for_drop
+ *
+ * Like find_composite_type_dependencies, but for dropping an attribute.  Only
+ * stored values of the type matter; mere references to it in function
+ * defaults and SQL bodies don't.
+ */
+void
+find_composite_type_dependencies_for_drop(Oid typeOid, Relation origRelation,
+										  const char *origTypeName)
+{
+	find_composite_type_dependencies_ext(typeOid, origRelation, origTypeName,
+										 true);
+}
+
+static void
+find_composite_type_dependencies_ext(Oid typeOid, Relation origRelation,
+									 const char *origTypeName, bool for_drop)
+{
 	HASHCTL		hctl;
 	HTAB	   *visited;
 
@@ -7053,7 +7081,7 @@ find_composite_type_dependencies(Oid typeOid, Relation origRelation,
 						  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 
 	find_composite_type_dependencies_recurse(typeOid, origRelation, origTypeName,
-											 visited);
+											 visited, for_drop);
 
 	/*
 	 * We used to not record pg_depend entries in some cases where we really
@@ -7070,7 +7098,8 @@ find_composite_type_dependencies(Oid typeOid, Relation origRelation,
  */
 static void
 find_composite_type_dependencies_recurse(Oid typeOid, Relation origRelation,
-										 const char *origTypeName, HTAB *visited)
+										 const char *origTypeName, HTAB *visited,
+										 bool for_drop)
 {
 	Relation	depRel;
 	ScanKeyData key[2];
@@ -7124,7 +7153,7 @@ find_composite_type_dependencies_recurse(Oid typeOid, Relation origRelation,
 							pg_depend->objsubid);
 
 		check_composite_type_dependency(&depobj, typeOid, origRelation, origTypeName,
-										visited);
+										visited, for_drop);
 	}
 
 	systable_endscan(depScan);
@@ -7152,7 +7181,7 @@ find_composite_type_dependencies_recurse(Oid typeOid, Relation origRelation,
 static void
 check_composite_type_dependency(ObjectAddress *depobj, Oid typeOid,
 								Relation origRelation, const char *origTypeName,
-								HTAB *visited)
+								HTAB *visited, bool for_drop)
 {
 	Oid			classid = depobj->classId;
 	Oid			objid = depobj->objectId;
@@ -7204,14 +7233,20 @@ check_composite_type_dependency(ObjectAddress *depobj, Oid typeOid,
 			if (!HeapTupleIsValid(catalog_tup))
 				elog(ERROR, "cache lookup failed for function %u", objid);
 
-			/* Is it used in the argument DEFAULTs? */
+			/*
+			 * Is it used in the argument DEFAULTs or the SQL body?  For a
+			 * drop, only values of the type count.
+			 */
 			expr = get_node_tree_attr(PROCOID, catalog_tup, Anum_pg_proc_proargdefaults);
-			if (expr && CheckTypeDependencyInExpr(expr, NIL, typeOid))
+			if (expr &&
+				(for_drop ? expr_holds_value_of_type(expr, typeOid) :
+				 CheckTypeDependencyInExpr(expr, NIL, typeOid)))
 				report_type_used_in_expr(depobj, origRelation, origTypeName);
 
-			/* Is it used in the SQL body? */
 			expr = get_node_tree_attr(PROCOID, catalog_tup, Anum_pg_proc_prosqlbody);
-			if (expr && CheckTypeDependencyInExpr(expr, NIL, typeOid))
+			if (expr &&
+				(for_drop ? expr_holds_value_of_type(expr, typeOid) :
+				 CheckTypeDependencyInExpr(expr, NIL, typeOid)))
 				report_type_used_in_expr(depobj, origRelation, origTypeName);
 
 			/*
@@ -7267,7 +7302,7 @@ check_composite_type_dependency(ObjectAddress *depobj, Oid typeOid,
 			 */
 			find_composite_type_dependencies_recurse(objid,
 													 origRelation, origTypeName,
-													 visited);
+													 visited, for_drop);
 
 			/*
 			 * A domain's default expression can embed a Const of the altered
@@ -7368,7 +7403,7 @@ check_composite_type_dependency(ObjectAddress *depobj, Oid typeOid,
 					 */
 					find_composite_type_dependencies_recurse(rel->rd_rel->reltype,
 															 origRelation, origTypeName,
-															 visited);
+															 visited, for_drop);
 				}
 			}
 
@@ -7516,6 +7551,35 @@ check_composite_type_dependency(ObjectAddress *depobj, Oid typeOid,
 			report_type_used_in_expr(depobj, origRelation, origTypeName);
 			break;
 	}
+}
+
+/*
+ * expr_holds_value_of_type
+ *
+ * Does the expression or SQL-function body contain a constant or ROW()
+ * constructor of the given type?
+ */
+static bool
+expr_holds_value_of_type(Node *expr, Oid typeOid)
+{
+	return expr_holds_value_of_type_walker(expr, &typeOid);
+}
+
+static bool
+expr_holds_value_of_type_walker(Node *node, Oid *typeOid)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Const))
+		return ((Const *) node)->consttype == *typeOid;
+	if (IsA(node, RowExpr) && ((RowExpr *) node)->row_typeid == *typeOid)
+		return true;
+	if (IsA(node, Query))
+		return query_tree_walker((Query *) node,
+								 expr_holds_value_of_type_walker,
+								 typeOid, 0);
+	return expression_tree_walker(node, expr_holds_value_of_type_walker,
+								  typeOid);
 }
 
 /*
