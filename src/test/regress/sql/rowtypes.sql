@@ -684,10 +684,11 @@ BEGIN
   RETURN 12345;
 END $$;
 
--- assign to v.b while b is dropped - the value disappears
+-- assign to v.b while trying to drop b - the drop is refused, as
+-- compositetable_holder stores values of the row type
 UPDATE compositetable_holder SET v.b = compositetable_drop();
 
--- 12345 is nowhere to be found
+-- the stored value is unchanged
 SELECT v::text AS stored_value FROM compositetable_holder;
 
 DROP FUNCTION compositetable_drop();

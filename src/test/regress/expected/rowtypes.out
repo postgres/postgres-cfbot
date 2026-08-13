@@ -1528,13 +1528,17 @@ BEGIN
   EXECUTE 'ALTER TABLE compositetable_type_1 DROP COLUMN b';
   RETURN 12345;
 END $$;
--- assign to v.b while b is dropped - the value disappears
+-- assign to v.b while trying to drop b - the drop is refused, as
+-- compositetable_holder stores values of the row type
 UPDATE compositetable_holder SET v.b = compositetable_drop();
--- 12345 is nowhere to be found
+ERROR:  cannot alter table "compositetable_type_1" because column "compositetable_holder.v" uses its row type
+CONTEXT:  SQL statement "ALTER TABLE compositetable_type_1 DROP COLUMN b"
+PL/pgSQL function compositetable_drop() line 3 at EXECUTE
+-- the stored value is unchanged
 SELECT v::text AS stored_value FROM compositetable_holder;
  stored_value 
 --------------
- (1)
+ (1,2)
 (1 row)
 
 DROP FUNCTION compositetable_drop();

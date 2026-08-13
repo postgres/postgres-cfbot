@@ -183,7 +183,7 @@ SELECT rownum, r, (r).c1 FROM atcomp_inc_ref ORDER BY rownum;
  3      | (3,30,300) |  3
 (3 rows)
 
--- Store composites with columns that are then subsequently removed
+-- Store composites of row types that subsequently lose columns
 CREATE TABLE attdrop_tail (t1 int, t2 text, t3 int8, t4 float8);
 CREATE TABLE attdrop_mid (m1 int, m2 text, m3 int8, m4 float8);
 CREATE TABLE attdrop_tozero (z1 int);
@@ -204,22 +204,33 @@ SELECT key, tail, mid, tozero, toadd, (tail).*, (mid).*, (tozero).*, (toadd).* F
  r4-null-rows   |           |           |        |       |    |    |    |    |    |    |    |    |    |    |   
 (4 rows)
 
--- while at it, make sure this works not just for top-level SQL, but also
--- plpgsql, by doing the drop inside a DO block.
+-- Dropping a column is refused while a table stores values of its row type,
+-- as the column would disappear from the stored values.
+ALTER TABLE attdrop_tail DROP COLUMN t4; -- fails
+ERROR:  cannot alter table "attdrop_tail" because column "attdrop_test.tail" uses its row type
+ALTER TABLE attdrop_toadd DROP COLUMN a2; -- fails
+ERROR:  cannot alter table "attdrop_toadd" because column "attdrop_test.toadd" uses its row type
+-- Values held outside of tables, here in plpgsql variables, can still outlive
+-- a drop.  Make sure that such values, formed before the drop, can still be
+-- deformed after it: load them, drop the table storing the row types, and then
+-- drop the columns.
+CREATE TYPE attdrop_rec AS (key text, tail attdrop_tail, mid attdrop_mid, tozero attdrop_tozero, toadd attdrop_toadd);
 DO $$
 DECLARE
-    r1 attdrop_test;
+    r1 attdrop_rec;
     r2 record;
-    r3 attdrop_test;
+    r3 attdrop_rec;
     r3_t attdrop_tail;
     r3_m attdrop_mid;
     r3_z attdrop_tozero;
     r3_a attdrop_toadd;
 BEGIN
-    r1 = at FROM attdrop_test at WHERE key = 'r1-all-present';
+    r1 = ROW(at.key, at.tail, at.mid, at.tozero, at.toadd)::attdrop_rec
+      FROM attdrop_test at WHERE key = 'r1-all-present';
     SELECT * INTO r2 FROM attdrop_test t WHERE key = 'r2-some-nulls';
 
-    r3 = at FROM attdrop_test at WHERE key = 'r3-other-nulls';
+    r3 = ROW(at.key, at.tail, at.mid, at.tozero, at.toadd)::attdrop_rec
+      FROM attdrop_test at WHERE key = 'r3-other-nulls';
     r3_t = tail FROM attdrop_test at WHERE key = 'r3-other-nulls';
     r3_m = r3.mid;
     r3_z = r3.tozero;
@@ -230,6 +241,8 @@ BEGIN
     RAISE NOTICE 'r2 before drop: %', r2;
     RAISE NOTICE 'r3 before drop: %', r3;
     RAISE NOTICE 'r3_* before drop: t: %, m: %, z: %, a: %', r3_t, r3_m, r3_z, r3_a;
+
+    DROP TABLE attdrop_test;
 
     ALTER TABLE attdrop_tail DROP COLUMN t4;
     ALTER TABLE attdrop_mid DROP COLUMN m3;
@@ -251,50 +264,41 @@ NOTICE:  r1 after drop: (r1-all-present,"(1,1,1)","(1,1,1)","()","(1)")
 NOTICE:  r2 after drop: (r2-some-nulls,"(2,,2)","(,2,2)","()","(2)")
 NOTICE:  r3 after drop: (r3-other-nulls,"(,3,)","(3,,)","()","(3)")
 NOTICE:  r3_* after drop: t: (,3,), m: (3,,), z: (), a: (3)
--- show plain executor after drop
-SELECT key, tail, mid, tozero, toadd, (tail).*, (mid).*, (tozero).*, (toadd).* FROM attdrop_test ORDER BY key;
-      key       |  tail   |   mid   | tozero | toadd | t1 | t2 | t3 | m1 | m2 | m4 | a1 
-----------------+---------+---------+--------+-------+----+----+----+----+----+----+----
- r1-all-present | (1,1,1) | (1,1,1) | ()     | (1)   |  1 | 1  |  1 |  1 | 1  |  1 |  1
- r2-some-nulls  | (2,,2)  | (,2,2)  | ()     | (2)   |  2 |    |  2 |    | 2  |  2 |  2
- r3-other-nulls | (,3,)   | (3,,)   | ()     | (3)   |    | 3  |    |  3 |    |    |  3
- r4-null-rows   |         |         |        |       |    |    |    |    |    |    |   
-(4 rows)
-
--- check that updating the datums works after the drop, and that a new rows look right too
-UPDATE attdrop_test SET tail.t1 = -(tail).t1, mid.m4 = -1, toadd.a1 = -(toadd).a1 WHERE key = 'r1-all-present';
+-- Store values of the narrowed row types, and check that they, and updates
+-- to them, look right.  The table is left behind to test pg_upgrade with row
+-- types that have dropped columns.
+CREATE TABLE attdrop_test(key text, tail attdrop_tail, mid attdrop_mid, tozero attdrop_tozero, toadd attdrop_toadd);
 INSERT INTO attdrop_test(key, tail, mid, tozero, toadd) VALUES
+   ('r4-null-rows', NULL, NULL, NULL, NULL),
    ('r5-post-drop-1', ROW(5, 5, 5), ROW(5, 5, 5), ROW(), ROW(5)),
-   ('r6-post-drop-2', ROW(6, 6, 6), ROW(6, 6, 6), ROW(), ROW(6));
+   ('r6-post-drop-2', ROW(6, NULL, 6), ROW(NULL, 6, NULL), ROW(), ROW(6));
+UPDATE attdrop_test SET tail.t1 = -(tail).t1, mid.m4 = -1, toadd.a1 = -(toadd).a1 WHERE key = 'r5-post-drop-1';
 SELECT key, tail, mid, tozero, toadd, (tail).*, (mid).*, (tozero).*, (toadd).* FROM attdrop_test ORDER BY key;
       key       |   tail   |   mid    | tozero | toadd | t1 | t2 | t3 | m1 | m2 | m4 | a1 
 ----------------+----------+----------+--------+-------+----+----+----+----+----+----+----
- r1-all-present | (-1,1,1) | (1,1,-1) | ()     | (-1)  | -1 | 1  |  1 |  1 | 1  | -1 | -1
- r2-some-nulls  | (2,,2)   | (,2,2)   | ()     | (2)   |  2 |    |  2 |    | 2  |  2 |  2
- r3-other-nulls | (,3,)    | (3,,)    | ()     | (3)   |    | 3  |    |  3 |    |    |  3
  r4-null-rows   |          |          |        |       |    |    |    |    |    |    |   
- r5-post-drop-1 | (5,5,5)  | (5,5,5)  | ()     | (5)   |  5 | 5  |  5 |  5 | 5  |  5 |  5
- r6-post-drop-2 | (6,6,6)  | (6,6,6)  | ()     | (6)   |  6 | 6  |  6 |  6 | 6  |  6 |  6
-(6 rows)
+ r5-post-drop-1 | (-5,5,5) | (5,5,-1) | ()     | (-5)  | -5 | 5  |  5 |  5 | 5  | -1 | -5
+ r6-post-drop-2 | (6,,6)   | (,6,)    | ()     | (6)   |  6 |    |  6 |    | 6  |    |  6
+(3 rows)
 
--- add a new column, insert row, drop another set of columns
+-- Adding a column is still allowed while values are stored; the stored values
+-- read as NULL for it.  Dropping one is refused again.
 ALTER TABLE attdrop_toadd ADD COLUMN a3 int;
-ALTER TABLE attdrop_tail DROP COLUMN t3;
-ALTER TABLE attdrop_mid DROP COLUMN m2;
+ALTER TABLE attdrop_tail DROP COLUMN t3; -- fails
+ERROR:  cannot alter table "attdrop_tail" because column "attdrop_test.tail" uses its row type
+ALTER TABLE attdrop_mid DROP COLUMN m2; -- fails
+ERROR:  cannot alter table "attdrop_mid" because column "attdrop_test.mid" uses its row type
 INSERT INTO attdrop_test(key, tail, mid, tozero, toadd) VALUES
-   ('r7-post-add', ROW(7, 7), ROW(7, 7), ROW(), ROW(7, 77));
-UPDATE attdrop_test SET tail.t2 = (tail).t2||'-u', mid.m4 = -2, toadd.a1 = -(toadd).a1, toadd.a3 = 23 WHERE key = 'r2-some-nulls';
+   ('r7-post-add', ROW(7, 7, 7), ROW(7, 7, 7), ROW(), ROW(7, 77));
+UPDATE attdrop_test SET tail.t2 = (tail).t2||'-u', mid.m4 = -2, toadd.a1 = -(toadd).a1, toadd.a3 = 23 WHERE key = 'r6-post-drop-2';
 SELECT key, tail, mid, tozero, toadd, (tail).*, (mid).*, (tozero).*, (toadd).* FROM attdrop_test ORDER BY key;
-      key       |  tail  |  mid   | tozero |  toadd  | t1 | t2 | m1 | m4 | a1 | a3 
-----------------+--------+--------+--------+---------+----+----+----+----+----+----
- r1-all-present | (-1,1) | (1,-1) | ()     | (-1,)   | -1 | 1  |  1 | -1 | -1 |   
- r2-some-nulls  | (2,)   | (,-2)  | ()     | (-2,23) |  2 |    |    | -2 | -2 | 23
- r3-other-nulls | (,3)   | (3,)   | ()     | (3,)    |    | 3  |  3 |    |  3 |   
- r4-null-rows   |        |        |        |         |    |    |    |    |    |   
- r5-post-drop-1 | (5,5)  | (5,5)  | ()     | (5,)    |  5 | 5  |  5 |  5 |  5 |   
- r6-post-drop-2 | (6,6)  | (6,6)  | ()     | (6,)    |  6 | 6  |  6 |  6 |  6 |   
- r7-post-add    | (7,7)  | (7,7)  | ()     | (7,77)  |  7 | 7  |  7 |  7 |  7 | 77
-(7 rows)
+      key       |   tail   |   mid    | tozero |  toadd  | t1 | t2 | t3 | m1 | m2 | m4 | a1 | a3 
+----------------+----------+----------+--------+---------+----+----+----+----+----+----+----+----
+ r4-null-rows   |          |          |        |         |    |    |    |    |    |    |    |   
+ r5-post-drop-1 | (-5,5,5) | (5,5,-1) | ()     | (-5,)   | -5 | 5  |  5 |  5 | 5  | -1 | -5 |   
+ r6-post-drop-2 | (6,,6)   | (,6,-2)  | ()     | (-6,23) |  6 |    |  6 |    | 6  | -2 | -6 | 23
+ r7-post-add    | (7,7,7)  | (7,7,7)  | ()     | (7,77)  |  7 | 7  |  7 |  7 | 7  |  7 |  7 | 77
+(4 rows)
 
 -- Adding a column to a view goes through ATExecAddColumn; make sure that
 -- composite tuples using that row type can be deformed correctly.
@@ -3661,29 +3665,88 @@ Inherits:
 
 DROP TABLE test_tbl2_subclass, test_tbl2;
 DROP TYPE test_type2;
+-- Dropping an attribute is refused once a relation with storage has a column
+-- of the type, whether or not anything else depends on the attribute, and
+-- CASCADE does not override it.
 CREATE TYPE test_typex AS (a int, b text);
 CREATE TABLE test_tblx (x int, y test_typex check ((y).a > 0));
 ALTER TYPE test_typex DROP ATTRIBUTE a; -- fails
-ERROR:  cannot drop column a of composite type test_typex because other objects depend on it
-DETAIL:  constraint test_tblx_y_check on table test_tblx depends on column a of composite type test_typex
-HINT:  Use DROP ... CASCADE to drop the dependent objects too.
-ALTER TYPE test_typex DROP ATTRIBUTE a CASCADE;
-NOTICE:  drop cascades to constraint test_tblx_y_check on table test_tblx
+ERROR:  cannot alter type "test_typex" because column "test_tblx.y" uses it
+ALTER TYPE test_typex DROP ATTRIBUTE a CASCADE; -- fails
+ERROR:  cannot alter type "test_typex" because column "test_tblx.y" uses it
 \d test_tblx
                Table "public.test_tblx"
  Column |    Type    | Collation | Nullable | Default 
 --------+------------+-----------+----------+---------
  x      | integer    |           |          | 
  y      | test_typex |           |          | 
+Check constraints:
+    "test_tblx_y_check" CHECK ((y).a > 0)
 
 DROP TABLE test_tblx;
 DROP TYPE test_typex;
+-- Values of a composite type record only its OID and typmod, never the shape
+-- they were built with, so a stored value is read back against whatever the
+-- type looks like at read time.  Dropping an attribute would therefore make it
+-- disappear from values written before the drop, which is refused: values that
+-- were distinct would become equal, and where the column carries a unique
+-- index the table would be left holding data that violates it and that the
+-- index can no longer be rebuilt from.
+CREATE TYPE test_stored AS (a int, b int);
+CREATE TABLE test_stored_tbl (v test_stored);
+CREATE UNIQUE INDEX test_stored_tbl_v ON test_stored_tbl (v);
+INSERT INTO test_stored_tbl VALUES (ROW(1, 2)::test_stored),
+                                   (ROW(1, 3)::test_stored);
+ALTER TYPE test_stored DROP ATTRIBUTE b; -- fails
+ERROR:  cannot alter type "test_stored" because column "test_stored_tbl.v" uses it
+-- still two distinct values, and the index still rebuilds from them
+SELECT count(DISTINCT v) FROM test_stored_tbl;
+ count 
+-------
+     2
+(1 row)
+
+REINDEX INDEX test_stored_tbl_v;
+-- once nothing stores the type, dropping the attribute is allowed again
+DROP TABLE test_stored_tbl;
+ALTER TYPE test_stored DROP ATTRIBUTE b;
+DROP TYPE test_stored;
+-- The same applies to a table's row type, which is a composite type too.
+CREATE TABLE test_rowtype (a int, b int);
+CREATE TABLE test_rowtype_ref (v test_rowtype);
+ALTER TABLE test_rowtype DROP COLUMN b; -- fails
+ERROR:  cannot alter table "test_rowtype" because column "test_rowtype_ref.v" uses its row type
+DROP TABLE test_rowtype_ref;
+ALTER TABLE test_rowtype DROP COLUMN b;
+DROP TABLE test_rowtype;
+-- Values of the type stored as constants in expressions are covered too.
+CREATE TYPE test_stored_const AS (a int, b int);
+CREATE VIEW test_stored_view AS
+  SELECT '(1,2)'::test_stored_const = '(1,3)'::test_stored_const AS eq;
+ALTER TYPE test_stored_const DROP ATTRIBUTE b; -- fails
+ERROR:  cannot alter type "test_stored_const" because rule _RETURN on view test_stored_view uses it
+SELECT eq FROM test_stored_view;
+ eq 
+----
+ f
+(1 row)
+
+DROP VIEW test_stored_view;
+CREATE TABLE test_stored_chk
+  (i int CHECK ('(1,2)'::test_stored_const <> '(1,3)'::test_stored_const));
+ALTER TYPE test_stored_const DROP ATTRIBUTE b; -- fails
+ERROR:  cannot alter type "test_stored_const" because constraint test_stored_chk_check on table test_stored_chk uses it
+INSERT INTO test_stored_chk VALUES (1);
+DROP TABLE test_stored_chk;
+DROP TYPE test_stored_const;
 -- This test isn't that interesting on its own, but the purpose is to leave
 -- behind a table to test pg_upgrade with. The table has a composite type
--- column in it, and the composite type has a dropped attribute.
+-- column in it, and the composite type has a dropped attribute.  The attribute
+-- is dropped before the table is created, since it could not be dropped
+-- afterwards.
 CREATE TYPE test_type3 AS (a int);
-CREATE TABLE test_tbl3 (c) AS SELECT '(1)'::test_type3;
 ALTER TYPE test_type3 DROP ATTRIBUTE a, ADD ATTRIBUTE b int;
+CREATE TABLE test_tbl3 (c) AS SELECT '(1)'::test_type3;
 CREATE TYPE test_type_empty AS ();
 DROP TYPE test_type_empty;
 --
