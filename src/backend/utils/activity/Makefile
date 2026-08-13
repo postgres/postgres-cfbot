@@ -29,7 +29,6 @@ OBJS = \
 	pgstat_io.o \
 	pgstat_kind.o \
 	pgstat_lock.o \
-	pgstat_per_backend.o \
 	pgstat_relation.o \
 	pgstat_replslot.o \
 	pgstat_shmem.o \
