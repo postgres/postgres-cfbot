@@ -2291,7 +2291,6 @@ PgFdwSamplingMethod
 PgFdwScanState
 PgIfAddrCallback
 PgStatShared_Archiver
-PgStatShared_Backend
 PgStatShared_BgWriter
 PgStatShared_Checkpointer
 PgStatShared_Common
@@ -2313,7 +2312,6 @@ PgStatShared_Subscription
 PgStatShared_Wal
 PgStatShared_WalBackendEntry
 PgStat_ArchiverStats
-PgStat_Backend
 PgStat_BackendIO
 PgStat_BackendSubEntry
 PgStat_BgWriterStats
