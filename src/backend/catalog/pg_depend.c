@@ -1157,15 +1157,28 @@ getIdentitySequence(Relation rel, AttrNumber attnum, bool missing_ok)
 	 */
 	if (RelationGetForm(rel)->relispartition)
 	{
-		List	   *ancestors = get_partition_ancestors(relid);
 		const char *attname = get_attname(relid, attnum, false);
 
-		relid = llast_oid(ancestors);
+		/*
+		 * Climb to the root.  get_partition_ancestors() is unusable here: it
+		 * stops at a partition whose concurrent detach has been committed but
+		 * not finalized, and so reports no ancestors at all for one.  Such a
+		 * partition keeps its identity columns, and the sequences behind them
+		 * keep belonging to the root, until the detach is finalized.
+		 *
+		 * XXX A variant of get_partition_ancestors() taking even_if_detached
+		 * would climb with pg_inherits opened once, but adding one would make
+		 * this harder to back-patch.
+		 */
+		do
+		{
+			relid = get_partition_parent(relid, true);
+		} while (get_rel_relispartition(relid));
+
 		attnum = get_attnum(relid, attname);
 		if (attnum == InvalidAttrNumber)
 			elog(ERROR, "cache lookup failed for attribute \"%s\" of relation %u",
 				 attname, relid);
-		list_free(ancestors);
 	}
 
 	seqlist = getOwnedSequences_internal(relid, attnum, DEPENDENCY_INTERNAL);
