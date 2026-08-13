@@ -458,10 +458,6 @@ pgstat_bestart_final(void)
 
 	PGSTAT_END_WRITE_ACTIVITY(beentry);
 
-	/* Create the backend statistics entry */
-	if (pgstat_tracks_backend_bktype(MyBackendType))
-		pgstat_create_backend(MyProcNumber);
-
 	/* Update app name to current GUC setting */
 	if (application_name)
 		pgstat_report_appname(application_name);
