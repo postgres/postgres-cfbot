@@ -7152,13 +7152,18 @@ local0.*    /var/log/postgresql
 
        <note>
         <para>
-          The logging collector is designed to never lose messages.  This means
-          that in case of extremely high load, server processes could be
+          The logging collector is designed to avoid dropping messages even under high log volume.
+          This means that in case of extremely high load, server processes could be
           blocked while trying to send additional log messages when the
           collector has fallen behind.  In contrast, <application>syslog</application>
           prefers to drop messages if it cannot write them, which means it
           may fail to log some messages in such cases but it will not block
           the rest of the system.
+        </para>
+        <para>
+          The logging collector does not guarantee that log messages have reached durable storage.
+          A system crash, power loss, or errors while writing the log file
+          can result in messages being lost.
         </para>
        </note>
 
