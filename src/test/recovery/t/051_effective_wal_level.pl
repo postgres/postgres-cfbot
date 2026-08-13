@@ -569,7 +569,7 @@ hot_standby_feedback = on
 		qr/sync_slots/,
 		q(\echo sync_slots
 select injection_points_set_local();
-select injection_points_attach('replication-slot-create-begin', 'wait');
+select injection_points_attach('replication-slot-create-begin', 'wait', 'sync_slot');
 select pg_sync_replication_slots();
 ));
 	$standby5->wait_for_event('client backend',
@@ -622,7 +622,7 @@ select pg_sync_replication_slots();
 		qr/create_standby5_slot/,
 		q(\echo create_standby5_slot
 select injection_points_set_local();
-select injection_points_attach('replication-slot-create-begin', 'wait');
+select injection_points_attach('replication-slot-create-begin', 'wait', 'standby5_slot');
 select pg_create_logical_replication_slot('standby5_slot', 'test_decoding');
 ));
 	$standby5->wait_for_event('client backend',
