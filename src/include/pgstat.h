@@ -567,15 +567,6 @@ typedef struct PgStat_WalStats
 	TimestampTz stat_reset_timestamp;
 } PgStat_WalStats;
 
-/* -------
- * PgStat_Backend		Backend statistics
- * -------
- */
-typedef struct PgStat_Backend
-{
-	TimestampTz stat_reset_timestamp;
-} PgStat_Backend;
-
 /*
  * Functions in pgstat.c
  */
@@ -611,16 +602,6 @@ extern bool pgstat_have_entry(PgStat_Kind kind, Oid dboid, uint64 objid);
 
 extern void pgstat_report_archiver(const char *xlog, bool failed);
 extern PgStat_ArchiverStats *pgstat_fetch_stat_archiver(void);
-
-/*
- * Functions in pgstat_backend.c
- */
-
-extern PgStat_Backend *pgstat_fetch_stat_backend(ProcNumber procNumber);
-extern PgStat_Backend *pgstat_fetch_stat_backend_by_pid(int pid,
-														BackendType *bktype);
-extern bool pgstat_tracks_backend_bktype(BackendType bktype);
-extern void pgstat_create_backend(ProcNumber procnum);
 
 /*
  * Functions in pgstat_bgwriter.c
