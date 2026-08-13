@@ -2107,6 +2107,20 @@ get_rel_sync_entry(PGOutputData *data, Relation relation)
 		bool		am_partition = get_rel_relispartition(relid);
 		char		relkind = get_rel_relkind(relid);
 		List	   *rel_publications = NIL;
+		List	   *ancestors = NIL;
+
+		/*
+		 * A partition whose concurrent detach has been committed but not
+		 * finalized reports no ancestors, even though relispartition is still
+		 * set.  Determine publication membership and identity as for a
+		 * standalone table: changes are no longer published via its former
+		 * ancestors, but can still be published via its own publications.
+		 */
+		if (am_partition)
+		{
+			ancestors = get_partition_ancestors(relid);
+			am_partition = (ancestors != NIL);
+		}
 
 		/* Reload publications if needed before use. */
 		if (!publications_valid)
@@ -2214,7 +2228,6 @@ get_rel_sync_entry(PGOutputData *data, Relation relation)
 
 				if (am_partition)
 				{
-					List	   *ancestors = get_partition_ancestors(relid);
 					Oid			last_ancestor_relid = llast_oid(ancestors);
 
 					/*
@@ -2267,7 +2280,6 @@ get_rel_sync_entry(PGOutputData *data, Relation relation)
 				{
 					Oid			ancestor;
 					int			level;
-					List	   *ancestors = get_partition_ancestors(relid);
 
 					ancestor = GetTopMostAncestorInPublication(pub->oid,
 															   ancestors,
@@ -2365,6 +2377,7 @@ get_rel_sync_entry(PGOutputData *data, Relation relation)
 		list_free(pubids);
 		list_free(schemaPubids);
 		list_free(rel_publications);
+		list_free(ancestors);
 
 		entry->replicate_valid = true;
 	}
