@@ -151,6 +151,7 @@ ALTER TYPE atcomp ALTER ATTRIBUTE a TYPE bigint CASCADE; -- someday this should 
 DROP INDEX atref_idx;
 CREATE INDEX atref_hash_idx ON atref USING hash (atfunc(c));
 ALTER TYPE atcomp ALTER ATTRIBUTE a TYPE bigint CASCADE; -- someday this should work
+ALTER TYPE atcomp DROP ATTRIBUTE a; -- fails
 DROP TABLE atref;
 DROP FUNCTION atfunc(numeric);
 DROP TYPE atcomp;

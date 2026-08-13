@@ -16,6 +16,7 @@
 
 #include "access/genam.h"
 #include "access/htup_details.h"
+#include "access/relation.h"
 #include "access/table.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
@@ -74,6 +75,7 @@
 #include "commands/publicationcmds.h"
 #include "commands/seclabel.h"
 #include "commands/sequence.h"
+#include "commands/tablecmds.h"
 #include "commands/trigger.h"
 #include "commands/typecmds.h"
 #include "funcapi.h"
@@ -178,6 +180,7 @@ static bool stack_address_present_add_flags(const ObjectAddress *object,
 											int flags,
 											ObjectAddressStack *stack);
 static void DeleteInitPrivs(const ObjectAddress *object);
+static void check_dropped_columns(ObjectAddresses *targetObjects);
 
 
 /*
@@ -231,6 +234,62 @@ deleteObjectsInList(ObjectAddresses *targetObjects, Relation *depRel,
 
 		deleteOneObject(thisobj, depRel, flags);
 	}
+
+	/*
+	 * Refuse dropping a column whose row type is stored elsewhere: stored
+	 * values would silently lose it, so distinct values could become equal.
+	 * Check after all deletions, so that objects dropped by this same command
+	 * don't count.  Internal deletions (temp object cleanup) must not fail,
+	 * so skip them.
+	 */
+	if (!(flags & PERFORM_DELETION_INTERNAL))
+		check_dropped_columns(targetObjects);
+}
+
+/*
+ * Subroutine of deleteObjectsInList: check that no dropped column belongs to a
+ * row type that is still stored somewhere.
+ */
+static void
+check_dropped_columns(ObjectAddresses *targetObjects)
+{
+	List	   *relids = NIL;
+	List	   *rels = NIL;
+
+	for (int i = 0; i < targetObjects->numrefs; i++)
+	{
+		const ObjectAddress *thisobj = &targetObjects->refs[i];
+
+		if (thisobj->classId != RelationRelationId || thisobj->objectSubId == 0)
+			continue;
+
+		relids = list_append_unique_oid(relids, thisobj->objectId);
+	}
+
+	foreach_oid(relid, relids)
+	{
+		Relation	rel;
+
+		/* skip relations that this command dropped as a whole */
+		if (!SearchSysCacheExists1(RELOID, ObjectIdGetDatum(relid)))
+			continue;
+
+		/* RemoveAttributeById() already locked it */
+		rel = relation_open(relid, NoLock);
+		if (OidIsValid(rel->rd_rel->reltype))
+			rels = lappend(rels, rel);
+		else
+			relation_close(rel, NoLock);
+	}
+
+	/* check them all at once, as that scans some catalogs in full */
+	if (rels != NIL)
+		find_composite_type_dependencies_for_drop(rels);
+
+	foreach_ptr(RelationData, rel, rels)
+		relation_close(rel, NoLock);
+	list_free(rels);
+	list_free(relids);
 }
 
 /*

@@ -684,15 +684,34 @@ BEGIN
   RETURN 12345;
 END $$;
 
--- assign to v.b while b is dropped - the value disappears
+-- assign to v.b while trying to drop b - refused, as the row type is stored
 UPDATE compositetable_holder SET v.b = compositetable_drop();
 
--- 12345 is nowhere to be found
+-- the stored value is unchanged
 SELECT v::text AS stored_value FROM compositetable_holder;
 
 DROP FUNCTION compositetable_drop();
 DROP TABLE compositetable_holder;
 DROP TABLE compositetable_type_1;
+
+-- An unstored value can still lose a field in the middle of a FieldStore.
+CREATE TYPE compositetype_inner AS (a int, b int);
+CREATE TYPE compositetype_outer AS (v compositetype_inner);
+CREATE FUNCTION compositetype_drop() RETURNS int LANGUAGE plpgsql AS $$
+BEGIN
+  ALTER TYPE compositetype_inner DROP ATTRIBUTE b;
+  RETURN 12345;
+END $$;
+DO $$
+DECLARE
+  held compositetype_outer := ROW(ROW(1, 2)::compositetype_inner);
+BEGIN
+  held.v.b := compositetype_drop();
+  RAISE NOTICE 'after drop: %', held;
+END $$;
+DROP FUNCTION compositetype_drop();
+DROP TYPE compositetype_outer;
+DROP TYPE compositetype_inner;
 
 --
 -- Tests for expanded records built from a flat composite datum, which core

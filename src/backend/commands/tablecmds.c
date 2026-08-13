@@ -507,17 +507,21 @@ static void ATTypedTableRecursion(List **wqueue, Relation rel, AlterTableCmd *cm
 								  AlterTableUtilityContext *context);
 static List *find_typed_table_dependencies(Oid typeOid, const char *typeName,
 										   DropBehavior behavior);
+static HTAB *create_visited_types(void);
 static void find_composite_type_dependencies_recurse(Oid typeOid, Relation origRelation,
-													 const char *origTypeName, HTAB *visited);
+													 const char *origTypeName, HTAB *visited,
+													 bool for_drop);
 static void check_composite_type_dependency(ObjectAddress *depobj, Oid typeOid,
 											Relation origRelation, const char *origTypeName,
-											HTAB *visited);
+											HTAB *visited, bool for_drop);
+static bool expr_holds_value_of_type(Node *expr, Oid typeOid);
+static bool expr_holds_value_of_type_walker(Node *node, Oid *typeOid);
 static void report_type_used_in_column(const char *relname, const char *attname,
 									   Relation origRelation, const char *origTypeName);
 static void report_type_used_in_expr(const ObjectAddress *obj, Relation origRelation,
 									 const char *origTypeName);
 static Node *get_node_tree_attr(SysCacheIdentifier cacheId, HeapTuple tup, AttrNumber attnum);
-static void find_missing_composite_type_dependencies(HTAB *types, Relation origRelation, const char *origTypeName);
+static void find_missing_composite_type_dependencies(HTAB *types);
 static void ATPrepAddColumn(List **wqueue, Relation rel, bool recurse, bool recursing,
 							bool is_view, AlterTableCmd *cmd, LOCKMODE lockmode,
 							AlterTableUtilityContext *context);
@@ -7034,29 +7038,67 @@ void
 find_composite_type_dependencies(Oid typeOid, Relation origRelation,
 								 const char *origTypeName)
 {
-	HASHCTL		hctl;
-	HTAB	   *visited;
-
-	memset(&hctl, 0, sizeof(HASHCTL));
-	hctl.keysize = sizeof(Oid);
-	hctl.entrysize = sizeof(Oid);
-	hctl.hcxt = CurrentMemoryContext;
-
-	visited = hash_create("visited types",
-						  32,	/* start small and extend */
-						  &hctl,
-						  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	HTAB	   *visited = create_visited_types();
 
 	find_composite_type_dependencies_recurse(typeOid, origRelation, origTypeName,
-											 visited);
+											 visited, false);
 
 	/*
 	 * We used to not record pg_depend entries in some cases where we really
 	 * should have.  Scan the catalog tables for those, too.
 	 */
-	find_missing_composite_type_dependencies(visited, origRelation, origTypeName);
+	find_missing_composite_type_dependencies(visited);
 
 	hash_destroy(visited);
+}
+
+/*
+ * find_composite_type_dependencies_for_drop
+ *
+ * Like find_composite_type_dependencies, but for dropping columns of the given
+ * relations' row types.  Only stored values of the types matter; mere
+ * references to them in function defaults and SQL bodies don't.  The catalog
+ * scans for missing dependencies are done once for all the relations.
+ */
+void
+find_composite_type_dependencies_for_drop(List *rels)
+{
+	HTAB	   *visited = create_visited_types();
+
+	foreach_ptr(RelationData, rel, rels)
+		find_composite_type_dependencies_recurse(rel->rd_rel->reltype, rel, NULL,
+												 visited, true);
+	find_missing_composite_type_dependencies(visited);
+
+	hash_destroy(visited);
+}
+
+/*
+ * Entry in the hash table of types visited by
+ * find_composite_type_dependencies_recurse(), remembering what to name in an
+ * error about the type.
+ */
+typedef struct VisitedType
+{
+	Oid			typeOid;		/* hash key */
+	Relation	origRelation;
+	const char *origTypeName;
+}			VisitedType;
+
+static HTAB *
+create_visited_types(void)
+{
+	HASHCTL		hctl;
+
+	memset(&hctl, 0, sizeof(HASHCTL));
+	hctl.keysize = sizeof(Oid);
+	hctl.entrysize = sizeof(VisitedType);
+	hctl.hcxt = CurrentMemoryContext;
+
+	return hash_create("visited types",
+					   32,		/* start small and extend */
+					   &hctl,
+					   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 }
 
 /*
@@ -7065,13 +7107,15 @@ find_composite_type_dependencies(Oid typeOid, Relation origRelation,
  */
 static void
 find_composite_type_dependencies_recurse(Oid typeOid, Relation origRelation,
-										 const char *origTypeName, HTAB *visited)
+										 const char *origTypeName, HTAB *visited,
+										 bool for_drop)
 {
 	Relation	depRel;
 	ScanKeyData key[2];
 	SysScanDesc depScan;
 	HeapTuple	depTup;
 	bool		visited_already;
+	VisitedType *entry;
 
 	Assert(OidIsValid(typeOid));
 
@@ -7079,9 +7123,11 @@ find_composite_type_dependencies_recurse(Oid typeOid, Relation origRelation,
 	check_stack_depth();
 
 	/* skip if we visited this type already */
-	hash_search(visited, &typeOid, HASH_ENTER, &visited_already);
+	entry = hash_search(visited, &typeOid, HASH_ENTER, &visited_already);
 	if (visited_already)
 		return;
+	entry->origRelation = origRelation;
+	entry->origTypeName = origTypeName;
 
 	/*
 	 * We already hold a lock on the relation being ALTERed, but also lock its
@@ -7119,7 +7165,7 @@ find_composite_type_dependencies_recurse(Oid typeOid, Relation origRelation,
 							pg_depend->objsubid);
 
 		check_composite_type_dependency(&depobj, typeOid, origRelation, origTypeName,
-										visited);
+										visited, for_drop);
 	}
 
 	systable_endscan(depScan);
@@ -7147,7 +7193,7 @@ find_composite_type_dependencies_recurse(Oid typeOid, Relation origRelation,
 static void
 check_composite_type_dependency(ObjectAddress *depobj, Oid typeOid,
 								Relation origRelation, const char *origTypeName,
-								HTAB *visited)
+								HTAB *visited, bool for_drop)
 {
 	Oid			classid = depobj->classId;
 	Oid			objid = depobj->objectId;
@@ -7199,14 +7245,20 @@ check_composite_type_dependency(ObjectAddress *depobj, Oid typeOid,
 			if (!HeapTupleIsValid(catalog_tup))
 				elog(ERROR, "cache lookup failed for function %u", objid);
 
-			/* Is it used in the argument DEFAULTs? */
+			/*
+			 * Is it used in the argument DEFAULTs or the SQL body?  For a
+			 * drop, only values of the type count.
+			 */
 			expr = get_node_tree_attr(PROCOID, catalog_tup, Anum_pg_proc_proargdefaults);
-			if (expr && CheckTypeDependencyInExpr(expr, NIL, typeOid))
+			if (expr &&
+				(for_drop ? expr_holds_value_of_type(expr, typeOid) :
+				 CheckTypeDependencyInExpr(expr, NIL, typeOid)))
 				report_type_used_in_expr(depobj, origRelation, origTypeName);
 
-			/* Is it used in the SQL body? */
 			expr = get_node_tree_attr(PROCOID, catalog_tup, Anum_pg_proc_prosqlbody);
-			if (expr && CheckTypeDependencyInExpr(expr, NIL, typeOid))
+			if (expr &&
+				(for_drop ? expr_holds_value_of_type(expr, typeOid) :
+				 CheckTypeDependencyInExpr(expr, NIL, typeOid)))
 				report_type_used_in_expr(depobj, origRelation, origTypeName);
 
 			/*
@@ -7262,7 +7314,7 @@ check_composite_type_dependency(ObjectAddress *depobj, Oid typeOid,
 			 */
 			find_composite_type_dependencies_recurse(objid,
 													 origRelation, origTypeName,
-													 visited);
+													 visited, for_drop);
 
 			/*
 			 * A domain's default expression can embed a Const of the altered
@@ -7363,7 +7415,7 @@ check_composite_type_dependency(ObjectAddress *depobj, Oid typeOid,
 					 */
 					find_composite_type_dependencies_recurse(rel->rd_rel->reltype,
 															 origRelation, origTypeName,
-															 visited);
+															 visited, for_drop);
 				}
 			}
 
@@ -7484,6 +7536,35 @@ check_composite_type_dependency(ObjectAddress *depobj, Oid typeOid,
 }
 
 /*
+ * expr_holds_value_of_type
+ *
+ * Does the expression or SQL-function body contain a constant or ROW()
+ * constructor of the given type?
+ */
+static bool
+expr_holds_value_of_type(Node *expr, Oid typeOid)
+{
+	return expr_holds_value_of_type_walker(expr, &typeOid);
+}
+
+static bool
+expr_holds_value_of_type_walker(Node *node, Oid *typeOid)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Const))
+		return ((Const *) node)->consttype == *typeOid;
+	if (IsA(node, RowExpr) && ((RowExpr *) node)->row_typeid == *typeOid)
+		return true;
+	if (IsA(node, Query))
+		return query_tree_walker((Query *) node,
+								 expr_holds_value_of_type_walker,
+								 typeOid, 0);
+	return expression_tree_walker(node, expr_holds_value_of_type_walker,
+								  typeOid);
+}
+
+/*
  * report_type_used_in_column
  *
  * Complain that the ALTER can't proceed because a column uses the type being
@@ -7578,8 +7659,7 @@ get_node_tree_attr(SysCacheIdentifier cacheId, HeapTuple tup, AttrNumber attnum)
  * Unfortunately, these need to resort to sequential scans, which is slow.
  */
 static void
-find_missing_composite_type_dependencies(HTAB *types, Relation origRelation,
-										 const char *origTypeName)
+find_missing_composite_type_dependencies(HTAB *types)
 {
 	Relation	catalog_rel;
 	SysScanDesc scan;
@@ -7613,15 +7693,16 @@ find_missing_composite_type_dependencies(HTAB *types, Relation origRelation,
 		foreach_ptr(Node, expr, exprs)
 		{
 			Oid			resultType = exprType(expr);
+			VisitedType *vt = hash_search(types, &resultType, HASH_FIND, NULL);
 
-			if (hash_search(types, &resultType, HASH_FIND, NULL))
+			if (vt)
 			{
 				Form_pg_partitioned_table form =
 					(Form_pg_partitioned_table) GETSTRUCT(tup);
 				ObjectAddress obj;
 
 				ObjectAddressSet(obj, RelationRelationId, form->partrelid);
-				report_type_used_in_expr(&obj, origRelation, origTypeName);
+				report_type_used_in_expr(&obj, vt->origRelation, vt->origTypeName);
 			}
 		}
 	}
@@ -7646,14 +7727,15 @@ find_missing_composite_type_dependencies(HTAB *types, Relation origRelation,
 		foreach_ptr(Node, expr, exprs)
 		{
 			Oid			resultType = exprType(expr);
+			VisitedType *vt = hash_search(types, &resultType, HASH_FIND, NULL);
 
-			if (hash_search(types, &resultType, HASH_FIND, NULL))
+			if (vt)
 			{
 				Form_pg_index index = (Form_pg_index) GETSTRUCT(tup);
 				ObjectAddress obj;
 
 				ObjectAddressSet(obj, RelationRelationId, index->indexrelid);
-				report_type_used_in_expr(&obj, origRelation, origTypeName);
+				report_type_used_in_expr(&obj, vt->origRelation, vt->origTypeName);
 			}
 		}
 	}
@@ -7677,14 +7759,15 @@ find_missing_composite_type_dependencies(HTAB *types, Relation origRelation,
 		foreach_ptr(Node, expr, exprs)
 		{
 			Oid			resultType = exprType(expr);
+			VisitedType *vt = hash_search(types, &resultType, HASH_FIND, NULL);
 
-			if (hash_search(types, &resultType, HASH_FIND, NULL))
+			if (vt)
 			{
 				Form_pg_statistic_ext form = (Form_pg_statistic_ext) GETSTRUCT(tup);
 				ObjectAddress obj;
 
 				ObjectAddressSet(obj, StatisticExtRelationId, form->oid);
-				report_type_used_in_expr(&obj, origRelation, origTypeName);
+				report_type_used_in_expr(&obj, vt->origRelation, vt->origTypeName);
 			}
 		}
 	}
