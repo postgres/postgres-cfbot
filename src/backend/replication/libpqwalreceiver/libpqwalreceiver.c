@@ -1025,6 +1025,19 @@ libpqrcv_create_slot(WalReceiverConn *conn, const char *slotname,
 				 errdetail("Could not create replication slot \"%s\": got %d rows and %d fields, expected %d rows and %d fields.",
 						   slotname, PQntuples(res), PQnfields(res), 1, 4)));
 
+	/*
+	 * CREATE_REPLICATION_SLOT has always returned a single row with four
+	 * columns; the consistent point (field 1) and snapshot name (field 2) are
+	 * read below.  Verify the result shape first so that a malformed reply
+	 * lacking the expected row cannot lead to a NULL-pointer dereference.
+	 */
+	if (PQnfields(res) != 4 || PQntuples(res) != 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROTOCOL_VIOLATION),
+				 errmsg("invalid response from primary server"),
+				 errdetail("Could not create replication slot \"%s\": got %d rows and %d fields, expected %d rows and %d fields.",
+						   slotname, PQntuples(res), PQnfields(res), 1, 4)));
+
 	if (lsn)
 		*lsn = DatumGetLSN(DirectFunctionCall1Coll(pg_lsn_in, InvalidOid,
 												   CStringGetDatum(PQgetvalue(res, 0, 1))));
