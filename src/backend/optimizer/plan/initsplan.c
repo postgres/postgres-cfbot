@@ -3407,6 +3407,40 @@ check_redundant_nullability_qual(PlannerInfo *root, Node *clause)
 }
 
 /*
+ * baserestrictinfo_contains_dup
+ *    Return true if 'rel' already has a baserestrictinfo whose clause is
+ *	  equal() to restrictinfo.
+ *
+ * It only treat clauses as duplicates when their security levels, pushed-down
+ * status and pseudoconstant flags match, and neither is an outer-join clone
+ * variant (whose serials/relids need to stay in lockstep).
+ */
+static bool
+baserestrictinfo_contains_dup(RelOptInfo *rel, RestrictInfo *restrictinfo)
+{
+	ListCell   *lc;
+
+	if (restrictinfo->has_clone || restrictinfo->is_clone)
+		return false;
+
+	foreach(lc, rel->baserestrictinfo)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+
+		if (rinfo->has_clone || rinfo->is_clone)
+			continue;
+
+		if (restrictinfo->security_level == rinfo->security_level &&
+			restrictinfo->is_pushed_down == rinfo->is_pushed_down &&
+			restrictinfo->pseudoconstant == rinfo->pseudoconstant &&
+			equal(restrictinfo->clause, rinfo->clause))
+			return true;
+	}
+
+	return false;
+}
+
+/*
  * add_base_clause_to_rel
  *		Add 'restrictinfo' as a baserestrictinfo to the base relation denoted
  *		by 'relid'.  We offer some simple prechecks to try to determine if the
@@ -3442,6 +3476,13 @@ add_base_clause_to_rel(PlannerInfo *root, Index relid,
 	{
 		/* Don't add the clause if it is always true */
 		if (restriction_is_always_true(root, restrictinfo))
+			return;
+
+		/*
+		 * Don't add the clause if an equal clause is already present, to
+		 * avoid double-counting its selectivity.
+		 */
+		if (baserestrictinfo_contains_dup(rel, restrictinfo))
 			return;
 
 		/*

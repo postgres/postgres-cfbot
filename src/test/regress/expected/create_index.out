@@ -2441,10 +2441,10 @@ SELECT unique1 FROM tenk1 WHERE unique1 = ANY('{NULL,NULL,NULL}');
 
 explain (costs off)
 SELECT unique1 FROM tenk1 WHERE unique1 IS NULL AND unique1 IS NULL;
-                       QUERY PLAN                        
----------------------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Index Only Scan using tenk1_unique1 on tenk1
-   Index Cond: ((unique1 IS NULL) AND (unique1 IS NULL))
+   Index Cond: (unique1 IS NULL)
 (2 rows)
 
 SELECT unique1 FROM tenk1 WHERE unique1 IS NULL AND unique1 IS NULL;
