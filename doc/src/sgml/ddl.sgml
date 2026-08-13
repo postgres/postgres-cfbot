@@ -1861,9 +1861,9 @@ CREATE TABLE variants (
 
     <para>
      <productname>PostgreSQL</productname> supports temporal foreign keys with
-     action <literal>NO ACTION</literal>, but not <literal>RESTRICT</literal>,
-     <literal>CASCADE</literal>, <literal>SET NULL</literal>, or <literal>SET
-     DEFAULT</literal>.
+     action <literal>NO ACTION</literal> and <literal>RESTRICT</literal>, but
+     not <literal>CASCADE</literal>, <literal>SET NULL</literal>, or
+     <literal>SET DEFAULT</literal>.
     </para>
    </sect3>
   </sect2>
