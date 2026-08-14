@@ -58,6 +58,7 @@ typedef struct LZ4State
 	 * decompression operations.
 	 */
 	bool		compressing;
+	bool		frame_finished;
 
 	/*
 	 * I/O buffer area.
@@ -160,6 +161,12 @@ ReadDataFromArchiveLZ4(ArchiveHandle *AH, CompressorState *cs)
 	LZ4F_decompressOptions_t dec_opt;
 	LZ4F_errorCode_t status;
 
+	/*
+	 * cs->private_data is an LZ4State for compression, whereas this function
+	 * uses a short-lived decompression context.  Keep its state local.
+	 */
+	bool		dec_done = false;
+
 	memset(&dec_opt, 0, sizeof(dec_opt));
 	status = LZ4F_createDecompressionContext(&ctx, LZ4F_VERSION);
 	if (LZ4F_isError(status))
@@ -187,11 +194,15 @@ ReadDataFromArchiveLZ4(ArchiveHandle *AH, CompressorState *cs)
 			if (LZ4F_isError(status))
 				pg_fatal("could not decompress: %s",
 						 LZ4F_getErrorName(status));
+			dec_done = (status == 0);
 
 			ahwrite(outbuf, 1, out_size, AH);
 			readp += read_size;
 		}
 	}
+
+	if (!dec_done)
+		pg_fatal("could not decompress data: compressed stream is incomplete");
 
 	pg_free(outbuf);
 	pg_free(readbuf);
@@ -414,11 +425,7 @@ LZ4Stream_read_internal(LZ4State *state, void *ptr, int ptrsize, bool eol_flag)
 
 	/* Lazy init */
 	if (!LZ4Stream_init(state, false /* decompressing */ ))
-	{
-		pg_log_error("unable to initialize LZ4 library: %s",
-					 LZ4F_getErrorName(state->errcode));
 		return -1;
-	}
 
 	/* Loop until postcondition is satisfied */
 	while (remaining > 0)
@@ -466,12 +473,17 @@ LZ4Stream_read_internal(LZ4State *state, void *ptr, int ptrsize, bool eol_flag)
 
 			rsize = fread(state->buffer, 1, state->buflen, state->fp);
 			if (rsize < state->buflen && !feof(state->fp))
-			{
-				pg_log_error("could not read from input file: %m");
 				return -1;
-			}
+
 			if (rsize == 0)
+			{
+				if (!state->frame_finished)
+				{
+					errno = EIO;
+					return -1;
+				}
 				break;			/* must be EOF */
+			}
 			state->bufdata = rsize;
 			state->bufnext = 0;
 		}
@@ -492,10 +504,9 @@ LZ4Stream_read_internal(LZ4State *state, void *ptr, int ptrsize, bool eol_flag)
 			if (LZ4F_isError(status))
 			{
 				state->errcode = status;
-				pg_log_error("could not read from input file: %s",
-							 LZ4F_getErrorName(state->errcode));
 				return -1;
 			}
+			state->frame_finished = (status == 0);
 			state->bufnext += inlen;
 			state->outbufdata = outlen;
 			state->outbufnext = 0;
@@ -600,12 +611,16 @@ LZ4Stream_gets(char *ptr, int size, CompressFileHandle *CFH)
 
 	ret = LZ4Stream_read_internal(state, ptr, size - 1, true);
 
-	/*
-	 * LZ4Stream_read_internal returning 0 or -1 means that it was either an
-	 * EOF or an error, but gets_func is defined to return NULL in either case
-	 * so we can treat both the same here.
-	 */
-	if (ret <= 0)
+	if (ret < 0)
+	{
+		/* gets_func must return NULL rather than exiting on an error. */
+		pg_log_error("could not read from input file: %s",
+					 LZ4Stream_get_error(CFH));
+		return NULL;
+	}
+
+	/* gets_func returns NULL on EOF when no characters have been read. */
+	if (ret == 0)
 		return NULL;
 
 	/*
@@ -681,6 +696,11 @@ LZ4Stream_close(CompressFileHandle *CFH)
 		}
 		else
 		{
+			if (!state->frame_finished)
+			{
+				errno = EIO;
+				success = false;
+			}
 			status = LZ4F_freeDecompressionContext(state->dtx);
 			if (LZ4F_isError(status))
 			{
