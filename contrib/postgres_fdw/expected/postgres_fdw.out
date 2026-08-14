@@ -4442,6 +4442,7 @@ select count(*), x.b from ft1, (select c2 a, sum(c1) b from ft1 group by c2) x w
                Sort Key: (sum(ft1_1.c1))
                ->  Hash Join
                      Output: (sum(ft1_1.c1)), (PARTIAL count(*))
+                     Inner Unique: true
                      Hash Cond: (ft1_1.c2 = ft1.c2)
                      ->  Foreign Scan
                            Output: ft1_1.c2, (sum(ft1_1.c1))
@@ -4455,7 +4456,7 @@ select count(*), x.b from ft1, (select c2 a, sum(c1) b from ft1 group by c2) x w
                                  ->  Foreign Scan on public.ft1
                                        Output: ft1.c2
                                        Remote SQL: SELECT c2 FROM "S 1"."T 1"
-(24 rows)
+(25 rows)
 
 select count(*), x.b from ft1, (select c2 a, sum(c1) b from ft1 group by c2) x where ft1.c2 = x.a group by x.b order by 1, 2;
  count |   b   
