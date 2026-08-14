@@ -12,6 +12,7 @@
 use strict;
 use warnings FATAL => 'all';
 
+use File::Copy qw(copy);
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
@@ -37,6 +38,56 @@ my $tempdir = PostgreSQL::Test::Utils::tempdir;
 my $supports_gzip = check_pg_config("#define HAVE_LIBZ 1");
 my $supports_lz4 = check_pg_config("#define USE_LZ4 1");
 my $supports_zstd = check_pg_config("#define USE_ZSTD 1");
+
+sub
+truncate_custom_compressed_data
+{
+	my ($path, $magic, $empty) = @_;
+	my ($data, $pos, $first_lenpos, $last_lenpos, $last_len);
+
+	open my $fh, '+<', $path or die "could not open $path: $!";
+	binmode $fh;
+	local $/;
+	$data = <$fh>;
+
+	$pos = index($data, $magic);
+	die "compressed frame magic not found in $path" if $pos < 5;
+	$pos -= 5;
+	$first_lenpos = $pos;
+
+	while (1)
+	{
+		my $len;
+
+		die "unexpected custom block length encoding in $path"
+		  if substr($data, $pos, 1) ne "\0";
+		$len = unpack('V', substr($data, $pos + 1, 4));
+		last if $len == 0;
+
+		die "invalid custom block length in $path"
+		  if $pos + 5 + $len > length($data);
+		$last_lenpos = $pos;
+		$last_len = $len;
+		$pos += 5 + $len;
+	}
+
+	if ($empty)
+	{
+		substr($data, $first_lenpos + 1, 4, pack('V', 0));
+		substr($data, $first_lenpos + 5, $pos - $first_lenpos, '');
+	}
+	else
+	{
+		die "invalid final custom block length in $path" if $last_len < 2;
+		substr($data, $last_lenpos + 1, 4, pack('V', $last_len - 1));
+		substr($data, $last_lenpos + 5 + $last_len - 1, 1, '');
+	}
+
+	seek($fh, 0, 0) or die "could not seek $path: $!";
+	truncate($fh, 0) or die "could not truncate $path: $!";
+	print {$fh} $data or die "could not write $path: $!";
+	close $fh or die "could not close $path: $!";
+}
 
 my %pgdump_runs = (
 	compression_none_custom => {
@@ -629,6 +680,58 @@ foreach my $run (sort keys %pgdump_runs)
 			}
 		}
 	}
+}
+
+for my $method (qw(lz4 zstd))
+{
+	my $supported = $method eq 'lz4' ? $supports_lz4 : $supports_zstd;
+	my $extension = $method eq 'lz4' ? 'lz4' : 'zst';
+	my $magic = $method eq 'lz4' ? pack('H*', '04224d18') :
+		pack('H*', '28b52ffd');
+	my $custom_path = "$tempdir/compression_${method}_custom.dump";
+	my $custom_bad_path = "$tempdir/${method}_custom_bad.dump";
+	my ($directory_path) = glob("$tempdir/compression_${method}_dir/*.dat.$extension");
+
+  SKIP:
+	{
+		skip "$method compression not supported by this build", 2
+		  if !$supported;
+
+		copy($custom_path, $custom_bad_path)
+		  or die "could not copy $custom_path: $!";
+		truncate_custom_compressed_data($custom_bad_path, $magic, 0);
+		$node->command_fails(
+			[ 'pg_restore', '--file' => "$tempdir/${method}_custom_bad.sql",
+			  $custom_bad_path ],
+			"$method custom archive with truncated compressed data fails");
+
+		die "could not find compressed data file for $method"
+		  if !defined($directory_path);
+		my $directory_size = -s $directory_path;
+		truncate($directory_path, $directory_size - 1)
+		  or die "could not truncate $directory_path: $!";
+		$node->command_fails(
+			[ 'pg_restore', '--file' => "$tempdir/${method}_directory_bad.sql",
+			  "$tempdir/compression_${method}_dir" ],
+			"$method directory archive with truncated compressed data fails");
+	}
+}
+
+SKIP:
+{
+	skip "zstd compression not supported by this build", 1 if !$supports_zstd;
+
+	my $custom_path = "$tempdir/compression_zstd_custom.dump";
+	my $custom_bad_path = "$tempdir/zstd_custom_empty.dump";
+
+	copy($custom_path, $custom_bad_path)
+	  or die "could not copy $custom_path: $!";
+	truncate_custom_compressed_data($custom_bad_path,
+		pack('H*', '28b52ffd'), 1);
+	$node->command_fails(
+		[ 'pg_restore', '--file' => "$tempdir/zstd_custom_empty.sql",
+		  $custom_bad_path ],
+		"zstd custom archive with empty compressed data fails");
 }
 
 #########################################

@@ -68,6 +68,14 @@ typedef enum
 	ASTREAMER_ARCHIVE_TRAILER,
 } astreamer_archive_context;
 
+/* State of the most recently processed compressed frame. */
+typedef enum
+{
+	ASTREAMER_STREAM_NEW,
+	ASTREAMER_FRAME_INCOMPLETE,
+	ASTREAMER_FRAME_COMPLETE,
+}			astreamer_decompression_state;
+
 /*
  * Each chunk of data that is classified as ASTREAMER_MEMBER_HEADER,
  * ASTREAMER_MEMBER_CONTENTS, or ASTREAMER_MEMBER_TRAILER should also
