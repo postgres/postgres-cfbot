@@ -1137,6 +1137,13 @@ A side with lateral references into the other is re-executed once per row of
 that other side, so its rows are effectively multiplied and it keeps its keys
 only through Combination, not Preservation.
 
+An appendrel child emits a subset of its parent's rows, and a subset of a
+distinct set is distinct, so a child relation simply inherits its parent's
+keys.  The same holds for the child join relations built for a partitionwise
+join.  No translation is needed: a child Var belongs to the same
+EquivalenceClass as its parent, so the keys' EC indexes carry over unchanged.
+This is what lets a partitionwise join prove its child joins inner-unique.
+
 Finally, the query's upper relations get keys too.  The grouping step is
 NULL-aware distinct over the grouping columns, and emits a single row (the
 empty key) for a plain aggregation or grouping only by constants; the DISTINCT

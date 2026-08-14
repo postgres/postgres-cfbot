@@ -80,12 +80,24 @@ static int	base_ec_position(PlannerInfo *root, EquivalenceClass *ec);
  *		Deduce the unique keys of a base relation's output.
  *
  * This is called once per base rel, after its restriction clauses and (for
- * plain relations) index information have been set up.
+ * plain relations) index information have been set up, and once per appendrel
+ * child, which just inherits its parent's keys.
  */
 void
 populate_baserel_uniquekeys(PlannerInfo *root, RelOptInfo *rel)
 {
-	Assert(rel->reloptkind == RELOPT_BASEREL);
+	Assert(IS_SIMPLE_REL(rel));
+
+	/*
+	 * An appendrel child emits a subset of its parent's rows, so every key of
+	 * the parent is a key of the child.  A child Var belongs to the same ECs
+	 * as its parent, so the EC indexes carry over unchanged.
+	 */
+	if (rel->reloptkind == RELOPT_OTHER_MEMBER_REL)
+	{
+		rel->uniquekeys = rel->top_parent->uniquekeys;
+		return;
+	}
 
 	/*
 	 * Compute this now even if we have no rules for this rtekind: it is

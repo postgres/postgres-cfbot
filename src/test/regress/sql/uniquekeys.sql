@@ -173,6 +173,43 @@ explain (costs off)
 select * from uk_p, uk_q where (uk_p.id, uk_q.id) in (select c, c from uk_pk2);
 
 --
+-- Appendrel children
+--
+-- A child emits a subset of its parent's rows, so it inherits the parent's
+-- keys.  A partitioned table's unique index must include the partition key,
+-- so the parent has keys to inherit; an inheritance parent has none.
+--
+create table uk_pt1 (a int, b int, primary key (a)) partition by range (a);
+create table uk_pt1a partition of uk_pt1 for values from (0) to (10);
+create table uk_pt1b partition of uk_pt1 for values from (10) to (20);
+create table uk_pt2 (a int, b int, primary key (a)) partition by range (a);
+create table uk_pt2a partition of uk_pt2 for values from (0) to (10);
+create table uk_pt2b partition of uk_pt2 for values from (10) to (20);
+create table uk_pt3 (a int, b int, primary key (a)) partition by range (a);
+create table uk_pt3a partition of uk_pt3 for values from (0) to (10);
+create table uk_pt3b partition of uk_pt3 for values from (10) to (20);
+create table uk_inh (id int primary key, v int);
+create table uk_inh_c () inherits (uk_inh);
+
+-- the partitioned parent's own key removes the DISTINCT
+explain (costs off) select distinct a from uk_pt1;
+-- an inheritance parent has no key: a child row may duplicate a parent one
+explain (costs off) select distinct id from uk_inh;
+
+set enable_partitionwise_join to on;
+set enable_hashjoin to off;
+-- each child join is inner-unique, proven from the child base rel's key
+explain (verbose, costs off)
+select uk_pt1.b from uk_pt1 join uk_pt2 on uk_pt1.a = uk_pt2.a;
+-- here the outer join's inner side is itself a child joinrel, whose key is
+-- inherited from the parent joinrel
+explain (verbose, costs off)
+select uk_pt1.b from uk_pt1 left join (uk_pt2 join uk_pt3 on uk_pt2.a = uk_pt3.a)
+  on uk_pt1.a = uk_pt2.a;
+reset enable_hashjoin;
+reset enable_partitionwise_join;
+
+--
 -- Result correctness: steps that must not be removed
 --
 -- Cases where an over-strong key would drop a step that is really needed, and
@@ -244,3 +281,5 @@ select uk_e2.id, uk_e2.v from uk_e2 join uk_e1 on uk_e2.id = uk_e1.a and uk_e2.v
 
 drop table uk_p, uk_q, uk_r, uk_pk2, uk_nul, uk_nnd, uk_txt;
 drop table uk_defer, uk_part, uk_d1, uk_d2, uk_e1, uk_e2, uk_e3;
+drop table uk_pt1, uk_pt2, uk_pt3;
+drop table uk_inh cascade;
