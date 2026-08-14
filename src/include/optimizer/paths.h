@@ -308,6 +308,8 @@ extern void populate_unique_rel_uniquekeys(PlannerInfo *root,
 										   RelOptInfo *input_rel,
 										   SpecialJoinInfo *sjinfo,
 										   bool is_noop);
+extern void populate_agg_rel_uniquekeys(PlannerInfo *root,
+										RelOptInfo *grouped_rel);
 extern bool uniquekeys_distinct_is_noop(PlannerInfo *root,
 										RelOptInfo *input_rel);
 extern bool uniquekeys_grouping_is_noop(PlannerInfo *root,
