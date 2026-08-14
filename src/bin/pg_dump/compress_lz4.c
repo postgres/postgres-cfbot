@@ -58,6 +58,7 @@ typedef struct LZ4State
 	 * decompression operations.
 	 */
 	bool		compressing;
+	bool		frame_finished;
 
 	/*
 	 * I/O buffer area.
@@ -159,6 +160,7 @@ ReadDataFromArchiveLZ4(ArchiveHandle *AH, CompressorState *cs)
 	LZ4F_decompressionContext_t ctx = NULL;
 	LZ4F_decompressOptions_t dec_opt;
 	LZ4F_errorCode_t status;
+	bool		frame_finished = false;
 
 	memset(&dec_opt, 0, sizeof(dec_opt));
 	status = LZ4F_createDecompressionContext(&ctx, LZ4F_VERSION);
@@ -187,11 +189,15 @@ ReadDataFromArchiveLZ4(ArchiveHandle *AH, CompressorState *cs)
 			if (LZ4F_isError(status))
 				pg_fatal("could not decompress: %s",
 						 LZ4F_getErrorName(status));
+			frame_finished = (status == 0);
 
 			ahwrite(outbuf, 1, out_size, AH);
 			readp += read_size;
 		}
 	}
+
+	if (!frame_finished)
+		pg_fatal("could not decompress data: compressed stream is incomplete");
 
 	pg_free(outbuf);
 	pg_free(readbuf);
@@ -466,12 +472,17 @@ LZ4Stream_read_internal(LZ4State *state, void *ptr, int ptrsize, bool eol_flag)
 
 			rsize = fread(state->buffer, 1, state->buflen, state->fp);
 			if (rsize < state->buflen && !feof(state->fp))
-			{
-				pg_log_error("could not read from input file: %m");
 				return -1;
-			}
+
 			if (rsize == 0)
+			{
+				if (!state->frame_finished)
+				{
+					errno = EIO;
+					return -1;
+				}
 				break;			/* must be EOF */
+			}
 			state->bufdata = rsize;
 			state->bufnext = 0;
 		}
@@ -492,10 +503,9 @@ LZ4Stream_read_internal(LZ4State *state, void *ptr, int ptrsize, bool eol_flag)
 			if (LZ4F_isError(status))
 			{
 				state->errcode = status;
-				pg_log_error("could not read from input file: %s",
-							 LZ4F_getErrorName(state->errcode));
 				return -1;
 			}
+			state->frame_finished = (status == 0);
 			state->bufnext += inlen;
 			state->outbufdata = outlen;
 			state->outbufnext = 0;
@@ -681,6 +691,11 @@ LZ4Stream_close(CompressFileHandle *CFH)
 		}
 		else
 		{
+			if (!state->frame_finished)
+			{
+				errno = EIO;
+				success = false;
+			}
 			status = LZ4F_freeDecompressionContext(state->dtx);
 			if (LZ4F_isError(status))
 			{
