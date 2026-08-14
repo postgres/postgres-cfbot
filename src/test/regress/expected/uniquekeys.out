@@ -633,6 +633,63 @@ select uk_pt1.b from uk_pt1 left join (uk_pt2 join uk_pt3 on uk_pt2.a = uk_pt3.a
 reset enable_hashjoin;
 reset enable_partitionwise_join;
 --
+-- Eager aggregation
+--
+-- Partial aggregation keeps one row per group, so the grouped relation is
+-- distinct over its grouping expressions, which can prove a join above it
+-- inner-unique.
+--
+create table uk_ea1 (id int primary key, x int, val int);
+create table uk_ea2 (id int, y int);
+insert into uk_ea1 select i, i % 10, i from generate_series(1, 1000) i;
+insert into uk_ea2 select i % 100, i from generate_series(1, 1000) i;
+analyze uk_ea1, uk_ea2;
+-- uk_ea2 is grouped by the join column, so the join sees a unique inner side
+explain (verbose, costs off)
+select uk_ea1.x, sum(uk_ea2.y) from uk_ea1 join uk_ea2 on uk_ea1.id = uk_ea2.id
+  group by uk_ea1.x order by 1;
+                             QUERY PLAN                             
+--------------------------------------------------------------------
+ Sort
+   Output: uk_ea1.x, (sum(uk_ea2.y))
+   Sort Key: uk_ea1.x
+   ->  Finalize HashAggregate
+         Output: uk_ea1.x, sum(uk_ea2.y)
+         Group Key: uk_ea1.x
+         ->  Merge Join
+               Output: uk_ea1.x, (PARTIAL sum(uk_ea2.y))
+               Inner Unique: true
+               Merge Cond: (uk_ea1.id = uk_ea2.id)
+               ->  Index Scan using uk_ea1_pkey on public.uk_ea1
+                     Output: uk_ea1.id, uk_ea1.x, uk_ea1.val
+               ->  Sort
+                     Output: uk_ea2.id, (PARTIAL sum(uk_ea2.y))
+                     Sort Key: uk_ea2.id
+                     ->  Partial HashAggregate
+                           Output: uk_ea2.id, PARTIAL sum(uk_ea2.y)
+                           Group Key: uk_ea2.id
+                           ->  Seq Scan on public.uk_ea2
+                                 Output: uk_ea2.id, uk_ea2.y
+(20 rows)
+
+select uk_ea1.x, sum(uk_ea2.y) from uk_ea1 join uk_ea2 on uk_ea1.id = uk_ea2.id
+  group by uk_ea1.x order by 1;
+ x |  sum  
+---+-------
+ 0 | 45000
+ 1 | 49600
+ 2 | 49700
+ 3 | 49800
+ 4 | 49900
+ 5 | 50000
+ 6 | 50100
+ 7 | 50200
+ 8 | 50300
+ 9 | 50400
+(10 rows)
+
+drop table uk_ea1, uk_ea2;
+--
 -- Result correctness: steps that must not be removed
 --
 -- Cases where an over-strong key would drop a step that is really needed, and

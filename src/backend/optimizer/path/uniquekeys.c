@@ -71,7 +71,7 @@ static bool side_is_unique(PlannerInfo *root, RelOptInfo *joinrel,
 						   JoinType jointype, List *restrictlist);
 static int	find_ec_position(PlannerInfo *root, Expr *expr,
 							 List *opfamilies, Oid collation,
-							 Bitmapset *candidates);
+							 Bitmapset *candidates, Relids child_relids);
 static int	base_ec_position(PlannerInfo *root, EquivalenceClass *ec);
 
 
@@ -172,7 +172,7 @@ populate_plain_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel)
 			pos = find_ec_position(root, colexpr,
 								   get_mergejoin_opfamilies(equality_op),
 								   ind->indexcollations[c],
-								   rel->eclass_indexes);
+								   rel->eclass_indexes, NULL);
 			if (pos < 0)
 			{
 				useless = true;
@@ -322,7 +322,7 @@ add_subquery_key_col(PlannerInfo *root, RelOptInfo *rel,
 					 exprTypmod((Node *) tle->expr),
 					 collation, 0);
 	pos = find_ec_position(root, (Expr *) colvar, opfamilies, collation,
-						   rel->eclass_indexes);
+						   rel->eclass_indexes, NULL);
 	if (pos < 0)
 		return false;
 	ec = (EquivalenceClass *) list_nth(root->eq_classes, pos);
@@ -821,7 +821,7 @@ populate_unique_rel_uniquekeys(PlannerInfo *root, RelOptInfo *unique_rel,
 		/* Match in base-EC space: strip any outer-join nulling first */
 		expr = (Expr *) remove_nulling_relids((Node *) expr,
 											  root->outer_join_rels, NULL);
-		pos = find_ec_position(root, expr, opfamilies, collation, NULL);
+		pos = find_ec_position(root, expr, opfamilies, collation, NULL, NULL);
 		if (pos < 0)
 			return;
 
@@ -835,6 +835,75 @@ populate_unique_rel_uniquekeys(PlannerInfo *root, RelOptInfo *unique_rel,
 	}
 
 	add_uniquekey(unique_rel, key_ecs, true);
+}
+
+/*
+ * populate_agg_rel_uniquekeys
+ *		Deduce the unique keys of a relation that eager aggregation has
+ *		partially aggregated.
+ *
+ * Partial aggregation keeps one row per group, NULL-aware just as GROUP BY is,
+ * so the grouped relation is distinct over its grouping expressions.
+ *
+ * The caller applies this only to a grouped simple relation, whose only way to
+ * produce rows is to aggregate that relation.  A grouped join relation could
+ * instead be built by joining an already-grouped input to a plain one, which
+ * emits one row per group per matching row of the other side rather than one
+ * row per group.
+ */
+void
+populate_agg_rel_uniquekeys(PlannerInfo *root, RelOptInfo *grouped_rel)
+{
+	RelAggInfo *agg_info = grouped_rel->agg_info;
+	Bitmapset  *key_ecs = NULL;
+	ListCell   *lc1;
+	ListCell   *lc2;
+
+	Assert(agg_info != NULL);
+	Assert(IS_SIMPLE_REL(grouped_rel));
+	Assert(bms_equal(agg_info->apply_agg_at, grouped_rel->relids));
+
+	forboth(lc1, agg_info->group_clauses, lc2, agg_info->group_exprs)
+	{
+		SortGroupClause *sgc = lfirst_node(SortGroupClause, lc1);
+		Expr	   *expr = (Expr *) lfirst(lc2);
+		List	   *opfamilies = get_mergejoin_opfamilies(sgc->eqop);
+		Oid			collation = exprCollation((Node *) expr);
+		EquivalenceClass *ec;
+		int			pos;
+
+		/* The key needs all these expressions, so we can't skip one */
+		if (opfamilies == NIL)
+			return;
+
+		/* Match in base-EC space: strip any outer-join nulling first */
+		expr = (Expr *) remove_nulling_relids((Node *) expr,
+											  root->outer_join_rels, NULL);
+
+		/*
+		 * For a child relation the grouping expressions are child Vars, which
+		 * are child members of the same ECs as their parents, so we must let
+		 * those match too.
+		 */
+		pos = find_ec_position(root, expr, opfamilies, collation, NULL,
+							   IS_OTHER_REL(grouped_rel) ?
+							   grouped_rel->relids : NULL);
+		if (pos < 0)
+			return;
+
+		ec = list_nth_node(EquivalenceClass, root->eq_classes, pos);
+
+		/* A column equated to a constant is not needed in the key */
+		if (ec->ec_has_const)
+			continue;
+
+		key_ecs = bms_add_member(key_ecs, pos);
+	}
+
+	if (!bms_is_subset(key_ecs, get_interesting_unique_ecs(root)))
+		return;
+
+	add_uniquekey(grouped_rel, key_ecs, true);
 }
 
 /*
@@ -989,7 +1058,7 @@ uniquekeys_uniquification_is_noop(PlannerInfo *root, RelOptInfo *rel,
 		/* Match in base-EC space: strip any outer-join nulling first */
 		expr = (Expr *) remove_nulling_relids((Node *) expr,
 											  root->outer_join_rels, NULL);
-		pos = find_ec_position(root, expr, opfamilies, collation, NULL);
+		pos = find_ec_position(root, expr, opfamilies, collation, NULL, NULL);
 		if (pos >= 0)
 			covered = bms_add_member(covered, pos);
 	}
@@ -1182,7 +1251,7 @@ collect_clause_ecs(PlannerInfo *root, List *clause, Bitmapset **ecs_p)
 
 			expr = (Expr *) remove_nulling_relids((Node *) tle->expr,
 												  root->outer_join_rels, NULL);
-			pos = find_ec_position(root, expr, opfamilies, collation, NULL);
+			pos = find_ec_position(root, expr, opfamilies, collation, NULL, NULL);
 		}
 		if (pos < 0)
 			return false;
@@ -1277,12 +1346,16 @@ side_is_unique(PlannerInfo *root, RelOptInfo *joinrel,
  *		matching "expr".  If "candidates" is non-NULL, consider only the ECs at
  *		those positions.  Returns -1 if there is none.
  *
+ * "child_relids" identifies a child relation whose members should be
+ * considered as well; pass NULL to match only against parent members.
+ *
  * Keys live in base-EC space, so a caller matching a reference that an outer
  * join may have null-extended must first strip its varnullingrels.
  */
 static int
 find_ec_position(PlannerInfo *root, Expr *expr,
-				 List *opfamilies, Oid collation, Bitmapset *candidates)
+				 List *opfamilies, Oid collation, Bitmapset *candidates,
+				 Relids child_relids)
 {
 	foreach_node(EquivalenceClass, ec, root->eq_classes)
 	{
@@ -1297,7 +1370,7 @@ find_ec_position(PlannerInfo *root, Expr *expr,
 			ec->ec_collation != collation ||
 			!equal(ec->ec_opfamilies, opfamilies))
 			continue;
-		if (find_ec_member_matching_expr(ec, expr, NULL))
+		if (find_ec_member_matching_expr(ec, expr, child_relids))
 			return pos;
 	}
 	return -1;
@@ -1342,7 +1415,7 @@ base_ec_position(PlannerInfo *root, EquivalenceClass *ec)
 			expr = remove_nulling_relids(expr, root->outer_join_rels, NULL);
 
 		pos = find_ec_position(root, (Expr *) expr, ec->ec_opfamilies,
-							   ec->ec_collation, NULL);
+							   ec->ec_collation, NULL, NULL);
 		if (pos >= 0)
 			return pos;
 	}

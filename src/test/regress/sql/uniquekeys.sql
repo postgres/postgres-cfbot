@@ -202,6 +202,28 @@ reset enable_hashjoin;
 reset enable_partitionwise_join;
 
 --
+-- Eager aggregation
+--
+-- Partial aggregation keeps one row per group, so the grouped relation is
+-- distinct over its grouping expressions, which can prove a join above it
+-- inner-unique.
+--
+create table uk_ea1 (id int primary key, x int, val int);
+create table uk_ea2 (id int, y int);
+insert into uk_ea1 select i, i % 10, i from generate_series(1, 1000) i;
+insert into uk_ea2 select i % 100, i from generate_series(1, 1000) i;
+analyze uk_ea1, uk_ea2;
+
+-- uk_ea2 is grouped by the join column, so the join sees a unique inner side
+explain (verbose, costs off)
+select uk_ea1.x, sum(uk_ea2.y) from uk_ea1 join uk_ea2 on uk_ea1.id = uk_ea2.id
+  group by uk_ea1.x order by 1;
+select uk_ea1.x, sum(uk_ea2.y) from uk_ea1 join uk_ea2 on uk_ea1.id = uk_ea2.id
+  group by uk_ea1.x order by 1;
+
+drop table uk_ea1, uk_ea2;
+
+--
 -- Result correctness: steps that must not be removed
 --
 -- Cases where an over-strong key would drop a step that is really needed, and

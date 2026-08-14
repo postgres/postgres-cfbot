@@ -4460,10 +4460,10 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 	Cost		run_cost = workspace->run_cost;
 	int			numbuckets = workspace->numbuckets;
 	int			numbatches = workspace->numbatches;
-	Cost		cpu_per_tuple;
 	QualCost	hash_qual_cost;
 	QualCost	qp_qual_cost;
 	double		hashjointuples;
+	double		hashjoinrows;
 	double		virtualbuckets;
 	Selectivity innerbucketsize;
 	Selectivity innermcvfreq;
@@ -4681,14 +4681,25 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 	}
 
 	/*
-	 * For each tuple that gets through the hashjoin proper, we charge
-	 * cpu_tuple_cost plus the cost of evaluating additional restriction
-	 * clauses that are to be applied at the join.  (This is pessimistic since
-	 * not all of the quals may get evaluated at each tuple.)
+	 * For each tuple that gets through the hashjoin proper, we charge the
+	 * cost of evaluating additional restriction clauses that are to be
+	 * applied at the join.  (This is pessimistic since not all of the quals
+	 * may get evaluated at each tuple.)  cpu_tuple_cost, on the other hand,
+	 * is charged once per row the join emits.
+	 *
+	 * Those two counts coincide except for JOIN_RIGHT_SEMI and
+	 * JOIN_RIGHT_ANTI, which emit inner rows whereas hashjointuples counts
+	 * outer-side tuples.  For those, use the path's own row estimate as the
+	 * number of rows emitted.
 	 */
 	startup_cost += qp_qual_cost.startup;
-	cpu_per_tuple = cpu_tuple_cost + qp_qual_cost.per_tuple;
-	run_cost += cpu_per_tuple * hashjointuples;
+	if (path->jpath.jointype == JOIN_RIGHT_SEMI ||
+		path->jpath.jointype == JOIN_RIGHT_ANTI)
+		hashjoinrows = path->jpath.path.rows;
+	else
+		hashjoinrows = hashjointuples;
+	run_cost += qp_qual_cost.per_tuple * hashjointuples +
+		cpu_tuple_cost * hashjoinrows;
 
 	/* tlist eval costs are paid per output row, not per tuple scanned */
 	startup_cost += path->jpath.path.pathtarget->cost.startup;

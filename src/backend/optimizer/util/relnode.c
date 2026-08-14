@@ -486,6 +486,9 @@ build_simple_grouped_rel(PlannerInfo *root, RelOptInfo *rel)
 	grouped_rel->rows = agg_info->grouped_rows;
 	grouped_rel->agg_info = agg_info;
 
+	/* Deduce the grouped rel's unique keys */
+	populate_agg_rel_uniquekeys(root, grouped_rel);
+
 	rel->grouped_rel = grouped_rel;
 
 	return grouped_rel;
