@@ -1122,7 +1122,6 @@ build_child_join_rel(PlannerInfo *root, RelOptInfo *outer_rel,
 	joinrel->useridiscurrent = false;
 	joinrel->fdwroutine = NULL;
 	joinrel->fdw_private = NULL;
-	joinrel->uniquekeys = NIL;
 	joinrel->unique_rel = NULL;
 	joinrel->unique_pathkeys = NIL;
 	joinrel->unique_groupclause = NIL;
@@ -1147,6 +1146,12 @@ build_child_join_rel(PlannerInfo *root, RelOptInfo *outer_rel,
 	joinrel->all_partrels = NULL;
 	joinrel->partexprs = NULL;
 	joinrel->nullable_partexprs = NULL;
+
+	/*
+	 * A child joinrel emits a subset of the parent joinrel's rows, so every
+	 * key of the parent is a key of the child.
+	 */
+	joinrel->uniquekeys = parent_joinrel->uniquekeys;
 
 	/* Compute information relevant to foreign relations. */
 	set_foreign_rel_properties(joinrel, outer_rel, inner_rel);
