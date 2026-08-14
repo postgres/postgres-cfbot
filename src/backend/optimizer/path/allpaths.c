@@ -404,10 +404,7 @@ set_base_rel_uniquekeys(PlannerInfo *root)
 			continue;
 
 		Assert(rel->relid == rti);	/* sanity check on array */
-
-		/* ignore RTEs that are "other rels" */
-		if (rel->reloptkind != RELOPT_BASEREL)
-			continue;
+		Assert(IS_SIMPLE_REL(rel)); /* sanity check on rel */
 
 		populate_baserel_uniquekeys(root, rel);
 	}
