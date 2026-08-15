@@ -518,20 +518,15 @@ SyncRepReleaseWaiters(void)
 	}
 
 	/*
-	 * We're a potential sync standby. Release waiters if there are enough
-	 * sync standbys and we are considered as sync.
-	 */
-	SyncRepInitWakeList();
-
-	LWLockAcquire(SyncRepLock, LW_EXCLUSIVE);
-
-	/*
-	 * Check whether we are a sync standby or not, and calculate the synced
-	 * positions among all sync standbys.  (Note: although this step does not
-	 * of itself require holding SyncRepLock, it seems like a good idea to do
-	 * it after acquiring the lock.  This ensures that the WAL pointers we use
-	 * to release waiters are newer than any previous execution of this
-	 * routine used.)
+	 * We're a potential sync standby.  Check whether we are a sync standby
+	 * and calculate the synced positions among all sync standbys before
+	 * taking the lock: the walk over the walsender slots takes their
+	 * spinlocks, allocates, and possibly sorts, and doing all of it under
+	 * SyncRepLock delays every committer.
+	 *
+	 * Positions gone stale by the time the lock is held cost nothing.  The
+	 * guards further down only ever move lsn[] forward, so a reading older
+	 * than a concurrent walsender's simply releases nobody.
 	 */
 	got_recptr = SyncRepGetSyncRecPtr(&writePtr, &flushPtr, &applyPtr, &am_sync);
 
@@ -559,10 +554,13 @@ SyncRepReleaseWaiters(void)
 	 */
 	if (!got_recptr || !am_sync)
 	{
-		LWLockRelease(SyncRepLock);
 		announce_next_takeover = !am_sync;
 		return;
 	}
+
+	SyncRepInitWakeList();
+
+	LWLockAcquire(SyncRepLock, LW_EXCLUSIVE);
 
 	/*
 	 * Set the lsn first so that when we wake backends they will release up to
