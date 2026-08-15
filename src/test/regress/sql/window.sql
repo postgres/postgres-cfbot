@@ -1659,6 +1659,155 @@ SELECT * FROM
    FROM empsalary) emp
 WHERE first_emp = 1 OR last_emp = 1;
 
+-- Test reordering of the GROUP BY keys to match the first window's sort
+-- order
+SET enable_hashagg TO off;
+
+-- Ensure the GROUP BY keys are reordered to match the sort order of the
+-- window's PARTITION BY clause, allowing the sort for the grouping step to
+-- also provide the sorted input required by the WindowAgg.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname, min(salary) minsalary,
+       sum(min(salary)) OVER (PARTITION BY depname) depminsum
+FROM empsalary
+GROUP BY empno, depname;
+
+-- As above, but include the window's ORDER BY keys too.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname,
+       count(*) OVER (PARTITION BY depname ORDER BY empno) c
+FROM empsalary
+GROUP BY empno, depname;
+
+-- Ensure the GROUP BY keys are matched to the window's sort order in
+-- preference to the query's ORDER BY, since the latter sort is performed
+-- above the WindowAgg.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname, min(salary) minsalary,
+       sum(min(salary)) OVER (PARTITION BY depname) depminsum
+FROM empsalary
+GROUP BY empno, depname
+ORDER BY empno;
+
+-- Ensure the GROUP BY keys remaining after matching the window's sort order
+-- are ordered to match the query's ORDER BY, allowing the final sort to be
+-- avoided when the WindowAgg preserves the grouping step's output ordering.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname, min(salary) minsalary,
+       sum(min(salary)) OVER (PARTITION BY depname) depminsum
+FROM empsalary
+GROUP BY empno, enroll_date, depname
+ORDER BY depname, enroll_date;
+
+-- As above, but with an ORDER BY that does not lead with the window's sort
+-- keys.  Ensure the remaining GROUP BY keys still follow the query's ORDER
+-- BY even though the final sort cannot be avoided.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname, min(salary) minsalary,
+       sum(min(salary)) OVER (PARTITION BY depname) depminsum
+FROM empsalary
+GROUP BY empno, enroll_date, depname
+ORDER BY enroll_date, empno;
+
+-- Ensure the GROUP BY keys are still matched to the query's ORDER BY when
+-- the window imposes no sort order of its own.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname, min(salary) minsalary,
+       sum(min(salary)) OVER () salarysum
+FROM empsalary
+GROUP BY depname, empno
+ORDER BY empno, depname;
+
+-- Ensure the GROUP BY keys adopt the sort direction of the window's ORDER BY
+-- keys, so that a single sort still serves both steps.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname,
+       count(*) OVER (PARTITION BY depname ORDER BY empno DESC) c
+FROM empsalary
+GROUP BY empno, depname;
+
+-- As above, but with NULLS FIRST in the window's ORDER BY.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname,
+       count(*) OVER (PARTITION BY depname ORDER BY empno NULLS FIRST) c
+FROM empsalary
+GROUP BY empno, depname;
+
+-- Ensure the window's sort direction is preferred even when the query's
+-- ORDER BY has given the GROUP BY key a different one.  The final sort can
+-- then be done incrementally.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname,
+       count(*) OVER (PARTITION BY depname ORDER BY empno DESC) c
+FROM empsalary
+GROUP BY empno, depname
+ORDER BY depname, empno;
+
+-- Likewise for a PARTITION BY key whose direction differs from that given
+-- to the GROUP BY key by the query's ORDER BY.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname,
+       count(*) OVER (PARTITION BY depname ORDER BY empno) c
+FROM empsalary
+GROUP BY empno, depname
+ORDER BY depname DESC;
+
+-- Ensure the GROUP BY key does not adopt the window's sort ordering when
+-- the query's ORDER BY has given it a different equality operator.
+EXPLAIN (COSTS OFF)
+SELECT r, count(*) OVER (ORDER BY r DESC) c
+FROM (SELECT row(depname, empno) AS r FROM empsalary) s
+GROUP BY r
+ORDER BY r USING *<;
+
+-- Ensure the GROUP BY keys do not adopt a window's ORDER BY that uses a
+-- different operator family, even with the same equality operator.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname,
+       count(*) OVER (PARTITION BY empno ORDER BY depname USING ~<~) c
+FROM empsalary
+GROUP BY depname, empno;
+
+-- Ensure a later sort clause referencing an already-matched GROUP BY key
+-- with the same equality operator is skipped as redundant rather than
+-- ending the match, even without window functions.
+EXPLAIN (COSTS OFF)
+SELECT empno, enroll_date, depname
+FROM empsalary
+GROUP BY empno, enroll_date, depname
+ORDER BY depname USING ~<~, depname, enroll_date, empno;
+
+CREATE TABLE groupwin (x int, y int, z int);
+INSERT INTO groupwin
+  SELECT i % 4, i % 5, CASE WHEN i % 7 = 0 THEN NULL ELSE i % 3 END
+  FROM generate_series(1, 1000) i;
+CREATE INDEX groupwin_x_y_idx ON groupwin (x, y);
+ANALYZE groupwin;
+
+-- Ensure the GROUP BY keys adopting the window's sort direction doesn't
+-- prevent grouping directly off a presorted input, then sorting just the
+-- groups for the window.
+EXPLAIN (COSTS OFF)
+SELECT x, y, count(*), count(*) OVER (PARTITION BY x ORDER BY y DESC) c
+FROM groupwin
+GROUP BY x, y;
+
+-- Check the results with a descending window ORDER BY over NULLs.
+EXPLAIN (COSTS OFF)
+SELECT x, z, count(*),
+       sum(count(*)) OVER (PARTITION BY x ORDER BY z DESC NULLS LAST) s
+FROM groupwin
+GROUP BY x, z;
+SELECT x, z, count(*),
+       sum(count(*)) OVER (PARTITION BY x ORDER BY z DESC NULLS LAST) s
+FROM groupwin
+GROUP BY x, z
+ORDER BY x, z DESC NULLS LAST;
+
+DROP TABLE groupwin;
+
+RESET enable_hashagg;
+
 CREATE INDEX empsalary_salary_empno_idx ON empsalary (salary, empno);
 
 SET enable_seqscan = 0;
