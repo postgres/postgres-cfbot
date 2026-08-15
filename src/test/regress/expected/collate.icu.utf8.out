@@ -2046,6 +2046,36 @@ SELECT x FROM test1ci INTERSECT SELECT x FROM test2ci ORDER BY x;
  ghi
 (2 rows)
 
+-- GROUP BY must not adopt a window's sort operator from another opfamily:
+-- text_pattern_ops' ~<~ sorts 'A' and 'a' apart although they are equal
+SET enable_hashagg TO off;
+EXPLAIN (COSTS OFF)
+SELECT x, count(*), count(*) OVER (ORDER BY x USING ~<~)
+FROM (VALUES ('a' COLLATE case_insensitive), ('B'), ('A'), ('b'), ('a')) v(x)
+GROUP BY x;
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ WindowAgg
+   Window: w1 AS (ORDER BY "*VALUES*".column1)
+   ->  Sort
+         Sort Key: "*VALUES*".column1 COLLATE case_insensitive USING ~<~
+         ->  GroupAggregate
+               Group Key: "*VALUES*".column1
+               ->  Sort
+                     Sort Key: "*VALUES*".column1 COLLATE case_insensitive
+                     ->  Values Scan on "*VALUES*"
+(9 rows)
+
+SELECT x, count(*), count(*) OVER (ORDER BY x USING ~<~)
+FROM (VALUES ('a' COLLATE case_insensitive), ('B'), ('A'), ('b'), ('a')) v(x)
+GROUP BY x;
+ x | count | count 
+---+-------+-------
+ B |     2 |     1
+ a |     3 |     2
+(2 rows)
+
+RESET enable_hashagg;
 SELECT x FROM test2ci INTERSECT SELECT x FROM test1ci ORDER BY x;
   x  
 -----
