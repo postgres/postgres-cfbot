@@ -92,7 +92,7 @@ transformGraphTablePropertyRef(ParseState *pstate, ColumnRef *cref)
 
 		if (IsA(field1, A_Star) || IsA(field2, A_Star))
 		{
-			if (pstate->p_expr_kind == EXPR_KIND_SELECT_TARGET)
+			if (pstate->p_expr_kind == EXPR_KIND_GRAPH_TABLE_COLUMNS)
 				ereport(ERROR,
 						errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						errmsg("\"*\" is not supported here"),
@@ -106,7 +106,6 @@ transformGraphTablePropertyRef(ParseState *pstate, ColumnRef *cref)
 
 		elvarname = strVal(field1);
 		propname = strVal(field2);
-
 		if (list_member(gpstate->variables, field1))
 		{
 			GraphPropertyRef *gpr;
@@ -137,6 +136,8 @@ transformGraphTablePropertyRef(ParseState *pstate, ColumnRef *cref)
 
 			gpr->location = cref->location;
 			gpr->elvarname = elvarname;
+
+			gpr->varlevelsup = 0;
 			gpr->propid = pgpform->oid;
 			gpr->typeId = pgpform->pgptypid;
 			gpr->typmod = pgpform->pgptypmod;
@@ -250,8 +251,7 @@ transformGraphElementPattern(ParseState *pstate, GraphElementPattern *gep)
 	gpstate->cur_gep = gep;
 
 	gep->labelexpr = transformLabelExpr(gpstate, gep->labelexpr);
-
-	gep->whereClause = transformExpr(pstate, gep->whereClause, EXPR_KIND_WHERE);
+	gep->whereClause = transformExpr(pstate, gep->whereClause, EXPR_KIND_GRAPH_TABLE_WHERE);
 
 	/*
 	 * Assign collations here for the reason mentioned in the prologue of
@@ -387,7 +387,7 @@ transformGraphPattern(ParseState *pstate, GraphPattern *graph_pattern)
 											 transformPathPatternList(pstate, graph_pattern->path_pattern_list));
 
 	graph_pattern->path_pattern_list = path_pattern_list;
-	graph_pattern->whereClause = transformExpr(pstate, graph_pattern->whereClause, EXPR_KIND_WHERE);
+	graph_pattern->whereClause = transformExpr(pstate, graph_pattern->whereClause, EXPR_KIND_GRAPH_TABLE_WHERE);
 	assign_expr_collations(pstate, graph_pattern->whereClause);
 
 	return (Node *) graph_pattern;

@@ -2196,11 +2196,23 @@ typedef struct GraphLabelRef
 
 /*
  * GraphPropertyRef - property reference inside GRAPH_TABLE clause
+ *
+ * A GraphPropertyRef is generated during transformation and resolved away by
+ * the rewriter, so only a few places need to know about it.  It carries a
+ * varlevelsup and is treated like a Var by contain_vars_of_level() and
+ * locate_var_of_level(); IncrementVarSublevelsUp() leaves it alone, since
+ * replace_property_refs() passes its varlevelsup through when resolving it to
+ * a Var.
+ * We don't yet allow correlated subqueries inside a GRAPH_TABLE reference, so
+ * varlevelsup is always 0 today.
  */
 typedef struct GraphPropertyRef
 {
 	Expr		xpr;
 	const char *elvarname;
+
+	/* > 0 for an outer-query reference, but see above: always 0 today */
+	Index		varlevelsup;
 	Oid			propid;
 	Oid			typeId;
 	int32		typmod;
