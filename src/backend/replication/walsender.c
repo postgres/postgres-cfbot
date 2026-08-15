@@ -4100,7 +4100,10 @@ static void
 WalSndShmemInit(void *arg)
 {
 	for (int i = 0; i < NUM_SYNC_REP_WAIT_MODE; i++)
+	{
 		dlist_init(&(WalSndCtl->SyncRepQueue[i]));
+		pg_atomic_init_u64(&(WalSndCtl->lsn[i]), 0);
+	}
 
 	for (int i = 0; i < max_wal_senders; i++)
 	{
