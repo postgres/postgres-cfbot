@@ -2424,21 +2424,22 @@ from int4_tbl t1, int4_tbl t2
   left join int4_tbl t3 on t3.f1 > 0
   left join int4_tbl t4 on t3.f1 > 1
 where t4.f1 is null;
-                      QUERY PLAN                       
--------------------------------------------------------
+                         QUERY PLAN                          
+-------------------------------------------------------------
  Nested Loop
    ->  Nested Loop Left Join
          Filter: (t4.f1 IS NULL)
          ->  Seq Scan on int4_tbl t2
          ->  Materialize
                ->  Nested Loop Left Join
-                     Join Filter: (t3.f1 > 1)
                      ->  Seq Scan on int4_tbl t3
                            Filter: (f1 > 0)
-                     ->  Materialize
-                           ->  Seq Scan on int4_tbl t4
+                     ->  Result
+                           One-Time Filter: (t3.f1 > 1)
+                           ->  Materialize
+                                 ->  Seq Scan on int4_tbl t4
    ->  Seq Scan on int4_tbl t1
-(12 rows)
+(13 rows)
 
 select t1.f1
 from int4_tbl t1, int4_tbl t2
@@ -2454,21 +2455,23 @@ select *
 from int4_tbl t1 left join int4_tbl t2 on true
   left join int4_tbl t3 on t2.f1 > 0
   left join int4_tbl t4 on t3.f1 > 0;
-                      QUERY PLAN                       
--------------------------------------------------------
+                         QUERY PLAN                          
+-------------------------------------------------------------
  Nested Loop Left Join
    ->  Seq Scan on int4_tbl t1
    ->  Materialize
          ->  Nested Loop Left Join
-               Join Filter: (t3.f1 > 0)
                ->  Nested Loop Left Join
-                     Join Filter: (t2.f1 > 0)
                      ->  Seq Scan on int4_tbl t2
+                     ->  Result
+                           One-Time Filter: (t2.f1 > 0)
+                           ->  Materialize
+                                 ->  Seq Scan on int4_tbl t3
+               ->  Result
+                     One-Time Filter: (t3.f1 > 0)
                      ->  Materialize
-                           ->  Seq Scan on int4_tbl t3
-               ->  Materialize
-                     ->  Seq Scan on int4_tbl t4
-(12 rows)
+                           ->  Seq Scan on int4_tbl t4
+(14 rows)
 
 explain (costs off)
 select * from onek t1
@@ -2525,7 +2528,6 @@ select * from int4_tbl t1
                    QUERY PLAN                    
 -------------------------------------------------
  Nested Loop Left Join
-   Join Filter: (t2.f1 = t3.f1)
    ->  Nested Loop Left Join
          ->  Nested Loop Left Join
                ->  Seq Scan on int4_tbl t1
@@ -2533,9 +2535,11 @@ select * from int4_tbl t1
                      ->  Seq Scan on int4_tbl t2
          ->  Materialize
                ->  Seq Scan on int4_tbl t3
-   ->  Materialize
-         ->  Seq Scan on int4_tbl t4
-(11 rows)
+   ->  Result
+         One-Time Filter: (t2.f1 = t3.f1)
+         ->  Materialize
+               ->  Seq Scan on int4_tbl t4
+(12 rows)
 
 explain (costs off)
 select * from int4_tbl t1
@@ -2563,23 +2567,25 @@ select * from int4_tbl t1
   left join (int4_tbl t2 left join int4_tbl t3 on t2.f1 > 0) on t2.f1 > 1
   left join int4_tbl t4 on t2.f1 > 2 and t3.f1 > 3
 where t1.f1 = coalesce(t2.f1, 1);
-                     QUERY PLAN                     
-----------------------------------------------------
+                       QUERY PLAN                       
+--------------------------------------------------------
  Nested Loop Left Join
-   Join Filter: ((t2.f1 > 2) AND (t3.f1 > 3))
    ->  Nested Loop Left Join
-         Join Filter: (t2.f1 > 0)
          ->  Nested Loop Left Join
                Filter: (t1.f1 = COALESCE(t2.f1, 1))
                ->  Seq Scan on int4_tbl t1
                ->  Materialize
                      ->  Seq Scan on int4_tbl t2
                            Filter: (f1 > 1)
+         ->  Result
+               One-Time Filter: (t2.f1 > 0)
+               ->  Materialize
+                     ->  Seq Scan on int4_tbl t3
+   ->  Result
+         One-Time Filter: ((t2.f1 > 2) AND (t3.f1 > 3))
          ->  Materialize
-               ->  Seq Scan on int4_tbl t3
-   ->  Materialize
-         ->  Seq Scan on int4_tbl t4
-(14 rows)
+               ->  Seq Scan on int4_tbl t4
+(16 rows)
 
 explain (costs off)
 select * from int4_tbl t1
@@ -2588,22 +2594,24 @@ select * from int4_tbl t1
                 where t3.f1 is null) s
              left join tenk1 t4 on s.f1 > 1)
     on s.f1 = t1.f1;
-                   QUERY PLAN                    
--------------------------------------------------
+                      QUERY PLAN                       
+-------------------------------------------------------
  Hash Right Join
    Hash Cond: (t2.f1 = t1.f1)
    ->  Nested Loop Left Join
-         Join Filter: (t2.f1 > 1)
          ->  Nested Loop Left Join
-               Join Filter: (t2.f1 > 0)
                Filter: (t3.f1 IS NULL)
                ->  Seq Scan on int4_tbl t2
-               ->  Materialize
-                     ->  Seq Scan on int4_tbl t3
-         ->  Seq Scan on tenk1 t4
+               ->  Result
+                     One-Time Filter: (t2.f1 > 0)
+                     ->  Materialize
+                           ->  Seq Scan on int4_tbl t3
+         ->  Result
+               One-Time Filter: (t2.f1 > 1)
+               ->  Seq Scan on tenk1 t4
    ->  Hash
          ->  Seq Scan on int4_tbl t1
-(13 rows)
+(15 rows)
 
 explain (costs off)
 select * from int4_tbl t1
@@ -2615,20 +2623,22 @@ select * from int4_tbl t1
                            QUERY PLAN                            
 -----------------------------------------------------------------
  Nested Loop Left Join
-   Join Filter: (t2.f1 > 1)
    ->  Hash Right Join
          Hash Cond: (t2.f1 = t1.f1)
          ->  Nested Loop Left Join
-               Join Filter: (t2.f1 > 0)
                Filter: (t2.f1 <> COALESCE(t3.f1, '-1'::integer))
                ->  Seq Scan on int4_tbl t2
-               ->  Materialize
-                     ->  Seq Scan on int4_tbl t3
+               ->  Result
+                     One-Time Filter: (t2.f1 > 0)
+                     ->  Materialize
+                           ->  Seq Scan on int4_tbl t3
          ->  Hash
                ->  Seq Scan on int4_tbl t1
-   ->  Materialize
-         ->  Seq Scan on tenk1 t4
-(14 rows)
+   ->  Result
+         One-Time Filter: (t2.f1 > 1)
+         ->  Materialize
+               ->  Seq Scan on tenk1 t4
+(16 rows)
 
 explain (costs off)
 select * from onek t1
@@ -2680,17 +2690,18 @@ select * from int8_tbl t1
     left join lateral
       (select * from int8_tbl t3 where t3.q1 = t2.q1 offset 0) s
       on t2.q1 = 1;
-                QUERY PLAN                 
--------------------------------------------
+                    QUERY PLAN                    
+--------------------------------------------------
  Nested Loop Left Join
    ->  Seq Scan on int8_tbl t1
    ->  Materialize
          ->  Nested Loop Left Join
-               Join Filter: (t2.q1 = 1)
                ->  Seq Scan on int8_tbl t2
-               ->  Seq Scan on int8_tbl t3
-                     Filter: (q1 = t2.q1)
-(8 rows)
+               ->  Result
+                     One-Time Filter: (t2.q1 = 1)
+                     ->  Seq Scan on int8_tbl t3
+                           Filter: (q1 = t2.q1)
+(9 rows)
 
 explain (costs off)
 select * from int8_tbl t1
@@ -2698,16 +2709,17 @@ select * from int8_tbl t1
     left join lateral
       (select * from generate_series(t2.q1, 100)) s
       on t2.q1 = 1;
-                     QUERY PLAN                     
-----------------------------------------------------
+                        QUERY PLAN                        
+----------------------------------------------------------
  Nested Loop Left Join
    ->  Seq Scan on int8_tbl t1
    ->  Materialize
          ->  Nested Loop Left Join
-               Join Filter: (t2.q1 = 1)
                ->  Seq Scan on int8_tbl t2
-               ->  Function Scan on generate_series
-(7 rows)
+               ->  Result
+                     One-Time Filter: (t2.q1 = 1)
+                     ->  Function Scan on generate_series
+(8 rows)
 
 explain (costs off)
 select * from int8_tbl t1
@@ -2715,16 +2727,17 @@ select * from int8_tbl t1
     left join lateral
       (select t2.q1 from int8_tbl t3) s
       on t2.q1 = 1;
-                QUERY PLAN                 
--------------------------------------------
+                    QUERY PLAN                    
+--------------------------------------------------
  Nested Loop Left Join
    ->  Seq Scan on int8_tbl t1
    ->  Materialize
          ->  Nested Loop Left Join
-               Join Filter: (t2.q1 = 1)
                ->  Seq Scan on int8_tbl t2
-               ->  Seq Scan on int8_tbl t3
-(7 rows)
+               ->  Result
+                     One-Time Filter: (t2.q1 = 1)
+                     ->  Seq Scan on int8_tbl t3
+(8 rows)
 
 explain (costs off)
 select * from onek t1
@@ -2732,20 +2745,21 @@ select * from onek t1
     left join lateral
       (select * from onek t3 where t3.two = t2.two offset 0) s
       on t2.unique1 = 1;
-                    QUERY PLAN                    
---------------------------------------------------
+                       QUERY PLAN                       
+--------------------------------------------------------
  Nested Loop Left Join
    ->  Seq Scan on onek t1
    ->  Materialize
          ->  Nested Loop Left Join
-               Join Filter: (t2.unique1 = 1)
                ->  Seq Scan on onek t2
-               ->  Memoize
-                     Cache Key: t2.two
-                     Cache Mode: binary
-                     ->  Seq Scan on onek t3
-                           Filter: (two = t2.two)
-(11 rows)
+               ->  Result
+                     One-Time Filter: (t2.unique1 = 1)
+                     ->  Memoize
+                           Cache Key: t2.two
+                           Cache Mode: binary
+                           ->  Seq Scan on onek t3
+                                 Filter: (two = t2.two)
+(12 rows)
 
 --
 -- check a case where we formerly got confused by conflicting sort orders
@@ -4657,11 +4671,12 @@ select unique1, x from tenk1 left join f_immutable_int4(1) x on unique1 = x;
                      QUERY PLAN                     
 ----------------------------------------------------
  Nested Loop Left Join
-   Join Filter: (tenk1.unique1 = 1)
    ->  Index Only Scan using tenk1_unique1 on tenk1
-   ->  Materialize
-         ->  Result
-(5 rows)
+   ->  Result
+         One-Time Filter: (tenk1.unique1 = 1)
+         ->  Materialize
+               ->  Result
+(6 rows)
 
 explain (costs off)
 select unique1, x from tenk1 right join f_immutable_int4(1) x on unique1 = x;
@@ -4708,17 +4723,17 @@ from nt3 as nt3
     ) as ss2
     on ss2.id = nt3.nt2_id
 where nt3.id = 1 and ss2.b3;
-                  QUERY PLAN                  
-----------------------------------------------
+                   QUERY PLAN                    
+-------------------------------------------------
  Nested Loop Left Join
    Filter: ((nt2.b1 OR ((0) = 42)))
    ->  Index Scan using nt3_pkey on nt3
          Index Cond: (id = 1)
    ->  Nested Loop Left Join
-         Join Filter: (0 = nt2.nt1_id)
          ->  Index Scan using nt2_pkey on nt2
                Index Cond: (id = nt3.nt2_id)
          ->  Result
+               One-Time Filter: (0 = nt2.nt1_id)
 (9 rows)
 
 drop function f_immutable_int4(int);
@@ -4958,7 +4973,6 @@ select count(*) from
 -------------------------------------------------------------------------
  Aggregate
    ->  Nested Loop Left Join
-         Join Filter: (a.unique2 = b.unique1)
          ->  Nested Loop
                ->  Nested Loop
                      ->  Seq Scan on int4_tbl
@@ -4968,9 +4982,11 @@ select count(*) from
                                  Index Cond: (thousand = int4_tbl.f1)
                ->  Index Scan using tenk1_unique1 on tenk1 a
                      Index Cond: (unique1 = b.unique2)
-         ->  Index Only Scan using tenk1_thous_tenthous on tenk1 c
-               Index Cond: (thousand = a.thousand)
-(14 rows)
+         ->  Result
+               One-Time Filter: (a.unique2 = b.unique1)
+               ->  Index Only Scan using tenk1_thous_tenthous on tenk1 c
+                     Index Cond: (thousand = a.thousand)
+(15 rows)
 
 select count(*) from
   tenk1 a join tenk1 b on a.unique1 = b.unique2
@@ -4995,7 +5011,6 @@ select b.unique1 from
    ->  Nested Loop Left Join
          ->  Seq Scan on int4_tbl i2
          ->  Nested Loop Left Join
-               Join Filter: (b.unique1 = 42)
                ->  Nested Loop
                      ->  Nested Loop
                            ->  Seq Scan on int4_tbl i1
@@ -5003,9 +5018,11 @@ select b.unique1 from
                                  Index Cond: ((thousand = i1.f1) AND (tenthous = i2.f1))
                      ->  Index Scan using tenk1_unique1 on tenk1 a
                            Index Cond: (unique1 = b.unique2)
-               ->  Index Only Scan using tenk1_thous_tenthous on tenk1 c
-                     Index Cond: (thousand = a.thousand)
-(15 rows)
+               ->  Result
+                     One-Time Filter: (b.unique1 = 42)
+                     ->  Index Only Scan using tenk1_thous_tenthous on tenk1 c
+                           Index Cond: (thousand = a.thousand)
+(16 rows)
 
 select b.unique1 from
   tenk1 a join tenk1 b on a.unique1 = b.unique2
@@ -5304,39 +5321,41 @@ select t1.* from
   on (t1.f1 = b1.d1)
   left join int4_tbl i4
   on (i8.q2 = i4.f1);
-                              QUERY PLAN                              
-----------------------------------------------------------------------
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
  Hash Left Join
    Output: t1.f1
    Hash Cond: (i8.q2 = i4.f1)
    ->  Nested Loop Left Join
          Output: t1.f1, i8.q2
-         Join Filter: (t1.f1 = '***'::text)
          ->  Seq Scan on public.text_tbl t1
                Output: t1.f1
-         ->  Materialize
+         ->  Result
                Output: i8.q2
-               ->  Hash Right Join
+               One-Time Filter: (t1.f1 = '***'::text)
+               ->  Materialize
                      Output: i8.q2
-                     Hash Cond: ((NULL::integer) = i8b1.q2)
-                     ->  Hash Join
-                           Output: i8.q2, (NULL::integer)
-                           Hash Cond: (i8.q1 = i8b2.q1)
-                           ->  Seq Scan on public.int8_tbl i8
-                                 Output: i8.q1, i8.q2
+                     ->  Hash Right Join
+                           Output: i8.q2
+                           Hash Cond: ((NULL::integer) = i8b1.q2)
+                           ->  Hash Join
+                                 Output: i8.q2, (NULL::integer)
+                                 Hash Cond: (i8.q1 = i8b2.q1)
+                                 ->  Seq Scan on public.int8_tbl i8
+                                       Output: i8.q1, i8.q2
+                                 ->  Hash
+                                       Output: i8b2.q1, (NULL::integer)
+                                       ->  Seq Scan on public.int8_tbl i8b2
+                                             Output: i8b2.q1, NULL::integer
                            ->  Hash
-                                 Output: i8b2.q1, (NULL::integer)
-                                 ->  Seq Scan on public.int8_tbl i8b2
-                                       Output: i8b2.q1, NULL::integer
-                     ->  Hash
-                           Output: i8b1.q2
-                           ->  Seq Scan on public.int8_tbl i8b1
                                  Output: i8b1.q2
+                                 ->  Seq Scan on public.int8_tbl i8b1
+                                       Output: i8b1.q2
    ->  Hash
          Output: i4.f1
          ->  Seq Scan on public.int4_tbl i4
                Output: i4.f1
-(30 rows)
+(32 rows)
 
 select t1.* from
   text_tbl t1
@@ -5365,43 +5384,45 @@ select t1.* from
   on (t1.f1 = b1.d1)
   left join int4_tbl i4
   on (i8.q2 = i4.f1);
-                                 QUERY PLAN                                 
-----------------------------------------------------------------------------
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
  Hash Left Join
    Output: t1.f1
    Hash Cond: (i8.q2 = i4.f1)
    ->  Nested Loop Left Join
          Output: t1.f1, i8.q2
-         Join Filter: (t1.f1 = '***'::text)
          ->  Seq Scan on public.text_tbl t1
                Output: t1.f1
-         ->  Materialize
+         ->  Result
                Output: i8.q2
-               ->  Hash Right Join
+               One-Time Filter: (t1.f1 = '***'::text)
+               ->  Materialize
                      Output: i8.q2
-                     Hash Cond: ((NULL::integer) = i8b1.q2)
                      ->  Hash Right Join
-                           Output: i8.q2, (NULL::integer)
-                           Hash Cond: (i8b2.q1 = i8.q1)
-                           ->  Nested Loop
-                                 Output: i8b2.q1, NULL::integer
-                                 ->  Seq Scan on public.int8_tbl i8b2
-                                       Output: i8b2.q1, i8b2.q2
-                                 ->  Materialize
-                                       ->  Seq Scan on public.int4_tbl i4b2
-                           ->  Hash
-                                 Output: i8.q1, i8.q2
-                                 ->  Seq Scan on public.int8_tbl i8
+                           Output: i8.q2
+                           Hash Cond: ((NULL::integer) = i8b1.q2)
+                           ->  Hash Right Join
+                                 Output: i8.q2, (NULL::integer)
+                                 Hash Cond: (i8b2.q1 = i8.q1)
+                                 ->  Nested Loop
+                                       Output: i8b2.q1, NULL::integer
+                                       ->  Seq Scan on public.int8_tbl i8b2
+                                             Output: i8b2.q1, i8b2.q2
+                                       ->  Materialize
+                                             ->  Seq Scan on public.int4_tbl i4b2
+                                 ->  Hash
                                        Output: i8.q1, i8.q2
-                     ->  Hash
-                           Output: i8b1.q2
-                           ->  Seq Scan on public.int8_tbl i8b1
+                                       ->  Seq Scan on public.int8_tbl i8
+                                             Output: i8.q1, i8.q2
+                           ->  Hash
                                  Output: i8b1.q2
+                                 ->  Seq Scan on public.int8_tbl i8b1
+                                       Output: i8b1.q2
    ->  Hash
          Output: i4.f1
          ->  Seq Scan on public.int4_tbl i4
                Output: i4.f1
-(34 rows)
+(36 rows)
 
 select t1.* from
   text_tbl t1
@@ -5431,46 +5452,48 @@ select t1.* from
   on (t1.f1 = b1.d1)
   left join int4_tbl i4
   on (i8.q2 = i4.f1);
-                                 QUERY PLAN                                 
-----------------------------------------------------------------------------
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
  Hash Left Join
    Output: t1.f1
    Hash Cond: (i8.q2 = i4.f1)
    ->  Nested Loop Left Join
          Output: t1.f1, i8.q2
-         Join Filter: (t1.f1 = '***'::text)
          ->  Seq Scan on public.text_tbl t1
                Output: t1.f1
-         ->  Materialize
+         ->  Result
                Output: i8.q2
-               ->  Hash Right Join
+               One-Time Filter: (t1.f1 = '***'::text)
+               ->  Materialize
                      Output: i8.q2
-                     Hash Cond: ((NULL::integer) = i8b1.q2)
                      ->  Hash Right Join
-                           Output: i8.q2, (NULL::integer)
-                           Hash Cond: (i8b2.q1 = i8.q1)
-                           ->  Hash Join
-                                 Output: i8b2.q1, NULL::integer
-                                 Hash Cond: (i8b2.q1 = i4b2.f1)
-                                 ->  Seq Scan on public.int8_tbl i8b2
-                                       Output: i8b2.q1, i8b2.q2
-                                 ->  Hash
-                                       Output: i4b2.f1
-                                       ->  Seq Scan on public.int4_tbl i4b2
+                           Output: i8.q2
+                           Hash Cond: ((NULL::integer) = i8b1.q2)
+                           ->  Hash Right Join
+                                 Output: i8.q2, (NULL::integer)
+                                 Hash Cond: (i8b2.q1 = i8.q1)
+                                 ->  Hash Join
+                                       Output: i8b2.q1, NULL::integer
+                                       Hash Cond: (i8b2.q1 = i4b2.f1)
+                                       ->  Seq Scan on public.int8_tbl i8b2
+                                             Output: i8b2.q1, i8b2.q2
+                                       ->  Hash
                                              Output: i4b2.f1
-                           ->  Hash
-                                 Output: i8.q1, i8.q2
-                                 ->  Seq Scan on public.int8_tbl i8
+                                             ->  Seq Scan on public.int4_tbl i4b2
+                                                   Output: i4b2.f1
+                                 ->  Hash
                                        Output: i8.q1, i8.q2
-                     ->  Hash
-                           Output: i8b1.q2
-                           ->  Seq Scan on public.int8_tbl i8b1
+                                       ->  Seq Scan on public.int8_tbl i8
+                                             Output: i8.q1, i8.q2
+                           ->  Hash
                                  Output: i8b1.q2
+                                 ->  Seq Scan on public.int8_tbl i8b1
+                                       Output: i8b1.q2
    ->  Hash
          Output: i4.f1
          ->  Seq Scan on public.int4_tbl i4
                Output: i4.f1
-(37 rows)
+(39 rows)
 
 select t1.* from
   text_tbl t1
@@ -5564,8 +5587,8 @@ select 1 from
   join int4_tbl i42 on ss1.a is null or i8.q1 <> i8.q2
   right join (select 2 as b) ss2
   on ss2.b < i4.f1;
-                        QUERY PLAN                         
------------------------------------------------------------
+                           QUERY PLAN                           
+----------------------------------------------------------------
  Nested Loop Left Join
    ->  Result
    ->  Nested Loop
@@ -5573,16 +5596,17 @@ select 1 from
                Join Filter: NULL::boolean
                Filter: (((1) IS NULL) OR (i8.q1 <> i8.q2))
                ->  Nested Loop Left Join
-                     Join Filter: (i4.f1 IS NOT NULL)
                      ->  Seq Scan on int4_tbl i4
                            Filter: (2 < f1)
-                     ->  Materialize
-                           ->  Seq Scan on int8_tbl i8
+                     ->  Result
+                           One-Time Filter: (i4.f1 IS NOT NULL)
+                           ->  Materialize
+                                 ->  Seq Scan on int8_tbl i8
                ->  Result
                      One-Time Filter: false
          ->  Materialize
                ->  Seq Scan on int4_tbl i42
-(16 rows)
+(17 rows)
 
 --
 -- test for appropriate join order in the presence of lateral references
@@ -6243,7 +6267,6 @@ from int8_tbl t1
                    QUERY PLAN                    
 -------------------------------------------------
  Nested Loop Left Join
-   Join Filter: (t2.q2 < t3.unique2)
    ->  Nested Loop Left Join
          Join Filter: (t2.q1 > t3.unique1)
          ->  Hash Left Join
@@ -6253,9 +6276,11 @@ from int8_tbl t1
                      ->  Seq Scan on int8_tbl t2
          ->  Materialize
                ->  Seq Scan on onek t3
-   ->  Materialize
-         ->  Seq Scan on onek t4
-(13 rows)
+   ->  Result
+         One-Time Filter: (t2.q2 < t3.unique2)
+         ->  Materialize
+               ->  Seq Scan on onek t4
+(14 rows)
 
 -- bug #19460: we need to clean up RestrictInfos more than we had been doing
 explain (costs off)
@@ -6507,11 +6532,12 @@ select 1 from a t1
    ->  Seq Scan on a t1
    ->  Materialize
          ->  Nested Loop Left Join
-               Join Filter: (t2.id = 1)
                ->  Index Only Scan using a_pkey on a t2
                      Index Cond: (id = 1)
-               ->  Seq Scan on a t3
-(8 rows)
+               ->  Result
+                     One-Time Filter: (t2.id = 1)
+                     ->  Seq Scan on a t3
+(9 rows)
 
 -- check join removal works when uniqueness of the join condition is enforced
 -- by a UNION
@@ -8003,14 +8029,15 @@ explain (costs off)
 select * from emp1 t1
    inner join emp1 t2 on t1.id = t2.id
     left join emp1 t3 on t1.id > 1 and t1.id < 2;
-                  QUERY PLAN                  
-----------------------------------------------
+                       QUERY PLAN                       
+--------------------------------------------------------
  Nested Loop Left Join
-   Join Filter: ((t2.id > 1) AND (t2.id < 2))
    ->  Seq Scan on emp1 t2
-   ->  Materialize
-         ->  Seq Scan on emp1 t3
-(5 rows)
+   ->  Result
+         One-Time Filter: ((t2.id > 1) AND (t2.id < 2))
+         ->  Materialize
+               ->  Seq Scan on emp1 t3
+(6 rows)
 
 -- Check that SJE doesn't replace the target relation
 EXPLAIN (COSTS OFF)
@@ -8031,14 +8058,16 @@ EXPLAIN (COSTS OFF)
 SELECT * FROM emp1 t1
    INNER JOIN emp1 t2 ON t1.id = t2.id
     LEFT JOIN emp1 t3 ON t1.code = 1 AND (t2.code = t3.code OR t2.code = 1);
-                                QUERY PLAN                                 
----------------------------------------------------------------------------
+                      QUERY PLAN                       
+-------------------------------------------------------
  Nested Loop Left Join
-   Join Filter: ((t2.code = 1) AND ((t2.code = t3.code) OR (t2.code = 1)))
+   Join Filter: ((t2.code = t3.code) OR (t2.code = 1))
    ->  Seq Scan on emp1 t2
-   ->  Materialize
-         ->  Seq Scan on emp1 t3
-(5 rows)
+   ->  Result
+         One-Time Filter: (t2.code = 1)
+         ->  Materialize
+               ->  Seq Scan on emp1 t3
+(7 rows)
 
     INSERT INTO emp1 VALUES (1, 1), (2, 1);
 WITH t1 AS (SELECT * FROM emp1)
@@ -8213,11 +8242,12 @@ SELECT 1 AS c1 FROM sl sl1 LEFT JOIN (sl AS sl2 NATURAL JOIN sl AS sl3)
  Nested Loop Left Join
    ->  Seq Scan on sl sl1
    ->  Nested Loop Left Join
-         Join Filter: sl3.bool_col
          ->  Seq Scan on sl sl3
                Filter: (bool_col AND (a IS NOT NULL) AND (b IS NOT NULL) AND (c IS NOT NULL) AND (bool_col IS NOT NULL))
-         ->  Seq Scan on sl sl4
-(7 rows)
+         ->  Result
+               One-Time Filter: sl3.bool_col
+               ->  Seq Scan on sl sl4
+(8 rows)
 
 -- Check optimization disabling if it will violate special join conditions.
 -- Two identical joined relations satisfies self join removal conditions but
@@ -10215,3 +10245,43 @@ SELECT COUNT(*) FROM onek t1 LEFT JOIN tenk1 t2
  19000
 (1 row)
 
+-- Outer-only ON-clauses become a gating Result on the inner side; for a
+-- parameter-independent inner, NestLoop.keep_inner_rewind retains REWIND so
+-- a Materialize below the gate replays its buffer across rescans rather than
+-- rebuilding it for every outer tuple that passes the gate.
+create function platform_independent_explain(query text) returns setof text
+language plpgsql as
+$$
+declare
+    ln text;
+begin
+    for ln in
+        execute format('explain (analyze, costs off, summary off, timing off, buffers off) %s', query)
+    loop
+        ln := regexp_replace(ln, 'Maximum Storage: \d+', 'Maximum Storage: N');
+        return next ln;
+    end loop;
+end;
+$$;
+set enable_hashjoin = off;
+set enable_mergejoin = off;
+select platform_independent_explain('
+    select count(*) from onek t1 left join int4_tbl t2
+      on (t1.unique1 = t2.f1 and t1.hundred in (1, 2))');
+                        platform_independent_explain                        
+----------------------------------------------------------------------------
+ Aggregate (actual rows=1.00 loops=1)
+   ->  Nested Loop Left Join (actual rows=1000.00 loops=1)
+         Join Filter: (t1.unique1 = t2.f1)
+         Rows Removed by Join Filter: 1000
+         ->  Seq Scan on onek t1 (actual rows=1000.00 loops=1)
+         ->  Result (actual rows=1.00 loops=1000)
+               One-Time Filter: (t1.hundred = ANY ('{1,2}'::integer[]))
+               ->  Materialize (actual rows=5.00 loops=200)
+                     Storage: Memory  Maximum Storage: NkB
+                     ->  Seq Scan on int4_tbl t2 (actual rows=5.00 loops=1)
+(10 rows)
+
+reset enable_hashjoin;
+reset enable_mergejoin;
+drop function platform_independent_explain(text);
