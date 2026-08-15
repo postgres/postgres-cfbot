@@ -459,8 +459,8 @@ group_keys_reorder_by_pathkeys(List *pathkeys, List **group_pathkeys,
  *
  * The function considers (and keeps) following GROUP BY orderings:
  *
- * - GROUP BY keys as ordered by preprocess_groupclause() to match target
- *   ORDER BY clause (as much as possible),
+ * - GROUP BY keys as ordered by preprocess_groupclause() to match the target
+ *   ORDER BY clause or the first window's sort order (as much as possible),
  * - GROUP BY keys reordered to match 'path' ordering (as much as possible).
  */
 List *
