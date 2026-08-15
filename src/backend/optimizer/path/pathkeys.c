@@ -633,6 +633,68 @@ pathkey_has_sort_operator(PathKey *pathkey)
 }
 
 /*
+ * get_window_group_keys_ordering
+ *		Reorder the GROUP BY keys to match the ordering of the first window.
+ *
+ * If there are window functions, the sort performed directly above the
+ * grouping step is the one required by the first window, rather than the one
+ * for ORDER BY, which is performed above the WindowAgg nodes.  So it can pay
+ * to group in the window's ordering, letting the sort for the grouping step
+ * also serve the window.  We reorder the GROUP BY keys to match as much of
+ * root->window_pathkeys as possible, taking on its sort direction and NULLS
+ * ordering, since grouping doesn't care about those.  The remaining group
+ * keys keep the order preprocess_groupclause() gave them, which matches the
+ * ORDER BY as far as possible; as WindowAgg nodes preserve their input
+ * ordering, that may save the final sort as well.
+ *
+ * This ordering is merely offered as one more candidate, rather than being
+ * applied to root->group_pathkeys, which also guide the planning of the
+ * scan/join steps below the grouping step (as query_pathkeys).  The window's
+ * ordering would be the wrong one to suggest there whenever the grouping step
+ * can't provide it as cheaply as an extra sort above the grouping step can,
+ * for instance when an index provides the original ordering.  So we leave it
+ * to the cost to decide.
+ *
+ * Like the other alternative orderings of the GROUP BY keys, this one is
+ * considered only if enable_group_by_reordering is on.
+ *
+ * Returns NULL if there is no such ordering that differs from
+ * root->group_pathkeys.
+ */
+GroupByOrdering *
+get_window_group_keys_ordering(PlannerInfo *root)
+{
+	GroupByOrdering *info;
+	List	   *pathkeys = root->group_pathkeys;
+	List	   *clauses = root->processed_groupClause;
+
+	if (!enable_group_by_reordering ||
+		root->window_pathkeys == NIL || root->group_pathkeys == NIL ||
+		root->parse->groupingSets ||
+		pathkeys_contained_in(root->window_pathkeys, root->group_pathkeys))
+		return NULL;
+
+	if (group_keys_reorder_by_pathkeys(root->window_pathkeys,
+									   &pathkeys, &clauses,
+									   root->num_groupby_pathkeys) == 0)
+		return NULL;
+
+	/*
+	 * The window's ordering may extend beyond the GROUP BY keys in their
+	 * original order, e.g. with an aggregate as a further window ORDER BY
+	 * key, in which case the reordering changes nothing.
+	 */
+	if (compare_pathkeys(pathkeys, root->group_pathkeys) == PATHKEYS_EQUAL)
+		return NULL;
+
+	info = makeNode(GroupByOrdering);
+	info->pathkeys = pathkeys;
+	info->clauses = clauses;
+
+	return info;
+}
+
+/*
  * get_useful_group_keys_orderings
  *		Determine which orderings of GROUP BY keys are potentially interesting.
  *
@@ -646,7 +708,10 @@ pathkey_has_sort_operator(PathKey *pathkey)
  *   ORDER BY clause (as much as possible),
  * - GROUP BY keys reordered to match 'path' ordering (as much as possible),
  *   taking on the sort direction and NULLS ordering of 'path' where they
- *   differ from those of the GROUP BY keys.
+ *   differ from those of the GROUP BY keys,
+ * - GROUP BY keys reordered to match the ordering required by the first
+ *   window (as much as possible), taking on its sort direction and NULLS
+ *   ordering likewise.
  */
 List *
 get_useful_group_keys_orderings(PlannerInfo *root, Path *path)
@@ -701,6 +766,29 @@ get_useful_group_keys_orderings(PlannerInfo *root, Path *path)
 
 			infos = lappend(infos, info);
 		}
+	}
+
+	/*
+	 * Also try the ordering of the group keys that matches the first window,
+	 * unless the path's ordering already produced it above.  A partial match
+	 * is useful here even without incremental sort, since the grouping step's
+	 * input is sorted on all of the group keys anyway.
+	 */
+	info = get_window_group_keys_ordering(root);
+	if (info != NULL)
+	{
+		ListCell   *lc;
+
+		foreach(lc, infos)
+		{
+			GroupByOrdering *other = lfirst_node(GroupByOrdering, lc);
+
+			if (compare_pathkeys(info->pathkeys, other->pathkeys) ==
+				PATHKEYS_EQUAL)
+				break;
+		}
+		if (lc == NULL)
+			infos = lappend(infos, info);
 	}
 
 #ifdef USE_ASSERT_CHECKING

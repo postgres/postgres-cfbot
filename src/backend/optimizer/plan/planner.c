@@ -8062,75 +8062,94 @@ gather_grouping_paths(PlannerInfo *root, RelOptInfo *rel)
 {
 	ListCell   *lc;
 	Path	   *cheapest_partial_path;
-	List	   *groupby_pathkeys;
+	List	   *orderings;
+	GroupByOrdering *window_ordering;
 
 	/*
-	 * This occurs after any partial aggregation has taken place, so trim off
-	 * any pathkeys added for ORDER BY / DISTINCT aggregates.
+	 * Sort the partial paths by the GROUP BY keys in their original order,
+	 * and also in the order matching the first window, if any, so that the
+	 * finalization step can produce that ordering without a sort of its own.
+	 * Sorting below the Gather Merge has the workers share the work.
+	 *
+	 * XXX Shouldn't this also consider the other group-key orderings?
 	 */
-	if (list_length(root->group_pathkeys) > root->num_groupby_pathkeys)
-		groupby_pathkeys = list_copy_head(root->group_pathkeys,
-										  root->num_groupby_pathkeys);
-	else
-		groupby_pathkeys = root->group_pathkeys;
+	orderings = list_make1(root->group_pathkeys);
+	window_ordering = get_window_group_keys_ordering(root);
+	if (window_ordering != NULL)
+		orderings = lappend(orderings, window_ordering->pathkeys);
 
 	/* Try Gather for unordered paths and Gather Merge for ordered ones. */
 	generate_useful_gather_paths(root, rel, true);
 
 	cheapest_partial_path = linitial(rel->partial_pathlist);
 
-	/* XXX Shouldn't this also consider the group-key-reordering? */
-	foreach(lc, rel->partial_pathlist)
+	foreach_ptr(List, pathkeys, orderings)
 	{
-		Path	   *path = (Path *) lfirst(lc);
-		bool		is_sorted;
-		int			presorted_keys;
-		double		total_groups;
-
-		is_sorted = pathkeys_count_contained_in(groupby_pathkeys,
-												path->pathkeys,
-												&presorted_keys);
-
-		if (is_sorted)
-			continue;
+		List	   *groupby_pathkeys;
 
 		/*
-		 * Try at least sorting the cheapest path and also try incrementally
-		 * sorting any path which is partially sorted already (no need to deal
-		 * with paths which have presorted keys when incremental sort is
-		 * disabled unless it's the cheapest input path).
+		 * This occurs after any partial aggregation has taken place, so trim
+		 * off any pathkeys added for ORDER BY / DISTINCT aggregates.
 		 */
-		if (path != cheapest_partial_path &&
-			(presorted_keys == 0 || !enable_incremental_sort))
-			continue;
-
-		/*
-		 * We've no need to consider both a sort and incremental sort. We'll
-		 * just do a sort if there are no presorted keys and an incremental
-		 * sort when there are presorted keys.
-		 */
-		if (presorted_keys == 0 || !enable_incremental_sort)
-			path = (Path *) create_sort_path(root, rel, path,
-											 groupby_pathkeys,
-											 -1.0);
+		if (list_length(pathkeys) > root->num_groupby_pathkeys)
+			groupby_pathkeys = list_copy_head(pathkeys,
+											  root->num_groupby_pathkeys);
 		else
-			path = (Path *) create_incremental_sort_path(root,
-														 rel,
-														 path,
-														 groupby_pathkeys,
-														 presorted_keys,
-														 -1.0);
-		total_groups = compute_gather_rows(path);
-		path = (Path *)
-			create_gather_merge_path(root,
-									 rel,
-									 path,
-									 rel->reltarget,
-									 groupby_pathkeys,
-									 NULL,
-									 &total_groups);
+			groupby_pathkeys = pathkeys;
 
-		add_path(rel, path);
+		foreach(lc, rel->partial_pathlist)
+		{
+			Path	   *path = (Path *) lfirst(lc);
+			bool		is_sorted;
+			int			presorted_keys;
+			double		total_groups;
+
+			is_sorted = pathkeys_count_contained_in(groupby_pathkeys,
+													path->pathkeys,
+													&presorted_keys);
+
+			if (is_sorted)
+				continue;
+
+			/*
+			 * Try at least sorting the cheapest path and also try
+			 * incrementally sorting any path which is partially sorted
+			 * already (no need to deal with paths which have presorted keys
+			 * when incremental sort is disabled unless it's the cheapest
+			 * input path).
+			 */
+			if (path != cheapest_partial_path &&
+				(presorted_keys == 0 || !enable_incremental_sort))
+				continue;
+
+			/*
+			 * We've no need to consider both a sort and incremental sort.
+			 * We'll just do a sort if there are no presorted keys and an
+			 * incremental sort when there are presorted keys.
+			 */
+			if (presorted_keys == 0 || !enable_incremental_sort)
+				path = (Path *) create_sort_path(root, rel, path,
+												 groupby_pathkeys,
+												 -1.0);
+			else
+				path = (Path *) create_incremental_sort_path(root,
+															 rel,
+															 path,
+															 groupby_pathkeys,
+															 presorted_keys,
+															 -1.0);
+			total_groups = compute_gather_rows(path);
+			path = (Path *)
+				create_gather_merge_path(root,
+										 rel,
+										 path,
+										 rel->reltarget,
+										 groupby_pathkeys,
+										 NULL,
+										 &total_groups);
+
+			add_path(rel, path);
+		}
 	}
 }
 
