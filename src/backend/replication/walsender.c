@@ -95,6 +95,7 @@
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
+#include "utils/injection_point.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/pg_lsn.h"
@@ -207,6 +208,13 @@ static TimestampTz last_reply_timestamp = 0;
 /* Have we sent a heartbeat message asking for reply, since last reply? */
 static bool waiting_for_ping_response = false;
 
+/*
+ * Set when a standby reply has updated this walsender's positions and the
+ * waiters those positions release have not been released yet.  Raised per
+ * reply, acted on once per drain of the socket.
+ */
+static bool syncrep_release_pending = false;
+
 /* Timestamp when walsender received the shutdown request */
 static TimestampTz shutdown_request_timestamp = 0;
 
@@ -301,6 +309,7 @@ static void CreateReplicationSlot(CreateReplicationSlotCmd *cmd);
 static void DropReplicationSlot(DropReplicationSlotCmd *cmd);
 static void StartReplication(StartReplicationCmd *cmd);
 static void StartLogicalReplication(StartReplicationCmd *cmd);
+static void SyncRepFlushPendingRelease(void);
 static void ProcessStandbyMessage(void);
 static void ProcessStandbyReplyMessage(void);
 static void ProcessStandbyHSFeedbackMessage(void);
@@ -382,6 +391,15 @@ WalSndErrorCleanup(void)
 	ConditionVariableCancelSleep();
 	pgstat_report_wait_end();
 	pgaio_error_cleanup();
+
+	/*
+	 * A release deferred by the reply drain survives an error thrown while a
+	 * later message in the same drain was being parsed.  The positions the
+	 * drained reply put in shared memory are valid whatever came after it,
+	 * and the committers it acknowledged have no other process to wake them.
+	 * The locks are released above, so the queue lock is free to take.
+	 */
+	SyncRepFlushPendingRelease();
 
 	if (xlogreader != NULL && xlogreader->seg.ws_file >= 0)
 		wal_segment_close(xlogreader);
@@ -2366,6 +2384,22 @@ exec_replication_command(const char *cmd_string)
 }
 
 /*
+ * Run the release a drained reply deferred.  A reply already processed has
+ * put its positions in shared memory, and the committers it acknowledged
+ * have nothing but this process to wake them, so every exit out of the reply
+ * drain runs through here before leaving.  The standby's goodbye is the
+ * common one.
+ */
+static void
+SyncRepFlushPendingRelease(void)
+{
+	if (!syncrep_release_pending)
+		return;
+	syncrep_release_pending = false;
+	SyncRepReleaseWaiters();
+}
+
+/*
  * Process any incoming messages while streaming. Also checks if the remote
  * end has closed the connection.
  */
@@ -2391,6 +2425,7 @@ ProcessRepliesIfAny(void)
 		if (r < 0)
 		{
 			/* unexpected error or EOF */
+			SyncRepFlushPendingRelease();
 			ereport(COMMERROR,
 					(errcode(ERRCODE_PROTOCOL_VIOLATION),
 					 errmsg("unexpected EOF on standby connection")));
@@ -2414,6 +2449,7 @@ ProcessRepliesIfAny(void)
 				maxmsglen = PQ_SMALL_MESSAGE_LIMIT;
 				break;
 			default:
+				SyncRepFlushPendingRelease();
 				ereport(FATAL,
 						(errcode(ERRCODE_PROTOCOL_VIOLATION),
 						 errmsg("invalid standby message type \"%c\"",
@@ -2426,6 +2462,7 @@ ProcessRepliesIfAny(void)
 		resetStringInfo(&reply_message);
 		if (pq_getmessage(&reply_message, maxmsglen))
 		{
+			SyncRepFlushPendingRelease();
 			ereport(COMMERROR,
 					(errcode(ERRCODE_PROTOCOL_VIOLATION),
 					 errmsg("unexpected EOF on standby connection")));
@@ -2441,6 +2478,7 @@ ProcessRepliesIfAny(void)
 				 */
 			case PqMsg_CopyData:
 				ProcessStandbyMessage();
+				INJECTION_POINT("walsender-reply-drained", NULL);
 				received = true;
 				break;
 
@@ -2462,9 +2500,12 @@ ProcessRepliesIfAny(void)
 
 				/*
 				 * PqMsg_Terminate means that the standby is closing down the
-				 * socket.
+				 * socket.  The last reply it sent is drained already, and
+				 * what that reply acknowledged must not leave with this
+				 * process.
 				 */
 			case PqMsg_Terminate:
+				SyncRepFlushPendingRelease();
 				proc_exit(0);
 
 			default:
@@ -2480,6 +2521,13 @@ ProcessRepliesIfAny(void)
 		last_reply_timestamp = last_processing;
 		waiting_for_ping_response = false;
 	}
+
+	/*
+	 * One release covers every reply drained above: the positions in shared
+	 * memory are already the newest ones, and each release takes SyncRepLock
+	 * exclusively.
+	 */
+	SyncRepFlushPendingRelease();
 }
 
 /*
@@ -2510,6 +2558,7 @@ ProcessStandbyMessage(void)
 			break;
 
 		default:
+			SyncRepFlushPendingRelease();
 			ereport(COMMERROR,
 					(errcode(ERRCODE_PROTOCOL_VIOLATION),
 					 errmsg("unexpected message type \"%c\"", msgtype)));
@@ -2645,8 +2694,14 @@ ProcessStandbyReplyMessage(void)
 		SpinLockRelease(&walsnd->mutex);
 	}
 
+	/*
+	 * The release is left for ProcessRepliesIfAny() to run once per drain of
+	 * the socket: several replies routinely sit in the buffer together, and
+	 * every release takes SyncRepLock exclusively to compute positions this
+	 * message has just made stale anyway.
+	 */
 	if (!am_cascading_walsender)
-		SyncRepReleaseWaiters();
+		syncrep_release_pending = true;
 
 	/*
 	 * Advance our local xmin horizon when the client confirmed a flush.
