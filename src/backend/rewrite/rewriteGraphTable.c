@@ -1039,6 +1039,40 @@ replace_property_refs_mutator(Node *node, struct replace_property_refs_context *
 
 		return (Node *) newvar;
 	}
+	else if (IsA(node, Aggref))
+	{
+		Aggref	   *aggref;
+
+		/* Copy the Aggref node and mutate its sub-structure */
+		aggref = (Aggref *) expression_tree_mutator(node,
+													replace_property_refs_mutator,
+													context);
+
+		/*
+		 * An aggregate is allowed in a graph table expression, but only if
+		 * it's an outer aggregate.  Since it will be in a subquery after the
+		 * rewrite, we have to increase the level by one.
+		 */
+		Assert(aggref->agglevelsup > 0);
+		aggref->agglevelsup++;
+
+		return (Node *) aggref;
+	}
+	else if (IsA(node, GroupingFunc))
+	{
+		GroupingFunc *grp;
+
+		/* Copy the GroupingFunc node and mutate its sub-structure */
+		grp = (GroupingFunc *) expression_tree_mutator(node,
+													   replace_property_refs_mutator,
+													   context);
+
+		/* Like Aggref, this should be an outer-level reference */
+		Assert(grp->agglevelsup > 0);
+		grp->agglevelsup++;
+
+		return (Node *) grp;
+	}
 	else if (IsA(node, GraphPropertyRef))
 	{
 		GraphPropertyRef *gpr = (GraphPropertyRef *) node;

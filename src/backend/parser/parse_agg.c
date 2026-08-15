@@ -600,6 +600,12 @@ check_agglevels_and_constraints(ParseState *pstate, Node *expr)
 
 			break;
 
+		case EXPR_KIND_GRAPH_TABLE_COLUMNS:
+		case EXPR_KIND_GRAPH_TABLE_WHERE:
+			errkind = true;
+
+			break;
+
 			/*
 			 * There is intentionally no default: case here, so that the
 			 * compiler will warn if we add a new ParseExprKind without
@@ -769,9 +775,17 @@ check_agg_arguments_walker(Node *node,
 {
 	if (node == NULL)
 		return false;
-	if (IsA(node, Var))
+	if (IsA(node, Var) || IsA(node, GraphPropertyRef))
 	{
-		int			varlevelsup = ((Var *) node)->varlevelsup;
+		/*
+		 * A GraphPropertyRef always refers to a property of its own
+		 * GRAPH_TABLE.  Because subqueries within GRAPH_TABLE are not
+		 * allowed, it can never reference an outer query level, so it behaves
+		 * like a Var with varlevelsup 0.  Counting it as level 0 keeps an
+		 * aggregate that also references an outer Var from being classified
+		 * at that outer level instead of at the GRAPH_TABLE's own level.
+		 */
+		int			varlevelsup = IsA(node, Var) ? ((Var *) node)->varlevelsup : 0;
 
 		/* convert levelsup to frame of reference of original query */
 		varlevelsup -= context->sublevels_up;
@@ -1044,6 +1058,10 @@ transformWindowFuncCall(ParseState *pstate, WindowFunc *wfunc,
 			break;
 		case EXPR_KIND_FOR_PORTION:
 			err = _("window functions are not allowed in FOR PORTION OF expressions");
+			break;
+		case EXPR_KIND_GRAPH_TABLE_COLUMNS:
+		case EXPR_KIND_GRAPH_TABLE_WHERE:
+			errkind = true;
 			break;
 
 			/*
