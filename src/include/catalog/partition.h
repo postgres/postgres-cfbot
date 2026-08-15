@@ -19,8 +19,10 @@
 /* Seed for the extended hash function */
 #define HASH_PARTITION_SEED UINT64CONST(0x7A5B22367996DCFD)
 
+extern bool check_rel_can_be_partition(Oid relid);
 extern Oid	get_partition_parent(Oid relid, bool even_if_detached);
 extern List *get_partition_ancestors(Oid relid);
+extern Oid	get_partition_root(Oid relid, bool even_if_detached);
 extern Oid	index_get_partition(Relation partition, Oid indexId);
 extern List *map_partition_varattnos(List *expr, int fromrel_varno,
 									 Relation to_rel, Relation from_rel);
