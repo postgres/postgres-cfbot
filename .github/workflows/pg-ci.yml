@@ -559,6 +559,42 @@ jobs:
       - *ccache_restore_branch_step
       - *linux_prepare_workspace_step
 
+      # TEMPORARY: this whole step goes away, together with the commit that
+      # added it, once https://github.com/anarazel/pg-vm-images/pull/144 is
+      # merged and this job uses the native i386 image it adds.
+      #
+      # We lift the interpreter out of the .deb instead of installing the
+      # package, because python3.X-minimal is not Multi-Arch: same (it cannot
+      # be, it ships an arch-specific /usr/bin/python3.X), so installing the
+      # i386 one would replace the amd64 python3 stack instead of joining it.
+      # The libpython packages it needs are Multi-Arch: same and do co-install,
+      # because their extension modules carry the architecture in the file name
+      # (_ctypes.cpython-313-i386-linux-gnu.so).
+      - name: Install 32-bit Python
+        run: |
+          set -ex
+          pyver=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            "libpython${pyver}-minimal:i386" "libpython${pyver}-stdlib:i386"
+          tmp=$(mktemp -d)
+          ( cd "$tmp" && apt-get download "python${pyver}-minimal:i386" )
+          dpkg-deb --fsys-tarfile "$tmp"/python${pyver}-minimal_*_i386.deb \
+            | tar -xOf - "./usr/bin/python${pyver}" \
+            > /usr/local/bin/python3-i386
+          chmod 755 /usr/local/bin/python3-i386
+          rm -rf "$tmp"
+
+          # pytest itself needs no separate install: /usr/lib/python3/dist-packages
+          # is on this interpreter's sys.path too and pytest is pure python. A
+          # wrapper is still needed, because meson's PYTEST option takes a
+          # program path and so cannot spell "python3-i386 -m pytest" itself.
+          cat > /usr/local/bin/pytest-i386 <<'PYTEST_I386'
+          #! /bin/sh
+          exec /usr/local/bin/python3-i386 -m pytest "$@"
+          PYTEST_I386
+          chmod 755 /usr/local/bin/pytest-i386
+
       - name: Configure
         shell: *su_postgres_shell
         run: |
