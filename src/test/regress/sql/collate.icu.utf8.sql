@@ -738,6 +738,18 @@ SELECT x FROM test3ci WHERE x ~ 'a';
 SELECT x FROM test1ci UNION SELECT x FROM test2ci ORDER BY x;
 SELECT x FROM test2ci UNION SELECT x FROM test1ci ORDER BY x;
 SELECT x FROM test1ci INTERSECT SELECT x FROM test2ci ORDER BY x;
+
+-- GROUP BY must not adopt a window's sort operator from another opfamily:
+-- text_pattern_ops' ~<~ sorts 'A' and 'a' apart although they are equal
+SET enable_hashagg TO off;
+EXPLAIN (COSTS OFF)
+SELECT x, count(*), count(*) OVER (ORDER BY x USING ~<~)
+FROM (VALUES ('a' COLLATE case_insensitive), ('B'), ('A'), ('b'), ('a')) v(x)
+GROUP BY x;
+SELECT x, count(*), count(*) OVER (ORDER BY x USING ~<~)
+FROM (VALUES ('a' COLLATE case_insensitive), ('B'), ('A'), ('b'), ('a')) v(x)
+GROUP BY x;
+RESET enable_hashagg;
 SELECT x FROM test2ci INTERSECT SELECT x FROM test1ci ORDER BY x;
 SELECT x FROM test1ci EXCEPT SELECT x FROM test2ci;
 SELECT x FROM test2ci EXCEPT SELECT x FROM test1ci;
