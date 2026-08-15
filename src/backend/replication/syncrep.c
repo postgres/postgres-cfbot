@@ -135,6 +135,25 @@ static bool SyncRepQueueIsOrderedByLSN(int mode);
 #endif
 
 /*
+ * Accessors for the position a queue's waiters have been released up to.
+ *
+ * Writers hold SyncRepLock and only ever move it forward, so a reader
+ * without the lock can be behind, never ahead.
+ */
+static inline XLogRecPtr
+SyncRepGetLSN(int mode)
+{
+	return pg_atomic_read_u64(&WalSndCtl->lsn[mode]);
+}
+
+static inline void
+SyncRepSetLSN(int mode, XLogRecPtr lsn)
+{
+	Assert(LWLockHeldByMeInMode(SyncRepLock, LW_EXCLUSIVE));
+	pg_atomic_write_u64(&WalSndCtl->lsn[mode], lsn);
+}
+
+/*
  * ===========================================================
  * Synchronous Replication functions for normal user backends
  * ===========================================================
@@ -198,41 +217,47 @@ SyncRepWaitForLSN(XLogRecPtr lsn, bool commit)
 
 	Assert(dlist_node_is_detached(&MyProc->syncRepLinks));
 	Assert(WalSndCtl != NULL);
+	Assert(MyProc->syncRepState == SYNC_REP_NOT_WAITING);
+
+	/*
+	 * A released position that already covers this LSN says a valid quorum
+	 * acknowledged it, which is the same answer the check below the lock
+	 * would give.  It only ever moves forward, so a stale read can only send
+	 * us to take the lock for nothing, never past a wait we owe.  How often
+	 * this exit fires depends on the wait mode: it needs the acknowledgement
+	 * to have arrived before the committer got here.
+	 */
+	if (lsn <= SyncRepGetLSN(mode))
+		return;
 
 	LWLockAcquire(SyncRepLock, LW_EXCLUSIVE);
-	Assert(MyProc->syncRepState == SYNC_REP_NOT_WAITING);
+
+	/*
+	 * Read it again under the lock.  The standby may have replied in the
+	 * window since the check above, and this is the read that decides:
+	 * anything the queue is released up to needs no wait, whether or not the
+	 * sync standby data has been initialized yet.
+	 */
+	if (lsn <= SyncRepGetLSN(mode))
+	{
+		LWLockRelease(SyncRepLock);
+		return;
+	}
 
 	/*
 	 * We don't wait for sync rep if SYNC_STANDBY_DEFINED is not set.  See
 	 * SyncRepUpdateSyncStandbysDefined().
 	 *
-	 * Also check that the standby hasn't already replied. Unlikely race
-	 * condition but we'll be fetching that cache line anyway so it's likely
-	 * to be a low cost check.
-	 *
 	 * If the sync standby data has not been initialized yet
-	 * (SYNC_STANDBY_INIT is not set), fall back to a check based on the LSN,
-	 * then do a direct GUC check.
+	 * (SYNC_STANDBY_INIT is not set), fall back to a direct GUC check.
 	 */
 	if (WalSndCtl->sync_standbys_status & SYNC_STANDBY_INIT)
 	{
-		if ((WalSndCtl->sync_standbys_status & SYNC_STANDBY_DEFINED) == 0 ||
-			lsn <= WalSndCtl->lsn[mode])
+		if ((WalSndCtl->sync_standbys_status & SYNC_STANDBY_DEFINED) == 0)
 		{
 			LWLockRelease(SyncRepLock);
 			return;
 		}
-	}
-	else if (lsn <= WalSndCtl->lsn[mode])
-	{
-		/*
-		 * The LSN is older than what we need to wait for.  The sync standby
-		 * data has not been initialized yet, but we are OK to not wait
-		 * because we know that there is no point in doing so based on the
-		 * LSN.
-		 */
-		LWLockRelease(SyncRepLock);
-		return;
 	}
 	else if (!SyncStandbysDefined())
 	{
@@ -566,19 +591,19 @@ SyncRepReleaseWaiters(void)
 	 * Set the lsn first so that when we wake backends they will release up to
 	 * this location.
 	 */
-	if (WalSndCtl->lsn[SYNC_REP_WAIT_WRITE] < writePtr)
+	if (SyncRepGetLSN(SYNC_REP_WAIT_WRITE) < writePtr)
 	{
-		WalSndCtl->lsn[SYNC_REP_WAIT_WRITE] = writePtr;
+		SyncRepSetLSN(SYNC_REP_WAIT_WRITE, writePtr);
 		numwrite = SyncRepWakeQueue(false, SYNC_REP_WAIT_WRITE);
 	}
-	if (WalSndCtl->lsn[SYNC_REP_WAIT_FLUSH] < flushPtr)
+	if (SyncRepGetLSN(SYNC_REP_WAIT_FLUSH) < flushPtr)
 	{
-		WalSndCtl->lsn[SYNC_REP_WAIT_FLUSH] = flushPtr;
+		SyncRepSetLSN(SYNC_REP_WAIT_FLUSH, flushPtr);
 		numflush = SyncRepWakeQueue(false, SYNC_REP_WAIT_FLUSH);
 	}
-	if (WalSndCtl->lsn[SYNC_REP_WAIT_APPLY] < applyPtr)
+	if (SyncRepGetLSN(SYNC_REP_WAIT_APPLY) < applyPtr)
 	{
-		WalSndCtl->lsn[SYNC_REP_WAIT_APPLY] = applyPtr;
+		SyncRepSetLSN(SYNC_REP_WAIT_APPLY, applyPtr);
 		numapply = SyncRepWakeQueue(false, SYNC_REP_WAIT_APPLY);
 	}
 
@@ -971,6 +996,7 @@ SyncRepWakeQueue(bool all, int mode)
 {
 	int			numprocs = 0;
 	dlist_mutable_iter iter;
+	XLogRecPtr	lsn = SyncRepGetLSN(mode);
 
 	Assert(mode >= 0 && mode < NUM_SYNC_REP_WAIT_MODE);
 	Assert(LWLockHeldByMeInMode(SyncRepLock, LW_EXCLUSIVE));
@@ -983,7 +1009,7 @@ SyncRepWakeQueue(bool all, int mode)
 		/*
 		 * Assume the queue is ordered by LSN
 		 */
-		if (!all && WalSndCtl->lsn[mode] < proc->waitLSN)
+		if (!all && lsn < proc->waitLSN)
 			return numprocs;
 
 		/*
