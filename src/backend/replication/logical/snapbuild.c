@@ -703,7 +703,7 @@ SnapBuildProcessNewCid(SnapBuild *builder, TransactionId xid,
 	ReorderBufferAddNewTupleCids(builder->reorder, xlrec->top_xid, lsn,
 								 xlrec->target_locator, xlrec->target_tid,
 								 xlrec->cmin, xlrec->cmax,
-								 xlrec->combocid);
+								 xlrec->combocid, xid);
 
 	/* figure out new command id */
 	if (xlrec->cmin != InvalidCommandId &&

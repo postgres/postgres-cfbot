@@ -42,6 +42,7 @@ tests += {
       'stats',
       'twophase',
       'twophase_stream',
+      'tuplecid',
     ],
     'regress_args': [
       '--temp-config', files('logical.conf'),
@@ -66,6 +67,7 @@ tests += {
       'skip_snapshot_restore',
       'invalidation_distribution',
       'parallel_session_origin',
+      'tuplecid_restart',
     ],
     'regress_args': [
       '--temp-config', files('logical.conf'),
