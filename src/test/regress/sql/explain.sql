@@ -191,3 +191,18 @@ select explain_filter('explain (analyze,buffers off,costs off) select sum(n) ove
 -- Test tuplestore storage usage in Window aggregate (memory and disk case, final result is disk)
 select explain_filter('explain (analyze,buffers off,costs off) select sum(n) over(partition by m) from (SELECT n < 3 as m, n from generate_series(1,2500) a(n))');
 reset work_mem;
+
+-- Ensure the Function Scan runs in the leader.  The storage information is
+-- taken from the leader's tuplestore, so a parallel plan would report
+-- nothing here.
+set max_parallel_workers_per_gather to 0;
+-- Test tuplestore storage usage in Function Scan (memory case)
+select explain_filter('explain (analyze,buffers off,costs off) select count(*) from generate_series(1,10) a(n)');
+-- Test tuplestore storage usage in Function Scan (disk case)
+set work_mem to 64;
+select explain_filter('explain (analyze,buffers off,costs off) select count(*) from generate_series(1,10000) a(n)');
+-- Test tuplestore storage usage in Function Scan with ROWS FROM, which uses
+-- one tuplestore per function
+select explain_filter('explain (analyze,buffers off,costs off) select count(*) from rows from (generate_series(1,10000), generate_series(1,10000)) a(n,m)');
+reset work_mem;
+reset max_parallel_workers_per_gather;
