@@ -59,7 +59,7 @@ env:
   # Build test dependencies as part of the build step, to see compiler
   # errors/warnings in one place.
   MBUILD_TARGET: all testprep
-  MTEST_ARGS: --print-errorlogs --no-rebuild -C build
+  MTEST_ARGS: --print-errorlogs --max-lines=500 --no-rebuild -C build
 
   # Can be set to a non-empty value to run a limited set of tests
   # (e.g. --suite regress to only run the main regression tests).
