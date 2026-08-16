@@ -23,6 +23,7 @@
 #include "executor/nodeSubplan.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
+#include "nodes/multibitmapset.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
@@ -91,7 +92,8 @@ static bool contain_outer_selfref(Node *node);
 static bool contain_outer_selfref_walker(Node *node, Index *depth);
 static void inline_cte(PlannerInfo *root, CommonTableExpr *cte);
 static bool inline_cte_walker(Node *node, inline_cte_walker_context *context);
-static bool sublink_testexpr_is_not_nullable(PlannerInfo *root, SubLink *sublink);
+static bool sublink_testexpr_is_not_nullable(PlannerInfo *root, SubLink *sublink,
+											 SafeQualsInfo *sqinfo);
 static bool simplify_EXISTS_query(PlannerInfo *root, Query *query);
 static Query *convert_EXISTS_to_ANY(PlannerInfo *root, Query *subselect,
 									Node **testexpr, List **paramIds);
@@ -1322,6 +1324,12 @@ convert_VALUES_to_ANY(PlannerInfo *root, Node *testexpr, Query *values)
  * The conversion must fail if the converted qual would reference any but
  * these parent-query relids.
  *
+ * sqinfo describes the qual clauses that are guaranteed to filter the
+ * rows on which the SubLink is evaluated.  We only need it for the
+ * under_not case, where it may help prove that the left-hand expressions
+ * are non-nullable.  It may be NULL, in which case no such proof is
+ * attempted.
+ *
  * On success, the returned JoinExpr has larg = NULL and rarg = the jointree
  * item representing the pulled-up subquery.  The caller must set larg to
  * represent the relation(s) on the lefthand side of the new join, and insert
@@ -1343,7 +1351,8 @@ convert_VALUES_to_ANY(PlannerInfo *root, Node *testexpr, Query *values)
  */
 JoinExpr *
 convert_ANY_sublink_to_join(PlannerInfo *root, SubLink *sublink,
-							bool under_not, Relids available_rels)
+							bool under_not, Relids available_rels,
+							SafeQualsInfo *sqinfo)
 {
 	JoinExpr   *result;
 	Query	   *parse = root->parse;
@@ -1370,7 +1379,7 @@ convert_ANY_sublink_to_join(PlannerInfo *root, SubLink *sublink,
 	 * safe to convert NOT IN to an anti-join.
 	 */
 	if (under_not &&
-		(!sublink_testexpr_is_not_nullable(root, sublink) ||
+		(!sublink_testexpr_is_not_nullable(root, sublink, sqinfo) ||
 		 !query_outputs_are_not_nullable(subselect)))
 		return NULL;
 
@@ -1475,6 +1484,15 @@ convert_ANY_sublink_to_join(PlannerInfo *root, SubLink *sublink,
  * behavior, ensuring the operator does not produce NULL results from non-null
  * inputs.
  *
+ * An outer expression is provably non-nullable if it is a column with a NOT
+ * NULL constraint, or more generally any expression that expr_is_nonnullable
+ * accepts.  In addition, a plain Var can be proven non-nullable if some clause
+ * in sqinfo->quals forces it non-null.  Those quals were collected by the
+ * caller from the jointree at or below the point where this NOT IN is
+ * evaluated, and are guaranteed to remove any NULL-valued rows before they can
+ * affect the result of the anti-join, so the NOT IN to anti-join conversion
+ * stays valid.
+ *
  * We handle the three standard parser representations for ANY sublinks: a
  * single OpExpr for single-column comparisons, a BoolExpr containing a list of
  * OpExprs for multi-column equality or inequality checks (where equality
@@ -1486,7 +1504,8 @@ convert_ANY_sublink_to_join(PlannerInfo *root, SubLink *sublink,
  * side of conservatism: if we're not sure, it's okay to return FALSE.
  */
 static bool
-sublink_testexpr_is_not_nullable(PlannerInfo *root, SubLink *sublink)
+sublink_testexpr_is_not_nullable(PlannerInfo *root, SubLink *sublink,
+								 SafeQualsInfo *sqinfo)
 {
 	Node	   *testexpr = sublink->testexpr;
 	List	   *outer_exprs = NIL;
@@ -1570,19 +1589,62 @@ sublink_testexpr_is_not_nullable(PlannerInfo *root, SubLink *sublink)
 	foreach_ptr(Expr, expr, outer_exprs)
 	{
 		/*
+		 * Look through binary relabelings, since we know those don't
+		 * introduce nulls.
+		 */
+		while (IsA(expr, RelabelType))
+			expr = ((RelabelType *) expr)->arg;
+
+		/*
 		 * We have already collected relation-level not-null constraints for
 		 * the outer query, so we can consult the global hash table for
 		 * nullability information.
 		 */
-		if (!expr_is_nonnullable(root, expr, NOTNULL_SOURCE_HASHTABLE))
-			return false;
+		if (expr_is_nonnullable(root, expr, NOTNULL_SOURCE_HASHTABLE))
+			continue;
 
 		/*
-		 * Note: It is possible to further prove non-nullability by examining
-		 * the qual clauses available at or below the jointree node where this
-		 * NOT IN clause is evaluated, but for the moment it doesn't seem
-		 * worth the extra complication.
+		 * For a plain Var, even if that didn't work, we can still prove it
+		 * non-nullable if find_nonnullable_vars can find a "var IS NOT NULL"
+		 * or similarly strict condition among sqinfo->quals.  Those are the
+		 * quals the caller determined are guaranteed to filter the rows on
+		 * which this SubLink is evaluated.  Compute the list of Vars they
+		 * force non-null if we didn't already; the caller shares one
+		 * SafeQualsInfo among all the SubLinks at a jointree node, so we do
+		 * this once for all of them.
+		 *
+		 * Note that the quals must be run through flatten_join_alias_vars,
+		 * just as the outer expressions were above, so that the Vars match
+		 * up.
+		 *
+		 * Note also that we can only prove things about this query's own
+		 * Vars.
 		 */
+		if (sqinfo != NULL && sqinfo->quals != NIL &&
+			IsA(expr, Var) && ((Var *) expr)->varlevelsup == 0)
+		{
+			Var		   *var = (Var *) expr;
+
+			if (!sqinfo->computed)
+			{
+				List	   *flat_quals;
+
+				flat_quals = (List *)
+					flatten_join_alias_vars(root, root->parse,
+											(Node *) sqinfo->quals);
+				sqinfo->nonnullable_vars =
+					find_nonnullable_vars((Node *) flat_quals);
+				sqinfo->computed = true;
+			}
+
+			if (mbms_is_member(var->varno,
+							   var->varattno - FirstLowInvalidHeapAttributeNumber,
+							   sqinfo->nonnullable_vars))
+				continue;
+		}
+
+		/* We failed to prove this outer expression non-nullable */
+		return false;
 	}
 
 	return true;
@@ -1591,7 +1653,9 @@ sublink_testexpr_is_not_nullable(PlannerInfo *root, SubLink *sublink)
 /*
  * convert_EXISTS_sublink_to_join: try to convert an EXISTS SubLink to a join
  *
- * The API of this function is identical to convert_ANY_sublink_to_join's.
+ * The API of this function is identical to convert_ANY_sublink_to_join's,
+ * except that it has no sqinfo parameter, since converting an EXISTS or NOT
+ * EXISTS never depends on proving an expression non-nullable.
  */
 JoinExpr *
 convert_EXISTS_sublink_to_join(PlannerInfo *root, SubLink *sublink,
