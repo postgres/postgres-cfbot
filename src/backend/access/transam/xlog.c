@@ -4794,13 +4794,17 @@ SetDataChecksumsOnInProgress(void)
  * state can be changed to "on". Once the state is "on" checksums will be both
  * written and verified.
  *
+ * 'fast' determines whether the checkpoints requested before progressing to
+ * the next phase are fast (CHECKPOINT_FAST) or spread.
+ *
  * This function blocks until all backends in the cluster have acknowledged the
  * state transition.
  */
 void
-SetDataChecksumsOn(void)
+SetDataChecksumsOn(bool fast)
 {
 	uint64		barrier;
+	int			flags;
 
 	SpinLockAcquire(&XLogCtl->info_lck);
 
@@ -4814,7 +4818,7 @@ SetDataChecksumsOn(void)
 		SpinLockRelease(&XLogCtl->info_lck);
 		elog(WARNING,
 			 "cannot set data checksums to \"on\", current state is not \"inprogress-on\", disabling");
-		SetDataChecksumsOff();
+		SetDataChecksumsOff(fast);
 		return;
 	}
 
@@ -4844,7 +4848,12 @@ SetDataChecksumsOn(void)
 	MyProc->delayChkptFlags &= ~DELAY_CHKPT_START;
 	END_CRIT_SECTION();
 
-	RequestCheckpoint(CHECKPOINT_FORCE | CHECKPOINT_WAIT | CHECKPOINT_FAST);
+	/* determine flags for the checkpoint */
+	flags = CHECKPOINT_FORCE | CHECKPOINT_WAIT;
+	if (fast)
+		flags |= CHECKPOINT_FAST;
+
+	RequestCheckpoint(flags);
 	WaitForProcSignalBarrier(barrier);
 }
 
@@ -4858,13 +4867,23 @@ SetDataChecksumsOn(void)
  * backends which have yet to observe the state change from "on" won't get
  * validation errors on concurrently modified pages. Once all backends have
  * changed to "inprogress-off", the barrier for moving to "off" can be emitted.
+ *
+ * 'fast' determines whether the checkpoints requested before progressing to
+ * the next phase are fast (CHECKPOINT_FAST) or spread.
+ *
  * This function blocks until all backends in the cluster have acknowledged the
  * state transition.
  */
 void
-SetDataChecksumsOff(void)
+SetDataChecksumsOff(bool fast)
 {
 	uint64		barrier;
+	int			flags;
+
+	/* determine flags for the checkpoint(s) */
+	flags = CHECKPOINT_FORCE | CHECKPOINT_WAIT;
+	if (fast)
+		flags |= CHECKPOINT_FAST;
 
 	SpinLockAcquire(&XLogCtl->info_lck);
 
@@ -4906,7 +4925,7 @@ SetDataChecksumsOff(void)
 		MyProc->delayChkptFlags &= ~DELAY_CHKPT_START;
 		END_CRIT_SECTION();
 
-		RequestCheckpoint(CHECKPOINT_FORCE | CHECKPOINT_WAIT | CHECKPOINT_FAST);
+		RequestCheckpoint(flags);
 		WaitForProcSignalBarrier(barrier);
 
 		/*
@@ -4944,7 +4963,7 @@ SetDataChecksumsOff(void)
 	MyProc->delayChkptFlags &= ~DELAY_CHKPT_START;
 	END_CRIT_SECTION();
 
-	RequestCheckpoint(CHECKPOINT_FORCE | CHECKPOINT_WAIT | CHECKPOINT_FAST);
+	RequestCheckpoint(flags);
 	WaitForProcSignalBarrier(barrier);
 }
 

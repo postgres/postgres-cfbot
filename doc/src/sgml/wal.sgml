@@ -358,11 +358,21 @@
     </para>
 
     <para>
+      Checkpoints have to be performed at certain points - both when enabling
+      and disabling data checksums, which may generate of lot of writes due to
+      flushing dirty pages. The impact may be reduced by requresting spread
+      checkpoints using the <parameter>fast</parameter> parameter of the
+      <function>pg_enable_data_checksums()</function> and
+      <function>pg_disable_data_checksums()</function> functions.
+    </para>
+
+    <para>
      <itemizedlist>
       <listitem><para>
        I/O: all pages need to have data checksums calculated and written which
        will generate a lot of dirty pages that will need to be flushed to disk,
-       as well as WAL logged.
+       as well as WAL logged. Both enabling and disabling data checksums requires
+       performing checkpoints, which may generate a lot of writes.
       </para></listitem>
       <listitem><para>
        Replication: When the standby receives the data checksum state change
