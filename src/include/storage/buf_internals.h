@@ -558,6 +558,13 @@ ResourceOwnerForgetBufferIO(ResourceOwner owner, Buffer buffer)
 	ResourceOwnerForget(owner, Int32GetDatum(buffer), &buffer_io_resowner_desc);
 }
 
+/* For use in freelist.c but defined in bufmgr.c */
+extern bool ClaimVictimBuffer(BufferAccessStrategy strategy,
+							  BufferDesc *buf_hdr, Buffer bufnum,
+							  uint64 buf_state,
+							  bool from_ring,
+							  IOContext io_context);
+
 /*
  * Internal buffer management routines
  */
@@ -594,10 +601,10 @@ extern void TerminateBufferIO(BufferDesc *buf, bool clear_dirty, uint64 set_flag
 
 /* freelist.c */
 extern IOContext IOContextForStrategy(BufferAccessStrategy strategy);
-extern BufferDesc *GetBufferFromRing(BufferAccessStrategy strategy,
-									 uint64 *buf_state);
-extern void AddBufferToRing(BufferAccessStrategy strategy, BufferDesc *buf);
-extern BufferDesc *GetBufferFromClocksweep(uint64 *buf_state);
+extern Buffer GetBufferFromRing(BufferAccessStrategy strategy,
+								IOContext io_context);
+extern void AddBufferToRing(BufferAccessStrategy strategy, Buffer bufnum);
+extern Buffer GetBufferFromClocksweep(IOContext io_context);
 extern bool StrategyRejectBuffer(BufferAccessStrategy strategy,
 								 BufferDesc *buf, uint64 buf_state);
 
