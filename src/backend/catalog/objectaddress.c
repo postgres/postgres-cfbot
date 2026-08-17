@@ -3018,6 +3018,16 @@ getObjectDescription(const ObjectAddress *object, bool missing_ok)
 		case RelationRelationId:
 			if (object->objectSubId == 0)
 				getRelationDescription(&buffer, object->objectId, missing_ok);
+			else if (object->objectSubId == WholeRowAttrNumber)
+			{
+				StringInfoData rel;
+
+				initStringInfo(&rel);
+				getRelationDescription(&rel, object->objectId, missing_ok);
+				/* translator: %s is, e.g., "table %s" */
+				appendStringInfo(&buffer, _("whole row of %s"), rel.data);
+				pfree(rel.data);
+			}
 			else
 			{
 				/* column, not whole relation */
