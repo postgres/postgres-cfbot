@@ -2614,10 +2614,25 @@ GetVictimBuffer(BufferAccessStrategy strategy, IOContext io_context)
 again:
 
 	/*
-	 * Select a victim buffer.  The buffer is returned pinned and owned by
-	 * this backend.
+	 * Select a victim buffer. The buffer is returned pinned and owned by this
+	 * backend. If given a strategy object, see whether it can select a
+	 * buffer; otherwise, or if the ring cannot provide one, get a buffer from
+	 * shared buffers using the clock sweep and record it in the ring.
 	 */
-	buf_hdr = StrategyGetBuffer(strategy, &buf_state, &from_ring);
+	buf_hdr = NULL;
+	from_ring = false;
+	if (strategy)
+	{
+		buf_hdr = GetBufferFromRing(strategy, &buf_state);
+		if (buf_hdr)
+			from_ring = true;
+	}
+	if (!buf_hdr)
+	{
+		buf_hdr = GetBufferFromClocksweep(&buf_state);
+		if (strategy)
+			AddBufferToRing(strategy, buf_hdr);
+	}
 	buf = BufferDescriptorGetBuffer(buf_hdr);
 
 	/*
@@ -2628,7 +2643,7 @@ again:
 	/*
 	 * If the buffer was dirty, try to write it out.  There is a race
 	 * condition here, another backend could dirty the buffer between
-	 * StrategyGetBuffer() checking that it is not in use and invalidating the
+	 * GetBufferFrom*() checking that it is not in use and invalidating the
 	 * buffer below. That's addressed by InvalidateVictimBuffer() verifying
 	 * that the buffer is not dirty.
 	 */
@@ -2643,13 +2658,13 @@ again:
 		 * compacting the page contents while we write).  We must use a
 		 * conditional lock acquisition here to avoid deadlock.  Even though
 		 * the buffer was not pinned (and therefore surely not locked) when
-		 * StrategyGetBuffer returned it, someone else could have pinned and
+		 * GetBufferFrom*() returned it, someone else could have pinned and
 		 * (share-)exclusive-locked it by the time we get here. If we try to
 		 * get the lock unconditionally, we'd block waiting for them; if they
 		 * later block waiting for us, deadlock ensues. (This has been
 		 * observed to happen when two backends are both trying to split btree
 		 * index pages, and the second one just happens to be trying to split
-		 * the page the first one got from StrategyGetBuffer.)
+		 * the page the first one got from GetBufferFrom*().)
 		 */
 		if (!BufferLockConditional(buf, buf_hdr, BUFFER_LOCK_SHARE_EXCLUSIVE))
 		{
@@ -2670,7 +2685,7 @@ again:
 		 *
 		 * We need to hold the content lock in at least share-exclusive mode
 		 * to safely inspect the page LSN, so this couldn't have been done
-		 * inside StrategyGetBuffer().
+		 * inside GetBufferFromRing().
 		 */
 		if (strategy && from_ring &&
 			StrategyRejectBuffer(strategy, buf_hdr, buf_state))
