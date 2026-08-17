@@ -457,10 +457,16 @@ make prefix=/usr/local/pgsql.new install
 
     <para>
      Initialize the new cluster using <command>initdb</command>.
-     Again, use compatible <command>initdb</command>
-     flags that match the old cluster. Many
-     prebuilt installers do this step automatically. There is no need to
-     start the new cluster.
+     Two <command>initdb</command> settings must match the old cluster, or
+     <application>pg_upgrade</application> will fail with a control-data
+     mismatch: the WAL segment size (<option>--wal-segsize</option>) and the
+     data checksum setting (<option>--data-checksums</option> or
+     <option>--no-data-checksums</option>).  You can read the old cluster's
+     values with
+     <link linkend="app-pgcontroldata"><application>pg_controldata</application></link>.
+     (The encoding and locale need not match: <application>pg_upgrade</application>
+     copies them from the old cluster.)  Many prebuilt installers do this step
+     automatically.  There is no need to start the new cluster.
     </para>
    </step>
 
