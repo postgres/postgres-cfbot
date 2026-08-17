@@ -2209,7 +2209,7 @@ vacuum_rel(Oid relid, RangeVar *relation, VacuumParams params,
 	{
 		StdRdOptIndexCleanup vacuum_index_cleanup;
 
-		if (rel->rd_options == NULL)
+		if (!RelationHasStdRdOptions(rel))
 			vacuum_index_cleanup = STDRD_OPTION_VACUUM_INDEX_CLEANUP_AUTO;
 		else
 			vacuum_index_cleanup =
@@ -2240,7 +2240,7 @@ vacuum_rel(Oid relid, RangeVar *relation, VacuumParams params,
 	 * Check if the vacuum_max_eager_freeze_failure_rate table storage
 	 * parameter was specified. This overrides the GUC value.
 	 */
-	if (rel->rd_options != NULL &&
+	if (RelationHasStdRdOptions(rel) &&
 		((StdRdOptions *) rel->rd_options)->vacuum_max_eager_freeze_failure_rate >= 0)
 		params.max_eager_freeze_failure_rate =
 			((StdRdOptions *) rel->rd_options)->vacuum_max_eager_freeze_failure_rate;
@@ -2251,7 +2251,8 @@ vacuum_rel(Oid relid, RangeVar *relation, VacuumParams params,
 	 */
 	if (params.truncate == VACOPTVALUE_UNSPECIFIED)
 	{
-		StdRdOptions *opts = (StdRdOptions *) rel->rd_options;
+		StdRdOptions *opts = RelationHasStdRdOptions(rel) ?
+			(StdRdOptions *) rel->rd_options : NULL;
 
 		if (opts && opts->vacuum_truncate != PG_TERNARY_UNSET)
 		{

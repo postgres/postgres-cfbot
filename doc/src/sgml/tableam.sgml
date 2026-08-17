@@ -152,4 +152,71 @@ my_tableam_handler(PG_FUNCTION_ARGS)
   its implementation.
  </para>
 
+ <sect1 id="tableam-reloptions">
+  <title>Table Access Method Storage Parameters</title>
+
+  <para>
+   A table access method may define its own set of storage parameters
+   (reloptions) by supplying an <structfield>amoptions</structfield>
+   callback in its <structname>TableAmRoutine</structname>.  The callback
+   has the same signature as the corresponding index AM callback; it is
+   invoked at <command>CREATE TABLE</command> and
+   <command>ALTER TABLE</command> time to parse and validate the option
+   set, and at relation open time (with <literal>validate = false</literal>)
+   to build the in-memory representation stored in
+   <structfield>Relation-&gt;rd_options</structfield>.  An AM that does not
+   supply an <structfield>amoptions</structfield> callback inherits the
+   standard heap parser and the <structname>StdRdOptions</structname>
+   layout.
+  </para>
+
+  <para>
+   When the AM provides its own parser it owns the option set entirely:
+   it may accept all standard heap options, only a subset, or define
+   parameters of its own.  The bytea returned from the callback is
+   stored verbatim in <structfield>rd_options</structfield>, so the AM
+   also dictates the in-memory layout that its other callbacks read.
+  </para>
+
+  <para>
+   The parser is expected to validate user-supplied values, but
+   <emphasis>must not silently rewrite them</emphasis>.  In particular
+   it must not coerce out-of-range values to a default, drop unknown
+   options when <literal>validate = true</literal>, or substitute a
+   different unit; the user must be able to verify with
+   <command>SELECT reloptions FROM pg_class</command> that the values
+   they supplied are what the relation will use.  Out-of-range or
+   unknown options should be reported with
+   <function>ereport(ERROR)</function>.
+  </para>
+
+  <para>
+   To honour an option that the core code already registers for
+   <literal>RELOPT_KIND_HEAP</literal> (for example
+   <literal>fillfactor</literal> or the <literal>autovacuum_*</literal>
+   family), call <function>add_reloption_to_kind()</function> once per
+   option in the module's <function>_PG_init</function>.  This extends
+   the existing registration with the AM's own kind without forcing
+   the AM to re-declare each option.
+  </para>
+
+  <para>
+   <command>ALTER TABLE ... SET ACCESS METHOD</command> revalidates the
+   relation's current storage parameters against the new access
+   method's parser after all <literal>SET</literal>,
+   <literal>RESET</literal>, and <literal>REPLACE</literal>
+   sub-commands in the same statement have been applied.  A parameter
+   that is not accepted by the new AM raises an error; the user can
+   clear such parameters in the same statement (see <xref
+   linkend="sql-altertable"/>).
+  </para>
+
+  <para>
+   See <filename>src/test/modules/dummy_table_am</filename> for a
+   minimal example that exercises both
+   <structfield>amoptions</structfield> and
+   <function>add_reloption_to_kind()</function>.
+  </para>
+ </sect1>
+
 </chapter>
