@@ -155,6 +155,16 @@ clauselist_selectivity_ext(PlannerInfo *root,
 											&estimatedclauses, false);
 	}
 
+	if (use_extended_stats && rel == NULL && varRelid != 0)
+	{
+		RelOptInfo *paramrel = find_base_rel(root, varRelid);
+
+		if (paramrel->rtekind == RTE_RELATION && paramrel->statlist != NIL)
+			s1 *= dependencies_clauselist_selectivity(root, clauses, varRelid,
+													jointype, sjinfo, paramrel,
+													&estimatedclauses);
+	}
+
 	/*
 	 * Apply normal selectivity estimates for remaining clauses. We'll be
 	 * careful to skip any clauses which were already estimated above.
