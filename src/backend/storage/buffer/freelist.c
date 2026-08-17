@@ -96,13 +96,9 @@ typedef struct BufferAccessStrategyData
 
 
 /* Prototypes for internal functions */
-static BufferDesc *GetBufferFromRing(BufferAccessStrategy strategy,
-									 uint64 *buf_state);
-static void AddBufferToRing(BufferAccessStrategy strategy,
-							BufferDesc *buf);
 
 /*
- * ClockSweepTick - Helper routine for StrategyGetBuffer()
+ * ClockSweepTick - Helper routine for GetBufferFromClocksweep()
  *
  * Move the clock hand one buffer ahead of its current position and return the
  * id of the buffer now under the hand.
@@ -167,42 +163,16 @@ ClockSweepTick(void)
 }
 
 /*
- * StrategyGetBuffer
- *
- *	Called by the bufmgr to get the next candidate buffer to use in
- *	GetVictimBuffer(). The only hard requirement GetVictimBuffer() has is that
- *	the selected buffer must not currently be pinned by anyone.
- *
- *	strategy is a BufferAccessStrategy object, or NULL for default strategy.
- *
- *	It is the callers responsibility to ensure the buffer ownership can be
- *	tracked via TrackNewBufferPin().
- *
- *	The buffer is pinned and marked as owned, using TrackNewBufferPin(),
- *	before returning.
+ *	Return a buffer from clock sweep, pinned and marked as owned using
+ *	TrackNewBufferPin(). It is the caller's responsibility to make sure the
+ *	buffer ownership can be tracked.
  */
 BufferDesc *
-StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_ring)
+GetBufferFromClocksweep(uint64 *buf_state)
 {
 	BufferDesc *buf;
 	int			bgwprocno;
 	int			trycounter;
-
-	*from_ring = false;
-
-	/*
-	 * If given a strategy object, see whether it can select a buffer. We
-	 * assume strategy objects don't need buffer_strategy_lock.
-	 */
-	if (strategy != NULL)
-	{
-		buf = GetBufferFromRing(strategy, buf_state);
-		if (buf != NULL)
-		{
-			*from_ring = true;
-			return buf;
-		}
-	}
 
 	/*
 	 * If asked, we need to waken the bgwriter. Since we don't want to rely on
@@ -304,8 +274,6 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_r
 												   local_buf_state))
 				{
 					/* Found a usable buffer */
-					if (strategy != NULL)
-						AddBufferToRing(strategy, buf);
 					*buf_state = local_buf_state;
 
 					TrackNewBufferPin(BufferDescriptorGetBuffer(buf));
@@ -360,8 +328,8 @@ StrategySyncStart(uint32 *complete_passes, uint32 *num_buf_alloc)
 /*
  * StrategyNotifyBgWriter -- set or clear allocation notification latch
  *
- * If bgwprocno isn't -1, the next invocation of StrategyGetBuffer will
- * set that latch.  Pass -1 to clear the pending notification before it
+ * If bgwprocno isn't -1, the next invocation of GetBufferFromClocksweep()
+ * will set that latch.  Pass -1 to clear the pending notification before it
  * happens.  This feature is used by the bgwriter process to wake itself up
  * from hibernation, and is not meant for anybody else to use.
  */
@@ -370,8 +338,8 @@ StrategyNotifyBgWriter(int bgwprocno)
 {
 	/*
 	 * We acquire buffer_strategy_lock just to ensure that the store appears
-	 * atomic to StrategyGetBuffer.  The bgwriter should call this rather
-	 * infrequently, so there's no performance penalty from being safe.
+	 * atomic to GetBufferFromClocksweep.  The bgwriter should call this
+	 * rather infrequently, so there's no performance penalty from being safe.
 	 */
 	SpinLockAcquire(&StrategyControl->buffer_strategy_lock);
 	StrategyControl->bgwprocno = bgwprocno;
@@ -620,7 +588,7 @@ FreeAccessStrategy(BufferAccessStrategy strategy)
  * The buffer is pinned and marked as owned, using TrackNewBufferPin(), before
  * returning.
  */
-static BufferDesc *
+BufferDesc *
 GetBufferFromRing(BufferAccessStrategy strategy, uint64 *buf_state)
 {
 	BufferDesc *buf;
@@ -699,7 +667,7 @@ GetBufferFromRing(BufferAccessStrategy strategy, uint64 *buf_state)
  * Caller must hold the buffer header spinlock on the buffer.  Since this
  * is called with the spinlock held, it had better be quite cheap.
  */
-static void
+void
 AddBufferToRing(BufferAccessStrategy strategy, BufferDesc *buf)
 {
 	strategy->buffers[strategy->current] = BufferDescriptorGetBuffer(buf);
