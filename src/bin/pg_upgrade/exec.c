@@ -17,7 +17,7 @@
 
 static void check_data_dir(ClusterInfo *cluster);
 static void check_bin_dir(ClusterInfo *cluster, bool check_versions);
-static void get_bin_version(ClusterInfo *cluster);
+void		get_bin_version(ClusterInfo *cluster);
 static void check_exec(const char *dir, const char *program, bool check_version);
 
 #ifdef WIN32
@@ -30,7 +30,7 @@ static int	win32_check_directory_write_permissions(void);
  *
  *	Fetch major version of binaries for cluster.
  */
-static void
+void
 get_bin_version(ClusterInfo *cluster)
 {
 	char		cmd[MAXPGPATH],
