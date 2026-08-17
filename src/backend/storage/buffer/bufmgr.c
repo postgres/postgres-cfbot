@@ -679,6 +679,10 @@ static pg_always_inline void TrackBufferHit(IOObject io_object,
 											ForkNumber forknum, BlockNumber blocknum);
 static uint32 MaxWriteBuffers(void);
 static Buffer GetVictimBuffer(BufferAccessStrategy strategy, IOContext io_context);
+static bool ClaimVictimBuffer(BufferAccessStrategy strategy,
+							  BufferDesc *buf_hdr, Buffer bufnum,
+							  uint64 buf_state,
+							  bool from_ring, IOContext io_context);
 static void FlushUnlockedBuffer(BufferDesc *buf, SMgrRelation reln,
 								IOObject io_object, IOContext io_context);
 static void FlushBuffer(BufferDesc *buf, SMgrRelation reln,
@@ -2580,6 +2584,97 @@ InvalidateVictimBuffer(BufferDesc *buf_hdr)
 }
 
 /*
+ * Helper to claim a victim buffer -- which is invalidating its existing
+ * contents (including flushing the old contents first if needed).
+ * Returns true if it successfully claimed the victim buffer and false if it
+ * failed to do so. Buffer must already be pinned, but if we fail to claim it
+ * we will unpin it.
+ */
+static bool
+ClaimVictimBuffer(BufferAccessStrategy strategy,
+				  BufferDesc *buf_hdr, Buffer bufnum, uint64 buf_state,
+				  bool from_ring, IOContext io_context)
+{
+	/*
+	 * We shouldn't have any other pins for this buffer.
+	 */
+	CheckBufferIsPinnedOnce(bufnum);
+
+	/*
+	 * If the buffer was dirty, try to write it out.  There is a race
+	 * condition here, another backend could dirty the buffer between
+	 * GetBufferFrom*() checking that it is not in use and invalidating the
+	 * buffer below. That's addressed by InvalidateVictimBuffer() verifying
+	 * that the buffer is not dirty.
+	 */
+	if (buf_state & BM_DIRTY)
+	{
+		Assert(buf_state & BM_TAG_VALID);
+		Assert(buf_state & BM_VALID);
+
+		/*
+		 * We need a share-exclusive lock on the buffer contents to write it
+		 * out (else we might write invalid data, eg because someone else is
+		 * compacting the page contents while we write).  We must use a
+		 * conditional lock acquisition here to avoid deadlock.  Even though
+		 * the buffer was not pinned (and therefore surely not locked) when
+		 * GetBufferFrom*() returned it, someone else could have pinned and
+		 * (share-)exclusive-locked it by the time we get here. If we try to
+		 * get the lock unconditionally, we'd block waiting for them; if they
+		 * later block waiting for us, deadlock ensues. (This has been
+		 * observed to happen when two backends are both trying to split btree
+		 * index pages, and the second one just happens to be trying to split
+		 * the page the first one got from GetBufferFrom*().)
+		 */
+		if (!BufferLockConditional(bufnum, buf_hdr, BUFFER_LOCK_SHARE_EXCLUSIVE))
+		{
+			/*
+			 * Someone else has locked the buffer, so give it up and loop back
+			 * to get another one.
+			 */
+			UnpinBuffer(buf_hdr);
+			return false;
+		}
+
+		/*
+		 * If using a nondefault strategy, and this victim came from the
+		 * strategy ring, let the strategy decide whether to reject it when
+		 * reusing it would require a WAL flush.  This only applies to
+		 * permanent buffers; unlogged buffers can have fake LSNs, so
+		 * XLogNeedsFlush() is not meaningful for them.
+		 *
+		 * We need to hold the content lock in at least share-exclusive mode
+		 * to safely inspect the page LSN.
+		 */
+		if (from_ring && StrategyRejectBuffer(strategy, buf_hdr, buf_state))
+		{
+			UnlockReleaseBuffer(bufnum);
+			return false;
+		}
+
+		/* OK, do the I/O */
+		FlushBuffer(buf_hdr, NULL, IOOBJECT_RELATION, io_context);
+		BufferLockUnlock(bufnum, buf_hdr);
+
+		ScheduleBufferTagForWriteback(&BackendWritebackContext, io_context,
+									  &buf_hdr->tag);
+	}
+
+	/*
+	 * If the buffer has an entry in the buffer mapping table, delete it. This
+	 * can fail because another backend could have pinned or dirtied the
+	 * buffer.
+	 */
+	if ((buf_state & BM_TAG_VALID) && !InvalidateVictimBuffer(buf_hdr))
+	{
+		UnpinBuffer(buf_hdr);
+		return false;
+	}
+
+	return true;
+}
+
+/*
  * Determine the largest IO we can assemble given global constraints on the
  * number of pinned buffers and max IO size. Currently only a single write is
  * inflight at a time, so the batch can consume all the pinned buffers this
@@ -2635,86 +2730,17 @@ again:
 	}
 	buf = BufferDescriptorGetBuffer(buf_hdr);
 
-	/*
-	 * We shouldn't have any other pins for this buffer.
-	 */
-	CheckBufferIsPinnedOnce(buf);
-
-	/*
-	 * If the buffer was dirty, try to write it out.  There is a race
-	 * condition here, another backend could dirty the buffer between
-	 * GetBufferFrom*() checking that it is not in use and invalidating the
-	 * buffer below. That's addressed by InvalidateVictimBuffer() verifying
-	 * that the buffer is not dirty.
-	 */
-	if (buf_state & BM_DIRTY)
-	{
-		Assert(buf_state & BM_TAG_VALID);
-		Assert(buf_state & BM_VALID);
-
-		/*
-		 * We need a share-exclusive lock on the buffer contents to write it
-		 * out (else we might write invalid data, eg because someone else is
-		 * compacting the page contents while we write).  We must use a
-		 * conditional lock acquisition here to avoid deadlock.  Even though
-		 * the buffer was not pinned (and therefore surely not locked) when
-		 * GetBufferFrom*() returned it, someone else could have pinned and
-		 * (share-)exclusive-locked it by the time we get here. If we try to
-		 * get the lock unconditionally, we'd block waiting for them; if they
-		 * later block waiting for us, deadlock ensues. (This has been
-		 * observed to happen when two backends are both trying to split btree
-		 * index pages, and the second one just happens to be trying to split
-		 * the page the first one got from GetBufferFrom*().)
-		 */
-		if (!BufferLockConditional(buf, buf_hdr, BUFFER_LOCK_SHARE_EXCLUSIVE))
-		{
-			/*
-			 * Someone else has locked the buffer, so give it up and loop back
-			 * to get another one.
-			 */
-			UnpinBuffer(buf_hdr);
-			goto again;
-		}
-
-		/*
-		 * If using a nondefault strategy, and this victim came from the
-		 * strategy ring, let the strategy decide whether to reject it when
-		 * reusing it would require a WAL flush.  This only applies to
-		 * permanent buffers; unlogged buffers can have fake LSNs, so
-		 * XLogNeedsFlush() is not meaningful for them.
-		 *
-		 * We need to hold the content lock in at least share-exclusive mode
-		 * to safely inspect the page LSN, so this couldn't have been done
-		 * inside GetBufferFromRing().
-		 */
-		if (strategy && from_ring &&
-			StrategyRejectBuffer(strategy, buf_hdr, buf_state))
-		{
-			UnlockReleaseBuffer(buf);
-			goto again;
-		}
-
-		/* OK, do the I/O */
-		FlushBuffer(buf_hdr, NULL, IOOBJECT_RELATION, io_context);
-		BufferLockUnlock(buf, buf_hdr);
-
-		ScheduleBufferTagForWriteback(&BackendWritebackContext, io_context,
-									  &buf_hdr->tag);
-	}
-
 	/* Don't use a stale buf_state value after InvalidateVictimBuffer */
 	buf_valid = buf_state & BM_VALID;
 
 	/*
-	 * If the buffer has an entry in the buffer mapping table, delete it. This
-	 * can fail because another backend could have pinned or dirtied the
-	 * buffer.
+	 * Try to claim the buffer -- flushing it first if dirty, and possibly
+	 * letting the strategy reject it. If someone else takes or dirties the
+	 * buffer before we can claim it, loop back and get another one.
 	 */
-	if ((buf_state & BM_TAG_VALID) && !InvalidateVictimBuffer(buf_hdr))
-	{
-		UnpinBuffer(buf_hdr);
+	if (!ClaimVictimBuffer(strategy, buf_hdr, buf, buf_state, from_ring,
+						   io_context))
 		goto again;
-	}
 
 	if (buf_valid)
 	{
