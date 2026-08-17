@@ -679,10 +679,6 @@ static pg_always_inline void TrackBufferHit(IOObject io_object,
 											ForkNumber forknum, BlockNumber blocknum);
 static uint32 MaxWriteBuffers(void);
 static Buffer GetVictimBuffer(BufferAccessStrategy strategy, IOContext io_context);
-static bool ClaimVictimBuffer(BufferAccessStrategy strategy,
-							  BufferDesc *buf_hdr, Buffer bufnum,
-							  uint64 buf_state,
-							  bool from_ring, IOContext io_context);
 static void FlushUnlockedBuffer(BufferDesc *buf, SMgrRelation reln,
 								IOObject io_object, IOContext io_context);
 static void FlushBuffer(BufferDesc *buf, SMgrRelation reln,
@@ -2590,7 +2586,7 @@ InvalidateVictimBuffer(BufferDesc *buf_hdr)
  * failed to do so. Buffer must already be pinned, but if we fail to claim it
  * we will unpin it.
  */
-static bool
+bool
 ClaimVictimBuffer(BufferAccessStrategy strategy,
 				  BufferDesc *buf_hdr, Buffer bufnum, uint64 buf_state,
 				  bool from_ring, IOContext io_context)
@@ -2692,11 +2688,11 @@ MaxWriteBuffers(void)
 static Buffer
 GetVictimBuffer(BufferAccessStrategy strategy, IOContext io_context)
 {
+	Buffer		bufnum = InvalidBuffer;
+#ifdef USE_ASSERT_CHECKING
 	BufferDesc *buf_hdr;
-	Buffer		buf;
 	uint64		buf_state;
-	bool		from_ring;
-	bool		buf_valid;
+#endif
 
 	/*
 	 * Ensure, before we pin a victim buffer, that there's a free refcount
@@ -2705,77 +2701,33 @@ GetVictimBuffer(BufferAccessStrategy strategy, IOContext io_context)
 	ReservePrivateRefCountEntry();
 	ResourceOwnerEnlarge(CurrentResourceOwner);
 
-	/* we return here if a prospective victim buffer gets used concurrently */
-again:
-
 	/*
 	 * Select a victim buffer. The buffer is returned pinned and owned by this
-	 * backend. If given a strategy object, see whether it can select a
-	 * buffer; otherwise, or if the ring cannot provide one, get a buffer from
-	 * shared buffers using the clock sweep and record it in the ring.
+	 * backend and is already cleaned and invalidated.
 	 */
-	buf_hdr = NULL;
-	from_ring = false;
 	if (strategy)
+		bufnum = GetBufferFromRing(strategy, io_context);
+
+	/* If no strategy or didn't find a strategy buffer, get one from SB */
+	if (!BufferIsValid(bufnum))
 	{
-		buf_hdr = GetBufferFromRing(strategy, &buf_state);
-		if (buf_hdr)
-			from_ring = true;
-	}
-	if (!buf_hdr)
-	{
-		buf_hdr = GetBufferFromClocksweep(&buf_state);
+		bufnum = GetBufferFromClocksweep(io_context);
 		if (strategy)
-			AddBufferToRing(strategy, buf_hdr);
-	}
-	buf = BufferDescriptorGetBuffer(buf_hdr);
-
-	/* Don't use a stale buf_state value after InvalidateVictimBuffer */
-	buf_valid = buf_state & BM_VALID;
-
-	/*
-	 * Try to claim the buffer -- flushing it first if dirty, and possibly
-	 * letting the strategy reject it. If someone else takes or dirties the
-	 * buffer before we can claim it, loop back and get another one.
-	 */
-	if (!ClaimVictimBuffer(strategy, buf_hdr, buf, buf_state, from_ring,
-						   io_context))
-		goto again;
-
-	if (buf_valid)
-	{
-		/*
-		 * When a BufferAccessStrategy is in use, blocks evicted from shared
-		 * buffers are counted as IOOP_EVICT in the corresponding context
-		 * (e.g. IOCONTEXT_BULKWRITE). Shared buffers are evicted by a
-		 * strategy in two cases: 1) while initially claiming buffers for the
-		 * strategy ring 2) to replace an existing strategy ring buffer
-		 * because it is pinned or in use and cannot be reused.
-		 *
-		 * Blocks evicted from buffers already in the strategy ring are
-		 * counted as IOOP_REUSE in the corresponding strategy context.
-		 *
-		 * At this point, we can accurately count evictions and reuses,
-		 * because we have successfully claimed the valid buffer and
-		 * invalidated its previous tenant. Previously, we may have been
-		 * forced to release the buffer due to concurrent pinners or erroring
-		 * out.
-		 */
-		pgstat_count_io_op(IOOBJECT_RELATION, io_context,
-						   from_ring ? IOOP_REUSE : IOOP_EVICT, 1, 0);
+			AddBufferToRing(strategy, bufnum);
 	}
 
 	/* a final set of sanity checks */
 #ifdef USE_ASSERT_CHECKING
+	buf_hdr = GetBufferDescriptor(bufnum - 1);
 	buf_state = pg_atomic_read_u64(&buf_hdr->state);
 
 	Assert(BUF_STATE_GET_REFCOUNT(buf_state) == 1);
 	Assert(!(buf_state & (BM_TAG_VALID | BM_VALID | BM_DIRTY)));
 
-	CheckBufferIsPinnedOnce(buf);
+	CheckBufferIsPinnedOnce(bufnum);
 #endif
 
-	return buf;
+	return bufnum;
 }
 
 /*
@@ -4838,8 +4790,7 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln, IOObject io_object,
 	 * If a shared buffer which was added to the ring later because the
 	 * current strategy buffer is pinned or in use or because all strategy
 	 * buffers were dirty and rejected (for BAS_BULKREAD operations only)
-	 * requires flushing, this is counted as an IOCONTEXT_NORMAL IOOP_WRITE
-	 * (from_ring will be false).
+	 * requires flushing, this is counted as an IOCONTEXT_NORMAL IOOP_WRITE.
 	 *
 	 * When a strategy is not in use, the write can only be a "regular" write
 	 * of a dirty shared buffer (IOCONTEXT_NORMAL IOOP_WRITE).
