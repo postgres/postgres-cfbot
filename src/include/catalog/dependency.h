@@ -197,6 +197,7 @@ extern List *getOwnedSequences(Oid relid);
 extern Oid	getIdentitySequence(Relation rel, AttrNumber attnum, bool missing_ok);
 
 extern Oid	get_index_constraint(Oid indexId);
+extern Oid	get_auxiliary_index(Oid indexId);
 
 extern List *get_index_ref_constraints(Oid indexId);
 

@@ -314,6 +314,8 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 	indexInfo->ii_ParallelWorkers = 0;
 	indexInfo->ii_Am = BTREE_AM_OID;
 	indexInfo->ii_AmCache = NULL;
+	indexInfo->ii_Auxiliary = false;
+	indexInfo->ii_AuxiliaryForIndexId = InvalidOid;
 	indexInfo->ii_Context = CurrentMemoryContext;
 
 	collationIds[0] = InvalidOid;

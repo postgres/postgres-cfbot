@@ -3029,6 +3029,10 @@ StdAnalyzeData
 StdRdOptIndexCleanup
 StdRdOptions
 Step
+StirMetaPageData
+StirPageOpaque
+StirPageOpaqueData
+StirTuple
 StopList
 StrategyNumber
 StreamCtl

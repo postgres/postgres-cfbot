@@ -507,6 +507,7 @@ CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS concur_index2 ON concur_heap(f1);
 INSERT INTO concur_heap VALUES ('b','x');
 -- check if constraint is enforced properly at build time
 CREATE UNIQUE INDEX CONCURRENTLY concur_index3 ON concur_heap(f2);
+DROP INDEX concur_index3_ccaux;
 -- test that expression indexes and partial indexes work concurrently
 CREATE INDEX CONCURRENTLY concur_index4 on concur_heap(f2) WHERE f1='a';
 CREATE INDEX CONCURRENTLY concur_index5 on concur_heap(f2) WHERE f1='x';
@@ -1319,10 +1320,12 @@ CREATE TABLE concur_reindex_tab4 (c1 int);
 INSERT INTO concur_reindex_tab4 VALUES (1), (1), (2);
 -- This trick creates an invalid index.
 CREATE UNIQUE INDEX CONCURRENTLY concur_reindex_ind5 ON concur_reindex_tab4 (c1);
+DROP INDEX concur_reindex_ind5_ccaux;
 -- Reindexing concurrently this index fails with the same failure.
 -- The extra index created is itself invalid, and can be dropped.
 REINDEX INDEX CONCURRENTLY concur_reindex_ind5;
 \d concur_reindex_tab4
+DROP INDEX concur_reindex_ind5_ccaux;
 DROP INDEX concur_reindex_ind5_ccnew;
 -- This makes the previous failure go away, so the index can become valid.
 DELETE FROM concur_reindex_tab4 WHERE c1 = 1;
@@ -1333,6 +1336,79 @@ REINDEX TABLE CONCURRENTLY concur_reindex_tab4;
 REINDEX INDEX CONCURRENTLY concur_reindex_ind5;
 \d concur_reindex_tab4
 DROP TABLE concur_reindex_tab4;
+
+-- Check handling of auxiliary indexes
+CREATE TABLE aux_index_tab5 (c1 int);
+INSERT INTO aux_index_tab5 VALUES (1), (1), (2);
+-- This trick creates an invalid index and auxiliary index for it
+CREATE UNIQUE INDEX CONCURRENTLY aux_index_ind6 ON aux_index_tab5 (c1);
+\d aux_index_tab5
+-- Not allowed to reindex auxiliary index
+REINDEX INDEX aux_index_ind6_ccaux;
+-- Concurrently also
+REINDEX INDEX CONCURRENTLY aux_index_ind6_ccaux;
+-- This makes the previous failure go away, so the index can become valid.
+DELETE FROM aux_index_tab5 WHERE c1 = 1;
+-- Should be skipped during reindex and dropped
+REINDEX INDEX aux_index_ind6;
+-- Make sure aux index is dropped
+\d aux_index_tab5
+DROP INDEX aux_index_ind6;
+
+-- Insert duplicates again
+INSERT INTO aux_index_tab5 VALUES (1), (1);
+-- Create invalid index again
+CREATE UNIQUE INDEX CONCURRENTLY aux_index_ind6 ON aux_index_tab5 (c1);
+-- This makes the previous failure go away, so the index can become valid.
+DELETE FROM aux_index_tab5 WHERE c1 = 1;
+-- Should be skipped during reindex
+REINDEX TABLE CONCURRENTLY aux_index_tab5;
+-- Make sure it is still exists
+\d aux_index_tab5
+-- Should be skipped during reindex and dropped
+REINDEX TABLE aux_index_tab5;
+-- Make sure aux index is dropped
+\d aux_index_tab5
+DROP INDEX aux_index_ind6;
+
+-- Insert duplicates again
+INSERT INTO aux_index_tab5 VALUES (1), (1);
+-- Create invalid index again
+CREATE UNIQUE INDEX CONCURRENTLY aux_index_ind6 ON aux_index_tab5 (c1);
+-- This makes the previous failure go away, so the index can become valid.
+DELETE FROM aux_index_tab5 WHERE c1 = 1;
+-- Should be skipped during reindex and dropped
+REINDEX INDEX CONCURRENTLY aux_index_ind6;
+-- Make sure aux index is dropped
+\d aux_index_tab5
+DROP INDEX aux_index_ind6;
+
+-- Insert duplicates again
+INSERT INTO aux_index_tab5 VALUES (1), (1);
+-- Create invalid index again
+CREATE UNIQUE INDEX CONCURRENTLY aux_index_ind6 ON aux_index_tab5 (c1);
+-- This makes the previous failure go away, so the index can become valid.
+DELETE FROM aux_index_tab5 WHERE c1 = 1;
+-- Drop main index CONCURRENTLY
+DROP INDEX CONCURRENTLY aux_index_ind6;
+-- Make sure auxiliary index dropped too
+\d aux_index_tab5
+DROP INDEX aux_index_ind6;
+
+-- Insert duplicates again
+INSERT INTO aux_index_tab5 VALUES (1), (1);
+-- Create invalid index again
+CREATE UNIQUE INDEX CONCURRENTLY aux_index_ind6 ON aux_index_tab5 (c1);
+-- Drop main index
+DROP INDEX aux_index_ind6;
+-- Make sure auxiliary index dropped too
+\d aux_index_tab5
+
+SET default_transaction_isolation = 'repeatable read';
+CREATE INDEX CONCURRENTLY aux_index_ind6 ON aux_index_tab5 (c1);
+SET default_transaction_isolation = 'read committed';
+
+DROP TABLE aux_index_tab5;
 
 -- Check handling of indexes with expressions and predicates.  The
 -- definitions of the rebuilt indexes should match the original

@@ -19,6 +19,7 @@ SUBDIRS	    = \
 	nbtree \
 	rmgrdesc \
 	spgist \
+	stir \
 	sequence \
 	table \
 	tablesample \
