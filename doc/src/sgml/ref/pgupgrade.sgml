@@ -263,6 +263,53 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
+      <term><option>--initdb</option></term>
+      <listitem>
+       <para>
+        Create the new cluster automatically by running
+        <command>initdb</command> before upgrading, instead of requiring the
+        user to have created it manually.  The WAL segment size and data
+        checksum setting are derived from the old cluster so the new cluster
+        passes <application>pg_upgrade</application>'s control-data check; the
+        encoding and locale are matched to the old cluster's
+        <literal>template0</literal>.
+       </para>
+       <para>
+        The new cluster data directory specified with
+        <option>-D</option>/<option>--new-datadir</option> must be empty or
+        not yet exist; otherwise <application>pg_upgrade</application> exits
+        with an error.
+       </para>
+       <para>
+        When combined with <option>-c</option>/<option>--check</option>,
+        <option>--initdb</option> performs a dry run: it reports the
+        <command>initdb</command> command it would run and verifies that the new
+        cluster could be created (the new binaries' major version matches, the
+        target directory is empty, and the old cluster is reachable), but
+        does not create the new cluster.  This is a lighter check than a plain
+        <option>--check</option>, which instead queries an already-created new
+        cluster.
+       </para>
+       <para>
+        <option>--initdb</option> cannot be combined with
+        <option>-O</option>/<option>--new-options</option>: those options are
+        passed to the new cluster's server process, which accepts a different
+        set of options than <command>initdb</command>.  If you need to supply
+        such options, create the new cluster manually and omit
+        <option>--initdb</option>.
+       </para>
+       <para>
+        To discover the old cluster's encoding and locale,
+        <option>--initdb</option> briefly starts the old server in
+        binary-upgrade mode (which disables autovacuum) and stops it again
+        before creating the new cluster.  If a compatibility check fails after
+        the new cluster has been created, its data directory is removed
+        automatically, so the upgrade can be retried without manual cleanup.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
       <term><option>--no-statistics</option></term>
       <listitem>
        <para>
@@ -467,6 +514,12 @@ make prefix=/usr/local/pgsql.new install
      (The encoding and locale need not match: <application>pg_upgrade</application>
      copies them from the old cluster.)  Many prebuilt installers do this step
      automatically.  There is no need to start the new cluster.
+    </para>
+    <para>
+     Alternatively, pass <option>--initdb</option> to
+     <application>pg_upgrade</application> to have it run
+     <command>initdb</command> automatically, deriving the required settings
+     from the old cluster.  In that case this manual step can be skipped.
     </para>
    </step>
 
