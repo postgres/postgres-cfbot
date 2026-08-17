@@ -325,6 +325,9 @@ typedef struct
 	int			char_signedness;	/* default char signedness: -1 for initial
 									 * value, 1 for "signed" and 0 for
 									 * "unsigned" */
+	bool		initdb_new_cluster; /* run initdb to create the new cluster
+									 * before upgrading, instead of requiring
+									 * the user to have created it manually */
 } UserOpts;
 
 typedef struct
@@ -391,6 +394,7 @@ void		generate_old_dump(void);
 
 bool		exec_prog(const char *log_filename, const char *opt_log_file,
 					  bool report_error, bool exit_on_error, const char *fmt, ...) pg_attribute_printf(5, 6);
+void		get_bin_version(ClusterInfo *cluster);
 void		verify_directories(void);
 bool		pid_lock_file_exists(const char *datadir);
 
@@ -423,6 +427,7 @@ FileNameMap *gen_db_file_maps(DbInfo *old_db,
 							  DbInfo *new_db, int *nmaps, const char *old_pgdata,
 							  const char *new_pgdata);
 void		get_db_rel_and_slot_infos(ClusterInfo *cluster);
+void		get_template0_info(ClusterInfo *cluster);
 int			count_old_cluster_logical_slots(void);
 void		get_subscription_info(ClusterInfo *cluster);
 
