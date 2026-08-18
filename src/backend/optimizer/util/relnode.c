@@ -1320,6 +1320,27 @@ build_joinrel_tlist(PlannerInfo *root, RelOptInfo *joinrel,
 			}
 			continue;
 		}
+		/*
+		 * We allow FDWs to have PARAM_EXEC Params here.
+		 */
+		else if (IsA(var, Param))
+		{
+			Param	   *param = (Param *) var;
+
+			Assert(IS_FOREIGN_PARAM(root, param));
+
+			joinrel->reltarget->exprs =
+				lappend(joinrel->reltarget->exprs, param);
+
+			/*
+			 * Estimate using the type info  (Note: keep this in sync with
+			 * set_rel_width())
+			 */
+			joinrel->reltarget->width +=
+				get_typavgwidth(param->paramtype, param->paramtypmod);
+
+			continue;
+		}
 
 		/*
 		 * Otherwise, anything in a baserel or joinrel targetlist ought to be

@@ -129,6 +129,9 @@ typedef struct PgFdwRelationInfo
 	 * representing the relation.
 	 */
 	int			relation_index;
+
+	/* PARAM_EXEC Param representing the remote table OID of a target rel */
+	Param	   *tableoid_param;
 } PgFdwRelationInfo;
 
 /*

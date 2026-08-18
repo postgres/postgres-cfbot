@@ -3198,7 +3198,12 @@ finalize_primnode(Node *node, finalize_primnode_context *context)
 		{
 			int			paramid = ((Param *) node)->paramid;
 
-			context->paramids = bms_add_member(context->paramids, paramid);
+			/*
+			 * Params added by FDWs are irrelevant for parameter change
+			 * signaling.
+			 */
+			if (!bms_is_member(paramid, context->root->glob->foreignParamIDs))
+				context->paramids = bms_add_member(context->paramids, paramid);
 		}
 		return false;			/* no more to do here */
 	}

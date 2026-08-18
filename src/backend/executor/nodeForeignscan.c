@@ -65,6 +65,8 @@ ForeignNext(ForeignScanState *node)
 	 * Insert valid value into tableoid, the only actually-useful system
 	 * column.
 	 */
+
+	slot->tts_remoteOid = slot->tts_tableOid;
 	if (plan->fsSystemCol && !TupIsNull(slot))
 		slot->tts_tableOid = RelationGetRelid(node->ss.ss_currentRelation);
 

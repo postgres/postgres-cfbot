@@ -402,6 +402,7 @@ typedef struct Param
 	Oid			paramcollid;
 	/* token location, or -1 if unknown */
 	ParseLoc	location;
+	Index		target_rte;
 } Param;
 
 /*

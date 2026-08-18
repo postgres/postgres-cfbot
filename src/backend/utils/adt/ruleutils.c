@@ -9374,7 +9374,7 @@ get_parameter(Param *param, deparse_context *context)
 	 * It's a bug if we get here for anything except PARAM_EXTERN Params, but
 	 * in production builds printing $N seems more useful than failing.
 	 */
-	Assert(param->paramkind == PARAM_EXTERN);
+	Assert(param->paramkind == PARAM_EXTERN || param->paramkind == PARAM_EXEC);
 
 	appendStringInfo(context->buf, "$%d", param->paramid);
 }

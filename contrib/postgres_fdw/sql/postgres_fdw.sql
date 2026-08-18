@@ -4806,6 +4806,50 @@ RESET client_min_messages;
 RESET debug_discard_caches;
 
 -- ===================================================================
+-- check whether fdw created for partitioned table will delete tuples only from
+-- desired partition
+-- ===================================================================
+
+CREATE TABLE measurement (
+       city_id         int not null,
+       logdate         date not null,
+       peaktemp        int,
+       unitsales       int
+) PARTITION BY RANGE (logdate);
+
+CREATE TABLE measurement_y2006m02 PARTITION OF measurement
+       FOR VALUES FROM ('2006-02-01') TO ('2006-03-01');
+
+CREATE TABLE measurement_y2006m03 PARTITION OF measurement
+       FOR VALUES FROM ('2006-03-01') TO ('2006-04-01');
+
+CREATE TABLE measurement_y2006m04 PARTITION OF measurement
+       FOR VALUES FROM ('2006-04-01') TO ('2006-05-01');
+
+INSERT INTO measurement VALUES (1,'2006-02-01',1,1);
+INSERT INTO measurement VALUES (2,'2006-03-01',1,1);
+INSERT INTO measurement VALUES (3,'2006-04-01',1,1);
+
+create foreign table measurement_fdw (
+       city_id int options (column_name 'city_id') not null,
+       logdate date options (column_name 'logdate') not null,
+       peaktemp text options (column_name 'peaktemp'),
+       unitsales integer options (column_name 'unitsales')
+) SERVER loopback OPTIONS (table_name 'measurement');
+
+DELETE FROM measurement_fdw
+USING (
+       SELECT t1.city_id sub_city_id
+       FROM measurement_fdw t1
+       WHERE t1.city_id=1
+       LIMIT 1000
+) sub
+WHERE measurement_fdw.city_id = sub.sub_city_id
+RETURNING city_id, logdate, peaktemp, unitsales;
+
+SELECT * FROM measurement_fdw;
+
+-- ===================================================================
 -- test cleanup of failed connections on abort
 -- ===================================================================
 

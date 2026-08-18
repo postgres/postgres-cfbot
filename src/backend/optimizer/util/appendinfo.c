@@ -947,6 +947,29 @@ add_row_identity_var(PlannerInfo *root, Var *orig_var,
 	root->processed_tlist = lappend(root->processed_tlist, tle);
 }
 
+static void
+fix_foreign_params(PlannerInfo *root, List *tlist)
+{
+	ListCell   *lc;
+
+	foreach(lc, tlist)
+	{
+		TargetEntry *tle = (TargetEntry *) lfirst(lc);
+		Param	   *param = (Param *) tle->expr;
+
+		if (tle->resjunk && IsA(param, Param) &&
+			param->paramkind == PARAM_EXEC &&
+			param->paramid == -1)
+		{
+			param->paramid = list_length(root->glob->paramExecTypes);
+			root->glob->paramExecTypes =
+				lappend_oid(root->glob->paramExecTypes, param->paramtype);
+			root->glob->foreignParamIDs =
+				bms_add_member(root->glob->foreignParamIDs, param->paramid);
+		}
+	}
+}
+
 /*
  * add_row_identity_columns
  *
@@ -991,8 +1014,12 @@ add_row_identity_columns(PlannerInfo *root, Index rtindex,
 		fdwroutine = GetFdwRoutineForRelation(target_relation, false);
 
 		if (fdwroutine->AddForeignUpdateTargets != NULL)
+		{
+
 			fdwroutine->AddForeignUpdateTargets(root, rtindex,
 												target_rte, target_relation);
+			fix_foreign_params(root, root->processed_tlist);
+		}
 
 		/*
 		 * For UPDATE, we need to make the FDW fetch unchanged columns by

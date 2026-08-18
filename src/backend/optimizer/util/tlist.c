@@ -329,18 +329,37 @@ apply_tlist_labeling(List *dest_tlist, List *src_tlist)
 	ListCell   *ld,
 			   *ls;
 
-	Assert(list_length(dest_tlist) == list_length(src_tlist));
-	forboth(ld, dest_tlist, ls, src_tlist)
+	foreach(ld, dest_tlist)
 	{
+		bool has_src = false;
 		TargetEntry *dest_tle = (TargetEntry *) lfirst(ld);
-		TargetEntry *src_tle = (TargetEntry *) lfirst(ls);
 
-		Assert(dest_tle->resno == src_tle->resno);
-		dest_tle->resname = src_tle->resname;
-		dest_tle->ressortgroupref = src_tle->ressortgroupref;
-		dest_tle->resorigtbl = src_tle->resorigtbl;
-		dest_tle->resorigcol = src_tle->resorigcol;
-		dest_tle->resjunk = src_tle->resjunk;
+		foreach(ls, src_tlist)
+		{
+			TargetEntry *src_tle = (TargetEntry *) lfirst(ls);
+
+			if (dest_tle->resno == src_tle->resno)
+			{
+				has_src = true;
+				dest_tle->resname = src_tle->resname;
+				dest_tle->ressortgroupref = src_tle->ressortgroupref;
+				dest_tle->resorigtbl = src_tle->resorigtbl;
+				dest_tle->resorigcol = src_tle->resorigcol;
+				dest_tle->resjunk = src_tle->resjunk;
+				break;
+			}
+		}
+
+		if (!has_src)
+		{
+			TargetEntry *new_entry = palloc0(sizeof(TargetEntry));
+			new_entry->resname = dest_tle->resname;
+			new_entry->ressortgroupref = dest_tle->ressortgroupref;
+			new_entry->resorigtbl = dest_tle->resorigtbl;
+			new_entry->resorigcol = dest_tle->resorigcol;
+			new_entry->resjunk = dest_tle->resjunk;
+			src_tlist = lappend(src_tlist, new_entry);
+		}
 	}
 }
 

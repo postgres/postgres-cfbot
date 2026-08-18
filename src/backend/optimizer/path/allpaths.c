@@ -1165,6 +1165,26 @@ set_append_rel_size(PlannerInfo *root, RelOptInfo *rel,
 								   (Node *) rel->reltarget->exprs,
 								   1, &appinfo);
 
+		/* Do it if fdw is partition */
+		if (planner_rt_fetch(childRTindex, root)->relkind == RELKIND_FOREIGN_TABLE &&
+			!bms_is_empty(root->glob->foreignParamIDs))
+		{
+			foreach(lc, root->processed_tlist)
+			{
+				TargetEntry *tle = (TargetEntry *) lfirst(lc);
+				Param	   *param = (Param *) tle->expr;
+
+				if (tle->resjunk && IsA(param, Param) &&
+					IS_FOREIGN_PARAM(root, param) &&
+					param->target_rte == childRTindex) // TODO same for another case
+				{
+					/* XXX is copyObject necessary here? */
+					childrel->reltarget->exprs =
+						lappend(childrel->reltarget->exprs, copyObject(param));
+				}
+			}
+		}
+
 		/*
 		 * We have to make child entries in the EquivalenceClass data
 		 * structures as well.  This is needed either if the parent

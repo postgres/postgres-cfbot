@@ -48,6 +48,7 @@
 #include "catalog/pg_ts_dict.h"
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
+#include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/plannodes.h"
 #include "optimizer/optimizer.h"
@@ -132,6 +133,7 @@ static void deparseTargetList(StringInfo buf,
 							  Relation rel,
 							  bool is_returning,
 							  Bitmapset *attrs_used,
+							  bool tableoid_needed,
 							  bool qualify_col,
 							  List **retrieved_attrs);
 static void deparseExplicitTargetList(List *tlist,
@@ -350,10 +352,11 @@ foreign_expr_walker(Node *node,
 					/* Var belongs to foreign table */
 
 					/*
-					 * System columns other than ctid should not be sent to
-					 * the remote, since we don't make any effort to ensure
-					 * that local and remote values match (tableoid, in
-					 * particular, almost certainly doesn't match).
+					 * System columns other than ctid and remote table oid
+					 * should not be sent to the remote, since we don't make
+					 * any effort to ensure that local and remote values
+					 * match (tableoid, in particular, almost certainly
+					 * doesn't match).
 					 */
 					if (var->varattno < 0 &&
 						var->varattno != SelfItemPointerAttributeNumber)
@@ -1255,6 +1258,23 @@ build_tlist_to_deparse(RelOptInfo *foreignrel)
 												  PVC_RECURSE_PLACEHOLDERS));
 	}
 
+	/* Also, add the Param representing the remote table OID, if it exists. */
+	if (fpinfo->tableoid_param)
+	{
+		TargetEntry *tle;
+		/*
+		 * Core code should have contained the Param in the given relation's
+		 * reltarget.
+		 */
+		Assert(list_member(foreignrel->reltarget->exprs,
+						   fpinfo->tableoid_param));
+		tle = makeTargetEntry((Expr *) copyObject(fpinfo->tableoid_param),
+							  list_length(tlist) + 1,
+							  NULL,
+							  false);
+		tlist = lappend(tlist, tle);
+	}
+
 	return tlist;
 }
 
@@ -1410,7 +1430,9 @@ deparseSelectSql(List *tlist, bool is_subquery, List **retrieved_attrs,
 		Relation	rel = table_open(rte->relid, NoLock);
 
 		deparseTargetList(buf, rte, foreignrel->relid, rel, false,
-						  fpinfo->attrs_used, false, retrieved_attrs);
+						  fpinfo->attrs_used,
+						  fpinfo->tableoid_param != NULL,
+						  false, retrieved_attrs);
 		table_close(rel, NoLock);
 	}
 }
@@ -1461,6 +1483,7 @@ deparseTargetList(StringInfo buf,
 				  Relation rel,
 				  bool is_returning,
 				  Bitmapset *attrs_used,
+				  bool tableoid_needed,
 				  bool qualify_col,
 				  List **retrieved_attrs)
 {
@@ -1517,6 +1540,22 @@ deparseTargetList(StringInfo buf,
 
 		*retrieved_attrs = lappend_int(*retrieved_attrs,
 									   SelfItemPointerAttributeNumber);
+	}
+
+	if (tableoid_needed &&
+	(bms_is_member(TableOidAttributeNumber - FirstLowInvalidHeapAttributeNumber,
+					  attrs_used)))
+	{
+			Assert(!first);
+			Assert(!is_returning);
+
+			appendStringInfoString(buf, ", ");
+			if (qualify_col)
+				ADD_REL_QUALIFIER(buf, rtindex);
+			appendStringInfoString(buf, "tableoid");
+
+			*retrieved_attrs = lappend_int(*retrieved_attrs,
+											TableOidAttributeNumber);
 	}
 
 	/* Don't generate bad syntax if no undropped columns */
@@ -2279,7 +2318,7 @@ deparseUpdateSql(StringInfo buf, RangeTblEntry *rte,
 	deparseRelation(buf, rel);
 	appendStringInfoString(buf, " SET ");
 
-	pindex = 2;					/* ctid is always the first param */
+	pindex = 3;					/* ctid is always the first param */
 	first = true;
 	foreach(lc, targetAttrs)
 	{
@@ -2299,7 +2338,7 @@ deparseUpdateSql(StringInfo buf, RangeTblEntry *rte,
 			pindex++;
 		}
 	}
-	appendStringInfoString(buf, " WHERE ctid = $1");
+	appendStringInfoString(buf, " WHERE ctid = $1 AND tableoid = $2");
 
 	deparseReturningList(buf, rte, rtindex, rel,
 						 rel->trigdesc && rel->trigdesc->trig_update_after_row,
@@ -2417,7 +2456,7 @@ deparseDeleteSql(StringInfo buf, RangeTblEntry *rte,
 {
 	appendStringInfoString(buf, "DELETE FROM ");
 	deparseRelation(buf, rel);
-	appendStringInfoString(buf, " WHERE ctid = $1");
+	appendStringInfoString(buf, " WHERE ctid = $1 AND tableoid = $2");
 
 	deparseReturningList(buf, rte, rtindex, rel,
 						 rel->trigdesc && rel->trigdesc->trig_delete_after_row,
@@ -2532,7 +2571,7 @@ deparseReturningList(StringInfo buf, RangeTblEntry *rte,
 	}
 
 	if (attrs_used != NULL)
-		deparseTargetList(buf, rte, rtindex, rel, true, attrs_used, false,
+		deparseTargetList(buf, rte, rtindex, rel, true, attrs_used, false, false,
 						  retrieved_attrs);
 	else
 		*retrieved_attrs = NIL;
@@ -2739,6 +2778,12 @@ deparseColumnRef(StringInfo buf, int varno, int varattno, RangeTblEntry *rte,
 			ADD_REL_QUALIFIER(buf, varno);
 		appendStringInfoString(buf, "ctid");
 	}
+	else if (varattno == TableOidAttributeNumber)
+	{
+		if (qualify_col)
+			ADD_REL_QUALIFIER(buf, varno);
+		appendStringInfoString(buf, "tableoid");
+	}
 	else if (varattno < 0)
 	{
 		/*
@@ -2750,8 +2795,9 @@ deparseColumnRef(StringInfo buf, int varno, int varattno, RangeTblEntry *rte,
 		Oid			fetchval = 0;
 
 		if (varattno == TableOidAttributeNumber)
+		{
 			fetchval = rte->relid;
-
+		}
 		if (qualify_col)
 		{
 			appendStringInfoString(buf, "CASE WHEN (");
@@ -2802,7 +2848,7 @@ deparseColumnRef(StringInfo buf, int varno, int varattno, RangeTblEntry *rte,
 
 		appendStringInfoString(buf, "ROW(");
 		deparseTargetList(buf, rte, varno, rel, false, attrs_used, qualify_col,
-						  &retrieved_attrs);
+						  qualify_col, &retrieved_attrs);
 		appendStringInfoChar(buf, ')');
 
 		/* Complete the CASE WHEN statement started above. */
@@ -3187,6 +3233,23 @@ deparseConst(Const *node, deparse_expr_cxt *context, int showtype)
 static void
 deparseParam(Param *node, deparse_expr_cxt *context)
 {
+	PgFdwRelationInfo *fpinfo = (PgFdwRelationInfo *) context->foreignrel->fdw_private;
+
+	/*
+	 * If the Param is the one representing the remote table OID, the value
+	 * needs to be produced; fetch the remote table OID, instead.
+	 */
+	if (equal(node, (Node *) fpinfo->tableoid_param))
+	{
+		Assert(bms_is_member(context->root->parse->resultRelation,
+							 context->foreignrel->relids));
+		Assert(bms_membership(context->foreignrel->relids) == BMS_MULTIPLE);
+		ADD_REL_QUALIFIER(context->buf, context->root->parse->resultRelation);
+
+		appendStringInfoString(context->buf, "tableoid");
+		return;
+	}
+
 	if (context->params_list)
 	{
 		int			pindex = 0;

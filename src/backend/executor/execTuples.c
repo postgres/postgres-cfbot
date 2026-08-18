@@ -79,6 +79,9 @@ static inline void tts_buffer_heap_store_tuple(TupleTableSlot *slot,
 											   Buffer buffer,
 											   bool transfer_pin);
 static void tts_heap_store_tuple(TupleTableSlot *slot, HeapTuple tuple, bool shouldFree);
+static void tts_heap_materialize_ext(TupleTableSlot *slot, int natts);
+static void tts_minimal_materialize_ext(TupleTableSlot *slot, int natts);
+static void tts_buffer_heap_materialize_ext(TupleTableSlot *slot, int natts);
 
 
 const TupleTableSlotOps TTSOpsVirtual;
@@ -269,18 +272,29 @@ static void
 tts_virtual_copyslot(TupleTableSlot *dstslot, TupleTableSlot *srcslot)
 {
 	TupleDesc	srcdesc = srcslot->tts_tupleDescriptor;
+	TupleDesc	dstdesc = dstslot->tts_tupleDescriptor;
+	int			min_natts = Min(dstdesc->natts, srcdesc->natts);
 
 	tts_virtual_clear(dstslot);
 
 	slot_getallattrs(srcslot);
 
-	for (int natt = 0; natt < srcdesc->natts; natt++)
+	for (int natt = 0; natt < min_natts; natt++)
 	{
 		dstslot->tts_values[natt] = srcslot->tts_values[natt];
 		dstslot->tts_isnull[natt] = srcslot->tts_isnull[natt];
 	}
 
-	dstslot->tts_nvalid = srcdesc->natts;
+	if (dstdesc->natts > srcdesc->natts)
+	{
+		for (int natt = min_natts; natt < dstdesc->natts; natt++)
+		{
+			dstslot->tts_values[natt] = (Datum) 0;
+			dstslot->tts_isnull[natt] = true;
+		}
+	}
+
+	dstslot->tts_nvalid = dstdesc->natts;
 	dstslot->tts_flags &= ~TTS_FLAG_EMPTY;
 
 	/* make sure storage doesn't depend on external memory */
@@ -288,24 +302,26 @@ tts_virtual_copyslot(TupleTableSlot *dstslot, TupleTableSlot *srcslot)
 }
 
 static HeapTuple
-tts_virtual_copy_heap_tuple(TupleTableSlot *slot)
+tts_virtual_copy_heap_tuple(TupleTableSlot *slot, int natts)
 {
 	Assert(!TTS_EMPTY(slot));
 
-	return heap_form_tuple(slot->tts_tupleDescriptor,
+	return heap_form_tuple_ext(slot->tts_tupleDescriptor,
 						   slot->tts_values,
-						   slot->tts_isnull);
+						   slot->tts_isnull,
+						   natts);
 }
 
 static MinimalTuple
-tts_virtual_copy_minimal_tuple(TupleTableSlot *slot, Size extra)
+tts_virtual_copy_minimal_tuple(TupleTableSlot *slot, Size extra, int natts)
 {
 	Assert(!TTS_EMPTY(slot));
 
-	return heap_form_minimal_tuple(slot->tts_tupleDescriptor,
+	return heap_form_minimal_tuple_ext(slot->tts_tupleDescriptor,
 								   slot->tts_values,
 								   slot->tts_isnull,
-								   extra);
+								   extra,
+								   natts);
 }
 
 
@@ -398,6 +414,12 @@ tts_heap_is_current_xact_tuple(TupleTableSlot *slot)
 static void
 tts_heap_materialize(TupleTableSlot *slot)
 {
+	tts_heap_materialize_ext(slot, -1);
+}
+
+static void
+tts_heap_materialize_ext(TupleTableSlot *slot, int natts)
+{
 	HeapTupleTableSlot *hslot = (HeapTupleTableSlot *) slot;
 	MemoryContext oldContext;
 
@@ -417,9 +439,10 @@ tts_heap_materialize(TupleTableSlot *slot)
 	hslot->off = 0;
 
 	if (!hslot->tuple)
-		hslot->tuple = heap_form_tuple(slot->tts_tupleDescriptor,
+		hslot->tuple = heap_form_tuple_ext(slot->tts_tupleDescriptor,
 									   slot->tts_values,
-									   slot->tts_isnull);
+									   slot->tts_isnull,
+									   natts);
 	else
 	{
 		/*
@@ -427,7 +450,7 @@ tts_heap_materialize(TupleTableSlot *slot)
 		 * context of the given slot (else it would have TTS_FLAG_SHOULDFREE
 		 * set).  Copy the tuple into the given slot's memory context.
 		 */
-		hslot->tuple = heap_copytuple(hslot->tuple);
+		hslot->tuple = heap_copytuple_ext(hslot->tuple, slot, natts);
 	}
 
 	slot->tts_flags |= TTS_FLAG_SHOULDFREE;
@@ -461,24 +484,24 @@ tts_heap_get_heap_tuple(TupleTableSlot *slot)
 }
 
 static HeapTuple
-tts_heap_copy_heap_tuple(TupleTableSlot *slot)
+tts_heap_copy_heap_tuple(TupleTableSlot *slot, int natts)
 {
 	HeapTupleTableSlot *hslot = (HeapTupleTableSlot *) slot;
 
 	Assert(!TTS_EMPTY(slot));
 	if (!hslot->tuple)
-		tts_heap_materialize(slot);
+		tts_heap_materialize_ext(slot, natts);
 
-	return heap_copytuple(hslot->tuple);
+	return heap_copytuple_ext(hslot->tuple, slot, natts);
 }
 
 static MinimalTuple
-tts_heap_copy_minimal_tuple(TupleTableSlot *slot, Size extra)
+tts_heap_copy_minimal_tuple(TupleTableSlot *slot, Size extra, int natts)
 {
 	HeapTupleTableSlot *hslot = (HeapTupleTableSlot *) slot;
 
 	if (!hslot->tuple)
-		tts_heap_materialize(slot);
+		tts_heap_materialize_ext(slot, natts);
 
 	return minimal_tuple_from_heap_tuple(hslot->tuple, extra);
 }
@@ -586,6 +609,12 @@ tts_minimal_is_current_xact_tuple(TupleTableSlot *slot)
 static void
 tts_minimal_materialize(TupleTableSlot *slot)
 {
+	tts_minimal_materialize_ext(slot, -1);
+}
+
+static void
+tts_minimal_materialize_ext(TupleTableSlot *slot, int natts)
+{
 	MinimalTupleTableSlot *mslot = (MinimalTupleTableSlot *) slot;
 	MemoryContext oldContext;
 
@@ -606,10 +635,11 @@ tts_minimal_materialize(TupleTableSlot *slot)
 
 	if (!mslot->mintuple)
 	{
-		mslot->mintuple = heap_form_minimal_tuple(slot->tts_tupleDescriptor,
+		mslot->mintuple = heap_form_minimal_tuple_ext(slot->tts_tupleDescriptor,
 												  slot->tts_values,
 												  slot->tts_isnull,
-												  0);
+												  0 /* no extra */,
+												  natts);
 	}
 	else
 	{
@@ -637,9 +667,13 @@ tts_minimal_copyslot(TupleTableSlot *dstslot, TupleTableSlot *srcslot)
 {
 	MemoryContext oldcontext;
 	MinimalTuple mintuple;
+	int			min_natts;
+
+	min_natts = Min(dstslot->tts_tupleDescriptor->natts,
+					srcslot->tts_tupleDescriptor->natts);
 
 	oldcontext = MemoryContextSwitchTo(dstslot->tts_mcxt);
-	mintuple = ExecCopySlotMinimalTuple(srcslot);
+	mintuple = ExecCopySlotMinimalTupleExteded(srcslot, min_natts);
 	MemoryContextSwitchTo(oldcontext);
 
 	ExecStoreMinimalTuple(mintuple, dstslot, true);
@@ -657,7 +691,7 @@ tts_minimal_get_minimal_tuple(TupleTableSlot *slot)
 }
 
 static HeapTuple
-tts_minimal_copy_heap_tuple(TupleTableSlot *slot)
+tts_minimal_copy_heap_tuple(TupleTableSlot *slot, int natts)
 {
 	MinimalTupleTableSlot *mslot = (MinimalTupleTableSlot *) slot;
 
@@ -668,7 +702,7 @@ tts_minimal_copy_heap_tuple(TupleTableSlot *slot)
 }
 
 static MinimalTuple
-tts_minimal_copy_minimal_tuple(TupleTableSlot *slot, Size extra)
+tts_minimal_copy_minimal_tuple(TupleTableSlot *slot, Size extra, int natts)
 {
 	MinimalTupleTableSlot *mslot = (MinimalTupleTableSlot *) slot;
 
@@ -803,6 +837,12 @@ tts_buffer_is_current_xact_tuple(TupleTableSlot *slot)
 static void
 tts_buffer_heap_materialize(TupleTableSlot *slot)
 {
+	tts_buffer_heap_materialize_ext(slot, -1 /* natts */);
+}
+
+static void
+tts_buffer_heap_materialize_ext(TupleTableSlot *slot, int natts)
+{
 	BufferHeapTupleTableSlot *bslot = (BufferHeapTupleTableSlot *) slot;
 	MemoryContext oldContext;
 
@@ -874,12 +914,16 @@ tts_buffer_heap_copyslot(TupleTableSlot *dstslot, TupleTableSlot *srcslot)
 		TTS_SHOULDFREE(srcslot) ||
 		!bsrcslot->base.tuple)
 	{
+		int		min_natts;
 		MemoryContext oldContext;
+
+		min_natts = Min(dstslot->tts_tupleDescriptor->natts,
+						srcslot->tts_tupleDescriptor->natts);
 
 		ExecClearTuple(dstslot);
 		dstslot->tts_flags &= ~TTS_FLAG_EMPTY;
 		oldContext = MemoryContextSwitchTo(dstslot->tts_mcxt);
-		bdstslot->base.tuple = ExecCopySlotHeapTuple(srcslot);
+		bdstslot->base.tuple = ExecCopySlotHeapTupleExteded(srcslot, min_natts);
 		dstslot->tts_flags |= TTS_FLAG_SHOULDFREE;
 		MemoryContextSwitchTo(oldContext);
 	}
@@ -915,27 +959,27 @@ tts_buffer_heap_get_heap_tuple(TupleTableSlot *slot)
 }
 
 static HeapTuple
-tts_buffer_heap_copy_heap_tuple(TupleTableSlot *slot)
+tts_buffer_heap_copy_heap_tuple(TupleTableSlot *slot, int natts)
 {
 	BufferHeapTupleTableSlot *bslot = (BufferHeapTupleTableSlot *) slot;
 
 	Assert(!TTS_EMPTY(slot));
 
 	if (!bslot->base.tuple)
-		tts_buffer_heap_materialize(slot);
+		tts_buffer_heap_materialize_ext(slot, natts);
 
-	return heap_copytuple(bslot->base.tuple);
+	return heap_copytuple_ext(bslot->base.tuple, slot, natts);
 }
 
 static MinimalTuple
-tts_buffer_heap_copy_minimal_tuple(TupleTableSlot *slot, Size extra)
+tts_buffer_heap_copy_minimal_tuple(TupleTableSlot *slot, Size extra, int natts)
 {
 	BufferHeapTupleTableSlot *bslot = (BufferHeapTupleTableSlot *) slot;
 
 	Assert(!TTS_EMPTY(slot));
 
 	if (!bslot->base.tuple)
-		tts_buffer_heap_materialize(slot);
+		tts_buffer_heap_materialize_ext(slot, natts);
 
 	return minimal_tuple_from_heap_tuple(bslot->base.tuple, extra);
 }
@@ -1884,8 +1928,7 @@ ExecStoreAllNullTuple(TupleTableSlot *slot)
  * Until the slot is materialized, the contents of the slot depend on the
  * datum.
  */
-void
-ExecStoreHeapTupleDatum(Datum data, TupleTableSlot *slot)
+void ExecStoreHeapTupleDatum(Datum data, TupleTableSlot *slot)
 {
 	HeapTupleData tuple = {0};
 	HeapTupleHeader td;
@@ -1895,6 +1938,7 @@ ExecStoreHeapTupleDatum(Datum data, TupleTableSlot *slot)
 	tuple.t_len = HeapTupleHeaderGetDatumLength(td);
 	tuple.t_self = td->t_ctid;
 	tuple.t_data = td;
+	tuple.t_tableOid = InvalidOid;
 
 	ExecClearTuple(slot);
 
@@ -1939,7 +1983,7 @@ ExecFetchSlotHeapTuple(TupleTableSlot *slot, bool materialize, bool *shouldFree)
 	{
 		if (shouldFree)
 			*shouldFree = true;
-		return slot->tts_ops->copy_heap_tuple(slot);
+		return slot->tts_ops->copy_heap_tuple(slot, -1 /* natts */);
 	}
 	else
 	{
@@ -1990,7 +2034,8 @@ ExecFetchSlotMinimalTuple(TupleTableSlot *slot,
 	{
 		if (shouldFree)
 			*shouldFree = true;
-		return slot->tts_ops->copy_minimal_tuple(slot, 0);
+		return slot->tts_ops->copy_minimal_tuple(slot, 0 /* no extra */,
+												 -1 /* natts */);
 	}
 }
 

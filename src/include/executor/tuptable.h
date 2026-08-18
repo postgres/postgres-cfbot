@@ -141,6 +141,7 @@ typedef struct TupleTableSlot
 	MemoryContext tts_mcxt;		/* slot itself is in this context */
 	ItemPointerData tts_tid;	/* stored tuple's tid */
 	Oid			tts_tableOid;	/* table oid of tuple */
+	Oid			tts_remoteOid;
 } TupleTableSlot;
 
 /* routines for a TupleTableSlot implementation */
@@ -223,8 +224,10 @@ struct TupleTableSlotOps
 	 * meaningful "system columns" in the copy. The copy is not be "owned" by
 	 * the slot i.e. the caller has to take responsibility to free memory
 	 * consumed by the slot.
+	 *
+	 * TODO comment for "natts"
 	 */
-	HeapTuple	(*copy_heap_tuple) (TupleTableSlot *slot);
+	HeapTuple	(*copy_heap_tuple) (TupleTableSlot *slot, int natts);
 
 	/*
 	 * Return a copy of minimal tuple representing the contents of the slot.
@@ -237,8 +240,10 @@ struct TupleTableSlotOps
 	 * The copy has "extra" bytes (maxaligned and zeroed) available before the
 	 * tuple, which is useful so that some callers may store extra data along
 	 * with the minimal tuple without the need for an additional allocation.
+	 *
+	 * TODO comment for "natts"
 	 */
-	MinimalTuple (*copy_minimal_tuple) (TupleTableSlot *slot, Size extra);
+	MinimalTuple (*copy_minimal_tuple) (TupleTableSlot *slot, Size extra, int natts);
 };
 
 /*
@@ -367,6 +372,12 @@ extern void slot_getsomeattrs_int(TupleTableSlot *slot, int attnum);
 
 
 #ifndef FRONTEND
+
+/* Forward declarations */
+static inline HeapTuple ExecCopySlotHeapTupleExteded(TupleTableSlot *slot,
+													 int natts);
+static inline MinimalTuple ExecCopySlotMinimalTupleExteded(TupleTableSlot *slot,
+														   int natts);
 
 /*
  * This function forces the entries of the slot's Datum/isnull arrays to be
@@ -503,9 +514,15 @@ ExecMaterializeSlot(TupleTableSlot *slot)
 static inline HeapTuple
 ExecCopySlotHeapTuple(TupleTableSlot *slot)
 {
+	return ExecCopySlotHeapTupleExteded(slot, -1 /* natts */);
+}
+
+static inline HeapTuple
+ExecCopySlotHeapTupleExteded(TupleTableSlot *slot, int natts)
+{
 	Assert(!TTS_EMPTY(slot));
 
-	return slot->tts_ops->copy_heap_tuple(slot);
+	return slot->tts_ops->copy_heap_tuple(slot, natts);
 }
 
 /*
@@ -514,7 +531,13 @@ ExecCopySlotHeapTuple(TupleTableSlot *slot)
 static inline MinimalTuple
 ExecCopySlotMinimalTuple(TupleTableSlot *slot)
 {
-	return slot->tts_ops->copy_minimal_tuple(slot, 0);
+	return ExecCopySlotMinimalTupleExteded(slot, -1 /* natts */);
+}
+
+static inline MinimalTuple
+ExecCopySlotMinimalTupleExteded(TupleTableSlot *slot, int natts)
+{
+	return slot->tts_ops->copy_minimal_tuple(slot, 0 /* no extra */, natts);
 }
 
 /*
@@ -524,9 +547,9 @@ ExecCopySlotMinimalTuple(TupleTableSlot *slot)
  * caller to make an additional allocation).
  */
 static inline MinimalTuple
-ExecCopySlotMinimalTupleExtra(TupleTableSlot *slot, Size extra)
+ExecCopySlotMinimalTupleExtra(TupleTableSlot *slot, Size extra, int natts)
 {
-	return slot->tts_ops->copy_minimal_tuple(slot, extra);
+	return slot->tts_ops->copy_minimal_tuple(slot, extra, natts);
 }
 
 /*
@@ -545,9 +568,12 @@ ExecCopySlot(TupleTableSlot *dstslot, TupleTableSlot *srcslot)
 {
 	Assert(!TTS_EMPTY(srcslot));
 	Assert(srcslot != dstslot);
-	Assert(dstslot->tts_tupleDescriptor->natts ==
-		   srcslot->tts_tupleDescriptor->natts);
 
+	/*
+	 * If source slot has less attributes then target - copy source and
+	 * set target to nulls. Otherwise copy only leading attributes and set
+	 * target natts to source counter.
+	 */
 	dstslot->tts_ops->copyslot(dstslot, srcslot);
 
 	return dstslot;

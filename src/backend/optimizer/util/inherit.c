@@ -294,6 +294,7 @@ expand_inherited_rtentry(PlannerInfo *root, RelOptInfo *rel,
 						  InvalidOid,
 						  0);
 			snprintf(resname, sizeof(resname), "tableoid%u", oldrc->rowmarkId);
+
 			tle = makeTargetEntry((Expr *) var,
 								  list_length(root->processed_tlist) + 1,
 								  pstrdup(resname),
