@@ -290,6 +290,7 @@ typedef enum
 	DATACHECKSUMSWORKER_ABORTED,
 	DATACHECKSUMSWORKER_FAILED,
 	DATACHECKSUMSWORKER_DROPDB,
+	DATACHECKSUMSWORKER_TERMINATED,
 } DataChecksumsWorkerResult;
 
 /*
@@ -350,6 +351,14 @@ typedef struct DataChecksumsStateStruct
 	DataChecksumsWorkerResult worker_result;
 
 	/*
+	 * Set by the worker's SIGTERM handler, to let the launcher tell a
+	 * terminated worker from one which hit an error.  Written from a signal
+	 * handler so not protected by the lock; the launcher resets it before
+	 * starting a worker and reads it only after the worker has exited.
+	 */
+	volatile sig_atomic_t worker_terminated;
+
+	/*
 	 * Tells the worker process whether it should also process the shared
 	 * catalogs
 	 */
@@ -394,6 +403,7 @@ static BgwHandleStatus WaitForDataChecksumsWorkerState(BackgroundWorkerHandle *h
 static DataChecksumsWorkerResult ProcessDatabase(DataChecksumsWorkerDatabase *db);
 static void launcher_exit(int code, Datum arg);
 static void launcher_cancel_handler(SIGNAL_ARGS);
+static void worker_terminate_handler(SIGNAL_ARGS);
 static void WaitForAllTransactionsToFinish(void);
 static bool ProcessAllDatabases(void);
 static void DataChecksumsShmemRequest(void *arg);
@@ -961,6 +971,7 @@ ProcessDatabase(DataChecksumsWorkerDatabase *db)
 	 */
 	DataChecksumState->worker_result = DATACHECKSUMSWORKER_FAILED;
 	DataChecksumState->worker_pid = InvalidPid;
+	DataChecksumState->worker_terminated = false;
 
 	invocation = ++DataChecksumState->worker_invocation_counter;
 	DataChecksumState->worker_invocation = invocation;
@@ -1029,12 +1040,17 @@ ProcessDatabase(DataChecksumsWorkerDatabase *db)
 
 		/*
 		 * Heuristic to see if the database was dropped, and if it was we can
-		 * treat it as not an error, else treat as fatal and error out.
+		 * treat it as not an error, else treat as fatal and error out.  A
+		 * worker terminated this early, e.g. by a DROP DATABASE ... WITH
+		 * (FORCE) arriving while it was still connecting, is not an error
+		 * either but the database has to be retried.
 		 */
-		if (DatabaseExists(db->dboid))
-			return DATACHECKSUMSWORKER_FAILED;
-		else
+		if (!DatabaseExists(db->dboid))
 			return DATACHECKSUMSWORKER_DROPDB;
+		else if (DataChecksumState->worker_terminated)
+			return DATACHECKSUMSWORKER_TERMINATED;
+		else
+			return DATACHECKSUMSWORKER_FAILED;
 	}
 
 	/*
@@ -1085,9 +1101,17 @@ ProcessDatabase(DataChecksumsWorkerDatabase *db)
 	 * likely FATALed in InitPostgres.  If the database was dropped after we
 	 * built the database list then that is the expected outcome and not an
 	 * error, so apply the same heuristic as when the worker failed to start.
+	 *
+	 * If the database still exists but the worker was terminated, e.g. by a
+	 * DROP DATABASE ... WITH (FORCE) which then failed to drop the database,
+	 * the worker did not hit an error either, but the database still has to
+	 * be processed.  Report that separately so the launcher can retry it.
 	 */
 	if (result == DATACHECKSUMSWORKER_FAILED && !DatabaseExists(db->dboid))
 		result = DATACHECKSUMSWORKER_DROPDB;
+	else if (result == DATACHECKSUMSWORKER_FAILED &&
+			 DataChecksumState->worker_terminated)
+		result = DATACHECKSUMSWORKER_TERMINATED;
 
 	CHECK_FOR_LAUNCHER_ABORT_REQUEST();
 	if (abort_requested)
@@ -1164,6 +1188,23 @@ launcher_cancel_handler(SIGNAL_ARGS)
 	SetLatch(MyLatch);
 
 	errno = save_errno;
+}
+
+/*
+ * worker_terminate_handler
+ *
+ * SIGTERM handler for the worker process.  Record that the worker is being
+ * terminated before performing the normal die() processing, so that the
+ * launcher can tell a terminated worker from one which hit an error: a
+ * terminated worker is not a processing failure and its database is retried,
+ * while an error aborts the whole operation.
+ */
+static void
+worker_terminate_handler(SIGNAL_ARGS)
+{
+	DataChecksumState->worker_terminated = true;
+
+	die(postgres_signal_arg, pg_siginfo);
 }
 
 /*
@@ -1431,17 +1472,35 @@ ProcessAllDatabases(void)
 	{
 		DataChecksumsWorkerResult result;
 
-		result = ProcessDatabase(db);
+		for (;;)
+		{
+			result = ProcessDatabase(db);
 
 #ifdef USE_INJECTION_POINTS
-		/* Allow a test process to alter the result of the operation */
-		if (IS_INJECTION_POINT_ATTACHED("datachecksumsworker-fail-db-result"))
-		{
-			result = DATACHECKSUMSWORKER_FAILED;
-			INJECTION_POINT_CACHED("datachecksumsworker-fail-db-result",
-								   db->dbname);
-		}
+			/* Allow a test process to alter the result of the operation */
+			if (IS_INJECTION_POINT_ATTACHED("datachecksumsworker-fail-db-result"))
+			{
+				result = DATACHECKSUMSWORKER_FAILED;
+				INJECTION_POINT_CACHED("datachecksumsworker-fail-db-result",
+									   db->dbname);
+			}
 #endif
+
+			if (result != DATACHECKSUMSWORKER_TERMINATED)
+				break;
+
+			/*
+			 * The worker was terminated without hitting an error, and the
+			 * database still exists.  Start a new worker for it, since the
+			 * database has to be processed for the operation to complete.
+			 * Each retry requires another explicit termination, so this
+			 * cannot loop on its own, and aborting the operation remains
+			 * possible by canceling the launcher.
+			 */
+			ereport(LOG,
+					errmsg("data checksum processing was interrupted in database \"%s\", retrying",
+						   db->dbname));
+		}
 
 		pgstat_progress_update_param(PROGRESS_DATACHECKSUMS_DBS_DONE,
 									 ++cumulative_total);
@@ -1747,7 +1806,7 @@ DataChecksumsWorkerMain(Datum arg)
 
 	operation = ENABLE_DATACHECKSUMS;
 
-	pqsignal(SIGTERM, die);
+	pqsignal(SIGTERM, worker_terminate_handler);
 	pqsignal(SIGUSR1, procsignal_sigusr1_handler);
 
 	BackgroundWorkerUnblockSignals();
