@@ -1101,6 +1101,106 @@ CopyFromTextLikeOneRow(CopyFromState cstate, ExprContext *econtext,
 					cstate->num_errors++;
 				}
 			}
+			else if (cstate->opts.on_error == COPY_ON_ERROR_TABLE)
+			{
+				char	   *err_code;
+				Datum	   *newvalues;
+				bool	   *newnulls;
+				ModifyTableState *mtstate = cstate->mtcontext->mtstate;
+				EState	   *estate = mtstate->ps.state;
+				MemoryContext tmpcontext;
+
+				/* Prepare to build the result tuple */
+				TupleTableSlot *myslot = ExecGetReturningSlot(estate,
+															  mtstate->resultRelInfo);
+
+				ExecClearTuple(myslot);
+
+				newvalues = myslot->tts_values;
+				newnulls = myslot->tts_isnull;
+
+				Assert(RelationGetDescr(cstate->error_rel)->natts == 10);
+
+				for (int i = 0; i < RelationGetDescr(cstate->error_rel)->natts; i++)
+					newnulls[i] = false;
+
+				newvalues[0] = ObjectIdGetDatum(GetUserId());
+				newvalues[1] = ObjectIdGetDatum(cstate->rel->rd_rel->oid);
+				newvalues[2] = CStringGetTextDatum(cstate->filename ? cstate->filename : "STDIN");
+				newvalues[3] = Int64GetDatum((int64) cstate->cur_lineno);
+				newvalues[4] = CStringGetTextDatum(cstate->line_buf.data);
+				newvalues[5] = CStringGetTextDatum(cstate->cur_attname);
+
+				if (string)
+					newvalues[6] = CStringGetTextDatum(string);
+				else
+				{
+					newvalues[6] = (Datum) 0;
+					newnulls[6] = true;
+				}
+
+				if (cstate->escontext->error_data->message)
+					newvalues[7] =
+						CStringGetTextDatum(cstate->escontext->error_data->message);
+				else
+				{
+					newvalues[7] = (Datum) 0;
+					newnulls[7] = true;
+				}
+
+				if (cstate->escontext->error_data->detail)
+					newvalues[8] =
+						CStringGetTextDatum(cstate->escontext->error_data->detail);
+				else
+				{
+					newvalues[8] = (Datum) 0;
+					newnulls[8] = true;
+				}
+
+				err_code =
+					unpack_sql_state(cstate->escontext->error_data->sqlerrcode);
+				newvalues[9] = CStringGetTextDatum(err_code);
+
+				/* Build the virtual tuple. */
+				ExecStoreVirtualTuple(myslot);
+
+				tmpcontext = MemoryContextSwitchTo(estate->es_query_cxt);
+
+				/*
+				 * For each row inserted into error_table, the BEFORE
+				 * STATEMENT, BEFORE ROW, AFTER ROW, and AFTER STATEMENT
+				 * triggers are fired.
+				 */
+				AfterTriggerBeginQuery();
+
+				/*
+				 * Cannot reuse the previous TransitionCaptureState:
+				 * AfterTriggerEndQuery frees it below.
+				 */
+				mtstate->mt_transition_capture =
+					MakeTransitionCaptureState(cstate->error_rel->trigdesc,
+											   RelationGetRelid(cstate->error_rel),
+											   CMD_INSERT);
+
+				ExecBSInsertTriggers(estate, mtstate->rootResultRelInfo);
+
+				ExecInsert(cstate->mtcontext,
+						   mtstate->resultRelInfo,
+						   myslot,
+						   false,
+						   NULL,
+						   NULL);
+
+				ExecASInsertTriggers(estate,
+									 mtstate->rootResultRelInfo,
+									 mtstate->mt_transition_capture);
+
+				AfterTriggerEndQuery(estate);
+
+				MemoryContextSwitchTo(tmpcontext);
+
+				cstate->num_errors++;
+			}
 
 			if (cstate->opts.log_verbosity == COPY_LOG_VERBOSITY_VERBOSE)
 			{
@@ -1130,6 +1230,13 @@ CopyFromTextLikeOneRow(CopyFromState cstate, ExprContext *econtext,
 									   cstate->cur_lineno,
 									   cstate->cur_attname,
 									   attval));
+					else if (cstate->opts.on_error == COPY_ON_ERROR_TABLE)
+						ereport(NOTICE,
+								errmsg("saving error information to table \"%s\" due to data type incompatibility at line %" PRIu64 " for column \"%s\": \"%s\"",
+									   RelationGetRelationName(cstate->error_rel),
+									   cstate->cur_lineno,
+									   cstate->cur_attname,
+									   attval));
 					pfree(attval);
 				}
 				else
@@ -1137,6 +1244,12 @@ CopyFromTextLikeOneRow(CopyFromState cstate, ExprContext *econtext,
 					if (cstate->opts.on_error == COPY_ON_ERROR_IGNORE)
 						ereport(NOTICE,
 								errmsg("skipping row due to data type incompatibility at line %" PRIu64 " for column \"%s\": null input",
+									   cstate->cur_lineno,
+									   cstate->cur_attname));
+					else if (cstate->opts.on_error == COPY_ON_ERROR_TABLE)
+						ereport(NOTICE,
+								errmsg("saving error information to table \"%s\" due to data type incompatibility at line %" PRIu64 " for column \"%s\": null input",
+									   RelationGetRelationName(cstate->error_rel),
 									   cstate->cur_lineno,
 									   cstate->cur_attname));
 				}
@@ -1148,6 +1261,8 @@ CopyFromTextLikeOneRow(CopyFromState cstate, ExprContext *econtext,
 				return true;
 			else if (cstate->opts.on_error == COPY_ON_ERROR_SET_NULL)
 				continue;
+			else if (cstate->opts.on_error == COPY_ON_ERROR_TABLE)
+				return true;
 		}
 
 		cstate->cur_attname = NULL;
