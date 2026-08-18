@@ -30,6 +30,7 @@ test_checkpointer_combines_writes($node, $block_size);
 test_regular_backend_combines_writes($node, $block_size);
 test_eager_clean_combines_writes($node, $block_size);
 test_copy_from_combines_writes($node, $block_size);
+test_vacuum_combines_writes($node, $block_size);
 
 $node->stop();
 
@@ -387,4 +388,34 @@ sub test_eager_clean_combines_writes
 		'direct eager clean wrote dirty buffers separated by nonresident gaps');
 
 	$psql->quit();
+}
+
+sub test_vacuum_combines_writes
+{
+	my ($node, $block_size) = @_;
+
+	# ~120 blocks: enough to wrap vacuum's ring (sized below) several
+	# times, with dead tuples on every page so pruning dirties every page
+	# vacuum reads into the ring.
+	#
+	# This uses a regular (logged) table, so at least one test covers logged
+	# tables. We don't expect WAL flush timing to affect the results because the
+	# target buffer is always included in the batch and will do a combined write
+	# regardless of whether or not it has to flush WAL.
+	$node->safe_psql(
+		'postgres', qq(
+	CREATE TABLE wc_vacuum (id int, payload text);
+	INSERT INTO wc_vacuum SELECT g, repeat('y', 200) FROM generate_series(1, 3600) AS g;
+	DELETE FROM wc_vacuum WHERE id % 5 = 0;
+	SELECT flush_rel_buffers('wc_vacuum'::regclass);
+	SELECT evict_rel('wc_vacuum'::regclass);
+	));
+
+	$node->safe_psql('postgres', "SELECT pg_stat_reset_shared('io')");
+	$node->safe_psql('postgres',
+		"VACUUM (BUFFER_USAGE_LIMIT '256kB') wc_vacuum");
+	$node->safe_psql('postgres', 'SELECT pg_stat_force_next_flush()');
+
+	assert_combined_writes($node, 'vacuum', 'client backend', 'vacuum',
+		$block_size);
 }
