@@ -210,6 +210,61 @@ $node->poll_query_until('postgres',
 $result = $node->safe_psql('postgres', "SELECT count(*) FROM t WHERE a > 1");
 is($result, '10000', 'ensure checksummed pages can be read back');
 
+# A worker terminated while its database still exists, for example by a
+# DROP DATABASE ... WITH (FORCE) which then failed to drop the database, did
+# not fail to process it.  The launcher must retry the database rather than
+# abort the whole operation.
+disable_data_checksums($node, wait => 1);
+
+$node->safe_psql('postgres', "CREATE DATABASE killme;");
+$node->safe_psql('killme',
+	"CREATE TABLE killme_t AS SELECT generate_series(1,10000) AS a;");
+
+# Hold the worker inside "killme" by keeping a temporary table around.
+$bg = $node->background_psql('killme');
+$bg->query_safe('CREATE TEMP TABLE holdme (a int);');
+
+enable_data_checksums($node);
+
+$node->poll_query_until(
+	'postgres', qq[
+	SELECT count(*) > 0 FROM pg_stat_activity
+	WHERE backend_type = 'datachecksums worker' AND datname = 'killme'
+	  AND query LIKE 'Waiting for % temp tables to be removed']
+) or die "timed out waiting for worker to wait for temporary tables";
+
+my $worker_pid = $node->safe_psql(
+	'postgres', qq[
+	SELECT pid FROM pg_stat_activity
+	WHERE backend_type = 'datachecksums worker' AND datname = 'killme']);
+$node->safe_psql('postgres', "SELECT pg_terminate_backend($worker_pid);");
+
+# The launcher starts a replacement worker, which waits for the temp table
+# just like the terminated one did.
+$node->poll_query_until(
+	'postgres', qq[
+	SELECT count(*) > 0 FROM pg_stat_activity
+	WHERE backend_type = 'datachecksums worker' AND datname = 'killme'
+	  AND pid <> $worker_pid
+	  AND query LIKE 'Waiting for % temp tables to be removed']
+) or die "timed out waiting for replacement worker";
+
+$log = slurp_file($node->logfile);
+like(
+	$log,
+	qr/data checksum processing was interrupted in database "killme", retrying/,
+	'retry of the terminated worker is logged');
+
+# Release the replacement worker and let the operation complete.
+$bg->query_safe('DROP TABLE holdme;');
+$bg->quit;
+
+wait_for_checksum_state($node, 'on');
+$node->poll_query_until('postgres',
+		"SELECT count(*) = 0 "
+	  . "FROM pg_catalog.pg_stat_activity "
+	  . "WHERE backend_type = 'datachecksums launcher';");
+
 $node->stop;
 
 # The resulting cluster must also pass offline verification, proving no
