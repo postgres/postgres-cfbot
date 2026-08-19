@@ -1204,6 +1204,105 @@ CREATE SUBSCRIPTION my_subscription SERVER subscription_server PUBLICATION testp
    The query that is actually sent to the remote server for execution can
    be examined using <command>EXPLAIN VERBOSE</command>.
   </para>
+
+  <para>
+   In addition to the remote query itself, the plan that the remote server
+   chooses for that query can be examined with the
+   <literal>REMOTE_PLANS</literal> option of <command>EXPLAIN</command>.
+   For every foreign scan or foreign modification in the local plan,
+   <filename>postgres_fdw</filename> runs <command>EXPLAIN</command> on the
+   remote server for the corresponding remote query and prints the result in a
+   <literal>Remote Plans</literal> section, keyed by the plan node id of the
+   local node.  For example:
+<programlisting>
+EXPLAIN (VERBOSE, REMOTE_PLANS) SELECT * FROM foreign_tbl WHERE id = 42;
+                        QUERY PLAN
+-----------------------------------------------------------
+ Foreign Scan on public.foreign_tbl
+   Output: id, val
+   Remote SQL: SELECT id, val FROM public.tbl WHERE ((id = 42))
+   Plan Node ID: 0
+ Remote Plans:
+ -------------
+ Plan Node ID 0:
+   Index Scan using tbl_pkey on public.tbl
+     Output: id, val
+     Index Cond: (tbl.id = 42)
+</programlisting>
+   When the local plan uses a parameterized foreign scan (for example, as
+   the inner side of a nested loop join), the remote SQL contains parameter
+   placeholders, which a plain <command>EXPLAIN</command> on the remote server
+   could not plan; it would fail with <literal>there is no parameter $1</literal>.
+   <literal>REMOTE_PLANS</literal> therefore asks the remote server for a
+   generic plan in this case:
+<programlisting>
+EXPLAIN (VERBOSE, REMOTE_PLANS, COSTS OFF)
+  SELECT * FROM local_tbl a, foreign_tbl b WHERE a.id = 1 AND b.id = a.val;
+                        QUERY PLAN
+-----------------------------------------------------------
+ Nested Loop
+   Output: a.id, a.val, b.id, b.val
+   -&gt;  Seq Scan on public.local_tbl a
+         Output: a.id, a.val
+         Filter: (a.id = 1)
+   -&gt;  Foreign Scan on public.foreign_tbl b
+         Output: b.id, b.val
+         Remote SQL: SELECT id, val FROM public.tbl WHERE ((id = $1::integer))
+         Plan Node ID: 1
+ Remote Plans:
+ -------------
+ Plan Node ID 1:
+   Index Scan using tbl_pkey on public.tbl
+     Output: id, val
+     Index Cond: (tbl.id = $1)
+</programlisting>
+  </para>
+
+  <para>
+   The <literal>REMOTE_PLANS</literal> option is registered when the
+   <filename>postgres_fdw</filename> library is loaded into the session.  The
+   library is loaded on demand, the first time the session plans or executes a
+   query against a foreign table, so in a session that has not yet touched a
+   foreign table the option is not recognized and
+   <command>EXPLAIN</command> reports
+   <literal>unrecognized EXPLAIN option "remote_plans"</literal>.  Note that
+   <command>CREATE EXTENSION postgres_fdw</command> alone does not load the
+   library into the current session.  To make the option available up front,
+   use <command>LOAD 'postgres_fdw'</command>, or list the library in
+   <xref linkend="guc-session-preload-libraries"/> or
+   <xref linkend="guc-shared-preload-libraries"/>.
+   The following restrictions apply:
+   <itemizedlist>
+    <listitem>
+     <para>
+      It cannot be combined with <literal>ANALYZE</literal>; doing so raises an
+      error.  The remote query is only planned, never executed, so the foreign
+      server is not affected and no remote rows are fetched.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      The remote server must be running <productname>PostgreSQL</productname>
+      16 or later, because <literal>REMOTE_PLANS</literal> relies on the
+      <literal>GENERIC_PLAN</literal> option of <command>EXPLAIN</command>,
+      which was introduced in that release.  As shown in the parameterized
+      example above, the plan shown by <literal>REMOTE_PLANS</literal> is
+      always a generic plan, which may differ from the plan the remote
+      server actually uses at execution time when specific parameter values
+      are available.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      All <command>EXPLAIN</command> options specified by the user (other than
+      <literal>REMOTE_PLANS</literal> itself and
+      <literal>GENERIC_PLAN</literal>) are forwarded to the remote server.
+      If the remote server is running an older version that does not recognize
+      a forwarded option, it will report an error.
+     </para>
+    </listitem>
+   </itemizedlist>
+  </para>
  </sect2>
 
  <sect2 id="postgres-fdw-remote-query-execution-environment">

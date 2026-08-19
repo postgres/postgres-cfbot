@@ -311,6 +311,15 @@ SELECT * FROM ft1 t1 WHERE t1.c3 = (SELECT MAX(c3) FROM ft2 t2) ORDER BY c1;
 WITH t1 AS (SELECT * FROM ft1 WHERE c1 <= 10) SELECT t2.c1, t2.c2, t2.c3, t2.c4 FROM t1, ft2 t2 WHERE t1.c1 = t2.c1 ORDER BY t1.c1;
 -- fixed values
 SELECT 'fixed', NULL FROM ft1 t1 WHERE c1 = 1;
+-- with WHERE clause and REMOTE_PLANS
+EXPLAIN (REMOTE_PLANS, VERBOSE, COSTS OFF) SELECT * FROM ft1 t1 WHERE t1.c1 = 101;
+-- an error raised by the remote EXPLAIN is reported to the client; without
+-- REMOTE_PLANS this plan never contacts the remote server at all
+CREATE FOREIGN TABLE remote_plans_bad (c1 int)
+  SERVER loopback OPTIONS (schema_name 'S 1', table_name 'no_such_table');
+EXPLAIN (COSTS OFF) SELECT * FROM remote_plans_bad;
+EXPLAIN (REMOTE_PLANS, COSTS OFF) SELECT * FROM remote_plans_bad;
+DROP FOREIGN TABLE remote_plans_bad;
 -- Test forcing the remote server to produce sorted data for a merge join.
 SET enable_hashjoin TO false;
 SET enable_nestloop TO false;
@@ -338,6 +347,19 @@ SELECT t1."C 1", t2.c1, t3.c1 FROM "S 1"."T 1" t1 left join ft1 t2 full join ft2
 EXPLAIN (VERBOSE, COSTS OFF)
 	SELECT t1."C 1", t2.c1, t3.c1 FROM "S 1"."T 1" t1 full join ft1 t2 full join ft2 t3 on (t2.c1 = t3.c1) on (t3.c1 = t1."C 1") OFFSET 100 LIMIT 10;
 SELECT t1."C 1", t2.c1, t3.c1 FROM "S 1"."T 1" t1 full join ft1 t2 full join ft2 t3 on (t2.c1 = t3.c1) on (t3.c1 = t1."C 1") OFFSET 100 LIMIT 10;
+
+-- Join push-down test
+-- Ensure join conditions are pushed down to the foreign server
+EXPLAIN (REMOTE_PLANS, VERBOSE, COSTS OFF)
+	SELECT t1.c1, t2.c1 FROM ft1 t1 JOIN ft2 t2 ON (t1.c1 = t2.c1) WHERE t1.c2 = 10;
+
+-- Tables on multiple foreign connections: ft5 lives on server loopback and
+-- ft6 on server loopback2, so the join cannot be pushed down as a single
+-- foreign join.  Each side is scanned over its own connection, so REMOTE_PLANS
+-- must collect and print one remote plan per connection.
+EXPLAIN (REMOTE_PLANS, VERBOSE, COSTS OFF)
+	SELECT t1.c1, t2.c1 FROM ft5 t1 JOIN ft6 t2 ON (t1.c1 = t2.c1) WHERE t1.c1 = 10;
+
 RESET enable_hashjoin;
 RESET enable_nestloop;
 
@@ -379,6 +401,11 @@ EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM ft1 t1 WHERE c8 = 'foo';  -- can't be
 EXPLAIN (VERBOSE, COSTS OFF)
   SELECT * FROM "S 1"."T 1" a, ft2 b WHERE a."C 1" = 47 AND b.c1 = a.c2;
 SELECT * FROM "S 1"."T 1" a, ft2 b WHERE a."C 1" = 47 AND b.c1 = a.c2;
+-- REMOTE_PLANS over a parameterized foreign scan: the deparsed remote SQL
+-- carries a $1 placeholder, which only plans on the remote side because
+-- REMOTE_PLANS forces GENERIC_PLAN.
+EXPLAIN (REMOTE_PLANS, VERBOSE, COSTS OFF)
+  SELECT * FROM "S 1"."T 1" a, ft2 b WHERE a."C 1" = 47 AND b.c1 = a.c2;
 
 -- check both safe and unsafe join conditions
 EXPLAIN (VERBOSE, COSTS OFF)
@@ -1562,6 +1589,20 @@ SELECT ft1.c1 FROM ft1 JOIN ft2 on ft1.c1 = ft2.c1 WHERE
 		SELECT ft2.c1 FROM ft2 JOIN ft4 ON ft2.c1 = ft4.c1)
 	ORDER BY ft1.c1 LIMIT 5;
 
+-- EXPLAIN with REMOTE_PLANS
+-- REMOTE_PLANS forces GENERIC_PLAN on the remote EXPLAIN, so it cannot be
+-- combined with ANALYZE
+EXPLAIN (REMOTE_PLANS, COSTS OFF, ANALYZE)
+SELECT ft1.c1 FROM ft1 JOIN ft2 on ft1.c1 = ft2.c1 WHERE
+	ft1.c1 IN (
+		SELECT ft2.c1 FROM ft2 JOIN ft4 ON ft2.c1 = ft4.c1)
+	ORDER BY ft1.c1 LIMIT 5;
+EXPLAIN (REMOTE_PLANS, COSTS OFF)
+SELECT ft1.c1 FROM ft1 JOIN ft2 on ft1.c1 = ft2.c1 WHERE
+	ft1.c1 IN (
+		SELECT ft2.c1 FROM ft2 JOIN ft4 ON ft2.c1 = ft4.c1)
+	ORDER BY ft1.c1 LIMIT 5;
+
 -- ===================================================================
 -- test writable foreign table stuff
 -- ===================================================================
@@ -1645,6 +1686,9 @@ DELETE FROM fpo_part_parent
   FOR PORTION OF c4 FROM '2024-06-01' TO '2024-06-15' WHERE c2 = 1; -- okay
 SELECT c1, c2, c3, c4 FROM fpo_part_local ORDER BY c4;
 DROP TABLE fpo_part_parent;
+-- test write on foreign tables with REMOTE_PLANS
+EXPLAIN (REMOTE_PLANS, VERBOSE, COSTS OFF)
+UPDATE ft2 SET c2 = c2 + 300 WHERE c1 % 10 = 3;
 
 -- Test UPDATE/DELETE with RETURNING on a three-table join
 INSERT INTO ft2 (c1,c2,c3)
@@ -4296,6 +4340,9 @@ INSERT INTO insert_tbl (SELECT * FROM local_tbl UNION ALL SELECT * FROM remote_t
 INSERT INTO insert_tbl (SELECT * FROM local_tbl UNION ALL SELECT * FROM remote_tbl);
 
 SELECT * FROM insert_tbl ORDER BY a;
+
+EXPLAIN (REMOTE_PLANS, VERBOSE, COSTS OFF)
+INSERT INTO insert_tbl (SELECT * FROM local_tbl UNION ALL SELECT * FROM remote_tbl);
 
 -- Check with direct modify
 EXPLAIN (VERBOSE, COSTS OFF)

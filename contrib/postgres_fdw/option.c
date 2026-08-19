@@ -592,4 +592,7 @@ _PG_init(void)
 							   NULL);
 
 	MarkGUCPrefixReserved("postgres_fdw");
+
+	/* Register EXPLAIN (REMOTE_PLANS) and install the hooks it needs. */
+	postgres_fdw_explain_init();
 }
