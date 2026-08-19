@@ -531,7 +531,8 @@
     autovacuum is invoked on any table that might contain unfrozen rows with
     XIDs older than the age specified by the configuration parameter <xref
     linkend="guc-autovacuum-freeze-max-age"/>.  (This will happen even if
-    autovacuum is disabled.)
+    autovacuum is disabled.  In that case, only <command>VACUUM</command> is
+    performed; <command>ANALYZE</command> is skipped.)
    </para>
 
    <para>
