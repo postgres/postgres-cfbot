@@ -13,6 +13,8 @@ struct rusage
 {
 	struct timeval ru_utime;	/* user time used */
 	struct timeval ru_stime;	/* system time used */
+	long		ru_inblock;		/* Currently always 0 for Windows */
+	long		ru_oublock;		/* Currently always 0 for Windows */
 };
 
 extern int	getrusage(int who, struct rusage *rusage);
