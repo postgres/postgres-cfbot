@@ -131,3 +131,5 @@ test: ddl-dependency-locking
 test: tablespace-dependency-locking
 test: pub-concurrent-drop
 test: drop-owned-grant
+
+test: serializable-savepoint
