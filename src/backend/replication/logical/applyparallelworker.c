@@ -223,6 +223,32 @@
  * replica identity keys. This could be useful for users who prefer higher
  * parallelism and experience few conflicts.
  *
+ * Additionally, foreign key dependencies are also tracked to prevent constraint
+ * violations. Consider a referencing table FK_TABLE (a INT REFERENCES PK_TABLE)
+ * and a referenced table PK_TABLE (a INT PRIMARY KEY):
+ *
+ *   TX-1: INSERT row (1) INTO PK_TABLE
+ *   TX-2: INSERT row (1) INTO FK_TABLE
+ *
+ * TX-2 must wait for TX-1; otherwise, a foreign key violation occurs.
+ *
+ * Similarly, for deletions:
+ *
+ *   TX-1: DELETE row (1) FROM FK_TABLE
+ *   TX-2: DELETE row (1) FROM PK_TABLE
+ *
+ * TX-2 must wait for TX-1 to avoid violating the foreign key constraint.
+ *
+ * Therefore, we record new tuples on the referenced table (PK_TABLE) and check
+ * for dependencies when processing new tuples on the referencing table
+ * (FK_TABLE). Conversely, we record old tuples deleted from the referencing
+ * table and require deletions on the referenced table to depend on them.
+ *
+ * Similar to unique key dependencies, for delete-delete cases we only track
+ * foreign key dependencies on columns that are part of the replica identity
+ * keys on the publisher. This may lead to false positives but is acceptable
+ * given the trade-off.
+ *
  * Note that the local unique key could change after dependency checking and
  * before applying the change. However, to centralize tracking and keep it
  * simple, we still perform this check only in the leader apply worker. This is

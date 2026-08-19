@@ -39,6 +39,35 @@ $node_publisher->safe_psql(
     CREATE UNIQUE INDEX tab_toast_ri_index on tab_toast (a, b);
     ALTER TABLE tab_toast REPLICA IDENTITY USING INDEX tab_toast_ri_index;
     INSERT INTO tab_toast(a, b) VALUES(repeat('1234567890', 200), '1234567890');
+
+    CREATE TABLE regress_tab_pk (id int PRIMARY KEY);
+    CREATE TABLE regress_tab_fk (id int PRIMARY KEY, fk int REFERENCES regress_tab_pk (id));
+
+   CREATE TABLE pk_parted (
+        id int PRIMARY KEY,
+        value int
+    ) PARTITION BY RANGE (id);
+
+    CREATE TABLE pk_parted_1 (
+        value int,
+        id int NOT NULL
+    );
+
+    ALTER TABLE pk_parted ATTACH PARTITION pk_parted_1
+    FOR VALUES FROM (1) TO (10);
+
+    CREATE TABLE fk_parted (
+        id int REFERENCES pk_parted(id),
+        value int
+    ) PARTITION BY RANGE (id);
+
+    CREATE TABLE fk_parted_1 (
+        value int,
+        id int
+    );
+
+    ALTER TABLE fk_parted ATTACH PARTITION fk_parted_1
+    FOR VALUES FROM (1) TO (10);
 ));
 $node_publisher->safe_psql('postgres',
     "INSERT INTO regress_tab VALUES (generate_series(1, 10), 'test');");
@@ -82,6 +111,35 @@ $node_subscriber->safe_psql(
     ALTER TABLE tab_toast ALTER COLUMN a SET STORAGE EXTERNAL;
     CREATE UNIQUE INDEX tab_toast_ri_index on tab_toast (a, b);
     ALTER TABLE tab_toast REPLICA IDENTITY USING INDEX tab_toast_ri_index;
+
+    CREATE TABLE regress_tab_pk (id int PRIMARY KEY);
+    CREATE TABLE regress_tab_fk (id int PRIMARY KEY, fk int REFERENCES regress_tab_pk (id));
+
+   CREATE TABLE pk_parted (
+        id int PRIMARY KEY,
+        value int
+    ) PARTITION BY RANGE (id);
+
+    CREATE TABLE pk_parted_1 (
+        value int,
+        id int NOT NULL
+    );
+
+    ALTER TABLE pk_parted ATTACH PARTITION pk_parted_1
+    FOR VALUES FROM (1) TO (10);
+
+    CREATE TABLE fk_parted (
+        id int REFERENCES pk_parted(id),
+        value int
+    ) PARTITION BY RANGE (id);
+
+    CREATE TABLE fk_parted_1 (
+        value int,
+        id int
+    );
+
+    ALTER TABLE fk_parted ATTACH PARTITION fk_parted_1
+    FOR VALUES FROM (1) TO (10);
 ));
 $node_subscriber->safe_psql('postgres',
     "CREATE SUBSCRIPTION regress_sub CONNECTION '$publisher_connstr' PUBLICATION regress_pub;");
@@ -901,5 +959,394 @@ $result = $node_subscriber->safe_psql('postgres',
     "SELECT count(1) FROM regress_part_tab");
 is($result, '1',
     'changes after leaf unique index replacement are replicated correctly');
+
+##################################################
+# Test that the dependency tracking works correctly for foreign keys on
+# subscriber during parallel apply.
+##################################################
+
+# Test that when receiving table schema information for a referencing table, the
+# subscriber correctly checks for dependencies on the referenced table and waits
+# for its changes to complete.
+$node_subscriber->safe_psql('postgres',
+	"SELECT injection_points_attach('parallel-worker-before-commit','wait');"
+);
+
+# Enable foreign triggers on subscriber
+my $pk_fk_trigger = $node_subscriber->safe_psql('postgres', qq[
+    SELECT tgname
+    FROM pg_trigger
+    WHERE tgrelid = 'regress_tab_pk'::regclass
+      AND tgconstraint > 0
+    LIMIT 1
+]);
+chomp($pk_fk_trigger);
+
+my $fk_fk_trigger = $node_subscriber->safe_psql('postgres', qq[
+    SELECT tgname
+    FROM pg_trigger
+    WHERE tgrelid = 'regress_tab_fk'::regclass
+      AND tgconstraint > 0
+    LIMIT 1
+]);
+chomp($fk_fk_trigger);
+
+$node_subscriber->safe_psql('postgres',
+    qq[ALTER TABLE regress_tab_pk ENABLE REPLICA TRIGGER "$pk_fk_trigger";
+    ALTER TABLE regress_tab_fk ENABLE REPLICA TRIGGER "$fk_fk_trigger";]);
+
+$node_publisher->safe_psql('postgres',
+    "INSERT INTO regress_tab_pk VALUES (2);");
+
+$node_subscriber->wait_for_event('logical replication parallel worker',
+	'parallel-worker-before-commit');
+
+$offset = -s $node_subscriber->logfile;
+
+$node_publisher->safe_psql('postgres',
+    "INSERT INTO regress_tab_fk VALUES (1, 2);");
+
+# Verify the dependency is detected on referenced table schema information
+$str = $node_subscriber->wait_for_log(qr/found conflicting change on table [1-9][0-9]+ from ([1-9][0-9]+)/, $offset);
+$xid = $str =~ /found conflicting change on table [1-9][0-9]+ from ([1-9][0-9]+)/;
+
+# Verify the parallel worker waits for the same transaction
+$node_subscriber->wait_for_log(qr/wait for depended xid $xid/, $offset);
+
+ok(1, "referenced table dependency detected for parallel apply");
+
+# Wakeup the parallel worker
+$node_subscriber->safe_psql('postgres', qq[
+    SELECT injection_points_detach('parallel-worker-before-commit');
+    SELECT injection_points_wakeup('parallel-worker-before-commit');
+]);
+
+# Verify the streamed transaction can be applied
+$node_subscriber->wait_for_log(qr/finish waiting for depended xid $xid/, $offset);
+$node_publisher->wait_for_catchup('regress_sub');
+
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT count(1) FROM regress_tab_pk");
+is ($result, 1, 'insert is replicated to referenced table on subscriber');
+
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT count(1) FROM regress_tab_fk");
+is ($result, 1, 'insert is replicated to referencing table on subscriber');
+
+# INSERT - INSERT case: Tx-1 inserts referenced tuple and Tx-2 inserts
+# referencing tuple.
+
+$node_subscriber->safe_psql('postgres',
+	"SELECT injection_points_attach('parallel-worker-before-commit','wait');"
+);
+
+$node_publisher->safe_psql('postgres',
+    "INSERT INTO regress_tab_pk VALUES (3);");
+
+$node_subscriber->wait_for_event('logical replication parallel worker',
+	'parallel-worker-before-commit');
+
+$offset = -s $node_subscriber->logfile;
+
+$node_publisher->safe_psql('postgres',
+    "INSERT INTO regress_tab_fk VALUES (2, 3);");
+
+# Verify the dependency for referenced key change is detected
+$str = $node_subscriber->wait_for_log(qr/found conflicting referenced key change on table [1-9][0-9]+ from ([1-9][0-9]+)/, $offset);
+$xid = $str =~ /found conflicting referenced key change on table [1-9][0-9]+ from ([1-9][0-9]+)/;
+
+# Verify the parallel worker waits for the same transaction
+$node_subscriber->wait_for_log(qr/wait for depended xid $xid/, $offset);
+
+ok(1, "referenced key dependency detected for parallel apply");
+
+# Wakeup the parallel worker
+$node_subscriber->safe_psql('postgres', qq[
+    SELECT injection_points_detach('parallel-worker-before-commit');
+    SELECT injection_points_wakeup('parallel-worker-before-commit');
+]);
+
+# Verify the streamed transaction can be applied
+$node_subscriber->wait_for_log(qr/finish waiting for depended xid $xid/, $offset);
+$node_publisher->wait_for_catchup('regress_sub');
+
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT count(1) FROM regress_tab_pk");
+is ($result, 2, 'insert is replicated to referenced table on subscriber');
+
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT count(1) FROM regress_tab_fk");
+is ($result, 2, 'insert is replicated to referencing table on subscriber');
+
+# DELETE - DELETE case: Tx-1 deletes referencing tuple and Tx-2 deletes
+# referenced tuple.
+$node_subscriber->safe_psql('postgres',
+	"SELECT injection_points_attach('parallel-worker-before-commit','wait');"
+);
+
+$node_publisher->safe_psql('postgres',
+    "DELETE FROM regress_tab_fk WHERE id = 1;");
+
+$node_subscriber->wait_for_event('logical replication parallel worker',
+	'parallel-worker-before-commit');
+
+$offset = -s $node_subscriber->logfile;
+
+$node_publisher->safe_psql('postgres',
+    "DELETE FROM regress_tab_pk WHERE id = 2;");
+
+$str = $node_subscriber->wait_for_log(qr/found conflicting foreign key change on table [1-9][0-9]+ from ([1-9][0-9]+)/, $offset);
+$xid = $str =~ /found conflicting foreign key change on table [1-9][0-9]+ from ([1-9][0-9]+)/;
+
+$node_subscriber->wait_for_log(qr/wait for depended xid $xid/, $offset);
+
+ok(1, "foreign key dependency detected for parallel apply");
+
+$node_subscriber->safe_psql('postgres', qq[
+    SELECT injection_points_detach('parallel-worker-before-commit');
+    SELECT injection_points_wakeup('parallel-worker-before-commit');
+]);
+
+$node_subscriber->wait_for_log(qr/finish waiting for depended xid $xid/, $offset);
+$node_publisher->wait_for_catchup('regress_sub');
+
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT count(1) FROM regress_tab_pk");
+is ($result, 1, 'delete is replicated to referenced table on subscriber');
+
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT count(1) FROM regress_tab_fk");
+is ($result, 1, 'delete is replicated to referencing table on subscriber');
+
+##################################################
+# Test that the dependency tracking works correctly for foreign keys when both
+# the referenced and referencing tables are partitioned.
+##################################################
+
+$node_subscriber->safe_psql('postgres',
+	"SELECT injection_points_attach('parallel-worker-before-commit','wait');"
+);
+
+my $part_pk_trigger = $node_subscriber->safe_psql('postgres', qq[
+        SELECT tgname
+        FROM pg_trigger
+        WHERE tgrelid = 'pk_parted_1'::regclass
+            AND tgconstraint > 0
+        LIMIT 1
+]);
+chomp($part_pk_trigger);
+
+my $part_fk_trigger = $node_subscriber->safe_psql('postgres', qq[
+        SELECT tgname
+        FROM pg_trigger
+        WHERE tgrelid = 'fk_parted_1'::regclass
+            AND tgconstraint > 0
+        LIMIT 1
+]);
+chomp($part_fk_trigger);
+
+$node_subscriber->safe_psql('postgres',
+        qq[ALTER TABLE pk_parted_1 ENABLE REPLICA TRIGGER "$part_pk_trigger";
+        ALTER TABLE fk_parted_1 ENABLE REPLICA TRIGGER "$part_fk_trigger";]);
+
+$node_publisher->safe_psql('postgres',
+    "INSERT INTO pk_parted_1(id, value) VALUES (1, 10);");
+
+$node_subscriber->wait_for_event('logical replication parallel worker',
+	'parallel-worker-before-commit');
+
+$offset = -s $node_subscriber->logfile;
+
+$node_publisher->safe_psql('postgres',
+    "INSERT INTO fk_parted_1(id, value) VALUES (1, 10);");
+
+# Verify the dependency is detected on referenced table schema information
+$str = $node_subscriber->wait_for_log(qr/found conflicting change on table [1-9][0-9]+ from ([1-9][0-9]+)/, $offset);
+$xid = $str =~ /found conflicting change on table [1-9][0-9]+ from ([1-9][0-9]+)/;
+
+# Verify the parallel worker waits for the same transaction
+$node_subscriber->wait_for_log(qr/wait for depended xid $xid/, $offset);
+
+ok(1, "partitioned referenced table dependency detected for parallel apply");
+
+# Wakeup the parallel worker
+$node_subscriber->safe_psql('postgres', qq[
+    SELECT injection_points_detach('parallel-worker-before-commit');
+    SELECT injection_points_wakeup('parallel-worker-before-commit');
+]);
+
+# Verify the streamed transaction can be applied
+$node_subscriber->wait_for_log(qr/finish waiting for depended xid $xid/, $offset);
+$node_publisher->wait_for_catchup('regress_sub');
+
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT count(1) FROM pk_parted_1");
+is ($result, 1, 'insert is replicated to referenced table on subscriber');
+
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT count(1) FROM fk_parted_1");
+is ($result, 1, 'insert is replicated to referencing table on subscriber');
+
+# INSERT - INSERT case: Tx-1 inserts referenced tuple and Tx-2 inserts
+# referencing tuple.
+
+$node_subscriber->safe_psql('postgres',
+	"SELECT injection_points_attach('parallel-worker-before-commit','wait');"
+);
+
+$node_publisher->safe_psql('postgres',
+    "INSERT INTO pk_parted_1(id, value) VALUES (2, 20);");
+
+$node_subscriber->wait_for_event('logical replication parallel worker',
+	'parallel-worker-before-commit');
+
+$offset = -s $node_subscriber->logfile;
+
+$node_publisher->safe_psql('postgres',
+    "INSERT INTO fk_parted_1(id, value) VALUES (2, 20);");
+
+# Verify the dependency for referenced key change is detected
+$str = $node_subscriber->wait_for_log(qr/found conflicting referenced key change on table [1-9][0-9]+ from ([1-9][0-9]+)/, $offset);
+$xid = $str =~ /found conflicting referenced key change on table [1-9][0-9]+ from ([1-9][0-9]+)/;
+
+# Verify the parallel worker waits for the same transaction
+$node_subscriber->wait_for_log(qr/wait for depended xid $xid/, $offset);
+
+ok(1, "partitioned referenced key dependency detected for parallel apply");
+
+# Wakeup the parallel worker
+$node_subscriber->safe_psql('postgres', qq[
+    SELECT injection_points_detach('parallel-worker-before-commit');
+    SELECT injection_points_wakeup('parallel-worker-before-commit');
+]);
+
+# Verify the streamed transaction can be applied
+$node_subscriber->wait_for_log(qr/finish waiting for depended xid $xid/, $offset);
+$node_publisher->wait_for_catchup('regress_sub');
+
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT count(1) FROM pk_parted_1");
+is ($result, 2, 'insert is replicated to referenced table on subscriber');
+
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT count(1) FROM fk_parted_1");
+is ($result, 2, 'insert is replicated to referencing table on subscriber');
+
+##################################################
+# Test that dependency tracking works correctly when local foreign keys are
+# defined on partitioned subscriber tables mapped from regular publisher tables.
+##################################################
+
+$node_publisher->safe_psql('postgres', qq[
+    CREATE TABLE regress_fk_root_pk (id int PRIMARY KEY, value int);
+    CREATE TABLE regress_fk_root_fk (
+        id int,
+        pk_id int REFERENCES regress_fk_root_pk(id),
+        value int,
+        PRIMARY KEY (id, pk_id)
+    );
+]);
+
+$node_subscriber->safe_psql('postgres', qq[
+    CREATE TABLE regress_fk_root_pk (id int PRIMARY KEY, value int)
+        PARTITION BY RANGE (id);
+    CREATE TABLE regress_fk_root_pk_1 (value int, id int PRIMARY KEY);
+    ALTER TABLE regress_fk_root_pk ATTACH PARTITION regress_fk_root_pk_1
+        FOR VALUES FROM (1) TO (100);
+
+    CREATE TABLE regress_fk_root_fk (
+        id int,
+        pk_id int REFERENCES regress_fk_root_pk(id),
+        value int,
+        PRIMARY KEY (id, pk_id)
+    ) PARTITION BY RANGE (id);
+    CREATE TABLE regress_fk_root_fk_1 (
+        value int,
+        pk_id int,
+        id int,
+        PRIMARY KEY (id, pk_id)
+    );
+    ALTER TABLE regress_fk_root_fk ATTACH PARTITION regress_fk_root_fk_1
+        FOR VALUES FROM (1) TO (100);
+]);
+
+$node_subscriber->safe_psql('postgres',
+    "ALTER SUBSCRIPTION regress_sub REFRESH PUBLICATION WITH (copy_data = false);");
+
+my $root_fk_triggers = $node_subscriber->safe_psql('postgres', qq[
+    SELECT format('ALTER TABLE %s ENABLE REPLICA TRIGGER %I;',
+                  tgrelid::regclass, tgname)
+    FROM pg_trigger
+    WHERE tgrelid IN ('regress_fk_root_pk'::regclass,
+                      'regress_fk_root_pk_1'::regclass,
+                      'regress_fk_root_fk'::regclass,
+                      'regress_fk_root_fk_1'::regclass)
+      AND tgconstraint > 0
+    ORDER BY tgrelid::regclass::text, tgname
+]);
+
+$node_subscriber->safe_psql('postgres', $root_fk_triggers);
+
+# Warm the relation map entries for both newly added tables.  These tables are
+# added after subscription creation with copy_data=false, so no table sync has
+# opened them before the dependency scenario below.
+$node_publisher->safe_psql('postgres', qq[
+    BEGIN;
+    INSERT INTO regress_fk_root_pk VALUES (50, 10);
+    INSERT INTO regress_fk_root_fk VALUES (50, 50, 10);
+    COMMIT;
+]);
+$node_publisher->wait_for_catchup('regress_sub');
+
+$node_publisher->safe_psql('postgres', qq[
+    BEGIN;
+    DELETE FROM regress_fk_root_fk WHERE id = 50;
+    DELETE FROM regress_fk_root_pk WHERE id = 50;
+    COMMIT;
+]);
+$node_publisher->wait_for_catchup('regress_sub');
+
+$node_subscriber->safe_psql('postgres',
+    "SELECT injection_points_attach('parallel-worker-before-commit','wait');"
+);
+
+# Tx-1 inserts the referenced row through a root-mapped relation.  The root
+# relmap entry must use partitioned-table FK metadata to record the dependency.
+$node_publisher->safe_psql('postgres',
+    "INSERT INTO regress_fk_root_pk VALUES (1, 10);");
+
+$node_subscriber->wait_for_event('logical replication parallel worker',
+    'parallel-worker-before-commit');
+
+$offset = -s $node_subscriber->logfile;
+
+$node_publisher->safe_psql('postgres',
+    "INSERT INTO regress_fk_root_fk VALUES (1, 1, 10);");
+
+$str = $node_subscriber->wait_for_log(qr/found conflicting referenced key change on table [1-9][0-9]+ from ([1-9][0-9]+)/, $offset);
+$xid = $str =~ /found conflicting referenced key change on table [1-9][0-9]+ from ([1-9][0-9]+)/;
+
+$node_subscriber->wait_for_log(qr/wait for depended xid $xid/, $offset);
+
+ok(1,
+   "root-mapped partitioned subscriber uses leaf FK metadata for referenced-key dependency");
+
+$node_subscriber->safe_psql('postgres', qq[
+    SELECT injection_points_detach('parallel-worker-before-commit');
+    SELECT injection_points_wakeup('parallel-worker-before-commit');
+]);
+
+$node_subscriber->wait_for_log(qr/finish waiting for depended xid $xid/, $offset);
+$node_publisher->wait_for_catchup('regress_sub');
+
+$result = $node_subscriber->safe_psql('postgres',
+    "SELECT count(1) FROM regress_fk_root_pk");
+is($result, '1',
+    'insert is replicated to root-mapped partitioned referenced table');
+
+$result = $node_subscriber->safe_psql('postgres',
+    "SELECT count(1) FROM regress_fk_root_fk");
+is($result, '1',
+    'insert is replicated to root-mapped partitioned referencing table');
 
 done_testing();
