@@ -1826,6 +1826,22 @@
   check_hook => 'check_stage_log_stats',
 },
 
+{ name => 'log_postmaster_excess_connections', type => 'int', context => 'PGC_SIGHUP', group => 'LOGGING_WHAT',
+  short_desc => 'Logs postmaster stats once per second when the rate of new connections exceeds this value.',
+  long_desc => '0 disables this check.',
+  variable => 'log_postmaster_excess_connections',
+  boot_val => '0',
+  min => '0',
+  max => 'INT_MAX',
+},
+
+{ name => 'log_postmaster_overloads', type => 'bool', context => 'PGC_SIGHUP', group => 'LOGGING_WHAT',
+  short_desc => 'Logs postmaster stats once per second when it is short of CPU.',
+  long_desc => 'If the postmaster has signs of being overloaded log message summarizing its recent activity.',
+  variable => 'log_postmaster_overloads',
+  boot_val => 'false',
+},
+
 { name => 'log_recovery_conflict_waits', type => 'bool', context => 'PGC_SIGHUP', group => 'LOGGING_WHAT',
   short_desc => 'Logs standby recovery conflict waits.',
   variable => 'log_recovery_conflict_waits',
