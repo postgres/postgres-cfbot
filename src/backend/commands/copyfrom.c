@@ -809,40 +809,6 @@ CopyFrom(CopyFromState cstate)
 		Assert(cstate->escontext);
 
 	/*
-	 * The target must be a plain, foreign, or partitioned relation, or have
-	 * an INSTEAD OF INSERT row trigger.  (Currently, such triggers are only
-	 * allowed on views, so we only hint about them in the view case.)
-	 */
-	if (cstate->rel->rd_rel->relkind != RELKIND_RELATION &&
-		cstate->rel->rd_rel->relkind != RELKIND_FOREIGN_TABLE &&
-		cstate->rel->rd_rel->relkind != RELKIND_PARTITIONED_TABLE &&
-		!(cstate->rel->trigdesc &&
-		  cstate->rel->trigdesc->trig_insert_instead_row))
-	{
-		if (cstate->rel->rd_rel->relkind == RELKIND_VIEW)
-			ereport(ERROR,
-					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-					 errmsg("cannot copy to view \"%s\"",
-							RelationGetRelationName(cstate->rel)),
-					 errhint("To enable copying to a view, provide an INSTEAD OF INSERT trigger.")));
-		else if (cstate->rel->rd_rel->relkind == RELKIND_MATVIEW)
-			ereport(ERROR,
-					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-					 errmsg("cannot copy to materialized view \"%s\"",
-							RelationGetRelationName(cstate->rel))));
-		else if (cstate->rel->rd_rel->relkind == RELKIND_SEQUENCE)
-			ereport(ERROR,
-					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-					 errmsg("cannot copy to sequence \"%s\"",
-							RelationGetRelationName(cstate->rel))));
-		else
-			ereport(ERROR,
-					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-					 errmsg("cannot copy to non-table relation \"%s\"",
-							RelationGetRelationName(cstate->rel))));
-	}
-
-	/*
 	 * If the target file is new-in-transaction, we assume that checking FSM
 	 * for free space is a waste of time.  This could possibly be wrong, but
 	 * it's unlikely.
@@ -1562,6 +1528,40 @@ BeginCopyFrom(ParseState *pstate,
 		0,
 		0
 	};
+
+	/*
+	 * The target must be a plain, foreign, or partitioned relation, or have
+	 * an INSTEAD OF INSERT row trigger.  (Currently, such triggers are only
+	 * allowed on views, so we only hint about them in the view case.)
+	 */
+	if (rel->rd_rel->relkind != RELKIND_RELATION &&
+		rel->rd_rel->relkind != RELKIND_FOREIGN_TABLE &&
+		rel->rd_rel->relkind != RELKIND_PARTITIONED_TABLE &&
+		!(rel->trigdesc &&
+		  rel->trigdesc->trig_insert_instead_row))
+	{
+		if (rel->rd_rel->relkind == RELKIND_VIEW)
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("cannot copy to view \"%s\"",
+							RelationGetRelationName(rel)),
+					 errhint("To enable copying to a view, provide an INSTEAD OF INSERT trigger.")));
+		else if (rel->rd_rel->relkind == RELKIND_MATVIEW)
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("cannot copy to materialized view \"%s\"",
+							RelationGetRelationName(rel))));
+		else if (rel->rd_rel->relkind == RELKIND_SEQUENCE)
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("cannot copy to sequence \"%s\"",
+							RelationGetRelationName(rel))));
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("cannot copy to non-table relation \"%s\"",
+							RelationGetRelationName(rel))));
+	}
 
 	/* Allocate workspace and zero all fields */
 	cstate = palloc0_object(CopyFromStateData);
