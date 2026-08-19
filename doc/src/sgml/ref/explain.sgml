@@ -222,8 +222,8 @@ ROLLBACK;
       execution of the query, if the datatype output functions are
       expensive or if <acronym>TOAST</acronym>ed values must be fetched
       from out-of-line storage.  <command>EXPLAIN</command>'s default
-      behavior, <literal>SERIALIZE NONE</literal>, does not perform these
-      conversions.  If <literal>SERIALIZE TEXT</literal>
+      behavior, <literal>SERIALIZE NONE</literal>(or <literal>OFF</literal>),
+      does not perform these conversions.  If <literal>SERIALIZE TEXT</literal>
       or <literal>SERIALIZE BINARY</literal> is specified, the appropriate
       conversions are performed, and the time spent doing so is measured
       (unless <literal>TIMING OFF</literal> is specified).  If
