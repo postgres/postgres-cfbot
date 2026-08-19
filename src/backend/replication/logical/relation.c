@@ -20,7 +20,10 @@
 #include "access/amapi.h"
 #include "access/genam.h"
 #include "access/table.h"
+#include "catalog/heap.h"
 #include "catalog/namespace.h"
+#include "catalog/partition.h"
+#include "catalog/pg_constraint.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_subscription_rel.h"
@@ -33,6 +36,7 @@
 #include "replication/logicalrelation.h"
 #include "replication/worker_internal.h"
 #include "rewrite/rewriteHandler.h"
+#include "utils/fmgroids.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
@@ -64,6 +68,10 @@ typedef struct LogicalRepPartMapEntry
 
 static Oid	FindLogicalRepLocalIndex(Relation localrel, LogicalRepRelation *remoterel,
 									 AttrMap *attrMap);
+static void logicalrep_map_attnums_by_name(Oid src_reloid, Oid dst_reloid,
+										   int nkeys,
+										   const AttrNumber *src_attnums,
+										   AttrNumber *dst_attnums);
 
 /*
  * Write all the remote relation information from the LogicalRepRelMapEntry to
@@ -133,6 +141,7 @@ logicalrep_relmap_invalidate_cb(Datum arg, Oid reloid)
 				entry->localrelvalid = false;
 				entry->parallel_safety_valid = false;
 				entry->local_unique_indexes_valid = false;
+				entry->local_fkeys_valid = false;
 				hash_seq_term(&status);
 				break;
 			}
@@ -150,6 +159,7 @@ logicalrep_relmap_invalidate_cb(Datum arg, Oid reloid)
 			entry->localrelvalid = false;
 			entry->parallel_safety_valid = false;
 			entry->local_unique_indexes_valid = false;
+			entry->local_fkeys_valid = false;
 		}
 	}
 }
@@ -197,6 +207,33 @@ free_local_unique_indexes(LogicalRepRelMapEntry *entry)
 }
 
 /*
+ * Release local foreign key lists.
+ */
+static void
+free_local_fkeys(LogicalRepRelMapEntry *entry)
+{
+	Assert(am_leader_apply_worker());
+
+	foreach_ptr(LogicalRepSubFKey, fkinfo, entry->local_fkeys)
+	{
+		list_free(fkinfo->fkattnums_new);
+		list_free(fkinfo->fkattnums_old);
+	}
+
+	foreach_ptr(LogicalRepSubRefKey, refinfo, entry->local_refkeys)
+	{
+		list_free(refinfo->refattnums_new);
+		list_free(refinfo->refattnums_old);
+	}
+
+	list_free_deep(entry->local_fkeys);
+	list_free_deep(entry->local_refkeys);
+
+	entry->local_fkeys = NIL;
+	entry->local_refkeys = NIL;
+}
+
+/*
  * Free the entry of a relation map cache.
  */
 static void
@@ -226,6 +263,9 @@ logicalrep_relmap_free_entry(LogicalRepRelMapEntry *entry)
 
 	if (entry->local_unique_indexes != NIL)
 		free_local_unique_indexes(entry);
+
+	if (entry->local_fkeys != NIL || entry->local_refkeys != NIL)
+		free_local_fkeys(entry);
 }
 
 /*
@@ -293,6 +333,7 @@ logicalrep_relmap_update(LogicalRepRelation *remoterel)
 	 * changed.
 	 */
 	entry->local_unique_indexes_valid = false;
+	entry->local_fkeys_valid = false;
 
 	MemoryContextSwitchTo(oldctx);
 }
@@ -481,6 +522,7 @@ logicalrep_rel_open(LogicalRepRelId remoteid, LOCKMODE lockmode)
 			entry->localrelvalid = false;
 			entry->parallel_safety_valid = false;
 			entry->local_unique_indexes_valid = false;
+			entry->local_fkeys_valid = false;
 		}
 		else if (!entry->localrelvalid)
 		{
@@ -930,6 +972,407 @@ logicalrep_build_dependent_unique_indexes(LogicalRepRelMapEntry *entry)
 }
 
 /*
+ * Return all local relation map entries that match the given list of local
+ * relation OIDs.
+ */
+static List *
+logicalrep_get_local_relentries(List *localrelids)
+{
+	HASH_SEQ_STATUS status;
+	LogicalRepRelMapEntry *entry;
+	List	   *entries = NIL;
+
+	if (LogicalRepRelMap == NULL)
+		return NIL;
+
+	hash_seq_init(&status, LogicalRepRelMap);
+	while ((entry = (LogicalRepRelMapEntry *) hash_seq_search(&status)) != NULL)
+	{
+		if (!OidIsValid(entry->localreloid))
+			continue;
+
+		if (list_member_oid(localrelids, entry->localreloid))
+			entries = lappend(entries, entry);
+	}
+
+	return entries;
+}
+
+/*
+ * Map key columns from src_reloid to dst_reloid by attribute name.
+ */
+static void
+logicalrep_map_attnums_by_name(Oid src_reloid, Oid dst_reloid,
+							   int nkeys,
+							   const AttrNumber *src_attnums,
+							   AttrNumber *dst_attnums)
+{
+	if (src_reloid == dst_reloid)
+	{
+		memcpy(dst_attnums, src_attnums, nkeys * sizeof(AttrNumber));
+		return;
+	}
+
+	for (int i = 0; i < nkeys; i++)
+	{
+		char	   *attname;
+		AttrNumber	attnum;
+
+		attname = get_attname(src_reloid, src_attnums[i], false);
+		attnum = get_attnum(dst_reloid, attname);
+		pfree(attname);
+
+		Assert(AttributeNumberIsValid(attnum));
+
+		dst_attnums[i] = attnum;
+	}
+}
+
+/*
+ * Check whether the table has any foreign key triggers of the given type
+ * (trig_type) enabled in replica mode.
+ */
+static bool
+fkey_trigger_enabled_in_replica(Relation rel, Oid conoid, int trig_type)
+{
+	TriggerDesc *trigdesc = rel->trigdesc;
+
+	if (trigdesc == NULL)
+		return false;
+
+	for (int i = 0; i < trigdesc->numtriggers; i++)
+	{
+		Trigger    *trig = &trigdesc->triggers[i];
+
+		/* Keep only PK-side action triggers for this FK constraint */
+		if (trig->tgconstraint != conoid ||
+			RI_FKey_trigger_type(trig->tgfoid) != trig_type)
+			continue;
+
+		/* In replica mode, only REPLICA/ALWAYS triggers can fire. */
+		if (trig->tgenabled == TRIGGER_FIRES_ON_REPLICA ||
+			trig->tgenabled == TRIGGER_FIRES_ALWAYS)
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * Build lists of foreign key and referenced primary key remote columns. Both
+ * lists are ordered according to the referenced table's remote column order.
+ */
+static void
+build_fk_remote_attnums(LogicalRepRelMapEntry *fkentry,
+						LogicalRepRelMapEntry *refentry,
+						int nkeys,
+						const AttrNumber *fk_conkey,
+						const AttrNumber *ref_confkey,
+						int trig_type,
+						List **fkattnums_new,
+						List **fkattnums_old)
+{
+	int			pkatt = -1;
+
+	Assert(trig_type == RI_TRIGGER_FK || trig_type == RI_TRIGGER_PK);
+
+	/*
+	 * Traverse the referenced table's remote replica identity columns in order,
+	 * and for each, find the corresponding foreign key column that matches it.
+	 */
+	while ((pkatt = bms_next_member(refentry->remoterel.attkeys, pkatt)) >= 0)
+	{
+		for (int i = 0; i < nkeys; i++)
+		{
+			AttrNumber	fk_local_attnum = fk_conkey[i];
+			AttrNumber	ref_local_attnum = ref_confkey[i];
+			int			fk_remote_attnum;
+			int			ref_remote_attnum;
+			int			mapped_attnum = 0;
+
+			fk_remote_attnum = fkentry->attrmap->attnums[AttrNumberGetAttrOffset(fk_local_attnum)];
+			ref_remote_attnum = refentry->attrmap->attnums[AttrNumberGetAttrOffset(ref_local_attnum)];
+
+			/* Skip if not the current traversed column */
+			if (ref_remote_attnum != pkatt)
+				continue;
+
+			/* Skip columns that are unavailable in the remote table */
+			if (ref_remote_attnum < 0 || fk_remote_attnum < 0)
+				continue;
+
+			if (trig_type == RI_TRIGGER_FK)
+				mapped_attnum = fk_remote_attnum + 1;
+			else if (trig_type == RI_TRIGGER_PK)
+				mapped_attnum = ref_remote_attnum + 1;
+
+			*fkattnums_new = lappend_int(*fkattnums_new, mapped_attnum);
+
+			/* Old tuple contains only replica identity columns. */
+			if (bms_is_member(fk_remote_attnum, fkentry->remoterel.attkeys) &&
+				bms_is_member(ref_remote_attnum, refentry->remoterel.attkeys))
+				*fkattnums_old = lappend_int(*fkattnums_old, mapped_attnum);
+
+			break;
+		}
+	}
+}
+
+/*
+ * Collect foreign keys for dependency tracking.
+ *
+ * This function collects both foreign keys in the referencing table and the
+ * primary key in the referenced table, as both are needed for dependency
+ * tracking (see applyparallelworker.c for details).
+ *
+ * For referencing-side foreign keys, we cannot use the referencing column
+ * numbers directly, because their order may differ from the primary key column
+ * order in the referenced table. To ensure consistency, we store a list of
+ * column numbers in the order of the referenced table's remote columns. The
+ * dependency tracking function will traverse this list to build the hash key.
+ * For referenced-side primary keys, we preserve the original column order.
+ *
+ * For one foreign key constraint on the table, We collect two set of column
+ * numbers for both the referencing and referenced keys:
+ *
+ * - One for INSERT-INSERT dependency tracking, using the new tuple. This
+ *   includes all remote columns referenced by the foreign key, as the new tuple
+ *   contains all remote values.
+ *
+ * - One for DELETE-DELETE dependency tracking, using the old tuple. This
+ *   includes only columns that are part of the replica identity key, because
+ *   the old tuple of an UPDATE or DELETE contains only replica identity key
+ *   columns. Any other columns would be missing and unavailable for dependency
+ *   tracking.
+ *
+ * If there are multiple foreign keys referencing other tables, or if the
+ * primary key is referenced by multiple foreign keys, we will have multiple
+ * column number sets. One might think that for a referenced primary key, we
+ * only need to store a single column bitmap (since only one primary key
+ * exists). However, the referencing side may not have all those column values
+ * available (columns outside the replica identity). Therefore, we store
+ * multiple primary key column sets, each including only the columns that are
+ * available on both sides. This ensures that the remote values on both the
+ * referenced and referencing tables can compute the same hash value.
+ */
+static void
+get_local_fkeys(LogicalRepRelMapEntry *entry, List **local_fkeys,
+				List **local_refkeys)
+{
+	int			trig_type;
+	Relation	fkeyRel;
+	SysScanDesc fkeyScan;
+	HeapTuple	tuple;
+	Oid			relid = RelationGetRelid(entry->localrel);
+
+	Assert(OidIsValid(relid));
+
+	fkeyRel = table_open(ConstraintRelationId, AccessShareLock);
+
+	fkeyScan = systable_beginscan(fkeyRel, InvalidOid, false,
+								  NULL, 0, NULL);
+
+	while (HeapTupleIsValid(tuple = systable_getnext(fkeyScan)))
+	{
+		Form_pg_constraint con = (Form_pg_constraint) GETSTRUCT(tuple);
+		List	   *fkentries;
+		AttrNumber	conkey[INDEX_MAX_KEYS] = {0};
+		AttrNumber	confkey[INDEX_MAX_KEYS] = {0};
+		AttrNumber *key_to_map;
+		int			numfks;
+		MemoryContext oldctx;
+		List	   *all_parts;
+		Oid			otherrelid;
+
+		/* Not a foreign key */
+		if (con->contype != CONSTRAINT_FOREIGN)
+			continue;
+
+		/* Skip if FK enforcement is disabled */
+		if (!con->conenforced)
+			continue;
+
+		/*
+		 * Deferrable foreign keys do not need tracking, as they won't cause
+		 * constraint violations as long as commit order is preserved.
+		 */
+		if (con->condeferrable && con->condeferred)
+			continue;
+
+		if (con->confrelid == relid)
+		{
+			trig_type = RI_TRIGGER_PK;
+			otherrelid = con->conrelid;
+			key_to_map = conkey;
+		}
+		else if (con->conrelid == relid)
+		{
+			trig_type = RI_TRIGGER_FK;
+			otherrelid = con->confrelid;
+			key_to_map = confkey;
+		}
+		else
+			continue;
+
+		/*
+		 * Skip when no replica-mode ON DELETE/ON UPDATE violation trigger can
+		 * fire for this FK on the referenced table.
+		 */
+		if (!fkey_trigger_enabled_in_replica(entry->localrel, con->oid,
+											 trig_type))
+			continue;
+
+		DeconstructFkConstraintRow(tuple, &numfks, conkey, confkey,
+								   NULL, NULL, NULL, NULL, NULL);
+
+		/*
+		 * Collect all partitions of the referenced (or referencing) table if
+		 * it's partitioned, and cache foreign key data between the current
+		 * table and all of its partitions.
+		 *
+		 * This is necessary when both the referencing and referenced sides are
+		 * partitioned tables, as pg_constraint does not record foreign key
+		 * relationships between child partitions. We must search them
+		 * explicitly.
+		 *
+		 * No lock is needed on each partition because we already hold a lock on
+		 * the referencing table, preventing concurrent alterations that would
+		 * affect foreign key dependencies.
+		 */
+		all_parts = find_all_inheritors(otherrelid, NoLock, NULL);
+		fkentries = logicalrep_get_local_relentries(all_parts);
+
+		foreach_ptr(LogicalRepRelMapEntry, fkentry, fkentries)
+		{
+			AttrNumber	mapped_conkey[INDEX_MAX_KEYS] = {0};
+
+			/*
+			 * Skip if the referencing table is not published or has not
+			 * replicated any changes.
+			 */
+			if (!fkentry->attrmap)
+				continue;
+
+			/*
+			 * Map column numbers from the parent to the corresponding child
+			 * columns.
+			 */
+			logicalrep_map_attnums_by_name(otherrelid,
+										   fkentry->localreloid,
+										   numfks,
+										   key_to_map,
+										   mapped_conkey);
+
+			oldctx = MemoryContextSwitchTo(LogicalRepRelMapContext);
+
+			if (trig_type == RI_TRIGGER_PK)
+			{
+				LogicalRepSubRefKey *refinfo;
+
+				refinfo = palloc0_object(LogicalRepSubRefKey);
+				refinfo->conoid = con->oid;
+				refinfo->fk_remoteid = fkentry->remoterel.remoteid;
+
+				build_fk_remote_attnums(fkentry, entry, numfks, mapped_conkey,
+										confkey, trig_type,
+										&refinfo->refattnums_new,
+										&refinfo->refattnums_old);
+
+				*local_refkeys = lappend(*local_refkeys, refinfo);
+			}
+			else if (trig_type == RI_TRIGGER_FK)
+			{
+				LogicalRepSubFKey *fkinfo;
+
+				fkinfo = palloc0_object(LogicalRepSubFKey);
+				fkinfo->conoid = con->oid;
+				fkinfo->ref_remoteid = fkentry->remoterel.remoteid;
+
+				build_fk_remote_attnums(entry, fkentry, numfks, conkey,
+										mapped_conkey, trig_type,
+										&fkinfo->fkattnums_new,
+										&fkinfo->fkattnums_old);
+
+				*local_fkeys = lappend(*local_fkeys, fkinfo);
+			}
+
+			MemoryContextSwitchTo(oldctx);
+		}
+
+		list_free(fkentries);
+	}
+
+	systable_endscan(fkeyScan);
+
+	table_close(fkeyRel, AccessShareLock);
+}
+
+/*
+ * Collect all local foreign keys and referenced primary keys that can be used
+ * for dependency tracking. For partitioned tables, this also collects keys from
+ * all leaf partitions.
+ *
+ * See get_local_fkeys() for details on how keys are collected.
+ */
+void
+logicalrep_build_dependent_fkeys(LogicalRepRelMapEntry *entry)
+{
+	List	   *partitions;
+
+	if (entry->local_fkeys_valid)
+		return;
+
+	free_local_fkeys(entry);
+
+	/*
+	 * For non-partitioned tables, simply get the foreign keys and referenced
+	 * primary keys and return.
+	 */
+	if (entry->localrel->rd_rel->relkind == RELKIND_RELATION)
+	{
+		get_local_fkeys(entry, &entry->local_fkeys, &entry->local_refkeys);
+		entry->local_fkeys_valid = true;
+		return;
+	}
+
+	/*
+	 * Collect foreign keys and referenced primary keys from all leaf partitions
+	 * of this partitioned table.
+	 */
+	partitions = find_all_inheritors(entry->localreloid, AccessShareLock,
+									 NULL);
+
+	foreach_oid(relid, partitions)
+	{
+		LogicalRepRelMapEntry *part_entry;
+		Relation	partrel;
+		AttrMap    *root_to_part_attrmap;
+
+		/* Only check leaf partitions */
+		if (get_rel_relkind(relid) == RELKIND_PARTITIONED_TABLE)
+			continue;
+
+		partrel = table_open(relid, AccessShareLock);
+
+		root_to_part_attrmap =
+			build_attrmap_by_name_if_req(RelationGetDescr(entry->localrel),
+										 RelationGetDescr(partrel), false);
+
+		part_entry = logicalrep_partition_open(entry, partrel,
+											   root_to_part_attrmap);
+
+		if (root_to_part_attrmap)
+			free_attrmap(root_to_part_attrmap);
+
+		get_local_fkeys(part_entry, &entry->local_fkeys, &entry->local_refkeys);
+
+		table_close(partrel, AccessShareLock);
+	}
+
+	entry->local_fkeys_valid = true;
+}
+
+/*
  * Partition cache: look up partition LogicalRepRelMapEntry's
  *
  * Unlike relation map cache, this is keyed by partition OID, not remote
@@ -974,7 +1417,10 @@ logicalrep_partmap_invalidate_cb(Datum arg, Oid reloid)
 								 HASH_FIND, NULL);
 
 			if (parent)
+			{
 				parent->local_unique_indexes_valid = false;
+				parent->local_fkeys_valid = false;
+			}
 		}
 	}
 	else

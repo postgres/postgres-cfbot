@@ -60,6 +60,11 @@ typedef struct LogicalRepRelMapEntry
 	List	   *local_unique_indexes;
 	bool		local_unique_indexes_valid;
 
+	/* Local foreign keys. Used for dependency tracking */
+	List	   *local_fkeys;
+	List	   *local_refkeys;
+	bool		local_fkeys_valid;
+
 	/*
 	 * Per-operation safety cache for parallel apply. If
 	 * parallel_global_unsafe[action] is true, that action cannot be applied in
@@ -89,6 +94,30 @@ typedef struct LogicalRepSubUniqueIndex
 	bool		nulls_distinct;	/* Whether NULLs are considered distinct */
 } LogicalRepSubUniqueIndex;
 
+/*
+ * Referencing side foreign key information. This is used to track dependencies
+ * between transactions that modify the same referenced and referencing key
+ * values.
+ */
+typedef struct LogicalRepSubFKey
+{
+	Oid			conoid;		/* OID of the FK constraint */
+	LogicalRepRelId ref_remoteid; /* referenced remote relation */
+	List	   *fkattnums_new;	/* new-tuple-safe referencing remote attnums */
+	List	   *fkattnums_old; /* old-tuple-safe referencing remote attnums */
+} LogicalRepSubFKey;
+
+/*
+ * Similar to LogicalRepSubFKey, but for referenced-side primary keys.
+ */
+typedef struct LogicalRepSubRefKey
+{
+	Oid			conoid;		/* OID of the FK constraint */
+	LogicalRepRelId fk_remoteid; /* referencing remote relation */
+	List	   *refattnums_new;	/* new-tuple-safe referenced remote attnums */
+	List	   *refattnums_old; /* old-tuple-safe referenced remote attnums */
+} LogicalRepSubRefKey;
+
 extern void logicalrep_relmap_update(LogicalRepRelation *remoterel);
 extern void logicalrep_partmap_reset_relmap(LogicalRepRelation *remoterel);
 
@@ -100,6 +129,7 @@ extern void logicalrep_rel_close(LogicalRepRelMapEntry *rel,
 								 LOCKMODE lockmode);
 extern void logicalrep_rel_check_parallel_safety(LogicalRepRelMapEntry *entry);
 extern void logicalrep_build_dependent_unique_indexes(LogicalRepRelMapEntry *entry);
+extern void logicalrep_build_dependent_fkeys(LogicalRepRelMapEntry *entry);
 extern bool IsIndexUsableForReplicaIdentityFull(Relation idxrel, AttrMap *attrmap);
 extern Oid	GetRelationIdentityOrPK(Relation rel);
 extern void logicalrep_write_all_internal_rels(StringInfo out, int *num_rels);
