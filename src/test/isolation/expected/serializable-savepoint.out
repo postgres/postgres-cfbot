@@ -1,0 +1,131 @@
+Parsed test spec with 3 sessions
+
+starting permutation: r1 w2 w1 c1 sp2 r2 rb2 c2 rall
+step r1: SELECT v FROM t WHERE id = 2;
+v
+-
+0
+(1 row)
+
+step w2: UPDATE t SET v = 1 WHERE id = 2;
+step w1: UPDATE t SET v = 1 WHERE id = 1;
+step c1: COMMIT;
+step sp2: SAVEPOINT f;
+step r2: SELECT v FROM t WHERE id = 1;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step rb2: ROLLBACK TO SAVEPOINT f;
+step c2: COMMIT;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step rall: SELECT id, v FROM t ORDER BY id;
+id|v
+--+-
+ 1|1
+ 2|0
+(2 rows)
+
+
+starting permutation: r1 w2 w1 c1 r2x c2 rall
+step r1: SELECT v FROM t WHERE id = 2;
+v
+-
+0
+(1 row)
+
+step w2: UPDATE t SET v = 1 WHERE id = 2;
+step w1: UPDATE t SET v = 1 WHERE id = 1;
+step c1: COMMIT;
+s2: NOTICE:  serialization failure swallowed
+step r2x: DO $$
+            BEGIN
+              PERFORM v FROM t WHERE id = 1;
+            EXCEPTION WHEN serialization_failure THEN
+              RAISE NOTICE 'serialization failure swallowed';
+            END $$;
+step c2: COMMIT;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step rall: SELECT id, v FROM t ORDER BY id;
+id|v
+--+-
+ 1|1
+ 2|0
+(2 rows)
+
+
+starting permutation: r2a r1 w1 c1 sp2 w2b rb2 c2 rall
+step r2a: SELECT v FROM t WHERE id = 1;
+v
+-
+0
+(1 row)
+
+step r1: SELECT v FROM t WHERE id = 2;
+v
+-
+0
+(1 row)
+
+step w1: UPDATE t SET v = 1 WHERE id = 1;
+step c1: COMMIT;
+step sp2: SAVEPOINT f;
+step w2b: UPDATE t SET v = 2 WHERE id = 2;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step rb2: ROLLBACK TO SAVEPOINT f;
+step c2: COMMIT;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step rall: SELECT id, v FROM t ORDER BY id;
+id|v
+--+-
+ 1|1
+ 2|0
+(2 rows)
+
+
+starting permutation: r1 w2 w1 c1 sp2 r2 rb2 r2a c2 rall
+step r1: SELECT v FROM t WHERE id = 2;
+v
+-
+0
+(1 row)
+
+step w2: UPDATE t SET v = 1 WHERE id = 2;
+step w1: UPDATE t SET v = 1 WHERE id = 1;
+step c1: COMMIT;
+step sp2: SAVEPOINT f;
+step r2: SELECT v FROM t WHERE id = 1;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step rb2: ROLLBACK TO SAVEPOINT f;
+step r2a: SELECT v FROM t WHERE id = 1;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step c2: COMMIT;
+step rall: SELECT id, v FROM t ORDER BY id;
+id|v
+--+-
+ 1|1
+ 2|0
+(2 rows)
+
+
+starting permutation: r1 w2 w1 c1 sp2 r2 rb2 w2b c2 rall
+step r1: SELECT v FROM t WHERE id = 2;
+v
+-
+0
+(1 row)
+
+step w2: UPDATE t SET v = 1 WHERE id = 2;
+step w1: UPDATE t SET v = 1 WHERE id = 1;
+step c1: COMMIT;
+step sp2: SAVEPOINT f;
+step r2: SELECT v FROM t WHERE id = 1;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step rb2: ROLLBACK TO SAVEPOINT f;
+step w2b: UPDATE t SET v = 2 WHERE id = 2;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step c2: COMMIT;
+step rall: SELECT id, v FROM t ORDER BY id;
+id|v
+--+-
+ 1|1
+ 2|0
+(2 rows)
+
