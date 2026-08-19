@@ -219,6 +219,7 @@ extern int	fsync_fname_ext(const char *fname, bool isdir, bool ignore_perm, int 
 extern int	durable_rename(const char *oldfile, const char *newfile, int elevel);
 extern int	durable_unlink(const char *fname, int elevel);
 extern void SyncDataDirectory(void);
+extern int	GetFsyncConcurrencyLimit(void);
 extern int	data_sync_elevel(int elevel);
 
 static inline ssize_t
