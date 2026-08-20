@@ -5537,6 +5537,14 @@ dumpSubscription(Archive *fout, const SubscriptionInfo *subinfo)
 	appendPQExpBuffer(delq, "DROP SUBSCRIPTION %s;\n",
 					  qsubname);
 
+	if (dopt->binary_upgrade)
+	{
+		appendPQExpBufferStr(query, "\n-- For binary upgrade, must preserve pg_subscription.oid\n");
+		appendPQExpBuffer(query,
+						  "SELECT pg_catalog.binary_upgrade_set_next_pg_subscription_oid('%u'::pg_catalog.oid);\n\n",
+						  subinfo->dobj.catId.oid);
+	}
+
 	appendPQExpBuffer(query, "CREATE SUBSCRIPTION %s ",
 					  qsubname);
 	if (subinfo->subservername)
