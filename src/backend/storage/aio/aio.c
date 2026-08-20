@@ -739,6 +739,7 @@ pgaio_io_reclaim(PgAioHandle *ioh)
 	ioh->flags = 0;
 	ioh->num_callbacks = 0;
 	ioh->handle_data_len = 0;
+	ioh->wait_event_info = 0;
 	ioh->report_return = NULL;
 	ioh->result = 0;
 	ioh->distilled_result.status = PGAIO_RS_UNKNOWN;
