@@ -624,6 +624,19 @@ add_path(RelOptInfo *parent_rel, Path *new_path)
 			parent_rel->pathlist = foreach_delete_current(parent_rel->pathlist,
 														  p1);
 
+			if (IsA(old_path, MergePath))
+			{
+				MergePath  *mjpath = (MergePath *) old_path;
+				list_free(mjpath->path_mergeclauses);
+				list_free(mjpath->innersortkeys);
+				list_free(mjpath->outersortkeys);
+				list_free(mjpath->jpath.path.pathkeys);
+			}
+			else if (IsA(old_path, HashPath))
+			{
+				HashPath  *hjpath = (HashPath *) old_path;
+				list_free(hjpath->path_hashclauses);
+			}
 			/*
 			 * Delete the data pointed-to by the deleted cell, if possible
 			 */
@@ -659,6 +672,20 @@ add_path(RelOptInfo *parent_rel, Path *new_path)
 	}
 	else
 	{
+		if (IsA(new_path, MergePath))
+		{
+			MergePath  *mjpath = (MergePath *) new_path;
+			list_free(mjpath->path_mergeclauses);
+			list_free(mjpath->innersortkeys);
+			list_free(mjpath->outersortkeys);
+			list_free(mjpath->jpath.path.pathkeys);
+		}
+		else if (IsA(new_path, HashPath))
+		{
+			HashPath  *hjpath = (HashPath *) new_path;
+			list_free(hjpath->path_hashclauses);
+		}
+
 		/* Reject and recycle the new path */
 		if (!IsA(new_path, IndexPath))
 			pfree(new_path);
@@ -863,6 +890,21 @@ add_partial_path(RelOptInfo *parent_rel, Path *new_path)
 		{
 			parent_rel->partial_pathlist =
 				foreach_delete_current(parent_rel->partial_pathlist, p1);
+
+			if (IsA(old_path, MergePath))
+			{
+				MergePath  *mjpath = (MergePath *) old_path;
+				list_free(mjpath->path_mergeclauses);
+				list_free(mjpath->innersortkeys);
+				list_free(mjpath->outersortkeys);
+				list_free(mjpath->jpath.path.pathkeys);
+			}
+			else if (IsA(old_path, HashPath))
+			{
+				HashPath  *hjpath = (HashPath *) old_path;
+				list_free(hjpath->path_hashclauses);
+			}
+
 			pfree(old_path);
 		}
 		else
@@ -895,6 +937,20 @@ add_partial_path(RelOptInfo *parent_rel, Path *new_path)
 	else
 	{
 		/* Reject and recycle the new path */
+		if (IsA(new_path, MergePath))
+		{
+			MergePath  *mjpath = (MergePath *) new_path;
+			list_free(mjpath->path_mergeclauses);
+			list_free(mjpath->innersortkeys);
+			list_free(mjpath->outersortkeys);
+			list_free(mjpath->jpath.path.pathkeys);
+		}
+		else if (IsA(new_path, HashPath))
+		{
+			HashPath  *hjpath = (HashPath *) new_path;
+			list_free(hjpath->path_hashclauses);
+		}
+
 		pfree(new_path);
 	}
 }
@@ -2484,15 +2540,15 @@ create_mergejoin_path(PlannerInfo *root,
 		outer_path->parallel_safe && inner_path->parallel_safe;
 	/* This is a foolish way to estimate parallel_workers, but for now... */
 	pathnode->jpath.path.parallel_workers = outer_path->parallel_workers;
-	pathnode->jpath.path.pathkeys = pathkeys;
+	pathnode->jpath.path.pathkeys = list_copy(pathkeys);
 	pathnode->jpath.jointype = jointype;
 	pathnode->jpath.inner_unique = extra->inner_unique;
 	pathnode->jpath.outerjoinpath = outer_path;
 	pathnode->jpath.innerjoinpath = inner_path;
 	pathnode->jpath.joinrestrictinfo = restrict_clauses;
-	pathnode->path_mergeclauses = mergeclauses;
-	pathnode->outersortkeys = outersortkeys;
-	pathnode->innersortkeys = innersortkeys;
+	pathnode->path_mergeclauses = list_copy(mergeclauses);
+	pathnode->outersortkeys = list_copy(outersortkeys);
+	pathnode->innersortkeys = list_copy(innersortkeys);
 	pathnode->outer_presorted_keys = outer_presorted_keys;
 	/* pathnode->skip_mark_restore will be set by final_cost_mergejoin */
 	/* pathnode->materialize_inner will be set by final_cost_mergejoin */
@@ -2568,7 +2624,7 @@ create_hashjoin_path(PlannerInfo *root,
 	pathnode->jpath.outerjoinpath = outer_path;
 	pathnode->jpath.innerjoinpath = inner_path;
 	pathnode->jpath.joinrestrictinfo = restrict_clauses;
-	pathnode->path_hashclauses = hashclauses;
+	pathnode->path_hashclauses = list_copy(hashclauses);
 	/* final_cost_hashjoin will fill in pathnode->num_batches */
 
 	final_cost_hashjoin(root, pathnode, workspace, extra);

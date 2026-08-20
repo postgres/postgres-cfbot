@@ -1560,7 +1560,7 @@ find_mergeclauses_for_outer_pathkeys(PlannerInfo *root,
 	{
 		PathKey    *pathkey = (PathKey *) lfirst(i);
 		EquivalenceClass *pathkey_ec = pathkey->pk_eclass;
-		List	   *matched_restrictinfos = NIL;
+		bool		found_clauses = false;
 		ListCell   *j;
 
 		/*----------
@@ -1608,7 +1608,10 @@ find_mergeclauses_for_outer_pathkeys(PlannerInfo *root,
 			clause_ec = rinfo->outer_is_left ?
 				rinfo->left_ec : rinfo->right_ec;
 			if (clause_ec == pathkey_ec)
-				matched_restrictinfos = lappend(matched_restrictinfos, rinfo);
+			{
+				mergeclauses = lappend(mergeclauses, rinfo);
+				found_clauses = true;
+			}
 		}
 
 		/*
@@ -1616,14 +1619,8 @@ find_mergeclauses_for_outer_pathkeys(PlannerInfo *root,
 		 * sort-key positions in the pathkeys are useless.  (But we can still
 		 * mergejoin if we found at least one mergeclause.)
 		 */
-		if (matched_restrictinfos == NIL)
+		if (!found_clauses)
 			break;
-
-		/*
-		 * If we did find usable mergeclause(s) for this sort-key position,
-		 * add them to result list.
-		 */
-		mergeclauses = list_concat(mergeclauses, matched_restrictinfos);
 	}
 
 	return mergeclauses;
