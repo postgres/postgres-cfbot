@@ -12052,6 +12052,10 @@
   proisstrict => 'f', provolatile => 'v', proparallel => 'u',
   prorettype => 'void', proargtypes => '',
   prosrc => 'binary_upgrade_create_conflict_detection_slot' },
+{ oid => '9160', descr => 'for use by pg_upgrade',
+  proname => 'binary_upgrade_set_next_pg_subscription_oid', provolatile => 'v',
+  proparallel => 'r', prorettype => 'void', proargtypes => 'oid',
+  prosrc => 'binary_upgrade_set_next_pg_subscription_oid' },
 
 # conversion functions
 { oid => '4310', descr => 'internal conversion function for KOI8R to WIN1251',
