@@ -56,10 +56,19 @@ PG_MODULE_MAGIC_EXT(
  *--------------------------------------------------------------------------
  */
 
-/* Backend-local pending statistics before flush to shared memory */
+/*
+ * Backend-local pending statistics before flush to shared memory.
+ *
+ * numcalls is non-transactional and is flushed on any flush, including an
+ * in-transaction one.  numcalls_txn is transactional and becomes visible in
+ * shared memory only at a transaction boundary; this demonstrates how a custom
+ * kind can defer transaction-dependent counters (see the flush callback).
+ */
 typedef struct PgStat_StatCustomVarEntry
 {
 	PgStat_Counter numcalls;	/* times statistic was incremented */
+	PgStat_Counter numcalls_txn;	/* likewise, but flushed only at a
+									 * transaction boundary */
 } PgStat_StatCustomVarEntry;
 
 /* Shared memory statistics entry visible to all backends */
