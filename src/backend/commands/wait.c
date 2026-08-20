@@ -35,7 +35,7 @@ ExecWaitStmt(ParseState *pstate, WaitStmt *stmt, bool isTopLevel,
 			 DestReceiver *dest)
 {
 	XLogRecPtr	lsn;
-	int64		timeout = 0;
+	int			timeout = 0;
 	WaitLSNResult waitLSNResult;
 	WaitLSNType lsnType = WAIT_LSN_TYPE_STANDBY_REPLAY; /* default */
 	bool		throw = true;
@@ -116,7 +116,7 @@ ExecWaitStmt(ParseState *pstate, WaitStmt *stmt, bool isTopLevel,
 			dval = rint(dval);
 
 			/* Range check */
-			if (unlikely(isnan(dval) || !FLOAT8_FITS_IN_INT64(dval)))
+			if (unlikely(isnan(dval) || !FLOAT8_FITS_IN_INT32(dval)))
 				ereport(ERROR,
 						errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
 						errmsg("timeout value is out of range"));
@@ -126,7 +126,7 @@ ExecWaitStmt(ParseState *pstate, WaitStmt *stmt, bool isTopLevel,
 						errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 						errmsg("timeout cannot be negative"));
 
-			timeout = (int64) dval;
+			timeout = (int) dval;
 		}
 		else if (strcmp(defel->defname, "no_throw") == 0)
 		{
