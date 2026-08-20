@@ -26,6 +26,7 @@
 
 
 static void pgaio_io_before_start(PgAioHandle *ioh);
+static void pgaio_io_set_wait_event(PgAioHandle *ioh, uint32 wait_event_info);
 
 
 
@@ -76,26 +77,30 @@ pgaio_io_get_op_data(PgAioHandle *ioh)
 
 void
 pgaio_io_start_readv(PgAioHandle *ioh,
-					 int fd, int iovcnt, uint64 offset)
+					 int fd, int iovcnt, uint64 offset,
+					 uint32 wait_event_info)
 {
 	pgaio_io_before_start(ioh);
 
 	ioh->op_data.read.fd = fd;
 	ioh->op_data.read.offset = offset;
 	ioh->op_data.read.iov_length = iovcnt;
+	pgaio_io_set_wait_event(ioh, wait_event_info);
 
 	pgaio_io_stage(ioh, PGAIO_OP_READV);
 }
 
 void
 pgaio_io_start_writev(PgAioHandle *ioh,
-					  int fd, int iovcnt, uint64 offset)
+					  int fd, int iovcnt, uint64 offset,
+					  uint32 wait_event_info)
 {
 	pgaio_io_before_start(ioh);
 
 	ioh->op_data.write.fd = fd;
 	ioh->op_data.write.offset = offset;
 	ioh->op_data.write.iov_length = iovcnt;
+	pgaio_io_set_wait_event(ioh, wait_event_info);
 
 	pgaio_io_stage(ioh, PGAIO_OP_WRITEV);
 }
@@ -124,14 +129,14 @@ pgaio_io_perform_synchronously(PgAioHandle *ioh)
 	switch ((PgAioOp) ioh->op)
 	{
 		case PGAIO_OP_READV:
-			pgstat_report_wait_start(WAIT_EVENT_DATA_FILE_READ);
+			pgstat_report_wait_start(ioh->wait_event_info);
 			result = pg_preadv(ioh->op_data.read.fd, iov,
 							   ioh->op_data.read.iov_length,
 							   ioh->op_data.read.offset);
 			pgstat_report_wait_end();
 			break;
 		case PGAIO_OP_WRITEV:
-			pgstat_report_wait_start(WAIT_EVENT_DATA_FILE_WRITE);
+			pgstat_report_wait_start(ioh->wait_event_info);
 			result = pg_pwritev(ioh->op_data.write.fd, iov,
 								ioh->op_data.write.iov_length,
 								ioh->op_data.write.offset);
@@ -170,6 +175,19 @@ pgaio_io_before_start(PgAioHandle *ioh)
 	 * processing.
 	 */
 	Assert(!INTERRUPTS_CAN_BE_PROCESSED());
+}
+
+/*
+ * Helper function to be called by IO operation preparation functions, to
+ * specify the wait event to report while the IO is executed.
+ */
+static void
+pgaio_io_set_wait_event(PgAioHandle *ioh, uint32 wait_event_info)
+{
+	/* every IO needs a wait event to report while it is being executed */
+	Assert(wait_event_info != 0);
+
+	ioh->wait_event_info = wait_event_info;
 }
 
 /*
