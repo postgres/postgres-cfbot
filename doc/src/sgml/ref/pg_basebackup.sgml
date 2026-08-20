@@ -268,9 +268,14 @@ PostgreSQL documentation
         <literal>/some/path</literal> directory. Storing a backup on the
         server requires superuser privileges or having privileges of the
         <literal>pg_write_server_files</literal> role. If the target is set to
-        <literal>blackhole</literal>, the contents are discarded and not
-        stored anywhere. This should only be used for testing purposes, as you
-        will not end up with an actual backup.
+        <literal>server-blackhole</literal>, the contents are discarded by the
+        server and not stored anywhere. If the target is set to
+        <literal>client-blackhole</literal>, the backup is sent to
+        <application>pg_basebackup</application> as usual, but discarded instead
+        of being written to disk; this can be used to measure how fast a backup
+        can be produced without being limited by the speed of the local
+        storage.  Both blackhole targets should only be used for testing
+        purposes, as you will not end up with an actual backup.
        </para>
 
        <para>

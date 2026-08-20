@@ -2008,6 +2008,64 @@ pqGetCopyData3(PGconn *conn, char **buffer, int async)
 }
 
 /*
+ * pqGetCopyDataInternalBuf3 - like pqGetCopyData3, but avoids malloc and
+ * memory copying.
+ *
+ * Instead of allocating fresh buffer and copying the CopyData payload into
+ * that new memory, this sets *buffer directly into conn->inBuffer and returns
+ * its length. The message is marked consumed, and the returned pointer stays
+ * valid only until the next libpq call that reads from the socket (e.g. using
+ * pgReadData() or this call). Called must be done with the data processing
+ * before calling this again.
+ *
+ * Differences between thnis and the orginal pgGetCopyData3() are:
+ * - the caller must not free *buffer
+ * - the payload is not null-terminated
+ *
+ * The main advantage of this call is that it avoids memory copy for for
+ * high-throughput COPY.
+ */
+int
+pqGetCopyDataInternalBuf3(PGconn *conn, char **buffer, int async)
+{
+	int			msgLength;
+
+	for (;;)
+	{
+		/* Collect the next input message; see pqGetCopyData3 for details. */
+		msgLength = getCopyDataMessage(conn);
+		if (msgLength < 0)
+			return msgLength;	/* end-of-copy or error */
+		if (msgLength == 0)
+		{
+			/* Don't block if async read requested */
+			if (async)
+				return 0;
+			/* Need to load more data */
+			if (pqWait(true, false, conn) ||
+				pqReadData(conn) < 0)
+				return -2;
+			continue;
+		}
+
+		msgLength -= 4;
+		if (msgLength > 0)
+		{
+			/* Just use libpq internal input buffer */
+			*buffer = &conn->inBuffer[conn->inCursor];
+
+			/* Mark message consumed */
+			pqParseDone(conn, conn->inCursor + msgLength);
+
+			return msgLength;
+		}
+
+		/* Empty, so drop it and loop around for another */
+		pqParseDone(conn, conn->inCursor);
+	}
+}
+
+/*
  * PQgetline - gets a newline-terminated string from the backend.
  *
  * See fe-exec.c for documentation.
