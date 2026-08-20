@@ -2222,7 +2222,7 @@ FileStartReadV(PgAioHandle *ioh, File file,
 
 	vfdP = &VfdCache[file];
 
-	pgaio_io_start_readv(ioh, vfdP->fd, iovcnt, offset);
+	pgaio_io_start_readv(ioh, vfdP->fd, iovcnt, offset, wait_event_info);
 
 	return 0;
 }
