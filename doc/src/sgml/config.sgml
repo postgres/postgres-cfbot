@@ -5085,13 +5085,17 @@ HINT:  If it is safe for all REPLICATION users to use this library as an output 
        </para>
 
        <para>
-        Note that this invalidation mechanism is not applicable for slots
-        on the standby server that are being synced from the primary server
-        (i.e., standby slots having
+        This mechanism also applies to slots on a standby server that are being
+        synced from the primary server (i.e., standby slots having
         <link linkend="view-pg-replication-slots">pg_replication_slots</link>.<structfield>synced</structfield>
-        value <literal>true</literal>). Synced slots are always considered to
-        be inactive because they don't perform logical decoding to produce
-        changes.
+        value <literal>true</literal>). A synced slot's
+        <literal>catalog_xmin</literal> is sent to the primary's physical slot
+        through the standby's <xref linkend="guc-hot-standby-feedback"/> and
+        holds the catalog horizon back there, so a synced slot whose
+        <literal>catalog_xmin</literal> has aged can keep vacuum on the primary
+        from pruning dead catalog rows and freezing XIDs. Invalidating such a
+        slot on the standby advances the <literal>catalog_xmin</literal> held by
+        the primary's physical slot, letting vacuum there proceed.
        </para>
       </listitem>
      </varlistentry>
