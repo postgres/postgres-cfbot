@@ -813,4 +813,90 @@ is( $primary5->safe_psql(
 
 $primary5->stop;
 
+# Testcase 6: a synced slot on a standby (aged catalog_xmin) is invalidated
+# by a restartpoint, which releases the catalog_xmin it had pinned on the
+# primary's physical slot via hs_feedback. Sync is off after one manual sync
+# so the synced catalog_xmin stays frozen, and the age limit is set only on
+# the standby.
+my $primary6 = PostgreSQL::Test::Cluster->new('primary6');
+$primary6->init(allows_streaming => 'logical');
+$primary6->append_conf(
+	'postgresql.conf', qq{
+autovacuum = off
+checkpoint_timeout = 1h
+});
+$primary6->start;
+$primary6->safe_psql('postgres', $consume_xid_proc);
+$primary6->safe_psql('postgres',
+	"SELECT pg_create_physical_replication_slot('sb6_phys')");
+$primary6->backup('backup6');
+
+my $standby6 = PostgreSQL::Test::Cluster->new('standby6');
+$standby6->init_from_backup($primary6, 'backup6', has_streaming => 1);
+my $connstr6 = $primary6->connstr;
+$standby6->append_conf(
+	'postgresql.conf', qq{
+primary_slot_name = 'sb6_phys'
+primary_conninfo = '$connstr6 dbname=postgres'
+hot_standby_feedback = on
+wal_receiver_status_interval = 1
+sync_replication_slots = off
+checkpoint_timeout = 1h
+max_slot_xid_age = $slot_xid_age
+});
+$standby6->start;
+$primary6->wait_for_replay_catchup($standby6);
+
+# Create the failover slot now that the standby is up, then sync it once by
+# hand.
+$primary6->safe_psql('postgres',
+	"SELECT pg_create_logical_replication_slot('failover6_slot', 'pgoutput', false, false, true)"
+);
+my $synced6 = 0;
+foreach (1 .. 10)
+{
+	$primary6->safe_psql('postgres', "SELECT pg_log_standby_snapshot()");
+	$primary6->wait_for_replay_catchup($standby6);
+	$standby6->safe_psql('postgres', "SELECT pg_sync_replication_slots()");
+	$synced6 = $standby6->safe_psql(
+		'postgres', qq[
+		SELECT count(*) = 1 FROM pg_replication_slots
+			WHERE slot_name = 'failover6_slot' AND synced AND NOT temporary
+			AND catalog_xmin IS NOT NULL;
+	]);
+	last if $synced6 eq 't';
+}
+$synced6 eq 't' or die "Timed out waiting for failover6_slot to be synced";
+
+# The synced slot's catalog_xmin, pinned onto sb6_phys via hs_feedback.
+my $frozen = $standby6->safe_psql('postgres',
+	"SELECT catalog_xmin FROM pg_replication_slots WHERE slot_name = 'failover6_slot'"
+);
+$primary6->poll_query_until(
+	'postgres', qq[
+	SELECT catalog_xmin = '$frozen' FROM pg_replication_slots
+		WHERE slot_name = 'sb6_phys';
+]) or die "Timed out waiting for sb6_phys to pick up the synced catalog_xmin";
+
+# Age the frozen synced catalog_xmin out, then a restartpoint on the standby
+# invalidates it (a primary checkpoint gives the standby one to restart from).
+$primary6->safe_psql('postgres', qq{CALL consume_xid(2 * $slot_xid_age)});
+$primary6->safe_psql('postgres', "CHECKPOINT");
+$primary6->wait_for_replay_catchup($standby6);
+$standby6->safe_psql('postgres', "CHECKPOINT");
+wait_for_xid_aged_invalidation($standby6, 'failover6_slot');
+ok(1, 'synced slot on standby invalidated by restartpoint');
+
+# With the synced slot gone, the standby stops reporting its catalog_xmin, so
+# the feedback horizon on the primary's physical slot is released.
+$primary6->poll_query_until(
+	'postgres', qq[
+	SELECT catalog_xmin IS DISTINCT FROM '$frozen'::xid FROM pg_replication_slots
+		WHERE slot_name = 'sb6_phys';
+]) or die "Timed out waiting for sb6_phys catalog_xmin to be released";
+ok(1, 'invalidation releases the feedback horizon on the primary');
+
+$standby6->stop;
+$primary6->stop;
+
 done_testing();

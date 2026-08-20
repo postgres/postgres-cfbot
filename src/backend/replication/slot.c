@@ -1931,17 +1931,21 @@ CanInvalidateIdleSlot(ReplicationSlot *s)
  *
  * 1. XID age limit is set
  * 2. Slot has a valid xmin or catalog_xmin
- * 3. The slot is not being synced from the primary while the server is in
- *	  recovery. This is because synced slots are always considered to be
- *	  inactive because they don't perform logical decoding to produce changes.
+ *
+ * Note that this includes synced slots on a standby. A synced slot's
+ * catalog_xmin is sent to the primary's physical slot through
+ * hot_standby_feedback and holds the catalog horizon back there, so a synced
+ * slot whose catalog_xmin has aged can keep vacuum on the primary from pruning
+ * dead catalog rows and freezing XIDs, even though it does no decoding of its
+ * own on the standby. Invalidating it advances the catalog_xmin held by the
+ * primary's physical slot, letting vacuum there proceed.
  */
 static inline bool
 CanInvalidateXidAgedSlot(ReplicationSlot *s)
 {
 	return (max_slot_xid_age != 0 &&
 			(TransactionIdIsValid(s->data.xmin) ||
-			 TransactionIdIsValid(s->data.catalog_xmin)) &&
-			!(RecoveryInProgress() && s->data.synced));
+			 TransactionIdIsValid(s->data.catalog_xmin)));
 }
 
 /*
