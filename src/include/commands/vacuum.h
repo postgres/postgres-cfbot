@@ -321,6 +321,22 @@ typedef struct PVWorkerUsage
 	PVWorkerStats cleanup;
 } PVWorkerUsage;
 
+/*
+ * AnalyzeSamplingStats stores sampling statistics collected during ANALYZE.
+ * This is used to report sampling information for both manual ANALYZE VERBOSE
+ * and autoanalyze logging.
+ */
+typedef struct AnalyzeSamplingStats
+{
+	Oid			relid;			/* relation OID */
+	BlockNumber totalpages;		/* total pages in relation */
+	BlockNumber scannedpages;	/* pages actually scanned */
+	double		liverows;		/* live rows found during sampling */
+	double		deadrows;		/* dead rows found during sampling */
+	int			samplerows;		/* number of rows in sample */
+	double		totalrows;		/* estimated total rows */
+} AnalyzeSamplingStats;
+
 /* GUC parameters */
 extern PGDLLIMPORT int default_statistics_target;	/* PGDLLIMPORT for PostGIS */
 extern PGDLLIMPORT int vacuum_freeze_min_age;
