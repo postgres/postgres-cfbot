@@ -3693,6 +3693,18 @@ ANALYZE fprt2;
 ANALYZE fprt2_p1;
 ANALYZE fprt2_p2;
 
+CREATE TABLE fprt3 (a int, b int, c varchar(40)) partition by hash(c);
+CREATE TABLE fprt3_ft (a int, b int, c varchar(40));
+CREATE TABLE fprt3_p1 partition of fprt3 FOR values WITH (modulus 2, remainder 0);
+CREATE FOREIGN TABLE fprt3_p2 partition of fprt3 FOR values WITH (modulus 2,
+remainder 1) server loopback options (table_name 'fprt3_ft');
+
+CREATE TABLE fprt4 (a int, b int, c varchar(40)) partition by hash(c);
+CREATE TABLE fprt4_ft (a int, b int, c varchar(40));
+CREATE TABLE fprt4_p1 partition of fprt4 FOR values WITH (modulus 2, remainder 0);
+CREATE FOREIGN TABLE fprt4_p2 partition of fprt4 FOR values WITH (modulus 2,
+remainder 1) server loopback options (table_name 'fprt4_ft');
+
 -- inner join three tables
 EXPLAIN (COSTS OFF)
 SELECT t1.a,t2.b,t3.c FROM fprt1 t1 INNER JOIN fprt2 t2 ON (t1.a = t2.b) INNER JOIN fprt1 t3 ON (t2.b = t3.a) WHERE t1.a % 25 =0 ORDER BY 1,2,3;
@@ -3722,6 +3734,10 @@ SELECT t1.a, t1.phv, t2.b, t2.phv FROM (SELECT 't1_phv' phv, * FROM fprt1 WHERE 
 EXPLAIN (COSTS OFF)
 SELECT t1.a, t2.b FROM fprt1 t1 INNER JOIN fprt2 t2 ON (t1.a = t2.b) WHERE t1.a % 25 = 0 ORDER BY 1,2 FOR UPDATE OF t1;
 SELECT t1.a, t2.b FROM fprt1 t1 INNER JOIN fprt2 t2 ON (t1.a = t2.b) WHERE t1.a % 25 = 0 ORDER BY 1,2 FOR UPDATE OF t1;
+
+-- varchar types wrapped by a RelabelType is removed to enable partitionwise joins
+EXPLAIN(VERBOSE, COSTS OFF) SELECT fprt3.a, fprt4.a FROM fprt3 JOIN fprt4 ON fprt3.c =
+fprt4.c WHERE fprt3.c = '0002';
 
 RESET enable_partitionwise_join;
 
