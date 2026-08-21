@@ -3818,6 +3818,31 @@ SELECT to_date('0000-02-01','YYYY-MM-DD');  -- allowed, though it shouldn't be
  02-01-0001 BC
 (1 row)
 
+-- Zero month/day values are treated as missing data and default to 1
+SELECT to_date('2024-00-15', 'YYYY-MM-DD');  -- ok, 0 -> January
+  to_date   
+------------
+ 01-15-2024
+(1 row)
+
+SELECT to_date('2024-01-00', 'YYYY-MM-DD');  -- ok, 0 -> 1'st
+  to_date   
+------------
+ 01-01-2024
+(1 row)
+
+SELECT to_date('100-00-00', 'YYY-MM-DD');  -- ok, 0/0 -> Jan 1st, year 100 -> 2100
+  to_date   
+------------
+ 01-01-2100
+(1 row)
+
+SELECT to_date('100', 'YYY'); -- ok, equivalent to above
+  to_date   
+------------
+ 01-01-2100
+(1 row)
+
 SELECT to_date('100000000', 'CC');
 ERROR:  date/time field value out of range: "100000000"
 SELECT to_date('-100000000', 'CC');
