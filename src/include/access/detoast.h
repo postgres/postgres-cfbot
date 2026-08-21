@@ -14,7 +14,7 @@
 
 /*
  * Macro to fetch the possibly-unaligned contents of an EXTERNAL datum
- * into a local "varatt_external" toast pointer.  This should be
+ * into a local "varatt_external_oid" toast pointer.  This should be
  * just a memcpy, but some versions of gcc seem to produce broken code
  * that assumes the datum contents are aligned.  Introducing an explicit
  * intermediate "varattrib_1b_e *" variable seems to fix it.
@@ -28,7 +28,10 @@ do { \
 } while (0)
 
 /* Size of an EXTERNAL datum that contains a standard TOAST pointer */
-#define TOAST_POINTER_SIZE (VARHDRSZ_EXTERNAL + sizeof(varatt_external))
+#define TOAST_OID_POINTER_SIZE (VARHDRSZ_EXTERNAL + sizeof(varatt_external_oid))
+
+/* Size of an EXTERNAL datum that contains an Oid8 TOAST pointer */
+#define TOAST_OID8_POINTER_SIZE (VARHDRSZ_EXTERNAL + sizeof(varatt_external_oid8))
 
 /* Size of an EXTERNAL datum that contains an indirection pointer */
 #define INDIRECT_POINTER_SIZE (VARHDRSZ_EXTERNAL + sizeof(varatt_indirect))

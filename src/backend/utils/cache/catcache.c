@@ -249,6 +249,18 @@ int4hashfast(Datum datum)
 }
 
 static bool
+oid8eqfast(Datum a, Datum b)
+{
+	return DatumGetObjectId8(a) == DatumGetObjectId8(b);
+}
+
+static uint32
+oid8hashfast(Datum datum)
+{
+	return murmurhash64(DatumGetObjectId8(datum));
+}
+
+static bool
 texteqfast(Datum a, Datum b)
 {
 	/*
@@ -310,6 +322,11 @@ GetCCHashEqFuncs(Oid keytype, CCHashFN *hashfunc, RegProcedure *eqfunc, CCFastEq
 			*hashfunc = int4hashfast;
 			*fasteqfunc = int4eqfast;
 			*eqfunc = F_INT4EQ;
+			break;
+		case OID8OID:
+			*hashfunc = oid8hashfast;
+			*fasteqfunc = oid8eqfast;
+			*eqfunc = F_OID8EQ;
 			break;
 		case TEXTOID:
 			*hashfunc = texthashfast;

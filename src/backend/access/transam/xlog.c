@@ -4324,7 +4324,7 @@ WriteControlFile(void)
 	ControlFile->nameDataLen = NAMEDATALEN;
 	ControlFile->indexMaxKeys = INDEX_MAX_KEYS;
 
-	ControlFile->toast_max_chunk_size = TOAST_MAX_CHUNK_SIZE;
+	ControlFile->toast_max_chunk_size = TOAST_OID_MAX_CHUNK_SIZE;
 	ControlFile->loblksize = LOBLKSIZE;
 
 	ControlFile->float8ByVal = true;	/* vestigial */
@@ -4577,15 +4577,15 @@ ReadControlFile(void)
 						   "INDEX_MAX_KEYS", ControlFile->indexMaxKeys,
 						   "INDEX_MAX_KEYS", INDEX_MAX_KEYS),
 				 errhint("It looks like you need to recompile or initdb.")));
-	if (ControlFile->toast_max_chunk_size != TOAST_MAX_CHUNK_SIZE)
+	if (ControlFile->toast_max_chunk_size != TOAST_OID_MAX_CHUNK_SIZE)
 		ereport(FATAL,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("database files are incompatible with server"),
 		/* translator: %s is a variable name and %d is its value */
 				 errdetail("The database cluster was initialized with %s %d,"
 						   " but the server was compiled with %s %d.",
-						   "TOAST_MAX_CHUNK_SIZE", ControlFile->toast_max_chunk_size,
-						   "TOAST_MAX_CHUNK_SIZE", (int) TOAST_MAX_CHUNK_SIZE),
+						   "TOAST_OID_MAX_CHUNK_SIZE", ControlFile->toast_max_chunk_size,
+						   "TOAST_OID_MAX_CHUNK_SIZE", (int) TOAST_OID_MAX_CHUNK_SIZE),
 				 errhint("It looks like you need to recompile or initdb.")));
 	if (ControlFile->loblksize != LOBLKSIZE)
 		ereport(FATAL,
@@ -8603,10 +8603,10 @@ KeepLogSeg(XLogRecPtr recptr, XLogSegNo *logSegNo)
  * Write a NEXTOID log record
  */
 void
-XLogPutNextOid(Oid nextOid)
+XLogPutNextOid(Oid8 nextOid)
 {
 	XLogBeginInsert();
-	XLogRegisterData(&nextOid, sizeof(Oid));
+	XLogRegisterData(&nextOid, sizeof(Oid8));
 	(void) XLogInsert(RM_XLOG_ID, XLOG_NEXTOID);
 
 	/*
@@ -8872,7 +8872,7 @@ xlog_redo(XLogReaderState *record)
 
 	if (info == XLOG_NEXTOID)
 	{
-		Oid			nextOid;
+		Oid8		nextOid;
 
 		/*
 		 * We used to try to take the maximum of TransamVariables->nextOid and
@@ -8881,7 +8881,7 @@ xlog_redo(XLogReaderState *record)
 		 * anyway, better to just believe the record exactly.  We still take
 		 * OidGenLock while setting the variable, just in case.
 		 */
-		memcpy(&nextOid, XLogRecGetData(record), sizeof(Oid));
+		memcpy(&nextOid, XLogRecGetData(record), sizeof(Oid8));
 		LWLockAcquire(OidGenLock, LW_EXCLUSIVE);
 		TransamVariables->nextOid = nextOid;
 		TransamVariables->oidCount = 0;

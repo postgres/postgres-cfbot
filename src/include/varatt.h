@@ -16,7 +16,7 @@
 #define VARATT_H
 
 /*
- * varatt_external is a traditional "TOAST pointer", that is, the
+ * varatt_external_oid is a traditional "TOAST pointer", that is, the
  * information needed to fetch a Datum stored out-of-line in a TOAST table.
  * The data is compressed if and only if the external size stored in
  * va_extinfo is less than va_rawsize - VARHDRSZ.
@@ -29,14 +29,42 @@
  * you can look at these fields!  (The reason we use memcmp is to avoid
  * having to do that just to detect equality of two TOAST pointers...)
  */
-typedef struct varatt_external
+typedef struct varatt_external_oid
 {
 	int32		va_rawsize;		/* Original data size (includes header) */
 	uint32		va_extinfo;		/* External saved size (without header) and
 								 * compression method */
 	Oid			va_valueid;		/* Unique ID of value within TOAST table */
 	Oid			va_toastrelid;	/* RelID of TOAST table containing it */
-} varatt_external;
+} varatt_external_oid;
+
+/*
+ * varatt_external_oid8 is a "TOAST pointer" for TOAST tables that use
+ * Oid8 (64-bit) as their chunk_id type.  Same layout as varatt_external_oid
+ * except that va_valueid is split into two uint32 halves to enforce a
+ * stricter structure size without padding.
+ *
+ * This struct must not contain any padding, because we sometimes compare
+ * these pointers using memcmp.
+ */
+typedef struct varatt_external_oid8
+{
+	int32		va_rawsize;		/* Original data size (includes header) */
+	uint32		va_extinfo;		/* External saved size (without header) and
+								 * compression method */
+	uint32		va_valueid_lo;	/* Low 32 bits of value ID */
+	uint32		va_valueid_hi;	/* High 32 bits of value ID */
+	Oid			va_toastrelid;	/* RelID of TOAST table containing it */
+} varatt_external_oid8;
+
+/* Helper macros to get/set the 64-bit value ID from the lo/hi fields */
+#define VARATT_EXTERNAL_OID8_GET_VALUEID(tp) \
+	((Oid8) (tp).va_valueid_lo | ((Oid8) (tp).va_valueid_hi << 32))
+#define VARATT_EXTERNAL_OID8_SET_VALUEID(tp, id) \
+	do { \
+		(tp).va_valueid_lo = (uint32) (id); \
+		(tp).va_valueid_hi = (uint32) ((id) >> 32); \
+	} while (0)
 
 /*
  * These macros define the "saved size" portion of va_extinfo.  Its remaining
@@ -51,7 +79,7 @@ typedef struct varatt_external
  * The creator of such a Datum is entirely responsible that the referenced
  * storage survives for as long as referencing pointer Datums can exist.
  *
- * Note that just as for varatt_external, this struct is stored
+ * Note that just as for varatt_external_oid, this struct is stored
  * unaligned within any containing tuple.
  */
 typedef struct varatt_indirect
@@ -66,7 +94,7 @@ typedef struct varatt_indirect
  * storage.  APIs for this, in particular the definition of struct
  * ExpandedObjectHeader, are in src/include/utils/expandeddatum.h.
  *
- * Note that just as for varatt_external, this struct is stored
+ * Note that just as for varatt_external_oid, this struct is stored
  * unaligned within any containing tuple.
  */
 typedef struct ExpandedObjectHeader ExpandedObjectHeader;
@@ -78,15 +106,17 @@ typedef struct varatt_expanded
 
 /*
  * Type tag for the various sorts of "TOAST pointer" datums.  The peculiar
- * value for VARTAG_ONDISK comes from a requirement for on-disk compatibility
- * with a previous notion that the tag field was the pointer datum's length.
+ * value for VARTAG_ONDISK_OID comes from a requirement for on-disk
+ * compatibility with a previous notion that the tag field was the pointer
+ * datum's length.
  */
 typedef enum vartag_external
 {
 	VARTAG_INDIRECT = 1,
 	VARTAG_EXPANDED_RO = 2,
 	VARTAG_EXPANDED_RW = 3,
-	VARTAG_ONDISK = 18
+	VARTAG_ONDISK_OID8 = 4,
+	VARTAG_ONDISK_OID = 18
 } vartag_external;
 
 /* Is a TOAST pointer either type of expanded-object pointer? */
@@ -105,8 +135,10 @@ VARTAG_SIZE(vartag_external tag)
 		return sizeof(varatt_indirect);
 	else if (VARTAG_IS_EXPANDED(tag))
 		return sizeof(varatt_expanded);
-	else if (tag == VARTAG_ONDISK)
-		return sizeof(varatt_external);
+	else if (tag == VARTAG_ONDISK_OID)
+		return sizeof(varatt_external_oid);
+	else if (tag == VARTAG_ONDISK_OID8)
+		return sizeof(varatt_external_oid8);
 	else
 	{
 		Assert(false);
@@ -360,7 +392,19 @@ VARATT_IS_EXTERNAL(const void *PTR)
 static inline bool
 VARATT_IS_EXTERNAL_ONDISK(const void *PTR)
 {
-	return VARATT_IS_EXTERNAL(PTR) && VARTAG_EXTERNAL(PTR) == VARTAG_ONDISK;
+	vartag_external tag;
+
+	if (!VARATT_IS_EXTERNAL(PTR))
+		return false;
+	tag = VARTAG_EXTERNAL(PTR);
+	return (tag == VARTAG_ONDISK_OID || tag == VARTAG_ONDISK_OID8);
+}
+
+/* Is varlena datum a pointer to on-disk toasted data with 8-byte value ID? */
+static inline bool
+VARATT_IS_EXTERNAL_ONDISK_OID8(const void *PTR)
+{
+	return VARATT_IS_EXTERNAL(PTR) && VARTAG_EXTERNAL(PTR) == VARTAG_ONDISK_OID8;
 }
 
 /* Is varlena datum an indirect pointer? */
@@ -502,28 +546,21 @@ VARDATA_COMPRESSED_GET_COMPRESS_METHOD(const void *PTR)
 	return ((const varattrib_4b *) PTR)->va_compressed.va_tcinfo >> VARLENA_EXTSIZE_BITS;
 }
 
-/* Same for external Datums; but note argument is a varatt_external */
+/*
+ * Same for external Datums; but note argument is a struct
+ * varatt_external_oid.
+ */
 static inline Size
-VARATT_EXTERNAL_GET_EXTSIZE(varatt_external toast_pointer)
+VARATT_EXTERNAL_OID_GET_EXTSIZE(varatt_external_oid toast_pointer)
 {
 	return toast_pointer.va_extinfo & VARLENA_EXTSIZE_MASK;
 }
 
 static inline uint32
-VARATT_EXTERNAL_GET_COMPRESS_METHOD(varatt_external toast_pointer)
+VARATT_EXTERNAL_OID_GET_COMPRESS_METHOD(varatt_external_oid toast_pointer)
 {
 	return toast_pointer.va_extinfo >> VARLENA_EXTSIZE_BITS;
 }
-
-/* Set size and compress method of an externally-stored varlena datum */
-/* This has to remain a macro; beware multiple evaluations! */
-#define VARATT_EXTERNAL_SET_SIZE_AND_COMPRESS_METHOD(toast_pointer, len, cm) \
-	do { \
-		Assert((cm) == TOAST_PGLZ_COMPRESSION_ID || \
-			   (cm) == TOAST_LZ4_COMPRESSION_ID); \
-		((toast_pointer).va_extinfo = \
-			(len) | ((uint32) (cm) << VARLENA_EXTSIZE_BITS)); \
-	} while (0)
 
 /*
  * Testing whether an externally-stored value is compressed now requires
@@ -533,9 +570,32 @@ VARATT_EXTERNAL_GET_COMPRESS_METHOD(varatt_external toast_pointer)
  * actually saves space, so we expect either equality or less-than.
  */
 static inline bool
-VARATT_EXTERNAL_IS_COMPRESSED(varatt_external toast_pointer)
+VARATT_EXTERNAL_OID_IS_COMPRESSED(varatt_external_oid toast_pointer)
 {
-	return VARATT_EXTERNAL_GET_EXTSIZE(toast_pointer) <
+	return VARATT_EXTERNAL_OID_GET_EXTSIZE(toast_pointer) <
+		(Size) (toast_pointer.va_rawsize - VARHDRSZ);
+}
+
+/*
+ * Same for external Datums; but note argument is a struct
+ * varatt_external_oid8.
+ */
+static inline Size
+VARATT_EXTERNAL_OID8_GET_EXTSIZE(varatt_external_oid8 toast_pointer)
+{
+	return toast_pointer.va_extinfo & VARLENA_EXTSIZE_MASK;
+}
+
+static inline uint32
+VARATT_EXTERNAL_OID8_GET_COMPRESS_METHOD(varatt_external_oid8 toast_pointer)
+{
+	return toast_pointer.va_extinfo >> VARLENA_EXTSIZE_BITS;
+}
+
+static inline bool
+VARATT_EXTERNAL_OID8_IS_COMPRESSED(varatt_external_oid8 toast_pointer)
+{
+	return VARATT_EXTERNAL_OID8_GET_EXTSIZE(toast_pointer) <
 		(Size) (toast_pointer.va_rawsize - VARHDRSZ);
 }
 

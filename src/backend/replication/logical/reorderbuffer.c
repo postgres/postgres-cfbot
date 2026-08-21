@@ -177,7 +177,7 @@ typedef struct ReorderBufferIterTXNState
 /* toast datastructures */
 typedef struct ReorderBufferToastEnt
 {
-	Oid			chunk_id;		/* toast_table.chunk_id */
+	Oid8		chunk_id;		/* toast_table.chunk_id */
 	int32		last_chunk_seq; /* toast_table.chunk_seq of the last chunk we
 								 * have seen */
 	Size		num_chunks;		/* number of chunks we've already seen */
@@ -5010,7 +5010,7 @@ ReorderBufferToastInitHash(ReorderBuffer *rb, ReorderBufferTXN *txn)
 
 	Assert(txn->toast_hash == NULL);
 
-	hash_ctl.keysize = sizeof(Oid);
+	hash_ctl.keysize = sizeof(Oid8);
 	hash_ctl.entrysize = sizeof(ReorderBufferToastEnt);
 	hash_ctl.hcxt = rb->context;
 	txn->toast_hash = hash_create("ReorderBufferToastHash", 5, &hash_ctl,
@@ -5034,7 +5034,7 @@ ReorderBufferToastAppendChunk(ReorderBuffer *rb, ReorderBufferTXN *txn,
 	bool		isnull;
 	Pointer		chunk;
 	TupleDesc	desc = RelationGetDescr(relation);
-	Oid			chunk_id;
+	Oid8		chunk_id;
 	int32		chunk_seq;
 
 	if (txn->toast_hash == NULL)
@@ -5061,11 +5061,11 @@ ReorderBufferToastAppendChunk(ReorderBuffer *rb, ReorderBufferTXN *txn,
 		dlist_init(&ent->chunks);
 
 		if (chunk_seq != 0)
-			elog(ERROR, "got sequence entry %d for toast chunk %u instead of seq 0",
+			elog(ERROR, "got sequence entry %d for toast chunk " OID8_FORMAT " instead of seq 0",
 				 chunk_seq, chunk_id);
 	}
 	else if (found && chunk_seq != ent->last_chunk_seq + 1)
-		elog(ERROR, "got sequence entry %d for toast chunk %u instead of seq %d",
+		elog(ERROR, "got sequence entry %d for toast chunk " OID8_FORMAT " instead of seq %d",
 			 chunk_seq, chunk_id, ent->last_chunk_seq + 1);
 
 	chunk = DatumGetPointer(fastgetattr(newtup, 3, desc, &isnull));
@@ -5168,12 +5168,15 @@ ReorderBufferToastReplace(ReorderBuffer *rb, ReorderBufferTXN *txn,
 		varlena    *varlena_pointer;
 
 		/* va_rawsize is the size of the original datum -- including header */
-		varatt_external toast_pointer;
+		varatt_external_oid toast_pointer;
+		varatt_external_oid8 toast_pointer8;
 		varatt_indirect redirect_pointer;
 		varlena    *new_datum = NULL;
 		varlena    *reconstructed;
 		dlist_iter	it;
 		Size		data_done = 0;
+		Oid8		toast_valueid;
+		int32		rawsize;
 
 		if (attr->attisdropped)
 			continue;
@@ -5193,14 +5196,26 @@ ReorderBufferToastReplace(ReorderBuffer *rb, ReorderBufferTXN *txn,
 		if (!VARATT_IS_EXTERNAL(varlena_pointer))
 			continue;
 
-		VARATT_EXTERNAL_GET_POINTER(toast_pointer, varlena_pointer);
+		/* Branch on vartag to handle both pointer types */
+		if (VARTAG_EXTERNAL(varlena_pointer) == VARTAG_ONDISK_OID8)
+		{
+			VARATT_EXTERNAL_GET_POINTER(toast_pointer8, varlena_pointer);
+			toast_valueid = VARATT_EXTERNAL_OID8_GET_VALUEID(toast_pointer8);
+			rawsize = toast_pointer8.va_rawsize;
+		}
+		else
+		{
+			VARATT_EXTERNAL_GET_POINTER(toast_pointer, varlena_pointer);
+			toast_valueid = toast_pointer.va_valueid;
+			rawsize = toast_pointer.va_rawsize;
+		}
 
 		/*
 		 * Check whether the toast tuple changed, replace if so.
 		 */
 		ent = (ReorderBufferToastEnt *)
 			hash_search(txn->toast_hash,
-						&toast_pointer.va_valueid,
+						&toast_valueid,
 						HASH_FIND,
 						NULL);
 		if (ent == NULL)
@@ -5211,7 +5226,7 @@ ReorderBufferToastReplace(ReorderBuffer *rb, ReorderBufferTXN *txn,
 
 		free[natt] = true;
 
-		reconstructed = palloc0(toast_pointer.va_rawsize);
+		reconstructed = palloc0(rawsize);
 
 		ent->reconstructed = reconstructed;
 
@@ -5236,13 +5251,28 @@ ReorderBufferToastReplace(ReorderBuffer *rb, ReorderBufferTXN *txn,
 				   VARSIZE(chunk) - VARHDRSZ);
 			data_done += VARSIZE(chunk) - VARHDRSZ;
 		}
-		Assert(data_done == VARATT_EXTERNAL_GET_EXTSIZE(toast_pointer));
 
-		/* make sure its marked as compressed or not */
-		if (VARATT_EXTERNAL_IS_COMPRESSED(toast_pointer))
-			SET_VARSIZE_COMPRESSED(reconstructed, data_done + VARHDRSZ);
+		/* Verify size and set compression status based on pointer type */
+		if (VARTAG_EXTERNAL(varlena_pointer) == VARTAG_ONDISK_OID8)
+		{
+			Assert(data_done == VARATT_EXTERNAL_OID8_GET_EXTSIZE(toast_pointer8));
+
+			/* make sure its marked as compressed or not */
+			if (VARATT_EXTERNAL_OID8_IS_COMPRESSED(toast_pointer8))
+				SET_VARSIZE_COMPRESSED(reconstructed, data_done + VARHDRSZ);
+			else
+				SET_VARSIZE(reconstructed, data_done + VARHDRSZ);
+		}
 		else
-			SET_VARSIZE(reconstructed, data_done + VARHDRSZ);
+		{
+			Assert(data_done == VARATT_EXTERNAL_OID_GET_EXTSIZE(toast_pointer));
+
+			/* make sure its marked as compressed or not */
+			if (VARATT_EXTERNAL_OID_IS_COMPRESSED(toast_pointer))
+				SET_VARSIZE_COMPRESSED(reconstructed, data_done + VARHDRSZ);
+			else
+				SET_VARSIZE(reconstructed, data_done + VARHDRSZ);
+		}
 
 		memset(&redirect_pointer, 0, sizeof(redirect_pointer));
 		redirect_pointer.pointer = reconstructed;

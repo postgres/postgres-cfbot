@@ -32,6 +32,7 @@
 #include "nodes/makefuncs.h"
 #include "utils/fmgroids.h"
 #include "utils/rel.h"
+#include "utils/lsyscache.h"
 #include "utils/syscache.h"
 
 static void CheckAndCreateToastTable(Oid relOid, Datum reloptions,
@@ -146,6 +147,7 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 	int16		coloptions[2];
 	ObjectAddress baseobject,
 				toastobject;
+	Oid			toast_chunkid_typid = OIDOID;
 
 	/*
 	 * Is it already toasted?
@@ -158,9 +160,17 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 	 */
 	if (!IsBinaryUpgrade)
 	{
+		StdRdOptToastValueType value_type;
+
 		/* Normal mode, normal check */
 		if (!needs_toast_table(rel))
 			return false;
+
+		value_type = RelationGetToastValueType(rel, STDRD_OPTION_TOAST_VALUE_TYPE_OID);
+		if (value_type == STDRD_OPTION_TOAST_VALUE_TYPE_OID)
+			toast_chunkid_typid = OIDOID;
+		else if (value_type == STDRD_OPTION_TOAST_VALUE_TYPE_OID8)
+			toast_chunkid_typid = OID8OID;
 	}
 	else
 	{
@@ -184,6 +194,24 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 		 */
 		if (!OidIsValid(binary_upgrade_next_toast_pg_class_oid))
 			return false;
+
+		/*
+		 * The attribute type for chunk_id should have been set when requesting
+		 * a TOAST table creation.
+		 */
+		if (!OidIsValid(binary_upgrade_next_toast_chunk_id_typoid))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("toast chunk_id type not set while in binary upgrade mode")));
+		if (binary_upgrade_next_toast_chunk_id_typoid != OIDOID &&
+			binary_upgrade_next_toast_chunk_id_typoid != OID8OID)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("cannot support toast chunk_id type %u in binary upgrade mode",
+							binary_upgrade_next_toast_chunk_id_typoid)));
+
+		toast_chunkid_typid = binary_upgrade_next_toast_chunk_id_typoid;
+		binary_upgrade_next_toast_chunk_id_typoid = InvalidOid;
 	}
 
 	/*
@@ -201,11 +229,24 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 	snprintf(toast_idxname, sizeof(toast_idxname),
 			 "pg_toast_%u_index", relOid);
 
+	/*
+	 * Special case here.  If OIDOldToast is defined, we need to rely on the
+	 * existing table for the job because we do not want to create an
+	 * inconsistent relation that would conflict with the parent and break
+	 * the world.
+	 */
+	if (OidIsValid(OIDOldToast))
+	{
+		toast_chunkid_typid = get_atttype(OIDOldToast, 1);
+		if (!OidIsValid(toast_chunkid_typid))
+			elog(ERROR, "cache lookup failed for relation %u", OIDOldToast);
+	}
+
 	/* this is pretty painful...  need a tuple descriptor */
 	tupdesc = CreateTemplateTupleDesc(3);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 1,
 					   "chunk_id",
-					   OIDOID,
+					   toast_chunkid_typid,
 					   -1, 0);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 2,
 					   "chunk_seq",
@@ -319,7 +360,10 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 	collationIds[0] = InvalidOid;
 	collationIds[1] = InvalidOid;
 
-	opclassIds[0] = OID_BTREE_OPS_OID;
+	if (toast_chunkid_typid == OIDOID)
+		opclassIds[0] = OID_BTREE_OPS_OID;
+	else if (toast_chunkid_typid == OID8OID)
+		opclassIds[0] = OID8_BTREE_OPS_OID;
 	opclassIds[1] = INT4_BTREE_OPS_OID;
 
 	coloptions[0] = 0;

@@ -286,11 +286,11 @@ PostgreSQL documentation
    </varlistentry>
 
    <varlistentry>
-    <term><option>-o <replaceable class="parameter">oid</replaceable></option></term>
-    <term><option>--next-oid=<replaceable class="parameter">oid</replaceable></option></term>
+    <term><option>-o <replaceable class="parameter">oid8</replaceable></option></term>
+    <term><option>--next-oid=<replaceable class="parameter">oid8</replaceable></option></term>
     <listitem>
      <para>
-      Manually set the next OID.
+      Manually set the next OID (8 bytes).
      </para>
 
      <para>
