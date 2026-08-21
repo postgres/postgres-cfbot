@@ -1,0 +1,5 @@
+comment = 'Test extension with owned schema (superuser=false)'
+default_version = '1.0'
+superuser = false
+owned_schema = true
+schema = 'test_owned_schema_nosuperuser'

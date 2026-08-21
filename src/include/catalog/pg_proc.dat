@@ -12006,7 +12006,7 @@
 { oid => '3591', descr => 'for use by pg_upgrade',
   proname => 'binary_upgrade_create_empty_extension', proisstrict => 'f',
   provolatile => 'v', proparallel => 'u', prorettype => 'void',
-  proargtypes => 'text text bool text _oid _text _text',
+  proargtypes => 'text text bool bool text _oid _text _text',
   prosrc => 'binary_upgrade_create_empty_extension' },
 { oid => '4083', descr => 'for use by pg_upgrade',
   proname => 'binary_upgrade_set_record_init_privs', provolatile => 'v',

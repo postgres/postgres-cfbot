@@ -19,6 +19,7 @@
 #include "catalog/pg_subscription_rel.h"
 #include "catalog/pg_type.h"
 #include "commands/extension.h"
+#include "commands/schemacmds.h"
 #include "miscadmin.h"
 #include "replication/logical.h"
 #include "replication/logicallauncher.h"
@@ -185,12 +186,14 @@ Datum
 binary_upgrade_create_empty_extension(PG_FUNCTION_ARGS)
 {
 	text	   *extName;
-	text	   *schemaName;
+	char	   *schemaName;
 	bool		relocatable;
+	bool		ownedschema;
 	text	   *extVersion;
 	Datum		extConfig;
 	Datum		extCondition;
 	List	   *requiredExtensions;
+	Oid			schemaOid;
 
 	CHECK_IS_BINARY_UPGRADE;
 
@@ -198,28 +201,30 @@ binary_upgrade_create_empty_extension(PG_FUNCTION_ARGS)
 	if (PG_ARGISNULL(0) ||
 		PG_ARGISNULL(1) ||
 		PG_ARGISNULL(2) ||
-		PG_ARGISNULL(3))
+		PG_ARGISNULL(3) ||
+		PG_ARGISNULL(4))
 		elog(ERROR, "null argument to binary_upgrade_create_empty_extension is not allowed");
 
 	extName = PG_GETARG_TEXT_PP(0);
-	schemaName = PG_GETARG_TEXT_PP(1);
+	schemaName = text_to_cstring(PG_GETARG_TEXT_PP(1));
 	relocatable = PG_GETARG_BOOL(2);
-	extVersion = PG_GETARG_TEXT_PP(3);
-
-	if (PG_ARGISNULL(4))
-		extConfig = PointerGetDatum(NULL);
-	else
-		extConfig = PG_GETARG_DATUM(4);
+	ownedschema = PG_GETARG_BOOL(3);
+	extVersion = PG_GETARG_TEXT_PP(4);
 
 	if (PG_ARGISNULL(5))
+		extConfig = PointerGetDatum(NULL);
+	else
+		extConfig = PG_GETARG_DATUM(5);
+
+	if (PG_ARGISNULL(6))
 		extCondition = PointerGetDatum(NULL);
 	else
-		extCondition = PG_GETARG_DATUM(5);
+		extCondition = PG_GETARG_DATUM(6);
 
 	requiredExtensions = NIL;
-	if (!PG_ARGISNULL(6))
+	if (!PG_ARGISNULL(7))
 	{
-		ArrayType  *textArray = PG_GETARG_ARRAYTYPE_P(6);
+		ArrayType  *textArray = PG_GETARG_ARRAYTYPE_P(7);
 		Datum	   *textDatums;
 		int			ndatums;
 		int			i;
@@ -234,10 +239,27 @@ binary_upgrade_create_empty_extension(PG_FUNCTION_ARGS)
 		}
 	}
 
+	if (ownedschema)
+	{
+		ParseState *pstate = make_parsestate(NULL);
+		CreateSchemaStmt *csstmt = makeNode(CreateSchemaStmt);
+
+		csstmt->schemaname = schemaName;
+		csstmt->authrole = NULL;	/* will be created by current user */
+		csstmt->schemaElts = NIL;
+		csstmt->if_not_exists = false;
+		schemaOid = CreateSchemaCommand(pstate, csstmt, -1, -1);
+	}
+	else
+	{
+		schemaOid = get_namespace_oid(schemaName, false);
+	}
+
 	InsertExtensionTuple(text_to_cstring(extName),
 						 GetUserId(),
-						 get_namespace_oid(text_to_cstring(schemaName), false),
+						 schemaOid,
 						 relocatable,
+						 ownedschema,
 						 text_to_cstring(extVersion),
 						 extConfig,
 						 extCondition,

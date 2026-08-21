@@ -95,6 +95,8 @@ typedef struct ExtensionControlFile
 									 * MODULE_PATHNAME */
 	char	   *comment;		/* comment, if any */
 	char	   *schema;			/* target schema (allowed if !relocatable) */
+	bool		owned_schema;	/* if the schema should be owned by the
+								 * extension */
 	bool		relocatable;	/* is ALTER EXTENSION SET SCHEMA supported? */
 	bool		superuser;		/* must be superuser to install? */
 	bool		trusted;		/* allow becoming superuser on the fly? */
@@ -794,6 +796,14 @@ parse_extension_control_file(ExtensionControlFile *control,
 		{
 			control->schema = pstrdup(item->value);
 		}
+		else if (strcmp(item->name, "owned_schema") == 0)
+		{
+			if (!parse_bool(item->value, &control->owned_schema))
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("parameter \"%s\" requires a Boolean value",
+								item->name)));
+		}
 		else if (strcmp(item->name, "relocatable") == 0)
 		{
 			if (!parse_bool(item->value, &control->relocatable))
@@ -1238,6 +1248,44 @@ extension_is_trusted(ExtensionControlFile *control)
 }
 
 /*
+ * Enforce superuser requirements for extension operations.
+ *
+ * Returns true if we should switch to superuser for trusted extensions.
+ * Throws an error if superuser is required but not available.
+ *
+ * This function should only be called after choosing the appropriate
+ * control file (including any secondary control files for updates).
+ */
+static bool
+check_extension_superuser_requirements(ExtensionControlFile *control,
+									   const char *from_version)
+{
+	if (control->superuser && !superuser())
+	{
+		if (extension_is_trusted(control))
+			return true;
+		else if (from_version == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+					 errmsg("permission denied to create extension \"%s\"",
+							control->name),
+					 control->trusted
+					 ? errhint("Must have CREATE privilege on current database to create this extension.")
+					 : errhint("Must be superuser to create this extension.")));
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+					 errmsg("permission denied to update extension \"%s\"",
+							control->name),
+					 control->trusted
+					 ? errhint("Must have CREATE privilege on current database to update this extension.")
+					 : errhint("Must be superuser to update this extension.")));
+	}
+
+	return false;
+}
+
+/*
  * Execute the appropriate script file for installing or updating the extension
  *
  * If from_version isn't NULL, it's an update
@@ -1265,27 +1313,7 @@ execute_extension_script(Oid extensionOid, ExtensionControlFile *control,
 	 * here so that the control flags are correctly associated with the right
 	 * script(s) if they happen to be set in secondary control files.
 	 */
-	if (control->superuser && !superuser())
-	{
-		if (extension_is_trusted(control))
-			switch_to_superuser = true;
-		else if (from_version == NULL)
-			ereport(ERROR,
-					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-					 errmsg("permission denied to create extension \"%s\"",
-							control->name),
-					 control->trusted
-					 ? errhint("Must have CREATE privilege on current database to create this extension.")
-					 : errhint("Must be superuser to create this extension.")));
-		else
-			ereport(ERROR,
-					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-					 errmsg("permission denied to update extension \"%s\"",
-							control->name),
-					 control->trusted
-					 ? errhint("Must have CREATE privilege on current database to update this extension.")
-					 : errhint("Must be superuser to update this extension.")));
-	}
+	switch_to_superuser = check_extension_superuser_requirements(control, from_version);
 
 	filename = get_extension_script_filename(control, from_version, version);
 
@@ -1825,6 +1853,169 @@ find_install_path(List *evi_list, ExtensionVersionInfo *evi_target,
 }
 
 /*
+ * Create a schema with the given name, as part of CREATE EXTENSION.
+ */
+static Oid
+CreateSchemaForExtension(char *schemaName)
+{
+	ParseState *pstate = make_parsestate(NULL);
+	CreateSchemaStmt *csstmt = makeNode(CreateSchemaStmt);
+
+	pstate->p_sourcetext = "(generated CREATE SCHEMA command)";
+
+	csstmt->schemaname = schemaName;
+	csstmt->authrole = NULL;	/* will be created by current user */
+	csstmt->schemaElts = NIL;
+	csstmt->if_not_exists = false;
+
+	CreateSchemaCommand(pstate, csstmt, -1, -1);
+
+	/*
+	 * CreateSchemaCommand includes CommandCounterIncrement, so new schema is
+	 * now visible.
+	 */
+	return get_namespace_oid(schemaName, false);
+}
+
+/*
+ * Create an owned schema with the given name, as part of CREATE EXTENSION.
+ * Errors if the schema already exists.
+ */
+static Oid
+CreateOwnedSchemaForExtension(char *schemaName)
+{
+	/*
+	 * An owned schema must be created by the extension, so a pre-existing
+	 * schema with the same name is an error.
+	 */
+	Oid			schemaOid = get_namespace_oid(schemaName, true);
+
+	if (OidIsValid(schemaOid))
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_DUPLICATE_SCHEMA),
+				 errmsg("schema \"%s\" already exists",
+						schemaName),
+				 errhint("Drop schema \"%s\" or specify another schema using CREATE EXTENSION ... SCHEMA ...", schemaName)));
+	}
+
+	return CreateSchemaForExtension(schemaName);
+}
+
+/*
+ * Gets or creates the schema than an extension should be created in.
+ *
+ * Returns the OID of the schema and updates schemaName to the name of the schema.
+ */
+static Oid
+GetOrCreateSchemaForExtension(char **schemaName, ExtensionControlFile *control, bool cascade)
+{
+	/*
+	 * The simplest case is when the user provides a schema name.
+	 */
+	if (*schemaName)
+	{
+		Oid			schemaOid;
+
+		if (!control->owned_schema)
+		{
+			/*
+			 * For non-owned schemas, this schema must already exist. We want
+			 * to check this now, so it fails even if we bail out of this
+			 * block due to the CASCADE logic.
+			 */
+			schemaOid = get_namespace_oid(*schemaName, false);
+		}
+
+		if (control->schema && strcmp(control->schema, *schemaName) != 0)
+		{
+			/*
+			 * The extension is not relocatable and the author gave us a
+			 * schema for it.
+			 *
+			 * Unless CASCADE parameter was given, it's an error to give a
+			 * schema different from control->schema if control->schema is
+			 * specified.
+			 */
+			if (!cascade)
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("extension \"%s\" must be installed in schema \"%s\"",
+								control->name,
+								control->schema),
+						 errhint("Do not specify SCHEMA when running CREATE EXTENSION for extension \"%s\"", control->name)));
+			}
+
+			/*
+			 * If the schema mismatches and CASCADE was given, we pretend the
+			 * user did not specify a schema and use the normal logic below to
+			 * get or create the schema from the control file.
+			 */
+		}
+		else if (control->owned_schema)
+		{
+			return CreateOwnedSchemaForExtension(*schemaName);
+		}
+		else
+		{
+			return schemaOid;
+		}
+	}
+
+	if (control->schema)
+	{
+		Oid			schemaOid;
+
+		*schemaName = control->schema;
+
+		if (control->owned_schema)
+		{
+			return CreateOwnedSchemaForExtension(control->schema);
+		}
+
+		/* Find or create the schema in case it does not exist. */
+		schemaOid = get_namespace_oid(control->schema, true);
+		if (OidIsValid(schemaOid))
+		{
+			return schemaOid;
+		}
+		return CreateSchemaForExtension(control->schema);
+	}
+
+	if (control->owned_schema)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_SCHEMA),
+				 errmsg("no schema has been selected to create in")));
+	}
+
+	{
+		/*
+		 * Neither user nor author of the extension specified schema; use the
+		 * current default creation namespace, which is the first explicit
+		 * entry in the search_path.
+		 */
+		List	   *search_path = fetch_search_path(false);
+		Oid			schemaOid;
+
+		if (search_path == NIL) /* nothing valid in search_path? */
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_SCHEMA),
+					 errmsg("no schema has been selected to create in")));
+		schemaOid = linitial_oid(search_path);
+		*schemaName = get_namespace_name(schemaOid);
+		if (*schemaName == NULL)	/* recently-deleted namespace? */
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_SCHEMA),
+					 errmsg("no schema has been selected to create in")));
+
+		list_free(search_path);
+		return schemaOid;
+	}
+}
+
+/*
  * CREATE EXTENSION worker
  *
  * When CASCADE is specified, CreateExtensionInternal() recurses if required
@@ -1853,6 +2044,9 @@ CreateExtensionInternal(char *extensionName,
 	Oid			extensionOid;
 	ObjectAddress address;
 	ListCell   *lc;
+	bool		switch_to_superuser = false;
+	Oid			save_userid = 0;
+	int			save_sec_context = 0;
 
 	/*
 	 * Read the primary control file.  Note we assume that it does not contain
@@ -1921,80 +2115,25 @@ CreateExtensionInternal(char *extensionName,
 	control = read_extension_aux_control_file(pcontrol, versionName);
 
 	/*
-	 * Determine the target schema to install the extension into
+	 * For trusted extensions with owned schemas, we need to create the schema
+	 * as superuser to ensure proper ownership.
 	 */
-	if (schemaName)
+	if (control->owned_schema)
 	{
-		/* If the user is giving us the schema name, it must exist already. */
-		schemaOid = get_namespace_oid(schemaName, false);
-	}
-
-	if (control->schema != NULL)
-	{
-		/*
-		 * The extension is not relocatable and the author gave us a schema
-		 * for it.
-		 *
-		 * Unless CASCADE parameter was given, it's an error to give a schema
-		 * different from control->schema if control->schema is specified.
-		 */
-		if (schemaName && strcmp(control->schema, schemaName) != 0 &&
-			!cascade)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("extension \"%s\" must be installed in schema \"%s\"",
-							control->name,
-							control->schema)));
-
-		/* Always use the schema from control file for current extension. */
-		schemaName = control->schema;
-
-		/* Find or create the schema in case it does not exist. */
-		schemaOid = get_namespace_oid(schemaName, true);
-
-		if (!OidIsValid(schemaOid))
+		switch_to_superuser = check_extension_superuser_requirements(control, NULL);
+		if (switch_to_superuser)
 		{
-			ParseState *pstate = make_parsestate(NULL);
-			CreateSchemaStmt *csstmt = makeNode(CreateSchemaStmt);
-
-			pstate->p_sourcetext = "(generated CREATE SCHEMA command)";
-
-			csstmt->schemaname = schemaName;
-			csstmt->authrole = NULL;	/* will be created by current user */
-			csstmt->schemaElts = NIL;
-			csstmt->if_not_exists = false;
-
-			CreateSchemaCommand(pstate, csstmt, -1, -1);
-
-			/*
-			 * CreateSchemaCommand includes CommandCounterIncrement, so new
-			 * schema is now visible.
-			 */
-			schemaOid = get_namespace_oid(schemaName, false);
+			GetUserIdAndSecContext(&save_userid, &save_sec_context);
+			SetUserIdAndSecContext(BOOTSTRAP_SUPERUSERID,
+								   save_sec_context | SECURITY_LOCAL_USERID_CHANGE);
 		}
 	}
-	else if (!OidIsValid(schemaOid))
-	{
-		/*
-		 * Neither user nor author of the extension specified schema; use the
-		 * current default creation namespace, which is the first explicit
-		 * entry in the search_path.
-		 */
-		List	   *search_path = fetch_search_path(false);
 
-		if (search_path == NIL) /* nothing valid in search_path? */
-			ereport(ERROR,
-					(errcode(ERRCODE_UNDEFINED_SCHEMA),
-					 errmsg("no schema has been selected to create in")));
-		schemaOid = linitial_oid(search_path);
-		schemaName = get_namespace_name(schemaOid);
-		if (schemaName == NULL) /* recently-deleted namespace? */
-			ereport(ERROR,
-					(errcode(ERRCODE_UNDEFINED_SCHEMA),
-					 errmsg("no schema has been selected to create in")));
+	schemaOid = GetOrCreateSchemaForExtension(&schemaName, control, cascade);
 
-		list_free(search_path);
-	}
+	/* Restore authentication state after schema creation if needed */
+	if (switch_to_superuser)
+		SetUserIdAndSecContext(save_userid, save_sec_context);
 
 	/*
 	 * Make note if a temporary namespace has been accessed in this
@@ -2040,6 +2179,7 @@ CreateExtensionInternal(char *extensionName,
 	 */
 	address = InsertExtensionTuple(control->name, extowner,
 								   schemaOid, control->relocatable,
+								   control->owned_schema,
 								   versionName,
 								   PointerGetDatum(NULL),
 								   PointerGetDatum(NULL),
@@ -2245,7 +2385,8 @@ CreateExtension(ParseState *pstate, CreateExtensionStmt *stmt)
  */
 ObjectAddress
 InsertExtensionTuple(const char *extName, Oid extOwner,
-					 Oid schemaOid, bool relocatable, const char *extVersion,
+					 Oid schemaOid, bool relocatable, bool ownedSchema,
+					 const char *extVersion,
 					 Datum extConfig, Datum extCondition,
 					 List *requiredExtensions)
 {
@@ -2275,6 +2416,7 @@ InsertExtensionTuple(const char *extName, Oid extOwner,
 	values[Anum_pg_extension_extowner - 1] = ObjectIdGetDatum(extOwner);
 	values[Anum_pg_extension_extnamespace - 1] = ObjectIdGetDatum(schemaOid);
 	values[Anum_pg_extension_extrelocatable - 1] = BoolGetDatum(relocatable);
+	values[Anum_pg_extension_extownedschema - 1] = BoolGetDatum(ownedSchema);
 	values[Anum_pg_extension_extversion - 1] = CStringGetTextDatum(extVersion);
 
 	if (extConfig == PointerGetDatum(NULL))
@@ -2318,6 +2460,17 @@ InsertExtensionTuple(const char *extName, Oid extOwner,
 	/* Record all of them (this includes duplicate elimination) */
 	record_object_address_dependencies(&myself, refobjs, DEPENDENCY_NORMAL);
 	free_object_addresses(refobjs);
+
+	if (ownedSchema)
+	{
+		ObjectAddress schemaAddress = {
+			.classId = NamespaceRelationId,
+			.objectId = schemaOid,
+		};
+
+		recordDependencyOn(&schemaAddress, &myself, DEPENDENCY_EXTENSION);
+	}
+
 
 	/* Post creation hook for new extension */
 	InvokeObjectPostCreateHook(ExtensionRelationId, extensionOid, 0);
@@ -3253,12 +3406,16 @@ extension_config_remove(Oid extensionoid, Oid tableoid)
 
 /*
  * Execute ALTER EXTENSION SET SCHEMA
+ *
+ * For owned schemas, this boils down to changing the name of its schema. For
+ * non-owned schemas this requires moving all the member objects into the new
+ * schema.
  */
 ObjectAddress
 AlterExtensionNamespace(const char *extensionName, const char *newschema, Oid *oldschema)
 {
 	Oid			extensionOid;
-	Oid			nspOid;
+	Oid			nspOid = InvalidOid;
 	Oid			oldNspOid;
 	AclResult	aclresult;
 	Relation	extRel;
@@ -3271,10 +3428,9 @@ AlterExtensionNamespace(const char *extensionName, const char *newschema, Oid *o
 	HeapTuple	depTup;
 	ObjectAddresses *objsMoved;
 	ObjectAddress extAddr;
+	bool		ownedSchema;
 
 	extensionOid = get_extension_oid(extensionName, false);
-
-	nspOid = LookupCreationNamespace(newschema);
 
 	/*
 	 * Permission check: must own extension.  Note that we don't bother to
@@ -3283,22 +3439,6 @@ AlterExtensionNamespace(const char *extensionName, const char *newschema, Oid *o
 	if (!object_ownercheck(ExtensionRelationId, extensionOid, GetUserId()))
 		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_EXTENSION,
 					   extensionName);
-
-	/* Permission check: must have creation rights in target namespace */
-	aclresult = object_aclcheck(NamespaceRelationId, nspOid, GetUserId(), ACL_CREATE);
-	if (aclresult != ACLCHECK_OK)
-		aclcheck_error(aclresult, OBJECT_SCHEMA, newschema);
-
-	/*
-	 * If the schema is currently a member of the extension, disallow moving
-	 * the extension into the schema.  That would create a dependency loop.
-	 */
-	if (getExtensionOfObject(NamespaceRelationId, nspOid) == extensionOid)
-		ereport(ERROR,
-				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("cannot move extension \"%s\" into schema \"%s\" "
-						"because the extension contains the schema",
-						extensionName, newschema)));
 
 	/* Locate the pg_extension tuple */
 	extRel = table_open(ExtensionRelationId, RowExclusiveLock);
@@ -3323,14 +3463,56 @@ AlterExtensionNamespace(const char *extensionName, const char *newschema, Oid *o
 
 	systable_endscan(extScan);
 
+	ownedSchema = extForm->extownedschema;
+
 	/*
-	 * If the extension is already in the target schema, just silently do
-	 * nothing.
+	 * For non-owned schemas, we should now evaluate if the target schema is a
+	 * valid target. For owned schemas, no such checks are needed, because
+	 * we'll simply rename the existing schema.
 	 */
-	if (extForm->extnamespace == nspOid)
+	if (!ownedSchema)
 	{
-		table_close(extRel, RowExclusiveLock);
-		return InvalidObjectAddress;
+		nspOid = LookupCreationNamespace(newschema);
+
+		/* Permission check: must have creation rights in target namespace */
+		aclresult = object_aclcheck(NamespaceRelationId, nspOid, GetUserId(), ACL_CREATE);
+		if (aclresult != ACLCHECK_OK)
+			aclcheck_error(aclresult, OBJECT_SCHEMA, newschema);
+
+		/*
+		 * If the schema is currently a member of the extension, disallow
+		 * moving the extension into the schema.  That would create a
+		 * dependency loop.
+		 */
+		if (getExtensionOfObject(NamespaceRelationId, nspOid) == extensionOid)
+			ereport(ERROR,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("cannot move extension \"%s\" into schema \"%s\" "
+							"because the extension contains the schema",
+							extensionName, newschema)));
+
+		/*
+		 * If the extension is already in the target schema, just silently do
+		 * nothing.
+		 */
+		if (extForm->extnamespace == nspOid)
+		{
+			table_close(extRel, RowExclusiveLock);
+			return InvalidObjectAddress;
+		}
+	}
+	else
+	{
+		/*
+		 * If the owned schema already has the target name, just silently do
+		 * nothing. We cannot compare namespace OIDs like the non-owned case
+		 * does, because renaming means the target schema doesn't exist yet.
+		 */
+		if (strcmp(get_namespace_name(extForm->extnamespace), newschema) == 0)
+		{
+			table_close(extRel, RowExclusiveLock);
+			return InvalidObjectAddress;
+		}
 	}
 
 	/* Check extension is supposed to be relocatable */
@@ -3404,6 +3586,13 @@ AlterExtensionNamespace(const char *extensionName, const char *newschema, Oid *o
 		}
 
 		/*
+		 * We don't actually move any objects for owned schemas because we
+		 * simply rename the schema that these objects are already in.
+		 */
+		if (ownedSchema)
+			continue;
+
+		/*
 		 * Otherwise, ignore non-membership dependencies.  (Currently, the
 		 * only other case we could see here is a normal dependency from
 		 * another extension.)
@@ -3446,18 +3635,35 @@ AlterExtensionNamespace(const char *extensionName, const char *newschema, Oid *o
 
 	relation_close(depRel, AccessShareLock);
 
-	/* Now adjust pg_extension.extnamespace */
-	extForm->extnamespace = nspOid;
+	/* Now actually update the schema of the extension. */
+	if (ownedSchema)
+	{
+		/*
+		 * For owned schemas, we simply rename the schema. This means that we
+		 * don't need to update the extension its catalog entry, because the
+		 * oid of the schema will stay the same.
+		 */
+		RenameSchema(get_namespace_name(oldNspOid), newschema);
+		table_close(extRel, RowExclusiveLock);
+	}
+	else
+	{
+		/*
+		 * For non-owned schemas, we now have to update the extension's schema
+		 * entry, and also update the dependencies.
+		 */
+		extForm->extnamespace = nspOid;
 
-	CatalogTupleUpdate(extRel, &extTup->t_self, extTup);
+		CatalogTupleUpdate(extRel, &extTup->t_self, extTup);
 
-	table_close(extRel, RowExclusiveLock);
+		table_close(extRel, RowExclusiveLock);
 
-	/* update dependency to point to the new schema */
-	if (changeDependencyFor(ExtensionRelationId, extensionOid,
-							NamespaceRelationId, oldNspOid, nspOid) != 1)
-		elog(ERROR, "could not change schema dependency for extension %s",
-			 NameStr(extForm->extname));
+		/* update dependency to point to the new schema */
+		if (changeDependencyFor(ExtensionRelationId, extensionOid,
+								NamespaceRelationId, oldNspOid, nspOid) != 1)
+			elog(ERROR, "could not change schema dependency for extension %s",
+				 NameStr(extForm->extname));
+	}
 
 	InvokeObjectPostAlterHook(ExtensionRelationId, extensionOid, 0);
 
