@@ -103,9 +103,10 @@ CreateConstraintEntry(const char *constraintName,
 	ObjectAddresses *addrs_auto;
 	ObjectAddresses *addrs_normal;
 
-	/* Only CHECK or FOREIGN KEY constraint can be not enforced */
-	Assert(isEnforced || constraintType == CONSTRAINT_CHECK ||
-		   constraintType == CONSTRAINT_FOREIGN);
+	/* CHECK, FOREIGN KEY, NOT NULL constraint can be not enforced */
+	Assert(isEnforced || (constraintType == CONSTRAINT_CHECK ||
+						  constraintType == CONSTRAINT_FOREIGN ||
+						  constraintType == CONSTRAINT_NOTNULL));
 	/* NOT ENFORCED constraint must be NOT VALID */
 	Assert(isEnforced || !isValidated);
 
@@ -583,8 +584,8 @@ ChooseConstraintName(const char *name1, const char *name2,
 }
 
 /*
- * Find and return a copy of the pg_constraint tuple that implements a
- * (possibly not valid) not-null constraint for the given column of the
+ * Find and return a copy of the pg_constraint tuple that implements a (possibly
+ * not valid or not enforced) not-null constraint for the given column of the
  * given relation.  If no such constraint exists, return NULL.
  *
  * XXX This would be easier if we had pg_attribute.notnullconstr with the OID
@@ -637,8 +638,8 @@ findNotNullConstraintAttnum(Oid relid, AttrNumber attnum)
 
 /*
  * Find and return a copy of the pg_constraint tuple that implements a
- * (possibly not valid) not-null constraint for the given column of the
- * given relation.
+ * (possibly not valid or not enforced) not-null constraint for the given column
+ * of the given relation.
  * If no such column or no such constraint exists, return NULL.
  */
 HeapTuple
@@ -731,8 +732,8 @@ extractNotNullColumn(HeapTuple constrTup)
  * If no not-null constraint is found for the column, return false.
  * Caller can create one.
  *
- * If a constraint exists but the connoinherit flag is not what the caller
- * wants, throw an error about the incompatibility.  If the desired
+ * If a constraint exists but the connoinherit, conenforced flag is not what the
+ * caller wants, throw an error about the incompatibility.  If the desired
  * constraint is valid but the existing constraint is not valid, also
  * throw an error about that (the opposite case is acceptable).  If
  * the proposed constraint has a different name, also throw an error.
@@ -743,7 +744,8 @@ extractNotNullColumn(HeapTuple constrTup)
  */
 bool
 AdjustNotNullInheritance(Oid relid, AttrNumber attnum, const char *new_conname,
-						 bool is_local, bool is_no_inherit, bool is_notvalid)
+						 bool is_local, bool is_no_inherit, bool is_notvalid,
+						 bool is_enforced)
 {
 	HeapTuple	tup;
 
@@ -773,7 +775,7 @@ AdjustNotNullInheritance(Oid relid, AttrNumber attnum, const char *new_conname,
 		 * Throw an error if the existing constraint is NOT VALID and caller
 		 * wants a valid one.
 		 */
-		if (!is_notvalid && !conform->convalidated)
+		if (!is_notvalid && !conform->convalidated && conform->conenforced)
 			ereport(ERROR,
 					errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 					errmsg("incompatible NOT VALID constraint \"%s\" on relation \"%s\"",
@@ -796,6 +798,26 @@ AdjustNotNullInheritance(Oid relid, AttrNumber attnum, const char *new_conname,
 						   new_conname, get_attname(relid, attnum, false), get_rel_name(relid)),
 					errdetail("A not-null constraint named \"%s\" already exists for this column.",
 							  NameStr(conform->conname)));
+
+		/*
+		 * If the ENFORCED status we're asked for doesn't match what the
+		 * existing constraint has, then throw an error.
+		 */
+		if (is_enforced != conform->conenforced)
+		{
+			if (is_enforced)
+				ereport(ERROR,
+						errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						errmsg("cannot change not enforced NOT NULL constraint \"%s\" on relation \"%s\" to enforced",
+							   NameStr(conform->conname), get_rel_name(relid)),
+						errhint("You might need to ensure the existing constraint is enforced."));
+			else
+				ereport(ERROR,
+						errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						errmsg("cannot change enforced NOT NULL constraint \"%s\" on relation \"%s\" to not enforced",
+							   NameStr(conform->conname), get_rel_name(relid)),
+						errhint("You might need to ensure the existing constraint is not enforced."));
+		}
 
 		if (!is_local)
 		{
@@ -827,6 +849,7 @@ AdjustNotNullInheritance(Oid relid, AttrNumber attnum, const char *new_conname,
  * RelationGetNotNullConstraints
  *		Return the list of not-null constraints for the given rel
  *
+ * The returned not-null constraints possibly not enforced!
  * Caller can request cooked constraints, or raw.
  *
  * This is seldom needed, so we just scan pg_constraint each time.
@@ -873,7 +896,7 @@ RelationGetNotNullConstraints(Oid relid, bool cooked, bool include_noinh)
 			cooked->name = pstrdup(NameStr(conForm->conname));
 			cooked->attnum = colnum;
 			cooked->expr = NULL;
-			cooked->is_enforced = true;
+			cooked->is_enforced = conForm->conenforced;
 			cooked->skip_validation = !conForm->convalidated;
 			cooked->is_local = true;
 			cooked->inhcount = 0;
@@ -893,7 +916,7 @@ RelationGetNotNullConstraints(Oid relid, bool cooked, bool include_noinh)
 			constr->location = -1;
 			constr->keys = list_make1(makeString(get_attname(relid, colnum,
 															 false)));
-			constr->is_enforced = true;
+			constr->is_enforced = conForm->conenforced;
 			constr->skip_validation = !conForm->convalidated;
 			constr->initially_valid = conForm->convalidated;
 			constr->is_no_inherit = conForm->connoinherit;

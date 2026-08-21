@@ -623,6 +623,98 @@ alter table p1_c1 inherit p1;
 drop table p1, p1_c1;
 
 --
+-- Similarly, check the merging of existing constraints; a parent not-null constraint
+-- marked as NOT ENFORCED can merge with an ENFORCED child constraint, but the
+-- reverse is not allowed.
+--
+create table p1(f1 int constraint p1_a_nn not null);
+create table p1_c1(f1 int constraint p1_c1_nn not null not enforced);
+alter table p1_c1 inherit p1; -- error
+create table p1_c2(f1 int not null not enforced) inherits(p1); -- error
+create table p1_c2(f1 int not null not enforced) inherits(p1_c1, p1); -- error
+create table p1_c2(f1 int not null not enforced) inherits(p1_c1); -- ok. produce not enforced
+create table p1_c3(f1 int not null enforced) inherits(p1_c1, p1); -- ok. produce enforced
+create table p1_c4(f1 int ) inherits(p1_c1, p1, p1_c2, p1_c3); -- ok, produce enforced
+select conrelid::regclass::text, coninhcount, conenforced
+from pg_constraint
+where conrelid::regclass::text in ('p1', 'p1_c1', 'p1_c2', 'p1_c3', 'p1_c4') and contype = 'n';
+drop table if exists p1, p1_c1, p1_c2, p1_c3, p1_c4 cascade;
+
+create table p1(f1 int);
+create table p1_c1() inherits(p1);
+create table p1_c2() inherits(p1, p1_c1);
+
+alter table p1 add constraint p1_nn_1 not null f1 not enforced;
+alter table p1 alter column f1 drop not null; -- all not enforced not-null constraint will be droped
+select 1 as expect_zero_row
+from pg_constraint
+where conrelid::regclass::text in ('p1', 'p1_c1', 'p1_c2', 'p1_c3', 'p1_c4') and contype = 'n';
+alter table p1 add constraint p1_nn_1 not null f1 not enforced;
+alter table p1 add constraint p1_nn_1x not null f1 not enforced; -- error, already exists
+alter table p1 add constraint p1_nn_1 not null f1 enforced; -- error, column f1 already have not enforced
+alter table p1 add constraint p1_nn_1 not null f1 not enforced;
+alter table p1_c1 add constraint p1_nn_1 not null f1 enforced; -- error
+alter table p1_c1 add constraint p1_nn_1 not null f1 not enforced; -- ok
+
+-- not allowed: child is not enforced, parent is enforced
+alter table p1 alter column f1 drop not null;
+alter table p1_c1 alter column f1 drop not null;
+alter table p1_c1 add constraint nn_x not null f1 not enforced;
+alter table p1 add constraint nn_x not null f1 enforced; -- error
+
+alter table p1_c1 alter column f1 drop not null;
+alter table p1_c1 add constraint nn_v not null f1 not valid enforced;
+alter table p1 add constraint nn_v not null f1 not enforced; -- error
+drop table p1 cascade;
+
+create table p1_nn(f1 int constraint p1_nn_a_nn not null not enforced);
+create table p1_nn_c3(f1 int);
+alter table p1_nn_c3 inherit p1_nn; -- error, because p1_nn_c3 does not have not-null constraint
+drop table p1_nn_c3;
+create table p1_nn_c1(f1 int constraint p1_nn_c1_a_nn not null);
+alter table p1_nn_c1 inherit p1_nn; -- ok: parent not-null is not enforced while child is enforced
+create table p1_nn_c2() inherits(p1_nn, p1_nn_c1); -- merged multiple not-null constraints produce an enforced one
+\d+ p1_nn_c2
+
+create table p1_nn_c4(f1 int not null not enforced) inherits(p1_nn, p1_nn_c1); -- error, parent (p1_nn_c1) have enforced
+-- merged multiple not-null constraints produce an enforced one, below two will be success.
+create table p1_nn_c4(f1 int not null) inherits(p1_nn, p1_nn_c1);
+create table p1_nn_c5(f1 int) inherits(p1_nn, p1_nn_c1, p1_nn_c4);
+
+select  conrelid::regclass, conname, conenforced, convalidated, coninhcount
+from    pg_constraint
+where   conrelid::regclass::text = ANY ('{p1_nn, p1_nn_c1, p1_nn_c2, p1_nn_c4, p1_nn_c5}') and contype = 'n'
+order by conname, conrelid::regclass::text collate "C";
+-- p1_nn etc is used for pg_upgrade tests, so don't drop it
+
+-- Test ALTER CONSTRAINT INHERIT for not enforced not null
+create table inh_nn1 (f1 int, constraint nn not null f1 not enforced no inherit);
+create table inh_nn2 (f2 text, f3 int) inherits (inh_nn1);
+create table inh_nn3 (f1 int) inherits (inh_nn1, inh_nn2);
+create table inh_nn4 (f1 int) inherits (inh_nn1, inh_nn2, inh_nn3);
+alter table inh_nn2 add constraint nn2 not null f1;
+alter table inh_nn1 alter constraint nn inherit;
+
+create view constraint_info AS
+select  conrelid::regclass, conname, conkey[1], conenforced, convalidated, coninhcount, connoinherit, conislocal
+from    pg_constraint
+where   conrelid::regclass::text IN ('inh_nn1', 'inh_nn2', 'inh_nn3', 'inh_nn4')
+and     contype = 'n'
+order by conname, conrelid::regclass::text collate "C";
+
+select * from constraint_info;
+drop table inh_nn1 cascade;
+create table inh_nn1 (f1 int, constraint nn not null f1 no inherit);
+create table inh_nn2 (f2 text, f3 int) inherits (inh_nn1);
+alter table inh_nn2 add constraint nn2 not null f1 not enforced;
+create table inh_nn3 (f1 int) inherits (inh_nn1, inh_nn2);
+select * from constraint_info;
+
+-- error, parent not-null is enforcecd, child not-null cannot be not enforced
+alter table inh_nn1 alter constraint nn inherit;
+drop table inh_nn1 cascade;
+
+--
 -- Test DROP behavior of multiply-defined CHECK constraints
 --
 create table p1(f1 int constraint f1_pos CHECK (f1 > 0));

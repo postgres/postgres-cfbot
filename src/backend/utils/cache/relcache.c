@@ -4632,8 +4632,8 @@ CheckNNConstraintFetch(Relation relation)
 		bool		isnull;
 
 		/*
-		 * If this is a not-null constraint, then only look at it if it's
-		 * invalid, and if so, mark the TupleDesc entry as known invalid.
+		 * If this is an enforced not-null constraint, then only look at it if
+		 * it's invalid, and if so, mark the TupleDesc entry as known invalid.
 		 * Otherwise move on.  We'll mark any remaining columns that are still
 		 * in UNKNOWN state as known valid later.  This allows us not to have
 		 * to extract the attnum from this constraint tuple in the vast
@@ -4641,7 +4641,7 @@ CheckNNConstraintFetch(Relation relation)
 		 */
 		if (conform->contype == CONSTRAINT_NOTNULL)
 		{
-			if (!conform->convalidated)
+			if (!conform->convalidated && conform->conenforced)
 			{
 				AttrNumber	attnum;
 

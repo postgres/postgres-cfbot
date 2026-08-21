@@ -904,6 +904,7 @@ ALTER TABLE t ADD CONSTRAINT t_b_check CHECK (b > 0);
 ALTER TABLE t ADD CONSTRAINT t_b_check1 CHECK (b > 0) NOT ENFORCED;
 ALTER TABLE t ADD CONSTRAINT t_b_check2 CHECK (b > 0) NOT VALID;
 ALTER TABLE t ADD CONSTRAINT t_b_nn NOT NULL b NOT VALID;
+ALTER TABLE t ADD CONSTRAINT t_d_nn NOT NULL d NOT ENFORCED;
 INSERT INTO tp_0_1(i, t, b) VALUES(0, DEFAULT, 1);
 INSERT INTO tp_1_2(i, t, b) VALUES(1, DEFAULT, 2);
 CREATE OR REPLACE FUNCTION trigger_function() RETURNS trigger LANGUAGE 'plpgsql' AS
@@ -938,6 +939,7 @@ Statistics objects:
 Not-null constraints:
     "tp_0_1_i_not_null" NOT NULL "i" (inherited)
     "t_b_nn" NOT NULL "b" (inherited) NOT VALID
+    "t_d_nn" NOT NULL "d" (inherited) NOT ENFORCED
 Triggers:
     t_before_insert_row_trigger BEFORE INSERT ON tp_0_1 FOR EACH ROW EXECUTE FUNCTION trigger_function('t'), ON TABLE t
     tp_0_1_before_insert_row_trigger BEFORE INSERT ON tp_0_1 FOR EACH ROW EXECUTE FUNCTION trigger_function('tp_0_1')
@@ -960,6 +962,7 @@ Check constraints:
 Not-null constraints:
     "t_i_not_null" NOT NULL "i" (inherited)
     "t_b_nn" NOT NULL "b" (inherited) NOT VALID
+    "t_d_nn" NOT NULL "d" (inherited) NOT ENFORCED
 Triggers:
     t_before_insert_row_trigger BEFORE INSERT ON tp_0_1 FOR EACH ROW EXECUTE FUNCTION trigger_function('t'), ON TABLE t
 

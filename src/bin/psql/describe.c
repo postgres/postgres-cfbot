@@ -3187,7 +3187,14 @@ describeOneTableDetails(const char *schemaname,
 			appendPQExpBuffer(&buf,
 							  "SELECT c.conname, a.attname, c.connoinherit,\n"
 							  "  c.conislocal, c.coninhcount <> 0,\n"
-							  "  c.convalidated\n"
+							  "  c.convalidated, ");
+
+			if (pset.sversion >= 200000)
+				appendPQExpBufferStr(&buf, "c.conenforced\n");
+			else
+				appendPQExpBufferStr(&buf, "true AS conenforced\n");
+
+			appendPQExpBuffer(&buf,
 							  "FROM pg_catalog.pg_constraint c JOIN\n"
 							  "  pg_catalog.pg_attribute a ON\n"
 							  "    (a.attrelid = c.conrelid AND a.attnum = c.conkey[1])\n"
@@ -3211,15 +3218,20 @@ describeOneTableDetails(const char *schemaname,
 				bool		islocal = PQgetvalue(result, i, 3)[0] == 't';
 				bool		inherited = PQgetvalue(result, i, 4)[0] == 't';
 				bool		validated = PQgetvalue(result, i, 5)[0] == 't';
+				bool		enforced = PQgetvalue(result, i, 6)[0] == 't';
 
-				printfPQExpBuffer(&buf, "    \"%s\" NOT NULL \"%s\"%s%s",
+				printfPQExpBuffer(&buf, "    \"%s\" NOT NULL \"%s\"%s",
 								  PQgetvalue(result, i, 0),
 								  PQgetvalue(result, i, 1),
 								  PQgetvalue(result, i, 2)[0] == 't' ?
 								  " NO INHERIT" :
 								  islocal && inherited ? _(" (local, inherited)") :
-								  inherited ? _(" (inherited)") : "",
-								  !validated ? " NOT VALID" : "");
+								  inherited ? _(" (inherited)") : "");
+
+				if (!enforced)
+					appendPQExpBufferStr(&buf, " NOT ENFORCED");
+				else if (!validated)
+					appendPQExpBufferStr(&buf, " NOT VALID");
 
 				printTableAddFooter(&cont, buf.data);
 			}
