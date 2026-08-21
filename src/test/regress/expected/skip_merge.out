@@ -1,0 +1,633 @@
+--
+-- Index Suffix Scan (MergeAppend)
+--
+-- Equality/IN on index prefix columns is expanded into per-prefix IndexPaths
+-- merged with MergeAppend when ORDER BY starts with a later index column.
+-- A qual on the suffix column is optional.  ASC/DESC and NULLS ordering must
+-- match the index (or the opposite scan direction).
+--
+CREATE SCHEMA skip_merge;
+SET search_path TO skip_merge;
+CREATE TABLE test AS
+SELECT x, y
+FROM generate_series(1, 50) AS x,
+     generate_series(1, 50) AS y;
+CREATE INDEX test_idx ON test USING btree (x, y);
+ANALYZE test;
+CREATE TABLE t3 AS
+SELECT a, b, c
+FROM generate_series(1, 10) AS a,
+     generate_series(1, 10) AS b,
+     generate_series(1, 20) AS c;
+CREATE INDEX t3_idx ON t3 USING btree (a, b, c);
+ANALYZE t3;
+CREATE TABLE tdesc AS
+SELECT x, y
+FROM generate_series(1, 20) AS x,
+     generate_series(1, 20) AS y;
+CREATE INDEX tdesc_idx ON tdesc USING btree (x, y DESC);
+ANALYZE tdesc;
+-- Nullable suffix for NULLS FIRST / LAST tests.
+CREATE TABLE tnulls AS
+SELECT x, y
+FROM generate_series(1, 10) AS x,
+     generate_series(1, 10) AS y
+UNION ALL
+SELECT x, NULL::int
+FROM generate_series(1, 4) AS x;
+CREATE INDEX tnulls_idx ON tnulls USING btree (x, y);			-- ASC, NULLS LAST
+CREATE INDEX tnulls_nf_idx ON tnulls USING btree (x, y NULLS FIRST);
+ANALYZE tnulls;
+-- Same data as tnulls, but only a NULLS LAST index (mismatch cases).
+CREATE TABLE tnulls_nl AS SELECT * FROM tnulls;
+CREATE INDEX tnulls_nl_idx ON tnulls_nl USING btree (x, y);		-- ASC, NULLS LAST
+ANALYZE tnulls_nl;
+-- Same data as tnulls, but only a NULLS FIRST index (mismatch cases).
+CREATE TABLE tnulls_nf AS SELECT * FROM tnulls;
+CREATE INDEX tnulls_nf_only_idx ON tnulls_nf USING btree (x, y NULLS FIRST);
+ANALYZE tnulls_nf;
+-- Single-key btree index (unsupported: no suffix column).
+CREATE TABLE tsingle AS SELECT * FROM test;
+CREATE INDEX tsingle_idx ON tsingle USING btree (x);
+ANALYZE tsingle;
+-- Hash index (unsupported: no sortopfamily).
+CREATE TABLE thash AS SELECT * FROM test;
+CREATE INDEX thash_idx ON thash USING hash (x);
+ANALYZE thash;
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SET enable_indexskipmerge = on;
+--
+-- Supported: expect Merge Append
+--
+-- Basic: Const IN + ORDER BY suffix.
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM test WHERE x IN (1, 3)
+ORDER BY y LIMIT 3;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Limit
+   ->  Merge Append
+         Sort Key: y
+         ->  Index Only Scan using test_idx on test
+               Index Cond: (x = 1)
+         ->  Index Only Scan using test_idx on test
+               Index Cond: (x = 3)
+(7 rows)
+
+-- = ANY(array) form.
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM test WHERE x = ANY (ARRAY[1, 2])
+ORDER BY y LIMIT 3;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Limit
+   ->  Merge Append
+         Sort Key: y
+         ->  Index Only Scan using test_idx on test
+               Index Cond: (x = 1)
+         ->  Index Only Scan using test_idx on test
+               Index Cond: (x = 2)
+(7 rows)
+
+--
+-- Ordered suffix with range filters
+--
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM test WHERE x IN (1, 3) AND y >= 10
+ORDER BY y LIMIT 3;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Limit
+   ->  Merge Append
+         Sort Key: y
+         ->  Index Only Scan using test_idx on test
+               Index Cond: ((x = 1) AND (y >= 10))
+         ->  Index Only Scan using test_idx on test
+               Index Cond: ((x = 3) AND (y >= 10))
+(7 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM test WHERE x IN (1, 3) AND y > 10
+ORDER BY y LIMIT 3;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Limit
+   ->  Merge Append
+         Sort Key: y
+         ->  Index Only Scan using test_idx on test
+               Index Cond: ((x = 1) AND (y > 10))
+         ->  Index Only Scan using test_idx on test
+               Index Cond: ((x = 3) AND (y > 10))
+(7 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM test WHERE x IN (1, 3) AND y < 10
+ORDER BY y LIMIT 3;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Limit
+   ->  Merge Append
+         Sort Key: y
+         ->  Index Only Scan using test_idx on test
+               Index Cond: ((x = 1) AND (y < 10))
+         ->  Index Only Scan using test_idx on test
+               Index Cond: ((x = 3) AND (y < 10))
+(7 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM test WHERE x IN (1, 3) AND y <= 10
+ORDER BY y LIMIT 3;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Limit
+   ->  Merge Append
+         Sort Key: y
+         ->  Index Only Scan using test_idx on test
+               Index Cond: ((x = 1) AND (y <= 10))
+         ->  Index Only Scan using test_idx on test
+               Index Cond: ((x = 3) AND (y <= 10))
+(7 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM test WHERE x IN (1, 3) AND y BETWEEN 10 AND 30
+ORDER BY y LIMIT 3;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Limit
+   ->  Merge Append
+         Sort Key: y
+         ->  Index Only Scan using test_idx on test
+               Index Cond: ((x = 1) AND (y >= 10) AND (y <= 30))
+         ->  Index Only Scan using test_idx on test
+               Index Cond: ((x = 3) AND (y >= 10) AND (y <= 30))
+(7 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM test WHERE x IN (1, 3) AND y >= 1 AND y <= 3
+ORDER BY y LIMIT 3;
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Limit
+   ->  Merge Append
+         Sort Key: y
+         ->  Index Only Scan using test_idx on test
+               Index Cond: ((x = 1) AND (y >= 1) AND (y <= 3))
+         ->  Index Only Scan using test_idx on test
+               Index Cond: ((x = 3) AND (y >= 1) AND (y <= 3))
+(7 rows)
+
+-- Secondary ORDER BY on prefix (MergeAppend compares full sort keys).
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM test WHERE x IN (1, 3)
+ORDER BY y, x LIMIT 3;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Limit
+   ->  Merge Append
+         Sort Key: y, x
+         ->  Index Only Scan using test_idx on test
+               Index Cond: (x = 1)
+         ->  Index Only Scan using test_idx on test
+               Index Cond: (x = 3)
+(7 rows)
+
+-- At max_index_merge_scans limit.
+SET max_index_merge_scans = 2;
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM test WHERE x IN (1, 3)
+ORDER BY y LIMIT 3;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Limit
+   ->  Merge Append
+         Sort Key: y
+         ->  Index Only Scan using test_idx on test
+               Index Cond: (x = 1)
+         ->  Index Only Scan using test_idx on test
+               Index Cond: (x = 3)
+(7 rows)
+
+RESET max_index_merge_scans;
+-- Multi-column prefix cartesian product.
+EXPLAIN (COSTS OFF)
+SELECT a, b, c FROM t3 WHERE a IN (1, 3) AND b IN (3, 4)
+ORDER BY c LIMIT 3;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Limit
+   ->  Merge Append
+         Sort Key: c
+         ->  Index Only Scan using t3_idx on t3
+               Index Cond: ((a = 1) AND (b = 3))
+         ->  Index Only Scan using t3_idx on t3
+               Index Cond: ((a = 1) AND (b = 4))
+         ->  Index Only Scan using t3_idx on t3
+               Index Cond: ((a = 3) AND (b = 3))
+         ->  Index Only Scan using t3_idx on t3
+               Index Cond: ((a = 3) AND (b = 4))
+(11 rows)
+
+-- Equality OpExpr mixed with IN on another prefix column.
+EXPLAIN (COSTS OFF)
+SELECT a, b, c FROM t3 WHERE a = 1 AND b IN (3, 4)
+ORDER BY c LIMIT 3;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Limit
+   ->  Merge Append
+         Sort Key: c
+         ->  Index Only Scan using t3_idx on t3
+               Index Cond: ((a = 1) AND (b = 3))
+         ->  Index Only Scan using t3_idx on t3
+               Index Cond: ((a = 1) AND (b = 4))
+(7 rows)
+
+-- Suffix is a middle index column.
+EXPLAIN (COSTS OFF)
+SELECT a, b, c
+FROM t3 WHERE a IN (1, 3)
+ORDER BY b LIMIT 3;
+                   QUERY PLAN                   
+------------------------------------------------
+ Limit
+   ->  Merge Append
+         Sort Key: b
+         ->  Index Only Scan using t3_idx on t3
+               Index Cond: (a = 1)
+         ->  Index Only Scan using t3_idx on t3
+               Index Cond: (a = 3)
+(7 rows)
+
+-- ORDER BY DESC on ASC index => Backward scan children.
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM test WHERE x IN (1, 3) ORDER BY y DESC
+LIMIT 3;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Limit
+   ->  Merge Append
+         Sort Key: y DESC
+         ->  Index Only Scan Backward using test_idx on test
+               Index Cond: (x = 1)
+         ->  Index Only Scan Backward using test_idx on test
+               Index Cond: (x = 3)
+(7 rows)
+
+-- DESC index + matching DESC order => Forward.
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM tdesc WHERE x IN (1, 3) ORDER BY y DESC
+LIMIT 3;
+                      QUERY PLAN                      
+------------------------------------------------------
+ Limit
+   ->  Merge Append
+         Sort Key: y DESC
+         ->  Index Only Scan using tdesc_idx on tdesc
+               Index Cond: (x = 1)
+         ->  Index Only Scan using tdesc_idx on tdesc
+               Index Cond: (x = 3)
+(7 rows)
+
+-- DESC index + ASC order => Backward.
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM tdesc WHERE x IN (1, 3) ORDER BY y ASC
+LIMIT 3;
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Limit
+   ->  Merge Append
+         Sort Key: y
+         ->  Index Only Scan Backward using tdesc_idx on tdesc
+               Index Cond: (x = 1)
+         ->  Index Only Scan Backward using tdesc_idx on tdesc
+               Index Cond: (x = 3)
+(7 rows)
+
+-- Default ASC index NULLS LAST matches ORDER BY ... NULLS LAST.
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM tnulls WHERE x IN (1, 3) ORDER BY y NULLS LAST
+LIMIT 3;
+                       QUERY PLAN                       
+--------------------------------------------------------
+ Limit
+   ->  Merge Append
+         Sort Key: y
+         ->  Index Only Scan using tnulls_idx on tnulls
+               Index Cond: (x = 1)
+         ->  Index Only Scan using tnulls_idx on tnulls
+               Index Cond: (x = 3)
+(7 rows)
+
+-- Explicit NULLS FIRST index matches ORDER BY ... NULLS FIRST.
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM tnulls WHERE x IN (1, 3) ORDER BY y NULLS FIRST
+LIMIT 3;
+                        QUERY PLAN                         
+-----------------------------------------------------------
+ Limit
+   ->  Merge Append
+         Sort Key: y NULLS FIRST
+         ->  Index Only Scan using tnulls_nf_idx on tnulls
+               Index Cond: (x = 1)
+         ->  Index Only Scan using tnulls_nf_idx on tnulls
+               Index Cond: (x = 3)
+(7 rows)
+
+-- No LIMIT (force Merge Append over SAOP+Sort).
+SET enable_sort = off;
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM test WHERE x IN (1, 3)
+ORDER BY y;
+                  QUERY PLAN                  
+----------------------------------------------
+ Merge Append
+   Sort Key: y
+   ->  Index Only Scan using test_idx on test
+         Index Cond: (x = 1)
+   ->  Index Only Scan using test_idx on test
+         Index Cond: (x = 3)
+(6 rows)
+
+RESET enable_sort;
+-- Outer Params (LATERAL) still accepted.
+EXPLAIN (COSTS OFF)
+SELECT s.*
+FROM (VALUES (19), (20)) AS v(ymin),
+LATERAL (
+	SELECT x, y FROM test
+	WHERE x IN (1, 3) AND y >= v.ymin
+	ORDER BY y LIMIT 1
+) s;
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
+ Nested Loop
+   ->  Values Scan on "*VALUES*"
+   ->  Limit
+         ->  Merge Append
+               Sort Key: test.y
+               ->  Index Only Scan using test_idx on test
+                     Index Cond: ((x = 1) AND (y >= "*VALUES*".column1))
+               ->  Index Only Scan using test_idx on test
+                     Index Cond: ((x = 3) AND (y >= "*VALUES*".column1))
+(9 rows)
+
+-- IN-list containing NULL expands (null-equality child included).
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM test WHERE x = ANY (ARRAY[1, NULL])
+ORDER BY y
+LIMIT 3;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Limit
+   ->  Merge Append
+         Sort Key: y
+         ->  Index Only Scan using test_idx on test
+               Index Cond: (x = 1)
+         ->  Index Only Scan using test_idx on test
+               Index Cond: (x = NULL::integer)
+(7 rows)
+
+--
+-- Cases that do not choose Merge Append
+--
+-- Feature GUC off.
+SET enable_indexskipmerge = off;
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM test WHERE x IN (1, 3)
+ORDER BY y LIMIT 3;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: y
+         ->  Index Only Scan using test_idx on test
+               Index Cond: (x = ANY ('{1,3}'::integer[]))
+(5 rows)
+
+RESET enable_indexskipmerge;
+-- Indexscan GUC off.
+SET enable_indexscan = off;
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM test WHERE x IN (1, 3)
+ORDER BY y LIMIT 3;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: y
+         ->  Bitmap Heap Scan on test
+               Disabled: true
+               Recheck Cond: (x = ANY ('{1,3}'::integer[]))
+               ->  Bitmap Index Scan on test_idx
+                     Index Cond: (x = ANY ('{1,3}'::integer[]))
+(8 rows)
+
+RESET enable_indexscan;
+-- Fewer than two prefixes.
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM test WHERE x = 1
+ORDER BY y LIMIT 3;
+                  QUERY PLAN                  
+----------------------------------------------
+ Limit
+   ->  Index Only Scan using test_idx on test
+         Index Cond: (x = 1)
+(3 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM test WHERE x IN (1)
+ORDER BY y LIMIT 3;
+                  QUERY PLAN                  
+----------------------------------------------
+ Limit
+   ->  Index Only Scan using test_idx on test
+         Index Cond: (x = 1)
+(3 rows)
+
+-- No ORDER BY / ORDER BY leading column only.
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM test WHERE x IN (1, 3)
+LIMIT 3;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Limit
+   ->  Index Only Scan using test_idx on test
+         Index Cond: (x = ANY ('{1,3}'::integer[]))
+(3 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM test WHERE x IN (1, 3)
+ORDER BY x LIMIT 3;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Limit
+   ->  Index Only Scan using test_idx on test
+         Index Cond: (x = ANY ('{1,3}'::integer[]))
+(3 rows)
+
+-- Prefix range only (no equality/IN).
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM test WHERE x >= 1 AND x <= 2
+ORDER BY y LIMIT 3;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: y
+         ->  Index Only Scan using test_idx on test
+               Index Cond: ((x >= 1) AND (x <= 2))
+(5 rows)
+
+-- Over max_index_merge_scans.
+SET max_index_merge_scans = 2;
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM test WHERE x IN (1, 2, 5)
+ORDER BY y LIMIT 3;
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: y
+         ->  Index Only Scan using test_idx on test
+               Index Cond: (x = ANY ('{1,2,5}'::integer[]))
+(5 rows)
+
+-- Multi-prefix product over the GUC limit.
+SET max_index_merge_scans = 3;
+EXPLAIN (COSTS OFF)
+SELECT a, b, c FROM t3 WHERE a IN (1, 3) AND b IN (3, 4)
+ORDER BY c LIMIT 3;
+                                          QUERY PLAN                                           
+-----------------------------------------------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: c
+         ->  Index Only Scan using t3_idx on t3
+               Index Cond: ((a = ANY ('{1,3}'::integer[])) AND (b = ANY ('{3,4}'::integer[])))
+(5 rows)
+
+-- Gap (b) between prefix constraints and sorting suffix
+SET max_index_merge_scans = 3;
+EXPLAIN (COSTS OFF)
+SELECT a, b, c FROM t3 WHERE a IN (1, 3)
+ORDER BY c LIMIT 3;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: c
+         ->  Index Only Scan using t3_idx on t3
+               Index Cond: (a = ANY ('{1,3}'::integer[]))
+(5 rows)
+
+-- Non-Const / null / empty array SAOP.
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM test WHERE x IN (SELECT u FROM generate_series(1, 2) u)
+ORDER BY y LIMIT 3;
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: test.y
+         ->  Nested Loop
+               ->  HashAggregate
+                     Group Key: u.u
+                     ->  Function Scan on generate_series u
+               ->  Index Only Scan using test_idx on test
+                     Index Cond: (x = u.u)
+(9 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM test WHERE x = ANY (NULL::int[])
+ORDER BY y LIMIT 3;
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: y
+         ->  Index Only Scan using test_idx on test
+               Index Cond: (x = ANY (NULL::integer[]))
+(5 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM test WHERE x = ANY ('{}'::int[])
+ORDER BY y LIMIT 3;
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: y
+         ->  Index Only Scan using test_idx on test
+               Index Cond: (x = ANY ('{}'::integer[]))
+(5 rows)
+
+-- Nulls order mismatch: only NULLS LAST index, query wants NULLS FIRST.
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM tnulls_nl WHERE x IN (1, 3) ORDER BY y NULLS FIRST
+LIMIT 3;
+                          QUERY PLAN                          
+--------------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: y NULLS FIRST
+         ->  Index Only Scan using tnulls_nl_idx on tnulls_nl
+               Index Cond: (x = ANY ('{1,3}'::integer[]))
+(5 rows)
+
+-- Nulls order mismatch: only NULLS FIRST index, query wants NULLS LAST.
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM tnulls_nf
+WHERE x IN (1, 3) ORDER BY y NULLS LAST
+LIMIT 3;
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: y
+         ->  Index Only Scan using tnulls_nf_only_idx on tnulls_nf
+               Index Cond: (x = ANY ('{1,3}'::integer[]))
+(5 rows)
+
+-- Single-key index.
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM tsingle
+WHERE x IN (1, 3)
+ORDER BY y LIMIT 3;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: y
+         ->  Index Scan using tsingle_idx on tsingle
+               Index Cond: (x = ANY ('{1,3}'::integer[]))
+(5 rows)
+
+-- Hash index (no sortopfamily).
+EXPLAIN (COSTS OFF)
+SELECT x, y FROM thash
+WHERE x IN (1, 3)
+ORDER BY y LIMIT 3;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: y
+         ->  Bitmap Heap Scan on thash
+               Disabled: true
+               Recheck Cond: (x = ANY ('{1,3}'::integer[]))
+               ->  Bitmap Index Scan on thash_idx
+                     Index Cond: (x = ANY ('{1,3}'::integer[]))
+(8 rows)
+
+RESET ALL;
+DROP SCHEMA skip_merge CASCADE;
+NOTICE:  drop cascades to 8 other objects
+DETAIL:  drop cascades to table skip_merge.test
+drop cascades to table skip_merge.t3
+drop cascades to table skip_merge.tdesc
+drop cascades to table skip_merge.tnulls
+drop cascades to table skip_merge.tnulls_nl
+drop cascades to table skip_merge.tnulls_nf
+drop cascades to table skip_merge.tsingle
+drop cascades to table skip_merge.thash
