@@ -216,6 +216,165 @@ init_timezone_hashtable(void)
 	return true;
 }
 
+static void
+get_tz_change_gaps(struct pg_tm *tm_before, struct pg_tm *tm_after, short *result)
+{
+	#define mark(field, unit) \
+	do { \
+		if (tm_before->tm_##field > tm_after->tm_##field) \
+		{ \
+			if (TZ_GAP_##unit == 0) \
+				*result = 0; \
+			else \
+				*result &= BITWISE_HI_RIGHT(TZ_GAP_##unit - 1); \
+		} \
+		else if (tm_before->tm_##field < tm_after->tm_##field) \
+			return; \
+	} while (0)
+	mark(year, YEAR);
+	mark(mon, MONTH);
+	mark(mday, DAY);
+	mark(hour, HOUR);
+	mark(min, MINUTE);
+	mark(sec, SECOND);
+	#undef mark
+}
+
+/*
+ * Check every time transition that moves time backwards
+ * up to which part of the timestamp the effects are observable
+ * on a timestamp truncation fashion. This information will be stored
+ * in the timezone state to assist decisions related to monotonicity
+ * analysis.
+ * 2026-07-02 01:59:59.999999 to
+ * 2026-07-02 01:00:00.000000
+ * ==== == == == << xx xxxxxx
+ *
+ * would not violate monotonicity for year, month, day, and hour
+ * but would break for minutes and seconds.
+ */
+static void
+inspect_monotonicity(struct pg_tz *tz)
+{
+	struct state	*sp;
+	struct pg_tm	tm_before;
+	struct pg_tm	tm_after;
+	struct pg_tm	*p;
+
+	int_fast32_t	prev_offset;
+	int_fast32_t	offset;
+	sp = &tz->state;
+
+	if (sp == NULL || sp->typecnt <= 0){
+		/* invalid input, conservative behaviour */
+		tz->state.monotonicity.local = 0;
+		tz->state.monotonicity.utc = 0;
+		return;
+	}
+	/*
+	 *start assuming monotonicity, update as we observe
+	 * counter-examples below
+	 */
+	tz->state.monotonicity.local = BITWISE_HI_RIGHT(TZ_GAP_NUM_BITS);
+	tz->state.monotonicity.utc = BITWISE_HI_RIGHT(TZ_GAP_NUM_BITS);
+	if (sp->timecnt == 0)
+	{
+		return;
+	}
+	offset = sp->ttis[0].tt_utoff;
+
+	for (int i = 0; i < sp->timecnt; i++)
+	{
+		pg_time_t		t_before;
+		pg_time_t		t_after;
+
+		t_after  = sp->ats[i];
+		t_before = t_after - 1;
+
+		prev_offset = offset;
+		offset = sp->ttis[sp->types[i]].tt_utoff;
+		/*
+		 * The variables t_before and t_after are the last
+		 * timestamp before the transition, and the first timestamp
+		 * after the transition at UTC, with 1 microsecond resolution.
+		 *
+		 * The offset indicates the number of seconds the local time
+		 * is ahead of GMT.
+		 *
+		 * Conceptually,
+		 *
+		 * tz_before = (t + prev_offset - 1 micro second)
+		 * tz_after  = (t + offset)
+		 *
+		 */
+		if(offset < prev_offset)
+		{
+			/*
+			 * at this transition we have offset < prev_offset,
+			 * since offset is in seconds,
+			 *      offset <= prev_offset - 1 second
+			 * and offset < prev_offset - 1 microsecond
+			 * and thus
+			 *  t + offset <  t + prev_offset - 1 microsecond
+			 * i.e. tz_after < tz_before
+			 *
+			 * So, local time moves backwards, so fields affected
+			 * by this transition stop being monotonic at the local time.
+			*/
+			p = pg_localtime(&t_before, tz);
+			if (p == NULL)
+				return;
+			tm_before = *p;
+
+			p = pg_localtime(&t_after, tz);
+			if (p == NULL)
+				return;
+			tm_after = *p;
+			get_tz_change_gaps(
+				&tm_before, &tm_after, &tz->state.monotonicity.local
+			);
+		}
+		else
+		{
+			/*
+			 * Similarly, here tz_after jumps forward, while this doesn't
+			 * impact the local time monotonicity, but creates a gap in
+			 * the local time, since
+			 * tz_after = tz_before + (offset - prev_offset) + 1 microsecond
+			 * even if tz_before < t < tz_after never existed in that
+			 * particular timezone, they might exist as postgres timestamp
+			 * value.
+			 *
+			 * The documented behaviour is:
+			 * An invalid timestamp that appears to fall within a jump-forward
+			 * daylight savings transition is assigned the UTC offset that
+			 * prevailed in the time zone just before the transition.
+			 *
+			 * so that means that when converting from local time at the given
+			 * timezone back to UTC, the time will remain continuous tz_before
+			 * to tz_after - 1, the discontinuity will happen at tz_after.
+			 * so in this case we have
+			 *
+			 * utc_before = (utc_after - 1) + (offset - prev_offset)
+			 */
+			t_before += (offset - prev_offset) * USECS_PER_SEC;
+			p = pg_gmtime(&t_before);
+			if(p == NULL)
+				return;
+			tm_before = *p;
+
+			p = pg_gmtime(&t_after);
+			if(p == NULL)
+				return;
+			tm_after = *p;
+
+			get_tz_change_gaps(
+				&tm_before, &tm_after, &tz->state.monotonicity.utc
+			);
+		}
+	}
+}
+
 /*
  * Load a timezone from file or from cache.
  * Does not verify that the timezone is acceptable!
@@ -280,7 +439,7 @@ pg_tzset(const char *tzname)
 	/* hash_search already copied uppername into the hash key */
 	strcpy(tzp->tz.TZname, canonname);
 	memcpy(&tzp->tz.state, &tzstate, sizeof(tzstate));
-
+	inspect_monotonicity(&tzp->tz);
 	return &tzp->tz;
 }
 
