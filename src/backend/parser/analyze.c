@@ -76,6 +76,8 @@ post_parse_analyze_hook_type post_parse_analyze_hook = NULL;
 static Query *transformOptionalSelectInto(ParseState *pstate, Node *parseTree);
 static Query *transformDeleteStmt(ParseState *pstate, DeleteStmt *stmt);
 static Query *transformInsertStmt(ParseState *pstate, InsertStmt *stmt);
+static void transformInsertSetClause(ParseState *pstate, List *setClause,
+									 List **cols_p, List **valuesLists_p);
 static OnConflictExpr *transformOnConflictClause(ParseState *pstate,
 												 OnConflictClause *onConflictClause);
 static ForPortionOfExpr *transformForPortionOfClause(ParseState *pstate,
@@ -656,6 +658,129 @@ transformDeleteStmt(ParseState *pstate, DeleteStmt *stmt)
 }
 
 /*
+ * transformInsertSetClause -
+ *	  Transform INSERT ... SET clause into column list and VALUES lists.
+ *
+ * This function handles both single-row and multi-row SET syntax:
+ *   Single row: INSERT INTO t SET c1=1, c2=2
+ *   Multi-row:  INSERT INTO t SET (c1=1, c2=2), (c1=3, c2=4)
+ *
+ * The function supports different column sets across rows. For example:
+ *   INSERT INTO t SET (c1=1, c2=2, c3=3), (c1=4, c2=5)
+ * This will generate:
+ *   - Column list: c1, c2, c3
+ *   - Values: (1, 2, 3), (4, 5, DEFAULT)
+ *
+ * Missing columns in any row are filled with DEFAULT.
+ */
+static void
+transformInsertSetClause(ParseState *pstate, List *setClause,
+						 List **cols_p, List **valuesLists_p)
+{
+	List	   *all_cols = NIL;		/* List of all unique column names */
+	List	   *valuesLists = NIL;
+
+	/*
+	 * First pass: collect all unique column names from all rows.
+	 * We need to scan all rows first to determine the complete set of columns.
+	 * Also check for duplicate columns within each row.
+	 */
+	foreach_node(List, set_clause, setClause)
+	{
+		List	   *row_cols = NIL;		/* Columns seen in this row */
+
+		foreach_node(ResTarget, res, set_clause)
+		{
+			bool		found = false;
+
+			/* Check for duplicate column in the same row */
+			foreach_node(ResTarget, row_col, row_cols)
+			{
+				if (strcmp(row_col->name, res->name) == 0)
+				{
+					ereport(ERROR,
+							(errcode(ERRCODE_SYNTAX_ERROR),
+							 errmsg("column \"%s\" specified more than once",
+									res->name),
+							 parser_errposition(pstate, res->location)));
+				}
+			}
+
+			/* Add to this row's column list */
+			row_cols = lappend(row_cols, res);
+
+			/* Check if we've already seen this column name across all rows */
+			foreach_node(ResTarget, existing, all_cols)
+			{
+				if (strcmp(existing->name, res->name) == 0)
+				{
+					found = true;
+					break;
+				}
+			}
+
+			/* If this is a new column across all rows, add it to our list */
+			if (!found)
+			{
+				ResTarget  *col = makeNode(ResTarget);
+
+				col->name = res->name;
+				col->indirection = res->indirection;
+				col->val = NULL;
+				col->location = res->location;
+				all_cols = lappend(all_cols, col);
+			}
+		}
+	}
+
+	/*
+	 * Second pass: for each row, create a values list matching the column order
+	 * from all_cols. Use DEFAULT for any columns not present in this row.
+	 */
+	foreach_node(List, set_clause, setClause)
+	{
+		List	   *vals = NIL;
+
+		/* For each column in the complete column list */
+		foreach_node(ResTarget, col, all_cols)
+		{
+			bool		found = false;
+
+			/* Search for this column in the current row */
+			foreach_node(ResTarget, res, set_clause)
+			{
+				if (strcmp(col->name, res->name) == 0)
+				{
+					/* Found it - use the provided value */
+					vals = lappend(vals, res->val);
+					found = true;
+					break;
+				}
+			}
+
+			/*
+			 * If the column is not present in this row, use DEFAULT.
+			 * Create a SetToDefault node to represent the DEFAULT keyword.
+			 */
+			if (!found)
+			{
+				SetToDefault *def = makeNode(SetToDefault);
+
+				def->location = -1;
+				vals = lappend(vals, def);
+			}
+		}
+
+		/* Add this row's values to the valuesLists */
+		valuesLists = lappend(valuesLists, vals);
+	}
+
+	/* Return the results */
+	*cols_p = all_cols;
+	*valuesLists_p = valuesLists;
+}
+
+/*
  * transformInsertStmt -
  *	  transform an Insert Statement
  */
@@ -693,6 +818,26 @@ transformInsertStmt(ParseState *pstate, InsertStmt *stmt)
 	}
 
 	qry->override = stmt->override;
+
+	/*
+	 * If we have SET clause (INSERT ... SET col=val, ...), transform it
+	 * into column list and VALUES list before further processing.
+	 */
+	if (stmt->setClause != NIL)
+	{
+		List	   *cols = NIL;
+		List	   *valuesLists = NIL;
+
+		/* Transform SET clause into columns and values */
+		transformInsertSetClause(pstate, stmt->setClause, &cols, &valuesLists);
+
+		/* Create a SelectStmt with multiple VALUES rows */
+		selectStmt = makeNode(SelectStmt);
+		selectStmt->valuesLists = valuesLists;
+		stmt->selectStmt = (Node *) selectStmt;
+		stmt->cols = cols;
+		stmt->setClause = NIL;	/* clear it so we don't process again */
+	}
 
 	/*
 	 * ON CONFLICT DO UPDATE and ON CONFLICT DO SELECT FOR UPDATE/SHARE

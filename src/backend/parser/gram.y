@@ -562,6 +562,8 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %type <node>	for_portion_of_clause
 %type <node>	tablesample_clause opt_repeatable_clause
 %type <target>	target_el set_target insert_column_item
+%type <list>	insert_set_clause insert_set_clause_list
+%type <list>	insert_set_clause_group insert_set_clause_group_list
 
 %type <str>		generic_option_name
 %type <node>	generic_option_arg
@@ -13068,6 +13070,36 @@ insert_rest:
 					$$->cols = NIL;
 					$$->selectStmt = NULL;
 				}
+			| OVERRIDING override_kind VALUE_P SET insert_set_clause_list
+				{
+					$$ = makeNode(InsertStmt);
+					$$->cols = NIL;
+					$$->selectStmt = NULL;
+					$$->override = $2;
+					$$->setClause = list_make1($5);
+				}
+			| OVERRIDING override_kind VALUE_P SET insert_set_clause_group_list
+				{
+					$$ = makeNode(InsertStmt);
+					$$->cols = NIL;
+					$$->selectStmt = NULL;
+					$$->override = $2;
+					$$->setClause = $5;
+				}
+			| SET insert_set_clause_group_list
+				{
+					$$ = makeNode(InsertStmt);
+					$$->cols = NIL;
+					$$->selectStmt = NULL;
+					$$->setClause = $2;
+				}
+			| SET insert_set_clause_list
+				{
+					$$ = makeNode(InsertStmt);
+					$$->cols = NIL;
+					$$->selectStmt = NULL;
+					$$->setClause = list_make1($2);
+				}
 		;
 
 override_kind:
@@ -13376,6 +13408,38 @@ set_target:
 set_target_list:
 			set_target								{ $$ = list_make1($1); }
 			| set_target_list ',' set_target		{ $$ = lappend($1,$3); }
+		;
+
+/*
+ * Grammar rules for INSERT ... SET syntax
+ * Supports both single-row and multi-row syntax:
+ *   Single row: INSERT INTO table SET col1=val1, col2=val2
+ *   Multi-row:  INSERT INTO table SET (col1=val1, col2=val2), (col1=val3, col2=val4)
+ *
+ * These rules are INSERT-specific and only allow simple column=value assignments.
+ */
+insert_set_clause:
+			set_target '=' a_expr
+				{
+					$1->val = (Node *) $3;
+					$$ = list_make1($1);
+				}
+		;
+
+insert_set_clause_list:
+			insert_set_clause						{ $$ = $1; }
+			| insert_set_clause_list ',' insert_set_clause
+													{ $$ = list_concat($1, $3); }
+		;
+
+insert_set_clause_group:
+			'(' insert_set_clause_list ')'			{ $$ = $2; }
+		;
+
+insert_set_clause_group_list:
+			insert_set_clause_group					{ $$ = list_make1($1); }
+			| insert_set_clause_group_list ',' insert_set_clause_group
+													{ $$ = lappend($1, $3); }
 		;
 
 

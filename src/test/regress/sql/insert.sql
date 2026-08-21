@@ -674,3 +674,210 @@ alter table returningwrtest2 drop c;
 alter table returningwrtest attach partition returningwrtest2 for values in (2);
 insert into returningwrtest values (2, 'foo') returning returningwrtest;
 drop table returningwrtest;
+
+--
+-- INSERT ... SET syntax tests
+--
+create table insertsettest (
+    id int,
+    name text,
+    salary int default 50000,
+    dept text,
+    created_at timestamp default now()
+);
+
+-- Basic INSERT SET syntax
+insert into insertsettest set id=1, name='Alice', salary=60000, dept='Engineering';
+insert into insertsettest set name='Bob', id=2, dept='Sales', salary=55000;
+
+-- INSERT SET with DEFAULT keyword
+insert into insertsettest set id=3, name='Charlie', salary=DEFAULT, dept='HR';
+insert into insertsettest set id=4, name='David', dept='Marketing';  -- salary should use default
+
+-- INSERT SET with NULL values
+insert into insertsettest set id=5, name='Eve', salary=NULL, dept='Finance';
+insert into insertsettest set id=6, name=NULL, salary=70000, dept='IT';
+
+-- INSERT SET with expressions
+insert into insertsettest set id=7, name='Frank', salary=50000+10000, dept='Engineering';
+insert into insertsettest set id=8, name=upper('grace'), salary=45000, dept=lower('SALES');
+
+-- INSERT SET with functions
+insert into insertsettest set id=9, name=concat('John', ' ', 'Doe'), salary=80000, dept='Executive';
+
+-- INSERT SET with subqueries
+insert into insertsettest set id=10, name='Kate', salary=(select max(salary) + 5000 from insertsettest), dept='Engineering';
+
+-- INSERT SET with column subset (others should be NULL or DEFAULT)
+insert into insertsettest set id=11, name='Laura';
+insert into insertsettest set id=12, dept='Support';
+
+-- Verify all inserts
+select id, name, salary, dept from insertsettest order by id;
+
+-- INSERT SET with RETURNING clause
+insert into insertsettest set id=13, name='Mike', salary=90000, dept='Management' returning id, name, salary, dept;
+insert into insertsettest set id=14, name='Nancy', salary=95000, dept='Executive' returning id, name, salary;
+
+-- INSERT SET with ON CONFLICT DO UPDATE
+create table insertsetpk (
+    id int primary key,
+    value text,
+    counter int default 0
+);
+
+insert into insertsetpk set id=1, value='first', counter=1;
+insert into insertsetpk set id=2, value='second', counter=2;
+
+-- Test ON CONFLICT DO UPDATE with INSERT SET
+insert into insertsetpk set id=1, value='updated', counter=10
+    on conflict (id) do update set value=excluded.value, counter=excluded.counter;
+
+insert into insertsetpk set id=2, value='also updated', counter=20
+    on conflict (id) do update set counter=insertsetpk.counter + excluded.counter;
+
+select * from insertsetpk order by id;
+
+-- Test ON CONFLICT DO NOTHING with INSERT SET
+insert into insertsetpk set id=1, value='ignored', counter=100
+    on conflict (id) do nothing;
+
+select * from insertsetpk order by id;
+
+-- INSERT SET with OVERRIDING SYSTEM VALUE (for generated columns)
+create table insertsetgen (
+    id int generated always as identity,
+    data text
+);
+
+-- This should fail (can't override without OVERRIDING clause)
+insert into insertsetgen set id=100, data='test';
+
+-- This should work
+insert into insertsetgen overriding system value set id=100, data='test';
+insert into insertsetgen set data='auto-generated';
+
+select * from insertsetgen order by id;
+
+drop table insertsetgen;
+
+-- INSERT SET with CHECK constraints
+create table insertsetcheck (
+    id int,
+    age int check (age >= 0 and age <= 150),
+    score int check (score between 0 and 100)
+);
+
+insert into insertsetcheck set id=1, age=25, score=85;
+insert into insertsetcheck set id=2, age=30, score=92;
+
+-- These should fail
+insert into insertsetcheck set id=3, age=-5, score=50;  -- age check fails
+insert into insertsetcheck set id=4, age=25, score=150; -- score check fails
+
+select * from insertsetcheck order by id;
+
+drop table insertsetcheck;
+
+-- INSERT SET with partitioned tables
+create table insertsetpart (
+    id int,
+    category text,
+    value int
+) partition by list (category);
+
+create table insertsetpart_a partition of insertsetpart for values in ('A');
+create table insertsetpart_b partition of insertsetpart for values in ('B');
+create table insertsetpart_c partition of insertsetpart for values in ('C');
+
+insert into insertsetpart set id=1, category='A', value=100;
+insert into insertsetpart set id=2, category='B', value=200;
+insert into insertsetpart set id=3, category='C', value=300;
+insert into insertsetpart set id=4, category='A', value=150;
+
+select tableoid::regclass, * from insertsetpart order by id;
+
+drop table insertsetpart;
+
+-- INSERT SET with inheritance
+create table insertsetparent (
+    id int,
+    parent_col text
+);
+
+create table insertsetchild (
+    child_col text
+) inherits (insertsetparent);
+
+insert into insertsetparent set id=1, parent_col='parent data';
+insert into insertsetchild set id=2, parent_col='from child', child_col='child data';
+
+select * from insertsetparent order by id;
+select * from insertsetchild;
+
+drop table insertsetchild;
+drop table insertsetparent;
+
+-- INSERT SET error cases
+-- Duplicate column names (should fail)
+insert into insertsettest set id=15, name='Test', id=16;
+
+-- Non-existent column (should fail)
+insert into insertsettest set id=15, nonexistent='value';
+
+-- Type mismatch (should fail)
+insert into insertsettest set id='not a number', name='Test';
+
+-- Multi-column assignment syntax (should fail - this is UPDATE syntax)
+insert into insertsettest set (id, name) = (20, 'Test');
+
+-- Multi-column assignment with subquery (should fail)
+insert into insertsettest set (id, name) = (select 21, 'Test');
+
+-- INSERT SET with CTE
+with new_values as (
+    select 15 as new_id, 'Oliver' as new_name, 85000 as new_salary
+)
+insert into insertsettest
+select new_id, new_name, new_salary, 'Sales' from new_values;
+
+-- Verify CTE insert worked (not using SET syntax, but for completeness)
+select id, name, salary, dept from insertsettest where id = 15;
+
+-- Multi-row INSERT SET syntax
+create table insertsetmulti (
+    c1 int,
+    c2 int,
+    c3 int
+);
+
+-- Basic multi-row with same column order
+insert into insertsetmulti set (c1=1, c2=2, c3=3), (c1=4, c2=5, c3=6);
+select * from insertsetmulti order by c1;
+
+-- Multi-row with different column orders
+-- This tests that column-value matching works correctly across rows
+insert into insertsetmulti set (c2=20, c1=10, c3=30), (c1=40, c3=60, c2=50), (c3=90, c2=80, c1=70);
+select * from insertsetmulti order by c1;
+
+-- Multi-row with mixed expressions
+insert into insertsetmulti set (c1=100, c2=200, c3=300), (c2=500, c1=400, c3=600);
+select * from insertsetmulti order by c1;
+
+-- Test different column sets in multi-row INSERT SET
+-- First row has all columns, second row has subset (c3 should get DEFAULT/NULL)
+insert into insertsetmulti set (c1=1000, c2=2000, c3=3000), (c1=4000, c2=5000);
+select * from insertsetmulti where c1 >= 1000 order by c1;
+
+-- First row has subset, second row has all columns (c2 in first row should get DEFAULT/NULL)
+insert into insertsetmulti set (c1=1001, c3=3001), (c1=4001, c2=5001, c3=6001);
+select * from insertsetmulti where c1 >= 1001 order by c1;
+
+-- Different subsets in each row (union of all columns used, missing get DEFAULT/NULL)
+insert into insertsetmulti set (c1=1002, c2=2002), (c1=4002, c3=6002);
+select * from insertsetmulti where c1 >= 1002 order by c1;
+
+-- Cleanup
+drop table insertsettest;
+drop table insertsetpk;
+drop table insertsetmulti;

@@ -2256,6 +2256,7 @@ typedef struct InsertStmt
 	ReturningClause *returningClause;	/* RETURNING clause */
 	WithClause *withClause;		/* WITH clause */
 	OverridingKind override;	/* OVERRIDING clause */
+	List	   *setClause;		/* SET clause (for INSERT ... SET syntax) */
 } InsertStmt;
 
 /* ----------------------
