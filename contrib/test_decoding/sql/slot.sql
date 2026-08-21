@@ -193,3 +193,68 @@ SELECT pg_drop_replication_slot('failover_true_slot');
 SELECT pg_drop_replication_slot('failover_false_slot');
 SELECT pg_drop_replication_slot('failover_default_slot');
 SELECT pg_drop_replication_slot('physical_slot');
+
+-- A slot function that errors out must still release the slot, otherwise the
+-- next slot operation in the session fails an assertion or leaves the slot
+-- behind. Advancing a freshly created slot to a low LSN always errors.
+
+-- Test 1: a block with an EXCEPTION clause runs its statements in a subxact
+-- and catches an error raised there. The slot must be released so the next
+-- slot operation works.
+SELECT 'init' FROM pg_create_logical_replication_slot('regress_subxact_slot', 'test_decoding');
+DO $$
+BEGIN
+    PERFORM pg_replication_slot_advance('regress_subxact_slot', '0/1');
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'caught SQLSTATE %', SQLSTATE;
+END $$;
+SELECT count(*) >= 0 AS peek_ok
+    FROM pg_logical_slot_peek_changes('regress_subxact_slot', NULL, NULL);
+
+-- Test 2: the EXCEPTION clause does not match, so the error is not caught. The
+-- slot is still released, so the next slot operation works. Show only the
+-- SQLSTATE for stable output.
+\set VERBOSITY sqlstate
+DO $$
+BEGIN
+    PERFORM pg_replication_slot_advance('regress_subxact_slot', '0/1');
+EXCEPTION WHEN division_by_zero THEN
+    RAISE NOTICE 'unreachable';
+END $$;
+\set VERBOSITY default
+SELECT count(*) >= 0 AS peek_ok
+    FROM pg_logical_slot_peek_changes('regress_subxact_slot', NULL, NULL);
+SELECT pg_drop_replication_slot('regress_subxact_slot');
+
+-- Test 3: same as Test 1 for a temporary slot, which is dropped rather than
+-- just released, so it is not left behind after the error.
+SELECT 'init' FROM pg_create_logical_replication_slot('regress_subxact_temp_slot', 'test_decoding', true);
+DO $$
+BEGIN
+    PERFORM pg_replication_slot_advance('regress_subxact_temp_slot', '0/1');
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'caught SQLSTATE %', SQLSTATE;
+END $$;
+SELECT count(*) = 0 AS temp_slot_dropped
+    FROM pg_replication_slots WHERE slot_name = 'regress_subxact_temp_slot';
+
+-- Test 4: a top-level error always drops the session's temporary slots, even
+-- one unrelated to the error and never acquired here.
+SELECT 'init' FROM pg_create_logical_replication_slot('regress_toplevel_temp_slot', 'test_decoding', true);
+SELECT 1 / 0;
+SELECT count(*) = 0 AS temp_slot_dropped
+    FROM pg_replication_slots WHERE slot_name = 'regress_toplevel_temp_slot';
+
+-- Test 5: an error raised and caught in a subxact that held no slot does
+-- not drop the session's temporary slots, unlike a top-level error, which
+-- always does.
+SELECT 'init' FROM pg_create_logical_replication_slot('regress_kept_temp_slot', 'test_decoding', true);
+DO $$
+BEGIN
+    PERFORM 1 / 0;
+EXCEPTION WHEN division_by_zero THEN
+    RAISE NOTICE 'caught SQLSTATE %', SQLSTATE;
+END $$;
+SELECT count(*) = 1 AS temp_slot_kept
+    FROM pg_replication_slots WHERE slot_name = 'regress_kept_temp_slot';
+SELECT pg_drop_replication_slot('regress_kept_temp_slot');
