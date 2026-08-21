@@ -288,6 +288,58 @@ EXPLAIN (VERBOSE, COSTS OFF) SELECT JSON_SERIALIZE('{}' RETURNING bytea);
    Output: JSON_SERIALIZE('{}'::json RETURNING bytea)
 (2 rows)
 
+-- JSON_SERIALIZE() with jsonb input
+SELECT JSON_SERIALIZE('[1,2,4,5]'::jsonb);
+ json_serialize 
+----------------
+ [1, 2, 4, 5]
+(1 row)
+
+SELECT JSON_SERIALIZE('{"a": 1}'::jsonb);
+ json_serialize 
+----------------
+ {"a": 1}
+(1 row)
+
+SELECT JSON_SERIALIZE('{"a": 1}'::jsonb RETURNING text);
+ json_serialize 
+----------------
+ {"a": 1}
+(1 row)
+
+SELECT JSON_SERIALIZE('{"a": 1}'::jsonb RETURNING bytea);
+   json_serialize   
+--------------------
+ \x7b2261223a20317d
+(1 row)
+
+SELECT JSON_SERIALIZE('{"a": 1}'::jsonb RETURNING varchar);
+ json_serialize 
+----------------
+ {"a": 1}
+(1 row)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT JSON_SERIALIZE('{"a": 1}'::jsonb);
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Result
+   Output: JSON_SERIALIZE('{"a": 1}'::jsonb RETURNING text)
+(2 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT JSON_SERIALIZE('{"a": 1}'::jsonb RETURNING bytea);
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Result
+   Output: JSON_SERIALIZE('{"a": 1}'::jsonb RETURNING bytea)
+(2 rows)
+
+-- jsonb input: error cases
+SELECT JSON_SERIALIZE('{"a": 1}'::jsonb RETURNING int);
+ERROR:  cannot use type integer in RETURNING clause of JSON_SERIALIZE()
+HINT:  Try returning a string type or bytea.
+SELECT JSON_SERIALIZE('{"a": 1}'::jsonb RETURNING jsonb);
+ERROR:  cannot use type jsonb in RETURNING clause of JSON_SERIALIZE()
+HINT:  Try returning a string type or bytea.
 -- JSON_OBJECT()
 SELECT JSON_OBJECT();
  json_object 

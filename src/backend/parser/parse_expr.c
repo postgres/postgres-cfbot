@@ -3719,7 +3719,13 @@ makeJsonConstructorExpr(ParseState *pstate, JsonConstructorType type,
 	 * Coerce to the RETURNING type and format, if needed.  We abuse
 	 * CaseTestExpr here as placeholder to pass the result of either
 	 * evaluating 'fexpr' or whatever is produced by ExecEvalJsonConstructor()
-	 * that is of type JSON or JSONB to the coercion function.
+	 * to the coercion function.
+	 *
+	 * For most constructor types the placeholder type is JSON or JSONB,
+	 * determined by the RETURNING format.  JSON_SERIALIZE is different: it
+	 * doesn't produce json/jsonb but rather consumes it, and the executor
+	 * passes the input argument through directly (see execExpr.c), so the
+	 * placeholder must reflect the actual argument type.
 	 */
 	if (fexpr)
 	{
@@ -3735,8 +3741,14 @@ makeJsonConstructorExpr(ParseState *pstate, JsonConstructorType type,
 	{
 		CaseTestExpr *cte = makeNode(CaseTestExpr);
 
-		cte->typeId = returning->format->format_type == JS_FORMAT_JSONB ?
-			JSONBOID : JSONOID;
+		if (type == JSCTOR_JSON_SERIALIZE)
+		{
+			Assert(args != NIL);
+			cte->typeId = exprType(linitial(args));
+		}
+		else
+			cte->typeId = returning->format->format_type == JS_FORMAT_JSONB ?
+				JSONBOID : JSONOID;
 		cte->typeMod = -1;
 		cte->collation = InvalidOid;
 
