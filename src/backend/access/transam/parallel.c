@@ -79,6 +79,7 @@
 #define PARALLEL_KEY_RELMAPPER_STATE		UINT64CONST(0xFFFFFFFFFFFF000D)
 #define PARALLEL_KEY_UNCOMMITTEDENUMS		UINT64CONST(0xFFFFFFFFFFFF000E)
 #define PARALLEL_KEY_CLIENTCONNINFO			UINT64CONST(0xFFFFFFFFFFFF000F)
+#define PARALLEL_KEY_SNAPSHOT_RESTORED		UINT64CONST(0xFFFFFFFFFFFF0010)
 
 /* Fixed-size parallel state. */
 typedef struct FixedParallelState
@@ -308,6 +309,10 @@ InitializeParallelDSM(ParallelContext *pcxt)
 										pcxt->nworkers));
 		shm_toc_estimate_keys(&pcxt->estimator, 1);
 
+		shm_toc_estimate_chunk(&pcxt->estimator, mul_size(sizeof(bool),
+							   pcxt->nworkers));
+		shm_toc_estimate_keys(&pcxt->estimator, 1);
+
 		/* Estimate how much we'll need for the entrypoint info. */
 		shm_toc_estimate_chunk(&pcxt->estimator, strlen(pcxt->library_name) +
 							   strlen(pcxt->function_name) + 2);
@@ -379,6 +384,7 @@ InitializeParallelDSM(ParallelContext *pcxt)
 		char	   *entrypointstate;
 		char	   *uncommittedenumsspace;
 		char	   *clientconninfospace;
+		bool	   *snapshot_set_flag_space;
 		Size		lnamelen;
 
 		/* Serialize shared libraries we have loaded. */
@@ -494,6 +500,19 @@ InitializeParallelDSM(ParallelContext *pcxt)
 		strcpy(entrypointstate, pcxt->library_name);
 		strcpy(entrypointstate + lnamelen + 1, pcxt->function_name);
 		shm_toc_insert(pcxt->toc, PARALLEL_KEY_ENTRYPOINT, entrypointstate);
+
+		/*
+		 * Establish dynamic shared memory to pass information about importing
+		 * of snapshot.
+		 */
+		snapshot_set_flag_space =
+				shm_toc_allocate(pcxt->toc, mul_size(sizeof(bool), pcxt->nworkers));
+		for (i = 0; i < pcxt->nworkers; ++i)
+		{
+			pcxt->worker[i].snapshot_restored = &snapshot_set_flag_space[i];
+			*pcxt->worker[i].snapshot_restored = false;
+		}
+		shm_toc_insert(pcxt->toc, PARALLEL_KEY_SNAPSHOT_RESTORED, snapshot_set_flag_space);
 	}
 
 	/* Update nworkers_to_launch, in case we changed nworkers above. */
@@ -670,6 +689,10 @@ LaunchParallelWorkers(ParallelContext *pcxt)
  * Wait for all workers to attach to their error queues, and throw an error if
  * any worker fails to do this.
  *
+ * wait_for_snapshot: track whether each parallel worker has successfully restored
+ * its snapshot. This is needed when using periodic snapshot resets to ensure all
+ * workers have a valid initial snapshot before proceeding with the scan.
+ *
  * Callers can assume that if this function returns successfully, then the
  * number of workers given by pcxt->nworkers_launched have initialized and
  * attached to their error queues.  Whether or not these workers are guaranteed
@@ -699,7 +722,7 @@ LaunchParallelWorkers(ParallelContext *pcxt)
  * call this function at all.
  */
 void
-WaitForParallelWorkersToAttach(ParallelContext *pcxt)
+WaitForParallelWorkersToAttach(ParallelContext *pcxt, bool wait_for_snapshot)
 {
 	int			i;
 
@@ -743,9 +766,23 @@ WaitForParallelWorkersToAttach(ParallelContext *pcxt)
 				mq = shm_mq_get_queue(pcxt->worker[i].error_mqh);
 				if (shm_mq_get_sender(mq) != NULL)
 				{
-					/* Yes, so it is known to be attached. */
-					pcxt->known_attached_workers[i] = true;
-					++pcxt->nknown_attached_workers;
+					if (!wait_for_snapshot || *pcxt->worker[i].snapshot_restored)
+					{
+						/* Worker is known to be attached. */
+						pcxt->known_attached_workers[i] = true;
+						++pcxt->nknown_attached_workers;
+					}
+					else
+					{
+						/*
+						 * Worker attached but hasn't restored its snapshot yet.
+						 */
+						rc = WaitLatch(MyLatch,
+									   WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+									   10, WAIT_EVENT_BGWORKER_STARTUP);
+						if (rc & WL_LATCH_SET)
+							ResetLatch(MyLatch);
+					}
 				}
 			}
 			else if (status == BGWH_STOPPED)
@@ -787,6 +824,16 @@ WaitForParallelWorkersToAttach(ParallelContext *pcxt)
 			Assert(pcxt->nknown_attached_workers == pcxt->nworkers_launched);
 			break;
 		}
+	}
+
+	/* Set snapshot restored flag to false. */
+	if (pcxt->nworkers > 0)
+	{
+		bool	   *snapshot_restored_space;
+		snapshot_restored_space =
+				shm_toc_lookup(pcxt->toc, PARALLEL_KEY_SNAPSHOT_RESTORED, false);
+		for (i = 0; i < pcxt->nworkers; ++i)
+			snapshot_restored_space[i] = false;
 	}
 }
 
@@ -1304,6 +1351,7 @@ ParallelWorkerMain(Datum main_arg)
 	shm_toc    *toc;
 	FixedParallelState *fps;
 	char	   *error_queue_space;
+	bool	   *snapshot_restored_space;
 	shm_mq	   *mq;
 	shm_mq_handle *mqh;
 	char	   *libraryspace;
@@ -1506,6 +1554,10 @@ ParallelWorkerMain(Datum main_arg)
 	RestoreTransactionSnapshot(tsnapshot,
 							   fps->parallel_leader_pgproc);
 	PushActiveSnapshot(asnapshot);
+
+	/* Snapshot is restored, set flag to make leader know about it. */
+	snapshot_restored_space = shm_toc_lookup(toc, PARALLEL_KEY_SNAPSHOT_RESTORED, false);
+	snapshot_restored_space[ParallelWorkerNumber] = true;
 
 	/*
 	 * We've changed which tuples we can see, and must therefore invalidate
