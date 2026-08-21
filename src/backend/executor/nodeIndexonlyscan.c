@@ -31,26 +31,17 @@
 #include "postgres.h"
 
 #include "access/genam.h"
-#include "access/htup_details.h"
 #include "access/relscan.h"
 #include "access/tableam.h"
-#include "access/tupdesc.h"
-#include "access/visibilitymap.h"
-#include "catalog/pg_type.h"
 #include "executor/executor.h"
 #include "executor/instrument.h"
 #include "executor/nodeIndexonlyscan.h"
 #include "executor/nodeIndexscan.h"
 #include "miscadmin.h"
-#include "storage/bufmgr.h"
-#include "storage/predicate.h"
-#include "utils/builtins.h"
 #include "utils/rel.h"
 
 
 static TupleTableSlot *IndexOnlyNext(IndexOnlyScanState *node);
-static void StoreIndexTuple(IndexOnlyScanState *node, TupleTableSlot *slot,
-							IndexScanDesc scandesc);
 
 
 /* ----------------------------------------------------------------
@@ -67,7 +58,6 @@ IndexOnlyNext(IndexOnlyScanState *node)
 	ScanDirection direction;
 	IndexScanDesc scandesc;
 	TupleTableSlot *slot;
-	ItemPointer tid;
 
 	/*
 	 * extract necessary information from index scan node
@@ -93,6 +83,7 @@ IndexOnlyNext(IndexOnlyScanState *node)
 		 */
 		scandesc = index_beginscan(node->ss.ss_currentRelation,
 								   node->ioss_RelationDesc,
+								   true,
 								   estate->es_snapshot,
 								   node->ioss_Instrument,
 								   node->ioss_NumScanKeys,
@@ -101,11 +92,7 @@ IndexOnlyNext(IndexOnlyScanState *node)
 								   SO_HINT_REL_READ_ONLY : SO_NONE);
 
 		node->ioss_ScanDesc = scandesc;
-
-
-		/* Set it up for index-only scan */
-		node->ioss_ScanDesc->xs_want_itup = true;
-		node->ioss_VMBuffer = InvalidBuffer;
+		Assert(node->ioss_ScanDesc->xs_want_itup);
 
 		/*
 		 * If no run-time keys to calculate or they are ready, go ahead and
@@ -122,80 +109,9 @@ IndexOnlyNext(IndexOnlyScanState *node)
 	/*
 	 * OK, now that we have what we need, fetch the next tuple.
 	 */
-	while ((tid = index_getnext_tid(scandesc, direction)) != NULL)
+	while (table_index_getnext_slot(scandesc, direction, slot))
 	{
-		bool		tuple_from_heap = false;
-
 		CHECK_FOR_INTERRUPTS();
-
-		/*
-		 * We can skip the heap fetch if the TID references a heap page on
-		 * which all tuples are known visible to everybody.  In any case,
-		 * we'll use the index tuple not the heap tuple as the data source.
-		 *
-		 * Note on Memory Ordering Effects: visibilitymap_get_status does not
-		 * lock the visibility map buffer, and therefore the result we read
-		 * here could be slightly stale.  However, it can't be stale enough to
-		 * matter.
-		 *
-		 * We need to detect clearing a VM bit due to an insert right away,
-		 * because the tuple is present in the index page but not visible. The
-		 * reading of the TID by this scan (using a shared lock on the index
-		 * buffer) is serialized with the insert of the TID into the index
-		 * (using an exclusive lock on the index buffer). Because the VM bit
-		 * is cleared before updating the index, and locking/unlocking of the
-		 * index page acts as a full memory barrier, we are sure to see the
-		 * cleared bit if we see a recently-inserted TID.
-		 *
-		 * Deletes do not update the index page (only VACUUM will clear out
-		 * the TID), so the clearing of the VM bit by a delete is not
-		 * serialized with this test below, and we may see a value that is
-		 * significantly stale. However, we don't care about the delete right
-		 * away, because the tuple is still visible until the deleting
-		 * transaction commits or the statement ends (if it's our
-		 * transaction). In either case, the lock on the VM buffer will have
-		 * been released (acting as a write barrier) after clearing the bit.
-		 * And for us to have a snapshot that includes the deleting
-		 * transaction (making the tuple invisible), we must have acquired
-		 * ProcArrayLock after that time, acting as a read barrier.
-		 *
-		 * It's worth going through this complexity to avoid needing to lock
-		 * the VM buffer, which could cause significant contention.
-		 */
-		if (!VM_ALL_VISIBLE(scandesc->heapRelation,
-							ItemPointerGetBlockNumber(tid),
-							&node->ioss_VMBuffer))
-		{
-			/*
-			 * Rats, we have to visit the heap to check visibility.
-			 */
-			InstrCountTuples2(node, 1);
-			if (!index_fetch_heap(scandesc, node->ioss_TableSlot))
-				continue;		/* no visible tuple, try next index entry */
-
-			ExecClearTuple(node->ioss_TableSlot);
-
-			/*
-			 * Only MVCC snapshots are supported here, so there should be no
-			 * need to keep following the HOT chain once a visible entry has
-			 * been found.  If we did want to allow that, we'd need to keep
-			 * more state to remember not to call index_getnext_tid next time.
-			 */
-			if (scandesc->xs_heap_continue)
-				elog(ERROR, "non-MVCC snapshots are not supported in index-only scans");
-
-			/*
-			 * Note: at this point we are holding a pin on the heap page, as
-			 * recorded in scandesc->xs_cbuf.  We could release that pin now,
-			 * but it's not clear whether it's a win to do so.  The next index
-			 * entry might require a visit to the same heap page.
-			 */
-
-			tuple_from_heap = true;
-		}
-
-		/* Fill the scan tuple slot with data from the index */
-		StoreIndexTuple(node, slot, scandesc);
 
 		/*
 		 * If the index was lossy, we have to recheck the index quals.
@@ -211,28 +127,6 @@ IndexOnlyNext(IndexOnlyScanState *node)
 			}
 		}
 
-		/*
-		 * We don't currently support rechecking ORDER BY distances.  (In
-		 * principle, if the index can support retrieval of the originally
-		 * indexed value, it should be able to produce an exact distance
-		 * calculation too.  So it's not clear that adding code here for
-		 * recheck/re-sort would be worth the trouble.  But we should at least
-		 * throw an error if someone tries it.)
-		 */
-		if (scandesc->numberOfOrderBys > 0 && scandesc->xs_recheckorderby)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("lossy distance functions are not supported in index-only scans")));
-
-		/*
-		 * If we didn't access the heap, then we'll need to take a predicate
-		 * lock explicitly, as if we had.  For now we do that at page level.
-		 */
-		if (!tuple_from_heap)
-			PredicateLockPage(scandesc->heapRelation,
-							  ItemPointerGetBlockNumber(tid),
-							  estate->es_snapshot);
-
 		return slot;
 	}
 
@@ -241,85 +135,6 @@ IndexOnlyNext(IndexOnlyScanState *node)
 	 * the scan..
 	 */
 	return ExecClearTuple(slot);
-}
-
-/*
- * StoreIndexTuple
- *		Fill the slot with the data the index AM returned.
- *
- * The data might be provided in either HeapTuple (xs_hitup) or IndexTuple
- * (xs_itup) format.  Conceivably an index AM might fill both fields, in which
- * case we prefer the heap format, since it's probably a bit cheaper to fill a
- * slot from.
- *
- * At some point this might be generally-useful functionality, but
- * right now we don't need it elsewhere.
- */
-static void
-StoreIndexTuple(IndexOnlyScanState *node, TupleTableSlot *slot,
-				IndexScanDesc scandesc)
-{
-	ExecClearTuple(slot);
-
-	/*
-	 * We must deform the tuple using the tupdesc the index AM formed it with
-	 * (xs_hitupdesc or xs_itupdesc), not the slot's tupdesc.  The datums
-	 * returned by the index AM must be binary compatible, but the descriptors
-	 * may align each column differently in certain rare cases. (Actually,
-	 * btree's "name" opclass stores cstring tuples that _aren't_ even binary
-	 * compatible, in the strictest sense.  We directly handle that here.)
-	 */
-	if (scandesc->xs_hitup)
-	{
-		Assert(slot->tts_tupleDescriptor->natts == scandesc->xs_hitupdesc->natts);
-
-		heap_deform_tuple(scandesc->xs_hitup, scandesc->xs_hitupdesc,
-						  slot->tts_values, slot->tts_isnull);
-	}
-	else if (scandesc->xs_itup)
-	{
-		Assert(slot->tts_tupleDescriptor->natts == scandesc->xs_itupdesc->natts);
-
-		index_deform_tuple(scandesc->xs_itup, scandesc->xs_itupdesc,
-						   slot->tts_values, slot->tts_isnull);
-
-		/*
-		 * Copy all name columns stored as cstrings back into a NAMEDATALEN
-		 * byte sized allocation.  We mark this branch as unlikely as
-		 * generally "name" is used only for the system catalogs and this
-		 * would have to be a user query running on those or some other user
-		 * table with an index on a name column.
-		 */
-		if (unlikely(node->ioss_NameCStringAttNums != NULL))
-		{
-			int			attcount = node->ioss_NameCStringCount;
-
-			for (int idx = 0; idx < attcount; idx++)
-			{
-				int			attnum = node->ioss_NameCStringAttNums[idx];
-				Name		name;
-
-				/* skip null Datums */
-				if (slot->tts_isnull[attnum])
-					continue;
-
-				/*
-				 * allocate the NAMEDATALEN and copy the datum into that
-				 * memory
-				 */
-				name = (Name) MemoryContextAlloc(node->ss.ps.ps_ExprContext->ecxt_per_tuple_memory,
-												 NAMEDATALEN);
-
-				/* use namestrcpy to zero-pad all trailing bytes */
-				namestrcpy(name, DatumGetCString(slot->tts_values[attnum]));
-				slot->tts_values[attnum] = NameGetDatum(name);
-			}
-		}
-	}
-	else
-		elog(ERROR, "no data returned for index-only scan");
-
-	ExecStoreVirtualTuple(slot);
 }
 
 /*
@@ -415,13 +230,6 @@ ExecEndIndexOnlyScan(IndexOnlyScanState *node)
 	indexRelationDesc = node->ioss_RelationDesc;
 	indexScanDesc = node->ioss_ScanDesc;
 
-	/* Release VM buffer pin, if any. */
-	if (node->ioss_VMBuffer != InvalidBuffer)
-	{
-		ReleaseBuffer(node->ioss_VMBuffer);
-		node->ioss_VMBuffer = InvalidBuffer;
-	}
-
 	/*
 	 * When ending a parallel worker, copy the statistics gathered by the
 	 * worker back into shared memory so that it can be picked up by the main
@@ -441,6 +249,10 @@ ExecEndIndexOnlyScan(IndexOnlyScanState *node)
 		 * which will have a new IndexOnlyScanState and zeroed stats.
 		 */
 		winstrument->nsearches += node->ioss_Instrument->nsearches;
+		winstrument->ntabletuplefetches += node->ioss_Instrument->ntabletuplefetches;
+
+		/* Collect IO stats for this process into shared instrumentation */
+		AccumulateIOStats(&winstrument->io, &node->ioss_Instrument->io);
 	}
 
 	/*
@@ -489,7 +301,7 @@ ExecIndexOnlyMarkPos(IndexOnlyScanState *node)
 		}
 	}
 
-	index_markpos(node->ioss_ScanDesc);
+	table_index_scan_markpos(node->ioss_ScanDesc);
 }
 
 /* ----------------------------------------------------------------
@@ -518,7 +330,7 @@ ExecIndexOnlyRestrPos(IndexOnlyScanState *node)
 		}
 	}
 
-	index_restrpos(node->ioss_ScanDesc);
+	table_index_scan_restrpos(node->ioss_ScanDesc);
 }
 
 /* ----------------------------------------------------------------
@@ -540,8 +352,6 @@ ExecInitIndexOnlyScan(IndexOnlyScan *node, EState *estate, int eflags)
 	Relation	indexRelation;
 	LOCKMODE	lockmode;
 	TupleDesc	tupDesc;
-	int			indnkeyatts;
-	int			namecount;
 
 	/*
 	 * create state structure
@@ -570,22 +380,14 @@ ExecInitIndexOnlyScan(IndexOnlyScan *node, EState *estate, int eflags)
 	 * Build the scan tuple type using the indextlist generated by the
 	 * planner.  We use this, rather than the index's physical tuple
 	 * descriptor, because the latter contains storage column types not the
-	 * types of the original datums.  (It's the AM's responsibility to return
-	 * suitable data anyway.)
+	 * types of the original datums.  (It's the index AM's responsibility to
+	 * return suitable data anyway.  The table AM calls index_fill_ios_slot to
+	 * fill the slot with that data.)
 	 */
 	tupDesc = ExecTypeFromTL(node->indextlist);
 	ExecInitScanTupleSlot(estate, &indexstate->ss, tupDesc,
 						  &TTSOpsVirtual,
 						  0);
-
-	/*
-	 * We need another slot, in a format that's suitable for the table AM, for
-	 * when we need to fetch a tuple from the table for rechecking visibility.
-	 */
-	indexstate->ioss_TableSlot =
-		ExecAllocTableSlot(&estate->es_tupleTable,
-						   RelationGetDescr(currentRelation),
-						   table_slot_callbacks(currentRelation), 0);
 
 	/*
 	 * Initialize result type and projection info.  The node's targetlist will
@@ -676,48 +478,6 @@ ExecInitIndexOnlyScan(IndexOnlyScan *node, EState *estate, int eflags)
 		indexstate->ioss_RuntimeContext = NULL;
 	}
 
-	indexstate->ioss_NameCStringAttNums = NULL;
-	indnkeyatts = indexRelation->rd_index->indnkeyatts;
-	namecount = 0;
-
-	/*
-	 * The "name" type for btree uses text_ops which results in storing
-	 * cstrings in the indexed keys rather than names.  Here we detect that in
-	 * a generic way in case other index AMs want to do the same optimization.
-	 * Check for opclasses with an opcintype of NAMEOID and an index tuple
-	 * descriptor with CSTRINGOID.  If any of these are found, create an array
-	 * marking the index attribute number of each of them.  StoreIndexTuple()
-	 * handles copying the name Datums into a NAMEDATALEN-byte allocation.
-	 */
-
-	/* First, count the number of such index keys */
-	for (int attnum = 0; attnum < indnkeyatts; attnum++)
-	{
-		if (TupleDescAttr(indexRelation->rd_att, attnum)->atttypid == CSTRINGOID &&
-			indexRelation->rd_opcintype[attnum] == NAMEOID)
-			namecount++;
-	}
-
-	if (namecount > 0)
-	{
-		int			idx = 0;
-
-		/*
-		 * Now create an array to mark the attribute numbers of the keys that
-		 * need to be converted from cstring to name.
-		 */
-		indexstate->ioss_NameCStringAttNums = palloc_array(AttrNumber, namecount);
-
-		for (int attnum = 0; attnum < indnkeyatts; attnum++)
-		{
-			if (TupleDescAttr(indexRelation->rd_att, attnum)->atttypid == CSTRINGOID &&
-				indexRelation->rd_opcintype[attnum] == NAMEOID)
-				indexstate->ioss_NameCStringAttNums[idx++] = (AttrNumber) attnum;
-		}
-	}
-
-	indexstate->ioss_NameCStringCount = namecount;
-
 	/*
 	 * all done.
 	 */
@@ -773,14 +533,14 @@ ExecIndexOnlyScanInitializeDSM(IndexOnlyScanState *node,
 	node->ioss_ScanDesc =
 		index_beginscan_parallel(node->ss.ss_currentRelation,
 								 node->ioss_RelationDesc,
+								 true,
 								 node->ioss_Instrument,
 								 node->ioss_NumScanKeys,
 								 node->ioss_NumOrderByKeys,
 								 piscan,
 								 ScanRelIsReadOnly(&node->ss) ?
 								 SO_HINT_REL_READ_ONLY : SO_NONE);
-	node->ioss_ScanDesc->xs_want_itup = true;
-	node->ioss_VMBuffer = InvalidBuffer;
+	Assert(node->ioss_ScanDesc->xs_want_itup);
 
 	/*
 	 * If no run-time keys to calculate or they are ready, go ahead and pass
@@ -823,13 +583,14 @@ ExecIndexOnlyScanInitializeWorker(IndexOnlyScanState *node,
 	node->ioss_ScanDesc =
 		index_beginscan_parallel(node->ss.ss_currentRelation,
 								 node->ioss_RelationDesc,
+								 true,
 								 node->ioss_Instrument,
 								 node->ioss_NumScanKeys,
 								 node->ioss_NumOrderByKeys,
 								 piscan,
 								 ScanRelIsReadOnly(&node->ss) ?
 								 SO_HINT_REL_READ_ONLY : SO_NONE);
-	node->ioss_ScanDesc->xs_want_itup = true;
+	Assert(node->ioss_ScanDesc->xs_want_itup);
 
 	/*
 	 * If no run-time keys to calculate or they are ready, go ahead and pass

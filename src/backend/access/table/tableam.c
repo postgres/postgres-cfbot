@@ -222,48 +222,30 @@ table_beginscan_parallel_tidrange(Relation relation,
 }
 
 
-/* ----------------------------------------------------------------------------
- * Index scan related functions.
- * ----------------------------------------------------------------------------
- */
-
-/*
- * To perform that check simply start an index scan, create the necessary
- * slot, do the heap lookup, and shut everything down again. This could be
- * optimized, but is unlikely to matter from a performance POV. If there
- * frequently are live index pointers also matching a unique index key, the
- * CPU overhead of this routine is unlikely to matter.
- *
- * Note that *tid may be modified when we return true if the AM supports
- * storing multiple row versions reachable via a single index entry (like
- * heap's HOT).
- */
-bool
-table_index_fetch_tuple_check(Relation rel,
-							  ItemPointer tid,
-							  Snapshot snapshot,
-							  bool *all_dead)
-{
-	IndexFetchTableData *scan;
-	TupleTableSlot *slot;
-	bool		call_again = false;
-	bool		found;
-
-	slot = table_slot_create(rel, NULL);
-	scan = table_index_fetch_begin(rel, SO_NONE);
-	found = table_index_fetch_tuple(scan, tid, snapshot, slot, &call_again,
-									all_dead);
-	table_index_fetch_end(scan);
-	ExecDropSingleTupleTableSlot(slot);
-
-	return found;
-}
-
-
 /* ------------------------------------------------------------------------
  * Functions for non-modifying operations on individual tuples
  * ------------------------------------------------------------------------
  */
+
+/*
+ * Caller should note the table_fetch_tid warning about *tid being modified
+ * when we return true in some cases
+ */
+bool
+table_fetch_tid_check(Relation rel,
+					  ItemPointer tid,
+					  Snapshot snapshot,
+					  bool *all_dead)
+{
+	TupleTableSlot *slot;
+	bool		found;
+
+	slot = table_slot_create(rel, NULL);
+	found = table_fetch_tid(rel, tid, snapshot, slot, all_dead);
+	ExecDropSingleTupleTableSlot(slot);
+
+	return found;
+}
 
 void
 table_tuple_get_latest_tid(TableScanDesc scan, ItemPointer tid)

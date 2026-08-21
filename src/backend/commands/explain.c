@@ -137,7 +137,7 @@ static void show_recursive_union_info(RecursiveUnionState *rstate,
 static void show_memoize_info(MemoizeState *mstate, List *ancestors,
 							  ExplainState *es);
 static void show_hashagg_info(AggState *aggstate, ExplainState *es);
-static void show_indexsearches_info(PlanState *planstate, ExplainState *es);
+static void show_indexscan_info(PlanState *planstate, ExplainState *es);
 static void show_tidbitmap_info(BitmapHeapScanState *planstate,
 								ExplainState *es);
 static void show_scan_io_usage(ScanState *planstate,
@@ -1978,7 +1978,8 @@ ExplainNode(PlanState *planstate, List *ancestors,
 			if (plan->qual)
 				show_instrumentation_count("Rows Removed by Filter", 1,
 										   planstate, es);
-			show_indexsearches_info(planstate, es);
+			show_indexscan_info(planstate, es);
+			show_scan_io_usage((ScanState *) planstate, es);
 			break;
 		case T_IndexOnlyScan:
 			show_scan_qual(((IndexOnlyScan *) plan)->indexqual,
@@ -1992,15 +1993,13 @@ ExplainNode(PlanState *planstate, List *ancestors,
 			if (plan->qual)
 				show_instrumentation_count("Rows Removed by Filter", 1,
 										   planstate, es);
-			if (es->analyze)
-				ExplainPropertyFloat("Heap Fetches", NULL,
-									 planstate->instrument->ntuples2, 0, es);
-			show_indexsearches_info(planstate, es);
+			show_indexscan_info(planstate, es);
+			show_scan_io_usage((ScanState *) planstate, es);
 			break;
 		case T_BitmapIndexScan:
 			show_scan_qual(((BitmapIndexScan *) plan)->indexqualorig,
 						   "Index Cond", planstate, ancestors, es);
-			show_indexsearches_info(planstate, es);
+			show_indexscan_info(planstate, es);
 			break;
 		case T_BitmapHeapScan:
 			show_scan_qual(((BitmapHeapScan *) plan)->bitmapqualorig,
@@ -3872,15 +3871,16 @@ show_hashagg_info(AggState *aggstate, ExplainState *es)
 }
 
 /*
- * Show the total number of index searches for a
+ * Show index scan related executor instrumentation for a
  * IndexScan/IndexOnlyScan/BitmapIndexScan node
  */
 static void
-show_indexsearches_info(PlanState *planstate, ExplainState *es)
+show_indexscan_info(PlanState *planstate, ExplainState *es)
 {
 	Plan	   *plan = planstate->plan;
 	SharedIndexScanInstrumentation *SharedInfo = NULL;
-	uint64		nsearches = 0;
+	uint64		nsearches = 0,
+				ntabletuplefetches = 0;
 
 	if (!es->analyze)
 		return;
@@ -3901,6 +3901,7 @@ show_indexsearches_info(PlanState *planstate, ExplainState *es)
 				IndexOnlyScanState *indexstate = ((IndexOnlyScanState *) planstate);
 
 				nsearches = indexstate->ioss_Instrument->nsearches;
+				ntabletuplefetches = indexstate->ioss_Instrument->ntabletuplefetches;
 				SharedInfo = indexstate->ioss_SharedInfo;
 				break;
 			}
@@ -3924,8 +3925,12 @@ show_indexsearches_info(PlanState *planstate, ExplainState *es)
 			IndexScanInstrumentation *winstrument = &SharedInfo->winstrument[i];
 
 			nsearches += winstrument->nsearches;
+			ntabletuplefetches += winstrument->ntabletuplefetches;
 		}
 	}
+
+	if (nodeTag(plan) == T_IndexOnlyScan)
+		ExplainPropertyUInteger("Heap Fetches", NULL, ntabletuplefetches, es);
 
 	ExplainPropertyUInteger("Index Searches", NULL, nsearches, es);
 }
@@ -4081,6 +4086,18 @@ show_scan_io_usage(ScanState *planstate, ExplainState *es)
 	{
 		stats = planstate->ss_currentScanDesc->rs_instrument->io;
 	}
+	else if (IsA(planstate, IndexScanState))
+	{
+		IndexScanState *indexstate = ((IndexScanState *) planstate);
+
+		stats = indexstate->iss_Instrument->io;
+	}
+	else if (IsA(planstate, IndexOnlyScanState))
+	{
+		IndexOnlyScanState *indexstate = ((IndexOnlyScanState *) planstate);
+
+		stats = indexstate->ioss_Instrument->io;
+	}
 
 	/*
 	 * Accumulate data from parallel workers (if any).
@@ -4153,6 +4170,54 @@ show_scan_io_usage(ScanState *planstate, ExplainState *es)
 
 						ExplainOpenWorker(i, es);
 						print_io_usage(es, &winstrument->stats.io);
+						ExplainCloseWorker(i, es);
+					}
+				}
+
+				break;
+			}
+		case T_IndexScan:
+			{
+				SharedIndexScanInstrumentation *sinstrument
+				= ((IndexScanState *) planstate)->iss_SharedInfo;
+
+				if (sinstrument)
+				{
+					for (int i = 0; i < sinstrument->num_workers; ++i)
+					{
+						IndexScanInstrumentation *winstrument = &sinstrument->winstrument[i];
+
+						AccumulateIOStats(&stats, &winstrument->io);
+
+						if (!es->workers_state)
+							continue;
+
+						ExplainOpenWorker(i, es);
+						print_io_usage(es, &winstrument->io);
+						ExplainCloseWorker(i, es);
+					}
+				}
+
+				break;
+			}
+		case T_IndexOnlyScan:
+			{
+				SharedIndexScanInstrumentation *sinstrument
+				= ((IndexOnlyScanState *) planstate)->ioss_SharedInfo;
+
+				if (sinstrument)
+				{
+					for (int i = 0; i < sinstrument->num_workers; ++i)
+					{
+						IndexScanInstrumentation *winstrument = &sinstrument->winstrument[i];
+
+						AccumulateIOStats(&stats, &winstrument->io);
+
+						if (!es->workers_state)
+							continue;
+
+						ExplainOpenWorker(i, es);
+						print_io_usage(es, &winstrument->io);
 						ExplainCloseWorker(i, es);
 					}
 				}
