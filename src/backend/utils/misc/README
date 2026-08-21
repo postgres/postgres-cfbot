@@ -115,6 +115,12 @@ This hook allows variable-specific computation of the value displayed
 by SHOW (and other SQL features for showing GUC variable values).
 The return value can point to a static buffer, since show functions are
 not used reentrantly.
+Note that the show_hook only controls display of the variable's current
+value, not its auxiliary values such as min, max, or reset value.
+Therefore it is unwise to format the output significantly differently
+than the way that those values will be displayed.  (As an example,
+don't use a show_hook to display a file mode value in octal; instead
+set the GUC_SHOW_IN_OCTAL flag.)
 
 
 Saving/Restoring GUC Variable Values
