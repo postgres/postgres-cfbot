@@ -682,22 +682,6 @@ RelationCloseSmgr(Relation relation)
 
 
 /*
- * RelationIsScannable
- *		Currently can only be false for a materialized view which has not been
- *		populated by its query.  This is likely to get more complicated later,
- *		so use a macro which looks like a function.
- */
-#define RelationIsScannable(relation) ((relation)->rd_rel->relispopulated)
-
-/*
- * RelationIsPopulated
- *		Currently, we don't physically distinguish the "populated" and
- *		"scannable" properties of matviews, but that may change later.
- *		Hence, use the appropriate one of these macros in code tests.
- */
-#define RelationIsPopulated(relation) ((relation)->rd_rel->relispopulated)
-
-/*
  * RelationIsAccessibleInLogicalDecoding
  *		True if we need to log enough information to have access via
  *		decoding snapshot.

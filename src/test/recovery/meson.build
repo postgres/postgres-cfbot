@@ -64,6 +64,9 @@ tests += {
       't/053_standby_login_event_trigger.pl',
       't/054_unlogged_sequence_promotion.pl',
       't/055_cascade_reconnect.pl',
+      't/056_unlogged_matview.pl',
+      't/057_unlogged_matview_standby.pl',
+      't/058_unlogged_matview_promotion.pl',
     ],
   },
 }

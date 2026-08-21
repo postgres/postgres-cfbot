@@ -716,6 +716,7 @@ GuessControlValues(void)
 	ControlFile.time = (pg_time_t) time(NULL);
 	ControlFile.checkPoint = ControlFile.checkPointCopy.redo;
 	ControlFile.unloggedLSN = FirstNormalUnloggedLSN;
+	ControlFile.unloggedResetGen = 0;
 
 	/* minRecoveryPoint, backupStartPoint and backupEndPoint can be left zero */
 
@@ -917,6 +918,13 @@ RewriteControlFile(void)
 
 	ControlFile.state = DB_SHUTDOWNED;
 	ControlFile.checkPoint = ControlFile.checkPointCopy.redo;
+
+	/*
+	 * WAL reset skips crash recovery, so unlogged storage is suspect.  Bump
+	 * the reset generation so pre-reset epoch stamps read as "not populated".
+	 */
+	ControlFile.unloggedResetGen++;
+
 	ControlFile.minRecoveryPoint = InvalidXLogRecPtr;
 	ControlFile.minRecoveryPointTLI = 0;
 	ControlFile.backupStartPoint = InvalidXLogRecPtr;
