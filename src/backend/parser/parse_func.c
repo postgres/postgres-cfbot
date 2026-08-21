@@ -95,6 +95,7 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 	bool		is_column = (fn == NULL);
 	List	   *agg_order = (fn ? fn->agg_order : NIL);
 	Expr	   *agg_filter = NULL;
+	Expr	   *agg_on_empty = NULL;
 	WindowDef  *over = (fn ? fn->over : NULL);
 	bool		agg_within_group = (fn ? fn->agg_within_group : false);
 	bool		agg_star = (fn ? fn->agg_star : false);
@@ -129,6 +130,15 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 		agg_filter = (Expr *) transformWhereClause(pstate, fn->agg_filter,
 												   EXPR_KIND_FILTER,
 												   "FILTER");
+
+	/*
+	 * If there's an aggregate ON EMPTY default value given, transform it
+	 * here. It is parsed in its own expression kind so that disallowed
+	 * constructs are reported as occurring "in ON EMPTY expressions".
+	 */
+	if (fn && fn->agg_on_empty != NULL)
+		agg_on_empty = (Expr *) transformExpr(pstate, fn->agg_on_empty,
+											  EXPR_KIND_AGG_ON_EMPTY);
 
 	/*
 	 * Most of the rest of the parser just assumes that functions do not have
@@ -226,6 +236,7 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 	 */
 	could_be_projection = (nargs == 1 && !proc_call &&
 						   agg_order == NIL && agg_filter == NULL &&
+						   agg_on_empty == NULL &&
 						   !agg_star && !agg_distinct && over == NULL &&
 						   !func_variadic && argnames == NIL &&
 						   list_length(funcname) == 1 &&
@@ -337,6 +348,12 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 			ereport(ERROR,
 					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 					 errmsg("ORDER BY specified, but %s is not an aggregate function",
+							NameListToString(funcname)),
+					 parser_errposition(pstate, location)));
+		if (agg_on_empty != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("ON EMPTY specified, but %s is not an aggregate function",
 							NameListToString(funcname)),
 					 parser_errposition(pstate, location)));
 		if (agg_filter)
@@ -876,7 +893,8 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 					 parser_errposition(pstate, location)));
 
 		/* parse_agg.c does additional aggregate-specific processing */
-		transformAggregateCall(pstate, aggref, fargs, agg_order, agg_distinct);
+		transformAggregateCall(pstate, aggref, fargs, agg_order, agg_distinct,
+							   agg_on_empty);
 
 		retval = (Node *) aggref;
 	}
@@ -952,6 +970,18 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 					 parser_errposition(pstate, location)));
 
 		/*
+		 * ON EMPTY only has meaning for aggregates: it supplies the value to
+		 * return when the aggregate processes no rows.  A true window
+		 * function does not aggregate input rows, so it would be silently
+		 * ignored; reject it instead.
+		 */
+		if (!wfunc->winagg && agg_on_empty)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("ON EMPTY is not implemented for non-aggregate window functions"),
+					 parser_errposition(pstate, location)));
+
+		/*
 		 * Window functions can't either take or return sets
 		 */
 		if (pstate->p_last_srf != last_srf)
@@ -969,7 +999,7 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 					 parser_errposition(pstate, location)));
 
 		/* parse_agg.c does additional window-func-specific processing */
-		transformWindowFuncCall(pstate, wfunc, over);
+		transformWindowFuncCall(pstate, wfunc, over, agg_on_empty);
 
 		retval = (Node *) wfunc;
 	}
@@ -2805,6 +2835,9 @@ check_srf_call_placement(ParseState *pstate, Node *last_srf, int location)
 		case EXPR_KIND_COLUMN_DEFAULT:
 		case EXPR_KIND_FUNCTION_DEFAULT:
 			err = _("set-returning functions are not allowed in DEFAULT expressions");
+			break;
+		case EXPR_KIND_AGG_ON_EMPTY:
+			err = _("set-returning functions are not allowed in ON EMPTY expressions");
 			break;
 		case EXPR_KIND_INDEX_EXPRESSION:
 			err = _("set-returning functions are not allowed in index expressions");

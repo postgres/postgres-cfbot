@@ -567,6 +567,7 @@ transformColumnRef(ParseState *pstate, ColumnRef *cref)
 		case EXPR_KIND_CHECK_CONSTRAINT:
 		case EXPR_KIND_DOMAIN_CHECK:
 		case EXPR_KIND_FUNCTION_DEFAULT:
+		case EXPR_KIND_AGG_ON_EMPTY:
 		case EXPR_KIND_INDEX_EXPRESSION:
 		case EXPR_KIND_INDEX_PREDICATE:
 		case EXPR_KIND_STATS_EXPRESSION:
@@ -1852,6 +1853,9 @@ transformSubLink(ParseState *pstate, SubLink *sublink)
 		case EXPR_KIND_COLUMN_DEFAULT:
 		case EXPR_KIND_FUNCTION_DEFAULT:
 			err = _("cannot use subquery in DEFAULT expression");
+			break;
+		case EXPR_KIND_AGG_ON_EMPTY:
+			err = _("cannot use subquery in ON EMPTY expression");
 			break;
 		case EXPR_KIND_INDEX_EXPRESSION:
 			err = _("cannot use subquery in index expression");
@@ -3227,6 +3231,8 @@ ParseExprKindName(ParseExprKind exprKind)
 		case EXPR_KIND_COLUMN_DEFAULT:
 		case EXPR_KIND_FUNCTION_DEFAULT:
 			return "DEFAULT";
+		case EXPR_KIND_AGG_ON_EMPTY:
+			return "ON EMPTY";
 		case EXPR_KIND_INDEX_EXPRESSION:
 			return "index expression";
 		case EXPR_KIND_INDEX_PREDICATE:
@@ -3994,7 +4000,7 @@ transformJsonAggConstructor(ParseState *pstate, JsonAggConstructor *agg_ctor,
 					parser_errposition(pstate, agg_ctor->location));
 
 		/* parse_agg.c does additional window-func-specific processing */
-		transformWindowFuncCall(pstate, wfunc, agg_ctor->over);
+		transformWindowFuncCall(pstate, wfunc, agg_ctor->over, NULL);
 
 		node = (Node *) wfunc;
 	}
@@ -4021,7 +4027,8 @@ transformJsonAggConstructor(ParseState *pstate, JsonAggConstructor *agg_ctor,
 		aggref->aggtransno = -1;
 		aggref->location = agg_ctor->location;
 
-		transformAggregateCall(pstate, aggref, args, agg_ctor->agg_order, false);
+		transformAggregateCall(pstate, aggref, args, agg_ctor->agg_order,
+							   false, NULL);
 
 		node = (Node *) aggref;
 	}

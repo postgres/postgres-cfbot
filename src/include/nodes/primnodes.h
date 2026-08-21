@@ -493,6 +493,9 @@ typedef struct Aggref
 	/* FILTER expression, if any */
 	Expr	   *aggfilter;
 
+	/* ON EMPTY expression, if any */
+	Expr	   *aggonempty;
+
 	/* true if argument list was really '*' */
 	bool		aggstar pg_node_attr(query_jumble_ignore);
 
@@ -598,6 +601,8 @@ typedef struct WindowFunc
 	List	   *args;
 	/* FILTER expression, if any */
 	Expr	   *aggfilter;
+	/* ON EMPTY expression, if any */
+	Expr	   *aggonempty;
 	/* List of WindowFuncRunConditions to help short-circuit execution */
 	List	   *runCondition pg_node_attr(query_jumble_ignore);
 	/* index of associated WindowClause */

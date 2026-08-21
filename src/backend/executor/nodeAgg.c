@@ -649,6 +649,12 @@ initialize_aggregate(AggState *aggstate, AggStatePerTrans pertrans,
 	 * still need to do this.
 	 */
 	pergroupstate->noTransValue = pertrans->initValueIsNull;
+
+	/*
+	 * Initialize the flag used for ON EMPTY to track whether any input rows
+	 * were received.
+	 */
+	pergroupstate->inputReceived = false;
 }
 
 /*
@@ -1056,6 +1062,25 @@ finalize_aggregate(AggState *aggstate,
 	AggStatePerTrans pertrans = &aggstate->pertrans[peragg->transno];
 
 	oldContext = MemoryContextSwitchTo(aggstate->ss.ps.ps_ExprContext->ecxt_per_tuple_memory);
+
+	/*
+	 * If the ON EMPTY clause is specified with a default value, evaluate and
+	 * return it in cases where no input rows were received.
+	 *
+	 * The inputReceived flag is used to detect the empty set case (zero rows
+	 * processed).
+	 */
+	if (peragg->aggonemptystate != NULL && !pergroupstate->inputReceived)
+	{
+		*resultVal = ExecEvalExpr(peragg->aggonemptystate,
+								  aggstate->ss.ps.ps_ExprContext,
+								  resultIsNull);
+
+		/* Switch back to the caller's context before returning */
+		MemoryContextSwitchTo(oldContext);
+
+		return;
+	}
 
 	/*
 	 * Evaluate any direct arguments.  We do this even if there's no finalfn
@@ -3956,6 +3981,13 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 				aclcheck_error(aclresult, OBJECT_FUNCTION,
 							   get_func_name(transfn_oid));
 			InvokeFunctionExecuteHook(transfn_oid);
+
+			/* Build expression state for ON EMPTY default expression */
+			if (aggref->aggonempty)
+				peragg->aggonemptystate = ExecInitExpr(aggref->aggonempty,
+													   (PlanState *) aggstate);
+			else
+				peragg->aggonemptystate = NULL;
 
 			/*
 			 * initval is potentially null, so don't try to access it as a
