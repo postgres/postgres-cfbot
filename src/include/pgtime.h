@@ -46,6 +46,23 @@ struct pg_tm
 	const char *tm_zone;
 };
 
+/*
+ * These values are used to encode the gaps when in when converting
+ * timestamp representations between timezones across a time change,
+ * the most common case being DST. If a time change affects
+ * only minutes and seconds, would be represented using bits
+ * TZ_GAP_MINUTE and TZ_GAP_SECOND.
+ */
+typedef enum TZGapEffectBits {
+	TZ_GAP_YEAR  ,
+	TZ_GAP_MONTH ,
+	TZ_GAP_DAY   ,
+	TZ_GAP_HOUR  ,
+	TZ_GAP_MINUTE,
+	TZ_GAP_SECOND,
+	TZ_GAP_NUM_BITS
+} TZMonotonicityBits;
+
 /* These structs are opaque outside the timezone library */
 typedef struct pg_tz pg_tz;
 typedef struct pg_tzenum pg_tzenum;
@@ -56,6 +73,8 @@ typedef struct pg_tzenum pg_tzenum;
 /* these functions are in localtime.c */
 
 extern struct pg_tm *pg_localtime(const pg_time_t *timep, const pg_tz *tz);
+extern bool pg_timezone_is_monotonic(const pg_tz *tz, TZMonotonicityBits unit, bool to_utc);
+
 extern struct pg_tm *pg_gmtime(const pg_time_t *timep);
 extern int	pg_next_dst_boundary(const pg_time_t *timep,
 								 long int *before_gmtoff,

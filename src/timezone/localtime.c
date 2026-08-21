@@ -1770,6 +1770,21 @@ pg_next_dst_boundary(const pg_time_t *timep,
 }
 
 /*
+ * Determine whether timestamps truncated to the specified
+ * unit is monotonic when either converting from UTC to TZ
+ * or from TZ to UTC, the last argument indicates the direction
+ * if the conversion of interest.
+ */
+bool
+pg_timezone_is_monotonic(const pg_tz *tz, TZMonotonicityBits unit, bool to_utc)
+{
+	return ((to_utc ?
+		tz->state.monotonicity.utc :
+		tz->state.monotonicity.local
+	) & BITWISE_HI_AT(unit)) != 0;
+}
+
+/*
  * Identify a timezone abbreviation's meaning in the given zone
  *
  * Determine the GMT offset and DST flag associated with the abbreviation.
