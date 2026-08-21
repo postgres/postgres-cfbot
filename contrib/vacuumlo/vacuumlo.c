@@ -29,7 +29,7 @@
 #include "libpq-fe.h"
 #include "pg_getopt.h"
 
-#define BUFSIZE			1024
+#define BUFSIZE			4096
 
 enum trivalue
 {
@@ -182,24 +182,72 @@ vacuumlo(const char *database, const struct _param *param)
 	PQclear(res);
 
 	/*
-	 * Now find any candidate tables that have columns of type oid.
+	 * Now find any candidate tables that have columns of type oid (or domains
+	 * over oid, or composite types containing oid fields, recursively).
 	 *
 	 * NOTE: we ignore system tables and temp tables by the expedient of
 	 * rejecting tables in schemas named 'pg_*'.  In particular, the temp
 	 * table formed above is ignored, and pg_largeobject will be too. If
 	 * either of these were scanned, obviously we'd end up with nothing to
 	 * delete...
+	 *
+	 * The query returns (schema, table, expr) where expr is a SQL expression
+	 * built server-side with quote_ident(). For example, expr may be: loid,
+	 * (val).loid, ((val).inner_comp).loid, or unnest(loids).
 	 */
 	buf[0] = '\0';
-	strcat(buf, "SELECT s.nspname, c.relname, a.attname ");
-	strcat(buf, "FROM pg_class c, pg_attribute a, pg_namespace s, pg_type t ");
-	strcat(buf, "WHERE a.attnum > 0 AND NOT a.attisdropped ");
-	strcat(buf, "      AND a.attrelid = c.oid ");
-	strcat(buf, "      AND a.atttypid = t.oid ");
-	strcat(buf, "      AND c.relnamespace = s.oid ");
-	strcat(buf, "      AND t.typname in ('oid', 'lo') ");
-	strcat(buf, "      AND c.relkind in (" CppAsString2(RELKIND_RELATION) ", " CppAsString2(RELKIND_MATVIEW) ")");
-	strcat(buf, "      AND s.nspname !~ '^pg_'");
+	if (PQserverVersion(conn) >= 140000)
+	{
+		strcat(buf, "WITH RECURSIVE expressions(schema, tbl, expr, typid) AS ("
+			   "  SELECT quote_ident(s.nspname), quote_ident(c.relname), "
+			   "    quote_ident(a.attname), a.atttypid "
+			   "  FROM pg_class c "
+			   "  JOIN pg_attribute a ON a.attrelid = c.oid "
+			   "    AND a.attnum > 0 AND NOT a.attisdropped "
+			   "  JOIN pg_namespace s ON c.relnamespace = s.oid "
+			   "  WHERE c.relkind IN ("
+			   CppAsString2(RELKIND_RELATION) ", "
+			   CppAsString2(RELKIND_MATVIEW) ") "
+			   "  AND s.nspname !~ '^pg_' "
+			   "  UNION ALL "
+			   "  SELECT d.schema, d.tbl, x.expr, x.typid "
+			   "  FROM expressions d, "
+			   "  LATERAL ("
+			   "    SELECT d.expr, t.typbasetype AS typid "
+			   "    FROM pg_type t "
+			   "    WHERE t.oid = d.typid AND t.typtype = 'd' "
+			   "    UNION ALL "
+			   "    SELECT 'unnest(' || d.expr || ')', t.typelem AS typid "
+			   "    FROM pg_type t "
+			   "    WHERE t.oid = d.typid AND t.typelem != 0 "
+			   "      AND t.typlen = -1 "
+			   "    UNION ALL "
+			   "    SELECT '(' || d.expr || ').' || quote_ident(a.attname), "
+			   "      a.atttypid "
+			   "    FROM pg_type t "
+			   "    JOIN pg_attribute a ON a.attrelid = t.typrelid "
+			   "      AND a.attnum > 0 AND NOT a.attisdropped "
+			   "    WHERE t.oid = d.typid "
+			   "      AND t.typtype = 'c' AND t.typrelid != 0 "
+			   "  ) x"
+			   ") "
+			   "SELECT schema, tbl, expr "
+			   "FROM expressions WHERE typid = 26 "
+			   "  OR typid IN (SELECT oid FROM pg_type"
+			   "               WHERE typname = 'lo')");
+	}
+	else
+	{
+		strcat(buf, "SELECT quote_ident(s.nspname), quote_ident(c.relname), quote_ident(a.attname) ");
+		strcat(buf, "FROM pg_class c, pg_attribute a, pg_namespace s, pg_type t ");
+		strcat(buf, "WHERE a.attnum > 0 AND NOT a.attisdropped ");
+		strcat(buf, "      AND a.attrelid = c.oid ");
+		strcat(buf, "      AND a.atttypid = t.oid ");
+		strcat(buf, "      AND c.relnamespace = s.oid ");
+		strcat(buf, "      AND t.typname in ('oid', 'lo') ");
+		strcat(buf, "      AND c.relkind in (" CppAsString2(RELKIND_RELATION) ", " CppAsString2(RELKIND_MATVIEW) ")");
+		strcat(buf, "      AND s.nspname !~ '^pg_'");
+	}
 	res = PQexec(conn, buf);
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
 	{
@@ -213,52 +261,31 @@ vacuumlo(const char *database, const struct _param *param)
 	{
 		char	   *schema,
 				   *table,
-				   *field;
+				   *expr;
 
 		schema = PQgetvalue(res, i, 0);
 		table = PQgetvalue(res, i, 1);
-		field = PQgetvalue(res, i, 2);
+		expr = PQgetvalue(res, i, 2);
 
 		if (param->verbose)
-			fprintf(stdout, "Checking %s in %s.%s\n", field, schema, table);
-
-		schema = PQescapeIdentifier(conn, schema, strlen(schema));
-		table = PQescapeIdentifier(conn, table, strlen(table));
-		field = PQescapeIdentifier(conn, field, strlen(field));
-
-		if (!schema || !table || !field)
-		{
-			pg_log_error("%s", PQerrorMessage(conn));
-			PQclear(res);
-			PQfinish(conn);
-			PQfreemem(schema);
-			PQfreemem(table);
-			PQfreemem(field);
-			return -1;
-		}
+			fprintf(stdout, "Checking %s in %s.%s\n", expr, schema, table);
 
 		snprintf(buf, BUFSIZE,
 				 "DELETE FROM vacuum_l "
 				 "WHERE lo IN (SELECT %s FROM %s.%s)",
-				 field, schema, table);
+				 expr, schema, table);
+
 		res2 = PQexec(conn, buf);
 		if (PQresultStatus(res2) != PGRES_COMMAND_OK)
 		{
 			pg_log_error("failed to check %s in table %s.%s: %s",
-						 field, schema, table, PQerrorMessage(conn));
+						 expr, schema, table, PQerrorMessage(conn));
 			PQclear(res2);
 			PQclear(res);
 			PQfinish(conn);
-			PQfreemem(schema);
-			PQfreemem(table);
-			PQfreemem(field);
 			return -1;
 		}
 		PQclear(res2);
-
-		PQfreemem(schema);
-		PQfreemem(table);
-		PQfreemem(field);
 	}
 	PQclear(res);
 
@@ -542,3 +569,4 @@ main(int argc, char **argv)
 
 	return rc;
 }
+
