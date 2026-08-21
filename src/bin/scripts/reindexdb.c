@@ -42,18 +42,20 @@ static void get_parallel_tabidx_list(PGconn *conn,
 									 SimpleStringList *index_list,
 									 SimpleOidList **table_list,
 									 bool echo);
-static void reindex_one_database(ConnParams *cparams, ReindexType type,
+static bool reindex_one_database(ConnParams *cparams, ReindexType type,
 								 SimpleStringList *user_list,
 								 const char *progname,
 								 bool echo, bool verbose, bool concurrently,
-								 int concurrentCons, const char *tablespace);
+								 int concurrentCons, const char *tablespace,
+								 bool conn_fail_ok);
 static void reindex_all_databases(ConnParams *cparams,
 								  const char *progname, bool echo,
 								  bool quiet, bool verbose, bool concurrently,
 								  int concurrentCons, const char *tablespace,
 								  bool syscatalog, SimpleStringList *schemas,
 								  SimpleStringList *tables,
-								  SimpleStringList *indexes);
+								  SimpleStringList *indexes,
+								  bool conn_fail_ok);
 static void gen_reindex_command(PGconn *conn, ReindexType type,
 								const char *name, bool echo, bool verbose,
 								bool concurrently, const char *tablespace,
@@ -86,6 +88,7 @@ main(int argc, char *argv[])
 		{"concurrently", no_argument, NULL, 1},
 		{"maintenance-db", required_argument, NULL, 2},
 		{"tablespace", required_argument, NULL, 3},
+		{"continue", no_argument, NULL, 4},
 		{NULL, 0, NULL, 0}
 	};
 
@@ -107,6 +110,7 @@ main(int argc, char *argv[])
 	bool		quiet = false;
 	bool		verbose = false;
 	bool		concurrently = false;
+	bool		conn_fail_ok = false;
 	SimpleStringList indexes = {NULL, NULL};
 	SimpleStringList tables = {NULL, NULL};
 	SimpleStringList schemas = {NULL, NULL};
@@ -179,6 +183,9 @@ main(int argc, char *argv[])
 			case 3:
 				tablespace = pg_strdup(optarg);
 				break;
+			case 4:
+				conn_fail_ok = true;
+				break;
 			default:
 				/* getopt_long already emitted a complaint */
 				pg_log_error_hint("Try \"%s --help\" for more information.", progname);
@@ -216,6 +223,11 @@ main(int argc, char *argv[])
 	if (concurrentCons > 1 && syscatalog)
 		pg_fatal("cannot use multiple jobs to reindex system catalogs");
 
+	/* --continue only governs the all-databases loop. */
+	if (conn_fail_ok && !alldb)
+		pg_fatal("cannot use the \"%s\" option without \"%s\"",
+				 "continue", "all");
+
 	if (alldb)
 	{
 		if (dbname)
@@ -225,7 +237,8 @@ main(int argc, char *argv[])
 
 		reindex_all_databases(&cparams, progname, echo, quiet, verbose,
 							  concurrently, concurrentCons, tablespace,
-							  syscatalog, &schemas, &tables, &indexes);
+							  syscatalog, &schemas, &tables, &indexes,
+							  conn_fail_ok);
 	}
 	else
 	{
@@ -244,22 +257,25 @@ main(int argc, char *argv[])
 		if (syscatalog)
 			reindex_one_database(&cparams, REINDEX_SYSTEM, NULL,
 								 progname, echo, verbose,
-								 concurrently, 1, tablespace);
+								 concurrently, 1, tablespace, false);
 
 		if (schemas.head != NULL)
 			reindex_one_database(&cparams, REINDEX_SCHEMA, &schemas,
 								 progname, echo, verbose,
-								 concurrently, concurrentCons, tablespace);
+								 concurrently, concurrentCons, tablespace,
+								 false);
 
 		if (indexes.head != NULL)
 			reindex_one_database(&cparams, REINDEX_INDEX, &indexes,
 								 progname, echo, verbose,
-								 concurrently, concurrentCons, tablespace);
+								 concurrently, concurrentCons, tablespace,
+								 false);
 
 		if (tables.head != NULL)
 			reindex_one_database(&cparams, REINDEX_TABLE, &tables,
 								 progname, echo, verbose,
-								 concurrently, concurrentCons, tablespace);
+								 concurrently, concurrentCons, tablespace,
+								 false);
 
 		/*
 		 * reindex database only if neither index nor table nor schema nor
@@ -269,18 +285,24 @@ main(int argc, char *argv[])
 			tables.head == NULL && schemas.head == NULL)
 			reindex_one_database(&cparams, REINDEX_DATABASE, NULL,
 								 progname, echo, verbose,
-								 concurrently, concurrentCons, tablespace);
+								 concurrently, concurrentCons, tablespace,
+								 false);
 	}
 
 	exit(0);
 }
 
-static void
+/*
+ * Reindex one database.  Returns false if the database had to be skipped
+ * because it could not be connected to, which is only possible when
+ * conn_fail_ok is set; see reindex_all_databases().
+ */
+static bool
 reindex_one_database(ConnParams *cparams, ReindexType type,
 					 SimpleStringList *user_list,
 					 const char *progname, bool echo,
 					 bool verbose, bool concurrently, int concurrentCons,
-					 const char *tablespace)
+					 const char *tablespace, bool conn_fail_ok)
 {
 	PGconn	   *conn;
 	SimpleStringListCell *cell;
@@ -294,7 +316,14 @@ reindex_one_database(ConnParams *cparams, ReindexType type,
 	int			items_count = 0;
 	ParallelSlot *free_slot = NULL;
 
-	conn = connectDatabase(cparams, progname, echo, false, true);
+	conn = connectDatabase(cparams, progname, echo, conn_fail_ok, true);
+	if (PQstatus(conn) == CONNECTION_BAD)
+	{
+		pg_log_warning("skipping database \"%s\": %s",
+					   PQdb(conn), PQerrorMessage(conn));
+		PQfinish(conn);
+		return false;
+	}
 
 	if (concurrently && PQserverVersion(conn) < 120000)
 	{
@@ -353,7 +382,7 @@ reindex_one_database(ConnParams *cparams, ReindexType type,
 				if (process_list == NULL)
 				{
 					PQfinish(conn);
-					return;
+					return true;
 				}
 				break;
 
@@ -371,7 +400,7 @@ reindex_one_database(ConnParams *cparams, ReindexType type,
 				if (tableoid_list == NULL)
 				{
 					PQfinish(conn);
-					return;
+					return true;
 				}
 
 				indices_tables_cell = tableoid_list->head;
@@ -489,6 +518,8 @@ finish:
 
 	if (failed)
 		exit(1);
+
+	return true;
 }
 
 /*
@@ -833,7 +864,7 @@ reindex_all_databases(ConnParams *cparams,
 					  bool concurrently, int concurrentCons,
 					  const char *tablespace, bool syscatalog,
 					  SimpleStringList *schemas, SimpleStringList *tables,
-					  SimpleStringList *indexes)
+					  SimpleStringList *indexes, bool conn_fail_ok)
 {
 	PGconn	   *conn;
 	PGresult   *result;
@@ -857,25 +888,35 @@ reindex_all_databases(ConnParams *cparams,
 
 		cparams->override_dbname = dbname;
 
-		if (syscatalog)
-			reindex_one_database(cparams, REINDEX_SYSTEM, NULL,
-								 progname, echo, verbose,
-								 concurrently, 1, tablespace);
+		/*
+		 * A skipped database is reported once, by whichever call below runs
+		 * first for it; the remaining work for that database is dropped.
+		 */
+		if (syscatalog &&
+			!reindex_one_database(cparams, REINDEX_SYSTEM, NULL,
+								  progname, echo, verbose,
+								  concurrently, 1, tablespace, conn_fail_ok))
+			continue;
 
-		if (schemas->head != NULL)
-			reindex_one_database(cparams, REINDEX_SCHEMA, schemas,
-								 progname, echo, verbose,
-								 concurrently, concurrentCons, tablespace);
+		if (schemas->head != NULL &&
+			!reindex_one_database(cparams, REINDEX_SCHEMA, schemas,
+								  progname, echo, verbose,
+								  concurrently, concurrentCons, tablespace,
+								  conn_fail_ok))
+			continue;
 
-		if (indexes->head != NULL)
-			reindex_one_database(cparams, REINDEX_INDEX, indexes,
-								 progname, echo, verbose,
-								 concurrently, 1, tablespace);
+		if (indexes->head != NULL &&
+			!reindex_one_database(cparams, REINDEX_INDEX, indexes,
+								  progname, echo, verbose,
+								  concurrently, 1, tablespace, conn_fail_ok))
+			continue;
 
-		if (tables->head != NULL)
-			reindex_one_database(cparams, REINDEX_TABLE, tables,
-								 progname, echo, verbose,
-								 concurrently, concurrentCons, tablespace);
+		if (tables->head != NULL &&
+			!reindex_one_database(cparams, REINDEX_TABLE, tables,
+								  progname, echo, verbose,
+								  concurrently, concurrentCons, tablespace,
+								  conn_fail_ok))
+			continue;
 
 		/*
 		 * reindex database only if neither index nor table nor schema nor
@@ -885,7 +926,8 @@ reindex_all_databases(ConnParams *cparams,
 			tables->head == NULL && schemas->head == NULL)
 			reindex_one_database(cparams, REINDEX_DATABASE, NULL,
 								 progname, echo, verbose,
-								 concurrently, concurrentCons, tablespace);
+								 concurrently, concurrentCons, tablespace,
+								 conn_fail_ok);
 	}
 
 	PQclear(result);
@@ -900,6 +942,8 @@ help(const char *progname)
 	printf(_("\nOptions:\n"));
 	printf(_("  -a, --all                    reindex all databases\n"));
 	printf(_("      --concurrently           reindex concurrently\n"));
+	printf(_("      --continue               with --all, skip databases that cannot be\n"
+			 "                               connected to instead of exiting\n"));
 	printf(_("  -d, --dbname=DBNAME          database to reindex\n"));
 	printf(_("  -e, --echo                   show the commands being sent to the server\n"));
 	printf(_("  -i, --index=INDEX            recreate specific index(es) only\n"));
