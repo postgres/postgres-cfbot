@@ -552,7 +552,8 @@ makeJsonLexContext(JsonLexContext *lex, text *json, bool need_escapes)
 										VARDATA_ANY(json),
 										VARSIZE_ANY_EXHDR(json),
 										GetDatabaseEncoding(),
-										need_escapes);
+										need_escapes,
+										false);
 }
 
 /*
@@ -661,7 +662,8 @@ json_errsave_error(JsonParseErrorType error, JsonLexContext *lex,
 	else
 		errsave(escontext,
 				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-				 errmsg("invalid input syntax for type %s", "json"),
+				 errmsg("invalid input syntax for type %s",
+						lex->json5 ? "json5" : "json"),
 				 errdetail_internal("%s", json_errdetail(error, lex)),
 				 report_json_context(lex)));
 }
@@ -2791,7 +2793,7 @@ populate_array_json(PopulateArrayContext *ctx, const char *json, int len)
 	JsonSemAction sem;
 
 	state.lex = makeJsonLexContextCstringLen(NULL, json, len,
-											 GetDatabaseEncoding(), true);
+											 GetDatabaseEncoding(), true, false);
 	state.ctx = ctx;
 
 	memset(&sem, 0, sizeof(sem));
@@ -3829,7 +3831,7 @@ get_json_object_as_hash(const char *json, int len, const char *funcname,
 	state->function_name = funcname;
 	state->hash = tab;
 	state->lex = makeJsonLexContextCstringLen(NULL, json, len,
-											  GetDatabaseEncoding(), true);
+											  GetDatabaseEncoding(), true, false);
 
 	sem->semstate = state;
 	sem->array_start = hash_array_start;

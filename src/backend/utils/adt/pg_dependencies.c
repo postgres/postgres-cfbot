@@ -778,7 +778,7 @@ pg_dependencies_in(PG_FUNCTION_ARGS)
 	sem_action.object_field_end = NULL;
 	sem_action.scalar = dependencies_scalar;
 
-	lex = makeJsonLexContextCstringLen(NULL, str, strlen(str), PG_UTF8, true);
+	lex = makeJsonLexContextCstringLen(NULL, str, strlen(str), PG_UTF8, true, false);
 
 	result = pg_parse_json(lex, &sem_action);
 	freeJsonLexContext(lex);
