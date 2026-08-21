@@ -476,6 +476,23 @@ OPTIONS (ADD password_required 'false');
      </listitem>
     </varlistentry>
 
+    <varlistentry>
+     <term><literal>streaming_fetch</literal> (<type>boolean</type>)</term>
+     <listitem>
+      <para>
+       Specifies whether to fetch rows from the remote server without
+       using a cursor. When enabled, the remote server is free to use
+       parallel query plans, which can significantly improve performance
+       for large scans. When a second scan begins on the same connection
+       while one is already in progress, the remaining rows of the first scan
+       are buffered locally (using work_mem) and replayed on demand.
+       Asynchronous execution is not supported in this mode and is disabled
+       automatically. The default is <literal>false</literal>. It can be
+       specified for a foreign table or a foreign server. The option
+       specified on a table overrides an option specified for the server.
+      </para>
+     </listitem>
+    </varlistentry>
    </variablelist>
 
   </sect3>
