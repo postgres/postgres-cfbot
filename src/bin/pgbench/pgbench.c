@@ -537,6 +537,11 @@ typedef enum
 	 * CSTATE_WAIT_RESULT waits until we get a result set back from the server
 	 * for the current command.
 	 *
+	 * CSTATE_WAIT_PREPARE_RESULT waits for the result of an async PQsendPrepare
+	 * issued from CSTATE_START_COMMAND in QUERY_PREPARED mode.  Once the prepare
+	 * succeeds, the prepared flag is set and we loop back to CSTATE_START_COMMAND
+	 * to send the actual query.  On failure we go to CSTATE_ERROR.
+	 *
 	 * CSTATE_SLEEP waits until the end of \sleep.
 	 *
 	 * CSTATE_END_COMMAND records the end-of-command timestamp, increments the
@@ -549,6 +554,7 @@ typedef enum
 	 */
 	CSTATE_START_COMMAND,
 	CSTATE_WAIT_RESULT,
+	CSTATE_WAIT_PREPARE_RESULT,
 	CSTATE_SLEEP,
 	CSTATE_END_COMMAND,
 	CSTATE_SKIP_COMMAND,
@@ -3109,6 +3115,30 @@ prepareCommand(CState *st, int command_num)
 }
 
 /*
+ * Asynchronously start preparing the SQL command from st->use_file at
+ * command_num.  Caller must ensure st->prepared is allocated and that the
+ * command is not yet prepared.  Returns true if the Prepare was sent; the
+ * caller must then wait for the result in CSTATE_WAIT_PREPARE_RESULT and set
+ * the prepared flag only after the result is read successfully.
+ *
+ * Unlike prepareCommand (synchronous, used for the pipeline path), this does
+ * not set st->prepared[...].
+ */
+static bool
+sendPrepareCommand(CState *st, int command_num)
+{
+	Command    *command = sql_script[st->use_file].commands[command_num];
+
+	Assert(command->type == SQL_COMMAND);
+	Assert(st->prepared != NULL);
+	Assert(!st->prepared[st->use_file][command_num]);
+
+	pg_log_debug("client %d preparing %s", st->id, command->prepname);
+	return PQsendPrepare(st->con, command->prepname,
+						 command->argv[0], command->argc - 1, NULL) != 0;
+}
+
+/*
  * Prepare all the commands in the script that come after the \startpipeline
  * that's at position st->command, and the first \endpipeline we find.
  *
@@ -3147,8 +3177,16 @@ prepareCommandsInPipeline(CState *st)
 	st->prepared[st->use_file][st->command] = true;
 }
 
+/* Result of sendCommand(). */
+typedef enum
+{
+	SEND_FAILED,				/* could not send */
+	SEND_OK,					/* sent; wait for query result */
+	SEND_PREPARE_PENDING,		/* async Prepare issued; wait for prepare result */
+} SendCommandResult;
+
 /* Send a SQL command, using the chosen querymode */
-static bool
+static SendCommandResult
 sendCommand(CState *st, Command *command)
 {
 	int			r;
@@ -3179,7 +3217,20 @@ sendCommand(CState *st, Command *command)
 	{
 		const char *params[MAX_ARGS];
 
-		prepareCommand(st, st->command);
+		if (!st->prepared)
+			allocCStatePrepared(st);
+
+		if (!st->prepared[st->use_file][st->command])
+		{
+			if (!sendPrepareCommand(st, st->command))
+			{
+				pg_log_debug("client %d could not send %s",
+							 st->id, command->argv[0]);
+				return SEND_FAILED;
+			}
+			return SEND_PREPARE_PENDING;
+		}
+
 		getQueryParams(&st->variables, command, params);
 
 		pg_log_debug("client %d sending %s", st->id, command->prepname);
@@ -3192,10 +3243,10 @@ sendCommand(CState *st, Command *command)
 	if (r == 0)
 	{
 		pg_log_debug("client %d could not send %s", st->id, command->argv[0]);
-		return false;
+		return SEND_FAILED;
 	}
 	else
-		return true;
+		return SEND_OK;
 }
 
 /*
@@ -3894,18 +3945,23 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 						}
 					}
 
-					if (!sendCommand(st, command))
+					switch (sendCommand(st, command))
 					{
-						commandFailed(st, "SQL", "SQL command send failed");
-						st->state = CSTATE_ABORTED;
-					}
-					else
-					{
-						/* Wait for results, unless in pipeline mode */
-						if (PQpipelineStatus(st->con) == PQ_PIPELINE_OFF)
-							st->state = CSTATE_WAIT_RESULT;
-						else
-							st->state = CSTATE_END_COMMAND;
+						case SEND_FAILED:
+							commandFailed(st, "SQL", "SQL command send failed");
+							st->state = CSTATE_ABORTED;
+							break;
+						case SEND_PREPARE_PENDING:
+							/* Wait for the async Prepare result */
+							st->state = CSTATE_WAIT_PREPARE_RESULT;
+							break;
+						case SEND_OK:
+							/* Wait for results, unless in pipeline mode */
+							if (PQpipelineStatus(st->con) == PQ_PIPELINE_OFF)
+								st->state = CSTATE_WAIT_RESULT;
+							else
+								st->state = CSTATE_END_COMMAND;
+							break;
 					}
 				}
 				else if (command->type == META_COMMAND)
@@ -3927,6 +3983,7 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				 * something bad happened.
 				 */
 				Assert(st->state == CSTATE_WAIT_RESULT ||
+					   st->state == CSTATE_WAIT_PREPARE_RESULT ||
 					   st->state == CSTATE_END_COMMAND ||
 					   st->state == CSTATE_SLEEP ||
 					   st->state == CSTATE_ABORTED);
@@ -4069,6 +4126,55 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				else
 					st->state = CSTATE_ABORTED;
 				break;
+
+				/*
+				 * Wait for the async PQsendPrepare result.
+				 */
+			case CSTATE_WAIT_PREPARE_RESULT:
+				{
+					PGresult   *res;
+
+					pg_log_debug("client %d receiving prepare result", st->id);
+
+					if (PQisBusy(st->con) && !PQconsumeInput(st->con))
+					{
+						commandFailed(st, "SQL", "perhaps the backend died while preparing");
+						st->state = CSTATE_ABORTED;
+						break;
+					}
+					if (PQisBusy(st->con))
+						return;		/* don't have the whole result yet */
+
+					res = PQgetResult(st->con);
+					if (PQresultStatus(res) == PGRES_COMMAND_OK)
+					{
+						PQclear(res);
+						/* null terminator expected after a single result */
+						res = PQgetResult(st->con);
+						Assert(res == NULL);
+
+						st->prepared[st->use_file][st->command] = true;
+						/* Re-enter START_COMMAND to send the actual query */
+						st->state = CSTATE_START_COMMAND;
+					}
+					else
+					{
+						const char *sqlstate = PQresultErrorField(res,
+																 PG_DIAG_SQLSTATE);
+						st->estatus = getSQLErrorStatus(st, sqlstate);
+						pg_log_error("%s", PQerrorMessage(st->con));
+						PQclear(res);
+						/* drain anything else pending on this command */
+						while ((res = PQgetResult(st->con)) != NULL)
+							PQclear(res);
+						if (canRetryError(st->estatus) ||
+							canContinueOnError(st->estatus))
+							st->state = CSTATE_ERROR;
+						else
+							st->state = CSTATE_ABORTED;
+					}
+					break;
+				}
 
 				/*
 				 * Wait until sleep is done. This state is entered after a
@@ -7631,6 +7737,7 @@ threadRun(void *arg)
 					min_usec = this_usec;
 			}
 			else if (st->state == CSTATE_WAIT_RESULT ||
+					 st->state == CSTATE_WAIT_PREPARE_RESULT ||
 					 st->state == CSTATE_WAIT_ROLLBACK_RESULT)
 			{
 				/*
@@ -7721,6 +7828,7 @@ threadRun(void *arg)
 			CState	   *st = &state[i];
 
 			if (st->state == CSTATE_WAIT_RESULT ||
+				st->state == CSTATE_WAIT_PREPARE_RESULT ||
 				st->state == CSTATE_WAIT_ROLLBACK_RESULT)
 			{
 				/* don't call advanceConnectionState unless data is available */
