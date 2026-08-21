@@ -5493,7 +5493,8 @@ unicode_assigned(PG_FUNCTION_ARGS)
 
 	if (GetDatabaseEncoding() != PG_UTF8)
 		ereport(ERROR,
-				(errmsg("Unicode categorization can only be performed if server encoding is UTF8")));
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("Unicode categorization can only be performed if server encoding is UTF8")));
 
 	/* convert to char32_t */
 	size = pg_mbstrlen_with_len(VARDATA_ANY(input), VARSIZE_ANY_EXHDR(input));
