@@ -3337,10 +3337,13 @@ _tocEntryRequired(TocEntry *te, teSection curSection, ArchiveHandle *AH)
 		 * out large objects.  (Only large object definitions, comments and
 		 * other metadata should be generated in binary-upgrade mode, not the
 		 * actual data, but that need not concern us here.)
+		 *
+		 * Force immediate data dump if requested, even with dumpData is unset.
 		 */
 		if (!(ropt->sequence_data && strcmp(te->desc, "SEQUENCE SET") == 0) &&
 			!(ropt->binary_upgrade &&
 			  (strcmp(te->desc, "BLOB") == 0 ||
+			   strcmp(te->desc, "IMMEDIATE TABLE DATA") == 0 ||
 			   strcmp(te->desc, "BLOB METADATA") == 0 ||
 			   (strcmp(te->desc, "ACL") == 0 &&
 				strncmp(te->tag, "LARGE OBJECT", 12) == 0) ||
