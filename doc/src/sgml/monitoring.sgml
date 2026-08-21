@@ -239,7 +239,9 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
    more frequently than once per <varname>PGSTAT_MIN_INTERVAL</varname>
    milliseconds (1 second unless altered while building the server); so a
    query or transaction still in progress does not affect the displayed totals
-   and the displayed information lags behind actual activity.  However,
+   and the displayed information lags behind actual activity, unless the process
+   is asked to flush its pending statistics by calling
+   <function>pg_stat_force_next_flush</function>.  However,
    current-query information collected by <varname>track_activities</varname>
    is always up-to-date.
   </para>
@@ -4540,7 +4542,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
       </para>
       <para>
        The time of the last sequential scan on this table, based on the
-       most recent transaction stop time
+       most recent transaction stop time, or the statement start time
+       when flushed during a transaction
       </para></entry>
      </row>
 
@@ -4568,7 +4571,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
       </para>
       <para>
        The time of the last index scan on this table, based on the
-       most recent transaction stop time
+       most recent transaction stop time, or the statement start time
+       when flushed during a transaction
       </para></entry>
      </row>
 
@@ -5069,7 +5073,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
       </para>
       <para>
        The time of the last scan on this index, based on the
-       most recent transaction stop time
+       most recent transaction stop time, or the statement start time
+       when flushed during a transaction
       </para></entry>
      </row>
 
@@ -5937,6 +5942,23 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        </para>
        <para>
         Discards the current statistics snapshot or cached information.
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>pg_stat_force_next_flush</primary>
+        </indexterm>
+        <function>pg_stat_force_next_flush</function> ()
+        <returnvalue>void</returnvalue>
+       </para>
+       <para>
+        Flushes the statistics pending in the current session to shared
+        memory, making them visible to other sessions.  When called within
+        a transaction, counters tracking data modifications, such as the
+        numbers of inserted, updated, and deleted tuples, are deferred
+        until the transaction ends.
        </para></entry>
       </row>
 
