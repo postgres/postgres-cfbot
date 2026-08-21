@@ -130,6 +130,7 @@
 #include "access/xact.h"
 #include "common/file_utils.h"
 #include "miscadmin.h"
+#include "nodes/pg_list.h"
 #include "pgstat.h"
 #include "replication/logical.h"
 #include "replication/reorderbuffer.h"
@@ -365,6 +366,8 @@ SnapBuildBuildSnapshot(SnapBuild *builder)
 {
 	Snapshot	snapshot;
 	Size		ssize;
+	static List *xids_already_tested = NIL;
+	static List *new_xids_already_tested = NIL;
 
 	Assert(builder->state >= SNAPBUILD_FULL_SNAPSHOT);
 
@@ -378,7 +381,7 @@ SnapBuildBuildSnapshot(SnapBuild *builder)
 
 	/*
 	 * We misuse the original meaning of SnapshotData's xip and subxip fields
-	 * to make the more fitting for our needs.
+	 * to make them more fitting for our needs.
 	 *
 	 * In the 'xip' array we store transactions that have to be treated as
 	 * committed. Since we will only ever look at tuples from transactions
@@ -402,6 +405,75 @@ SnapBuildBuildSnapshot(SnapBuild *builder)
 
 	snapshot->xmin = builder->xmin;
 	snapshot->xmax = builder->xmax;
+
+	/*
+	 * Although very unlikely, it's possible that a commit WAL record was
+	 * decoded but CLOG is not aware of the commit yet. Should the CLOG update
+	 * be delayed even more, visibility checks that use this snapshot could
+	 * work incorrectly.  Therefore we check the CLOG status here.
+	 *
+	 * We must not do this using TransactionIdIsInProgress()!  The check there
+	 * for latestCompletedXid would wreak havoc because the transaction we're
+	 * interested in may not be out of ProcArray yet, but we must not wait for
+	 * that.  Doing the transam.c check directly is correct, though unusual.
+	 *
+	 * We don't want to repeatedly read the CLOG status for the same
+	 * transaction, and it's easy to keep track of which ones we've already
+	 * checked.  Keep a list of the ones we test on each cycle, and use the
+	 * list from the previous cycle to skip testing them now.
+	 */
+	for (int i = 0; i < builder->committed.xcnt; i++)
+	{
+		for (;;)
+		{
+			if (list_member_xid(xids_already_tested, builder->committed.xip[i]))
+			{
+				MemoryContext oldcxt;
+
+				oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+				new_xids_already_tested = lappend_xid(new_xids_already_tested,
+													  builder->committed.xip[i]);
+				MemoryContextSwitchTo(oldcxt);
+				break;
+			}
+			else if (TransactionIdDidCommit(builder->committed.xip[i]))
+			{
+				MemoryContext oldcxt;
+
+				oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+				new_xids_already_tested = lappend_xid(new_xids_already_tested,
+													  builder->committed.xip[i]);
+				MemoryContextSwitchTo(oldcxt);
+				break;
+			}
+			else
+			{
+				/*
+				 * Note that the other process doesn't know we're waiting for
+				 * them, so nothing is going to signal us out of this latch.
+				 * Therefore use a short timeout.
+				 */
+				(void) WaitLatch(MyLatch,
+								 WL_LATCH_SET | WL_TIMEOUT |
+								 WL_EXIT_ON_PM_DEATH,
+								 2L,
+								 WAIT_EVENT_SNAPBUILD_CLOG);
+				ResetLatch(MyLatch);
+			}
+			CHECK_FOR_INTERRUPTS();
+		}
+	}
+
+	/* Swap these lists for next time */
+	if (xids_already_tested != NIL)
+		list_free(xids_already_tested);
+	if (new_xids_already_tested != NIL)
+	{
+		xids_already_tested = new_xids_already_tested;
+		new_xids_already_tested = NIL;
+	}
+	else
+		xids_already_tested = NIL;
 
 	/* store all transactions to be treated as committed by this snapshot */
 	snapshot->xip =
