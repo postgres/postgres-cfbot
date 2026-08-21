@@ -252,21 +252,6 @@ select date_trunc('day', ts), count(*) from src group by 1;
          Output: date_trunc('day'::text, ts)
 (5 rows)
 
--- date_trunc on timestamptz should not use index
-explain (costs off, verbose)
-select date_trunc('day', tstz), count(*) from src group by 1;
-                         QUERY PLAN                          
--------------------------------------------------------------
- GroupAggregate
-   Output: (date_trunc('day'::text, tstz)), count(*)
-   Group Key: (date_trunc('day'::text, src.tstz))
-   ->  Sort
-         Output: (date_trunc('day'::text, tstz))
-         Sort Key: (date_trunc('day'::text, src.tstz))
-         ->  Index Only Scan using src_tstz_idx on slope.src
-               Output: date_trunc('day'::text, tstz)
-(8 rows)
-
 --
 -- Test arithmetic operations
 --
@@ -424,23 +409,6 @@ select -v_int4 from src order by 1;
    ->  Index Only Scan using src_v_int4_idx on slope.src
          Output: (- v_int4)
 (5 rows)
-
---
--- Group and order
---
-explain (costs off, verbose)
-select tstz::date, count(*) from src group by 1 order by 1;
-                         QUERY PLAN                          
--------------------------------------------------------------
- GroupAggregate
-   Output: ((tstz)::date), count(*)
-   Group Key: ((src.tstz)::date)
-   ->  Sort
-         Output: ((tstz)::date)
-         Sort Key: ((src.tstz)::date)
-         ->  Index Only Scan using src_tstz_idx on slope.src
-               Output: (tstz)::date
-(8 rows)
 
 --
 -- Test nested monotonic function
@@ -844,8 +812,195 @@ SELECT v_int4::oid FROM src ORDER BY 1;
    ->  Index Only Scan using src_v_int4_idx on src
 (3 rows)
 
+--
+-- Now that some plans were shown, and we see that in many cases what
+-- we care is whether a plan has a index scan or not. This function will
+-- check that for us and just return
+--
+CREATE OR REPLACE FUNCTION index_plan (query text) RETURNS BOOLEAN LANGUAGE plpgsql AS $$
+DECLARE
+    plan json;
+BEGIN
+   EXECUTE 'EXPLAIN (COSTS OFF, FORMAT JSON) SELECT ' || query || ' ORDER BY 1' into plan;
+   RETURN  plan->0->'Plan'->>'Node Type' LIKE 'Index%Scan';
+END
+$$;
+--
+-- Functions that take a timezone argument
+--
+PREPARE query(text) AS
+WITH
+cols AS (
+    SELECT * FROM unnest(ARRAY['ts', 'tstz'])
+        WITH ORDINALITY AS c(col, ord)
+),
+units AS (
+    SELECT * FROM unnest(ARRAY['year', 'month', 'day', 'hour', 'minute', 'second'])
+        WITH ORDINALITY AS s(unit, ord)
+)
+SELECT
+    f AS expression,
+    coalesce(string_agg(col, ', ' ORDER BY cols.ord) FILTER (
+        WHERE index_plan(format('timezone(%L, %I) FROM src', $1, col))
+    ), 'none') AS monotonic
+FROM cols,
+     unnest(ARRAY['timezone(TZ, <>)']) AS f(f)
+GROUP BY f
+UNION ALL
+SELECT
+    'date_trunc(<>, tstz, TZ)' AS expression,
+    coalesce(string_agg(unit, ', ' ORDER BY units.ord) FILTER (
+        WHERE index_plan(format('date_trunc(%L, tstz, %L) FROM src', unit, $1))
+    ), 'none') AS monotonic
+FROM units
+ORDER BY 1;
+EXECUTE query('UTC');
+        expression        |               monotonic                
+--------------------------+----------------------------------------
+ date_trunc(<>, tstz, TZ) | year, month, day, hour, minute, second
+ timezone(TZ, <>)         | ts, tstz
+(2 rows)
+
+EXECUTE query('Africa/Ouagadougou');
+        expression        |               monotonic                
+--------------------------+----------------------------------------
+ date_trunc(<>, tstz, TZ) | year, month, day, hour, minute, second
+ timezone(TZ, <>)         | tstz
+(2 rows)
+
+EXECUTE query('Europe/London');
+        expression        |       monotonic        
+--------------------------+------------------------
+ date_trunc(<>, tstz, TZ) | year, month, day, hour
+ timezone(TZ, <>)         | none
+(2 rows)
+
+EXECUTE query('Antarctica/Troll');
+        expression        |    monotonic     
+--------------------------+------------------
+ date_trunc(<>, tstz, TZ) | year, month, day
+ timezone(TZ, <>)         | none
+(2 rows)
+
+EXECUTE query('Pacific/Guam');
+        expression        |  monotonic  
+--------------------------+-------------
+ date_trunc(<>, tstz, TZ) | year, month
+ timezone(TZ, <>)         | none
+(2 rows)
+
+EXECUTE query('America/Goose_Bay');
+        expression        | monotonic 
+--------------------------+-----------
+ date_trunc(<>, tstz, TZ) | year
+ timezone(TZ, <>)         | none
+(2 rows)
+
+--
+-- Functions that depend on session timezone
+--
+PREPARE query_local AS
+WITH
+cols AS (
+    SELECT * FROM unnest(ARRAY['ts', 'tstz'])
+        WITH ORDINALITY AS c(col, ord)
+),
+units AS (
+    SELECT * FROM unnest(ARRAY['year', 'month', 'day', 'hour', 'minute', 'second'])
+        WITH ORDINALITY AS s(unit, ord)
+)
+SELECT
+    format(f, '<>') AS expression,
+    coalesce(string_agg(col, ', ' ORDER BY cols.ord) FILTER (
+        WHERE index_plan(format(f, col) || ' FROM src')
+    ), 'none') AS monotonic
+FROM cols,
+     unnest(ARRAY['%s AT LOCAL', 'timezone(%s)', '%s::date']) AS f(f)
+GROUP BY f
+UNION ALL
+SELECT
+    format('date_trunc(<>, %s)', col) AS expression,
+    coalesce(string_agg(unit, ', ' ORDER BY units.ord) FILTER (
+        WHERE index_plan(format('date_trunc(%L, %I) FROM src', unit, col))
+    ), 'none') AS monotonic
+FROM cols, units
+GROUP BY col
+ORDER BY 1;
+-- UTC
+SET timezone = 'UTC';
+EXECUTE query_local;
+      expression      |               monotonic                
+----------------------+----------------------------------------
+ <> AT LOCAL          | ts, tstz
+ <>::date             | ts, tstz
+ date_trunc(<>, ts)   | year, month, day, hour, minute, second
+ date_trunc(<>, tstz) | year, month, day, hour, minute, second
+ timezone(<>)         | ts, tstz
+(5 rows)
+
+-- No DST at all
+SET timezone = 'Africa/Ouagadougou';
+EXECUTE query_local;
+      expression      |               monotonic                
+----------------------+----------------------------------------
+ <> AT LOCAL          | tstz
+ <>::date             | ts, tstz
+ date_trunc(<>, ts)   | year, month, day, hour, minute, second
+ date_trunc(<>, tstz) | year, month, day, hour, minute, second
+ timezone(<>)         | tstz
+(5 rows)
+
+-- The common case: one hour DST
+SET timezone = 'Europe/London';
+EXECUTE query_local;
+      expression      |               monotonic                
+----------------------+----------------------------------------
+ <> AT LOCAL          | none
+ <>::date             | ts, tstz
+ date_trunc(<>, ts)   | year, month, day, hour, minute, second
+ date_trunc(<>, tstz) | year, month, day, hour
+ timezone(<>)         | none
+(5 rows)
+
+-- DST might affect the hour
+SET timezone = 'Antarctica/Troll';
+EXECUTE query_local;
+      expression      |               monotonic                
+----------------------+----------------------------------------
+ <> AT LOCAL          | none
+ <>::date             | ts, tstz
+ date_trunc(<>, ts)   | year, month, day, hour, minute, second
+ date_trunc(<>, tstz) | year, month, day
+ timezone(<>)         | none
+(5 rows)
+
+-- A weird case: used to go back a day
+SET timezone = 'Pacific/Guam';
+EXECUTE query_local;
+      expression      |               monotonic                
+----------------------+----------------------------------------
+ <> AT LOCAL          | none
+ <>::date             | ts
+ date_trunc(<>, ts)   | year, month, day, hour, minute, second
+ date_trunc(<>, tstz) | year, month
+ timezone(<>)         | none
+(5 rows)
+
+-- Even weirder, went back a month
+SET timezone = 'America/Goose_Bay';
+EXECUTE query_local;
+      expression      |               monotonic                
+----------------------+----------------------------------------
+ <> AT LOCAL          | none
+ <>::date             | ts
+ date_trunc(<>, ts)   | year, month, day, hour, minute, second
+ date_trunc(<>, tstz) | year
+ timezone(<>)         | none
+(5 rows)
+
+DEALLOCATE ALL;
 DROP SCHEMA slope CASCADE;
-NOTICE:  drop cascades to 14 other objects
+NOTICE:  drop cascades to 15 other objects
 DETAIL:  drop cascades to table t
 drop cascades to table u
 drop cascades to operator family test_int4_ops for access method btree
@@ -860,3 +1015,4 @@ drop cascades to type non42
 drop cascades to type fp_real
 drop cascades to table numeric_corners
 drop cascades to table inc
+drop cascades to function index_plan(text)
