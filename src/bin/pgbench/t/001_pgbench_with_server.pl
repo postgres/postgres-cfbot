@@ -850,6 +850,73 @@ SELECT 5432 AS fail UNION SELECT 5433 ORDER BY 1 \gset
 }
 	});
 
+# \gset stores a SQL NULL as the null value, which expressions can use.
+$node->pgbench(
+	'-t 1', 0,
+	[ qr{type: .*/001_pgbench_gset_null}, qr{processed: 1/1} ],
+	[ qr{command=2.: null\b}, qr{command=3.: boolean true\b} ],
+	'pgbench gset command with NULL',
+	{
+		'001_pgbench_gset_null' => q{-- NULL is stored as the null value
+SELECT NULL AS nv \gset
+\set i debug(:nv)
+\set i debug(:nv IS NULL)
+}
+	});
+
+# NULL and empty string captured by \gset stay distinct when interpolated
+$node->safe_psql('postgres',
+	'CREATE UNLOGGED TABLE gset_null_tab(id INTEGER, t TEXT);');
+
+$node->pgbench(
+	'-t 1', 0,
+	[ qr{type: .*/001_pgbench_gset_null_interp}, qr{processed: 1/1} ],
+	[],
+	'pgbench gset NULL interpolation',
+	{
+		'001_pgbench_gset_null_interp' => q{-- interpolate NULL and ''
+SELECT NULL AS nv, ''::text AS es \gset
+INSERT INTO gset_null_tab VALUES (1, :nv);
+INSERT INTO gset_null_tab VALUES (2, ':es');
+}
+	});
+
+is( $node->safe_psql(
+		'postgres', 'SELECT t IS NULL FROM gset_null_tab WHERE id = 1;'),
+	't',
+	'gset NULL interpolates as SQL NULL');
+is( $node->safe_psql(
+		'postgres', "SELECT t = '' FROM gset_null_tab WHERE id = 2;"),
+	't',
+	'gset empty string stays empty');
+
+# In the extended and prepared query modes a NULL-valued variable is bound as
+# the string "NULL", not as an SQL null parameter.
+for my $mode ('extended', 'prepared')
+{
+	$node->pgbench(
+		"-t 1 -M $mode",
+		0,
+		[ qr{type: .*/001_pgbench_gset_null_param_$mode}, qr{processed: 1/1} ],
+		[],
+		"pgbench gset NULL as query parameter ($mode)",
+		{
+			"001_pgbench_gset_null_param_$mode" =>
+			  q{-- NULL bound as a query parameter
+SELECT NULL AS nv \gset
+INSERT INTO gset_null_tab VALUES (3, :nv);
+}
+		});
+}
+
+is( $node->safe_psql(
+		'postgres',
+		"SELECT count(*) FROM gset_null_tab WHERE id = 3 AND t = 'NULL';"),
+	'2',
+	'gset NULL is bound as the string NULL in extended and prepared modes');
+
+$node->safe_psql('postgres', 'DROP TABLE gset_null_tab;');
+
 # working \aset
 # Valid cases.
 $node->pgbench(
