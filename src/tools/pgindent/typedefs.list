@@ -846,7 +846,6 @@ FSMPageData
 FakeRelCacheEntry
 FakeRelCacheEntryData
 FastPathMeta
-FastPathStrongRelationLockData
 FdwInfo
 FdwRoutine
 FetchDirection
