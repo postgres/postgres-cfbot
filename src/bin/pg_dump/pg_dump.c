@@ -352,6 +352,7 @@ static void addConstrChildIdxDeps(DumpableObject *dobj, const IndxInfo *refidx);
 static void getDomainConstraints(Archive *fout, TypeInfo *tyinfo);
 static void getTableData(DumpOptions *dopt, TableInfo *tblinfo, int numTables, char relkind);
 static void makeTableDataInfo(DumpOptions *dopt, TableInfo *tbinfo);
+static void makeExtensionDataInfo(DumpOptions *dopt, TableInfo *tbinfo);
 static void buildMatViewRefreshDependencies(Archive *fout);
 static void getTableDataFKConstraints(void);
 static void determineNotNullFlags(Archive *fout, PGresult *res, int r,
@@ -2838,6 +2839,8 @@ dumpTableData(Archive *fout, const TableDataInfo *tdinfo)
 	char	   *tdDefn = NULL;
 	char	   *copyStmt;
 	const char *copyFrom;
+	const char *description = "TABLE DATA";
+	teSection	section = SECTION_DATA;
 
 	/* We had better have loaded per-column details about this table */
 	Assert(tbinfo->interesting);
@@ -2885,6 +2888,16 @@ dumpTableData(Archive *fout, const TableDataInfo *tdinfo)
 	}
 
 	/*
+	 * Extension config table data goes into SECTION_PRE_DATA so it is
+	 * available before user tables that may need it for validation.
+	 */
+	if (tdinfo->dobj.objType == DO_EXTENSION_DATA)
+	{
+		description = "EXTENSION DATA";
+		section = SECTION_PRE_DATA;
+	}
+
+	/*
 	 * Note: although the TableDataInfo is a full DumpableObject, we treat its
 	 * dependency on its table as "special" and pass it to ArchiveEntry now.
 	 * See comments for BuildArchiveDependencies.
@@ -2897,8 +2910,8 @@ dumpTableData(Archive *fout, const TableDataInfo *tdinfo)
 						  ARCHIVE_OPTS(.tag = tbinfo->dobj.name,
 									   .namespace = tbinfo->dobj.namespace->dobj.name,
 									   .owner = tbinfo->rolname,
-									   .description = "TABLE DATA",
-									   .section = SECTION_DATA,
+									   .description = description,
+									   .section = section,
 									   .createStmt = tdDefn,
 									   .copyStmt = copyStmt,
 									   .deps = &(tbinfo->dobj.dumpId),
@@ -3076,6 +3089,48 @@ makeTableDataInfo(DumpOptions *dopt, TableInfo *tbinfo)
 	}
 
 	/* Make sure that we'll collect per-column info for this table. */
+	tbinfo->interesting = true;
+}
+
+/*
+ * makeExtensionDataInfo --- create TableDataInfo for extension config table
+ *
+ * This is used during binary upgrades to ensure extension configuration
+ * table data is dumped early (before user tables that may depend on it).
+ * For example, PostGIS's spatial_ref_sys must be populated before any
+ * table with geometry(Point, 27700) can be created due to SRID validation.
+ */
+static void
+makeExtensionDataInfo(DumpOptions *dopt, TableInfo *tbinfo)
+{
+	TableDataInfo *tdinfo;
+
+	/* Already have a data object? */
+	if (tbinfo->dataObj != NULL)
+		return;
+
+	/*
+	 * Caller ensures that this is only called for RELKIND_RELATION.
+	 */
+
+	/* OK, create the data object */
+	tdinfo = (TableDataInfo *) pg_malloc(sizeof(TableDataInfo));
+
+	tdinfo->dobj.objType = DO_EXTENSION_DATA;
+
+	tdinfo->dobj.catId.tableoid = 0;
+	tdinfo->dobj.catId.oid = tbinfo->dobj.catId.oid;
+	AssignDumpId(&tdinfo->dobj);
+	tdinfo->dobj.name = tbinfo->dobj.name;
+	tdinfo->dobj.namespace = tbinfo->dobj.namespace;
+	tdinfo->tdtable = tbinfo;
+	tdinfo->filtercond = NULL;
+	addObjectDependency(&tdinfo->dobj, tbinfo->dobj.dumpId);
+
+	/* Mark that this object contains data */
+	tdinfo->dobj.components |= DUMP_COMPONENT_DATA;
+
+	tbinfo->dataObj = tdinfo;
 	tbinfo->interesting = true;
 }
 
@@ -11656,6 +11711,9 @@ dumpDumpableObject(Archive *fout, DumpableObject *dobj)
 		case DO_EXTENSION:
 			dumpExtension(fout, (const ExtensionInfo *) dobj);
 			break;
+		case DO_EXTENSION_DATA:
+			dumpTableData(fout, (const TableDataInfo *) dobj);
+			break;
 		case DO_TYPE:
 			dumpType(fout, (const TypeInfo *) dobj);
 			break;
@@ -20115,10 +20173,25 @@ processExtensionTables(Archive *fout, ExtensionInfo extinfo[],
 
 				if (dumpobj)
 				{
-					makeTableDataInfo(dopt, configtbl);
+					/*
+					 * For binary upgrades, dump extension config table data
+					 * before user tables are created so it's available for
+					 * validation (e.g. PostGIS SRIDs).
+					 */
+					if (dopt->binary_upgrade &&
+						configtbl->relkind == RELKIND_RELATION)
+						makeExtensionDataInfo(dopt, configtbl);
+					else
+						makeTableDataInfo(dopt, configtbl);
 					if (configtbl->dataObj != NULL)
 					{
-						if (strlen(extconditionarray[j]) > 0)
+						/*
+						 * For binary upgrade (DO_EXTENSION_DATA), don't apply
+						 * the filter condition - we need ALL data since the
+						 * extension won't populate built-in data in binary
+						 * upgrade mode.
+						 */
+						if (strlen(extconditionarray[j]) > 0 && !dopt->binary_upgrade)
 							configtbl->dataObj->filtercond = pg_strdup(extconditionarray[j]);
 					}
 				}
@@ -20396,6 +20469,7 @@ addBoundaryDependencies(DumpableObject **dobjs, int numObjs,
 		{
 			case DO_NAMESPACE:
 			case DO_EXTENSION:
+			case DO_EXTENSION_DATA:
 			case DO_TYPE:
 			case DO_SHELL_TYPE:
 			case DO_FUNC:

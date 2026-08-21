@@ -18,6 +18,7 @@ CREATE TABLE regress_table_dumpable (
 	col1 int check (col1 > 0)
 );
 SELECT pg_catalog.pg_extension_config_dump('regress_table_dumpable', '');
+INSERT INTO regress_table_dumpable VALUES (27700);
 GRANT SELECT ON regress_table_dumpable TO public;
 
 CREATE SCHEMA regress_pg_dump_schema;

@@ -515,7 +515,6 @@ my %tests = (
 			extension_schema => 1,
 		},
 		unlike => {
-			binary_upgrade => 1,
 			exclude_table => 1,
 			exclude_extension => 1,
 			exclude_extension_filter => 1,
