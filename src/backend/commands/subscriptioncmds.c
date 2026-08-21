@@ -19,6 +19,7 @@
 #include "access/table.h"
 #include "access/twophase.h"
 #include "access/xact.h"
+#include "catalog/binary_upgrade.h"
 #include "catalog/catalog.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
@@ -980,9 +981,16 @@ CreateSubscription(ParseState *pstate, CreateSubscriptionStmt *stmt,
 	 * apply workers initialization, and to handle origin creation dynamically
 	 * when tables are added to the subscription. It is not clear whether
 	 * preventing creation of origins is worth additional complexity.
+	 *
+	 * In binary-upgrade mode, skip origin creation here. It will be created
+	 * separately so that the origin ID (roident) from the old cluster can be
+	 * preserved for this subscription.
 	 */
-	ReplicationOriginNameForLogicalRep(subid, InvalidOid, originname, sizeof(originname));
-	replorigin_create(originname);
+	if (!IsBinaryUpgrade)
+	{
+		ReplicationOriginNameForLogicalRep(subid, InvalidOid, originname, sizeof(originname));
+		replorigin_create(originname);
+	}
 
 	/*
 	 * Connect to remote side to execute requested commands and fetch table
