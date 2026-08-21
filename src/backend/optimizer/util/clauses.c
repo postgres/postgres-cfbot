@@ -3826,7 +3826,7 @@ eval_const_expressions_mutator(Node *node,
 										 fselect->resulttypmod,
 										 fselect->resultcollid,
 										 ((Var *) arg)->varlevelsup);
-						/* New Var has same OLD/NEW returning as old one */
+						/* New Var has same returningtype as old one */
 						newvar->varreturningtype = ((Var *) arg)->varreturningtype;
 						/* New Var is nullable by same rels as the old one */
 						newvar->varnullingrels = ((Var *) arg)->varnullingrels;

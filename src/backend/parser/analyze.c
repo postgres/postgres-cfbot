@@ -1281,12 +1281,21 @@ transformOnConflictClause(ParseState *pstate,
 											   EXPR_KIND_WHERE, "WHERE");
 
 		/*
-		 * Remove the EXCLUDED pseudo relation from the query namespace, since
-		 * it's not supposed to be available in RETURNING.  (Maybe someday we
-		 * could allow that, and drop this step.)
+		 * Leave the EXCLUDED pseudo relation in the query namespace so that
+		 * it is available in RETURNING expressions, but change it to be a
+		 * table-only item so that its columns are only accessible using
+		 * qualified names.  This ensures that columns from the target
+		 * relation can be accessed using unqualified names without ambiguity.
+		 *
+		 * Also, set its returning_type so that any RETURNING list Vars
+		 * referencing it are marked correctly.
 		 */
 		Assert((ParseNamespaceItem *) llast(pstate->p_namespace) == exclNSItem);
-		pstate->p_namespace = list_delete_last(pstate->p_namespace);
+		exclNSItem->p_cols_visible = false;
+
+		exclNSItem->p_returning_type = VAR_RETURNING_EXCLUDED;
+		for (int i = 0; i < list_length(exclNSItem->p_names->colnames); i++)
+			exclNSItem->p_nscolumns[i].p_varreturningtype = VAR_RETURNING_EXCLUDED;
 	}
 
 	/* Finally, build ON CONFLICT DO [NOTHING | SELECT | UPDATE] expression */

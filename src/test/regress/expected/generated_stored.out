@@ -114,32 +114,44 @@ INSERT INTO gtest1 VALUES (3, 33), (4, DEFAULT);  -- error
 ERROR:  cannot insert a non-DEFAULT value into column "b"
 DETAIL:  Column "b" is a generated column.
 INSERT INTO gtest1 VALUES (3, DEFAULT), (4, DEFAULT);  -- ok
+INSERT INTO gtest1 VALUES (4, DEFAULT), (5, DEFAULT)
+  ON CONFLICT (a) DO UPDATE SET a = excluded.a + 100
+  RETURNING old.*, new.*, excluded.*;
+ a | b |  a  |  b  | a | b 
+---+---+-----+-----+---+---
+ 4 | 8 | 104 | 208 | 4 | 8
+   |   |   5 |  10 |   |  
+(2 rows)
+
 SELECT * FROM gtest1 ORDER BY a;
- a | b 
----+---
- 1 | 2
- 2 | 4
- 3 | 6
- 4 | 8
-(4 rows)
+  a  |  b  
+-----+-----
+   1 |   2
+   2 |   4
+   3 |   6
+   5 |  10
+ 104 | 208
+(5 rows)
 
 SELECT gtest1 FROM gtest1 ORDER BY a;  -- whole-row reference
- gtest1 
---------
+  gtest1   
+-----------
  (1,2)
  (2,4)
  (3,6)
- (4,8)
-(4 rows)
+ (5,10)
+ (104,208)
+(5 rows)
 
 SELECT a, (SELECT gtest1.b) FROM gtest1 ORDER BY a;  -- sublink
- a | b 
----+---
- 1 | 2
- 2 | 4
- 3 | 6
- 4 | 8
-(4 rows)
+  a  |  b  
+-----+-----
+   1 |   2
+   2 |   4
+   3 |   6
+   5 |  10
+ 104 | 208
+(5 rows)
 
 DELETE FROM gtest1 WHERE a >= 3;
 UPDATE gtest1 SET b = DEFAULT WHERE a = 1;

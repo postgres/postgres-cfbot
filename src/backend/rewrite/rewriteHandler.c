@@ -664,7 +664,7 @@ rewriteRuleAction(Query *parsetree,
 									  0,
 									  new_rte,
 									  parsetree->targetList,
-									  sub_action->resultRelation,
+									  0,
 									  (event == CMD_UPDATE) ?
 									  REPLACEVARS_CHANGE_VARNO :
 									  REPLACEVARS_SUBSTITUTE_NULL,
@@ -681,7 +681,7 @@ rewriteRuleAction(Query *parsetree,
 									  0,
 									  new_rte,
 									  list_concat(gen_cols, parsetree->targetList),
-									  sub_action->resultRelation,
+									  0,
 									  (event == CMD_UPDATE) ?
 									  REPLACEVARS_CHANGE_VARNO :
 									  REPLACEVARS_SUBSTITUTE_NULL,
@@ -2425,7 +2425,7 @@ CopyAndAddInvertedQual(Query *parsetree,
 									  0,
 									  rte,
 									  parsetree->targetList,
-									  parsetree->resultRelation,
+									  0,
 									  (event == CMD_UPDATE) ?
 									  REPLACEVARS_CHANGE_VARNO :
 									  REPLACEVARS_SUBSTITUTE_NULL,
@@ -2438,7 +2438,7 @@ CopyAndAddInvertedQual(Query *parsetree,
 											 rte,
 											 list_concat(gen_cols,
 														 parsetree->targetList),
-											 parsetree->resultRelation,
+											 0,
 											 (event == CMD_UPDATE) ?
 											 REPLACEVARS_CHANGE_VARNO :
 											 REPLACEVARS_SUBSTITUTE_NULL,
@@ -3845,12 +3845,12 @@ rewriteTargetView(Query *parsetree, Relation view)
 			BuildOnConflictExcludedTargetlist(base_rel, new_exclRelIndex);
 
 		/*
-		 * Update all Vars in the ON CONFLICT clause that refer to the old
-		 * EXCLUDED pseudo-relation.  We want to use the column mappings
-		 * defined in the view targetlist, but we need the outputs to refer to
-		 * the new EXCLUDED pseudo-relation rather than the new target RTE.
-		 * Also notice that "EXCLUDED.*" will be expanded using the view's
-		 * rowtype, which seems correct.
+		 * Update all Vars in the ON CONFLICT clause and RETURNING list that
+		 * refer to the old EXCLUDED pseudo-relation.  We want to use the
+		 * column mappings defined in the view targetlist, but we need the
+		 * outputs to refer to the new EXCLUDED pseudo-relation rather than
+		 * the new target RTE.  Also notice that "EXCLUDED.*" will be expanded
+		 * using the view's rowtype, which seems correct.
 		 */
 		tmp_tlist = copyObject(view_targetlist);
 
@@ -3863,7 +3863,18 @@ rewriteTargetView(Query *parsetree, Relation view)
 									  0,
 									  view_rte,
 									  tmp_tlist,
-									  new_rt_index,
+									  0,
+									  REPLACEVARS_REPORT_ERROR,
+									  0,
+									  &parsetree->hasSubLinks);
+
+		parsetree->returningList = (List *)
+			ReplaceVarsFromTargetList((Node *) parsetree->returningList,
+									  old_exclRelIndex,
+									  0,
+									  view_rte,
+									  tmp_tlist,
+									  new_exclRelIndex,
 									  REPLACEVARS_REPORT_ERROR,
 									  0,
 									  &parsetree->hasSubLinks);
