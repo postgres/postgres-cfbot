@@ -178,10 +178,6 @@ select ts::date, count(*) from src group by 1;
 explain (costs off, verbose)
 select date_trunc('day', ts), count(*) from src group by 1;
 
--- date_trunc on timestamptz should not use index
-explain (costs off, verbose)
-select date_trunc('day', tstz), count(*) from src group by 1;
-
 
 --
 -- Test arithmetic operations
@@ -202,7 +198,6 @@ select v_int4 * 2, count(*) from src group by 1;
 -- Division by positive constant: v_int4 / 2 is increasing
 explain (costs off, verbose)
 select v_int4 / 2, count(*) from src group by 1;
-
 
 --
 -- Test decreasing functions
@@ -247,13 +242,6 @@ select -v_int4 from src order by 1 desc;
 -- the query order is -v_int4 ASC NULLS LAST
 explain (costs off, verbose)
 select -v_int4 from src order by 1;
-
---
--- Group and order
---
-
-explain (costs off, verbose)
-select tstz::date, count(*) from src group by 1 order by 1;
 
 --
 -- Test nested monotonic function
@@ -536,4 +524,115 @@ from src;
 EXPLAIN (COSTS OFF)
 SELECT v_int4::oid FROM src ORDER BY 1;
 
+
+
+--
+-- Now that some plans were shown, and we see that in many cases what
+-- we care is whether a plan has a index scan or not. This function will
+-- check that for us and just return
+--
+CREATE OR REPLACE FUNCTION index_plan (query text) RETURNS BOOLEAN LANGUAGE plpgsql AS $$
+DECLARE
+    plan json;
+BEGIN
+   EXECUTE 'EXPLAIN (COSTS OFF, FORMAT JSON) SELECT ' || query || ' ORDER BY 1' into plan;
+   RETURN  plan->0->'Plan'->>'Node Type' LIKE 'Index%Scan';
+END
+$$;
+
+
+--
+-- Functions that take a timezone argument
+--
+PREPARE query(text) AS
+WITH
+cols AS (
+    SELECT * FROM unnest(ARRAY['ts', 'tstz'])
+        WITH ORDINALITY AS c(col, ord)
+),
+units AS (
+    SELECT * FROM unnest(ARRAY['year', 'month', 'day', 'hour', 'minute', 'second'])
+        WITH ORDINALITY AS s(unit, ord)
+)
+SELECT
+    f AS expression,
+    coalesce(string_agg(col, ', ' ORDER BY cols.ord) FILTER (
+        WHERE index_plan(format('timezone(%L, %I) FROM src', $1, col))
+    ), 'none') AS monotonic
+FROM cols,
+     unnest(ARRAY['timezone(TZ, <>)']) AS f(f)
+GROUP BY f
+UNION ALL
+SELECT
+    'date_trunc(<>, tstz, TZ)' AS expression,
+    coalesce(string_agg(unit, ', ' ORDER BY units.ord) FILTER (
+        WHERE index_plan(format('date_trunc(%L, tstz, %L) FROM src', unit, $1))
+    ), 'none') AS monotonic
+FROM units
+ORDER BY 1;
+
+EXECUTE query('UTC');
+EXECUTE query('Africa/Ouagadougou');
+EXECUTE query('Europe/London');
+EXECUTE query('Antarctica/Troll');
+EXECUTE query('Pacific/Guam');
+EXECUTE query('America/Goose_Bay');
+
+--
+-- Functions that depend on session timezone
+--
+PREPARE query_local AS
+WITH
+cols AS (
+    SELECT * FROM unnest(ARRAY['ts', 'tstz'])
+        WITH ORDINALITY AS c(col, ord)
+),
+units AS (
+    SELECT * FROM unnest(ARRAY['year', 'month', 'day', 'hour', 'minute', 'second'])
+        WITH ORDINALITY AS s(unit, ord)
+)
+SELECT
+    format(f, '<>') AS expression,
+    coalesce(string_agg(col, ', ' ORDER BY cols.ord) FILTER (
+        WHERE index_plan(format(f, col) || ' FROM src')
+    ), 'none') AS monotonic
+FROM cols,
+     unnest(ARRAY['%s AT LOCAL', 'timezone(%s)', '%s::date']) AS f(f)
+GROUP BY f
+UNION ALL
+SELECT
+    format('date_trunc(<>, %s)', col) AS expression,
+    coalesce(string_agg(unit, ', ' ORDER BY units.ord) FILTER (
+        WHERE index_plan(format('date_trunc(%L, %I) FROM src', unit, col))
+    ), 'none') AS monotonic
+FROM cols, units
+GROUP BY col
+ORDER BY 1;
+
+-- UTC
+SET timezone = 'UTC';
+EXECUTE query_local;
+
+-- No DST at all
+SET timezone = 'Africa/Ouagadougou';
+EXECUTE query_local;
+
+-- The common case: one hour DST
+SET timezone = 'Europe/London';
+EXECUTE query_local;
+
+-- DST might affect the hour
+SET timezone = 'Antarctica/Troll';
+EXECUTE query_local;
+
+-- A weird case: used to go back a day
+SET timezone = 'Pacific/Guam';
+EXECUTE query_local;
+
+-- Even weirder, went back a month
+SET timezone = 'America/Goose_Bay';
+EXECUTE query_local;
+
+
+DEALLOCATE ALL;
 DROP SCHEMA slope CASCADE;
