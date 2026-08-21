@@ -90,6 +90,22 @@ RESET client_min_messages;
 CREATE PUBLICATION testpub_parsertst FOR TABLE pub_test.testpub_nopk, CURRENT_SCHEMA;
 CREATE PUBLICATION testpub_parsertst FOR TABLES IN SCHEMA foo, test.foo;
 
+-- should be able to publish and describe schemas and tables with embedded quotes
+CREATE SCHEMA "it's my schema";
+CREATE TABLE "it's my schema"."it's my schema table"("it's my col1" int, "it's my col2" int);
+CREATE TABLE "it's my public table"("it's my col1" int, "it's my col2" int);
+CREATE PUBLICATION regress_pub_embedded_quotes1 FOR TABLES IN SCHEMA "it's my schema";
+CREATE PUBLICATION regress_pub_embedded_quotes2 FOR TABLE "it's my schema"."it's my schema table";
+CREATE PUBLICATION regress_pub_embedded_quotes3 FOR TABLE "it's my public table"("it's my col1");
+CREATE PUBLICATION regress_pub_embedded_quotes4 FOR ALL TABLES EXCEPT (TABLE "it's my public table");
+\dn "it's my schema"
+\d "it's my schema"."it's my schema table"
+\d "it's my public table";
+\dRp+ regress_pub_embedded_quotes*
+DROP PUBLICATION regress_pub_embedded_quotes1, regress_pub_embedded_quotes2, regress_pub_embedded_quotes3, regress_pub_embedded_quotes4;
+DROP SCHEMA "it's my schema" CASCADE;
+DROP TABLE "it's my public table";
+
 -- should be able to add a table of the same schema to the schema publication
 ALTER PUBLICATION testpub_forschema ADD TABLE pub_test.testpub_nopk;
 \dRp+ testpub_forschema
