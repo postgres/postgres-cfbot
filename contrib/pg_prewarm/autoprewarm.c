@@ -30,7 +30,6 @@
 
 #include "access/relation.h"
 #include "access/xact.h"
-#include "pgstat.h"
 #include "postmaster/bgworker.h"
 #include "postmaster/interrupt.h"
 #include "storage/buf_internals.h"
@@ -48,7 +47,7 @@
 #include "utils/rel.h"
 #include "utils/relfilenumbermap.h"
 #include "utils/timestamp.h"
-#include "utils/wait_event.h"
+#include "utils/wait_classes.h"
 
 #define AUTOPREWARM_FILE "autoprewarm.blocks"
 
