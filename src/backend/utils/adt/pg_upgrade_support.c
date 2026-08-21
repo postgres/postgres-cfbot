@@ -377,58 +377,6 @@ binary_upgrade_add_sub_rel_state(PG_FUNCTION_ARGS)
 }
 
 /*
- * binary_upgrade_replorigin_advance
- *
- * Update the remote_lsn for the subscriber's replication origin.
- */
-Datum
-binary_upgrade_replorigin_advance(PG_FUNCTION_ARGS)
-{
-	Relation	rel;
-	Oid			subid;
-	char	   *subname;
-	char		originname[NAMEDATALEN];
-	ReplOriginId node;
-	XLogRecPtr	remote_commit;
-
-	CHECK_IS_BINARY_UPGRADE;
-
-	/*
-	 * We must ensure a non-NULL subscription name before dereferencing the
-	 * arguments.
-	 */
-	if (PG_ARGISNULL(0))
-		elog(ERROR, "null argument to binary_upgrade_replorigin_advance is not allowed");
-
-	subname = text_to_cstring(PG_GETARG_TEXT_PP(0));
-	remote_commit = PG_ARGISNULL(1) ? InvalidXLogRecPtr : PG_GETARG_LSN(1);
-
-	rel = table_open(SubscriptionRelationId, RowExclusiveLock);
-	subid = get_subscription_oid(subname, false);
-
-	ReplicationOriginNameForLogicalRep(subid, InvalidOid, originname, sizeof(originname));
-
-	/* Lock to prevent the replication origin from vanishing */
-	LockRelationOid(ReplicationOriginRelationId, RowExclusiveLock);
-	node = replorigin_by_name(originname, false);
-
-	/*
-	 * The server will be stopped after setting up the objects in the new
-	 * cluster and the origins will be flushed during the shutdown checkpoint.
-	 * This will ensure that the latest LSN values for origin will be
-	 * available after the upgrade.
-	 */
-	replorigin_advance(node, remote_commit, InvalidXLogRecPtr,
-					   false /* backward */ ,
-					   false /* WAL log */ );
-
-	UnlockRelationOid(ReplicationOriginRelationId, RowExclusiveLock);
-	table_close(rel, RowExclusiveLock);
-
-	PG_RETURN_VOID();
-}
-
-/*
  * binary_upgrade_create_conflict_detection_slot
  *
  * Create a replication slot to retain information necessary for conflict
@@ -442,6 +390,67 @@ binary_upgrade_create_conflict_detection_slot(PG_FUNCTION_ARGS)
 	CreateConflictDetectionSlot();
 
 	ReplicationSlotRelease();
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * binary_upgrade_create_replication_origin
+ *
+ * Create a replication origin with a specific OID and name, optionally
+ * restoring its remote_lsn. Used by pg_upgrade to preserve replication
+ * origin OIDs across the upgrade.
+ */
+Datum
+binary_upgrade_create_replication_origin(PG_FUNCTION_ARGS)
+{
+	Oid             node_oid;
+	ReplOriginId    node;
+	Relation		rel;
+	char           *originname;
+	XLogRecPtr      remote_lsn = InvalidXLogRecPtr;
+
+	CHECK_IS_BINARY_UPGRADE;
+
+	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
+		elog(ERROR,
+			 "null argument to binary_upgrade_create_replication_origin is not allowed");
+
+	node_oid = PG_GETARG_OID(0);
+
+	if (node_oid == InvalidOid || node_oid >= DoNotReplicateId)
+		ereport(ERROR,
+				errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				errmsg("replication origin ID %u is out of range", node_oid));
+
+	node = (ReplOriginId) node_oid;
+
+	originname = text_to_cstring(PG_GETARG_TEXT_PP(1));
+
+	/*
+	 * To avoid needing a TOAST table for pg_replication_origin, we limit
+	 * replication origin names to 512 bytes.  This should be more than enough
+	 * for all practical use.
+	 */
+	if (strlen(originname) > MAX_RONAME_LEN)
+		ereport(ERROR,
+				errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				errmsg("replication origin name is too long"),
+				errdetail("Replication origin names must be no longer than %d bytes.",
+						  MAX_RONAME_LEN));
+
+	if (!PG_ARGISNULL(2))
+		remote_lsn = PG_GETARG_LSN(2);
+
+	Assert(IsTransactionState());
+
+	/* Acquire an exclusive lock before inserting the new origin. */
+	rel = table_open(ReplicationOriginRelationId, ExclusiveLock);
+
+	replorigin_create_with_id(node, originname, remote_lsn,
+							  !PG_ARGISNULL(2), rel);
+
+	table_close(rel, ExclusiveLock);
 
 	PG_RETURN_VOID();
 }
