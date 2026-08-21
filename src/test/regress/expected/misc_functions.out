@@ -861,3 +861,84 @@ SELECT test_instr_time();
  t
 (1 row)
 
+-- test pg_datum_image_equal(..., ...)
+WITH values AS (
+    SELECT val::numeric FROM (
+        VALUES ('1.0'),
+               ('1.00'),
+               ('2.0'),
+               ('2.1'),
+               (NULL)
+    ) AS v(val)
+)
+SELECT a.val a, b.val b, a.val = b.val eq, pg_datum_image_equal(a.val, b.val) pdie
+FROM values a CROSS JOIN values b;
+  a   |  b   | eq | pdie 
+------+------+----+------
+  1.0 |  1.0 | t  | t
+  1.0 | 1.00 | t  | f
+  1.0 |  2.0 | f  | f
+  1.0 |  2.1 | f  | f
+  1.0 |      |    | f
+ 1.00 |  1.0 | t  | f
+ 1.00 | 1.00 | t  | t
+ 1.00 |  2.0 | f  | f
+ 1.00 |  2.1 | f  | f
+ 1.00 |      |    | f
+  2.0 |  1.0 | f  | f
+  2.0 | 1.00 | f  | f
+  2.0 |  2.0 | t  | t
+  2.0 |  2.1 | f  | f
+  2.0 |      |    | f
+  2.1 |  1.0 | f  | f
+  2.1 | 1.00 | f  | f
+  2.1 |  2.0 | f  | f
+  2.1 |  2.1 | t  | t
+  2.1 |      |    | f
+      |  1.0 |    | f
+      | 1.00 |    | f
+      |  2.0 |    | f
+      |  2.1 |    | f
+      |      |    | t
+(25 rows)
+
+WITH values AS (
+    SELECT val::jsonb FROM (
+        VALUES ('{"key": 1.0}'),
+               ('{"key": 1.00}'),
+               ('{"key": 2.0}'),
+               ('{"key": null}'),
+               (NULL)
+    ) AS v(val)
+)
+SELECT a.val a, b.val b, a.val = b.val eq, pg_datum_image_equal(a.val, b.val) pdie
+FROM values a CROSS JOIN values b;
+       a       |       b       | eq | pdie 
+---------------+---------------+----+------
+ {"key": 1.0}  | {"key": 1.0}  | t  | t
+ {"key": 1.0}  | {"key": 1.00} | t  | f
+ {"key": 1.0}  | {"key": 2.0}  | f  | f
+ {"key": 1.0}  | {"key": null} | f  | f
+ {"key": 1.0}  |               |    | f
+ {"key": 1.00} | {"key": 1.0}  | t  | f
+ {"key": 1.00} | {"key": 1.00} | t  | t
+ {"key": 1.00} | {"key": 2.0}  | f  | f
+ {"key": 1.00} | {"key": null} | f  | f
+ {"key": 1.00} |               |    | f
+ {"key": 2.0}  | {"key": 1.0}  | f  | f
+ {"key": 2.0}  | {"key": 1.00} | f  | f
+ {"key": 2.0}  | {"key": 2.0}  | t  | t
+ {"key": 2.0}  | {"key": null} | f  | f
+ {"key": 2.0}  |               |    | f
+ {"key": null} | {"key": 1.0}  | f  | f
+ {"key": null} | {"key": 1.00} | f  | f
+ {"key": null} | {"key": 2.0}  | f  | f
+ {"key": null} | {"key": null} | t  | t
+ {"key": null} |               |    | f
+               | {"key": 1.0}  |    | f
+               | {"key": 1.00} |    | f
+               | {"key": 2.0}  |    | f
+               | {"key": null} |    | f
+               |               |    | t
+(25 rows)
+
