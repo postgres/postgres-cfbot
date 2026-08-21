@@ -545,6 +545,13 @@ pqTraceOutput_ParameterStatus(FILE *f, const char *message, int *cursor)
 }
 
 static void
+pqTraceOutput_PrepStmtDealloc(FILE *f, const char *message, int *cursor)
+{
+	fprintf(f, "PrepStmtDealloc\t");
+	pqTraceOutputString(f, message, cursor, false);
+}
+
+static void
 pqTraceOutput_ParameterDescription(FILE *f, const char *message, int *cursor, bool regress)
 {
 	int			nfields;
@@ -794,6 +801,9 @@ pqTraceOutputMessage(PGconn *conn, const char *message, bool toServer)
 				fprintf(conn->Pfdebug, "Sync"); /* no message content */
 			else
 				pqTraceOutput_ParameterStatus(conn->Pfdebug, message, &logCursor);
+			break;
+		case PqMsg_PrepStmtDealloc:
+			pqTraceOutput_PrepStmtDealloc(conn->Pfdebug, message, &logCursor);
 			break;
 		case PqMsg_ParameterDescription:
 			pqTraceOutput_ParameterDescription(conn->Pfdebug, message, &logCursor, regress);

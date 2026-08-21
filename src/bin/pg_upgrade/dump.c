@@ -24,7 +24,8 @@ generate_old_dump(void)
 			  "\"%s/pg_dumpall\" %s%s --globals-only --quote-all-identifiers "
 			  "--binary-upgrade %s --no-sync -f \"%s/%s\"",
 			  new_cluster.bindir, cluster_conn_opts(&old_cluster),
-			  protocol_negotiation_supported(&old_cluster) ? "" : " -d \"max_protocol_version=3.0\"",
+			  protocol_negotiation_supported(&old_cluster) ?
+			  "" : " -d \"max_protocol_version=3.0 report_prep_stmt_dealloc=0\"",
 			  log_opts.verbose ? "--verbose" : "",
 			  log_opts.dumpdir,
 			  GLOBALS_DUMP_FILE);
@@ -45,7 +46,10 @@ generate_old_dump(void)
 		appendPQExpBufferStr(&connstr, "dbname=");
 		appendConnStrVal(&connstr, old_db->db_name);
 		if (!protocol_negotiation_supported(&old_cluster))
+		{
 			appendPQExpBufferStr(&connstr, " max_protocol_version=3.0");
+			appendPQExpBufferStr(&connstr, " report_prep_stmt_dealloc=0");
+		}
 
 		initPQExpBuffer(&escaped_connstr);
 		appendShellString(&escaped_connstr, connstr.data);

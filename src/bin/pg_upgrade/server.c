@@ -72,7 +72,10 @@ get_db_conn(ClusterInfo *cluster, const char *db_name)
 		appendConnStrVal(&conn_opts, cluster->sockdir);
 	}
 	if (!protocol_negotiation_supported(cluster))
+	{
 		appendPQExpBufferStr(&conn_opts, " max_protocol_version=3.0");
+		appendPQExpBufferStr(&conn_opts, " report_prep_stmt_dealloc=0");
+	}
 
 	conn = PQconnectdb(conn_opts.data);
 	termPQExpBuffer(&conn_opts);

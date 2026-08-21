@@ -7,6 +7,7 @@ B	113	RowDescription	 4 "?column?" NNNN 0 NNNN 4 -1 0 "?column?" NNNN 0 NNNN 655
 B	5	ReadyForQuery	 I
 F	16	Close	 S "select_one"
 F	4	Sync
+B	15	PrepStmtDealloc	 "select_one"
 B	4	CloseComplete
 B	5	ReadyForQuery	 I
 F	16	Describe	 S "select_one"

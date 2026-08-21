@@ -486,6 +486,15 @@ typedef void (*pgthreadlock_t) (int acquire);
 extern pgthreadlock_t PQregisterThreadLock(pgthreadlock_t newhandler);
 extern pgthreadlock_t PQgetThreadLock(void);
 
+/* callbacks for prepared statement deallocation notifications */
+typedef void (*PQprepStmtDeallocCallback) (PGconn *conn, void *arg,
+										   const char *name);
+
+extern int	PQaddPrepStmtDeallocCallback(PGconn *conn,
+										 PQprepStmtDeallocCallback cb,
+										 void *arg);
+extern int	PQprepStmtDeallocReporting(PGconn *conn);
+
 /* === in fe-trace.c === */
 extern void PQtrace(PGconn *conn, FILE *debug_port);
 extern void PQuntrace(PGconn *conn);
