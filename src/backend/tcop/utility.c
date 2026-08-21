@@ -1706,10 +1706,14 @@ ProcessUtilitySlow(ParseState *pstate,
 				break;
 
 			case T_CreateTrigStmt:
-				address = CreateTrigger((CreateTrigStmt *) parsetree,
-										queryString, InvalidOid, InvalidOid,
-										InvalidOid, InvalidOid, InvalidOid,
-										InvalidOid, NULL, false, false);
+				{
+					CreateTrigStmt *stmt = (CreateTrigStmt *) parsetree;
+
+					address = CreateTriggerFiringOn(stmt, queryString, InvalidOid, InvalidOid,
+													InvalidOid, InvalidOid, InvalidOid,
+													InvalidOid, NULL, false,
+													false, stmt->tgenabled);
+				}
 				break;
 
 			case T_CreatePLangStmt:

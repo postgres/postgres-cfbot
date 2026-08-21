@@ -812,6 +812,7 @@ typedef enum TableLikeOption
 	CREATE_TABLE_LIKE_INDEXES = 1 << 6,
 	CREATE_TABLE_LIKE_STATISTICS = 1 << 7,
 	CREATE_TABLE_LIKE_STORAGE = 1 << 8,
+	CREATE_TABLE_LIKE_TRIGGERS = 1 << 9,
 	CREATE_TABLE_LIKE_ALL = PG_INT32_MAX
 } TableLikeOption;
 
@@ -3255,6 +3256,7 @@ typedef struct CreateTrigStmt
 {
 	NodeTag		type;
 	bool		replace;		/* replace trigger if already exists */
+	char		tgenabled;		/* trigger's firing configuration */
 	bool		isconstraint;	/* This is a constraint trigger */
 	char	   *trigname;		/* TRIGGER's name */
 	RangeVar   *relation;		/* relation trigger is on */
@@ -3273,6 +3275,9 @@ typedef struct CreateTrigStmt
 	bool		deferrable;		/* [NOT] DEFERRABLE */
 	bool		initdeferred;	/* INITIALLY {DEFERRED|IMMEDIATE} */
 	RangeVar   *constrrel;		/* opposite relation, if RI trigger */
+	char	   *trigcomment;	/* comment to apply to trigger, or NULL */
+	bool		transformed;	/* true means no need to do parse analysis for
+								 * whenClause */
 } CreateTrigStmt;
 
 /* ----------------------

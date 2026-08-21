@@ -174,6 +174,20 @@ CREATE TRIGGER before_ins_stmt_trig BEFORE INSERT ON main_table
 FOR EACH STATEMENT EXECUTE PROCEDURE trigger_func('before_ins_stmt');
 CREATE TRIGGER after_ins_stmt_trig AFTER INSERT ON main_table
 FOR EACH STATEMENT EXECUTE PROCEDURE trigger_func('after_ins_stmt');
+CREATE TRIGGER wholetrig BEFORE UPDATE ON main_table FOR EACH ROW
+WHEN (OLD IS NOT NULL)
+EXECUTE PROCEDURE trigger_func('modified_a');
+CREATE TABLE main_table1(LIKE main_table INCLUDING TRIGGERS); -- error, wholerow reference not allowed
+ERROR:  cannot convert whole-row table reference
+DETAIL:  Trigger "wholetrig" contains a whole-row table reference.
+DROP TRIGGER wholetrig ON main_table;
+CREATE TRIGGER wholetrig BEFORE UPDATE ON main_table FOR EACH ROW
+WHEN (NEW IS NOT NULL)
+EXECUTE PROCEDURE trigger_func('modified_a');
+CREATE TABLE main_table1(LIKE main_table INCLUDING TRIGGERS); -- error, wholerow reference not allowed
+ERROR:  cannot convert whole-row table reference
+DETAIL:  Trigger "wholetrig" contains a whole-row table reference.
+DROP TRIGGER wholetrig ON main_table;
 --
 -- if neither 'FOR EACH ROW' nor 'FOR EACH STATEMENT' was specified,
 -- CREATE TRIGGER should default to 'FOR EACH STATEMENT'
@@ -394,6 +408,46 @@ NOTICE:  trigger_func(after_upd_a_b_row) called: action = UPDATE, when = AFTER, 
 NOTICE:  trigger_func(after_upd_b_row) called: action = UPDATE, when = AFTER, level = ROW
 NOTICE:  trigger_func(after_upd_b_stmt) called: action = UPDATE, when = AFTER, level = STATEMENT
 NOTICE:  trigger_func(after_upd_stmt) called: action = UPDATE, when = AFTER, level = STATEMENT
+-- CREATE TABLE LIKE INCLUDING TRIGGERS tests
+COMMENT ON TRIGGER before_ins_stmt_trig ON main_table IS 'trigger before_ins_stmt_trig';
+CREATE TABLE main_table1(c int, LIKE main_table INCLUDING TRIGGERS INCLUDING COMMENTS);
+CREATE TABLE main_table2(c int, LIKE main_table EXCLUDING TRIGGERS INCLUDING COMMENTS);
+SELECT  pg_get_triggerdef(oid)
+FROM    pg_trigger
+WHERE NOT tgisinternal AND tgrelid IN ('main_table'::regclass, 'main_table1'::regclass, 'main_table2'::regclass)
+ORDER BY tgname, tgrelid::regclass::text COLLATE "C";
+                                                                  pg_get_triggerdef                                                                   
+------------------------------------------------------------------------------------------------------------------------------------------------------
+ CREATE TRIGGER after_ins_stmt_trig AFTER INSERT ON public.main_table FOR EACH STATEMENT EXECUTE FUNCTION trigger_func('after_ins_stmt')
+ CREATE TRIGGER after_ins_stmt_trig AFTER INSERT ON public.main_table1 FOR EACH STATEMENT EXECUTE FUNCTION trigger_func('after_ins_stmt')
+ CREATE TRIGGER after_upd_a_b_row_trig AFTER UPDATE OF a, b ON public.main_table FOR EACH ROW EXECUTE FUNCTION trigger_func('after_upd_a_b_row')
+ CREATE TRIGGER after_upd_a_b_row_trig AFTER UPDATE OF a, b ON public.main_table1 FOR EACH ROW EXECUTE FUNCTION trigger_func('after_upd_a_b_row')
+ CREATE TRIGGER after_upd_b_row_trig AFTER UPDATE OF b ON public.main_table FOR EACH ROW EXECUTE FUNCTION trigger_func('after_upd_b_row')
+ CREATE TRIGGER after_upd_b_row_trig AFTER UPDATE OF b ON public.main_table1 FOR EACH ROW EXECUTE FUNCTION trigger_func('after_upd_b_row')
+ CREATE TRIGGER after_upd_b_stmt_trig AFTER UPDATE OF b ON public.main_table FOR EACH STATEMENT EXECUTE FUNCTION trigger_func('after_upd_b_stmt')
+ CREATE TRIGGER after_upd_b_stmt_trig AFTER UPDATE OF b ON public.main_table1 FOR EACH STATEMENT EXECUTE FUNCTION trigger_func('after_upd_b_stmt')
+ CREATE TRIGGER after_upd_stmt_trig AFTER UPDATE ON public.main_table FOR EACH STATEMENT EXECUTE FUNCTION trigger_func('after_upd_stmt')
+ CREATE TRIGGER after_upd_stmt_trig AFTER UPDATE ON public.main_table1 FOR EACH STATEMENT EXECUTE FUNCTION trigger_func('after_upd_stmt')
+ CREATE TRIGGER before_ins_stmt_trig BEFORE INSERT ON public.main_table FOR EACH STATEMENT EXECUTE FUNCTION trigger_func('before_ins_stmt')
+ CREATE TRIGGER before_ins_stmt_trig BEFORE INSERT ON public.main_table1 FOR EACH STATEMENT EXECUTE FUNCTION trigger_func('before_ins_stmt')
+ CREATE TRIGGER before_upd_a_row_trig BEFORE UPDATE OF a ON public.main_table FOR EACH ROW EXECUTE FUNCTION trigger_func('before_upd_a_row')
+ CREATE TRIGGER before_upd_a_row_trig BEFORE UPDATE OF a ON public.main_table1 FOR EACH ROW EXECUTE FUNCTION trigger_func('before_upd_a_row')
+ CREATE TRIGGER before_upd_a_stmt_trig BEFORE UPDATE OF a ON public.main_table FOR EACH STATEMENT EXECUTE FUNCTION trigger_func('before_upd_a_stmt')
+ CREATE TRIGGER before_upd_a_stmt_trig BEFORE UPDATE OF a ON public.main_table1 FOR EACH STATEMENT EXECUTE FUNCTION trigger_func('before_upd_a_stmt')
+(16 rows)
+
+SELECT  pc.relname, pd.tgname, obj_description(pd.oid, 'pg_trigger')
+FROM    pg_trigger pd JOIN pg_class pc
+ON      pc.oid = pd.tgrelid AND pd.tgname = 'before_ins_stmt_trig'
+ORDER BY 1;
+   relname   |        tgname        |       obj_description        
+-------------+----------------------+------------------------------
+ main_table  | before_ins_stmt_trig | trigger before_ins_stmt_trig
+ main_table1 | before_ins_stmt_trig | trigger before_ins_stmt_trig
+(2 rows)
+
+COMMENT ON TRIGGER before_ins_stmt_trig ON main_table IS NULL;
+DROP TABLE main_table1, main_table2;
 --
 -- Test case for bug with BEFORE trigger followed by AFTER trigger with WHEN
 --
@@ -422,7 +476,27 @@ NOTICE:  dummy_update_func(afterb) called: action = UPDATE, old = (t), new = (f)
 UPDATE some_t SET some_col = TRUE;
 NOTICE:  dummy_update_func(before) called: action = UPDATE, old = (f), new = (t)
 NOTICE:  dummy_update_func(aftera) called: action = UPDATE, old = (f), new = (t)
+ALTER TABLE some_t ENABLE REPLICA TRIGGER some_trig_aftera;
+ALTER TABLE some_t DISABLE TRIGGER some_trig_afterb;
+ALTER TABLE some_t ENABLE ALWAYS TRIGGER some_trig_before;
+CREATE TABLE some_t1 (c INT, LIKE some_t INCLUDING TRIGGERS INCLUDING COMMENTS);
+\d+ some_t1
+                                   Table "public.some_t1"
+  Column  |  Type   | Collation | Nullable | Default | Storage | Stats target | Description 
+----------+---------+-----------+----------+---------+---------+--------------+-------------
+ c        | integer |           |          |         | plain   |              | 
+ some_col | boolean |           | not null |         | plain   |              | 
+Not-null constraints:
+    "some_t_some_col_not_null" NOT NULL "some_col"
+Disabled user triggers:
+    some_trig_afterb AFTER UPDATE ON some_t1 FOR EACH ROW WHEN (NOT new.some_col) EXECUTE FUNCTION dummy_update_func('afterb')
+Triggers firing always:
+    some_trig_before BEFORE UPDATE ON some_t1 FOR EACH ROW EXECUTE FUNCTION dummy_update_func('before')
+Triggers firing on replica only:
+    some_trig_aftera AFTER UPDATE ON some_t1 FOR EACH ROW WHEN (NOT old.some_col AND new.some_col) EXECUTE FUNCTION dummy_update_func('aftera')
+
 DROP TABLE some_t;
+DROP TABLE some_t1;
 -- bogus cases
 CREATE TRIGGER error_upd_and_col BEFORE UPDATE OR UPDATE OF a ON main_table
 FOR EACH ROW EXECUTE PROCEDURE trigger_func('error_upd_and_col');
@@ -861,6 +935,15 @@ CREATE TRIGGER instead_of_update_trig INSTEAD OF UPDATE ON main_view
 FOR EACH ROW EXECUTE PROCEDURE view_trigger('instead_of_upd');
 CREATE TRIGGER instead_of_delete_trig INSTEAD OF DELETE ON main_view
 FOR EACH ROW EXECUTE PROCEDURE view_trigger('instead_of_del');
+CREATE TABLE main_view_table(LIKE main_view INCLUDING TRIGGERS); -- View triggers are not copied
+\d main_view_table
+          Table "public.main_view_table"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ a      | integer |           |          | 
+ b      | integer |           |          | 
+
+DROP TABLE main_view_table;
 -- Valid BEFORE statement VIEW triggers
 CREATE TRIGGER before_ins_stmt_trig BEFORE INSERT ON main_view
 FOR EACH STATEMENT EXECUTE PROCEDURE view_trigger('before_view_ins_stmt');
@@ -2326,6 +2409,20 @@ create constraint trigger parted_trig_two after insert on parted_constr
   deferrable initially deferred enforced
   for each row when (bark(new.b) AND new.a % 2 = 1)
   execute procedure trigger_notice_ab();
+create table parted_constr_copy (c int, like parted_constr including all, d int);
+select  pg_get_triggerdef(oid)
+from    pg_trigger
+where   not tgisinternal and tgrelid in ('parted_constr_copy'::regclass, 'parted_constr'::regclass)
+order by tgname;
+                                                                                               pg_get_triggerdef                                                                                                
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ CREATE CONSTRAINT TRIGGER parted_trig AFTER INSERT ON public.parted_constr DEFERRABLE INITIALLY IMMEDIATE FOR EACH ROW EXECUTE FUNCTION trigger_notice_ab()
+ CREATE CONSTRAINT TRIGGER parted_trig AFTER INSERT ON public.parted_constr_copy DEFERRABLE INITIALLY IMMEDIATE FOR EACH ROW EXECUTE FUNCTION trigger_notice_ab()
+ CREATE CONSTRAINT TRIGGER parted_trig_two AFTER INSERT ON public.parted_constr DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN ((bark(new.b) AND ((new.a % 2) = 1))) EXECUTE FUNCTION trigger_notice_ab()
+ CREATE CONSTRAINT TRIGGER parted_trig_two AFTER INSERT ON public.parted_constr_copy DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN ((bark(new.b) AND ((new.a % 2) = 1))) EXECUTE FUNCTION trigger_notice_ab()
+(4 rows)
+
+drop table parted_constr_copy;
 -- The immediate constraint is fired immediately; the WHEN clause of the
 -- deferred constraint is also called immediately.  The deferred constraint
 -- is fired at commit time.
@@ -3106,6 +3203,18 @@ create trigger iocdu_tt_parted_insert_trig
 create trigger iocdu_tt_parted_update_trig
   after update on iocdu_tt_parted referencing old table as old_table new table as new_table
   for each statement execute procedure dump_update();
+CREATE TABLE iocdu_tt_parted_copy(LIKE iocdu_tt_parted INCLUDING TRIGGERS);
+\d iocdu_tt_parted_copy
+        Table "public.iocdu_tt_parted_copy"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ a      | integer |           | not null | 
+ b      | text    |           |          | 
+Triggers:
+    iocdu_tt_parted_insert_trig AFTER INSERT ON iocdu_tt_parted_copy REFERENCING NEW TABLE AS new_table FOR EACH STATEMENT EXECUTE FUNCTION dump_insert()
+    iocdu_tt_parted_update_trig AFTER UPDATE ON iocdu_tt_parted_copy REFERENCING OLD TABLE AS old_table NEW TABLE AS new_table FOR EACH STATEMENT EXECUTE FUNCTION dump_update()
+
+DROP TABLE iocdu_tt_parted_copy;
 -- inserts only
 insert into iocdu_tt_parted values (1, 'AAA'), (2, 'BBB')
   on conflict (a) do
@@ -3589,6 +3698,26 @@ begin
 end;
 $$;
 alter function whoami() owner to regress_fn_owner;
+-- CREATE TABLE LIKE INCLUDING TRIGGERS for constraint trigger
+create schema test_trig;
+create table test_trig.trig_t1 (id integer);
+create table test_trig.trig_t2 (id integer);
+alter function whoami() set schema test_trig;
+create constraint trigger con_trig_test after insert on test_trig.trig_t1
+from test_trig.trig_t2
+deferrable initially deferred
+for each row
+execute function test_trig.whoami();
+create table trig_t1_copy(like test_trig.trig_t1 including triggers);
+select pg_get_triggerdef(oid) from pg_trigger where tgrelid = 'trig_t1_copy'::regclass;
+                                                                                 pg_get_triggerdef                                                                                 
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ CREATE CONSTRAINT TRIGGER con_trig_test AFTER INSERT ON public.trig_t1_copy FROM test_trig.trig_t2 DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION test_trig.whoami()
+(1 row)
+
+alter function test_trig.whoami() set schema public;
+drop table test_trig.trig_t1, test_trig.trig_t2, trig_t1_copy;
+drop schema test_trig;
 create table defer_trig (id integer);
 grant insert on defer_trig to public;
 create constraint trigger whoami after insert on defer_trig
