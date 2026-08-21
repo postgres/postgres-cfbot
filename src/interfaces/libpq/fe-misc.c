@@ -50,6 +50,7 @@
 #include "mb/pg_wchar.h"
 #include "pg_config_paths.h"
 #include "port/pg_bswap.h"
+#include "port/pg_threads_ext.h"
 
 static int	pqPutMsgBytes(const void *buf, size_t len, PGconn *conn);
 static int	pqSendSome(PGconn *conn, int len);
@@ -1455,7 +1456,7 @@ libpq_binddomain(void)
 	 * might as well do it the same way everywhere.
 	 */
 	static volatile bool already_bound = false;
-	static pthread_mutex_t binddomain_mutex = PTHREAD_MUTEX_INITIALIZER;
+	static pg_mtx_t binddomain_mutex = PG_MTX_PLAIN_INIT;
 
 	if (!already_bound)
 	{
@@ -1466,7 +1467,7 @@ libpq_binddomain(void)
 		int			save_errno = errno;
 #endif
 
-		(void) pthread_mutex_lock(&binddomain_mutex);
+		pg_mtx_lock(&binddomain_mutex);
 
 		if (!already_bound)
 		{
@@ -1483,7 +1484,7 @@ libpq_binddomain(void)
 			already_bound = true;
 		}
 
-		(void) pthread_mutex_unlock(&binddomain_mutex);
+		pg_mtx_unlock(&binddomain_mutex);
 
 #ifdef WIN32
 		SetLastError(save_errno);

@@ -3,11 +3,11 @@
 #define POSTGRES_ECPG_INTERNAL
 #include "postgres_fe.h"
 
-#include "ecpg-pthread-win32.h"
 #include "ecpgerrno.h"
 #include "ecpglib.h"
 #include "ecpglib_extern.h"
 #include "ecpgtype.h"
+#include "port/pg_threads.h"
 
 void
 ecpg_free(void *ptr)
@@ -77,34 +77,7 @@ struct auto_mem
 	struct auto_mem *next;
 };
 
-static pthread_key_t auto_mem_key;
-static pthread_once_t auto_mem_once = PTHREAD_ONCE_INIT;
-
-static void
-auto_mem_destructor(void *arg)
-{
-	(void) arg;					/* keep the compiler quiet */
-	ECPGfree_auto_mem();
-}
-
-static void
-auto_mem_key_init(void)
-{
-	pthread_key_create(&auto_mem_key, auto_mem_destructor);
-}
-
-static struct auto_mem *
-get_auto_allocs(void)
-{
-	pthread_once(&auto_mem_once, auto_mem_key_init);
-	return (struct auto_mem *) pthread_getspecific(auto_mem_key);
-}
-
-static void
-set_auto_allocs(struct auto_mem *am)
-{
-	pthread_setspecific(auto_mem_key, am);
-}
+static thread_local struct auto_mem *auto_mem_thread_local;
 
 char *
 ecpg_auto_alloc(long size, int lineno)
@@ -131,46 +104,36 @@ ecpg_add_mem(void *ptr, int lineno)
 		return false;
 
 	am->pointer = ptr;
-	am->next = get_auto_allocs();
-	set_auto_allocs(am);
+	am->next = auto_mem_thread_local;
+	auto_mem_thread_local = am;
 	return true;
 }
 
 void
 ECPGfree_auto_mem(void)
 {
-	struct auto_mem *am = get_auto_allocs();
-
 	/* free all memory we have allocated for the user */
-	if (am)
+	while (auto_mem_thread_local)
 	{
-		do
-		{
-			struct auto_mem *act = am;
+		struct auto_mem *act = auto_mem_thread_local;
+		struct auto_mem *next = act->next;
 
-			am = am->next;
-			ecpg_free(act->pointer);
-			ecpg_free(act);
-		} while (am);
-		set_auto_allocs(NULL);
+		ecpg_free(act->pointer);
+		ecpg_free(act);
+		auto_mem_thread_local = next;
 	}
 }
 
 void
 ecpg_clear_auto_mem(void)
 {
-	struct auto_mem *am = get_auto_allocs();
-
 	/* only free our own structure */
-	if (am)
+	while (auto_mem_thread_local)
 	{
-		do
-		{
-			struct auto_mem *act = am;
+		struct auto_mem *act = auto_mem_thread_local;
+		struct auto_mem *next = act->next;
 
-			am = am->next;
-			ecpg_free(act);
-		} while (am);
-		set_auto_allocs(NULL);
+		ecpg_free(act);
+		auto_mem_thread_local = next;
 	}
 }

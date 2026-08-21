@@ -105,7 +105,9 @@ do
 	test "$f" = src/include/port/win32_msvc/dirent.h && continue
 	test "$f" = src/include/port/win32_msvc/utime.h && continue
 	test "$f" = src/include/port/win32ntdll.h && continue
-	test "$f" = src/port/pthread-win32.h && continue
+
+	# Platform-specific headers that are included by pg_threads.h.
+	case "$f" in src/include/port/pg_threads/*.h) continue ; esac
 
 	# Likewise, these files are platform-specific, and the one
 	# relevant to our platform will be included by atomics.h.

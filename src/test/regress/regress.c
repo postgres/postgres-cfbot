@@ -40,6 +40,7 @@
 #include "optimizer/plancat.h"
 #include "parser/parse_coerce.h"
 #include "port/atomics.h"
+#include "port/pg_threads_ext.h"
 #include "portability/instr_time.h"
 #include "postmaster/postmaster.h"	/* for MAX_BACKENDS */
 #include "storage/spin.h"
@@ -499,6 +500,14 @@ wait_pid(PG_FUNCTION_ARGS)
 	if (errno != ESRCH)
 		elog(ERROR, "could not check PID %d liveness: %m", pid);
 
+	PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(test_pg_threads_ext);
+Datum
+test_pg_threads_ext(PG_FUNCTION_ARGS)
+{
+	pg_threads_ext_assertions();
 	PG_RETURN_VOID();
 }
 

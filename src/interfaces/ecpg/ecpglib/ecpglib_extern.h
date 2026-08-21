@@ -166,7 +166,6 @@ bool		ecpg_get_data(const PGresult *, int, int, int, enum ECPGttype type,
 						  enum ECPGttype, char *, char *, long, long, long,
 						  enum ARRAY_TYPE, enum COMPAT_MODE, bool);
 
-void		ecpg_pthreads_init(void);
 struct connection *ecpg_get_connection(const char *connection_name);
 char	   *ecpg_alloc(long size, int lineno);
 char	   *ecpg_auto_alloc(long size, int lineno);
@@ -232,6 +231,8 @@ void		ecpg_set_native_sqlda(int lineno, struct sqlda_struct **_sqlda,
 unsigned	ecpg_hex_dec_len(unsigned srclen);
 unsigned	ecpg_hex_enc_len(unsigned srclen);
 unsigned	ecpg_hex_encode(const char *src, unsigned len, char *dst);
+
+void		ecpg_descriptor_on_thread_exit(void);
 
 #ifdef ENABLE_NLS
 extern char *ecpg_gettext(const char *msgid) pg_attribute_format_arg(1);
