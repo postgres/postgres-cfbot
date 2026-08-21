@@ -241,6 +241,7 @@ extern CachedPlan *GetCachedPlan(CachedPlanSource *plansource,
 								 ParamListInfo boundParams,
 								 ResourceOwner owner,
 								 QueryEnvironment *queryEnv);
+extern bool AcquireExecutorLocks(CachedPlan *cplan);
 extern void ReleaseCachedPlan(CachedPlan *plan, ResourceOwner owner);
 
 extern bool CachedPlanAllowsSimpleValidityCheck(CachedPlanSource *plansource,
@@ -252,5 +253,7 @@ extern bool CachedPlanIsSimplyValid(CachedPlanSource *plansource,
 
 extern CachedExpression *GetCachedExpression(Node *expr);
 extern void FreeCachedExpression(CachedExpression *cexpr);
+
+extern bool CachedPlanCanPrep(CachedPlan *cplan, CachedPlanSource *plansource);
 
 #endif							/* PLANCACHE_H */
