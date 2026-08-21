@@ -1,0 +1,1677 @@
+============================================================================
+  PostgreSQL Row Pattern Recognition: Flat-Array Stream NFA Guide
+============================================================================
+
+  This README's target audience is developers with a basic
+  understanding of the PostgreSQL executor and planner architecture.
+  Also it would be better for them to understand the specification of
+  the row pattern recognition in the SQL standard [1][2]. If you do
+  not have access to the SQL standard, Oracle's manual or Trino's
+  manual can be alternatives for them.
+
+  This README's scope is the entire process from PATTERN/DEFINE clause
+  parsing to NFA runtime execution.
+
+  Related code:
+    - src/backend/parser/parse_rpr.c          (parser phase)
+    - src/backend/optimizer/plan/rpr.c        (optimizer phase)
+    - src/backend/executor/nodeWindowAgg.c    (executor phase, window agg)
+    - src/backend/executor/execRPR.c          (executor phase, NFA engine)
+    - src/include/executor/execRPR.h          (NFA public API)
+    - src/include/nodes/plannodes.h           (plan node definitions)
+    - src/include/nodes/execnodes.h           (execution state definitions)
+    - src/include/optimizer/rpr.h             (types and constants)
+    - src/backend/optimizer/plan/createplan.c (nav offset computation)
+
+============================================================================
+
+What is a Flat-Array Stream NFA?
+
+  The NFA (Nondeterministic Finite Automaton) in this implementation
+  is not a traditional state-transition graph but a flat array of
+  fixed-size 16-byte elements. At runtime, it processes the row stream
+  in a forward-only manner, expanding epsilon transitions eagerly
+  without backtracking.
+
+  - Flat-Array: Pattern compiled into a flat array,
+                not a graph (Chapter IV)
+  - Stream:     Rows consumed sequentially in one direction,
+                never revisited (Chapter XII)
+  - NFA:        Nondeterministic execution where multiple states
+                coexist within a single context (Chapter VI)
+
+Chapter I  Row Pattern Recognition Overview
+============================================================================
+
+Normative reference: ISO/IEC 19075-5 (SQL Technical Report, Part 5: Row
+pattern recognition in SQL).  Subclause numbers cited throughout this code
+base refer to that document.  Where Chapters 4 (FROM clause) and 6 (WINDOW
+clause) describe parallel material, this implementation cites the Chapter 6
+subclause first because it targets Feature R020.
+
+Row Pattern Recognition (hereafter RPR) is a feature introduced in SQL:2016
+that matches regex-based patterns against ordered row sets.
+
+The SQL standard defines two forms:
+
+  Feature R010: MATCH_RECOGNIZE (FROM clause)
+    - Dedicated table operator
+    - Provides dedicated functions such as MATCH_NUMBER(), CLASSIFIER()
+    - Supports ONE ROW PER MATCH / ALL ROWS PER MATCH
+
+  Feature R020: RPR in a window (WINDOW clause)
+    - Integrated into the existing window function framework
+    - Supports ALL ROWS PER MATCH only
+    - No MATCH_NUMBER()
+
+This implementation targets Feature R020.
+
+The basic syntax is as follows:
+
+  SELECT ...
+  OVER (
+    PARTITION BY ...
+    ORDER BY ...
+    ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING
+    [INITIAL | SEEK]   -- SEEK is defined in the standard but not implemented
+    AFTER MATCH SKIP TO NEXT ROW | SKIP PAST LAST ROW
+    PATTERN ( <regex> )
+    DEFINE <variable> AS <condition>, ...
+  )
+
+The PATTERN clause is a regular expression over row pattern variables.
+The DEFINE clause specifies boolean conditions that determine whether each
+variable evaluates to true for the current row.
+
+Example:
+
+  PATTERN (A+ B)
+  DEFINE A AS price > PREV(price),
+         B AS price < PREV(price)
+
+This pattern matches "a span where prices rise consecutively then drop."
+
+Chapter II  Overall Processing Pipeline
+============================================================================
+
+RPR processing is divided into three phases:
+
+  +--------------------------------------------------------------+
+  |  1. Parsing (Parser)                                         |
+  |     SQL text -> PATTERN parse tree + DEFINE expression tree  |
+  |                                                              |
+  |  2. Compilation (Optimizer/Planner)                          |
+  |     PATTERN parse tree -> optimization -> flat NFA elements  |
+  |                                                              |
+  |  3. Execution (Executor)                                     |
+  |     Row-by-row matching via NFA simulation                   |
+  +--------------------------------------------------------------+
+
+Each phase uses independent data structures, and the interfaces between
+phases are well-defined:
+
+  Parser -> Planner:    WindowClause.rpPattern (RPRPatternNode tree)
+                        WindowClause.defineClause (TargetEntry list)
+
+  Planner -> Executor:  WindowAgg.rpPattern (RPRPattern struct)
+                        WindowAgg.defineClause (TargetEntry list)
+
+Chapter III  Parsing Phase
+============================================================================
+
+III-1. Entry Point
+
+  transformWindowDefinitions() (parse_clause.c)
+    +-- transformRPR() (parse_rpr.c)
+
+transformRPR() is invoked when RPCommonSyntax is present and performs the
+following:
+
+  (1) Frame option validation
+      - Only ROWS is allowed (RANGE, GROUPS are not)
+      - The start boundary must be CURRENT ROW
+      - EXCLUDE option is not allowed
+
+  (2) Transcription to WindowClause
+      - Copies rpPattern, rpSkipTo, initial fields
+
+  (3) DEFINE clause transformation (transformDefineClause)
+
+III-2. PATTERN parse tree
+
+The parser transforms the PATTERN clause into an RPRPatternNode tree.
+Each node has one of the following four types:
+
+  RPR_PATTERN_VAR    Variable reference. Name stored in varName field.
+  RPR_PATTERN_SEQ    Concatenation. Children node list in children.
+  RPR_PATTERN_ALT    Alternation (or). Branch node list in children.
+  RPR_PATTERN_GROUP  Group (parentheses). Body node list in children.
+
+All nodes have min/max fields to express quantifiers:
+
+  A       -> VAR(A, min=1, max=1)
+  A+      -> VAR(A, min=1, max=INF)
+  A*      -> VAR(A, min=0, max=INF)
+  A?      -> VAR(A, min=0, max=1)
+  A{3,5}  -> VAR(A, min=3, max=5)
+
+If the reluctant field is true, the quantifier is reluctant (non-greedy).
+
+Example: PATTERN ((A+ B) | C*)
+
+  ALT
+  +-- SEQ
+  |   +-- VAR(A, 1, INF)
+  |   +-- VAR(B, 1, 1)
+  +-- VAR(C, 0, INF)
+
+III-3. DEFINE Clause Transformation
+
+transformDefineClause() processes each DEFINE variable as follows:
+
+  (1) Checks for duplicate variable names
+  (2) Transforms the expression via transformExpr()
+  (3) Extracts Var nodes via pull_var_clause() and ensures each is
+      present in the query targetlist, so the planner propagates the
+      referenced columns through the plan tree
+  (4) Wraps in a TargetEntry with the variable name set in resname
+
+After all variables are processed:
+  (5) Coerces each expression to Boolean type (coerce_to_boolean)
+
+Variables that are used in PATTERN but not defined in DEFINE are implicitly
+evaluated as TRUE (matching all rows).
+
+Chapter IV  Compilation Phase
+============================================================================
+
+IV-1. Entry Point
+
+  create_windowagg_plan() (createplan.c)
+    +-- buildRPRPattern()           NFA compilation (6 phases)
+
+IV-2. The 6 Phases of buildRPRPattern()
+
+  Phase 1: parse tree optimization (optimizeRPRPattern)
+  Phase 2: Statistics collection (scanRPRPattern)
+  Phase 3: Memory allocation (makeRPRPattern)
+  Phase 4: NFA element fill (fillRPRPattern)
+  Phase 5: Finalization (finalizeRPRPattern)
+  Phase 6: Absorbability analysis (computeAbsorbability)
+
+IV-3. Phase 1: Parse Tree Optimization
+
+After copying the parser-generated parse tree, the following optimizations are
+applied:
+
+  (a) SEQ flattening: Unwrap nested SEQ nodes
+      SEQ(A, SEQ(B, C)) -> SEQ(A, B, C)
+
+  (b) Consecutive variable merging: Merge consecutive occurrences of the
+      same variable into a single quantifier
+      A A -> A{2}
+      A{2,3} A{1,2} -> A{3,5}
+
+  (c) Consecutive group merging: Merge repeated identical groups
+      (A B)+ (A B)+ -> (A B){2,INF}
+
+  (d) Consecutive ALT merging: Merge repeated identical ALT nodes
+      (A | B) (A | B) (A | B) -> (A | B){3}
+
+  (e) Prefix/suffix merging: Merge identical sequences before/after
+      a group
+      A B (A B)+ -> (A B){2,INF}
+
+  (f) ALT flattening and deduplication
+      (A | (B | C)) -> (A | B | C)
+      (A | B | A) -> (A | B)
+
+  (g) Quantifier multiplication: Collapse nested quantifiers when safe
+      (A+)+ -> A+
+      (A{2,3}){5} -> A{10,15}
+      (A{2,})* stays as-is (count 1 unreachable; A* would be wrong)
+
+  (h) Single-child unwrap
+      SEQ(A) -> A,  (A){1,1} -> A
+
+IV-4. Phase 4: NFA Element Array Generation
+
+Transforms the optimized parse tree into a flat array of RPRPatternElement.
+This is the core data structure used for NFA simulation at runtime.
+
+RPRPatternElement struct (16 bytes):
+
+  Field      Size     Description
+  ---------------------------------------------------------
+  varId      1B      Variable ID (0-0xEF) or control code (0xFC-0xFF)
+  depth      1B      Group nesting depth
+  flags      1B      Bit flags (see below)
+  reserved   1B      Padding
+  min        4B      Quantifier lower bound
+  max        4B      Quantifier upper bound
+  next       2B      Next element index (sequential flow)
+  jump       2B      Branch target index (for ALT/GROUP)
+
+Pattern variables occupy varId 0 to RPR_VARID_MAX (0xEF) inclusive,
+giving 240 distinct variables.  Any varId with the high nibble set
+(0xF0-0xFF) is reserved for control elements; 0xF0-0xFB are currently
+spare.
+
+Control codes:
+
+  RPR_VARID_BEGIN (0xFC)  Group start marker
+  RPR_VARID_END   (0xFD)  Group end marker
+  RPR_VARID_ALT   (0xFE)  Alternation start marker
+  RPR_VARID_FIN   (0xFF)  Pattern completion marker
+
+Element flags (1 byte, bitmask):
+
+  0x01  RPR_ELEM_RELUCTANT          (VAR, BEGIN, END)
+        Non-greedy quantifier.  Prefers shorter match: try exit-loop
+        first, then repeat.  Set on VAR for simple (A+?),
+        on BEGIN+END for group ((...)+?).
+
+  0x02  RPR_ELEM_EMPTY_LOOP         (END)
+        Group body can produce empty match (all children nullable).
+        Creates a fast-forward exit clone alongside the normal
+        loop-back so cycle detection doesn't kill legitimate
+        matches. (IV-4b)
+
+  0x04  RPR_ELEM_ABSORBABLE_BRANCH  (VAR, BEGIN, END, ALT)
+        Element lies within an absorbable region.  Used at runtime to
+        track whether the current NFA state is in an absorbable
+        context. See "IV-5. Absorbability Analysis" and
+        "VIII-2. Solution: Context Absorption" for more details about
+        absorption.
+
+  0x08  RPR_ELEM_ABSORBABLE         (VAR, END)
+        Absorption comparison point.  Where to compare consecutive
+        iterations for absorption.
+          - Simple unbounded VAR (A+): set on the VAR itself
+          - Unbounded GROUP ((A B)+): set on the END element only
+
+  Accessor macros:
+    RPRElemIsReluctant(e)        (e)->flags & 0x01
+    RPRElemCanEmptyLoop(e)       (e)->flags & 0x02
+    RPRElemIsAbsorbableBranch(e) (e)->flags & 0x04
+    RPRElemIsAbsorbable(e)       (e)->flags & 0x08
+
+Example: PATTERN (A+ B | C)
+
+  Parse tree: ALT(SEQ(VAR(A,1,INF), VAR(B,1,1)), VAR(C,1,1))
+
+  Compilation result:
+
+  idx  varId  depth  min  max  next  jump  Description
+  ------------------------------------------------------------
+   0   ALT    0      1    1    1     -1    Alternation start
+   1   A(0)   1      1    INF  2     3     Branch 1: A+
+   2   B(1)   1      1    1    4     -1    Branch 1: B -> FIN
+   3   C(2)   1      1    1    4     -1    Branch 2: C -> FIN
+   4   FIN    0      1    1    -1    -1    Pattern completion
+
+  - idx 0: ALT marker. next(=1) is the start of the first branch
+  - idx 1: Variable A. next(=2) is B, jump(=3) is the start of the second
+           branch
+  - idx 2: Variable B. next(=4) is FIN
+  - idx 3: Variable C. next(=4) is FIN
+  - idx 4: FIN marker. Match completion signal
+
+Roles of next and jump:
+
+  - next: The next element to move to "after consuming" the current element.
+          For VAR, the next position after a successful match.
+          For BEGIN/END, the next position inside/outside the group.
+
+  - jump: The element to "skip to."
+          In ALT, a jump from one branch to the next branch.
+          In BEGIN, a skip path to END+1 (for groups with min=0).
+          In END, a loop-back to the start of the group body.
+
+Example: PATTERN ((A B)+)
+
+  idx  varId    depth  min  max  next  jump  Description
+  --------------------------------------------------------------
+   0   BEGIN    0      1    INF  1     4     Group start
+   1   A(0)     1      1    1    2     -1    A
+   2   B(1)     1      1    1    3     -1    B
+   3   END      0      1    INF  4     1     Group end
+   4   FIN      0      1    1    -1    -1    Pattern completion
+
+  - idx 0: BEGIN. next(=1) enters the group body.
+           jump(=4) skips to after END = FIN (used when min=0).
+  - idx 3: END. next(=4) exits the group.
+           jump(=1) loops back to the start of the group body.
+
+IV-4a. Reluctant Flag (RPR_ELEM_RELUCTANT)
+
+The reluctant flag is set during Phase 4 (fillRPRPattern) when the parse
+tree node has reluctant == true. It reverses the priority of quantifier
+expansion at runtime:
+
+  Greedy (default):  try loop-back first, then exit  (prefer longer match)
+  Reluctant:         try exit first, then loop-back   (prefer shorter match)
+
+The flag is set on all elements that carry the quantifier:
+
+  Simple VAR (A+?):     RPR_ELEM_RELUCTANT on the VAR element
+  Group ((...)+?):      RPR_ELEM_RELUCTANT on BEGIN and END elements
+
+At runtime (nfa_advance), the flag controls Depth-First Search
+(DFS) exploration order:
+
+  VAR with quantifier:
+    Greedy:    primary path = next (continue), clone = jump (skip)
+    Reluctant: primary path = jump (skip), clone = next (continue)
+
+  END element:
+    Greedy:    primary path = jump (loop-back), clone = next (exit)
+    Reluctant: primary path = next (exit), clone = jump (loop-back)
+
+  BEGIN with min=0:
+    Greedy:    primary path = next (enter group), clone = jump (skip)
+    Reluctant: primary path = jump (skip), clone = next (enter group)
+
+The absorption optimization requires greedy quantifiers. Reluctant
+quantifiers are excluded from absorbability analysis (see IV-5).
+
+IV-4b. Empty Loop Flag (RPR_ELEM_EMPTY_LOOP)
+
+The empty-loop flag is set during Phase 4 (fillRPRPatternGroup) on the END
+element when the group body is nullable -- i.e., every path through the
+body can match zero rows (all children are nullable).
+
+Example patterns that trigger this flag:
+
+  (A?)*    A is nullable (min=0), so group body is nullable -> END gets flag
+  (A? B?)+ Both children nullable -> body nullable -> END gets flag
+  (A | B*) B* is nullable, making the ALT nullable -> END gets flag
+
+The flag works in conjunction with the empty match cycle detection
+(elemIdx visited bitmap). Without this flag, cycle detection alone would
+cause legitimate matches to fail.
+
+Problem example: (A*){2,3}
+  - Iteration 1: A* consumes all available rows -> count=1, END reached
+  - Loop-back for iteration 2: A* matches zero rows -> END reached again
+  - Cycle detection sees the same elemIdx on the same row -> state killed
+  - count never reaches min(2) -> match fails (incorrect)
+
+With the RPR_ELEM_EMPTY_LOOP flag, nfa_advance_end creates two paths:
+the normal loop-back (which cycle detection will eventually kill) and
+a fast-forward exit clone that bypasses the loop entirely.
+(See IX-4(c) for detailed runtime behavior.)
+
+IV-5. Absorbability Analysis (RPR_ELEM_ABSORBABLE)
+
+Context absorption is an optimization technique that reduces O(n^2) to O(n).
+(Runtime behavior is described in Chapter VIII.)
+
+This phase determines whether the pattern has a structure suitable for the
+absorption optimization and sets flags on the relevant elements:
+
+  RPR_ELEM_ABSORBABLE         Absorption comparison point
+  RPR_ELEM_ABSORBABLE_BRANCH  Element within an absorbable region
+
+Eligibility conditions:
+
+  (1) SKIP PAST LAST ROW (not NEXT ROW)
+  (2) Frame end is UNBOUNDED FOLLOWING
+
+Structural conditions (isUnboundedStart + computeAbsorbabilityRecursive):
+
+  Case 1: Simple VAR+ (e.g., A+)
+          -> ABSORBABLE | ABSORBABLE_BRANCH set on the VAR
+  Case 2: GROUP+ with fixed-length children (min == max, recursively)
+          e.g., (A B)+, (A B{2})+, ((A (B C){2}){2})+
+          -> ABSORBABLE_BRANCH on all elements within the group,
+             ABSORBABLE | ABSORBABLE_BRANCH on END
+
+          Why this is safe: when every child has min == max, the group
+          is semantically equivalent to unrolling its body into {1,1}
+          elements.  E.g., (A B{2})+ behaves like (A B B)+.  Each
+          iteration consumes a fixed number of rows, so an earlier
+          context's count always dominates a later one's (monotonicity).
+
+  Case 3: GROUP+ whose body starts with VAR+ (e.g., (A+ B)+)
+          -> Recurses from BEGIN into the body, applying Case 1.
+            ABSORBABLE | ABSORBABLE_BRANCH set on A.
+            B and END get no flags -> absorption stops once past A.
+
+Absorbability is determined per-element, not per-pattern.
+Absorption comparison is performed only when a state resides at an
+element with the RPR_ELEM_ABSORBABLE flag. Once a state leaves the
+flagged region, absorption is permanently disabled for that state.
+
+Through this mechanism, the runtime guarantees monotonicity:
+"a context that started earlier always subsumes a context that
+started later."
+
+Chapter V  NFA Runtime Data Structures
+============================================================================
+
+V-1. RPRNFAState -- NFA State
+
+A single NFA state represents "how far the pattern has progressed."
+
+  Field         Description
+  -----------------------------------------------------------
+  elemIdx       Index of the current pattern element
+  counts[]      Repetition count per group depth
+  isAbsorbable  Whether the state is in an absorbable region
+  next          Next state in the linked list
+
+The size of the counts array is rpPattern->maxDepth (= maximum group
+nesting depth + 1), allocated as a flexible array member at the end of
+the struct.
+
+Example: In PATTERN ((A B)+ C), a state waiting for B in the 3rd iteration
+
+  Element array: [0:BEGIN(d0) 1:A(d1) 2:B(d1) 3:END(d0) 4:C(d0) 5:FIN]
+
+  elemIdx = 2 (B, depth 1)
+  counts[0] = 2 (depth 0: depth of END. Group completed 2 iterations)
+  counts[1] = 1 (depth 1: depth of B. A matched in current iteration)
+
+  Counts are indexed by depth, not by elemIdx.
+  counts[0] is incremented when passing through END(depth 0),
+  and the group repetition count is preserved even when
+  the state is at B(depth 1).
+
+Definition of two states being "equal":
+
+  Two states are equal if they have the same elemIdx and the same counts
+  up to the depth of that element.
+  nfa_states_equal() compares counts[0..elem->depth] using memcmp.
+  Only counts at or below the depth of the current element are meaningful.
+
+V-2. RPRNFAContext -- Matching Context
+
+A single context represents "a matching attempt started from a specific
+start row."
+
+  Field                 Description
+  ---------------------------------------------------------------------
+  states                Linked list of active NFA states
+  matchStartRow         Row number where matching started
+  matchEndRow           Row number where matching completed
+                        (-1 if incomplete)
+  lastProcessedRow      Last row processed
+  matchedState          State that reached FIN (for greedy fallback)
+  hasAbsorbableState    Whether this context can absorb other contexts
+  allStatesAbsorbable   Whether this context can be absorbed
+  next, prev            Doubly-linked list
+
+Since the NFA is nondeterministic, multiple states can coexist
+simultaneously within a single context.
+
+Example: In PATTERN (A | B) C, if the first row matches both A and B,
+two states coexist within the context:
+
+  State 1: elemIdx=3 (waiting for C, via branch A)
+  State 2: elemIdx=3 (waiting for C, via branch B)
+
+In this case, since the (elemIdx, counts) of the two states are equal,
+nfa_add_state_unique() retains only State 1 (branch A), which was
+added first.
+Because DFS processes the first branch of ALT first, the state via A
+is registered first, and the state via B is discarded as a duplicate.
+This is the preferment guarantee.
+
+V-3. RPR Fields of WindowAggState
+
+  nfaContext / nfaContextTail   Doubly-linked list of active contexts
+  nfaContextFree                Reuse pool for contexts
+  nfaStateFree                  Reuse pool for states
+  nfaVarMatched                 Per-row cache: varMatched[varId]
+  nfaVisitedElems               Bitmap for cycle detection
+  nfaVisitedMinWord             Lowest bitmapword index touched since last reset
+  nfaVisitedMaxWord             Highest bitmapword index touched since last reset
+  nfaStateSize                  Precomputed size of RPRNFAState
+  defineMatchStartDependent     DEFINE vars needing per-context evaluation (match_start_dependent)
+  nfaLastProcessedRow           Last row processed by NFA (-1 = none)
+
+  EXPLAIN ANALYZE instrumentation counters are omitted here; see
+  execnodes.h for the full list.
+
+Memory management:
+
+  States and contexts are managed through their own free lists.
+  Instead of palloc, they are obtained from the reuse pool, and
+  returned to the pool upon deallocation.
+  This reduces the overhead of frequent allocation/deallocation.
+
+Chapter VI  NFA Execution: 3-Phase Model
+============================================================================
+
+VI-1. Entry Point and Overall Flow
+
+When the window function processes each row, row_is_in_reduced_frame()
+is called. This function determines whether the current row belongs to
+a matched frame, and if necessary, calls update_reduced_frame() to
+drive the NFA.
+
+Flow of update_reduced_frame():
+
+  (1) Find or create a context for the target row
+  (2) Enter the row processing loop
+  (3) After the loop ends, record the match result
+
+Pseudocode of the row processing loop:
+
+  targetCtx = ExecRPRGetHeadContext(pos)
+  if targetCtx == NULL:
+      targetCtx = ExecRPRStartContext(pos)
+
+  for currentPos = startPos; targetCtx->states != NULL; currentPos++:
+      if not rpr_evaluate_row(currentPos):  -- row does not exist
+          ExecRPRFinalizeAllContexts()      -- finalize all contexts
+          ExecRPRCleanupDeadContexts()      -- clean up after finalization
+          break
+
+      ExecRPRProcessRow(currentPos)         -- 3-phase processing
+      ExecRPRStartContext(currentPos + 1)   -- pre-create next start point
+      ExecRPRCleanupDeadContexts()          -- remove dead contexts
+
+Key point: Processing a single row may require processing multiple rows
+ahead. Due to the nature of window functions, determining the frame for
+row N requires looking at rows beyond N.
+
+VI-2. Context Creation: ExecRPRStartContext()
+
+Creates a new context and performs the initial advance.
+
+  (1) Allocate context via nfa_context_make()
+  (2) Set matchStartRow = pos
+  (3) Create initial state: elemIdx=0 (first pattern element),
+      counts=all zero
+  (4) Call nfa_advance() with currentPos = pos - 1 (no row consumed
+      yet)
+
+The initial advance expands epsilon transitions at the beginning of
+the pattern. For example, the initial advance for PATTERN ((A | B) C):
+
+  Start: elemIdx=0 (ALT)
+    -> Expand ALT branches
+      -> elemIdx=1 (A) -- VAR, so add state; stop here
+      -> elemIdx=2 (B) -- VAR, so add state; stop here
+
+  Result: Two states in the context {waiting for A, waiting for B}
+
+During the initial advance, reaching FIN is not recorded as a match.
+This is to prevent empty matches.
+
+VI-3. Row Evaluation: rpr_evaluate_row()
+
+Evaluates all variable conditions in the DEFINE clause at once for
+the current row.
+
+  for each defineClause[i]:
+      result = ExecEvalExpr(defineClause[i])
+      varMatched[i] = (not null and true)
+
+To support row navigation operators (PREV, NEXT, FIRST, LAST),
+a 1-slot model is used: only ecxt_outertuple is set to the current
+row.  Navigation is handled by EEOP_RPR_NAV_SET/RESTORE opcodes
+emitted during DEFINE expression compilation:
+
+  NAV_SET:     save ecxt_outertuple, swap in target row via nav_slot
+  (evaluate):  argument expression reads from swapped slot
+  NAV_RESTORE: restore original ecxt_outertuple
+
+Compound navigation (PREV(FIRST()), NEXT(FIRST()), PREV(LAST()),
+NEXT(LAST())) is flattened by the parser into a single RPRNavExpr
+with a compound kind (RPR_NAV_PREV_FIRST, etc.).  The executor
+computes the target position in two steps: first the inner reference
+point (match_start + N or currentpos - N) with match-range validation,
+then the outer adjustment (+/- M) with partition-range validation.
+If either step is out of range, the result is NULL.
+
+nav_slot caches the last fetched position (nav_slot_pos) to avoid
+redundant tuplestore lookups when multiple navigation calls target
+the same row.
+
+The varMatched array is referenced later in Phase 1 (Match).
+
+VI-4. Per-Context Re-evaluation (match_start_dependent variables)
+
+DEFINE variables that depend on match_start (those containing FIRST,
+LAST-with-offset, or compound PREV_FIRST/NEXT_FIRST/PREV_LAST/NEXT_LAST)
+are identified at plan time via defineMatchStartDependent.  The shared
+evaluation in rpr_evaluate_row() uses the head context's matchStartRow
+for FIRST/LAST base position.
+
+When processing a context whose matchStartRow differs from the shared
+value, nfa_reevaluate_dependent_vars() temporarily sets nav_match_start
+to that context's matchStartRow and re-evaluates only the dependent
+variables.  The original nav_match_start and currentpos are saved and
+restored after re-evaluation.
+
+Summary of evaluation strategy by navigation content:
+
+  Navigation content               evaluation
+  -------------------------------------------------------
+  No navigation                    shared (once per row)
+  PREV/NEXT only                   shared (once per row)
+  LAST (no offset)                 shared (once per row)
+  LAST (with offset)               per-context
+  FIRST (any)                      per-context
+  Compound (inner FIRST)           per-context
+  Compound (inner LAST, no off.)   shared (once per row)
+  Compound (inner LAST, w/off.)    per-context
+
+VI-5. Tuplestore Mark and Trim (nodeWindowAgg.c)
+
+Navigation functions require access to past rows via the tuplestore.
+To allow tuplestore_trim() to free rows that are no longer reachable,
+the planner computes two offsets (see compute_define_metadata):
+
+  navMaxOffset (Nav Mark Lookback):
+    Maximum backward reach from currentpos.  Contributed by PREV,
+    LAST-with-offset, and compound PREV_LAST/NEXT_LAST.
+    Mark position: currentpos - navMaxOffset.
+
+  navFirstOffset (Nav Mark Lookahead):
+    Minimum forward offset from match_start.  Contributed by FIRST
+    and compound PREV_FIRST/NEXT_FIRST.  Can be negative when
+    compound PREV_FIRST looks before match_start.
+    Mark position: oldest_context->matchStartRow + navFirstOffset.
+
+The actual mark is set to: min(lookback_mark, lookahead_mark).
+This ensures all rows reachable by any navigation function are retained.
+
+When offsets contain non-constant expressions (Param), the planner sets
+navMaxOffsetKind/navFirstOffsetKind to RPR_NAV_OFFSET_NEEDS_EVAL and the
+executor evaluates them at init time.  On overflow, the kind is set to
+RPR_NAV_OFFSET_RETAIN_ALL, disabling trim for that dimension.
+
+VI-6. ExecRPRProcessRow(): 3-Phase Processing
+
+NFA processing for a single row is divided into three phases:
+
+  +--------------------------------------------+
+  |  Phase 1: MATCH (convergence)              |
+  |  Compare the current row against each VAR  |
+  |  state. Remove states that fail to match.  |
+  |                                            |
+  |  Phase 2: ABSORB (absorption)              |
+  |  Merge duplicate contexts to prevent       |
+  |  state explosion.                          |
+  |                                            |
+  |  Phase 3: ADVANCE (expansion)              |
+  |  Expand epsilon transitions to prepare     |
+  |  for the next row.                         |
+  +--------------------------------------------+
+
+This ordering is important:
+
+  - Match executes first to "consume the current row."
+  - Absorb executes immediately after Match, when states have been updated.
+  - Advance executes last to prepare "states waiting for the next row."
+
+Chapter VII  Phase 1: Match
+============================================================================
+
+nfa_match() iterates through each state in the context:
+
+  (1) Check whether the state's elemIdx is a VAR element
+  (2) Compare against the current row using nfa_eval_var_match()
+  (3) Match success: increment repetition count, retain state
+  (4) Match failure: remove state
+
+Match determination (nfa_eval_var_match):
+
+  If varId is within the range of defineVariableList:
+      Use the value of varMatched[varId]
+
+  If varId exceeds the range (variable not defined in DEFINE):
+      Unconditionally true (matches all rows)
+
+Immediate advance for simple VARs:
+
+  For a VAR with min=1, max=1 where the next element is END,
+  the Match phase processes through END immediately.
+  This is necessary for accurate state comparison in Phase 2 (Absorb).
+
+  Example: In PATTERN ((A B)+), when A matches, it immediately advances
+  to B, and when B matches, it immediately advances through END to
+  complete the group count. This enables absorption comparison with
+  other contexts.
+
+Chapter VIII  Phase 2: Absorb (Context Absorption)
+============================================================================
+
+Absorption is the runtime optimization that collapses contexts which
+have converged on identical future behavior.  Two contexts are
+treated as equivalent when one's bookkeeping (elemIdx and per-depth
+iteration counts) is dominated by another's; the younger one is then
+discarded.  The optimization is safe because pattern matching is
+monotonic -- an earlier context's reachable matches always contain a
+later context's.  This is what reduces the naive O(N^2) state count
+to O(N).
+
+VIII-1. Problem
+
+In the current implementation, a new context is started for each row
+processed.
+Applying PATTERN (A+) to 10 rows produces 10 contexts,
+each of which tracks state independently.
+
+If there are N rows, the total number of states becomes O(N^2):
+
+  Context 1 (started at row 1): can match A up to N times
+  Context 2 (started at row 2): can match A up to N-1 times
+  ...
+  Context N (started at row N): can match A 1 time
+
+VIII-2. Solution: Context Absorption
+
+Key observation: a context started earlier contains
+all matches of a later-started context (monotonicity principle).
+
+If Context 1 started at row 1 and matched A 5 times,
+the state where Context 2 (started at row 2) matched A 4 times
+is already contained within Context 1.
+
+Therefore Context 2 can be "absorbed" into Context 1.
+
+Worked example for PATTERN (A+) over 3 rows (each matches A):
+
+  After row 1:
+    Ctx_1 (started row 1): state at A with counts[0] = 1
+
+  After row 2:
+    Ctx_1: state at A with counts[0] = 2
+    Ctx_2 (started row 2): state at A with counts[0] = 1
+    -> Same elemIdx; Ctx_1.count (2) dominates Ctx_2.count (1).
+    -> Ctx_2 absorbed.
+
+  After row 3:
+    Ctx_1: state at A with counts[0] = 3
+    Ctx_3 (started row 3): state at A with counts[0] = 1
+    -> Ctx_1.count (3) dominates Ctx_3.count (1).
+    -> Ctx_3 absorbed.
+
+Total active contexts stays at O(1) instead of growing with N.
+
+The monotonicity argument covers only a context's future (in-progress)
+matches, not a match it has already recorded (matchedState) -- e.g., one
+on a non-absorbable branch, which an absorbing context cannot reproduce.
+Absorption therefore excludes any context holding a recorded match (see
+nfa_update_absorption_flags()).  This costs no efficiency: SKIP PAST LAST
+ROW still prunes such redundant contexts once the covering match is
+recorded (nfa_add_matched_state()).
+
+VIII-3. Absorption Conditions
+
+Planner-time prerequisites (all must hold for absorption to be enabled):
+
+  (a) SKIP PAST LAST ROW.  SKIP TO NEXT ROW creates overlapping
+      contexts that cannot be safely absorbed.
+  (b) Unbounded frame (ROWS BETWEEN CURRENT ROW AND UNBOUNDED
+      FOLLOWING).  Limited frames apply differently to each context,
+      breaking the monotonicity principle.
+  (c) No match_start_dependent navigation in DEFINE.
+
+      Mechanism: each context has a different matchStartRow, so FIRST
+      resolves to a different row for each context at the same
+      currentpos.  An earlier context's DEFINE result no longer
+      subsumes a later one's, making count-dominance comparison
+      invalid.  Rather than comparing matchStartRow at runtime
+      (which would complicate the absorb path), any match_start
+      dependency disables absorption entirely.
+
+      Navigation content              match_start dep.  absorption
+      ------------------------------------------------------------
+      No navigation                   none              safe
+      PREV/NEXT only                  none              safe
+      LAST (no offset)                none              safe
+      LAST (with offset)              boundary check    unsafe
+      FIRST (any)                     direct            unsafe
+      Compound (inner FIRST)          direct            unsafe
+      Compound (inner LAST, no off.)  none              safe
+      Compound (inner LAST, w/off.)   boundary check    unsafe
+
+  The "match_start dep." column classifies how the navigation ties a
+  DEFINE result to the context's matchStartRow:
+
+    none            Independent of matchStartRow.  The result depends
+                    only on currentpos (or a fixed offset from it), so
+                    every context evaluates it identically.
+    direct          Computed from matchStartRow itself -- FIRST counts
+                    forward from match start -- so the resolved row,
+                    and thus the result, differs per context.
+    boundary check  The resolved row is currentpos-relative (LAST with
+                    a backward offset, or a compound whose inner LAST
+                    carries an offset), but its in-range test is taken
+                    against the match range [matchStartRow, currentpos].
+                    The range bound differs per context, so the result
+                    can too.
+
+  Only "none" is safe for absorption; "direct" and "boundary check"
+  both make an earlier context's result stop subsuming a later one's
+  (see (c) above).
+
+Runtime conditions (evaluated per context pair):
+
+  (1) The pattern is marked as isAbsorbable (see IV-5)
+  (2) allStatesAbsorbable of the target context is true
+  (3) An earlier context "covers" all states of the target
+
+Cover condition (nfa_states_covered) -- "count-dominance":
+
+  A state with the same elemIdx exists in the earlier context,
+  and the count at that depth is greater than or equal -- then it is
+  covered.  The earlier context's per-depth iteration count thus
+  dominates the later one's; this is the count-dominance comparison
+  referenced in VIII-3(c).
+
+VIII-4. Dual-Flag Design
+
+Two boolean flags make the absorption decision efficient:
+
+  hasAbsorbableState (monotonic: only true->false transition possible)
+    "Does this context have the ability to absorb other contexts?"
+    true if at least one absorbable state exists.
+    Transitions to false when states are removed leaving no absorbable
+    states.
+    Once false, it never becomes true again.
+
+  allStatesAbsorbable (dynamic: can fluctuate)
+    "Can this context be absorbed?"
+    true if all states are in an absorbable region.
+    Becomes false when a non-absorbable state is added; reverts to true
+    when it is removed.
+
+VIII-5. Absorption Order
+
+nfa_absorb_contexts() traverses from tail (newest) to head (oldest).
+
+  for ctx = tail to head:
+      if ctx.allStatesAbsorbable:
+          for older = ctx.prev to head:
+              if older.hasAbsorbableState:
+                  if nfa_states_covered(older, ctx):
+                      free(ctx)  -- absorbed
+                      break
+
+Since inspection starts from the newest context, the most recently started
+(= having the shortest match) context is absorbed first.
+
+Chapter IX  Phase 3: Advance (Epsilon Transition Expansion)
+============================================================================
+
+IX-1. Overview
+
+nfa_advance() expands epsilon transitions from each state after Match,
+generating "new states waiting for the next row."
+
+An epsilon transition is a transition that moves without consuming a row:
+
+  - ALT: branch to each alternative
+  - BEGIN: enter group (or skip if min=0)
+  - END: loop-back within group (or exit when condition is met)
+  - FIN: record match completion
+  - VAR loop/exit: repeat/exit according to the quantifier
+
+Expansion stops upon reaching a VAR element, and the state is added.
+This is because VAR is the element that "will consume the next row."
+
+IX-2. Processing Order: DFS and Preferment
+
+advance processes states in lexicographic order,
+performing Depth-First Search (DFS) on each state.
+
+This DFS order is what guarantees the SQL standard's "preferment":
+
+  The branch that appears first in the PATTERN text takes precedence.
+
+Example: PATTERN (A | B) C
+
+  The first branch A of the ALT takes precedence over the second branch B.
+  When both A and B can match, the match via A is selected.
+
+nfa_add_state_unique() prevents duplicate addition of the same state,
+so the state added first (= from the preferred branch) is retained.
+
+IX-3. Routing Function: nfa_route_to_elem()
+
+All inter-element transitions in the advance phase go through
+nfa_route_to_elem().
+This function branches its behavior based on the type of the next element:
+
+  If the next element is VAR:
+    (1) Add the state to the context (nfa_add_state_unique)
+    (2) If the VAR has min=0, also add a skip path (recurse via next)
+    -> Expansion stops here (VAR is the element that "will consume the next
+       row")
+
+  If the next element is non-VAR (ALT, BEGIN, END, FIN):
+    -> Recursively call nfa_advance_state() to continue expansion
+
+With this structure, advance recursively follows epsilon transitions
+until reaching a VAR, consistently stopping only at VAR elements.
+
+IX-4. Per-Element advance Behavior
+
+(a) ALT (nfa_advance_alt)
+
+  Upon encountering an ALT element, all branches are expanded in order.
+  The first element of each branch is connected via a jump pointer.
+
+  idx=0 (ALT) -> branch 1 start (next) -> branch 2 start (jump) -> ...
+
+  nfa_advance_state() is recursively called for each branch.
+
+(b) BEGIN (nfa_advance_begin)
+
+  Handles group entry.
+  jump points to the element after END (= first element outside the group).
+
+  Greedy (default):
+    (1) Enter the group body (move via next, reset the count at that depth)
+    (2) If min=0, also add a group skip path (move via jump)
+
+  Reluctant:
+    Order reversed -- skip path first, group entry second.
+    If the skip path reaches FIN, the group entry path is not generated
+    (shortest match preferred).
+
+(c) END (nfa_advance_end)
+
+  Handles group termination. This is the core of the repetition logic.
+
+  Let count be the count at the current depth:
+
+  count < min:
+    Loop-back (move via jump, repeat the group body)
+
+    If the RPR_ELEM_EMPTY_LOOP flag is set:
+      In addition to loop-back, also add a fast-forward exit path.
+      This is because the body may produce an empty match, causing count
+      to never reach min. fast-forward resets counts[depth] to 0
+      and exits via next (treating the remaining required iterations
+      as empty matches).
+
+  min <= count < max:
+    Greedy: loop-back first, exit second
+    Reluctant: exit first, loop-back second
+               If the exit path reaches FIN, loop-back is omitted.
+
+  count >= max:
+    Unconditional exit (move via next)
+
+  On exit: reset counts[depth] = 0, and if the next element is an outer END,
+  increment the count at the outer depth.
+
+(d) VAR (nfa_advance_var)
+
+  Handles repeat/exit for a VAR element with a quantifier.
+
+  Let count be the count at the current depth:
+
+  count < min:
+    Unconditional loop (stay at the same elemIdx, wait for the next row)
+
+  min <= count < max:
+    Greedy: loop first, exit (next) second
+    Reluctant: exit first, loop second
+               If the exit path reaches FIN, loop is omitted.
+
+  count >= max:
+    Unconditional exit (move via next)
+
+  On exit: reset counts[depth] = 0.
+
+(e) FIN
+
+  Match success. The current state is moved to matchedState for recording,
+  and matchEndRow is set to the current row.
+
+  Upon reaching FIN, all remaining unprocessed states are removed
+  (early termination). By DFS order, the path that reached FIN first
+  has the highest preferment, so the rest are inferior paths.
+  This is the core mechanism that guarantees preferment.
+
+  In SKIP PAST LAST ROW mode, upon reaching FIN, subsequent contexts
+  that started within the match range are immediately pruned.
+
+IX-5. State Deduplication: nfa_add_state_unique()
+
+When adding a new state to a context, it is compared against existing
+states;
+if an identical state already exists, it is not added.
+
+Comparison criteria: elemIdx + counts[0..elem->depth] (see V-1)
+
+This deduplication is the core mechanism that suppresses NFA state
+explosion.
+Because DFS order causes preferred-branch states to be added first,
+identical states from lower-priority branches are automatically discarded.
+
+IX-6. Cycle Detection: nfaVisitedElems
+
+When a group body can produce an empty match,
+looping back from END may cause an infinite loop.
+
+Example: PATTERN ((A?)*)
+
+  A? has min=0, so it can pass through without matching.
+  If the outer group repeats: BEGIN -> A? skip -> END -> BEGIN -> ...
+
+To prevent this:
+
+  (1) At compile time: set the RPR_ELEM_EMPTY_LOOP flag on the END
+      of groups whose body is nullable.
+      The runtime effect of this flag is described in IX-4(c):
+      when count < min, a fast-forward exit path is added,
+      resolving the deadlock where count cannot increase due to empty
+      matches.
+
+  (2) At runtime: initialize the nfaVisitedElems bitmap immediately before
+      DFS expansion of each state within advance (once per state).
+      During DFS, epsilon elements (END, ALT, BEGIN) are marked in the
+      bitmap at nfa_advance_state entry.  VAR elements are marked later
+      when added to the state list (nfa_add_state_unique), so that
+      legitimate loop-back to the same VAR in a new group iteration
+      (e.g., END -> ALT -> same VAR) is not blocked.
+      If a previously visited elemIdx is revisited, that path is terminated.
+
+  Note: the bitmap tracks only elemIdx and does not consider counts.
+  Therefore, legitimate revisits to the same elemIdx but with different
+  counts may also be blocked.  This only occurs when the group body is
+  nullable (all paths can match empty), causing END -> loop-back ->
+  skip -> END within a single DFS.  In such cases the END element has
+  the RPR_ELEM_EMPTY_LOOP flag, so the fast-forward exit (IX-4(c))
+  provides an alternative path that bypasses the cycle.
+
+Chapter X  Match Result Processing
+============================================================================
+
+X-1. Match Result
+
+RPR tracks the current match result as a single entry in WindowAggState
+with four fields: rpr_match_valid, rpr_match_matched, rpr_match_start,
+and rpr_match_length.  When rpr_match_valid is true, the entry describes
+the match result for the position at rpr_match_start: rpr_match_matched
+indicates success or failure, and rpr_match_length gives the number of
+rows consumed.  A match with rpr_match_length 0 represents an empty match
+(pattern matched but consumed no rows).  When rpr_match_valid is false,
+the position has not been evaluated yet (RF_NOT_DETERMINED).
+
+A row's status against the current match result can be obtained by
+calling get_reduced_frame_status().
+
+X-2. AFTER MATCH SKIP
+
+Determines the starting point for the next match attempt after a successful
+match:
+
+  SKIP TO NEXT ROW:
+    New match attempt begins from the row after the match start row.
+    Overlapping matches are possible.
+
+  SKIP PAST LAST ROW:
+    New match attempt begins from the row after the match end row.
+    Only non-overlapping matches are possible.
+
+X-3. INITIAL vs SEEK
+
+  Standard definition (ISO/IEC 19075-5 6.12):
+  INITIAL: "is used to look for a match whose first row is R."
+  SEEK:    "is used to permit a search for the first match anywhere
+           from R through the end of the full window frame."
+  In either case, if there is no match, the reduced window frame is empty.
+  The default is INITIAL.
+
+  Current implementation:
+  SEEK is not supported (the parser raises an error).
+  Only INITIAL is supported, searching only for matches starting at each
+  row position pos.
+
+X-4. Bounded Frame Handling
+
+  With RPR, the frame mode is always ROWS and the frame start must be
+  CURRENT ROW. The frame end must be UNBOUNDED FOLLOWING or a positive
+  offset (n >= 1) FOLLOWING; a CURRENT ROW end or a zero offset is
+  rejected, since it would reduce the frame to the single current row.
+
+  When the frame is bounded (e.g., ROWS BETWEEN CURRENT ROW AND 5
+  FOLLOWING), ExecRPRProcessRow receives hasLimitedFrame=true and
+  frameOffset indicating the upper bound.  Before the match phase,
+  any context whose match has exceeded the frame boundary
+  (currentPos >= matchStartRow + frameOffset + 1) is finalized early
+  by forcing a mismatch.  This prevents matches from extending beyond
+  the window frame.  The sum is clamped to PG_INT64_MAX on overflow.
+
+  Note that bounded frames also disable context absorption at the
+  planner level (see VIII-3(b)), since the frame boundary breaks the
+  monotonicity assumption required for correct absorption.
+
+Chapter XI  Worked Example: Full Execution Trace
+============================================================================
+
+XI-1. Query
+
+  SELECT company, tdate, price,
+         first_value(price) OVER w AS start_price,
+         last_value(price) OVER w AS end_price
+  FROM stock
+  WINDOW w AS (
+    PARTITION BY company
+    ORDER BY tdate
+    ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING
+    AFTER MATCH SKIP PAST LAST ROW
+    PATTERN (A+ B)
+    DEFINE A AS price > PREV(price),
+           B AS price < PREV(price)
+  );
+
+XI-2. Data
+
+  Row#    tdate       price
+  --------------------------
+  0       2024-01-01  100
+  1       2024-01-02  110
+  2       2024-01-03  120
+  3       2024-01-04  115
+  4       2024-01-05  130
+
+XI-3. Compilation Result
+
+  PATTERN (A+ B) -> unchanged after optimization
+
+  idx  varId  depth  min  max  next  jump
+  -----------------------------------------
+   0   A(0)   0      1    INF  1     -1     A+
+   1   B(1)   0      1    1    2     -1     B
+   2   FIN    0      1    1    -1    -1
+
+  DEFINE: A -> "price > PREV(price)", B -> "price < PREV(price)"
+  isAbsorbable = true (A+ is a simple unbounded VAR)
+
+XI-4. Execution Trace
+
+--- Row 0 (price=100) ---
+
+  update_reduced_frame(0) called.
+
+  Context C0 created (matchStartRow=0).
+  Initial advance: elemIdx=0(A) -> VAR, so state is added.
+  C0.states = [{elemIdx=0, counts=[0]}]
+
+  rpr_evaluate_row(0):
+    A: price(100) > PREV(price) -> no PREV -> false
+    B: price(100) < PREV(price) -> no PREV -> false
+    varMatched = [false, false]
+
+  ExecRPRProcessRow(0):
+    Phase 1 (Match): A(0) state vs varMatched[0]=false -> state removed
+    C0.states = [] (empty)
+
+    Phase 2 (Absorb): skipped (no states)
+    Phase 3 (Advance): skipped (no states)
+
+  C0.states is empty, so the loop terminates.
+  matchEndRow < matchStartRow -> unmatched.
+
+--- Row 1 (price=110) ---
+
+  update_reduced_frame(1) called.
+
+  Context C1 created (matchStartRow=1).
+  Initial advance: C1.states = [{elemIdx=0, counts=[0]}]
+
+  rpr_evaluate_row(1):
+    A: 110 > PREV(100) -> true
+    B: 110 < PREV(100) -> false
+    varMatched = [true, false]
+
+  ExecRPRProcessRow(1):
+    Phase 1 (Match): A(0) match succeeds -> counts[0]++ -> counts=[1]
+    C1.states = [{elemIdx=0, counts=[1]}]
+
+    Phase 3 (Advance):
+      State {elemIdx=0, counts=[1]}: A+ (min=1, count=1, max=INF)
+        count >= min, so:
+        Greedy -> loop first: keep {elemIdx=0, counts=[1]}
+                  exit: reset counts[0]=0, next(=1) -> {elemIdx=1,
+                        counts=[0]}
+    C1.states = [{elemIdx=0, counts=[1]}, {elemIdx=1, counts=[0]}]
+
+--- Row 2 (price=120) ---
+
+  Context C2 created (matchStartRow=2).
+  Initial advance: C2.states = [{elemIdx=0, counts=[0]}]
+
+  rpr_evaluate_row(2):
+    A: 120 > PREV(110) -> true
+    B: 120 < PREV(110) -> false
+    varMatched = [true, false]
+
+  C1 ExecRPRProcessRow(2):
+    Phase 1 (Match):
+      {elemIdx=0, counts=[1]}: A matches -> counts=[2]
+      {elemIdx=1, counts=[0]}: B does not match -> removed
+    C1.states = [{elemIdx=0, counts=[2]}]
+
+  C2 ExecRPRProcessRow(2):
+    Phase 1 (Match):
+      {elemIdx=0, counts=[0]}: A matches -> counts=[1]
+    C2.states = [{elemIdx=0, counts=[1]}]
+
+    Phase 2 (Absorb):
+      Does C1 (started earlier) cover C2?
+        C1: {elemIdx=0, counts=[2]}, C2: {elemIdx=0, counts=[1]}
+        Same elemIdx, C1.counts >= C2.counts -> covered
+      C2 absorbed. -> removed.
+
+    Phase 3 (Advance):
+      {elemIdx=0, counts=[2]}: Greedy -> loop + exit
+        Loop: {elemIdx=0, counts=[2]}
+        Exit: reset counts[0]=0, next(=1) -> {elemIdx=1, counts=[0]}
+    C1.states = [{elemIdx=0, counts=[2]}, {elemIdx=1, counts=[0]}]
+
+  Context C3 created (matchStartRow=3).
+
+--- Row 3 (price=115) ---
+
+  rpr_evaluate_row(3):
+    A: 115 > PREV(120) -> false
+    B: 115 < PREV(120) -> true
+    varMatched = [false, true]
+
+  ExecRPRProcessRow(3):
+    Phase 1 (Match):
+      {elemIdx=0, counts=[2]}: A does not match -> removed
+      {elemIdx=1, counts=[0]}: B matches -> counts=[1]
+    C1.states = [{elemIdx=1, counts=[1]}]
+
+    Phase 3 (Advance):
+      {elemIdx=1, counts=[1]}: B (min=1, max=1)
+        count(1) >= max(1) -> unconditional exit
+        Reset counts[0]=0, next = 2 (FIN)
+      FIN reached -> matchEndRow = 3, matchedState recorded.
+      Early termination: no remaining states, so completed immediately.
+    C1.states = [] (empty after reaching FIN)
+
+  C1.states is empty and matchEndRow=3 >= matchStartRow=1 -> match succeeds.
+
+  rpr_match_start = 1, rpr_match_length = 3
+
+--- Row 4 (price=130) ---
+
+  update_reduced_frame(4) called.
+  C3 was already created but matchStartRow=3, so it is not applicable.
+  New context C4 created (matchStartRow=4).
+
+  rpr_evaluate_row(4):
+    A: 130 > PREV(115) -> true
+    B: 130 < PREV(115) -> false
+
+  ... No subsequent rows, so ExecRPRFinalizeAllContexts() is called.
+  Match incomplete -> unmatched.
+
+XI-5. Final Result
+
+  Row 0: unmatched     -> reduced frame empty (window funcs NULL, count() 0)
+  Row 1: match head    -> frame = rows 1 through 3
+  Row 2: inside match  -> skipped
+  Row 3: inside match  -> skipped
+  Row 4: unmatched     -> reduced frame empty (window funcs NULL, count() 0)
+
+Chapter XII  Summary of Key Design Decisions
+============================================================================
+
+XII-1. Flat Array vs Tree-Based NFA
+
+  The compiled pattern is stored as a flat array of fixed-size 16-byte
+  RPRPatternElement structs rather than as a tree.
+
+  The array is contiguous and cache-friendly, elements reference each
+  other by 2-byte index instead of by pointer, and the whole structure
+  can be serialized with memcpy when passed to plan nodes.
+
+XII-2. Forward-only Execution vs Backtracking
+
+  The NFA is simulated forward-only, tracking a set of live states,
+  rather than by backtracking.
+
+  Backtracking would take exponential time in the worst case, whereas
+  forward-only NFA simulation is polynomial.  Forward-only also fits the
+  window pipeline, which delivers sorted rows sequentially: it needs no
+  re-fetching of earlier rows, and each row's DEFINE conditions (SQL
+  expressions such as PREV or running aggregates, with high re-evaluation
+  cost) are evaluated only once.  DFS order yields preferment naturally,
+  with greedy or reluctant behavior per quantifier obtained by reversing
+  that order.
+
+XII-3. Per-Context Management
+
+  A separate match context is maintained for each start row.
+
+  This supports overlapping matches under SKIP TO NEXT ROW, determines
+  each row's frame independently, and lets the absorption optimization
+  eliminate redundant contexts in O(n).
+
+XII-4. Memory Pool Management
+
+  NFA states are managed through a custom free list, and both RPRNFAState
+  and RPRNFAContext are allocated in a partition-lifespan memory context
+  that is freed in release_partition.
+
+  NFA states are created and destroyed in large numbers per row, so the
+  free list avoids palloc/pfree overhead.  Their size varies (the
+  counts[] array), but maxDepth is fixed within a single query, so all
+  states have the same size.
+
+XII-5. Execution Optimization Summary
+
+  The following optimizations make the NFA simulation practical.
+
+  -- Compile-time --
+
+  (1) Parse Tree Optimization (IV-3)
+
+    Simplifies the parse tree before converting the pattern to an NFA.
+    Reduces the number of NFA elements through consecutive variable
+    merging (A A -> A{2}), SEQ flattening, quantifier multiplication,
+    and other transformations.
+
+    Significance: Reducing the element count directly shrinks the state
+    space, decreasing the cost of all subsequent runtime phases (match,
+    absorb, advance).
+
+  -- Runtime: advance phase --
+
+  (2) Group Skip (IX-4(b))
+
+    At the BEGIN of a group with min=0, uses jump to skip the entire
+    group. Moves directly to the first element outside the group without
+    exploring the group body. Greedy enters then skips; Reluctant skips
+    then enters.
+
+    Significance: For optional groups (min=0), immediately generates
+    a skip path without exploring the body, avoiding unnecessary DFS
+    expansion.
+
+  (3) State Deduplication (IX-5)
+
+    During advance, DFS may generate states with the same (elemIdx,
+    counts) combination through multiple paths. Additionally, for
+    group absorption, nfa_match performs inline advance from bounded
+    VARs (count >= max) within the absorbable region (ABSORBABLE_BRANCH)
+    through END chains to reach the comparison point (ABSORBABLE END).
+    This process can also produce duplicate states reaching the same END.
+    nfa_add_state_unique() blocks duplicate addition of identical states
+    in both cases.
+
+    Significance: Prevents exponential growth of the state count in
+    ALT branches and quantifier expansion. Since DFS order causes the
+    preferred branch's state to be registered first, identical states
+    from lower-priority branches are automatically discarded, thereby
+    also guaranteeing preferment.
+
+  (4) Cycle Detection and Fast-Forward (IX-6, IX-4(c))
+
+    When a nullable group body (e.g., A?) repeats empty matches,
+    the END -> BEGIN loop-back can continue indefinitely.
+
+    Two mechanisms resolve this:
+    - A visited bitmap (nfaVisitedElems) blocks revisitation of the
+      same element, preventing infinite loops (safety)
+    - At an END with the RPR_ELEM_EMPTY_LOOP flag set, when
+      count < min, the remaining required iterations are treated as
+      empty matches and a fast-forward exit path out of the group is
+      added (correctness)
+
+    Significance: Cycle detection guarantees termination, and
+    fast-forward guarantees that the min condition is satisfied.
+    Without these, patterns containing nullable groups would fall
+    into infinite loops or fail to match.
+
+  (5) Match Pruning (IX-4(e))
+
+    When a state reaches FIN during advance, all remaining unprocessed
+    states of that context are removed. Because of DFS order, the path
+    that reaches FIN first has the highest preferment, so the remaining
+    paths are inferior.
+
+    Significance: Once the best match is determined, exploration of
+    inferior paths is immediately terminated. This mechanism achieves
+    both preferment guarantees and performance optimization.
+
+  -- Runtime: inter-context --
+
+  (6) Early Termination (SKIP PAST LAST ROW)
+
+    In SKIP PAST LAST ROW mode, when a match is found, subsequent
+    contexts whose start rows fall within the match range are pruned
+    immediately without further processing.
+    In SKIP TO NEXT ROW mode, overlapping contexts are preserved
+    because each row requires its own independent match.
+
+    Significance: Prunes subsequent contexts whose start rows overlap
+    with a prior match range, avoiding unnecessary processing.
+
+  (7) Context Absorption (Chapter VIII)
+
+    If an independent context is created for each row, O(n^2) states
+    accumulate. By exploiting the monotonicity that an earlier-started
+    context subsumes the states of a later-started context, redundant
+    contexts are eliminated early.
+
+    Absorbability is determined per-element; comparison is performed
+    only at elements with the RPR_ELEM_ABSORBABLE flag (see IV-5).
+
+    Significance: Keeps the number of active contexts at a constant
+    level, achieving O(n^2) -> O(n) time complexity. Without this,
+    performance degrades sharply on long partitions.
+
+Appendix A. Key Function Index
+============================================================================
+
+  Function                      File                  Role
+  --------------------------------------------------------------------------
+  transformRPR                  parse_rpr.c           Parser entry point
+  transformDefineClause         parse_rpr.c           DEFINE transformation
+  buildRPRPattern               rpr.c                 NFA compilation main
+  optimizeRPRPattern            rpr.c                 parse tree optimization
+  fillRPRPattern                rpr.c                 NFA element generation
+  finalizeRPRPattern            rpr.c                 Finalization
+  computeAbsorbability          rpr.c                 Absorption analysis
+  update_reduced_frame          nodeWindowAgg.c       Execution main loop
+  rpr_evaluate_row              nodeWindowAgg.c       DEFINE evaluation
+  ExecRPRStartContext           execRPR.c             Context creation
+  ExecRPRProcessRow             execRPR.c             3-phase processing
+  nfa_match                     execRPR.c             Phase 1
+  nfa_absorb_contexts           execRPR.c             Phase 2
+  nfa_advance                   execRPR.c             Phase 3
+  nfa_advance_state             execRPR.c             Per-state branching
+  nfa_route_to_elem             execRPR.c             Element routing
+  nfa_advance_alt               execRPR.c             ALT handling
+  nfa_advance_begin             execRPR.c             BEGIN handling
+  nfa_advance_end               execRPR.c             END handling
+  nfa_advance_var               execRPR.c             VAR handling
+  nfa_add_state_unique          execRPR.c             Deduplication
+  nfa_states_covered            execRPR.c             Absorption check
+  nfa_reevaluate_dependent_vars execRPR.c             Per-context re-eval
+  ExecRPRGetHeadContext         execRPR.c             Context lookup
+  ExecRPRFreeContext            execRPR.c             Context deallocation
+  ExecRPRCleanupDeadContexts    execRPR.c             Dead context cleanup
+  ExecRPRFinalizeAllContexts    execRPR.c             Partition-end finalize
+  ExecRPRRecordContextSuccess   execRPR.c             Stats: match success
+  ExecRPRRecordContextFailure   execRPR.c             Stats: match failure
+  compute_define_metadata       createplan.c          Trim offset computation
+
+Appendix B. Data Structure Relationship Diagram
+============================================================================
+
+  Parser Layer
+  --------
+  RPCommonSyntax
+    |--- rpSkipTo: RPSkipTo
+    |--- initial: bool
+    +--- rpPattern: RPRPatternNode* (tree)
+         |--- nodeType: VAR | SEQ | ALT | GROUP
+         |--- min, max: quantifier
+         |--- varName: variable name (VAR only)
+         +--- children: List* (SEQ/ALT/GROUP only)
+
+  Planner Layer
+  ----------
+  WindowAgg (plan node)
+    |--- rpSkipTo: RPSkipTo
+    |--- defineClause: List<TargetEntry>
+    +--- rpPattern: RPRPattern*
+         |--- numVars: int
+         |--- varNames: char**
+         |--- maxDepth: RPRDepth
+         |--- isAbsorbable: bool
+         |--- numElements: int
+         +--- elements: RPRPatternElement[]  (flat array)
+              |--- varId      (1B)
+              |--- depth      (1B)
+              |--- flags      (1B)
+              |--- reserved   (1B)
+              |--- min, max   (4B + 4B)
+              +--- next, jump (2B + 2B)
+
+  Executor Layer
+  ----------
+  WindowAggState
+    |--- rpSkipTo: RPSkipTo (AFTER MATCH SKIP mode)
+    |--- rpPattern: RPRPattern* (copied from plan)
+    |--- defineVariableList: List<String> (variable names, DEFINE order)
+    |--- defineClauseExprs: List<ExprState>
+    |--- nfaVarMatched: bool[] (per-row cache)
+    |--- defineMatchStartDependent: Bitmapset* (match_start_dependent
+    |        DEFINE vars; see VI-4)
+    |--- nfaVisitedElems: bitmapword* (cycle detection)
+    |--- nfaVisitedMinWord / nfaVisitedMaxWord: int16
+    |        (touched-word range for fast reset)
+    |--- nfaLastProcessedRow: int64 (-1 = none)
+    |--- nfaStateSize: Size (pre-calculated RPRNFAState allocation size)
+    |--- nfaContext <-> nfaContextTail (doubly-linked list)
+    |   +--- RPRNFAContext
+    |       |--- states: RPRNFAState* (linked list)
+    |       |   |--- elemIdx
+    |       |   |--- counts[]
+    |       |   +--- isAbsorbable
+    |       |--- matchStartRow, matchEndRow
+    |       |--- lastProcessedRow
+    |       |--- matchedState (cloned on FIN arrival)
+    |       |--- hasAbsorbableState
+    |       +--- allStatesAbsorbable
+    |--- nfaContextFree (recycling pool)
+    +--- nfaStateFree (recycling pool)
+
+Appendix C. NFA Element Array Examples
+============================================================================
+
+C-1. PATTERN (A B C)
+
+  idx  varId  depth  min  max  next  jump
+  ------------------------------------------
+   0   A      0      1    1    1     -1
+   1   B      0      1    1    2     -1
+   2   C      0      1    1    3     -1
+   3   FIN    0      1    1    -1    -1
+
+C-2. PATTERN (A+ B*)
+
+  idx  varId  depth  min  max  next  jump  flags
+  ------------------------------------------------------------------------
+   0   A      0      1    INF  1     -1    ABSORBABLE | ABSORBABLE_BRANCH
+   1   B      0      0    INF  2     -1
+   2   FIN    0      1    1    -1    -1
+
+  Only A+ is the absorption point (Case 1). Once past A,
+  absorption is permanently disabled for that state.
+
+C-3. PATTERN (A | B | C)
+
+  idx  varId  depth  min  max  next  jump
+  ----------------------------------------
+   0   ALT    0      1    1    1     -1    alternation start
+   1   A      1      1    1    4     2     branch 1 -> FIN, jump -> branch 2
+   2   B      1      1    1    4     3     branch 2 -> FIN, jump -> branch 3
+   3   C      1      1    1    4     -1    branch 3 -> FIN
+   4   FIN    0      1    1    -1    -1
+
+C-4. PATTERN ((A B)+ C)
+
+  idx  varId    depth  min  max  next  jump  flags
+  --------------------------------------------------------------------------
+   0   BEGIN    0      1    INF  1     4     ABSORBABLE_BRANCH
+   1   A        1      1    1    2     -1    ABSORBABLE_BRANCH
+   2   B        1      1    1    3     -1    ABSORBABLE_BRANCH
+   3   END      0      1    INF  4     1     ABSORBABLE | ABSORBABLE_BRANCH
+   4   C        0      1    1    5     -1
+   5   FIN      0      1    1    -1    -1
+
+  Case 2: GROUP+ with {1,1} body VARs. A, B are branches;
+  END is the absorption point. Compare with C-6 (Case 3).
+
+C-5. PATTERN ((A | B)+? C)
+
+  idx  varId    depth  min  max   next  jump  flags
+  -------------------------------------------------------------------
+   0   BEGIN    0      1    INF   1     5     RELUCTANT, group start
+   1   ALT      1      1    1     2     -1    alternation start
+   2   A        2      1    1     4     3     branch 1
+   3   B        2      1    1     4     -1    branch 2
+   4   END      0      1    INF   5     1     RELUCTANT, group end
+   5   C        0      1    1     6     -1
+   6   FIN      0      1    1     -1    -1
+
+C-6. PATTERN ((A+ B)+ C)  -- Absorbability flag example
+
+  idx  varId    depth  min  max   next  jump  flags
+  ---------------------------------------------------------------------------
+   0   BEGIN    0      1    INF   1     4     ABSORBABLE_BRANCH, group start
+   1   A        1      1    INF   2     -1    ABSORBABLE | ABSORBABLE_BRANCH
+   2   B        1      1    1     3     -1
+   3   END      0      1    INF   4     1     group end
+   4   C        0      1    1     5     -1
+   5   FIN      0      1    1     -1    -1
+
+  Recurses from BEGIN into the body -> A matches Case 1 (simple VAR+).
+  A gets ABSORBABLE | ABSORBABLE_BRANCH, BEGIN gets ABSORBABLE_BRANCH.
+  B and END get no flags -> absorption stops once the state advances to B.
+  (See IV-5 Case 3)
+
+C-7. PATTERN ((A+ B | C*)+ D)  -- Per-branch absorption in ALT
+
+  idx  varId    depth  min  max   next  jump  flags
+  ---------------------------------------------------------------------------
+   0   BEGIN    0      1    INF   1     6     ABSORBABLE_BRANCH
+   1   ALT      1      1    1     2     -1    ABSORBABLE_BRANCH
+   2   A        2      1    INF   3     4     ABSORBABLE | ABSORBABLE_BRANCH
+   3   B        2      1    1     5     -1
+   4   C        2      0    INF   5     -1    ABSORBABLE | ABSORBABLE_BRANCH
+   5   END      0      1    INF   6     1     EMPTY_LOOP
+   6   D        0      1    1     7     -1
+   7   FIN      0      1    1     -1    -1
+
+  ALT branches are checked independently for absorbability.
+  Branch 1: A+ matches Case 1 -> A gets ABSORBABLE. B has no flag.
+  Branch 2: C* matches Case 1 -> C gets ABSORBABLE.
+  Both A and C get ABSORBABLE_BRANCH as part of their respective branch
+  paths.
+  END has EMPTY_LOOP: branch 2 (C*) is nullable, making the group body
+  nullable.
+  BEGIN and ALT get ABSORBABLE_BRANCH (on the path to absorbable elements).
+
+
+References:
+
+[1] ISO/IEC 19075-5 Information technology - Guidance for the use of
+    database language SQL - Part 5: Row pattern recognition
+
+[2] ISO/IEC 9075-2 Information technology - Database languages - SQL -
+    Part 2: Foundation (SQL/Foundation)
+
+============================================================================
+  End of document
+============================================================================

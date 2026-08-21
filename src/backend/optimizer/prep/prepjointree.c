@@ -2600,6 +2600,13 @@ perform_pullup_replace_vars(PlannerInfo *root,
 	parse->returningList = (List *)
 		pullup_replace_vars((Node *) parse->returningList, rvcontext);
 
+	foreach_node(WindowClause, wc, parse->windowClause)
+	{
+		if (wc->defineClause != NIL)
+			wc->defineClause = (List *)
+				pullup_replace_vars((Node *) wc->defineClause, rvcontext);
+	}
+
 	if (parse->onConflict)
 	{
 		parse->onConflict->onConflictSet = (List *)

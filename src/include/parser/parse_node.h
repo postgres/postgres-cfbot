@@ -51,6 +51,7 @@ typedef enum ParseExprKind
 	EXPR_KIND_WINDOW_FRAME_RANGE,	/* window frame clause with RANGE */
 	EXPR_KIND_WINDOW_FRAME_ROWS,	/* window frame clause with ROWS */
 	EXPR_KIND_WINDOW_FRAME_GROUPS,	/* window frame clause with GROUPS */
+	EXPR_KIND_RPR_DEFINE,		/* DEFINE */
 	EXPR_KIND_SELECT_TARGET,	/* SELECT target list item */
 	EXPR_KIND_INSERT_TARGET,	/* INSERT target list item */
 	EXPR_KIND_UPDATE_SOURCE,	/* UPDATE assignment source item */
@@ -230,6 +231,7 @@ struct ParseState
 	ParseNamespaceItem *p_grouping_nsitem;	/* NSItem for grouping, or NULL */
 	List	   *p_windowdefs;	/* raw representations of window clauses */
 	ParseExprKind p_expr_kind;	/* what kind of expression we're parsing */
+	List	   *p_rpr_pattern_vars; /* Row pattern variable names */
 	int			p_next_resno;	/* next targetlist resno to assign */
 	List	   *p_multiassign_exprs;	/* junk tlist entries for multiassign */
 	List	   *p_locking_clause;	/* raw FOR UPDATE/FOR SHARE info */

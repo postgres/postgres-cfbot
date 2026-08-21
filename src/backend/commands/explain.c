@@ -30,6 +30,7 @@
 #include "nodes/extensible.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "optimizer/rpr.h"
 #include "parser/analyze.h"
 #include "parser/parsetree.h"
 #include "rewrite/rewriteHandler.h"
@@ -119,6 +120,15 @@ static void show_window_def(WindowAggState *planstate,
 static void show_window_keys(StringInfo buf, PlanState *planstate,
 							 int nkeys, AttrNumber *keycols,
 							 List *ancestors, ExplainState *es);
+static void append_rpr_quantifier(StringInfo buf, RPRPatternElement *elem);
+static char *deparse_rpr_pattern(RPRPattern *pattern);
+static int	deparse_rpr_seq(RPRPattern *pattern, int start, int limit,
+							StringInfo buf);
+static int	deparse_rpr_node(RPRPattern *pattern, int idx, int limit,
+							 StringInfo buf);
+static int	rpr_match_end(RPRPattern *pattern, int beginIdx);
+static int	rpr_alt_scope_end(RPRPattern *pattern, int idx);
+static int	rpr_next_branch(RPRPattern *pattern, int bno, int altEnd);
 static void show_storage_info(char *maxStorageType, int64 maxSpaceUsed,
 							  ExplainState *es);
 static void show_tablesample(TableSampleClause *tsc, PlanState *planstate,
@@ -129,6 +139,7 @@ static void show_incremental_sort_info(IncrementalSortState *incrsortstate,
 static void show_hash_info(HashState *hashstate, ExplainState *es);
 static void show_material_info(MaterialState *mstate, ExplainState *es);
 static void show_windowagg_info(WindowAggState *winstate, ExplainState *es);
+static void show_rpr_nfa_stats(WindowAggState *winstate, ExplainState *es);
 static void show_ctescan_info(CteScanState *ctescanstate, ExplainState *es);
 static void show_table_func_scan_info(TableFuncScanState *tscanstate,
 									  ExplainState *es);
@@ -2899,6 +2910,247 @@ show_sortorder_options(StringInfo buf, Node *sortexpr,
 }
 
 /*
+ * Append quantifier suffix for a pattern element.
+ */
+static void
+append_rpr_quantifier(StringInfo buf, RPRPatternElement *elem)
+{
+	/* Append quantifier if not {1,1} */
+	if (elem->min == 0 && elem->max == RPR_QUANTITY_INF)
+		appendStringInfoChar(buf, '*');
+	else if (elem->min == 1 && elem->max == RPR_QUANTITY_INF)
+		appendStringInfoChar(buf, '+');
+	else if (elem->min == 0 && elem->max == 1)
+		appendStringInfoChar(buf, '?');
+	else if (elem->max == RPR_QUANTITY_INF)
+		appendStringInfo(buf, "{%d,}", elem->min);
+	else if (elem->min == elem->max && elem->min != 1)
+		appendStringInfo(buf, "{%d}", elem->min);
+	else if (elem->min != 1 || elem->max != 1)
+		appendStringInfo(buf, "{%d,%d}", elem->min, elem->max);
+
+	if (RPRElemIsReluctant(elem))
+	{
+		if (elem->min == 1 && elem->max == 1)
+			appendStringInfoString(buf, "{1}"); /* make reluctant ?
+												 * unambiguous */
+		appendStringInfoChar(buf, '?');
+	}
+
+	/* Append absorption markers: " for comparison point, ' for branch only */
+	if (RPRElemIsAbsorbable(elem))
+	{
+		Assert(elem->max == RPR_QUANTITY_INF);
+		appendStringInfoChar(buf, '"');
+	}
+	else if (RPRElemIsAbsorbableBranch(elem))
+		appendStringInfoChar(buf, '\'');
+}
+
+/*
+ * Deparse a compiled RPRPattern (bytecode) back to a pattern string.
+ *
+ * The flat RPRPatternElement[] array is walked by recursive descent.  Each
+ * construct is deparsed within an inherited [start, limit) window: the parent
+ * passes the boundary down, so each construct's extent is fixed by its caller.
+ * Three signals drive the walk:
+ *
+ *   - scope ends (where an ALT or GROUP body finishes) come from depth, via
+ *     rpr_alt_scope_end() and rpr_match_end().
+ *   - branch boundaries (where a "|" goes) come from a branch-start jump,
+ *     confirmed by the relative test elem[j-1].next != j, via
+ *     rpr_next_branch().
+ *   - parentheses come from structure (a BEGIN group, an ALT) plus a one-step
+ *     lookahead for a group that wraps a lone ALT.
+ *
+ * depth and the relative next test are stable across the next/jump values the
+ * compiler assigns to branch tails and nested alternations, which is what makes
+ * them suitable to anchor scope and branch boundaries.
+ *
+ * EXPLAIN parenthesizes every ALT on its own, so a top-level "A | B" deparses
+ * as "(a | b)".  This self-consistent EXPLAIN form is the correctness oracle
+ * here; pg_get_viewdef differs, as its parens come only from an enclosing
+ * GROUP.  Absorption markers (' ") are orthogonal and handled by
+ * append_rpr_quantifier().
+ *
+ * Two compiler invariants hold throughout: {1,1} groups are unwrapped before
+ * bytecode generation (so every BEGIN/END group carries a non-trivial
+ * quantifier, and a lone ALT inside a group always spans to the group's END),
+ * and a group's quantifier is read from its END element (the BEGIN copy is
+ * ignored).
+ */
+static char *
+deparse_rpr_pattern(RPRPattern *pattern)
+{
+	StringInfoData buf;
+
+	Assert(pattern != NULL && pattern->numElements >= 2);
+
+	initStringInfo(&buf);
+	deparse_rpr_seq(pattern, 0, pattern->numElements, &buf);
+	return buf.data;
+}
+
+/*
+ * Deparse a run of sibling elements in [start, limit), separated by spaces.
+ *
+ * Stops at limit or at the FIN terminator (top-level call passes limit =
+ * numElements, where the last element is FIN).  Returns the index reached.
+ */
+static int
+deparse_rpr_seq(RPRPattern *pattern, int start, int limit, StringInfo buf)
+{
+	int			i = start;
+	bool		first = true;
+
+	while (i < limit && !RPRElemIsFin(&pattern->elements[i]))
+	{
+		if (!first)
+			appendStringInfoChar(buf, ' ');
+		first = false;
+		i = deparse_rpr_node(pattern, i, limit, buf);
+	}
+	return i;
+}
+
+/*
+ * Deparse the single construct starting at index idx, bounded by the
+ * inherited limit.  Returns the index just past the construct.
+ *
+ * A VAR is its name plus quantifier.  A BEGIN opens a group spanning to its
+ * matching END (rpr_match_end); when the group's sole child is an ALT that
+ * runs to the END, the ALT supplies the parentheses and the group only adds
+ * the quantifier, otherwise the group body is wrapped in its own "( )".  An
+ * ALT runs to its depth-determined scope end (capped by the inherited limit)
+ * and emits "( b1 | b2 | ... )", each branch deparsed within the boundary
+ * handed down by rpr_next_branch.
+ */
+static int
+deparse_rpr_node(RPRPattern *pattern, int idx, int limit, StringInfo buf)
+{
+	RPRPatternElement *elem = &pattern->elements[idx];
+
+	if (RPRElemIsVar(elem))
+	{
+		Assert(elem->varId < pattern->numVars);
+		appendStringInfoString(buf,
+							   quote_identifier(pattern->varNames[elem->varId]));
+		append_rpr_quantifier(buf, elem);
+		return idx + 1;
+	}
+
+	if (RPRElemIsBegin(elem))
+	{
+		int			end = rpr_match_end(pattern, idx);
+		bool		loneAlt;
+
+		loneAlt = (idx + 1 < end &&
+				   RPRElemIsAlt(&pattern->elements[idx + 1]) &&
+				   rpr_alt_scope_end(pattern, idx + 1) == end);
+
+		if (loneAlt)
+		{
+			/* The ALT child already parenthesizes the whole group body. */
+			(void) deparse_rpr_node(pattern, idx + 1, end, buf);
+		}
+		else
+		{
+			appendStringInfoChar(buf, '(');
+			(void) deparse_rpr_seq(pattern, idx + 1, end, buf);
+			appendStringInfoChar(buf, ')');
+		}
+		append_rpr_quantifier(buf, &pattern->elements[end]);
+		return end + 1;
+	}
+
+	Assert(RPRElemIsAlt(elem));
+	{
+		int			altEnd = rpr_alt_scope_end(pattern, idx);
+		int			b;
+		bool		first = true;
+
+		/* an alternation's depth-derived scope end never exceeds the limit */
+		Assert(altEnd <= limit);
+
+		appendStringInfoChar(buf, '(');
+		b = idx + 1;
+		while (b < altEnd)
+		{
+			int			nb = rpr_next_branch(pattern, b, altEnd);
+
+			if (!first)
+				appendStringInfoString(buf, " | ");
+			first = false;
+			(void) deparse_rpr_seq(pattern, b, nb, buf);
+			b = nb;
+		}
+		appendStringInfoChar(buf, ')');
+		return altEnd;
+	}
+}
+
+/*
+ * Find the END that closes the group opened by the BEGIN at beginIdx: the
+ * first END at the same depth scanning forward.
+ */
+static int
+rpr_match_end(RPRPattern *pattern, int beginIdx)
+{
+	RPRDepth	d = pattern->elements[beginIdx].depth;
+	int			i;
+
+	for (i = beginIdx + 1; i < pattern->numElements; i++)
+	{
+		RPRPatternElement *e = &pattern->elements[i];
+
+		if (RPRElemIsEnd(e) && e->depth == d)
+			return i;
+	}
+	pg_unreachable();			/* a BEGIN always has a matching END */
+}
+
+/*
+ * Scope end of the construct at index idx: the first following element whose
+ * depth is no greater than idx's own.  For an ALT marker this is the index
+ * just past its last branch, since depth stays constant across branch
+ * boundaries.  FIN sits at depth 0, so a top-level ALT stops there.
+ */
+static int
+rpr_alt_scope_end(RPRPattern *pattern, int idx)
+{
+	RPRDepth	d = pattern->elements[idx].depth;
+	int			i;
+
+	for (i = idx + 1; i < pattern->numElements; i++)
+	{
+		if (pattern->elements[i].depth <= d)
+			return i;
+	}
+	return pattern->numElements;
+}
+
+/*
+ * Boundary of the alternation branch starting at bno (i.e. the start of the
+ * next branch, or altEnd if bno is the last branch).
+ *
+ * The branch-start element's jump points at the next branch when this is not
+ * the last branch.  jump is overloaded (a group BEGIN also uses it for its
+ * skip path), so confirm a real branch boundary with the relative test
+ * elem[j-1].next != j: at a true boundary the preceding branch's tail has its
+ * next redirected past the alternation, so it does not point at j.
+ */
+static int
+rpr_next_branch(RPRPattern *pattern, int bno, int altEnd)
+{
+	int			j = pattern->elements[bno].jump;
+
+	if (j != RPR_ELEMIDX_INVALID && j < altEnd &&
+		pattern->elements[j - 1].next != j)
+		return j;
+	return altEnd;
+}
+
+/*
  * Show the window definition for a WindowAgg node.
  */
 static void
@@ -2956,6 +3208,76 @@ show_window_def(WindowAggState *planstate, List *ancestors, ExplainState *es)
 	appendStringInfoChar(&wbuf, ')');
 	ExplainPropertyText("Window", wbuf.data, es);
 	pfree(wbuf.data);
+
+	/* Show Row Pattern Recognition pattern if present */
+	if (wagg->rpPattern != NULL)
+	{
+		RPRNavOffsetKind maxKind = wagg->navMaxOffsetKind;
+		int64		maxOffset = wagg->navMaxOffset;
+		RPRNavOffsetKind firstKind = wagg->navFirstOffsetKind;
+		int64		firstOffset = wagg->navFirstOffset;
+
+		char	   *patternStr = deparse_rpr_pattern(wagg->rpPattern);
+
+		ExplainPropertyText("Pattern", patternStr, es);
+
+		pfree(patternStr);
+
+		/*
+		 * Show navigation offsets for tuplestore trim.  For EXPLAIN ANALYZE,
+		 * use the executor-resolved values (which may differ from the plan
+		 * when NEEDS_EVAL was resolved to FIXED or RETAIN_ALL at init).
+		 */
+		if (es->analyze)
+		{
+			maxKind = planstate->navMaxOffsetKind;
+			maxOffset = planstate->navMaxOffset;
+			firstKind = planstate->navFirstOffsetKind;
+			firstOffset = planstate->navFirstOffset;
+		}
+
+		switch (maxKind)
+		{
+			case RPR_NAV_OFFSET_NEEDS_EVAL:
+				ExplainPropertyText("Nav Mark Lookback", "runtime", es);
+				break;
+			case RPR_NAV_OFFSET_RETAIN_ALL:
+				ExplainPropertyText("Nav Mark Lookback", "retain all", es);
+				break;
+			case RPR_NAV_OFFSET_FIXED:
+				ExplainPropertyInteger("Nav Mark Lookback", NULL,
+									   maxOffset, es);
+				break;
+			default:
+				elog(ERROR, "unrecognized RPR nav offset kind: %d",
+					 maxKind);
+				break;
+		}
+
+		if (wagg->hasFirstNav)
+		{
+			switch (firstKind)
+			{
+				case RPR_NAV_OFFSET_NEEDS_EVAL:
+					ExplainPropertyText("Nav Mark Lookahead", "runtime",
+										es);
+					break;
+				case RPR_NAV_OFFSET_FIXED:
+					if (firstOffset == PG_INT64_MAX)
+						ExplainPropertyText("Nav Mark Lookahead", "infinite",
+											es);
+					else
+						ExplainPropertyInteger("Nav Mark Lookahead", NULL,
+											   firstOffset, es);
+					break;
+				default:
+					/* RPR_NAV_OFFSET_RETAIN_ALL is lookback-only, never here */
+					elog(ERROR, "unrecognized RPR nav offset kind: %d",
+						 firstKind);
+					break;
+			}
+		}
+	}
 }
 
 /*
@@ -3513,6 +3835,7 @@ show_windowagg_info(WindowAggState *winstate, ExplainState *es)
 {
 	char	   *maxStorageType;
 	int64		maxSpaceUsed;
+	WindowAgg  *wagg = (WindowAgg *) winstate->ss.ps.plan;
 
 	Tuplestorestate *tupstore = winstate->buffer;
 
@@ -3525,6 +3848,160 @@ show_windowagg_info(WindowAggState *winstate, ExplainState *es)
 
 	tuplestore_get_stats(tupstore, &maxStorageType, &maxSpaceUsed);
 	show_storage_info(maxStorageType, maxSpaceUsed, es);
+
+	/* Show NFA statistics for Row Pattern Recognition */
+	if (wagg->rpPattern != NULL)
+		show_rpr_nfa_stats(winstate, es);
+}
+
+/*
+ * Show NFA statistics for Row Pattern Recognition on WindowAgg node.
+ */
+static void
+show_rpr_nfa_stats(WindowAggState *winstate, ExplainState *es)
+{
+	if (es->format != EXPLAIN_FORMAT_TEXT)
+	{
+		/* State and context counters */
+		ExplainPropertyInteger("NFA States Peak", NULL, winstate->nfaStatesMax, es);
+		ExplainPropertyInteger("NFA States Total", NULL, winstate->nfaStatesTotalCreated, es);
+		ExplainPropertyInteger("NFA States Merged", NULL, winstate->nfaStatesMerged, es);
+		ExplainPropertyInteger("NFA Contexts Peak", NULL, winstate->nfaContextsMax, es);
+		ExplainPropertyInteger("NFA Contexts Total", NULL, winstate->nfaContextsTotalCreated, es);
+		ExplainPropertyInteger("NFA Contexts Absorbed", NULL, winstate->nfaContextsAbsorbed, es);
+		ExplainPropertyInteger("NFA Contexts Skipped", NULL, winstate->nfaContextsSkipped, es);
+		ExplainPropertyInteger("NFA Contexts Pruned", NULL, winstate->nfaContextsPruned, es);
+
+		/* Match/mismatch counts and length statistics */
+		ExplainPropertyInteger("NFA Matched", NULL, winstate->nfaMatchesSucceeded, es);
+		ExplainPropertyInteger("NFA Mismatched", NULL, winstate->nfaMatchesFailed, es);
+		if (winstate->nfaMatchesSucceeded > 0)
+		{
+			ExplainPropertyInteger("NFA Match Length Min", NULL, winstate->nfaMatchLen.min, es);
+			ExplainPropertyInteger("NFA Match Length Max", NULL, winstate->nfaMatchLen.max, es);
+			ExplainPropertyFloat("NFA Match Length Avg", NULL,
+								 (double) winstate->nfaMatchLen.total / winstate->nfaMatchesSucceeded, 1,
+								 es);
+		}
+		if (winstate->nfaMatchesFailed > 0)
+		{
+			ExplainPropertyInteger("NFA Mismatch Length Min", NULL, winstate->nfaFailLen.min, es);
+			ExplainPropertyInteger("NFA Mismatch Length Max", NULL, winstate->nfaFailLen.max, es);
+			ExplainPropertyFloat("NFA Mismatch Length Avg", NULL,
+								 (double) winstate->nfaFailLen.total / winstate->nfaMatchesFailed, 1,
+								 es);
+		}
+
+		/* Absorbed/skipped context length statistics */
+		if (winstate->nfaContextsAbsorbed > 0)
+		{
+			ExplainPropertyInteger("NFA Absorbed Length Min", NULL, winstate->nfaAbsorbedLen.min, es);
+			ExplainPropertyInteger("NFA Absorbed Length Max", NULL, winstate->nfaAbsorbedLen.max, es);
+			ExplainPropertyFloat("NFA Absorbed Length Avg", NULL,
+								 (double) winstate->nfaAbsorbedLen.total / winstate->nfaContextsAbsorbed, 1,
+								 es);
+		}
+		if (winstate->nfaContextsSkipped > 0)
+		{
+			ExplainPropertyInteger("NFA Skipped Length Min", NULL, winstate->nfaSkippedLen.min, es);
+			ExplainPropertyInteger("NFA Skipped Length Max", NULL, winstate->nfaSkippedLen.max, es);
+			ExplainPropertyFloat("NFA Skipped Length Avg", NULL,
+								 (double) winstate->nfaSkippedLen.total / winstate->nfaContextsSkipped, 1,
+								 es);
+		}
+	}
+	else
+	{
+		/* State and context counters */
+		ExplainIndentText(es);
+		appendStringInfo(es->str,
+						 "NFA States: " INT64_FORMAT " peak, " INT64_FORMAT " total, " INT64_FORMAT " merged\n",
+						 winstate->nfaStatesMax,
+						 winstate->nfaStatesTotalCreated,
+						 winstate->nfaStatesMerged);
+		ExplainIndentText(es);
+		appendStringInfo(es->str,
+						 "NFA Contexts: " INT64_FORMAT " peak, " INT64_FORMAT " total, " INT64_FORMAT " pruned\n",
+						 winstate->nfaContextsMax,
+						 winstate->nfaContextsTotalCreated,
+						 winstate->nfaContextsPruned);
+
+		/* Match/mismatch counts with length min/max/avg */
+		ExplainIndentText(es);
+		appendStringInfoString(es->str, "NFA: ");
+		if (winstate->nfaMatchesSucceeded > 0)
+		{
+			double		avgLen = (double) winstate->nfaMatchLen.total / winstate->nfaMatchesSucceeded;
+
+			appendStringInfo(es->str,
+							 INT64_FORMAT " matched (len " INT64_FORMAT "/" INT64_FORMAT "/%.1f)",
+							 winstate->nfaMatchesSucceeded,
+							 winstate->nfaMatchLen.min,
+							 winstate->nfaMatchLen.max,
+							 avgLen);
+		}
+		else
+		{
+			appendStringInfoString(es->str, "0 matched");
+		}
+		if (winstate->nfaMatchesFailed > 0)
+		{
+			double		avgFail = (double) winstate->nfaFailLen.total / winstate->nfaMatchesFailed;
+
+			appendStringInfo(es->str,
+							 ", " INT64_FORMAT " mismatched (len " INT64_FORMAT "/" INT64_FORMAT "/%.1f)",
+							 winstate->nfaMatchesFailed,
+							 winstate->nfaFailLen.min,
+							 winstate->nfaFailLen.max,
+							 avgFail);
+		}
+		else
+		{
+			appendStringInfoString(es->str, ", 0 mismatched");
+		}
+		appendStringInfoChar(es->str, '\n');
+
+		/* Absorbed/skipped context length statistics */
+		if (winstate->nfaContextsAbsorbed > 0 || winstate->nfaContextsSkipped > 0)
+		{
+			ExplainIndentText(es);
+			appendStringInfoString(es->str, "NFA: ");
+
+			if (winstate->nfaContextsAbsorbed > 0)
+			{
+				double		avgAbsorbed = (double) winstate->nfaAbsorbedLen.total / winstate->nfaContextsAbsorbed;
+
+				appendStringInfo(es->str,
+								 INT64_FORMAT " absorbed (len " INT64_FORMAT "/" INT64_FORMAT "/%.1f)",
+								 winstate->nfaContextsAbsorbed,
+								 winstate->nfaAbsorbedLen.min,
+								 winstate->nfaAbsorbedLen.max,
+								 avgAbsorbed);
+			}
+			else
+			{
+				appendStringInfoString(es->str, "0 absorbed");
+			}
+
+			if (winstate->nfaContextsSkipped > 0)
+			{
+				double		avgSkipped = (double) winstate->nfaSkippedLen.total / winstate->nfaContextsSkipped;
+
+				appendStringInfo(es->str,
+								 ", " INT64_FORMAT " skipped (len " INT64_FORMAT "/" INT64_FORMAT "/%.1f)",
+								 winstate->nfaContextsSkipped,
+								 winstate->nfaSkippedLen.min,
+								 winstate->nfaSkippedLen.max,
+								 avgSkipped);
+			}
+			else
+			{
+				appendStringInfoString(es->str, ", 0 skipped");
+			}
+
+			appendStringInfoChar(es->str, '\n');
+		}
+	}
 }
 
 /*

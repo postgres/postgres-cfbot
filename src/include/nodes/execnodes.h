@@ -2526,6 +2526,71 @@ typedef enum WindowAggStatus
 									 * tuples during spool */
 } WindowAggStatus;
 
+/* RPR reduced frame states returned by get_reduced_frame_status() */
+#define RF_NOT_DETERMINED	0	/* not yet processed */
+#define RF_FRAME_HEAD		1	/* start row of a match */
+#define RF_SKIPPED			2	/* interior row of a match */
+#define RF_UNMATCHED		3	/* no match at this row */
+#define RF_EMPTY_MATCH		4	/* empty match (0 rows); treated as unmatched */
+
+/*
+ * RPRNFAState - single NFA state for pattern matching
+ *
+ * counts[] tracks repetition counts at each nesting depth.
+ *
+ * isAbsorbable tracks if state is in absorbable region (ABSORBABLE_BRANCH).
+ * Monotonic property: once false, stays false (can't re-enter region).
+ */
+typedef struct RPRNFAState
+{
+	struct RPRNFAState *next;	/* next state in linked list */
+	int16		elemIdx;		/* current pattern element index */
+	bool		isAbsorbable;	/* true if state is in absorbable region */
+	int32		counts[FLEXIBLE_ARRAY_MEMBER];	/* repetition counts by depth */
+} RPRNFAState;
+
+/*
+ * RPRNFAContext - context for NFA pattern matching execution
+ *
+ * Two-flag absorption design:
+ *   hasAbsorbableState: can this context absorb others? (>=1 absorbable state)
+ *     - Monotonic: true->false only, cannot recover once false
+ *     - Used to skip absorption attempts once all absorbable states are gone
+ *   allStatesAbsorbable: can this context be absorbed? (ALL states absorbable)
+ *     - Dynamic: can change false->true (when non-absorbable states die)
+ *     - Used to determine if this context is eligible for absorption
+ */
+typedef struct RPRNFAContext
+{
+	struct RPRNFAContext *next; /* next context in linked list */
+	struct RPRNFAContext *prev; /* previous context (for reverse traversal) */
+	RPRNFAState *states;		/* active states (linked list) */
+
+	int64		matchStartRow;	/* row where match started */
+	int64		matchEndRow;	/* row where match ended (-1 = no match) */
+	int64		lastProcessedRow;	/* last row processed (for fail depth) */
+	RPRNFAState *matchedState;	/* FIN state for greedy fallback (cloned) */
+
+	/* Two-flag absorption optimization */
+	bool		hasAbsorbableState; /* can absorb others (>=1 absorbable
+									 * state) */
+	bool		allStatesAbsorbable;	/* can be absorbed (ALL states
+										 * absorbable) */
+} RPRNFAContext;
+
+/*
+ * NFALengthStats
+ *
+ * Statistics for length measurements (min/max/total) used for computing
+ * average lengths in EXPLAIN ANALYZE output.
+ */
+typedef struct NFALengthStats
+{
+	int64		min;			/* minimum length */
+	int64		max;			/* maximum length */
+	int64		total;			/* total length (for computing average) */
+} NFALengthStats;
+
 typedef struct WindowAggState
 {
 	ScanState	ss;				/* its first field is NodeTag */
@@ -2585,10 +2650,56 @@ typedef struct WindowAggState
 	int64		groupheadpos;	/* current row's peer group head position */
 	int64		grouptailpos;	/* " " " " tail position (group end+1) */
 
+	/* these fields are used in Row pattern recognition: */
+	RPSkipTo	rpSkipTo;		/* Row Pattern Skip To type */
+	struct RPRPattern *rpPattern;	/* compiled pattern for NFA execution */
+	List	   *defineVariableList; /* list of row pattern definition
+									 * variables (list of String) */
+	List	   *defineClauseExprs;	/* expression for row pattern definition
+									 * search conditions ExprState list */
+	RPRNFAContext *nfaContext;	/* active matching contexts (head) */
+	RPRNFAContext *nfaContextTail;	/* tail of active contexts (for reverse
+									 * traversal) */
+	RPRNFAContext *nfaContextFree;	/* recycled NFA context nodes */
+	RPRNFAState *nfaStateFree;	/* recycled NFA state nodes */
+	Size		nfaStateSize;	/* pre-calculated RPRNFAState size */
+	bool	   *nfaVarMatched;	/* per-row cache: varMatched[varId] for varId
+								 * < numDefines */
+	Bitmapset  *defineMatchStartDependent;	/* DEFINE vars needing per-context
+											 * evaluation
+											 * (match_start-dependent) */
+	bitmapword *nfaVisitedElems;	/* elemIdx visited bitmap for cycle
+									 * detection */
+	int16		nfaVisitedMinWord;	/* lowest bitmapword index touched since
+									 * last reset (PG_INT16_MAX = none) */
+	int16		nfaVisitedMaxWord;	/* highest bitmapword index touched since
+									 * last reset (-1 = none) */
+	int64		nfaLastProcessedRow;	/* last row processed by NFA (-1 =
+										 * none) */
+
+	/* NFA statistics for EXPLAIN ANALYZE */
+	int64		nfaStatesActive;	/* current active states (internal) */
+	int64		nfaStatesMax;	/* peak active states */
+	int64		nfaStatesTotalCreated;	/* total states allocated */
+	int64		nfaStatesMerged;	/* states merged (deduplicated) */
+	int64		nfaContextsActive;	/* current active contexts (internal) */
+	int64		nfaContextsMax; /* peak active contexts */
+	int64		nfaContextsTotalCreated;	/* total contexts allocated */
+	int64		nfaContextsAbsorbed;	/* contexts absorbed (optimization) */
+	int64		nfaContextsSkipped; /* contexts skipped (SKIP PAST LAST ROW) */
+	int64		nfaContextsPruned;	/* contexts pruned on first row */
+	int64		nfaMatchesSucceeded;	/* successful pattern matches */
+	int64		nfaMatchesFailed;	/* failed pattern matches */
+	NFALengthStats nfaMatchLen; /* successful match length stats */
+	NFALengthStats nfaFailLen;	/* mismatch length stats */
+	NFALengthStats nfaAbsorbedLen;	/* absorbed context length stats */
+	NFALengthStats nfaSkippedLen;	/* skipped context length stats */
+
 	MemoryContext partcontext;	/* context for partition-lifespan data */
 	MemoryContext aggcontext;	/* shared context for aggregate working data */
 	MemoryContext curaggcontext;	/* current aggregate's working data */
 	ExprContext *tmpcontext;	/* short-term evaluation context */
+	ExprContext *rprContext;	/* DEFINE clause evaluation context */
 
 	bool		all_first;		/* true if the scan is starting */
 	bool		partition_spooled;	/* true if all tuples in current partition
@@ -2612,6 +2723,25 @@ typedef struct WindowAggState
 	TupleTableSlot *agg_row_slot;
 	TupleTableSlot *temp_slot_1;
 	TupleTableSlot *temp_slot_2;
+
+	/* RPR navigation */
+	RPRNavOffsetKind navMaxOffsetKind;	/* status of navMaxOffset */
+	int64		navMaxOffset;	/* max backward nav offset (when FIXED) */
+	bool		hasFirstNav;	/* FIRST() present in DEFINE */
+	RPRNavOffsetKind navFirstOffsetKind;	/* status of navFirstOffset */
+	int64		navFirstOffset; /* min FIRST() offset (when FIXED) */
+	struct WindowObjectData *nav_winobj;	/* winobj for RPR nav fetch */
+	int64		nav_slot_pos;	/* position cached in nav_slot, or -1 */
+	TupleTableSlot *nav_slot;	/* slot for PREV/NEXT/FIRST/LAST target row */
+	TupleTableSlot *nav_saved_outertuple;	/* saved slot during nav swap */
+	TupleTableSlot *nav_null_slot;	/* all NULL slot */
+	int64		nav_match_start;	/* match_start for FIRST/LAST nav */
+
+	/* RPR current match result */
+	bool		rpr_match_valid;	/* true if a match result is set */
+	bool		rpr_match_matched;	/* true if the result was a match */
+	int64		rpr_match_start;	/* start position of the match result */
+	int64		rpr_match_length;	/* number of rows matched (0 = empty) */
 } WindowAggState;
 
 /* ----------------

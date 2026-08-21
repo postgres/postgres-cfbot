@@ -702,6 +702,50 @@ FROM tenk1 t1 WHERE t1.ten = (SELECT (random() * 10)::integer);
     happen without the sub-<literal>SELECT</literal> construct.
    </para>
 
+   <para>
+    When examining query plans for Row Pattern Recognition with
+    <command>EXPLAIN</command>, the pattern output may include special
+    markers that indicate optimization opportunities. A double quote
+    <literal>"</literal> marks where pattern absorption can occur,
+    and a single quote <literal>'</literal> marks absorbable elements
+    within a branch. For example, using the <structname>stock</structname>
+    table from <xref linkend="tutorial-window"/>, a query that looks for
+    repeated up-then-down movements reports its pattern as
+    <literal>(up' down')+"</literal>:
+
+<screen>
+EXPLAIN (COSTS OFF)
+SELECT company, tdate, price, count(price) OVER w
+FROM stock
+WINDOW w AS (
+    PARTITION BY company
+    ORDER BY tdate
+    ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING
+    AFTER MATCH SKIP PAST LAST ROW
+    INITIAL
+    PATTERN ((UP DOWN)+)
+    DEFINE UP AS price &gt; PREV(price),
+           DOWN AS price &lt; PREV(price)
+);
+
+                                              QUERY PLAN
+-------------------------------------------------------------------&zwsp;------------------------------------
+ WindowAgg
+   Window: w AS (PARTITION BY company ORDER BY tdate ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+   Pattern: (up' down')+"
+   Nav Mark Lookback: 1
+   -&gt;  Sort
+         Sort Key: company, tdate
+         -&gt;  Seq Scan on stock
+</screen>
+
+    Here the single quotes mark <literal>up</literal> and
+    <literal>down</literal> as absorbable within the group, while the
+    trailing double quote marks the repeated group itself as absorbable.
+    These markers are primarily useful for understanding internal
+    optimization behavior.
+   </para>
+
   </sect2>
 
   <sect2 id="using-explain-analyze">

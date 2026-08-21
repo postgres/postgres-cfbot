@@ -274,6 +274,10 @@ typedef enum ExprEvalOp
 	EEOP_MERGE_SUPPORT_FUNC,
 	EEOP_SUBPLAN,
 
+	/* row pattern navigation (RPR PREV/NEXT) */
+	EEOP_RPR_NAV_SET,
+	EEOP_RPR_NAV_RESTORE,
+
 	/* aggregation related nodes */
 	EEOP_AGG_STRICT_DESERIALIZE,
 	EEOP_AGG_DESERIALIZE,
@@ -695,6 +699,18 @@ typedef struct ExprEvalStep
 			SubPlanState *sstate;
 		}			subplan;
 
+		/* for EEOP_RPR_NAV_SET / EEOP_RPR_NAV_RESTORE */
+		struct
+		{
+			WindowAggState *winstate;
+			RPRNavKind	kind;	/* navigation kind (simple or compound) */
+			Datum	   *offset_value;	/* offset value(s), or NULL */
+			bool	   *offset_isnull;	/* offset null flag(s) */
+			/* For compound nav: offset_value[0] = inner, [1] = outer */
+			int16		resulttyplen;	/* RESTORE: result type length */
+			bool		resulttypbyval; /* RESTORE: result pass-by-value? */
+		}			rpr_nav;
+
 		/* for EEOP_AGG_*DESERIALIZE */
 		struct
 		{
@@ -902,6 +918,10 @@ extern void ExecEvalMergeSupportFunc(ExprState *state, ExprEvalStep *op,
 									 ExprContext *econtext);
 extern void ExecEvalSubPlan(ExprState *state, ExprEvalStep *op,
 							ExprContext *econtext);
+extern void ExecEvalRPRNavSet(ExprState *state, ExprEvalStep *op,
+							  ExprContext *econtext);
+extern void ExecEvalRPRNavRestore(ExprState *state, ExprEvalStep *op,
+								  ExprContext *econtext);
 extern void ExecEvalWholeRowVar(ExprState *state, ExprEvalStep *op,
 								ExprContext *econtext);
 extern void ExecEvalSysVar(ExprState *state, ExprEvalStep *op,

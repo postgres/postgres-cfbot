@@ -28,6 +28,7 @@
 
 #include "miscadmin.h"
 #include "nodes/bitmapset.h"
+#include "nodes/plannodes.h"
 #include "nodes/readfuncs.h"
 
 
@@ -563,6 +564,85 @@ _readExtensibleNode(void)
 
 	/* deserialize the private fields */
 	methods->nodeRead(local_node);
+
+	READ_DONE();
+}
+
+static RPRPattern *
+_readRPRPattern(void)
+{
+	READ_LOCALS(RPRPattern);
+
+	READ_INT_FIELD(numVars);
+	READ_INT_FIELD(maxDepth);
+	READ_INT_FIELD(numElements);
+
+	/* Read varNames array */
+	token = pg_strtok(&length); /* skip :varNames */
+	token = pg_strtok(&length); /* get '(' or '<>' */
+	if (local_node->numVars > 0 && token[0] == '(')
+	{
+		local_node->varNames = palloc_array(char *, local_node->numVars);
+		for (int i = 0; i < local_node->numVars; i++)
+		{
+			token = pg_strtok(&length);
+			local_node->varNames[i] = debackslash(token, length);
+		}
+		token = pg_strtok(&length); /* skip ')' */
+	}
+	else
+	{
+		local_node->varNames = NULL;
+	}
+
+	/* Read elements array */
+	token = pg_strtok(&length); /* skip :elements */
+	token = pg_strtok(&length); /* get '(' */
+	/* out always emits the array (makeRPRPattern guarantees numElements >= 2) */
+	Assert(local_node->numElements > 0 && token[0] == '(');
+	local_node->elements = palloc0_array(RPRPatternElement, local_node->numElements);
+	for (int i = 0; i < local_node->numElements; i++)
+	{
+		RPRPatternElement *elem = &local_node->elements[i];
+		int			varId,
+					flags,
+					depth,
+					min,
+					max,
+					next,
+					jump;
+
+		/* Parse "(varId depth flags min max next jump)" */
+		token = pg_strtok(&length);
+		varId = atoi(token);
+		token = pg_strtok(&length);
+		depth = atoi(token);
+		token = pg_strtok(&length);
+		flags = atoi(token);
+		token = pg_strtok(&length);
+		min = atoi(token);
+		token = pg_strtok(&length);
+		max = atoi(token);
+		token = pg_strtok(&length);
+		next = atoi(token);
+		token = pg_strtok(&length);
+		jump = atoi(token);
+		token = pg_strtok(&length); /* skip ')' */
+
+		elem->varId = (RPRVarId) varId;
+		elem->flags = (RPRElemFlags) flags;
+		elem->depth = (RPRDepth) depth;
+		elem->min = (RPRQuantity) min;
+		elem->max = (RPRQuantity) max;
+		elem->next = (RPRElemIdx) next;
+		elem->jump = (RPRElemIdx) jump;
+
+		/* Read next element's '(' or end */
+		if (i < local_node->numElements - 1)
+			token = pg_strtok(&length); /* get '(' */
+	}
+
+	READ_BOOL_FIELD(isAbsorbable);
 
 	READ_DONE();
 }

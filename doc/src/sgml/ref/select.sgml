@@ -1014,8 +1014,8 @@ WINDOW <replaceable class="parameter">window_name</replaceable> AS ( <replaceabl
     The <replaceable class="parameter">frame_clause</replaceable> can be one of
 
 <synopsis>
-{ RANGE | ROWS | GROUPS } <replaceable>frame_start</replaceable> [ <replaceable>frame_exclusion</replaceable> ]
-{ RANGE | ROWS | GROUPS } BETWEEN <replaceable>frame_start</replaceable> AND <replaceable>frame_end</replaceable> [ <replaceable>frame_exclusion</replaceable> ]
+{ RANGE | ROWS | GROUPS } <replaceable>frame_start</replaceable> [ <replaceable>frame_exclusion</replaceable> ] [ <replaceable>row_pattern_common_syntax</replaceable> ]
+{ RANGE | ROWS | GROUPS } BETWEEN <replaceable>frame_start</replaceable> AND <replaceable>frame_end</replaceable> [ <replaceable>frame_exclusion</replaceable> ] [ <replaceable>row_pattern_common_syntax</replaceable> ]
 </synopsis>
 
     where <replaceable>frame_start</replaceable>
@@ -1120,6 +1120,83 @@ EXCLUDE NO OTHERS
     modes are designed to ensure that rows that are peers in
     the <literal>ORDER BY</literal> ordering are treated alike: all rows of
     a given peer group will be in the frame or excluded from it.
+   </para>
+
+   <para>
+    The
+    optional <replaceable class="parameter">row_pattern_common_syntax</replaceable>
+    defines the <firstterm>Row Pattern Recognition condition</firstterm> for
+    this
+    window. <replaceable class="parameter">row_pattern_common_syntax</replaceable>
+    includes the following subclauses.
+
+<synopsis>
+[ { AFTER MATCH SKIP PAST LAST ROW | AFTER MATCH SKIP TO NEXT ROW } ]
+[ INITIAL | SEEK ]
+PATTERN ( <replaceable class="parameter">pattern_variable_name</replaceable> [ <replaceable>quantifier</replaceable> ] [ ... ] )
+DEFINE <replaceable class="parameter">definition_variable_name</replaceable> AS <replaceable class="parameter">expression</replaceable> [, ...]
+</synopsis>
+    <literal>AFTER MATCH SKIP PAST LAST ROW</literal> or <literal>AFTER MATCH
+    SKIP TO NEXT ROW</literal> controls how to proceed to the next row position
+    after a match is found. With <literal>AFTER MATCH SKIP PAST LAST
+    ROW</literal> (the default) the next row position is next to the last row of
+    the previous match. On the other hand, with <literal>AFTER MATCH SKIP TO NEXT
+    ROW</literal> the next row position is next to the first row of the previous
+    match. <literal>INITIAL</literal> or <literal>SEEK</literal> specifies from
+    which row in the frame pattern matching begins.
+    If <literal>INITIAL</literal> is specified, the match must start
+    from the first row in the frame. If <literal>SEEK</literal> is specified,
+    the set of matching rows does not necessarily start from the first row. The
+    default is <literal>INITIAL</literal>. Currently
+    only <literal>INITIAL</literal> is supported. <literal>DEFINE</literal>
+    defines definition variables along with a boolean
+    expression. <literal>PATTERN</literal> defines a sequence of rows that
+    satisfies certain conditions using variables defined
+    in the <literal>DEFINE</literal> clause (an empty <literal>PATTERN()</literal>
+    is not supported). Each pattern variable can be followed by a quantifier
+    to specify how many times it should match:
+    <literal>*</literal> (zero or more),
+    <literal>+</literal> (one or more),
+    <literal>?</literal> (zero or one),
+    <literal>{</literal><replaceable>n</replaceable><literal>}</literal> (exactly <replaceable>n</replaceable> times, n &gt; 0),
+    <literal>{</literal><replaceable>n</replaceable><literal>,}</literal> (at least <replaceable>n</replaceable> times, n &gt;= 0),
+    <literal>{,</literal><replaceable>m</replaceable><literal>}</literal> (at most <replaceable>m</replaceable> times, m &gt; 0), or
+    <literal>{</literal><replaceable>n</replaceable><literal>,</literal><replaceable>m</replaceable><literal>}</literal>
+    (between <replaceable>n</replaceable> and <replaceable>m</replaceable> times, 0 &lt;= n &lt;= m, 0 &lt; m).
+    Reluctant quantifiers (e.g., <literal>*?</literal>, <literal>+?</literal>,
+    <literal>??</literal>, <literal>{</literal><replaceable>n</replaceable><literal>,</literal><replaceable>m</replaceable><literal>}?</literal>)
+    are supported.
+    The exclusion (<literal>{-</literal> and <literal>-}</literal>)
+    is not supported.
+    Patterns can be grouped using parentheses, and alternation (OR) can be
+    expressed using the vertical bar <literal>|</literal>.
+    For example, <literal>(A B)+</literal> matches one or more repetitions
+    of the sequence A followed by B, and <literal>A | B</literal> matches
+    either A or B.
+    If a pattern variable is not defined in
+    the <literal>DEFINE</literal> clause, it is not automatically added
+    to the <literal>DEFINE</literal> clause. Instead, the executor evaluates
+    the variable as <literal>TRUE</literal> at execution time, behaving as if
+    the following definition existed.
+
+<synopsis>
+<literal>variable_name</literal> AS TRUE
+</synopsis>
+
+    Conversely, variables defined in the <literal>DEFINE</literal> clause
+    but not used in the <literal>PATTERN</literal> clause are rejected
+    with an error.
+   </para>
+
+   <para>
+    Note that the maximum number of unique pattern variables
+    used in the <literal>PATTERN</literal> clause is 240.
+    If this limit is exceeded, an error will be raised.
+    Additionally, the maximum nesting depth of pattern groups
+    (parentheses) is 253 levels.
+    However, pattern optimizations such as flattening nested sequences
+    and simplifying nested quantifiers may reduce the effective depth,
+    so this limit is rarely reached in practice.
    </para>
 
    <para>
@@ -2232,6 +2309,19 @@ SELECT 2+2;
     <command>UPDATE</command>, <command>DELETE</command>, and
     <command>MERGE</command> to be used as <literal>WITH</literal>
     queries.  This is not found in the SQL standard.
+   </para>
+  </refsect2>
+
+  <refsect2>
+   <title>Row Pattern Recognition</title>
+
+   <para>
+    <productname>PostgreSQL</productname> supports row pattern recognition
+    within the <literal>WINDOW</literal> clause.  The SQL standard defines
+    more subclauses: <literal>MEASURES</literal> and
+    <literal>SUBSET</literal>.  They are not currently supported
+    in <productname>PostgreSQL</productname>.  Also in the standard there are
+    more variations in the <literal>AFTER MATCH</literal> clause.
    </para>
   </refsect2>
 

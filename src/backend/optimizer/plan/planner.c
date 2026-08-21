@@ -49,6 +49,7 @@
 #include "optimizer/planmain.h"
 #include "optimizer/planner.h"
 #include "optimizer/prep.h"
+#include "optimizer/rpr.h"
 #include "optimizer/subselect.h"
 #include "optimizer/tlist.h"
 #include "parser/analyze.h"
@@ -1071,11 +1072,26 @@ subquery_planner(PlannerGlobal *glob, Query *parse, char *plan_name,
 	{
 		WindowClause *wc = lfirst_node(WindowClause, l);
 
+		/*
+		 * Reject volatile functions (and sequence operations) in an RPR
+		 * DEFINE clause.  This is done here, not during parse analysis, to
+		 * follow the convention of not checking expression volatility while
+		 * parsing; debug_query_string still lets us report the offending
+		 * location.  Every window clause is visited, including ones not used
+		 * by any OVER, so the check does not depend on the window surviving
+		 * select_active_windows().
+		 */
+		if (wc->rpPattern && wc->defineClause)
+			validate_rpr_define_volatility(wc->defineClause);
+
 		/* partitionClause/orderClause are sort/group expressions */
 		wc->startOffset = preprocess_expression(root, wc->startOffset,
 												EXPRKIND_LIMIT);
 		wc->endOffset = preprocess_expression(root, wc->endOffset,
 											  EXPRKIND_LIMIT);
+		wc->defineClause = (List *) preprocess_expression(root,
+														  (Node *) wc->defineClause,
+														  EXPRKIND_TARGET);
 	}
 
 	parse->limitOffset = preprocess_expression(root, parse->limitOffset,
@@ -6097,6 +6113,14 @@ optimize_window_clauses(PlannerInfo *root, WindowFuncLists *wflists)
 		if (wflists->windowFuncs[wc->winref] == NIL)
 			continue;
 
+		/*
+		 * If a DEFINE clause exists, do not let support functions replace the
+		 * frame with a non-RPR-compatible one.  RPR windows require ROWS
+		 * BETWEEN CURRENT ROW AND ...
+		 */
+		if (wc->defineClause != NIL)
+			continue;
+
 		foreach(lc2, wflists->windowFuncs[wc->winref])
 		{
 			SupportRequestOptimizeWindowClause req;
@@ -6174,13 +6198,20 @@ optimize_window_clauses(PlannerInfo *root, WindowFuncLists *wflists)
 
 				/*
 				 * Perform the same duplicate check that is done in
-				 * transformWindowFuncCall.
+				 * transformWindowFuncCall. wc is never an RPR clause here
+				 * (those are skipped above), and an RPR existing_wc differs
+				 * in its frame options anyway, so the RPR-related comparisons
+				 * are a defensive backstop for parity.
 				 */
 				if (equal(wc->partitionClause, existing_wc->partitionClause) &&
 					equal(wc->orderClause, existing_wc->orderClause) &&
 					wc->frameOptions == existing_wc->frameOptions &&
 					equal(wc->startOffset, existing_wc->startOffset) &&
-					equal(wc->endOffset, existing_wc->endOffset))
+					equal(wc->endOffset, existing_wc->endOffset) &&
+					wc->rpSkipTo == existing_wc->rpSkipTo &&
+					wc->initial == existing_wc->initial &&
+					equal(wc->defineClause, existing_wc->defineClause) &&
+					equal(wc->rpPattern, existing_wc->rpPattern))
 				{
 					ListCell   *lc4;
 
