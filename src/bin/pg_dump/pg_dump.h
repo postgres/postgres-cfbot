@@ -727,7 +727,6 @@ typedef struct _SubscriptionInfo
 	char	   *subwalrcvtimeout;
 	char	   *subpublications;
 	char	   *suborigin;
-	char	   *suboriginremotelsn;
 } SubscriptionInfo;
 
 /*
