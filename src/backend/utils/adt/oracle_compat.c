@@ -1165,7 +1165,6 @@ repeat(PG_FUNCTION_ARGS)
 	text	   *result;
 	int			slen,
 				tlen;
-	int			i;
 	char	   *cp,
 			   *sp;
 
@@ -1186,11 +1185,36 @@ repeat(PG_FUNCTION_ARGS)
 	SET_VARSIZE(result, tlen);
 	cp = VARDATA(result);
 	sp = VARDATA_ANY(string);
-	for (i = 0; i < count; i++)
+
+	if (count == 0 || slen == 0)
+		PG_RETURN_TEXT_P(result);
+
+	if (count < 8)
 	{
+		int			i;
+		for (i = 0; i < count; i++)
+		{
+			memcpy(cp, sp, slen);
+			cp += slen;
+			CHECK_FOR_INTERRUPTS();
+		}
+	}
+	else
+	{
+		int			curcount = 1;
 		memcpy(cp, sp, slen);
 		cp += slen;
 		CHECK_FOR_INTERRUPTS();
+
+		while (curcount < count)
+		{
+			int			chunk = Min(curcount, count - curcount);
+
+			memcpy(cp, VARDATA(result), chunk * slen);
+			cp += chunk * slen;
+			curcount += chunk;
+			CHECK_FOR_INTERRUPTS();
+		}
 	}
 
 	PG_RETURN_TEXT_P(result);
