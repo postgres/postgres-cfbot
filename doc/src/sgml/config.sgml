@@ -12424,6 +12424,33 @@ dynamic_library_path = '/usr/local/lib/postgresql:$libdir'
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-disconnect-requested" xreflabel="disconnect_requested">
+      <term><varname>disconnect_requested</varname> (<type>boolean</type>)
+      <indexterm>
+       <primary><varname>disconnect_requested</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Reports whether the server has politely requested that the client close
+        this connection at a convenient moment.  It is turned on when the server
+        enters a smart shutdown (see <xref linkend="app-pg-ctl"/>), or when
+        <link linkend="functions-admin-signal-table"><function>pg_request_disconnect_backend</function></link>
+        is called for this backend.  The request is advisory: the connection
+        remains fully usable, and it is up to the client whether and when to act
+        on it.  This is primarily useful for connection poolers, which can close
+        and re-establish an idle connection to help a server drain its
+        connections quickly, for example during a switchover.
+       </para>
+       <para>
+        Because this parameter is flagged for reporting to the client, its value
+        is delivered with a <literal>ParameterStatus</literal> protocol message
+        whenever it changes (see <xref linkend="protocol-async"/>), so a client
+        can observe it without issuing a query specifically for that purpose.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-effective-wal-level" xreflabel="effective_wal_level">
       <term><varname>effective_wal_level</varname> (<type>enum</type>)
       <indexterm>
