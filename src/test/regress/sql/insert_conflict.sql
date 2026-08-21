@@ -434,11 +434,19 @@ DROP TABLE dropcol;
 
 -- check handling of regular btree constraint along with gist constraint
 
+create table unique_conflict(copy_tbl oid, filename text, lineno bigint, line text);
 create table twoconstraints (f1 int unique, f2 box,
                              exclude using gist(f2 with &&));
 insert into twoconstraints values(1, '((0,0),(1,1))');
 insert into twoconstraints values(1, '((2,2),(3,3))');  -- fail on f1
+copy twoconstraints from stdin (delimiter ';', on_conflict table, conflict_table unique_conflict);
+1;((2,2),(3,3))
+\.
 insert into twoconstraints values(2, '((0,0),(1,2))');  -- fail on f2
+insert into twoconstraints values(2, '((0,0),(1,2))') on conflict do nothing;  -- ok
+copy twoconstraints from stdin (delimiter ';', on_conflict table, conflict_table unique_conflict);
+2;((0,0),(1,2))
+\.
 insert into twoconstraints values(2, '((0,0),(1,2))')
   on conflict on constraint twoconstraints_f1_key do nothing;  -- fail on f2
 insert into twoconstraints values(2, '((0,0),(1,2))')
@@ -447,6 +455,29 @@ select * from twoconstraints;
 drop table twoconstraints;
 
 -- check handling of self-conflicts at various isolation levels
+create table selfconflict0 (f1 int primary key, f2 int);
+begin transaction isolation level read committed;
+copy selfconflict0 from stdin (delimiter ',', on_conflict table, conflict_table unique_conflict);
+4,1
+4,2
+\.
+commit;
+
+begin transaction isolation level repeatable read;
+copy selfconflict0 from stdin (delimiter ',', on_conflict table, conflict_table unique_conflict);
+5,1
+5,2
+\.
+commit;
+
+begin transaction isolation level serializable;
+copy selfconflict0 from stdin (delimiter ',', on_conflict table, conflict_table unique_conflict);
+6,1
+6,2
+\.
+commit;
+drop table selfconflict0;
+drop table unique_conflict;
 
 create table selfconflict (f1 int primary key, f2 int);
 

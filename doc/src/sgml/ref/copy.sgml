@@ -44,6 +44,8 @@ COPY { <replaceable class="parameter">table_name</replaceable> [ ( <replaceable 
     FORCE_QUOTE { ( <replaceable class="parameter">column_name</replaceable> [, ...] ) | * }
     FORCE_NOT_NULL { ( <replaceable class="parameter">column_name</replaceable> [, ...] ) | * }
     FORCE_NULL { ( <replaceable class="parameter">column_name</replaceable> [, ...] ) | * }
+    ON_CONFLICT <replaceable class="parameter">conflict_action</replaceable>
+    CONFLICT_TABLE <replaceable class="parameter">conflict_table</replaceable>
     ON_ERROR <replaceable class="parameter">error_action</replaceable>
     REJECT_LIMIT <replaceable class="parameter">maxerror</replaceable>
     ENCODING '<replaceable class="parameter">encoding_name</replaceable>'
@@ -440,6 +442,89 @@ COPY (SELECT j FROM (VALUES ('null'::json), (NULL::json)) v(j))
     </listitem>
    </varlistentry>
 
+   <varlistentry id="sql-copy-params-on-conflict">
+    <term><literal>ON_CONFLICT</literal></term>
+    <listitem>
+     <para>
+      Specifies the behavior when a row violates a unique or exclusion constraint.
+      If <replaceable class="parameter">conflict_action</replaceable> is set to
+      <literal>stop</literal> (the default), the command will fail. If it is set to
+      <literal>table</literal>, the conflicting row's information is inserted to
+      <replaceable class="parameter">conflict_table</replaceable> specified by
+      <literal>CONFLICT_TABLE</literal>, and continue with the next one.
+      Under the hood, this uses the same mechanism as <link linkend="sql-on-conflict"><command>INSERT ... ON CONFLICT</command></link>.
+      However it does not support <literal>NOT DEFERRABLE</literal> unique or exclusion constraints.
+     </para>
+
+     <para>
+      The <literal>table</literal> option is applicable only for
+      <command>COPY FROM</command> when the <literal>FORMAT</literal>
+      is <literal>text</literal> or <literal>csv</literal>.
+      If <literal>ON_CONFLICT</literal> is set to <literal>table</literal>, a
+      <literal>NOTICE</literal> message is emitted at the end of the command
+      reporting the number of rows that were inserted into table <replaceable class="parameter">conflict_table</replaceable>
+      due to unique or exclusion constraint violation, provided that at least one row was affected.
+      When the <literal>LOG_VERBOSITY</literal> option is set to
+      <literal>verbose</literal>, a <literal>NOTICE</literal> message is emitted
+      for each row inserted by <literal>ON_CONFLICT</literal>, containing the
+      input line that violates unique or exclusion constraint. When the <literal>LOG_VERBOSITY</literal> option set to
+      <literal>silent</literal>, no messages are emitted regarding discarded rows.
+     </para>
+    </listitem>
+   </varlistentry>
+
+    <varlistentry id="sql-copy-params-conflict-table">
+    <term><literal>CONFLICT_TABLE</literal></term>
+    <listitem>
+      <para>
+      Specifies a destination table (<replaceable class="parameter">conflict_table</replaceable>)
+      to capture unique and exclusion constraint violations encountered while running
+      <command>COPY FROM</command> operation.
+      The destination table <replaceable class="parameter">conflict_table</replaceable> must define
+      exactly four columns, though the specific column names are not restricted.
+      The required column order and data types are:
+      <informaltable>
+      <tgroup cols="2">
+        <thead>
+        <row>
+          <entry>Data Type</entry>
+          <entry>Description</entry>
+        </row>
+        </thead>
+        <tbody>
+        <row>
+          <entry><type>oid</type></entry>
+          <entry>
+           The OID of the target table for the <command>COPY FROM</command> command.
+           This corresponds to <link linkend="catalog-pg-class"><structname>pg_class</structname></link>.<structfield>oid</structfield>.
+           Note that no formal dependency is maintained; if the referenced table is dropped,
+           this value will persist as a stale reference.
+          </entry>
+        </row>
+        <row>
+          <entry><type>text</type></entry>
+          <entry>The file path of the <command>COPY FROM</command> input</entry>
+        </row>
+        <row>
+          <entry><type>bigint</type></entry>
+           <entry>
+            The line number within the input source where the unique or exclusion
+            constraint violation occurred (starting at 1)
+           </entry>
+        </row>
+        <row>
+          <entry><type>text</type></entry>
+          <entry>The raw line text content of the record that caused the violation</entry>
+        </row>
+        </tbody>
+      </tgroup>
+      </informaltable>
+      </para>
+
+    </listitem>
+    </varlistentry>
+
+
    <varlistentry id="sql-copy-params-on-error">
     <term><literal>ON_ERROR</literal></term>
     <listitem>
@@ -493,6 +578,8 @@ COPY (SELECT j FROM (VALUES ('null'::json), (NULL::json)) v(j))
       If not specified, <literal>ON_ERROR</literal>=<literal>ignore</literal>
       allows an unlimited number of errors, meaning <command>COPY</command> will
       skip all erroneous data.
+      Note: Rows skipped due to unique or exclusion constraint violations handled by the
+      <literal>ON_CONFLICT</literal> option do not count toward this error limit.
      </para>
     </listitem>
    </varlistentry>

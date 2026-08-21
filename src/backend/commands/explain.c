@@ -4862,9 +4862,8 @@ show_modifytable_info(ModifyTableState *mtstate, List *ancestors,
 			resolution = "NOTHING";
 		else if (node->onConflictAction == ONCONFLICT_UPDATE)
 			resolution = "UPDATE";
-		else
+		else if (node->onConflictAction == ONCONFLICT_SELECT)
 		{
-			Assert(node->onConflictAction == ONCONFLICT_SELECT);
 			switch (node->onConflictLockStrength)
 			{
 				case LCS_NONE:
