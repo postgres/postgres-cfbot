@@ -1670,6 +1670,18 @@ PerformWalRecovery(void)
 	CheckRecoveryConsistency();
 
 	/*
+	 * EnableStandbyMode() disables periodic recovery progress logging,
+	 * because a standby remains in recovery until promotion and would
+	 * otherwise emit recovery progress messages indefinitely.
+	 *
+	 * However, earlier startup phases executed afterward, such as
+	 * ResetUnloggedRelations(), may have re-enabled the timeout. Therefore,
+	 * disable it again before entering WAL replay.
+	 */
+	if (StandbyMode)
+		disable_startup_progress_timeout();
+
+	/*
 	 * Find the first record that logically follows the checkpoint --- it
 	 * might physically precede it, though.
 	 */
