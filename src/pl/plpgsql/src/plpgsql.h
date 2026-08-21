@@ -435,6 +435,15 @@ typedef struct PLpgSQL_rec
 
 	/* We always store record variables as "expanded" records */
 	ExpandedRecordHeader *erh;
+
+	/*
+	 * Composite type version snapshot for ALTER TYPE detection.
+	 * Populated when the record is assigned; checked at RETURN time.
+	 * Includes the outermost type and all nested composite types.
+	 */
+	int			nCompTypes;
+	Oid		   *compTypeOids;
+	uint64	   *compTypeVersions;
 } PLpgSQL_rec;
 
 /*
