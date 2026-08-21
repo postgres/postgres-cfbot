@@ -287,6 +287,21 @@ struct VacuumCutoffs
 	 */
 	TransactionId FreezeLimit;
 	MultiXactId MultiXactCutoff;
+
+	/*
+	 * Oldest xmin and catalog xmin of any replication slot obtained from the
+	 * same ComputeXidHorizons() call that computed OldestXmin.
+	 */
+	TransactionId SlotXmin;
+	TransactionId SlotCatalogXmin;
+
+	/*
+	 * Whether a slot's catalog_xmin can hold this relation's OldestXmin back.
+	 * That is true for catalog and shared relations, and false for ordinary
+	 * and temporary ones. It decides whether an aged slot holding only a
+	 * catalog_xmin (a logical slot) is worth invalidating for this relation.
+	 */
+	bool		SlotCatalogXminRelevant;
 };
 
 /*
@@ -399,6 +414,10 @@ extern IndexBulkDeleteResult *vac_bulkdel_one_index(IndexVacuumInfo *ivinfo,
 													VacDeadItemsInfo *dead_items_info);
 extern IndexBulkDeleteResult *vac_cleanup_one_index(IndexVacuumInfo *ivinfo,
 													IndexBulkDeleteResult *istat);
+extern bool InvalidateXidAgedReplicationSlots(TransactionId oldest_xmin,
+											  TransactionId slot_xmin,
+											  TransactionId slot_catalog_xmin,
+											  bool slot_catalog_xmin_relevant);
 
 /* In postmaster/autovacuum.c */
 extern void AutoVacuumUpdateCostLimit(void);
