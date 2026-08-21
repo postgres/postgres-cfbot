@@ -1309,9 +1309,12 @@ acquire_sample_rows(Relation onerel, int elevel,
 										0);
 
 	/* Outer loop over blocks to sample */
-	while (table_scan_analyze_next_block(scan, stream))
+	for (;;)
 	{
 		vacuum_delay_point(true);
+
+		if (!table_scan_analyze_next_block(scan, stream))
+			break;
 
 		while (table_scan_analyze_next_tuple(scan, &liverows, &deadrows, slot))
 		{
