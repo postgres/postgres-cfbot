@@ -73,6 +73,22 @@ REPACK (CONCURRENTLY) repack_conc_replident;
 ALTER TABLE repack_conc_replident ADD PRIMARY KEY (i) DEFERRABLE;
 REPACK (CONCURRENTLY) repack_conc_replident;
 
+-- An index that a failed CREATE INDEX CONCURRENTLY left neither valid nor
+-- ready is not copied to the new heap; copying this one would fail on the row
+-- its expression rejects.
+CREATE TABLE repack_conc_invalid (i int PRIMARY KEY, j int);
+INSERT INTO repack_conc_invalid VALUES (1, 0), (2, 1);
+CREATE INDEX CONCURRENTLY repack_conc_invalid_expr ON repack_conc_invalid ((1/j));
+SELECT relfilenode AS invalid_expr_node FROM pg_class
+WHERE oid = 'repack_conc_invalid_expr'::regclass \gset
+REPACK (CONCURRENTLY) repack_conc_invalid;
+SELECT indisvalid, indisready FROM pg_index
+WHERE indexrelid = 'repack_conc_invalid_expr'::regclass;
+SELECT relfilenode = :invalid_expr_node FROM pg_class
+WHERE oid = 'repack_conc_invalid_expr'::regclass;
+SELECT * FROM repack_conc_invalid ORDER BY i;
+DROP TABLE repack_conc_invalid;
+
 -- clean up
 DROP TABLE repack_conc_replident, clstrpart;
 
