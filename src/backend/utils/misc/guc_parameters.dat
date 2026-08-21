@@ -288,6 +288,13 @@
   max => 'INT_MAX',
 },
 
+{ name => 'autovacuum_warning', type => 'bool', context => 'PGC_SIGHUP', group => 'VACUUM_AUTOVACUUM',
+  short_desc => 'Enables warnings when autovacuum cannot keep up.',
+  long_desc => 'Write a message to the server log if autovacuum attempts to process a table that is already being vacuumed by another worker.',
+  variable => 'autovacuum_warning',
+  boot_val => 'false',
+},
+
 { name => 'autovacuum_work_mem', type => 'int', context => 'PGC_SIGHUP', group => 'RESOURCES_MEM',
   short_desc => 'Sets the maximum memory to be used by each autovacuum worker process.',
   long_desc => '-1 means use "maintenance_work_mem".',

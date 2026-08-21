@@ -141,6 +141,7 @@ double		autovacuum_vacuum_insert_score_weight = 1.0;
 double		autovacuum_analyze_score_weight = 1.0;
 double		autovacuum_vac_cost_delay;
 int			autovacuum_vac_cost_limit;
+bool		autovacuum_warning;
 
 int			Log_autovacuum_min_duration = 600000;
 int			Log_autoanalyze_min_duration = 600000;
@@ -2415,6 +2416,12 @@ do_autovacuum(void)
 		LWLockRelease(AutovacuumLock);
 		if (skipit)
 		{
+			if (autovacuum_warning)
+				ereport(LOG,
+						(errmsg("autovacuum: table \"%s.%s\" is already being vacuumed by another worker",
+								get_namespace_name(get_rel_namespace(relid)),
+								get_rel_name(relid)),
+						 errhint("Consider tuning the autovacuum configuration parameters.")));
 			LWLockRelease(AutovacuumScheduleLock);
 			continue;
 		}
