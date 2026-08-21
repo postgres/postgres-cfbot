@@ -9989,10 +9989,18 @@ get_rule_expr(Node *node, deparse_context *context,
 				if (!PRETTY_PAREN(context))
 					appendStringInfoChar(buf, '(');
 				get_rule_expr_paren(arg1, context, true, node);
-				appendStringInfo(buf, " %s %s (",
+
+				/*
+				 * Surface hashed decision in EXPLAIN.
+				 * hashfuncid is only ever set in a finished plan tree, so this
+				 * never appears in deparsed views, rules, or other stored
+				 * expressions.
+				 */
+				appendStringInfo(buf, " %s %s%s (",
 								 generate_operator_name(expr->opno,
 														exprType(arg1),
 														get_base_element_type(exprType(arg2))),
+								 OidIsValid(expr->hashfuncid) ? "hashed " : "",
 								 expr->useOr ? "ANY" : "ALL");
 				get_rule_expr_paren(arg2, context, true, node);
 
