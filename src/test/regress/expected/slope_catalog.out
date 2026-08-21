@@ -12,6 +12,7 @@ FROM pg_operator o
 JOIN pg_proc p ON p.oid = o.oprcode
 JOIN pg_proc sp ON sp.oid = p.prosupport
 WHERE sp.proname LIKE '%slope%'
+   OR sp.proname LIKE '%prosupport'
 ORDER BY sp.proname, o.oprname, left_type, right_type;
  oid  | operator |          left_type          |         right_type          |       prosupport        
 ------+----------+-----------------------------+-----------------------------+-------------------------
@@ -130,61 +131,68 @@ SELECT
     sp.proname AS prosupport
 FROM pg_proc p
 JOIN pg_proc sp ON sp.oid = p.prosupport
-WHERE sp.proname LIKE '%slope%'
+WHERE (sp.proname LIKE '%slope%' OR sp.proname LIKE '%prosupport')
   AND NOT EXISTS (SELECT 1 FROM pg_operator o WHERE o.oprcode = p.oid)
 ORDER BY sp.proname, p.proname, arguments;
- oid  |   function   |             arguments             |           returns           |       prosupport        
-------+--------------+-----------------------------------+-----------------------------+-------------------------
- 2025 | timestamp    | date, time without time zone      | timestamp without time zone | addition_slope_support
- 2466 | acosh        | double precision                  | double precision            | arg0_asc_slope_support
- 1600 | asin         | double precision                  | double precision            | arg0_asc_slope_support
- 2731 | asind        | double precision                  | double precision            | arg0_asc_slope_support
- 2465 | asinh        | double precision                  | double precision            | arg0_asc_slope_support
- 1602 | atan         | double precision                  | double precision            | arg0_asc_slope_support
- 2733 | atand        | double precision                  | double precision            | arg0_asc_slope_support
- 2467 | atanh        | double precision                  | double precision            | arg0_asc_slope_support
- 1345 | cbrt         | double precision                  | double precision            | arg0_asc_slope_support
- 2308 | ceil         | double precision                  | double precision            | arg0_asc_slope_support
- 1711 | ceil         | numeric                           | numeric                     | arg0_asc_slope_support
- 2320 | ceiling      | double precision                  | double precision            | arg0_asc_slope_support
- 2167 | ceiling      | numeric                           | numeric                     | arg0_asc_slope_support
- 2029 | date         | timestamp without time zone       | date                        | arg0_asc_slope_support
- 1608 | degrees      | double precision                  | double precision            | arg0_asc_slope_support
- 6219 | erf          | double precision                  | double precision            | arg0_asc_slope_support
- 1347 | exp          | double precision                  | double precision            | arg0_asc_slope_support
- 1732 | exp          | numeric                           | numeric                     | arg0_asc_slope_support
- 2309 | floor        | double precision                  | double precision            | arg0_asc_slope_support
- 1712 | floor        | numeric                           | numeric                     | arg0_asc_slope_support
- 1341 | ln           | double precision                  | double precision            | arg0_asc_slope_support
- 1734 | ln           | numeric                           | numeric                     | arg0_asc_slope_support
- 1340 | log          | double precision                  | double precision            | arg0_asc_slope_support
- 1741 | log          | numeric                           | numeric                     | arg0_asc_slope_support
- 1194 | log10        | double precision                  | double precision            | arg0_asc_slope_support
- 1481 | log10        | numeric                           | numeric                     | arg0_asc_slope_support
- 1733 | numeric_exp  | numeric                           | numeric                     | arg0_asc_slope_support
- 1735 | numeric_ln   | numeric                           | numeric                     | arg0_asc_slope_support
- 1731 | numeric_sqrt | numeric                           | numeric                     | arg0_asc_slope_support
- 1609 | radians      | double precision                  | double precision            | arg0_asc_slope_support
- 1342 | round        | double precision                  | double precision            | arg0_asc_slope_support
- 1708 | round        | numeric                           | numeric                     | arg0_asc_slope_support
- 1707 | round        | numeric, integer                  | numeric                     | arg0_asc_slope_support
- 2462 | sinh         | double precision                  | double precision            | arg0_asc_slope_support
- 1344 | sqrt         | double precision                  | double precision            | arg0_asc_slope_support
- 1730 | sqrt         | numeric                           | numeric                     | arg0_asc_slope_support
- 2464 | tanh         | double precision                  | double precision            | arg0_asc_slope_support
- 2024 | timestamp    | date                              | timestamp without time zone | arg0_asc_slope_support
- 1174 | timestamptz  | date                              | timestamp with time zone    | arg0_asc_slope_support
- 1359 | timestamptz  | date, time with time zone         | timestamp with time zone    | arg0_asc_slope_support
- 1176 | timestamptz  | date, time without time zone      | timestamp with time zone    | arg0_asc_slope_support
- 1158 | to_timestamp | double precision                  | timestamp with time zone    | arg0_asc_slope_support
- 1343 | trunc        | double precision                  | double precision            | arg0_asc_slope_support
- 1710 | trunc        | numeric                           | numeric                     | arg0_asc_slope_support
- 1709 | trunc        | numeric, integer                  | numeric                     | arg0_asc_slope_support
- 1601 | acos         | double precision                  | double precision            | arg0_desc_slope_support
- 2732 | acosd        | double precision                  | double precision            | arg0_desc_slope_support
- 6220 | erfc         | double precision                  | double precision            | arg0_desc_slope_support
- 2020 | date_trunc   | text, timestamp without time zone | timestamp without time zone | arg1_asc_slope_support
-(49 rows)
+ oid  |   function   |              arguments               |           returns           |           prosupport           
+------+--------------+--------------------------------------+-----------------------------+--------------------------------
+ 2025 | timestamp    | date, time without time zone         | timestamp without time zone | addition_slope_support
+ 2466 | acosh        | double precision                     | double precision            | arg0_asc_slope_support
+ 1600 | asin         | double precision                     | double precision            | arg0_asc_slope_support
+ 2731 | asind        | double precision                     | double precision            | arg0_asc_slope_support
+ 2465 | asinh        | double precision                     | double precision            | arg0_asc_slope_support
+ 1602 | atan         | double precision                     | double precision            | arg0_asc_slope_support
+ 2733 | atand        | double precision                     | double precision            | arg0_asc_slope_support
+ 2467 | atanh        | double precision                     | double precision            | arg0_asc_slope_support
+ 1345 | cbrt         | double precision                     | double precision            | arg0_asc_slope_support
+ 2308 | ceil         | double precision                     | double precision            | arg0_asc_slope_support
+ 1711 | ceil         | numeric                              | numeric                     | arg0_asc_slope_support
+ 2320 | ceiling      | double precision                     | double precision            | arg0_asc_slope_support
+ 2167 | ceiling      | numeric                              | numeric                     | arg0_asc_slope_support
+ 2029 | date         | timestamp without time zone          | date                        | arg0_asc_slope_support
+ 1608 | degrees      | double precision                     | double precision            | arg0_asc_slope_support
+ 6219 | erf          | double precision                     | double precision            | arg0_asc_slope_support
+ 1347 | exp          | double precision                     | double precision            | arg0_asc_slope_support
+ 1732 | exp          | numeric                              | numeric                     | arg0_asc_slope_support
+ 2309 | floor        | double precision                     | double precision            | arg0_asc_slope_support
+ 1712 | floor        | numeric                              | numeric                     | arg0_asc_slope_support
+ 1341 | ln           | double precision                     | double precision            | arg0_asc_slope_support
+ 1734 | ln           | numeric                              | numeric                     | arg0_asc_slope_support
+ 1340 | log          | double precision                     | double precision            | arg0_asc_slope_support
+ 1741 | log          | numeric                              | numeric                     | arg0_asc_slope_support
+ 1194 | log10        | double precision                     | double precision            | arg0_asc_slope_support
+ 1481 | log10        | numeric                              | numeric                     | arg0_asc_slope_support
+ 1733 | numeric_exp  | numeric                              | numeric                     | arg0_asc_slope_support
+ 1735 | numeric_ln   | numeric                              | numeric                     | arg0_asc_slope_support
+ 1731 | numeric_sqrt | numeric                              | numeric                     | arg0_asc_slope_support
+ 1609 | radians      | double precision                     | double precision            | arg0_asc_slope_support
+ 1342 | round        | double precision                     | double precision            | arg0_asc_slope_support
+ 1708 | round        | numeric                              | numeric                     | arg0_asc_slope_support
+ 1707 | round        | numeric, integer                     | numeric                     | arg0_asc_slope_support
+ 2462 | sinh         | double precision                     | double precision            | arg0_asc_slope_support
+ 1344 | sqrt         | double precision                     | double precision            | arg0_asc_slope_support
+ 1730 | sqrt         | numeric                              | numeric                     | arg0_asc_slope_support
+ 2464 | tanh         | double precision                     | double precision            | arg0_asc_slope_support
+ 2024 | timestamp    | date                                 | timestamp without time zone | arg0_asc_slope_support
+ 1174 | timestamptz  | date                                 | timestamp with time zone    | arg0_asc_slope_support
+ 1359 | timestamptz  | date, time with time zone            | timestamp with time zone    | arg0_asc_slope_support
+ 1176 | timestamptz  | date, time without time zone         | timestamp with time zone    | arg0_asc_slope_support
+ 1158 | to_timestamp | double precision                     | timestamp with time zone    | arg0_asc_slope_support
+ 1343 | trunc        | double precision                     | double precision            | arg0_asc_slope_support
+ 1710 | trunc        | numeric                              | numeric                     | arg0_asc_slope_support
+ 1709 | trunc        | numeric, integer                     | numeric                     | arg0_asc_slope_support
+ 1601 | acos         | double precision                     | double precision            | arg0_desc_slope_support
+ 2732 | acosd        | double precision                     | double precision            | arg0_desc_slope_support
+ 6220 | erfc         | double precision                     | double precision            | arg0_desc_slope_support
+ 1217 | date_trunc   | text, timestamp with time zone       | timestamp with time zone    | date_trunc_slope_support
+ 1284 | date_trunc   | text, timestamp with time zone, text | timestamp with time zone    | date_trunc_slope_support
+ 2020 | date_trunc   | text, timestamp without time zone    | timestamp without time zone | date_trunc_slope_support
+ 1178 | date         | timestamp with time zone             | date                        | timestamptz_date_slope_support
+ 1159 | timezone     | text, timestamp with time zone       | timestamp without time zone | timezone_prosupport
+ 2069 | timezone     | text, timestamp without time zone    | timestamp with time zone    | timezone_prosupport
+ 6334 | timezone     | timestamp with time zone             | timestamp without time zone | timezone_prosupport
+ 6335 | timezone     | timestamp without time zone          | timestamp with time zone    | timezone_prosupport
+(56 rows)
 
 -- Operators whose name has slope support for some types but not others
 SELECT
@@ -196,14 +204,15 @@ FROM pg_operator u
 JOIN pg_proc up ON up.oid = u.oprcode
 WHERE (up.prosupport = 0 OR NOT EXISTS (
         SELECT 1 FROM pg_proc sp
-        WHERE sp.oid = up.prosupport AND sp.proname LIKE '%slope%'))
+        WHERE sp.oid = up.prosupport
+          AND (sp.proname LIKE '%slope%' OR sp.proname LIKE '%prosupport')))
   AND EXISTS (
       SELECT 1
       FROM pg_operator s
       JOIN pg_proc sp_impl ON sp_impl.oid = s.oprcode
       JOIN pg_proc sp_sup ON sp_sup.oid = sp_impl.prosupport
       WHERE s.oprname = u.oprname
-        AND sp_sup.proname LIKE '%slope%')
+        AND (sp_sup.proname LIKE '%slope%' OR sp_sup.proname LIKE '%prosupport'))
 ORDER BY u.oprname, left_type, right_type;
  oid  | operator |          left_type          |         right_type          
 ------+----------+-----------------------------+-----------------------------
@@ -268,29 +277,32 @@ SELECT
 FROM pg_proc u
 WHERE (u.prosupport = 0 OR NOT EXISTS (
         SELECT 1 FROM pg_proc sp
-        WHERE sp.oid = u.prosupport AND sp.proname LIKE '%slope%'))
+        WHERE sp.oid = u.prosupport
+          AND (sp.proname LIKE '%slope%' OR sp.proname LIKE '%prosupport')))
   AND NOT EXISTS (SELECT 1 FROM pg_operator o WHERE o.oprcode = u.oid)
   AND EXISTS (
       SELECT 1
       FROM pg_proc s
       JOIN pg_proc sp ON sp.oid = s.prosupport
       WHERE s.proname = u.proname
-        AND sp.proname LIKE '%slope%'
+        AND (sp.proname LIKE '%slope%' OR sp.proname LIKE '%prosupport')
         AND NOT EXISTS (SELECT 1 FROM pg_operator o WHERE o.oprcode = s.oid))
 ORDER BY u.proname, arguments;
- oid  |   function   |              arguments               |           returns           
-------+--------------+--------------------------------------+-----------------------------
- 1178 | date         | timestamp with time zone             | date
- 1218 | date_trunc   | text, interval                       | interval
- 1217 | date_trunc   | text, timestamp with time zone       | timestamp with time zone
- 1284 | date_trunc   | text, timestamp with time zone, text | timestamp with time zone
- 1736 | log          | numeric, numeric                     | numeric
- 2027 | timestamp    | timestamp with time zone             | timestamp without time zone
- 1961 | timestamp    | timestamp without time zone, integer | timestamp without time zone
- 1967 | timestamptz  | timestamp with time zone, integer    | timestamp with time zone
- 2028 | timestamptz  | timestamp without time zone          | timestamp with time zone
- 1778 | to_timestamp | text, text                           | timestamp with time zone
-  753 | trunc        | macaddr                              | macaddr
- 4112 | trunc        | macaddr8                             | macaddr8
-(12 rows)
+ oid  |   function   |               arguments               |           returns           
+------+--------------+---------------------------------------+-----------------------------
+ 1218 | date_trunc   | text, interval                        | interval
+ 1736 | log          | numeric, numeric                      | numeric
+ 2027 | timestamp    | timestamp with time zone              | timestamp without time zone
+ 1961 | timestamp    | timestamp without time zone, integer  | timestamp without time zone
+ 1967 | timestamptz  | timestamp with time zone, integer     | timestamp with time zone
+ 2028 | timestamptz  | timestamp without time zone           | timestamp with time zone
+ 2038 | timezone     | interval, time with time zone         | time with time zone
+ 1026 | timezone     | interval, timestamp with time zone    | timestamp without time zone
+ 2070 | timezone     | interval, timestamp without time zone | timestamp with time zone
+ 2037 | timezone     | text, time with time zone             | time with time zone
+ 6336 | timezone     | time with time zone                   | time with time zone
+ 1778 | to_timestamp | text, text                            | timestamp with time zone
+  753 | trunc        | macaddr                               | macaddr
+ 4112 | trunc        | macaddr8                              | macaddr8
+(14 rows)
 
