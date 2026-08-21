@@ -3,9 +3,17 @@
 #include <math.h>
 
 #include "c.h"
+#include "catalog/pg_type.h"
+#include "nodes/primnodes.h"
 #include "nodes/supportnodes.h"
+#include "parser/scansup.h"
+#include "pgtime.h"
+#include "utils/builtins.h"
+#include "utils/fmgroids.h"
+#include "utils/datetime.h"
 #include "utils/fmgrprotos.h"
 #include "utils/numeric.h"
+#include "varatt.h"
 
 /**
  * Extended numeric sign, the usual -1, 0, 1,
@@ -341,4 +349,193 @@ divide_slope_support(PG_FUNCTION_ARGS)
 			PG_RETURN_POINTER(NULL);
 	}
 	PG_RETURN_POINTER(NULL);
+}
+
+/*
+ * Look up a timezone from a constant text argument.
+ */
+static pg_tz *
+get_const_timezone_arg(List *args, int argno)
+{
+	Node	   *tz_arg_node;
+	Const	   *tz_const;
+	text	   *zone;
+	char		tzname[TZ_STRLEN_MAX + 1];
+
+	if (args == NULL || list_length(args) <= argno)
+		return NULL;
+
+	tz_arg_node = list_nth(args, argno);
+	if (!IsA(tz_arg_node, Const))
+		return NULL;
+
+	tz_const = (Const *) tz_arg_node;
+
+	if (tz_const->constisnull || tz_const->consttype != TEXTOID)
+		return NULL;
+
+	zone = DatumGetTextPP(tz_const->constvalue);
+	text_to_cstring_buffer(zone, tzname, sizeof(tzname));
+	return DecodeTimezoneNameToTz(tzname);
+}
+
+/*
+ * Slope support for date(timestamptz)
+ */
+Datum
+timestamptz_date_slope_support(PG_FUNCTION_ARGS)
+{
+	SLOPE_REQUEST(req);
+
+	if (pg_timezone_is_monotonic(session_timezone, TZ_GAP_DAY, false))
+		return monotonic_slope_support(req, 1, asc0_slope);
+	else
+		PG_RETURN_POINTER(NULL);
+}
+
+static Oid
+get_monotonic_expr_funcid(SupportRequestMonotonic *req)
+{
+	Node	   *expr = req->expr;
+	if (IsA(expr, FuncExpr))
+		return ((FuncExpr *) expr)->funcid;
+	return InvalidOid;
+}
+
+static Datum
+timestamptz_support_lookup(SupportRequestMonotonic *req, Datum fixed_unit, pg_tz *tzp)
+{
+	text	   *units;
+	int			val;
+	char	   *lowunits;
+	int			type;
+	TZMonotonicityBits tz_unit;
+
+	units = DatumGetTextPP(fixed_unit);
+
+	lowunits = downcase_truncate_identifier(VARDATA_ANY(units),
+											VARSIZE_ANY_EXHDR(units),
+											false);
+
+	type = DecodeUnits(0, lowunits, &val);
+
+	if (type != UNITS)
+		PG_RETURN_POINTER(NULL);
+
+	switch (val)
+	{
+		case DTK_WEEK:
+			PG_RETURN_POINTER(NULL);
+		case DTK_MILLENNIUM:
+		case DTK_CENTURY:
+		case DTK_DECADE:
+		case DTK_YEAR:
+			tz_unit = TZ_GAP_YEAR;
+			break;
+		case DTK_QUARTER:
+		case DTK_MONTH:
+			tz_unit = TZ_GAP_MONTH;
+			break;
+		case DTK_DAY:
+			tz_unit = TZ_GAP_DAY;
+			break;
+		case DTK_HOUR:
+			tz_unit = TZ_GAP_HOUR;
+			break;
+		case DTK_MINUTE:
+			tz_unit = TZ_GAP_MINUTE;
+			break;
+		case DTK_SECOND:
+		case DTK_MILLISEC:
+		case DTK_MICROSEC:
+			tz_unit = TZ_GAP_SECOND;
+			break;
+		default:
+			PG_RETURN_POINTER(NULL);
+	}
+	if (pg_timezone_is_monotonic(tzp, tz_unit, false))
+		return monotonic_slope_support(req, 2, asc1_slope);
+	else
+		PG_RETURN_POINTER(NULL);
+}
+
+/*
+ * Prosupport for timezone(...) overloads with timestamp types.
+ */
+Datum
+timezone_prosupport(PG_FUNCTION_ARGS)
+{
+	pg_tz	   *tzp;
+	bool		to_utc = false;
+	SLOPE_REQUEST_ARGS(req, args, 1);
+
+
+	switch (get_monotonic_expr_funcid(req))
+	{
+
+		case F_TIMEZONE_TEXT_TIMESTAMP:
+			to_utc = true;
+			pg_fallthrough;
+		case F_TIMEZONE_TEXT_TIMESTAMPTZ:
+			tzp = get_const_timezone_arg(args, 0);
+			break;
+		case F_TIMEZONE_TIMESTAMP:
+			to_utc = true;
+			pg_fallthrough;
+		case F_TIMEZONE_TIMESTAMPTZ:
+			tzp = session_timezone;
+			break;
+
+		default:
+			PG_RETURN_POINTER(NULL);
+	}
+
+	if (tzp == NULL || !pg_timezone_is_monotonic(tzp, TZ_GAP_SECOND, to_utc))
+		PG_RETURN_POINTER(NULL);
+
+	/*
+	 * We need MONOTONICFUNC_INCREASING for either the first or
+	 * second argument, but the other argument is either a constant
+	 * or missing, so we can simply return MONOTONICFUNC_INCREASING
+	 * for both.
+	 */
+	return monotonic_slope_support(req, 2, asc_slope);
+}
+
+/*
+ * Prosupport for date_trunc(...) overloads with timestamp types.
+ */
+Datum
+date_trunc_slope_support(PG_FUNCTION_ARGS)
+{
+	Const	   *unit_arg;
+	pg_tz	   *tzp = NULL;
+	SLOPE_REQUEST_ARGS(req, args, 2);
+
+	unit_arg = (Const *) linitial(args);
+	if (!IsA(unit_arg, Const) || unit_arg->constisnull)
+		PG_RETURN_POINTER(NULL);
+
+	switch (get_monotonic_expr_funcid(req))
+	{
+		case F_DATE_TRUNC_TEXT_TIMESTAMP:
+			tzp = DecodeTimezoneNameToTz("UTC");
+			break;
+
+		case F_DATE_TRUNC_TEXT_TIMESTAMPTZ_TEXT:
+			tzp = get_const_timezone_arg(args, 2);
+			break;
+
+		case F_DATE_TRUNC_TEXT_TIMESTAMPTZ:
+			tzp = session_timezone;
+			break;
+
+		default:
+			PG_RETURN_POINTER(NULL);
+	}
+
+	if (tzp == NULL)
+		PG_RETURN_POINTER(NULL);
+
+	return timestamptz_support_lookup(req, unit_arg->constvalue, tzp);
 }
