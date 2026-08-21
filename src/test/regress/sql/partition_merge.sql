@@ -760,9 +760,9 @@ DROP TABLE t;
 
 -- Test for generated columns (different order of columns in partitioned table
 -- and partitions).
-CREATE TABLE t (i int, g int GENERATED ALWAYS AS (i + tableoid::int)) PARTITION BY RANGE (i);
-CREATE TABLE tp_1 (g int GENERATED ALWAYS AS (i + tableoid::int), i int);
-CREATE TABLE tp_2 (g int GENERATED ALWAYS AS (i + tableoid::int), i int);
+CREATE TABLE t (i int, g int GENERATED ALWAYS AS (i + 2)) PARTITION BY RANGE (i);
+CREATE TABLE tp_1 (g int GENERATED ALWAYS AS (i + 2), i int);
+CREATE TABLE tp_2 (g int GENERATED ALWAYS AS (i + 2), i int);
 ALTER TABLE t ATTACH PARTITION tp_1 FOR VALUES FROM (-1) TO (10);
 ALTER TABLE t ATTACH PARTITION tp_2 FOR VALUES FROM (10) TO (20);
 ALTER TABLE t ADD CHECK (g > 0);

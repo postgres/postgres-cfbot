@@ -1058,9 +1058,9 @@ SELECT count(*) FROM t WHERE i = 0 AND tab_id IN (SELECT tab_id FROM t WHERE i =
 DROP TABLE t;
 -- Test for generated columns (different order of columns in partitioned table
 -- and partitions).
-CREATE TABLE t (i int, g int GENERATED ALWAYS AS (i + tableoid::int)) PARTITION BY RANGE (i);
-CREATE TABLE tp_1 (g int GENERATED ALWAYS AS (i + tableoid::int), i int);
-CREATE TABLE tp_2 (g int GENERATED ALWAYS AS (i + tableoid::int), i int);
+CREATE TABLE t (i int, g int GENERATED ALWAYS AS (i + 2)) PARTITION BY RANGE (i);
+CREATE TABLE tp_1 (g int GENERATED ALWAYS AS (i + 2), i int);
+CREATE TABLE tp_2 (g int GENERATED ALWAYS AS (i + 2), i int);
 ALTER TABLE t ATTACH PARTITION tp_1 FOR VALUES FROM (-1) TO (10);
 ALTER TABLE t ATTACH PARTITION tp_2 FOR VALUES FROM (10) TO (20);
 ALTER TABLE t ADD CHECK (g > 0);
@@ -1071,7 +1071,7 @@ INSERT INTO t VALUES (16);
 -- ERROR
 INSERT INTO t VALUES (0);
 ERROR:  new row for relation "tp_12" violates check constraint "t_i_check"
-DETAIL:  Failing row contains (0, virtual).
+DETAIL:  Failing row contains (0, 2).
 -- Should be 3 rows: (5), (15), (16):
 SELECT i FROM t ORDER BY i;
  i  
