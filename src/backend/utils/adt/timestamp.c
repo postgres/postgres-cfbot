@@ -1921,10 +1921,6 @@ timestamp2tm(Timestamp dt, int *tzp, struct pg_tm *tm, fsec_t *fsec, const char 
 	Timestamp	time;
 	pg_time_t	utime;
 
-	/* Use session timezone if caller asks for default */
-	if (attimezone == NULL)
-		attimezone = session_timezone;
-
 	time = dt;
 	TMODULO(time, date, USECS_PER_DAY);
 
@@ -1970,7 +1966,9 @@ timestamp2tm(Timestamp dt, int *tzp, struct pg_tm *tm, fsec_t *fsec, const char 
 	utime = (pg_time_t) dt;
 	if ((Timestamp) utime == dt)
 	{
-		struct pg_tm *tx = pg_localtime(&utime, attimezone);
+		/* Use session timezone doesn't pass one */
+		struct pg_tm *tx = pg_localtime(&utime,
+			attimezone == NULL ? session_timezone : attimezone);
 
 		tm->tm_year = tx->tm_year + 1900;
 		tm->tm_mon = tx->tm_mon + 1;
