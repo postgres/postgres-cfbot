@@ -211,6 +211,7 @@ extern Oid	get_multirange_range(Oid multirangeOid);
 extern Oid	get_index_column_opclass(Oid index_oid, int attno);
 extern bool get_index_isreplident(Oid index_oid);
 extern bool get_index_isvalid(Oid index_oid);
+extern bool get_index_isready(Oid index_oid);
 extern bool get_index_isclustered(Oid index_oid);
 extern Oid	get_publication_oid(const char *pubname, bool missing_ok);
 extern char *get_publication_name(Oid pubid, bool missing_ok);

@@ -534,13 +534,16 @@ BEGIN;
 CREATE INDEX std_index on concur_heap(f2);
 COMMIT;
 
--- Failed builds are left invalid by VACUUM FULL, fixed by REINDEX
+-- Failed builds are left invalid by VACUUM FULL and by REINDEX TABLE,
+-- fixed by REINDEX INDEX
 VACUUM FULL concur_heap;
 REINDEX TABLE concur_heap;
 DELETE FROM concur_heap WHERE f1 = 'b';
 VACUUM FULL concur_heap;
 \d concur_heap
 REINDEX TABLE concur_heap;
+\d concur_heap
+REINDEX INDEX concur_index3;
 \d concur_heap
 
 -- Temporary tables with concurrent builds and on-commit actions

@@ -4096,6 +4096,34 @@ reindex_relation(const ReindexStmt *stmt, Oid relid, int flags,
 		Oid			indexNamespaceId = get_rel_namespace(indexOid);
 
 		/*
+		 * Skip an index that is neither valid nor ready for inserts, such as
+		 * one left behind by a failed CREATE INDEX CONCURRENTLY.  Nothing
+		 * reads such an index and DML does not maintain it, so its storage
+		 * need not follow the heap, and rebuilding it can fail on data that
+		 * the index does not accept, taking the whole command down.
+		 *
+		 * An invalid index that is ready has to be rebuilt: DML maintains it,
+		 * so its storage must keep matching the heap.  So has one whose
+		 * storage moves to another tablespace or changes persistence, else
+		 * pg_class would not describe the storage that is there.
+		 */
+		if (!OidIsValid(params->tablespaceOid) &&
+			get_rel_persistence(indexOid) == persistence &&
+			!get_index_isvalid(indexOid) && !get_index_isready(indexOid))
+		{
+			ereport(WARNING,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("skipping invalid index \"%s.%s\"",
+							get_namespace_name(indexNamespaceId),
+							get_rel_name(indexOid)),
+					 errhint("Use DROP INDEX or REINDEX INDEX.")));
+
+			if (flags & REINDEX_REL_SUPPRESS_INDEX_USE)
+				RemoveReindexPending(indexOid);
+			continue;
+		}
+
+		/*
 		 * Skip any invalid indexes on a TOAST table.  These can only be
 		 * duplicate leftovers from a failed REINDEX CONCURRENTLY, and if
 		 * rebuilt it would not be possible to drop them anymore.
