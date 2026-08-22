@@ -3538,13 +3538,16 @@ SELECT ten FROM onek t WHERE 1.0::integer IN ((VALUES (1), (3)));
 (1 row)
 
 --
--- Check NOT IN performs an ANTI JOIN when both the outer query's expressions
--- and the sub-select's output columns are provably non-nullable, and the
--- operator itself cannot return NULL for non-null inputs.
+-- Test cases for NOT ANY transformations and ALL transformations
 --
 BEGIN;
 CREATE TEMP TABLE not_null_tab (id int NOT NULL, val int NOT NULL);
 CREATE TEMP TABLE null_tab (id int, val int);
+--
+-- Check NOT IN performs an ANTI JOIN when both the outer query's expressions
+-- and the sub-select's output columns are provably non-nullable, and the
+-- operator itself cannot return NULL for non-null inputs.
+--
 -- ANTI JOIN: both sides are defined NOT NULL
 EXPLAIN (COSTS OFF)
 SELECT * FROM not_null_tab
@@ -4021,5 +4024,159 @@ WHERE COALESCE(t1.id, -1) NOT IN
  id | val 
 ----+-----
 (0 rows)
+
+--
+-- Check ALL SubLink is converted to ANY SubLink if negated testexpr exists
+--
+-- Ensure we get a hashed ANY SubPlan
+EXPLAIN (COSTS OFF)
+SELECT * FROM not_null_tab
+WHERE id <> ALL (SELECT id FROM null_tab);
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Seq Scan on not_null_tab
+   Filter: (NOT (ANY (id = (hashed SubPlan any_1).col1)))
+   SubPlan any_1
+     ->  Seq Scan on null_tab
+(4 rows)
+
+-- Ensure we get a hashed ANY SubPlan
+EXPLAIN (COSTS OFF)
+SELECT * FROM not_null_tab
+WHERE (id, val) <> ALL (SELECT id, val FROM null_tab);
+                                             QUERY PLAN                                             
+----------------------------------------------------------------------------------------------------
+ Seq Scan on not_null_tab
+   Filter: (NOT (ANY ((id = (hashed SubPlan any_1).col1) AND (val = (hashed SubPlan any_1).col2))))
+   SubPlan any_1
+     ->  Seq Scan on null_tab
+(4 rows)
+
+-- Ensure we get an ANY SubPlan
+EXPLAIN (COSTS OFF)
+SELECT * FROM not_null_tab
+WHERE (id, val) > ALL (SELECT id, val FROM null_tab);
+                                       QUERY PLAN                                        
+-----------------------------------------------------------------------------------------
+ Seq Scan on not_null_tab
+   Filter: (NOT (ANY (ROW(id, val) <= ROW((SubPlan any_1).col1, (SubPlan any_1).col2))))
+   SubPlan any_1
+     ->  Materialize
+           ->  Seq Scan on null_tab
+(5 rows)
+
+-- Ensure we get an anti-join
+EXPLAIN (COSTS OFF)
+SELECT * FROM not_null_tab
+WHERE id <> ALL (SELECT id FROM not_null_tab);
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Hash Anti Join
+   Hash Cond: (not_null_tab.id = not_null_tab_1.id)
+   ->  Seq Scan on not_null_tab
+   ->  Hash
+         ->  Seq Scan on not_null_tab not_null_tab_1
+(5 rows)
+
+-- Ensure we get an anti-join
+EXPLAIN (COSTS OFF)
+SELECT * FROM not_null_tab
+WHERE (id, val) <> ALL (SELECT id, val FROM not_null_tab);
+                                            QUERY PLAN                                             
+---------------------------------------------------------------------------------------------------
+ Merge Anti Join
+   Merge Cond: ((not_null_tab.id = not_null_tab_1.id) AND (not_null_tab.val = not_null_tab_1.val))
+   ->  Sort
+         Sort Key: not_null_tab.id, not_null_tab.val
+         ->  Seq Scan on not_null_tab
+   ->  Sort
+         Sort Key: not_null_tab_1.id, not_null_tab_1.val
+         ->  Seq Scan on not_null_tab not_null_tab_1
+(8 rows)
+
+-- Ensure we get an anti-join
+EXPLAIN (COSTS OFF)
+SELECT * FROM not_null_tab
+WHERE (id, val) > ALL (SELECT id, val FROM not_null_tab);
+                                              QUERY PLAN                                               
+-------------------------------------------------------------------------------------------------------
+ Nested Loop Anti Join
+   Join Filter: (ROW(not_null_tab.id, not_null_tab.val) <= ROW(not_null_tab_1.id, not_null_tab_1.val))
+   ->  Seq Scan on not_null_tab
+   ->  Materialize
+         ->  Seq Scan on not_null_tab not_null_tab_1
+(5 rows)
+
+-- Ensure we get a semi-join
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_tab
+WHERE NOT id <> ALL (SELECT id FROM null_tab);
+                    QUERY PLAN                     
+---------------------------------------------------
+ Hash Join
+   Hash Cond: (null_tab.id = null_tab_1.id)
+   ->  Seq Scan on null_tab
+   ->  Hash
+         ->  HashAggregate
+               Group Key: null_tab_1.id
+               ->  Seq Scan on null_tab null_tab_1
+(7 rows)
+
+-- Ensure we get a hashed ANY SubPlan
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_tab t1
+LEFT JOIN null_tab t2
+ON NOT t1.id <> ALL (SELECT id FROM null_tab);
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Nested Loop Left Join
+   Join Filter: (ANY (t1.id = (hashed SubPlan any_1).col1))
+   ->  Seq Scan on null_tab t1
+   ->  Materialize
+         ->  Seq Scan on null_tab t2
+   SubPlan any_1
+     ->  Seq Scan on null_tab
+(7 rows)
+
+-- Ensure we get a semi-join
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_tab
+WHERE NOT (id, val) <> ALL (SELECT id, val FROM null_tab);
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Hash Join
+   Hash Cond: ((null_tab.id = null_tab_1.id) AND (null_tab.val = null_tab_1.val))
+   ->  Seq Scan on null_tab
+   ->  Hash
+         ->  HashAggregate
+               Group Key: null_tab_1.id, null_tab_1.val
+               ->  Seq Scan on null_tab null_tab_1
+(7 rows)
+
+-- Ensure we get a semi-join
+EXPLAIN (COSTS OFF)
+SELECT * FROM null_tab
+WHERE NOT (id, val) > ALL (SELECT id, val FROM null_tab);
+                                      QUERY PLAN                                       
+---------------------------------------------------------------------------------------
+ Nested Loop Semi Join
+   Join Filter: (ROW(null_tab.id, null_tab.val) <= ROW(null_tab_1.id, null_tab_1.val))
+   ->  Seq Scan on null_tab
+   ->  Materialize
+         ->  Seq Scan on null_tab null_tab_1
+(5 rows)
+
+-- Ensure we get ALL SubPlan, as the operator has no negator
+EXPLAIN (COSTS OFF)
+SELECT * FROM not_null_tab
+WHERE id ?= ALL (SELECT id FROM not_null_tab);
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Seq Scan on not_null_tab
+   Filter: (ALL (id ?= (SubPlan all_1).col1))
+   SubPlan all_1
+     ->  Materialize
+           ->  Seq Scan on not_null_tab not_null_tab_1
+(5 rows)
 
 ROLLBACK;

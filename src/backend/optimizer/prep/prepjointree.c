@@ -44,6 +44,7 @@
 #include "parser/parsetree.h"
 #include "rewrite/rewriteHandler.h"
 #include "rewrite/rewriteManip.h"
+#include "utils/lsyscache.h"
 #include "utils/rel.h"
 
 
@@ -114,6 +115,7 @@ static Node *pull_up_sublinks_jointree_recurse(PlannerInfo *root, Node *jtnode,
 static Node *pull_up_sublinks_qual_recurse(PlannerInfo *root, Node *node,
 										   Node **jtlink1, Relids available_rels1,
 										   Node **jtlink2, Relids available_rels2);
+static Node *negate_sublink_testexpr(Node *testexpr);
 static Node *pull_up_subqueries_recurse(PlannerInfo *root, Node *jtnode,
 										JoinExpr *lowest_outer_join,
 										AppendRelInfo *containing_appendrel);
@@ -648,7 +650,9 @@ replace_empty_jointree(Query *parse)
 /*
  * pull_up_sublinks
  *		Attempt to pull up ANY and EXISTS SubLinks to be treated as
- *		semijoins or anti-semijoins.
+ *		semijoins or anti-semijoins.  We also transform ALL SubLinks
+ *		to ANY SubLinks if possible to unlock hashed SubPlan execution
+ *		and enable potential pull-up.
  *
  * A clause "foo op ANY (sub-SELECT)" can be processed by pulling the
  * sub-SELECT up to become a rangetable entry and treating the implied
@@ -664,6 +668,20 @@ replace_empty_jointree(Query *parse)
  *
  * Under similar conditions, EXISTS and NOT EXISTS clauses can be handled
  * by pulling up the sub-SELECT and creating a semijoin or anti-semijoin.
+ *
+ * A negated clause "NOT (foo op ANY (sub-SELECT))" can be handled
+ * similarly by creating an anti-semijoin.  However, this transformation
+ * is much more restricted than a positive ANY pull-up: to safely bypass
+ * standard SQL's 3-valued logic, we must rigidly prove that both the
+ * outer test expression and the subquery's output expression are strictly
+ * non-nullable, and that the operator itself cannot return NULL for
+ * non-null inputs.
+ *
+ * A clause "foo op ALL (sub-SELECT)" can be logically rewritten into "NOT
+ * (foo negator_op ANY (sub-SELECT))".  This conversion makes it possible
+ * for the executor to evaluate the unflattened sublink using a hashed
+ * SubPlan.  Furthermore, it exposes the sublink to the standard pull-up
+ * machinery, potentially flattening it into a semijoin or anti-semijoin.
  *
  * This routine searches for such clauses and does the necessary parsetree
  * transformations if any are found.
@@ -870,7 +888,7 @@ pull_up_sublinks_qual_recurse(PlannerInfo *root, Node *node,
 		JoinExpr   *j;
 		Relids		child_rels;
 
-		/* Is it a convertible ANY or EXISTS clause? */
+		/* Is it a convertible ANY, EXISTS or ALL clause? */
 		if (sublink->subLinkType == ANY_SUBLINK)
 		{
 			ScalarArrayOpExpr *saop;
@@ -992,12 +1010,45 @@ pull_up_sublinks_qual_recurse(PlannerInfo *root, Node *node,
 				return NULL;
 			}
 		}
+		else if (sublink->subLinkType == ALL_SUBLINK)
+		{
+			Node	   *negated_expr = negate_sublink_testexpr(sublink->testexpr);
+
+			if (negated_expr != NULL)
+			{
+				SubLink    *any_sublink;
+				Node	   *not_expr;
+
+				any_sublink = makeNode(SubLink);
+				any_sublink->subLinkType = ANY_SUBLINK;
+				any_sublink->subLinkId = 0;
+				any_sublink->testexpr = negated_expr;
+				any_sublink->operName = sublink->operName;
+				any_sublink->subselect = sublink->subselect;
+				any_sublink->location = sublink->location;
+				/* XXX should we update operName accordingly */
+
+				not_expr = (Node *) makeBoolExpr(NOT_EXPR,
+												 list_make1(any_sublink),
+												 any_sublink->location);
+
+				return pull_up_sublinks_qual_recurse(root,
+													 not_expr,
+													 jtlink1,
+													 available_rels1,
+													 jtlink2,
+													 available_rels2);
+			}
+		}
 		/* Else return it unmodified */
 		return node;
 	}
 	if (is_notclause(node))
 	{
-		/* If the immediate argument of NOT is ANY or EXISTS, try to convert */
+		/*
+		 * If the immediate argument of NOT is ANY, EXISTS or ALL, try to
+		 * convert.
+		 */
 		SubLink    *sublink = (SubLink *) get_notclausearg((Expr *) node);
 		JoinExpr   *j;
 		Relids		child_rels;
@@ -1112,6 +1163,31 @@ pull_up_sublinks_qual_recurse(PlannerInfo *root, Node *node,
 					return NULL;
 				}
 			}
+			else if (sublink->subLinkType == ALL_SUBLINK)
+			{
+				Node	   *negated_expr = negate_sublink_testexpr(sublink->testexpr);
+
+				if (negated_expr != NULL)
+				{
+					SubLink    *any_sublink;
+
+					any_sublink = makeNode(SubLink);
+					any_sublink->subLinkType = ANY_SUBLINK;
+					any_sublink->subLinkId = 0;
+					any_sublink->testexpr = negated_expr;
+					any_sublink->operName = sublink->operName;
+					any_sublink->subselect = sublink->subselect;
+					any_sublink->location = sublink->location;
+					/* XXX should we update operName accordingly */
+
+					return pull_up_sublinks_qual_recurse(root,
+														 (Node *) any_sublink,
+														 jtlink1,
+														 available_rels1,
+														 jtlink2,
+														 available_rels2);
+				}
+			}
 		}
 		/* Else return it unmodified */
 		return node;
@@ -1146,6 +1222,122 @@ pull_up_sublinks_qual_recurse(PlannerInfo *root, Node *node,
 	}
 	/* Stop if not an AND */
 	return node;
+}
+
+/*
+ * negate_sublink_testexpr
+ *		Attempt to logically negate the testexpr of an ALL_SUBLINK.
+ *
+ * This helper is used to transform ALL sublinks into ANY sublinks.  It returns
+ * a newly allocated negated expression tree, or NULL if negation is not
+ * possible.
+ */
+static Node *
+negate_sublink_testexpr(Node *testexpr)
+{
+	if (testexpr == NULL)
+		return NULL;
+	if (IsA(testexpr, OpExpr))
+	{
+		/* single-column comparison */
+		OpExpr	   *opexpr = (OpExpr *) testexpr;
+		Oid			negator = get_negator(opexpr->opno);
+
+		if (OidIsValid(negator))
+		{
+			OpExpr	   *newopexpr = makeNode(OpExpr);
+
+			newopexpr->opno = negator;
+			newopexpr->opfuncid = InvalidOid;
+			newopexpr->opresulttype = opexpr->opresulttype;
+			newopexpr->opretset = opexpr->opretset;
+			newopexpr->opcollid = opexpr->opcollid;
+			newopexpr->inputcollid = opexpr->inputcollid;
+			newopexpr->args = opexpr->args;
+			newopexpr->location = opexpr->location;
+			return (Node *) newopexpr;
+		}
+	}
+	else if (is_andclause(testexpr) || is_orclause(testexpr))
+	{
+		/* multi-column equality or inequality checks */
+		BoolExpr   *bexpr = (BoolExpr *) testexpr;
+		List	   *nargs = NIL;
+
+		/*--------------------
+		 * Apply DeMorgan's Laws:
+		 *		(NOT (AND A B)) => (OR (NOT A) (NOT B))
+		 *		(NOT (OR A B))	=> (AND (NOT A) (NOT B))
+		 * i.e., swap AND for OR and negate each subclause.
+		 *--------------------
+		 */
+		foreach_ptr(Node, arg, bexpr->args)
+		{
+			Node	   *negated_arg = negate_sublink_testexpr(arg);
+
+			if (negated_arg == NULL)
+				return NULL;
+
+			nargs = lappend(nargs, negated_arg);
+		}
+
+		return (bexpr->boolop == AND_EXPR) ?
+			(Node *) makeBoolExpr(OR_EXPR, nargs, bexpr->location) :
+			(Node *) makeBoolExpr(AND_EXPR, nargs, bexpr->location);
+	}
+	else if (IsA(testexpr, RowCompareExpr))
+	{
+		/* multi-column ordering checks */
+		RowCompareExpr *rcexpr = (RowCompareExpr *) testexpr;
+		RowCompareExpr *newrcexpr;
+		List	   *negated_opnos = NIL;
+		CompareType negated_cmptype;
+
+		foreach_oid(opno, rcexpr->opnos)
+		{
+			Oid			negator = get_negator(opno);
+
+			if (!OidIsValid(negator))
+				return NULL;
+
+			negated_opnos = lappend_oid(negated_opnos, negator);
+		}
+
+		switch (rcexpr->cmptype)
+		{
+			case COMPARE_LT:
+				negated_cmptype = COMPARE_GE;
+				break;
+			case COMPARE_LE:
+				negated_cmptype = COMPARE_GT;
+				break;
+			case COMPARE_GE:
+				negated_cmptype = COMPARE_LT;
+				break;
+			case COMPARE_GT:
+				negated_cmptype = COMPARE_LE;
+				break;
+			default:
+				/* EQ and NE cases aren't allowed here */
+				elog(ERROR, "unrecognized compare type: %d",
+					 (int) rcexpr->cmptype);
+				negated_cmptype = COMPARE_INVALID;	/* keep compiler quiet */
+				break;
+		}
+
+		newrcexpr = makeNode(RowCompareExpr);
+
+		newrcexpr->cmptype = negated_cmptype;
+		newrcexpr->opnos = negated_opnos;
+		newrcexpr->opfamilies = rcexpr->opfamilies;
+		newrcexpr->inputcollids = rcexpr->inputcollids;
+		newrcexpr->largs = rcexpr->largs;
+		newrcexpr->rargs = rcexpr->rargs;
+
+		return (Node *) newrcexpr;
+	}
+
+	return NULL;
 }
 
 /*
