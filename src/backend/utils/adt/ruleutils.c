@@ -450,6 +450,7 @@ static void get_rule_orderby(List *orderList, List *targetList,
 static void get_rule_windowclause(Query *query, deparse_context *context);
 static void get_rule_windowspec(WindowClause *wc, List *targetList,
 								deparse_context *context);
+static void appendWindowRefName(StringInfo buf, const char *refname);
 static void get_window_frame_options(int frameOptions,
 									 Node *startOffset, Node *endOffset,
 									 deparse_context *context);
@@ -7157,7 +7158,7 @@ get_rule_windowspec(WindowClause *wc, List *targetList,
 	appendStringInfoChar(buf, '(');
 	if (wc->refname)
 	{
-		appendStringInfoString(buf, quote_identifier(wc->refname));
+		appendWindowRefName(buf, wc->refname);
 		needspace = true;
 	}
 	/* partition clauses are always inherited, so only print if no refname */
@@ -7197,6 +7198,35 @@ get_rule_windowspec(WindowClause *wc, List *targetList,
 								 context);
 	}
 	appendStringInfoChar(buf, ')');
+}
+
+/*
+ * Emit the name of the existing window a window specification inherits from.
+ *
+ * PARTITION, RANGE, ROWS, and GROUPS have the same precedence as IDENT
+ * at the start of a window specification, preventing them from being
+ * recognized as an existing_window_name (see opt_existing_window_name
+ * in gram.y). Since these are unreserved keywords, quote_identifier()
+ * does not quote them, causing the generated SQL to fail when reparsed.
+ * Therefore, quote these keywords here.
+ */
+static void
+appendWindowRefName(StringInfo buf, const char *refname)
+{
+	const char *quoted = quote_identifier(refname);
+
+	if (quoted == refname &&
+		(strcmp(refname, "partition") == 0 ||
+		 strcmp(refname, "range") == 0 ||
+		 strcmp(refname, "rows") == 0 ||
+		 strcmp(refname, "groups") == 0))
+	{
+		appendStringInfoChar(buf, '"');
+		appendStringInfoString(buf, refname);
+		appendStringInfoChar(buf, '"');
+	}
+	else
+		appendStringInfoString(buf, quoted);
 }
 
 /*

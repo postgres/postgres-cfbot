@@ -17452,6 +17452,10 @@ window_specification: '(' opt_existing_window_name opt_partition_clause
  * that the shift/reduce conflict is resolved in favor of reducing the rule.
  * These keywords are thus precluded from being an existing_window_name but
  * are not reserved for any other purpose.
+ *
+ * To preserve quoting in views during dump and restore, ruleutils.c must quote
+ * those keywords when deparsing an existing_window_name.
+ * See appendWindowRefName().
  */
 opt_existing_window_name: ColId						{ $$ = $1; }
 			| /*EMPTY*/				%prec Op		{ $$ = NULL; }
