@@ -1686,6 +1686,8 @@ executeItemOptUnwrapTarget(JsonPathExecContext *cxt, JsonPathItem *jsp,
 		case jpiStrBtrim:
 		case jpiStrInitcap:
 		case jpiStrSplitPart:
+		case jpiStrSplit:
+		case jpiStrTranslate:
 			{
 				if (unwrap && JsonbType(jb) == jbvArray)
 					return executeItemUnwrapTargetArray(cxt, jsp, jb, found, false);
@@ -1693,6 +1695,85 @@ executeItemOptUnwrapTarget(JsonPathExecContext *cxt, JsonPathItem *jsp,
 				return executeStringInternalMethod(cxt, jsp, jb, found);
 			}
 			break;
+		case jpiStrJoin:
+			{
+				JsonPathItem next_elem;
+				JsonbValue	jbv_res;
+				char	   *sep;
+				char	   *null_replace = NULL;
+				StringInfoData buf;
+				bool		first = true;
+				bool		hasNext;
+
+				jspGetLeftArg(jsp, &elem);
+				sep = jspGetString(&elem, NULL);
+
+				if (jsp->content.args.right != 0)
+				{
+					jspGetRightArg(jsp, &elem);
+					null_replace = jspGetString(&elem, NULL);
+				}
+
+				/* Validate target is an array */
+				if (JsonbType(jb) != jbvArray)
+				{
+					RETURN_ERROR(ereport(ERROR,
+										 (errcode(ERRCODE_SQL_JSON_ARRAY_NOT_FOUND),
+										  errmsg("jsonpath item method .join() can only be applied to an array"))));
+				}
+
+				Assert(jb->type == jbvBinary);
+
+				initStringInfo(&buf);
+
+				/* Process the array elements */
+				{
+					JsonbIterator *it;
+					JsonbValue	v;
+					JsonbIteratorToken tok;
+
+					it = JsonbIteratorInit(jb->val.binary.data);
+					while ((tok = JsonbIteratorNext(&it, &v, true)) != WJB_DONE)
+					{
+						if (tok != WJB_ELEM)
+							continue;
+
+						if (v.type == jbvString)
+						{
+							if (!first)
+								appendStringInfoString(&buf, sep);
+							appendBinaryStringInfo(&buf, v.val.string.val, v.val.string.len);
+							first = false;
+						}
+						else if (v.type == jbvNull)
+						{
+							if (null_replace)
+							{
+								if (!first)
+									appendStringInfoString(&buf, sep);
+								appendStringInfoString(&buf, null_replace);
+								first = false;
+							}
+						}
+						else
+						{
+							RETURN_ERROR(ereport(ERROR,
+												 (errcode(ERRCODE_SQL_JSON_ITEM_CANNOT_BE_CAST_TO_TARGET_TYPE),
+												  errmsg("jsonpath .join() array elements must be strings or nulls"))));
+						}
+					}
+				}
+
+				jbv_res.type = jbvString;
+				jbv_res.val.string.val = buf.data;
+				jbv_res.val.string.len = buf.len;
+
+				hasNext = jspGetNext(jsp, &next_elem);
+				if (!hasNext && !found)
+					return jperOk;
+
+				return executeNextItem(cxt, jsp, hasNext ? &next_elem : NULL, &jbv_res, found);
+			}
 
 		default:
 			elog(ERROR, "unrecognized jsonpath item type: %d", jsp->type);
@@ -2916,7 +2997,9 @@ executeStringInternalMethod(JsonPathExecContext *cxt, JsonPathItem *jsp,
 		   jsp->type == jpiStrRtrim ||
 		   jsp->type == jpiStrBtrim ||
 		   jsp->type == jpiStrInitcap ||
-		   jsp->type == jpiStrSplitPart);
+		   jsp->type == jpiStrTranslate ||
+		   jsp->type == jpiStrSplitPart ||
+		   jsp->type == jpiStrSplit);
 
 	if (!(jb = getScalar(jb, jbvString)))
 		RETURN_ERROR(ereport(ERROR,
@@ -2930,23 +3013,33 @@ executeStringInternalMethod(JsonPathExecContext *cxt, JsonPathItem *jsp,
 	switch (jsp->type)
 	{
 		case jpiStrReplace:
+		case jpiStrTranslate:
 			{
 				char	   *from_str,
 						   *to_str;
+				PGFunction	func;
 
 				jspGetLeftArg(jsp, &elem);
 				if (elem.type != jpiString)
-					elog(ERROR, "invalid jsonpath item type for .replace() from");
+					elog(ERROR, "invalid jsonpath item type for .%s() from",
+						 jspOperationName(jsp->type));
 
 				from_str = jspGetString(&elem, NULL);
 
 				jspGetRightArg(jsp, &elem);
 				if (elem.type != jpiString)
-					elog(ERROR, "invalid jsonpath item type for .replace() to");
+					elog(ERROR, "invalid jsonpath item type for .%s() to",
+						 jspOperationName(jsp->type));
 
 				to_str = jspGetString(&elem, NULL);
 
-				resStr = TextDatumGetCString(DirectFunctionCall3Coll(replace_text,
+				/* Dispatch to the correct internal function */
+				if (jsp->type == jpiStrReplace)
+					func = replace_text;
+				else
+					func = translate;
+
+				resStr = TextDatumGetCString(DirectFunctionCall3Coll(func,
 																	 DEFAULT_COLLATION_OID,
 																	 str,
 																	 CStringGetTextDatum(from_str),
@@ -3046,6 +3139,95 @@ executeStringInternalMethod(JsonPathExecContext *cxt, JsonPathItem *jsp,
 																	 Int32GetDatum(n)));
 				break;
 			}
+		case jpiStrSplit:
+			{
+				char	   *delim_str;
+				char	   *null_str = NULL;
+				Datum		arr_datum;
+				ArrayType  *arr;
+				Datum	   *elems;
+				bool	   *nulls;
+				int			nelems;
+				JsonbInState state = {0};
+
+				/* Extract the delimiter */
+				jspGetLeftArg(jsp, &elem);
+				if (elem.type != jpiString)
+					elog(ERROR, "invalid jsonpath item type for .split() delimiter");
+
+				delim_str = jspGetString(&elem, NULL);
+
+				/* Extract the optional null_string */
+				if (jsp->content.args.right != 0)
+				{
+					jspGetRightArg(jsp, &elem);
+					if (elem.type != jpiString)
+						elog(ERROR, "invalid jsonpath item type for .split() null_string");
+
+					null_str = jspGetString(&elem, NULL);
+				}
+
+				/* forward the execution to internal text_to_array functions */
+				if (null_str)
+				{
+					arr_datum = DirectFunctionCall3Coll(text_to_array_null,
+														DEFAULT_COLLATION_OID,
+														str,
+														CStringGetTextDatum(delim_str),
+														CStringGetTextDatum(null_str));
+				}
+				else
+				{
+					arr_datum = DirectFunctionCall2Coll(text_to_array,
+														DEFAULT_COLLATION_OID,
+														str,
+														CStringGetTextDatum(delim_str));
+				}
+
+				arr = DatumGetArrayTypeP(arr_datum);
+				deconstruct_array_builtin(arr, TEXTOID, &elems, &nulls, &nelems);
+
+				pushJsonbValue(&state, WJB_BEGIN_ARRAY, NULL);
+
+				for (int i = 0; i < nelems; i++)
+				{
+					JsonbValue	v;
+
+					if (nulls[i])
+					{
+						v.type = jbvNull;
+					}
+					else
+					{
+						char	   *val = TextDatumGetCString(elems[i]);
+
+						v.type = jbvString;
+						v.val.string.val = val;
+						v.val.string.len = strlen(val);
+					}
+					pushJsonbValue(&state, WJB_ELEM, &v);
+				}
+
+				pushJsonbValue(&state, WJB_END_ARRAY, NULL);
+
+				{
+					Jsonb	   *jb_result = JsonbValueToJsonb(state.result);
+					JsonbValue	binary_jbv;
+
+					binary_jbv.type = jbvBinary;
+					binary_jbv.val.binary.data = &jb_result->root;
+					binary_jbv.val.binary.len = VARSIZE_ANY_EXHDR(jb_result);
+
+					res = jperOk;
+					hasNext = jspGetNext(jsp, &elem);
+
+					if (!hasNext && !found)
+						return res;
+
+					return executeNextItem(cxt, jsp, &elem, &binary_jbv, found);
+				}
+			}
+			break;
 		default:
 			elog(ERROR, "unsupported jsonpath item type: %d", jsp->type);
 	}
