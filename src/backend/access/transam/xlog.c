@@ -3770,6 +3770,54 @@ PreallocXlogFiles(XLogRecPtr endptr, TimeLineID tli)
 }
 
 /*
+ * Eagerly pre-create up to 'nsegs' future WAL segments, starting with the
+ * first unused segment at or after the current WAL insertion location, and
+ * return the number of segments that were newly created.
+ *
+ * This backs the pg_wal_preallocate() SQL function.  Unlike
+ * PreallocXlogFiles(), which lazily creates a single segment near the end of a
+ * checkpoint, this fills the future-segment pool on demand so that a
+ * subsequent burst of WAL activity does not pay the cost of creating and
+ * zero-filling segments in the foreground.  It is a best-effort warm-up,
+ * since concurrent WAL insertion can advance beyond the location sampled
+ * below while this function runs.
+ *
+ * The caller must ensure that recovery is not in progress and WAL file
+ * installation is active.  The work is interruptible, since creating many
+ * segments can take a while.
+ */
+int64
+PreallocNXlogFiles(int64 nsegs)
+{
+	XLogSegNo	segno;
+	XLogRecPtr	insertptr;
+	TimeLineID	tli;
+	int64		nsegsadded = 0;
+
+	insertptr = GetXLogInsertRecPtr();
+	tli = GetWALInsertionTimeLine();
+	XLByteToPrevSeg(insertptr, segno, wal_segment_size);
+
+	for (int64 i = 0; i < nsegs; i++)
+	{
+		bool		added;
+		char		path[MAXPGPATH];
+		int			lf;
+
+		CHECK_FOR_INTERRUPTS();
+
+		segno++;
+		lf = XLogFileInitInternal(segno, tli, &added, path);
+		if (lf >= 0)
+			close(lf);
+		if (added)
+			nsegsadded++;
+	}
+
+	return nsegsadded;
+}
+
+/*
  * Throws an error if the given log segment has already been removed or
  * recycled. The caller should only pass a segment that it knows to have
  * existed while the server has been running, as this function always
