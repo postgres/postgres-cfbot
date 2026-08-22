@@ -160,6 +160,13 @@ SELECT bt_index_check('bttest_b_idx', heapallindexed => false, checkunique => tr
 SELECT bt_index_parent_check('bttest_a_idx', heapallindexed => true, rootdescend => true, checkunique => true);
 SELECT bt_index_parent_check('bttest_b_idx', heapallindexed => true, rootdescend => false, checkunique => true);
 
+-- indexallkeysmatch: verify each index tuple points to heap tuple with same key
+SELECT bt_index_check('bttest_a_idx', heapallindexed => false, checkunique => false, indexallkeysmatch => true);
+SELECT bt_index_parent_check('bttest_a_idx', heapallindexed => false, rootdescend => false, checkunique => false, indexallkeysmatch => true);
+
+-- indexallkeysmatch on expression index (exercises FormIndexDatum/ii_ExpressionsState path)
+SELECT bt_index_check('bttest_a_expr_idx', heapallindexed => false, checkunique => false, indexallkeysmatch => true);
+
 -- Check that null values in an unique index are not treated as equal
 CREATE TABLE bttest_unique_nulls (a serial, b int, c int UNIQUE);
 INSERT INTO bttest_unique_nulls VALUES (generate_series(1, 10000), 2, default);
