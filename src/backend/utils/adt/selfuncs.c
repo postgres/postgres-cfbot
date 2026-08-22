@@ -305,6 +305,301 @@ eqsel(PG_FUNCTION_ARGS)
 }
 
 /*
+ * Extract the estimable branches of a CoalesceExpr.  Strips RelabelType,
+ * skips NULL-constant branches, and stops at the first non-NULL Const
+ * (setting *terminates_with_const).  Returns false if the expression
+ * is constant or no branches remain.
+ */
+static bool
+match_coalesce_join_side(Node *side,
+						 List **stripped_args,
+						 bool *terminates_with_const)
+{
+	CoalesceExpr *c;
+	ListCell   *lc;
+	Node	   *firstarg;
+	List	   *result = NIL;
+
+	*terminates_with_const = false;
+	*stripped_args = NIL;
+
+	if (side == NULL || !IsA(side, CoalesceExpr))
+		return false;
+
+	c = (CoalesceExpr *) side;
+
+	firstarg = (Node *) linitial(c->args);
+
+	while (firstarg && IsA(firstarg, RelabelType))
+		firstarg = (Node *) ((RelabelType *) firstarg)->arg;
+	if (firstarg == NULL || IsA(firstarg, Const))
+		return false;
+
+	foreach(lc, c->args)
+	{
+		Node	   *arg = (Node *) lfirst(lc);
+
+		/* strip RelabelType */
+		while (arg && IsA(arg, RelabelType))
+			arg = (Node *) ((RelabelType *) arg)->arg;
+
+		if (arg == NULL)
+		{
+			list_free(result);
+			return false;
+		}
+
+		if (IsA(arg, Const))
+		{
+			if (((Const *) arg)->consttype != c->coalescetype)
+			{
+				list_free(result);
+				return false;
+			}
+
+			/* NULL Const is skipped */
+			if (!((Const *) arg)->constisnull)
+			{
+				result = lappend(result, arg);
+				*terminates_with_const = true;
+				break;
+			}
+		}
+		else
+		{
+			if (exprType(arg) != c->coalescetype)
+			{
+				list_free(result);
+				return false;
+			}
+			result = lappend(result, arg);
+		}
+	}
+
+	if (result == NIL)
+		return false;
+
+	*stripped_args = result;
+	return true;
+}
+
+/*
+ * Fill prefix_probs[i] = Prod_{j<i} stanullfrac(args[j]) for a stripped
+ * COALESCE arg list.  Returns false if any non-Const arg lacks statistics.
+ */
+static bool
+get_coalesce_prefix_probs(PlannerInfo *root, List *args, double *prefix_probs)
+{
+	ListCell   *lc;
+	int			i = 0;
+	double		prefix = 1.0;
+
+	foreach(lc, args)
+	{
+		Node	   *arg = (Node *) lfirst(lc);
+
+		prefix_probs[i++] = prefix;
+
+		/* nothing to fold for the last arg or a Const */
+		if (lnext(args, lc) == NULL || IsA(arg, Const))
+			continue;
+
+		{
+			VariableStatData vd;
+			double		p_i;
+
+			examine_variable(root, arg, 0, &vd);
+			if (!HeapTupleIsValid(vd.statsTuple))
+			{
+				ReleaseVariableStats(vd);
+				return false;
+			}
+			p_i = ((Form_pg_statistic) GETSTRUCT(vd.statsTuple))->stanullfrac;
+			ReleaseVariableStats(vd);
+
+			if (p_i < 0.0 || p_i > 1.0)
+				return false;
+
+			prefix *= p_i;
+		}
+	}
+
+	return true;
+}
+
+/*
+ * Common guts of eqsel/eqjoinsel when one or both operands are CoalesceExpr.
+ * Computes:
+ *
+ *   sel(COALESCE(l_1,...,l_M) = COALESCE(r_1,...,r_N)) =
+ *       Sum_{i,j}  P_L(reach i) * P_R(reach j) * sel(l_i = r_j)
+ *
+ * where P(reach i) = Prod_{j<i} stanullfrac(arg_j).  A non-COALESCE operand
+ * is treated as a single-element list.
+ */
+static bool
+try_coalesce_eq(PG_FUNCTION_ARGS, double *selec_out)
+{
+	PlannerInfo *root = (PlannerInfo *) PG_GETARG_POINTER(0);
+	Oid			operator = PG_GETARG_OID(1);
+	List	   *args = (List *) PG_GETARG_POINTER(2);
+	bool		is_eqjoin = (fcinfo->flinfo != NULL &&
+							 fcinfo->flinfo->fn_oid == F_EQJOINSEL);
+	SpecialJoinInfo *sjinfo = is_eqjoin ?
+		(SpecialJoinInfo *) PG_GETARG_POINTER(4) : NULL;
+	int			eqsel_varRelid = is_eqjoin ? 0 : PG_GETARG_INT32(3);
+	Oid			collation = PG_GET_COLLATION();
+	Node	   *left;
+	Node	   *right;
+	List	   *left_args = NIL;
+	List	   *right_args = NIL;
+	bool		left_is_coalesce;
+	bool		right_is_coalesce;
+	bool		left_term_const = false;
+	bool		right_term_const = false;
+	double	   *left_prefix;
+	double	   *right_prefix;
+	double		acc_selec = 0.0;
+	ListCell   *llc;
+	int			li;
+
+	if (list_length(args) != 2)
+		return false;
+
+	left = (Node *) linitial(args);
+	right = (Node *) lsecond(args);
+
+	left_is_coalesce = match_coalesce_join_side(left, &left_args,
+												&left_term_const);
+	right_is_coalesce = match_coalesce_join_side(right, &right_args,
+												 &right_term_const);
+
+	if (!left_is_coalesce && !right_is_coalesce)
+		return false;
+
+	/*
+	 * One side is a CoalesceExpr that we declined to decompose.  Give up
+	 * rather than wrap it as a single opaque branch below, which would add a
+	 * bogus term to the sum; let the caller estimate the clause normally.
+	 */
+	if ((left_is_coalesce && !right_is_coalesce && IsA(right, CoalesceExpr)) ||
+		(right_is_coalesce && !left_is_coalesce && IsA(left, CoalesceExpr)))
+	{
+		list_free(left_args);
+		list_free(right_args);
+		return false;
+	}
+
+	if (!left_is_coalesce)
+	{
+		left_args = list_make1(left);
+		left_term_const = IsA(left, Const);
+	}
+	if (!right_is_coalesce)
+	{
+		right_args = list_make1(right);
+		right_term_const = IsA(right, Const);
+	}
+
+	left_prefix = (double *) palloc(sizeof(double) * list_length(left_args));
+	right_prefix = (double *) palloc(sizeof(double) * list_length(right_args));
+
+	if (!get_coalesce_prefix_probs(root, left_args, left_prefix) ||
+		!get_coalesce_prefix_probs(root, right_args, right_prefix))
+	{
+		pfree(left_prefix);
+		pfree(right_prefix);
+		list_free(left_args);
+		list_free(right_args);
+		return false;
+	}
+
+	li = 0;
+	foreach(llc, left_args)
+	{
+		Node	   *larg = (Node *) lfirst(llc);
+		bool		lconst = IsA(larg, Const);
+		ListCell   *rlc;
+		int			ri = 0;
+
+		if (left_prefix[li] < 1.0e-12)
+			break;
+
+		foreach(rlc, right_args)
+		{
+			Node	   *rarg = (Node *) lfirst(rlc);
+			bool		rconst = IsA(rarg, Const);
+			Selectivity contrib = 0.0;
+
+			if (left_prefix[li] * right_prefix[ri] < 1.0e-12)
+				break;
+
+			if (lconst && rconst)
+			{
+				Const	   *lc = (Const *) larg;
+				Const	   *rc = (Const *) rarg;
+
+				/*
+				 * Both branches are constants, so the equality is constant
+				 * too: a match is selectivity 1.0, a mismatch 0.0.  A NULL
+				 * input makes the strict operator never return true, i.e.
+				 * 0.0.
+				 */
+				if (!(lc->constisnull || rc->constisnull) &&
+					DatumGetBool(OidFunctionCall2Coll(get_opcode(operator),
+													  collation,
+													  lc->constvalue,
+													  rc->constvalue)))
+					contrib = 1.0;
+			}
+			else
+			{
+				List	   *sub_args = list_make2(copyObject(larg),
+												  copyObject(rarg));
+
+				if (!is_eqjoin || lconst || rconst)
+				{
+					contrib = DatumGetFloat8(DirectFunctionCall4Coll(eqsel,
+																	 collation,
+																	 PointerGetDatum(root),
+																	 ObjectIdGetDatum(operator),
+																	 PointerGetDatum(sub_args),
+																	 Int32GetDatum(eqsel_varRelid)));
+				}
+				else
+				{
+					contrib = DatumGetFloat8(DirectFunctionCall5Coll(eqjoinsel,
+																	 collation,
+																	 PointerGetDatum(root),
+																	 ObjectIdGetDatum(operator),
+																	 PointerGetDatum(sub_args),
+																	 Int16GetDatum(JOIN_INNER),
+																	 PointerGetDatum(sjinfo)));
+				}
+
+				list_free(sub_args);
+			}
+
+			CLAMP_PROBABILITY(contrib);
+			acc_selec += left_prefix[li] * right_prefix[ri] * contrib;
+
+			ri++;
+		}
+
+		li++;
+	}
+
+	pfree(left_prefix);
+	pfree(right_prefix);
+	list_free(left_args);
+	list_free(right_args);
+
+	CLAMP_PROBABILITY(acc_selec);
+	*selec_out = acc_selec;
+	return true;
+}
+
+/*
  * Common code for eqsel() and neqsel()
  */
 static double
@@ -319,6 +614,9 @@ eqsel_internal(PG_FUNCTION_ARGS, bool negate)
 	Node	   *other;
 	bool		varonleft;
 	double		selec;
+
+	if (try_coalesce_eq(fcinfo, &selec))
+		return selec;
 
 	/*
 	 * When asked about <>, we do the estimation using the corresponding =
@@ -2421,6 +2719,9 @@ eqjoinsel(PG_FUNCTION_ARGS)
 	bool		join_is_reversed;
 	RelOptInfo *inner_rel;
 
+	if (try_coalesce_eq(fcinfo, &selec))
+		PG_RETURN_FLOAT8((float8) selec);
+
 	get_join_variables(root, args, sjinfo,
 					   &vardata1, &vardata2, &join_is_reversed);
 
@@ -4378,6 +4679,154 @@ estimate_multivariate_bucketsize(PlannerInfo *root, RelOptInfo *inner,
 }
 
 /*
+ * Most-common-value frequency for vardata.  Falls back to 1/ntuples when
+ * only a histogram slot is present.  Returns 0.0 if no statistics are
+ * available.
+ */
+static void
+get_variable_mcv_freq(VariableStatData *vardata, Selectivity *mcv_freq)
+{
+	AttStatsSlot sslot;
+
+	*mcv_freq = 0.0;
+
+	if (!HeapTupleIsValid(vardata->statsTuple))
+		return;
+
+	if (get_attstatsslot(&sslot, vardata->statsTuple,
+						 STATISTIC_KIND_MCV, InvalidOid,
+						 ATTSTATSSLOT_NUMBERS))
+	{
+		if (sslot.nnumbers > 0)
+			*mcv_freq = sslot.numbers[0];
+		free_attstatsslot(&sslot);
+	}
+	else if (get_attstatsslot(&sslot, vardata->statsTuple,
+							  STATISTIC_KIND_HISTOGRAM, InvalidOid,
+							  0))
+	{
+		/* no MCVs but histogram present: column is likely unique */
+		if (vardata->rel && vardata->rel->tuples > 0)
+			*mcv_freq = 1.0 / vardata->rel->tuples;
+	}
+}
+
+/*
+ * Estimate bucket stats for a CoalesceExpr hashkey when examine_variable()
+ * returned a default ndistinct.  Uses per-branch ndistinct and mcv_freq,
+ * weighted by null fall-through probability.
+ */
+static bool
+hash_bucket_stats_coalesce_dispatch(PlannerInfo *root,
+									Node *hashkey,
+									double nbuckets,
+									Selectivity *mcv_freq,
+									Selectivity *bucketsize_frac)
+{
+	List	   *stripped_args;
+	bool		terminates_with_const;
+	double	   *prefix;
+	int			nargs;
+	int			i;
+	ListCell   *lc;
+	double		nd_mix = 0.0;
+	Selectivity mcv_mix = 0.0;
+	double		rel_rows_proxy = 0.0;
+	double		rel_tuples_proxy = 0.0;
+	double		estfract;
+
+	if (!match_coalesce_join_side(hashkey, &stripped_args, &terminates_with_const))
+		return false;
+
+	nargs = list_length(stripped_args);
+	prefix = (double *) palloc(sizeof(double) * nargs);
+
+	if (!get_coalesce_prefix_probs(root, stripped_args, prefix))
+	{
+		pfree(prefix);
+		list_free(stripped_args);
+		return false;
+	}
+
+	i = 0;
+	foreach(lc, stripped_args)
+	{
+		Node	   *arg = (Node *) lfirst(lc);
+
+		if (IsA(arg, Const))
+		{
+			mcv_mix = Max(mcv_mix, prefix[i]);
+			if (prefix[i] > 0.0)
+				nd_mix += 1.0;
+		}
+		else
+		{
+			VariableStatData vd;
+			double		nd_i;
+			bool		isdefault;
+			Selectivity mcv_i;
+
+			examine_variable(root, arg, 0, &vd);
+			nd_i = get_variable_numdistinct(&vd, &isdefault);
+
+			if (isdefault)
+			{
+				ReleaseVariableStats(vd);
+				pfree(prefix);
+				list_free(stripped_args);
+				return false;
+			}
+
+			get_variable_mcv_freq(&vd, &mcv_i);
+
+			nd_mix = Max(nd_mix, nd_i);
+			mcv_mix = Max(mcv_mix, prefix[i] * mcv_i);
+
+			if (i == 0 && vd.rel && vd.rel->tuples > 0)
+			{
+				rel_rows_proxy = vd.rel->rows;
+				rel_tuples_proxy = vd.rel->tuples;
+			}
+
+			ReleaseVariableStats(vd);
+		}
+
+		i++;
+	}
+
+	pfree(prefix);
+	list_free(stripped_args);
+
+	if (rel_tuples_proxy > 0.0)
+	{
+		nd_mix *= rel_rows_proxy / rel_tuples_proxy;
+		nd_mix = clamp_row_est(nd_mix);
+	}
+
+	if (nd_mix <= 0.0)
+		return false;
+
+	if (nd_mix > nbuckets)
+		estfract = 1.0 / nbuckets;
+	else
+		estfract = 1.0 / nd_mix;
+
+	CLAMP_PROBABILITY(mcv_mix);
+	*mcv_freq = Max(*mcv_freq, mcv_mix);
+	CLAMP_PROBABILITY(*mcv_freq);
+	estfract = Max(estfract, *mcv_freq);
+
+	if (estfract < 1.0e-6)
+		estfract = 1.0e-6;
+	else if (estfract > 1.0)
+		estfract = 1.0;
+
+	*bucketsize_frac = (Selectivity) estfract;
+
+	return true;
+}
+
+/*
  * Estimate hash bucket statistics when the specified expression is used
  * as a hash key for the given number of buckets.
  *
@@ -4430,42 +4879,20 @@ estimate_hash_bucket_stats(PlannerInfo *root, Node *hashkey, double nbuckets,
 	double		estfract,
 				ndistinct;
 	bool		isdefault;
-	AttStatsSlot sslot;
 
 	examine_variable(root, hashkey, 0, &vardata);
 
-	/* Initialize *mcv_freq to "unknown" */
-	*mcv_freq = 0.0;
-
-	/* Look up the frequency of the most common value, if available */
-	if (HeapTupleIsValid(vardata.statsTuple))
-	{
-		if (get_attstatsslot(&sslot, vardata.statsTuple,
-							 STATISTIC_KIND_MCV, InvalidOid,
-							 ATTSTATSSLOT_NUMBERS))
-		{
-			/*
-			 * The first MCV stat is for the most common value.
-			 */
-			if (sslot.nnumbers > 0)
-				*mcv_freq = sslot.numbers[0];
-			free_attstatsslot(&sslot);
-		}
-		else if (get_attstatsslot(&sslot, vardata.statsTuple,
-								  STATISTIC_KIND_HISTOGRAM, InvalidOid,
-								  0))
-		{
-			/*
-			 * If there are no recorded MCVs, but we do have a histogram, then
-			 * assume that ANALYZE determined that the column is unique.
-			 */
-			if (vardata.rel && vardata.rel->tuples > 0)
-				*mcv_freq = 1.0 / vardata.rel->tuples;
-		}
-	}
+	get_variable_mcv_freq(&vardata, mcv_freq);
 
 	/* Get number of distinct values */
 	ndistinct = get_variable_numdistinct(&vardata, &isdefault);
+
+	if (isdefault && hash_bucket_stats_coalesce_dispatch(root, hashkey, nbuckets,
+														 mcv_freq, bucketsize_frac))
+	{
+		ReleaseVariableStats(vardata);
+		return;
+	}
 
 	/*
 	 * If ndistinct isn't real, punt.  We normally return 0.1, but if the
