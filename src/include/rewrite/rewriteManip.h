@@ -89,7 +89,8 @@ extern Node *add_nulling_relids(Node *node,
 								const Bitmapset *added_relids);
 extern Node *remove_nulling_relids(Node *node,
 								   const Bitmapset *removable_relids,
-								   const Bitmapset *except_relids);
+								   const Bitmapset *except_relids,
+								   bool remove_noop_phvs);
 
 extern Node *replace_rte_variables(Node *node,
 								   int target_varno, int sublevels_up,

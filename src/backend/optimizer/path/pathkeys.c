@@ -1408,7 +1408,7 @@ make_pathkeys_for_sortclauses_extended(PlannerInfo *root,
 			sortkey = (Expr *)
 				remove_nulling_relids((Node *) sortkey,
 									  bms_make_singleton(root->group_rtindex),
-									  NULL);
+									  NULL, true);
 		}
 		pathkey = make_pathkey_from_sortop(root,
 										   sortkey,

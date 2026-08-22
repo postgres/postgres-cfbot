@@ -3689,7 +3689,7 @@ add_unique_group_var(PlannerInfo *root, List *varinfos,
 	 * extended statistics (see estimate_multivariate_ndistinct).  So strip
 	 * them out first.
 	 */
-	var = remove_nulling_relids(var, root->outer_join_rels, NULL);
+	var = remove_nulling_relids(var, root->outer_join_rels, NULL, false);
 
 	foreach(lc, varinfos)
 	{
@@ -4270,7 +4270,8 @@ estimate_multivariate_bucketsize(PlannerInfo *root, RelOptInfo *inner,
 				 * Clear nullingrels to correctly match hash keys.  See
 				 * add_unique_group_var()'s comment for details.
 				 */
-				expr = remove_nulling_relids(expr, root->outer_join_rels, NULL);
+				expr = remove_nulling_relids(expr, root->outer_join_rels,
+											 NULL, false);
 
 				/*
 				 * Detect and exclude exact duplicates from the list of hash
@@ -5778,7 +5779,8 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 		 * extended statistics.  So strip them out first.
 		 */
 		if (bms_overlap(varnos, root->outer_join_rels))
-			node = remove_nulling_relids(node, root->outer_join_rels, NULL);
+			node = remove_nulling_relids(node, root->outer_join_rels,
+										 NULL, false);
 
 		foreach(ilist, onerel->indexlist)
 		{

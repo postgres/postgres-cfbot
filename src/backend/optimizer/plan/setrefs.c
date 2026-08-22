@@ -2553,11 +2553,11 @@ set_upper_references(PlannerInfo *root, Plan *plan, int rtoffset)
 		plan->targetlist = (List *)
 			remove_nulling_relids((Node *) plan->targetlist,
 								  bms_make_singleton(root->group_rtindex),
-								  NULL);
+								  NULL, true);
 		plan->qual = (List *)
 			remove_nulling_relids((Node *) plan->qual,
 								  bms_make_singleton(root->group_rtindex),
-								  NULL);
+								  NULL, true);
 	}
 
 	output_targetlist = NIL;

@@ -5832,7 +5832,7 @@ make_group_input_target(PlannerInfo *root, PathTarget *final_target)
 				expr = (Expr *)
 					remove_nulling_relids((Node *) expr,
 										  bms_make_singleton(root->group_rtindex),
-										  NULL);
+										  NULL, true);
 			}
 			add_column_to_pathtarget(input_target, expr, sgref);
 		}
@@ -5876,7 +5876,7 @@ make_group_input_target(PlannerInfo *root, PathTarget *final_target)
 		non_group_vars = (List *)
 			remove_nulling_relids((Node *) non_group_vars,
 								  bms_make_singleton(root->group_rtindex),
-								  NULL);
+								  NULL, true);
 	}
 	add_new_columns_to_pathtarget(input_target, non_group_vars);
 

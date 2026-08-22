@@ -1160,7 +1160,7 @@ split_pathtarget_walker(Node *node, split_pathtarget_context *context)
 		sanitized_node =
 			remove_nulling_relids(node,
 								  bms_make_singleton(context->root->group_rtindex),
-								  NULL);
+								  NULL, true);
 	}
 
 	/*
