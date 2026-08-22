@@ -12440,9 +12440,9 @@
 { oid => '3443',
   descr => 'pg_controldata recovery state information as a function',
   proname => 'pg_control_recovery', provolatile => 'v', prorettype => 'record',
-  proargtypes => '', proallargtypes => '{pg_lsn,int4,pg_lsn,pg_lsn,bool}',
-  proargmodes => '{o,o,o,o,o}',
-  proargnames => '{min_recovery_end_lsn,min_recovery_end_timeline,backup_start_lsn,backup_end_lsn,end_of_backup_record_required}',
+  proargtypes => '', proallargtypes => '{pg_lsn,int4,pg_lsn,pg_lsn,bool,bool}',
+  proargmodes => '{o,o,o,o,o,o}',
+  proargnames => '{min_recovery_end_lsn,min_recovery_end_timeline,backup_start_lsn,backup_end_lsn,end_of_backup_record_required,backup_label_required}',
   prosrc => 'pg_control_recovery' },
 
 { oid => '3444',

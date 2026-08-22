@@ -659,7 +659,14 @@ InitWalRecovery(ControlFileData *ControlFile, bool *wasShutdown_ptr,
 	}
 	else
 	{
-		/* No backup_label file has been found if we are here. */
+		/*
+		 * No backup_label file has been found if we are here. Error if the
+		 * control file requires backup_label.
+		 */
+		if (ControlFile->backupLabelRequired)
+			ereport(FATAL,
+					errmsg("could not find backup_label required for recovery"),
+					errhint("restore the backup_label file that was created during the backup."));
 
 		/*
 		 * If tablespace_map file is present without backup_label file, there
@@ -939,11 +946,21 @@ InitWalRecovery(ControlFileData *ControlFile, bool *wasShutdown_ptr,
 		 *
 		 * Any other state indicates that the backup somehow became corrupted
 		 * and we can't sensibly continue with recovery.
+		 *
+		 * backupLabelRequired is set to false since backup_label is no longer
+		 * required once pg_control has been updated on disk. If recovery
+		 * terminates abnormally between when pg_control is updated and
+		 * backup_label is renamed then on restart pg_control will be
+		 * reinitialized from backup_label. If the user manually deletes
+		 * backup_label before restarting then recovery will proceed with the
+		 * contents of pg_control just as it would if the crash had happened
+		 * directly after backup_label rename.
 		 */
 		if (haveBackupLabel)
 		{
 			ControlFile->backupStartPoint = checkPoint.redo;
 			ControlFile->backupEndRequired = backupEndRequired;
+			ControlFile->backupLabelRequired = false;
 
 			if (backupFromStandby)
 			{
