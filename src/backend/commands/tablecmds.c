@@ -4756,7 +4756,8 @@ AlterTableGetLockLevel(List *cmds)
 				 * Subcommands that may be visible to concurrent SELECTs
 				 */
 			case AT_DropColumn: /* change visible to SELECT */
-			case AT_AddColumnToView:	/* CREATE VIEW */
+			case AT_AddColumnToView:	/* via CREATE OR REPLACE
+										 * [MATERIALIZED] VIEW */
 			case AT_DropOids:	/* used to equiv to DropColumn */
 			case AT_EnableAlwaysRule:	/* may change SELECT rules */
 			case AT_EnableReplicaRule:	/* may change SELECT rules */
@@ -5056,8 +5057,9 @@ ATPrepCmd(List **wqueue, Relation rel, AlterTableCmd *cmd,
 			/* Recursion occurs during execution phase */
 			pass = AT_PASS_ADD_COL;
 			break;
-		case AT_AddColumnToView:	/* add column via CREATE OR REPLACE VIEW */
-			ATSimplePermissions(cmd->subtype, rel, ATT_VIEW);
+		case AT_AddColumnToView:	/* via CREATE OR REPLACE [MATERIALIZED]
+									 * VIEW */
+			ATSimplePermissions(cmd->subtype, rel, ATT_VIEW | ATT_MATVIEW);
 			ATPrepAddColumn(wqueue, rel, recurse, recursing, true, cmd,
 							lockmode, context);
 			/* Recursion occurs during execution phase */
@@ -5494,7 +5496,8 @@ ATExecCmd(List **wqueue, AlteredTableInfo *tab,
 	switch (cmd->subtype)
 	{
 		case AT_AddColumn:		/* ADD COLUMN */
-		case AT_AddColumnToView:	/* add column via CREATE OR REPLACE VIEW */
+		case AT_AddColumnToView:	/* via CREATE OR REPLACE [MATERIALIZED]
+									 * VIEW */
 			address = ATExecAddColumn(wqueue, tab, rel, &cmd,
 									  cmd->recurse, false,
 									  lockmode, cur_pass, context);
