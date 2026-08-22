@@ -7910,6 +7910,29 @@ FROM pg_stat_get_backend_idset() AS backendid;
        </itemizedlist>
       </para></entry>
      </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>index_vacuum_pids</structfield> <type>integer[]</type>
+      </para>
+      <para>
+       The process IDs currently vacuuming or cleaning up an index (the
+       leader process and any parallel workers). Null when no index is
+       being processed.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>index_vacuum_oids</structfield> <type>oid[]</type>
+      </para>
+      <para>
+       The OIDs of the indexes being vacuumed or cleaned up, aligned by
+       position with <structfield>index_vacuum_pids</structfield>: the index
+       at each position is being processed by the process ID at the same
+       position. Null when no index is being processed.
+      </para></entry>
+     </row>
     </tbody>
    </tgroup>
   </table>

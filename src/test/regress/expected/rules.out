@@ -2213,9 +2213,18 @@ pg_stat_progress_vacuum| SELECT s.pid,
             WHEN 2 THEN 'autovacuum'::text
             WHEN 3 THEN 'autovacuum_wraparound'::text
             ELSE NULL::text
-        END AS started_by
-   FROM (pg_stat_get_progress_info('VACUUM'::text) s(pid, datid, relid, param1, param2, param3, param4, param5, param6, param7, param8, param9, param10, param11, param12, param13, param14, param15, param16, param17, param18, param19, param20)
-     LEFT JOIN pg_database d ON ((s.datid = d.oid)));
+        END AS started_by,
+    i.index_vacuum_pids,
+    i.index_vacuum_oids
+   FROM ((pg_stat_get_progress_info('VACUUM'::text) s(pid, datid, relid, param1, param2, param3, param4, param5, param6, param7, param8, param9, param10, param11, param12, param13, param14, param15, param16, param17, param18, param19, param20)
+     LEFT JOIN pg_database d ON ((s.datid = d.oid)))
+     LEFT JOIN pg_stat_activity a ON ((s.pid = a.pid))),
+    LATERAL ( SELECT array_agg(w.pid ORDER BY (w.pid <> s.pid), w.pid) AS index_vacuum_pids,
+            array_agg((w.param14)::oid ORDER BY (w.pid <> s.pid), w.pid) AS index_vacuum_oids
+           FROM (pg_stat_get_progress_info('VACUUM'::text) w(pid, datid, relid, param1, param2, param3, param4, param5, param6, param7, param8, param9, param10, param11, param12, param13, param14, param15, param16, param17, param18, param19, param20)
+             LEFT JOIN pg_stat_activity wa ON ((w.pid = wa.pid)))
+          WHERE ((COALESCE(wa.leader_pid, w.pid) = s.pid) AND (w.param14 <> 0))) i
+  WHERE (a.leader_pid IS NULL);
 pg_stat_recovery| SELECT promote_triggered,
     last_replayed_read_lsn,
     last_replayed_end_lsn,
