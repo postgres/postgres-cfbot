@@ -64,6 +64,7 @@ static bool contain_windowfuncs_walker(Node *node, void *context);
 static bool locate_windowfunc_walker(Node *node,
 									 locate_windowfunc_context *context);
 static bool checkExprHasSubLink_walker(Node *node, void *context);
+static Relids adjust_relid_set(Relids relids, int oldrelid, int newrelid);
 static Node *add_nulling_relids_mutator(Node *node,
 										add_nulling_relids_context *context);
 static Node *remove_nulling_relids_mutator(Node *node,
@@ -528,23 +529,27 @@ OffsetVarNodes(Node *node, int offset, int sublevels_up)
  *
  * Find all Var nodes in the given tree belonging to a specific relation
  * (identified by sublevels_up and rt_index), and change their varno fields
- * to 'new_index'.  The varnosyn fields are changed too.  Also, adjust other
- * nodes that contain rangetable indexes, such as RangeTblRef and JoinExpr.
+ * to 'new_index' (see adjust_relid_set for the exact change behavior).
+ * The varnosyn fields are changed too.  Also adjust other nodes that
+ * contain rangetable indexes, such as RangeTblRef and JoinExpr.
  *
  * NOTE: although this has the form of a walker, we cheat and modify the
  * nodes in-place.  The given expression tree should have been copied
  * earlier to ensure that no unwanted side-effects occur!
  */
 
+typedef struct
+{
+	int			rt_index;
+	int			new_index;
+	int			sublevels_up;
+} ChangeVarNodes_context;
+
 static bool
 ChangeVarNodes_walker(Node *node, ChangeVarNodes_context *context)
 {
 	if (node == NULL)
 		return false;
-
-	if (context->callback && context->callback(node, context))
-		return false;
-
 	if (IsA(node, Var))
 	{
 		Var		   *var = (Var *) node;
@@ -649,28 +654,14 @@ ChangeVarNodes_walker(Node *node, ChangeVarNodes_context *context)
 	return expression_tree_walker(node, ChangeVarNodes_walker, context);
 }
 
-/*
- * ChangeVarNodesExtended - similar to ChangeVarNodes, but with an additional
- *							'callback' param
- *
- * ChangeVarNodes changes a given node and all of its underlying nodes.  This
- * version of function additionally takes a callback, which has a chance to
- * process a node before ChangeVarNodes_walker.  A callback returns a boolean
- * value indicating if the given node should be skipped from further processing
- * by ChangeVarNodes_walker.  The callback is called only for expressions and
- * other children nodes of a Query processed by a walker.  Initial processing
- * of the root Query node doesn't invoke the callback.
- */
 void
-ChangeVarNodesExtended(Node *node, int rt_index, int new_index,
-					   int sublevels_up, ChangeVarNodes_callback callback)
+ChangeVarNodes(Node *node, int rt_index, int new_index, int sublevels_up)
 {
 	ChangeVarNodes_context context;
 
 	context.rt_index = rt_index;
 	context.new_index = new_index;
 	context.sublevels_up = sublevels_up;
-	context.callback = callback;
 
 	/*
 	 * Must be prepared to start with a Query or a bare expression tree; if
@@ -717,36 +708,6 @@ ChangeVarNodesExtended(Node *node, int rt_index, int new_index,
 		ChangeVarNodes_walker(node, &context);
 }
 
-void
-ChangeVarNodes(Node *node, int rt_index, int new_index, int sublevels_up)
-{
-	ChangeVarNodesExtended(node, rt_index, new_index, sublevels_up, NULL);
-}
-
-/*
- * ChangeVarNodesWalkExpression - process subexpression within a callback
- *								  function passed to ChangeVarNodesExtended.
- *
- * This is intended to be used by a callback that needs to recursively
- * process subexpressions of some node being visited by an outer
- * ChangeVarNodesExtended call, instead of relying on ChangeVarNodes_walker's
- * default recursion.  We invoke ChangeVarNodes_walker directly rather than
- * via expression_tree_walker, because expression_tree_walker only visits
- * child nodes and would fail to process the passed node itself --
- * for example, a bare Var node would not get its varno adjusted.
- *
- * Because this calls ChangeVarNodes_walker directly, if the passed node is
- * a Query, it will be treated as a sub-Query: sublevels_up is incremented
- * before recursing into it, and Query-level fields (resultRelation,
- * mergeTargetRelation, rowMarks, etc.) will not be adjusted.  Do not apply
- * this to a top-level Query node; use ChangeVarNodesExtended for that.
- */
-bool
-ChangeVarNodesWalkExpression(Node *node, ChangeVarNodes_context *context)
-{
-	return ChangeVarNodes_walker(node, context);
-}
-
 /*
  * adjust_relid_set - substitute newrelid for oldrelid in a Relid set
  *
@@ -756,7 +717,7 @@ ChangeVarNodesWalkExpression(Node *node, ChangeVarNodes_context *context)
  * a special varno, this function does nothing.  When newrelid is a special
  * varno, this function behaves as delete.
  */
-Relids
+static Relids
 adjust_relid_set(Relids relids, int oldrelid, int newrelid)
 {
 	if (!IS_SPECIAL_VARNO(oldrelid) && bms_is_member(oldrelid, relids))
