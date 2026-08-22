@@ -14,6 +14,7 @@
 #define PARTITION_H
 
 #include "partitioning/partdefs.h"
+#include "storage/lockdefs.h"
 #include "utils/relcache.h"
 
 /* Seed for the extended hash function */
@@ -21,6 +22,7 @@
 
 extern Oid	get_partition_parent(Oid relid, bool even_if_detached);
 extern List *get_partition_ancestors(Oid relid);
+extern List *lock_partition_ancestors(Oid relid, LOCKMODE lockmode);
 extern Oid	index_get_partition(Relation partition, Oid indexId);
 extern List *map_partition_varattnos(List *expr, int fromrel_varno,
 									 Relation to_rel, Relation from_rel);
