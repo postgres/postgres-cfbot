@@ -1127,6 +1127,31 @@ CREATE VIEW pg_replication_slots AS
     FROM pg_get_replication_slots() AS L
             LEFT JOIN pg_database D ON (L.datoid = D.oid);
 
+CREATE VIEW pg_xmin_horizon AS
+    SELECT
+        c.kind,
+        c.pid,
+        c.slot_name,
+        p.gid,
+        c.datid,
+        d.datname,
+        c.shared_xmin,
+        c.catalog_xmin,
+        c.data_xmin,
+        CASE c.kind
+            WHEN 'backend'       THEN a.xact_start
+            WHEN 'prepared_xact' THEN p.prepared
+            ELSE NULL
+        END AS xact_start
+    FROM pg_get_xmin_horizon() c
+        LEFT JOIN pg_stat_activity a ON a.pid = c.pid
+        LEFT JOIN pg_prepared_xacts p
+            ON c.kind = 'prepared_xact' AND p.transaction = c.data_xmin
+        LEFT JOIN pg_database d ON d.oid = c.datid;
+
+REVOKE ALL ON pg_xmin_horizon FROM PUBLIC;
+GRANT SELECT ON pg_xmin_horizon TO pg_read_all_stats;
+
 CREATE VIEW pg_stat_replication_slots AS
     SELECT
             s.slot_name,

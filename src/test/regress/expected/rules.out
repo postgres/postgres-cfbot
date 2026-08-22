@@ -2906,6 +2906,24 @@ pg_wait_events| SELECT type,
     name,
     description
    FROM pg_get_wait_events() pg_get_wait_events(type, name, description);
+pg_xmin_horizon| SELECT c.kind,
+    c.pid,
+    c.slot_name,
+    p.gid,
+    c.datid,
+    d.datname,
+    c.shared_xmin,
+    c.catalog_xmin,
+    c.data_xmin,
+        CASE c.kind
+            WHEN 'backend'::text THEN a.xact_start
+            WHEN 'prepared_xact'::text THEN p.prepared
+            ELSE NULL::timestamp with time zone
+        END AS xact_start
+   FROM (((pg_get_xmin_horizon() c(kind, pid, slot_name, datid, shared_xmin, catalog_xmin, data_xmin)
+     LEFT JOIN pg_stat_activity a ON ((a.pid = c.pid)))
+     LEFT JOIN pg_prepared_xacts p ON (((c.kind = 'prepared_xact'::text) AND (p.transaction = c.data_xmin))))
+     LEFT JOIN pg_database d ON ((d.oid = c.datid)));
 SELECT tablename, rulename, definition FROM pg_rules
 WHERE schemaname = 'pg_catalog'
 ORDER BY tablename, rulename;
