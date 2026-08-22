@@ -1101,7 +1101,14 @@ CreateSubscription(ParseState *pstate, CreateSubscriptionStmt *stmt,
 	 * conflict during replication.
 	 */
 	if (opts.enabled || opts.retaindeadtuples)
+	{
+		if (max_logical_replication_workers == 0)
+			ereport(WARNING,
+					(errmsg("subscription was created, but logical replication is disabled"),
+					 errhint("To initiate replication, set \"max_logical_replication_workers\" to a non zero value.")));
+
 		ApplyLauncherWakeupAtCommit();
+	}
 
 	InvokeObjectPostCreateHook(SubscriptionRelationId, subid, 0);
 
@@ -2138,7 +2145,14 @@ AlterSubscription(ParseState *pstate, AlterSubscriptionStmt *stmt,
 				replaces[Anum_pg_subscription_subenabled - 1] = true;
 
 				if (opts.enabled)
+				{
+					if (max_logical_replication_workers == 0)
+						ereport(WARNING,
+								(errmsg("subscription was enabled, but logical replication is disabled"),
+								 errhint("To initiate replication, set \"max_logical_replication_workers\" to a non zero value.")));
+
 					ApplyLauncherWakeupAtCommit();
+				}
 
 				update_tuple = true;
 				break;
