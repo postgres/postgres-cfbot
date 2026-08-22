@@ -72,6 +72,8 @@ extern void EventTriggerSQLDropAddObject(const ObjectAddress *object,
 
 extern void EventTriggerInhibitCommandCollection(void);
 extern void EventTriggerUndoInhibitCommandCollection(void);
+extern bool EventTriggerCommandCollectionActive(void);
+extern List *EventTriggerGetCollectedCommands(void);
 
 extern void EventTriggerCollectSimpleCommand(ObjectAddress address,
 											 ObjectAddress secondaryObject,
@@ -81,6 +83,12 @@ extern void EventTriggerAlterTableStart(const Node *parsetree);
 extern void EventTriggerAlterTableRelid(Oid objectId);
 extern void EventTriggerCollectAlterTableSubcmd(const Node *subcmd,
 												ObjectAddress address);
+extern void EventTriggerCollectAlterColumnTypeUsing(const char *colName,
+													const char *usingText);
+extern void EventTriggerCollectMergeSplitSources(AlterTableType subtype,
+												 const PartitionCmd *pc);
+extern void EventTriggerCollectMergeSplitCreated(AlterTableType subtype,
+												 const PartitionCmd *pc);
 extern void EventTriggerAlterTableEnd(void);
 
 extern void EventTriggerCollectGrant(InternalGrant *istmt);

@@ -33,12 +33,47 @@ typedef enum CollectedCommandType
 } CollectedCommandType;
 
 /*
+ * A partition's schema-qualified name, captured for the deparser before the
+ * partition is dropped.  See CollectedATSubcmd.partition_sources.
+ */
+typedef struct CollectedPartitionName
+{
+	char	   *schemaname;
+	char	   *objname;
+} CollectedPartitionName;
+
+/*
  * For ALTER TABLE commands, we keep a list of the subcommands therein.
  */
 typedef struct CollectedATSubcmd
 {
 	ObjectAddress address;		/* affected column, constraint, index, ... */
 	Node	   *parsetree;
+
+	/*
+	 * For ALTER COLUMN TYPE, the USING expression rendered to text at prep
+	 * time (before any column it references can be dropped by a sibling
+	 * subcommand), or NULL.  See EventTriggerCollectAlterColumnTypeUsing().
+	 */
+	char	   *using_text;
+
+	/*
+	 * For MERGE PARTITIONS / SPLIT PARTITION, the schema-qualified names of
+	 * the source partition(s) the command drops, captured before the drop
+	 * (they are gone by deparse time).  A list of CollectedPartitionName, or
+	 * NIL.  See EventTriggerCollectMergeSplitSources().
+	 */
+	List	   *partition_sources;
+
+	/*
+	 * For MERGE PARTITIONS / SPLIT PARTITION, the OIDs of the partition(s)
+	 * the command creates (the merged-into partition, or the split-off ones),
+	 * captured at execution time.  These still exist at deparse time, so
+	 * their name and bound are read from the catalog by OID -- unlike the raw
+	 * parse node's names, that needs no search_path.  A list of Oid, or NIL.
+	 * See EventTriggerCollectMergeSplitCreated().
+	 */
+	List	   *partition_created;
 } CollectedATSubcmd;
 
 typedef struct CollectedCommand

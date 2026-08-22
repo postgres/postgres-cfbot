@@ -101,6 +101,7 @@
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
+#include "utils/guc.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -5491,6 +5492,16 @@ ATExecCmd(List **wqueue, AlteredTableInfo *tab,
 	ObjectAddress address = InvalidObjectAddress;
 	Relation	rel = tab->rel;
 
+	/*
+	 * MERGE PARTITIONS / SPLIT PARTITION drop their source partition(s) as
+	 * part of execution.  When DDL is being collected, record the sources'
+	 * schema-qualified names now, while they still exist, for the deparser.
+	 */
+	if ((cmd->subtype == AT_MergePartitions ||
+		 cmd->subtype == AT_SplitPartition) &&
+		EventTriggerCommandCollectionActive())
+		EventTriggerCollectMergeSplitSources(cmd->subtype, (PartitionCmd *) cmd->def);
+
 	switch (cmd->subtype)
 	{
 		case AT_AddColumn:		/* ADD COLUMN */
@@ -5807,6 +5818,18 @@ ATExecCmd(List **wqueue, AlteredTableInfo *tab,
 				 (int) cmd->subtype);
 			break;
 	}
+
+	/*
+	 * MERGE PARTITIONS / SPLIT PARTITION have now created their new
+	 * partition(s); when DDL is being collected, record their OIDs for the
+	 * deparser (see the matching EventTriggerCollectMergeSplitSources() call
+	 * above).
+	 */
+	if (cmd &&
+		(cmd->subtype == AT_MergePartitions ||
+		 cmd->subtype == AT_SplitPartition) &&
+		EventTriggerCommandCollectionActive())
+		EventTriggerCollectMergeSplitCreated(cmd->subtype, (PartitionCmd *) cmd->def);
 
 	/*
 	 * Report the subcommand to interested event triggers.
@@ -14975,6 +14998,32 @@ ATPrepAlterColumnType(List **wqueue,
 				 errmsg("cannot specify USING when altering type of generated column"),
 				 errdetail("Column \"%s\" is a generated column.", colName),
 				 parser_errposition(pstate, def->location)));
+
+	/*
+	 * If a USING clause was given and DDL command collection is active,
+	 * render it to text now, while every column it might reference still
+	 * exists. A sibling DROP COLUMN in the same statement can remove one of
+	 * those columns before the command finishes, after which the deparser
+	 * could no longer name it. This is the one ALTER TABLE clause with that
+	 * hazard: the USING expression is evaluated once against the old rows and
+	 * forms no dependency, so it may reference a column being dropped,
+	 * whereas a stored expression could not.
+	 */
+	if (!recursing && def->cooked_default != NULL &&
+		EventTriggerCommandCollectionActive())
+	{
+		int			save_nestlevel = NewGUCNestLevel();
+		char	   *using_text;
+
+		/* Schema-qualify names so the text is portable, as the deparser does */
+		RestrictSearchPath();
+		using_text = TextDatumGetCString(DirectFunctionCall2(pg_get_expr,
+															 CStringGetTextDatum(nodeToString(def->cooked_default)),
+															 ObjectIdGetDatum(RelationGetRelid(rel))));
+		AtEOXact_GUC(true, save_nestlevel);
+
+		EventTriggerCollectAlterColumnTypeUsing(colName, using_text);
+	}
 
 	/*
 	 * Don't alter inherited columns.  At outer level, there had better not be
