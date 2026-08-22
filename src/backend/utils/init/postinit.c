@@ -43,6 +43,7 @@
 #include "postmaster/postmaster.h"
 #include "replication/slot.h"
 #include "replication/slotsync.h"
+#include "replication/syncrep.h"
 #include "replication/walsender.h"
 #include "storage/aio_subsys.h"
 #include "storage/bufmgr.h"
@@ -1253,6 +1254,17 @@ InitPostgres(const char *in_dbname, Oid dboid,
 	/* Apply PostAuthDelay as soon as we've read all options */
 	if (PostAuthDelay > 0)
 		pg_usleep(PostAuthDelay * 1000000L);
+
+	/* Check whether this role's post-recovery synchronization is complete */
+	if (AmRegularBackendProcess() &&
+		!am_walsender &&
+		!SyncRepPostRecoveryComplete())
+	{
+		ereport(FATAL,
+				(errcode(ERRCODE_CANNOT_CONNECT_NOW),
+				 errmsg("cannot connect until synchronous replication is established with standbys"),
+				 errdetail("The end-of-recovery WAL location has not been replicated according to \"post_recovery_sync_level\".")));
+	}
 
 	/*
 	 * Initialize various default states that can't be set up until we've
