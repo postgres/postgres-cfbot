@@ -89,6 +89,8 @@ typedef struct
 	List	   *fkconstraints;	/* FOREIGN KEY constraints */
 	List	   *ixconstraints;	/* index-creating constraints */
 	List	   *likeclauses;	/* LIKE clauses that need post-processing */
+	List	   *options;		/* options from WITH clause, table AM specific
+								 * parameters */
 	List	   *blist;			/* "before list" of things to do before
 								 * creating the table */
 	List	   *alist;			/* "after list" of things to do after creating
@@ -243,6 +245,7 @@ transformCreateStmt(CreateStmt *stmt, const char *queryString)
 	cxt.fkconstraints = NIL;
 	cxt.ixconstraints = NIL;
 	cxt.likeclauses = NIL;
+	cxt.options = stmt->options;
 	cxt.blist = NIL;
 	cxt.alist = NIL;
 	cxt.pkey = NULL;
@@ -367,6 +370,7 @@ transformCreateStmt(CreateStmt *stmt, const char *queryString)
 	stmt->tableElts = cxt.columns;
 	stmt->constraints = cxt.ckconstraints;
 	stmt->nnconstraints = cxt.nnconstraints;
+	stmt->options = cxt.options;
 
 	result = lappend(cxt.blist, stmt);
 	result = list_concat(result, cxt.alist);
@@ -1117,8 +1121,8 @@ transformTableConstraint(CreateStmtContext *cxt, Constraint *constraint)
  * table has been created.
  *
  * Some options are ignored.  For example, as foreign tables have no storage,
- * these INCLUDING options have no effect: STORAGE, COMPRESSION, IDENTITY
- * and INDEXES.  Similarly, INCLUDING INDEXES is ignored from a view.
+ * these INCLUDING options have no effect: STORAGE, COMPRESSION, IDENTITY,
+ * INDEXES and PARAMETERS.  Similarly, INCLUDING INDEXES is ignored from a view.
  */
 static void
 transformTableLikeClause(CreateStmtContext *cxt, TableLikeClause *table_like_clause)
@@ -1263,6 +1267,75 @@ transformTableLikeClause(CreateStmtContext *cxt, TableLikeClause *table_like_cla
 			stmt->comment = comment;
 
 			cxt->alist = lappend(cxt->alist, stmt);
+		}
+	}
+
+	/* Likewise, copy storage parameters if requested */
+	if ((table_like_clause->options & CREATE_TABLE_LIKE_PARAMETERS) &&
+		!cxt->isforeign &&
+		relation->rd_rel->relkind != RELKIND_VIEW)
+	{
+		HeapTuple	tuple;
+		Datum		reloptions;
+		bool		isnull;
+		Oid			relid;
+		List	   *oldoptions = NIL;
+		List	   *oldtoastoptions = NIL;
+
+		relid = RelationGetRelid(relation);
+		tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+
+		if (!HeapTupleIsValid(tuple))
+			elog(ERROR, "cache lookup failed for relation %u", relid);
+
+		reloptions = SysCacheGetAttr(RELOID, tuple,
+									 Anum_pg_class_reloptions, &isnull);
+		if (!isnull)
+		{
+			oldoptions = untransformRelOptions(reloptions);
+
+			foreach_node(DefElem, option, oldoptions)
+				cxt->options = lappend(cxt->options, option);
+		}
+
+		ReleaseSysCache(tuple);
+
+		/* get the toast relation's reloptions */
+		if (OidIsValid(relation->rd_rel->reltoastrelid))
+		{
+			Relation	toastrel;
+			Oid			toastid = relation->rd_rel->reltoastrelid;
+
+			/*
+			 * The referenced table is already locked; acquire the lock on its
+			 * associated TOAST relation now.
+			 */
+			toastrel = table_open(toastid, AccessShareLock);
+
+			tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(toastid));
+
+			if (!HeapTupleIsValid(tuple))
+				elog(ERROR, "cache lookup failed for relation %u", toastid);
+
+			reloptions = SysCacheGetAttr(RELOID, tuple, Anum_pg_class_reloptions,
+										 &isnull);
+			if (!isnull)
+			{
+				oldtoastoptions = untransformRelOptionsExtended(reloptions, "toast");
+
+				foreach_node(DefElem, option, oldtoastoptions)
+					cxt->options = lappend(cxt->options, option);
+			}
+
+			ReleaseSysCache(tuple);
+
+			/*
+			 * Close the toast relation, but keep our AccessShareLock on it
+			 * until xact commit.  That will prevent someone else from
+			 * deleting or ALTERing the parent TOAST before we can run
+			 * expandTableLikeClause.
+			 */
+			table_close(toastrel, NoLock);
 		}
 	}
 
@@ -3895,6 +3968,7 @@ transformAlterTableStmt(Oid relid, AlterTableStmt *stmt,
 	cxt.fkconstraints = NIL;
 	cxt.ixconstraints = NIL;
 	cxt.likeclauses = NIL;
+	cxt.options = NIL;
 	cxt.blist = NIL;
 	cxt.alist = NIL;
 	cxt.pkey = NULL;
