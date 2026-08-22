@@ -10,6 +10,7 @@ tests += {
     },
     'tests': [
       't/001_parallel_autovacuum.pl',
+      't/002_cost_rebalance.pl',
     ],
   },
 }
