@@ -2348,12 +2348,19 @@ match_previous_words(int pattern_id,
 	else if (Matches("ALTER", "SUBSCRIPTION", MatchAny))
 		COMPLETE_WITH("CONNECTION", "ENABLE", "DISABLE", "OWNER TO",
 					  "RENAME TO", "REFRESH PUBLICATION", "REFRESH SEQUENCES",
-					  "SERVER", "SET", "SKIP (", "ADD PUBLICATION", "DROP PUBLICATION");
+					  "REFRESH TABLE", "SERVER", "SET", "SKIP (",
+					  "ADD PUBLICATION", "DROP PUBLICATION");
 	else if (Matches("ALTER", "SUBSCRIPTION", MatchAny, "SERVER"))
 		COMPLETE_WITH_QUERY(Query_for_list_of_servers);
 	/* ALTER SUBSCRIPTION <name> REFRESH */
 	else if (Matches("ALTER", "SUBSCRIPTION", MatchAny, MatchAnyN, "REFRESH"))
-		COMPLETE_WITH("PUBLICATION", "SEQUENCES");
+		COMPLETE_WITH("PUBLICATION", "SEQUENCES", "TABLE");
+	/* ALTER SUBSCRIPTION <name> REFRESH TABLE */
+	else if (Matches("ALTER", "SUBSCRIPTION", MatchAny, "REFRESH", "TABLE"))
+		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_tables);
+	else if (HeadMatches("ALTER", "SUBSCRIPTION", MatchAny, "REFRESH", "TABLE") &&
+			 ends_with(prev_wd, ','))
+		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_tables);
 	/* ALTER SUBSCRIPTION <name> REFRESH PUBLICATION */
 	else if (Matches("ALTER", "SUBSCRIPTION", MatchAny, MatchAnyN, "REFRESH", "PUBLICATION"))
 		COMPLETE_WITH("WITH (");
