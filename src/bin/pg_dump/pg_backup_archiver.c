@@ -44,6 +44,7 @@
 #include "pg_backup_archiver.h"
 #include "pg_backup_db.h"
 #include "pg_backup_utils.h"
+#include "storage/block.h"
 #include "pgtar.h"
 
 #define TEXT_DUMP_HEADER "--\n-- PostgreSQL database dump\n--\n\n"
@@ -155,6 +156,7 @@ InitDumpOptions(DumpOptions *opts)
 	opts->dumpSchema = true;
 	opts->dumpData = true;
 	opts->dumpStatistics = false;
+	opts->max_table_segment_pages = InvalidBlockNumber;
 }
 
 /*
@@ -1980,6 +1982,25 @@ _moveBefore(TocEntry *pos, TocEntry *te)
 }
 
 /*
+ * Add a dependency id to a DependencyList object
+ * This is currently used for collecting reverse 
+ * dependencies for chunked data dump 
+ *
+ * Note: duplicate dependencies are currently not eliminated
+ */
+void
+addStandaloneDependency(DependencyList *dobj, DumpId refId)
+{
+	if (dobj->nDeps >= dobj->allocDeps)
+	{
+		dobj->allocDeps = (dobj->allocDeps <= 0) ? 16 : dobj->allocDeps * 2;
+		dobj->dependencies = pg_realloc_array(dobj->dependencies,
+											  DumpId, dobj->allocDeps);
+	}
+	dobj->dependencies[dobj->nDeps++] = refId;
+}
+
+/*
  * Build index arrays for the TOC list
  *
  * This should be invoked only after we have created or read in all the TOC
@@ -1998,6 +2019,7 @@ buildTocEntryArrays(ArchiveHandle *AH)
 
 	AH->tocsByDumpId = pg_malloc0_array(TocEntry *, (maxDumpId + 1));
 	AH->tableDataId = pg_malloc0_array(DumpId, (maxDumpId + 1));
+	AH->tableDataChunkIds = pg_malloc0_array(DependencyList, (maxDumpId + 1));
 
 	for (te = AH->toc->next; te != AH->toc; te = te->next)
 	{
@@ -2013,8 +2035,12 @@ buildTocEntryArrays(ArchiveHandle *AH)
 		 * TOC entry that has a DATA item.  We compute this by reversing the
 		 * TABLE DATA item's dependency, knowing that a TABLE DATA item has
 		 * just one dependency and it is the TABLE item.
+		 *
+		 * For chunked table data, the TABLE DATA item has a description like
+		 * "TABLE DATA (pages 100:199)", and we collect all such items as
+		 * reverse dependencies for the parent table's entry in tableDataChunkIds.
 		 */
-		if (strcmp(te->desc, "TABLE DATA") == 0 && te->nDeps > 0)
+		if (strncmp(te->desc, "TABLE DATA", 10) == 0 && te->nDeps > 0)
 		{
 			DumpId		tableId = te->dependencies[0];
 
@@ -2026,7 +2052,14 @@ buildTocEntryArrays(ArchiveHandle *AH)
 			if (tableId <= 0 || tableId > maxDumpId)
 				pg_fatal("bad table dumpId for TABLE DATA item");
 
-			AH->tableDataId[tableId] = te->dumpId;
+			if (te->desc[10] == '\0') /* te->desc == "TABLE DATA" */
+				AH->tableDataId[tableId] = te->dumpId;
+			else
+			{
+				/* Chunked table data, the description is "TABLE DATA (pages %u:%u)" */
+				addStandaloneDependency(&(AH->tableDataChunkIds[tableId]), te->dumpId);
+				pg_log_debug("Added chunked table data dependency: tableId %u + chunkId %u",
+							 tableId, te->dumpId);}
 		}
 	}
 }
@@ -2763,7 +2796,7 @@ ReadToc(ArchiveHandle *AH)
 				strcmp(te->desc, "ACL") == 0 ||
 				strcmp(te->desc, "ACL LANGUAGE") == 0)
 				te->section = SECTION_NONE;
-			else if (strcmp(te->desc, "TABLE DATA") == 0 ||
+			else if (strncmp(te->desc, "TABLE DATA", 10) == 0 ||
 					 strcmp(te->desc, "BLOBS") == 0 ||
 					 strcmp(te->desc, "BLOB COMMENTS") == 0)
 				te->section = SECTION_DATA;
@@ -2993,7 +3026,7 @@ _tocEntryRequired(TocEntry *te, teSection curSection, ArchiveHandle *AH)
 	 * associated pg_shdepend rows. This is faster to restore than the
 	 * equivalent set of large object commands.
 	 */
-	if (ropt->binary_upgrade && strcmp(te->desc, "TABLE DATA") == 0 &&
+	if (ropt->binary_upgrade && strncmp(te->desc, "TABLE DATA", 10) == 0 &&
 		(te->catalogId.oid == LargeObjectMetadataRelationId ||
 		 te->catalogId.oid == SharedDependRelationId))
 		return REQ_DATA;
@@ -3237,7 +3270,7 @@ _tocEntryRequired(TocEntry *te, teSection curSection, ArchiveHandle *AH)
 					return 0;
 			}
 			else if (strcmp(te->desc, "TABLE") == 0 ||
-					 strcmp(te->desc, "TABLE DATA") == 0 ||
+					 strncmp(te->desc, "TABLE DATA", 10) == 0 ||
 					 strcmp(te->desc, "VIEW") == 0 ||
 					 strcmp(te->desc, "FOREIGN TABLE") == 0 ||
 					 strcmp(te->desc, "MATERIALIZED VIEW") == 0 ||
@@ -4883,19 +4916,6 @@ fix_dependencies(ArchiveHandle *AH)
 	int			i;
 
 	/*
-	 * Initialize the depCount/revDeps/nRevDeps fields, and make sure the TOC
-	 * items are marked as not being in any parallel-processing list.
-	 */
-	for (te = AH->toc->next; te != AH->toc; te = te->next)
-	{
-		te->depCount = te->nDeps;
-		te->revDeps = NULL;
-		te->nRevDeps = 0;
-		te->pending_prev = NULL;
-		te->pending_next = NULL;
-	}
-
-	/*
 	 * POST_DATA items that are shown as depending on a table need to be
 	 * re-pointed to depend on that table's data, instead.  This ensures they
 	 * won't get scheduled until the data has been loaded.
@@ -4922,13 +4942,28 @@ fix_dependencies(ArchiveHandle *AH)
 						te->dependencies = pg_malloc_object(DumpId);
 						te->dependencies[0] = te2->dumpId;
 						te->nDeps++;
-						te->depCount++;
 						break;
 					}
 				}
 				break;
 			}
 		}
+	}
+
+	/*
+	 * Initialize the depCount/revDeps/nRevDeps fields, and make sure the TOC
+	 * items are marked as not being in any parallel-processing list.
+	 *
+	 * This must be done after all dependency modifications (like repointing
+	 * and BLOB fixes) are complete, so that depCount matches the final nDeps.
+	 */
+	for (te = AH->toc->next; te != AH->toc; te = te->next)
+	{
+		te->depCount = te->nDeps;
+		te->revDeps = NULL;
+		te->nRevDeps = 0;
+		te->pending_prev = NULL;
+		te->pending_next = NULL;
 	}
 
 	/*
@@ -5005,6 +5040,12 @@ fix_dependencies(ArchiveHandle *AH)
  * that parallel restore will prioritize larger jobs (index builds, FK
  * constraint checks, etc) over smaller ones, avoiding situations where we
  * end a restore with only one active job working on a large table.
+ *
+ * In case of chunked dumps, we change the depenency on table with depedency
+ * on the first chunk of data and add the remaining chunk ids, if any, to the 
+ * end of depencency list
+ * we also calculate the fullDataLength as the sum of the lengths of chunk
+ * data items and use that to set the item's dataLength.
  */
 static void
 repoint_table_dependencies(ArchiveHandle *AH)
@@ -5020,8 +5061,9 @@ repoint_table_dependencies(ArchiveHandle *AH)
 		for (i = 0; i < te->nDeps; i++)
 		{
 			olddep = te->dependencies[i];
-			if (olddep <= AH->maxDumpId &&
-				AH->tableDataId[olddep] != 0)
+			if (olddep > AH->maxDumpId)
+				continue;
+			if (AH->tableDataId[olddep] != 0)
 			{
 				DumpId		tabledataid = AH->tableDataId[olddep];
 				TocEntry   *tabledatate = AH->tocsByDumpId[tabledataid];
@@ -5030,6 +5072,39 @@ repoint_table_dependencies(ArchiveHandle *AH)
 				te->dataLength = Max(te->dataLength, tabledatate->dataLength);
 				pg_log_debug("transferring dependency %d -> %d to %d",
 							 te->dumpId, olddep, tabledataid);
+			}
+			else if (AH->tableDataChunkIds[olddep].nDeps > 0)
+			{
+				int			j;
+				DumpId		chunkdataid;
+				uint64		fullDataLength;
+				DependencyList *deplist = &AH->tableDataChunkIds[olddep];
+
+				/* first in list replaces the dependency on table */
+				chunkdataid = deplist->dependencies[0];
+				te->dependencies[i] = chunkdataid;
+				fullDataLength = AH->tocsByDumpId[chunkdataid]->dataLength;
+				pg_log_debug("transferring chunk list %d -> %d to %d",
+							 te->dumpId, olddep, chunkdataid);
+
+				if (deplist->nDeps > 1)
+				{
+					/* make space */
+					te->dependencies = pg_realloc_array(te->dependencies,
+												  DumpId,
+												  te->nDeps + deplist->nDeps - 1);
+
+					/* the rest are appended to dependencies */
+					for (j = 1; j < deplist->nDeps; j++)
+					{
+						chunkdataid = deplist->dependencies[j];
+						te->dependencies[te->nDeps++] = chunkdataid;
+						fullDataLength += AH->tocsByDumpId[chunkdataid]->dataLength;
+						pg_log_debug("adding chunk list %d -> %d to %d",
+									te->dumpId, olddep, chunkdataid);
+					}
+				}
+				te->dataLength = Max(te->dataLength, fullDataLength);
 			}
 		}
 	}
@@ -5084,7 +5159,7 @@ identify_locking_dependencies(ArchiveHandle *AH, TocEntry *te)
 		DumpId		depid = te->dependencies[i];
 
 		if (depid <= AH->maxDumpId && AH->tocsByDumpId[depid] != NULL &&
-			((strcmp(AH->tocsByDumpId[depid]->desc, "TABLE DATA") == 0) ||
+			((strncmp(AH->tocsByDumpId[depid]->desc, "TABLE DATA", 10) == 0) ||
 			 strcmp(AH->tocsByDumpId[depid]->desc, "TABLE") == 0))
 			lockids[nlockids++] = depid;
 	}
