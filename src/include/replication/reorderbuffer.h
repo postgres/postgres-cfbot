@@ -458,6 +458,12 @@ typedef struct ReorderBufferTXN
 	 */
 	Size		size;
 
+	/*
+	 * Size of this transaction (changes currently in memory, on disk or
+	 * streamed in bytes).
+	 */
+	Size		rb_size;
+
 	/* Size of top-transaction including sub-transactions. */
 	Size		total_size;
 
@@ -699,6 +705,14 @@ struct ReorderBuffer
 	 */
 	int64		totalTxns;		/* total number of transactions sent */
 	int64		totalBytes;		/* total amount of data decoded */
+
+	/*
+	 * Tracks total size of changes in the reorder buffer including the
+	 * changes spilled to disk or sent downstream as part of an unfinished
+	 * streamed transaction. In other words, this tracks the total size of all
+	 * the changes in reorder buffer if it would have been infinitely large.
+	 */
+	int64		totalSize;
 };
 
 
@@ -739,7 +753,7 @@ extern void ReorderBufferCommitChild(ReorderBuffer *rb, TransactionId xid,
 extern void ReorderBufferAbort(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn,
 							   TimestampTz abort_time);
 extern void ReorderBufferAbortOld(ReorderBuffer *rb, TransactionId oldestRunningXid);
-extern void ReorderBufferForget(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn);
+extern void ReorderBufferForget(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn, bool upd_rb_total_size);
 extern void ReorderBufferInvalidate(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn);
 
 extern void ReorderBufferSetBaseSnapshot(ReorderBuffer *rb, TransactionId xid,
