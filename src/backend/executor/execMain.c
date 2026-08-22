@@ -54,6 +54,7 @@
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "nodes/queryjumble.h"
+#include "optimizer/optimizer.h"
 #include "parser/parse_relation.h"
 #include "pgstat.h"
 #include "rewrite/rewriteHandler.h"
@@ -1353,7 +1354,8 @@ InitResultRelInfo(ResultRelInfo *resultRelInfo,
 	resultRelInfo->ri_projectNewInfoValid = false;
 	resultRelInfo->ri_FdwState = NULL;
 	resultRelInfo->ri_usesFdwDirectModify = false;
-	resultRelInfo->ri_CheckConstraintExprs = NULL;
+	resultRelInfo->ri_CheckConstraintExprsI = NULL;
+	resultRelInfo->ri_CheckConstraintExprsU = NULL;
 	resultRelInfo->ri_GenVirtualNotNullConstraintExprs = NULL;
 	resultRelInfo->ri_GeneratedExprsI = NULL;
 	resultRelInfo->ri_GeneratedExprsU = NULL;
@@ -1841,7 +1843,7 @@ ExecutePlan(QueryDesc *queryDesc,
  * Returns NULL if OK, else name of failed check constraint
  */
 static const char *
-ExecRelCheck(ResultRelInfo *resultRelInfo,
+ExecRelCheck(CmdType cmdtype, ResultRelInfo *resultRelInfo,
 			 TupleTableSlot *slot, EState *estate)
 {
 	Relation	rel = resultRelInfo->ri_RelationDesc;
@@ -1859,15 +1861,36 @@ ExecRelCheck(ResultRelInfo *resultRelInfo,
 		elog(ERROR, "%d pg_constraint record(s) missing for relation \"%s\"",
 			 rel->rd_rel->relchecks - ncheck, RelationGetRelationName(rel));
 
+	Assert(cmdtype == CMD_UPDATE || cmdtype == CMD_INSERT);
+
 	/*
 	 * If first time through for this result relation, build expression
 	 * nodetrees for rel's constraint expressions.  Keep them in the per-query
 	 * memory context so they'll survive throughout the query.
 	 */
-	if (resultRelInfo->ri_CheckConstraintExprs == NULL)
+	if ((!resultRelInfo->ri_CheckConstraintExprsU && cmdtype == CMD_UPDATE) ||
+		(!resultRelInfo->ri_CheckConstraintExprsI && cmdtype == CMD_INSERT))
 	{
+		Bitmapset  *updatedCols = NULL;
+		ExprState **checkExprs;
+
+		/*
+		 * During an UPDATE, we may skip CHECK constraint verification. But if
+		 * BEFORE ROW UPDATE trigger is present, the verification cannot be
+		 * skipped as the trigger might modify additional columns
+		 */
+		if (cmdtype == CMD_UPDATE &&
+			!(rel->trigdesc && rel->trigdesc->trig_update_before_row))
+			updatedCols = ExecGetAllUpdatedCols(resultRelInfo, estate);
+
 		oldContext = MemoryContextSwitchTo(estate->es_query_cxt);
-		resultRelInfo->ri_CheckConstraintExprs = palloc0_array(ExprState *, ncheck);
+		checkExprs = palloc0_array(ExprState *, ncheck);
+
+		if (cmdtype == CMD_UPDATE)
+			resultRelInfo->ri_CheckConstraintExprsU = checkExprs;
+		else
+			resultRelInfo->ri_CheckConstraintExprsI = checkExprs;
+
 		for (int i = 0; i < ncheck; i++)
 		{
 			Expr	   *checkconstr;
@@ -1878,8 +1901,34 @@ ExecRelCheck(ResultRelInfo *resultRelInfo,
 
 			checkconstr = stringToNode(check[i].ccbin);
 			checkconstr = (Expr *) expand_generated_columns_in_expr((Node *) checkconstr, rel, 1);
-			resultRelInfo->ri_CheckConstraintExprs[i] =
-				ExecPrepareExpr(checkconstr, estate);
+
+			if (updatedCols)
+			{
+				Bitmapset  *check_attrs = NULL;
+
+				pull_varattnos((Node *) checkconstr, 1, &check_attrs);
+
+				/*
+				 * Skip check constraint verification during an UPDATE if the
+				 * constraint expression references any columns, contains no
+				 * whole-row references, and does not reference any of the
+				 * columns being updated.
+				 */
+				if (check_attrs &&
+					!bms_is_member(0 - FirstLowInvalidHeapAttributeNumber, check_attrs) &&
+					!bms_overlap(check_attrs, updatedCols))
+				{
+					ereport(DEBUG1,
+							errmsg_internal("skipping verification for constraint \"%s\" on table \"%s\"",
+											check[i].ccname,
+											RelationGetRelationName(rel)));
+
+					bms_free(check_attrs);
+
+					continue;
+				}
+			}
+			checkExprs[i] = ExecPrepareExpr(checkconstr, estate);
 		}
 		MemoryContextSwitchTo(oldContext);
 	}
@@ -1896,7 +1945,9 @@ ExecRelCheck(ResultRelInfo *resultRelInfo,
 	/* And evaluate the constraints */
 	for (int i = 0; i < ncheck; i++)
 	{
-		ExprState  *checkconstr = resultRelInfo->ri_CheckConstraintExprs[i];
+		ExprState  *checkconstr = (cmdtype == CMD_INSERT)
+			? resultRelInfo->ri_CheckConstraintExprsI[i]
+			: resultRelInfo->ri_CheckConstraintExprsU[i];
 
 		/*
 		 * NOTE: SQL specifies that a NULL result from a constraint expression
@@ -2043,7 +2094,7 @@ ExecPartitionCheckEmitError(ResultRelInfo *resultRelInfo,
  * 'resultRelInfo' is the final result relation, after tuple routing.
  */
 void
-ExecConstraints(ResultRelInfo *resultRelInfo,
+ExecConstraints(CmdType cmdtype, ResultRelInfo *resultRelInfo,
 				TupleTableSlot *slot, EState *estate)
 {
 	Relation	rel = resultRelInfo->ri_RelationDesc;
@@ -2093,7 +2144,7 @@ ExecConstraints(ResultRelInfo *resultRelInfo,
 	{
 		const char *failed;
 
-		if ((failed = ExecRelCheck(resultRelInfo, slot, estate)) != NULL)
+		if ((failed = ExecRelCheck(cmdtype, resultRelInfo, slot, estate)) != NULL)
 		{
 			char	   *val_desc;
 			Relation	orig_rel = rel;

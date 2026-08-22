@@ -1118,3 +1118,88 @@ COMMENT ON CONSTRAINT inv_ck ON DOMAIN constraint_comments_dom IS 'comment on in
 CREATE TABLE regress_notnull1 (a integer);
 CREATE TABLE regress_notnull2 () INHERITS (regress_notnull1);
 ALTER TABLE ONLY regress_notnull2 ALTER COLUMN a SET NOT NULL;
+
+CREATE FUNCTION dummy_update_func_in_constr() RETURNS trigger AS $$
+BEGIN
+RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TABLE upd_check_skip0 (a int, CONSTRAINT cc CHECK (upd_check_skip0 IS NOT NULL));
+INSERT INTO upd_check_skip0 VALUES (1);
+
+CREATE TABLE upd_check_skip (
+    i int, a int DEFAULT 11, b int, c int,
+    d int GENERATED ALWAYS AS (b + c) STORED,
+    e int GENERATED ALWAYS AS (i) VIRTUAL) PARTITION BY RANGE (i);
+
+CREATE TABLE upd_check_skip_1 (
+    a int DEFAULT 12, i int, c int, b int,
+    d int GENERATED ALWAYS AS (b + 1) STORED,
+    e int GENERATED ALWAYS AS (b - 100) VIRTUAL);
+
+ALTER TABLE upd_check_skip ATTACH PARTITION upd_check_skip_1 FOR VALUES FROM (0) TO (10);
+CREATE TABLE upd_check_skip_2 PARTITION OF upd_check_skip FOR VALUES FROM (10) TO (30);
+INSERT INTO upd_check_skip SELECT g + 8, g, -g-g, g+1 FROM generate_series(0, 4) g;
+ALTER TABLE upd_check_skip ADD COLUMN f int;
+
+ALTER TABLE upd_check_skip ADD CONSTRAINT cc1 CHECK (a + b < 1);
+ALTER TABLE upd_check_skip ADD CONSTRAINT cc2 CHECK (a + c < 100);
+ALTER TABLE upd_check_skip ADD CONSTRAINT cc3 CHECK (b < 1);
+ALTER TABLE upd_check_skip ADD CONSTRAINT cc4 CHECK (d < 2);
+ALTER TABLE upd_check_skip ADD CONSTRAINT cc5 CHECK (e < 20);
+
+SELECT * FROM upd_check_skip ORDER BY i;
+
+SET log_statement to NONE;
+SET client_min_messages TO 'debug1';
+
+-- constraint cc contain whole-row reference therefore cannot be skipped
+UPDATE upd_check_skip0 SET a = 2;
+
+-- error, but cc2, cc5 are still being skipped
+UPDATE upd_check_skip SET b = 11, d = default WHERE i = 12;
+
+-- error, but cc2, cc5 are still being skipped
+MERGE INTO upd_check_skip t USING (VALUES (12, 11)) AS s(a, b)
+  ON t.i = s.a WHEN MATCHED THEN UPDATE SET b = s.b, d = default;
+
+-- MERGE UPDATE referenced constraint will be skipped, but MERGE INSERT
+-- constraint check still need enforced
+MERGE INTO upd_check_skip t USING (VALUES (12, -5), (18, 0)) AS s(a, b)
+  ON t.i = s.a
+  WHEN MATCHED THEN UPDATE SET b = s.b
+  WHEN NOT MATCHED BY TARGET THEN INSERT(i, a, b, c) VALUES (12, -3, -1, 4);
+
+MERGE INTO upd_check_skip t USING (VALUES (8, 0), (18, 0)) AS s(a, b)
+  ON t.i = s.a
+  WHEN MATCHED THEN UPDATE SET b = s.b
+  WHEN NOT MATCHED BY SOURCE AND i = 11 THEN UPDATE SET a = -3, b = -1, c = 4;
+
+-- skipping verification for constraint cc1, cc3, cc5 because column c is not
+-- being referenced. However, in table upd_check_skip_2, the generated column d
+-- references column c, therefore constraint cc4 on upd_check_skip_2 cannot be skipped
+UPDATE upd_check_skip SET c = 3 WHERE i = 11 OR i = 8;
+
+-- column f is not referenced by any constraints
+-- virtual generated column is expanded before constraint check
+UPDATE upd_check_skip SET f = 14, e = DEFAULT WHERE i = 12;
+
+-- test cross partition update
+UPDATE upd_check_skip SET b = 11, i = 9 WHERE i = 12;
+
+CREATE TRIGGER upd_check_skip_row_trig_before
+BEFORE UPDATE ON upd_check_skip
+FOR EACH ROW
+EXECUTE PROCEDURE dummy_update_func_in_constr();
+
+-- BEFORE ROW UPDATE TRIGGER is there, cannot skip
+UPDATE upd_check_skip SET a = NULL, b = NULL, c = NULL;
+
+DROP TRIGGER upd_check_skip_row_trig_before ON upd_check_skip;
+DROP FUNCTION dummy_update_func_in_constr;
+DROP TABLE upd_check_skip0;
+DROP TABLE upd_check_skip;
+
+RESET client_min_messages;
+RESET log_statement;
