@@ -27,6 +27,7 @@ extern PGDLLIMPORT double min_eager_agg_group_size;
 extern PGDLLIMPORT int min_parallel_table_scan_size;
 extern PGDLLIMPORT int min_parallel_index_scan_size;
 extern PGDLLIMPORT bool enable_group_by_reordering;
+extern PGDLLIMPORT bool enable_slope;
 
 /* Hooks for plugins to get control in set_rel_pathlist() */
 typedef void (*join_path_setup_hook_type) (PlannerInfo *root,
@@ -235,8 +236,10 @@ extern Path *get_cheapest_fractional_path_for_pathkeys(List *paths,
 													   Relids required_outer,
 													   double fraction);
 extern Path *get_cheapest_parallel_safe_total_inner(List *paths);
-extern List *build_index_pathkeys(PlannerInfo *root, IndexOptInfo *index,
-								  ScanDirection scandir);
+extern void precompute_slope_pathkeys(PlannerInfo *root);
+extern List *build_index_pathkeys(PlannerInfo *root, IndexOptInfo *index);
+extern PathKey *make_reversed_pathkey(PlannerInfo *root, PathKey *pathkey);
+extern List *reverse_pathkeys(PlannerInfo *root, List *pathkeys);
 extern List *build_partition_pathkeys(PlannerInfo *root, RelOptInfo *partrel,
 									  ScanDirection scandir, bool *partialkeys);
 extern List *build_expression_pathkey(PlannerInfo *root, Expr *expr,

@@ -6254,6 +6254,41 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-enable-slope" xreflabel="enable_slope">
+      <term><varname>enable_slope</varname> (<type>boolean</type>)
+      <indexterm>
+       <primary><varname>enable_slope</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Enables or disables query planner's slope analysis. The slope analysis
+        gives the query executor the ability to use an index when the data
+        order is implied but not direct. Consider the following example</para>
+
+       <programlisting>
+CREATE TABLE orders(created_at timestamp, ...);
+CREATE INDEX ON orders(created_at);
+SELECT created_at::date, count(1)
+FROM orders GROUP BY 1
+ORDER BY 1
+LIMIT 5;
+       </programlisting>
+
+       <para>
+        The table has an index on <varname>created_at</varname> of
+        type <type>timestamp</type>. Grouping takes advantage of the order
+        on timestamp, as a data series ordered by timestamp will cluster
+        all the rows per day in contiguous blocks. Without that knowledge
+        the entire table must be read.
+       </para>
+
+       <para>
+        Default is <literal>on</literal>.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-enable-sort" xreflabel="enable_sort">
       <term><varname>enable_sort</varname> (<type>boolean</type>)
       <indexterm>
