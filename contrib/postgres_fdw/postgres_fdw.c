@@ -18,6 +18,7 @@
 #include "access/sysattr.h"
 #include "access/table.h"
 #include "catalog/pg_opfamily.h"
+#include "commands/copy.h"
 #include "commands/defrem.h"
 #include "commands/explain_format.h"
 #include "commands/explain_state.h"
@@ -26,6 +27,7 @@
 #include "executor/instrument.h"
 #include "foreign/fdwapi.h"
 #include "funcapi.h"
+#include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
@@ -69,6 +71,9 @@ PG_MODULE_MAGIC_EXT(
 
 /* If no remote estimates, assume a sort costs 20% extra */
 #define DEFAULT_FDW_SORT_MULTIPLIER 1.2
+
+/* Buffer size to send COPY IN data */
+#define COPYBUFSIZ 8192
 
 /*
  * Indexes of FDW-private information stored in fdw_private lists.
@@ -459,6 +464,12 @@ static void postgresBeginForeignInsert(ModifyTableState *mtstate,
 									   ResultRelInfo *resultRelInfo);
 static void postgresEndForeignInsert(EState *estate,
 									 ResultRelInfo *resultRelInfo);
+
+static void postgresExecForeignBatchCopy(EState *estate,
+										 ResultRelInfo *resultRelInfo,
+										 TupleTableSlot **slots,
+										 int numSlots);
+
 static int	postgresIsForeignRelUpdatable(Relation rel);
 static bool postgresPlanDirectModify(PlannerInfo *root,
 									 ModifyTable *plan,
@@ -667,6 +678,9 @@ static void merge_fdw_options(PgFdwRelationInfo *fpinfo,
 							  const PgFdwRelationInfo *fpinfo_o,
 							  const PgFdwRelationInfo *fpinfo_i);
 static int	get_batch_size_option(Relation rel);
+static void convert_slot_to_copy_text(StringInfo buf,
+									  PgFdwModifyState *fmstate,
+									  TupleTableSlot *slot);
 
 
 /*
@@ -699,6 +713,7 @@ postgres_fdw_handler(PG_FUNCTION_ARGS)
 	routine->EndForeignModify = postgresEndForeignModify;
 	routine->BeginForeignInsert = postgresBeginForeignInsert;
 	routine->EndForeignInsert = postgresEndForeignInsert;
+	routine->ExecForeignBatchCopy = postgresExecForeignBatchCopy;
 	routine->IsForeignRelUpdatable = postgresIsForeignRelUpdatable;
 	routine->PlanDirectModify = postgresPlanDirectModify;
 	routine->BeginDirectModify = postgresBeginDirectModify;
@@ -2369,6 +2384,94 @@ postgresEndForeignModify(EState *estate,
 
 	/* Destroy the execution state */
 	finish_foreign_modify(fmstate);
+}
+
+/*
+ * postgresExecForeignBatchCopy
+ *		Insert a batch of tuples into a foreign table using the COPY protocol.
+ *
+ * This is a self-contained operation: it opens a COPY ... FROM STDIN on the
+ * remote connection, streams all the given tuples, and closes the COPY, all
+ * within a single call.  The connection is therefore left idle again once we
+ * return, which lets several foreign partitions (or local code that runs
+ * between batches, such as triggers) safely share the same cached connection.
+ */
+static void
+postgresExecForeignBatchCopy(EState *estate,
+							 ResultRelInfo *resultRelInfo,
+							 TupleTableSlot **slots,
+							 int numSlots)
+{
+	PgFdwModifyState *fmstate = (PgFdwModifyState *) resultRelInfo->ri_FdwState;
+	StringInfoData sql;
+	StringInfoData buf;
+	PGresult   *res;
+	int			nestlevel;
+	int			i;
+
+	elog(DEBUG1, "postgres_fdw: COPY %d rows into foreign table", numSlots);
+
+	/* Build the COPY ... FROM STDIN command for this relation. */
+	initStringInfo(&sql);
+	deparseCopySql(&sql, fmstate->rel, fmstate->target_attrs);
+
+	/* Make sure any constants are printed portably. */
+	nestlevel = set_transmission_modes();
+
+	/* Start the COPY protocol. */
+	if (!PQsendQuery(fmstate->conn, sql.data))
+		pgfdw_report_error(NULL, fmstate->conn, sql.data);
+
+	res = pgfdw_get_result(fmstate->conn);
+	if (PQresultStatus(res) != PGRES_COPY_IN)
+		pgfdw_report_error(res, fmstate->conn, sql.data);
+	PQclear(res);
+
+	/*
+	 * The connection is now in COPY_IN mode.  Record that so that, if an
+	 * error is thrown before we finish, transaction abort cleanup knows it
+	 * must terminate the COPY before the connection can be reused.
+	 */
+	fmstate->conn_state->copy_in_progress = true;
+
+	/* Stream all the rows, flushing the buffer when it grows large. */
+	initStringInfo(&buf);
+	for (i = 0; i < numSlots; i++)
+	{
+		convert_slot_to_copy_text(&buf, fmstate, slots[i]);
+
+		if (buf.len >= COPYBUFSIZ)
+		{
+			if (PQputCopyData(fmstate->conn, buf.data, buf.len) <= 0)
+				pgfdw_report_error(NULL, fmstate->conn, sql.data);
+			resetStringInfo(&buf);
+		}
+	}
+	if (buf.len > 0)
+	{
+		if (PQputCopyData(fmstate->conn, buf.data, buf.len) <= 0)
+			pgfdw_report_error(NULL, fmstate->conn, sql.data);
+	}
+
+	/* Close the COPY protocol and check for success. */
+	if (PQputCopyEnd(fmstate->conn, NULL) < 0 || PQflush(fmstate->conn))
+		pgfdw_report_error(NULL, fmstate->conn, sql.data);
+
+	/*
+	 * The COPY termination has been sent, so the connection is no longer in
+	 * COPY_IN mode; abort cleanup no longer needs to terminate it.
+	 */
+	fmstate->conn_state->copy_in_progress = false;
+
+	res = pgfdw_get_result(fmstate->conn);
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pgfdw_report_error(res, fmstate->conn, sql.data);
+	PQclear(res);
+
+	reset_transmission_modes(nestlevel);
+
+	pfree(buf.data);
+	pfree(sql.data);
 }
 
 /*
@@ -9297,4 +9400,57 @@ get_batch_size_option(Relation rel)
 	}
 
 	return batch_size;
+}
+
+/*
+ *  Write target attribute values from fmstate into buf buffer to be sent as
+ *  COPY FROM STDIN data
+ */
+static void
+convert_slot_to_copy_text(StringInfo buf,
+						  PgFdwModifyState *fmstate,
+						  TupleTableSlot *slot)
+{
+	TupleDesc	tupdesc = RelationGetDescr(fmstate->rel);
+	bool		first = true;
+	int			i = 0;
+
+	foreach_int(attnum, fmstate->target_attrs)
+	{
+		CompactAttribute *attr = TupleDescCompactAttr(tupdesc, attnum - 1);
+		Datum		datum;
+		bool		isnull;
+
+		/* Ignore generated columns; they are set to DEFAULT */
+		if (attr->attgenerated)
+			continue;
+
+		if (!first)
+			appendStringInfoCharMacro(buf, '\t');
+		first = false;
+
+		datum = slot_getattr(slot, attnum, &isnull);
+
+		if (isnull)
+			appendStringInfoString(buf, "\\N");
+		else
+		{
+			const char *value = OutputFunctionCall(&fmstate->p_flinfo[i],
+												   datum);
+
+			/*
+			 * Append a string to buf, escaping special characters for COPY
+			 * TEXT format.
+			 */
+			CopyEscapeText(buf,
+						   value,
+						   '\t',
+						   GetDatabaseEncoding(),
+						   false,
+						   false);
+		}
+		i++;
+	}
+
+	appendStringInfoCharMacro(buf, '\n');
 }

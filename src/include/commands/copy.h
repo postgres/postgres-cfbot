@@ -136,5 +136,11 @@ extern void EndCopyTo(CopyToState cstate);
 extern uint64 DoCopyTo(CopyToState cstate);
 extern List *CopyGetAttnums(TupleDesc tupDesc, Relation rel,
 							List *attnamelist);
+extern void CopyEscapeText(StringInfo buf,
+						   const char *string,
+						   char delimc,
+						   int file_encoding,
+						   bool need_transcoding,
+						   bool encoding_embeds_ascii);
 
 #endif							/* COPY_H */

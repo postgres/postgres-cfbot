@@ -908,6 +908,55 @@ EndForeignInsert(EState *estate,
 
     <para>
 <programlisting>
+void
+ExecForeignBatchCopy(EState *estate,
+                     ResultRelInfo *rinfo,
+                     TupleTableSlot **slots,
+                     int numSlots);
+</programlisting>
+
+     Insert a batch of tuples into a foreign table during a
+     <command>COPY FROM</command> command, using an optimized bulk-load
+     protocol (such as the <command>COPY</command> protocol for remote
+     <productname>PostgreSQL</productname> servers) instead of inserting the
+     tuples one at a time.
+     <literal>estate</literal> is global execution state for the query.
+     <literal>rinfo</literal> is the <structname>ResultRelInfo</structname> struct
+     describing the target foreign table.
+     <literal>slots</literal> is an array of tuple table slots containing the
+     tuples to be inserted; <literal>numSlots</literal> is the number of tuples
+     in the array.
+    </para>
+
+    <para>
+     This callback is used only when a <command>COPY FROM</command> is executed
+     directly on a foreign table, or is routed into a foreign-table partition,
+     and batching is enabled for the table (that is, the
+     <function>GetForeignModifyBatchSize</function> callback reports a batch
+     size greater than one).  It is not used when the target has
+     <literal>AFTER ROW</literal> triggers, because the transferred rows are not
+     returned to feed those triggers.  In all other cases the core code falls
+     back to <function>ExecForeignBatchInsert</function> or
+     <function>ExecForeignInsert</function>.
+    </para>
+
+    <para>
+     Each call is expected to be self-contained: the callback should open the
+     bulk-load session, transfer all <literal>numSlots</literal> tuples, and
+     close the session before returning.  This leaves the remote connection idle
+     between calls, which allows several foreign partitions to share one
+     connection safely.
+    </para>
+
+    <para>
+     If the <function>ExecForeignBatchCopy</function> pointer is set to
+     <literal>NULL</literal>, <command>COPY FROM</command> falls back to
+     inserting tuples through
+     <function>ExecForeignInsert</function>/<function>ExecForeignBatchInsert</function>.
+    </para>
+
+    <para>
+<programlisting>
 int
 IsForeignRelUpdatable(Relation rel);
 </programlisting>
