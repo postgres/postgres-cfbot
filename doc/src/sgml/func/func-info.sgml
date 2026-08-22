@@ -3970,6 +3970,38 @@ acl      | {postgres=arwdDxtm/postgres,foo=r/postgres}
         is false, the <literal>OWNER</literal> clause is omitted.
        </para></entry>
       </row>
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>pg_get_publication_ddl</primary>
+        </indexterm>
+        <function>pg_get_publication_ddl</function>
+        ( <parameter>publication</parameter> <type>oid</type>
+        <optional>, <literal>VARIADIC</literal> <parameter>options</parameter>
+        <type>text</type> </optional> )
+        <returnvalue>setof text</returnvalue>
+       </para>
+       <para role="func_signature">
+        <function>pg_get_publication_ddl</function>
+        ( <parameter>publication</parameter> <type>text</type>
+        <optional>, <literal>VARIADIC</literal> <parameter>options</parameter>
+        <type>text</type> </optional> )
+        <returnvalue>setof text</returnvalue>
+       </para>
+       <para>
+        Reconstructs the <link linkend="sql-createpublication"><command>CREATE PUBLICATION</command></link> statement for
+        the specified publication (by OID or name), followed by an
+        <command>ALTER PUBLICATION ... OWNER TO</command> statement (the
+        <command>CREATE PUBLICATION</command> grammar has no
+        <literal>OWNER</literal> clause).  Each statement is returned as a
+        separate row.  An error is raised if no publication with the supplied
+        OID or name exists.
+        The following options are supported:
+        <literal>pretty</literal> (boolean) for formatted output and
+        <literal>owner</literal> (boolean) to include
+        <literal>OWNER</literal>.
+       </para></entry>
+      </row>
      </tbody>
     </tgroup>
    </table>
