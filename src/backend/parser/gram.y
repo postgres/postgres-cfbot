@@ -843,7 +843,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 
 	WAIT WHEN WHERE WHITESPACE_P WINDOW WITH WITHIN WITHOUT WORK WRAPPER WRITE
 
-	XML_P XMLATTRIBUTES XMLCONCAT XMLELEMENT XMLEXISTS XMLFOREST XMLNAMESPACES
+	XML_P XMLATTRIBUTES XMLCAST XMLCONCAT XMLELEMENT XMLEXISTS XMLFOREST XMLNAMESPACES
 	XMLPARSE XMLPI XMLROOT XMLSERIALIZE XMLTABLE
 
 	YEAR_P YES_P
@@ -17022,6 +17022,24 @@ func_expr_common_subexpr:
 					v->location = @1;
 					$$ = (Node *) v;
 				}
+			| XMLCAST '(' a_expr AS Typename ')'
+				{
+					XmlCast *n = makeNode(XmlCast);
+
+					n->expr = $3;
+					n->targetType = $5;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
+			| XMLCAST '(' a_expr AS Typename xml_passing_mech ')'
+				{
+					XmlCast *n = makeNode(XmlCast);
+
+					n->expr = $3;
+					n->targetType = $5;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
 			| XMLCONCAT '(' expr_list ')'
 				{
 					$$ = makeXmlExpr(IS_XMLCONCAT, NULL, NIL, $3, @1);
@@ -19317,6 +19335,7 @@ col_name_keyword:
 			| VALUES
 			| VARCHAR
 			| XMLATTRIBUTES
+			| XMLCAST
 			| XMLCONCAT
 			| XMLELEMENT
 			| XMLEXISTS
@@ -19920,6 +19939,7 @@ bare_label_keyword:
 			| WRITE
 			| XML_P
 			| XMLATTRIBUTES
+			| XMLCAST
 			| XMLCONCAT
 			| XMLELEMENT
 			| XMLEXISTS

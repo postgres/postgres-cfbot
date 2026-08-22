@@ -220,6 +220,9 @@ exprType(const Node *expr)
 				type = BOOLOID;
 			else if (((const XmlExpr *) expr)->op == IS_XMLSERIALIZE)
 				type = TEXTOID;
+			else if (((const XmlExpr *) expr)->op == IS_XMLCAST &&
+					 ((const XmlExpr *) expr)->targetType != XMLOID)
+				type = TEXTOID;
 			else
 				type = XMLOID;
 			break;
@@ -986,11 +989,13 @@ exprCollation(const Node *expr)
 		case T_XmlExpr:
 
 			/*
-			 * XMLSERIALIZE returns text from non-collatable inputs, so its
-			 * collation is always default.  The other cases return boolean or
-			 * XML, which are non-collatable.
+			 * XMLSERIALIZE and XMLCAST (to a non-XML type) return text, so
+			 * their collation is always default.  The other cases return
+			 * boolean or XML, which are non-collatable.
 			 */
-			if (((const XmlExpr *) expr)->op == IS_XMLSERIALIZE)
+			if (((const XmlExpr *) expr)->op == IS_XMLSERIALIZE ||
+				(((const XmlExpr *) expr)->op == IS_XMLCAST &&
+				 ((const XmlExpr *) expr)->targetType != XMLOID))
 				coll = DEFAULT_COLLATION_OID;
 			else
 				coll = InvalidOid;
@@ -1260,9 +1265,15 @@ exprSetCollation(Node *expr, Oid collation)
 				   (collation == InvalidOid));
 			break;
 		case T_XmlExpr:
-			Assert((((XmlExpr *) expr)->op == IS_XMLSERIALIZE) ?
-				   (collation == DEFAULT_COLLATION_OID) :
-				   (collation == InvalidOid));
+			{
+				const XmlExpr *xexpr = (const XmlExpr *) expr;
+
+				if (xexpr->op == IS_XMLSERIALIZE ||
+					(xexpr->op == IS_XMLCAST && xexpr->targetType != XMLOID))
+					Assert(collation == DEFAULT_COLLATION_OID);
+				else
+					Assert(collation == InvalidOid);
+			}
 			break;
 		case T_JsonValueExpr:
 			exprSetCollation((Node *) ((JsonValueExpr *) expr)->formatted_expr,
@@ -1753,6 +1764,9 @@ exprLocation(const Node *expr)
 			break;
 		case T_FunctionParameter:
 			loc = ((const FunctionParameter *) expr)->location;
+			break;
+		case T_XmlCast:
+			loc = ((const XmlCast *) expr)->location;
 			break;
 		case T_XmlSerialize:
 			/* XMLSERIALIZE keyword should always be the first thing */
@@ -4580,6 +4594,16 @@ raw_expression_tree_walker_impl(Node *node,
 				if (WALK(tc->arg))
 					return true;
 				if (WALK(tc->typeName))
+					return true;
+			}
+			break;
+		case T_XmlCast:
+			{
+				XmlCast   *xc = (XmlCast *) node;
+
+				if (WALK(xc->expr))
+					return true;
+				if (WALK(xc->targetType))
 					return true;
 			}
 			break;
