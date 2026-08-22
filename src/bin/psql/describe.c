@@ -546,6 +546,28 @@ describeFunctions(const char *functypes, const char *func_pattern,
 		appendPQExpBufferStr(&buf, "      )\n");
 	}
 
+	/*
+	 * Use p.pronamespace here, rather than n.nspname, so that the
+	 * system schemas can be filtered during the pg_proc scan, before calling
+	 * pg_function_is_visible().  The latter can populate catalog caches for
+	 * every function it examines.  The ARRAY subquery becomes an InitPlan and
+	 * quietly ignores either schema if it does not exist.
+	 */
+	if (!showSystem && !func_pattern)
+	{
+		if (have_where)
+			appendPQExpBufferStr(&buf, "      AND ");
+		else
+		{
+			appendPQExpBufferStr(&buf, "WHERE ");
+			have_where = true;
+		}
+		appendPQExpBufferStr(&buf,
+							 "p.pronamespace <> ALL (ARRAY(\n"
+							 "        SELECT oid FROM pg_catalog.pg_namespace\n"
+							 "        WHERE nspname IN ('pg_catalog', 'information_schema')))\n");
+	}
+
 	if (!validateSQLNamePattern(&buf, func_pattern, have_where, false,
 								"n.nspname", "p.proname", NULL,
 								"pg_catalog.pg_function_is_visible(p.oid)",
@@ -585,10 +607,6 @@ describeFunctions(const char *functypes, const char *func_pattern,
 			appendPQExpBuffer(&buf, "  AND t%d.typname IS NULL\n", i);
 		}
 	}
-
-	if (!showSystem && !func_pattern)
-		appendPQExpBufferStr(&buf, "      AND n.nspname <> 'pg_catalog'\n"
-							 "      AND n.nspname <> 'information_schema'\n");
 
 	appendPQExpBufferStr(&buf, "ORDER BY 1, 2, 4;");
 

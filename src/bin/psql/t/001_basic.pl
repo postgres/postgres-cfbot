@@ -75,6 +75,18 @@ $node->start;
 psql_like($node, '\copyright', qr/Copyright/, '\copyright');
 psql_like($node, '\help', qr/ALTER/, '\help without arguments');
 psql_like($node, '\help SELECT', qr/SELECT/, '\help with argument');
+psql_like(
+	$node,
+	'\set ECHO_HIDDEN on
+\df',
+	qr{
+		WHERE \s+ p\.pronamespace \s+ <> \s+ ALL \s+ \(ARRAY\(
+		.*? SELECT \s+ oid \s+ FROM \s+ pg_catalog\.pg_namespace
+		.*? WHERE \s+ nspname \s+ IN \s+
+		\('pg_catalog', \s+ 'information_schema'\)\)\)
+		.*? AND \s+ pg_catalog\.pg_function_is_visible\(p\.oid\)
+	}xs,
+	'\df filters system functions before testing visibility');
 
 # Test clean handling of unsupported replication command responses
 psql_fails_like(
