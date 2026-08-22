@@ -421,6 +421,10 @@ static const internalPQconninfoOption PQconninfoOptions[] = {
 		"SSL-Key-Log-File", "D", 64,
 	offsetof(struct pg_conn, sslkeylogfile)},
 
+	{"mptcp", "PGMPTCP", "0", NULL,
+		"MPTCP-Protocol", "", 1,
+	offsetof(struct pg_conn, mptcp)},
+
 	/* Terminating entry --- MUST BE LAST */
 	{NULL, NULL, NULL, NULL,
 	NULL, NULL, 0}
@@ -3253,6 +3257,7 @@ keep_going:						/* We will come back to here until there is
 					char		host_addr[NI_MAXHOST];
 					int			sock_type;
 					AddrInfo   *addr_cur;
+					int			ip_protocol = 0;
 
 					/*
 					 * Advance to next possible host, if we've tried all of
@@ -3338,7 +3343,23 @@ keep_going:						/* We will come back to here until there is
 					 */
 					sock_type |= SOCK_NONBLOCK;
 #endif
-					conn->sock = socket(addr_cur->family, sock_type, 0);
+
+					/*
+					 * enable MPTCP only on IP and IPv6 sockets and not for
+					 * UNIX domain sockets
+					 */
+					if (addr_cur->family != AF_UNIX && conn->mptcp && conn->mptcp[0] == '1')
+					{
+#ifdef IPPROTO_MPTCP
+						/* TODO: remove this, it's for devel/informational purposes only for now */
+						fprintf(stderr, "enabling MPTCP client\n");
+						ip_protocol = IPPROTO_MPTCP;
+#else
+						libpq_append_conn_error(conn, "MPTCP client is not supported on this platform");
+#endif
+
+					}
+					conn->sock = socket(addr_cur->family, sock_type, ip_protocol);
 					if (conn->sock == PGINVALID_SOCKET)
 					{
 						int			errorno = SOCK_ERRNO;
@@ -5160,6 +5181,7 @@ freePGconn(PGconn *conn)
 	free(conn->scram_client_key);
 	free(conn->scram_server_key);
 	free(conn->sslkeylogfile);
+	free(conn->mptcp);
 	free(conn->oauth_issuer);
 	free(conn->oauth_issuer_id);
 	free(conn->oauth_discovery_uri);

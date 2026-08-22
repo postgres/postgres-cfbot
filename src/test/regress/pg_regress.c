@@ -850,6 +850,7 @@ initialize_environment(void)
 		unsetenv("PGSSLMODE");
 		unsetenv("PGSSLROOTCERT");
 		unsetenv("PGSSLSNI");
+		unsetenv("PGMPTCP");
 		unsetenv("PGTARGETSESSIONATTRS");
 		unsetenv("PGUSER");
 		/* PGPORT, see below */
