@@ -16,7 +16,9 @@ use Test::More;
 # file and the standby promotes successfully.
 
 my $node = PostgreSQL::Test::Cluster->new('primary');
-$node->init(allows_streaming => 1);
+# This test emits a message of a chosen size and requires the resulting record
+# to cross a segment boundary, so the record must reach WAL at that size.
+$node->init(allows_streaming => 1, no_wal_compression => 1);
 # We need these settings for stability of WAL behavior.
 $node->append_conf(
 	'postgresql.conf', qq(

@@ -228,6 +228,34 @@ struct XLogReaderState
 	 * requested starting position.
 	 */
 	XLogRecPtr	DecodeRecPtr;	/* start of last record decoded */
+
+	/*
+	 * Kept across calls so that decompressing a full page image does not
+	 * create and destroy a decompression context every time.  Void because
+	 * this header is included where zstd.h is not.
+	 */
+	void	   *fpi_dctx;
+
+	/*
+	 * Records below this are decoded to rebuild the decompressors and then
+	 * dropped rather than returned; see XLogBeginReadStreamed().
+	 */
+	XLogRecPtr	warmupEndPtr;
+
+	/*
+	 * Frame records without decoding them: the caller only wants to know
+	 * where a record ends and to have its page in readBuf.  A record that
+	 * belongs to a compression stream cannot be decoded twice anyway, since
+	 * the decompressor has already consumed it.
+	 */
+	bool		framing_only;
+
+	/*
+	 * Per stream: has a record that starts the stream over been seen yet?
+	 * Until one has, the stream's earlier records cannot be decompressed,
+	 * because the state they were compressed against is not here.
+	 */
+	bool	   *stream_ready;
 	XLogRecPtr	NextRecPtr;		/* end+1 of last record decoded */
 	XLogRecPtr	PrevRecPtr;		/* start of previous record decoded */
 
@@ -250,6 +278,17 @@ struct XLogReaderState
 	bool		free_decode_buffer; /* need to free? */
 	char	   *decode_buffer_head; /* data is read from the head */
 	char	   *decode_buffer_tail; /* new data is written at the tail */
+
+	/* Buffer for decompressing whole-record compressed WAL records */
+	char	   *decompression_buffer;
+	uint32		decompression_buffer_size;
+
+	/*
+	 * One decompression context per compression stream met so far, indexed by
+	 * the stream id in the record.  Void because the type belongs to whichever
+	 * compression library the build has.
+	 */
+	void	  **stream_dctx;
 
 	/*
 	 * Queue of records that have been decoded.  This is a linked list that
@@ -342,6 +381,8 @@ extern void XLogReaderSetDecodeBuffer(XLogReaderState *state,
 
 /* Position the XLogReader to given record */
 extern void XLogBeginRead(XLogReaderState *state, XLogRecPtr RecPtr);
+extern XLogRecPtr XLogBeginReadStreamed(XLogReaderState *state,
+										XLogRecPtr RecPtr, char **errormsg);
 extern XLogRecPtr XLogFindNextRecord(XLogReaderState *state, XLogRecPtr RecPtr,
 									 char **errormsg);
 
