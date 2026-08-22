@@ -2337,6 +2337,18 @@ match_previous_words(int pattern_id,
 		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_tables);
 	else if (Matches("ALTER", "PUBLICATION", MatchAny, "SET", "ALL", "TABLES", "EXCEPT", "(", "TABLE", MatchAnyN) && !ends_with(prev_wd, ','))
 		COMPLETE_WITH(")");
+	else if (Matches("ALTER", "PUBLICATION", MatchAny, "SET", "ALL", "SEQUENCES"))
+		COMPLETE_WITH("EXCEPT ( SEQUENCE");
+	else if (Matches("ALTER", "PUBLICATION", MatchAny, "SET", "ALL", "SEQUENCES", "EXCEPT"))
+		COMPLETE_WITH("( SEQUENCE");
+	else if (Matches("ALTER", "PUBLICATION", MatchAny, "SET", "ALL", "SEQUENCES", "EXCEPT", "("))
+		COMPLETE_WITH("SEQUENCE");
+	else if (Matches("ALTER", "PUBLICATION", MatchAny, "SET", "ALL", "SEQUENCES", "EXCEPT", "(", "SEQUENCE"))
+		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_sequences);
+	else if (Matches("ALTER", "PUBLICATION", MatchAny, "SET", "ALL", "SEQUENCES", "EXCEPT", "(", "SEQUENCE", MatchAnyN) && ends_with(prev_wd, ','))
+		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_sequences);
+	else if (Matches("ALTER", "PUBLICATION", MatchAny, "SET", "ALL", "SEQUENCES", "EXCEPT", "(", "SEQUENCE", MatchAnyN) && !ends_with(prev_wd, ','))
+		COMPLETE_WITH(")");
 	else if (Matches("ALTER", "PUBLICATION", MatchAny, "ADD|DROP|SET", "TABLES", "IN", "SCHEMA"))
 		COMPLETE_WITH_QUERY_PLUS(Query_for_list_of_schemas
 								 " AND nspname NOT LIKE E'pg\\\\_%%'",
@@ -3750,6 +3762,18 @@ match_previous_words(int pattern_id,
 	else if (Matches("CREATE", "PUBLICATION", MatchAny, "FOR", "ALL", "TABLES", "EXCEPT", "(", "TABLE", MatchAnyN) && ends_with(prev_wd, ','))
 		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_tables);
 	else if (Matches("CREATE", "PUBLICATION", MatchAny, "FOR", "ALL", "TABLES", "EXCEPT", "(", "TABLE", MatchAnyN) && !ends_with(prev_wd, ','))
+		COMPLETE_WITH(")");
+	else if (Matches("CREATE", "PUBLICATION", MatchAny, "FOR", "ALL", "SEQUENCES"))
+		COMPLETE_WITH("EXCEPT ( SEQUENCE", "WITH (");
+	else if (Matches("CREATE", "PUBLICATION", MatchAny, "FOR", "ALL", "SEQUENCES", "EXCEPT"))
+		COMPLETE_WITH("( SEQUENCE");
+	else if (Matches("CREATE", "PUBLICATION", MatchAny, "FOR", "ALL", "SEQUENCES", "EXCEPT", "("))
+		COMPLETE_WITH("SEQUENCE");
+	else if (Matches("CREATE", "PUBLICATION", MatchAny, "FOR", "ALL", "SEQUENCES", "EXCEPT", "(", "SEQUENCE"))
+		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_sequences);
+	else if (Matches("CREATE", "PUBLICATION", MatchAny, "FOR", "ALL", "SEQUENCES", "EXCEPT", "(", "SEQUENCE", MatchAnyN) && ends_with(prev_wd, ','))
+		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_sequences);
+	else if (Matches("CREATE", "PUBLICATION", MatchAny, "FOR", "ALL", "SEQUENCES", "EXCEPT", "(", "SEQUENCE", MatchAnyN) && !ends_with(prev_wd, ','))
 		COMPLETE_WITH(")");
 	else if (Matches("CREATE", "PUBLICATION", MatchAny, "FOR", "TABLES"))
 		COMPLETE_WITH("IN SCHEMA");

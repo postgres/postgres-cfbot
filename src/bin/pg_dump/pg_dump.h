@@ -679,6 +679,7 @@ typedef struct _PublicationInfo
 	bool		pubviaroot;
 	PublishGencolsType pubgencols_type;
 	SimplePtrList except_tables;
+	SimplePtrList except_sequences;
 } PublicationInfo;
 
 /*

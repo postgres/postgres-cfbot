@@ -456,7 +456,8 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 				TriggerTransitions TriggerReferencing
 				vacuum_relation_list opt_vacuum_relation_list
 				drop_option_list pub_obj_list pub_all_obj_type_list
-				pub_except_obj_list opt_pub_except_clause
+				pub_except_tbl_list opt_pub_except_tbl_clause
+				pub_except_seq_list opt_pub_except_seq_clause
 
 %type <retclause> returning_clause
 %type <node>	returning_option
@@ -596,7 +597,8 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %type <node>	var_value zone_value
 %type <rolespec> auth_ident RoleSpec opt_granted_by
 %type <publicationobjectspec> PublicationObjSpec
-%type <publicationobjectspec> PublicationExceptObjSpec
+%type <publicationobjectspec> PublicationExceptTblSpec
+%type <publicationobjectspec> PublicationExceptSeqSpec
 %type <publicationallobjectspec> PublicationAllObjSpec
 
 %type <keyword> unreserved_keyword type_func_name_keyword
@@ -11275,7 +11277,7 @@ AlterOwnerStmt: ALTER AGGREGATE aggregate_with_argtypes OWNER TO RoleSpec
  * pub_all_obj_type is one of:
  *
  *		TABLES [EXCEPT (TABLE table [, ...] )]
- *		SEQUENCES
+ *		SEQUENCES [EXCEPT (SEQUENCE sequence [, ...] )]
  *
  * CREATE PUBLICATION FOR pub_obj [, ...] [WITH options]
  *
@@ -11337,10 +11339,10 @@ PublicationObjSpec:
 				{
 					$$ = makeNode(PublicationObjSpec);
 					$$->pubobjtype = PUBLICATIONOBJ_TABLE;
-					$$->pubtable = makeNode(PublicationTable);
-					$$->pubtable->relation = $2;
-					$$->pubtable->columns = $3;
-					$$->pubtable->whereClause = $4;
+					$$->pubrelation = makeNode(PublicationRelation);
+					$$->pubrelation->relation = $2;
+					$$->pubrelation->columns = $3;
+					$$->pubrelation->whereClause = $4;
 				}
 			| TABLES IN_P SCHEMA ColId
 				{
@@ -11361,7 +11363,7 @@ PublicationObjSpec:
 					$$->pubobjtype = PUBLICATIONOBJ_CONTINUATION;
 					/*
 					 * If either a row filter or column list is specified, create
-					 * a PublicationTable object.
+					 * a PublicationRelation object.
 					 */
 					if ($2 || $3)
 					{
@@ -11371,10 +11373,10 @@ PublicationObjSpec:
 						 * error will be thrown later via
 						 * preprocess_pubobj_list().
 						 */
-						$$->pubtable = makeNode(PublicationTable);
-						$$->pubtable->relation = makeRangeVar(NULL, $1, @1);
-						$$->pubtable->columns = $2;
-						$$->pubtable->whereClause = $3;
+						$$->pubrelation = makeNode(PublicationRelation);
+						$$->pubrelation->relation = makeRangeVar(NULL, $1, @1);
+						$$->pubrelation->columns = $2;
+						$$->pubrelation->whereClause = $3;
 					}
 					else
 					{
@@ -11386,10 +11388,10 @@ PublicationObjSpec:
 				{
 					$$ = makeNode(PublicationObjSpec);
 					$$->pubobjtype = PUBLICATIONOBJ_CONTINUATION;
-					$$->pubtable = makeNode(PublicationTable);
-					$$->pubtable->relation = makeRangeVarFromQualifiedName($1, $2, @1, yyscanner);
-					$$->pubtable->columns = $3;
-					$$->pubtable->whereClause = $4;
+					$$->pubrelation = makeNode(PublicationRelation);
+					$$->pubrelation->relation = makeRangeVarFromQualifiedName($1, $2, @1, yyscanner);
+					$$->pubrelation->columns = $3;
+					$$->pubrelation->whereClause = $4;
 					$$->location = @1;
 				}
 			/* grammar like tablename * , ONLY tablename, ONLY ( tablename ) */
@@ -11397,10 +11399,10 @@ PublicationObjSpec:
 				{
 					$$ = makeNode(PublicationObjSpec);
 					$$->pubobjtype = PUBLICATIONOBJ_CONTINUATION;
-					$$->pubtable = makeNode(PublicationTable);
-					$$->pubtable->relation = $1;
-					$$->pubtable->columns = $2;
-					$$->pubtable->whereClause = $3;
+					$$->pubrelation = makeNode(PublicationRelation);
+					$$->pubrelation->relation = $1;
+					$$->pubrelation->columns = $2;
+					$$->pubrelation->whereClause = $3;
 				}
 			| CURRENT_SCHEMA
 				{
@@ -11416,23 +11418,29 @@ pub_obj_list:	PublicationObjSpec
 					{ $$ = lappend($1, $3); }
 	;
 
-opt_pub_except_clause:
-			EXCEPT '(' TABLE pub_except_obj_list ')'	{ $$ = $4; }
+opt_pub_except_tbl_clause:
+			EXCEPT '(' TABLE pub_except_tbl_list ')'	{ $$ = $4; }
+			| /*EMPTY*/									{ $$ = NIL; }
+		;
+
+opt_pub_except_seq_clause:
+			EXCEPT '(' SEQUENCE pub_except_seq_list ')'	{ $$ = $4; }
 			| /*EMPTY*/									{ $$ = NIL; }
 		;
 
 PublicationAllObjSpec:
-				ALL TABLES opt_pub_except_clause
+				ALL TABLES opt_pub_except_tbl_clause
 					{
 						$$ = makeNode(PublicationAllObjSpec);
 						$$->pubobjtype = PUBLICATION_ALL_TABLES;
-						$$->except_tables = $3;
+						$$->except_relations = $3;
 						$$->location = @1;
 					}
-				| ALL SEQUENCES
+				| ALL SEQUENCES opt_pub_except_seq_clause
 					{
 						$$ = makeNode(PublicationAllObjSpec);
 						$$->pubobjtype = PUBLICATION_ALL_SEQUENCES;
+						$$->except_relations = $3;
 						$$->location = @1;
 					}
 					;
@@ -11443,21 +11451,41 @@ pub_all_obj_type_list:	PublicationAllObjSpec
 					{ $$ = lappend($1, $3); }
 	;
 
-PublicationExceptObjSpec:
+PublicationExceptTblSpec:
 			 relation_expr
 				{
 					$$ = makeNode(PublicationObjSpec);
 					$$->pubobjtype = PUBLICATIONOBJ_EXCEPT_TABLE;
-					$$->pubtable = makeNode(PublicationTable);
-					$$->pubtable->except = true;
-					$$->pubtable->relation = $1;
+					$$->pubrelation = makeNode(PublicationRelation);
+					$$->pubrelation->except = true;
+					$$->pubrelation->relation = $1;
 					$$->location = @1;
 				}
 	;
 
-pub_except_obj_list: PublicationExceptObjSpec
+PublicationExceptSeqSpec:
+			 qualified_name
+				{
+					$$ = makeNode(PublicationObjSpec);
+					$$->pubobjtype = PUBLICATIONOBJ_EXCEPT_SEQUENCE;
+					$$->pubrelation = makeNode(PublicationRelation);
+					$$->pubrelation->except = true;
+					$$->pubrelation->relation = $1;
+					$$->location = @1;
+				}
+	;
+
+pub_except_tbl_list: PublicationExceptTblSpec
 					{ $$ = list_make1($1); }
-			| pub_except_obj_list ',' opt_table PublicationExceptObjSpec
+			| pub_except_tbl_list ',' opt_table PublicationExceptTblSpec
+					{ $$ = lappend($1, $4); }
+	;
+
+pub_except_seq_list: PublicationExceptSeqSpec
+					{ $$ = list_make1($1); }
+			| pub_except_seq_list ',' PublicationExceptSeqSpec
+					{ $$ = lappend($1, $3); }
+			| pub_except_seq_list ',' SEQUENCE PublicationExceptSeqSpec
 					{ $$ = lappend($1, $4); }
 	;
 
@@ -11481,7 +11509,7 @@ pub_except_obj_list: PublicationExceptObjSpec
  * pub_all_obj_type is one of:
  *
  *		ALL TABLES [ EXCEPT ( TABLE table_name [, ...] ) ]
- *		ALL SEQUENCES
+ *		ALL SEQUENCES [ EXCEPT ( SEQUENCE sequence_name [, ...] ) ]
  *
  *****************************************************************************/
 
@@ -20830,11 +20858,11 @@ preprocess_pub_all_objtype_list(List *all_objects_list, List **pubobjects,
 								bool *all_tables, bool *all_sequences,
 								core_yyscan_t yyscanner)
 {
-	if (!all_objects_list)
-		return;
-
 	*all_tables = false;
 	*all_sequences = false;
+
+	if (!all_objects_list)
+		return;
 
 	foreach_ptr(PublicationAllObjSpec, obj, all_objects_list)
 	{
@@ -20848,7 +20876,7 @@ preprocess_pub_all_objtype_list(List *all_objects_list, List **pubobjects,
 						parser_errposition(obj->location));
 
 			*all_tables = true;
-			*pubobjects = list_concat(*pubobjects, obj->except_tables);
+			*pubobjects = list_concat(*pubobjects, obj->except_relations);
 		}
 		else if (obj->pubobjtype == PUBLICATION_ALL_SEQUENCES)
 		{
@@ -20860,6 +20888,7 @@ preprocess_pub_all_objtype_list(List *all_objects_list, List **pubobjects,
 						parser_errposition(obj->location));
 
 			*all_sequences = true;
+			*pubobjects = list_concat(*pubobjects, obj->except_relations);
 		}
 	}
 }
@@ -20895,8 +20924,8 @@ preprocess_pubobj_list(List *pubobjspec_list, core_yyscan_t yyscanner)
 
 		if (pubobj->pubobjtype == PUBLICATIONOBJ_TABLE)
 		{
-			/* relation name or pubtable must be set for this type of object */
-			if (!pubobj->name && !pubobj->pubtable)
+			/* Relation name or pubrelation must be set for this type of object */
+			if (!pubobj->name && !pubobj->pubrelation)
 				ereport(ERROR,
 						errcode(ERRCODE_SYNTAX_ERROR),
 						errmsg("invalid table name"),
@@ -20904,12 +20933,12 @@ preprocess_pubobj_list(List *pubobjspec_list, core_yyscan_t yyscanner)
 
 			if (pubobj->name)
 			{
-				/* convert it to PublicationTable */
-				PublicationTable *pubtable = makeNode(PublicationTable);
+				/* Convert it to PublicationRelation */
+				PublicationRelation *pubrelation = makeNode(PublicationRelation);
 
-				pubtable->relation =
+				pubrelation->relation =
 					makeRangeVar(NULL, pubobj->name, pubobj->location);
-				pubobj->pubtable = pubtable;
+				pubobj->pubrelation = pubrelation;
 				pubobj->name = NULL;
 			}
 		}
@@ -20917,14 +20946,14 @@ preprocess_pubobj_list(List *pubobjspec_list, core_yyscan_t yyscanner)
 				 pubobj->pubobjtype == PUBLICATIONOBJ_TABLES_IN_CUR_SCHEMA)
 		{
 			/* WHERE clause is not allowed on a schema object */
-			if (pubobj->pubtable && pubobj->pubtable->whereClause)
+			if (pubobj->pubrelation && pubobj->pubrelation->whereClause)
 				ereport(ERROR,
 						errcode(ERRCODE_SYNTAX_ERROR),
 						errmsg("WHERE clause not allowed for schema"),
 						parser_errposition(pubobj->location));
 
 			/* Column list is not allowed on a schema object */
-			if (pubobj->pubtable && pubobj->pubtable->columns)
+			if (pubobj->pubrelation && pubobj->pubrelation->columns)
 				ereport(ERROR,
 						errcode(ERRCODE_SYNTAX_ERROR),
 						errmsg("column specification not allowed for schema"),
@@ -20932,11 +20961,11 @@ preprocess_pubobj_list(List *pubobjspec_list, core_yyscan_t yyscanner)
 
 			/*
 			 * We can distinguish between the different type of schema objects
-			 * based on whether name and pubtable is set.
+			 * based on whether name and pubrelation is set.
 			 */
 			if (pubobj->name)
 				pubobj->pubobjtype = PUBLICATIONOBJ_TABLES_IN_SCHEMA;
-			else if (!pubobj->name && !pubobj->pubtable)
+			else if (!pubobj->name && !pubobj->pubrelation)
 				pubobj->pubobjtype = PUBLICATIONOBJ_TABLES_IN_CUR_SCHEMA;
 			else
 				ereport(ERROR,

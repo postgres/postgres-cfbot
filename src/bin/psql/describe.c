@@ -1673,7 +1673,7 @@ describeOneTableDetails(const char *schemaname,
 	{
 		PGresult   *result = NULL;
 		printQueryOpt myopt = pset.popt;
-		char	   *footers[3] = {NULL, NULL, NULL};
+		char	   *footers[4] = {NULL, NULL, NULL, NULL};
 
 		printfPQExpBuffer(&buf, "/* %s */\n", _("Get sequence information"));
 		appendPQExpBuffer(&buf,
@@ -1751,11 +1751,27 @@ describeOneTableDetails(const char *schemaname,
 		{
 			printfPQExpBuffer(&buf, "/* %s */\n",
 							  _("Get publications containing this sequence"));
-			appendPQExpBuffer(&buf, "SELECT pubname FROM pg_catalog.pg_publication p"
+			appendPQExpBuffer(&buf, "SELECT p.pubname FROM pg_catalog.pg_publication p"
 							  "\nWHERE p.puballsequences"
-							  "\n AND pg_catalog.pg_relation_is_publishable('%s')"
-							  "\nORDER BY 1",
+							  "\n AND pg_catalog.pg_relation_is_publishable('%s')",
 							  oid);
+
+			/*
+			 * Skip entries where this sequence appears in the publication's
+			 * EXCEPT (SEQUENCE) clause.
+			 */
+			if (pset.sversion >= 200000)
+			{
+				appendPQExpBuffer(&buf,
+								  "\n AND NOT EXISTS ("
+								  "\n 	SELECT 1"
+								  "\n 	FROM pg_catalog.pg_publication_rel pr"
+								  "\n 	WHERE pr.prpubid = p.oid AND"
+								  "\n 	pr.prrelid = '%s' AND pr.prexcept)",
+								  oid);
+			}
+
+			appendPQExpBuffer(&buf, "\nORDER BY 1");
 
 			result = PSQLexec(buf.data);
 			if (result)
@@ -1781,6 +1797,42 @@ describeOneTableDetails(const char *schemaname,
 			}
 		}
 
+		/* Print publications that explicitly exclude this sequence */
+		if (pset.sversion >= 200000)
+		{
+			printfPQExpBuffer(&buf,
+							  "SELECT p.pubname\n"
+							  "FROM pg_catalog.pg_publication p\n"
+							  "JOIN pg_catalog.pg_publication_rel pr ON p.oid = pr.prpubid\n"
+							  "WHERE pr.prrelid = '%s' AND pr.prexcept\n"
+							  "ORDER BY 1;", oid);
+
+			result = PSQLexec(buf.data);
+			if (result)
+			{
+				int			tuples = PQntuples(result);
+
+				if (tuples > 0)
+				{
+					printfPQExpBuffer(&tmpbuf, _("Excluded from publications:"));
+
+					/* Might be an empty set - that's ok */
+					for (i = 0; i < tuples; i++)
+						appendPQExpBuffer(&tmpbuf, "\n    \"%s\"", PQgetvalue(result, i, 0));
+
+					if (footers[0] == NULL)
+						footers[0] = pg_strdup(tmpbuf.data);
+					else if (footers[1] == NULL)
+						footers[1] = pg_strdup(tmpbuf.data);
+					else
+						footers[2] = pg_strdup(tmpbuf.data);
+					resetPQExpBuffer(&tmpbuf);
+				}
+
+				PQclear(result);
+			}
+		}
+
 		if (tableinfo.relpersistence == RELPERSISTENCE_UNLOGGED)
 			printfPQExpBuffer(&title, _("Unlogged sequence \"%s.%s\""),
 							  schemaname, relationname);
@@ -1797,6 +1849,7 @@ describeOneTableDetails(const char *schemaname,
 
 		pg_free(footers[0]);
 		pg_free(footers[1]);
+		pg_free(footers[2]);
 
 		retval = true;
 		goto error_return;		/* not an error, just return early */
@@ -3066,7 +3119,7 @@ describeOneTableDetails(const char *schemaname,
 			{
 				/*
 				 * Skip entries where this relation appears in the
-				 * publication's EXCEPT list.
+				 * publication's EXCEPT (TABLE) clause.
 				 */
 				appendPQExpBuffer(&buf,
 								  " AND NOT pr.prexcept\n"
@@ -6738,6 +6791,7 @@ describePublications(const char *pattern)
 		char	   *pubid = PQgetvalue(res, i, 0);
 		char	   *pubname = PQgetvalue(res, i, 1);
 		bool		puballtables = strcmp(PQgetvalue(res, i, 3), "t") == 0;
+		bool		puballsequences = strcmp(PQgetvalue(res, i, 4), "t") == 0;
 		printTableOpt myopt = pset.popt.topt;
 
 		initPQExpBuffer(&title);
@@ -6774,7 +6828,7 @@ describePublications(const char *pattern)
 			printTableAddCell(&cont, PQgetvalue(res, i, 10), false, false);
 		printTableAddCell(&cont, PQgetvalue(res, i, 11), false, false);
 
-		if (!puballtables)
+		if (!puballtables && !puballsequences)
 		{
 			/* Get the tables for the specified publication */
 			printfPQExpBuffer(&buf, "/* %s */\n",
@@ -6841,11 +6895,15 @@ describePublications(const char *pattern)
 					goto error_return;
 			}
 		}
-		else
+
+		if (puballtables)
 		{
 			if (pset.sversion >= 190000)
 			{
-				/* Get tables in the EXCEPT clause for this publication */
+				/*
+				 * Get tables in the EXCEPT (TABLE ...) clause for this
+				 * publication
+				 */
 				printfPQExpBuffer(&buf, "/* %s */\n",
 								  _("Get tables excluded by this publication"));
 				appendPQExpBuffer(&buf,
@@ -6853,9 +6911,32 @@ describePublications(const char *pattern)
 								  "FROM pg_catalog.pg_class c\n"
 								  "     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace\n"
 								  "     JOIN pg_catalog.pg_publication_rel pr ON c.oid = pr.prrelid\n"
-								  "WHERE pr.prpubid = '%s' AND pr.prexcept\n"
+								  "WHERE pr.prpubid = '%s' AND pr.prexcept AND c.relkind IN ('r','p')\n"
 								  "ORDER BY 1", pubid);
 				if (!addFooterToPublicationDesc(&buf, _("Except tables:"),
+												true, &cont))
+					goto error_return;
+			}
+		}
+
+		if (puballsequences)
+		{
+			if (pset.sversion >= 200000)
+			{
+				/*
+				 * Get sequences in the EXCEPT (SEQUENCE ...) clause for this
+				 * publication
+				 */
+				printfPQExpBuffer(&buf, "/* %s */\n",
+								  _("Get sequences excluded by this publication"));
+				appendPQExpBuffer(&buf,
+								  "SELECT n.nspname || '.' || c.relname\n"
+								  "FROM pg_catalog.pg_class c\n"
+								  "     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace\n"
+								  "     JOIN pg_catalog.pg_publication_rel pr ON c.oid = pr.prrelid\n"
+								  "WHERE pr.prpubid = '%s' AND pr.prexcept AND c.relkind = 'S'\n"
+								  "ORDER BY 1", pubid);
+				if (!addFooterToPublicationDesc(&buf, _("Except sequences:"),
 												true, &cont))
 					goto error_return;
 			}

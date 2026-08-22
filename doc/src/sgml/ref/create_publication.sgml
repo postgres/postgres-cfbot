@@ -33,7 +33,7 @@ CREATE PUBLICATION <replaceable class="parameter">name</replaceable>
 <phrase>and <replaceable class="parameter">publication_all_object</replaceable> is one of:</phrase>
 
     ALL TABLES [ EXCEPT ( <replaceable class="parameter">except_table_object</replaceable> [, ... ] ) ]
-    ALL SEQUENCES
+    ALL SEQUENCES [ EXCEPT ( <replaceable class="parameter">except_sequence_object</replaceable> [, ... ] ) ]
 
 <phrase>and <replaceable class="parameter">table_and_columns</replaceable> is:</phrase>
 
@@ -46,6 +46,10 @@ CREATE PUBLICATION <replaceable class="parameter">name</replaceable>
 <phrase>and <replaceable class="parameter">table_object</replaceable> is:</phrase>
 
    [ ONLY ] <replaceable class="parameter">table_name</replaceable> [ * ]
+
+<phrase>and <replaceable class="parameter">except_sequence_object</replaceable> is:</phrase>
+
+    SEQUENCE <replaceable class="parameter">sequence_name</replaceable> [, ... ]
 </synopsis>
  </refsynopsisdiv>
 
@@ -103,6 +107,15 @@ CREATE PUBLICATION <replaceable class="parameter">name</replaceable>
     <listitem>
      <para>
       Name of an existing schema.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="sql-createpublication-params-sequence-name">
+    <term><replaceable class="parameter">sequence_name</replaceable></term>
+    <listitem>
+     <para>
+      Name of an existing sequence.
      </para>
     </listitem>
    </varlistentry>
@@ -219,22 +232,26 @@ CREATE PUBLICATION <replaceable class="parameter">name</replaceable>
      <para>
       Only persistent sequences are included in the publication. Temporary
       sequences and unlogged sequences are excluded from the publication.
+      Sequences listed in the <literal>EXCEPT</literal> clause are excluded from
+      the publication.
      </para>
     </listitem>
    </varlistentry>
 
-   <varlistentry id="sql-createpublication-params-for-except-table">
+   <varlistentry id="sql-createpublication-params-for-except">
     <term><literal>EXCEPT</literal></term>
     <listitem>
      <para>
-      This clause specifies a list of tables to be excluded from the
-      publication.
+      This clause specifies the tables to be excluded from an
+      <literal>ALL TABLES</literal> publication, or the sequences to be excluded
+      from an <literal>ALL SEQUENCES</literal> publication.
      </para>
      <para>
-      Once a table is excluded, the exclusion applies to that table
-      regardless of its name or schema. Renaming the table or moving it to
-      another schema using <command>ALTER TABLE ... SET SCHEMA</command> does
-      not remove the exclusion.
+      Once a table or sequence is excluded, the exclusion applies to that
+      object regardless of its name or schema. Renaming the object or moving
+      it to another schema using <command>ALTER TABLE ... SET SCHEMA</command>
+      or <command>ALTER SEQUENCE ... SET SCHEMA</command> does not remove the
+      exclusion.
      </para>
      <para>
       For inherited tables, if <literal>ONLY</literal> is specified before the
@@ -254,9 +271,10 @@ CREATE PUBLICATION <replaceable class="parameter">name</replaceable>
      </para>
      <para>
       There can be a case where a subscription includes multiple publications.
-      In such a case, a table or partition that is included in one publication
-      but excluded (explicitly or implicitly) by the <literal>EXCEPT</literal>
-      clause of another is considered included for replication.
+      In such a case, a table, partition or sequence that is included in one
+      publication but excluded (explicitly or implicitly) by the
+      <literal>EXCEPT</literal> clause of another is considered included for
+      replication.
      </para>
     </listitem>
    </varlistentry>
@@ -584,11 +602,20 @@ CREATE PUBLICATION all_tables_except FOR ALL TABLES EXCEPT (TABLE users, departm
   </para>
 
   <para>
-   Create a publication that publishes all sequences for synchronization, and
-   all changes in all tables except <structname>users</structname> and
-   <structname>departments</structname>:
+   Create a publication that publishes all sequences for synchronization except
+   <structname>seq1</structname> and <structname>seq2</structname>:
 <programlisting>
-CREATE PUBLICATION all_sequences_tables_except FOR ALL SEQUENCES, ALL TABLES EXCEPT (TABLE users, departments);
+CREATE PUBLICATION all_sequences_except FOR ALL SEQUENCES EXCEPT (SEQUENCE seq1, seq2);
+</programlisting>
+  </para>
+
+  <para>
+   Create a publication that publishes all sequences for synchronization except
+   <structname>seq1</structname> and <structname>seq2</structname>, and all
+   changes in all tables except
+   <structname>users</structname> and <structname>departments</structname>:
+<programlisting>
+CREATE PUBLICATION all_sequences_tables_except FOR ALL SEQUENCES EXCEPT (SEQUENCE seq1, seq2), ALL TABLES EXCEPT (TABLE users, departments);
 </programlisting>
   </para>
  </refsect1>
