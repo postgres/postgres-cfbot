@@ -307,7 +307,6 @@ DROP SCHEMA regress_schema_misc CASCADE;
 NOTICE:  drop cascades to 17 other objects
 DETAIL:  drop cascades to function regress_schema_misc.cs_sum(integer)
 drop cascades to collation regress_schema_misc.cs_builtin_c
-drop cascades to type regress_schema_misc.cs_positive
 drop cascades to function regress_schema_misc.cs_add(integer,integer)
 drop cascades to operator regress_schema_misc.+(integer,integer)
 drop cascades to function regress_schema_misc.cs_proc(integer,integer)
@@ -322,5 +321,6 @@ drop cascades to type regress_schema_misc.cs_range
 drop cascades to function regress_schema_misc.cs_type_out(regress_schema_misc.cs_type)
 drop cascades to type regress_schema_misc.cs_type
 drop cascades to function regress_schema_misc.cs_type_in(cstring)
+drop cascades to type regress_schema_misc.cs_positive
 -- Clean up
 DROP ROLE regress_create_schema_role;
