@@ -725,7 +725,7 @@ X015	Fields of XML type			NO
 X016	Persistent XML values			YES	
 X020	XMLConcat			YES	
 X025	XMLCast			NO	
-X030	XMLDocument			NO	
+X030	XMLDocument			YES	supported except for RETURNING
 X031	XMLElement			YES	
 X032	XMLForest			YES	
 X034	XMLAgg			YES	

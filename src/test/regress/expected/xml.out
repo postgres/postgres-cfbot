@@ -1891,3 +1891,61 @@ SELECT xmltext('x'|| '<P>73</P>'::xml || .42 || true || 'j'::char);
  x&lt;P&gt;73&lt;/P&gt;0.42truej
 (1 row)
 
+SELECT
+  xmldocument(
+    xmlelement(NAME root,
+      xmlattributes(42 AS att),
+      xmlcomment('comment'),
+      xmlelement(NAME foo,'<foo&bar>'),
+      xmlelement(NAME bar, xmlconcat('va', 'lue')),
+      xmlpi(name pi),
+      xmlelement(NAME txt, xmltext('<"&>'))
+    )
+  );
+                                                      xmldocument                                                       
+------------------------------------------------------------------------------------------------------------------------
+ <root att="42"><!--comment--><foo>&lt;foo&amp;bar&gt;</foo><bar>value</bar><?pi?><txt>&lt;&quot;&amp;&gt;</txt></root>
+(1 row)
+
+SELECT xmldocument(NULL);
+ xmldocument 
+-------------
+ 
+(1 row)
+
+SELECT xmldocument('<foo>bar</foo>'::xml);
+  xmldocument   
+----------------
+ <foo>bar</foo>
+(1 row)
+
+SELECT xmldocument('foo'::xml);
+ xmldocument 
+-------------
+ foo
+(1 row)
+
+SELECT xmldocument('foo');
+ xmldocument 
+-------------
+ foo
+(1 row)
+
+SELECT xmldocument('');
+ xmldocument 
+-------------
+ 
+(1 row)
+
+SELECT xmldocument(' ');
+ xmldocument 
+-------------
+  
+(1 row)
+
+SELECT xmldocument(xmlcomment('comment'));
+  xmldocument   
+----------------
+ <!--comment-->
+(1 row)
+

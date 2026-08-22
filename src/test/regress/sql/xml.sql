@@ -685,3 +685,22 @@ SELECT xmltext('  ');
 SELECT xmltext('foo `$_-+?=*^%!|/\()[]{}');
 SELECT xmltext('foo & <"bar">');
 SELECT xmltext('x'|| '<P>73</P>'::xml || .42 || true || 'j'::char);
+
+SELECT
+  xmldocument(
+    xmlelement(NAME root,
+      xmlattributes(42 AS att),
+      xmlcomment('comment'),
+      xmlelement(NAME foo,'<foo&bar>'),
+      xmlelement(NAME bar, xmlconcat('va', 'lue')),
+      xmlpi(name pi),
+      xmlelement(NAME txt, xmltext('<"&>'))
+    )
+  );
+SELECT xmldocument(NULL);
+SELECT xmldocument('<foo>bar</foo>'::xml);
+SELECT xmldocument('foo'::xml);
+SELECT xmldocument('foo');
+SELECT xmldocument('');
+SELECT xmldocument(' ');
+SELECT xmldocument(xmlcomment('comment'));
