@@ -66,10 +66,10 @@ static void CloseTableList(List *rels);
 static void LockSchemaList(List *schemalist);
 static void PublicationAddTables(Oid pubid, List *rels, bool if_not_exists,
 								 AlterPublicationStmt *stmt);
-static void PublicationDropTables(Oid pubid, List *rels, bool missing_ok);
+static bool PublicationDropTables(Oid pubid, List *rels, bool missing_ok);
 static void PublicationAddSchemas(Oid pubid, List *schemas, bool if_not_exists,
 								  AlterPublicationStmt *stmt);
-static void PublicationDropSchemas(Oid pubid, List *schemas, bool missing_ok);
+static bool PublicationDropSchemas(Oid pubid, List *schemas, bool missing_ok);
 static char defGetGeneratedColsOption(DefElem *def);
 
 
@@ -1238,7 +1238,7 @@ InvalidatePublicationRels(List *relids)
 /*
  * Add or remove table to/from publication.
  */
-static void
+static bool
 AlterPublicationTables(AlterPublicationStmt *stmt, HeapTuple tup,
 					   List *tables, const char *queryString,
 					   bool publish_schema)
@@ -1246,6 +1246,7 @@ AlterPublicationTables(AlterPublicationStmt *stmt, HeapTuple tup,
 	List	   *rels = NIL;
 	Form_pg_publication pubform = (Form_pg_publication) GETSTRUCT(tup);
 	Oid			pubid = pubform->oid;
+	bool		dropped = false;
 
 	/*
 	 * Nothing to do if no objects, except in SET: for that it is quite
@@ -1253,7 +1254,7 @@ AlterPublicationTables(AlterPublicationStmt *stmt, HeapTuple tup,
 	 * to remove all the existing tables.
 	 */
 	if (!tables && stmt->action != AP_SetObjects)
-		return;
+		return false;
 
 	rels = OpenTableList(tables);
 
@@ -1269,7 +1270,7 @@ AlterPublicationTables(AlterPublicationStmt *stmt, HeapTuple tup,
 		PublicationAddTables(pubid, rels, false, stmt);
 	}
 	else if (stmt->action == AP_DropObjects)
-		PublicationDropTables(pubid, rels, false);
+		dropped = PublicationDropTables(pubid, rels, false);
 	else						/* AP_SetObjects */
 	{
 		List	   *oldrelids = NIL;
@@ -1404,7 +1405,7 @@ AlterPublicationTables(AlterPublicationStmt *stmt, HeapTuple tup,
 		}
 
 		/* And drop them. */
-		PublicationDropTables(pubid, delrels, true);
+		dropped = PublicationDropTables(pubid, delrels, true);
 
 		/*
 		 * Don't bother calculating the difference for adding, we'll catch and
@@ -1416,6 +1417,8 @@ AlterPublicationTables(AlterPublicationStmt *stmt, HeapTuple tup,
 	}
 
 	CloseTableList(rels);
+
+	return dropped;
 }
 
 /*
@@ -1423,11 +1426,12 @@ AlterPublicationTables(AlterPublicationStmt *stmt, HeapTuple tup,
  *
  * Add or remove schemas to/from publication.
  */
-static void
+static bool
 AlterPublicationSchemas(AlterPublicationStmt *stmt,
 						HeapTuple tup, List *schemaidlist)
 {
 	Form_pg_publication pubform = (Form_pg_publication) GETSTRUCT(tup);
+	bool		dropped = false;
 
 	/*
 	 * Nothing to do if no objects, except in SET: for that it is quite
@@ -1435,7 +1439,7 @@ AlterPublicationSchemas(AlterPublicationStmt *stmt,
 	 * to remove all the existing schemas.
 	 */
 	if (!schemaidlist && stmt->action != AP_SetObjects)
-		return;
+		return false;
 
 	/*
 	 * Schema lock is held until the publication is altered to prevent
@@ -1478,7 +1482,7 @@ AlterPublicationSchemas(AlterPublicationStmt *stmt,
 		PublicationAddSchemas(pubform->oid, schemaidlist, false, stmt);
 	}
 	else if (stmt->action == AP_DropObjects)
-		PublicationDropSchemas(pubform->oid, schemaidlist, false);
+		dropped = PublicationDropSchemas(pubform->oid, schemaidlist, false);
 	else						/* AP_SetObjects */
 	{
 		List	   *oldschemaids = GetPublicationSchemas(pubform->oid);
@@ -1494,7 +1498,7 @@ AlterPublicationSchemas(AlterPublicationStmt *stmt,
 		LockSchemaList(delschemas);
 
 		/* And drop them */
-		PublicationDropSchemas(pubform->oid, delschemas, true);
+		dropped = PublicationDropSchemas(pubform->oid, delschemas, true);
 
 		/*
 		 * Don't bother calculating the difference for adding, we'll catch and
@@ -1502,6 +1506,8 @@ AlterPublicationSchemas(AlterPublicationStmt *stmt,
 		 */
 		PublicationAddSchemas(pubform->oid, schemaidlist, true, stmt);
 	}
+
+	return dropped;
 }
 
 /*
@@ -1601,7 +1607,7 @@ CheckAlterPublication(AlterPublicationStmt *stmt, HeapTuple tup,
 /*
  * Update FOR ALL TABLES / FOR ALL SEQUENCES flags of a publication.
  */
-static void
+static bool
 AlterPublicationAllFlags(AlterPublicationStmt *stmt, Relation rel,
 						 HeapTuple tup)
 {
@@ -1612,7 +1618,7 @@ AlterPublicationAllFlags(AlterPublicationStmt *stmt, Relation rel,
 	bool		dirty = false;
 
 	if (!stmt->for_all_tables && !stmt->for_all_sequences)
-		return;
+		return false;
 
 	pubform = (Form_pg_publication) GETSTRUCT(tup);
 
@@ -1641,10 +1647,17 @@ AlterPublicationAllFlags(AlterPublicationStmt *stmt, Relation rel,
 		CatalogTupleUpdate(rel, &tup->t_self, tup);
 		CommandCounterIncrement();
 
+		pubform = (Form_pg_publication) GETSTRUCT(tup);
+
 		/* For ALL TABLES, we must invalidate all relcache entries */
 		if (replaces[Anum_pg_publication_puballtables - 1])
 			CacheInvalidateRelcacheAll();
+
+		InvokeObjectPostAlterHook(PublicationRelationId,
+								  pubform->oid, 0);
 	}
+
+	return dirty;
 }
 
 /*
@@ -1686,6 +1699,9 @@ AlterPublication(ParseState *pstate, AlterPublicationStmt *stmt)
 		List	   *exceptrelations = NIL;
 		List	   *schemaidlist = NIL;
 		Oid			pubid = pubform->oid;
+		bool		tables_dropped;
+		bool		schemas_dropped;
+		bool		all_flags_changed;
 
 		ObjectsInPublicationToOids(stmt->pubobjects, pstate, &relations,
 								   &exceptrelations, &schemaidlist);
@@ -1712,10 +1728,20 @@ AlterPublication(ParseState *pstate, AlterPublicationStmt *stmt)
 						   stmt->pubname));
 
 		relations = list_concat(relations, exceptrelations);
-		AlterPublicationTables(stmt, tup, relations, pstate->p_sourcetext,
-							   schemaidlist != NIL);
-		AlterPublicationSchemas(stmt, tup, schemaidlist);
-		AlterPublicationAllFlags(stmt, rel, tup);
+		tables_dropped =
+			AlterPublicationTables(stmt, tup, relations, pstate->p_sourcetext,
+								   schemaidlist != NIL);
+		schemas_dropped = AlterPublicationSchemas(stmt, tup, schemaidlist);
+		all_flags_changed = AlterPublicationAllFlags(stmt, rel, tup);
+
+		if (tables_dropped || schemas_dropped || all_flags_changed)
+		{
+			ObjectAddress obj;
+
+			ObjectAddressSet(obj, PublicationRelationId, pubid);
+			EventTriggerCollectSimpleCommand(obj, InvalidObjectAddress,
+											 (Node *) stmt);
+		}
 	}
 
 	/* Cleanup. */
@@ -2063,12 +2089,13 @@ PublicationAddTables(Oid pubid, List *rels, bool if_not_exists,
 /*
  * Remove listed tables from the publication.
  */
-static void
+static bool
 PublicationDropTables(Oid pubid, List *rels, bool missing_ok)
 {
 	ObjectAddress obj;
 	ListCell   *lc;
 	Oid			prid;
+	bool		dropped = false;
 
 	foreach(lc, rels)
 	{
@@ -2102,7 +2129,10 @@ PublicationDropTables(Oid pubid, List *rels, bool missing_ok)
 
 		ObjectAddressSet(obj, PublicationRelRelationId, prid);
 		performDeletion(&obj, DROP_CASCADE, 0);
+		dropped = true;
 	}
+
+	return dropped;
 }
 
 /*
@@ -2134,12 +2164,13 @@ PublicationAddSchemas(Oid pubid, List *schemas, bool if_not_exists,
 /*
  * Remove listed schemas from the publication.
  */
-static void
+static bool
 PublicationDropSchemas(Oid pubid, List *schemas, bool missing_ok)
 {
 	ObjectAddress obj;
 	ListCell   *lc;
 	Oid			psid;
+	bool		dropped = false;
 
 	foreach(lc, schemas)
 	{
@@ -2162,7 +2193,10 @@ PublicationDropSchemas(Oid pubid, List *schemas, bool missing_ok)
 
 		ObjectAddressSet(obj, PublicationNamespaceRelationId, psid);
 		performDeletion(&obj, DROP_CASCADE, 0);
+		dropped = true;
 	}
+
+	return dropped;
 }
 
 /*

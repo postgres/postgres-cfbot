@@ -401,6 +401,14 @@ DROP ROLE regress_evt_user;
 DROP EVENT TRIGGER regress_event_trigger_drop_objects;
 DROP EVENT TRIGGER undroppable;
 -- Event triggers on relations.
+CREATE TABLE evttrig_pub_tbl (a int);
+CREATE TABLE evttrig_pub_tbl2 (a int);
+CREATE TABLE evttrig_pub_tbl3 (a int);
+CREATE SCHEMA evttrig_pub_schema;
+CREATE SCHEMA evttrig_pub_schema2;
+CREATE PUBLICATION evttrig_pub FOR TABLE evttrig_pub_tbl,
+  evttrig_pub_tbl2, evttrig_pub_tbl3, TABLES IN SCHEMA evttrig_pub_schema,
+  evttrig_pub_schema2;
 CREATE OR REPLACE FUNCTION event_trigger_report_dropped()
  RETURNS event_trigger
  LANGUAGE plpgsql
@@ -434,6 +442,24 @@ BEGIN
 END; $$;
 CREATE EVENT TRIGGER regress_event_trigger_report_end ON ddl_command_end
   EXECUTE PROCEDURE event_trigger_report_end();
+ALTER PUBLICATION evttrig_pub DROP TABLE evttrig_pub_tbl;
+NOTICE:  NORMAL: orig=t normal=f istemp=f type=publication relation identity=public.evttrig_pub_tbl in publication evttrig_pub schema=<NULL> name=<NULL> addr={public,evttrig_pub_tbl} args={evttrig_pub}
+NOTICE:  END: command_tag=ALTER PUBLICATION type=publication identity=evttrig_pub
+ALTER PUBLICATION evttrig_pub DROP TABLES IN SCHEMA evttrig_pub_schema;
+NOTICE:  NORMAL: orig=t normal=f istemp=f type=publication namespace identity=evttrig_pub_schema in publication evttrig_pub schema=<NULL> name=<NULL> addr={evttrig_pub_schema} args={evttrig_pub}
+NOTICE:  END: command_tag=ALTER PUBLICATION type=publication identity=evttrig_pub
+ALTER PUBLICATION evttrig_pub SET TABLE evttrig_pub_tbl2;
+NOTICE:  NORMAL: orig=t normal=f istemp=f type=publication namespace identity=evttrig_pub_schema2 in publication evttrig_pub schema=<NULL> name=<NULL> addr={evttrig_pub_schema2} args={evttrig_pub}
+NOTICE:  NORMAL: orig=t normal=f istemp=f type=publication relation identity=public.evttrig_pub_tbl3 in publication evttrig_pub schema=<NULL> name=<NULL> addr={public,evttrig_pub_tbl3} args={evttrig_pub}
+NOTICE:  END: command_tag=ALTER PUBLICATION type=publication identity=evttrig_pub
+CREATE PUBLICATION evttrig_all_pub;
+NOTICE:  END: command_tag=CREATE PUBLICATION type=publication identity=evttrig_all_pub
+ALTER PUBLICATION evttrig_all_pub SET ALL TABLES EXCEPT (TABLE evttrig_pub_tbl);
+NOTICE:  END: command_tag=ALTER PUBLICATION type=publication relation identity=public.evttrig_pub_tbl in publication evttrig_all_pub
+NOTICE:  END: command_tag=ALTER PUBLICATION type=publication identity=evttrig_all_pub
+ALTER PUBLICATION evttrig_all_pub SET ALL SEQUENCES;
+NOTICE:  NORMAL: orig=t normal=f istemp=f type=publication relation identity=public.evttrig_pub_tbl in publication evttrig_all_pub schema=<NULL> name=<NULL> addr={public,evttrig_pub_tbl} args={evttrig_all_pub}
+NOTICE:  END: command_tag=ALTER PUBLICATION type=publication identity=evttrig_all_pub
 CREATE SCHEMA evttrig
 	CREATE TABLE one (col_a SERIAL PRIMARY KEY, col_b text DEFAULT 'forty two', col_c SERIAL)
 	CREATE INDEX one_idx ON one (col_b)
@@ -590,6 +616,13 @@ NOTICE:  END: command_tag=CREATE OPERATOR FAMILY type=operator family identity=p
 NOTICE:  END: command_tag=CREATE OPERATOR CLASS type=operator class identity=public.evttrigopclass USING btree
 DROP EVENT TRIGGER regress_event_trigger_report_dropped;
 DROP EVENT TRIGGER regress_event_trigger_report_end;
+DROP PUBLICATION evttrig_pub;
+DROP PUBLICATION evttrig_all_pub;
+DROP TABLE evttrig_pub_tbl;
+DROP TABLE evttrig_pub_tbl2;
+DROP TABLE evttrig_pub_tbl3;
+DROP SCHEMA evttrig_pub_schema;
+DROP SCHEMA evttrig_pub_schema2;
 -- only allowed from within an event trigger function, should fail
 select pg_event_trigger_table_rewrite_oid();
 ERROR:  pg_event_trigger_table_rewrite_oid() can only be called in a table_rewrite event trigger function
