@@ -20,6 +20,11 @@ my $SERVERHOSTADDR = '127.0.0.1';
 # This is the pattern to use in pg_hba.conf to match incoming connections.
 my $SERVERHOSTCIDR = '127.0.0.1/32';
 
+if ($ENV{with_ssl} eq 'libressl')
+{
+	plan skip_all => 'SNI not supported when building with LibreSSL';
+}
+
 if ($ENV{with_ssl} ne 'openssl')
 {
 	plan skip_all => 'OpenSSL not supported by this build';
@@ -32,12 +37,6 @@ if (!$ENV{PG_TEST_EXTRA} || $ENV{PG_TEST_EXTRA} !~ /\bssl\b/)
 }
 
 my $ssl_server = SSL::Server->new();
-
-if ($ssl_server->is_libressl)
-{
-	plan skip_all => 'SNI not supported when building with LibreSSL';
-}
-
 my $node = PostgreSQL::Test::Cluster->new('primary');
 $node->init;
 
