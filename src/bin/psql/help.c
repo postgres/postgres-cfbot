@@ -433,6 +433,10 @@ helpVariables(unsigned short int pager)
 		  "    specifies the standard psql prompt\n");
 	HELP0("  PROMPT2\n"
 		  "    specifies the prompt used when a statement continues from a previous line\n");
+	HELP0("  PROMPT_COMMAND\n"
+		  "    shell command executed before each prompt; stdout available as %D\n");
+	HELP0("  PROMPT_SESSION_EXPORT\n"
+		  "    if on, export PG* and PSQL_* environment for PROMPT_COMMAND (off by default)\n");
 	HELP0("  PROMPT3\n"
 		  "    specifies the prompt used during COPY ... FROM STDIN\n");
 	HELP0("  QUIET\n"
@@ -444,6 +448,9 @@ helpVariables(unsigned short int pager)
 		  "    server's version (in short string or numeric format)\n");
 	HELP0("  SHELL_ERROR\n"
 		  "    \"true\" if the last shell command failed, \"false\" if it succeeded\n");
+	HELP0("  SHELL_EXIT\n"
+		  "    exit status of the last SQL or shell command (0 on success, 1 on SQL error,\n"
+		  "    or the shell exit code for \\!, \\copy, etc.)\n");
 	HELP0("  SHELL_EXIT_CODE\n"
 		  "    exit status of the last shell command\n");
 	HELP0("  SHOW_ALL_RESULTS\n"
