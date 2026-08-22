@@ -48,6 +48,7 @@ tests += {
       't/036_sequences.pl',
       't/037_except.pl',
       't/038_walsnd_shutdown_timeout.pl',
+      't/050_parallel_apply.pl',
       't/100_bugs.pl',
     ],
   },
