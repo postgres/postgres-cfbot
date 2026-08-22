@@ -99,6 +99,11 @@
 	((pretty) ? (PRETTYFLAG_PAREN | PRETTYFLAG_INDENT | PRETTYFLAG_SCHEMA) \
 	 : PRETTYFLAG_INDENT)
 
+/* Conversion of "bool pretty" option for DDL statements (0 when false) */
+#define GET_DDL_PRETTY_FLAGS(pretty) \
+	((pretty) ? (PRETTYFLAG_PAREN | PRETTYFLAG_INDENT | PRETTYFLAG_SCHEMA) \
+	 : 0)
+
 /* Default line length for pretty-print wrapping: 0 means wrap always */
 #define WRAP_COLUMN_DEFAULT		0
 
@@ -547,7 +552,6 @@ static char *generate_function_name(Oid funcid, int nargs,
 									bool inGroupBy);
 static char *generate_operator_name(Oid operid, Oid arg1, Oid arg2);
 static void add_cast_to(StringInfo buf, Oid typid);
-static char *generate_qualified_type_name(Oid typid);
 static text *string_to_text(char *str);
 static char *flatten_reloptions(Oid relid);
 void		get_reloptions(StringInfo buf, Datum reloptions);
@@ -560,7 +564,6 @@ static void get_json_table_nested_columns(TableFunc *tf, JsonTablePlan *plan,
 										  deparse_context *context,
 										  bool showimplicit,
 										  bool needcomma);
-
 #define only_marker(rte)  ((rte)->inh ? "" : "ONLY ")
 
 
@@ -14296,7 +14299,7 @@ add_cast_to(StringInfo buf, Oid typid)
  * SQL-standard type names ... although in current usage, this should
  * only get used for domains, so such cases wouldn't occur anyway.
  */
-static char *
+char *
 generate_qualified_type_name(Oid typid)
 {
 	HeapTuple	tp;
@@ -14497,4 +14500,24 @@ get_range_partbound_string(List *bound_datums)
 	appendStringInfoChar(&buf, ')');
 
 	return buf.data;
+}
+
+/*
+ * Cross-file wrappers exposing this file's PRETTYFLAG_*-based deparsing to
+ * external callers that only know a plain "pretty" bool.
+ */
+char *
+pg_get_constraintdef_for_ddl(Oid constraintId, bool fullCommand,
+							 bool pretty, bool missing_ok)
+{
+	return pg_get_constraintdef_worker(constraintId, fullCommand,
+									   GET_DDL_PRETTY_FLAGS(pretty),
+									   missing_ok);
+}
+
+char *
+deparse_expression_for_ddl(Node *expr, bool pretty)
+{
+	return deparse_expression_pretty(expr, NIL, false, false,
+									 GET_DDL_PRETTY_FLAGS(pretty), 0);
 }

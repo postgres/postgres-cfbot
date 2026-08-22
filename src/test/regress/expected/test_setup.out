@@ -235,3 +235,76 @@ create function fipshash(text)
     returns text
     strict immutable parallel safe leakproof
     return substr(encode(sha256($1::bytea), 'hex'), 1, 32);
+--
+-- DDL round-trip verification infrastructure.
+-- An event trigger that automatically verifies pg_get_<type>_ddl() for every
+-- CREATE command that has a matching reconstruction function.  Runs inline at
+-- creation time so even objects that are later dropped get tested.
+--
+CREATE FUNCTION regress_ddl_roundtrip_trigger_func() RETURNS event_trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    r           RECORD;
+    obj_type    text;
+    original    text;
+    recreated   text;
+BEGIN
+    -- Recursion guard: the recreate step fires this trigger again.
+    IF current_setting('regress.ddl_roundtrip_in_progress', true) = 'true' THEN
+        RETURN;
+    END IF;
+
+    -- pg_event_trigger_ddl_commands() can raise before yielding a row (e.g.
+    -- an unsupported object type), so the whole loop -- not just each row --
+    -- must be inside the handler; a gap on one row of a multi-row event
+    -- therefore also discards verification already done for earlier rows in
+    -- that event. Accepted trade-off for this test convenience. A genuine
+    -- round-trip mismatch (SQLSTATE P0004) still propagates.
+    BEGIN
+        FOR r IN SELECT * FROM pg_event_trigger_ddl_commands()
+        LOOP
+            IF r.command_tag LIKE 'CREATE %' THEN
+                obj_type := lower(substring(r.command_tag from 'CREATE (.*)'));
+
+                IF EXISTS (
+                    SELECT 1 FROM pg_proc
+                    WHERE proname  = format('pg_get_%s_ddl', obj_type)
+                      AND pronamespace = 'pg_catalog'::regnamespace
+                ) THEN
+                    PERFORM set_config('regress.ddl_roundtrip_in_progress', 'true', true);
+
+                    -- pg_get_<type>_ddl() is SETOF text; aggregate all rows
+                    -- in emission order instead of only capturing the first.
+                    EXECUTE format(
+                        'SELECT string_agg(ddl, E''\n'' ORDER BY ord)
+                           FROM pg_get_%s_ddl(%L) WITH ORDINALITY AS t(ddl, ord)',
+                        obj_type, r.object_identity)
+                        INTO original;
+                    EXECUTE format('DROP %s %s', obj_type, r.object_identity);
+                    EXECUTE original;
+                    EXECUTE format(
+                        'SELECT string_agg(ddl, E''\n'' ORDER BY ord)
+                           FROM pg_get_%s_ddl(%L) WITH ORDINALITY AS t(ddl, ord)',
+                        obj_type, r.object_identity)
+                        INTO recreated;
+
+                    ASSERT original = recreated,
+                        format(E'DDL round-trip mismatch for %s %s:\n  original:  %s\n  recreated: %s',
+                               obj_type, r.object_identity, original, recreated);
+
+                    PERFORM set_config('regress.ddl_roundtrip_in_progress', 'false', true);
+                END IF;
+            END IF;
+        END LOOP;
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF SQLSTATE = 'P0004' THEN
+                RAISE;
+            END IF;
+            RAISE WARNING 'regress_ddl_roundtrip_trigger_func: skipping DDL round-trip check (%): %',
+                SQLSTATE, SQLERRM;
+    END;
+END;
+$$;
+CREATE EVENT TRIGGER regress_ddl_roundtrip_trigger ON ddl_command_end
+    EXECUTE FUNCTION regress_ddl_roundtrip_trigger_func();
