@@ -53,6 +53,30 @@
  </para>
 
  <para>
+  As of version 1.10, the operator classes for <type>int2</type>,
+  <type>int4</type> and <type>int8</type> additionally support cross-type
+  query operators. An index on any one of these integer types can be used
+  with a B-tree-style comparison (<literal>&lt;</literal>,
+  <literal>&lt;=</literal>, <literal>=</literal>, <literal>&gt;=</literal>,
+  <literal>&gt;</literal>, <literal>&lt;&gt;</literal>) or with the
+  distance operator (<literal>&lt;-&gt;</literal>) against a value of any
+  of the other two integer types, without an explicit cast. Query
+  constants outside the indexed column's range are compared according to
+  normal integer comparison semantics, without narrowing the query value
+  to the column type first.
+ </para>
+
+ <para>
+  The integer distance operator (<literal>&lt;-&gt;</literal>) used for
+  nearest-neighbor (<literal>ORDER BY</literal>) searches computes the
+  distance in <type>float8</type>. For <type>int8</type> values whose
+  distance from the query exceeds 2^53, the result loses precision and
+  may reorder results that are nearly equidistant; it never changes which
+  rows match. This applies equally to same-type and cross-type
+  <type>int8</type> distance searches.
+ </para>
+
+ <para>
   By default <filename>btree_gist</filename> builds <acronym>GiST</acronym> index with
   <function>sortsupport</function> in <firstterm>sorted</firstterm> mode. This usually results in
   much faster index built speed. It is still possible to revert to buffered built strategy
