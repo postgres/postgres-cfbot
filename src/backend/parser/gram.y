@@ -325,6 +325,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %type <str>			opt_single_name
 %type <list>		opt_qualified_name
 %type <boolean>		opt_concurrently opt_usingindex
+%type <node>		opt_refresh_where_clause
 %type <dbehavior>	opt_drop_behavior
 %type <list>		opt_utility_option_list
 %type <list>		opt_wait_with_clause
@@ -5107,15 +5108,26 @@ OptNoLog:	UNLOGGED					{ $$ = RELPERSISTENCE_UNLOGGED; }
  *****************************************************************************/
 
 RefreshMatViewStmt:
-			REFRESH MATERIALIZED VIEW opt_concurrently qualified_name opt_with_data
+			REFRESH MATERIALIZED VIEW opt_concurrently qualified_name opt_with_data opt_refresh_where_clause
 				{
 					RefreshMatViewStmt *n = makeNode(RefreshMatViewStmt);
 
 					n->concurrent = $4;
 					n->relation = $5;
 					n->skipData = !($6);
+					n->whereClause = $7;
+
+					if (n->skipData && n->whereClause)
+						ereport(ERROR,
+								(errcode(ERRCODE_SYNTAX_ERROR),
+								 errmsg("cannot specify WHERE clause with WITH NO DATA")));
 					$$ = (Node *) n;
 				}
+		;
+
+opt_refresh_where_clause:
+			WHERE a_expr			{ $$ = $2; }
+			| /* empty */			{ $$ = NULL; }
 		;
 
 

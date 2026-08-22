@@ -1256,7 +1256,8 @@ CheckValidRowMarkRel(Relation rel, RowMarkType markType)
 			break;
 		case RELKIND_MATVIEW:
 			/* Allow referencing a matview, but not actual locking clauses */
-			if (markType != ROW_MARK_REFERENCE)
+			if (markType != ROW_MARK_REFERENCE &&
+				!MatViewIncrementalMaintenanceIsEnabled())
 				ereport(ERROR,
 						(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 						 errmsg("cannot lock rows in materialized view \"%s\"",
