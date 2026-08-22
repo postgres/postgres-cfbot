@@ -466,6 +466,16 @@ typedef struct XLogCtlData
 
 	XLogSegNo	lastRemovedSegNo;	/* latest removed/recycled XLOG segment */
 
+	/*
+	 * Directory-durability frontier: the highest WAL segment whose pg_wal
+	 * entry is known durable, on timeline InstalledDurableTLI.  Lets batched
+	 * recycling defer fsyncs without the write path entering a segment whose
+	 * rename is not yet flushed.  Timeline-qualified so a stale value cannot
+	 * carry across a promotion.  Protected by info_lck.
+	 */
+	TimeLineID	InstalledDurableTLI;
+	XLogSegNo	InstalledDurableSeg;
+
 	/* Fake LSN counter, for unlogged relations. */
 	pg_atomic_uint64 unloggedLSN;
 
@@ -716,15 +726,18 @@ static void AdvanceXLInsertBuffer(XLogRecPtr upto, TimeLineID tli,
 static void XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible);
 static bool InstallXLogFileSegment(XLogSegNo *segno, char *tmppath,
 								   bool find_free, XLogSegNo max_segno,
-								   TimeLineID tli);
+								   TimeLineID tli, bool batch);
 static void XLogFileClose(void);
+static void AdvanceInstalledDurableSeg(TimeLineID tli, XLogSegNo segno);
+static void EnsureXLogSegDirDurable(int fd, XLogSegNo segno, TimeLineID tli);
 static void PreallocXlogFiles(XLogRecPtr endptr, TimeLineID tli);
 static void RemoveTempXlogFiles(void);
 static void RemoveOldXlogFiles(XLogSegNo segno, XLogRecPtr lastredoptr,
 							   XLogRecPtr endptr, TimeLineID insertTLI);
 static void RemoveXlogFile(const struct dirent *segment_de,
 						   XLogSegNo recycleSegNo, XLogSegNo *endlogSegNo,
-						   TimeLineID insertTLI);
+						   TimeLineID insertTLI, bool batch,
+						   List **recycled_paths, List **cleanup_names);
 static void UpdateLastRemovedPtr(char *filename);
 static void ValidateXLOGDirectoryStructure(void);
 static void CleanupBackupHistory(void);
@@ -3403,7 +3416,7 @@ XLogFileInitInternal(XLogSegNo logsegno, TimeLineID logtli,
 	 */
 	max_segno = logsegno + CheckPointSegments;
 	if (InstallXLogFileSegment(&installed_segno, tmppath, true, max_segno,
-							   logtli))
+							   logtli, false))
 	{
 		*added = true;
 		elog(DEBUG2, "done creating and filling new WAL file");
@@ -3444,16 +3457,24 @@ XLogFileInit(XLogSegNo logsegno, TimeLineID logtli)
 	Assert(logtli != 0);
 
 	fd = XLogFileInitInternal(logsegno, logtli, &ignore_added, path);
-	if (fd >= 0)
-		return fd;
-
-	/* Now open original target segment (might not be file I just made) */
-	fd = BasicOpenFile(path, O_RDWR | PG_BINARY | O_CLOEXEC |
-					   get_sync_bit(wal_sync_method));
 	if (fd < 0)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not open file \"%s\": %m", path)));
+	{
+		/* Now open original target segment (might not be file I just made) */
+		fd = BasicOpenFile(path, O_RDWR | PG_BINARY | O_CLOEXEC |
+						   get_sync_bit(wal_sync_method));
+		if (fd < 0)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not open file \"%s\": %m", path)));
+	}
+
+	/*
+	 * About to write WAL here.  If the checkpointer recycled this segment with
+	 * a deferred fsync, make its rename durable first.  Covers both the reuse
+	 * and reopen paths above; PreallocXlogFiles() only pre-creates and calls
+	 * XLogFileInitInternal() directly, so it does not reach here.
+	 */
+	EnsureXLogSegDirDurable(fd, logsegno, logtli);
 	return fd;
 }
 
@@ -3587,7 +3608,7 @@ XLogFileCopy(TimeLineID destTLI, XLogSegNo destsegno,
 	/*
 	 * Now move the segment into place with its final name.
 	 */
-	if (!InstallXLogFileSegment(&destsegno, tmppath, false, 0, destTLI))
+	if (!InstallXLogFileSegment(&destsegno, tmppath, false, 0, destTLI, false))
 		elog(ERROR, "InstallXLogFileSegment should not have failed");
 }
 
@@ -3619,7 +3640,8 @@ XLogFileCopy(TimeLineID destTLI, XLogSegNo destsegno,
  */
 static bool
 InstallXLogFileSegment(XLogSegNo *segno, char *tmppath,
-					   bool find_free, XLogSegNo max_segno, TimeLineID tli)
+					   bool find_free, XLogSegNo max_segno, TimeLineID tli,
+					   bool batch)
 {
 	char		path[MAXPGPATH];
 	struct stat stat_buf;
@@ -3657,7 +3679,26 @@ InstallXLogFileSegment(XLogSegNo *segno, char *tmppath,
 	}
 
 	Assert(access(path, F_OK) != 0 && errno == ENOENT);
-	if (durable_rename(tmppath, path, LOG) != 0)
+
+	if (batch)
+	{
+		/*
+		 * Plain rename; the caller fsyncs the renamed files and pg_wal once the
+		 * whole pass is done, so the filesystem can coalesce the flushes.  The
+		 * pre-rename source fsync durable_rename() does is skipped: a WAL
+		 * segment is already durable by the time it is recycled.
+		 */
+		if (rename(tmppath, path) < 0)
+		{
+			LWLockRelease(ControlFileLock);
+			ereport(LOG,
+					(errcode_for_file_access(),
+					 errmsg("could not rename file \"%s\" to \"%s\": %m",
+							tmppath, path)));
+			return false;
+		}
+	}
+	else if (durable_rename(tmppath, path, LOG) != 0)
 	{
 		LWLockRelease(ControlFileLock);
 		/* durable_rename already emitted log message */
@@ -3665,6 +3706,14 @@ InstallXLogFileSegment(XLogSegNo *segno, char *tmppath,
 	}
 
 	LWLockRelease(ControlFileLock);
+
+	/*
+	 * The non-batched path used durable_rename(), so the entry is durable now;
+	 * advance the frontier.  In batched mode the caller advances it after its
+	 * bulk pg_wal fsync.
+	 */
+	if (!batch)
+		AdvanceInstalledDurableSeg(tli, *segno);
 
 	return true;
 }
@@ -3881,6 +3930,105 @@ UpdateLastRemovedPtr(char *filename)
 }
 
 /*
+ * Advance the directory-durability frontier to at least (tli, segno).
+ * Called once a segment's rename into pg_wal has been made durable (by
+ * durable_rename(), or by the checkpointer's batched fsync of pg_wal).
+ *
+ * The frontier is timeline-qualified: a higher timeline always supersedes the
+ * previous one (its segments are different files needing their own fsync), and
+ * within a timeline the highest segment number wins.
+ */
+static void
+AdvanceInstalledDurableSeg(TimeLineID tli, XLogSegNo segno)
+{
+	SpinLockAcquire(&XLogCtl->info_lck);
+	if (tli > XLogCtl->InstalledDurableTLI)
+	{
+		XLogCtl->InstalledDurableTLI = tli;
+		XLogCtl->InstalledDurableSeg = segno;
+	}
+	else if (tli == XLogCtl->InstalledDurableTLI &&
+			 segno > XLogCtl->InstalledDurableSeg)
+		XLogCtl->InstalledDurableSeg = segno;
+	SpinLockRelease(&XLogCtl->info_lck);
+}
+
+/*
+ * Ensure segment (segno, tli)'s pg_wal entry is durable before it is written.
+ *
+ * Batched recycling renames segments but defers the pg_wal fsync, so if the
+ * write path reaches a just-renamed segment first, its rename is not yet
+ * durable (issue_xlog_fsync() fsyncs only the file, never pg_wal).  If the
+ * frontier does not already cover it, fsync the file and pg_wal here; the
+ * timeline-qualified check keeps a stale frontier from carrying across a
+ * promotion.  Normally the checkpointer stays ahead and this is just a
+ * spinlock-protected compare.
+ */
+static void
+EnsureXLogSegDirDurable(int fd, XLogSegNo segno, TimeLineID tli)
+{
+	bool		durable;
+
+	SpinLockAcquire(&XLogCtl->info_lck);
+	durable = (tli == XLogCtl->InstalledDurableTLI &&
+			   segno <= XLogCtl->InstalledDurableSeg);
+	SpinLockRelease(&XLogCtl->info_lck);
+
+	if (durable)
+		return;
+
+	INJECTION_POINT_CACHED("wal-recycle-before-write-path-fsync", NULL);
+
+	/*
+	 * fsync the file (carries the rename where we cannot fsync a directory,
+	 * e.g. Windows) and fsync pg_wal (carries it on most Unix filesystems).
+	 */
+	if (pg_fsync(fd) != 0)
+	{
+		char		path[MAXPGPATH];
+
+		XLogFilePath(path, tli, segno, wal_segment_size);
+		ereport(data_sync_elevel(ERROR),
+				(errcode_for_file_access(),
+				 errmsg("could not fsync file \"%s\": %m", path)));
+	}
+	fsync_fname(XLOGDIR, true);
+
+	AdvanceInstalledDurableSeg(tli, segno);
+}
+
+/*
+ * fsync a recycled segment file by name, tolerating concurrent removal.
+ * Unlike fsync_fname(), ENOENT is not an error: if another process removed
+ * the segment after we renamed it, its durability is no longer our concern.
+ */
+static void
+fsync_fname_recycled(const char *fname)
+{
+	int			fd;
+
+	fd = BasicOpenFile(fname, O_RDWR | PG_BINARY | O_CLOEXEC);
+	if (fd < 0)
+	{
+		if (errno == ENOENT)
+			return;
+		ereport(data_sync_elevel(ERROR),
+				(errcode_for_file_access(),
+				 errmsg("could not open file \"%s\": %m", fname)));
+	}
+
+	if (pg_fsync(fd) != 0)
+		ereport(data_sync_elevel(ERROR),
+				(errcode_for_file_access(),
+				 errmsg("could not fsync file \"%s\": %m", fname)));
+
+	if (close(fd) != 0)
+		ereport(data_sync_elevel(ERROR),
+				(errcode_for_file_access(),
+				 errmsg("could not close file \"%s\": %m", fname)));
+}
+
+/*
  * Remove all temporary log files in pg_wal
  *
  * This is called at the beginning of recovery after a previous crash,
@@ -3928,6 +4076,9 @@ RemoveOldXlogFiles(XLogSegNo segno, XLogRecPtr lastredoptr, XLogRecPtr endptr,
 	char		lastoff[MAXFNAMELEN];
 	XLogSegNo	endlogSegNo;
 	XLogSegNo	recycleSegNo;
+	List	   *recycled_paths = NIL;
+	List	   *cleanup_names = NIL;
+	ListCell   *lc;
 
 	/* Initialize info about where to try to recycle to */
 	XLByteToSeg(endptr, endlogSegNo, wal_segment_size);
@@ -3970,12 +4121,48 @@ RemoveOldXlogFiles(XLogSegNo segno, XLogRecPtr lastredoptr, XLogRecPtr endptr,
 				/* Update the last removed location in shared memory first */
 				UpdateLastRemovedPtr(xlde->d_name);
 
-				RemoveXlogFile(xlde, recycleSegNo, &endlogSegNo, insertTLI);
+				RemoveXlogFile(xlde, recycleSegNo, &endlogSegNo, insertTLI,
+							   true, &recycled_paths, &cleanup_names);
 			}
 		}
 	}
 
 	FreeDir(xldir);
+
+	/*
+	 * Test hook: pause here, after the renames but before they are made
+	 * durable, so a test can drive the write frontier into a just-recycled
+	 * segment and crash, exercising the write-path barrier.
+	 */
+	INJECTION_POINT("wal-recycle-before-batch-fsync", NULL);
+
+	/*
+	 * Make the whole pass durable at once: fsync each recycled file, then
+	 * fsync pg_wal a single time.  Renaming first and fsyncing afterwards lets
+	 * the filesystem coalesce what used to be one journal flush per segment.
+	 * The per-file fsyncs mostly do nothing (the contents were already durable)
+	 * but persist the rename where we cannot fsync a directory, e.g. Windows.
+	 * A segment concurrently removed (e.g. by promotion cleanup) is skipped.
+	 */
+	foreach(lc, recycled_paths)
+		fsync_fname_recycled((char *) lfirst(lc));
+
+	if (recycled_paths != NIL || cleanup_names != NIL)
+	{
+		fsync_fname(XLOGDIR, true);
+		AdvanceInstalledDurableSeg(insertTLI, endlogSegNo - 1);
+	}
+
+	/*
+	 * Now that the batch is durable, drop the old segments' archive-status
+	 * files.  Doing it earlier could, after a crash that lost a rename, leave
+	 * an old segment whose .done marker was already gone and re-archive it.
+	 */
+	foreach(lc, cleanup_names)
+		XLogArchiveCleanup((char *) lfirst(lc));
+
+	list_free_deep(recycled_paths);
+	list_free_deep(cleanup_names);
 }
 
 /*
@@ -4043,7 +4230,8 @@ RemoveNonParentXlogFiles(XLogRecPtr switchpoint, TimeLineID newTLI)
 			 * - but seems safer to let them be archived and removed later.
 			 */
 			if (!XLogArchiveIsReady(xlde->d_name))
-				RemoveXlogFile(xlde, recycleSegNo, &endLogSegNo, newTLI);
+				RemoveXlogFile(xlde, recycleSegNo, &endLogSegNo, newTLI,
+						   false, NULL, NULL);
 		}
 	}
 
@@ -4066,7 +4254,8 @@ RemoveNonParentXlogFiles(XLogRecPtr switchpoint, TimeLineID newTLI)
 static void
 RemoveXlogFile(const struct dirent *segment_de,
 			   XLogSegNo recycleSegNo, XLogSegNo *endlogSegNo,
-			   TimeLineID insertTLI)
+			   TimeLineID insertTLI, bool batch,
+			   List **recycled_paths, List **cleanup_names)
 {
 	char		path[MAXPGPATH];
 #ifdef WIN32
@@ -4086,12 +4275,25 @@ RemoveXlogFile(const struct dirent *segment_de,
 		XLogCtl->InstallXLogFileSegmentActive &&	/* callee rechecks this */
 		get_dirent_type(path, segment_de, false, DEBUG2) == PGFILETYPE_REG &&
 		InstallXLogFileSegment(endlogSegNo, path,
-							   true, recycleSegNo, insertTLI))
+							   true, recycleSegNo, insertTLI, batch))
 	{
 		ereport(DEBUG2,
 				(errmsg_internal("recycled write-ahead log file \"%s\"",
 								 segname)));
 		CheckpointStats.ckpt_segs_recycled++;
+
+		/*
+		 * Batched mode only renamed the segment; remember its new path so the
+		 * caller can fsync it once all renames are done.
+		 */
+		if (recycled_paths != NULL)
+		{
+			char		dstpath[MAXPGPATH];
+
+			XLogFilePath(dstpath, insertTLI, *endlogSegNo, wal_segment_size);
+			*recycled_paths = lappend(*recycled_paths, pstrdup(dstpath));
+		}
+
 		/* Needn't recheck that slot on future iterations */
 		(*endlogSegNo)++;
 	}
@@ -4125,19 +4327,39 @@ RemoveXlogFile(const struct dirent *segment_de,
 							path)));
 			return;
 		}
-		rc = durable_unlink(newpath, LOG);
+		if (batch)
+			rc = unlink(newpath);
+		else
+			rc = durable_unlink(newpath, LOG);
 #else
-		rc = durable_unlink(path, LOG);
+		if (batch)
+			rc = unlink(path);
+		else
+			rc = durable_unlink(path, LOG);
 #endif
 		if (rc != 0)
 		{
-			/* Message already logged by durable_unlink() */
+			/*
+			 * In batched mode the caller's pg_wal fsync makes the unlink durable;
+			 * plain unlink() only sets errno, so report failures here.
+			 */
+			if (batch)
+				ereport(LOG,
+						(errcode_for_file_access(),
+						 errmsg("could not remove file \"%s\": %m", path)));
 			return;
 		}
 		CheckpointStats.ckpt_segs_removed++;
 	}
 
-	XLogArchiveCleanup(segname);
+	/*
+	 * Batched mode defers archive-status cleanup to the caller (after the
+	 * batch fsync); unbatched mode is already durable, so clean up now.
+	 */
+	if (cleanup_names != NULL)
+		*cleanup_names = lappend(*cleanup_names, pstrdup(segname));
+	else
+		XLogArchiveCleanup(segname);
 }
 
 /*
