@@ -63,6 +63,7 @@ parseCommandLine(int argc, char *argv[])
 		{"no-statistics", no_argument, NULL, 5},
 		{"set-char-signedness", required_argument, NULL, 6},
 		{"swap", no_argument, NULL, 7},
+		{"pg-commit-ts", no_argument, NULL, 8},
 
 		{NULL, 0, NULL, 0}
 	};
@@ -233,6 +234,9 @@ parseCommandLine(int argc, char *argv[])
 			case 7:
 				user_opts.transfer_mode = TRANSFER_MODE_SWAP;
 				break;
+			case 8:
+				user_opts.do_copy_pg_commit_ts = true;
+				break;
 
 			default:
 				fprintf(stderr, _("Try \"%s --help\" for more information.\n"),
@@ -325,6 +329,7 @@ usage(void)
 	printf(_("  -U, --username=NAME           cluster superuser (default \"%s\")\n"), os_info.user);
 	printf(_("  -v, --verbose                 enable verbose internal logging\n"));
 	printf(_("  -V, --version                 display version information, then exit\n"));
+	printf(_("  --pg-commit-ts                copy pg_commit_ts directory\n"));
 	printf(_("  --clone                       clone instead of copying files to new cluster\n"));
 	printf(_("  --copy                        copy files to new cluster (default)\n"));
 	printf(_("  --copy-file-range             copy files to new cluster with copy_file_range\n"));
