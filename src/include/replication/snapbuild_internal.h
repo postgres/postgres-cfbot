@@ -130,6 +130,17 @@ struct SnapBuild
 	}			committed;
 
 	/*
+	 * Generation counter, incremented each time a new catalog snapshot is
+	 * built due to a catalog-modifying transaction commit.  Used for lazy
+	 * snapshot distribution: instead of distributing a snapshot to every
+	 * in-progress transaction on each catalog-modifying commit, we only
+	 * distribute when the transaction actually needs to decode a data change.
+	 * This avoids O(N^2) snapshot disk usage when a long-running transaction
+	 * coexists with many vacuum commits.
+	 */
+	uint64		snapshot_generation;
+
+	/*
 	 * Array of transactions and subtransactions that had modified catalogs
 	 * and were running when the snapshot was serialized.
 	 *
