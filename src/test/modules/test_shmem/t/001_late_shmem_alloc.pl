@@ -28,6 +28,28 @@ cmp_ok($attach_count2, '>', $attach_count1,
 $node->stop;
 
 ###
+# Test allocating memory after startup in single-user mode, where there is
+# no postmaster
+###
+SKIP:
+{
+	skip 'single-user mode is not supported on this platform', 1
+	  if $windows_os;
+
+	my $query = "SELECT get_test_shmem_attach_count();\n";
+	my $result = run_log(
+		[
+			'postgres', '--single', '-F',
+			'-c' => 'exit_on_error=true',
+			'-D' => $node->data_dir,
+			'postgres'
+		],
+		'<' => \$query);
+
+	ok($result, "shmem area is initialized in single-user mode");
+}
+
+###
 # Test that loading via shared_preload_libraries also works
 ###
 $node->append_conf('postgresql.conf',

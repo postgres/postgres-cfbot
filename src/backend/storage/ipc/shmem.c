@@ -872,7 +872,9 @@ ShmemAddrIsValid(const void *addr)
 void
 RegisterShmemCallbacks(const ShmemCallbacks *callbacks)
 {
-	if (shmem_request_state == SRS_DONE && IsUnderPostmaster)
+	/* a standalone backend has no postmaster, but can still allocate here */
+	if (shmem_request_state == SRS_DONE &&
+		(IsUnderPostmaster || !IsPostmasterEnvironment))
 	{
 		/*
 		 * After-startup initialization or attachment.  Call the appropriate
