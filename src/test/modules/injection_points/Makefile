@@ -22,7 +22,8 @@ ISOLATION = basic \
 	    ri_fastpath_reindex \
 	    syscache-update-pruned \
 	    wait_cleanup \
-	    heap_lock_update
+	    heap_lock_update \
+	    vacuum_skip_lock_stats
 
 # some isolation tests require wal_level=replica
 ISOLATION_OPTS = --temp-config $(top_srcdir)/src/test/modules/injection_points/extra.conf
