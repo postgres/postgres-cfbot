@@ -522,6 +522,184 @@ SELECT * FROM nocols n, LATERAL (VALUES(n.*)) v;
 (1 row)
 
 --
+-- Test writing the clauses in the order they are evaluated: FROM first and
+-- the select list last, or left out entirely
+--
+FROM int8_tbl SELECT q1, q2 ORDER BY q1, q2;
+        q1        |        q2         
+------------------+-------------------
+              123 |               456
+              123 |  4567890123456789
+ 4567890123456789 | -4567890123456789
+ 4567890123456789 |               123
+ 4567890123456789 |  4567890123456789
+(5 rows)
+
+FROM int8_tbl ORDER BY q1, q2;
+        q1        |        q2         
+------------------+-------------------
+              123 |               456
+              123 |  4567890123456789
+ 4567890123456789 | -4567890123456789
+ 4567890123456789 |               123
+ 4567890123456789 |  4567890123456789
+(5 rows)
+
+FROM int8_tbl SELECT ALL q1 ORDER BY q1;
+        q1        
+------------------
+              123
+              123
+ 4567890123456789
+ 4567890123456789
+ 4567890123456789
+(5 rows)
+
+FROM int8_tbl SELECT DISTINCT q1 ORDER BY q1;
+        q1        
+------------------
+              123
+ 4567890123456789
+(2 rows)
+
+FROM int8_tbl SELECT DISTINCT ON (q1) q1, q2 ORDER BY q1, q2;
+        q1        |        q2         
+------------------+-------------------
+              123 |               456
+ 4567890123456789 | -4567890123456789
+(2 rows)
+
+-- an empty target list is as acceptable as it is in SELECT ... FROM
+FROM int8_tbl WHERE q1 = 123 SELECT;
+--
+(2 rows)
+
+-- the other clauses keep their usual meanings, and precede the select list
+FROM int8_tbl WHERE q2 <> 456 GROUP BY q1 HAVING count(*) > 1
+  SELECT q1, count(*) ORDER BY q1;
+        q1        | count 
+------------------+-------
+ 4567890123456789 |     3
+(1 row)
+
+FROM int8_tbl WINDOW w AS (PARTITION BY q1)
+  SELECT q1, count(*) OVER w ORDER BY q1 LIMIT 3;
+        q1        | count 
+------------------+-------
+              123 |     2
+              123 |     2
+ 4567890123456789 |     3
+(3 rows)
+
+FROM int8_tbl WHERE q1 <> q2 ORDER BY q1, q2 LIMIT 2 FOR UPDATE;
+ q1  |        q2        
+-----+------------------
+ 123 |              456
+ 123 | 4567890123456789
+(2 rows)
+
+FROM int8_tbl a JOIN int8_tbl b ON a.q2 = b.q1 SELECT a.q1, b.q2
+  ORDER BY a.q1, b.q2;
+        q1        |        q2         
+------------------+-------------------
+              123 | -4567890123456789
+              123 |               123
+              123 |  4567890123456789
+ 4567890123456789 | -4567890123456789
+ 4567890123456789 |               123
+ 4567890123456789 |               456
+ 4567890123456789 |  4567890123456789
+ 4567890123456789 |  4567890123456789
+(8 rows)
+
+FROM generate_series(1, 3) g(i), LATERAL (SELECT i * 2) s(j) SELECT i, j
+  ORDER BY i;
+ i | j 
+---+---
+ 1 | 2
+ 2 | 4
+ 3 | 6
+(3 rows)
+
+-- and it nests like any other SELECT
+SELECT * FROM (FROM int8_tbl SELECT q1 AS x) ss ORDER BY x;
+        x         
+------------------
+              123
+              123
+ 4567890123456789
+ 4567890123456789
+ 4567890123456789
+(5 rows)
+
+WITH cte AS (FROM int8_tbl) FROM cte SELECT count(*);
+ count 
+-------
+     5
+(1 row)
+
+FROM int8_tbl SELECT q1 UNION FROM int8_tbl SELECT q2 ORDER BY 1;
+        q1         
+-------------------
+ -4567890123456789
+               123
+               456
+  4567890123456789
+(4 rows)
+
+(FROM int8_tbl SELECT q1) EXCEPT (FROM int8_tbl SELECT q2) ORDER BY 1;
+ q1 
+----
+(0 rows)
+
+-- works in the places a SELECT can be embedded in another statement
+CREATE TEMP TABLE fromfirst_tbl (q bigint);
+INSERT INTO fromfirst_tbl FROM int8_tbl WHERE q1 = 123 SELECT q1;
+INSERT INTO fromfirst_tbl FROM int8_tbl WHERE q2 = 456 SELECT DISTINCT q2;
+TABLE fromfirst_tbl;
+  q  
+-----
+ 123
+ 123
+ 456
+(3 rows)
+
+COPY (FROM fromfirst_tbl) TO stdout;
+123
+123
+456
+FROM fromfirst_tbl WHERE q = 123 SELECT q INTO TEMP TABLE fromfirst_into;
+TABLE fromfirst_into;
+  q  
+-----
+ 123
+ 123
+(2 rows)
+
+-- a stored query is deparsed as an ordinary SELECT
+CREATE TEMP VIEW fromfirst_view AS FROM int8_tbl WHERE q2 > 0 SELECT q1;
+SELECT pg_get_viewdef('fromfirst_view'::regclass);
+  pg_get_viewdef   
+-------------------
+  SELECT q1       +
+    FROM int8_tbl +
+   WHERE (q2 > 0);
+(1 row)
+
+-- nothing may follow the select list, and DISTINCT still requires one
+FROM int8_tbl SELECT q1 WHERE q1 = 123;
+ERROR:  syntax error at or near "WHERE"
+LINE 1: FROM int8_tbl SELECT q1 WHERE q1 = 123;
+                                ^
+FROM int8_tbl SELECT DISTINCT;
+ERROR:  syntax error at or near ";"
+LINE 1: FROM int8_tbl SELECT DISTINCT;
+                                     ^
+FROM;
+ERROR:  syntax error at or near ";"
+LINE 1: FROM;
+            ^
+--
 -- Test ORDER BY options
 --
 CREATE TEMP TABLE foo (f1 int);
