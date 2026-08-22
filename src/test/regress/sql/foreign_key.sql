@@ -2483,6 +2483,52 @@ ALTER TABLE fk_r_1 DROP CONSTRAINT fk_r_p_id_p_jd_fkey;
 ALTER TABLE fk_r DROP CONSTRAINT fk_r_p_id_p_jd_fkey_1;
 ALTER TABLE fk_r_2 DROP CONSTRAINT fk_r_p_id_p_jd_fkey;
 
+-- tests for SET session_replication_role = replica;
+
+RESET session_replication_role;
+
+-- disabling FK checks
+
+CREATE TABLE pkt(id int PRIMARY KEY);
+CREATE TABLE fkt(fk int REFERENCES pkt(id));
+
+INSERT INTO fkt VALUES(1); -- should fail
+
+SET session_replication_role=replica;
+INSERT INTO fkt VALUES(1); -- should succeed now
+
+DROP TABLE fkt, pkt;
+RESET session_replication_role;
+
+-- skipping FK validation during ALTER TABLE ... ADD FOREIGN KEY
+
+CREATE TABLE pkt(id int PRIMARY KEY);
+CREATE TABLE fkt(fk int);
+INSERT INTO fkt VALUES(1);
+
+ALTER TABLE fkt ADD FOREIGN KEY (fk) REFERENCES pkt(id); -- should fail
+
+SET session_replication_role=replica;
+ALTER TABLE fkt ADD FOREIGN KEY (fk) REFERENCES pkt(id); -- should succeed now
+
+DROP TABLE fkt, pkt;
+RESET session_replication_role;
+
+-- skipping FK existence checks during TRUNCATE
+
+CREATE TABLE pkt(id int PRIMARY KEY);
+CREATE TABLE fkt(fk int REFERENCES pkt(id));
+
+TRUNCATE pkt; -- should fail
+
+SET session_replication_role=replica;
+TRUNCATE pkt; -- should succeed now
+
+DROP TABLE fkt, pkt;
+RESET session_replication_role;
+
+-- end of tests for SET session_replication_role = replica;
+
 SET client_min_messages TO warning;
 DROP SCHEMA fkpart12 CASCADE;
 RESET client_min_messages;
