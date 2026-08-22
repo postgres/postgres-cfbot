@@ -240,6 +240,51 @@ emailAddress
     </para>
     </listitem>
    </varlistentry>
+
+   <varlistentry>
+    <term>
+     <function>ssl_group_info() returns setof record</function>
+     <indexterm>
+      <primary>ssl_group_info</primary>
+     </indexterm>
+    </term>
+    <listitem>
+    <para>
+     Provide information about TLS groups: group type and group name.
+     The group type value could be one of the following:
+
+     <variablelist>
+      <varlistentry id="ssl-group-info-negotiated">
+       <term><literal>negotiated</literal></term>
+       <listitem>
+        <para>
+         The group used for the handshake key exchange process.
+        </para>
+       </listitem>
+      </varlistentry>
+
+      <varlistentry id="ssl-group-info-shared">
+       <term><literal>shared</literal></term>
+       <listitem>
+        <para>
+         List of named groups shared with the server side.
+        </para>
+       </listitem>
+      </varlistentry>
+
+      <varlistentry id="ssl-group-info-supported">
+       <term><literal>supported</literal></term>
+       <listitem>
+        <para>
+         list of named groups supported by the client for key exchange in the
+         form of "supported_groups" extension.
+        </para>
+       </listitem>
+      </varlistentry>
+     </variablelist>
+    </para>
+    </listitem>
+   </varlistentry>
   </variablelist>
  </sect2>
 
