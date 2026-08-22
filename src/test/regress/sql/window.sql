@@ -1659,6 +1659,67 @@ SELECT * FROM
    FROM empsalary) emp
 WHERE first_emp = 1 OR last_emp = 1;
 
+-- Test reordering of the GROUP BY keys to match the first window's sort
+-- order
+SET enable_hashagg TO off;
+
+-- Ensure the GROUP BY keys are reordered to match the sort order of the
+-- window's PARTITION BY clause, allowing the sort for the grouping step to
+-- also provide the sorted input required by the WindowAgg.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname, min(salary) minsalary,
+       sum(min(salary)) OVER (PARTITION BY depname) depminsum
+FROM empsalary
+GROUP BY empno, depname;
+
+-- As above, but include the window's ORDER BY keys too.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname,
+       count(*) OVER (PARTITION BY depname ORDER BY empno) c
+FROM empsalary
+GROUP BY empno, depname;
+
+-- Ensure the GROUP BY keys are matched to the window's sort order in
+-- preference to the query's ORDER BY, since the latter sort is performed
+-- above the WindowAgg.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname, min(salary) minsalary,
+       sum(min(salary)) OVER (PARTITION BY depname) depminsum
+FROM empsalary
+GROUP BY empno, depname
+ORDER BY empno;
+
+-- Ensure the GROUP BY keys remaining after matching the window's sort order
+-- are ordered to match the query's ORDER BY, allowing the final sort to be
+-- avoided when the WindowAgg preserves the grouping step's output ordering.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname, min(salary) minsalary,
+       sum(min(salary)) OVER (PARTITION BY depname) depminsum
+FROM empsalary
+GROUP BY empno, enroll_date, depname
+ORDER BY depname, enroll_date;
+
+-- As above, but with an ORDER BY that does not lead with the window's sort
+-- keys.  Ensure the remaining GROUP BY keys still follow the query's ORDER
+-- BY even though the final sort cannot be avoided.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname, min(salary) minsalary,
+       sum(min(salary)) OVER (PARTITION BY depname) depminsum
+FROM empsalary
+GROUP BY empno, enroll_date, depname
+ORDER BY enroll_date, empno;
+
+-- Ensure the GROUP BY keys are still matched to the query's ORDER BY when
+-- the window imposes no sort order of its own.
+EXPLAIN (COSTS OFF)
+SELECT empno, depname, min(salary) minsalary,
+       sum(min(salary)) OVER () salarysum
+FROM empsalary
+GROUP BY depname, empno
+ORDER BY empno, depname;
+
+RESET enable_hashagg;
+
 CREATE INDEX empsalary_salary_empno_idx ON empsalary (salary, empno);
 
 SET enable_seqscan = 0;
