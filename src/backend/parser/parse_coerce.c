@@ -3173,6 +3173,10 @@ find_coercion_pathway(Oid targetTypeId, Oid sourceTypeId,
 	if (OidIsValid(targetTypeId))
 		targetTypeId = getBaseType(targetTypeId);
 
+	/* Disallow UNKNOWN target types. */
+	if (targetTypeId == UNKNOWNOID)
+		return COERCION_PATH_NONE;
+
 	/* Domains are always coercible to and from their base type */
 	if (sourceTypeId == targetTypeId)
 		return COERCION_PATH_RELABELTYPE;
