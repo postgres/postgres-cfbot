@@ -57,7 +57,7 @@ static ArchiveHandle *_allocAH(const char *FileSpec, const ArchiveFormat fmt,
 							   const pg_compress_specification compression_spec,
 							   bool dosync, ArchiveMode mode,
 							   SetupWorkerPtrType setupWorkerPtr,
-							   DataDirSyncMethod sync_method);
+							   DataDirSyncMethod sync_method, bool FileSpecIsPipe);
 static void _getObjectDescription(PQExpBuffer buf, const TocEntry *te);
 static void _printTocEntry(ArchiveHandle *AH, TocEntry *te, const char *pfx);
 static void _doSetFixedOutputState(ArchiveHandle *AH);
@@ -233,11 +233,12 @@ CreateArchive(const char *FileSpec, const ArchiveFormat fmt,
 			  const pg_compress_specification compression_spec,
 			  bool dosync, ArchiveMode mode,
 			  SetupWorkerPtrType setupDumpWorker,
-			  DataDirSyncMethod sync_method)
+			  DataDirSyncMethod sync_method,
+			  bool FileSpecIsPipe)
 
 {
 	ArchiveHandle *AH = _allocAH(FileSpec, fmt, compression_spec,
-								 dosync, mode, setupDumpWorker, sync_method);
+								 dosync, mode, setupDumpWorker, sync_method, FileSpecIsPipe);
 
 	return (Archive *) AH;
 }
@@ -245,7 +246,7 @@ CreateArchive(const char *FileSpec, const ArchiveFormat fmt,
 /* Open an existing archive */
 /* Public */
 Archive *
-OpenArchive(const char *FileSpec, const ArchiveFormat fmt)
+OpenArchive(const char *FileSpec, const ArchiveFormat fmt, bool FileSpecIsPipe)
 {
 	ArchiveHandle *AH;
 	pg_compress_specification compression_spec = {0};
@@ -253,7 +254,7 @@ OpenArchive(const char *FileSpec, const ArchiveFormat fmt)
 	compression_spec.algorithm = PG_COMPRESSION_NONE;
 	AH = _allocAH(FileSpec, fmt, compression_spec, true,
 				  archModeRead, setupRestoreWorker,
-				  DATA_DIR_SYNC_METHOD_FSYNC);
+				  DATA_DIR_SYNC_METHOD_FSYNC, FileSpecIsPipe);
 
 	return (Archive *) AH;
 }
@@ -1721,7 +1722,19 @@ SetOutput(ArchiveHandle *AH, const char *filename,
 	else
 		mode = PG_BINARY_W;
 
-	CFH = InitCompressFileHandle(compression_spec);
+	/*
+	 * The output handle (usually stdout) should never be a pipe command
+	 * managed by our popen logic, even if the archive itself is a pipe.  Our
+	 * pipe command implementation for directory mode is a template for the
+	 * data files, not for this primary output stream.
+	 *
+	 * Furthermore, marking this as a pipe command would cause it to be closed
+	 * with pclose() instead of fclose().  Since this handle is opened via
+	 * fdopen() (for stdout) or fopen() (for a regular file), using pclose()
+	 * on it is a bug that causes failures on BSD-based systems (like FreeBSD
+	 * or macOS).
+	 */
+	CFH = InitCompressFileHandle(compression_spec, false);
 
 	if (!CFH->open_func(filename, fn, mode, CFH))
 	{
@@ -2376,7 +2389,8 @@ static ArchiveHandle *
 _allocAH(const char *FileSpec, const ArchiveFormat fmt,
 		 const pg_compress_specification compression_spec,
 		 bool dosync, ArchiveMode mode,
-		 SetupWorkerPtrType setupWorkerPtr, DataDirSyncMethod sync_method)
+		 SetupWorkerPtrType setupWorkerPtr, DataDirSyncMethod sync_method,
+		 bool FileSpecIsPipe)
 {
 	ArchiveHandle *AH;
 	CompressFileHandle *CFH;
@@ -2417,6 +2431,8 @@ _allocAH(const char *FileSpec, const ArchiveFormat fmt,
 	else
 		AH->fSpec = NULL;
 
+	AH->is_pipe = FileSpecIsPipe;
+
 	AH->currUser = NULL;		/* unknown */
 	AH->currSchema = NULL;		/* ditto */
 	AH->currTablespace = NULL;	/* ditto */
@@ -2429,14 +2445,26 @@ _allocAH(const char *FileSpec, const ArchiveFormat fmt,
 
 	AH->mode = mode;
 	AH->compression_spec = compression_spec;
-	AH->dosync = dosync;
+	AH->dosync = FileSpecIsPipe ? false : dosync;
 	AH->sync_method = sync_method;
 
 	memset(&(AH->sqlparse), 0, sizeof(AH->sqlparse));
 
 	/* Open stdout with no compression for AH output handle */
 	out_compress_spec.algorithm = PG_COMPRESSION_NONE;
-	CFH = InitCompressFileHandle(out_compress_spec);
+
+	/*
+	 * The output handle (usually stdout) should never be a pipe command
+	 * managed by our popen logic, even if the archive itself is a pipe.  Our
+	 * pipe command implementation for directory mode is a template for the
+	 * data files, not for this primary output stream.
+	 *
+	 * Furthermore, marking this as a pipe command would cause it to be closed
+	 * with pclose() instead of fclose().  Since this handle is opened via
+	 * fdopen() (for stdout), using pclose() on it is a bug that causes
+	 * failures on BSD-based systems (like FreeBSD or macOS).
+	 */
+	CFH = InitCompressFileHandle(out_compress_spec, false);
 	if (!CFH->open_func(NULL, fileno(stdout), PG_BINARY_A, CFH))
 		pg_fatal("could not open stdout for appending: %m");
 	AH->OF = CFH;

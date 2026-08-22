@@ -8,6 +8,11 @@ use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
 
+# Use perl one-liner as a portable 'cat' replacement for Windows compatibility.
+my $perlbin = $^X;
+$perlbin =~ s!\\!/!g if $PostgreSQL::Test::Utils::windows_os;
+my $perl_cat = "$perlbin -pe ''";
+
 my $tempdir = PostgreSQL::Test::Utils::tempdir;
 my $inputfile;
 
@@ -97,6 +102,19 @@ command_ok(
 		'postgres'
 	],
 	"filter file without patterns");
+
+mkdir "$backupdir/dump_pipe_filter";
+
+command_ok(
+	[
+		'pg_dump',
+		'--port' => $port,
+		'--format' => 'directory',
+		'--pipe' => "$perl_cat > $backupdir/dump_pipe_filter/%f",
+		'--filter' => "$tempdir/inputfile.txt",
+		'postgres'
+	],
+	"filter file without patterns with pipe");
 
 my $dump = slurp_file($plainfile);
 
