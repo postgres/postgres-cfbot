@@ -62,6 +62,7 @@
 #include "parser/parse_func.h"
 #include "parser/parse_type.h"
 #include "pgstat.h"
+#include "storage/lmgr.h"
 #include "tcop/pquery.h"
 #include "tcop/utility.h"
 #include "utils/acl.h"
@@ -1386,9 +1387,21 @@ AlterFunction(ParseState *pstate, AlterFunctionStmt *stmt)
 
 	ObjectAddressSet(address, ProcedureRelationId, funcOid);
 
+	/* Lock the function so nobody else can do anything with it. */
+	LockDatabaseObject(ProcedureRelationId, funcOid, 0, AccessExclusiveLock);
+
+	/*
+	 * It is possible that by the time we acquire the lock on function,
+	 * concurrent DDL has removed it. We can test this by checking the
+	 * existence of function. We get the tuple again to avoid the risk
+	 * of function definition getting changed.
+	 */
 	tup = SearchSysCacheCopy1(PROCOID, ObjectIdGetDatum(funcOid));
-	if (!HeapTupleIsValid(tup)) /* should not happen */
-		elog(ERROR, "cache lookup failed for function %u", funcOid);
+	if (!HeapTupleIsValid(tup))
+		ereport(ERROR,
+				errcode(ERRCODE_UNDEFINED_OBJECT),
+				errmsg("function \"%s\" does not exist",
+					   NameListToString(stmt->func->objname)));
 
 	procForm = (Form_pg_proc) GETSTRUCT(tup);
 
