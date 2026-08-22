@@ -674,3 +674,101 @@ alter table returningwrtest2 drop c;
 alter table returningwrtest attach partition returningwrtest2 for values in (2);
 insert into returningwrtest values (2, 'foo') returning returningwrtest;
 drop table returningwrtest;
+
+-- ******
+-- *  INSERT ... BY NAME
+-- ******
+create table byname_t (a int, b int, c int default 42);
+
+-- BY NAME matches the query's result columns to target columns by name,
+-- regardless of order
+insert into byname_t (a, b) by name select 2 as b, 1 as a;
+select a, b, c from byname_t order by a;
+
+-- Without an explicit column list, all table columns are candidates; columns
+-- not named by the query receive their default values
+truncate byname_t;
+insert into byname_t by name select 10 as c, 20 as a;
+select a, b, c from byname_t order by a;
+
+-- The same rule applies when an explicit column list is present
+truncate byname_t;
+insert into byname_t (a, b) by name select 30 as a;
+select a, b, c from byname_t order by a;
+
+-- BY POSITION is the default, spelled out explicitly
+truncate byname_t;
+insert into byname_t (a, b, c) by position select 1, 2, 3;
+select a, b, c from byname_t order by a;
+truncate byname_t;
+insert into byname_t by position values (4, 5, 6);
+select a, b, c from byname_t order by a;
+truncate byname_t;
+insert into byname_t by position default values;
+select a, b, c from byname_t order by a;
+
+-- source column order does not matter with BY NAME
+truncate byname_t;
+insert into byname_t by name select 3 as c, 1 as a, 2 as b;
+select a, b, c from byname_t order by a;
+
+-- BY NAME works with a general query (CTE, expressions)
+truncate byname_t;
+with src(x, y) as (values (100, 200))
+  insert into byname_t by name select y as b, x as a from src;
+select a, b, c from byname_t order by a;
+
+-- BY NAME is case sensitive and honors quoted identifiers
+create table byname_case ("Col" int, col int);
+insert into byname_case by name select 1 as "Col", 2 as col;
+select "Col", col from byname_case;
+drop table byname_case;
+
+-- error: a result column has no matching target column
+insert into byname_t by name select 1 as a, 2 as zzz;
+
+-- error: an explicit target list narrows the candidate columns
+insert into byname_t (a, b) by name select 1 as a, 2 as c;
+
+-- error: two result columns map to the same target column
+insert into byname_t by name select 1 as a, 2 as a;
+
+-- error: generated result column names still need a matching target column
+insert into byname_t by name select 1, 2;
+
+-- error: target column indirection cannot be matched unambiguously by name
+create type byname_pair as (x int, y int);
+create table byname_comp (c byname_pair);
+insert into byname_comp(c.x, c.y) by name select 1 as c;
+drop table byname_comp;
+drop type byname_pair;
+
+-- error: BY NAME requires a query source
+insert into byname_t by name values (1, 2, 3);
+insert into byname_t (a, b) by name values (1, 2);
+insert into byname_t by name default values;
+
+drop table byname_t;
+
+-- BY NAME combined with OVERRIDING and an identity column
+create table byname_ident (id int generated always as identity,
+							val int, note text default 'x');
+insert into byname_ident (id, val) by name overriding system value
+  select 99 as val, 5 as id;
+insert into byname_ident (id, val) overriding system value by name
+  select 100 as val, 6 as id;
+select id, val, note from byname_ident order by id;
+drop table byname_ident;
+
+-- BY NAME combined with ON CONFLICT and RETURNING
+create table byname_conflict (id int primary key, a int, b int default 9);
+insert into byname_conflict by name select 1 as id, 2 as a;
+insert into byname_conflict by name select 1 as id, 99 as a
+  on conflict do nothing;
+select id, a, b from byname_conflict order by id;
+insert into byname_conflict by name select 5 as a, 1 as id
+  on conflict (id) do update set a = excluded.a;
+insert into byname_conflict by name select 2 as id, 7 as a
+  returning id, a, b;
+select id, a, b from byname_conflict order by id;
+drop table byname_conflict;
