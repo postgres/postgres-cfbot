@@ -679,6 +679,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 				json_table_plan_union
 				json_table_plan_cross
 				json_table_plan_primary
+				json_transform_action
 %type <list>	json_name_and_value_list
 				json_value_expr_list
 				json_array_aggregate_order_by_clause_opt
@@ -686,9 +687,14 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 				json_behavior_clause_opt
 				json_passing_clause_opt
 				json_table_column_definition_list
+				json_transform_behavior_list_opt
+				json_transform_behavior_list
 %type <str>		json_table_path_name_opt
+%type <node>	json_transform_behavior
 %type <ival>	json_behavior_type
 				json_predicate_type_constraint
+				json_transform_behavior_value
+				json_transform_behavior_target
 				json_quotes_clause_opt
 				json_table_default_plan_choices
 				json_table_default_plan_inner_outer
@@ -775,7 +781,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	DOUBLE_P DROP
 
 	EACH EDGE ELSE EMPTY_P ENABLE_P ENCODING ENCRYPTED END_P ENFORCED ENUM_P
-	ERROR_P ESCAPE EVENT EXCEPT EXCLUDE EXCLUDING EXCLUSIVE EXECUTE EXISTS
+	ERROR_P ESCAPE EVENT EXCEPT EXCLUDE EXCLUDING EXCLUSIVE EXECUTE EXISTING EXISTS
 	EXPLAIN EXPRESSION EXTENSION EXTERNAL EXTRACT
 
 	FALSE_P FAMILY FETCH FILTER FINALIZE FIRST_P FLOAT_P FOLLOWING FOR
@@ -791,7 +797,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	INTERSECT INTERVAL INTO INVOKER IS ISNULL ISOLATION
 
 	JOIN JSON JSON_ARRAY JSON_ARRAYAGG JSON_EXISTS JSON_OBJECT JSON_OBJECTAGG
-	JSON_QUERY JSON_SCALAR JSON_SERIALIZE JSON_TABLE JSON_VALUE
+	JSON_QUERY JSON_SCALAR JSON_SERIALIZE JSON_TABLE JSON_TRANSFORM JSON_VALUE
 
 	KEEP KEY KEYS
 
@@ -800,7 +806,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	LOCALTIME LOCALTIMESTAMP LOCATION LOCK_P LOCKED LOGGED LSN_P
 
 	MAPPING MATCH MATCHED MATERIALIZED MAXVALUE MERGE MERGE_ACTION METHOD
-	MINUTE_P MINVALUE MODE MONTH_P MOVE
+	MINUTE_P MINVALUE MISSING MODE MONTH_P MOVE
 
 	NAME_P NAMES NATIONAL NATURAL NCHAR NESTED NEW NEXT NFC NFD NFKC NFKD NO NODE
 	NONE NORMALIZE NORMALIZED
@@ -819,7 +825,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	QUOTE QUOTES
 
 	RANGE READ REAL REASSIGN RECURSIVE REF_P REFERENCES REFERENCING
-	REFRESH REINDEX RELATIONSHIP RELATIVE_P RELEASE RENAME REPACK REPEATABLE REPLACE REPLICA
+	REFRESH REINDEX RELATIONSHIP RELATIVE_P RELEASE REMOVE RENAME REPACK REPEATABLE REPLACE REPLICA
 	RESET RESPECT_P RESTART RESTRICT RETURN RETURNING RETURNS REVOKE RIGHT ROLE ROLLBACK ROLLUP
 	ROUTINE ROUTINES ROW ROWS RULE
 
@@ -940,6 +946,14 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %nonassoc	UNBOUNDED NESTED /* ideally would have same precedence as IDENT */
 %nonassoc	IDENT PARTITION RANGE ROWS GROUPS PRECEDING FOLLOWING CUBE ROLLUP
 			SET KEYS OBJECT_P SCALAR TO USING VALUE_P WITH WITHOUT PATH
+/*
+ * IGNORE is given a precedence so the shift/reduce conflict between window
+ * null-treatment (IGNORE NULLS) and a JSON_TRANSFORM behavior clause
+ * (IGNORE ON ...) resolves in favor of shifting (binding IGNORE to NULLS).
+ * The empty null_treatment rule below is marked %prec UNBOUNDED (lower) so
+ * the shift wins by precedence rather than as an unresolved conflict.
+ */
+%nonassoc	IGNORE_P
 %left		Op OPERATOR RIGHT_ARROW '|'	/* multi-character ops and user-defined operators */
 %left		'+' '-'
 %left		'*' '/' '%'
@@ -17254,6 +17268,19 @@ func_expr_common_subexpr:
 					n->location = @1;
 					$$ = (Node *) n;
 				}
+			| JSON_TRANSFORM '('
+				json_value_expr ',' json_transform_action
+				json_passing_clause_opt
+			')'
+				{
+					JsonFuncExpr *n = makeNode(JsonFuncExpr);
+					n->op = JSON_TRANSFORM_OP;
+					n->context_item = (JsonValueExpr *) $3;
+					n->action = (JsonTransformAction *) $5;
+					n->passing = $6;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
 			;
 
 
@@ -17381,7 +17408,7 @@ filter_clause:
 null_treatment:
 			IGNORE_P NULLS_P						{ $$ = PARSER_IGNORE_NULLS; }
 			| RESPECT_P NULLS_P						{ $$ = PARSER_RESPECT_NULLS; }
-			| /*EMPTY*/								{ $$ = NO_NULLTREATMENT; }
+			| /*EMPTY*/			%prec UNBOUNDED		{ $$ = NO_NULLTREATMENT; }
 		;
 
 window_clause:
@@ -18132,6 +18159,100 @@ json_returning_clause_opt:
 					$$ = (Node *) n;
 				}
 			| /* EMPTY */							{ $$ = NULL; }
+		;
+
+json_transform_action:
+			/* INSERT path_expr = value_expr */
+			INSERT a_expr '=' json_value_expr json_transform_behavior_list_opt
+			{
+				JsonTransformAction *n = makeNode(JsonTransformAction);
+				n->op = TRANSFORM_INSERT;
+				n->pathspec = $2;
+				n->value_expr = $4;
+				n->behaviors = $5;
+				n->location = @1;
+
+				$$ = (Node *) n;
+			}
+			|
+			RENAME a_expr '=' Sconst json_transform_behavior_list_opt
+			{
+				JsonTransformAction *n = makeNode(JsonTransformAction);
+				n->op = TRANSFORM_RENAME;
+				n->pathspec = $2;
+				n->value_expr = makeStringConst($4, @4);
+				n->behaviors = $5;
+				n->location = @1;
+
+				$$ = (Node *) n;
+			}
+			|
+			REPLACE a_expr '=' json_value_expr json_transform_behavior_list_opt
+			{
+				JsonTransformAction *n = makeNode(JsonTransformAction);
+				n->op = TRANSFORM_REPLACE;
+				n->pathspec = $2;
+				n->value_expr = $4;
+				n->behaviors = $5;
+				n->location = @1;
+
+				$$ = (Node *) n;
+			}
+			|
+			REMOVE a_expr json_transform_behavior_list_opt
+			{
+				JsonTransformAction *n = makeNode(JsonTransformAction);
+				n->op = TRANSFORM_REMOVE;
+				n->pathspec = $2;
+				n->value_expr = NULL;
+				n->behaviors = $3;
+				n->location = @1;
+
+				$$ = (Node *) n;
+			};
+
+/*
+ * Optional per-action behavior clauses: a sequence of "<value> ON <target>".
+ * Each clause is collected as an encoded integer (see the
+ * JSON_TRANSFORM_CLAUSE_* macros) and resolved/validated in parse analysis.
+ */
+json_transform_behavior_list_opt:
+			json_transform_behavior_list			{ $$ = $1; }
+			| /* EMPTY */							{ $$ = NIL; }
+		;
+
+json_transform_behavior_list:
+			json_transform_behavior
+				{ $$ = list_make1($1); }
+			| json_transform_behavior_list json_transform_behavior
+				{ $$ = lappend($1, $2); }
+		;
+
+json_transform_behavior:
+			json_transform_behavior_value ON json_transform_behavior_target
+				{
+					JsonTransformBehaviorClause *c = makeNode(JsonTransformBehaviorClause);
+
+					c->behavior = $1;
+					c->target = $3;
+					c->location = @1;
+					$$ = (Node *) c;
+				}
+		;
+
+json_transform_behavior_value:
+			ERROR_P		{ $$ = JSON_TRANSFORM_BEHAVIOR_ERROR; }
+			| IGNORE_P	{ $$ = JSON_TRANSFORM_BEHAVIOR_IGNORE; }
+			| NULL_P	{ $$ = JSON_TRANSFORM_BEHAVIOR_NULL; }
+			| REMOVE	{ $$ = JSON_TRANSFORM_BEHAVIOR_REMOVE; }
+		;
+
+json_transform_behavior_target:
+			EXISTING	{ $$ = JSON_TRANSFORM_TARGET_EXISTING; }
+			| MISSING	{ $$ = JSON_TRANSFORM_TARGET_MISSING; }
+			| NULL_P	{ $$ = JSON_TRANSFORM_TARGET_NULL; }
+			| EMPTY_P	{ $$ = JSON_TRANSFORM_TARGET_EMPTY; }
+			| ERROR_P	{ $$ = JSON_TRANSFORM_TARGET_ERROR; }
 		;
 
 /*
@@ -18998,6 +19119,7 @@ unreserved_keyword:
 			| EXCLUDING
 			| EXCLUSIVE
 			| EXECUTE
+			| EXISTING
 			| EXPLAIN
 			| EXPRESSION
 			| EXTENSION
@@ -19069,6 +19191,7 @@ unreserved_keyword:
 			| METHOD
 			| MINUTE_P
 			| MINVALUE
+			| MISSING
 			| MODE
 			| MONTH_P
 			| MOVE
@@ -19144,6 +19267,7 @@ unreserved_keyword:
 			| RELATIONSHIP
 			| RELATIVE_P
 			| RELEASE
+			| REMOVE
 			| RENAME
 			| REPACK
 			| REPEATABLE
@@ -19292,6 +19416,7 @@ col_name_keyword:
 			| JSON_SCALAR
 			| JSON_SERIALIZE
 			| JSON_TABLE
+			| JSON_TRANSFORM
 			| JSON_VALUE
 			| LEAST
 			| MERGE_ACTION
@@ -19595,6 +19720,7 @@ bare_label_keyword:
 			| EXCLUDING
 			| EXCLUSIVE
 			| EXECUTE
+			| EXISTING
 			| EXISTS
 			| EXPLAIN
 			| EXPRESSION
@@ -19667,6 +19793,7 @@ bare_label_keyword:
 			| JSON_SCALAR
 			| JSON_SERIALIZE
 			| JSON_TABLE
+			| JSON_TRANSFORM
 			| JSON_VALUE
 			| KEEP
 			| KEY
@@ -19701,6 +19828,7 @@ bare_label_keyword:
 			| MERGE_ACTION
 			| METHOD
 			| MINVALUE
+			| MISSING
 			| MODE
 			| MOVE
 			| NAME_P
@@ -19793,6 +19921,7 @@ bare_label_keyword:
 			| RELATIONSHIP
 			| RELATIVE_P
 			| RELEASE
+			| REMOVE
 			| RENAME
 			| REPACK
 			| REPEATABLE

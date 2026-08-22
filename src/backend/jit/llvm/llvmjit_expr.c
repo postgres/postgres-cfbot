@@ -2352,6 +2352,12 @@ llvm_compile_expr(ExprState *state)
 					break;
 				}
 
+			case EEOP_JSON_TRANSFORM:
+				build_EvalXFunc(b, mod, "ExecEvalJsonTransform",
+								v_state, op, v_econtext);
+				LLVMBuildBr(b, opblocks[opno + 1]);
+				break;
+
 			case EEOP_JSONEXPR_COERCION:
 				build_EvalXFunc(b, mod, "ExecEvalJsonCoercion",
 								v_state, op, v_econtext);

@@ -1693,6 +1693,67 @@ typedef struct JsonValueExpr
 	JsonFormat *format;			/* FORMAT clause, if specified */
 } JsonValueExpr;
 
+typedef enum JsonTransformOp
+{
+	TRANSFORM_INSERT,
+	TRANSFORM_REMOVE,
+	TRANSFORM_RENAME,
+	TRANSFORM_REPLACE,
+}			JsonTransformOp;
+
+/*
+ * Per-action behavior, used for the ON EXISTING / ON MISSING / ON NULL
+ * clauses of JSON_TRANSFORM.  JSON_TRANSFORM_BEHAVIOR_UNSPECIFIED means the
+ * user omitted the clause; parse analysis replaces it with the spec default.
+ */
+typedef enum JsonTransformBehavior
+{
+	JSON_TRANSFORM_BEHAVIOR_UNSPECIFIED = 0,
+	JSON_TRANSFORM_BEHAVIOR_ERROR,
+	JSON_TRANSFORM_BEHAVIOR_IGNORE,
+	JSON_TRANSFORM_BEHAVIOR_NULL,
+	JSON_TRANSFORM_BEHAVIOR_REMOVE,
+}			JsonTransformBehavior;
+
+/* Which ON-clause a raw grammar behavior applies to. */
+typedef enum JsonTransformBehaviorTarget
+{
+	JSON_TRANSFORM_TARGET_EXISTING = 1,
+	JSON_TRANSFORM_TARGET_MISSING,
+	JSON_TRANSFORM_TARGET_NULL,
+	JSON_TRANSFORM_TARGET_EMPTY,
+	JSON_TRANSFORM_TARGET_ERROR,
+}			JsonTransformBehaviorTarget;
+
+/*
+ * One "<value> ON <target>" clause collected by the grammar (e.g.
+ * IGNORE ON EXISTING).  These are gathered into JsonTransformAction.behaviors
+ * and resolved into the on_existing/on_missing/on_null fields during parse
+ * analysis; the node is transient and not used past analysis.
+ */
+typedef struct JsonTransformBehaviorClause
+{
+	NodeTag		type;
+	JsonTransformBehaviorTarget target;
+	JsonTransformBehavior behavior;
+	ParseLoc	location;
+}			JsonTransformBehaviorClause;
+
+typedef struct JsonTransformAction
+{
+	NodeTag		type;
+	JsonTransformOp op;
+	Node	   *pathspec;		/* The JSON Path: '$.a' */
+	Node	   *value_expr;
+	/* raw ON-clauses from the grammar (transient; resolved in analysis) */
+	List	   *behaviors;
+	/* resolved behaviors (filled by parse analysis from defaults + clauses) */
+	JsonTransformBehavior on_existing;
+	JsonTransformBehavior on_missing;
+	JsonTransformBehavior on_null;
+	ParseLoc	location;		/* token location, or -1 if unknown */
+}			JsonTransformAction;
+
 typedef enum JsonConstructorType
 {
 	JSCTOR_JSON_OBJECT = 1,
@@ -1829,6 +1890,7 @@ typedef enum JsonExprOp
 	JSON_QUERY_OP,				/* JSON_QUERY() */
 	JSON_VALUE_OP,				/* JSON_VALUE() */
 	JSON_TABLE_OP,				/* JSON_TABLE() */
+	JSON_TRANSFORM_OP,			/* JSON_TRANSFORM() */
 } JsonExprOp;
 
 /*
@@ -1853,6 +1915,8 @@ typedef struct JsonExpr
 
 	/* jsonpath-valued expression containing the query pattern */
 	Node	   *path_spec;
+
+	JsonTransformAction *action;
 
 	/* Expected type/format of the output. */
 	JsonReturning *returning;
