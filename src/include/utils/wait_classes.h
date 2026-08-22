@@ -26,4 +26,13 @@
 #define PG_WAIT_IO					0x0A000000U
 #define PG_WAIT_INJECTIONPOINT		0x0B000000U
 
+/*
+ * Bit-layout masks for wait_event_info.  The high byte encodes the
+ * class (one of the PG_WAIT_* constants above); the low 16 bits
+ * encode the per-class event id; the middle byte is currently
+ * reserved (see pgstat_report_wait_start in wait_event.h).
+ */
+#define WAIT_EVENT_CLASS_MASK		0xFF000000U
+#define WAIT_EVENT_ID_MASK			0x0000FFFFU
+
 #endif							/* WAIT_CLASSES_H */

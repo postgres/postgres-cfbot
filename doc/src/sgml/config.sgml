@@ -9237,6 +9237,112 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-wait-event-capture" xreflabel="wait_event_capture">
+      <term><varname>wait_event_capture</varname> (<type>enum</type>)
+      <indexterm>
+       <primary><varname>wait_event_capture</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Controls collection of wait event timing instrumentation.  Requires
+        the server to be compiled with
+        <option>--enable-wait-event-timing</option>.  Possible values are
+        <literal>off</literal> (the default), <literal>stats</literal>, and
+        <literal>trace</literal>; each level is a strict superset of the
+        previous one.
+       </para>
+       <para>
+        At <literal>stats</literal>, the server records per-backend wait
+        event statistics &mdash; counts, total and average durations, and a
+        log2 duration histogram &mdash; visible in the
+        <link linkend="monitoring-pg-stat-wait-event-timing-view">
+        <structname>pg_stat_wait_event_timing</structname></link> view.
+        Two <function>clock_gettime()</function>-grade timestamps are taken
+        around every wait event transition, costing roughly
+        40&ndash;100&nbsp;ns each on modern hardware; while
+        <varname>wait_event_capture</varname> is <literal>off</literal> the
+        hot path adds only a single predictable branch.
+       </para>
+       <para>
+        At <literal>trace</literal>, the server additionally records every
+        individual wait event, together with query-attribution markers,
+        into a per-session ring buffer exposed via the
+        <link linkend="monitoring-pg-backend-wait-event-trace-view">
+        <structname>pg_backend_wait_event_trace</structname></link> view.
+        The ring is allocated lazily from dynamic shared memory on first
+        use (default 4&nbsp;MB per backend; see
+        <xref linkend="guc-wait-event-trace-ring-size"/>), so only
+        sessions that enable trace pay the per-ring memory cost.  Query
+        attribution &mdash; matching each wait to the query that incurred
+        it &mdash; requires both <xref linkend="guc-track-activities"/> and
+        <xref linkend="guc-compute-query-id"/>; a warning is logged if
+        either is missing when trace is enabled.
+       </para>
+       <para>
+        Only superusers and users with the appropriate <literal>SET</literal>
+        privilege can change this setting.  Read access to the resulting
+        statistics is controlled separately by membership in the
+        <link linkend="predefined-roles"><literal>pg_read_all_stats</literal></link>
+        role (which the <literal>pg_monitor</literal> role inherits).  To
+        delegate the ability to change the setting to a monitoring role,
+        use <command>GRANT SET ON PARAMETER</command>:
+<programlisting>
+GRANT SET ON PARAMETER wait_event_capture TO pg_monitor;
+</programlisting>
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-wait-event-timing-max-tranches" xreflabel="wait_event_timing_max_tranches">
+      <term><varname>wait_event_timing_max_tranches</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>wait_event_timing_max_tranches</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Sets the maximum number of distinct LWLock tranches whose timing is
+        recorded individually per backend.  PostgreSQL maintains a
+        per-backend hash table mapping each tranche the backend encounters
+        to its histogram; once the table fills, further tranches are
+        counted against <structfield>lwlock_overflow_count</structfield> in
+        <link linkend="monitoring-pg-stat-wait-event-timing-overflow-view">
+        <structname>pg_stat_wait_event_timing_overflow</structname></link>
+        and not individually timed.  Sized at server start; this parameter
+        has no effect on builds compiled without
+        <option>--enable-wait-event-timing</option>.  The default is
+        <literal>192</literal>; raise it if your installation loads many
+        extensions that register their own LWLock tranches and you observe
+        a non-zero <structfield>lwlock_overflow_count</structfield>.  This
+        parameter can only be set at server start.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-wait-event-trace-ring-size" xreflabel="wait_event_trace_ring_size">
+      <term><varname>wait_event_trace_ring_size</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>wait_event_trace_ring_size</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Sets the size of the per-backend ring buffer used at the
+        <literal>trace</literal> level of
+        <xref linkend="guc-wait-event-capture"/>.  Each backend that enables
+        trace allocates a ring of this size from a cluster-wide dynamic
+        shared memory area.  The value must be a power of two; larger rings
+        retain a longer history of wait events before wrapping.  If this
+        parameter is specified without units, it is taken as kilobytes.  The
+        default is <literal>4096</literal> (4&nbsp;MB).  This parameter has
+        no effect on builds compiled without
+        <option>--enable-wait-event-timing</option>, and can only be set at
+        server start.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-track-functions" xreflabel="track_functions">
       <term><varname>track_functions</varname> (<type>enum</type>)
       <indexterm>

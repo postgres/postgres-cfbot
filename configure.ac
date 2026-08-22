@@ -226,6 +226,14 @@ AC_SUBST(DTRACEFLAGS)])
 AC_SUBST(enable_dtrace)
 
 #
+# --enable-wait-event-timing adds wait event timing instrumentation
+#
+PGAC_ARG_BOOL(enable, wait-event-timing, no,
+              [build with wait event timing instrumentation],
+              [AC_DEFINE([USE_WAIT_EVENT_TIMING], 1,
+                         [Define to 1 to build with wait event timing. (--enable-wait-event-timing)])])
+
+#
 # TAP tests
 #
 PGAC_ARG_BOOL(enable, tap-tests, no,

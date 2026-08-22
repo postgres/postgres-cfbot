@@ -1,0 +1,181 @@
+--
+-- WAIT_EVENT_TIMING
+--
+-- Exercises the wait_event_capture instrumentation: the GUC, the stats
+-- surface (pg_stat_get_wait_event_timing(), the pg_stat_wait_event_timing
+-- and histogram-buckets views, overflow counters, resets), and the trace
+-- surface (the per-session ring, its readers, and the query markers).
+--
+-- Two expected outputs are maintained:
+--   wait_event_timing.out    -- --enable-wait-event-timing builds
+--   wait_event_timing_1.out  -- builds without the option (stub)
+-- The difference is whether SET wait_event_capture = stats succeeds and
+-- whether the SRF records anything; durations are never printed, so the
+-- timing-build output is deterministic.
+--
+-- Default is off.
+SHOW wait_event_capture;
+ wait_event_capture 
+--------------------
+ off
+(1 row)
+
+-- The taxonomy view is pure SQL and identical in both build configs.
+SELECT count(*) AS buckets FROM pg_wait_event_timing_histogram_buckets;
+ buckets 
+---------
+      32
+(1 row)
+
+SELECT bucket_idx, lower_ns, upper_ns, label
+FROM pg_wait_event_timing_histogram_buckets
+WHERE bucket_idx IN (0, 1, 31)
+ORDER BY bucket_idx;
+ bucket_idx |   lower_ns    | upper_ns |  label  
+------------+---------------+----------+---------
+          0 |             0 |     1024 | <1us
+          1 |          1024 |     2048 | 1-2us
+         31 | 1099511627776 |          | >=1024s
+(3 rows)
+
+-- Enable stats capture and generate a deterministic wait: pg_sleep emits a
+-- Timeout / PgSleep wait of ~0.1s.  (In a stub build the SET errors and the
+-- SRF stays empty; that is the documented difference between the two
+-- expected files.)
+SET wait_event_capture = stats;
+ERROR:  invalid value for parameter "wait_event_capture": "stats"
+DETAIL:  This build does not support wait event capture.
+HINT:  Compile PostgreSQL with --enable-wait-event-timing.
+SELECT pg_sleep(0.1);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- PgSleep must now be recorded for this backend, with the per-event
+-- invariants holding.  We print only booleans so the output is stable.
+SELECT calls >= 1 AS calls_ok,
+       calls = (SELECT sum(h) FROM unnest(histogram) AS h) AS hist_sum_eq_calls,
+       total_time_ms > 0 AS total_positive,
+       max_time_us > 0 AS max_positive,
+       array_length(histogram, 1)
+         = (SELECT count(*)::int FROM pg_wait_event_timing_histogram_buckets)
+         AS histogram_len_ok
+FROM pg_stat_get_wait_event_timing(pg_backend_pid())
+WHERE wait_event = 'PgSleep';
+ calls_ok | hist_sum_eq_calls | total_positive | max_positive | histogram_len_ok 
+----------+-------------------+----------------+--------------+------------------
+(0 rows)
+
+-- The view surfaces the same row (type/name only; durations omitted).
+SELECT wait_event_type, wait_event
+FROM pg_stat_wait_event_timing
+WHERE pid = pg_backend_pid() AND wait_event = 'PgSleep';
+ wait_event_type | wait_event 
+-----------------+------------
+(0 rows)
+
+-- A non-NULL pid that does not exist yields no rows (silent, not an error).
+SELECT count(*) AS rows_for_bogus_pid
+FROM pg_stat_get_wait_event_timing(-1);
+ rows_for_bogus_pid 
+--------------------
+                  0
+(1 row)
+
+-- Overflow/reset counters for this backend.  A simple test backend uses
+-- few LWLock tranches and no out-of-range classes, so both overflow
+-- counters are zero, and a fresh backend has not been reset.
+SELECT lwlock_overflow_count, flat_overflow_count, reset_count
+FROM pg_stat_wait_event_timing_overflow
+WHERE pid = pg_backend_pid();
+ lwlock_overflow_count | flat_overflow_count | reset_count 
+-----------------------+---------------------+-------------
+(0 rows)
+
+-- Resetting our own backend is synchronous: the PgSleep row is cleared and
+-- reset_count advances.  (We filter to PgSleep because inter-command waits
+-- such as ClientRead may be recorded again before the next statement runs.)
+SELECT pg_stat_reset_wait_event_timing(NULL);
+ERROR:  wait event capture is not supported by this build
+HINT:  Compile PostgreSQL with --enable-wait-event-timing.
+SELECT count(*) AS pgsleep_rows_after_reset
+FROM pg_stat_wait_event_timing
+WHERE pid = pg_backend_pid() AND wait_event = 'PgSleep';
+ pgsleep_rows_after_reset 
+--------------------------
+                        0
+(1 row)
+
+SELECT reset_count
+FROM pg_stat_wait_event_timing_overflow
+WHERE pid = pg_backend_pid();
+ reset_count 
+-------------
+(0 rows)
+
+-- The pid argument defaults to NULL, so a no-argument call resets the
+-- caller's own backend.
+SELECT pg_stat_reset_wait_event_timing();
+ERROR:  wait event capture is not supported by this build
+HINT:  Compile PostgreSQL with --enable-wait-event-timing.
+-- Resetting an unknown pid is a silent no-op, not an error.
+SELECT pg_stat_reset_wait_event_timing(2147483647);
+ERROR:  wait event capture is not supported by this build
+HINT:  Compile PostgreSQL with --enable-wait-event-timing.
+RESET wait_event_capture;
+--
+-- Trace level: per-session ring of individual waits + query markers.
+-- (In a stub build SET trace errors and the trace readers stay empty;
+-- that is the documented difference between the two expected files.)
+--
+SET compute_query_id = on;
+SET wait_event_capture = trace;
+ERROR:  invalid value for parameter "wait_event_capture": "trace"
+DETAIL:  This build does not support wait event capture.
+HINT:  Compile PostgreSQL with --enable-wait-event-timing.
+SELECT pg_sleep(0.1);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- PgSleep is recorded in this backend's ring with a positive duration.
+SELECT count(*) >= 1 AS pgsleep_in_ring,
+       coalesce(bool_and(duration_us > 0), false) AS durations_positive
+FROM pg_get_backend_wait_event_trace()
+WHERE wait_event = 'PgSleep';
+ pgsleep_in_ring | durations_positive 
+-----------------+--------------------
+ f               | f
+(1 row)
+
+-- The same records are visible through the view.
+SELECT count(*) >= 1 AS view_has_pgsleep
+FROM pg_backend_wait_event_trace
+WHERE wait_event = 'PgSleep';
+ view_has_pgsleep 
+------------------
+ f
+(1 row)
+
+-- Executor markers bracket the work and carry a non-zero query_id.
+SELECT count(*) >= 1 AS has_exec_markers,
+       coalesce(bool_and(query_id <> 0), true) AS markers_have_query_id
+FROM pg_get_backend_wait_event_trace()
+WHERE wait_event_type = 'Query'
+  AND wait_event IN ('ExecStart', 'ExecEnd');
+ has_exec_markers | markers_have_query_id 
+------------------+-----------------------
+ f                | t
+(1 row)
+
+-- Clearing orphaned rings is a no-op here (no orphans) but must succeed.
+SELECT pg_stat_clear_orphaned_wait_event_rings() >= 0 AS clear_orphans_ok;
+ clear_orphans_ok 
+------------------
+ t
+(1 row)
+
+RESET compute_query_id;
+RESET wait_event_capture;

@@ -21,6 +21,7 @@ backend_sources += files(
   'pgstat_subscription.c',
   'pgstat_wal.c',
   'pgstat_xact.c',
+  'wait_event_timing.c',
 )
 
 # this includes a .c file with contents generated in ../../../include/activity,

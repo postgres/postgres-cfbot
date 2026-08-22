@@ -850,6 +850,7 @@ enable_debug
 enable_profiling
 enable_coverage
 enable_dtrace
+enable_wait_event_timing
 enable_tap_tests
 enable_injection_points
 with_blocksize
@@ -1551,6 +1552,8 @@ Optional Features:
   --enable-profiling      build with profiling enabled
   --enable-coverage       build with coverage testing instrumentation
   --enable-dtrace         build with DTrace support
+  --enable-wait-event-timing
+                          build with wait event timing instrumentation
   --enable-tap-tests      enable TAP tests (requires Perl and IPC::Run)
   --enable-injection-points
                           enable injection points (for testing)
@@ -3630,6 +3633,35 @@ else
 
 fi
 
+
+
+
+#
+# --enable-wait-event-timing adds wait event timing instrumentation
+#
+
+
+# Check whether --enable-wait-event-timing was given.
+if test "${enable_wait_event_timing+set}" = set; then :
+  enableval=$enable_wait_event_timing;
+  case $enableval in
+    yes)
+
+$as_echo "#define USE_WAIT_EVENT_TIMING 1" >>confdefs.h
+
+      ;;
+    no)
+      :
+      ;;
+    *)
+      as_fn_error $? "no argument expected for --enable-wait-event-timing option" "$LINENO" 5
+      ;;
+  esac
+
+else
+  enable_wait_event_timing=no
+
+fi
 
 
 

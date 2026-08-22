@@ -37,10 +37,12 @@ OBJS = \
 	pgstat_wal.o \
 	pgstat_xact.o \
 	wait_event.o \
-	wait_event_funcs.o
+	wait_event_funcs.o \
+	wait_event_timing.o
 
 # Force these dependencies to be known even without dependency info built:
 wait_event.o: wait_event.c $(top_builddir)/src/backend/utils/pgstat_wait_event.c
 wait_event_funcs.o: wait_event_funcs.c $(top_builddir)/src/backend/utils/wait_event_funcs_data.c
+wait_event_timing.o: wait_event_timing.c $(top_builddir)/src/backend/utils/wait_event_timing_data.h
 
 include $(top_srcdir)/src/backend/common.mk

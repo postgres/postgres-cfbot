@@ -130,6 +130,10 @@ test: partition_merge partition_split partition_join partition_prune reloptions 
 # ----------
 test: compression compression_lz4 compression_pglz cluster
 
+# wait_event_timing reads only the calling backend's own stats, so it is
+# safe on its own line; pg_sleep keeps its runtime small.
+test: wait_event_timing
+
 # event_trigger depends on create_am and cannot run concurrently with
 # any test that runs DDL
 # oidjoins is read-only, though, and should run late for best coverage
