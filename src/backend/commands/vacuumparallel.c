@@ -945,7 +945,7 @@ parallel_vacuum_process_all_indexes(ParallelVacuumState *pvs, int num_index_scan
 		WaitForParallelWorkersToFinish(pvs->pcxt);
 
 		for (int i = 0; i < pvs->pcxt->nworkers_launched; i++)
-			InstrAccumParallelQuery(&pvs->buffer_usage[i], &pvs->wal_usage[i]);
+			InstrAccumParallelQuery(&pvs->buffer_usage[i], NULL, &pvs->wal_usage[i]);
 	}
 
 	/*
@@ -1313,7 +1313,7 @@ parallel_vacuum_main(dsm_segment *seg, shm_toc *toc)
 	error_context_stack = &errcallback;
 
 	/* Prepare to track buffer usage during parallel execution */
-	InstrStartParallelQuery();
+	InstrStartParallelQuery(NULL);
 
 	/* Process indexes to perform vacuum/cleanup */
 	parallel_vacuum_process_safe_indexes(&pvs);
@@ -1321,8 +1321,8 @@ parallel_vacuum_main(dsm_segment *seg, shm_toc *toc)
 	/* Report buffer/WAL usage during parallel execution */
 	buffer_usage = shm_toc_lookup(toc, PARALLEL_VACUUM_KEY_BUFFER_USAGE, false);
 	wal_usage = shm_toc_lookup(toc, PARALLEL_VACUUM_KEY_WAL_USAGE, false);
-	InstrEndParallelQuery(&buffer_usage[ParallelWorkerNumber],
-						  &wal_usage[ParallelWorkerNumber]);
+	InstrEndParallelQuery(&buffer_usage[ParallelWorkerNumber], NULL,
+						  &wal_usage[ParallelWorkerNumber], NULL);
 
 	/* Report any remaining cost-based vacuum delay time */
 	if (track_cost_delay_timing)

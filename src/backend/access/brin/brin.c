@@ -2573,7 +2573,7 @@ _brin_end_parallel(BrinLeader *brinleader, BrinBuildState *state)
 	 * or we might get incomplete data.)
 	 */
 	for (i = 0; i < brinleader->pcxt->nworkers_launched; i++)
-		InstrAccumParallelQuery(&brinleader->bufferusage[i], &brinleader->walusage[i]);
+		InstrAccumParallelQuery(&brinleader->bufferusage[i], NULL, &brinleader->walusage[i]);
 
 	/* Free last reference to MVCC snapshot, if one was used */
 	if (IsMVCCSnapshot(brinleader->snapshot))
@@ -2936,7 +2936,7 @@ _brin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	tuplesort_attach_shared(sharedsort, seg);
 
 	/* Prepare to track buffer usage during parallel execution */
-	InstrStartParallelQuery();
+	InstrStartParallelQuery(NULL);
 
 	/*
 	 * Might as well use reliable figure when doling out maintenance_work_mem
@@ -2951,8 +2951,8 @@ _brin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	/* Report WAL/buffer usage during parallel execution */
 	bufferusage = shm_toc_lookup(toc, PARALLEL_KEY_BUFFER_USAGE, false);
 	walusage = shm_toc_lookup(toc, PARALLEL_KEY_WAL_USAGE, false);
-	InstrEndParallelQuery(&bufferusage[ParallelWorkerNumber],
-						  &walusage[ParallelWorkerNumber]);
+	InstrEndParallelQuery(&bufferusage[ParallelWorkerNumber], NULL,
+						  &walusage[ParallelWorkerNumber], NULL);
 
 	index_close(indexRel, indexLockmode);
 	table_close(heapRel, heapLockmode);

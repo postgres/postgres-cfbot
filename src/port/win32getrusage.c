@@ -57,5 +57,9 @@ getrusage(int who, struct rusage *rusage)
 	rusage->ru_utime.tv_sec = li.QuadPart / 1000000L;
 	rusage->ru_utime.tv_usec = li.QuadPart % 1000000L;
 
+	/* Currently always 0 for Windows */
+	rusage->ru_inblock = 0;
+	rusage->ru_oublock = 0;
+
 	return 0;
 }
