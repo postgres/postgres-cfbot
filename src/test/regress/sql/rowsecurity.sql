@@ -2634,6 +2634,156 @@ drop function rls_f(text);
 drop table rls_t, test_t;
 
 --
+-- Test for pg_get_policy_ddl(table, policy_name[, pretty]) function.
+--
+CREATE TABLE rls_tbl_1 (
+    did         int primary key,
+    cid         int,
+    dlevel      int not null,
+    dauthor     name,
+    dtitle      text
+);
+GRANT ALL ON rls_tbl_1 TO public;
+CREATE TABLE rls_tbl_2 (
+    pguser      name primary key,
+    seclv       int
+);
+GRANT SELECT ON rls_tbl_2 TO public;
+
+-- Test PERMISSIVE and RESTRICTIVE
+CREATE POLICY rls_p1 ON rls_tbl_1 AS PERMISSIVE
+    USING (dlevel <= (SELECT seclv FROM rls_tbl_2 WHERE pguser = current_user));
+CREATE POLICY rls_p2 ON rls_tbl_1 AS RESTRICTIVE USING (cid <> 44 AND cid < 50);
+
+-- Test FOR ALL | SELECT | INSERT | UPDATE | DELETE
+CREATE POLICY rls_p3 ON rls_tbl_1 FOR ALL USING (dauthor = current_user);
+CREATE POLICY rls_p4 ON rls_tbl_1 FOR SELECT USING (cid % 2 = 0);
+CREATE POLICY rls_p5 ON rls_tbl_1 FOR INSERT WITH CHECK (cid % 2 = 1);
+CREATE POLICY rls_p6 ON rls_tbl_1 FOR UPDATE USING (cid % 2 = 0);
+CREATE POLICY rls_p7 ON rls_tbl_1 FOR DELETE USING (cid < 8);
+
+-- Test TO { role_name ... }
+CREATE POLICY rls_p8 ON rls_tbl_1 TO regress_rls_dave, regress_rls_alice USING (true);
+CREATE POLICY rls_p9 ON rls_tbl_1 TO regress_rls_exempt_user WITH CHECK (cid = (SELECT seclv FROM rls_tbl_2));
+
+-- Test UPDATE policy with both USING and WITH CHECK
+CREATE POLICY rls_p10 ON rls_tbl_1 FOR UPDATE
+    USING (dlevel > 0) WITH CHECK (dlevel < 100);
+
+-- Test ALL policy with both USING and WITH CHECK (AS PERMISSIVE and FOR ALL are defaults, omitted)
+CREATE POLICY rls_p11 ON rls_tbl_1
+    USING (dlevel >= 1) WITH CHECK (dlevel <= 99);
+
+-- Test RESTRICTIVE on a specific command
+CREATE POLICY rls_p12 ON rls_tbl_1 AS RESTRICTIVE FOR SELECT
+    USING (cid > 0);
+
+-- NULL inputs should return no rows
+SELECT count(*) FROM pg_get_policy_ddl(NULL, 'rls_p1');
+SELECT count(*) FROM pg_get_policy_ddl('rls_tbl_1', NULL);
+SELECT count(*) FROM pg_get_policy_ddl(NULL, NULL);
+
+-- Table does not exist
+SELECT * FROM pg_get_policy_ddl('nonexistent_tbl', 'rls_p1');
+-- Policy does not exist
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'nonexistent_pol');
+
+-- Without pretty formatting (default); also verify explicit false equals default
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p1');
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p2');
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p3');
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p4');
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p5');
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p6');
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p7');
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p8');
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p9');
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p10');
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p11');
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p12');
+-- Explicit false must match omitting the argument
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p10', false);
+-- NULL pretty must also default to non-pretty
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p10', NULL);
+
+-- pretty accepts all standard boolean representations: true/false, on/off, 1/0
+\pset format unaligned
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p3', 'on'::bool);
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p3', '1'::bool);
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p3', 'off'::bool);
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p3', '0'::bool);
+\pset format aligned
+
+-- With pretty formatting
+\pset format unaligned
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p1', true);
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p2', true);
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p3', true);
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p4', true);
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p5', true);
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p6', true);
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p7', true);
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p8', true);
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p9', true);
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p10', true);
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p11', true);
+SELECT * FROM pg_get_policy_ddl('rls_tbl_1', 'rls_p12', true);
+\pset format aligned
+
+-- Round-trip: the generated DDL must be re-executable, including for atomic
+-- boolean expressions that pg_get_expr() does not parenthesize.
+CREATE TABLE rls_rt (a int);
+CREATE POLICY rt_true ON rls_rt USING (true);
+CREATE POLICY rt_false ON rls_rt FOR INSERT WITH CHECK (false);
+CREATE TEMP TABLE rt_ddl AS
+    SELECT pg_get_policy_ddl('rls_rt', 'rt_true') AS ddl
+    UNION ALL
+    SELECT pg_get_policy_ddl('rls_rt', 'rt_false');
+DROP POLICY rt_true ON rls_rt;
+DROP POLICY rt_false ON rls_rt;
+SELECT ddl FROM rt_ddl ORDER BY ddl \gexec
+SELECT polname FROM pg_policy WHERE polrelid = 'rls_rt'::regclass ORDER BY polname;
+DROP TABLE rls_rt;
+
+-- Schema-qualification: function references in expressions must be
+-- fully qualified regardless of the caller's search_path.
+CREATE SCHEMA rls_s1;
+CREATE SCHEMA rls_s2;
+CREATE FUNCTION rls_s1.rls_f(int) RETURNS bool LANGUAGE sql AS 'SELECT $1 > 0';
+CREATE FUNCTION rls_s2.rls_f(int) RETURNS bool LANGUAGE sql AS 'SELECT $1 < 0';
+CREATE TABLE rls_tbl_3 (a int);
+CREATE POLICY rls_pf ON rls_tbl_3 USING (rls_s1.rls_f(a));
+-- With rls_s1 in path, rls_f should still appear schema-qualified in DDL.
+SET search_path = regress_rls_schema, rls_s1;
+\pset format unaligned
+SELECT * FROM pg_get_policy_ddl('rls_tbl_3', 'rls_pf');
+\pset format aligned
+-- Restore the test's search_path before cleanup.
+SET search_path = regress_rls_schema;
+DROP POLICY rls_pf ON rls_tbl_3;
+DROP TABLE rls_tbl_3;
+DROP FUNCTION rls_s1.rls_f(int);
+DROP FUNCTION rls_s2.rls_f(int);
+DROP SCHEMA rls_s1;
+DROP SCHEMA rls_s2;
+
+-- Clean up objects created for testing pg_get_policy_ddl function.
+DROP POLICY rls_p1 ON rls_tbl_1;
+DROP POLICY rls_p2 ON rls_tbl_1;
+DROP POLICY rls_p3 ON rls_tbl_1;
+DROP POLICY rls_p4 ON rls_tbl_1;
+DROP POLICY rls_p5 ON rls_tbl_1;
+DROP POLICY rls_p6 ON rls_tbl_1;
+DROP POLICY rls_p7 ON rls_tbl_1;
+DROP POLICY rls_p8 ON rls_tbl_1;
+DROP POLICY rls_p9 ON rls_tbl_1;
+DROP POLICY rls_p10 ON rls_tbl_1;
+DROP POLICY rls_p11 ON rls_tbl_1;
+DROP POLICY rls_p12 ON rls_tbl_1;
+DROP TABLE rls_tbl_1;
+DROP TABLE rls_tbl_2;
+
+--
 -- Clean up objects
 --
 RESET SESSION AUTHORIZATION;
