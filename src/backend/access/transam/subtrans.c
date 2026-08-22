@@ -246,7 +246,6 @@ SUBTRANSShmemRequest(void *arg)
 	SimpleLruRequest(.desc = &SubTransSlruDesc,
 					 .name = "subtransaction",
 					 .Dir = "pg_subtrans",
-					 .long_segment_names = false,
 
 					 .nslots = SUBTRANSShmemBuffers(),
 
