@@ -633,6 +633,8 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %type <defelt>	xmltable_column_option_el
 %type <list>	xml_namespace_list
 %type <target>	xml_namespace_el
+%type <ival> 	opt_xml_declaration_option
+%type <str>		opt_xml_declaration_version xmlserialize_version
 
 %type <node>	func_application func_expr_common_subexpr
 %type <node>	func_expr func_expr_windowless
@@ -843,8 +845,8 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 
 	WAIT WHEN WHERE WHITESPACE_P WINDOW WITH WITHIN WITHOUT WORK WRAPPER WRITE
 
-	XML_P XMLATTRIBUTES XMLCONCAT XMLELEMENT XMLEXISTS XMLFOREST XMLNAMESPACES
-	XMLPARSE XMLPI XMLROOT XMLSERIALIZE XMLTABLE
+	XML_P XMLATTRIBUTES XMLCONCAT XMLDECLARATION XMLELEMENT XMLEXISTS XMLFOREST
+	XMLNAMESPACES XMLPARSE XMLPI XMLROOT XMLSERIALIZE XMLTABLE
 
 	YEAR_P YES_P
 
@@ -17078,14 +17080,16 @@ func_expr_common_subexpr:
 					$$ = makeXmlExpr(IS_XMLROOT, NULL, NIL,
 									 list_make3($3, $5, $6), @1);
 				}
-			| XMLSERIALIZE '(' document_or_content a_expr AS SimpleTypename xml_indent_option ')'
+			| XMLSERIALIZE '(' document_or_content a_expr AS SimpleTypename opt_xml_declaration_version opt_xml_declaration_option xml_indent_option ')'
 				{
 					XmlSerialize *n = makeNode(XmlSerialize);
 
 					n->xmloption = $3;
 					n->expr = $4;
 					n->typeName = $6;
-					n->indent = $7;
+					n->version = $7;
+					n->xmldeclaration = $8;
+					n->indent = $9;
 					n->location = @1;
 					$$ = (Node *) n;
 				}
@@ -17308,6 +17312,21 @@ document_or_content: DOCUMENT_P						{ $$ = XMLOPTION_DOCUMENT; }
 xml_indent_option: INDENT							{ $$ = true; }
 			| NO INDENT								{ $$ = false; }
 			| /*EMPTY*/								{ $$ = false; }
+		;
+
+xmlserialize_version:
+			VERSION_P Sconst		{ $$ = $2; }
+		|	VERSION_P NULL_P		{ $$ = NULL; }
+		;
+
+opt_xml_declaration_version:
+			xmlserialize_version	{ $$ = $1; }
+			| /*EMPTY*/				{ $$ = NULL; }
+		;
+
+opt_xml_declaration_option: INCLUDING XMLDECLARATION	{ $$ = XMLSERIALIZE_INCLUDING_XMLDECLARATION; }
+			| EXCLUDING XMLDECLARATION					{ $$ = XMLSERIALIZE_EXCLUDING_XMLDECLARATION; }
+			| /*EMPTY*/									{ $$ = XMLSERIALIZE_NO_XMLDECLARATION_OPTION; }
 		;
 
 xml_whitespace_option: PRESERVE WHITESPACE_P		{ $$ = true; }
@@ -19247,6 +19266,7 @@ unreserved_keyword:
 			| WRAPPER
 			| WRITE
 			| XML_P
+			| XMLDECLARATION
 			| YEAR_P
 			| YES_P
 			| ZONE
@@ -19921,6 +19941,7 @@ bare_label_keyword:
 			| XML_P
 			| XMLATTRIBUTES
 			| XMLCONCAT
+			| XMLDECLARATION
 			| XMLELEMENT
 			| XMLEXISTS
 			| XMLFOREST
