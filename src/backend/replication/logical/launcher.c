@@ -1576,7 +1576,7 @@ CreateConflictDetectionSlot(void)
 			errmsg("creating replication conflict detection slot"));
 
 	ReplicationSlotCreate(CONFLICT_DETECTION_SLOT, false, RS_PERSISTENT, false,
-						  false, false, false);
+						  false, false, false, true);
 
 	init_conflict_slot_xmin();
 }
