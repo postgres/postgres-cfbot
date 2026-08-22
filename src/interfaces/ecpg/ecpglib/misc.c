@@ -437,11 +437,11 @@ int
 pthread_mutex_lock(pthread_mutex_t *mp)
 {
 	/* Initialize the csection if not already done */
-	if (mp->initstate != 1)
+	if (InterlockedCompareExchange(&mp->initstate, 0, 0) != 1)
 	{
 		LONG		istate;
 
-		while ((istate = InterlockedExchange(&mp->initstate, 2)) == 2)
+		while ((istate = InterlockedCompareExchange(&mp->initstate, 2, 0)) == 2)
 			Sleep(0);			/* wait, another thread is doing this */
 		if (istate != 1)
 			InitializeCriticalSection(&mp->csection);
@@ -454,7 +454,7 @@ pthread_mutex_lock(pthread_mutex_t *mp)
 int
 pthread_mutex_unlock(pthread_mutex_t *mp)
 {
-	if (mp->initstate != 1)
+	if (InterlockedCompareExchange(&mp->initstate, 0, 0) != 1)
 		return EINVAL;
 	LeaveCriticalSection(&mp->csection);
 	return 0;
@@ -465,13 +465,14 @@ static pthread_mutex_t win32_pthread_once_lock = PTHREAD_MUTEX_INITIALIZER;
 void
 win32_pthread_once(volatile pthread_once_t *once, void (*fn) (void))
 {
-	if (!*once)
+	/* Pair each read with the interlocked publication after fn(). */
+	if (InterlockedCompareExchange(once, 0, 0) != 1)
 	{
 		pthread_mutex_lock(&win32_pthread_once_lock);
-		if (!*once)
+		if (InterlockedCompareExchange(once, 0, 0) != 1)
 		{
 			fn();
-			*once = true;
+			InterlockedExchange(once, 1);
 		}
 		pthread_mutex_unlock(&win32_pthread_once_lock);
 	}
