@@ -4085,22 +4085,20 @@ select sum(c1%3), sum(distinct c1%3 order by c1%3) filter (where c1%3 < 2), c2 f
 -- Outer query is aggregation query
 explain (verbose, costs off)
 select distinct (select count(*) filter (where t2.c2 = 6 and t2.c1 < 10) from ft1 t1 where t1.c1 = 6) from ft2 t2 where t2.c2 % 6 = 0 order by 1;
-                                                          QUERY PLAN                                                          
-------------------------------------------------------------------------------------------------------------------------------
- Unique
+                                                       QUERY PLAN                                                       
+------------------------------------------------------------------------------------------------------------------------
+ Sort
    Output: ((SubPlan expr_1))
-   ->  Sort
-         Output: ((SubPlan expr_1))
-         Sort Key: ((SubPlan expr_1))
-         ->  Foreign Scan
-               Output: (SubPlan expr_1)
-               Relations: Aggregate on (public.ft2 t2)
-               Remote SQL: SELECT count(*) FILTER (WHERE ((c2 = 6) AND ("C 1" < 10))) FROM "S 1"."T 1" WHERE (((c2 % 6) = 0))
-               SubPlan expr_1
-                 ->  Foreign Scan on public.ft1 t1
-                       Output: (count(*) FILTER (WHERE ((t2.c2 = 6) AND (t2.c1 < 10))))
-                       Remote SQL: SELECT NULL FROM "S 1"."T 1" WHERE (("C 1" = 6))
-(13 rows)
+   Sort Key: ((SubPlan expr_1))
+   ->  Foreign Scan
+         Output: (SubPlan expr_1)
+         Relations: Aggregate on (public.ft2 t2)
+         Remote SQL: SELECT count(*) FILTER (WHERE ((c2 = 6) AND ("C 1" < 10))) FROM "S 1"."T 1" WHERE (((c2 % 6) = 0))
+         SubPlan expr_1
+           ->  Foreign Scan on public.ft1 t1
+                 Output: (count(*) FILTER (WHERE ((t2.c2 = 6) AND (t2.c1 < 10))))
+                 Remote SQL: SELECT NULL FROM "S 1"."T 1" WHERE (("C 1" = 6))
+(11 rows)
 
 select distinct (select count(*) filter (where t2.c2 = 6 and t2.c1 < 10) from ft1 t1 where t1.c1 = 6) from ft2 t2 where t2.c2 % 6 = 0 order by 1;
  count 
@@ -4446,6 +4444,7 @@ select count(*), x.b from ft1, (select c2 a, sum(c1) b from ft1 group by c2) x w
                Sort Key: (sum(ft1_1.c1))
                ->  Hash Join
                      Output: (sum(ft1_1.c1)), (PARTIAL count(*))
+                     Inner Unique: true
                      Hash Cond: (ft1_1.c2 = ft1.c2)
                      ->  Foreign Scan
                            Output: ft1_1.c2, (sum(ft1_1.c1))
@@ -4459,7 +4458,7 @@ select count(*), x.b from ft1, (select c2 a, sum(c1) b from ft1 group by c2) x w
                                  ->  Foreign Scan on public.ft1
                                        Output: ft1.c2
                                        Remote SQL: SELECT c2 FROM "S 1"."T 1"
-(24 rows)
+(25 rows)
 
 select count(*), x.b from ft1, (select c2 a, sum(c1) b from ft1 group by c2) x where ft1.c2 = x.a group by x.b order by 1, 2;
  count |   b   

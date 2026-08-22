@@ -495,6 +495,7 @@ process_equivalence(PlannerInfo *root,
 		ec->ec_min_security = restrictinfo->security_level;
 		ec->ec_max_security = restrictinfo->security_level;
 		ec->ec_merged = NULL;
+		/* ec_index is set later */
 		em1 = add_eq_member(ec, item1, item1_relids,
 							jdomain, item1_type);
 		em2 = add_eq_member(ec, item2, item2_relids,
@@ -863,6 +864,7 @@ get_eclass_for_sort_expr(PlannerInfo *root,
 		}
 	}
 
+	newec->ec_index = list_length(root->eq_classes);
 	root->eq_classes = lappend(root->eq_classes, newec);
 
 	/*
@@ -871,7 +873,6 @@ get_eclass_for_sort_expr(PlannerInfo *root,
 	 */
 	if (root->ec_merging_done)
 	{
-		int			ec_index = list_length(root->eq_classes) - 1;
 		int			i = -1;
 
 		while ((i = bms_next_member(newec->ec_relids, i)) > 0)
@@ -891,7 +892,7 @@ get_eclass_for_sort_expr(PlannerInfo *root,
 			Assert(rel->reloptkind == RELOPT_BASEREL);
 
 			rel->eclass_indexes = bms_add_member(rel->eclass_indexes,
-												 ec_index);
+												 newec->ec_index);
 		}
 	}
 
@@ -1207,6 +1208,9 @@ generate_base_implied_equalities(PlannerInfo *root)
 
 		Assert(ec->ec_merged == NULL);	/* else shouldn't be in list */
 		Assert(!ec->ec_broken); /* not yet anyway... */
+
+		/* The EC's position is now final, since no more merging can happen */
+		ec->ec_index = ec_index;
 
 		/*
 		 * Generate implied equalities that are restriction clauses.

@@ -2848,13 +2848,13 @@ order by x.thousand desc, x.twothousand;
          Sort Key: x.thousand DESC, x.twothousand
          Presorted Key: x.thousand
          ->  Merge Join
-               Merge Cond: (y.thousand = x.thousand)
-               ->  Partial GroupAggregate
-                     Group Key: y.thousand
-                     ->  Index Only Scan Backward using tenk1_thous_tenthous on tenk1 y
+               Merge Cond: (x.thousand = y.thousand)
                ->  Sort
                      Sort Key: x.thousand DESC
                      ->  Seq Scan on tenk1 x
+               ->  Partial GroupAggregate
+                     Group Key: y.thousand
+                     ->  Index Only Scan Backward using tenk1_thous_tenthous on tenk1 y
 (13 rows)
 
 reset enable_hashagg;
@@ -7088,17 +7088,15 @@ select d.* from d left join (select distinct * from b) s
 explain (costs off)
 select d.* from d left join (select * from b group by b.id, b.c_id) s
   on d.a = s.id;
-                QUERY PLAN                
-------------------------------------------
- Merge Right Join
-   Merge Cond: (b.id = d.a)
-   ->  Group
-         Group Key: b.id
-         ->  Index Scan using b_pkey on b
-   ->  Sort
-         Sort Key: d.a
-         ->  Seq Scan on d
-(8 rows)
+           QUERY PLAN            
+---------------------------------
+ Hash Left Join
+   Hash Cond: (d.a = s.id)
+   ->  Seq Scan on d
+   ->  Hash
+         ->  Subquery Scan on s
+               ->  Seq Scan on b
+(6 rows)
 
 -- join removal is not possible when the GROUP BY contains non-empty grouping
 -- sets or multiple empty grouping sets
@@ -7153,18 +7151,15 @@ select d.* from d left join (select 1 as x from b group by grouping sets((), gro
 explain (costs off)
 select d.* from d left join (select distinct * from b) s
   on d.a = s.id;
-              QUERY PLAN              
---------------------------------------
- Merge Right Join
-   Merge Cond: (b.id = d.a)
-   ->  Unique
-         ->  Sort
-               Sort Key: b.id, b.c_id
+           QUERY PLAN            
+---------------------------------
+ Hash Left Join
+   Hash Cond: (d.a = s.id)
+   ->  Seq Scan on d
+   ->  Hash
+         ->  Subquery Scan on s
                ->  Seq Scan on b
-   ->  Sort
-         Sort Key: d.a
-         ->  Seq Scan on d
-(9 rows)
+(6 rows)
 
 -- join removal is not possible here
 explain (costs off)
