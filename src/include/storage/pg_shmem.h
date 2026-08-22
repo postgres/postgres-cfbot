@@ -85,10 +85,14 @@ extern void PGSharedMemoryReAttach(void);
 extern void PGSharedMemoryNoReAttach(void);
 #endif
 
-extern PGShmemHeader *PGSharedMemoryCreate(Size size,
+extern PGShmemHeader *PGSharedMemoryCreate(Size initial_size, Size max_size,
 										   PGShmemHeader **shim);
 extern bool PGSharedMemoryIsInUse(unsigned long id1, unsigned long id2);
 extern void PGSharedMemoryDetach(void);
+extern bool PGSharedMemoryEnsureFreed(void *addr, Size size);
+extern bool PGSharedMemoryEnsureAllocated(void *addr, Size size);
+extern bool PGSharedMemoryProtect(void *rw_start, void *rw_end, void *prot_end);
 extern void GetHugePageSize(Size *hugepagesize, int *mmap_flags);
+extern size_t GetOSPageSize(void);
 
 #endif							/* PG_SHMEM_H */

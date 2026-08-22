@@ -590,19 +590,50 @@ check_huge_page_size(int *newval, void **extra, GucSource source)
 }
 
 /*
+ * Get the page size being used by the shared memory.
+ *
+ * The function should be called only after the shared memory has been setup.
+ */
+size_t
+GetOSPageSize(void)
+{
+	size_t		os_page_size;
+
+	Assert(huge_pages_status != HUGE_PAGES_UNKNOWN);
+
+	os_page_size = sysconf(_SC_PAGESIZE);
+
+	/* If huge pages are actually in use, use huge page size */
+	if (huge_pages_status == HUGE_PAGES_ON)
+		GetHugePageSize(&os_page_size, NULL);
+
+	return os_page_size;
+}
+
+/*
  * Creates an anonymous mmap()ed shared memory segment.
  *
- * Pass the requested size in *size.  This function will modify *size to the
- * actual size of the allocation, if it ends up allocating a segment that is
- * larger than requested.
+ * initial_size is the amount of memory required at the start of the server.
+ *
+ * *size is the size of the anonymous memory mapping to create. It will be
+ * updated to the actual size of the allocation, if it ends up allocating a
+ * segment that is larger than the requested. When *size > initial_size we want
+ * to reserve a large memory segment while allocating only initial_size amount of
+ * memory at the server start.
+ *
+ * When using huge pages, we make sure that there are enough huge pages
+ * configured to cover the initial_size worth of memory.
  */
 static void *
-CreateAnonymousSegment(Size *size)
+CreateAnonymousSegment(Size initial_size, Size *size)
 {
 	Size		allocsize = *size;
 	void	   *ptr = MAP_FAILED;
 	int			mmap_errno = 0;
+	bool		resizable = (initial_size < allocsize);
 	int			mmap_flags = MAP_SHARED | MAP_ANONYMOUS | MAP_HASSEMAPHORE;
+
+	Assert(initial_size <= allocsize);
 
 #ifndef MAP_HUGETLB
 	/* PGSharedMemoryCreate should have dealt with this case */
@@ -610,23 +641,61 @@ CreateAnonymousSegment(Size *size)
 #else
 	if (huge_pages == HUGE_PAGES_ON || huge_pages == HUGE_PAGES_TRY)
 	{
-		/*
-		 * Round up the request size to a suitable large value.
-		 */
 		Size		hugepagesize;
 		int			huge_mmap_flags;
+		bool		probe_ok = true;
 
+		/* Round up the request size to a suitable large value. */
 		GetHugePageSize(&hugepagesize, &huge_mmap_flags);
-
 		if (allocsize % hugepagesize != 0)
 			allocsize = add_size(allocsize, hugepagesize - (allocsize % hugepagesize));
+		if (initial_size % hugepagesize != 0)
+			initial_size = add_size(initial_size, hugepagesize - (initial_size % hugepagesize));
 
-		ptr = mmap(NULL, allocsize, PROT_READ | PROT_WRITE,
-				   mmap_flags | huge_mmap_flags, -1, 0);
-		mmap_errno = errno;
-		if (huge_pages == HUGE_PAGES_TRY && ptr == MAP_FAILED)
-			elog(DEBUG1, "mmap(%zu) with MAP_HUGETLB failed, huge pages disabled: %m",
-				 allocsize);
+		/*
+		 * When the total amount of space requested is larger than the initial
+		 * memory requirement, we do not allocate memory worth the entire
+		 * requested space upfront. But we will need to make sure that there
+		 * are enough huge pages configured to cover the initial memory
+		 * requirement. Otherwise, we will choose huge pages map instead of
+		 * falling back to normal pages and the server will not start. Hence
+		 * we first try to map and allocate the initial memory requirement. If
+		 * it fails we fall back to normal pages. If it succeeds, we unmap the
+		 * memory and then try to map the entire requested space without
+		 * allocating memory.
+		 */
+		if (resizable)
+		{
+			void	   *probe;
+
+			probe = mmap(NULL, initial_size, PROT_READ | PROT_WRITE,
+						 mmap_flags | huge_mmap_flags,
+						 -1, 0);
+			if (probe == MAP_FAILED)
+			{
+				mmap_errno = errno;
+				probe_ok = false;
+				if (huge_pages == HUGE_PAGES_TRY)
+					elog(DEBUG1,
+						 "huge-page probe mmap(%zu) failed, huge pages disabled: %m",
+						 initial_size);
+			}
+			else if (munmap(probe, initial_size) != 0)
+				elog(ERROR, "munmap(%p, %zu) huge page probe failed: %m", probe, initial_size);
+		}
+
+		if (probe_ok)
+		{
+			if (resizable)
+				mmap_flags |= MAP_NORESERVE;
+			ptr = mmap(NULL, allocsize, PROT_READ | PROT_WRITE,
+					   mmap_flags | huge_mmap_flags, -1, 0);
+			mmap_errno = errno;
+			if (huge_pages == HUGE_PAGES_TRY && ptr == MAP_FAILED)
+				elog(DEBUG1,
+					 "mmap(%zu) with MAP_HUGETLB failed, huge pages disabled: %m",
+					 allocsize);
+		}
 	}
 #endif
 
@@ -645,6 +714,10 @@ CreateAnonymousSegment(Size *size)
 		 * to non-huge pages.
 		 */
 		allocsize = *size;
+
+		/* Use MAP_NORESERVE when we do not need all the memory up front. */
+		if (resizable)
+			mmap_flags |= MAP_NORESERVE;
 		ptr = mmap(NULL, allocsize, PROT_READ | PROT_WRITE,
 				   mmap_flags, -1, 0);
 		mmap_errno = errno;
@@ -693,13 +766,18 @@ AnonymousShmemDetach(int status, Datum arg)
  * standard header.  Also, register an on_shmem_exit callback to release
  * the storage.
  *
+ * initial_size is the amount of memory required at the start of the server.
+ * Used only when we want to reserve a large memory segment while allocating
+ * only initial_size amount of memory at the server start. That facility is only
+ * available when using anonymous shared memory segments.
+ *
  * Dead Postgres segments pertinent to this DataDir are recycled if found, but
  * we do not fail upon collision with foreign shmem segments.  The idea here
  * is to detect and re-use keys that may have been assigned by a crashed
  * postmaster or backend.
  */
 PGShmemHeader *
-PGSharedMemoryCreate(Size size,
+PGSharedMemoryCreate(Size initial_size, Size size,
 					 PGShmemHeader **shim)
 {
 	IpcMemoryKey NextShmemSegID;
@@ -738,7 +816,7 @@ PGSharedMemoryCreate(Size size,
 
 	if (shared_memory_type == SHMEM_TYPE_MMAP)
 	{
-		AnonymousShmem = CreateAnonymousSegment(&size);
+		AnonymousShmem = CreateAnonymousSegment(initial_size, &size);
 		AnonymousShmemSize = size;
 
 		/* Register on-exit routine to unmap the anonymous segment */
@@ -753,6 +831,10 @@ PGSharedMemoryCreate(Size size,
 
 		/* huge pages are only available with mmap */
 		SetConfigOption("huge_pages_status", "off",
+						PGC_INTERNAL, PGC_S_DYNAMIC_DEFAULT);
+
+		/* resizable shared memory is only available with mmap */
+		SetConfigOption("have_resizable_shmem", "off",
 						PGC_INTERNAL, PGC_S_DYNAMIC_DEFAULT);
 	}
 
@@ -990,4 +1072,149 @@ PGSharedMemoryDetach(void)
 				 AnonymousShmem, AnonymousShmemSize);
 		AnonymousShmem = NULL;
 	}
+}
+
+/*
+ * Make sure that the memory of given size from the given address is released.
+ *
+ * The address and size are expected to be page aligned.
+ *
+ * Only supported on platforms that support anonymous shared memory.
+ *
+ * On success returns true. false if system call fails.
+ */
+bool
+PGSharedMemoryEnsureFreed(void *addr, Size size)
+{
+#ifndef HAVE_RESIZABLE_SHMEM
+	ereport(ERROR,
+			errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			errmsg("resizable shared memory is not supported on this platform"));
+#else
+	if (!AnonymousShmem)
+		ereport(ERROR,
+				errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				errmsg("only anonymous shared memory can be freed"));
+
+#ifdef USE_ASSERT_CHECKING
+	{
+		size_t		os_page_size = GetOSPageSize();
+
+		Assert(addr == (void *) TYPEALIGN(os_page_size, addr));
+		Assert(size == TYPEALIGN(os_page_size, size));
+	}
+#endif
+
+	if (madvise(addr, size, MADV_REMOVE) == -1)
+	{
+		ereport(WARNING, errmsg("could not free shared memory: %m"));
+		return false;
+	}
+
+	return true;
+#endif
+}
+
+/*
+ * Make sure that the memory of given size from the given address is allocated.
+ *
+ * The address and size are expected to be page aligned.  The caller is
+ * responsible for ensuring that the range is already writable; this function
+ * only populates it.
+ *
+ * Only supported on platforms that support anonymous shared memory.
+ *
+ * On success returns true, false if system call fails.
+ */
+bool
+PGSharedMemoryEnsureAllocated(void *addr, Size size)
+{
+#ifndef HAVE_RESIZABLE_SHMEM
+	ereport(ERROR,
+			errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			errmsg("resizable shared memory is not supported on this platform"));
+#else
+	if (!AnonymousShmem)
+		ereport(ERROR,
+				errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				errmsg("only anonymous shared memory can be allocated at runtime"));
+
+#ifdef USE_ASSERT_CHECKING
+	{
+		size_t		os_page_size = GetOSPageSize();
+
+		Assert(addr == (void *) TYPEALIGN(os_page_size, addr));
+		Assert(size == TYPEALIGN(os_page_size, size));
+	}
+#endif
+
+	if (madvise(addr, size, MADV_POPULATE_WRITE) == -1)
+	{
+		ereport(WARNING, errmsg("could not allocate shared memory: %m"));
+		return false;
+	}
+
+	return true;
+#endif
+}
+
+/*
+ * Set memory protection on the given region of shared memory.
+ *
+ * Makes [rw_start, rw_end) readable and writable, and [rw_end, prot_end)
+ * inaccessible.
+ *
+ * All addresses are expected to be page aligned.
+ *
+ * Only supported on platforms that support resizable shared memory.
+ *
+ * On success returns true, false if system call fails.
+ */
+bool
+PGSharedMemoryProtect(void *rw_start, void *rw_end, void *prot_end)
+{
+#ifndef HAVE_RESIZABLE_SHMEM
+	ereport(ERROR,
+			errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			errmsg("resizable shared memory is not supported on this platform"));
+#else
+
+	if (!AnonymousShmem)
+		ereport(ERROR,
+				errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				errmsg("only anonymous shared memory can be protected at runtime"));
+
+#ifdef USE_ASSERT_CHECKING
+	{
+		size_t		os_page_size = GetOSPageSize();
+
+		Assert(rw_start == (void *) TYPEALIGN(os_page_size, rw_start));
+		Assert(rw_end == (void *) TYPEALIGN(os_page_size, rw_end));
+		Assert(prot_end == (void *) TYPEALIGN(os_page_size, prot_end));
+	}
+#endif
+	Assert(rw_end >= rw_start);
+
+	if (rw_end > rw_start)
+	{
+		if (mprotect(rw_start, (char *) rw_end - (char *) rw_start,
+					 PROT_READ | PROT_WRITE) != 0)
+		{
+			ereport(WARNING, errmsg("could not protect shared memory: %m"));
+			return false;
+		}
+	}
+
+	if (prot_end > rw_end)
+	{
+		if (mprotect(rw_end, (char *) prot_end - (char *) rw_end,
+					 PROT_NONE) != 0)
+		{
+			ereport(WARNING, errmsg("could not protect shared memory: %m"));
+			return false;
+		}
+	}
+
+	return true;
+#endif
 }

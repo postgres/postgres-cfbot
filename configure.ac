@@ -1912,6 +1912,10 @@ AC_CHECK_DECLS([memset_s], [], [], [#define __STDC_WANT_LIB_EXT1__ 1
 # This is probably only present on macOS, but may as well check always
 AC_CHECK_DECLS(F_FULLFSYNC, [], [], [#include <fcntl.h>])
 
+# Linux-specific madvise constants needed for resizable shared memory. See similar checks in meson.build for explanation of why these checks are here.
+AC_CHECK_DECLS([MADV_POPULATE_WRITE], [], [], [#include <sys/mman.h>])
+AC_CHECK_DECLS([MADV_REMOVE], [], [], [#include <sys/mman.h>])
+
 AC_REPLACE_FUNCS(m4_normalize([
 	explicit_bzero
 	getopt

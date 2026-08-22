@@ -8753,8 +8753,8 @@
 { oid => '5052', descr => 'allocations from the main shared memory segment',
   proname => 'pg_get_shmem_allocations', prorows => '50', proretset => 't',
   provolatile => 'v', prorettype => 'record', proargtypes => '',
-  proallargtypes => '{text,int8,int8,int8}', proargmodes => '{o,o,o,o}',
-  proargnames => '{name,off,size,allocated_size}',
+  proallargtypes => '{text,int8,int8,int8,int8,int8,int8}', proargmodes => '{o,o,o,o,o,o,o}',
+  proargnames => '{name,off,size,allocated_size,minimum_size,maximum_size,reserved_space}',
   prosrc => 'pg_get_shmem_allocations',
   proacl => '{POSTGRES=X,pg_read_all_stats=X}' },
 

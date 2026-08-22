@@ -69,32 +69,42 @@ AuxiliaryProcessMainCommon(void)
 	BaseInit();
 
 	/*
-	 * Prevent consuming interrupts between setting ProcSignalInit and setting
-	 * the initial local data checksum value.  If a barrier is emitted, and
-	 * absorbed, before local cached state is initialized the state transition
-	 * can be invalid.
+	 * Prevent consuming interrupts between ProcSignalInit() and the
+	 * initialization of local states that are kept in sync with shared memory
+	 * via procsignal-based barriers. If a barrier is emitted, and absorbed,
+	 * before local cached state is initialized the state transition can be
+	 * invalid.
+	 *
+	 * These initializations intentionally happen after ProcSignalInit(),
+	 * otherwise we might miss a state change. This means we may also receive
+	 * a barrier for the state we've just initialized, but it can happen only
+	 * once.
+	 *
+	 * The postmaster (which is what gets forked into the new child process)
+	 * does not handle barriers, therefore its local states may not reflect
+	 * the current state of the shared memory.
+	 *
+	 * NB: Even if the postmaster handled barriers, the value might still be
+	 * stale, as it might have changed after this process forked.
 	 */
 	HOLD_INTERRUPTS();
 
 	ProcSignalInit(NULL, 0);
 
 	/*
-	 * Initialize a local cache of the data_checksum_version, to be updated by
-	 * the procsignal-based barriers.
-	 *
-	 * This intentionally happens after initializing the procsignal, otherwise
-	 * we might miss a state change. This means we can get a barrier for the
-	 * state we've just initialized - but it can happen only once.
-	 *
-	 * The postmaster (which is what gets forked into the new child process)
-	 * does not handle barriers, therefore it may not have the current value
-	 * of LocalDataChecksumState value (it'll have the value read from the
-	 * control file, which may be arbitrarily old).
-	 *
-	 * NB: Even if the postmaster handled barriers, the value might still be
-	 * stale, as it might have changed after this process forked.
+	 * LocalDataChecksumState inherited from Postmaster will have the value
+	 * read from the control file, which may be arbitrarily old. Update it.
 	 */
 	InitLocalDataChecksumState();
+
+	/*
+	 * Refresh per-backend protections for resizable shmem structures, in case
+	 * these structures have been resized since the startup. Structures are
+	 * expected to be kept in sync by respective subsystems using
+	 * procsignal-based barriers. But we modify their protections en-masse
+	 * here, rather than relying on individual subsystems to do it.
+	 */
+	ShmemReprotectResizableStructs();
 
 	RESUME_INTERRUPTS();
 
