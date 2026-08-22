@@ -3667,6 +3667,108 @@ unpack_sql_state(int sql_state)
 	return buf;
 }
 
+/*
+ * Build a message formatted for stderr
+ */
+static void
+build_stderr_message(StringInfo buf, ErrorData *edata)
+{
+	initStringInfo(buf);
+
+	log_line_prefix(buf, edata);
+	appendStringInfo(buf, "%s:  ", _(error_severity(edata->elevel)));
+
+	if (Log_error_verbosity >= PGERROR_VERBOSE)
+		appendStringInfo(buf, "%s: ", unpack_sql_state(edata->sqlerrcode));
+
+	if (edata->message)
+		append_with_tabs(buf, edata->message);
+	else
+		append_with_tabs(buf, _("missing error text"));
+
+	if (edata->cursorpos > 0)
+		appendStringInfo(buf, _(" at character %d"),
+						 edata->cursorpos);
+	else if (edata->internalpos > 0)
+		appendStringInfo(buf, _(" at character %d"),
+						 edata->internalpos);
+
+	appendStringInfoChar(buf, '\n');
+
+	if (Log_error_verbosity >= PGERROR_DEFAULT)
+	{
+		if (edata->detail_log)
+		{
+			log_line_prefix(buf, edata);
+			appendStringInfoString(buf, _("DETAIL:  "));
+			append_with_tabs(buf, edata->detail_log);
+			appendStringInfoChar(buf, '\n');
+		}
+		else if (edata->detail)
+		{
+			log_line_prefix(buf, edata);
+			appendStringInfoString(buf, _("DETAIL:  "));
+			append_with_tabs(buf, edata->detail);
+			appendStringInfoChar(buf, '\n');
+		}
+		if (edata->hint)
+		{
+			log_line_prefix(buf, edata);
+			appendStringInfoString(buf, _("HINT:  "));
+			append_with_tabs(buf, edata->hint);
+			appendStringInfoChar(buf, '\n');
+		}
+		if (edata->internalquery)
+		{
+			log_line_prefix(buf, edata);
+			appendStringInfoString(buf, _("QUERY:  "));
+			append_with_tabs(buf, edata->internalquery);
+			appendStringInfoChar(buf, '\n');
+		}
+		if (edata->context && !edata->hide_ctx)
+		{
+			log_line_prefix(buf, edata);
+			appendStringInfoString(buf, _("CONTEXT:  "));
+			append_with_tabs(buf, edata->context);
+			appendStringInfoChar(buf, '\n');
+		}
+		if (Log_error_verbosity >= PGERROR_VERBOSE)
+		{
+			/* assume no newlines in funcname or filename... */
+			if (edata->funcname && edata->filename)
+			{
+				log_line_prefix(buf, edata);
+				appendStringInfo(buf, _("LOCATION:  %s, %s:%d\n"),
+								 edata->funcname, edata->filename,
+								 edata->lineno);
+			}
+			else if (edata->filename)
+			{
+				log_line_prefix(buf, edata);
+				appendStringInfo(buf, _("LOCATION:  %s:%d\n"),
+								 edata->filename, edata->lineno);
+			}
+		}
+		if (edata->backtrace)
+		{
+			log_line_prefix(buf, edata);
+			appendStringInfoString(buf, _("BACKTRACE:  "));
+			append_with_tabs(buf, edata->backtrace);
+			appendStringInfoChar(buf, '\n');
+		}
+	}
+
+	/*
+	 * If the user wants the query that generated this error logged, do it.
+	 */
+	if (check_log_of_query(edata))
+	{
+		log_line_prefix(buf, edata);
+		appendStringInfoString(buf, _("STATEMENT:  "));
+		append_with_tabs(buf, debug_query_string);
+		appendStringInfoChar(buf, '\n');
+	}
+}
 
 /*
  * Write error report to server's log
@@ -3676,102 +3778,7 @@ send_message_to_server_log(ErrorData *edata)
 {
 	StringInfoData buf;
 	bool		fallback_to_stderr = false;
-
-	initStringInfo(&buf);
-
-	log_line_prefix(&buf, edata);
-	appendStringInfo(&buf, "%s:  ", _(error_severity(edata->elevel)));
-
-	if (Log_error_verbosity >= PGERROR_VERBOSE)
-		appendStringInfo(&buf, "%s: ", unpack_sql_state(edata->sqlerrcode));
-
-	if (edata->message)
-		append_with_tabs(&buf, edata->message);
-	else
-		append_with_tabs(&buf, _("missing error text"));
-
-	if (edata->cursorpos > 0)
-		appendStringInfo(&buf, _(" at character %d"),
-						 edata->cursorpos);
-	else if (edata->internalpos > 0)
-		appendStringInfo(&buf, _(" at character %d"),
-						 edata->internalpos);
-
-	appendStringInfoChar(&buf, '\n');
-
-	if (Log_error_verbosity >= PGERROR_DEFAULT)
-	{
-		if (edata->detail_log)
-		{
-			log_line_prefix(&buf, edata);
-			appendStringInfoString(&buf, _("DETAIL:  "));
-			append_with_tabs(&buf, edata->detail_log);
-			appendStringInfoChar(&buf, '\n');
-		}
-		else if (edata->detail)
-		{
-			log_line_prefix(&buf, edata);
-			appendStringInfoString(&buf, _("DETAIL:  "));
-			append_with_tabs(&buf, edata->detail);
-			appendStringInfoChar(&buf, '\n');
-		}
-		if (edata->hint)
-		{
-			log_line_prefix(&buf, edata);
-			appendStringInfoString(&buf, _("HINT:  "));
-			append_with_tabs(&buf, edata->hint);
-			appendStringInfoChar(&buf, '\n');
-		}
-		if (edata->internalquery)
-		{
-			log_line_prefix(&buf, edata);
-			appendStringInfoString(&buf, _("QUERY:  "));
-			append_with_tabs(&buf, edata->internalquery);
-			appendStringInfoChar(&buf, '\n');
-		}
-		if (edata->context && !edata->hide_ctx)
-		{
-			log_line_prefix(&buf, edata);
-			appendStringInfoString(&buf, _("CONTEXT:  "));
-			append_with_tabs(&buf, edata->context);
-			appendStringInfoChar(&buf, '\n');
-		}
-		if (Log_error_verbosity >= PGERROR_VERBOSE)
-		{
-			/* assume no newlines in funcname or filename... */
-			if (edata->funcname && edata->filename)
-			{
-				log_line_prefix(&buf, edata);
-				appendStringInfo(&buf, _("LOCATION:  %s, %s:%d\n"),
-								 edata->funcname, edata->filename,
-								 edata->lineno);
-			}
-			else if (edata->filename)
-			{
-				log_line_prefix(&buf, edata);
-				appendStringInfo(&buf, _("LOCATION:  %s:%d\n"),
-								 edata->filename, edata->lineno);
-			}
-		}
-		if (edata->backtrace)
-		{
-			log_line_prefix(&buf, edata);
-			appendStringInfoString(&buf, _("BACKTRACE:  "));
-			append_with_tabs(&buf, edata->backtrace);
-			appendStringInfoChar(&buf, '\n');
-		}
-	}
-
-	/*
-	 * If the user wants the query that generated this error logged, do it.
-	 */
-	if (check_log_of_query(edata))
-	{
-		log_line_prefix(&buf, edata);
-		appendStringInfoString(&buf, _("STATEMENT:  "));
-		append_with_tabs(&buf, debug_query_string);
-		appendStringInfoChar(&buf, '\n');
-	}
+	bool		has_stderr_message = false;
 
 #ifdef HAVE_SYSLOG
 	/* Write to syslog, if enabled */
@@ -3811,6 +3818,12 @@ send_message_to_server_log(ErrorData *edata)
 				break;
 		}
 
+		if (!has_stderr_message)
+		{
+			build_stderr_message(&buf, edata);
+			has_stderr_message = true;
+		}
+
 		write_syslog(syslog_level, buf.data);
 	}
 #endif							/* HAVE_SYSLOG */
@@ -3819,6 +3832,12 @@ send_message_to_server_log(ErrorData *edata)
 	/* Write to eventlog, if enabled */
 	if (Log_destination & LOG_DESTINATION_EVENTLOG)
 	{
+		if (!has_stderr_message)
+		{
+			build_stderr_message(&buf, edata);
+			has_stderr_message = true;
+		}
+
 		write_eventlog(edata->elevel, buf.data, buf.len);
 	}
 #endif							/* WIN32 */
@@ -3861,6 +3880,12 @@ send_message_to_server_log(ErrorData *edata)
 		whereToSendOutput == DestDebug ||
 		fallback_to_stderr)
 	{
+		if (!has_stderr_message)
+		{
+			build_stderr_message(&buf, edata);
+			has_stderr_message = true;
+		}
+
 		/*
 		 * Use the chunking protocol if we know the syslogger should be
 		 * catching stderr output, and we are not ourselves the syslogger.
@@ -3886,10 +3911,19 @@ send_message_to_server_log(ErrorData *edata)
 
 	/* If in the syslogger process, try to write messages direct to file */
 	if (syslogger_setup_done)
+	{
+		if (!has_stderr_message)
+		{
+			build_stderr_message(&buf, edata);
+			has_stderr_message = true;
+		}
+
 		write_syslogger_file(buf.data, buf.len, LOG_DESTINATION_STDERR);
+	}
 
 	/* No more need of the message formatted for stderr */
-	pfree(buf.data);
+	if (has_stderr_message)
+		pfree(buf.data);
 }
 
 /*
