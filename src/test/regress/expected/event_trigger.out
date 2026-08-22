@@ -84,6 +84,99 @@ create event trigger regress_event_trigger2 on ddl_command_start
    execute procedure test_event_trigger();
 -- OK
 comment on event trigger regress_event_trigger is 'test comment';
+-- further output may display the trigger owner name, so ensure it
+-- is set to something predictable.
+CREATE ROLE regress_evt_superuser SUPERUSER;
+ALTER EVENT TRIGGER regress_event_trigger OWNER TO regress_evt_superuser;
+ALTER EVENT TRIGGER regress_event_trigger2 OWNER TO regress_evt_superuser;
+-- these are all OK - checks the DDL output without a tag filter and with one
+SELECT pg_get_event_trigger_ddl('regress_event_trigger');
+                                           pg_get_event_trigger_ddl                                            
+---------------------------------------------------------------------------------------------------------------
+ CREATE EVENT TRIGGER regress_event_trigger ON ddl_command_start EXECUTE FUNCTION public.test_event_trigger();
+ ALTER EVENT TRIGGER regress_event_trigger OWNER TO regress_evt_superuser;
+ ALTER EVENT TRIGGER regress_event_trigger ENABLE;
+(3 rows)
+
+SELECT pg_get_event_trigger_ddl('regress_event_trigger2');
+                                                                    pg_get_event_trigger_ddl                                                                    
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+ CREATE EVENT TRIGGER regress_event_trigger2 ON ddl_command_start WHEN TAG IN ('CREATE TABLE', 'CREATE FUNCTION') EXECUTE FUNCTION public.test_event_trigger();
+ ALTER EVENT TRIGGER regress_event_trigger2 OWNER TO regress_evt_superuser;
+ ALTER EVENT TRIGGER regress_event_trigger2 ENABLE;
+(3 rows)
+
+-- check formatted output
+SELECT pg_get_event_trigger_ddl('regress_event_trigger', true);
+                         pg_get_event_trigger_ddl                          
+---------------------------------------------------------------------------
+ CREATE EVENT TRIGGER regress_event_trigger                               +
+     ON ddl_command_start                                                 +
+     EXECUTE FUNCTION public.test_event_trigger();
+ ALTER EVENT TRIGGER regress_event_trigger OWNER TO regress_evt_superuser;
+ ALTER EVENT TRIGGER regress_event_trigger ENABLE;
+(3 rows)
+
+-- check output without owner/enable type
+SELECT pg_get_event_trigger_ddl('regress_event_trigger', owner:=false);
+                                           pg_get_event_trigger_ddl                                            
+---------------------------------------------------------------------------------------------------------------
+ CREATE EVENT TRIGGER regress_event_trigger ON ddl_command_start EXECUTE FUNCTION public.test_event_trigger();
+ ALTER EVENT TRIGGER regress_event_trigger ENABLE;
+(2 rows)
+
+SELECT pg_get_event_trigger_ddl('regress_event_trigger', enable:=false);
+                                           pg_get_event_trigger_ddl                                            
+---------------------------------------------------------------------------------------------------------------
+ CREATE EVENT TRIGGER regress_event_trigger ON ddl_command_start EXECUTE FUNCTION public.test_event_trigger();
+ ALTER EVENT TRIGGER regress_event_trigger OWNER TO regress_evt_superuser;
+(2 rows)
+
+SELECT pg_get_event_trigger_ddl('regress_event_trigger', owner:=false, enable:=false);
+                                           pg_get_event_trigger_ddl                                            
+---------------------------------------------------------------------------------------------------------------
+ CREATE EVENT TRIGGER regress_event_trigger ON ddl_command_start EXECUTE FUNCTION public.test_event_trigger();
+(1 row)
+
+-- check output with different enable values
+ALTER EVENT TRIGGER regress_event_trigger DISABLE;
+SELECT pg_get_event_trigger_ddl('regress_event_trigger', owner:=false);
+                                           pg_get_event_trigger_ddl                                            
+---------------------------------------------------------------------------------------------------------------
+ CREATE EVENT TRIGGER regress_event_trigger ON ddl_command_start EXECUTE FUNCTION public.test_event_trigger();
+ ALTER EVENT TRIGGER regress_event_trigger DISABLE;
+(2 rows)
+
+ALTER EVENT TRIGGER regress_event_trigger ENABLE ALWAYS;
+SELECT pg_get_event_trigger_ddl('regress_event_trigger', owner:=false);
+                                           pg_get_event_trigger_ddl                                            
+---------------------------------------------------------------------------------------------------------------
+ CREATE EVENT TRIGGER regress_event_trigger ON ddl_command_start EXECUTE FUNCTION public.test_event_trigger();
+ ALTER EVENT TRIGGER regress_event_trigger ENABLE ALWAYS;
+(2 rows)
+
+ALTER EVENT TRIGGER regress_event_trigger ENABLE REPLICA;
+SELECT pg_get_event_trigger_ddl('regress_event_trigger', owner:=false);
+                                           pg_get_event_trigger_ddl                                            
+---------------------------------------------------------------------------------------------------------------
+ CREATE EVENT TRIGGER regress_event_trigger ON ddl_command_start EXECUTE FUNCTION public.test_event_trigger();
+ ALTER EVENT TRIGGER regress_event_trigger ENABLE REPLICA;
+(2 rows)
+
+-- reset enable state
+ALTER EVENT TRIGGER regress_event_trigger ENABLE;
+-- will return an empty result set
+SELECT pg_get_event_trigger_ddl(NULL);
+ pg_get_event_trigger_ddl 
+--------------------------
+(0 rows)
+
+-- should fail, no argument
+SELECT pg_get_event_trigger_ddl();
+ERROR:  function pg_get_event_trigger_ddl() does not exist
+LINE 1: SELECT pg_get_event_trigger_ddl();
+               ^
+DETAIL:  No function of that name accepts the given number of arguments.
 -- drop as non-superuser should fail
 create role regress_evt_user;
 set role regress_evt_user;
@@ -398,6 +491,7 @@ SELECT * FROM dropped_objects WHERE object_type = 'schema';
 (3 rows)
 
 DROP ROLE regress_evt_user;
+DROP ROLE regress_evt_superuser;
 DROP EVENT TRIGGER regress_event_trigger_drop_objects;
 DROP EVENT TRIGGER undroppable;
 -- Event triggers on relations.

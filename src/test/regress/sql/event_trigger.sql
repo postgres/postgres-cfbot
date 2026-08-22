@@ -85,6 +85,41 @@ create event trigger regress_event_trigger2 on ddl_command_start
 -- OK
 comment on event trigger regress_event_trigger is 'test comment';
 
+-- further output may display the trigger owner name, so ensure it
+-- is set to something predictable.
+CREATE ROLE regress_evt_superuser SUPERUSER;
+ALTER EVENT TRIGGER regress_event_trigger OWNER TO regress_evt_superuser;
+ALTER EVENT TRIGGER regress_event_trigger2 OWNER TO regress_evt_superuser;
+
+-- these are all OK - checks the DDL output without a tag filter and with one
+SELECT pg_get_event_trigger_ddl('regress_event_trigger');
+SELECT pg_get_event_trigger_ddl('regress_event_trigger2');
+
+-- check formatted output
+SELECT pg_get_event_trigger_ddl('regress_event_trigger', true);
+
+-- check output without owner/enable type
+SELECT pg_get_event_trigger_ddl('regress_event_trigger', owner:=false);
+SELECT pg_get_event_trigger_ddl('regress_event_trigger', enable:=false);
+SELECT pg_get_event_trigger_ddl('regress_event_trigger', owner:=false, enable:=false);
+
+-- check output with different enable values
+ALTER EVENT TRIGGER regress_event_trigger DISABLE;
+SELECT pg_get_event_trigger_ddl('regress_event_trigger', owner:=false);
+ALTER EVENT TRIGGER regress_event_trigger ENABLE ALWAYS;
+SELECT pg_get_event_trigger_ddl('regress_event_trigger', owner:=false);
+ALTER EVENT TRIGGER regress_event_trigger ENABLE REPLICA;
+SELECT pg_get_event_trigger_ddl('regress_event_trigger', owner:=false);
+
+-- reset enable state
+ALTER EVENT TRIGGER regress_event_trigger ENABLE;
+
+-- will return an empty result set
+SELECT pg_get_event_trigger_ddl(NULL);
+
+-- should fail, no argument
+SELECT pg_get_event_trigger_ddl();
+
 -- drop as non-superuser should fail
 create role regress_evt_user;
 set role regress_evt_user;
@@ -296,6 +331,7 @@ DROP OWNED BY regress_evt_user;
 SELECT * FROM dropped_objects WHERE object_type = 'schema';
 
 DROP ROLE regress_evt_user;
+DROP ROLE regress_evt_superuser;
 
 DROP EVENT TRIGGER regress_event_trigger_drop_objects;
 DROP EVENT TRIGGER undroppable;
