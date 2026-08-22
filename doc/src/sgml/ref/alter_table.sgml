@@ -52,6 +52,7 @@ ALTER TABLE [ IF EXISTS ] <replaceable class="parameter">name</replaceable>
     ALTER [ COLUMN ] <replaceable class="parameter">column_name</replaceable> SET DEFAULT <replaceable class="parameter">expression</replaceable>
     ALTER [ COLUMN ] <replaceable class="parameter">column_name</replaceable> DROP DEFAULT
     ALTER [ COLUMN ] <replaceable class="parameter">column_name</replaceable> { SET | DROP } NOT NULL
+    ALTER [ COLUMN ] <replaceable class="parameter">column_name</replaceable> ADD GENERATED USING CONSTRAINT <replaceable class="parameter">constraint_name</replaceable> STORED
     ALTER [ COLUMN ] <replaceable class="parameter">column_name</replaceable> SET EXPRESSION AS ( <replaceable class="parameter">expression</replaceable> )
     ALTER [ COLUMN ] <replaceable class="parameter">column_name</replaceable> DROP EXPRESSION [ IF EXISTS ]
     ALTER [ COLUMN ] <replaceable class="parameter">column_name</replaceable> ADD GENERATED { ALWAYS | BY DEFAULT } AS IDENTITY [ ( <replaceable>sequence_options</replaceable> ) ]
@@ -268,6 +269,42 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
       allows them, but not the other way around.  It is also possible to drop
       the <literal>NOT NULL</literal> constraint from <literal>ONLY</literal>
       the parent table, which does not remove it from the children.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="sql-altertable-desc-add-generated-always-stored-using-constraint">
+    <term><literal>ADD GENERATED USING CONSTRAINT</literal></term>
+    <listitem>
+     <para>
+      This form changes a regular column into a stored generated column, using
+      the expression from the given <literal>CHECK</literal> constraint as
+      generation expression. The operation will be performed without rewriting
+      the table, which avoids holding an <literal>ACCESS EXCLUSIVE</literal>
+      lock for a possibly long time.
+     </para>
+
+     <para>
+      Before using this command, the table will usually have been prepared by
+      adding a regular column, backfilling it with values matching the intended
+      generation expression and adding a constraint to ensure that the
+      generation expression is satisfied. Note that the constraint can also be
+      added without holding an <literal>ACCESS EXCLUSIVE</literal> lock while
+      the table is scanned, using <literal>NOT VALID</literal> and
+      <literal>VALIDATE CONSTRAINT</literal>.
+     </para>
+
+     <para>
+      If the column being modified is nullable, the constraint must be of the
+      form <literal>CHECK (column_name IS NOT DISTINCT FROM expr)</literal>.
+      If the column is <literal>NOT NULL</literal>, then the form
+      <literal>CHECK (column_name = expr)</literal> is also allowed.
+     </para>
+
+     <para>
+      After this command is run, <literal>column_name</literal> will be a stored
+      generated column with <literal>expr</literal> as its generation
+      expression.
      </para>
     </listitem>
    </varlistentry>
