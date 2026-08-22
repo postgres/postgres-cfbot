@@ -36,6 +36,7 @@ OBJS = \
 	filter.o \
 	parallel.o \
 	pg_backup_archiver.o \
+	pg_backup_blackhole.o \
 	pg_backup_custom.o \
 	pg_backup_db.o \
 	pg_backup_directory.o \
