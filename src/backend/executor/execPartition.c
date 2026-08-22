@@ -786,14 +786,13 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 				 * This will have the effect of also treating that second
 				 * index as arbiter.
 				 *
-				 * XXX get_partition_ancestors scans pg_inherits, which is not
-				 * only slow, but also means the catalog snapshot can get
-				 * invalidated each time through the loop (cf.
-				 * GetNonHistoricCatalogSnapshot).  Consider a syscache or
-				 * some other way to cache?
+				 * Use the already-open index relation so its ancestor list
+				 * can be cached on the relcache entry, avoiding repeated
+				 * pg_inherits scans in this loop.
 				 */
 				indexoid = RelationGetRelid(leaf_part_rri->ri_IndexRelationDescs[listidx]);
-				ancestors = get_partition_ancestors(indexoid);
+				ancestors =
+					get_partition_index_ancestors(leaf_part_rri->ri_IndexRelationDescs[listidx]);
 				INJECTION_POINT("exec-init-partition-after-get-partition-ancestors", NULL);
 
 				if (ancestors != NIL &&
