@@ -225,11 +225,6 @@ ExecInitMaterial(Material *node, EState *estate, int eflags)
 	ExecInitResultTupleSlotTL(&matstate->ss.ps, &TTSOpsMinimalTuple);
 	matstate->ss.ps.ps_ProjInfo = NULL;
 
-	/*
-	 * initialize tuple type.
-	 */
-	ExecCreateScanSlotFromOuterPlan(estate, &matstate->ss, &TTSOpsMinimalTuple);
-
 	return matstate;
 }
 

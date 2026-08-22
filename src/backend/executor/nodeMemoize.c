@@ -1020,11 +1020,6 @@ ExecInitMemoize(Memoize *node, EState *estate, int eflags)
 	mstate->ss.ps.ps_ProjInfo = NULL;
 
 	/*
-	 * Initialize scan slot and type.
-	 */
-	ExecCreateScanSlotFromOuterPlan(estate, &mstate->ss, &TTSOpsMinimalTuple);
-
-	/*
 	 * Set the state machine to lookup the cache.  We won't find anything
 	 * until we cache something, but this saves a special case to create the
 	 * first entry.
