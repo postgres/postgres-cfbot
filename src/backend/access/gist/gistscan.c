@@ -346,6 +346,13 @@ gistrescan(IndexScanDesc scan, ScanKey key, int nkeys,
 			pfree(fn_extras);
 	}
 
+	/* release resources used in index-only scans */
+	if (BufferIsValid(so->vmbuf))
+	{
+		ReleaseBuffer(so->vmbuf);
+		so->vmbuf = InvalidBuffer;
+	}
+
 	/* any previous xs_hitup will have been pfree'd in context resets above */
 	scan->xs_hitup = NULL;
 }
@@ -358,6 +365,13 @@ gistendscan(IndexScanDesc scan)
 	/* Before leaving current page, deal with any killed items */
 	if (so->numKilled > 0)
 		gistkillitems(scan);
+
+	/* release resources used in index-only scans */
+	if (BufferIsValid(so->vmbuf))
+	{
+		ReleaseBuffer(so->vmbuf);
+		so->vmbuf = InvalidBuffer;
+	}
 
 	/*
 	 * freeGISTstate is enough to clean up everything made by gistbeginscan,

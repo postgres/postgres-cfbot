@@ -625,7 +625,7 @@ spgvacuumpage(spgBulkDeleteState *bds, Buffer buffer)
 	BlockNumber blkno = BufferGetBlockNumber(buffer);
 	Page		page;
 
-	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+	LockBufferForCleanup(buffer);
 	page = BufferGetPage(buffer);
 
 	if (PageIsNew(page))

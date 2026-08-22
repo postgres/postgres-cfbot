@@ -22,6 +22,7 @@
 #include "storage/buffile.h"
 #include "utils/hsearch.h"
 #include "access/genam.h"
+#include "tableam.h"
 
 /*
  * Maximum number of "halves" a page can be split into in one operation.
@@ -124,6 +125,8 @@ typedef struct GISTSearchHeapItem
 								 * index-only scans */
 	OffsetNumber offnum;		/* track offset in page to mark tuple as
 								 * LP_DEAD */
+	uint8		visrecheck;		/* Cached visibility check result for this
+								 * heap pointer. */
 } GISTSearchHeapItem;
 
 /* Unvisited item, either index page or heap tuple */
@@ -176,6 +179,8 @@ typedef struct GISTScanOpaqueData
 	OffsetNumber curPageData;	/* next item to return */
 	MemoryContext pageDataCxt;	/* context holding the fetched tuples, for
 								 * index-only scans */
+	/* info used by Index-Only Scans */
+	Buffer		vmbuf;			/* reusable buffer for IOS' vm lookups */
 } GISTScanOpaqueData;
 
 typedef GISTScanOpaqueData *GISTScanOpaque;

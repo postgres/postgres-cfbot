@@ -326,10 +326,10 @@ restart:
 	recurse_to = InvalidBlockNumber;
 
 	/*
-	 * We are not going to stay here for a long time, aggressively grab an
-	 * exclusive lock.
+	 * We are not going to stay here for a long time, aggressively grab a
+	 * cleanup lock.
 	 */
-	LockBuffer(buffer, GIST_EXCLUSIVE);
+	LockBufferForCleanup(buffer);
 	page = BufferGetPage(buffer);
 
 	if (gistPageRecyclable(page))

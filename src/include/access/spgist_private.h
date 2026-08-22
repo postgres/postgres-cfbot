@@ -21,6 +21,7 @@
 #include "storage/buf.h"
 #include "utils/geo_decls.h"
 #include "utils/relcache.h"
+#include "tableam.h"
 
 
 typedef struct SpGistOptions
@@ -175,6 +176,7 @@ typedef struct SpGistSearchItem
 	bool		isLeaf;			/* SearchItem is heap item */
 	bool		recheck;		/* qual recheck is needed */
 	bool		recheckDistances;	/* distance recheck is needed */
+	uint8		visrecheck;		/* IOS: TMVC_Result of contained heap tuple */
 
 	/* array with numberOfOrderBys entries */
 	double		distances[FLEXIBLE_ARRAY_MEMBER];
@@ -223,6 +225,7 @@ typedef struct SpGistScanOpaqueData
 
 	/* These fields are only used in amgettuple scans: */
 	bool		want_itup;		/* are we reconstructing tuples? */
+	Buffer		vmbuf;			/* IOS: used for table_index_vischeck_tuples */
 	TupleDesc	reconTupDesc;	/* if so, descriptor for reconstructed tuples */
 	int			nPtrs;			/* number of TIDs found on current page */
 	int			iPtr;			/* index for scanning through same */
@@ -231,6 +234,8 @@ typedef struct SpGistScanOpaqueData
 	bool		recheckDistances[MaxIndexTuplesPerPage];	/* distance recheck
 															 * flags */
 	HeapTuple	reconTups[MaxIndexTuplesPerPage];	/* reconstructed tuples */
+	/* support for IOS */
+	uint8	   *visrecheck;		/* IOS vis check results, counted by nPtrs */
 
 	/* distances (for recheck) */
 	IndexOrderByDistance *distances[MaxIndexTuplesPerPage];

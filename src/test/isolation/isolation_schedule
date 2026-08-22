@@ -18,6 +18,8 @@ test: two-ids
 test: multiple-row-versions
 test: index-only-scan
 test: index-only-bitmapscan
+test: index-only-scan-gist-vacuum
+test: index-only-scan-spgist-vacuum
 test: predicate-lock-hot-tuple
 test: update-conflict-out
 test: deadlock-simple
