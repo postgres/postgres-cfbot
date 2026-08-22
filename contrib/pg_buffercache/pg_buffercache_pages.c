@@ -161,7 +161,7 @@ pg_buffercache_pages(PG_FUNCTION_ARGS)
 		reldatabase = bufHdr->tag.dbOid;
 		forknum = BufTagGetForkNum(&bufHdr->tag);
 		blocknum = bufHdr->tag.blockNum;
-		usagecount = BUF_STATE_GET_USAGECOUNT(buf_state);
+		usagecount = BUF_STATE_GET_COOLSTATE(buf_state);
 		pinning_backends = BUF_STATE_GET_REFCOUNT(buf_state);
 
 		if (buf_state & BM_DIRTY)
@@ -605,7 +605,7 @@ pg_buffercache_summary(PG_FUNCTION_ARGS)
 		if (buf_state & BM_VALID)
 		{
 			buffers_used++;
-			usagecount_total += BUF_STATE_GET_USAGECOUNT(buf_state);
+			usagecount_total += BUF_STATE_GET_COOLSTATE(buf_state);
 
 			if (buf_state & BM_DIRTY)
 				buffers_dirty++;
@@ -655,7 +655,7 @@ pg_buffercache_usage_counts(PG_FUNCTION_ARGS)
 
 		CHECK_FOR_INTERRUPTS();
 
-		usage_count = BUF_STATE_GET_USAGECOUNT(buf_state);
+		usage_count = BUF_STATE_GET_COOLSTATE(buf_state);
 		usage_counts[usage_count]++;
 
 		if (buf_state & BM_DIRTY)
