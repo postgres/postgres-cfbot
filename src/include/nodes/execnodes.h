@@ -1095,6 +1095,27 @@ typedef struct DomainConstraintState
 	ExprState  *check_exprstate;	/* check_expr's eval state, or NULL */
 } DomainConstraintState;
 
+typedef struct SafeTypeCastState
+{
+	SafeTypeCastExpr *stcexpr;
+
+	/*
+	 * The jump target used to skip all remaining steps when the default
+	 * expression evaluation is bypassed.
+	 */
+	int			jump_end;
+
+	/*
+	 * Error-safe context for type coercion evaluation. A pointer to this is
+	 * passed to ExecInitExprRec() during type coercion expression
+	 * initialization (see ExecInitSafeTypeCastExpr).
+	 *
+	 * At runtime, this is reset before each evaluation of EEOP_SAFETYPE_CAST.
+	 */
+	ErrorSaveContext escontext;
+
+} SafeTypeCastState;
+
 /*
  * State for JsonExpr evaluation, too big to inline.
  *

@@ -24,6 +24,12 @@ SELECT * FROM xmltest;
   2 | <value>two</value>
 (2 rows)
 
+SELECT CAST('<wrong'::text AS xml DEFAULT NULL ON CONVERSION ERROR) as to_xml;
+ to_xml 
+--------
+ 
+(1 row)
+
 -- test non-throwing API, too
 SELECT pg_input_is_valid('<value>one</value>', 'xml');
  pg_input_is_valid 

@@ -47,6 +47,8 @@ extern char *typeTypeName(Type t);
 extern Oid	typeTypeRelid(Type typ);
 extern Oid	typeTypeCollation(Type typ);
 extern Datum stringTypeDatum(Type tp, char *string, int32 atttypmod);
+extern bool stringTypeDatumSafe(Type tp, char *string, int32 atttypmod,
+								Node *escontext, Datum *result);
 
 extern Oid	typeidTypeRelid(Oid type_id);
 extern Oid	typeOrDomainTypeRelid(Oid type_id);

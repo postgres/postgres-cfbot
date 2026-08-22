@@ -98,6 +98,11 @@ create function int8alias1cmp(int8, int8alias1) returns int
 alter operator family integer_ops using btree add
   function 1 int8alias1cmp (int8, int8alias1);
 
+-- int8alias2 binary-coercible to int8, this should not fail
+select cast('1'::int8 as int8alias2 default null on conversion error);
+select cast('1'::int8alias2 as int8 default null on conversion error);
+select cast('a' as int8alias2 default null on conversion error);
+
 create table ec0 (ff int8 primary key, f1 int8, f2 int8);
 create table ec1 (ff int8 primary key, f1 int8alias1, f2 int8alias2);
 create table ec2 (xf int8 primary key, x1 int8alias1, x2 int8alias2);

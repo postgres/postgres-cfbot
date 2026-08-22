@@ -25,6 +25,11 @@ SELECT 1 AS "int" LIMIT 3 OFFSET 3;
 SELECT 1 AS "int" OFFSET 1 FETCH FIRST 2 ROW ONLY;
 SELECT 1 AS "int" OFFSET 2 FETCH FIRST 3 ROW ONLY;
 
+-- error safe type cast
+SELECT CAST('a' AS int DEFAULT 2 ON CONVERSION ERROR);
+SELECT CAST('12' AS numeric DEFAULT 2 ON CONVERSION ERROR);
+SELECT CAST('12' AS numeric(10) DEFAULT 2 ON CONVERSION ERROR);
+
 -- DISTINCT and ORDER BY patterns
 -- Try some query permutations which once produced identical query IDs
 SELECT DISTINCT 1 AS "int";

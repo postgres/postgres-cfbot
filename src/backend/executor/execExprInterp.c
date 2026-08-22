@@ -578,6 +578,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_XMLEXPR,
 		&&CASE_EEOP_JSON_CONSTRUCTOR,
 		&&CASE_EEOP_IS_JSON,
+		&&CASE_EEOP_SAFETYPE_CAST,
 		&&CASE_EEOP_JSONEXPR_PATH,
 		&&CASE_EEOP_JSONEXPR_COERCION,
 		&&CASE_EEOP_JSONEXPR_COERCION_FINISH,
@@ -1934,6 +1935,28 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			ExecEvalJsonIsPredicate(state, op);
 
 			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_SAFETYPE_CAST)
+		{
+			SafeTypeCastState *stcstate = op->d.stcexpr.stcstate;
+
+			if (!SOFT_ERROR_OCCURRED(&stcstate->escontext))
+				EEO_JUMP(stcstate->jump_end);
+			else
+			{
+				*op->resvalue = (Datum) 0;
+				*op->resnull = true;
+
+				/*
+				 * Type cast error occurred. Reset the ErrorSaveContext so
+				 * it's ready for the next coercion evaluation attempt.
+				 */
+				stcstate->escontext.error_occurred = false;
+				stcstate->escontext.details_wanted = false;
+
+				EEO_NEXT();
+			}
 		}
 
 		EEO_CASE(EEOP_JSONEXPR_PATH)
@@ -3654,6 +3677,18 @@ ExecEvalArrayCoerce(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 							  econtext,
 							  op->d.arraycoerce.resultelemtype,
 							  op->d.arraycoerce.amstate);
+
+	if (SOFT_ERROR_OCCURRED(op->d.arraycoerce.elemexprstate->escontext))
+	{
+		*op->resvalue = (Datum) 0;
+		*op->resnull = true;
+
+		/*
+		 * A soft error occurred. The caller may need to reset
+		 * ExprState.ErrorSaveContext.error_occurred for the next evaluation.
+		 * Currently, EEOP_SAFETYPE_CAST will do that.
+		 */
+	}
 }
 
 /*

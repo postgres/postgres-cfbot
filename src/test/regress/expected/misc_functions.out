@@ -2,6 +2,19 @@
 \getenv libdir PG_LIBDIR
 \getenv dlsuffix PG_DLSUFFIX
 \set regresslib :libdir '/regress' :dlsuffix
+create function dummyx(int) returns void language plpgsql error unsafe as $$begin end$$;
+alter function dummyx error safe;
+select pg_get_functiondef('dummyx'::regproc);
+                pg_get_functiondef                 
+---------------------------------------------------
+ CREATE OR REPLACE FUNCTION public.dummyx(integer)+
+  RETURNS void                                    +
+  LANGUAGE plpgsql                                +
+  ERROR SAFE                                      +
+ AS $function$begin end$function$                 +
+ 
+(1 row)
+
 --
 -- num_nulls()
 --

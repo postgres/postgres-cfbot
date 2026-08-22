@@ -517,6 +517,14 @@ WHERE c.castmethod = 'b' AND
                     k.castsource = c.casttarget AND
                     k.casttarget = c.castsource);
 
+-- List build-in type cast that is not error-safe
+select pp.proname, pp.prosrc
+from pg_cast pc join pg_proc pp on pp.oid = pc.castfunc
+join pg_type pt on pt.oid = castsource
+join pg_type pt1 on pt1.oid = casttarget
+and pc.castfunc > 0 and pt.typnamespace = 'pg_catalog'::regnamespace
+and pt1.typnamespace = 'pg_catalog'::regnamespace and proerrorsafe is false
+order by pp.proname, pp.prosrc;
 
 -- **************** pg_conversion ****************
 

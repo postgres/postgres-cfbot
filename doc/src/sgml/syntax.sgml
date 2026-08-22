@@ -2125,6 +2125,48 @@ CAST ( <replaceable>expression</replaceable> AS <replaceable>type</replaceable> 
      <xref linkend="sql-createcast"/>.
     </para>
    </note>
+
+   <sect3 id="sql-syntax-type-casts-safe">
+    <title>Safe Type Casts</title>
+
+    <para>
+     A type cast may occasionally fail at run time.  To guard against such
+     failures, you can provide an <literal>ON CONVERSION ERROR</literal>
+     clause to control what happens when a cast fails.  The available forms
+     are:
+<synopsis>
+CAST ( <replaceable>expression</replaceable> AS <replaceable>type</replaceable> DEFAULT <replaceable>expression</replaceable> ON CONVERSION ERROR )
+CAST ( <replaceable>expression</replaceable> AS <replaceable>type</replaceable> ERROR ON CONVERSION ERROR )
+</synopsis>
+     With <literal>DEFAULT <replaceable>expression</replaceable> ON CONVERSION ERROR</literal>,
+     the default <replaceable>expression</replaceable> is evaluated and
+     returned instead.  The <literal>ERROR ON CONVERSION ERROR</literal>
+     form raises an error on failure, which is also the default behavior
+     when no <literal>ON CONVERSION ERROR</literal> clause is specified.
+     Note: The <literal>DEFAULT</literal> <replaceable>expression</replaceable>
+     is itself evaluated normally, so it may also raise an error during that evaluation.
+    </para>
+
+    <para>
+     User-defined type casts created with <link linkend="sql-createcast">CREATE CAST</link>
+     are also supported, provided that the corresponding cast
+     function in the <classname>pg_proc</classname> system catalog is ERROR SAFE.
+     A function is considered ERROR SAFE when its <literal>proerrorsafe</literal>
+     column is set to <literal>true</literal>.
+    </para>
+
+    <para>
+     Some examples:
+<screen>
+SELECT CAST('not-a-date' AS date DEFAULT NULL ON CONVERSION ERROR);
+<lineannotation>Result: </lineannotation><computeroutput>NULL</computeroutput>
+SELECT CAST('not-a-date' AS date DEFAULT '1970-01-01' ON CONVERSION ERROR);
+<lineannotation>Result: </lineannotation><computeroutput>1970-01-01</computeroutput>
+SELECT CAST(TEXT 'error' AS integer DEFAULT 3 ON CONVERSION ERROR);
+<lineannotation>Result: </lineannotation><computeroutput>3</computeroutput>
+</screen>
+    </para>
+   </sect3>
   </sect2>
 
   <sect2 id="sql-syntax-collate-exprs">
