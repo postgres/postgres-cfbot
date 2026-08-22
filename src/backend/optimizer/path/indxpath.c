@@ -196,7 +196,7 @@ static Expr *match_clause_to_ordering_op(IndexOptInfo *index,
 static bool ec_member_matches_indexcol(PlannerInfo *root, RelOptInfo *rel,
 									   EquivalenceClass *ec, EquivalenceMember *em,
 									   void *arg);
-
+static bool is_path_unique(IndexOptInfo *index, IndexClauseSet *clauses);
 
 /*
  * create_index_paths()
@@ -772,6 +772,82 @@ get_index_paths(PlannerInfo *root, RelOptInfo *rel,
 }
 
 /*
+ * index_clauses_has_eq_op
+ *	  Returns true if the provided index clauses have at least one equality
+ *	  operation
+ */
+static bool
+index_clauses_has_eq_op(IndexOptInfo *index, List *clauses)
+{
+	ListCell   *lc;
+
+	foreach(lc, clauses)
+	{
+		IndexClause *iclause = lfirst_node(IndexClause, lc);
+		ListCell   *lc2;
+
+		foreach(lc2, iclause->indexquals)
+		{
+			RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc2);
+			Expr	   *clause = rinfo->clause;
+
+			if (IsA(clause, OpExpr))
+			{
+				int			op_strategy;
+				OpExpr	   *op = (OpExpr *) clause;
+
+				op_strategy = get_op_opfamily_strategy(op->opno,
+													   index->opfamily[iclause->indexcol]);
+				Assert(op_strategy != 0);	/* not a member of opfamily?? */
+				if (op_strategy == BTEqualStrategyNumber)
+					return true;
+			}
+			else if (IsA(clause, NullTest))
+			{
+				NullTest   *nt = (NullTest *) clause;
+
+				if (nt->nulltesttype == IS_NULL && index->nullsnotdistinct)
+				{
+					/*
+					 * IS NULL is like = for uniqueness purposes, but only if
+					 * the index is configured with NULLS NOT DISTINCT
+					 */
+					return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
+/*
+ * is_path_unique
+ *	  Given an index and its clauses, return true if an index is unique, and
+ *	  all index key columns have at least one equality condition.
+ */
+static bool
+is_path_unique(IndexOptInfo *index, IndexClauseSet *clauses)
+{
+	int			indexcol;
+
+	if (!index->unique)
+		/* Not a unique index, bail out */
+		return false;
+
+	/*
+	 * We have a unique index, check that each key column has at least one
+	 * equality operation
+	 */
+	for (indexcol = 0; indexcol < index->nkeycolumns; indexcol++)
+	{
+		if (!index_clauses_has_eq_op(index, clauses->indexclauses[indexcol]))
+			/* index column doesn't have an eq op, the path can't be unique */
+			return false;
+	}
+	return true;
+}
+
+/*
  * build_index_paths
  *	  Given an index and a set of index clauses for it, construct zero
  *	  or more IndexPaths. It also constructs zero or more partial IndexPaths.
@@ -824,6 +900,7 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 	bool		pathkeys_possibly_useful;
 	bool		index_is_ordered;
 	bool		index_only_scan;
+	bool		unique_path;
 	int			indexcol;
 
 	Assert(skip_nonnative_saop != NULL || scantype == ST_BITMAPSCAN);
@@ -901,6 +978,12 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 			return NIL;
 	}
 
+	/*
+	 * Determine whether the path is unique, i.e., the index is unique and all
+	 * key columns have an equality clause
+	 */
+	unique_path = is_path_unique(index, clauses);
+
 	/* We do not want the index's rel itself listed in outer_relids */
 	outer_relids = bms_del_member(outer_relids, rel->relid);
 
@@ -974,7 +1057,8 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 								  index_only_scan,
 								  outer_relids,
 								  loop_count,
-								  false);
+								  false,
+								  unique_path);
 		result = lappend(result, ipath);
 
 		/*
@@ -994,7 +1078,8 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 									  index_only_scan,
 									  outer_relids,
 									  loop_count,
-									  true);
+									  true,
+									  unique_path);
 
 			/*
 			 * if, after costing the path, we find that it's not worth using
@@ -1027,7 +1112,8 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 									  index_only_scan,
 									  outer_relids,
 									  loop_count,
-									  false);
+									  false,
+									  unique_path);
 			result = lappend(result, ipath);
 
 			/* If appropriate, consider parallel index scan */
@@ -1044,7 +1130,8 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 										  index_only_scan,
 										  outer_relids,
 										  loop_count,
-										  true);
+										  true,
+										  unique_path);
 
 				/*
 				 * if, after costing the path, we find that it's not worth
