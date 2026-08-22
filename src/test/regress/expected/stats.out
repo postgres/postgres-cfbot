@@ -270,6 +270,45 @@ FROM prevstats AS pr;
 
 COMMIT;
 ----
+-- Check that TOAST statistics are visible from the owning table's row.
+-- Use temporary tables so that autovacuum can't interfere.
+----
+CREATE TEMPORARY TABLE stats_toast_test (a text);
+ALTER TABLE stats_toast_test ALTER COLUMN a SET STORAGE EXTERNAL;
+INSERT INTO stats_toast_test SELECT repeat('a', 10000) FROM generate_series(1, 5);
+DELETE FROM stats_toast_test;
+CREATE TEMPORARY TABLE stats_toast_test_none (a int);
+INSERT INTO stats_toast_test_none VALUES (1);
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+-- toast_relid links to the correct TOAST table
+SELECT st.toast_relid = c.reltoastrelid AS toast_relid_matches,
+       st.toast_n_dead_tup > 0 AS toast_n_dead_tup_positive,
+       st.toast_autovacuum_count >= 0 AS toast_autovacuum_count_ok
+  FROM pg_stat_user_tables st JOIN pg_class c ON c.oid = st.relid
+ WHERE st.relname = 'stats_toast_test';
+ toast_relid_matches | toast_n_dead_tup_positive | toast_autovacuum_count_ok 
+---------------------+---------------------------+---------------------------
+ t                   | t                         | t
+(1 row)
+
+-- a table without a TOAST table reports NULLs
+SELECT toast_relid, toast_n_dead_tup, toast_last_autovacuum,
+       toast_autovacuum_count
+  FROM pg_stat_user_tables
+ WHERE relname = 'stats_toast_test_none';
+ toast_relid | toast_n_dead_tup | toast_last_autovacuum | toast_autovacuum_count 
+-------------+------------------+-----------------------+------------------------
+             |                  |                       |                       
+(1 row)
+
+DROP TABLE stats_toast_test;
+DROP TABLE stats_toast_test_none;
+----
 -- Basic tests for track_functions
 ---
 CREATE FUNCTION stats_test_func1() RETURNS VOID LANGUAGE plpgsql AS $$BEGIN END;$$;
