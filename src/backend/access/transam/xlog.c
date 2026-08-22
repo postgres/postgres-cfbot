@@ -6729,6 +6729,18 @@ StartupXLOG(void)
 	 */
 	if (promoted)
 		RequestCheckpoint(CHECKPOINT_FORCE);
+	/*
+	 * This is done because We skip RemoveOldXlogFiles() in
+	 * an END_OF_RECOVERY checkpoint for a lower recovery time. And then
+	 * start another checkpoint at the end in background which can do the
+	 * cleanup while the regular database operations can continue.
+	 * continue. We considered adding this to PerformRecoveryXlogAction()
+	 * but we need to wait for the recovery to be marked complete.
+	 * END_OF_RECOVERY checkpoint. The details can be found in the comment
+	 * inside CreateCheckPoint().
+	 */
+	if (performedWalRecovery)
+		RequestCheckpoint(CHECKPOINT_FORCE);
 }
 
 /*
@@ -7890,8 +7902,56 @@ CreateCheckPoint(int flags)
 		KeepLogSeg(recptr, &_logSegNo);
 	}
 	_logSegNo--;
-	RemoveOldXlogFiles(_logSegNo, RedoRecPtr, recptr,
+	/*
+	 * This is done to start accepting connections
+	 * post recovery without having to wait for the deletion of old xlog files.
+	 * The other part of this logic is in StartupXLOG(). Below is the
+	 * description of the problem and potential solutions.
+	 *
+	 * The problem arises when there are a huge number of xlog files which need
+	 * to be removed and it can delay recovery from a crash. We have seen this
+	 * happen in the following scenarios.
+	 * 1. Inactive replication slot leading to WAL accumulation. If the slot
+	 *    is deleted and a crash happens soon after.
+	 * 2. PITR not able to keep up. If it's disabled and a crash happens soon
+	 *    after.
+	 *
+	 * Possible solutions
+	 * 1. Skip removal of old xlog files during end of recovery. And rely on a later
+	 *    checkpoint to take care of those. The below code on its own can implement
+	 *    this.
+	 * 2. We separate the RemoveOldXlogFiles() into a separate request.
+	 *    Or find a way to refactor the code to finish recovery while the
+	 *    deletion goes in background. This would require making changes
+	 *    to different parts of the code and seems more error-prone. As
+	 *    we'll start accepting connections and will get new queries
+	 *    coming in, we'll need to be sure that the deletion is not
+	 *    interfering with that. This could be doable by keeping track of
+	 *    the lsn from the end of recovery checkpoint but seems riskier than
+	 *    option 3.
+	 * 3. We can combine the above 2 ideas. Instead of separating out the
+	 *    RemoveOldXlogFiles(), we can just run another checkpoint right
+	 *    after the recovery without setting CHECKPOINT_WAIT.
+	 *    This checkpoint will not be an END_OF_RECOVERY checkpoint,
+	 *    but a regular checkpoint which can do the same job in background.
+	 *    While this will lead to some extra bookkeeping work before we
+	 *    reach RemoveOldXlogFiles(), that should be minuscule as it would
+	 *    happen right after the recovery completion. Therefore here we are
+	 *    implementing this solution. The extra checkpoint is created at
+	 *    the end of StartupXLOG (see comment there) after recovery.
+	 *
+	 * Another alternative might be to create another checkpoint flag
+	 * CHECKPOINT_SKIP_OLD_FILES_DELETION and pass that from the caller
+	 * instead of always skipping this step for CHECKPOINT_END_OF_RECOVERY.
+	 * We can create a flag CHECKPOINT_ONLY_DELETE_OLD_FILES
+	 * to be used from the second checkpoint. Which ensures that no extra
+	 * work is done. This might end up very close to option 2.
+	 */
+	if (!(flags & CHECKPOINT_END_OF_RECOVERY))
+	{
+		RemoveOldXlogFiles(_logSegNo, RedoRecPtr, recptr,
 					   checkPoint.ThisTimeLineID);
+	}
 
 	/*
 	 * Make more log segments if needed.  (Do this after recycling old log
