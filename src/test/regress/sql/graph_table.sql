@@ -306,10 +306,21 @@ SELECT * FROM GRAPH_TABLE (g1 MATCH (src IS el1 | vl1)-[conn]->(dest) COLUMNS (c
 SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers WHERE c.address = 'US')-[IS customer_orders]->(o IS orders) COLUMNS (c.*));
 -- star anywhere else is not allowed as a property reference
 SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers WHERE c.* IS NOT NULL)-[IS customer_orders]->(o IS orders) COLUMNS (c.name));
--- aggregate, window, and set-returning functions are not supported in COLUMNS
+-- aggregate, grouping, window, and set-returning functions are not allowed
+-- in the COLUMNS list or the graph pattern WHERE, except for outer-level aggs
 SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers) COLUMNS (count(*) AS num));
+SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers) COLUMNS (GROUPING(c.customer_id) AS g));
 SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers) COLUMNS (row_number() OVER () AS rn));
 SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers) COLUMNS (generate_series(1, 2) AS gs));
+SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers WHERE count(c.customer_id) > 0) COLUMNS (c.name AS nm));
+SELECT EXISTS(SELECT num FROM GRAPH_TABLE (myshop MATCH (c IS customers) COLUMNS (count(o.customer_id) AS num)) t) FROM customers o;
+SELECT EXISTS(SELECT nm FROM GRAPH_TABLE (myshop MATCH (c IS customers) WHERE count(o.customer_id) > 0 COLUMNS (c.name AS nm)) t) FROM customers o;
+SELECT EXISTS(SELECT nm FROM GRAPH_TABLE (myshop MATCH (c IS customers WHERE count(o.customer_id) > 0) COLUMNS (c.name AS nm)) t) FROM customers o;
+SELECT EXISTS(SELECT nm FROM GRAPH_TABLE (myshop MATCH (c IS customers WHERE count(c.customer_id + o.customer_id) > 0) COLUMNS (c.name AS nm)) t) FROM customers o;
+SELECT EXISTS(SELECT nm FROM GRAPH_TABLE (myshop MATCH (c IS customers WHERE GROUPING(o.customer_id) = 1) COLUMNS (c.name AS nm)) t) FROM customers o GROUP BY customer_id;
+-- a property in a GRAPH_TABLE subquery below the aggregate is not local to it,
+-- so the aggregate is allowed
+SELECT count(o.customer_id + (SELECT count(n) FROM GRAPH_TABLE (g1 MATCH (src) COLUMNS (src.vprop1 AS n)) x)) FROM customers o;
 -- consecutive element patterns with same kind
 SELECT * FROM GRAPH_TABLE (g1 MATCH ()() COLUMNS (1 as one));
 SELECT * FROM GRAPH_TABLE (g1 MATCH -> COLUMNS (1 AS one));
@@ -617,6 +628,8 @@ SELECT * FROM customers co WHERE co.customer_id = (SELECT customer_id FROM GRAPH
 -- query within graph table
 SELECT sname, dname FROM GRAPH_TABLE (g1 MATCH (src)->(dest) WHERE src.vprop1 > (SELECT max(v1.vprop1) FROM v1) COLUMNS(src.vname AS sname, dest.vname AS dname));
 SELECT sname, dname FROM GRAPH_TABLE (g1 MATCH (src)->(dest) WHERE out_degree(src.vname) > (SELECT max(out_degree(nname)) FROM GRAPH_TABLE (g1 MATCH (node) COLUMNS (node.vname AS nname))) COLUMNS(src.vname AS sname, dest.vname AS dname));
+SELECT sname FROM GRAPH_TABLE (g1 MATCH (src WHERE (SELECT src.vprop1 > 0)) COLUMNS (src.vname AS sname));
+SELECT x FROM GRAPH_TABLE (g1 MATCH (src) COLUMNS ((SELECT 1) AS x));
 
 -- GRAPH_TABLE subquery in HAVING clause (tests expression mutator)
 SELECT src.vname, count(*) FROM v1 AS src
