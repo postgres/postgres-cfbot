@@ -624,7 +624,10 @@ fsm_readbuf(Relation rel, FSMAddress addr, bool extend)
 	{
 		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 		if (PageIsNew(BufferGetPage(buf)))
+		{
 			PageInit(BufferGetPage(buf), BLCKSZ, 0);
+			MarkBufferDirty(buf);
+		}
 		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
 	}
 	return buf;
