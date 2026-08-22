@@ -848,6 +848,35 @@ ALTER TABLE gtest28a DROP COLUMN a;
 CREATE TABLE gtest28b (LIKE gtest28a INCLUDING GENERATED);
 
 \d gtest28*
+-- Test table partitioning, change child table generation expression
+CREATE TABLE gtest_pk AS SELECT g::int as b FROM generate_series(1, 100) g;
+ALTER TABLE gtest_pk ADD PRIMARY KEY (b);
+CREATE TABLE gtest35(a int, b int GENERATED ALWAYS AS (a) STORED NOT NULL, CONSTRAINT cc check (b < 120)) PARTITION BY RANGE (a);
+CREATE TABLE gtest35_1 PARTITION OF gtest35 FOR VALUES FROM (1) TO (10);
+CREATE TABLE gtest35_2 PARTITION OF gtest35 FOR VALUES FROM (10) TO (20);
+-- CREATE INDEX gtest35_b_idx ON gtest35(b);
+INSERT INTO gtest35 SELECT g FROM generate_series(5, 14) g;
+-- ALTER TABLE gtest35 ADD CONSTRAINT gtest35_fk FOREIGN KEY (b) REFERENCES gtest_pk;
+
+ALTER TABLE ONLY gtest35 ALTER COLUMN b SET EXPRESSION AS (a); -- error
+ALTER TABLE gtest35_1 ALTER COLUMN b SET EXPRESSION AS (a+1); -- error
+DROP INDEX gtest35_b_idx;
+
+ALTER TABLE gtest35_1 ALTER COLUMN b SET EXPRESSION AS (case when a=7 then 200 else a + 112 end); -- error
+ALTER TABLE gtest35_2 ALTER COLUMN b SET EXPRESSION AS (case when a=10 then 200 else a + 2 end); -- error
+
+-- Test inheritance, change child table generation expression
+CREATE TABLE gtest36(a int, b int GENERATED ALWAYS AS (a) STORED NOT NULL, CONSTRAINT cc check (b < 120));
+CREATE TABLE gtest36_1 () INHERITS (gtest36);
+CREATE TABLE gtest36_12 () INHERITS (gtest36, gtest36_1);
+INSERT INTO gtest36 VALUES (8), (9);
+INSERT INTO gtest36_1 VALUES (10), (11);
+INSERT INTO gtest36_12 VALUES (12), (13);
+CREATE INDEX gtest36_b_idx ON gtest36(b);
+ALTER TABLE gtest36 ADD CONSTRAINT gtest36_fk FOREIGN KEY (b) REFERENCES gtest_pk;
+
+ALTER TABLE ONLY gtest36 ALTER COLUMN b SET EXPRESSION AS (a); -- error
+ALTER TABLE gtest36_1 ALTER COLUMN b SET EXPRESSION AS (a+1); -- error
 
 -- rule actions referring to generated columns:
 -- NEW.b in a rule action should reflect the generated column's new value

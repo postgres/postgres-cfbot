@@ -795,6 +795,9 @@ static void ATExecSplitPartition(List **wqueue, AlteredTableInfo *tab,
 static List *collectPartitionIndexExtDeps(List *partitionOids);
 static void applyPartitionIndexExtDeps(Oid newPartOid, List *extDepState);
 static void freePartitionIndexExtDeps(List *extDepState);
+static void ATPrepSetExpression(List **wqueue, AlteredTableInfo *tab, Relation rel,
+								AlterTableCmd *cmd, bool recurse, bool recursing,
+								LOCKMODE lockmode);
 
 /* ----------------------------------------------------------------
  *		DefineRelation
@@ -5134,6 +5137,7 @@ ATPrepCmd(List **wqueue, Relation rel, AlterTableCmd *cmd,
 			ATSimplePermissions(cmd->subtype, rel,
 								ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_FOREIGN_TABLE);
 			ATSimpleRecursion(wqueue, rel, cmd, recurse, lockmode, context);
+			ATPrepSetExpression(wqueue, tab, rel, cmd, recurse, recursing, lockmode);
 			pass = AT_PASS_SET_EXPRESSION;
 			break;
 		case AT_DropExpression: /* ALTER COLUMN DROP EXPRESSION */
@@ -8825,19 +8829,6 @@ ATExecSetExpression(AlteredTableInfo *tab, Relation rel, const char *colName,
 	}
 
 	/*
-	 * Find everything that depends on the column (constraints, indexes, etc),
-	 * and record enough information to let us recreate the objects.
-	 */
-	RememberAllDependentForRebuilding(tab, AT_SetExpression, rel, attnum, colName);
-
-	/*
-	 * Find whole-row referenced objects that depend on the column
-	 * (constraints, indexes, etc.), and record enough information to let us
-	 * recreate the objects.
-	 */
-	RememberWholeRowDependentForRebuilding(tab, AT_SetExpression, rel);
-
-	/*
 	 * Drop the dependency records of the GENERATED expression, in particular
 	 * its INTERNAL dependency on the column, which would otherwise cause
 	 * dependency.c to refuse to perform the deletion.
@@ -8895,6 +8886,71 @@ ATExecSetExpression(AlteredTableInfo *tab, Relation rel, const char *colName,
 	ObjectAddressSubSet(address, RelationRelationId,
 						RelationGetRelid(rel), attnum);
 	return address;
+}
+
+/*
+ * ALTER TABLE ALTER COLUMN SET EXPRESSION
+ */
+static void
+ATPrepSetExpression(List **wqueue, AlteredTableInfo *tab, Relation rel,
+					AlterTableCmd *cmd, bool recurse, bool recursing,
+					LOCKMODE lockmode)
+{
+	char	   *colName = cmd->name;
+	Form_pg_attribute attTup;
+	AttrNumber	attnum;
+
+	HeapTuple	tuple = SearchSysCacheAttName(RelationGetRelid(rel),
+											  colName);
+
+	if (!HeapTupleIsValid(tuple))
+	{
+		/*
+		 * it can happen, for example: -------------------------------------
+		 * ALTER TABLE ADD COLUMN b int GENERATED ALWAYS AS (2) STORED, ALTER
+		 * COLUMN b SET EXPRESSION AS (a * 3);
+		 */
+		return;
+	}
+	attTup = (Form_pg_attribute) GETSTRUCT(tuple);
+	attnum = attTup->attnum;
+	ReleaseSysCache(tuple);
+
+	/*
+	 * Find everything that depends on the column (constraints, indexes, etc),
+	 * and record enough information to let us recreate the objects.
+	 */
+	RememberAllDependentForRebuilding(tab, AT_SetExpression, rel, attnum, colName);
+
+	/*
+	 * Find whole-row referenced objects that depend on the column
+	 * (constraints, indexes, etc.), and record enough information to let us
+	 * recreate the objects.
+	 */
+	RememberWholeRowDependentForRebuilding(tab, AT_SetExpression, rel);
+
+	if (tab->changedConstraintOids != NIL || tab->changedIndexOids != NIL)
+	{
+		List	   *children = find_inheritance_children(RelationGetRelid(rel), NoLock);
+
+		/*
+		 * Cannot use ONLY to modify a generated column's expression when
+		 * there are dependencies (e.g. constraints, indexes) that need to be
+		 * rebuilt, since that rebuild must cascade to the children too.
+		 */
+		if (!recurse && !recursing && children != NIL)
+			ereport(ERROR,
+					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("ALTER TABLE ONLY ... SET EXPRESSION is not supported for generated columns with dependent objects on a parent table"),
+					errdetail("Dependent objects, such as constraints and indexes, must be rebuilt in child tables as well, which conflicts with ONLY."));
+
+		/* cannot rebuild partition child table index */
+		if (!recursing && (rel->rd_rel->relispartition || has_superclass(RelationGetRelid(rel))))
+			ereport(ERROR,
+					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("cannot use ALTER TABLE ... SET EXPRESSION on a generated column in a child table with dependent objects"),
+					errdetail("Inherited objects, such as indexes, cannot be rebuilt independently for a child table."));
+	}
 }
 
 /*
