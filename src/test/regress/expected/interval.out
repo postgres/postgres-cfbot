@@ -857,6 +857,16 @@ SELECT interval(2) '1 day 01:23:45.6789';
  1 day 01:23:45.68
 (1 row)
 
+-- invalid typmods passed to the SQL-callable length-coercion function are
+-- user errors, not internal errors.  Use a DO block to verify the SQLSTATE.
+DO $$
+BEGIN
+  PERFORM pg_catalog.interval(interval '1 day', 1539);
+EXCEPTION WHEN invalid_parameter_value THEN
+  RAISE NOTICE 'invalid interval typmod rejected';
+END
+$$;
+NOTICE:  invalid interval typmod rejected
 SELECT interval '12:34.5678' minute to second(2);  -- per SQL spec
   interval   
 -------------
