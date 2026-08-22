@@ -46,6 +46,7 @@
 #include "postgres.h"
 
 #ifdef USE_LIBXML
+#include <libxml/c14n.h>
 #include <libxml/chvalid.h>
 #include <libxml/entities.h>
 #include <libxml/parser.h>
@@ -566,6 +567,82 @@ xmltext(PG_FUNCTION_ARGS)
 #endif							/* not USE_LIBXML */
 }
 
+/*
+ * Canonicalizes the given XML document according to the W3C Canonical XML 1.1
+ * specification, using libxml2's xmlC14NDocDumpMemory().
+ *
+ * The input XML must be a well-formed document (not a fragment). The
+ * canonical form is deterministic and useful for digital signatures and
+ * comparing logically equivalent XML.
+ *
+ * The second argument determines whether comments are preserved
+ * (true) or omitted (false) in the canonicalized output.
+ */
+Datum
+xmlcanonicalize(PG_FUNCTION_ARGS)
+{
+#ifdef USE_LIBXML
+	xmltype    *arg = PG_GETARG_XML_P(0);
+	bool		keep_comments = PG_GETARG_BOOL(1);
+	text	   *result;
+	xmlChar    *volatile xmlbuf = NULL;
+	int			nbytes = 0;
+	volatile xmlDocPtr doc = NULL;
+	PgXmlErrorContext *xmlerrcxt;
+
+	/* Set up XML error context for proper libxml2 error integration */
+	xmlerrcxt = pg_xml_init(PG_XML_STRICTNESS_ALL);
+
+	PG_TRY();
+	{
+		char	   *converted;
+
+		/* Parse the input as a full XML document */
+		doc = xml_parse(arg, XMLOPTION_DOCUMENT, true,
+						GetDatabaseEncoding(), NULL, NULL, NULL);
+
+		/* Canonicalize the entire document using C14N 1.1 */
+		nbytes = xmlC14NDocDumpMemory(doc, NULL, XML_C14N_1_1,
+									  NULL, keep_comments,
+									  (xmlChar **) &xmlbuf);
+
+		if (nbytes < 0 || xmlbuf == NULL || xmlerrcxt->err_occurred)
+			xml_ereport(xmlerrcxt, ERROR, ERRCODE_INTERNAL_ERROR,
+						"could not canonicalize XML document");
+
+		/*
+		 * C14N always produces UTF-8 output regardless of the database
+		 * encoding.  Convert to the server encoding so the result is a
+		 * valid text value.
+		 */
+		converted = pg_any_to_server((char *) xmlbuf, nbytes, PG_UTF8);
+
+		result = cstring_to_text(converted);
+		if (converted != (char *) xmlbuf)
+			pfree(converted);
+	}
+	PG_CATCH();
+	{
+		if (doc)
+			xmlFreeDoc((xmlDocPtr) doc);
+		if (xmlbuf)
+			xmlFree((xmlChar *) xmlbuf);
+
+		pg_xml_done(xmlerrcxt, true);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	xmlFreeDoc((xmlDocPtr) doc);
+	xmlFree((xmlChar *) xmlbuf);
+	pg_xml_done(xmlerrcxt, false);
+
+	PG_RETURN_TEXT_P(result);
+#else
+	NO_XML_SUPPORT();
+	return 0;
+#endif							/* not USE_LIBXML */
+}
 
 /*
  * TODO: xmlconcat needs to merge the notations and unparsed entities

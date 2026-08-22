@@ -9360,6 +9360,10 @@
 { oid => '3813', descr => 'generate XML text node',
   proname => 'xmltext', prorettype => 'xml', proargtypes => 'text',
   prosrc => 'xmltext' },
+{ oid => '3814', descr => 'generate the canonical form of an XML document',
+  proname => 'xmlcanonicalize', prorettype => 'text', proargtypes => 'xml bool',
+  proargnames => '{doc,keep_comments}', proargdefaults => '{true}',
+  prosrc => 'xmlcanonicalize' },
 
 { oid => '2923', descr => 'map table contents to XML',
   proname => 'table_to_xml', procost => '100', provolatile => 's',
