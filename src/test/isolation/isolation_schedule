@@ -106,6 +106,7 @@ test: vacuum-concurrent-drop
 test: vacuum-conflict
 test: vacuum-skip-locked
 test: stats
+test: stats-per-backend
 test: horizons
 test: predicate-hash
 test: predicate-gist

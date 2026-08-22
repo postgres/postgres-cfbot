@@ -380,6 +380,26 @@ typedef struct PgStat_KindInfo
 	 */
 	void		(*snapshot_cb) (void);
 
+	/*
+	 * Per-backend dshash support for built-in fixed-numbered statistics kinds
+	 * that also maintain per-backend entries in a dedicated dshash. If
+	 * per_backend_data_len is non-zero, the generic infrastructure handles
+	 * attach, fetch, accumulate, and snapshot pre-caching automatically.
+	 *
+	 * Each entry starts with PgStatShared_PerBackendEntry, followed by the
+	 * kind-specific statistics payload.
+	 */
+	uint32		per_backend_data_off;	/* offset of stats data in entry */
+	uint32		per_backend_data_len;	/* size of stats data in entry */
+	/* offset of dshash_table_handle in shared struct */
+	uint32		per_backend_hash_handle_off;
+
+	/*
+	 * Callback to accumulate one per-backend entry into a destination of the
+	 * kind's statistics type. Called with the entry's content lock held.
+	 */
+	void		(*per_backend_acc_cb) (void *dst, void *entry);
+
 	/* name of the kind of stats */
 	const char *const name;
 } PgStat_KindInfo;
@@ -457,19 +477,23 @@ typedef struct PgStatShared_Checkpointer
 /* Shared-memory ready PgStat_IO */
 typedef struct PgStatShared_IO
 {
-	/*
-	 * locks[i] protects stats.stats[i]. locks[0] also protects
-	 * stats.stat_reset_timestamp.
-	 */
-	LWLock		locks[BACKEND_NUM_TYPES];
+	LWLock		lock;
 	PgStat_IO	stats;
+
+	/*
+	 * Per-backend dshash, keyed by ProcNumber.
+	 */
+	dshash_table_handle backend_hash_handle;
 } PgStatShared_IO;
 
 typedef struct PgStatShared_Lock
 {
-	/* lock protects ->stats */
+	/* lock protects ->stats (global stats) */
 	LWLock		lock;
 	PgStat_Lock stats;
+
+	/* Per-backend dshash, keyed by ProcNumber */
+	dshash_table_handle backend_hash_handle;
 } PgStatShared_Lock;
 
 typedef struct PgStatShared_SLRU
@@ -479,11 +503,56 @@ typedef struct PgStatShared_SLRU
 	PgStat_SLRUStats stats[SLRU_NUM_ELEMENTS];
 } PgStatShared_SLRU;
 
+/*
+ * Common header for entries in per-backend statistics dshashes. The
+ * ProcNumber key must be the first field for dshash.
+ */
+typedef struct PgStatShared_PerBackendEntry
+{
+	ProcNumber	key;
+	BackendType backend_type;
+	LWLock		lock;
+} PgStatShared_PerBackendEntry;
+
+/*
+ * Per-backend entry for IO statistics, stored in a dshash keyed by
+ * ProcNumber.
+ */
+typedef struct PgStatShared_IOBackendEntry
+{
+	PgStatShared_PerBackendEntry header;
+	PgStat_BackendIO stats;
+} PgStatShared_IOBackendEntry;
+
+/*
+ * Per-backend entry for lock statistics, stored in a dshash keyed by
+ * ProcNumber.
+ */
+typedef struct PgStatShared_LockBackendEntry
+{
+	PgStatShared_PerBackendEntry header;
+	PgStat_Lock stats;
+} PgStatShared_LockBackendEntry;
+
+/*
+ * Per-backend entry for WAL statistics, stored in a dshash keyed by
+ * ProcNumber.
+ */
+typedef struct PgStatShared_WalBackendEntry
+{
+	PgStatShared_PerBackendEntry header;
+	PgStat_WalStats stats;
+} PgStatShared_WalBackendEntry;
+
 typedef struct PgStatShared_Wal
 {
-	/* lock protects ->stats */
 	LWLock		lock;
 	PgStat_WalStats stats;
+
+	/*
+	 * Per-backend dshash, keyed by ProcNumber.
+	 */
+	dshash_table_handle backend_hash_handle;
 } PgStatShared_Wal;
 
 
@@ -531,12 +600,6 @@ typedef struct PgStatShared_ReplSlot
 	PgStatShared_Common header;
 	PgStat_StatReplSlotEntry stats;
 } PgStatShared_ReplSlot;
-
-typedef struct PgStatShared_Backend
-{
-	PgStatShared_Common header;
-	PgStat_Backend stats;
-} PgStatShared_Backend;
 
 /*
  * Central shared memory entry for the cumulative stats system.
@@ -623,6 +686,9 @@ typedef struct PgStat_Snapshot
 
 	PgStat_WalStats wal;
 
+	/* Per-backend snapshot hash */
+	struct pgstat_per_backend_snapshot_hash *per_backend_stats;
+
 	/*
 	 * Data in snapshot for custom fixed-numbered statistics, indexed by
 	 * (PgStat_Kind - PGSTAT_KIND_CUSTOM_MIN).  Each entry is allocated in
@@ -696,6 +762,17 @@ extern PgStat_EntryRef *pgstat_fetch_pending_entry(PgStat_Kind kind,
 extern void *pgstat_fetch_entry(PgStat_Kind kind, Oid dboid, uint64 objid,
 								bool *may_free);
 extern void pgstat_snapshot_fixed(PgStat_Kind kind);
+extern void pgstat_maybe_clear_snapshot(void);
+
+/* Generic per-backend helpers */
+extern void pgstat_create_my_per_backend_entries(void);
+extern dshash_table *pgstat_per_backend_attach(PgStat_Kind kind);
+extern void *pgstat_lock_my_per_backend_entry(PgStat_Kind kind, bool nowait);
+extern void pgstat_per_backend_snapshot(PgStat_Kind kind, dshash_table *hash,
+										void *snap);
+extern void *pgstat_fetch_per_backend(PgStat_Kind kind, ProcNumber procnum);
+extern void pgstat_acc_my_per_backend(PgStat_Kind kind, LWLock *lock);
+extern void pgstat_acc_all_per_backend(PgStat_Kind kind, LWLock *lock);
 
 
 /*
@@ -705,21 +782,6 @@ extern void pgstat_snapshot_fixed(PgStat_Kind kind);
 extern void pgstat_archiver_init_shmem_cb(void *stats);
 extern void pgstat_archiver_reset_all_cb(TimestampTz ts);
 extern void pgstat_archiver_snapshot_cb(void);
-
-/*
- * Functions in pgstat_backend.c
- */
-
-/* flags for pgstat_flush_backend() */
-#define PGSTAT_BACKEND_FLUSH_IO		(1 << 0)	/* Flush I/O statistics */
-#define PGSTAT_BACKEND_FLUSH_WAL   (1 << 1) /* Flush WAL statistics */
-#define PGSTAT_BACKEND_FLUSH_LOCK  (1 << 2) /* Flush lock statistics */
-#define PGSTAT_BACKEND_FLUSH_ALL   (PGSTAT_BACKEND_FLUSH_IO | PGSTAT_BACKEND_FLUSH_WAL | PGSTAT_BACKEND_FLUSH_LOCK)
-
-extern bool pgstat_flush_backend(bool nowait, uint32 flags);
-extern bool pgstat_backend_flush_cb(bool nowait);
-extern void pgstat_backend_reset_timestamp_cb(PgStatShared_Common *header,
-											  TimestampTz ts);
 
 /*
  * Functions in pgstat_bgwriter.c
@@ -771,6 +833,9 @@ extern bool pgstat_io_flush_cb(bool nowait);
 extern void pgstat_io_init_shmem_cb(void *stats);
 extern void pgstat_io_reset_all_cb(TimestampTz ts);
 extern void pgstat_io_snapshot_cb(void);
+extern void pgstat_io_acc_backend_cb(void);
+extern void pgstat_io_acc_all_backends(void);
+extern void pgstat_io_per_backend_acc_cb(void *dst, void *entry);
 
 /*
  * Functions in pgstat_lock.c
@@ -780,6 +845,9 @@ extern bool pgstat_lock_flush_cb(bool nowait);
 extern void pgstat_lock_init_shmem_cb(void *stats);
 extern void pgstat_lock_reset_all_cb(TimestampTz ts);
 extern void pgstat_lock_snapshot_cb(void);
+extern void pgstat_lock_acc_backend_cb(void);
+extern void pgstat_lock_acc_all_backends(void);
+extern void pgstat_lock_per_backend_acc_cb(void *dst, void *entry);
 
 /*
  * Functions in pgstat_relation.c
@@ -862,6 +930,9 @@ extern bool pgstat_wal_flush_cb(bool nowait);
 extern void pgstat_wal_init_shmem_cb(void *stats);
 extern void pgstat_wal_reset_all_cb(TimestampTz ts);
 extern void pgstat_wal_snapshot_cb(void);
+extern void pgstat_wal_acc_backend_cb(void);
+extern void pgstat_wal_acc_all_backends(void);
+extern void pgstat_wal_per_backend_acc_cb(void *dst, void *entry);
 
 
 /*

@@ -1671,32 +1671,47 @@ Datum
 pg_stat_get_backend_io(PG_FUNCTION_ARGS)
 {
 	ReturnSetInfo *rsinfo;
-	BackendType bktype;
 	int			pid;
-	PgStat_Backend *backend_stats;
-	PgStat_BktypeIO *bktype_stats;
+	PGPROC	   *proc;
+	ProcNumber	procnum;
+	PgBackendStatus *beentry;
+	BackendType bktype;
+	PgStat_BackendIO *backend_io;
 
 	InitMaterializedSRF(fcinfo, 0);
 	rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 
 	pid = PG_GETARG_INT32(0);
-	backend_stats = pgstat_fetch_stat_backend_by_pid(pid, &bktype);
 
-	if (!backend_stats)
+	proc = BackendPidGetProc(pid);
+
+	if (!proc)
+		proc = AuxiliaryPidGetProc(pid);
+	if (!proc)
 		return (Datum) 0;
 
-	bktype_stats = &backend_stats->io_stats;
+	procnum = GetNumberFromPGProc(proc);
+	beentry = pgstat_get_beentry_by_proc_number(procnum);
+
+	if (!beentry || beentry->st_procpid != pid)
+		return (Datum) 0;
+
+	bktype = beentry->st_backendType;
+	backend_io = pgstat_fetch_stat_backend_io(procnum);
+
+	if (!backend_io)
+		return (Datum) 0;
 
 	/*
 	 * In Assert builds, we can afford an extra loop through all of the
 	 * counters (in pg_stat_io_build_tuples()), checking that only expected
 	 * stats are non-zero, since it keeps the non-Assert code cleaner.
 	 */
-	Assert(pgstat_bktype_io_stats_valid(bktype_stats, bktype));
+	Assert(pgstat_bktype_io_stats_valid(&backend_io->stats, bktype));
 
-	/* save tuples with data from this PgStat_BktypeIO */
-	pg_stat_io_build_tuples(rsinfo, bktype_stats, bktype,
-							backend_stats->stat_reset_timestamp);
+	pg_stat_io_build_tuples(rsinfo, &backend_io->stats, bktype,
+							backend_io->stat_reset_timestamp);
+
 	return (Datum) 0;
 }
 
@@ -1769,19 +1784,33 @@ Datum
 pg_stat_get_backend_wal(PG_FUNCTION_ARGS)
 {
 	int			pid;
-	PgStat_Backend *backend_stats;
-	PgStat_WalCounters bktype_stats;
+	PGPROC	   *proc;
+	ProcNumber	procnum;
+	PgBackendStatus *beentry;
+	PgStat_WalStats *wal_stats;
 
 	pid = PG_GETARG_INT32(0);
-	backend_stats = pgstat_fetch_stat_backend_by_pid(pid, NULL);
 
-	if (!backend_stats)
+	proc = BackendPidGetProc(pid);
+
+	if (!proc)
+		proc = AuxiliaryPidGetProc(pid);
+	if (!proc)
 		PG_RETURN_NULL();
 
-	bktype_stats = backend_stats->wal_counters;
+	procnum = GetNumberFromPGProc(proc);
+	beentry = pgstat_get_beentry_by_proc_number(procnum);
 
-	/* save tuples with data from this PgStat_WalCounters */
-	return (pg_stat_wal_build_tuple(bktype_stats, backend_stats->stat_reset_timestamp));
+	if (!beentry || beentry->st_procpid != pid)
+		PG_RETURN_NULL();
+
+	wal_stats = pgstat_fetch_stat_backend_wal(procnum);
+
+	if (!wal_stats)
+		PG_RETURN_NULL();
+
+	return (pg_stat_wal_build_tuple(wal_stats->wal_counters,
+									wal_stats->stat_reset_timestamp));
 }
 
 /*
@@ -1858,19 +1887,36 @@ pg_stat_get_backend_lock(PG_FUNCTION_ARGS)
 {
 	int			pid;
 	ReturnSetInfo *rsinfo;
-	PgStat_Backend *backend_stats;
+	PGPROC	   *proc;
+	ProcNumber	procnum;
+	PgBackendStatus *beentry;
+	PgStat_Lock *lock_stats;
 
 	InitMaterializedSRF(fcinfo, 0);
 	rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 
 	pid = PG_GETARG_INT32(0);
-	backend_stats = pgstat_fetch_stat_backend_by_pid(pid, NULL);
 
-	if (!backend_stats)
+	proc = BackendPidGetProc(pid);
+
+	if (!proc)
+		proc = AuxiliaryPidGetProc(pid);
+	if (!proc)
 		return (Datum) 0;
 
-	pg_stat_lock_build_tuples(rsinfo, backend_stats->lock_stats.stats,
-							  backend_stats->stat_reset_timestamp);
+	procnum = GetNumberFromPGProc(proc);
+	beentry = pgstat_get_beentry_by_proc_number(procnum);
+
+	if (!beentry || beentry->st_procpid != pid)
+		return (Datum) 0;
+
+	lock_stats = pgstat_fetch_stat_backend_lock(procnum);
+
+	if (!lock_stats)
+		return (Datum) 0;
+
+	pg_stat_lock_build_tuples(rsinfo, lock_stats->stats,
+							  lock_stats->stat_reset_timestamp);
 
 	return (Datum) 0;
 }
@@ -2175,6 +2221,7 @@ pg_stat_reset_backend_stats(PG_FUNCTION_ARGS)
 	PGPROC	   *proc;
 	PgBackendStatus *beentry;
 	ProcNumber	procNumber;
+	TimestampTz ts;
 	int			backend_pid = PG_GETARG_INT32(0);
 
 	proc = BackendPidGetProc(backend_pid);
@@ -2192,11 +2239,14 @@ pg_stat_reset_backend_stats(PG_FUNCTION_ARGS)
 	if (!beentry)
 		PG_RETURN_VOID();
 
-	/* Check if the backend type tracks statistics */
-	if (!pgstat_tracks_backend_bktype(beentry->st_backendType))
-		PG_RETURN_VOID();
-
-	pgstat_reset(PGSTAT_KIND_BACKEND, InvalidOid, procNumber);
+	/*
+	 * Accumulate the backend's WAL, lock and IO stats into the global stats,
+	 * then zero the entries.
+	 */
+	ts = GetCurrentTimestamp();
+	pgstat_wal_reset_backend_cb(procNumber, ts);
+	pgstat_lock_reset_backend_cb(procNumber, ts);
+	pgstat_io_reset_backend_cb(procNumber, ts);
 
 	PG_RETURN_VOID();
 }

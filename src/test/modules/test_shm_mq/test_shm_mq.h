@@ -21,6 +21,10 @@
 /* Identifier for shared memory segments used by this extension. */
 #define		PG_TEST_SHM_MQ_MAGIC		0x79fb2447
 
+/* Special message used to test statistics from a shmem-only worker. */
+#define PG_TEST_SHM_MQ_STATS_MESSAGE	"test_shm_mq worker stats"
+#define PG_TEST_SHM_MQ_STATS_RECORDS	1000000
+
 /*
  * This structure is stored in the dynamic shared memory segment.  We use
  * it to determine whether all workers started up OK and successfully
