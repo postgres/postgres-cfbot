@@ -72,6 +72,102 @@ static LLVMValueRef create_LifetimeEnd(LLVMModuleRef mod);
 					   lengthof(((LLVMValueRef[]){__VA_ARGS__})), \
 					   ((LLVMValueRef[]){__VA_ARGS__}))
 
+static bool
+llvm_try_inline_function_call(LLVMBuilderRef b, FunctionCallInfo fcinfo, LLVMValueRef v_resvaluep, LLVMValueRef v_resnullp)
+{
+	LLVMValueRef v_fcinfo, v_retval;
+	v_fcinfo = l_ptr_const(fcinfo, l_ptr(StructFunctionCallInfoData));
+	if (fcinfo->flinfo->fn_addr == &int4eq) {
+		/* load arg 1 */
+		LLVMValueRef arg0_ptr = l_funcvaluep(b, v_fcinfo, 0);
+		LLVMValueRef arg0 = LLVMBuildLoad2(b, LLVMInt64Type(), arg0_ptr, "arg0_64");
+		LLVMValueRef arg0_truncated = LLVMBuildTrunc(b, arg0, LLVMInt32Type(), "arg0_32");
+		/* load arg 2 */
+		LLVMValueRef arg1_ptr = l_funcvaluep(b, v_fcinfo, 1);
+		LLVMValueRef arg1 = LLVMBuildLoad2(b, LLVMInt64Type(), arg1_ptr, "arg1_64");
+		LLVMValueRef arg1_truncated = LLVMBuildTrunc(b, arg1, LLVMInt32Type(), "arg1_32");
+		/* compare and convert result */
+		LLVMValueRef cmp = LLVMBuildICmp(b, LLVMIntEQ, arg0_truncated, arg1_truncated, "int_eq");
+		v_retval = LLVMBuildZExt(b, cmp, LLVMInt64Type(), "int_eq_ext");
+		LLVMBuildStore(b, v_retval, v_resvaluep);
+		LLVMBuildStore(b, l_sbool_const(0), v_resnullp);
+		return true;
+	} else if (fcinfo->flinfo->fn_addr == &int8eq) {
+		/* load arg 0 */
+		LLVMValueRef arg0_ptr = l_funcvaluep(b, v_fcinfo, 0);
+		LLVMValueRef arg0 = LLVMBuildLoad2(b, LLVMInt64Type(), arg0_ptr, "arg0_64");
+		/* load arg 1 */
+		LLVMValueRef arg1_ptr = l_funcvaluep(b, v_fcinfo, 1);
+		LLVMValueRef arg1 = LLVMBuildLoad2(b, LLVMInt64Type(), arg1_ptr, "arg1_64");
+		/* compare and convert result */
+		LLVMValueRef cmp = LLVMBuildICmp(b, LLVMIntEQ, arg0, arg1, "int_eq");
+		v_retval = LLVMBuildZExt(b, cmp, LLVMInt64Type(), "int_eq_ext");
+		LLVMBuildStore(b, v_retval, v_resvaluep);
+		LLVMBuildStore(b, l_sbool_const(0), v_resnullp);
+		return true;
+	} else if (fcinfo->flinfo->fn_addr == &date_lt) {
+		/* load arg 1 */
+		LLVMValueRef arg0_ptr = l_funcvaluep(b, v_fcinfo, 0);
+		LLVMValueRef arg0 = LLVMBuildLoad2(b, LLVMInt64Type(), arg0_ptr, "arg0_64");
+		LLVMValueRef arg0_truncated = LLVMBuildTrunc(b, arg0, LLVMInt32Type(), "arg0_32");
+		/* load arg 2 */
+		LLVMValueRef arg1_ptr = l_funcvaluep(b, v_fcinfo, 1);
+		LLVMValueRef arg1 = LLVMBuildLoad2(b, LLVMInt64Type(), arg1_ptr, "arg1_64");
+		LLVMValueRef arg1_truncated = LLVMBuildTrunc(b, arg1, LLVMInt32Type(), "arg1_32");
+		/* compare and convert result */
+		LLVMValueRef cmp = LLVMBuildICmp(b, LLVMIntSLT, arg0_truncated, arg1_truncated, "date_lt");
+		v_retval = LLVMBuildZExt(b, cmp, LLVMInt64Type(), "int_eq_ext");
+		LLVMBuildStore(b, v_retval, v_resvaluep);
+		LLVMBuildStore(b, l_sbool_const(0), v_resnullp);
+		return true;
+	} else if (fcinfo->flinfo->fn_addr == &date_gt) {
+		/* load arg 1 */
+		LLVMValueRef arg0_ptr = l_funcvaluep(b, v_fcinfo, 0);
+		LLVMValueRef arg0 = LLVMBuildLoad2(b, LLVMInt64Type(), arg0_ptr, "arg0_64");
+		LLVMValueRef arg0_truncated = LLVMBuildTrunc(b, arg0, LLVMInt32Type(), "arg0_32");
+		/* load arg 2 */
+		LLVMValueRef arg1_ptr = l_funcvaluep(b, v_fcinfo, 1);
+		LLVMValueRef arg1 = LLVMBuildLoad2(b, LLVMInt64Type(), arg1_ptr, "arg1_64");
+		LLVMValueRef arg1_truncated = LLVMBuildTrunc(b, arg1, LLVMInt32Type(), "arg1_32");
+		/* compare and convert result */
+		LLVMValueRef cmp = LLVMBuildICmp(b, LLVMIntSGT, arg0_truncated, arg1_truncated, "date_gt");
+		v_retval = LLVMBuildZExt(b, cmp, LLVMInt64Type(), "int_eq_ext");
+		LLVMBuildStore(b, v_retval, v_resvaluep);
+		LLVMBuildStore(b, l_sbool_const(0), v_resnullp);
+		return true;
+	} else if (fcinfo->flinfo->fn_addr == &date_le) {
+		/* load arg 1 */
+		LLVMValueRef arg0_ptr = l_funcvaluep(b, v_fcinfo, 0);
+		LLVMValueRef arg0 = LLVMBuildLoad2(b, LLVMInt64Type(), arg0_ptr, "arg0_64");
+		LLVMValueRef arg0_truncated = LLVMBuildTrunc(b, arg0, LLVMInt32Type(), "arg0_32");
+		/* load arg 2 */
+		LLVMValueRef arg1_ptr = l_funcvaluep(b, v_fcinfo, 1);
+		LLVMValueRef arg1 = LLVMBuildLoad2(b, LLVMInt64Type(), arg1_ptr, "arg1_64");
+		LLVMValueRef arg1_truncated = LLVMBuildTrunc(b, arg1, LLVMInt32Type(), "arg1_32");
+		/* compare and convert result */
+		LLVMValueRef cmp = LLVMBuildICmp(b, LLVMIntSLE, arg0_truncated, arg1_truncated, "date_le");
+		v_retval = LLVMBuildZExt(b, cmp, LLVMInt64Type(), "int_eq_ext");
+		LLVMBuildStore(b, v_retval, v_resvaluep);
+		LLVMBuildStore(b, l_sbool_const(0), v_resnullp);
+		return true;
+	} else if (fcinfo->flinfo->fn_addr == &date_ge) {
+		/* load arg 1 */
+		LLVMValueRef arg0_ptr = l_funcvaluep(b, v_fcinfo, 0);
+		LLVMValueRef arg0 = LLVMBuildLoad2(b, LLVMInt64Type(), arg0_ptr, "arg0_64");
+		LLVMValueRef arg0_truncated = LLVMBuildTrunc(b, arg0, LLVMInt32Type(), "arg0_32");
+		/* load arg 2 */
+		LLVMValueRef arg1_ptr = l_funcvaluep(b, v_fcinfo, 1);
+		LLVMValueRef arg1 = LLVMBuildLoad2(b, LLVMInt64Type(), arg1_ptr, "arg1_64");
+		LLVMValueRef arg1_truncated = LLVMBuildTrunc(b, arg1, LLVMInt32Type(), "arg1_32");
+		/* compare and convert result */
+		LLVMValueRef cmp = LLVMBuildICmp(b, LLVMIntSGE, arg0_truncated, arg1_truncated, "date_ge");
+		v_retval = LLVMBuildZExt(b, cmp, LLVMInt64Type(), "int_eq_ext");
+		LLVMBuildStore(b, v_retval, v_resvaluep);
+		LLVMBuildStore(b, l_sbool_const(0), v_resnullp);
+		return true;
+	}
+	return false;
+}
 
 /*
  * JIT compile expression.
@@ -740,10 +836,13 @@ llvm_compile_expr(ExprState *state)
 						LLVMPositionBuilderAtEnd(b, b_nonull);
 					}
 
-					v_retval = BuildV1Call(context, b, mod, fcinfo,
-										   &v_fcinfo_isnull);
-					LLVMBuildStore(b, v_retval, v_resvaluep);
-					LLVMBuildStore(b, v_fcinfo_isnull, v_resnullp);
+					if (!llvm_try_inline_function_call(b, fcinfo, v_resvaluep, v_resnullp)) {
+						/* No inlining done, do the direct call instead */
+						v_retval = BuildV1Call(context, b, mod, fcinfo,
+											   &v_fcinfo_isnull);
+						LLVMBuildStore(b, v_retval, v_resvaluep);
+						LLVMBuildStore(b, v_fcinfo_isnull, v_resnullp);
+					}
 
 					LLVMBuildBr(b, opblocks[opno + 1]);
 					break;
