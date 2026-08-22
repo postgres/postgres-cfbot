@@ -35,6 +35,9 @@
  *
  *	We control all assignments of pg_database.oid because we want the directory
  *	names to match between the old and new cluster.
+ *
+ *	We control assignment of pg_subscription.oid because we want the oid to
+ *	match between the old and new cluster.
  */
 
 
@@ -216,13 +219,12 @@ main(int argc, char **argv)
 	 * as it only retains the dead tuples. It is created here for consistency.
 	 * Note that the new conflict detection slot uses the latest transaction
 	 * ID as xmin, so it cannot protect dead tuples that existed before the
-	 * upgrade. Additionally, commit timestamps and origin data are not
-	 * preserved during the upgrade. So, even after creating the slot, the
-	 * upgraded subscriber may be unable to detect conflicts or log relevant
-	 * commit timestamps and origins when applying changes from the publisher
-	 * occurred before the upgrade especially if those changes were not
-	 * replicated. It can only protect tuples that might be deleted after the
-	 * new cluster starts.
+	 * upgrade. Additionally, commit timestamps are not preserved during the
+	 * upgrade. So, even after creating the slot, the upgraded subscriber may
+	 * be unable to detect conflicts or log relevant commit timestamps and
+	 * origins when applying changes from the publisher occurred before the
+	 * upgrade especially if those changes were not replicated. It can only
+	 * protect tuples that might be deleted after the new cluster starts.
 	 */
 	if (migrate_logical_slots || old_cluster.sub_retain_dead_tuples)
 	{

@@ -286,7 +286,8 @@ typedef struct
 	char	  **tablespaces;	/* tablespace directories */
 	int			num_tablespaces;
 	const char *tablespace_suffix;	/* directory specification */
-	int			nsubs;			/* number of subscriptions */
+	int			nrepl_origins;	/* number of replication origins */
+	int			nrepl_origins_active;	/* number of replication origins that are active */
 	bool		sub_retain_dead_tuples; /* whether a subscription enables
 										 * retain_dead_tuples. */
 } ClusterInfo;
@@ -425,6 +426,7 @@ FileNameMap *gen_db_file_maps(DbInfo *old_db,
 void		get_db_rel_and_slot_infos(ClusterInfo *cluster);
 int			count_old_cluster_logical_slots(void);
 void		get_subscription_info(ClusterInfo *cluster);
+void		get_replication_origin_info(ClusterInfo *cluster);
 
 /* option.c */
 
