@@ -131,8 +131,9 @@ transformGraphTablePropertyRef(ParseState *pstate, ColumnRef *cref)
 			pgptup = SearchSysCache2(PROPGRAPHPROPNAME, ObjectIdGetDatum(gpstate->graphid), CStringGetDatum(propname));
 			if (!HeapTupleIsValid(pgptup))
 				ereport(ERROR,
-						errcode(ERRCODE_SYNTAX_ERROR),
-						errmsg("property \"%s\" does not exist", propname));
+						errcode(ERRCODE_UNDEFINED_OBJECT),
+						errmsg("property \"%s\" does not exist", propname),
+						parser_errposition(pstate, cref->location));
 			pgpform = (Form_pg_propgraph_property) GETSTRUCT(pgptup);
 
 			gpr->location = cref->location;
@@ -163,8 +164,9 @@ transformGraphTablePropertyRef(ParseState *pstate, ColumnRef *cref)
  * graph, an error is raised.
  */
 static Node *
-transformLabelExpr(GraphTableParseState *gpstate, Node *labelexpr)
+transformLabelExpr(ParseState *pstate, Node *labelexpr)
 {
+	GraphTableParseState *gpstate = pstate->p_graph_table_pstate;
 	Node	   *result;
 
 	if (labelexpr == NULL)
@@ -188,7 +190,8 @@ transformLabelExpr(GraphTableParseState *gpstate, Node *labelexpr)
 				if (!labelid)
 					ereport(ERROR,
 							errcode(ERRCODE_UNDEFINED_OBJECT),
-							errmsg("label \"%s\" does not exist in property graph \"%s\"", labelname, get_rel_name(gpstate->graphid)));
+							errmsg("label \"%s\" does not exist in property graph \"%s\"", labelname, get_rel_name(gpstate->graphid)),
+							parser_errposition(pstate, cref->location));
 
 				lref = makeNode(GraphLabelRef);
 				lref->labelid = labelid;
@@ -208,7 +211,7 @@ transformLabelExpr(GraphTableParseState *gpstate, Node *labelexpr)
 				{
 					Node	   *arg = (Node *) lfirst(lc);
 
-					arg = transformLabelExpr(gpstate, arg);
+					arg = transformLabelExpr(pstate, arg);
 					args = lappend(args, arg);
 				}
 
@@ -249,7 +252,7 @@ transformGraphElementPattern(ParseState *pstate, GraphElementPattern *gep)
 
 	gpstate->cur_gep = gep;
 
-	gep->labelexpr = transformLabelExpr(gpstate, gep->labelexpr);
+	gep->labelexpr = transformLabelExpr(pstate, gep->labelexpr);
 
 	gep->whereClause = transformExpr(pstate, gep->whereClause, EXPR_KIND_WHERE);
 
