@@ -562,6 +562,21 @@ typedef struct PgStat_WalStats
 } PgStat_WalStats;
 
 /* -------
+ * PgStat_AioCounters	AIO activity counters
+ * -------
+ */
+typedef struct PgStat_AioCounters
+{
+	PgStat_Counter started;
+	PgStat_Counter executed_sync;
+	PgStat_Counter executed_async;
+	PgStat_Counter completed_self;
+	PgStat_Counter completed_other;
+	PgStat_Counter handle_waits;
+	PgStat_Counter submitted;
+} PgStat_AioCounters;
+
+/* -------
  * PgStat_Backend		Backend statistics
  * -------
  */
@@ -571,6 +586,7 @@ typedef struct PgStat_Backend
 	PgStat_BktypeIO io_stats;
 	PgStat_WalCounters wal_counters;
 	PgStat_PendingLock lock_stats;
+	PgStat_AioCounters aio_counters;
 } PgStat_Backend;
 
 /* ---------
@@ -589,6 +605,8 @@ typedef struct PgStat_BackendPending
 	 * PGSTAT_KIND_LOCK.
 	 */
 	PgStat_PendingLock pending_lock;
+	/* Store the AIO statistics counters */
+	PgStat_AioCounters aio_counters;
 } PgStat_BackendPending;
 
 /*
@@ -644,6 +662,13 @@ extern void pgstat_count_backend_io_op(IOObject io_object,
 /* used by pgstat_lock.c for lock stats tracked in backends */
 extern void pgstat_count_backend_lock_waits(uint8 locktag_type, PgStat_Counter usecs);
 extern void pgstat_count_backend_lock_fastpath_exceeded(uint8 locktag_type);
+
+/* used by aio.c for AIO stats tracked in backends */
+extern void pgstat_count_backend_aio_start(bool synchronous);
+extern void pgstat_count_backend_aio_complete_self(void);
+extern void pgstat_count_backend_aio_complete_other(void);
+extern void pgstat_count_backend_aio_handle_wait(void);
+extern void pgstat_count_backend_aio_submitted(void);
 
 extern PgStat_Backend *pgstat_fetch_stat_backend(ProcNumber procNumber);
 extern PgStat_Backend *pgstat_fetch_stat_backend_by_pid(int pid,
