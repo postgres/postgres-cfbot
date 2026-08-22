@@ -173,6 +173,20 @@ AioShmemRequest(void *arg)
 }
 
 /*
+ * Wrapper around pgaio_method_ops->shmem_cleanup to satisfy the
+ * on_shmem_exit() callback signature.
+ */
+static void
+pgaio_shmem_cleanup(int code, Datum arg)
+{
+	/*
+	 * No null check needed here; AioShmemInit only registers this callback
+	 * when shmem_cleanup is non-null.
+	 */
+	pgaio_method_ops->shmem_cleanup();
+}
+
+/*
  * Initialize AIO shared memory during postmaster startup.
  */
 static void
@@ -225,6 +239,10 @@ AioShmemInit(void *arg)
 
 	if (pgaio_method_ops->shmem_callbacks.init_fn)
 		pgaio_method_ops->shmem_callbacks.init_fn(pgaio_method_ops->shmem_callbacks.opaque_arg);
+
+	/* Register callback to release any resources allocated above. */
+	if (pgaio_method_ops->shmem_cleanup)
+		on_shmem_exit(pgaio_shmem_cleanup, 0);
 }
 
 static void
