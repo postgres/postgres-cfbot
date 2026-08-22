@@ -1785,18 +1785,36 @@ insert into test_pg_wholerow_index values (2, 'addition', 0);
 drop index row_image_index;
 drop function row_image(test_pg_wholerow_index);
 drop table test_pg_wholerow_index;
--- Test of a partitioned index attach, when there are exclusion constraints.
-create table idx_excl_part (a int4range, b int4range) partition by list (a);
-create table idx_excl_part_1 (a int4range, b int4range);
-alter table only idx_excl_part attach partition idx_excl_part_1 for values in ('[0,1)'::int4range);
-alter table only idx_excl_part add constraint idxpart_id_data_excl exclude using gist (a with =, b with &&);
-alter table idx_excl_part_1 add constraint idxpart_1_id_data_excl exclude using gist (a with &&, b with &&);
--- This should be disallowed, because the constraints don't match.
-alter index idxpart_id_data_excl attach partition idxpart_1_id_data_excl;
-ERROR:  cannot attach index "idxpart_1_id_data_excl" as a partition of index "idxpart_id_data_excl"
-DETAIL:  The index definitions do not match.
--- but if we recreate the constraint differently, it's allowed:
-alter table idx_excl_part_1 drop constraint idxpart_1_id_data_excl;
-alter table idx_excl_part_1 add constraint idxpart_1_id_data_excl exclude using gist (a with =, b with &&);
-alter index idxpart_id_data_excl attach partition idxpart_1_id_data_excl;
--- leave these tables around, for pg_upgrade testing
+-- test creation of a predicate index with a whole-row expression
+DROP TABLE IF EXISTS test_pg_wholerow;
+NOTICE:  table "test_pg_wholerow" does not exist, skipping
+CREATE TABLE test_pg_wholerow(a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL, c text);
+CREATE UNIQUE INDEX test_pg_wholerow_pred_idx ON test_pg_wholerow(a) WHERE test_pg_wholerow IS NOT NULL;
+INSERT INTO test_pg_wholerow(a,c) SELECT NULL, NULL FROM generate_series(1, 1000);
+INSERT INTO test_pg_wholerow(a,c) SELECT 1, '1';
+ANALYZE test_pg_wholerow;
+SELECT relname,reltuples FROM pg_catalog.pg_class WHERE relname IN ('test_pg_wholerow', 'test_pg_wholerow_pred_idx') ORDER BY OID;
+          relname          | reltuples 
+---------------------------+-----------
+ test_pg_wholerow          |      1001
+ test_pg_wholerow_pred_idx |         1
+(2 rows)
+
+EXPLAIN (COSTS OFF) SELECT *   FROM test_pg_wholerow WHERE test_pg_wholerow IS NOT NULL;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Index Scan using test_pg_wholerow_pred_idx on test_pg_wholerow
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT a   FROM test_pg_wholerow WHERE test_pg_wholerow IS NOT NULL;
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Index Only Scan using test_pg_wholerow_pred_idx on test_pg_wholerow
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT a,b FROM test_pg_wholerow WHERE test_pg_wholerow IS NOT NULL;
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Index Only Scan using test_pg_wholerow_pred_idx on test_pg_wholerow
+(1 row)
+

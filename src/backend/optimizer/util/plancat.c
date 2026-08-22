@@ -431,24 +431,38 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 			 * properly reduced.
 			 */
 			info->indexprs = RelationGetIndexExpressions(indexRelation);
+			info->indexprsExpand = RelationGetIndexExpressionsExpand(indexRelation);
 			info->indpred = RelationGetIndexPredicate(indexRelation);
+			info->indpredExpand = RelationGetIndexPredicateExpand(indexRelation);
 			if (info->indexprs)
 			{
 				if (varno != 1)
+				{
 					ChangeVarNodes((Node *) info->indexprs, 1, varno, 0);
+					ChangeVarNodes((Node *) info->indexprsExpand, 1, varno, 0);
+				}
 
 				info->indexprs = (List *)
 					eval_const_expressions(root, (Node *) info->indexprs);
+				info->indexprsExpand = (List *)
+					eval_const_expressions(root, (Node *) info->indexprsExpand);
 			}
 			if (info->indpred)
 			{
 				if (varno != 1)
+				{
 					ChangeVarNodes((Node *) info->indpred, 1, varno, 0);
+					ChangeVarNodes((Node *) info->indpredExpand, 1, varno, 0);
+				}
 
 				info->indpred = (List *)
 					eval_const_expressions(root,
 										   (Node *) make_ands_explicit(info->indpred));
+				info->indpredExpand = (List *)
+					eval_const_expressions(root,
+										   (Node *) make_ands_explicit(info->indpredExpand));
 				info->indpred = make_ands_implicit((Expr *) info->indpred);
+				info->indpredExpand = make_ands_implicit((Expr *) info->indpredExpand);
 			}
 
 			/* Build targetlist using the completed indexprs data */
@@ -939,8 +953,8 @@ infer_arbiter_indexes(PlannerInfo *root)
 										   attno - FirstLowInvalidHeapAttributeNumber);
 				}
 
-				inferElems = RelationGetIndexExpressions(idxRel);
-				inferIndexExprs = RelationGetIndexPredicate(idxRel);
+				inferElems = RelationGetIndexExpressionsExpand(idxRel);
+				inferIndexExprs = RelationGetIndexPredicateExpand(idxRel);
 				break;
 			}
 		}
@@ -954,8 +968,8 @@ infer_arbiter_indexes(PlannerInfo *root)
 	{
 		Form_pg_index idxForm;
 		Bitmapset  *indexedAttrs;
-		List	   *idxExprs;
-		List	   *predExprs;
+		List	   *idxExpandExprs;
+		List	   *predExpandExprs;
 		AttrNumber	natt;
 		bool		match;
 
@@ -1070,13 +1084,13 @@ infer_arbiter_indexes(PlannerInfo *root)
 			continue;
 
 		/* Expression attributes (if any) must match */
-		idxExprs = RelationGetIndexExpressions(idxRel);
-		if (idxExprs)
+		idxExpandExprs = RelationGetIndexExpressionsExpand(idxRel);
+		if (idxExpandExprs)
 		{
 			if (varno != 1)
-				ChangeVarNodes((Node *) idxExprs, 1, varno, 0);
+				ChangeVarNodes((Node *) idxExpandExprs, 1, varno, 0);
 
-			idxExprs = (List *) eval_const_expressions(root, (Node *) idxExprs);
+			idxExpandExprs = (List *) eval_const_expressions(root, (Node *) idxExpandExprs);
 		}
 
 		/*
@@ -1093,7 +1107,7 @@ infer_arbiter_indexes(PlannerInfo *root)
 			 * this for both expressions and ordinary (non-expression)
 			 * attributes appearing as inference elements.
 			 */
-			if (!infer_collation_opclass_match(elem, idxRel, idxExprs))
+			if (!infer_collation_opclass_match(elem, idxRel, idxExpandExprs))
 			{
 				match = false;
 				break;
@@ -1115,7 +1129,7 @@ infer_arbiter_indexes(PlannerInfo *root)
 			 */
 			if (elem->infercollid != InvalidOid ||
 				elem->inferopclass != InvalidOid ||
-				list_member(idxExprs, elem->expr))
+				list_member(idxExpandExprs, elem->expr))
 				continue;
 
 			match = false;
@@ -1134,19 +1148,19 @@ infer_arbiter_indexes(PlannerInfo *root)
 		 * In case a constraint was named, ensure the candidate has an equal
 		 * set of expressions as the named constraint's index.
 		 */
-		if (list_difference(idxExprs, inferElems) != NIL)
+		if (list_difference(idxExpandExprs, inferElems) != NIL)
 			continue;
 
-		predExprs = RelationGetIndexPredicate(idxRel);
-		if (predExprs)
+		predExpandExprs = RelationGetIndexPredicateExpand(idxRel);
+		if (predExpandExprs)
 		{
 			if (varno != 1)
-				ChangeVarNodes((Node *) predExprs, 1, varno, 0);
+				ChangeVarNodes((Node *) predExpandExprs, 1, varno, 0);
 
-			predExprs = (List *)
+			predExpandExprs = (List *)
 				eval_const_expressions(root,
-									   (Node *) make_ands_explicit(predExprs));
-			predExprs = make_ands_implicit((Expr *) predExprs);
+									   (Node *) make_ands_explicit(predExpandExprs));
+			predExpandExprs = make_ands_implicit((Expr *) predExpandExprs);
 		}
 
 		/*
@@ -1157,12 +1171,12 @@ infer_arbiter_indexes(PlannerInfo *root)
 		 */
 		if (OidIsValid(indexOidFromConstraint))
 		{
-			if (list_difference(predExprs, inferIndexExprs) != NIL)
+			if (list_difference(predExpandExprs, inferIndexExprs) != NIL)
 				continue;
 		}
 		else
 		{
-			if (!predicate_implied_by(predExprs, inferIndexExprs, false))
+			if (!predicate_implied_by(predExpandExprs, inferIndexExprs, false))
 				continue;
 		}
 

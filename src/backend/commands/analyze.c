@@ -898,7 +898,7 @@ compute_index_stats(Relation onerel, double totalrows,
 		TupleTableSlot *slot;
 		EState	   *estate;
 		ExprContext *econtext;
-		ExprState  *predicate;
+		ExprState  *predicateExpand;
 		Datum	   *exprvals;
 		bool	   *exprnulls;
 		int			numindexrows,
@@ -907,7 +907,7 @@ compute_index_stats(Relation onerel, double totalrows,
 		double		totalindexrows;
 
 		/* Ignore index if no columns to analyze and not partial */
-		if (attr_cnt == 0 && indexInfo->ii_Predicate == NIL)
+		if (attr_cnt == 0 && indexInfo->ii_PredicateExpand == NIL)
 			continue;
 
 		/*
@@ -925,7 +925,7 @@ compute_index_stats(Relation onerel, double totalrows,
 		econtext->ecxt_scantuple = slot;
 
 		/* Set up execution state for predicate. */
-		predicate = ExecPrepareQual(indexInfo->ii_Predicate, estate);
+		predicateExpand = ExecPrepareQual(indexInfo->ii_PredicateExpand, estate);
 
 		/* Compute and save index expression values */
 		exprvals = palloc_array(Datum, numrows * attr_cnt);
@@ -948,9 +948,9 @@ compute_index_stats(Relation onerel, double totalrows,
 			ExecStoreHeapTuple(heapTuple, slot, false);
 
 			/* If index is partial, check predicate */
-			if (predicate != NULL)
+			if (predicateExpand != NULL)
 			{
-				if (!ExecQual(predicate, econtext))
+				if (!ExecQual(predicateExpand, econtext))
 					continue;
 			}
 			numindexrows++;

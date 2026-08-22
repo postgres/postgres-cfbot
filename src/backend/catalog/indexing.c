@@ -133,7 +133,9 @@ CatalogIndexInsert(CatalogIndexState indstate, HeapTuple heapTuple,
 		 * supported, nor exclusion constraints, nor deferred uniqueness
 		 */
 		Assert(indexInfo->ii_Expressions == NIL);
+		Assert(indexInfo->ii_ExpressionsExpand == NIL);
 		Assert(indexInfo->ii_Predicate == NIL);
+		Assert(indexInfo->ii_PredicateExpand == NIL);
 		Assert(indexInfo->ii_ExclusionOps == NULL);
 		Assert(index->rd_index->indimmediate);
 		Assert(indexInfo->ii_NumIndexKeyAttrs != 0);

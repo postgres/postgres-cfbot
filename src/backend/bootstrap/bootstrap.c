@@ -1156,11 +1156,17 @@ index_register(Oid heap,
 	/* expressions will likely be null, but may as well copy it */
 	newind->il_info->ii_Expressions =
 		copyObject(indexInfo->ii_Expressions);
+	newind->il_info->ii_ExpressionsExpand =
+		copyObject(indexInfo->ii_ExpressionsExpand);
 	newind->il_info->ii_ExpressionsState = NIL;
+	newind->il_info->ii_ExpressionsExpandState = NIL;
 	/* predicate will likely be null, but may as well copy it */
 	newind->il_info->ii_Predicate =
 		copyObject(indexInfo->ii_Predicate);
+	newind->il_info->ii_PredicateExpand =
+		copyObject(indexInfo->ii_PredicateExpand);
 	newind->il_info->ii_PredicateState = NULL;
+	newind->il_info->ii_PredicateExpandState = NULL;
 	/* no exclusion constraints at bootstrap time, so no need to copy */
 	Assert(indexInfo->ii_ExclusionOps == NULL);
 	Assert(indexInfo->ii_ExclusionProcs == NULL);

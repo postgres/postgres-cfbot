@@ -1153,7 +1153,7 @@ heapam_index_build_range_scan(Relation heapRelation,
 	Datum		values[INDEX_MAX_KEYS];
 	bool		isnull[INDEX_MAX_KEYS];
 	double		reltuples;
-	ExprState  *predicate;
+	ExprState  *predicateExpand;
 	TupleTableSlot *slot;
 	EState	   *estate;
 	ExprContext *econtext;
@@ -1194,7 +1194,7 @@ heapam_index_build_range_scan(Relation heapRelation,
 	econtext->ecxt_scantuple = slot;
 
 	/* Set up execution state for predicate, if any. */
-	predicate = ExecPrepareQual(indexInfo->ii_Predicate, estate);
+	predicateExpand = ExecPrepareQual(indexInfo->ii_PredicateExpand, estate);
 
 	/*
 	 * Prepare for scan of the base relation.  In a normal index build, we use
@@ -1601,9 +1601,9 @@ heapam_index_build_range_scan(Relation heapRelation,
 		 * In a partial index, discard tuples that don't satisfy the
 		 * predicate.
 		 */
-		if (predicate != NULL)
+		if (predicateExpand != NULL)
 		{
-			if (!ExecQual(predicate, econtext))
+			if (!ExecQual(predicateExpand, econtext))
 				continue;
 		}
 
@@ -1703,7 +1703,9 @@ heapam_index_build_range_scan(Relation heapRelation,
 
 	/* These may have been pointing to the now-gone estate */
 	indexInfo->ii_ExpressionsState = NIL;
+	indexInfo->ii_ExpressionsExpandState = NIL;
 	indexInfo->ii_PredicateState = NULL;
+	indexInfo->ii_PredicateExpandState = NULL;
 
 	return reltuples;
 }
@@ -1720,7 +1722,7 @@ heapam_index_validate_scan(Relation heapRelation,
 	HeapTuple	heapTuple;
 	Datum		values[INDEX_MAX_KEYS];
 	bool		isnull[INDEX_MAX_KEYS];
-	ExprState  *predicate;
+	ExprState  *predicateExpand;
 	TupleTableSlot *slot;
 	EState	   *estate;
 	ExprContext *econtext;
@@ -1752,7 +1754,7 @@ heapam_index_validate_scan(Relation heapRelation,
 	econtext->ecxt_scantuple = slot;
 
 	/* Set up execution state for predicate, if any. */
-	predicate = ExecPrepareQual(indexInfo->ii_Predicate, estate);
+	predicateExpand = ExecPrepareQual(indexInfo->ii_PredicateExpand, estate);
 
 	/*
 	 * Prepare for scan of the base relation.  We need just those tuples
@@ -1889,9 +1891,9 @@ heapam_index_validate_scan(Relation heapRelation,
 			 * In a partial index, discard tuples that don't satisfy the
 			 * predicate.
 			 */
-			if (predicate != NULL)
+			if (predicateExpand != NULL)
 			{
-				if (!ExecQual(predicate, econtext))
+				if (!ExecQual(predicateExpand, econtext))
 					continue;
 			}
 
@@ -1946,7 +1948,9 @@ heapam_index_validate_scan(Relation heapRelation,
 
 	/* These may have been pointing to the now-gone estate */
 	indexInfo->ii_ExpressionsState = NIL;
+	indexInfo->ii_ExpressionsExpandState = NIL;
 	indexInfo->ii_PredicateState = NULL;
+	indexInfo->ii_PredicateExpandState = NULL;
 }
 
 /*
