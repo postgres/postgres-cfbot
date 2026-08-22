@@ -1174,6 +1174,7 @@ GraphElementPatternKind
 GraphLabelRef
 GraphPattern
 GraphPropertyRef
+GraphTableElementVariable
 GraphTableParseState
 Group
 GroupByColInfo
