@@ -47,6 +47,77 @@ when the wait time might exceed a few seconds.
 The rest of this README file discusses the regular lock manager in detail.
 
 
+Atomic Operations
+=================
+
+PostgreSQL's atomic operations (see src/include/port/atomics.h) can be
+implemented using either C11 stdatomic.h or traditional platform-specific
+code. The implementation is selected at build time via the USE_STDATOMIC_H
+preprocessor definition:
+
+* C11 stdatomic.h implementation (USE_STDATOMIC_H defined):
+  Uses the standard C11 <stdatomic.h> header for all atomic operations.
+  This provides better portability and potentially better compiler
+  optimizations. Available on:
+  - MSVC 2022+ (requires /experimental:c11atomics flag)
+  - GCC 4.9+ and Clang 3.1+ (no special flags needed)
+
+* Traditional implementation (USE_STDATOMIC_H not defined):
+  Uses platform-specific implementations that have been battle-tested
+  in PostgreSQL for many years:
+  - Architecture-specific: arch-x86.h, arch-arm.h, arch-ppc.h
+  - Compiler intrinsics: generic-gcc.h, generic-msvc.h
+  - Fallback implementations: generic.h, fallback.h
+
+Both implementations provide the same public API and observable semantics.
+The choice is made at build configuration time:
+
+  meson setup build -Duse_stdatomic=auto  # Auto-detect (default)
+  meson setup build -Duse_stdatomic=yes   # Force stdatomic.h
+  meson setup build -Duse_stdatomic=no    # Force traditional
+
+The two implementations differ internally in several ways that do not affect
+the public API:
+
+* Memory ordering.  pg_atomic_read_u32/u64() use seq_cst ordering under
+  stdatomic.h; pg_atomic_write_u32/u64() use relaxed.  The seq_cst read was
+  required for correctness on weak-memory hardware (e.g. RISC-V), where the
+  weaker relaxed and acquire orderings let a concurrent reader miss a tuple
+  in a parallel hash join.  The write stays relaxed: a plain atomic store
+  matches the traditional "no barrier" contract for pg_atomic_write and, on
+  ARM64, avoids the store-release (STLR) serialization that would penalize
+  contended writes to hot shared state.  The pg_atomic_unlocked_write_*
+  variant also uses relaxed ordering, consistent with its "no guarantees"
+  contract.  On x86 (TSO) a seq_cst load is still a plain mov, so there is no
+  added cost;
+  on ARM/RISC-V it adds fence instructions on these paths.
+
+* Barriers.  Each barrier pairs a compiler barrier (atomic_signal_fence) with
+  the thread fence (atomic_thread_fence), because a bare thread fence orders
+  only atomic accesses and would let the compiler reorder plain loads/stores
+  across it, whereas PostgreSQL's barrier contract must order non-atomic
+  accesses too.  This matches the traditional generic-gcc.h barriers.
+
+* Spinlock flag polarity.  The stdatomic.h pg_atomic_flag uses 1=unlocked,
+  0=locked (fetch_and-based test-and-set), the inverse of the traditional
+  0=unlocked, 1=locked (exchange-based).  This is an internal detail with no
+  external visibility beyond raw values seen in a debugger.
+
+* Binary compatibility.  The atomic types are _Atomic(...) under stdatomic.h
+  and volatile-struct under the traditional path.  The two are not binary
+  compatible, so objects and shared memory cannot be mixed between builds;
+  the implementation is fixed at build time, so this is not a concern in
+  practice.
+
+* Platform reach.  Under stdatomic.h, 64-bit atomics are available on 32-bit
+  ARM (compiler/runtime may emulate them with locks), atomics are usable from
+  frontend programs, and the headers are C++-compatible.  The traditional
+  path disables 64-bit atomics on ARM32 and is backend-only.
+
+For more information on memory barriers and atomic operations, see
+src/backend/storage/lmgr/README.barrier.
+
+
 Lock Data Structures
 --------------------
 

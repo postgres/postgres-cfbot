@@ -759,6 +759,7 @@ LLVM_LIBS
 CLANG
 LLVM_CONFIG
 AWK
+with_stdatomic
 with_llvm
 have_cxx
 ac_ct_CXX
@@ -857,6 +858,7 @@ with_segsize
 with_segsize_blocks
 with_wal_blocksize
 with_llvm
+with_stdatomic
 enable_depend
 enable_cassert
 with_icu
@@ -1576,6 +1578,8 @@ Optional Packages:
   --with-wal-blocksize=BLOCKSIZE
                           set WAL block size in kB [8]
   --with-llvm             build with LLVM based JIT support
+  --with-stdatomic[=yes/no/auto]
+                          use C11 stdatomic.h for atomic operations [auto]
   --without-icu           build without ICU support
   --with-tcl              build Tcl modules (PL/Tcl)
   --with-tclconfig=DIR    tclConfig.sh is in DIR
@@ -4915,6 +4919,26 @@ else
 
 fi
 
+
+
+
+#
+# C11 stdatomic.h
+#
+# Accepts --with-stdatomic={yes,no,auto}.  "auto" (the default) uses
+# stdatomic.h if a compile test succeeds; "yes" requires it; "no" forces the
+# traditional platform-specific atomics.  The actual detection runs later,
+# after the compiler and 64-bit integer handling have been configured.
+
+# Check whether --with-stdatomic was given.
+if test "${with_stdatomic+set}" = set; then :
+  withval=$with_stdatomic; case $withval in
+               yes | no | auto) ;;
+               *) as_fn_error $? "invalid argument to --with-stdatomic; use yes, no, or auto" "$LINENO" 5 ;;
+             esac
+else
+  with_stdatomic=no
+fi
 
 
 for ac_prog in gawk mawk nawk awk
@@ -17685,6 +17709,91 @@ if test x"$pgac_cv_gcc_atomic_int64_cas" = x"yes"; then
 
 $as_echo "#define HAVE_GCC__ATOMIC_INT64_CAS 1" >>confdefs.h
 
+fi
+
+
+# Decide whether to use C11 stdatomic.h (see --with-stdatomic above).  The
+# probe mirrors the one used by the meson build: it must compile 32-bit
+# fetch_add, a seq_cst thread fence, and a 64-bit compare-exchange.
+if test "$with_stdatomic" != no; then
+  # Use a link test, not a compile test: 64-bit atomic_compare_exchange_strong()
+  # can lower to a libatomic call (__atomic_compare_exchange_8) on some 32-bit
+  # or weakly-aligned targets.  A compile-only check would pass there and then
+  # fail at final link.  Retry with -latomic if the bare link fails.
+  { $as_echo "$as_me:${as_lineno-$LINENO}: checking for working C11 stdatomic.h" >&5
+$as_echo_n "checking for working C11 stdatomic.h... " >&6; }
+if ${pgac_cv_stdatomic+:} false; then :
+  $as_echo_n "(cached) " >&6
+else
+  pgac_cv_stdatomic=no
+   cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+#include <stdatomic.h>
+int
+main ()
+{
+_Atomic int x = 0;
+      atomic_fetch_add(&x, 1);
+      atomic_thread_fence(memory_order_seq_cst);
+      _Atomic(unsigned long long) y = 0;
+      unsigned long long expected = 0;
+      atomic_compare_exchange_strong(&y, &expected, 42);
+
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_link "$LINENO"; then :
+  pgac_cv_stdatomic=yes
+else
+  pgac_save_LIBS=$LIBS
+     LIBS="$LIBS -latomic"
+     cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+#include <stdatomic.h>
+int
+main ()
+{
+_Atomic int x = 0;
+        atomic_fetch_add(&x, 1);
+        atomic_thread_fence(memory_order_seq_cst);
+        _Atomic(unsigned long long) y = 0;
+        unsigned long long expected = 0;
+        atomic_compare_exchange_strong(&y, &expected, 42);
+
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_link "$LINENO"; then :
+  pgac_cv_stdatomic='yes, with -latomic'
+else
+  pgac_cv_stdatomic=no
+fi
+rm -f core conftest.err conftest.$ac_objext \
+    conftest$ac_exeext conftest.$ac_ext
+     LIBS=$pgac_save_LIBS
+fi
+rm -f core conftest.err conftest.$ac_objext \
+    conftest$ac_exeext conftest.$ac_ext
+fi
+{ $as_echo "$as_me:${as_lineno-$LINENO}: result: $pgac_cv_stdatomic" >&5
+$as_echo "$pgac_cv_stdatomic" >&6; }
+else
+  pgac_cv_stdatomic=no
+fi
+
+if test "$with_stdatomic" = yes && test "$pgac_cv_stdatomic" = no; then
+  as_fn_error $? "--with-stdatomic=yes was given, but a working C11 stdatomic.h could not be found" "$LINENO" 5
+fi
+
+if test "$pgac_cv_stdatomic" != no; then
+
+$as_echo "#define USE_STDATOMIC_H 1" >>confdefs.h
+
+  if test "$pgac_cv_stdatomic" = 'yes, with -latomic'; then
+    LIBS="$LIBS -latomic"
+  fi
 fi
 
 
