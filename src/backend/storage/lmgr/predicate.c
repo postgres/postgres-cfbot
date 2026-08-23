@@ -169,6 +169,7 @@
 #include "storage/shmem.h"
 #include "storage/subsystems.h"
 #include "utils/guc_hooks.h"
+#include "utils/injection_point.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 #include "utils/wait_event.h"
@@ -1689,6 +1690,13 @@ GetSerializableTransactionSnapshotInt(Snapshot snapshot,
 	 */
 #ifdef TEST_SUMMARIZE_SERIAL
 	SummarizeOldestCommittedSxact();
+#endif
+#ifdef USE_INJECTION_POINTS
+	if (IS_INJECTION_POINT_ATTACHED("serializable-summarize"))
+	{
+		INJECTION_POINT("serializable-summarize", NULL);
+		SummarizeOldestCommittedSxact();
+	}
 #endif
 	LWLockAcquire(SerializableXactHashLock, LW_EXCLUSIVE);
 	do
