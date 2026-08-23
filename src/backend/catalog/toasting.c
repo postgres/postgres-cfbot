@@ -202,7 +202,7 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 			 "pg_toast_%u_index", relOid);
 
 	/* this is pretty painful...  need a tuple descriptor */
-	tupdesc = CreateTemplateTupleDesc(3);
+	tupdesc = CreateTemplateTupleDesc(5);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 1,
 					   "chunk_id",
 					   OIDOID,
@@ -215,6 +215,14 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 					   "chunk_data",
 					   BYTEAOID,
 					   -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 4,
+					   "chunk_tids",
+					   TIDARRAYOID,
+					   -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 5,
+					   "chunk_tid_offsets",
+					   INT8ARRAYOID,
+					   -1, 0);
 
 	/*
 	 * Ensure that the toast table doesn't itself get toasted, or we'll be
@@ -224,15 +232,21 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 	TupleDescAttr(tupdesc, 0)->attstorage = TYPSTORAGE_PLAIN;
 	TupleDescAttr(tupdesc, 1)->attstorage = TYPSTORAGE_PLAIN;
 	TupleDescAttr(tupdesc, 2)->attstorage = TYPSTORAGE_PLAIN;
+	TupleDescAttr(tupdesc, 3)->attstorage = TYPSTORAGE_PLAIN;
+	TupleDescAttr(tupdesc, 4)->attstorage = TYPSTORAGE_PLAIN;
 
 	/* Toast field should not be compressed */
 	TupleDescAttr(tupdesc, 0)->attcompression = InvalidCompressionMethod;
 	TupleDescAttr(tupdesc, 1)->attcompression = InvalidCompressionMethod;
 	TupleDescAttr(tupdesc, 2)->attcompression = InvalidCompressionMethod;
+	TupleDescAttr(tupdesc, 3)->attcompression = InvalidCompressionMethod;
+	TupleDescAttr(tupdesc, 4)->attcompression = InvalidCompressionMethod;
 
 	populate_compact_attribute(tupdesc, 0);
 	populate_compact_attribute(tupdesc, 1);
 	populate_compact_attribute(tupdesc, 2);
+	populate_compact_attribute(tupdesc, 3);
+	populate_compact_attribute(tupdesc, 4);
 
 	TupleDescFinalize(tupdesc);
 
@@ -299,7 +313,15 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 	indexInfo->ii_IndexAttrNumbers[1] = 2;
 	indexInfo->ii_Expressions = NIL;
 	indexInfo->ii_ExpressionsState = NIL;
-	indexInfo->ii_Predicate = NIL;
+	{
+		NullTest   *ntest = makeNode(NullTest);
+
+		ntest->arg = (Expr *) makeVar(1, 1, OIDOID, -1, InvalidOid, 0);
+		ntest->nulltesttype = IS_NOT_NULL;
+		ntest->argisrow = false;
+		ntest->location = -1;
+		indexInfo->ii_Predicate = list_make1(ntest);
+	}
 	indexInfo->ii_PredicateState = NULL;
 	indexInfo->ii_ExclusionOps = NULL;
 	indexInfo->ii_ExclusionProcs = NULL;

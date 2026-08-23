@@ -341,6 +341,13 @@ typedef enum StdRdOptIndexCleanup
 	STDRD_OPTION_VACUUM_INDEX_CLEANUP_NOT_SET,
 } StdRdOptIndexCleanup;
 
+typedef enum ToastFlavour
+{
+	TOAST_FLAVOUR_NOT_SET = -1,
+	TOAST_FLAVOUR_PLAIN = 0,
+	TOAST_FLAVOUR_DIRECT = 1
+} ToastFlavour;
+
 typedef struct StdRdOptions
 {
 	int32		vl_len_;		/* varlena header (do not touch directly!) */
@@ -357,6 +364,7 @@ typedef struct StdRdOptions
 	 * to freeze. 0 if disabled, -1 if unspecified.
 	 */
 	double		vacuum_max_eager_freeze_failure_rate;
+	ToastFlavour toast_flavour;
 } StdRdOptions;
 
 #define HEAP_MIN_FILLFACTOR			10
