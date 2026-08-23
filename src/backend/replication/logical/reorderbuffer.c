@@ -110,6 +110,9 @@
 #include "storage/sinval.h"
 #include "utils/builtins.h"
 #include "utils/inval.h"
+#include "utils/array.h"
+#include "catalog/pg_type.h"
+#include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/relfilenumbermap.h"
@@ -174,10 +177,21 @@ typedef struct ReorderBufferIterTXNState
 	ReorderBufferIterTXNEntry entries[FLEXIBLE_ARRAY_MEMBER];
 } ReorderBufferIterTXNState;
 
+typedef struct ReorderBufferToastKey
+{
+	bool		is_direct;
+	union
+	{
+		Oid			chunk_id;
+		ItemPointerData tid;
+	}			u;
+} ReorderBufferToastKey;
+
 /* toast datastructures */
 typedef struct ReorderBufferToastEnt
 {
-	Oid			chunk_id;		/* toast_table.chunk_id */
+	ReorderBufferToastKey key;	/* toast_table.chunk_id or chunk TID */
+	Oid			chunk_id;		/* toast_table.chunk_id (kept for compatibility) */
 	int32		last_chunk_seq; /* toast_table.chunk_seq of the last chunk we
 								 * have seen */
 	Size		num_chunks;		/* number of chunks we've already seen */
@@ -5010,7 +5024,7 @@ ReorderBufferToastInitHash(ReorderBuffer *rb, ReorderBufferTXN *txn)
 
 	Assert(txn->toast_hash == NULL);
 
-	hash_ctl.keysize = sizeof(Oid);
+	hash_ctl.keysize = sizeof(ReorderBufferToastKey);
 	hash_ctl.entrysize = sizeof(ReorderBufferToastEnt);
 	hash_ctl.hcxt = rb->context;
 	txn->toast_hash = hash_create("ReorderBufferToastHash", 5, &hash_ctl,
@@ -5036,6 +5050,10 @@ ReorderBufferToastAppendChunk(ReorderBuffer *rb, ReorderBufferTXN *txn,
 	TupleDesc	desc = RelationGetDescr(relation);
 	Oid			chunk_id;
 	int32		chunk_seq;
+	ReorderBufferToastKey key;
+	bool		is_direct = false;
+	Datum		chunk_tids_datum;
+	bool		chunk_tids_isnull = true;
 
 	if (txn->toast_hash == NULL)
 		ReorderBufferToastInitHash(rb, txn);
@@ -5044,46 +5062,139 @@ ReorderBufferToastAppendChunk(ReorderBuffer *rb, ReorderBufferTXN *txn,
 
 	newtup = change->data.tp.newtuple;
 	chunk_id = DatumGetObjectId(fastgetattr(newtup, 1, desc, &isnull));
-	Assert(!isnull);
+	if (isnull)
+	{
+		is_direct = true;
+		memset(&key, 0, sizeof(key));
+		key.is_direct = true;
+		key.u.tid = newtup->t_self;
+		if (!ItemPointerIsValid(&key.u.tid))
+			elog(ERROR, "invalid TID for direct toast chunk");
+	}
+	else
+	{
+		memset(&key, 0, sizeof(key));
+		key.is_direct = false;
+		key.u.chunk_id = chunk_id;
+	}
+
 	chunk_seq = DatumGetInt32(fastgetattr(newtup, 2, desc, &isnull));
 	Assert(!isnull);
 
+	if (desc->natts >= 4)
+	{
+		chunk_tids_datum = fastgetattr(newtup, 4, desc, &chunk_tids_isnull);
+	}
+
 	ent = (ReorderBufferToastEnt *)
-		hash_search(txn->toast_hash, &chunk_id, HASH_ENTER, &found);
+		hash_search(txn->toast_hash, &key, HASH_ENTER, &found);
+
+	chunk = DatumGetPointer(fastgetattr(newtup, 3, desc, &isnull));
+	if (!isnull)
+	{
+		/* calculate size so we can allocate the right size at once later */
+		if (!VARATT_IS_EXTENDED(chunk))
+			chunksize = VARSIZE(chunk) - VARHDRSZ;
+		else if (VARATT_IS_SHORT(chunk))
+			/* could happen due to heap_form_tuple doing its thing */
+			chunksize = VARSIZE_SHORT(chunk) - VARHDRSZ_SHORT;
+		else
+			elog(ERROR, "unexpected type of toast chunk");
+	}
+	else
+	{
+		chunksize = 0;
+	}
 
 	if (!found)
 	{
-		Assert(ent->chunk_id == chunk_id);
+		ent->key = key;
+		ent->chunk_id = is_direct ? InvalidOid : chunk_id;
 		ent->num_chunks = 0;
 		ent->last_chunk_seq = 0;
 		ent->size = 0;
 		ent->reconstructed = NULL;
 		dlist_init(&ent->chunks);
 
-		if (chunk_seq != 0)
+		if (!is_direct && chunk_seq != 0)
 			elog(ERROR, "got sequence entry %d for toast chunk %u instead of seq 0",
 				 chunk_seq, chunk_id);
 	}
-	else if (found && chunk_seq != ent->last_chunk_seq + 1)
-		elog(ERROR, "got sequence entry %d for toast chunk %u instead of seq %d",
-			 chunk_seq, chunk_id, ent->last_chunk_seq + 1);
+	else if (found && !is_direct)
+	{
+		if (chunk_seq != ent->last_chunk_seq + 1)
+			elog(ERROR, "got sequence entry %d for toast chunk %u instead of seq %d",
+				 chunk_seq, chunk_id, ent->last_chunk_seq + 1);
+	}
+	else if (found && is_direct)
+	{
+		elog(ERROR, "duplicate TID in direct toast hash");
+	}
 
-	chunk = DatumGetPointer(fastgetattr(newtup, 3, desc, &isnull));
-	Assert(!isnull);
+	/* Group previous chunks if this is a node with chunk_tids */
+	if (is_direct && !chunk_tids_isnull)
+	{
+		ArrayType  *arr = DatumGetArrayTypeP(chunk_tids_datum);
+		Oid			eltype = ARR_ELEMTYPE(arr);
+		int16		typlen;
+		bool		typbyval;
+		char		typalign;
+		Datum	   *elems;
+		bool	   *nulls;
+		int			nelems;
+		int			i;
 
-	/* calculate size so we can allocate the right size at once later */
-	if (!VARATT_IS_EXTENDED(chunk))
-		chunksize = VARSIZE(chunk) - VARHDRSZ;
-	else if (VARATT_IS_SHORT(chunk))
-		/* could happen due to heap_form_tuple doing its thing */
-		chunksize = VARSIZE_SHORT(chunk) - VARHDRSZ_SHORT;
-	else
-		elog(ERROR, "unexpected type of toast chunk");
+		Assert(eltype == TIDOID);
+		get_typlenbyvalalign(eltype, &typlen, &typbyval, &typalign);
+		deconstruct_array(arr, eltype, typlen, typbyval, typalign,
+						  &elems, &nulls, &nelems);
 
-	ent->size += chunksize;
+		for (i = 0; i < nelems; i++)
+		{
+			ItemPointer tid = DatumGetItemPointer(elems[i]);
+			ReorderBufferToastKey prev_key;
+			ReorderBufferToastEnt *ent_prev;
+			dlist_mutable_iter miter;
+
+			if (ItemPointerEquals(tid, &key.u.tid))
+				continue;
+
+			memset(&prev_key, 0, sizeof(prev_key));
+			prev_key.is_direct = true;
+			prev_key.u.tid = *tid;
+
+			ent_prev = (ReorderBufferToastEnt *)
+				hash_search(txn->toast_hash, &prev_key, HASH_FIND, NULL);
+
+			if (ent_prev == NULL)
+				elog(ERROR, "could not find previous direct toast chunk");
+
+			/* Move chunks to the current entry */
+			dlist_foreach_modify(miter, &ent_prev->chunks)
+			{
+				ReorderBufferChange *c = dlist_container(ReorderBufferChange, node, miter.cur);
+				dlist_delete(miter.cur);
+				dlist_push_tail(&ent->chunks, &c->node);
+			}
+
+			ent->size += ent_prev->size;
+			ent->num_chunks += ent_prev->num_chunks;
+
+			/* Remove from hash */
+			hash_search(txn->toast_hash, &prev_key, HASH_REMOVE, NULL);
+		}
+
+		pfree(elems);
+		pfree(nulls);
+	}
+
 	ent->last_chunk_seq = chunk_seq;
-	ent->num_chunks++;
-	dlist_push_tail(&ent->chunks, &change->node);
+	if (chunksize > 0)
+	{
+		ent->size += chunksize;
+		ent->num_chunks++;
+		dlist_push_tail(&ent->chunks, &change->node);
+	}
 }
 
 /*
@@ -5174,6 +5285,10 @@ ReorderBufferToastReplace(ReorderBuffer *rb, ReorderBufferTXN *txn,
 		varlena    *reconstructed;
 		dlist_iter	it;
 		Size		data_done = 0;
+		ReorderBufferToastKey key;
+		int32		rawsize;
+		uint32		extsize;
+		bool		is_compressed;
 
 		if (attr->attisdropped)
 			continue;
@@ -5193,14 +5308,33 @@ ReorderBufferToastReplace(ReorderBuffer *rb, ReorderBufferTXN *txn,
 		if (!VARATT_IS_EXTERNAL(varlena_pointer))
 			continue;
 
-		VARATT_EXTERNAL_GET_POINTER(toast_pointer, varlena_pointer);
+		memset(&key, 0, sizeof(key));
+		if (VARATT_IS_EXTERNAL_DIRECT(varlena_pointer))
+		{
+			varatt_direct toast_pointer_direct;
+			VARATT_EXTERNAL_GET_POINTER_DIRECT(toast_pointer_direct, varlena_pointer);
+			key.is_direct = true;
+			key.u.tid = toast_pointer_direct.va_tid;
+			rawsize = toast_pointer_direct.va_rawsize;
+			extsize = VARATT_DIRECT_GET_EXTSIZE(toast_pointer_direct);
+			is_compressed = VARATT_DIRECT_IS_COMPRESSED(toast_pointer_direct);
+		}
+		else
+		{
+			VARATT_EXTERNAL_GET_POINTER(toast_pointer, varlena_pointer);
+			key.is_direct = false;
+			key.u.chunk_id = toast_pointer.va_valueid;
+			rawsize = toast_pointer.va_rawsize;
+			extsize = VARATT_EXTERNAL_GET_EXTSIZE(toast_pointer);
+			is_compressed = VARATT_EXTERNAL_IS_COMPRESSED(toast_pointer);
+		}
 
 		/*
 		 * Check whether the toast tuple changed, replace if so.
 		 */
 		ent = (ReorderBufferToastEnt *)
 			hash_search(txn->toast_hash,
-						&toast_pointer.va_valueid,
+						&key,
 						HASH_FIND,
 						NULL);
 		if (ent == NULL)
@@ -5211,7 +5345,7 @@ ReorderBufferToastReplace(ReorderBuffer *rb, ReorderBufferTXN *txn,
 
 		free[natt] = true;
 
-		reconstructed = palloc0(toast_pointer.va_rawsize);
+		reconstructed = palloc0(rawsize);
 
 		ent->reconstructed = reconstructed;
 
@@ -5236,10 +5370,10 @@ ReorderBufferToastReplace(ReorderBuffer *rb, ReorderBufferTXN *txn,
 				   VARSIZE(chunk) - VARHDRSZ);
 			data_done += VARSIZE(chunk) - VARHDRSZ;
 		}
-		Assert(data_done == VARATT_EXTERNAL_GET_EXTSIZE(toast_pointer));
+		Assert(data_done == extsize);
 
 		/* make sure its marked as compressed or not */
-		if (VARATT_EXTERNAL_IS_COMPRESSED(toast_pointer))
+		if (is_compressed)
 			SET_VARSIZE_COMPRESSED(reconstructed, data_done + VARHDRSZ);
 		else
 			SET_VARSIZE(reconstructed, data_done + VARHDRSZ);

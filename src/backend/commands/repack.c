@@ -621,6 +621,26 @@ cluster_rel(RepackCommand cmd, Relation OldHeap, Oid indexOid,
 		goto out;
 	}
 
+	if (OldHeap->rd_rel->relkind == RELKIND_TOASTVALUE)
+	{
+		/*
+		 * If this TOAST table supports Direct TOAST (has chunk_tids column),
+		 * disallow VACUUM FULL, CLUSTER, or REPACK directly on the TOAST
+		 * table. Rebuilding the TOAST table independently would invalidate the
+		 * physical TIDs stored in the parent relation's tuples.
+		 */
+		if (OldHeap->rd_att->natts >= 4 &&
+			strcmp(NameStr(TupleDescAttr(OldHeap->rd_att, 3)->attname), "chunk_tids") == 0)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot %s direct TOAST table directly",
+							RepackCommandAsString(cmd)),
+					 errhint("Execute %s on the parent table instead.",
+							 RepackCommandAsString(cmd))));
+		}
+	}
+
 	Assert(OldHeap->rd_rel->relkind == RELKIND_RELATION ||
 		   OldHeap->rd_rel->relkind == RELKIND_MATVIEW ||
 		   OldHeap->rd_rel->relkind == RELKIND_TOASTVALUE);
@@ -2874,7 +2894,7 @@ adjust_toast_pointers(Relation relation, TupleTableSlot *dest, TupleTableSlot *s
 		slot_getsomeattrs(dest, i + 1);
 
 		varlena_dst = (varlena *) DatumGetPointer(dest->tts_values[i]);
-		if (!VARATT_IS_EXTERNAL_ONDISK(varlena_dst))
+		if (!VARATT_IS_EXTERNAL_ONDISK(varlena_dst) && !VARATT_IS_EXTERNAL_DIRECT(varlena_dst))
 			continue;
 		slot_getsomeattrs(src, i + 1);
 
