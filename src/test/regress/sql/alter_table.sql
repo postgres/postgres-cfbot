@@ -2058,6 +2058,46 @@ CREATE TYPE test_type_empty AS ();
 DROP TYPE test_type_empty;
 
 --
+-- Cached plans for queries that scan a set-returning function returning a
+-- named composite type must be invalidated when ALTER TYPE ADD ATTRIBUTE
+-- widens that type.  The fix records the composite's underlying relation OID
+-- (pg_type.typrelid) in the plan's list of referenced relations
+-- (glob->relationOids, checked by PlanCacheRelCallback) so the relcache
+-- invalidation broadcast by ALTER TYPE reaches the cached plan.
+--
+-- Without the fix the plan is never marked stale.  A PL/pgSQL function whose
+-- RETURN QUERY calls such an SRF raises "structure of query does not match
+-- function result type" because its SPI plan still expects the old column
+-- count while the SRF (independently replanned via table relcache) already
+-- returns the new one.
+--
+-- SECURITY DEFINER prevents inlining; without inlining the outer plan tracks
+-- only the proc OID (in glob->invalItems, checked by PlanCacheObjectCallback),
+-- so only the typrelid relation dependency added by the fix triggers its
+-- invalidation.
+--
+CREATE TYPE planinv_ct AS (a int, b int);
+CREATE TABLE planinv_tbl (a int, b int);
+INSERT INTO planinv_tbl VALUES (1, 2);
+CREATE FUNCTION planinv_srf() RETURNS SETOF planinv_ct
+  LANGUAGE sql STABLE SECURITY DEFINER AS $$ SELECT * FROM planinv_tbl $$;
+CREATE FUNCTION planinv_caller() RETURNS SETOF planinv_ct LANGUAGE plpgsql AS $$
+BEGIN
+  RETURN QUERY SELECT r.* FROM planinv_srf() r;
+END; $$;
+-- Warm up the plan cache.
+SELECT * FROM planinv_caller();
+ALTER TYPE planinv_ct ADD ATTRIBUTE c int;
+ALTER TABLE planinv_tbl ADD COLUMN c int DEFAULT 99;
+-- Without the fix: ERROR: structure of query does not match function result type
+-- With the fix: the plan is invalidated and the function returns all columns.
+SELECT * FROM planinv_caller();
+DROP FUNCTION planinv_caller();
+DROP FUNCTION planinv_srf();
+DROP TABLE planinv_tbl;
+DROP TYPE planinv_ct;
+
+--
 -- typed tables: OF / NOT OF
 --
 
