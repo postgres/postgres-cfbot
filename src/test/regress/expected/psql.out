@@ -5191,14 +5191,16 @@ drop role regress_partitioning_role;
 -- \d on toast table (use pg_statistic's toast table, which has a known name)
 \d pg_toast.pg_toast_2619
 TOAST table "pg_toast.pg_toast_2619"
-   Column   |  Type   
-------------+---------
- chunk_id   | oid
- chunk_seq  | integer
- chunk_data | bytea
+      Column       |   Type   
+-------------------+----------
+ chunk_id          | oid
+ chunk_seq         | integer
+ chunk_data        | bytea
+ chunk_tids        | tid[]
+ chunk_tid_offsets | bigint[]
 Owning table: "pg_catalog.pg_statistic"
 Indexes:
-    "pg_toast_2619_index" PRIMARY KEY, btree (chunk_id, chunk_seq)
+    "pg_toast_2619_index" PRIMARY KEY, btree (chunk_id, chunk_seq) WHERE chunk_id IS NOT NULL
 
 -- check printing info about access methods
 \dA

@@ -71,10 +71,11 @@ toast_tuple_init(ToastTupleContext *ttc)
 			 * we have to delete it later.
 			 */
 			if (att->attlen == -1 && !ttc->ttc_oldisnull[i] &&
-				VARATT_IS_EXTERNAL_ONDISK(old_value))
+				(VARATT_IS_EXTERNAL_ONDISK(old_value) || VARATT_IS_EXTERNAL_DIRECT(old_value)))
 			{
 				if (ttc->ttc_isnull[i] ||
-					!VARATT_IS_EXTERNAL_ONDISK(new_value) ||
+					!(VARATT_IS_EXTERNAL_ONDISK(new_value) || VARATT_IS_EXTERNAL_DIRECT(new_value)) ||
+					VARTAG_EXTERNAL(old_value) != VARTAG_EXTERNAL(new_value) ||
 					memcmp(old_value, new_value,
 						   VARSIZE_EXTERNAL(old_value)) != 0)
 				{
@@ -330,7 +331,7 @@ toast_delete_external(Relation rel, const Datum *values, const bool *isnull,
 
 			if (isnull[i])
 				continue;
-			else if (VARATT_IS_EXTERNAL_ONDISK(DatumGetPointer(value)))
+			else if (VARATT_IS_EXTERNAL_ONDISK(DatumGetPointer(value)) || VARATT_IS_EXTERNAL_DIRECT(DatumGetPointer(value)))
 				toast_delete_datum(rel, value, is_speculative);
 		}
 	}
