@@ -272,7 +272,7 @@ repack_store_change(LogicalDecodingContext *ctx, Relation relation,
 				 * We get here if the table has external values but only
 				 * in-line values are being updated now.
 				 */
-				Assert(VARATT_IS_EXTERNAL_ONDISK(varlen));
+				Assert(VARATT_IS_EXTERNAL_ONDISK(varlen) || VARATT_IS_EXTERNAL_DIRECT(varlen));
 			}
 		}
 

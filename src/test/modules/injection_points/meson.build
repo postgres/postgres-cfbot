@@ -38,6 +38,7 @@ injection_points_isolation = [
   'repack_temporal',
   'repack_temporal_multirange',
   'repack_toast',
+  'repack_direct_toast',
   'ri_fastpath_reindex',
   'ri_fastpath_snapshot',
   'syscache-update-pruned',
