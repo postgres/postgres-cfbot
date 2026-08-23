@@ -115,9 +115,6 @@ CATALOG(pg_class,1259,RelationRelationId) BKI_BOOTSTRAP BKI_ROWTYPE_OID(83,Relat
 	/* row security forced for owners or not */
 	bool		relforcerowsecurity BKI_DEFAULT(f);
 
-	/* matview currently holds query results */
-	bool		relispopulated BKI_DEFAULT(t);
-
 	/* see REPLICA_IDENTITY_xxx constants */
 	char		relreplident BKI_DEFAULT(n);
 
@@ -132,6 +129,15 @@ CATALOG(pg_class,1259,RelationRelationId) BKI_BOOTSTRAP BKI_ROWTYPE_OID(83,Relat
 
 	/* all multixacts in this rel are >= this; it is really a MultiXactId */
 	TransactionId relminmxid BKI_DEFAULT(1);	/* FirstMultiXactId */
+
+	/*
+	 * Populated epoch.  0 (RELPOPULATED_NONE): no data.  1
+	 * (RELPOPULATED_ETERNAL): crash-safe populated, used for every relation
+	 * except unlogged matviews.  Any other value is an epoch stamp for a
+	 * populated unlogged matview, valid only while the cluster stays in that
+	 * epoch.  See MatViewPopulatedValueIsValid().
+	 */
+	int64		relpopulated BKI_DEFAULT(1);
 
 #ifdef CATALOG_VARLEN			/* variable-length fields start here */
 	/* NOTE: These fields are not present in a relcache entry's rd_rel field. */
@@ -150,7 +156,7 @@ END_CATALOG_STRUCT
 
 /* Size of fixed part of pg_class tuples, not counting var-length fields */
 #define CLASS_TUPLE_SIZE \
-	 (offsetof(FormData_pg_class,relminmxid) + sizeof(TransactionId))
+	 (offsetof(FormData_pg_class,relpopulated) + sizeof(int64))
 
 /* ----------------
  *		Form_pg_class corresponds to a pointer to a tuple with
@@ -179,6 +185,10 @@ MAKE_SYSCACHE(RELNAMENSP, pg_class_relname_nsp_index, 128);
 #define		  RELKIND_PARTITIONED_TABLE 'p' /* partitioned table */
 #define		  RELKIND_PARTITIONED_INDEX 'I' /* partitioned index */
 #define		  RELKIND_PROPGRAPH		  'g'	/* property graph */
+
+/* Reserved values of pg_class.relpopulated; any other value is an epoch. */
+#define		  RELPOPULATED_NONE		  0 /* not populated */
+#define		  RELPOPULATED_ETERNAL	  1 /* populated, storage is crash-safe */
 
 #define		  RELPERSISTENCE_PERMANENT	'p' /* regular table */
 #define		  RELPERSISTENCE_UNLOGGED	'u' /* unlogged permanent table */

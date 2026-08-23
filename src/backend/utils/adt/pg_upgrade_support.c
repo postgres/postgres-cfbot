@@ -19,6 +19,7 @@
 #include "catalog/pg_subscription_rel.h"
 #include "catalog/pg_type.h"
 #include "commands/extension.h"
+#include "commands/matview.h"
 #include "miscadmin.h"
 #include "replication/logical.h"
 #include "replication/logicallauncher.h"
@@ -29,6 +30,7 @@
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/pg_lsn.h"
+#include "utils/rel.h"
 
 
 #define CHECK_IS_BINARY_UPGRADE									\
@@ -178,6 +180,24 @@ binary_upgrade_set_next_pg_authid_oid(PG_FUNCTION_ARGS)
 
 	CHECK_IS_BINARY_UPGRADE;
 	binary_upgrade_next_pg_authid_oid = authoid;
+	PG_RETURN_VOID();
+}
+
+Datum
+binary_upgrade_set_matview_populated(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	Relation	rel;
+
+	CHECK_IS_BINARY_UPGRADE;
+
+	rel = relation_open(relid, AccessExclusiveLock);
+	if (rel->rd_rel->relkind != RELKIND_MATVIEW)
+		elog(ERROR, "relation \"%s\" is not a materialized view",
+			 RelationGetRelationName(rel));
+	SetMatViewPopulatedState(rel, true);
+	relation_close(rel, NoLock);
+
 	PG_RETURN_VOID();
 }
 

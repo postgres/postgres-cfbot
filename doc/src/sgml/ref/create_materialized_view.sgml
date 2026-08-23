@@ -60,6 +60,32 @@ CREATE MATERIALIZED VIEW [ IF NOT EXISTS ] <replaceable>table_name</replaceable>
   <title>Parameters</title>
 
   <variablelist>
+   <varlistentry id="sql-creatematerializedview-unlogged">
+    <term><literal>UNLOGGED</literal></term>
+    <listitem>
+     <para>
+      If specified, the materialized view is created as an unlogged
+      materialized view.  Data written to an unlogged materialized view is
+      not written to the write-ahead log (see <xref linkend="wal"/>), which
+      makes populating it, whether by <command>CREATE MATERIALIZED
+      VIEW</command> or by a later <command>REFRESH MATERIALIZED
+      VIEW</command>, considerably faster.  However, an unlogged materialized
+      view is not crash-safe: its contents are discarded after a crash or
+      unclean shutdown, at which point the materialized view reverts to the
+      unpopulated state and must be rebuilt with <command>REFRESH
+      MATERIALIZED VIEW</command> before it can be queried again, the same as
+      a materialized view created with <literal>WITH NO DATA</literal> (see
+      below).  Unlike an unlogged table, which reads as empty after a crash,
+      an unlogged materialized view instead reports that it has not been
+      populated.  Contents are preserved across a normal shutdown and
+      restart.  The contents of an unlogged materialized view are also not
+      replicated to standby servers, so on a standby such a materialized view
+      always reports itself as unpopulated, even immediately after the
+      primary refreshes it.
+     </para>
+    </listitem>
+   </varlistentry>
+
    <varlistentry>
     <term><literal>IF NOT EXISTS</literal></term>
     <listitem>
