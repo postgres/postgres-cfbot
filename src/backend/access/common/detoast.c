@@ -22,10 +22,15 @@
 #include "utils/expandeddatum.h"
 #include "utils/rel.h"
 
-static varlena *toast_fetch_datum(varlena *attr);
 static varlena *toast_fetch_datum_slice(varlena *attr,
 										int32 sliceoffset,
 										int32 slicelength);
+static inline varlena *
+toast_fetch_datum(varlena *attr)
+{
+	return toast_fetch_datum_slice(attr, 0, -1);
+}
+
 static varlena *toast_decompress_datum(varlena *attr);
 static varlena *toast_decompress_datum_slice(varlena *attr, int32 slicelength);
 
@@ -332,54 +337,6 @@ detoast_attr_slice(varlena *attr,
 	return result;
 }
 
-/* ----------
- * toast_fetch_datum -
- *
- *	Reconstruct an in memory Datum from the chunks saved
- *	in the toast relation
- * ----------
- */
-static varlena *
-toast_fetch_datum(varlena *attr)
-{
-	Relation	toastrel;
-	varlena    *result;
-	varatt_external toast_pointer;
-	int32		attrsize;
-
-	if (!VARATT_IS_EXTERNAL_ONDISK(attr))
-		elog(ERROR, "toast_fetch_datum shouldn't be called for non-ondisk datums");
-
-	/* Must copy to access aligned fields */
-	VARATT_EXTERNAL_GET_POINTER(toast_pointer, attr);
-
-	attrsize = VARATT_EXTERNAL_GET_EXTSIZE(toast_pointer);
-
-	result = (varlena *) palloc(attrsize + VARHDRSZ);
-
-	if (VARATT_EXTERNAL_IS_COMPRESSED(toast_pointer))
-		SET_VARSIZE_COMPRESSED(result, attrsize + VARHDRSZ);
-	else
-		SET_VARSIZE(result, attrsize + VARHDRSZ);
-
-	if (attrsize == 0)
-		return result;			/* Probably shouldn't happen, but just in
-								 * case. */
-
-	/*
-	 * Open the toast relation and its indexes
-	 */
-	toastrel = table_open(toast_pointer.va_toastrelid, AccessShareLock);
-
-	/* Fetch all chunks */
-	table_relation_fetch_toast_slice(toastrel, toast_pointer.va_valueid,
-									 attrsize, 0, attrsize, result);
-
-	/* Close toast table */
-	table_close(toastrel, AccessShareLock);
-
-	return result;
-}
 
 /* ----------
  * toast_fetch_datum_slice -
