@@ -138,6 +138,12 @@ SELECT * FROM verify_heapam('test_foreign_table',
 							startblock := NULL,
 							endblock := NULL);
 
+-- Check that Direct TOAST tables are verified without reporting false corruption
+CREATE TABLE direct_toast_check (id int, val text) WITH (toast_flavour = 'direct');
+INSERT INTO direct_toast_check SELECT i, string_agg(md5(i::text), '') FROM generate_series(1, 10) i GROUP BY i;
+SELECT * FROM verify_heapam('direct_toast_check', check_toast := true);
+DROP TABLE direct_toast_check;
+
 -- cleanup
 DROP TABLE heaptest;
 DROP TABLESPACE regress_test_stats_tblspc;
