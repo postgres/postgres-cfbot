@@ -10509,6 +10509,28 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-toast-default-flavour" xreflabel="toast_default_flavour">
+      <term><varname>toast_default_flavour</varname> (<type>enum</type>)
+      <indexterm>
+       <primary><varname>toast_default_flavour</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        This variable sets the default <acronym>TOAST</acronym> table format
+        to use when creating new <acronym>TOAST</acronym> tables. Supported
+        values are <literal>plain</literal> (the default, which creates a
+        3-column <acronym>TOAST</acronym> table with a non-partial primary key
+        index) and <literal>direct</literal> (which creates a 5-column Direct
+        <acronym>TOAST</acronym> table with a partial unique index).
+        Actual <command>INSERT</command> and <command>UPDATE</command>
+        operations use the table's <literal>toast_flavour</literal> storage
+        parameter in <command>CREATE TABLE</command> or
+        <command>ALTER TABLE</command>.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-temp-tablespaces" xreflabel="temp_tablespaces">
       <term><varname>temp_tablespaces</varname> (<type>string</type>)
       <indexterm>
