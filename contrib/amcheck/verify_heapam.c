@@ -12,6 +12,7 @@
 
 #include "access/detoast.h"
 #include "access/genam.h"
+#include "access/heapam.h"
 #include "access/heaptoast.h"
 #include "access/multixact.h"
 #include "access/relation.h"
@@ -28,6 +29,7 @@
 #include "storage/lwlock.h"
 #include "storage/procarray.h"
 #include "storage/read_stream.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/rel.h"
 #include "utils/tuplestore.h"
@@ -75,6 +77,8 @@ typedef enum SkipPages
  */
 typedef struct ToastedAttribute
 {
+	bool		is_direct;
+	struct varatt_direct toast_pointer_direct;
 	Oid8		va_valueid;		/* value ID (works for both Oid and Oid8) */
 	uint32		va_extinfo;		/* external size and compression method */
 	vartag_external tag;		/* VARTAG_ONDISK_OID or VARTAG_ONDISK_OID8 */
@@ -1752,7 +1756,8 @@ check_tuple_attribute(HeapCheckContext *ctx)
 	{
 		uint8		va_tag = VARTAG_EXTERNAL(tp + ctx->offset);
 
-		if (va_tag != VARTAG_ONDISK_OID && va_tag != VARTAG_ONDISK_OID8)
+		if (va_tag != VARTAG_ONDISK_OID && va_tag != VARTAG_ONDISK_OID8 &&
+			va_tag != VARTAG_DIRECT)
 		{
 			report_corruption(ctx,
 							  psprintf("toasted attribute has unexpected TOAST tag %u",
@@ -1795,6 +1800,84 @@ check_tuple_attribute(HeapCheckContext *ctx)
 		return true;
 
 	/* It is external, and we're looking at a page on disk */
+	if (VARATT_IS_EXTERNAL_DIRECT(attr))
+	{
+		struct varatt_direct toast_pointer;
+
+		VARATT_EXTERNAL_GET_POINTER_DIRECT(toast_pointer, attr);
+
+		/* Toasted attributes too large to be untoasted should never be stored */
+		if (toast_pointer.va_rawsize > VARLENA_SIZE_LIMIT)
+			report_corruption(ctx,
+							  psprintf("direct toast value rawsize %d exceeds limit %d",
+									   toast_pointer.va_rawsize,
+									   VARLENA_SIZE_LIMIT));
+
+		if (VARATT_DIRECT_IS_COMPRESSED(toast_pointer))
+		{
+			ToastCompressionId cmid;
+			bool		valid = false;
+
+			/* Compressed attributes should have a valid compression method */
+			cmid = VARATT_DIRECT_GET_COMPRESS_METHOD(toast_pointer);
+			switch (cmid)
+			{
+					/* List of all valid compression method IDs */
+				case TOAST_PGLZ_COMPRESSION_ID:
+				case TOAST_LZ4_COMPRESSION_ID:
+					valid = true;
+					break;
+
+					/* Recognized but invalid compression method ID */
+				case TOAST_INVALID_COMPRESSION_ID:
+					break;
+
+					/* Intentionally no default here */
+			}
+			if (!valid)
+				report_corruption(ctx,
+								  psprintf("direct toast value has invalid compression method id %d",
+										   cmid));
+		}
+
+		/* The tuple header better claim to contain toasted values */
+		if (!(infomask & HEAP_HASEXTERNAL))
+		{
+			report_corruption(ctx, "direct toast value is external but tuple header flag HEAP_HASEXTERNAL not set");
+			return true;
+		}
+
+		/* The relation better have a toast table */
+		if (!ctx->rel->rd_rel->reltoastrelid)
+		{
+			report_corruption(ctx, "direct toast value is external but relation has no toast relation");
+			return true;
+		}
+
+		/* If we were told to skip toast checking, then we're done. */
+		if (ctx->toast_rel == NULL)
+			return true;
+
+		/*
+		 * If this tuple is eligible to be pruned, we cannot check the toast.
+		 * Otherwise, we push a copy of the toast tuple so we can check it after
+		 * releasing the main table buffer lock.
+		 */
+		if (!ctx->tuple_could_be_pruned)
+		{
+			ToastedAttribute *ta;
+
+			ta = palloc0_object(ToastedAttribute);
+			ta->is_direct = true;
+			ta->toast_pointer_direct = toast_pointer;
+			ta->blkno = ctx->blkno;
+			ta->offnum = ctx->offnum;
+			ta->attnum = ctx->attnum;
+			ctx->toasted_attributes = lappend(ctx->toasted_attributes, ta);
+		}
+
+		return true;
+	}
 
 	/* Must copy attr into a decoded pointer for alignment considerations */
 	toast_external_info_get(attr, &toast_ext_data);
@@ -1870,7 +1953,7 @@ check_tuple_attribute(HeapCheckContext *ctx)
 		ToastedAttribute *ta;
 
 		ta = palloc0_object(ToastedAttribute);
-
+		ta->is_direct = false;
 		/* The pointer has already been decoded above, just reuse it */
 		ta->tag = va_tag_value;
 		ta->va_valueid = toast_pointer_valueid;
@@ -1882,6 +1965,215 @@ check_tuple_attribute(HeapCheckContext *ctx)
 	}
 
 	return true;
+}
+
+#ifndef DIRECT_TOAST_MAX_DEPTH
+#define DIRECT_TOAST_MAX_DEPTH	16
+#endif
+
+static void
+check_toasted_attribute_direct_recursive(HeapCheckContext *ctx, ToastedAttribute *ta,
+										 ItemPointer tid, uint32 *total_data_bytes,
+										 int depth)
+{
+	HeapTupleData tup;
+	Buffer		buffer = InvalidBuffer;
+	bool		isnull;
+	Datum		chunk_seq_datum;
+	Pointer		chunk;
+	int32		chunksize;
+	Datum		tids_datum;
+	Datum		offsets_datum = (Datum) 0;
+	bool		is_null_tids;
+	bool		is_null_offsets = true;
+
+	check_stack_depth();
+
+	if (depth >= DIRECT_TOAST_MAX_DEPTH)
+	{
+		report_toast_corruption(ctx, ta,
+								psprintf("direct toast chunk at TID (%u, %u) exceeds maximum tree depth %d",
+										 ItemPointerGetBlockNumber(tid),
+										 ItemPointerGetOffsetNumber(tid),
+										 DIRECT_TOAST_MAX_DEPTH));
+		return;
+	}
+
+	tup.t_self = *tid;
+	if (!heap_fetch(ctx->toast_rel, get_toast_snapshot(), &tup, &buffer, false))
+	{
+		report_toast_corruption(ctx, ta,
+								psprintf("direct toast chunk at TID (%u, %u) not found in toast table",
+										 ItemPointerGetBlockNumber(tid),
+										 ItemPointerGetOffsetNumber(tid)));
+		return;
+	}
+
+	/* Check chunk_id (attribute 1) is NULL */
+	(void) fastgetattr(&tup, 1, ctx->toast_rel->rd_att, &isnull);
+	if (!isnull)
+		report_toast_corruption(ctx, ta,
+								psprintf("direct toast chunk at TID (%u, %u) has non-null chunk_id",
+										 ItemPointerGetBlockNumber(tid),
+										 ItemPointerGetOffsetNumber(tid)));
+
+	/* Check chunk_seq (attribute 2) is non-null and >= 0 */
+	chunk_seq_datum = fastgetattr(&tup, 2, ctx->toast_rel->rd_att, &isnull);
+	if (isnull)
+		report_toast_corruption(ctx, ta,
+								psprintf("direct toast chunk at TID (%u, %u) has null sequence number",
+										 ItemPointerGetBlockNumber(tid),
+										 ItemPointerGetOffsetNumber(tid)));
+	else if (DatumGetInt32(chunk_seq_datum) < 0)
+		report_toast_corruption(ctx, ta,
+								psprintf("direct toast chunk at TID (%u, %u) has negative sequence number %d",
+										 ItemPointerGetBlockNumber(tid),
+										 ItemPointerGetOffsetNumber(tid),
+										 DatumGetInt32(chunk_seq_datum)));
+
+	/* Check chunk_data (attribute 3) */
+	chunk = DatumGetPointer(fastgetattr(&tup, 3, ctx->toast_rel->rd_att, &isnull));
+	if (!isnull)
+	{
+		if (!VARATT_IS_EXTENDED(chunk))
+			chunksize = VARSIZE(chunk) - VARHDRSZ;
+		else if (VARATT_IS_SHORT(chunk))
+			chunksize = VARSIZE_SHORT(chunk) - VARHDRSZ_SHORT;
+		else
+		{
+			uint32		header = ((varattrib_4b *) chunk)->va_4byte.va_header;
+
+			report_toast_corruption(ctx, ta,
+									psprintf("direct toast chunk at TID (%u, %u) has invalid varlena header %0x",
+											 ItemPointerGetBlockNumber(tid),
+											 ItemPointerGetOffsetNumber(tid),
+											 header));
+			ReleaseBuffer(buffer);
+			return;
+		}
+
+		if (chunksize > TOAST_MAX_CHUNK_SIZE(TupleDescAttr(ctx->toast_rel->rd_att, 0)->atttypid))
+			report_toast_corruption(ctx, ta,
+									psprintf("direct toast chunk at TID (%u, %u) has oversized chunk (%d bytes)",
+											 ItemPointerGetBlockNumber(tid),
+											 ItemPointerGetOffsetNumber(tid),
+											 chunksize));
+
+		*total_data_bytes += chunksize;
+	}
+
+	/* Check chunk_tids (attribute 4) and chunk_tid_offsets (attribute 5) */
+	tids_datum = fastgetattr(&tup, 4, ctx->toast_rel->rd_att, &is_null_tids);
+	if (ctx->toast_rel->rd_att->natts >= 5)
+		offsets_datum = fastgetattr(&tup, 5, ctx->toast_rel->rd_att, &is_null_offsets);
+
+	if (!is_null_tids)
+	{
+		ArrayType  *tids_arr = DatumGetArrayTypePCopy(tids_datum);
+		ArrayType  *offsets_arr = is_null_offsets ? NULL : DatumGetArrayTypePCopy(offsets_datum);
+		Datum	   *tids_elems;
+		bool	   *tids_nulls;
+		int			num_tids;
+		int			i;
+
+		ReleaseBuffer(buffer);
+
+		deconstruct_array_builtin(tids_arr, TIDOID, &tids_elems, &tids_nulls, &num_tids);
+
+		if (offsets_arr != NULL)
+		{
+			Datum	   *offsets_elems;
+			bool	   *offsets_nulls;
+			int			num_offsets;
+
+			deconstruct_array_builtin(offsets_arr, INT8OID, &offsets_elems, &offsets_nulls, &num_offsets);
+			if (num_offsets != num_tids + 1)
+			{
+				report_toast_corruption(ctx, ta,
+										psprintf("direct toast chunk at TID (%u, %u) has %d offsets for %d child TIDs",
+												 ItemPointerGetBlockNumber(tid),
+												 ItemPointerGetOffsetNumber(tid),
+												 num_offsets, num_tids));
+			}
+			else
+			{
+				for (i = 0; i < num_tids; i++)
+				{
+					if (offsets_nulls[i] || offsets_nulls[i + 1] ||
+						DatumGetInt64(offsets_elems[i]) < 0 ||
+						DatumGetInt64(offsets_elems[i]) >= DatumGetInt64(offsets_elems[i + 1]))
+					{
+						report_toast_corruption(ctx, ta,
+												psprintf("direct toast chunk at TID (%u, %u) has invalid or non-monotonic chunk_tid_offsets",
+														 ItemPointerGetBlockNumber(tid),
+														 ItemPointerGetOffsetNumber(tid)));
+						break;
+					}
+				}
+			}
+			pfree(offsets_elems);
+			pfree(offsets_nulls);
+			pfree(offsets_arr);
+		}
+
+		for (i = 0; i < num_tids; i++)
+		{
+			ItemPointer child_tid;
+
+			CHECK_FOR_INTERRUPTS();
+
+			if (tids_nulls[i])
+			{
+				report_toast_corruption(ctx, ta,
+										psprintf("direct toast chunk at TID (%u, %u) has null child TID",
+												 ItemPointerGetBlockNumber(tid),
+												 ItemPointerGetOffsetNumber(tid)));
+				continue;
+			}
+
+			child_tid = (ItemPointer) DatumGetPointer(tids_elems[i]);
+			if (ItemPointerEquals(child_tid, tid))
+			{
+				report_toast_corruption(ctx, ta,
+										psprintf("direct toast chunk at TID (%u, %u) references itself in chunk_tids",
+												 ItemPointerGetBlockNumber(tid),
+												 ItemPointerGetOffsetNumber(tid)));
+				continue;
+			}
+
+			check_toasted_attribute_direct_recursive(ctx, ta, child_tid,
+													 total_data_bytes, depth + 1);
+		}
+		pfree(tids_elems);
+		pfree(tids_nulls);
+		pfree(tids_arr);
+	}
+	else
+	{
+		if (!is_null_offsets)
+			report_toast_corruption(ctx, ta,
+									psprintf("direct toast chunk at TID (%u, %u) has chunk_tid_offsets without chunk_tids",
+											 ItemPointerGetBlockNumber(tid),
+											 ItemPointerGetOffsetNumber(tid)));
+		ReleaseBuffer(buffer);
+	}
+}
+
+static void
+check_toasted_attribute_direct(HeapCheckContext *ctx, ToastedAttribute *ta)
+{
+	uint32		extsize = VARATT_DIRECT_GET_EXTSIZE(ta->toast_pointer_direct);
+	uint32		total_data_bytes = 0;
+
+	check_toasted_attribute_direct_recursive(ctx, ta, &ta->toast_pointer_direct.va_tid,
+											 &total_data_bytes, 0);
+
+	if (total_data_bytes != extsize)
+	{
+		report_toast_corruption(ctx, ta,
+								psprintf("direct toast value was expected to have %u bytes, but found %u bytes across chunks",
+										 extsize, total_data_bytes));
+	}
 }
 
 /*
@@ -1904,6 +2196,12 @@ check_toasted_attribute(HeapCheckContext *ctx, ToastedAttribute *ta)
 	Oid8		toast_valueid;
 	Oid			toast_typid;
 	vartag_external expected_tag;
+
+	if (ta->is_direct)
+	{
+		check_toasted_attribute_direct(ctx, ta);
+		return;
+	}
 
 	toast_valueid = ta->va_valueid;
 	extsize = VARATT_EXTINFO_GET_EXTSIZE(ta->va_extinfo);
