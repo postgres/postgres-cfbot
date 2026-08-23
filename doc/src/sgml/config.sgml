@@ -10508,6 +10508,25 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-toast-flavour" xreflabel="toast_flavour">
+      <term><varname>toast_flavour</varname> (<type>enum</type>)
+      <indexterm>
+       <primary><varname>toast_flavour</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        This variable sets the default <acronym>TOAST</acronym> storage flavour
+        to use for new writes. Supported values are <literal>plain</literal>
+        (the default, which uses index-based chunk lookups) and <literal>direct</literal>
+        (which stores physical <type>TID</type> pointers to bypass index lookups).
+        This can be overridden for individual tables by setting the
+        <literal>toast_flavour</literal> storage parameter in
+        <command>CREATE TABLE</command> or <command>ALTER TABLE</command>.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-temp-tablespaces" xreflabel="temp_tablespaces">
       <term><varname>temp_tablespaces</varname> (<type>string</type>)
       <indexterm>
