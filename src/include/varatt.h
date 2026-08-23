@@ -15,6 +15,8 @@
 #ifndef VARATT_H
 #define VARATT_H
 
+#include "storage/itemptr.h"
+
 /*
  * varatt_external_oid is a traditional "TOAST pointer", that is, the
  * information needed to fetch a Datum stored out-of-line in a TOAST table.
@@ -80,6 +82,15 @@ VARATT_EXTERNAL_OID8_SET_VALUEID(varatt_external_oid8 *toast_pointer, Oid8 id)
 	toast_pointer->va_valueid_hi = (uint32) (id >> 32);
 }
 
+typedef struct varatt_direct
+{
+	int32		va_rawsize;		/* Original data size (includes header) */
+	uint32		va_extinfo;		/* External saved size (without header) and
+								 * compression method */
+	Oid			va_toastrelid;	/* RelID of TOAST table containing it */
+	ItemPointerData va_tid;		/* Physical TID of the final chunk */
+} varatt_direct;
+
 /*
  * These macros define the "saved size" portion of va_extinfo.  Its remaining
  * two high-order bits identify the compression method.
@@ -130,7 +141,8 @@ typedef enum vartag_external
 	VARTAG_EXPANDED_RO = 2,
 	VARTAG_EXPANDED_RW = 3,
 	VARTAG_ONDISK_OID8 = 4,
-	VARTAG_ONDISK_OID = 18
+	VARTAG_ONDISK_OID = 18,
+	VARTAG_DIRECT = 19
 } vartag_external;
 
 /* Is a TOAST pointer either type of expanded-object pointer? */
@@ -153,6 +165,8 @@ VARTAG_SIZE(vartag_external tag)
 		return sizeof(varatt_external_oid);
 	else if (tag == VARTAG_ONDISK_OID8)
 		return sizeof(varatt_external_oid8);
+	else if (tag == VARTAG_DIRECT)
+		return sizeof(varatt_direct);
 	else
 	{
 		Assert(false);
@@ -414,6 +428,24 @@ VARATT_IS_EXTERNAL_ONDISK(const void *PTR)
 	return (tag == VARTAG_ONDISK_OID || tag == VARTAG_ONDISK_OID8);
 }
 
+static inline bool
+VARATT_IS_EXTERNAL_DIRECT(const void *PTR)
+{
+	return VARATT_IS_EXTERNAL(PTR) && VARTAG_EXTERNAL(PTR) == VARTAG_DIRECT;
+}
+
+static inline bool
+VARATT_IS_EXTERNAL_ONDISK_OR_DIRECT(const void *PTR)
+{
+	vartag_external tag;
+
+	if (!VARATT_IS_EXTERNAL(PTR))
+		return false;
+	tag = VARTAG_EXTERNAL(PTR);
+	return (tag == VARTAG_ONDISK_OID || tag == VARTAG_ONDISK_OID8 ||
+			tag == VARTAG_DIRECT);
+}
+
 /* Is varlena datum an indirect pointer? */
 static inline bool
 VARATT_IS_EXTERNAL_INDIRECT(const void *PTR)
@@ -579,6 +611,25 @@ static inline bool
 VARATT_EXTINFO_IS_COMPRESSED(uint32 extinfo, int32 rawsize)
 {
 	return VARATT_EXTINFO_GET_EXTSIZE(extinfo) < (Size) (rawsize - VARHDRSZ);
+}
+
+static inline Size
+VARATT_DIRECT_GET_EXTSIZE(varatt_direct toast_pointer)
+{
+	return toast_pointer.va_extinfo & VARLENA_EXTSIZE_MASK;
+}
+
+static inline uint32
+VARATT_DIRECT_GET_COMPRESS_METHOD(varatt_direct toast_pointer)
+{
+	return toast_pointer.va_extinfo >> VARLENA_EXTSIZE_BITS;
+}
+
+static inline bool
+VARATT_DIRECT_IS_COMPRESSED(varatt_direct toast_pointer)
+{
+	return VARATT_DIRECT_GET_EXTSIZE(toast_pointer) <
+		(Size) (toast_pointer.va_rawsize - VARHDRSZ);
 }
 
 #endif
