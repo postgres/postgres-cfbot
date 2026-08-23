@@ -3740,6 +3740,12 @@ deconstruct_array_builtin(const ArrayType *array,
 			elmalign = TYPALIGN_INT;
 			break;
 
+		case INT8OID:
+			elmlen = sizeof(int64);
+			elmbyval = true;
+			elmalign = TYPALIGN_DOUBLE;
+			break;
+
 		case OIDOID:
 			elmlen = sizeof(Oid);
 			elmbyval = true;
