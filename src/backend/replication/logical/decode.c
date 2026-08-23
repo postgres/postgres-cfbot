@@ -928,6 +928,7 @@ DecodeInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	xl_heap_insert *xlrec;
 	ReorderBufferChange *change;
 	RelFileLocator target_locator;
+	BlockNumber blknum;
 
 	xlrec = (xl_heap_insert *) XLogRecGetData(r);
 
@@ -939,7 +940,7 @@ DecodeInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 		return;
 
 	/* only interested in our database */
-	XLogRecGetBlockTag(r, 0, &target_locator, NULL, NULL);
+	XLogRecGetBlockTag(r, 0, &target_locator, NULL, &blknum);
 	if (target_locator.dbOid != ctx->slot->data.database)
 		return;
 
@@ -963,6 +964,10 @@ DecodeInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 		ReorderBufferAllocTupleBuf(ctx->reorder, tuplelen);
 
 	DecodeXLogTuple(tupledata, datalen, change->data.tp.newtuple);
+
+	/* Set the TID for toast relation inserts, needed for direct toast */
+	if (xlrec->flags & XLH_INSERT_ON_TOAST_RELATION)
+		ItemPointerSet(&change->data.tp.newtuple->t_self, blknum, xlrec->offnum);
 
 	change->data.tp.clear_toast_afterwards = true;
 
