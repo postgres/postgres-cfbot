@@ -308,6 +308,7 @@ WHERE pg_class.oid=indexrelid
 
 -- Verify that toast tables are clusterable
 CLUSTER pg_toast.pg_toast_826 USING pg_toast_826_index;
+ERROR:  cannot cluster on partial index "pg_toast_826_index"
 -- Verify that clustering all tables does in fact cluster the right ones
 CREATE USER regress_clstr_user;
 CREATE TABLE clstr_1 (a INT PRIMARY KEY);
