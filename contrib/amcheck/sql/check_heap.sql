@@ -168,6 +168,25 @@ SELECT * FROM verify_heapam('test_foreign_table',
 							startblock := NULL,
 							endblock := NULL);
 
+-- Check that Direct TOAST tables (single-chunk, flat multi-chunk, and tree DAG)
+-- are verified without reporting false corruption
+CREATE TABLE direct_toast_check (id int, val text) WITH (toast_flavour = 'direct', toast_tuple_target = 128);
+ALTER TABLE direct_toast_check ALTER COLUMN val SET STORAGE EXTERNAL;
+INSERT INTO direct_toast_check VALUES
+  (1, repeat(md5('tier1'), 50)),
+  (2, repeat(md5('tier2'), 1000)),
+  (3, repeat(md5('tier3'), 10000));
+SELECT * FROM verify_heapam('direct_toast_check', check_toast := true);
+SELECT * FROM verify_heapam((SELECT reltoastrelid FROM pg_class WHERE relname = 'direct_toast_check'));
+DROP TABLE direct_toast_check;
+
+-- Check that VACUUM FULL on a 3-column TOAST table while toast_default_flavour = 'direct'
+-- preserves the 3-column TOAST table format without corruption
+SET toast_default_flavour = 'direct';
+VACUUM FULL test_toast_oid;
+RESET toast_default_flavour;
+SELECT * FROM verify_heapam((SELECT reltoastrelid FROM pg_class WHERE relname = 'test_toast_oid'));
+
 -- cleanup
 DROP TABLE test_toast_oid;
 DROP TABLE test_toast_oid8;
