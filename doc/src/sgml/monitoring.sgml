@@ -564,6 +564,15 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
      </row>
 
      <row>
+      <entry><structname>pg_stat_vfdcache</structname><indexterm><primary>pg_stat_vfdcache</primary></indexterm></entry>
+      <entry>One row only, showing cluster-wide statistics about virtual file
+       descriptor (VFD) cache activity. See
+       <link linkend="monitoring-pg-stat-vfdcache-view">
+       <structname>pg_stat_vfdcache</structname></link> for details.
+      </entry>
+     </row>
+
+     <row>
       <entry><structname>pg_stat_wal</structname><indexterm><primary>pg_stat_wal</primary></indexterm></entry>
       <entry>One row only, showing statistics about WAL activity. See
        <link linkend="monitoring-pg-stat-wal-view">
@@ -3905,6 +3914,89 @@ description | Waiting for a newly initialized WAL file to reach durable storage
   </para>
  </sect2>
 
+ <sect2 id="monitoring-pg-stat-vfdcache-view">
+  <title><structname>pg_stat_vfdcache</structname></title>
+
+  <indexterm zone="monitoring-pg-stat-vfdcache-view">
+   <primary>pg_stat_vfdcache</primary>
+  </indexterm>
+
+  <para>
+   The <structname>pg_stat_vfdcache</structname> view will always have a
+   single row, containing data about cluster-wide VFD (Virtual File
+   Descriptor) cache activity.
+  </para>
+
+  <table id="pg-stat-vfdcache-view" xreflabel="pg_stat_vfdcache">
+   <title><structname>pg_stat_vfdcache</structname> View</title>
+   <tgroup cols="1">
+    <thead>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       Column Type
+      </para>
+      <para>
+       Description
+      </para></entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>hits</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of file accesses where the physical file descriptor was
+       already open in the cache, requiring no system call
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>misses</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of file accesses where the physical file descriptor had
+       been evicted from the cache, requiring <function>open()</function>
+       to be called again before the access could proceed
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>max_open_fds</structfield> <type>integer</type>
+      </para>
+      <para>
+       Maximum number of file descriptors available to each backend process
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>hit_ratio</structfield> <type>float8</type>
+      </para>
+      <para>
+       Fraction of file accesses that were cache hits:
+       <literal>hits / (hits + misses)</literal>
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>stats_reset</structfield> <type>timestamp with time zone</type>
+      </para>
+      <para>
+       Time at which the counters were last reset by
+       <function>pg_stat_reset_vfdcache()</function>
+      </para></entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+
+ </sect2>
+
  <sect2 id="monitoring-pg-stat-wal-view">
    <title><structname>pg_stat_wal</structname></title>
 
@@ -6151,6 +6243,21 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        <para>
         This function is restricted to superusers by default, but other users
         can be granted EXECUTE to run the function.
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
+          <primary>pg_stat_reset_vfdcache</primary>
+        </indexterm>
+        <function>pg_stat_reset_vfdcache</function> ()
+        <returnvalue>void</returnvalue>
+       </para>
+       <para>
+        Reset shared VFD cache statistics counters to zero.  The reset
+        timestamp is recorded in
+        <structname>pg_stat_vfdcache</structname>.<structfield>stats_reset</structfield>.
        </para></entry>
       </row>
      </tbody>
