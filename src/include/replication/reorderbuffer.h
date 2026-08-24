@@ -699,6 +699,7 @@ struct ReorderBuffer
 	 */
 	int64		totalTxns;		/* total number of transactions sent */
 	int64		totalBytes;		/* total amount of data decoded */
+	int64		outputBytes;	/* amount of data produced for downstream */
 };
 
 
