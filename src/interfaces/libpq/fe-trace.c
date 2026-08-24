@@ -299,6 +299,16 @@ pqTraceOutput_Close(PQExpBuffer buf, const char *message, int *cursor)
 }
 
 static void
+pqTraceOutput_CompressedMessages(PQExpBuffer buf, const char *message, int *cursor, int length,
+								 bool suppress)
+{
+	appendPQExpBufferStr(buf, "CompressedMessages\t");
+	pqTraceOutputByte1(buf, message, cursor);
+	pqTraceOutputString(buf, message, cursor, false);
+	pqTraceOutputNbyte(buf, length - *cursor + 1, message, cursor, suppress);
+}
+
+static void
 pqTraceOutput_CommandComplete(PQExpBuffer buf, const char *message, int *cursor)
 {
 	appendPQExpBufferStr(buf, "CommandComplete\t");
@@ -646,11 +656,12 @@ pqTraceOutput_ReadyForQuery(PQExpBuffer buf, const char *message, int *cursor)
  * Print the given message to the trace output stream.
  */
 void
-pqTraceOutputMessage(PGconn *conn, const char *message, bool toServer)
+pqTraceOutputMessage(PGconn *conn, const char *message, bool toServer, bool compressed)
 {
 	char		id;
 	int			length;
 	char	   *prefix = toServer ? "F" : "B";
+	char	   *compressedPrefix = compressed ? "*" : "";
 	int			logCursor = 0;
 	bool		regress;
 	PQExpBufferData buf;
@@ -673,19 +684,26 @@ pqTraceOutputMessage(PGconn *conn, const char *message, bool toServer)
 	logCursor += 4;
 
 	/*
-	 * In regress mode, suppress the length of ErrorResponse, NoticeResponse
-	 * and ParameterStatus. The F (file name), L (line number) and R (routine
-	 * name) fields can change as server code is modified, and if their
-	 * lengths differ from the originals, that would break tests. For
-	 * ParameterStatus, the size changes depending on the parameters' value,
-	 * whose values depend on the test environment.
+	 * In regress mode, suppress the length of some messages. For
+	 * ErrorResponse and NoticeResponse, the F (file name), L (line number)
+	 * and R (routine name) fields can change as server code is modified, and
+	 * if their lengths differ from the originals, that would break tests.
+	 *
+	 * For ParameterStatus, the size will change depending on the parameters'
+	 * values, which is likely going to be different depending on the test
+	 * environment.
+	 *
+	 * For CompressedMessages, the message's length will depend on the
+	 * architecture (32-bit/64-bit) or other factors like the compression
+	 * library's version.
 	 */
 	if (regress && !toServer && (id == PqMsg_ErrorResponse
 								 || id == PqMsg_NoticeResponse
-								 || id == PqMsg_ParameterStatus))
-		appendPQExpBuffer(&buf, "%s\tNN\t", prefix);
+								 || id == PqMsg_ParameterStatus
+								 || id == PqMsg_CompressedMessages))
+		appendPQExpBuffer(&buf, "%s%s\tNN\t", prefix, compressedPrefix);
 	else
-		appendPQExpBuffer(&buf, "%s\t%d\t", prefix, length);
+		appendPQExpBuffer(&buf, "%s%s\t%d\t", prefix, compressedPrefix, length);
 
 	switch (id)
 	{
@@ -700,6 +718,9 @@ pqTraceOutputMessage(PGconn *conn, const char *message, bool toServer)
 		case PqMsg_CloseComplete:
 			appendPQExpBufferStr(&buf, "CloseComplete");
 			/* No message content */
+			break;
+		case PqMsg_CompressedMessages:
+			pqTraceOutput_CompressedMessages(&buf, message, &logCursor, length, regress);
 			break;
 		case PqMsg_NotificationResponse:
 			pqTraceOutput_NotificationResponse(&buf, message, &logCursor, regress);
