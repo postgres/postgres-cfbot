@@ -959,7 +959,7 @@ extern ssize_t pg_GSS_bytes_pending(PGconn *conn);
 /* === in fe-trace.c === */
 
 extern void pqTraceOutputMessage(PGconn *conn, const char *message,
-								 bool toServer);
+								 bool toServer, bool compressed);
 extern void pqTraceOutputNoTypeByteMessage(PGconn *conn, const char *message);
 extern void pqTraceOutputCharResponse(PGconn *conn, const char *responseType,
 									  char response);
