@@ -40,6 +40,7 @@
 
 /* include stuff common to fe and be */
 #include "libpq/pqcomm.h"
+#include "common/compression.h"
 /* include stuff found in fe only */
 #include "fe-auth-sasl.h"
 #include "pqexpbuffer.h"
@@ -375,6 +376,12 @@ typedef struct msg_buffer
 	int			end;			/* offset to first position after avail data */
 }			msg_buffer;
 
+typedef struct pqDecompressor
+{
+	int			(*decompress_payload) (PGconn *conn);
+	void		(*free_context) (PGconn *conn);
+}			pqDecompressor;
+
 /*
  * PGconn stores all the state data associated with a single connection
  * to a backend.
@@ -588,6 +595,18 @@ struct pg_conn
 	 * code that uses ints during size calculations.
 	 */
 	msg_buffer	inBuffer;
+	int			compress_cursor;	/* Location of currently processed
+									 * compressed bytes, relative to
+									 * inBuffer's start */
+	int			compress_end;	/* Location of end of CompressedMessages,
+								 * relative to inBuffer's start */
+
+	msg_buffer	decompressBuffer;	/* Buffer for the decompressed messages */
+
+	pg_compress_algorithm compress_algorithm;	/* Compression used */
+	pqDecompressor decompressor;
+	int			decompress_chunk_size;
+	void	   *compress_state; /* private state for compression */
 
 
 	/* Buffer for data not yet sent to backend */
@@ -798,6 +817,19 @@ extern PGresult *pqFunctionCall3(PGconn *conn, Oid fnid,
 /* === in fe-cancel.c === */
 
 extern int	PQsendCancelRequest(PGconn *cancelConn);
+
+/* === in fe-compress.c === */
+
+extern int	pqReadCompressedMessage(PGconn *conn, int msgLength);
+extern int	pqDecompressPayload(PGconn *conn);
+
+/* === in fe-compress-zstd.c === */
+
+extern int	pqInitDecompressorZstd(PGconn *conn);
+
+/* === in fe-compress-lz4.c === */
+
+extern int	pqInitDecompressorLz4(PGconn *conn);
 
 /* === in fe-misc.c === */
 
