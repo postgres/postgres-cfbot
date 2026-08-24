@@ -69,10 +69,14 @@ PostgreSQL documentation
   <warning>
    <para>
     Restoring a dump causes the destination to execute arbitrary code of the
-    source superusers' choice.  Partial dumps and partial restores do not limit
-    that.  If the source superusers are not trusted, the dumped SQL statements
-    must be inspected before restoring.  Note that the client running the dump
-    and restore need not trust the source or destination superusers.
+    source superusers' choice, or of the choice of any role that owns a
+    dumped object.  For example, a table owner can supply such code through
+    a <literal>CHECK</literal> constraint or a generated column expression,
+    which the destination evaluates as it loads the table's rows.  Partial
+    dumps and partial restores do not limit that.  If those roles are not
+    trusted, the dumped SQL statements must be inspected before restoring.
+    Note that the client running the dump and restore need not trust the
+    source or destination superusers.
    </para>
   </warning>
 
