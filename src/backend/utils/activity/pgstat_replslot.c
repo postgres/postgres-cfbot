@@ -74,16 +74,16 @@ pgstat_reset_replslot(const char *name)
  * pgstat_acquire_replslot() have already been called.
  */
 void
-pgstat_report_replslot(ReplicationSlot *slot, const PgStat_StatReplSlotEntry *repSlotStat)
+pgstat_report_replslot(ReplicationSlot *slot, const PgStat_ReplSlotStats *repSlotStat)
 {
 	PgStat_EntryRef *entry_ref;
 	PgStatShared_ReplSlot *shstatent;
-	PgStat_StatReplSlotEntry *statent;
+	PgStat_ReplSlotStats *statent;
 
 	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_REPLSLOT, InvalidOid,
 											ReplicationSlotIndex(slot), false);
 	shstatent = (PgStatShared_ReplSlot *) entry_ref->shared_stats;
-	statent = &shstatent->stats;
+	statent = &shstatent->stats.decoding_stats;
 
 	/* Update the replication slot statistics */
 #define REPLSLOT_ACC(fld) statent->fld += repSlotStat->fld

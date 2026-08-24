@@ -2385,16 +2385,16 @@ pg_stat_get_replication_slot(PG_FUNCTION_ARGS)
 	}
 
 	values[0] = CStringGetTextDatum(NameStr(slotname));
-	values[1] = Int64GetDatum(slotent->spill_txns);
-	values[2] = Int64GetDatum(slotent->spill_count);
-	values[3] = Int64GetDatum(slotent->spill_bytes);
-	values[4] = Int64GetDatum(slotent->stream_txns);
-	values[5] = Int64GetDatum(slotent->stream_count);
-	values[6] = Int64GetDatum(slotent->stream_bytes);
-	values[7] = Int64GetDatum(slotent->mem_exceeded_count);
-	values[8] = Int64GetDatum(slotent->total_txns);
-	values[9] = Int64GetDatum(slotent->total_bytes);
-	values[10] = Int64GetDatum(slotent->output_bytes);
+	values[1] = Int64GetDatum(slotent->decoding_stats.spill_txns);
+	values[2] = Int64GetDatum(slotent->decoding_stats.spill_count);
+	values[3] = Int64GetDatum(slotent->decoding_stats.spill_bytes);
+	values[4] = Int64GetDatum(slotent->decoding_stats.stream_txns);
+	values[5] = Int64GetDatum(slotent->decoding_stats.stream_count);
+	values[6] = Int64GetDatum(slotent->decoding_stats.stream_bytes);
+	values[7] = Int64GetDatum(slotent->decoding_stats.mem_exceeded_count);
+	values[8] = Int64GetDatum(slotent->decoding_stats.total_txns);
+	values[9] = Int64GetDatum(slotent->decoding_stats.total_bytes);
+	values[10] = Int64GetDatum(slotent->decoding_stats.output_bytes);
 	values[11] = Int64GetDatum(slotent->slotsync_skip_count);
 
 	if (slotent->slotsync_last_skip == 0)

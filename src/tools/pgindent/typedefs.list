@@ -2335,6 +2335,7 @@ PgStat_PendingDroppedStatsItem
 PgStat_PendingIO
 PgStat_PendingLock
 PgStat_RelationStatus
+PgStat_ReplSlotStats
 PgStat_SLRUStats
 PgStat_ShmemControl
 PgStat_Snapshot
