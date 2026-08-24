@@ -394,6 +394,7 @@ ReorderBufferAllocate(void)
 	buffer->memExceededCount = 0;
 	buffer->totalTxns = 0;
 	buffer->totalBytes = 0;
+	buffer->outputBytes = 0;
 
 	buffer->current_restart_decoding_lsn = InvalidXLogRecPtr;
 
