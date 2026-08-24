@@ -483,7 +483,7 @@ SELECT id, length(val) FROM tab_toast_maint;
   1 |   5500
 (1 row)
 
--- CLUSTER on direct TOAST table directly is rejected
+-- CLUSTER and REPACK on direct TOAST table directly are rejected
 DO $$
 DECLARE
     toast_relname text;
@@ -503,6 +503,209 @@ BEGIN
     EXCEPTION WHEN feature_not_supported THEN
         RAISE NOTICE 'expected error caught for CLUSTER on direct TOAST table: %', regexp_replace(SQLERRM, 'pg_toast_[0-9]+_index', 'pg_toast_xxx_index');
     END;
+
+    -- REPACK directly on direct TOAST table should be rejected
+    BEGIN
+        EXECUTE 'REPACK pg_toast.' || toast_relname;
+        RAISE EXCEPTION 'REPACK on direct TOAST table should have failed';
+    EXCEPTION WHEN feature_not_supported THEN
+        RAISE NOTICE 'expected error caught for REPACK on direct TOAST table: %', SQLERRM;
+    END;
 END$$;
 NOTICE:  expected error caught for CLUSTER on direct TOAST table: cannot cluster on partial index "pg_toast_xxx_index"
+NOTICE:  expected error caught for REPACK on direct TOAST table: cannot REPACK direct TOAST table directly
+-- VACUUM FULL targeting only the direct TOAST table is also rejected
+VACUUM (PROCESS_MAIN FALSE, FULL) tab_toast_maint;
+ERROR:  cannot VACUUM direct TOAST table directly
+HINT:  Execute VACUUM on the parent table instead.
 DROP TABLE tab_toast_maint;
+--
+-- Test pg_ensure_direct_toast and legacy TOAST table in-place upgrade
+--
+CREATE TABLE tab_legacy_test(id int, val text);
+ALTER TABLE tab_legacy_test ALTER COLUMN val SET STORAGE EXTERNAL;
+INSERT INTO tab_legacy_test VALUES (1, repeat('legacy-plain-payload-', 300));
+-- Set toast_flavour = 'direct' first, then simulate an un-upgraded 3-column TOAST table
+-- to test the write-time guard in toast_save_datum_direct()
+ALTER TABLE tab_legacy_test SET (toast_flavour = 'direct');
+DO $$
+DECLARE
+    toast_relid oid;
+    toast_idxid oid;
+BEGIN
+    SELECT c1.reltoastrelid INTO toast_relid
+    FROM pg_class c1
+    WHERE c1.relname = 'tab_legacy_test';
+
+    SELECT indexrelid INTO toast_idxid
+    FROM pg_index
+    WHERE indrelid = toast_relid;
+
+    -- Delete attributes 4 and 5 from pg_attribute
+    DELETE FROM pg_attribute WHERE attrelid = toast_relid AND attnum IN (4, 5);
+    UPDATE pg_class SET relnatts = 3 WHERE oid = toast_relid;
+
+    -- Clear index predicate from pg_index
+    UPDATE pg_index SET indpred = NULL WHERE indexrelid = toast_idxid;
+END$$;
+\c -
+-- Attempting direct write to legacy TOAST table should fail with descriptive error & hint
+DO $$
+BEGIN
+    INSERT INTO tab_legacy_test VALUES (2, repeat('direct-write-attempt-', 300));
+    RAISE EXCEPTION 'direct write to legacy table should have failed';
+EXCEPTION WHEN feature_not_supported THEN
+    RAISE NOTICE 'expected error caught: %', regexp_replace(SQLERRM, 'pg_toast_[0-9]+', 'pg_toast_xxx');
+END$$;
+NOTICE:  expected error caught: cannot write direct TOAST datum to legacy TOAST table "pg_toast_xxx"
+-- Read legacy plain data still works
+SELECT id, length(val), substring(val, 1, 20) FROM tab_legacy_test WHERE id = 1;
+ id | length |      substring       
+----+--------+----------------------
+  1 |   6300 | legacy-plain-payload
+(1 row)
+
+-- Unprivileged role cannot call pg_ensure_direct_toast
+CREATE ROLE regress_dtoast_user;
+SET ROLE regress_dtoast_user;
+SELECT pg_ensure_direct_toast('tab_legacy_test'::regclass);
+ERROR:  must be superuser to upgrade TOAST table format
+RESET ROLE;
+DROP ROLE regress_dtoast_user;
+-- Upgrade using pg_ensure_direct_toast
+SELECT pg_ensure_direct_toast('tab_legacy_test'::regclass);
+ pg_ensure_direct_toast 
+------------------------
+ 
+(1 row)
+
+-- Direct write now succeeds!
+INSERT INTO tab_legacy_test VALUES (2, repeat('direct-write-success-', 300));
+-- Read both plain and direct rows
+SELECT id, length(val), substring(val, 1, 20) FROM tab_legacy_test ORDER BY id;
+ id | length |      substring       
+----+--------+----------------------
+  1 |   6300 | legacy-plain-payload
+  2 |   6300 | direct-write-success
+(2 rows)
+
+-- Test ALTER TABLE SET (toast_flavour = 'direct') on a naturally created 3-column TOAST table
+CREATE TABLE tab_legacy_alter(id int, val text);
+ALTER TABLE tab_legacy_alter ALTER COLUMN val SET STORAGE EXTERNAL;
+INSERT INTO tab_legacy_alter VALUES (1, repeat('legacy-alter-payload-', 300));
+-- Verify initial 3-column format and that REPACK and VACUUM FULL directly on the 3-column TOAST table are allowed
+SELECT t.relnatts, i.indisprimary, i.indpred IS NOT NULL AS has_pred
+FROM pg_class c
+JOIN pg_class t ON t.oid = c.reltoastrelid
+JOIN pg_index i ON i.indrelid = t.oid
+WHERE c.relname = 'tab_legacy_alter';
+ relnatts | indisprimary | has_pred 
+----------+--------------+----------
+        3 | t            | f
+(1 row)
+
+VACUUM (PROCESS_MAIN FALSE, FULL) tab_legacy_alter;
+DO $$
+DECLARE
+    toast_relname text;
+BEGIN
+    SELECT t.relname INTO toast_relname
+    FROM pg_class c JOIN pg_class t ON t.oid = c.reltoastrelid
+    WHERE c.relname = 'tab_legacy_alter';
+    EXECUTE 'REPACK pg_toast.' || toast_relname;
+END$$;
+-- Verify that VACUUM FULL on the parent table while toast_default_flavour = 'direct'
+-- preserves the existing 3-column TOAST table format
+SET toast_default_flavour = 'direct';
+VACUUM FULL tab_legacy_alter;
+RESET toast_default_flavour;
+SELECT t.relnatts, i.indisprimary, i.indpred IS NOT NULL AS has_pred
+FROM pg_class c
+JOIN pg_class t ON t.oid = c.reltoastrelid
+JOIN pg_index i ON i.indrelid = t.oid
+WHERE c.relname = 'tab_legacy_alter';
+ relnatts | indisprimary | has_pred 
+----------+--------------+----------
+        3 | t            | f
+(1 row)
+
+-- Alter table SET toast_flavour = 'direct' automatically calls ensure_direct_toast
+ALTER TABLE tab_legacy_alter SET (toast_flavour = 'direct');
+-- Verify upgraded 5-column format and partial non-primary index
+SELECT t.relnatts, i.indisprimary, i.indpred IS NOT NULL AS has_pred
+FROM pg_class c
+JOIN pg_class t ON t.oid = c.reltoastrelid
+JOIN pg_index i ON i.indrelid = t.oid
+WHERE c.relname = 'tab_legacy_alter';
+ relnatts | indisprimary | has_pred 
+----------+--------------+----------
+        5 | f            | t
+(1 row)
+
+-- Direct write now succeeds
+INSERT INTO tab_legacy_alter VALUES (2, repeat('alter-direct-success-', 300));
+-- Read both rows
+SELECT id, length(val), substring(val, 1, 20) FROM tab_legacy_alter ORDER BY id;
+ id | length |      substring       
+----+--------+----------------------
+  1 |   6300 | legacy-alter-payload
+  2 |   6300 | alter-direct-success
+(2 rows)
+
+DROP TABLE tab_legacy_test;
+DROP TABLE tab_legacy_alter;
+-- Test that toast_default_flavour = 'direct' creates a 5-column TOAST table,
+-- while INSERT and UPDATE still use the table's toast_flavour reloption ('plain' by default),
+-- and VACUUM (PROCESS_MAIN FALSE, FULL) refuses based on the 5-column TOAST table format
+SET toast_default_flavour = 'direct';
+CREATE TABLE tab_default_direct_guc(id int, val text STORAGE EXTERNAL);
+RESET toast_default_flavour;
+SELECT t.relnatts, i.indisprimary, i.indpred IS NOT NULL AS has_pred
+FROM pg_class c
+JOIN pg_class t ON t.oid = c.reltoastrelid
+JOIN pg_index i ON i.indrelid = t.oid
+WHERE c.relname = 'tab_default_direct_guc';
+ relnatts | indisprimary | has_pred 
+----------+--------------+----------
+        5 | f            | t
+(1 row)
+
+INSERT INTO tab_default_direct_guc VALUES (1, repeat('guc-only-plain-insert-', 300));
+SELECT pg_column_toast_chunk_id(val) IS NOT NULL AS is_plain_after_insert FROM tab_default_direct_guc WHERE id = 1;
+ is_plain_after_insert 
+-----------------------
+ t
+(1 row)
+
+UPDATE tab_default_direct_guc SET val = repeat('guc-only-plain-update-', 300) WHERE id = 1;
+SELECT pg_column_toast_chunk_id(val) IS NOT NULL AS is_plain_after_update FROM tab_default_direct_guc WHERE id = 1;
+ is_plain_after_update 
+-----------------------
+ t
+(1 row)
+
+VACUUM (PROCESS_MAIN FALSE, FULL) tab_default_direct_guc;
+ERROR:  cannot VACUUM direct TOAST table directly
+HINT:  Execute VACUUM on the parent table instead.
+DROP TABLE tab_default_direct_guc;
+-- Test ALTER TABLE ADD COLUMN adding the first toastable column to a table with toast_flavour = 'direct'
+CREATE TABLE tab_addcol_direct(id int) WITH (toast_flavour = 'direct');
+ALTER TABLE tab_addcol_direct ADD COLUMN val text STORAGE EXTERNAL;
+SELECT t.relnatts, i.indisprimary, i.indpred IS NOT NULL AS has_pred
+FROM pg_class c
+JOIN pg_class t ON t.oid = c.reltoastrelid
+JOIN pg_index i ON i.indrelid = t.oid
+WHERE c.relname = 'tab_addcol_direct';
+ relnatts | indisprimary | has_pred 
+----------+--------------+----------
+        5 | f            | t
+(1 row)
+
+INSERT INTO tab_addcol_direct VALUES (1, repeat('addcol-direct-payload-', 300));
+SELECT pg_column_toast_chunk_id(val) IS NULL AS is_direct_toast, length(val) FROM tab_addcol_direct WHERE id = 1;
+ is_direct_toast | length 
+-----------------+--------
+ t               |   6600
+(1 row)
+
+DROP TABLE tab_addcol_direct;
