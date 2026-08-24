@@ -554,7 +554,11 @@ pqDropConnection(PGconn *conn, bool flushInput)
 
 	/* Optionally discard any unread data */
 	if (flushInput)
+	{
 		conn->inBuffer.start = conn->inBuffer.cursor = conn->inBuffer.end = 0;
+		if (conn->decompressBuffer.buffer)
+			conn->decompressBuffer.start = conn->decompressBuffer.cursor = conn->decompressBuffer.end = 0;
+	}
 
 	/* Always discard any unsent data */
 	conn->outCount = 0;
@@ -2793,6 +2797,10 @@ pqConnectDBStart(PGconn *conn)
 
 	/* Ensure our buffers are empty */
 	conn->inBuffer.start = conn->inBuffer.cursor = conn->inBuffer.end = 0;
+	if (conn->decompressBuffer.buffer)
+		conn->decompressBuffer.start = conn->decompressBuffer.cursor = conn->decompressBuffer.end = 0;
+	if (conn->inBuffer.buffer)
+		conn->inBuffer.start = conn->inBuffer.cursor = conn->inBuffer.end = 0;
 	conn->outCount = 0;
 
 	/*
@@ -5218,6 +5226,9 @@ freePGconn(PGconn *conn)
 	free(conn->inBuffer.buffer);
 	free(conn->outBuffer);
 	free(conn->rowBuf);
+	if (conn->decompressor.free_context)
+		conn->decompressor.free_context(conn);
+	free(conn->decompressBuffer.buffer);
 	termPQExpBuffer(&conn->errorMessage);
 	termPQExpBuffer(&conn->workBuffer);
 
