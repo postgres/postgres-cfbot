@@ -3630,7 +3630,9 @@ libpq_deps += [
   gssapi,
   ldap_r,
   libintl,
+  lz4,
   ssl,
+  zstd,
 ]
 
 libpq_oauth_deps += [
