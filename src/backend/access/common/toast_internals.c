@@ -1024,7 +1024,8 @@ toast_save_datum_direct(Relation rel, Datum value,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot write direct TOAST datum to legacy TOAST table \"%s\"",
 						toastrelname),
-				 errhint("Run \"ALTER TABLE %s SET (toast_flavour = 'direct');\" to upgrade the TOAST table.",
+				 errhint("Run \"SELECT pg_ensure_direct_toast('%s'::regclass);\" or \"ALTER TABLE %s SET (toast_flavour = 'direct');\" to upgrade the TOAST table.",
+						 RelationGetRelationName(rel),
 						 RelationGetRelationName(rel))));
 	}
 
