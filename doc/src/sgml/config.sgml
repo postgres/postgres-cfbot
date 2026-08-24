@@ -3647,16 +3647,17 @@ include_dir 'conf.d'
       <listitem>
        <para>
         When this parameter is <literal>on</literal>, the <productname>PostgreSQL</productname>
-        server writes the entire content of each disk page to WAL during the
-        first modification of that page after a checkpoint, even for
-        non-critical modifications of so-called hint bits.
+        server writes information about the first modification of each disk
+        page after a checkpoint to WAL, even for non-critical modifications
+        of so-called hint bits.  Heap tuple visibility hint bits are stored in
+        compact WAL records.  Other hint changes cause the entire page to be
+        logged.
        </para>
 
        <para>
         If data checksums are enabled, hint bit updates are always WAL-logged
-        and this setting is ignored. You can use this setting to test how much
-        extra WAL-logging would occur if your database had data checksums
-        enabled.
+        and this setting is ignored.  Full-page images are still used in that
+        case to protect checksummed pages from torn writes.
        </para>
 
        <para>

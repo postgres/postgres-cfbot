@@ -5717,7 +5717,8 @@ IncrBufferRefCount(Buffer buffer)
  */
 static inline void
 MarkSharedBufferDirtyHint(Buffer buffer, BufferDesc *bufHdr, uint64 lockstate,
-						  bool buffer_std)
+						  bool buffer_std,
+						  BufferHintWalLogger wal_logger)
 {
 	Page		page = BufferGetPage(buffer);
 
@@ -5739,17 +5740,18 @@ MarkSharedBufferDirtyHint(Buffer buffer, BufferDesc *bufHdr, uint64 lockstate,
 	if (unlikely(!(lockstate & BM_DIRTY)))
 	{
 		XLogRecPtr	lsn = InvalidXLogRecPtr;
-		bool		wal_log = false;
+		bool		wal_log_needed = false;
 		uint64		buf_state;
 
 		/*
-		 * If we need to protect hint bit updates from torn writes, WAL-log a
-		 * full page image of the page. This full page image is only necessary
-		 * if the hint bit update is the first change to the page since the
-		 * last checkpoint.
+		 * If we need to WAL-log hint bit updates, log either a full-page
+		 * image or an access-method-specific record.  This is only necessary
+		 * when the hint update is the first change to the page since the last
+		 * checkpoint.
 		 *
-		 * We don't check full_page_writes here because that logic is included
-		 * when we call XLogInsert() since the value changes dynamically.
+		 * XLogSaveBufferForHint() leaves the dynamic full_page_writes check
+		 * to XLogInsert().  An alternative logger is responsible for deciding
+		 * whether its change needs a full-page image.
 		 */
 		if (XLogHintBitIsNeeded() && (lockstate & BM_PERMANENT))
 		{
@@ -5765,17 +5767,17 @@ MarkSharedBufferDirtyHint(Buffer buffer, BufferDesc *bufHdr, uint64 lockstate,
 				RelFileLocatorSkippingWAL(BufTagGetRelFileLocator(&bufHdr->tag)))
 				return;
 
-			wal_log = true;
+			wal_log_needed = true;
 		}
 
 		/*
-		 * We must mark the page dirty before we emit the WAL record, as per
-		 * the usual rules, to ensure that BufferSync()/SyncOneBuffer() try to
-		 * flush the buffer, even if we haven't inserted the WAL record yet.
-		 * As we hold at least a share-exclusive lock, checkpoints will wait
-		 * for this backend to be done with the buffer before continuing. If
-		 * we did it the other way round, a checkpoint could start between
-		 * writing the WAL record and marking the buffer dirty.
+		 * We must mark the page dirty before we emit any WAL record to ensure
+		 * that BufferSync()/SyncOneBuffer() tries to flush the buffer, even
+		 * if we haven't inserted the WAL record yet. As we hold at least a
+		 * share-exclusive lock, checkpoints will wait for this backend to be
+		 * done with the buffer before continuing. If we did it the other way
+		 * round, a checkpoint could start between writing the WAL record and
+		 * marking the buffer dirty.
 		 */
 		buf_state = LockBufHdr(bufHdr);
 
@@ -5791,13 +5793,14 @@ MarkSharedBufferDirtyHint(Buffer buffer, BufferDesc *bufHdr, uint64 lockstate,
 
 		/*
 		 * If the block is already dirty because we either made a change or
-		 * set a hint already, then we don't need to write a full page image.
+		 * set a hint already, then we don't need to write another WAL record.
 		 * Note that aggressive cleaning of blocks dirtied by hint bit setting
 		 * would increase the call rate. Bulk setting of hint bits would
 		 * reduce the call rate...
 		 */
-		if (wal_log)
-			lsn = XLogSaveBufferForHint(buffer, buffer_std);
+		if (wal_log_needed)
+			lsn = wal_logger ? wal_logger(buffer) :
+				XLogSaveBufferForHint(buffer, buffer_std);
 
 		if (XLogRecPtrIsValid(lsn))
 		{
@@ -5832,7 +5835,7 @@ MarkSharedBufferDirtyHint(Buffer buffer, BufferDesc *bufHdr, uint64 lockstate,
  *
  * This is essentially the same as MarkBufferDirty, except:
  *
- * 1. The caller does not write WAL; so if checksums are enabled, we may need
+ * 1. The change is non-critical.  If checksums are enabled, we may still need
  *	  to write an XLOG_FPI_FOR_HINT WAL record to protect against torn pages.
  * 2. The caller might have only a share-exclusive-lock instead of an
  *	  exclusive-lock on the buffer's content lock.
@@ -5858,7 +5861,7 @@ MarkBufferDirtyHint(Buffer buffer, bool buffer_std)
 
 	MarkSharedBufferDirtyHint(buffer, bufHdr,
 							  pg_atomic_read_u64(&bufHdr->state),
-							  buffer_std);
+							  buffer_std, NULL);
 }
 
 /*
@@ -7127,6 +7130,35 @@ BufferFinishSetHintBits(Buffer buffer, bool mark_dirty, bool buffer_std)
 }
 
 /*
+ * Like BufferFinishSetHintBits(), but use the supplied callback instead of
+ * XLogSaveBufferForHint() when WAL logging is needed.
+ */
+void
+BufferFinishSetHintBitsWithWal(Buffer buffer, bool mark_dirty, bool buffer_std,
+							   BufferHintWalLogger wal_logger)
+{
+	BufferDesc *buf_hdr;
+
+	if (BufferIsLocal(buffer))
+	{
+		if (mark_dirty)
+			MarkLocalBufferDirty(buffer);
+		return;
+	}
+
+	Assert(BufferIsLockedByMeInMode(buffer, BUFFER_LOCK_SHARE_EXCLUSIVE) ||
+		   BufferIsLockedByMeInMode(buffer, BUFFER_LOCK_EXCLUSIVE));
+
+	if (!mark_dirty)
+		return;
+
+	buf_hdr = GetBufferDescriptor(buffer - 1);
+	MarkSharedBufferDirtyHint(buffer, buf_hdr,
+							  pg_atomic_read_u64(&buf_hdr->state),
+							  buffer_std, wal_logger);
+}
+
+/*
  * Try to set hint bits on a single 16bit value in a buffer.
  *
  * If hint bits are allowed to be set, set *ptr = val, try to mark the buffer
@@ -7138,8 +7170,9 @@ BufferFinishSetHintBits(Buffer buffer, bool mark_dirty, bool buffer_std)
  * BufferFinishSetHintBits() when setting hints once in a buffer, but slower
  * than the former when setting hint bits multiple times in the same buffer.
  */
-bool
-BufferSetHintBits16(uint16 *ptr, uint16 val, Buffer buffer)
+static bool
+BufferSetHintBits16Internal(uint16 *ptr, uint16 val, Buffer buffer,
+							BufferHintWalLogger wal_logger)
 {
 	BufferDesc *buf_hdr;
 	uint64		lockstate;
@@ -7166,12 +7199,27 @@ BufferSetHintBits16(uint16 *ptr, uint16 val, Buffer buffer)
 	{
 		*ptr = val;
 
-		MarkSharedBufferDirtyHint(buffer, buf_hdr, lockstate, true);
+		MarkSharedBufferDirtyHint(buffer, buf_hdr, lockstate, true,
+								  wal_logger);
 
 		return true;
 	}
 
 	return false;
+}
+
+bool
+BufferSetHintBits16(uint16 *ptr, uint16 val, Buffer buffer)
+{
+	return BufferSetHintBits16Internal(ptr, val, buffer, NULL);
+}
+
+bool
+BufferSetHintBits16WithWal(uint16 *ptr, uint16 val, Buffer buffer,
+						   BufferHintWalLogger wal_logger)
+{
+	Assert(wal_logger != NULL);
+	return BufferSetHintBits16Internal(ptr, val, buffer, wal_logger);
 }
 
 

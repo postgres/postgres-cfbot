@@ -316,9 +316,16 @@ extern void BufferGetTag(Buffer buffer, RelFileLocator *rlocator,
 
 extern void MarkBufferDirtyHint(Buffer buffer, bool buffer_std);
 
+typedef XLogRecPtr (*BufferHintWalLogger) (Buffer buffer);
+
 extern bool BufferSetHintBits16(uint16 *ptr, uint16 val, Buffer buffer);
+extern bool BufferSetHintBits16WithWal(uint16 *ptr, uint16 val, Buffer buffer,
+									   BufferHintWalLogger wal_logger);
 extern bool BufferBeginSetHintBits(Buffer buffer);
 extern void BufferFinishSetHintBits(Buffer buffer, bool mark_dirty, bool buffer_std);
+extern void BufferFinishSetHintBitsWithWal(Buffer buffer, bool mark_dirty,
+										   bool buffer_std,
+										   BufferHintWalLogger wal_logger);
 
 extern void UnlockBuffers(void);
 extern void UnlockBuffer(Buffer buffer);
