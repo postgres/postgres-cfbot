@@ -996,6 +996,15 @@ toast_save_datum_direct(Relation rel, Datum value,
 	state.chunk_seq = 0;
 	state.max_chunk_size = TOAST_MAX_CHUNK_SIZE(TupleDescAttr(state.toasttupDesc, 0)->atttypid);
 
+	if (state.toasttupDesc->natts < 5)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot write direct TOAST datum to legacy TOAST table \"%s\"",
+						RelationGetRelationName(state.toastrel)),
+				 errhint("Run \"SELECT pg_ensure_direct_toast('%s'::regclass);\" or \"ALTER TABLE %s SET (toast_flavour = 'direct');\" to upgrade the TOAST table.",
+						 RelationGetRelationName(rel),
+						 RelationGetRelationName(rel))));
+
 	if (VARATT_IS_SHORT(dval))
 	{
 		data_p = VARDATA_SHORT(dval);

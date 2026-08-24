@@ -26,5 +26,6 @@ extern void AlterTableCreateToastTable(Oid relOid, Datum reloptions,
 									   LOCKMODE lockmode);
 extern void BootstrapToastTable(char *relName,
 								Oid toastOid, Oid toastIndexOid);
+extern void ensure_direct_toast(Oid relid);
 
 #endif							/* TOASTING_H */
