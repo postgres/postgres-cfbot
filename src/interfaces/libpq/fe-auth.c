@@ -81,7 +81,7 @@ pg_GSS_continue(PGconn *conn, int payloadlen)
 									payloadlen);
 			return STATUS_ERROR;
 		}
-		if (pqGetnchar(ginbuf.value, payloadlen, conn))
+		if (pqGetnchar(ginbuf.value, payloadlen, conn, &conn->inBuffer))
 		{
 			/*
 			 * Shouldn't happen, because the caller should've ensured that the
@@ -99,7 +99,7 @@ pg_GSS_continue(PGconn *conn, int payloadlen)
 
 	/* finished parsing, trace server-to-client message */
 	if (conn->Pfdebug)
-		pqTraceOutputMessage(conn, conn->inBuffer + conn->inStart, false);
+		pqTraceOutputMessage(conn, conn->inBuffer.buffer + conn->inBuffer.start, false);
 
 	/* Only try to acquire credentials if GSS delegation isn't disabled. */
 	if (!pg_GSS_have_cred_cache(&conn->gcred))
@@ -247,7 +247,7 @@ pg_SSPI_continue(PGconn *conn, int payloadlen)
 									payloadlen);
 			return STATUS_ERROR;
 		}
-		if (pqGetnchar(inputbuf, payloadlen, conn))
+		if (pqGetnchar(inputbuf, payloadlen, conn, &conn->inBuffer))
 		{
 			/*
 			 * Shouldn't happen, because the caller should've ensured that the
@@ -267,7 +267,7 @@ pg_SSPI_continue(PGconn *conn, int payloadlen)
 
 	/* finished parsing, trace server-to-client message */
 	if (conn->Pfdebug)
-		pqTraceOutputMessage(conn, conn->inBuffer + conn->inStart, false);
+		pqTraceOutputMessage(conn, conn->inBuffer.buffer + conn->inBuffer.start, false);
 
 	OutBuffers[0].pvBuffer = NULL;
 	OutBuffers[0].BufferType = SECBUFFER_TOKEN;
@@ -464,7 +464,7 @@ pg_SASL_init(PGconn *conn, int payloadlen, bool *async)
 	selected_mechanism = NULL;
 	for (;;)
 	{
-		if (pqGets(&mechanism_buf, conn))
+		if (pqGets(&mechanism_buf, conn, &conn->inBuffer))
 		{
 			appendPQExpBufferStr(&conn->errorMessage,
 								 "fe_sendauth: invalid authentication request from server: invalid list of authentication mechanisms\n");
@@ -605,7 +605,7 @@ pg_SASL_init(PGconn *conn, int payloadlen, bool *async)
 
 	/* finished parsing, trace server-to-client message */
 	if (conn->Pfdebug)
-		pqTraceOutputMessage(conn, conn->inBuffer + conn->inStart, false);
+		pqTraceOutputMessage(conn, conn->inBuffer.buffer + conn->inBuffer.start, false);
 
 	Assert(conn->sasl);
 
@@ -718,7 +718,7 @@ pg_SASL_continue(PGconn *conn, int payloadlen, bool final, bool *async)
 		return STATUS_ERROR;
 	}
 
-	if (pqGetnchar(challenge, payloadlen, conn))
+	if (pqGetnchar(challenge, payloadlen, conn, &conn->inBuffer))
 	{
 		free(challenge);
 		return STATUS_ERROR;
@@ -726,7 +726,7 @@ pg_SASL_continue(PGconn *conn, int payloadlen, bool final, bool *async)
 
 	/* finished parsing, trace server-to-client message */
 	if (conn->Pfdebug)
-		pqTraceOutputMessage(conn, conn->inBuffer + conn->inStart, false);
+		pqTraceOutputMessage(conn, conn->inBuffer.buffer + conn->inBuffer.start, false);
 
 	/* For safety and convenience, ensure the buffer is NULL-terminated. */
 	challenge[payloadlen] = '\0';
@@ -803,13 +803,13 @@ pg_password_sendauth(PGconn *conn, const char *password, AuthRequest areq)
 	/* Read the salt from the AuthenticationMD5Password message. */
 	if (areq == AUTH_REQ_MD5)
 	{
-		if (pqGetnchar(md5Salt, 4, conn))
+		if (pqGetnchar(md5Salt, 4, conn, &conn->inBuffer))
 			return STATUS_ERROR;	/* shouldn't happen */
 	}
 
 	/* finished parsing, trace server-to-client message */
 	if (conn->Pfdebug)
-		pqTraceOutputMessage(conn, conn->inBuffer + conn->inStart, false);
+		pqTraceOutputMessage(conn, conn->inBuffer.buffer + conn->inBuffer.start, false);
 
 	/* Encrypt the password if needed. */
 
