@@ -541,7 +541,7 @@ pqDropConnection(PGconn *conn, bool flushInput)
 
 	/* Optionally discard any unread data */
 	if (flushInput)
-		conn->inStart = conn->inCursor = conn->inEnd = 0;
+		conn->inBuffer.start = conn->inBuffer.cursor = conn->inBuffer.end = 0;
 
 	/* Always discard any unsent data */
 	conn->outCount = 0;
@@ -2740,7 +2740,7 @@ pqConnectDBStart(PGconn *conn)
 	}
 
 	/* Ensure our buffers are empty */
-	conn->inStart = conn->inCursor = conn->inEnd = 0;
+	conn->inBuffer.start = conn->inBuffer.cursor = conn->inBuffer.end = 0;
 	conn->outCount = 0;
 
 	/*
@@ -3799,7 +3799,7 @@ keep_going:						/* We will come back to here until there is
 						/* caller failed to wait for data */
 						return PGRES_POLLING_READING;
 					}
-					if (pqGetc(&SSLok, conn) < 0)
+					if (pqGetc(&SSLok, conn, &conn->inBuffer) < 0)
 					{
 						/* should not happen really */
 						return PGRES_POLLING_READING;
@@ -3810,7 +3810,7 @@ keep_going:						/* We will come back to here until there is
 							pqTraceOutputCharResponse(conn, "SSLResponse",
 													  SSLok);
 						/* mark byte consumed */
-						conn->inStart = conn->inCursor;
+						conn->inBuffer.start = conn->inBuffer.cursor;
 					}
 					else if (SSLok == 'N')
 					{
@@ -3818,7 +3818,7 @@ keep_going:						/* We will come back to here until there is
 							pqTraceOutputCharResponse(conn, "SSLResponse",
 													  SSLok);
 						/* mark byte consumed */
-						conn->inStart = conn->inCursor;
+						conn->inBuffer.start = conn->inBuffer.cursor;
 
 						/*
 						 * The connection is still valid, so if it's OK to
@@ -3858,7 +3858,7 @@ keep_going:						/* We will come back to here until there is
 					 * handshake, so it wasn't encrypted and indeed may have
 					 * been injected by a man-in-the-middle.
 					 */
-					if (conn->inCursor != conn->inEnd)
+					if (conn->inBuffer.cursor != conn->inBuffer.end)
 					{
 						libpq_append_conn_error(conn, "received unencrypted data after SSL response");
 						goto error_return;
@@ -3904,7 +3904,7 @@ keep_going:						/* We will come back to here until there is
 					else if (rdresult == 0)
 						/* caller failed to wait for data */
 						return PGRES_POLLING_READING;
-					if (pqGetc(&gss_ok, conn) < 0)
+					if (pqGetc(&gss_ok, conn, &conn->inBuffer) < 0)
 						/* shouldn't happen... */
 						return PGRES_POLLING_READING;
 
@@ -3928,7 +3928,7 @@ keep_going:						/* We will come back to here until there is
 					}
 
 					/* mark byte consumed */
-					conn->inStart = conn->inCursor;
+					conn->inBuffer.start = conn->inBuffer.cursor;
 
 					if (gss_ok == 'N')
 					{
@@ -3965,7 +3965,7 @@ keep_going:						/* We will come back to here until there is
 					 * handshake, so it wasn't encrypted and indeed may have
 					 * been injected by a man-in-the-middle.
 					 */
-					if (conn->inCursor != conn->inEnd)
+					if (conn->inBuffer.cursor != conn->inBuffer.end)
 					{
 						libpq_append_conn_error(conn, "received unencrypted data after GSSAPI encryption response");
 						goto error_return;
@@ -4009,10 +4009,10 @@ keep_going:						/* We will come back to here until there is
 				 * the message is incomplete, we will return without advancing
 				 * inStart, and resume here next time).
 				 */
-				conn->inCursor = conn->inStart;
+				conn->inBuffer.cursor = conn->inBuffer.start;
 
 				/* Read type byte */
-				if (pqGetc(&beresp, conn))
+				if (pqGetc(&beresp, conn, &conn->inBuffer))
 				{
 					/* We'll come back when there is more data */
 					return PGRES_POLLING_READING;
@@ -4034,7 +4034,7 @@ keep_going:						/* We will come back to here until there is
 				}
 
 				/* Read message length word */
-				if (pqGetInt(&msgLength, 4, conn))
+				if (pqGetInt(&msgLength, 4, conn, &conn->inBuffer))
 				{
 					/* We'll come back when there is more data */
 					return PGRES_POLLING_READING;
@@ -4071,14 +4071,14 @@ keep_going:						/* We will come back to here until there is
 					(msgLength < 8 || msgLength > MAX_ERRLEN))
 				{
 					/* Handle error from a pre-3.0 server */
-					conn->inCursor = conn->inStart + 1; /* reread data */
-					if (pqGets_append(&conn->errorMessage, conn))
+					conn->inBuffer.cursor = conn->inBuffer.start + 1;	/* reread data */
+					if (pqGets_append(&conn->errorMessage, conn, &conn->inBuffer))
 					{
 						/*
 						 * We may not have authenticated the server yet, so
 						 * don't let the buffer grow forever.
 						 */
-						avail = conn->inEnd - conn->inCursor;
+						avail = conn->inBuffer.end - conn->inBuffer.cursor;
 						if (avail > MAX_ERRLEN)
 						{
 							libpq_append_conn_error(conn, "received invalid error message");
@@ -4089,7 +4089,7 @@ keep_going:						/* We will come back to here until there is
 						return PGRES_POLLING_READING;
 					}
 					/* OK, we read the message; mark data consumed */
-					pqParseDone(conn, conn->inCursor);
+					pqParseDone(conn, &conn->inBuffer, conn->inBuffer.cursor);
 
 					/*
 					 * Before 7.2, the postmaster didn't always end its
@@ -4115,7 +4115,7 @@ keep_going:						/* We will come back to here until there is
 				 * PGRES_POLLING_READING after this point.
 				 */
 				msgLength -= 4;
-				avail = conn->inEnd - conn->inCursor;
+				avail = conn->inBuffer.end - conn->inBuffer.cursor;
 				if (avail < msgLength)
 				{
 					/*
@@ -4123,8 +4123,7 @@ keep_going:						/* We will come back to here until there is
 					 * needed to hold the whole message; see notes in
 					 * pqParseInput3.
 					 */
-					if (pqCheckInBufferSpace(conn->inCursor + (size_t) msgLength,
-											 conn))
+					if (pqCheckMsgBufferSpace(conn->inBuffer.cursor + (size_t) msgLength, &conn->inBuffer, conn))
 						goto error_return;
 					/* We'll come back when there is more data */
 					return PGRES_POLLING_READING;
@@ -4133,13 +4132,13 @@ keep_going:						/* We will come back to here until there is
 				/* Handle errors. */
 				if (beresp == PqMsg_ErrorResponse)
 				{
-					if (pqGetErrorNotice3(conn, true))
+					if (pqGetErrorNotice3(conn, true, &conn->inBuffer))
 					{
 						libpq_append_conn_error(conn, "received invalid error message");
 						goto error_return;
 					}
 					/* OK, we read the message; mark data consumed */
-					pqParseDone(conn, conn->inCursor);
+					pqParseDone(conn, &conn->inBuffer, conn->inBuffer.cursor);
 
 					/*
 					 * If error is "cannot connect now", try the next host if
@@ -4168,7 +4167,7 @@ keep_going:						/* We will come back to here until there is
 						libpq_append_conn_error(conn, "received duplicate protocol negotiation message");
 						goto error_return;
 					}
-					if (pqGetNegotiateProtocolVersion3(conn))
+					if (pqGetNegotiateProtocolVersion3(conn, &conn->inBuffer))
 					{
 						/* pqGetNegotiateProtocolVersion3 set error already */
 						goto error_return;
@@ -4176,7 +4175,7 @@ keep_going:						/* We will come back to here until there is
 					conn->pversion_negotiated = true;
 
 					/* OK, we read the message; mark data consumed */
-					pqParseDone(conn, conn->inCursor);
+					pqParseDone(conn, &conn->inBuffer, conn->inBuffer.cursor);
 
 					goto keep_going;
 				}
@@ -4185,7 +4184,7 @@ keep_going:						/* We will come back to here until there is
 				conn->auth_req_received = true;
 
 				/* Get the type of request. */
-				if (pqGetInt((int *) &areq, 4, conn))
+				if (pqGetInt((int *) &areq, 4, conn, &conn->inBuffer))
 				{
 					/* can't happen because we checked the length already */
 					libpq_append_conn_error(conn, "received invalid authentication request");
@@ -4217,7 +4216,7 @@ keep_going:						/* We will come back to here until there is
 				 * don't call pqParseDone here because we already traced this
 				 * message inside pg_fe_sendauth.
 				 */
-				conn->inStart = conn->inCursor;
+				conn->inBuffer.start = conn->inBuffer.cursor;
 
 				if (res != STATUS_OK)
 				{
@@ -5031,8 +5030,8 @@ pqMakeEmptyPGconn(void)
 	 * be enlarged anytime it has less than 8K free, so we initially allocate
 	 * twice that.
 	 */
-	conn->inBufSize = 16 * 1024;
-	conn->inBuffer = (char *) malloc(conn->inBufSize);
+	conn->inBuffer.bufSize = 16 * 1024;
+	conn->inBuffer.buffer = (char *) malloc(conn->inBuffer.bufSize);
 	conn->outBufSize = 16 * 1024;
 	conn->outBuffer = (char *) malloc(conn->outBufSize);
 	conn->rowBufLen = 32;
@@ -5040,7 +5039,7 @@ pqMakeEmptyPGconn(void)
 	initPQExpBuffer(&conn->errorMessage);
 	initPQExpBuffer(&conn->workBuffer);
 
-	if (conn->inBuffer == NULL ||
+	if (conn->inBuffer.buffer == NULL ||
 		conn->outBuffer == NULL ||
 		conn->rowBuf == NULL ||
 		PQExpBufferBroken(&conn->errorMessage) ||
@@ -5148,7 +5147,7 @@ freePGconn(PGconn *conn)
 	free(conn->scram_server_key_binary);
 	/* if this is a cancel connection, be_cancel_key may still be allocated */
 	free(conn->be_cancel_key);
-	free(conn->inBuffer);
+	free(conn->inBuffer.buffer);
 	free(conn->outBuffer);
 	free(conn->rowBuf);
 	termPQExpBuffer(&conn->errorMessage);
