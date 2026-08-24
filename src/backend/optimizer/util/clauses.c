@@ -1197,6 +1197,19 @@ contain_nonstrict_functions_walker(Node *node, void *context)
 		return true;
 	else if (IsA(node, JsonConstructorExpr))
 		return true;
+	else if (IsA(node, JsonExpr))
+	{
+		/*
+		 * JSON_EXISTS, JSON_QUERY, and JSON_VALUE are strict with respect to
+		 * their context item, but not their PASSING arguments: a NULL
+		 * PASSING value merely becomes a jsonpath variable containing a JSON
+		 * null, so the result can still be non-NULL.  Likewise, inputs
+		 * appearing only within the ON EMPTY/ON ERROR expressions need not
+		 * affect the result at all.  So we must treat the whole construct as
+		 * non-strict.
+		 */
+		return true;
+	}
 	else
 	{
 		/* Check other function-containing nodes */
