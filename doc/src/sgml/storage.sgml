@@ -479,6 +479,86 @@ Furthermore, <literal>plain</literal> and <literal>direct</literal> <acronym>TOA
 pointers can seamlessly coexist within the same table, allowing tables upgraded from
 older <productname>PostgreSQL</productname> versions to be read transparently and
 gradually adopt Direct <acronym>TOAST</acronym> for new writes.
+When upgrading a pre-existing table that was created prior to Direct <acronym>TOAST</acronym>
+support (having a legacy 3-column <acronym>TOAST</acronym> table), executing
+<command>ALTER TABLE ... SET (toast_flavour = 'direct')</command> automatically
+upgrades the <acronym>TOAST</acronym> table in-place to the 5-column format with a
+partial index.  Administrators can also explicitly upgrade any table or <acronym>TOAST</acronym>
+table by calling <function>pg_ensure_direct_toast(<type>regclass</type>)</function>.
+</para>
+
+<para>
+To upgrade all user tables' <acronym>TOAST</acronym> tables in a quiet database in bulk,
+the following query can be used:
+<programlisting>
+SELECT c.oid::regclass AS tablename,
+       pg_ensure_direct_toast(c.reltoastrelid::regclass)
+  FROM pg_class AS c
+ WHERE c.reltoastrelid != 0
+   AND EXISTS (SELECT FROM pg_stat_user_tables AS t WHERE t.relid = c.oid);
+</programlisting>
+</para>
+
+<para>
+For a busy production database, tables can be upgraded one by one with lock timeouts
+and growing wait times between retries to avoid lock contention:
+<programlisting>
+DO $$
+DECLARE
+  lock_timeout_ms int := 100;
+  max_attempts int := 10;
+  tablename text;
+  toastoid regclass;
+  attempt_nr int;
+  update_completed boolean;
+  attempts text;
+  any_found boolean := false;
+BEGIN
+  PERFORM set_config('lock_timeout', lock_timeout_ms || 'ms', false);
+
+  FOR tablename, toastoid IN
+    SELECT c.oid::regclass::text,
+           c.reltoastrelid::regclass
+      FROM pg_class AS c
+     WHERE EXISTS (SELECT FROM pg_stat_user_tables AS t WHERE t.relid = c.oid)
+       AND (SELECT count(*)
+              FROM pg_attribute AS a
+             WHERE a.attrelid = c.reltoastrelid) = 3
+  LOOP
+    any_found := true;
+    update_completed := false;
+    FOR attempt_nr IN 1..max_attempts LOOP
+      BEGIN
+        PERFORM pg_ensure_direct_toast(toastoid);
+        update_completed := true;
+        EXIT;
+      EXCEPTION
+        WHEN lock_not_available THEN
+          PERFORM pg_sleep(0.1 * attempt_nr); /* sleep a little longer each time */
+        WHEN OTHERS THEN
+          RAISE WARNING 'Error updating % to Direct TOAST: %', tablename, SQLERRM;
+          EXIT;
+      END;
+    END LOOP;
+
+    IF update_completed THEN
+      IF attempt_nr > 1 THEN
+        attempts := format(' after %s attempts', attempt_nr);
+      ELSE
+        attempts := '';
+      END IF;
+      RAISE INFO 'Table % updated to Direct TOAST%', tablename, attempts;
+    ELSE
+      RAISE WARNING 'Timeout waiting to update table % to Direct TOAST', tablename;
+    END IF;
+  END LOOP;
+
+  IF NOT any_found THEN
+    RAISE INFO 'No tables needed update to use Direct TOAST';
+  END IF;
+END;
+$$;
+</programlisting>
 </para>
 
 <para>

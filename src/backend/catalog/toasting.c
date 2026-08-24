@@ -27,10 +27,15 @@
 #include "catalog/pg_am.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_opclass.h"
+#include "catalog/pg_type.h"
 #include "catalog/toasting.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
+#include "utils/builtins.h"
 #include "utils/fmgroids.h"
+#include "utils/inval.h"
+#include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
 
@@ -453,4 +458,177 @@ needs_toast_table(Relation rel)
 
 	/* Otherwise, let the AM decide. */
 	return table_relation_needs_toast_table(rel);
+}
+
+/*
+ * ensure_direct_toast
+ *
+ * Upgrades a legacy (3-column, full index) TOAST table in-place to support
+ * the Direct TOAST format.
+ * Accepts either the parent table's OID or the TOAST table's OID.
+ */
+void
+ensure_direct_toast(Oid relid)
+{
+	Relation	targetrel;
+	Relation	toastrel;
+	Oid			toastrelid;
+	Relation	pg_class_rel;
+	Relation	pg_attribute_rel;
+	Relation	pg_index_rel;
+	HeapTuple	tuple;
+	HeapTuple	newtuple;
+	TupleDesc	td;
+	Oid			toastIndexOid = InvalidOid;
+	List	   *indexoids;
+
+	targetrel = table_open(relid, AccessShareLock);
+
+	if (targetrel->rd_rel->relkind == RELKIND_TOASTVALUE)
+	{
+		toastrelid = relid;
+		table_close(targetrel, AccessShareLock);
+	}
+	else if (targetrel->rd_rel->relkind == RELKIND_RELATION ||
+			 targetrel->rd_rel->relkind == RELKIND_MATVIEW)
+	{
+		toastrelid = targetrel->rd_rel->reltoastrelid;
+		table_close(targetrel, AccessShareLock);
+
+		if (!OidIsValid(toastrelid))
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("table \"%s\" does not have a TOAST table",
+							get_rel_name(relid))));
+	}
+	else
+	{
+		table_close(targetrel, AccessShareLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("relation \"%s\" is not a table or TOAST table",
+						get_rel_name(relid))));
+	}
+
+	/* Open the toast relation with exclusive lock */
+	toastrel = table_open(toastrelid, AccessExclusiveLock);
+
+	if (toastrel->rd_rel->relkind != RELKIND_TOASTVALUE)
+		elog(ERROR, "relation %u is not a TOAST table", toastrelid);
+
+	/*
+	 * Step 1: Add missing columns chunk_tids and chunk_tid_offsets if needed.
+	 */
+	if (toastrel->rd_att->natts < 5)
+	{
+		td = CreateTemplateTupleDesc(2);
+		TupleDescInitEntry(td, (AttrNumber) 1,
+						   "chunk_tids",
+						   TIDARRAYOID,
+						   -1, 0);
+		TupleDescInitEntry(td, (AttrNumber) 2,
+						   "chunk_tid_offsets",
+						   INT8ARRAYOID,
+						   -1, 0);
+		TupleDescAttr(td, 0)->attnum = 4;
+		TupleDescAttr(td, 0)->attstorage = TYPSTORAGE_PLAIN;
+		TupleDescAttr(td, 0)->attcompression = InvalidCompressionMethod;
+		TupleDescAttr(td, 1)->attnum = 5;
+		TupleDescAttr(td, 1)->attstorage = TYPSTORAGE_PLAIN;
+		TupleDescAttr(td, 1)->attcompression = InvalidCompressionMethod;
+
+		populate_compact_attribute(td, 0);
+		populate_compact_attribute(td, 1);
+		TupleDescFinalize(td);
+
+		pg_attribute_rel = table_open(AttributeRelationId, RowExclusiveLock);
+		InsertPgAttributeTuples(pg_attribute_rel, td, toastrelid, NULL, NULL);
+		table_close(pg_attribute_rel, RowExclusiveLock);
+		FreeTupleDesc(td);
+
+		/* Update pg_class.relnatts = 5 */
+		pg_class_rel = table_open(RelationRelationId, RowExclusiveLock);
+		tuple = SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(toastrelid));
+		if (!HeapTupleIsValid(tuple))
+			elog(ERROR, "cache lookup failed for relation %u", toastrelid);
+		((Form_pg_class) GETSTRUCT(tuple))->relnatts = 5;
+		CatalogTupleUpdate(pg_class_rel, &tuple->t_self, tuple);
+		heap_freetuple(tuple);
+		table_close(pg_class_rel, RowExclusiveLock);
+	}
+
+	/*
+	 * Step 2: Ensure the TOAST unique index is partial (WHERE chunk_id IS NOT NULL).
+	 */
+	indexoids = RelationGetIndexList(toastrel);
+	if (indexoids != NIL)
+		toastIndexOid = linitial_oid(indexoids);
+	list_free(indexoids);
+
+	if (OidIsValid(toastIndexOid))
+	{
+		pg_index_rel = table_open(IndexRelationId, RowExclusiveLock);
+		tuple = SearchSysCacheCopy1(INDEXRELID, ObjectIdGetDatum(toastIndexOid));
+		if (HeapTupleIsValid(tuple))
+		{
+			bool		isnull;
+
+			(void) SysCacheGetAttr(INDEXRELID, tuple, Anum_pg_index_indpred, &isnull);
+
+			if (isnull)
+			{
+				Datum		values[Natts_pg_index];
+				bool		nulls[Natts_pg_index];
+				bool		replaces[Natts_pg_index];
+				NullTest   *ntest;
+				char	   *pred_str;
+
+				memset(values, 0, sizeof(values));
+				memset(nulls, 0, sizeof(nulls));
+				memset(replaces, 0, sizeof(replaces));
+
+				ntest = makeNode(NullTest);
+				ntest->arg = (Expr *) makeVar(1, 1, OIDOID, -1, InvalidOid, 0);
+				ntest->nulltesttype = IS_NOT_NULL;
+				ntest->argisrow = false;
+				ntest->location = -1;
+
+				pred_str = nodeToString(list_make1(ntest));
+
+				values[Anum_pg_index_indisprimary - 1] = BoolGetDatum(false);
+				replaces[Anum_pg_index_indisprimary - 1] = true;
+
+				values[Anum_pg_index_indpred - 1] = CStringGetTextDatum(pred_str);
+				replaces[Anum_pg_index_indpred - 1] = true;
+				nulls[Anum_pg_index_indpred - 1] = false;
+
+				newtuple = heap_modify_tuple(tuple, RelationGetDescr(pg_index_rel),
+											 values, nulls, replaces);
+				CatalogTupleUpdate(pg_index_rel, &tuple->t_self, newtuple);
+				heap_freetuple(newtuple);
+				pfree(pred_str);
+
+				CacheInvalidateRelcacheByRelid(toastIndexOid);
+			}
+			heap_freetuple(tuple);
+		}
+		table_close(pg_index_rel, RowExclusiveLock);
+	}
+
+	CacheInvalidateRelcacheByRelid(toastrelid);
+	CommandCounterIncrement();
+
+	table_close(toastrel, AccessExclusiveLock);
+}
+
+/*
+ * SQL-callable function
+ */
+Datum
+pg_ensure_direct_toast(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+
+	ensure_direct_toast(relid);
+	PG_RETURN_VOID();
 }

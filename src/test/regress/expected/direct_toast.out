@@ -563,3 +563,99 @@ BEGIN
 END$$;
 NOTICE:  expected error caught for CLUSTER on direct TOAST table: cannot cluster on partial index "pg_toast_16485_index"
 DROP TABLE tab_toast_maint;
+--
+-- Test pg_ensure_direct_toast and legacy TOAST table in-place upgrade
+--
+CREATE TABLE tab_legacy_test(id int, val text);
+ALTER TABLE tab_legacy_test ALTER COLUMN val SET STORAGE EXTERNAL;
+INSERT INTO tab_legacy_test VALUES (1, repeat('legacy-plain-payload-', 300));
+-- Simulate a legacy 3-column TOAST table by removing trailing attributes and index predicate
+DO $$
+DECLARE
+    toast_relid oid;
+    toast_idxid oid;
+BEGIN
+    SELECT c1.reltoastrelid INTO toast_relid
+    FROM pg_class c1
+    WHERE c1.relname = 'tab_legacy_test';
+
+    SELECT indexrelid INTO toast_idxid
+    FROM pg_index
+    WHERE indrelid = toast_relid;
+
+    -- Delete attributes 4 and 5 from pg_attribute
+    DELETE FROM pg_attribute WHERE attrelid = toast_relid AND attnum IN (4, 5);
+    UPDATE pg_class SET relnatts = 3 WHERE oid = toast_relid;
+
+    -- Clear index predicate from pg_index
+    UPDATE pg_index SET indpred = NULL WHERE indexrelid = toast_idxid;
+END$$;
+\c -
+-- Attempting direct write to legacy TOAST table should fail with descriptive error & hint
+SET toast_flavour = 'direct';
+INSERT INTO tab_legacy_test VALUES (2, repeat('direct-write-attempt-', 300));
+ERROR:  cannot write direct TOAST datum to legacy TOAST table "pg_toast_16495"
+HINT:  Run "SELECT pg_ensure_direct_toast('tab_legacy_test'::regclass);" or "ALTER TABLE tab_legacy_test SET (toast_flavour = 'direct');" to upgrade the TOAST table.
+RESET toast_flavour;
+-- Read legacy plain data still works
+SELECT id, length(val), substring(val, 1, 20) FROM tab_legacy_test WHERE id = 1;
+ id | length |      substring       
+----+--------+----------------------
+  1 |   6300 | legacy-plain-payload
+(1 row)
+
+-- Upgrade using pg_ensure_direct_toast
+SELECT pg_ensure_direct_toast('tab_legacy_test'::regclass);
+ pg_ensure_direct_toast 
+------------------------
+ 
+(1 row)
+
+-- Direct write now succeeds!
+SET toast_flavour = 'direct';
+INSERT INTO tab_legacy_test VALUES (2, repeat('direct-write-success-', 300));
+RESET toast_flavour;
+-- Read both plain and direct rows
+SELECT id, length(val), substring(val, 1, 20) FROM tab_legacy_test ORDER BY id;
+ id | length |      substring       
+----+--------+----------------------
+  1 |   6300 | legacy-plain-payload
+  2 |   6300 | direct-write-success
+(2 rows)
+
+-- Test ALTER TABLE SET (toast_flavour = 'direct') on a simulated legacy table
+CREATE TABLE tab_legacy_alter(id int, val text);
+ALTER TABLE tab_legacy_alter ALTER COLUMN val SET STORAGE EXTERNAL;
+INSERT INTO tab_legacy_alter VALUES (1, repeat('legacy-alter-payload-', 300));
+DO $$
+DECLARE
+    toast_relid oid;
+    toast_idxid oid;
+BEGIN
+    SELECT c1.reltoastrelid INTO toast_relid
+    FROM pg_class c1
+    WHERE c1.relname = 'tab_legacy_alter';
+
+    SELECT indexrelid INTO toast_idxid
+    FROM pg_index
+    WHERE indrelid = toast_relid;
+
+    DELETE FROM pg_attribute WHERE attrelid = toast_relid AND attnum IN (4, 5);
+    UPDATE pg_class SET relnatts = 3 WHERE oid = toast_relid;
+    UPDATE pg_index SET indpred = NULL WHERE indexrelid = toast_idxid;
+END$$;
+\c -
+-- Alter table SET toast_flavour = 'direct' automatically calls ensure_direct_toast
+ALTER TABLE tab_legacy_alter SET (toast_flavour = 'direct');
+-- Direct write now succeeds
+INSERT INTO tab_legacy_alter VALUES (2, repeat('alter-direct-success-', 300));
+-- Read both rows
+SELECT id, length(val), substring(val, 1, 20) FROM tab_legacy_alter ORDER BY id;
+ id | length |      substring       
+----+--------+----------------------
+  1 |   6300 | legacy-alter-payload
+  2 |   6300 | alter-direct-success
+(2 rows)
+
+DROP TABLE tab_legacy_test;
+DROP TABLE tab_legacy_alter;
