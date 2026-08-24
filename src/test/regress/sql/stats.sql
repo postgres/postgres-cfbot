@@ -581,6 +581,19 @@ SELECT stats_reset AS wal_reset_ts FROM pg_stat_wal \gset
 SELECT pg_stat_reset_shared('wal');
 SELECT stats_reset > :'wal_reset_ts'::timestamptz FROM pg_stat_wal;
 
+-- Test that reset_shared with vfdcache specified as the stats type works
+SELECT stats_reset AS vfdcache_reset_ts FROM pg_stat_vfdcache \gset
+SELECT pg_stat_reset_shared('vfdcache');
+SELECT stats_reset > :'vfdcache_reset_ts'::timestamptz FROM pg_stat_vfdcache;
+
+-- Test that VFD cache hits and misses are tracked after file access
+SELECT hits + misses AS vfd_accesses_before FROM pg_stat_vfdcache \gset
+CREATE TEMP TABLE test_vfd_activity (i int);
+INSERT INTO test_vfd_activity SELECT generate_series(1, 100);
+DROP TABLE test_vfd_activity;
+SELECT pg_stat_force_next_flush();
+SELECT (hits + misses) > :vfd_accesses_before FROM pg_stat_vfdcache;
+
 -- Test error case for reset_shared with unknown stats type
 SELECT pg_stat_reset_shared('unknown');
 
