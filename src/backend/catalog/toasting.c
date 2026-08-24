@@ -713,3 +713,20 @@ ensure_direct_toast(Oid relid)
 
 	table_close(toastrel, NoLock);
 }
+
+/*
+ * SQL-callable function
+ */
+Datum
+pg_ensure_direct_toast(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("must be superuser to upgrade TOAST table format")));
+
+	ensure_direct_toast(relid);
+	PG_RETURN_VOID();
+}
