@@ -446,7 +446,8 @@ pqParseDone(PGconn *conn, msg_buffer * msgBuf, int newInStart)
 {
 	/* trace server-to-client message */
 	if (conn->Pfdebug)
-		pqTraceOutputMessage(conn, msgBuf->buffer + msgBuf->start, false);
+		pqTraceOutputMessage(conn, msgBuf->buffer + msgBuf->start, false,
+							 msgBuf == &conn->decompressBuffer);
 
 	/* Mark message as done */
 	msgBuf->start = newInStart;
@@ -546,7 +547,7 @@ pqPutMsgEnd(PGconn *conn)
 	if (conn->Pfdebug)
 	{
 		if (conn->outCount < conn->outMsgStart)
-			pqTraceOutputMessage(conn, conn->outBuffer + conn->outCount, true);
+			pqTraceOutputMessage(conn, conn->outBuffer + conn->outCount, true, false);
 		else
 			pqTraceOutputNoTypeByteMessage(conn,
 										   conn->outBuffer + conn->outMsgStart);
