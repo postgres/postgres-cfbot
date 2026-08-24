@@ -2428,6 +2428,9 @@ pg_stat_user_tables| SELECT relid,
   WHERE ((schemaname <> ALL (ARRAY['pg_catalog'::name, 'information_schema'::name])) AND (schemaname !~ '^pg_toast'::text));
 pg_stat_vfdcache| SELECT pg_stat_get_vfd_hits() AS hits,
     pg_stat_get_vfd_misses() AS misses,
+    pg_stat_get_vfd_cache_open_entries() AS open_entries,
+    pg_stat_get_vfd_cache_allocated_entries() AS allocated_entries,
+    pg_stat_get_vfd_cache_bytes() AS cache_bytes,
     pg_stat_get_vfd_max_open_fds() AS max_open_fds,
         CASE
             WHEN ((pg_stat_get_vfd_hits() + pg_stat_get_vfd_misses()) = 0) THEN NULL::double precision

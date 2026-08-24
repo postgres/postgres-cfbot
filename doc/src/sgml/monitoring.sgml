@@ -3965,6 +3965,39 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>open_entries</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Sum of VFD slots currently holding an open kernel file descriptor
+       across all active backends (equivalent to summing each backend's
+       <literal>nfile</literal> counter)
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>allocated_entries</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Sum of allocated VFD cache entries across all active backends,
+       including entries whose file descriptor has been closed by the LRU
+       eviction policy but whose slot has not yet been freed
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>cache_bytes</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Sum of memory used by VFD cache entries across all active backends,
+       in bytes; includes <literal>sizeof(Vfd)</literal> for each allocated
+       slot plus the heap-allocated file name string for each populated slot
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
        <structfield>max_open_fds</structfield> <type>integer</type>
       </para>
       <para>
