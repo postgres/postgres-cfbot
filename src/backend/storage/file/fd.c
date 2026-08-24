@@ -1478,6 +1478,7 @@ static int
 FileAccess(File file)
 {
 	int			returnValue;
+	bool		is_open;
 
 	DO_DB(elog(LOG, "FileAccess %d (%s)",
 			   file, VfdCache[file].fileName));
@@ -1486,8 +1487,10 @@ FileAccess(File file)
 	 * Is the file open?  If not, open it and put it at the head of the LRU
 	 * ring (possibly closing the least recently used file to get an FD).
 	 */
+	is_open = !FileIsNotOpen(file);
+	pgstat_count_vfd_access(is_open);
 
-	if (FileIsNotOpen(file))
+	if (!is_open)
 	{
 		returnValue = LruInsert(file);
 		if (returnValue != 0)
