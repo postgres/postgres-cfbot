@@ -2470,6 +2470,57 @@ check_old_cluster_subscription_state(void)
 	PQclear(res);
 	PQfinish(conn);
 
+	if (user_opts.do_copy_pg_commit_ts)
+	{
+		/*
+		 * Save pg_replication_origin.roident and
+		 * pg_replication_origin_status.remote_lsn old cluster.
+		 */
+		conn = connectToServer(&old_cluster, old_cluster.dbarr.dbs[0].db_name);
+		res = executeQueryOrDie(conn,
+								"SELECT string_agg(CASE WHEN os.remote_lsn is not null THEN format('"
+								"           SELECT pg_catalog.pg_replication_origin_advance("
+								"           (SELECT roname FROM pg_catalog.pg_replication_origin "
+								"           WHERE roident=%%s), %%L)', o.roident, os.remote_lsn) END, ';'),"
+								"       format('UPDATE pg_catalog.pg_replication_origin r SET roident=roident::int+10000'), "
+								"       string_agg(CASE WHEN s.subname is not null THEN "
+								"                  format('UPDATE pg_catalog.pg_replication_origin r "
+								"                          SET roident=%%s from pg_catalog.pg_subscription s WHERE r.roname=''pg_''||s.oid "
+								"                          and s.subname=%%L'"
+								"                  ,o.roident, s.subname) "
+								"                  ELSE"
+								"                  format('UPDATE pg_catalog.pg_replication_origin r "
+								"                         SET roident=%%s WHERE r.roname=%%L'"
+								"                  ,o.roident, o.roname) "
+								"                  END"
+								"       ,';' ORDER BY o.roident DESC), "
+								"        max(o.roident)>9999 "
+								"FROM pg_catalog.pg_replication_origin o "
+								"LEFT JOIN pg_catalog.pg_subscription s "
+								"       ON o.roname = 'pg_' || s.oid "
+								"LEFT JOIN pg_catalog.pg_replication_origin_status os "
+								"       ON os.external_id = o.roname;");
+
+		ntup = PQntuples(res);
+		if (ntup > 0)
+		{
+			if (strcmp(PQgetvalue(res, 0, 3), "t") == 0)
+				pg_fatal("The origin ID exceeds 9999");
+			sql_roident_correction = createPQExpBuffer();
+			/* Prepare roident in new cluster for execute update */
+			appendPQExpBufferStr(sql_roident_correction, PQgetvalue(res, 0, 1));
+			appendPQExpBufferStr(sql_roident_correction, ";\n");
+			/* Restore roident */
+			appendPQExpBufferStr(sql_roident_correction, PQgetvalue(res, 0, 2));
+			appendPQExpBufferStr(sql_roident_correction, ";\n");
+			/* Restore remote_lsn if exists */
+			appendPQExpBufferStr(sql_roident_correction, PQgetvalue(res, 0, 0));
+			appendPQExpBufferStr(sql_roident_correction, ";\n");
+			PQclear(res);
+			PQfinish(conn);
+		}
+	}
+
 	/*
 	 * We don't allow upgrade if there is a risk of dangling slot or origin
 	 * corresponding to initial sync after upgrade.
