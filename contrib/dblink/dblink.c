@@ -145,6 +145,7 @@ static remoteConn *pconn = NULL;
 static HTAB *remoteConnHash = NULL;
 
 /* custom wait event values, retrieved from shared memory */
+static uint32 dblink_we_cancel = 0;
 static uint32 dblink_we_connect = 0;
 static uint32 dblink_we_get_conn = 0;
 static uint32 dblink_we_get_result = 0;
@@ -1350,7 +1351,12 @@ dblink_cancel_query(PG_FUNCTION_ARGS)
 	conn = dblink_get_named_conn(text_to_cstring(PG_GETARG_TEXT_PP(0)));
 	endtime = TimestampTzPlusMilliseconds(GetCurrentTimestamp(),
 										  30000);
-	msg = libpqsrv_cancel(conn, endtime);
+
+	/* first time, allocate or get the custom wait event */
+	if (dblink_we_cancel == 0)
+		dblink_we_cancel = WaitEventExtensionNew("DblinkCancel");
+
+	msg = libpqsrv_cancel(conn, endtime, dblink_we_cancel);
 	if (msg == NULL)
 		msg = "OK";
 
