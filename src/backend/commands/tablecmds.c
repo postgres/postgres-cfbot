@@ -795,6 +795,9 @@ static void ATExecSplitPartition(List **wqueue, AlteredTableInfo *tab,
 static List *collectPartitionIndexExtDeps(List *partitionOids);
 static void applyPartitionIndexExtDeps(Oid newPartOid, List *extDepState);
 static void freePartitionIndexExtDeps(List *extDepState);
+static void ATPrepSetExpression(List **wqueue, AlteredTableInfo *tab, Relation rel,
+								AlterTableCmd *cmd, bool recurse, bool recursing,
+								LOCKMODE lockmode);
 
 /* ----------------------------------------------------------------
  *		DefineRelation
@@ -5134,6 +5137,7 @@ ATPrepCmd(List **wqueue, Relation rel, AlterTableCmd *cmd,
 			ATSimplePermissions(cmd->subtype, rel,
 								ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_FOREIGN_TABLE);
 			ATSimpleRecursion(wqueue, rel, cmd, recurse, lockmode, context);
+			ATPrepSetExpression(wqueue, tab, rel, cmd, recurse, recursing, lockmode);
 			pass = AT_PASS_SET_EXPRESSION;
 			break;
 		case AT_DropExpression: /* ALTER COLUMN DROP EXPRESSION */
@@ -8895,6 +8899,71 @@ ATExecSetExpression(AlteredTableInfo *tab, Relation rel, const char *colName,
 	ObjectAddressSubSet(address, RelationRelationId,
 						RelationGetRelid(rel), attnum);
 	return address;
+}
+
+/*
+ * ALTER TABLE ALTER COLUMN SET EXPRESSION
+ */
+static void
+ATPrepSetExpression(List **wqueue, AlteredTableInfo *tab, Relation rel,
+					AlterTableCmd *cmd, bool recurse, bool recursing,
+					LOCKMODE lockmode)
+{
+	char	   *colName = cmd->name;
+	Form_pg_attribute attTup;
+	AttrNumber	attnum;
+	HeapTuple	tuple;
+
+	tuple = SearchSysCacheAttName(RelationGetRelid(rel),
+								  colName);
+	if (!HeapTupleIsValid(tuple))
+	{
+		/*
+		 * If a newly added generated column has its generation expression set
+		 * in the same command, the column has not been installed yet, so the
+		 * attribute lookup will return false.
+		 */
+		return;
+	}
+	attTup = (Form_pg_attribute) GETSTRUCT(tuple);
+	attnum = attTup->attnum;
+
+	ReleaseSysCache(tuple);
+
+	if (recursing)
+		return;
+
+	RememberAllDependentForRebuilding(tab, AT_SetExpression, rel, attnum, colName);
+
+	RememberWholeRowDependentForRebuilding(tab, AT_SetExpression, rel);
+
+	if (!recurse && !recursing)
+	{
+		/*
+		 * Cannot use ONLY to modify a generated column's expression when
+		 * there are dependencies (e.g. constraints or indexes) that need to
+		 * be rebuilt. For a parent table, the rebuild must cascade to its
+		 * child partitions. For a child table, dropping and recreating its
+		 * dependencies while preserving the partition constraint hierarchy is
+		 * not trivial.
+		 */
+		if (tab->changedConstraintOids != NIL || tab->changedIndexOids != NIL)
+			ereport(ERROR,
+					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("ALTER TABLE ONLY ... SET EXPRESSION is not supported for generated columns with dependent objects on a parent table"),
+					errdetail("Dependent objects, such as constraints and indexes, must be rebuilt in child tables as well, which conflicts with ONLY."));
+	}
+	else if (!recursing && has_superclass(RelationGetRelid(rel)))
+	{
+		if (tab->changedConstraintOids != NIL || tab->changedIndexOids != NIL)
+			ereport(ERROR,
+					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("cannot use ALTER TABLE ... SET EXPRESSION on a generated column in a child table with dependent objects"),
+					errdetail("Inherited objects, such as indexes, cannot be rebuilt independently for a child table."));
+
+	}
+	tab->changedConstraintOids = NIL;
+	tab->changedIndexOids = NIL;
 }
 
 /*
