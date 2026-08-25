@@ -24,6 +24,18 @@ typedef struct PgAioHandleCallbacks PgAioHandleCallbacks;
 typedef struct PgAioTargetInfo PgAioTargetInfo;
 
 /*
+ * A tag identifying a file handled by sync.c.  This is defined here so that
+ * PgAioTargetData can store it without duplicating its representation.
+ */
+typedef struct PgAioSyncFileTag
+{
+	int16		handler;		/* SyncRequestHandler value */
+	int16		forknum;		/* ForkNumber */
+	RelFileLocator rlocator;	/* physical relation identifier */
+	uint64		segno;
+} PgAioSyncFileTag;
+
+/*
  * A reference to an IO that can be used to wait for the IO (using
  * pgaio_wref_wait()) to complete.
  *
@@ -69,6 +81,8 @@ typedef union PgAioTargetData
 		bool		is_temp:1;	/* proc can be inferred by owning AIO */
 		bool		skip_fsync:1;
 	}			smgr;
+
+	PgAioSyncFileTag sync_filetag;
 } PgAioTargetData;
 
 
