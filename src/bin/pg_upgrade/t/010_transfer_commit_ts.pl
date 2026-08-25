@@ -32,7 +32,7 @@ $new->init;
 
 # Setup a common pg_upgrade command to be used by all the test cases
 my @pg_upgrade_cmd = (
-	'pg_upgrade', '--no-sync',
+	'pg_upgrade', '--no-sync', '--preserve-commit-timestamps',
 	'--old-datadir' => $old->data_dir,
 	'--new-datadir' => $new->data_dir,
 	'--old-bindir' => $old->config_data('--bindir'),

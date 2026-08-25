@@ -765,10 +765,11 @@ determine_commit_ts_transfer(void)
 	old_cluster.copy_commit_ts = false;
 
 	/*
-	 * Quick return if no commit timestamp information was available from
-	 * pg_control.
+	 * Quick return if 1) no commit timestamp information was available from
+	 * pg_control or 2) not requested.
 	 */
-	if (old_cluster.controldata.chkpnt_oldstCommitTsxid == 0 ||
+	if (!user_opts.do_copy_pg_commit_ts ||
+		old_cluster.controldata.chkpnt_oldstCommitTsxid == 0 ||
 		old_cluster.controldata.chkpnt_newstCommitTsxid == 0)
 		return;
 
