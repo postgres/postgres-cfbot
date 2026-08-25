@@ -46,17 +46,11 @@ typedef enum SyncRequestHandler
 } SyncRequestHandler;
 
 /*
- * A tag identifying a file.  Currently it has the members required for md.c's
- * usage, but sync.c has no knowledge of the internal structure, and it is
- * liable to change as required by future handlers.
+ * A tag identifying a file.  Its representation is shared with AIO target
+ * data, so changes are automatically visible to processes that reopen files
+ * on behalf of sync.c.
  */
-typedef struct FileTag
-{
-	int16		handler;		/* SyncRequestHandler value, saving space */
-	int16		forknum;		/* ForkNumber, saving space */
-	RelFileLocator rlocator;
-	uint64		segno;
-} FileTag;
+typedef PgAioSyncFileTag FileTag;
 
 struct PendingFsyncEntry;
 struct PgAioHandle;
@@ -118,5 +112,10 @@ extern void ProcessSyncRequests(void);
 extern void RememberSyncRequest(const FileTag *ftag, SyncRequestType type);
 extern bool RegisterSyncRequest(const FileTag *ftag, SyncRequestType type,
 								bool retryOnError);
+
+/* AIO support */
+extern PGDLLIMPORT const PgAioTargetInfo aio_sync_filetag_target_info;
+extern void pgaio_io_set_target_sync_filetag(PgAioHandle *ioh,
+											 const FileTag *ftag);
 
 #endif							/* SYNC_H */

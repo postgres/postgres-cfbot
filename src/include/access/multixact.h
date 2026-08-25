@@ -115,7 +115,9 @@ extern bool MultiXactIdPrecedesOrEquals(MultiXactId multi1,
 										MultiXactId multi2);
 
 extern void multixactoffsetssyncfiletag(PgAioHandle *ioh, InflightSyncEntry *entry);
+extern int	multixactoffsetsopenfiletag(const FileTag *ftag);
 extern void multixactmemberssyncfiletag(PgAioHandle *ioh, InflightSyncEntry *entry);
+extern int	multixactmembersopenfiletag(const FileTag *ftag);
 
 extern void AtEOXact_MultiXact(void);
 extern void AtPrepare_MultiXact(void);

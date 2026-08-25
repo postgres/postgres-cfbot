@@ -132,9 +132,19 @@ static CycleCtr checkpoint_cycle_ctr = 0;
 typedef struct SyncOps
 {
 	void		(*sync_syncfiletag) (PgAioHandle *ioh, InflightSyncEntry *entry);
+
+	/*
+	 * Optional.  Reopen the file identified by ftag, so that an fsync started
+	 * by sync_syncfiletag() can be executed in a different process, e.g. an
+	 * IO worker.  Returns a file descriptor opened with OpenTransientFile(),
+	 * or -1 with errno set.  Handlers that provide this must use the
+	 * PGAIO_TID_SYNC_FILETAG target (see pgaio_io_set_target_sync_filetag()).
+	 */
+	int			(*sync_openfiletag) (const FileTag *ftag);
 	int			(*sync_unlinkfiletag) (const FileTag *ftag, char *path);
 	bool		(*sync_filetagmatches) (const FileTag *ftag,
 										const FileTag *candidate);
+	const char *sync_target_name;
 } SyncOps;
 
 /*
@@ -149,21 +159,128 @@ static const SyncOps syncsw[] = {
 	},
 	/* pg_xact */
 	[SYNC_HANDLER_CLOG] = {
-		.sync_syncfiletag = clogsyncfiletag
+		.sync_syncfiletag = clogsyncfiletag,
+		.sync_openfiletag = clogopenfiletag,
+		.sync_target_name = "pg_xact"
 	},
 	/* pg_commit_ts */
 	[SYNC_HANDLER_COMMIT_TS] = {
-		.sync_syncfiletag = committssyncfiletag
+		.sync_syncfiletag = committssyncfiletag,
+		.sync_openfiletag = committsopenfiletag,
+		.sync_target_name = "pg_commit_ts"
 	},
 	/* pg_multixact/offsets */
 	[SYNC_HANDLER_MULTIXACT_OFFSET] = {
-		.sync_syncfiletag = multixactoffsetssyncfiletag
+		.sync_syncfiletag = multixactoffsetssyncfiletag,
+		.sync_openfiletag = multixactoffsetsopenfiletag,
+		.sync_target_name = "pg_multixact/offsets"
 	},
 	/* pg_multixact/members */
 	[SYNC_HANDLER_MULTIXACT_MEMBER] = {
-		.sync_syncfiletag = multixactmemberssyncfiletag
+		.sync_syncfiletag = multixactmemberssyncfiletag,
+		.sync_openfiletag = multixactmembersopenfiletag,
+		.sync_target_name = "pg_multixact/members"
 	}
 };
+
+static void sync_aio_reopen(PgAioHandle *ioh);
+static void sync_aio_close(PgAioHandle *ioh);
+static char *sync_aio_describe_identity(const PgAioTargetData *sd);
+
+/*
+ * Target info for files identified by a FileTag (see PGAIO_TID_SYNC_FILETAG).
+ * Unlike PGAIO_TID_SYNC, a FileTag contains everything needed to find the
+ * file again in another process, so such IOs can be executed by IO workers.
+ */
+const PgAioTargetInfo aio_sync_filetag_target_info = {
+	.name = "sync_filetag",
+	.reopen = sync_aio_reopen,
+	.close = sync_aio_close,
+	.describe_identity = sync_aio_describe_identity,
+};
+
+/*
+ * Set up ioh to operate on the file identified by ftag.
+ */
+void
+pgaio_io_set_target_sync_filetag(PgAioHandle *ioh, const FileTag *ftag)
+{
+	PgAioTargetData *sd = pgaio_io_get_target_data(ioh);
+
+	Assert(syncsw[ftag->handler].sync_openfiletag != NULL);
+	Assert(syncsw[ftag->handler].sync_target_name != NULL);
+
+	pgaio_io_set_target(ioh, PGAIO_TID_SYNC_FILETAG);
+
+	sd->sync_filetag = *ftag;
+}
+
+static FileTag
+sync_aio_filetag(const PgAioTargetData *sd)
+{
+	return sd->sync_filetag;
+}
+
+/*
+ * reopen callback for PGAIO_TID_SYNC_FILETAG, to open the file in the process
+ * executing the IO.
+ */
+static void
+sync_aio_reopen(PgAioHandle *ioh)
+{
+	PgAioTargetData *sd = pgaio_io_get_target_data(ioh);
+	PgAioOpData *od = pgaio_io_get_op_data(ioh);
+	FileTag		ftag = sync_aio_filetag(sd);
+	int			fd;
+
+	/*
+	 * The caller needs to prevent interrupts from being processed, otherwise
+	 * the FD could be closed again before we get to executing the IO.
+	 */
+	Assert(!INTERRUPTS_CAN_BE_PROCESSED());
+
+	Assert(pgaio_io_get_op(ioh) == PGAIO_OP_FSYNC);
+
+	fd = syncsw[ftag.handler].sync_openfiletag(&ftag);
+	if (fd < 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not open segment " UINT64_FORMAT " of SLRU \"%s\": %m",
+						ftag.segno,
+						syncsw[ftag.handler].sync_target_name)));
+
+	od->fsync.fd = fd;
+}
+
+/*
+ * close callback for PGAIO_TID_SYNC_FILETAG, releasing the descriptor
+ * acquired by sync_aio_reopen().
+ *
+ * Called in a critical section, so a failure to close cannot be reported.
+ * That is not a meaningful loss: the data has already been flushed by the
+ * fsync, and the descriptor is not written to.
+ */
+static void
+sync_aio_close(PgAioHandle *ioh)
+{
+	PgAioOpData *od = pgaio_io_get_op_data(ioh);
+
+	(void) CloseTransientFile(od->fsync.fd);
+	od->fsync.fd = -1;
+}
+
+/*
+ * describe_identity callback for PGAIO_TID_SYNC_FILETAG.
+ */
+static char *
+sync_aio_describe_identity(const PgAioTargetData *sd)
+{
+	FileTag		ftag = sync_aio_filetag(sd);
+
+	return psprintf(_("segment " UINT64_FORMAT " of SLRU \"%s\""),
+					ftag.segno,
+					syncsw[ftag.handler].sync_target_name);
+}
 
 /*
  * Initialize data structures for the file sync tracking.
