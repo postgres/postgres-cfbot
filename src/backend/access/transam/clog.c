@@ -1115,10 +1115,16 @@ clog_redo(XLogReaderState *record)
 }
 
 /*
- * Entrypoint for sync.c to sync clog files.
+ * Entrypoints for sync.c to sync and reopen clog files.
  */
 void
 clogsyncfiletag(struct PgAioHandle *ioh, InflightSyncEntry *entry)
 {
 	SlruSyncFileTag(XactCtl, ioh, entry);
+}
+
+int
+clogopenfiletag(const FileTag *ftag)
+{
+	return SlruOpenFileTag(XactCtl, ftag);
 }
