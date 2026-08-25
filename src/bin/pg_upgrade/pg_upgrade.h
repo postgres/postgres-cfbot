@@ -319,6 +319,7 @@ typedef struct
 	bool		check;			/* check clusters only, don't change any data */
 	bool		live_check;		/* check clusters only, old server is running */
 	bool		do_sync;		/* flush changes to disk */
+	bool		do_copy_pg_commit_ts;	/* copy pg_commit_ts directory */
 	transferMode transfer_mode; /* copy files or link them? */
 	int			jobs;			/* number of processes/threads to use */
 	char	   *socketdir;		/* directory to use for Unix sockets */
