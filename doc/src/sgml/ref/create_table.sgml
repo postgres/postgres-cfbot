@@ -100,7 +100,7 @@ class="parameter">referential_action</replaceable> ] [ ON UPDATE <replaceable cl
 
 <phrase>and <replaceable class="parameter">like_option</replaceable> is:</phrase>
 
-{ INCLUDING | EXCLUDING } { COMMENTS | COMPRESSION | CONSTRAINTS | DEFAULTS | GENERATED | IDENTITY | INDEXES | STATISTICS | STORAGE | ALL }
+{ INCLUDING | EXCLUDING } { COMMENTS | COMPRESSION | CONSTRAINTS | DEFAULTS | GENERATED | IDENTITY | INDEXES | STATISTICS | STORAGE | PARAMETERS | ALL }
 
 <phrase>and <replaceable class="parameter">partition_bound_spec</replaceable> is:</phrase>
 
@@ -770,6 +770,18 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
           constraints are chosen according to the default rules, regardless of
           how the originals were named.  (This behavior avoids possible
           duplicate-name failures for the new indexes.)
+         </para>
+        </listitem>
+       </varlistentry>
+
+       <varlistentry id="sql-createtable-parms-like-opt-paramters">
+        <term><literal>INCLUDING PARAMETERS</literal></term>
+        <listitem>
+         <para>
+          All table parameters, such as the storage parameter
+          settings of the source table, will be copied.  For table storage
+          parameters, see <xref linkend="sql-createtable-storage-parameters"/>
+          below for more information.
          </para>
         </listitem>
        </varlistentry>

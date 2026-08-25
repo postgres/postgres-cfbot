@@ -249,7 +249,8 @@ CREATE TABLE ctl_table(a int PRIMARY KEY,
   b varchar COMPRESSION pglz,
   c int GENERATED ALWAYS AS (a * 2) STORED,
   d bigint GENERATED ALWAYS AS IDENTITY,
-  e int DEFAULT 1);
+  e int DEFAULT 1)
+  WITH (fillfactor = 100);
 
 CREATE INDEX ctl_table_a_key ON ctl_table(a);
 COMMENT ON COLUMN ctl_table.b IS 'Column b';
@@ -268,7 +269,7 @@ SELECT attname, attcompression FROM pg_attribute
   WHERE attrelid = 'ctl_foreign_table1'::regclass and attnum > 0 ORDER BY attnum;
 
 -- Test INCLUDING ALL
--- INDEXES, IDENTITY, COMPRESSION, STORAGE are not copied.
+-- INDEXES, IDENTITY, COMPRESSION, STORAGE, PARAMETERS are not copied.
 CREATE FOREIGN TABLE ctl_foreign_table2(LIKE ctl_table INCLUDING ALL) SERVER ctl_s0;
 \d+ ctl_foreign_table2
 -- \d+ does not report the value of attcompression for a foreign table, so
@@ -306,3 +307,42 @@ DROP TABLE ctl_table;
 DROP FOREIGN TABLE ctl_foreign_table1;
 DROP FOREIGN TABLE ctl_foreign_table2;
 DROP FOREIGN DATA WRAPPER ctl_dummy CASCADE;
+
+-- CREATE TABLE LIKE with PARAMETERS
+CREATE TABLE t_sp (a text) WITH (
+  fillfactor = 100,
+  toast_tuple_target = 128,
+  vacuum_index_cleanup = auto,
+  toast.vacuum_index_cleanup = auto,
+  vacuum_truncate = true,
+  toast.vacuum_truncate = false,
+  log_autovacuum_min_duration = 100,
+  toast.log_autovacuum_min_duration = 100);
+
+CREATE TABLE t_sp1 (LIKE t_sp INCLUDING PARAMETERS) WITH (fillfactor = 100); -- fail
+CREATE TABLE t_sp1 (LIKE t_sp EXCLUDING PARAMETERS) WITH (fillfactor = 100); -- ok
+\d+ t_sp1
+
+CREATE TABLE t_sp2 (LIKE t_sp INCLUDING PARAMETERS) WITH (
+  parallel_workers = 3,
+  toast.autovacuum_vacuum_threshold = 101,
+  toast.autovacuum_vacuum_scale_factor = 0.3);
+
+SELECT c.relname, c.reloptions, t.reloptions as toast_reloptions
+  FROM pg_catalog.pg_class c
+  LEFT JOIN pg_catalog.pg_class t ON (c.reltoastrelid = t.oid)
+  WHERE c.relname IN ('t_sp1', 't_sp2')
+  ORDER BY c.relname \gx
+
+CREATE MATERIALIZED VIEW mv_dummy WITH (fillfactor = 10) AS SELECT 1 AS a;
+CREATE TABLE t_sp3 (LIKE mv_dummy INCLUDING PARAMETERS);
+\d+ t_sp3
+
+CREATE VIEW t_spv1 WITH (check_option=local) AS SELECT a FROM t_sp;
+CREATE TABLE t_sp4 (LIKE t_spv1 INCLUDING PARAMETERS) WITH (fillfactor = 10);
+-- view option (check_option=local) will not copied to new table
+\d+ t_sp4
+
+DROP VIEW t_spv1;
+DROP MATERIALIZED VIEW mv_dummy;
+DROP TABLE t_sp, t_sp1, t_sp2, t_sp3;
