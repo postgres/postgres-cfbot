@@ -12,6 +12,7 @@
 
 #include "common/relpath.h"
 #include "libpq-fe.h"
+#include "fe_utils/string_utils.h"
 
 /* For now, pg_upgrade does not use common/logging.c; use our own pg_fatal */
 #undef pg_fatal
@@ -361,6 +362,7 @@ extern UserOpts user_opts;
 extern ClusterInfo old_cluster,
 			new_cluster;
 extern OSInfo os_info;
+extern PQExpBuffer sql_roident_correction;
 
 /* check.c */
 
