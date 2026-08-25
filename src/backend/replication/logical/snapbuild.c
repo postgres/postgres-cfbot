@@ -940,10 +940,14 @@ SnapBuildPurgeOlderTxn(SnapBuild *builder)
 
 /*
  * Handle everything that needs to be done when a transaction commits
+ *
+ * distribute indicates whether the committing transaction's catalog changes
+ * are relevant to the database this decoding session is connected to.
  */
 void
 SnapBuildCommitTxn(SnapBuild *builder, XLogRecPtr lsn, TransactionId xid,
-				   int nsubxacts, TransactionId *subxacts, uint32 xinfo)
+				   int nsubxacts, TransactionId *subxacts, uint32 xinfo,
+				   bool distribute)
 {
 	int			nxact;
 
@@ -1075,14 +1079,22 @@ SnapBuildCommitTxn(SnapBuild *builder, XLogRecPtr lsn, TransactionId xid,
 			return;
 
 		/*
-		 * Decrease the snapshot builder's refcount of the old snapshot, note
-		 * that it still will be used if it has been handed out to the
-		 * reorderbuffer earlier.
+		 * To rebuild the builder's snapshot, decrease the snapshot builder's
+		 * refcount of the old snapshot, note that it still will be used if
+		 * it has been handed out to the reorderbuffer earlier.  Skip the
+		 * rebuilding when the catalog changes are not relevant to our
+		 * database.
 		 */
-		if (builder->snapshot)
-			SnapBuildSnapDecRefcount(builder->snapshot);
+		if (distribute || builder->snapshot == NULL)
+		{
+			if (builder->snapshot)
+				SnapBuildSnapDecRefcount(builder->snapshot);
 
-		builder->snapshot = SnapBuildBuildSnapshot(builder);
+			builder->snapshot = SnapBuildBuildSnapshot(builder);
+
+			/* refcount of the snapshot builder for the new snapshot */
+			SnapBuildSnapIncRefcount(builder->snapshot);
+		}
 
 		/* we might need to execute invalidations, add snapshot */
 		if (!ReorderBufferXidHasBaseSnapshot(builder->reorder, xid))
@@ -1092,14 +1104,14 @@ SnapBuildCommitTxn(SnapBuild *builder, XLogRecPtr lsn, TransactionId xid,
 										 builder->snapshot);
 		}
 
-		/* refcount of the snapshot builder for the new snapshot */
-		SnapBuildSnapIncRefcount(builder->snapshot);
-
 		/*
 		 * Add a new catalog snapshot and invalidations messages to all
-		 * currently running transactions.
+		 * currently running transactions, unless the committing
+		 * transaction's catalog changes cannot influence the decoding of
+		 * our database.
 		 */
-		SnapBuildDistributeSnapshotAndInval(builder, lsn, xid);
+		if (distribute)
+			SnapBuildDistributeSnapshotAndInval(builder, lsn, xid);
 	}
 }
 
