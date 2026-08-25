@@ -241,6 +241,7 @@ extern bool SlruScanDirectory(SlruDesc *ctl, SlruScanCallback callback, void *da
 extern void SlruDeleteSegment(SlruDesc *ctl, int64 segno);
 
 extern void SlruSyncFileTag(SlruDesc *ctl, struct PgAioHandle *ioh, struct InflightSyncEntry *entry);
+extern int	SlruOpenFileTag(SlruDesc *ctl, const FileTag *ftag);
 
 /* SlruScanDirectory public callbacks */
 extern bool SlruScanDirCbReportPresence(SlruDesc *ctl, char *filename,
