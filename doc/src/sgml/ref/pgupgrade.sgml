@@ -374,6 +374,18 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
+      <term><option>--pg-commit-ts</option></term>
+      <listitem>
+       <para>
+        Migrate the commit timestamp during the upgrade. The upgrade would fail
+        if the old cluster enables
+        <link linkend="guc-track-commit-timestamp"><varname>track_commit_timestamp</varname></link>
+        but new cluster does not.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
       <term><option>-?</option></term>
       <term><option>--help</option></term>
       <listitem><para>show help, then exit</para></listitem>
