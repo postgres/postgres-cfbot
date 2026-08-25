@@ -17,6 +17,7 @@
 #include "storage/aio.h"
 #include "storage/aio_internal.h"
 #include "storage/smgr.h"
+#include "storage/sync.h"
 
 static char *pgaio_sync_describe_identity(const PgAioTargetData *sd);
 
@@ -39,7 +40,15 @@ static const PgAioTargetInfo *pgaio_target_info[] = {
 	},
 	[PGAIO_TID_SMGR] = &aio_smgr_target_info,
 	[PGAIO_TID_SYNC] = &aio_sync_target_info,
+	[PGAIO_TID_SYNC_FILETAG] = &aio_sync_filetag_target_info,
 };
+
+/*
+ * The IO whose descriptor this process reopened and whose target requires the
+ * descriptor to be released after execution.  Only set between
+ * pgaio_io_reopen() and pgaio_io_close_reopened().
+ */
+static PgAioHandle *pgaio_reopened_ioh = NULL;
 
 
 /*
@@ -141,6 +150,33 @@ pgaio_io_reopen(PgAioHandle *ioh)
 {
 	Assert(ioh->target > PGAIO_TID_INVALID && ioh->target < PGAIO_TID_COUNT);
 	Assert(ioh->op > PGAIO_OP_INVALID && ioh->op < PGAIO_OP_COUNT);
+	Assert(pgaio_reopened_ioh == NULL);
 
 	pgaio_target_info[ioh->target]->reopen(ioh);
+
+	/*
+	 * Remember that this process, rather than the one that staged the IO,
+	 * owns the file descriptor now, so that pgaio_io_close_reopened() can
+	 * release it once the IO has been executed.
+	 */
+	if (pgaio_target_info[ioh->target]->close != NULL)
+		pgaio_reopened_ioh = ioh;
+}
+
+/*
+ * Internal: Counterpart to pgaio_io_reopen(), releasing the file descriptor it
+ * acquired.  Does nothing unless this process reopened this very IO and its
+ * target needs the descriptor to be released.
+ *
+ * This has to be called before the IO's completion is processed, as that can
+ * make the handle be reused for an unrelated IO.
+ */
+void
+pgaio_io_close_reopened(PgAioHandle *ioh)
+{
+	if (pgaio_reopened_ioh != ioh)
+		return;
+
+	pgaio_reopened_ioh = NULL;
+	pgaio_target_info[ioh->target]->close(ioh);
 }

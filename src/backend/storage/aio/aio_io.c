@@ -169,6 +169,14 @@ pgaio_io_perform_synchronously(PgAioHandle *ioh)
 	Assert(result <= INT_MAX);
 	ioh->result = result < 0 ? -errno : result;
 
+	/*
+	 * If we, rather than the process that staged the IO, opened the file,
+	 * close it again.  Has to happen after the result has been determined, as
+	 * closing may clobber errno, and before the completion is processed, as
+	 * that can recycle the handle.
+	 */
+	pgaio_io_close_reopened(ioh);
+
 	pgaio_io_process_completion(ioh, ioh->result);
 
 	END_CRIT_SECTION();
