@@ -1321,6 +1321,15 @@ CREATE SUBSCRIPTION my_subscription SERVER subscription_server PUBLICATION testp
 
   <variablelist>
    <varlistentry>
+    <term><literal>PostgresFdwCancel</literal></term>
+    <listitem>
+     <para>
+      Waiting for a remote server to acknowledge a query cancellation request.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
     <term><literal>PostgresFdwCleanupResult</literal></term>
     <listitem>
      <para>
