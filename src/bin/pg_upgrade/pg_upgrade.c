@@ -780,7 +780,8 @@ copy_xact_xlog_xid(void)
 	 */
 	is_copy_commit_ts =
 		(old_cluster.controldata.chkpnt_oldstCommitTsxid > 0 &&
-		 old_cluster.controldata.chkpnt_newstCommitTsxid > 0);
+		 old_cluster.controldata.chkpnt_newstCommitTsxid > 0 &&
+		 user_opts.do_copy_pg_commit_ts);
 
 	if (is_copy_commit_ts)
 	{
