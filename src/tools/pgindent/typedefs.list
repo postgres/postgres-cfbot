@@ -1341,6 +1341,7 @@ IndexVacuumInfo
 IndxInfo
 InferClause
 InferenceElem
+InflightSyncEntry
 InfoItem
 InhInfo
 InheritableSocket
@@ -3053,12 +3054,14 @@ SupportRequestSimplify
 SupportRequestSimplifyAggref
 SupportRequestWFuncMonotonic
 Syn
+SyncFileCloseMethod
 SyncOps
 SyncRepConfigData
 SyncRepStandbyData
 SyncRequestHandler
 SyncRequestType
 SyncStandbySlotsConfigData
+SyncState
 SyncingRelationsState
 SysCacheIdentifier
 SysFKRelationship

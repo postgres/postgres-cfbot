@@ -240,7 +240,7 @@ typedef bool (*SlruScanCallback) (SlruDesc *ctl, char *filename, int64 segpage,
 extern bool SlruScanDirectory(SlruDesc *ctl, SlruScanCallback callback, void *data);
 extern void SlruDeleteSegment(SlruDesc *ctl, int64 segno);
 
-extern int	SlruSyncFileTag(SlruDesc *ctl, const FileTag *ftag, char *path);
+extern void SlruSyncFileTag(SlruDesc *ctl, struct PgAioHandle *ioh, struct InflightSyncEntry *entry);
 
 /* SlruScanDirectory public callbacks */
 extern bool SlruScanDirCbReportPresence(SlruDesc *ctl, char *filename,
