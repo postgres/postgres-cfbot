@@ -13454,6 +13454,7 @@ dumpFunc(Archive *fout, const FuncInfo *finfo)
 	char	   *prorows;
 	char	   *prosupport;
 	char	   *proparallel;
+	char	   *proerrorsafe;
 	char	   *lanname;
 	char	  **configitems = NULL;
 	int			nconfigitems = 0;
@@ -13496,6 +13497,13 @@ dumpFunc(Archive *fout, const FuncInfo *finfo)
 
 		appendPQExpBufferStr(query,
 							 "proparallel,\n");
+
+		if (fout->remoteVersion >= 200000)
+			appendPQExpBufferStr(query,
+								 "proerrorsafe,\n");
+		else
+			appendPQExpBufferStr(query,
+								 "false AS proerrorsafe,\n");
 
 		if (fout->remoteVersion >= 110000)
 			appendPQExpBufferStr(query,
@@ -13561,6 +13569,7 @@ dumpFunc(Archive *fout, const FuncInfo *finfo)
 	prorows = PQgetvalue(res, 0, PQfnumber(res, "prorows"));
 	prosupport = PQgetvalue(res, 0, PQfnumber(res, "prosupport"));
 	proparallel = PQgetvalue(res, 0, PQfnumber(res, "proparallel"));
+	proerrorsafe = PQgetvalue(res, 0, PQfnumber(res, "proerrorsafe"));
 	lanname = PQgetvalue(res, 0, PQfnumber(res, "lanname"));
 
 	/*
@@ -13725,6 +13734,9 @@ dumpFunc(Archive *fout, const FuncInfo *finfo)
 			pg_fatal("unrecognized proparallel value for function \"%s\"",
 					 finfo->dobj.name);
 	}
+
+	if (proerrorsafe[0] == 't')
+		appendPQExpBufferStr(q, " ERROR SAFE");
 
 	for (int i = 0; i < nconfigitems; i++)
 	{

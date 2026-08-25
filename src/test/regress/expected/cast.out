@@ -1,0 +1,1212 @@
+SET extra_float_digits = 0;
+SET lc_monetary TO "C";
+-- CAST DEFAULT ON CONVERSION ERROR
+SELECT CAST(B'01' AS date DEFAULT NULL ON CONVERSION ERROR);
+ date 
+------
+ 
+(1 row)
+
+SELECT CAST(BIT'01' AS date DEFAULT NULL ON CONVERSION ERROR);
+ date 
+------
+ 
+(1 row)
+
+SELECT CAST(TRUE AS date DEFAULT NULL ON CONVERSION ERROR);
+ date 
+------
+ 
+(1 row)
+
+SELECT CAST(1.1 AS date DEFAULT NULL ON CONVERSION ERROR);
+ date 
+------
+ 
+(1 row)
+
+SELECT CAST(1 AS date DEFAULT NULL ON CONVERSION ERROR);
+ date 
+------
+ 
+(1 row)
+
+SELECT CAST(1111 AS "char" DEFAULT 'A' ON CONVERSION ERROR);
+ char 
+------
+ A
+(1 row)
+
+SELECT CAST('def'::text AS integer DEFAULT NULL ON CONVERSION ERROR);
+ int4 
+------
+     
+(1 row)
+
+SELECT CAST('2'::jsonb AS text DEFAULT 'fallback' ON CONVERSION ERROR);
+ text 
+------
+ 2
+(1 row)
+
+SELECT CAST('1' COLLATE "C" || 'h' AS text DEFAULT 'fallback' ON CONVERSION ERROR);
+ text 
+------
+ 1h
+(1 row)
+
+SELECT CAST(concat('1' collate "C", 'h') AS int DEFAULT NULL ON CONVERSION ERROR);
+ concat 
+--------
+       
+(1 row)
+
+SELECT CAST(65536 AS int2 DEFAULT NULL ON CONVERSION ERROR);
+ int2 
+------
+     
+(1 row)
+
+SELECT CAST(int8(65536) AS int2 DEFAULT NULL ON CONVERSION ERROR);
+ int8 
+------
+     
+(1 row)
+
+SELECT CAST(12.111 as numeric(10,1) DEFAULT NULL ON CONVERSION ERROR) as to_numeric_scale;
+ to_numeric_scale 
+------------------
+             12.1
+(1 row)
+
+-- source expression is a unknown const
+VALUES (CAST('error' AS integer ERROR ON CONVERSION ERROR)); -- error
+ERROR:  invalid input syntax for type integer: "error"
+LINE 1: VALUES (CAST('error' AS integer ERROR ON CONVERSION ERROR));
+                     ^
+VALUES (CAST('error' AS integer DEFAULT NULL ON CONVERSION ERROR));
+ column1 
+---------
+        
+(1 row)
+
+VALUES (CAST('error' AS integer DEFAULT 42 ON CONVERSION ERROR));
+ column1 
+---------
+      42
+(1 row)
+
+SELECT CAST('a' as int DEFAULT 18 ON CONVERSION ERROR);
+ int4 
+------
+   18
+(1 row)
+
+SELECT CAST('a' as int DEFAULT sum(1) ON CONVERSION ERROR); -- error
+ERROR:  aggregate functions are not allowed in CAST DEFAULT expressions
+LINE 1: SELECT CAST('a' as int DEFAULT sum(1) ON CONVERSION ERROR);
+                                       ^
+SELECT CAST('a' as int DEFAULT sum(1) over() ON CONVERSION ERROR); -- error
+ERROR:  window functions are not allowed in CAST DEFAULT expressions
+LINE 1: SELECT CAST('a' as int DEFAULT sum(1) over() ON CONVERSION E...
+                                       ^
+SELECT CAST('a' as int DEFAULT (SELECT NULL) ON CONVERSION ERROR); -- error
+ERROR:  cannot use subquery in CAST DEFAULT expression
+LINE 1: SELECT CAST('a' as int DEFAULT (SELECT NULL) ON CONVERSION E...
+                                       ^
+SELECT CAST('a' as int DEFAULT 'b' ON CONVERSION ERROR); -- error
+ERROR:  invalid input syntax for type integer: "b"
+LINE 1: SELECT CAST('a' as int DEFAULT 'b' ON CONVERSION ERROR);
+                                       ^
+SELECT CAST('a'::int as int DEFAULT NULL ON CONVERSION ERROR); -- error
+ERROR:  invalid input syntax for type integer: "a"
+LINE 1: SELECT CAST('a'::int as int DEFAULT NULL ON CONVERSION ERROR...
+                    ^
+SELECT CAST(CAST(1 AS int DEFAULT 0 ON CONVERSION ERROR) + '70000'::int2::int4 AS int DEFAULT -1 ON CONVERSION ERROR); -- error
+ERROR:  value "70000" is out of range for type smallint
+LINE 1: ...ST(CAST(1 AS int DEFAULT 0 ON CONVERSION ERROR) + '70000'::i...
+                                                             ^
+SELECT CAST(CAST(1 AS int DEFAULT 0 ON CONVERSION ERROR) + 70000::int2::int4 AS int DEFAULT -1 ON CONVERSION ERROR); -- ok
+ int4 
+------
+   -1
+(1 row)
+
+SELECT CAST(CAST(1 AS int DEFAULT 0 ON CONVERSION ERROR) + 70000::int2::int4 AS int DEFAULT 111111111111111 ON CONVERSION ERROR); -- error
+ERROR:  integer out of range
+SELECT CAST(CAST(1 AS int DEFAULT 0 ON CONVERSION ERROR) AS int DEFAULT 70000::int2::int4 ON CONVERSION ERROR); -- error
+ERROR:  smallint out of range
+-- the default expression’s collation should match target type collation
+VALUES (CAST('error' AS text DEFAULT '1' COLLATE "C" ON CONVERSION ERROR));
+ERROR:  collation of CAST DEFAULT expression conflicts with target type collation
+LINE 1: VALUES (CAST('error' AS text DEFAULT '1' COLLATE "C" ON CONV...
+                                             ^
+DETAIL:  "C" versus "default"
+VALUES (CAST('error' AS int2vector DEFAULT '1 3'  ON CONVERSION ERROR));
+ column1 
+---------
+ 1 3
+(1 row)
+
+VALUES (CAST('error' AS int2vector[] DEFAULT '{1 3}'  ON CONVERSION ERROR));
+ column1 
+---------
+ {"1 3"}
+(1 row)
+
+-- source expression contain subquery
+SELECT CAST((SELECT b FROM generate_series(1, 1), (VALUES('H')) s(b))
+            AS int2vector[] DEFAULT '{1 3}'  ON CONVERSION ERROR);
+    b    
+---------
+ {"1 3"}
+(1 row)
+
+SELECT CAST((SELECT ARRAY((SELECT b FROM generate_series(1, 2) g, (VALUES('H')) s(b))))
+            AS INT[]
+            DEFAULT NULL ON CONVERSION ERROR);
+ array 
+-------
+ 
+(1 row)
+
+CREATE FUNCTION ret_int8() RETURNS BIGINT AS $$ BEGIN RETURN 2147483648; END; $$ LANGUAGE plpgsql IMMUTABLE;
+SELECT CAST('a' as int DEFAULT ret_int8() ON CONVERSION ERROR); -- error
+ERROR:  integer out of range
+SELECT CAST('a' as date DEFAULT ret_int8() ON CONVERSION ERROR); -- error
+ERROR:  cannot coerce CAST DEFAULT expression to type date
+LINE 1: SELECT CAST('a' as date DEFAULT ret_int8() ON CONVERSION ERR...
+                                        ^
+-- DEFAULT expression cannot be set-returning
+CREATE FUNCTION ret_setint() RETURNS SETOF integer AS
+$$
+BEGIN RETURN QUERY EXECUTE 'select 1 union all select 1'; END;
+$$
+LANGUAGE plpgsql IMMUTABLE;
+CREATE TEMP TABLE tcast0(a INT, b int);
+INSERT INTO tcast0 VALUES(1,2), (65536,3);
+SET jit_above_cost = 0;
+SELECT CAST(a AS int2 DEFAULT NULL ON CONVERSION ERROR) FROM tcast0;
+ a 
+---
+ 1
+  
+(2 rows)
+
+SET jit_above_cost TO DEFAULT;
+SELECT CAST(a AS int2 DEFAULT NULL ON CONVERSION ERROR) FROM tcast0;
+ a 
+---
+ 1
+  
+(2 rows)
+
+SELECT CAST(ROW(1,2) AS tcast0 DEFAULT NULL ON CONVERSION ERROR) FROM tcast0 as t;
+ERROR:  cannot cast type record to tcast0 with DEFAULT expression in CAST ... ON CONVERSION ERROR
+LINE 1: SELECT CAST(ROW(1,2) AS tcast0 DEFAULT NULL ON CONVERSION ER...
+                    ^
+DETAIL:  Explicit cast is defined but definition is not error safe.
+DROP TABLE tcast0;
+CREATE TABLE tcast(a text[], b int GENERATED BY DEFAULT AS IDENTITY);
+INSERT INTO tcast VALUES ('{12}'), ('{1,a, b}'), ('{{1,2}, {c,d}}'), ('{13}');
+SELECT CAST('a' as int DEFAULT ret_setint() ON CONVERSION ERROR) FROM tcast; -- error
+ERROR:  set-returning functions are not allowed in CAST DEFAULT expressions
+LINE 1: SELECT CAST('a' as int DEFAULT ret_setint() ON CONVERSION ER...
+                                       ^
+SELECT CAST(t AS text[] DEFAULT '{21,22, ' || b || '}' ON CONVERSION ERROR) FROM tcast as t;
+     t     
+-----------
+ {21,22,1}
+ {21,22,2}
+ {21,22,3}
+ {21,22,4}
+(4 rows)
+
+SELECT CAST(t.a AS int[] DEFAULT '{21,22}'::int[] || b ON CONVERSION ERROR) FROM tcast as t;
+     a     
+-----------
+ {12}
+ {21,22,2}
+ {21,22,3}
+ {13}
+(4 rows)
+
+CREATE DOMAIN ddomain AS numeric CHECK ((1/ (VALUE - 1)) > 0);
+SELECT CAST ('1' AS ddomain DEFAULT NULL ON CONVERSION ERROR);
+ERROR:  division by zero
+SELECT CAST (1 AS ddomain DEFAULT NULL ON CONVERSION ERROR);
+ERROR:  division by zero
+CREATE VIEW vddomain AS SELECT CAST (1 AS ddomain DEFAULT NULL ON CONVERSION ERROR);
+\sv vddomain
+CREATE OR REPLACE VIEW public.vddomain AS
+ SELECT CAST(1 AS ddomain DEFAULT NULL::numeric::ddomain ON CONVERSION ERROR) AS ddomain
+DROP VIEW vddomain;
+-- Test nested type casts; all sub-expressions will be evaluated in an error-safe manner too.
+CREATE DOMAIN d_nota AS text CHECK (VALUE <> 'a');
+CREATE TABLE tcast1(a text, b text[], c int, d int8, e int8[]);
+INSERT INTO tcast1(a, b, d, e) values('a', '{a}', 2147483648, '{2147483648}');
+SELECT CAST (CAST(a AS int) AS text DEFAULT NULL ON CONVERSION ERROR) FROM tcast1;
+ a 
+---
+ 
+(1 row)
+
+SELECT CAST (CAST('a' AS int) AS text DEFAULT NULL ON CONVERSION ERROR) FROM tcast1;  -- error
+ERROR:  invalid input syntax for type integer: "a"
+LINE 1: SELECT CAST (CAST('a' AS int) AS text DEFAULT NULL ON CONVER...
+                          ^
+SELECT CAST (CAST('a'::text AS int) AS text DEFAULT NULL ON CONVERSION ERROR) FROM tcast1; -- ok
+ text 
+------
+ 
+(1 row)
+
+SELECT CAST (CAST(a AS d_nota) AS text DEFAULT NULL ON CONVERSION ERROR) FROM tcast1;
+ a 
+---
+ 
+(1 row)
+
+SELECT CAST (CAST('a' AS d_nota) AS text DEFAULT NULL ON CONVERSION ERROR) FROM tcast1;
+ text 
+------
+ 
+(1 row)
+
+SELECT CAST (CAST(d AS int) AS text DEFAULT NULL ON CONVERSION ERROR) FROM tcast1;
+ d 
+---
+ 
+(1 row)
+
+SELECT CAST (CAST('2147483648'::int8 AS int) AS text DEFAULT NULL ON CONVERSION ERROR) FROM tcast1;
+ text 
+------
+ 
+(1 row)
+
+SELECT CAST (CAST('{a}'::text[] AS int[]) AS text[] DEFAULT NULL ON CONVERSION ERROR) FROM tcast1;
+ text 
+------
+ 
+(1 row)
+
+SELECT CAST (CAST(b AS int[]) AS text[] DEFAULT NULL ON CONVERSION ERROR) FROM tcast1;
+ b 
+---
+ 
+(1 row)
+
+SELECT CAST (CAST(b AS d_nota[]) AS text[] DEFAULT NULL ON CONVERSION ERROR) FROM tcast1;
+ b 
+---
+ 
+(1 row)
+
+SELECT CAST (CAST(e AS int[]) AS text[] DEFAULT NULL ON CONVERSION ERROR) FROM tcast1;
+ e 
+---
+ 
+(1 row)
+
+-- test nested ArrayCoerceExpr constant folding
+SELECT CAST('{a}'::text[] AS int[] DEFAULT NULL ON CONVERSION ERROR) FROM tcast1;
+ int4 
+------
+ 
+(1 row)
+
+SELECT CAST(CAST('{a}'::text[] AS date[]) AS int[] DEFAULT NULL ON CONVERSION ERROR) FROM tcast1;
+ int4 
+------
+ 
+(1 row)
+
+SELECT CAST(('{' || sum(1 + 2) || '}')::int[] AS int[] DEFAULT NULL ON CONVERSION ERROR) FROM (VALUES (1), (2)) sub;
+ int4 
+------
+ {6}
+(1 row)
+
+SELECT CAST(('{' || sum(1 + 2) OVER () || '}')::int[] AS int[] DEFAULT NULL ON CONVERSION ERROR) FROM (VALUES (1), (2)) sub;
+ int4 
+------
+ {6}
+ {6}
+(2 rows)
+
+-- test with user-defined type, domain, array over domain, domain over array
+CREATE DOMAIN d_int42 as int check (value = 42) NOT NULL;
+CREATE DOMAIN d_int42arr as d_int42[];
+CREATE DOMAIN d_int42arr1 as d_int42arr;
+CREATE DOMAIN d_int8 as int8 check (value > 0);
+CREATE DOMAIN d_int8arr as d_int8[];
+CREATE DOMAIN d_char3_not_null as char(3) NOT NULL;
+CREATE DOMAIN d_varchar as varchar(3) NOT NULL;
+CREATE DOMAIN d_int_arr as int[] check (value = '{41, 43}') NOT NULL;
+CREATE TYPE comp_domain_with_typmod AS (a d_char3_not_null, b int);
+CREATE TYPE comp2 AS (a d_varchar);
+CREATE DOMAIN d_numeric as numeric(4,4);
+SELECT CAST(1.0::float4 AS d_numeric DEFAULT NULL ON CONVERSION ERROR);
+ d_numeric 
+-----------
+          
+(1 row)
+
+SELECT CAST('{1.0}' AS numeric(4,1)[] DEFAULT NULL ON CONVERSION ERROR);
+ numeric 
+---------
+ {1.0}
+(1 row)
+
+SELECT CAST('{0.1, 1.0}' AS d_numeric[] DEFAULT NULL ON CONVERSION ERROR);
+ d_numeric 
+-----------
+ 
+(1 row)
+
+SELECT CAST(11 AS d_int42 DEFAULT 41 ON CONVERSION ERROR); -- error
+ERROR:  value for domain d_int42 violates check constraint "d_int42_check"
+SELECT CAST(NULL AS d_int42 DEFAULT NULL ON CONVERSION ERROR); -- error
+ERROR:  domain d_int42 does not allow null values
+SELECT CAST(11 AS d_int42 DEFAULT 42 ON CONVERSION ERROR);
+ d_int42 
+---------
+      42
+(1 row)
+
+SELECT CAST(NULL AS d_int42 DEFAULT 42 ON CONVERSION ERROR);
+ d_int42 
+---------
+      42
+(1 row)
+
+SELECT CAST(ARRAY[42]::d_int42arr1 AS d_int8 DEFAULT '1' ON CONVERSION ERROR);
+ array 
+-------
+     1
+(1 row)
+
+SELECT CAST(ARRAY[42]::d_int42arr1 AS d_int8[] DEFAULT '{1}' ON CONVERSION ERROR);
+ array 
+-------
+ {42}
+(1 row)
+
+SELECT CAST(ARRAY[42]::d_int42arr1 AS d_int8arr DEFAULT '{1}' ON CONVERSION ERROR);
+ array 
+-------
+ {42}
+(1 row)
+
+SELECT CAST(ARRAY[42]::d_int42arr1 AS d_int8arr[] DEFAULT NULL ON CONVERSION ERROR);
+ array 
+-------
+ 
+(1 row)
+
+SELECT CAST(ARRAY[42,41] AS d_int42[] DEFAULT '{42, 42}' ON CONVERSION ERROR);
+  array  
+---------
+ {42,42}
+(1 row)
+
+SELECT CAST(ARRAY[42,41] AS d_int_arr DEFAULT '{41, 43}' ON CONVERSION ERROR);
+  array  
+---------
+ {41,43}
+(1 row)
+
+SELECT CAST(ARRAY[42, 41]::d_int42arr1 AS d_int8arr DEFAULT '{1,2,3}' ON CONVERSION ERROR);
+  array  
+---------
+ {1,2,3}
+(1 row)
+
+SELECT CAST(ARRAY[42, 41] AS d_int42arr1 DEFAULT '{42, 42}' ON CONVERSION ERROR);
+  array  
+---------
+ {42,42}
+(1 row)
+
+SELECT CAST(CAST(ARRAY[CAST(ARRAY[42, 42] AS d_int42arr)] AS d_int42arr1[])
+            AS d_int8arr[]
+            DEFAULT NULL ON CONVERSION ERROR);
+    array    
+-------------
+ {"{42,42}"}
+(1 row)
+
+SELECT CAST('(NULL)' AS comp2 DEFAULT '(1232)' ON CONVERSION ERROR); -- error
+ERROR:  value too long for type character varying(3)
+LINE 1: SELECT CAST('(NULL)' AS comp2 DEFAULT '(1232)' ON CONVERSION...
+                                              ^
+SELECT CAST('(NULL)' AS comp2 DEFAULT '(123)' ON CONVERSION ERROR);
+ comp2 
+-------
+ (123)
+(1 row)
+
+SELECT CAST('(,42)' AS comp_domain_with_typmod DEFAULT NULL ON CONVERSION ERROR);
+ comp_domain_with_typmod 
+-------------------------
+ 
+(1 row)
+
+SELECT CAST('(NULL,42)' AS comp_domain_with_typmod DEFAULT '(1,2)' ON CONVERSION ERROR);
+ comp_domain_with_typmod 
+-------------------------
+ ("1  ",2)
+(1 row)
+
+SELECT CAST(A AS comp_domain_with_typmod DEFAULT '(1,2)' ON CONVERSION ERROR)
+FROM (VALUES('(NULL,42)'::text), ('(,42)')) sub(a);
+     a     
+-----------
+ ("1  ",2)
+ ("1  ",2)
+(2 rows)
+
+SELECT CAST('(NULL,42)' AS comp_domain_with_typmod DEFAULT '(1234,2)' ON CONVERSION ERROR); -- error
+ERROR:  value too long for type character(3)
+LINE 1: ...ST('(NULL,42)' AS comp_domain_with_typmod DEFAULT '(1234,2)'...
+                                                             ^
+SELECT CAST(ROW(NULL,42) AS comp_domain_with_typmod DEFAULT NULL ON CONVERSION ERROR); -- error
+ERROR:  cannot cast type record to comp_domain_with_typmod with DEFAULT expression in CAST ... ON CONVERSION ERROR
+LINE 1: SELECT CAST(ROW(NULL,42) AS comp_domain_with_typmod DEFAULT ...
+                    ^
+DETAIL:  Explicit cast is defined but definition is not error safe.
+-- test array coerce
+SELECT CAST(array['a'::text] AS int[] DEFAULT NULL ON CONVERSION ERROR);
+ array 
+-------
+ 
+(1 row)
+
+SELECT CAST(array['a'] AS int[] DEFAULT ARRAY[1] ON CONVERSION ERROR);
+ array 
+-------
+ {1}
+(1 row)
+
+SELECT CAST(array[11.12] AS date[] DEFAULT NULL ON CONVERSION ERROR);
+ array 
+-------
+ 
+(1 row)
+
+SELECT CAST(array[11111111111111111] AS int[] DEFAULT NULL ON CONVERSION ERROR);
+ array 
+-------
+ 
+(1 row)
+
+SELECT CAST(array[['abc'],[456]] AS int[] DEFAULT NULL ON CONVERSION ERROR);
+ array 
+-------
+ 
+(1 row)
+
+SELECT CAST('{123,abc,456}' AS int[] DEFAULT '{-789}' ON CONVERSION ERROR);
+  int4  
+--------
+ {-789}
+(1 row)
+
+SELECT CAST('{234,def,567}'::text[] AS integer[] DEFAULT '{-1011}' ON CONVERSION ERROR);
+  int4   
+---------
+ {-1011}
+(1 row)
+
+SELECT CAST(ARRAY[['1'], ['three'],['a']] AS int[] DEFAULT '{1,2}' ON CONVERSION ERROR);
+ array 
+-------
+ {1,2}
+(1 row)
+
+SELECT CAST(ARRAY[['1', '2'], ['three', 'a']] AS int[] DEFAULT '{21,22}' ON CONVERSION ERROR);
+  array  
+---------
+ {21,22}
+(1 row)
+
+-- error: `three'::int` will fail earlier
+SELECT CAST(ARRAY[['1', '2'], ['three'::int, 'a']] AS int[] DEFAULT '{21,22}' ON CONVERSION ERROR);
+ERROR:  invalid input syntax for type integer: "three"
+LINE 1: SELECT CAST(ARRAY[['1', '2'], ['three'::int, 'a']] AS int[] ...
+                                       ^
+SELECT CAST(ARRAY[1, 'three'::int] AS int[] DEFAULT '{21,22}' ON CONVERSION ERROR);
+ERROR:  invalid input syntax for type integer: "three"
+LINE 1: SELECT CAST(ARRAY[1, 'three'::int] AS int[] DEFAULT '{21,22}...
+                             ^
+-- safe cast with geometry data type
+SELECT CAST('(1,2)'::point AS box DEFAULT NULL ON CONVERSION ERROR);
+     box     
+-------------
+ (1,2),(1,2)
+(1 row)
+
+SELECT CAST('[(NaN,1),(NaN,infinity)]'::lseg AS point DEFAULT NULL ON CONVERSION ERROR);
+     point      
+----------------
+ (NaN,Infinity)
+(1 row)
+
+SELECT CAST('[(1e+300,Infinity),(1e+300,Infinity)]'::lseg AS point DEFAULT NULL ON CONVERSION ERROR);
+       point       
+-------------------
+ (1e+300,Infinity)
+(1 row)
+
+SELECT CAST('[(1,2),(3,4)]'::path as polygon DEFAULT NULL ON CONVERSION ERROR);
+ polygon 
+---------
+ 
+(1 row)
+
+SELECT CAST('(NaN,1.0,NaN,infinity)'::box AS point DEFAULT NULL ON CONVERSION ERROR);
+     point      
+----------------
+ (NaN,Infinity)
+(1 row)
+
+SELECT CAST('(2.0,2.0,0.0,0.0)'::box AS lseg DEFAULT NULL ON CONVERSION ERROR);
+     lseg      
+---------------
+ [(2,2),(0,0)]
+(1 row)
+
+SELECT CAST('(2.0,2.0,0.0,0.0)'::box AS polygon DEFAULT NULL ON CONVERSION ERROR);
+          polygon          
+---------------------------
+ ((0,0),(0,2),(2,2),(2,0))
+(1 row)
+
+SELECT CAST('(2.0,2.0,0.0,0.0)'::box AS path DEFAULT NULL ON CONVERSION ERROR);
+ path 
+------
+ 
+(1 row)
+
+SELECT CAST('(2.0,infinity,NaN,infinity)'::box AS circle DEFAULT NULL ON CONVERSION ERROR);
+        circle        
+----------------------
+ <(NaN,Infinity),NaN>
+(1 row)
+
+SELECT CAST('(NaN,0.0),(2.0,4.0),(0.0,infinity)'::polygon AS point DEFAULT NULL ON CONVERSION ERROR);
+     point      
+----------------
+ (NaN,Infinity)
+(1 row)
+
+SELECT CAST('(2.0,0.0),(2.0,4.0),(0.0,0.0)'::polygon AS path DEFAULT NULL ON CONVERSION ERROR);
+        path         
+---------------------
+ ((2,0),(2,4),(0,0))
+(1 row)
+
+SELECT CAST('(2.0,0.0),(2.0,4.0),(0.0,0.0)'::polygon AS box DEFAULT NULL ON CONVERSION ERROR);
+     box     
+-------------
+ (2,4),(0,0)
+(1 row)
+
+SELECT CAST('(NaN,infinity),(2.0,4.0),(0.0,infinity)'::polygon AS circle DEFAULT NULL ON CONVERSION ERROR);
+        circle        
+----------------------
+ <(NaN,Infinity),NaN>
+(1 row)
+
+SELECT CAST('<(5,1),3>'::circle AS point DEFAULT NULL ON CONVERSION ERROR);
+ point 
+-------
+ (5,1)
+(1 row)
+
+SELECT CAST('<(3,5),0>'::circle as box DEFAULT NULL ON CONVERSION ERROR);
+     box     
+-------------
+ (3,5),(3,5)
+(1 row)
+
+SELECT CAST('<(3,5),0>'::circle as polygon DEFAULT NULL ON CONVERSION ERROR);
+ polygon 
+---------
+ 
+(1 row)
+
+-- safe cast with money data type
+-- cast from money to other type is not error safe
+SELECT CAST('123456789012345678'::numeric AS MONEY DEFAULT NULL ON CONVERSION ERROR);
+ money 
+-------
+      
+(1 row)
+
+SELECT CAST('123456789012345678'::int8 AS MONEY DEFAULT NULL ON CONVERSION ERROR);
+ money 
+-------
+      
+(1 row)
+
+SELECT CAST('2147483647'::int4 AS MONEY DEFAULT NULL ON CONVERSION ERROR);
+       money       
+-------------------
+ $2,147,483,647.00
+(1 row)
+
+SELECT CAST('-2147483648'::int4 AS MONEY DEFAULT NULL ON CONVERSION ERROR);
+       money        
+--------------------
+ -$2,147,483,648.00
+(1 row)
+
+SELECT CAST('-0'::int4 AS MONEY DEFAULT NULL ON CONVERSION ERROR);
+ money 
+-------
+ $0.00
+(1 row)
+
+SELECT CAST(NULL::money AS numeric DEFAULT NULL ON CONVERSION ERROR);
+ERROR:  cannot cast type money to numeric with DEFAULT expression in CAST ... ON CONVERSION ERROR
+LINE 1: SELECT CAST(NULL::money AS numeric DEFAULT NULL ON CONVERSIO...
+                    ^
+DETAIL:  Explicit cast is defined but definition is not error safe.
+SELECT CAST(NULL::money[] AS numeric[] DEFAULT NULL ON CONVERSION ERROR);
+ERROR:  cannot cast type money to numeric with DEFAULT expression in CAST ... ON CONVERSION ERROR
+DETAIL:  Explicit cast is defined but definition is not error safe.
+-- safe cast from boolean type to other data types
+SELECT CAST(true AS numeric DEFAULT NULL ON CONVERSION ERROR);
+ numeric 
+---------
+        
+(1 row)
+
+SELECT CAST(false AS int DEFAULT NULL ON CONVERSION ERROR);
+ int4 
+------
+    0
+(1 row)
+
+SELECT CAST(false AS text DEFAULT NULL ON CONVERSION ERROR);
+ text  
+-------
+ false
+(1 row)
+
+-- safe cast from bytea type to other data types
+SELECT CAST ('\x112233445566778899'::bytea AS int8 DEFAULT 19 ON CONVERSION ERROR);
+ int8 
+------
+   19
+(1 row)
+
+SELECT CAST('\x123456789A'::bytea AS int4 DEFAULT 20 ON CONVERSION ERROR);
+ int4 
+------
+   20
+(1 row)
+
+SELECT CAST('\x123456'::bytea AS int2 DEFAULT 21 ON CONVERSION ERROR);
+ int2 
+------
+   21
+(1 row)
+
+SELECT CAST('\x1234567890abcdef'::bytea AS uuid DEFAULT NULL ON CONVERSION ERROR);
+ uuid 
+------
+ 
+(1 row)
+
+-- safe cast from uuid type to other data types
+SELECT CAST('5b35380a-7143-4912-9b55-f322699c6770'::uuid AS bytea DEFAULT NULL ON CONVERSION ERROR);
+               bytea                
+------------------------------------
+ \x5b35380a714349129b55f322699c6770
+(1 row)
+
+-- safe cast related to network address data type
+SELECT CAST('192.168.1.x' as inet DEFAULT NULL ON CONVERSION ERROR);
+ inet 
+------
+ 
+(1 row)
+
+SELECT CAST('192.168.1.2/30' as cidr DEFAULT NULL ON CONVERSION ERROR);
+ cidr 
+------
+ 
+(1 row)
+
+SELECT CAST('22:00:5c:08:55:08:01:02'::macaddr8 as macaddr DEFAULT NULL ON CONVERSION ERROR);
+ macaddr 
+---------
+ 
+(1 row)
+
+-- safe cast from bit type to other data types
+SELECT CAST('111111111100001'::bit(100) AS INT DEFAULT 22 ON CONVERSION ERROR);
+ int4 
+------
+   22
+(1 row)
+
+SELECT CAST ('111111111100001'::bit(100) AS INT8 DEFAULT 23 ON CONVERSION ERROR);
+ int8 
+------
+   23
+(1 row)
+
+-- safe cast related to oid data type
+SELECT CAST(12345678901::bigint AS oid DEFAULT NULL ON CONVERSION ERROR);
+ oid 
+-----
+    
+(1 row)
+
+SELECT CAST(12345678901::bigint AS regproc DEFAULT NULL ON CONVERSION ERROR);
+ regproc 
+---------
+ 
+(1 row)
+
+SELECT CAST(12345678901::bigint AS regprocedure DEFAULT NULL ON CONVERSION ERROR);
+ regprocedure 
+--------------
+ 
+(1 row)
+
+SELECT CAST(12345678901::bigint AS regclass DEFAULT NULL ON CONVERSION ERROR);
+ regclass 
+----------
+ 
+(1 row)
+
+SELECT CAST(1234567890::bigint AS oid DEFAULT NULL ON CONVERSION ERROR);
+    oid     
+------------
+ 1234567890
+(1 row)
+
+SELECT CAST(1234567890::bigint AS regrole DEFAULT NULL ON CONVERSION ERROR);
+  regrole   
+------------
+ 1234567890
+(1 row)
+
+SELECT CAST(1234567890::bigint AS regnamespace DEFAULT NULL ON CONVERSION ERROR);
+ regnamespace 
+--------------
+ 1234567890
+(1 row)
+
+SELECT CAST(1234567890::bigint AS regdatabase DEFAULT NULL ON CONVERSION ERROR);
+ regdatabase 
+-------------
+ 1234567890
+(1 row)
+
+-- safe cast from text type to other data types
+SELECT CAST('pg_temp_1.foo'::text AS regclass DEFAULT NULL ON CONVERSION ERROR);
+ regclass 
+----------
+ 
+(1 row)
+
+SELECT CAST('a.b.c.d'::text as regclass DEFAULT NULL ON CONVERSION ERROR);
+ regclass 
+----------
+ 
+(1 row)
+
+CREATE TABLE test_safecast0(col0 text, col1 jsonb);
+INSERT INTO test_safecast0 VALUES ('<value>one</value', '"test"');
+SELECT col0 as text,
+       CAST(col0 AS regclass DEFAULT NULL ON CONVERSION ERROR) as to_regclass,
+       CAST(col0 AS regclass DEFAULT NULL ON CONVERSION ERROR) IS NULL as expect_true,
+       CAST(col0 AS "char"  DEFAULT NULL ON CONVERSION ERROR) as to_char,
+       CAST(col0 AS name DEFAULT NULL ON CONVERSION ERROR) as to_name
+FROM test_safecast0;
+       text        | to_regclass | expect_true | to_char |      to_name      
+-------------------+-------------+-------------+---------+-------------------
+ <value>one</value |             | t           | <       | <value>one</value
+(1 row)
+
+-- safe type cast for jsonb data type
+SELECT col1 as jsonb,
+       CAST(col1 AS integer DEFAULT NULL ON CONVERSION ERROR) as to_integer,
+       CAST(col1 AS numeric DEFAULT NULL ON CONVERSION ERROR) as to_numeric,
+       CAST(col1 AS bigint DEFAULT NULL ON CONVERSION ERROR) as to_int8,
+       CAST(col1 AS float4 DEFAULT NULL ON CONVERSION ERROR) as to_float4,
+       CAST(col1 AS float8 DEFAULT NULL ON CONVERSION ERROR) as to_float8,
+       CAST(col1 AS boolean DEFAULT NULL ON CONVERSION ERROR) as to_bool,
+       CAST(col1 AS smallint DEFAULT NULL ON CONVERSION ERROR) as to_smallint
+FROM test_safecast0;
+ jsonb  | to_integer | to_numeric | to_int8 | to_float4 | to_float8 | to_bool | to_smallint 
+--------+------------+------------+---------+-----------+-----------+---------+-------------
+ "test" |            |            |         |           |           |         |            
+(1 row)
+
+-- test CAST DEFAULT expression mutability
+CREATE INDEX cast_error_idx ON test_safecast0((CAST(col1 as int DEFAULT random(min=>1, max=>1) ON CONVERSION ERROR))); -- error
+ERROR:  functions in index expression must be marked IMMUTABLE
+LINE 1: CREATE INDEX cast_error_idx ON test_safecast0((CAST(col1 as ...
+                                                      ^
+CREATE INDEX cast_error_idx ON test_safecast0((CAST(col1 as xid DEFAULT NULL ON CONVERSION ERROR))); -- error
+ERROR:  data type xid has no default operator class for access method "btree"
+HINT:  You must specify an operator class for the index or define a default operator class for the data type.
+CREATE INDEX cast_error_idx ON test_safecast0((CAST(col1 as int DEFAULT NULL ON CONVERSION ERROR))); -- ok
+SELECT pg_get_indexdef('cast_error_idx'::regclass);
+                                                           pg_get_indexdef                                                            
+--------------------------------------------------------------------------------------------------------------------------------------
+ CREATE INDEX cast_error_idx ON public.test_safecast0 USING btree ((CAST(col1 AS integer DEFAULT NULL::integer ON CONVERSION ERROR)))
+(1 row)
+
+-- safe cast betweeen range data types
+SELECT CAST('[1,2]'::int4range AS int4multirange DEFAULT NULL ON CONVERSION ERROR);
+ int4multirange 
+----------------
+ {[1,3)}
+(1 row)
+
+SELECT CAST('[1,2]'::int8range AS int8multirange DEFAULT NULL ON CONVERSION ERROR);
+ int8multirange 
+----------------
+ {[1,3)}
+(1 row)
+
+SELECT CAST('[1,2]'::numrange  AS nummultirange DEFAULT NULL ON CONVERSION ERROR);
+ nummultirange 
+---------------
+ {[1,2]}
+(1 row)
+
+SELECT CAST('[-infinity,infinity]'::daterange AS datemultirange DEFAULT NULL ON CONVERSION ERROR);
+     datemultirange     
+------------------------
+ {[-infinity,infinity]}
+(1 row)
+
+SELECT CAST('[-infinity,infinity]'::tsrange AS tsmultirange DEFAULT NULL ON CONVERSION ERROR);
+      tsmultirange      
+------------------------
+ {[-infinity,infinity]}
+(1 row)
+
+SELECT CAST('[-infinity,infinity]'::tstzrange AS tstzmultirange DEFAULT NULL ON CONVERSION ERROR);
+     tstzmultirange     
+------------------------
+ {[-infinity,infinity]}
+(1 row)
+
+-- safe cast betweeen numeric data types
+CREATE TABLE test_safecast1(
+  col1 float4, col2 float8, col3 numeric, col4 numeric[],
+  col5 int2 default 32767,
+  col6 int4 default 32768,
+  col7 int8 default 4294967296);
+INSERT INTO test_safecast1 VALUES('11.1234', '11.1234', '9223372036854775808', '{11.1234}'::numeric[]);
+INSERT INTO test_safecast1 VALUES('inf', 'inf', 'inf', '{11.1234, 12, inf, NaN}'::numeric[]);
+INSERT INTO test_safecast1 VALUES('-inf', '-inf', '-inf', '{11.1234, 12, -inf, NaN}'::numeric[]);
+INSERT INTO test_safecast1 VALUES('NaN', 'NaN', 'NaN', '{11.1234, 12, -inf, NaN}'::numeric[]);
+SELECT col5 as int2,
+       CAST(col5 AS int2 DEFAULT NULL ON CONVERSION ERROR) as to_int2,
+       CAST(col5 AS int4 DEFAULT NULL ON CONVERSION ERROR) as to_int4,
+       CAST(col5 AS oid DEFAULT NULL ON CONVERSION ERROR) as to_oid,
+       CAST(col5 as int8 DEFAULT NULL ON CONVERSION ERROR) as to_int8,
+       CAST(col5 as float4 DEFAULT NULL ON CONVERSION ERROR) as to_float4,
+       CAST(col5 as float8 DEFAULT NULL ON CONVERSION ERROR) as to_float8,
+       CAST(col5 as numeric DEFAULT NULL ON CONVERSION ERROR) as to_numeric,
+       CAST(col5 as numeric(10,1) DEFAULT NULL ON CONVERSION ERROR) as to_numeric_scale
+FROM test_safecast1;
+ int2  | to_int2 | to_int4 | to_oid | to_int8 | to_float4 | to_float8 | to_numeric | to_numeric_scale 
+-------+---------+---------+--------+---------+-----------+-----------+------------+------------------
+ 32767 |   32767 |   32767 |  32767 |   32767 |     32767 |     32767 |      32767 |          32767.0
+ 32767 |   32767 |   32767 |  32767 |   32767 |     32767 |     32767 |      32767 |          32767.0
+ 32767 |   32767 |   32767 |  32767 |   32767 |     32767 |     32767 |      32767 |          32767.0
+ 32767 |   32767 |   32767 |  32767 |   32767 |     32767 |     32767 |      32767 |          32767.0
+(4 rows)
+
+SELECT col6 as int4,
+       CAST(col6 AS int2 DEFAULT NULL ON CONVERSION ERROR) as to_int2,
+       CAST(col6 AS int4 DEFAULT NULL ON CONVERSION ERROR) as to_int4,
+       CAST(col6 AS oid DEFAULT NULL ON CONVERSION ERROR) as to_oid,
+       CAST(col6 as int8 DEFAULT NULL ON CONVERSION ERROR) as to_int8,
+       CAST(col6 as float4 DEFAULT NULL ON CONVERSION ERROR) as to_float4,
+       CAST(col6 as float8 DEFAULT NULL ON CONVERSION ERROR) as to_float8,
+       CAST(col6 as numeric DEFAULT NULL ON CONVERSION ERROR) as to_numeric,
+       CAST(col6 as numeric(10,1) DEFAULT NULL ON CONVERSION ERROR) as to_numeric_scale
+FROM test_safecast1;
+ int4  | to_int2 | to_int4 | to_oid | to_int8 | to_float4 | to_float8 | to_numeric | to_numeric_scale 
+-------+---------+---------+--------+---------+-----------+-----------+------------+------------------
+ 32768 |         |   32768 |  32768 |   32768 |     32768 |     32768 |      32768 |          32768.0
+ 32768 |         |   32768 |  32768 |   32768 |     32768 |     32768 |      32768 |          32768.0
+ 32768 |         |   32768 |  32768 |   32768 |     32768 |     32768 |      32768 |          32768.0
+ 32768 |         |   32768 |  32768 |   32768 |     32768 |     32768 |      32768 |          32768.0
+(4 rows)
+
+SELECT col7 as int8,
+       CAST(col7 AS int2 DEFAULT NULL ON CONVERSION ERROR) as to_int2,
+       CAST(col7 AS int4 DEFAULT NULL ON CONVERSION ERROR) as to_int4,
+       CAST(col7 AS oid DEFAULT NULL ON CONVERSION ERROR) as to_oid,
+       CAST(col7 as int8 DEFAULT NULL ON CONVERSION ERROR) as to_int8,
+       CAST(col7 as float4 DEFAULT NULL ON CONVERSION ERROR) as to_float4,
+       CAST(col7 as float8 DEFAULT NULL ON CONVERSION ERROR) as to_float8,
+       CAST(col7 as numeric DEFAULT NULL ON CONVERSION ERROR) as to_numeric,
+       CAST(col7 as numeric(10,1) DEFAULT NULL ON CONVERSION ERROR) as to_numeric_scale
+FROM test_safecast1;
+    int8    | to_int2 | to_int4 | to_oid |  to_int8   |  to_float4  | to_float8  | to_numeric | to_numeric_scale 
+------------+---------+---------+--------+------------+-------------+------------+------------+------------------
+ 4294967296 |         |         |        | 4294967296 | 4.29497e+09 | 4294967296 | 4294967296 |                 
+ 4294967296 |         |         |        | 4294967296 | 4.29497e+09 | 4294967296 | 4294967296 |                 
+ 4294967296 |         |         |        | 4294967296 | 4.29497e+09 | 4294967296 | 4294967296 |                 
+ 4294967296 |         |         |        | 4294967296 | 4.29497e+09 | 4294967296 | 4294967296 |                 
+(4 rows)
+
+SELECT col3 as numeric,
+       CAST(col3 AS int2 DEFAULT NULL ON CONVERSION ERROR) as to_int2,
+       CAST(col3 AS int4 DEFAULT NULL ON CONVERSION ERROR) as to_int4,
+       CAST(col3 AS oid DEFAULT NULL ON CONVERSION ERROR) as to_oid,
+       CAST(col3 as int8 DEFAULT NULL ON CONVERSION ERROR) as to_int8,
+       CAST(col3 as float4 DEFAULT NULL ON CONVERSION ERROR) as to_float4,
+       CAST(col3 as float8 DEFAULT NULL ON CONVERSION ERROR) as to_float8,
+       CAST(col3 as numeric DEFAULT NULL ON CONVERSION ERROR) as to_numeric,
+       CAST(col3 as numeric(10,1) DEFAULT NULL ON CONVERSION ERROR) as to_numeric_scale
+FROM test_safecast1;
+       numeric       | to_int2 | to_int4 | to_oid | to_int8 |  to_float4  |      to_float8       |     to_numeric      | to_numeric_scale 
+---------------------+---------+---------+--------+---------+-------------+----------------------+---------------------+------------------
+ 9223372036854775808 |         |         |        |         | 9.22337e+18 | 9.22337203685478e+18 | 9223372036854775808 |                 
+            Infinity |         |         |        |         |    Infinity |             Infinity |            Infinity |                 
+           -Infinity |         |         |        |         |   -Infinity |            -Infinity |           -Infinity |                 
+                 NaN |         |         |        |         |         NaN |                  NaN |                 NaN |              NaN
+(4 rows)
+
+SELECT col4 as num_arr,
+       CAST(col4 AS int2[] DEFAULT NULL ON CONVERSION ERROR) as int2arr,
+       CAST(col4 AS int4[] DEFAULT NULL ON CONVERSION ERROR) as int4arr,
+       CAST(col4 as int8[] DEFAULT NULL ON CONVERSION ERROR) as int8arr,
+       CAST(col4 as float4[] DEFAULT NULL ON CONVERSION ERROR) as f4arr,
+       CAST(col4 as float8[] DEFAULT NULL ON CONVERSION ERROR) as f8arr,
+       CAST(col4 as numeric(10,1)[] DEFAULT NULL ON CONVERSION ERROR) as numarr
+FROM test_safecast1;
+          num_arr           | int2arr | int4arr | int8arr |           f4arr            |           f8arr            | numarr 
+----------------------------+---------+---------+---------+----------------------------+----------------------------+--------
+ {11.1234}                  | {11}    | {11}    | {11}    | {11.1234}                  | {11.1234}                  | {11.1}
+ {11.1234,12,Infinity,NaN}  |         |         |         | {11.1234,12,Infinity,NaN}  | {11.1234,12,Infinity,NaN}  | 
+ {11.1234,12,-Infinity,NaN} |         |         |         | {11.1234,12,-Infinity,NaN} | {11.1234,12,-Infinity,NaN} | 
+ {11.1234,12,-Infinity,NaN} |         |         |         | {11.1234,12,-Infinity,NaN} | {11.1234,12,-Infinity,NaN} | 
+(4 rows)
+
+SELECT col1 as float4,
+       CAST(col1 AS int2 DEFAULT NULL ON CONVERSION ERROR) as to_int2,
+       CAST(col1 AS int4 DEFAULT NULL ON CONVERSION ERROR) as to_int4,
+       CAST(col1 AS oid DEFAULT NULL ON CONVERSION ERROR) as to_oid,
+       CAST(col1 as int8 DEFAULT NULL ON CONVERSION ERROR) as to_int8,
+       CAST(col1 as float4 DEFAULT NULL ON CONVERSION ERROR) as to_float4,
+       CAST(col1 as float8 DEFAULT NULL ON CONVERSION ERROR) as to_float8,
+       CAST(col1 as numeric DEFAULT NULL ON CONVERSION ERROR) as to_numeric,
+       CAST(col1 as numeric(10,1) DEFAULT NULL ON CONVERSION ERROR) as to_numeric_scale
+FROM test_safecast1;
+  float4   | to_int2 | to_int4 | to_oid | to_int8 | to_float4 |    to_float8     | to_numeric | to_numeric_scale 
+-----------+---------+---------+--------+---------+-----------+------------------+------------+------------------
+   11.1234 |      11 |      11 |        |      11 |   11.1234 | 11.1233997344971 |    11.1234 |             11.1
+  Infinity |         |         |        |         |  Infinity |         Infinity |   Infinity |                 
+ -Infinity |         |         |        |         | -Infinity |        -Infinity |  -Infinity |                 
+       NaN |         |         |        |         |       NaN |              NaN |        NaN |              NaN
+(4 rows)
+
+SELECT col2 as float8,
+       CAST(col2 AS int2 DEFAULT NULL ON CONVERSION ERROR) as to_int2,
+       CAST(col2 AS int4 DEFAULT NULL ON CONVERSION ERROR) as to_int4,
+       CAST(col2 AS oid DEFAULT NULL ON CONVERSION ERROR) as to_oid,
+       CAST(col2 as int8 DEFAULT NULL ON CONVERSION ERROR) as to_int8,
+       CAST(col2 as float4 DEFAULT NULL ON CONVERSION ERROR) as to_float4,
+       CAST(col2 as float8 DEFAULT NULL ON CONVERSION ERROR) as to_float8,
+       CAST(col2 as numeric DEFAULT NULL ON CONVERSION ERROR) as to_numeric,
+       CAST(col2 as numeric(10,1) DEFAULT NULL ON CONVERSION ERROR) as to_numeric_scale
+FROM test_safecast1;
+  float8   | to_int2 | to_int4 | to_oid | to_int8 | to_float4 | to_float8 | to_numeric | to_numeric_scale 
+-----------+---------+---------+--------+---------+-----------+-----------+------------+------------------
+   11.1234 |      11 |      11 |        |      11 |   11.1234 |   11.1234 |    11.1234 |             11.1
+  Infinity |         |         |        |         |  Infinity |  Infinity |   Infinity |                 
+ -Infinity |         |         |        |         | -Infinity | -Infinity |  -Infinity |                 
+       NaN |         |         |        |         |       NaN |       NaN |        NaN |              NaN
+(4 rows)
+
+-- safe type cast for type date/timestamp/timestamptz/interval
+CREATE TABLE test_safecast2(
+  col0 date, col1 timestamp, col2 timestamptz,
+  col3 interval, col4 time, col5 timetz);
+INSERT INTO test_safecast2 VALUES
+('-infinity', '-infinity', '-infinity', '-infinity',
+  '2003-03-07 15:36:39 America/New_York', '2003-07-07 15:36:39 America/New_York'),
+('-infinity', 'infinity', 'infinity', 'infinity', '11:59:59.99 PM', '11:59:59.99 PM PDT');
+SELECT col0 as date,
+       CAST(col0 AS timestamptz DEFAULT NULL ON CONVERSION ERROR) as to_timestamptz,
+       CAST(col0 AS date DEFAULT NULL ON CONVERSION ERROR) as to_date,
+       CAST(col0 AS time DEFAULT NULL ON CONVERSION ERROR) as to_times,
+       CAST(col0 AS timetz DEFAULT NULL ON CONVERSION ERROR) as to_timetz,
+       CAST(col0 AS timestamp(2) DEFAULT NULL ON CONVERSION ERROR) as to_timestamp_scale
+FROM test_safecast2;
+   date    | to_timestamptz |  to_date  | to_times | to_timetz | to_timestamp_scale 
+-----------+----------------+-----------+----------+-----------+--------------------
+ -infinity | -infinity      | -infinity |          |           | -infinity
+ -infinity | -infinity      | -infinity |          |           | -infinity
+(2 rows)
+
+SELECT col1 as timestamp,
+       CAST(col1 AS timestamptz DEFAULT NULL ON CONVERSION ERROR) as to_timestamptz,
+       CAST(col1 AS date DEFAULT NULL ON CONVERSION ERROR) as to_date,
+       CAST(col1 AS time DEFAULT NULL ON CONVERSION ERROR) as to_times,
+       CAST(col1 AS timetz DEFAULT NULL ON CONVERSION ERROR) as to_timetz,
+       CAST(col1 AS timestamp(2) DEFAULT NULL ON CONVERSION ERROR) as to_timestamp_scale
+FROM test_safecast2;
+ timestamp | to_timestamptz |  to_date  | to_times | to_timetz | to_timestamp_scale 
+-----------+----------------+-----------+----------+-----------+--------------------
+ -infinity | -infinity      | -infinity |          |           | -infinity
+ infinity  | infinity       | infinity  |          |           | infinity
+(2 rows)
+
+SELECT col2 as timestamptz,
+       CAST(col2 AS timestamptz DEFAULT NULL ON CONVERSION ERROR) as to_timestamptz,
+       CAST(col2 AS date DEFAULT NULL ON CONVERSION ERROR) as to_date,
+       CAST(col2 AS time DEFAULT NULL ON CONVERSION ERROR) as to_times,
+       CAST(col2 AS timetz DEFAULT NULL ON CONVERSION ERROR) as to_timetz,
+       CAST(col2 AS timestamp(2) DEFAULT NULL ON CONVERSION ERROR) as to_timestamp_scale
+FROM test_safecast2;
+ timestamptz | to_timestamptz |  to_date  | to_times | to_timetz | to_timestamp_scale 
+-------------+----------------+-----------+----------+-----------+--------------------
+ -infinity   | -infinity      | -infinity |          |           | -infinity
+ infinity    | infinity       | infinity  |          |           | infinity
+(2 rows)
+
+SELECT col3 as interval,
+       CAST(col3 AS timestamptz DEFAULT NULL ON CONVERSION ERROR) as to_timestamptz,
+       CAST(col3 AS date DEFAULT NULL ON CONVERSION ERROR) as to_date,
+       CAST(col3 AS time DEFAULT NULL ON CONVERSION ERROR) as to_times,
+       CAST(col3 AS timetz DEFAULT NULL ON CONVERSION ERROR) as to_timetz,
+       CAST(col3 AS timestamp(2) DEFAULT NULL ON CONVERSION ERROR) as to_timestamp_scale,
+       CAST(col3 AS interval(2) DEFAULT NULL ON CONVERSION ERROR) as to_interval_scale
+FROM test_safecast2;
+ interval  | to_timestamptz | to_date | to_times | to_timetz | to_timestamp_scale | to_interval_scale 
+-----------+----------------+---------+----------+-----------+--------------------+-------------------
+ -infinity |                |         |          |           |                    | -infinity
+ infinity  |                |         |          |           |                    | infinity
+(2 rows)
+
+SELECT col4 as time,
+       CAST(col4 AS time(2) DEFAULT NULL ON CONVERSION ERROR) as to_times,
+       CAST(col4 AS timetz DEFAULT NULL ON CONVERSION ERROR) IS NOT NULL as to_timetz,
+       CAST(col4 AS interval(2) DEFAULT NULL ON CONVERSION ERROR) as to_interval,
+       CAST(col4 AS interval(2) DEFAULT NULL ON CONVERSION ERROR) as to_interval_scale
+FROM test_safecast2;
+    time     |  to_times   | to_timetz |          to_interval          |       to_interval_scale       
+-------------+-------------+-----------+-------------------------------+-------------------------------
+ 15:36:39    | 15:36:39    | t         | @ 15 hours 36 mins 39 secs    | @ 15 hours 36 mins 39 secs
+ 23:59:59.99 | 23:59:59.99 | t         | @ 23 hours 59 mins 59.99 secs | @ 23 hours 59 mins 59.99 secs
+(2 rows)
+
+SELECT col5 as timetz,
+       CAST(col5 AS time DEFAULT NULL ON CONVERSION ERROR) as to_time,
+       CAST(col5 AS time(2) DEFAULT NULL ON CONVERSION ERROR) as to_time_scale,
+       CAST(col5 AS timetz DEFAULT NULL ON CONVERSION ERROR) as to_timetz,
+       CAST(col5 AS timetz(6) DEFAULT NULL ON CONVERSION ERROR) as to_timetz_scale,
+       CAST(col5 AS interval DEFAULT NULL ON CONVERSION ERROR) as to_interval,
+       CAST(col5 AS interval(2) DEFAULT NULL ON CONVERSION ERROR) as to_interval_scale
+FROM test_safecast2;
+     timetz     |   to_time   | to_time_scale |   to_timetz    | to_timetz_scale | to_interval | to_interval_scale 
+----------------+-------------+---------------+----------------+-----------------+-------------+-------------------
+ 15:36:39-04    | 15:36:39    | 15:36:39      | 15:36:39-04    | 15:36:39-04     |             | 
+ 23:59:59.99-07 | 23:59:59.99 | 23:59:59.99   | 23:59:59.99-07 | 23:59:59.99-07  |             | 
+(2 rows)
+
+-- test deparse
+SET datestyle TO ISO, YMD;
+CREATE VIEW safecastview AS
+SELECT
+      CAST('2022-01-01' COLLATE "C" COLLATE "POSIX" as DATE DEFAULT NULL ON CONVERSION ERROR) as cast,
+      CAST('1234' as char(3) DEFAULT -1111 ON CONVERSION ERROR) as cast0,
+       CAST(1 as date DEFAULT (('2025-Dec-06'::date + random(min=>1, max=>1::int))) ON CONVERSION ERROR) as cast1,
+       CAST(ARRAY[['1'], ['three'],['a']] AS int[] DEFAULT '{1,2}' ON CONVERSION ERROR) as cast2,
+       CAST(ARRAY[['1', '2'], ['three', 'a']] AS date[] DEFAULT NULL ON CONVERSION ERROR) as cast3,
+       CAST(ARRAY['three'] AS INT[] DEFAULT '{1,2}' ON CONVERSION ERROR) as cast4,
+       CAST(CAST(1 AS int DEFAULT 0 ON CONVERSION ERROR) + 70000::int2::int4 AS int DEFAULT -1 ON CONVERSION ERROR) as cast5;
+\sv safecastview
+CREATE OR REPLACE VIEW public.safecastview AS
+ SELECT CAST('2022-01-01'::text COLLATE "POSIX" AS date DEFAULT NULL::date ON CONVERSION ERROR) AS "cast",
+    CAST('1234'::text AS character(3) DEFAULT '-1111'::integer::character(3) ON CONVERSION ERROR) AS cast0,
+    CAST(1 AS date DEFAULT '2025-12-06'::date + random(min => 1, max => 1) ON CONVERSION ERROR) AS cast1,
+    CAST(ARRAY[ARRAY[1], ARRAY['three'], ARRAY['a']] AS integer[] DEFAULT '{1,2}'::integer[] ON CONVERSION ERROR) AS cast2,
+    CAST(ARRAY[ARRAY['1', '2'], ARRAY['three', 'a']] AS date[] DEFAULT NULL::date[] ON CONVERSION ERROR) AS cast3,
+    CAST(ARRAY['three'] AS integer[] DEFAULT '{1,2}'::integer[] ON CONVERSION ERROR) AS cast4,
+    CAST((CAST(1 AS integer DEFAULT 0 ON CONVERSION ERROR)) + 70000::smallint::integer AS integer DEFAULT '-1'::integer ON CONVERSION ERROR) AS cast5
+SELECT * FROM safecastview;
+    cast    | cast0 |   cast1    | cast2 | cast3 | cast4 | cast5 
+------------+-------+------------+-------+-------+-------+-------
+ 2022-01-01 | 123   | 2025-12-07 | {1,2} |       | {1,2} |    -1
+(1 row)
+
+CREATE VIEW safecastview1 AS
+SELECT CAST(ARRAY[['1'], ['three'],['a']] AS d_int_arr
+            DEFAULT '{41,43}' ON CONVERSION ERROR) as cast1,
+       CAST(ARRAY[['1', '2', 1.1], ['three', true, B'01']] AS d_int_arr
+            DEFAULT '{41,43}' ON CONVERSION ERROR) as cast2;
+\sv safecastview1
+CREATE OR REPLACE VIEW public.safecastview1 AS
+ SELECT CAST(ARRAY[ARRAY[1], ARRAY['three'], ARRAY['a']] AS d_int_arr DEFAULT '{41,43}'::integer[]::d_int_arr ON CONVERSION ERROR) AS cast1,
+    CAST(ARRAY[ARRAY[1, 2, 1.1::integer], ARRAY['three', true, '01'::"bit"]] AS d_int_arr DEFAULT '{41,43}'::integer[]::d_int_arr ON CONVERSION ERROR) AS cast2
+SELECT * FROM safecastview1;
+  cast1  |  cast2  
+---------+---------
+ {41,43} | {41,43}
+(1 row)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT CAST('1' || 'a' AS int DEFAULT 2 ON CONVERSION ERROR);
+                                    QUERY PLAN                                     
+-----------------------------------------------------------------------------------
+ Result
+   Output: CAST(('1'::text || 'a'::text) AS integer DEFAULT 2 ON CONVERSION ERROR)
+(2 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT CAST('a' AS int DEFAULT 2 ON CONVERSION ERROR);
+                             QUERY PLAN                             
+--------------------------------------------------------------------
+ Result
+   Output: CAST('a'::text AS integer DEFAULT 2 ON CONVERSION ERROR)
+(2 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT CAST(ARRAY[['1', '2', 1.1], ['three', true, B'01']] AS d_int_arr DEFAULT NULL ON CONVERSION ERROR);
+                                                                         QUERY PLAN                                                                          
+-------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Result
+   Output: CAST(ARRAY[ARRAY[1, 2, (1.1)::integer], ARRAY['three', true, '01'::"bit"]] AS d_int_arr DEFAULT (NULL::integer[])::d_int_arr ON CONVERSION ERROR)
+(2 rows)
+
+RESET datestyle;
+DROP VIEW safecastview;
+DROP VIEW safecastview1;
+DROP TABLE test_safecast0;
+DROP TABLE test_safecast1;
+DROP TABLE test_safecast2;
+DROP TABLE tcast;
+DROP TABLE tcast1;
+DROP FUNCTION ret_int8;
+DROP FUNCTION ret_setint;
+DROP TYPE comp_domain_with_typmod;
+DROP TYPE comp2;
+DROP DOMAIN d_nota;
+DROP DOMAIN d_varchar;
+DROP DOMAIN d_int8arr;
+DROP DOMAIN d_int8;
+DROP DOMAIN d_int42arr1;
+DROP DOMAIN d_int42arr;
+DROP DOMAIN d_int42;
+DROP DOMAIN d_char3_not_null;
+DROP DOMAIN d_numeric;
+DROP DOMAIN ddomain;
+RESET extra_float_digits;
+RESET lc_monetary;
