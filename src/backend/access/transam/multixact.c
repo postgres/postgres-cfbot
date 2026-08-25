@@ -2998,17 +2998,17 @@ multixact_redo(XLogReaderState *record)
 /*
  * Entrypoint for sync.c to sync offsets files.
  */
-int
-multixactoffsetssyncfiletag(const FileTag *ftag, char *path)
+void
+multixactoffsetssyncfiletag(struct PgAioHandle *ioh, InflightSyncEntry *entry)
 {
-	return SlruSyncFileTag(MultiXactOffsetCtl, ftag, path);
+	SlruSyncFileTag(MultiXactOffsetCtl, ioh, entry);
 }
 
 /*
  * Entrypoint for sync.c to sync members files.
  */
-int
-multixactmemberssyncfiletag(const FileTag *ftag, char *path)
+void
+multixactmemberssyncfiletag(struct PgAioHandle *ioh, InflightSyncEntry *entry)
 {
-	return SlruSyncFileTag(MultiXactMemberCtl, ftag, path);
+	SlruSyncFileTag(MultiXactMemberCtl, ioh, entry);
 }

@@ -2258,6 +2258,29 @@ FileStartReadV(PgAioHandle *ioh, File file,
 	return 0;
 }
 
+int
+FileStartSync(PgAioHandle *ioh, File file, bool datasync,
+			  uint32 wait_event_info)
+{
+	int			returnCode;
+	Vfd		   *vfdP;
+
+	Assert(FileIsValid(file));
+
+	DO_DB(elog(LOG, "FileStartSync: %d (%s)",
+			   file, VfdCache[file].fileName));
+
+	returnCode = FileAccess(file);
+	if (returnCode < 0)
+		return returnCode;
+
+	vfdP = &VfdCache[file];
+
+	pgaio_io_start_fsync(ioh, vfdP->fd, datasync, wait_event_info);
+
+	return 0;
+}
+
 ssize_t
 FileWriteV(File file, const struct iovec *iov, int iovcnt, pgoff_t offset,
 		   uint32 wait_event_info)

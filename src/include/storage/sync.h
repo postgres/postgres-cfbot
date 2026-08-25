@@ -13,6 +13,9 @@
 #ifndef SYNC_H
 #define SYNC_H
 
+#include "lib/ilist.h"
+#include "portability/instr_time.h"
+#include "storage/aio_types.h"
 #include "storage/relfilelocator.h"
 
 /*
@@ -54,6 +57,59 @@ typedef struct FileTag
 	RelFileLocator rlocator;
 	uint64		segno;
 } FileTag;
+
+struct PendingFsyncEntry;
+struct PgAioHandle;
+
+/*
+ * How the file opened by a sync handler must be closed once its asynchronous
+ * fsync has completed.
+ */
+typedef enum SyncFileCloseMethod
+{
+	SYNC_CLOSE_NONE = 0,		/* nothing to close */
+	SYNC_CLOSE_TRANSIENT,		/* CloseTransientFile(close_file) */
+	SYNC_CLOSE_VFD,				/* FileClose((File) close_file) */
+} SyncFileCloseMethod;
+
+/*
+ * State for a single in-flight asynchronous fsync request.  A sync handler
+ * opens the file to be synced, fills in the fields it is responsible for, and
+ * starts an asynchronous fsync on the AIO handle it is given.
+ */
+typedef struct InflightSyncEntry
+{
+	FileTag		tag;			/* identifies handler and file */
+
+	char		path[MAXPGPATH];
+
+	/*
+	 * Set by the handler: whether it started an asynchronous fsync on the
+	 * passed-in AIO handle.  If the file could not be opened, the handler
+	 * sets started = false and open_errno to the errno of the failed open.
+	 */
+	bool		started;
+	int			open_errno;
+
+	/* set by the handler: how to close the opened file after completion */
+	SyncFileCloseMethod close_method;
+	int			close_file;		/* fd, or File, depending on close_method */
+
+	struct PendingFsyncEntry *hash_entry;
+
+	int			retry_count;
+
+	instr_time	start_time;
+
+	PgAioReturn ioret;
+	PgAioWaitRef iow;
+
+	/* membership in the inflight / retry lists */
+	dlist_node	node;
+
+	/* membership in the error-cleanup list */
+	dlist_node	cleanup_node;
+} InflightSyncEntry;
 
 extern void InitSync(void);
 extern void SyncPreCheckpoint(void);
