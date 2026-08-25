@@ -1,0 +1,6 @@
+# pgbench extension
+comment = 'pgbench distribution, permutation, and hashing functions'
+default_version = '1.0'
+module_pathname = '$libdir/pgbench'
+relocatable = false
+schema = 'pgbench'
