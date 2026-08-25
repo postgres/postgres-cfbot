@@ -14,6 +14,7 @@
 #define SCRIPT_H
 
 #include "common/pg_prng.h"
+#include "common/pgbench_funcs.h"
 #include "pgbench.h"
 #include "pqexpbuffer.h"
 #include "stats.h"
@@ -23,20 +24,6 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
-
-/*
- * Hashing constants
- */
-#define FNV_PRIME			UINT64CONST(0x100000001b3)
-#define FNV_OFFSET_BASIS	UINT64CONST(0xcbf29ce484222325)
-#define MM2_MUL				UINT64CONST(0xc6a4a7935bd1e995)
-#define MM2_MUL_TIMES_8		UINT64CONST(0x35253c9ade8f4ca8)
-#define MM2_ROT				47
-
-#define MIN_GAUSSIAN_PARAM		2.0 /* minimum parameter for gauss */
-
-#define MIN_ZIPFIAN_PARAM		1.001	/* minimum parameter for zipfian */
-#define MAX_ZIPFIAN_PARAM		1000.0	/* maximum parameter for zipfian */
 
 #define nbranches	1			/* Makes little sense to change this.  Change
 								 * -s instead */

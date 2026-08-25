@@ -19,6 +19,7 @@
 #include "commands.h"
 #include "common/logging.h"
 #include "common/pg_prng.h"
+#include "common/pgbench_funcs.h"
 #include "common/string.h"
 #include "engine.h"
 #include "fe_utils/string_utils.h"
@@ -132,28 +133,6 @@ void
 initRandomState(pg_prng_state *state)
 {
 	pg_prng_seed(state, pg_prng_uint64(&base_random_sequence));
-}
-
-/*
- * random number generator: generate a value, such that the series of values
- * will approximate a Poisson distribution centered on the given value.
- *
- * Individual results are rounded to integers, though the center value need
- * not be one.
- */
-static int64
-getPoissonRand(pg_prng_state *state, double center)
-{
-	/*
-	 * Use inverse transform sampling to generate a value > 0, such that the
-	 * expected (i.e. average) value is the given argument.
-	 */
-	double		uniform;
-
-	/* pg_prng_double value in [0, 1), uniform in (0, 1] */
-	uniform = 1.0 - pg_prng_double(state);
-
-	return (int64) (-log(uniform) * center + 0.5);
 }
 
 /* set up a connection to the backend */
@@ -784,7 +763,7 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				Assert(throttle_delay > 0);
 
 				thread->throttle_trigger +=
-					getPoissonRand(&thread->ts_throttle_rs, throttle_delay);
+					pgbench_random_poisson(&thread->ts_throttle_rs, throttle_delay);
 				st->txn_scheduled = thread->throttle_trigger;
 
 				/*
