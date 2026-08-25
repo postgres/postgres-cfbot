@@ -38,6 +38,8 @@
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
 
+#define BTREE_MAX_EXTEND_BY 16
+
 static BTMetaPageData *_bt_getmeta(Relation rel, Buffer metabuf);
 static void _bt_delitems_delete(Relation rel, Buffer buf,
 								TransactionId snapshotConflictHorizon,
@@ -853,9 +855,11 @@ _bt_getbuf(Relation rel, BlockNumber blkno, int access)
 Buffer
 _bt_allocbuf(Relation rel, Relation heaprel)
 {
+	Buffer		buffers[BTREE_MAX_EXTEND_BY];
 	Buffer		buf;
 	BlockNumber blkno;
 	Page		page;
+	uint32		extend_by;
 
 	Assert(heaprel != NULL);
 
@@ -954,13 +958,37 @@ _bt_allocbuf(Relation rel, Relation heaprel)
 	}
 
 	/*
-	 * Extend the relation by one page. Need to use RBM_ZERO_AND_LOCK or we
+	 * Extend the relation by several pages, retaining the first page for this
+	 * allocation and making the rest available through the FSM.  This
+	 * amortizes relation extension and buffer replacement across several
+	 * page splits.  Grow geometrically at first, so that this doesn't bloat
+	 * small indexes, and cap the batch to limit the number of buffers pinned
+	 * at once.
+	 *
+	 * Relation extension is not WAL-logged.  FSM updates normally aren't
+	 * either, but an FSM page can reach a standby in a hint full-page image.
+	 * The standby can therefore have FSM entries for reserved pages beyond the
+	 * end of its main fork.  GetFreeIndexPage() verifies the main fork's
+	 * length before returning such an entry.
+	 *
+	 * Need to use RBM_ZERO_AND_LOCK for the first page or we
 	 * risk a race condition against btvacuumscan --- see comments therein.
 	 * This forces us to repeat the valgrind request that _bt_lockbuf()
 	 * otherwise would make, as we can't use _bt_lockbuf() without introducing
 	 * a race.
 	 */
-	buf = ExtendBufferedRel(BMR_REL(rel), MAIN_FORKNUM, NULL, EB_LOCK_FIRST);
+	extend_by = Min(RelationGetNumberOfBlocks(rel), BTREE_MAX_EXTEND_BY);
+	extend_by = Max(extend_by, 1);
+	blkno = ExtendBufferedRelBy(BMR_REL(rel), MAIN_FORKNUM, NULL,
+								EB_LOCK_FIRST, extend_by, buffers, &extend_by);
+	buf = buffers[0];
+
+	for (uint32 i = 1; i < extend_by; i++)
+		ReleaseBuffer(buffers[i]);
+
+	if (extend_by > 1)
+		RecordFreeIndexPages(rel, blkno + 1, extend_by - 1);
+
 	if (!RelationUsesLocalBuffers(rel))
 		VALGRIND_MAKE_MEM_DEFINED(BufferGetPage(buf), BLCKSZ);
 

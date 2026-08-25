@@ -19,6 +19,8 @@
 
 extern BlockNumber GetFreeIndexPage(Relation rel);
 extern void RecordFreeIndexPage(Relation rel, BlockNumber freeBlock);
+extern void RecordFreeIndexPages(Relation rel, BlockNumber firstBlock,
+								 uint32 nblocks);
 extern void RecordUsedIndexPage(Relation rel, BlockNumber usedBlock);
 
 extern void IndexFreeSpaceMapVacuum(Relation rel);
