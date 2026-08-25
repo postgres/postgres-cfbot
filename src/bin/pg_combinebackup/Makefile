@@ -30,10 +30,20 @@ OBJS = \
 	reconstruct.o \
 	write_manifest.o
 
+TEST_OBJS = \
+	checksum_helper_test.o \
+	test_checksum_helper.o
+
 all: pg_combinebackup
 
 pg_combinebackup: $(OBJS) | submake-libpgport submake-libpgfeutils
 	$(CC) $(CFLAGS) $^ $(LDFLAGS) $(LDFLAGS_EX) $(LIBS) -o $@$(X)
+
+test_checksum_helper$(X): $(TEST_OBJS) | submake-libpgport submake-libpgfeutils
+	$(CC) $(CFLAGS) $^ $(LDFLAGS) $(LDFLAGS_EX) $(LIBS) -o $@$(X)
+
+checksum_helper_test.o: $(top_srcdir)/src/common/checksum_helper.c
+	$(CC) $(CFLAGS) $(CPPFLAGS) -DFRONTEND -c $< -o $@
 
 install: all installdirs
 	$(INSTALL_PROGRAM) pg_combinebackup$(X) '$(DESTDIR)$(bindir)/pg_combinebackup$(X)'
@@ -45,11 +55,11 @@ uninstall:
 	rm -f '$(DESTDIR)$(bindir)/pg_combinebackup$(X)'
 
 clean distclean maintainer-clean:
-	rm -f pg_combinebackup$(X) $(OBJS)
+	rm -f pg_combinebackup$(X) test_checksum_helper$(X) $(OBJS) $(TEST_OBJS)
 	rm -rf tmp_check
 
-check:
+check: test_checksum_helper$(X)
 	$(prove_check)
 
-installcheck:
+installcheck: test_checksum_helper$(X)
 	$(prove_installcheck)
