@@ -1897,11 +1897,16 @@ SlruSyncFileTag(SlruDesc *ctl, struct PgAioHandle *ioh, InflightSyncEntry *entry
 	}
 
 	/*
-	 * Use the generic sync target.  SLRU segments are not smgr relations and
-	 * cannot be reopened from a FileTag in another process, so this fsync
-	 * will run synchronously in worker mode.
+	 * If this SLRU is registered with sync.c, identify the file by its
+	 * FileTag, so that the fsync can be executed by an IO worker, which will
+	 * reopen the file with SlruOpenFileTag().  Otherwise there is no handler
+	 * to reopen the file through, so use the generic sync target, whose IOs
+	 * cannot be handed off to a worker.
 	 */
-	pgaio_io_set_target(ioh, PGAIO_TID_SYNC);
+	if (ctl->options.sync_handler != SYNC_HANDLER_NONE)
+		pgaio_io_set_target_sync_filetag(ioh, &entry->tag);
+	else
+		pgaio_io_set_target(ioh, PGAIO_TID_SYNC);
 
 	/* Start the asynchronous fsync; the fd is closed once it completes. */
 	pgaio_io_start_fsync(ioh, fd, false, WAIT_EVENT_SLRU_FLUSH_SYNC);
@@ -1909,4 +1914,23 @@ SlruSyncFileTag(SlruDesc *ctl, struct PgAioHandle *ioh, InflightSyncEntry *entry
 	entry->started = true;
 	entry->close_method = SYNC_CLOSE_TRANSIENT;
 	entry->close_file = fd;
+}
+
+/*
+ * Counterpart to SlruSyncFileTag(), opening the segment identified by ftag in
+ * a process that did not stage the IO.  As with SlruSyncFileTag(), individual
+ * SLRUs have to provide the handler function, so that the correct "SlruCtl"
+ * is used.
+ *
+ * Returns a file descriptor opened with OpenTransientFile(), or -1 with errno
+ * set.
+ */
+int
+SlruOpenFileTag(SlruDesc *ctl, const FileTag *ftag)
+{
+	char		path[MAXPGPATH];
+
+	SlruFileName(ctl, path, ftag->segno);
+
+	return OpenTransientFile(path, O_RDWR | PG_BINARY);
 }
