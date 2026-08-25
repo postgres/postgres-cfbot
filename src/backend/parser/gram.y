@@ -321,6 +321,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 				simple_select values_clause
 				PLpgSQL_Expr PLAssignStmt
 
+%type <node>		opt_trailing_comma
 %type <str>			opt_single_name
 %type <list>		opt_qualified_name
 %type <boolean>		opt_concurrently opt_usingindex
@@ -438,7 +439,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 				qualified_name_list any_name any_name_list type_name_list
 				any_operator expr_list attrs
 				distinct_clause opt_distinct_clause
-				target_list opt_target_list insert_column_list set_target_list
+				target_list target_list_items opt_target_list insert_column_list set_target_list
 				merge_values_clause
 				set_clause_list set_clause
 				def_list operator_def_list indirection opt_indirection
@@ -1179,6 +1180,11 @@ stmt:
 /*
  * Generic supporting productions for DDL
  */
+opt_trailing_comma:
+			 ','							{ $$ = NULL; }
+			| /* EMPTY */					{ $$ = NULL; }
+			;
+
 opt_single_name:
 			ColId							{ $$ = $1; }
 			| /* EMPTY */					{ $$ = NULL; }
@@ -18414,9 +18420,13 @@ opt_target_list: target_list						{ $$ = $1; }
 		;
 
 target_list:
+			target_list_items  opt_trailing_comma	{ $$ = $1; }
+			;
+
+target_list_items:
 			target_el								{ $$ = list_make1($1); }
-			| target_list ',' target_el				{ $$ = lappend($1, $3); }
-		;
+			| target_list_items ',' target_el		{ $$ = lappend($1, $3); }
+			;
 
 target_el:	a_expr AS ColLabel
 				{
