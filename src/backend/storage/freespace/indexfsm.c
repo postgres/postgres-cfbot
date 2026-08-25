@@ -54,6 +54,21 @@ RecordFreeIndexPage(Relation rel, BlockNumber freeBlock)
 	RecordPageWithFreeSpace(rel, freeBlock, BLCKSZ - 1);
 }
 
+/*
+ * RecordFreeIndexPages - mark a range of pages as free in the FSM
+ */
+void
+RecordFreeIndexPages(Relation rel, BlockNumber firstBlock, uint32 nblocks)
+{
+	BlockNumber lastBlock = firstBlock + nblocks;
+
+	Assert(nblocks > 0);
+
+	for (BlockNumber blkno = firstBlock; blkno < lastBlock; blkno++)
+		RecordFreeIndexPage(rel, blkno);
+
+	FreeSpaceMapVacuumRange(rel, firstBlock, lastBlock);
+}
 
 /*
  * RecordUsedIndexPage - mark a page as used in the FSM
