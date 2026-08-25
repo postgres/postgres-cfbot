@@ -1,0 +1,240 @@
+<!-- doc/src/sgml/pgbench-ext.sgml -->
+
+<sect1 id="pgbench-ext" xreflabel="pgbench (extension)">
+ <title>pgbench &mdash; benchmark random distributions, hashing, and permutation functions</title>
+
+ <indexterm zone="pgbench-ext">
+  <primary>pgbench</primary>
+  <secondary>extension</secondary>
+ </indexterm>
+
+ <para>
+  The <filename>pgbench</filename> module provides SQL-callable functions
+  implementing the statistical random distribution generators, domain
+  permutations, and 64-bit hashing routines from the
+  <xref linkend="pgbench"/> benchmarking tool.
+ </para>
+
+ <para>
+  These functions are installed into the <literal>pgbench</literal> schema and
+  enable reproducible server-side synthetic data generation, procedural
+  workload simulation, and client/server algorithmic parity in custom test
+  harnesses.
+ </para>
+
+ <para>
+  This module is considered <quote>trusted</quote>, that is, it can be
+  installed by non-superusers who have <literal>CREATE</literal> privilege
+  on the current database.
+ </para>
+
+ <sect2 id="pgbench-ext-funcs">
+  <title>Functions</title>
+
+  <para>
+   All functions provided by this extension are installed in the
+   <literal>pgbench</literal> schema.
+  </para>
+
+  <variablelist>
+   <varlistentry id="pgbench-ext-funcs-setseed">
+    <term>
+     <function>pgbench.setseed(seed double precision) returns void</function>
+     <indexterm>
+      <primary>setseed</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <term>
+     <function>pgbench.setseed(seed bigint) returns void</function>
+    </term>
+    <listitem>
+     <para>
+      Sets the seed for the backend's internal pseudorandom number generator used
+      by the <literal>pgbench</literal> random functions.  When passed a
+      <type>double precision</type> value, it must be in the range
+      <literal>[-1.0, 1.0]</literal>.  When passed a <type>bigint</type> value,
+      it initializes the full 64-bit state directly.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-random">
+    <term>
+     <function>pgbench.random(min bigint, max bigint) returns bigint</function>
+     <indexterm>
+      <primary>random</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates a uniformly-distributed random integer between
+      <parameter>min</parameter> and <parameter>max</parameter>, inclusive.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-random-gaussian">
+    <term>
+     <function>pgbench.random_gaussian(min bigint, max bigint, parameter double precision) returns bigint</function>
+     <indexterm>
+      <primary>random_gaussian</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates a Gaussian-distributed random integer between
+      <parameter>min</parameter> and <parameter>max</parameter>, inclusive.
+      The <parameter>parameter</parameter> defines how concentrated the values
+      are toward the center of the range and must be at least <literal>2.0</literal>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-random-exponential">
+    <term>
+     <function>pgbench.random_exponential(min bigint, max bigint, parameter double precision) returns bigint</function>
+     <indexterm>
+      <primary>random_exponential</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates an exponentially-distributed random integer between
+      <parameter>min</parameter> and <parameter>max</parameter>, inclusive.
+      The <parameter>parameter</parameter> controls the distribution density and
+      must be greater than <literal>0.0</literal>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-random-zipfian">
+    <term>
+     <function>pgbench.random_zipfian(min bigint, max bigint, parameter double precision) returns bigint</function>
+     <indexterm>
+      <primary>random_zipfian</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates a Zipfian-distributed random integer between
+      <parameter>min</parameter> and <parameter>max</parameter>, inclusive.
+      The <parameter>parameter</parameter> (Zipfian skew factor <literal>s</literal>)
+      must be in the range <literal>[1.001, 1000.0]</literal>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-random-poisson">
+    <term>
+     <function>pgbench.random_poisson(center double precision) returns bigint</function>
+     <indexterm>
+      <primary>random_poisson</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Generates a Poisson-distributed random integer centered on
+      <parameter>center</parameter>, which must be greater than <literal>0.0</literal>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-hash-murmur2">
+    <term>
+     <function>pgbench.hash_murmur2(val bigint [, seed bigint ]) returns bigint</function>
+     <indexterm>
+      <primary>hash_murmur2</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Computes the 64-bit Austin Appleby MurmurHash2 of <parameter>val</parameter>
+      using optional <parameter>seed</parameter> (default is <literal>0</literal>).
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-hash-fnv1a">
+    <term>
+     <function>pgbench.hash_fnv1a(val bigint [, seed bigint ]) returns bigint</function>
+     <indexterm>
+      <primary>hash_fnv1a</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Computes the 64-bit Fowler&ndash;Noll&ndash;Vo 1a hash of
+      <parameter>val</parameter> using optional <parameter>seed</parameter>
+      (default is <literal>0</literal>).
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-hash">
+    <term>
+     <function>pgbench.hash(val bigint [, seed bigint ]) returns bigint</function>
+     <indexterm>
+      <primary>hash</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      An alias for <function>pgbench.hash_murmur2</function>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="pgbench-ext-funcs-permute">
+    <term>
+     <function>pgbench.permute(val bigint, size bigint [, seed bigint ]) returns bigint</function>
+     <indexterm>
+      <primary>permute</primary>
+      <secondary>in pgbench</secondary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Permutes <parameter>val</parameter> into the range
+      <literal>[0, size)</literal> using a multi-round Feistel-style bijective
+      permutation seeded with <parameter>seed</parameter> (default is
+      <literal>0</literal>).  <parameter>size</parameter> must be greater than
+      <literal>0</literal>.
+     </para>
+    </listitem>
+   </varlistentry>
+  </variablelist>
+ </sect2>
+
+ <sect2 id="pgbench-ext-examples">
+  <title>Examples</title>
+
+  <para>
+   Generate a reproducible synthetic customer workload directly within SQL:
+  </para>
+
+<programlisting>
+CREATE EXTENSION pgbench;
+
+-- Seed PRNG for reproducible test run
+SELECT pgbench.setseed(42::bigint);
+
+-- Generate non-uniform account IDs following a Zipfian distribution
+SELECT pgbench.random_zipfian(1, 100000, 1.2) AS aid
+FROM generate_series(1, 10);
+
+-- Generate a unique permutation of customer IDs from 0 to 999
+SELECT pgbench.permute(i, 1000, 12345) AS permuted_id
+FROM generate_series(0, 999) i;
+</programlisting>
+ </sect2>
+
+</sect1>
