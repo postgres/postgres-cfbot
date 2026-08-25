@@ -85,6 +85,9 @@ char	   *output_files[] = {
 	NULL
 };
 
+/* list SQL commands for new cluster */
+PQExpBuffer sql_roident_correction;
+
 int
 main(int argc, char **argv)
 {
@@ -252,6 +255,23 @@ main(int argc, char **argv)
 	create_script_for_old_cluster_deletion(&deletion_script_file_name);
 
 	issue_warnings_and_set_wal_level();
+
+	if (user_opts.do_copy_pg_commit_ts && sql_roident_correction)
+	{
+		/*
+		 * Correction pg_replication_origin.roident and
+		 * pg_replication_origin_status.remote_lsn for new cluster.
+		 */
+		PGconn	*conn_new_template1;
+
+		start_postmaster(&new_cluster, true);
+
+		conn_new_template1 = connectToServer(&new_cluster, "template1");
+		PQclear(executeQueryOrDie(conn_new_template1, "%s", sql_roident_correction->data));
+		PQfinish(conn_new_template1);
+
+		stop_postmaster(false);
+	}
 
 	pg_log(PG_REPORT,
 		   "\n"
