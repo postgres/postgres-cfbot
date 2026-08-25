@@ -271,3 +271,6 @@ create table list_parted_tbl1 partition of list_parted_tbl
   for values in (1) partition by list(b);
 explain (costs off) select * from list_parted_tbl;
 drop table list_parted_tbl;
+
+-- Test trailing commas
+select 1,2,3, from pg_class limit 1;
