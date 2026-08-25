@@ -1,0 +1,7 @@
+# Generated subdirectories
+/log/
+/results/
+/tmp_check/
+
+# Symlinked source
+/pgbench_funcs.c
