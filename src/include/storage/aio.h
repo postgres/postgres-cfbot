@@ -119,9 +119,10 @@ typedef enum PgAioTargetID
 	PGAIO_TID_INVALID = 0,
 	PGAIO_TID_SMGR,
 	PGAIO_TID_SYNC,
+	PGAIO_TID_SYNC_FILETAG,
 } PgAioTargetID;
 
-#define PGAIO_TID_COUNT (PGAIO_TID_SYNC + 1)
+#define PGAIO_TID_COUNT (PGAIO_TID_SYNC_FILETAG + 1)
 
 
 /*
@@ -178,7 +179,11 @@ struct PgAioTargetInfo
 
 	/*
 	 * Optional counterpart to reopen, releasing the file descriptor it
-	 * acquired once the IO has been executed.
+	 * acquired.  Called in the process that reopened the IO, after the IO has
+	 * been executed.  Targets whose reopen callback reuses a cached
+	 * descriptor do not need this.
+	 *
+	 * This is called in a critical section, so it must not raise errors.
 	 */
 	void		(*close) (PgAioHandle *ioh);
 

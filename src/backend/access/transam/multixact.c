@@ -3001,7 +3001,7 @@ multixact_redo(XLogReaderState *record)
 }
 
 /*
- * Entrypoint for sync.c to sync offsets files.
+ * Entrypoints for sync.c to sync and reopen offsets files.
  */
 void
 multixactoffsetssyncfiletag(struct PgAioHandle *ioh, InflightSyncEntry *entry)
@@ -3009,11 +3009,23 @@ multixactoffsetssyncfiletag(struct PgAioHandle *ioh, InflightSyncEntry *entry)
 	SlruSyncFileTag(MultiXactOffsetCtl, ioh, entry);
 }
 
+int
+multixactoffsetsopenfiletag(const FileTag *ftag)
+{
+	return SlruOpenFileTag(MultiXactOffsetCtl, ftag);
+}
+
 /*
- * Entrypoint for sync.c to sync members files.
+ * Entrypoints for sync.c to sync and reopen members files.
  */
 void
 multixactmemberssyncfiletag(struct PgAioHandle *ioh, InflightSyncEntry *entry)
 {
 	SlruSyncFileTag(MultiXactMemberCtl, ioh, entry);
+}
+
+int
+multixactmembersopenfiletag(const FileTag *ftag)
+{
+	return SlruOpenFileTag(MultiXactMemberCtl, ftag);
 }
