@@ -1211,7 +1211,7 @@ ReplicationSlotPersistInvalidation(ReplicationSlotInvalidationCause cause,
 	char		path[MAXPGPATH];
 
 	Assert(MyReplicationSlot != NULL);
-	Assert(MyReplicationSlot->data.persistency == RS_PERSISTENT);
+	Assert(MyReplicationSlot->data.persistency != RS_EPHEMERAL);
 	Assert(MyReplicationSlot->data.invalidated == RS_INVAL_NONE);
 	Assert(cause != RS_INVAL_NONE);
 	Assert(!clear_restart_lsn || cause == RS_INVAL_WAL_REMOVED);
