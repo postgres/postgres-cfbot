@@ -437,6 +437,9 @@ static int	lazy_scan_prune(LVRelState *vacrel, Buffer buf,
 							BlockNumber blkno, Page page,
 							Buffer vmbuffer,
 							bool *has_lpdead_items, bool *vm_page_frozen);
+static bool lazy_scan_freeze(LVRelState *vacrel, Buffer buf,
+							 BlockNumber blkno, Page page,
+							 bool *has_lpdead_items);
 static bool lazy_scan_noprune(LVRelState *vacrel, Buffer buf,
 							  BlockNumber blkno, Page page,
 							  bool *has_lpdead_items);
@@ -1456,13 +1459,22 @@ lazy_scan_heap(LVRelState *vacrel)
 			!lazy_scan_noprune(vacrel, buf, blkno, page, &has_lpdead_items))
 		{
 			/*
-			 * lazy_scan_noprune could not do all required processing.  Wait
-			 * for a cleanup lock, and call lazy_scan_prune in the usual way.
+			 * An aggressive VACUUM needs to freeze this page. First try to
+			 * freeze tuple headers with an ordinary exclusive lock. This can
+			 * make progress on pages pinned by row-lock waiters. Fall back to
+			 * the usual cleanup-lock path only when a dead tuple prevents the
+			 * relation freeze cutoffs from advancing.
 			 */
 			Assert(vacrel->aggressive);
 			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-			LockBufferForCleanup(buf);
-			got_cleanup_lock = true;
+			LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+			if (!lazy_scan_freeze(vacrel, buf, blkno, page,
+								  &has_lpdead_items))
+			{
+				LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+				LockBufferForCleanup(buf);
+				got_cleanup_lock = true;
+			}
 		}
 
 		/*
@@ -2145,6 +2157,75 @@ lazy_scan_prune(LVRelState *vacrel,
 	*has_lpdead_items = (presult.lpdead_items > 0);
 
 	return presult.ndeleted;
+}
+
+/*
+ * lazy_scan_freeze() -- freeze tuple headers without physical pruning.
+ *
+ * Caller must hold a pin and an ordinary exclusive lock on the buffer.
+ * Returns false when a DEAD tuple prevents advancing the relation's freeze
+ * cutoffs without a cleanup-lock pass.
+ */
+static bool
+lazy_scan_freeze(LVRelState *vacrel,
+				 Buffer buf,
+				 BlockNumber blkno,
+				 Page page,
+				 bool *has_lpdead_items)
+{
+	HeapPageFreezeParams params;
+	HeapPageFreezeResult result;
+
+	Assert(BufferGetBlockNumber(buf) == blkno);
+	Assert(page == BufferGetPage(buf));
+
+	params.relation = vacrel->rel;
+	params.buffer = buf;
+	params.vistest = vacrel->vistest;
+	params.cutoffs = &vacrel->cutoffs;
+
+	heap_page_freeze_only(&params, &result,
+						  &vacrel->offnum,
+						  &vacrel->NewRelfrozenXid,
+						  &vacrel->NewRelminMxid);
+
+	if (result.needs_cleanup)
+		return false;
+
+	if (result.nfrozen > 0)
+		vacrel->new_frozen_tuple_pages++;
+
+	if (result.lpdead_items > 0)
+	{
+		if (vacrel->nindexes == 0)
+		{
+			result.hastup = true;
+			result.dead_tuples += result.lpdead_items;
+		}
+		else
+		{
+			vacrel->lpdead_item_pages++;
+			qsort(result.deadoffsets, result.lpdead_items,
+				  sizeof(OffsetNumber), cmpOffsetNumbers);
+			dead_items_add(vacrel, blkno, result.deadoffsets,
+						   result.lpdead_items);
+			vacrel->lpdead_items += result.lpdead_items;
+		}
+	}
+
+	vacrel->tuples_frozen += result.nfrozen;
+	vacrel->live_tuples += result.live_tuples;
+	vacrel->recently_dead_tuples += result.recently_dead_tuples;
+	vacrel->missed_dead_tuples += result.dead_tuples;
+	if (result.dead_tuples > 0)
+		vacrel->missed_dead_pages++;
+
+	if (result.hastup)
+		vacrel->nonempty_pages = blkno + 1;
+
+	*has_lpdead_items = (result.lpdead_items > 0);
+
+	return true;
 }
 
 /*
