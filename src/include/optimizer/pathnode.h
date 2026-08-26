@@ -346,6 +346,7 @@ extern RelOptInfo *build_simple_rel(PlannerInfo *root, int relid,
 									RelOptInfo *parent);
 extern RelOptInfo *build_simple_grouped_rel(PlannerInfo *root, RelOptInfo *rel);
 extern RelOptInfo *build_grouped_rel(PlannerInfo *root, RelOptInfo *rel);
+extern RelOptInfo *copy_rel_without_paths(RelOptInfo *rel);
 extern RelOptInfo *find_base_rel(PlannerInfo *root, int relid);
 extern RelOptInfo *find_base_rel_noerr(PlannerInfo *root, int relid);
 extern RelOptInfo *find_base_rel_ignore_join(PlannerInfo *root, int relid);
