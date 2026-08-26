@@ -1838,3 +1838,564 @@ GROUP BY t1.x ORDER BY t1.x;
 RESET geqo;
 RESET geqo_threshold;
 DROP TABLE eager_agg_tab_ml;
+--
+-- Test eager aggregation for queries with no aggregates, where what is
+-- pushed down is a plain deduplication
+--
+CREATE TABLE eager_distinct_t1 (id int, val int);
+CREATE TABLE eager_distinct_t2 (id int, t1_id int, flag bool);
+INSERT INTO eager_distinct_t1 SELECT i, i FROM generate_series(1, 10) i;
+INSERT INTO eager_distinct_t2
+  SELECT i, ((i - 1) / 100) + 1, i % 2 = 0 FROM generate_series(1, 1000) i;
+ANALYZE eager_distinct_t1;
+ANALYZE eager_distinct_t2;
+-- Deduplicate the to-many side before the join, so the join produces only
+-- the rows DISTINCT keeps.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ORDER BY t1.id;
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
+ Sort
+   Output: t1.id
+   Sort Key: t1.id
+   ->  HashAggregate
+         Output: t1.id
+         Group Key: t1.id
+         ->  Hash Join
+               Output: t1.id
+               Hash Cond: (t1.id = t2.t1_id)
+               ->  Seq Scan on public.eager_distinct_t1 t1
+                     Output: t1.id, t1.val
+               ->  Hash
+                     Output: t2.t1_id
+                     ->  HashAggregate
+                           Output: t2.t1_id
+                           Group Key: t2.t1_id
+                           ->  Seq Scan on public.eager_distinct_t2 t2
+                                 Output: t2.id, t2.t1_id, t2.flag
+(18 rows)
+
+SELECT DISTINCT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ORDER BY t1.id;
+ id 
+----
+  1
+  2
+  3
+  4
+  5
+  6
+  7
+  8
+  9
+ 10
+(10 rows)
+
+-- The same query without eager aggregation, for comparison
+SET enable_eager_aggregate TO off;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ORDER BY t1.id;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Sort
+   Output: t1.id
+   Sort Key: t1.id
+   ->  HashAggregate
+         Output: t1.id
+         Group Key: t1.id
+         ->  Hash Join
+               Output: t1.id
+               Hash Cond: (t2.t1_id = t1.id)
+               ->  Seq Scan on public.eager_distinct_t2 t2
+                     Output: t2.id, t2.t1_id, t2.flag
+               ->  Hash
+                     Output: t1.id
+                     ->  Seq Scan on public.eager_distinct_t1 t1
+                           Output: t1.id
+(15 rows)
+
+SELECT DISTINCT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ORDER BY t1.id;
+ id 
+----
+  1
+  2
+  3
+  4
+  5
+  6
+  7
+  8
+  9
+ 10
+(10 rows)
+
+RESET enable_eager_aggregate;
+-- Produce results with sorting deduplication
+SET enable_hashagg TO off;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ORDER BY t1.id;
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ Sort
+   Output: t1.id
+   Sort Key: t1.id
+   ->  GroupAggregate
+         Output: t1.id
+         Group Key: t1.id
+         ->  Sort
+               Output: t1.id
+               Sort Key: t1.id
+               ->  Hash Join
+                     Output: t1.id
+                     Hash Cond: (t2.t1_id = t1.id)
+                     ->  GroupAggregate
+                           Output: t2.t1_id
+                           Group Key: t2.t1_id
+                           ->  Sort
+                                 Output: t2.t1_id
+                                 Sort Key: t2.t1_id
+                                 ->  Seq Scan on public.eager_distinct_t2 t2
+                                       Output: t2.t1_id
+                     ->  Hash
+                           Output: t1.id
+                           ->  Seq Scan on public.eager_distinct_t1 t1
+                                 Output: t1.id
+(24 rows)
+
+SELECT DISTINCT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ORDER BY t1.id;
+ id 
+----
+  1
+  2
+  3
+  4
+  5
+  6
+  7
+  8
+  9
+ 10
+(10 rows)
+
+RESET enable_hashagg;
+-- Deduplication is not possible when a column of the to-many side is
+-- observable, since its rows are then not interchangeable.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT t1.id, t2.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ORDER BY t1.id, t2.id;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Unique
+   Output: t1.id, t2.id
+   ->  Sort
+         Output: t1.id, t2.id
+         Sort Key: t1.id, t2.id
+         ->  Hash Join
+               Output: t1.id, t2.id
+               Hash Cond: (t2.t1_id = t1.id)
+               ->  Seq Scan on public.eager_distinct_t2 t2
+                     Output: t2.id, t2.t1_id, t2.flag
+               ->  Hash
+                     Output: t1.id
+                     ->  Seq Scan on public.eager_distinct_t1 t1
+                           Output: t1.id
+(14 rows)
+
+-- Declined for DISTINCT ON too, which keeps a particular row from each
+-- group, even though only the driver side is projected here
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT ON (t1.id) t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ORDER BY t1.id, t2.id;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Unique
+   Output: t1.id, t2.id
+   ->  Sort
+         Output: t1.id, t2.id
+         Sort Key: t1.id, t2.id
+         ->  Hash Join
+               Output: t1.id, t2.id
+               Hash Cond: (t2.t1_id = t1.id)
+               ->  Seq Scan on public.eager_distinct_t2 t2
+                     Output: t2.id, t2.t1_id, t2.flag
+               ->  Hash
+                     Output: t1.id
+                     ->  Seq Scan on public.eager_distinct_t1 t1
+                           Output: t1.id
+(14 rows)
+
+-- A qual on the to-many side is applied before the deduplication
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ WHERE t2.flag
+ORDER BY t1.id;
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
+ Sort
+   Output: t1.id
+   Sort Key: t1.id
+   ->  HashAggregate
+         Output: t1.id
+         Group Key: t1.id
+         ->  Hash Join
+               Output: t1.id
+               Hash Cond: (t1.id = t2.t1_id)
+               ->  Seq Scan on public.eager_distinct_t1 t1
+                     Output: t1.id, t1.val
+               ->  Hash
+                     Output: t2.t1_id
+                     ->  HashAggregate
+                           Output: t2.t1_id
+                           Group Key: t2.t1_id
+                           ->  Seq Scan on public.eager_distinct_t2 t2
+                                 Output: t2.id, t2.t1_id, t2.flag
+                                 Filter: t2.flag
+(19 rows)
+
+SELECT DISTINCT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ WHERE t2.flag
+ORDER BY t1.id;
+ id 
+----
+  1
+  2
+  3
+  4
+  5
+  6
+  7
+  8
+  9
+ 10
+(10 rows)
+
+-- GROUP BY with no aggregates behaves the same way as DISTINCT
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+GROUP BY t1.id ORDER BY t1.id;
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ Group
+   Output: t1.id
+   Group Key: t1.id
+   ->  GroupAggregate
+         Output: t1.id
+         Group Key: t1.id
+         ->  Sort
+               Output: t1.id
+               Sort Key: t1.id
+               ->  Hash Join
+                     Output: t1.id
+                     Hash Cond: (t1.id = t2.t1_id)
+                     ->  Seq Scan on public.eager_distinct_t1 t1
+                           Output: t1.id, t1.val
+                     ->  Hash
+                           Output: t2.t1_id
+                           ->  HashAggregate
+                                 Output: t2.t1_id
+                                 Group Key: t2.t1_id
+                                 ->  Seq Scan on public.eager_distinct_t2 t2
+                                       Output: t2.id, t2.t1_id, t2.flag
+(21 rows)
+
+SELECT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+GROUP BY t1.id ORDER BY t1.id;
+ id 
+----
+  1
+  2
+  3
+  4
+  5
+  6
+  7
+  8
+  9
+ 10
+(10 rows)
+
+DROP TABLE eager_distinct_t1;
+DROP TABLE eager_distinct_t2;
+--
+-- Test that the deduplication has its own usefulness threshold, separate
+-- from the one that governs aggregate pushdown
+--
+CREATE TABLE eager_distinct_g1 (id int);
+CREATE TABLE eager_distinct_g2 (id int, g1_id int);
+-- four rows per driver row, which is above min_eager_distinct_group_size and
+-- below min_eager_agg_group_size
+INSERT INTO eager_distinct_g1 SELECT i FROM generate_series(1, 10) i;
+INSERT INTO eager_distinct_g2
+  SELECT i, ((i - 1) / 4) + 1 FROM generate_series(1, 40) i;
+ANALYZE eager_distinct_g1;
+ANALYZE eager_distinct_g2;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT g1.id
+  FROM eager_distinct_g1 g1
+  JOIN eager_distinct_g2 g2 ON g2.g1_id = g1.id
+ORDER BY g1.id;
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
+ Sort
+   Output: g1.id
+   Sort Key: g1.id
+   ->  HashAggregate
+         Output: g1.id
+         Group Key: g1.id
+         ->  Hash Join
+               Output: g1.id
+               Hash Cond: (g1.id = g2.g1_id)
+               ->  Seq Scan on public.eager_distinct_g1 g1
+                     Output: g1.id
+               ->  Hash
+                     Output: g2.g1_id
+                     ->  HashAggregate
+                           Output: g2.g1_id
+                           Group Key: g2.g1_id
+                           ->  Seq Scan on public.eager_distinct_g2 g2
+                                 Output: g2.id, g2.g1_id
+(18 rows)
+
+-- Raising the threshold past the group size declines the pushdown
+SET min_eager_distinct_group_size TO 8;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT g1.id
+  FROM eager_distinct_g1 g1
+  JOIN eager_distinct_g2 g2 ON g2.g1_id = g1.id
+ORDER BY g1.id;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Sort
+   Output: g1.id
+   Sort Key: g1.id
+   ->  HashAggregate
+         Output: g1.id
+         Group Key: g1.id
+         ->  Hash Join
+               Output: g1.id
+               Hash Cond: (g2.g1_id = g1.id)
+               ->  Seq Scan on public.eager_distinct_g2 g2
+                     Output: g2.id, g2.g1_id
+               ->  Hash
+                     Output: g1.id
+                     ->  Seq Scan on public.eager_distinct_g1 g1
+                           Output: g1.id
+(15 rows)
+
+-- ... without changing the answer
+SELECT DISTINCT g1.id
+  FROM eager_distinct_g1 g1
+  JOIN eager_distinct_g2 g2 ON g2.g1_id = g1.id
+ORDER BY g1.id;
+ id 
+----
+  1
+  2
+  3
+  4
+  5
+  6
+  7
+  8
+  9
+ 10
+(10 rows)
+
+RESET min_eager_distinct_group_size;
+-- The aggregate threshold does not govern the deduplication
+SET min_eager_agg_group_size TO 1000;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT g1.id
+  FROM eager_distinct_g1 g1
+  JOIN eager_distinct_g2 g2 ON g2.g1_id = g1.id
+ORDER BY g1.id;
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
+ Sort
+   Output: g1.id
+   Sort Key: g1.id
+   ->  HashAggregate
+         Output: g1.id
+         Group Key: g1.id
+         ->  Hash Join
+               Output: g1.id
+               Hash Cond: (g1.id = g2.g1_id)
+               ->  Seq Scan on public.eager_distinct_g1 g1
+                     Output: g1.id
+               ->  Hash
+                     Output: g2.g1_id
+                     ->  HashAggregate
+                           Output: g2.g1_id
+                           Group Key: g2.g1_id
+                           ->  Seq Scan on public.eager_distinct_g2 g2
+                                 Output: g2.id, g2.g1_id
+(18 rows)
+
+RESET min_eager_agg_group_size;
+-- ... nor does the deduplication threshold govern aggregates
+SET min_eager_distinct_group_size TO 1000;
+SET min_eager_agg_group_size TO 0;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT g1.id, max(g2.id)
+  FROM eager_distinct_g1 g1
+  JOIN eager_distinct_g2 g2 ON g2.g1_id = g1.id
+GROUP BY g1.id ORDER BY g1.id;
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
+ Finalize GroupAggregate
+   Output: g1.id, max(g2.id)
+   Group Key: g1.id
+   ->  Sort
+         Output: g1.id, (PARTIAL max(g2.id))
+         Sort Key: g1.id
+         ->  Hash Join
+               Output: g1.id, (PARTIAL max(g2.id))
+               Hash Cond: (g1.id = g2.g1_id)
+               ->  Seq Scan on public.eager_distinct_g1 g1
+                     Output: g1.id
+               ->  Hash
+                     Output: g2.g1_id, (PARTIAL max(g2.id))
+                     ->  Partial HashAggregate
+                           Output: g2.g1_id, PARTIAL max(g2.id)
+                           Group Key: g2.g1_id
+                           ->  Seq Scan on public.eager_distinct_g2 g2
+                                 Output: g2.id, g2.g1_id
+(18 rows)
+
+RESET min_eager_distinct_group_size;
+RESET min_eager_agg_group_size;
+DROP TABLE eager_distinct_g1;
+DROP TABLE eager_distinct_g2;
+--
+-- Test that on a chain of to-many joins the deduplication is applied at
+-- every hop, so that the duplicates never accumulate
+--
+CREATE TABLE eager_distinct_c1 (id int);
+CREATE TABLE eager_distinct_c2 (id int, c1_id int);
+CREATE TABLE eager_distinct_c3 (id int, c2_id int);
+INSERT INTO eager_distinct_c1 SELECT i FROM generate_series(1, 100) i;
+INSERT INTO eager_distinct_c2
+  SELECT i, ((i - 1) / 10) + 1 FROM generate_series(1, 1000) i;
+INSERT INTO eager_distinct_c3
+  SELECT i, ((i - 1) / 10) + 1 FROM generate_series(1, 10000) i;
+ANALYZE eager_distinct_c1;
+ANALYZE eager_distinct_c2;
+ANALYZE eager_distinct_c3;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT c1.id
+  FROM eager_distinct_c1 c1
+  JOIN eager_distinct_c2 c2 ON c2.c1_id = c1.id
+  JOIN eager_distinct_c3 c3 ON c3.c2_id = c2.id;
+                                    QUERY PLAN                                     
+-----------------------------------------------------------------------------------
+ HashAggregate
+   Output: c1.id
+   Group Key: c1.id
+   ->  Hash Join
+         Output: c1.id
+         Hash Cond: (c1.id = c2.c1_id)
+         ->  Seq Scan on public.eager_distinct_c1 c1
+               Output: c1.id
+         ->  Hash
+               Output: c2.c1_id
+               ->  HashAggregate
+                     Output: c2.c1_id
+                     Group Key: c2.c1_id
+                     ->  Hash Join
+                           Output: c2.c1_id
+                           Hash Cond: (c2.id = c3.c2_id)
+                           ->  Seq Scan on public.eager_distinct_c2 c2
+                                 Output: c2.id, c2.c1_id
+                           ->  Hash
+                                 Output: c3.c2_id
+                                 ->  HashAggregate
+                                       Output: c3.c2_id
+                                       Group Key: c3.c2_id
+                                       ->  Seq Scan on public.eager_distinct_c3 c3
+                                             Output: c3.id, c3.c2_id
+(25 rows)
+
+-- The result is 100 rows, so check it rather than printing it
+SELECT count(*), sum(id) FROM (
+  SELECT DISTINCT c1.id
+    FROM eager_distinct_c1 c1
+    JOIN eager_distinct_c2 c2 ON c2.c1_id = c1.id
+    JOIN eager_distinct_c3 c3 ON c3.c2_id = c2.id) s;
+ count | sum  
+-------+------
+   100 | 5050
+(1 row)
+
+-- The same chain without eager aggregation, for comparison
+SET enable_eager_aggregate TO off;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT c1.id
+  FROM eager_distinct_c1 c1
+  JOIN eager_distinct_c2 c2 ON c2.c1_id = c1.id
+  JOIN eager_distinct_c3 c3 ON c3.c2_id = c2.id;
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
+ HashAggregate
+   Output: c1.id
+   Group Key: c1.id
+   ->  Hash Join
+         Output: c1.id
+         Hash Cond: (c3.c2_id = c2.id)
+         ->  Seq Scan on public.eager_distinct_c3 c3
+               Output: c3.id, c3.c2_id
+         ->  Hash
+               Output: c1.id, c2.id
+               ->  Hash Join
+                     Output: c1.id, c2.id
+                     Hash Cond: (c2.c1_id = c1.id)
+                     ->  Seq Scan on public.eager_distinct_c2 c2
+                           Output: c2.id, c2.c1_id
+                     ->  Hash
+                           Output: c1.id
+                           ->  Seq Scan on public.eager_distinct_c1 c1
+                                 Output: c1.id
+(19 rows)
+
+SELECT count(*), sum(id) FROM (
+  SELECT DISTINCT c1.id
+    FROM eager_distinct_c1 c1
+    JOIN eager_distinct_c2 c2 ON c2.c1_id = c1.id
+    JOIN eager_distinct_c3 c3 ON c3.c2_id = c2.id) s;
+ count | sum  
+-------+------
+   100 | 5050
+(1 row)
+
+RESET enable_eager_aggregate;
+DROP TABLE eager_distinct_c1;
+DROP TABLE eager_distinct_c2;
+DROP TABLE eager_distinct_c3;
