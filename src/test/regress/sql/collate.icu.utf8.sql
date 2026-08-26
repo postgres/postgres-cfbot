@@ -1313,12 +1313,38 @@ EXPLAIN (COSTS OFF)
 SELECT t1.c, count(t2.c) FROM pagg_tab5 t1 JOIN pagg_tab6 t2 ON t1.c = t2.c AND t1.c = t2.b GROUP BY 1 ORDER BY t1.c COLLATE "C";
 SELECT t1.c, count(t2.c) FROM pagg_tab5 t1 JOIN pagg_tab6 t2 ON t1.c = t2.c AND t1.c = t2.b GROUP BY 1 ORDER BY t1.c COLLATE "C";
 
+-- Here the partition key collation is the same as the collation of the
+-- partitioned column, so a partitionwise join can't be rejected by comparing
+-- those two. The equality of the partition keys is proven only by an
+-- equivalence class, whose collation (case_insensitive) is not the partition
+-- key collation. Under a non-deterministic collation the partitions are not
+-- join-closed, so a partitionwise join would give a wrong answer here (it
+-- would return 5 rather than 9).
+SET enable_partitionwise_join TO true;
+CREATE TABLE pwj_tab1 (a int, b text) PARTITION BY LIST (b);
+CREATE TABLE pwj_tab1_p1 PARTITION OF pwj_tab1 FOR VALUES IN ('AbC');
+CREATE TABLE pwj_tab1_p2 PARTITION OF pwj_tab1 FOR VALUES IN ('abc', 'ABC');
+CREATE TABLE pwj_tab2 (a int, b text) PARTITION BY LIST (b);
+CREATE TABLE pwj_tab2_p1 PARTITION OF pwj_tab2 FOR VALUES IN ('AbC');
+CREATE TABLE pwj_tab2_p2 PARTITION OF pwj_tab2 FOR VALUES IN ('abc', 'ABC');
+INSERT INTO pwj_tab1 VALUES (1, 'abc'), (2, 'ABC'), (3, 'AbC');
+INSERT INTO pwj_tab2 VALUES (1, 'abc'), (2, 'ABC'), (3, 'AbC');
+ANALYZE pwj_tab1;
+ANALYZE pwj_tab2;
+
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM pwj_tab1 t1, pwj_tab2 t2 WHERE t1.b = 'abc' COLLATE case_insensitive AND t2.b = 'abc' COLLATE case_insensitive;
+SELECT count(*) FROM pwj_tab1 t1, pwj_tab2 t2 WHERE t1.b = 'abc' COLLATE case_insensitive AND t2.b = 'abc' COLLATE case_insensitive;
+
 DROP TABLE pagg_tab3;
 DROP TABLE pagg_tab4;
 DROP TABLE pagg_tab5;
 DROP TABLE pagg_tab6;
+DROP TABLE pwj_tab1;
+DROP TABLE pwj_tab2;
 
 RESET enable_partitionwise_aggregate;
+RESET enable_partitionwise_join;
 RESET max_parallel_workers_per_gather;
 RESET enable_incremental_sort;
 
