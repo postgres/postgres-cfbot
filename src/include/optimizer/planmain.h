@@ -104,6 +104,8 @@ extern RestrictInfo *build_implied_join_equality(PlannerInfo *root,
 												 Index security_level);
 extern void rebuild_joinclause_attr_needed(PlannerInfo *root);
 extern void match_foreign_keys_to_quals(PlannerInfo *root);
+extern void compute_semijoin_info(PlannerInfo *root, SpecialJoinInfo *sjinfo,
+								  List *clause);
 
 /*
  * prototypes for plan/analyzejoins.c

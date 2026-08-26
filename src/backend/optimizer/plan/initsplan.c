@@ -117,8 +117,6 @@ static SpecialJoinInfo *make_outerjoininfo(PlannerInfo *root,
 										   Relids inner_join_rels,
 										   JoinType jointype, Index ojrelid,
 										   List *clause);
-static void compute_semijoin_info(PlannerInfo *root, SpecialJoinInfo *sjinfo,
-								  List *clause);
 static void deconstruct_distribute_oj_quals(PlannerInfo *root,
 											List *jtitems,
 											JoinTreeItem *jtitem);
@@ -2482,7 +2480,7 @@ make_outerjoininfo(PlannerInfo *root,
  * Note: this relies on only the jointype and syn_righthand fields of the
  * SpecialJoinInfo; the rest may not be set yet.
  */
-static void
+void
 compute_semijoin_info(PlannerInfo *root, SpecialJoinInfo *sjinfo, List *clause)
 {
 	List	   *semi_operators;
