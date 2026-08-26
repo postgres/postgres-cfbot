@@ -1026,6 +1026,14 @@
   boot_val => 'true',
 },
 
+{ name => 'enable_semijoin_conversion', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
+  short_desc => 'Enables representing filtering inner joins as semijoins.',
+  long_desc => 'When a joined relation only restricts which rows survive and nothing can observe how often rows are duplicated, the join is planned as a semijoin so that matching rows do not fan out the other inputs.',
+  flags => 'GUC_EXPLAIN',
+  variable => 'enable_semijoin_conversion',
+  boot_val => 'false',
+},
+
 { name => 'enable_seqscan', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
   short_desc => 'Enables the planner\'s use of sequential-scan plans.',
   flags => 'GUC_EXPLAIN',

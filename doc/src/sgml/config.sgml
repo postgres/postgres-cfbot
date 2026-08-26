@@ -6234,6 +6234,30 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-enable-semijoin-conversion" xreflabel="enable_semijoin_conversion">
+      <term><varname>enable_semijoin_conversion</varname> (<type>boolean</type>)
+      <indexterm>
+       <primary><varname>enable_semijoin_conversion</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Enables or disables the optimization that plans an inner join as a
+        semijoin when the joined relation only determines which rows survive.
+        The relation must not contribute any values beyond the join
+        conditions, and the query must not depend on how many times a row is
+        duplicated.  <literal>SELECT DISTINCT</literal> qualifies, as does
+        <literal>GROUP BY</literal> without aggregates, and so do aggregates
+        such as <function>min</function> and <function>max</function> whose
+        result does not depend on how often an input appears.  Matching rows
+        then do not multiply the other inputs.  Only queries whose joins are
+        all inner joins are considered, and one relation at a time, so a
+        chain of such joins is left alone.  The default is
+        <literal>off</literal>.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-enable-seqscan" xreflabel="enable_seqscan">
       <term><varname>enable_seqscan</varname> (<type>boolean</type>)
       <indexterm>

@@ -242,6 +242,13 @@ query_planner(PlannerInfo *root,
 	joinlist = remove_useless_self_joins(root, joinlist);
 
 	/*
+	 * Represent inner joins that only filter as semijoins, so that matching
+	 * rows don't fan out the other inputs.  This has to follow the join
+	 * removals above, since they can change which relations are referenced.
+	 */
+	convert_joins_to_semijoins(root, joinlist);
+
+	/*
 	 * Now distribute "placeholders" to base rels as needed.  This has to be
 	 * done after join removal because removal could change whether a
 	 * placeholder is evaluable at a base rel.
