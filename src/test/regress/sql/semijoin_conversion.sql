@@ -52,6 +52,19 @@ SELECT d.grp
  WHERE f.flag
  GROUP BY d.grp;
 
+-- every aggregate present ignores them
+EXPLAIN (COSTS OFF)
+SELECT max(d.id), count(DISTINCT d.grp)
+  FROM sjc_driver d JOIN sjc_filter f ON f.driver_id = d.id
+ WHERE f.flag;
+
+-- bool_and() is min() over bool and carries the same marker, so duplicates are
+-- ignored there too
+EXPLAIN (COSTS OFF)
+SELECT bool_and(d.id > 0)
+  FROM sjc_driver d JOIN sjc_filter f ON f.driver_id = d.id
+ WHERE f.flag;
+
 -- a chain of filtering joins forms one group of two relations, and a group of
 -- two is declined
 EXPLAIN (COSTS OFF)
@@ -89,11 +102,50 @@ SELECT d.id
   FROM sjc_driver d JOIN sjc_filter f ON f.driver_id = d.id
  WHERE f.flag;
 
+-- count(*) counts them
+EXPLAIN (COSTS OFF)
+SELECT count(*)
+  FROM sjc_driver d JOIN sjc_filter f ON f.driver_id = d.id
+ WHERE f.flag;
+
+-- sum() adds them up
+EXPLAIN (COSTS OFF)
+SELECT sum(d.id)
+  FROM sjc_driver d JOIN sjc_filter f ON f.driver_id = d.id
+ WHERE f.flag;
+
+-- an ordered-set aggregate reads a position in the input distribution, and
+-- mode() reports the most frequent input outright
+EXPLAIN (COSTS OFF)
+SELECT mode() WITHIN GROUP (ORDER BY d.grp)
+  FROM sjc_driver d JOIN sjc_filter f ON f.driver_id = d.id
+ WHERE f.flag;
+
+-- bit_xor() cancels a value supplied twice, and so counts its inputs
+EXPLAIN (COSTS OFF)
+SELECT bit_xor(d.id)
+  FROM sjc_driver d JOIN sjc_filter f ON f.driver_id = d.id
+ WHERE f.flag;
+
+-- bit_and() ignores duplicates but carries no marker, and so is not admitted
+EXPLAIN (COSTS OFF)
+SELECT bit_and(d.id)
+  FROM sjc_driver d JOIN sjc_filter f ON f.driver_id = d.id
+ WHERE f.flag;
+
 -- the inner relation is projected, and so does more than filter
 EXPLAIN (COSTS OFF)
 SELECT DISTINCT d.id, f.id
   FROM sjc_driver d JOIN sjc_filter f ON f.driver_id = d.id
  WHERE f.flag;
+
+-- HAVING counts the inner relation
+EXPLAIN (COSTS OFF)
+SELECT d.grp
+  FROM sjc_driver d JOIN sjc_filter f ON f.driver_id = d.id
+ WHERE f.flag
+ GROUP BY d.grp
+HAVING count(f.id) > 4;
 
 -- a window function can see the partition's row count
 EXPLAIN (COSTS OFF)
@@ -122,6 +174,102 @@ SELECT DISTINCT d.id, d.payload
        JOIN sjc_unique u ON u.driver_id = d.id
        JOIN sjc_uniq2 u2 ON u2.unique_id = u.id
  WHERE u2.id < 30;
+
+--
+-- A key set filtering a chain of to-many joins
+--
+-- The chain below the counted relation only filters, and the many leaves per
+-- ancestor are duplicates.  It is declined all the same, since the righthand
+-- side would hold more than one relation.
+
+CREATE TABLE sjc_customer (id int PRIMARY KEY, name text, owner_group int);
+CREATE TABLE sjc_order (id int PRIMARY KEY, customer_id int, status text);
+CREATE TABLE sjc_item (id int PRIMARY KEY, order_id int, sku text);
+CREATE TABLE sjc_keyset (item_id int PRIMARY KEY);
+CREATE TABLE sjc_keyblob (keys bytea);
+CREATE TABLE sjc_group (id int PRIMARY KEY, default_access int);
+CREATE TABLE sjc_grant (owner_id int, grantee_id int, access int);
+
+INSERT INTO sjc_customer
+  SELECT g, 'cust' || g, (g % 3) + 1 FROM generate_series(1, 200) g;
+INSERT INTO sjc_order
+  SELECT g, ((g - 1) / 3) + 1, 'open' FROM generate_series(1, 600) g;
+INSERT INTO sjc_item
+  SELECT g, ((g - 1) / 4) + 1, 'sku' || g FROM generate_series(1, 2400) g;
+INSERT INTO sjc_keyset SELECT g FROM generate_series(1, 400) g;
+
+-- the same 400 keys packed as four-byte big-endian ints
+INSERT INTO sjc_keyblob
+  SELECT string_agg(decode(lpad(to_hex(g), 8, '0'), 'hex'), ''::bytea ORDER BY g)
+    FROM generate_series(1, 400) g;
+
+INSERT INTO sjc_group SELECT g, 1 FROM generate_series(1, 3) g;
+INSERT INTO sjc_grant SELECT 1, 7, 2;
+
+CREATE INDEX ON sjc_order (customer_id);
+CREATE INDEX ON sjc_item (order_id);
+ANALYZE sjc_customer;
+ANALYZE sjc_order;
+ANALYZE sjc_item;
+ANALYZE sjc_keyset;
+ANALYZE sjc_keyblob;
+ANALYZE sjc_group;
+ANALYZE sjc_grant;
+
+-- The key set join is strict in the item, so reduce_outer_joins() has made all
+-- three inner before the transformation runs.  They form one group of three.
+EXPLAIN (COSTS OFF)
+SELECT count(DISTINCT c.id)
+  FROM sjc_customer c
+       LEFT JOIN sjc_order o ON o.customer_id = c.id
+       LEFT JOIN sjc_item i ON i.order_id = o.id
+       JOIN sjc_keyset k ON k.item_id = i.id;
+
+-- The same query with the key set unpacked from a blob, which adds the blob and
+-- the function scan walking it to the group.
+EXPLAIN (COSTS OFF)
+SELECT count(DISTINCT c.id)
+  FROM sjc_customer c
+       LEFT JOIN sjc_order o ON o.customer_id = c.id
+       LEFT JOIN sjc_item i ON i.order_id = o.id
+       JOIN (SELECT (('x' || encode(substring(b.keys FROM g.i * 4 + 1 FOR 4),
+                                    'hex'))::bit(32)::int) AS item_id
+               FROM sjc_keyblob b
+                    CROSS JOIN generate_series(0, 399) AS g(i)) AS ks
+         ON ks.item_id = i.id;
+
+-- Counting the leaf relation instead of an ancestor leaves nothing to lift.
+-- The key set is unique on the item, so no fanout remains to remove.
+EXPLAIN (COSTS OFF)
+SELECT count(DISTINCT i.id)
+  FROM sjc_item i JOIN sjc_keyset k ON k.item_id = i.id;
+
+-- The coalesce is not strict in the granting relation, so the left join
+-- survives reduce_outer_joins() and the whole query is declined.
+EXPLAIN (COSTS OFF)
+SELECT count(DISTINCT c.id)
+  FROM sjc_customer c
+       JOIN sjc_order o ON o.customer_id = c.id
+       JOIN sjc_item i ON i.order_id = o.id
+       JOIN sjc_keyset k ON k.item_id = i.id
+       JOIN sjc_group g ON g.id = c.owner_group
+       LEFT JOIN sjc_grant a
+              ON a.owner_id = c.owner_group AND a.grantee_id = 7
+ WHERE c.owner_group = 7
+    OR coalesce(a.access, g.default_access, 1) >= 2;
+
+-- Written as an inner join instead, the same access check reaches the group
+-- test.  Every relation below the customer still only filters.
+EXPLAIN (COSTS OFF)
+SELECT count(DISTINCT c.id)
+  FROM sjc_customer c
+       JOIN sjc_order o ON o.customer_id = c.id
+       JOIN sjc_item i ON i.order_id = o.id
+       JOIN sjc_keyset k ON k.item_id = i.id
+       JOIN sjc_group g ON g.id = c.owner_group
+       JOIN sjc_grant a
+              ON a.owner_id = c.owner_group AND a.grantee_id = 7
+ WHERE a.access >= 2;
 
 -- Beyond join_collapse_limit the jointree stays nested and is planned one
 -- sub-list at a time, and a semijoin must not span two sub-lists.  Only the
@@ -163,6 +311,32 @@ SELECT count(*), sum(id) FROM (
          JOIN sjc_deep e ON e.filter_id = f.id
    WHERE f.flag) s;
 
+SELECT count(DISTINCT c.id)
+  FROM sjc_customer c
+       LEFT JOIN sjc_order o ON o.customer_id = c.id
+       LEFT JOIN sjc_item i ON i.order_id = o.id
+       JOIN sjc_keyset k ON k.item_id = i.id;
+
+SELECT count(DISTINCT c.id)
+  FROM sjc_customer c
+       LEFT JOIN sjc_order o ON o.customer_id = c.id
+       LEFT JOIN sjc_item i ON i.order_id = o.id
+       JOIN (SELECT (('x' || encode(substring(b.keys FROM g.i * 4 + 1 FOR 4),
+                                    'hex'))::bit(32)::int) AS item_id
+               FROM sjc_keyblob b
+                    CROSS JOIN generate_series(0, 399) AS g(i)) AS ks
+         ON ks.item_id = i.id;
+
+SELECT count(DISTINCT c.id)
+  FROM sjc_customer c
+       JOIN sjc_order o ON o.customer_id = c.id
+       JOIN sjc_item i ON i.order_id = o.id
+       JOIN sjc_keyset k ON k.item_id = i.id
+       JOIN sjc_group g ON g.id = c.owner_group
+       JOIN sjc_grant a
+              ON a.owner_id = c.owner_group AND a.grantee_id = 7
+ WHERE a.access >= 2;
+
 SET enable_semijoin_conversion = off;
 
 SELECT count(*), sum(id), sum(length(payload)) FROM (
@@ -183,4 +357,32 @@ SELECT count(*), sum(id) FROM (
          JOIN sjc_deep e ON e.filter_id = f.id
    WHERE f.flag) s;
 
+SELECT count(DISTINCT c.id)
+  FROM sjc_customer c
+       LEFT JOIN sjc_order o ON o.customer_id = c.id
+       LEFT JOIN sjc_item i ON i.order_id = o.id
+       JOIN sjc_keyset k ON k.item_id = i.id;
+
+SELECT count(DISTINCT c.id)
+  FROM sjc_customer c
+       LEFT JOIN sjc_order o ON o.customer_id = c.id
+       LEFT JOIN sjc_item i ON i.order_id = o.id
+       JOIN (SELECT (('x' || encode(substring(b.keys FROM g.i * 4 + 1 FOR 4),
+                                    'hex'))::bit(32)::int) AS item_id
+               FROM sjc_keyblob b
+                    CROSS JOIN generate_series(0, 399) AS g(i)) AS ks
+         ON ks.item_id = i.id;
+
+SELECT count(DISTINCT c.id)
+  FROM sjc_customer c
+       JOIN sjc_order o ON o.customer_id = c.id
+       JOIN sjc_item i ON i.order_id = o.id
+       JOIN sjc_keyset k ON k.item_id = i.id
+       JOIN sjc_group g ON g.id = c.owner_group
+       JOIN sjc_grant a
+              ON a.owner_id = c.owner_group AND a.grantee_id = 7
+ WHERE a.access >= 2;
+
 DROP TABLE sjc_driver, sjc_filter, sjc_deep, sjc_unique, sjc_uniq2, sjc_bygrp;
+DROP TABLE sjc_customer, sjc_order, sjc_item, sjc_keyset, sjc_keyblob,
+           sjc_group, sjc_grant;

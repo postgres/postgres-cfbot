@@ -22,6 +22,8 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
+#include "catalog/pg_aggregate.h"
 #include "catalog/pg_class.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
@@ -35,6 +37,7 @@
 #include "parser/parse_agg.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/lsyscache.h"
+#include "utils/syscache.h"
 
 /*
  * Utility structure.  A sorting procedure is needed to simplify the search
@@ -88,6 +91,7 @@ static bool replace_relid_callback(Node *node,
 static bool query_discards_duplicates(PlannerInfo *root);
 static bool rel_is_output_irrelevant(PlannerInfo *root, RelOptInfo *rel,
 									 Relids inputrelids);
+static bool query_aggs_ignore_duplicates(PlannerInfo *root);
 static Relids semijoin_rhs_component(PlannerInfo *root, Relids pool, int seed);
 static List *semijoin_join_clauses(PlannerInfo *root, Relids lhs, Relids rhs);
 static bool convert_one_join_to_semijoin(PlannerInfo *root, Relids lhs,
@@ -1437,9 +1441,9 @@ query_discards_duplicates(PlannerInfo *root)
 	if (contain_volatile_functions((Node *) root->processed_tlist))
 		return false;
 
-	/* An aggregate can count its input rows. */
+	/* Aggregation is a boundary only if no aggregate counts its input rows. */
 	if (parse->hasAggs)
-		return false;
+		return query_aggs_ignore_duplicates(root);
 
 	/* Under DISTINCT ON, arrival order picks the surviving row of a tie. */
 	if (parse->distinctClause != NIL)
@@ -1488,6 +1492,70 @@ rel_is_output_irrelevant(PlannerInfo *root, RelOptInfo *rel,
 	}
 
 	return true;
+}
+
+/*
+ * query_aggs_ignore_duplicates
+ *		Is every aggregate in this query insensitive to how many times a given
+ *		input row is supplied?
+ *
+ * A DISTINCT-qualified aggregate drops duplicate inputs itself, and an
+ * aggregate carrying an aggsortop is min()-like.  Everything else is rejected,
+ * including bit_and() and bit_or(), which do ignore duplicates but cannot be
+ * recognized as such from the catalog.
+ */
+static bool
+query_aggs_ignore_duplicates(PlannerInfo *root)
+{
+	List	   *nodes;
+	ListCell   *l;
+	bool		result = true;
+
+	nodes = pull_var_clause((Node *) root->processed_tlist,
+							PVC_INCLUDE_AGGREGATES |
+							PVC_INCLUDE_WINDOWFUNCS |
+							PVC_INCLUDE_PLACEHOLDERS);
+	nodes = list_concat(nodes,
+						pull_var_clause(root->parse->havingQual,
+										PVC_INCLUDE_AGGREGATES |
+										PVC_INCLUDE_WINDOWFUNCS |
+										PVC_INCLUDE_PLACEHOLDERS));
+
+	foreach(l, nodes)
+	{
+		Aggref	   *aggref = (Aggref *) lfirst(l);
+		HeapTuple	aggtuple;
+		Form_pg_aggregate aggform;
+		bool		insensitive;
+
+		if (!IsA(aggref, Aggref))
+			continue;
+
+		aggtuple = SearchSysCache1(AGGFNOID,
+								   ObjectIdGetDatum(aggref->aggfnoid));
+		if (!HeapTupleIsValid(aggtuple))
+			elog(ERROR, "cache lookup failed for aggregate %u",
+				 aggref->aggfnoid);
+		aggform = (Form_pg_aggregate) GETSTRUCT(aggtuple);
+
+		if (AGGKIND_IS_ORDERED_SET(aggform->aggkind))
+			insensitive = false;
+		else if (aggref->aggdistinct != NIL)
+			insensitive = true;
+		else
+			insensitive = OidIsValid(aggform->aggsortop);
+
+		ReleaseSysCache(aggtuple);
+
+		if (!insensitive)
+		{
+			result = false;
+			break;
+		}
+	}
+
+	list_free(nodes);
+	return result;
 }
 
 /*

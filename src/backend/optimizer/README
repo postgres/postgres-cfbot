@@ -292,9 +292,10 @@ Two conditions must hold.  First, the query must discard duplicates.  Second,
 nothing outside the joins may reference the relation, which is the attr_needed
 test join_is_removable() uses.
 
-DISTINCT qualifies, and so does GROUP BY without aggregates.  An aggregate may
-count its input rows, so a query containing one is left alone.  DISTINCT ON
-keeps the duplicates, since the sort order picks the surviving row.  So do window
+DISTINCT qualifies, and so does GROUP BY without aggregates.  min(), max() and
+DISTINCT-qualified aggregates qualify as well, while count(), sum() and the
+ordered-set aggregates count their input rows.  DISTINCT ON keeps the
+duplicates, since the sort order picks the surviving row.  So do window
 functions, set-returning functions in the target list, row locking, grouping
 sets and volatile output expressions.  A set operation keeps them too, since
 each arm is planned as a separate query level and a UNION above stays invisible
