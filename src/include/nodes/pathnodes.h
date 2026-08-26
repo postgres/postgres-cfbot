@@ -1297,7 +1297,8 @@ typedef struct RelOptInfo
  *
  * "agg_useful" is a flag to indicate whether the grouped paths are considered
  * useful.  It is set true if the average partial group size is no less than
- * min_eager_agg_group_size, suggesting a significant row count reduction.
+ * min_eager_agg_group_size (or min_eager_distinct_group_size when there are no
+ * aggregates), suggesting a significant row count reduction.
  */
 typedef struct RelAggInfo
 {
