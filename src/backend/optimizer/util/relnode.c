@@ -103,6 +103,7 @@ static bool init_grouping_targets(PlannerInfo *root, RelOptInfo *rel,
 static bool is_var_in_aggref_only(PlannerInfo *root, Var *var);
 static bool is_var_needed_by_join(PlannerInfo *root, Var *var, RelOptInfo *rel);
 static Index get_expression_sortgroupref(PlannerInfo *root, Expr *expr);
+static double min_useful_group_size(PlannerInfo *root);
 
 
 /*
@@ -2702,6 +2703,24 @@ build_child_join_reltarget(PlannerInfo *root,
 }
 
 /*
+ * min_useful_group_size
+ *	  The average group size at which pushing down starts to be worthwhile.
+ *
+ * A deduplication is judged separately from a partial aggregate.  Both shrink
+ * the joins above them, but a deduplication only builds the groups, while a
+ * partial aggregate also calls a transition function for every row and holds
+ * state for every group.
+ */
+static double
+min_useful_group_size(PlannerInfo *root)
+{
+	if (root->eager_agg_mode == EAGER_AGG_DEDUP)
+		return min_eager_distinct_group_size;
+
+	return min_eager_agg_group_size;
+}
+
+/*
  * create_rel_agg_info
  *	  Create the RelAggInfo structure for the given relation if it can produce
  *	  grouped paths.  The given relation is the non-grouped one which has the
@@ -2758,11 +2777,11 @@ create_rel_agg_info(PlannerInfo *root, RelOptInfo *rel,
 
 			/*
 			 * The grouped paths for the given relation are considered useful
-			 * iff the average group size is no less than
-			 * min_eager_agg_group_size.
+			 * iff the average group size is no less than the applicable
+			 * minimum.
 			 */
 			agg_info->agg_useful =
-				(rel->rows / agg_info->grouped_rows) >= min_eager_agg_group_size;
+				(rel->rows / agg_info->grouped_rows) >= min_useful_group_size(root);
 		}
 
 		return agg_info;
@@ -2824,10 +2843,10 @@ create_rel_agg_info(PlannerInfo *root, RelOptInfo *rel,
 
 		/*
 		 * The grouped paths for the given relation are considered useful iff
-		 * the average group size is no less than min_eager_agg_group_size.
+		 * the average group size is no less than the applicable minimum.
 		 */
 		result->agg_useful =
-			(rel->rows / result->grouped_rows) >= min_eager_agg_group_size;
+			(rel->rows / result->grouped_rows) >= min_useful_group_size(root);
 	}
 
 	return result;

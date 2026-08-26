@@ -2241,6 +2241,15 @@
   max => 'DBL_MAX',
 },
 
+{ name => 'min_eager_distinct_group_size', type => 'real', context => 'PGC_USERSET', group => 'QUERY_TUNING_COST',
+  short_desc => 'Sets the minimum average group size required to consider applying eager deduplication.',
+  flags => 'GUC_EXPLAIN',
+  variable => 'min_eager_distinct_group_size',
+  boot_val => '2.0',
+  min => '0.0',
+  max => 'DBL_MAX',
+},
+
 { name => 'min_parallel_index_scan_size', type => 'int', context => 'PGC_USERSET', group => 'QUERY_TUNING_COST',
   short_desc => 'Sets the minimum amount of index data for a parallel scan.',
   long_desc => 'If the planner estimates that it will read a number of index pages too small to reach this limit, a parallel scan will not be considered.',
