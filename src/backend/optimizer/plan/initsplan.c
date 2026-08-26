@@ -98,6 +98,7 @@ typedef struct GroupByColInfo
 static bool is_partial_agg_memory_risky(PlannerInfo *root);
 static void collect_eager_agg_infos(PlannerInfo *root);
 static void create_agg_clause_infos(PlannerInfo *root);
+static bool grouping_key_usable(Expr *expr);
 static void create_grouping_expr_infos(PlannerInfo *root);
 static EquivalenceClass *get_eclass_for_sortgroupclause(PlannerInfo *root,
 														SortGroupClause *sgc,
@@ -636,9 +637,12 @@ setup_eager_aggregation(PlannerInfo *root)
 {
 	collect_eager_agg_infos(root);
 
-	/* Nothing usable was found */
+	/* Retain the grouping clause only when keys were collected */
 	if (root->group_expr_list == NIL)
+	{
+		root->eager_group_clause = NIL;
 		return;
+	}
 
 	/* Push a partial aggregate if there is one, otherwise a deduplication */
 	root->eager_agg_mode = (root->agg_clause_list == NIL) ?
@@ -667,6 +671,8 @@ collect_eager_agg_infos(PlannerInfo *root)
 	 */
 	if (!root->processed_groupClause)
 		return;
+
+	root->eager_group_clause = root->processed_groupClause;
 
 	/*
 	 * For now we don't try to support grouping sets.
@@ -883,6 +889,50 @@ create_agg_clause_infos(PlannerInfo *root)
 }
 
 /*
+ * grouping_key_usable
+ *	  Can the given expression serve as a grouping key?
+ *
+ * For now we only support plain Vars.  Beyond that, equality must imply image
+ * equality, or else merging two keys could lose information an upper qual
+ * needs.  NUMERIC is the standard counterexample: 0 and 0.0 are equal to the
+ * equality operator but do not have the same byte image.
+ */
+static bool
+grouping_key_usable(Expr *expr)
+{
+	TypeCacheEntry *tce;
+	Oid			equalimageproc;
+
+	if (!IsA(expr, Var))
+		return false;
+
+	tce = lookup_type_cache(exprType((Node *) expr),
+							TYPECACHE_BTREE_OPFAMILY);
+	if (!OidIsValid(tce->btree_opf) ||
+		!OidIsValid(tce->btree_opintype))
+		return false;
+
+	equalimageproc = get_opfamily_proc(tce->btree_opf,
+									   tce->btree_opintype,
+									   tce->btree_opintype,
+									   BTEQUALIMAGE_PROC);
+
+	/*
+	 * If there is no BTEQUALIMAGE_PROC, eager aggregation is assumed to be
+	 * unsafe.  Otherwise, we call the procedure to check.  We must be careful
+	 * to pass the expression's actual collation, rather than the data type's
+	 * default collation, to ensure that non-deterministic collations are
+	 * correctly handled.
+	 */
+	if (!OidIsValid(equalimageproc))
+		return false;
+
+	return DatumGetBool(OidFunctionCall1Coll(equalimageproc,
+											 exprCollation((Node *) expr),
+											 ObjectIdGetDatum(tce->btree_opintype)));
+}
+
+/*
  * create_grouping_expr_infos
  *	  Create a GroupingExprInfo for each expression usable as grouping key.
  *
@@ -902,53 +952,14 @@ create_grouping_expr_infos(PlannerInfo *root)
 
 	Assert(root->group_expr_list == NIL);
 
-	foreach(lc, root->processed_groupClause)
+	foreach(lc, root->eager_group_clause)
 	{
 		SortGroupClause *sgc = lfirst_node(SortGroupClause, lc);
 		TargetEntry *tle = get_sortgroupclause_tle(sgc, root->processed_tlist);
-		TypeCacheEntry *tce;
-		Oid			equalimageproc;
 
 		Assert(tle->ressortgroupref > 0);
 
-		/*
-		 * For now we only support plain Vars as grouping expressions.
-		 */
-		if (!IsA(tle->expr, Var))
-			return;
-
-		/*
-		 * Eager aggregation is only possible if equality implies image
-		 * equality for each grouping key.  Otherwise, placing keys with
-		 * different byte images into the same group may result in the loss of
-		 * information that could be necessary to evaluate upper qual clauses.
-		 *
-		 * For instance, the NUMERIC data type is not supported, as values
-		 * that are considered equal by the equality operator (e.g., 0 and
-		 * 0.0) can have different scales.
-		 */
-		tce = lookup_type_cache(exprType((Node *) tle->expr),
-								TYPECACHE_BTREE_OPFAMILY);
-		if (!OidIsValid(tce->btree_opf) ||
-			!OidIsValid(tce->btree_opintype))
-			return;
-
-		equalimageproc = get_opfamily_proc(tce->btree_opf,
-										   tce->btree_opintype,
-										   tce->btree_opintype,
-										   BTEQUALIMAGE_PROC);
-
-		/*
-		 * If there is no BTEQUALIMAGE_PROC, eager aggregation is assumed to
-		 * be unsafe.  Otherwise, we call the procedure to check.  We must be
-		 * careful to pass the expression's actual collation, rather than the
-		 * data type's default collation, to ensure that non-deterministic
-		 * collations are correctly handled.
-		 */
-		if (!OidIsValid(equalimageproc) ||
-			!DatumGetBool(OidFunctionCall1Coll(equalimageproc,
-											   exprCollation((Node *) tle->expr),
-											   ObjectIdGetDatum(tce->btree_opintype))))
+		if (!grouping_key_usable(tle->expr))
 			return;
 
 		exprs = lappend(exprs, tle->expr);

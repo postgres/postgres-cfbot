@@ -2991,7 +2991,7 @@ init_grouping_targets(PlannerInfo *root, RelOptInfo *rel,
 			SortGroupClause *sgc;
 
 			/* Find the matching SortGroupClause */
-			sgc = get_sortgroupref_clause(sortgroupref, root->processed_groupClause);
+			sgc = get_sortgroupref_clause(sortgroupref, root->eager_group_clause);
 			Assert(sgc->tleSortGroupRef <= maxSortGroupRef);
 
 			/*
