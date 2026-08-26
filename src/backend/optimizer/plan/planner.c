@@ -5069,6 +5069,29 @@ create_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	/* now build distinct paths based on input_rel's partial_pathlist */
 	create_partial_distinct_paths(root, input_rel, distinct_rel, target);
 
+	/*
+	 * A pushed-down deduplication already groups by the DISTINCT expressions,
+	 * so its rows are the result.  Neither Sort nor Unique projects, so add a
+	 * projection onto the target.
+	 */
+	if (root->eager_agg_mode == EAGER_AGG_DEDUP &&
+		input_rel->grouped_rel != NULL &&
+		!IS_DUMMY_REL(input_rel->grouped_rel) &&
+		input_rel->grouped_rel->pathlist != NIL)
+	{
+		ListCell   *lc;
+
+		foreach(lc, input_rel->grouped_rel->pathlist)
+		{
+			Path	   *path = (Path *) lfirst(lc);
+
+			add_path(distinct_rel,
+					 (Path *) create_projection_path(root, distinct_rel,
+													 path,
+													 target));
+		}
+	}
+
 	/* Give a helpful error if we failed to create any paths */
 	if (distinct_rel->pathlist == NIL)
 		ereport(ERROR,
