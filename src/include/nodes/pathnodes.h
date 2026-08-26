@@ -153,6 +153,18 @@ typedef enum UpperRelationKind
 	/* NB: UPPERREL_FINAL must be last enum entry; it's used to size arrays */
 } UpperRelationKind;
 
+/*
+ * This enum identifies what eager aggregation pushes below the joins, if
+ * anything.  A partial aggregate emits transition values; a deduplication
+ * emits final rows.
+ */
+typedef enum EagerAggMode
+{
+	EAGER_AGG_NONE = 0,			/* eager aggregation does not apply */
+	EAGER_AGG_PARTIAL,			/* partial aggregates are pushed down */
+	EAGER_AGG_DEDUP,			/* a plain deduplication is pushed down */
+} EagerAggMode;
+
 /*----------
  * PlannerGlobal
  *		Global information for planning/optimization
@@ -500,6 +512,9 @@ struct PlannerInfo
 
 	/* list of GroupingExprInfos */
 	List	   *group_expr_list;
+
+	/* what eager aggregation pushes below the joins, if anything */
+	EagerAggMode eager_agg_mode;
 
 	/* list of plain Vars contained in targetlist and havingQual */
 	List	   *tlist_vars;
