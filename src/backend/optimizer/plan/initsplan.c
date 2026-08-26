@@ -99,8 +99,14 @@ static bool is_partial_agg_memory_risky(PlannerInfo *root);
 static void collect_eager_agg_infos(PlannerInfo *root);
 static void create_agg_clause_infos(PlannerInfo *root);
 static bool grouping_key_usable(Expr *expr);
+static Index max_sortgroupref(List *tlist);
+static List *pull_agg_level_exprs(PlannerInfo *root);
+static bool aggref_is_plain(Aggref *aggref);
+static bool collect_distinct_agg_keys(Aggref *aggref, Index *nextref,
+									  List **exprs, List **clauses);
 static void add_grouping_expr_infos(PlannerInfo *root, List *exprs,
 									List *clauses);
+static void create_distinct_agg_grouping(PlannerInfo *root);
 static void create_grouping_expr_infos(PlannerInfo *root);
 static EquivalenceClass *get_eclass_for_sortgroupclause(PlannerInfo *root,
 														SortGroupClause *sgc,
@@ -680,27 +686,10 @@ collect_eager_agg_infos(PlannerInfo *root)
 	else if (root->parse->distinctClause && !root->parse->hasDistinctOn)
 		root->eager_group_clause = root->processed_distinctClause;
 
-	if (root->eager_group_clause == NIL)
-		return;
-
 	/*
 	 * For now we don't try to support grouping sets.
 	 */
 	if (root->parse->groupingSets)
-		return;
-
-	/*
-	 * For now we don't try to support DISTINCT or ORDER BY aggregates.
-	 */
-	if (root->numOrderedAggs > 0)
-		return;
-
-	/*
-	 * If there are any aggregates that do not support partial mode, or any
-	 * partial aggregates that are non-serializable, do not apply eager
-	 * aggregation.
-	 */
-	if (root->hasNonPartialAggs || root->hasNonSerialAggs)
 		return;
 
 	/*
@@ -715,6 +704,31 @@ collect_eager_agg_infos(PlannerInfo *root)
 	 * the query.
 	 */
 	if (bms_membership(root->all_baserels) != BMS_MULTIPLE)
+		return;
+
+	/*
+	 * agg(DISTINCT x) supplies its arguments as grouping keys if the query
+	 * has no GROUP BY or DISTINCT.  The pushdown is then a deduplication, and
+	 * the checks below govern aggregates, so return ahead of them.
+	 */
+	if (root->eager_group_clause == NIL)
+	{
+		create_distinct_agg_grouping(root);
+		return;
+	}
+
+	/*
+	 * For now we don't try to support DISTINCT or ORDER BY aggregates.
+	 */
+	if (root->numOrderedAggs > 0)
+		return;
+
+	/*
+	 * If there are any aggregates that do not support partial mode, or any
+	 * partial aggregates that are non-serializable, do not apply eager
+	 * aggregation.
+	 */
+	if (root->hasNonPartialAggs || root->hasNonSerialAggs)
 		return;
 
 	/*
@@ -972,6 +986,113 @@ grouping_key_usable(Expr *expr)
 }
 
 /*
+ * max_sortgroupref
+ *	  The largest sortgroupref the given targetlist uses.
+ */
+static Index
+max_sortgroupref(List *tlist)
+{
+	Index		maxref = 0;
+	ListCell   *lc;
+
+	foreach(lc, tlist)
+	{
+		TargetEntry *tle = lfirst_node(TargetEntry, lc);
+
+		if (tle->ressortgroupref > maxref)
+			maxref = tle->ressortgroupref;
+	}
+
+	return maxref;
+}
+
+/*
+ * pull_agg_level_exprs
+ *	  The aggregates and plain Vars the query evaluates above the joins.
+ */
+static List *
+pull_agg_level_exprs(PlannerInfo *root)
+{
+	List	   *exprs;
+
+	exprs = pull_var_clause((Node *) root->processed_tlist,
+							PVC_INCLUDE_AGGREGATES |
+							PVC_RECURSE_WINDOWFUNCS |
+							PVC_RECURSE_PLACEHOLDERS);
+
+	if (root->parse->havingQual != NULL)
+		exprs = list_concat(exprs,
+							pull_var_clause(root->parse->havingQual,
+											PVC_INCLUDE_AGGREGATES |
+											PVC_RECURSE_PLACEHOLDERS));
+
+	return exprs;
+}
+
+/*
+ * aggref_is_plain
+ *	  Does the aggregate depend only on the set of its argument values?
+ *
+ * FILTER picks which rows reach the aggregate, while ORDER BY and the direct
+ * arguments of an ordered-set aggregate make the result depend on the order
+ * they arrive in.  A VARIADIC aggregate takes its arguments as an array, which
+ * we do not try to match against a grouping key.
+ */
+static bool
+aggref_is_plain(Aggref *aggref)
+{
+	return (aggref->aggfilter == NULL &&
+			aggref->aggorder == NIL &&
+			aggref->aggdirectargs == NIL &&
+			!aggref->aggvariadic);
+}
+
+/*
+ * collect_distinct_agg_keys
+ *	  Make a grouping key of each expression the aggregate takes DISTINCT.
+ *
+ * Appends to *exprs and *clauses, numbering the new clauses from *nextref.
+ * Returns false if an expression cannot serve as a grouping key.
+ */
+static bool
+collect_distinct_agg_keys(Aggref *aggref, Index *nextref,
+						  List **exprs, List **clauses)
+{
+	ListCell   *lc;
+
+	foreach(lc, aggref->aggdistinct)
+	{
+		SortGroupClause *sgc = lfirst_node(SortGroupClause, lc);
+		TargetEntry *tle;
+		SortGroupClause *key;
+
+		tle = get_sortgroupclause_tle(sgc, aggref->args);
+
+		if (!grouping_key_usable(tle->expr))
+			return false;
+
+		/*
+		 * A key already collected from another aggregate needs no second
+		 * clause; grouping on it once is enough.
+		 */
+		if (list_member(*exprs, tle->expr))
+			continue;
+
+		key = makeNode(SortGroupClause);
+		key->tleSortGroupRef = ++(*nextref);
+		key->eqop = sgc->eqop;
+		key->sortop = sgc->sortop;
+		key->nulls_first = sgc->nulls_first;
+		key->hashable = sgc->hashable;
+
+		*exprs = lappend(*exprs, tle->expr);
+		*clauses = lappend(*clauses, key);
+	}
+
+	return true;
+}
+
+/*
  * add_grouping_expr_infos
  *	  Record a GroupingExprInfo for each of the given keys.
  */
@@ -994,6 +1115,73 @@ add_grouping_expr_infos(PlannerInfo *root, List *exprs, List *clauses)
 
 		root->group_expr_list = lappend(root->group_expr_list, ge_info);
 	}
+}
+
+/*
+ * create_distinct_agg_grouping
+ *	  Derive grouping keys from aggregates that ignore duplicate input rows.
+ *
+ * agg(DISTINCT x) discards duplicate x before aggregating, so its arguments
+ * serve as grouping keys for a query with no GROUP BY or DISTINCT.  Eager
+ * aggregation can then deduplicate on those keys beneath a to-many join, and
+ * since the keys are the arguments, the deduplicated rows still carry what
+ * the aggregates above read.
+ *
+ * An aggregate without DISTINCT counts duplicates and rules this out, as does
+ * a FILTER clause, whose result depends on which rows arrive.
+ *
+ * Leaves root->group_expr_list NIL if no such keys were found.
+ */
+static void
+create_distinct_agg_grouping(PlannerInfo *root)
+{
+	List	   *exprs = NIL;
+	List	   *clauses = NIL;
+	List	   *agg_level_exprs;
+	Index		nextref;
+	ListCell   *lc;
+
+	if (!root->parse->hasAggs)
+		return;
+
+	/* The synthesized clauses take the refs the query has left over */
+	nextref = max_sortgroupref(root->processed_tlist);
+
+	agg_level_exprs = pull_agg_level_exprs(root);
+
+	foreach(lc, agg_level_exprs)
+	{
+		Expr	   *expr = (Expr *) lfirst(lc);
+		Aggref	   *aggref;
+
+		/*
+		 * A plain Var outside an aggregate would have to be a grouping key,
+		 * and there is no GROUP BY here, so this cannot happen.
+		 */
+		if (!IsA(expr, Aggref))
+			return;
+
+		aggref = (Aggref *) expr;
+
+		if (aggref->aggdistinct == NIL || !aggref_is_plain(aggref))
+			return;
+
+		if (!collect_distinct_agg_keys(aggref, &nextref, &exprs, &clauses))
+			return;
+	}
+
+	list_free(agg_level_exprs);
+
+	if (exprs == NIL)
+		return;
+
+	/*
+	 * These keys have no TargetEntry to be found from, so
+	 * create_grouping_expr_infos() cannot build their GroupingExprInfos.
+	 */
+	add_grouping_expr_infos(root, exprs, clauses);
+
+	root->eager_group_clause = clauses;
 }
 
 /*

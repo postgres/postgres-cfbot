@@ -2985,11 +2985,22 @@ init_grouping_targets(PlannerInfo *root, RelOptInfo *rel,
 	List	   *possibly_dependent = NIL;
 	Index		maxSortGroupRef;
 
-	/* Identify the max sortgroupref */
+	/*
+	 * Identify the max sortgroupref.  Grouping clauses synthesized from
+	 * DISTINCT aggregates carry refs of their own, past the targetlist's, so
+	 * they have to be counted too.
+	 */
 	maxSortGroupRef = 0;
 	foreach(lc, root->processed_tlist)
 	{
 		Index		ref = ((TargetEntry *) lfirst(lc))->ressortgroupref;
+
+		if (ref > maxSortGroupRef)
+			maxSortGroupRef = ref;
+	}
+	foreach(lc, root->eager_group_clause)
+	{
+		Index		ref = lfirst_node(SortGroupClause, lc)->tleSortGroupRef;
 
 		if (ref > maxSortGroupRef)
 			maxSortGroupRef = ref;
