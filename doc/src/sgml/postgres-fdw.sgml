@@ -1199,6 +1199,40 @@ CREATE SUBSCRIPTION my_subscription SERVER subscription_server PUBLICATION testp
   </para>
 
   <para>
+   When such optimized whole-query shipping is not possible, an
+   <command>UPDATE</command> or <command>DELETE</command> is instead executed
+   by first selecting the affected rows from the remote server and then
+   issuing a separate remote <command>UPDATE</command> or
+   <command>DELETE</command> for each row, identified by its
+   <literal>ctid</literal> and remote <literal>tableoid</literal>.  If the
+   remote table is the root of a partitioning hierarchy, each such per-row
+   command targets that root and so cannot benefit from partition pruning
+   (the remote planner has no way to prune based on the transmitted
+   <literal>tableoid</literal> parameter), which can make this considerably
+   slower than the whole-query case when many rows are affected.  For best
+   performance, prefer whole-query
+   shipping when possible, and otherwise try to limit the number of rows
+   affected by an <command>UPDATE</command> or <command>DELETE</command> on
+   a foreign table that maps to a partitioned table on the remote server.
+  </para>
+
+  <para>
+   The <literal>ctid</literal>/<literal>tableoid</literal> row identity
+   described above only disambiguates rows when the remote table named by
+   <literal>table_name</literal> is itself an ordinary table, partitioned
+   table, or inheritance parent on the remote server.  If that remote table
+   is itself a foreign table (for example, another
+   <filename>postgres_fdw</filename> table forwarding to a partitioned
+   table one hop further away), the remote <literal>tableoid</literal>
+   returned for every row is simply that foreign table's own OID, which does
+   not distinguish the rows it forwards.  In that situation, a non-direct
+   <command>UPDATE</command> or <command>DELETE</command> that affects more
+   than one row can still update or delete the wrong rows, exactly as
+   without this disambiguation; chaining foreign tables in this way is not
+   currently detected or protected against.
+  </para>
+
+  <para>
    When <filename>postgres_fdw</filename> encounters a join between foreign tables on
    the same foreign server, it sends the entire join to the foreign server,
    unless for some reason it believes that it will be more efficient to fetch
