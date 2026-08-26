@@ -233,6 +233,8 @@ typedef struct PgFdwModifyState
 
 	/* info about parameters for prepared statement */
 	AttrNumber	ctidAttno;		/* attnum of input resjunk ctid column */
+	AttrNumber	tableoidAttno;	/* attnum of input resjunk remote tableoid
+								 * column, or 0 if none */
 	int			p_nums;			/* number of parameters to transmit */
 	FmgrInfo   *p_flinfo;		/* output conversion functions for them */
 
@@ -558,6 +560,7 @@ static TupleTableSlot **execute_foreign_modify(EState *estate,
 static void prepare_foreign_modify(PgFdwModifyState *fmstate);
 static const char **convert_prep_stmt_params(PgFdwModifyState *fmstate,
 											 ItemPointer tupleid,
+											 Oid tableoid,
 											 TupleTableSlot **slots,
 											 int numSlots);
 static void store_returning_result(PgFdwModifyState *fmstate,
@@ -567,6 +570,7 @@ static void deallocate_query(PgFdwModifyState *fmstate);
 static List *build_remote_returning(Index rtindex, Relation rel,
 									List *returningList);
 static void rebuild_fdw_scan_tlist(ForeignScan *fscan, List *tlist);
+static void set_remote_tableoid_resnames(List *fdw_scan_tlist);
 static void execute_dml_stmt(ForeignScanState *node);
 static TupleTableSlot *get_returning_data(ForeignScanState *node);
 static void init_returning_filter(PgFdwDirectModifyState *dmstate,
@@ -1348,6 +1352,52 @@ postgresGetForeignPaths(PlannerInfo *root,
 }
 
 /*
+ * normalize_wholerow_vartype_mutator
+ *		Mutator for normalize_wholerow_vartype().
+ */
+static Node *
+normalize_wholerow_vartype_mutator(Node *node, Index *relid)
+{
+	if (node == NULL)
+		return NULL;
+	if (IsA(node, Var))
+	{
+		Var		   *var = (Var *) node;
+
+		if (var->varno == *relid &&
+			var->varattno == InvalidAttrNumber &&
+			var->vartype != RECORDOID)
+		{
+			var = copyObject(var);
+			var->vartype = RECORDOID;
+			var->vartypmod = -1;
+		}
+		return (Node *) var;
+	}
+	return expression_tree_mutator(node, normalize_wholerow_vartype_mutator,
+								   (void *) relid);
+}
+
+/*
+ * normalize_wholerow_vartype
+ *		Return a copy of exprs in which every whole-row Var on relid is
+ *		typed RECORD, regardless of what it was typed originally.
+ *
+ * Core's own row-identity whole-row Var (see add_row_identity_columns()) is
+ * always typed RECORD, while a direct whole-row reference in the query
+ * (e.g. "t.*") keeps the relation's real row type.  setrefs.c's Var-
+ * matching keys purely on varno/varattno and keeps whichever vartype the
+ * reference being fixed up already has, so mismatched types here would
+ * make two Vars that denote the same fdw_scan_tlist entry resolve
+ * inconsistently.  Normalizing to one vartype avoids that.
+ */
+static List *
+normalize_wholerow_vartype(List *exprs, Index relid)
+{
+	return (List *) normalize_wholerow_vartype_mutator((Node *) exprs, &relid);
+}
+
+/*
  * postgresGetForeignPlan
  *		Create ForeignScan plan node which implements selected best path
  */
@@ -1434,6 +1484,115 @@ postgresGetForeignPlan(PlannerInfo *root,
 		 * should recheck all the remote quals.
 		 */
 		fdw_recheck_quals = remote_exprs;
+
+		/*
+		 * If a non-direct UPDATE/DELETE needs the remote tableoid (flagged by
+		 * a pseudo-column Var in the rel's targetlist), build an explicit
+		 * fdw_scan_tlist as for a join instead of scanning positionally.
+		 */
+		foreach(lc, foreignrel->reltarget->exprs)
+		{
+			Var		   *var = (Var *) lfirst(lc);
+
+			if (IsA(var, Var) &&
+				var->varattno == RemoteTableOidAttributeNumber)
+			{
+				List	   *epq_vars;
+				List	   *scan_vars = NIL;
+				ListCell   *lc2;
+
+				fdw_scan_tlist = build_tlist_to_deparse(foreignrel);
+
+				/*
+				 * fdw_scan_tlist above already carries core's own RECORD-
+				 * typed whole-row Var for this relation (see
+				 * add_row_identity_columns()).  If a local qual or recheck
+				 * qual also references this relation's whole row directly
+				 * (e.g. "t.* IS NOT NULL"), retype that reference to match,
+				 * so it resolves consistently and folds into the same
+				 * fdw_scan_tlist entry below (see normalize_wholerow_vartype()).
+				 */
+				local_exprs = normalize_wholerow_vartype(local_exprs,
+														 foreignrel->relid);
+				fdw_recheck_quals = normalize_wholerow_vartype(fdw_recheck_quals,
+															   foreignrel->relid);
+
+				/*
+				 * Vars in the EPQ recheck and local quals now resolve against
+				 * the scan output, so add any not already covered.  Skip any
+				 * Var that isn't a column of this relation (e.g. a join
+				 * partner's column referenced by a pushed-down join qual):
+				 * that isn't ours to fetch, and it's already handled as a
+				 * bound parameter wherever it appears inside a qual.
+				 */
+				epq_vars = pull_var_clause((Node *) list_concat_copy(fdw_recheck_quals,
+																	  local_exprs),
+										   PVC_RECURSE_PLACEHOLDERS);
+				foreach(lc2, epq_vars)
+				{
+					Var		   *epq_var = lfirst_node(Var, lc2);
+
+					if (bms_is_member(epq_var->varno, foreignrel->relids))
+						scan_vars = lappend(scan_vars, epq_var);
+				}
+				fdw_scan_tlist = add_to_flat_tlist(fdw_scan_tlist, scan_vars);
+
+				/*
+				 * If this relation's whole row is referenced anywhere in
+				 * the scan output, every one of its real columns must be
+				 * fetched too, so make_tuple_from_result_row() can
+				 * reconstruct it locally afterward instead of the remote
+				 * side building and shipping a second, redundant ROW(...)
+				 * (see deparseExplicitTargetList()).
+				 */
+				{
+					bool		has_wholerow = false;
+					ListCell   *lc3;
+
+					foreach(lc3, fdw_scan_tlist)
+					{
+						TargetEntry *tle = lfirst_node(TargetEntry, lc3);
+
+						if (IsA(tle->expr, Var) &&
+							((Var *) tle->expr)->varattno == InvalidAttrNumber &&
+							((Var *) tle->expr)->varno == foreignrel->relid)
+						{
+							has_wholerow = true;
+							break;
+						}
+					}
+
+					if (has_wholerow)
+					{
+						Relation	rel = table_open(foreigntableid, NoLock);
+						TupleDesc	tupdesc = RelationGetDescr(rel);
+						List	   *relcols = NIL;
+						int			attnum;
+
+						for (attnum = 1; attnum <= tupdesc->natts; attnum++)
+						{
+							Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
+							Var		   *cvar;
+
+							if (attr->attisdropped)
+								continue;
+
+							cvar = makeVar(foreignrel->relid, attnum,
+										   attr->atttypid, attr->atttypmod,
+										   attr->attcollation, 0);
+							relcols = lappend(relcols, cvar);
+						}
+
+						fdw_scan_tlist = add_to_flat_tlist(fdw_scan_tlist, relcols);
+
+						table_close(rel, NoLock);
+					}
+				}
+
+				set_remote_tableoid_resnames(fdw_scan_tlist);
+				break;
+			}
+		}
 	}
 	else
 	{
@@ -1469,6 +1628,7 @@ postgresGetForeignPlan(PlannerInfo *root,
 
 		/* Build the list of columns to be fetched from the foreign server. */
 		fdw_scan_tlist = build_tlist_to_deparse(foreignrel);
+		set_remote_tableoid_resnames(fdw_scan_tlist);
 
 		/*
 		 * Ensure that the outer plan produces a tuple whose descriptor
@@ -1782,8 +1942,12 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 	/*
 	 * Get info we'll need for converting data fetched from the foreign server
 	 * into local representation and error reporting during that process.
+	 *
+	 * Key the choice off fdw_scan_tlist, not scanrelid: an explicit
+	 * fdw_scan_tlist (built to fetch the remote tableoid) fetches into the
+	 * scan tuple slot like a join, even for a base-relation scan.
 	 */
-	if (fsplan->scan.scanrelid > 0)
+	if (fsplan->scan.scanrelid > 0 && fsplan->fdw_scan_tlist == NIL)
 	{
 		fsstate->rel = node->ss.ss_currentRelation;
 		fsstate->tupdesc = RelationGetDescr(fsstate->rel);
@@ -1990,6 +2154,21 @@ postgresAddForeignUpdateTargets(PlannerInfo *root,
 
 	/* Register it as a row-identity column needed by this target rel */
 	add_row_identity_var(root, var, rtindex, "ctid");
+
+	/*
+	 * ctid alone isn't unique if the foreign table maps to a partitioned
+	 * table remotely, so also fetch the remote tableoid, via an out-of-range
+	 * attnum rather than TableOidAttributeNumber (see deparseColumnRef).
+	 */
+	var = makeVar(rtindex,
+				  RemoteTableOidAttributeNumber,
+				  OIDOID,
+				  -1,
+				  InvalidOid,
+				  0);
+
+	/* Register it as a second row-identity column needed by this target rel */
+	add_row_identity_var(root, var, rtindex, "remotetableoid");
 }
 
 /*
@@ -2853,6 +3032,31 @@ postgresPlanDirectModify(PlannerInfo *root,
 		/* Build new fdw_scan_tlist if UPDATE/DELETE .. RETURNING. */
 		if (returningList)
 			rebuild_fdw_scan_tlist(fscan, returningList);
+	}
+	else
+	{
+		ListCell   *lc;
+
+		/*
+		 * A direct modification identifies rows by pushed-down qualifiers, so
+		 * discard any fdw_scan_tlist built to fetch the remote tableoid,
+		 * falling back to the positional path.
+		 */
+		fscan->fdw_scan_tlist = NIL;
+
+		/*
+		 * The tlist's remote-tableoid Var likewise isn't needed; replace it
+		 * with a NULL const rather than dropping the (positionally indexed)
+		 * entry.
+		 */
+		foreach(lc, fscan->scan.plan.targetlist)
+		{
+			TargetEntry *tle = lfirst_node(TargetEntry, lc);
+
+			if (IsA(tle->expr, Var) &&
+				((Var *) tle->expr)->varattno == RemoteTableOidAttributeNumber)
+				tle->expr = (Expr *) makeNullConst(OIDOID, -1, InvalidOid);
+		}
 	}
 
 	/*
@@ -4334,8 +4538,12 @@ create_foreign_modify(EState *estate,
 	if (fmstate->has_returning)
 		fmstate->attinmeta = TupleDescGetAttInMetadata(tupdesc);
 
-	/* Prepare for output conversion of parameters used in prepared stmt. */
-	n_params = list_length(fmstate->target_attrs) + 1;
+	/*
+	 * Prepare for output conversion of parameters used in prepared stmt.
+	 * UPDATE/DELETE transmit two extra leading parameters (ctid, tableoid) to
+	 * identify the row; INSERT transmits none.
+	 */
+	n_params = list_length(fmstate->target_attrs) + 2;
 	fmstate->p_flinfo = palloc0_array(FmgrInfo, n_params);
 	fmstate->p_nums = 0;
 
@@ -4351,6 +4559,19 @@ create_foreign_modify(EState *estate,
 
 		/* First transmittable parameter will be ctid */
 		getTypeOutputInfo(TIDOID, &typefnoid, &isvarlena);
+		fmgr_info(typefnoid, &fmstate->p_flinfo[fmstate->p_nums]);
+		fmstate->p_nums++;
+
+		/*
+		 * Find the remote tableoid resjunk column; it's the second
+		 * transmittable parameter, disambiguating ctid across partitions.
+		 */
+		fmstate->tableoidAttno =
+			ExecFindJunkAttributeInTlist(subplan->targetlist, "remotetableoid");
+		if (!AttributeNumberIsValid(fmstate->tableoidAttno))
+			elog(ERROR, "could not find junk remotetableoid column");
+
+		getTypeOutputInfo(OIDOID, &typefnoid, &isvarlena);
 		fmgr_info(typefnoid, &fmstate->p_flinfo[fmstate->p_nums]);
 		fmstate->p_nums++;
 	}
@@ -4405,6 +4626,7 @@ execute_foreign_modify(EState *estate,
 {
 	PgFdwModifyState *fmstate = (PgFdwModifyState *) resultRelInfo->ri_FdwState;
 	ItemPointer ctid = NULL;
+	Oid			tableoid = InvalidOid;
 	const char **p_values;
 	PGresult   *res;
 	int			n_rows;
@@ -4445,7 +4667,8 @@ execute_foreign_modify(EState *estate,
 		prepare_foreign_modify(fmstate);
 
 	/*
-	 * For UPDATE/DELETE, get the ctid that was passed up as a resjunk column
+	 * For UPDATE/DELETE, get the ctid and remote tableoid that were passed up
+	 * as resjunk columns; together they identify the remote row to modify.
 	 */
 	if (operation == CMD_UPDATE || operation == CMD_DELETE)
 	{
@@ -4459,10 +4682,19 @@ execute_foreign_modify(EState *estate,
 		if (isNull)
 			elog(ERROR, "ctid is NULL");
 		ctid = (ItemPointer) DatumGetPointer(datum);
+
+		datum = ExecGetJunkAttribute(planSlots[0],
+									 fmstate->tableoidAttno,
+									 &isNull);
+		/* shouldn't ever get a null result... */
+		if (isNull)
+			elog(ERROR, "remote tableoid is NULL");
+		tableoid = DatumGetObjectId(datum);
 	}
 
 	/* Convert parameters needed by prepared statement to text form */
-	p_values = convert_prep_stmt_params(fmstate, ctid, slots, *numSlots);
+	p_values = convert_prep_stmt_params(fmstate, ctid, tableoid,
+										slots, *numSlots);
 
 	/*
 	 * Execute the prepared statement.
@@ -4560,6 +4792,7 @@ prepare_foreign_modify(PgFdwModifyState *fmstate)
  *		Create array of text strings representing parameter values
  *
  * tupleid is ctid to send, or NULL if none
+ * tableoid is the remote tableoid to send; used only when tupleid != NULL
  * slot is slot to get remaining parameters from, or NULL if none
  *
  * Data is constructed in temp_cxt; caller should reset that after use.
@@ -4567,6 +4800,7 @@ prepare_foreign_modify(PgFdwModifyState *fmstate)
 static const char **
 convert_prep_stmt_params(PgFdwModifyState *fmstate,
 						 ItemPointer tupleid,
+						 Oid tableoid,
 						 TupleTableSlot **slots,
 						 int numSlots)
 {
@@ -4583,13 +4817,17 @@ convert_prep_stmt_params(PgFdwModifyState *fmstate,
 	/* ctid is provided only for UPDATE/DELETE, which don't allow batching */
 	Assert(!(tupleid != NULL && numSlots > 1));
 
-	/* 1st parameter should be ctid, if it's in use */
+	/* 1st and 2nd parameters should be ctid and tableoid, if in use */
 	if (tupleid != NULL)
 	{
 		Assert(numSlots == 1);
 		/* don't need set_transmission_modes for TID output */
 		p_values[pindex] = OutputFunctionCall(&fmstate->p_flinfo[pindex],
 											  PointerGetDatum(tupleid));
+		pindex++;
+		/* don't need set_transmission_modes for OID output */
+		p_values[pindex] = OutputFunctionCall(&fmstate->p_flinfo[pindex],
+											  ObjectIdGetDatum(tableoid));
 		pindex++;
 	}
 
@@ -4604,7 +4842,8 @@ convert_prep_stmt_params(PgFdwModifyState *fmstate,
 
 		for (i = 0; i < numSlots; i++)
 		{
-			j = (tupleid != NULL) ? 1 : 0;
+			/* ctid and tableoid occupy the first two parameter slots */
+			j = (tupleid != NULL) ? 2 : 0;
 			foreach(lc, fmstate->target_attrs)
 			{
 				int			attnum = lfirst_int(lc);
@@ -4828,6 +5067,26 @@ rebuild_fdw_scan_tlist(ForeignScan *fscan, List *tlist)
 											false));
 	}
 	fscan->fdw_scan_tlist = new_tlist;
+}
+
+/*
+ * set_remote_tableoid_resnames
+ *		Name fdw_scan_tlist's remote-tableoid pseudo-column entries
+ *		"remotetableoid", since their out-of-range attno has no catalog name.
+ */
+static void
+set_remote_tableoid_resnames(List *fdw_scan_tlist)
+{
+	ListCell   *lc;
+
+	foreach(lc, fdw_scan_tlist)
+	{
+		TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+		if (IsA(tle->expr, Var) &&
+			((Var *) tle->expr)->varattno == RemoteTableOidAttributeNumber)
+			tle->resname = pstrdup("remotetableoid");
+	}
 }
 
 /*
@@ -9030,6 +9289,95 @@ make_tuple_from_result_row(PGresult *res,
 		j++;
 	}
 
+	/*
+	 * Fill in any local-tableoid pseudo-entry and any whole-row reference
+	 * that deparseExplicitTargetList() skipped shipping to the remote
+	 * server (see there): the tableoid is simply this scan's own relation
+	 * OID, and the whole row is built here from the columns already decoded
+	 * above.
+	 */
+	if (fsstate)
+	{
+		ForeignScan *fsplan = castNode(ForeignScan, fsstate->ss.ps.plan);
+
+		if (fsplan->scan.scanrelid > 0 && fsplan->fdw_scan_tlist != NIL)
+		{
+			Oid			reloid = RelationGetRelid(fsstate->ss.ss_currentRelation);
+			TupleDesc	reltupdesc = RelationGetDescr(fsstate->ss.ss_currentRelation);
+			Datum	   *relvalues = NULL;
+			bool	   *relnulls = NULL;
+			List	   *wholerow_positions = NIL;
+			ListCell   *lc2;
+			int			pos = 0;
+
+			/*
+			 * There can be more than one whole-row Var for this relation in
+			 * the tlist (a query's own reference alongside core's row-
+			 * identity one); collect every position to fill in below.
+			 */
+			foreach(lc2, fsplan->fdw_scan_tlist)
+			{
+				TargetEntry *tle = lfirst_node(TargetEntry, lc2);
+				Var		   *tvar;
+
+				pos++;
+
+				if (!IsA(tle->expr, Var))
+					continue;
+				tvar = (Var *) tle->expr;
+
+				if (tvar->varattno == TableOidAttributeNumber)
+				{
+					values[pos - 1] = ObjectIdGetDatum(reloid);
+					nulls[pos - 1] = false;
+				}
+				else if (tvar->varno == fsplan->scan.scanrelid &&
+						 tvar->varattno == InvalidAttrNumber)
+				{
+					/* Whole-row Var: fill in after collecting its columns. */
+					wholerow_positions = lappend_int(wholerow_positions, pos);
+				}
+				else if (tvar->varno == fsplan->scan.scanrelid &&
+						 tvar->varattno > InvalidAttrNumber &&
+						 tvar->varattno <= reltupdesc->natts)
+				{
+					if (relvalues == NULL)
+					{
+						relvalues = palloc0_array(Datum, reltupdesc->natts);
+						relnulls = palloc_array(bool, reltupdesc->natts);
+						memset(relnulls, true, reltupdesc->natts * sizeof(bool));
+					}
+					relvalues[tvar->varattno - 1] = values[pos - 1];
+					relnulls[tvar->varattno - 1] = nulls[pos - 1];
+				}
+			}
+
+			/*
+			 * Only reconstruct locally if there are other columns to build
+			 * from (relvalues != NULL); otherwise the whole row was shipped
+			 * as a literal ROW(...) instead (see
+			 * tlist_has_other_column_of_rel()), and the value already
+			 * fetched above is correct as is.
+			 */
+			if (wholerow_positions != NIL && relvalues != NULL)
+			{
+				HeapTuple	rowtup;
+				Datum		rowdatum;
+
+				rowtup = heap_form_tuple(reltupdesc, relvalues, relnulls);
+				rowdatum = heap_copy_tuple_as_datum(rowtup, reltupdesc);
+
+				foreach(lc2, wholerow_positions)
+				{
+					int			wholerow_pos = lfirst_int(lc2);
+
+					values[wholerow_pos - 1] = rowdatum;
+					nulls[wholerow_pos - 1] = false;
+				}
+			}
+		}
+	}
+
 	/* Uninstall error context callback. */
 	error_context_stack = errcallback.previous;
 
@@ -9104,15 +9452,21 @@ conversion_error_callback(void *arg)
 		int			varno = 0;
 		AttrNumber	colno = 0;
 
-		if (fsplan->scan.scanrelid > 0)
+		if (fsplan->scan.scanrelid > 0 && fsplan->fdw_scan_tlist == NIL)
 		{
-			/* error occurred in a scan against a foreign table */
+			/*
+			 * Error occurred in a scan against a foreign table, fetched
+			 * positionally, so cur_attno is the table's attribute number.
+			 */
 			varno = fsplan->scan.scanrelid;
 			colno = errpos->cur_attno;
 		}
 		else
 		{
-			/* error occurred in a scan against a foreign join */
+			/*
+			 * Error occurred in a scan against a foreign join, or a base
+			 * relation with an explicit fdw_scan_tlist; cur_attno indexes it.
+			 */
 			TargetEntry *tle;
 
 			tle = list_nth_node(TargetEntry, fsplan->fdw_scan_tlist,
@@ -9145,6 +9499,8 @@ conversion_error_callback(void *arg)
 				attname = strVal(list_nth(rte->eref->colnames, colno - 1));
 			else if (colno == SelfItemPointerAttributeNumber)
 				attname = "ctid";
+			else if (colno == RemoteTableOidAttributeNumber)
+				attname = "tableoid";
 		}
 	}
 	else if (rel)
