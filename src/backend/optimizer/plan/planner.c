@@ -4388,6 +4388,37 @@ create_ordinary_grouping_paths(PlannerInfo *root, RelOptInfo *input_rel,
 							  partially_grouped_rel, agg_costs, gd,
 							  extra);
 
+	/*
+	 * Eager aggregation may have pushed a deduplication below the joins.
+	 * Every aggregate the query computes here ignores how often a row
+	 * arrives, so grouping the deduplicated rows yields the same results as
+	 * grouping the join's rows.  Group them as a path.
+	 */
+	if (root->eager_agg_mode == EAGER_AGG_DEDUP &&
+		input_rel->grouped_rel != NULL &&
+		!IS_DUMMY_REL(input_rel->grouped_rel) &&
+		input_rel->grouped_rel->pathlist != NIL)
+	{
+		RelOptInfo *dedup_rel;
+		ListCell   *lc;
+
+		dedup_rel = copy_rel_without_paths(input_rel);
+
+		foreach(lc, input_rel->grouped_rel->pathlist)
+		{
+			Path	   *path = (Path *) lfirst(lc);
+
+			add_path(dedup_rel,
+					 (Path *) create_projection_path(root, dedup_rel,
+													 path,
+													 input_rel->reltarget));
+		}
+
+		set_cheapest(dedup_rel);
+		add_paths_to_grouping_rel(root, dedup_rel, grouped_rel, NULL,
+								  agg_costs, gd, extra);
+	}
+
 	/* Give a helpful error if we failed to find any implementation */
 	if (grouped_rel->pathlist == NIL)
 		ereport(ERROR,
@@ -7636,9 +7667,11 @@ create_partial_grouping_paths(PlannerInfo *root,
 
 	/*
 	 * Check whether any partially aggregated paths have been generated
-	 * through eager aggregation.
+	 * through eager aggregation.  A deduplication emits final rows, so
+	 * create_ordinary_grouping_paths() groups them instead.
 	 */
-	if (input_rel->grouped_rel &&
+	if (root->eager_agg_mode != EAGER_AGG_DEDUP &&
+		input_rel->grouped_rel &&
 		!IS_DUMMY_REL(input_rel->grouped_rel) &&
 		input_rel->grouped_rel->pathlist != NIL)
 		eager_agg_rel = input_rel->grouped_rel;
