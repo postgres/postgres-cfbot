@@ -1198,6 +1198,22 @@ CREATE SUBSCRIPTION my_subscription SERVER subscription_server PUBLICATION testp
   </para>
 
   <para>
+   When such optimized whole-query shipping is not possible, an
+   <command>UPDATE</command> or <command>DELETE</command> is instead executed
+   by first selecting the affected rows from the remote server and then
+   issuing a separate remote <command>UPDATE</command> or
+   <command>DELETE</command> for each row, identified by its
+   <literal>ctid</literal> and remote <literal>tableoid</literal>.  If the
+   remote table is the root of a partitioning hierarchy, each such per-row
+   command targets that root and so cannot benefit from partition pruning,
+   which can make this considerably slower than the whole-query case when
+   many rows are affected.  For best performance, prefer whole-query
+   shipping when possible, and otherwise try to limit the number of rows
+   affected by an <command>UPDATE</command> or <command>DELETE</command> on
+   a foreign table that maps to a partitioned table on the remote server.
+  </para>
+
+  <para>
    When <filename>postgres_fdw</filename> encounters a join between foreign tables on
    the same foreign server, it sends the entire join to the foreign server,
    unless for some reason it believes that it will be more efficient to fetch

@@ -315,6 +315,25 @@ add_vars_to_targetlist(PlannerInfo *root, List *vars,
 
 			if (bms_is_subset(where_needed, rel->relids))
 				continue;
+
+			/*
+			 * An out-of-range attno (> max_attr) is an FDW row-identity
+			 * pseudo-column (e.g. postgres_fdw's remote table OID for
+			 * UPDATE/DELETE) with no attr_needed[] slot; like a ROWID_VAR
+			 * it's always needed, so just add it to the reltarget once.
+			 */
+			if (attno > rel->max_attr)
+			{
+				/* Only an FDW can inject an out-of-range row-identity column */
+				Assert(rel->fdwroutine != NULL);
+				var = copyObject(var);
+				var->varnullingrels = NULL;
+				if (!list_member(rel->reltarget->exprs, var))
+					rel->reltarget->exprs = lappend(rel->reltarget->exprs,
+													var);
+				continue;
+			}
+
 			Assert(attno >= rel->min_attr && attno <= rel->max_attr);
 			attno -= rel->min_attr;
 			if (rel->attr_needed[attno] == NULL)
