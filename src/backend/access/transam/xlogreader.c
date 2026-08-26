@@ -32,6 +32,7 @@
 #include "catalog/pg_control.h"
 #include "common/pg_lzcompress.h"
 #include "replication/origin.h"
+#include "utils/memutils.h"
 
 #ifndef FRONTEND
 #include "pgstat.h"
@@ -55,6 +56,11 @@ static bool ValidXLogRecord(XLogReaderState *state, XLogRecord *record,
 static void ResetDecoder(XLogReaderState *state);
 static void WALOpenSegmentInit(WALOpenSegment *seg, WALSegmentContext *segcxt,
 							   int segsize, const char *waldir);
+static XLogRecPtr XLogFindRecordStart(XLogReaderState *state, XLogRecPtr RecPtr,
+									  char **errormsg);
+static XLogRecord *XLogDecompressRecordIfNeeded(XLogReaderState *state,
+												XLogRecord *record,
+												XLogRecPtr recptr);
 
 /* size of the buffer allocated for error message. */
 #define MAX_ERRORMSG_LEN 1000
@@ -171,6 +177,22 @@ XLogReaderFree(XLogReaderState *state)
 	pfree(state->errormsg_buf);
 	if (state->readRecordBuf)
 		pfree(state->readRecordBuf);
+#ifdef USE_ZSTD
+	if (state->fpi_dctx)
+		ZSTD_freeDCtx((ZSTD_DCtx *) state->fpi_dctx);
+#endif
+	if (state->decompression_buffer)
+		pfree(state->decompression_buffer);
+#ifdef USE_ZSTD
+	if (state->stream_dctx)
+	{
+		for (int i = 0; i < XLR_MAX_STREAMS; i++)
+			if (state->stream_dctx[i])
+				ZSTD_freeDCtx((ZSTD_DCtx *) state->stream_dctx[i]);
+		pfree(state->stream_dctx);
+		pfree(state->stream_ready);
+	}
+#endif
 	pfree(state->readBuf);
 	pfree(state);
 }
@@ -246,6 +268,88 @@ XLogBeginRead(XLogReaderState *state, XLogRecPtr RecPtr)
 	state->NextRecPtr = RecPtr;
 	state->ReadRecPtr = InvalidXLogRecPtr;
 	state->DecodeRecPtr = InvalidXLogRecPtr;
+	state->warmupEndPtr = InvalidXLogRecPtr;
+}
+
+/*
+ * Prepare to read records from RecPtr onwards, which unlike XLogBeginRead()
+ * works even when the records there were compressed against earlier ones.
+ *
+ * A record compressed as part of a stream cannot be decompressed on its own,
+ * so reading starts at the last stream reset boundary at or below RecPtr,
+ * where every stream is known to begin again.  The records in between are
+ * decoded only to rebuild the decompressors and are not returned by
+ * XLogReadRecord().
+ *
+ * Returns the position reading actually starts from, or InvalidXLogRecPtr with
+ * *errormsg set.  If the WAL below RecPtr is gone -- a replication slot may
+ * hold nothing older than what it needs itself -- reading starts at RecPtr,
+ * which is correct for every record that is not part of a stream.
+ */
+XLogRecPtr
+XLogBeginReadStreamed(XLogReaderState *state, XLogRecPtr RecPtr,
+					  char **errormsg)
+{
+	XLogRecPtr	boundary;
+	XLogRecPtr	found;
+	char	   *msg;
+
+	Assert(XLogRecPtrIsValid(RecPtr));
+
+	if (errormsg == NULL)
+		errormsg = &msg;	/* the caller is content with the fallback */
+	*errormsg = NULL;
+	boundary = RecPtr - (RecPtr % WAL_COMPRESSION_STREAM_RESET);
+
+	if (boundary == 0)
+	{
+		XLogBeginRead(state, RecPtr);
+		return RecPtr;
+	}
+
+	found = XLogFindRecordStart(state, boundary, errormsg);
+	if (XLogRecPtrIsValid(found))
+	{
+		/*
+		 * Read forward from the boundary to bring the decompressors up to
+		 * date, stopping once the next record to read is the one the caller
+		 * asked for.  That record must not be read here: a stream record fed
+		 * to its decompressor twice leaves it in a state the next records
+		 * were not compressed against.
+		 */
+		XLogBeginRead(state, found);
+		state->warmupEndPtr = RecPtr;
+		while (state->NextRecPtr < RecPtr)
+		{
+			if (XLogReadRecord(state, errormsg) == NULL)
+				break;
+		}
+
+		if (state->NextRecPtr >= RecPtr)
+		{
+			/*
+			 * Leave the reader exactly as XLogBeginRead() would have, so that
+			 * callers see no trace of the rewind.  The decompressors are not
+			 * part of that state and stay as the warm-up left them.
+			 */
+			found = state->NextRecPtr;
+			XLogBeginRead(state, found);
+			return found;
+		}
+	}
+
+	{
+		/*
+		 * The WAL below RecPtr is gone; a replication slot need not keep
+		 * anything older than it uses itself.  Start where we were asked to,
+		 * which reads every record that is not part of a stream.
+		 */
+		*errormsg = NULL;
+		state->warmupEndPtr = InvalidXLogRecPtr;
+		return XLogFindNextRecord(state, RecPtr, errormsg);
+	}
+
+	return found;
 }
 
 /*
@@ -539,10 +643,12 @@ XLogDecodeNextRecord(XLogReaderState *state, bool nonblocking)
 	XLogRecPtr	targetPagePtr;
 	bool		randAccess;
 	uint32		len,
-				total_len;
+				total_len_decomp,
+				total_len_physical;
 	uint32		targetRecOff;
 	uint32		pageHeaderSize;
 	bool		assembled;
+	bool		have_decomp_len;
 	bool		gotheader;
 	int			readOff;
 	DecodedXLogRecord *decoded;
@@ -592,6 +698,14 @@ restart:
 	state->nonblocking = nonblocking;
 	state->currRecPtr = RecPtr;
 	assembled = false;
+
+	/*
+	 * Start each pass without a decode slot.  We do not always take one below
+	 * - a compressed record whose header straddles a page does not tell us
+	 * how much space it needs yet - and carrying one over from a previous pass
+	 * would hand out a slot that is already in the decode queue.
+	 */
+	decoded = NULL;
 
 	targetPagePtr = RecPtr - (RecPtr % XLOG_BLCKSZ);
 	targetRecOff = RecPtr % XLOG_BLCKSZ;
@@ -650,7 +764,70 @@ restart:
 	 * whole header.
 	 */
 	record = (XLogRecord *) (state->readBuf + RecPtr % XLOG_BLCKSZ);
-	total_len = record->xl_tot_len;
+	total_len_physical = record->xl_tot_len;
+
+	/*
+	 * Size the record will occupy once decoded, which for a compressed record
+	 * is its decompressed length rather than xl_tot_len.
+	 *
+	 * Only xl_tot_len is guaranteed to be on this page; xl_info may live on
+	 * the next one when the record starts near the end of a page.  If we
+	 * cannot tell yet, have_decomp_len stays false and we allocate after
+	 * assembly instead.
+	 */
+	total_len_decomp = 0;
+	have_decomp_len = false;
+
+	if (targetRecOff <= XLOG_BLCKSZ - SizeOfXLogRecord)
+	{
+		/* Full header is on this page; safe to read xl_info. */
+		if (record->xl_info & XLR_COMPRESSED)
+		{
+			/*
+			 * Skip if the compression header spans pages, or if the record is
+			 * too short to be a valid compressed one.
+			 */
+			if (targetRecOff <= XLOG_BLCKSZ - SizeOfXLogCompressedRecord &&
+				total_len_physical >= SizeOfXLogCompressedRecord)
+			{
+				XLogCompressionHeader *c = (XLogCompressionHeader *) record;
+				uint32		dlen = c->decompressed_length;
+				bool		valid_method;
+
+				valid_method = false
+#ifdef USE_LZ4
+					|| (c->method == XLR_COMPRESS_LZ4)
+#endif
+#ifdef USE_ZSTD
+					|| (c->method == XLR_COMPRESS_ZSTD)
+#endif
+					;
+
+				/* Sanity-check before using for allocation */
+				if (dlen > SizeOfXLogRecord && dlen <= XLogRecordMaxSize &&
+					valid_method)
+				{
+					total_len_decomp = dlen;
+					have_decomp_len = true;
+				}
+			}
+		}
+		else
+		{
+			total_len_decomp = record->xl_tot_len;
+			have_decomp_len = true;
+		}
+	}
+	else
+	{
+		/*
+		 * Header spans pages, so we cannot read xl_info and do not know
+		 * whether this is a compressed record, let alone how big it decodes
+		 * to.  xl_tot_len would be the compressed size, and reserving that
+		 * much would leave the decoder writing past its slot, so leave the
+		 * allocation to the pass after assembly.
+		 */
+	}
 
 	/*
 	 * If the whole record header is on this page, validate it immediately.
@@ -666,16 +843,18 @@ restart:
 								   randAccess))
 			goto err;
 		gotheader = true;
+		if (record->xl_info & XLR_COMPRESSED)
+			gotheader = targetRecOff <= XLOG_BLCKSZ - SizeOfXLogCompressedRecord;
 	}
 	else
 	{
 		/* There may be no next page if it's too small. */
-		if (total_len < SizeOfXLogRecord)
+		if (total_len_physical < SizeOfXLogRecord)
 		{
 			report_invalid_record(state,
 								  "invalid record length at %X/%08X: expected at least %u, got %u",
 								  LSN_FORMAT_ARGS(RecPtr),
-								  (uint32) SizeOfXLogRecord, total_len);
+								  (uint32) SizeOfXLogRecord, total_len_physical);
 			goto err;
 		}
 
@@ -684,12 +863,12 @@ restart:
 		 * reconstruct it.  The backend enforces the same limit in
 		 * XLogRecordAssemble().
 		 */
-		if (total_len > XLogRecordMaxSize)
+		if (total_len_physical > XLogRecordMaxSize)
 		{
 			report_invalid_record(state,
 								  "invalid record length at %X/%08X: expected at most %u, got %u",
 								  LSN_FORMAT_ARGS(RecPtr),
-								  XLogRecordMaxSize, total_len);
+								  XLogRecordMaxSize, total_len_physical);
 			goto err;
 		}
 
@@ -702,21 +881,24 @@ restart:
 	 * calling palloc.  If we can't, we'll try again below after we've
 	 * validated that total_len isn't garbage bytes from a recycled WAL page.
 	 */
-	decoded = XLogReadRecordAlloc(state,
-								  total_len,
-								  false /* allow_oversized */ );
+	if (have_decomp_len)
+		decoded = XLogReadRecordAlloc(state,
+									  total_len_decomp,
+									  false /* allow_oversized */ );
+
 	if (decoded == NULL && nonblocking)
 	{
 		/*
-		 * There is no space in the circular decode buffer, and the caller is
-		 * only reading ahead.  The caller should consume existing records to
-		 * make space.
+		 * Either there is no space in the circular decode buffer, or we could
+		 * not tell how much this record needs.  Either way the caller is only
+		 * reading ahead, so let it replay what it has; it will come back for
+		 * this record with nonblocking off, where we may allocate.
 		 */
 		return XLREAD_WOULDBLOCK;
 	}
 
 	len = XLOG_BLCKSZ - RecPtr % XLOG_BLCKSZ;
-	if (total_len > len)
+	if (total_len_physical > len)
 	{
 		/* Need to reassemble record */
 		char	   *contdata;
@@ -788,19 +970,19 @@ restart:
 			 * we expect there to be left.
 			 */
 			if (pageHeader->xlp_rem_len == 0 ||
-				total_len != (pageHeader->xlp_rem_len + gotlen))
+				total_len_physical != (pageHeader->xlp_rem_len + gotlen))
 			{
 				report_invalid_record(state,
 									  "invalid contrecord length %u (expected %lld) at %X/%08X",
 									  pageHeader->xlp_rem_len,
-									  ((long long) total_len) - gotlen,
+									  ((long long) total_len_physical) - gotlen,
 									  LSN_FORMAT_ARGS(RecPtr));
 				goto err;
 			}
 
 			/* Wait for the next page to become available */
 			readOff = ReadPageInternal(state, targetPagePtr,
-									   Min(total_len - gotlen + SizeOfXLogShortPHD,
+									   Min(total_len_physical - gotlen + SizeOfXLogShortPHD,
 										   XLOG_BLCKSZ));
 			if (readOff == XLREAD_WOULDBLOCK)
 				return XLREAD_WOULDBLOCK;
@@ -845,7 +1027,7 @@ restart:
 			 * also cross-checked total_len against xlp_rem_len on the second
 			 * page, and verified xlp_pageaddr on both.
 			 */
-			if (total_len > state->readRecordBufSize)
+			if (total_len_physical > state->readRecordBufSize)
 			{
 				char		save_copy[XLOG_BLCKSZ * 2];
 
@@ -856,11 +1038,11 @@ restart:
 				Assert(gotlen <= lengthof(save_copy));
 				Assert(gotlen <= state->readRecordBufSize);
 				memcpy(save_copy, state->readRecordBuf, gotlen);
-				allocate_recordbuf(state, total_len);
+				allocate_recordbuf(state, total_len_physical);
 				memcpy(state->readRecordBuf, save_copy, gotlen);
 				buffer = state->readRecordBuf + gotlen;
 			}
-		} while (gotlen < total_len);
+		} while (gotlen < total_len_physical);
 		Assert(gotheader);
 
 		record = (XLogRecord *) state->readRecordBuf;
@@ -875,8 +1057,9 @@ restart:
 	else
 	{
 		/* Wait for the record data to become available */
+		Assert(targetRecOff + total_len_physical <= XLOG_BLCKSZ);
 		readOff = ReadPageInternal(state, targetPagePtr,
-								   Min(targetRecOff + total_len, XLOG_BLCKSZ));
+								   targetRecOff + total_len_physical);
 		if (readOff == XLREAD_WOULDBLOCK)
 			return XLREAD_WOULDBLOCK;
 		else if (readOff < 0)
@@ -886,7 +1069,7 @@ restart:
 		if (!ValidXLogRecord(state, record, RecPtr))
 			goto err;
 
-		state->NextRecPtr = RecPtr + MAXALIGN(total_len);
+		state->NextRecPtr = RecPtr + MAXALIGN(total_len_physical);
 
 		state->DecodeRecPtr = RecPtr;
 	}
@@ -909,14 +1092,45 @@ restart:
 	if (decoded == NULL)
 	{
 		Assert(!nonblocking);
+
+		/* total_len_decomp may not yet reflect the actual decompressed size */
+		if (record->xl_info & XLR_COMPRESSED)
+		{
+			XLogCompressionHeader *c = (XLogCompressionHeader *) record;
+
+			Assert(c->decompressed_length > 0);
+			Assert(c->decompressed_length < MaxAllocSize);
+			total_len_decomp = c->decompressed_length;
+		}
+		else
+			total_len_decomp = record->xl_tot_len;
 		decoded = XLogReadRecordAlloc(state,
-									  total_len,
+									  total_len_decomp,
 									  true /* allow_oversized */ );
 		/* allocation should always happen under allow_oversized */
 		Assert(decoded != NULL);
 	}
 
-	if (DecodeXLogRecord(state, decoded, record, RecPtr, &errormsg))
+	if (state->framing_only)
+	{
+		/*
+		 * Fill in only what says where this record sits.  Nothing reads the
+		 * payload in this mode, and decoding it would run the record through
+		 * a decompressor that has already consumed it.
+		 */
+		decoded->header = *record;
+		decoded->lsn = RecPtr;
+		decoded->next = NULL;
+		decoded->record_origin = InvalidReplOriginId;
+		decoded->toplevel_xid = InvalidTransactionId;
+		decoded->main_data = NULL;
+		decoded->main_data_len = 0;
+		decoded->max_block_id = -1;
+		decoded->size = MAXALIGN(offsetof(DecodedXLogRecord, blocks));
+	}
+
+	if (state->framing_only ||
+		DecodeXLogRecord(state, decoded, record, RecPtr, &errormsg))
 	{
 		/* Record the location of the next record. */
 		decoded->next_lsn = state->NextRecPtr;
@@ -943,6 +1157,21 @@ restart:
 		if (!state->decode_queue_head)
 			state->decode_queue_head = decoded;
 		return XLREAD_SUCCESS;
+	}
+
+	if (RecPtr < state->warmupEndPtr)
+	{
+		/*
+		 * We are only reading this record to feed the decompressors, and its
+		 * stream has not started over yet, so it cannot be decoded and the
+		 * caller was never going to see it.  Move on to the next one.
+		 */
+		if (decoded->oversized)
+			pfree(decoded);
+		state->errormsg_buf[0] = '\0';
+		state->errormsg_deferred = false;
+		RecPtr = state->NextRecPtr;
+		goto restart;
 	}
 
 err:
@@ -1410,27 +1639,18 @@ XLogReaderResetError(XLogReaderState *state)
 }
 
 /*
- * Find the first record with an lsn >= RecPtr.
+ * Find where the first record at or after RecPtr starts, without reading it.
  *
- * This is different from XLogBeginRead() in that RecPtr doesn't need to point
- * to a valid record boundary.  Useful for checking whether RecPtr is a valid
- * xlog address for reading, and to find the first valid address after some
- * address when dumping records for debugging purposes.
+ * RecPtr does not need to point to a record boundary: page headers alone tell
+ * us where to skip continuation data, which is enough to land on the start of
+ * a record.
  *
- * This positions the reader, like XLogBeginRead(), so that the next call to
- * XLogReadRecord() will read the next valid record.
- *
- * On failure, InvalidXLogRecPtr is returned, and *errormsg is set to a string
- * with details of the failure.
- *
- * When set, *errormsg points to an internal buffer that's valid until the next
- * call to XLogReadRecord.
+ * On failure, InvalidXLogRecPtr is returned and *errormsg is set.
  */
-XLogRecPtr
-XLogFindNextRecord(XLogReaderState *state, XLogRecPtr RecPtr, char **errormsg)
+static XLogRecPtr
+XLogFindRecordStart(XLogReaderState *state, XLogRecPtr RecPtr, char **errormsg)
 {
 	XLogRecPtr	tmpRecPtr;
-	XLogRecPtr	found = InvalidXLogRecPtr;
 	XLogPageHeader header;
 
 	*errormsg = NULL;
@@ -1517,18 +1737,7 @@ XLogFindNextRecord(XLogReaderState *state, XLogRecPtr RecPtr, char **errormsg)
 	 * because either we're at the first record after the beginning of a page
 	 * or we just jumped over the remaining data of a continuation.
 	 */
-	XLogBeginRead(state, tmpRecPtr);
-	while (XLogReadRecord(state, errormsg) != NULL)
-	{
-		/* past the record we've found, break out */
-		if (RecPtr <= state->ReadRecPtr)
-		{
-			/* Rewind the reader to the beginning of the last record. */
-			found = state->ReadRecPtr;
-			XLogBeginRead(state, found);
-			return found;
-		}
-	}
+	return tmpRecPtr;
 
 err:
 	XLogReaderInvalReadState(state);
@@ -1542,6 +1751,49 @@ err:
 		if (state->errormsg_buf[0] != '\0')
 			*errormsg = state->errormsg_buf;
 		state->errormsg_deferred = false;
+	}
+
+	return InvalidXLogRecPtr;
+}
+
+/*
+ * Find the first record with an lsn >= RecPtr.
+ *
+ * This is different from XLogBeginRead() in that RecPtr doesn't need to point
+ * to a valid record boundary.  Useful for checking whether RecPtr is a valid
+ * xlog address for reading, and to find the first valid address after some
+ * address when dumping records for debugging purposes.
+ *
+ * This positions the reader, like XLogBeginRead(), so that the next call to
+ * XLogReadRecord() will read the next valid record.
+ *
+ * On failure, InvalidXLogRecPtr is returned, and *errormsg is set to a string
+ * with details of the failure.
+ *
+ * When set, *errormsg points to an internal buffer that's valid until the next
+ * call to XLogReadRecord.
+ */
+XLogRecPtr
+XLogFindNextRecord(XLogReaderState *state, XLogRecPtr RecPtr, char **errormsg)
+{
+	XLogRecPtr	start;
+
+	start = XLogFindRecordStart(state, RecPtr, errormsg);
+	if (!XLogRecPtrIsValid(start))
+		return InvalidXLogRecPtr;
+
+	XLogBeginRead(state, start);
+	while (XLogReadRecord(state, errormsg) != NULL)
+	{
+		/* past the record we've found, break out */
+		if (RecPtr <= state->ReadRecPtr)
+		{
+			/* Rewind the reader to the beginning of the last record. */
+			XLogRecPtr	found = state->ReadRecPtr;
+
+			XLogBeginRead(state, found);
+			return found;
+		}
 	}
 
 	return InvalidXLogRecPtr;
@@ -1716,6 +1968,192 @@ DecodeXLogRecordRequiredSpace(size_t xl_tot_len)
 	return size;
 }
 
+static XLogRecord *
+XLogDecompressRecordIfNeeded(XLogReaderState *state,
+							 XLogRecord *record,
+							 XLogRecPtr recptr)
+{
+	if (record->xl_info & XLR_COMPRESSED)
+	{
+#ifndef WAL_WHOLE_RECORD_COMPRESSION
+		report_invalid_record(state,
+							  "could not decompress record at %X/%08X compressed with method %u not supported by build",
+							  LSN_FORMAT_ARGS(recptr),
+							  ((XLogCompressionHeader *) record)->method);
+		return NULL;
+#else
+		XLogCompressionHeader *src = (XLogCompressionHeader *) record;
+
+		/* decompressed_length covers the XLogRecord header + body */
+		uint32		body_len = src->decompressed_length - SizeOfXLogRecord;
+		uint32		srclen = src->record_header.xl_tot_len - SizeOfXLogCompressedRecord;
+		bool		decomp_success = true;
+		char	   *dst;
+		XLogRecord *dst_h;
+
+		/*
+		 * Grow the decompression buffer if needed, rounding up to BLCKSZ to
+		 * avoid frequent small reallocations.  Since the buffer content is
+		 * always fully overwritten, we simply pfree and reallocate.
+		 */
+		if (state->decompression_buffer_size < src->decompressed_length)
+		{
+			uint32		new_size = (uint32) TYPEALIGN(BLCKSZ, src->decompressed_length);
+
+			if (state->decompression_buffer)
+				pfree(state->decompression_buffer);
+			state->decompression_buffer =
+				palloc_extended(new_size, MCXT_ALLOC_NO_OOM);
+			if (!state->decompression_buffer)
+			{
+				state->decompression_buffer_size = 0;
+				report_invalid_record(state,
+									  "out of memory while decompressing record at %X/%08X",
+									  LSN_FORMAT_ARGS(recptr));
+				return NULL;
+			}
+			state->decompression_buffer_size = new_size;
+		}
+
+		dst_h = (XLogRecord *) state->decompression_buffer;
+		*dst_h = src->record_header;
+		dst_h->xl_tot_len = src->decompressed_length;
+		dst = (char *) &dst_h[1];
+
+#ifdef USE_ZSTD
+		if (src->stream != XLR_NO_STREAM)
+		{
+			ZSTD_DCtx  *dctx;
+			ZSTD_inBuffer in;
+			ZSTD_outBuffer out;
+
+			if (src->method != XLR_COMPRESS_ZSTD)
+			{
+				report_invalid_record(state,
+									  "streamed record at %X/%08X uses an unexpected compression method",
+									  LSN_FORMAT_ARGS(recptr));
+				return NULL;
+			}
+
+			if (state->stream_dctx == NULL)
+			{
+				state->stream_dctx = palloc0_array(void *, XLR_MAX_STREAMS);
+				state->stream_ready = palloc0_array(bool, XLR_MAX_STREAMS);
+			}
+
+			/*
+			 * A reader that started in the middle of WAL meets records whose
+			 * stream began earlier.  Nothing here can decompress them, and
+			 * feeding them to a fresh context would decode to whatever the
+			 * bytes happen to mean, so refuse until the stream starts over.
+			 */
+			if (!(src->stream_flags & XLR_STREAM_RESET) &&
+				!state->stream_ready[src->stream])
+			{
+				report_invalid_record(state,
+									  "no decompression state for stream %u at %X/%08X",
+									  src->stream, LSN_FORMAT_ARGS(recptr));
+				return NULL;
+			}
+
+			dctx = (ZSTD_DCtx *) state->stream_dctx[src->stream];
+			if (dctx == NULL)
+			{
+				dctx = ZSTD_createDCtx();
+				if (dctx == NULL)
+				{
+					report_invalid_record(state,
+										  "out of memory while decompressing record at %X/%08X",
+										  LSN_FORMAT_ARGS(recptr));
+					return NULL;
+				}
+				state->stream_dctx[src->stream] = dctx;
+			}
+
+			if (src->stream_flags & XLR_STREAM_RESET)
+			{
+				ZSTD_DCtx_reset(dctx, ZSTD_reset_session_only);
+				state->stream_ready[src->stream] = true;
+			}
+
+			in.src = (char *) &src[1];
+			in.size = srclen;
+			in.pos = 0;
+			out.dst = dst;
+			out.size = body_len;
+			out.pos = 0;
+
+			while (in.pos < in.size)
+			{
+				size_t		ret = ZSTD_decompressStream(dctx, &out, &in);
+
+				if (ZSTD_isError(ret))
+				{
+					decomp_success = false;
+					break;
+				}
+				if (out.pos == out.size && in.pos < in.size)
+				{
+					decomp_success = false;
+					break;
+				}
+			}
+			if (decomp_success && out.pos != body_len)
+				decomp_success = false;
+		}
+		else if (src->method == XLR_COMPRESS_LZ4)
+#else
+		if (src->method == XLR_COMPRESS_LZ4)
+#endif
+		{
+#ifdef USE_LZ4
+			if (LZ4_decompress_safe((char *) &src[1], dst,
+									srclen, body_len) <= 0)
+				decomp_success = false;
+#else
+			report_invalid_record(state,
+								  "could not decompress record at %X/%08X compressed with %s not supported by build",
+								  LSN_FORMAT_ARGS(recptr), "lz4");
+			return NULL;
+#endif
+		}
+		else if (src->method == XLR_COMPRESS_ZSTD)
+		{
+#ifdef USE_ZSTD
+			size_t		decomp_result = ZSTD_decompress(dst, body_len,
+														(char *) &src[1], srclen);
+
+			if (ZSTD_isError(decomp_result))
+				decomp_success = false;
+#else
+			report_invalid_record(state,
+								  "could not decompress record at %X/%08X compressed with %s not supported by build",
+								  LSN_FORMAT_ARGS(recptr), "zstd");
+			return NULL;
+#endif
+		}
+		else
+		{
+			report_invalid_record(state,
+								  "could not decompress record at %X/%08X compressed with unknown method",
+								  LSN_FORMAT_ARGS(recptr));
+			return NULL;
+		}
+
+		if (!decomp_success)
+		{
+			report_invalid_record(state,
+								  "could not decompress record at %X/%08X",
+								  LSN_FORMAT_ARGS(recptr));
+			return NULL;
+		}
+
+		return (XLogRecord *) state->decompression_buffer;
+#endif
+	}
+	return record;
+}
+
 /*
  * Decode a record.  "decoded" must point to a MAXALIGNed memory area that has
  * space for at least DecodeXLogRecordRequiredSpace(record) bytes.  On
@@ -1753,6 +2191,14 @@ DecodeXLogRecord(XLogReaderState *state,
 	uint32		datatotal;
 	RelFileLocator *rlocator = NULL;
 	uint8		block_id;
+
+	record = XLogDecompressRecordIfNeeded(state, record, lsn);
+
+	if (!record)
+	{
+		/* Decompression failed, error must be reported already */
+		return false;
+	}
 
 	decoded->header = *record;
 	decoded->lsn = lsn;
@@ -1928,8 +2374,8 @@ DecodeXLogRecord(XLogReaderState *state,
 					blk->bimg_len != BLCKSZ)
 				{
 					report_invalid_record(state,
-										  "neither BKPIMAGE_HAS_HOLE nor BKPIMAGE_COMPRESSED set, but block image length is %d at %X/%08X",
-										  blk->data_len,
+										  "neither BKPIMAGE_HAS_HOLE nor BKPIMAGE_COMPRESSED set, but block image length is %u at %X/%08X",
+										  (unsigned int) blk->bimg_len,
 										  LSN_FORMAT_ARGS(state->ReadRecPtr));
 					goto err;
 				}
@@ -2177,9 +2623,24 @@ RestoreBlockImage(XLogReaderState *record, uint8 block_id, char *page)
 		else if ((bkpb->bimg_info & BKPIMAGE_COMPRESS_ZSTD) != 0)
 		{
 #ifdef USE_ZSTD
-			size_t		decomp_result = ZSTD_decompress(tmp.data,
-														BLCKSZ - bkpb->hole_length,
-														ptr, bkpb->bimg_len);
+			size_t		decomp_result;
+
+			if (record->fpi_dctx == NULL)
+			{
+				record->fpi_dctx = ZSTD_createDCtx();
+				if (record->fpi_dctx == NULL)
+				{
+					report_invalid_record(record, "out of memory while restoring image at %X/%08X, block %d",
+										  LSN_FORMAT_ARGS(record->ReadRecPtr),
+										  block_id);
+					return false;
+				}
+			}
+
+			decomp_result = ZSTD_decompressDCtx((ZSTD_DCtx *) record->fpi_dctx,
+												tmp.data,
+												BLCKSZ - bkpb->hole_length,
+												ptr, bkpb->bimg_len);
 
 			if (ZSTD_isError(decomp_result))
 				decomp_success = false;

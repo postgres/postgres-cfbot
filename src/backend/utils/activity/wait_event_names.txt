@@ -418,6 +418,7 @@ XactSLRU	"Waiting to access the transaction status SLRU cache."
 ParallelVacuumDSA	"Waiting for parallel vacuum dynamic shared memory allocation."
 AioUringCompletion	"Waiting for another process to complete IO via io_uring."
 ShmemIndex	"Waiting to find or allocate space in shared memory."
+WALCompressionStream	"Waiting to compress a WAL record into a shared compression stream."
 
 # No "ABI_compatibility" region here as WaitEventLWLock has its own C code.
 

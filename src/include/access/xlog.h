@@ -58,6 +58,8 @@ extern PGDLLIMPORT int CommitSiblings;
 extern PGDLLIMPORT bool track_wal_io_timing;
 extern PGDLLIMPORT int wal_decode_buffer_size;
 extern PGDLLIMPORT int data_checksums;
+extern PGDLLIMPORT int wal_compression_threshold;
+extern PGDLLIMPORT int wal_compression_streams;
 
 extern PGDLLIMPORT int CheckPointSegments;
 
@@ -223,6 +225,10 @@ typedef enum WALAvailability
 struct XLogRecData;
 struct XLogReaderState;
 
+extern int	XLogCompressionStreamAcquire(int preferred, XLogRecPtr redo,
+									 bool *restart);
+extern void XLogCompressionStreamRelease(int slot, XLogRecPtr end_pos,
+										 bool restarted, bool failed);
 extern XLogRecPtr XLogInsertRecord(struct XLogRecData *rdata,
 								   XLogRecPtr fpw_lsn,
 								   uint8 flags,

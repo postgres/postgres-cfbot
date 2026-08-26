@@ -3678,8 +3678,11 @@ include_dir 'conf.d'
         When enabled, the <productname>PostgreSQL</productname>
         server compresses full page images written to WAL (e.g. when
         <xref linkend="guc-full-page-writes"/> is on, during a base backup,
-        etc.).
-        A compressed page image will be decompressed during WAL replay.
+        etc.).  With <literal>lz4</literal> or <literal>zstd</literal>, a
+        record larger than <xref linkend="guc-wal-compression-threshold"/>
+        is instead compressed as a whole, which usually does better when
+        one record carries several page images.
+        Compressed data will be decompressed during WAL replay.
         The supported methods are <literal>off</literal>, <literal>on</literal>,
         <literal>zstd</literal> (if <productname>PostgreSQL</productname> was compiled with <option>--with-zstd</option>),
         <literal>lz4</literal> (if <productname>PostgreSQL</productname> was compiled with <option>--with-lz4</option>), and
@@ -3696,6 +3699,37 @@ include_dir 'conf.d'
         increasing the risk of unrecoverable data corruption,
         but at the cost of some extra CPU spent on the compression during
         WAL logging and on the decompression during WAL replay.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-wal-compression-threshold" xreflabel="wal_compression_threshold">
+      <term><varname>wal_compression_threshold</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>wal_compression_threshold</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Smallest WAL record that <xref linkend="guc-wal-compression"/>
+        compresses as a whole rather than compressing each of its full page
+        images separately.  If this value is specified without units, it is
+        taken as bytes.  The default is 512 bytes.  Only records compressed
+        with <literal>lz4</literal> or <literal>zstd</literal> are affected;
+        <literal>pglz</literal> always compresses page images individually.
+        Only superusers and users with the appropriate <literal>SET</literal>
+        privilege can change this setting.
+       </para>
+
+       <para>
+        Lowering this value does not simply compress more.  A record taken by
+        whole-record compression no longer has its page images compressed
+        individually, and carries a slightly larger header, so a threshold
+        below the default can produce <emphasis>more</emphasis> WAL rather
+        than less.  Setting it above the size of the largest possible WAL
+        record disables whole-record compression entirely, leaving the
+        page-image compression that <xref linkend="guc-wal-compression"/>
+        performed before this setting existed.
        </para>
       </listitem>
      </varlistentry>
