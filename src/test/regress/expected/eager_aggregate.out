@@ -2917,28 +2917,31 @@ HAVING count(*) > 5;
                      ->  Seq Scan on eager_distinct_a1 a1
 (10 rows)
 
--- Keys are derived only for a query with no grouping clause of its own.
--- This one groups by a1.id, so eager aggregation declines its DISTINCT
--- aggregate.
+-- A DISTINCT aggregate is idempotent, so the query's own grouping clause
+-- drives the deduplication
 EXPLAIN (COSTS OFF)
 SELECT a1.id, count(DISTINCT a1.title)
   FROM eager_distinct_a1 a1
   JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id
  WHERE a2.flag
  GROUP BY a1.id;
-                        QUERY PLAN                        
-----------------------------------------------------------
+                           QUERY PLAN                           
+----------------------------------------------------------------
  GroupAggregate
    Group Key: a1.id
    ->  Sort
          Sort Key: a1.id, a1.title
-         ->  Hash Join
-               Hash Cond: (a2.a1_id = a1.id)
-               ->  Seq Scan on eager_distinct_a2 a2
-                     Filter: flag
-               ->  Hash
-                     ->  Seq Scan on eager_distinct_a1 a1
-(10 rows)
+         ->  HashAggregate
+               Group Key: a1.id
+               ->  Hash Join
+                     Hash Cond: (a2.a1_id = a1.id)
+                     ->  HashAggregate
+                           Group Key: a2.a1_id
+                           ->  Seq Scan on eager_distinct_a2 a2
+                                 Filter: flag
+                     ->  Hash
+                           ->  Seq Scan on eager_distinct_a1 a1
+(14 rows)
 
 -- The deduplication threshold governs the derived keys too
 SET min_eager_distinct_group_size TO 8;
@@ -3054,3 +3057,144 @@ RESET max_parallel_workers_per_gather;
 DROP TABLE eager_distinct_a1;
 DROP TABLE eager_distinct_a2;
 DROP TABLE eager_distinct_a3;
+--
+-- Test that an aggregate whose result depends on how many times a row reached
+-- it keeps that row observable, so the relation producing it still produces
+-- every match
+--
+CREATE TABLE eager_minmax_d (id int PRIMARY KEY, k text);
+CREATE TABLE eager_minmax_f1 (id int PRIMARY KEY, d_id int);
+CREATE TABLE eager_minmax_f2 (id int PRIMARY KEY, f1_id int, flag bool);
+INSERT INTO eager_minmax_d SELECT i, 'd' || i FROM generate_series(1, 100) i;
+INSERT INTO eager_minmax_f1
+  SELECT i, ((i - 1) / 10) + 1 FROM generate_series(1, 1000) i;
+INSERT INTO eager_minmax_f2
+  SELECT i, ((i - 1) / 10) + 1, i % 2 = 0 FROM generate_series(1, 10000) i;
+CREATE INDEX ON eager_minmax_f1 (d_id);
+CREATE INDEX ON eager_minmax_f2 (f1_id);
+ANALYZE eager_minmax_d;
+ANALYZE eager_minmax_f1;
+ANALYZE eager_minmax_f2;
+-- An aggregate reading the other side needs its rows, so that side is
+-- partially aggregated instead of being folded away
+EXPLAIN (COSTS OFF)
+SELECT d.id, max(f1.id)
+  FROM eager_minmax_d d
+  JOIN eager_minmax_f1 f1 ON f1.d_id = d.id
+ GROUP BY d.id;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Finalize HashAggregate
+   Group Key: d.id
+   ->  Hash Join
+         Hash Cond: (f1.d_id = d.id)
+         ->  Partial HashAggregate
+               Group Key: f1.d_id
+               ->  Seq Scan on eager_minmax_f1 f1
+         ->  Hash
+               ->  Seq Scan on eager_minmax_d d
+(9 rows)
+
+-- Counting the matches still requires the join to produce them
+EXPLAIN (COSTS OFF)
+SELECT d.id, count(*)
+  FROM eager_minmax_d d
+  JOIN eager_minmax_f1 f1 ON f1.d_id = d.id
+  JOIN eager_minmax_f2 f2 ON f2.f1_id = f1.id
+ WHERE f2.flag
+ GROUP BY d.id;
+                          QUERY PLAN                          
+--------------------------------------------------------------
+ Finalize HashAggregate
+   Group Key: d.id
+   ->  Hash Join
+         Hash Cond: (f1.d_id = d.id)
+         ->  Partial HashAggregate
+               Group Key: f1.d_id
+               ->  Hash Join
+                     Hash Cond: (f2.f1_id = f1.id)
+                     ->  Seq Scan on eager_minmax_f2 f2
+                           Filter: flag
+                     ->  Hash
+                           ->  Seq Scan on eager_minmax_f1 f1
+         ->  Hash
+               ->  Seq Scan on eager_minmax_d d
+(14 rows)
+
+-- ... and so does an aggregate that adds them up
+EXPLAIN (COSTS OFF)
+SELECT d.id, sum(d.id)
+  FROM eager_minmax_d d
+  JOIN eager_minmax_f1 f1 ON f1.d_id = d.id
+  JOIN eager_minmax_f2 f2 ON f2.f1_id = f1.id
+ WHERE f2.flag
+ GROUP BY d.id;
+                       QUERY PLAN                       
+--------------------------------------------------------
+ HashAggregate
+   Group Key: d.id
+   ->  Hash Join
+         Hash Cond: (f1.d_id = d.id)
+         ->  Hash Join
+               Hash Cond: (f2.f1_id = f1.id)
+               ->  Seq Scan on eager_minmax_f2 f2
+                     Filter: flag
+               ->  Hash
+                     ->  Seq Scan on eager_minmax_f1 f1
+         ->  Hash
+               ->  Seq Scan on eager_minmax_d d
+(12 rows)
+
+-- bit_xor is not idempotent, since a second copy of a row cancels the first
+EXPLAIN (COSTS OFF)
+SELECT d.id, bit_xor(d.id)
+  FROM eager_minmax_d d
+  JOIN eager_minmax_f1 f1 ON f1.d_id = d.id
+  JOIN eager_minmax_f2 f2 ON f2.f1_id = f1.id
+ WHERE f2.flag
+ GROUP BY d.id;
+                       QUERY PLAN                       
+--------------------------------------------------------
+ HashAggregate
+   Group Key: d.id
+   ->  Hash Join
+         Hash Cond: (f1.d_id = d.id)
+         ->  Hash Join
+               Hash Cond: (f2.f1_id = f1.id)
+               ->  Seq Scan on eager_minmax_f2 f2
+                     Filter: flag
+               ->  Hash
+                     ->  Seq Scan on eager_minmax_f1 f1
+         ->  Hash
+               ->  Seq Scan on eager_minmax_d d
+(12 rows)
+
+SELECT count(*), min(m), max(m) FROM (
+  SELECT d.id, max(d.k) AS m
+    FROM eager_minmax_d d
+    JOIN eager_minmax_f1 f1 ON f1.d_id = d.id
+    JOIN eager_minmax_f2 f2 ON f2.f1_id = f1.id
+   WHERE f2.flag
+   GROUP BY d.id) s;
+ count | min | max 
+-------+-----+-----
+   100 | d1  | d99
+(1 row)
+
+SET enable_eager_aggregate TO off;
+SELECT count(*), min(m), max(m) FROM (
+  SELECT d.id, max(d.k) AS m
+    FROM eager_minmax_d d
+    JOIN eager_minmax_f1 f1 ON f1.d_id = d.id
+    JOIN eager_minmax_f2 f2 ON f2.f1_id = f1.id
+   WHERE f2.flag
+   GROUP BY d.id) s;
+ count | min | max 
+-------+-----+-----
+   100 | d1  | d99
+(1 row)
+
+RESET enable_eager_aggregate;
+DROP TABLE eager_minmax_d;
+DROP TABLE eager_minmax_f1;
+DROP TABLE eager_minmax_f2;

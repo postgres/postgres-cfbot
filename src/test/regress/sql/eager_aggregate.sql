@@ -908,9 +908,8 @@ SELECT count(DISTINCT a1.id)
  WHERE a2.flag
 HAVING count(*) > 5;
 
--- Keys are derived only for a query with no grouping clause of its own.
--- This one groups by a1.id, so eager aggregation declines its DISTINCT
--- aggregate.
+-- A DISTINCT aggregate is idempotent, so the query's own grouping clause
+-- drives the deduplication
 EXPLAIN (COSTS OFF)
 SELECT a1.id, count(DISTINCT a1.title)
   FROM eager_distinct_a1 a1
@@ -978,3 +977,86 @@ RESET max_parallel_workers_per_gather;
 DROP TABLE eager_distinct_a1;
 DROP TABLE eager_distinct_a2;
 DROP TABLE eager_distinct_a3;
+
+
+--
+-- Test that an aggregate whose result depends on how many times a row reached
+-- it keeps that row observable, so the relation producing it still produces
+-- every match
+--
+
+CREATE TABLE eager_minmax_d (id int PRIMARY KEY, k text);
+CREATE TABLE eager_minmax_f1 (id int PRIMARY KEY, d_id int);
+CREATE TABLE eager_minmax_f2 (id int PRIMARY KEY, f1_id int, flag bool);
+
+INSERT INTO eager_minmax_d SELECT i, 'd' || i FROM generate_series(1, 100) i;
+INSERT INTO eager_minmax_f1
+  SELECT i, ((i - 1) / 10) + 1 FROM generate_series(1, 1000) i;
+INSERT INTO eager_minmax_f2
+  SELECT i, ((i - 1) / 10) + 1, i % 2 = 0 FROM generate_series(1, 10000) i;
+
+CREATE INDEX ON eager_minmax_f1 (d_id);
+CREATE INDEX ON eager_minmax_f2 (f1_id);
+
+ANALYZE eager_minmax_d;
+ANALYZE eager_minmax_f1;
+ANALYZE eager_minmax_f2;
+
+-- An aggregate reading the other side needs its rows, so that side is
+-- partially aggregated instead of being folded away
+EXPLAIN (COSTS OFF)
+SELECT d.id, max(f1.id)
+  FROM eager_minmax_d d
+  JOIN eager_minmax_f1 f1 ON f1.d_id = d.id
+ GROUP BY d.id;
+
+-- Counting the matches still requires the join to produce them
+EXPLAIN (COSTS OFF)
+SELECT d.id, count(*)
+  FROM eager_minmax_d d
+  JOIN eager_minmax_f1 f1 ON f1.d_id = d.id
+  JOIN eager_minmax_f2 f2 ON f2.f1_id = f1.id
+ WHERE f2.flag
+ GROUP BY d.id;
+
+-- ... and so does an aggregate that adds them up
+EXPLAIN (COSTS OFF)
+SELECT d.id, sum(d.id)
+  FROM eager_minmax_d d
+  JOIN eager_minmax_f1 f1 ON f1.d_id = d.id
+  JOIN eager_minmax_f2 f2 ON f2.f1_id = f1.id
+ WHERE f2.flag
+ GROUP BY d.id;
+
+-- bit_xor is not idempotent, since a second copy of a row cancels the first
+EXPLAIN (COSTS OFF)
+SELECT d.id, bit_xor(d.id)
+  FROM eager_minmax_d d
+  JOIN eager_minmax_f1 f1 ON f1.d_id = d.id
+  JOIN eager_minmax_f2 f2 ON f2.f1_id = f1.id
+ WHERE f2.flag
+ GROUP BY d.id;
+
+SELECT count(*), min(m), max(m) FROM (
+  SELECT d.id, max(d.k) AS m
+    FROM eager_minmax_d d
+    JOIN eager_minmax_f1 f1 ON f1.d_id = d.id
+    JOIN eager_minmax_f2 f2 ON f2.f1_id = f1.id
+   WHERE f2.flag
+   GROUP BY d.id) s;
+
+SET enable_eager_aggregate TO off;
+
+SELECT count(*), min(m), max(m) FROM (
+  SELECT d.id, max(d.k) AS m
+    FROM eager_minmax_d d
+    JOIN eager_minmax_f1 f1 ON f1.d_id = d.id
+    JOIN eager_minmax_f2 f2 ON f2.f1_id = f1.id
+   WHERE f2.flag
+   GROUP BY d.id) s;
+
+RESET enable_eager_aggregate;
+
+DROP TABLE eager_minmax_d;
+DROP TABLE eager_minmax_f1;
+DROP TABLE eager_minmax_f2;
