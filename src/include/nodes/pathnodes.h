@@ -513,6 +513,9 @@ struct PlannerInfo
 	/* list of GroupingExprInfos */
 	List	   *group_expr_list;
 
+	/* the SortGroupClauses the grouping expressions were derived from */
+	List	   *eager_group_clause;
+
 	/* what eager aggregation pushes below the joins, if anything */
 	EagerAggMode eager_agg_mode;
 
