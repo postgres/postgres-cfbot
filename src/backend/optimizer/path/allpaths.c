@@ -352,11 +352,10 @@ setup_simple_grouped_rels(PlannerInfo *root)
 	Index		rti;
 
 	/*
-	 * If there are no aggregate expressions or grouping expressions, eager
-	 * aggregation is not possible.
+	 * If there are no grouping expressions, eager aggregation is not
+	 * possible.
 	 */
-	if (root->agg_clause_list == NIL ||
-		root->group_expr_list == NIL)
+	if (root->group_expr_list == NIL)
 		return;
 
 	for (rti = 1; rti < root->simple_rel_array_size; rti++)
@@ -1376,11 +1375,10 @@ set_grouped_rel_pathlist(PlannerInfo *root, RelOptInfo *rel)
 	RelOptInfo *grouped_rel;
 
 	/*
-	 * If there are no aggregate expressions or grouping expressions, eager
-	 * aggregation is not possible.
+	 * If there are no grouping expressions, eager aggregation is not
+	 * possible.
 	 */
-	if (root->agg_clause_list == NIL ||
-		root->group_expr_list == NIL)
+	if (root->group_expr_list == NIL)
 		return;
 
 	/* Add paths to the grouped base relation if one exists. */
@@ -3501,6 +3499,7 @@ generate_grouped_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 {
 	RelAggInfo *agg_info = grouped_rel->agg_info;
 	AggClauseCosts agg_costs;
+	AggSplit	aggsplit;
 	bool		can_hash;
 	bool		can_sort;
 	Path	   *cheapest_total_path = NULL;
@@ -3523,8 +3522,15 @@ generate_grouped_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 		!agg_info->agg_useful)
 		return;
 
+	/* A deduplication emits final rows and carries zero aggregate cost */
 	MemSet(&agg_costs, 0, sizeof(AggClauseCosts));
-	get_agg_clause_costs(root, AGGSPLIT_INITIAL_SERIAL, &agg_costs);
+	if (root->eager_agg_mode == EAGER_AGG_DEDUP)
+		aggsplit = AGGSPLIT_SIMPLE;
+	else
+	{
+		aggsplit = AGGSPLIT_INITIAL_SERIAL;
+		get_agg_clause_costs(root, aggsplit, &agg_costs);
+	}
 
 	/*
 	 * Determine whether it's possible to perform sort-based implementations
@@ -3669,7 +3675,7 @@ generate_grouped_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 											path,
 											agg_info->target,
 											AGG_SORTED,
-											AGGSPLIT_INITIAL_SERIAL,
+											aggsplit,
 											agg_info->group_clauses,
 											NIL,
 											&agg_costs,
@@ -3745,7 +3751,7 @@ generate_grouped_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 											path,
 											agg_info->target,
 											AGG_SORTED,
-											AGGSPLIT_INITIAL_SERIAL,
+											aggsplit,
 											agg_info->group_clauses,
 											NIL,
 											&agg_costs,
@@ -3781,7 +3787,7 @@ generate_grouped_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 										path,
 										agg_info->target,
 										AGG_HASHED,
-										AGGSPLIT_INITIAL_SERIAL,
+										aggsplit,
 										agg_info->group_clauses,
 										NIL,
 										&agg_costs,
@@ -3816,7 +3822,7 @@ generate_grouped_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 										path,
 										agg_info->target,
 										AGG_HASHED,
-										AGGSPLIT_INITIAL_SERIAL,
+										aggsplit,
 										agg_info->group_clauses,
 										NIL,
 										&agg_costs,
