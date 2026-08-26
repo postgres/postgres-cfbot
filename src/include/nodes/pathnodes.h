@@ -660,6 +660,9 @@ struct PlannerInfo
 	/* true if a planner extension may replan this subquery */
 	bool		assumeReplanning;
 
+	/* nesting depth of speculative costing; see clausesel.c */
+	int			speculative_costing;
+
 	/*
 	 * The rangetable index for the RTE_GROUP RTE, or 0 if there is no
 	 * RTE_GROUP RTE.
