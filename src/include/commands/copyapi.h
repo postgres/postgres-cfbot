@@ -14,6 +14,7 @@
 #ifndef COPYAPI_H
 #define COPYAPI_H
 
+#include "commands/copy_state.h"
 #include "commands/copy.h"
 
 /*
@@ -101,5 +102,47 @@ typedef struct CopyFromRoutine
 	 */
 	void		(*CopyFromEnd) (CopyFromState cstate);
 } CopyFromRoutine;
+
+/*
+ * Optional callback to process one format-specific COPY option. Invoked
+ * from ProcessCopyOptions() once per option that core did not recognize, after
+ * every core option has been parsed (so 'opts' is fully populated).
+ *
+ * Returns true if the option belongs to the format and is valid. Returns false
+ * if the option is not one the format recognizes, in which case core raises the
+ * "not accepted" error; thus an unrecognized option always errors, whether or
+ * not the format supplies this callback. For a recognized option with an invalid
+ * value, the callback should ereport() itself.
+ */
+typedef bool (*ProcessOneCopyOptionFn) (CopyFormatOptions *opts, bool is_from,
+										DefElem *option);
+
+/*
+ * Optional callback to validate a custom format's fully-parsed options as a
+ * whole. Invoked once from ProcessCopyOptions() after all options have been
+ * processed, so it can enforce cross-option constraints and reject
+ * incompatible core options. It runs even when no format-specific options were
+ * supplied. Reports problems with ereport().
+ */
+typedef void (*ValidateCopyOptionsFn) (CopyFormatOptions *opts, bool is_from);
+
+/*
+ * Sturct to store the registered custom format information.
+ */
+typedef struct CopyCustomFormatEntry
+{
+	const char *name;			/* constant string; never freed (see below) */
+	const CopyToRoutine *to_routine;
+	const CopyFromRoutine *from_routine;
+	ProcessOneCopyOptionFn option_fn;
+	ValidateCopyOptionsFn validate_fn;
+} CopyCustomFormatEntry;
+
+extern void RegisterCopyCustomFormat(const char *name, const CopyToRoutine *to,
+									 const CopyFromRoutine *from,
+									 ProcessOneCopyOptionFn option_fn,
+									 ValidateCopyOptionsFn validate_fn);
+
+extern const CopyCustomFormatEntry *GetCopyCustomFormatRoutines(const char *name);
 
 #endif							/* COPYAPI_H */

@@ -544,6 +544,7 @@ ConvProcInfo
 ConversionLocation
 ConvertRowtypeExpr
 CookedConstraint
+CopyCustomFormatEntry
 CopyDest
 CopyFormat
 CopyFormatOptions
@@ -3189,6 +3190,7 @@ Tcl_Obj
 Tcl_Size
 Tcl_Time
 TempNamespaceStatus
+TestCopyOptions
 TestDSMRegistryHashEntry
 TestDSMRegistryStruct
 TestDecodingData

@@ -58,7 +58,16 @@ typedef enum CopyFormat
 	COPY_FORMAT_BINARY,
 	COPY_FORMAT_CSV,
 	COPY_FORMAT_JSON,
+	COPY_FORMAT_CUSTOM,			/* format provided by an extension */
 } CopyFormat;
+#define CopyFormatIsBuiltins(format) ((format) != COPY_FORMAT_CUSTOM)
+
+/*
+ * Full definitions live in commands/copyapi.h, which includes this header;
+ * CopyFormatOptions only needs to hold pointers to the resolved routines.
+ */
+struct CopyToRoutine;
+struct CopyFromRoutine;
 
 /*
  * A struct to hold COPY options, in a parsed form. All of these are related
@@ -97,9 +106,18 @@ typedef struct CopyFormatOptions
 	CopyLogVerbosityChoice log_verbosity;	/* verbosity of logged messages */
 	int64		reject_limit;	/* maximum tolerable number of errors */
 	List	   *convert_select; /* list of column names (can be NIL) */
+
+	/*
+	 * Resolved handler for a custom format. The directoin not in use may be
+	 * NULL. For built-in formats these are unused.
+	 */
+	const struct CopyCustomFormatEntry *custom_format_ent;
+
+	/* Custom format private option data */
+	void	   *format_private_opts;
 } CopyFormatOptions;
 
-/* These are private in commands/copy[from|to].c */
+/* These are defined in copy_state.h */
 typedef struct CopyFromStateData *CopyFromState;
 typedef struct CopyToStateData *CopyToState;
 
