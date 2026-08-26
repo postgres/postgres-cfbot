@@ -723,11 +723,16 @@ clause_selectivity_ext(PlannerInfo *root,
 		 * result won't change if we are switching the input relations or
 		 * considering a unique-ified case, so we only need one cache variable
 		 * for all non-JOIN_INNER cases.
+		 *
+		 * A speculative costing pass examines the clause under a join type of
+		 * its own choosing, so it bypasses the cache entirely; see
+		 * begin_speculative_costing().
 		 */
-		if (varRelid == 0 ||
-			rinfo->num_base_rels == 0 ||
-			(rinfo->num_base_rels == 1 &&
-			 bms_is_member(varRelid, rinfo->clause_relids)))
+		if (root->speculative_costing == 0 &&
+			(varRelid == 0 ||
+			 rinfo->num_base_rels == 0 ||
+			 (rinfo->num_base_rels == 1 &&
+			  bms_is_member(varRelid, rinfo->clause_relids))))
 		{
 			/* Cacheable --- do we already have the result? */
 			if (jointype == JOIN_INNER)
@@ -974,4 +979,34 @@ clause_selectivity_ext(PlannerInfo *root,
 #endif							/* SELECTIVITY_DEBUG */
 
 	return s1;
+}
+
+/*
+ * begin_speculative_costing
+ *	  Enter a costing pass that examines clauses under a join type of its own
+ *	  choosing.
+ *
+ * A clause holds one cached selectivity for JOIN_INNER and one for whatever
+ * other join type it is examined under, which suffices because a clause
+ * belongs to a single join.  Such a pass would both read estimates meant for
+ * the real join and leave its own behind for that join to find, so between
+ * here and end_speculative_costing() the cache is bypassed.  An OR clause
+ * caches per-subclause selectivities in sub-RestrictInfos of its own, which a
+ * list of clauses would miss.
+ */
+void
+begin_speculative_costing(PlannerInfo *root)
+{
+	root->speculative_costing++;
+}
+
+/*
+ * end_speculative_costing
+ *	  Leave the costing pass entered by begin_speculative_costing().
+ */
+void
+end_speculative_costing(PlannerInfo *root)
+{
+	Assert(root->speculative_costing > 0);
+	root->speculative_costing--;
 }
