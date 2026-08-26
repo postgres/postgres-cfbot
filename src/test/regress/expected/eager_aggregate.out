@@ -1948,8 +1948,8 @@ SELECT DISTINCT t1.id
   FROM eager_distinct_t1 t1
   JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
 ORDER BY t1.id;
-                                 QUERY PLAN                                  
------------------------------------------------------------------------------
+                           QUERY PLAN                            
+-----------------------------------------------------------------
  Sort
    Output: t1.id
    Sort Key: t1.id
@@ -1959,22 +1959,14 @@ ORDER BY t1.id;
          ->  Sort
                Output: t1.id
                Sort Key: t1.id
-               ->  Hash Join
+               ->  Nested Loop Semi Join
                      Output: t1.id
-                     Hash Cond: (t2.t1_id = t1.id)
-                     ->  GroupAggregate
-                           Output: t2.t1_id
-                           Group Key: t2.t1_id
-                           ->  Sort
-                                 Output: t2.t1_id
-                                 Sort Key: t2.t1_id
-                                 ->  Seq Scan on public.eager_distinct_t2 t2
-                                       Output: t2.t1_id
-                     ->  Hash
-                           Output: t1.id
-                           ->  Seq Scan on public.eager_distinct_t1 t1
-                                 Output: t1.id
-(24 rows)
+                     Join Filter: (t1.id = t2.t1_id)
+                     ->  Seq Scan on public.eager_distinct_t1 t1
+                           Output: t1.id, t1.val
+                     ->  Seq Scan on public.eager_distinct_t2 t2
+                           Output: t2.id, t2.t1_id, t2.flag
+(16 rows)
 
 SELECT DISTINCT t1.id
   FROM eager_distinct_t1 t1
