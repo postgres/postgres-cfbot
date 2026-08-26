@@ -110,6 +110,7 @@ restart:
 	root->group_expr_list = NIL;
 	root->eager_group_clause = NIL;
 	root->eager_agg_mode = EAGER_AGG_NONE;
+	root->filter_only_rels = NULL;
 	root->tlist_vars = NIL;
 	root->fkey_list = NIL;
 	root->initial_rels = NIL;

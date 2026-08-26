@@ -119,6 +119,7 @@ static SpecialJoinInfo *make_outerjoininfo(PlannerInfo *root,
 										   Relids inner_join_rels,
 										   JoinType jointype, Index ojrelid,
 										   List *clause);
+static Relids find_filter_only_rels(PlannerInfo *root);
 static void compute_semijoin_info(PlannerInfo *root, SpecialJoinInfo *sjinfo,
 								  List *clause);
 static void deconstruct_distribute_oj_quals(PlannerInfo *root,
@@ -647,6 +648,8 @@ setup_eager_aggregation(PlannerInfo *root)
 	/* Push a partial aggregate if there is one, otherwise a deduplication */
 	root->eager_agg_mode = (root->agg_clause_list == NIL) ?
 		EAGER_AGG_DEDUP : EAGER_AGG_PARTIAL;
+
+	root->filter_only_rels = find_filter_only_rels(root);
 }
 
 /*
@@ -736,6 +739,36 @@ collect_eager_agg_infos(PlannerInfo *root)
 	 * Collect grouping expressions that appear in grouping clauses.
 	 */
 	create_grouping_expr_infos(root);
+}
+
+/*
+ * find_filter_only_rels
+ *	  Base relations that only decide which rows survive.
+ *
+ * Excluded from the tlist and the HAVING qual.  The query can only tell
+ * whether a match exists, so a join of these may be folded into an existence
+ * check.  This set only filters which paths get built.
+ */
+static Relids
+find_filter_only_rels(PlannerInfo *root)
+{
+	Relids		observable = NULL;
+	ListCell   *lc;
+
+	foreach(lc, root->processed_tlist)
+	{
+		TargetEntry *te = lfirst_node(TargetEntry, lc);
+
+		observable = bms_add_members(observable,
+									 pull_varnos(root, (Node *) te->expr));
+	}
+
+	if (root->parse->havingQual)
+		observable = bms_add_members(observable,
+									 pull_varnos(root,
+												 root->parse->havingQual));
+
+	return bms_difference(root->all_baserels, observable);
 }
 
 /*
