@@ -40,6 +40,10 @@ static bool restriction_is_constant_false(List *restrictlist,
 static void make_grouped_join_rel(PlannerInfo *root, RelOptInfo *rel1,
 								  RelOptInfo *rel2, RelOptInfo *joinrel,
 								  SpecialJoinInfo *sjinfo, List *restrictlist);
+static void make_deduplicated_join_rel(PlannerInfo *root, RelOptInfo *rel1,
+									   RelOptInfo *rel2, RelOptInfo *joinrel,
+									   SpecialJoinInfo *sjinfo,
+									   List *restrictlist);
 static void populate_joinrel_with_paths(PlannerInfo *root, RelOptInfo *rel1,
 										RelOptInfo *rel2, RelOptInfo *joinrel,
 										SpecialJoinInfo *sjinfo, List *restrictlist);
@@ -925,12 +929,19 @@ make_grouped_join_rel(PlannerInfo *root, RelOptInfo *rel1,
 	Relids		apply_agg_at;
 
 	/*
-	 * If there are no aggregate expressions or grouping expressions, eager
-	 * aggregation is not possible.
+	 * If there are no grouping expressions, eager aggregation is not
+	 * possible.
 	 */
-	if (root->agg_clause_list == NIL ||
-		root->group_expr_list == NIL)
+	if (root->group_expr_list == NIL)
 		return;
+
+	/* A deduplication composes down the join tree differently */
+	if (root->eager_agg_mode == EAGER_AGG_DEDUP)
+	{
+		make_deduplicated_join_rel(root, rel1, rel2, joinrel, sjinfo,
+								   restrictlist);
+		return;
+	}
 
 	/* Retrieve the grouped relations for the two input rels */
 	grouped_rel1 = rel1->grouped_rel;
@@ -1059,6 +1070,86 @@ make_grouped_join_rel(PlannerInfo *root, RelOptInfo *rel1,
 								grouped_rel,
 								sjinfo,
 								restrictlist);
+}
+
+/*
+ * make_deduplicated_join_rel
+ *	  Build the deduplicated variant of the given join relation.
+ *
+ * A join reintroduces the duplicates, and deduplication is idempotent, so one
+ * is folded in at every level.
+ */
+static void
+make_deduplicated_join_rel(PlannerInfo *root, RelOptInfo *rel1,
+						   RelOptInfo *rel2, RelOptInfo *joinrel,
+						   SpecialJoinInfo *sjinfo, List *restrictlist)
+{
+	RelOptInfo *grouped_rel;
+	RelOptInfo *grouped_rel1 = rel1->grouped_rel;
+	RelOptInfo *grouped_rel2 = rel2->grouped_rel;
+	RelOptInfo *joined;
+	bool		rel1_empty;
+	bool		rel2_empty;
+
+	rel1_empty = (grouped_rel1 == NULL || IS_DUMMY_REL(grouped_rel1));
+	rel2_empty = (grouped_rel2 == NULL || IS_DUMMY_REL(grouped_rel2));
+
+	/* Find or construct the deduplicated relation for this joinrel */
+	grouped_rel = joinrel->grouped_rel;
+	if (grouped_rel == NULL)
+	{
+		RelAggInfo *agg_info;
+
+		agg_info = create_rel_agg_info(root, joinrel, true);
+		if (agg_info == NULL || !agg_info->agg_useful)
+			return;
+
+		grouped_rel = build_grouped_rel(root, joinrel);
+		grouped_rel->reltarget = agg_info->target;
+		grouped_rel->rows = agg_info->grouped_rows;
+
+		/* Every level is its own placement */
+		agg_info->apply_agg_at = bms_copy(joinrel->relids);
+
+		grouped_rel->agg_info = agg_info;
+		joinrel->grouped_rel = grouped_rel;
+	}
+
+	Assert(IS_GROUPED_REL(grouped_rel));
+
+	/* We may have already proven this relation to be dummy. */
+	if (IS_DUMMY_REL(grouped_rel))
+		return;
+
+	/* generate_grouped_paths() covers the case of two plain inputs */
+	if (rel1_empty && rel2_empty)
+		return;
+
+	/*
+	 * Join the inputs into a scratch relation, preferring the deduplicated
+	 * variant of each side, then deduplicate the result.  Using both
+	 * deduplicated variants at once is safe: every join key is a grouping
+	 * key, so merged rows match the same rows on the other side.
+	 */
+	joined = build_grouped_rel(root, joinrel);
+	joined->reltarget = grouped_rel->agg_info->agg_input;
+	set_joinrel_size_estimates(root, joined,
+							   rel1_empty ? rel1 : grouped_rel1,
+							   rel2_empty ? rel2 : grouped_rel2,
+							   sjinfo, restrictlist);
+
+	populate_joinrel_with_paths(root,
+								rel1_empty ? rel1 : grouped_rel1,
+								rel2_empty ? rel2 : grouped_rel2,
+								joined,
+								sjinfo,
+								restrictlist);
+
+	if (joined->pathlist == NIL)
+		return;
+
+	set_cheapest(joined);
+	generate_grouped_paths(root, grouped_rel, joined);
 }
 
 /*

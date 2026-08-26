@@ -415,3 +415,231 @@ RESET geqo;
 RESET geqo_threshold;
 
 DROP TABLE eager_agg_tab_ml;
+
+
+--
+-- Test eager aggregation for queries with no aggregates, where what is
+-- pushed down is a plain deduplication
+--
+
+CREATE TABLE eager_distinct_t1 (id int, val int);
+CREATE TABLE eager_distinct_t2 (id int, t1_id int, flag bool);
+
+INSERT INTO eager_distinct_t1 SELECT i, i FROM generate_series(1, 10) i;
+INSERT INTO eager_distinct_t2
+  SELECT i, ((i - 1) / 100) + 1, i % 2 = 0 FROM generate_series(1, 1000) i;
+
+ANALYZE eager_distinct_t1;
+ANALYZE eager_distinct_t2;
+
+-- Deduplicate the to-many side before the join, so the join produces only
+-- the rows DISTINCT keeps.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ORDER BY t1.id;
+
+SELECT DISTINCT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ORDER BY t1.id;
+
+-- The same query without eager aggregation, for comparison
+SET enable_eager_aggregate TO off;
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ORDER BY t1.id;
+
+SELECT DISTINCT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ORDER BY t1.id;
+
+RESET enable_eager_aggregate;
+
+-- Produce results with sorting deduplication
+SET enable_hashagg TO off;
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ORDER BY t1.id;
+
+SELECT DISTINCT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ORDER BY t1.id;
+
+RESET enable_hashagg;
+
+-- Deduplication is not possible when a column of the to-many side is
+-- observable, since its rows are then not interchangeable.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT t1.id, t2.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ORDER BY t1.id, t2.id;
+
+-- Declined for DISTINCT ON too, which keeps a particular row from each
+-- group, even though only the driver side is projected here
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT ON (t1.id) t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ORDER BY t1.id, t2.id;
+
+-- A qual on the to-many side is applied before the deduplication
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ WHERE t2.flag
+ORDER BY t1.id;
+
+SELECT DISTINCT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ WHERE t2.flag
+ORDER BY t1.id;
+
+-- GROUP BY with no aggregates behaves the same way as DISTINCT
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+GROUP BY t1.id ORDER BY t1.id;
+
+SELECT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+GROUP BY t1.id ORDER BY t1.id;
+
+DROP TABLE eager_distinct_t1;
+DROP TABLE eager_distinct_t2;
+
+
+--
+-- Test that the deduplication has its own usefulness threshold, separate
+-- from the one that governs aggregate pushdown
+--
+
+CREATE TABLE eager_distinct_g1 (id int);
+CREATE TABLE eager_distinct_g2 (id int, g1_id int);
+
+-- four rows per driver row, which is above min_eager_distinct_group_size and
+-- below min_eager_agg_group_size
+INSERT INTO eager_distinct_g1 SELECT i FROM generate_series(1, 10) i;
+INSERT INTO eager_distinct_g2
+  SELECT i, ((i - 1) / 4) + 1 FROM generate_series(1, 40) i;
+
+ANALYZE eager_distinct_g1;
+ANALYZE eager_distinct_g2;
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT g1.id
+  FROM eager_distinct_g1 g1
+  JOIN eager_distinct_g2 g2 ON g2.g1_id = g1.id
+ORDER BY g1.id;
+
+-- Raising the threshold past the group size declines the pushdown
+SET min_eager_distinct_group_size TO 8;
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT g1.id
+  FROM eager_distinct_g1 g1
+  JOIN eager_distinct_g2 g2 ON g2.g1_id = g1.id
+ORDER BY g1.id;
+
+-- ... without changing the answer
+SELECT DISTINCT g1.id
+  FROM eager_distinct_g1 g1
+  JOIN eager_distinct_g2 g2 ON g2.g1_id = g1.id
+ORDER BY g1.id;
+
+RESET min_eager_distinct_group_size;
+
+-- The aggregate threshold does not govern the deduplication
+SET min_eager_agg_group_size TO 1000;
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT g1.id
+  FROM eager_distinct_g1 g1
+  JOIN eager_distinct_g2 g2 ON g2.g1_id = g1.id
+ORDER BY g1.id;
+
+RESET min_eager_agg_group_size;
+
+-- ... nor does the deduplication threshold govern aggregates
+SET min_eager_distinct_group_size TO 1000;
+SET min_eager_agg_group_size TO 0;
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT g1.id, max(g2.id)
+  FROM eager_distinct_g1 g1
+  JOIN eager_distinct_g2 g2 ON g2.g1_id = g1.id
+GROUP BY g1.id ORDER BY g1.id;
+
+RESET min_eager_distinct_group_size;
+RESET min_eager_agg_group_size;
+
+DROP TABLE eager_distinct_g1;
+DROP TABLE eager_distinct_g2;
+
+
+--
+-- Test that on a chain of to-many joins the deduplication is applied at
+-- every hop, so that the duplicates never accumulate
+--
+
+CREATE TABLE eager_distinct_c1 (id int);
+CREATE TABLE eager_distinct_c2 (id int, c1_id int);
+CREATE TABLE eager_distinct_c3 (id int, c2_id int);
+
+INSERT INTO eager_distinct_c1 SELECT i FROM generate_series(1, 100) i;
+INSERT INTO eager_distinct_c2
+  SELECT i, ((i - 1) / 10) + 1 FROM generate_series(1, 1000) i;
+INSERT INTO eager_distinct_c3
+  SELECT i, ((i - 1) / 10) + 1 FROM generate_series(1, 10000) i;
+
+ANALYZE eager_distinct_c1;
+ANALYZE eager_distinct_c2;
+ANALYZE eager_distinct_c3;
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT c1.id
+  FROM eager_distinct_c1 c1
+  JOIN eager_distinct_c2 c2 ON c2.c1_id = c1.id
+  JOIN eager_distinct_c3 c3 ON c3.c2_id = c2.id;
+
+-- The result is 100 rows, so check it rather than printing it
+SELECT count(*), sum(id) FROM (
+  SELECT DISTINCT c1.id
+    FROM eager_distinct_c1 c1
+    JOIN eager_distinct_c2 c2 ON c2.c1_id = c1.id
+    JOIN eager_distinct_c3 c3 ON c3.c2_id = c2.id) s;
+
+-- The same chain without eager aggregation, for comparison
+SET enable_eager_aggregate TO off;
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT c1.id
+  FROM eager_distinct_c1 c1
+  JOIN eager_distinct_c2 c2 ON c2.c1_id = c1.id
+  JOIN eager_distinct_c3 c3 ON c3.c2_id = c2.id;
+
+SELECT count(*), sum(id) FROM (
+  SELECT DISTINCT c1.id
+    FROM eager_distinct_c1 c1
+    JOIN eager_distinct_c2 c2 ON c2.c1_id = c1.id
+    JOIN eager_distinct_c3 c3 ON c3.c2_id = c2.id) s;
+
+RESET enable_eager_aggregate;
+
+DROP TABLE eager_distinct_c1;
+DROP TABLE eager_distinct_c2;
+DROP TABLE eager_distinct_c3;

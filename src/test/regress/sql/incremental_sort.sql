@@ -240,9 +240,13 @@ set parallel_setup_cost=0;
 set min_parallel_table_scan_size = 0;
 set min_parallel_index_scan_size = 0;
 
--- Parallel sort below join.
+-- Parallel sort below join.  The lateral side only multiplies rows, so eager
+-- deduplication would fold it into an existence check and this would stop
+-- being a test of where the sort goes.
+set enable_eager_aggregate = off;
 explain (costs off) select distinct sub.unique1, stringu1
 from tenk1, lateral (select tenk1.unique1 from generate_series(1, 1000)) as sub;
+reset enable_eager_aggregate;
 explain (costs off) select sub.unique1, stringu1
 from tenk1, lateral (select tenk1.unique1 from generate_series(1, 1000)) as sub
 order by 1, 2;
