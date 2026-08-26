@@ -3566,9 +3566,11 @@ generate_grouped_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 
 	/*
 	 * Determine whether we should consider hash-based implementations of
-	 * grouping.
+	 * grouping.  An ordered aggregate cannot be hashed.  Under eager
+	 * deduplication the aggregates stay above the join.
 	 */
-	Assert(root->numOrderedAggs == 0);
+	Assert(root->numOrderedAggs == 0 ||
+		   root->eager_agg_mode == EAGER_AGG_DEDUP);
 	can_hash = (agg_info->group_clauses != NIL &&
 				grouping_is_hashable(agg_info->group_clauses));
 

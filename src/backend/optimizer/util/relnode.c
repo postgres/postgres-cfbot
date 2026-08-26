@@ -500,18 +500,7 @@ build_grouped_rel(PlannerInfo *root, RelOptInfo *rel)
 {
 	RelOptInfo *grouped_rel;
 
-	grouped_rel = makeNode(RelOptInfo);
-	memcpy(grouped_rel, rel, sizeof(RelOptInfo));
-
-	/*
-	 * clear path info
-	 */
-	grouped_rel->pathlist = NIL;
-	grouped_rel->ppilist = NIL;
-	grouped_rel->partial_pathlist = NIL;
-	grouped_rel->cheapest_startup_path = NULL;
-	grouped_rel->cheapest_total_path = NULL;
-	grouped_rel->cheapest_parameterized_paths = NIL;
+	grouped_rel = copy_rel_without_paths(rel);
 
 	/*
 	 * clear partition info
@@ -534,6 +523,31 @@ build_grouped_rel(PlannerInfo *root, RelOptInfo *rel)
 	grouped_rel->rows = 0;
 
 	return grouped_rel;
+}
+
+/*
+ * copy_rel_without_paths
+ *	  Flat copy a relation, leaving the copy's path lists empty.
+ *
+ * The copy shares everything else with the original, so a caller wanting
+ * different size estimates or partitioning must reset those itself.
+ */
+RelOptInfo *
+copy_rel_without_paths(RelOptInfo *rel)
+{
+	RelOptInfo *newrel;
+
+	newrel = makeNode(RelOptInfo);
+	memcpy(newrel, rel, sizeof(RelOptInfo));
+
+	newrel->pathlist = NIL;
+	newrel->ppilist = NIL;
+	newrel->partial_pathlist = NIL;
+	newrel->cheapest_startup_path = NULL;
+	newrel->cheapest_total_path = NULL;
+	newrel->cheapest_parameterized_paths = NIL;
+
+	return newrel;
 }
 
 /*
