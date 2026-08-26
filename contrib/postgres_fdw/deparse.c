@@ -1391,11 +1391,14 @@ deparseSelectSql(List *tlist, bool is_subquery, List **retrieved_attrs,
 		 */
 		deparseSubqueryTargetList(context);
 	}
-	else if (IS_JOIN_REL(foreignrel) || IS_UPPER_REL(foreignrel))
+	else if (IS_JOIN_REL(foreignrel) || IS_UPPER_REL(foreignrel) ||
+			 tlist != NIL)
 	{
 		/*
 		 * For a join or upper relation the input tlist gives the list of
-		 * columns required to be fetched from the foreign server.
+		 * columns required to be fetched from the foreign server; likewise
+		 * for a base-relation scan given an explicit tlist (fdw_scan_tlist)
+		 * to fetch the remote tableoid (see postgresGetForeignPlan()).
 		 */
 		deparseExplicitTargetList(tlist, false, retrieved_attrs, context);
 	}
@@ -1722,12 +1725,51 @@ get_jointype_name(JoinType jointype)
 }
 
 /*
+ * Does tlist contain an individual real column (varattno > 0) of relid,
+ * besides a whole-row entry for it?  Used to tell whether a whole-row
+ * reference has anything to be locally reconstructed from (see
+ * deparseExplicitTargetList()).
+ */
+static bool
+tlist_has_other_column_of_rel(List *tlist, Index relid)
+{
+	ListCell   *lc;
+
+	foreach(lc, tlist)
+	{
+		TargetEntry *tle = lfirst_node(TargetEntry, lc);
+
+		if (IsA(tle->expr, Var) &&
+			((Var *) tle->expr)->varno == relid &&
+			((Var *) tle->expr)->varattno > 0)
+			return true;
+	}
+	return false;
+}
+
+/*
  * Deparse given targetlist and append it to context->buf.
  *
  * tlist is list of TargetEntry's which in turn contain Var nodes.
  *
- * retrieved_attrs is the list of continuously increasing integers starting
- * from 1. It has same number of entries as tlist.
+ * retrieved_attrs is normally the list of continuously increasing integers
+ * starting from 1, with the same number of entries as tlist.  There are two
+ * exceptions, both specific to a base relation's SELECT list built as an
+ * explicit fdw_scan_tlist for row-identity purposes:
+ *
+ * - the local-tableoid pseudo-entry (a Var on TableOidAttributeNumber): its
+ *   value is already known at plan time, so instead of shipping it to the
+ *   remote server as a literal Const, it's skipped here and filled in
+ *   locally afterward, by make_tuple_from_result_row().
+ *
+ * - a plain whole-row reference to the relation itself (a Var on attno 0),
+ *   when its columns are also being fetched individually elsewhere in this
+ *   tlist (e.g. for EPQ recheck): shipping the whole row too would transfer
+ *   those columns twice, so it's skipped here and reconstructed locally
+ *   afterward instead, again by make_tuple_from_result_row().  Absent such
+ *   sibling columns (e.g. the relation has none), it is shipped as a
+ *   literal ROW(...) as usual, since there is nothing to reconstruct it
+ *   from.
  *
  * This is used for both SELECT and RETURNING targetlists; the is_returning
  * parameter is true only for a RETURNING targetlist.
@@ -1740,7 +1782,9 @@ deparseExplicitTargetList(List *tlist,
 {
 	ListCell   *lc;
 	StringInfo	buf = context->buf;
+	bool		is_base_rel = !is_returning && IS_SIMPLE_REL(context->scanrel);
 	int			i = 0;
+	bool		first = true;
 
 	*retrieved_attrs = NIL;
 
@@ -1748,18 +1792,38 @@ deparseExplicitTargetList(List *tlist,
 	{
 		TargetEntry *tle = lfirst_node(TargetEntry, lc);
 
-		if (i > 0)
+		i++;
+
+		/* Local tableoid: known locally, skip the remote round trip. */
+		if (is_base_rel &&
+			IsA(tle->expr, Var) &&
+			((Var *) tle->expr)->varattno == TableOidAttributeNumber)
+			continue;
+
+		/*
+		 * Whole-row reference to this relation with a sibling column
+		 * elsewhere in tlist: skip the redundant ROW(...) and reconstruct
+		 * it locally instead (see make_tuple_from_result_row()).
+		 */
+		if (is_base_rel &&
+			IsA(tle->expr, Var) &&
+			((Var *) tle->expr)->varattno == InvalidAttrNumber &&
+			((Var *) tle->expr)->varno == context->scanrel->relid &&
+			tlist_has_other_column_of_rel(tlist, context->scanrel->relid))
+			continue;
+
+		if (!first)
 			appendStringInfoString(buf, ", ");
 		else if (is_returning)
 			appendStringInfoString(buf, " RETURNING ");
+		first = false;
 
 		deparseExpr((Expr *) tle->expr, context);
 
-		*retrieved_attrs = lappend_int(*retrieved_attrs, i + 1);
-		i++;
+		*retrieved_attrs = lappend_int(*retrieved_attrs, i);
 	}
 
-	if (i == 0 && !is_returning)
+	if (first && !is_returning)
 		appendStringInfoString(buf, "NULL");
 }
 
@@ -2364,7 +2428,7 @@ deparseUpdateSql(StringInfo buf, RangeTblEntry *rte,
 	deparseRelation(buf, rel);
 	appendStringInfoString(buf, " SET ");
 
-	pindex = 2;					/* ctid is always the first param */
+	pindex = 3;					/* ctid ($1) and tableoid ($2) come first */
 	first = true;
 	foreach(lc, targetAttrs)
 	{
@@ -2384,7 +2448,7 @@ deparseUpdateSql(StringInfo buf, RangeTblEntry *rte,
 			pindex++;
 		}
 	}
-	appendStringInfoString(buf, " WHERE ctid = $1");
+	appendStringInfoString(buf, " WHERE ctid = $1 AND tableoid = $2");
 
 	deparseReturningList(buf, rte, rtindex, rel,
 						 rel->trigdesc && rel->trigdesc->trig_update_after_row,
@@ -2502,7 +2566,7 @@ deparseDeleteSql(StringInfo buf, RangeTblEntry *rte,
 {
 	appendStringInfoString(buf, "DELETE FROM ");
 	deparseRelation(buf, rel);
-	appendStringInfoString(buf, " WHERE ctid = $1");
+	appendStringInfoString(buf, " WHERE ctid = $1 AND tableoid = $2");
 
 	deparseReturningList(buf, rte, rtindex, rel,
 						 rel->trigdesc && rel->trigdesc->trig_delete_after_row,
@@ -2888,6 +2952,17 @@ deparseColumnRef(StringInfo buf, int varno, int varattno, RangeTblEntry *rte,
 		if (qualify_col)
 			ADD_REL_QUALIFIER(buf, varno);
 		appendStringInfoString(buf, "ctid");
+	}
+	else if (varattno == RemoteTableOidAttributeNumber)
+	{
+		/*
+		 * Pseudo-column carrying the remote table OID as part of the row
+		 * identity for UPDATE/DELETE (see postgresAddForeignUpdateTargets);
+		 * fetch it as the remote "tableoid" system column.
+		 */
+		if (qualify_col)
+			ADD_REL_QUALIFIER(buf, varno);
+		appendStringInfoString(buf, "tableoid");
 	}
 	else if (varattno < 0)
 	{
