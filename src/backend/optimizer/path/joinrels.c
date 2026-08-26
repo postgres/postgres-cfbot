@@ -18,6 +18,7 @@
 #include "optimizer/appendinfo.h"
 #include "optimizer/cost.h"
 #include "optimizer/joininfo.h"
+#include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/planner.h"
@@ -44,6 +45,8 @@ static void make_deduplicated_join_rel(PlannerInfo *root, RelOptInfo *rel1,
 									   RelOptInfo *rel2, RelOptInfo *joinrel,
 									   SpecialJoinInfo *sjinfo,
 									   List *restrictlist);
+static bool dedup_rhs_unobservable(PlannerInfo *root, RelOptInfo *grouped_rel,
+								   RelOptInfo *rhs);
 static void populate_joinrel_with_paths(PlannerInfo *root, RelOptInfo *rel1,
 										RelOptInfo *rel2, RelOptInfo *joinrel,
 										SpecialJoinInfo *sjinfo, List *restrictlist);
@@ -1150,6 +1153,33 @@ make_deduplicated_join_rel(PlannerInfo *root, RelOptInfo *rel1,
 
 	set_cheapest(joined);
 	generate_grouped_paths(root, grouped_rel, joined);
+}
+
+/*
+ * dedup_rhs_unobservable
+ *	  Does the given input supply nothing that the deduplicated relation emits?
+ *
+ * If it does not, the only thing the query can tell about it is whether a
+ * matching row exists, so producing the matches is wasted work.  Checking the
+ * targets is sufficient: whatever an upper join or a lateral reference still
+ * needs is part of the deduplicated relation's target.
+ */
+static bool
+dedup_rhs_unobservable(PlannerInfo *root, RelOptInfo *grouped_rel,
+					   RelOptInfo *rhs)
+{
+	RelAggInfo *agg_info = grouped_rel->agg_info;
+	Relids		observable;
+
+	observable = pull_varnos(root, (Node *) agg_info->target->exprs);
+	if (bms_overlap(observable, rhs->relids))
+		return false;
+
+	observable = pull_varnos(root, (Node *) agg_info->agg_input->exprs);
+	if (bms_overlap(observable, rhs->relids))
+		return false;
+
+	return true;
 }
 
 /*
