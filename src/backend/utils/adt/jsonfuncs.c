@@ -5289,7 +5289,7 @@ setPathObject(JsonbIterator **it, const Datum *path_elems, const bool *path_null
 				v;
 	bool		done = false;
 
-	if (level >= path_len || path_nulls[level])
+	if (level >= path_len)
 		done = true;
 	else
 	{
@@ -5427,7 +5427,7 @@ setPathArray(JsonbIterator **it, const Datum *path_elems, const bool *path_nulls
 	bool		done = false;
 
 	/* pick correct index */
-	if (level < path_len && !path_nulls[level])
+	if (level < path_len)
 	{
 		char	   *c = TextDatumGetCString(path_elems[level]);
 		char	   *badp;
