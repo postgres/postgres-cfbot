@@ -176,6 +176,44 @@ SELECT DISTINCT d.id, d.payload
  WHERE u2.id < 30;
 
 --
+-- Relation kinds other than tables and subqueries
+--
+
+-- A VALUES list restricting which drivers survive is no different from a table
+-- restricting them, and duplicates in the list fan the driver out the same way.
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id, d.payload
+  FROM sjc_driver d JOIN (VALUES (1), (1), (2), (2)) v(id) ON v.id = d.grp;
+
+-- Same for a set-returning function, which is how a client-supplied key set
+-- often arrives.
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id, d.payload
+  FROM sjc_driver d JOIN generate_series(1, 4) g(id) ON g.id = d.grp;
+
+-- The function scan and the table join to each other, so the two form one
+-- group and the group is declined.
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id, d.payload
+  FROM sjc_driver d
+       JOIN generate_series(1, 4) g(id) ON true
+       JOIN sjc_filter f ON f.driver_id = d.id AND f.id % 4 = g.id
+ WHERE f.flag;
+
+-- A volatile function builds fresh rows on every read, and unique-ification
+-- would change how often the read happens.
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id, d.payload
+  FROM sjc_driver d
+       JOIN generate_series(1, (random() * 4)::int) g(id) ON g.id = d.grp;
+
+-- Likewise a VALUES list whose entries are volatile.
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id, d.payload
+  FROM sjc_driver d
+       JOIN (VALUES ((random() * 4)::int), (2)) v(id) ON v.id = d.grp;
+
+--
 -- A key set filtering a chain of to-many joins
 --
 -- The chain below the counted relation only filters, and the many leaves per
@@ -311,6 +349,17 @@ SELECT count(*), sum(id) FROM (
          JOIN sjc_deep e ON e.filter_id = f.id
    WHERE f.flag) s;
 
+SELECT count(*), sum(id) FROM (
+  SELECT DISTINCT d.id
+    FROM sjc_driver d
+         JOIN generate_series(1, 4) g(id) ON true
+         JOIN sjc_filter f ON f.driver_id = d.id AND f.id % 4 = g.id
+   WHERE f.flag) s;
+
+SELECT count(*), sum(id) FROM (
+  SELECT DISTINCT d.id
+    FROM sjc_driver d JOIN (VALUES (1), (1), (2), (2)) v(id) ON v.id = d.grp) s;
+
 SELECT count(DISTINCT c.id)
   FROM sjc_customer c
        LEFT JOIN sjc_order o ON o.customer_id = c.id
@@ -356,6 +405,17 @@ SELECT count(*), sum(id) FROM (
          JOIN sjc_filter f ON f.driver_id = d.id
          JOIN sjc_deep e ON e.filter_id = f.id
    WHERE f.flag) s;
+
+SELECT count(*), sum(id) FROM (
+  SELECT DISTINCT d.id
+    FROM sjc_driver d
+         JOIN generate_series(1, 4) g(id) ON true
+         JOIN sjc_filter f ON f.driver_id = d.id AND f.id % 4 = g.id
+   WHERE f.flag) s;
+
+SELECT count(*), sum(id) FROM (
+  SELECT DISTINCT d.id
+    FROM sjc_driver d JOIN (VALUES (1), (1), (2), (2)) v(id) ON v.id = d.grp) s;
 
 SELECT count(DISTINCT c.id)
   FROM sjc_customer c

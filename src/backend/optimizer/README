@@ -313,6 +313,10 @@ as one righthand side, but with a selective lefthand side and no index, in a
 handful of adversarial cases, the transformation could cost more than
 preventing the fanout would save.
 
+A table, a subquery, a function scan and a VALUES list can all be lifted.  The
+last two build their own rows from expressions, so a volatile expression rules
+one out: unique-ification changes how often the rows are built.
+
 enable_semijoin_conversion controls the transformation.  Only queries whose
 joins are all plain inner joins are considered, and lateral references and
 PlaceHolderVars rule a query out, since either may need a column from a

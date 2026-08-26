@@ -1176,6 +1176,19 @@ convert_joins_to_semijoins(PlannerInfo *root, List *joinlist)
 			case RTE_SUBQUERY:
 				break;
 
+				/*
+				 * These build their own rows, and unique-ification changes
+				 * how often that happens.
+				 */
+			case RTE_FUNCTION:
+				if (contain_volatile_functions((Node *) rte->functions))
+					continue;
+				break;
+			case RTE_VALUES:
+				if (contain_volatile_functions((Node *) rte->values_lists))
+					continue;
+				break;
+
 			default:
 				continue;
 		}
