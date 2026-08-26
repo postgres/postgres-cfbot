@@ -666,13 +666,17 @@ collect_eager_agg_infos(PlannerInfo *root)
 		return;
 
 	/*
-	 * Don't apply eager aggregation if there are no available GROUP BY
-	 * clauses.
+	 * Identify the clauses that determine which rows the query can tell
+	 * apart.  DISTINCT serves the same purpose as GROUP BY here.  DISTINCT ON
+	 * does not, since it keeps a particular row from each group.
 	 */
-	if (!root->processed_groupClause)
-		return;
+	if (root->processed_groupClause)
+		root->eager_group_clause = root->processed_groupClause;
+	else if (root->parse->distinctClause && !root->parse->hasDistinctOn)
+		root->eager_group_clause = root->processed_distinctClause;
 
-	root->eager_group_clause = root->processed_groupClause;
+	if (root->eager_group_clause == NIL)
+		return;
 
 	/*
 	 * For now we don't try to support grouping sets.
@@ -722,10 +726,10 @@ collect_eager_agg_infos(PlannerInfo *root)
 	create_agg_clause_infos(root);
 
 	/*
-	 * If there are no suitable aggregate expressions, we cannot apply eager
-	 * aggregation.
+	 * If the query has aggregates, at least one must be suitable.  With no
+	 * aggregates, what gets pushed down is a plain deduplication.
 	 */
-	if (root->agg_clause_list == NIL)
+	if (root->parse->hasAggs && root->agg_clause_list == NIL)
 		return;
 
 	/*
