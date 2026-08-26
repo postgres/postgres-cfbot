@@ -35,6 +35,7 @@ extern RelOptInfo *query_planner(PlannerInfo *root,
  * prototypes for plan/planagg.c
  */
 extern void preprocess_minmax_aggregates(PlannerInfo *root);
+extern Oid	fetch_agg_sort_op(Oid aggfnoid);
 
 /*
  * prototypes for plan/createplan.c

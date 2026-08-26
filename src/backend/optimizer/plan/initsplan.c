@@ -101,12 +101,15 @@ static void create_agg_clause_infos(PlannerInfo *root);
 static bool grouping_key_usable(Expr *expr);
 static Index max_sortgroupref(List *tlist);
 static List *pull_agg_level_exprs(PlannerInfo *root);
+static Relids grouping_key_relids(PlannerInfo *root);
 static bool aggref_is_plain(Aggref *aggref);
+static bool aggref_idempotent(Aggref *aggref);
 static bool collect_distinct_agg_keys(Aggref *aggref, Index *nextref,
 									  List **exprs, List **clauses);
 static void add_grouping_expr_infos(PlannerInfo *root, List *exprs,
 									List *clauses);
 static void create_distinct_agg_grouping(PlannerInfo *root);
+static bool aggs_indifferent_to_duplicates(PlannerInfo *root);
 static void create_grouping_expr_infos(PlannerInfo *root);
 static EquivalenceClass *get_eclass_for_sortgroupclause(PlannerInfo *root,
 														SortGroupClause *sgc,
@@ -718,6 +721,18 @@ collect_eager_agg_infos(PlannerInfo *root)
 	}
 
 	/*
+	 * An idempotent aggregate ignores how often a row arrives, so a
+	 * deduplication on the query's grouping keys takes the place of a partial
+	 * aggregate.  The checks below govern aggregates, so return ahead of
+	 * them.
+	 */
+	if (aggs_indifferent_to_duplicates(root))
+	{
+		create_grouping_expr_infos(root);
+		return;
+	}
+
+	/*
 	 * For now we don't try to support DISTINCT or ORDER BY aggregates.
 	 */
 	if (root->numOrderedAggs > 0)
@@ -1030,6 +1045,27 @@ pull_agg_level_exprs(PlannerInfo *root)
 }
 
 /*
+ * grouping_key_relids
+ *	  The relations the query groups by.
+ */
+static Relids
+grouping_key_relids(PlannerInfo *root)
+{
+	Relids		relids = NULL;
+	ListCell   *lc;
+
+	foreach(lc, root->eager_group_clause)
+	{
+		SortGroupClause *sgc = lfirst_node(SortGroupClause, lc);
+		Node	   *expr = get_sortgroupclause_expr(sgc, root->processed_tlist);
+
+		relids = bms_add_members(relids, pull_varnos(root, expr));
+	}
+
+	return relids;
+}
+
+/*
  * aggref_is_plain
  *	  Does the aggregate depend only on the set of its argument values?
  *
@@ -1045,6 +1081,26 @@ aggref_is_plain(Aggref *aggref)
 			aggref->aggorder == NIL &&
 			aggref->aggdirectargs == NIL &&
 			!aggref->aggvariadic);
+}
+
+/*
+ * aggref_idempotent
+ *	  Does the aggregate return the same result however often a row arrives?
+ *
+ * DISTINCT discards the duplicates before aggregating, so any aggregate
+ * carrying it qualifies.  So do MIN and MAX, which the catalog marks by giving
+ * them a sort operator.
+ */
+static bool
+aggref_idempotent(Aggref *aggref)
+{
+	if (!aggref_is_plain(aggref))
+		return false;
+
+	if (aggref->aggdistinct != NIL)
+		return true;
+
+	return OidIsValid(fetch_agg_sort_op(aggref->aggfnoid));
 }
 
 /*
@@ -1182,6 +1238,66 @@ create_distinct_agg_grouping(PlannerInfo *root)
 	add_grouping_expr_infos(root, exprs, clauses);
 
 	root->eager_group_clause = clauses;
+}
+
+/*
+ * aggs_indifferent_to_duplicates
+ *	  Do the query's aggregates return the same results however often a row
+ *	  arrives?
+ *
+ * A deduplication leaves each surviving row a single time, so every aggregate
+ * computed above it has to be idempotent.
+ *
+ * The aggregates must only read relations the query groups by.  A partial
+ * aggregate on such a relation groups on the same keys.
+ */
+static bool
+aggs_indifferent_to_duplicates(PlannerInfo *root)
+{
+	List	   *exprs;
+	Relids		group_relids;
+	bool		result = true;
+	ListCell   *lc;
+
+	if (!root->parse->hasAggs)
+		return false;
+
+	group_relids = grouping_key_relids(root);
+	exprs = pull_agg_level_exprs(root);
+
+	foreach(lc, exprs)
+	{
+		Expr	   *expr = (Expr *) lfirst(lc);
+		Aggref	   *aggref;
+		Relids		arg_relids;
+
+		/*
+		 * A plain Var at this level is a grouping key, or a grouped primary
+		 * key of the same relation.
+		 */
+		if (!IsA(expr, Aggref))
+			continue;
+
+		aggref = (Aggref *) expr;
+
+		if (!aggref_idempotent(aggref))
+		{
+			result = false;
+			break;
+		}
+
+		arg_relids = pull_varnos(root, (Node *) aggref->args);
+		result = bms_is_subset(arg_relids, group_relids);
+		bms_free(arg_relids);
+
+		if (!result)
+			break;
+	}
+
+	list_free(exprs);
+	bms_free(group_relids);
+
+	return result;
 }
 
 /*
