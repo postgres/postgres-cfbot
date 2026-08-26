@@ -1465,6 +1465,191 @@ heap_page_prune_and_freeze(PruneFreezeParams *params,
 										 new_relfrozen_xid, new_relmin_mxid);
 }
 
+/*
+ * Freeze tuples on a page without pruning it.
+ *
+ * Caller must hold a pin and an exclusive lock on the page.  This function
+ * neither changes line pointers nor updates pruning hints or the visibility
+ * map.  It is intended for VACUUM to make freeze progress on a page that is
+ * pinned by another backend and therefore cannot be cleanup locked.
+ *
+ * result->needs_cleanup is set when a DEAD tuple has XIDs or MultiXactIds
+ * that must be removed before the relation's freeze cutoffs can advance.
+ */
+void
+heap_page_freeze_only(HeapPageFreezeParams *params,
+					  HeapPageFreezeResult *result, OffsetNumber *off_loc,
+					  TransactionId *new_relfrozen_xid,
+					  MultiXactId *new_relmin_mxid)
+{
+	Page		page = BufferGetPage(params->buffer);
+	HeapTupleData tuple;
+	FreezeState state;
+	TransactionId dead_relfrozen_xid = *new_relfrozen_xid;
+	MultiXactId dead_relmin_mxid = *new_relmin_mxid;
+	TransactionId conflict_xid;
+	OffsetNumber maxoff;
+	bool		totally_frozen;
+	int8		htsv[MaxHeapTuplesPerPage + 1];
+	enum
+	{
+		HEAPTUPLE_NONE = -1
+	};
+
+	Assert(BufferIsLockedByMeInMode(params->buffer, BUFFER_LOCK_EXCLUSIVE));
+	Assert(params->cutoffs != NULL);
+	Assert(TransactionIdIsValid(*new_relfrozen_xid));
+	Assert(MultiXactIdIsValid(*new_relmin_mxid));
+
+	MemSet(result, 0, sizeof(*result));
+	tuple.t_tableOid = RelationGetRelid(params->relation);
+	maxoff = PageGetMaxOffsetNumber(page);
+
+	/*
+	 * Classify line pointers and determine tuple visibility before preparing
+	 * any freeze plans.  Save the results, since checking visibility twice
+	 * can give different answers.  This avoids creating a MultiXactId when an
+	 * old DEAD tuple requires a later cleanup-lock pass.
+	 */
+	for (OffsetNumber offnum = maxoff;
+		 offnum >= FirstOffsetNumber;
+		 offnum = OffsetNumberPrev(offnum))
+	{
+		ItemId		itemid = PageGetItemId(page, offnum);
+		HeapTupleHeader tupleheader;
+
+		*off_loc = offnum;
+		htsv[offnum] = HEAPTUPLE_NONE;
+		if (!ItemIdIsUsed(itemid))
+			continue;
+		if (ItemIdIsDead(itemid))
+		{
+			result->deadoffsets[result->lpdead_items++] = offnum;
+			continue;
+		}
+		if (ItemIdIsRedirected(itemid))
+		{
+			result->hastup = true;
+			continue;
+		}
+
+		Assert(ItemIdIsNormal(itemid));
+		result->hastup = true;
+		tupleheader = (HeapTupleHeader) PageGetItem(page, itemid);
+		tuple.t_data = tupleheader;
+		tuple.t_len = ItemIdGetLength(itemid);
+		ItemPointerSet(&tuple.t_self,
+					   BufferGetBlockNumber(params->buffer), offnum);
+
+		htsv[offnum] = heap_tuple_satisfies_vacuum(&tuple, params->buffer,
+												   params->vistest, params->cutoffs);
+		if (htsv[offnum] == HEAPTUPLE_DEAD &&
+			heap_tuple_should_freeze(tupleheader, params->cutoffs,
+									 &dead_relfrozen_xid,
+									 &dead_relmin_mxid))
+		{
+			result->needs_cleanup = true;
+			*off_loc = InvalidOffsetNumber;
+			return;
+		}
+	}
+
+	/*
+	 * No DEAD tuple requires a cleanup-lock pass.  Prepare freeze plans and
+	 * collect page statistics.
+	 */
+	heap_page_freeze_init(&state, true,
+						  *new_relfrozen_xid, *new_relmin_mxid);
+
+	for (OffsetNumber offnum = maxoff;
+		 offnum >= FirstOffsetNumber;
+		 offnum = OffsetNumberPrev(offnum))
+	{
+		ItemId		itemid;
+		HeapTupleHeader tupleheader;
+
+		/* Non-normal line pointers do not need freezing. */
+		if (htsv[offnum] == HEAPTUPLE_NONE)
+			continue;
+
+		/*
+		 * Leave DEAD tuples for a later cleanup-lock pass, avoiding a
+		 * separate freeze WAL record before they are removed.
+		 */
+		if (htsv[offnum] == HEAPTUPLE_DEAD)
+		{
+			result->dead_tuples++;
+			continue;
+		}
+
+		*off_loc = offnum;
+		switch (htsv[offnum])
+		{
+			case HEAPTUPLE_DELETE_IN_PROGRESS:
+			case HEAPTUPLE_LIVE:
+				result->live_tuples++;
+				break;
+
+			case HEAPTUPLE_RECENTLY_DEAD:
+				result->recently_dead_tuples++;
+				break;
+
+			case HEAPTUPLE_INSERT_IN_PROGRESS:
+				break;
+
+			default:
+				elog(ERROR, "unexpected HeapTupleSatisfiesVacuum result");
+				break;
+		}
+
+		itemid = PageGetItemId(page, offnum);
+		tupleheader = (HeapTupleHeader) PageGetItem(page, itemid);
+
+		if (heap_prepare_freeze_tuple(tupleheader, params->cutoffs,
+									  &state.pagefrz,
+									  &state.frozen[state.nfrozen],
+									  &totally_frozen))
+			state.frozen[state.nfrozen++].offset = offnum;
+	}
+
+	*off_loc = InvalidOffsetNumber;
+
+	if (state.nfrozen > 0)
+	{
+		heap_pre_freeze_checks(params->buffer, state.frozen, state.nfrozen);
+		Assert(TransactionIdPrecedes(state.pagefrz.FreezePageConflictXid,
+									 params->cutoffs->OldestXmin));
+		conflict_xid = state.pagefrz.FreezePageConflictXid;
+
+		START_CRIT_SECTION();
+
+		heap_freeze_prepared_tuples(params->buffer, state.frozen,
+									state.nfrozen);
+		MarkBufferDirty(params->buffer);
+
+		if (RelationNeedsWAL(params->relation))
+			log_heap_prune_and_freeze(params->relation, params->buffer,
+									  InvalidBuffer, 0, conflict_xid,
+									  false, PRUNE_VACUUM_SCAN,
+									  state.frozen, state.nfrozen,
+									  NULL, 0, NULL, 0, NULL, 0);
+
+		END_CRIT_SECTION();
+	}
+
+	result->nfrozen = state.nfrozen;
+	heap_page_freeze_update_relstats(&state,
+									 new_relfrozen_xid, new_relmin_mxid);
+
+	if (result->dead_tuples > 0)
+	{
+		if (TransactionIdPrecedes(dead_relfrozen_xid, *new_relfrozen_xid))
+			*new_relfrozen_xid = dead_relfrozen_xid;
+		if (MultiXactIdPrecedes(dead_relmin_mxid, *new_relmin_mxid))
+			*new_relmin_mxid = dead_relmin_mxid;
+	}
+}
+
 /* Perform visibility checks shared by pruning and freezing. */
 static HTSV_Result
 heap_tuple_satisfies_vacuum(HeapTuple tup,
