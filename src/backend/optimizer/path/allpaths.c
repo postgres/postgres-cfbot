@@ -82,6 +82,7 @@ bool		enable_geqo = false;	/* just in case GUC doesn't set it */
 bool		enable_eager_aggregate = true;
 int			geqo_threshold;
 double		min_eager_agg_group_size;
+double		min_eager_distinct_group_size;
 int			min_parallel_table_scan_size;
 int			min_parallel_index_scan_size;
 
