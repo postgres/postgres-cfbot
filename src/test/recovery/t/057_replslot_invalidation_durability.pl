@@ -122,4 +122,129 @@ ok(-f $restart_segment_path,
 
 $node->stop;
 
+# Check that slot synchronization also persists an invalidation before
+# publishing it.
+my $primary = PostgreSQL::Test::Cluster->new('sync_primary');
+$primary->init(allows_streaming => 'logical', extra => ['--wal-segsize=1']);
+$primary->append_conf(
+	'postgresql.conf', qq(
+autovacuum = off
+checkpoint_timeout = 1h
+max_wal_size = 64MB
+));
+$primary->start;
+$primary->safe_psql('postgres', 'CREATE EXTENSION injection_points');
+$primary->safe_psql('postgres',
+	q{SELECT pg_create_physical_replication_slot('sync_phys')});
+$primary->backup('sync_backup');
+
+my $standby = PostgreSQL::Test::Cluster->new('sync_standby');
+$standby->init_from_backup(
+	$primary, 'sync_backup',
+	has_streaming => 1,
+	has_restoring => 1);
+my $primary_connstr = $primary->connstr;
+$standby->append_conf(
+	'postgresql.conf', qq(
+checkpoint_timeout = 1h
+hot_standby_feedback = on
+primary_slot_name = 'sync_phys'
+primary_conninfo = '$primary_connstr dbname=postgres'
+));
+$standby->start;
+$primary->wait_for_replay_catchup($standby);
+
+$primary->safe_psql(
+	'postgres',
+	q{SELECT pg_create_logical_replication_slot(
+		'sync_slot', 'pgoutput', false, false, true)});
+
+my $slot_synced = 'f';
+foreach (1 .. 10)
+{
+	$primary->safe_psql('postgres', 'SELECT pg_log_standby_snapshot()');
+	$primary->wait_for_replay_catchup($standby);
+	$standby->safe_psql('postgres', 'SELECT pg_sync_replication_slots()');
+	$slot_synced = $standby->safe_psql(
+		'postgres',
+		q{
+SELECT count(*) = 1
+FROM pg_replication_slots
+WHERE slot_name = 'sync_slot'
+  AND synced
+  AND NOT temporary
+  AND invalidation_reason IS NULL
+});
+	last if $slot_synced eq 't';
+}
+is($slot_synced, 't', 'valid failover slot is synchronized');
+my $sync_restart_lsn = $standby->safe_psql(
+	'postgres',
+	q{
+SELECT restart_lsn
+FROM pg_replication_slots
+WHERE slot_name = 'sync_slot'
+});
+
+$primary->append_conf('postgresql.conf', 'max_slot_wal_keep_size = 1MB');
+$primary->reload;
+$primary->advance_wal(8);
+$primary->wait_for_replay_catchup($standby);
+$primary->safe_psql('postgres', 'CHECKPOINT');
+
+is( $primary->safe_psql(
+		'postgres',
+		q{
+SELECT invalidation_reason
+FROM pg_replication_slots
+WHERE slot_name = 'sync_slot'
+}),
+	'wal_removed',
+	'failover slot is invalidated on the primary');
+
+$standby->safe_psql(
+	'postgres',
+	q{
+SELECT injection_points_attach(
+	'replication-slot-save-error', 'error', 'sync_slot')
+});
+
+($ret, $stdout, $stderr) =
+  $standby->psql('postgres', 'SELECT pg_sync_replication_slots()');
+like(
+	$stderr,
+	qr/error triggered for injection point replication-slot-save-error/,
+	'injected error prevents synchronized invalidation from being saved');
+
+is( $standby->safe_psql(
+		'postgres',
+		q{
+SELECT invalidation_reason IS NULL
+FROM pg_replication_slots
+WHERE slot_name = 'sync_slot'
+}),
+	't',
+	'failed save leaves synchronized slot valid');
+
+$standby->safe_psql('postgres',
+	q{SELECT injection_points_detach('replication-slot-save-error')});
+
+$standby->safe_psql('postgres', 'SELECT pg_sync_replication_slots()');
+
+$standby->stop('immediate');
+$standby->start;
+
+is( $standby->safe_psql(
+		'postgres',
+		qq{
+SELECT invalidation_reason, restart_lsn = '$sync_restart_lsn'
+FROM pg_replication_slots
+WHERE slot_name = 'sync_slot'
+}),
+	'wal_removed|t',
+	'retried synchronized invalidation and restart LSN survive restart');
+
+$standby->stop;
+$primary->stop;
+
 done_testing();
