@@ -519,6 +519,9 @@ struct PlannerInfo
 	/* what eager aggregation pushes below the joins, if anything */
 	EagerAggMode eager_agg_mode;
 
+	/* base rels supplying nothing the query outputs, or NULL if none */
+	Relids		filter_only_rels;
+
 	/* list of plain Vars contained in targetlist and havingQual */
 	List	   *tlist_vars;
 
