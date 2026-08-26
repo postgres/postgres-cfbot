@@ -8541,6 +8541,29 @@ resolve_special_varno(Node *node, deparse_context *context,
 		if (!tle)
 			elog(ERROR, "bogus varattno for INDEX_VAR var: %d", var->varattno);
 
+		/*
+		 * A row-identity pseudo-column in fdw_scan_tlist has an out-of-range
+		 * attno and no catalog column to name, so when deparsing it as a
+		 * variable (get_special_variable) print its scan-tlist name rather
+		 * than chasing a non-existent attribute (which fails in
+		 * get_variable).
+		 */
+		if (callback == get_special_variable && tle->resname &&
+			IsA(tle->expr, Var))
+		{
+			Var		   *itvar = (Var *) tle->expr;
+
+			if (itvar->varno >= 1 &&
+				itvar->varno <= list_length(dpns->rtable) &&
+				itvar->varattno >
+				deparse_columns_fetch(itvar->varno, dpns)->num_cols)
+			{
+				appendStringInfoString(context->buf,
+									   quote_identifier(tle->resname));
+				return;
+			}
+		}
+
 		resolve_special_varno((Node *) tle->expr, context,
 							  callback, callback_arg);
 		return;
