@@ -69,6 +69,8 @@ tests += {
       't/058_shutdown_crash_restart.pl',
       't/059_remote_apply_status_interval.pl',
       't/060_multixact_crashed_updater.pl',
+      't/061_replslot_invalidation_durability.pl',
+      't/062_slot_invalidation_concurrency.pl',
     ],
   },
 }
