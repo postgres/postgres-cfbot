@@ -795,10 +795,10 @@ ReplicationSlotReleaseInternal(bool update_inactive_since)
 	Assert(slot != NULL && slot->active_proc != INVALID_PROC_NUMBER);
 
 	/*
-	 * Skipping the inactive_since update is only needed when undoing the
-	 * internal acquisition of an inactive persistent slot after an ERROR.
+	 * Skipping the inactive_since update is only needed when undoing an
+	 * internal slot acquisition after failed invalidation persistence.
 	 */
-	Assert(update_inactive_since || slot->data.persistency == RS_PERSISTENT);
+	Assert(update_inactive_since || slot->data.persistency != RS_EPHEMERAL);
 
 	is_logical = SlotIsLogical(slot);
 
@@ -1221,7 +1221,7 @@ ReplicationSlotPersistInvalidation(ReplicationSlotInvalidationCause cause,
 	ReplicationSlot *slot = MyReplicationSlot;
 
 	Assert(slot != NULL);
-	Assert(slot->data.persistency == RS_PERSISTENT);
+	Assert(slot->data.persistency != RS_EPHEMERAL);
 	Assert(slot->data.invalidated == RS_INVAL_NONE);
 	Assert(cause != RS_INVAL_NONE);
 	Assert(!clear_restart_lsn || cause == RS_INVAL_WAL_REMOVED);
