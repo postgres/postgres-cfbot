@@ -451,10 +451,9 @@ build_simple_grouped_rel(PlannerInfo *root, RelOptInfo *rel)
 	RelAggInfo *agg_info;
 
 	/*
-	 * We should have available aggregate expressions and grouping
-	 * expressions, otherwise we cannot reach here.
+	 * We should have available grouping expressions, otherwise we cannot
+	 * reach here.
 	 */
-	Assert(root->agg_clause_list != NIL);
 	Assert(root->group_expr_list != NIL);
 
 	/* nothing to do for dummy rel */
@@ -2723,11 +2722,7 @@ create_rel_agg_info(PlannerInfo *root, RelOptInfo *rel,
 	List	   *group_clauses = NIL;
 	List	   *group_exprs = NIL;
 
-	/*
-	 * The lists of aggregate expressions and grouping expressions should have
-	 * been constructed.
-	 */
-	Assert(root->agg_clause_list != NIL);
+	/* The list of grouping expressions should have been constructed. */
 	Assert(root->group_expr_list != NIL);
 
 	/*
@@ -3089,7 +3084,8 @@ init_grouping_targets(PlannerInfo *root, RelOptInfo *rel,
 			*group_clauses = lappend(*group_clauses, sgc);
 			*group_exprs = lappend(*group_exprs, expr);
 		}
-		else if (is_var_in_aggref_only(root, (Var *) expr))
+		else if (root->eager_agg_mode == EAGER_AGG_PARTIAL &&
+				 is_var_in_aggref_only(root, (Var *) expr))
 		{
 			/*
 			 * The expression is referenced by an aggregate function pushed

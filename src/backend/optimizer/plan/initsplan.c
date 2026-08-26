@@ -96,6 +96,7 @@ typedef struct GroupByColInfo
 
 
 static bool is_partial_agg_memory_risky(PlannerInfo *root);
+static void collect_eager_agg_infos(PlannerInfo *root);
 static void create_agg_clause_infos(PlannerInfo *root);
 static void create_grouping_expr_infos(PlannerInfo *root);
 static EquivalenceClass *get_eclass_for_sortgroupclause(PlannerInfo *root,
@@ -632,6 +633,27 @@ remove_useless_groupby_columns(PlannerInfo *root)
  */
 void
 setup_eager_aggregation(PlannerInfo *root)
+{
+	collect_eager_agg_infos(root);
+
+	/* Nothing usable was found */
+	if (root->group_expr_list == NIL)
+		return;
+
+	/* Push a partial aggregate if there is one, otherwise a deduplication */
+	root->eager_agg_mode = (root->agg_clause_list == NIL) ?
+		EAGER_AGG_DEDUP : EAGER_AGG_PARTIAL;
+}
+
+/*
+ * collect_eager_agg_infos
+ *	  Collect the aggregate expressions and grouping expressions that eager
+ *	  aggregation can push down, if any.
+ *
+ * Leaves root->group_expr_list NIL if the query cannot be handled.
+ */
+static void
+collect_eager_agg_infos(PlannerInfo *root)
 {
 	/*
 	 * Don't apply eager aggregation if disabled by user.
