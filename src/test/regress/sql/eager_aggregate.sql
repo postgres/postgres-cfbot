@@ -643,3 +643,105 @@ RESET enable_eager_aggregate;
 DROP TABLE eager_distinct_c1;
 DROP TABLE eager_distinct_c2;
 DROP TABLE eager_distinct_c3;
+
+
+--
+-- Test that a relation the query can only test for a match is folded into an
+-- existence check, and that this never happens where the matches are counted
+--
+
+CREATE TABLE eager_semi_d (id int PRIMARY KEY, k numeric);
+CREATE TABLE eager_semi_f1 (id int PRIMARY KEY, d_id int);
+CREATE TABLE eager_semi_f2 (id int PRIMARY KEY, f1_id int, flag bool);
+
+INSERT INTO eager_semi_d SELECT i, i::numeric FROM generate_series(1, 100) i;
+INSERT INTO eager_semi_f1
+  SELECT i, ((i - 1) / 10) + 1 FROM generate_series(1, 1000) i;
+INSERT INTO eager_semi_f2
+  SELECT i, ((i - 1) / 10) + 1, i % 2 = 0 FROM generate_series(1, 10000) i;
+
+CREATE INDEX ON eager_semi_f1 (d_id);
+CREATE INDEX ON eager_semi_f2 (f1_id);
+
+ANALYZE eager_semi_d;
+ANALYZE eager_semi_f1;
+ANALYZE eager_semi_f2;
+
+-- Neither f1 nor f2 reaches the output, so the join may stop at the first match
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id
+  FROM eager_semi_d d
+  JOIN eager_semi_f1 f1 ON f1.d_id = d.id
+  JOIN eager_semi_f2 f2 ON f2.f1_id = f1.id
+ WHERE f2.flag;
+
+SELECT count(*), sum(id) FROM (
+  SELECT DISTINCT d.id
+    FROM eager_semi_d d
+    JOIN eager_semi_f1 f1 ON f1.d_id = d.id
+    JOIN eager_semi_f2 f2 ON f2.f1_id = f1.id
+   WHERE f2.flag) s;
+
+-- Once a column of f1 reaches the output, the matches are observable
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id, f1.id
+  FROM eager_semi_d d
+  JOIN eager_semi_f1 f1 ON f1.d_id = d.id;
+
+-- An aggregate counts the matches, so every one of them must be produced
+EXPLAIN (COSTS OFF)
+SELECT d.id, count(*)
+  FROM eager_semi_d d
+  JOIN eager_semi_f1 f1 ON f1.d_id = d.id
+ GROUP BY d.id;
+
+SELECT count(*), sum(c) FROM (
+  SELECT d.id, count(*) AS c
+    FROM eager_semi_d d
+    JOIN eager_semi_f1 f1 ON f1.d_id = d.id
+   GROUP BY d.id) s;
+
+-- The same holds when the aggregate names no column of the counted relation
+SELECT count(*), sum(c) FROM (
+  SELECT d.id, count(*) AS c
+    FROM eager_semi_d d
+    JOIN eager_semi_f1 f1 ON f1.d_id = d.id
+    JOIN eager_semi_f2 f2 ON f2.f1_id = f1.id
+   GROUP BY d.id) s;
+
+-- Equality does not imply image equality for numeric, so the grouping key
+-- rules out eager aggregation altogether
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.k
+  FROM eager_semi_d d
+  JOIN eager_semi_f1 f1 ON f1.d_id = d.id;
+
+-- An outer join above the existence check still sees the rows it must
+SELECT count(*), sum(id) FROM (
+  SELECT DISTINCT d.id
+    FROM eager_semi_d d
+    LEFT JOIN eager_semi_f1 f1 ON f1.d_id = d.id
+    JOIN eager_semi_f2 f2 ON f2.f1_id = f1.id
+   WHERE f2.flag) s;
+
+SET enable_eager_aggregate TO off;
+
+SELECT count(*), sum(id) FROM (
+  SELECT DISTINCT d.id
+    FROM eager_semi_d d
+    JOIN eager_semi_f1 f1 ON f1.d_id = d.id
+    JOIN eager_semi_f2 f2 ON f2.f1_id = f1.id
+   WHERE f2.flag) s;
+
+SELECT count(*), sum(id) FROM (
+  SELECT DISTINCT d.id
+    FROM eager_semi_d d
+    LEFT JOIN eager_semi_f1 f1 ON f1.d_id = d.id
+    JOIN eager_semi_f2 f2 ON f2.f1_id = f1.id
+   WHERE f2.flag) s;
+
+RESET enable_eager_aggregate;
+
+DROP TABLE eager_semi_d;
+DROP TABLE eager_semi_f1;
+DROP TABLE eager_semi_f2;
