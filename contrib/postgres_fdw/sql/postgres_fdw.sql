@@ -5146,3 +5146,35 @@ RESET client_min_messages;
 DROP FUNCTION wait_for_backend_termination(int);
 DROP FOREIGN TABLE remote_backend_pid;
 DROP VIEW my_backend_pid;
+
+-- ===================================================================
+-- test UPDATE/DELETE on a foreign table whose remote counterpart is
+-- itself a partitioned table
+-- ===================================================================
+
+-- The two rows below land in separate partitions and, being the first
+-- row in each partition's heap, collide on ctid (0,1).  A row-identity
+-- scheme that relies on ctid alone can't tell them apart.
+CREATE TABLE parted_remote (a int, b int) PARTITION BY LIST (a);
+CREATE TABLE parted_remote_p1 PARTITION OF parted_remote FOR VALUES IN (1);
+CREATE TABLE parted_remote_p2 PARTITION OF parted_remote FOR VALUES IN (2);
+INSERT INTO parted_remote_p1 VALUES (1, 100);
+INSERT INTO parted_remote_p2 VALUES (2, 200);
+
+CREATE FOREIGN TABLE foreign_parted_remote (a int, b int)
+  SERVER loopback OPTIONS (table_name 'parted_remote');
+
+-- Force a non-direct-modify UPDATE (random() isn't shippable), so the
+-- ctid/tableoid row-identity path below is actually exercised.
+UPDATE foreign_parted_remote SET b = 999 WHERE a = 1 AND random() <= 1;
+
+-- Only the a = 1 row (in parted_remote_p1) should have changed.
+SELECT tableoid::regclass, a, b FROM parted_remote ORDER BY a;
+
+DELETE FROM foreign_parted_remote WHERE a = 2 AND random() <= 1;
+
+-- Only the a = 2 row (in parted_remote_p2) should be gone.
+SELECT tableoid::regclass, a, b FROM parted_remote ORDER BY a;
+
+DROP FOREIGN TABLE foreign_parted_remote;
+DROP TABLE parted_remote;
