@@ -344,6 +344,8 @@ extern void ReplicationSlotAcquire(const char *name, bool nowait,
 extern void ReplicationSlotRelease(void);
 extern void ReplicationSlotCleanup(bool synced_only);
 extern void ReplicationSlotSave(void);
+extern void ReplicationSlotPersistInvalidation(ReplicationSlotInvalidationCause cause,
+											   bool clear_restart_lsn);
 extern void ReplicationSlotMarkDirty(void);
 
 /* misc stuff */
