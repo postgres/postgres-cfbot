@@ -41,12 +41,16 @@ static bool restriction_is_constant_false(List *restrictlist,
 static void make_grouped_join_rel(PlannerInfo *root, RelOptInfo *rel1,
 								  RelOptInfo *rel2, RelOptInfo *joinrel,
 								  SpecialJoinInfo *sjinfo, List *restrictlist);
+static bool dedup_rhs_unobservable(PlannerInfo *root, RelOptInfo *grouped_rel,
+								   RelOptInfo *rhs);
+static void make_dedup_semijoin_paths(PlannerInfo *root, RelOptInfo *lhs,
+									  RelOptInfo *rhs, RelOptInfo *joinrel,
+									  RelOptInfo *grouped_rel,
+									  List *restrictlist);
 static void make_deduplicated_join_rel(PlannerInfo *root, RelOptInfo *rel1,
 									   RelOptInfo *rel2, RelOptInfo *joinrel,
 									   SpecialJoinInfo *sjinfo,
 									   List *restrictlist);
-static bool dedup_rhs_unobservable(PlannerInfo *root, RelOptInfo *grouped_rel,
-								   RelOptInfo *rhs);
 static void populate_joinrel_with_paths(PlannerInfo *root, RelOptInfo *rel1,
 										RelOptInfo *rel2, RelOptInfo *joinrel,
 										SpecialJoinInfo *sjinfo, List *restrictlist);
@@ -1124,6 +1128,17 @@ make_deduplicated_join_rel(PlannerInfo *root, RelOptInfo *rel1,
 	if (IS_DUMMY_REL(grouped_rel))
 		return;
 
+	/* A filtering input needs only one match */
+	if (sjinfo->jointype == JOIN_INNER)
+	{
+		if (dedup_rhs_unobservable(root, grouped_rel, rel2))
+			make_dedup_semijoin_paths(root, rel1, rel2, joinrel, grouped_rel,
+									  restrictlist);
+		if (dedup_rhs_unobservable(root, grouped_rel, rel1))
+			make_dedup_semijoin_paths(root, rel2, rel1, joinrel, grouped_rel,
+									  restrictlist);
+	}
+
 	/* generate_grouped_paths() covers the case of two plain inputs */
 	if (rel1_empty && rel2_empty)
 		return;
@@ -1180,6 +1195,78 @@ dedup_rhs_unobservable(PlannerInfo *root, RelOptInfo *grouped_rel,
 		return false;
 
 	return true;
+}
+
+/*
+ * make_dedup_semijoin_paths
+ *	  Add paths that reach the deduplicated relation through a semijoin.
+ *
+ * The SpecialJoinInfo exists to cost these paths.  Join order enumeration
+ * works from root->join_info_list, which still describes the query's own
+ * joins.  The paths land in the deduplicated relation beside the ones already
+ * there, so cost chooses between probing for a match and deduplicating below
+ * the join.
+ */
+static void
+make_dedup_semijoin_paths(PlannerInfo *root, RelOptInfo *lhs, RelOptInfo *rhs,
+						  RelOptInfo *joinrel, RelOptInfo *grouped_rel,
+						  List *restrictlist)
+{
+	SpecialJoinInfo *sjinfo;
+	RelOptInfo *semi;
+
+	/*
+	 * The rows a semijoin drops are duplicates of rows it keeps, so nothing
+	 * above may count them.  Either the query has no aggregates, or
+	 * setup_eager_aggregation() found every one of them indifferent to
+	 * duplicates and reading only relations the query groups by, which
+	 * excludes this input because it contributes nothing the query reads.
+	 */
+	Assert(root->eager_agg_mode == EAGER_AGG_DEDUP);
+
+	sjinfo = makeNode(SpecialJoinInfo);
+	sjinfo->min_lefthand = lhs->relids;
+	sjinfo->min_righthand = rhs->relids;
+	sjinfo->syn_lefthand = lhs->relids;
+	sjinfo->syn_righthand = rhs->relids;
+	sjinfo->jointype = JOIN_SEMI;
+	sjinfo->ojrelid = 0;
+	sjinfo->commute_above_l = NULL;
+	sjinfo->commute_above_r = NULL;
+	sjinfo->commute_below_l = NULL;
+	sjinfo->commute_below_r = NULL;
+	sjinfo->lhs_strict = false;
+
+	/*
+	 * A semijoin can be planned by deduplicating the righthand side on the
+	 * join keys and joining that as an inner join.  That sorts or hashes
+	 * every righthand row before the join starts.  The point here is to stop
+	 * at the first match, touching only as much of the righthand side as that
+	 * takes.
+	 */
+	sjinfo->semi_can_btree = false;
+	sjinfo->semi_can_hash = false;
+	sjinfo->semi_operators = NIL;
+	sjinfo->semi_rhs_exprs = NIL;
+
+	semi = build_grouped_rel(root, joinrel);
+	semi->reltarget = grouped_rel->agg_info->agg_input;
+
+	/* These clauses belong to the inner join we are shadowing */
+	begin_speculative_costing(root);
+
+	set_joinrel_size_estimates(root, semi, lhs, rhs, sjinfo, restrictlist);
+
+	add_paths_to_joinrel(root, semi, lhs, rhs, JOIN_SEMI, sjinfo,
+						 restrictlist);
+
+	end_speculative_costing(root);
+
+	if (semi->pathlist == NIL)
+		return;
+
+	set_cheapest(semi);
+	generate_grouped_paths(root, grouped_rel, semi);
 }
 
 /*
