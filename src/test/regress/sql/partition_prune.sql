@@ -53,6 +53,23 @@ explain (costs off) select * from coll_pruning where a collate "C" = 'a' collate
 -- collation doesn't match the partitioning collation, no pruning occurs
 explain (costs off) select * from coll_pruning where a collate "POSIX" = 'a' collate "POSIX";
 
+-- the partition key expression involves a binary-compatible cast, so it is
+-- stored wrapped in a RelabelType; that has to be ignored when matching
+-- clauses to the partition key, else no pruning occurs
+create table cast_pruning (a int, c varchar(40)) partition by list ((c::text));
+create table cast_pruning_a partition of cast_pruning for values in ('a');
+create table cast_pruning_b partition of cast_pruning for values in ('b');
+create table cast_pruning_null partition of cast_pruning for values in (null);
+insert into cast_pruning values (1, 'a'), (2, 'b'), (3, null);
+
+explain (costs off) select * from cast_pruning where c = 'a';
+explain (costs off) select * from cast_pruning where c in ('a', 'b');
+explain (costs off) select * from cast_pruning where c is null;
+
+select * from cast_pruning where c = 'a';
+select * from cast_pruning where c in ('a', 'b') order by a;
+select * from cast_pruning where c is null;
+
 create table rlp (a int, b varchar) partition by range (a);
 create table rlp_default partition of rlp default partition by list (a);
 create table rlp_default_default partition of rlp_default default;

@@ -1837,6 +1837,16 @@ match_clause_to_partition_key(GeneratePruningStepsContext *context,
 	bool		notclause;
 
 	/*
+	 * Strip any RelabelType from the partition key expression itself, to
+	 * match the stripping already done below on the clause operands.
+	 * Partition key expressions can be wrapped in a RelabelType.  Collation
+	 * correctness doesn't depend on keeping the RelabelType here, since it's
+	 * separately verified below via PartCollMatchesExprColl().
+	 */
+	while (IsA(partkey, RelabelType))
+		partkey = ((const RelabelType *) partkey)->arg;
+
+	/*
 	 * Recognize specially shaped clauses that match a Boolean partition key.
 	 */
 	boolmatchstatus = match_boolean_partition_clause(partopfamily, clause,
