@@ -1248,6 +1248,8 @@ HeadlineWordEntry
 HeapCheckContext
 HeapCheckReadStreamData
 HeapPageFreeze
+HeapPageFreezeParams
+HeapPageFreezeResult
 HeapScanDesc
 HeapScanDescData
 HeapTuple
