@@ -156,6 +156,17 @@ remove_useless_outer_joins(PlannerInfo *root)
 		removed_relids = bms_add_member(removed_relids, sjinfo->ojrelid);
 
 		/*
+		 * As in pull_up_simple_subquery, discard no-longer-needed subqueries.
+		 * This is not just an optimization, but is necessary to prevent
+		 * subsequent processing from descending into stale subtrees and
+		 * seeing inconsistent data.  (Although simple_rte_array[] will be
+		 * rebuilt shortly, we can still use it to access the correct RTE in
+		 * the parse tree.)
+		 */
+		if (root->simple_rte_array[innerrelid]->rtekind == RTE_SUBQUERY)
+			root->simple_rte_array[innerrelid]->subquery = NULL;
+
+		/*
 		 * It's okay to keep scanning join_info_list for more removable joins,
 		 * even though the data that join_is_removable consults is now
 		 * slightly out of date.  Removing a join can only delete attr_needed
@@ -413,10 +424,11 @@ remove_join_from_jointree(Node *jtnode, int ojrelid, int *nremoved)
  *
  * Having removed some relations and outer joins from the jointree, we must
  * get rid of any references to them that are left behind elsewhere.  There
- * should be no ordinary Vars of a removed relation left, but the relids can
+ * should be no ordinary Vars of a removed relation left, but OJ relids can
  * still appear in the nullingrels sets of surviving Vars and PlaceHolderVars,
- * and in the phrels sets of PlaceHolderVars.  ChangeVarNodes knows how to
- * strip a relid out of all of those.
+ * and both regular and OJ relids can appear in the phrels sets of
+ * PlaceHolderVars.  ChangeVarNodes knows how to strip a relid out of all of
+ * those.
  */
 static void
 remove_rels_from_query_tree(PlannerInfo *root, Relids removed_relids)
@@ -425,8 +437,7 @@ remove_rels_from_query_tree(PlannerInfo *root, Relids removed_relids)
 
 	while ((relid = bms_next_member(removed_relids, relid)) >= 0)
 	{
-		/* Pass -1 for new_index to get the removal behavior */
-		ChangeVarNodes((Node *) root->parse, relid, -1, 0);
+		ChangeVarNodes((Node *) root->parse, relid, INVALID_VAR, 0);
 
 		/*
 		 * processed_tlist shares some but not all of its nodes with
@@ -434,11 +445,11 @@ remove_rels_from_query_tree(PlannerInfo *root, Relids removed_relids)
 		 * harmless: ChangeVarNodes works in-place, and removing a relid that
 		 * isn't there is idempotent.)
 		 */
-		ChangeVarNodes((Node *) root->processed_tlist, relid, -1, 0);
+		ChangeVarNodes((Node *) root->processed_tlist, relid, INVALID_VAR, 0);
 
 		/* There could be references in the append_rel_list, too */
 		if (root->append_rel_list != NIL)
-			ChangeVarNodes((Node *) root->append_rel_list, relid, -1, 0);
+			ChangeVarNodes((Node *) root->append_rel_list, relid, INVALID_VAR, 0);
 	}
 }
 
