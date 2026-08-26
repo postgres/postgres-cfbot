@@ -273,6 +273,54 @@ such cases don't arise often so it's not clear that it's worth developing a
 more complicated system.
 
 
+Converting Filtering Joins to Semijoins
+---------------------------------------
+
+An inner join sometimes serves only to restrict which rows of the other inputs
+survive.  The joined relation appears only in the join clauses, while the
+target list, the grouping and ordering clauses and the aggregate arguments all
+draw on the other inputs.  When the query discards duplicate rows, emitting one
+output row per match is wasted work.  For example, in
+
+	SELECT DISTINCT a.x FROM a, b WHERE b.a_id = a.id
+
+each A row is emitted once however many B rows match, so B needs a probe for
+existence.  convert_joins_to_semijoins() adds a JOIN_SEMI SpecialJoinInfo
+for B.
+
+Two conditions must hold.  First, the query must discard duplicates.  Second,
+nothing outside the joins may reference the relation, which is the attr_needed
+test join_is_removable() uses.
+
+DISTINCT qualifies, and so does GROUP BY without aggregates.  An aggregate may
+count its input rows, so a query containing one is left alone.  DISTINCT ON
+keeps the duplicates, since the sort order picks the surviving row.  So do window
+functions, set-returning functions in the target list, row locking, grouping
+sets and volatile output expressions.  A set operation keeps them too, since
+each arm is planned as a separate query level and a UNION above stays invisible
+from within an arm.
+
+Adding the SpecialJoinInfo does not dictate a plan shape.  join_is_legal()
+still allows the righthand side to be unique-ified and then inner-joined, so the
+planner keeps choosing between that shape and a semijoin on cost.  What the
+transformation removes is the alternative that fans the other inputs out.  A
+righthand side must be unique-ifiable, and a righthand side already unique for
+its join clauses is left alone.
+
+One relation at a time is lifted.  Several joined rels could be lifted together
+as one righthand side, but with a selective lefthand side and no index, in a
+handful of adversarial cases, the transformation could cost more than
+preventing the fanout would save.
+
+enable_semijoin_conversion controls the transformation.  Only queries whose
+joins are all plain inner joins are considered, and lateral references and
+PlaceHolderVars rule a query out, since either may need a column from a
+relation about to stop emitting columns.  The joinlist must also be a single
+flat list of base relations: beyond join_collapse_limit relations the jointree
+stays nested and make_rel_from_joinlist() plans each sub-list on its own,
+while a synthesized semijoin needs both of its sides in one sub-list.
+
+
 Pulling Up Subqueries
 ---------------------
 

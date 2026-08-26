@@ -1,0 +1,186 @@
+--
+-- SEMIJOIN CONVERSION
+-- Inner joins that only filter can be planned as semijoins, so that matching
+-- rows do not fan out the other inputs.  The tests below check two things: the
+-- transformation applies where the query discards the duplicates, and declines
+-- where the query keeps them.
+--
+
+CREATE TABLE sjc_driver (id int PRIMARY KEY, grp int, payload text);
+CREATE TABLE sjc_filter (id int PRIMARY KEY, driver_id int, flag bool);
+CREATE TABLE sjc_deep (id int PRIMARY KEY, filter_id int);
+CREATE TABLE sjc_unique (id int PRIMARY KEY, driver_id int UNIQUE);
+CREATE TABLE sjc_uniq2 (id int PRIMARY KEY, unique_id int UNIQUE);
+CREATE TABLE sjc_bygrp (id int PRIMARY KEY, grp int);
+
+INSERT INTO sjc_driver
+  SELECT g, g % 5, 'p' || g FROM generate_series(1, 40) g;
+INSERT INTO sjc_filter
+  SELECT g, (g % 40) + 1, g % 4 <> 0 FROM generate_series(1, 200) g;
+INSERT INTO sjc_deep
+  SELECT g, (g % 200) + 1 FROM generate_series(1, 400) g;
+INSERT INTO sjc_unique
+  SELECT g, g FROM generate_series(1, 40) g;
+INSERT INTO sjc_uniq2
+  SELECT g, g FROM generate_series(1, 40) g;
+INSERT INTO sjc_bygrp
+  SELECT g, g % 5 FROM generate_series(1, 400) g;
+
+ANALYZE sjc_driver;
+ANALYZE sjc_filter;
+ANALYZE sjc_deep;
+ANALYZE sjc_unique;
+ANALYZE sjc_uniq2;
+ANALYZE sjc_bygrp;
+
+SET enable_semijoin_conversion = on;
+
+--
+-- Cases where the duplicates cannot be observed, so the join is converted
+--
+
+-- SELECT DISTINCT discards them
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id, d.payload
+  FROM sjc_driver d JOIN sjc_filter f ON f.driver_id = d.id
+ WHERE f.flag;
+
+-- GROUP BY without aggregates discards them
+EXPLAIN (COSTS OFF)
+SELECT d.grp
+  FROM sjc_driver d JOIN sjc_filter f ON f.driver_id = d.id
+ WHERE f.flag
+ GROUP BY d.grp;
+
+-- a chain of filtering joins forms one group of two relations, and a group of
+-- two is declined
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id
+  FROM sjc_driver d
+       JOIN sjc_filter f ON f.driver_id = d.id
+       JOIN sjc_deep e ON e.filter_id = f.id
+ WHERE f.flag;
+
+-- two filters joined to each other through an equivalence class also form one
+-- group, and are declined for the same reason
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id
+  FROM sjc_driver d
+       JOIN sjc_filter f ON f.driver_id = d.id
+       JOIN sjc_unique u ON u.driver_id = d.id
+ WHERE f.flag AND u.id < 30;
+
+-- filters with no clause connecting them form separate groups of one, so each
+-- filter is lifted on its own
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id
+  FROM sjc_driver d
+       JOIN sjc_filter f ON f.driver_id = d.id
+       JOIN sjc_bygrp b ON b.grp = d.grp
+ WHERE f.flag AND b.id < 300;
+
+--
+-- Cases where the duplicates are observable, so the join is left alone
+--
+
+-- nothing deduplicates
+EXPLAIN (COSTS OFF)
+SELECT d.id
+  FROM sjc_driver d JOIN sjc_filter f ON f.driver_id = d.id
+ WHERE f.flag;
+
+-- the inner relation is projected, and so does more than filter
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id, f.id
+  FROM sjc_driver d JOIN sjc_filter f ON f.driver_id = d.id
+ WHERE f.flag;
+
+-- a window function can see the partition's row count
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id, count(*) OVER () AS n
+  FROM sjc_driver d JOIN sjc_filter f ON f.driver_id = d.id
+ WHERE f.flag;
+
+-- DISTINCT ON keeps one row per group, but which one depends on the sort
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT ON (d.grp) d.grp, d.id
+  FROM sjc_driver d JOIN sjc_filter f ON f.driver_id = d.id
+ WHERE f.flag
+ ORDER BY d.grp, d.id;
+
+-- the inner relation is already unique on its join key, so no fanout remains
+-- to remove and the transformation declines
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id, d.payload
+  FROM sjc_driver d JOIN sjc_unique u ON u.driver_id = d.id;
+
+-- a chain of unique relations is declined as a group of two, before uniqueness
+-- comes into question
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id, d.payload
+  FROM sjc_driver d
+       JOIN sjc_unique u ON u.driver_id = d.id
+       JOIN sjc_uniq2 u2 ON u2.unique_id = u.id
+ WHERE u2.id < 30;
+
+-- Beyond join_collapse_limit the jointree stays nested and is planned one
+-- sub-list at a time, and a semijoin must not span two sub-lists.  Only the
+-- result is checked, a nine-way join plan being too unstable to compare.
+SET join_collapse_limit = 8;
+SELECT count(*) FROM (
+  SELECT DISTINCT d.id
+    FROM sjc_driver d
+         JOIN sjc_unique u ON u.driver_id = d.id
+         JOIN sjc_uniq2 u2 ON u2.unique_id = u.id
+         JOIN sjc_filter f1 ON f1.driver_id = d.id
+         JOIN sjc_filter f2 ON f2.driver_id = d.id
+         JOIN sjc_filter f3 ON f3.driver_id = d.id
+         JOIN sjc_filter f4 ON f4.driver_id = d.id
+         JOIN sjc_filter f5 ON f5.driver_id = d.id
+         JOIN sjc_deep e ON e.filter_id = f1.id
+   WHERE d.id = 7 AND f1.flag) s;
+RESET join_collapse_limit;
+
+--
+-- Results must be identical either way
+--
+
+SELECT count(*), sum(id), sum(length(payload)) FROM (
+  SELECT DISTINCT d.id, d.payload
+    FROM sjc_driver d JOIN sjc_filter f ON f.driver_id = d.id
+   WHERE f.flag) s;
+
+SELECT count(*), sum(grp) FROM (
+  SELECT d.grp
+    FROM sjc_driver d JOIN sjc_filter f ON f.driver_id = d.id
+   WHERE f.flag
+   GROUP BY d.grp) s;
+
+SELECT count(*), sum(id) FROM (
+  SELECT DISTINCT d.id
+    FROM sjc_driver d
+         JOIN sjc_filter f ON f.driver_id = d.id
+         JOIN sjc_deep e ON e.filter_id = f.id
+   WHERE f.flag) s;
+
+SET enable_semijoin_conversion = off;
+
+SELECT count(*), sum(id), sum(length(payload)) FROM (
+  SELECT DISTINCT d.id, d.payload
+    FROM sjc_driver d JOIN sjc_filter f ON f.driver_id = d.id
+   WHERE f.flag) s;
+
+SELECT count(*), sum(grp) FROM (
+  SELECT d.grp
+    FROM sjc_driver d JOIN sjc_filter f ON f.driver_id = d.id
+   WHERE f.flag
+   GROUP BY d.grp) s;
+
+SELECT count(*), sum(id) FROM (
+  SELECT DISTINCT d.id
+    FROM sjc_driver d
+         JOIN sjc_filter f ON f.driver_id = d.id
+         JOIN sjc_deep e ON e.filter_id = f.id
+   WHERE f.flag) s;
+
+DROP TABLE sjc_driver, sjc_filter, sjc_deep, sjc_unique, sjc_uniq2, sjc_bygrp;

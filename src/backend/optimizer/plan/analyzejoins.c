@@ -24,6 +24,7 @@
 
 #include "catalog/pg_class.h"
 #include "nodes/nodeFuncs.h"
+#include "optimizer/clauses.h"
 #include "optimizer/joininfo.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
@@ -52,6 +53,7 @@ typedef struct
 } SelfJoinCandidate;
 
 bool		enable_self_join_elimination;
+bool		enable_semijoin_conversion;
 
 /* local functions */
 static bool join_is_removable(PlannerInfo *root, SpecialJoinInfo *sjinfo);
@@ -83,6 +85,13 @@ static bool is_innerrel_unique_for(PlannerInfo *root,
 static int	self_join_candidates_cmp(const void *a, const void *b);
 static bool replace_relid_callback(Node *node,
 								   ChangeVarNodes_context *context);
+static bool query_discards_duplicates(PlannerInfo *root);
+static bool rel_is_output_irrelevant(PlannerInfo *root, RelOptInfo *rel,
+									 Relids inputrelids);
+static Relids semijoin_rhs_component(PlannerInfo *root, Relids pool, int seed);
+static List *semijoin_join_clauses(PlannerInfo *root, Relids lhs, Relids rhs);
+static bool convert_one_join_to_semijoin(PlannerInfo *root, Relids lhs,
+										 Relids rhs);
 
 
 /*
@@ -1102,6 +1111,384 @@ reduce_unique_semijoins(PlannerInfo *root)
 	}
 }
 
+/*
+ * convert_joins_to_semijoins
+ *		Represent inner joins that only filter as semijoins instead.
+ *
+ * See "Converting Filtering Joins to Semijoins" in src/backend/optimizer/README.
+ */
+void
+convert_joins_to_semijoins(PlannerInfo *root, List *joinlist)
+{
+	Relids		candidates = NULL;
+	Relids		lhs;
+	int			relid;
+	ListCell   *lc;
+
+	if (!enable_semijoin_conversion)
+		return;
+
+	/*
+	 * Beyond join_collapse_limit relations the jointree stays nested and
+	 * make_rel_from_joinlist() plans each sub-list on its own, while a
+	 * synthesized semijoin needs both sides in one sub-list.
+	 */
+	if (list_length(joinlist) != bms_num_members(root->all_baserels))
+		return;
+	foreach(lc, joinlist)
+	{
+		if (!IsA(lfirst(lc), RangeTblRef))
+			return;
+	}
+
+	/* Only plain inner joins: an outer join constrains the join order. */
+	if (root->join_info_list != NIL)
+		return;
+
+	/*
+	 * A lifted relation stops emitting columns, which a lateral reference or
+	 * a PlaceHolderVar may need.
+	 */
+	if (root->hasLateralRTEs || root->placeholder_list != NIL)
+		return;
+
+	if (!query_discards_duplicates(root))
+		return;
+
+	relid = -1;
+	while ((relid = bms_next_member(root->all_baserels, relid)) > 0)
+	{
+		RelOptInfo *rel = root->simple_rel_array[relid];
+		RangeTblEntry *rte = root->simple_rte_array[relid];
+
+		if (rel == NULL || rel->reloptkind != RELOPT_BASEREL)
+			continue;
+		if (relid == root->parse->resultRelation)
+			continue;
+
+		switch (rte->rtekind)
+		{
+			case RTE_RELATION:
+			case RTE_SUBQUERY:
+				break;
+
+			default:
+				continue;
+		}
+		if (!bms_is_empty(rel->lateral_relids))
+			continue;
+
+		/* A column read above the join disqualifies the candidate. */
+		if (!rel_is_output_irrelevant(root, rel, root->all_baserels))
+			continue;
+
+		candidates = bms_add_member(candidates, relid);
+	}
+
+	if (bms_is_empty(candidates))
+		return;
+
+	/* Something has to be left to return rows from. */
+	lhs = bms_difference(root->all_baserels, candidates);
+	if (bms_is_empty(lhs))
+		return;
+
+	while (!bms_is_empty(candidates))
+	{
+		int			seed = bms_next_member(candidates, -1);
+		Relids		rhs = semijoin_rhs_component(root, candidates, seed);
+
+		candidates = bms_del_members(candidates, rhs);
+
+		/*
+		 * Lift one relation only.  A semijoin joins its righthand side as a
+		 * unit, and against a selective lefthand side that can cost more than
+		 * the fanout it removes.
+		 */
+		if (bms_membership(rhs) != BMS_SINGLETON)
+			continue;
+
+		convert_one_join_to_semijoin(root, lhs, rhs);
+	}
+}
+
+/*
+ * semijoin_rhs_component
+ *		Collect the relations in "pool" that are joined, directly or
+ *		transitively, to the one identified by "seed".
+ *
+ * Unconnected relations carry independent existence tests, so one shared
+ * righthand side would make a cartesian product of them.
+ */
+static Relids
+semijoin_rhs_component(PlannerInfo *root, Relids pool, int seed)
+{
+	Relids		component = bms_make_singleton(seed);
+	bool		grew = true;
+
+	while (grew)
+	{
+		int			relid = -1;
+
+		grew = false;
+		while ((relid = bms_next_member(pool, relid)) > 0)
+		{
+			RelOptInfo *rel;
+			bool		joined = false;
+			ListCell   *lc;
+
+			if (bms_is_member(relid, component))
+				continue;
+
+			rel = root->simple_rel_array[relid];
+
+			foreach(lc, rel->joininfo)
+			{
+				RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
+
+				if (bms_overlap(rinfo->required_relids, component))
+				{
+					joined = true;
+					break;
+				}
+			}
+
+			/*
+			 * An ordinary "a.x = b.y" clause is absorbed into an equivalence
+			 * class and never reaches joininfo, so sharing a class counts
+			 * too.
+			 */
+			if (!joined)
+			{
+				foreach(lc, root->eq_classes)
+				{
+					EquivalenceClass *ec = (EquivalenceClass *) lfirst(lc);
+
+					if (bms_is_member(relid, ec->ec_relids) &&
+						bms_overlap(ec->ec_relids, component))
+					{
+						joined = true;
+						break;
+					}
+				}
+			}
+
+			if (joined)
+			{
+				component = bms_add_member(component, relid);
+				grew = true;
+			}
+		}
+	}
+
+	return component;
+}
+
+/*
+ * semijoin_join_clauses
+ *		Find the clauses that would become the join conditions of a semijoin
+ *		between "lhs" and "rhs".
+ */
+static List *
+semijoin_join_clauses(PlannerInfo *root, Relids lhs, Relids rhs)
+{
+	List	   *result = NIL;
+	Relids		joinrelids = bms_union(lhs, rhs);
+	int			relid = -1;
+
+	while ((relid = bms_next_member(rhs, relid)) > 0)
+	{
+		RelOptInfo *rel = root->simple_rel_array[relid];
+		List	   *derived;
+		ListCell   *lc;
+
+		derived = generate_join_implied_equalities(root, joinrelids, lhs,
+												   rel, NULL);
+		foreach(lc, derived)
+		{
+			if (!list_member_ptr(result, lfirst(lc)))
+				result = lappend(result, lfirst(lc));
+		}
+
+		foreach(lc, rel->joininfo)
+		{
+			RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
+
+			if (!bms_overlap(rinfo->required_relids, lhs))
+				continue;
+			if (!list_member_ptr(result, rinfo))
+				result = lappend(result, rinfo);
+		}
+	}
+
+	return result;
+}
+
+/*
+ * convert_one_join_to_semijoin
+ *		Add the SpecialJoinInfo describing "lhs SEMI rhs", if worthwhile.
+ *
+ * Returns true if the semijoin was installed.
+ */
+static bool
+convert_one_join_to_semijoin(PlannerInfo *root, Relids lhs, Relids rhs)
+{
+	SpecialJoinInfo *sjinfo;
+	List	   *rinfos;
+	List	   *clauses = NIL;
+	Relids		clause_relids = NULL;
+	Relids		strict_relids = NULL;
+	Relids		min_lefthand;
+	ListCell   *lc;
+
+	rinfos = semijoin_join_clauses(root, lhs, rhs);
+
+	/*
+	 * With no clause tying the sides together the join is a cartesian
+	 * product.
+	 */
+	if (rinfos == NIL)
+		return false;
+
+	foreach(lc, rinfos)
+	{
+		RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
+
+		clauses = lappend(clauses, rinfo->clause);
+		clause_relids = bms_add_members(clause_relids, rinfo->clause_relids);
+		strict_relids = bms_add_members(strict_relids,
+										find_nonnullable_rels((Node *) rinfo->clause));
+	}
+
+	min_lefthand = bms_intersect(clause_relids, lhs);
+	/* An empty minimum is not allowed. */
+	if (bms_is_empty(min_lefthand))
+		min_lefthand = bms_copy(lhs);
+
+	sjinfo = makeNode(SpecialJoinInfo);
+	sjinfo->jointype = JOIN_SEMI;
+	sjinfo->syn_lefthand = bms_copy(lhs);
+	sjinfo->syn_righthand = bms_copy(rhs);
+	sjinfo->min_lefthand = min_lefthand;
+	sjinfo->min_righthand = bms_copy(rhs);
+	sjinfo->ojrelid = 0;		/* semijoins have no RT index */
+	sjinfo->commute_above_l = NULL;
+	sjinfo->commute_above_r = NULL;
+	sjinfo->commute_below_l = NULL;
+	sjinfo->commute_below_r = NULL;
+	sjinfo->lhs_strict = bms_overlap(strict_relids, lhs);
+
+	compute_semijoin_info(root, sjinfo, clauses);
+
+	/* Without unique-ification the semijoin would be the only shape left. */
+	if (!sjinfo->semi_can_btree && !sjinfo->semi_can_hash)
+		return false;
+
+	/*
+	 * An already-unique righthand side has no duplicates to remove.
+	 * reduce_unique_semijoins() has already run and never revisits a semijoin
+	 * added later, so check here.
+	 */
+	if (is_innerrel_unique_for(root, bms_union(lhs, rhs), lhs,
+							   find_base_rel(root, bms_singleton_member(rhs)),
+							   JOIN_SEMI, rinfos, NULL))
+		return false;
+
+	root->join_info_list = lappend(root->join_info_list, sjinfo);
+
+	return true;
+}
+
+/*
+ * query_discards_duplicates
+ *		Does this query level discard duplicate rows?
+ */
+static bool
+query_discards_duplicates(PlannerInfo *root)
+{
+	Query	   *parse = root->parse;
+
+	if (parse->commandType != CMD_SELECT)
+		return false;
+
+	/* A UNION above is planned separately and stays invisible from here. */
+	if (parse->setOperations != NULL)
+		return false;
+
+	/* A window function can count its partition's rows. */
+	if (parse->hasWindowFuncs)
+		return false;
+
+	/* An SRF in the targetlist expands rows after any deduplication. */
+	if (parse->hasTargetSRFs)
+		return false;
+
+	if (parse->hasModifyingCTE)
+		return false;
+
+	/* Row locking makes the number of scanned rows externally visible. */
+	if (parse->rowMarks != NIL)
+		return false;
+
+	if (parse->groupingSets != NIL)
+		return false;
+
+	/* A volatile output expression can differ between two copies of a row. */
+	if (contain_volatile_functions((Node *) root->processed_tlist))
+		return false;
+
+	/* An aggregate can count its input rows. */
+	if (parse->hasAggs)
+		return false;
+
+	/* Under DISTINCT ON, arrival order picks the surviving row of a tie. */
+	if (parse->distinctClause != NIL)
+		return !parse->hasDistinctOn;
+
+	if (parse->groupClause != NIL)
+		return true;
+
+	return false;
+}
+
+/*
+ * rel_is_output_irrelevant
+ *		Does this relation do anything besides restrict which rows of the
+ *		other relations survive?
+ *
+ * "inputrelids" holds the contemplated join's inputs, and attr_needed must stay
+ * inside them, as in join_is_removable().
+ */
+static bool
+rel_is_output_irrelevant(PlannerInfo *root, RelOptInfo *rel,
+						 Relids inputrelids)
+{
+	int			attroff;
+	ListCell   *l;
+
+	if (rel->attr_needed == NULL)
+		return false;
+
+	for (attroff = rel->max_attr - rel->min_attr; attroff >= 0; attroff--)
+	{
+		if (!bms_is_subset(rel->attr_needed[attroff], inputrelids))
+			return false;
+	}
+
+	foreach(l, root->placeholder_list)
+	{
+		PlaceHolderInfo *phinfo = (PlaceHolderInfo *) lfirst(l);
+
+		if (bms_overlap(phinfo->ph_lateral, rel->relids))
+			return false;
+		if (!bms_overlap(phinfo->ph_eval_at, rel->relids))
+			continue;
+		if (!bms_is_subset(phinfo->ph_needed, inputrelids))
+			return false;
+	}
+
+	return true;
+}
 
 /*
  * rel_supports_distinctness

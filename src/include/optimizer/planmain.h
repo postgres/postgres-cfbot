@@ -21,6 +21,7 @@
 #define DEFAULT_CURSOR_TUPLE_FRACTION 0.1
 extern PGDLLIMPORT double cursor_tuple_fraction;
 extern PGDLLIMPORT bool enable_self_join_elimination;
+extern PGDLLIMPORT bool enable_semijoin_conversion;
 
 /* query_planner callback to compute query_pathkeys */
 typedef void (*query_pathkeys_callback) (PlannerInfo *root, void *extra);
@@ -112,6 +113,7 @@ extern void compute_semijoin_info(PlannerInfo *root, SpecialJoinInfo *sjinfo,
  */
 extern List *remove_useless_joins(PlannerInfo *root, List *joinlist);
 extern void reduce_unique_semijoins(PlannerInfo *root);
+extern void convert_joins_to_semijoins(PlannerInfo *root, List *joinlist);
 extern bool query_supports_distinctness(Query *query);
 extern bool query_is_distinct_for(Query *query, List *distinct_cols);
 extern bool innerrel_is_unique(PlannerInfo *root,
