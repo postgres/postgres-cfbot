@@ -870,6 +870,7 @@ FixedParamState
 FlagMode
 Float
 FlushPosition
+FreezeState
 FmgrBuiltin
 FmgrHookEventType
 FmgrInfo
