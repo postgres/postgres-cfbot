@@ -186,6 +186,57 @@ explain (costs off) select * from coll_pruning where a collate "POSIX" = 'a' col
          Filter: ((a)::text = 'a'::text COLLATE "POSIX")
 (7 rows)
 
+-- the partition key expression involves a binary-compatible cast, so it is
+-- stored wrapped in a RelabelType; that has to be ignored when matching
+-- clauses to the partition key, else no pruning occurs
+create table cast_pruning (a int, c varchar(40)) partition by list ((c::text));
+create table cast_pruning_a partition of cast_pruning for values in ('a');
+create table cast_pruning_b partition of cast_pruning for values in ('b');
+create table cast_pruning_null partition of cast_pruning for values in (null);
+insert into cast_pruning values (1, 'a'), (2, 'b'), (3, null);
+explain (costs off) select * from cast_pruning where c = 'a';
+               QUERY PLAN                
+-----------------------------------------
+ Seq Scan on cast_pruning_a cast_pruning
+   Filter: ((c)::text = 'a'::text)
+(2 rows)
+
+explain (costs off) select * from cast_pruning where c in ('a', 'b');
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Append
+   ->  Seq Scan on cast_pruning_a cast_pruning_1
+         Filter: ((c)::text = ANY ('{a,b}'::text[]))
+   ->  Seq Scan on cast_pruning_b cast_pruning_2
+         Filter: ((c)::text = ANY ('{a,b}'::text[]))
+(5 rows)
+
+explain (costs off) select * from cast_pruning where c is null;
+                 QUERY PLAN                 
+--------------------------------------------
+ Seq Scan on cast_pruning_null cast_pruning
+   Filter: (c IS NULL)
+(2 rows)
+
+select * from cast_pruning where c = 'a';
+ a | c 
+---+---
+ 1 | a
+(1 row)
+
+select * from cast_pruning where c in ('a', 'b') order by a;
+ a | c 
+---+---
+ 1 | a
+ 2 | b
+(2 rows)
+
+select * from cast_pruning where c is null;
+ a | c 
+---+---
+ 3 | 
+(1 row)
+
 create table rlp (a int, b varchar) partition by range (a);
 create table rlp_default partition of rlp default partition by list (a);
 create table rlp_default_default partition of rlp_default default;
