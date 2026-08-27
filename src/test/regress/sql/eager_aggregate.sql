@@ -908,8 +908,8 @@ SELECT count(DISTINCT a1.id)
  WHERE a2.flag
 HAVING count(*) > 5;
 
--- A DISTINCT aggregate is idempotent, so the query's own grouping clause
--- drives the deduplication
+-- The deduplication groups on the keys the query groups by, so the query's
+-- own aggregate takes its input directly
 EXPLAIN (COSTS OFF)
 SELECT a1.id, count(DISTINCT a1.title)
   FROM eager_distinct_a1 a1

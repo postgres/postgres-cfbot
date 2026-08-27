@@ -2092,30 +2092,27 @@ SELECT t1.id
   FROM eager_distinct_t1 t1
   JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
 GROUP BY t1.id ORDER BY t1.id;
-                                 QUERY PLAN                                  
------------------------------------------------------------------------------
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
  Group
    Output: t1.id
    Group Key: t1.id
-   ->  GroupAggregate
+   ->  Sort
          Output: t1.id
-         Group Key: t1.id
-         ->  Sort
+         Sort Key: t1.id
+         ->  Hash Join
                Output: t1.id
-               Sort Key: t1.id
-               ->  Hash Join
-                     Output: t1.id
-                     Hash Cond: (t1.id = t2.t1_id)
-                     ->  Seq Scan on public.eager_distinct_t1 t1
-                           Output: t1.id, t1.val
-                     ->  Hash
+               Hash Cond: (t1.id = t2.t1_id)
+               ->  Seq Scan on public.eager_distinct_t1 t1
+                     Output: t1.id, t1.val
+               ->  Hash
+                     Output: t2.t1_id
+                     ->  HashAggregate
                            Output: t2.t1_id
-                           ->  HashAggregate
-                                 Output: t2.t1_id
-                                 Group Key: t2.t1_id
-                                 ->  Seq Scan on public.eager_distinct_t2 t2
-                                       Output: t2.id, t2.t1_id, t2.flag
-(21 rows)
+                           Group Key: t2.t1_id
+                           ->  Seq Scan on public.eager_distinct_t2 t2
+                                 Output: t2.id, t2.t1_id, t2.flag
+(18 rows)
 
 SELECT t1.id
   FROM eager_distinct_t1 t1
@@ -2917,31 +2914,29 @@ HAVING count(*) > 5;
                      ->  Seq Scan on eager_distinct_a1 a1
 (10 rows)
 
--- A DISTINCT aggregate is idempotent, so the query's own grouping clause
--- drives the deduplication
+-- The deduplication groups on the keys the query groups by, so the query's
+-- own aggregate takes its input directly
 EXPLAIN (COSTS OFF)
 SELECT a1.id, count(DISTINCT a1.title)
   FROM eager_distinct_a1 a1
   JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id
  WHERE a2.flag
  GROUP BY a1.id;
-                           QUERY PLAN                           
-----------------------------------------------------------------
+                        QUERY PLAN                        
+----------------------------------------------------------
  GroupAggregate
    Group Key: a1.id
    ->  Sort
          Sort Key: a1.id, a1.title
-         ->  HashAggregate
-               Group Key: a1.id
-               ->  Hash Join
-                     Hash Cond: (a2.a1_id = a1.id)
-                     ->  HashAggregate
-                           Group Key: a2.a1_id
-                           ->  Seq Scan on eager_distinct_a2 a2
-                                 Filter: flag
-                     ->  Hash
-                           ->  Seq Scan on eager_distinct_a1 a1
-(14 rows)
+         ->  Hash Join
+               Hash Cond: (a2.a1_id = a1.id)
+               ->  HashAggregate
+                     Group Key: a2.a1_id
+                     ->  Seq Scan on eager_distinct_a2 a2
+                           Filter: flag
+               ->  Hash
+                     ->  Seq Scan on eager_distinct_a1 a1
+(12 rows)
 
 -- The deduplication threshold governs the derived keys too
 SET min_eager_distinct_group_size TO 8;
