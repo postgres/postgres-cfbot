@@ -3193,3 +3193,360 @@ RESET enable_eager_aggregate;
 DROP TABLE eager_minmax_d;
 DROP TABLE eager_minmax_f1;
 DROP TABLE eager_minmax_f2;
+--
+-- Test the deduplication against constructs that read the rows behind it, or
+-- that rule it out
+--
+CREATE TABLE eager_edge_d (id int PRIMARY KEY, name text, k int);
+CREATE TABLE eager_edge_f (id int PRIMARY KEY, d_id int, flag bool);
+-- d 50 groups under a NULL name, 10 rows of f carry a NULL join key, and f
+-- matches nothing above d 90
+INSERT INTO eager_edge_d
+  SELECT i, CASE WHEN i = 50 THEN NULL ELSE 'd' || i % 50 END, i % 5
+    FROM generate_series(1, 100) i;
+INSERT INTO eager_edge_f
+  SELECT i, CASE WHEN i % 200 = 0 THEN NULL ELSE i % 90 + 1 END, i % 2 = 0
+    FROM generate_series(1, 2000) i;
+CREATE INDEX eager_edge_f_d_id ON eager_edge_f (d_id);
+ANALYZE eager_edge_d;
+ANALYZE eager_edge_f;
+-- The deduplication collects the NULL grouping keys into one group, as
+-- DISTINCT does
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.name
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id
+ORDER BY d.name;
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ Sort
+   Sort Key: d.name
+   ->  HashAggregate
+         Group Key: d.name
+         ->  Nested Loop Semi Join
+               ->  Seq Scan on eager_edge_d d
+               ->  Index Only Scan using eager_edge_f_d_id on eager_edge_f f
+                     Index Cond: (d_id = d.id)
+(8 rows)
+
+SELECT count(*), count(name) FROM (
+  SELECT DISTINCT d.name
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id) s;
+ count | count 
+-------+-------
+    50 |    49
+(1 row)
+
+SET enable_eager_aggregate TO off;
+SELECT count(*), count(name) FROM (
+  SELECT DISTINCT d.name
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id) s;
+ count | count 
+-------+-------
+    50 |    49
+(1 row)
+
+RESET enable_eager_aggregate;
+-- A NULL join key drops the row, whether the join produces the matches or
+-- only tests for them
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id
+ORDER BY d.id;
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ Sort
+   Sort Key: d.id
+   ->  HashAggregate
+         Group Key: d.id
+         ->  Nested Loop Semi Join
+               ->  Seq Scan on eager_edge_d d
+               ->  Index Only Scan using eager_edge_f_d_id on eager_edge_f f
+                     Index Cond: (d_id = d.id)
+(8 rows)
+
+SELECT count(*), min(id), max(id) FROM (
+  SELECT DISTINCT d.id
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id) s;
+ count | min | max 
+-------+-----+-----
+    90 |   1 |  90
+(1 row)
+
+SET enable_eager_aggregate TO off;
+SELECT count(*), min(id), max(id) FROM (
+  SELECT DISTINCT d.id
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id) s;
+ count | min | max 
+-------+-----+-----
+    90 |   1 |  90
+(1 row)
+
+RESET enable_eager_aggregate;
+-- A lateral reference reads a column of f outside the grouping keys, so the
+-- rows of f are not interchangeable after all
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id
+  JOIN LATERAL (SELECT count(*) AS c FROM eager_edge_f f2
+                 WHERE f2.flag = f.flag) s ON s.c > 0
+ORDER BY d.id;
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ Sort
+   Sort Key: d.id
+   ->  HashAggregate
+         Group Key: d.id
+         ->  Hash Join
+               Hash Cond: (f.d_id = d.id)
+               ->  HashAggregate
+                     Group Key: f.d_id
+                     ->  Nested Loop
+                           ->  HashAggregate
+                                 Group Key: f.flag, f.d_id
+                                 ->  Seq Scan on eager_edge_f f
+                           ->  Memoize
+                                 Cache Key: f.flag
+                                 Cache Mode: binary
+                                 ->  Subquery Scan on s
+                                       ->  Aggregate
+                                             Filter: (count(*) > 0)
+                                             ->  Seq Scan on eager_edge_f f2
+                                                   Filter: (flag = f.flag)
+               ->  Hash
+                     ->  Seq Scan on eager_edge_d d
+(22 rows)
+
+SELECT count(*) FROM (
+  SELECT DISTINCT d.id
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id
+    JOIN LATERAL (SELECT count(*) AS c FROM eager_edge_f f2
+                   WHERE f2.flag = f.flag) s ON s.c > 0) s2;
+ count 
+-------
+    90
+(1 row)
+
+-- The deduplication still applies to an existence check the query wrote itself
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id
+ WHERE EXISTS (SELECT 1 FROM eager_edge_f f2
+                WHERE f2.d_id = d.id AND f2.flag)
+ORDER BY d.id;
+                                       QUERY PLAN                                        
+-----------------------------------------------------------------------------------------
+ Sort
+   Sort Key: d.id
+   ->  HashAggregate
+         Group Key: d.id
+         ->  Nested Loop Semi Join
+               ->  Seq Scan on eager_edge_d d
+               ->  Hash Join
+                     Hash Cond: (f2.d_id = f.d_id)
+                     Join Filter: (d.id = f2.d_id)
+                     ->  HashAggregate
+                           Group Key: f2.d_id
+                           ->  Seq Scan on eager_edge_f f2
+                                 Filter: flag
+                     ->  Hash
+                           ->  Index Only Scan using eager_edge_f_d_id on eager_edge_f f
+                                 Index Cond: (d_id = d.id)
+(16 rows)
+
+SELECT count(*) FROM (
+  SELECT DISTINCT d.id
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id
+   WHERE EXISTS (SELECT 1 FROM eager_edge_f f2
+                  WHERE f2.d_id = d.id AND f2.flag)) s;
+ count 
+-------
+    45
+(1 row)
+
+-- ... and to its negation
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id
+ WHERE NOT EXISTS (SELECT 1 FROM eager_edge_f f2
+                    WHERE f2.d_id = d.id AND f2.flag)
+ORDER BY d.id;
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ Sort
+   Sort Key: d.id
+   ->  HashAggregate
+         Group Key: d.id
+         ->  Nested Loop
+               ->  Hash Right Anti Join
+                     Hash Cond: (f2.d_id = d.id)
+                     ->  Seq Scan on eager_edge_f f2
+                           Filter: flag
+                     ->  Hash
+                           ->  Seq Scan on eager_edge_d d
+               ->  Index Only Scan using eager_edge_f_d_id on eager_edge_f f
+                     Index Cond: (d_id = d.id)
+(13 rows)
+
+SELECT count(*) FROM (
+  SELECT DISTINCT d.id
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id
+   WHERE NOT EXISTS (SELECT 1 FROM eager_edge_f f2
+                      WHERE f2.d_id = d.id AND f2.flag)) s;
+ count 
+-------
+    45
+(1 row)
+
+-- The primary key determines name, so the grouping clause loses it before
+-- eager aggregation reads it, and name rides along with the group
+EXPLAIN (COSTS OFF)
+SELECT d.id, d.name, max(d.k)
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id
+ GROUP BY d.id, d.name
+ORDER BY d.id;
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ GroupAggregate
+   Group Key: d.id
+   ->  Sort
+         Sort Key: d.id
+         ->  Nested Loop Semi Join
+               ->  Seq Scan on eager_edge_d d
+               ->  Index Only Scan using eager_edge_f_d_id on eager_edge_f f
+                     Index Cond: (d_id = d.id)
+(8 rows)
+
+SELECT count(*), count(name), sum(m) FROM (
+  SELECT d.id, d.name, max(d.k) AS m
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id
+   GROUP BY d.id, d.name) s;
+ count | count | sum 
+-------+-------+-----
+    90 |    89 | 180
+(1 row)
+
+SET enable_eager_aggregate TO off;
+SELECT count(*), count(name), sum(m) FROM (
+  SELECT d.id, d.name, max(d.k) AS m
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id
+   GROUP BY d.id, d.name) s;
+ count | count | sum 
+-------+-------+-----
+    90 |    89 | 180
+(1 row)
+
+RESET enable_eager_aggregate;
+-- Grouping sets ask for several groupings at once, which is not supported
+EXPLAIN (COSTS OFF)
+SELECT d.id, d.k, max(d.k)
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id
+ GROUP BY GROUPING SETS ((d.id), (d.k));
+                  QUERY PLAN                  
+----------------------------------------------
+ HashAggregate
+   Hash Key: d.id
+   Hash Key: d.k
+   ->  Hash Join
+         Hash Cond: (f.d_id = d.id)
+         ->  Seq Scan on eager_edge_f f
+         ->  Hash
+               ->  Seq Scan on eager_edge_d d
+(8 rows)
+
+-- A set-returning function in the target list is not supported either
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id, generate_series(1, 2)
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id;
+                     QUERY PLAN                     
+----------------------------------------------------
+ HashAggregate
+   Group Key: d.id, generate_series(1, 2)
+   ->  ProjectSet
+         ->  Hash Join
+               Hash Cond: (f.d_id = d.id)
+               ->  Seq Scan on eager_edge_f f
+               ->  Hash
+                     ->  Seq Scan on eager_edge_d d
+(8 rows)
+
+-- DISTINCT ON keeps a particular row of each group, but a grouping clause
+-- beside it still supplies the keys
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT ON (d.id) d.id
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id
+ GROUP BY d.id
+ORDER BY d.id;
+                                    QUERY PLAN                                     
+-----------------------------------------------------------------------------------
+ Unique
+   ->  Group
+         Group Key: d.id
+         ->  Sort
+               Sort Key: d.id
+               ->  Nested Loop Semi Join
+                     ->  Seq Scan on eager_edge_d d
+                     ->  Index Only Scan using eager_edge_f_d_id on eager_edge_f f
+                           Index Cond: (d_id = d.id)
+(9 rows)
+
+-- A parallel plan deduplicates in each worker without a pushdown, and reaches
+-- the same rows
+SET parallel_setup_cost=0;
+SET parallel_tuple_cost=0;
+SET min_parallel_table_scan_size=0;
+SET max_parallel_workers_per_gather=4;
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id
+ORDER BY d.id;
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
+ Sort
+   Sort Key: d.id
+   ->  HashAggregate
+         Group Key: d.id
+         ->  Gather
+               Workers Planned: 3
+               ->  HashAggregate
+                     Group Key: d.id
+                     ->  Parallel Hash Join
+                           Hash Cond: (f.d_id = d.id)
+                           ->  Parallel Seq Scan on eager_edge_f f
+                           ->  Parallel Hash
+                                 ->  Parallel Seq Scan on eager_edge_d d
+(13 rows)
+
+SELECT count(*) FROM (
+  SELECT DISTINCT d.id
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id) s;
+ count 
+-------
+    90
+(1 row)
+
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+RESET min_parallel_table_scan_size;
+RESET max_parallel_workers_per_gather;
+DROP TABLE eager_edge_d;
+DROP TABLE eager_edge_f;
