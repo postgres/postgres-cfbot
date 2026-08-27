@@ -1060,3 +1060,192 @@ RESET enable_eager_aggregate;
 DROP TABLE eager_minmax_d;
 DROP TABLE eager_minmax_f1;
 DROP TABLE eager_minmax_f2;
+
+
+--
+-- Test the deduplication against constructs that read the rows behind it, or
+-- that rule it out
+--
+
+CREATE TABLE eager_edge_d (id int PRIMARY KEY, name text, k int);
+CREATE TABLE eager_edge_f (id int PRIMARY KEY, d_id int, flag bool);
+
+-- d 50 groups under a NULL name, 10 rows of f carry a NULL join key, and f
+-- matches nothing above d 90
+INSERT INTO eager_edge_d
+  SELECT i, CASE WHEN i = 50 THEN NULL ELSE 'd' || i % 50 END, i % 5
+    FROM generate_series(1, 100) i;
+INSERT INTO eager_edge_f
+  SELECT i, CASE WHEN i % 200 = 0 THEN NULL ELSE i % 90 + 1 END, i % 2 = 0
+    FROM generate_series(1, 2000) i;
+
+CREATE INDEX eager_edge_f_d_id ON eager_edge_f (d_id);
+
+ANALYZE eager_edge_d;
+ANALYZE eager_edge_f;
+
+-- The deduplication collects the NULL grouping keys into one group, as
+-- DISTINCT does
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.name
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id
+ORDER BY d.name;
+
+SELECT count(*), count(name) FROM (
+  SELECT DISTINCT d.name
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id) s;
+
+SET enable_eager_aggregate TO off;
+
+SELECT count(*), count(name) FROM (
+  SELECT DISTINCT d.name
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id) s;
+
+RESET enable_eager_aggregate;
+
+-- A NULL join key drops the row, whether the join produces the matches or
+-- only tests for them
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id
+ORDER BY d.id;
+
+SELECT count(*), min(id), max(id) FROM (
+  SELECT DISTINCT d.id
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id) s;
+
+SET enable_eager_aggregate TO off;
+
+SELECT count(*), min(id), max(id) FROM (
+  SELECT DISTINCT d.id
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id) s;
+
+RESET enable_eager_aggregate;
+
+-- A lateral reference reads a column of f outside the grouping keys, so the
+-- rows of f are not interchangeable after all
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id
+  JOIN LATERAL (SELECT count(*) AS c FROM eager_edge_f f2
+                 WHERE f2.flag = f.flag) s ON s.c > 0
+ORDER BY d.id;
+
+SELECT count(*) FROM (
+  SELECT DISTINCT d.id
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id
+    JOIN LATERAL (SELECT count(*) AS c FROM eager_edge_f f2
+                   WHERE f2.flag = f.flag) s ON s.c > 0) s2;
+
+-- The deduplication still applies to an existence check the query wrote itself
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id
+ WHERE EXISTS (SELECT 1 FROM eager_edge_f f2
+                WHERE f2.d_id = d.id AND f2.flag)
+ORDER BY d.id;
+
+SELECT count(*) FROM (
+  SELECT DISTINCT d.id
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id
+   WHERE EXISTS (SELECT 1 FROM eager_edge_f f2
+                  WHERE f2.d_id = d.id AND f2.flag)) s;
+
+-- ... and to its negation
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id
+ WHERE NOT EXISTS (SELECT 1 FROM eager_edge_f f2
+                    WHERE f2.d_id = d.id AND f2.flag)
+ORDER BY d.id;
+
+SELECT count(*) FROM (
+  SELECT DISTINCT d.id
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id
+   WHERE NOT EXISTS (SELECT 1 FROM eager_edge_f f2
+                      WHERE f2.d_id = d.id AND f2.flag)) s;
+
+-- The primary key determines name, so the grouping clause loses it before
+-- eager aggregation reads it, and name rides along with the group
+EXPLAIN (COSTS OFF)
+SELECT d.id, d.name, max(d.k)
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id
+ GROUP BY d.id, d.name
+ORDER BY d.id;
+
+SELECT count(*), count(name), sum(m) FROM (
+  SELECT d.id, d.name, max(d.k) AS m
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id
+   GROUP BY d.id, d.name) s;
+
+SET enable_eager_aggregate TO off;
+
+SELECT count(*), count(name), sum(m) FROM (
+  SELECT d.id, d.name, max(d.k) AS m
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id
+   GROUP BY d.id, d.name) s;
+
+RESET enable_eager_aggregate;
+
+-- Grouping sets ask for several groupings at once, which is not supported
+EXPLAIN (COSTS OFF)
+SELECT d.id, d.k, max(d.k)
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id
+ GROUP BY GROUPING SETS ((d.id), (d.k));
+
+-- A set-returning function in the target list is not supported either
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id, generate_series(1, 2)
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id;
+
+-- DISTINCT ON keeps a particular row of each group, but a grouping clause
+-- beside it still supplies the keys
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT ON (d.id) d.id
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id
+ GROUP BY d.id
+ORDER BY d.id;
+
+-- A parallel plan deduplicates in each worker without a pushdown, and reaches
+-- the same rows
+SET parallel_setup_cost=0;
+SET parallel_tuple_cost=0;
+SET min_parallel_table_scan_size=0;
+SET max_parallel_workers_per_gather=4;
+
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id
+ORDER BY d.id;
+
+SELECT count(*) FROM (
+  SELECT DISTINCT d.id
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id) s;
+
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+RESET min_parallel_table_scan_size;
+RESET max_parallel_workers_per_gather;
+
+DROP TABLE eager_edge_d;
+DROP TABLE eager_edge_f;
