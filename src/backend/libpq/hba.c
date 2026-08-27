@@ -43,6 +43,15 @@
 #include "utils/memutils.h"
 #include "utils/varlena.h"
 
+#ifdef USE_PAM
+#ifdef HAVE_PAM_PAM_APPL_H
+#include <pam/pam_appl.h>
+#endif
+#ifdef HAVE_SECURITY_PAM_APPL_H
+#include <security/pam_appl.h>
+#endif
+#endif
+
 #ifdef USE_LDAP
 #ifdef WIN32
 #include <winldap.h>
@@ -2096,6 +2105,13 @@ parse_hba_auth_opt(char *name, char *val, HbaLine *hbaline,
 		REQUIRE_AUTH_OPTION(uaPAM, "pamservice", "pam");
 		hbaline->pamservice = pstrdup(val);
 	}
+#ifdef HAVE_PAM_START_CONFDIR
+	else if (strcmp(name, "pamconfdir") == 0)
+	{
+		REQUIRE_AUTH_OPTION(uaPAM, "pamconfdir", "pam");
+		hbaline->pamconfdir = pstrdup(val);
+	}
+#endif
 	else if (strcmp(name, "pam_use_hostname") == 0)
 	{
 		REQUIRE_AUTH_OPTION(uaPAM, "pam_use_hostname", "pam");

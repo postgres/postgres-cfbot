@@ -1245,10 +1245,12 @@ if not pamopt.disabled()
         args: test_c_args, include_directories: postgres_inc)
       cdata.set('HAVE_SECURITY_PAM_APPL_H', 1)
       pam_header_found = true
+      pam_header_fp = 'security/pam_appl.h'
     elif cc.check_header('pam/pam_appl.h', dependencies: pam, required: pamopt,
         args: test_c_args, include_directories: postgres_inc)
       cdata.set('HAVE_PAM_PAM_APPL_H', 1)
       pam_header_found = true
+      pam_header_fp = 'pam/pam_appl.h'
     endif
 
     if pam_header_found
@@ -3228,6 +3230,7 @@ func_checks = [
   ['strlcat'],
   ['strlcpy'],
   ['strsep'],
+  ['pam_start_confdir', {'dependencies': [pam]}],
   ['strsignal'],
   ['sync_file_range'],
   ['syncfs'],
