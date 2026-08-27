@@ -532,8 +532,6 @@ CREATE TABLE instead_of_insert_tbl(id serial, name text);
 CREATE VIEW instead_of_insert_tbl_view AS SELECT ''::text AS str;
 
 COPY instead_of_insert_tbl_view FROM stdin; -- fail
-test1
-\.
 
 CREATE FUNCTION fun_instead_of_insert_tbl() RETURNS trigger AS $$
 BEGIN
