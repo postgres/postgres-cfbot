@@ -25,4 +25,8 @@ if icu.found()
   subdir('icu')
 endif
 
+if pam.found()
+  subdir('pam')
+endif
+
 subdir('perl')
