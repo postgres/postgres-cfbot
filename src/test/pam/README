@@ -1,0 +1,48 @@
+src/test/pam/README
+
+Tests for PAM functionality
+============================
+
+This directory contains a test suite for PAM functionality. This
+requires a PAM installation. This test suite only tests PAM with a
+custom confdir argument in pam_start_confdir so no PAM config is needed
+outside of the files created by this test suite. Because of the dependency
+on pam_start_confdir, the PAM version must be greatr than or equal to 1.4.0.
+
+Running the tests
+=================
+
+NOTE: You must have given the --enable-tap-tests argument to configure.
+
+Run
+    make check PG_TEST_EXTRA=pam
+or
+    make installcheck PG_TEST_EXTRA=pam
+
+You can use "make installcheck" if you previously did "make install".
+In that case, the code in the installation tree is tested.  With
+"make check", a temporary installation tree is built from the current
+sources and then tested.
+
+Either way, this test initializes, starts, and stops a test Postgres
+cluster, as well setting up temporary non-root pam config files.
+
+See src/test/perl/README for more info about running these tests.
+
+Requirements
+============
+PAM is required, specifically version 1.4.0 or above.
+
+Debian/Ubuntu packages: libpam-runtime
+(You will already have needed libpam-runtime and libpam0g-dev to build.)
+
+RHEL/CentOS/Fedora package: pam
+(You will already have needed pam and pam-devel to build.)
+
+FreeBSD: no support for tests
+(PAM for FreeBSD does not support the function pam_start_confdir which is
+required to run these tests)
+
+macOS: no support for tests
+(PAM for macOS does not support the function pam_start_confdir which is
+required to run these tests)
