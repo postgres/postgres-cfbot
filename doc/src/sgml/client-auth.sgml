@@ -2169,6 +2169,20 @@ host ... ldap ldapbasedn="dc=example,dc=net"
        </para>
       </listitem>
      </varlistentry>
+     <varlistentry>
+      <term><literal>pamconfdir</literal></term>
+      <listitem>
+       <para>
+        If specified, use the pam configuration directory specified instead
+        of the usual <filename>/etc/pam.d/</filename> directory. This is
+        useful if the default configuration directory is inaccessible or
+        undesitable to use. Please note that note that this makes use of the
+        <symbol>pam_start_confdir</symbol> function and as such will not be
+        usable by any PAM implementation that does not support this function.
+        (On linux-pam this was introduced in 1.4.0.)
+       </para>
+      </listitem>
+     </varlistentry>
     </variablelist>
    </para>
 
