@@ -15,7 +15,6 @@
 #include "nodes/pg_list.h"
 #include "regex/regex.h"
 
-
 /*
  * The following enum represents the authentication methods that
  * are supported by PostgreSQL.
@@ -108,6 +107,9 @@ typedef struct HbaLine
 	UserAuth	auth_method;
 	char	   *usermap;
 	char	   *pamservice;
+#ifdef HAVE_PAM_START_CONFDIR
+	char	   *pamconfdir;
+#endif
 	bool		pam_use_hostname;
 	bool		ldaptls;
 	char	   *ldapscheme;

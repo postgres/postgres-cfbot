@@ -726,6 +726,7 @@ with_readline
 with_systemd
 with_selinux
 with_ldap
+with_pam
 with_krb_srvnam
 krb_srvtab
 with_gssapi
@@ -8461,6 +8462,7 @@ fi
 $as_echo "$with_pam" >&6; }
 
 
+
 #
 # BSD AUTH
 #
@@ -13244,6 +13246,17 @@ _ACEOF
 else
   as_fn_error $? "library 'pam' is required for PAM" "$LINENO" 5
 fi
+
+  for ac_func in pam_start_confdir
+do :
+  ac_fn_c_check_func "$LINENO" "pam_start_confdir" "ac_cv_func_pam_start_confdir"
+if test "x$ac_cv_func_pam_start_confdir" = xyes; then :
+  cat >>confdefs.h <<_ACEOF
+#define HAVE_PAM_START_CONFDIR 1
+_ACEOF
+
+fi
+done
 
 fi
 
