@@ -357,10 +357,11 @@ INSERT INTO people (id, name, address) VALUES (<emphasis>DEFAULT</emphasis>, 'C'
    columns.  Thus, it is for columns what a view is for tables.  There are two
    kinds of generated columns: stored and virtual.  A stored generated column
    is computed when it is written (inserted or updated) and occupies storage
-   as if it were a normal column.  A virtual generated column occupies no
-   storage and is computed when it is read.  Thus, a virtual generated column
-   is similar to a view and a stored generated column is similar to a
-   materialized view (except that it is always updated automatically).
+   as if it were a normal column.  A virtual generated column is also computed when
+   it is written, but occupies no storage and is recomputed on every read.
+   Thus, a virtual generated column is similar to a view and a stored generated
+   column is similar to a materialized view (except that it is always updated
+   automatically)
   </para>
 
   <para>
