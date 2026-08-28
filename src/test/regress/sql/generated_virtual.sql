@@ -71,10 +71,8 @@ SELECT * FROM gtest1 ORDER BY a;
 SELECT a, b, b * 2 AS b2 FROM gtest1 ORDER BY a;
 SELECT a, b FROM gtest1 WHERE b = 4 ORDER BY a;
 
--- test that overflow error happens on read
+-- test that overflow error happens on write
 INSERT INTO gtest1 VALUES (2000000000);
-SELECT * FROM gtest1;
-DELETE FROM gtest1 WHERE a = 2000000000;
 
 -- test with joins
 CREATE TABLE gtestx (x int, y int);
@@ -323,6 +321,9 @@ DROP USER regress_user11;
 CREATE TABLE gtest20 (a int PRIMARY KEY, b int GENERATED ALWAYS AS (a * 2) VIRTUAL CHECK (b < 50));
 INSERT INTO gtest20 (a) VALUES (10);  -- ok
 INSERT INTO gtest20 (a) VALUES (30);  -- violates constraint
+COPY gtest20 (a) FROM stdin;  -- violates constraint
+30
+\.
 
 ALTER TABLE gtest20 ALTER COLUMN b SET EXPRESSION AS (a * 100);  -- violates constraint
 ALTER TABLE gtest20 ALTER COLUMN b SET EXPRESSION AS (a * 3);  -- ok
@@ -351,7 +352,21 @@ CREATE TABLE gtest20c (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL);
 ALTER TABLE gtest20c ADD CONSTRAINT whole_row_check CHECK (gtest20c IS NOT NULL);
 INSERT INTO gtest20c VALUES (1);  -- ok
 INSERT INTO gtest20c VALUES (NULL);  -- fails
+COPY gtest20c FROM stdin;  -- ok
+2
+\.
+COPY gtest20c FROM stdin;  -- fails
+\N
+\.
 ALTER TABLE gtest20c ALTER COLUMN b SET EXPRESSION AS (NULL::int);  -- violates constraint
+
+-- UPDATE that doesn't change the columns a virtual column depends on
+CREATE TABLE gtest20e (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL, c int);
+ALTER TABLE gtest20e ADD CONSTRAINT whole_row_check CHECK (gtest20e IS NOT NULL);
+ALTER TABLE gtest20e ADD CONSTRAINT b_check CHECK (b < 10);
+INSERT INTO gtest20e (a, c) VALUES (1, 1);
+UPDATE gtest20e SET c = 2;  -- ok
+UPDATE gtest20e SET a = 10;  -- violates constraint
 
 -- index with whole-row reference needs rebuild
 CREATE TABLE gtest20d (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL);
