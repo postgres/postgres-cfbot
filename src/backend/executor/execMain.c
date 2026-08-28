@@ -94,6 +94,14 @@ static void EvalPlanQualStart(EPQState *epqstate, Plan *planTree);
 static void ReportNotNullViolationError(ResultRelInfo *resultRelInfo,
 										TupleTableSlot *slot,
 										EState *estate, int attnum);
+static TupleTableSlot *ExecComputeVirtualGenerated(ResultRelInfo *resultRelInfo,
+												   TupleTableSlot *slot,
+												   EState *estate);
+static char *BuildSlotValueDescription(Oid reloid, TupleTableSlot *slot,
+									   TupleDesc tupdesc,
+									   Bitmapset *modifiedCols,
+									   int maxfieldlen,
+									   bool virtual_computed);
 
 /* end of local decls */
 
@@ -1335,6 +1343,8 @@ InitResultRelInfo(ResultRelInfo *resultRelInfo,
 	resultRelInfo->ri_GenVirtualNotNullConstraintExprs = NULL;
 	resultRelInfo->ri_GeneratedExprsI = NULL;
 	resultRelInfo->ri_GeneratedExprsU = NULL;
+	resultRelInfo->ri_VirtualGeneratedExprs = NULL;
+	resultRelInfo->ri_VirtualGeneratedSlot = NULL;
 	resultRelInfo->ri_projectReturning = NULL;
 	resultRelInfo->ri_onConflictArbiterIndexes = NIL;
 	resultRelInfo->ri_onConflict = NULL;
@@ -1829,6 +1839,87 @@ ExecutePlan(QueryDesc *queryDesc,
 
 
 /*
+ * ExecComputeVirtualGenerated --- compute virtual generated columns of a tuple
+ *
+ * Returns a slot holding a copy of the tuple in 'slot' in which the virtual
+ * generated columns contain their computed values.  'slot' itself is not
+ * modified, since virtual generated columns are always stored as nulls.
+ *
+ * The returned slot's tuple descriptor doesn't mark any column as generated,
+ * so expressions evaluated against it can read the computed values directly
+ * instead of expanding the generation expressions.  The values are allocated
+ * in the per-tuple memory context, so the slot is valid only until that
+ * context is reset.
+ */
+static TupleTableSlot *
+ExecComputeVirtualGenerated(ResultRelInfo *resultRelInfo,
+							TupleTableSlot *slot, EState *estate)
+{
+	Relation	rel = resultRelInfo->ri_RelationDesc;
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+	int			natts = tupdesc->natts;
+	TupleTableSlot *vslot;
+	ExprContext *econtext;
+
+	Assert(tupdesc->constr && tupdesc->constr->has_generated_virtual);
+
+	/*
+	 * If first time through for this result relation, build expression
+	 * nodetrees for the generation expressions and the slot that will hold
+	 * the computed values.  Keep them in the per-query memory context so
+	 * they'll survive throughout the query.
+	 */
+	if (resultRelInfo->ri_VirtualGeneratedExprs == NULL)
+	{
+		MemoryContext oldContext;
+
+		oldContext = MemoryContextSwitchTo(estate->es_query_cxt);
+		resultRelInfo->ri_VirtualGeneratedExprs = palloc0_array(ExprState *, natts);
+		for (int i = 0; i < natts; i++)
+		{
+			Form_pg_attribute att = TupleDescAttr(tupdesc, i);
+
+			if (att->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL)
+				resultRelInfo->ri_VirtualGeneratedExprs[i] =
+					ExecPrepareExpr((Expr *) build_generation_expression(rel, i + 1),
+									estate);
+		}
+
+		/* CreateTupleDescCopy() resets attgenerated */
+		resultRelInfo->ri_VirtualGeneratedSlot =
+			ExecInitExtraTupleSlot(estate, CreateTupleDescCopy(tupdesc),
+								   &TTSOpsVirtual);
+		MemoryContextSwitchTo(oldContext);
+	}
+
+	vslot = resultRelInfo->ri_VirtualGeneratedSlot;
+
+	/* Copy the input tuple, then fill in the virtual generated columns */
+	slot_getallattrs(slot);
+	ExecClearTuple(vslot);
+	memcpy(vslot->tts_values, slot->tts_values, natts * sizeof(Datum));
+	memcpy(vslot->tts_isnull, slot->tts_isnull, natts * sizeof(bool));
+
+	/* The generation expressions are evaluated against the input tuple */
+	econtext = GetPerTupleExprContext(estate);
+	econtext->ecxt_scantuple = slot;
+
+	for (int i = 0; i < natts; i++)
+	{
+		ExprState  *genexpr = resultRelInfo->ri_VirtualGeneratedExprs[i];
+
+		if (genexpr)
+			vslot->tts_values[i] = ExecEvalExprSwitchContext(genexpr, econtext,
+															 &vslot->tts_isnull[i]);
+	}
+
+	ExecStoreVirtualTuple(vslot);
+	vslot->tts_tableOid = slot->tts_tableOid;
+
+	return vslot;
+}
+
+/*
  * ExecRelCheck --- check that tuple meets check constraints for result relation
  *
  * Returns NULL if OK, else name of failed check constraint
@@ -1869,8 +1960,12 @@ ExecRelCheck(ResultRelInfo *resultRelInfo,
 			if (!check[i].ccenforced)
 				continue;
 
+			/*
+			 * No need to expand virtual generated columns here: the caller
+			 * passes a slot in which they have already been computed by
+			 * ExecComputeVirtualGenerated().
+			 */
 			checkconstr = stringToNode(check[i].ccbin);
-			checkconstr = (Expr *) expand_generated_columns_in_expr((Node *) checkconstr, rel, 1);
 			resultRelInfo->ri_CheckConstraintExprs[i] =
 				ExecPrepareExpr(checkconstr, estate);
 		}
@@ -2043,15 +2138,22 @@ ExecConstraints(ResultRelInfo *resultRelInfo,
 	TupleDesc	tupdesc = RelationGetDescr(rel);
 	TupleConstr *constr = tupdesc->constr;
 	Bitmapset  *modifiedCols;
-	List	   *notnull_virtual_attrs = NIL;
 
 	Assert(constr);				/* we should not be called otherwise */
 
 	/*
+	 * Compute virtual generated columns, so that constraints can check their
+	 * values and error messages can show them.  We do this even if there are
+	 * no constraints, to make sure that the values can be computed, otherwise
+	 * we could store a row that cannot be read back. From here on, 'slot' is a
+	 * copy of the input tuple with those columns filled in; the input slot is
+	 * not modified, since virtual generated columns must not be stored.
+	 */
+	if (constr->has_generated_virtual)
+		slot = ExecComputeVirtualGenerated(resultRelInfo, slot, estate);
+
+	/*
 	 * Verify not-null constraints.
-	 *
-	 * Not-null constraints on virtual generated columns are collected and
-	 * checked separately below.
 	 */
 	if (constr->has_not_null)
 	{
@@ -2059,24 +2161,9 @@ ExecConstraints(ResultRelInfo *resultRelInfo,
 		{
 			Form_pg_attribute att = TupleDescAttr(tupdesc, attnum - 1);
 
-			if (att->attnotnull && att->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL)
-				notnull_virtual_attrs = lappend_int(notnull_virtual_attrs, attnum);
-			else if (att->attnotnull && slot_attisnull(slot, attnum))
+			if (att->attnotnull && slot_attisnull(slot, attnum))
 				ReportNotNullViolationError(resultRelInfo, slot, estate, attnum);
 		}
-	}
-
-	/*
-	 * Verify not-null constraints on virtual generated column, if any.
-	 */
-	if (notnull_virtual_attrs)
-	{
-		AttrNumber	attnum;
-
-		attnum = ExecRelGenVirtualNotNull(resultRelInfo, slot, estate,
-										  notnull_virtual_attrs);
-		if (attnum != InvalidAttrNumber)
-			ReportNotNullViolationError(resultRelInfo, slot, estate, attnum);
 	}
 
 	/*
@@ -2123,11 +2210,12 @@ ExecConstraints(ResultRelInfo *resultRelInfo,
 			else
 				modifiedCols = bms_union(ExecGetInsertedCols(resultRelInfo, estate),
 										 ExecGetUpdatedCols(resultRelInfo, estate));
-			val_desc = ExecBuildSlotValueDescription(RelationGetRelid(rel),
-													 slot,
-													 tupdesc,
-													 modifiedCols,
-													 64);
+			val_desc = BuildSlotValueDescription(RelationGetRelid(rel),
+												 slot,
+												 tupdesc,
+												 modifiedCols,
+												 64,
+												 true);
 			ereport(ERROR,
 					(errcode(ERRCODE_CHECK_VIOLATION),
 					 errmsg("new row for relation \"%s\" violates check constraint \"%s\"",
@@ -2213,6 +2301,9 @@ ExecRelGenVirtualNotNull(ResultRelInfo *resultRelInfo, TupleTableSlot *slot,
 
 /*
  * Report a violation of a not-null constraint that was already detected.
+ *
+ * 'slot' must have its virtual generated columns, if any, computed by
+ * ExecComputeVirtualGenerated().
  */
 static void
 ReportNotNullViolationError(ResultRelInfo *resultRelInfo, TupleTableSlot *slot,
@@ -2260,11 +2351,12 @@ ReportNotNullViolationError(ResultRelInfo *resultRelInfo, TupleTableSlot *slot,
 		modifiedCols = bms_union(ExecGetInsertedCols(resultRelInfo, estate),
 								 ExecGetUpdatedCols(resultRelInfo, estate));
 
-	val_desc = ExecBuildSlotValueDescription(RelationGetRelid(rel),
-											 slot,
-											 tupdesc,
-											 modifiedCols,
-											 64);
+	val_desc = BuildSlotValueDescription(RelationGetRelid(rel),
+										 slot,
+										 tupdesc,
+										 modifiedCols,
+										 64,
+										 true);
 	ereport(ERROR,
 			errcode(ERRCODE_NOT_NULL_VIOLATION),
 			errmsg("null value in column \"%s\" of relation \"%s\" violates not-null constraint",
@@ -2445,6 +2537,9 @@ ExecWithCheckOptions(WCOKind kind, ResultRelInfo *resultRelInfo,
  * BuildIndexValueDescription, if the user has access to view a subset of the
  * column involved, that subset will be returned with a key identifying which
  * columns they are.
+ *
+ * Virtual generated columns are shown as "virtual", since their values are
+ * not stored in the tuple.
  */
 char *
 ExecBuildSlotValueDescription(Oid reloid,
@@ -2452,6 +2547,23 @@ ExecBuildSlotValueDescription(Oid reloid,
 							  TupleDesc tupdesc,
 							  Bitmapset *modifiedCols,
 							  int maxfieldlen)
+{
+	return BuildSlotValueDescription(reloid, slot, tupdesc, modifiedCols,
+									 maxfieldlen, false);
+}
+
+/*
+ * Workhorse for ExecBuildSlotValueDescription. If virtual_computed is true,
+ * the slot is one returned by ExecComputeVirtualGenerated() (or converted from
+ * one), so the values of virtual generated columns are shown.
+ */
+static char *
+BuildSlotValueDescription(Oid reloid,
+						  TupleTableSlot *slot,
+						  TupleDesc tupdesc,
+						  Bitmapset *modifiedCols,
+						  int maxfieldlen,
+						  bool virtual_computed)
 {
 	StringInfoData buf;
 	StringInfoData collist;
@@ -2531,7 +2643,8 @@ ExecBuildSlotValueDescription(Oid reloid,
 
 		if (table_perm || column_perm)
 		{
-			if (att->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL)
+			if (att->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL &&
+				!virtual_computed)
 				val = "virtual";
 			else if (slot->tts_isnull[i])
 				val = "null";
