@@ -933,8 +933,8 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
      </para>
 
      <para>
-      When <literal>VIRTUAL</literal> is specified, the column will be
-      computed when it is read, and it will not occupy any storage.  When
+      When <literal>VIRTUAL</literal> is specified, the column will be computed
+      when it is written and read, but it will not occupy any storage.  When
       <literal>STORED</literal> is specified, the column will be computed on
       write and will be stored on disk.  <literal>VIRTUAL</literal> is the
       default.
