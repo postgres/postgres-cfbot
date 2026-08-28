@@ -361,6 +361,8 @@ typedef struct pg_conn_host
 	char	   *hostaddr;		/* host numeric IP address */
 	char	   *port;			/* port number (if NULL or empty, use
 								 * DEF_PGPORT[_STR]) */
+	char	   *portaddr;		/* port number actually connected to, for TCP
+								 * connections (if NULL or empty, use port) */
 	char	   *password;		/* password for this host, read from the
 								 * password file; NULL if not sought or not
 								 * found in password file. */
@@ -383,6 +385,10 @@ struct pg_conn
 								 * precedence over pghost. */
 	char	   *pgport;			/* the server's communication port number, or
 								 * a comma-separated list of ports */
+	char	   *pgportaddr;		/* the port number to connect to, or a
+								 * comma-separated list of same.  Takes
+								 * precedence over pgport, except for
+								 * Unix-domain socket connections. */
 	char	   *connect_timeout;	/* connection timeout (numeric string) */
 	char	   *pgtcp_user_timeout; /* tcp user timeout (numeric string) */
 	char	   *client_encoding_initial;	/* encoding to use */
@@ -484,6 +490,7 @@ struct pg_conn
 	int			whichhost;		/* host we're currently trying/connected to */
 	pg_conn_host *connhost;		/* details about each named host */
 	char	   *connip;			/* IP address for current network connection */
+	char	   *connport;		/* port number for current network connection */
 
 	/*
 	 * The pending command queue as a singly-linked list.  Head is the command

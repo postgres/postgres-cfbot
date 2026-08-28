@@ -156,6 +156,12 @@ PQcancelCreate(PGconn *conn)
 		if (!cancelConn->connhost[0].port)
 			goto oom_error;
 	}
+	if (originalHost.portaddr)
+	{
+		cancelConn->connhost[0].portaddr = strdup(originalHost.portaddr);
+		if (!cancelConn->connhost[0].portaddr)
+			goto oom_error;
+	}
 	if (originalHost.password)
 	{
 		cancelConn->connhost[0].password = strdup(originalHost.password);

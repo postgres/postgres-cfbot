@@ -344,6 +344,17 @@ make check-world PG_TEST_EXTRA='kerberos ldap ssl load_balance libpq_encryption'
     </varlistentry>
 
     <varlistentry>
+     <term><literal>portaddr</literal></term>
+     <listitem>
+      <para>
+       Runs the test <filename>src/interfaces/libpq/t/007_portaddr.pl</filename>.
+       The <literal>portaddr</literal> connection parameter only applies to
+       TCP connections, so this test opens a TCP/IP listen socket.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
      <term><literal>regress_dump_restore</literal></term>
      <listitem>
       <para>

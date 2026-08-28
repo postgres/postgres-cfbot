@@ -1085,12 +1085,14 @@ postgresql://%2Fvar%2Flib%2Fpostgresql/dbname
      <para>
        It is possible to specify multiple hosts to connect to, so that they are
        tried in the given order. In the Keyword/Value format, the <literal>host</literal>,
-       <literal>hostaddr</literal>, and <literal>port</literal> options accept comma-separated
+       <literal>hostaddr</literal>, <literal>port</literal>, and
+       <literal>portaddr</literal> options accept comma-separated
        lists of values. The same number of elements must be given in each
        option that is specified, such
        that e.g., the first <literal>hostaddr</literal> corresponds to the first host name,
        the second <literal>hostaddr</literal> corresponds to the second host name, and so
-       forth. As an exception, if only one <literal>port</literal> is specified, it
+       forth. As an exception, if only one <literal>port</literal>
+       or <literal>portaddr</literal> is specified, it
        applies to all the hosts.
      </para>
 
@@ -1248,6 +1250,73 @@ postgresql://%2Fvar%2Flib%2Fpostgresql/dbname
         specifies the default port number established
         when <productname>PostgreSQL</productname> was built.
        </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="libpq-connect-portaddr" xreflabel="portaddr">
+      <term><literal>portaddr</literal></term>
+      <listitem>
+      <para>
+       Port number to actually connect to at the server host.  When a nonempty
+       string is specified for this parameter, it determines where the
+       connection is made, and <xref linkend="libpq-connect-port"/> only
+       identifies the server &mdash; much as
+       <xref linkend="libpq-connect-host"/> still identifies the server when
+       <xref linkend="libpq-connect-hostaddr"/> is given.  If this parameter
+       is not specified, the value of <literal>port</literal> is connected to,
+       which is the historical behavior.  This parameter is ignored for
+       Unix-domain socket connections, whose socket file name is always
+       determined by <literal>port</literal>.
+      </para>
+
+      <para>
+       Using <literal>portaddr</literal> allows the connection to be made
+       through an intermediary listening on a different port, such as an
+       <acronym>SSH</acronym> tunnel or a connection proxy, while the other
+       connection parameters continue to describe the server itself.  In
+       particular, the port used to identify the connection in a password file
+       (see <xref linkend="libpq-pgpass"/>) is <literal>port</literal>, not
+       <literal>portaddr</literal>, so a password file entry written for the
+       server's own port keeps matching even when the intermediary listens on
+       a port that is not known in advance.  The following rules are used:
+        <itemizedlist>
+         <listitem>
+          <para>
+           If <literal>port</literal> is specified
+           without <literal>portaddr</literal>, the connection is made to
+           <literal>port</literal>, which also identifies the connection.
+          </para>
+         </listitem>
+         <listitem>
+          <para>
+           If <literal>portaddr</literal> is specified
+           without <literal>port</literal>, the value
+           for <literal>portaddr</literal> gives the port to connect to, and
+           the default port number identifies the connection.
+          </para>
+         </listitem>
+         <listitem>
+          <para>
+           If both <literal>port</literal> and <literal>portaddr</literal> are
+           specified, the value for <literal>portaddr</literal> gives the port
+           to connect to.  The value for <literal>port</literal> is used only
+           to identify the connection.
+          </para>
+         </listitem>
+        </itemizedlist>
+       Note that authentication is likely to fail if <literal>port</literal>
+       is not the port of the server reached
+       at <literal>portaddr</literal>, since the password file entry that is
+       selected will then be the wrong one.
+      </para>
+
+      <para>
+       A comma-separated list of <literal>portaddr</literal> values is also
+       accepted, in which case it must have the same length as the host list,
+       or it may specify a single value to be used for all hosts.  An empty
+       item in the list causes the corresponding <literal>port</literal> value
+       to be used.  See <xref linkend="libpq-multiple-hosts"/> for details.
+      </para>
       </listitem>
      </varlistentry>
 
@@ -2766,8 +2835,15 @@ char *PQport(const PGconn *conn);
       </para>
 
       <para>
-       If multiple ports were specified in the connection parameters,
-       <xref linkend="libpq-PQport"/> returns the port actually connected to.
+       If the connection parameters specified both <literal>port</literal> and
+       <literal>portaddr</literal>, then <xref linkend="libpq-PQport"/> will
+       return the <literal>port</literal> information.  If
+       <literal>portaddr</literal> was specified without
+       <literal>port</literal>, then the default port number is returned,
+       since that is what identifies the server.  If multiple ports were
+       specified in the connection parameters,
+       <xref linkend="libpq-PQport"/> returns the port of the host actually
+       connected to.
       </para>
 
       <para>
@@ -2783,6 +2859,30 @@ char *PQport(const PGconn *conn);
        not possible to rely on the result of <xref linkend="libpq-PQport"/> until
        the connection is established.  The status of the connection can be
        checked using the function <xref linkend="libpq-PQstatus"/>.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry id="libpq-PQportaddr">
+     <term><function>PQportaddr</function><indexterm><primary>PQportaddr</primary></indexterm></term>
+
+     <listitem>
+      <para>
+       Returns the port that the active connection was actually made to.
+       This can be the port given by the <literal>port</literal> parameter,
+       or a port provided through the <literal>portaddr</literal> parameter.
+<synopsis>
+char *PQportaddr(const PGconn *conn);
+</synopsis>
+      </para>
+
+      <para>
+       <xref linkend="libpq-PQportaddr"/> returns <symbol>NULL</symbol> if the
+       <parameter>conn</parameter> argument is <symbol>NULL</symbol>.
+       Otherwise, if there is an error producing the port information (perhaps
+       if the connection has not been fully established or there was an
+       error), or if the connection is made over a Unix-domain socket, it
+       returns an empty string.
       </para>
      </listitem>
     </varlistentry>
@@ -9110,6 +9210,18 @@ myEventProc(PGEventId evtId, void *evtInfo, void *passThrough)
     <listitem>
      <para>
       <indexterm>
+       <primary><envar>PGPORTADDR</envar></primary>
+      </indexterm>
+      <envar>PGPORTADDR</envar> behaves the same as the <xref
+      linkend="libpq-connect-portaddr"/> connection parameter.
+      This can be set instead of or in addition to <envar>PGPORT</envar>
+      to connect through an intermediary listening on another port.
+     </para>
+    </listitem>
+
+    <listitem>
+     <para>
+      <indexterm>
        <primary><envar>PGREQUIRESSL</envar></primary>
       </indexterm>
       <envar>PGREQUIRESSL</envar> behaves the same as the <xref
@@ -9465,6 +9577,11 @@ myEventProc(PGEventId evtId, void *evtInfo, void *passThrough)
    the connection is a Unix-domain socket connection and
    the <literal>host</literal> parameter
    matches <application>libpq</application>'s default socket directory path.
+   The port field is matched to the <literal>port</literal> connection
+   parameter if that is specified, otherwise to the default port number;
+   it is never matched to the <literal>portaddr</literal> parameter.  This
+   way an entry written for the server's own port keeps matching when the
+   connection is made through an intermediary listening on another port.
    In a standby server, a database field of <literal>replication</literal>
    matches streaming replication connections made to the primary server.
    The database field is of limited usefulness otherwise, because users have

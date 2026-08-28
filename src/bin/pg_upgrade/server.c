@@ -314,7 +314,8 @@ stop_postmaster(bool in_atexit)
 /*
  * check_pghost_envvar()
  *
- * Tests that PGHOST does not point to a non-local server
+ * Tests that PGHOST does not point to a non-local server, and that a stray
+ * PGPORTADDR cannot redirect our connections to some other port
  */
 void
 check_pghost_envvar(void)
@@ -342,6 +343,20 @@ check_pghost_envvar(void)
 				 strcmp(value, "::1") != 0 && !is_unixsock_path(value)))
 				pg_fatal("libpq environment variable %s has a non-local server value: %s",
 						 option->envvar, value);
+		}
+
+		/*
+		 * There is no acceptable value for PGPORTADDR: it would redirect
+		 * connections away from the ports pg_upgrade chooses for the old and
+		 * new clusters.
+		 */
+		if (option->envvar && strcmp(option->envvar, "PGPORTADDR") == 0)
+		{
+			const char *value = getenv(option->envvar);
+
+			if (value && strlen(value) > 0)
+				pg_fatal("libpq environment variable %s must not be set when running pg_upgrade",
+						 option->envvar);
 		}
 	}
 

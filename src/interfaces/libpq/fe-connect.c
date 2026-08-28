@@ -243,6 +243,10 @@ static const internalPQconninfoOption PQconninfoOptions[] = {
 		"Database-Port", "", 6,
 	offsetof(struct pg_conn, pgport)},
 
+	{"portaddr", "PGPORTADDR", NULL, NULL,
+		"Database-Port-Address", "", 6,
+	offsetof(struct pg_conn, pgportaddr)},
+
 	{"client_encoding", "PGCLIENTENCODING", NULL, NULL,
 		"Client-Encoding", "", 10,
 	offsetof(struct pg_conn, client_encoding_initial)},
@@ -1404,6 +1408,48 @@ pqConnectOptions2(PGconn *conn)
 	}
 
 	/*
+	 * Next, work out the port number to actually connect to for each host
+	 * name, if portaddr was given.  As for port above, these fields may be
+	 * left null or empty; we will use the corresponding port field whenever
+	 * we read such a portaddr field.
+	 */
+	if (conn->pgportaddr != NULL && conn->pgportaddr[0] != '\0')
+	{
+		int			i;
+		char	   *s = conn->pgportaddr;
+		bool		more = true;
+
+		for (i = 0; i < conn->nconnhost && more; i++)
+		{
+			conn->connhost[i].portaddr = parse_comma_separated_list(&s, &more);
+			if (conn->connhost[i].portaddr == NULL)
+				goto oom_error;
+		}
+
+		/*
+		 * If exactly one portaddr was given, use it for every host.
+		 * Otherwise, there must be exactly as many portaddrs as there were
+		 * hosts.
+		 */
+		if (i == 1 && !more)
+		{
+			for (i = 1; i < conn->nconnhost; i++)
+			{
+				conn->connhost[i].portaddr = strdup(conn->connhost[0].portaddr);
+				if (conn->connhost[i].portaddr == NULL)
+					goto oom_error;
+			}
+		}
+		else if (more || i != conn->nconnhost)
+		{
+			conn->status = CONNECTION_BAD;
+			libpq_append_conn_error(conn, "could not match %d portaddr values to %d hosts",
+									count_comma_separated_elems(conn->pgportaddr), conn->nconnhost);
+			return false;
+		}
+	}
+
+	/*
 	 * If user name was not given, fetch it.  (Most likely, the fetch will
 	 * fail, since the only way we get here is if pg_fe_getauthname() failed
 	 * during conninfo_add_defaults().  But now we want an error message.)
@@ -1459,7 +1505,10 @@ pqConnectOptions2(PGconn *conn)
 				/*
 				 * Try to get a password for this host from file.  We use host
 				 * for the hostname search key if given, else hostaddr (at
-				 * least one of them is guaranteed nonempty by now).
+				 * least one of them is guaranteed nonempty by now).  Likewise,
+				 * the port search key is always port, never portaddr: the
+				 * search keys identify the server we mean to reach, not the
+				 * address we happen to reach it at.
 				 */
 				const char *pwhost = conn->connhost[i].host;
 				const char *password_errmsg = NULL;
@@ -2413,6 +2462,30 @@ getHostaddr(PGconn *conn, char *host_addr, int host_addr_len)
 		host_addr[0] = '\0';
 }
 
+/* ----------
+ * getPortaddr -
+ * Form the port number of the current connection, in the same way that
+ * getHostaddr() forms its IP address.  conn->raddr must be valid.  Nothing
+ * is reported for Unix-domain sockets, which have no port number.
+ * ----------
+ */
+static void
+getPortaddr(PGconn *conn, char *port_str, int port_str_len)
+{
+	struct sockaddr_storage *addr = &conn->raddr.addr;
+
+	if (addr->ss_family == AF_INET || addr->ss_family == AF_INET6)
+	{
+		if (pg_getnameinfo_all(addr, conn->raddr.salen,
+							   NULL, 0,
+							   port_str, port_str_len,
+							   NI_NUMERICSERV) != 0)
+			port_str[0] = '\0';
+	}
+	else
+		port_str[0] = '\0';
+}
+
 /*
  * emitHostIdentityInfo -
  * Speculatively append "connection to server so-and-so failed: " to
@@ -2446,7 +2519,9 @@ emitHostIdentityInfo(PGconn *conn, const char *host_addr)
 			displayed_host = conn->connhost[conn->whichhost].hostaddr;
 		else
 			displayed_host = conn->connhost[conn->whichhost].host;
-		displayed_port = conn->connhost[conn->whichhost].port;
+		displayed_port = conn->connhost[conn->whichhost].portaddr;
+		if (displayed_port == NULL || displayed_port[0] == '\0')
+			displayed_port = conn->connhost[conn->whichhost].port;
 		if (displayed_port == NULL || displayed_port[0] == '\0')
 			displayed_port = DEF_PGPORT_STR;
 
@@ -3067,6 +3142,25 @@ keep_going:						/* We will come back to here until there is
 				goto keep_going;
 			}
 		}
+
+		/*
+		 * If portaddr was given, that is the port we actually connect to, and
+		 * port only serves to identify the server, just as host does when
+		 * hostaddr is given.  portaddr is ignored for Unix-domain socket
+		 * connections, which are named by port.
+		 */
+		if (ch->type != CHT_UNIX_SOCKET &&
+			ch->portaddr != NULL && ch->portaddr[0] != '\0')
+		{
+			if (!pqParseIntParam(ch->portaddr, &thisport, conn, "portaddr"))
+				goto error_return;
+
+			if (thisport < 1 || thisport > 65535)
+			{
+				libpq_append_conn_error(conn, "invalid port number: \"%s\"", ch->portaddr);
+				goto keep_going;
+			}
+		}
 		snprintf(portstr, sizeof(portstr), "%d", thisport);
 
 		/* Use pg_getaddrinfo_all() to resolve the address */
@@ -3251,6 +3345,7 @@ keep_going:						/* We will come back to here until there is
 				 */
 				{
 					char		host_addr[NI_MAXHOST];
+					char		port_str[NI_MAXSERV];
 					int			sock_type;
 					AddrInfo   *addr_cur;
 
@@ -3306,8 +3401,8 @@ keep_going:						/* We will come back to here until there is
 						goto error_return;
 
 					/*
-					 * Set connip, too.  Note we purposely ignore strdup
-					 * failure; not a big problem if it fails.
+					 * Set connip and connport, too.  Note we purposely ignore
+					 * strdup failure; not a big problem if it fails.
 					 */
 					if (conn->connip != NULL)
 					{
@@ -3317,6 +3412,15 @@ keep_going:						/* We will come back to here until there is
 					getHostaddr(conn, host_addr, NI_MAXHOST);
 					if (host_addr[0])
 						conn->connip = strdup(host_addr);
+
+					if (conn->connport != NULL)
+					{
+						free(conn->connport);
+						conn->connport = NULL;
+					}
+					getPortaddr(conn, port_str, NI_MAXSERV);
+					if (port_str[0])
+						conn->connport = strdup(port_str);
 
 					/* Try to create the socket */
 					sock_type = SOCK_STREAM;
@@ -5108,6 +5212,7 @@ freePGconn(PGconn *conn)
 	free(conn->pghost);
 	free(conn->pghostaddr);
 	free(conn->pgport);
+	free(conn->pgportaddr);
 	free(conn->connect_timeout);
 	free(conn->pgtcp_user_timeout);
 	free(conn->client_encoding_initial);
@@ -5171,6 +5276,7 @@ freePGconn(PGconn *conn)
 	free(conn->events);
 	pqReleaseConnHosts(conn);
 	free(conn->connip);
+	free(conn->connport);
 	release_conn_addrinfo(conn);
 	free(conn->scram_client_key_binary);
 	free(conn->scram_server_key_binary);
@@ -5199,6 +5305,7 @@ pqReleaseConnHosts(PGconn *conn)
 			free(conn->connhost[i].host);
 			free(conn->connhost[i].hostaddr);
 			free(conn->connhost[i].port);
+			free(conn->connhost[i].portaddr);
 			if (conn->connhost[i].password != NULL)
 			{
 				explicit_bzero(conn->connhost[i].password,
@@ -7668,6 +7775,19 @@ PQport(const PGconn *conn)
 		return conn->connhost[conn->whichhost].port;
 
 	return DEF_PGPORT_STR;
+}
+
+char *
+PQportaddr(const PGconn *conn)
+{
+	if (!conn)
+		return NULL;
+
+	/* Return the port actually connected to */
+	if (conn->connhost != NULL && conn->connport != NULL)
+		return conn->connport;
+
+	return "";
 }
 
 /*

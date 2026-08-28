@@ -67,7 +67,7 @@ env:
 
   PGCTLTIMEOUT: 120  # avoids spurious failures during parallel tests
   TEMP_CONFIG: ${{ github.workspace }}/src/tools/ci/pg_ci_base.conf
-  PG_TEST_EXTRA: kerberos ldap ssl libpq_encryption load_balance oauth
+  PG_TEST_EXTRA: kerberos ldap ssl libpq_encryption load_balance oauth portaddr
 
   # Postgres config args for the meson builds, shared between all meson tasks
   # except the 'SanityCheck' task

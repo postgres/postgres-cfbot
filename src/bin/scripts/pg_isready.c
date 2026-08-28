@@ -35,6 +35,7 @@ main(int argc, char **argv)
 	const char *pghost_str = NULL;
 	const char *pghostaddr_str = NULL;
 	const char *pgport_str = NULL;
+	const char *pgportaddr_str = NULL;
 
 #define PARAMS_ARRAY_SIZE	7
 
@@ -184,6 +185,13 @@ main(int argc, char **argv)
 			else if (def->val)
 				pgport_str = def->val;
 		}
+		else if (strcmp(def->keyword, "portaddr") == 0)
+		{
+			if (opt && opt->val)
+				pgportaddr_str = opt->val;
+			else if (def->val)
+				pgportaddr_str = def->val;
+		}
 
 		if (opt)
 			opt++;
@@ -195,7 +203,7 @@ main(int argc, char **argv)
 	{
 		printf("%s:%s - ",
 			   pghostaddr_str != NULL ? pghostaddr_str : pghost_str,
-			   pgport_str);
+			   pgportaddr_str != NULL ? pgportaddr_str : pgport_str);
 
 		switch (rv)
 		{
