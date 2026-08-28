@@ -144,6 +144,8 @@
 #include "utils/builtins.h"
 #include "utils/tuplestore.h"
 
+typedef struct ShmemIndexEnt ShmemIndexEnt;
+
 /*
  * Registered callbacks.
  *
@@ -158,15 +160,20 @@ static List *registered_shmem_callbacks;
 
 /*
  * In the shmem request phase, all the shmem areas requested with the
- * ShmemRequest*() functions are accumulated here.
+ * ShmemRequest*() functions are accumulated in the 'pending_shmem_requests'
+ * list.  The List, the ShmemRequest structs, and the 'options' are all
+ * allocated in TopMemoryContext.
  */
 typedef struct
 {
 	ShmemStructOpts *options;
 	ShmemRequestKind kind;
+
+	/* InitShmemIndexEntry() sets this pointer when the area is allocated */
+	ShmemIndexEnt *index_entry;
 } ShmemRequest;
 
-static List *pending_shmem_requests;
+static List *pending_shmem_requests;	/* List of ShmemRequests */
 
 /*
  * Per-process state machine, for sanity checking that we do things in the
@@ -262,18 +269,20 @@ static HTAB *ShmemIndex;
 #define SHMEM_INDEX_ADDITIONAL_SIZE		 (128)
 
 /* this is a hash bucket in the shmem index table */
-typedef struct
+typedef struct ShmemIndexEnt
 {
 	char		key[SHMEM_INDEX_KEYSIZE];	/* string name */
 	void	   *location;		/* location in shared mem */
 	Size		size;			/* # bytes requested for the structure */
 	Size		allocated_size; /* # bytes actually allocated */
+	bool		initialized;	/* has the init callback been run? */
 } ShmemIndexEnt;
 
 /* To get reliable results for NUMA inquiry we need to "touch pages" once */
 static bool firstNumaTouch = true;
 
 static void CallShmemCallbacksAfterStartup(const ShmemCallbacks *callbacks);
+static void ProcessShmemRequestsAfterStartup(const ShmemCallbacks *callbacks);
 static void InitShmemIndexEntry(ShmemRequest *request);
 static bool AttachShmemIndexEntry(ShmemRequest *request, bool missing_ok);
 
@@ -335,6 +344,7 @@ ShmemRequestStructWithOpts(const ShmemStructOpts *options)
 void
 ShmemRequestInternal(ShmemStructOpts *options, ShmemRequestKind kind)
 {
+	MemoryContext oldcontext;
 	ShmemRequest *request;
 
 	/* Check the options */
@@ -374,10 +384,13 @@ ShmemRequestInternal(ShmemStructOpts *options, ShmemRequestKind kind)
 	}
 
 	/* Request looks valid, remember it */
+	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
 	request = palloc_object(ShmemRequest);
 	request->options = options;
 	request->kind = kind;
+	request->index_entry = NULL;
 	pending_shmem_requests = lappend(pending_shmem_requests, request);
+	MemoryContextSwitchTo(oldcontext);
 }
 
 /*
@@ -435,10 +448,7 @@ ShmemInitRequested(void)
 	foreach_ptr(ShmemRequest, request, pending_shmem_requests)
 	{
 		InitShmemIndexEntry(request);
-		pfree(request->options);
 	}
-	list_free_deep(pending_shmem_requests);
-	pending_shmem_requests = NIL;
 
 	/*
 	 * Call the subsystem-specific init callbacks to finish initialization of
@@ -449,6 +459,15 @@ ShmemInitRequested(void)
 		if (callbacks->init_fn)
 			callbacks->init_fn(callbacks->opaque_arg);
 	}
+
+	/* Now we can mark all the areas as initialized and free the requests */
+	foreach_ptr(ShmemRequest, request, pending_shmem_requests)
+	{
+		request->index_entry->initialized = true;
+		pfree(request->options);
+	}
+	list_free_deep(pending_shmem_requests);
+	pending_shmem_requests = NIL;
 
 	shmem_request_state = SRS_DONE;
 }
@@ -551,7 +570,12 @@ InitShmemIndexEntry(ShmemRequest *request)
 	index_entry->allocated_size = allocated_size;
 	index_entry->location = structPtr;
 
-	/* Initialize depending on the kind of shmem area it is */
+	/*
+	 * The area is considered fully initialized only after the subsystem's
+	 * init callback has been called.  For now, perform only basic
+	 * initialization based on the kind of shmem area it is.
+	 */
+	index_entry->initialized = false;
 	switch (request->kind)
 	{
 		case SHMEM_KIND_STRUCT:
@@ -565,6 +589,9 @@ InitShmemIndexEntry(ShmemRequest *request)
 			shmem_slru_init(structPtr, request->options);
 			break;
 	}
+
+	/* return the pointer to the entry to the caller */
+	request->index_entry = index_entry;
 }
 
 /*
@@ -594,6 +621,20 @@ AttachShmemIndexEntry(ShmemRequest *request, bool missing_ok)
 		return false;
 	}
 
+	/*
+	 * If it was previously allocated but not fully initialized, error out.
+	 * There is currently no way of retrying or cleaning up an uninitialized
+	 * entry, it just lingers until the server is shut down.  But this can
+	 * only happen when allocating areas after postmaster startup, and it's
+	 * unlikely that you could successfully retry anyway.  The most likely
+	 * reason for failed initialization is that you are out of shared memory
+	 * and retrying won't help with that.
+	 */
+	if (!index_entry->initialized)
+		ereport(ERROR,
+				(errmsg("cannot attach to shared memory struct \"%s\" because it was not fully initialized",
+						request->options->name)));
+
 	/* Check that the size in the index matches the request */
 	if (index_entry->size != request->options->size &&
 		request->options->size != SHMEM_ATTACH_UNKNOWN_SIZE)
@@ -621,6 +662,8 @@ AttachShmemIndexEntry(ShmemRequest *request, bool missing_ok)
 			shmem_slru_attach(index_entry->location, request->options);
 			break;
 	}
+
+	request->index_entry = index_entry;
 
 	return true;
 }
@@ -732,6 +775,7 @@ InitShmemAllocator(PGShmemHeader *seghdr)
 		result->size = ShmemAllocator->index_size;
 		result->allocated_size = ShmemAllocator->index_size;
 		result->location = ShmemAllocator->index;
+		result->initialized = true;
 	}
 }
 
@@ -903,26 +947,49 @@ RegisterShmemCallbacks(const ShmemCallbacks *callbacks)
 static void
 CallShmemCallbacksAfterStartup(const ShmemCallbacks *callbacks)
 {
+	Assert(shmem_request_state == SRS_DONE);
+	Assert(pending_shmem_requests == NIL);
+
+	PG_TRY();
+	{
+		shmem_request_state = SRS_REQUESTING;
+
+		/*
+		 * Call the request callback first.  The callback makes
+		 * ShmemRequest*() calls for each shmem area, adding them to
+		 * pending_shmem_requests.
+		 */
+		if (callbacks->request_fn)
+			callbacks->request_fn(callbacks->opaque_arg);
+
+		/* Process all the requests */
+		shmem_request_state = SRS_AFTER_STARTUP_ATTACH_OR_INIT;
+		if (pending_shmem_requests != NIL)
+			ProcessShmemRequestsAfterStartup(callbacks);
+	}
+	PG_FINALLY();
+	{
+		foreach_ptr(ShmemRequest, request, pending_shmem_requests)
+			pfree(request->options);
+		list_free_deep(pending_shmem_requests);
+		pending_shmem_requests = NIL;
+
+		shmem_request_state = SRS_DONE;
+	}
+	PG_END_TRY();
+}
+
+static void
+ProcessShmemRequestsAfterStartup(const ShmemCallbacks *callbacks)
+{
 	bool		found_any;
 	bool		notfound_any;
 
-	Assert(shmem_request_state == SRS_DONE);
-	shmem_request_state = SRS_REQUESTING;
+	/* There should be some requests to process */
+	Assert(pending_shmem_requests != NIL);
 
-	/*
-	 * Call the request callback first.  The callback makes ShmemRequest*()
-	 * calls for each shmem area, adding them to pending_shmem_requests.
-	 */
-	Assert(pending_shmem_requests == NIL);
-	if (callbacks->request_fn)
-		callbacks->request_fn(callbacks->opaque_arg);
-	shmem_request_state = SRS_AFTER_STARTUP_ATTACH_OR_INIT;
-
-	if (pending_shmem_requests == NIL)
-	{
-		shmem_request_state = SRS_DONE;
-		return;
-	}
+	/* Caller manages the global state variable */
+	Assert(shmem_request_state == SRS_AFTER_STARTUP_ATTACH_OR_INIT);
 
 	/*
 	 * Hold ShmemIndexLock while we allocate all the shmem entries and run all
@@ -940,8 +1007,22 @@ CallShmemCallbacksAfterStartup(const ShmemCallbacks *callbacks)
 	found_any = notfound_any = false;
 	foreach_ptr(ShmemRequest, request, pending_shmem_requests)
 	{
-		if (hash_search(ShmemIndex, request->options->name, HASH_FIND, NULL))
+		ShmemIndexEnt *index_entry;
+
+		index_entry = (ShmemIndexEnt *)
+			hash_search(ShmemIndex, request->options->name, HASH_FIND, NULL);
+		if (index_entry)
+		{
+			/*
+			 * Check for a half-initialized area.  (See also similar check in
+			 * AttachShmemIndexEntry())
+			 */
+			if (!index_entry->initialized)
+				ereport(ERROR,
+						(errmsg("cannot attach to shared memory struct \"%s\" because it was not fully initialized",
+								request->options->name)));
 			found_any = true;
+		}
 		else
 			notfound_any = true;
 	}
@@ -958,11 +1039,7 @@ CallShmemCallbacksAfterStartup(const ShmemCallbacks *callbacks)
 			AttachShmemIndexEntry(request, false);
 		else
 			InitShmemIndexEntry(request);
-
-		pfree(request->options);
 	}
-	list_free_deep(pending_shmem_requests);
-	pending_shmem_requests = NIL;
 
 	/* Finish by calling the appropriate subsystem-specific callback */
 	if (found_any)
@@ -976,8 +1053,12 @@ CallShmemCallbacksAfterStartup(const ShmemCallbacks *callbacks)
 			callbacks->init_fn(callbacks->opaque_arg);
 	}
 
+	foreach_ptr(ShmemRequest, request, pending_shmem_requests)
+	{
+		request->index_entry->initialized = true;
+	}
+
 	LWLockRelease(ShmemIndexLock);
-	shmem_request_state = SRS_DONE;
 }
 
 /*
@@ -1041,7 +1122,11 @@ ShmemInitStruct(const char *name, Size size, bool *foundPtr)
 
 	/* Initialize it if not found */
 	if (!*foundPtr)
+	{
 		InitShmemIndexEntry(&request);
+		/* no additional initialization needed */
+		request.index_entry->initialized = true;
+	}
 
 	LWLockRelease(ShmemIndexLock);
 
