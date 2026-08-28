@@ -12456,6 +12456,20 @@ dynamic_library_path = '/usr/local/lib/postgresql:$libdir'
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-have-resizable-shmem" xreflabel="have_resizable_shmem">
+      <term><varname>have_resizable_shmem</varname> (<type>boolean</type>)
+      <indexterm>
+       <primary><varname>have_resizable_shmem</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Reports whether <productname>PostgreSQL</productname> supports <link
+        linkend="xfunc-shared-addin-resizable">Resizable shared memory structures</link>.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-huge-pages-status" xreflabel="huge_pages_status">
       <term><varname>huge_pages_status</varname> (<type>enum</type>)
       <indexterm>
@@ -12635,31 +12649,99 @@ dynamic_library_path = '/usr/local/lib/postgresql:$libdir'
       </listitem>
      </varlistentry>
 
-     <varlistentry id="guc-shared-memory-size" xreflabel="shared_memory_size">
-      <term><varname>shared_memory_size</varname> (<type>integer</type>)
+     <varlistentry id="guc-shared-memory-initial-size" xreflabel="shared_memory_initial_size">
+      <term><varname>shared_memory_initial_size</varname> (<type>integer</type>)
       <indexterm>
-       <primary><varname>shared_memory_size</varname> configuration parameter</primary>
+       <primary><varname>shared_memory_initial_size</varname> configuration parameter</primary>
       </indexterm>
       </term>
       <listitem>
        <para>
-        Reports the size of the main shared memory area, rounded up to the
-        nearest megabyte.
+        Reports the amount of memory, rounded up to the nearest megabyte, allocated at the server startup in main shared memory area.
        </para>
       </listitem>
      </varlistentry>
 
-     <varlistentry id="guc-shared-memory-size-in-huge-pages" xreflabel="shared_memory_size_in_huge_pages">
-      <term><varname>shared_memory_size_in_huge_pages</varname> (<type>integer</type>)
+     <varlistentry id="guc-shared-memory-minimum-size" xreflabel="shared_memory_minimum_size">
+      <term><varname>shared_memory_minimum_size</varname> (<type>integer</type>)
       <indexterm>
-       <primary><varname>shared_memory_size_in_huge_pages</varname> configuration parameter</primary>
+       <primary><varname>shared_memory_minimum_size</varname> configuration parameter</primary>
       </indexterm>
       </term>
       <listitem>
        <para>
-        Reports the number of huge pages that are needed for the main shared
-        memory area based on the specified <xref linkend="guc-huge-page-size"/>.
+        Reports the minimum amount of memory, rounded up to the nearest megabyte, required in the main shared memory area.
+      </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-shared-memory-maximum-size" xreflabel="shared_memory_maximum_size">
+      <term><varname>shared_memory_maximum_size</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>shared_memory_maximum_size</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Reports the maximum size of the main shared memory area, rounded up
+        to the nearest megabyte. This is the amount of address space that
+        must be reserved for the main shared memory area. This is also the maximum amount of memory that may be allocated in the main shared memory area.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-shared-memory-initial-size-in-huge-pages" xreflabel="shared_memory_initial_size_in_huge_pages">
+      <term><varname>shared_memory_initial_size_in_huge_pages</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>shared_memory_initial_size_in_huge_pages</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Reports the number of huge pages needed in the main shared memory area
+        at the startup based on the specified <xref
+        linkend="guc-huge-page-size"/>. If huge pages are not supported, this
+        will be <literal>-1</literal>.
+       </para>
+       <para>
+        This setting is supported only on <productname>Linux</productname>. It
+        is always set to <literal>-1</literal> on other platforms. For more
+        details about using huge pages on <productname>Linux</productname>, see
+        <xref linkend="linux-huge-pages"/>.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-shared-memory-minimum-size-in-huge-pages" xreflabel="shared_memory_minimum_size_in_huge_pages">
+      <term><varname>shared_memory_minimum_size_in_huge_pages</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>shared_memory_minimum_size_in_huge_pages</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Reports the minimum number of huge pages needed in the main shared memory area based on the specified <xref linkend="guc-huge-page-size"/>.
         If huge pages are not supported, this will be <literal>-1</literal>.
+       </para>
+       <para>
+        This setting is supported only on <productname>Linux</productname>.  It
+        is always set to <literal>-1</literal> on other platforms.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-shared-memory-maximum-size-in-huge-pages" xreflabel="shared_memory_maximum_size_in_huge_pages">
+      <term><varname>shared_memory_maximum_size_in_huge_pages</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>shared_memory_maximum_size_in_huge_pages</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Reports the maximum number of huge pages needed in the
+        main shared memory area based on the specified
+        <xref linkend="guc-huge-page-size"/>. If huge pages are not
+        supported, this will be <literal>-1</literal>.
        </para>
        <para>
         This setting is supported only on <productname>Linux</productname>.  It

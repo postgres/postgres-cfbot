@@ -787,6 +787,16 @@ InitPostgres(const char *in_dbname, Oid dboid,
 	 */
 	InitLocalDataChecksumState();
 
+	/*
+	 * Refresh per-backend protections for resizable shmem structures. Usually
+	 * the subsystems using resizable shared structures will use
+	 * ProcSignalBarrier mechanism to coordinate resizing which would involve
+	 * adjusting the protections as well. Like InitLocalDataChecksumState()
+	 * above, this must run after ProcSignalInit so as not to miss a barrier
+	 * for protection change.
+	 */
+	ShmemReprotectResizableStructs();
+
 	RESUME_INTERRUPTS();
 
 	/*

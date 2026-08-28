@@ -2894,6 +2894,22 @@ decl_checks = [
   ['timingsafe_bcmp',  'string.h'],
 ]
 
+# Linux-specific madvise constants needed for resizable shared memory.
+# Usually we use AC_CHECK_DECLS to check for function declarations, but in this
+# case we are using it to detect existence of constants. These constants are
+# used to define HAVE_RESIZABLE_SHMEM which is used in storage/pg_shmem.h as
+# well as storage/shmem.h. The first abstracts the APIs to allocate shared
+# memory segments from the operating system whereas the second abstracts APIs to
+# allocate shared memory to various subsystems. Since they are related but
+# orthogonal to each other, including any one of them in the other file doesn't
+# make sense. pg_config_manual.h is the only place where HAVE_RESIZABLE_SHMEM
+# can be defined and made available to both without including sys/mman.h. But
+# for that we need constants that indicate the existence of following defines.
+decl_checks += [
+  ['MADV_POPULATE_WRITE', 'sys/mman.h'],
+  ['MADV_REMOVE', 'sys/mman.h'],
+]
+
 # Need to check for function declarations for these functions, because
 # checking for library symbols wouldn't handle deployment target
 # restrictions on macOS

@@ -1770,8 +1770,11 @@ pg_shadow| SELECT pg_authid.rolname AS usename,
 pg_shmem_allocations| SELECT name,
     off,
     size,
-    allocated_size
-   FROM pg_get_shmem_allocations() pg_get_shmem_allocations(name, off, size, allocated_size);
+    allocated_size,
+    minimum_size,
+    maximum_size,
+    reserved_space
+   FROM pg_get_shmem_allocations() pg_get_shmem_allocations(name, off, size, allocated_size, minimum_size, maximum_size, reserved_space);
 pg_shmem_allocations_numa| SELECT name,
     numa_node,
     size

@@ -3190,6 +3190,7 @@ TestDSMRegistryHashEntry
 TestDSMRegistryStruct
 TestDecodingData
 TestDecodingTxnData
+TestResizableShmemStruct
 TestShmemData
 TestSpec
 TestValueType

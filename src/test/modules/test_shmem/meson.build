@@ -27,7 +27,8 @@ tests += {
   'bd': meson.current_build_dir(),
   'tap': {
     'tests': [
-      't/001_late_shmem_alloc.pl',
+      't/001_fixed_shmem_struct.pl',
+      't/002_resizable_shmem_struct.pl',
     ],
   },
 }
