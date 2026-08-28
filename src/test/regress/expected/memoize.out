@@ -138,7 +138,7 @@ WHERE t1.unique1 < 10;
 -- Try with LATERAL references within PlaceHolderVars
 SELECT explain_memoize('
 SELECT COUNT(*), AVG(t1.twenty) FROM tenk1 t1 LEFT JOIN
-LATERAL (SELECT t1.two+1 AS c1, t2.unique1 AS c2 FROM tenk1 t2) s ON TRUE
+LATERAL (SELECT (t1.two+1)::bigint AS c1, t2.unique1 AS c2 FROM tenk1 t2) s ON TRUE
 WHERE s.c1 = s.c2 AND t1.unique1 < 1000;', false);
                                        explain_memoize                                        
 ----------------------------------------------------------------------------------------------
@@ -148,11 +148,11 @@ WHERE s.c1 = s.c2 AND t1.unique1 < 1000;', false);
                Filter: (unique1 < 1000)
                Rows Removed by Filter: 9000
          ->  Memoize (actual rows=1.00 loops=N)
-               Cache Key: (t1.two + 1)
+               Cache Key: ((t1.two + 1))::bigint
                Cache Mode: binary
                Hits: 998  Misses: 2  Evictions: Zero  Overflows: 0  Memory Usage: NkB
                ->  Index Only Scan using tenk1_unique1 on tenk1 t2 (actual rows=1.00 loops=N)
-                     Filter: ((t1.two + 1) = unique1)
+                     Filter: (((t1.two + 1))::bigint = unique1)
                      Rows Removed by Filter: 9999
                      Heap Fetches: N
                      Index Searches: N
@@ -160,7 +160,7 @@ WHERE s.c1 = s.c2 AND t1.unique1 < 1000;', false);
 
 -- And check we get the expected results.
 SELECT COUNT(*), AVG(t1.twenty) FROM tenk1 t1 LEFT JOIN
-LATERAL (SELECT t1.two+1 AS c1, t2.unique1 AS c2 FROM tenk1 t2) s ON TRUE
+LATERAL (SELECT (t1.two+1)::bigint AS c1, t2.unique1 AS c2 FROM tenk1 t2) s ON TRUE
 WHERE s.c1 = s.c2 AND t1.unique1 < 1000;
  count |        avg         
 -------+--------------------
@@ -170,7 +170,7 @@ WHERE s.c1 = s.c2 AND t1.unique1 < 1000;
 -- Ensure we do not omit the cache keys from PlaceHolderVars
 SELECT explain_memoize('
 SELECT COUNT(*), AVG(t1.twenty) FROM tenk1 t1 LEFT JOIN
-LATERAL (SELECT t1.twenty AS c1, t2.unique1 AS c2, t2.two FROM tenk1 t2) s
+LATERAL (SELECT t1.twenty::bigint AS c1, t2.unique1 AS c2, t2.two FROM tenk1 t2) s
 ON t1.two = s.two
 WHERE s.c1 = s.c2 AND t1.unique1 < 1000;', false);
                                     explain_memoize                                    
@@ -181,17 +181,17 @@ WHERE s.c1 = s.c2 AND t1.unique1 < 1000;', false);
                Filter: (unique1 < 1000)
                Rows Removed by Filter: 9000
          ->  Memoize (actual rows=1.00 loops=N)
-               Cache Key: t1.two, t1.twenty
+               Cache Key: t1.two, (t1.twenty)::bigint
                Cache Mode: binary
                Hits: 980  Misses: 20  Evictions: Zero  Overflows: 0  Memory Usage: NkB
                ->  Seq Scan on tenk1 t2 (actual rows=1.00 loops=N)
-                     Filter: ((t1.twenty = unique1) AND (t1.two = two))
+                     Filter: (((t1.twenty)::bigint = unique1) AND (t1.two = two))
                      Rows Removed by Filter: 9999
 (12 rows)
 
 -- And check we get the expected results.
 SELECT COUNT(*), AVG(t1.twenty) FROM tenk1 t1 LEFT JOIN
-LATERAL (SELECT t1.twenty AS c1, t2.unique1 AS c2, t2.two FROM tenk1 t2) s
+LATERAL (SELECT t1.twenty::bigint AS c1, t2.unique1 AS c2, t2.two FROM tenk1 t2) s
 ON t1.two = s.two
 WHERE s.c1 = s.c2 AND t1.unique1 < 1000;
  count |        avg         

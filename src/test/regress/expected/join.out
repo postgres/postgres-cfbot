@@ -36,6 +36,16 @@ create temp table onerow();
 insert into onerow default values;
 analyze onerow;
 --
+-- A STABLE, non-inlinable identity function used to
+-- prevent the planner from stripping no-op PHVs in some tests.
+--
+CREATE OR REPLACE FUNCTION phv(anyelement)
+RETURNS anyelement AS $$
+BEGIN
+  RETURN $1;
+END;
+$$ LANGUAGE plpgsql STABLE COST 0.00001;
+--
 -- CORRELATION NAMES
 -- Make sure that table/column aliases are supported
 -- before diving into more complex join syntax.
@@ -4521,13 +4531,13 @@ from nt3 as nt3
     (select nt2.*, (nt2.b1 and ss1.a3) AS b3
      from nt2 as nt2
        left join
-         (select nt1.*, (nt1.id is not null) as a3 from nt1) as ss1
+         (select nt1.*, (nt1.id > 0 and nt1.id < 5) as a3 from nt1) as ss1
          on ss1.id = nt2.nt1_id
     ) as ss2
     on ss2.id = nt3.nt2_id
 where nt3.id = 1 and ss2.b3;
-                  QUERY PLAN                  
-----------------------------------------------
+                      QUERY PLAN                      
+------------------------------------------------------
  Nested Loop
    ->  Nested Loop
          ->  Index Scan using nt3_pkey on nt3
@@ -4536,7 +4546,7 @@ where nt3.id = 1 and ss2.b3;
                Index Cond: (id = nt3.nt2_id)
    ->  Index Only Scan using nt1_pkey on nt1
          Index Cond: (id = nt2.nt1_id)
-         Filter: (nt2.b1 AND true)
+         Filter: (nt2.b1 AND ((id > 0) AND (id < 5)))
 (9 rows)
 
 select nt3.id
@@ -4545,7 +4555,7 @@ from nt3 as nt3
     (select nt2.*, (nt2.b1 and ss1.a3) AS b3
      from nt2 as nt2
        left join
-         (select nt1.*, (nt1.id is not null) as a3 from nt1) as ss1
+         (select nt1.*, (nt1.id > 0 and nt1.id < 5) as a3 from nt1) as ss1
          on ss1.id = nt2.nt1_id
     ) as ss2
     on ss2.id = nt3.nt2_id
@@ -4610,20 +4620,20 @@ select * from
   int4_tbl as i41,
   lateral
     (select 1 as x from
-      (select i41.f1 as lat,
+      (select phv(i41.f1) as lat,
               i42.f1 as loc from
          int8_tbl as i81, int4_tbl as i42) as ss1
       right join int4_tbl as i43 on (i43.f1 > 1)
       where ss1.loc = ss1.lat) as ss2
 where i41.f1 > 0;
-                    QUERY PLAN                    
---------------------------------------------------
+                    QUERY PLAN                     
+---------------------------------------------------
  Nested Loop
    ->  Nested Loop
          ->  Seq Scan on int4_tbl i41
                Filter: (f1 > 0)
          ->  Nested Loop
-               Join Filter: (i42.f1 = i41.f1)
+               Join Filter: (i42.f1 = phv(i41.f1))
                ->  Seq Scan on int8_tbl i81
                ->  Materialize
                      ->  Seq Scan on int4_tbl i42
@@ -4636,7 +4646,7 @@ select * from
   int4_tbl as i41,
   lateral
     (select 1 as x from
-      (select i41.f1 as lat,
+      (select phv(i41.f1) as lat,
               i42.f1 as loc from
          int8_tbl as i81, int4_tbl as i42) as ss1
       right join int4_tbl as i43 on (i43.f1 > 1)
@@ -4789,28 +4799,28 @@ explain (costs off)
 select t1.unique2, t1.stringu1, t2.unique1, t2.stringu2 from
   tenk1 t1
   inner join int4_tbl i1
-    left join (select v1.x2, v2.y1, 11 AS d1
+    left join (select v1.x2, v2.y1, phv(11) AS d1
                from (select 1,0 from onerow) v1(x1,x2)
-               left join (select 3,1 from onerow) v2(y1,y2)
+               left join (select phv(3),1 from onerow) v2(y1,y2)
                on v1.x1 = v2.y2) subq1
     on (i1.f1 = subq1.x2)
   on (t1.unique2 = subq1.d1)
   left join tenk1 t2
   on (subq1.y1 = t2.unique1)
 where t1.unique2 < 42 and t1.stringu1 > t2.stringu2;
-                              QUERY PLAN                               
------------------------------------------------------------------------
+                              QUERY PLAN                              
+----------------------------------------------------------------------
  Nested Loop
    ->  Nested Loop
          Join Filter: (t1.stringu1 > t2.stringu2)
          ->  Nested Loop
                ->  Nested Loop
-                     ->  Seq Scan on onerow
                      ->  Seq Scan on onerow onerow_1
-               ->  Index Scan using tenk1_unique2 on tenk1 t1
-                     Index Cond: ((unique2 = (11)) AND (unique2 < 42))
-         ->  Index Scan using tenk1_unique1 on tenk1 t2
-               Index Cond: (unique1 = (3))
+                     ->  Index Scan using tenk1_unique1 on tenk1 t2
+                           Index Cond: (unique1 = (phv(3)))
+               ->  Seq Scan on onerow
+         ->  Index Scan using tenk1_unique2 on tenk1 t1
+               Index Cond: ((unique2 = (phv(11))) AND (unique2 < 42))
    ->  Seq Scan on int4_tbl i1
          Filter: (f1 = 0)
 (13 rows)
@@ -4818,9 +4828,9 @@ where t1.unique2 < 42 and t1.stringu1 > t2.stringu2;
 select t1.unique2, t1.stringu1, t2.unique1, t2.stringu2 from
   tenk1 t1
   inner join int4_tbl i1
-    left join (select v1.x2, v2.y1, 11 AS d1
+    left join (select v1.x2, v2.y1, phv(11) AS d1
                from (select 1,0 from onerow) v1(x1,x2)
-               left join (select 3,1 from onerow) v2(y1,y2)
+               left join (select phv(3),1 from onerow) v2(y1,y2)
                on v1.x1 = v2.y2) subq1
     on (i1.f1 = subq1.x2)
   on (t1.unique2 = subq1.d1)
@@ -4910,34 +4920,34 @@ explain (costs off)
 select t1.unique2, t1.stringu1, t2.unique1, t2.stringu2 from
   tenk1 t1
   inner join int4_tbl i1
-    left join (select v1.x2, v2.y1, 11 AS d1
+    left join (select v1.x2, v2.y1, phv(11) AS d1
                from (values(1,0)) v1(x1,x2)
-               left join (values(3,1)) v2(y1,y2)
+               left join (values(phv(3),1)) v2(y1,y2)
                on v1.x1 = v2.y2) subq1
     on (i1.f1 = subq1.x2)
   on (t1.unique2 = subq1.d1)
   left join tenk1 t2
   on (subq1.y1 = t2.unique1)
 where t1.unique2 < 42 and t1.stringu1 > t2.stringu2;
-                           QUERY PLAN                            
------------------------------------------------------------------
+                              QUERY PLAN                              
+----------------------------------------------------------------------
  Nested Loop
    Join Filter: (t1.stringu1 > t2.stringu2)
    ->  Nested Loop
          ->  Seq Scan on int4_tbl i1
                Filter: (f1 = 0)
          ->  Index Scan using tenk1_unique2 on tenk1 t1
-               Index Cond: ((unique2 = (11)) AND (unique2 < 42))
+               Index Cond: ((unique2 = (phv(11))) AND (unique2 < 42))
    ->  Index Scan using tenk1_unique1 on tenk1 t2
-         Index Cond: (unique1 = (3))
+         Index Cond: (unique1 = (phv(3)))
 (9 rows)
 
 select t1.unique2, t1.stringu1, t2.unique1, t2.stringu2 from
   tenk1 t1
   inner join int4_tbl i1
-    left join (select v1.x2, v2.y1, 11 AS d1
+    left join (select v1.x2, v2.y1, phv(11) AS d1
                from (values(1,0)) v1(x1,x2)
-               left join (values(3,1)) v2(y1,y2)
+               left join (values(phv(3),1)) v2(y1,y2)
                on v1.x1 = v2.y2) subq1
     on (i1.f1 = subq1.x2)
   on (t1.unique2 = subq1.d1)
@@ -4953,22 +4963,22 @@ where t1.unique2 < 42 and t1.stringu1 > t2.stringu2;
 -- or we end up with noplace to evaluate the lateral PHV
 explain (verbose, costs off)
 select * from
-  (select 1 as x) ss1 left join (select 2 as y) ss2 on (true),
+  (select 1 as x) ss1 left join (select phv(2) as y) ss2 on (true),
   lateral (select ss2.y as z limit 1) ss3;
-        QUERY PLAN         
----------------------------
+            QUERY PLAN             
+-----------------------------------
  Nested Loop
-   Output: 1, (2), ((2))
+   Output: 1, (phv(2)), ((phv(2)))
    ->  Result
-         Output: 2
+         Output: phv(2)
    ->  Limit
-         Output: ((2))
+         Output: ((phv(2)))
          ->  Result
-               Output: (2)
+               Output: (phv(2))
 (8 rows)
 
 select * from
-  (select 1 as x) ss1 left join (select 2 as y) ss2 on (true),
+  (select 1 as x) ss1 left join (select phv(2) as y) ss2 on (true),
   lateral (select ss2.y as z limit 1) ss3;
  x | y | z 
 ---+---+---
@@ -5074,25 +5084,25 @@ select * from t t1
 explain (verbose, costs off)
 select * from
      (select k from
-         (select i, coalesce(i, j) as k from
+         (select i, (i > 0 and j > 0) as k from
              (select i from t union all select 0)
              join (select 1 as j limit 1) on i = j)
          right join (select 2 as x) on true
          join (select 3 as y) on i is not null
      ),
      lateral (select k as kl limit 1);
-                            QUERY PLAN                             
--------------------------------------------------------------------
+                             QUERY PLAN                             
+--------------------------------------------------------------------
  Nested Loop
-   Output: COALESCE(t.i, (1)), ((COALESCE(t.i, (1))))
+   Output: ((t.i > 0) AND ((1) > 0)), ((((t.i > 0) AND ((1) > 0))))
    ->  Limit
          Output: 1
          ->  Result
                Output: 1
    ->  Nested Loop
-         Output: t.i, ((COALESCE(t.i, (1))))
+         Output: t.i, ((((t.i > 0) AND ((1) > 0))))
          ->  Result
-               Output: t.i, COALESCE(t.i, (1))
+               Output: t.i, ((t.i > 0) AND ((1) > 0))
                ->  Append
                      ->  Index Only Scan using t_pkey on pg_temp.t
                            Output: t.i
@@ -5101,9 +5111,9 @@ select * from
                            Output: 0
                            One-Time Filter: ((1) = 0)
          ->  Limit
-               Output: ((COALESCE(t.i, (1))))
+               Output: ((((t.i > 0) AND ((1) > 0))))
                ->  Result
-                     Output: (COALESCE(t.i, (1)))
+                     Output: (((t.i > 0) AND ((1) > 0)))
 (21 rows)
 
 rollback;
@@ -5197,26 +5207,26 @@ explain (costs off)
 select * from
   (select 0 as z) as t1
   left join
-  (select true as a) as t2
+  (select phv(true) as a) as t2
   on true,
   lateral (select true as b
            union all
            select a as b) as t3
 where b;
-              QUERY PLAN               
----------------------------------------
+                 QUERY PLAN                 
+--------------------------------------------
  Nested Loop
    ->  Result
    ->  Append
          ->  Result
          ->  Result
-               One-Time Filter: (true)
+               One-Time Filter: (phv(true))
 (6 rows)
 
 select * from
   (select 0 as z) as t1
   left join
-  (select true as a) as t2
+  (select phv(true) as a) as t2
   on true,
   lateral (select true as b
            union all
@@ -6051,8 +6061,8 @@ select t1.* from
   on (t1.f1 = b1.d1)
   left join int4_tbl i4
   on (i8.q2 = i4.f1);
-                              QUERY PLAN                              
-----------------------------------------------------------------------
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
  Hash Left Join
    Output: t1.f1
    Hash Cond: (i8.q2 = i4.f1)
@@ -6063,22 +6073,22 @@ select t1.* from
                Output: t1.f1
          ->  Materialize
                Output: i8.q2
-               ->  Hash Right Join
+               ->  Nested Loop Left Join
                      Output: i8.q2
-                     Hash Cond: ((NULL::integer) = i8b1.q2)
-                     ->  Hash Join
-                           Output: i8.q2, (NULL::integer)
-                           Hash Cond: (i8.q1 = i8b2.q1)
-                           ->  Seq Scan on public.int8_tbl i8
-                                 Output: i8.q1, i8.q2
-                           ->  Hash
-                                 Output: i8b2.q1, (NULL::integer)
-                                 ->  Seq Scan on public.int8_tbl i8b2
-                                       Output: i8b2.q1, NULL::integer
-                     ->  Hash
-                           Output: i8b1.q2
-                           ->  Seq Scan on public.int8_tbl i8b1
-                                 Output: i8b1.q2
+                     Join Filter: (NULL::integer = i8b1.q2)
+                     ->  Seq Scan on public.int8_tbl i8b1
+                           Output: i8b1.q1, i8b1.q2
+                     ->  Materialize
+                           Output: i8.q2
+                           ->  Hash Join
+                                 Output: i8.q2
+                                 Hash Cond: (i8.q1 = i8b2.q1)
+                                 ->  Seq Scan on public.int8_tbl i8
+                                       Output: i8.q1, i8.q2
+                                 ->  Hash
+                                       Output: i8b2.q1
+                                       ->  Seq Scan on public.int8_tbl i8b2
+                                             Output: i8b2.q1
    ->  Hash
          Output: i4.f1
          ->  Seq Scan on public.int4_tbl i4
@@ -6543,18 +6553,18 @@ explain (verbose, costs off)
 select ss2.* from
   int4_tbl i41
   left join int8_tbl i8
-    join (select i42.f1 as c1, i43.f1 as c2, 42 as c3
+    join (select i42.f1 as c1, i43.f1 as c2, phv(42) as c3
           from int4_tbl i42, int4_tbl i43) ss1
     on i8.q1 = ss1.c2
   on i41.f1 = ss1.c1,
   lateral (select i41.*, i8.*, ss1.* from text_tbl limit 1) ss2
 where ss1.c2 = 0;
-                               QUERY PLAN                               
-------------------------------------------------------------------------
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
  Nested Loop
-   Output: (i41.f1), (i8.q1), (i8.q2), (i42.f1), (i43.f1), ((42))
+   Output: (i41.f1), (i8.q1), (i8.q2), (i42.f1), (i43.f1), ((phv(42)))
    ->  Hash Join
-         Output: i41.f1, i42.f1, i8.q1, i8.q2, i43.f1, 42
+         Output: i41.f1, i42.f1, i8.q1, i8.q2, i43.f1, phv(42)
          Hash Cond: (i41.f1 = i42.f1)
          ->  Nested Loop
                Output: i8.q1, i8.q2, i43.f1, i41.f1
@@ -6573,15 +6583,15 @@ where ss1.c2 = 0;
                ->  Seq Scan on public.int4_tbl i42
                      Output: i42.f1
    ->  Limit
-         Output: (i41.f1), (i8.q1), (i8.q2), (i42.f1), (i43.f1), ((42))
+         Output: (i41.f1), (i8.q1), (i8.q2), (i42.f1), (i43.f1), ((phv(42)))
          ->  Seq Scan on public.text_tbl
-               Output: i41.f1, i8.q1, i8.q2, i42.f1, i43.f1, (42)
+               Output: i41.f1, i8.q1, i8.q2, i42.f1, i43.f1, (phv(42))
 (25 rows)
 
 select ss2.* from
   int4_tbl i41
   left join int8_tbl i8
-    join (select i42.f1 as c1, i43.f1 as c2, 42 as c3
+    join (select i42.f1 as c1, i43.f1 as c2, phv(42) as c3
           from int4_tbl i42, int4_tbl i43) ss1
     on i8.q1 = ss1.c2
   on i41.f1 = ss1.c1,
@@ -7189,8 +7199,8 @@ select d.* from d left join (select 1 as x from b group by rollup(x)) s
    Hash Cond: (d.a = (1))
    ->  Seq Scan on d
    ->  Hash
-         ->  MixedAggregate
-               Hash Key: 1
+         ->  GroupAggregate
+               Group Key: 1
                Group Key: ()
                ->  Seq Scan on b
 (8 rows)
@@ -7811,19 +7821,19 @@ insert into t values (1,1), (2,2);
 explain (costs off)
 select 1
 from t t1
-  left join (select t2.a, 1 as c
+  left join (select t2.a, phv(1) as c
              from t t2 left join t t3 on t2.a = t3.a) s
   on true
   left join t t4 on true
 where s.a < s.c;
-             QUERY PLAN              
--------------------------------------
+                QUERY PLAN                
+------------------------------------------
  Nested Loop Left Join
    ->  Nested Loop
          ->  Seq Scan on t t1
          ->  Materialize
                ->  Seq Scan on t t2
-                     Filter: (a < 1)
+                     Filter: (a < phv(1))
    ->  Materialize
          ->  Seq Scan on t t4
 (8 rows)
@@ -7836,13 +7846,13 @@ from t t1
   on true
   left join t t4 on true
 where s.a < s.c;
-                  QUERY PLAN                   
------------------------------------------------
+                    QUERY PLAN                     
+---------------------------------------------------
  Nested Loop Left Join
    ->  Nested Loop
          ->  Seq Scan on t t1
-         ->  Seq Scan on t t2
-               Filter: (a < COALESCE(t1.a, 1))
+         ->  Index Only Scan using t_a_key on t t2
+               Index Cond: (a < COALESCE(t1.a, 1))
    ->  Materialize
          ->  Seq Scan on t t4
 (7 rows)
@@ -7866,15 +7876,15 @@ explain (verbose, costs off)
 select i8.*, ss.v, t.unique2
   from int8_tbl i8
     left join int4_tbl i4 on i4.f1 = 1
-    left join lateral (select i4.f1 + 1 as v) as ss on true
+    left join lateral (select phv(i4.f1 + 1) as v) as ss on true
     left join tenk1 t on t.unique2 = ss.v
 where q2 = 456;
                          QUERY PLAN                          
 -------------------------------------------------------------
  Nested Loop Left Join
-   Output: i8.q1, i8.q2, ((i4.f1 + 1)), t.unique2
+   Output: i8.q1, i8.q2, (phv((i4.f1 + 1))), t.unique2
    ->  Nested Loop Left Join
-         Output: i8.q1, i8.q2, (i4.f1 + 1)
+         Output: i8.q1, i8.q2, phv((i4.f1 + 1))
          ->  Seq Scan on public.int8_tbl i8
                Output: i8.q1, i8.q2
                Filter: (i8.q2 = 456)
@@ -7883,13 +7893,13 @@ where q2 = 456;
                Filter: (i4.f1 = 1)
    ->  Index Only Scan using tenk1_unique2 on public.tenk1 t
          Output: t.unique2
-         Index Cond: (t.unique2 = ((i4.f1 + 1)))
+         Index Cond: (t.unique2 = (phv((i4.f1 + 1))))
 (13 rows)
 
 select i8.*, ss.v, t.unique2
   from int8_tbl i8
     left join int4_tbl i4 on i4.f1 = 1
-    left join lateral (select i4.f1 + 1 as v) as ss on true
+    left join lateral (select phv(i4.f1 + 1) as v) as ss on true
     left join tenk1 t on t.unique2 = ss.v
 where q2 = 456;
  q1  | q2  | v | unique2 
@@ -7904,20 +7914,20 @@ create temp table parttbl1 partition of parttbl for values from (1) to (100);
 insert into parttbl values (11), (12);
 explain (costs off)
 select * from
-  (select *, 12 as phv from parttbl) as ss
+  (select *, phv(12) as phv from parttbl) as ss
   right join int4_tbl on true
 where ss.a = ss.phv and f1 = 0;
              QUERY PLAN             
 ------------------------------------
  Nested Loop
    ->  Seq Scan on parttbl1 parttbl
-         Filter: (a = 12)
+         Filter: (a = phv(12))
    ->  Seq Scan on int4_tbl
          Filter: (f1 = 0)
 (5 rows)
 
 select * from
-  (select *, 12 as phv from parttbl) as ss
+  (select *, phv(12) as phv from parttbl) as ss
   right join int4_tbl on true
 where ss.a = ss.phv and f1 = 0;
  a  | phv | f1 
@@ -8700,7 +8710,7 @@ on true;
 -- not implemented yet.
 explain (verbose, costs off)
 select 1 from emp1 t1 left join
-    ((select 1 as x, * from emp1 t2) s1 inner join
+    ((select phv(1) as x, * from emp1 t2) s1 inner join
         (select * from emp1 t3) s2 on s1.id = s2.id)
     on true
 where s1.x = 1;
@@ -8714,7 +8724,7 @@ where s1.x = 1;
          Output: t3.id
          ->  Seq Scan on public.emp1 t3
                Output: t3.id
-               Filter: (1 = 1)
+               Filter: (phv(1) = 1)
 (9 rows)
 
 -- Check that PHVs do not impose any constraints on removing self joins
@@ -8761,7 +8771,7 @@ INSERT INTO tbl_phv (x, y)
 VACUUM ANALYZE tbl_phv;
 EXPLAIN (COSTS OFF, VERBOSE)
 SELECT 1 FROM tbl_phv t1 LEFT JOIN
-  (SELECT 1 extra, x, y FROM tbl_phv tl) t3 JOIN
+  (SELECT phv(1) extra, x, y FROM tbl_phv tl) t3 JOIN
     (SELECT y FROM tbl_phv tr) t4
   ON t4.y = t3.y
 ON true WHERE t3.extra IS NOT NULL AND t3.x = t1.x % 2;
@@ -8774,7 +8784,7 @@ ON true WHERE t3.extra IS NOT NULL AND t3.x = t1.x % 2;
    ->  Index Scan using tbl_phv_idx on public.tbl_phv tr
          Output: tr.x, tr.y
          Index Cond: (tr.x = (t1.x % 2))
-         Filter: (1 IS NOT NULL)
+         Filter: (phv(1) IS NOT NULL)
 (8 rows)
 
 DROP TABLE IF EXISTS tbl_phv;
@@ -9927,23 +9937,23 @@ select * from
 explain (verbose, costs off)
 select * from
   (select 0 as val0) as ss0
-  left join (select 1 as val) as ss1 on true
+  left join (select phv(1) as val) as ss1 on true
   left join lateral (select ss1.val as val_filtered where false) as ss2 on true;
-           QUERY PLAN           
---------------------------------
+            QUERY PLAN             
+-----------------------------------
  Nested Loop Left Join
-   Output: 0, (1), ((1))
+   Output: 0, (phv(1)), ((phv(1)))
    Join Filter: false
    ->  Result
-         Output: 1
+         Output: phv(1)
    ->  Result
-         Output: (1)
+         Output: (phv(1))
          One-Time Filter: false
 (8 rows)
 
 select * from
   (select 0 as val0) as ss0
-  left join (select 1 as val) as ss1 on true
+  left join (select phv(1) as val) as ss1 on true
   left join lateral (select ss1.val as val_filtered where false) as ss2 on true;
  val0 | val | val_filtered 
 ------+-----+--------------
@@ -10933,20 +10943,20 @@ DROP TABLE group_tbl;
 -- Test that we ignore PlaceHolderVars when looking up statistics
 EXPLAIN (COSTS OFF)
 SELECT t1.unique1 FROM tenk1 t1 LEFT JOIN
-  (SELECT *, 42 AS phv FROM tenk1 t2) ss ON t1.unique2 = ss.unique2
+  (SELECT *, phv(42) AS phv FROM tenk1 t2) ss ON t1.unique2 = ss.unique2
 WHERE ss.unique1 = ss.phv AND t1.unique1 < 100;
                     QUERY PLAN                    
 --------------------------------------------------
  Nested Loop
    ->  Seq Scan on tenk1 t2
-         Filter: (unique1 = 42)
+         Filter: (unique1 = phv(42))
    ->  Index Scan using tenk1_unique2 on tenk1 t1
          Index Cond: (unique2 = t2.unique2)
          Filter: (unique1 < 100)
 (6 rows)
 
 SELECT t1.unique1 FROM tenk1 t1 LEFT JOIN
-  (SELECT *, 42 AS phv FROM tenk1 t2) ss ON t1.unique2 = ss.unique2
+  (SELECT *, phv(42) AS phv FROM tenk1 t2) ss ON t1.unique2 = ss.unique2
 WHERE ss.unique1 = ss.phv AND t1.unique1 < 100;
  unique1 
 ---------
@@ -10995,3 +11005,4 @@ SELECT COUNT(*) FROM onek t1 LEFT JOIN tenk1 t2
  19000
 (1 row)
 
+DROP FUNCTION phv(anyelement);

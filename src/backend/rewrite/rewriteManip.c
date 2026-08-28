@@ -54,6 +54,7 @@ typedef struct
 	const Bitmapset *removable_relids;
 	const Bitmapset *except_relids;
 	int			sublevels_up;
+	bool		remove_noop_phvs;
 } remove_nulling_relids_context;
 
 static bool contain_aggs_of_level_walker(Node *node,
@@ -68,6 +69,7 @@ static Node *add_nulling_relids_mutator(Node *node,
 										add_nulling_relids_context *context);
 static Node *remove_nulling_relids_mutator(Node *node,
 										   remove_nulling_relids_context *context);
+static bool is_safe_to_strip_payload(Node *node);
 
 
 /*
@@ -1322,17 +1324,22 @@ add_nulling_relids_mutator(Node *node,
  * in Var.varnullingrels and PlaceHolderVar.phnullingrels fields within
  * the given expression, except in nodes belonging to rels listed in
  * except_relids.
+ *
+ * If remove_noop_phvs is true, we also check if PlaceHolderVars become
+ * no-ops and strip them if so.
  */
 Node *
 remove_nulling_relids(Node *node,
 					  const Bitmapset *removable_relids,
-					  const Bitmapset *except_relids)
+					  const Bitmapset *except_relids,
+					  bool remove_noop_phvs)
 {
 	remove_nulling_relids_context context;
 
 	context.removable_relids = removable_relids;
 	context.except_relids = except_relids;
 	context.sublevels_up = 0;
+	context.remove_noop_phvs = remove_noop_phvs;
 	return query_or_expression_tree_mutator(node,
 											remove_nulling_relids_mutator,
 											&context,
@@ -1370,11 +1377,15 @@ remove_nulling_relids_mutator(Node *node,
 			!bms_overlap(phv->phrels, context->except_relids))
 		{
 			/*
-			 * Note: it might seem desirable to remove the PHV altogether if
-			 * phnullingrels goes to empty.  Currently we dare not do that
-			 * because we use PHVs in some cases to enforce separate identity
-			 * of subexpressions; see wrap_option usages in prepjointree.c.
+			 * If phnullingrels goes to empty, the PHV is no longer needed for
+			 * outer-join nulling.  We can remove it if we are allowed to
+			 * remove no-op PHVs, provided that it is not marked as preserved
+			 * (which indicates that it is needed to enforce separate identity
+			 * of subexpressions) and that the contained expression is safe to
+			 * pull up without breaking various invariants established by
+			 * expression preprocessing.
 			 */
+
 			/* Copy the PlaceHolderVar and mutate what's below ... */
 			phv = (PlaceHolderVar *)
 				expression_tree_mutator(node,
@@ -1387,6 +1398,14 @@ remove_nulling_relids_mutator(Node *node,
 			phv->phrels = bms_difference(phv->phrels,
 										 context->removable_relids);
 			Assert(!bms_is_empty(phv->phrels));
+
+			/* Strip the PHV if it's safe; see comment above */
+			if (context->remove_noop_phvs &&
+				!phv->phpreserved &&
+				bms_is_empty(phv->phnullingrels) &&
+				is_safe_to_strip_payload((Node *) phv->phexpr))
+				return (Node *) phv->phexpr;
+
 			return (Node *) phv;
 		}
 		/* Otherwise fall through to copy the PlaceHolderVar normally */
@@ -1405,6 +1424,44 @@ remove_nulling_relids_mutator(Node *node,
 		return (Node *) newnode;
 	}
 	return expression_tree_mutator(node, remove_nulling_relids_mutator, context);
+}
+
+/*
+ * is_safe_to_strip_payload
+ *
+ * Check whether the given node is safe to pull up into the surrounding
+ * expression structure.
+ *
+ * This is used to remove a PlaceHolderVar.  Even if a PlaceHolderVar is no
+ * longer needed, we cannot simply remove it if doing so would expose the
+ * contained expression to a parent node in a way that breaks various
+ * invariants established by earlier expression preprocessing.
+ *
+ * Since we don't know what the parent node is, we need to be conservative.
+ */
+static bool
+is_safe_to_strip_payload(Node *node)
+{
+	if (node == NULL)
+		return false;
+
+	switch (nodeTag(node))
+	{
+		case T_Var:
+		case T_Const:
+		case T_PlaceHolderVar:
+			/* Atomic nodes should be safe to expose */
+			return true;
+
+		case T_OpExpr:
+		case T_CoalesceExpr:
+			return true;
+
+		default:
+			return false;
+	}
+
+	return false;
 }
 
 
