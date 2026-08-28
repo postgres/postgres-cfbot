@@ -6122,6 +6122,14 @@
   proargnames => '{name,blks_zeroed,blks_hit,blks_read,blks_written,blks_exists,flushes,truncates,stats_reset}',
   prosrc => 'pg_stat_get_slru' },
 
+{ oid => '8463', descr => 'statistics: information about tablespace',
+  proname => 'pg_stat_get_tablespace', provolatile => 's',
+  proparallel => 'r', prorettype => 'record', proargtypes => 'oid',
+  proallargtypes => '{oid,int8,int8,float8,float8,int8,int8,int8,int8,int8,int8,int8,timestamptz}',
+  proargmodes => '{i,o,o,o,o,o,o,o,o,o,o,o,o}',
+  proargnames => '{spcoid,blks_fetched,blks_hit,blk_read_time,blk_write_time,temp_files,temp_bytes,tup_returned,tup_fetched,tup_inserted,tup_updated,tup_deleted,stats_reset}',
+  prosrc => 'pg_stat_get_tablespace' },
+
 { oid => '2978', descr => 'statistics: number of function calls',
   proname => 'pg_stat_get_function_calls', provolatile => 's',
   proparallel => 'r', prorettype => 'int8', proargtypes => 'oid',

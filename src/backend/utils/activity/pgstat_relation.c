@@ -37,12 +37,14 @@ typedef struct TwoPhasePgStatRecord
 	PgStat_Counter updated_pre_truncdrop;
 	PgStat_Counter deleted_pre_truncdrop;
 	Oid			id;				/* table's OID */
+	Oid			tablespace_oid; /* table's tablespace OID */
 	bool		shared;			/* is it a shared catalog? */
 	bool		truncdropped;	/* was the relation truncated/dropped? */
 } TwoPhasePgStatRecord;
 
 
 static PgStat_RelationStatus *pgstat_prep_relation_pending(PgStat_Kind kind,
+														   Oid tablespace_oid,
 														   Oid rel_id, bool isshared);
 static void add_tabstat_xact_level(PgStat_RelationStatus *pgstat_info, int nest_level);
 static void ensure_tabstat_xact_level(PgStat_RelationStatus *pgstat_info);
@@ -179,6 +181,7 @@ pgstat_assoc_relation(Relation rel)
 
 	/* find or make the PgStat_RelationStatus entry, and update link */
 	rel->pgstat_info = pgstat_prep_relation_pending(kind,
+													rel->rd_locator.spcOid,
 													RelationGetRelid(rel),
 													rel->rd_rel->relisshared);
 
@@ -204,6 +207,21 @@ pgstat_unlink_relation(Relation rel)
 	Assert(rel->pgstat_info->relation == rel);
 	rel->pgstat_info->relation = NULL;
 	rel->pgstat_info = NULL;
+}
+
+/*
+ * Refresh the tablespace recorded in a relation's pending statistics.
+ *
+ * pgstat_assoc_relation() records the tablespace once, when the pending entry
+ * is first created, but a relation can subsequently be moved to a different
+ * tablespace.  RelationRebuildRelation() preserves pgstat_info across a rebuild,
+ * so without this the entry would keep crediting the old tablespace.
+ */
+void
+pgstat_relation_update_tablespace(Relation rel)
+{
+	if (rel->pgstat_info != NULL)
+		rel->pgstat_info->tablespace_oid = rel->rd_locator.spcOid;
 }
 
 /*
@@ -780,6 +798,7 @@ AtPrepare_PgStat_Relations(PgStat_SubXactStatus *xact_state)
 		record.updated_pre_truncdrop = trans->updated_pre_truncdrop;
 		record.deleted_pre_truncdrop = trans->deleted_pre_truncdrop;
 		record.id = relstat->tab.id;
+		record.tablespace_oid = relstat->tablespace_oid;
 		record.shared = relstat->tab.shared;
 		record.truncdropped = trans->truncdropped;
 
@@ -823,7 +842,9 @@ pgstat_twophase_postcommit(FullTransactionId fxid, uint16 info,
 	PgStat_RelationStatus *pgstat_info;
 
 	/* Find or create a relstat entry for the rel */
-	pgstat_info = pgstat_prep_relation_pending(PGSTAT_KIND_RELATION, rec->id, rec->shared);
+	pgstat_info = pgstat_prep_relation_pending(PGSTAT_KIND_RELATION,
+											   rec->tablespace_oid, rec->id,
+											   rec->shared);
 
 	/* Same math as in AtEOXact_PgStat, commit case */
 	pgstat_info->tab.counts.tuples_inserted += rec->tuples_inserted;
@@ -859,7 +880,9 @@ pgstat_twophase_postabort(FullTransactionId fxid, uint16 info,
 	PgStat_RelationStatus *pgstat_info;
 
 	/* Find or create a relstat entry for the rel */
-	pgstat_info = pgstat_prep_relation_pending(PGSTAT_KIND_RELATION, rec->id, rec->shared);
+	pgstat_info = pgstat_prep_relation_pending(PGSTAT_KIND_RELATION,
+											   rec->tablespace_oid, rec->id,
+											   rec->shared);
 
 	/* Same math as in AtEOXact_PgStat, abort case */
 	if (rec->truncdropped)
@@ -967,6 +990,21 @@ pgstat_relation_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 	dbentry->blocks_fetched += lstats->tab.counts.blocks_fetched;
 	dbentry->blocks_hit += lstats->tab.counts.blocks_hit;
 
+	/* Likewise for the tablespace the relation lives in */
+	if (OidIsValid(lstats->tablespace_oid))
+	{
+		PgStat_StatTabspaceEntry *tsentry;
+
+		tsentry = pgstat_prep_tablespace_pending(lstats->tablespace_oid);
+		tsentry->tuples_returned += lstats->tab.counts.tuples_returned;
+		tsentry->tuples_fetched += lstats->tab.counts.tuples_fetched;
+		tsentry->tuples_inserted += lstats->tab.counts.tuples_inserted;
+		tsentry->tuples_updated += lstats->tab.counts.tuples_updated;
+		tsentry->tuples_deleted += lstats->tab.counts.tuples_deleted;
+		tsentry->blocks_fetched += lstats->tab.counts.blocks_fetched;
+		tsentry->blocks_hit += lstats->tab.counts.blocks_hit;
+	}
+
 	return true;
 }
 
@@ -990,7 +1028,8 @@ pgstat_relation_reset_timestamp_cb(PgStatShared_Common *header, TimestampTz ts)
  * initialized if not exists.
  */
 static PgStat_RelationStatus *
-pgstat_prep_relation_pending(PgStat_Kind kind, Oid rel_id, bool isshared)
+pgstat_prep_relation_pending(PgStat_Kind kind, Oid tablespace_oid, Oid rel_id,
+							 bool isshared)
 {
 	PgStat_EntryRef *entry_ref;
 	PgStat_RelationStatus *pending;
@@ -1000,6 +1039,7 @@ pgstat_prep_relation_pending(PgStat_Kind kind, Oid rel_id, bool isshared)
 										  rel_id, NULL);
 	pending = entry_ref->pending;
 	pending->kind = kind;
+	pending->tablespace_oid = tablespace_oid;
 	if (kind != PGSTAT_KIND_INDEX)
 	{
 		pending->tab.id = rel_id;

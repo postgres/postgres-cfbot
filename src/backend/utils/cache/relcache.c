@@ -1351,6 +1351,15 @@ RelationInitPhysicalAddr(Relation relation)
 	else
 		relation->rd_locator.dbOid = MyDatabaseId;
 
+	/*
+	 * The relation may have been moved to another tablespace, so keep the
+	 * tablespace recorded for statistics purposes in step.  Paths that reload
+	 * an entry in place, such as RelationReloadIndexInfo(), reach here with a
+	 * live pgstat_info; RelationRebuildRelation() instead builds a fresh entry
+	 * and swaps pgstat_info back afterwards, so it repeats this itself.
+	 */
+	pgstat_relation_update_tablespace(relation);
+
 	if (relation->rd_rel->relfilenode)
 	{
 		/*
@@ -2760,6 +2769,13 @@ RelationRebuildRelation(Relation relation)
 		/* pgstat_info / enabled must be preserved */
 		SWAPFIELD(struct PgStat_RelationStatus *, pgstat_info);
 		SWAPFIELD(bool, pgstat_enabled);
+
+		/*
+		 * RelationInitPhysicalAddr() ran on the newly built entry, which had
+		 * no pgstat_info yet, so redo the refresh now that the preserved
+		 * pgstat_info and the rebuilt rd_locator are on the same entry.
+		 */
+		pgstat_relation_update_tablespace(relation);
 		/* preserve old partition key if we have one */
 		if (keep_partkey)
 		{
