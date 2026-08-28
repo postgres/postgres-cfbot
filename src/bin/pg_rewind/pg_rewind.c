@@ -738,6 +738,7 @@ perform_rewind(filemap_t *filemap, rewind_source *source,
 	ControlFile_new.minRecoveryPoint = endrec;
 	ControlFile_new.minRecoveryPointTLI = endtli;
 	ControlFile_new.state = DB_IN_ARCHIVE_RECOVERY;
+	ControlFile_new.backupLabelRequired = true;
 	if (!dry_run)
 		update_controlfile(datadir_target, &ControlFile_new, do_sync);
 }
