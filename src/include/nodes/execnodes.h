@@ -603,6 +603,16 @@ typedef struct ResultRelInfo
 	int			ri_NumGeneratedNeededI;
 	int			ri_NumGeneratedNeededU;
 
+	/*
+	 * Arrays of virtual generated columns ExprStates for INSERT/UPDATE/MERGE.
+	 */
+	ExprState **ri_VirtualGeneratedExprsI;
+	ExprState **ri_VirtualGeneratedExprsU;
+
+	/* number of virtual generated columns we need to compute */
+	int			ri_NumVirtualGeneratedNeededI;
+	int			ri_NumVirtualGeneratedNeededU;
+
 	/* list of RETURNING expressions */
 	List	   *ri_returningList;
 

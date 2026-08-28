@@ -838,6 +838,12 @@ ExecSimpleRelationInsert(ResultRelInfo *resultRelInfo,
 			ExecComputeStoredGenerated(resultRelInfo, estate, slot,
 									   CMD_INSERT);
 
+		/* Compute virtual generated columns */
+		if (rel->rd_att->constr &&
+			rel->rd_att->constr->has_generated_virtual)
+			ExecComputeVirtualGenerated(resultRelInfo, estate, slot,
+										CMD_INSERT);
+
 		/* Check the constraints of the tuple */
 		if (rel->rd_att->constr)
 			ExecConstraints(resultRelInfo, slot, estate);
@@ -941,6 +947,12 @@ ExecSimpleRelationUpdate(ResultRelInfo *resultRelInfo,
 			rel->rd_att->constr->has_generated_stored)
 			ExecComputeStoredGenerated(resultRelInfo, estate, slot,
 									   CMD_UPDATE);
+
+		/* Compute virtual generated columns */
+		if (rel->rd_att->constr &&
+			rel->rd_att->constr->has_generated_virtual)
+			ExecComputeVirtualGenerated(resultRelInfo, estate, slot,
+										CMD_UPDATE);
 
 		/* Check the constraints of the tuple */
 		if (rel->rd_att->constr)
