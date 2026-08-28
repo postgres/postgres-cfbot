@@ -1808,6 +1808,94 @@ SELECT count(*) FROM pht3 t1 JOIN pht4 t2 ON t1.d = t2.d WHERE t1.c = '0002' AND
 
 RESET enable_hashjoin;
 RESET enable_mergejoin;
+-- outer join on a partition key that is an expression wrapped in a RelabelType
+CREATE TABLE pht5 (a int, c varchar(40)) PARTITION BY HASH ((c::text));
+CREATE TABLE pht5_p1 PARTITION OF pht5 FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+CREATE TABLE pht5_p2 PARTITION OF pht5 FOR VALUES WITH (MODULUS 2, REMAINDER 1);
+INSERT INTO pht5 SELECT i, to_char(i/50, 'FM0000') FROM generate_series(0, 599, 2) i;
+-- a key with no match in pht6, so that the join produces a null-extended row
+INSERT INTO pht5 VALUES (600, '9999');
+ANALYZE pht5;
+CREATE TABLE pht6 (a int, c varchar(40)) PARTITION BY HASH ((c::text));
+CREATE TABLE pht6_p1 PARTITION OF pht6 FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+CREATE TABLE pht6_p2 PARTITION OF pht6 FOR VALUES WITH (MODULUS 2, REMAINDER 1);
+INSERT INTO pht6 SELECT i, to_char(i/50, 'FM0000') FROM generate_series(0, 599, 3) i;
+ANALYZE pht6;
+CREATE TABLE pht7 (a int, c varchar(40)) PARTITION BY HASH ((c::text));
+CREATE TABLE pht7_p1 PARTITION OF pht7 FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+CREATE TABLE pht7_p2 PARTITION OF pht7 FOR VALUES WITH (MODULUS 2, REMAINDER 1);
+INSERT INTO pht7 SELECT i, to_char(i/50, 'FM0000') FROM generate_series(0, 599, 5) i;
+ANALYZE pht7;
+-- avoid hash and merge joins, whose costs here are close enough to the
+-- partitionwise nested loop's to make the test output unstable
+SET enable_hashjoin = off;
+SET enable_mergejoin = off;
+SET max_parallel_workers_per_gather = 0;
+-- the second count() shows that a null-extended row is produced
+EXPLAIN (COSTS OFF)
+SELECT count(*), count(t2.a) FROM pht5 t1 LEFT JOIN pht6 t2 ON t1.c::text = t2.c::text;
+                          QUERY PLAN                          
+--------------------------------------------------------------
+ Aggregate
+   ->  Append
+         ->  Nested Loop Left Join
+               Join Filter: ((t1_1.c)::text = (t2_1.c)::text)
+               ->  Seq Scan on pht5_p1 t1_1
+               ->  Materialize
+                     ->  Seq Scan on pht6_p1 t2_1
+         ->  Nested Loop Left Join
+               Join Filter: ((t1_2.c)::text = (t2_2.c)::text)
+               ->  Seq Scan on pht5_p2 t1_2
+               ->  Materialize
+                     ->  Seq Scan on pht6_p2 t2_2
+(12 rows)
+
+SELECT count(*), count(t2.a) FROM pht5 t1 LEFT JOIN pht6 t2 ON t1.c::text = t2.c::text;
+ count | count 
+-------+-------
+  5001 |  5000
+(1 row)
+
+-- Here the upper join clause references t2.c, which is a nullable partition
+-- key expression of the (pht5, pht6) join relation, so matching it requires
+-- ignoring relabeling on nullable_partexprs as well.
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM (pht5 t1 LEFT JOIN pht6 t2 ON t1.c::text = t2.c::text)
+                     LEFT JOIN pht7 t3 ON t2.c::text = t3.c::text;
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
+ Aggregate
+   ->  Append
+         ->  Nested Loop Left Join
+               Join Filter: ((t1_1.c)::text = (t2_1.c)::text)
+               ->  Seq Scan on pht5_p1 t1_1
+               ->  Materialize
+                     ->  Nested Loop Left Join
+                           Join Filter: ((t2_1.c)::text = (t3_1.c)::text)
+                           ->  Seq Scan on pht6_p1 t2_1
+                           ->  Materialize
+                                 ->  Seq Scan on pht7_p1 t3_1
+         ->  Nested Loop Left Join
+               Join Filter: ((t1_2.c)::text = (t2_2.c)::text)
+               ->  Seq Scan on pht5_p2 t1_2
+               ->  Materialize
+                     ->  Nested Loop Left Join
+                           Join Filter: ((t2_2.c)::text = (t3_2.c)::text)
+                           ->  Seq Scan on pht6_p2 t2_2
+                           ->  Materialize
+                                 ->  Seq Scan on pht7_p2 t3_2
+(20 rows)
+
+SELECT count(*) FROM (pht5 t1 LEFT JOIN pht6 t2 ON t1.c::text = t2.c::text)
+                     LEFT JOIN pht7 t3 ON t2.c::text = t3.c::text;
+ count 
+-------
+ 50001
+(1 row)
+
+RESET max_parallel_workers_per_gather;
+RESET enable_hashjoin;
+RESET enable_mergejoin;
 -- test default partition behavior for range
 ALTER TABLE prt1 DETACH PARTITION prt1_p3;
 ALTER TABLE prt1 ATTACH PARTITION prt1_p3 DEFAULT;
