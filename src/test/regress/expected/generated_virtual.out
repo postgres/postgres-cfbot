@@ -166,11 +166,9 @@ SELECT a, b FROM gtest1 WHERE b = 4 ORDER BY a;
  2 | 4
 (1 row)
 
--- test that overflow error happens on read
+-- test that overflow error happens on write
 INSERT INTO gtest1 VALUES (2000000000);
-SELECT * FROM gtest1;
 ERROR:  integer out of range
-DELETE FROM gtest1 WHERE a = 2000000000;
 -- test with joins
 CREATE TABLE gtestx (x int, y int);
 INSERT INTO gtestx VALUES (11, 1), (22, 2), (33, 3);
@@ -647,7 +645,7 @@ CREATE TABLE gtest20 (a int PRIMARY KEY, b int GENERATED ALWAYS AS (a * 2) VIRTU
 INSERT INTO gtest20 (a) VALUES (10);  -- ok
 INSERT INTO gtest20 (a) VALUES (30);  -- violates constraint
 ERROR:  new row for relation "gtest20" violates check constraint "gtest20_b_check"
-DETAIL:  Failing row contains (30, virtual).
+DETAIL:  Failing row contains (30, 60).
 ALTER TABLE gtest20 ALTER COLUMN b SET EXPRESSION AS (a * 100);  -- violates constraint
 ERROR:  check constraint "gtest20_b_check" of relation "gtest20" is violated by some row
 ALTER TABLE gtest20 ALTER COLUMN b SET EXPRESSION AS (a * 3);  -- ok
@@ -693,7 +691,7 @@ ALTER TABLE gtest20c ADD CONSTRAINT whole_row_check CHECK (gtest20c IS NOT NULL)
 INSERT INTO gtest20c VALUES (1);  -- ok
 INSERT INTO gtest20c VALUES (NULL);  -- fails
 ERROR:  new row for relation "gtest20c" violates check constraint "whole_row_check"
-DETAIL:  Failing row contains (null, virtual).
+DETAIL:  Failing row contains (null, null).
 ALTER TABLE gtest20c ALTER COLUMN b SET EXPRESSION AS (NULL::int);  -- violates constraint
 ERROR:  check constraint "whole_row_check" of relation "gtest20c" is violated by some row
 -- index with whole-row reference needs rebuild
@@ -708,12 +706,12 @@ CREATE TABLE gtest21a (a int PRIMARY KEY, b int GENERATED ALWAYS AS (nullif(a, 0
 INSERT INTO gtest21a (a) VALUES (1);  -- ok
 INSERT INTO gtest21a (a) VALUES (0);  -- violates constraint
 ERROR:  null value in column "b" of relation "gtest21a" violates not-null constraint
-DETAIL:  Failing row contains (0, virtual).
+DETAIL:  Failing row contains (0, null).
 -- also check with table constraint syntax
 CREATE TABLE gtest21ax (a int PRIMARY KEY, b int GENERATED ALWAYS AS (nullif(a, 0)) VIRTUAL, CONSTRAINT cc NOT NULL b);
 INSERT INTO gtest21ax (a) VALUES (0);  -- violates constraint
 ERROR:  null value in column "b" of relation "gtest21ax" violates not-null constraint
-DETAIL:  Failing row contains (0, virtual).
+DETAIL:  Failing row contains (0, null).
 INSERT INTO gtest21ax (a) VALUES (1);  --ok
 -- SET EXPRESSION supports not null constraint
 ALTER TABLE gtest21ax ALTER COLUMN b SET EXPRESSION AS (nullif(a, 1)); --error
@@ -723,17 +721,17 @@ CREATE TABLE gtest21ax (a int PRIMARY KEY, b int GENERATED ALWAYS AS (nullif(a, 
 ALTER TABLE gtest21ax ADD CONSTRAINT cc NOT NULL b;
 INSERT INTO gtest21ax (a) VALUES (0);  -- violates constraint
 ERROR:  null value in column "b" of relation "gtest21ax" violates not-null constraint
-DETAIL:  Failing row contains (0, virtual).
+DETAIL:  Failing row contains (0, null).
 DROP TABLE gtest21ax;
 CREATE TABLE gtest21b (a int, b int GENERATED ALWAYS AS (nullif(a, 0)) VIRTUAL);
 ALTER TABLE gtest21b ALTER COLUMN b SET NOT NULL;
 INSERT INTO gtest21b (a) VALUES (1);  -- ok
 INSERT INTO gtest21b (a) VALUES (2), (0);  -- violates constraint
 ERROR:  null value in column "b" of relation "gtest21b" violates not-null constraint
-DETAIL:  Failing row contains (0, virtual).
+DETAIL:  Failing row contains (0, null).
 INSERT INTO gtest21b (a) VALUES (NULL);  -- error
 ERROR:  null value in column "b" of relation "gtest21b" violates not-null constraint
-DETAIL:  Failing row contains (null, virtual).
+DETAIL:  Failing row contains (null, null).
 ALTER TABLE gtest21b ALTER COLUMN b DROP NOT NULL;
 INSERT INTO gtest21b (a) VALUES (0);  -- ok now
 -- virtual generated columns are not physically stored, even when not null
@@ -790,10 +788,10 @@ CREATE TABLE gtestnn_childdef PARTITION OF gtestnn_parent default;
 INSERT INTO gtestnn_parent VALUES (2, 2, default), (3, 5, default), (14, 12, default);  -- ok
 INSERT INTO gtestnn_parent VALUES (1, 2, default);  -- error
 ERROR:  null value in column "f3" of relation "gtestnn_child" violates not-null constraint
-DETAIL:  Failing row contains (1, 2, virtual).
+DETAIL:  Failing row contains (1, 2, null).
 INSERT INTO gtestnn_parent VALUES (2, 10, default);  -- error
 ERROR:  null value in column "f3" of relation "gtestnn_child" violates not-null constraint
-DETAIL:  Failing row contains (2, 10, virtual).
+DETAIL:  Failing row contains (2, 10, null).
 ALTER TABLE gtestnn_parent ALTER COLUMN f3 SET EXPRESSION AS (nullif(f1, 2) + nullif(f2, 11));  -- error
 ERROR:  column "f3" of relation "gtestnn_child" contains null values
 INSERT INTO gtestnn_parent VALUES (10, 11, default);  -- ok
