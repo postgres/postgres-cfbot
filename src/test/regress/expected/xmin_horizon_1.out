@@ -1,0 +1,21 @@
+SELECT current_setting('max_prepared_transactions')::integer < 2 AS skip_test \gset
+-- ACL coverage: pg_xmin_horizon is REVOKE'd from PUBLIC and GRANT'd to
+-- pg_read_all_stats.
+CREATE ROLE regress_pxh_unpriv;
+CREATE ROLE regress_pxh_priv;
+GRANT pg_read_all_stats TO regress_pxh_priv;
+SET ROLE regress_pxh_unpriv;
+SELECT count(*) FROM pg_xmin_horizon;
+ERROR:  permission denied for view pg_xmin_horizon
+RESET ROLE;
+SET ROLE regress_pxh_priv;
+SELECT count(*) >= 0 AS readable FROM pg_xmin_horizon;
+ readable 
+----------
+ t
+(1 row)
+
+RESET ROLE;
+DROP ROLE regress_pxh_unpriv, regress_pxh_priv;
+\if :skip_test
+\quit
