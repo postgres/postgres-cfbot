@@ -187,6 +187,7 @@ typedef struct local_relopts
 	 (char *)(optstruct) + (optstruct)->member)
 
 extern relopt_kind add_reloption_kind(void);
+extern void add_reloption_to_kind(const char *name, relopt_kind kind);
 extern void add_bool_reloption(uint32 kinds, const char *name, const char *desc,
 							   bool default_val, LOCKMODE lockmode);
 extern void add_ternary_reloption(uint32 kinds, const char *name,
@@ -250,6 +251,8 @@ extern bytea *default_reloptions(Datum reloptions, bool validate,
 extern struct StdRdOptions *merge_toast_reloptions(const struct StdRdOptions *toast_opts,
 												   const struct StdRdOptions *main_opts);
 extern bytea *heap_reloptions(char relkind, Datum reloptions, bool validate);
+extern bytea *table_reloptions(amoptions_function amoptions, char relkind,
+							   Datum reloptions, bool validate);
 extern bytea *view_reloptions(Datum reloptions, bool validate);
 extern bytea *partitioned_table_reloptions(Datum reloptions, bool validate);
 extern bytea *index_reloptions(amoptions_function amoptions, Datum reloptions,

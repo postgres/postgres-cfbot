@@ -1,0 +1,153 @@
+-- Tests for the table AM amoptions callback and add_reloption_to_kind()
+CREATE EXTENSION dummy_table_am;
+
+-- Sanity: CREATE TABLE with AM-specific options succeeds and round-trips
+CREATE TABLE dummy_t (a int) USING dummy_table_am
+    WITH (option_int = 17, option_real = 2.5, option_bool = false,
+          option_enum = 'two', fillfactor = 60);
+SELECT reloptions FROM pg_class
+    WHERE oid = 'dummy_t'::regclass ORDER BY reloptions;
+
+-- AM-specific option ranges are enforced (option_int allows -10..100)
+CREATE TABLE dummy_oor (a int) USING dummy_table_am WITH (option_int = 9999);
+
+-- Unknown options are rejected at CREATE TABLE time
+CREATE TABLE dummy_bad (a int) USING dummy_table_am WITH (autovacuum_vacuum_threshold = 4);
+
+-- Default values land in pg_class only when the user did not set them
+CREATE TABLE dummy_defaults (a int) USING dummy_table_am;
+SELECT reloptions FROM pg_class WHERE oid = 'dummy_defaults'::regclass;
+DROP TABLE dummy_defaults;
+
+-- ALTER TABLE ... SET (...) with AM-specific option
+ALTER TABLE dummy_t SET (option_int = 42);
+SELECT reloptions FROM pg_class WHERE oid = 'dummy_t'::regclass;
+
+-- ALTER TABLE ... SET (...) with an unknown option errors
+ALTER TABLE dummy_t SET (autovacuum_vacuum_threshold = 4);
+
+-- ALTER TABLE ... RESET (option) round-trips
+ALTER TABLE dummy_t RESET (option_int);
+SELECT reloptions FROM pg_class WHERE oid = 'dummy_t'::regclass;
+
+-- SET ACCESS METHOD revalidation:
+--   moving a heap table that has standard heap options not accepted by the
+--   new AM (autovacuum_vacuum_threshold; dummy_table_am inherits
+--   autovacuum_enabled but not the rest of the autovacuum_* family) into
+--   dummy_table_am must fail with a clear message and must NOT silently
+--   drop the option.
+CREATE TABLE heap_t (a int) WITH (fillfactor = 70, autovacuum_vacuum_threshold = 4);
+SELECT reloptions FROM pg_class WHERE oid = 'heap_t'::regclass;
+ALTER TABLE heap_t SET ACCESS METHOD dummy_table_am;
+-- Confirm nothing changed
+SELECT amname FROM pg_class c JOIN pg_am a ON a.oid = c.relam
+    WHERE c.oid = 'heap_t'::regclass;
+SELECT reloptions FROM pg_class WHERE oid = 'heap_t'::regclass;
+
+-- After RESETing the offending option in the same statement the swap
+-- succeeds; fillfactor survives because dummy_table_am inherits it via
+-- add_reloption_to_kind().
+ALTER TABLE heap_t SET ACCESS METHOD dummy_table_am, RESET (autovacuum_vacuum_threshold);
+SELECT amname FROM pg_class c JOIN pg_am a ON a.oid = c.relam
+    WHERE c.oid = 'heap_t'::regclass;
+SELECT reloptions FROM pg_class WHERE oid = 'heap_t'::regclass;
+
+-- Going back to heap still works: heap accepts fillfactor.
+ALTER TABLE heap_t SET ACCESS METHOD heap;
+SELECT amname FROM pg_class c JOIN pg_am a ON a.oid = c.relam
+    WHERE c.oid = 'heap_t'::regclass;
+
+-- SET ACCESS METHOD + SET (...) of an option that only the new AM accepts.
+CREATE TABLE heap_to_dt (a int);
+ALTER TABLE heap_to_dt SET ACCESS METHOD dummy_table_am, SET (option_int = 25);
+SELECT amname FROM pg_class c JOIN pg_am a ON a.oid = c.relam
+    WHERE c.oid = 'heap_to_dt'::regclass;
+SELECT reloptions FROM pg_class WHERE oid = 'heap_to_dt'::regclass;
+
+-- The reverse direction must be caught too: heap has no amoptions of its
+-- own (table_reloptions() just falls back to heap_reloptions()), but that
+-- is not a reason to skip validation.  option_int is dummy_table_am-only,
+-- so switching back to heap while it is still set must fail the same way,
+-- not silently drop it at the next relcache load.
+ALTER TABLE heap_to_dt SET ACCESS METHOD heap;
+-- Confirm nothing changed
+SELECT amname FROM pg_class c JOIN pg_am a ON a.oid = c.relam
+    WHERE c.oid = 'heap_to_dt'::regclass;
+SELECT reloptions FROM pg_class WHERE oid = 'heap_to_dt'::regclass;
+-- RESETting the offending option in the same statement lets it through
+ALTER TABLE heap_to_dt SET ACCESS METHOD heap, RESET (option_int);
+SELECT amname FROM pg_class c JOIN pg_am a ON a.oid = c.relam
+    WHERE c.oid = 'heap_to_dt'::regclass;
+SELECT reloptions FROM pg_class WHERE oid = 'heap_to_dt'::regclass;
+
+-- fillfactor genuinely reaches heap's own page-packing logic now, not just
+-- pg_class.reloptions: dummy_table_am embeds a full StdRdOptions as the
+-- first member of its own options struct and sets
+-- TableAmRoutine.has_std_options_prefix, so RelationGetFillFactor() can read
+-- it directly instead of always seeing the hardcoded default.
+CREATE TABLE dummy_ff10 (a int) USING dummy_table_am WITH (fillfactor = 10);
+CREATE TABLE dummy_ff100 (a int) USING dummy_table_am WITH (fillfactor = 100);
+INSERT INTO dummy_ff10 SELECT generate_series(1, 5000);
+INSERT INTO dummy_ff100 SELECT generate_series(1, 5000);
+VACUUM dummy_ff10;
+VACUUM dummy_ff100;
+SELECT (SELECT relpages FROM pg_class WHERE oid = 'dummy_ff10'::regclass) >
+       (SELECT relpages FROM pg_class WHERE oid = 'dummy_ff100'::regclass)
+       AS low_fillfactor_uses_more_pages;
+DROP TABLE dummy_ff10;
+DROP TABLE dummy_ff100;
+
+-- A table with a toastable column works: dummy_table_am overrides
+-- relation_toast_am rather than inheriting heap's, which would return
+-- this AM's own oid instead of heap's for its TOAST table, making that
+-- TOAST table itself a dummy_table_am relation and failing as soon as
+-- its chunk_id/chunk_seq index was built (that scan goes through
+-- heap_getnext() directly, which requires a real heap relation).
+CREATE TABLE dummy_txt (a int, b text) USING dummy_table_am;
+INSERT INTO dummy_txt VALUES (1, repeat('x', 10000));
+SELECT a, length(b) FROM dummy_txt;
+DROP TABLE dummy_txt;
+
+-- Partitioned-table inheritance: AM declared on the parent partition flows
+-- to partitions that don't override it.  Partitioned tables themselves
+-- cannot carry reloptions; the test verifies the AM lookup that
+-- DefineRelation does for partitions.
+CREATE TABLE parted (a int) PARTITION BY RANGE (a) USING dummy_table_am;
+CREATE TABLE parted_p1 PARTITION OF parted FOR VALUES FROM (0) TO (100)
+    WITH (option_int = 11);
+SELECT c.relname,
+       (SELECT amname FROM pg_am WHERE oid = c.relam) AS amname,
+       c.reloptions
+    FROM pg_class c
+    WHERE c.oid IN ('parted'::regclass, 'parted_p1'::regclass)
+    ORDER BY c.relname;
+
+-- A partition that explicitly chooses heap must reject options that are
+-- only known to the parent's AM.
+CREATE TABLE parted_p2 PARTITION OF parted FOR VALUES FROM (100) TO (200)
+    USING heap WITH (option_int = 9);
+
+-- A parent created without USING has no AM of its own (relam = 0); a
+-- partition of it takes default_table_access_method, so its reloptions
+-- must be validated by that AM, not silently fall through to heap's
+-- parser (which would reject the AM's own options and accept heap-only
+-- ones the AM would then drop).
+SET default_table_access_method = dummy_table_am;
+CREATE TABLE parted_noam (a int) PARTITION BY RANGE (a);
+CREATE TABLE parted_noam_p1 PARTITION OF parted_noam
+    FOR VALUES FROM (0) TO (100) WITH (option_int = 12);
+SELECT c.relname,
+       (SELECT amname FROM pg_am WHERE oid = c.relam) AS amname,
+       c.reloptions
+    FROM pg_class c
+    WHERE c.oid IN ('parted_noam'::regclass, 'parted_noam_p1'::regclass)
+    ORDER BY c.relname;
+RESET default_table_access_method;
+DROP TABLE parted_noam;
+
+DROP TABLE parted;
+DROP TABLE heap_to_dt;
+DROP TABLE heap_t;
+DROP TABLE dummy_t;
+
+DROP EXTENSION dummy_table_am;

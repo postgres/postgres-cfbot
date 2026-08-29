@@ -1,0 +1,21 @@
+Dummy Table AM
+==============
+
+Dummy table AM is a module for testing the table access method
+amoptions callback and the add_reloption_to_kind() helper.  It
+delegates all storage and scan callbacks to the heap AM and only
+swaps in its own option parser, so a relation created with USING
+dummy_table_am behaves like a heap table but accepts a different
+set of reloptions:
+
+  - "fillfactor"     (inherited from the core heap registration via
+                      add_reloption_to_kind)
+  - "option_int"     (integer)
+  - "option_real"    (real)
+  - "option_bool"    (boolean)
+  - "option_enum"    (enum, one|two)
+
+Standard heap options such as parallel_workers, autovacuum_*, and
+toast_tuple_target are intentionally NOT accepted, to exercise the
+"AM rejects an unknown option" path in ALTER TABLE ... SET ACCESS
+METHOD revalidation.

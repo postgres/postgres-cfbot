@@ -2211,7 +2211,8 @@ vacuum_rel(Oid relid, RangeVar *relation, VacuumParams params,
 	 * whose parameters the caller handed down for that purpose.  For anything
 	 * else, params.main_relopts is NULL, and this just copies our own.
 	 */
-	relopts = merge_toast_reloptions((StdRdOptions *) rel->rd_options,
+	relopts = merge_toast_reloptions(RelationHasStdRdOptions(rel) ?
+									 (StdRdOptions *) rel->rd_options : NULL,
 									 params.main_relopts);
 
 	/*
