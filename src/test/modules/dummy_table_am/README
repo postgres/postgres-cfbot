@@ -1,0 +1,25 @@
+Dummy Table AM
+==============
+
+This module provides two table access methods for testing the amoptions
+callback and add_reloption_to_kind().  Both use heap's callbacks for
+everything except reloption parsing, so their tables behave like heap
+tables, except that indexes cannot be built on them: heap_getnext(),
+which index builds use, accepts only heap's own TableAmRoutine.
+
+dummy_table_am accepts all of heap's options, plus these:
+
+  - "option_int"     (integer, -10..100)
+  - "option_real"    (real, -10..100)
+  - "option_bool"    (boolean)
+  - "option_enum"    (enum, one|two)
+
+Its options struct begins with StdRdOptions, and it sets
+has_std_options_prefix.
+
+dummy_custom_table_am accepts only three integer options, "option_a",
+"option_b" and "option_c" (0..100, default 0).  Its options struct does
+not begin with StdRdOptions, and its fields are at the offsets of
+StdRdOptions' fillfactor, toast_tuple_target and toast_value_type, so
+that core code wrongly reading StdRdOptions fields from it gets values
+that show up in the tests.
