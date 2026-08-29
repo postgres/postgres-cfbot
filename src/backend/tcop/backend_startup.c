@@ -811,12 +811,15 @@ retry:
 			else if (strncmp(nameptr, "_pq_.", 5) == 0)
 			{
 				/*
-				 * Any option beginning with _pq_. is reserved for use as a
-				 * protocol-level option, but at present no such options are
-				 * defined.
+				 * Options beginning with _pq_. are protocol extensions.
+				 * Recognized ones are handled here; report the rest as
+				 * unsupported.
 				 */
-				unrecognized_protocol_options =
-					lappend(unrecognized_protocol_options, pstrdup(nameptr));
+				if (strcmp(nameptr, "_pq_.report_prep_stmt_dealloc") == 0)
+					port->report_prep_stmt_dealloc = true;
+				else
+					unrecognized_protocol_options =
+						lappend(unrecognized_protocol_options, pstrdup(nameptr));
 			}
 			else
 			{

@@ -151,6 +151,7 @@ typedef struct Port
 	char	   *user_name;
 	char	   *cmdline_options;
 	List	   *guc_options;
+	bool		report_prep_stmt_dealloc;
 
 	/*
 	 * The startup packet application name, only used here for the "connection
