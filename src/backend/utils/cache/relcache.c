@@ -473,19 +473,30 @@ RelationParseRelOptions(Relation relation, HeapTuple tuple)
 {
 	bytea	   *options;
 	amoptions_function amoptsfn;
+	bool		stdoptions = false;
 
 	relation->rd_options = NULL;
+	relation->rd_stdoptions = false;
 
 	/*
 	 * Look up any AM-specific parse function; fall out if relkind should not
-	 * have options.
+	 * have options.  Also note whether the options will be a StdRdOptions, or
+	 * begin with one: that is so if they're parsed with heap_reloptions(), or
+	 * by a table AM that sets has_std_options_prefix.
 	 */
 	switch (relation->rd_rel->relkind)
 	{
 		case RELKIND_RELATION:
-		case RELKIND_TOASTVALUE:
-		case RELKIND_VIEW:
 		case RELKIND_MATVIEW:
+			amoptsfn = RelationGetTableAmOptions(relation);
+			stdoptions = amoptsfn == NULL ||
+				relation->rd_tableam->has_std_options_prefix;
+			break;
+		case RELKIND_TOASTVALUE:
+			amoptsfn = NULL;
+			stdoptions = true;
+			break;
+		case RELKIND_VIEW:
 		case RELKIND_PARTITIONED_TABLE:
 			amoptsfn = NULL;
 			break;
@@ -516,6 +527,7 @@ RelationParseRelOptions(Relation relation, HeapTuple tuple)
 												  VARSIZE(options));
 		memcpy(relation->rd_options, options, VARSIZE(options));
 		pfree(options);
+		relation->rd_stdoptions = stdoptions;
 	}
 }
 
