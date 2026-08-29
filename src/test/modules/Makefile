@@ -10,6 +10,7 @@ SUBDIRS = \
 		  delay_execution \
 		  dummy_index_am \
 		  dummy_seclabel \
+		  dummy_table_am \
 		  index \
 		  libpq_pipeline \
 		  oauth_validator \
