@@ -602,6 +602,11 @@ CREATE VIEW customers_us_redacted AS SELECT * FROM GRAPH_TABLE (myshop2 MATCH (c
 
 SELECT * FROM customers_us_redacted;
 
+-- with multiple property graph references in the query, the error message
+-- identifies the graph the property is missing from (node_id exists in
+-- myshop but nowhere in myshop2)
+SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers) COLUMNS (c.name AS n1)) g1, GRAPH_TABLE (myshop2 MATCH (o IS orders) COLUMNS (o.node_id AS n2)) g2;  -- error
+
 -- GRAPH_TABLE in UDFs
 CREATE FUNCTION out_degree(sname varchar) RETURNS varchar AS $$
 DECLARE
