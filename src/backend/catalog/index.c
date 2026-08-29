@@ -2972,7 +2972,8 @@ index_update_stats(Relation rel,
 	{
 		if (AutoVacuumingActive())
 		{
-			StdRdOptions *options = (StdRdOptions *) rel->rd_options;
+			StdRdOptions *options = RelationHasStdRdOptions(rel) ?
+				(StdRdOptions *) rel->rd_options : NULL;
 
 			if (options != NULL &&
 				options->autovacuum.enabled == PG_TERNARY_FALSE)

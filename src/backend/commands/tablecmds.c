@@ -696,9 +696,12 @@ static void ATPrepSetTableSpace(AlteredTableInfo *tab, Relation rel,
 								const char *tablespacename, LOCKMODE lockmode);
 static void ATExecSetTableSpace(Oid tableOid, Oid newTableSpace, LOCKMODE lockmode);
 static void ATExecSetTableSpaceNoStorage(Relation rel, Oid newTableSpace);
+static void ATValidateAccessMethodOptions(List **wqueue);
+static amoptions_function GetTableAmOptions(Oid amoid);
 static void ATExecSetRelOptions(Relation rel, List *defList,
 								AlterTableType operation,
-								LOCKMODE lockmode);
+								LOCKMODE lockmode,
+								bool deferValidation);
 static void ATExecEnableDisableTrigger(Relation rel, const char *trigname,
 									   char fires_when, bool skip_system, bool recurse,
 									   LOCKMODE lockmode);
@@ -946,6 +949,28 @@ DefineRelation(CreateStmt *stmt, char relkind, Oid ownerId,
 		ownerId = GetUserId();
 
 	/*
+	 * For relations with table AM and partitioned tables, select access
+	 * method to use: an explicitly indicated one, or (in the case of a
+	 * partitioned table) the parent's, if it has one.
+	 */
+	if (stmt->accessMethod != NULL)
+	{
+		Assert(RELKIND_HAS_TABLE_AM(relkind) || relkind == RELKIND_PARTITIONED_TABLE);
+		accessMethodId = get_table_am_oid(stmt->accessMethod, false);
+	}
+	else if (RELKIND_HAS_TABLE_AM(relkind) || relkind == RELKIND_PARTITIONED_TABLE)
+	{
+		if (stmt->partbound)
+		{
+			Assert(list_length(inheritOids) == 1);
+			accessMethodId = get_rel_relam(linitial_oid(inheritOids));
+		}
+
+		if (RELKIND_HAS_TABLE_AM(relkind) && !OidIsValid(accessMethodId))
+			accessMethodId = get_table_am_oid(default_table_access_method, false);
+	}
+
+	/*
 	 * Parse and validate reloptions, if any.
 	 */
 	reloptions = transformRelOptions((Datum) 0, stmt->options, NULL, validnsps,
@@ -958,6 +983,11 @@ DefineRelation(CreateStmt *stmt, char relkind, Oid ownerId,
 			break;
 		case RELKIND_PARTITIONED_TABLE:
 			(void) partitioned_table_reloptions(reloptions, true);
+			break;
+		case RELKIND_RELATION:
+		case RELKIND_MATVIEW:
+			(void) table_reloptions(GetTableAmOptions(accessMethodId),
+									relkind, reloptions, true);
 			break;
 		default:
 			(void) heap_reloptions(relkind, reloptions, true);
@@ -1052,28 +1082,6 @@ DefineRelation(CreateStmt *stmt, char relkind, Oid ownerId,
 	}
 
 	TupleDescFinalize(descriptor);
-
-	/*
-	 * For relations with table AM and partitioned tables, select access
-	 * method to use: an explicitly indicated one, or (in the case of a
-	 * partitioned table) the parent's, if it has one.
-	 */
-	if (stmt->accessMethod != NULL)
-	{
-		Assert(RELKIND_HAS_TABLE_AM(relkind) || relkind == RELKIND_PARTITIONED_TABLE);
-		accessMethodId = get_table_am_oid(stmt->accessMethod, false);
-	}
-	else if (RELKIND_HAS_TABLE_AM(relkind) || relkind == RELKIND_PARTITIONED_TABLE)
-	{
-		if (stmt->partbound)
-		{
-			Assert(list_length(inheritOids) == 1);
-			accessMethodId = get_rel_relam(linitial_oid(inheritOids));
-		}
-
-		if (RELKIND_HAS_TABLE_AM(relkind) && !OidIsValid(accessMethodId))
-			accessMethodId = get_table_am_oid(default_table_access_method, false);
-	}
 
 	/*
 	 * Create the relation.  Inherited defaults and CHECK constraints are
@@ -4947,6 +4955,9 @@ ATController(AlterTableStmt *parsetree,
 	/* Phase 2: update system catalogs */
 	ATRewriteCatalogs(&wqueue, lockmode, context);
 
+	/* Validate options as needed */
+	ATValidateAccessMethodOptions(&wqueue);
+
 	/* Phase 3: scan/rewrite tables as needed, and run afterStmts */
 	ATRewriteTables(parsetree, &wqueue, lockmode, context);
 }
@@ -5612,7 +5623,13 @@ ATExecCmd(List **wqueue, AlteredTableInfo *tab,
 		case AT_SetRelOptions:	/* SET (...) */
 		case AT_ResetRelOptions:	/* RESET (...) */
 		case AT_ReplaceRelOptions:	/* replace entire option list */
-			ATExecSetRelOptions(rel, (List *) cmd->def, cmd->subtype, lockmode);
+
+			/*
+			 * With SET ACCESS METHOD, ATValidateAccessMethodOptions() checks
+			 * the final option list instead.
+			 */
+			ATExecSetRelOptions(rel, (List *) cmd->def, cmd->subtype, lockmode,
+								tab->chgAccessMethod);
 			break;
 		case AT_EnableTrig:		/* ENABLE TRIGGER name */
 			ATExecEnableDisableTrigger(rel, cmd->name,
@@ -17305,11 +17322,76 @@ ATPrepSetTableSpace(AlteredTableInfo *tab, Relation rel, const char *tablespacen
 }
 
 /*
+ * Check the reloptions of each relation whose access method is being changed
+ * against the new access method's parser.  This runs after phase 2, so the
+ * options checked are the final ones, after any SET, RESET or REPLACE
+ * subcommands; checking each of those against the new AM as it runs would
+ * make the outcome depend on their order.  The check is needed even when the
+ * new AM uses the standard heap parser, since the old AM may have accepted
+ * options that heap does not.  Without it, an option the new AM doesn't
+ * recognize would stay in pg_class.reloptions but be ignored when the
+ * relcache entry is built.
+ */
+static void
+ATValidateAccessMethodOptions(List **wqueue)
+{
+	ListCell   *ltab;
+
+	foreach(ltab, *wqueue)
+	{
+		AlteredTableInfo *tab = (AlteredTableInfo *) lfirst(ltab);
+		HeapTuple	reltup;
+		Datum		reloptions;
+		bool		isnull;
+
+		/*
+		 * A partitioned table may be set to have no access method, in which
+		 * case there's nothing to check.
+		 */
+		if (!tab->chgAccessMethod || !OidIsValid(tab->newAccessMethod))
+			continue;
+
+		reltup = SearchSysCache1(RELOID, ObjectIdGetDatum(tab->relid));
+		if (!HeapTupleIsValid(reltup))
+			elog(ERROR, "cache lookup failed for relation %u", tab->relid);
+		reloptions = SysCacheGetAttr(RELOID, reltup,
+									 Anum_pg_class_reloptions, &isnull);
+		if (!isnull)
+			(void) table_reloptions(GetTableAmOptions(tab->newAccessMethod),
+									((Form_pg_class) GETSTRUCT(reltup))->relkind,
+									reloptions, true);
+		ReleaseSysCache(reltup);
+	}
+}
+
+/*
+ * Return the amoptions callback of the table access method with the given
+ * OID, or NULL if it has none.
+ */
+static amoptions_function
+GetTableAmOptions(Oid amoid)
+{
+	HeapTuple	amtup;
+	Oid			amhandler;
+
+	amtup = SearchSysCache1(AMOID, ObjectIdGetDatum(amoid));
+	if (!HeapTupleIsValid(amtup))
+		elog(ERROR, "cache lookup failed for access method %u", amoid);
+	amhandler = ((Form_pg_am) GETSTRUCT(amtup))->amhandler;
+	ReleaseSysCache(amtup);
+
+	return GetTableAmRoutine(amhandler)->amoptions;
+}
+
+/*
  * Set, reset, or replace reloptions.
+ *
+ * If deferValidation is true, the new options of a table or materialized view
+ * are not validated here; the caller arranges for that to be done later.
  */
 static void
 ATExecSetRelOptions(Relation rel, List *defList, AlterTableType operation,
-					LOCKMODE lockmode)
+					LOCKMODE lockmode, bool deferValidation)
 {
 	Oid			relid;
 	Relation	pgclass;
@@ -17361,7 +17443,11 @@ ATExecSetRelOptions(Relation rel, List *defList, AlterTableType operation,
 	{
 		case RELKIND_RELATION:
 		case RELKIND_MATVIEW:
-			(void) heap_reloptions(rel->rd_rel->relkind, newOptions, true);
+			if (!deferValidation)
+				(void) table_reloptions(rel->rd_tableam ?
+										rel->rd_tableam->amoptions : NULL,
+										rel->rd_rel->relkind,
+										newOptions, true);
 			break;
 		case RELKIND_PARTITIONED_TABLE:
 			(void) partitioned_table_reloptions(newOptions, true);
