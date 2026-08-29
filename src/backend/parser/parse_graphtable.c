@@ -243,7 +243,8 @@ transformGraphElementPattern(ParseState *pstate, GraphElementPattern *gep)
 	if (gep->quantifier)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("element pattern quantifier is not supported")));
+				 errmsg("element pattern quantifier is not supported"),
+				 parser_errposition(pstate, gep->location)));
 
 	Assert(!gpstate->cur_gep);
 
