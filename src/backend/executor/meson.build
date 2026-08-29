@@ -13,6 +13,7 @@ backend_sources += files(
   'execParallel.c',
   'execPartition.c',
   'execProcnode.c',
+  'execRPR.c',
   'execReplication.c',
   'execSRF.c',
   'execScan.c',

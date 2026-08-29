@@ -127,6 +127,33 @@ SELECT calls, query FROM pg_stat_statements ORDER BY query COLLATE "C";
 DROP TABLE pgss_a, pgss_b CASCADE;
 
 --
+-- queries with a row pattern recognition window
+--
+CREATE TABLE pgss_rpr (id integer);
+
+SELECT pg_stat_statements_reset() IS NOT NULL AS t;
+
+-- DEFINE lists that differ only in which variable name gets which condition
+-- must not collide on one query id
+SELECT count(*) OVER w FROM pgss_rpr
+WINDOW w AS (
+  ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING
+  AFTER MATCH SKIP PAST LAST ROW
+  PATTERN (A B)
+  DEFINE A AS id > 50, B AS id < 50);
+
+SELECT count(*) OVER w FROM pgss_rpr
+WINDOW w AS (
+  ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING
+  AFTER MATCH SKIP PAST LAST ROW
+  PATTERN (A B)
+  DEFINE B AS id > 50, A AS id < 50);
+
+SELECT calls, query FROM pg_stat_statements ORDER BY query COLLATE "C";
+
+DROP TABLE pgss_rpr;
+
+--
 -- access to pg_stat_statements_info view
 --
 SELECT pg_stat_statements_reset() IS NOT NULL AS t;
