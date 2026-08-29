@@ -645,6 +645,65 @@ typedef struct WindowFuncRunCondition
 } WindowFuncRunCondition;
 
 /*
+ * RPRNavExpr
+ *
+ * Represents a PREV/NEXT/FIRST/LAST navigation call in an RPR DEFINE clause.
+ * At expression compile time this is translated into EEOP_RPR_NAV_SET /
+ * EEOP_RPR_NAV_RESTORE opcodes rather than a normal function call.
+ *
+ * Simple navigation (PREV/NEXT/FIRST/LAST):
+ *   kind:       RPR_NAV_PREV, RPR_NAV_NEXT, RPR_NAV_FIRST, or RPR_NAV_LAST
+ *   arg:        the expression to evaluate against the target row
+ *   offset_arg: optional explicit offset expression (2-arg form); NULL for
+ *               the 1-arg form (implicit offset: 1 for PREV/NEXT, 0 for
+ *               FIRST/LAST)
+ *
+ * Compound navigation (PREV/NEXT wrapping FIRST/LAST):
+ *   kind:              RPR_NAV_PREV_FIRST, PREV_LAST, NEXT_FIRST, NEXT_LAST
+ *   arg:               the expression to evaluate against the final target row
+ *   offset_arg:        inner offset (FIRST/LAST), NULL = implicit default
+ *   compound_offset_arg: outer offset (PREV/NEXT), NULL = implicit default
+ *
+ * Compound target computation:
+ *   PREV_FIRST: (match_start + inner) - outer
+ *   NEXT_FIRST: (match_start + inner) + outer
+ *   PREV_LAST:  (currentpos  - inner) - outer
+ *   NEXT_LAST:  (currentpos  - inner) + outer
+ */
+typedef enum RPRNavKind
+{
+	RPR_NAV_PREV,				/* offset default: 1 */
+	RPR_NAV_NEXT,				/* offset default: 1 */
+	RPR_NAV_FIRST,				/* offset default: 0 */
+	RPR_NAV_LAST,				/* offset default: 0 */
+	/* compound: outer(inner(arg)) */
+	RPR_NAV_PREV_FIRST,			/* (offset, compound_offset) default: (0, 1) */
+	RPR_NAV_PREV_LAST,			/* (offset, compound_offset) default: (0, 1) */
+	RPR_NAV_NEXT_FIRST,			/* (offset, compound_offset) default: (0, 1) */
+	RPR_NAV_NEXT_LAST,			/* (offset, compound_offset) default: (0, 1) */
+} RPRNavKind;
+
+typedef struct RPRNavExpr
+{
+	Expr		xpr;
+	RPRNavKind	kind;			/* navigation kind */
+	Expr	   *arg;			/* argument expression */
+	Expr	   *offset_arg;		/* offset expression, or NULL for default */
+	Expr	   *compound_offset_arg;	/* outer offset for compound nav, or
+										 * NULL for its default */
+
+	/* unique ID within the WindowAgg; -1 until the planner assigns it */
+	int			navno pg_node_attr(query_jumble_ignore);
+
+	/* result type (same as arg's type) */
+	Oid			resulttype pg_node_attr(query_jumble_ignore);
+	/* OID of collation of result */
+	Oid			resultcollid pg_node_attr(query_jumble_ignore);
+	/* token location, or -1 if unknown */
+	ParseLoc	location;
+} RPRNavExpr;
+
+/*
  * MergeSupportFunc
  *
  * A MergeSupportFunc is a merge support function expression that can only

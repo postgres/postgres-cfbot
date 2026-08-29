@@ -79,6 +79,9 @@ static void _jumbleVariableSetStmt(JumbleState *jstate, Node *node);
 static void _jumbleRangeTblEntry_eref(JumbleState *jstate,
 									  RangeTblEntry *rte,
 									  Alias *expr);
+static void _jumbleWindowClause_defineClause(JumbleState *jstate,
+											 WindowClause *wc,
+											 List *defineClause);
 
 /*
  * Given a possibly multi-statement source string, confine our attention to the
@@ -772,6 +775,39 @@ _jumbleRangeTblEntry_eref(JumbleState *jstate,
 	 * This includes only the table name, the list of column names is ignored.
 	 */
 	JUMBLE_STRING(aliasname);
+}
+
+/*
+ * Custom query jumble function for WindowClause.defineClause.
+ *
+ * The DEFINE clause is stored as a list of TargetEntry, one per row pattern
+ * variable, whose resname is the variable being defined.  TargetEntry.resname
+ * is marked as query_jumble_ignore, however in a DEFINE clause, the resname
+ * is semantically significant: it binds the condition to a PATTERN variable.
+ * "DEFINE A AS p > 50, B AS p < 50" and "DEFINE B AS p > 50, A AS p < 50"
+ * are different queries and must get different query ids. Therefore jumble
+ * TargetEntry.resname is necessary for WindowClause.defineClause.
+ */
+static void
+_jumbleWindowClause_defineClause(JumbleState *jstate,
+								 WindowClause *wc,
+								 List *defineClause)
+{
+	/*
+	 * Jumble the list as the generated code would, so that a window without a
+	 * DEFINE clause keeps its query id.
+	 */
+	_jumbleNode(jstate, (Node *) defineClause);
+
+	/* Then add the variable names, which TargetEntry.resname hides. */
+	foreach_node(TargetEntry, tle, defineClause)
+	{
+		if (tle->resname)
+			AppendJumble(jstate, (const unsigned char *) tle->resname,
+						 strlen(tle->resname) + 1);
+		else
+			AppendJumbleNull(jstate);
+	}
 }
 
 /*

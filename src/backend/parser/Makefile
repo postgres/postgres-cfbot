@@ -30,6 +30,7 @@ OBJS = \
 	parse_oper.o \
 	parse_param.o \
 	parse_relation.o \
+	parse_rpr.o \
 	parse_target.o \
 	parse_type.o \
 	parse_utilcmd.o \

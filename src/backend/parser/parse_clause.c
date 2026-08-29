@@ -39,6 +39,7 @@
 #include "parser/parse_graphtable.h"
 #include "parser/parse_oper.h"
 #include "parser/parse_relation.h"
+#include "parser/parse_rpr.h"
 #include "parser/parse_target.h"
 #include "parser/parse_type.h"
 #include "parser/parser.h"
@@ -3005,6 +3006,8 @@ transformWindowDefinitions(ParseState *pstate,
 		 * And prepare the new WindowClause.
 		 */
 		wc = makeNode(WindowClause);
+		wc->rpSkipTo = ST_NONE; /* ST_NONE marks this as a non-RPR window;
+								 * overridden by transformRPR() if RPR is used */
 		wc->name = windef->name;
 		wc->refname = windef->refname;
 
@@ -3133,6 +3136,10 @@ transformWindowDefinitions(ParseState *pstate,
 											 rangeopfamily, rangeopcintype,
 											 &wc->endInRangeFunc,
 											 windef->endOffset);
+
+		/* Process Row Pattern Recognition related clauses */
+		transformRPR(pstate, wc, windef, targetlist);
+
 		wc->winref = winref;
 
 		result = lappend(result, wc);

@@ -48,6 +48,9 @@ static void unify_hypothetical_args(ParseState *pstate,
 									List *fargs, int numAggregatedArgs,
 									Oid *actual_arg_types, Oid *declared_arg_types);
 static Oid	FuncNameAsType(List *funcname);
+static Node *ParseRPRNavCall(ParseState *pstate, List *funcname,
+							 List *fargs, List *argnames, FuncCall *fn,
+							 int location);
 static Node *ParseComplexProjection(ParseState *pstate, const char *funcname,
 									Node *first_arg, int location);
 static Oid	LookupFuncNameInternal(ObjectType objtype, List *funcname,
@@ -121,6 +124,7 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 	int			fgc_flags;
 	char		aggkind = 0;
 	ParseCallbackState pcbstate;
+	bool		could_be_rpr_nav = false;
 
 	/*
 	 * If there's an aggregate filter, transform it using transformWhereClause
@@ -218,6 +222,28 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 	}
 
 	/*
+	 * Inside an RPR DEFINE clause, an unqualified call to one of the row
+	 * pattern navigation names PREV/NEXT/FIRST/LAST denotes the navigation
+	 * operation, not an ordinary function.  Just note that here; the catalog
+	 * lookup is skipped and the RPRNavExpr is built at the end, after the
+	 * common decoration checks have run (see the could_be_rpr_nav handling
+	 * below).  A schema-qualified call is the explicit way to reach an
+	 * ordinary function of one of these names.
+	 */
+	if (!is_column && !proc_call &&
+		pstate->p_expr_kind == EXPR_KIND_RPR_DEFINE &&
+		list_length(funcname) == 1)
+	{
+		const char *name = strVal(linitial(funcname));
+
+		if (strcmp(name, "prev") == 0 ||
+			strcmp(name, "next") == 0 ||
+			strcmp(name, "first") == 0 ||
+			strcmp(name, "last") == 0)
+			could_be_rpr_nav = true;
+	}
+
+	/*
 	 * Decide whether it's legitimate to consider the construct to be a column
 	 * projection.  For that, there has to be a single argument of complex
 	 * type, the function name must not be qualified, and there cannot be any
@@ -265,17 +291,32 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 	 * with default arguments.
 	 */
 
-	setup_parser_errposition_callback(&pcbstate, pstate, location);
+	if (!could_be_rpr_nav)
+	{
+		setup_parser_errposition_callback(&pcbstate, pstate, location);
 
-	fdresult = func_get_detail(funcname, fargs, argnames, nargs,
-							   actual_arg_types,
-							   !func_variadic, true, proc_call,
-							   &fgc_flags,
-							   &funcid, &rettype, &retset,
-							   &nvargs, &vatype,
-							   &declared_arg_types, &argdefaults);
+		fdresult = func_get_detail(funcname, fargs, argnames, nargs,
+								   actual_arg_types,
+								   !func_variadic, true, proc_call,
+								   &fgc_flags,
+								   &funcid, &rettype, &retset,
+								   &nvargs, &vatype,
+								   &declared_arg_types, &argdefaults);
 
-	cancel_parser_errposition_callback(&pcbstate);
+		cancel_parser_errposition_callback(&pcbstate);
+	}
+	else
+	{
+		/*
+		 * A recognized navigation name skips catalog lookup entirely.  Treat
+		 * it as an ordinary function so the common wrong-kind-of-routine and
+		 * decoration checks below run with the existing messages, then route
+		 * to ParseRPRNavCall to build the RPRNavExpr.
+		 */
+		Assert(!proc_call);
+
+		fdresult = FUNCDETAIL_NORMAL;
+	}
 
 	/*
 	 * Check for various wrong-kind-of-routine cases.
@@ -655,6 +696,15 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 												 proc_call),
 					 parser_errposition(pstate, location)));
 	}
+
+	/*
+	 * A recognized navigation name has now passed the common decoration and
+	 * wrong-kind checks above; build the RPRNavExpr.  No fallback to function
+	 * resolution ever happens here.
+	 */
+	if (could_be_rpr_nav)
+		return ParseRPRNavCall(pstate, funcname, fargs, argnames, fn,
+							   location);
 
 	/*
 	 * If there are default arguments, we have to include their types in
@@ -2090,6 +2140,153 @@ FuncNameAsType(List *funcname)
 }
 
 /*
+ * ParseRPRNavCall
+ *		Recognize a row pattern navigation operation in a DEFINE clause.
+ *
+ * Inside an EXPR_KIND_RPR_DEFINE clause an unqualified call to one of the
+ * names PREV/NEXT/FIRST/LAST denotes the corresponding row pattern navigation
+ * operation (ISO/IEC 19075-5 Subclause 5.6), not an ordinary function call.
+ * The name is matched here, before any catalog lookup, with no fallback to
+ * function resolution: once it matches, decoration and argument-count
+ * violations are dedicated errors rather than letting an ordinary function of
+ * the same name take over.  A schema-qualified call (the caller restricts us
+ * to unqualified names) is the documented way to reach such a function
+ * instead.
+ *
+ * The caller routes here only after the name has matched one of the four
+ * navigation names and the common decoration/wrong-kind checks in
+ * ParseFuncOrColumn have run, so this always returns an RPRNavExpr.
+ */
+static Node *
+ParseRPRNavCall(ParseState *pstate, List *funcname, List *fargs,
+				List *argnames, FuncCall *fn, int location)
+{
+	const char *name = strVal(linitial(funcname));
+	RPRNavKind	kind;
+	const char *navname;
+	int			nargs = list_length(fargs);
+	Node	   *arg;
+	RPRNavExpr *navexpr;
+
+	/* match the parser-downcased identifier; otherwise not a navigation name */
+	if (strcmp(name, "prev") == 0)
+	{
+		kind = RPR_NAV_PREV;
+		navname = "PREV";
+	}
+	else if (strcmp(name, "next") == 0)
+	{
+		kind = RPR_NAV_NEXT;
+		navname = "NEXT";
+	}
+	else if (strcmp(name, "first") == 0)
+	{
+		kind = RPR_NAV_FIRST;
+		navname = "FIRST";
+	}
+	else if (strcmp(name, "last") == 0)
+	{
+		kind = RPR_NAV_LAST;
+		navname = "LAST";
+	}
+	else
+	{
+		/* the caller only routes here after matching one of the four names */
+		pg_unreachable();
+		return NULL;
+	}
+
+	/*
+	 * Once the name matches we never fall back to function resolution, so any
+	 * decoration that does not make sense for a navigation operation is a
+	 * hard error.  The aggregate/window decorations (agg_star, DISTINCT,
+	 * WITHIN GROUP, ORDER BY, FILTER, OVER, RESPECT/IGNORE NULLS) are already
+	 * rejected by the common path in ParseFuncOrColumn, which treated the
+	 * recognized name as an ordinary function; what remains are the
+	 * decorations that path accepts for a plain function but a navigation
+	 * operation must still reject.
+	 */
+	if (fn->func_variadic)
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("cannot use VARIADIC with row pattern navigation function %s",
+						navname),
+				 parser_errposition(pstate, location)));
+	if (argnames != NIL)
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("cannot use named arguments with row pattern navigation function %s",
+						navname),
+				 parser_errposition(pstate, location)));
+	/* takes a value expression and an optional offset */
+	if (nargs == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("too few arguments for row pattern navigation function %s",
+						navname),
+				 errdetail("%s takes a value expression and an optional offset argument.",
+						   navname),
+				 parser_errposition(pstate, location)));
+	if (nargs > 2)
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("too many arguments for row pattern navigation function %s",
+						navname),
+				 errdetail("%s takes a value expression and an optional offset argument.",
+						   navname),
+				 parser_errposition(pstate, location)));
+
+	/*
+	 * Resolve a still-unknown first argument to text, the same way the
+	 * anycompatible family does.  A navigation operation is not a polymorphic
+	 * function, so the old "could not determine polymorphic type" error does
+	 * not apply; an unknown literal cannot contain a column reference, so the
+	 * walker still rejects it later.
+	 */
+	arg = linitial(fargs);
+	if (exprType(arg) == UNKNOWNOID)
+		arg = coerce_to_common_type(pstate, arg, TEXTOID, navname);
+
+	navexpr = makeNode(RPRNavExpr);
+	navexpr->kind = kind;
+	navexpr->arg = (Expr *) arg;
+	navexpr->navno = -1;		/* assigned while planning */
+
+	/* an explicit offset is coerced to int8, which the executor reads */
+	if (nargs == 2)
+	{
+		Node	   *offset = lsecond(fargs);
+		Oid			offtype = exprType(offset);
+
+		if (offtype != INT8OID)
+		{
+			Node	   *newoffset;
+
+			newoffset = coerce_to_target_type(pstate, offset, offtype,
+											  INT8OID, -1, COERCION_IMPLICIT,
+											  COERCE_IMPLICIT_CAST, -1);
+			if (newoffset == NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_DATATYPE_MISMATCH),
+						 errmsg("offset argument of %s must be type %s, not type %s",
+								navname, "bigint", format_type_be(offtype)),
+						 parser_errposition(pstate, exprLocation(offset))));
+			offset = newoffset;
+		}
+		navexpr->offset_arg = (Expr *) offset;
+	}
+	else
+		navexpr->offset_arg = NULL;
+
+	/* compound_offset_arg stays NULL; define_walker flattening fills it in */
+	navexpr->resulttype = exprType(arg);
+	/* resultcollid will be set by parse_collate.c */
+	navexpr->location = location;
+
+	return (Node *) navexpr;
+}
+
+/*
  * ParseComplexProjection -
  *	  handles function calls with a single argument that is of complex type.
  *	  If the function call is actually a column projection, return a suitably
@@ -2847,6 +3044,9 @@ check_srf_call_placement(ParseState *pstate, Node *last_srf, int location)
 			break;
 		case EXPR_KIND_FOR_PORTION:
 			err = _("set-returning functions are not allowed in FOR PORTION OF expressions");
+			break;
+		case EXPR_KIND_RPR_DEFINE:
+			errkind = true;
 			break;
 
 			/*
