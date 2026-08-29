@@ -3915,6 +3915,7 @@ intset_internal_node
 intset_leaf_node
 intset_node
 intvKEY
+invalidDbMode
 io_callback_fn
 io_stat_col
 itemIdCompact

@@ -1068,7 +1068,10 @@ check_is_install_user(ClusterInfo *cluster)
  *
  *	Ensure that all non-template0 databases allow connections since they
  *	otherwise won't be restored; and that template0 explicitly doesn't allow
- *	connections since it would make pg_dumpall --globals restore fail.
+ *	connections since it would make pg_dumpall --globals restore fail. Invalid
+ *	databases (whose DROP DATABASE was interrupted) are skipped by default and
+ *	reported here; with --invalid-databases=error they abort the upgrade
+ *	instead.
  */
 static void
 check_for_connection_status(ClusterInfo *cluster)
@@ -1081,6 +1084,7 @@ check_for_connection_status(ClusterInfo *cluster)
 	int			i_datallowconn;
 	int			i_datconnlimit;
 	FILE	   *script = NULL;
+	bool		skipped_invalid = false;
 	char		output_path[MAXPGPATH];
 
 	prep_status("Checking database connection settings");
@@ -1114,20 +1118,36 @@ check_for_connection_status(ClusterInfo *cluster)
 				pg_fatal("template0 must not allow connections, "
 						 "i.e. its pg_database.datallowconn must be false");
 		}
-		else
-		{
-			/*
-			 * Avoid datallowconn == false databases from being skipped on
-			 * restore, and ensure that no databases are marked invalid with
-			 * datconnlimit == -2.
-			 */
-			if ((strcmp(datallowconn, "f") == 0) || strcmp(datconnlimit, "-2") == 0)
-			{
-				if (script == NULL && (script = fopen_priv(output_path, "w")) == NULL)
-					pg_fatal("could not open file \"%s\": %m", output_path);
 
-				fprintf(script, "%s\n", datname);
+		/*
+		 * Skip invalid databases unless the user asked us to treat them as an
+		 * error. They are left out of the upgrade, and their files are
+		 * removed along with the rest of the old cluster by the generated
+		 * delete_old_cluster script.
+		 */
+		else if (strcmp(datconnlimit, "-2") == 0 &&
+				 user_opts.invalid_db_mode == INVALID_DB_SKIP)
+		{
+			if (!skipped_invalid)
+			{
+				report_status(PG_WARNING, "warning");
+				skipped_invalid = true;
 			}
+			pg_log(PG_WARNING,
+				   "invalid database \"%s\" will not be upgraded", datname);
+		}
+
+		/*
+		 * Databases that disallow connections would be silently skipped on
+		 * restore, and invalid databases in --invalid-databases=error mode
+		 * must not be carried over, so both block the upgrade.
+		 */
+		else if (strcmp(datallowconn, "f") == 0 || strcmp(datconnlimit, "-2") == 0)
+		{
+			if (script == NULL && (script = fopen_priv(output_path, "w")) == NULL)
+				pg_fatal("could not open file \"%s\": %m", output_path);
+
+			fprintf(script, "%s\n", datname);
 		}
 	}
 
@@ -1147,7 +1167,7 @@ check_for_connection_status(ClusterInfo *cluster)
 				 "connections.  A list of databases with the problem is in the file:\n"
 				 "    %s", output_path);
 	}
-	else
+	else if (!skipped_invalid)
 		check_ok();
 }
 
