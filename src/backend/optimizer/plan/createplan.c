@@ -35,6 +35,7 @@
 #include "optimizer/planmain.h"
 #include "optimizer/prep.h"
 #include "optimizer/restrictinfo.h"
+#include "optimizer/rpr.h"
 #include "optimizer/subselect.h"
 #include "optimizer/tlist.h"
 #include "parser/parse_clause.h"
@@ -294,7 +295,10 @@ static Memoize *make_memoize(Plan *lefttree, Oid *hashoperators,
 static WindowAgg *make_windowagg(List *tlist, WindowClause *wc,
 								 int partNumCols, AttrNumber *partColIdx, Oid *partOperators, Oid *partCollations,
 								 int ordNumCols, AttrNumber *ordColIdx, Oid *ordOperators, Oid *ordCollations,
-								 List *runCondition, List *qual, bool topWindow,
+								 List *runCondition,
+								 RPRPattern *compiledPattern,
+								 Bitmapset *defineMatchStartDependent,
+								 List *qual, bool topWindow,
 								 Plan *lefttree);
 static Group *make_group(List *tlist, List *qual, int numGroupCols,
 						 AttrNumber *grpColIdx, Oid *grpOperators, Oid *grpCollations,
@@ -2466,6 +2470,125 @@ create_minmaxagg_plan(PlannerInfo *root, MinMaxAggPath *best_path)
 }
 
 /*
+ * DefineMetadataContext - context for the DEFINE clause walk below.
+ *
+ * The walk classifies one thing: which DEFINE variables depend on the match
+ * start, which is what buildRPRPattern() needs to decide context absorption.
+ * The trim offsets are not plan-time metadata; the executor records them at
+ * init (build_define_offsets) and settles their values per scan
+ * (resolve_nav_offsets), both in nodeWindowAgg.c.
+ *
+ * The driver sets curVarIdx to the index of the variable being walked before
+ * each invocation; the walker uses it to populate matchStartDependent.
+ */
+typedef struct DefineMetadataContext
+{
+	int			curVarIdx;		/* DEFINE variable currently being walked */
+	int			navno;			/* next RPRNavExpr.navno to assign */
+	Bitmapset  *matchStartDependent;	/* variables that depend on
+										 * match_start */
+} DefineMetadataContext;
+
+/*
+ * compute_matchStartDependent
+ *
+ * per-variable match_start dependency for absorption suppression: outer nav
+ * kinds that reach match_start (FIRST, LAST-with-offset, PREV_FIRST,
+ * NEXT_FIRST, PREV_LAST/NEXT_LAST-with-offset) add curVarIdx to
+ * matchStartDependent.
+ *
+ * Classification uses only the outer nav kind: parser nesting restrictions
+ * prevent FIRST/LAST inside a PREV/NEXT value subexpression.
+ */
+static void
+compute_matchStartDependent(RPRNavExpr *nav, DefineMetadataContext *context)
+{
+	/*
+	 * Parser guarantee: by the time the planner sees a DEFINE expression,
+	 * compound nesting has been flattened into a single RPRNavExpr and any
+	 * other RPRNavExpr nesting has been rejected.  So nav's direct child
+	 * fields are not themselves RPRNavExpr nodes, and outer-kind dispatch
+	 * below is sufficient.
+	 */
+	Assert(nav->arg == NULL || !IsA(nav->arg, RPRNavExpr));
+	Assert(nav->offset_arg == NULL || !IsA(nav->offset_arg, RPRNavExpr));
+	Assert(nav->compound_offset_arg == NULL ||
+		   !IsA(nav->compound_offset_arg, RPRNavExpr));
+
+	/*
+	 * Match-start dependency: classify the outer nav kind.  A constant
+	 * LAST(x, 0) is conservatively included (offset_arg is a non-NULL Const),
+	 * causing a harmless extra re-evaluation; since LAST(x, 0) is the current
+	 * row, its result is independent of the match start.
+	 */
+	if (nav->kind == RPR_NAV_FIRST ||
+		(nav->kind == RPR_NAV_LAST && nav->offset_arg != NULL) ||
+		nav->kind == RPR_NAV_PREV_FIRST ||
+		nav->kind == RPR_NAV_NEXT_FIRST ||
+		((nav->kind == RPR_NAV_PREV_LAST ||
+		  nav->kind == RPR_NAV_NEXT_LAST) &&
+		 nav->offset_arg != NULL))
+		context->matchStartDependent =
+			bms_add_member(context->matchStartDependent,
+						   context->curVarIdx);
+}
+
+static bool
+RPRNavExpr_walker(Node *node, DefineMetadataContext *ctx)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, RPRNavExpr))
+	{
+		RPRNavExpr *nav = castNode(RPRNavExpr, node);
+
+		nav->navno = ctx->navno++;
+		compute_matchStartDependent(nav, ctx);
+	}
+
+	return expression_tree_walker(node, RPRNavExpr_walker, ctx);
+}
+
+/*
+ * compute_define_metadata
+ *		Classify which DEFINE variables depend on the match start, and number
+ *		the navigations.
+ *
+ * Walks each DEFINE variable expression once and returns the set of variable
+ * indices whose navigation reaches match_start: those containing FIRST or a
+ * compound PREV_FIRST/NEXT_FIRST, or a LAST that carries an offset of its
+ * own, whether plain or inside a compound PREV_LAST/NEXT_LAST.  Such
+ * variables require per-context re-evaluation during NFA processing, and
+ * their presence disqualifies the pattern from context absorption.
+ *
+ * The same walk assigns RPRNavExpr.navno in visit order, which is the order
+ * the executor builds WindowAggState.rprNavOffsets in.
+ *
+ * Navigation offsets for tuplestore trim are not computed here; they are
+ * built at executor init (build_define_offsets) and settled per scan
+ * (resolve_nav_offsets), which can evaluate non-constant offsets that the
+ * planner cannot fold.
+ */
+static void
+compute_define_metadata(List *defineClause, Bitmapset **matchStartDependent)
+{
+	DefineMetadataContext ctx;
+
+	ctx.curVarIdx = 0;
+	ctx.navno = 0;
+	ctx.matchStartDependent = NULL;
+
+	foreach_node(TargetEntry, te, defineClause)
+	{
+		ctx.curVarIdx = foreach_current_index(te);
+
+		RPRNavExpr_walker((Node *) te->expr, &ctx);
+	}
+
+	*matchStartDependent = ctx.matchStartDependent;
+}
+
+/*
  * create_windowagg_plan
  *
  *	  Create a WindowAgg plan for 'best_path' and (recursively) plans
@@ -2489,6 +2612,8 @@ create_windowagg_plan(PlannerInfo *root, WindowAggPath *best_path)
 	Oid		   *ordOperators;
 	Oid		   *ordCollations;
 	ListCell   *lc;
+	RPRPattern *compiledPattern = NULL;
+	Bitmapset  *matchStartDependent = NULL;
 
 	/*
 	 * Choice of tlist here is motivated by the fact that WindowAgg will be
@@ -2539,6 +2664,24 @@ create_windowagg_plan(PlannerInfo *root, WindowAggPath *best_path)
 		ordNumCols++;
 	}
 
+	/* Build RPR pattern */
+	if (wc->rpPattern)
+	{
+		/*
+		 * Classify which DEFINE variables depend on match_start (for
+		 * absorption suppression in buildRPRPattern).  Nav offsets for
+		 * tuplestore trim are resolved later, at executor init.
+		 */
+		compute_define_metadata(wc->defineClause, &matchStartDependent);
+
+		/* Compile and optimize RPR patterns */
+		compiledPattern = buildRPRPattern(wc->rpPattern,
+										  wc->defineClause,
+										  wc->rpSkipTo,
+										  wc->frameOptions,
+										  !bms_is_empty(matchStartDependent));
+	}
+
 	/* And finally we can make the WindowAgg node */
 	plan = make_windowagg(tlist,
 						  wc,
@@ -2551,6 +2694,8 @@ create_windowagg_plan(PlannerInfo *root, WindowAggPath *best_path)
 						  ordOperators,
 						  ordCollations,
 						  best_path->runCondition,
+						  compiledPattern,
+						  matchStartDependent,
 						  best_path->qual,
 						  best_path->topwindow,
 						  subplan);
@@ -6649,7 +6794,10 @@ static WindowAgg *
 make_windowagg(List *tlist, WindowClause *wc,
 			   int partNumCols, AttrNumber *partColIdx, Oid *partOperators, Oid *partCollations,
 			   int ordNumCols, AttrNumber *ordColIdx, Oid *ordOperators, Oid *ordCollations,
-			   List *runCondition, List *qual, bool topWindow, Plan *lefttree)
+			   List *runCondition,
+			   RPRPattern *compiledPattern,
+			   Bitmapset *defineMatchStartDependent,
+			   List *qual, bool topWindow, Plan *lefttree)
 {
 	WindowAgg  *node = makeNode(WindowAgg);
 	Plan	   *plan = &node->plan;
@@ -6676,6 +6824,15 @@ make_windowagg(List *tlist, WindowClause *wc,
 	node->inRangeAsc = wc->inRangeAsc;
 	node->inRangeNullsFirst = wc->inRangeNullsFirst;
 	node->topWindow = topWindow;
+	node->rpSkipTo = wc->rpSkipTo;
+
+	/* Store compiled pattern for NFA execution */
+	node->rpPattern = compiledPattern;
+
+	node->defineClause = wc->defineClause;
+
+	/* Store pre-computed match_start dependency bitmapset */
+	node->defineMatchStartDependent = defineMatchStartDependent;
 
 	plan->targetlist = tlist;
 	plan->lefttree = lefttree;

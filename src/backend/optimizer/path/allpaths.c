@@ -2467,6 +2467,17 @@ find_window_run_conditions(Query *subquery, AttrNumber attno,
 	wclause = (WindowClause *) list_nth(subquery->windowClause,
 										wfunc->winref - 1);
 
+	/*
+	 * If a DEFINE clause exists, we cannot push down a run condition. In the
+	 * case, a window partition (or frame) is divided into multiple reduced
+	 * frames and each frame should be evaluated to the end of the partition
+	 * (or full frame end). This means we cannot apply the run condition
+	 * optimization because it stops evaluation window functions in certain
+	 * cases.
+	 */
+	if (wclause->defineClause != NIL)
+		return false;
+
 	req.type = T_SupportRequestWFuncMonotonic;
 	req.window_func = wfunc;
 	req.window_clause = wclause;
@@ -4917,6 +4928,84 @@ remove_unused_subquery_outputs(Query *subquery, RelOptInfo *rel,
 		 */
 		if (contain_volatile_functions(texpr))
 			continue;
+
+		/*
+		 * If any RPR (Row Pattern Recognition) window clause references this
+		 * column in its DEFINE clause, don't remove it.  The DEFINE
+		 * expression needs these columns in the tuplestore slot for pattern
+		 * matching evaluation, even if the outer query doesn't reference
+		 * them.
+		 */
+		if (IsA(texpr, Var))
+		{
+			Var		   *var = (Var *) texpr;
+			bool		needed_by_define = false;
+
+			foreach_node(WindowClause, wc, subquery->windowClause)
+			{
+				if (wc->defineClause != NIL)
+				{
+					/*
+					 * flags == 0 is safe: DEFINE rejects aggregates, window
+					 * functions and subqueries at parse time, and this runs
+					 * before any PlaceHolderVar could be planted.
+					 */
+					List	   *vars = pull_var_clause((Node *) wc->defineClause, 0);
+
+					foreach_node(Var, dvar, vars)
+					{
+
+						/*
+						 * Match varno as well as varattno: a Var pulled from
+						 * a DEFINE clause can share an attribute number with
+						 * an unrelated output column of a different relation,
+						 * which would otherwise be over-retained.  Checking
+						 * varlevelsup is just paranoia, since outer
+						 * references in DEFINE are rejected during parse
+						 * analysis.
+						 */
+						if (dvar->varno == var->varno &&
+							dvar->varattno == var->varattno &&
+							dvar->varlevelsup == var->varlevelsup)
+						{
+							needed_by_define = true;
+							break;
+						}
+					}
+					list_free(vars);
+					if (needed_by_define)
+						break;
+				}
+			}
+			if (needed_by_define)
+				continue;
+		}
+
+		/*
+		 * If it's a window function referencing a window clause with RPR,
+		 * don't remove it.  Even when the window function result is unused by
+		 * the outer query, the RPR pattern matching (frame reduction via
+		 * DEFINE/PATTERN) must still execute.  Replacing this with NULL would
+		 * leave no active window functions for the WindowClause, causing the
+		 * planner to omit the WindowAgg node entirely.
+		 */
+		if (IsA(texpr, WindowFunc))
+		{
+			bool		is_rpr = false;
+			WindowFunc *wfunc = (WindowFunc *) texpr;
+
+			foreach_node(WindowClause, wc, subquery->windowClause)
+			{
+				if (wc->winref == wfunc->winref && wc->defineClause != NIL)
+				{
+					is_rpr = true;
+					break;
+				}
+			}
+
+			if (is_rpr)
+				continue;
+		}
 
 		/*
 		 * OK, we don't need it.  Replace the expression with a NULL constant.
