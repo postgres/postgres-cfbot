@@ -439,22 +439,18 @@ main(int argc, char **argv)
 			target_wal_endrec = chkptendrec;
 		}
 
-		/*
-		 * Check for the possibility that the target is in fact a direct
-		 * ancestor of the source. In that case, there is no divergent history
-		 * in the target that needs rewinding.
-		 */
-		if (target_wal_endrec > divergerec)
-		{
-			rewind_needed = true;
-		}
-		else
-		{
-			/* the last common checkpoint record must be part of target WAL */
-			Assert(target_wal_endrec == divergerec);
+		pg_log_info("target WAL ends at %X/%08X", LSN_FORMAT_ARGS(target_wal_endrec));
 
-			rewind_needed = false;
-		}
+		/*
+		 * The target WAL cannot end before the divergence point.
+		 * If target_wal_endrec == divergerec, the target wrote no WAL past the 
+		 * fork point. However, because the timelines diverged, we must still 
+		 * synchronize non-WAL files and fetch the new timeline history.
+		 */
+		if (target_wal_endrec < divergerec)
+			pg_fatal("target WAL ends before the divergence point");
+
+		rewind_needed = true;
 	}
 
 	if (!rewind_needed)
@@ -471,7 +467,7 @@ main(int argc, char **argv)
 	keepwal_init();
 
 	findLastCheckpoint(datadir_target, divergerec, lastcommontliIndex,
-					   &chkptrec, &chkpttli, &chkptredo, restore_command);
+					   &chkptrec, &chkpttli, &chkptredo, restore_command, ControlFile_target.checkPoint);
 	pg_log_info("rewinding from last common checkpoint at %X/%08X on timeline %u",
 				LSN_FORMAT_ARGS(chkptrec), chkpttli);
 
