@@ -24,6 +24,7 @@
 #include "access/nbtree.h"
 #include "access/reloptions.h"
 #include "access/spgist_private.h"
+#include "access/tableam.h"
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
 #include "commands/tablespace.h"
@@ -621,6 +622,7 @@ static relopt_gen **custom_options = NULL;
 static bool need_initialization = true;
 
 static void initialize_reloptions(void);
+static relopt_gen *find_reloption(const char *name, relopt_kind kind);
 static void parse_one_reloption(relopt_value *option, char *text_str,
 								int text_len, bool validate);
 
@@ -841,6 +843,26 @@ add_reloption_kind(void)
 				 errmsg("user-defined relation parameter types limit exceeded")));
 	last_assigned_kind <<= 1;
 	return (relopt_kind) last_assigned_kind;
+}
+
+/*
+ * add_reloption_to_kind
+ *		Make a heap reloption valid for an additional kind.
+ *
+ * This lets a table access method with its own relopt_kind accept a
+ * standard option such as fillfactor without defining it again.
+ */
+void
+add_reloption_to_kind(const char *name, relopt_kind kind)
+{
+	relopt_gen *gen = find_reloption(name, RELOPT_KIND_HEAP);
+
+	if (gen == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("reloption \"%s\" does not exist", name)));
+
+	gen->kinds |= kind;
 }
 
 /*
@@ -1609,8 +1631,11 @@ extractRelOptions(HeapTuple tuple, TupleDesc tupdesc,
 	switch (classForm->relkind)
 	{
 		case RELKIND_RELATION:
-		case RELKIND_TOASTVALUE:
 		case RELKIND_MATVIEW:
+			options = table_reloptions(amoptions, classForm->relkind,
+									   datum, false);
+			break;
+		case RELKIND_TOASTVALUE:
 			options = heap_reloptions(classForm->relkind, datum, false);
 			break;
 		case RELKIND_PARTITIONED_TABLE:
@@ -2388,6 +2413,43 @@ heap_reloptions(char relkind, Datum reloptions, bool validate)
 			/* other relkinds are not supported */
 			return NULL;
 	}
+}
+
+/*
+ * Parse options for a table or materialized view.
+ *
+ *	amoptions	the table AM's amoptions callback, or NULL to use
+ *				heap_reloptions()
+ *	relkind		the relation's kind
+ *	reloptions	options as text[] datum
+ *	validate	error flag
+ */
+bytea *
+table_reloptions(amoptions_function amoptions, char relkind,
+				 Datum reloptions, bool validate)
+{
+	if (amoptions == NULL)
+		return heap_reloptions(relkind, reloptions, validate);
+
+	/* Assume the AM's defaults are wanted if no options were given */
+	if (DatumGetPointer(reloptions) == NULL)
+		return NULL;
+
+	return amoptions(reloptions, validate);
+}
+
+/*
+ * Returns the options parser to pass to table_reloptions() for a table or
+ * materialized view: its table AM's amoptions callback, or NULL if the
+ * relation's options are parsed with heap_reloptions().
+ */
+amoptions_function
+RelationGetTableAmOptions(Relation relation)
+{
+	Assert(relation->rd_rel->relkind == RELKIND_RELATION ||
+		   relation->rd_rel->relkind == RELKIND_MATVIEW);
+
+	return relation->rd_tableam ? relation->rd_tableam->amoptions : NULL;
 }
 
 
