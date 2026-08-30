@@ -5,6 +5,7 @@
 #include "c.h"
 #include "catalog/pg_type.h"
 #include "nodes/miscnodes.h"
+#include "nodes/pathnodes.h"
 #include "nodes/primnodes.h"
 #include "nodes/supportnodes.h"
 #include "parser/scansup.h"
@@ -31,7 +32,7 @@ typedef enum SLOPE_SIGN
 	SLOPE_SIGN_PINF = 2,
 	SLOPE_SIGN_NAN = 3,
 	SLOPE_SIGN_NULL = 4,
-}			SLOPE_SIGN;
+} SLOPE_SIGN;
 
 #define SLOPE_REQUEST(req) \
 	SupportRequestMonotonic *req; \
@@ -363,7 +364,6 @@ get_const_timezone_arg(List *args, int argno)
 	text	   *zone;
 	char		tzname[TZ_STRLEN_MAX + 1];
 	ErrorSaveContext escontext = {T_ErrorSaveContext};
-	int			offset;
 	pg_tz	   *tz;
 
 	if (args == NULL || list_length(args) <= argno)
@@ -381,10 +381,27 @@ get_const_timezone_arg(List *args, int argno)
 	zone = DatumGetTextPP(tz_const->constvalue);
 	text_to_cstring_buffer(zone, tzname, sizeof(tzname));
 
-	DecodeTimezoneName(tzname, &offset, &tz, (Node *) &escontext);
+	DecodeTimezoneName(tzname, NULL, &tz, (Node *) &escontext);
 	if (escontext.error_occurred)
 		return NULL;
 	return tz;
+}
+
+
+/*
+ * Session TimeZone is only safe to consult for oneshot plans.  A cached
+ * plan that baked in the current zone would go stale after SET TimeZone.
+ * Non-monotonic prosupport requests (and a NULL root) must not be
+ * treated as SupportRequestMonotonic: the struct layouts differ.
+ */
+static pg_tz *
+get_plan_timezone(SupportRequestMonotonic *req)
+{
+	if (req->root != NULL &&
+		req->root->glob != NULL &&
+		req->root->glob->is_oneshot)
+		return session_timezone;
+	return NULL;
 }
 
 /*
@@ -393,19 +410,21 @@ get_const_timezone_arg(List *args, int argno)
 Datum
 timestamptz_date_slope_support(PG_FUNCTION_ARGS)
 {
+	pg_tz		 *tzp;
 	SLOPE_REQUEST(req);
 
-	if (pg_timezone_is_monotonic(session_timezone, TZ_GAP_DAY, false))
+	tzp = get_plan_timezone(req);
+
+	if (tzp != NULL && pg_timezone_is_monotonic(tzp, TZ_GAP_DAY, false))
 		return monotonic_slope_support(req, 1, asc0_slope);
 	else
 		PG_RETURN_POINTER(NULL);
 }
 
 static Oid
-get_monotonic_expr_funcid(SupportRequestMonotonic * req)
+get_monotonic_expr_funcid(SupportRequestMonotonic *req)
 {
 	Node	   *expr = req->expr;
-
 	if (IsA(expr, FuncExpr))
 		return ((FuncExpr *) expr)->funcid;
 	return InvalidOid;
@@ -491,7 +510,7 @@ timezone_prosupport(PG_FUNCTION_ARGS)
 			to_utc = true;
 			pg_fallthrough;
 		case F_TIMEZONE_TIMESTAMPTZ:
-			tzp = session_timezone;
+			tzp = get_plan_timezone(req);
 			break;
 
 		default:
@@ -502,9 +521,10 @@ timezone_prosupport(PG_FUNCTION_ARGS)
 		PG_RETURN_POINTER(NULL);
 
 	/*
-	 * We need MONOTONICFUNC_INCREASING for either the first or second
-	 * argument, but the other argument is either a constant or missing, so we
-	 * can simply return MONOTONICFUNC_INCREASING for both.
+	 * We need MONOTONICFUNC_INCREASING for either the first or
+	 * second argument, but the other argument is either a constant
+	 * or missing, so we can simply return MONOTONICFUNC_INCREASING
+	 * for both.
 	 */
 	return monotonic_slope_support(req, 2, asc_slope);
 }
@@ -534,7 +554,7 @@ date_trunc_slope_support(PG_FUNCTION_ARGS)
 			break;
 
 		case F_DATE_TRUNC_TEXT_TIMESTAMPTZ:
-			tzp = session_timezone;
+			tzp = get_plan_timezone(req);
 			break;
 
 		default:
