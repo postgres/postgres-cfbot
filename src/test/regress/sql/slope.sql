@@ -633,6 +633,15 @@ EXECUTE query_local;
 SET timezone = 'America/Goose_Bay';
 EXECUTE query_local;
 
+--
+-- TimeZone lookup error handling
+--
+-- Errors should not be thrown at planning time
+-- if the timezone lookup fails.
+
+EXPLAIN (COSTS OFF)
+SELECT min(date_trunc('day', ts, 'Bogus/Zone')) FROM src;
+SELECT min(date_trunc('day', ts, 'Bogus/Zone')) FROM src;
 
 DEALLOCATE ALL;
 DROP SCHEMA slope CASCADE;
