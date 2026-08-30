@@ -489,6 +489,14 @@ CompleteCachedPlan(CachedPlanSource *plansource,
 	plansource->parserSetup = parserSetup;
 	plansource->parserSetupArg = parserSetupArg;
 	plansource->cursor_options = cursor_options;
+	/*
+	 * Mirror CachedPlanSource.is_oneshot into cursor_options.
+	 * Oneshot plans may use statement-local optimizations;
+	 * if the bit is unset the plan may be reused and must
+	 * not go stale.
+	 */
+	if (plansource->is_oneshot)
+		plansource->cursor_options |= CURSOR_OPT_ONESHOT;
 	plansource->fixed_result = fixed_result;
 
 	/*
