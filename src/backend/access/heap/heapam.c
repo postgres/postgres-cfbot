@@ -110,8 +110,9 @@ static bool ConditionalMultiXactIdWait(MultiXactId multi, MultiXactStatus status
 static void index_delete_sort(TM_IndexDeleteOp *delstate);
 static int	bottomup_sort_and_shrink(TM_IndexDeleteOp *delstate);
 static XLogRecPtr log_heap_new_cid(Relation relation, HeapTuple tup);
-static HeapTuple ExtractReplicaIdentity(Relation relation, HeapTuple tp, bool key_required,
-										bool *copy);
+static HeapTuple BuildOldKeyTuple(Relation relation, HeapTuple tp, HeapTuple newtp,
+								  bool key_required, bool log_unchanged_external,
+								  bool *copy);
 
 
 /*
@@ -3009,7 +3010,7 @@ l1:
 	 * we don't PANIC upon a memory allocation failure.
 	 */
 	old_key_tuple = walLogical ?
-		ExtractReplicaIdentity(relation, &tp, true, &old_key_copied) : NULL;
+		BuildOldKeyTuple(relation, &tp, NULL, true, false, &old_key_copied) : NULL;
 
 	/*
 	 * If this is the first possibly-multixact-able operation in the current
@@ -3308,6 +3309,8 @@ heap_update(Relation relation, const ItemPointerData *otid, HeapTuple newtup,
 	bool		checked_lockers;
 	bool		locker_remains;
 	bool		id_has_external = false;
+	bool		key_changed = false;
+	bool		log_unchanged_external = false;
 	TransactionId xmax_new_tuple,
 				xmax_old_tuple;
 	uint16		infomask_old_tuple,
@@ -3365,6 +3368,20 @@ heap_update(Relation relation, const ItemPointerData *otid, HeapTuple newtup,
 	interesting_attrs = bms_add_members(interesting_attrs, sum_attrs);
 	interesting_attrs = bms_add_members(interesting_attrs, key_attrs);
 	interesting_attrs = bms_add_members(interesting_attrs, id_attrs);
+
+	/*
+	 * Determine whether this update must WAL-log the values of unchanged,
+	 * out-of-line, non-replica-identity columns, so that a publication row
+	 * filter's UPDATE-to-INSERT transformation can still reconstruct them
+	 * during decoding; see BuildOldKeyTuple.
+	 *
+	 * The relcache lookup for row filter existence requires catalog access,
+	 * so we perform it before acquiring the buffer lock.
+	 */
+	if (walLogical && RelationIsLogicallyLogged(relation) &&
+		relation->rd_rel->relreplident != REPLICA_IDENTITY_FULL &&
+		RelationHasPubRowFilterForUpdate(relation))
+		log_unchanged_external = true;
 
 	block = ItemPointerGetBlockNumber(otid);
 	INJECTION_POINT("heap_update-before-pin", NULL);
@@ -3447,7 +3464,7 @@ heap_update(Relation relation, const ItemPointerData *otid, HeapTuple newtup,
 	 * old tuple is externally stored or not.  This is required because for
 	 * such attributes the flattened value won't be WAL logged as part of the
 	 * new tuple so we must include it as part of the old_key_tuple.  See
-	 * ExtractReplicaIdentity.
+	 * BuildOldKeyTuple.
 	 */
 	modified_attrs = HeapDetermineColumnsInfo(relation, interesting_attrs,
 											  id_attrs, &oldtup,
@@ -4090,15 +4107,27 @@ l2:
 
 	/*
 	 * Compute replica identity tuple before entering the critical section so
-	 * we don't PANIC upon a memory allocation failure.
-	 * ExtractReplicaIdentity() will return NULL if nothing needs to be
-	 * logged.  Pass old key required as true only if the replica identity key
-	 * columns are modified or it has external data.
+	 * we don't PANIC upon a memory allocation failure. BuildOldKeyTuple()
+	 * will return NULL if nothing needs to be logged.  Pass old key required
+	 * as true only if the replica identity key columns are modified or it has
+	 * external data.
+	 *
+	 * Ask for unchanged, non-replica-identity, out-of-line column values to
+	 * be logged along with the key when a publication row filter could
+	 * transform this update into an insert during decoding.  The
+	 * transformation requires a change of the replica identity key, because
+	 * row filters may only reference replica identity columns, so don't
+	 * bother when the key is intact; id_has_external alone does not imply a
+	 * key change.  Without external data in both the old and the new tuple
+	 * there is nothing to preserve either.
 	 */
-	old_key_tuple = ExtractReplicaIdentity(relation, &oldtup,
-										   bms_overlap(modified_attrs, id_attrs) ||
-										   id_has_external,
-										   &old_key_copied);
+	key_changed = bms_overlap(modified_attrs, id_attrs);
+	old_key_tuple = BuildOldKeyTuple(relation, &oldtup, newtup,
+									 key_changed || id_has_external,
+									 log_unchanged_external && key_changed &&
+									 HeapTupleHasExternal(&oldtup) &&
+									 HeapTupleHasExternal(newtup),
+									 &old_key_copied);
 
 	clear_all_visible = PageIsAllVisible(page);
 	clear_all_visible_new = newbuf != buffer && PageIsAllVisible(newpage);
@@ -9322,8 +9351,10 @@ log_heap_new_cid(Relation relation, HeapTuple tup)
 }
 
 /*
- * Build a heap tuple representing the configured REPLICA IDENTITY to represent
- * the old tuple in an UPDATE or DELETE.
+ * Build the old-key tuple to be WAL-logged for an UPDATE or DELETE, holding the
+ * old tuple's replica identity column values and, if requested
+ * (log_unchanged_external), unchanged non-replica-identity external data. For
+ * REPLICA IDENTITY FULL, the whole old tuple is flattened and returned.
  *
  * Returns NULL if there's no need to log an identity or if there's no suitable
  * key defined.
@@ -9331,12 +9362,25 @@ log_heap_new_cid(Relation relation, HeapTuple tup)
  * Pass key_required true if any replica identity columns changed value, or if
  * any of them have any external data.  Delete must always pass true.
  *
+ * For updates (newtp non-NULL), log_unchanged_external asks for the values of
+ * unchanged, non-replica-identity columns that are stored out-of-line to be
+ * included in the old-key tuple as well.  Such values normally appear nowhere
+ * in the update's WAL record, but a publication row filter can transform the
+ * update into an insert during decoding, and the insert would otherwise have no
+ * way to reconstruct them (the output plugin copies them over from the old
+ * tuple, see pgoutput_row_filter()).  heap_update() requests this only when
+ * the table is published with a row filter and the update changes the
+ * replica identity key: the extra columns only matter when the key changes,
+ * because a row filter can only reference replica identity columns, so the
+ * transformation requires a key change.
+ *
  * *copy is set to true if the returned tuple is a modified copy rather than
  * the same tuple that was passed in.
  */
 static HeapTuple
-ExtractReplicaIdentity(Relation relation, HeapTuple tp, bool key_required,
-					   bool *copy)
+BuildOldKeyTuple(Relation relation, HeapTuple tp, HeapTuple newtp,
+				 bool key_required, bool log_unchanged_external,
+				 bool *copy)
 {
 	TupleDesc	desc = RelationGetDescr(relation);
 	char		replident = relation->rd_rel->relreplident;
@@ -9385,19 +9429,69 @@ ExtractReplicaIdentity(Relation relation, HeapTuple tp, bool key_required,
 		return NULL;
 
 	/*
-	 * Construct a new tuple containing only the replica identity columns,
-	 * with nulls elsewhere.  While we're at it, assert that the replica
-	 * identity columns aren't null.
+	 * Construct a new tuple containing the replica identity columns, and when
+	 * requested, unchanged non-replica-identity columns with external values.
+	 * All other columns are set to NULL. While we're at it, assert that the
+	 * replica identity columns are not NULL.
 	 */
 	heap_deform_tuple(tp, desc, values, nulls);
 
+	Assert(newtp != NULL || !log_unchanged_external);
+
 	for (int i = 0; i < desc->natts; i++)
 	{
+		CompactAttribute *att;
+		Datum		new_value;
+		bool		new_isnull;
+		bool		old_isnull = nulls[i];
+
 		if (bms_is_member(i + 1 - FirstLowInvalidHeapAttributeNumber,
 						  idattrs))
+		{
 			Assert(!nulls[i]);
-		else
-			nulls[i] = true;
+			continue;
+		}
+
+		/* do not log non-replica-identity columns by default */
+		nulls[i] = true;
+
+		if (!log_unchanged_external)
+			continue;
+
+		/*
+		 * When requested, keep a column whose value is stored out-of-line and
+		 * is unchanged by the update, so that a row filter's UPDATE-to-INSERT
+		 * transformation can reconstruct it during decoding.  The value kept
+		 * here is still an on-disk TOAST pointer; it is flattened into the
+		 * tuple below.
+		 *
+		 * Both the old and the new value must be on-disk TOAST pointers to
+		 * the same value.  If the new value is not external, the WAL record
+		 * carries it (inline, or as newly inserted toast chunks that decoding
+		 * can reassemble), so there is nothing to preserve here.
+		 */
+		att = TupleDescCompactAttr(desc, i);
+
+		/* only varlena columns can be stored out-of-line */
+		if (att->attlen != -1 || att->attisdropped)
+			continue;
+
+		/* the old value must be stored externally on-disk */
+		if (old_isnull ||
+			!VARATT_IS_EXTERNAL_ONDISK(DatumGetPointer(values[i])))
+			continue;
+
+		/* the new value must be stored externally on-disk as well */
+		new_value = heap_getattr(newtp, i + 1, desc, &new_isnull);
+
+		if (new_isnull ||
+			!VARATT_IS_EXTERNAL_ONDISK(DatumGetPointer(new_value)))
+			continue;
+
+		/* keep the column if the update left the toast value unchanged */
+		if (heap_attr_equals(desc, i + 1, values[i], new_value,
+							 old_isnull, new_isnull))
+			nulls[i] = false;
 	}
 
 	key_tuple = heap_form_tuple(desc, values, nulls);
@@ -9406,8 +9500,10 @@ ExtractReplicaIdentity(Relation relation, HeapTuple tp, bool key_required,
 	bms_free(idattrs);
 
 	/*
-	 * If the tuple, which by here only contains indexed columns, still has
-	 * toasted columns, force them to be inlined. This is somewhat unlikely
+	 * If the tuple, which by here only contains replica identity columns plus
+	 * any unchanged out-of-line columns kept above, still has toasted
+	 * columns, force them to be inlined so that the WAL record contains the
+	 * actual data.  For replica identity columns this is somewhat unlikely
 	 * since there's limits on the size of indexed columns, so we don't
 	 * duplicate toast_flatten_tuple()s functionality in the above loop over
 	 * the indexed columns, even if it would be more efficient.

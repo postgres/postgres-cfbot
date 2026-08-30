@@ -5913,14 +5913,22 @@ RelationBuildPublicationDesc(Relation relation, PublicationDesc *pubdesc)
 		 * row filters and we can skip the validation.
 		 */
 		if (!pubform->puballtables &&
-			(pubform->pubupdate || pubform->pubdelete) &&
-			pub_rf_contains_invalid_column(pubid, relation, ancestors,
-										   pubform->pubviaroot))
+			(pubform->pubupdate || pubform->pubdelete))
 		{
-			if (pubform->pubupdate)
-				pubdesc->rf_valid_for_update = false;
-			if (pubform->pubdelete)
-				pubdesc->rf_valid_for_delete = false;
+			bool		rf_exists = false;
+
+			if (pub_rf_contains_invalid_column(pubid, relation, ancestors,
+											   pubform->pubviaroot,
+											   &rf_exists))
+			{
+				if (pubform->pubupdate)
+					pubdesc->rf_valid_for_update = false;
+				if (pubform->pubdelete)
+					pubdesc->rf_valid_for_delete = false;
+			}
+
+			if (rf_exists && pubform->pubupdate)
+				pubdesc->rf_exists_for_update = true;
 		}
 
 		/*
@@ -5994,6 +6002,24 @@ RelationBuildPublicationDesc(Relation relation, PublicationDesc *pubdesc)
 	relation->rd_pubdesc = palloc_object(PublicationDesc);
 	memcpy(relation->rd_pubdesc, pubdesc, sizeof(PublicationDesc));
 	MemoryContextSwitchTo(oldcxt);
+}
+
+/*
+ * Check whether the table is published with a row filter for UPDATEs.
+ */
+bool
+RelationHasPubRowFilterForUpdate(Relation relation)
+{
+	if (!relation->rd_pubdesc)
+	{
+		PublicationDesc pubdesc;
+
+		RelationBuildPublicationDesc(relation, &pubdesc);
+
+		return pubdesc.rf_exists_for_update;
+	}
+
+	return relation->rd_pubdesc->rf_exists_for_update;
 }
 
 static bytea **
