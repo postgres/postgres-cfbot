@@ -11150,17 +11150,19 @@ dumpRelationStats_dumper(Archive *fout, const void *userArg, const TocEntry *te)
 		 * The results must be in the order of the relations supplied in the
 		 * parameters to ensure we remain in sync as we walk through the TOC.
 		 *
-		 * For versions before 19, the redundant filter clause on s.tablename
-		 * = ANY(...) seems sufficient to convince the planner to use
-		 * pg_class_relname_nsp_index, which avoids a full scan of pg_stats.
-		 * In newer versions, pg_stats returns the table OIDs, eliminating the
-		 * need for that hack.
+		 * pg_stats is a security barrier view, so the planner will not push
+		 * the join clause down into it, and we would scan all of pg_statistic
+		 * once per batch.  The redundant filter clause is a restriction
+		 * clause on a leakproof operator, which the planner is willing to
+		 * push down, and that gets us an index scan.  This may not work for
+		 * all versions.
 		 */
 		if (fout->remoteVersion >= 190000)
 			appendPQExpBufferStr(query,
 								 "FROM pg_catalog.pg_stats s "
 								 "JOIN unnest($1) WITH ORDINALITY AS u (tableid, ord) "
 								 "ON s.tableid = u.tableid "
+								 "WHERE s.tableid = ANY($1) "
 								 "ORDER BY u.ord, s.attname, s.inherited");
 		else
 			appendPQExpBufferStr(query,
