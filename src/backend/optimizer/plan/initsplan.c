@@ -99,6 +99,8 @@ static bool is_partial_agg_memory_risky(PlannerInfo *root);
 static void collect_eager_agg_infos(PlannerInfo *root);
 static void create_agg_clause_infos(PlannerInfo *root);
 static bool grouping_key_usable(Expr *expr);
+static void add_grouping_expr_infos(PlannerInfo *root, List *exprs,
+									List *clauses);
 static void create_grouping_expr_infos(PlannerInfo *root);
 static EquivalenceClass *get_eclass_for_sortgroupclause(PlannerInfo *root,
 														SortGroupClause *sgc,
@@ -970,6 +972,31 @@ grouping_key_usable(Expr *expr)
 }
 
 /*
+ * add_grouping_expr_infos
+ *	  Record a GroupingExprInfo for each of the given keys.
+ */
+static void
+add_grouping_expr_infos(PlannerInfo *root, List *exprs, List *clauses)
+{
+	ListCell   *lc;
+	ListCell   *lc2;
+
+	forboth(lc, exprs, lc2, clauses)
+	{
+		Expr	   *expr = (Expr *) lfirst(lc);
+		SortGroupClause *sgc = lfirst_node(SortGroupClause, lc2);
+		GroupingExprInfo *ge_info;
+
+		ge_info = makeNode(GroupingExprInfo);
+		ge_info->expr = (Expr *) copyObject(expr);
+		ge_info->sortgroupref = sgc->tleSortGroupRef;
+		ge_info->ec = get_eclass_for_sortgroupclause(root, sgc, expr);
+
+		root->group_expr_list = lappend(root->group_expr_list, ge_info);
+	}
+}
+
+/*
  * create_grouping_expr_infos
  *	  Create a GroupingExprInfo for each expression usable as grouping key.
  *
@@ -980,12 +1007,8 @@ static void
 create_grouping_expr_infos(PlannerInfo *root)
 {
 	List	   *exprs = NIL;
-	List	   *sortgrouprefs = NIL;
-	List	   *ecs = NIL;
-	ListCell   *lc,
-			   *lc1,
-			   *lc2,
-			   *lc3;
+	List	   *clauses = NIL;
+	ListCell   *lc;
 
 	Assert(root->group_expr_list == NIL);
 
@@ -1000,27 +1023,10 @@ create_grouping_expr_infos(PlannerInfo *root)
 			return;
 
 		exprs = lappend(exprs, tle->expr);
-		sortgrouprefs = lappend_int(sortgrouprefs, tle->ressortgroupref);
-		ecs = lappend(ecs, get_eclass_for_sortgroupclause(root, sgc, tle->expr));
+		clauses = lappend(clauses, sgc);
 	}
 
-	/*
-	 * Construct a GroupingExprInfo for each expression.
-	 */
-	forthree(lc1, exprs, lc2, sortgrouprefs, lc3, ecs)
-	{
-		Expr	   *expr = (Expr *) lfirst(lc1);
-		int			sortgroupref = lfirst_int(lc2);
-		EquivalenceClass *ec = (EquivalenceClass *) lfirst(lc3);
-		GroupingExprInfo *ge_info;
-
-		ge_info = makeNode(GroupingExprInfo);
-		ge_info->expr = (Expr *) copyObject(expr);
-		ge_info->sortgroupref = sortgroupref;
-		ge_info->ec = ec;
-
-		root->group_expr_list = lappend(root->group_expr_list, ge_info);
-	}
+	add_grouping_expr_infos(root, exprs, clauses);
 }
 
 /*
