@@ -366,6 +366,7 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 	glob = makeNode(PlannerGlobal);
 
 	glob->boundParams = boundParams;
+	glob->is_oneshot = (cursorOptions & CURSOR_OPT_ONESHOT) != 0;
 	glob->subplans = NIL;
 	glob->subpaths = NIL;
 	glob->subroots = NIL;
