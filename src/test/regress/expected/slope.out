@@ -855,10 +855,10 @@ SELECT
 FROM units
 ORDER BY 1;
 EXECUTE query('UTC');
-        expression        |               monotonic                
---------------------------+----------------------------------------
- date_trunc(<>, tstz, TZ) | year, month, day, hour, minute, second
- timezone(TZ, <>)         | ts, tstz
+        expression        | monotonic 
+--------------------------+-----------
+ date_trunc(<>, tstz, TZ) | none
+ timezone(TZ, <>)         | none
 (2 rows)
 
 EXECUTE query('Africa/Ouagadougou');
@@ -998,6 +998,21 @@ EXECUTE query_local;
  timezone(<>)         | none
 (5 rows)
 
+--
+-- TimeZone lookup error handling
+--
+-- Errors should not be thrown at planning time
+-- if the timezone lookup fails.
+EXPLAIN (COSTS OFF)
+SELECT min(date_trunc('day', ts, 'Bogus/Zone')) FROM src;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Aggregate
+   ->  Index Only Scan using src_ts_idx on src
+(2 rows)
+
+SELECT min(date_trunc('day', ts, 'Bogus/Zone')) FROM src;
+ERROR:  time zone "Bogus/Zone" not recognized
 DEALLOCATE ALL;
 DROP SCHEMA slope CASCADE;
 NOTICE:  drop cascades to 15 other objects
