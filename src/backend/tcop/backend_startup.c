@@ -808,12 +808,29 @@ retry:
 									valptr),
 							 errhint("Valid values are: \"false\", 0, \"true\", 1, \"database\".")));
 			}
+			else if (strcmp(nameptr, "_pq_.compression") == 0)
+			{
+#ifdef USE_ZSTD
+				if (strcmp(valptr, "zstd") != 0)
+					ereport(FATAL,
+							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+							 errmsg("invalid value for protocol option \"%s\": \"%s\"",
+									nameptr, valptr)));
+				if (protocol_compression == PROTOCOL_COMPRESSION_ZSTD)
+					pq_enable_protocol_compression();
+				else
+					unrecognized_protocol_options =
+						lappend(unrecognized_protocol_options, pstrdup(nameptr));
+#else
+				unrecognized_protocol_options =
+					lappend(unrecognized_protocol_options, pstrdup(nameptr));
+#endif
+			}
 			else if (strncmp(nameptr, "_pq_.", 5) == 0)
 			{
 				/*
 				 * Any option beginning with _pq_. is reserved for use as a
-				 * protocol-level option, but at present no such options are
-				 * defined.
+				 * protocol-level option.
 				 */
 				unrecognized_protocol_options =
 					lappend(unrecognized_protocol_options, pstrdup(nameptr));

@@ -2429,6 +2429,13 @@
   check_hook => 'check_primary_slot_name',
 },
 
+{ name => 'protocol_compression', type => 'enum', context => 'PGC_SIGHUP', group => 'CONN_AUTH_SETTINGS',
+  short_desc => 'Allows clients to negotiate protocol compression.',
+  variable => 'protocol_compression',
+  boot_val => 'PROTOCOL_COMPRESSION_OFF',
+  options => 'protocol_compression_options',
+},
+
 { name => 'quote_all_identifiers', type => 'bool', context => 'PGC_USERSET', group => 'COMPAT_OPTIONS_PREVIOUS',
   short_desc => 'When generating SQL fragments, quote all identifiers.',
   variable => 'quote_all_identifiers',

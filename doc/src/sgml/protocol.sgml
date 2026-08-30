@@ -346,9 +346,14 @@
 
      <tbody>
       <row>
-       <entry namest="last" align="center" valign="middle">
-        <emphasis>(No supported protocol extensions are currently defined.)</emphasis>
-       </entry>
+       <entry><literal>_pq_.compression</literal></entry>
+       <entry><literal>zstd</literal></entry>
+       <entry>Client and server</entry>
+       <entry>Enables Zstandard compression of server-to-client
+        <literal>DataRow</literal> and <literal>CopyData</literal> messages,
+        and client-to-server <literal>CopyData</literal> messages during
+        <command>COPY FROM</command>, after authentication.  See
+        <xref linkend="protocol-message-formats-CompressedData"/>.</entry>
       </row>
      </tbody>
     </tgroup>
@@ -4653,6 +4658,66 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
        </listitem>
       </varlistentry>
      </variablelist>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="protocol-message-formats-CompressedData">
+    <term>CompressedData (F &amp; B)</term>
+    <listitem>
+     <variablelist>
+      <varlistentry>
+       <term>Byte1('z')</term>
+       <listitem>
+        <para>
+         Identifies the message as a flushed segment of compressed protocol
+         data.
+        </para>
+       </listitem>
+      </varlistentry>
+
+      <varlistentry>
+       <term>Int32</term>
+       <listitem>
+        <para>
+         Length of message contents in bytes, including self.
+        </para>
+       </listitem>
+      </varlistentry>
+
+      <varlistentry>
+       <term>Byte<replaceable>n</replaceable></term>
+       <listitem>
+        <para>
+         A flushed segment of a Zstandard stream.  The concatenated
+         uncompressed data from successive segments forms a stream of
+         ordinary protocol messages.  A backend segment may contain
+         <literal>DataRow</literal> or <literal>CopyData</literal> messages.  A
+         frontend segment contains bytes from at most one
+         <literal>CopyData</literal> message.  In either direction, an ordinary
+         protocol message may span multiple compressed segments.
+        </para>
+       </listitem>
+      </varlistentry>
+     </variablelist>
+
+     <para>
+      The compression context is retained between CompressedData messages.
+      Ordinary uncompressed messages may occur between them when the
+      uncompressed stream is at a message boundary, and do not change the
+      context.  If an ordinary protocol message is incomplete, the next
+      message must be another CompressedData message.  Each compressed payload
+      is limited to 17 MiB and may produce at most 16 MiB of uncompressed data.
+      A CompressedData message cannot contain the end of one Zstandard frame
+      and the beginning of another.  After a backend frame ends, another
+      cannot begin before <literal>ReadyForQuery</literal>.  After a frontend
+      frame ends, another cannot begin before <literal>CopyDone</literal> or
+      <literal>CopyFail</literal>.  An unfinished backend frame must end before
+      <literal>ReadyForQuery</literal>, and an unfinished frontend frame must
+      end before <literal>CopyDone</literal> or <literal>CopyFail</literal>.
+      A CompressedData message that produces no output may carry the frame
+      epilogue.  No CompressedData message may be sent before the first
+      ReadyForQuery of the connection.
+     </para>
     </listitem>
    </varlistentry>
 

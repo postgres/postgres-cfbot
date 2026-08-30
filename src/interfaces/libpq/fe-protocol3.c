@@ -18,6 +18,10 @@
 #include <fcntl.h>
 #include <limits.h>
 
+#ifdef USE_ZSTD
+#include <zstd.h>
+#endif
+
 #ifdef WIN32
 #include "win32.h"
 #else
@@ -37,6 +41,7 @@
  */
 #define VALID_LONG_MESSAGE_TYPE(id) \
 	((id) == PqMsg_CopyData || \
+	 (id) == PqMsg_CompressedData || \
 	 (id) == PqMsg_DataRow || \
 	 (id) == PqMsg_ErrorResponse || \
 	 (id) == PqMsg_FunctionCallResponse || \
@@ -60,6 +65,409 @@ static void reportErrorPosition(PQExpBuffer msg, const char *query,
 								int loc, int encoding);
 static size_t build_startup_packet(const PGconn *conn, char *packet,
 								   const PQEnvironmentOption *options);
+
+#ifdef USE_ZSTD
+
+/*
+ * Compression buffers up to this size are kept between messages; a larger one
+ * was grown by an occasional large message and is given back at the next
+ * protocol boundary.
+ */
+#define PQ_COMPRESSION_BUFFER_KEEP_SIZE (1024 * 1024)
+
+static int
+pqCompressionInitBuffers(PGconn *conn)
+{
+	if (conn->compression_buffers_initialized)
+		return 0;
+
+	initPQExpBuffer(&conn->compression_buffer);
+	initPQExpBuffer(&conn->compression_output_buffer);
+	if (PQExpBufferBroken(&conn->compression_buffer) ||
+		PQExpBufferBroken(&conn->compression_output_buffer))
+	{
+		termPQExpBuffer(&conn->compression_buffer);
+		termPQExpBuffer(&conn->compression_output_buffer);
+		libpq_append_conn_error(conn, "out of memory");
+		return 1;
+	}
+
+	conn->compression_buffers_initialized = true;
+	return 0;
+}
+
+/*
+ * Give back the compression buffers that one large message has grown.
+ *
+ * Called where they hold nothing live, so that a single large result does not
+ * keep tens of megabytes for the life of the connection.
+ */
+static void
+pqCompressionReleaseBuffers(PGconn *conn)
+{
+	char	   *data;
+
+	if (!conn->compression_buffers_initialized)
+		return;
+	if (conn->compression_buffer.maxlen > PQ_COMPRESSION_BUFFER_KEEP_SIZE)
+	{
+		data = realloc(conn->compression_buffer.data, INITIAL_EXPBUFFER_SIZE);
+		if (data != NULL)
+		{
+			conn->compression_buffer.data = data;
+			conn->compression_buffer.maxlen = INITIAL_EXPBUFFER_SIZE;
+			resetPQExpBuffer(&conn->compression_buffer);
+		}
+	}
+	if (conn->compression_output_buffer.maxlen > PQ_COMPRESSION_BUFFER_KEEP_SIZE)
+	{
+		data = realloc(conn->compression_output_buffer.data,
+					   INITIAL_EXPBUFFER_SIZE);
+		if (data != NULL)
+		{
+			conn->compression_output_buffer.data = data;
+			conn->compression_output_buffer.maxlen = INITIAL_EXPBUFFER_SIZE;
+			resetPQExpBuffer(&conn->compression_output_buffer);
+		}
+	}
+}
+
+void
+pqCompressionReset(PGconn *conn)
+{
+	if (conn->compression_dctx != NULL)
+	{
+		ZSTD_freeDCtx((ZSTD_DCtx *) conn->compression_dctx);
+		conn->compression_dctx = NULL;
+	}
+	if (conn->compression_cctx != NULL)
+	{
+		ZSTD_freeCCtx((ZSTD_CCtx *) conn->compression_cctx);
+		conn->compression_cctx = NULL;
+	}
+	if (conn->compression_buffers_initialized)
+	{
+		termPQExpBuffer(&conn->compression_buffer);
+		termPQExpBuffer(&conn->compression_output_buffer);
+		conn->compression_buffers_initialized = false;
+	}
+	conn->compression_in_frame = false;
+	conn->compression_frame_ended = false;
+	conn->compression_ready = false;
+	conn->compression_copy_started = false;
+	conn->compression_rejected = false;
+}
+
+/* Replace one CompressedData wrapper with the ordinary messages it contains. */
+static int
+pqDecompressData(PGconn *conn, int msgLength)
+{
+	int			outer_size = msgLength + 5;
+	int			tail_size;
+	int			new_end;
+	int			position;
+	size_t		segment_size = 0;
+	ZSTD_inBuffer input;
+	ZSTD_DCtx  *dctx;
+	size_t		result = 1;
+
+	if (msgLength <= 0 || msgLength > PQ_COMPRESSION_MAX_WRAPPER_SIZE)
+	{
+		libpq_append_conn_error(conn, "invalid compressed protocol message size");
+		return 1;
+	}
+
+	if (conn->compression_dctx == NULL)
+	{
+		size_t		rc;
+
+		dctx = ZSTD_createDCtx();
+		if (dctx == NULL)
+		{
+			libpq_append_conn_error(conn, "out of memory");
+			return 1;
+		}
+		if (pqCompressionInitBuffers(conn))
+		{
+			ZSTD_freeDCtx(dctx);
+			return 1;
+		}
+		rc = ZSTD_DCtx_setParameter(dctx, ZSTD_d_windowLogMax, 16);
+		if (ZSTD_isError(rc))
+		{
+			ZSTD_freeDCtx(dctx);
+			libpq_append_conn_error(conn,
+									"could not configure Zstandard decompressor: %s",
+									ZSTD_getErrorName(rc));
+			return 1;
+		}
+		conn->compression_dctx = dctx;
+	}
+	dctx = (ZSTD_DCtx *) conn->compression_dctx;
+	if (conn->compression_frame_ended)
+	{
+		libpq_append_conn_error(conn,
+								"received data after the compressed protocol stream ended");
+		return 1;
+	}
+
+	input.src = conn->inBuffer + conn->inCursor;
+	input.size = msgLength;
+	input.pos = 0;
+
+	for (;;)
+	{
+		ZSTD_outBuffer out;
+		size_t		old_input_pos = input.pos;
+		size_t		output_size;
+
+		output_size = PQ_COMPRESSION_MAX_SEGMENT_SIZE - segment_size;
+		output_size = output_size == 0 ? 1 :
+			Min(ZSTD_DStreamOutSize(), output_size);
+		if (!enlargePQExpBuffer(&conn->compression_buffer, output_size))
+		{
+			libpq_append_conn_error(conn, "out of memory");
+			return 1;
+		}
+		out.dst = conn->compression_buffer.data + conn->compression_buffer.len;
+		out.size = output_size;
+		out.pos = 0;
+
+		result = ZSTD_decompressStream(dctx, &out, &input);
+		if (ZSTD_isError(result))
+		{
+			libpq_append_conn_error(conn, "Zstandard decompression failed: %s",
+									ZSTD_getErrorName(result));
+			return 1;
+		}
+		if (input.pos == old_input_pos && out.pos == 0)
+		{
+			if (input.pos == input.size)
+				break;
+			libpq_append_conn_error(conn,
+									"compressed protocol message has invalid size");
+			return 1;
+		}
+		conn->compression_buffer.len += out.pos;
+		conn->compression_buffer.data[conn->compression_buffer.len] = '\0';
+		segment_size += out.pos;
+		if (segment_size > PQ_COMPRESSION_MAX_SEGMENT_SIZE)
+		{
+			libpq_append_conn_error(conn,
+									"compressed protocol message is too large");
+			return 1;
+		}
+		if (result == 0)
+		{
+			if (input.pos != input.size)
+			{
+				libpq_append_conn_error(conn,
+										"compressed protocol message contains multiple frames");
+				return 1;
+			}
+			break;
+		}
+		if (input.pos == input.size && out.pos < out.size)
+			break;
+	}
+	conn->compression_in_frame = (result != 0);
+	conn->compression_frame_ended = (result == 0);
+
+	/* Validate the complete prefix of the logical protocol stream. */
+	position = 0;
+	while (conn->compression_buffer.len - position >= 5)
+	{
+		uint32		message_length;
+
+		if (conn->compression_buffer.data[position] != PqMsg_DataRow &&
+			conn->compression_buffer.data[position] != PqMsg_CopyData)
+			goto invalid_contents;
+		memcpy(&message_length,
+			   conn->compression_buffer.data + position + 1, 4);
+		message_length = pg_ntoh32(message_length);
+		if (message_length < 4 || message_length > INT_MAX)
+			goto invalid_contents;
+		if (message_length > conn->compression_buffer.len - position - 1)
+			break;
+		position += message_length + 1;
+	}
+	if (result == 0 && position != conn->compression_buffer.len)
+		goto invalid_contents;
+
+	tail_size = conn->inEnd - conn->inStart - outer_size;
+
+	/* Keep an incomplete inner message until another wrapper arrives. */
+	if (position != conn->compression_buffer.len)
+		position = 0;
+	new_end = conn->inEnd - outer_size + position;
+	if (pqCheckInBufferSpace(new_end, conn))
+		return 1;
+	new_end = conn->inEnd - outer_size + position;
+	memmove(conn->inBuffer + conn->inStart + position,
+			conn->inBuffer + conn->inStart + outer_size, tail_size);
+	if (position > 0)
+	{
+		memcpy(conn->inBuffer + conn->inStart, conn->compression_buffer.data,
+			   position);
+		resetPQExpBuffer(&conn->compression_buffer);
+	}
+	conn->inEnd = new_end;
+	conn->inCursor = conn->inStart;
+	return 0;
+
+invalid_contents:
+	libpq_append_conn_error(conn,
+							"compressed protocol message contains invalid messages");
+	return 1;
+}
+
+/* Write one frontend message as one or more compressed stream segments. */
+static int
+pqPutCompressedCopySegment(PGconn *conn, const char *buffer, int nbytes,
+						   ZSTD_EndDirective directive)
+{
+	ZSTD_CCtx  *cctx = (ZSTD_CCtx *) conn->compression_cctx;
+	char		header[5];
+	bool		context_advanced = false;
+	size_t		source_size = nbytes > 0 ? (size_t) nbytes + 5 : 0;
+	size_t		source_pos = 0;
+	size_t		result = 0;
+	uint32		n32;
+
+	if (cctx == NULL)
+	{
+		if (pqCompressionInitBuffers(conn))
+			return EOF;
+		cctx = ZSTD_createCCtx();
+		if (cctx == NULL)
+			goto oom;
+		result = ZSTD_CCtx_setParameter(cctx, ZSTD_c_windowLog, 16);
+		if (ZSTD_isError(result))
+		{
+			ZSTD_freeCCtx(cctx);
+			cctx = NULL;
+			goto zstd_error;
+		}
+		conn->compression_cctx = cctx;
+	}
+
+	if (source_size > 0)
+	{
+		header[0] = PqMsg_CopyData;
+		n32 = pg_hton32((uint32) nbytes + 4);
+		memcpy(header + 1, &n32, 4);
+	}
+	do
+	{
+		ZSTD_EndDirective segment_directive;
+		ZSTD_outBuffer output;
+		size_t		segment_size;
+		size_t		segment_end;
+		size_t		compressed_size;
+
+		segment_size = Min(source_size - source_pos,
+						   (size_t) PQ_COMPRESSION_MAX_SEGMENT_SIZE);
+		segment_end = source_pos + segment_size;
+		segment_directive = (segment_end == source_size) ?
+			directive : ZSTD_e_flush;
+		compressed_size = ZSTD_compressBound(segment_size) +
+			ZSTD_CStreamOutSize() + 64;
+		if (compressed_size > PQ_COMPRESSION_MAX_WRAPPER_SIZE ||
+			compressed_size > INT_MAX - conn->outCount - 5 ||
+			pqCheckOutBufferSpace(conn->outCount + 5 + compressed_size, conn))
+			goto fail;
+
+		resetPQExpBuffer(&conn->compression_output_buffer);
+		if (!enlargePQExpBuffer(&conn->compression_output_buffer,
+								compressed_size))
+			goto oom;
+		output.dst = conn->compression_output_buffer.data;
+		output.size = compressed_size;
+		output.pos = 0;
+
+		while (source_pos < segment_end)
+		{
+			ZSTD_inBuffer input;
+			size_t		part_end;
+
+			if (source_pos < sizeof(header))
+			{
+				part_end = Min(segment_end, sizeof(header));
+				input.src = header + source_pos;
+				input.size = part_end - source_pos;
+			}
+			else
+			{
+				part_end = segment_end;
+				input.src = buffer + source_pos - sizeof(header);
+				input.size = part_end - source_pos;
+			}
+			input.pos = 0;
+			while (input.pos < input.size)
+			{
+				context_advanced = true;
+				result = ZSTD_compressStream2(cctx, &output, &input,
+											  ZSTD_e_continue);
+				if (ZSTD_isError(result))
+					goto zstd_error;
+			}
+			source_pos = part_end;
+		}
+
+		{
+			ZSTD_inBuffer input = {NULL, 0, 0};
+
+			do
+			{
+				context_advanced = true;
+				result = ZSTD_compressStream2(cctx, &output, &input,
+											  segment_directive);
+				if (ZSTD_isError(result))
+					goto zstd_error;
+			} while (result != 0);
+		}
+
+		if (pqPutMsgStart(PqMsg_CompressedData, conn) < 0 ||
+			pqPutnchar(conn->compression_output_buffer.data, output.pos, conn) < 0 ||
+			pqPutMsgEnd(conn) < 0)
+			goto fail;
+	} while (source_pos < source_size);
+
+	return 0;
+
+oom:
+	libpq_append_conn_error(conn, "out of memory");
+	goto fail;
+
+zstd_error:
+	libpq_append_conn_error(conn, "Zstandard compression failed: %s",
+							ZSTD_getErrorName(result));
+fail:
+	if (context_advanced)
+		conn->status = CONNECTION_BAD;
+	return EOF;
+}
+
+int
+pqPutCompressedCopyData(PGconn *conn, const char *buffer, int nbytes)
+{
+	if (pqPutCompressedCopySegment(conn, buffer, nbytes, ZSTD_e_flush) < 0)
+		return EOF;
+	conn->compression_copy_started = true;
+	return 0;
+}
+
+int
+pqEndCompressedCopyData(PGconn *conn)
+{
+	if (!conn->compression_copy_started)
+		return 0;
+	if (pqPutCompressedCopySegment(conn, NULL, 0, ZSTD_e_end) < 0)
+		return EOF;
+	conn->compression_copy_started = false;
+	return 0;
+}
+#endif
 
 
 /*
@@ -104,6 +512,24 @@ pqParseInput3(PGconn *conn)
 			handleSyncLoss(conn, id, msgLength);
 			return;
 		}
+#ifdef USE_ZSTD
+		if (id == PqMsg_CompressedData &&
+			msgLength - 4 > PQ_COMPRESSION_MAX_WRAPPER_SIZE)
+		{
+			libpq_append_conn_error(conn,
+									"compressed protocol message is too large");
+			handleFatalError(conn);
+			return;
+		}
+		if (conn->compression_buffers_initialized &&
+			conn->compression_buffer.len > 0 && id != PqMsg_CompressedData)
+		{
+			libpq_append_conn_error(conn,
+									"compressed protocol message was interrupted");
+			handleFatalError(conn);
+			return;
+		}
+#endif
 
 		/*
 		 * Can't process if message body isn't all here yet.
@@ -133,6 +559,43 @@ pqParseInput3(PGconn *conn)
 			}
 			return;
 		}
+
+#ifdef USE_ZSTD
+		if (id == PqMsg_CompressedData)
+		{
+			if (!conn->compression_ready)
+			{
+				libpq_append_conn_error(conn,
+										"received compressed data without negotiated compression");
+				handleFatalError(conn);
+				return;
+			}
+			if (pqDecompressData(conn, msgLength))
+			{
+				handleFatalError(conn);
+				return;
+			}
+			continue;
+		}
+		if (id == PqMsg_ReadyForQuery && conn->compression_in_frame)
+		{
+			libpq_append_conn_error(conn,
+									"compressed protocol stream was not terminated before ReadyForQuery");
+			handleFatalError(conn);
+			return;
+		}
+		if (id == PqMsg_ReadyForQuery)
+		{
+			if (conn->compression_copy_started)
+			{
+				ZSTD_freeCCtx((ZSTD_CCtx *) conn->compression_cctx);
+				conn->compression_cctx = NULL;
+				conn->compression_copy_started = false;
+			}
+			conn->compression_frame_ended = false;
+			pqCompressionReleaseBuffers(conn);
+		}
+#endif
 
 		/*
 		 * NOTIFY and NOTICE messages can happen in any state; always process
@@ -228,6 +691,12 @@ pqParseInput3(PGconn *conn)
 				case PqMsg_ReadyForQuery:
 					if (getReadyForQuery(conn))
 						return;
+#ifdef USE_ZSTD
+					if (conn->compression && !conn->compression_rejected &&
+						(strcmp(conn->compression, "zstd") == 0 ||
+						 strcmp(conn->compression, "prefer") == 0))
+						conn->compression_ready = true;
+#endif
 					if (conn->pipelineStatus != PQ_PIPELINE_OFF)
 					{
 						conn->result = PQmakeEmptyPGresult(conn,
@@ -1447,6 +1916,7 @@ pqGetNegotiateProtocolVersion3(PGconn *conn)
 	int			num;
 	bool		found_test_protocol_negotiation;
 	bool		expect_test_protocol_negotiation;
+	bool		requested_compression;
 
 	/*
 	 * During 19beta only, if protocol grease is in use, assume that it's the
@@ -1527,6 +1997,13 @@ pqGetNegotiateProtocolVersion3(PGconn *conn)
 	 */
 	found_test_protocol_negotiation = false;
 	expect_test_protocol_negotiation = (conn->max_pversion == PG_PROTOCOL_GREASE);
+#ifdef USE_ZSTD
+	requested_compression = conn->compression &&
+		(strcmp(conn->compression, "zstd") == 0 ||
+		 strcmp(conn->compression, "prefer") == 0);
+#else
+	requested_compression = false;
+#endif
 
 	for (int i = 0; i < num; i++)
 	{
@@ -1545,6 +2022,19 @@ pqGetNegotiateProtocolVersion3(PGconn *conn)
 			strcmp(conn->workBuffer.data, "_pq_.test_protocol_negotiation") == 0)
 		{
 			found_test_protocol_negotiation = true;
+		}
+		else if (requested_compression &&
+				 strcmp(conn->workBuffer.data, "_pq_.compression") == 0)
+		{
+			if (strcmp(conn->compression, "prefer") == 0)
+				conn->compression_rejected = true;
+			else
+			{
+				libpq_append_conn_error(conn,
+										"server does not support protocol compression method \"zstd\"");
+				need_grease_info = false;
+				goto failure;
+			}
 		}
 		else
 		{
@@ -1865,6 +2355,24 @@ getCopyDataMessage(PGconn *conn)
 			handleSyncLoss(conn, id, msgLength);
 			return -2;
 		}
+#ifdef USE_ZSTD
+		if (id == PqMsg_CompressedData &&
+			msgLength - 4 > PQ_COMPRESSION_MAX_WRAPPER_SIZE)
+		{
+			libpq_append_conn_error(conn,
+									"compressed protocol message is too large");
+			handleFatalError(conn);
+			return -2;
+		}
+		if (conn->compression_buffers_initialized &&
+			conn->compression_buffer.len > 0 && id != PqMsg_CompressedData)
+		{
+			libpq_append_conn_error(conn,
+									"compressed protocol message was interrupted");
+			handleFatalError(conn);
+			return -2;
+		}
+#endif
 		avail = conn->inEnd - conn->inCursor;
 		if (avail < msgLength - 4)
 		{
@@ -1886,6 +2394,25 @@ getCopyDataMessage(PGconn *conn)
 			}
 			return 0;
 		}
+
+#ifdef USE_ZSTD
+		if (id == PqMsg_CompressedData)
+		{
+			if (!conn->compression_ready)
+			{
+				libpq_append_conn_error(conn,
+										"received compressed data without negotiated compression");
+				handleFatalError(conn);
+				return -2;
+			}
+			if (pqDecompressData(conn, msgLength - 4))
+			{
+				handleFatalError(conn);
+				return -2;
+			}
+			continue;
+		}
+#endif
 
 		/*
 		 * If it's a legitimate async message type, process it.  (NOTIFY
@@ -2135,6 +2662,12 @@ pqEndcopy3(PGconn *conn)
 	if (conn->asyncStatus == PGASYNC_COPY_IN ||
 		conn->asyncStatus == PGASYNC_COPY_BOTH)
 	{
+#ifdef USE_ZSTD
+		if (conn->compression_ready &&
+			conn->asyncStatus == PGASYNC_COPY_IN &&
+			pqEndCompressedCopyData(conn) < 0)
+			return 1;
+#endif
 		if (pqPutMsgStart(PqMsg_CopyDone, conn) < 0 ||
 			pqPutMsgEnd(conn) < 0)
 			return 1;
@@ -2539,6 +3072,12 @@ build_startup_packet(const PGconn *conn, char *packet,
 
 	if (conn->client_encoding_initial && conn->client_encoding_initial[0])
 		ADD_STARTUP_OPTION("client_encoding", conn->client_encoding_initial);
+#ifdef USE_ZSTD
+	if (conn->compression &&
+		(strcmp(conn->compression, "zstd") == 0 ||
+		 strcmp(conn->compression, "prefer") == 0))
+		ADD_STARTUP_OPTION("_pq_.compression", "zstd");
+#endif
 
 	/*
 	 * Add the test_protocol_negotiation option when greasing, to test that

@@ -57,6 +57,11 @@
 #define PqMsg_PortalSuspended		's'
 #define PqMsg_ParameterDescription	't'
 #define PqMsg_NegotiateProtocolVersion 'v'
+#define PqMsg_CompressedData			'z'
+
+/* Resource limits for one CompressedData payload and its decoded segment. */
+#define PQ_COMPRESSION_MAX_SEGMENT_SIZE		(16 * 1024 * 1024)
+#define PQ_COMPRESSION_MAX_WRAPPER_SIZE		(17 * 1024 * 1024)
 
 
 /* These are the codes sent by both the frontend and backend. */

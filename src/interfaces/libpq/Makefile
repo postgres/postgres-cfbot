@@ -86,6 +86,7 @@ endif
 # instead link with -lpgcommon_shlib and -lpgport_shlib, to get object files
 # that are built correctly for use in a shlib.
 SHLIB_LINK_INTERNAL = -lpgcommon_shlib -lpgport_shlib
+SHLIB_LINK += $(filter -lzstd, $(LIBS))
 ifneq ($(PORTNAME), win32)
 SHLIB_LINK += $(filter -lcrypt -ldes -lcom_err -lcrypto -lk5crypto -lkrb5 -lgssapi_krb5 -lgss -lgssapi -lssl -lsocket -lnsl -lresolv -lintl -ldl -lm, $(LIBS)) $(LDAP_LIBS_FE) $(PTHREAD_LIBS)
 else

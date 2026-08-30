@@ -496,6 +496,14 @@ static const struct config_enum_entry wal_compression_options[] = {
 	{NULL, 0, false}
 };
 
+static const struct config_enum_entry protocol_compression_options[] = {
+	{"off", PROTOCOL_COMPRESSION_OFF, false},
+#ifdef USE_ZSTD
+	{"zstd", PROTOCOL_COMPRESSION_ZSTD, false},
+#endif
+	{NULL, 0, false}
+};
+
 static const struct config_enum_entry file_copy_method_options[] = {
 	{"copy", FILE_COPY_METHOD_COPY, false},
 #if defined(HAVE_COPYFILE) && defined(COPYFILE_CLONE_FORCE) || defined(HAVE_COPY_FILE_RANGE)

@@ -424,6 +424,7 @@ struct pg_conn
 	char	   *gssdelegation;	/* Try to delegate GSS credentials? (0 or 1) */
 	char	   *min_protocol_version;	/* minimum used protocol version */
 	char	   *max_protocol_version;	/* maximum used protocol version */
+	char	   *compression;	/* protocol compression method */
 	char	   *ssl_min_protocol_version;	/* minimum TLS protocol version */
 	char	   *ssl_max_protocol_version;	/* maximum TLS protocol version */
 	char	   *target_session_attrs;	/* desired session properties */
@@ -579,6 +580,18 @@ struct pg_conn
 	int			inStart;		/* offset to first unconsumed data in buffer */
 	int			inCursor;		/* next byte to tentatively consume */
 	int			inEnd;			/* offset to first position after avail data */
+#ifdef USE_ZSTD
+	void	   *compression_dctx;	/* experimental protocol decompressor */
+	void	   *compression_cctx;	/* experimental protocol compressor */
+	PQExpBufferData compression_buffer; /* reusable decompression buffer */
+	PQExpBufferData compression_output_buffer;
+	bool		compression_buffers_initialized;
+	bool		compression_in_frame;
+	bool		compression_frame_ended;
+	bool		compression_ready;
+	bool		compression_copy_started;
+#endif
+	bool		compression_rejected;
 
 	/* Buffer for data not yet sent to backend */
 	char	   *outBuffer;		/* currently allocated buffer */
@@ -771,6 +784,9 @@ extern PGresult *PQnfn(PGconn *conn, int fnid, int *result_buf, int buf_size,
 extern char *pqBuildStartupPacket3(PGconn *conn, int *packetlen,
 								   const PQEnvironmentOption *options);
 extern void pqParseInput3(PGconn *conn);
+#ifdef USE_ZSTD
+extern void pqCompressionReset(PGconn *conn);
+#endif
 extern int	pqGetErrorNotice3(PGconn *conn, bool isError);
 extern void pqBuildErrorMessage3(PQExpBuffer msg, const PGresult *res,
 								 PGVerbosity verbosity, PGContextVisibility show_context);
@@ -811,6 +827,11 @@ extern int	pqGetInt(int *result, size_t bytes, PGconn *conn);
 extern int	pqPutInt(int value, size_t bytes, PGconn *conn);
 extern int	pqPutMsgStart(char msg_type, PGconn *conn);
 extern int	pqPutMsgEnd(PGconn *conn);
+#ifdef USE_ZSTD
+extern int	pqPutCompressedCopyData(PGconn *conn, const char *buffer,
+									int nbytes);
+extern int	pqEndCompressedCopyData(PGconn *conn);
+#endif
 extern int	pqReadData(PGconn *conn);
 extern int	pqFlush(PGconn *conn);
 extern int	pqWait(int forRead, int forWrite, PGconn *conn);

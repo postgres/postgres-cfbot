@@ -963,6 +963,24 @@ include_dir 'conf.d'
        </para>
       </listitem>
      </varlistentry>
+
+     <varlistentry id="guc-protocol-compression" xreflabel="protocol_compression">
+      <term><varname>protocol_compression</varname> (<type>enum</type>)
+      <indexterm>
+       <primary><varname>protocol_compression</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Controls whether new client connections may negotiate compression of
+        data-bearing protocol messages.  The supported values are
+        <literal>off</literal>, the default, and <literal>zstd</literal> when
+        <productname>PostgreSQL</productname> was built with Zstandard.
+        Reloading this parameter affects new connections; existing
+        connections retain their negotiated setting.
+       </para>
+      </listitem>
+     </varlistentry>
      </variablelist>
      </sect2>
 
