@@ -56,6 +56,10 @@ ifeq ($(with_ssl),openssl)
 OBJS += \
 	fe-secure-openssl.o
 endif
+ifeq ($(with_ssl),libressl)
+OBJS += \
+	fe-secure-libressl.o
+endif
 
 ifeq ($(with_gssapi),yes)
 OBJS += \
