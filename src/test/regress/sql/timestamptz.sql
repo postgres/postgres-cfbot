@@ -229,6 +229,15 @@ SELECT date_trunc('timezone', timestamp with time zone 'infinity', 'GMT') AS not
 SELECT date_trunc( 'week', timestamp with time zone 'infinity', 'GMT') AS inf_zone_trunc;
 SELECT date_trunc('ago', timestamp with time zone 'infinity', 'GMT') AS invalid_zone_trunc;
 
+SET timezone to 'UTC';
+SELECT unit, side,
+       timezone(z, date_trunc(unit, t::timestamptz, z)) as "local",
+       timezone('UTC', date_trunc(unit, t::timestamptz, z)) as "UTC"
+FROM (VALUES ('before', '1916-07-27 22:26:07.987654+00', 'Europe/Athens'),
+             ('after', '1916-07-27 22:26:08.123456+00', 'Europe/Athens')) t1(side, t,z),
+     (VALUES ('month'), ('day'), ('hour'), ('minute'), ('sec')) t2(unit);
+RESET timezone;
+
 -- verify date_bin behaves the same as date_trunc for relevant intervals
 SELECT
   str,
