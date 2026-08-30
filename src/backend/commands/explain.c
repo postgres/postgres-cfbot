@@ -355,6 +355,11 @@ standard_ExplainOneQuery(Query *query, int cursorOptions,
 		bufusage_start = pgBufferUsage;
 	INSTR_TIME_SET_CURRENT(planstart);
 
+	/*
+	 * Plans produced by EXPLAIN are never cached.
+	 */
+	cursorOptions |= CURSOR_OPT_ONESHOT;
+
 	/* plan the query */
 	plan = pg_plan_query(query, queryString, cursorOptions, params, es);
 
