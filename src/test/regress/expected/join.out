@@ -4137,34 +4137,25 @@ where not exists (
 );
                        QUERY PLAN                        
 ---------------------------------------------------------
- Merge Anti Join
-   Merge Cond: (t1.c1 = t2.c2)
-   ->  Sort
-         Sort Key: t1.c1
-         ->  Seq Scan on tt4x t1
-   ->  Sort
-         Sort Key: t2.c2
-         ->  Merge Right Join
-               Merge Cond: (t5.c1 = t3.c2)
-               ->  Merge Join
-                     Merge Cond: (t4.c2 = t5.c1)
-                     ->  Sort
-                           Sort Key: t4.c2
-                           ->  Seq Scan on tt4x t4
-                     ->  Sort
-                           Sort Key: t5.c1
-                           ->  Seq Scan on tt4x t5
-               ->  Sort
-                     Sort Key: t3.c2
+ Hash Anti Join
+   Hash Cond: (t1.c1 = t2.c2)
+   ->  Seq Scan on tt4x t1
+   ->  Hash
+         ->  Nested Loop Left Join
+               ->  Nested Loop Left Join
+                     ->  Seq Scan on tt4x t2
+                     ->  Materialize
+                           ->  Seq Scan on tt4x t3
+               ->  Materialize
                      ->  Merge Left Join
-                           Merge Cond: (t2.c3 = t3.c1)
+                           Merge Cond: (t4.c2 = t5.c1)
                            ->  Sort
-                                 Sort Key: t2.c3
-                                 ->  Seq Scan on tt4x t2
+                                 Sort Key: t4.c2
+                                 ->  Seq Scan on tt4x t4
                            ->  Sort
-                                 Sort Key: t3.c1
-                                 ->  Seq Scan on tt4x t3
-(27 rows)
+                                 Sort Key: t5.c1
+                                 ->  Seq Scan on tt4x t5
+(18 rows)
 
 --
 -- regression test for problems of the sort depicted in bug #3494
