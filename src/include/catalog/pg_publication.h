@@ -118,6 +118,19 @@ typedef struct PublicationDesc
 	 */
 	bool		gencols_valid_for_update;
 	bool		gencols_valid_for_delete;
+
+	/*
+	 * true if some publication which publishes UPDATEs has a row filter on
+	 * this relation.  heap_update() consults this to decide whether it needs
+	 * to preserve unchanged, non-replica-identity, TOASTed column values that
+	 * a row filter's UPDATE-to-INSERT transformation may need but cannot find
+	 * in WAL.  Note that when an UPDATE reaches heap_update(), any such row
+	 * filter is known to reference only replica identity columns (otherwise
+	 * CheckCmdReplicaIdentity() would have rejected the statement), which is
+	 * what makes a replica identity change a necessary condition for the
+	 * transformation.
+	 */
+	bool		rf_exists_for_update;
 } PublicationDesc;
 
 #ifdef EXPOSE_TO_CLIENT_CODE
