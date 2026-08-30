@@ -2191,6 +2191,9 @@ typedef struct GraphLabelRef
 {
 	NodeTag		type;
 	Oid			labelid;
+	List	   *properties pg_node_attr(equal_ignore, query_jumble_ignore);
+	List	   *elements pg_node_attr(equal_ignore, query_jumble_ignore);
+	List	   *elem_labels pg_node_attr(equal_ignore, query_jumble_ignore);
 	ParseLoc	location;
 } GraphLabelRef;
 

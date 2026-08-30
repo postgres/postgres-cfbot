@@ -58,6 +58,8 @@ struct path_factor
 {
 	GraphElementPatternKind kind;
 	const char *variable;
+	bool		has_empty_labelexpr;	/* Copied from the corresponding
+										 * GraphElementPattern */
 	Node	   *labelexpr;
 	Node	   *whereClause;
 	int			factorpos;		/* Position of this path factor in the list of
@@ -82,6 +84,8 @@ struct path_element
 	struct path_factor *path_factor;
 	Oid			elemoid;
 	Oid			reloid;
+	List	   *elem_label_oids;	/* OIDs linking labels from the element
+									 * pattern to this element. */
 	/* Source and destination vertex elements for an edge element. */
 	Oid			srcvertexid;
 	Oid			destvertexid;
@@ -99,7 +103,7 @@ static List *generate_queries_for_path_pattern_recurse(RangeTblEntry *rte, List 
 static Query *generate_query_for_empty_path_pattern(RangeTblEntry *rte);
 static Query *generate_union_from_pathqueries(List **pathqueries);
 static List *get_path_elements_for_path_factor(Oid propgraphid, struct path_factor *pf);
-static bool is_property_associated_with_label(Oid labeloid, Oid propoid);
+static List *get_path_elements_from_labelexpr(struct path_factor *pf, Node *labelexpr);
 static Node *get_element_property_expr(Oid elemoid, Oid propoid, int rtindex);
 
 /*
@@ -214,20 +218,23 @@ generate_queries_for_path_pattern(RangeTblEntry *rte, List *path_pattern)
 
 				/*
 				 * If both the element patterns have label expressions, they
-				 * need to be conjuncted, which is not supported right now.
+				 * need to be conjuncted.
 				 *
 				 * However, an empty label expression means all labels.
 				 * Conjunction of any label expression with all labels is the
 				 * expression itself. Hence if only one of the two element
 				 * patterns has a label expression use that expression.
 				 */
-				if (!other->labelexpr)
+				if (other->has_empty_labelexpr)
+				{
 					other->labelexpr = gep->labelexpr;
-				else if (gep->labelexpr && !equal(other->labelexpr, gep->labelexpr))
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("element patterns with same variable name \"%s\" but different label expressions are not supported",
-									gep->variable)));
+					other->has_empty_labelexpr = gep->has_empty_labelexpr;
+				}
+				else if (!gep->has_empty_labelexpr && !equal(other->labelexpr, gep->labelexpr))
+					other->labelexpr = (Node *) makeBoolExpr(AND_EXPR,
+															 list_make2(other->labelexpr,
+																		gep->labelexpr),
+															 -1);
 
 				/*
 				 * If two element patterns have the same variable name, they
@@ -250,6 +257,7 @@ generate_queries_for_path_pattern(RangeTblEntry *rte, List *path_pattern)
 			pf = palloc0_object(struct path_factor);
 			pf->factorpos = factorpos++;
 			pf->kind = gep->kind;
+			pf->has_empty_labelexpr = gep->has_empty_labelexpr;
 			pf->labelexpr = gep->labelexpr;
 			pf->variable = gep->variable;
 			pf->whereClause = gep->whereClause;
@@ -765,7 +773,7 @@ generate_setop_from_pathqueries(List *pathqueries, List **rtable, List **targetl
  * function returns NULL.
  */
 static struct path_element *
-create_pe_for_element(struct path_factor *pf, Oid elemoid)
+create_pe_for_element(struct path_factor *pf, Oid elemoid, Oid elem_label_oid)
 {
 	HeapTuple	eletup = SearchSysCache1(PROPGRAPHELOID, ObjectIdGetDatum(elemoid));
 	Form_pg_propgraph_element pgeform;
@@ -775,16 +783,17 @@ create_pe_for_element(struct path_factor *pf, Oid elemoid)
 		elog(ERROR, "cache lookup failed for property graph element %u", elemoid);
 	pgeform = ((Form_pg_propgraph_element) GETSTRUCT(eletup));
 
-	if ((pgeform->pgekind == PGEKIND_VERTEX && pf->kind != VERTEX_PATTERN) ||
-		(pgeform->pgekind == PGEKIND_EDGE && !IS_EDGE_PATTERN(pf->kind)))
-	{
-		ReleaseSysCache(eletup);
-		return NULL;
-	}
+	/*
+	 * We make sure that the type of graph element fits the element pattern
+	 * kind when collecting elements in get_propgraph_label_elements() itself.
+	 */
+	Assert((pgeform->pgekind == PGEKIND_VERTEX && pf->kind == VERTEX_PATTERN) ||
+		   (pgeform->pgekind == PGEKIND_EDGE && IS_EDGE_PATTERN(pf->kind)));
 
 	pe = palloc0_object(struct path_element);
 	pe->path_factor = pf;
 	pe->elemoid = elemoid;
+	pe->elem_label_oids = list_make1_oid(elem_label_oid);
 	pe->reloid = pgeform->pgerelid;
 
 	/*
@@ -824,188 +833,125 @@ create_pe_for_element(struct path_factor *pf, Oid elemoid)
 }
 
 /*
- * Returns the list of OIDs of graph labels which the given label expression
- * resolves to in the given property graph.
+ * Return a list of all the graph elements that satisfy the graph element pattern
+ * represented by the given path_factor `pf`.
+ *
+ * The elements that satisfy the given element pattern are collected by walking
+ * the label expression. We create one path_element object representing every
+ * element whose graph element kind qualifies the element pattern kind. A list of
+ * all such path_element objects is returned.
+ *
+ * get_path_elements_for_path_factor() is the entry point for recursively
+ * walking the label expression. The actual recursion is implemented in
+ * get_path_elements_from_labelexpr().
  */
 static List *
-get_labels_for_expr(Oid propgraphid, Node *labelexpr)
+get_path_elements_for_path_factor(Oid propgraphid, struct path_factor *pf)
 {
-	List	   *label_oids;
+	return get_path_elements_from_labelexpr(pf, pf->labelexpr);
+}
 
-	if (!labelexpr)
-	{
-		Relation	rel;
-		SysScanDesc scan;
-		ScanKeyData key[1];
-		HeapTuple	tup;
+static List *
+get_path_elements_from_labelexpr(struct path_factor *pf, Node *labelexpr)
+{
+	List	   *path_elements;
 
-		/*
-		 * According to section 9.2 "Contextual inference of a set of labels"
-		 * subclause 2.a.ii of SQL/PGQ standard, element pattern which does
-		 * not have a label expression is considered to have label expression
-		 * equivalent to '%|!%' which is set of all labels.
-		 */
-		label_oids = NIL;
-		rel = table_open(PropgraphLabelRelationId, AccessShareLock);
-		ScanKeyInit(&key[0],
-					Anum_pg_propgraph_label_pglpgid,
-					BTEqualStrategyNumber,
-					F_OIDEQ, ObjectIdGetDatum(propgraphid));
-		scan = systable_beginscan(rel, PropgraphLabelGraphNameIndexId,
-								  true, NULL, 1, key);
-		while (HeapTupleIsValid(tup = systable_getnext(scan)))
-		{
-			Form_pg_propgraph_label label = (Form_pg_propgraph_label) GETSTRUCT(tup);
+	/* Empty label expressions should have been tranformed already. */
+	Assert(labelexpr);
 
-			label_oids = lappend_oid(label_oids, label->oid);
-		}
-		systable_endscan(scan);
-		table_close(rel, AccessShareLock);
-	}
-	else if (IsA(labelexpr, GraphLabelRef))
+	if (IsA(labelexpr, GraphLabelRef))
 	{
 		GraphLabelRef *glr = castNode(GraphLabelRef, labelexpr);
+		ListCell   *lc_elem;
+		ListCell   *lc_el;
 
-		label_oids = list_make1_oid(glr->labelid);
+		path_elements = NIL;
+		forboth(lc_elem, glr->elements, lc_el, glr->elem_labels)
+			path_elements = lappend(path_elements,
+									create_pe_for_element(pf, lfirst_oid(lc_elem), lfirst_oid(lc_el)));
 	}
 	else if (IsA(labelexpr, BoolExpr))
 	{
 		BoolExpr   *be = castNode(BoolExpr, labelexpr);
 		List	   *label_exprs = be->args;
 
-		label_oids = NIL;
-		foreach_node(GraphLabelRef, glr, label_exprs)
-			label_oids = lappend_oid(label_oids, glr->labelid);
+		Assert(be->boolop == OR_EXPR || be->boolop == AND_EXPR);
+
+		if (be->boolop == OR_EXPR)
+		{
+			/*
+			 * Label disjunction: collect all distinct elements across all
+			 * sub-expressions, merging elem_label_oids for elements that
+			 * appear in more than one sub-expression.
+			 */
+			path_elements = NIL;
+			foreach_ptr(Node, label_expr, label_exprs)
+			{
+				List	   *node_path_elements = get_path_elements_from_labelexpr(pf, label_expr);
+
+				if (path_elements == NIL)
+					path_elements = node_path_elements;
+				else
+				{
+					foreach_ptr(struct path_element, npe, node_path_elements)
+					{
+						struct path_element *found = NULL;
+
+						foreach_ptr(struct path_element, pe, path_elements)
+						{
+							if (npe->elemoid == pe->elemoid)
+							{
+								pe->elem_label_oids = list_concat(pe->elem_label_oids,
+																  npe->elem_label_oids);
+								found = pe;
+								break;
+							}
+						}
+
+						if (!found)
+							path_elements = lappend(path_elements, npe);
+					}
+				}
+			}
+		}
+		else
+		{
+			List	   *left_elems;
+			List	   *right_elems;
+			List	   *intersection = NIL;
+
+			/*
+			 * Label conjunction (implicit, from same-variable element
+			 * patterns with different label expressions): recurse into each
+			 * child of the binary AND tree and keep only elements that appear
+			 * in both sides.  Merge elem_label_oids so that property
+			 * resolution can use labels from both sides of the conjunction.
+			 */
+			left_elems = get_path_elements_from_labelexpr(pf, linitial(label_exprs));
+			right_elems = get_path_elements_from_labelexpr(pf, lsecond(label_exprs));
+
+			foreach_ptr(struct path_element, pe, left_elems)
+			{
+				foreach_ptr(struct path_element, npe, right_elems)
+				{
+					if (pe->elemoid == npe->elemoid)
+					{
+						pe->elem_label_oids = list_concat(pe->elem_label_oids,
+														  npe->elem_label_oids);
+						intersection = lappend(intersection, pe);
+						break;
+					}
+				}
+			}
+			path_elements = intersection;
+		}
+
 	}
 	else
 	{
-		/*
-		 * should not reach here since gram.y will not generate a label
-		 * expression with other node types.
-		 */
+		path_elements = NIL;	/* Keep compiler quiet */
 		elog(ERROR, "unsupported label expression node: %d", (int) nodeTag(labelexpr));
 	}
-
-	return label_oids;
-}
-
-/*
- * Return a list of all the graph elements that satisfy the graph element pattern
- * represented by the given path_factor `pf`.
- *
- * First we find all the graph labels that satisfy the label expression in path
- * factor. Each label is associated with one or more graph elements.  A union of
- * all such elements satisfies the element pattern. We create one path_element
- * object representing every element whose graph element kind qualifies the
- * element pattern kind. A list of all such path_element objects is returned.
- *
- * Note that we need to report an error for an explicitly specified label which
- * is not associated with any graph element of the required kind. So we have to
- * treat each label separately. Without that requirement we could have collected
- * all the unique elements first and then created path_element objects for them
- * to simplify the code.
- */
-static List *
-get_path_elements_for_path_factor(Oid propgraphid, struct path_factor *pf)
-{
-	List	   *label_oids = get_labels_for_expr(propgraphid, pf->labelexpr);
-	List	   *elem_oids_seen = NIL;
-	List	   *pf_elem_oids = NIL;
-	List	   *path_elements = NIL;
-	List	   *unresolved_labels = NIL;
-	Relation	rel;
-	SysScanDesc scan;
-	ScanKeyData key[1];
-	HeapTuple	tup;
-
-	/*
-	 * A property graph element can be either a vertex or an edge. Other types
-	 * of path factors like nested path pattern need to be handled separately
-	 * when supported.
-	 */
-	Assert(pf->kind == VERTEX_PATTERN || IS_EDGE_PATTERN(pf->kind));
-
-	rel = table_open(PropgraphElementLabelRelationId, AccessShareLock);
-	foreach_oid(labeloid, label_oids)
-	{
-		bool		found = false;
-
-		ScanKeyInit(&key[0],
-					Anum_pg_propgraph_element_label_pgellabelid,
-					BTEqualStrategyNumber,
-					F_OIDEQ, ObjectIdGetDatum(labeloid));
-		scan = systable_beginscan(rel, PropgraphElementLabelLabelIndexId, true,
-								  NULL, 1, key);
-		while (HeapTupleIsValid(tup = systable_getnext(scan)))
-		{
-			Form_pg_propgraph_element_label label_elem = (Form_pg_propgraph_element_label) GETSTRUCT(tup);
-			Oid			elem_oid = label_elem->pgelelid;
-
-			if (!list_member_oid(elem_oids_seen, elem_oid))
-			{
-				/*
-				 * Create path_element object if the new element qualifies the
-				 * element pattern kind.
-				 */
-				struct path_element *pe = create_pe_for_element(pf, elem_oid);
-
-				if (pe)
-				{
-					path_elements = lappend(path_elements, pe);
-
-					/* Remember qualified elements. */
-					pf_elem_oids = lappend_oid(pf_elem_oids, elem_oid);
-					found = true;
-				}
-
-				/*
-				 * Remember qualified and unqualified elements processed so
-				 * far to avoid processing already processed elements again.
-				 */
-				elem_oids_seen = lappend_oid(elem_oids_seen, label_elem->pgelelid);
-			}
-			else if (list_member_oid(pf_elem_oids, elem_oid))
-			{
-				/*
-				 * The graph element is known to qualify the given element
-				 * pattern. Flag that the current label has at least one
-				 * qualified element associated with it.
-				 */
-				found = true;
-			}
-		}
-
-		if (!found)
-		{
-			/*
-			 * We did not find any qualified element associated with this
-			 * label. The label or its properties can not be associated with
-			 * the given element pattern. Throw an error if the label was
-			 * explicitly specified in the element pattern. Otherwise remember
-			 * it for later use.
-			 */
-			if (!pf->labelexpr)
-				unresolved_labels = lappend_oid(unresolved_labels, labeloid);
-			else
-				ereport(ERROR,
-						(errcode(ERRCODE_UNDEFINED_OBJECT),
-						 errmsg("no property graph element of type \"%s\" has label \"%s\" associated with it in property graph \"%s\"",
-								pf->kind == VERTEX_PATTERN ? "vertex" : "edge",
-								get_propgraph_label_name(labeloid),
-								get_rel_name(propgraphid))));
-		}
-
-		systable_endscan(scan);
-	}
-	table_close(rel, AccessShareLock);
-
-	/*
-	 * Remove the labels which were not explicitly mentioned in the label
-	 * expression but do not have any qualified elements associated with them.
-	 * Properties associated with such labels may not be referenced. See
-	 * replace_property_refs_mutator() for more details.
-	 */
-	pf->labeloids = list_difference_oid(label_oids, unresolved_labels);
 
 	return path_elements;
 }
@@ -1045,7 +991,6 @@ replace_property_refs_mutator(Node *node, struct replace_property_refs_context *
 		Node	   *n = NULL;
 		struct path_element *found_mapping = NULL;
 		struct path_factor *mapping_factor = NULL;
-		List	   *unrelated_labels = NIL;
 
 		foreach_ptr(struct path_element, m, context->mappings)
 		{
@@ -1066,16 +1011,11 @@ replace_property_refs_mutator(Node *node, struct replace_property_refs_context *
 		mapping_factor = found_mapping->path_factor;
 
 		/*
-		 * Find property definition for given element through any of the
+		 * Find property definition for the given element through any of the
 		 * associated labels qualifying the given element pattern.
 		 */
-		foreach_oid(labeloid, mapping_factor->labeloids)
+		foreach_oid(elem_labelid, found_mapping->elem_label_oids)
 		{
-			Oid			elem_labelid = GetSysCacheOid2(PROPGRAPHELEMENTLABELELEMENTLABEL,
-													   Anum_pg_propgraph_element_label_oid,
-													   ObjectIdGetDatum(found_mapping->elemoid),
-													   ObjectIdGetDatum(labeloid));
-
 			if (OidIsValid(elem_labelid))
 			{
 				HeapTuple	tup = SearchSysCache2(PROPGRAPHLABELPROP, ObjectIdGetDatum(elem_labelid),
@@ -1097,56 +1037,26 @@ replace_property_refs_mutator(Node *node, struct replace_property_refs_context *
 
 				ReleaseSysCache(tup);
 			}
-			else
-			{
-				/*
-				 * Label is not associated with the element but it may be
-				 * associated with the property through some other element.
-				 * Save it for later use.
-				 */
-				unrelated_labels = lappend_oid(unrelated_labels, labeloid);
-			}
 		}
 
 		/* See if we can resolve the property in some other way. */
 		if (!n)
 		{
-			bool		prop_associated = false;
+			/*
+			 * The property is associated with at least one of the labels that
+			 * satisfy given element pattern. If it's associated with the
+			 * given element (through some other label), use correspondig
+			 * value expression. Otherwise NULL. Ref. SQL/PGQ standard section
+			 * 6.5 Property Reference, General Rule 2.b.
+			 */
+			n = get_element_property_expr(found_mapping->elemoid, gpr->propid,
+										  mapping_factor->factorpos + 1);
 
-			foreach_oid(loid, unrelated_labels)
-			{
-				if (is_property_associated_with_label(loid, gpr->propid))
-				{
-					prop_associated = true;
-					break;
-				}
-			}
-
-			if (prop_associated)
-			{
-				/*
-				 * The property is associated with at least one of the labels
-				 * that satisfy given element pattern. If it's associated with
-				 * the given element (through some other label), use
-				 * corresponding value expression. Otherwise NULL. Ref.
-				 * SQL/PGQ standard section 6.5 Property Reference, General
-				 * Rule 2.b.
-				 */
-				n = get_element_property_expr(found_mapping->elemoid, gpr->propid,
-											  mapping_factor->factorpos + 1);
-
-				if (!n)
-					n = (Node *) makeNullConst(gpr->typeId, gpr->typmod, gpr->collation);
-			}
-
+			if (!n)
+				n = (Node *) makeNullConst(gpr->typeId, gpr->typmod, gpr->collation);
 		}
 
-		if (!n)
-			ereport(ERROR,
-					errcode(ERRCODE_UNDEFINED_OBJECT),
-					errmsg("property \"%s\" for element variable \"%s\" not found",
-						   get_propgraph_property_name(gpr->propid), mapping_factor->variable));
-
+		Assert(n);
 		return n;
 	}
 
@@ -1259,43 +1169,6 @@ build_edge_vertex_link_quals(HeapTuple edgetup, int edgerti, int refrti, Oid ref
 	assign_expr_collations(pstate, (Node *) quals);
 
 	return quals;
-}
-
-/*
- * Check if the given property is associated with the given label.
- *
- * A label projects the same set of properties through every element it is
- * associated with. Find any of the elements and return true if that element is
- * associated with the given property. False otherwise.
- */
-static bool
-is_property_associated_with_label(Oid labeloid, Oid propoid)
-{
-	Relation	rel;
-	SysScanDesc scan;
-	ScanKeyData key[1];
-	HeapTuple	tup;
-	bool		associated = false;
-
-	rel = table_open(PropgraphElementLabelRelationId, RowShareLock);
-	ScanKeyInit(&key[0],
-				Anum_pg_propgraph_element_label_pgellabelid,
-				BTEqualStrategyNumber,
-				F_OIDEQ, ObjectIdGetDatum(labeloid));
-	scan = systable_beginscan(rel, PropgraphElementLabelLabelIndexId,
-							  true, NULL, 1, key);
-
-	if (HeapTupleIsValid(tup = systable_getnext(scan)))
-	{
-		Form_pg_propgraph_element_label ele_label = (Form_pg_propgraph_element_label) GETSTRUCT(tup);
-
-		associated = SearchSysCacheExists2(PROPGRAPHLABELPROP,
-										   ObjectIdGetDatum(ele_label->oid), ObjectIdGetDatum(propoid));
-	}
-	systable_endscan(scan);
-	table_close(rel, RowShareLock);
-
-	return associated;
 }
 
 /*
