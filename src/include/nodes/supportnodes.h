@@ -465,7 +465,8 @@ typedef struct SupportRequestMonotonic
 	NodeTag		type;
 
 	/* Input fields: */
-	Node	   *expr;			/* FuncExpr or OpExpr */
+	Node		*expr;			/* FuncExpr or OpExpr */
+	PlannerInfo *root;			/* Additional context */
 
 	/* Output fields (set by prosupport function): */
 	int			nslopes;		/* number of slopes in array */
