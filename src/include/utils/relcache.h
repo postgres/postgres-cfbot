@@ -91,6 +91,7 @@ extern void RelationInitIndexAccessInfo(Relation relation);
 struct PublicationDesc;
 extern void RelationBuildPublicationDesc(Relation relation,
 										 struct PublicationDesc *pubdesc);
+extern bool RelationHasPubRowFilterForUpdate(Relation relation);
 
 extern void RelationInitTableAccessMethod(Relation relation);
 
