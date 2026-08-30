@@ -48,7 +48,7 @@ static bool matches_boolean_partition_clause(RestrictInfo *rinfo,
 											 int partkeycol);
 static Var *find_var_for_subquery_tle(RelOptInfo *rel, TargetEntry *tle);
 static bool right_merge_direction(PlannerInfo *root, PathKey *pathkey);
-static MonotonicFunction get_expr_slope_wrt(Expr *expr, Expr *target);
+static MonotonicFunction get_expr_slope_wrt(Expr *expr, Expr *target, PlannerInfo *root);
 static bool indexcol_is_equalimage(IndexOptInfo *index, int colno);
 static PathKey *slope_emit_pathkey(PlannerInfo *root, PathKey *pk,
 								   Expr *indexkey, bool reverse_sort,
@@ -913,7 +913,7 @@ expr_can_nan(Expr *target)
  *   MONOTONICFUNC_NONE:       cannot determine monotonicity
  */
 static MonotonicFunction
-get_expr_slope_wrt(Expr *expr, Expr *target)
+get_expr_slope_wrt(Expr *expr, Expr *target, PlannerInfo *root)
 {
 	MonotonicFunction slope = MONOTONICFUNC_INCREASING;
 
@@ -990,6 +990,7 @@ get_expr_slope_wrt(Expr *expr, Expr *target)
 		/* Call prosupport to get slope pattern */
 		req.type = T_SupportRequestMonotonic;
 		req.expr = (Node *) expr;
+		req.root = root;
 		req.slopes = NULL;
 		req.nslopes = 0;
 
@@ -1296,7 +1297,8 @@ build_index_pathkeys(PlannerInfo *root,
 
 					em = linitial(qpk->pk_eclass->ec_members);
 					qpk->pk_slope = get_expr_slope_wrt(em->em_expr,
-													   qpk->pk_var);
+													   qpk->pk_var,
+													   root);
 				}
 
 				/*

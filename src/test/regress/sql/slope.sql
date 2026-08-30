@@ -643,5 +643,26 @@ EXPLAIN (COSTS OFF)
 SELECT min(date_trunc('day', ts, 'Bogus/Zone')) FROM src;
 SELECT min(date_trunc('day', ts, 'Bogus/Zone')) FROM src;
 
+--
+-- Plan cache
+--
+-- if a plan is cached ignore monotonicity that depends on session timezone.
+
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+CREATE TABLE pc(t timestamptz);
+INSERT INTO pc VALUES ('2025-11-02 05:59:59+00'),
+                      ('2025-11-02 06:00:00+00');
+CREATE INDEX ON pc(t);
+
+SET TimeZone = 'UTC';
+PREPARE q AS SELECT t AT LOCAL AS l FROM pc ORDER BY 1;
+EXECUTE q;                             -- generic plan, built under Etc/UTC
+EXPLAIN (COSTS OFF) SELECT t AT LOCAL as l FROM pc ORDER BY 1;
+SET TimeZone = 'America/New_York';
+EXECUTE q;
+EXPLAIN (COSTS OFF) SELECT t AT LOCAL as l FROM pc ORDER BY 1;
+
+
 DEALLOCATE ALL;
 DROP SCHEMA slope CASCADE;

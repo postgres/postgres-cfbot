@@ -855,10 +855,10 @@ SELECT
 FROM units
 ORDER BY 1;
 EXECUTE query('UTC');
-        expression        | monotonic 
---------------------------+-----------
- date_trunc(<>, tstz, TZ) | none
- timezone(TZ, <>)         | none
+        expression        |               monotonic                
+--------------------------+----------------------------------------
+ date_trunc(<>, tstz, TZ) | year, month, day, hour, minute, second
+ timezone(TZ, <>)         | ts, tstz
 (2 rows)
 
 EXECUTE query('Africa/Ouagadougou');
@@ -1013,9 +1013,50 @@ SELECT min(date_trunc('day', ts, 'Bogus/Zone')) FROM src;
 
 SELECT min(date_trunc('day', ts, 'Bogus/Zone')) FROM src;
 ERROR:  time zone "Bogus/Zone" not recognized
+--
+-- Plan cache
+--
+-- if a plan is cached ignore monotonicity that depends on session timezone.
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+CREATE TABLE pc(t timestamptz);
+INSERT INTO pc VALUES ('2025-11-02 05:59:59+00'),
+                      ('2025-11-02 06:00:00+00');
+CREATE INDEX ON pc(t);
+SET TimeZone = 'UTC';
+PREPARE q AS SELECT t AT LOCAL AS l FROM pc ORDER BY 1;
+EXECUTE q;                             -- generic plan, built under Etc/UTC
+            l             
+--------------------------
+ Sun Nov 02 05:59:59 2025
+ Sun Nov 02 06:00:00 2025
+(2 rows)
+
+EXPLAIN (COSTS OFF) SELECT t AT LOCAL as l FROM pc ORDER BY 1;
+              QUERY PLAN              
+--------------------------------------
+ Index Only Scan using pc_t_idx on pc
+(1 row)
+
+SET TimeZone = 'America/New_York';
+EXECUTE q;
+            l             
+--------------------------
+ Sun Nov 02 01:00:00 2025
+ Sun Nov 02 01:59:59 2025
+(2 rows)
+
+EXPLAIN (COSTS OFF) SELECT t AT LOCAL as l FROM pc ORDER BY 1;
+                 QUERY PLAN                 
+--------------------------------------------
+ Sort
+   Sort Key: ((t AT LOCAL))
+   ->  Index Only Scan using pc_t_idx on pc
+(3 rows)
+
 DEALLOCATE ALL;
 DROP SCHEMA slope CASCADE;
-NOTICE:  drop cascades to 15 other objects
+NOTICE:  drop cascades to 16 other objects
 DETAIL:  drop cascades to table t
 drop cascades to table u
 drop cascades to operator family test_int4_ops for access method btree
@@ -1031,3 +1072,4 @@ drop cascades to type fp_real
 drop cascades to table numeric_corners
 drop cascades to table inc
 drop cascades to function index_plan(text)
+drop cascades to table pc

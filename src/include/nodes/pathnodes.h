@@ -250,6 +250,9 @@ typedef struct PlannerGlobal
 	/* is plan specific to current role? */
 	bool		dependsOnRole;
 
+	/* oneshot plan? statement-local optimizations are allowed */
+	bool		is_oneshot;
+
 	/* parallel mode potentially OK? */
 	bool		parallelModeOK;
 
