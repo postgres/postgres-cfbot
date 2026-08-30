@@ -525,7 +525,7 @@ parse_sane_timezone(struct pg_tm *tm, text *zone)
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("time zone \"%s\" not recognized", tzname)));
 
-		type = DecodeTimezoneName(tzname, &val, &tzp);
+		type = DecodeTimezoneName(tzname, &val, &tzp, NULL);
 
 		if (type == TZNAME_FIXED_OFFSET)
 		{
@@ -1973,8 +1973,11 @@ timestamp2tm(Timestamp dt, int *tzp, struct pg_tm *tm, fsec_t *fsec, const char 
 	if ((Timestamp) utime == dt)
 	{
 		/* Use session timezone doesn't pass one */
-		struct pg_tm *tx = pg_localtime(&utime,
-			attimezone == NULL ? session_timezone : attimezone);
+		pg_tz		 *tz;
+		struct pg_tm *tx;
+
+		tz = attimezone == NULL ? session_timezone : attimezone;
+		tx = pg_localtime(&utime, tz);
 
 		/* Treat failure as out-of-range, though it could be ENOMEM */
 		if (tx)
@@ -6377,7 +6380,7 @@ timestamp_zone(PG_FUNCTION_ARGS)
 	 */
 	text_to_cstring_buffer(zone, tzname, sizeof(tzname));
 
-	type = DecodeTimezoneName(tzname, &val, &tzp);
+	type = DecodeTimezoneName(tzname, &val, &tzp, NULL);
 
 	if (type == TZNAME_FIXED_OFFSET)
 	{
@@ -6645,7 +6648,7 @@ timestamptz_zone(PG_FUNCTION_ARGS)
 	 */
 	text_to_cstring_buffer(zone, tzname, sizeof(tzname));
 
-	type = DecodeTimezoneName(tzname, &val, &tzp);
+	type = DecodeTimezoneName(tzname, &val, &tzp, NULL);
 
 	if (type == TZNAME_FIXED_OFFSET)
 	{
