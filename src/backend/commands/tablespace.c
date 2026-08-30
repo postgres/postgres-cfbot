@@ -70,6 +70,7 @@
 #include "miscadmin.h"
 #include "postmaster/bgwriter.h"
 #include "storage/fd.h"
+#include "storage/lmgr.h"
 #include "storage/lwlock.h"
 #include "storage/procsignal.h"
 #include "storage/standby.h"
@@ -456,6 +457,10 @@ DropTableSpace(DropTableSpaceStmt *stmt)
 	if (IsPinnedObject(TableSpaceRelationId, tablespaceoid))
 		aclcheck_error(ACLCHECK_NO_PRIV, OBJECT_TABLESPACE,
 					   tablespacename);
+
+	/* Prevent new shared dependencies while we drop the tablespace. */
+	LockSharedObject(TableSpaceRelationId, tablespaceoid, 0,
+					 AccessExclusiveLock);
 
 	/* Check for pg_shdepend entries depending on this tablespace */
 	if (checkSharedDependencies(TableSpaceRelationId, tablespaceoid,
