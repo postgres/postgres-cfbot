@@ -478,8 +478,12 @@ extern bool heap_page_is_all_visible(Relation rel, Buffer buf,
 /* in heap/heapam_visibility.c */
 extern bool HeapTupleSatisfiesVisibility(HeapTuple htup, Snapshot snapshot,
 										 Buffer buffer);
+extern bool HeapTupleSatisfiesVisibilityNoHints(HeapTuple htup,
+												Snapshot snapshot);
 extern TM_Result HeapTupleSatisfiesUpdate(HeapTuple htup, CommandId curcid,
 										  Buffer buffer);
+extern TM_Result HeapTupleSatisfiesUpdateNoHints(HeapTuple htup,
+												 CommandId curcid);
 extern HTSV_Result HeapTupleSatisfiesVacuum(HeapTuple htup, TransactionId OldestXmin,
 											Buffer buffer);
 extern HTSV_Result HeapTupleSatisfiesVacuumHorizon(HeapTuple htup, Buffer buffer,
