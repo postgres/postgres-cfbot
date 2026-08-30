@@ -972,6 +972,9 @@ RenameTableSpace(const char *oldname, const char *newname)
 
 	table_endscan(scan);
 
+	/* Lock the tablespace before updating its catalog tuple. */
+	shdepLockAndCheckObject(TableSpaceRelationId, tspId);
+
 	/* Must be owner */
 	if (!object_ownercheck(TableSpaceRelationId, tspId, GetUserId()))
 		aclcheck_error(ACLCHECK_NO_PRIV, OBJECT_TABLESPACE, oldname);
@@ -1061,7 +1064,12 @@ AlterTableSpaceOptions(AlterTableSpaceOptionsStmt *stmt)
 				 errmsg("tablespace \"%s\" does not exist",
 						stmt->tablespacename)));
 
+	tup = heap_copytuple(tup);
 	tablespaceoid = ((Form_pg_tablespace) GETSTRUCT(tup))->oid;
+	table_endscan(scandesc);
+
+	/* Lock the tablespace before updating its catalog tuple. */
+	shdepLockAndCheckObject(TableSpaceRelationId, tablespaceoid);
 
 	/* Must be owner of the existing object */
 	if (!object_ownercheck(TableSpaceRelationId, tablespaceoid, GetUserId()))
@@ -1093,9 +1101,8 @@ AlterTableSpaceOptions(AlterTableSpaceOptionsStmt *stmt)
 	InvokeObjectPostAlterHook(TableSpaceRelationId, tablespaceoid, 0);
 
 	heap_freetuple(newtuple);
+	heap_freetuple(tup);
 
-	/* Conclude heap scan. */
-	table_endscan(scandesc);
 	table_close(rel, NoLock);
 
 	return tablespaceoid;
