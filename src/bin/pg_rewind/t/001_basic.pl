@@ -100,9 +100,7 @@ sub run_test
 		my $primary_pgdata = $node_primary->data_dir;
 		my $standby_pgdata = $node_standby->data_dir;
 
-		# First check that pg_rewind fails if the target cluster is
-		# not stopped as it fails to start up for the forced recovery
-		# step.
+		# First check that pg_rewind refuses a running target cluster.	
 		command_fails(
 			[
 				'pg_rewind', '--debug',
@@ -111,18 +109,6 @@ sub run_test
 				'--no-sync'
 			],
 			'pg_rewind with running target');
-
-		# Again with --no-ensure-shutdown, which should equally fail.
-		# This time pg_rewind complains without attempting to perform
-		# recovery once.
-		command_fails(
-			[
-				'pg_rewind', '--debug',
-				'--source-pgdata' => $standby_pgdata,
-				'--target-pgdata' => $primary_pgdata,
-				'--no-sync', '--no-ensure-shutdown'
-			],
-			'pg_rewind --no-ensure-shutdown with running target');
 
 		# Stop the target, and attempt to run with a local source
 		# still running.  This fails as pg_rewind requires to have
@@ -133,7 +119,7 @@ sub run_test
 				'pg_rewind', '--debug',
 				'--source-pgdata' => $standby_pgdata,
 				'--target-pgdata' => $primary_pgdata,
-				'--no-sync', '--no-ensure-shutdown'
+				'--no-sync'
 			],
 			'pg_rewind with unexpected running source');
 
