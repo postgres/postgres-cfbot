@@ -927,6 +927,23 @@ HINT:  To initiate replication, you must manually create the replication slot, e
     So the <command>UPDATE</command> is transformed into an <command>INSERT</command>.
    </para>
 
+   <note>
+    <para>
+     An <command>INSERT</command> resulting from this transformation needs the
+     complete new row, but the value of a column that is stored out-of-line
+     (see <xref linkend="storage-toast"/>) is normally not present in the WAL
+     for an <command>UPDATE</command> that did not modify the column, unless
+     the column is part of the replica identity.  To keep such values
+     available to the transformation, the publisher logs them with the old
+     row's key when the table is published with a row filter and the update
+     changes a replica identity column.  This slightly increases the WAL
+     volume for such updates; it does not happen with
+     <literal>REPLICA IDENTITY FULL</literal> (see
+     <xref linkend="sql-altertable-replica-identity"/>), where the complete
+     old row is logged anyway.
+    </para>
+   </note>
+
    <para>
     <xref linkend="logical-replication-row-filter-transformations-summary"/>
     summarizes the applied transformations.
@@ -2446,6 +2463,17 @@ CONTEXT:  processing remote data for replication origin "pg_16395" during "INSER
      that do not have a default operator class for B-tree or Hash. However,
      this limitation can be overcome by ensuring that the table has a primary
      key or replica identity defined for it.
+    </para>
+   </listitem>
+
+   <listitem>
+    <para>
+     An <command>UPDATE</command> or <command>DELETE</command> fails if the old
+     row to be written to <acronym>WAL</acronym> for logical decoding exceeds
+     1 GB after values stored out-of-line (see <xref linkend="storage-toast"/>)
+     are included, because the row must be formed in memory as a single tuple.
+     Such a failure results in an
+     <literal>invalid memory alloc request size</literal> error.
     </para>
    </listitem>
   </itemizedlist>
