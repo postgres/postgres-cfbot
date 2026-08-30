@@ -4,6 +4,7 @@
 
 #include "c.h"
 #include "catalog/pg_type.h"
+#include "nodes/miscnodes.h"
 #include "nodes/primnodes.h"
 #include "nodes/supportnodes.h"
 #include "parser/scansup.h"
@@ -30,7 +31,7 @@ typedef enum SLOPE_SIGN
 	SLOPE_SIGN_PINF = 2,
 	SLOPE_SIGN_NAN = 3,
 	SLOPE_SIGN_NULL = 4,
-} SLOPE_SIGN;
+}			SLOPE_SIGN;
 
 #define SLOPE_REQUEST(req) \
 	SupportRequestMonotonic *req; \
@@ -361,6 +362,9 @@ get_const_timezone_arg(List *args, int argno)
 	Const	   *tz_const;
 	text	   *zone;
 	char		tzname[TZ_STRLEN_MAX + 1];
+	ErrorSaveContext escontext = {T_ErrorSaveContext};
+	int			offset;
+	pg_tz	   *tz;
 
 	if (args == NULL || list_length(args) <= argno)
 		return NULL;
@@ -376,7 +380,11 @@ get_const_timezone_arg(List *args, int argno)
 
 	zone = DatumGetTextPP(tz_const->constvalue);
 	text_to_cstring_buffer(zone, tzname, sizeof(tzname));
-	return DecodeTimezoneNameToTz(tzname);
+
+	DecodeTimezoneName(tzname, &offset, &tz, (Node *) &escontext);
+	if (escontext.error_occurred)
+		return NULL;
+	return tz;
 }
 
 /*
@@ -394,9 +402,10 @@ timestamptz_date_slope_support(PG_FUNCTION_ARGS)
 }
 
 static Oid
-get_monotonic_expr_funcid(SupportRequestMonotonic *req)
+get_monotonic_expr_funcid(SupportRequestMonotonic * req)
 {
 	Node	   *expr = req->expr;
+
 	if (IsA(expr, FuncExpr))
 		return ((FuncExpr *) expr)->funcid;
 	return InvalidOid;
@@ -469,7 +478,6 @@ timezone_prosupport(PG_FUNCTION_ARGS)
 	bool		to_utc = false;
 	SLOPE_REQUEST_ARGS(req, args, 1);
 
-
 	switch (get_monotonic_expr_funcid(req))
 	{
 
@@ -494,10 +502,9 @@ timezone_prosupport(PG_FUNCTION_ARGS)
 		PG_RETURN_POINTER(NULL);
 
 	/*
-	 * We need MONOTONICFUNC_INCREASING for either the first or
-	 * second argument, but the other argument is either a constant
-	 * or missing, so we can simply return MONOTONICFUNC_INCREASING
-	 * for both.
+	 * We need MONOTONICFUNC_INCREASING for either the first or second
+	 * argument, but the other argument is either a constant or missing, so we
+	 * can simply return MONOTONICFUNC_INCREASING for both.
 	 */
 	return monotonic_slope_support(req, 2, asc_slope);
 }
