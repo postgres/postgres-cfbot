@@ -275,10 +275,18 @@ contain_invalid_rfcolumn_walker(Node *node, rf_context *context)
  * REPLICA IDENTITY index or not.
  *
  * Returns true if any invalid column is found.
+ *
+ * On return, *rf_exists is set to true iff this publication has a row
+ * filter defined for the relation, independently of whether that filter is
+ * valid.  It is left untouched (and so should be initialized by the caller)
+ * when REPLICA IDENTITY FULL makes the question moot: in that case the old
+ * tuple's full contents are always available, so callers that use
+ * *rf_exists to decide whether extra protection is needed don't need to
+ * know whether a filter exists.
  */
 bool
 pub_rf_contains_invalid_column(Oid pubid, Relation relation, List *ancestors,
-							   bool pubviaroot)
+							   bool pubviaroot, bool *rf_exists)
 {
 	HeapTuple	rftuple;
 	Oid			relid = RelationGetRelid(relation);
@@ -327,6 +335,8 @@ pub_rf_contains_invalid_column(Oid pubid, Relation relation, List *ancestors,
 		rf_context	context = {0};
 		Node	   *rfnode;
 		Bitmapset  *bms = NULL;
+
+		*rf_exists = true;
 
 		context.pubviaroot = pubviaroot;
 		context.parentid = publish_as_relid;
