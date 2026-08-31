@@ -157,6 +157,7 @@ heap_page_items(PG_FUNCTION_ARGS)
 
 		inter_call_data->offset = FirstOffsetNumber;
 		inter_call_data->page = get_page_from_raw(raw_page);
+		verify_page_header(inter_call_data->page);
 
 		fctx->max_calls = PageGetMaxOffsetNumber(inter_call_data->page);
 		fctx->user_fctx = inter_call_data;
