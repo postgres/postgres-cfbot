@@ -106,6 +106,10 @@ SELECT (COUNT(*) = (SELECT relpages FROM pg_class WHERE relname = 'test2')) AS r
  t
 (1 row)
 
+-- A corrupt line pointer must be reported, not read out of bounds.  All-ones is
+-- an invalid (out-of-range, unaligned) line pointer on any architecture.
+SELECT brin_page_items(set_byte(set_byte(set_byte(set_byte(get_raw_page('test1_a_idx', 2), 24, 255), 25, 255), 26, 255), 27, 255), 'test1_a_idx');
+ERROR:  invalid line pointer at offset 1 in BRIN page
 DROP TABLE test1;
 DROP TABLE test2;
 -- Test that parallel index build produces the same BRIN index as serial build.
