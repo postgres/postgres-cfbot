@@ -84,6 +84,7 @@ extern bool restriction_is_always_false(PlannerInfo *root,
 										RestrictInfo *restrictinfo);
 extern void distribute_restrictinfo_to_rels(PlannerInfo *root,
 											RestrictInfo *restrictinfo);
+extern void add_semijoin_not_null_quals(PlannerInfo *root);
 extern RestrictInfo *process_implied_equality(PlannerInfo *root,
 											  Oid opno,
 											  Oid collation,
