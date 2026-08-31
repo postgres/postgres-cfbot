@@ -152,6 +152,8 @@ WAIT FOR LSN '<replaceable class="parameter">lsn</replaceable>'
           milliseconds.  Also it might be given as string literal with
           integer number of milliseconds or a number with unit
           (see <xref linkend="config-setting-names-values"/>).
+          The valid range is <literal>0 .. INT_MAX</literal> milliseconds.
+          A value of zero means waiting indefinitely.
          </para>
         </listitem>
        </varlistentry>
