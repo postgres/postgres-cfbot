@@ -500,10 +500,23 @@ bt_page_print_tuples(ua_page_items *uargs)
 
 	id = PageGetItemId(page, offset);
 
-	if (!ItemIdIsValid(id))
-		elog(ERROR, "invalid ItemId");
+	/* Check that the line pointer and tuple lie within the page. */
+	if (!ItemIdHasStorage(id) ||
+		ItemIdGetOffset(id) != MAXALIGN(ItemIdGetOffset(id)) ||
+		ItemIdGetLength(id) < sizeof(IndexTupleData) ||
+		ItemIdGetOffset(id) + ItemIdGetLength(id) > BLCKSZ)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid line pointer at offset %u in btree page",
+						offset)));
 
 	itup = (IndexTuple) PageGetItem(page, id);
+
+	if (IndexTupleSize(itup) > ItemIdGetLength(id))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid index tuple length at offset %u in btree page",
+						offset)));
 
 	j = 0;
 	memset(nulls, 0, sizeof(nulls));
