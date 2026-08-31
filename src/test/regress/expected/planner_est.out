@@ -299,9 +299,9 @@ true, true, false, true);
 SELECT explain_mask_costs($$
 SELECT * FROM generate_subscripts(ARRAY[1, 2, (SELECT 3)], (SELECT 1)) g(s);$$,
 false, true, false, true);
-                          explain_mask_costs                           
------------------------------------------------------------------------
- Function Scan on generate_subscripts g  (cost=N..N rows=1000 width=N)
+                          explain_mask_costs                          
+----------------------------------------------------------------------
+ Function Scan on generate_subscripts g  (cost=N..N rows=100 width=N)
    InitPlan expr_1
      ->  Result  (cost=N..N rows=1 width=N)
    InitPlan expr_2
@@ -311,9 +311,9 @@ false, true, false, true);
 SELECT explain_mask_costs($$
 SELECT * FROM generate_subscripts(ARRAY[1, 2, (SELECT 3)], 2) g(s);$$,
 false, true, false, true);
-                          explain_mask_costs                           
------------------------------------------------------------------------
- Function Scan on generate_subscripts g  (cost=N..N rows=1000 width=N)
+                          explain_mask_costs                          
+----------------------------------------------------------------------
+ Function Scan on generate_subscripts g  (cost=N..N rows=100 width=N)
    InitPlan expr_1
      ->  Result  (cost=N..N rows=1 width=N)
 (3 rows)
@@ -342,11 +342,11 @@ true, true, false, true);
 SELECT explain_mask_costs($$
 SELECT * FROM subscript_table_1 t, LATERAL generate_subscripts(t.a, 2) g(s);$$,
 false, true, false, true);
-                             explain_mask_costs                              
------------------------------------------------------------------------------
- Nested Loop  (cost=N..N rows=100000 width=N)
+                             explain_mask_costs                             
+----------------------------------------------------------------------------
+ Nested Loop  (cost=N..N rows=10000 width=N)
    ->  Seq Scan on subscript_table_1 t  (cost=N..N rows=100 width=N)
-   ->  Function Scan on generate_subscripts g  (cost=N..N rows=1000 width=N)
+   ->  Function Scan on generate_subscripts g  (cost=N..N rows=100 width=N)
 (3 rows)
 
 RESET enable_memoize;
