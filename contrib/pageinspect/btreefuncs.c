@@ -768,6 +768,7 @@ bt_page_items_bytea(PG_FUNCTION_ARGS)
 		uargs = palloc_object(ua_page_items);
 
 		uargs->page = get_page_from_raw(raw_page);
+		verify_page_header(uargs->page);
 
 		if (PageIsNew(uargs->page))
 		{
