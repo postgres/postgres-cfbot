@@ -8005,7 +8005,8 @@ pwdfMatchesString(char *buf, const char *token)
  * explicit_bzero(ret, strlen(ret)); pqReleaseConnHosts() relies on this.
  *
  * On failure, *errmsg is set to an error to be returned.  It is
- * left NULL on success, or if no password could be found.
+ * left NULL on success, or if no password could be found.  Callers
+ * that do not care about the distinction can pass errmsg as NULL.
  */
 static char *
 passwordFromFile(const char *hostname, const char *port,
@@ -8018,7 +8019,8 @@ passwordFromFile(const char *hostname, const char *port,
 #endif
 	PQExpBufferData buf;
 
-	*errmsg = NULL;
+	if (errmsg)
+		*errmsg = NULL;
 
 	if (dbname == NULL || dbname[0] == '\0')
 		return NULL;
@@ -8087,7 +8089,8 @@ passwordFromFile(const char *hostname, const char *port,
 		/* Make sure there's a reasonable amount of room in the buffer */
 		if (!enlargePQExpBuffer(&buf, 128))
 		{
-			*errmsg = libpq_gettext("out of memory");
+			if (errmsg)
+				*errmsg = libpq_gettext("out of memory");
 			break;
 		}
 
@@ -8145,7 +8148,8 @@ passwordFromFile(const char *hostname, const char *port,
 
 				if (!ret)
 				{
-					*errmsg = libpq_gettext("out of memory");
+					if (errmsg)
+						*errmsg = libpq_gettext("out of memory");
 					return NULL;
 				}
 
@@ -8161,6 +8165,59 @@ passwordFromFile(const char *hostname, const char *port,
 	explicit_bzero(buf.data, buf.maxlen);
 	termPQExpBuffer(&buf);
 	return NULL;
+}
+
+
+/*
+ * PQpassfileLookup
+ *
+ * Look up a password in a password file, applying the same rules that
+ * connection establishment applies when no password has been specified.
+ * This lets applications that connect through an intermediary (for
+ * example, a local SSH tunnel) look up the password under the real
+ * server's host and port while connecting elsewhere.
+ *
+ * The first four arguments correspond to the fields of a password file
+ * line, and NULL or empty values are treated the same way as during
+ * connection establishment: hostname is matched as "localhost" (as is
+ * a hostname equal to the default Unix-socket directory), port
+ * defaults to DEF_PGPORT_STR, while dbname and username must be
+ * supplied.  If passfile is NULL or empty, PGPASSFILE or the default
+ * password file location is used.
+ *
+ * Returns a malloc'd string the caller must free with PQfreemem(), or
+ * NULL if no matching password was found or the lookup could not be
+ * completed.  The string holds nothing but the password (see
+ * passwordFromFile()), so a caller that wants it gone from memory can
+ * overwrite strlen() bytes before freeing it.
+ */
+char *
+PQpassfileLookup(const char *hostname, const char *port,
+				 const char *dbname, const char *username,
+				 const char *passfile)
+{
+	char		pgpassfile[MAXPGPATH];
+
+	if (passfile == NULL || passfile[0] == '\0')
+	{
+		const char *pgpassenv = getenv("PGPASSFILE");
+
+		if (pgpassenv != NULL && pgpassenv[0] != '\0')
+			passfile = pgpassenv;
+		else
+		{
+			char		homedir[MAXPGPATH];
+
+			if (!pqGetHomeDirectory(homedir, sizeof(homedir)))
+				return NULL;
+			snprintf(pgpassfile, sizeof(pgpassfile), "%s/%s",
+					 homedir, PGPASSFILE);
+			passfile = pgpassfile;
+		}
+	}
+
+	return passwordFromFile(hostname, port, dbname, username,
+							passfile, NULL);
 }
 
 
