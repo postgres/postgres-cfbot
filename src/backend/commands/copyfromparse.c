@@ -167,7 +167,7 @@ static int	CopyGetData(CopyFromState cstate, void *databuf,
 						int minread, int maxread);
 static inline bool CopyGetInt32(CopyFromState cstate, int32 *val);
 static inline bool CopyGetInt16(CopyFromState cstate, int16 *val);
-static void CopyLoadInputBuf(CopyFromState cstate);
+static void CopyLoadInputBuf(CopyFromState cstate, bool speculative);
 static int	CopyReadBinaryData(CopyFromState cstate, char *dest, int nbytes);
 
 void
@@ -651,9 +651,15 @@ CopyLoadRawBuf(CopyFromState cstate)
  *
  * If INPUT_BUF_BYTES(cstate) > 0, the unprocessed bytes are moved to the start
  * of the buffer and then we load more data after that.
+ *
+ * A speculative load is one made on the chance that the caller will want the
+ * data, not because it needs it yet.  Such a load leaves a pending encoding
+ * error pending, so long as the caller still has something to chew on, since
+ * the input may never be read that far.  NB: a speculative caller must cope
+ * with getting no additional data.
  */
 static void
-CopyLoadInputBuf(CopyFromState cstate)
+CopyLoadInputBuf(CopyFromState cstate, bool speculative)
 {
 	int			nbytes = INPUT_BUF_BYTES(cstate);
 
@@ -684,7 +690,11 @@ CopyLoadInputBuf(CopyFromState cstate)
 		 * conversion error.
 		 */
 		if (cstate->input_reached_error)
+		{
+			if (speculative && INPUT_BUF_BYTES(cstate) > 0)
+				return;
 			CopyConversionError(cstate);
+		}
 
 		/* no more input, and everything has been converted */
 		if (cstate->input_reached_eof)
@@ -1381,7 +1391,7 @@ CopyReadLineTextSIMDHelper(CopyFromState cstate, bool is_csv,
 		{
 			REFILL_LINEBUF;
 
-			CopyLoadInputBuf(cstate);
+			CopyLoadInputBuf(cstate, true);
 			/* update our local variables */
 			*hit_eof_p = cstate->input_reached_eof;
 			input_buf_ptr = cstate->input_buf_index;
@@ -1566,7 +1576,7 @@ CopyReadLineText(CopyFromState cstate, bool is_csv)
 		{
 			REFILL_LINEBUF;
 
-			CopyLoadInputBuf(cstate);
+			CopyLoadInputBuf(cstate, false);
 			/* update our local variables */
 			hit_eof = cstate->input_reached_eof;
 			input_buf_ptr = cstate->input_buf_index;
