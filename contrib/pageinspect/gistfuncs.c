@@ -46,6 +46,8 @@ verify_gist_page(bytea *raw_page)
 	Page		page = get_page_from_raw(raw_page);
 	GISTPageOpaque opaq;
 
+	verify_page_header(page);
+
 	if (PageIsNew(page))
 		return page;
 

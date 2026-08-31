@@ -175,6 +175,12 @@ SELECT * FROM heap_tuple_infomask_flags(x'0010'::int, 0);
  {HEAP_XMAX_KEYSHR_LOCK} | {}
 (1 row)
 
+-- A corrupt page header must be rejected, rather than being used to walk off
+-- the end of the page.  pd_lower is at offset 12.
+\set VERBOSITY terse
+SELECT heap_page_items(set_byte(set_byte(get_raw_page('test1', 0), 12, 255), 13, 255));
+ERROR:  invalid page header
+\set VERBOSITY default
 DROP TABLE test1;
 -- check that using any of these functions with a partitioned table or index
 -- would fail
