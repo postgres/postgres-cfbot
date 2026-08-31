@@ -100,6 +100,9 @@ SELECT hash_metapage_info(get_raw_page('test_hash', 0));
 SELECT hash_page_items(get_raw_page('test_hash', 0));
 SELECT hash_page_stats(get_raw_page('test_hash', 0));
 SELECT hash_page_type(get_raw_page('test_hash', 0));
+-- A corrupt line pointer must be reported, not read out of bounds.  All-ones is
+-- an invalid (out-of-range, unaligned) line pointer on any architecture.
+SELECT hash_page_items(set_byte(set_byte(set_byte(set_byte(get_raw_page('test_hash_a_idx', 3), 24, 255), 25, 255), 26, 255), 27, 255));
 \set VERBOSITY default
 
 -- Tests with all-zero pages.
