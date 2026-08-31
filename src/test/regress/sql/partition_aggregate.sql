@@ -208,6 +208,53 @@ SELECT a, c, sum(b), avg(c), count(*) FROM pagg_tab_m GROUP BY (a+b)/2, 2, 1 HAV
 SELECT a, c, sum(b), avg(c), count(*) FROM pagg_tab_m GROUP BY (a+b)/2, 2, 1 HAVING sum(b) = 50 AND avg(c) > 25 ORDER BY 1, 2, 3;
 
 
+-- Partition by an expression that is a binary-compatible cast, so that the
+-- stored partition key expression is itself wrapped in a RelabelType
+
+CREATE TABLE pagg_tab_v (a int, c varchar(40)) PARTITION BY LIST ((c::text));
+CREATE TABLE pagg_tab_v_p1 PARTITION OF pagg_tab_v FOR VALUES IN ('0000', '0001');
+CREATE TABLE pagg_tab_v_p2 PARTITION OF pagg_tab_v FOR VALUES IN ('0002');
+INSERT INTO pagg_tab_v SELECT i, to_char(i % 3, 'FM0000') FROM generate_series(0, 2999) i;
+ANALYZE pagg_tab_v;
+
+-- Full aggregation as GROUP BY clause matches with PARTITION KEY
+EXPLAIN (COSTS OFF)
+SELECT c, sum(a), count(*) FROM pagg_tab_v GROUP BY c ORDER BY 1;
+SELECT c, sum(a), count(*) FROM pagg_tab_v GROUP BY c ORDER BY 1;
+
+-- Full aggregation also when the GROUP BY clause spells out the cast
+EXPLAIN (COSTS OFF)
+SELECT c::text, sum(a), count(*) FROM pagg_tab_v GROUP BY c::text ORDER BY 1;
+SELECT c::text, sum(a), count(*) FROM pagg_tab_v GROUP BY c::text ORDER BY 1;
+
+-- A binary-compatible cast need not preserve equality semantics, so matching
+-- the stripped partition key is not enough on its own.  Build a type that is
+-- binary-coercible to text but compares case insensitively.
+
+CREATE TYPE pagg_ci;
+CREATE FUNCTION pagg_ci_in(cstring) RETURNS pagg_ci STRICT IMMUTABLE LANGUAGE internal AS 'textin';
+CREATE FUNCTION pagg_ci_out(pagg_ci) RETURNS cstring STRICT IMMUTABLE LANGUAGE internal AS 'textout';
+CREATE TYPE pagg_ci (input = pagg_ci_in, output = pagg_ci_out, like = text);
+CREATE CAST (pagg_ci AS text) WITHOUT FUNCTION;
+
+CREATE FUNCTION pagg_ci_eq(pagg_ci, pagg_ci) RETURNS bool
+  STRICT IMMUTABLE LANGUAGE sql AS $$SELECT lower($1::text) = lower($2::text)$$;
+CREATE OPERATOR = (leftarg = pagg_ci, rightarg = pagg_ci, procedure = pagg_ci_eq);
+CREATE FUNCTION pagg_ci_hash(pagg_ci) RETURNS int4 STRICT IMMUTABLE LANGUAGE sql AS $$SELECT hashtext(lower($1::text))$$;
+CREATE OPERATOR CLASS pagg_ci_ops DEFAULT FOR TYPE pagg_ci USING hash AS OPERATOR 1 =, FUNCTION 1 pagg_ci_hash(pagg_ci);
+
+CREATE TABLE pagg_tab_ci (a int, c pagg_ci) PARTITION BY LIST ((c::text) COLLATE "C");
+CREATE TABLE pagg_tab_ci_p1 PARTITION OF pagg_tab_ci FOR VALUES IN ('A');
+CREATE TABLE pagg_tab_ci_p2 PARTITION OF pagg_tab_ci FOR VALUES IN ('a');
+INSERT INTO pagg_tab_ci SELECT i, (CASE WHEN i % 3 = 0 THEN 'A' ELSE 'a' END)::pagg_ci FROM generate_series(1, 3000) i;
+ANALYZE pagg_tab_ci;
+
+-- Partial aggregation only
+EXPLAIN (COSTS OFF)
+SELECT c, count(*) FROM pagg_tab_ci GROUP BY c;
+SELECT c, count(*) FROM pagg_tab_ci GROUP BY c;
+
+
 -- Test with multi-level partitioning scheme
 
 CREATE TABLE pagg_tab_ml (a int, b int, c text) PARTITION BY RANGE(a);

@@ -8531,12 +8531,26 @@ group_by_has_partkey(RelOptInfo *input_rel,
 		foreach(lc, partexprs)
 		{
 			ListCell   *lg;
+			ListCell   *lgc;
 			Expr	   *partexpr = lfirst(lc);
 			Oid			partcoll = input_rel->part_scheme->partcollation[cnt];
+			Oid			partopfamily = input_rel->part_scheme->partopfamily[cnt];
 
-			foreach(lg, groupexprs)
+			/*
+			 * Strip any RelabelType decorations, to match the stripping done
+			 * on the grouping expressions below.  A partition key involving a
+			 * binary-compatible cast, such as ((col::text)) on a varchar
+			 * column, is itself stored wrapped in a RelabelType.  The
+			 * collation is not lost, since partcoll and groupcoll are
+			 * compared separately below.
+			 */
+			while (partexpr && IsA(partexpr, RelabelType))
+				partexpr = ((RelabelType *) partexpr)->arg;
+
+			forboth(lg, groupexprs, lgc, groupClause)
 			{
 				Expr	   *groupexpr = lfirst(lg);
+				SortGroupClause *sgc = lfirst_node(SortGroupClause, lgc);
 				Oid			groupcoll = exprCollation((Node *) groupexpr);
 
 				/*
@@ -8555,6 +8569,13 @@ group_by_has_partkey(RelOptInfo *input_rel,
 					 */
 					if (OidIsValid(partcoll) && OidIsValid(groupcoll) &&
 						partcoll != groupcoll)
+						return false;
+
+					/*
+					 * Reject a match if the operator that grouping will use
+					 * is not part of the partitioning operator family.
+					 */
+					if (!op_in_opfamily(sgc->eqop, partopfamily))
 						return false;
 
 					found = true;
