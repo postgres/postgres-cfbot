@@ -53,6 +53,9 @@ SELECT bt_page_items('aaa'::bytea);
 CREATE INDEX test1_a_brin ON test1 USING brin(a);
 SELECT bt_page_items(get_raw_page('test1', 0));
 SELECT bt_page_items(get_raw_page('test1_a_brin', 0));
+-- A corrupt line pointer must be reported, not read out of bounds.  All-ones is
+-- an invalid (out-of-range, unaligned) line pointer on any architecture.
+SELECT bt_page_items(set_byte(set_byte(set_byte(set_byte(get_raw_page('test1_a_idx', 1), 24, 255), 25, 255), 26, 255), 27, 255));
 \set VERBOSITY default
 
 -- Tests with all-zero pages.
