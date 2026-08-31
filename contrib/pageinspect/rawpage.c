@@ -233,6 +233,38 @@ get_page_from_raw(bytea *raw_page)
 	return page;
 }
 
+/*
+ * verify_page_header
+ *
+ * Check that a page's header is self-consistent.  Functions that walk the
+ * contents of a page must call this first: PageGetMaxOffsetNumber() and the
+ * other page accessors are all derived from these fields, so a corrupt header
+ * would make them address memory outside the page.
+ *
+ * This is deliberately not done by get_page_from_raw(), so that page_header()
+ * can still be used to inspect a page whose header is damaged.
+ */
+void
+verify_page_header(Page page)
+{
+	PageHeader	ph = (PageHeader) page;
+
+	/*
+	 * These are the checks PageIsVerified() makes on the header, except for
+	 * the pd_flags test: they are the fields the page accessors derive
+	 * addresses from.  An all-zero page passes, and callers handle those.
+	 */
+	if (!(ph->pd_lower <= ph->pd_upper &&
+		  ph->pd_upper <= ph->pd_special &&
+		  ph->pd_special <= BLCKSZ &&
+		  ph->pd_special == MAXALIGN(ph->pd_special)))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid page header"),
+				 errdetail("lower = %u, upper = %u, special = %u.",
+						   ph->pd_lower, ph->pd_upper, ph->pd_special)));
+}
+
 
 /*
  * page_header
