@@ -3619,6 +3619,7 @@ frontend_no_fe_utils_code = declare_dependency(
 # Dependencies both for static and shared libpq
 libpq_deps += [
   thread_dep,
+  zstd,
 
   gssapi,
   ldap_r,

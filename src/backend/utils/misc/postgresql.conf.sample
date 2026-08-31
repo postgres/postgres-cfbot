@@ -76,6 +76,7 @@
                                         # (change requires restart)
 #bonjour_name = ''                      # defaults to the computer name
                                         # (change requires restart)
+#protocol_compression = off             # off, zstd
 
 # - TCP settings -
 # see "man tcp" for details

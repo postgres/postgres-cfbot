@@ -347,6 +347,10 @@ static const internalPQconninfoOption PQconninfoOptions[] = {
 		"Max-Protocol-Version", "", 6,	/* sizeof("latest") = 6 */
 	offsetof(struct pg_conn, max_protocol_version)},
 
+	{"compression", "PGCOMPRESSION", "off", NULL,
+		"Protocol-Compression", "", 7,	/* sizeof("prefer") == 7 */
+	offsetof(struct pg_conn, compression)},
+
 	{"ssl_min_protocol_version", "PGSSLMINPROTOCOLVERSION", "TLSv1.2", NULL,
 		"SSL-Minimum-Protocol-Version", "", 8,	/* sizeof("TLSv1.x") == 8 */
 	offsetof(struct pg_conn, ssl_min_protocol_version)},
@@ -2164,6 +2168,27 @@ pqConnectOptions2(PGconn *conn)
 		conn->status = CONNECTION_BAD;
 		libpq_append_conn_error(conn, "\"%s\" is greater than \"%s\"", "min_protocol_version", "max_protocol_version");
 		return false;
+	}
+
+	if (conn->compression && strcmp(conn->compression, "off") != 0)
+	{
+		if (strcmp(conn->compression, "zstd") != 0 &&
+			strcmp(conn->compression, "prefer") != 0)
+		{
+			conn->status = CONNECTION_BAD;
+			libpq_append_conn_error(conn, "invalid %s value: \"%s\"",
+									"compression", conn->compression);
+			return false;
+		}
+#ifndef USE_ZSTD
+		if (strcmp(conn->compression, "zstd") == 0)
+		{
+			conn->status = CONNECTION_BAD;
+			libpq_append_conn_error(conn,
+									"compression method \"zstd\" is not supported by this build");
+			return false;
+		}
+#endif
 	}
 
 	/*
@@ -5152,6 +5177,7 @@ freePGconn(PGconn *conn)
 	free(conn->gssdelegation);
 	free(conn->min_protocol_version);
 	free(conn->max_protocol_version);
+	free(conn->compression);
 	free(conn->ssl_min_protocol_version);
 	free(conn->ssl_max_protocol_version);
 	free(conn->target_session_attrs);
@@ -5174,6 +5200,9 @@ freePGconn(PGconn *conn)
 	release_conn_addrinfo(conn);
 	free(conn->scram_client_key_binary);
 	free(conn->scram_server_key_binary);
+#ifdef USE_ZSTD
+	pqCompressionReset(conn);
+#endif
 	/* if this is a cancel connection, be_cancel_key may still be allocated */
 	free(conn->be_cancel_key);
 	free(conn->inBuffer);
@@ -5347,6 +5376,11 @@ pqClosePGconn(PGconn *conn)
 
 	/* Reset all state obtained from server, too */
 	pqDropServerData(conn);
+#ifdef USE_ZSTD
+	pqCompressionReset(conn);
+#else
+	conn->compression_rejected = false;
+#endif
 }
 
 /*

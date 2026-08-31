@@ -692,6 +692,11 @@ pqTraceOutputMessage(PGconn *conn, const char *message, bool toServer)
 			pqTraceOutput_CopyData(conn->Pfdebug, message, &logCursor,
 								   length, regress);
 			break;
+		case PqMsg_CompressedData:
+			fprintf(conn->Pfdebug, "CompressedData");
+			/* The compressed payload is intentionally opaque to PQtrace. */
+			logCursor = length + 1;
+			break;
 		case PqMsg_Describe:
 			/* Describe(F) and DataRow(B) use the same identifier. */
 			Assert(PqMsg_Describe == PqMsg_DataRow);
