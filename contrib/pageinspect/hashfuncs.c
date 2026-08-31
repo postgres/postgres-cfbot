@@ -61,6 +61,8 @@ verify_hash_page(bytea *raw_page, int flags)
 	Page		page = get_page_from_raw(raw_page);
 	int			pagetype = LH_UNUSED_PAGE;
 
+	verify_page_header(page);
+
 	/* Treat new pages as unused. */
 	if (!PageIsNew(page))
 	{
