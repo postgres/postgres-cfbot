@@ -158,6 +158,19 @@ $oldpub->safe_psql(
 		SELECT count(*) FROM pg_logical_emit_message('false', 'prefix', 'This is a non-transactional message', true);
 		SELECT pg_replication_slot_advance('test_slot3', pg_current_wal_lsn());
 ]);
+
+# Sleep here because Windows builds cannot check postmaster.pid exactly,
+# so they may mistake a pre-existing postmaster.pid for one created by the
+# postmaster they start. Waiting more than the 2 seconds slop time allowed
+# by wait_for_postmaster_start() prevents that mistake.
+sleep 3 if ($windows_os);
+
+# A live check cannot require slots to have consumed all WAL because the old
+# server can generate more WAL concurrently. Verify that these slots are accepted
+# now. The check below verifies rejection after shutdown.
+command_ok([ @pg_upgrade_cmd, '--check' ],
+	'pg_upgrade --check with live old cluster and unconsumed WAL');
+
 $oldpub->stop;
 
 # pg_upgrade will fail because there are slots still having unconsumed WAL
