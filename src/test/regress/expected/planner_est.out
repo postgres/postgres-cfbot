@@ -119,6 +119,85 @@ false, true, false, true);
 SELECT * FROM generate_series(TIMESTAMPTZ '2024-02-01', TIMESTAMPTZ '2024-03-01', INTERVAL '0 day') g(s);
 ERROR:  step size cannot equal zero
 --
+-- Test the SupportRequestRows support functions for the integer variants of
+-- generate_series()
+--
+-- Ensure the row estimate matches the actual rows
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(1, 25) g(s);$$,
+true, true, false, true);
+                                     explain_mask_costs                                      
+---------------------------------------------------------------------------------------------
+ Function Scan on generate_series g  (cost=N..N rows=25 width=N) (actual rows=25.00 loops=1)
+(1 row)
+
+-- As above but with non-default step
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(1, 25, 2) g(s);$$,
+true, true, false, true);
+                                     explain_mask_costs                                      
+---------------------------------------------------------------------------------------------
+ Function Scan on generate_series g  (cost=N..N rows=13 width=N) (actual rows=13.00 loops=1)
+(1 row)
+
+-- Ensure the estimates match when step is decreasing
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(25, 1, -1) g(s);$$,
+true, true, false, true);
+                                     explain_mask_costs                                      
+---------------------------------------------------------------------------------------------
+ Function Scan on generate_series g  (cost=N..N rows=25 width=N) (actual rows=25.00 loops=1)
+(1 row)
+
+-- Ensure an empty range estimates 1 row
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(25, 1) g(s);$$,
+true, true, false, true);
+                                    explain_mask_costs                                     
+-------------------------------------------------------------------------------------------
+ Function Scan on generate_series g  (cost=N..N rows=1 width=N) (actual rows=0.00 loops=1)
+(1 row)
+
+-- Ensure a constant NULL argument estimates no rows
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(1, NULL::int4) g(s);$$,
+true, true, false, true);
+                                    explain_mask_costs                                     
+-------------------------------------------------------------------------------------------
+ Function Scan on generate_series g  (cost=N..N rows=1 width=N) (actual rows=0.00 loops=1)
+(1 row)
+
+-- Ensure we get the default row estimate when step size is zero.  We expect
+-- generate_series() to throw the error rather than the support function.
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(1, 25, 0) g(s);$$,
+false, true, false, true);
+                        explain_mask_costs                         
+-------------------------------------------------------------------
+ Function Scan on generate_series g  (cost=N..N rows=1000 width=N)
+(1 row)
+
+SELECT * FROM generate_series(1, 25, 0) g(s);
+ERROR:  step size cannot equal zero
+-- As above for the bigint variant
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(1::int8, 25::int8, 3::int8) g(s);$$,
+true, true, false, true);
+                                    explain_mask_costs                                     
+-------------------------------------------------------------------------------------------
+ Function Scan on generate_series g  (cost=N..N rows=9 width=N) (actual rows=9.00 loops=1)
+(1 row)
+
+-- Ensure a very large range does not overflow the row estimate
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(1::int8, 10000000000::int8) g(s);$$,
+false, true, false, true);
+                            explain_mask_costs                            
+--------------------------------------------------------------------------
+ Function Scan on generate_series g  (cost=N..N rows=10000000000 width=N)
+(1 row)
+
+--
 -- Test the SupportRequestRows support function for generate_series_numeric()
 --
 -- Ensure the row estimate matches the actual rows
@@ -210,6 +289,89 @@ false, true, false, true);
      ->  Result  (cost=N..N rows=1 width=N)
 (4 rows)
 
+--
+-- Test the SupportRequestRows support function for unnest(anyarray)
+--
+-- Ensure the row estimate matches the actual rows for a constant array
+SELECT explain_mask_costs($$
+SELECT * FROM unnest('{1,2,3,4,5}'::int[]) u(e);$$,
+true, true, false, true);
+                                explain_mask_costs                                
+----------------------------------------------------------------------------------
+ Function Scan on unnest u  (cost=N..N rows=5 width=N) (actual rows=5.00 loops=1)
+(1 row)
+
+-- A multi-dimensional array is estimated as its total number of elements
+SELECT explain_mask_costs($$
+SELECT * FROM unnest('{{1,2,3},{4,5,6}}'::int[]) u(e);$$,
+true, true, false, true);
+                                explain_mask_costs                                
+----------------------------------------------------------------------------------
+ Function Scan on unnest u  (cost=N..N rows=6 width=N) (actual rows=6.00 loops=1)
+(1 row)
+
+-- Ensure empty and NULL arrays estimate 1 row after clamping
+SELECT explain_mask_costs($$
+SELECT * FROM unnest('{}'::int[]) u(e);$$,
+true, true, false, true);
+                                explain_mask_costs                                
+----------------------------------------------------------------------------------
+ Function Scan on unnest u  (cost=N..N rows=1 width=N) (actual rows=0.00 loops=1)
+(1 row)
+
+SELECT explain_mask_costs($$
+SELECT * FROM unnest(NULL::int[]) u(e);$$,
+true, true, false, true);
+                                explain_mask_costs                                
+----------------------------------------------------------------------------------
+ Function Scan on unnest u  (cost=N..N rows=1 width=N) (actual rows=0.00 loops=1)
+(1 row)
+
+-- An ArrayExpr is estimated from its element count
+SELECT explain_mask_costs($$
+SELECT * FROM unnest(ARRAY[1, 2, (SELECT 3)]) u(e);$$,
+true, true, false, true);
+                                explain_mask_costs                                
+----------------------------------------------------------------------------------
+ Function Scan on unnest u  (cost=N..N rows=3 width=N) (actual rows=3.00 loops=1)
+   InitPlan expr_1
+     ->  Result  (cost=N..N rows=1 width=N) (actual rows=1.00 loops=1)
+(3 rows)
+
+-- Ensure a Var array is estimated from the DECHIST statistics.  The arrays
+-- hold distinct elements only, keeping the average independent of sampling.
+CREATE TEMP TABLE unnest_table_1 AS
+  SELECT array_agg(g) AS a FROM generate_series(1, 100) i,
+    LATERAL generate_series(1, 7) g GROUP BY i;
+ANALYZE unnest_table_1;
+-- Disable Memoize to keep the plan shape stable
+SET enable_memoize = off;
+SELECT explain_mask_costs($$
+SELECT * FROM unnest_table_1 t, LATERAL unnest(t.a) u(e);$$,
+true, true, false, true);
+                                      explain_mask_costs                                       
+-----------------------------------------------------------------------------------------------
+ Nested Loop  (cost=N..N rows=700 width=N) (actual rows=700.00 loops=1)
+   ->  Seq Scan on unnest_table_1 t  (cost=N..N rows=100 width=N) (actual rows=100.00 loops=1)
+   ->  Function Scan on unnest u  (cost=N..N rows=7 width=N) (actual rows=7.00 loops=100)
+(3 rows)
+
+-- Without column statistics the default estimate of 10 applies.  Analyze
+-- only "id" so that the array column has none but the row count is stable.
+CREATE TEMP TABLE unnest_table_2 (id int, a int[]);
+INSERT INTO unnest_table_2 SELECT i, ARRAY[1, 2, 3] FROM generate_series(1, 5) i;
+ANALYZE unnest_table_2 (id);
+SELECT explain_mask_costs($$
+SELECT * FROM unnest_table_2 t, LATERAL unnest(t.a) u(e);$$,
+true, true, false, true);
+                                    explain_mask_costs                                     
+-------------------------------------------------------------------------------------------
+ Nested Loop  (cost=N..N rows=50 width=N) (actual rows=15.00 loops=1)
+   ->  Seq Scan on unnest_table_2 t  (cost=N..N rows=5 width=N) (actual rows=5.00 loops=1)
+   ->  Function Scan on unnest u  (cost=N..N rows=10 width=N) (actual rows=3.00 loops=5)
+(3 rows)
+
+RESET enable_memoize;
 -- Verify that scalarineqsel() works on "char" columns
 CREATE TEMP TABLE char_table_1 AS
   SELECT i::"char" AS c FROM generate_series(64,96) i;

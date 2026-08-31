@@ -94,6 +94,54 @@ false, true, false, true);
 SELECT * FROM generate_series(TIMESTAMPTZ '2024-02-01', TIMESTAMPTZ '2024-03-01', INTERVAL '0 day') g(s);
 
 --
+-- Test the SupportRequestRows support functions for the integer variants of
+-- generate_series()
+--
+
+-- Ensure the row estimate matches the actual rows
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(1, 25) g(s);$$,
+true, true, false, true);
+
+-- As above but with non-default step
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(1, 25, 2) g(s);$$,
+true, true, false, true);
+
+-- Ensure the estimates match when step is decreasing
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(25, 1, -1) g(s);$$,
+true, true, false, true);
+
+-- Ensure an empty range estimates 1 row
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(25, 1) g(s);$$,
+true, true, false, true);
+
+-- Ensure a constant NULL argument estimates no rows
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(1, NULL::int4) g(s);$$,
+true, true, false, true);
+
+-- Ensure we get the default row estimate when step size is zero.  We expect
+-- generate_series() to throw the error rather than the support function.
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(1, 25, 0) g(s);$$,
+false, true, false, true);
+
+SELECT * FROM generate_series(1, 25, 0) g(s);
+
+-- As above for the bigint variant
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(1::int8, 25::int8, 3::int8) g(s);$$,
+true, true, false, true);
+
+-- Ensure a very large range does not overflow the row estimate
+SELECT explain_mask_costs($$
+SELECT * FROM generate_series(1::int8, 10000000000::int8) g(s);$$,
+false, true, false, true);
+
+--
 -- Test the SupportRequestRows support function for generate_series_numeric()
 --
 
@@ -146,6 +194,60 @@ false, true, false, true);
 SELECT explain_mask_costs($$
 SELECT * FROM tenk1 WHERE unique1 <> ALL (ARRAY[1, 2, 98, (SELECT 99), NULL]);$$,
 false, true, false, true);
+
+--
+-- Test the SupportRequestRows support function for unnest(anyarray)
+--
+
+-- Ensure the row estimate matches the actual rows for a constant array
+SELECT explain_mask_costs($$
+SELECT * FROM unnest('{1,2,3,4,5}'::int[]) u(e);$$,
+true, true, false, true);
+
+-- A multi-dimensional array is estimated as its total number of elements
+SELECT explain_mask_costs($$
+SELECT * FROM unnest('{{1,2,3},{4,5,6}}'::int[]) u(e);$$,
+true, true, false, true);
+
+-- Ensure empty and NULL arrays estimate 1 row after clamping
+SELECT explain_mask_costs($$
+SELECT * FROM unnest('{}'::int[]) u(e);$$,
+true, true, false, true);
+
+SELECT explain_mask_costs($$
+SELECT * FROM unnest(NULL::int[]) u(e);$$,
+true, true, false, true);
+
+-- An ArrayExpr is estimated from its element count
+SELECT explain_mask_costs($$
+SELECT * FROM unnest(ARRAY[1, 2, (SELECT 3)]) u(e);$$,
+true, true, false, true);
+
+-- Ensure a Var array is estimated from the DECHIST statistics.  The arrays
+-- hold distinct elements only, keeping the average independent of sampling.
+CREATE TEMP TABLE unnest_table_1 AS
+  SELECT array_agg(g) AS a FROM generate_series(1, 100) i,
+    LATERAL generate_series(1, 7) g GROUP BY i;
+ANALYZE unnest_table_1;
+
+-- Disable Memoize to keep the plan shape stable
+SET enable_memoize = off;
+
+SELECT explain_mask_costs($$
+SELECT * FROM unnest_table_1 t, LATERAL unnest(t.a) u(e);$$,
+true, true, false, true);
+
+-- Without column statistics the default estimate of 10 applies.  Analyze
+-- only "id" so that the array column has none but the row count is stable.
+CREATE TEMP TABLE unnest_table_2 (id int, a int[]);
+INSERT INTO unnest_table_2 SELECT i, ARRAY[1, 2, 3] FROM generate_series(1, 5) i;
+ANALYZE unnest_table_2 (id);
+
+SELECT explain_mask_costs($$
+SELECT * FROM unnest_table_2 t, LATERAL unnest(t.a) u(e);$$,
+true, true, false, true);
+
+RESET enable_memoize;
 
 -- Verify that scalarineqsel() works on "char" columns
 CREATE TEMP TABLE char_table_1 AS
