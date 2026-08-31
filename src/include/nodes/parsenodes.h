@@ -2540,6 +2540,7 @@ typedef enum AlterTableType
 	AT_CookedColumnDefault,		/* add a pre-cooked column default */
 	AT_DropNotNull,				/* alter column drop not null */
 	AT_SetNotNull,				/* alter column set not null */
+	AT_AddGeneratedStored,		/* add generated using constraint */
 	AT_SetExpression,			/* alter column set expression */
 	AT_DropExpression,			/* alter column drop expression */
 	AT_SetStatistics,			/* alter column set statistics */

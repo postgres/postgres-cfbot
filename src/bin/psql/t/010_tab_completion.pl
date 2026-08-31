@@ -46,6 +46,8 @@ $node->safe_psql('postgres',
 	  . "CREATE TYPE enum1 AS ENUM ('foo', 'bar', 'baz', 'BLACK');\n"
 	  . "CREATE PUBLICATION some_publication;\n"
 	  . "CREATE TABLE fpo_test (id int4range, valid_at daterange, name text);\n"
+	  . "CREATE TABLE gencol_test (a int primary key, b int);\n"
+	  . "ALTER TABLE gencol_test ADD CONSTRAINT check_gen CHECK (b IS NOT DISTINCT FROM (a + 1));\n"
 );
 
 # In a VPATH build, we'll be started in the source directory, but we want
@@ -457,6 +459,23 @@ check_completion("v\t", qr/valid_at /,
 
 check_completion("FR\t", qr/FROM /,
 	"complete FOR PORTION OF <col> FR<tab> to FROM");
+
+clear_query();
+
+check_completion("ALTER TABLE gencol_test ALTER COLUMN b A\t", qr/ADD /,
+	"complete ALTER COLUMN <col> ADD");
+
+check_completion("G\t", qr/GENERATED /,
+	"complete ALTER COLUMN <col> ADD GENERATED");
+
+check_completion("U\t", qr/USING CONSTRAINT /,
+	"complete ALTER COLUMN <col> ADD GENERATED USING CONSTRAINT");
+
+check_completion("\t", qr/check_gen /,
+	"complete ALTER COLUMN <col> ADD GENERATED USING CONSTRAINT offers check constraint names");
+
+check_completion("S\t", qr/STORED /,
+	"complete ALTER COLUMN <col> ADD GENERATED USING CONSTRAINT constr_name STORED");
 
 clear_query();
 
