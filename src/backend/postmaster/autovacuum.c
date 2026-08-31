@@ -3210,9 +3210,15 @@ relation_needs_vacanalyze(Oid relid,
 	if (autovacuum_multixact_freeze_score_weight > 1.0)
 		effective_mxid_failsafe_age /= autovacuum_multixact_freeze_score_weight;
 
-	if (xid_age >= effective_xid_failsafe_age)
+	/*
+	 * Note that raising a score below 1.0 to a power greater than 1.0 shrinks
+	 * it, and shrinks it further as the age grows, so scaling such a score
+	 * would leave an older table sorting behind a younger one.  Only scale
+	 * scores that the exponentiation will actually amplify.
+	 */
+	if (xid_age >= effective_xid_failsafe_age && scores->xid > 1.0)
 		scores->xid = pow(scores->xid, Max(1.0, (double) xid_age / 100000000));
-	if (mxid_age >= effective_mxid_failsafe_age)
+	if (mxid_age >= effective_mxid_failsafe_age && scores->mxid > 1.0)
 		scores->mxid = pow(scores->mxid, Max(1.0, (double) mxid_age / 100000000));
 
 	scores->xid *= autovacuum_freeze_score_weight;
