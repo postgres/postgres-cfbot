@@ -11015,6 +11015,27 @@ addFkRecurseReferenced(Constraint *fkconstraint, Relation rel,
 	Assert(CheckRelationLockedByMe(rel, ShareRowExclusiveLock, true));
 
 	/*
+	 * ATAddForeignKeyConstraint checks the persistence of the referenced
+	 * relation named in the constraint, but that says nothing about the
+	 * partitions below it: a permanent partitioned table may contain
+	 * unlogged partitions, whose data vanishes on crash recovery just as for
+	 * a standalone unlogged table.  Every relation on the referenced side
+	 * passes through here, both when the constraint is created and when it
+	 * is cloned for a newly created or attached partition, so repeat the
+	 * check for each of them.  Only the permanent-to-unlogged combination
+	 * needs to be considered, because temporary relations cannot be
+	 * partitions of permanent ones.
+	 */
+	if (rel->rd_rel->relpersistence == RELPERSISTENCE_PERMANENT &&
+		!RelationIsPermanent(pkrel))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+				 errmsg("constraints on permanent tables may reference only permanent tables"),
+				 errdetail("Table \"%s\" is an unlogged partition of a table referenced by permanent table \"%s\".",
+						   RelationGetRelationName(pkrel),
+						   RelationGetRelationName(rel))));
+
+	/*
 	 * Create action triggers to enforce the constraint, or skip them if the
 	 * constraint is NOT ENFORCED.
 	 */
