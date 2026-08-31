@@ -401,14 +401,15 @@ select 1 = all (select (select 1));
 explain (costs off)
 select * from int4_tbl o where exists
   (select 1 from int4_tbl i where i.f1=o.f1 limit null);
-             QUERY PLAN             
-------------------------------------
+               QUERY PLAN               
+----------------------------------------
  Hash Semi Join
    Hash Cond: (o.f1 = i.f1)
    ->  Seq Scan on int4_tbl o
    ->  Hash
          ->  Seq Scan on int4_tbl i
-(5 rows)
+               Filter: (f1 IS NOT NULL)
+(6 rows)
 
 explain (costs off)
 select * from int4_tbl o where not exists
@@ -764,8 +765,8 @@ explain (verbose, costs off)
 select * from semijoin_unique_tbl t1, semijoin_unique_tbl t2
 where (t1.a, t2.a) in (select a+1, b+1 from semijoin_unique_tbl t3)
 order by t1.a, t2.a;
-                                           QUERY PLAN                                           
-------------------------------------------------------------------------------------------------
+                                              QUERY PLAN                                               
+-------------------------------------------------------------------------------------------------------
  Incremental Sort
    Output: t1.a, t1.b, t2.a, t2.b
    Sort Key: t1.a, t2.a
@@ -790,7 +791,8 @@ order by t1.a, t2.a;
                                  Group Key: (t3.a + 1), (t3.b + 1)
                                  ->  Seq Scan on public.semijoin_unique_tbl t3
                                        Output: t3.a, t3.b, (t3.a + 1), (t3.b + 1)
-(24 rows)
+                                       Filter: (((t3.a + 1) IS NOT NULL) AND ((t3.b + 1) IS NOT NULL))
+(25 rows)
 
 -- encourage use of parallel plans
 set parallel_setup_cost=0;
