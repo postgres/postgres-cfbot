@@ -1528,9 +1528,8 @@ RelationInitIndexAccessInfo(Relation relation)
 	 * a context, and not just a couple of pallocs, is so that we won't leak
 	 * any subsidiary info attached to fmgr lookup records.
 	 */
-	indexcxt = AllocSetContextCreate(CacheMemoryContext,
-									 "index info",
-									 ALLOCSET_SMALL_SIZES);
+	indexcxt = ProxyContextCreate(CacheMemoryContext, "index info");
+
 	relation->rd_indexcxt = indexcxt;
 	MemoryContextCopyAndSetIdentifier(indexcxt,
 									  RelationGetRelationName(relation));
@@ -1703,8 +1702,7 @@ IndexSupportInitialize(oidvector *indclass, AttrNumber nKeyAtts,
 		FmgrInfo   *supportinfo;
 		MemoryContext shapectx;
 
-		shapectx = AllocSetContextCreate(RelShapeContext, "index shape",
-										 ALLOCSET_SMALL_SIZES);
+		shapectx = ProxyContextCreate(RelShapeContext, "index shape");
 
 		allocsize = sizeof(Oid) * 2 * key.nkeyatts;
 		allocsize += sizeof(RegProcedure) * key.nsupport * key.nkeyatts;
@@ -7021,8 +7019,7 @@ load_relcache_init_index(Relation rel, FILE *fp)
 	 * prepare index info context --- parameters should match
 	 * RelationInitIndexAccessInfo
 	 */
-	indexcxt = AllocSetContextCreate(CacheMemoryContext, "index info",
-									 ALLOCSET_SMALL_SIZES);
+	indexcxt = ProxyContextCreate(CacheMemoryContext, "index info");
 	rel->rd_indexcxt = indexcxt;
 	MemoryContextCopyAndSetIdentifier(indexcxt,
 									  RelationGetRelationName(rel));
@@ -7111,8 +7108,7 @@ load_relcache_init_index(Relation rel, FILE *fp)
 
 		entry->rsc_refcount = 1;
 
-		idxshapectx = AllocSetContextCreate(RelShapeContext, "index shape",
-											ALLOCSET_SMALL_SIZES);
+		idxshapectx = ProxyContextCreate(RelShapeContext, "index shape");
 
 		total_alloc = sizeof(FmgrInfo) * key.nsupport * key.nkeyatts;
 		total_alloc += sizeof(Oid) * 2 * key.nkeyatts;
