@@ -49,6 +49,14 @@ tests += {
       'defprivs',
       'textsearch',
       'matviews',
+      'deparse_create_table',
+      'deparse_alter_table',
     ],
+  },
+  'tap': {
+    'tests': [
+      't/001_deparse_regress.pl',
+    ],
+    'test_kwargs': {'priority': 50}
   },
 }

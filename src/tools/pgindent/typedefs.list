@@ -474,6 +474,7 @@ CollateStrength
 CollectedATSubcmd
 CollectedCommand
 CollectedCommandType
+CollectedPartitionName
 ColorTrgm
 ColorTrgmInfo
 ColumnCompareData
@@ -2249,6 +2250,7 @@ PatternInfo
 PatternInfoArray
 Pattern_Prefix_Status
 Pattern_Type
+PendingColTypeUsing
 PendingFsyncEntry
 PendingListenAction
 PendingListenEntry
@@ -2422,6 +2424,7 @@ PrepareStmt
 PreparedStatement
 PresortedKeyData
 PrewarmType
+PrintDeparsedDDL
 PrintExtraTocPtrType
 PrintTocDataPtrType
 PrintfArgType
@@ -3185,6 +3188,7 @@ Tcl_Obj
 Tcl_Size
 Tcl_Time
 TempNamespaceStatus
+TestDDLDeparseErrorInfo
 TestDSMRegistryHashEntry
 TestDSMRegistryStruct
 TestDecodingData
@@ -3699,6 +3703,7 @@ config_handle
 config_var_value
 contain_aggs_of_level_context
 contain_placeholder_references_context
+convSpecifier
 convert_testexpr_context
 copy_data_dest_cb
 copy_data_source_cb
@@ -3931,6 +3936,7 @@ json_manifest_version_callback
 json_ofield_action
 json_scalar_action
 json_struct_action
+json_trivalue
 keepwal_entry
 keepwal_hash
 key_t

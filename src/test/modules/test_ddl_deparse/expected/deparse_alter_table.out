@@ -1,0 +1,783 @@
+--
+-- Tests for DDL deparsing of ALTER TABLE.
+--
+-- As with deparse_create_table, the module intercepts each supported
+-- ALTER TABLE, runs it in a rolled-back subtransaction, deparses the
+-- collected command, and replays the reconstruction; the deparsed text is
+-- shown as a NOTICE.  A single ALTER TABLE -- possibly carrying several
+-- subcommands -- deparses to exactly one ALTER TABLE, preserving the
+-- single-pass semantics of the original.
+--
+-- The event triggers created by the test_ddl_deparse script (first in the
+-- schedule) remain installed, so their "DDL test:" NOTICEs appear below.
+--
+LOAD 'test_ddl_deparse';
+SET test_ddl_deparse.execute_deparsed_ddl = on;
+SET test_ddl_deparse.print_deparsed_ddl = text;
+CREATE SCHEMA deparse_at;
+NOTICE:  DDL test: type simple, tag CREATE SCHEMA
+CREATE TABLE deparse_at.t (a int, b text);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.t (a pg_catalog.int4, b pg_catalog.text)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+-- ADD / DROP COLUMN, including the IF [NOT] EXISTS guards
+ALTER TABLE deparse_at.t ADD COLUMN c int;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.t ADD COLUMN c pg_catalog.int4
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD COLUMN (and recurse) desc column c of table deparse_at.t
+ALTER TABLE deparse_at.t ADD COLUMN IF NOT EXISTS d text;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.t ADD COLUMN IF NOT EXISTS d pg_catalog.text
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD COLUMN (and recurse) desc column d of table deparse_at.t
+ALTER TABLE deparse_at.t DROP COLUMN b;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.t DROP COLUMN b
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type DROP COLUMN (and recurse) desc column ........pg.dropped.2........ of table deparse_at.t
+ALTER TABLE deparse_at.t DROP COLUMN IF EXISTS c;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.t DROP COLUMN IF EXISTS c
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type DROP COLUMN (and recurse) desc column ........pg.dropped.3........ of table deparse_at.t
+-- several subcommands in one statement stay in one statement (collected in
+-- execution-pass order, which replays to the same result)
+ALTER TABLE deparse_at.t ADD COLUMN e int, ADD COLUMN f text, DROP COLUMN d;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.t DROP COLUMN d, ADD COLUMN e pg_catalog.int4, ADD COLUMN f pg_catalog.text
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type DROP COLUMN (and recurse) desc column ........pg.dropped.4........ of table deparse_at.t
+NOTICE:    subcommand: type ADD COLUMN (and recurse) desc column e of table deparse_at.t
+NOTICE:    subcommand: type ADD COLUMN (and recurse) desc column f of table deparse_at.t
+-- ADD COLUMN carrying a plain NOT NULL and/or DEFAULT is rendered inline by
+-- the column deparse; the internal not-null constraint is not emitted twice
+ALTER TABLE deparse_at.t ADD COLUMN g int NOT NULL DEFAULT 0;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.t ADD COLUMN g pg_catalog.int4 NOT NULL DEFAULT 0
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD COLUMN (and recurse) desc column g of table deparse_at.t
+NOTICE:    subcommand: type ADD CONSTRAINT (and recurse) desc constraint t_g_not_null on table deparse_at.t
+-- ALTER COLUMN subcommands
+CREATE TABLE deparse_at.c (a int, b text, n numeric);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.c (a pg_catalog.int4, b pg_catalog.text, n pg_catalog."numeric")
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+ALTER TABLE deparse_at.c ALTER COLUMN a SET DEFAULT 42;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.c ALTER COLUMN a SET DEFAULT 42
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ALTER COLUMN SET DEFAULT desc column a of table deparse_at.c
+-- SET DEFAULT NULL: a bare NULL default is not stored in pg_attrdef, so it
+-- must be rendered as written rather than looked up
+ALTER TABLE deparse_at.c ALTER COLUMN a SET DEFAULT NULL;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.c ALTER COLUMN a SET DEFAULT NULL
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ALTER COLUMN SET DEFAULT desc column a of table deparse_at.c
+ALTER TABLE deparse_at.c ALTER COLUMN a DROP DEFAULT;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.c ALTER COLUMN a DROP DEFAULT
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ALTER COLUMN SET DEFAULT desc column a of table deparse_at.c
+ALTER TABLE deparse_at.c ALTER COLUMN a SET NOT NULL;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.c ALTER COLUMN a SET NOT NULL
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type SET NOT NULL (and recurse) desc constraint c_a_not_null on table deparse_at.c
+ALTER TABLE deparse_at.c ALTER COLUMN a DROP NOT NULL;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.c ALTER COLUMN a DROP NOT NULL
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type DROP NOT NULL (and recurse) desc column a of table deparse_at.c
+ALTER TABLE deparse_at.c ALTER COLUMN b SET STATISTICS 100;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.c ALTER COLUMN b SET STATISTICS 100
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type SET STATS desc column b of table deparse_at.c
+-- SET STATISTICS DEFAULT leaves the value node NULL
+ALTER TABLE deparse_at.c ALTER COLUMN b SET STATISTICS DEFAULT;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.c ALTER COLUMN b SET STATISTICS DEFAULT
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type SET STATS desc column b of table deparse_at.c
+ALTER TABLE deparse_at.c ALTER COLUMN b SET (n_distinct = 5);
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.c ALTER COLUMN b SET (n_distinct = '5')
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type SET OPTIONS desc column b of table deparse_at.c
+ALTER TABLE deparse_at.c ALTER COLUMN b RESET (n_distinct);
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.c ALTER COLUMN b RESET (n_distinct)
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type RESET OPTIONS desc column b of table deparse_at.c
+ALTER TABLE deparse_at.c ALTER COLUMN b SET STORAGE EXTERNAL;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.c ALTER COLUMN b SET STORAGE external
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type SET STORAGE desc column b of table deparse_at.c
+ALTER TABLE deparse_at.c ALTER COLUMN b SET COMPRESSION pglz;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.c ALTER COLUMN b SET COMPRESSION pglz
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type SET COMPRESSION desc column b of table deparse_at.c
+-- SET DATA TYPE, with and without a USING expression
+ALTER TABLE deparse_at.c ALTER COLUMN a SET DATA TYPE bigint;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.c ALTER COLUMN a SET DATA TYPE pg_catalog.int8
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ALTER COLUMN SET TYPE desc column a of table deparse_at.c
+ALTER TABLE deparse_at.c ALTER COLUMN n SET DATA TYPE int USING n::int;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.c ALTER COLUMN n SET DATA TYPE pg_catalog.int4 USING (n)::integer
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ALTER COLUMN SET TYPE desc column n of table deparse_at.c
+ALTER TABLE deparse_at.c ALTER COLUMN b TYPE varchar(20) COLLATE "C";
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.c ALTER COLUMN b SET DATA TYPE pg_catalog."varchar"(20) COLLATE pg_catalog."C"
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ALTER COLUMN SET TYPE desc column b of table deparse_at.c
+-- several ALTER COLUMN subcommands in one statement
+ALTER TABLE deparse_at.c
+	ALTER COLUMN a SET DEFAULT 1,
+	ALTER COLUMN b SET NOT NULL,
+	ALTER COLUMN n SET STATISTICS 50;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.c ALTER COLUMN b SET NOT NULL, ALTER COLUMN a SET DEFAULT 1, ALTER COLUMN n SET STATISTICS 50
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type SET NOT NULL (and recurse) desc constraint c_b_not_null on table deparse_at.c
+NOTICE:    subcommand: type ALTER COLUMN SET DEFAULT desc column a of table deparse_at.c
+NOTICE:    subcommand: type SET STATS desc column n of table deparse_at.c
+-- constraint subcommands
+CREATE TABLE deparse_at.con (a int, b int, c int);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.con (a pg_catalog.int4, b pg_catalog.int4, c pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+ALTER TABLE deparse_at.con ADD CONSTRAINT chk CHECK (a > 0);
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.con ADD CONSTRAINT chk CHECK ((a > 0))
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD CONSTRAINT (and recurse) desc constraint chk on table deparse_at.con
+ALTER TABLE deparse_at.con ADD CHECK (b > 0) NOT VALID;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.con ADD CHECK ((b > 0)) NOT VALID
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD CONSTRAINT (and recurse) desc constraint con_b_check on table deparse_at.con
+ALTER TABLE deparse_at.con VALIDATE CONSTRAINT con_b_check;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.con VALIDATE CONSTRAINT con_b_check
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type VALIDATE CONSTRAINT (and recurse) desc constraint con_b_check on table deparse_at.con
+ALTER TABLE deparse_at.con ADD PRIMARY KEY (a);
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.con ADD PRIMARY KEY (a)
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD CONSTRAINT (and recurse) desc constraint con_a_not_null on table deparse_at.con
+NOTICE:    subcommand: type ADD INDEX desc index deparse_at.con_pkey
+ALTER TABLE deparse_at.con ADD CONSTRAINT uq UNIQUE (b) WITH (fillfactor = 70);
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.con ADD CONSTRAINT uq UNIQUE (b) WITH (fillfactor = '70')
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD INDEX desc index deparse_at.uq
+ALTER TABLE deparse_at.con ADD UNIQUE (c) DEFERRABLE INITIALLY DEFERRED;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.con ADD UNIQUE (c) DEFERRABLE INITIALLY DEFERRED
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD INDEX desc index deparse_at.con_c_key
+CREATE TABLE deparse_at.ref (x int PRIMARY KEY);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.ref (x pg_catalog.int4, PRIMARY KEY (x))
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+ALTER TABLE deparse_at.con ADD FOREIGN KEY (a) REFERENCES deparse_at.ref (x)
+	ON DELETE CASCADE;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.con ADD FOREIGN KEY (a) REFERENCES deparse_at.ref(x) ON DELETE CASCADE
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD CONSTRAINT (and recurse) desc constraint con_a_fkey on table deparse_at.con
+ALTER TABLE deparse_at.con DROP CONSTRAINT chk;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.con DROP CONSTRAINT chk
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type DROP CONSTRAINT (and recurse) desc <NULL>
+ALTER TABLE deparse_at.con DROP CONSTRAINT IF EXISTS nonesuch;
+NOTICE:  constraint "nonesuch" of relation "con" does not exist, skipping
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.con DROP CONSTRAINT IF EXISTS nonesuch
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type DROP CONSTRAINT (and recurse) desc <NULL>
+-- A constraint the user did not name must come back unnamed, so that the
+-- replay derives the name the same way the original did.  Execution fills the
+-- derived name into the very subcommand that is later collected, so the
+-- question can only be answered from the raw statement -- including for a
+-- constraint written with a column definition, which parse analysis splits out
+-- into a subcommand of its own.
+ALTER TABLE deparse_at.con ADD COLUMN d int CHECK (d > 0);
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.con ADD COLUMN d pg_catalog.int4, ADD CHECK ((d > 0))
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD COLUMN (and recurse) desc column d of table deparse_at.con
+NOTICE:    subcommand: type ADD CONSTRAINT (and recurse) desc constraint con_d_check on table deparse_at.con
+ALTER TABLE deparse_at.con ADD COLUMN e int CONSTRAINT named_e CHECK (e > 0);
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.con ADD COLUMN e pg_catalog.int4, ADD CONSTRAINT named_e CHECK ((e > 0))
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD COLUMN (and recurse) desc column e of table deparse_at.con
+NOTICE:    subcommand: type ADD CONSTRAINT (and recurse) desc constraint named_e on table deparse_at.con
+-- exclusion constraint
+CREATE TABLE deparse_at.ex (c circle);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.ex (c pg_catalog.circle)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+ALTER TABLE deparse_at.ex ADD EXCLUDE USING gist (c WITH &&);
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.ex ADD EXCLUDE USING gist (c WITH &&)
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD INDEX desc index deparse_at.ex_c_excl
+-- ALTER CONSTRAINT: deferrability and enforceability (rendered from the
+-- ATAlterConstraint node; INITIALLY IMMEDIATE is the default and implicit)
+CREATE TABLE deparse_at.acpk (x int PRIMARY KEY);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.acpk (x pg_catalog.int4, PRIMARY KEY (x))
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+CREATE TABLE deparse_at.acfk (a int,
+	CONSTRAINT fk FOREIGN KEY (a) REFERENCES deparse_at.acpk (x));
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.acfk (a pg_catalog.int4, CONSTRAINT fk FOREIGN KEY (a) REFERENCES deparse_at.acpk(x))
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD CONSTRAINT (and recurse) desc constraint fk on table deparse_at.acfk
+ALTER TABLE deparse_at.acfk ALTER CONSTRAINT fk DEFERRABLE INITIALLY DEFERRED;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.acfk ALTER CONSTRAINT fk DEFERRABLE INITIALLY DEFERRED
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ALTER CONSTRAINT (and recurse) desc constraint fk on table deparse_at.acfk
+ALTER TABLE deparse_at.acfk ALTER CONSTRAINT fk DEFERRABLE INITIALLY IMMEDIATE;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.acfk ALTER CONSTRAINT fk DEFERRABLE
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ALTER CONSTRAINT (and recurse) desc constraint fk on table deparse_at.acfk
+ALTER TABLE deparse_at.acfk ALTER CONSTRAINT fk NOT DEFERRABLE;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.acfk ALTER CONSTRAINT fk NOT DEFERRABLE
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ALTER CONSTRAINT (and recurse) desc constraint fk on table deparse_at.acfk
+ALTER TABLE deparse_at.acfk ALTER CONSTRAINT fk NOT ENFORCED;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.acfk ALTER CONSTRAINT fk NOT ENFORCED
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ALTER CONSTRAINT (and recurse) desc constraint fk on table deparse_at.acfk
+ALTER TABLE deparse_at.acfk ALTER CONSTRAINT fk ENFORCED;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.acfk ALTER CONSTRAINT fk ENFORCED
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ALTER CONSTRAINT (and recurse) desc constraint fk on table deparse_at.acfk
+-- user-written table-level NOT NULL (named, unnamed, NO INHERIT).  The
+-- internal NOT NULL that ADD COLUMN ... NOT NULL generates for a different
+-- column in the same statement is rendered inline, not duplicated here; the
+-- two are told apart by matching the raw statement per column.
+CREATE TABLE deparse_at.nn (a int, b int, c int);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.nn (a pg_catalog.int4, b pg_catalog.int4, c pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+ALTER TABLE deparse_at.nn ADD CONSTRAINT nn_a NOT NULL a;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.nn ADD CONSTRAINT nn_a NOT NULL a
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD CONSTRAINT (and recurse) desc constraint nn_a on table deparse_at.nn
+ALTER TABLE deparse_at.nn ADD NOT NULL b;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.nn ADD NOT NULL b
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD CONSTRAINT (and recurse) desc constraint nn_b_not_null on table deparse_at.nn
+ALTER TABLE deparse_at.nn ADD COLUMN d int NOT NULL DEFAULT 0,
+	ADD CONSTRAINT nn_c NOT NULL c;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.nn ADD COLUMN d pg_catalog.int4 NOT NULL DEFAULT 0, ADD CONSTRAINT nn_c NOT NULL c
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD COLUMN (and recurse) desc column d of table deparse_at.nn
+NOTICE:    subcommand: type ADD CONSTRAINT (and recurse) desc constraint nn_d_not_null on table deparse_at.nn
+NOTICE:    subcommand: type ADD CONSTRAINT (and recurse) desc constraint nn_c on table deparse_at.nn
+CREATE TABLE deparse_at.nnp (a int);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.nnp (a pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE TABLE deparse_at.nnc (a int) INHERITS (deparse_at.nnp);
+NOTICE:  merging column "a" with inherited definition
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.nnc (a pg_catalog.int4) INHERITS (deparse_at.nnp)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+ALTER TABLE ONLY deparse_at.nnp ADD CONSTRAINT nn_ni NOT NULL a NO INHERIT;
+NOTICE:  deparsed DDL: ALTER TABLE ONLY deparse_at.nnp ADD CONSTRAINT nn_ni NOT NULL a NO INHERIT
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD CONSTRAINT desc constraint nn_ni on table deparse_at.nnp
+CREATE TABLE deparse_at.nnv (a int);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.nnv (a pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+ALTER TABLE deparse_at.nnv ADD CONSTRAINT nn_nv NOT NULL a NOT VALID;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.nnv ADD CONSTRAINT nn_nv NOT NULL a NOT VALID
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD CONSTRAINT (and recurse) desc constraint nn_nv on table deparse_at.nnv
+-- ADD NOT NULL for a column that already has one merges with the existing
+-- constraint and creates no catalog row, so nothing can be looked up by the
+-- name the user did not give.  The subcommand must still be emitted -- the
+-- replay merges again, to the same effect -- rather than dropped, which would
+-- leave the statement with no subcommand at all.
+CREATE TABLE deparse_at.nnm (a int NOT NULL);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.nnm (a pg_catalog.int4 NOT NULL)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+ALTER TABLE deparse_at.nnm ADD NOT NULL a;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.nnm ADD NOT NULL a
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD CONSTRAINT (and recurse) desc <NULL>
+CREATE TABLE deparse_at.nnmp (a int NOT NULL);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.nnmp (a pg_catalog.int4 NOT NULL)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE TABLE deparse_at.nnmc () INHERITS (deparse_at.nnmp);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.nnmc () INHERITS (deparse_at.nnmp)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+ALTER TABLE deparse_at.nnmc ADD NOT NULL a;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.nnmc ADD NOT NULL a
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD CONSTRAINT (and recurse) desc <NULL>
+-- table-level subcommands
+CREATE ROLE regress_deparse_role;
+CREATE TABLE deparse_at.tl (a int, b int);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.tl (a pg_catalog.int4, b pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+ALTER TABLE deparse_at.tl OWNER TO regress_deparse_role;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.tl OWNER TO regress_deparse_role
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type CHANGE OWNER desc <NULL>
+ALTER TABLE deparse_at.tl SET UNLOGGED;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.tl SET UNLOGGED
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type SET UNLOGGED desc <NULL>
+ALTER TABLE deparse_at.tl SET LOGGED;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.tl SET LOGGED
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type SET LOGGED desc <NULL>
+ALTER TABLE deparse_at.tl SET WITHOUT OIDS;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.tl SET WITHOUT OIDS
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type DROP OIDS desc <NULL>
+ALTER TABLE deparse_at.tl SET (fillfactor = 70);
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.tl SET (fillfactor = '70')
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type SET RELOPTIONS desc <NULL>
+ALTER TABLE deparse_at.tl RESET (fillfactor);
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.tl RESET (fillfactor)
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type RESET RELOPTIONS desc <NULL>
+ALTER TABLE deparse_at.tl SET TABLESPACE pg_default;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.tl SET TABLESPACE pg_default
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type SET TABLESPACE desc <NULL>
+ALTER TABLE deparse_at.tl ENABLE ROW LEVEL SECURITY;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.tl ENABLE ROW LEVEL SECURITY
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ENABLE ROW SECURITY desc <NULL>
+ALTER TABLE deparse_at.tl FORCE ROW LEVEL SECURITY;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.tl FORCE ROW LEVEL SECURITY
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type FORCE ROW SECURITY desc <NULL>
+ALTER TABLE deparse_at.tl NO FORCE ROW LEVEL SECURITY;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.tl NO FORCE ROW LEVEL SECURITY
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type NO FORCE ROW SECURITY desc <NULL>
+ALTER TABLE deparse_at.tl DISABLE ROW LEVEL SECURITY;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.tl DISABLE ROW LEVEL SECURITY
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type DISABLE ROW SECURITY desc <NULL>
+CREATE INDEX tl_a_idx ON deparse_at.tl (a);
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+ALTER TABLE deparse_at.tl CLUSTER ON tl_a_idx;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.tl CLUSTER ON tl_a_idx
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type CLUSTER desc index deparse_at.tl_a_idx
+ALTER TABLE deparse_at.tl SET WITHOUT CLUSTER;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.tl SET WITHOUT CLUSTER
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type DROP CLUSTER desc <NULL>
+ALTER TABLE deparse_at.tl ALTER COLUMN a SET NOT NULL;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.tl ALTER COLUMN a SET NOT NULL
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type SET NOT NULL (and recurse) desc constraint tl_a_not_null on table deparse_at.tl
+ALTER TABLE deparse_at.tl ADD UNIQUE (a);
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.tl ADD UNIQUE (a)
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD INDEX desc index deparse_at.tl_a_key
+ALTER TABLE deparse_at.tl REPLICA IDENTITY FULL;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.tl REPLICA IDENTITY FULL
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type REPLICA IDENTITY desc <NULL>
+ALTER TABLE deparse_at.tl REPLICA IDENTITY USING INDEX tl_a_key;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.tl REPLICA IDENTITY USING INDEX tl_a_key
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type REPLICA IDENTITY desc <NULL>
+ALTER TABLE deparse_at.tl REPLICA IDENTITY DEFAULT;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.tl REPLICA IDENTITY DEFAULT
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type REPLICA IDENTITY desc <NULL>
+-- inheritance
+CREATE TABLE deparse_at.ip (a int, b int);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.ip (a pg_catalog.int4, b pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE TABLE deparse_at.ic (a int, b int);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.ic (a pg_catalog.int4, b pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+ALTER TABLE deparse_at.ic INHERIT deparse_at.ip;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.ic INHERIT deparse_at.ip
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD INHERIT desc table deparse_at.ip
+ALTER TABLE deparse_at.ic NO INHERIT deparse_at.ip;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.ic NO INHERIT deparse_at.ip
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type DROP INHERIT desc table deparse_at.ip
+-- partition attach/detach
+CREATE TABLE deparse_at.pt (a int) PARTITION BY RANGE (a);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.pt (a pg_catalog.int4) PARTITION BY RANGE (a)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE TABLE deparse_at.pt1 (a int);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.pt1 (a pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+ALTER TABLE deparse_at.pt ATTACH PARTITION deparse_at.pt1 FOR VALUES FROM (1) TO (10);
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.pt ATTACH PARTITION deparse_at.pt1 FOR VALUES FROM (1) TO (10)
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ATTACH PARTITION desc table deparse_at.pt1
+ALTER TABLE deparse_at.pt DETACH PARTITION deparse_at.pt1;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.pt DETACH PARTITION deparse_at.pt1
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type DETACH PARTITION desc table deparse_at.pt1
+-- CLUSTER ON a leaf-partition's index: the subcommand's collected address is
+-- that index, and a leaf-partition index has a pg_inherits row, so the
+-- inheritance-child skip must not mistake it for a recursed child and drop it
+CREATE TABLE deparse_at.cl (a int NOT NULL) PARTITION BY RANGE (a);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.cl (a pg_catalog.int4 NOT NULL) PARTITION BY RANGE (a)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE TABLE deparse_at.cl1 PARTITION OF deparse_at.cl FOR VALUES FROM (0) TO (10);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.cl1 PARTITION OF deparse_at.cl FOR VALUES FROM (0) TO (10)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE INDEX cl_a_idx ON deparse_at.cl (a);
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+ALTER TABLE deparse_at.cl1 CLUSTER ON cl1_a_idx;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.cl1 CLUSTER ON cl1_a_idx
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type CLUSTER desc index deparse_at.cl1_a_idx
+-- DROP EXPRESSION (of a generated column) and SET ACCESS METHOD
+CREATE TABLE deparse_at.dx (a int, b int GENERATED ALWAYS AS (a * 2) STORED);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.dx (a pg_catalog.int4, b pg_catalog.int4 GENERATED ALWAYS AS ((a * 2)) STORED)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+ALTER TABLE deparse_at.dx ALTER COLUMN b DROP EXPRESSION;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.dx ALTER COLUMN b DROP EXPRESSION
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type DROP EXPRESSION desc column b of table deparse_at.dx
+ALTER TABLE deparse_at.dx ALTER COLUMN b DROP EXPRESSION IF EXISTS;
+NOTICE:  column "b" of relation "dx" is not a generated column, skipping
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.dx ALTER COLUMN b DROP EXPRESSION IF EXISTS
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type DROP EXPRESSION desc <NULL>
+ALTER TABLE deparse_at.dx SET ACCESS METHOD heap;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.dx SET ACCESS METHOD heap
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type SET ACCESS METHOD desc <NULL>
+ALTER TABLE deparse_at.dx SET ACCESS METHOD DEFAULT;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.dx SET ACCESS METHOD DEFAULT
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type SET ACCESS METHOD desc <NULL>
+-- ENABLE / DISABLE of triggers and rules, all spellings
+CREATE FUNCTION deparse_at.trigfn() RETURNS trigger LANGUAGE plpgsql
+	AS 'BEGIN RETURN NEW; END';
+NOTICE:  DDL test: type simple, tag CREATE FUNCTION
+CREATE TRIGGER trg BEFORE INSERT ON deparse_at.dx
+	FOR EACH ROW EXECUTE FUNCTION deparse_at.trigfn();
+NOTICE:  DDL test: type simple, tag CREATE TRIGGER
+ALTER TABLE deparse_at.dx DISABLE TRIGGER trg;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.dx DISABLE TRIGGER trg
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type DISABLE TRIGGER (and recurse) desc <NULL>
+ALTER TABLE deparse_at.dx ENABLE TRIGGER trg;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.dx ENABLE TRIGGER trg
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ENABLE TRIGGER (and recurse) desc <NULL>
+ALTER TABLE deparse_at.dx ENABLE ALWAYS TRIGGER trg;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.dx ENABLE ALWAYS TRIGGER trg
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ENABLE TRIGGER (always) (and recurse) desc <NULL>
+ALTER TABLE deparse_at.dx ENABLE REPLICA TRIGGER trg;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.dx ENABLE REPLICA TRIGGER trg
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ENABLE TRIGGER (replica) (and recurse) desc <NULL>
+ALTER TABLE deparse_at.dx DISABLE TRIGGER ALL;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.dx DISABLE TRIGGER ALL
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type DISABLE TRIGGER (all) (and recurse) desc <NULL>
+ALTER TABLE deparse_at.dx ENABLE TRIGGER USER;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.dx ENABLE TRIGGER USER
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ENABLE TRIGGER (user) (and recurse) desc <NULL>
+CREATE RULE trg_rule AS ON INSERT TO deparse_at.dx DO INSTEAD NOTHING;
+NOTICE:  DDL test: type simple, tag CREATE RULE
+ALTER TABLE deparse_at.dx DISABLE RULE trg_rule;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.dx DISABLE RULE trg_rule
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type DISABLE RULE desc <NULL>
+ALTER TABLE deparse_at.dx ENABLE RULE trg_rule;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.dx ENABLE RULE trg_rule
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ENABLE RULE desc <NULL>
+ALTER TABLE deparse_at.dx ENABLE ALWAYS RULE trg_rule;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.dx ENABLE ALWAYS RULE trg_rule
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ENABLE RULE (always) desc <NULL>
+ALTER TABLE deparse_at.dx ENABLE REPLICA RULE trg_rule;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.dx ENABLE REPLICA RULE trg_rule
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ENABLE RULE (replica) desc <NULL>
+-- identity columns (ADD/SET/DROP GENERATED ... AS IDENTITY, with sequence
+-- options that parse analysis splits out and the deparser restores from the
+-- raw statement) and SET EXPRESSION of a generated column
+CREATE TABLE deparse_at.idc (a int NOT NULL, b int NOT NULL,
+	g int GENERATED ALWAYS AS (a + 1) STORED);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.idc (a pg_catalog.int4 NOT NULL, b pg_catalog.int4 NOT NULL, g pg_catalog.int4 GENERATED ALWAYS AS ((a + 1)) STORED)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+ALTER TABLE deparse_at.idc ALTER COLUMN a ADD GENERATED ALWAYS AS IDENTITY;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.idc ALTER COLUMN a ADD GENERATED ALWAYS AS IDENTITY
+NOTICE:  DDL test: type simple, tag CREATE SEQUENCE
+NOTICE:  DDL test: type simple, tag ALTER SEQUENCE
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD IDENTITY (and recurse) desc column a of table deparse_at.idc
+ALTER TABLE deparse_at.idc ALTER COLUMN b ADD GENERATED BY DEFAULT AS IDENTITY
+	(START WITH 10 INCREMENT BY 2);
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.idc ALTER COLUMN b ADD GENERATED BY DEFAULT AS IDENTITY (START WITH 10 INCREMENT BY 2)
+NOTICE:  DDL test: type simple, tag CREATE SEQUENCE
+NOTICE:  DDL test: type simple, tag ALTER SEQUENCE
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD IDENTITY (and recurse) desc column b of table deparse_at.idc
+ALTER TABLE deparse_at.idc ALTER COLUMN a SET GENERATED BY DEFAULT;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.idc ALTER COLUMN a SET GENERATED BY DEFAULT
+NOTICE:  DDL test: type simple, tag ALTER SEQUENCE
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type SET IDENTITY (and recurse) desc column a of table deparse_at.idc
+ALTER TABLE deparse_at.idc ALTER COLUMN a RESTART WITH 100;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.idc ALTER COLUMN a RESTART WITH 100
+NOTICE:  DDL test: type simple, tag ALTER SEQUENCE
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type SET IDENTITY (and recurse) desc <NULL>
+ALTER TABLE deparse_at.idc ALTER COLUMN b SET INCREMENT BY 5;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.idc ALTER COLUMN b SET INCREMENT BY 5
+NOTICE:  DDL test: type simple, tag ALTER SEQUENCE
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type SET IDENTITY (and recurse) desc <NULL>
+ALTER TABLE deparse_at.idc ALTER COLUMN a DROP IDENTITY;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.idc ALTER COLUMN a DROP IDENTITY
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type DROP IDENTITY (and recurse) desc column a of table deparse_at.idc
+ALTER TABLE deparse_at.idc ALTER COLUMN a DROP IDENTITY IF EXISTS;
+NOTICE:  column "a" of relation "idc" is not an identity column, skipping
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.idc ALTER COLUMN a DROP IDENTITY IF EXISTS
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type DROP IDENTITY (and recurse) desc <NULL>
+ALTER TABLE deparse_at.idc ALTER COLUMN g SET EXPRESSION AS (a + 100);
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.idc ALTER COLUMN g SET EXPRESSION AS ((a + 100))
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type SET EXPRESSION desc column g of table deparse_at.idc
+-- ADD COLUMN and ADD IDENTITY of that same new column in one statement:
+-- parse analysis collects it as two ALTER TABLE commands (the identity links
+-- a sequence via a nested internal ALTER TABLE), which the deparser merges
+-- back into the single ALTER TABLE the user wrote
+ALTER TABLE deparse_at.idc
+	ADD COLUMN c int NOT NULL,
+	ALTER COLUMN c ADD GENERATED ALWAYS AS IDENTITY;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.idc ADD COLUMN c pg_catalog.int4 NOT NULL, ALTER COLUMN c ADD GENERATED ALWAYS AS IDENTITY
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD COLUMN (and recurse) desc column c of table deparse_at.idc
+NOTICE:    subcommand: type ADD CONSTRAINT (and recurse) desc constraint idc_c_not_null on table deparse_at.idc
+NOTICE:  DDL test: type simple, tag CREATE SEQUENCE
+NOTICE:  DDL test: type simple, tag ALTER SEQUENCE
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD IDENTITY (and recurse) desc column c of table deparse_at.idc
+-- OF a composite type, and NOT OF
+CREATE TYPE deparse_at.oftype AS (a int, b int);
+NOTICE:  DDL test: type simple, tag CREATE TYPE
+CREATE TABLE deparse_at.oft (a int, b int);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.oft (a pg_catalog.int4, b pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+ALTER TABLE deparse_at.oft OF deparse_at.oftype;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.oft OF deparse_at.oftype
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type OF desc type deparse_at.oftype
+ALTER TABLE deparse_at.oft NOT OF;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.oft NOT OF
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type NOT OF desc <NULL>
+-- RENAME and SET SCHEMA (collected as simple commands, not subcommands)
+CREATE TABLE deparse_at.rn (a int, CONSTRAINT ck CHECK (a > 0));
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.rn (a pg_catalog.int4, CONSTRAINT ck CHECK ((a > 0)))
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+ALTER TABLE deparse_at.rn RENAME COLUMN a TO b;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.rn RENAME COLUMN a TO b
+NOTICE:  DDL test: type simple, tag ALTER TABLE
+ALTER TABLE deparse_at.rn RENAME CONSTRAINT ck TO ck2;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.rn RENAME CONSTRAINT ck TO ck2
+NOTICE:  DDL test: type simple, tag ALTER TABLE
+ALTER TABLE deparse_at.rn RENAME TO rn2;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.rn RENAME TO rn2
+NOTICE:  DDL test: type simple, tag ALTER TABLE
+ALTER TABLE IF EXISTS deparse_at.nonesuch RENAME TO whatever;
+NOTICE:  relation "nonesuch" does not exist, skipping
+CREATE SCHEMA deparse_at2;
+NOTICE:  DDL test: type simple, tag CREATE SCHEMA
+ALTER TABLE deparse_at.rn2 SET SCHEMA deparse_at2;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.rn2 SET SCHEMA deparse_at2
+NOTICE:  DDL test: type simple, tag ALTER TABLE
+-- ALTER COLUMN TYPE whose USING references a column dropped in the same
+-- statement: the USING is rendered to text at prep time, before the drop, so
+-- it can still name the column; the two subcommands (collected as one ALTER
+-- TABLE) round-trip together.  Both statement orders behave identically, as
+-- execution reorders subcommands by pass.
+CREATE TABLE deparse_at.u (a int, b int);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.u (a pg_catalog.int4, b pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+INSERT INTO deparse_at.u VALUES (1, 42);
+ALTER TABLE deparse_at.u ALTER COLUMN a TYPE text USING b::text, DROP COLUMN b;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.u DROP COLUMN b, ALTER COLUMN a SET DATA TYPE pg_catalog.text USING (b)::text
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type DROP COLUMN (and recurse) desc column ........pg.dropped.2........ of table deparse_at.u
+NOTICE:    subcommand: type ALTER COLUMN SET TYPE desc column a of table deparse_at.u
+CREATE TABLE deparse_at.u2 (a int, b int);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.u2 (a pg_catalog.int4, b pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+INSERT INTO deparse_at.u2 VALUES (1, 42);
+ALTER TABLE deparse_at.u2 DROP COLUMN b, ALTER COLUMN a TYPE text USING b::text;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.u2 DROP COLUMN b, ALTER COLUMN a SET DATA TYPE pg_catalog.text USING (b)::text
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type DROP COLUMN (and recurse) desc column ........pg.dropped.2........ of table deparse_at.u2
+NOTICE:    subcommand: type ALTER COLUMN SET TYPE desc column a of table deparse_at.u2
+-- SET STATISTICS by column number: an unnamed expression column of an index,
+-- reached via ALTER TABLE naming the index.  The subcommand carries the
+-- column position, not a name (formerly a NULL-name crash); it deparses to
+-- the same by-number form.
+CREATE INDEX deparse_at_ei ON deparse_at.t ((a + e));
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+ALTER TABLE deparse_at.deparse_at_ei ALTER COLUMN 1 SET STATISTICS 1000;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.deparse_at_ei ALTER COLUMN 1 SET STATISTICS 1000
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type SET STATS desc column a_e of index deparse_at.deparse_at_ei
+ALTER TABLE deparse_at.deparse_at_ei ALTER COLUMN 1 SET STATISTICS DEFAULT;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.deparse_at_ei ALTER COLUMN 1 SET STATISTICS DEFAULT
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type SET STATS desc column a_e of index deparse_at.deparse_at_ei
+-- ADD [CONSTRAINT name] {PRIMARY KEY | UNIQUE} USING INDEX adopts an existing
+-- unique index.  It must round-trip as USING INDEX (deparsing the constraint
+-- definition would build a duplicate index on replay).  The index's
+-- pre-adoption name comes from the raw statement (adoption may rename the index
+-- to the constraint name), so it survives to name the still-existing index on
+-- replay.
+CREATE TABLE deparse_at.ui1 (a int, b int);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.ui1 (a pg_catalog.int4, b pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE UNIQUE INDEX ui1_uq ON deparse_at.ui1 (b);
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+-- named constraint, different index name: the index is renamed on replay too
+ALTER TABLE deparse_at.ui1 ADD CONSTRAINT ui1_pk PRIMARY KEY USING INDEX ui1_uq;
+NOTICE:  ALTER TABLE / ADD CONSTRAINT USING INDEX will rename index "ui1_uq" to "ui1_pk"
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.ui1 ADD CONSTRAINT ui1_pk PRIMARY KEY USING INDEX ui1_uq
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD CONSTRAINT (and recurse) desc constraint ui1_b_not_null on table deparse_at.ui1
+NOTICE:    subcommand: type ADD CONSTRAINT (using index) desc constraint ui1_pk on table deparse_at.ui1
+-- unnamed UNIQUE over a covering (INCLUDE) index: constraint takes the index
+-- name, no rename; the INCLUDE columns live in the index, not restated
+CREATE TABLE deparse_at.ui2 (a int, b int, c int);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.ui2 (a pg_catalog.int4, b pg_catalog.int4, c pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE UNIQUE INDEX ui2_idx ON deparse_at.ui2 (a, b) INCLUDE (c);
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+ALTER TABLE deparse_at.ui2 ADD UNIQUE USING INDEX ui2_idx;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.ui2 ADD UNIQUE USING INDEX ui2_idx
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD CONSTRAINT (using index) desc constraint ui2_idx on table deparse_at.ui2
+-- deferrable
+CREATE TABLE deparse_at.ui3 (a int);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.ui3 (a pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE UNIQUE INDEX ui3_uq ON deparse_at.ui3 (a);
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+ALTER TABLE deparse_at.ui3
+  ADD CONSTRAINT ui3_pk PRIMARY KEY USING INDEX ui3_uq DEFERRABLE INITIALLY DEFERRED;
+NOTICE:  ALTER TABLE / ADD CONSTRAINT USING INDEX will rename index "ui3_uq" to "ui3_pk"
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.ui3 ADD CONSTRAINT ui3_pk PRIMARY KEY USING INDEX ui3_uq DEFERRABLE INITIALLY DEFERRED
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD CONSTRAINT (and recurse) desc constraint ui3_a_not_null on table deparse_at.ui3
+NOTICE:    subcommand: type ADD CONSTRAINT (using index) desc constraint ui3_pk on table deparse_at.ui3
+-- combined with ALTER COLUMN TYPE in one statement (index rebuilt, name kept)
+CREATE TABLE deparse_at.ui4 (f1 int);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.ui4 (f1 pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE UNIQUE INDEX ui4_i0 ON deparse_at.ui4 (f1);
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+ALTER TABLE deparse_at.ui4 ADD PRIMARY KEY USING INDEX ui4_i0, ALTER f1 TYPE bigint;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.ui4 ALTER COLUMN f1 SET DATA TYPE pg_catalog.int8, ADD PRIMARY KEY USING INDEX ui4_i0
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ALTER COLUMN SET TYPE desc column f1 of table deparse_at.ui4
+NOTICE:    subcommand: type (re) ADD INDEX desc index deparse_at.ui4_i0
+NOTICE:    subcommand: type ADD CONSTRAINT (and recurse) desc constraint ui4_f1_not_null on table deparse_at.ui4
+NOTICE:    subcommand: type ADD CONSTRAINT (using index) desc constraint ui4_i0 on table deparse_at.ui4
+-- MERGE PARTITIONS / SPLIT PARTITION.  The source partition(s) are dropped by
+-- the command, so their schema-qualified names are captured before the drop;
+-- the created partition(s) survive, so their name and bound come from the
+-- catalog by OID.  Names are always emitted schema-qualified regardless of how
+-- the user wrote them, so the reconstruction replays under a restricted
+-- search_path.
+CREATE TABLE deparse_at.sales (id int, d date) PARTITION BY RANGE (d);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.sales (id pg_catalog.int4, d pg_catalog.date) PARTITION BY RANGE (d)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE TABLE deparse_at.sales_jan PARTITION OF deparse_at.sales
+  FOR VALUES FROM ('2022-01-01') TO ('2022-02-01');
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.sales_jan PARTITION OF deparse_at.sales FOR VALUES FROM ('01-01-2022') TO ('02-01-2022')
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE TABLE deparse_at.sales_feb PARTITION OF deparse_at.sales
+  FOR VALUES FROM ('2022-02-01') TO ('2022-03-01');
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.sales_feb PARTITION OF deparse_at.sales FOR VALUES FROM ('02-01-2022') TO ('03-01-2022')
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE TABLE deparse_at.sales_mar PARTITION OF deparse_at.sales
+  FOR VALUES FROM ('2022-03-01') TO ('2022-04-01');
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.sales_mar PARTITION OF deparse_at.sales FOR VALUES FROM ('03-01-2022') TO ('04-01-2022')
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+-- merge two adjacent partitions (names unqualified, resolved via search_path)
+SET search_path = deparse_at;
+ALTER TABLE sales MERGE PARTITIONS (sales_jan, sales_feb) INTO sales_jan_feb;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.sales MERGE PARTITIONS (deparse_at.sales_jan, deparse_at.sales_feb) INTO deparse_at.sales_jan_feb
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type MERGE PARTITIONS desc <NULL>
+RESET search_path;
+-- split it back into two, with explicit bounds
+ALTER TABLE deparse_at.sales SPLIT PARTITION deparse_at.sales_jan_feb INTO (
+  PARTITION deparse_at.sales_jan FOR VALUES FROM ('2022-01-01') TO ('2022-02-01'),
+  PARTITION deparse_at.sales_feb FOR VALUES FROM ('2022-02-01') TO ('2022-03-01'));
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.sales SPLIT PARTITION deparse_at.sales_jan_feb INTO (PARTITION deparse_at.sales_jan FOR VALUES FROM ('01-01-2022') TO ('02-01-2022'), PARTITION deparse_at.sales_feb FOR VALUES FROM ('02-01-2022') TO ('03-01-2022'))
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type SPLIT PARTITION desc <NULL>
+-- merged-into partition placed in a different schema than the parent
+ALTER TABLE deparse_at.sales MERGE PARTITIONS (deparse_at.sales_feb, deparse_at.sales_mar)
+  INTO deparse_at2.sales_feb_mar;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.sales MERGE PARTITIONS (deparse_at.sales_feb, deparse_at.sales_mar) INTO deparse_at2.sales_feb_mar
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type MERGE PARTITIONS desc <NULL>
+-- LIST partitioning
+CREATE TABLE deparse_at.reg (r text) PARTITION BY LIST (r);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.reg (r pg_catalog.text) PARTITION BY LIST (r)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE TABLE deparse_at.reg_w PARTITION OF deparse_at.reg FOR VALUES IN ('w');
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.reg_w PARTITION OF deparse_at.reg FOR VALUES IN ('w')
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE TABLE deparse_at.reg_e PARTITION OF deparse_at.reg FOR VALUES IN ('e');
+NOTICE:  deparsed DDL: CREATE TABLE deparse_at.reg_e PARTITION OF deparse_at.reg FOR VALUES IN ('e')
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+ALTER TABLE deparse_at.reg MERGE PARTITIONS (deparse_at.reg_w, deparse_at.reg_e)
+  INTO deparse_at.reg_we;
+NOTICE:  deparsed DDL: ALTER TABLE deparse_at.reg MERGE PARTITIONS (deparse_at.reg_w, deparse_at.reg_e) INTO deparse_at.reg_we
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type MERGE PARTITIONS desc <NULL>
+-- IF EXISTS on a missing table is a no-op (no deparse, no warning)
+ALTER TABLE IF EXISTS deparse_at.nonesuch ADD COLUMN z int;
+NOTICE:  relation "nonesuch" does not exist, skipping
+SELECT attname FROM pg_attribute
+  WHERE attrelid = 'deparse_at.t'::regclass AND attnum > 0 AND NOT attisdropped
+  ORDER BY attnum;
+ attname 
+---------
+ a
+ e
+ f
+ g
+(4 rows)
+
+DROP SCHEMA deparse_at CASCADE;
+NOTICE:  drop cascades to 33 other objects
+DETAIL:  drop cascades to table deparse_at.t
+drop cascades to table deparse_at.c
+drop cascades to table deparse_at.con
+drop cascades to table deparse_at.ref
+drop cascades to table deparse_at.ex
+drop cascades to table deparse_at.acpk
+drop cascades to table deparse_at.acfk
+drop cascades to table deparse_at.nn
+drop cascades to table deparse_at.nnp
+drop cascades to table deparse_at.nnc
+drop cascades to table deparse_at.nnv
+drop cascades to table deparse_at.nnm
+drop cascades to table deparse_at.nnmp
+drop cascades to table deparse_at.nnmc
+drop cascades to table deparse_at.tl
+drop cascades to table deparse_at.ip
+drop cascades to table deparse_at.ic
+drop cascades to table deparse_at.pt
+drop cascades to table deparse_at.pt1
+drop cascades to table deparse_at.cl
+drop cascades to table deparse_at.dx
+drop cascades to function deparse_at.trigfn()
+drop cascades to table deparse_at.idc
+drop cascades to type deparse_at.oftype
+drop cascades to table deparse_at.oft
+drop cascades to table deparse_at.u
+drop cascades to table deparse_at.u2
+drop cascades to table deparse_at.ui1
+drop cascades to table deparse_at.ui2
+drop cascades to table deparse_at.ui3
+drop cascades to table deparse_at.ui4
+drop cascades to table deparse_at.sales
+drop cascades to table deparse_at.reg
+DROP SCHEMA deparse_at2 CASCADE;
+NOTICE:  drop cascades to table deparse_at2.rn2
+DROP ROLE regress_deparse_role;

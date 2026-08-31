@@ -1,0 +1,718 @@
+--
+-- Tests for DDL deparsing of CREATE TABLE.
+--
+-- Note: the event triggers created by the test_ddl_deparse script (which
+-- must run first in this schedule) remain installed, so their "DDL test:"
+-- NOTICEs appear interleaved below; deparse capture itself does not use
+-- them.
+--
+-- With test_ddl_deparse.execute_deparsed_ddl enabled, the module
+-- intercepts each supported CREATE TABLE: the original command is executed
+-- in a subtransaction that is rolled back, the collected command is
+-- deparsed to JSON, and the reconstructed command is executed for real.
+-- With print_deparsed_ddl enabled the reconstructed command is shown as a
+-- NOTICE, so the expected output asserts the deparsed text itself; exactly
+-- one NOTICE per statement shows that one DDL deparses to one DDL.
+--
+LOAD 'test_ddl_deparse';
+SET test_ddl_deparse.execute_deparsed_ddl = on;
+SET test_ddl_deparse.print_deparsed_ddl = text;
+CREATE SCHEMA deparse_tests;
+NOTICE:  DDL test: type simple, tag CREATE SCHEMA
+-- simple case
+CREATE TABLE deparse_tests.t1 (a int, b text);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t1 (a pg_catalog.int4, b pg_catalog.text)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+-- serial must stay serial: no sequence creation and no nextval() default
+-- may appear in the deparsed command, but the replayed table must still
+-- have them.
+CREATE TABLE deparse_tests.t_serial (id serial, big bigserial NOT NULL);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_serial (id serial, big bigserial NOT NULL)
+NOTICE:  DDL test: type simple, tag CREATE SEQUENCE
+NOTICE:  DDL test: type simple, tag CREATE SEQUENCE
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag ALTER SEQUENCE
+NOTICE:  DDL test: type simple, tag ALTER SEQUENCE
+SELECT attname, pg_get_serial_sequence('deparse_tests.t_serial', attname) AS seq
+  FROM pg_attribute
+  WHERE attrelid = 'deparse_tests.t_serial'::regclass AND attnum > 0
+  ORDER BY attnum;
+ attname |              seq               
+---------+--------------------------------
+ id      | deparse_tests.t_serial_id_seq
+ big     | deparse_tests.t_serial_big_seq
+(2 rows)
+
+-- COMPRESSION and STORAGE appear only when the user wrote them; columns
+-- without the clause must adopt the target's defaults on replay
+-- (attcompression stays unset).
+CREATE TABLE deparse_tests.t_options (
+a text COMPRESSION pglz,
+b text STORAGE external,
+c text
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_options (a pg_catalog.text COMPRESSION pglz, b pg_catalog.text STORAGE external, c pg_catalog.text)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+SELECT attname, attcompression, attstorage
+  FROM pg_attribute
+  WHERE attrelid = 'deparse_tests.t_options'::regclass AND attnum > 0
+  ORDER BY attnum;
+ attname | attcompression | attstorage 
+---------+----------------+------------
+ a       | p              | x
+ b       |                | e
+ c       |                | x
+(3 rows)
+
+-- inline constraints are normalized to table constraints, but stay within
+-- the single CREATE TABLE command; unnamed constraints get the same
+-- auto-derived name on replay.
+CREATE TABLE deparse_tests.t_constr (
+a int PRIMARY KEY,
+b int REFERENCES deparse_tests.t_constr (a) NOT NULL,
+c text DEFAULT 'x' CHECK (c <> ''),
+CONSTRAINT named_check CHECK (a > 0)
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_constr (a pg_catalog.int4, b pg_catalog.int4 NOT NULL, c pg_catalog.text DEFAULT 'x'::text, CHECK ((c <> ''::text)), CONSTRAINT named_check CHECK ((a > 0)), PRIMARY KEY (a), FOREIGN KEY (b) REFERENCES deparse_tests.t_constr(a))
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD CONSTRAINT (and recurse) desc constraint t_constr_b_fkey on table deparse_tests.t_constr
+SELECT conname, contype, pg_get_constraintdef(oid)
+  FROM pg_constraint
+  WHERE conrelid = 'deparse_tests.t_constr'::regclass
+  ORDER BY conname COLLATE "C";
+       conname       | contype |                 pg_get_constraintdef                 
+---------------------+---------+------------------------------------------------------
+ named_check         | c       | CHECK ((a > 0))
+ t_constr_a_not_null | n       | NOT NULL a
+ t_constr_b_fkey     | f       | FOREIGN KEY (b) REFERENCES deparse_tests.t_constr(a)
+ t_constr_b_not_null | n       | NOT NULL b
+ t_constr_c_check    | c       | CHECK ((c <> ''::text))
+ t_constr_pkey       | p       | PRIMARY KEY (a)
+(6 rows)
+
+-- table-level NOT NULL constraint syntax
+CREATE TABLE deparse_tests.t_tblnotnull (a int, CONSTRAINT nn_a NOT NULL a);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_tblnotnull (a pg_catalog.int4, CONSTRAINT nn_a NOT NULL a)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+-- type names are normalized but keep their typmod; interval exercises
+-- SQL-standard types with special typmod rules
+CREATE TABLE deparse_tests.t_types (
+a varchar(10),
+b numeric(10,2),
+c timestamp(3),
+d interval hour to minute,
+e int[]
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_types (a pg_catalog."varchar"(10), b pg_catalog."numeric"(10,2), c TIMESTAMP(3) without time zone, d INTERVAL hour to minute, e pg_catalog.int4[])
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+-- identity columns: sequence options are emitted only as far as the user
+-- gave them
+CREATE TABLE deparse_tests.t_identity (
+a int GENERATED ALWAYS AS IDENTITY,
+b int GENERATED BY DEFAULT AS IDENTITY (START WITH 10 INCREMENT BY 5)
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_identity (a pg_catalog.int4 GENERATED ALWAYS AS IDENTITY, b pg_catalog.int4 GENERATED BY DEFAULT AS IDENTITY (START WITH 10 INCREMENT BY 5))
+NOTICE:  DDL test: type simple, tag CREATE SEQUENCE
+NOTICE:  DDL test: type simple, tag CREATE SEQUENCE
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag ALTER SEQUENCE
+NOTICE:  DDL test: type simple, tag ALTER SEQUENCE
+SELECT seqstart, seqincrement
+  FROM pg_sequence
+  WHERE seqrelid = pg_get_serial_sequence('deparse_tests.t_identity', 'b')::regclass;
+ seqstart | seqincrement 
+----------+--------------
+       10 |            5
+(1 row)
+
+-- generated columns
+CREATE TABLE deparse_tests.t_generated (
+a int,
+b int GENERATED ALWAYS AS (a * 2) STORED,
+c int GENERATED ALWAYS AS (a + 1) VIRTUAL
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_generated (a pg_catalog.int4, b pg_catalog.int4 GENERATED ALWAYS AS ((a * 2)) STORED, c pg_catalog.int4 GENERATED ALWAYS AS ((a + 1)) VIRTUAL)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+-- defaults referencing other objects come out schema-qualified
+CREATE SEQUENCE deparse_tests.myseq;
+NOTICE:  DDL test: type simple, tag CREATE SEQUENCE
+CREATE TABLE deparse_tests.t_defaults (
+a timestamptz DEFAULT now(),
+b int DEFAULT nextval('deparse_tests.myseq')
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_defaults (a TIMESTAMP WITH TIME ZONE DEFAULT now(), b pg_catalog.int4 DEFAULT nextval('deparse_tests.myseq'::regclass))
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+-- collation
+CREATE TABLE deparse_tests.t_collate (a text COLLATE "C");
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_collate (a pg_catalog.text COLLATE pg_catalog."C")
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+-- persistence
+CREATE UNLOGGED TABLE deparse_tests.t_unlogged (a int);
+NOTICE:  deparsed DDL: CREATE UNLOGGED TABLE deparse_tests.t_unlogged (a pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+-- reloptions, only as typed
+CREATE TABLE deparse_tests.t_withopts (a int)
+	WITH (fillfactor = 70, autovacuum_enabled = false);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_withopts (a pg_catalog.int4) WITH (fillfactor = '70', autovacuum_enabled = 'false')
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+-- inheritance
+CREATE TABLE deparse_tests.t_parent (a int NOT NULL, b text);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_parent (a pg_catalog.int4 NOT NULL, b pg_catalog.text)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE TABLE deparse_tests.t_child () INHERITS (deparse_tests.t_parent);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_child () INHERITS (deparse_tests.t_parent)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+-- partitioning
+CREATE TABLE deparse_tests.t_part (a int, b text) PARTITION BY RANGE (a);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_part (a pg_catalog.int4, b pg_catalog.text) PARTITION BY RANGE (a)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE TABLE deparse_tests.t_part1 PARTITION OF deparse_tests.t_part
+	FOR VALUES FROM (1) TO (10);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_part1 PARTITION OF deparse_tests.t_part FOR VALUES FROM (1) TO (10)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE TABLE deparse_tests.t_part2 PARTITION OF deparse_tests.t_part
+	(b WITH OPTIONS NOT NULL)
+	FOR VALUES FROM (10) TO (20);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_part2 PARTITION OF deparse_tests.t_part (b WITH OPTIONS NOT NULL) FOR VALUES FROM (10) TO (20)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE TABLE deparse_tests.t_partd PARTITION OF deparse_tests.t_part DEFAULT;
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_partd PARTITION OF deparse_tests.t_part DEFAULT
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+-- typed table
+CREATE TYPE deparse_tests.comp AS (x int, y text);
+NOTICE:  DDL test: type simple, tag CREATE TYPE
+CREATE TABLE deparse_tests.t_of OF deparse_tests.comp (x WITH OPTIONS NOT NULL);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_of OF deparse_tests.comp (x WITH OPTIONS NOT NULL)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+-- exclusion constraint
+CREATE TABLE deparse_tests.t_excl (
+c circle,
+EXCLUDE USING gist (c WITH &&)
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_excl (c pg_catalog.circle, EXCLUDE USING gist (c WITH &&))
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+-- quoted identifiers
+CREATE TABLE deparse_tests."Mixed Case" ("Col A" int, "select" text);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests."Mixed Case" ("Col A" pg_catalog.int4, "select" pg_catalog.text)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+-- IF NOT EXISTS on an existing relation deparses to nothing and must not
+-- be replayed
+CREATE TABLE IF NOT EXISTS deparse_tests.t1 (a int);
+NOTICE:  relation "t1" already exists, skipping
+-- LIKE contributes columns that are not in the raw statement, so they are
+-- recovered from the catalog.  Bare LIKE copies the type, its collation and
+-- NOT NULL, and nothing else.
+CREATE TABLE deparse_tests.t_like_src (
+a int NOT NULL,
+b text COLLATE "C",
+c numeric(10,2) STORAGE plain,
+d int DEFAULT 7,
+e int GENERATED ALWAYS AS (d * 2) STORED
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_like_src (a pg_catalog.int4 NOT NULL, b pg_catalog.text COLLATE pg_catalog."C", c pg_catalog."numeric"(10,2) STORAGE plain, d pg_catalog.int4 DEFAULT 7, e pg_catalog.int4 GENERATED ALWAYS AS ((d * 2)) STORED)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE TABLE deparse_tests.t_like (LIKE deparse_tests.t_like_src);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_like (a pg_catalog.int4 CONSTRAINT t_like_src_a_not_null NOT NULL, b pg_catalog.text COLLATE pg_catalog."C", c pg_catalog."numeric"(10,2), d pg_catalog.int4, e pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+-- columns the user did write are still deparsed from what they wrote, and
+-- the catalog order keeps the two kinds interleaved as the command produced
+-- them (serial stays serial, the copied columns come from pg_attribute)
+CREATE TABLE deparse_tests.t_like_mixed (
+x serial,
+LIKE deparse_tests.t_like_src,
+y int DEFAULT 1
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_like_mixed (x serial, a pg_catalog.int4 CONSTRAINT t_like_src_a_not_null NOT NULL, b pg_catalog.text COLLATE pg_catalog."C", c pg_catalog."numeric"(10,2), d pg_catalog.int4, e pg_catalog.int4, y pg_catalog.int4 DEFAULT 1)
+NOTICE:  DDL test: type simple, tag CREATE SEQUENCE
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag ALTER SEQUENCE
+-- the options that land in the table definition are all recovered
+CREATE TABLE deparse_tests.t_like_incl (
+LIKE deparse_tests.t_like_src
+	INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING CONSTRAINTS
+	INCLUDING STORAGE INCLUDING COMPRESSION
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_like_incl (a pg_catalog.int4 CONSTRAINT t_like_src_a_not_null NOT NULL, b pg_catalog.text COLLATE pg_catalog."C", c pg_catalog."numeric"(10,2) STORAGE PLAIN, d pg_catalog.int4 DEFAULT 7, e pg_catalog.int4 GENERATED ALWAYS AS ((d * 2)) STORED)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ALTER COLUMN SET DEFAULT (precooked) desc column d of table deparse_tests.t_like_incl
+NOTICE:    subcommand: type ALTER COLUMN SET DEFAULT (precooked) desc column e of table deparse_tests.t_like_incl
+-- identity comes back with the sequence parameters that were copied
+CREATE TABLE deparse_tests.t_like_idsrc (
+a int GENERATED BY DEFAULT AS IDENTITY (START WITH 10 INCREMENT BY 5)
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_like_idsrc (a pg_catalog.int4 GENERATED BY DEFAULT AS IDENTITY (START WITH 10 INCREMENT BY 5))
+NOTICE:  DDL test: type simple, tag CREATE SEQUENCE
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag ALTER SEQUENCE
+CREATE TABLE deparse_tests.t_like_ident
+  (LIKE deparse_tests.t_like_idsrc INCLUDING IDENTITY);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_like_ident (a pg_catalog.int4 CONSTRAINT t_like_idsrc_a_not_null NOT NULL GENERATED BY DEFAULT AS IDENTITY (CACHE 1 NO CYCLE INCREMENT BY 5 MAXVALUE 2147483647 MINVALUE 1 START WITH 10))
+NOTICE:  DDL test: type simple, tag CREATE SEQUENCE
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag ALTER SEQUENCE
+SELECT seqstart, seqincrement
+  FROM pg_sequence
+  WHERE seqrelid = pg_get_serial_sequence('deparse_tests.t_like_ident', 'a')::regclass;
+ seqstart | seqincrement 
+----------+--------------
+       10 |            5
+(1 row)
+
+-- options that copy an object needing a statement of its own are declined:
+-- the statement is not intercepted and executes normally
+CREATE INDEX ON deparse_tests.t_like_src (a);
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+COMMENT ON COLUMN deparse_tests.t_like_src.a IS 'a comment';
+NOTICE:  DDL test: type simple, tag COMMENT
+CREATE TABLE deparse_tests.t_like_idx
+  (LIKE deparse_tests.t_like_src INCLUDING INDEXES);
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+CREATE TABLE deparse_tests.t_like_cmt
+  (LIKE deparse_tests.t_like_src INCLUDING COMMENTS);
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag COMMENT
+CREATE TABLE deparse_tests.t_like_all
+  (LIKE deparse_tests.t_like_src INCLUDING ALL);
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ALTER COLUMN SET DEFAULT (precooked) desc column d of table deparse_tests.t_like_all
+NOTICE:    subcommand: type ALTER COLUMN SET DEFAULT (precooked) desc column e of table deparse_tests.t_like_all
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+NOTICE:  DDL test: type simple, tag COMMENT
+SELECT relname FROM pg_class WHERE oid = 'deparse_tests.t_like'::regclass;
+ relname 
+---------
+ t_like
+(1 row)
+
+-- DEFAULT NULL stores no pg_attrdef entry but must still deparse
+CREATE TABLE deparse_tests.t_defnull (a int DEFAULT NULL, b text DEFAULT NULL::text);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_defnull (a pg_catalog.int4 DEFAULT NULL, b pg_catalog.text DEFAULT NULL)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+-- identity sequence options that parse analysis consumes are still in the
+-- raw parse tree: SEQUENCE NAME must deparse; OWNED BY is dropped, since
+-- execution overrides it (the sequence is always owned by the identity
+-- column) and the name it carries need not be replayable
+CREATE TABLE deparse_tests.t_seqname (
+id int GENERATED ALWAYS AS IDENTITY
+	(SEQUENCE NAME deparse_tests.t_seqname_seq START WITH 5)
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_seqname (id pg_catalog.int4 GENERATED ALWAYS AS IDENTITY (SEQUENCE NAME deparse_tests.t_seqname_seq START WITH 5))
+NOTICE:  DDL test: type simple, tag CREATE SEQUENCE
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag ALTER SEQUENCE
+SELECT relname FROM pg_class WHERE oid = 'deparse_tests.t_seqname_seq'::regclass;
+    relname    
+---------------
+ t_seqname_seq
+(1 row)
+
+CREATE TABLE deparse_tests.t_ownedby (
+id int GENERATED BY DEFAULT AS IDENTITY
+	(OWNED BY NONE)
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_ownedby (id pg_catalog.int4 GENERATED BY DEFAULT AS IDENTITY)
+NOTICE:  DDL test: type simple, tag CREATE SEQUENCE
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag ALTER SEQUENCE
+CREATE TABLE deparse_tests.t_owner (x int);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_owner (x pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE TABLE deparse_tests.t_ownedby2 (
+id int GENERATED ALWAYS AS IDENTITY
+	(OWNED BY deparse_tests.t_owner.x START WITH 7)
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_ownedby2 (id pg_catalog.int4 GENERATED ALWAYS AS IDENTITY (START WITH 7))
+NOTICE:  DDL test: type simple, tag CREATE SEQUENCE
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag ALTER SEQUENCE
+SELECT pg_get_serial_sequence('deparse_tests.t_ownedby2', 'id');
+     pg_get_serial_sequence      
+---------------------------------
+ deparse_tests.t_ownedby2_id_seq
+(1 row)
+
+-- USING INDEX TABLESPACE must stay attached to the constraint that carried
+-- it, also when several unnamed constraints of the same type exist
+CREATE TABLE deparse_tests.t_idxtblspc (
+a int,
+b int,
+c int,
+UNIQUE (a),
+UNIQUE (b) USING INDEX TABLESPACE pg_default,
+PRIMARY KEY (c)
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_idxtblspc (a pg_catalog.int4, b pg_catalog.int4, c pg_catalog.int4, PRIMARY KEY (c), UNIQUE (a), UNIQUE (b) USING INDEX TABLESPACE pg_default)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+-- UNIQUE constraint variants, all via pg_get_constraintdef
+CREATE TABLE deparse_tests.t_unique (
+a int UNIQUE,
+b int,
+c int,
+d int,
+UNIQUE NULLS NOT DISTINCT (b),
+UNIQUE (c) INCLUDE (d),
+CONSTRAINT defer_u UNIQUE (d) DEFERRABLE INITIALLY DEFERRED
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_unique (a pg_catalog.int4, b pg_catalog.int4, c pg_catalog.int4, d pg_catalog.int4, UNIQUE (a), UNIQUE NULLS NOT DISTINCT (b), UNIQUE (c) INCLUDE (d), CONSTRAINT defer_u UNIQUE (d) DEFERRABLE INITIALLY DEFERRED)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+SELECT conname, pg_get_constraintdef(oid)
+  FROM pg_constraint
+  WHERE conrelid = 'deparse_tests.t_unique'::regclass
+  ORDER BY conname COLLATE "C";
+     conname      |           pg_get_constraintdef           
+------------------+------------------------------------------
+ defer_u          | UNIQUE (d) DEFERRABLE INITIALLY DEFERRED
+ t_unique_a_key   | UNIQUE (a)
+ t_unique_b_key   | UNIQUE NULLS NOT DISTINCT (b)
+ t_unique_c_d_key | UNIQUE (c) INCLUDE (d)
+(4 rows)
+
+-- foreign key matching and referential actions
+CREATE TABLE deparse_tests.t_fkref (a int, b int, PRIMARY KEY (a, b));
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_fkref (a pg_catalog.int4, b pg_catalog.int4, PRIMARY KEY (a, b))
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+CREATE TABLE deparse_tests.t_fk (
+x int,
+y int,
+FOREIGN KEY (x, y) REFERENCES deparse_tests.t_fkref (a, b)
+	MATCH FULL ON DELETE CASCADE ON UPDATE SET NULL
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_fk (x pg_catalog.int4, y pg_catalog.int4, FOREIGN KEY (x, y) REFERENCES deparse_tests.t_fkref(a, b) MATCH FULL ON UPDATE SET NULL ON DELETE CASCADE)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type alter table, tag ALTER TABLE
+NOTICE:    subcommand: type ADD CONSTRAINT (and recurse) desc constraint t_fk_x_y_fkey on table deparse_tests.t_fk
+-- temp tables and ON COMMIT; the temp schema is emitted as pg_temp
+CREATE TEMP TABLE t_temp (a int);
+NOTICE:  deparsed DDL: CREATE TEMPORARY TABLE pg_temp.t_temp (a pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE TEMP TABLE t_temp_delrows (a int) ON COMMIT DELETE ROWS;
+NOTICE:  deparsed DDL: CREATE TEMPORARY TABLE pg_temp.t_temp_delrows (a pg_catalog.int4) ON COMMIT DELETE ROWS
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+BEGIN;
+CREATE TEMP TABLE t_temp_drop (a int) ON COMMIT DROP;
+NOTICE:  deparsed DDL: CREATE TEMPORARY TABLE pg_temp.t_temp_drop (a pg_catalog.int4) ON COMMIT DROP
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+COMMIT;
+DROP TABLE t_temp, t_temp_delrows;
+-- access method and tablespace, only as typed
+CREATE TABLE deparse_tests.t_tblspc (a int) USING heap TABLESPACE pg_default;
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_tblspc (a pg_catalog.int4) USING heap TABLESPACE pg_default
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+-- partitioning: list and hash, key expressions, opclass and collation
+CREATE TABLE deparse_tests.t_list (a text COLLATE "C", b int)
+	PARTITION BY LIST (a COLLATE "POSIX" text_pattern_ops);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_list (a pg_catalog.text COLLATE pg_catalog."C", b pg_catalog.int4) PARTITION BY LIST (a COLLATE "POSIX" text_pattern_ops)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE TABLE deparse_tests.t_list1 PARTITION OF deparse_tests.t_list
+	FOR VALUES IN ('x', 'y');
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_list1 PARTITION OF deparse_tests.t_list FOR VALUES IN ('x', 'y')
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE TABLE deparse_tests.t_list2 PARTITION OF deparse_tests.t_list
+	(b WITH OPTIONS DEFAULT 42)
+	FOR VALUES IN ('z');
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_list2 PARTITION OF deparse_tests.t_list (b WITH OPTIONS DEFAULT 42) FOR VALUES IN ('z')
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE TABLE deparse_tests.t_hash (a int, b text)
+	PARTITION BY HASH ((a + length(b)));
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_hash (a pg_catalog.int4, b pg_catalog.text) PARTITION BY HASH (((a + length(b))))
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE TABLE deparse_tests.t_hash1 PARTITION OF deparse_tests.t_hash
+	FOR VALUES WITH (MODULUS 4, REMAINDER 0);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_hash1 PARTITION OF deparse_tests.t_hash FOR VALUES WITH (modulus 4, remainder 0)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+-- identity sequence option spread
+CREATE TABLE deparse_tests.t_identity2 (
+a int GENERATED ALWAYS AS IDENTITY
+	(MINVALUE 0 MAXVALUE 100 CACHE 10 CYCLE)
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_identity2 (a pg_catalog.int4 GENERATED ALWAYS AS IDENTITY (MINVALUE 0 MAXVALUE 100 CACHE 10 CYCLE))
+NOTICE:  DDL test: type simple, tag CREATE SEQUENCE
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag ALTER SEQUENCE
+-- NO INHERIT forms
+CREATE TABLE deparse_tests.t_noinh (
+a int NOT NULL NO INHERIT,
+b int CONSTRAINT chk_b CHECK (b > 0) NO INHERIT,
+c int,
+CONSTRAINT nn_c NOT NULL c NO INHERIT
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_noinh (a pg_catalog.int4 NOT NULL NO INHERIT, b pg_catalog.int4, c pg_catalog.int4, CONSTRAINT nn_c NOT NULL c NO INHERIT, CONSTRAINT chk_b CHECK ((b > 0)) NO INHERIT)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+-- multiple inheritance parents, in order
+CREATE TABLE deparse_tests.t_parent2 (c int);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_parent2 (c pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE TABLE deparse_tests.t_multi ()
+	INHERITS (deparse_tests.t_parent, deparse_tests.t_parent2);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_multi () INHERITS (deparse_tests.t_parent, deparse_tests.t_parent2)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+-- more type and storage spellings: smallserial, array of typmod type,
+-- STORAGE MAIN, and the COMPRESSION DEFAULT keyword
+CREATE TABLE deparse_tests.t_types2 (
+a smallserial,
+b varchar(3)[],
+c text STORAGE main,
+d text COMPRESSION default
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_types2 (a smallserial, b pg_catalog."varchar"(3)[], c pg_catalog.text STORAGE main, d pg_catalog.text COMPRESSION "default")
+NOTICE:  DDL test: type simple, tag CREATE SEQUENCE
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag ALTER SEQUENCE
+-- hostile names: format-string metacharacters and embedded quotes must
+-- pass through the fmt expansion inertly
+CREATE TABLE deparse_tests."evil %{name}I table" (
+"a""b" int,
+"%{col}s" text DEFAULT 'O''Reilly',
+"100%" numeric
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests."evil %{name}I table" ("a""b" pg_catalog.int4, "%{col}s" pg_catalog.text DEFAULT 'O''Reilly'::text, "100%" pg_catalog."numeric")
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+SELECT relname FROM pg_class WHERE relname = 'evil %{name}I table';
+       relname       
+---------------------
+ evil %{name}I table
+(1 row)
+
+-- parse analysis merges redundant index constraints (the duplicate
+-- UNIQUE (a), and UNIQUE (a) into the primary key); USING INDEX
+-- TABLESPACE attribution must follow the surviving index of each
+-- constraint, not raw-parse-tree positions
+CREATE TABLE deparse_tests.t_dedup (
+a int UNIQUE,
+b int,
+UNIQUE (a),
+UNIQUE (b) USING INDEX TABLESPACE pg_default
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_dedup (a pg_catalog.int4, b pg_catalog.int4, UNIQUE (a), UNIQUE (b) USING INDEX TABLESPACE pg_default)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+CREATE TABLE deparse_tests.t_dedup2 (
+a int,
+b int,
+UNIQUE (a),
+UNIQUE (a),
+UNIQUE (b) USING INDEX TABLESPACE pg_default,
+PRIMARY KEY (a)
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_dedup2 (a pg_catalog.int4, b pg_catalog.int4, PRIMARY KEY (a), UNIQUE (b) USING INDEX TABLESPACE pg_default)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+-- constraint attributes and the exclusion predicate come after USING
+-- INDEX TABLESPACE in the grammar; the deparsed text must order them
+-- accordingly
+CREATE TABLE deparse_tests.t_deferidx (
+a int,
+b int,
+UNIQUE (a) USING INDEX TABLESPACE pg_default DEFERRABLE INITIALLY DEFERRED,
+PRIMARY KEY (b) USING INDEX TABLESPACE pg_default DEFERRABLE
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_deferidx (a pg_catalog.int4, b pg_catalog.int4, PRIMARY KEY (b) USING INDEX TABLESPACE pg_default DEFERRABLE, UNIQUE (a) USING INDEX TABLESPACE pg_default DEFERRABLE INITIALLY DEFERRED)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+CREATE TABLE deparse_tests.t_exclwhere (
+c circle,
+active bool,
+EXCLUDE USING gist (c WITH &&)
+	USING INDEX TABLESPACE pg_default WHERE (active) DEFERRABLE
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_exclwhere (c pg_catalog.circle, active pg_catalog.bool, EXCLUDE USING gist (c WITH &&) USING INDEX TABLESPACE pg_default WHERE (active) DEFERRABLE)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+-- index storage parameters on index-backed constraints, only as typed
+CREATE TABLE deparse_tests.t_idxopts (
+a int,
+b int,
+UNIQUE (a) WITH (fillfactor = 90),
+PRIMARY KEY (b) WITH (fillfactor = 80, deduplicate_items = off)
+	USING INDEX TABLESPACE pg_default DEFERRABLE
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_idxopts (a pg_catalog.int4, b pg_catalog.int4, PRIMARY KEY (b) WITH (fillfactor = '80', deduplicate_items = 'off') USING INDEX TABLESPACE pg_default DEFERRABLE, UNIQUE (a) WITH (fillfactor = '90'))
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+SELECT c.relname, c.reloptions
+  FROM pg_class c
+  WHERE c.relname IN ('t_idxopts_a_key', 't_idxopts_pkey')
+  ORDER BY 1;
+     relname     |              reloptions               
+-----------------+---------------------------------------
+ t_idxopts_a_key | {fillfactor=90}
+ t_idxopts_pkey  | {fillfactor=80,deduplicate_items=off}
+(2 rows)
+
+-- storage parameters of an exclusion constraint are already part of the
+-- pg_get_constraintdef output and must not be emitted twice
+CREATE TABLE deparse_tests.t_exclopts (
+c circle,
+EXCLUDE USING gist (c WITH &&) WITH (fillfactor = 70)
+	USING INDEX TABLESPACE pg_default DEFERRABLE
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_exclopts (c pg_catalog.circle, EXCLUDE USING gist (c WITH &&) WITH (fillfactor='70') USING INDEX TABLESPACE pg_default DEFERRABLE)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+SELECT c.relname, c.reloptions
+  FROM pg_class c
+  JOIN pg_constraint con ON con.conindid = c.oid
+  WHERE con.conrelid = 'deparse_tests.t_exclopts'::regclass;
+      relname      |   reloptions    
+-------------------+-----------------
+ t_exclopts_c_excl | {fillfactor=70}
+(1 row)
+
+-- an exclusion predicate that the (indent-flavored) ruleutils output
+-- renders across multiple lines must still split and replay correctly
+CREATE TABLE deparse_tests.t_exclcase (
+c circle,
+n int,
+EXCLUDE USING gist (c WITH &&)
+	USING INDEX TABLESPACE pg_default
+	WHERE (CASE WHEN n > 0 THEN true ELSE false END)
+	DEFERRABLE
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_exclcase (c pg_catalog.circle, n pg_catalog.int4, EXCLUDE USING gist (c WITH &&) USING INDEX TABLESPACE pg_default WHERE (
+CASE
+    WHEN (n > 0) THEN true
+    ELSE false
+END) DEFERRABLE)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+SELECT pg_get_constraintdef(oid)
+  FROM pg_constraint
+  WHERE conrelid = 'deparse_tests.t_exclcase'::regclass;
+          pg_get_constraintdef          
+----------------------------------------
+ EXCLUDE USING gist (c WITH &&) WHERE (+
+ CASE                                  +
+     WHEN (n > 0) THEN true            +
+     ELSE false                        +
+ END) DEFERRABLE
+(1 row)
+
+-- all optional exclusion-constraint clauses at once: the predicate strip
+-- must operate on a body whose remaining suffix is the embedded WITH
+CREATE TABLE deparse_tests.t_exclall (
+c circle,
+n int,
+x int,
+EXCLUDE USING gist (c WITH &&) INCLUDE (x)
+	WITH (fillfactor = 60)
+	USING INDEX TABLESPACE pg_default
+	WHERE (CASE WHEN n > 0 THEN true ELSE false END)
+	DEFERRABLE INITIALLY DEFERRED
+);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_exclall (c pg_catalog.circle, n pg_catalog.int4, x pg_catalog.int4, EXCLUDE USING gist (c WITH &&) INCLUDE (x) WITH (fillfactor='60') USING INDEX TABLESPACE pg_default WHERE (
+CASE
+    WHEN (n > 0) THEN true
+    ELSE false
+END) DEFERRABLE INITIALLY DEFERRED)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+SELECT pg_get_constraintdef(oid)
+  FROM pg_constraint
+  WHERE conrelid = 'deparse_tests.t_exclall'::regclass;
+                           pg_get_constraintdef                            
+---------------------------------------------------------------------------
+ EXCLUDE USING gist (c WITH &&) INCLUDE (x) WITH (fillfactor='60') WHERE (+
+ CASE                                                                     +
+     WHEN (n > 0) THEN true                                               +
+     ELSE false                                                           +
+ END) DEFERRABLE INITIALLY DEFERRED
+(1 row)
+
+-- printing works whether or not the deparsed version is executed
+SET test_ddl_deparse.execute_deparsed_ddl = off;
+CREATE TABLE deparse_tests.t_printonly (a int);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_printonly (a pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+-- the JSON blob itself can be printed, alone or along with the command
+SET test_ddl_deparse.print_deparsed_ddl = json;
+CREATE TABLE deparse_tests.t_json (id serial);
+NOTICE:  deparsed JSON: {"tag": "CREATE TABLE", "command": {"fmt": "CREATE%{persistence}s TABLE%{if_not_exists}s %{identity}D%{of_type}s%{partition_of}s%{table_elements}s%{inherits}s%{partition_bound}s%{partition_by}s%{access_method}s%{with_clause}s%{on_commit}s%{tablespace}s", "of_type": null, "identity": {"objname": "t_json", "schemaname": "deparse_tests"}, "inherits": null, "on_commit": null, "tablespace": null, "persistence": null, "with_clause": null, "partition_by": null, "partition_of": null, "access_method": null, "if_not_exists": null, "table_elements": {"fmt": " (%{elements:, }s)", "elements": [{"fmt": "%{name}I %{coltype}T%{storage}s%{compression}s%{collation}s%{not_null}s%{default}s%{identity_column}s%{generated_column}s", "name": "id", "type": "column", "coltype": {"typmod": "", "typarray": false, "typename": "serial", "schemaname": ""}, "default": null, "storage": null, "not_null": null, "collation": null, "compression": null, "identity_column": null, "generated_column": null}]}, "partition_bound": null}}
+NOTICE:  DDL test: type simple, tag CREATE SEQUENCE
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+NOTICE:  DDL test: type simple, tag ALTER SEQUENCE
+SET test_ddl_deparse.print_deparsed_ddl = 'both';
+SET test_ddl_deparse.execute_deparsed_ddl = on;
+CREATE TABLE deparse_tests.t_both (a int DEFAULT 42);
+NOTICE:  deparsed JSON: {"tag": "CREATE TABLE", "command": {"fmt": "CREATE%{persistence}s TABLE%{if_not_exists}s %{identity}D%{of_type}s%{partition_of}s%{table_elements}s%{inherits}s%{partition_bound}s%{partition_by}s%{access_method}s%{with_clause}s%{on_commit}s%{tablespace}s", "of_type": null, "identity": {"objname": "t_both", "schemaname": "deparse_tests"}, "inherits": null, "on_commit": null, "tablespace": null, "persistence": null, "with_clause": null, "partition_by": null, "partition_of": null, "access_method": null, "if_not_exists": null, "table_elements": {"fmt": " (%{elements:, }s)", "elements": [{"fmt": "%{name}I %{coltype}T%{storage}s%{compression}s%{collation}s%{not_null}s%{default}s%{identity_column}s%{generated_column}s", "name": "a", "type": "column", "coltype": {"typmod": "", "typarray": false, "typename": "int4", "schemaname": "pg_catalog"}, "default": {"fmt": " DEFAULT %{default_expr}s", "default_expr": "42"}, "storage": null, "not_null": null, "collation": null, "compression": null, "identity_column": null, "generated_column": null}]}, "partition_bound": null}}
+NOTICE:  deparsed DDL: CREATE TABLE deparse_tests.t_both (a pg_catalog.int4 DEFAULT 42)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+RESET test_ddl_deparse.print_deparsed_ddl;
+RESET test_ddl_deparse.execute_deparsed_ddl;
+DROP SCHEMA deparse_tests CASCADE;
+NOTICE:  drop cascades to 58 other objects
+DETAIL:  drop cascades to table deparse_tests.t1
+drop cascades to table deparse_tests.t_serial
+drop cascades to table deparse_tests.t_options
+drop cascades to table deparse_tests.t_constr
+drop cascades to table deparse_tests.t_tblnotnull
+drop cascades to table deparse_tests.t_types
+drop cascades to table deparse_tests.t_identity
+drop cascades to table deparse_tests.t_generated
+drop cascades to sequence deparse_tests.myseq
+drop cascades to table deparse_tests.t_defaults
+drop cascades to table deparse_tests.t_collate
+drop cascades to table deparse_tests.t_unlogged
+drop cascades to table deparse_tests.t_withopts
+drop cascades to table deparse_tests.t_parent
+drop cascades to table deparse_tests.t_child
+drop cascades to table deparse_tests.t_part
+drop cascades to type deparse_tests.comp
+drop cascades to table deparse_tests.t_of
+drop cascades to table deparse_tests.t_excl
+drop cascades to table deparse_tests."Mixed Case"
+drop cascades to table deparse_tests.t_like_src
+drop cascades to table deparse_tests.t_like
+drop cascades to table deparse_tests.t_like_mixed
+drop cascades to table deparse_tests.t_like_incl
+drop cascades to table deparse_tests.t_like_idsrc
+drop cascades to table deparse_tests.t_like_ident
+drop cascades to table deparse_tests.t_like_idx
+drop cascades to table deparse_tests.t_like_cmt
+drop cascades to table deparse_tests.t_like_all
+drop cascades to table deparse_tests.t_defnull
+drop cascades to table deparse_tests.t_seqname
+drop cascades to table deparse_tests.t_ownedby
+drop cascades to table deparse_tests.t_owner
+drop cascades to table deparse_tests.t_ownedby2
+drop cascades to table deparse_tests.t_idxtblspc
+drop cascades to table deparse_tests.t_unique
+drop cascades to table deparse_tests.t_fkref
+drop cascades to table deparse_tests.t_fk
+drop cascades to table deparse_tests.t_tblspc
+drop cascades to table deparse_tests.t_list
+drop cascades to table deparse_tests.t_hash
+drop cascades to table deparse_tests.t_identity2
+drop cascades to table deparse_tests.t_noinh
+drop cascades to table deparse_tests.t_parent2
+drop cascades to table deparse_tests.t_multi
+drop cascades to table deparse_tests.t_types2
+drop cascades to table deparse_tests."evil %{name}I table"
+drop cascades to table deparse_tests.t_dedup
+drop cascades to table deparse_tests.t_dedup2
+drop cascades to table deparse_tests.t_deferidx
+drop cascades to table deparse_tests.t_exclwhere
+drop cascades to table deparse_tests.t_idxopts
+drop cascades to table deparse_tests.t_exclopts
+drop cascades to table deparse_tests.t_exclcase
+drop cascades to table deparse_tests.t_exclall
+drop cascades to table deparse_tests.t_printonly
+drop cascades to table deparse_tests.t_json
+drop cascades to table deparse_tests.t_both
