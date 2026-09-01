@@ -40,16 +40,19 @@
 #include "foreign/fdwapi.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
+#include "nodes/makefuncs.h"
 #include "nodes/miscnodes.h"
 #include "optimizer/optimizer.h"
 #include "pgstat.h"
 #include "rewrite/rewriteHandler.h"
 #include "storage/fd.h"
 #include "tcop/tcopprot.h"
+#include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/portal.h"
 #include "utils/rel.h"
+#include "utils/rls.h"
 #include "utils/snapmgr.h"
 #include "utils/typcache.h"
 
@@ -783,7 +786,7 @@ CopyFrom(CopyFromState cstate)
 	ResultRelInfo *resultRelInfo;
 	ResultRelInfo *target_resultRelInfo;
 	ResultRelInfo *prevResultRelInfo = NULL;
-	EState	   *estate = CreateExecutorState(); /* for ExecConstraints() */
+	EState	   *estate;
 	ModifyTableState *mtstate;
 	ExprContext *econtext;
 	TupleTableSlot *singleslot = NULL;
@@ -801,6 +804,7 @@ CopyFrom(CopyFromState cstate)
 	bool		has_before_insert_row_trig;
 	bool		has_instead_insert_row_trig;
 	bool		leafpart_use_multi_insert = false;
+	QueryDesc  *queryDesc = NULL;
 
 	Assert(cstate->rel);
 	Assert(list_length(cstate->range_table) == 1);
@@ -910,32 +914,120 @@ CopyFrom(CopyFromState cstate)
 		ti_options |= TABLE_INSERT_FROZEN;
 	}
 
-	/*
-	 * We need a ResultRelInfo so we can use the regular executor's
-	 * index-entry-making machinery.  (There used to be a huge amount of code
-	 * here that basically duplicated execUtils.c ...)
-	 */
-	ExecInitRangeTable(estate, cstate->range_table, cstate->rteperminfos,
-					   bms_make_singleton(1));
-	resultRelInfo = target_resultRelInfo = makeNode(ResultRelInfo);
-	ExecInitResultRelation(estate, resultRelInfo, 1);
+	if (check_enable_rls(RelationGetRelid(cstate->rel), InvalidOid, false) == RLS_ENABLED)
+	{
+		Query	   *query;
+		RawStmt    *raw_query;
+		char	   *query_string;
+		PlannedStmt *plan;
+		RangeVar   *from;
+		InsertStmt *insertstmt;
+		List	   *rewritten;
+		char	   *namespace;
 
-	/* Verify the named relation is a valid target for INSERT */
-	CheckValidResultRel(resultRelInfo, CMD_INSERT, ONCONFLICT_NONE, NIL, NULL);
+		namespace = get_namespace_name(RelationGetNamespace(cstate->rel));
 
+		from = makeRangeVar(namespace,
+							pstrdup(RelationGetRelationName(cstate->rel)),
+							-1);
+		from->inh = false;
+
+		insertstmt = makeNode(InsertStmt);
+		insertstmt->relation = from;
+
+		raw_query = makeNode(RawStmt);
+		raw_query->stmt = (Node *) insertstmt;
+		raw_query->stmt_location = -1;
+		raw_query->stmt_len = 0;
+
+		query_string = psprintf("INSERT INTO %s DEFAULT VALUES",
+								quote_qualified_identifier(namespace,
+														   RelationGetRelationName(cstate->rel)));
+
+		/*
+		 * Run parse analysis and rewrite.  RLS is applied during query
+		 * rewrite, so it cannot be skipped here.  Note this also acquires
+		 * sufficient locks on the table(s) involved.
+		 */
+		rewritten = pg_analyze_and_rewrite_fixedparams(raw_query,
+													   query_string,
+													   NULL,
+													   0,
+													   NULL);
+		if (rewritten == NIL)
+			ereport(ERROR,
+					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("DO INSTEAD NOTHING rules are not supported for COPY FROM with row-level security"));
+		else if (list_length(rewritten) > 1)
+			ereport(ERROR,
+					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("rules with additional commands are not supported for COPY FROM with row-level security"));
+
+		query = linitial_node(Query, rewritten);
+
+		if (query->querySource != QSRC_ORIGINAL)
+			ereport(ERROR,
+					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("DO INSTEAD rules are not supported for COPY FROM with row-level security"));
+
+		/* plan the query */
+		plan = pg_plan_query(query, query_string, 0, NULL, NULL);
+
+		/* Create a QueryDesc requesting no output */
+		queryDesc = CreateQueryDesc(plan,
+									query_string,
+									GetActiveSnapshot(),
+									InvalidSnapshot,
+									None_Receiver,
+									NULL,
+									NULL,
+									0);
+
+		/*
+		 * Call ExecutorStart to build the executor state; the plan is never
+		 * run, as COPY supplies the rows itself.  This initializes the
+		 * ResultRelInfo, including the ri_WithCheckOptions needed by
+		 * ExecWithCheckOptions() to check RLS policies against copied rows.
+		 */
+		ExecutorStart(queryDesc, 0);
+
+		estate = queryDesc->estate;
+		mtstate = (ModifyTableState *) queryDesc->planstate;
+		resultRelInfo = target_resultRelInfo = mtstate->resultRelInfo;
+	}
+	else
+	{
+		estate = CreateExecutorState(); /* for ExecConstraints() */
+
+		/* Prepare to catch AFTER triggers. */
+		AfterTriggerBeginQuery();
+
+		/*
+		 * We need a ResultRelInfo so we can use the regular executor's
+		 * index-entry-making machinery.  (There used to be a huge amount of
+		 * code here that basically duplicated execUtils.c ...)
+		 */
+		ExecInitRangeTable(estate, cstate->range_table, cstate->rteperminfos,
+						   bms_make_singleton(1));
+		resultRelInfo = target_resultRelInfo = makeNode(ResultRelInfo);
+		ExecInitResultRelation(estate, resultRelInfo, 1);
+
+		/* Verify the named relation is a valid target for INSERT */
+		CheckValidResultRel(resultRelInfo, CMD_INSERT, ONCONFLICT_NONE, NIL, NULL);
+
+		/*
+		 * Set up a ModifyTableState so we can let FDW(s) init themselves for
+		 * foreign-table result relation(s).
+		 */
+		mtstate = makeNode(ModifyTableState);
+		mtstate->ps.plan = NULL;
+		mtstate->ps.state = estate;
+		mtstate->operation = CMD_INSERT;
+		mtstate->mt_nrels = 1;
+		mtstate->resultRelInfo = resultRelInfo;
+		mtstate->rootResultRelInfo = resultRelInfo;
+	}
 	ExecOpenIndices(resultRelInfo, false);
-
-	/*
-	 * Set up a ModifyTableState so we can let FDW(s) init themselves for
-	 * foreign-table result relation(s).
-	 */
-	mtstate = makeNode(ModifyTableState);
-	mtstate->ps.plan = NULL;
-	mtstate->ps.state = estate;
-	mtstate->operation = CMD_INSERT;
-	mtstate->mt_nrels = 1;
-	mtstate->resultRelInfo = resultRelInfo;
-	mtstate->rootResultRelInfo = resultRelInfo;
 
 	if (resultRelInfo->ri_FdwRoutine != NULL &&
 		resultRelInfo->ri_FdwRoutine->BeginForeignInsert != NULL)
@@ -959,8 +1051,7 @@ CopyFrom(CopyFromState cstate)
 
 	Assert(resultRelInfo->ri_BatchSize >= 1);
 
-	/* Prepare to catch AFTER triggers. */
-	AfterTriggerBeginQuery();
+	proute = mtstate->mt_partition_tuple_routing;
 
 	/*
 	 * If there are any triggers with transition tables on the named relation,
@@ -970,16 +1061,20 @@ CopyFrom(CopyFromState cstate)
 	 * transition capture is active, we also set it in mtstate, which is
 	 * passed to ExecFindPartition() below.
 	 */
-	cstate->transition_capture = mtstate->mt_transition_capture =
-		MakeTransitionCaptureState(cstate->rel->trigdesc,
-								   RelationGetRelid(cstate->rel),
-								   CMD_INSERT);
+	if (mtstate->mt_transition_capture == NULL)
+		cstate->transition_capture = mtstate->mt_transition_capture =
+			MakeTransitionCaptureState(cstate->rel->trigdesc,
+									   RelationGetRelid(cstate->rel),
+									   CMD_INSERT);
+	else
+		cstate->transition_capture = mtstate->mt_transition_capture;
 
 	/*
 	 * If the named relation is a partitioned table, initialize state for
 	 * CopyFrom tuple routing.
 	 */
-	if (cstate->rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+	if (cstate->rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE &&
+		proute == NULL)
 		proute = ExecSetupPartitionTupleRouting(estate, cstate->rel);
 
 	if (cstate->whereClause)
@@ -1352,6 +1447,20 @@ CopyFrom(CopyFromState cstate)
 											   CMD_INSERT);
 
 				/*
+				 * We suppress error context information other than the
+				 * relation name, if row level security policy check fails.
+				 */
+				Assert(!cstate->relname_only);
+				cstate->relname_only = true;
+
+				if (resultRelInfo->ri_WithCheckOptions != NIL)
+					ExecWithCheckOptions(WCO_RLS_INSERT_CHECK, resultRelInfo,
+										 myslot, estate);
+
+				/* reset relname_only */
+				cstate->relname_only = false;
+
+				/*
 				 * If the target is a plain table, check the constraints of
 				 * the tuple.
 				 */
@@ -1490,30 +1599,42 @@ CopyFrom(CopyFromState cstate)
 	/* Execute AFTER STATEMENT insertion triggers */
 	ExecASInsertTriggers(estate, target_resultRelInfo, cstate->transition_capture);
 
-	/* Handle queued AFTER triggers */
-	AfterTriggerEndQuery(estate);
-
-	ExecResetTupleTable(estate->es_tupleTable, false);
-
-	/* Allow the FDW to shut down */
-	if (target_resultRelInfo->ri_FdwRoutine != NULL &&
-		target_resultRelInfo->ri_FdwRoutine->EndForeignInsert != NULL)
-		target_resultRelInfo->ri_FdwRoutine->EndForeignInsert(estate,
-															  target_resultRelInfo);
-
 	/* Tear down the multi-insert buffer data */
 	if (insertMethod != CIM_SINGLE)
 		CopyMultiInsertInfoCleanup(&multiInsertInfo);
 
-	/* Close all the partitioned tables, leaf partitions, and their indices */
-	if (proute)
-		ExecCleanupTupleRouting(mtstate, proute);
+	if (queryDesc == NULL)
+	{
+		/* Handle queued AFTER triggers */
+		AfterTriggerEndQuery(estate);
 
-	/* Close the result relations, including any trigger target relations */
-	ExecCloseResultRelations(estate);
-	ExecCloseRangeTableRelations(estate);
+		ExecResetTupleTable(estate->es_tupleTable, false);
 
-	FreeExecutorState(estate);
+		/* Allow the FDW to shut down */
+		if (target_resultRelInfo->ri_FdwRoutine != NULL &&
+			target_resultRelInfo->ri_FdwRoutine->EndForeignInsert != NULL)
+			target_resultRelInfo->ri_FdwRoutine->EndForeignInsert(estate,
+																  target_resultRelInfo);
+
+		/*
+		 * Close all the partitioned tables, leaf partitions, and their
+		 * indices
+		 */
+		if (proute)
+			ExecCleanupTupleRouting(mtstate, proute);
+
+		/* Close the result relations, including any trigger target relations */
+		ExecCloseResultRelations(estate);
+		ExecCloseRangeTableRelations(estate);
+
+		FreeExecutorState(estate);
+	}
+	else
+	{
+		ExecutorFinish(queryDesc);
+		ExecutorEnd(queryDesc);
+		FreeQueryDesc(queryDesc);
+	}
 
 	return processed;
 }
