@@ -627,6 +627,7 @@ ResolveRecoveryConflictWithLock(LOCKTAG locktag, bool logging_conflict)
 {
 	TimestampTz ltime;
 	TimestampTz now;
+	bool		timeouts_armed = false;
 
 	Assert(InHotStandby);
 
@@ -697,61 +698,80 @@ ResolveRecoveryConflictWithLock(LOCKTAG locktag, bool logging_conflict)
 		cnt++;
 
 		enable_timeouts(timeouts, cnt);
+		timeouts_armed = true;
 	}
-
-	/* Wait to be signaled by the release of the Relation Lock */
-	ProcWaitForSignal(PG_WAIT_LOCK | locktag.locktag_type);
 
 	/*
-	 * Exit if ltime is reached. Then all the backends holding conflicting
-	 * locks will be canceled in the next ResolveRecoveryConflictWithLock()
-	 * call.
+	 * ProcWaitForSignal() can wake up even when the lock wait has not ended
+	 * and neither timeout has expired.  Keep waiting with the same timeouts
+	 * in that case.  Returning to the caller would restart the deadlock
+	 * timeout with a later deadline, which could keep it from ever expiring.
+	 *
+	 * If the standby delay limit was already reached above, no timeouts were
+	 * set.  Return after any wakeup so the caller can try resolving the
+	 * conflict again.
 	 */
-	if (got_standby_lock_timeout)
-		goto cleanup;
-
-	if (got_standby_deadlock_timeout)
+	for (;;)
 	{
-		VirtualTransactionId *backends;
-
-		backends = GetLockConflicts(&locktag, AccessExclusiveLock, NULL);
-
-		/* Quick exit if there's no work to be done */
-		if (!VirtualTransactionIdIsValid(*backends))
-			goto cleanup;
-
-		/*
-		 * Send signals to all the backends holding the conflicting locks, to
-		 * ask them to check themselves for deadlocks.
-		 */
-		while (VirtualTransactionIdIsValid(*backends))
-		{
-			(void) SignalRecoveryConflictWithVirtualXID(*backends,
-														RECOVERY_CONFLICT_STARTUP_DEADLOCK);
-			backends++;
-		}
-
-		/*
-		 * Exit if the recovery conflict has not been logged yet even though
-		 * logging is enabled, so that the caller can log that. Then
-		 * RecoveryConflictWithLock() is called again and we will wait again
-		 * for the lock to be released.
-		 */
-		if (logging_conflict)
-			goto cleanup;
-
-		/*
-		 * Wait again here to be signaled by the release of the Relation Lock,
-		 * to prevent the subsequent RecoveryConflictWithLock() from causing
-		 * deadlock_timeout and sending a request for deadlocks check again.
-		 * Otherwise the request continues to be sent every deadlock_timeout
-		 * until the relation locks are released or ltime is reached.
-		 */
-		got_standby_deadlock_timeout = false;
 		ProcWaitForSignal(PG_WAIT_LOCK | locktag.locktag_type);
-	}
 
-cleanup:
+		if (!timeouts_armed)
+			break;
+
+		if (*((volatile ProcWaitStatus *) &MyProc->waitStatus) != PROC_WAIT_STATUS_WAITING)
+			break;
+
+		/*
+		 * Exit if ltime is reached. Then all the backends holding conflicting
+		 * locks will be canceled in the next
+		 * ResolveRecoveryConflictWithLock() call.
+		 */
+		if (got_standby_lock_timeout)
+			break;
+
+		if (got_standby_deadlock_timeout)
+		{
+			VirtualTransactionId *backends;
+
+			backends = GetLockConflicts(&locktag, AccessExclusiveLock, NULL);
+
+			/* Quick exit if there's no work to be done */
+			if (!VirtualTransactionIdIsValid(*backends))
+				break;
+
+			/*
+			 * Send signals to all the backends holding the conflicting locks,
+			 * to ask them to check themselves for deadlocks.
+			 */
+			while (VirtualTransactionIdIsValid(*backends))
+			{
+				(void) SignalRecoveryConflictWithVirtualXID(*backends,
+															RECOVERY_CONFLICT_STARTUP_DEADLOCK);
+				backends++;
+			}
+
+			/*
+			 * Exit if the recovery conflict has not been logged yet even
+			 * though logging is enabled, so that the caller can log that.
+			 * Then RecoveryConflictWithLock() is called again and we will
+			 * wait again for the lock to be released.
+			 */
+			if (logging_conflict)
+				break;
+
+			/*
+			 * Wait again here to be signaled by the release of the Relation
+			 * Lock, to prevent the subsequent RecoveryConflictWithLock() from
+			 * causing deadlock_timeout and sending a request for deadlocks
+			 * check again. Otherwise the request continues to be sent every
+			 * deadlock_timeout until the relation locks are released or ltime
+			 * is reached.
+			 */
+			got_standby_deadlock_timeout = false;
+			ProcWaitForSignal(PG_WAIT_LOCK | locktag.locktag_type);
+			break;
+		}
+	}
 
 	/*
 	 * Clear any timeout requests established above.  We assume here that the
@@ -790,17 +810,25 @@ cleanup:
  * Deadlocks are extremely rare, and relatively expensive to check for,
  * so we don't do a deadlock check right away ... only if we have had to wait
  * at least deadlock_timeout.
+ *
+ * The current process should be the waiter process and should have
+ * published the waited buffer via SetStartupBufferPinWaitBuf().
  */
 void
 ResolveRecoveryConflictWithBufferPin(void)
 {
 	TimestampTz ltime;
+	Buffer		buffer;
+	bool		timeouts_armed = false;
 
 	Assert(InHotStandby);
 
+	buffer = GetStartupBufferPinWaitBuf();
+	Assert(BufferIsValid(buffer));
+
 	ltime = GetStandbyLimitTime();
 
-	if (GetCurrentTimestamp() >= ltime && ltime != 0)
+	if (ltime != 0 && GetCurrentTimestamp() >= ltime)
 	{
 		/*
 		 * We're already behind, so clear a path as quickly as possible.
@@ -831,37 +859,51 @@ ResolveRecoveryConflictWithBufferPin(void)
 		cnt++;
 
 		enable_timeouts(timeouts, cnt);
+		timeouts_armed = true;
 	}
 
 	/*
-	 * Wait to be signaled by UnpinBuffer() or for the wait to be interrupted
-	 * by one of the timeouts established above.
-	 *
-	 * We assume that only UnpinBuffer() and the timeout requests established
-	 * above can wake us up here. WakeupRecovery() called by walreceiver or
-	 * SIGHUP signal handler, etc cannot do that because it uses the different
-	 * latch from that ProcWaitForSignal() waits on.
+	 * ProcWaitForSignal() can wake up for unrelated reasons.  If timeouts
+	 * were set, keep waiting with the same deadlines until a timeout expires
+	 * or only our own pin remains.  The helper also makes sure we are
+	 * registered for another unpin notification before waiting again.  If the
+	 * delay limit had already passed, return after any wakeup so the caller
+	 * can retry.
 	 */
-	ProcWaitForSignal(WAIT_EVENT_BUFFER_CLEANUP);
-
-	if (got_standby_delay_timeout)
-		SendRecoveryConflictWithBufferPin(RECOVERY_CONFLICT_BUFFERPIN);
-	else if (got_standby_deadlock_timeout)
+	for (;;)
 	{
-		/*
-		 * Send out a request for hot-standby backends to check themselves for
-		 * deadlocks.
-		 *
-		 * XXX The subsequent ResolveRecoveryConflictWithBufferPin() will wait
-		 * to be signaled by UnpinBuffer() again and send a request for
-		 * deadlocks check if deadlock_timeout happens. This causes the
-		 * request to continue to be sent every deadlock_timeout until the
-		 * buffer is unpinned or ltime is reached. This would increase the
-		 * workload in the startup process and backends. In practice it may
-		 * not be so harmful because the period that the buffer is kept pinned
-		 * is basically no so long. But we should fix this?
-		 */
-		SendRecoveryConflictWithBufferPin(RECOVERY_CONFLICT_BUFFERPIN_DEADLOCK);
+		ProcWaitForSignal(WAIT_EVENT_BUFFER_CLEANUP);
+
+		if (!timeouts_armed)
+			break;
+
+		if (PinCountWaiterCheckReadyForCleanup(buffer))
+			break;
+
+		/* Request cancellation if the delay timeout has expired. */
+		if (got_standby_delay_timeout)
+		{
+			SendRecoveryConflictWithBufferPin(RECOVERY_CONFLICT_BUFFERPIN);
+			break;
+		}
+		else if (got_standby_deadlock_timeout)
+		{
+			/*
+			 * Send out a request for hot-standby backends to check themselves
+			 * for deadlocks.
+			 *
+			 * XXX The subsequent ResolveRecoveryConflictWithBufferPin() will
+			 * wait to be signaled by UnpinBuffer() again and send a request
+			 * for deadlocks check if deadlock_timeout happens. This causes
+			 * the request to continue to be sent every deadlock_timeout until
+			 * the buffer is unpinned or ltime is reached. This would increase
+			 * the workload in the startup process and backends. In practice
+			 * it may not be so harmful because the period that the buffer is
+			 * kept pinned is basically no so long. But we should fix this?
+			 */
+			SendRecoveryConflictWithBufferPin(RECOVERY_CONFLICT_BUFFERPIN_DEADLOCK);
+			break;
+		}
 	}
 
 	/*
