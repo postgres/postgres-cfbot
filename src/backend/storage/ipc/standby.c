@@ -699,6 +699,7 @@ ResolveRecoveryConflictWithLock(LOCKTAG locktag, bool logging_conflict)
 
 		enable_timeouts(timeouts, cnt);
 		timeouts_armed = true;
+		INJECTION_POINT("standby-conflict-timeouts-armed", "lock");
 	}
 
 	/*
@@ -860,6 +861,7 @@ ResolveRecoveryConflictWithBufferPin(void)
 
 		enable_timeouts(timeouts, cnt);
 		timeouts_armed = true;
+		INJECTION_POINT("standby-conflict-timeouts-armed", "bufferpin");
 	}
 
 	/*
