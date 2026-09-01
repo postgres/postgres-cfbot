@@ -274,6 +274,7 @@ static bool get_actual_variable_endpoint(Relation heapRel,
 static RelOptInfo *find_join_input_rel(PlannerInfo *root, Relids relids);
 static double btcost_correlation(IndexOptInfo *index,
 								 VariableStatData *vardata);
+static bool strip_all_adjacency_relabeltypes_walker(Node *node, void *context);
 
 /* Define support routines for MCV hash tables */
 #define SH_PREFIX				MCVHashTable
@@ -5673,12 +5674,14 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 	basenode = strip_all_phvs_deep(root, node);
 
 	/*
-	 * Look inside any binary-compatible relabeling.  We need to handle nested
-	 * RelabelType nodes here, because the prior stripping of PlaceHolderVars
-	 * may have brought separate RelabelTypes into adjacency.
-	 */
-	while (IsA(basenode, RelabelType))
-		basenode = (Node *) ((RelabelType *) basenode)->arg;
+	* eval_const_expressions() should already have stripped adjacent
+	* RelabelTypes. However, stripping PlaceHolderVars above may have
+	* brought previously separated RelabelTypes into adjacency, either
+	* at the top level or within a deeper subtree. Normalize the expression
+	* before calling equal() so that structurally equivalent expressions
+	* can be matched, as in eval_const_expressions().
+	*/
+	strip_all_adjacency_relabeltypes_walker(basenode, NULL);
 
 	/* Fast path for a simple Var */
 	if (IsA(basenode, Var) &&
@@ -5799,9 +5802,7 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 					if (indexpr_item == NULL)
 						elog(ERROR, "too few entries in indexprs list");
 					indexkey = (Node *) lfirst(indexpr_item);
-					if (indexkey && IsA(indexkey, RelabelType))
-						indexkey = (Node *) ((RelabelType *) indexkey)->arg;
-					if (equal(node, indexkey))
+					if (equal(basenode, indexkey))
 					{
 						/*
 						 * Found a match ... is it a unique index? Tests here
@@ -5925,12 +5926,8 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 
 				Assert(expr);
 
-				/* strip RelabelType before comparing it */
-				if (expr && IsA(expr, RelabelType))
-					expr = (Node *) ((RelabelType *) expr)->arg;
-
 				/* found a match, see if we can extract pg_statistic row */
-				if (equal(node, expr))
+				if (equal(basenode, expr))
 				{
 					/*
 					 * XXX Not sure if we should cache the tuple somewhere.
@@ -9340,4 +9337,57 @@ brincostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 		statsData.pagesPerRange;
 
 	*indexPages = index->pages;
+}
+
+/*
+ * strip_all_adjacency_relabeltypes_walker
+ *		Walker to deeply strip all adjacent RelabelTypes.
+ *
+ * If node is RelabelType, the behavior is almost like applyRelabelType().
+ */
+static bool
+strip_all_adjacency_relabeltypes_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, RelabelType))
+	{
+		RelabelType 	*relabel = (RelabelType *) node;
+		Node			*arg = (Node *) relabel->arg;
+
+		/* If we find stacked RelabelTypes (eg, from foo::int::oid) we can discard
+		 * all but the top one, and must do so to ensure that semantically
+		 * equivalent expressions are equal().
+		 */
+		while (arg && IsA(arg, RelabelType))
+			arg = (Node *) ((RelabelType *) arg)->arg;
+
+		relabel->arg = (Expr *) arg;
+
+		if (arg == NULL)
+			return false;
+
+		if (IsA(arg, Const))
+		{
+			/* Modify the Const directly to preserve const-flatness. */
+			Const	   *con = (Const *) arg;
+
+			con->consttype = relabel->resulttype;
+			con->consttypmod = relabel->resulttypmod;
+			con->constcollid = relabel->resultcollid;
+			/* We keep the Const's original location. */
+			node = arg;
+
+			return false;
+		}
+		else if (exprType(arg) == relabel->resulttype &&
+			exprTypmod(arg) == relabel->resulttypmod &&
+			exprCollation(arg) == relabel->resultcollid)
+		{
+			node = arg;
+		}
+	}
+
+	return expression_tree_walker(node, strip_all_adjacency_relabeltypes_walker, context);
 }
