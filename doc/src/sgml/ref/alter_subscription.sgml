@@ -28,6 +28,7 @@ ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> ADD PUBLICA
 ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> DROP PUBLICATION <replaceable class="parameter">publication_name</replaceable> [, ...] [ WITH ( <replaceable class="parameter">publication_option</replaceable> [= <replaceable class="parameter">value</replaceable>] [, ... ] ) ]
 ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> REFRESH PUBLICATION [ WITH ( <replaceable class="parameter">refresh_option</replaceable> [= <replaceable class="parameter">value</replaceable>] [, ... ] ) ]
 ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> REFRESH SEQUENCES
+ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> REFRESH TABLE <replaceable class="parameter">table_name</replaceable> [, ...]
 ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> ENABLE
 ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> DISABLE
 ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> SET ( <replaceable class="parameter">subscription_parameter</replaceable> [= <replaceable class="parameter">value</replaceable>] [, ... ] )
@@ -69,6 +70,7 @@ ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> RENAME TO <
 
   <para>
    Commands <command>ALTER SUBSCRIPTION ... REFRESH PUBLICATION</command>,
+   <command>ALTER SUBSCRIPTION ... REFRESH TABLE</command>,
    <command>ALTER SUBSCRIPTION ... {SET|ADD|DROP} PUBLICATION ...</command>
    with <literal>refresh</literal> option as <literal>true</literal>,
    <command>ALTER SUBSCRIPTION ... SET (failover = true|false)</command> and
@@ -260,6 +262,76 @@ ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> RENAME TO <
       See <xref linkend="sequences-out-of-sync"/> for recommendations on how to
       identify and handle out-of-sync sequences.
      </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="sql-altersubscription-params-refresh-table">
+    <term><literal>REFRESH TABLE</literal></term>
+    <listitem>
+     <para>
+      Re-synchronize the named tables with the publisher.  Unlike
+      <link linkend="sql-altersubscription-params-refresh-publication">
+      <command>ALTER SUBSCRIPTION ... REFRESH PUBLICATION</command></link>,
+      which only starts copying tables that are new to the subscription, this
+      re-copies tables that are already subscribed and have finished their
+      initial synchronization.  Each named table is truncated on the
+      subscriber and marked for initial synchronization again, so that a table
+      synchronization worker copies it afresh once the subscription is
+      enabled.  Which tables are subscribed is not changed.
+     </para>
+     <para>
+      This is intended for repairing a table whose contents have diverged from
+      the publisher, and it replaces the alternative of dropping and
+      recreating the whole subscription, which would re-copy every table and
+      lose the progress of the others.  Other subscribers of the same
+      publication are unaffected.
+     </para>
+     <para>
+      All of the named tables are truncated in a single command, so a set of
+      tables connected by foreign keys can be re-seeded together.  The tables
+      must already be part of the subscription, and the command fails without
+      changing anything if any of them is not.  The user must have the
+      <literal>TRUNCATE</literal> privilege on each named table.
+     </para>
+     <para>
+      The subscription must be disabled, and its apply worker must have
+      stopped, before this command can be used.  The command is also not
+      allowed when the subscription has
+      <link linkend="sql-createsubscription-params-with-two-phase"><literal>two_phase</literal></link>
+      commit enabled, because the tables are copied again.
+     </para>
+     <para>
+      Only tables that the subscription actually tracks, as listed in
+      <link linkend="catalog-pg-subscription-rel"><structname>pg_subscription_rel</structname></link>,
+      can be named.  For a partitioned table this depends on the publication:
+      with
+      <link linkend="sql-createpublication-params-with-publish-via-partition-root"><literal>publish_via_partition_root</literal></link>,
+      the partitioned table itself is tracked and refreshing it re-copies the
+      whole hierarchy; otherwise the individual partitions are tracked and
+      those are what can be refreshed.  Refreshing one partition leaves the
+      others untouched.
+     </para>
+     <para>
+      Tables in an inheritance hierarchy are refreshed individually.
+      Refreshing a parent discards only the parent's own rows, never those of
+      its inheritance children, since a child is a separate relation which may
+      be subscribed in its own right or may hold data that is not replicated
+      at all.  Name the children as well to refresh them too.
+     </para>
+     <para>
+      A table that another subscription also populates cannot be refreshed.
+      Discarding it would throw away the rows maintained by that subscription,
+      which would not copy them again, so the command reports an error instead.
+      This includes the case where the other subscription publishes a
+      partitioned ancestor of the table and routes rows into it.
+     </para>
+     <warning>
+      <para>
+       This command discards the local copy of the named tables.  Any data
+       present only on the subscriber, and any changes not yet replicated back
+       to the publisher, are lost.
+      </para>
+     </warning>
     </listitem>
    </varlistentry>
 
