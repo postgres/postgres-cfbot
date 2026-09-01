@@ -121,6 +121,13 @@
 #define APPEND_CPU_COST_MULTIPLIER 0.5
 
 /*
+ * Extra cpu_tuple_cost charged per input tuple for each doubling of a hash
+ * table beyond effective_cpu_cache_size, covering the probes that miss CPU
+ * cache.
+ */
+#define HASH_RESIDENCY_PENALTY	4.0
+
+/*
  * Maximum value for row estimates.  We cap row estimates to this to help
  * ensure that costs based on these estimates remain within the range of what
  * double can represent.  add_path() wouldn't act sanely given infinite or NaN
@@ -138,6 +145,7 @@ double		parallel_setup_cost = DEFAULT_PARALLEL_SETUP_COST;
 double		recursive_worktable_factor = DEFAULT_RECURSIVE_WORKTABLE_FACTOR;
 
 int			effective_cache_size = DEFAULT_EFFECTIVE_CACHE_SIZE;
+int			effective_cpu_cache_size = DEFAULT_EFFECTIVE_CPU_CACHE_SIZE;
 
 Cost		disable_cost = 1.0e10;
 
@@ -2806,6 +2814,7 @@ cost_agg(Path *path, PlannerInfo *root,
 	double		output_tuples;
 	Cost		startup_cost;
 	Cost		total_cost;
+	Cost		hash_entry_cost;
 	const AggClauseCosts dummy_aggcosts = {0};
 
 	/* Use all-zero per-aggregate costs if NULL is passed */
@@ -2813,6 +2822,36 @@ cost_agg(Path *path, PlannerInfo *root,
 	{
 		Assert(aggstrategy == AGG_HASHED);
 		aggcosts = &dummy_aggcosts;
+	}
+
+	/* Only the hashed strategies probe a hash table. */
+	hash_entry_cost = 0;
+	if ((aggstrategy == AGG_HASHED || aggstrategy == AGG_MIXED) &&
+		effective_cpu_cache_size > 0)
+	{
+		double		entrysize;
+		double		table_bytes;
+		double		cache_bytes = effective_cpu_cache_size * 1024.0;
+		Size		mem_limit;
+		uint64		ngroups_limit;
+		int			num_partitions;
+
+		entrysize = hash_agg_entry_size(list_length(root->aggtransinfos),
+										input_width,
+										aggcosts->transitionSpace);
+
+		/*
+		 * The disk costs below already charge for spilling past the
+		 * in-memory limit.  Clamping bounds the cost when numGroups is
+		 * overestimated.
+		 */
+		hash_agg_set_limits(entrysize, numGroups, 0, &mem_limit,
+							&ngroups_limit, &num_partitions);
+		table_bytes = Min(entrysize * numGroups, (double) mem_limit);
+
+		if (table_bytes > cache_bytes)
+			hash_entry_cost = cpu_tuple_cost * HASH_RESIDENCY_PENALTY
+				* LOG2(table_bytes / cache_bytes) * input_tuples;
 	}
 
 	/*
@@ -2827,6 +2866,10 @@ cost_agg(Path *path, PlannerInfo *root,
 	 *
 	 * We will produce a single output tuple if not grouping, and a tuple per
 	 * group otherwise.  We charge cpu_tuple_cost for each output tuple.
+	 *
+	 * AGG_HASHED and AGG_MIXED additionally pay hash_entry_cost per input
+	 * tuple for the memory traffic of building a hash table too large to stay
+	 * in cache.  This cost is zero for a table that fits.
 	 *
 	 * Note: in this cost model, AGG_SORTED and AGG_HASHED have exactly the
 	 * same total CPU cost, but AGG_SORTED has lower startup cost.  If the
@@ -2859,6 +2902,7 @@ cost_agg(Path *path, PlannerInfo *root,
 		total_cost += aggcosts->transCost.startup;
 		total_cost += aggcosts->transCost.per_tuple * input_tuples;
 		total_cost += (cpu_operator_cost * numGroupCols) * input_tuples;
+		total_cost += hash_entry_cost;
 		total_cost += aggcosts->finalCost.startup;
 		total_cost += aggcosts->finalCost.per_tuple * numGroups;
 		total_cost += cpu_tuple_cost * numGroups;
@@ -2892,6 +2936,7 @@ cost_agg(Path *path, PlannerInfo *root,
 		startup_cost += aggcosts->transCost.per_tuple * input_tuples;
 		/* cost of computing hash value */
 		startup_cost += (cpu_operator_cost * numGroupCols) * input_tuples;
+		startup_cost += hash_entry_cost;
 		startup_cost += aggcosts->finalCost.startup;
 
 		total_cost = startup_cost;
