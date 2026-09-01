@@ -114,6 +114,8 @@ static Node *pull_up_sublinks_jointree_recurse(PlannerInfo *root, Node *jtnode,
 static Node *pull_up_sublinks_qual_recurse(PlannerInfo *root, Node *node,
 										   Node **jtlink1, Relids available_rels1,
 										   Node **jtlink2, Relids available_rels2);
+static bool sublink_has_join_clause(SubLink *sublink, Relids rels);
+static bool qual_has_join_clause(Node *qual, int levelsup, Relids rels);
 static Node *pull_up_subqueries_recurse(PlannerInfo *root, Node *jtnode,
 										JoinExpr *lowest_outer_join,
 										AppendRelInfo *containing_appendrel);
@@ -850,10 +852,13 @@ pull_up_sublinks_jointree_recurse(PlannerInfo *root, Node *jtnode,
  * denotes the relations present underneath jtlink1).  Optionally, jtlink2 can
  * point to a second link where new JoinExprs should be inserted if they
  * reference available_rels2 (pass NULL for both those arguments if not used).
- * Note that SubLinks referencing both sets of variables cannot be optimized.
  * If we find multiple pull-up-able SubLinks, they'll get stacked onto jtlink1
  * and/or jtlink2 in the order we encounter them.  We rely on subsequent
  * optimization to rearrange the stack if appropriate.
+ *
+ * A SubLink referencing both sets fits neither link, but as a last resort it
+ * can still be pulled up into the RHS of a semijoin we just built; see the
+ * comment on that in the ANY_SUBLINK case below.
  *
  * Returns the replacement qual node, or NULL if the qual should be removed.
  */
@@ -937,6 +942,56 @@ pull_up_sublinks_qual_recurse(PlannerInfo *root, Node *node,
 				/* Return NULL representing constant TRUE */
 				return NULL;
 			}
+
+			/*
+			 * Neither link would take it, typically because it references
+			 * rels on both sides.  As a last resort, if jtlink1 and jtlink2
+			 * are the larg and rarg of a JOIN_SEMI JoinExpr we just built,
+			 * pull it up into that semijoin's RHS, handing its join qual back
+			 * to become part of the semijoin's own qual.  The duplicates the
+			 * plain join may produce don't matter to a semijoin.  Only worth
+			 * doing if it joins to what's in the RHS already.
+			 */
+			if (available_rels2 != NULL &&
+				sublink_has_join_clause(sublink, available_rels2) &&
+				(j = convert_ANY_sublink_to_join(root, sublink, false,
+												 bms_union(available_rels1,
+														   available_rels2))) != NULL)
+			{
+				Node	   *rarg;
+
+				/* Recursively process pulled-up jointree nodes */
+				rarg = pull_up_sublinks_jointree_recurse(root, j->rarg,
+														 &child_rels);
+
+				/*
+				 * Add it to the semijoin's RHS.  A quals-less FromExpr is
+				 * just a cross product, so extend its fromlist if the RHS
+				 * already is one; else build a new FromExpr.
+				 */
+				if (IsA(*jtlink2, FromExpr) &&
+					((FromExpr *) *jtlink2)->quals == NULL)
+				{
+					FromExpr   *f = (FromExpr *) *jtlink2;
+
+					f->fromlist = lappend(f->fromlist, rarg);
+				}
+				else
+					*jtlink2 = (Node *) makeFromExpr(list_make2(*jtlink2,
+																rarg), NULL);
+
+				/*
+				 * Hand the qual back to be put where the SubLink was, that
+				 * is, to become part of the semijoin's own qual.  The rels we
+				 * just pulled up are underneath jtlink2 now, so they're
+				 * available to anything inserted into it.
+				 */
+				return pull_up_sublinks_qual_recurse(root, j->quals,
+													 jtlink1, available_rels1,
+													 jtlink2,
+													 bms_union(available_rels2,
+															   child_rels));
+			}
 		}
 		else if (sublink->subLinkType == EXISTS_SUBLINK)
 		{
@@ -990,6 +1045,36 @@ pull_up_sublinks_qual_recurse(PlannerInfo *root, Node *node,
 														 child_rels);
 				/* Return NULL representing constant TRUE */
 				return NULL;
+			}
+
+			/* Same last-resort treatment as for ANY SubLinks */
+			if (available_rels2 != NULL &&
+				sublink_has_join_clause(sublink, available_rels2) &&
+				(j = convert_EXISTS_sublink_to_join(root, sublink, false,
+													bms_union(available_rels1,
+															  available_rels2))) != NULL)
+			{
+				Node	   *rarg;
+
+				rarg = pull_up_sublinks_jointree_recurse(root, j->rarg,
+														 &child_rels);
+
+				if (IsA(*jtlink2, FromExpr) &&
+					((FromExpr *) *jtlink2)->quals == NULL)
+				{
+					FromExpr   *f = (FromExpr *) *jtlink2;
+
+					f->fromlist = lappend(f->fromlist, rarg);
+				}
+				else
+					*jtlink2 = (Node *) makeFromExpr(list_make2(*jtlink2,
+																rarg), NULL);
+
+				return pull_up_sublinks_qual_recurse(root, j->quals,
+													 jtlink1, available_rels1,
+													 jtlink2,
+													 bms_union(available_rels2,
+															   child_rels));
 			}
 		}
 		/* Else return it unmodified */
@@ -1146,6 +1231,63 @@ pull_up_sublinks_qual_recurse(PlannerInfo *root, Node *node,
 	}
 	/* Stop if not an AND */
 	return node;
+}
+
+/*
+ * Has this SubLink a clause joining it to rels?
+ *
+ * Without one, pulling it up alongside rels makes only a cross product, which
+ * is worse than leaving it a SubPlan; see pull_up_sublinks_qual_recurse.
+ */
+static bool
+sublink_has_join_clause(SubLink *sublink, Relids rels)
+{
+	Query	   *subselect = (Query *) sublink->subselect;
+
+	/*
+	 * Either the test expression or the sub-select's own WHERE clause will
+	 * do.
+	 */
+	return qual_has_join_clause(sublink->testexpr, 0, rels) ||
+		qual_has_join_clause(subselect->jointree->quals, 1, rels);
+}
+
+/*
+ * Does qual contain a clause joining the sub-select to rels, that is, one
+ * referencing the sub-select and, levelsup levels up, nothing outside rels?
+ *
+ * Quals aren't AND-flat this early, so we have to recurse.
+ */
+static bool
+qual_has_join_clause(Node *qual, int levelsup, Relids rels)
+{
+	Relids		varnos;
+
+	if (qual == NULL)
+		return false;
+
+	if (is_andclause(qual))
+	{
+		ListCell   *lc;
+
+		foreach(lc, ((BoolExpr *) qual)->args)
+		{
+			if (qual_has_join_clause((Node *) lfirst(lc), levelsup, rels))
+				return true;
+		}
+		return false;
+	}
+
+	/*
+	 * When qual is the sub-select's own WHERE clause, not every clause in it
+	 * need mention the sub-select; one that doesn't only restricts rels.
+	 */
+	if (levelsup > 0 && !contain_vars_of_level(qual, 0))
+		return false;
+
+	varnos = pull_varnos_of_level(NULL, qual, levelsup);
+
+	return !bms_is_empty(varnos) && bms_is_subset(varnos, rels);
 }
 
 /*

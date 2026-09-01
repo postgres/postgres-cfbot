@@ -1455,6 +1455,158 @@ SELECT * FROM tenk1 A LEFT JOIN tenk2 B
 ON B.hundred in (SELECT min(c.hundred) FROM tenk2 C WHERE c.odd = b.odd);
 
 --
+-- Pull up sublinks that reference both sides of a semijoin we just made
+--
+
+-- the ANY sublink references both A and B; we pull it up into the RHS
+explain (costs off)
+select A.unique1, A.odd from tenk1 A where A.unique1 < 20 and exists
+(select 1 from onek B
+where B.unique1 in (select C.unique1 from onek C
+where C.hundred = A.odd)) order by 1;
+
+select A.unique1, A.odd from tenk1 A where A.unique1 < 20 and exists
+(select 1 from onek B
+where B.unique1 in (select C.unique1 from onek C
+where C.hundred = A.odd)) order by 1;
+
+-- likewise for a nested EXISTS
+explain (costs off)
+select A.unique1, A.odd from tenk1 A where A.unique1 < 20 and exists
+(select 1 from onek B
+where exists (select 1 from onek C
+where C.hundred = A.odd and C.unique1 = B.unique1)) order by 1;
+
+select A.unique1, A.odd from tenk1 A where A.unique1 < 20 and exists
+(select 1 from onek B
+where exists (select 1 from onek C
+where C.hundred = A.odd and C.unique1 = B.unique1)) order by 1;
+
+-- rels pulled into the RHS must be available to sublinks pulled up after
+-- them
+explain (costs off)
+select A.unique1, A.odd from tenk1 A where A.unique1 < 20 and exists
+(select 1 from onek B
+where exists (select 1 from onek C
+where C.hundred = A.odd and exists (select 1 from onek D
+where D.unique1 = C.unique1 and D.unique2 = B.unique2))) order by 1;
+
+select A.unique1, A.odd from tenk1 A where A.unique1 < 20 and exists
+(select 1 from onek B
+where exists (select 1 from onek C
+where C.hundred = A.odd and exists (select 1 from onek D
+where D.unique1 = C.unique1 and D.unique2 = B.unique2))) order by 1;
+
+-- the qual we hand back can itself hold a sublink referencing both sides
+explain (costs off)
+select A.unique1, A.odd from tenk1 A where A.unique1 < 20 and exists
+(select 1 from onek B
+where exists (select 1 from onek C
+where C.unique1 = B.unique1 and exists (select 1 from onek D
+where D.hundred = A.odd and D.unique2 = C.unique2))) order by 1;
+
+select A.unique1, A.odd from tenk1 A where A.unique1 < 20 and exists
+(select 1 from onek B
+where exists (select 1 from onek C
+where C.unique1 = B.unique1 and exists (select 1 from onek D
+where D.hundred = A.odd and D.unique2 = C.unique2))) order by 1;
+
+-- the pulled-up subquery can't always be flattened; then it stays a lateral
+-- scan parameterized by the semijoin's LHS.
+explain (costs off)
+select A.unique1, A.odd from tenk1 A where A.unique1 < 20 and exists
+(select 1 from onek B
+where B.unique1 in (select C.unique1 from onek C
+where C.odd = A.odd offset 0)) order by 1;
+
+select A.unique1, A.odd from tenk1 A where A.unique1 < 20 and exists
+(select 1 from onek B
+where B.unique1 in (select C.unique1 from onek C
+where C.odd = A.odd offset 0)) order by 1;
+
+-- we don't do this when the enclosing join is an antijoin, although the
+-- same reasoning would hold there
+explain (costs off)
+select * from tenk1 A where not exists
+(select 1 from onek B
+where B.unique1 in (select C.unique1 from onek C
+where C.odd = A.odd));
+
+-- and we can't when the sublink itself is negated: the antijoin replacing it
+-- would have to keep its own qual, which then couldn't reference A
+explain (costs off)
+select * from tenk1 A where exists
+(select 1 from onek B
+where not exists (select 1 from onek C
+where C.odd = A.odd and C.hundred = B.hundred));
+
+-- nor when the sublink isn't a top-level clause of the semijoin's qual
+explain (costs off)
+select * from tenk1 A where exists
+(select 1 from onek B
+where B.odd = A.odd or B.unique1 in (select C.unique1 from onek C
+where C.odd = A.odd));
+
+-- nor when nothing in the sublink's qual joins it to the rels already in
+-- the semijoin's RHS
+explain (costs off)
+select * from tenk1 A where exists
+(select 1 from onek B
+where A.odd + B.odd in (select C.unique1 from onek C));
+
+-- likewise for an EXISTS sublink, which can be hashed too, by way of
+-- convert_EXISTS_to_ANY
+explain (costs off)
+select * from tenk1 A where exists
+(select 1 from onek B
+where exists (select 1 from onek C
+where C.unique1 = A.odd + B.odd));
+
+-- a clause that doesn't mention the sub-select only restricts the RHS, so
+-- it doesn't count either
+explain (costs off)
+select * from tenk1 A where exists
+(select 1 from onek B
+where exists (select 1 from onek C
+where B.hundred = 5 and C.unique1 = A.odd + B.odd));
+
+-- but one clause that does is enough, alongside another that doesn't
+explain (costs off)
+select * from tenk1 A where exists
+(select 1 from onek B
+where (A.odd + B.odd, B.unique2) in (select C.unique1, C.unique2 from onek C));
+
+-- the sub-select's own WHERE clause serves as well as the test expression,
+-- becoming a join clause once the sub-select is flattened
+explain (costs off)
+select A.unique1, A.odd from tenk1 A where A.unique1 < 20 and exists
+(select 1 from onek B
+where A.odd in (select C.unique1 from onek C where C.unique2 = B.unique2))
+order by 1;
+
+select A.unique1, A.odd from tenk1 A where A.unique1 < 20 and exists
+(select 1 from onek B
+where A.odd in (select C.unique1 from onek C where C.unique2 = B.unique2))
+order by 1;
+
+-- it's fine for all this to happen inside the nullable side of an outer
+-- join, since nothing gets moved out of that side
+explain (costs off)
+select X.unique1, A.unique1 from tenk1 X left join tenk1 A
+on X.unique1 = A.unique1
+and exists (select 1 from onek B
+where B.unique1 in (select C.unique1 from onek C
+where C.odd = A.odd))
+where X.unique1 < 20 order by 1;
+
+select X.unique1, A.unique1 from tenk1 X left join tenk1 A
+on X.unique1 = A.unique1
+and exists (select 1 from onek B
+where B.unique1 in (select C.unique1 from onek C
+where C.odd = A.odd))
+where X.unique1 < 20 order by 1;
+
+--
 -- Test VALUES to ARRAY (VtA) transformation
 --
 
