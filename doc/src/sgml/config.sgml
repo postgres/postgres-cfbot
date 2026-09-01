@@ -6542,6 +6542,35 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-effective-cpu-cache-size" xreflabel="effective_cpu_cache_size">
+      <term><varname>effective_cpu_cache_size</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>effective_cpu_cache_size</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Sets the planner's assumption about how much of a hash table stays in
+        the <acronym>CPU</acronym>'s data cache.  Hashed aggregation is charged
+        for the additional memory traffic of a hash table larger than this, so
+        a higher value makes hashed aggregation more likely to be chosen over
+        sorted aggregation for queries with many groups, and a lower value less
+        likely.  Setting it to <literal>0</literal> removes the extra cost
+        entirely.
+       </para>
+
+       <para>
+        Set this to the cache available to a single query, which is
+        smaller than the machine's total last-level cache when several queries
+        or parallel workers run concurrently, each building its own hash table.
+        This parameter is used only for estimation purposes; it neither
+        reserves cache nor limits the size of any hash table.
+        If this value is specified without units, it is taken as kilobytes.
+        The default is 8 megabytes (<literal>8MB</literal>).
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-min-eager-agg-group-size" xreflabel="min_eager_agg_group_size">
       <term><varname>min_eager_agg_group_size</varname> (<type>floating point</type>)
       <indexterm>
