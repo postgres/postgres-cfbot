@@ -6,7 +6,9 @@
  * Note: for most purposes, PlaceHolderVar is considered a Var too,
  * even if its contained expression is variable-free.  Also, CurrentOfExpr
  * is treated as a Var for purposes of determining whether an expression
- * contains variables.
+ * contains variables.  GraphPropertyRef carries a varlevelsup and is likewise
+ * treated as a Var when determining which query level a reference belongs to
+ * (see primnodes.h).
  *
  *
  * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
@@ -462,6 +464,12 @@ contain_vars_of_level_walker(Node *node, int *sublevels_up)
 			return true;		/* abort tree traversal and return true */
 		return false;
 	}
+	if (IsA(node, GraphPropertyRef))
+	{
+		if (((GraphPropertyRef *) node)->varlevelsup == *sublevels_up)
+			return true;		/* abort tree traversal and return true */
+		return false;
+	}
 	if (IsA(node, CurrentOfExpr))
 	{
 		if (*sublevels_up == 0)
@@ -581,6 +589,18 @@ locate_var_of_level_walker(Node *node,
 			var->location >= 0)
 		{
 			context->var_location = var->location;
+			return true;		/* abort tree traversal and return true */
+		}
+		return false;
+	}
+	if (IsA(node, GraphPropertyRef))
+	{
+		GraphPropertyRef *gpr = (GraphPropertyRef *) node;
+
+		if (gpr->varlevelsup == context->sublevels_up &&
+			gpr->location >= 0)
+		{
+			context->var_location = gpr->location;
 			return true;		/* abort tree traversal and return true */
 		}
 		return false;

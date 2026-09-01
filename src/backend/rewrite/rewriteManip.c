@@ -815,6 +815,19 @@ IncrementVarSublevelsUp_walker(Node *node,
 			var->varlevelsup += context->delta_sublevels_up;
 		return false;			/* done here */
 	}
+	if (IsA(node, GraphPropertyRef))
+	{
+		/*
+		 * Unlike a Var, we must not adjust a GraphPropertyRef's level here.
+		 * This walker runs over a GRAPH_TABLE COLUMNS/WHERE expression before
+		 * replace_property_refs() resolves each GraphPropertyRef to a Var
+		 * local to the generated path query, setting its final level via
+		 * ChangeVarNodes().  As we don't yet allow correlated subqueries
+		 * inside a GRAPH_TABLE reference, varlevelsup is always 0; assert it.
+		 */
+		Assert(((GraphPropertyRef *) node)->varlevelsup == 0);
+		return false;			/* done here */
+	}
 	if (IsA(node, CurrentOfExpr))
 	{
 		/* this should not happen */

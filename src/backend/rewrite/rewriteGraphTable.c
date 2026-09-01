@@ -34,7 +34,6 @@
 #include "parser/parse_oper.h"
 #include "parser/parse_relation.h"
 #include "parser/parsetree.h"
-#include "parser/parse_graphtable.h"
 #include "rewrite/rewriteGraphTable.h"
 #include "rewrite/rewriteHandler.h"
 #include "rewrite/rewriteManip.h"
@@ -100,7 +99,8 @@ static Query *generate_query_for_empty_path_pattern(RangeTblEntry *rte);
 static Query *generate_union_from_pathqueries(List **pathqueries);
 static List *get_path_elements_for_path_factor(Oid propgraphid, struct path_factor *pf);
 static bool is_property_associated_with_label(Oid labeloid, Oid propoid);
-static Node *get_element_property_expr(Oid elemoid, Oid propoid, int rtindex);
+static Node *get_element_property_expr(Oid elemoid, Oid propoid, int rtindex,
+									   Index varlevelsup);
 
 /*
  * Convert GRAPH_TABLE clause into a subquery using relational
@@ -530,9 +530,10 @@ generate_query_for_graph_path(RangeTblEntry *rte, List *graph_path)
 
 		if (pf->whereClause)
 		{
-			Node	   *tr;
+			Node	   *tr = copyObject(pf->whereClause);
 
-			tr = replace_property_refs(rte->relid, pf->whereClause, list_make1(pe));
+			IncrementVarSublevelsUp(tr, 1, 0);
+			tr = replace_property_refs(rte->relid, tr, list_make1(pe));
 
 			qual_exprs = lappend(qual_exprs, tr);
 		}
@@ -540,9 +541,10 @@ generate_query_for_graph_path(RangeTblEntry *rte, List *graph_path)
 
 	if (rte->graph_pattern->whereClause)
 	{
-		Node	   *path_quals = replace_property_refs(rte->relid,
-													   (Node *) rte->graph_pattern->whereClause,
-													   graph_path);
+		Node	   *path_quals = copyObject(rte->graph_pattern->whereClause);
+
+		IncrementVarSublevelsUp(path_quals, 1, 0);
+		path_quals = replace_property_refs(rte->relid, path_quals, graph_path);
 
 		qual_exprs = lappend(qual_exprs, path_quals);
 	}
@@ -551,9 +553,11 @@ generate_query_for_graph_path(RangeTblEntry *rte, List *graph_path)
 										qual_exprs ? (Node *) makeBoolExpr(AND_EXPR, qual_exprs, -1) : NULL);
 
 	/* Construct query targetlist from COLUMNS specification of GRAPH_TABLE. */
+	path_query->targetList = copyObject(rte->graph_table_columns);
+	IncrementVarSublevelsUp((Node *) path_query->targetList, 1, 0);
 	path_query->targetList = castNode(List,
 									  replace_property_refs(rte->relid,
-															(Node *) rte->graph_table_columns,
+															(Node *) path_query->targetList,
 															graph_path));
 
 	/*
@@ -1025,21 +1029,7 @@ replace_property_refs_mutator(Node *node, struct replace_property_refs_context *
 {
 	if (node == NULL)
 		return NULL;
-	if (IsA(node, Var))
-	{
-		Var		   *var = (Var *) node;
-		Var		   *newvar = copyObject(var);
-
-		/*
-		 * If it's already a Var, then it was a lateral reference.  Since we
-		 * are in a subquery after the rewrite, we have to increase the level
-		 * by one.
-		 */
-		newvar->varlevelsup++;
-
-		return (Node *) newvar;
-	}
-	else if (IsA(node, GraphPropertyRef))
+	if (IsA(node, GraphPropertyRef))
 	{
 		GraphPropertyRef *gpr = (GraphPropertyRef *) node;
 		Node	   *n = NULL;
@@ -1062,6 +1052,8 @@ replace_property_refs_mutator(Node *node, struct replace_property_refs_context *
 		 * path pattern.
 		 */
 		Assert(found_mapping);
+
+		Assert(gpr->varlevelsup == 0);
 
 		mapping_factor = found_mapping->path_factor;
 
@@ -1093,7 +1085,8 @@ replace_property_refs_mutator(Node *node, struct replace_property_refs_context *
 
 				n = stringToNode(TextDatumGetCString(SysCacheGetAttrNotNull(PROPGRAPHLABELPROP,
 																			tup, Anum_pg_propgraph_label_property_plpexpr)));
-				ChangeVarNodes(n, 1, mapping_factor->factorpos + 1, 0);
+				ChangeVarNodes(n, 1, mapping_factor->factorpos + 1,
+							   gpr->varlevelsup);
 
 				ReleaseSysCache(tup);
 			}
@@ -1132,8 +1125,10 @@ replace_property_refs_mutator(Node *node, struct replace_property_refs_context *
 				 * SQL/PGQ standard section 6.5 Property Reference, General
 				 * Rule 2.b.
 				 */
-				n = get_element_property_expr(found_mapping->elemoid, gpr->propid,
-											  mapping_factor->factorpos + 1);
+				n = get_element_property_expr(found_mapping->elemoid,
+											  gpr->propid,
+											  mapping_factor->factorpos + 1,
+											  gpr->varlevelsup);
 
 				if (!n)
 					n = (Node *) makeNullConst(gpr->typeId, gpr->typmod, gpr->collation);
@@ -1304,7 +1299,8 @@ is_property_associated_with_label(Oid labeloid, Oid propoid)
  * NULL.
  */
 static Node *
-get_element_property_expr(Oid elemoid, Oid propoid, int rtindex)
+get_element_property_expr(Oid elemoid, Oid propoid, int rtindex,
+						  Index varlevelsup)
 {
 	Relation	rel;
 	SysScanDesc scan;
@@ -1331,7 +1327,7 @@ get_element_property_expr(Oid elemoid, Oid propoid, int rtindex)
 			continue;
 		n = stringToNode(TextDatumGetCString(SysCacheGetAttrNotNull(PROPGRAPHLABELPROP,
 																	proptup, Anum_pg_propgraph_label_property_plpexpr)));
-		ChangeVarNodes(n, 1, rtindex, 0);
+		ChangeVarNodes(n, 1, rtindex, varlevelsup);
 
 		ReleaseSysCache(proptup);
 		break;
