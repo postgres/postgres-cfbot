@@ -3470,6 +3470,54 @@ WakePinCountWaiter(BufferDesc *buf)
 }
 
 /*
+ * Register the current process as the pincount waiter for a shared buffer
+ * and unlock the buffer header. Return true if the process was registered as
+ * the pincount waiter and must now wait to be signaled, or false if the
+ * shared refcount was concurrently reduced to 1 (only our own pin remains),
+ * in which case no wait is necessary.
+ *
+ * The caller must hold the buffer header lock, pass the current buffer state
+ * returned by LockBufHdr(), and ensure that no other backend is already
+ * registered as the waiter.
+ */
+static bool
+RegisterPinCountWaiter(BufferDesc *bufHdr, uint64 buf_state)
+{
+	Assert((buf_state & BM_PIN_COUNT_WAITER) == 0 ||
+		   bufHdr->wait_backend_pgprocno == MyProcNumber);
+
+	bufHdr->wait_backend_pgprocno = MyProcNumber;
+	PinCountWaitBuf = bufHdr;
+
+	/*
+	 * Publish BM_PIN_COUNT_WAITER while retaining the buffer header lock.
+	 * The shared refcount can be decremented while BM_LOCKED is set, so
+	 * use an atomic operation that preserves concurrent refcount changes.
+	 */
+	pg_atomic_fetch_or_u64(&bufHdr->state, BM_PIN_COUNT_WAITER);
+
+	/*
+	 * Recheck the refcount after publishing the waiter flag, while shared
+	 * refcount increments are still prevented by BM_LOCKED.  If only our
+	 * pin remains, the cleanup-lock condition has already been satisfied,
+	 * so remove the waiter state and return without sleeping.
+	 */
+	buf_state = pg_atomic_read_u64(&bufHdr->state);
+	if (BUF_STATE_GET_REFCOUNT(buf_state) == 1)
+	{
+		UnlockBufHdrExt(bufHdr, buf_state,
+						0, BM_PIN_COUNT_WAITER,
+						0);
+		PinCountWaitBuf = NULL;
+		return false;
+	}
+
+	UnlockBufHdr(bufHdr);
+
+	return true;
+}
+
+/*
  * UnpinBuffer -- make buffer available for replacement.
  *
  * This should be applied only to shared buffers, never local ones.  This
@@ -4761,6 +4809,62 @@ BufferGetLSNAtomic(Buffer buffer)
 		return lsn;
 	}
 #endif
+}
+
+/*
+ * PinCountWaiterCheckReadyForCleanup
+ *		Recheck whether the current cleanup-lock wait has completed and, if
+ *		necessary, rearm the shared pin-count notification.
+ *
+ * The caller must own the backend-local cleanup wait for this buffer, as
+ * indicated by PinCountWaitBuf.  BM_PIN_COUNT_WAITER may still be set for
+ * this process, or it may already have been cleared by WakePinCountWaiter()
+ * before signaling us.
+ *
+ * Return true if our own pin is the only remaining shared pin.  Otherwise,
+ * ensure that this process is registered as the shared pin-count waiter and
+ * return false.
+ */
+bool
+PinCountWaiterCheckReadyForCleanup(Buffer buffer)
+{
+	BufferDesc *bufHdr;
+	uint64		buf_state;
+	uint32		buf_refcount;
+
+	Assert(BufferIsValid(buffer));
+	Assert(!BufferIsLocal(buffer));
+
+	bufHdr = GetBufferDescriptor(buffer - 1);
+	Assert(PinCountWaitBuf == bufHdr);
+
+	buf_state = LockBufHdr(bufHdr);
+	buf_refcount = BUF_STATE_GET_REFCOUNT(buf_state);
+
+	if (buf_refcount == 1)
+	{
+		UnlockBufHdr(bufHdr);
+		return true;
+	}
+
+	if ((buf_state & BM_PIN_COUNT_WAITER) != 0 &&
+		bufHdr->wait_backend_pgprocno != MyProcNumber)
+	{
+		UnlockBufHdr(bufHdr);
+		elog(ERROR, "multiple processes attempting to wait for pincount 1");
+	}
+
+	/*
+	 * If other processes still pin the buffer, register this process again as
+	 * the pincount waiter to wait again. The refcount may be concurrently
+	 * reduced to 1 despite our holding the buffer header lock, in which case
+	 * RegisterPinCountWaiter() returns false and the buffer is ready for
+	 * cleanup.
+	 */
+	if (!RegisterPinCountWaiter(bufHdr, buf_state))
+		return true;
+
+	return false;
 }
 
 /* ---------------------------------------------------------------------
