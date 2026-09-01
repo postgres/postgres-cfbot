@@ -3210,9 +3210,15 @@ relation_needs_vacanalyze(Oid relid,
 	if (autovacuum_multixact_freeze_score_weight > 1.0)
 		effective_mxid_failsafe_age /= autovacuum_multixact_freeze_score_weight;
 
-	if (xid_age >= effective_xid_failsafe_age)
+	/*
+	 * Only apply the exponent when it increases the score.  Dividing the
+	 * effective ages by the weights above can let a score below one reach this
+	 * point, and raising that to a power shrinks it, so a larger weight could
+	 * otherwise demote a table that is closer to wraparound.
+	 */
+	if (xid_age >= effective_xid_failsafe_age && scores->xid > 1.0)
 		scores->xid = pow(scores->xid, Max(1.0, (double) xid_age / 100000000));
-	if (mxid_age >= effective_mxid_failsafe_age)
+	if (mxid_age >= effective_mxid_failsafe_age && scores->mxid > 1.0)
 		scores->mxid = pow(scores->mxid, Max(1.0, (double) mxid_age / 100000000));
 
 	scores->xid *= autovacuum_freeze_score_weight;
