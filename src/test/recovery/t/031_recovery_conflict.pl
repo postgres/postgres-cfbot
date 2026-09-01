@@ -223,6 +223,7 @@ $node_standby->adjust_conf(
 	'postgresql.conf',
 	'max_standby_streaming_delay',
 	"${PostgreSQL::Test::Utils::timeout_default}s");
+
 $node_standby->restart();
 $psql_standby->reconnect_and_clear();
 
@@ -247,7 +248,7 @@ SELECT txid_current();
 
 $node_primary->wait_for_replay_catchup($node_standby);
 
-$res = $psql_standby->query_until(
+$psql_standby->query_until(
 	qr/^1$/m, qq[
     BEGIN;
     -- hold pin
@@ -256,9 +257,6 @@ $res = $psql_standby->query_until(
     -- wait for lock held by prepared transaction
 	SELECT * FROM $table2;
     ]);
-ok(1,
-	"$sect: cursor holding conflicting pin, also waiting for lock, established"
-);
 
 # just to make sure we're waiting for lock already
 ok( $node_standby->poll_query_until(
@@ -276,10 +274,55 @@ check_conflict_log("User transaction caused buffer deadlock with recovery.");
 $psql_standby->reconnect_and_clear();
 check_conflict_stat("deadlock");
 
+
+## RECOVERY CONFLICT 6: Lock deadlock
+$sect = "startup lock deadlock";
+
+# Restart to clear any alarm left by the buffer pin test. Disable progress
+# logging so it does not set another timer.
+$node_standby->append_conf('postgresql.conf',
+	'log_startup_progress_interval = 0');
+$node_standby->restart();
+$psql_standby->reconnect_and_clear();
+
+# Hold a lock on table1 while waiting for startup's lock on table2. Let the
+# session finish its first deadlock check before making startup wait for
+# table1. That first check finds no deadlock, so startup must ask the
+# session to check again once both processes are waiting for each other.
+my $standby_pid = $psql_standby->query_safe('SELECT pg_backend_pid()');
+$log_location = -s $node_standby->logfile;
+$psql_standby->query_until(
+	qr/^1$/m, qq[
+    BEGIN;
+    SET LOCAL deadlock_timeout = '10ms';
+    SET LOCAL log_lock_waits = on;
+    LOCK TABLE $table1 IN ACCESS SHARE MODE;
+    SELECT 1;
+    SELECT * FROM $table2;
+]);
+$node_standby->wait_for_log(
+	qr/process $standby_pid still waiting for AccessShareLock/,
+	$log_location);
+
+# Make startup wait for the session's lock on table1, creating the deadlock.
+$node_primary->safe_psql($test_db, qq[BEGIN; LOCK TABLE $table1; COMMIT;]);
+$node_primary->wait_for_replay_catchup($node_standby);
+
+# Check that the session reports a deadlock and increments the deadlock count.
+$node_standby->wait_for_log(qr/ERROR:  deadlock detected/, $log_location);
+$psql_standby->reconnect_and_clear();
+ok( $node_standby->poll_query_until(
+		$test_db,
+		qq[SELECT deadlocks FROM pg_stat_database WHERE datname='$test_db';],
+		'1'),
+	"$sect: stats show lock deadlock on standby");
+
 # clean up for next tests
 $node_primary->safe_psql($test_db, qq[ROLLBACK PREPARED 'lock';]);
 $node_standby->adjust_conf('postgresql.conf', 'max_standby_streaming_delay',
 	'50ms');
+$node_standby->adjust_conf('postgresql.conf', 'log_startup_progress_interval',
+	undef);
 $node_standby->restart();
 $psql_standby->reconnect_and_clear();
 
@@ -297,7 +340,7 @@ cmp_ok( $node_standby->safe_psql(
 );
 
 
-## RECOVERY CONFLICT 6: Database conflict
+## RECOVERY CONFLICT 7: Database conflict
 $sect = "database conflict";
 
 $node_primary->safe_psql('postgres', qq[DROP DATABASE $test_db;]);
@@ -310,6 +353,96 @@ check_conflict_log("User was connected to a database that must be dropped");
 # explicitly shut down psql instances gracefully - to avoid hangs or worse on
 # windows
 $psql_standby->quit;
+
+# An unrelated wakeup must not restart the deadlock timer in either recovery
+# wait. Run these tests last because they use a long timeout.
+if (   $ENV{enable_injection_points} eq 'yes'
+	&& $node_primary->check_extension('injection_points'))
+{
+	$node_primary->safe_psql('postgres', 'CREATE EXTENSION injection_points');
+	$node_primary->wait_for_replay_catchup($node_standby);
+
+	$node_standby->adjust_conf('postgresql.conf',
+		'max_standby_streaming_delay', '-1');
+	$node_standby->append_conf('postgresql.conf',
+		'log_startup_progress_interval = 0');
+	# Set the deadlock timeout far beyond the expected test duration.
+	$node_standby->adjust_conf('postgresql.conf', 'deadlock_timeout', '1d');
+
+	# Log startup's notices so we can see if it sets the timer again.
+	$node_standby->append_conf('postgresql.conf',
+		q[log_min_messages = 'warning, startup:notice']);
+	$node_standby->restart();
+
+	my $startup_pid = $node_standby->safe_psql('postgres',
+		q[SELECT pid FROM pg_stat_activity WHERE backend_type = 'startup']);
+	my $point = 'standby-conflict-timeouts-armed';
+
+	for my $kind ('bufferpin', 'lock')
+	{
+		my $table = "test_recovery_wakeup_$kind";
+		my $wait_event = $kind eq 'bufferpin' ? 'BufferCleanup' : 'relation';
+
+		# Leave aborted rows for VACUUM to remove. Commit another insert to
+		# flush the WAL, then replay it before taking the cursor's snapshot.
+		$node_primary->safe_psql(
+			'postgres', qq[
+CREATE TABLE $table(a int) WITH (autovacuum_enabled = false);
+INSERT INTO $table VALUES (1);
+BEGIN;
+INSERT INTO $table SELECT generate_series(1, 100);
+ROLLBACK;
+INSERT INTO $table VALUES (2);
+]);
+		$node_primary->wait_for_replay_catchup($node_standby);
+
+		my $session = $node_standby->background_psql('postgres');
+		$session->query_safe(
+			$kind eq 'bufferpin'
+			? "BEGIN; DECLARE c CURSOR FOR SELECT a FROM $table; FETCH FROM c;"
+			: "BEGIN; LOCK TABLE $table IN ACCESS SHARE MODE;");
+
+		$node_primary->safe_psql('postgres',
+			$kind eq 'bufferpin'
+			? "VACUUM FREEZE $table"
+			: "BEGIN; LOCK TABLE $table; COMMIT;");
+		$node_standby->wait_for_event('startup', $wait_event);
+
+		# The timer is already set. Log any attempt by this resolver to set it
+		# again.
+		$node_standby->safe_psql('postgres',
+			"SELECT injection_points_attach('$point', 'notice', '$kind');");
+
+		# Wake startup while the session still holds the pin or lock. Wait for
+		# its log message so we know it has left the original wait.
+		my $log_offset = -s $node_standby->logfile;
+		is( $node_standby->safe_psql(
+				'postgres',
+				"SELECT pg_log_backend_memory_contexts($startup_pid)"),
+			't',
+			"$kind: memory-context request sent to startup");
+		$node_standby->wait_for_log(
+			qr/logging memory contexts of PID $startup_pid\b/, $log_offset);
+
+		# Wait for startup to resume its wait for the pin or lock. Startup
+		# writes notices directly to the test log, so any notice from setting
+		# the timer again must be in the file by then.
+		$node_standby->wait_for_event('startup', $wait_event);
+		unlike(
+			slurp_file($node_standby->logfile, $log_offset),
+			qr/notice triggered for injection point \Q$point\E/,
+			"$kind: unrelated wakeup did not restart the deadlock timer");
+
+		# Stop recording timer setup before releasing the pin or lock.
+		$node_standby->safe_psql('postgres',
+			"SELECT injection_points_detach('$point');");
+		$session->query_safe('COMMIT;');
+		# Wait for replay too: VACUUM can return before flushing its WAL.
+		$node_primary->wait_for_catchup($node_standby, 'replay',
+			$node_primary->lsn('insert'));
+		$session->quit;
+	}
+}
 
 $node_standby->stop();
 $node_primary->stop();
