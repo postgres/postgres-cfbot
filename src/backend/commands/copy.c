@@ -238,20 +238,16 @@ DoCopy(ParseState *pstate, const CopyStmt *stmt,
 		 *
 		 * If RLS is not enabled for this, then just fall through to the
 		 * normal non-filtering relation handling.
+		 *
+		 * COPY FROM with row-level security is handled in function CopyFrom.
 		 */
-		if (check_enable_rls(relid, InvalidOid, false) == RLS_ENABLED)
+		if (!is_from && check_enable_rls(relid, InvalidOid, false) == RLS_ENABLED)
 		{
 			SelectStmt *select;
 			ColumnRef  *cr;
 			ResTarget  *target;
 			RangeVar   *from;
 			List	   *targetList = NIL;
-
-			if (is_from)
-				ereport(ERROR,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("COPY FROM not supported with row-level security"),
-						 errhint("Use INSERT statements instead.")));
 
 			/*
 			 * Build target list
