@@ -6842,34 +6842,14 @@ LockBufferForCleanup(Buffer buffer)
 			LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
 			elog(ERROR, "multiple backends attempting to wait for pincount 1");
 		}
-		bufHdr->wait_backend_pgprocno = MyProcNumber;
-		PinCountWaitBuf = bufHdr;
-
 		/*
-		 * Publish BM_PIN_COUNT_WAITER while retaining the buffer header lock.
-		 * The shared refcount can be decremented while BM_LOCKED is set, so
-		 * use an atomic operation that preserves concurrent refcount changes.
+		 * Register ourselves as the pincount waiter.  If the shared refcount
+		 * was concurrently reduced to 1 (only our own pin remains),
+		 * RegisterPinCountWaiter() returns false and no wait is necessary.
 		 */
-		pg_atomic_fetch_or_u64(&bufHdr->state, BM_PIN_COUNT_WAITER);
-
-		/*
-		 * Recheck the refcount after publishing the waiter flag, while shared
-		 * refcount increments are still prevented by BM_LOCKED.  If only our
-		 * pin remains, the cleanup-lock condition has already been satisfied,
-		 * so remove the waiter state and return without sleeping.
-		 */
-		buf_state = pg_atomic_read_u64(&bufHdr->state);
-
-		if (BUF_STATE_GET_REFCOUNT(buf_state) == 1)
-		{
-			UnlockBufHdrExt(bufHdr, buf_state,
-							0, BM_PIN_COUNT_WAITER,
-							0);
-			PinCountWaitBuf = NULL;
+		if (!RegisterPinCountWaiter(bufHdr, buf_state))
 			goto cleanup_lock_acquired;
-		}
 
-		UnlockBufHdr(bufHdr);
 		LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
 
 		/* Wait to be signaled by UnpinBuffer() */
