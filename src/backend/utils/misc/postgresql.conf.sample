@@ -465,6 +465,7 @@
 #min_parallel_table_scan_size = 8MB
 #min_parallel_index_scan_size = 512kB
 #effective_cache_size = 4GB
+#effective_cpu_cache_size = 8MB
 #min_eager_agg_group_size = 8.0
 
 #jit_above_cost = 100000                # perform JIT compilation if available
