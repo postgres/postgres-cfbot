@@ -12,6 +12,9 @@ PGFILEDESC = "pg_prewarm - preload relation data into system buffer cache"
 
 REGRESS = pg_prewarm
 
+EXTRA_INSTALL = src/test/modules/injection_points
+export enable_injection_points
+
 TAP_TESTS = 1
 
 ifdef USE_PGXS

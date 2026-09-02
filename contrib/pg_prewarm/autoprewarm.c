@@ -47,6 +47,7 @@
 #include "storage/smgr.h"
 #include "tcop/tcopprot.h"
 #include "utils/guc.h"
+#include "utils/injection_point.h"
 #include "utils/rel.h"
 #include "utils/relfilenumbermap.h"
 #include "utils/timestamp.h"
@@ -548,6 +549,14 @@ apw_prewarm_blocks(Relation rel, struct AutoPrewarmReadStreamData *p)
 			instr_time	elapsed;
 
 			blocks_since_check = 0;
+
+			/*
+			 * Pass the relation name so a test can wait here for a specific
+			 * relation only, instead of the first one that reaches this
+			 * point.
+			 */
+			INJECTION_POINT("autoprewarm-before-lock-check",
+							RelationGetRelationName(rel));
 
 			INSTR_TIME_SET_CURRENT(currenttime);
 			elapsed = currenttime;
