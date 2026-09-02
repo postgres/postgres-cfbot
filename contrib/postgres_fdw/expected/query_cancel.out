@@ -32,3 +32,26 @@ SET LOCAL statement_timeout = '10ms';
 SELECT count(*) FROM ft1 a CROSS JOIN ft1 b CROSS JOIN ft1 c CROSS JOIN ft1 d;
 ERROR:  canceling statement due to statement timeout
 COMMIT;
+-- Same as above, but for a streaming_fetch (cursor-free) scan: verify that
+-- canceling mid-stream correctly clears conn_state->active_scan, so the
+-- connection is safely reusable afterward.
+ALTER FOREIGN TABLE ft1 OPTIONS (SET streaming_fetch 'true');
+BEGIN;
+SELECT count(*) FROM ft1 a;
+ count 
+-------
+   822
+(1 row)
+
+SET LOCAL statement_timeout = '10ms';
+SELECT count(*) FROM ft1 a CROSS JOIN ft1 b CROSS JOIN ft1 c CROSS JOIN ft1 d;
+ERROR:  canceling statement due to statement timeout
+COMMIT;
+-- Must succeed cleanly if active_scan was properly cleared on cancel.
+SELECT count(*) FROM ft1;
+ count 
+-------
+   822
+(1 row)
+
+ALTER FOREIGN TABLE ft1 OPTIONS (SET streaming_fetch 'false');
