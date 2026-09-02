@@ -6305,8 +6305,68 @@ get_select_query_def(Query *query, deparse_context *context)
 	{
 		appendContextKeyword(context, " ORDER BY ",
 							 -PRETTYINDENT_STD, PRETTYINDENT_STD, 1);
-		get_rule_orderby(query->sortClause, query->targetList,
-						 force_colno, context);
+		if (query->orderByAll)
+		{
+			SortGroupClause *srt;
+			TargetEntry *tle;
+			Node	   *sortexpr;
+			Oid			sortcoltype;
+			TypeCacheEntry *typentry;
+
+			appendStringInfoString(buf, "ALL");
+
+			/*
+			 * Extract sort direction and NULLS ordering from the first
+			 * SortGroupClause. After transformation, sortClause contains
+			 * SortGroupClause nodes (one per column). All columns share the
+			 * same intended direction (ASC/DESC) and NULLS ordering, though
+			 * the actual sort operators differ by column type. We examine the
+			 * first column to determine what modifiers to output.
+			 */
+			Assert(query->sortClause != NIL);
+			srt = (SortGroupClause *) linitial(query->sortClause);
+
+			/*
+			 * Get the sort expression to determine its type without
+			 * appending anything to the output buffer.
+			 */
+			tle = get_sortgroupref_tle(srt->tleSortGroupRef, query->targetList);
+			sortexpr = (Node *) tle->expr;
+			sortcoltype = exprType(sortexpr);
+
+			/* See whether operator is default < or > for datatype */
+			typentry = lookup_type_cache(sortcoltype,
+										 TYPECACHE_LT_OPR | TYPECACHE_GT_OPR);
+
+			if (srt->sortop == typentry->lt_opr)
+			{
+				/* ASC is default, so emit nothing for it */
+				if (srt->nulls_first)
+					appendStringInfoString(buf, " NULLS FIRST");
+			}
+			else if (srt->sortop == typentry->gt_opr)
+			{
+				appendStringInfoString(buf, " DESC");
+				/* DESC defaults to NULLS FIRST */
+				if (!srt->nulls_first)
+					appendStringInfoString(buf, " NULLS LAST");
+			}
+			else
+			{
+				appendStringInfo(buf, " USING %s",
+								 generate_operator_name(srt->sortop,
+														sortcoltype,
+														sortcoltype));
+				/* be specific to eliminate ambiguity */
+				if (srt->nulls_first)
+					appendStringInfoString(buf, " NULLS FIRST");
+				else
+					appendStringInfoString(buf, " NULLS LAST");
+			}
+		}
+		else
+			get_rule_orderby(query->sortClause, query->targetList,
+							 force_colno, context);
 	}
 
 	/*

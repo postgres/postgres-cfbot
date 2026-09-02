@@ -1804,9 +1804,17 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt,
 	 */
 	qry->sortClause = transformSortClause(pstate,
 										  stmt->sortClause,
+										  stmt->orderByAll,
 										  &qry->targetList,
 										  EXPR_KIND_ORDER_BY,
 										  false /* allow SQL92 rules */ );
+	/*
+	 * Preserve the orderByAll flag for deparsing. Even though sortClause
+	 * is expanded to individual columns during transformation, we need to
+	 * remember that the original query used ORDER BY ALL so that
+	 * pg_get_viewdef() can recreate it correctly in view definitions.
+	 */
+	qry->orderByAll = stmt->orderByAll;
 
 	qry->groupClause = transformGroupClause(pstate,
 											stmt->groupClause,
@@ -2067,9 +2075,17 @@ transformValuesClause(ParseState *pstate, SelectStmt *stmt)
 	 */
 	qry->sortClause = transformSortClause(pstate,
 										  stmt->sortClause,
+										  stmt->orderByAll,
 										  &qry->targetList,
 										  EXPR_KIND_ORDER_BY,
 										  false /* allow SQL92 rules */ );
+	/*
+	 * Preserve the orderByAll flag for deparsing. Even though sortClause
+	 * is expanded to individual columns during transformation, we need to
+	 * remember that the original query used ORDER BY ALL so that
+	 * pg_get_viewdef() can recreate it correctly in view definitions.
+	 */
+	qry->orderByAll = stmt->orderByAll;
 
 	qry->limitOffset = transformLimitClause(pstate, stmt->limitOffset,
 											EXPR_KIND_OFFSET, "OFFSET",
@@ -2310,6 +2326,7 @@ transformSetOperationStmt(ParseState *pstate, SelectStmt *stmt)
 
 	qry->sortClause = transformSortClause(pstate,
 										  sortClause,
+										  stmt->orderByAll,
 										  &qry->targetList,
 										  EXPR_KIND_ORDER_BY,
 										  false /* allow SQL92 rules */ );
