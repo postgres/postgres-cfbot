@@ -1357,7 +1357,7 @@ CopyFrom(CopyFromState cstate)
 				 */
 				if (resultRelInfo->ri_FdwRoutine == NULL &&
 					resultRelInfo->ri_RelationDesc->rd_att->constr)
-					ExecConstraints(resultRelInfo, myslot, estate);
+					ExecConstraints(CMD_INSERT, resultRelInfo, myslot, estate);
 
 				/*
 				 * Also check the tuple against the partition constraint, if
