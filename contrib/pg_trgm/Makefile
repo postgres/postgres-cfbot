@@ -9,12 +9,12 @@ OBJS = \
 	trgm_regexp.o
 
 EXTENSION = pg_trgm
-DATA = pg_trgm--1.5--1.6.sql pg_trgm--1.4--1.5.sql pg_trgm--1.3--1.4.sql \
-	pg_trgm--1.3.sql pg_trgm--1.2--1.3.sql pg_trgm--1.1--1.2.sql \
-	pg_trgm--1.0--1.1.sql
+DATA = pg_trgm--1.6--1.7.sql pg_trgm--1.5--1.6.sql pg_trgm--1.4--1.5.sql \
+	pg_trgm--1.3--1.4.sql pg_trgm--1.3.sql pg_trgm--1.2--1.3.sql \
+	pg_trgm--1.1--1.2.sql pg_trgm--1.0--1.1.sql
 PGFILEDESC = "pg_trgm - trigram matching"
 
-REGRESS = pg_trgm pg_utf8_trgm pg_word_trgm pg_strict_word_trgm
+REGRESS = pg_trgm pg_utf8_trgm pg_word_trgm pg_strict_word_trgm pg_trgm_noeq
 
 ifdef USE_PGXS
 PG_CONFIG = pg_config
