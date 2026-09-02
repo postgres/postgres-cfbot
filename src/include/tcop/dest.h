@@ -142,9 +142,28 @@ extern void EndCommand(const QueryCompletion *qc, CommandDest dest,
 					   bool force_undecorated_output);
 extern void EndReplicationCommand(const char *commandTag);
 
+#include "lib/stringinfo.h"
+
+typedef enum ReadyForQueryMessageFormat
+{
+	READY_FOR_QUERY_PLAIN,
+	READY_FOR_QUERY_RICH,
+} ReadyForQueryMessageFormat;
+
+/* GUC variable */
+extern PGDLLIMPORT int ready_for_query_message;
+
+/* Hook for ReadyForQuery */
+typedef void (*ready_for_query_hook_type) (StringInfo buf);
+extern PGDLLIMPORT ready_for_query_hook_type ready_for_query_hook;
+
 /* Additional functions that go with destination management, more or less. */
 
 extern void NullCommand(CommandDest dest);
 extern void ReadyForQuery(CommandDest dest);
+extern bool ready_for_query_has_key(StringInfo buf, const char *key, uint8 key_len);
+extern void ready_for_query_append_kv(StringInfo buf,
+									  const char *key, uint8 key_len,
+									  const char *val, uint8 val_len);
 
 #endif							/* DEST_H */
