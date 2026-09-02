@@ -258,7 +258,7 @@ extern void InitResultRelInfo(ResultRelInfo *resultRelInfo,
 extern ResultRelInfo *ExecGetTriggerResultRel(EState *estate, Oid relid,
 											  ResultRelInfo *rootRelInfo);
 extern List *ExecGetAncestorResultRels(EState *estate, ResultRelInfo *resultRelInfo);
-extern void ExecConstraints(ResultRelInfo *resultRelInfo,
+extern void ExecConstraints(CmdType cmdtype, ResultRelInfo *resultRelInfo,
 							TupleTableSlot *slot, EState *estate);
 extern AttrNumber ExecRelGenVirtualNotNull(ResultRelInfo *resultRelInfo,
 										   TupleTableSlot *slot,
