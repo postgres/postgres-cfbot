@@ -1353,7 +1353,8 @@ CREATE VIEW pg_stat_progress_vacuum AS
         CASE S.param13 WHEN 1 THEN 'manual'
                        WHEN 2 THEN 'autovacuum'
                        WHEN 3 THEN 'autovacuum_wraparound'
-                       ELSE NULL END AS started_by
+                       ELSE NULL END AS started_by,
+        CAST(S.param14 AS oid) AS current_index_relid
     FROM pg_stat_get_progress_info('VACUUM') AS S
         LEFT JOIN pg_database D ON S.datid = D.oid;
 
