@@ -246,6 +246,7 @@ extern void PortalCreateHoldStore(Portal portal);
 extern void DropQueryEnvPortals(QueryEnvironment *queryEnv);
 extern void PortalHashTableDeleteAll(void);
 extern bool ThereAreNoReadyPortals(void);
+extern bool HasActiveWithHoldCursors(void);
 extern void HoldPinnedPortals(void);
 extern void ForgetPortalSnapshots(void);
 

@@ -55,7 +55,7 @@ static int	getParameterStatus(PGconn *conn);
 static int	getBackendKeyData(PGconn *conn, int msgLength);
 static int	getNotify(PGconn *conn);
 static int	getCopyStart(PGconn *conn, ExecStatusType copytype);
-static int	getReadyForQuery(PGconn *conn);
+static int	getReadyForQuery(PGconn *conn, int msgLength);
 static void reportErrorPosition(PQExpBuffer msg, const char *query,
 								int loc, int encoding);
 static size_t build_startup_packet(const PGconn *conn, char *packet,
@@ -226,7 +226,7 @@ pqParseInput3(PGconn *conn)
 					conn->asyncStatus = PGASYNC_READY;
 					break;
 				case PqMsg_ReadyForQuery:
-					if (getReadyForQuery(conn))
+					if (getReadyForQuery(conn, msgLength))
 						return;
 					if (conn->pipelineStatus != PQ_PIPELINE_OFF)
 					{
@@ -1773,7 +1773,7 @@ failure:
  * getReadyForQuery - process ReadyForQuery message
  */
 static int
-getReadyForQuery(PGconn *conn)
+getReadyForQuery(PGconn *conn, int msgLength)
 {
 	char		xact_status;
 
@@ -1794,6 +1794,13 @@ getReadyForQuery(PGconn *conn)
 			conn->xactStatus = PQTRANS_UNKNOWN;
 			break;
 	}
+
+	/*
+	 * Skip any extension data so clients ignore payload they are not
+	 * prepared to receive.
+	 */
+	if (msgLength > 1)
+		conn->inCursor += (msgLength - 1);
 
 	return 0;
 }
@@ -2346,7 +2353,7 @@ pqFunctionCall3(PGconn *conn, Oid fnid,
 					continue;
 				break;
 			case PqMsg_ReadyForQuery:
-				if (getReadyForQuery(conn))
+				if (getReadyForQuery(conn, msgLength))
 					continue;
 
 				/* consume the message */
