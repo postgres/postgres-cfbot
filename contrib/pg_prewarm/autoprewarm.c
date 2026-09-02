@@ -31,6 +31,7 @@
 #include "access/relation.h"
 #include "access/xact.h"
 #include "pgstat.h"
+#include "portability/instr_time.h"
 #include "postmaster/bgworker.h"
 #include "postmaster/interrupt.h"
 #include "storage/buf_internals.h"
@@ -39,6 +40,7 @@
 #include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
+#include "storage/lmgr.h"
 #include "storage/lwlock.h"
 #include "storage/procsignal.h"
 #include "storage/read_stream.h"
@@ -51,6 +53,14 @@
 #include "utils/wait_event.h"
 
 #define AUTOPREWARM_FILE "autoprewarm.blocks"
+
+/*
+ * How often the prewarm loop checks for a conflicting lock request: probe the
+ * shared lock table at most once per interval (in ms), and only consult the
+ * clock once every so many blocks.
+ */
+#define PREWARM_LOCK_CHECK_INTERVAL		20	/* ms */
+#define PREWARM_LOCK_CHECK_BLOCKS		32
 
 /* Metadata for each block we dump. */
 typedef struct BlockInfoRecord
@@ -494,6 +504,73 @@ apw_read_stream_next_block(ReadStream *stream,
 }
 
 /*
+ * Prewarm the blocks of one fork by draining the read stream, and return true
+ * if a conflicting lock request showed up while doing so. On such a waiter we
+ * stop early rather than reacquiring the lock and resuming; prewarming is
+ * best-effort, and the caller gives up the relation to let the waiter proceed.
+ * The read stream is always shut down before returning.
+ */
+static bool
+apw_prewarm_blocks(Relation rel, struct AutoPrewarmReadStreamData *p)
+{
+	ReadStream *stream;
+	Buffer		buf;
+	instr_time	starttime;
+	int			blocks_since_check = 0;
+	bool		waiter_detected = false;
+
+	stream = read_stream_begin_relation(READ_STREAM_MAINTENANCE |
+										READ_STREAM_DEFAULT |
+										READ_STREAM_USE_BATCHING,
+										NULL,
+										rel,
+										p->forknum,
+										apw_read_stream_next_block,
+										p,
+										0);
+
+	INSTR_TIME_SET_CURRENT(starttime);
+
+	while ((buf = read_stream_next_buffer(stream, NULL)) != InvalidBuffer)
+	{
+		apw_state->prewarmed_blocks++;
+		ReleaseBuffer(buf);
+
+		/*
+		 * Check for a conflicting lock waiter, but keep the clock reads and
+		 * lock table probes rare: only look at the clock every
+		 * PREWARM_LOCK_CHECK_BLOCKS blocks, and only probe once
+		 * PREWARM_LOCK_CHECK_INTERVAL has elapsed since the last probe.
+		 */
+		if (++blocks_since_check >= PREWARM_LOCK_CHECK_BLOCKS)
+		{
+			instr_time	currenttime;
+			instr_time	elapsed;
+
+			blocks_since_check = 0;
+
+			INSTR_TIME_SET_CURRENT(currenttime);
+			elapsed = currenttime;
+			INSTR_TIME_SUBTRACT(elapsed, starttime);
+			if ((INSTR_TIME_GET_MICROSEC(elapsed) / 1000)
+				>= PREWARM_LOCK_CHECK_INTERVAL)
+			{
+				if (LockHasWaitersRelation(rel, AccessShareLock))
+				{
+					waiter_detected = true;
+					break;
+				}
+				starttime = currenttime;
+			}
+		}
+	}
+
+	read_stream_end(stream);
+
+	return waiter_detected;
+}
+
+/*
  * Prewarm all blocks for one database (and possibly also global objects, if
  * those got grouped with this database).
  */
@@ -577,8 +654,6 @@ autoprewarm_database_main(Datum main_arg)
 			ForkNumber	forknum;
 			BlockNumber nblocks;
 			struct AutoPrewarmReadStreamData p;
-			ReadStream *stream;
-			Buffer		buf;
 
 			blk = block_info[i];
 
@@ -627,28 +702,22 @@ autoprewarm_database_main(Datum main_arg)
 					.nblocks = nblocks,
 			};
 
-			stream = read_stream_begin_relation(READ_STREAM_MAINTENANCE |
-												READ_STREAM_DEFAULT |
-												READ_STREAM_USE_BATCHING,
-												NULL,
-												rel,
-												p.forknum,
-												apw_read_stream_next_block,
-												&p,
-												0);
-
 			/*
-			 * Loop until we've prewarmed all the blocks from this fork. The
-			 * read stream callback will check that we still have free buffers
-			 * before requesting each block from the read stream API.
+			 * On a conflicting lock waiter, give up the whole relation: skip
+			 * its remaining blocks and break out so we close it (releasing
+			 * the lock) and move on to the next one.
 			 */
-			while ((buf = read_stream_next_buffer(stream, NULL)) != InvalidBuffer)
+			if (apw_prewarm_blocks(rel, &p))
 			{
-				apw_state->prewarmed_blocks++;
-				ReleaseBuffer(buf);
+				for (i = p.pos; i < apw_state->prewarm_stop_idx; i++)
+				{
+					blk = block_info[i];
+					if (blk.tablespace != tablespace ||
+						blk.filenumber != filenumber)
+						break;
+				}
+				break;
 			}
-
-			read_stream_end(stream);
 
 			/*
 			 * Advance i past all the blocks just prewarmed. Note that the
