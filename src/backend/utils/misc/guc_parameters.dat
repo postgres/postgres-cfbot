@@ -2438,6 +2438,14 @@
   max => 'DBL_MAX',
 },
 
+{ name => 'ready_for_query_message', type => 'enum', context => 'PGC_USERSET', group => 'CLIENT_CONN_OTHER',
+  short_desc => 'Sets the format of the ReadyForQuery protocol message.',
+  variable => 'ready_for_query_message',
+  boot_val => 'READY_FOR_QUERY_PLAIN',
+  options => 'ready_for_query_message_options',
+  assign_hook => 'assign_ready_for_query_message',
+},
+
 { name => 'recovery_end_command', type => 'string', context => 'PGC_SIGHUP', group => 'WAL_ARCHIVE_RECOVERY',
   short_desc => 'Sets the shell command that will be executed once at the end of recovery.',
   variable => 'recoveryEndCommand',
