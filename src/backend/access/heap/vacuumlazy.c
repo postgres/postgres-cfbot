@@ -3038,11 +3038,17 @@ lazy_vacuum_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 {
 	IndexVacuumInfo ivinfo;
 	LVSavedErrInfo saved_err_info;
+	const int	reset_index[] = {
+		PROGRESS_VACUUM_CURRENT_INDEX_RELID,
+		PROGRESS_SCAN_BLOCKS_TOTAL,
+		PROGRESS_SCAN_BLOCKS_DONE
+	};
+	const int64 reset_val[] = {(int64) InvalidOid, 0, 0};
 
 	ivinfo.index = indrel;
 	ivinfo.heaprel = vacrel->rel;
 	ivinfo.analyze_only = false;
-	ivinfo.report_progress = false;
+	ivinfo.report_progress = true;
 	ivinfo.estimated_count = true;
 	ivinfo.message_level = DEBUG2;
 	ivinfo.num_heap_tuples = reltuples;
@@ -3073,9 +3079,11 @@ lazy_vacuum_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 	pfree(vacrel->indname);
 	vacrel->indname = NULL;
 
-	/* Reset the current index relid to avoid reporting a stale value */
-	pgstat_progress_update_param(PROGRESS_VACUUM_CURRENT_INDEX_RELID,
-								 (int64) InvalidOid);
+	/*
+	 * Reset the current index progress parameters to avoid reporting stale
+	 * values.
+	 */
+	pgstat_progress_update_multi_param(3, reset_index, reset_val);
 
 	return istat;
 }
@@ -3096,11 +3104,17 @@ lazy_cleanup_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 {
 	IndexVacuumInfo ivinfo;
 	LVSavedErrInfo saved_err_info;
+	const int	reset_index[] = {
+		PROGRESS_VACUUM_CURRENT_INDEX_RELID,
+		PROGRESS_SCAN_BLOCKS_TOTAL,
+		PROGRESS_SCAN_BLOCKS_DONE
+	};
+	const int64 reset_val[] = {(int64) InvalidOid, 0, 0};
 
 	ivinfo.index = indrel;
 	ivinfo.heaprel = vacrel->rel;
 	ivinfo.analyze_only = false;
-	ivinfo.report_progress = false;
+	ivinfo.report_progress = true;
 	ivinfo.estimated_count = estimated_count;
 	ivinfo.message_level = DEBUG2;
 
@@ -3130,9 +3144,11 @@ lazy_cleanup_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 	pfree(vacrel->indname);
 	vacrel->indname = NULL;
 
-	/* Reset the current index relid to avoid reporting a stale value */
-	pgstat_progress_update_param(PROGRESS_VACUUM_CURRENT_INDEX_RELID,
-								 (int64) InvalidOid);
+	/*
+	 * Reset the current index progress parameters to avoid reporting stale
+	 * values.
+	 */
+	pgstat_progress_update_multi_param(3, reset_index, reset_val);
 
 	return istat;
 }

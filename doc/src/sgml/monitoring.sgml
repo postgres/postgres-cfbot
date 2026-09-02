@@ -7929,6 +7929,29 @@ FROM pg_stat_get_backend_idset() AS backendid;
       </para></entry>
      </row>
 
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>index_blks_total</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Total number of blocks to scan for the B-tree index identified by
+       <structfield>current_index_relid</structfield>. It is reset to 0 once
+       the index has been processed.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>index_blks_done</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of blocks scanned so far for the B-tree index identified by
+       <structfield>current_index_relid</structfield>. Together with
+       <structfield>index_blks_total</structfield> this gives per-index vacuum
+       progress, which is useful for estimating completion of large indexes.
+      </para></entry>
+     </row>
+
     </tbody>
    </tgroup>
   </table>
@@ -7939,8 +7962,9 @@ FROM pg_stat_get_backend_idset() AS backendid;
     parallel worker) reports its own row. On a worker row the meaningful
     columns are <structfield>pid</structfield>, <structfield>datid</structfield>,
     <structfield>datname</structfield>, <structfield>relid</structfield>,
-    <structfield>phase</structfield> and
-    <structfield>current_index_relid</structfield>. The remaining columns track
+    <structfield>phase</structfield>, <structfield>current_index_relid</structfield>,
+    <structfield>index_blks_total</structfield> and
+    <structfield>index_blks_done</structfield>. The remaining columns track
     command-level heap progress that only the leader maintains; they read as
     zero on worker rows. Because a table can be vacuumed by only one
     <command>VACUUM</command> at a time, the rows sharing a given

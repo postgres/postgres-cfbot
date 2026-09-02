@@ -1081,6 +1081,12 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 		PROGRESS_VACUUM_CURRENT_INDEX_RELID
 	};
 	int64		progress_val[2];
+	const int	reset_index[] = {
+		PROGRESS_VACUUM_CURRENT_INDEX_RELID,
+		PROGRESS_SCAN_BLOCKS_TOTAL,
+		PROGRESS_SCAN_BLOCKS_DONE
+	};
+	const int64 reset_val[] = {(int64) InvalidOid, 0, 0};
 
 	/*
 	 * Update the pointer to the corresponding bulk-deletion result if someone
@@ -1092,7 +1098,7 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 	ivinfo.index = indrel;
 	ivinfo.heaprel = pvs->heaprel;
 	ivinfo.analyze_only = false;
-	ivinfo.report_progress = false;
+	ivinfo.report_progress = true;
 	ivinfo.message_level = DEBUG2;
 	ivinfo.estimated_count = pvs->shared->estimated_count;
 	ivinfo.num_heap_tuples = pvs->shared->reltuples;
@@ -1127,9 +1133,11 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 				 RelationGetRelationName(indrel));
 	}
 
-	/* Reset the current index relid to avoid reporting a stale value */
-	pgstat_progress_update_param(PROGRESS_VACUUM_CURRENT_INDEX_RELID,
-								 (int64) InvalidOid);
+	/*
+	 * Reset the current index progress parameters to avoid reporting stale
+	 * values.
+	 */
+	pgstat_progress_update_multi_param(3, reset_index, reset_val);
 
 	/*
 	 * Copy the index bulk-deletion result returned from ambulkdelete and
