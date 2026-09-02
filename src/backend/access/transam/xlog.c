@@ -1541,7 +1541,10 @@ WALInsertLockUpdateInsertingAt(XLogRecPtr insertingAt)
  * Returns the location of the oldest insertion that is still in-progress.
  * Any WAL prior to that point has been fully copied into WAL buffers, and
  * can be flushed out to disk. Because this waits for any insertions older
- * than 'upto' to finish, the return value is always >= 'upto'.
+ * than 'upto' to finish, the return value is normally >= 'upto'.  However,
+ * if 'upto' is past the end of reserved WAL, the request is clamped to the
+ * current reserved position, and the return value can be smaller than
+ * 'upto'.  Callers must not write or flush past the returned position.
  *
  * Note: When you are about to write out WAL, you must call this function
  * *before* acquiring WALWriteLock, to avoid deadlocks. This function might
@@ -3011,6 +3014,7 @@ bool
 XLogBackgroundFlush(void)
 {
 	XLogwrtRqst WriteRqst;
+	XLogRecPtr	insertpos;
 	bool		flexible = true;
 	static TimestampTz lastflush;
 	TimestampTz now;
@@ -3114,8 +3118,18 @@ XLogBackgroundFlush(void)
 
 	START_CRIT_SECTION();
 
-	/* now wait for any in-progress insertions to finish and get write lock */
-	WaitXLogInsertionsToFinish(WriteRqst.Write);
+	/* now wait for any in-progress insertions to finish */
+	insertpos = WaitXLogInsertionsToFinish(WriteRqst.Write);
+
+	/* honor the clamp if the request was past the end of reserved WAL */
+	if (insertpos < WriteRqst.Write)
+	{
+		WriteRqst.Write = insertpos;
+		if (WriteRqst.Flush > insertpos)
+			WriteRqst.Flush = insertpos;
+	}
+
+	/* get write lock */
 	LWLockAcquire(WALWriteLock, LW_EXCLUSIVE);
 	RefreshXLogWriteResult(LogwrtResult);
 	if (WriteRqst.Write > LogwrtResult.Write ||
