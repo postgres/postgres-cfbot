@@ -1076,6 +1076,11 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 	IndexBulkDeleteResult *istat = NULL;
 	IndexBulkDeleteResult *istat_res;
 	IndexVacuumInfo ivinfo;
+	const int	progress_index[] = {
+		PROGRESS_VACUUM_PHASE,
+		PROGRESS_VACUUM_CURRENT_INDEX_RELID
+	};
+	int64		progress_val[2];
 
 	/*
 	 * Update the pointer to the corresponding bulk-deletion result if someone
@@ -1097,6 +1102,16 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 	pvs->indname = pstrdup(RelationGetRelationName(indrel));
 	pvs->status = indstats->status;
 
+	/*
+	 * Report the phase and the index we're about to process before we start,
+	 * so that it is visible for the whole duration of the index scan.
+	 */
+	progress_val[0] = (indstats->status == PARALLEL_INDVAC_STATUS_NEED_BULKDELETE)
+		? PROGRESS_VACUUM_PHASE_VACUUM_INDEX
+		: PROGRESS_VACUUM_PHASE_INDEX_CLEANUP;
+	progress_val[1] = (int64) RelationGetRelid(indrel);
+	pgstat_progress_update_multi_param(2, progress_index, progress_val);
+
 	switch (indstats->status)
 	{
 		case PARALLEL_INDVAC_STATUS_NEED_BULKDELETE:
@@ -1111,6 +1126,10 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 				 indstats->status,
 				 RelationGetRelationName(indrel));
 	}
+
+	/* Reset the current index relid to avoid reporting a stale value */
+	pgstat_progress_update_param(PROGRESS_VACUUM_CURRENT_INDEX_RELID,
+								 (int64) InvalidOid);
 
 	/*
 	 * Copy the index bulk-deletion result returned from ambulkdelete and
@@ -1315,6 +1334,9 @@ parallel_vacuum_main(dsm_segment *seg, shm_toc *toc)
 	/* Prepare to track buffer usage during parallel execution */
 	InstrStartParallelQuery();
 
+	/* Register this worker for vacuum progress reporting */
+	pgstat_progress_start_command(PROGRESS_COMMAND_VACUUM, shared->relid);
+
 	/* Process indexes to perform vacuum/cleanup */
 	parallel_vacuum_process_safe_indexes(&pvs);
 
@@ -1333,6 +1355,9 @@ parallel_vacuum_main(dsm_segment *seg, shm_toc *toc)
 
 	/* Pop the error context stack */
 	error_context_stack = errcallback.previous;
+
+	/* Unregister this worker from vacuum progress reporting */
+	pgstat_progress_end_command();
 
 	vac_close_indexes(nindexes, indrels, RowExclusiveLock);
 	table_close(rel, ShareUpdateExclusiveLock);
