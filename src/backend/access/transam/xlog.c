@@ -724,7 +724,7 @@ static void RemoveOldXlogFiles(XLogSegNo segno, XLogRecPtr lastredoptr,
 							   XLogRecPtr endptr, TimeLineID insertTLI);
 static void RemoveXlogFile(const struct dirent *segment_de,
 						   XLogSegNo recycleSegNo, XLogSegNo *endlogSegNo,
-						   TimeLineID insertTLI);
+						   TimeLineID insertTLI, List **cleanup_names);
 static void UpdateLastRemovedPtr(char *filename);
 static void ValidateXLOGDirectoryStructure(void);
 static void CleanupBackupHistory(void);
@@ -3928,6 +3928,8 @@ RemoveOldXlogFiles(XLogSegNo segno, XLogRecPtr lastredoptr, XLogRecPtr endptr,
 	char		lastoff[MAXFNAMELEN];
 	XLogSegNo	endlogSegNo;
 	XLogSegNo	recycleSegNo;
+	List	   *cleanup_names = NIL;
+	ListCell   *lc;
 
 	/* Initialize info about where to try to recycle to */
 	XLByteToSeg(endptr, endlogSegNo, wal_segment_size);
@@ -3970,12 +3972,23 @@ RemoveOldXlogFiles(XLogSegNo segno, XLogRecPtr lastredoptr, XLogRecPtr endptr,
 				/* Update the last removed location in shared memory first */
 				UpdateLastRemovedPtr(xlde->d_name);
 
-				RemoveXlogFile(xlde, recycleSegNo, &endlogSegNo, insertTLI);
+				RemoveXlogFile(xlde, recycleSegNo, &endlogSegNo, insertTLI,
+							   &cleanup_names);
 			}
 		}
 	}
 
 	FreeDir(xldir);
+
+	/* Make all removals durable with one directory fsync. */
+	if (cleanup_names != NIL)
+		fsync_fname(XLOGDIR, true);
+
+	/* Remove archive status only after the WAL-file removals are durable. */
+	foreach(lc, cleanup_names)
+		XLogArchiveCleanup((char *) lfirst(lc));
+
+	list_free_deep(cleanup_names);
 }
 
 /*
@@ -4043,7 +4056,7 @@ RemoveNonParentXlogFiles(XLogRecPtr switchpoint, TimeLineID newTLI)
 			 * - but seems safer to let them be archived and removed later.
 			 */
 			if (!XLogArchiveIsReady(xlde->d_name))
-				RemoveXlogFile(xlde, recycleSegNo, &endLogSegNo, newTLI);
+				RemoveXlogFile(xlde, recycleSegNo, &endLogSegNo, newTLI, NULL);
 		}
 	}
 
@@ -4066,15 +4079,18 @@ RemoveNonParentXlogFiles(XLogRecPtr switchpoint, TimeLineID newTLI)
 static void
 RemoveXlogFile(const struct dirent *segment_de,
 			   XLogSegNo recycleSegNo, XLogSegNo *endlogSegNo,
-			   TimeLineID insertTLI)
+			   TimeLineID insertTLI, List **cleanup_names)
 {
 	char		path[MAXPGPATH];
+	bool		removed = false;
+	const char *unlinkpath;
 #ifdef WIN32
 	char		newpath[MAXPGPATH];
 #endif
 	const char *segname = segment_de->d_name;
 
 	snprintf(path, MAXPGPATH, XLOGDIR "/%s", segname);
+	unlinkpath = path;
 
 	/*
 	 * Before deleting the file, see if it can be recycled as a future log
@@ -4125,19 +4141,30 @@ RemoveXlogFile(const struct dirent *segment_de,
 							path)));
 			return;
 		}
-		rc = durable_unlink(newpath, LOG);
-#else
-		rc = durable_unlink(path, LOG);
+		unlinkpath = newpath;
 #endif
+
+		if (cleanup_names != NULL)
+			rc = unlink(unlinkpath);
+		else
+			rc = durable_unlink(unlinkpath, LOG);
 		if (rc != 0)
 		{
-			/* Message already logged by durable_unlink() */
+			if (cleanup_names != NULL)
+				ereport(LOG,
+						(errcode_for_file_access(),
+						 errmsg("could not remove file \"%s\": %m",
+								unlinkpath)));
 			return;
 		}
 		CheckpointStats.ckpt_segs_removed++;
+		removed = true;
 	}
 
-	XLogArchiveCleanup(segname);
+	if (removed && cleanup_names != NULL)
+		*cleanup_names = lappend(*cleanup_names, pstrdup(segname));
+	else
+		XLogArchiveCleanup(segname);
 }
 
 /*
