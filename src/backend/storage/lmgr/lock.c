@@ -743,11 +743,45 @@ LockHasWaiters(const LOCKTAG *locktag, LOCKMODE lockmode, bool sessionLock)
 	LWLockAcquire(partitionLock, LW_SHARED);
 
 	/*
-	 * We don't need to re-find the lock or proclock, since we kept their
-	 * addresses in the locallock table, and they couldn't have been removed
-	 * while we were holding a lock on them.
+	 * Normally we can rely on the lock and proclock addresses kept in the
+	 * locallock table. But if the lock was acquired via the fast path, those
+	 * pointers are NULL, because the lock was never entered in the shared
+	 * lock table. A fast-path lock is a weak relation lock, and it can only
+	 * gain a waiter if some backend requests a conflicting (strong) lock, and
+	 * that request first moves all matching fast-path locks into the shared
+	 * table (see FastPathTransferRelationLocks()). So if we still find no
+	 * shared lock entry, the lock cannot have any waiters, and we return
+	 * false without moving it. If another backend did move it, look up the
+	 * lock and proclock here, the same way LockRelease() does.
 	 */
 	lock = locallock->lock;
+	if (!lock)
+	{
+		PROCLOCKTAG proclocktag;
+
+		Assert(EligibleForRelationFastPath(locktag, lockmode));
+		lock = (LOCK *) hash_search_with_hash_value(LockMethodLockHash,
+													locktag,
+													locallock->hashcode,
+													HASH_FIND,
+													NULL);
+		if (!lock)
+		{
+			/* Still fast-path only, so nobody could be waiting on it. */
+			LWLockRelease(partitionLock);
+			return false;
+		}
+		locallock->lock = lock;
+
+		proclocktag.myLock = lock;
+		proclocktag.myProc = MyProc;
+		locallock->proclock = (PROCLOCK *) hash_search(LockMethodProcLockHash,
+													   &proclocktag,
+													   HASH_FIND,
+													   NULL);
+		if (!locallock->proclock)
+			elog(ERROR, "failed to re-find shared proclock object");
+	}
 	LOCK_PRINT("LockHasWaiters: found", lock, lockmode);
 	proclock = locallock->proclock;
 	PROCLOCK_PRINT("LockHasWaiters: found", proclock);
