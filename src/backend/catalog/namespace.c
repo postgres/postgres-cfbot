@@ -19,14 +19,18 @@
  */
 #include "postgres.h"
 
+#include "access/genam.h"
 #include "access/htup_details.h"
 #include "access/parallel.h"
+#include "access/table.h"
 #include "access/xact.h"
 #include "access/xlog.h"
 #include "catalog/dependency.h"
+#include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/objectaccess.h"
 #include "catalog/pg_authid.h"
+#include "catalog/pg_depend.h"
 #include "catalog/pg_collation.h"
 #include "catalog/pg_conversion.h"
 #include "catalog/pg_database.h"
@@ -50,9 +54,11 @@
 #include "storage/lmgr.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
+#include "tcop/dest.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/catcache.h"
+#include "utils/fmgroids.h"
 #include "utils/guc_hooks.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
@@ -203,6 +209,8 @@ static Oid	myTempNamespace = InvalidOid;
 static Oid	myTempToastNamespace = InvalidOid;
 
 static SubTransactionId myTempNamespaceSubID = InvalidSubTransactionId;
+
+static bool session_has_temp_tables = false;
 
 /*
  * This is the user's textual search path specification --- it's the value
@@ -4616,6 +4624,26 @@ AtEOXact_Namespace(bool isCommit, bool parallel)
 		myTempNamespaceSubID = InvalidSubTransactionId;
 	}
 
+	if (!parallel)
+	{
+		if (!isCommit)
+		{
+			if (!OidIsValid(myTempNamespace))
+				session_has_temp_tables = false;
+		}
+	}
+}
+
+/*
+ * Pre-commit cleanup and status check for namespaces.
+ * Called before committing the transaction while still in TRANS_INPROGRESS state.
+ */
+void
+PreCommit_Namespace(void)
+{
+	if (ready_for_query_message == READY_FOR_QUERY_RICH &&
+		(MyXactFlags & XACT_FLAGS_ACCESSEDTEMPNAMESPACE))
+		CheckSessionTempTables();
 }
 
 /*
@@ -4725,6 +4753,60 @@ ResetTempTableNamespace(void)
 {
 	if (OidIsValid(myTempNamespace))
 		RemoveTempRelations(myTempNamespace);
+	session_has_temp_tables = false;
+}
+
+/*
+ * CheckSessionTempTables - check if any objects exist in myTempNamespace.
+ *
+ * This performs an index scan on pg_depend to determine if any objects depend
+ * on the temporary namespace. Only called when ready_for_query_message is rich.
+ */
+void
+CheckSessionTempTables(void)
+{
+	Relation	depRel;
+	SysScanDesc scan;
+	ScanKeyData key[2];
+	HeapTuple	tup;
+	bool		has_objects = false;
+
+	if (!IsTransactionState() || !OidIsValid(myTempNamespace))
+	{
+		session_has_temp_tables = false;
+		return;
+	}
+
+	depRel = table_open(DependRelationId, AccessShareLock);
+
+	ScanKeyInit(&key[0],
+				Anum_pg_depend_refclassid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(NamespaceRelationId));
+	ScanKeyInit(&key[1],
+				Anum_pg_depend_refobjid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(myTempNamespace));
+
+	scan = systable_beginscan(depRel, DependReferenceIndexId, true,
+							  SnapshotSelf, 2, key);
+
+	if (HeapTupleIsValid(tup = systable_getnext(scan)))
+		has_objects = true;
+
+	systable_endscan(scan);
+	table_close(depRel, AccessShareLock);
+
+	session_has_temp_tables = has_objects;
+}
+
+/*
+ * HasSessionTempTables - return whether this session currently has temporary tables
+ */
+bool
+HasSessionTempTables(void)
+{
+	return OidIsValid(myTempNamespace) && session_has_temp_tables;
 }
 
 
