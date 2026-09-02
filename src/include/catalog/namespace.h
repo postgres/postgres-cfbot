@@ -184,6 +184,8 @@ extern void GetTempNamespaceState(Oid *tempNamespaceId,
 extern void SetTempNamespaceState(Oid tempNamespaceId,
 								  Oid tempToastNamespaceId);
 extern void ResetTempTableNamespace(void);
+extern void CheckSessionTempTables(void);
+extern bool HasSessionTempTables(void);
 
 extern SearchPathMatcher *GetSearchPathMatcher(MemoryContext context);
 extern SearchPathMatcher *CopySearchPathMatcher(SearchPathMatcher *path);
@@ -196,6 +198,7 @@ extern Oid	FindDefaultConversionProc(int32 for_encoding, int32 to_encoding);
 
 /* initialization & transaction cleanup code */
 extern void InitializeSearchPath(void);
+extern void PreCommit_Namespace(void);
 extern void AtEOXact_Namespace(bool isCommit, bool parallel);
 extern void AtEOSubXact_Namespace(bool isCommit, SubTransactionId mySubid,
 								  SubTransactionId parentSubid);

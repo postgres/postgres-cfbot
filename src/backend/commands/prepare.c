@@ -760,3 +760,15 @@ build_regtype_array(Oid *param_types, int num_params)
 	result = construct_array_builtin(tmp_ary, num_params, REGTYPEOID);
 	return PointerGetDatum(result);
 }
+
+/*
+ * HasActivePreparedStatements - check if backend has any active prepared statements
+ */
+bool
+HasActivePreparedStatements(void)
+{
+	if (prepared_queries == NULL)
+		return false;
+
+	return hash_get_num_entries(prepared_queries) > 0;
+}
