@@ -1156,4 +1156,121 @@ slist_delete_current(slist_mutable_iter *iter)
 		 (iter).cur = (iter).next,											\
 		 (iter).next = (iter).next ? (iter).next->next : NULL)
 
+/* glist: generic wrapper over dclist + dlist */
+
+#define glist_init(head) (_Generic((head), \
+	dclist_head * : dclist_init, \
+	dlist_head * : dlist_init \
+)(head))
+#define glist_is_empty(head) (_Generic((head), \
+	dclist_head * : dclist_is_empty, \
+	dlist_head * : dlist_is_empty \
+)(head))
+#define glist_push_head(head, node) (_Generic((head), \
+	dclist_head * : dclist_push_head, \
+	dlist_head * : dlist_push_head \
+)(head, node))
+#define glist_push_tail(head, node) (_Generic((head), \
+	dlist_head * : dlist_push_tail, \
+	dclist_head * : dclist_push_tail \
+)(head, node))
+#define glist_insert_after(head, after, node) _Generic((head), \
+	dlist_head * : (dlist_insert_after(after, node)), \
+	dclist_head * : (dclist_insert_after(head, after, node)) \
+)
+#define glist_insert_before(head, before, node) _Generic((head), \
+	dlist_head * : (dlist_insert_before(before, node)), \
+	dclist_head * : (dclist_insert_before(head, before, node)) \
+)
+#define glist_delete(head, node) _Generic((head), \
+	dlist_head * : (dlist_delete(node)), \
+	dclist_head * : (dclist_delete(head, node)) \
+)
+#define glist_delete_thoroughly(head, node) _Generic((head), \
+	dlist_head * : (dlist_delete_thoroughly(node)), \
+	dclist_head * : (dclist_delete_thoroughly(head, node)) \
+)
+#define glist_delete_from(head, node) (_Generic((head), \
+	dlist_head * : dlist_delete_from, \
+	dclist_head * : dclist_delete_from \
+)(head, node))
+#define glist_delete_from_thoroughly(head, node) (_Generic((head), \
+	dlist_head * : dlist_delete_from_thoroughly, \
+	dclist_head * : dclist_delete_from_thoroughly \
+)(head, node))
+#define glist_pop_head_node(head) (_Generic((head), \
+	dclist_head * : dclist_pop_head_node, \
+	dlist_head * : dlist_pop_head_node \
+)(head))
+#define glist_move_head(head, node) (_Generic((head), \
+	dlist_head * : dlist_move_head, \
+	dclist_head * : dclist_move_head \
+)(head, node))
+#define glist_move_tail(head, node) (_Generic((head), \
+	dlist_head * : dlist_move_tail, \
+	dclist_head * : dclist_move_tail \
+)(head, node))
+#define glist_has_next(head, node) (_Generic((head), \
+	dlist_head * : dlist_has_next, \
+	dclist_head * : dclist_has_next \
+)(head, node))
+#define glist_has_prev(head, node) (_Generic((head), \
+	dlist_head * : dlist_has_prev, \
+	dclist_head * : dclist_has_prev \
+)(head, node))
+#define glist_next_node(head, node) (_Generic((head), \
+	dlist_head * : dlist_next_node, \
+	dclist_head * : dclist_next_node \
+)(head, node))
+#define glist_prev_node(head, node) (_Generic((head), \
+	dlist_head * : dlist_prev_node, \
+	dclist_head * : dclist_prev_node \
+)(head, node))
+#define glist_head_element_off(head, off) (_Generic((head), \
+	dlist_head * : dlist_head_element_off, \
+	dclist_head * : dclist_head_element_off \
+)(head, off))
+#define glist_head_node(head) (_Generic((head), \
+	dlist_head * : dlist_head_node, \
+	dclist_head * : dclist_head_node \
+)(head))
+#define glist_tail_element_off(head, off) (_Generic((head), \
+	dlist_head * : dlist_tail_element_off, \
+	dclist_head * : dclist_tail_element_off \
+)(head, off))
+#define glist_tail_node(head) (_Generic((head), \
+	dlist_head * : dlist_tail_node, \
+	dclist_head * : dclist_tail_node \
+)(head))
+
+#define glist_foreach_init(iter, lhead) (									\
+	(iter).end = glist_head_node(lhead),									\
+	(iter).cur = (iter).end->next ? (iter).end->next : (iter).end			\
+)
+#define glist_foreach_stopcond(iter, lhead) ((iter).cur != (iter).end)
+#define glist_foreach_next(iter, lhead) ((iter).cur = (iter).cur->next)
+
+#define glist_foreach(iter, lhead)											\
+	for (glist_foreach_init(iter, lhead);									\
+		 glist_foreach_stopcond(iter, lhead);								\
+		 glist_foreach_next(iter, lhead))
+
+#define glist_foreach_modify_init(iter, lhead) (							\
+	(iter).end = glist_head_node(lhead),									\
+	(iter).cur = (iter).end->next ? (iter).end->next : (iter).end,			\
+	(iter).next = (iter).cur->next											\
+)
+#define glist_foreach_modify_stopcond(iter, lhead) ((iter).cur != (iter).end)
+
+#define glist_foreach_modify_next(iter, lhead) (							\
+	((iter).cur = (iter).cur->next),										\
+	((iter).next = (iter).cur->next)										\
+)
+
+#define glist_foreach_modify(iter, lhead)									\
+	for (glist_foreach_modify_init(iter, lhead);							\
+		 glist_foreach_modify_stopcond(iter, lhead);						\
+		 glist_foreach_modify_next(iter, lhead))
+
+
 #endif							/* ILIST_H */
