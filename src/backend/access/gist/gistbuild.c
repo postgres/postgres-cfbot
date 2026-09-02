@@ -520,18 +520,31 @@ gist_indexsortbuild_levelstate_flush(GISTBuildState *state,
 			pfree(itvec_local);
 		}
 
-		/* Apply picksplit to list of all collected tuples */
-		dist = gistSplit(state->indexrel, levelstate->pages[0], itvec, vect_len, state->giststate);
+		/* Apply picksplit to list of all collected tuples. */
+		if (isleaf)
+			dist = gistSplit(state->indexrel, levelstate->pages[0], itvec,
+							 vect_len, state->giststate, 0);
+		else
+			dist = gistSplitPageWithSkipGroups(state->indexrel,
+											   levelstate->pages[0], itvec,
+											   vect_len, state->giststate, false);
 	}
 	else
 	{
-		/* Create split layout from single page */
-		dist = palloc0_object(SplitPageLayout);
-		union_tuple = gistunion(state->indexrel, itvec, vect_len,
-								state->giststate);
-		dist->itup = union_tuple;
-		dist->list = gistfillitupvec(itvec, vect_len, &(dist->lenlist));
-		dist->block.num = vect_len;
+		/* Create split layout from single page. */
+		if (isleaf)
+		{
+			dist = palloc0_object(SplitPageLayout);
+			union_tuple = gistunion(state->indexrel, itvec, vect_len,
+									state->giststate);
+			dist->itup = union_tuple;
+			dist->list = gistfillitupvec(itvec, vect_len, &(dist->lenlist));
+			dist->block.num = vect_len;
+		}
+		else
+			dist = gistSplitPageWithSkipGroups(state->indexrel,
+											   levelstate->pages[0], itvec,
+											   vect_len, state->giststate, false);
 	}
 
 	MemoryContextSwitchTo(oldCtx);
@@ -1101,8 +1114,13 @@ gistbufferinginserttuples(GISTBuildState *buildstate, Buffer buffer, int level,
 			{
 				ItemId		iid = PageGetItemId(page, off);
 				IndexTuple	idxtuple = (IndexTuple) PageGetItem(page, iid);
-				BlockNumber childblkno = ItemPointerGetBlockNumber(&(idxtuple->t_tid));
-				Buffer		childbuf = ReadBuffer(buildstate->indexrel, childblkno);
+				BlockNumber childblkno;
+				Buffer		childbuf;
+
+				if (GistTupleIsSkip(idxtuple))
+					continue;
+				childblkno = ItemPointerGetBlockNumber(&(idxtuple->t_tid));
+				childbuf = ReadBuffer(buildstate->indexrel, childblkno);
 
 				LockBuffer(childbuf, GIST_SHARE);
 				gistMemorizeAllDownlinks(buildstate, childbuf);
@@ -1439,7 +1457,7 @@ gistGetMaxLevel(Relation index)
 	{
 		Buffer		buffer;
 		Page		page;
-		IndexTuple	itup;
+		IndexTuple	itup = NULL;
 
 		buffer = ReadBuffer(index, blkno);
 
@@ -1462,8 +1480,18 @@ gistGetMaxLevel(Relation index)
 		 * matter which downlink we choose, the tree has the same depth
 		 * everywhere, so we just pick the first one.
 		 */
-		itup = (IndexTuple) PageGetItem(page,
-										PageGetItemId(page, FirstOffsetNumber));
+		for (OffsetNumber off = FirstOffsetNumber;
+			 off <= PageGetMaxOffsetNumber(page); off = OffsetNumberNext(off))
+		{
+			itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, off));
+			if (!GistTupleIsSkip(itup))
+				break;
+		}
+		if (itup == NULL || GistTupleIsSkip(itup))
+			ereport(ERROR,
+					(errcode(ERRCODE_INDEX_CORRUPTED),
+					 errmsg("index \"%s\" contains an empty GiST internal page",
+							RelationGetRelationName(index))));
 		blkno = ItemPointerGetBlockNumber(&(itup->t_tid));
 		UnlockReleaseBuffer(buffer);
 
@@ -1557,7 +1585,11 @@ gistMemorizeAllDownlinks(GISTBuildState *buildstate, Buffer parentbuf)
 	{
 		ItemId		iid = PageGetItemId(page, off);
 		IndexTuple	idxtuple = (IndexTuple) PageGetItem(page, iid);
-		BlockNumber childblkno = ItemPointerGetBlockNumber(&(idxtuple->t_tid));
+		BlockNumber childblkno;
+
+		if (GistTupleIsSkip(idxtuple))
+			continue;
+		childblkno = ItemPointerGetBlockNumber(&(idxtuple->t_tid));
 
 		gistMemorizeParent(buildstate, childblkno, parentblkno);
 	}
