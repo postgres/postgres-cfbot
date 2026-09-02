@@ -54,6 +54,7 @@ typedef struct portalhashent
 } PortalHashEnt;
 
 static HTAB *PortalHashTable = NULL;
+static int	active_with_hold_portal_count = 0;
 
 #define PortalHashTableLookup(NAME, PORTAL) \
 do { \
@@ -586,6 +587,12 @@ PortalDrop(Portal portal, bool isTopCommit)
 		tuplestore_end(portal->holdStore);
 		MemoryContextSwitchTo(oldcontext);
 		portal->holdStore = NULL;
+
+		if (portal->cursorOptions & CURSOR_OPT_HOLD)
+		{
+			if (active_with_hold_portal_count > 0)
+				active_with_hold_portal_count--;
+		}
 	}
 
 	/* delete tuplestore storage, if any */
@@ -628,6 +635,8 @@ PortalHashTableDeleteAll(void)
 		hash_seq_term(&status);
 		hash_seq_init(&status, PortalHashTable);
 	}
+
+	active_with_hold_portal_count = 0;
 }
 
 /*
@@ -660,6 +669,8 @@ HoldPortal(Portal portal)
 	portal->createSubid = InvalidSubTransactionId;
 	portal->activeSubid = InvalidSubTransactionId;
 	portal->createLevel = 0;
+
+	active_with_hold_portal_count++;
 }
 
 /*
@@ -1189,6 +1200,15 @@ ThereAreNoReadyPortals(void)
 	}
 
 	return true;
+}
+
+/*
+ * HasActiveWithHoldCursors - check if session has any active WITH HOLD cursors
+ */
+bool
+HasActiveWithHoldCursors(void)
+{
+	return active_with_hold_portal_count > 0;
 }
 
 /*
