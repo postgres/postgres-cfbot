@@ -53,11 +53,11 @@ LOAD '<replaceable class="parameter">filename</replaceable>'
 
   <para>
    Non-superusers can only apply <command>LOAD</command> to library files
-   located in <filename>$libdir/plugins/</filename> &mdash; the specified
-   <replaceable class="parameter">filename</replaceable> must begin
-   with exactly that string.  (It is the database administrator's
-   responsibility to ensure that only <quote>safe</quote> libraries
-   are installed there.)
+   located in <filename>$libdir/plugins/</filename>.  If the specified
+   <replaceable class="parameter">filename</replaceable> is a bare file
+   name, <filename>$libdir/plugins/</filename> is prepended automatically.
+   Otherwise, it must begin with exactly that string.  Administrators
+   must ensure that only <quote>safe</quote> libraries are installed there.
   </para>
  </refsect1>
 
