@@ -51,6 +51,7 @@ CREATE TABLE trunc_stats_test1(id serial, stuff text);
 CREATE TABLE trunc_stats_test2(id serial);
 CREATE TABLE trunc_stats_test3(id serial, stuff text);
 CREATE TABLE trunc_stats_test4(id serial);
+CREATE TABLE trunc_stats_test5(id serial);
 
 -- check that n_live_tup is reset to 0 after truncate
 INSERT INTO trunc_stats_test DEFAULT VALUES;
@@ -103,6 +104,15 @@ TRUNCATE trunc_stats_test4;
 INSERT INTO trunc_stats_test4 DEFAULT VALUES;
 ROLLBACK;
 
+-- ensure a truncate-only pending entry still flushes
+INSERT INTO trunc_stats_test5 DEFAULT VALUES;
+INSERT INTO trunc_stats_test5 DEFAULT VALUES;
+INSERT INTO trunc_stats_test5 DEFAULT VALUES;
+UPDATE trunc_stats_test5 SET id = id + 10 WHERE id = 1;
+DELETE FROM trunc_stats_test5 WHERE id = 2;
+SELECT pg_stat_force_next_flush();
+TRUNCATE trunc_stats_test5;
+
 -- do a seqscan
 SELECT count(*) FROM tenk2;
 -- do an indexscan
@@ -121,6 +131,10 @@ SET LOCAL stats_fetch_consistency = snapshot;
 SELECT relname, n_tup_ins, n_tup_upd, n_tup_del, n_live_tup, n_dead_tup
   FROM pg_stat_user_tables
  WHERE relname like 'trunc_stats_test%' order by relname;
+
+SELECT relname, n_ins_since_vacuum
+  FROM pg_stat_user_tables
+ WHERE relname = 'trunc_stats_test5';
 
 SELECT st.seq_scan >= pr.seq_scan + 1,
        st.seq_tup_read >= pr.seq_tup_read + cl.reltuples,
@@ -299,7 +313,7 @@ RELEASE SAVEPOINT sp1;
 COMMIT;
 SELECT pg_stat_get_live_tuples(:drop_stats_test_subxact_oid);
 
-DROP TABLE trunc_stats_test, trunc_stats_test1, trunc_stats_test2, trunc_stats_test3, trunc_stats_test4;
+DROP TABLE trunc_stats_test, trunc_stats_test1, trunc_stats_test2, trunc_stats_test3, trunc_stats_test4, trunc_stats_test5;
 DROP TABLE prevstats;
 
 
@@ -316,7 +330,6 @@ BEGIN;
 CREATE TEMPORARY TABLE test_last_scan(idx_col int primary key, noidx_col int);
 INSERT INTO test_last_scan(idx_col, noidx_col) VALUES(1, 1);
 SELECT pg_stat_force_next_flush();
-SELECT last_seq_scan, last_idx_scan FROM pg_stat_all_tables WHERE relid = 'test_last_scan'::regclass;
 COMMIT;
 
 SELECT stats_reset IS NOT NULL AS has_stats_reset
@@ -402,6 +415,8 @@ SELECT pg_stat_reset_single_index_counters('test_last_scan_pkey'::regclass);
 
 SELECT idx_scan, stats_reset IS NOT NULL AS has_stats_reset
   FROM pg_stat_all_indexes WHERE indexrelid = 'test_last_scan_pkey'::regclass;
+
+DROP TABLE test_last_scan;
 
 -----
 -- Test reset of some stats for shared table
@@ -654,6 +669,8 @@ DROP index stats_test_idx1;
 ROLLBACK;
 SELECT pg_stat_have_stats('index', :dboid, :stats_test_idx1_oid);
 
+DROP TABLE stats_test_tab1;
+
 -- put enable_seqscan back to on
 SET enable_seqscan TO on;
 
@@ -814,6 +831,8 @@ SELECT sum(writes) AS io_sum_local_new_tblspc_writes
 SELECT :io_sum_local_new_tblspc_writes > :io_sum_local_after_writes;
 RESET temp_buffers;
 
+DROP TABLE test_io_local;
+
 -- Test that reuse of strategy buffers and reads of blocks into these reused
 -- buffers while VACUUMing are tracked in pg_stat_io. If there is sufficient
 -- demand for shared buffers from concurrent queries, some buffers may be
@@ -875,6 +894,9 @@ SELECT pg_stat_reset_backend_stats(pg_backend_pid());
 SELECT sum(evictions) + sum(reuses) + sum(extends) + sum(fsyncs) + sum(reads) + sum(writes) + sum(writebacks) + sum(hits) AS my_io_stats_post_backend_reset
   FROM pg_stat_get_backend_io(pg_backend_pid()) \gset
 SELECT :my_io_stats_pre_reset > :my_io_stats_post_backend_reset;
+
+DROP TABLE test_io_vac_strategy;
+DROP TABLE test_io_bulkwrite_strategy;
 
 -- Check invalid input for pg_stat_get_backend_io()
 SELECT pg_stat_get_backend_io(NULL);
@@ -1023,5 +1045,314 @@ SELECT fastpath_exceeded > :backend_fastpath_exceeded_before
   WHERE locktype = 'relation';
 
 DROP TABLE part_test;
+
+--
+-- Test in-transaction flushes
+--
+CREATE TABLE partial_flush(id int) WITH (autovacuum_enabled = off);
+INSERT INTO partial_flush VALUES (1), (2), (3);
+SELECT pg_stat_force_next_flush();
+
+-- Record counters before the explicit transaction
+SELECT seq_scan AS seq_scan_before,
+       seq_tup_read AS seq_tup_read_before,
+       n_tup_ins AS n_tup_ins_before,
+       n_tup_upd AS n_tup_upd_before,
+       n_tup_hot_upd + n_tup_newpage_upd AS upd_detail_before
+  FROM pg_stat_user_tables WHERE relname = 'partial_flush' \gset
+
+BEGIN;
+SET LOCAL stats_fetch_consistency = none;
+
+-- Generate both transaction-safe and transaction-unsafe counters.
+SELECT count(*) FROM partial_flush;
+INSERT INTO partial_flush VALUES (4), (5);
+UPDATE partial_flush SET id = id WHERE id = 1;
+
+-- Flush in-transaction
+SELECT pg_stat_force_next_flush();
+
+-- Scans are visible in-transaction; ins and upd stay deferred.
+SELECT seq_scan - :seq_scan_before AS seq_scan_delta,
+       seq_tup_read - :seq_tup_read_before AS seq_tup_read_delta,
+       n_tup_ins - :n_tup_ins_before AS n_tup_ins_delta,
+       n_tup_upd - :n_tup_upd_before AS n_tup_upd_delta
+  FROM pg_stat_user_tables WHERE relname = 'partial_flush';
+
+-- The pg_stat_xact_user_tables view still reports this transaction's own
+-- inserts and updates, which the flush leaves in the pending counts.
+SELECT n_tup_ins, n_tup_upd
+  FROM pg_stat_xact_user_tables WHERE relname = 'partial_flush';
+
+-- Generate more transaction-safe activity to verify no double counting.
+SELECT count(*) FROM partial_flush;
+
+-- Flush again in-transaction
+SELECT pg_stat_force_next_flush();
+
+-- Should show cumulative totals, not double-counted.
+SELECT seq_scan - :seq_scan_before AS seq_scan_delta,
+       seq_tup_read - :seq_tup_read_before AS seq_tup_read_delta,
+       n_tup_ins - :n_tup_ins_before AS n_tup_ins_delta,
+       n_tup_upd - :n_tup_upd_before AS n_tup_upd_delta
+  FROM pg_stat_user_tables WHERE relname = 'partial_flush';
+
+COMMIT;
+
+-- After commit, all counters should be flushed.
+
+SELECT seq_scan - :seq_scan_before AS seq_scan_delta,
+       seq_tup_read - :seq_tup_read_before AS seq_tup_read_delta,
+       n_tup_ins - :n_tup_ins_before AS n_tup_ins_delta,
+       n_tup_upd - :n_tup_upd_before AS n_tup_upd_delta,
+       n_tup_hot_upd + n_tup_newpage_upd - :upd_detail_before AS upd_detail_delta
+  FROM pg_stat_user_tables WHERE relname = 'partial_flush';
+
+DROP TABLE partial_flush;
+
+--
+-- Test in-transaction flushes of index statistics.  An index scan reaches
+-- shared stats during a transaction and must not be double-counted by a later flush.
+--
+CREATE TABLE partial_flush_idx(id int primary key) WITH (autovacuum_enabled = off);
+INSERT INTO partial_flush_idx SELECT generate_series(1, 100);
+SELECT pg_stat_force_next_flush();
+
+SELECT idx_scan AS idx_scan_before
+  FROM pg_stat_user_indexes WHERE indexrelid = 'partial_flush_idx_pkey'::regclass \gset
+
+BEGIN;
+SET LOCAL stats_fetch_consistency = none;
+SET LOCAL enable_seqscan = off;
+SET LOCAL enable_bitmapscan = off;
+
+-- Two index scans.
+SELECT id FROM partial_flush_idx WHERE id = 1;
+SELECT id FROM partial_flush_idx WHERE id = 2;
+
+-- Flush in-transaction; index stats are non-transactional and reach shared
+-- stats now.
+SELECT pg_stat_force_next_flush();
+SELECT idx_scan - :idx_scan_before AS idx_scan_delta
+  FROM pg_stat_user_indexes WHERE indexrelid = 'partial_flush_idx_pkey'::regclass;
+
+-- Another index scan, then flush again to verify no double counting.
+SELECT id FROM partial_flush_idx WHERE id = 3;
+SELECT pg_stat_force_next_flush();
+SELECT idx_scan - :idx_scan_before AS idx_scan_delta
+  FROM pg_stat_user_indexes WHERE indexrelid = 'partial_flush_idx_pkey'::regclass;
+
+COMMIT;
+
+-- After commit the count is unchanged from the last in-transaction flush.
+SELECT pg_stat_force_next_flush();
+SELECT idx_scan - :idx_scan_before AS idx_scan_delta
+  FROM pg_stat_user_indexes WHERE indexrelid = 'partial_flush_idx_pkey'::regclass;
+
+DROP TABLE partial_flush_idx;
+
+--
+-- Roll back a savepoint after an in-transaction flush.  The flush must not
+-- write the subxact's inserts to shared stats.  After commit the inserts made
+-- outside the subxact count as live tuples while those rolled back count as
+-- dead.
+--
+CREATE TABLE subxact_flush(id int) WITH (autovacuum_enabled = off);
+INSERT INTO subxact_flush SELECT generate_series(1, 50);
+SELECT pg_stat_force_next_flush();
+
+SELECT n_live_tup AS n_live_tup_before,
+       n_dead_tup AS n_dead_tup_before,
+       seq_scan AS seq_scan_before
+  FROM pg_stat_user_tables WHERE relname = 'subxact_flush' \gset
+
+BEGIN;
+SET LOCAL stats_fetch_consistency = none;
+
+SELECT count(*) FROM subxact_flush;
+
+SAVEPOINT sp;
+INSERT INTO subxact_flush SELECT generate_series(51, 80);
+
+-- Flush during a transaction.  The scan reaches shared stats; the insert is deferred.
+SELECT pg_stat_force_next_flush();
+SELECT seq_scan - :seq_scan_before AS seq_scan_delta,
+       n_live_tup = :n_live_tup_before AS live_tup_unchanged
+  FROM pg_stat_user_tables WHERE relname = 'subxact_flush';
+
+ROLLBACK TO SAVEPOINT sp;
+INSERT INTO subxact_flush SELECT generate_series(81, 90);
+
+COMMIT;
+
+-- After commit the inserts made outside the subxact count as live tuples,
+-- those rolled back count as dead, and the in-transaction scan is still there.
+SELECT pg_stat_force_next_flush();
+SELECT n_live_tup - :n_live_tup_before AS n_live_tup_delta,
+       n_dead_tup - :n_dead_tup_before AS n_dead_tup_delta,
+       seq_scan - :seq_scan_before AS seq_scan_delta
+  FROM pg_stat_user_tables WHERE relname = 'subxact_flush';
+
+DROP TABLE subxact_flush;
+
+--
+-- Test that an in-transaction flush keeps the database aggregate in step with
+-- the relation counters that feed it, rather than a flush behind.
+--
+-- The relation flush accumulates into the database pending entry.  If that
+-- database entry was already visited earlier in the same flush pass, it must
+-- be re-queued so the relation's contribution reaches shared stats in this
+-- pass, not the next one.  To force that ordering, prime the database pending
+-- ahead of the table.  Scan a catalog and flush (which leaves the database
+-- entry pending), then scan the table and flush again.
+--
+CREATE TABLE flush_db_lag(id int) WITH (autovacuum_enabled = off);
+INSERT INTO flush_db_lag SELECT generate_series(1, 100);
+SELECT pg_stat_force_next_flush();
+
+BEGIN;
+SET LOCAL stats_fetch_consistency = none;
+
+-- Prime the database pending entry (and flush it) before touching the table.
+SELECT 1 FROM pg_class LIMIT 1;
+SELECT pg_stat_force_next_flush();
+
+SELECT pg_stat_get_db_tuples_returned(:dboid) AS db_before \gset
+
+-- Now scan the table; its 100 tuples feed the already-visited database entry.
+SELECT count(*) FROM flush_db_lag;
+SELECT pg_stat_force_next_flush();
+
+-- The database aggregate must have advanced by at least the relation's own
+-- 100 tuples in this same flush.  It also counts catalog scans, so the
+-- increase can only be larger, never smaller.  Without re-queue the relation's
+-- contribution would be deferred and the increase would fall short of 100.
+SELECT pg_stat_get_db_tuples_returned(:dboid) - :db_before >= 100 AS db_kept_up;
+
+COMMIT;
+
+DROP TABLE flush_db_lag;
+
+--
+-- Test an in-transaction partial flush with TRUNCATE.  The truncate's reset of
+-- live/dead counters is transactional and must not reach shared stats until
+-- commit.
+--
+CREATE TABLE partial_flush_truncate(id int) WITH (autovacuum_enabled = off);
+INSERT INTO partial_flush_truncate SELECT generate_series(1, 100);
+DELETE FROM partial_flush_truncate WHERE id <= 20;
+SELECT pg_stat_force_next_flush();
+
+SELECT n_live_tup AS n_live_tup_before,
+       n_dead_tup AS n_dead_tup_before,
+       seq_scan AS seq_scan_before
+  FROM pg_stat_user_tables WHERE relname = 'partial_flush_truncate' \gset
+
+-- Case 1 runs DML, TRUNCATE, more DML, then ROLLBACK.  The truncate's zeroing
+-- and all transactional counters must not leak to shared stats.
+BEGIN;
+SET LOCAL stats_fetch_consistency = none;
+
+-- DML before truncate.
+SELECT count(*) FROM partial_flush_truncate;
+INSERT INTO partial_flush_truncate SELECT generate_series(101, 110);
+UPDATE partial_flush_truncate SET id = id WHERE id = 1;
+
+TRUNCATE partial_flush_truncate;
+
+-- DML after truncate.
+INSERT INTO partial_flush_truncate SELECT generate_series(1, 10);
+
+-- Flush during a transaction.  The scan reaches shared stats; the rest is deferred.
+SELECT pg_stat_force_next_flush();
+
+SELECT seq_scan - :seq_scan_before AS seq_scan_delta,
+       n_live_tup = :n_live_tup_before AS live_tup_unchanged,
+       n_dead_tup = :n_dead_tup_before AS dead_tup_unchanged
+  FROM pg_stat_user_tables WHERE relname = 'partial_flush_truncate';
+
+ROLLBACK;
+
+-- After rollback live_tup is unchanged, but dead_tup increases since the
+-- aborted inserts leave dead tuples behind.
+SELECT pg_stat_force_next_flush();
+SELECT n_live_tup = :n_live_tup_before AS live_tup_unchanged,
+       n_dead_tup - :n_dead_tup_before AS dead_tup_delta
+  FROM pg_stat_user_tables WHERE relname = 'partial_flush_truncate';
+
+-- Case 2 runs DML, TRUNCATE, INSERT, DELETE, then COMMIT.  Update the baseline
+-- to account for changes from case 1.
+SELECT seq_scan AS seq_scan_before,
+       n_live_tup AS n_live_tup_before,
+       n_dead_tup AS n_dead_tup_before
+  FROM pg_stat_user_tables WHERE relname = 'partial_flush_truncate' \gset
+
+BEGIN;
+SET LOCAL stats_fetch_consistency = none;
+
+-- DML before truncate.
+SELECT count(*) FROM partial_flush_truncate;
+INSERT INTO partial_flush_truncate SELECT generate_series(101, 110);
+UPDATE partial_flush_truncate SET id = id WHERE id = 1;
+
+TRUNCATE partial_flush_truncate;
+
+-- DML after truncate.
+INSERT INTO partial_flush_truncate SELECT generate_series(1, 10);
+DELETE FROM partial_flush_truncate WHERE id <= 3;
+
+-- Flush during a transaction.  The scan reaches shared stats; transactional counters
+-- are deferred.
+SELECT pg_stat_force_next_flush();
+
+SELECT seq_scan - :seq_scan_before AS seq_scan_delta,
+       n_live_tup = :n_live_tup_before AS live_tup_unchanged,
+       n_dead_tup = :n_dead_tup_before AS dead_tup_unchanged
+  FROM pg_stat_user_tables WHERE relname = 'partial_flush_truncate';
+
+COMMIT;
+
+-- After commit, TRUNCATE has zeroed live/dead, so the counts reflect only the
+-- post-truncate inserts and deletes.
+SELECT pg_stat_force_next_flush();
+SELECT n_live_tup, n_dead_tup
+  FROM pg_stat_user_tables WHERE relname = 'partial_flush_truncate';
+
+DROP TABLE partial_flush_truncate;
+
+--
+-- Test that pg_stat_force_next_flush() called inside a function does not
+-- lose function call statistics.  An in-transaction flush must not clear the
+-- pending counts that the pg_stat_xact_user_functions view reports, and must
+-- not lose or double-count the cumulative shared counts.
+--
+SET track_functions TO 'all';
+CREATE FUNCTION flush_func_test() RETURNS VOID LANGUAGE plpgsql AS $$
+BEGIN
+    PERFORM pg_stat_force_next_flush();
+END;
+$$;
+SELECT 'flush_func_test()'::regprocedure::oid AS flush_func_test_oid \gset
+
+BEGIN;
+SET LOCAL stats_fetch_consistency = none;
+SELECT flush_func_test();
+SELECT flush_func_test();
+SELECT pg_stat_force_next_flush();
+
+-- Function calls are not transactional, so the calls are visible in both
+-- pg_stat_user_functions and pg_stat_xact_user_functions after the flush.  The
+-- flush must not clear the pending counts.
+SELECT funcname, calls FROM pg_stat_user_functions WHERE funcid = :flush_func_test_oid;
+SELECT pg_stat_get_xact_function_calls(:flush_func_test_oid) AS xact_calls;
+
+SELECT flush_func_test();
+COMMIT;
+
+-- After commit the third call is visible too, with no call double-counted.
+SELECT pg_stat_force_next_flush();
+SELECT funcname, calls FROM pg_stat_user_functions WHERE funcid = :flush_func_test_oid;
+
+DROP FUNCTION flush_func_test;
 
 -- End of Stats Test
