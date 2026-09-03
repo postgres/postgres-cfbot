@@ -132,7 +132,8 @@ extern HeapTuple statext_expressions_load(Oid stxoid, bool inh, int idx);
  * Statistics values applied to pg_class during stats import or restore
  *
  * A field with isnull set to true leaves the corresponding pg_class column
- * untouched.  The caller must initialize every field.
+ * untouched.  The caller must initialize every field; see also
+ * RELATION_STATS_VALUES_NULL.
  *
  * The "version" field is currently ignored.  In the future it can be used to
  * interpret the format of older statistics.
@@ -147,10 +148,23 @@ typedef struct RelationStatsValues
 } RelationStatsValues;
 
 /*
+ * Initializer for a RelationStatsValues.
+ */
+#define RELATION_STATS_VALUES_NULL \
+{ \
+	.version = {.value = (Datum) 0, .isnull = true}, \
+	.relpages = {.value = (Datum) 0, .isnull = true}, \
+	.reltuples = {.value = (Datum) 0, .isnull = true}, \
+	.relallvisible = {.value = (Datum) 0, .isnull = true}, \
+	.relallfrozen = {.value = (Datum) 0, .isnull = true}, \
+}
+
+/*
  * Statistics values applied to pg_statistic during stats import or restore.
  *
  * A field with isnull set to true leaves the corresponding statistics kind
- * unset.  The caller must initialize every field.
+ * unset.  The caller must initialize every field; see also
+ * ATTRIBUTE_STATS_VALUES_NULL.
  *
  * The "version" field is currently ignored.  In the future, it can be used to
  * interpret the format of older statistics.
@@ -172,6 +186,27 @@ typedef struct AttributeStatsValues
 	NullableDatum range_empty_frac;
 	NullableDatum range_bounds_histogram;
 } AttributeStatsValues;
+
+/*
+ * Initializer for an AttributeStatsValues.
+ */
+#define ATTRIBUTE_STATS_VALUES_NULL \
+{ \
+	.version = {.value = (Datum) 0, .isnull = true}, \
+	.null_frac = {.value = (Datum) 0, .isnull = true}, \
+	.avg_width = {.value = (Datum) 0, .isnull = true}, \
+	.n_distinct = {.value = (Datum) 0, .isnull = true}, \
+	.most_common_vals = {.value = (Datum) 0, .isnull = true}, \
+	.most_common_freqs = {.value = (Datum) 0, .isnull = true}, \
+	.histogram_bounds = {.value = (Datum) 0, .isnull = true}, \
+	.correlation = {.value = (Datum) 0, .isnull = true}, \
+	.most_common_elems = {.value = (Datum) 0, .isnull = true}, \
+	.most_common_elem_freqs = {.value = (Datum) 0, .isnull = true}, \
+	.elem_count_histogram = {.value = (Datum) 0, .isnull = true}, \
+	.range_length_histogram = {.value = (Datum) 0, .isnull = true}, \
+	.range_empty_frac = {.value = (Datum) 0, .isnull = true}, \
+	.range_bounds_histogram = {.value = (Datum) 0, .isnull = true}, \
+}
 
 extern bool import_relation_statistics(Relation rel,
 									   const RelationStatsValues *statvalues);
