@@ -1244,24 +1244,38 @@ retry:
 	 *
 	 * Note that RelationBuildRuleLock() relies on this being done after
 	 * extracting the relation's reloptions.
+	 *
+	 * Rules, triggers, and RLS policies only exist for table-like
+	 * relations, never for indexes; relhasrules/relhastriggers/
+	 * relrowsecurity are guaranteed false for RELKIND_INDEX and
+	 * RELKIND_PARTITIONED_INDEX.  We must skip this whole block, rather
+	 * than just relying on that, because rd_rules/rd_rulescxt/trigdesc/
+	 * rd_rsdesc are overlaid in a union with the index-only fields (see
+	 * RelationData in rel_internal.h); the else-branches below would
+	 * otherwise clobber the index access info that
+	 * RelationInitIndexAccessInfo() just set up above.
 	 */
-	if (relation->rd_rel->relhasrules)
-		RelationBuildRuleLock(relation);
-	else
+	if (relation->rd_rel->relkind != RELKIND_INDEX &&
+		relation->rd_rel->relkind != RELKIND_PARTITIONED_INDEX)
 	{
-		relation->rd_rules = NULL;
-		relation->rd_rulescxt = NULL;
+		if (relation->rd_rel->relhasrules)
+			RelationBuildRuleLock(relation);
+		else
+		{
+			relation->rd_rules = NULL;
+			relation->rd_rulescxt = NULL;
+		}
+
+		if (relation->rd_rel->relhastriggers)
+			RelationBuildTriggers(relation);
+		else
+			relation->trigdesc = NULL;
+
+		if (relation->rd_rel->relrowsecurity)
+			RelationBuildRowSecurity(relation);
+		else
+			relation->rd_rsdesc = NULL;
 	}
-
-	if (relation->rd_rel->relhastriggers)
-		RelationBuildTriggers(relation);
-	else
-		relation->trigdesc = NULL;
-
-	if (relation->rd_rel->relrowsecurity)
-		RelationBuildRowSecurity(relation);
-	else
-		relation->rd_rsdesc = NULL;
 
 	/*
 	 * initialize the relation lock manager information
@@ -2234,8 +2248,15 @@ RelationCloseCleanup(Relation relation)
 	 * If the relation is no longer open in this session, we can clean up any
 	 * stale partition descriptors it has.  This is unlikely, so check to see
 	 * if there are child contexts before expending a call to mcxt.c.
+	 *
+	 * rd_pdcxt/rd_pddcxt only exist for table-like relations; they are
+	 * overlaid in a union with index-only fields (see RelationData in
+	 * rel_internal.h), so this must be skipped for index relations to
+	 * avoid misinterpreting unrelated index data as a MemoryContext.
 	 */
-	if (RelationHasReferenceCountZero(relation))
+	if (RelationHasReferenceCountZero(relation) &&
+		relation->rd_rel->relkind != RELKIND_INDEX &&
+		relation->rd_rel->relkind != RELKIND_PARTITIONED_INDEX)
 	{
 		if (relation->rd_pdcxt != NULL &&
 			relation->rd_pdcxt->firstchild != NULL)
@@ -2440,7 +2461,22 @@ RelationReloadNailed(Relation relation)
 static void
 RelationDestroyRelation(Relation relation, bool remember_tupdesc)
 {
+	bool		isindex;
+
 	Assert(RelationHasReferenceCountZero(relation));
+
+	/*
+	 * rd_index/rd_indexcxt/etc and rd_rules/trigdesc/rd_partkey/etc are
+	 * overlaid in a union (see RelationData in rel_internal.h), since a
+	 * relation is never both an index and a table-like relation at once.
+	 * Capture which set of fields is "live" for this relation before
+	 * freeing rd_rel, so we know which branch of the union to clean up
+	 * below; the other branch's fields are aliases of this one's and must
+	 * not be dereferenced.
+	 */
+	isindex = relation->rd_rel &&
+		(relation->rd_rel->relkind == RELKIND_INDEX ||
+		 relation->rd_rel->relkind == RELKIND_PARTITIONED_INDEX);
 
 	/*
 	 * Make sure smgr and lower levels close the relation's files, if they
@@ -2475,39 +2511,45 @@ RelationDestroyRelation(Relation relation, bool remember_tupdesc)
 		else
 			FreeTupleDesc(relation->rd_att);
 	}
-	FreeTriggerDesc(relation->trigdesc);
-	list_free_deep(relation->rd_fkeylist);
 	list_free(relation->rd_indexlist);
 	list_free(relation->rd_statlist);
-	bms_free(relation->rd_keyattr);
-	bms_free(relation->rd_pkattr);
-	bms_free(relation->rd_idattr);
-	bms_free(relation->rd_hotblockingattr);
-	bms_free(relation->rd_summarizedattr);
-	if (relation->rd_pubdesc)
-		pfree(relation->rd_pubdesc);
 	if (relation->rd_options)
 		pfree(relation->rd_options);
-	if (relation->rd_indextuple)
-		pfree(relation->rd_indextuple);
 	if (relation->rd_amcache)
 		pfree(relation->rd_amcache);
-	if (relation->rd_fdwroutine)
-		pfree(relation->rd_fdwroutine);
-	if (relation->rd_indexcxt)
-		MemoryContextDelete(relation->rd_indexcxt);
-	if (relation->rd_rulescxt)
-		MemoryContextDelete(relation->rd_rulescxt);
-	if (relation->rd_rsdesc)
-		MemoryContextDelete(relation->rd_rsdesc->rscxt);
-	if (relation->rd_partkeycxt)
-		MemoryContextDelete(relation->rd_partkeycxt);
-	if (relation->rd_pdcxt)
-		MemoryContextDelete(relation->rd_pdcxt);
-	if (relation->rd_pddcxt)
-		MemoryContextDelete(relation->rd_pddcxt);
-	if (relation->rd_partcheckcxt)
-		MemoryContextDelete(relation->rd_partcheckcxt);
+	if (!isindex)
+	{
+		FreeTriggerDesc(relation->trigdesc);
+		list_free_deep(relation->rd_fkeylist);
+		bms_free(relation->rd_keyattr);
+		bms_free(relation->rd_pkattr);
+		bms_free(relation->rd_idattr);
+		bms_free(relation->rd_hotblockingattr);
+		bms_free(relation->rd_summarizedattr);
+		if (relation->rd_pubdesc)
+			pfree(relation->rd_pubdesc);
+		if (relation->rd_fdwroutine)
+			pfree(relation->rd_fdwroutine);
+		if (relation->rd_rulescxt)
+			MemoryContextDelete(relation->rd_rulescxt);
+		if (relation->rd_rsdesc)
+			MemoryContextDelete(relation->rd_rsdesc->rscxt);
+		if (relation->rd_partkeycxt)
+			MemoryContextDelete(relation->rd_partkeycxt);
+		if (relation->rd_pdcxt)
+			MemoryContextDelete(relation->rd_pdcxt);
+		if (relation->rd_pddcxt)
+			MemoryContextDelete(relation->rd_pddcxt);
+		if (relation->rd_partcheckcxt)
+			MemoryContextDelete(relation->rd_partcheckcxt);
+	}
+	else
+	{
+		if (relation->rd_indextuple)
+			pfree(relation->rd_indextuple);
+		if (relation->rd_indexcxt)
+			MemoryContextDelete(relation->rd_indexcxt);
+	}
 	pfree(relation);
 }
 
@@ -2699,10 +2741,29 @@ RelationRebuildRelation(Relation relation)
 		Assert(relation->rd_rel->relkind == newrel->rd_rel->relkind);
 
 		keep_tupdesc = equalTupleDescs(relation->rd_att, newrel->rd_att);
-		keep_rules = equalRuleLocks(relation->rd_rules, newrel->rd_rules);
-		keep_policies = equalRSDesc(relation->rd_rsdesc, newrel->rd_rsdesc);
-		/* partkey is immutable once set up, so we can always keep it */
-		keep_partkey = (relation->rd_partkey != NULL);
+
+		/*
+		 * rd_rules/rd_rsdesc/rd_partkey only exist for table-like
+		 * relations; they are overlaid in a union with index-only fields
+		 * (see RelationData in rel_internal.h).  We normally only reach
+		 * this generic rebuild path for indexes whose access info hasn't
+		 * been initialized yet (see above), but guard explicitly anyway to
+		 * avoid misinterpreting unrelated index data.
+		 */
+		if (relation->rd_rel->relkind == RELKIND_INDEX ||
+			relation->rd_rel->relkind == RELKIND_PARTITIONED_INDEX)
+		{
+			keep_rules = false;
+			keep_policies = false;
+			keep_partkey = false;
+		}
+		else
+		{
+			keep_rules = equalRuleLocks(relation->rd_rules, newrel->rd_rules);
+			keep_policies = equalRSDesc(relation->rd_rsdesc, newrel->rd_rsdesc);
+			/* partkey is immutable once set up, so we can always keep it */
+			keep_partkey = (relation->rd_partkey != NULL);
+		}
 
 		/*
 		 * Perform swapping of the relcache entry contents.  Within this
@@ -6482,27 +6543,38 @@ load_relcache_init_file(bool shared)
 		 * be a big performance hit since few system catalogs have such. Ditto
 		 * for RLS policy data, partition info, index expressions, predicates,
 		 * exclusion info, and FDW info.
+		 *
+		 * These fields are overlaid in a union with the index-only fields
+		 * that were just set up above (see RelationData in rel_internal.h),
+		 * so this must be skipped for index relations to avoid clobbering
+		 * that data.
 		 */
-		rel->rd_rules = NULL;
-		rel->rd_rulescxt = NULL;
-		rel->trigdesc = NULL;
-		rel->rd_rsdesc = NULL;
-		rel->rd_partkey = NULL;
-		rel->rd_partkeycxt = NULL;
-		rel->rd_partdesc = NULL;
-		rel->rd_partdesc_nodetached = NULL;
-		rel->rd_partdesc_nodetached_xmin = InvalidTransactionId;
-		rel->rd_pdcxt = NULL;
-		rel->rd_pddcxt = NULL;
-		rel->rd_partcheck = NIL;
-		rel->rd_partcheckvalid = false;
-		rel->rd_partcheckcxt = NULL;
-		rel->rd_indexprs = NIL;
-		rel->rd_indpred = NIL;
-		rel->rd_exclops = NULL;
-		rel->rd_exclprocs = NULL;
-		rel->rd_exclstrats = NULL;
-		rel->rd_fdwroutine = NULL;
+		if (rel->rd_rel->relkind != RELKIND_INDEX)
+		{
+			rel->rd_rules = NULL;
+			rel->rd_rulescxt = NULL;
+			rel->trigdesc = NULL;
+			rel->rd_rsdesc = NULL;
+			rel->rd_partkey = NULL;
+			rel->rd_partkeycxt = NULL;
+			rel->rd_partdesc = NULL;
+			rel->rd_partdesc_nodetached = NULL;
+			rel->rd_partdesc_nodetached_xmin = InvalidTransactionId;
+			rel->rd_pdcxt = NULL;
+			rel->rd_pddcxt = NULL;
+			rel->rd_partcheck = NIL;
+			rel->rd_partcheckvalid = false;
+			rel->rd_partcheckcxt = NULL;
+			rel->rd_keyattr = NULL;
+			rel->rd_pkattr = NULL;
+			rel->rd_idattr = NULL;
+			rel->rd_hotblockingattr = NULL;
+			rel->rd_summarizedattr = NULL;
+			rel->rd_pubdesc = NULL;
+			rel->rd_fdwroutine = NULL;
+			rel->rd_fkeyvalid = false;
+			rel->rd_fkeylist = NIL;
+		}
 
 		/*
 		 * Reset transient-state fields in the relcache entry
@@ -6517,14 +6589,8 @@ load_relcache_init_file(bool shared)
 		rel->rd_pkindex = InvalidOid;
 		rel->rd_replidindex = InvalidOid;
 		rel->rd_attrsvalid = false;
-		rel->rd_keyattr = NULL;
-		rel->rd_pkattr = NULL;
-		rel->rd_idattr = NULL;
-		rel->rd_pubdesc = NULL;
 		rel->rd_statvalid = false;
 		rel->rd_statlist = NIL;
-		rel->rd_fkeyvalid = false;
-		rel->rd_fkeylist = NIL;
 		rel->rd_createSubid = InvalidSubTransactionId;
 		rel->rd_newRelfilelocatorSubid = InvalidSubTransactionId;
 		rel->rd_firstRelfilelocatorSubid = InvalidSubTransactionId;

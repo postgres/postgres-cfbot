@@ -344,12 +344,28 @@ generate_partition_qual(Relation rel)
 			   *result = NIL;
 	Oid			parentrelid;
 	Relation	parent;
+	bool		is_index;
 
 	/* Guard against stack overflow due to overly deep partition tree */
 	check_stack_depth();
 
+	/*
+	 * rd_partcheck/rd_partcheckvalid/rd_partcheckcxt only exist for
+	 * table-like relations; they are overlaid in a union with index-only
+	 * fields (see RelationData in rel_internal.h). generate_partition_qual()
+	 * is also invoked for partitioned indexes (an index partition never has
+	 * a partition bound of its own, so this always ends up computing an
+	 * empty qual list for them), so guard against misinterpreting unrelated
+	 * index data, and don't cache results for indexes.
+	 */
+	if (rel->rd_rel->relkind == RELKIND_INDEX ||
+		rel->rd_rel->relkind == RELKIND_PARTITIONED_INDEX)
+		is_index = true;
+	else
+		is_index = false;
+
 	/* If we already cached the result, just return a copy */
-	if (rel->rd_partcheckvalid)
+	if (!is_index && rel->rd_partcheckvalid)
 		return copyObject(rel->rd_partcheck);
 
 	/*
@@ -396,6 +412,13 @@ generate_partition_qual(Relation rel)
 	 * here.
 	 */
 	result = map_partition_varattnos(result, 1, rel, parent);
+
+	/* Never cache results for indexes; see comment above */
+	if (is_index)
+	{
+		relation_close(parent, NoLock);
+		return result;
+	}
 
 	/* Assert that we're not leaking any old data during assignments below */
 	Assert(rel->rd_partcheckcxt == NULL);

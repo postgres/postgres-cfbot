@@ -98,41 +98,115 @@ typedef struct RelationData
 	TupleDesc	rd_att;			/* tuple descriptor */
 	Oid			rd_id;			/* relation's object id */
 	LockInfoData rd_lockInfo;	/* lock mgr's info for locking relation */
-	RuleLock   *rd_rules;		/* rewrite rules */
-	MemoryContext rd_rulescxt;	/* private memory cxt for rd_rules, if any */
-	TriggerDesc *trigdesc;		/* Trigger info, or NULL if rel has none */
-	/* use "struct" here to avoid needing to include rowsecurity.h: */
-	struct RowSecurityDesc *rd_rsdesc;	/* row security policies, or NULL */
-
-	/* data managed by RelationGetFKeyList: */
-	List	   *rd_fkeylist;	/* list of ForeignKeyCacheInfo (see below) */
-	bool		rd_fkeyvalid;	/* true if list has been computed */
-
-	/* data managed by RelationGetPartitionKey: */
-	PartitionKey rd_partkey;	/* partition key, or NULL */
-	MemoryContext rd_partkeycxt;	/* private context for rd_partkey, if any */
-
-	/* data managed by RelationGetPartitionDesc: */
-	PartitionDesc rd_partdesc;	/* partition descriptor, or NULL */
-	MemoryContext rd_pdcxt;		/* private context for rd_partdesc, if any */
-
-	/* Same as above, for partdescs that omit detached partitions */
-	PartitionDesc rd_partdesc_nodetached;	/* partdesc w/o detached parts */
-	MemoryContext rd_pddcxt;	/* for rd_partdesc_nodetached, if any */
 
 	/*
-	 * pg_inherits.xmin of the partition that was excluded in
-	 * rd_partdesc_nodetached.  This informs a future user of that partdesc:
-	 * if this value is not in progress for the active snapshot, then the
-	 * partdesc can be used, otherwise they have to build a new one.  (This
-	 * matches what find_inheritance_children_extended would do).
+	 * The following two blocks of fields are mutually exclusive: a
+	 * relation is never both an index and a non-index (table-like)
+	 * relation at the same time.  Overlapping them in a union avoids
+	 * paying for both sets of fields in every relcache entry, which adds
+	 * up across installations with large numbers of tables and indexes.
+	 * Anonymous struct/union members are used so that every field below
+	 * remains directly accessible as "relation->rd_xxx", exactly as if it
+	 * were not inside a union.
+	 *
+	 * NOTE: RelationDestroyRelation() in relcache.c must only clean up the
+	 * branch of this union that matches the relation's actual relkind; the
+	 * fields of the other branch alias this one's memory and must not be
+	 * dereferenced.
 	 */
-	TransactionId rd_partdesc_nodetached_xmin;
+	union
+	{
+		/* fields used only for a non-index (table-like) relation */
+		struct
+		{
+			RuleLock   *rd_rules;		/* rewrite rules */
+			MemoryContext rd_rulescxt;	/* private memory cxt for rd_rules, if any */
+			TriggerDesc *trigdesc;		/* Trigger info, or NULL if rel has none */
+			/* use "struct" here to avoid needing to include rowsecurity.h: */
+			struct RowSecurityDesc *rd_rsdesc;	/* row security policies, or NULL */
 
-	/* data managed by RelationGetPartitionQual: */
-	List	   *rd_partcheck;	/* partition CHECK quals */
-	bool		rd_partcheckvalid;	/* true if list has been computed */
-	MemoryContext rd_partcheckcxt;	/* private cxt for rd_partcheck, if any */
+			/* data managed by RelationGetFKeyList: */
+			List	   *rd_fkeylist;	/* list of ForeignKeyCacheInfo (see below) */
+			bool		rd_fkeyvalid;	/* true if list has been computed */
+
+			/* data managed by RelationGetPartitionKey: */
+			PartitionKey rd_partkey;	/* partition key, or NULL */
+			MemoryContext rd_partkeycxt;	/* private context for rd_partkey, if any */
+
+			/* data managed by RelationGetPartitionDesc: */
+			PartitionDesc rd_partdesc;	/* partition descriptor, or NULL */
+			MemoryContext rd_pdcxt;		/* private context for rd_partdesc, if any */
+
+			/* Same as above, for partdescs that omit detached partitions */
+			PartitionDesc rd_partdesc_nodetached;	/* partdesc w/o detached parts */
+			MemoryContext rd_pddcxt;	/* for rd_partdesc_nodetached, if any */
+
+			/*
+			 * pg_inherits.xmin of the partition that was excluded in
+			 * rd_partdesc_nodetached.  This informs a future user of that partdesc:
+			 * if this value is not in progress for the active snapshot, then the
+			 * partdesc can be used, otherwise they have to build a new one.  (This
+			 * matches what find_inheritance_children_extended would do).
+			 */
+			TransactionId rd_partdesc_nodetached_xmin;
+
+			/* data managed by RelationGetPartitionQual: */
+			List	   *rd_partcheck;	/* partition CHECK quals */
+			bool		rd_partcheckvalid;	/* true if list has been computed */
+			MemoryContext rd_partcheckcxt;	/* private cxt for rd_partcheck, if any */
+
+			/* data managed by RelationGetIndexAttrBitmap: */
+			Bitmapset  *rd_keyattr;		/* cols that can be ref'd by foreign keys */
+			Bitmapset  *rd_pkattr;		/* cols included in primary key */
+			Bitmapset  *rd_idattr;		/* included in replica identity index */
+			Bitmapset  *rd_hotblockingattr; /* cols blocking HOT update */
+			Bitmapset  *rd_summarizedattr;	/* cols indexed by summarizing indexes */
+
+			PublicationDesc *rd_pubdesc;	/* publication descriptor, or NULL */
+
+			/*
+			 * foreign-table support
+			 *
+			 * rd_fdwroutine must point to a single memory chunk palloc'd in
+			 * CacheMemoryContext.  It will be freed and reset to NULL on a
+			 * relcache reset.
+			 */
+			/* use "struct" here to avoid needing to include fdwapi.h: */
+			struct FdwRoutine *rd_fdwroutine;	/* cached function pointers, or NULL */
+		};
+
+		/* fields used only for an index relation */
+		struct
+		{
+			Form_pg_index rd_index;		/* pg_index tuple describing this index */
+			/* use "struct" here to avoid needing to include htup.h: */
+			struct HeapTupleData *rd_indextuple;	/* all of pg_index tuple */
+
+			/*
+			 * index access support info (used only for an index relation)
+			 *
+			 * Note: only default support procs for each opclass are cached, namely
+			 * those with lefttype and righttype equal to the opclass's opcintype. The
+			 * arrays are indexed by support function number, which is a sufficient
+			 * identifier given that restriction.
+			 */
+			MemoryContext rd_indexcxt;	/* private memory cxt for this stuff */
+			/* use "struct" here to avoid needing to include amapi.h: */
+			const struct IndexAmRoutine *rd_indam;	/* index AM's API struct */
+			Oid		   *rd_opfamily;	/* OIDs of op families for each index col */
+			Oid		   *rd_opcintype;	/* OIDs of opclass declared input data types */
+			RegProcedure *rd_support;	/* OIDs of support procedures */
+			struct FmgrInfo *rd_supportinfo;	/* lookup info for support procedures */
+			int16	   *rd_indoption;	/* per-column AM-specific flags */
+			List	   *rd_indexprs;	/* index expression trees, if any */
+			List	   *rd_indpred;		/* index predicate tree, if any */
+			Oid		   *rd_exclops;		/* OIDs of exclusion operators, if any */
+			Oid		   *rd_exclprocs;	/* OIDs of exclusion ops' procs, if any */
+			uint16	   *rd_exclstrats;	/* exclusion ops' strategy numbers, if any */
+			Oid		   *rd_indcollation;	/* OIDs of index collations */
+			bytea	  **rd_opcoptions;	/* parsed opclass-specific options */
+		};
+	};
 
 	/* data managed by RelationGetIndexList: */
 	List	   *rd_indexlist;	/* list of OIDs of indexes on relation */
@@ -145,13 +219,6 @@ typedef struct RelationData
 
 	/* data managed by RelationGetIndexAttrBitmap: */
 	bool		rd_attrsvalid;	/* are bitmaps of attrs valid? */
-	Bitmapset  *rd_keyattr;		/* cols that can be ref'd by foreign keys */
-	Bitmapset  *rd_pkattr;		/* cols included in primary key */
-	Bitmapset  *rd_idattr;		/* included in replica identity index */
-	Bitmapset  *rd_hotblockingattr; /* cols blocking HOT update */
-	Bitmapset  *rd_summarizedattr;	/* cols indexed by summarizing indexes */
-
-	PublicationDesc *rd_pubdesc;	/* publication descriptor, or NULL */
 
 	/*
 	 * rd_options is set whenever rd_rel is loaded into the relcache entry.
@@ -174,35 +241,6 @@ typedef struct RelationData
 	 */
 	const struct TableAmRoutine *rd_tableam;
 
-	/* These are non-NULL only for an index relation: */
-	Form_pg_index rd_index;		/* pg_index tuple describing this index */
-	/* use "struct" here to avoid needing to include htup.h: */
-	struct HeapTupleData *rd_indextuple;	/* all of pg_index tuple */
-
-	/*
-	 * index access support info (used only for an index relation)
-	 *
-	 * Note: only default support procs for each opclass are cached, namely
-	 * those with lefttype and righttype equal to the opclass's opcintype. The
-	 * arrays are indexed by support function number, which is a sufficient
-	 * identifier given that restriction.
-	 */
-	MemoryContext rd_indexcxt;	/* private memory cxt for this stuff */
-	/* use "struct" here to avoid needing to include amapi.h: */
-	const struct IndexAmRoutine *rd_indam;	/* index AM's API struct */
-	Oid		   *rd_opfamily;	/* OIDs of op families for each index col */
-	Oid		   *rd_opcintype;	/* OIDs of opclass declared input data types */
-	RegProcedure *rd_support;	/* OIDs of support procedures */
-	struct FmgrInfo *rd_supportinfo;	/* lookup info for support procedures */
-	int16	   *rd_indoption;	/* per-column AM-specific flags */
-	List	   *rd_indexprs;	/* index expression trees, if any */
-	List	   *rd_indpred;		/* index predicate tree, if any */
-	Oid		   *rd_exclops;		/* OIDs of exclusion operators, if any */
-	Oid		   *rd_exclprocs;	/* OIDs of exclusion ops' procs, if any */
-	uint16	   *rd_exclstrats;	/* exclusion ops' strategy numbers, if any */
-	Oid		   *rd_indcollation;	/* OIDs of index collations */
-	bytea	  **rd_opcoptions;	/* parsed opclass-specific options */
-
 	/*
 	 * rd_amcache is available for index and table AMs to cache private data
 	 * about the relation.  This must be just a cache since it may get reset
@@ -213,17 +251,6 @@ typedef struct RelationData
 	 * rd_amcache = NULL.
 	 */
 	void	   *rd_amcache;		/* available for use by index/table AM */
-
-	/*
-	 * foreign-table support
-	 *
-	 * rd_fdwroutine must point to a single memory chunk palloc'd in
-	 * CacheMemoryContext.  It will be freed and reset to NULL on a relcache
-	 * reset.
-	 */
-
-	/* use "struct" here to avoid needing to include fdwapi.h: */
-	struct FdwRoutine *rd_fdwroutine;	/* cached function pointers, or NULL */
 
 	/*
 	 * Hack for CLUSTER, rewriting ALTER TABLE, etc: when writing a new
