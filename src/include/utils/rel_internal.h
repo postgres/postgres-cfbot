@@ -38,18 +38,22 @@ typedef LockInfoData *LockInfo;
  * Here are the contents of a relation cache entry.
  */
 
+/*
+ * Field order within RelationData (and within each branch of the union
+ * further down) is chosen to minimize struct padding: pointer-sized
+ * (8-byte) fields are grouped first, followed by 4-byte fields, followed
+ * by 1-byte bool fields.  Don't reorder fields without re-checking that
+ * this packing is preserved.
+ */
 typedef struct RelationData
 {
-	RelFileLocator rd_locator;	/* relation physical identifier */
 	SMgrRelation rd_smgr;		/* cached file handle, or NULL */
+	Form_pg_class rd_rel;		/* RELATION tuple */
+	TupleDesc	rd_att;			/* tuple descriptor */
+
+	RelFileLocator rd_locator;	/* relation physical identifier */
 	int			rd_refcnt;		/* reference count */
 	ProcNumber	rd_backend;		/* owning backend's proc number, if temp rel */
-	bool		rd_islocaltemp; /* rel is a temp rel of this session */
-	bool		rd_isnailed;	/* rel is nailed in cache */
-	bool		rd_isvalid;		/* relcache entry is valid */
-	bool		rd_indexvalid;	/* is rd_indexlist valid? (also rd_pkindex and
-								 * rd_replidindex) */
-	bool		rd_statvalid;	/* is rd_statlist valid? */
 
 	/*----------
 	 * rd_createSubid is the ID of the highest subtransaction the rel has
@@ -94,10 +98,19 @@ typedef struct RelationData
 													 * any value */
 	SubTransactionId rd_droppedSubid;	/* dropped with another Subid set */
 
-	Form_pg_class rd_rel;		/* RELATION tuple */
-	TupleDesc	rd_att;			/* tuple descriptor */
 	Oid			rd_id;			/* relation's object id */
 	LockInfoData rd_lockInfo;	/* lock mgr's info for locking relation */
+
+	bool		rd_islocaltemp; /* rel is a temp rel of this session */
+	bool		rd_isnailed;	/* rel is nailed in cache */
+	bool		rd_isvalid;		/* relcache entry is valid */
+	bool		rd_indexvalid;	/* is rd_indexlist valid? (also rd_pkindex and
+								 * rd_replidindex) */
+	bool		rd_statvalid;	/* is rd_statlist valid? */
+	bool		rd_ispkdeferrable;	/* is rd_pkindex a deferrable PK? */
+	bool		rd_attrsvalid;	/* are bitmaps of attrs valid? (see
+								 * RelationGetIndexAttrBitmap) */
+	bool		pgstat_enabled; /* should relation stats be counted */
 
 	/*
 	 * The following two blocks of fields are mutually exclusive: a
@@ -127,7 +140,6 @@ typedef struct RelationData
 
 			/* data managed by RelationGetFKeyList: */
 			List	   *rd_fkeylist;	/* list of ForeignKeyCacheInfo (see below) */
-			bool		rd_fkeyvalid;	/* true if list has been computed */
 
 			/* data managed by RelationGetPartitionKey: */
 			PartitionKey rd_partkey;	/* partition key, or NULL */
@@ -141,18 +153,8 @@ typedef struct RelationData
 			PartitionDesc rd_partdesc_nodetached;	/* partdesc w/o detached parts */
 			MemoryContext rd_pddcxt;	/* for rd_partdesc_nodetached, if any */
 
-			/*
-			 * pg_inherits.xmin of the partition that was excluded in
-			 * rd_partdesc_nodetached.  This informs a future user of that partdesc:
-			 * if this value is not in progress for the active snapshot, then the
-			 * partdesc can be used, otherwise they have to build a new one.  (This
-			 * matches what find_inheritance_children_extended would do).
-			 */
-			TransactionId rd_partdesc_nodetached_xmin;
-
 			/* data managed by RelationGetPartitionQual: */
 			List	   *rd_partcheck;	/* partition CHECK quals */
-			bool		rd_partcheckvalid;	/* true if list has been computed */
 			MemoryContext rd_partcheckcxt;	/* private cxt for rd_partcheck, if any */
 
 			/* data managed by RelationGetIndexAttrBitmap: */
@@ -173,6 +175,18 @@ typedef struct RelationData
 			 */
 			/* use "struct" here to avoid needing to include fdwapi.h: */
 			struct FdwRoutine *rd_fdwroutine;	/* cached function pointers, or NULL */
+
+			/*
+			 * pg_inherits.xmin of the partition that was excluded in
+			 * rd_partdesc_nodetached.  This informs a future user of that partdesc:
+			 * if this value is not in progress for the active snapshot, then the
+			 * partdesc can be used, otherwise they have to build a new one.  (This
+			 * matches what find_inheritance_children_extended would do).
+			 */
+			TransactionId rd_partdesc_nodetached_xmin;
+
+			bool		rd_fkeyvalid;	/* true if rd_fkeylist has been computed */
+			bool		rd_partcheckvalid;	/* true if rd_partcheck has been computed */
 		};
 
 		/* fields used only for an index relation */
@@ -210,15 +224,9 @@ typedef struct RelationData
 
 	/* data managed by RelationGetIndexList: */
 	List	   *rd_indexlist;	/* list of OIDs of indexes on relation */
-	Oid			rd_pkindex;		/* OID of (deferrable?) primary key, if any */
-	bool		rd_ispkdeferrable;	/* is rd_pkindex a deferrable PK? */
-	Oid			rd_replidindex; /* OID of replica identity index, if any */
 
 	/* data managed by RelationGetStatExtList: */
 	List	   *rd_statlist;	/* list of OIDs of extended stats */
-
-	/* data managed by RelationGetIndexAttrBitmap: */
-	bool		rd_attrsvalid;	/* are bitmaps of attrs valid? */
 
 	/*
 	 * rd_options is set whenever rd_rel is loaded into the relcache entry.
@@ -226,15 +234,6 @@ typedef struct RelationData
 	 * defaults".
 	 */
 	bytea	   *rd_options;		/* parsed pg_class.reloptions */
-
-	/*
-	 * Oid of the handler for this relation. For an index this is a function
-	 * returning IndexAmRoutine, for table like relations a function returning
-	 * TableAmRoutine.  This is stored separately from rd_indam, rd_tableam as
-	 * its lookup requires syscache access, but during relcache bootstrap we
-	 * need to be able to initialize rd_tableam without syscache lookups.
-	 */
-	Oid			rd_amhandler;	/* OID of index AM's handler function */
 
 	/*
 	 * Table access method.
@@ -252,6 +251,21 @@ typedef struct RelationData
 	 */
 	void	   *rd_amcache;		/* available for use by index/table AM */
 
+	/* use "struct" here to avoid needing to include pgstat.h: */
+	struct PgStat_RelationStatus *pgstat_info;	/* statistics collection area */
+
+	Oid			rd_pkindex;		/* OID of (deferrable?) primary key, if any */
+	Oid			rd_replidindex; /* OID of replica identity index, if any */
+
+	/*
+	 * Oid of the handler for this relation. For an index this is a function
+	 * returning IndexAmRoutine, for table like relations a function returning
+	 * TableAmRoutine.  This is stored separately from rd_indam, rd_tableam as
+	 * its lookup requires syscache access, but during relcache bootstrap we
+	 * need to be able to initialize rd_tableam without syscache lookups.
+	 */
+	Oid			rd_amhandler;	/* OID of index AM's handler function */
+
 	/*
 	 * Hack for CLUSTER, rewriting ALTER TABLE, etc: when writing a new
 	 * version of a table, we need to make any toast pointers inserted into it
@@ -262,10 +276,6 @@ typedef struct RelationData
 	 * causes toast_save_datum() to try to preserve toast value OIDs.
 	 */
 	Oid			rd_toastoid;	/* Real TOAST table's OID, or InvalidOid */
-
-	bool		pgstat_enabled; /* should relation stats be counted */
-	/* use "struct" here to avoid needing to include pgstat.h: */
-	struct PgStat_RelationStatus *pgstat_info;	/* statistics collection area */
 } RelationData;
 
 #endif							/* REL_INTERNAL_H */
