@@ -1829,19 +1829,10 @@ load_libraries(const char *libraries, const char *gucname, bool restricted)
 	{
 		/* Note that filename was already canonicalized */
 		char	   *filename = (char *) lfirst(l);
-		char	   *expanded = NULL;
 
-		/* If restricting, insert $libdir/plugins if not mentioned already */
-		if (restricted && first_dir_separator(filename) == NULL)
-		{
-			expanded = psprintf("$libdir/plugins/%s", filename);
-			filename = expanded;
-		}
 		load_file(filename, restricted);
 		ereport(DEBUG1,
 				(errmsg_internal("loaded library \"%s\"", filename)));
-		if (expanded)
-			pfree(expanded);
 	}
 
 	list_free_deep(elemlist);
