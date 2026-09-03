@@ -159,6 +159,7 @@
 <!ENTITY pgtrgm          SYSTEM "pgtrgm.sgml">
 <!ENTITY pgvisibility    SYSTEM "pgvisibility.sgml">
 <!ENTITY pgwalinspect    SYSTEM "pgwalinspect.sgml">
+<!ENTITY pgbench-ext     SYSTEM "pgbench-ext.sgml">
 <!ENTITY postgres-fdw    SYSTEM "postgres-fdw.sgml">
 <!ENTITY seg             SYSTEM "seg.sgml">
 <!ENTITY contrib-spi     SYSTEM "contrib-spi.sgml">

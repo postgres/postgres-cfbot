@@ -1,0 +1,153 @@
+CREATE EXTENSION pgbench;
+-- Check schema and functions
+\dx+ pgbench
+                   Objects in extension "pgbench"
+                         Object description                          
+---------------------------------------------------------------------
+ function pgbench.hash(bigint,bigint)
+ function pgbench.hash_fnv1a(bigint,bigint)
+ function pgbench.hash_murmur2(bigint,bigint)
+ function pgbench.permute(bigint,bigint,bigint)
+ function pgbench.random(bigint,bigint)
+ function pgbench.random_exponential(bigint,bigint,double precision)
+ function pgbench.random_gaussian(bigint,bigint,double precision)
+ function pgbench.random_poisson(double precision)
+ function pgbench.random_zipfian(bigint,bigint,double precision)
+ function pgbench.setseed(bigint)
+ function pgbench.setseed(double precision)
+(11 rows)
+
+-- Test Hashing functions
+SELECT pgbench.hash_murmur2(12345, 0);
+     hash_murmur2     
+----------------------
+ -8599128181304237022
+(1 row)
+
+SELECT pgbench.hash_murmur2(12345, 42);
+    hash_murmur2     
+---------------------
+ -591810079667318857
+(1 row)
+
+SELECT pgbench.hash_fnv1a(12345, 0);
+      hash_fnv1a      
+----------------------
+ -1792800413050876852
+(1 row)
+
+SELECT pgbench.hash_fnv1a(12345, 42);
+      hash_fnv1a      
+----------------------
+ -5267424053501251834
+(1 row)
+
+-- pgbench.hash is alias for hash_murmur2
+SELECT pgbench.hash(12345, 0) = pgbench.hash_murmur2(12345, 0);
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT pgbench.hash(12345, 42) = pgbench.hash_murmur2(12345, 42);
+ ?column? 
+----------
+ t
+(1 row)
+
+-- Test Permutation function (bijective mapping over 0..9)
+SELECT array_agg(pgbench.permute(i, 10, 42) ORDER BY i) FROM generate_series(0, 9) i;
+       array_agg       
+-----------------------
+ {1,7,0,4,3,8,6,5,9,2}
+(1 row)
+
+SELECT count(DISTINCT pgbench.permute(i, 10, 42)) = 10 FROM generate_series(0, 9) i;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT count(DISTINCT pgbench.permute(i, 100, 12345)) = 100 FROM generate_series(0, 99) i;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- Test setseed and reproducibility
+SELECT pgbench.setseed(0.5);
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT pgbench.random(1, 100) AS r_unif,
+       pgbench.random_gaussian(1, 100, 2.5) AS r_gauss,
+       pgbench.random_exponential(1, 100, 3.0) AS r_exp,
+       pgbench.random_zipfian(1, 100, 1.5) AS r_zipf,
+       pgbench.random_poisson(50.0) AS r_poiss;
+ r_unif | r_gauss | r_exp | r_zipf | r_poiss 
+--------+---------+-------+--------+---------
+     17 |      60 |    61 |     50 |      36
+(1 row)
+
+-- Reset seed and verify exact same values
+SELECT pgbench.setseed(0.5);
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT pgbench.random(1, 100) AS r_unif,
+       pgbench.random_gaussian(1, 100, 2.5) AS r_gauss,
+       pgbench.random_exponential(1, 100, 3.0) AS r_exp,
+       pgbench.random_zipfian(1, 100, 1.5) AS r_zipf,
+       pgbench.random_poisson(50.0) AS r_poiss;
+ r_unif | r_gauss | r_exp | r_zipf | r_poiss 
+--------+---------+-------+--------+---------
+     17 |      60 |    61 |     50 |      36
+(1 row)
+
+-- Test bigint setseed
+SELECT pgbench.setseed(123456789::bigint);
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT pgbench.random(1, 100);
+ random 
+--------
+     41
+(1 row)
+
+SELECT pgbench.setseed(123456789::bigint);
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT pgbench.random(1, 100);
+ random 
+--------
+     41
+(1 row)
+
+-- Error cases: parameter boundaries
+SELECT pgbench.random(10, 5);
+ERROR:  empty range given to random: lower bound 10 is greater than upper bound 5
+SELECT pgbench.random_gaussian(1, 10, 1.5);
+ERROR:  gaussian parameter must be at least 2.000000 (not 1.500000)
+SELECT pgbench.random_exponential(1, 10, 0.0);
+ERROR:  exponential parameter must be greater than zero (not 0.000000)
+SELECT pgbench.random_zipfian(1, 10, 1.0);
+ERROR:  zipfian parameter must be in range [1.001, 1000] (not 1.000000)
+SELECT pgbench.random_zipfian(1, 10, 1001.0);
+ERROR:  zipfian parameter must be in range [1.001, 1000] (not 1001.000000)
+SELECT pgbench.random_poisson(0.0);
+ERROR:  poisson center parameter must be greater than zero (not 0.000000)
+SELECT pgbench.permute(5, 0, 42);
+ERROR:  permute size parameter must be greater than zero
+SELECT pgbench.setseed(1.5);
+ERROR:  setseed parameter 1.5 is out of allowed range [-1,1]
+DROP EXTENSION pgbench;
