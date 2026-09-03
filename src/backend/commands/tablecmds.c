@@ -4370,9 +4370,7 @@ RenameRelationInternal(Oid myrelid, const char *newrelname, bool is_internal, bo
 	 * let's not be totally oblivious to it.  We can process an index as
 	 * not-an-index, but not the other way around.
 	 */
-	Assert(!is_index ||
-		   is_index == (targetrelation->rd_rel->relkind == RELKIND_INDEX ||
-						targetrelation->rd_rel->relkind == RELKIND_PARTITIONED_INDEX));
+	Assert(!is_index || is_index == RelationIsIndex(targetrelation));
 
 	/*
 	 * Update pg_class tuple with new relname.  (Scribbling on reltup is OK
@@ -4399,8 +4397,7 @@ RenameRelationInternal(Oid myrelid, const char *newrelname, bool is_internal, bo
 	/*
 	 * Also rename the associated constraint, if any.
 	 */
-	if (targetrelation->rd_rel->relkind == RELKIND_INDEX ||
-		targetrelation->rd_rel->relkind == RELKIND_PARTITIONED_INDEX)
+	if (RelationIsIndex(targetrelation))
 	{
 		Oid			constraintId = get_index_constraint(myrelid);
 
@@ -9083,8 +9080,7 @@ ATExecSetStatistics(Relation rel, const char *colName, int16 colNum, Node *newVa
 				 errmsg("cannot alter statistics on virtual generated column \"%s\"",
 						colName)));
 
-	if (rel->rd_rel->relkind == RELKIND_INDEX ||
-		rel->rd_rel->relkind == RELKIND_PARTITIONED_INDEX)
+	if (RelationIsIndex(rel))
 	{
 		if (attnum > rel->rd_index->indnkeyatts)
 			ereport(ERROR,
@@ -19207,7 +19203,7 @@ ATExecReplicaIdentity(Relation rel, ReplicaIdentityStmt *stmt, LOCKMODE lockmode
 	indexRel = index_open(indexOid, ShareLock);
 
 	/* Check that the index is on the relation we're altering. */
-	if (indexRel->rd_index == NULL ||
+	if (!RelationIsIndex(indexRel) ||
 		indexRel->rd_index->indrelid != RelationGetRelid(rel))
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
