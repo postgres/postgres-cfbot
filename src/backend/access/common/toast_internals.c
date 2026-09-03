@@ -30,6 +30,20 @@
 
 int			toast_flavour = TOAST_FLAVOUR_PLAIN;
 
+/*
+ * Direct TOAST chunk organization parameters:
+ *
+ * - DIRECT_TOAST_TREE_THRESHOLD (100):
+ *   Values requiring up to 100 chunks (~200KB) are structured with a flat
+ *   root chunk containing a single chunk_tids array of all leaf chunk TIDs.
+ *   This avoids tree depth overhead for small to medium values.
+ *
+ * - DIRECT_TOAST_FANOUT (50):
+ *   When a value exceeds DIRECT_TOAST_TREE_THRESHOLD, a multi-level balanced
+ *   tree is constructed where intermediate index chunks hold up to 50 child
+ *   TIDs (chunk_tids) and cumulative byte boundaries (chunk_tid_offsets).
+ *   This enables O(log N) slice retrieval without index scans.
+ */
 #define DIRECT_TOAST_TREE_THRESHOLD	100
 #define DIRECT_TOAST_FANOUT			50
 

@@ -1,0 +1,115 @@
+src/backend/access/common/README.toast
+
+The Oversized-Attribute Storage Technique (TOAST)
+=================================================
+
+PostgreSQL stores table rows inside fixed-size pages (typically 8KB). When a
+row exceeds the target threshold (typically BLCKSZ / 4, or ~2KB), the storage
+engine uses TOAST to compress and/or move variable-length attributes (varlenas)
+out-of-line into a separate auxiliary relation, known as a TOAST table
+(cataloged as pg_toast_<relfilenumber>).
+
+PostgreSQL supports two on-disk external TOAST formats:
+1. Plain TOAST  (Traditional format, VARTAG_ONDISK = 18)
+2. Direct TOAST (Tree/TID direct format, VARTAG_DIRECT = 19)
+
+Whether a table uses Plain or Direct TOAST is controlled by the relation
+storage parameter 'toast_flavour' (or the GUC 'default_toast_flavour').
+
+
+1. Plain TOAST Format
+---------------------
+
+A Plain TOAST table has three columns:
+    (chunk_id OID, chunk_seq INT4, chunk_data BYTEA)
+
+Each out-of-line value is assigned a unique 32-bit OID (va_valueid). The
+value's data is broken into sequential chunks of up to TOAST_MAX_CHUNK_SIZE
+(typically ~2KB). An associated B-Tree index on (chunk_id, chunk_seq)
+indexes every chunk.
+
+The pointer stored in the main table's tuple is struct varatt_external (18 bytes):
+    int32   va_rawsize;     /* Original data size (includes 4-byte header) */
+    uint32  va_extinfo;     /* External saved size and 2 compression bits */
+    Oid     va_valueid;     /* Unique ID of value within TOAST table */
+    Oid     va_toastrelid;  /* RelID of TOAST table containing it */
+
+Detoasting requires opening an index scan on (chunk_id, chunk_seq). To read the
+entire datum or a partial slice, the executor searches the index for chunk 0,
+then iterates through consecutive chunks until the requested byte range is
+satisfied.
+
+
+2. Direct TOAST Format
+----------------------
+
+Direct TOAST eliminates index lookups during detoasting by embedding direct
+physical tuple identifiers (ItemPointerData / TID) into the pointer and chunk
+tuples.
+
+A Direct TOAST table has five columns:
+    (chunk_id OID, chunk_seq INT4, chunk_data BYTEA,
+     chunk_tids TID[], chunk_tid_offsets INT8[])
+
+The pointer stored in the main table's tuple is struct varatt_direct (18 bytes):
+    int32           va_rawsize;     /* Original data size (includes 4-byte header) */
+    uint32          va_extinfo;     /* External saved size and 2 compression bits */
+    Oid             va_toastrelid;  /* RelID of TOAST table containing it */
+    ItemPointerData va_tid;         /* Physical TID of root/terminal chunk */
+
+Notice that sizeof(varatt_direct) == sizeof(varatt_external) == 18 bytes.
+Because both pointer types have identical byte lengths, switching between
+Plain and Direct TOAST requires zero tuple header or layout adjustments in the
+parent table.
+
+2.1 Three-Tier Storage Hierarchy
+
+Depending on the size of the stored value, Direct TOAST structures chunks in one
+of three tiers:
+
+a) Single Chunk (datum size <= TOAST_MAX_CHUNK_SIZE, ~2KB):
+   The data fits into a single chunk tuple. The main tuple's va_tid points
+   directly to this chunk.
+   Detoasting: exactly 1 buffer page fetch, 0 index scans.
+
+b) Flat Multi-Chunk (<= DIRECT_TOAST_TREE_THRESHOLD = 100 chunks, up to ~200KB):
+   The data chunks (leaf chunks) are inserted first. A terminal "root" chunk is
+   then inserted which contains the last slice of data as chunk_data, plus a
+   chunk_tids array containing the ItemPointerData of all leaf chunks in sequence.
+   The main tuple's va_tid points to this root chunk.
+   Detoasting: fetches the root chunk, reads chunk_tids, and directly fetches each
+   referenced leaf chunk by TID without consulting any index.
+
+c) Hierarchical Tree / DAG (> DIRECT_TOAST_TREE_THRESHOLD = 100 chunks):
+   For very large values, chunks are organized into a multi-level balanced tree
+   with a fanout of DIRECT_TOAST_FANOUT (50).
+   Internal (non-leaf) chunks store:
+     - chunk_tids: array of ItemPointers to child chunks.
+     - chunk_tid_offsets: array of int64 cumulative start offsets for each child,
+       terminated by the total subtree size.
+   Detoasting: random-access partial slices (detoast_attr_slice) perform a binary
+   search over chunk_tid_offsets at each tree level, pruning subtrees that do not
+   overlap the requested range [sliceoffset, sliceoffset + slicelength). Slicing
+   runs in O(log N) buffer accesses without touching an index.
+
+2.2 Deletion & Memory Management
+
+When a tuple containing a Direct TOAST pointer is deleted or updated,
+toast_delete_datum_direct_recursive() traverses the chunk DAG by following
+chunk_tids recursively and deleting every referenced chunk tuple. Because all
+chunk locations are known from the embedded TIDs, no index lookups or table scans
+are required during cascaded deletion.
+
+2.3 Maintenance and Upgrades
+
+Direct TOAST tables still create and maintain the standard B-Tree index on
+(chunk_id, chunk_seq) to support VACUUM cleanup, sequential table scans, and
+fallback verification (such as amcheck).
+
+Existing tables can be upgraded in place from Plain to Direct TOAST:
+    ALTER TABLE my_table SET (toast_flavour = direct);
+or programmatically via pg_ensure_direct_toast(reloid).
+This operation adds chunk_tids and chunk_tid_offsets to the TOAST table with
+fast-default NULLs without rewriting table rows or requiring exclusive locks on
+large data sets. Existing Plain TOAST pointers continue to be read via the
+traditional path, while new out-of-line writes generate Direct TOAST pointers.

@@ -82,6 +82,19 @@ VARATT_EXTERNAL_OID8_SET_VALUEID(varatt_external_oid8 *toast_pointer, Oid8 id)
 	toast_pointer->va_valueid_hi = (uint32) (id >> 32);
 }
 
+/*
+ * varatt_direct is a "Direct TOAST pointer".
+ *
+ * Instead of identifying chunks via an OID (va_valueid) which requires a
+ * B-Tree index scan on (chunk_id, chunk_seq), va_tid points directly to the
+ * root/terminal chunk tuple on disk.
+ *
+ * Notice that sizeof(varatt_direct) == sizeof(varatt_external) == 18 bytes.
+ * This ensures that switching to Direct TOAST causes no size difference or
+ * alignment change in parent table tuples.
+ *
+ * Like varatt_external, this struct is stored unaligned within actual tuples.
+ */
 typedef struct varatt_direct
 {
 	int32		va_rawsize;		/* Original data size (includes header) */
