@@ -1202,8 +1202,7 @@ retry:
 	RelationBuildTupleDesc(relation);
 
 	/* foreign key data is not loaded till asked for */
-	relation->rd_fkeylist = NIL;
-	relation->rd_fkeyvalid = false;
+	relation->rd_fkeylist = RELCACHE_FKEYLIST_NOT_LOADED;
 
 	/* partitioning data is not loaded till asked for */
 	relation->rd_partinfo = NULL;
@@ -2502,7 +2501,8 @@ RelationDestroyRelation(Relation relation, bool remember_tupdesc)
 	if (!isindex)
 	{
 		FreeTriggerDesc(relation->trigdesc);
-		list_free_deep(relation->rd_fkeylist);
+		if (relation->rd_fkeylist != RELCACHE_FKEYLIST_NOT_LOADED)
+			list_free_deep(relation->rd_fkeylist);
 		bms_free(relation->rd_keyattr);
 		bms_free(relation->rd_pkattr);
 		bms_free(relation->rd_idattr);
@@ -4809,7 +4809,7 @@ RelationGetFKeyList(Relation relation)
 	MemoryContext oldcxt;
 
 	/* Quick exit if we already computed the list. */
-	if (relation->rd_fkeyvalid)
+	if (relation->rd_fkeylist != RELCACHE_FKEYLIST_NOT_LOADED)
 		return relation->rd_fkeylist;
 
 	/*
@@ -4862,11 +4862,11 @@ RelationGetFKeyList(Relation relation)
 	oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
 	oldlist = relation->rd_fkeylist;
 	relation->rd_fkeylist = copyObject(result);
-	relation->rd_fkeyvalid = true;
 	MemoryContextSwitchTo(oldcxt);
 
 	/* Don't leak the old list, if there is one */
-	list_free_deep(oldlist);
+	if (oldlist != RELCACHE_FKEYLIST_NOT_LOADED)
+		list_free_deep(oldlist);
 
 	return result;
 }
@@ -6563,8 +6563,7 @@ load_relcache_init_file(bool shared)
 			rel->rd_summarizedattr = NULL;
 			rel->rd_pubdesc = NULL;
 			rel->rd_fdwroutine = NULL;
-			rel->rd_fkeyvalid = false;
-			rel->rd_fkeylist = NIL;
+			rel->rd_fkeylist = RELCACHE_FKEYLIST_NOT_LOADED;
 		}
 
 		/*

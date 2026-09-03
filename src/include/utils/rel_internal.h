@@ -30,6 +30,15 @@ typedef struct LockRelId
 } LockRelId;
 
 /*
+ * Sentinel value for RelationData.rd_fkeylist indicating that the foreign
+ * key list has not yet been computed by RelationGetFKeyList().  This is
+ * distinct from NIL, which is a valid "computed, relation has no foreign
+ * keys" result; using a sentinel here avoids needing a separate validity
+ * flag.
+ */
+#define RELCACHE_FKEYLIST_NOT_LOADED ((List *) -1)
+
+/*
  * RelationPartitionInfo
  *		Partition-related data cached for a relation, allocated lazily on
  *		first use.  Only ever populated for partitioned tables (partkey and
@@ -171,8 +180,15 @@ typedef struct RelationData
 			/* use "struct" here to avoid needing to include rowsecurity.h: */
 			struct RowSecurityDesc *rd_rsdesc;	/* row security policies, or NULL */
 
-			/* data managed by RelationGetFKeyList: */
-			List	   *rd_fkeylist;	/* list of ForeignKeyCacheInfo (see below) */
+			/*
+			 * data managed by RelationGetFKeyList: list of
+			 * ForeignKeyCacheInfo (see below), or the sentinel
+			 * RELCACHE_FKEYLIST_NOT_LOADED if not yet computed.  NIL is a
+			 * valid "computed, no FKs" result, so a sentinel pointer value
+			 * is used instead of a separate validity flag to distinguish
+			 * "not yet computed" from that case.
+			 */
+			List	   *rd_fkeylist;
 
 			/*
 			 * data managed by RelationGetPartitionKey, RelationGetPartitionDesc,
@@ -199,8 +215,6 @@ typedef struct RelationData
 			 */
 			/* use "struct" here to avoid needing to include fdwapi.h: */
 			struct FdwRoutine *rd_fdwroutine;	/* cached function pointers, or NULL */
-
-			bool		rd_fkeyvalid;	/* true if rd_fkeylist has been computed */
 		};
 
 		/* fields used only for an index relation */
