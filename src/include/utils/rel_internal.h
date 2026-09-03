@@ -40,6 +40,134 @@ typedef LockInfoData *LockInfo;
 
 typedef struct RelationData
 {
+	union
+	{
+		/* fields used only for a non-index (table-like) relation */
+		struct
+		{
+			RuleLock   *rd_rules;		/* rewrite rules */
+			MemoryContext rd_rulescxt;	/* private memory cxt for rd_rules, if any */
+			TriggerDesc *trigdesc;		/* Trigger info, or NULL if rel has none */
+			/* use "struct" here to avoid needing to include rowsecurity.h: */
+			struct RowSecurityDesc *rd_rsdesc;	/* row security policies, or NULL */
+
+			/* data managed by RelationGetFKeyList: */
+			List	   *rd_fkeylist;	/* list of ForeignKeyCacheInfo (see below) */
+			bool		rd_fkeyvalid;	/* true if rd_fkeylist has been computed */
+
+			/* data managed by RelationGetPartitionKey: */
+			PartitionKey rd_partkey;	/* partition key, or NULL */
+			MemoryContext rd_partkeycxt;	/* private context for rd_partkey, if any */
+
+			/* data managed by RelationGetPartitionDesc: */
+			PartitionDesc rd_partdesc;	/* partition descriptor, or NULL */
+			MemoryContext rd_pdcxt;		/* private context for rd_partdesc, if any */
+
+			/* Same as above, for partdescs that omit detached partitions */
+			PartitionDesc rd_partdesc_nodetached;	/* partdesc w/o detached parts */
+			MemoryContext rd_pddcxt;	/* for rd_partdesc_nodetached, if any */
+
+			/*
+			 * pg_inherits.xmin of the partition that was excluded in
+			 * rd_partdesc_nodetached.  This informs a future user of that partdesc:
+			 * if this value is not in progress for the active snapshot, then the
+			 * partdesc can be used, otherwise they have to build a new one.  (This
+			 * matches what find_inheritance_children_extended would do).
+			 */
+			TransactionId rd_partdesc_nodetached_xmin;
+
+			/* data managed by RelationGetIndexList: */
+			List	   *rd_indexlist;	/* list of OIDs of indexes on relation */
+			Oid			rd_pkindex;		/* OID of (deferrable?) primary key, if any */
+			bool		rd_ispkdeferrable;	/* is rd_pkindex a deferrable PK? */
+			bool		rd_indexvalid;	/* is rd_indexlist valid? (also rd_pkindex and
+									 * rd_replidindex) */
+			Oid			rd_replidindex; /* OID of replica identity index, if any */
+
+			/* data managed by RelationGetIndexAttrBitmap: */
+			bool		rd_attrsvalid;	/* are bitmaps of attrs valid? (see
+									 * RelationGetIndexAttrBitmap) */
+			Bitmapset  *rd_keyattr;		/* cols that can be ref'd by foreign keys */
+			Bitmapset  *rd_pkattr;		/* cols included in primary key */
+			Bitmapset  *rd_idattr;		/* included in replica identity index */
+			Bitmapset  *rd_hotblockingattr; /* cols blocking HOT update */
+			Bitmapset  *rd_summarizedattr;	/* cols indexed by summarizing indexes */
+
+			/* data managed by RelationGetStatExtList: */
+			List	   *rd_statlist;	/* list of OIDs of extended stats */
+			bool		rd_statvalid;	/* is rd_statlist valid? */
+
+			/*
+			 * Table access method.
+			 */
+			const struct TableAmRoutine *rd_tableam;
+
+			/*
+			 * Hack for CLUSTER, rewriting ALTER TABLE, etc: when writing a new
+			 * version of a table, we need to make any toast pointers inserted into it
+			 * have the existing toast table's OID, not the OID of the transient toast
+			 * table.  If rd_toastoid isn't InvalidOid, it is the OID to place in
+			 * toast pointers inserted into this rel.  (Note it's set on the new
+			 * version of the main heap, not the toast table itself.)  This also
+			 * causes toast_save_datum() to try to preserve toast value OIDs.
+			 */
+			Oid			rd_toastoid;	/* Real TOAST table's OID, or InvalidOid */
+
+			/*
+			 * Type OID of the "chunk_id" column of this relation's TOAST table, i.e.
+			 * OIDOID or OID8OID.
+			 *
+			 * This data is filled on demand by RelationGetToastChunkIdType(), not at
+			 * relcache build time, so as to save in syscache lookups.
+			 */
+			Oid			rd_toastchunkidtype;
+
+			PublicationDesc *rd_pubdesc;	/* publication descriptor, or NULL */
+
+			/*
+			 * foreign-table support
+			 *
+			 * rd_fdwroutine must point to a single memory chunk palloc'd in
+			 * CacheMemoryContext.  It will be freed and reset to NULL on a
+			 * relcache reset.
+			 */
+			/* use "struct" here to avoid needing to include fdwapi.h: */
+			struct FdwRoutine *rd_fdwroutine;	/* cached function pointers, or NULL */
+		};
+
+		/* fields used only for an index relation */
+		struct
+		{
+			Form_pg_index rd_index;		/* pg_index tuple describing this index */
+			/* use "struct" here to avoid needing to include htup.h: */
+			struct HeapTupleData *rd_indextuple;	/* all of pg_index tuple */
+
+			/*
+			 * index access support info (used only for an index relation)
+			 *
+			 * Note: only default support procs for each opclass are cached, namely
+			 * those with lefttype and righttype equal to the opclass's opcintype. The
+			 * arrays are indexed by support function number, which is a sufficient
+			 * identifier given that restriction.
+			 */
+			MemoryContext rd_indexcxt;	/* private memory cxt for this stuff */
+			/* use "struct" here to avoid needing to include amapi.h: */
+			const struct IndexAmRoutine *rd_indam;	/* index AM's API struct */
+			Oid		   *rd_opfamily;	/* OIDs of op families for each index col */
+			Oid		   *rd_opcintype;	/* OIDs of opclass declared input data types */
+			RegProcedure *rd_support;	/* OIDs of support procedures */
+			struct FmgrInfo *rd_supportinfo;	/* lookup info for support procedures */
+			int16	   *rd_indoption;	/* per-column AM-specific flags */
+			List	   *rd_indexprs;	/* index expression trees, if any */
+			List	   *rd_indpred;		/* index predicate tree, if any */
+			Oid		   *rd_exclops;		/* OIDs of exclusion operators, if any */
+			Oid		   *rd_exclprocs;	/* OIDs of exclusion ops' procs, if any */
+			uint16	   *rd_exclstrats;	/* exclusion ops' strategy numbers, if any */
+			Oid		   *rd_indcollation;	/* OIDs of index collations */
+			bytea	  **rd_opcoptions;	/* parsed opclass-specific options */
+		};
+	};
+
 	RelFileLocator rd_locator;	/* relation physical identifier */
 	SMgrRelation rd_smgr;		/* cached file handle, or NULL */
 	int			rd_refcnt;		/* reference count */
@@ -47,9 +175,6 @@ typedef struct RelationData
 	bool		rd_islocaltemp; /* rel is a temp rel of this session */
 	bool		rd_isnailed;	/* rel is nailed in cache */
 	bool		rd_isvalid;		/* relcache entry is valid */
-	bool		rd_indexvalid;	/* is rd_indexlist valid? (also rd_pkindex and
-								 * rd_replidindex) */
-	bool		rd_statvalid;	/* is rd_statlist valid? */
 
 	/*----------
 	 * rd_createSubid is the ID of the highest subtransaction the rel has
@@ -98,60 +223,11 @@ typedef struct RelationData
 	TupleDesc	rd_att;			/* tuple descriptor */
 	Oid			rd_id;			/* relation's object id */
 	LockInfoData rd_lockInfo;	/* lock mgr's info for locking relation */
-	RuleLock   *rd_rules;		/* rewrite rules */
-	MemoryContext rd_rulescxt;	/* private memory cxt for rd_rules, if any */
-	TriggerDesc *trigdesc;		/* Trigger info, or NULL if rel has none */
-	/* use "struct" here to avoid needing to include rowsecurity.h: */
-	struct RowSecurityDesc *rd_rsdesc;	/* row security policies, or NULL */
-
-	/* data managed by RelationGetFKeyList: */
-	List	   *rd_fkeylist;	/* list of ForeignKeyCacheInfo (see below) */
-	bool		rd_fkeyvalid;	/* true if list has been computed */
-
-	/* data managed by RelationGetPartitionKey: */
-	PartitionKey rd_partkey;	/* partition key, or NULL */
-	MemoryContext rd_partkeycxt;	/* private context for rd_partkey, if any */
-
-	/* data managed by RelationGetPartitionDesc: */
-	PartitionDesc rd_partdesc;	/* partition descriptor, or NULL */
-	MemoryContext rd_pdcxt;		/* private context for rd_partdesc, if any */
-
-	/* Same as above, for partdescs that omit detached partitions */
-	PartitionDesc rd_partdesc_nodetached;	/* partdesc w/o detached parts */
-	MemoryContext rd_pddcxt;	/* for rd_partdesc_nodetached, if any */
-
-	/*
-	 * pg_inherits.xmin of the partition that was excluded in
-	 * rd_partdesc_nodetached.  This informs a future user of that partdesc:
-	 * if this value is not in progress for the active snapshot, then the
-	 * partdesc can be used, otherwise they have to build a new one.  (This
-	 * matches what find_inheritance_children_extended would do).
-	 */
-	TransactionId rd_partdesc_nodetached_xmin;
 
 	/* data managed by RelationGetPartitionQual: */
 	List	   *rd_partcheck;	/* partition CHECK quals */
 	bool		rd_partcheckvalid;	/* true if list has been computed */
 	MemoryContext rd_partcheckcxt;	/* private cxt for rd_partcheck, if any */
-
-	/* data managed by RelationGetIndexList: */
-	List	   *rd_indexlist;	/* list of OIDs of indexes on relation */
-	Oid			rd_pkindex;		/* OID of (deferrable?) primary key, if any */
-	bool		rd_ispkdeferrable;	/* is rd_pkindex a deferrable PK? */
-	Oid			rd_replidindex; /* OID of replica identity index, if any */
-
-	/* data managed by RelationGetStatExtList: */
-	List	   *rd_statlist;	/* list of OIDs of extended stats */
-
-	/* data managed by RelationGetIndexAttrBitmap: */
-	bool		rd_attrsvalid;	/* are bitmaps of attrs valid? */
-	Bitmapset  *rd_keyattr;		/* cols that can be ref'd by foreign keys */
-	Bitmapset  *rd_pkattr;		/* cols included in primary key */
-	Bitmapset  *rd_idattr;		/* included in replica identity index */
-	Bitmapset  *rd_hotblockingattr; /* cols blocking HOT update */
-	Bitmapset  *rd_summarizedattr;	/* cols indexed by summarizing indexes */
-
-	PublicationDesc *rd_pubdesc;	/* publication descriptor, or NULL */
 
 	/*
 	 * rd_options is set whenever rd_rel is loaded into the relcache entry.
@@ -170,40 +246,6 @@ typedef struct RelationData
 	Oid			rd_amhandler;	/* OID of index AM's handler function */
 
 	/*
-	 * Table access method.
-	 */
-	const struct TableAmRoutine *rd_tableam;
-
-	/* These are non-NULL only for an index relation: */
-	Form_pg_index rd_index;		/* pg_index tuple describing this index */
-	/* use "struct" here to avoid needing to include htup.h: */
-	struct HeapTupleData *rd_indextuple;	/* all of pg_index tuple */
-
-	/*
-	 * index access support info (used only for an index relation)
-	 *
-	 * Note: only default support procs for each opclass are cached, namely
-	 * those with lefttype and righttype equal to the opclass's opcintype. The
-	 * arrays are indexed by support function number, which is a sufficient
-	 * identifier given that restriction.
-	 */
-	MemoryContext rd_indexcxt;	/* private memory cxt for this stuff */
-	/* use "struct" here to avoid needing to include amapi.h: */
-	const struct IndexAmRoutine *rd_indam;	/* index AM's API struct */
-	Oid		   *rd_opfamily;	/* OIDs of op families for each index col */
-	Oid		   *rd_opcintype;	/* OIDs of opclass declared input data types */
-	RegProcedure *rd_support;	/* OIDs of support procedures */
-	struct FmgrInfo *rd_supportinfo;	/* lookup info for support procedures */
-	int16	   *rd_indoption;	/* per-column AM-specific flags */
-	List	   *rd_indexprs;	/* index expression trees, if any */
-	List	   *rd_indpred;		/* index predicate tree, if any */
-	Oid		   *rd_exclops;		/* OIDs of exclusion operators, if any */
-	Oid		   *rd_exclprocs;	/* OIDs of exclusion ops' procs, if any */
-	uint16	   *rd_exclstrats;	/* exclusion ops' strategy numbers, if any */
-	Oid		   *rd_indcollation;	/* OIDs of index collations */
-	bytea	  **rd_opcoptions;	/* parsed opclass-specific options */
-
-	/*
 	 * rd_amcache is available for index and table AMs to cache private data
 	 * about the relation.  This must be just a cache since it may get reset
 	 * at any time (in particular, it will get reset by a relcache inval
@@ -213,37 +255,6 @@ typedef struct RelationData
 	 * rd_amcache = NULL.
 	 */
 	void	   *rd_amcache;		/* available for use by index/table AM */
-
-	/*
-	 * foreign-table support
-	 *
-	 * rd_fdwroutine must point to a single memory chunk palloc'd in
-	 * CacheMemoryContext.  It will be freed and reset to NULL on a relcache
-	 * reset.
-	 */
-
-	/* use "struct" here to avoid needing to include fdwapi.h: */
-	struct FdwRoutine *rd_fdwroutine;	/* cached function pointers, or NULL */
-
-	/*
-	 * Hack for CLUSTER, rewriting ALTER TABLE, etc: when writing a new
-	 * version of a table, we need to make any toast pointers inserted into it
-	 * have the existing toast table's OID, not the OID of the transient toast
-	 * table.  If rd_toastoid isn't InvalidOid, it is the OID to place in
-	 * toast pointers inserted into this rel.  (Note it's set on the new
-	 * version of the main heap, not the toast table itself.)  This also
-	 * causes toast_save_datum() to try to preserve toast value OIDs.
-	 */
-	Oid			rd_toastoid;	/* Real TOAST table's OID, or InvalidOid */
-
-	/*
-	 * Type OID of the "chunk_id" column of this relation's TOAST table, i.e.
-	 * OIDOID or OID8OID.
-	 *
-	 * This data is filled on demand by RelationGetToastChunkIdType(), not at
-	 * relcache build time, so as to save in syscache lookups.
-	 */
-	Oid			rd_toastchunkidtype;
 
 	bool		pgstat_enabled; /* should relation stats be counted */
 	/* use "struct" here to avoid needing to include pgstat.h: */
