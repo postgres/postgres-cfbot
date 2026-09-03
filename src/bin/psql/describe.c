@@ -101,14 +101,14 @@ describeAggregates(const char *pattern, bool verbose, bool showSystem)
 		appendPQExpBuffer(&buf,
 						  "  pg_catalog.obj_description(p.oid, 'pg_proc') as \"%s\"\n"
 						  "FROM pg_catalog.pg_proc p\n"
-						  "     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace\n"
+						  "     JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace\n"
 						  "WHERE p.prokind = " CppAsString2(PROKIND_AGGREGATE) "\n",
 						  gettext_noop("Description"));
 	else
 		appendPQExpBuffer(&buf,
 						  "  pg_catalog.obj_description(p.oid, 'pg_proc') as \"%s\"\n"
 						  "FROM pg_catalog.pg_proc p\n"
-						  "     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace\n"
+						  "     JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace\n"
 						  "WHERE p.proisagg\n",
 						  gettext_noop("Description"));
 
@@ -425,7 +425,7 @@ describeFunctions(const char *functypes, const char *func_pattern,
 
 	appendPQExpBufferStr(&buf,
 						 "\nFROM pg_catalog.pg_proc p"
-						 "\n     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace\n");
+						 "\n     JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace\n");
 
 	for (int i = 0; i < num_arg_patterns; i++)
 	{
@@ -665,7 +665,7 @@ describeTypes(const char *pattern, bool verbose, bool showSystem)
 					  gettext_noop("Description"));
 
 	appendPQExpBufferStr(&buf, "FROM pg_catalog.pg_type t\n"
-						 "     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace\n");
+						 "     JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace\n");
 
 	/*
 	 * do not include complex types (typrelid!=0) unless they are standalone
@@ -827,7 +827,7 @@ describeOperators(const char *oper_pattern,
 					  "  coalesce(pg_catalog.obj_description(o.oid, 'pg_operator'),\n"
 					  "           pg_catalog.obj_description(o.oprcode, 'pg_proc')) AS \"%s\"\n"
 					  "FROM pg_catalog.pg_operator o\n"
-					  "     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = o.oprnamespace\n",
+					  "     JOIN pg_catalog.pg_namespace n ON n.oid = o.oprnamespace\n",
 					  gettext_noop("Description"));
 
 	if (num_arg_patterns >= 2)
@@ -1118,7 +1118,7 @@ permissionsList(const char *pattern, bool showSystem)
 					  gettext_noop("Policies"));
 
 	appendPQExpBufferStr(&buf, "\nFROM pg_catalog.pg_class c\n"
-						 "     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace\n"
+						 "     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace\n"
 						 "WHERE c.relkind IN ("
 						 CppAsString2(RELKIND_RELATION) ","
 						 CppAsString2(RELKIND_VIEW) ","
@@ -1276,7 +1276,7 @@ objectDescription(const char *pattern, bool showSystem)
 					  "  FROM pg_catalog.pg_constraint pgc\n"
 					  "    JOIN pg_catalog.pg_class c "
 					  "ON c.oid = pgc.conrelid\n"
-					  "    LEFT JOIN pg_catalog.pg_namespace n "
+					  "    JOIN pg_catalog.pg_namespace n "
 					  "    ON n.oid = c.relnamespace\n",
 					  gettext_noop("table constraint"));
 
@@ -1300,7 +1300,7 @@ objectDescription(const char *pattern, bool showSystem)
 					  "  FROM pg_catalog.pg_constraint pgc\n"
 					  "    JOIN pg_catalog.pg_type t "
 					  "ON t.oid = pgc.contypid\n"
-					  "    LEFT JOIN pg_catalog.pg_namespace n "
+					  "    JOIN pg_catalog.pg_namespace n "
 					  "    ON n.oid = t.typnamespace\n",
 					  gettext_noop("domain constraint"));
 
@@ -1371,7 +1371,7 @@ objectDescription(const char *pattern, bool showSystem)
 					  "  CAST('%s' AS pg_catalog.text) as object\n"
 					  "  FROM pg_catalog.pg_rewrite r\n"
 					  "       JOIN pg_catalog.pg_class c ON c.oid = r.ev_class\n"
-					  "       LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace\n"
+					  "       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace\n"
 					  "  WHERE r.rulename != '_RETURN'\n",
 					  gettext_noop("rule"));
 
@@ -1394,7 +1394,7 @@ objectDescription(const char *pattern, bool showSystem)
 					  "  CAST('%s' AS pg_catalog.text) as object\n"
 					  "  FROM pg_catalog.pg_trigger t\n"
 					  "       JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid\n"
-					  "       LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace\n",
+					  "       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace\n",
 					  gettext_noop("trigger"));
 
 	if (!showSystem && !pattern)
@@ -1458,7 +1458,7 @@ describeTableDetails(const char *pattern, bool verbose, bool showSystem)
 						 "  n.nspname,\n"
 						 "  c.relname\n"
 						 "FROM pg_catalog.pg_class c\n"
-						 "     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace\n");
+						 "     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace\n");
 
 	if (!showSystem && !pattern)
 		appendPQExpBufferStr(&buf, "WHERE n.nspname <> 'pg_catalog'\n"
@@ -4106,7 +4106,7 @@ listTables(const char *tabtypes, const char *pattern, bool verbose, bool showSys
 
 	appendPQExpBufferStr(&buf,
 						 "\nFROM pg_catalog.pg_class c"
-						 "\n     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace");
+						 "\n     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace");
 
 	if (pset.sversion >= 120000 && !pset.hide_tableam &&
 		(showTables || showMatViews || showIndexes))
@@ -4352,7 +4352,7 @@ listPartitionedTables(const char *reltypes, const char *pattern, bool verbose)
 
 	appendPQExpBufferStr(&buf,
 						 "\nFROM pg_catalog.pg_class c"
-						 "\n     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace");
+						 "\n     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace");
 
 	if (showIndexes)
 		appendPQExpBufferStr(&buf,
@@ -4572,7 +4572,7 @@ listDomains(const char *pattern, bool verbose, bool showSystem)
 
 	appendPQExpBufferStr(&buf,
 						 "\nFROM pg_catalog.pg_type t\n"
-						 "     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace\n");
+						 "     JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace\n");
 
 	if (verbose)
 		appendPQExpBufferStr(&buf,
