@@ -54,6 +54,9 @@ static bool describeOneTSConfig(const char *oid, const char *nspname,
 								const char *pnspname, const char *prsname);
 static void printACLColumn(PQExpBuffer buf, const char *colname);
 static bool listOneExtensionContents(const char *extname, const char *oid);
+static void appendSystemSchemaFilter(PQExpBuffer buf,
+									 const char *namespacevar,
+									 bool have_where);
 static bool validateSQLNamePattern(PQExpBuffer buf, const char *pattern,
 								   bool have_where, bool force_escape,
 								   const char *schemavar, const char *namevar,
@@ -114,8 +117,7 @@ describeAggregates(const char *pattern, bool verbose, bool showSystem)
 						  gettext_noop("Description"));
 
 	if (!showSystem && !pattern)
-		appendPQExpBufferStr(&buf, "      AND n.nspname <> 'pg_catalog'\n"
-							 "      AND n.nspname <> 'information_schema'\n");
+		appendSystemSchemaFilter(&buf, "p.pronamespace", true);
 
 	if (!validateSQLNamePattern(&buf, pattern, true, false,
 								"n.nspname", "p.proname", NULL,
@@ -546,6 +548,12 @@ describeFunctions(const char *functypes, const char *func_pattern,
 		appendPQExpBufferStr(&buf, "      )\n");
 	}
 
+	if (!showSystem && !func_pattern)
+	{
+		appendSystemSchemaFilter(&buf, "p.pronamespace", have_where);
+		have_where = true;
+	}
+
 	if (!validateSQLNamePattern(&buf, func_pattern, have_where, false,
 								"n.nspname", "p.proname", NULL,
 								"pg_catalog.pg_function_is_visible(p.oid)",
@@ -585,10 +593,6 @@ describeFunctions(const char *functypes, const char *func_pattern,
 			appendPQExpBuffer(&buf, "  AND t%d.typname IS NULL\n", i);
 		}
 	}
-
-	if (!showSystem && !func_pattern)
-		appendPQExpBufferStr(&buf, "      AND n.nspname <> 'pg_catalog'\n"
-							 "      AND n.nspname <> 'information_schema'\n");
 
 	appendPQExpBufferStr(&buf, "ORDER BY 1, 2, 4;");
 
@@ -684,8 +688,7 @@ describeTypes(const char *pattern, bool verbose, bool showSystem)
 		appendPQExpBufferStr(&buf, "  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_type el WHERE el.oid = t.typelem AND el.typarray = t.oid)\n");
 
 	if (!showSystem && !pattern)
-		appendPQExpBufferStr(&buf, "      AND n.nspname <> 'pg_catalog'\n"
-							 "      AND n.nspname <> 'information_schema'\n");
+		appendSystemSchemaFilter(&buf, "t.typnamespace", true);
 
 	/* Match name pattern against either internal or external name */
 	if (!validateSQLNamePattern(&buf, map_typename_pattern(pattern),
@@ -852,8 +855,7 @@ describeOperators(const char *oper_pattern,
 							 "     LEFT JOIN pg_catalog.pg_proc p ON p.oid = o.oprcode\n");
 
 	if (!showSystem && !oper_pattern)
-		appendPQExpBufferStr(&buf, "WHERE n.nspname <> 'pg_catalog'\n"
-							 "      AND n.nspname <> 'information_schema'\n");
+		appendSystemSchemaFilter(&buf, "o.oprnamespace", false);
 
 	if (!validateSQLNamePattern(&buf, oper_pattern,
 								!showSystem && !oper_pattern, true,
@@ -1132,8 +1134,7 @@ permissionsList(const char *pattern, bool showSystem)
 						 CppAsString2(RELKIND_PARTITIONED_TABLE) ")\n");
 
 	if (!showSystem && !pattern)
-		appendPQExpBufferStr(&buf, "      AND n.nspname <> 'pg_catalog'\n"
-							 "      AND n.nspname <> 'information_schema'\n");
+		appendSystemSchemaFilter(&buf, "c.relnamespace", true);
 
 	if (!validateSQLNamePattern(&buf, pattern, true, false,
 								"n.nspname", "c.relname", NULL,
@@ -1285,8 +1286,7 @@ objectDescription(const char *pattern, bool showSystem)
 					  gettext_noop("table constraint"));
 
 	if (!showSystem && !pattern)
-		appendPQExpBufferStr(&buf, "WHERE n.nspname <> 'pg_catalog'\n"
-							 "      AND n.nspname <> 'information_schema'\n");
+		appendSystemSchemaFilter(&buf, "c.relnamespace", false);
 
 	if (!validateSQLNamePattern(&buf, pattern, !showSystem && !pattern,
 								false, "n.nspname", "pgc.conname", NULL,
@@ -1309,8 +1309,7 @@ objectDescription(const char *pattern, bool showSystem)
 					  gettext_noop("domain constraint"));
 
 	if (!showSystem && !pattern)
-		appendPQExpBufferStr(&buf, "WHERE n.nspname <> 'pg_catalog'\n"
-							 "      AND n.nspname <> 'information_schema'\n");
+		appendSystemSchemaFilter(&buf, "t.typnamespace", false);
 
 	if (!validateSQLNamePattern(&buf, pattern, !showSystem && !pattern,
 								false, "n.nspname", "pgc.conname", NULL,
@@ -1333,8 +1332,7 @@ objectDescription(const char *pattern, bool showSystem)
 					  gettext_noop("operator class"));
 
 	if (!showSystem && !pattern)
-		appendPQExpBufferStr(&buf, "      AND n.nspname <> 'pg_catalog'\n"
-							 "      AND n.nspname <> 'information_schema'\n");
+		appendSystemSchemaFilter(&buf, "o.opcnamespace", true);
 
 	if (!validateSQLNamePattern(&buf, pattern, true, false,
 								"n.nspname", "o.opcname", NULL,
@@ -1357,8 +1355,7 @@ objectDescription(const char *pattern, bool showSystem)
 					  gettext_noop("operator family"));
 
 	if (!showSystem && !pattern)
-		appendPQExpBufferStr(&buf, "      AND n.nspname <> 'pg_catalog'\n"
-							 "      AND n.nspname <> 'information_schema'\n");
+		appendSystemSchemaFilter(&buf, "opf.opfnamespace", true);
 
 	if (!validateSQLNamePattern(&buf, pattern, true, false,
 								"n.nspname", "opf.opfname", NULL,
@@ -1380,8 +1377,7 @@ objectDescription(const char *pattern, bool showSystem)
 					  gettext_noop("rule"));
 
 	if (!showSystem && !pattern)
-		appendPQExpBufferStr(&buf, "      AND n.nspname <> 'pg_catalog'\n"
-							 "      AND n.nspname <> 'information_schema'\n");
+		appendSystemSchemaFilter(&buf, "c.relnamespace", true);
 
 	if (!validateSQLNamePattern(&buf, pattern, true, false,
 								"n.nspname", "r.rulename", NULL,
@@ -1402,8 +1398,7 @@ objectDescription(const char *pattern, bool showSystem)
 					  gettext_noop("trigger"));
 
 	if (!showSystem && !pattern)
-		appendPQExpBufferStr(&buf, "WHERE n.nspname <> 'pg_catalog'\n"
-							 "      AND n.nspname <> 'information_schema'\n");
+		appendSystemSchemaFilter(&buf, "c.relnamespace", false);
 
 	if (!validateSQLNamePattern(&buf, pattern, !showSystem && !pattern, false,
 								"n.nspname", "t.tgname", NULL,
@@ -1465,8 +1460,7 @@ describeTableDetails(const char *pattern, bool verbose, bool showSystem)
 						 "     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace\n");
 
 	if (!showSystem && !pattern)
-		appendPQExpBufferStr(&buf, "WHERE n.nspname <> 'pg_catalog'\n"
-							 "      AND n.nspname <> 'information_schema'\n");
+		appendSystemSchemaFilter(&buf, "c.relnamespace", false);
 
 	if (!validateSQLNamePattern(&buf, pattern, !showSystem && !pattern, false,
 								"n.nspname", "c.relname", NULL,
@@ -4229,9 +4223,10 @@ listTables(const char *tabtypes, const char *pattern, bool verbose, bool showSys
 	appendPQExpBufferStr(&buf, ")\n");
 
 	if (!showSystem && !pattern)
-		appendPQExpBufferStr(&buf, "      AND n.nspname <> 'pg_catalog'\n"
-							 "      AND n.nspname !~ '^pg_toast'\n"
-							 "      AND n.nspname <> 'information_schema'\n");
+	{
+		appendSystemSchemaFilter(&buf, "c.relnamespace", true);
+		appendPQExpBufferStr(&buf, "      AND n.nspname !~ '^pg_toast'\n");
+	}
 
 	if (!validateSQLNamePattern(&buf, pattern, true, false,
 								"n.nspname", "c.relname", NULL,
@@ -4502,9 +4497,10 @@ listPartitionedTables(const char *reltypes, const char *pattern, bool verbose)
 						 " AND NOT c.relispartition\n" : "");
 
 	if (!pattern)
-		appendPQExpBufferStr(&buf, "      AND n.nspname <> 'pg_catalog'\n"
-							 "      AND n.nspname !~ '^pg_toast'\n"
-							 "      AND n.nspname <> 'information_schema'\n");
+	{
+		appendSystemSchemaFilter(&buf, "c.relnamespace", true);
+		appendPQExpBufferStr(&buf, "      AND n.nspname !~ '^pg_toast'\n");
+	}
 
 	if (!validateSQLNamePattern(&buf, pattern, true, false,
 								"n.nspname", "c.relname", NULL,
@@ -4673,8 +4669,7 @@ listDomains(const char *pattern, bool verbose, bool showSystem)
 	appendPQExpBufferStr(&buf, "WHERE t.typtype = 'd'\n");
 
 	if (!showSystem && !pattern)
-		appendPQExpBufferStr(&buf, "      AND n.nspname <> 'pg_catalog'\n"
-							 "      AND n.nspname <> 'information_schema'\n");
+		appendSystemSchemaFilter(&buf, "t.typnamespace", true);
 
 	if (!validateSQLNamePattern(&buf, pattern, true, false,
 								"n.nspname", "t.typname", NULL,
@@ -4752,8 +4747,7 @@ listConversions(const char *pattern, bool verbose, bool showSystem)
 	appendPQExpBufferStr(&buf, "WHERE true\n");
 
 	if (!showSystem && !pattern)
-		appendPQExpBufferStr(&buf, "  AND n.nspname <> 'pg_catalog'\n"
-							 "  AND n.nspname <> 'information_schema'\n");
+		appendSystemSchemaFilter(&buf, "c.connamespace", true);
 
 	if (!validateSQLNamePattern(&buf, pattern, true, false,
 								"n.nspname", "c.conname", NULL,
@@ -5223,8 +5217,7 @@ listCollations(const char *pattern, bool verbose, bool showSystem)
 						 "WHERE n.oid = c.collnamespace\n");
 
 	if (!showSystem && !pattern)
-		appendPQExpBufferStr(&buf, "      AND n.nspname <> 'pg_catalog'\n"
-							 "      AND n.nspname <> 'information_schema'\n");
+		appendSystemSchemaFilter(&buf, "c.collnamespace", true);
 
 	/*
 	 * Hide collations that aren't usable in the current database's encoding.
@@ -6423,6 +6416,25 @@ listOneExtensionContents(const char *extname, const char *oid)
 	termPQExpBuffer(&title);
 	PQclear(res);
 	return true;
+}
+
+/*
+ * Append a filter that excludes objects in pg_catalog and
+ * information_schema.  Use the namespace OID stored in the object's catalog,
+ * rather than the name obtained through pg_namespace, so the restriction can
+ * be applied during the object catalog scan.  The subquery also tolerates a
+ * missing information_schema.
+ */
+static void
+appendSystemSchemaFilter(PQExpBuffer buf, const char *namespacevar,
+						 bool have_where)
+{
+	appendPQExpBuffer(buf,
+					  "%s%s <> ALL (ARRAY(\n"
+					  "        SELECT oid FROM pg_catalog.pg_namespace\n"
+					  "        WHERE nspname IN ('pg_catalog', 'information_schema')))\n",
+					  have_where ? "      AND " : "WHERE ",
+					  namespacevar);
 }
 
 /*
