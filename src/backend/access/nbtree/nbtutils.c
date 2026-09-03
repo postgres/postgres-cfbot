@@ -24,6 +24,7 @@
 #include "common/int.h"
 #include "lib/qunique.h"
 #include "miscadmin.h"
+#include "storage/lmgr.h"
 #include "storage/lwlock.h"
 #include "storage/subsystems.h"
 #include "utils/datum.h"
@@ -448,8 +449,8 @@ _bt_vacuum_cycleid(Relation rel)
 	{
 		BTOneVacInfo *vac = &btvacinfo->vacuums[i];
 
-		if (vac->relid.relId == rel->rd_lockInfo.lockRelId.relId &&
-			vac->relid.dbId == rel->rd_lockInfo.lockRelId.dbId)
+		if (vac->relid.relId == RelationGetLockRelId(rel).relId &&
+			vac->relid.dbId == RelationGetLockRelId(rel).dbId)
 		{
 			result = vac->cycleid;
 			break;
@@ -490,8 +491,8 @@ _bt_start_vacuum(Relation rel)
 	for (i = 0; i < btvacinfo->num_vacuums; i++)
 	{
 		vac = &btvacinfo->vacuums[i];
-		if (vac->relid.relId == rel->rd_lockInfo.lockRelId.relId &&
-			vac->relid.dbId == rel->rd_lockInfo.lockRelId.dbId)
+		if (vac->relid.relId == RelationGetLockRelId(rel).relId &&
+			vac->relid.dbId == RelationGetLockRelId(rel).dbId)
 		{
 			/*
 			 * Unlike most places in the backend, we have to explicitly
@@ -512,7 +513,7 @@ _bt_start_vacuum(Relation rel)
 		elog(ERROR, "out of btvacinfo slots");
 	}
 	vac = &btvacinfo->vacuums[btvacinfo->num_vacuums];
-	vac->relid = rel->rd_lockInfo.lockRelId;
+	vac->relid = RelationGetLockRelId(rel);
 	vac->cycleid = result;
 	btvacinfo->num_vacuums++;
 
@@ -538,8 +539,8 @@ _bt_end_vacuum(Relation rel)
 	{
 		BTOneVacInfo *vac = &btvacinfo->vacuums[i];
 
-		if (vac->relid.relId == rel->rd_lockInfo.lockRelId.relId &&
-			vac->relid.dbId == rel->rd_lockInfo.lockRelId.dbId)
+		if (vac->relid.relId == RelationGetLockRelId(rel).relId &&
+			vac->relid.dbId == RelationGetLockRelId(rel).dbId)
 		{
 			/* Remove it by shifting down the last entry */
 			*vac = btvacinfo->vacuums[btvacinfo->num_vacuums - 1];

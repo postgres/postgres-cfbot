@@ -19,6 +19,8 @@
 /*
  * LockRelId and LockInfo really belong to lmgr.h, but it's more convenient
  * to declare them here so we can have a LockInfoData field in a Relation.
+ * Moving them to lmgr.h would require including rel.h in lmgr.h, which creates
+ * a circular dependency.
  */
 
 typedef struct LockRelId
@@ -26,13 +28,6 @@ typedef struct LockRelId
 	Oid			relId;			/* a relation identifier */
 	Oid			dbId;			/* a database identifier */
 } LockRelId;
-
-typedef struct LockInfoData
-{
-	LockRelId	lockRelId;
-} LockInfoData;
-
-typedef LockInfoData *LockInfo;
 
 /*
  * Here are the contents of a relation cache entry.
@@ -99,7 +94,6 @@ typedef struct RelationData
 	SubTransactionId rd_droppedSubid;	/* dropped with another Subid set */
 
 	Oid			rd_id;			/* relation's object id */
-	LockInfoData rd_lockInfo;	/* lock mgr's info for locking relation */
 
 	bool		rd_islocaltemp; /* rel is a temp rel of this session */
 	bool		rd_isnailed;	/* rel is nailed in cache */

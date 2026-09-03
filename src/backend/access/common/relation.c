@@ -205,7 +205,7 @@ relation_openrv_extended(const RangeVar *relation, LOCKMODE lockmode,
 void
 relation_close(Relation relation, LOCKMODE lockmode)
 {
-	LockRelId	relid = relation->rd_lockInfo.lockRelId;
+	LockRelId	relid = RelationGetLockRelId(relation);
 
 	Assert(lockmode >= NoLock && lockmode < MAX_LOCKMODES);
 

@@ -177,7 +177,7 @@ try_index_open(Oid relationId, LOCKMODE lockmode)
 void
 index_close(Relation relation, LOCKMODE lockmode)
 {
-	LockRelId	relid = relation->rd_lockInfo.lockRelId;
+	LockRelId	relid = RelationGetLockRelId(relation);
 
 	Assert(lockmode >= NoLock && lockmode < MAX_LOCKMODES);
 
