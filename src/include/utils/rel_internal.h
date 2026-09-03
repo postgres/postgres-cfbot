@@ -30,6 +30,45 @@ typedef struct LockRelId
 } LockRelId;
 
 /*
+ * RelationPartitionInfo
+ *		Partition-related data cached for a relation, allocated lazily on
+ *		first use.  Only ever populated for partitioned tables (partkey and
+ *		the partdesc fields) and/or partitions (partcheck fields); most
+ *		relations need none of this, hence it's a separate lazily-allocated
+ *		struct rather than a set of fields embedded directly in
+ *		RelationData.
+ */
+typedef struct RelationPartitionInfo
+{
+	/* data managed by RelationGetPartitionKey: */
+	PartitionKey partkey;		/* partition key, or NULL */
+	MemoryContext partkeycxt;	/* private context for partkey, if any */
+
+	/* data managed by RelationGetPartitionDesc: */
+	PartitionDesc partdesc;		/* partition descriptor, or NULL */
+	MemoryContext pdcxt;		/* private context for partdesc, if any */
+
+	/* Same as above, for partdescs that omit detached partitions */
+	PartitionDesc partdesc_nodetached; /* partdesc w/o detached parts */
+	MemoryContext pddcxt;		/* for partdesc_nodetached, if any */
+
+	/* data managed by RelationGetPartitionQual: */
+	List	   *partcheck;		/* partition CHECK quals */
+	MemoryContext partcheckcxt; /* private cxt for partcheck, if any */
+
+	/*
+	 * pg_inherits.xmin of the partition that was excluded in
+	 * partdesc_nodetached.  This informs a future user of that partdesc: if
+	 * this value is not in progress for the active snapshot, then the
+	 * partdesc can be used, otherwise they have to build a new one.  (This
+	 * matches what find_inheritance_children_extended would do).
+	 */
+	TransactionId partdesc_nodetached_xmin;
+
+	bool		partcheckvalid; /* true if partcheck has been computed */
+} RelationPartitionInfo;
+
+/*
  * Here are the contents of a relation cache entry.
  */
 
@@ -135,21 +174,12 @@ typedef struct RelationData
 			/* data managed by RelationGetFKeyList: */
 			List	   *rd_fkeylist;	/* list of ForeignKeyCacheInfo (see below) */
 
-			/* data managed by RelationGetPartitionKey: */
-			PartitionKey rd_partkey;	/* partition key, or NULL */
-			MemoryContext rd_partkeycxt;	/* private context for rd_partkey, if any */
-
-			/* data managed by RelationGetPartitionDesc: */
-			PartitionDesc rd_partdesc;	/* partition descriptor, or NULL */
-			MemoryContext rd_pdcxt;		/* private context for rd_partdesc, if any */
-
-			/* Same as above, for partdescs that omit detached partitions */
-			PartitionDesc rd_partdesc_nodetached;	/* partdesc w/o detached parts */
-			MemoryContext rd_pddcxt;	/* for rd_partdesc_nodetached, if any */
-
-			/* data managed by RelationGetPartitionQual: */
-			List	   *rd_partcheck;	/* partition CHECK quals */
-			MemoryContext rd_partcheckcxt;	/* private cxt for rd_partcheck, if any */
+			/*
+			 * data managed by RelationGetPartitionKey, RelationGetPartitionDesc,
+			 * and RelationGetPartitionQual; NULL if none of these has been
+			 * called for this relation.  See RelationPartitionInfo above.
+			 */
+			RelationPartitionInfo *rd_partinfo;
 
 			/* data managed by RelationGetIndexAttrBitmap: */
 			Bitmapset  *rd_keyattr;		/* cols that can be ref'd by foreign keys */
@@ -170,17 +200,7 @@ typedef struct RelationData
 			/* use "struct" here to avoid needing to include fdwapi.h: */
 			struct FdwRoutine *rd_fdwroutine;	/* cached function pointers, or NULL */
 
-			/*
-			 * pg_inherits.xmin of the partition that was excluded in
-			 * rd_partdesc_nodetached.  This informs a future user of that partdesc:
-			 * if this value is not in progress for the active snapshot, then the
-			 * partdesc can be used, otherwise they have to build a new one.  (This
-			 * matches what find_inheritance_children_extended would do).
-			 */
-			TransactionId rd_partdesc_nodetached_xmin;
-
 			bool		rd_fkeyvalid;	/* true if rd_fkeylist has been computed */
-			bool		rd_partcheckvalid;	/* true if rd_partcheck has been computed */
 		};
 
 		/* fields used only for an index relation */

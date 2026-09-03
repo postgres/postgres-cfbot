@@ -80,10 +80,10 @@ RelationGetPartitionDesc(Relation rel, bool omit_detached)
 	 * If there is no active snapshot, detached partitions aren't omitted
 	 * either, so we can use the cached descriptor too in that case.
 	 */
-	if (likely(rel->rd_partdesc &&
-			   (!rel->rd_partdesc->detached_exist || !omit_detached ||
+	if (likely(rel->rd_partinfo && rel->rd_partinfo->partdesc &&
+			   (!rel->rd_partinfo->partdesc->detached_exist || !omit_detached ||
 				!ActiveSnapshotSet())))
-		return rel->rd_partdesc;
+		return rel->rd_partinfo->partdesc;
 
 	/*
 	 * If we're asked to omit detached partitions, we may be able to use a
@@ -94,16 +94,17 @@ RelationGetPartitionDesc(Relation rel, bool omit_detached)
 	 * scratch.
 	 */
 	if (omit_detached &&
-		rel->rd_partdesc_nodetached &&
+		rel->rd_partinfo &&
+		rel->rd_partinfo->partdesc_nodetached &&
 		ActiveSnapshotSet())
 	{
 		Snapshot	activesnap;
 
-		Assert(TransactionIdIsValid(rel->rd_partdesc_nodetached_xmin));
+		Assert(TransactionIdIsValid(rel->rd_partinfo->partdesc_nodetached_xmin));
 		activesnap = GetActiveSnapshot();
 
-		if (!XidInMVCCSnapshot(rel->rd_partdesc_nodetached_xmin, activesnap))
-			return rel->rd_partdesc_nodetached;
+		if (!XidInMVCCSnapshot(rel->rd_partinfo->partdesc_nodetached_xmin, activesnap))
+			return rel->rd_partinfo->partdesc_nodetached;
 	}
 
 	return RelationBuildPartitionDesc(rel, omit_detached);
@@ -385,12 +386,16 @@ retry:
 	 * the regular partdesc in rd_pdcxt, and the partdesc-excluding-
 	 * detached-partitions in rd_pddcxt.)
 	 */
+	if (rel->rd_partinfo == NULL)
+		rel->rd_partinfo = MemoryContextAllocZero(CacheMemoryContext,
+												  sizeof(RelationPartitionInfo));
+
 	if (is_omit)
 	{
-		if (rel->rd_pddcxt != NULL)
-			MemoryContextSetParent(rel->rd_pddcxt, new_pdcxt);
-		rel->rd_pddcxt = new_pdcxt;
-		rel->rd_partdesc_nodetached = partdesc;
+		if (rel->rd_partinfo->pddcxt != NULL)
+			MemoryContextSetParent(rel->rd_partinfo->pddcxt, new_pdcxt);
+		rel->rd_partinfo->pddcxt = new_pdcxt;
+		rel->rd_partinfo->partdesc_nodetached = partdesc;
 
 		/*
 		 * For partdescs built excluding detached partitions, which we save
@@ -401,14 +406,14 @@ retry:
 		 * with.
 		 */
 		Assert(TransactionIdIsValid(detached_xmin));
-		rel->rd_partdesc_nodetached_xmin = detached_xmin;
+		rel->rd_partinfo->partdesc_nodetached_xmin = detached_xmin;
 	}
 	else
 	{
-		if (rel->rd_pdcxt != NULL)
-			MemoryContextSetParent(rel->rd_pdcxt, new_pdcxt);
-		rel->rd_pdcxt = new_pdcxt;
-		rel->rd_partdesc = partdesc;
+		if (rel->rd_partinfo->pdcxt != NULL)
+			MemoryContextSetParent(rel->rd_partinfo->pdcxt, new_pdcxt);
+		rel->rd_partinfo->pdcxt = new_pdcxt;
+		rel->rd_partinfo->partdesc = partdesc;
 	}
 
 	return partdesc;

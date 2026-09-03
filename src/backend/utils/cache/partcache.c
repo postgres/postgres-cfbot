@@ -53,10 +53,10 @@ RelationGetPartitionKey(Relation rel)
 	if (rel->rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
 		return NULL;
 
-	if (unlikely(rel->rd_partkey == NULL))
+	if (unlikely(rel->rd_partinfo == NULL || rel->rd_partinfo->partkey == NULL))
 		RelationBuildPartitionKey(rel);
 
-	return rel->rd_partkey;
+	return rel->rd_partinfo->partkey;
 }
 
 /*
@@ -256,16 +256,19 @@ RelationBuildPartitionKey(Relation relation)
 	ReleaseSysCache(tuple);
 
 	/* Assert that we're not leaking any old data during assignments below */
-	Assert(relation->rd_partkeycxt == NULL);
-	Assert(relation->rd_partkey == NULL);
+	Assert(relation->rd_partinfo == NULL || relation->rd_partinfo->partkeycxt == NULL);
+	Assert(relation->rd_partinfo == NULL || relation->rd_partinfo->partkey == NULL);
 
 	/*
 	 * Success --- reparent our context and make the relcache point to the
 	 * newly constructed key
 	 */
 	MemoryContextSetParent(partkeycxt, CacheMemoryContext);
-	relation->rd_partkeycxt = partkeycxt;
-	relation->rd_partkey = key;
+	if (relation->rd_partinfo == NULL)
+		relation->rd_partinfo = MemoryContextAllocZero(CacheMemoryContext,
+													   sizeof(RelationPartitionInfo));
+	relation->rd_partinfo->partkeycxt = partkeycxt;
+	relation->rd_partinfo->partkey = key;
 }
 
 /*
@@ -350,13 +353,13 @@ generate_partition_qual(Relation rel)
 	check_stack_depth();
 
 	/*
-	 * rd_partcheck/rd_partcheckvalid/rd_partcheckcxt only exist for
-	 * table-like relations; they are overlaid in a union with index-only
-	 * fields (see RelationData in rel_internal.h). generate_partition_qual()
-	 * is also invoked for partitioned indexes (an index partition never has
-	 * a partition bound of its own, so this always ends up computing an
-	 * empty qual list for them), so guard against misinterpreting unrelated
-	 * index data, and don't cache results for indexes.
+	 * rd_partinfo only exists for table-like relations; it is overlaid in a
+	 * union with index-only fields (see RelationData in rel_internal.h).
+	 * generate_partition_qual() is also invoked for partitioned indexes (an
+	 * index partition never has a partition bound of its own, so this always
+	 * ends up computing an empty qual list for them), so guard against
+	 * misinterpreting unrelated index data, and don't cache results for
+	 * indexes.
 	 */
 	if (rel->rd_rel->relkind == RELKIND_INDEX ||
 		rel->rd_rel->relkind == RELKIND_PARTITIONED_INDEX)
@@ -365,8 +368,8 @@ generate_partition_qual(Relation rel)
 		is_index = false;
 
 	/* If we already cached the result, just return a copy */
-	if (!is_index && rel->rd_partcheckvalid)
-		return copyObject(rel->rd_partcheck);
+	if (!is_index && rel->rd_partinfo && rel->rd_partinfo->partcheckvalid)
+		return copyObject(rel->rd_partinfo->partcheck);
 
 	/*
 	 * Grab at least an AccessShareLock on the parent table.  Must do this
@@ -421,8 +424,12 @@ generate_partition_qual(Relation rel)
 	}
 
 	/* Assert that we're not leaking any old data during assignments below */
-	Assert(rel->rd_partcheckcxt == NULL);
-	Assert(rel->rd_partcheck == NIL);
+	Assert(rel->rd_partinfo == NULL || rel->rd_partinfo->partcheckcxt == NULL);
+	Assert(rel->rd_partinfo == NULL || rel->rd_partinfo->partcheck == NIL);
+
+	if (rel->rd_partinfo == NULL)
+		rel->rd_partinfo = MemoryContextAllocZero(CacheMemoryContext,
+												  sizeof(RelationPartitionInfo));
 
 	/*
 	 * Save a copy in the relcache.  The order of these operations is fairly
@@ -457,12 +464,12 @@ generate_partition_qual(Relation rel)
 		/* finally, link the allocations and memctx into the right places */
 		MemoryContextSetParent(partctx, CacheMemoryContext);
 
-		rel->rd_partcheckcxt = partctx;
-		rel->rd_partcheck = partcheck;
+		rel->rd_partinfo->partcheckcxt = partctx;
+		rel->rd_partinfo->partcheck = partcheck;
 	}
 	else
-		rel->rd_partcheck = NIL;
-	rel->rd_partcheckvalid = true;
+		rel->rd_partinfo->partcheck = NIL;
+	rel->rd_partinfo->partcheckvalid = true;
 
 	/* Keep the parent locked until commit */
 	relation_close(parent, NoLock);
