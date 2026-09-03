@@ -29,6 +29,7 @@
 #include "access/tupconvert.h"
 #include "access/xact.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_namespace.h"
 #include "commands/copyapi.h"
 #include "commands/copyfrom_internal.h"
 #include "commands/progress.h"
@@ -42,16 +43,20 @@
 #include "miscadmin.h"
 #include "nodes/miscnodes.h"
 #include "optimizer/optimizer.h"
+#include "parser/parse_relation.h"
 #include "pgstat.h"
 #include "rewrite/rewriteHandler.h"
 #include "storage/fd.h"
 #include "tcop/tcopprot.h"
+#include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/portal.h"
 #include "utils/rel.h"
+#include "utils/regproc.h"
 #include "utils/snapmgr.h"
 #include "utils/typcache.h"
+#include "utils/syscache.h"
 
 /*
  * No more than this many tuples per CopyMultiInsertBuffer
@@ -120,6 +125,9 @@ static void CopyFromBinaryInFunc(CopyFromState cstate, Oid atttypid,
 								 FmgrInfo *finfo, Oid *typioparam);
 static void CopyFromBinaryStart(CopyFromState cstate, TupleDesc tupDesc);
 static void CopyFromBinaryEnd(CopyFromState cstate);
+static void RangeVarCallbackForCopyErrorTable(const RangeVar *rv, Oid relid, Oid oldrelid,
+											  void *arg);
+static void CopyFromErrorTableInit(CopyFromState cstate);
 
 
 /*
@@ -982,6 +990,11 @@ CopyFrom(CopyFromState cstate)
 	if (cstate->rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
 		proute = ExecSetupPartitionTupleRouting(estate, cstate->rel);
 
+	if (cstate->opts.on_error == COPY_ON_ERROR_TABLE)
+		CopyFromErrorTableInit(cstate);
+	else
+		cstate->mtcontext = NULL;
+
 	if (cstate->whereClause)
 		cstate->qualexpr = ExecInitQual(castNode(List, cstate->whereClause),
 										&mtstate->ps);
@@ -1151,22 +1164,29 @@ CopyFrom(CopyFromState cstate)
 		if (!NextCopyFrom(cstate, econtext, myslot->tts_values, myslot->tts_isnull))
 			break;
 
-		if (cstate->opts.on_error == COPY_ON_ERROR_IGNORE &&
+		if ((cstate->opts.on_error == COPY_ON_ERROR_IGNORE ||
+			 cstate->opts.on_error == COPY_ON_ERROR_TABLE) &&
 			cstate->escontext->error_occurred)
 		{
 			/*
 			 * Soft error occurred, skip this tuple and just make
-			 * ErrorSaveContext ready for the next NextCopyFrom. Since we
-			 * don't set details_wanted and error_data is not to be filled,
-			 * just resetting error_occurred is enough.
+			 * ErrorSaveContext ready for the next NextCopyFrom.
 			 */
 			cstate->escontext->error_occurred = false;
+
+			/* Reset ErrorSaveContext->error_data */
+			if (cstate->opts.on_error == COPY_ON_ERROR_TABLE)
+			{
+				cstate->escontext->details_wanted = true;
+				memset(cstate->escontext->error_data, 0, sizeof(ErrorData));
+			}
 
 			/* Report that this tuple was skipped by the ON_ERROR clause */
 			pgstat_progress_update_param(PROGRESS_COPY_TUPLES_SKIPPED,
 										 cstate->num_errors);
 
-			if (cstate->opts.reject_limit > 0 &&
+			if (cstate->opts.on_error == COPY_ON_ERROR_IGNORE &&
+				cstate->opts.reject_limit > 0 &&
 				cstate->num_errors > cstate->opts.reject_limit)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
@@ -1480,6 +1500,13 @@ CopyFrom(CopyFromState cstate)
 								  "in %" PRIu64 " rows, columns were set to null due to data type incompatibility",
 								  cstate->num_errors,
 								  cstate->num_errors));
+		else if (cstate->opts.on_error == COPY_ON_ERROR_TABLE)
+			ereport(NOTICE,
+					errmsg_plural("%" PRIu64 " row was saved to table \"%s\" due to data type incompatibility",
+								  "%" PRIu64 " rows were saved to table \"%s\" due to data type incompatibility",
+								  cstate->num_errors,
+								  cstate->num_errors,
+								  RelationGetRelationName(cstate->error_rel)));
 	}
 
 	if (bistate != NULL)
@@ -1514,6 +1541,39 @@ CopyFrom(CopyFromState cstate)
 	ExecCloseRangeTableRelations(estate);
 
 	FreeExecutorState(estate);
+
+	/*
+	 * This should be aligned with the resource release/destruction performed
+	 * by ExecutorFinish and ExecutorEnd on the EState.
+	 */
+	if (cstate->opts.on_error == COPY_ON_ERROR_TABLE)
+	{
+		MemoryContext tmpcontext;
+		ModifyTableState *on_error_mtstate;
+
+		tmpcontext =
+			MemoryContextSwitchTo(cstate->mtcontext->estate->es_query_cxt);
+
+		on_error_mtstate = cstate->mtcontext->mtstate;
+		on_error_mtstate->mt_done = true;
+		cstate->mtcontext->estate->es_finished = true;
+
+		/* Release resources associated with error_table */
+		ExecResetTupleTable(cstate->mtcontext->estate->es_tupleTable, false);
+		ExecCloseResultRelations(cstate->mtcontext->estate);
+		ExecCloseRangeTableRelations(cstate->mtcontext->estate);
+
+		/* Do away with our snapshots */
+		UnregisterSnapshot(cstate->mtcontext->estate->es_snapshot);
+		UnregisterSnapshot(cstate->mtcontext->estate->es_crosscheck_snapshot);
+
+		/*
+		 * Must switch out of context before destroying it
+		 */
+		MemoryContextSwitchTo(tmpcontext);
+
+		FreeExecutorState(cstate->mtcontext->estate);
+	}
 
 	return processed;
 }
@@ -1630,6 +1690,15 @@ BeginCopyFrom(ParseState *pstate,
 		if (cstate->opts.on_error == COPY_ON_ERROR_IGNORE ||
 			cstate->opts.on_error == COPY_ON_ERROR_SET_NULL)
 			cstate->escontext->details_wanted = false;
+		else if (cstate->opts.on_error == COPY_ON_ERROR_TABLE)
+		{
+			/*
+			 * For ON_ERROR = TABLE, we must set details_wanted to true. This
+			 * ensures that ErrorData is populated when the next error occurs,
+			 * allowing us to capture error metadata.
+			 */
+			cstate->escontext->details_wanted = true;
+		}
 	}
 	else
 		cstate->escontext = NULL;
@@ -1651,6 +1720,84 @@ BeginCopyFrom(ParseState *pstate,
 			Form_pg_attribute att = TupleDescAttr(tupDesc, attno - 1);
 
 			cstate->domain_with_constraint[attno - 1] = DomainHasConstraints(att->atttypid, NULL);
+		}
+	}
+	else if (cstate->opts.on_error == COPY_ON_ERROR_TABLE)
+	{
+		/* Set up COPY FROM (ON_ERROR TABLE) */
+		HeapTuple	tp;
+		Oid			err_relOid,
+					typoid;
+		Oid			reloftype = InvalidOid;
+
+		List	   *relname_list = stringToQualifiedNameList(cstate->opts.error_table,
+															 NULL);
+
+		RangeVar   *relvar = makeRangeVarFromNameList(relname_list);
+
+		Assert(cstate->opts.error_table != NULL);
+
+		/*
+		 * We may insert tuples into error_table later. To avoid a deadlock or
+		 * long hang during COPY FROM, verify that the table is not already
+		 * locked; otherwise, report a lock conflict error.
+		 */
+		err_relOid = RangeVarGetRelidExtended(relvar,
+											  RowExclusiveLock,
+											  RVR_NOWAIT,
+											  RangeVarCallbackForCopyErrorTable,
+											  NULL);
+
+		if (RelationGetRelid(cstate->rel) == err_relOid)
+			ereport(ERROR,
+					errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					errmsg("cannot use relation \"%s\" for COPY error saving while copying data to it",
+						   cstate->opts.error_table));
+
+		cstate->error_rel = table_open(err_relOid, NoLock);
+
+		/*
+		 * The error-saving table must be a plain table. It cannot have
+		 * rewrite rules or any enabled row security policies.
+		 */
+		if (cstate->error_rel->rd_rel->relrowsecurity || cstate->error_rel->rd_rules)
+			ereport(ERROR,
+					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("cannot use relation \"%s\" for COPY error saving",
+						   RelationGetRelationName(cstate->error_rel)),
+					cstate->error_rel->rd_rel->relrowsecurity
+					? errdetail("The error saving table cannot have row-level security policies.")
+					: errdetail("The error saving table cannot have rules."));
+
+		typoid = GetSysCacheOid2(TYPENAMENSP, Anum_pg_type_oid,
+								 CStringGetDatum("copy_error_saving"),
+								 ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
+		if (!OidIsValid(typoid))
+			elog(ERROR, "cache lookup failed for catalog type %s", "copy_error_saving");
+
+		tp = SearchSysCache1(RELOID, ObjectIdGetDatum(err_relOid));
+		if (!HeapTupleIsValid(tp))
+			elog(ERROR, "cache lookup failed for relation %u", err_relOid);
+		else
+		{
+			Form_pg_class reltup = (Form_pg_class) GETSTRUCT(tp);
+
+			reloftype = reltup->reloftype;
+
+			if (reloftype != typoid)
+				ereport(ERROR,
+						errcode(ERRCODE_WRONG_OBJECT_TYPE),
+						errmsg("cannot use relation \"%s\" for COPY error saving",
+							   RelationGetRelationName(cstate->error_rel)),
+						OidIsValid(reloftype)
+						? errdetail("Relation \"%s\" is a typed table based on type \"%s\".",
+									RelationGetRelationName(cstate->error_rel),
+									format_type_be_qualified(reloftype))
+						: 0,
+						errhint("The COPY error saving table must be a typed table based on type \"%s\".",
+								format_type_be_qualified(typoid)));
+
+			ReleaseSysCache(tp);
 		}
 	}
 
@@ -1956,6 +2103,9 @@ EndCopyFrom(CopyFromState cstate)
 
 	pgstat_progress_end_command();
 
+	if (cstate->error_rel)
+		table_close(cstate->error_rel, NoLock);
+
 	MemoryContextDelete(cstate->copycontext);
 	pfree(cstate);
 }
@@ -1993,4 +2143,141 @@ ClosePipeFromProgram(CopyFromState cstate)
 						cstate->filename),
 				 errdetail_internal("%s", wait_result_to_str(pclose_rc))));
 	}
+}
+
+/*
+ * Perform permission and other checks for error_table, and initialize
+ * cstate->mtcontext.
+ */
+static void
+CopyFromErrorTableInit(CopyFromState cstate)
+{
+	ModifyTableState *mtstate;
+	ModifyTable *node;
+	MemoryContext tmpcontext;
+	ParseState *pstate = make_parsestate(NULL);
+	EState	   *estate = CreateExecutorState();
+	AclResult	aclresult;
+
+	cstate->mtcontext = palloc0_object(ModifyTableContext);
+
+	Assert(cstate->opts.on_error == COPY_ON_ERROR_TABLE);
+
+	tmpcontext = MemoryContextSwitchTo(estate->es_query_cxt);
+
+	estate->es_output_cid = GetCurrentCommandId(true);
+	estate->es_snapshot = RegisterSnapshot(GetActiveSnapshot());
+	estate->es_crosscheck_snapshot = RegisterSnapshot(InvalidSnapshot);
+
+	/*
+	 * COPY (ON_ERROR TABLE) inserts COPY FROM error details to error_table,
+	 * therefore, the current user must have INSERT privileges on error_table.
+	 */
+	aclresult = pg_class_aclcheck(RelationGetRelid(cstate->error_rel),
+								  GetUserId(),
+								  ACL_INSERT);
+	if (aclresult != ACLCHECK_OK)
+		aclcheck_error(aclresult,
+					   get_relkind_objtype(get_rel_relkind(RelationGetRelid(cstate->error_rel))),
+					   RelationGetRelationName(cstate->error_rel));
+
+	addRangeTableEntryForRelation(pstate, cstate->error_rel, RowExclusiveLock,
+								  NULL, false, false);
+
+	/*
+	 * We need a ResultRelInfo so we can use the regular executor's
+	 * index-entry-making machinery.
+	 */
+	ExecInitRangeTable(estate, pstate->p_rtable, pstate->p_rteperminfos,
+					   bms_make_singleton(1));
+
+	node = makeNode(ModifyTable);
+	node->operation = CMD_INSERT;
+	node->canSetTag = false;
+	node->rootRelation = 0;
+	node->resultRelations = list_make1_int(1);
+	node->onConflictAction = ONCONFLICT_NONE;
+
+	/*
+	 * Populate ModifyTableState for inserting record to error saving table.
+	 */
+	mtstate = makeNode(ModifyTableState);
+	mtstate->ps.plan = (Plan *) node;
+	mtstate->ps.state = estate;
+
+	mtstate->operation = CMD_INSERT;
+	mtstate->canSetTag = false;
+	mtstate->mt_done = false;
+
+	mtstate->mt_nrels = 1;
+	mtstate->resultRelInfo = palloc_array(ResultRelInfo, 1);
+
+	mtstate->rootResultRelInfo = mtstate->resultRelInfo;
+	ExecInitResultRelation(estate, mtstate->resultRelInfo,
+						   linitial_int(node->resultRelations));
+
+	/* Verify the named relation is a valid target for INSERT */
+	CheckValidResultRel(mtstate->resultRelInfo, node->operation,
+						node->onConflictAction, NIL, NULL);
+
+	/*
+	 * Open the table's indexes, if we have not done so already, so that we
+	 * can add new index entries for the inserted tuple.
+	 */
+	if (cstate->error_rel->rd_rel->relhasindex &&
+		mtstate->resultRelInfo->ri_IndexRelationDescs == NULL)
+		ExecOpenIndices(mtstate->resultRelInfo,
+						node->onConflictAction != ONCONFLICT_NONE);
+
+	MemoryContextSwitchTo(tmpcontext);
+
+	cstate->mtcontext->mtstate = mtstate;
+	cstate->mtcontext->estate = estate;
+}
+
+/*
+ * Callback to RangeVarGetRelidExtended().
+ *
+ * Checks the following:
+ *	- the relation specified is a table.
+ *	- the table is not a system table.
+ *
+ * If any of these checks fails then an error is raised.
+ */
+static void
+RangeVarCallbackForCopyErrorTable(const RangeVar *rv, Oid relid, Oid oldrelid,
+								  void *arg)
+{
+	HeapTuple	tuple;
+	Form_pg_class classform;
+	char		relkind;
+
+	tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+	if (!HeapTupleIsValid(tuple))
+		return;
+
+	classform = (Form_pg_class) GETSTRUCT(tuple);
+	relkind = classform->relkind;
+
+	if (!allowSystemTableMods && IsSystemClass(relid, classform))
+		ereport(ERROR,
+				errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				errmsg("permission denied: \"%s\" is a system catalog",
+					   rv->relname));
+
+	/*
+	 * Currently, the error-saving table must be a regular relation.
+	 *
+	 * TODO: Allow cstate->error_rel to be a partitioned table. This should
+	 * not be difficult, but requires proper handling of constraints and
+	 * triggers on the partitioned table.
+	 */
+	if (relkind != RELKIND_RELATION)
+		ereport(ERROR,
+				errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				errmsg("cannot use relation \"%s\" for COPY error saving",
+					   rv->relname),
+				errdetail_relkind_not_supported(relkind));
+
+	ReleaseSysCache(tuple);
 }
