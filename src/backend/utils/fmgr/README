@@ -206,7 +206,9 @@ For TOAST-able data types, the PG_GETARG macro will deliver a de-TOASTed
 data value.  There might be a few cases where the still-toasted value is
 wanted, but the vast majority of cases want the de-toasted result, so
 that will be the default.  To get the argument value without causing
-de-toasting, use PG_GETARG_RAW_VARLENA_P(n).
+de-toasting, use PG_GETARG_RAW_VARLENA_P(n).  Whether the out-of-line
+value is stored using Plain TOAST or Direct TOAST is an internal storage
+detail handled transparently by detoast_attr().
 
 Some functions require a modifiable copy of their input values.  In these
 cases, it's silly to do an extra copy step if we copied the data anyway

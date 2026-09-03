@@ -220,6 +220,12 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 					   "chunk_data",
 					   BYTEAOID,
 					   -1, 0);
+	/*
+	 * Direct TOAST columns:
+	 * chunk_tids stores child chunk TIDs for flat multi-chunk roots and interior DAG nodes.
+	 * chunk_tid_offsets stores byte offsets within chunk_tids for binary-search slicing.
+	 * Both columns are NULL for simple leaf chunks or legacy plain TOAST rows.
+	 */
 	TupleDescInitEntry(tupdesc, (AttrNumber) 4,
 					   "chunk_tids",
 					   TIDARRAYOID,
@@ -309,6 +315,10 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 	 * duplicate TOAST chunk OIDs. The index might also be a little more
 	 * efficient this way, since btree isn't all that happy with large numbers
 	 * of equal keys.
+	 *
+	 * Even when Direct TOAST is active (which fetches chunks directly by TID),
+	 * this index is still created and maintained for backward compatibility,
+	 * sequential scan fallback, and VACUUM validation.
 	 */
 
 	indexInfo = makeNode(IndexInfo);
