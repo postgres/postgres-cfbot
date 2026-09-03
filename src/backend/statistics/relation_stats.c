@@ -73,7 +73,7 @@ relation_statistics_update(const NullableDatum *args)
 	char	   *relname;
 	Oid			reloid;
 	Oid			locked_table = InvalidOid;
-	RelationStatsValues values;
+	RelationStatsValues values = RELATION_STATS_VALUES_NULL;
 
 	stats_check_required_arg(args, relarginfo, RELSCHEMA_ARG);
 	stats_check_required_arg(args, relarginfo, RELNAME_ARG);
@@ -92,8 +92,6 @@ relation_statistics_update(const NullableDatum *args)
 									  RangeVarCallbackForStats, &locked_table);
 
 	/* Collect the values to apply. */
-	values.version.value = (Datum) 0;
-	values.version.isnull = true;
 	values.relpages = args[RELPAGES_ARG];
 	values.reltuples = args[RELTUPLES_ARG];
 	values.relallvisible = args[RELALLVISIBLE_ARG];

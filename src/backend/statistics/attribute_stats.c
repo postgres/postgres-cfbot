@@ -140,7 +140,7 @@ attribute_statistics_update(const NullableDatum *args)
 	AttrNumber	attnum;
 	bool		inherited;
 	Oid			locked_table = InvalidOid;
-	AttributeStatsValues values;
+	AttributeStatsValues values = ATTRIBUTE_STATS_VALUES_NULL;
 
 	stats_check_required_arg(args, attarginfo, ATTRELSCHEMA_ARG);
 	stats_check_required_arg(args, attarginfo, ATTRELNAME_ARG);
@@ -206,8 +206,6 @@ attribute_statistics_update(const NullableDatum *args)
 	inherited = DatumGetBool(args[INHERITED_ARG].value);
 
 	/* Collect the values to apply */
-	values.version.value = (Datum) 0;
-	values.version.isnull = true;
 	values.null_frac = args[NULL_FRAC_ARG];
 	values.avg_width = args[AVG_WIDTH_ARG];
 	values.n_distinct = args[N_DISTINCT_ARG];

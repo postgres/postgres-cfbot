@@ -6254,7 +6254,7 @@ import_fetched_statistics(Relation relation,
 {
 	PGresult   *res;
 	NullableDatum version;
-	RelationStatsValues relvalues;
+	RelationStatsValues relvalues = RELATION_STATS_VALUES_NULL;
 
 	/* Set the 'version' value, which is common to both statistics. */
 	version.value = Int32GetDatum(remstats->version);
@@ -6275,7 +6275,7 @@ import_fetched_statistics(Relation relation,
 		{
 			int			row = remattrmap[mapidx].res_index;
 			AttrNumber	attnum = remattrmap[mapidx].local_attnum;
-			AttributeStatsValues attvalues;
+			AttributeStatsValues attvalues = ATTRIBUTE_STATS_VALUES_NULL;
 
 			/* All mappings should have been assigned a result set row. */
 			Assert(row >= 0);
@@ -6345,10 +6345,6 @@ import_fetched_statistics(Relation relation,
 				  get_opt_value(res, 0, RELSTATS_RELTUPLES));
 	Assert(!relvalues.reltuples.isnull);
 	/* We don't import relallvisible/relallfrozen. */
-	relvalues.relallvisible.value = (Datum) 0;
-	relvalues.relallvisible.isnull = true;
-	relvalues.relallfrozen.value = (Datum) 0;
-	relvalues.relallfrozen.isnull = true;
 
 	/* Try to import the statistics. */
 	if (!import_relation_statistics(relation, &relvalues))
