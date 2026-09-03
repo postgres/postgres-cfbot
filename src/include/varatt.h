@@ -82,6 +82,18 @@ VARATT_EXTERNAL_OID8_SET_VALUEID(varatt_external_oid8 *toast_pointer, Oid8 id)
 	toast_pointer->va_valueid_hi = (uint32) (id >> 32);
 }
 
+/*
+ * varatt_direct is a "Direct TOAST pointer".
+ *
+ * Instead of identifying chunks via an OID (va_valueid) which requires a
+ * B-Tree index scan on (chunk_id, chunk_seq), va_tid points directly to the
+ * root/terminal chunk tuple on disk.
+ *
+ * Notice that sizeof(varatt_direct) == sizeof(varatt_external_oid8) == 20 bytes
+ * (including 2 bytes of trailing compiler padding for 4-byte struct alignment).
+ *
+ * Like varatt_external_oid8, this struct is stored unaligned within actual tuples.
+ */
 typedef struct varatt_direct
 {
 	int32		va_rawsize;		/* Original data size (includes header) */
@@ -90,6 +102,10 @@ typedef struct varatt_direct
 	Oid			va_toastrelid;	/* RelID of TOAST table containing it */
 	ItemPointerData va_tid;		/* Physical TID of the final chunk */
 } varatt_direct;
+
+StaticAssertDecl((sizeof(int32) + sizeof(uint32) + sizeof(Oid) + sizeof(ItemPointerData) + 2) ==
+				 sizeof(varatt_direct),
+				 "varatt_direct unexpected size");
 
 /*
  * These macros define the "saved size" portion of va_extinfo.  Its remaining
