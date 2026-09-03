@@ -900,6 +900,7 @@ read_local_xlog_page_guts(XLogReaderState *state, XLogRecPtr targetPagePtr,
 	int			count;
 	WALReadError errinfo;
 	TimeLineID	currTLI;
+	Size		rbytes;
 
 	loc = targetPagePtr + reqLen;
 
@@ -1031,9 +1032,34 @@ read_local_xlog_page_guts(XLogReaderState *state, XLogRecPtr targetPagePtr,
 		count = read_upto - targetPagePtr;
 	}
 
-	if (!WALRead(state, cur_page, targetPagePtr, count, tli,
-				 &errinfo))
-		WALReadRaiseError(&errinfo);
+	/* attempt to read WAL from WAL buffers first */
+	rbytes = WALReadFromBuffers(cur_page, targetPagePtr, count, currTLI);
+
+	/* now read the remaining WAL from WAL file */
+	if (rbytes < count)
+	{
+		if (!WALRead(state,
+					 cur_page + rbytes,
+					 targetPagePtr + rbytes,
+					 count - rbytes,
+					 tli,
+					 &errinfo))
+		{
+			WALReadRaiseError(&errinfo);
+		}
+		rbytes = count;			/* All requested bytes read */
+	}
+	else if (state->seg.ws_file >= 0)
+	{
+		/*
+		 * Close the segment after a read fully satisfied from WAL buffers, so
+		 * the next file read reopens the correct one. See
+		 * logical_read_xlog_page() for why this is needed.
+		 */
+		state->routine.segment_close(state);
+	}
+
+	Assert(rbytes == count);
 
 	/* number of valid bytes in the buffer */
 	return count;
