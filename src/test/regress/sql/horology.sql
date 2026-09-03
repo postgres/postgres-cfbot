@@ -656,6 +656,7 @@ SELECT to_timestamp('2015-02-11 86000', 'YYYY-MM-DD SSSS');  -- ok
 SELECT to_timestamp('2015-02-11 86400', 'YYYY-MM-DD SSSS');
 SELECT to_timestamp('2015-02-11 86000', 'YYYY-MM-DD SSSSS');  -- ok
 SELECT to_timestamp('2015-02-11 86400', 'YYYY-MM-DD SSSSS');
+SELECT to_timestamp('2024-01-01 -1', 'YYYY-MM-DD SSSSS');
 SELECT to_timestamp('1000000000,999', 'Y,YYY');
 SELECT to_timestamp('0.-2147483648', 'SS.MS');
 SELECT to_timestamp('613566758', 'W');
@@ -669,6 +670,19 @@ SELECT to_date('2015 366', 'YYYY DDD');
 SELECT to_date('2016 365', 'YYYY DDD');  -- ok
 SELECT to_date('2016 366', 'YYYY DDD');  -- ok
 SELECT to_date('2016 367', 'YYYY DDD');
+SELECT to_date('2024 1000', 'YYYY DDD');
+SELECT to_date('2024 999', 'IYYY IDDD');
+SELECT to_date('2024 372', 'IYYY IDDD');
+SELECT to_date('2024 371', 'IYYY IDDD');  -- ok
+SELECT to_date('2024 XIII', 'YYYY RM');
+SELECT to_date('2024 IIII', 'YYYY RM');
+SELECT to_date('2024 XII', 'YYYY RM');  -- ok
+SELECT to_date('2024 54', 'IYYY IW');
+SELECT to_date('2024 99', 'IYYY IW');
+SELECT to_date('2024 53', 'IYYY IW');  -- ok
+SELECT to_date('2024 01 8', 'IYYY IW ID');
+SELECT to_date('2024 01 0', 'IYYY IW ID');
+SELECT to_date('2024 01 7', 'IYYY IW ID');  -- ok
 SELECT to_date('0000-02-01','YYYY-MM-DD');  -- allowed, though it shouldn't be
 SELECT to_date('100000000', 'CC');
 SELECT to_date('-100000000', 'CC');
