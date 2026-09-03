@@ -99,6 +99,7 @@
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
+#include "utils/injection_point.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -6913,6 +6914,15 @@ ATSimpleRecursion(List **wqueue, Relation rel,
 		Oid			relid = RelationGetRelid(rel);
 		ListCell   *child;
 		List	   *children;
+
+		/*
+		 * Injection point to allow testing deadlocks between ALTER TABLE
+		 * recursion (which locks children in OID order via
+		 * find_all_inheritors) and concurrent ATTACH PARTITION (which locks
+		 * ancestors in reverse hierarchy order via
+		 * generate_partition_qual).
+		 */
+		INJECTION_POINT("alter-table-simple-recursion", NULL);
 
 		children = find_all_inheritors(relid, lockmode, NULL);
 
