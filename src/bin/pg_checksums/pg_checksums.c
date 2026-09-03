@@ -102,8 +102,6 @@ struct exclude_list_item
 
 /*
  * List of files excluded from checksum validation.
- *
- * Note: this list should be kept in sync with what basebackup.c includes.
  */
 static const struct exclude_list_item skip[] = {
 	{"pg_control", false},
@@ -360,8 +358,10 @@ scan_directory(const char *basedir, const char *subdir, bool sizeonly)
 				*segmentpath++ = '\0';
 				segmentno = atoi(segmentpath);
 				if (segmentno == 0)
-					pg_fatal("invalid segment number %d in file name \"%s\"",
-							 segmentno, fn);
+				{
+					/* not a valid segment */
+					continue;
+				}
 			}
 
 			forkpath = strchr(fnonly, '_');
