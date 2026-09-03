@@ -6,13 +6,15 @@ setup
     DROP TABLE IF EXISTS tbl1;
     DROP TABLE IF EXISTS tbl2;
     CREATE TABLE tbl1 (val1 integer, val2 integer);
+    CREATE TABLE user_cat (val1 integer) WITH (user_catalog_table = true);
     CREATE EXTENSION pg_logicalinspect;
 }
 
 teardown
 {
-    DROP TABLE tbl1;
-    DROP TABLE tbl2;
+    DROP TABLE IF EXISTS tbl1;
+    DROP TABLE IF EXISTS tbl2;
+    DROP TABLE IF EXISTS user_cat;
     SELECT 'stop' FROM pg_drop_replication_slot('isolation_slot');
     DROP EXTENSION pg_logicalinspect;
 }
@@ -21,6 +23,7 @@ session "s0"
 setup { SET synchronous_commit=on; }
 step "s0_init" { SELECT 'init' FROM pg_create_logical_replication_slot('isolation_slot', 'test_decoding'); }
 step "s0_begin" { BEGIN; }
+step "s0_get_xid" { SELECT pg_current_xact_id() IS NOT NULL AS xid_assigned; }
 step "s0_savepoint" { SAVEPOINT sp1; }
 step "s0_truncate" { TRUNCATE tbl1; }
 step "s0_commit" { COMMIT; }
@@ -29,9 +32,12 @@ session "s1"
 setup { SET synchronous_commit=on; }
 step "s1_checkpoint" { CHECKPOINT; }
 step "s1_create_table" { CREATE TABLE tbl2 (val1 integer, val2 integer); }
+step "s1_insert_user_catalog" { INSERT INTO user_cat VALUES (1); }
+step "s1_advance_slot" { SELECT slot_name FROM pg_replication_slot_advance('isolation_slot', pg_current_wal_lsn()); }
 step "s1_get_changes" { SELECT data FROM pg_logical_slot_get_changes('isolation_slot', NULL, NULL, 'skip-empty-xacts', '1', 'include-xids', '0'); }
 step "s1_check_snapshot_meta" { SELECT count(meta.*) > 0 AS has_meta from pg_ls_logicalsnapdir(), pg_get_logical_snapshot_meta(name) as meta; }
 step "s1_check_snapshot_info" { SELECT count(*) > 0 as has_info FROM pg_ls_logicalsnapdir(), pg_get_logical_snapshot_info(name) AS info where info.catchange_count >= 2 and array_length(info.catchange_xip,1) >= 2 and info.committed_count >= 1 and array_length(info.committed_xip,1) >= 1; }
+step "s1_check_fast_forward_snapshot" { SELECT count(*) > 0 AS catalog_xid_tracked FROM pg_ls_logicalsnapdir() files, pg_get_logical_snapshot_info(files.name) AS info, user_cat WHERE user_cat.xmin = ANY(info.committed_xip); }
 
 
 # Both s0 and s1 execute catalog-change transactions. When "s1_get_changes" is
@@ -44,3 +50,10 @@ step "s1_check_snapshot_info" { SELECT count(*) > 0 as has_info FROM pg_ls_logic
 # least the expected number of transactions, accounting for potential
 # additional catalog changes that may occur due to concurrent autoanalyze.
 permutation "s0_init" "s0_begin" "s0_savepoint" "s0_truncate" "s1_create_table" "s1_checkpoint" "s1_get_changes" "s1_check_snapshot_info" "s1_check_snapshot_meta" "s0_commit"
+
+# An INSERT into a user catalog table emits NEW_CID without a cache
+# invalidation.  Keep an older transaction open so that the INSERT's XID
+# remains in the historic snapshot's interesting range.  Advancing the slot
+# fast-forwards over the NEW_CID and serializes a snapshot at the checkpoint.
+# The committed XID must be present in that saved snapshot.
+permutation "s0_init" "s0_begin" "s0_get_xid" "s1_insert_user_catalog" "s1_checkpoint" "s1_advance_slot" "s1_check_fast_forward_snapshot" "s0_commit"
