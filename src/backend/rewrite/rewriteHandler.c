@@ -2982,6 +2982,13 @@ relation_is_updatable(Oid reloid,
 		return ALL_EVENTS;
 	}
 
+	/* Indexes are not updatable */
+	if (RelationIsIndex(rel))
+	{
+		relation_close(rel, AccessShareLock);
+		return 0;
+	}
+
 	/* Look for unconditional DO INSTEAD rules, and note supported events */
 	rulelocks = rel->rd_rules;
 	if (rulelocks != NULL)
