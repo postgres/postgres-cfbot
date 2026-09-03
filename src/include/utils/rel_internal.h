@@ -305,4 +305,7 @@ typedef struct RelationData
 	Oid			rd_toastoid;	/* Real TOAST table's OID, or InvalidOid */
 } RelationData;
 
+StaticAssertDecl(sizeof(RelationData) <= 256,
+				 "size of RelationData exceeds 256 bytes");
+
 #endif							/* REL_INTERNAL_H */
