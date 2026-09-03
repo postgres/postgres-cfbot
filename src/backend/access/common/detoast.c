@@ -45,8 +45,8 @@ static void toast_fetch_datum_direct_slice_recursive(Relation toastrel, ItemPoin
 													 TupleTableSlot *slot);
 
 /*
- * Unpacked metadata from either plain (varatt_external) or direct (varatt_direct)
- * on-disk TOAST pointers.
+ * Unpacked metadata from either plain (varatt_external_oid /
+ * varatt_external_oid8) or direct (varatt_direct) on-disk TOAST pointers.
  */
 typedef struct ToastExternalMetadata
 {
@@ -55,8 +55,11 @@ typedef struct ToastExternalMetadata
 	bool		is_compressed;
 	Oid			toastrelid;
 	bool		is_direct;
-	Oid8		valueid;
-	struct varatt_direct direct_tp;
+	union
+	{
+		Oid8		valueid;
+		struct varatt_direct direct_tp;
+	};
 } ToastExternalMetadata;
 
 static inline void
@@ -70,7 +73,6 @@ toast_get_external_metadata(varlena *attr, ToastExternalMetadata *meta)
 		meta->is_compressed = VARATT_DIRECT_IS_COMPRESSED(meta->direct_tp);
 		meta->toastrelid = meta->direct_tp.va_toastrelid;
 		meta->is_direct = true;
-		meta->valueid = 0;
 	}
 	else if (VARATT_IS_EXTERNAL_ONDISK(attr))
 	{
@@ -673,7 +675,20 @@ toast_slice_copy_chunk(struct varlena *result, const char *chunk_data,
 }
 
 /*
- * Recursively traverse and fetch slices from a direct TOAST tree/DAG.
+ * toast_fetch_datum_direct_slice_recursive -
+ *
+ * Traverse a Direct TOAST tree/DAG to retrieve full datums or partial slices.
+ *
+ * Direct TOAST organizes chunks either as a single chunk, a flat multi-chunk
+ * list (chunk_tids populated, chunk_tid_offsets NULL), or a multi-level tree
+ * (both chunk_tids and chunk_tid_offsets populated).
+ *
+ * - Leaf chunks (chunk_tids IS NULL) copy their slice payload directly into
+ *   the result buffer at *logical_offset.
+ * - Flat multi-chunk roots iterate through all child TIDs in chunk_tids.
+ * - Interior tree chunks inspect chunk_tid_offsets to prune any subtrees that
+ *   do not overlap the requested range [sliceoffset, sliceoffset + slicelength),
+ *   achieving O(log N) slice fetching without consulting an index.
  */
 static void
 toast_fetch_datum_direct_slice_recursive(Relation toastrel, ItemPointer tid,
@@ -721,8 +736,7 @@ toast_fetch_datum_direct_slice_recursive(Relation toastrel, ItemPointer tid,
 		int			nelems;
 		int			i;
 
-		if (slot->tts_tupleDescriptor->natts >= 5)
-			offsets_datum = slot_getattr(slot, 5, &is_null_offsets);
+		offsets_datum = slot_getattr(slot, 5, &is_null_offsets);
 
 		deconstruct_array_builtin(arr, TIDOID, &elems, &nulls, &nelems);
 
