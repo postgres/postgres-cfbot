@@ -124,6 +124,10 @@ append_to_file "$pgdata/global/pg_internal.init.123", "foo";
 append_to_file "$pgdata/global/.DS_Store", "foo"
   unless ($Config{osname} eq 'darwin');
 
+# This is a file that doesn't look anything like our relfile segments, so it
+# should be ignored.
+append_to_file "$pgdata/global/bar.baz", "foo";
+
 # Enable checksums.
 command_ok([ 'pg_checksums', '--enable', '--no-sync', '--pgdata' => $pgdata ],
 	"checksums successfully enabled in cluster");
