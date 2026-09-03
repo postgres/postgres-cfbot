@@ -18,6 +18,7 @@
 #include "optimizer/appendinfo.h"
 #include "optimizer/cost.h"
 #include "optimizer/joininfo.h"
+#include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/planner.h"
@@ -40,6 +41,16 @@ static bool restriction_is_constant_false(List *restrictlist,
 static void make_grouped_join_rel(PlannerInfo *root, RelOptInfo *rel1,
 								  RelOptInfo *rel2, RelOptInfo *joinrel,
 								  SpecialJoinInfo *sjinfo, List *restrictlist);
+static bool dedup_rhs_unobservable(PlannerInfo *root, RelOptInfo *grouped_rel,
+								   RelOptInfo *rhs);
+static void make_dedup_semijoin_paths(PlannerInfo *root, RelOptInfo *lhs,
+									  RelOptInfo *rhs, RelOptInfo *joinrel,
+									  RelOptInfo *grouped_rel,
+									  List *restrictlist);
+static void make_deduplicated_join_rel(PlannerInfo *root, RelOptInfo *rel1,
+									   RelOptInfo *rel2, RelOptInfo *joinrel,
+									   SpecialJoinInfo *sjinfo,
+									   List *restrictlist);
 static void populate_joinrel_with_paths(PlannerInfo *root, RelOptInfo *rel1,
 										RelOptInfo *rel2, RelOptInfo *joinrel,
 										SpecialJoinInfo *sjinfo, List *restrictlist);
@@ -925,12 +936,19 @@ make_grouped_join_rel(PlannerInfo *root, RelOptInfo *rel1,
 	Relids		apply_agg_at;
 
 	/*
-	 * If there are no aggregate expressions or grouping expressions, eager
-	 * aggregation is not possible.
+	 * If there are no grouping expressions, eager aggregation is not
+	 * possible.
 	 */
-	if (root->agg_clause_list == NIL ||
-		root->group_expr_list == NIL)
+	if (root->group_expr_list == NIL)
 		return;
+
+	/* A deduplication composes down the join tree differently */
+	if (root->eager_agg_mode == EAGER_AGG_DEDUP)
+	{
+		make_deduplicated_join_rel(root, rel1, rel2, joinrel, sjinfo,
+								   restrictlist);
+		return;
+	}
 
 	/* Retrieve the grouped relations for the two input rels */
 	grouped_rel1 = rel1->grouped_rel;
@@ -1059,6 +1077,196 @@ make_grouped_join_rel(PlannerInfo *root, RelOptInfo *rel1,
 								grouped_rel,
 								sjinfo,
 								restrictlist);
+}
+
+/*
+ * make_deduplicated_join_rel
+ *	  Build the deduplicated variant of the given join relation.
+ *
+ * A join reintroduces the duplicates, and deduplication is idempotent, so one
+ * is folded in at every level.
+ */
+static void
+make_deduplicated_join_rel(PlannerInfo *root, RelOptInfo *rel1,
+						   RelOptInfo *rel2, RelOptInfo *joinrel,
+						   SpecialJoinInfo *sjinfo, List *restrictlist)
+{
+	RelOptInfo *grouped_rel;
+	RelOptInfo *grouped_rel1 = rel1->grouped_rel;
+	RelOptInfo *grouped_rel2 = rel2->grouped_rel;
+	RelOptInfo *joined;
+	bool		rel1_empty;
+	bool		rel2_empty;
+
+	rel1_empty = (grouped_rel1 == NULL || IS_DUMMY_REL(grouped_rel1));
+	rel2_empty = (grouped_rel2 == NULL || IS_DUMMY_REL(grouped_rel2));
+
+	/* Find or construct the deduplicated relation for this joinrel */
+	grouped_rel = joinrel->grouped_rel;
+	if (grouped_rel == NULL)
+	{
+		RelAggInfo *agg_info;
+
+		agg_info = create_rel_agg_info(root, joinrel, true);
+		if (agg_info == NULL || !agg_info->agg_useful)
+			return;
+
+		grouped_rel = build_grouped_rel(root, joinrel);
+		grouped_rel->reltarget = agg_info->target;
+		grouped_rel->rows = agg_info->grouped_rows;
+
+		/* Every level is its own placement */
+		agg_info->apply_agg_at = bms_copy(joinrel->relids);
+
+		grouped_rel->agg_info = agg_info;
+		joinrel->grouped_rel = grouped_rel;
+	}
+
+	Assert(IS_GROUPED_REL(grouped_rel));
+
+	/* We may have already proven this relation to be dummy. */
+	if (IS_DUMMY_REL(grouped_rel))
+		return;
+
+	/* A filtering input needs only one match */
+	if (sjinfo->jointype == JOIN_INNER)
+	{
+		if (dedup_rhs_unobservable(root, grouped_rel, rel2))
+			make_dedup_semijoin_paths(root, rel1, rel2, joinrel, grouped_rel,
+									  restrictlist);
+		if (dedup_rhs_unobservable(root, grouped_rel, rel1))
+			make_dedup_semijoin_paths(root, rel2, rel1, joinrel, grouped_rel,
+									  restrictlist);
+	}
+
+	/* generate_grouped_paths() covers the case of two plain inputs */
+	if (rel1_empty && rel2_empty)
+		return;
+
+	/*
+	 * Join the inputs into a scratch relation, preferring the deduplicated
+	 * variant of each side, then deduplicate the result.  Using both
+	 * deduplicated variants at once is safe: every join key is a grouping
+	 * key, so merged rows match the same rows on the other side.
+	 */
+	joined = build_grouped_rel(root, joinrel);
+	joined->reltarget = grouped_rel->agg_info->agg_input;
+	set_joinrel_size_estimates(root, joined,
+							   rel1_empty ? rel1 : grouped_rel1,
+							   rel2_empty ? rel2 : grouped_rel2,
+							   sjinfo, restrictlist);
+
+	populate_joinrel_with_paths(root,
+								rel1_empty ? rel1 : grouped_rel1,
+								rel2_empty ? rel2 : grouped_rel2,
+								joined,
+								sjinfo,
+								restrictlist);
+
+	if (joined->pathlist == NIL)
+		return;
+
+	set_cheapest(joined);
+	generate_grouped_paths(root, grouped_rel, joined);
+}
+
+/*
+ * dedup_rhs_unobservable
+ *	  Does the given input supply nothing that the deduplicated relation emits?
+ *
+ * If it does not, the only thing the query can tell about it is whether a
+ * matching row exists, so producing the matches is wasted work.  Checking the
+ * targets is sufficient: whatever an upper join or a lateral reference still
+ * needs is part of the deduplicated relation's target.
+ */
+static bool
+dedup_rhs_unobservable(PlannerInfo *root, RelOptInfo *grouped_rel,
+					   RelOptInfo *rhs)
+{
+	RelAggInfo *agg_info = grouped_rel->agg_info;
+	Relids		observable;
+
+	observable = pull_varnos(root, (Node *) agg_info->target->exprs);
+	if (bms_overlap(observable, rhs->relids))
+		return false;
+
+	observable = pull_varnos(root, (Node *) agg_info->agg_input->exprs);
+	if (bms_overlap(observable, rhs->relids))
+		return false;
+
+	return true;
+}
+
+/*
+ * make_dedup_semijoin_paths
+ *	  Add paths that reach the deduplicated relation through a semijoin.
+ *
+ * The SpecialJoinInfo exists to cost these paths.  Join order enumeration
+ * works from root->join_info_list, which still describes the query's own
+ * joins.  The paths land in the deduplicated relation beside the ones already
+ * there, so cost chooses between probing for a match and deduplicating below
+ * the join.
+ */
+static void
+make_dedup_semijoin_paths(PlannerInfo *root, RelOptInfo *lhs, RelOptInfo *rhs,
+						  RelOptInfo *joinrel, RelOptInfo *grouped_rel,
+						  List *restrictlist)
+{
+	SpecialJoinInfo *sjinfo;
+	RelOptInfo *semi;
+
+	/*
+	 * The rows a semijoin drops are duplicates of rows it keeps, so nothing
+	 * above may count them.  Either the query has no aggregates, or
+	 * setup_eager_aggregation() found every one of them indifferent to
+	 * duplicates and reading only relations the query groups by, which
+	 * excludes this input because it contributes nothing the query reads.
+	 */
+	Assert(root->eager_agg_mode == EAGER_AGG_DEDUP);
+
+	sjinfo = makeNode(SpecialJoinInfo);
+	sjinfo->min_lefthand = lhs->relids;
+	sjinfo->min_righthand = rhs->relids;
+	sjinfo->syn_lefthand = lhs->relids;
+	sjinfo->syn_righthand = rhs->relids;
+	sjinfo->jointype = JOIN_SEMI;
+	sjinfo->ojrelid = 0;
+	sjinfo->commute_above_l = NULL;
+	sjinfo->commute_above_r = NULL;
+	sjinfo->commute_below_l = NULL;
+	sjinfo->commute_below_r = NULL;
+	sjinfo->lhs_strict = false;
+
+	/*
+	 * A semijoin can be planned by deduplicating the righthand side on the
+	 * join keys and joining that as an inner join.  That sorts or hashes
+	 * every righthand row before the join starts.  The point here is to stop
+	 * at the first match, touching only as much of the righthand side as that
+	 * takes.
+	 */
+	sjinfo->semi_can_btree = false;
+	sjinfo->semi_can_hash = false;
+	sjinfo->semi_operators = NIL;
+	sjinfo->semi_rhs_exprs = NIL;
+
+	semi = build_grouped_rel(root, joinrel);
+	semi->reltarget = grouped_rel->agg_info->agg_input;
+
+	/* These clauses belong to the inner join we are shadowing */
+	begin_speculative_costing(root);
+
+	set_joinrel_size_estimates(root, semi, lhs, rhs, sjinfo, restrictlist);
+
+	add_paths_to_joinrel(root, semi, lhs, rhs, JOIN_SEMI, sjinfo,
+						 restrictlist);
+
+	end_speculative_costing(root);
+
+	if (semi->pathlist == NIL)
+		return;
+
+	set_cheapest(semi);
+	generate_grouped_paths(root, grouped_rel, semi);
 }
 
 /*

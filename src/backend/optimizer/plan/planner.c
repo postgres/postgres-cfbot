@@ -4018,6 +4018,38 @@ get_number_of_groups(PlannerInfo *root,
 }
 
 /*
+ * dedup_groups_as_query_does
+ *	  Does this deduplication group on exactly the query's grouping keys?
+ *
+ * The caller's grouping Agg groups on those keys again, so it can take the
+ * path's subpath instead.
+ */
+static bool
+dedup_groups_as_query_does(PlannerInfo *root, Path *path)
+{
+	AggPath    *aggpath;
+	ListCell   *lc;
+
+	if (!IsA(path, AggPath))
+		return false;
+
+	aggpath = (AggPath *) path;
+
+	if (aggpath->groupClause == NIL ||
+		list_length(aggpath->groupClause) !=
+		list_length(root->processed_groupClause))
+		return false;
+
+	foreach(lc, aggpath->groupClause)
+	{
+		if (!list_member_ptr(root->processed_groupClause, lfirst(lc)))
+			return false;
+	}
+
+	return true;
+}
+
+/*
  * create_grouping_paths
  *
  * Build a new upperrel containing Paths for grouping and/or aggregation.
@@ -4387,6 +4419,49 @@ create_ordinary_grouping_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	add_paths_to_grouping_rel(root, input_rel, grouped_rel,
 							  partially_grouped_rel, agg_costs, gd,
 							  extra);
+
+	/*
+	 * Eager aggregation may have pushed a deduplication below the joins.
+	 * Every aggregate the query computes here ignores how often a row
+	 * arrives, so grouping the deduplicated rows yields the same results as
+	 * grouping the join's rows.  Group them as a path.
+	 */
+	if (root->eager_agg_mode == EAGER_AGG_DEDUP &&
+		input_rel->grouped_rel != NULL &&
+		!IS_DUMMY_REL(input_rel->grouped_rel) &&
+		input_rel->grouped_rel->pathlist != NIL)
+	{
+		RelOptInfo *dedup_rel;
+		ListCell   *lc;
+
+		dedup_rel = copy_rel_without_paths(input_rel);
+
+		foreach(lc, input_rel->grouped_rel->pathlist)
+		{
+			Path	   *path = (Path *) lfirst(lc);
+
+			/*
+			 * The aggregate above repeats a deduplication on the query's own
+			 * keys, so take its input instead.  Any projection under it goes
+			 * too, since we project onto the target we want here anyway.
+			 */
+			if (dedup_groups_as_query_does(root, path))
+			{
+				path = ((AggPath *) path)->subpath;
+				if (IsA(path, ProjectionPath))
+					path = ((ProjectionPath *) path)->subpath;
+			}
+
+			add_path(dedup_rel,
+					 (Path *) create_projection_path(root, dedup_rel,
+													 path,
+													 input_rel->reltarget));
+		}
+
+		set_cheapest(dedup_rel);
+		add_paths_to_grouping_rel(root, dedup_rel, grouped_rel, NULL,
+								  agg_costs, gd, extra);
+	}
 
 	/* Give a helpful error if we failed to find any implementation */
 	if (grouped_rel->pathlist == NIL)
@@ -5068,6 +5143,29 @@ create_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 
 	/* now build distinct paths based on input_rel's partial_pathlist */
 	create_partial_distinct_paths(root, input_rel, distinct_rel, target);
+
+	/*
+	 * A pushed-down deduplication already groups by the DISTINCT expressions,
+	 * so its rows are the result.  Neither Sort nor Unique projects, so add a
+	 * projection onto the target.
+	 */
+	if (root->eager_agg_mode == EAGER_AGG_DEDUP &&
+		input_rel->grouped_rel != NULL &&
+		!IS_DUMMY_REL(input_rel->grouped_rel) &&
+		input_rel->grouped_rel->pathlist != NIL)
+	{
+		ListCell   *lc;
+
+		foreach(lc, input_rel->grouped_rel->pathlist)
+		{
+			Path	   *path = (Path *) lfirst(lc);
+
+			add_path(distinct_rel,
+					 (Path *) create_projection_path(root, distinct_rel,
+													 path,
+													 target));
+		}
+	}
 
 	/* Give a helpful error if we failed to create any paths */
 	if (distinct_rel->pathlist == NIL)
@@ -7613,9 +7711,11 @@ create_partial_grouping_paths(PlannerInfo *root,
 
 	/*
 	 * Check whether any partially aggregated paths have been generated
-	 * through eager aggregation.
+	 * through eager aggregation.  A deduplication emits final rows, so
+	 * create_ordinary_grouping_paths() groups them instead.
 	 */
-	if (input_rel->grouped_rel &&
+	if (root->eager_agg_mode != EAGER_AGG_DEDUP &&
+		input_rel->grouped_rel &&
 		!IS_DUMMY_REL(input_rel->grouped_rel) &&
 		input_rel->grouped_rel->pathlist != NIL)
 		eager_agg_rel = input_rel->grouped_rel;

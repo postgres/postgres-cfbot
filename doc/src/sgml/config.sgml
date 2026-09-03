@@ -6553,7 +6553,28 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
         Sets the minimum average group size required to consider applying
         eager aggregation. This helps avoid the overhead of eager
         aggregation when it does not offer significant row count reduction.
-        The default is <literal>8</literal>.
+        This parameter applies only when the query has aggregate functions;
+        see <xref linkend="guc-min-eager-distinct-group-size"/> for the case
+        where it does not. The default is <literal>8</literal>.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-min-eager-distinct-group-size" xreflabel="min_eager_distinct_group_size">
+      <term><varname>min_eager_distinct_group_size</varname> (<type>floating point</type>)
+      <indexterm>
+       <primary><varname>min_eager_distinct_group_size</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Sets the minimum average group size required to consider pushing a
+        deduplication below a join, which is what eager aggregation does for a
+        query that discards duplicate rows without computing any aggregates.
+        The threshold is lower than
+        <xref linkend="guc-min-eager-agg-group-size"/> because a
+        deduplication does not carry transition states. The default is
+        <literal>2</literal>.
        </para>
       </listitem>
      </varlistentry>

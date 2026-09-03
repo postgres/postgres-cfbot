@@ -52,8 +52,6 @@ static bool build_minmax_path(PlannerInfo *root, MinMaxAggInfo *mminfo,
 							  Oid eqop, Oid sortop, bool reverse_sort,
 							  bool nulls_first);
 static void minmax_qp_callback(PlannerInfo *root, void *extra);
-static Oid	fetch_agg_sort_op(Oid aggfnoid);
-
 
 /*
  * preprocess_minmax_aggregates - preprocess MIN/MAX aggregates
@@ -499,7 +497,7 @@ minmax_qp_callback(PlannerInfo *root, void *extra)
  * Get the OID of the sort operator, if any, associated with an aggregate.
  * Returns InvalidOid if there is no such operator.
  */
-static Oid
+Oid
 fetch_agg_sort_op(Oid aggfnoid)
 {
 	HeapTuple	aggTuple;

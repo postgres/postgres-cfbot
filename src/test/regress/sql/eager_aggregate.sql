@@ -415,3 +415,837 @@ RESET geqo;
 RESET geqo_threshold;
 
 DROP TABLE eager_agg_tab_ml;
+
+
+--
+-- Test eager aggregation for queries with no aggregates, where what is
+-- pushed down is a plain deduplication
+--
+
+CREATE TABLE eager_distinct_t1 (id int, val int);
+CREATE TABLE eager_distinct_t2 (id int, t1_id int, flag bool);
+
+INSERT INTO eager_distinct_t1 SELECT i, i FROM generate_series(1, 10) i;
+INSERT INTO eager_distinct_t2
+  SELECT i, ((i - 1) / 100) + 1, i % 2 = 0 FROM generate_series(1, 1000) i;
+
+ANALYZE eager_distinct_t1;
+ANALYZE eager_distinct_t2;
+
+-- Deduplicate the to-many side before the join, so the join produces only
+-- the rows DISTINCT keeps.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ORDER BY t1.id;
+
+SELECT DISTINCT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ORDER BY t1.id;
+
+-- The same query without eager aggregation, for comparison
+SET enable_eager_aggregate TO off;
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ORDER BY t1.id;
+
+SELECT DISTINCT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ORDER BY t1.id;
+
+RESET enable_eager_aggregate;
+
+-- Produce results with sorting deduplication
+SET enable_hashagg TO off;
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ORDER BY t1.id;
+
+SELECT DISTINCT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ORDER BY t1.id;
+
+RESET enable_hashagg;
+
+-- Deduplication is not possible when a column of the to-many side is
+-- observable, since its rows are then not interchangeable.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT t1.id, t2.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ORDER BY t1.id, t2.id;
+
+-- Declined for DISTINCT ON too, which keeps a particular row from each
+-- group, even though only the driver side is projected here
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT ON (t1.id) t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ORDER BY t1.id, t2.id;
+
+-- A qual on the to-many side is applied before the deduplication
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ WHERE t2.flag
+ORDER BY t1.id;
+
+SELECT DISTINCT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+ WHERE t2.flag
+ORDER BY t1.id;
+
+-- GROUP BY with no aggregates behaves the same way as DISTINCT
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+GROUP BY t1.id ORDER BY t1.id;
+
+SELECT t1.id
+  FROM eager_distinct_t1 t1
+  JOIN eager_distinct_t2 t2 ON t2.t1_id = t1.id
+GROUP BY t1.id ORDER BY t1.id;
+
+DROP TABLE eager_distinct_t1;
+DROP TABLE eager_distinct_t2;
+
+
+--
+-- Test that the deduplication has its own usefulness threshold, separate
+-- from the one that governs aggregate pushdown
+--
+
+CREATE TABLE eager_distinct_g1 (id int);
+CREATE TABLE eager_distinct_g2 (id int, g1_id int);
+
+-- four rows per driver row, which is above min_eager_distinct_group_size and
+-- below min_eager_agg_group_size
+INSERT INTO eager_distinct_g1 SELECT i FROM generate_series(1, 10) i;
+INSERT INTO eager_distinct_g2
+  SELECT i, ((i - 1) / 4) + 1 FROM generate_series(1, 40) i;
+
+ANALYZE eager_distinct_g1;
+ANALYZE eager_distinct_g2;
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT g1.id
+  FROM eager_distinct_g1 g1
+  JOIN eager_distinct_g2 g2 ON g2.g1_id = g1.id
+ORDER BY g1.id;
+
+-- Raising the threshold past the group size declines the pushdown
+SET min_eager_distinct_group_size TO 8;
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT g1.id
+  FROM eager_distinct_g1 g1
+  JOIN eager_distinct_g2 g2 ON g2.g1_id = g1.id
+ORDER BY g1.id;
+
+-- ... without changing the answer
+SELECT DISTINCT g1.id
+  FROM eager_distinct_g1 g1
+  JOIN eager_distinct_g2 g2 ON g2.g1_id = g1.id
+ORDER BY g1.id;
+
+RESET min_eager_distinct_group_size;
+
+-- The aggregate threshold does not govern the deduplication
+SET min_eager_agg_group_size TO 1000;
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT g1.id
+  FROM eager_distinct_g1 g1
+  JOIN eager_distinct_g2 g2 ON g2.g1_id = g1.id
+ORDER BY g1.id;
+
+RESET min_eager_agg_group_size;
+
+-- ... nor does the deduplication threshold govern aggregates
+SET min_eager_distinct_group_size TO 1000;
+SET min_eager_agg_group_size TO 0;
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT g1.id, max(g2.id)
+  FROM eager_distinct_g1 g1
+  JOIN eager_distinct_g2 g2 ON g2.g1_id = g1.id
+GROUP BY g1.id ORDER BY g1.id;
+
+RESET min_eager_distinct_group_size;
+RESET min_eager_agg_group_size;
+
+DROP TABLE eager_distinct_g1;
+DROP TABLE eager_distinct_g2;
+
+
+--
+-- Test that on a chain of to-many joins the deduplication is applied at
+-- every hop, so that the duplicates never accumulate
+--
+
+CREATE TABLE eager_distinct_c1 (id int);
+CREATE TABLE eager_distinct_c2 (id int, c1_id int);
+CREATE TABLE eager_distinct_c3 (id int, c2_id int);
+
+INSERT INTO eager_distinct_c1 SELECT i FROM generate_series(1, 100) i;
+INSERT INTO eager_distinct_c2
+  SELECT i, ((i - 1) / 10) + 1 FROM generate_series(1, 1000) i;
+INSERT INTO eager_distinct_c3
+  SELECT i, ((i - 1) / 10) + 1 FROM generate_series(1, 10000) i;
+
+ANALYZE eager_distinct_c1;
+ANALYZE eager_distinct_c2;
+ANALYZE eager_distinct_c3;
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT c1.id
+  FROM eager_distinct_c1 c1
+  JOIN eager_distinct_c2 c2 ON c2.c1_id = c1.id
+  JOIN eager_distinct_c3 c3 ON c3.c2_id = c2.id;
+
+-- The result is 100 rows, so check it rather than printing it
+SELECT count(*), sum(id) FROM (
+  SELECT DISTINCT c1.id
+    FROM eager_distinct_c1 c1
+    JOIN eager_distinct_c2 c2 ON c2.c1_id = c1.id
+    JOIN eager_distinct_c3 c3 ON c3.c2_id = c2.id) s;
+
+-- The same chain without eager aggregation, for comparison
+SET enable_eager_aggregate TO off;
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT c1.id
+  FROM eager_distinct_c1 c1
+  JOIN eager_distinct_c2 c2 ON c2.c1_id = c1.id
+  JOIN eager_distinct_c3 c3 ON c3.c2_id = c2.id;
+
+SELECT count(*), sum(id) FROM (
+  SELECT DISTINCT c1.id
+    FROM eager_distinct_c1 c1
+    JOIN eager_distinct_c2 c2 ON c2.c1_id = c1.id
+    JOIN eager_distinct_c3 c3 ON c3.c2_id = c2.id) s;
+
+RESET enable_eager_aggregate;
+
+DROP TABLE eager_distinct_c1;
+DROP TABLE eager_distinct_c2;
+DROP TABLE eager_distinct_c3;
+
+
+--
+-- Test that a relation the query can only test for a match is folded into an
+-- existence check, and that this never happens where the matches are counted
+--
+
+CREATE TABLE eager_semi_d (id int PRIMARY KEY, k numeric);
+CREATE TABLE eager_semi_f1 (id int PRIMARY KEY, d_id int);
+CREATE TABLE eager_semi_f2 (id int PRIMARY KEY, f1_id int, flag bool);
+
+INSERT INTO eager_semi_d SELECT i, i::numeric FROM generate_series(1, 100) i;
+INSERT INTO eager_semi_f1
+  SELECT i, ((i - 1) / 10) + 1 FROM generate_series(1, 1000) i;
+INSERT INTO eager_semi_f2
+  SELECT i, ((i - 1) / 10) + 1, i % 2 = 0 FROM generate_series(1, 10000) i;
+
+CREATE INDEX ON eager_semi_f1 (d_id);
+CREATE INDEX ON eager_semi_f2 (f1_id);
+
+ANALYZE eager_semi_d;
+ANALYZE eager_semi_f1;
+ANALYZE eager_semi_f2;
+
+-- Neither f1 nor f2 reaches the output, so the join may stop at the first match
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id
+  FROM eager_semi_d d
+  JOIN eager_semi_f1 f1 ON f1.d_id = d.id
+  JOIN eager_semi_f2 f2 ON f2.f1_id = f1.id
+ WHERE f2.flag;
+
+SELECT count(*), sum(id) FROM (
+  SELECT DISTINCT d.id
+    FROM eager_semi_d d
+    JOIN eager_semi_f1 f1 ON f1.d_id = d.id
+    JOIN eager_semi_f2 f2 ON f2.f1_id = f1.id
+   WHERE f2.flag) s;
+
+-- Once a column of f1 reaches the output, the matches are observable
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id, f1.id
+  FROM eager_semi_d d
+  JOIN eager_semi_f1 f1 ON f1.d_id = d.id;
+
+-- An aggregate counts the matches, so every one of them must be produced
+EXPLAIN (COSTS OFF)
+SELECT d.id, count(*)
+  FROM eager_semi_d d
+  JOIN eager_semi_f1 f1 ON f1.d_id = d.id
+ GROUP BY d.id;
+
+SELECT count(*), sum(c) FROM (
+  SELECT d.id, count(*) AS c
+    FROM eager_semi_d d
+    JOIN eager_semi_f1 f1 ON f1.d_id = d.id
+   GROUP BY d.id) s;
+
+-- The same holds when the aggregate names no column of the counted relation
+SELECT count(*), sum(c) FROM (
+  SELECT d.id, count(*) AS c
+    FROM eager_semi_d d
+    JOIN eager_semi_f1 f1 ON f1.d_id = d.id
+    JOIN eager_semi_f2 f2 ON f2.f1_id = f1.id
+   GROUP BY d.id) s;
+
+-- Equality does not imply image equality for numeric, so the grouping key
+-- rules out eager aggregation altogether
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.k
+  FROM eager_semi_d d
+  JOIN eager_semi_f1 f1 ON f1.d_id = d.id;
+
+-- An outer join above the existence check still sees the rows it must
+SELECT count(*), sum(id) FROM (
+  SELECT DISTINCT d.id
+    FROM eager_semi_d d
+    LEFT JOIN eager_semi_f1 f1 ON f1.d_id = d.id
+    JOIN eager_semi_f2 f2 ON f2.f1_id = f1.id
+   WHERE f2.flag) s;
+
+SET enable_eager_aggregate TO off;
+
+SELECT count(*), sum(id) FROM (
+  SELECT DISTINCT d.id
+    FROM eager_semi_d d
+    JOIN eager_semi_f1 f1 ON f1.d_id = d.id
+    JOIN eager_semi_f2 f2 ON f2.f1_id = f1.id
+   WHERE f2.flag) s;
+
+SELECT count(*), sum(id) FROM (
+  SELECT DISTINCT d.id
+    FROM eager_semi_d d
+    LEFT JOIN eager_semi_f1 f1 ON f1.d_id = d.id
+    JOIN eager_semi_f2 f2 ON f2.f1_id = f1.id
+   WHERE f2.flag) s;
+
+RESET enable_eager_aggregate;
+
+DROP TABLE eager_semi_d;
+DROP TABLE eager_semi_f1;
+DROP TABLE eager_semi_f2;
+
+
+--
+-- Test that a DISTINCT aggregate supplies the grouping keys, so that a query
+-- with no GROUP BY of its own can still deduplicate below the join
+--
+
+CREATE TABLE eager_distinct_a1 (id int PRIMARY KEY, title text, k numeric);
+CREATE TABLE eager_distinct_a2 (id int PRIMARY KEY, a1_id int, flag bool);
+CREATE TABLE eager_distinct_a3 (id int PRIMARY KEY, a2_id int, flag bool);
+
+INSERT INTO eager_distinct_a1
+  SELECT i, 'p' || i, i::numeric FROM generate_series(1, 100) i;
+INSERT INTO eager_distinct_a2
+  SELECT i, ((i - 1) / 10) + 1, i % 2 = 0 FROM generate_series(1, 1000) i;
+INSERT INTO eager_distinct_a3
+  SELECT i, ((i - 1) / 10) + 1, i % 2 = 0 FROM generate_series(1, 10000) i;
+
+CREATE INDEX ON eager_distinct_a2 (a1_id);
+CREATE INDEX ON eager_distinct_a3 (a2_id);
+
+ANALYZE eager_distinct_a1;
+ANALYZE eager_distinct_a2;
+ANALYZE eager_distinct_a3;
+
+-- count(DISTINCT) discards the duplicate rows the join produces, so the join
+-- is made to produce only the rows it keeps
+EXPLAIN (COSTS OFF)
+SELECT count(DISTINCT a1.id)
+  FROM eager_distinct_a1 a1
+  JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id
+ WHERE a2.flag;
+
+-- sum(DISTINCT) is insensitive to duplicates in the same way
+EXPLAIN (COSTS OFF)
+SELECT sum(DISTINCT a1.id)
+  FROM eager_distinct_a1 a1
+  JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id
+ WHERE a2.flag;
+
+-- Each DISTINCT aggregate contributes a grouping key
+EXPLAIN (COSTS OFF)
+SELECT count(DISTINCT a1.id), count(DISTINCT a1.title)
+  FROM eager_distinct_a1 a1
+  JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id
+ WHERE a2.flag;
+
+-- On a chain the deduplication reaches every hop, as it does for DISTINCT
+EXPLAIN (COSTS OFF)
+SELECT count(DISTINCT a1.id)
+  FROM eager_distinct_a1 a1
+  JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id
+  JOIN eager_distinct_a3 a3 ON a3.a2_id = a2.id
+ WHERE a3.flag;
+
+SELECT count(DISTINCT a1.id), sum(DISTINCT a1.id)
+  FROM eager_distinct_a1 a1
+  JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id
+ WHERE a2.flag;
+
+SELECT count(DISTINCT a1.id), count(DISTINCT a1.title)
+  FROM eager_distinct_a1 a1
+  JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id
+ WHERE a2.flag;
+
+SELECT count(DISTINCT a1.id)
+  FROM eager_distinct_a1 a1
+  JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id
+  JOIN eager_distinct_a3 a3 ON a3.a2_id = a2.id
+ WHERE a3.flag;
+
+SET enable_eager_aggregate TO off;
+
+SELECT count(DISTINCT a1.id), sum(DISTINCT a1.id)
+  FROM eager_distinct_a1 a1
+  JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id
+ WHERE a2.flag;
+
+SELECT count(DISTINCT a1.id), count(DISTINCT a1.title)
+  FROM eager_distinct_a1 a1
+  JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id
+ WHERE a2.flag;
+
+SELECT count(DISTINCT a1.id)
+  FROM eager_distinct_a1 a1
+  JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id
+  JOIN eager_distinct_a3 a3 ON a3.a2_id = a2.id
+ WHERE a3.flag;
+
+RESET enable_eager_aggregate;
+
+-- An aggregate that counts the duplicates requires the join to produce them
+EXPLAIN (COSTS OFF)
+SELECT count(*)
+  FROM eager_distinct_a1 a1
+  JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id
+ WHERE a2.flag;
+
+-- ... and so does one that sums over the driver without discarding them
+EXPLAIN (COSTS OFF)
+SELECT sum(a1.id)
+  FROM eager_distinct_a1 a1
+  JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id
+ WHERE a2.flag;
+
+-- One such aggregate is enough to require them, even beside a DISTINCT one
+EXPLAIN (COSTS OFF)
+SELECT count(DISTINCT a1.id), count(*)
+  FROM eager_distinct_a1 a1
+  JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id
+ WHERE a2.flag;
+
+-- A DISTINCT aggregate over the to-many side makes its rows observable
+EXPLAIN (COSTS OFF)
+SELECT count(DISTINCT a2.id)
+  FROM eager_distinct_a1 a1
+  JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id
+ WHERE a2.flag;
+
+-- An aggregate carrying FILTER or its own ORDER BY is left alone
+EXPLAIN (COSTS OFF)
+SELECT count(DISTINCT a1.id) FILTER (WHERE a1.id > 50)
+  FROM eager_distinct_a1 a1
+  JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id
+ WHERE a2.flag;
+
+EXPLAIN (COSTS OFF)
+SELECT count(DISTINCT a1.id ORDER BY a1.id)
+  FROM eager_distinct_a1 a1
+  JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id
+ WHERE a2.flag;
+
+-- Equality does not imply image equality for numeric, so such an argument
+-- cannot become a grouping key
+EXPLAIN (COSTS OFF)
+SELECT count(DISTINCT a1.k)
+  FROM eager_distinct_a1 a1
+  JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id
+ WHERE a2.flag;
+
+-- Nor can an argument that is not a plain column
+EXPLAIN (COSTS OFF)
+SELECT count(DISTINCT a1.id + 1)
+  FROM eager_distinct_a1 a1
+  JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id
+ WHERE a2.flag;
+
+-- Deduplication still applies when HAVING names the same aggregate
+EXPLAIN (COSTS OFF)
+SELECT count(DISTINCT a1.id)
+  FROM eager_distinct_a1 a1
+  JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id
+ WHERE a2.flag
+HAVING count(DISTINCT a1.id) > 5;
+
+-- ... while one that counts the duplicates requires them
+EXPLAIN (COSTS OFF)
+SELECT count(DISTINCT a1.id)
+  FROM eager_distinct_a1 a1
+  JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id
+ WHERE a2.flag
+HAVING count(*) > 5;
+
+-- The deduplication groups on the keys the query groups by, so the query's
+-- own aggregate takes its input directly
+EXPLAIN (COSTS OFF)
+SELECT a1.id, count(DISTINCT a1.title)
+  FROM eager_distinct_a1 a1
+  JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id
+ WHERE a2.flag
+ GROUP BY a1.id;
+
+-- The deduplication threshold governs the derived keys too
+SET min_eager_distinct_group_size TO 8;
+
+EXPLAIN (COSTS OFF)
+SELECT count(DISTINCT a1.id)
+  FROM eager_distinct_a1 a1
+  JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id
+ WHERE a2.flag;
+
+SELECT count(DISTINCT a1.id)
+  FROM eager_distinct_a1 a1
+  JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id
+ WHERE a2.flag;
+
+RESET min_eager_distinct_group_size;
+
+-- Here the side worth deduplicating is the nullable one, which the join may
+-- null-extend, so the count is taken over the join as it stands
+EXPLAIN (COSTS OFF)
+SELECT count(DISTINCT a1.id)
+  FROM eager_distinct_a1 a1
+  LEFT JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id AND a2.flag;
+
+SELECT count(DISTINCT a1.id)
+  FROM eager_distinct_a1 a1
+  LEFT JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id AND a2.flag;
+
+SET enable_eager_aggregate TO off;
+
+SELECT count(DISTINCT a1.id)
+  FROM eager_distinct_a1 a1
+  LEFT JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id AND a2.flag;
+
+RESET enable_eager_aggregate;
+
+-- The derived keys reach parallel plans as well
+SET parallel_setup_cost=0;
+SET parallel_tuple_cost=0;
+SET min_parallel_table_scan_size=0;
+SET max_parallel_workers_per_gather=4;
+
+EXPLAIN (COSTS OFF)
+SELECT count(DISTINCT a1.id)
+  FROM eager_distinct_a1 a1
+  JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id
+ WHERE a2.flag;
+
+SELECT count(DISTINCT a1.id)
+  FROM eager_distinct_a1 a1
+  JOIN eager_distinct_a2 a2 ON a2.a1_id = a1.id
+ WHERE a2.flag;
+
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+RESET min_parallel_table_scan_size;
+RESET max_parallel_workers_per_gather;
+
+DROP TABLE eager_distinct_a1;
+DROP TABLE eager_distinct_a2;
+DROP TABLE eager_distinct_a3;
+
+
+--
+-- Test that an aggregate whose result depends on how many times a row reached
+-- it keeps that row observable, so the relation producing it still produces
+-- every match
+--
+
+CREATE TABLE eager_minmax_d (id int PRIMARY KEY, k text);
+CREATE TABLE eager_minmax_f1 (id int PRIMARY KEY, d_id int);
+CREATE TABLE eager_minmax_f2 (id int PRIMARY KEY, f1_id int, flag bool);
+
+INSERT INTO eager_minmax_d SELECT i, 'd' || i FROM generate_series(1, 100) i;
+INSERT INTO eager_minmax_f1
+  SELECT i, ((i - 1) / 10) + 1 FROM generate_series(1, 1000) i;
+INSERT INTO eager_minmax_f2
+  SELECT i, ((i - 1) / 10) + 1, i % 2 = 0 FROM generate_series(1, 10000) i;
+
+CREATE INDEX ON eager_minmax_f1 (d_id);
+CREATE INDEX ON eager_minmax_f2 (f1_id);
+
+ANALYZE eager_minmax_d;
+ANALYZE eager_minmax_f1;
+ANALYZE eager_minmax_f2;
+
+-- An aggregate reading the other side needs its rows, so that side is
+-- partially aggregated instead of being folded away
+EXPLAIN (COSTS OFF)
+SELECT d.id, max(f1.id)
+  FROM eager_minmax_d d
+  JOIN eager_minmax_f1 f1 ON f1.d_id = d.id
+ GROUP BY d.id;
+
+-- Counting the matches still requires the join to produce them
+EXPLAIN (COSTS OFF)
+SELECT d.id, count(*)
+  FROM eager_minmax_d d
+  JOIN eager_minmax_f1 f1 ON f1.d_id = d.id
+  JOIN eager_minmax_f2 f2 ON f2.f1_id = f1.id
+ WHERE f2.flag
+ GROUP BY d.id;
+
+-- ... and so does an aggregate that adds them up
+EXPLAIN (COSTS OFF)
+SELECT d.id, sum(d.id)
+  FROM eager_minmax_d d
+  JOIN eager_minmax_f1 f1 ON f1.d_id = d.id
+  JOIN eager_minmax_f2 f2 ON f2.f1_id = f1.id
+ WHERE f2.flag
+ GROUP BY d.id;
+
+-- bit_xor is not idempotent, since a second copy of a row cancels the first
+EXPLAIN (COSTS OFF)
+SELECT d.id, bit_xor(d.id)
+  FROM eager_minmax_d d
+  JOIN eager_minmax_f1 f1 ON f1.d_id = d.id
+  JOIN eager_minmax_f2 f2 ON f2.f1_id = f1.id
+ WHERE f2.flag
+ GROUP BY d.id;
+
+SELECT count(*), min(m), max(m) FROM (
+  SELECT d.id, max(d.k) AS m
+    FROM eager_minmax_d d
+    JOIN eager_minmax_f1 f1 ON f1.d_id = d.id
+    JOIN eager_minmax_f2 f2 ON f2.f1_id = f1.id
+   WHERE f2.flag
+   GROUP BY d.id) s;
+
+SET enable_eager_aggregate TO off;
+
+SELECT count(*), min(m), max(m) FROM (
+  SELECT d.id, max(d.k) AS m
+    FROM eager_minmax_d d
+    JOIN eager_minmax_f1 f1 ON f1.d_id = d.id
+    JOIN eager_minmax_f2 f2 ON f2.f1_id = f1.id
+   WHERE f2.flag
+   GROUP BY d.id) s;
+
+RESET enable_eager_aggregate;
+
+DROP TABLE eager_minmax_d;
+DROP TABLE eager_minmax_f1;
+DROP TABLE eager_minmax_f2;
+
+
+--
+-- Test the deduplication against constructs that read the rows behind it, or
+-- that rule it out
+--
+
+CREATE TABLE eager_edge_d (id int PRIMARY KEY, name text, k int);
+CREATE TABLE eager_edge_f (id int PRIMARY KEY, d_id int, flag bool);
+
+-- d 50 groups under a NULL name, 10 rows of f carry a NULL join key, and f
+-- matches nothing above d 90
+INSERT INTO eager_edge_d
+  SELECT i, CASE WHEN i = 50 THEN NULL ELSE 'd' || i % 50 END, i % 5
+    FROM generate_series(1, 100) i;
+INSERT INTO eager_edge_f
+  SELECT i, CASE WHEN i % 200 = 0 THEN NULL ELSE i % 90 + 1 END, i % 2 = 0
+    FROM generate_series(1, 2000) i;
+
+CREATE INDEX eager_edge_f_d_id ON eager_edge_f (d_id);
+
+ANALYZE eager_edge_d;
+ANALYZE eager_edge_f;
+
+-- The deduplication collects the NULL grouping keys into one group, as
+-- DISTINCT does
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.name
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id
+ORDER BY d.name;
+
+SELECT count(*), count(name) FROM (
+  SELECT DISTINCT d.name
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id) s;
+
+SET enable_eager_aggregate TO off;
+
+SELECT count(*), count(name) FROM (
+  SELECT DISTINCT d.name
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id) s;
+
+RESET enable_eager_aggregate;
+
+-- A NULL join key drops the row, whether the join produces the matches or
+-- only tests for them
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id
+ORDER BY d.id;
+
+SELECT count(*), min(id), max(id) FROM (
+  SELECT DISTINCT d.id
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id) s;
+
+SET enable_eager_aggregate TO off;
+
+SELECT count(*), min(id), max(id) FROM (
+  SELECT DISTINCT d.id
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id) s;
+
+RESET enable_eager_aggregate;
+
+-- A lateral reference reads a column of f outside the grouping keys, so the
+-- rows of f are not interchangeable after all
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id
+  JOIN LATERAL (SELECT count(*) AS c FROM eager_edge_f f2
+                 WHERE f2.flag = f.flag) s ON s.c > 0
+ORDER BY d.id;
+
+SELECT count(*) FROM (
+  SELECT DISTINCT d.id
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id
+    JOIN LATERAL (SELECT count(*) AS c FROM eager_edge_f f2
+                   WHERE f2.flag = f.flag) s ON s.c > 0) s2;
+
+-- The deduplication still applies to an existence check the query wrote itself
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id
+ WHERE EXISTS (SELECT 1 FROM eager_edge_f f2
+                WHERE f2.d_id = d.id AND f2.flag)
+ORDER BY d.id;
+
+SELECT count(*) FROM (
+  SELECT DISTINCT d.id
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id
+   WHERE EXISTS (SELECT 1 FROM eager_edge_f f2
+                  WHERE f2.d_id = d.id AND f2.flag)) s;
+
+-- ... and to its negation
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id
+ WHERE NOT EXISTS (SELECT 1 FROM eager_edge_f f2
+                    WHERE f2.d_id = d.id AND f2.flag)
+ORDER BY d.id;
+
+SELECT count(*) FROM (
+  SELECT DISTINCT d.id
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id
+   WHERE NOT EXISTS (SELECT 1 FROM eager_edge_f f2
+                      WHERE f2.d_id = d.id AND f2.flag)) s;
+
+-- The primary key determines name, so the grouping clause loses it before
+-- eager aggregation reads it, and name rides along with the group
+EXPLAIN (COSTS OFF)
+SELECT d.id, d.name, max(d.k)
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id
+ GROUP BY d.id, d.name
+ORDER BY d.id;
+
+SELECT count(*), count(name), sum(m) FROM (
+  SELECT d.id, d.name, max(d.k) AS m
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id
+   GROUP BY d.id, d.name) s;
+
+SET enable_eager_aggregate TO off;
+
+SELECT count(*), count(name), sum(m) FROM (
+  SELECT d.id, d.name, max(d.k) AS m
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id
+   GROUP BY d.id, d.name) s;
+
+RESET enable_eager_aggregate;
+
+-- Grouping sets ask for several groupings at once, which is not supported
+EXPLAIN (COSTS OFF)
+SELECT d.id, d.k, max(d.k)
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id
+ GROUP BY GROUPING SETS ((d.id), (d.k));
+
+-- A set-returning function in the target list is not supported either
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id, generate_series(1, 2)
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id;
+
+-- DISTINCT ON keeps a particular row of each group, but a grouping clause
+-- beside it still supplies the keys
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT ON (d.id) d.id
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id
+ GROUP BY d.id
+ORDER BY d.id;
+
+-- A parallel plan deduplicates in each worker without a pushdown, and reaches
+-- the same rows
+SET parallel_setup_cost=0;
+SET parallel_tuple_cost=0;
+SET min_parallel_table_scan_size=0;
+SET max_parallel_workers_per_gather=4;
+
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.id
+  FROM eager_edge_d d
+  JOIN eager_edge_f f ON f.d_id = d.id
+ORDER BY d.id;
+
+SELECT count(*) FROM (
+  SELECT DISTINCT d.id
+    FROM eager_edge_d d
+    JOIN eager_edge_f f ON f.d_id = d.id) s;
+
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+RESET min_parallel_table_scan_size;
+RESET max_parallel_workers_per_gather;
+
+DROP TABLE eager_edge_d;
+DROP TABLE eager_edge_f;

@@ -734,6 +734,7 @@ EVP_MD
 EVP_MD_CTX
 EVP_PKEY
 EachState
+EagerAggMode
 Edge
 EditableObjectType
 ElementsState

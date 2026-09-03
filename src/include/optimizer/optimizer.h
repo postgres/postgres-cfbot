@@ -66,6 +66,8 @@ extern Selectivity clauselist_selectivity_ext(PlannerInfo *root,
 											  JoinType jointype,
 											  SpecialJoinInfo *sjinfo,
 											  bool use_extended_stats);
+extern void begin_speculative_costing(PlannerInfo *root);
+extern void end_speculative_costing(PlannerInfo *root);
 
 /* in path/costsize.c: */
 

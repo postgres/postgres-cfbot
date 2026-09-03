@@ -103,6 +103,7 @@ static bool init_grouping_targets(PlannerInfo *root, RelOptInfo *rel,
 static bool is_var_in_aggref_only(PlannerInfo *root, Var *var);
 static bool is_var_needed_by_join(PlannerInfo *root, Var *var, RelOptInfo *rel);
 static Index get_expression_sortgroupref(PlannerInfo *root, Expr *expr);
+static double min_useful_group_size(PlannerInfo *root);
 
 
 /*
@@ -451,10 +452,9 @@ build_simple_grouped_rel(PlannerInfo *root, RelOptInfo *rel)
 	RelAggInfo *agg_info;
 
 	/*
-	 * We should have available aggregate expressions and grouping
-	 * expressions, otherwise we cannot reach here.
+	 * We should have available grouping expressions, otherwise we cannot
+	 * reach here.
 	 */
-	Assert(root->agg_clause_list != NIL);
 	Assert(root->group_expr_list != NIL);
 
 	/* nothing to do for dummy rel */
@@ -500,18 +500,7 @@ build_grouped_rel(PlannerInfo *root, RelOptInfo *rel)
 {
 	RelOptInfo *grouped_rel;
 
-	grouped_rel = makeNode(RelOptInfo);
-	memcpy(grouped_rel, rel, sizeof(RelOptInfo));
-
-	/*
-	 * clear path info
-	 */
-	grouped_rel->pathlist = NIL;
-	grouped_rel->ppilist = NIL;
-	grouped_rel->partial_pathlist = NIL;
-	grouped_rel->cheapest_startup_path = NULL;
-	grouped_rel->cheapest_total_path = NULL;
-	grouped_rel->cheapest_parameterized_paths = NIL;
+	grouped_rel = copy_rel_without_paths(rel);
 
 	/*
 	 * clear partition info
@@ -534,6 +523,31 @@ build_grouped_rel(PlannerInfo *root, RelOptInfo *rel)
 	grouped_rel->rows = 0;
 
 	return grouped_rel;
+}
+
+/*
+ * copy_rel_without_paths
+ *	  Flat copy a relation, leaving the copy's path lists empty.
+ *
+ * The copy shares everything else with the original, so a caller wanting
+ * different size estimates or partitioning must reset those itself.
+ */
+RelOptInfo *
+copy_rel_without_paths(RelOptInfo *rel)
+{
+	RelOptInfo *newrel;
+
+	newrel = makeNode(RelOptInfo);
+	memcpy(newrel, rel, sizeof(RelOptInfo));
+
+	newrel->pathlist = NIL;
+	newrel->ppilist = NIL;
+	newrel->partial_pathlist = NIL;
+	newrel->cheapest_startup_path = NULL;
+	newrel->cheapest_total_path = NULL;
+	newrel->cheapest_parameterized_paths = NIL;
+
+	return newrel;
 }
 
 /*
@@ -2703,6 +2717,24 @@ build_child_join_reltarget(PlannerInfo *root,
 }
 
 /*
+ * min_useful_group_size
+ *	  The average group size at which pushing down starts to be worthwhile.
+ *
+ * A deduplication is judged separately from a partial aggregate.  Both shrink
+ * the joins above them, but a deduplication only builds the groups, while a
+ * partial aggregate also calls a transition function for every row and holds
+ * state for every group.
+ */
+static double
+min_useful_group_size(PlannerInfo *root)
+{
+	if (root->eager_agg_mode == EAGER_AGG_DEDUP)
+		return min_eager_distinct_group_size;
+
+	return min_eager_agg_group_size;
+}
+
+/*
  * create_rel_agg_info
  *	  Create the RelAggInfo structure for the given relation if it can produce
  *	  grouped paths.  The given relation is the non-grouped one which has the
@@ -2723,11 +2755,7 @@ create_rel_agg_info(PlannerInfo *root, RelOptInfo *rel,
 	List	   *group_clauses = NIL;
 	List	   *group_exprs = NIL;
 
-	/*
-	 * The lists of aggregate expressions and grouping expressions should have
-	 * been constructed.
-	 */
-	Assert(root->agg_clause_list != NIL);
+	/* The list of grouping expressions should have been constructed. */
 	Assert(root->group_expr_list != NIL);
 
 	/*
@@ -2763,11 +2791,11 @@ create_rel_agg_info(PlannerInfo *root, RelOptInfo *rel,
 
 			/*
 			 * The grouped paths for the given relation are considered useful
-			 * iff the average group size is no less than
-			 * min_eager_agg_group_size.
+			 * iff the average group size is no less than the applicable
+			 * minimum.
 			 */
 			agg_info->agg_useful =
-				(rel->rows / agg_info->grouped_rows) >= min_eager_agg_group_size;
+				(rel->rows / agg_info->grouped_rows) >= min_useful_group_size(root);
 		}
 
 		return agg_info;
@@ -2829,10 +2857,10 @@ create_rel_agg_info(PlannerInfo *root, RelOptInfo *rel,
 
 		/*
 		 * The grouped paths for the given relation are considered useful iff
-		 * the average group size is no less than min_eager_agg_group_size.
+		 * the average group size is no less than the applicable minimum.
 		 */
 		result->agg_useful =
-			(rel->rows / result->grouped_rows) >= min_eager_agg_group_size;
+			(rel->rows / result->grouped_rows) >= min_useful_group_size(root);
 	}
 
 	return result;
@@ -2957,11 +2985,22 @@ init_grouping_targets(PlannerInfo *root, RelOptInfo *rel,
 	List	   *possibly_dependent = NIL;
 	Index		maxSortGroupRef;
 
-	/* Identify the max sortgroupref */
+	/*
+	 * Identify the max sortgroupref.  Grouping clauses synthesized from
+	 * DISTINCT aggregates carry refs of their own, past the targetlist's, so
+	 * they have to be counted too.
+	 */
 	maxSortGroupRef = 0;
 	foreach(lc, root->processed_tlist)
 	{
 		Index		ref = ((TargetEntry *) lfirst(lc))->ressortgroupref;
+
+		if (ref > maxSortGroupRef)
+			maxSortGroupRef = ref;
+	}
+	foreach(lc, root->eager_group_clause)
+	{
+		Index		ref = lfirst_node(SortGroupClause, lc)->tleSortGroupRef;
 
 		if (ref > maxSortGroupRef)
 			maxSortGroupRef = ref;
@@ -2996,7 +3035,7 @@ init_grouping_targets(PlannerInfo *root, RelOptInfo *rel,
 			SortGroupClause *sgc;
 
 			/* Find the matching SortGroupClause */
-			sgc = get_sortgroupref_clause(sortgroupref, root->processed_groupClause);
+			sgc = get_sortgroupref_clause(sortgroupref, root->eager_group_clause);
 			Assert(sgc->tleSortGroupRef <= maxSortGroupRef);
 
 			/*
@@ -3089,7 +3128,8 @@ init_grouping_targets(PlannerInfo *root, RelOptInfo *rel,
 			*group_clauses = lappend(*group_clauses, sgc);
 			*group_exprs = lappend(*group_exprs, expr);
 		}
-		else if (is_var_in_aggref_only(root, (Var *) expr))
+		else if (root->eager_agg_mode == EAGER_AGG_PARTIAL &&
+				 is_var_in_aggref_only(root, (Var *) expr))
 		{
 			/*
 			 * The expression is referenced by an aggregate function pushed
