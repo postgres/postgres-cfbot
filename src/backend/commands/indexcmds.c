@@ -1496,7 +1496,7 @@ DefineIndex(ParseState *pstate,
 														  createdConstraintId,
 														  childRelid);
 
-						if (!cldidx->rd_index->indisvalid)
+						if (!RelationGetIndex(cldidx)->indisvalid)
 							invalidate_parent = true;
 
 						found = true;
@@ -3858,14 +3858,14 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 					Relation	indexRelation = index_open(cellOid,
 														   ShareUpdateExclusiveLock);
 
-					if (!indexRelation->rd_index->indisvalid)
+					if (!RelationGetIndex(indexRelation)->indisvalid)
 						ereport(WARNING,
 								(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 								 errmsg("skipping reindex of invalid index \"%s.%s\"",
 										get_namespace_name(get_rel_namespace(cellOid)),
 										get_rel_name(cellOid)),
 								 errhint("Use DROP INDEX or REINDEX INDEX.")));
-					else if (indexRelation->rd_index->indisexclusion)
+					else if (RelationGetIndex(indexRelation)->indisexclusion)
 						ereport(WARNING,
 								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 								 errmsg("cannot reindex exclusion constraint index \"%s.%s\" concurrently, skipping",
@@ -3911,7 +3911,7 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 						Relation	indexRelation = index_open(cellOid,
 															   ShareUpdateExclusiveLock);
 
-						if (!indexRelation->rd_index->indisvalid)
+						if (!RelationGetIndex(indexRelation)->indisvalid)
 							ereport(WARNING,
 									(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 									 errmsg("skipping reindex of invalid index \"%s.%s\"",
@@ -4088,7 +4088,7 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		Oid			tablespaceid;
 
 		indexRel = index_open(idx->indexId, ShareUpdateExclusiveLock);
-		heapRel = table_open(indexRel->rd_index->indrelid,
+		heapRel = table_open(RelationGetIndex(indexRel)->indrelid,
 							 ShareUpdateExclusiveLock);
 
 		/*
@@ -4132,7 +4132,7 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		concurrentName = ChooseRelationName(get_rel_name(idx->indexId),
 											NULL,
 											"ccnew",
-											get_rel_namespace(indexRel->rd_index->indrelid),
+											get_rel_namespace(RelationGetIndex(indexRel)->indrelid),
 											false);
 
 		/* Choose the new tablespace, indexes of toast tables are not moved */
@@ -4736,7 +4736,7 @@ IndexSetParentIndex(Relation partitionIdx, Oid parentOid)
 			ObjectAddressSet(partIdx, RelationRelationId, partRelid);
 			ObjectAddressSet(parentIdx, RelationRelationId, parentOid);
 			ObjectAddressSet(partitionTbl, RelationRelationId,
-							 partitionIdx->rd_index->indrelid);
+							 RelationGetIndex(partitionIdx)->indrelid);
 			recordDependencyOn(&partIdx, &parentIdx,
 							   DEPENDENCY_PARTITION_PRI);
 			recordDependencyOn(&partIdx, &partitionTbl,

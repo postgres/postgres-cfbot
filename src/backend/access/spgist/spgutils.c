@@ -126,14 +126,14 @@ GetIndexInputType(Relation index, AttrNumber indexcol)
 	List	   *indexprs;
 	ListCell   *indexpr_item;
 
-	Assert(index->rd_index != NULL);
-	Assert(indexcol > 0 && indexcol <= index->rd_index->indnkeyatts);
+	Assert(RelationGetIndex(index) != NULL);
+	Assert(indexcol > 0 && indexcol <= RelationGetIndex(index)->indnkeyatts);
 	opcintype = index->rd_opcintype[indexcol - 1];
 	if (!IsPolymorphicType(opcintype))
 		return opcintype;
-	heapcol = index->rd_index->indkey.values[indexcol - 1];
+	heapcol = RelationGetIndex(index)->indkey.values[indexcol - 1];
 	if (heapcol != 0)			/* Simple index column? */
-		return getBaseType(get_atttype(index->rd_index->indrelid, heapcol));
+		return getBaseType(get_atttype(RelationGetIndex(index)->indrelid, heapcol));
 
 	/*
 	 * If the index expressions are already cached, skip calling
@@ -146,9 +146,9 @@ GetIndexInputType(Relation index, AttrNumber indexcol)
 	else
 		indexprs = RelationGetIndexExpressions(index);
 	indexpr_item = list_head(indexprs);
-	for (int i = 1; i <= index->rd_index->indnkeyatts; i++)
+	for (int i = 1; i <= RelationGetIndex(index)->indnkeyatts; i++)
 	{
-		if (index->rd_index->indkey.values[i - 1] == 0)
+		if (RelationGetIndex(index)->indkey.values[i - 1] == 0)
 		{
 			/* expression column */
 			if (indexpr_item == NULL)

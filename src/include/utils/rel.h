@@ -14,6 +14,7 @@
 #ifndef REL_H
 #define REL_H
 
+#include "access/htup_details.h"
 #include "access/tupdesc.h"
 #include "access/xlog.h"
 #include "catalog/catalog.h"
@@ -320,18 +321,33 @@ RelationGetLockRelId(Relation relation)
 #define RelationGetNumberOfAttributes(relation) ((relation)->rd_rel->relnatts)
 
 /*
+ * RelationGetIndex
+ *		Returns the pg_index tuple describing an index relation.
+ *
+ * rd_index is not stored directly in RelationData; it is always equal to
+ * GETSTRUCT(relation->rd_indextuple), so we derive it on the fly instead of
+ * spending a pointer-sized field on it.
+ */
+static inline Form_pg_index
+RelationGetIndex(Relation relation)
+{
+	Assert(relation->rd_indextuple != NULL);
+	return (Form_pg_index) GETSTRUCT(relation->rd_indextuple);
+}
+
+/*
  * IndexRelationGetNumberOfAttributes
  *		Returns the number of attributes in an index.
  */
 #define IndexRelationGetNumberOfAttributes(relation) \
-		((relation)->rd_index->indnatts)
+		(RelationGetIndex(relation)->indnatts)
 
 /*
  * IndexRelationGetNumberOfKeyAttributes
  *		Returns the number of key attributes in an index.
  */
 #define IndexRelationGetNumberOfKeyAttributes(relation) \
-		((relation)->rd_index->indnkeyatts)
+		(RelationGetIndex(relation)->indnkeyatts)
 
 /*
  * RelationGetDescr

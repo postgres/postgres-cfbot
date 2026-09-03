@@ -2443,7 +2443,7 @@ transformIndexConstraint(Constraint *constraint, CreateStmtContext *cxt)
 
 		/* Open the index (this will throw an error if it is not an index) */
 		index_rel = index_open(index_oid, AccessShareLock);
-		index_form = index_rel->rd_index;
+		index_form = RelationGetIndex(index_rel);
 
 		/* Check that it does not have an associated constraint already */
 		if (OidIsValid(get_index_constraint(index_oid)))

@@ -456,7 +456,7 @@ bt_check_every_level(Relation rel, Relation heaprel, bool heapkeyspace,
 		 * horizon.  Throwing an error here should be very rare.  It doesn't
 		 * seem worth using a secondary snapshot to avoid this.
 		 */
-		if (IsolationUsesXactSnapshot() && rel->rd_index->indcheckxmin &&
+		if (IsolationUsesXactSnapshot() && RelationGetIndex(rel)->indcheckxmin &&
 			!TransactionIdPrecedes(HeapTupleHeaderGetXmin(rel->rd_indextuple->t_data),
 								   state->snapshot->xmin))
 			ereport(ERROR,

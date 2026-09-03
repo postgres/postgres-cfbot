@@ -244,7 +244,7 @@ pgstatindex_impl(Relation rel, FunctionCallInfo fcinfo)
 	 * but the results could be confusing.  For example, the index's size
 	 * could be too low for a valid index of the table.
 	 */
-	if (!rel->rd_index->indisvalid)
+	if (!RelationGetIndex(rel)->indisvalid)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("index \"%s\" is not valid",
@@ -558,7 +558,7 @@ pgstatginindex_internal(Oid relid, FunctionCallInfo fcinfo)
 				 errmsg("cannot access temporary indexes of other sessions")));
 
 	/* see pgstatindex_impl */
-	if (!rel->rd_index->indisvalid)
+	if (!RelationGetIndex(rel)->indisvalid)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("index \"%s\" is not valid",
@@ -648,7 +648,7 @@ pgstathashindex(PG_FUNCTION_ARGS)
 				 errmsg("cannot access temporary indexes of other sessions")));
 
 	/* see pgstatindex_impl */
-	if (!rel->rd_index->indisvalid)
+	if (!RelationGetIndex(rel)->indisvalid)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("index \"%s\" is not valid",

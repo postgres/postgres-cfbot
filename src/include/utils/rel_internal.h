@@ -220,7 +220,6 @@ typedef struct RelationData
 		/* fields used only for an index relation */
 		struct
 		{
-			Form_pg_index rd_index;		/* pg_index tuple describing this index */
 			/* use "struct" here to avoid needing to include htup.h: */
 			struct HeapTupleData *rd_indextuple;	/* all of pg_index tuple */
 

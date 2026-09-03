@@ -219,7 +219,7 @@ ExecOpenIndices(ResultRelInfo *resultRelInfo, bool speculative)
 		 * If the indexes are to be used for speculative insertion, add extra
 		 * information required by unique index entries.
 		 */
-		if (speculative && ii->ii_Unique && !indexDesc->rd_index->indisexclusion)
+		if (speculative && ii->ii_Unique && !RelationGetIndex(indexDesc)->indisexclusion)
 			BuildSpeculativeIndexInfo(indexDesc, ii);
 
 		relationDescs[i] = indexDesc;
@@ -411,7 +411,7 @@ ExecInsertIndexTuples(ResultRelInfo *resultRelInfo,
 		applyNoDupErr = (flags & EIIT_NO_DUPE_ERROR) &&
 			(arbiterIndexes == NIL ||
 			 list_member_oid(arbiterIndexes,
-							 indexRelation->rd_index->indexrelid));
+							 RelationGetIndex(indexRelation)->indexrelid));
 
 		/*
 		 * The index AM does the actual insertion, plus uniqueness checking.
@@ -426,11 +426,11 @@ ExecInsertIndexTuples(ResultRelInfo *resultRelInfo,
 		 * For a speculative insertion (used by INSERT ... ON CONFLICT), do
 		 * the same as for a deferrable unique index.
 		 */
-		if (!indexRelation->rd_index->indisunique)
+		if (!RelationGetIndex(indexRelation)->indisunique)
 			checkUnique = UNIQUE_CHECK_NO;
 		else if (applyNoDupErr)
 			checkUnique = UNIQUE_CHECK_PARTIAL;
-		else if (indexRelation->rd_index->indimmediate)
+		else if (RelationGetIndex(indexRelation)->indimmediate)
 			checkUnique = UNIQUE_CHECK_YES;
 		else
 			checkUnique = UNIQUE_CHECK_PARTIAL;
@@ -480,7 +480,7 @@ ExecInsertIndexTuples(ResultRelInfo *resultRelInfo,
 				violationOK = true;
 				waitMode = CEOUC_LIVELOCK_PREVENTING_WAIT;
 			}
-			else if (!indexRelation->rd_index->indimmediate)
+			else if (!RelationGetIndex(indexRelation)->indimmediate)
 			{
 				violationOK = true;
 				waitMode = CEOUC_NOWAIT;
@@ -510,7 +510,7 @@ ExecInsertIndexTuples(ResultRelInfo *resultRelInfo,
 			 * speculative conflict, since that always requires a restart.
 			 */
 			result = lappend_oid(result, RelationGetRelid(indexRelation));
-			if (indexRelation->rd_index->indimmediate && specConflict)
+			if (RelationGetIndex(indexRelation)->indimmediate && specConflict)
 				*specConflict = true;
 		}
 	}
@@ -600,10 +600,10 @@ ExecCheckIndexConstraints(ResultRelInfo *resultRelInfo, TupleTableSlot *slot,
 		/* When specific arbiter indexes requested, only examine them */
 		if (arbiterIndexes != NIL &&
 			!list_member_oid(arbiterIndexes,
-							 indexRelation->rd_index->indexrelid))
+							 RelationGetIndex(indexRelation)->indexrelid))
 			continue;
 
-		if (!indexRelation->rd_index->indimmediate)
+		if (!RelationGetIndex(indexRelation)->indimmediate)
 			ereport(ERROR,
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 					 errmsg("ON CONFLICT does not support deferrable unique constraints/exclusion constraints as arbiters"),

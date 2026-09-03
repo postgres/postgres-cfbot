@@ -1469,7 +1469,7 @@ brin_summarize_range(PG_FUNCTION_ARGS)
 						RelationGetRelationName(indexRel))));
 
 	/* see gin_clean_pending_list() */
-	if (indexRel->rd_index->indisvalid)
+	if (RelationGetIndex(indexRel)->indisvalid)
 		brinsummarize(indexRel, heapRel, heapBlk, true, &numSummarized, NULL);
 	else
 		ereport(DEBUG1,
@@ -1558,7 +1558,7 @@ brin_desummarize_range(PG_FUNCTION_ARGS)
 						RelationGetRelationName(indexRel))));
 
 	/* see gin_clean_pending_list() */
-	if (indexRel->rd_index->indisvalid)
+	if (RelationGetIndex(indexRel)->indisvalid)
 	{
 		/* the revmap does the hard work */
 		do

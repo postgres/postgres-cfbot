@@ -141,7 +141,7 @@ _bt_mkscankey(Relation rel, IndexTuple itup)
 	 * In NULLS NOT DISTINCT mode, we pretend that there are no null keys, so
 	 * that full uniqueness check is done.
 	 */
-	if (rel->rd_index->indnullsnotdistinct)
+	if (RelationGetIndex(rel)->indnullsnotdistinct)
 		key->anynullkeys = false;
 
 	return key;

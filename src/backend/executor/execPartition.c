@@ -506,7 +506,7 @@ IsIndexCompatibleAsArbiter(Relation arbiterIndexRelation,
 						   Relation indexRelation,
 						   IndexInfo *indexInfo)
 {
-	Assert(arbiterIndexRelation->rd_index->indrelid == indexRelation->rd_index->indrelid);
+	Assert(RelationGetIndex(arbiterIndexRelation)->indrelid == RelationGetIndex(indexRelation)->indrelid);
 
 	/* must match whether they're unique */
 	if (arbiterIndexInfo->ii_Unique != indexInfo->ii_Unique)
@@ -537,8 +537,8 @@ IsIndexCompatibleAsArbiter(Relation arbiterIndexRelation,
 			indexRelation->rd_opfamily[i])
 			return false;
 
-		if (arbiterIndexRelation->rd_index->indkey.values[i] !=
-			indexRelation->rd_index->indkey.values[i])
+		if (RelationGetIndex(arbiterIndexRelation)->indkey.values[i] !=
+			RelationGetIndex(indexRelation)->indkey.values[i])
 			return false;
 	}
 
@@ -847,7 +847,7 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 					unparented_ii = leaf_part_rri->ri_IndexRelationInfo[unparented_i];
 
 					Assert(!list_member_oid(arbiterIndexes,
-											unparented_rel->rd_index->indexrelid));
+											RelationGetIndex(unparented_rel)->indexrelid));
 
 					/* Ignore indexes not ready */
 					if (!unparented_ii->ii_ReadyForInserts)
@@ -871,7 +871,7 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 													   unparented_ii))
 						{
 							arbiterIndexes = lappend_oid(arbiterIndexes,
-														 unparented_rel->rd_index->indexrelid);
+														 RelationGetIndex(unparented_rel)->indexrelid);
 							additional_arbiters++;
 							break;
 						}

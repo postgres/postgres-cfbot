@@ -697,7 +697,7 @@ pg_nextoid(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("pg_nextoid() can only be used on system catalogs")));
 
-	if (idx->rd_index->indrelid != RelationGetRelid(rel))
+	if (RelationGetIndex(idx)->indrelid != RelationGetRelid(rel))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("index \"%s\" does not belong to table \"%s\"",
@@ -721,7 +721,7 @@ pg_nextoid(PG_FUNCTION_ARGS)
 						NameStr(*attname), "oid")));
 
 	if (IndexRelationGetNumberOfKeyAttributes(idx) != 1 ||
-		idx->rd_index->indkey.values[0] != attno)
+		RelationGetIndex(idx)->indkey.values[0] != attno)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("index \"%s\" is not the index for column \"%s\"",

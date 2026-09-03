@@ -1278,8 +1278,8 @@ InitCatCachePhase2(CatCache *cache, bool touch_index)
 		 * catch thinkos in definitions of new catcaches, so we don't worry
 		 * about the pg_am indexes not getting tested.
 		 */
-		Assert(idesc->rd_index->indisunique &&
-			   idesc->rd_index->indimmediate);
+		Assert(RelationGetIndex(idesc)->indisunique &&
+			   RelationGetIndex(idesc)->indimmediate);
 
 		index_close(idesc, AccessShareLock);
 		UnlockRelationOid(cache->cc_reloid, AccessShareLock);

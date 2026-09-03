@@ -656,7 +656,7 @@ ExecInitIndexOnlyScan(IndexOnlyScan *node, EState *estate, int eflags)
 	}
 
 	indexstate->ioss_NameCStringAttNums = NULL;
-	indnkeyatts = indexRelation->rd_index->indnkeyatts;
+	indnkeyatts = RelationGetIndex(indexRelation)->indnkeyatts;
 	namecount = 0;
 
 	/*

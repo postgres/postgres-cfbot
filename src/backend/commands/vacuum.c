@@ -2441,7 +2441,7 @@ vac_open_indexes(Relation relation, LOCKMODE lockmode,
 		Relation	indrel;
 
 		indrel = index_open(indexoid, lockmode);
-		if (indrel->rd_index->indisready)
+		if (RelationGetIndex(indrel)->indisready)
 			(*Irel)[i++] = indrel;
 		else
 			index_close(indrel, lockmode);
