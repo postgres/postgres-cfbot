@@ -143,16 +143,27 @@ load_external_function(const char *filename, const char *funcname,
  * we do not load it again.
  *
  * When 'restricted' is true, only libraries in the presumed-secure
- * directory $libdir/plugins may be referenced.
+ * directory $libdir/plugins may be referenced.  A bare library name is
+ * automatically expanded into that directory.
  */
 void
 load_file(const char *filename, bool restricted)
 {
 	char	   *fullname;
+	char	   *expanded = NULL;
 
 	/* Apply security restriction if requested */
 	if (restricted)
+	{
+		/* Insert $libdir/plugins if not mentioned already */
+		if (first_dir_separator(filename) == NULL)
+		{
+			expanded = psprintf("$libdir/plugins/%s", filename);
+			filename = expanded;
+		}
+
 		check_restricted_library_name(filename);
+	}
 
 	/* Expand the possibly-abbreviated filename to an exact path name */
 	fullname = expand_dynamic_library_name(filename);
@@ -161,6 +172,8 @@ load_file(const char *filename, bool restricted)
 	(void) internal_load_library(fullname);
 
 	pfree(fullname);
+	if (expanded)
+		pfree(expanded);
 }
 
 /*
