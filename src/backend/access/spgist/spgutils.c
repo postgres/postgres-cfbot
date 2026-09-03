@@ -126,7 +126,7 @@ GetIndexInputType(Relation index, AttrNumber indexcol)
 	List	   *indexprs;
 	ListCell   *indexpr_item;
 
-	Assert(index->rd_index != NULL);
+	Assert(RelationIsIndex(index));
 	Assert(indexcol > 0 && indexcol <= index->rd_index->indnkeyatts);
 	opcintype = index->rd_opcintype[indexcol - 1];
 	if (!IsPolymorphicType(opcintype))

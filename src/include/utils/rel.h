@@ -309,6 +309,14 @@ typedef struct ViewOptions
 #define RelationGetRelid(relation) ((relation)->rd_id)
 
 /*
+ * RelationIsIndex
+ * 		True for both, ordinary and partitioned index relations.
+ */
+#define RelationIsIndex(relation) \
+	((relation)->rd_rel->relkind == RELKIND_INDEX || \
+	 (relation)->rd_rel->relkind == RELKIND_PARTITIONED_INDEX)
+
+/*
  * RelationGetNumberOfAttributes
  *		Returns the total number of attributes in a relation.
  */
