@@ -227,10 +227,11 @@ $psql_standby->reconnect_and_clear();
 # lock on another relation in a prepared xact, so it's held continuously by
 # the startup process. The standby psql will block acquiring that lock while
 # holding a pin that vacuum needs, triggering the deadlock.
+# Keep autovacuum from consuming the dead rows before the explicit VACUUM.
 $node_primary->safe_psql(
 	$test_db,
 	qq[
-CREATE TABLE $table1(a int, b int);
+CREATE TABLE $table1(a int, b int) WITH (autovacuum_enabled = false);
 INSERT INTO $table1 VALUES (1);
 BEGIN;
 INSERT INTO $table1(a) SELECT generate_series(1, 100) i;
