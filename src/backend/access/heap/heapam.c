@@ -3628,6 +3628,19 @@ l2:
 				TransactionIdDidAbort(update_xact))
 				can_continue = true;
 		}
+		else if (HEAP_XMAX_IS_LOCKED_ONLY(infomask) &&
+				 TransactionIdEquals(xwait, xid))
+		{
+			/*
+			 * At this point Xmax is known not to be a MultiXactId.  The tuple
+			 * is locked only by the same XID that is now updating it, so
+			 * there is no independent locker to carry forward to the new
+			 * tuple.  The update itself is recorded in the old tuple's Xmax.
+			 */
+			checked_lockers = true;
+			locker_remains = false;
+			can_continue = true;
+		}
 		else if (TransactionIdIsCurrentTransactionId(xwait))
 		{
 			/*
