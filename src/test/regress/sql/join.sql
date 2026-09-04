@@ -3645,6 +3645,168 @@ JOIN (
 	) _t2t3t4
 ON sj_t1.id = _t2t3t4.id;
 
+-- Self-join removal on partitioned tables.  A unique index on a partitioned
+-- table must include the partition key, so it proves global uniqueness and the
+-- self-join can be removed just as for a plain table.
+
+-- RANGE partitioning, with a DEFAULT partition.
+create table sjp_range (id int, note text, primary key (id))
+  partition by range (id);
+create table sjp_range_neg partition of sjp_range for values from (minvalue) to (0);
+create table sjp_range_lo partition of sjp_range for values from (0) to (100);
+create table sjp_range_hi partition of sjp_range for values from (100) to (1000);
+create table sjp_range_def partition of sjp_range default;
+insert into sjp_range values
+  (-2147483648, 'intmin'), (-5, 'neg'), (0, 'zero'), (99, 'lo-boundary'),
+  (100, 'hi-boundary'), (999, 'hi-max'), (1000, 'in-default'), (7, null);
+analyze sjp_range;
+
+-- The result must be the same with elimination off and on.
+set enable_self_join_elimination to off;
+select p.id, q.note from sjp_range p, sjp_range q where p.id = q.id order by 1;
+set enable_self_join_elimination to on;
+explain (costs off)
+select p.id, q.note from sjp_range p, sjp_range q where p.id = q.id;
+select p.id, q.note from sjp_range p, sjp_range q where p.id = q.id order by 1;
+
+-- Restriction on the removed side is preserved.
+explain (costs off)
+select p.id from sjp_range p, sjp_range q where p.id = q.id and q.id >= 1000;
+select p.id from sjp_range p, sjp_range q where p.id = q.id and q.id >= 1000;
+
+-- int minimum boundary value.
+select p.id from sjp_range p, sjp_range q
+where p.id = q.id and p.id = -2147483648;
+
+-- NULL column from the removed side.
+select p.id, q.note from sjp_range p, sjp_range q
+where p.id = q.id and q.note is null;
+
+-- Three-way self-join.
+explain (costs off)
+select count(*) from sjp_range a, sjp_range b, sjp_range c
+where a.id = b.id and b.id = c.id;
+select count(*) from sjp_range a, sjp_range b, sjp_range c
+where a.id = b.id and b.id = c.id;
+
+-- Row marks: FOR UPDATE / FOR SHARE are still eliminated.
+explain (costs off)
+select p.id from sjp_range p, sjp_range q where p.id = q.id for update;
+explain (costs off)
+select p.id from sjp_range p, sjp_range q where p.id = q.id for share;
+
+-- Don't remove a self-join on a non-unique column.
+explain (costs off)
+select p.id from sjp_range p, sjp_range q where p.note = q.note;
+
+-- LIST partitioning, composite unique key (region, id).
+create table sjp_list (region text, id int, amt numeric, primary key (region, id))
+  partition by list (region);
+create table sjp_list_us partition of sjp_list for values in ('us');
+create table sjp_list_intl partition of sjp_list for values in ('eu', 'asia');
+create table sjp_list_def partition of sjp_list default;
+insert into sjp_list values
+  ('us', 1, 10.00), ('us', 2, -3.50), ('eu', 1, 0.00),
+  ('asia', 1, 1000000), ('other', 1, null);
+analyze sjp_list;
+
+explain (costs off)
+select p.region, p.id, q.amt from sjp_list p, sjp_list q
+where p.region = q.region and p.id = q.id;
+select p.region, p.id, q.amt from sjp_list p, sjp_list q
+where p.region = q.region and p.id = q.id order by 1, 2;
+
+-- Don't remove when only part of the composite key is equated.
+explain (costs off)
+select p.id from sjp_list p, sjp_list q where p.region = q.region;
+
+-- HASH partitioning.
+create table sjp_hash (id int, val text, primary key (id)) partition by hash (id);
+create table sjp_hash_0 partition of sjp_hash for values with (modulus 3, remainder 0);
+create table sjp_hash_1 partition of sjp_hash for values with (modulus 3, remainder 1);
+create table sjp_hash_2 partition of sjp_hash for values with (modulus 3, remainder 2);
+insert into sjp_hash select g, 'h' || g from generate_series(1, 20) g;
+analyze sjp_hash;
+explain (costs off)
+select p.id, q.val from sjp_hash p, sjp_hash q where p.id = q.id;
+select count(*) from sjp_hash p, sjp_hash q where p.id = q.id;
+
+-- Composite RANGE partition key (a, b).
+create table sjp_mc (a int, b int, val text, primary key (a, b))
+  partition by range (a, b);
+create table sjp_mc_1 partition of sjp_mc for values from (0, 0) to (10, 0);
+create table sjp_mc_2 partition of sjp_mc for values from (10, 0) to (20, 0);
+create table sjp_mc_d partition of sjp_mc default;
+insert into sjp_mc values (0, 0, 'a'), (9, 999, 'b'), (10, 0, 'd'), (15, 5, 'e');
+analyze sjp_mc;
+explain (costs off)
+select p.a, p.b, q.val from sjp_mc p, sjp_mc q where p.a = q.a and p.b = q.b;
+select p.a, p.b, q.val from sjp_mc p, sjp_mc q
+where p.a = q.a and p.b = q.b order by 1, 2;
+
+-- Equal constants on the second key column: still removable.
+explain (costs off)
+select p.a from sjp_mc p, sjp_mc q where p.a = q.a and p.b = 0 and q.b = 0;
+
+-- Don't remove when the second key column has conflicting constants.
+explain (costs off)
+select p.a from sjp_mc p, sjp_mc q where p.a = q.a and p.b = 0 and q.b = 5;
+
+-- Don't remove when only the leading partition-key column is equated.
+explain (costs off)
+select p.a from sjp_mc p, sjp_mc q where p.a = q.a;
+
+-- Multi-level (sub-partitioned) table; the primary key covers every partition
+-- key level.  The result must be the same with elimination off and on.
+create table sjp_sub (id int, grp text, val text, primary key (id, grp))
+  partition by range (id);
+create table sjp_sub_lo partition of sjp_sub for values from (0) to (100)
+  partition by list (grp);
+create table sjp_sub_lo_x partition of sjp_sub_lo for values in ('x');
+create table sjp_sub_lo_d partition of sjp_sub_lo default;
+create table sjp_sub_def partition of sjp_sub default;
+insert into sjp_sub values (1, 'x', 'a'), (2, 'y', 'b'), (50, 'x', 'c'), (5000, 'q', 'e');
+analyze sjp_sub;
+set enable_self_join_elimination to off;
+select p.id, p.grp, q.val from sjp_sub p, sjp_sub q
+where p.id = q.id and p.grp = q.grp order by 1, 2;
+set enable_self_join_elimination to on;
+explain (costs off)
+select p.id, p.grp, q.val from sjp_sub p, sjp_sub q
+where p.id = q.id and p.grp = q.grp;
+select p.id, p.grp, q.val from sjp_sub p, sjp_sub q
+where p.id = q.id and p.grp = q.grp order by 1, 2;
+
+-- UNIQUE NULLS NOT DISTINCT including the partition key.
+create table sjp_nnd (id int, k int, val text, unique nulls not distinct (id, k))
+  partition by range (id);
+create table sjp_nnd_lo partition of sjp_nnd for values from (0) to (100);
+create table sjp_nnd_hi partition of sjp_nnd for values from (100) to (1000);
+insert into sjp_nnd values (1, null, 'a'), (1, 1, 'b'), (2, null, 'c'), (150, null, 'd');
+analyze sjp_nnd;
+explain (costs off)
+select p.id, p.k, q.val from sjp_nnd p, sjp_nnd q where p.id = q.id and p.k = q.k;
+select p.id, p.k, q.val from sjp_nnd p, sjp_nnd q
+where p.id = q.id and p.k = q.k order by 1, 2 nulls first;
+
+-- Don't remove a join between two different tables (not a self-join).
+create table sjp_range2 (like sjp_range including all);
+insert into sjp_range2 select * from sjp_range;
+explain (costs off)
+select p.id from sjp_range p, sjp_range2 q where p.id = q.id;
+
+-- Don't remove the result relation of a partitioned UPDATE.
+explain (costs off)
+update sjp_range p set note = 'x' from sjp_range q where p.id = q.id and q.id = 7;
+
+drop table sjp_range;
+drop table sjp_range2;
+drop table sjp_list;
+drop table sjp_hash;
+drop table sjp_mc;
+drop table sjp_sub;
+drop table sjp_nnd;
+
 --
 -- Test RowMarks-related code
 --
