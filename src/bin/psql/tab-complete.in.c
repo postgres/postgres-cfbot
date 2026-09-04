@@ -2341,9 +2341,24 @@ match_previous_words(int pattern_id,
 		COMPLETE_WITH_QUERY_PLUS(Query_for_list_of_schemas
 								 " AND nspname NOT LIKE E'pg\\\\_%%'",
 								 "CURRENT_SCHEMA");
-	/* ALTER PUBLICATION <name> SET ( */
-	else if (Matches("ALTER", "PUBLICATION", MatchAny, MatchAnyN, "SET", "("))
-		COMPLETE_WITH("publish", "publish_generated_columns", "publish_via_partition_root");
+	/* ALTER PUBLICATION <name> SET ( <opt> */
+	else if (HeadMatches("ALTER", "PUBLICATION", MatchAny, "SET", "(*") &&
+			 !HeadMatches("ALTER", "PUBLICATION", MatchAny, "SET", "(*)"))
+	{
+		if (ends_with(prev_wd, '(') || ends_with(prev_wd, ','))
+			COMPLETE_WITH("publish =", "publish_generated_columns =",
+						  "publish_via_partition_root");
+
+		/* Complete "ALTER PUBLICATION <name> SET ( <opt> =" */
+
+		else if (TailMatches("publish"))
+			COMPLETE_WITH("=");
+
+		else if (TailMatches("publish_generated_columns"))
+			COMPLETE_WITH("=");
+		else if (TailMatches("publish_generated_columns", "="))
+			COMPLETE_WITH("none", "stored");
+	}
 	/* ALTER SUBSCRIPTION <name> */
 	else if (Matches("ALTER", "SUBSCRIPTION", MatchAny))
 		COMPLETE_WITH("CONNECTION", "ENABLE", "DISABLE", "OWNER TO",
@@ -2364,13 +2379,49 @@ match_previous_words(int pattern_id,
 	else if (Matches("ALTER", "SUBSCRIPTION", MatchAny, "SET"))
 		COMPLETE_WITH("(", "PUBLICATION");
 	/* ALTER SUBSCRIPTION <name> SET ( */
-	else if (Matches("ALTER", "SUBSCRIPTION", MatchAny, MatchAnyN, "SET", "("))
-		COMPLETE_WITH("binary", "conflict_log_destination", "disable_on_error",
-					  "failover", "max_retention_duration", "origin",
-					  "password_required", "retain_dead_tuples",
-					  "run_as_owner", "slot_name", "streaming",
-					  "synchronous_commit", "two_phase",
-					  "wal_receiver_timeout");
+	else if (HeadMatches("ALTER", "SUBSCRIPTION", MatchAny, "SET", "(*") &&
+			 !HeadMatches("ALTER", "SUBSCRIPTION", MatchAny, "SET", "(*)"))
+	{
+		if (ends_with(prev_wd, '(') || ends_with(prev_wd, ','))
+			COMPLETE_WITH("binary", "conflict_log_destination =",
+						  "disable_on_error", "failover",
+						  "max_retention_duration =", "origin =",
+						  "password_required", "retain_dead_tuples",
+						  "run_as_owner", "slot_name =", "streaming =",
+						  "synchronous_commit =", "two_phase",
+						  "wal_receiver_timeout =");
+
+		/* ALTER SUBSCRIPTION <name> SET ( <opt> = */
+
+		else if (TailMatches("conflict_log_destination"))
+			COMPLETE_WITH("=");
+		else if (TailMatches("conflict_log_destination", "="))
+			COMPLETE_WITH("all", "log", "table");
+
+		else if (TailMatches("max_retention_duration"))
+			COMPLETE_WITH("=");
+
+		else if (TailMatches("origin"))
+			COMPLETE_WITH("=");
+		else if (TailMatches("origin", "="))
+			COMPLETE_WITH("any", "none");
+
+		else if (TailMatches("slot_name"))
+			COMPLETE_WITH("=");
+
+		else if (TailMatches("streaming"))
+			COMPLETE_WITH("=");
+		else if (TailMatches("streaming", "="))
+			COMPLETE_WITH("off", "on", "parallel");
+
+		else if (TailMatches("synchronous_commit"))
+			COMPLETE_WITH("=");
+		else if (TailMatches("synchronous_commit", "="))
+			COMPLETE_WITH("local", "off", "on", "remote_apply", "remote_write");
+
+		else if (TailMatches("wal_receiver_timeout"))
+			COMPLETE_WITH("=");
+	}
 	/* ALTER SUBSCRIPTION <name> SKIP ( */
 	else if (Matches("ALTER", "SUBSCRIPTION", MatchAny, MatchAnyN, "SKIP", "("))
 		COMPLETE_WITH("lsn");
@@ -3765,9 +3816,37 @@ match_previous_words(int pattern_id,
 								 "CURRENT_SCHEMA");
 	else if (Matches("CREATE", "PUBLICATION", MatchAny, "FOR", "TABLES", "IN", "SCHEMA", MatchAny) && (!ends_with(prev_wd, ',')))
 		COMPLETE_WITH("WITH (");
-	/* Complete "CREATE PUBLICATION <name> [...] WITH" */
-	else if (Matches("CREATE", "PUBLICATION", MatchAnyN, "WITH", "("))
-		COMPLETE_WITH("publish", "publish_generated_columns", "publish_via_partition_root");
+	/* Complete "CREATE PUBLICATION <name> ... WITH ( <opt>" */
+	else if (HeadMatches("CREATE", "PUBLICATION"))
+	{
+		bool		seen_with = false;
+
+		for (int i = 0; i < previous_words_count; i++)
+		{
+			if (pg_strcasecmp(previous_words[i], "WITH") == 0)
+			{
+				seen_with = true;
+				break;
+			}
+		}
+
+		if (seen_with)
+		{
+			if (ends_with(prev_wd, '(') || ends_with(prev_wd, ','))
+				COMPLETE_WITH("publish =", "publish_generated_columns =",
+							  "publish_via_partition_root");
+
+			/* Complete "CREATE PUBLICATION <name> ...  WITH ( <opt> =" */
+
+			else if (TailMatches("publish"))
+				COMPLETE_WITH("=");
+
+			else if (TailMatches("publish_generated_columns"))
+				COMPLETE_WITH("=");
+			else if (TailMatches("publish_generated_columns", "="))
+				COMPLETE_WITH("none", "stored");
+		}
+	}
 
 /* CREATE RULE */
 	/* Complete "CREATE [ OR REPLACE ] RULE <sth>" with "AS ON" */
@@ -3934,15 +4013,66 @@ match_previous_words(int pattern_id,
 	}
 	else if (Matches("CREATE", "SUBSCRIPTION", MatchAnyN, "PUBLICATION", MatchAny))
 		COMPLETE_WITH("WITH (");
+	else if (Matches("CREATE", "SUBSCRIPTION", MatchAnyN, "WITH"))
+		COMPLETE_WITH("(");
 	/* Complete "CREATE SUBSCRIPTION <name> ...  WITH ( <opt>" */
-	else if (Matches("CREATE", "SUBSCRIPTION", MatchAnyN, "WITH", "("))
-		COMPLETE_WITH("binary", "conflict_log_destination", "connect", "copy_data",
-					  "create_slot", "disable_on_error", "enabled", "failover",
-					  "max_retention_duration", "origin",
-					  "password_required", "retain_dead_tuples",
-					  "run_as_owner", "slot_name", "streaming",
-					  "synchronous_commit", "two_phase",
-					  "wal_receiver_timeout");
+	else if (HeadMatches("CREATE", "SUBSCRIPTION"))
+	{
+		bool		seen_with = false;
+
+		for (int i = 0; i < previous_words_count; i++)
+		{
+			if (pg_strcasecmp(previous_words[i], "WITH") == 0)
+			{
+				seen_with = true;
+				break;
+			}
+		}
+
+		if (seen_with)
+		{
+			if (ends_with(prev_wd, '(') || ends_with(prev_wd, ','))
+				COMPLETE_WITH("binary", "conflict_log_destination =",
+							  "connect", "copy_data", "create_slot",
+							  "disable_on_error", "enabled", "failover",
+							  "max_retention_duration =", "origin =",
+							  "password_required", "retain_dead_tuples",
+							  "run_as_owner", "slot_name =", "streaming =",
+							  "synchronous_commit =", "two_phase",
+							  "wal_receiver_timeout =");
+
+			/* Complete "CREATE SUBSCRIPTION <name> ...  WITH ( <opt> =" */
+
+			else if (TailMatches("conflict_log_destination"))
+				COMPLETE_WITH("=");
+			else if (TailMatches("conflict_log_destination", "="))
+				COMPLETE_WITH("all", "log", "table");
+
+			else if (TailMatches("max_retention_duration"))
+				COMPLETE_WITH("=");
+
+			else if (TailMatches("origin"))
+				COMPLETE_WITH("=");
+			else if (TailMatches("origin", "="))
+				COMPLETE_WITH("any", "none");
+
+			else if (TailMatches("slot_name"))
+				COMPLETE_WITH("=");
+
+			else if (TailMatches("streaming"))
+				COMPLETE_WITH("=");
+			else if (TailMatches("streaming", "="))
+				COMPLETE_WITH("off", "on", "parallel");
+
+			else if (TailMatches("synchronous_commit"))
+				COMPLETE_WITH("=");
+			else if (TailMatches("synchronous_commit", "="))
+				COMPLETE_WITH("local", "off", "on", "remote_apply", "remote_write");
+
+			else if (TailMatches("wal_receiver_timeout"))
+				COMPLETE_WITH("=");
+		}
+	}
 
 /* CREATE TRIGGER --- is allowed inside CREATE SCHEMA, so use TailMatches */
 
