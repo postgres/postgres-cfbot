@@ -516,3 +516,41 @@ DROP TABLE foo;
 
 DROP EVENT TRIGGER python_a_snitch;
 DROP EVENT TRIGGER python_b_snitch;
+
+
+-- FOR PORTION OF
+
+CREATE TABLE temporal_trigger_test (
+    id int,
+    valid_at daterange,
+    v text
+);
+INSERT INTO temporal_trigger_test VALUES (1, '[2018-01-01,2020-01-01)', 'one');
+
+CREATE FUNCTION for_portion_of_trigger_func() RETURNS trigger
+LANGUAGE plpython3u
+AS $$
+plpy.notice("TD[when] => " + TD["when"] + " ; TD[event] => " + TD["event"] +
+            " ; TD[period_name] => " + repr(TD.get("period_name")) +
+            " ; TD[period_bounds] => " + repr(TD.get("period_bounds")))
+return None
+$$;
+
+CREATE TRIGGER for_portion_of_trigger_trig
+  BEFORE INSERT OR UPDATE OR DELETE ON temporal_trigger_test
+  FOR EACH ROW EXECUTE PROCEDURE for_portion_of_trigger_func();
+
+UPDATE temporal_trigger_test
+  FOR PORTION OF valid_at FROM '2019-01-01' TO '2019-06-01'
+  SET v = 'updated';
+SELECT * FROM temporal_trigger_test ORDER BY valid_at;
+
+DELETE FROM temporal_trigger_test
+  FOR PORTION OF valid_at FROM '2018-06-01' TO '2018-09-01';
+SELECT * FROM temporal_trigger_test ORDER BY valid_at;
+
+-- no FOR PORTION OF, so the keys are absent
+UPDATE temporal_trigger_test SET v = 'all of it';
+
+DROP TABLE temporal_trigger_test;
+DROP FUNCTION for_portion_of_trigger_func();

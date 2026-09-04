@@ -16,6 +16,7 @@
 #include "plpy_subxactobject.h"
 #include "plpy_util.h"
 #include "utils/fmgrprotos.h"
+#include "utils/lsyscache.h"
 
 static void ShutdownPLyFunction(Datum arg);
 static PyObject *PLy_function_build_args(FunctionCallInfo fcinfo, PLyProcedure *proc);
@@ -803,6 +804,8 @@ PLy_trigger_build_args(FunctionCallInfo fcinfo, PLyProcedure *proc, HeapTuple *r
 			   *pltrelid,
 			   *plttablename,
 			   *plttableschema,
+			   *pltperiodname,
+			   *pltperiodbounds,
 			   *pltargs,
 			   *pytnew,
 			   *pytold,
@@ -857,6 +860,30 @@ PLy_trigger_build_args(FunctionCallInfo fcinfo, PLyProcedure *proc, HeapTuple *r
 		PyDict_SetItemString(pltdata, "table_schema", plttableschema);
 		Py_DECREF(plttableschema);
 		pfree(stroid);
+
+		/*
+		 * If the query used FOR PORTION OF, report the column name and the
+		 * targeted bounds; otherwise leave these keys out of the dictionary.
+		 * The bounds could be any range or multirange type, so the best we
+		 * can offer is their text representation.
+		 */
+		if (tdata->tg_temporal)
+		{
+			ForPortionOfState *fpo = tdata->tg_temporal;
+			Oid			funcid;
+			bool		varlena;
+
+			pltperiodname = PLyUnicode_FromString(fpo->fp_rangeName);
+			PyDict_SetItemString(pltdata, "period_name", pltperiodname);
+			Py_DECREF(pltperiodname);
+
+			getTypeOutputInfo(fpo->fp_rangeType, &funcid, &varlena);
+			stroid = OidOutputFunctionCall(funcid, fpo->fp_targetRange);
+			pltperiodbounds = PLyUnicode_FromString(stroid);
+			PyDict_SetItemString(pltdata, "period_bounds", pltperiodbounds);
+			Py_DECREF(pltperiodbounds);
+			pfree(stroid);
+		}
 
 		if (TRIGGER_FIRED_BEFORE(tdata->tg_event))
 			pltwhen = PLyUnicode_FromString("BEFORE");

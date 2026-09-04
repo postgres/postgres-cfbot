@@ -4247,6 +4247,35 @@ ASSERT <replaceable class="parameter">condition</replaceable> <optional> , <repl
       </para>
      </listitem>
     </varlistentry>
+
+    <varlistentry id="plpgsql-dml-trigger-tg-temporal-column">
+     <term><varname>TG_PERIOD_NAME</varname> <type>text</type></term>
+     <listitem>
+      <para>
+       the column name used in a <literal>FOR PORTION OF</literal> clause,
+       or else <symbol>NULL</symbol>. Also set for the implicit
+       <literal>INSERT</literal> statements to add the
+       <glossterm linkend="glossary-temporal-leftovers">temporal
+       leftovers</glossterm>.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry id="plpgsql-dml-trigger-tg-temporal-target">
+     <term><varname>TG_PERIOD_BOUNDS</varname> <type>text</type></term>
+     <listitem>
+      <para>
+       the range/multirange given as the bounds of a
+       <literal>FOR PORTION OF</literal> clause, either directly (with parens syntax)
+       or computed from the <literal>FROM</literal> and <literal>TO</literal> bounds.
+       <symbol>NULL</symbol> if <literal>FOR PORTION OF</literal> was not used.
+       Also set for the implicit <literal>INSERT</literal> statements to add the
+       <glossterm linkend="glossary-temporal-leftovers">temporal
+       leftovers</glossterm>. This is a text value based on the type's output
+       function, since the type can't be known at function creation time.
+      </para>
+     </listitem>
+    </varlistentry>
    </variablelist>
   </para>
 
