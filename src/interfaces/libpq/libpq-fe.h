@@ -69,6 +69,10 @@ extern "C"
 /* Indicates presence of the PQAUTHDATA_OAUTH_BEARER_TOKEN_V2 authdata hook */
 #define LIBPQ_HAS_OAUTH_BEARER_TOKEN_V2 1
 
+/* Features added in PostgreSQL v20: */
+/* Indicates presence of PQpassfileLookup */
+#define LIBPQ_HAS_PASSFILE_LOOKUP 1
+
 /*
  * Option flags for PQcopyResult
  */
@@ -366,6 +370,11 @@ extern PQconninfoOption *PQconninfo(PGconn *conn);
 
 /* free the data structure returned by PQconndefaults() or PQconninfoParse() */
 extern void PQconninfoFree(PQconninfoOption *connOptions);
+
+/* look up a password in a password file */
+extern char *PQpassfileLookup(const char *hostname, const char *port,
+							  const char *dbname, const char *username,
+							  const char *passfile);
 
 /*
  * close the current connection and reestablish a new one with the same

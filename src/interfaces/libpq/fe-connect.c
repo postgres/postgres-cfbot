@@ -8143,6 +8143,56 @@ passwordFromFile(const char *hostname, const char *port,
 
 
 /*
+ * PQpassfileLookup
+ *
+ * Look up a password in a password file, applying the same rules that
+ * connection establishment applies when no password has been specified.
+ * This lets applications that connect through an intermediary (for
+ * example, a local SSH tunnel) look up the password under the real
+ * server's host and port while connecting elsewhere.
+ *
+ * The first four arguments correspond to the fields of a password file
+ * line, and NULL or empty values are treated the same way as during
+ * connection establishment: hostname is matched as "localhost", port
+ * defaults to DEF_PGPORT_STR, while dbname and username must be
+ * supplied.  If passfile is NULL or empty, PGPASSFILE or the default
+ * password file location is used.
+ *
+ * Returns a malloc'd string the caller must free with PQfreemem(), or
+ * NULL if no password could be found.
+ */
+char *
+PQpassfileLookup(const char *hostname, const char *port,
+				 const char *dbname, const char *username,
+				 const char *passfile)
+{
+	char		pgpassfile[MAXPGPATH];
+	const char *errmsg;
+
+	if (passfile == NULL || passfile[0] == '\0')
+	{
+		const char *pgpassenv = getenv("PGPASSFILE");
+
+		if (pgpassenv != NULL && pgpassenv[0] != '\0')
+			strlcpy(pgpassfile, pgpassenv, sizeof(pgpassfile));
+		else
+		{
+			char		homedir[MAXPGPATH];
+
+			if (!pqGetHomeDirectory(homedir, sizeof(homedir)))
+				return NULL;
+			snprintf(pgpassfile, sizeof(pgpassfile), "%s/%s",
+					 homedir, PGPASSFILE);
+		}
+		passfile = pgpassfile;
+	}
+
+	return passwordFromFile(hostname, port, dbname, username,
+							passfile, &errmsg);
+}
+
+
+/*
  *	If the connection failed due to bad password, we should mention
  *	if we got the password from the pgpassfile.
  */

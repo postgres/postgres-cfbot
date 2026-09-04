@@ -7976,6 +7976,59 @@ char *PQencryptPassword(const char *passwd, const char *user);
     </listitem>
    </varlistentry>
 
+   <varlistentry id="libpq-PQpassfileLookup">
+    <term><function>PQpassfileLookup</function><indexterm><primary>PQpassfileLookup</primary></indexterm></term>
+
+    <listitem>
+     <para>
+      Looks up a password in a password file
+      (see <xref linkend="libpq-pgpass"/>).
+<synopsis>
+char *PQpassfileLookup(const char *hostname, const char *port, const char *dbname, const char *username, const char *passfile);
+</synopsis>
+     </para>
+
+     <para>
+      This function performs the same password file lookup that connection
+      establishment performs when no password has been specified, and
+      returns the password from the first matching line.  It is intended
+      for applications that connect through an intermediary, for example a
+      local SSH tunnel: such an application can look up the password under
+      the real server's host and port, and then pass the result as the
+      <xref linkend="libpq-connect-password"/> connection parameter while
+      connecting to the intermediary's address.
+     </para>
+
+     <para>
+      The <parameter>hostname</parameter>, <parameter>port</parameter>,
+      <parameter>dbname</parameter> and <parameter>username</parameter>
+      arguments correspond to the first four fields of a password file
+      line.  If <parameter>hostname</parameter> is <symbol>NULL</symbol> or
+      empty, or matches <application>libpq</application>'s default socket
+      directory path, the host name <literal>localhost</literal> is
+      searched for; if <parameter>port</parameter> is <symbol>NULL</symbol>
+      or empty, the compiled-in default port is used.  No defaults are
+      applied for <parameter>dbname</parameter> and
+      <parameter>username</parameter>; if either is <symbol>NULL</symbol>
+      or empty, no password is returned.
+      <parameter>passfile</parameter> is the password file to use; if it is
+      <symbol>NULL</symbol> or empty, the file named by the
+      <envar>PGPASSFILE</envar> environment variable is used if set, else
+      the default password file location.
+     </para>
+
+     <para>
+      The return value is a string allocated by <function>malloc</function>,
+      or <symbol>NULL</symbol> if no password could be found.  Use
+      <xref linkend="libpq-PQfreemem"/> to free the result when done with
+      it.  The password file permission requirements described in
+      <xref linkend="libpq-pgpass"/> apply, and, as during connection
+      establishment, a warning is written to <filename>stderr</filename>
+      if the file is ignored because of them.
+     </para>
+    </listitem>
+   </varlistentry>
+
    <varlistentry id="libpq-PQmakeEmptyPGresult">
     <term><function>PQmakeEmptyPGresult</function><indexterm><primary>PQmakeEmptyPGresult</primary></indexterm></term>
 
@@ -9461,6 +9514,12 @@ myEventProc(PGEventId evtId, void *evtInfo, void *passThrough)
    strict than this, the file will be ignored.  On Microsoft Windows, it
    is assumed that the file is stored in a directory that is secure, so
    no special permissions check is made.
+  </para>
+
+  <para>
+   An application can perform the same password file lookup that
+   connection establishment performs by calling
+   <xref linkend="libpq-PQpassfileLookup"/>.
   </para>
  </sect1>
 
