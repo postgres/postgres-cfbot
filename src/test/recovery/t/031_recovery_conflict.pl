@@ -227,10 +227,11 @@ $psql_standby->reconnect_and_clear();
 # lock on another relation in a prepared xact, so it's held continuously by
 # the startup process. The standby psql will block acquiring that lock while
 # holding a pin that vacuum needs, triggering the deadlock.
+# Keep autovacuum from consuming the dead rows before the explicit VACUUM.
 $node_primary->safe_psql(
 	$test_db,
 	qq[
-CREATE TABLE $table1(a int, b int);
+CREATE TABLE $table1(a int, b int) WITH (autovacuum_enabled = false);
 INSERT INTO $table1 VALUES (1);
 BEGIN;
 INSERT INTO $table1(a) SELECT generate_series(1, 100) i;
@@ -281,13 +282,17 @@ $node_standby->restart();
 $psql_standby->reconnect_and_clear();
 
 
-# Check that expected number of conflicts show in pg_stat_database. Needs to
-# be tested before database is dropped, for obvious reasons.
-is( $node_standby->safe_psql(
+# Check that at least the expected number of conflicts show in
+# pg_stat_database. Needs to be tested before database is dropped, for obvious
+# reasons. A backend can process the same recovery conflict more than once
+# before it exits.
+cmp_ok( $node_standby->safe_psql(
 		$test_db,
 		qq[SELECT conflicts FROM pg_stat_database WHERE datname='$test_db';]),
+	'>=',
 	$expected_conflicts,
-	qq[$expected_conflicts recovery conflicts shown in pg_stat_database]);
+	qq[at least $expected_conflicts recovery conflicts shown in pg_stat_database]
+);
 
 
 ## RECOVERY CONFLICT 6: Database conflict
@@ -328,7 +333,7 @@ sub check_conflict_stat
 
 	ok( $node_standby->poll_query_until(
 			$test_db,
-			qq[SELECT confl_$conflict_type FROM pg_stat_database_conflicts WHERE datname='$test_db';],
-			'1'),
+			qq[SELECT confl_$conflict_type > 0 FROM pg_stat_database_conflicts WHERE datname='$test_db';],
+			't'),
 		"$sect: stats show conflict on standby");
 }
