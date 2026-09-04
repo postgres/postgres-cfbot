@@ -987,10 +987,12 @@ initialize_SSL(PGconn *conn)
 		{
 			char	   *fname = NULL;
 			char	   *dname = NULL;
+			bool		use_sslcrl = (conn->sslcrl && strlen(conn->sslcrl) > 0);
+			bool		use_sslcrldir = (conn->sslcrldir && strlen(conn->sslcrldir) > 0);
 
-			if (conn->sslcrl && strlen(conn->sslcrl) > 0)
+			if (use_sslcrl)
 				fname = conn->sslcrl;
-			if (conn->sslcrldir && strlen(conn->sslcrldir) > 0)
+			if (use_sslcrldir)
 				dname = conn->sslcrldir;
 
 			/* defaults to use the default CRL file */
@@ -1000,16 +1002,81 @@ initialize_SSL(PGconn *conn)
 				fname = fnbuf;
 			}
 
+			if (use_sslcrl)
+			{
+				if (stat(fname, &buf) != 0)
+				{
+					libpq_append_conn_error(conn, "certificate revocation list file \"%s\" does not exist", fname);
+					SSL_CTX_free(SSL_context);
+					return -1;
+				}
+				if (!S_ISREG(buf.st_mode))
+				{
+					libpq_append_conn_error(conn, "certificate revocation list file \"%s\" is not a regular file", fname);
+					SSL_CTX_free(SSL_context);
+					return -1;
+				}
+			}
+
+			if (use_sslcrldir)
+			{
+				if (stat(dname, &buf) != 0)
+				{
+					libpq_append_conn_error(conn, "certificate revocation list directory \"%s\" does not exist", dname);
+					SSL_CTX_free(SSL_context);
+					return -1;
+				}
+				if (!S_ISDIR(buf.st_mode))
+				{
+					libpq_append_conn_error(conn, "certificate revocation list directory \"%s\" is not a directory", dname);
+					SSL_CTX_free(SSL_context);
+					return -1;
+				}
+			}
+
 			/* Set the flags to check against the complete CRL chain */
 			if ((fname || dname) &&
 				X509_STORE_load_locations(cvstore, fname, dname) == 1)
 			{
-				X509_STORE_set_flags(cvstore,
-									 X509_V_FLAG_CRL_CHECK | X509_V_FLAG_CRL_CHECK_ALL);
+				if (X509_STORE_set_flags(cvstore,
+									 X509_V_FLAG_CRL_CHECK | X509_V_FLAG_CRL_CHECK_ALL) != 1)
+				{
+					char *err = SSLerrmessage(ERR_get_error());
+					libpq_append_conn_error(conn, "could not set crl check flags: %s",err);
+					SSLerrfree(err);
+					SSL_CTX_free(SSL_context);
+					return -1;
+				}
 			}
+			else
+			{
+				char *err = SSLerrmessage(ERR_get_error());
 
-			/* if not found, silently ignore;  we do not require CRL */
-			ERR_clear_error();
+				if (use_sslcrl)
+				{
+					libpq_append_conn_error(conn, "could not load SSL certificate revocation list file \"%s\": %s", fname, err);
+					SSLerrfree(err);
+					SSL_CTX_free(SSL_context);
+					return -1;
+				}
+				else if (use_sslcrldir)
+				{
+					libpq_append_conn_error(conn, "could not load SSL certificate revocation list directory \"%s\": %s", dname, err);
+					SSLerrfree(err);
+					SSL_CTX_free(SSL_context);
+					return -1;
+				}
+
+				ERR_clear_error();
+			}
+		}
+		else
+		{
+			char *err = SSLerrmessage(ERR_get_error());
+			libpq_append_conn_error(conn, "could not get cert store: %s", err);
+			SSLerrfree(err);
+			SSL_CTX_free(SSL_context);
+			return -1;
 		}
 		have_rootcert = true;
 	}
