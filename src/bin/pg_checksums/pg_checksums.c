@@ -488,7 +488,7 @@ main(int argc, char *argv[])
 				mode = PG_MODE_ENABLE;
 				break;
 			case 'f':
-				if (!option_parse_int(optarg, "-f/--filenode", 0,
+				if (!option_parse_int(optarg, "-f/--filenode", 1,
 									  INT_MAX,
 									  NULL))
 					exit(1);
