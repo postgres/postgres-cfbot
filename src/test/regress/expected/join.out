@@ -3053,17 +3053,18 @@ select * from tbl_rs t1 join
   lateral (select * from tbl_rs t2 where t2.a in
             (select t1.a+t3.a from tbl_rs t3) and t2.a < 5)
   on true;
-                QUERY PLAN                 
--------------------------------------------
+                   QUERY PLAN                   
+------------------------------------------------
  Nested Loop
    ->  Seq Scan on tbl_rs t1
    ->  Hash Right Semi Join
          Hash Cond: ((t1.a + t3.a) = t2.a)
          ->  Seq Scan on tbl_rs t3
+               Filter: ((t1.a + a) IS NOT NULL)
          ->  Hash
                ->  Seq Scan on tbl_rs t2
                      Filter: (a < 5)
-(8 rows)
+(9 rows)
 
 -- and check we get the expected results
 select * from tbl_rs t1 join
@@ -3518,8 +3519,8 @@ select * from tenk1 t1 left join
   (select t2.c from tbl_anti t2
    where exists (select 1 from tbl_anti t3 where t2.c = t3.c)) ss on true
 where ss.c is null;
-                      QUERY PLAN                       
--------------------------------------------------------
+                       QUERY PLAN                        
+---------------------------------------------------------
  Nested Loop Anti Join
    ->  Seq Scan on tenk1 t1
    ->  Materialize
@@ -3530,7 +3531,8 @@ where ss.c is null;
                      ->  HashAggregate
                            Group Key: t3.c
                            ->  Seq Scan on tbl_anti t3
-(10 rows)
+                                 Filter: (c IS NOT NULL)
+(11 rows)
 
 -- this is not an antijoin: the join clause t2.c = t3.c cannot guarantee t3.c
 -- is non-null
@@ -7844,17 +7846,18 @@ where exists (select 1 from t t4
                Group Key: t5.a
                ->  Hash Join
                      Output: t4.a, t5.a
-                     Hash Cond: (t6.b = t4.b)
-                     ->  Seq Scan on pg_temp.t t6
-                           Output: t6.a, t6.b
+                     Hash Cond: (t5.b = t4.b)
+                     ->  Seq Scan on pg_temp.t t5
+                           Output: t5.a, t5.b
+                           Filter: (t5.a IS NOT NULL)
                      ->  Hash
-                           Output: t4.b, t4.a, t5.b, t5.a
+                           Output: t4.b, t4.a, t6.b
                            ->  Hash Join
-                                 Output: t4.b, t4.a, t5.b, t5.a
+                                 Output: t4.b, t4.a, t6.b
                                  Inner Unique: true
-                                 Hash Cond: (t5.b = t4.b)
-                                 ->  Seq Scan on pg_temp.t t5
-                                       Output: t5.a, t5.b
+                                 Hash Cond: (t6.b = t4.b)
+                                 ->  Seq Scan on pg_temp.t t6
+                                       Output: t6.a, t6.b
                                  ->  Hash
                                        Output: t4.b, t4.a
                                        ->  Index Scan using t_a_key on pg_temp.t t4
@@ -7863,7 +7866,7 @@ where exists (select 1 from t t4
    ->  Index Only Scan using t_a_key on pg_temp.t t3
          Output: t3.a
          Index Cond: (t3.a = t5.a)
-(32 rows)
+(33 rows)
 
 select t1.a from t t1
   left join t t2 on t1.a = t2.a
@@ -8357,8 +8360,8 @@ select t4.a from sj t1
 explain (verbose, costs off)
 select t1.a from sj t1 where t1.b in (
   select t2.b from sj t2 join sj t3 on t2.c=t3.c);
-                QUERY PLAN                
-------------------------------------------
+                            QUERY PLAN                             
+-------------------------------------------------------------------
  Nested Loop Semi Join
    Output: t1.a
    Join Filter: (t1.b = t3.b)
@@ -8368,7 +8371,7 @@ select t1.a from sj t1 where t1.b in (
          Output: t3.b
          ->  Seq Scan on public.sj t3
                Output: t3.b
-               Filter: (t3.c IS NOT NULL)
+               Filter: ((t3.c IS NOT NULL) AND (t3.b IS NOT NULL))
 (10 rows)
 
 -- Check that quals get hoisted to the appropriate join level after SJE removal
