@@ -134,9 +134,11 @@ write_backup_label(char *output_directory, StringInfo buf,
 	uint8		checksum_payload[PG_CHECKSUM_MAX_LENGTH];
 	int			checksum_length;
 
-	pg_checksum_init(&checksum_ctx, checksum_type);
-
 	snprintf(output_filename, MAXPGPATH, "%s/backup_label", output_directory);
+
+	if (pg_checksum_init(&checksum_ctx, checksum_type) < 0)
+		pg_fatal("could not initialize checksum of file \"%s\"",
+				 output_filename);
 
 	if ((output_fd = open(output_filename,
 						  O_WRONLY | O_CREAT | O_EXCL | PG_BINARY,
@@ -176,6 +178,9 @@ write_backup_label(char *output_directory, StringInfo buf,
 		pg_fatal("could not close file \"%s\": %m", output_filename);
 
 	checksum_length = pg_checksum_final(&checksum_ctx, checksum_payload);
+	if (checksum_length < 0)
+		pg_fatal("could not finalize checksum of file \"%s\"",
+				 output_filename);
 
 	if (mwriter != NULL)
 	{
