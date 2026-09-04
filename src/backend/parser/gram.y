@@ -2685,6 +2685,24 @@ alter_table_cmd:
 
 					$$ = (Node *) n;
 				}
+			/* ALTER TABLE <name> ALTER [COLUMN] <colname> ADD GENERATED USING CONSTRAINT constraint_name STORED */
+			| ALTER opt_column ColId ADD_P GENERATED USING CONSTRAINT name STORED
+				{
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+					Constraint *c = makeNode(Constraint);
+
+					c->conname = $8;
+					c->contype = CONSTR_GENERATED;
+					c->generated_when = ATTRIBUTE_IDENTITY_ALWAYS;
+					c->generated_kind = ATTRIBUTE_GENERATED_STORED;
+					c->location = @8;
+
+					n->subtype = AT_AddGeneratedStored;
+					n->name = $3;
+					n->def = (Node *) c;
+
+					$$ = (Node *) n;
+				}
 			/* ALTER TABLE <name> ALTER [COLUMN] <colname> SET <sequence options>/RESET */
 			| ALTER opt_column ColId alter_identity_column_option_list
 				{
