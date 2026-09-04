@@ -1,0 +1,84 @@
+Parsed test spec with 3 sessions
+
+starting permutation: b1 r1 b2 d2 c2 w1 r1again c1
+step b1: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step r1: SELECT * FROM test WHERE k = 1;
+k|      j
+-+-------
+1|1000000
+(1 row)
+
+step b2: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step d2: DELETE FROM test WHERE j = 1000000;
+step c2: COMMIT;
+step w1: INSERT INTO test VALUES (1, 2);
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step r1again: SELECT * FROM test WHERE k = 1 ORDER BY j;
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
+step c1: COMMIT;
+
+starting permutation: b1 r1 b2 d2 c2 w1conflict r1again c1
+step b1: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step r1: SELECT * FROM test WHERE k = 1;
+k|      j
+-+-------
+1|1000000
+(1 row)
+
+step b2: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step d2: DELETE FROM test WHERE j = 1000000;
+step c2: COMMIT;
+step w1conflict: INSERT INTO test VALUES (1, 2) ON CONFLICT DO NOTHING;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step r1again: SELECT * FROM test WHERE k = 1 ORDER BY j;
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
+step c1: COMMIT;
+
+starting permutation: b1 r1 b2 d2 c2 sp1 w1 rb1 c1
+step b1: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step r1: SELECT * FROM test WHERE k = 1;
+k|      j
+-+-------
+1|1000000
+(1 row)
+
+step b2: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step d2: DELETE FROM test WHERE j = 1000000;
+step c2: COMMIT;
+step sp1: SAVEPOINT s;
+step w1: INSERT INTO test VALUES (1, 2);
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step rb1: ROLLBACK TO SAVEPOINT s;
+step c1: COMMIT;
+ERROR:  could not serialize access due to read/write dependencies among transactions
+
+starting permutation: b2 d2 c2 b1 w1 r1again c1
+step b2: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step d2: DELETE FROM test WHERE j = 1000000;
+step c2: COMMIT;
+step b1: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step w1: INSERT INTO test VALUES (1, 2);
+step r1again: SELECT * FROM test WHERE k = 1 ORDER BY j;
+k|j
+-+-
+1|2
+(1 row)
+
+step c1: COMMIT;
+
+starting permutation: b1 rother1 b3 u3 c3 b2 d2 c2 w1 c1
+step b1: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step rother1: SELECT * FROM other WHERE k = 1;
+k|v
+-+-
+1|1
+(1 row)
+
+step b3: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step u3: UPDATE other SET v = 2 WHERE k = 1;
+step c3: COMMIT;
+step b2: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step d2: DELETE FROM test WHERE j = 1000000;
+step c2: COMMIT;
+step w1: INSERT INTO test VALUES (1, 2);
+step c1: COMMIT;
