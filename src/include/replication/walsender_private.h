@@ -75,6 +75,13 @@ typedef struct WalSnd
 	 */
 	TimestampTz replyTime;
 
+	/*
+	 * Size of contents in reorder buffer including those spilled to the disk
+	 * or sent downstream as part of an unfinished streamed transaction. This
+	 * is the total size of all the changes in reorder buffer if it would have
+	 * been infinitely large.
+	 */
+	int64		rb_total_size;
 	ReplicationKind kind;
 } WalSnd;
 
