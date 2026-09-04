@@ -608,7 +608,7 @@ jobs:
 
           # Log into a place that will be archived in case of failure
           mkdir -p build/testrun
-          build/tmp_install/usr/local/pgsql/bin/pg_ctl -c -o '-c fsync=off' -D build/runningcheck -l build/testrun/runningcheck.log start
+          build/tmp_install/usr/local/pgsql/bin/pg_ctl -c -D build/runningcheck -l build/testrun/runningcheck.log start
 
           # Run the tests supporting running against an already running
           meson test ${{env.MTEST_ARGS}} --num-processes ${{env.TEST_JOBS}} --setup running

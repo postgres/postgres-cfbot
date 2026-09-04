@@ -199,7 +199,6 @@ sub configure_test_server_for_ssl
 	# enable logging etc.
 	$node->append_conf(
 		'postgresql.conf', <<EOF
-fsync=off
 log_connections=all
 log_hostname=on
 listen_addresses='$serverhost'
