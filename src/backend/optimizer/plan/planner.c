@@ -366,6 +366,7 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 	glob = makeNode(PlannerGlobal);
 
 	glob->boundParams = boundParams;
+	glob->is_oneshot = (cursorOptions & CURSOR_OPT_ONESHOT) != 0;
 	glob->subplans = NIL;
 	glob->subpaths = NIL;
 	glob->subroots = NIL;
@@ -3899,6 +3900,9 @@ standard_qp_callback(PlannerInfo *root, void *extra)
 		root->query_pathkeys = root->setop_pathkeys;
 	else
 		root->query_pathkeys = NIL;
+
+	/* Annotate query pathkeys with variation sources for SLOPE */
+	precompute_slope_pathkeys(root);
 }
 
 /*

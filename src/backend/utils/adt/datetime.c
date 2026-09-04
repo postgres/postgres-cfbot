@@ -3293,24 +3293,35 @@ DecodeSpecial(int field, const char *lowtoken, int *val)
 /*
  * DecodeTimezoneName()
  * Interpret string as a timezone abbreviation or name.
- * Throw error if the name is not recognized.
  *
- * The return value indicates what kind of zone identifier it is:
+ * Returns a TZNAME_* code on success.  On failure, reports via
+ * DateTimeParseError.  If escontext is an ErrorSaveContext the error is
+ * saved and a DTERR_BAD_TIMEZONE code is returned; otherwise it throws
+ * an error.
+ *
+ * Fixed offset timezones will be returned as ISO offset (east+) in
+ * offset if not NULL, otherwise a constant-offset POSIX zone will
+ * be constructed cached and returned in tz.
+ *
+ * The success codes indicate what kind of zone identifier it is:
  *	TZNAME_FIXED_OFFSET: fixed offset from UTC
  *	TZNAME_DYNTZ: dynamic timezone abbreviation
  *	TZNAME_ZONE: full tzdb zone name
  *
  * For TZNAME_FIXED_OFFSET, *offset receives the UTC offset (in seconds,
- * with ISO sign convention: positive is east of Greenwich).
- * For the other two cases, *tz receives the timezone struct representing
- * the zone name or the abbreviation's underlying zone.
+ * with ISO sign convention: positive is east of Greenwich) and *tz is a
+ * constant-offset POSIX zone (via pg_tzset_offset).  For the other two
+ * success cases, *tz receives the timezone struct representing the zone
+ * name or the abbreviation's underlying zone.
  */
 int
-DecodeTimezoneName(const char *tzname, int *offset, pg_tz **tz)
+DecodeTimezoneName(const char *tzname, int *offset, pg_tz **tz,
+				   Node *escontext)
 {
 	char	   *lowzone;
 	int			dterr,
-				type;
+				type,
+				abbr_offset;
 	DateTimeErrorExtra extra;
 
 	/*
@@ -3327,14 +3338,22 @@ DecodeTimezoneName(const char *tzname, int *offset, pg_tz **tz)
 										   strlen(tzname),
 										   false);
 
-	dterr = DecodeTimezoneAbbrev(0, lowzone, &type, offset, tz, &extra);
+	dterr = DecodeTimezoneAbbrev(0, lowzone, &type, &abbr_offset, tz, &extra);
 	if (dterr)
-		DateTimeParseError(dterr, &extra, NULL, NULL, NULL);
+	{
+		DateTimeParseError(dterr, &extra, NULL, NULL, escontext);
+		return DTERR_BAD_TIMEZONE;
+	}
 
 	if (type == TZ || type == DTZ)
 	{
-		/* fixed-offset abbreviation, return the offset */
+		/* ISO offset (east+) -> POSIX (west+) */
+		if (offset != NULL)
+			*offset = abbr_offset;
+		else
+			*tz = pg_tzset_offset(-abbr_offset);
 		return TZNAME_FIXED_OFFSET;
+
 	}
 	else if (type == DYNTZ)
 	{
@@ -3346,9 +3365,11 @@ DecodeTimezoneName(const char *tzname, int *offset, pg_tz **tz)
 		/* try it as a full zone name */
 		*tz = pg_tzset(tzname);
 		if (*tz == NULL)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("time zone \"%s\" not recognized", tzname)));
+		{
+			extra.dtee_timezone = tzname;
+			DateTimeParseError(DTERR_BAD_TIMEZONE, &extra, NULL, NULL, escontext);
+			return DTERR_BAD_TIMEZONE;
+		}
 		return TZNAME_ZONE;
 	}
 }
@@ -3358,21 +3379,15 @@ DecodeTimezoneName(const char *tzname, int *offset, pg_tz **tz)
  * Interpret string as a timezone abbreviation or name.
  * Throw error if the name is not recognized.
  *
- * This is a simple wrapper for DecodeTimezoneName that produces a pg_tz *
- * result in all cases.
+ * Wrapper for DecodeTimezoneName that produces a pg_tz * in all cases.
  */
 pg_tz *
 DecodeTimezoneNameToTz(const char *tzname)
 {
-	pg_tz	   *result;
-	int			offset;
+	pg_tz	   *tz;
 
-	if (DecodeTimezoneName(tzname, &offset, &result) == TZNAME_FIXED_OFFSET)
-	{
-		/* fixed-offset abbreviation, get a pg_tz descriptor for that */
-		result = pg_tzset_offset(-offset);	/* flip to POSIX sign convention */
-	}
-	return result;
+	DecodeTimezoneName(tzname, NULL, &tz, NULL);
+	return tz;
 }
 
 /*
