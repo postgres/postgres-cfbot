@@ -1165,7 +1165,7 @@ repeat(PG_FUNCTION_ARGS)
 	text	   *result;
 	int			slen,
 				tlen;
-	int			i;
+	int			curcount;
 	char	   *cp,
 			   *sp;
 
@@ -1186,10 +1186,37 @@ repeat(PG_FUNCTION_ARGS)
 	SET_VARSIZE(result, tlen);
 	cp = VARDATA(result);
 	sp = VARDATA_ANY(string);
-	for (i = 0; i < count; i++)
+
+	if (count == 0 || slen == 0)
+		PG_RETURN_TEXT_P(result);
+
+	if (slen == 1)
 	{
-		memcpy(cp, sp, slen);
-		cp += slen;
+		memset(cp, *sp, count);
+		CHECK_FOR_INTERRUPTS();
+		PG_RETURN_TEXT_P(result);
+	}
+
+	memcpy(cp, sp, slen);
+	cp += slen;
+	CHECK_FOR_INTERRUPTS();
+
+	curcount = 1;
+
+	/*
+	 * Reuse the portion of the result already produced, doubling the number
+	 * of copies on each iteration until the requested count is reached.
+	 *
+	 * chunk is never greater than curcount, so the source and destination
+	 * ranges of memcpy() do not overlap.
+	 */
+	while (curcount < count)
+	{
+		int			chunk = Min(curcount, count - curcount);
+
+		memcpy(cp, VARDATA(result), chunk * slen);
+		cp += chunk * slen;
+		curcount += chunk;
 		CHECK_FOR_INTERRUPTS();
 	}
 
