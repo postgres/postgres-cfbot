@@ -220,3 +220,89 @@ GetRelationPath(Oid dbOid, Oid spcOid, RelFileNumber relNumber,
 
 	return rp;
 }
+
+/*
+ * Basic parsing of putative relation filenames.
+ *
+ * This function returns true if the file appears to be in the correct format
+ * for a non-temporary relation and false otherwise.
+ *
+ * If it returns true, it sets *relnumber, *fork, and *segno to the values
+ * extracted from the filename. If it returns false, these values are set to
+ * InvalidRelFileNumber, InvalidForkNumber, and 0, respectively.
+ */
+bool
+parse_filename_for_nontemp_relation(const char *name, RelFileNumber *relnumber,
+									ForkNumber *fork, unsigned *segno)
+{
+	unsigned long n,
+				s;
+	ForkNumber	f;
+	char	   *endp;
+
+	*relnumber = InvalidRelFileNumber;
+	*fork = InvalidForkNumber;
+	*segno = 0;
+
+	/*
+	 * Relation filenames should begin with a digit that is not a zero. By
+	 * rejecting cases involving leading zeroes, the caller can assume that
+	 * there's only one possible string of characters that could have produced
+	 * any given value for *relnumber.
+	 *
+	 * (To be clear, we don't expect files with names like 0017.3 to exist at
+	 * all -- but if 0017.3 does exist, it's a non-relation file, not part of
+	 * the main fork for relfilenode 17.)
+	 */
+	if (name[0] < '1' || name[0] > '9')
+		return false;
+
+	/*
+	 * Parse the leading digit string. If the value is out of range, we
+	 * conclude that this isn't a relation file at all.
+	 */
+	errno = 0;
+	n = strtoul(name, &endp, 10);
+	if (errno || name == endp || n <= 0 || n > PG_UINT32_MAX)
+		return false;
+	name = endp;
+
+	/* Check for a fork name. */
+	if (*name != '_')
+		f = MAIN_FORKNUM;
+	else
+	{
+		int			forkchar;
+
+		forkchar = forkname_chars(name + 1, &f);
+		if (forkchar <= 0)
+			return false;
+		name += forkchar + 1;
+	}
+
+	/* Check for a segment number. */
+	if (*name != '.')
+		s = 0;
+	else
+	{
+		/* Reject leading zeroes, just like we do for RelFileNumber. */
+		if (name[1] < '1' || name[1] > '9')
+			return false;
+
+		errno = 0;
+		s = strtoul(name + 1, &endp, 10);
+		if (errno || name + 1 == endp || s <= 0 || s > PG_UINT32_MAX)
+			return false;
+		name = endp;
+	}
+
+	/* Now we should be at the end. */
+	if (*name != '\0')
+		return false;
+
+	/* Set out parameters and return. */
+	*relnumber = (RelFileNumber) n;
+	*fork = f;
+	*segno = (unsigned) s;
+	return true;
+}
