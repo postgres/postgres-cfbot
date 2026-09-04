@@ -159,7 +159,8 @@ static void preprocess_rowmarks(PlannerInfo *root);
 static double preprocess_limit(PlannerInfo *root,
 							   double tuple_fraction,
 							   int64 *offset_est, int64 *count_est);
-static List *preprocess_groupclause(PlannerInfo *root, List *force);
+static List *preprocess_groupclause(PlannerInfo *root, List *force,
+									List *activeWindows);
 static List *extract_rollup_sets(List *groupingSets);
 static List *reorder_grouping_sets(List *groupingSets, List *sortclause);
 static void standard_qp_callback(PlannerInfo *root, void *extra);
@@ -1804,16 +1805,9 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 		/* A recursive query should always have setOperations */
 		Assert(!root->hasRecursion);
 
-		/* Preprocess grouping sets and GROUP BY clause, if any */
+		/* Preprocess grouping sets, if any */
 		if (parse->groupingSets)
-		{
 			gset_data = preprocess_grouping_sets(root);
-		}
-		else if (parse->groupClause)
-		{
-			/* Preprocess regular GROUP BY clause, if any */
-			root->processed_groupClause = preprocess_groupclause(root, NIL);
-		}
 
 		/*
 		 * Preprocess targetlist.  Note that much of the remaining planning
@@ -1865,6 +1859,17 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 			else
 				parse->hasWindowFuncs = false;
 		}
+
+		/*
+		 * Preprocess a plain GROUP BY clause, if any.  We do this after
+		 * selecting the active windows so that preprocess_groupclause can try
+		 * to match the ordering of the GROUP BY elements to the sort order
+		 * required by the first window, if there is one.  (Grouping sets were
+		 * already handled by preprocess_grouping_sets, above.)
+		 */
+		if (parse->groupClause && !parse->groupingSets)
+			root->processed_groupClause = preprocess_groupclause(root, NIL,
+																 activeWindows);
 
 		/*
 		 * Preprocess MIN/MAX aggregates, if any.  Note: be careful about
@@ -2564,7 +2569,7 @@ preprocess_grouping_sets(PlannerInfo *root)
 		 * The groupClauses for hashed grouping sets are built later on.)
 		 */
 		if (gs->set)
-			rollup->groupClause = preprocess_groupclause(root, gs->set);
+			rollup->groupClause = preprocess_groupclause(root, gs->set, NIL);
 		else
 			rollup->groupClause = NIL;
 
@@ -3065,6 +3070,16 @@ limit_needed(Query *parse)
  * We also consider partial match between GROUP BY and ORDER BY elements,
  * which could allow to implement ORDER BY using the incremental sort.
  *
+ * When the query contains window functions, the sort performed directly
+ * above the grouping step is the one required by the first window clause
+ * rather than the one for ORDER BY (which is performed above the window
+ * functions).  In that case we try to match the sort order required by the
+ * first of the 'activeWindows' (ie its PARTITION BY keys followed by its
+ * ORDER BY keys) first, and then the query's ORDER BY clause, since the
+ * WindowAgg steps may preserve the grouping step's output ordering up to
+ * the final sort.  Callers passing a non-NIL 'force' list need not bother
+ * passing activeWindows.
+ *
  * We also consider other orderings of the GROUP BY elements, which could
  * match the sort ordering of other possible plans (eg an indexscan) and
  * thereby reduce cost.  This is implemented during the generation of grouping
@@ -3083,10 +3098,11 @@ limit_needed(Query *parse)
  * possible is done elsewhere.
  */
 static List *
-preprocess_groupclause(PlannerInfo *root, List *force)
+preprocess_groupclause(PlannerInfo *root, List *force, List *activeWindows)
 {
 	Query	   *parse = root->parse;
 	List	   *new_groupclause = NIL;
+	List	   *matchClause;
 	ListCell   *sl;
 	ListCell   *gl;
 
@@ -3104,17 +3120,47 @@ preprocess_groupclause(PlannerInfo *root, List *force)
 		return new_groupclause;
 	}
 
-	/* If no ORDER BY, nothing useful to do here */
-	if (parse->sortClause == NIL)
+	/*
+	 * Select the list of sort clauses that we'll try to match the GROUP BY
+	 * elements to.  Without window functions, this is simply the ORDER BY
+	 * clause.
+	 *
+	 * If there are any active windows, the sort directly above the grouping
+	 * step is the one for the first window, so match its PARTITION BY keys
+	 * followed by its ORDER BY keys first.  As in select_active_windows(),
+	 * remove any entries that duplicate earlier ones.
+	 *
+	 * We then append the query's ORDER BY clause.  The ordering of any GROUP
+	 * BY items beyond the first window's sort requirements is otherwise
+	 * arbitrary, and since the WindowAgg steps preserve their input ordering
+	 * (as long as the remaining windows require no additional sorts, which
+	 * is the case whenever their sort requirements are prefixes of the first
+	 * window's, per select_active_windows()), making the tail match the
+	 * ORDER BY can save the final sort too.  This also covers the case where
+	 * no active window requires any sort at all.
+	 */
+	if (activeWindows != NIL)
+	{
+		WindowClause *wc = linitial_node(WindowClause, activeWindows);
+
+		matchClause = list_concat_unique(list_copy(wc->partitionClause),
+										 wc->orderClause);
+		matchClause = list_concat_unique(matchClause, parse->sortClause);
+	}
+	else
+		matchClause = parse->sortClause;
+
+	/* If nothing to match against, nothing useful to do here */
+	if (matchClause == NIL)
 		return list_copy(parse->groupClause);
 
 	/*
-	 * Scan the ORDER BY clause and construct a list of matching GROUP BY
+	 * Scan the clauses to match and construct a list of matching GROUP BY
 	 * items, but only as far as we can make a matching prefix.
 	 *
-	 * This code assumes that the sortClause contains no duplicate items.
+	 * This code assumes that the list contains no duplicate items.
 	 */
-	foreach(sl, parse->sortClause)
+	foreach(sl, matchClause)
 	{
 		SortGroupClause *sc = lfirst_node(SortGroupClause, sl);
 
@@ -4540,7 +4586,7 @@ consider_groupingsets_paths(PlannerInfo *root,
 			{
 				rollup = makeNode(RollupData);
 
-				rollup->groupClause = preprocess_groupclause(root, gset);
+				rollup->groupClause = preprocess_groupclause(root, gset, NIL);
 				rollup->gsets_data = list_make1(gs);
 				rollup->gsets = remap_to_groupclause_idx(rollup->groupClause,
 														 rollup->gsets_data,
@@ -4729,7 +4775,7 @@ consider_groupingsets_paths(PlannerInfo *root,
 
 			Assert(gs->set != NIL);
 
-			rollup->groupClause = preprocess_groupclause(root, gs->set);
+			rollup->groupClause = preprocess_groupclause(root, gs->set, NIL);
 			rollup->gsets_data = list_make1(gs);
 			rollup->gsets = remap_to_groupclause_idx(rollup->groupClause,
 													 rollup->gsets_data,
