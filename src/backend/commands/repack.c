@@ -2229,6 +2229,7 @@ get_tables_to_repack_partitioned(RepackStmt *stmt, Relation rel,
 {
 	Oid			relid;
 	bool		rel_is_index;
+	List	   *tableoids;
 	List	   *inhoids;
 	List	   *rtcs = NIL;
 
@@ -2276,6 +2277,23 @@ get_tables_to_repack_partitioned(RepackStmt *stmt, Relation rel,
 	{
 		relid = RelationGetRelid(rel);
 		rel_is_index = false;
+	}
+
+	/*
+	 * Warn about foreign-table partitions, which have no local storage and
+	 * would otherwise be skipped silently.  When an index is specified, the
+	 * walk below covers the index's partition tree, which cannot contain
+	 * foreign tables, so walk the table's partition tree here in both cases.
+	 */
+	tableoids = find_all_inheritors(RelationGetRelid(rel), NoLock, NULL);
+	foreach_oid(tableoid, tableoids)
+	{
+		if (get_rel_relkind(tableoid) == RELKIND_FOREIGN_TABLE)
+			ereport(WARNING,
+			/*- translator: second %s is the name of a SQL command, eg. REPACK */
+					errmsg("skipping \"%s\" --- cannot execute %s on foreign tables",
+						   get_rel_name(tableoid),
+						   RepackCommandAsString(stmt->command)));
 	}
 
 	/*
