@@ -2404,6 +2404,13 @@
   max => 'INT_MAX / 1000000',
 },
 
+{ name => 'post_recovery_sync_level', type => 'enum', context => 'PGC_SUSET', group => 'REPLICATION_PRIMARY',
+  short_desc => 'Sets the synchronization level required before a session can connect after recovery.',
+  variable => 'post_recovery_sync_level',
+  boot_val => 'SYNCHRONOUS_COMMIT_OFF',
+  options => 'synchronous_commit_options',
+},
+
 # Not for general use
 { name => 'pre_auth_delay', type => 'int', context => 'PGC_SIGHUP', group => 'DEVELOPER_OPTIONS',
   short_desc => 'Sets the amount of time to wait before authentication on connection startup.',
@@ -2975,6 +2982,12 @@
   boot_val => 'SYNCHRONOUS_COMMIT_ON',
   options => 'synchronous_commit_options',
   assign_hook => 'assign_synchronous_commit',
+},
+
+{ name => 'synchronous_replication_wait_on_query_cancel', type => 'bool', context => 'PGC_SIGHUP', group => 'REPLICATION_PRIMARY',
+  short_desc => 'Continues waiting for synchronous replication after query cancellation.',
+  variable => 'SyncRepWaitOnQueryCancel',
+  boot_val => 'false',
 },
 
 { name => 'synchronous_standby_names', type => 'string', context => 'PGC_SIGHUP', group => 'REPLICATION_PRIMARY',
