@@ -14295,6 +14295,7 @@ CreateFKCheckTrigger(Oid myRelOid, Oid refRelOid, Constraint *fkconstraint,
 	 */
 	fk_trigger = makeNode(CreateTrigStmt);
 	fk_trigger->replace = false;
+	fk_trigger->tgenabled = TRIGGER_FIRES_ON_ORIGIN;
 	fk_trigger->isconstraint = true;
 	fk_trigger->trigname = "RI_ConstraintTrigger_c";
 	fk_trigger->relation = NULL;
@@ -14320,6 +14321,8 @@ CreateFKCheckTrigger(Oid myRelOid, Oid refRelOid, Constraint *fkconstraint,
 	fk_trigger->deferrable = fkconstraint->deferrable;
 	fk_trigger->initdeferred = fkconstraint->initdeferred;
 	fk_trigger->constrrel = NULL;
+	fk_trigger->trigcomment = NULL;
+	fk_trigger->transformed = true;
 
 	trigAddress = CreateTrigger(fk_trigger, NULL, myRelOid, refRelOid,
 								constraintOid, indexOid, InvalidOid,
@@ -14354,6 +14357,7 @@ createForeignKeyActionTriggers(Oid myRelOid, Oid refRelOid, Constraint *fkconstr
 	 */
 	fk_trigger = makeNode(CreateTrigStmt);
 	fk_trigger->replace = false;
+	fk_trigger->tgenabled = TRIGGER_FIRES_ON_ORIGIN;
 	fk_trigger->isconstraint = true;
 	fk_trigger->trigname = "RI_ConstraintTrigger_a";
 	fk_trigger->relation = NULL;
@@ -14365,6 +14369,8 @@ createForeignKeyActionTriggers(Oid myRelOid, Oid refRelOid, Constraint *fkconstr
 	fk_trigger->whenClause = NULL;
 	fk_trigger->transitionRels = NIL;
 	fk_trigger->constrrel = NULL;
+	fk_trigger->trigcomment = NULL;
+	fk_trigger->transformed = true;
 
 	switch (fkconstraint->fk_del_action)
 	{
@@ -14414,6 +14420,7 @@ createForeignKeyActionTriggers(Oid myRelOid, Oid refRelOid, Constraint *fkconstr
 	 */
 	fk_trigger = makeNode(CreateTrigStmt);
 	fk_trigger->replace = false;
+	fk_trigger->tgenabled = TRIGGER_FIRES_ON_ORIGIN;
 	fk_trigger->isconstraint = true;
 	fk_trigger->trigname = "RI_ConstraintTrigger_a";
 	fk_trigger->relation = NULL;
@@ -14425,6 +14432,8 @@ createForeignKeyActionTriggers(Oid myRelOid, Oid refRelOid, Constraint *fkconstr
 	fk_trigger->whenClause = NULL;
 	fk_trigger->transitionRels = NIL;
 	fk_trigger->constrrel = NULL;
+	fk_trigger->trigcomment = NULL;
+	fk_trigger->transformed = true;
 
 	switch (fkconstraint->fk_upd_action)
 	{
@@ -21626,6 +21635,7 @@ CloneRowTriggersToPartition(Relation parent, Relation partition)
 
 		trigStmt = makeNode(CreateTrigStmt);
 		trigStmt->replace = false;
+		trigStmt->tgenabled = trigForm->tgenabled;
 		trigStmt->isconstraint = OidIsValid(trigForm->tgconstraint);
 		trigStmt->trigname = NameStr(trigForm->tgname);
 		trigStmt->relation = NULL;
@@ -21640,6 +21650,8 @@ CloneRowTriggersToPartition(Relation parent, Relation partition)
 		trigStmt->deferrable = trigForm->tgdeferrable;
 		trigStmt->initdeferred = trigForm->tginitdeferred;
 		trigStmt->constrrel = NULL; /* passed separately */
+		trigStmt->trigcomment = NULL;
+		trigStmt->transformed = true;
 
 		CreateTriggerFiringOn(trigStmt, NULL, RelationGetRelid(partition),
 							  trigForm->tgconstrrelid, InvalidOid, InvalidOid,
