@@ -5133,7 +5133,6 @@ getSubscriptions(Archive *fout)
 	int			i_subwalrcvtimeout;
 	int			i_subpublications;
 	int			i_suborigin;
-	int			i_suboriginremotelsn;
 	int			i_subenabled;
 	int			i_subfailover;
 	int			i_subretaindeadtuples;
@@ -5202,11 +5201,9 @@ getSubscriptions(Archive *fout)
 						  LOGICALREP_ORIGIN_ANY);
 
 	if (dopt->binary_upgrade && fout->remoteVersion >= 170000)
-		appendPQExpBufferStr(query, " o.remote_lsn AS suboriginremotelsn,\n"
-							 " s.subenabled,\n");
+		appendPQExpBufferStr(query, " s.subenabled,\n");
 	else
-		appendPQExpBufferStr(query, " NULL AS suboriginremotelsn,\n"
-							 " false AS subenabled,\n");
+		appendPQExpBufferStr(query, " false AS subenabled,\n");
 
 	if (fout->remoteVersion >= 170000)
 		appendPQExpBufferStr(query,
@@ -5248,11 +5245,6 @@ getSubscriptions(Archive *fout)
 							 "LEFT JOIN pg_catalog.pg_foreign_server fs \n"
 							 "    ON fs.oid = s.subserver \n");
 
-	if (dopt->binary_upgrade && fout->remoteVersion >= 170000)
-		appendPQExpBufferStr(query,
-							 "LEFT JOIN pg_catalog.pg_replication_origin_status o \n"
-							 "    ON o.external_id = 'pg_' || s.oid::text \n");
-
 	appendPQExpBufferStr(query,
 						 "WHERE s.subdbid = (SELECT oid FROM pg_database\n"
 						 "                   WHERE datname = current_database())");
@@ -5286,7 +5278,6 @@ getSubscriptions(Archive *fout)
 	i_subwalrcvtimeout = PQfnumber(res, "subwalrcvtimeout");
 	i_subpublications = PQfnumber(res, "subpublications");
 	i_suborigin = PQfnumber(res, "suborigin");
-	i_suboriginremotelsn = PQfnumber(res, "suboriginremotelsn");
 
 	subinfo = pg_malloc_array(SubscriptionInfo, ntups);
 
@@ -5339,11 +5330,6 @@ getSubscriptions(Archive *fout)
 		subinfo[i].subpublications =
 			pg_strdup(PQgetvalue(res, i, i_subpublications));
 		subinfo[i].suborigin = pg_strdup(PQgetvalue(res, i, i_suborigin));
-		if (PQgetisnull(res, i, i_suboriginremotelsn))
-			subinfo[i].suboriginremotelsn = NULL;
-		else
-			subinfo[i].suboriginremotelsn =
-				pg_strdup(PQgetvalue(res, i, i_suboriginremotelsn));
 
 		/* Decide whether we want to dump it */
 		selectDumpableObject(&(subinfo[i].dobj), fout);
@@ -5537,6 +5523,14 @@ dumpSubscription(Archive *fout, const SubscriptionInfo *subinfo)
 	appendPQExpBuffer(delq, "DROP SUBSCRIPTION %s;\n",
 					  qsubname);
 
+	if (dopt->binary_upgrade)
+	{
+		appendPQExpBufferStr(query, "\n-- For binary upgrade, must preserve pg_subscription.oid\n");
+		appendPQExpBuffer(query,
+						  "SELECT pg_catalog.binary_upgrade_set_next_pg_subscription_oid('%u'::pg_catalog.oid);\n\n",
+						  subinfo->dobj.catId.oid);
+	}
+
 	appendPQExpBuffer(query, "CREATE SUBSCRIPTION %s ",
 					  qsubname);
 	if (subinfo->subservername)
@@ -5614,37 +5608,15 @@ dumpSubscription(Archive *fout, const SubscriptionInfo *subinfo)
 	 * In binary-upgrade mode, we allow the replication to continue after the
 	 * upgrade.
 	 */
-	if (dopt->binary_upgrade && fout->remoteVersion >= 170000)
+	if (dopt->binary_upgrade && subinfo->subenabled && fout->remoteVersion >= 170000)
 	{
-		if (subinfo->suboriginremotelsn)
-		{
-			/*
-			 * Preserve the remote_lsn for the subscriber's replication
-			 * origin. This value is required to start the replication from
-			 * the position before the upgrade. This value will be stale if
-			 * the publisher gets upgraded before the subscriber node.
-			 * However, this shouldn't be a problem as the upgrade of the
-			 * publisher ensures that all the transactions were replicated
-			 * before upgrading it.
-			 */
-			appendPQExpBufferStr(query,
-								 "\n-- For binary upgrade, must preserve the remote_lsn for the subscriber's replication origin.\n");
-			appendPQExpBufferStr(query,
-								 "SELECT pg_catalog.binary_upgrade_replorigin_advance(");
-			appendStringLiteralAH(query, subinfo->dobj.name, fout);
-			appendPQExpBuffer(query, ", '%s');\n", subinfo->suboriginremotelsn);
-		}
-
-		if (subinfo->subenabled)
-		{
-			/*
-			 * Enable the subscription to allow the replication to continue
-			 * after the upgrade.
-			 */
-			appendPQExpBufferStr(query,
-								 "\n-- For binary upgrade, must preserve the subscriber's running state.\n");
-			appendPQExpBuffer(query, "ALTER SUBSCRIPTION %s ENABLE;\n", qsubname);
-		}
+		/*
+		 * Enable the subscription to allow the replication to continue
+		 * after the upgrade.
+		 */
+		appendPQExpBufferStr(query,
+							 "\n-- For binary upgrade, must preserve the subscriber's running state.\n");
+		appendPQExpBuffer(query, "ALTER SUBSCRIPTION %s ENABLE;\n", qsubname);
 	}
 
 	if (subinfo->dobj.dump & DUMP_COMPONENT_DEFINITION)
