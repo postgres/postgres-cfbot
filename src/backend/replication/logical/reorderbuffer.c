@@ -2679,9 +2679,14 @@ ReorderBufferProcessTXN(ReorderBuffer *rb, ReorderBufferTXN *txn,
 		 * Aborting the current (sub-)transaction as a whole has the right
 		 * semantics. We want all locks acquired in here to be released, not
 		 * reassigned to the parent and we do not want any database access
-		 * have persistent effects.
+		 * have persistent effects.  In the !using_subtxn case this is a
+		 * top-level abort for internal cleanup; keep it out of
+		 * pg_stat_database.xact_rollback.
 		 */
-		AbortCurrentTransaction();
+		if (using_subtxn)
+			AbortCurrentTransaction();
+		else
+			AbortCurrentTransactionWithoutXactCounters();
 
 		/* make sure there's no cache pollution */
 		if (rbtxn_distr_inval_overflowed(txn))
@@ -2742,9 +2747,14 @@ ReorderBufferProcessTXN(ReorderBuffer *rb, ReorderBufferTXN *txn,
 
 		/*
 		 * Force cache invalidation to happen outside of a valid transaction
-		 * to prevent catalog access as we just caught an error.
+		 * to prevent catalog access as we just caught an error.  As above,
+		 * keep the top-level internal cleanup abort out of
+		 * pg_stat_database.xact_rollback.
 		 */
-		AbortCurrentTransaction();
+		if (using_subtxn)
+			AbortCurrentTransaction();
+		else
+			AbortCurrentTransactionWithoutXactCounters();
 
 		/* make sure there's no cache pollution */
 		if (rbtxn_distr_inval_overflowed(txn))
