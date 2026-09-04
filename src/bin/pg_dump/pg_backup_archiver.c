@@ -5198,7 +5198,7 @@ CloneArchive(ArchiveHandle *AH)
 
 	/* The clone will have its own connection, so disregard connection state */
 	clone->connection = NULL;
-	clone->connCancel = NULL;
+	clone->cancelConn = NULL;
 	clone->currUser = NULL;
 	clone->currSchema = NULL;
 	clone->currTableAm = NULL;

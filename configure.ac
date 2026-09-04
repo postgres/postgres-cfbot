@@ -1864,6 +1864,7 @@ AC_CHECK_FUNCS(m4_normalize([
 	memset_explicit
 	posix_fallocate
 	ppoll
+	pselect
 	pthread_is_threaded_np
 	setproctitle
 	setproctitle_fast
@@ -1960,6 +1961,7 @@ if test "$PORTNAME" = "win32"; then
   AC_LIBOBJ(dirmod)
   AC_LIBOBJ(kill)
   AC_LIBOBJ(open)
+  AC_LIBOBJ(pthread-win32)
   AC_LIBOBJ(system)
   AC_LIBOBJ(win32common)
   AC_LIBOBJ(win32dlopen)
