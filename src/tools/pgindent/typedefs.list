@@ -874,6 +874,7 @@ FixedParamState
 FlagMode
 Float
 FlushPosition
+FreezeState
 FmgrBuiltin
 FmgrHookEventType
 FmgrInfo
@@ -1266,6 +1267,8 @@ HeadlineWordEntry
 HeapCheckContext
 HeapCheckReadStreamData
 HeapPageFreeze
+HeapPageFreezeParams
+HeapPageFreezeResult
 HeapScanDesc
 HeapScanDescData
 HeapTuple

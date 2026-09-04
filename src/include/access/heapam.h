@@ -337,6 +337,33 @@ typedef struct PruneFreezeResult
 	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
 } PruneFreezeResult;
 
+/*
+ * Input parameters for pure freezing.
+ */
+typedef struct HeapPageFreezeParams
+{
+	Relation	relation;
+	Buffer		buffer;
+	GlobalVisState *vistest;
+	VacuumCutoffs *cutoffs;
+} HeapPageFreezeParams;
+
+/*
+ * Per-page result from pure freezing.
+ */
+typedef struct HeapPageFreezeResult
+{
+	int			nfrozen;		/* Number of tuples frozen on the page */
+	int			live_tuples;	/* Number of live tuples on the page */
+	int			recently_dead_tuples;	/* Number of recently dead tuples */
+	int			dead_tuples;	/* Number of DEAD tuples left unpruned */
+	int			lpdead_items;	/* Number of existing LP_DEAD items */
+	bool		hastup;			/* Page prevents relation truncation */
+	bool		needs_cleanup;	/* DEAD tuple requires pruning before
+								 * advancing freeze cutoffs */
+	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
+} HeapPageFreezeResult;
+
 
 /* ----------------
  *		function prototypes for heap access method
@@ -449,6 +476,11 @@ extern void heap_page_prune_and_freeze(PruneFreezeParams *params,
 									   OffsetNumber *off_loc,
 									   TransactionId *new_relfrozen_xid,
 									   MultiXactId *new_relmin_mxid);
+extern void heap_page_freeze_only(HeapPageFreezeParams *params,
+								  HeapPageFreezeResult *result,
+								  OffsetNumber *off_loc,
+								  TransactionId *new_relfrozen_xid,
+								  MultiXactId *new_relmin_mxid);
 extern void heap_page_prune_execute(Buffer buffer, bool lp_truncate_only,
 									OffsetNumber *redirected, int nredirected,
 									OffsetNumber *nowdead, int ndead,
