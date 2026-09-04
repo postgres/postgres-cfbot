@@ -19,6 +19,14 @@
 #include "miscadmin.h"
 #include "utils/builtins.h"
 
+#if HAVE_DECL_SSL_GET1_GROUPS && \
+	HAVE_DECL_SSL_GET_NEGOTIATED_GROUP && \
+	defined(HAVE_SSL_GROUP_TO_NAME) \
+
+#define HAVE_SSL_GROUPS
+
+#endif
+
 PG_MODULE_MAGIC_EXT(
 					.name = "sslinfo",
 					.version = PG_VERSION
@@ -28,12 +36,27 @@ static Datum X509_NAME_field_to_text(const X509_NAME *name, text *fieldName);
 static Datum ASN1_STRING_to_text(const ASN1_STRING *str);
 
 /*
- * Function context for data persisting over repeated calls.
+ * Function context for data persisting over repeated calls of
+ * ssl_extension_info.
  */
 typedef struct
 {
 	TupleDesc	tupdesc;
 } SSLExtensionInfoContext;
+
+/*
+ * Function context for data persisting over repeated calls of
+ * ssl_group_info.
+ */
+typedef struct
+{
+	TupleDesc	tupdesc;
+	int			nshared;
+	int			nsupported;
+
+	/* Supported groups have to be stored separately */
+	int		   *supported_groups;
+} SSLGroupInfoContext;
 
 /*
  * Indicates whether current session uses SSL
@@ -469,6 +492,173 @@ ssl_extension_info(PG_FUNCTION_ARGS)
 			elog(ERROR, "could not free OpenSSL BIO structure");
 
 		SRF_RETURN_NEXT(funcctx, result);
+	}
+
+	/* All done */
+	SRF_RETURN_DONE(funcctx);
+}
+
+/*
+ * Returns information about TLS groups.
+ *
+ * Returns setof record made of the following values:
+ * - type of the group: negotiated, shared, supported.
+ * - name of the group.
+ */
+PG_FUNCTION_INFO_V1(ssl_group_info);
+Datum
+ssl_group_info(PG_FUNCTION_ARGS)
+{
+#ifdef HAVE_SSL_GROUPS
+	/*
+	 * If we lack SSL groups API, we still need to do SRF stuff. Thus the
+	 * condition doesn't cover the whole function, but only parts of it. This
+	 * particular one is only to avoid unused variable warning, in case if
+	 * HAVE_SSL_GROUPS is false.
+	 */
+	SSL		   *ssl = MyProcPort->ssl;
+#endif
+
+	FuncCallContext *funcctx;
+	int			call_cntr = 0;
+	int			max_calls = 0;
+	MemoryContext oldcontext;
+	SSLGroupInfoContext *fctx;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+
+		TupleDesc	tupdesc;
+
+		/* create a function context for cross-call persistence */
+		funcctx = SRF_FIRSTCALL_INIT();
+
+		/*
+		 * Switch to memory context appropriate for multiple function calls
+		 */
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		/* Create a user function context for cross-call persistence */
+		fctx = palloc_object(SSLGroupInfoContext);
+
+		/* Construct tuple descriptor */
+		if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("function returning record called in context that cannot accept type record")));
+		fctx->tupdesc = BlessTupleDesc(tupdesc);
+
+		if (!MyProcPort->ssl_in_use)
+		{
+			/* fast track when no results */
+			MemoryContextSwitchTo(oldcontext);
+			SRF_RETURN_DONE(funcctx);
+		}
+
+#ifdef HAVE_SSL_GROUPS
+		if (ssl != NULL)
+		{
+			fctx->nsupported = SSL_get1_groups(ssl, NULL);
+			fctx->nshared = SSL_get_shared_group(ssl, -1);
+
+			fctx->supported_groups =
+				palloc(fctx->nsupported * sizeof(*fctx->supported_groups));
+			SSL_get1_groups(ssl, fctx->supported_groups);
+
+			/*
+			 * Set max_calls as the number of supported groups plus the number
+			 * of shared groups plus one negotiated group.
+			 */
+			max_calls = fctx->nsupported + fctx->nshared + 1;
+		}
+
+		if (max_calls > 0)
+		{
+			/* got results, keep track of them */
+			funcctx->max_calls = max_calls;
+			funcctx->user_fctx = fctx;
+		}
+		else
+		{
+			/* fast track when no results */
+			MemoryContextSwitchTo(oldcontext);
+			SRF_RETURN_DONE(funcctx);
+		}
+#else
+		/* SSL groups API is not present, skip */
+		MemoryContextSwitchTo(oldcontext);
+		SRF_RETURN_DONE(funcctx);
+#endif
+
+		MemoryContextSwitchTo(oldcontext);
+	}
+
+	/* stuff done on every call of the function */
+	funcctx = SRF_PERCALL_SETUP();
+
+	/*
+	 * Initialize per-call variables.
+	 */
+	call_cntr = funcctx->call_cntr;
+	max_calls = funcctx->max_calls;
+	fctx = funcctx->user_fctx;
+
+	/* do while there are more left to send */
+	if (call_cntr < max_calls)
+	{
+#ifdef HAVE_SSL_GROUPS
+		Datum		values[2];
+		bool		nulls[2];
+		HeapTuple	tuple;
+		Datum		result,
+					group_type;
+		int			nid;
+		const char *group_name;
+
+		/* Send the negotiated group first */
+		if (call_cntr == 0)
+		{
+			nid = SSL_get_negotiated_group(ssl);
+			group_type = CStringGetTextDatum("negotiated");
+		}
+		/* Then the shared groups */
+		else if (call_cntr < fctx->nshared + 1)
+		{
+			nid = SSL_get_shared_group(ssl, call_cntr - 1);
+			group_type = CStringGetTextDatum("shared");
+		}
+		/* And finally the supported groups */
+		else if (call_cntr < fctx->nsupported + fctx->nshared + 1)
+		{
+			nid = fctx->supported_groups[call_cntr - fctx->nshared - 1];
+			group_type = CStringGetTextDatum("supported");
+		}
+		else
+			SRF_RETURN_DONE(funcctx);
+
+		/*
+		 * SSL_group_to_name can return NULL in case of an error, e.g. when no
+		 * such name was registered for some reason.
+		 */
+		group_name = SSL_group_to_name(ssl, nid);
+		if (group_name == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("unknown OpenSSL group at position %d",
+							call_cntr)));
+
+		values[0] = group_type;
+		nulls[0] = false;
+
+		values[1] = CStringGetTextDatum(group_name);
+		nulls[1] = false;
+
+		/* Build tuple */
+		tuple = heap_form_tuple(fctx->tupdesc, values, nulls);
+		result = HeapTupleGetDatum(tuple);
+
+		SRF_RETURN_NEXT(funcctx, result);
+#endif
 	}
 
 	/* All done */

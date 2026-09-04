@@ -2787,6 +2787,7 @@ SQLValueFunction
 SQLValueFunctionOp
 SSL
 SSLExtensionInfoContext
+SSLGroupInfoContext
 SSL_CTX
 STARTUPINFO
 STRLEN
