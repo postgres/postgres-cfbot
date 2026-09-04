@@ -139,6 +139,12 @@ StatsShmemSize(void)
 	sz = MAXALIGN(sizeof(PgStat_ShmemControl));
 	sz = add_size(sz, pgstat_dsa_init_size());
 
+	/*
+	 * Dynamic allocation for PgStat_IO.hist_time_buckets_slots. Sized from
+	 * the rules in pgstat_tracks_io_*()
+	 */
+	sz = add_size(sz, MAXALIGN(pgstat_io_histogram_shmem_size()));
+
 	/* Add shared memory for all the custom fixed-numbered statistics */
 	for (PgStat_Kind kind = PGSTAT_KIND_CUSTOM_MIN; kind <= PGSTAT_KIND_CUSTOM_MAX; kind++)
 	{
@@ -193,6 +199,15 @@ StatsShmemInit(void *arg)
 							  pgstat_dsa_init_size(),
 							  LWTRANCHE_PGSTATS_DSA, NULL);
 	dsa_pin(dsa);
+
+	/*
+	 * Prepare PgStat_IO.hist_time_buckets_slot* stuff before calling
+	 * pgstat_io_init_shmem_cb(). The additional memory for this was requested
+	 * in the StatsShmemSize() above.
+	 */
+	ctl->io.stats.hist_time_buckets_slot_count = pgstat_io_get_sum_tracked();
+	ctl->io.stats.hist_time_buckets_slots = (uint64 (*)[PGSTAT_IO_HIST_BUCKETS]) p;
+	p += MAXALIGN(pgstat_io_histogram_shmem_size());
 
 	/*
 	 * To ensure dshash is created in "plain" shared memory, temporarily limit

@@ -6058,6 +6058,15 @@
   proargnames => '{backend_type,object,context,reads,read_bytes,read_time,writes,write_bytes,write_time,writebacks,writeback_time,extends,extend_bytes,extend_time,hits,evictions,reuses,fsyncs,fsync_time,stats_reset}',
   prosrc => 'pg_stat_get_io' },
 
+{ oid => '6149', descr => 'statistics: per backend type IO latency histogram',
+  proname => 'pg_stat_get_io_histogram', prorows => '30', proretset => 't',
+  provolatile => 'v', proparallel => 'r', prorettype => 'record',
+  proargtypes => '',
+  proallargtypes => '{text,text,text,text,int4range,int8,timestamptz}',
+  proargmodes => '{o,o,o,o,o,o,o}',
+  proargnames => '{backend_type,object,context,io_type,bucket_latency_us,bucket_count,stats_reset}',
+  prosrc => 'pg_stat_get_io_histogram' },
+
 { oid => '6509', descr => 'statistics: per lock type statistics',
   proname => 'pg_stat_get_lock', prorows => '10', proretset => 't',
   provolatile => 'v', proparallel => 'r', prorettype => 'record',
