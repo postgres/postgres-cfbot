@@ -99,6 +99,22 @@ SELECT 2 AS "int" ORDER BY 1;
    2
 (1 row)
 
+SELECT FROM (VALUES (1::INT, 2::INT)) AS t(a, b) ORDER BY a, b;
+--
+(1 row)
+
+SELECT a FROM (VALUES (1::INT, 2::INT)) AS t(a, b) ORDER BY a, b;
+ a 
+---
+ 1
+(1 row)
+
+SELECT a, b FROM (VALUES (1::INT, 2::INT)) AS t(a, b) ORDER BY a, b;
+ a | b 
+---+---
+ 1 | 2
+(1 row)
+
 /* this comment should not appear in the output */
 SELECT 'hello'
   -- but this one will appear
@@ -223,6 +239,9 @@ SELECT calls, rows, query FROM pg_stat_statements ORDER BY query COLLATE "C";
      1 |    2 | SELECT $1 AS i UNION SELECT $2 ORDER BY i
      1 |    1 | SELECT $1 || $2
      2 |    2 | SELECT DISTINCT $1 AS "int"
+     1 |    1 | SELECT FROM (VALUES ($1::INT, $2::INT)) AS t(a, b) ORDER BY a, b
+     1 |    1 | SELECT a FROM (VALUES ($1::INT, $2::INT)) AS t(a, b) ORDER BY a, b
+     1 |    1 | SELECT a, b FROM (VALUES ($1::INT, $2::INT)) AS t(a, b) ORDER BY a, b
      0 |    0 | SELECT calls, rows, query FROM pg_stat_statements ORDER BY query COLLATE "C"
      1 |    1 | SELECT pg_stat_statements_reset() IS NOT NULL AS t
      1 |    2 | WITH t(f) AS (                                                              +
@@ -230,7 +249,7 @@ SELECT calls, rows, query FROM pg_stat_statements ORDER BY query COLLATE "C";
        |      | )                                                                           +
        |      |   SELECT f FROM t ORDER BY f
      1 |    1 | select $1::jsonb ? $2
-(17 rows)
+(20 rows)
 
 SELECT pg_stat_statements_reset() IS NOT NULL AS t;
  t 
@@ -478,6 +497,24 @@ SELECT COUNT(*) FROM (VALUES (1::INT, 2::INT)) AS t(a, b) GROUP BY a, b;
      1
 (1 row)
 
+SELECT COUNT(*), a FROM (VALUES (1::INT, 2::INT)) AS t(a, b) GROUP BY a, b;
+ count | a 
+-------+---
+     1 | 1
+(1 row)
+
+SELECT COUNT(*), a, b FROM (VALUES (1::INT, 2::INT)) AS t(a, b) GROUP BY a, b;
+ count | a | b 
+-------+---+---
+     1 | 1 | 2
+(1 row)
+
+SELECT COUNT(*) FROM (VALUES (1::INT, 2::INT)) AS t(a, b) GROUP BY a, b ORDER BY a, b;
+ count 
+-------
+     1
+(1 row)
+
 SELECT COUNT(*) FROM (VALUES (1::INT, 2::INT)) AS t(a, b) GROUP BY b, a;
  count 
 -------
@@ -546,14 +583,17 @@ SELECT calls, query FROM pg_stat_statements WHERE query LIKE '%GROUP BY%' ORDER 
      1 | SELECT COUNT(*) FROM (VALUES ($1::INT, $2::INT)) AS t(a, b) GROUP BY a
      2 | SELECT COUNT(*) FROM (VALUES ($1::INT, $2::INT)) AS t(a, b) GROUP BY a HAVING a = $3
      1 | SELECT COUNT(*) FROM (VALUES ($1::INT, $2::INT)) AS t(a, b) GROUP BY a, b
+     1 | SELECT COUNT(*) FROM (VALUES ($1::INT, $2::INT)) AS t(a, b) GROUP BY a, b ORDER BY a, b
      1 | SELECT COUNT(*) FROM (VALUES ($1::INT, $2::INT)) AS t(a, b) GROUP BY b
      1 | SELECT COUNT(*) FROM (VALUES ($1::INT, $2::INT)) AS t(a, b) GROUP BY b HAVING b = $3
      1 | SELECT COUNT(*) FROM (VALUES ($1::INT, $2::INT)) AS t(a, b) GROUP BY b, a
+     1 | SELECT COUNT(*), a FROM (VALUES ($1::INT, $2::INT)) AS t(a, b) GROUP BY a, b
+     1 | SELECT COUNT(*), a, b FROM (VALUES ($1::INT, $2::INT)) AS t(a, b) GROUP BY a, b
      1 | SELECT GROUPING(a) FROM (VALUES ($1::INT, $2::INT)) AS t(a, b) GROUP BY a
      1 | SELECT GROUPING(b) FROM (VALUES ($1::INT, $2::INT)) AS t(a, b) GROUP BY a, b
      1 | SELECT GROUPING(b) FROM (VALUES ($1::INT, $2::INT)) AS t(a, b) GROUP BY b
      1 | SELECT GROUPING(b) FROM (VALUES ($1::INT, $2::INT)) AS t(a, b) GROUP BY b, a
-(12 rows)
+(15 rows)
 
 -- GROUP BY [DISTINCT]
 SELECT a, b, c

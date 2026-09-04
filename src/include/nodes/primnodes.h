@@ -2279,7 +2279,7 @@ typedef struct TargetEntry
 	/* column's number in source table */
 	AttrNumber	resorigcol pg_node_attr(query_jumble_ignore);
 	/* set to true to eliminate the attribute from final target list */
-	bool		resjunk pg_node_attr(query_jumble_ignore);
+	bool		resjunk;
 } TargetEntry;
 
 

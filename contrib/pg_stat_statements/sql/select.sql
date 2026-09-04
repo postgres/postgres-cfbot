@@ -31,6 +31,9 @@ SELECT DISTINCT 1 AS "int";
 SELECT DISTINCT 2 AS "int";
 SELECT 1 AS "int" ORDER BY 1;
 SELECT 2 AS "int" ORDER BY 1;
+SELECT FROM (VALUES (1::INT, 2::INT)) AS t(a, b) ORDER BY a, b;
+SELECT a FROM (VALUES (1::INT, 2::INT)) AS t(a, b) ORDER BY a, b;
+SELECT a, b FROM (VALUES (1::INT, 2::INT)) AS t(a, b) ORDER BY a, b;
 
 /* this comment should not appear in the output */
 SELECT 'hello'
@@ -162,6 +165,9 @@ SELECT COUNT(*) FROM pg_stat_statements WHERE query LIKE '%FETCH FIRST%';
 SELECT COUNT(*) FROM (VALUES (1::INT, 2::INT)) AS t(a, b) GROUP BY a;
 SELECT COUNT(*) FROM (VALUES (1::INT, 2::INT)) AS t(a, b) GROUP BY b;
 SELECT COUNT(*) FROM (VALUES (1::INT, 2::INT)) AS t(a, b) GROUP BY a, b;
+SELECT COUNT(*), a FROM (VALUES (1::INT, 2::INT)) AS t(a, b) GROUP BY a, b;
+SELECT COUNT(*), a, b FROM (VALUES (1::INT, 2::INT)) AS t(a, b) GROUP BY a, b;
+SELECT COUNT(*) FROM (VALUES (1::INT, 2::INT)) AS t(a, b) GROUP BY a, b ORDER BY a, b;
 SELECT COUNT(*) FROM (VALUES (1::INT, 2::INT)) AS t(a, b) GROUP BY b, a;
 SELECT COUNT(*) FROM (VALUES (1::INT, 2::INT)) AS t(a, b) GROUP BY GROUPING SETS(a, ());
 SELECT COUNT(*) FROM (VALUES (1::INT, 2::INT)) AS t(a, b) GROUP BY GROUPING SETS(b, ());
