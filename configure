@@ -1574,7 +1574,7 @@ Optional Packages:
   --with-segsize-blocks=SEGSIZE_BLOCKS
                           set table segment size in blocks [0]
   --with-wal-blocksize=BLOCKSIZE
-                          set WAL block size in kB [8]
+                          set WAL block size in kB [4]
   --with-llvm             build with LLVM based JIT support
   --without-icu           build without ICU support
   --with-tcl              build Tcl modules (PL/Tcl)
@@ -3841,7 +3841,7 @@ if test "${with_wal_blocksize+set}" = set; then :
   esac
 
 else
-  wal_blocksize=8
+  wal_blocksize=4
 fi
 
 
