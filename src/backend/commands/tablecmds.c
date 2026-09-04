@@ -8119,10 +8119,9 @@ ATExecSetNotNull(List **wqueue, Relation rel, char *conName, char *colName,
 	if (!recursing)
 	{
 		Assert(conName == NULL);
-		conName = ChooseConstraintName(RelationGetRelationName(rel),
-									   colName, "not_null",
-									   RelationGetNamespace(rel),
-									   NIL);
+		conName = ChooseConstraintNameForRelation(RelationGetRelid(rel),
+												  colName, "not_null",
+												  NIL);
 	}
 
 	constraint = makeNotNullConstraint(makeString(colName));
