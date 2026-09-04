@@ -177,6 +177,32 @@ static Datum ExecJustHashOuterVarVirt(ExprState *state, ExprContext *econtext, b
 static Datum ExecJustHashInnerVarVirt(ExprState *state, ExprContext *econtext, bool *isnull);
 static Datum ExecJustHashOuterVarStrict(ExprState *state, ExprContext *econtext, bool *isnull);
 
+/*
+ * One step of a JSON_TRANSFORM target path.
+ *
+ * The standard restricts the path to a chain of member accessors (.key)
+ * and wildcard member accessors (.*).  We model each accessor as one of
+ * these structs; the JSON_TRANSFORM walker below consumes the array.
+ */
+typedef struct JsonTransformStep
+{
+	bool		wildcard;		/* true for '.*' (matches every member) */
+	char	   *key;			/* member name (valid only if !wildcard) */
+	int			keylen;			/* length of key (not NUL-terminated) */
+} JsonTransformStep;
+
+static void jtSetPath(JsonbIterator **it, JsonbInState *st,
+					  JsonTransformStep *steps, int nsteps, int level,
+					  JsonTransformOp op, JsonbValue *newval,
+					  JsonTransformBehavior on_existing, bool strict,
+					  bool unwrap, bool *matched);
+static void jtSetPathObject(JsonbIterator **it, JsonbInState *st,
+							JsonTransformStep *steps, int nsteps, int level,
+							JsonTransformOp op, JsonbValue *newval,
+							JsonTransformBehavior on_existing, bool strict,
+							bool *matched, uint32 npairs);
+static void jtCopyValue(JsonbIterator **it, JsonbInState *st);
+
 /* execution helper functions */
 static pg_always_inline void ExecEvalArrayCompareInternal(FunctionCallInfo fcinfo,
 														  ArrayType *arr,
@@ -579,6 +605,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_JSON_CONSTRUCTOR,
 		&&CASE_EEOP_IS_JSON,
 		&&CASE_EEOP_JSONEXPR_PATH,
+		&&CASE_EEOP_JSON_TRANSFORM,
 		&&CASE_EEOP_JSONEXPR_COERCION,
 		&&CASE_EEOP_JSONEXPR_COERCION_FINISH,
 		&&CASE_EEOP_AGGREF,
@@ -1940,6 +1967,13 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		{
 			/* too complex for an inline implementation */
 			EEO_JUMP(ExecEvalJsonExprPath(state, op, econtext));
+		}
+
+		EEO_CASE(EEOP_JSON_TRANSFORM)
+		{
+			/* too complex for an inline implementation */
+			ExecEvalJsonTransform(state, op, econtext);
+			EEO_NEXT();
 		}
 
 		EEO_CASE(EEOP_JSONEXPR_COERCION)
@@ -5100,6 +5134,472 @@ ExecEvalJsonExprPath(ExprState *state, ExprEvalStep *op,
 	}
 
 	return jump_eval_coercion >= 0 ? jump_eval_coercion : jsestate->jump_end;
+}
+
+/*
+ * Convert a JSON_TRANSFORM jsonpath into an array of JsonTransformStep.
+ *
+ * Per standard ,the path must begin with the context variable '$' and
+ * may only contain member accessors (.key, jpiKey) and wildcard member
+ * accessors (.*, jpiAnyKey).  Array subscripts, filters, methods, recursive
+ * descent, and named variables are all rejected.  Additionally, for INSERT
+ * and RENAME the *last* accessor must be a named member, not a wildcard.
+ *
+ * The returned key pointers point into the (detoasted) jsonpath value, which
+ * outlives this evaluation, so we don't copy the strings.
+ */
+static JsonTransformStep *
+JsonPathToTransformSteps(JsonPath *jp, JsonTransformOp op, int *nsteps)
+{
+	JsonPathItem v;
+	JsonTransformStep *steps;
+	int			nalloc = 8;
+	int			n = 0;
+
+	steps = palloc(nalloc * sizeof(JsonTransformStep));
+
+	jspInit(&v, jp);
+
+	/* Per standard, the path must begin with '$'. */
+	if (v.type != jpiRoot)
+		ereport(ERROR,
+				errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				errmsg("JSON_TRANSFORM target path must start with the context variable $"));
+
+	while (jspHasNext(&v))
+	{
+		JsonPathItem next;
+
+		jspGetNext(&v, &next);
+		v = next;
+
+		if (n >= nalloc)
+		{
+			nalloc *= 2;
+			steps = repalloc(steps, nalloc * sizeof(JsonTransformStep));
+		}
+
+		if (v.type == jpiKey)
+		{
+			int32		len;
+
+			steps[n].wildcard = false;
+			steps[n].key = jspGetString(&v, &len);
+			steps[n].keylen = len;
+		}
+		else if (v.type == jpiAnyKey)
+		{
+			steps[n].wildcard = true;
+			steps[n].key = NULL;
+			steps[n].keylen = 0;
+		}
+		else
+			ereport(ERROR,
+					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("JSON_TRANSFORM target path may only contain member accessors (.key) and wildcard member accessors (.*)"),
+					errdetail("Array subscripts, filters, methods, and recursive descent are not allowed."));
+
+		n++;
+	}
+
+	if (n == 0)
+		ereport(ERROR,
+				errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				errmsg("JSON_TRANSFORM target path must name at least one member"));
+
+	/* INSERT/RENAME: the last accessor must name a member, not a wildcard. */
+	if ((op == TRANSFORM_INSERT || op == TRANSFORM_RENAME) &&
+		steps[n - 1].wildcard)
+		ereport(ERROR,
+				errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				errmsg("the last accessor of a JSON_TRANSFORM %s target path may not be a wildcard",
+					   op == TRANSFORM_INSERT ? "INSERT" : "RENAME"));
+
+	*nsteps = n;
+	return steps;
+}
+
+/*
+ * Copy the next value from *it into *st verbatim (scalar or whole container).
+ * Precondition: the value's token has NOT yet been read from *it.
+ *
+ * This is the standard "stream through unchanged" idiom used by setPath():
+ * descend with skipNested=false and re-emit every token until the container
+ * we opened is balanced again.
+ */
+static void
+jtCopyValue(JsonbIterator **it, JsonbInState *st)
+{
+	JsonbValue	v;
+	JsonbIteratorToken r = JsonbIteratorNext(it, &v, false);
+
+	pushJsonbValue(st, r, r < WJB_BEGIN_ARRAY ? &v : NULL);
+
+	if (r == WJB_BEGIN_ARRAY || r == WJB_BEGIN_OBJECT)
+	{
+		int			walking_level = 1;
+
+		while (walking_level != 0)
+		{
+			r = JsonbIteratorNext(it, &v, false);
+			if (r == WJB_BEGIN_ARRAY || r == WJB_BEGIN_OBJECT)
+				walking_level++;
+			else if (r == WJB_END_ARRAY || r == WJB_END_OBJECT)
+				walking_level--;
+			pushJsonbValue(st, r, r < WJB_BEGIN_ARRAY ? &v : NULL);
+		}
+	}
+}
+
+/*
+ * Walk one object's members, rebuilding it into *st and applying the action
+ * to members matched by steps[level].
+ *
+ * A named-key step matches at most one member; a wildcard step matches every
+ * member (and so must not "stop" after the first match).
+ */
+static void
+jtSetPathObject(JsonbIterator **it, JsonbInState *st,
+				JsonTransformStep *steps, int nsteps, int level,
+				JsonTransformOp op, JsonbValue *newval,
+				JsonTransformBehavior on_existing, bool strict,
+				bool *matched, uint32 npairs)
+{
+	JsonTransformStep *step = &steps[level];
+	bool		is_last = (level == nsteps - 1);
+	bool		found = false;
+	uint32		i;
+
+	for (i = 0; i < npairs; i++)
+	{
+		JsonbValue	k,
+					v;
+		JsonbIteratorToken r PG_USED_FOR_ASSERTS_ONLY;
+		bool		is_match;
+
+		r = JsonbIteratorNext(it, &k, true);
+		Assert(r == WJB_KEY);
+
+		is_match = step->wildcard ||
+			(k.val.string.len == step->keylen &&
+			 memcmp(k.val.string.val, step->key, step->keylen) == 0);
+
+		if (is_match && !step->wildcard)
+			found = true;
+
+		if (is_match && is_last)
+		{
+			switch (op)
+			{
+				case TRANSFORM_REMOVE:
+					/* swallow the value; push nothing -> member removed */
+					(void) JsonbIteratorNext(it, &v, true);
+					*matched = true;
+					break;
+
+				case TRANSFORM_REPLACE:
+					/* drop old value, push key + replacement */
+					(void) JsonbIteratorNext(it, &v, true);
+					pushJsonbValue(st, WJB_KEY, &k);
+					pushJsonbValue(st, WJB_VALUE, newval);
+					*matched = true;
+					break;
+
+				case TRANSFORM_INSERT:
+
+					/*
+					 * Target key already present.  ERROR (default) raises;
+					 * IGNORE keeps the existing member unchanged.
+					 */
+					if (on_existing == JSON_TRANSFORM_BEHAVIOR_ERROR)
+						ereport(ERROR,
+								errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+								errmsg("target in JSON_TRANSFORM already exists"));
+					(void) JsonbIteratorNext(it, &v, true);
+					pushJsonbValue(st, WJB_KEY, &k);
+					pushJsonbValue(st, WJB_VALUE, &v);
+					break;
+
+				case TRANSFORM_RENAME:
+
+					/*
+					 * Rename the key: read the existing value and re-emit it
+					 * under the new name carried in newval (a jbvString).
+					 *
+					 * Renaming to a name already present in this object would
+					 * produce duplicate keys.  Flag the object so the builder
+					 * rejects that at WJB_END_OBJECT instead of silently
+					 * de-duplicating; per the SQL standard this must raise
+					 * an error.  The flag lives on this object's parse-state
+					 * level (reset per level in pushState()), so it is scoped
+					 * to this object only.
+					 */
+					st->parseState->unique_keys = true;
+					(void) JsonbIteratorNext(it, &v, true);
+					pushJsonbValue(st, WJB_KEY, newval);
+					pushJsonbValue(st, WJB_VALUE, &v);
+					*matched = true;
+					break;
+
+				default:
+					elog(ERROR, "unexpected JsonTransformOp %d", (int) op);
+			}
+		}
+		else if (is_match && !is_last)
+		{
+			/* descend into this member's value to continue matching */
+			pushJsonbValue(st, WJB_KEY, &k);
+			jtSetPath(it, st, steps, nsteps, level + 1, op, newval,
+					  on_existing, strict, !strict, matched);
+		}
+		else
+		{
+			/* not a target: copy the member through unchanged */
+			pushJsonbValue(st, WJB_KEY, &k);
+			jtCopyValue(it, st);
+		}
+	}
+
+	/*
+	 * INSERT of a new key: if the named (non-wildcard) last-level key wasn't
+	 * found among the existing members, append it now.  (A wildcard as the
+	 * last INSERT accessor is rejected at path-validation time, so we never
+	 * reach here with step->wildcard.)
+	 */
+	if (op == TRANSFORM_INSERT && is_last && !step->wildcard && !found)
+	{
+		JsonbValue	newkey;
+
+		newkey.type = jbvString;
+		newkey.val.string.val = step->key;
+		newkey.val.string.len = step->keylen;
+		pushJsonbValue(st, WJB_KEY, &newkey);
+		pushJsonbValue(st, WJB_VALUE, newval);
+	}
+}
+
+/*
+ * Dispatcher: read the container/value currently at the front of *it and
+ * rebuild it into *st, recursing through objects along the path.
+ *
+ * 'strict' is the path's global mode; 'unwrap' says whether an array at this
+ * position should be lax-unwrapped -- true at a primary position in lax mode,
+ * false when recursing into an already-unwrapped array (keeping unwrapping one
+ * level deep).  A '.key'/'.*' accessor needs an object: applied to an array we
+ * unwrap it (lax) or raise a structural error (strict); applied to a scalar we
+ * skip it (lax) or raise a structural error (strict).  This matches the
+ * SQL/JSON path engine used by jsonb_path_query().
+ */
+static void
+jtSetPath(JsonbIterator **it, JsonbInState *st,
+		  JsonTransformStep *steps, int nsteps, int level,
+		  JsonTransformOp op, JsonbValue *newval,
+		  JsonTransformBehavior on_existing, bool strict, bool unwrap,
+		  bool *matched)
+{
+	JsonbValue	v;
+	JsonbIteratorToken r;
+
+	check_stack_depth();
+
+	r = JsonbIteratorNext(it, &v, false);
+
+	if (r == WJB_BEGIN_OBJECT)
+	{
+		pushJsonbValue(st, WJB_BEGIN_OBJECT, NULL);
+		jtSetPathObject(it, st, steps, nsteps, level, op, newval,
+						on_existing, strict, matched, v.val.object.nPairs);
+		r = JsonbIteratorNext(it, &v, true);
+		Assert(r == WJB_END_OBJECT);
+		pushJsonbValue(st, WJB_END_OBJECT, NULL);
+	}
+	else if (r == WJB_BEGIN_ARRAY && unwrap)
+	{
+		/*
+		 * Lax mode: a '.key'/'.*' accessor applied to an array auto-unwraps it.
+		 * Rebuild the array, re-applying the *current* step to each element.
+		 * Per the path language this unwrapping is one level deep, so we recurse
+		 * with unwrap=false: a nested array element is then handled as a plain
+		 * value (copied through), not unwrapped again.  This mirrors
+		 * jsonb_path_query()'s lax behavior.
+		 */
+		uint32		nelems = v.val.array.nElems;
+		uint32		i;
+
+		pushJsonbValue(st, WJB_BEGIN_ARRAY, NULL);
+		for (i = 0; i < nelems; i++)
+			jtSetPath(it, st, steps, nsteps, level, op, newval,
+					  on_existing, strict, false, matched);
+		r = JsonbIteratorNext(it, &v, true);
+		Assert(r == WJB_END_ARRAY);
+		pushJsonbValue(st, WJB_END_ARRAY, NULL);
+	}
+	else if (strict)
+	{
+		/*
+		 * A '.key'/'.*' accessor requires an object, but here the value is an
+		 * array we are not unwrapping, or a scalar.  In strict mode this is a
+		 * structural error, matching the SQL/JSON path engine.
+		 */
+		if (steps[level].wildcard)
+			ereport(ERROR,
+					errcode(ERRCODE_SQL_JSON_OBJECT_NOT_FOUND),
+					errmsg("jsonpath wildcard member accessor can only be applied to an object"));
+		else
+			ereport(ERROR,
+					errcode(ERRCODE_SQL_JSON_MEMBER_NOT_FOUND),
+					errmsg("jsonpath member accessor can only be applied to an object"));
+	}
+	else if (r == WJB_BEGIN_ARRAY)
+	{
+		/* lax, but not unwrapping (nested array): nothing matches, copy it */
+		int			walking_level = 1;
+
+		pushJsonbValue(st, WJB_BEGIN_ARRAY, NULL);
+		while (walking_level != 0)
+		{
+			r = JsonbIteratorNext(it, &v, false);
+			if (r == WJB_BEGIN_ARRAY || r == WJB_BEGIN_OBJECT)
+				walking_level++;
+			else if (r == WJB_END_ARRAY || r == WJB_END_OBJECT)
+				walking_level--;
+			pushJsonbValue(st, r, r < WJB_BEGIN_ARRAY ? &v : NULL);
+		}
+	}
+	else
+	{
+		/* lax scalar: nothing matches, leave as-is */
+		pushJsonbValue(st, r, &v);
+	}
+}
+
+/*
+ * Runtime handler for EEOP_JSON_TRANSFORM.
+ *
+ * By the time we get here, prior steps have populated:
+ *   jtstate->formatted_expr  — the input jsonb (guaranteed non-null; the
+ *								EEOP_JUMP_IF_NULL before us handles null)
+ *   jtstate->pathspec        — the compiled jsonpath Datum (non-null)
+ *   jtstate->action_value    — the value for INSERT/REPLACE
+ *								(isnull=true for REMOVE, or if user passed NULL)
+ *
+ * We convert the jsonpath to a list of accessor steps (member names and '.*'
+ * wildcards), then make a single streaming pass over the document, rebuilding
+ * it with the action applied wherever the path matches.  Doing our own pass
+ * (rather than delegating to jsonb_set/insert/delete_path on a text[] path)
+ * is what lets us honor '.*', which can match many members at once.
+ *
+ * The per-action behaviors (action->on_existing / on_missing / on_null) are
+ * resolved during parse analysis from the user's clauses plus the standard's
+ * implicit defaults; here we just honor them.  ON EMPTY / ON ERROR are not
+ * yet supported (rejected at parse time).
+ */
+void
+ExecEvalJsonTransform(ExprState *state, ExprEvalStep *op,
+					  ExprContext *econtext)
+{
+	JsonTransformExprState *jtstate = op->d.json_transform.jtstate;
+	JsonExpr   *jsexpr = jtstate->jsexpr;
+	JsonTransformAction *action = jsexpr->action;
+	Jsonb	   *in;
+	JsonPath   *jp;
+	JsonTransformStep *steps;
+	int			nsteps;
+	JsonbValue	newvalbuf;
+	JsonbValue *newval = NULL;
+	JsonbIterator *it;
+	JsonbInState st = {0};
+	JsonTransformOp effop = action->op;
+	bool		matched = false;
+	bool		strict;
+
+	/*
+	 * The JUMP_IF_NULL guards in the step array already skip us if
+	 * formatted_expr or pathspec is NULL.
+	 */
+	Assert(!jtstate->formatted_expr.isnull);
+	Assert(!jtstate->pathspec.isnull);
+
+	in = DatumGetJsonbP(jtstate->formatted_expr.value);
+	jp = DatumGetJsonPathP(jtstate->pathspec.value);
+	strict = (jp->header & JSONPATH_LAX) == 0;
+
+	/* Validate path and break it into accessor steps. */
+	steps = JsonPathToTransformSteps(jp, action->op, &nsteps);
+
+	/* Build the value the action needs, honoring ON NULL for INSERT/REPLACE. */
+	if (action->op == TRANSFORM_INSERT || action->op == TRANSFORM_REPLACE)
+	{
+		if (jtstate->action_value.isnull)
+		{
+			switch (action->on_null)
+			{
+				case JSON_TRANSFORM_BEHAVIOR_ERROR:
+					ereport(ERROR,
+							errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+							errmsg("null in replacement value of JSON_TRANSFORM not allowed"));
+					break;
+				case JSON_TRANSFORM_BEHAVIOR_IGNORE:
+					/* do not perform the action; return input unchanged */
+					*op->resvalue = JsonbPGetDatum(in);
+					*op->resnull = false;
+					return;
+				case JSON_TRANSFORM_BEHAVIOR_REMOVE:
+					/* delete the target instead of setting it (REPLACE only) */
+					effop = TRANSFORM_REMOVE;
+					break;
+				default:
+					/* NULL ON NULL: store a JSON null */
+					newvalbuf.type = jbvNull;
+					newval = &newvalbuf;
+					break;
+			}
+		}
+		else
+		{
+			JsonbToJsonbValue(DatumGetJsonbP(jtstate->action_value.value),
+							  &newvalbuf);
+			newval = &newvalbuf;
+		}
+	}
+	else if (action->op == TRANSFORM_RENAME)
+	{
+		/* new key name: a text value, carried to the walker as a jbvString */
+		text	   *newname = DatumGetTextPP(jtstate->action_value.value);
+
+		newvalbuf.type = jbvString;
+		newvalbuf.val.string.val = VARDATA_ANY(newname);
+		newvalbuf.val.string.len = VARSIZE_ANY_EXHDR(newname);
+		newval = &newvalbuf;
+	}
+
+	/*
+	 * A top-level scalar has no members for a '.key'/'.*' path to target, so
+	 * nothing matches: honor ON MISSING, else return the input unchanged.
+	 */
+	if (JB_ROOT_IS_SCALAR(in))
+	{
+		if (action->on_missing == JSON_TRANSFORM_BEHAVIOR_ERROR)
+			ereport(ERROR,
+					errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					errmsg("target in JSON_TRANSFORM does not exist"));
+		*op->resvalue = JsonbPGetDatum(in);
+		*op->resnull = false;
+		return;
+	}
+
+	it = JsonbIteratorInit(&in->root);
+	jtSetPath(&it, &st, steps, nsteps, 0, effop, newval,
+			  action->on_existing, strict, !strict, &matched);
+
+	/* ON MISSING ERROR: the path matched no existing target. */
+	if (!matched && action->on_missing == JSON_TRANSFORM_BEHAVIOR_ERROR)
+		ereport(ERROR,
+				errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				errmsg("target in JSON_TRANSFORM does not exist"));
+
+	*op->resvalue = JsonbPGetDatum(JsonbValueToJsonb(st.result));
+	*op->resnull = false;
 }
 
 /*

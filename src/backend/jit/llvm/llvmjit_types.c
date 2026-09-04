@@ -176,6 +176,7 @@ void	   *referenced_functions[] =
 	ExecEvalJsonCoercion,
 	ExecEvalJsonCoercionFinish,
 	ExecEvalJsonExprPath,
+	ExecEvalJsonTransform,
 	MakeExpandedObjectReadOnlyInternal,
 	slot_getmissingattrs,
 	slot_getsomeattrs_int,
