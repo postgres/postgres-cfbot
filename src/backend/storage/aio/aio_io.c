@@ -100,6 +100,19 @@ pgaio_io_start_writev(PgAioHandle *ioh,
 	pgaio_io_stage(ioh, PGAIO_OP_WRITEV);
 }
 
+void
+pgaio_io_start_fsync(PgAioHandle *ioh,
+					 int fd, bool datasync, uint32 wait_event_info)
+{
+	pgaio_io_before_start(ioh);
+
+	ioh->op_data.fsync.fd = fd;
+	ioh->op_data.fsync.datasync = datasync;
+	ioh->op_data.fsync.wait_event_info = wait_event_info;
+
+	pgaio_io_stage(ioh, PGAIO_OP_FSYNC);
+}
+
 
 
 /* --------------------------------------------------------------------------------
@@ -137,6 +150,14 @@ pgaio_io_perform_synchronously(PgAioHandle *ioh)
 								ioh->op_data.write.offset);
 			pgstat_report_wait_end();
 			break;
+		case PGAIO_OP_FSYNC:
+			pgstat_report_wait_start(ioh->op_data.fsync.wait_event_info);
+			if (ioh->op_data.fsync.datasync)
+				result = pg_fdatasync(ioh->op_data.fsync.fd);
+			else
+				result = pg_fsync(ioh->op_data.fsync.fd);
+			pgstat_report_wait_end();
+			break;
 		case PGAIO_OP_INVALID:
 			elog(ERROR, "trying to execute invalid IO operation");
 	}
@@ -147,6 +168,14 @@ pgaio_io_perform_synchronously(PgAioHandle *ioh)
 	 */
 	Assert(result <= INT_MAX);
 	ioh->result = result < 0 ? -errno : result;
+
+	/*
+	 * If we, rather than the process that staged the IO, opened the file,
+	 * close it again.  Has to happen after the result has been determined, as
+	 * closing may clobber errno, and before the completion is processed, as
+	 * that can recycle the handle.
+	 */
+	pgaio_io_close_reopened(ioh);
 
 	pgaio_io_process_completion(ioh, ioh->result);
 
@@ -189,6 +218,8 @@ pgaio_io_get_op_name(PgAioHandle *ioh)
 			return "readv";
 		case PGAIO_OP_WRITEV:
 			return "writev";
+		case PGAIO_OP_FSYNC:
+			return "fsync";
 	}
 
 	return NULL;				/* silence compiler */
@@ -209,6 +240,8 @@ pgaio_io_uses_fd(PgAioHandle *ioh, int fd)
 			return ioh->op_data.read.fd == fd;
 		case PGAIO_OP_WRITEV:
 			return ioh->op_data.write.fd == fd;
+		case PGAIO_OP_FSYNC:
+			return ioh->op_data.fsync.fd == fd;
 		case PGAIO_OP_INVALID:
 			return false;
 	}
@@ -233,6 +266,8 @@ pgaio_io_get_iovec_length(PgAioHandle *ioh, struct iovec **iov)
 			return ioh->op_data.read.iov_length;
 		case PGAIO_OP_WRITEV:
 			return ioh->op_data.write.iov_length;
+		case PGAIO_OP_FSYNC:
+			return 0;
 		default:
 			pg_unreachable();
 			return 0;

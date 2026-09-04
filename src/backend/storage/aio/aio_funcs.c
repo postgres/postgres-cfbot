@@ -191,6 +191,10 @@ retry:
 				values[6] =
 					Int64GetDatum(iov_byte_length(iov_copy, ioh_copy.op_data.write.iov_length));
 				break;
+			case PGAIO_OP_FSYNC:
+				nulls[5] = true;
+				nulls[6] = true;
+				break;
 		}
 
 		/* column: IO's target */

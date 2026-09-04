@@ -38,7 +38,8 @@ extern void SetCommitTsLimit(TransactionId oldestXact,
 							 TransactionId newestXact);
 extern void AdvanceOldestCommitTsXid(TransactionId oldestXact);
 
-extern int	committssyncfiletag(const FileTag *ftag, char *path);
+extern void committssyncfiletag(PgAioHandle *ioh, InflightSyncEntry *entry);
+extern int	committsopenfiletag(const FileTag *ftag);
 
 /* XLOG stuff */
 #define COMMIT_TS_ZEROPAGE		0x00
