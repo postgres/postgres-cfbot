@@ -958,8 +958,11 @@ main(int argc, char **argv)
 	if (!plainText)
 		dopt.outputCreateDB = 1;
 
-	/* Parallel backup only in the directory archive format so far */
-	if (archiveFormat != archDirectory && numWorkers > 1)
+	/*
+	 * Parallel backup only in the BLACKHOLE or the directory archive format
+	 * so far
+	 */
+	if (numWorkers > 1 && archiveFormat != archDirectory && archiveFormat != archBlackhole)
 		pg_fatal("parallel backup only supported by the directory format");
 
 	/* Open the output file */
@@ -1296,8 +1299,8 @@ help(const char *progname)
 
 	printf(_("\nGeneral options:\n"));
 	printf(_("  -f, --file=FILENAME          output file or directory name\n"));
-	printf(_("  -F, --format=c|d|t|p         output file format (custom, directory, tar,\n"
-			 "                               plain text (default))\n"));
+	printf(_("  -F, --format=c|d|t|p|b       output file format (custom, directory, tar,\n"
+			 "                               plain text (default), blackhole)\n"));
 	printf(_("  -j, --jobs=NUM               use this many parallel jobs to dump\n"));
 	printf(_("  -v, --verbose                verbose mode\n"));
 	printf(_("  -V, --version                output version information, then exit\n"));
@@ -1625,6 +1628,8 @@ parseArchiveFormat(const char *format, ArchiveMode *mode)
 		archiveFormat = archTar;
 	else if (pg_strcasecmp(format, "tar") == 0)
 		archiveFormat = archTar;
+	else if (pg_strcasecmp(format, "b") == 0 || pg_strcasecmp(format, "blackhole") == 0)
+		archiveFormat = archBlackhole;
 	else
 		pg_fatal("invalid output format \"%s\" specified", format);
 	return archiveFormat;
@@ -2341,6 +2346,7 @@ dumpTableData_copy(Archive *fout, const void *dcontext)
 	const TableInfo *tbinfo = tdinfo->tdtable;
 	const char *classname = tbinfo->dobj.name;
 	PQExpBuffer q = createPQExpBuffer();
+	ArchiveHandle *AH = (ArchiveHandle *) fout;
 
 	/*
 	 * Note: can't use getThreadLocalPQExpBuffer() here, we're calling fmtId
@@ -2352,6 +2358,14 @@ dumpTableData_copy(Archive *fout, const void *dcontext)
 	int			ret;
 	char	   *copybuf;
 	const char *column_list;
+	char	   *copy_dest = "stdout";
+	bool		blackhole = false;
+
+	if (AH->format == archBlackhole)
+	{
+		copy_dest = "BLACKHOLE";
+		blackhole = true;
+	}
 
 	pg_log_info("dumping contents of table \"%s.%s\"",
 				tbinfo->dobj.namespace->dobj.name, classname);
@@ -2388,16 +2402,35 @@ dumpTableData_copy(Archive *fout, const void *dcontext)
 		else
 			appendPQExpBufferStr(q, "* ");
 
-		appendPQExpBuffer(q, "FROM %s %s) TO stdout;",
+		appendPQExpBuffer(q, "FROM %s %s) TO %s;",
 						  fmtQualifiedDumpable(tbinfo),
-						  tdinfo->filtercond ? tdinfo->filtercond : "");
+						  tdinfo->filtercond ? tdinfo->filtercond : "",
+						  copy_dest);
 	}
 	else
 	{
-		appendPQExpBuffer(q, "COPY %s %s TO stdout;",
+		appendPQExpBuffer(q, "COPY %s %s TO %s;",
 						  fmtQualifiedDumpable(tbinfo),
-						  column_list);
+						  column_list,
+						  copy_dest);
 	}
+
+	/*
+	 * COPY TO BLACKHOLE discards rows server-side and never sends a
+	 * CopyOutResponse, so it completes with PGRES_COMMAND_OK and there is no
+	 * client-side message to receive.
+	 */
+	if (blackhole)
+	{
+		res = ExecuteSqlQuery(fout, q->data, PGRES_COMMAND_OK);
+		PQclear(res);
+		destroyPQExpBuffer(clistBuf);
+		destroyPQExpBuffer(q);
+		if (tbinfo->relkind == RELKIND_FOREIGN_TABLE)
+			set_restrict_relation_kind(fout, "view, foreign-table");
+		return 1;
+	}
+
 	res = ExecuteSqlQuery(fout, q->data, PGRES_COPY_OUT);
 	PQclear(res);
 	destroyPQExpBuffer(clistBuf);
