@@ -1332,6 +1332,13 @@ pg_backend_memory_contexts| SELECT name,
     free_chunks,
     used_bytes
    FROM pg_get_backend_memory_contexts() pg_get_backend_memory_contexts(name, ident, type, level, path, total_bytes, total_nblocks, free_bytes, free_chunks, used_bytes);
+pg_backend_wait_event_trace| SELECT seq,
+    timestamp_ns,
+    wait_event_type,
+    wait_event,
+    duration_us,
+    query_id
+   FROM pg_get_backend_wait_event_trace() t(seq, timestamp_ns, wait_event_type, wait_event, duration_us, query_id);
 pg_config| SELECT name,
     setting
    FROM pg_config() pg_config(name, setting);
@@ -2426,6 +2433,24 @@ pg_stat_user_tables| SELECT relid,
     stats_reset
    FROM pg_stat_all_tables
   WHERE ((schemaname <> ALL (ARRAY['pg_catalog'::name, 'information_schema'::name])) AND (schemaname !~ '^pg_toast'::text));
+pg_stat_wait_event_timing| SELECT pid,
+    backend_type,
+    procnumber,
+    wait_event_type,
+    wait_event,
+    calls,
+    total_time_ms,
+    avg_time_us,
+    max_time_us,
+    histogram
+   FROM pg_stat_get_wait_event_timing(NULL::integer) t(pid, backend_type, procnumber, wait_event_type, wait_event, calls, total_time_ms, avg_time_us, max_time_us, histogram);
+pg_stat_wait_event_timing_overflow| SELECT pid,
+    backend_type,
+    procnumber,
+    lwlock_overflow_count,
+    flat_overflow_count,
+    reset_count
+   FROM pg_stat_get_wait_event_timing_overflow(NULL::integer) t(pid, backend_type, procnumber, lwlock_overflow_count, flat_overflow_count, reset_count);
 pg_stat_wal| SELECT wal_records,
     wal_fpi,
     wal_bytes,
@@ -2902,6 +2927,11 @@ pg_views| SELECT n.nspname AS schemaname,
    FROM (pg_class c
      LEFT JOIN pg_namespace n ON ((n.oid = c.relnamespace)))
   WHERE (c.relkind = 'v'::"char");
+pg_wait_event_timing_histogram_buckets| SELECT bucket_idx,
+    lower_ns,
+    upper_ns,
+    label
+   FROM ( VALUES (0,(0)::bigint,(1024)::bigint,'<1us'::text), (1,(1024)::bigint,(2048)::bigint,'1-2us'::text), (2,(2048)::bigint,(4096)::bigint,'2-4us'::text), (3,(4096)::bigint,(8192)::bigint,'4-8us'::text), (4,(8192)::bigint,(16384)::bigint,'8-16us'::text), (5,(16384)::bigint,(32768)::bigint,'16-32us'::text), (6,(32768)::bigint,(65536)::bigint,'32-64us'::text), (7,(65536)::bigint,(131072)::bigint,'64-128us'::text), (8,(131072)::bigint,(262144)::bigint,'128-256us'::text), (9,(262144)::bigint,(524288)::bigint,'256-512us'::text), (10,(524288)::bigint,(1048576)::bigint,'512us-1ms'::text), (11,(1048576)::bigint,(2097152)::bigint,'1-2ms'::text), (12,(2097152)::bigint,(4194304)::bigint,'2-4ms'::text), (13,(4194304)::bigint,(8388608)::bigint,'4-8ms'::text), (14,(8388608)::bigint,(16777216)::bigint,'8-16ms'::text), (15,(16777216)::bigint,(33554432)::bigint,'16-32ms'::text), (16,(33554432)::bigint,(67108864)::bigint,'32-64ms'::text), (17,(67108864)::bigint,(134217728)::bigint,'64-128ms'::text), (18,(134217728)::bigint,(268435456)::bigint,'128-256ms'::text), (19,(268435456)::bigint,(536870912)::bigint,'256-512ms'::text), (20,(536870912)::bigint,(1073741824)::bigint,'512ms-1s'::text), (21,(1073741824)::bigint,'2147483648'::bigint,'1-2s'::text), (22,'2147483648'::bigint,'4294967296'::bigint,'2-4s'::text), (23,'4294967296'::bigint,'8589934592'::bigint,'4-8s'::text), (24,'8589934592'::bigint,'17179869184'::bigint,'8-16s'::text), (25,'17179869184'::bigint,'34359738368'::bigint,'16-32s'::text), (26,'34359738368'::bigint,'68719476736'::bigint,'32-64s'::text), (27,'68719476736'::bigint,'137438953472'::bigint,'64-128s'::text), (28,'137438953472'::bigint,'274877906944'::bigint,'128-256s'::text), (29,'274877906944'::bigint,'549755813888'::bigint,'256-512s'::text), (30,'549755813888'::bigint,'1099511627776'::bigint,'512s-1024s'::text), (31,'1099511627776'::bigint,NULL::bigint,'>=1024s'::text)) t(bucket_idx, lower_ns, upper_ns, label);
 pg_wait_events| SELECT type,
     name,
     description

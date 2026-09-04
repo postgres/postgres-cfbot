@@ -24,6 +24,7 @@ tests += {
       't/013_temp_obj_multisession.pl',
       't/014_log_statement_max_length.pl',
       't/015_temp_schema_exit_deferrable.pl',
+      't/016_wait_event_trace_seqlock.pl',
     ],
     # The injection points are cluster-wide, so disable installcheck
     'runningcheck': false,

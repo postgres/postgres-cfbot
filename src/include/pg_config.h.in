@@ -759,6 +759,9 @@
 /* Define to select unnamed POSIX semaphores. */
 #undef USE_UNNAMED_POSIX_SEMAPHORES
 
+/* Define to 1 to build with wait event timing. (--enable-wait-event-timing) */
+#undef USE_WAIT_EVENT_TIMING
+
 /* Define to select Win32-style semaphores. */
 #undef USE_WIN32_SEMAPHORES
 

@@ -347,6 +347,7 @@ extern PGDLLIMPORT const struct config_enum_entry dynamic_shared_memory_options[
 extern PGDLLIMPORT const struct config_enum_entry io_method_options[];
 extern PGDLLIMPORT const struct config_enum_entry recovery_target_action_options[];
 extern PGDLLIMPORT const struct config_enum_entry server_message_level_options[];
+extern PGDLLIMPORT const struct config_enum_entry wait_event_capture_options[];
 extern PGDLLIMPORT const struct config_enum_entry wal_level_options[];
 extern PGDLLIMPORT const struct config_enum_entry wal_sync_method_options[];
 

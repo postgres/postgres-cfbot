@@ -707,6 +707,11 @@
 #track_cost_delay_timing = off
 #track_io_timing = off
 #track_wal_io_timing = off
+#wait_event_capture = off               # off, stats, trace
+                                        # (requires --enable-wait-event-timing)
+#wait_event_timing_max_tranches = 192   # (change requires restart)
+#wait_event_trace_ring_size = 4MB      # power of two, 8kB .. 32MB
+                                        # (change requires restart)
 #track_functions = none                 # none, pl, all
 #stats_fetch_consistency = cache        # cache, none, snapshot
 

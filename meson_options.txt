@@ -40,6 +40,9 @@ option('pgport', type: 'integer', value: 5432,
 option('cassert', type: 'boolean', value: false,
   description: 'Enable assertion checks (for debugging)')
 
+option('wait_event_timing', type: 'boolean', value: false,
+  description: 'Enable wait event timing instrumentation')
+
 option('tap_tests', type: 'feature', value: 'auto',
   description: 'Enable TAP tests')
 
