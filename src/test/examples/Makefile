@@ -17,7 +17,6 @@ LDFLAGS_INTERNAL += $(libpq_pgport)
 PROGS = \
 	testlibpq \
 	testlibpq2 \
-	testlibpq3 \
 	testlibpq4 \
 	testlo \
 	testlo64
