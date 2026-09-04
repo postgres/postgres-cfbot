@@ -59,6 +59,7 @@
 #include "utils/builtins.h"
 #include "utils/guc_hooks.h"
 #include "utils/injection_point.h"
+#include "utils/snapmgr.h"
 #include "utils/varlena.h"
 #include "utils/wait_event.h"
 
@@ -156,6 +157,13 @@ const ShmemCallbacks ReplicationSlotsShmemCallbacks = {
 
 /* My backend's replication slot in the shared memory array */
 ReplicationSlot *MyReplicationSlot = NULL;
+
+/*
+ * Subxact that acquired MyReplicationSlot, or invalid if none is held
+ * or it was acquired with no transaction in progress (as a walsender does).
+ * Used to release the slot when that subxact aborts.
+ */
+static SubTransactionId MyReplicationSlotSubId = InvalidSubTransactionId;
 
 /* GUC variables */
 int			max_replication_slots = 10; /* the maximum number of replication
@@ -519,6 +527,7 @@ ReplicationSlotCreate(const char *name, bool db_specific,
 	slot->active_proc = MyProcNumber;
 	SpinLockRelease(&slot->mutex);
 	MyReplicationSlot = slot;
+	MyReplicationSlotSubId = GetCurrentSubTransactionId();
 
 	LWLockRelease(ReplicationSlotControlLock);
 
@@ -724,6 +733,7 @@ retry:
 
 	/* We made this slot active, so it's ours now. */
 	MyReplicationSlot = s;
+	MyReplicationSlotSubId = GetCurrentSubTransactionId();
 
 	/*
 	 * We need to check for invalidation after making the slot ours to avoid
@@ -848,6 +858,69 @@ ReplicationSlotRelease(void)
 
 		pfree(slotname);
 	}
+
+	/* The slot is no longer acquired in any subxact. */
+	MyReplicationSlotSubId = InvalidSubTransactionId;
+}
+
+/*
+ * At subxact end, hand off or release MyReplicationSlot if it was acquired
+ * in this subxact. On commit, ownership passes to the parent subxact; on
+ * abort, the slot is released.
+ */
+void
+AtEOSubXact_ReplicationSlot(bool isCommit, SubTransactionId mySubid,
+							SubTransactionId parentSubid)
+{
+	/* Nothing to do unless the slot was acquired in this subxact. */
+	if (MyReplicationSlotSubId != mySubid)
+		return;
+
+	/*
+	 * The subxact that acquired the slot is committing with the slot still
+	 * held. No slot function does that today. Warn, and hand the slot to the
+	 * parent so it is still released if an ancestor aborts.
+	 */
+	if (isCommit)
+	{
+		Assert(MyReplicationSlot != NULL);
+		ereport(WARNING,
+				(errcode(ERRCODE_WARNING),
+				 errmsg("subtransaction left replication slot \"%s\" acquired",
+						NameStr(MyReplicationSlot->data.name)),
+				 errhint("Check for missing \"ReplicationSlotRelease\" calls.")));
+
+		MyReplicationSlotSubId = parentSubid;
+		return;
+	}
+
+	/*
+	 * We must not get here while decoding is running. Decoding starts and
+	 * aborts an internal (sub)transaction while holding the slot, for each
+	 * decoded transaction (ReorderBufferProcessTXN()) and when executing
+	 * invalidations (ReorderBufferImmediateInvalidation()). However, those
+	 * subtransactions are always nested below the one that acquired the slot,
+	 * so their subtransaction ids are deeper and do not match here. Decoding
+	 * also runs with a historic snapshot set up, so assert that it is not.
+	 */
+	Assert(!HistoricSnapshotActive());
+
+	/*
+	 * The aborting subxact is the one that acquired the slot, so the slot is
+	 * still held and must be released. MyReplicationSlotSubId is set only
+	 * when a slot is held and cleared when it is released, so a matching
+	 * subxact id means the slot is ours.
+	 *
+	 * We only release the slot here and do not drop the session's temporary
+	 * slots, unlike the top-level error handler in PostgresMain(). An error
+	 * caught within a subtransaction, for example by a PL/pgSQL exception
+	 * block, is normally meant to be handled so the session carries on,
+	 * unlike a top-level error, so a temporary slot is left in place. That
+	 * matches the temporary slot behavior that predates this callback and is
+	 * simpler to reason about; the slot lives on until the session ends or a
+	 * top-level error occurs, as documented.
+	 */
+	ReplicationSlotRelease();
 }
 
 /*
@@ -1042,6 +1115,7 @@ ReplicationSlotDropAcquired(bool try_disable)
 
 	/* slot isn't acquired anymore */
 	MyReplicationSlot = NULL;
+	MyReplicationSlotSubId = InvalidSubTransactionId;
 
 	ReplicationSlotDropPtr(slot);
 

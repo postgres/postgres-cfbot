@@ -193,3 +193,33 @@ SELECT pg_drop_replication_slot('failover_true_slot');
 SELECT pg_drop_replication_slot('failover_false_slot');
 SELECT pg_drop_replication_slot('failover_default_slot');
 SELECT pg_drop_replication_slot('physical_slot');
+
+-- A slot function that errors out must still release the slot, otherwise the
+-- next slot operation in the session fails an assertion or leaks the slot.
+-- Advancing a freshly created slot to a low LSN always errors.
+
+-- Error raised inside a PL/pgSQL block with an EXCEPTION clause is caught in a
+-- subtransaction; the slot must still be released.
+SELECT 'init' FROM pg_create_logical_replication_slot('regress_subxact_slot', 'test_decoding');
+DO $$
+BEGIN
+    PERFORM pg_replication_slot_advance('regress_subxact_slot', '0/1');
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'caught SQLSTATE %', SQLSTATE;
+END $$;
+SELECT count(*) >= 0 AS peek_ok
+    FROM pg_logical_slot_peek_changes('regress_subxact_slot', NULL, NULL);
+
+-- The EXCEPTION clause does not match, so the error is not caught, but the
+-- slot is still released. Show only the SQLSTATE for stable output.
+\set VERBOSITY sqlstate
+DO $$
+BEGIN
+    PERFORM pg_replication_slot_advance('regress_subxact_slot', '0/1');
+EXCEPTION WHEN division_by_zero THEN
+    RAISE NOTICE 'unreachable';
+END $$;
+\set VERBOSITY default
+SELECT count(*) >= 0 AS peek_ok
+    FROM pg_logical_slot_peek_changes('regress_subxact_slot', NULL, NULL);
+SELECT pg_drop_replication_slot('regress_subxact_slot');
