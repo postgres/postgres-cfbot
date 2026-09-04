@@ -220,7 +220,7 @@ repack_setup_logical_decoding(Oid relid)
 	 */
 	snprintf(slotname, NAMEDATALEN, "pg_repack_%d", MyProcPid);
 	ReplicationSlotCreate(slotname, true, RS_TEMPORARY, false, true,
-						  false, false);
+						  false, false, true);
 	EnsureLogicalDecodingEnabled();
 
 	/*
