@@ -23,6 +23,7 @@
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "utils/fmgrprotos.h"
+#include "utils/like_bmh.h"
 #include "utils/pg_locale.h"
 #include "varatt.h"
 
@@ -162,6 +163,23 @@ GenericMatchText(const char *s, int slen, const char *p, int plen, Oid collation
 }
 
 static inline int
+LikeMatchText(const char *s, int slen, const char *p, int plen,
+			  FmgrInfo *flinfo, Oid collation)
+{
+	LikeBMHState *state = flinfo->fn_extra;
+	int			result;
+
+	if (state != NULL && state->mode == LIKE_BMH_GENERIC)
+		return GenericMatchText(s, slen, p, plen, collation);
+
+	result = like_bmh_match(s, slen, p, plen, flinfo, collation);
+	if (result == LIKE_BMH_FALLBACK)
+		return GenericMatchText(s, slen, p, plen, collation);
+
+	return result;
+}
+
+static inline int
 Generic_Text_IC_like(text *str, text *pat, Oid collation)
 {
 	char	   *s,
@@ -246,7 +264,8 @@ namelike(PG_FUNCTION_ARGS)
 	p = VARDATA_ANY(pat);
 	plen = VARSIZE_ANY_EXHDR(pat);
 
-	result = (GenericMatchText(s, slen, p, plen, PG_GET_COLLATION()) == LIKE_TRUE);
+	result = (LikeMatchText(s, slen, p, plen, fcinfo->flinfo,
+							PG_GET_COLLATION()) == LIKE_TRUE);
 
 	PG_RETURN_BOOL(result);
 }
@@ -288,7 +307,8 @@ textlike(PG_FUNCTION_ARGS)
 	p = VARDATA_ANY(pat);
 	plen = VARSIZE_ANY_EXHDR(pat);
 
-	result = (GenericMatchText(s, slen, p, plen, PG_GET_COLLATION()) == LIKE_TRUE);
+	result = (LikeMatchText(s, slen, p, plen, fcinfo->flinfo,
+							PG_GET_COLLATION()) == LIKE_TRUE);
 
 	PG_RETURN_BOOL(result);
 }
