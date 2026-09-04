@@ -1,0 +1,27 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s2_lock s1_delete s2_inval s2_unlock
+step s2_lock: SELECT pg_advisory_lock(0);
+pg_advisory_lock
+----------------
+                
+(1 row)
+
+step s1_delete: DELETE FROM crash_reentrancia_tabla_autoreferencial WHERE id = 1; <waiting ...>
+step s2_inval: 
+  DO $$                                    
+  BEGIN
+    FOR i IN 1..1000 LOOP
+      EXECUTE 'CREATE TEMPORARY TABLE t_temp_inval_(id INTEGER PRIMARY KEY)';
+      EXECUTE 'DROP TABLE t_temp_inval_';
+    END LOOP;
+  END;
+  $$;
+
+step s2_unlock: SELECT pg_advisory_unlock(0);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+step s1_delete: <... completed>
