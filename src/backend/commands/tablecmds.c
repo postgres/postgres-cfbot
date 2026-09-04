@@ -671,7 +671,13 @@ static ObjectAddress ATExecAlterColumnType(AlteredTableInfo *tab, Relation rel,
 										   AlterTableCmd *cmd, LOCKMODE lockmode);
 static void RememberAllDependentForRebuilding(AlteredTableInfo *tab, AlterTableType subtype,
 											  Relation rel, AttrNumber attnum, const char *colName);
-static void RememberWholeRowDependentForRebuilding(AlteredTableInfo *tab, AlterTableType subtype, Relation rel);
+static void RememberWholeRowDependentForRebuilding(AlteredTableInfo *tab, AlterTableType subtype,
+												   Relation rel, AttrNumber attnum,
+												   const char *colName);
+static void recordWholeRowDependencyOrError(AlteredTableInfo *tab, AlterTableType subtype,
+											Relation rel, AttrNumber attnum,
+											const ObjectAddress *depender,
+											DependencyType behavior);
 static void RememberConstraintForRebuilding(Oid conoid, AlteredTableInfo *tab);
 static void RememberIndexForRebuilding(Oid indoid, AlteredTableInfo *tab);
 static void RememberStatisticsForRebuilding(Oid stxoid, AlteredTableInfo *tab);
@@ -764,6 +770,8 @@ static void ATDetachCheckNoForeignKeyRefs(Relation partition);
 static char GetAttributeCompression(Oid atttypid, const char *compression);
 static char GetAttributeStorage(Oid atttypid, const char *storagemode);
 
+
+static List *GetAllRelAssociatedPolicies(Relation rel);
 
 /* ----------------------------------------------------------------
  *		DefineRelation
@@ -8773,7 +8781,7 @@ ATExecSetExpression(AlteredTableInfo *tab, Relation rel, const char *colName,
 	 * (constraints, indexes, etc.), and record enough information to let us
 	 * recreate the objects.
 	 */
-	RememberWholeRowDependentForRebuilding(tab, AT_SetExpression, rel);
+	RememberWholeRowDependentForRebuilding(tab, AT_SetExpression, rel, attnum, colName);
 
 	/*
 	 * Drop the dependency records of the GENERATED expression, in particular
@@ -9374,6 +9382,10 @@ ATExecDropColumn(List **wqueue, Relation rel, const char *colName,
 	List	   *children;
 	ObjectAddress object;
 	bool		is_expr;
+	AlteredTableInfo *tab;
+
+	/* Find or create work queue entry for this table */
+	tab = ATGetQueueEntry(wqueue, rel);
 
 	/* At top level, permission check was done in ATPrepCmd, else do it */
 	if (recursing)
@@ -9445,6 +9457,15 @@ ATExecDropColumn(List **wqueue, Relation rel, const char *colName,
 						colName, RelationGetRelationName(rel))));
 
 	ReleaseSysCache(tuple);
+
+	/*
+	 * Record dependencies between this relation and any objects containing
+	 * whole-row Var references. performMultipleDeletions will take care of
+	 * removing these dependencies later.
+	 */
+	RememberWholeRowDependentForRebuilding(tab, AT_DropColumn, rel, attnum, colName);
+
+	CommandCounterIncrement();
 
 	/*
 	 * Propagate to children as appropriate.  Unlike most other ALTER
@@ -15327,6 +15348,14 @@ ATExecAlterColumnType(AlteredTableInfo *tab, Relation rel,
 	RememberAllDependentForRebuilding(tab, AT_AlterColumnType, rel, attnum, colName);
 
 	/*
+	 * ALTER COLUMN SET DATA TYPE fundamentally changes the table’s record
+	 * type; At present, we cannot compare records that contain columns of
+	 * dissimilar types, see function record_eq, so errr out for wholerow
+	 * dependencies.
+	 */
+	RememberWholeRowDependentForRebuilding(tab, AT_AlterColumnType, rel, attnum, colName);
+
+	/*
 	 * Now scan for dependencies of this column on other things.  The only
 	 * things we should find are the dependency on the column datatype and
 	 * possibly a collation dependency.  Those can be removed.
@@ -15754,21 +15783,30 @@ RememberAllDependentForRebuilding(AlteredTableInfo *tab, AlterTableType subtype,
  * See also RememberAllDependentForRebuilding, which handles non-whole-row Var
  * references.
  *
- * This function currently applies only to ALTER COLUMN SET EXPRESSION.
+ * This function currently applies to ALTER COLUMN SET EXPRESSION,
+ * ALTER COLUMN SET DATA TYPE, and ALTER TABLE DROP COLUMN.
  */
 static void
-RememberWholeRowDependentForRebuilding(AlteredTableInfo *tab, AlterTableType subtype, Relation rel)
+RememberWholeRowDependentForRebuilding(AlteredTableInfo *tab, AlterTableType subtype, Relation rel,
+									   AttrNumber attnum, const char *colName)
 {
 	ScanKeyData skey;
 	Relation	pg_constraint;
+	Relation	pg_policy;
 	Relation	pg_index;
 	SysScanDesc conscan;
 	SysScanDesc indscan;
+	SysScanDesc policyscan;
 	HeapTuple	constrTuple;
 	HeapTuple	indexTuple;
+	HeapTuple	policyTuple;
 	bool		isnull;
+	List	   *pols = NIL;
+	Oid			reltypid;
 
-	Assert(subtype == AT_SetExpression);
+	Assert(subtype == AT_SetExpression ||
+		   subtype == AT_AlterColumnType ||
+		   subtype == AT_DropColumn);
 
 	/*
 	 * Check CHECK constraints with whole-row references first.
@@ -15824,7 +15862,21 @@ RememberWholeRowDependentForRebuilding(AlteredTableInfo *tab, AlterTableType sub
 				 */
 				if (bms_is_member(InvalidAttrNumber - FirstLowInvalidHeapAttributeNumber, expr_attrs))
 				{
-					RememberConstraintForRebuilding(conform->oid, tab);
+					if (subtype == AT_SetExpression)
+						RememberConstraintForRebuilding(conform->oid, tab);
+					else
+					{
+						ObjectAddress con_obj;
+
+						ObjectAddressSet(con_obj, ConstraintRelationId, conform->oid);
+
+						/*
+						 * The dependency between the CHECK constraint and its
+						 * relation is DEPENDENCY_AUTO.
+						 */
+						recordWholeRowDependencyOrError(tab, subtype, rel, attnum,
+														&con_obj, DEPENDENCY_AUTO);
+					}
 				}
 			}
 		}
@@ -15878,7 +15930,21 @@ RememberWholeRowDependentForRebuilding(AlteredTableInfo *tab, AlterTableType sub
 			 */
 			if (bms_is_member(InvalidAttrNumber - FirstLowInvalidHeapAttributeNumber, expr_attrs))
 			{
-				RememberIndexForRebuilding(index->indexrelid, tab);
+				if (subtype == AT_SetExpression)
+					RememberIndexForRebuilding(index->indexrelid, tab);
+				else
+				{
+					ObjectAddress idx_obj;
+
+					ObjectAddressSet(idx_obj, RelationRelationId, index->indexrelid);
+
+					/*
+					 * The index has a DEPENDENCY_AUTO relationship with its
+					 * relation.
+					 */
+					recordWholeRowDependencyOrError(tab, subtype, rel, attnum,
+													&idx_obj, DEPENDENCY_AUTO);
+				}
 				continue;
 			}
 		}
@@ -15906,13 +15972,172 @@ RememberWholeRowDependentForRebuilding(AlteredTableInfo *tab, AlterTableType sub
 			 */
 			if (bms_is_member(InvalidAttrNumber - FirstLowInvalidHeapAttributeNumber, expr_attrs))
 			{
-				RememberIndexForRebuilding(index->indexrelid, tab);
+				if (subtype == AT_SetExpression)
+					RememberIndexForRebuilding(index->indexrelid, tab);
+				else
+				{
+					ObjectAddress idx_obj;
+
+					ObjectAddressSet(idx_obj, RelationRelationId, index->indexrelid);
+
+					/*
+					 * The index has a DEPENDENCY_AUTO relationship with its
+					 * relation
+					 */
+					recordWholeRowDependencyOrError(tab, subtype, rel, attnum,
+													&idx_obj, DEPENDENCY_AUTO);
+				}
 			}
 		}
 	}
 
 	systable_endscan(indscan);
 	table_close(pg_index, AccessShareLock);
+
+	/*
+	 * Now checking trigger, policy whole-row references, ALTER COLUMN SET
+	 * EXPRESSION does not do anything about it.
+	 */
+
+	/*
+	 * For ALTER TABLE SET EXPRESSION:
+	 *
+	 * 1.No need to check trigger with whole-row references. Creation of
+	 * BEFORE triggers with whole-row Vars referencing (some column is
+	 * generated column) is disallowed; see CreateTriggerFiringOn().
+	 * Additionally, there is no need to worry about AFTER triggers; even if
+	 * the trigger were recreated (which it is not), its WHEN qualification
+	 * would remain unchanged.
+	 *
+	 * 2. No need to recheck policies with whole-row references, since we do
+	 * not recreate and re-evaluate the policy condition when a dependent
+	 * column's generated expression changes.
+	 */
+	if (subtype == AT_AlterColumnType || subtype == AT_DropColumn)
+	{
+		if (rel->trigdesc != NULL)
+		{
+			Node	   *expr;
+
+			for (int i = 0; i < rel->trigdesc->numtriggers; i++)
+			{
+				Bitmapset  *expr_attrs = NULL;
+				Trigger    *trig = &rel->trigdesc->triggers[i];
+
+				if (trig->tgqual == NULL)
+					continue;
+
+				expr = stringToNode(trig->tgqual);
+
+				pull_varattnos(expr, PRS2_OLD_VARNO, &expr_attrs);
+
+				pull_varattnos(expr, PRS2_NEW_VARNO, &expr_attrs);
+
+				/*
+				 * If the triger WHEN qual contains whole-row reference then
+				 * remember it
+				 */
+				if (bms_is_member(InvalidAttrNumber - FirstLowInvalidHeapAttributeNumber,
+								  expr_attrs))
+				{
+					ObjectAddress trigObj;
+
+					ObjectAddressSet(trigObj, TriggerRelationId, trig->tgoid);
+
+					/*
+					 * The dependency between the trigger and its relation is
+					 * DEPENDENCY_NORMAL
+					 */
+					recordWholeRowDependencyOrError(tab, subtype, rel, attnum,
+													&trigObj, DEPENDENCY_NORMAL);
+				}
+			}
+		}
+
+		/* Now checking policy whole-row references */
+		reltypid = get_rel_type_id(RelationGetRelid(rel));
+
+		pg_policy = table_open(PolicyRelationId, AccessShareLock);
+
+		/*
+		 * We cannot simply look up pg_policy->polrelid because a policy's
+		 * USING or CHECK expression may reference other relations. Instead,
+		 * we must scan pg_depend to identify all policies that depend on this
+		 * relation.
+		 */
+		pols = GetAllRelAssociatedPolicies(rel);
+
+		foreach_oid(policyoid, pols)
+		{
+			Datum		exprDatum;
+			char	   *exprString;
+			Node	   *expr;
+			ObjectAddress polObj;
+
+			ScanKeyInit(&skey,
+						Anum_pg_policy_oid,
+						BTEqualStrategyNumber, F_OIDEQ,
+						ObjectIdGetDatum(policyoid));
+			policyscan = systable_beginscan(pg_policy,
+											PolicyOidIndexId,
+											true,
+											NULL,
+											1,
+											&skey);
+			while (HeapTupleIsValid(policyTuple = systable_getnext(policyscan)))
+			{
+				Form_pg_policy policy = (Form_pg_policy) GETSTRUCT(policyTuple);
+
+				exprDatum = heap_getattr(policyTuple, Anum_pg_policy_polqual,
+										 RelationGetDescr(pg_policy),
+										 &isnull);
+				if (!isnull)
+				{
+					exprString = TextDatumGetCString(exprDatum);
+					expr = (Node *) stringToNode(exprString);
+					pfree(exprString);
+
+					if (expr_contain_wholerow(expr, reltypid))
+					{
+						ObjectAddressSet(polObj, PolicyRelationId, policy->oid);
+
+						/*
+						 * The dependency between the policy and it's relation
+						 * is DEPENDENCY_NORMAL
+						 */
+						recordWholeRowDependencyOrError(tab, subtype, rel, attnum,
+														&polObj, DEPENDENCY_NORMAL);
+
+						continue;
+					}
+				}
+
+				exprDatum = heap_getattr(policyTuple, Anum_pg_policy_polwithcheck,
+										 RelationGetDescr(pg_policy),
+										 &isnull);
+				if (!isnull)
+				{
+					exprString = TextDatumGetCString(exprDatum);
+					expr = (Node *) stringToNode(exprString);
+					pfree(exprString);
+
+					if (expr_contain_wholerow(expr, reltypid))
+					{
+						ObjectAddressSet(polObj, PolicyRelationId, policy->oid);
+
+						/*
+						 * The dependency between the policy and it's relation
+						 * is DEPENDENCY_NORMAL
+						 */
+						recordWholeRowDependencyOrError(tab, subtype, rel, attnum,
+														&polObj, DEPENDENCY_NORMAL);
+					}
+				}
+			}
+			systable_endscan(policyscan);
+		}
+		table_close(pg_policy, AccessShareLock);
+	}
 }
 
 /*
@@ -22835,4 +23060,82 @@ GetAttributeStorage(Oid atttypid, const char *storagemode)
 						format_type_be(atttypid))));
 
 	return cstorage;
+}
+
+/*
+ * Record dependencies between objects contains whole-row Var references
+ * (indexes, CHECK constraints, etc.) and the relation, or report an error. This
+ * is used for ALTER TABLE DROP COLUMN, ALTER COLUMN SET DATA TYPE only.  ALTER
+ * TABLE SET EXPRESSION relies on the existing Remember...ForRebuilding to
+ * perform the required work.
+ */
+static void
+recordWholeRowDependencyOrError(AlteredTableInfo *tab, AlterTableType subtype,
+								Relation rel, AttrNumber attnum,
+								const ObjectAddress *depender,
+								DependencyType behavior)
+{
+	if (subtype == AT_AlterColumnType)
+		ereport(ERROR,
+				errcode(ERRCODE_DATATYPE_MISMATCH),
+				errmsg("cannot alter table \"%s\" because %s uses its row type",
+					   RelationGetRelationName(rel),
+					   getObjectDescription(depender, false)),
+				errhint("You might need to drop %s first",
+						getObjectDescription(depender, false)));
+	else
+	{
+		ObjectAddress referenced;
+
+		Assert(subtype == AT_DropColumn);
+
+		ObjectAddressSubSet(referenced, RelationRelationId,
+							RelationGetRelid(rel), attnum);
+
+		recordDependencyOn(depender, &referenced, behavior);
+	}
+}
+
+/*
+ * GetAllRelAssociatedPolicies
+ *
+ * Returns a list of OIDs of all row-level security policies associated with the
+ * given relation.
+ */
+static List *
+GetAllRelAssociatedPolicies(Relation rel)
+{
+	Relation	depRel;
+	ScanKeyData key[3];
+	SysScanDesc scan;
+	HeapTuple	depTup;
+	List	   *result = NIL;
+
+	depRel = table_open(DependRelationId, AccessShareLock);
+	ScanKeyInit(&key[0],
+				Anum_pg_depend_refclassid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(RelationRelationId));
+	ScanKeyInit(&key[1],
+				Anum_pg_depend_refobjid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(RelationGetRelid(rel)));
+	ScanKeyInit(&key[2],
+				Anum_pg_depend_refobjsubid,
+				BTEqualStrategyNumber, F_INT4EQ,
+				Int32GetDatum((int32) 0));
+
+	scan = systable_beginscan(depRel, DependReferenceIndexId, true,
+							  NULL, 3, key);
+	while (HeapTupleIsValid(depTup = systable_getnext(scan)))
+	{
+		Form_pg_depend foundDep = (Form_pg_depend) GETSTRUCT(depTup);
+
+		if (foundDep->classid == PolicyRelationId)
+			result = list_append_unique_oid(result, foundDep->objid);
+	}
+	systable_endscan(scan);
+	table_close(depRel, AccessShareLock);
+
+	return result;
 }
