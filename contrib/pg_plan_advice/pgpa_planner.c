@@ -155,6 +155,9 @@ static bool pgpa_semijoin_permits_join(int outer_count, int inner_count,
 									   bool outer_is_nullable,
 									   bool *restrict_method);
 
+static uint64 pgpa_no_join_mask_from_advice_tag(pgpa_advice_tag_type tag);
+static uint64 pgpa_no_scan_mask_from_advice_tag(pgpa_advice_tag_type tag);
+
 static List *pgpa_planner_append_feedback(List *list, pgpa_trove *trove,
 										  pgpa_trove_lookup_type type,
 										  pgpa_identifier *rt_identifiers,
@@ -947,8 +950,12 @@ pgpa_planner_apply_join_path_advice(JoinType jointype, uint64 *pgs_mask_p,
 	Bitmapset  *jo_deny_indexes = NULL;
 	Bitmapset  *jo_deny_rel_indexes = NULL;
 	Bitmapset  *jm_indexes = NULL;
-	bool		jm_conflict = false;
+	bool		jm_pos_conflict = false;	/* positive tags disagree */
+	bool		jm_pos_neg_conflict = false;	/* a positive method is
+												 * forbidden */
 	uint64		join_mask = 0;
+	Bitmapset  *no_jm_indexes = NULL;
+	Bitmapset  *no_jm_conflict_indexes = NULL;
 	Bitmapset  *sj_permit_indexes = NULL;
 	Bitmapset  *sj_deny_indexes = NULL;
 
@@ -1043,10 +1050,38 @@ pgpa_planner_apply_join_path_advice(JoinType jointype, uint64 *pgs_mask_p,
 			{
 				jm_indexes = bms_add_member(jm_indexes, i);
 				if (join_mask != 0 && join_mask != my_join_mask)
-					jm_conflict = true;
+					jm_pos_conflict = true;
 				join_mask = my_join_mask;
 			}
 			continue;
+		}
+
+		/* Handle NO_ join method advice. */
+		{
+			uint64		my_no_join_mask;
+
+			my_no_join_mask = pgpa_no_join_mask_from_advice_tag(entry->tag);
+			if (my_no_join_mask != 0)
+			{
+				bool		permit;
+				bool		restrict_method;
+
+				/*
+				 * NO_ join tags impose the same join-order constraint as
+				 * positive ones: the target must be the inner rel.  Reuse
+				 * pgpa_join_method_permits_join to enforce it.
+				 */
+				permit = pgpa_join_method_permits_join(pjs->outer_count,
+													   pjs->inner_count,
+													   pjs->rids,
+													   entry,
+													   &restrict_method);
+				if (!permit)
+					jo_deny_indexes = bms_add_member(jo_deny_indexes, i);
+				else if (restrict_method)
+					no_jm_indexes = bms_add_member(no_jm_indexes, i);
+				continue;
+			}
 		}
 
 		/* Handle semijoin uniqueness advice. */
@@ -1118,12 +1153,46 @@ pgpa_planner_apply_join_path_advice(JoinType jointype, uint64 *pgs_mask_p,
 	}
 
 	/*
-	 * If more than one join method specification is relevant here and they
-	 * differ, mark them all as conflicting.
+	 * If more than one positive join method specification is relevant here
+	 * and they differ, mark them all as conflicting.
 	 */
-	if (jm_conflict)
+	if (jm_pos_conflict)
 		pgpa_trove_set_flags(pjs->join_entries, jm_indexes,
 							 PGPA_FB_CONFLICTING);
+
+	/*
+	 * Detect positive-vs-negative join method conflict: a method both
+	 * required by a positive tag and forbidden by a NO_ tag.  Check each NO_
+	 * tag independently, so that a clash on one method doesn't cause an
+	 * unrelated NO_ tag for a different method to be treated as conflicting
+	 * or left unenforced.
+	 */
+	if (join_mask != 0)
+	{
+		int			j = -1;
+
+		while ((j = bms_next_member(no_jm_indexes, j)) >= 0)
+		{
+			uint64		my_no_join_mask;
+
+			my_no_join_mask =
+				pgpa_no_join_mask_from_advice_tag(pjs->join_entries[j].tag);
+			if ((join_mask & my_no_join_mask) != 0)
+			{
+				jm_pos_neg_conflict = true;
+				no_jm_conflict_indexes =
+					bms_add_member(no_jm_conflict_indexes, j);
+			}
+		}
+
+		if (no_jm_conflict_indexes != NULL)
+		{
+			pgpa_trove_set_flags(pjs->join_entries, jm_indexes,
+								 PGPA_FB_CONFLICTING);
+			pgpa_trove_set_flags(pjs->join_entries, no_jm_conflict_indexes,
+								 PGPA_FB_CONFLICTING);
+		}
+	}
 
 	/* If semijoin advice says both yes and no, mark it all as conflicting. */
 	if (sj_permit_indexes != NULL && sj_deny_indexes != NULL)
@@ -1143,18 +1212,30 @@ pgpa_planner_apply_join_path_advice(JoinType jointype, uint64 *pgs_mask_p,
 	if ((jo_deny_indexes != NULL || jo_deny_rel_indexes != NULL) &&
 		jo_permit_indexes == NULL)
 		*pgs_mask_p &= ~PGS_JOIN_ANY;
-	if (join_mask != 0 && !jm_conflict)
+	if (join_mask != 0 && !jm_pos_conflict && !jm_pos_neg_conflict)
 		*pgs_mask_p &= ~(PGS_JOIN_ANY & ~join_mask);
+	if (no_jm_indexes != NULL)
+	{
+		uint64		enforce_no_join_mask = 0;
+		int			j = -1;
+
+		while ((j = bms_next_member(no_jm_indexes, j)) >= 0)
+		{
+			if (bms_is_member(j, no_jm_conflict_indexes))
+				continue;
+			enforce_no_join_mask |=
+				pgpa_no_join_mask_from_advice_tag(pjs->join_entries[j].tag);
+		}
+		*pgs_mask_p &= ~enforce_no_join_mask;
+	}
 	if (sj_deny_indexes != NULL && sj_permit_indexes == NULL)
 		*pgs_mask_p &= ~PGS_JOIN_ANY;
 }
 
 /*
- * Translate an advice tag into a path generation strategy mask.
+ * Translate a positive join advice tag into a strategy mask to enforce.
  *
- * This function can be called with tag types that don't represent join
- * strategies. In such cases, we just return 0, which can't be confused with
- * a valid mask.
+ * Returns 0 for tags that don't represent (positive) join strategies.
  */
 static uint64
 pgpa_join_strategy_mask_from_advice_tag(pgpa_advice_tag_type tag)
@@ -1175,6 +1256,37 @@ pgpa_join_strategy_mask_from_advice_tag(pgpa_advice_tag_type tag)
 			return PGS_NESTLOOP_MEMOIZE;
 		case PGPA_TAG_HASH_JOIN:
 			return PGS_HASHJOIN;
+		default:
+			return 0;
+	}
+}
+
+/*
+ * Translate a NO_ join advice tag into a strategy mask to forbid.
+ *
+ * Returns 0 for tags that aren't NO_ join tags.
+ */
+static uint64
+pgpa_no_join_mask_from_advice_tag(pgpa_advice_tag_type tag)
+{
+	switch (tag)
+	{
+		case PGPA_TAG_NO_HASH_JOIN:
+			return PGS_HASHJOIN;
+		case PGPA_TAG_NO_MERGE_JOIN:
+			return PGS_MERGEJOIN_ANY;
+		case PGPA_TAG_NO_MERGE_JOIN_MATERIALIZE:
+			return PGS_MERGEJOIN_MATERIALIZE;
+		case PGPA_TAG_NO_MERGE_JOIN_PLAIN:
+			return PGS_MERGEJOIN_PLAIN;
+		case PGPA_TAG_NO_NESTED_LOOP:
+			return PGS_NESTLOOP_ANY;
+		case PGPA_TAG_NO_NESTED_LOOP_MATERIALIZE:
+			return PGS_NESTLOOP_MATERIALIZE;
+		case PGPA_TAG_NO_NESTED_LOOP_MEMOIZE:
+			return PGS_NESTLOOP_MEMOIZE;
+		case PGPA_TAG_NO_NESTED_LOOP_PLAIN:
+			return PGS_NESTLOOP_PLAIN;
 		default:
 			return 0;
 	}
@@ -1620,6 +1732,50 @@ pgpa_semijoin_permits_join(int outer_count, int inner_count,
 }
 
 /*
+ * Translate a NO_ scan advice tag into a strategy mask to forbid.
+ *
+ * Returns 0 for tags that aren't NO_ scan tags.
+ */
+static uint64
+pgpa_no_scan_mask_from_advice_tag(pgpa_advice_tag_type tag)
+{
+	switch (tag)
+	{
+		case PGPA_TAG_NO_BITMAP_HEAP_SCAN:
+			return PGS_BITMAPSCAN;
+		case PGPA_TAG_NO_INDEX_ONLY_SCAN:
+			return PGS_INDEXONLYSCAN | PGS_CONSIDER_INDEXONLY;
+		case PGPA_TAG_NO_INDEX_SCAN:
+			return PGS_INDEXSCAN;
+		case PGPA_TAG_NO_SEQ_SCAN:
+			return PGS_SEQSCAN;
+		case PGPA_TAG_NO_TID_SCAN:
+			return PGS_TIDSCAN;
+		default:
+			return 0;
+	}
+}
+
+/*
+ * Strip enforcement-only bits from a scan-method mask, leaving only the
+ * bit(s) that actually identify a scan method.
+ *
+ * PGS_CONSIDER_INDEXONLY is included in the enforcement mask for both
+ * BITMAP_HEAP_SCAN (to work around the historical quirk described in
+ * pgpa_planner_apply_scan_advice) and INDEX_ONLY_SCAN/NO_INDEX_ONLY_SCAN (to
+ * make a would-be Index Only Scan degrade to, or be excluded in favor of, a
+ * plain Index Scan). It doesn't, by itself, identify any scan method, so it
+ * must be excluded before comparing two tags to see whether they specify the
+ * same or conflicting scan methods; otherwise, tags for genuinely unrelated
+ * methods that merely happen to share this bit would look like they conflict.
+ */
+static uint64
+pgpa_scan_semantic_mask(uint64 mask)
+{
+	return mask & ~PGS_CONSIDER_INDEXONLY;
+}
+
+/*
  * Apply scan advice to a RelOptInfo.
  */
 static void
@@ -1637,9 +1793,13 @@ pgpa_planner_apply_scan_advice(RelOptInfo *rel,
 	int			i = -1;
 	pgpa_trove_entry *scan_entry = NULL;
 	int			flags;
-	bool		scan_type_conflict = false;
+	bool		scan_pos_conflict = false;	/* positive tags disagree */
+	bool		scan_pos_neg_conflict = false;	/* a positive method is
+												 * forbidden */
 	Bitmapset  *scan_type_indexes = NULL;
 	Bitmapset  *scan_type_rel_indexes = NULL;
+	Bitmapset  *no_scan_indexes = NULL;
+	Bitmapset  *no_scan_conflict_indexes = NULL;
 	uint64		gather_mask = 0;
 	uint64		scan_type = all_scan_mask;	/* sentinel: no advice yet */
 
@@ -1648,8 +1808,20 @@ pgpa_planner_apply_scan_advice(RelOptInfo *rel,
 	{
 		pgpa_trove_entry *my_entry = &scan_entries[i];
 		uint64		my_scan_type = all_scan_mask;
+		uint64		my_no_scan_mask;
 
-		/* Translate our advice tags to a scan strategy advice value. */
+		/*
+		 * NO_ scan tags just accumulate a set of forbidden methods; handle
+		 * them separately from the positive scan-type logic below.
+		 */
+		my_no_scan_mask = pgpa_no_scan_mask_from_advice_tag(my_entry->tag);
+		if (my_no_scan_mask != 0)
+		{
+			no_scan_indexes = bms_add_member(no_scan_indexes, i);
+			continue;
+		}
+
+		/* Translate positive advice tags to a scan strategy value. */
 		if (my_entry->tag == PGPA_TAG_DO_NOT_SCAN)
 			my_scan_type = 0;
 		else if (my_entry->tag == PGPA_TAG_BITMAP_HEAP_SCAN)
@@ -1690,16 +1862,44 @@ pgpa_planner_apply_scan_advice(RelOptInfo *rel,
 		if (my_scan_type != all_scan_mask)
 		{
 			if (scan_type != all_scan_mask && scan_type != my_scan_type)
-				scan_type_conflict = true;
-			if (!scan_type_conflict && scan_entry != NULL &&
+				scan_pos_conflict = true;
+			if (!scan_pos_conflict && scan_entry != NULL &&
 				my_entry->target->itarget != NULL &&
 				scan_entry->target->itarget != NULL &&
 				!pgpa_index_targets_equal(scan_entry->target->itarget,
 										  my_entry->target->itarget))
-				scan_type_conflict = true;
+				scan_pos_conflict = true;
 			scan_entry = my_entry;
 			scan_type = my_scan_type;
 			scan_type_indexes = bms_add_member(scan_type_indexes, i);
+		}
+	}
+
+	/*
+	 * Detect positive-vs-negative scan conflict: a positive scan type that is
+	 * simultaneously forbidden by a NO_ tag.  Compare semantic masks (i.e.
+	 * excluding enforcement-only bits such as PGS_CONSIDER_INDEXONLY), and
+	 * check each NO_ tag independently, so that a clash on one method doesn't
+	 * cause an unrelated NO_ tag for a different method to be treated as
+	 * conflicting or left unenforced.
+	 */
+	if (scan_type != all_scan_mask)
+	{
+		uint64		scan_type_semantic = pgpa_scan_semantic_mask(scan_type);
+		int			j = -1;
+
+		while ((j = bms_next_member(no_scan_indexes, j)) >= 0)
+		{
+			uint64		my_no_scan_semantic;
+
+			my_no_scan_semantic =
+				pgpa_scan_semantic_mask(pgpa_no_scan_mask_from_advice_tag(scan_entries[j].tag));
+			if ((scan_type_semantic & my_no_scan_semantic) != 0)
+			{
+				scan_pos_neg_conflict = true;
+				no_scan_conflict_indexes =
+					bms_add_member(no_scan_conflict_indexes, j);
+			}
 		}
 	}
 
@@ -1725,7 +1925,7 @@ pgpa_planner_apply_scan_advice(RelOptInfo *rel,
 				const uint64 my_scan_type = PGS_APPEND | PGS_MERGE_APPEND;
 
 				if (scan_type != all_scan_mask && scan_type != my_scan_type)
-					scan_type_conflict = true;
+					scan_pos_conflict = true;
 				scan_entry = my_entry;
 				scan_type = my_scan_type;
 				scan_type_rel_indexes =
@@ -1778,7 +1978,7 @@ pgpa_planner_apply_scan_advice(RelOptInfo *rel,
 	}
 
 	/* Enforce choice of index. */
-	if (scan_entry != NULL && !scan_type_conflict &&
+	if (scan_entry != NULL && !scan_pos_conflict && !scan_pos_neg_conflict &&
 		(scan_entry->tag == PGPA_TAG_INDEX_SCAN ||
 		 scan_entry->tag == PGPA_TAG_INDEX_ONLY_SCAN))
 	{
@@ -1822,13 +2022,25 @@ pgpa_planner_apply_scan_advice(RelOptInfo *rel,
 
 	/*
 	 * Mark all the scan method entries as fully matched; and if they specify
-	 * different things, mark them all as conflicting.
+	 * different things, mark them all as conflicting.  Also mark them as
+	 * conflicting if any NO_ tag forbids the requested scan method.
 	 */
 	flags = PGPA_FB_MATCH_PARTIAL | PGPA_FB_MATCH_FULL;
-	if (scan_type_conflict)
+	if (scan_pos_conflict || scan_pos_neg_conflict)
 		flags |= PGPA_FB_CONFLICTING;
 	pgpa_trove_set_flags(scan_entries, scan_type_indexes, flags);
 	pgpa_trove_set_flags(rel_entries, scan_type_rel_indexes, flags);
+
+	/*
+	 * Mark NO_ scan entries as fully matched. Only the specific NO_ tags
+	 * whose method actually conflicts with the requested positive scan
+	 * method are marked conflicting; unrelated NO_ tags for the same
+	 * relation are unaffected.
+	 */
+	pgpa_trove_set_flags(scan_entries, no_scan_indexes,
+						 PGPA_FB_MATCH_PARTIAL | PGPA_FB_MATCH_FULL);
+	pgpa_trove_set_flags(scan_entries, no_scan_conflict_indexes,
+						 PGPA_FB_CONFLICTING);
 
 	/*
 	 * Mark every Gather-related piece of advice as partially matched. Mark
@@ -1847,8 +2059,22 @@ pgpa_planner_apply_scan_advice(RelOptInfo *rel,
 	 * Only clear bits here, so that we still respect the enable_* GUCs. Do
 	 * nothing in cases where the advice on a single topic conflicts.
 	 */
-	if (scan_type != all_scan_mask && !scan_type_conflict)
+	if (scan_type != all_scan_mask && !scan_pos_conflict && !scan_pos_neg_conflict)
 		rel->pgs_mask &= ~(all_scan_mask & ~scan_type);
+	if (no_scan_indexes != NULL)
+	{
+		uint64		enforce_no_scan_mask = 0;
+		int			j = -1;
+
+		while ((j = bms_next_member(no_scan_indexes, j)) >= 0)
+		{
+			if (bms_is_member(j, no_scan_conflict_indexes))
+				continue;
+			enforce_no_scan_mask |=
+				pgpa_no_scan_mask_from_advice_tag(scan_entries[j].tag);
+		}
+		rel->pgs_mask &= ~(all_scan_mask & enforce_no_scan_mask);
+	}
 	if (gather_mask != 0 && !gather_conflict)
 	{
 		uint64		all_gather_mask;

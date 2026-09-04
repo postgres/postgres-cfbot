@@ -58,8 +58,34 @@ pgpa_cstring_advice_tag(pgpa_advice_tag_type advice_tag)
 			return "NESTED_LOOP_MEMOIZE";
 		case PGPA_TAG_NESTED_LOOP_PLAIN:
 			return "NESTED_LOOP_PLAIN";
+		case PGPA_TAG_NO_BITMAP_HEAP_SCAN:
+			return "NO_BITMAP_HEAP_SCAN";
 		case PGPA_TAG_NO_GATHER:
 			return "NO_GATHER";
+		case PGPA_TAG_NO_HASH_JOIN:
+			return "NO_HASH_JOIN";
+		case PGPA_TAG_NO_INDEX_ONLY_SCAN:
+			return "NO_INDEX_ONLY_SCAN";
+		case PGPA_TAG_NO_INDEX_SCAN:
+			return "NO_INDEX_SCAN";
+		case PGPA_TAG_NO_MERGE_JOIN:
+			return "NO_MERGE_JOIN";
+		case PGPA_TAG_NO_MERGE_JOIN_MATERIALIZE:
+			return "NO_MERGE_JOIN_MATERIALIZE";
+		case PGPA_TAG_NO_MERGE_JOIN_PLAIN:
+			return "NO_MERGE_JOIN_PLAIN";
+		case PGPA_TAG_NO_NESTED_LOOP:
+			return "NO_NESTED_LOOP";
+		case PGPA_TAG_NO_NESTED_LOOP_MATERIALIZE:
+			return "NO_NESTED_LOOP_MATERIALIZE";
+		case PGPA_TAG_NO_NESTED_LOOP_MEMOIZE:
+			return "NO_NESTED_LOOP_MEMOIZE";
+		case PGPA_TAG_NO_NESTED_LOOP_PLAIN:
+			return "NO_NESTED_LOOP_PLAIN";
+		case PGPA_TAG_NO_SEQ_SCAN:
+			return "NO_SEQ_SCAN";
+		case PGPA_TAG_NO_TID_SCAN:
+			return "NO_TID_SCAN";
 		case PGPA_TAG_PARTITIONWISE:
 			return "PARTITIONWISE";
 		case PGPA_TAG_SEMIJOIN_NON_UNIQUE:
@@ -135,8 +161,34 @@ pgpa_parse_advice_tag(const char *tag, bool *fail)
 				return PGPA_TAG_NESTED_LOOP_MEMOIZE;
 			if (strcmp(tag, "nested_loop_plain") == 0)
 				return PGPA_TAG_NESTED_LOOP_PLAIN;
+			if (strcmp(tag, "no_bitmap_heap_scan") == 0)
+				return PGPA_TAG_NO_BITMAP_HEAP_SCAN;
 			if (strcmp(tag, "no_gather") == 0)
 				return PGPA_TAG_NO_GATHER;
+			if (strcmp(tag, "no_hash_join") == 0)
+				return PGPA_TAG_NO_HASH_JOIN;
+			if (strcmp(tag, "no_index_only_scan") == 0)
+				return PGPA_TAG_NO_INDEX_ONLY_SCAN;
+			if (strcmp(tag, "no_index_scan") == 0)
+				return PGPA_TAG_NO_INDEX_SCAN;
+			if (strcmp(tag, "no_merge_join") == 0)
+				return PGPA_TAG_NO_MERGE_JOIN;
+			if (strcmp(tag, "no_merge_join_materialize") == 0)
+				return PGPA_TAG_NO_MERGE_JOIN_MATERIALIZE;
+			if (strcmp(tag, "no_merge_join_plain") == 0)
+				return PGPA_TAG_NO_MERGE_JOIN_PLAIN;
+			if (strcmp(tag, "no_nested_loop") == 0)
+				return PGPA_TAG_NO_NESTED_LOOP;
+			if (strcmp(tag, "no_nested_loop_materialize") == 0)
+				return PGPA_TAG_NO_NESTED_LOOP_MATERIALIZE;
+			if (strcmp(tag, "no_nested_loop_memoize") == 0)
+				return PGPA_TAG_NO_NESTED_LOOP_MEMOIZE;
+			if (strcmp(tag, "no_nested_loop_plain") == 0)
+				return PGPA_TAG_NO_NESTED_LOOP_PLAIN;
+			if (strcmp(tag, "no_seq_scan") == 0)
+				return PGPA_TAG_NO_SEQ_SCAN;
+			if (strcmp(tag, "no_tid_scan") == 0)
+				return PGPA_TAG_NO_TID_SCAN;
 			break;
 		case 'p':
 			if (strcmp(tag, "partitionwise") == 0)

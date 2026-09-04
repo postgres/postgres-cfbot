@@ -320,6 +320,58 @@ DO_NOT_SCAN(<replaceable>target</replaceable> [ ... ])</synopsis>
 
   </sect3>
 
+  <sect3 id="pgplanadvice-no-scan-method">
+  <title>Negative Scan Method Advice</title>
+   <synopsis>
+NO_SEQ_SCAN(<replaceable>target</replaceable> [ ... ])
+NO_TID_SCAN(<replaceable>target</replaceable> [ ... ])
+NO_INDEX_SCAN(<replaceable>target</replaceable> [ ... ])
+NO_INDEX_ONLY_SCAN(<replaceable>target</replaceable> [ ... ])
+NO_BITMAP_HEAP_SCAN(<replaceable>target</replaceable> [ ... ])</synopsis>
+
+   <para>
+    These tags are the negative counterparts of the positive scan method tags.
+    Each <literal>NO_</literal> tag forbids the corresponding scan method for
+    the specified relation or relations. The planner will choose any other
+    eligible scan method instead.
+   </para>
+
+   <para>
+    For example, <literal>NO_SEQ_SCAN(t)</literal> tells the planner not to
+    use a <literal>Seq Scan</literal> on <literal>t</literal>. If the only
+    viable alternative is an index scan, the planner will use that. If no
+    alternative is available, the plan still uses the forbidden method and the
+    advice is reported as <literal>failed</literal>.
+   </para>
+
+   <para>
+    Unlike the positive scan method tags, multiple negative scan method tags
+    for the same relation can be combined freely without conflict. For example,
+    <literal>NO_SEQ_SCAN(t) NO_BITMAP_HEAP_SCAN(t)</literal> is valid and
+    restricts the planner to use an index scan or TID scan on <literal>t</literal>.
+   </para>
+
+   <para>
+    A negative tag and a positive tag specifying the same method are in
+    conflict with each other. For example, <literal>SEQ_SCAN(t)
+    NO_SEQ_SCAN(t)</literal> is a contradiction, and both pieces of advice will
+    be marked <literal>conflicting</literal>. However, a negative tag for one
+    method does not conflict with a positive tag for a different method. For
+    instance, <literal>NO_SEQ_SCAN(t) INDEX_SCAN(t my_index)</literal> is not a
+    conflict: the index scan is enforced and the prohibition on sequential scans
+    is also satisfied.
+   </para>
+
+   <para>
+    Note that <literal>NO_SEQ_SCAN((x y))</literal> and similar forms with a
+    parenthesized sublist are not valid syntax for negative scan tags, because
+    scan methods apply to individual relations, not join products. Negative scan
+    tags use the same target syntax as their positive counterparts: a
+    flat list of relation identifiers.
+   </para>
+
+  </sect3>
+
   <sect3 id="pgplanadvice-join-order">
   <title>Join Order Advice</title>
    <synopsis>
@@ -429,6 +481,83 @@ join_method_name(<replaceable>join_method_item</replaceable> [ ... ])
     relations on the inner side of a hash join. When using both join order
     advice and join method advice for the same query, it is a good idea to make
     sure that they do not mandate incompatible join orders.
+   </para>
+
+  </sect3>
+
+  <sect3 id="pgplanadvice-no-join-method">
+  <title>Negative Join Method Advice</title>
+   <synopsis>
+no_join_method_name(<replaceable>join_method_item</replaceable> [ ... ])
+
+<phrase>where <replaceable>no_join_method_name</replaceable> is:</phrase>
+
+{ NO_HASH_JOIN |
+  NO_NESTED_LOOP | NO_NESTED_LOOP_PLAIN | NO_NESTED_LOOP_MATERIALIZE | NO_NESTED_LOOP_MEMOIZE |
+  NO_MERGE_JOIN | NO_MERGE_JOIN_PLAIN | NO_MERGE_JOIN_MATERIALIZE }
+
+<phrase>and <replaceable>join_method_item</replaceable> is:</phrase>
+
+{ <replaceable>advice_target</replaceable> |
+( <replaceable>advice_target</replaceable> [ ... ] ) }</synopsis>
+
+   <para>
+    These tags are the negative counterparts of the positive join method tags.
+    A negative join method tag specifies that the named join method (or family
+    of join methods) should <emphasis>not</emphasis> be used when the specified
+    relation or set of relations appears on the inner side of a join. The
+    planner will choose any other eligible join method instead.
+   </para>
+
+   <para>
+    Both a coarser group form and a finer specific form are available for
+    nested-loop and merge-join. <literal>NO_NESTED_LOOP(t)</literal> disables
+    all three nested-loop variants (<literal>NESTED_LOOP_PLAIN</literal>,
+    <literal>NESTED_LOOP_MATERIALIZE</literal>, and
+    <literal>NESTED_LOOP_MEMOIZE</literal>), while
+    <literal>NO_NESTED_LOOP_PLAIN(t)</literal> disables only the plain variant,
+    leaving the other two available. Similarly,
+    <literal>NO_MERGE_JOIN(t)</literal> disables both merge-join variants, while
+    <literal>NO_MERGE_JOIN_PLAIN(t)</literal> and
+    <literal>NO_MERGE_JOIN_MATERIALIZE(t)</literal> target individual variants.
+    <literal>NO_HASH_JOIN</literal> has only one form since there is only one
+    hash-join variant.
+   </para>
+
+   <para>
+    Like positive join method tags, negative join method tags accept
+    parenthesized sublists specifying a set of relations that should appear
+    together on the inner side. For example,
+    <literal>NO_HASH_JOIN((a b))</literal> means that the join product of
+    <literal>a</literal> and <literal>b</literal> should not appear together on
+    the inner side of a hash join.
+   </para>
+
+   <para>
+    Negative join method tags impose the same join-order constraint as their
+    positive counterparts: the specified relation (or join product) cannot
+    become the driving table. For example, <literal>NO_HASH_JOIN(t)</literal>
+    implies that <literal>t</literal> cannot be the outermost relation in the
+    join, exactly as <literal>HASH_JOIN(t)</literal> would. Think of
+    <literal>NO_HASH_JOIN(t)</literal> as saying
+    <quote>use anything but a hash join, but keep <literal>t</literal> on the
+    inner side.</quote>
+   </para>
+
+   <para>
+    Multiple negative join method tags for the same relation can be combined
+    freely. For example, <literal>NO_HASH_JOIN(t) NO_NESTED_LOOP(t)</literal>
+    restricts the planner to merge-join when <literal>t</literal> is on the
+    inner side. A negative tag for one method does not conflict with a positive
+    tag for a different method: <literal>NO_HASH_JOIN(t)
+    NESTED_LOOP_PLAIN(t)</literal> is not a conflict.
+   </para>
+
+   <para>
+    A negative tag and a positive tag specifying the same join method are in
+    conflict. For example, <literal>HASH_JOIN(t) NO_HASH_JOIN(t)</literal>
+    contradicts itself, and both entries will be marked
+    <literal>conflicting</literal>.
    </para>
 
   </sect3>
