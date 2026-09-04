@@ -2077,6 +2077,9 @@ CheckPAMAuth(Port *port, const char *user, const char *password)
 {
 	int			retval;
 	pam_handle_t *pamh = NULL;
+#ifdef HAVE_PAM_START_CONFDIR
+	char 		 *pamconfdir = NULL;
+#endif
 
 	/*
 	 * We can't entirely rely on PAM to pass through appdata --- it appears
@@ -2095,13 +2098,29 @@ CheckPAMAuth(Port *port, const char *user, const char *password)
 	pam_passw_conv.appdata_ptr = unconstify(char *, password);	/* from password above,
 																 * not allocated */
 
+#ifdef HAVE_PAM_START_CONFDIR
+	if (port->hba->pamconfdir && port->hba->pamconfdir[0] != '\0')
+		pamconfdir = port->hba->pamconfdir;
+#endif
+
 	/* Optionally, one can set the service name in pg_hba.conf */
+
 	if (port->hba->pamservice && port->hba->pamservice[0] != '\0')
+#ifdef HAVE_PAM_START_CONFDIR
+		retval = pam_start_confdir(port->hba->pamservice, "pgsql@",
+						   		   &pam_passw_conv, pamconfdir, &pamh);
+#else
 		retval = pam_start(port->hba->pamservice, "pgsql@",
 						   &pam_passw_conv, &pamh);
+#endif
 	else
+#ifdef HAVE_PAM_START_CONFDIR
+		retval = pam_start_confdir(PGSQL_PAM_SERVICE, "pgsql@",
+						           &pam_passw_conv, pamconfdir, &pamh);
+#else
 		retval = pam_start(PGSQL_PAM_SERVICE, "pgsql@",
-						   &pam_passw_conv, &pamh);
+						           &pam_passw_conv, &pamh);
+#endif
 
 	if (retval != PAM_SUCCESS)
 	{

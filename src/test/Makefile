@@ -31,6 +31,9 @@ endif
 ifeq ($(with_ldap),yes)
 SUBDIRS += ldap
 endif
+ifeq ($(with_pam),yes)
+SUBDIRS += pam
+endif
 ifeq ($(with_ssl),openssl)
 SUBDIRS += ssl
 endif
