@@ -218,12 +218,16 @@ xact_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	uint8		info = XLogRecGetInfo(r) & XLOG_XACT_OPMASK;
 
 	/*
-	 * If the snapshot isn't yet fully built, we cannot decode anything, so
-	 * bail out.
+	 * If the snapshot hasn't started building yet, the transaction won't be
+	 * decoded or tracked by the snapshot, so bail out.
 	 */
-	if (SnapBuildCurrentState(builder) < SNAPBUILD_FULL_SNAPSHOT)
+	if (SnapBuildCurrentState(builder) < SNAPBUILD_BUILDING_SNAPSHOT)
 		return;
 
+	/*
+	 * Note that if the snapshot isn't yet fully built, the xlog is only used
+	 * to build the snapshot and won't be decoded.
+	 */
 	switch (info)
 	{
 		case XLOG_XACT_COMMIT:
@@ -294,18 +298,24 @@ xact_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 			{
 				TransactionId xid;
 				xl_xact_invals *invals;
+				bool has_snapshot;
 
 				xid = XLogRecGetXid(r);
 				invals = (xl_xact_invals *) XLogRecGetData(r);
+				has_snapshot =
+					SnapBuildCurrentState(builder) >= SNAPBUILD_FULL_SNAPSHOT;
 
 				/*
 				 * Execute the invalidations for xid-less transactions,
 				 * otherwise, accumulate them so that they can be processed at
 				 * the commit time.
+				 *
+				 * Note that we only need to do this when we are not fast-forwarding
+				 * and there is a snapshot.
 				 */
 				if (TransactionIdIsValid(xid))
 				{
-					if (!ctx->fast_forward)
+					if (!ctx->fast_forward && has_snapshot)
 						ReorderBufferAddInvalidations(reorder, xid,
 													  buf->origptr,
 													  invals->nmsgs,
@@ -313,7 +323,7 @@ xact_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 					ReorderBufferXidSetCatalogChanges(ctx->reorder, xid,
 													  buf->origptr);
 				}
-				else if (!ctx->fast_forward)
+				else if (!ctx->fast_forward && has_snapshot)
 					ReorderBufferImmediateInvalidation(ctx->reorder,
 													   invals->nmsgs,
 													   invals->msgs);
@@ -436,7 +446,19 @@ heap2_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	 * SnapBuildProcessRunningXacts().
 	 */
 	if (SnapBuildCurrentState(builder) < SNAPBUILD_FULL_SNAPSHOT)
+	{
+		/*
+		 * If we are building snapshot and the xlog means a catalog
+		 * change, we need to mark it in the reorder buffer.
+		 *
+		 * Now only XLOG_HEAP2_NEW_CID means a catalog change.
+		 */
+		if (SnapBuildCurrentState(builder) >= SNAPBUILD_BUILDING_SNAPSHOT &&
+			TransactionIdIsValid(xid) && info == XLOG_HEAP2_NEW_CID)
+			ReorderBufferXidSetCatalogChanges(ctx->reorder, xid, buf->origptr);
+
 		return;
+	}
 
 	switch (info)
 	{
@@ -1327,6 +1349,7 @@ DecodeTXNNeedSkip(LogicalDecodingContext *ctx, XLogRecordBuffer *buf,
 				  Oid txn_dbid, ReplOriginId origin_id)
 {
 	if (SnapBuildXactNeedsSkip(ctx->snapshot_builder, buf->origptr) ||
+		SnapBuildCurrentState(ctx->snapshot_builder) < SNAPBUILD_CONSISTENT ||
 		(txn_dbid != InvalidOid && txn_dbid != ctx->slot->data.database) ||
 		FilterByOrigin(ctx, origin_id))
 		return true;
