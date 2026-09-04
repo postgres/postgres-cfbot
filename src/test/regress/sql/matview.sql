@@ -318,3 +318,155 @@ EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF, TIMING OFF, BUFFERS OFF)
   CREATE MATERIALIZED VIEW IF NOT EXISTS matview_ine_tab AS
     SELECT 1 / 0 WITH NO DATA; -- ok
 DROP MATERIALIZED VIEW matview_ine_tab;
+
+--
+-- Test CREATE OR REPLACE MATERIALIZED VIEW
+--
+
+-- Matview does not already exist
+DROP MATERIALIZED VIEW IF EXISTS mvtest_replace;
+CREATE OR REPLACE MATERIALIZED VIEW mvtest_replace AS
+  SELECT 1 AS a;
+SELECT * FROM mvtest_replace;
+
+-- Replace query with data
+CREATE OR REPLACE MATERIALIZED VIEW mvtest_replace AS
+  SELECT 2 AS a;
+SELECT * FROM mvtest_replace;
+
+-- Replace query without data
+CREATE OR REPLACE MATERIALIZED VIEW mvtest_replace AS
+  SELECT 3 AS a
+  WITH NO DATA;
+SELECT * FROM mvtest_replace; -- error: not populated
+REFRESH MATERIALIZED VIEW mvtest_replace;
+SELECT * FROM mvtest_replace;
+
+-- Replace query but keep old data
+CREATE OR REPLACE MATERIALIZED VIEW mvtest_replace AS
+  SELECT 5 AS a
+  WITH OLD DATA;
+SELECT * FROM mvtest_replace;
+REFRESH MATERIALIZED VIEW mvtest_replace;
+SELECT * FROM mvtest_replace;
+
+-- Add column
+CREATE OR REPLACE MATERIALIZED VIEW mvtest_replace AS
+  SELECT 4 AS a, 1 b;
+SELECT * FROM mvtest_replace;
+
+-- Replace table options
+SELECT m.*, c.relname, c.reloptions, s.spcname, a.amname
+  FROM mvtest_replace m
+    CROSS JOIN pg_class c
+    LEFT JOIN pg_tablespace s ON s.oid = c.reltablespace
+    LEFT JOIN pg_am a ON a.oid = c.relam
+  WHERE c.relname = 'mvtest_replace';
+CREATE OR REPLACE MATERIALIZED VIEW mvtest_replace
+  USING heap2
+  WITH (fillfactor = 50)
+  TABLESPACE regress_tblspace
+  AS SELECT 5 AS a, 1 AS b;
+SELECT m.*, c.relname, c.reloptions, s.spcname, a.amname
+  FROM mvtest_replace m
+    CROSS JOIN pg_class c
+    LEFT JOIN pg_tablespace s ON s.oid = c.reltablespace
+    LEFT JOIN pg_am a ON a.oid = c.relam
+  WHERE c.relname = 'mvtest_replace';
+-- Restore default options
+CREATE OR REPLACE MATERIALIZED VIEW mvtest_replace
+  AS SELECT 5 AS a, 1 AS b;
+SELECT m.*, c.relname, c.reloptions, s.spcname, a.amname
+  FROM mvtest_replace m
+    CROSS JOIN pg_class c
+    LEFT JOIN pg_tablespace s ON s.oid = c.reltablespace
+    LEFT JOIN pg_am a ON a.oid = c.relam
+  WHERE c.relname = 'mvtest_replace';
+
+-- Can replace matview that has a dependent view
+CREATE VIEW mvtest_replace_v AS
+  SELECT * FROM mvtest_replace;
+CREATE OR REPLACE MATERIALIZED VIEW mvtest_replace AS
+  SELECT 6 AS a, 1 AS b;
+SELECT * FROM mvtest_replace, mvtest_replace_v;
+DROP VIEW mvtest_replace_v;
+
+-- Index gets rebuilt when replacing with data
+CREATE OR REPLACE MATERIALIZED VIEW mvtest_replace AS
+  SELECT 7 AS a, 1 AS b;
+CREATE UNIQUE INDEX ON mvtest_replace (b);
+SELECT * FROM mvtest_replace;
+SET enable_seqscan = off; -- force index scan
+EXPLAIN (COSTS OFF) SELECT * FROM mvtest_replace WHERE b = 1;
+SELECT * FROM mvtest_replace WHERE b = 1;
+RESET enable_seqscan;
+CREATE OR REPLACE MATERIALIZED VIEW mvtest_replace AS
+  SELECT 8 AS a, 1 AS b;
+SET enable_seqscan = off; -- force index scan
+EXPLAIN (COSTS OFF) SELECT * FROM mvtest_replace WHERE b = 1;
+SELECT * FROM mvtest_replace WHERE b = 1;
+RESET enable_seqscan;
+
+-- Cannot change column data type
+CREATE OR REPLACE MATERIALIZED VIEW mvtest_replace AS
+  SELECT 9 AS a, 'x' AS b; -- error
+SELECT * FROM mvtest_replace;
+
+-- Cannot rename column
+CREATE OR REPLACE MATERIALIZED VIEW mvtest_replace AS
+  SELECT 10 AS a, 1 AS b2; -- error
+SELECT * FROM mvtest_replace;
+
+CREATE OR REPLACE MATERIALIZED VIEW mvtest_replace AS
+  SELECT 11 AS a, 1 AS b, 'y' COLLATE "C" AS c;
+SELECT * FROM mvtest_replace;
+
+-- Cannot change column collation
+CREATE OR REPLACE MATERIALIZED VIEW mvtest_replace AS
+  SELECT 12 AS a, 1 AS b, 'x' COLLATE "POSIX" AS c; -- error
+SELECT * FROM mvtest_replace;
+
+-- Cannot drop column
+CREATE OR REPLACE MATERIALIZED VIEW mvtest_replace AS
+  SELECT 13 AS a, 1 AS b; -- error
+SELECT * FROM mvtest_replace;
+
+-- Must target a matview
+CREATE VIEW mvtest_not_mv AS
+  SELECT 1 AS a;
+CREATE OR REPLACE MATERIALIZED VIEW mvtest_not_mv AS
+  SELECT 1 AS a; -- error
+DROP VIEW mvtest_not_mv;
+
+-- Cannot use OR REPLACE with IF NOT EXISTS
+CREATE OR REPLACE MATERIALIZED VIEW IF NOT EXISTS mvtest_replace AS
+  SELECT 1 AS a;
+
+DROP MATERIALIZED VIEW mvtest_replace;
+
+-- Clause WITH OLD DATA is not allowed when creating a new matview
+CREATE OR REPLACE MATERIALIZED VIEW mvtest_replace AS
+  SELECT 17 AS a
+  WITH OLD DATA; -- error
+
+CREATE MATERIALIZED VIEW mvtest_replace AS
+  SELECT 1 AS c1, 2 AS c2, 3 AS c3, 4 AS c4,
+         5 AS c5, 6 AS c6, 7 AS c7, null AS c8;
+-- Add a ninth column (exceeding the old t_bits)
+CREATE OR REPLACE MATERIALIZED VIEW mvtest_replace AS
+  SELECT 1 AS c1, 2 AS c2, 3 AS c3, 4 AS c4,
+         5 AS c5, 6 AS c6, 7 AS c7, null AS c8,
+         null AS c9
+  WITH OLD DATA;
+SELECT c9 FROM mvtest_replace;
+
+-- Test constraint violation on WITH OLD DATA
+DROP MATERIALIZED VIEW mvtest_replace;
+CREATE DOMAIN mvtest_dom AS int
+  CONSTRAINT mvtest_dom_nn NOT NULL;
+CREATE MATERIALIZED VIEW mvtest_replace AS
+  SELECT 1::mvtest_dom AS a;
+CREATE OR REPLACE MATERIALIZED VIEW mvtest_replace AS
+  SELECT 2::mvtest_dom AS a, 3::mvtest_dom AS b
+  WITH OLD DATA; -- error: new column "b" cannot be null
+SELECT a FROM mvtest_replace;

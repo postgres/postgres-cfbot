@@ -2535,7 +2535,8 @@ typedef struct AlterTableStmt
 typedef enum AlterTableType
 {
 	AT_AddColumn,				/* add column */
-	AT_AddColumnToView,			/* implicitly via CREATE OR REPLACE VIEW */
+	AT_AddColumnToView,			/* implicitly via CREATE OR REPLACE
+								 * [MATERIALIZED] VIEW */
 	AT_ColumnDefault,			/* alter column default */
 	AT_CookedColumnDefault,		/* add a pre-cooked column default */
 	AT_DropNotNull,				/* alter column drop not null */
@@ -4613,6 +4614,5 @@ typedef struct WaitStmt
 	/* token location, or -1 if unknown */
 	ParseLoc	lsn_location pg_node_attr(query_jumble_location);
 } WaitStmt;
-
 
 #endif							/* PARSENODES_H */
