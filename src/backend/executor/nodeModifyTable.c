@@ -1436,6 +1436,7 @@ ExecForPortionOfLeftovers(ModifyTableContext *context,
 	ReturnSetInfo rsi;
 	bool		didInit = false;
 	bool		shouldFree = false;
+	bool		fire_triggers = !(estate->es_top_eflags & EXEC_FLAG_SKIP_TRIGGERS);
 	ResultRelInfo *rootRelInfo = mtstate->rootResultRelInfo;
 	bool		partitionRouting =
 		rootRelInfo &&
@@ -1610,15 +1611,30 @@ ExecForPortionOfLeftovers(ModifyTableContext *context,
 		 * its own transition table. If we just push & pop a new trigger level
 		 * for each insert, we get exactly what we need.
 		 *
+		 * But we also must obey EXEC_FLAG_SKIP_TRIGGERS. Our own temporal
+		 * foreign keys use FOR PORTION OF to implement CASCADE/SET NULL/SET
+		 * DEFAULT, which may insert temporal leftovers on the referencing
+		 * table, causing its INSERT triggers to fire. If they had their own
+		 * trigger level, they would fire before the temporal foreign key
+		 * finished its work, observing an invalid intermediate state. In
+		 * particular we would get spurious foreign key failures: if the
+		 * original ON UPDATE CASCADE foreign key action deleted two parts of
+		 * history, then inserting leftovers from the first delete would fail,
+		 * because its reference has disappeared. (Note that despite the name,
+		 * EXEC_FLAG_SKIP_TRIGGERS doesn't *skip* the triggers, only change
+		 * when they fire.)
+		 *
 		 * We have to make sure that the inserts don't add to the ROW_COUNT
 		 * diagnostic or the command tag, so we pass false for canSetTag.
 		 */
-		AfterTriggerBeginQuery();
+		if (fire_triggers)
+			AfterTriggerBeginQuery();
 		ExecSetupTransitionCaptureState(mtstate, estate);
 		fireBSTriggers(mtstate);
 		ExecInsert(context, resultRelInfo, leftoverSlot, false, NULL, NULL);
 		fireASTriggers(mtstate);
-		AfterTriggerEndQuery(estate);
+		if (fire_triggers)
+			AfterTriggerEndQuery(estate);
 	}
 
 	if (didInit)
@@ -5652,6 +5668,7 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 		/* Create state for FOR PORTION OF operation */
 
 		fpoState = makeNode(ForPortionOfState);
+		fpoState->fp_rangeName = pstrdup(forPortionOf->range_name);
 		fpoState->fp_rangeType = forPortionOf->rangeType;
 		fpoState->fp_rangeAttno = forPortionOf->rangeVar->varattno;
 		fpoState->fp_targetRange = targetRange;
@@ -5938,6 +5955,7 @@ ExecInitForPortionOf(ModifyTableState *mtstate, EState *estate,
 
 	leafState = makeNode(ForPortionOfState);
 
+	leafState->fp_rangeName = pstrdup(fpoState->fp_rangeName);
 	leafState->fp_rangeType = fpoState->fp_rangeType;
 	leafState->fp_targetRange = fpoState->fp_targetRange;
 	map = ExecGetChildToRootMap(resultRelInfo);
