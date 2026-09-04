@@ -133,6 +133,11 @@ extern char *GetDatabasePath(Oid dbOid, Oid spcOid);
 extern RelPathStr GetRelationPath(Oid dbOid, Oid spcOid, RelFileNumber relNumber,
 								  int procNumber, ForkNumber forkNumber);
 
+extern bool parse_filename_for_nontemp_relation(const char *name,
+												RelFileNumber *relnumber,
+												ForkNumber *fork,
+												unsigned *segno);
+
 /*
  * Wrapper macros for GetRelationPath.  Beware of multiple
  * evaluation of the RelFileLocator or RelFileLocatorBackend argument!
