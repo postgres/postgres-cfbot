@@ -579,6 +579,7 @@ transformColumnRef(ParseState *pstate, ColumnRef *cref)
 		case EXPR_KIND_GENERATED_COLUMN:
 		case EXPR_KIND_CYCLE_MARK:
 		case EXPR_KIND_PROPGRAPH_PROPERTY:
+		case EXPR_KIND_RPR_DEFINE:
 			/* okay */
 			break;
 
@@ -626,6 +627,57 @@ transformColumnRef(ParseState *pstate, ColumnRef *cref)
 	node = transformGraphTablePropertyRef(pstate, cref);
 	if (node != NULL)
 		return node;
+
+	/*----------
+	 * Qualified references in DEFINE need a tri-classification:
+	 *
+	 *	  pattern variable qualifier (e.g. UP.price): valid per
+	 *	  ISO/IEC 19075-5 6.15 / 4.16 but not yet implemented --
+	 *	  raise FEATURE_NOT_SUPPORTED.
+	 *
+	 *	  FROM-clause range variable qualifier: prohibited by
+	 *	  ISO/IEC 19075-5 6.5 -- raise SYNTAX_ERROR.
+	 *
+	 *	  any other qualifier (typo, undefined name): fall through and let
+	 *	  normal column resolution produce a sensible error.
+	 *
+	 * The quoted text reflects only the ColumnRef portion; a trailing field
+	 * selection on a composite type (e.g. ".amount" in "(A.items).amount")
+	 * lives in the surrounding A_Indirection node and is not included here.
+	 * That can be revisited when MEASURES support adds indirection-aware
+	 * traversal.
+	 *----------
+	 */
+	if (pstate->p_expr_kind == EXPR_KIND_RPR_DEFINE &&
+		list_length(cref->fields) != 1)
+	{
+		char	   *qualifier = strVal(linitial(cref->fields));
+		bool		is_pattern_var = false;
+
+		foreach_node(String, pv, pstate->p_rpr_pattern_vars)
+		{
+			if (strcmp(strVal(pv), qualifier) == 0)
+			{
+				is_pattern_var = true;
+				break;
+			}
+		}
+
+		if (is_pattern_var)
+			ereport(ERROR,
+					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("pattern variable qualified expression \"%s\" is not supported in DEFINE clause",
+						   NameListToString(cref->fields)),
+					parser_errposition(pstate, cref->location));
+		else if (refnameNamespaceItem(pstate, NULL, qualifier,
+									  cref->location, NULL) != NULL)
+			ereport(ERROR,
+					errcode(ERRCODE_SYNTAX_ERROR),
+					errmsg("range variable qualified expression \"%s\" is not allowed in DEFINE clause",
+						   NameListToString(cref->fields)),
+					parser_errposition(pstate, cref->location));
+		/* else: unknown qualifier -- fall through to normal resolution */
+	}
 
 	/*----------
 	 * The allowed syntaxes are:
@@ -892,6 +944,30 @@ transformColumnRef(ParseState *pstate, ColumnRef *cref)
 						 parser_errposition(pstate, cref->location)));
 				break;
 		}
+	}
+
+	/*
+	 * Restrict column references in a row pattern DEFINE clause.  node is now
+	 * a successfully resolved reference, so reject the two forms RPR does not
+	 * allow: a correlated reference to an outer query's column, and a
+	 * schema/catalog-qualified reference (three or more name parts).  Simple
+	 * two-part qualifiers (pattern or range variable) are handled earlier,
+	 * before resolution.
+	 */
+	if (pstate->p_expr_kind == EXPR_KIND_RPR_DEFINE)
+	{
+		if (IsA(node, Var) && ((Var *) node)->varlevelsup > 0)
+			ereport(ERROR,
+					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("cannot use outer query column in DEFINE clause"),
+					parser_errposition(pstate, cref->location));
+
+		if (list_length(cref->fields) >= 3)
+			ereport(ERROR,
+					errcode(ERRCODE_SYNTAX_ERROR),
+					errmsg("qualified expression \"%s\" is not allowed in DEFINE clause",
+						   NameListToString(cref->fields)),
+					parser_errposition(pstate, cref->location));
 	}
 
 	return node;
@@ -1891,6 +1967,31 @@ transformSubLink(ParseState *pstate, SubLink *sublink)
 			break;
 		case EXPR_KIND_FOR_PORTION:
 			err = _("cannot use subquery in FOR PORTION OF expression");
+			break;
+
+			/*----------
+			 * XXX SQL/RPR (ISO/IEC 19075-5 6.17.4 / 4.18.4; R020 / R010)
+			 * permits a subquery nested in a DEFINE expression provided
+			 * that:
+			 *   (a) the subquery does not itself perform row pattern
+			 *       recognition, and
+			 *   (b) the subquery does not reference a row pattern variable
+			 *       of the outer query.
+			 *
+			 * We reject all subqueries here for now.  Implementing the
+			 * case distinction would mean walking the analyzed subquery
+			 * Query tree for nested RPR window clauses to enforce (a),
+			 * and walking it for ColumnRef qualifiers matching any
+			 * ancestor's p_rpr_pattern_vars to enforce (b).  Both checks
+			 * are doable with the existing infrastructure -- they are
+			 * left as future work, not blocked on any other feature.
+			 * Until then this blanket rejection is intentional
+			 * over-rejection, not a standard fit; it subsumes both (a)
+			 * and (b) by making the subquery itself unreachable.
+			 *----------
+			 */
+		case EXPR_KIND_RPR_DEFINE:
+			err = _("cannot use subquery in DEFINE expression");
 			break;
 
 			/*
@@ -3255,6 +3356,8 @@ ParseExprKindName(ParseExprKind exprKind)
 			return "property definition expression";
 		case EXPR_KIND_FOR_PORTION:
 			return "FOR PORTION OF";
+		case EXPR_KIND_RPR_DEFINE:
+			return "DEFINE";
 
 			/*
 			 * There is intentionally no default: case here, so that the

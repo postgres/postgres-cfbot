@@ -127,6 +127,7 @@ typedef struct
 	bool		varprefix;		/* true to print prefixes on Vars */
 	bool		colNamesVisible;	/* do we care about output column names? */
 	bool		inGroupBy;		/* deparsing GROUP BY clause? */
+	bool		inRPRDefine;	/* deparsing an RPR DEFINE clause? */
 	bool		varInOrderBy;	/* deparsing simple Var in ORDER BY? */
 	Bitmapset  *appendparents;	/* if not null, map child Vars of these relids
 								 * back to the parent rel */
@@ -447,6 +448,10 @@ static void get_rule_groupingset(GroupingSet *gset, List *targetlist,
 								 bool omit_parens, deparse_context *context);
 static void get_rule_orderby(List *orderList, List *targetList,
 							 bool force_colno, deparse_context *context);
+static void append_pattern_quantifier(StringInfo buf, RPRPatternNode *node);
+static void get_rule_pattern_node(RPRPatternNode *node, deparse_context *context);
+static void get_rule_pattern(RPRPatternNode *rpPattern, deparse_context *context);
+static void get_rule_define(List *defineClause, deparse_context *context);
 static void get_rule_windowclause(Query *query, deparse_context *context);
 static void get_rule_windowspec(WindowClause *wc, List *targetList,
 								deparse_context *context);
@@ -544,7 +549,7 @@ static char *generate_qualified_relation_name(Oid relid);
 static char *generate_function_name(Oid funcid, int nargs,
 									List *argnames, Oid *argtypes,
 									bool has_variadic, bool *use_variadic_p,
-									bool inGroupBy);
+									bool inGroupBy, bool inRPRDefine);
 static char *generate_operator_name(Oid operid, Oid arg1, Oid arg2);
 static void add_cast_to(StringInfo buf, Oid typid);
 static char *generate_qualified_type_name(Oid typid);
@@ -1130,6 +1135,7 @@ pg_get_triggerdef_worker(Oid trigid, bool pretty)
 		context.indentLevel = PRETTYINDENT_STD;
 		context.colNamesVisible = true;
 		context.inGroupBy = false;
+		context.inRPRDefine = false;
 		context.varInOrderBy = false;
 		context.appendparents = NULL;
 
@@ -1141,7 +1147,7 @@ pg_get_triggerdef_worker(Oid trigid, bool pretty)
 	appendStringInfo(&buf, "EXECUTE FUNCTION %s(",
 					 generate_function_name(trigrec->tgfoid, 0,
 											NIL, NULL,
-											false, NULL, false));
+											false, NULL, false, false));
 
 	if (trigrec->tgnargs > 0)
 	{
@@ -3400,7 +3406,7 @@ pg_get_functiondef(PG_FUNCTION_ARGS)
 		appendStringInfo(&buf, " SUPPORT %s",
 						 generate_function_name(proc->prosupport, 1,
 												NIL, argtypes,
-												false, NULL, false));
+												false, NULL, false, false));
 	}
 
 	if (oldlen != buf.len)
@@ -4053,6 +4059,7 @@ deparse_expression_pretty(Node *expr, List *dpcontext,
 	context.indentLevel = startIndent;
 	context.colNamesVisible = true;
 	context.inGroupBy = false;
+	context.inRPRDefine = false;
 	context.varInOrderBy = false;
 	context.appendparents = NULL;
 
@@ -5847,6 +5854,7 @@ make_ruledef(StringInfo buf, HeapTuple ruletup, TupleDesc rulettc,
 		context.indentLevel = PRETTYINDENT_STD;
 		context.colNamesVisible = true;
 		context.inGroupBy = false;
+		context.inRPRDefine = false;
 		context.varInOrderBy = false;
 		context.appendparents = NULL;
 
@@ -6039,6 +6047,7 @@ get_query_def(Query *query, StringInfo buf, List *parentnamespace,
 	context.indentLevel = startIndent;
 	context.colNamesVisible = colNamesVisible;
 	context.inGroupBy = false;
+	context.inRPRDefine = false;
 	context.varInOrderBy = false;
 	context.appendparents = NULL;
 
@@ -7108,6 +7117,169 @@ get_rule_orderby(List *orderList, List *targetList,
 }
 
 /*
+ * Helper function to append quantifier string for pattern node
+ */
+static void
+append_pattern_quantifier(StringInfo buf, RPRPatternNode *node)
+{
+	bool		has_quantifier = true;
+
+	if (node->min == 1 && node->max == 1)
+	{
+		/* {1,1} = no quantifier */
+		has_quantifier = false;
+	}
+	else if (node->min == 0 && node->max == PG_INT32_MAX)
+		appendStringInfoChar(buf, '*');
+	else if (node->min == 1 && node->max == PG_INT32_MAX)
+		appendStringInfoChar(buf, '+');
+	else if (node->min == 0 && node->max == 1)
+		appendStringInfoChar(buf, '?');
+	else if (node->max == PG_INT32_MAX)
+		appendStringInfo(buf, "{%d,}", node->min);
+	else if (node->min == node->max)
+		appendStringInfo(buf, "{%d}", node->min);
+	else
+		appendStringInfo(buf, "{%d,%d}", node->min, node->max);
+
+	if (node->reluctant)
+	{
+		if (!has_quantifier)
+			appendStringInfoString(buf, "{1}"); /* make reluctant ?
+												 * unambiguous */
+		appendStringInfoChar(buf, '?');
+	}
+}
+
+/*
+ * quote_pattern_variable
+ *		Like quote_identifier(), but also quotes PERMUTE.
+ *
+ * PERMUTE is unreserved, so quote_identifier() leaves it bare, but a bare
+ * permute followed by '(' in a PATTERN would be re-read as the unsupported
+ * PERMUTE syntax.
+ *
+ * EXPLAIN deparses the compiled pattern with its own printer, so it calls
+ * this too; both spellings of a pattern must agree.
+ */
+const char *
+quote_pattern_variable(const char *varName)
+{
+	const char *result = quote_identifier(varName);
+
+	if (result == varName && strcmp(varName, "permute") == 0)
+		result = psprintf("\"%s\"", varName);
+
+	return result;
+}
+
+/*
+ * Recursive helper to display RPRPatternNode tree
+ */
+static void
+get_rule_pattern_node(RPRPatternNode *node, deparse_context *context)
+{
+	StringInfo	buf = context->buf;
+	const char *sep;
+
+	Assert(node != NULL);
+
+	switch (node->nodeType)
+	{
+		case RPR_PATTERN_VAR:
+			appendStringInfoString(buf, quote_pattern_variable(node->varName));
+			append_pattern_quantifier(buf, node);
+			break;
+
+		case RPR_PATTERN_SEQ:
+			sep = "";
+			foreach_node(RPRPatternNode, child, node->children)
+			{
+				appendStringInfoString(buf, sep);
+				get_rule_pattern_node(child, context);
+				sep = " ";
+			}
+			break;
+
+		case RPR_PATTERN_ALT:
+			sep = "";
+			foreach_node(RPRPatternNode, child, node->children)
+			{
+				appendStringInfoString(buf, sep);
+				get_rule_pattern_node(child, context);
+				sep = " | ";
+			}
+			break;
+
+		case RPR_PATTERN_GROUP:
+			appendStringInfoChar(buf, '(');
+			sep = "";
+			foreach_node(RPRPatternNode, child, node->children)
+			{
+				appendStringInfoString(buf, sep);
+				get_rule_pattern_node(child, context);
+				sep = " ";
+			}
+			appendStringInfoChar(buf, ')');
+			append_pattern_quantifier(buf, node);
+			break;
+	}
+}
+
+/*
+ * Display a PATTERN clause.
+ */
+static void
+get_rule_pattern(RPRPatternNode *rpPattern, deparse_context *context)
+{
+	StringInfo	buf = context->buf;
+
+	appendStringInfoChar(buf, '(');
+	get_rule_pattern_node(rpPattern, context);
+	appendStringInfoChar(buf, ')');
+}
+
+/*
+ * Display a DEFINE clause.
+ */
+static void
+get_rule_define(List *defineClause, deparse_context *context)
+{
+	StringInfo	buf = context->buf;
+	const char *sep = "  ";
+	bool		save_inrprdefine = context->inRPRDefine;
+	bool		save_varprefix = context->varprefix;
+
+	/*
+	 * Within the DEFINE clause an unqualified prev/next/first/last is a
+	 * navigation operation, so a user function of one of those names must be
+	 * schema-qualified to survive a reparse; see generate_function_name().
+	 */
+	context->inRPRDefine = true;
+
+	/*
+	 * DEFINE clause referenced columns cannot be table/schema-qualified: the
+	 * qualifier slot is for pattern variables, so print bare column names.
+	 */
+	context->varprefix = false;
+
+	/*
+	 * A name here is always followed by AS and so cannot start a PERMUTE
+	 * construct, which is why plain quote_identifier() is enough: the same
+	 * variable may print bare here and quoted in the PATTERN.
+	 */
+	foreach_node(TargetEntry, te, defineClause)
+	{
+		appendStringInfo(buf, "%s%s AS ", sep, quote_identifier(te->resname));
+		get_rule_expr((Node *) te->expr, context, false);
+		sep = ",\n  ";
+	}
+
+	context->varprefix = save_varprefix;
+	context->inRPRDefine = save_inrprdefine;
+}
+
+/*
  * Display a WINDOW clause.
  *
  * Note that the windowClause list might contain only anonymous window
@@ -7196,6 +7368,28 @@ get_rule_windowspec(WindowClause *wc, List *targetList,
 								 wc->startOffset, wc->endOffset,
 								 context);
 	}
+
+	/* RPR clauses start their own line, so no separator space is wanted */
+	if (wc->rpPattern)
+	{
+		if (wc->rpSkipTo == ST_NEXT_ROW)
+			appendStringInfoString(buf,
+								   "\n  AFTER MATCH SKIP TO NEXT ROW");
+		else
+		{
+			Assert(wc->rpSkipTo == ST_PAST_LAST_ROW);
+
+			appendStringInfoString(buf,
+								   "\n  AFTER MATCH SKIP PAST LAST ROW");
+		}
+
+		appendStringInfoString(buf, "\n  INITIAL\n  PATTERN ");
+		get_rule_pattern(wc->rpPattern, context);
+
+		appendStringInfoString(buf, "\n  DEFINE\n");
+		get_rule_define(wc->defineClause, context);
+	}
+
 	appendStringInfoChar(buf, ')');
 }
 
@@ -7291,6 +7485,7 @@ get_window_frame_options_for_explain(int frameOptions,
 	context.indentLevel = 0;
 	context.colNamesVisible = true;
 	context.inGroupBy = false;
+	context.inRPRDefine = false;
 	context.varInOrderBy = false;
 	context.appendparents = NULL;
 
@@ -9444,6 +9639,7 @@ isSimpleNode(Node *node, Node *parentNode, int prettyFlags)
 		case T_FuncExpr:
 		case T_JsonConstructorExpr:
 		case T_JsonExpr:
+		case T_RPRNavExpr:
 			/* function-like: name(..) or name[..] */
 			return true;
 
@@ -9937,6 +10133,89 @@ get_rule_expr(Node *node, deparse_context *context,
 
 		case T_FuncExpr:
 			get_func_expr((FuncExpr *) node, context, showimplicit);
+			break;
+
+		case T_RPRNavExpr:
+			{
+				RPRNavExpr *nav = (RPRNavExpr *) node;
+				const char *outer_func = NULL;
+				const char *inner_func;
+
+				switch (nav->kind)
+				{
+					case RPR_NAV_PREV:
+						inner_func = "PREV(";
+						break;
+					case RPR_NAV_NEXT:
+						inner_func = "NEXT(";
+						break;
+					case RPR_NAV_FIRST:
+						inner_func = "FIRST(";
+						break;
+					case RPR_NAV_LAST:
+						inner_func = "LAST(";
+						break;
+					case RPR_NAV_PREV_FIRST:
+						outer_func = "PREV(";
+						inner_func = "FIRST(";
+						break;
+					case RPR_NAV_PREV_LAST:
+						outer_func = "PREV(";
+						inner_func = "LAST(";
+						break;
+					case RPR_NAV_NEXT_FIRST:
+						outer_func = "NEXT(";
+						inner_func = "FIRST(";
+						break;
+					case RPR_NAV_NEXT_LAST:
+						outer_func = "NEXT(";
+						inner_func = "LAST(";
+						break;
+					default:
+						elog(ERROR, "unrecognized RPR navigation kind: %d",
+							 nav->kind);
+						inner_func = NULL;	/* keep compiler quiet */
+						break;
+				}
+
+				if (outer_func != NULL)
+				{
+					/*
+					 * Compound: PREV(FIRST(arg [, inner_offset]) [,
+					 * outer_offset])
+					 */
+					appendStringInfoString(buf, outer_func);
+					appendStringInfoString(buf, inner_func);
+					get_rule_expr((Node *) nav->arg, context, showimplicit);
+					if (nav->offset_arg != NULL)
+					{
+						appendStringInfoString(buf, ", ");
+						get_rule_expr((Node *) nav->offset_arg, context,
+									  showimplicit);
+					}
+					appendStringInfoChar(buf, ')');
+					if (nav->compound_offset_arg != NULL)
+					{
+						appendStringInfoString(buf, ", ");
+						get_rule_expr((Node *) nav->compound_offset_arg,
+									  context, showimplicit);
+					}
+					appendStringInfoChar(buf, ')');
+				}
+				else
+				{
+					/* Simple: FUNC(arg [, offset]) */
+					appendStringInfoString(buf, inner_func);
+					get_rule_expr((Node *) nav->arg, context, showimplicit);
+					if (nav->offset_arg != NULL)
+					{
+						appendStringInfoString(buf, ", ");
+						get_rule_expr((Node *) nav->offset_arg, context,
+									  showimplicit);
+					}
+					appendStringInfoChar(buf, ')');
+				}
+			}
 			break;
 
 		case T_NamedArgExpr:
@@ -11439,7 +11718,8 @@ get_func_expr(FuncExpr *expr, deparse_context *context,
 											argnames, argtypes,
 											expr->funcvariadic,
 											&use_variadic,
-											context->inGroupBy));
+											context->inGroupBy,
+											context->inRPRDefine));
 	nargs = 0;
 	foreach(l, expr->args)
 	{
@@ -11509,7 +11789,8 @@ get_agg_expr_helper(Aggref *aggref, deparse_context *context,
 		funcname = generate_function_name(aggref->aggfnoid, nargs, NIL,
 										  argtypes, aggref->aggvariadic,
 										  &use_variadic,
-										  context->inGroupBy);
+										  context->inGroupBy,
+										  context->inRPRDefine);
 
 	/* Print the aggregate name, schema-qualified if needed */
 	appendStringInfo(buf, "%s(%s", funcname,
@@ -11650,7 +11931,8 @@ get_windowfunc_expr_helper(WindowFunc *wfunc, deparse_context *context,
 	if (!funcname)
 		funcname = generate_function_name(wfunc->winfnoid, nargs, argnames,
 										  argtypes, false, NULL,
-										  context->inGroupBy);
+										  context->inGroupBy,
+										  context->inRPRDefine);
 
 	appendStringInfo(buf, "%s(", funcname);
 
@@ -13625,7 +13907,7 @@ get_tablesample_def(TableSampleClause *tablesample, deparse_context *context)
 	appendStringInfo(buf, " TABLESAMPLE %s (",
 					 generate_function_name(tablesample->tsmhandler, 1,
 											NIL, argtypes,
-											false, NULL, false));
+											false, NULL, false, false));
 
 	nargs = 0;
 	foreach(l, tablesample->args)
@@ -14039,12 +14321,14 @@ generate_qualified_relation_name(Oid relid)
  *
  * inGroupBy must be true if we're deparsing a GROUP BY clause.
  *
+ * inRPRDefine must be true if we're deparsing an RPR DEFINE clause.
+ *
  * The result includes all necessary quoting and schema-prefixing.
  */
 static char *
 generate_function_name(Oid funcid, int nargs, List *argnames, Oid *argtypes,
 					   bool has_variadic, bool *use_variadic_p,
-					   bool inGroupBy)
+					   bool inGroupBy, bool inRPRDefine)
 {
 	char	   *result;
 	HeapTuple	proctup;
@@ -14075,6 +14359,24 @@ generate_function_name(Oid funcid, int nargs, List *argnames, Oid *argtypes,
 	if (inGroupBy)
 	{
 		if (strcmp(proname, "cube") == 0 || strcmp(proname, "rollup") == 0)
+			force_qualify = true;
+	}
+
+	/*
+	 * Inside a row pattern DEFINE clause, the parser binds an unqualified
+	 * prev/next/first/last to a navigation operation before any catalog
+	 * lookup, so an unqualified call to a user function of one of those names
+	 * would change meaning across a deparse/reparse cycle.  Force schema
+	 * qualification; the qualified form is the documented escape hatch.  Only
+	 * the exact lower-case names are at risk: a mixed-case proname deparses
+	 * quoted and cannot match the parser's downcased comparison.
+	 */
+	if (inRPRDefine)
+	{
+		if (strcmp(proname, "prev") == 0 ||
+			strcmp(proname, "next") == 0 ||
+			strcmp(proname, "first") == 0 ||
+			strcmp(proname, "last") == 0)
 			force_qualify = true;
 	}
 

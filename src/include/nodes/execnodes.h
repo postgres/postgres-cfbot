@@ -70,6 +70,7 @@ typedef struct TupleTableSlot TupleTableSlot;
 typedef struct TupleTableSlotOps TupleTableSlotOps;
 typedef struct WalUsage WalUsage;
 typedef struct WorkerNodeInstrumentation WorkerNodeInstrumentation;
+typedef struct WindowAggState WindowAggState;
 
 
 /* ----------------
@@ -1072,6 +1073,52 @@ typedef struct SubPlanState
 	FmgrInfo   *cur_eq_funcs;	/* equality functions for LHS vs. table */
 	ExprState  *cur_eq_comp;	/* equality comparator for LHS vs. table */
 } SubPlanState;
+
+typedef struct RPRNavState
+{
+	NodeTag		type;
+
+	WindowAggState *winstate;
+	RPRNavExpr *rprnavexpr;
+
+	/*
+	 * Resolved navigation offsets for this execution, captured from
+	 * winstate->rprNavOffsets at expression compile time.  These live in
+	 * executor state (not on the RPRNavExpr) because plan trees are read-only
+	 * and may be shared by concurrent executions.
+	 */
+	NullableDatum offset;		/* inner offset */
+	NullableDatum compound_offset;	/* outer offset for compound nav */
+	int16		resulttyplen;	/* RESTORE: result type length */
+	bool		resulttypbyval; /* RESTORE: result pass-by-value? */
+} RPRNavState;
+
+/*
+ * RPRNavOffsetKind - status of a resolved navigation trim offset
+ * (WindowAggState.navMaxOffset / navFirstOffset)
+ */
+typedef enum RPRNavOffsetKind
+{
+	RPR_NAV_OFFSET_FIXED,		/* resolved constant; use the offset value */
+	RPR_NAV_OFFSET_NEEDS_EVAL,	/* non-constant offset; shows "runtime",
+								 * resolved per scan */
+	RPR_NAV_OFFSET_RETAIN_ALL,	/* offset overflow; retain all rows (no trim) */
+} RPRNavOffsetKind;
+
+/*
+ * RPRNavOffsets - one entry of WindowAggState.rprNavOffsets
+ *
+ * Associates an RPRNavExpr from the (read-only) plan tree with its offsets,
+ * built by build_define_offsets() at executor startup and settled once per
+ * scan by resolve_nav_offsets().  The list is in RPRNavExpr.navno order.
+ */
+typedef struct RPRNavOffsets
+{
+	RPRNavExpr *nav;			/* plan-tree node this entry belongs to */
+	ExprState  *offset_state;	/* inner offset expr, evaluated once per scan */
+	ExprState  *compound_offset_state;	/* outer (compound) offset expr */
+	RPRNavState *rprnavstate;	/* execution state; holds the resolved values */
+} RPRNavOffsets;
 
 /*
  * DomainConstraintState - one item to check during CoerceToDomain
@@ -2524,6 +2571,91 @@ typedef enum WindowAggStatus
 									 * tuples during spool */
 } WindowAggStatus;
 
+/* RPR reduced frame states returned by get_reduced_frame_status() */
+#define RF_NOT_DETERMINED	0	/* not yet processed */
+#define RF_FRAME_HEAD		1	/* start row of a match */
+#define RF_SKIPPED			2	/* interior row of a match */
+#define RF_UNMATCHED		3	/* no match at this row */
+#define RF_EMPTY_MATCH		4	/* empty match (0 rows); treated as unmatched */
+
+/*
+ * RPRNFAState - single NFA state for pattern matching
+ *
+ * counts[] tracks repetition counts at each nesting depth.
+ *
+ * isAbsorbable tracks if state is in absorbable region (ABSORBABLE_BRANCH).
+ * Monotonic property: once false, stays false (can't re-enter region).
+ */
+typedef struct RPRNFAState
+{
+	struct RPRNFAState *next;	/* next state in linked list */
+	int16		elemIdx;		/* current pattern element index */
+	bool		isAbsorbable;	/* true if state is in absorbable region */
+	int32		counts[FLEXIBLE_ARRAY_MEMBER];	/* repetition counts by depth */
+} RPRNFAState;
+
+/*
+ * RPRNFAContext - context for NFA pattern matching execution
+ *
+ * Two-flag absorption design:
+ *   hasAbsorbableState: can this context absorb others? (>=1 absorbable state)
+ *     - Monotonic: true->false only, cannot recover once false
+ *     - Used to skip absorption attempts once all absorbable states are gone
+ *   allStatesAbsorbable: can this context be absorbed? (ALL states
+ *   absorbable, no recorded match)
+ *     - Dynamic: false->true when non-absorbable states die; a recorded
+ *       match pins it false
+ *     - Used to determine if this context is eligible for absorption
+ */
+typedef struct RPRNFAContext
+{
+	struct RPRNFAContext *next; /* next context in linked list */
+	struct RPRNFAContext *prev; /* previous context (for reverse traversal) */
+	RPRNFAState *states;		/* active states (linked list) */
+
+	int64		matchStartRow;	/* row where match started */
+	int64		matchEndRow;	/* last row of the match; below matchStartRow
+								 * for an empty one, -1 before any */
+	int64		lastProcessedRow;	/* last row processed (for fail depth) */
+	RPRNFAState *matchedState;	/* this context's match candidate, or NULL */
+	bool		matchUpdated;	/* matchedState was set or replaced during the
+								 * advance now running */
+
+	/* Two-flag absorption optimization */
+	bool		hasAbsorbableState; /* can absorb others (>=1 absorbable
+									 * state) */
+	bool		allStatesAbsorbable;	/* can be absorbed (ALL states
+										 * absorbable) */
+} RPRNFAContext;
+
+/*
+ * NFALengthStats
+ *
+ * Statistics for length measurements (min/max/total) used for computing
+ * average lengths in EXPLAIN ANALYZE output.
+ */
+typedef struct NFALengthStats
+{
+	int64		min;			/* minimum length */
+	int64		max;			/* maximum length */
+	int64		total;			/* total length (for computing average) */
+} NFALengthStats;
+
+/*
+ * Tri-state result of a DEFINE predicate for one row pattern variable at the
+ * current row.  RPR_VAR_UNEVALUATED is the "not yet evaluated" sentinel and
+ * must be zero so palloc0 initializes the per-row cache to it; the DEFINE is
+ * evaluated lazily at the point the NFA first consumes the variable (see
+ * nfa_eval_var_match).  A NULL DEFINE result folds to RPR_VAR_FALSE
+ * (non-True = not mapped, per ISO/IEC 19075-5).
+ */
+typedef enum RPRVarMatch
+{
+	RPR_VAR_UNEVALUATED = 0,	/* not yet evaluated (sentinel) */
+	RPR_VAR_FALSE,				/* evaluated to non-True (FALSE or NULL) */
+	RPR_VAR_TRUE,				/* evaluated to True */
+} RPRVarMatch;
+
 typedef struct WindowAggState
 {
 	ScanState	ss;				/* its first field is NodeTag */
@@ -2583,10 +2715,56 @@ typedef struct WindowAggState
 	int64		groupheadpos;	/* current row's peer group head position */
 	int64		grouptailpos;	/* " " " " tail position (group end+1) */
 
+	/* these fields are used in Row pattern recognition: */
+	RPSkipTo	rpSkipTo;		/* Row Pattern Skip To type */
+	struct RPRPattern *rpPattern;	/* compiled pattern for NFA execution */
+	List	   *defineClauseExprs;	/* row pattern DEFINE search conditions as
+									 * an ExprState list, in DEFINE order
+									 * (list index == varId) */
+	RPRNFAContext *nfaContext;	/* active matching contexts (head) */
+	RPRNFAContext *nfaContextTail;	/* tail of active contexts (for reverse
+									 * traversal) */
+	RPRNFAContext *nfaContextFree;	/* recycled NFA context nodes */
+	RPRNFAState *nfaStateFree;	/* recycled NFA state nodes */
+	Size		nfaStateSize;	/* pre-calculated RPRNFAState size */
+	RPRVarMatch *nfaVarMatched; /* per-row tri-state cache: varMatched[varId]
+								 * for varId < list_length(defineClauseExprs),
+								 * evaluated lazily */
+	Bitmapset  *defineMatchStartDependent;	/* DEFINE vars needing per-context
+											 * evaluation
+											 * (match_start-dependent) */
+	bitmapword *nfaVisitedEnds; /* nullable ENDs reached in this DFS, indexed
+								 * by elemIdx (cycle detection) */
+	int16		nfaVisitedMinWord;	/* lowest bitmapword index touched since
+									 * last reset (PG_INT16_MAX = none) */
+	int16		nfaVisitedMaxWord;	/* highest bitmapword index touched since
+									 * last reset (-1 = none) */
+	int64		nfaLastProcessedRow;	/* last row processed by NFA (-1 =
+										 * none) */
+
+	/* NFA statistics for EXPLAIN ANALYZE */
+	int64		nfaStatesActive;	/* current active states (internal) */
+	int64		nfaStatesMax;	/* peak active states */
+	int64		nfaStatesTotalCreated;	/* total states allocated */
+	int64		nfaStatesMerged;	/* states merged (deduplicated) */
+	int64		nfaContextsActive;	/* current active contexts (internal) */
+	int64		nfaContextsMax; /* peak active contexts */
+	int64		nfaContextsTotalCreated;	/* total contexts allocated */
+	int64		nfaContextsAbsorbed;	/* contexts absorbed (optimization) */
+	int64		nfaContextsSkipped; /* contexts skipped (SKIP PAST LAST ROW) */
+	int64		nfaContextsPruned;	/* contexts pruned on first row */
+	int64		nfaMatchesSucceeded;	/* successful pattern matches */
+	int64		nfaMatchesFailed;	/* failed pattern matches */
+	NFALengthStats nfaMatchLen; /* successful match length stats */
+	NFALengthStats nfaFailLen;	/* mismatch length stats */
+	NFALengthStats nfaAbsorbedLen;	/* absorbed context length stats */
+	NFALengthStats nfaSkippedLen;	/* skipped context length stats */
+
 	MemoryContext partcontext;	/* context for partition-lifespan data */
 	MemoryContext aggcontext;	/* shared context for aggregate working data */
 	MemoryContext curaggcontext;	/* current aggregate's working data */
 	ExprContext *tmpcontext;	/* short-term evaluation context */
+	ExprContext *rprContext;	/* DEFINE clause evaluation context */
 
 	bool		all_first;		/* true if the scan is starting */
 	bool		partition_spooled;	/* true if all tuples in current partition
@@ -2610,6 +2788,42 @@ typedef struct WindowAggState
 	TupleTableSlot *agg_row_slot;
 	TupleTableSlot *temp_slot_1;
 	TupleTableSlot *temp_slot_2;
+
+	/* RPR navigation */
+
+	/*
+	 * per-execution resolved nav offsets: list of RPRNavOffsets, indexed by
+	 * RPRNavExpr.navno; built by build_define_offsets()
+	 */
+	List	   *rprNavOffsets;
+	bool		navResolvePending;	/* nav offsets need (re)resolving at the
+									 * next ExecWindowAgg call; set at init
+									 * and rescan, cleared by
+									 * resolve_nav_offsets() */
+	bool		hasMaxNav;		/* backward nav in DEFINE: PREV, LAST,
+								 * compound PREV_LAST/NEXT_LAST */
+	bool		hasFirstNav;	/* forward nav in DEFINE: FIRST, compound
+								 * PREV_FIRST/NEXT_FIRST */
+	RPRNavOffsetKind navMaxOffsetKind;	/* status of navMaxOffset */
+	int64		navMaxOffset;	/* max backward nav offset (when FIXED) */
+	RPRNavOffsetKind navFirstOffsetKind;	/* status of navFirstOffset */
+	int64		navFirstOffset; /* min forward reach from match_start (when
+								 * FIXED); negative when a compound PREV_FIRST
+								 * reaches back past it */
+	struct WindowObjectData *nav_winobj;	/* winobj for RPR */
+	int64		nav_slot_pos;	/* position cached in nav_slot, or -1 */
+	TupleTableSlot *nav_slot;	/* slot holding the resolved navigation target
+								 * row (simple or compound
+								 * PREV/NEXT/FIRST/LAST) */
+	TupleTableSlot *nav_saved_outertuple;	/* saved slot during nav swap */
+	int64		nav_match_start;	/* match_start for FIRST/LAST nav */
+
+	/* RPR current match result */
+	int64		rpr_match_start;	/* start of the result; < 0 = not
+									 * determined */
+	int64		rpr_match_length;	/* result kind when start >= 0: -1
+									 * unmatched, 0 empty match, >= 1 real
+									 * match length */
 } WindowAggState;
 
 /* ----------------

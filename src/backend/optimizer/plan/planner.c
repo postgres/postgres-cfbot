@@ -1062,6 +1062,21 @@ subquery_planner(PlannerGlobal *glob, Query *parse, char *plan_name,
 												EXPRKIND_LIMIT);
 		wc->endOffset = preprocess_expression(root, wc->endOffset,
 											  EXPRKIND_LIMIT);
+		wc->defineClause = (List *) preprocess_expression(root,
+														  (Node *) wc->defineClause,
+														  EXPRKIND_TARGET);
+
+		/*
+		 * Reject volatile expressions in an RPR DEFINE clause.  This is done
+		 * here, not during parse analysis, to follow the convention of not
+		 * checking expression volatility while parsing.  A subquery the
+		 * planner discards before reaching this point is therefore not
+		 * checked, which is the same rule that lets a volatile fold away.
+		 */
+		if (contain_volatile_functions((Node *) wc->defineClause))
+			ereport(ERROR,
+					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("DEFINE clause cannot contain volatile functions"));
 	}
 
 	parse->limitOffset = preprocess_expression(root, parse->limitOffset,
@@ -6083,6 +6098,14 @@ optimize_window_clauses(PlannerInfo *root, WindowFuncLists *wflists)
 		if (wflists->windowFuncs[wc->winref] == NIL)
 			continue;
 
+		/*
+		 * If a DEFINE clause exists, do not let support functions replace the
+		 * frame with a non-RPR-compatible one.  RPR windows require ROWS
+		 * BETWEEN CURRENT ROW AND ...
+		 */
+		if (wc->defineClause != NIL)
+			continue;
+
 		foreach(lc2, wflists->windowFuncs[wc->winref])
 		{
 			SupportRequestOptimizeWindowClause req;
@@ -6160,13 +6183,19 @@ optimize_window_clauses(PlannerInfo *root, WindowFuncLists *wflists)
 
 				/*
 				 * Perform the same duplicate check that is done in
-				 * transformWindowFuncCall.
+				 * transformWindowFuncCall. wc is never an RPR clause here
+				 * (those are skipped above), and an RPR existing_wc differs
+				 * in its frame options anyway, so the RPR-related comparisons
+				 * are a defensive backstop for parity.
 				 */
 				if (equal(wc->partitionClause, existing_wc->partitionClause) &&
 					equal(wc->orderClause, existing_wc->orderClause) &&
 					wc->frameOptions == existing_wc->frameOptions &&
 					equal(wc->startOffset, existing_wc->startOffset) &&
-					equal(wc->endOffset, existing_wc->endOffset))
+					equal(wc->endOffset, existing_wc->endOffset) &&
+					wc->rpSkipTo == existing_wc->rpSkipTo &&
+					equal(wc->defineClause, existing_wc->defineClause) &&
+					equal(wc->rpPattern, existing_wc->rpPattern))
 				{
 					ListCell   *lc4;
 
