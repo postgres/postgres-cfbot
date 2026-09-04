@@ -29,6 +29,7 @@
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/hsearch.h"
+#include "utils/memutils.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 
@@ -40,6 +41,16 @@ typedef struct SeenRelsEntry
 	Oid			rel_id;			/* relation oid */
 	int			list_index;		/* its position in output list(s) */
 } SeenRelsEntry;
+
+/*
+ * Entry of a hash table used in find_all_inheritors_ordered.
+ */
+typedef struct OrderedSeenRelsEntry
+{
+	Oid			rel_id;
+	List	   *children;
+	int			indegree;
+}			OrderedSeenRelsEntry;
 
 /*
  * find_inheritance_children
@@ -333,6 +344,123 @@ find_all_inheritors(Oid parentrelId, LOCKMODE lockmode, List **numparents)
 	hash_destroy(seen_rels);
 
 	return rels_list;
+}
+
+/*
+ * find_all_inheritors_ordered -
+ *		Same as find_all_inheritors(), except that an ancestor is always listed
+ *		before its descendants.
+ *
+ * The ordering is produced using Kahn's topological sorting algorithm.
+ */
+List *
+find_all_inheritors_ordered(Oid parentrelId, LOCKMODE lockmode)
+{
+	MemoryContext temp_context;
+	MemoryContext old_context;
+	HTAB	   *seen_rels;
+	HASHCTL		ctl;
+	List	   *agenda;
+	List	   *worklist = NIL;
+	List	   *ordered = NIL;
+	List	   *result = NIL;
+	ListCell   *lc;
+	OrderedSeenRelsEntry *node;
+	bool		found;
+
+	/* Use a temporary memory context to simplify cleanup */
+	temp_context = AllocSetContextCreate(CurrentMemoryContext,
+										 "find_all_inheritors_ordered",
+										 ALLOCSET_SMALL_SIZES);
+	old_context = MemoryContextSwitchTo(temp_context);
+
+	ctl.keysize = sizeof(Oid);
+	ctl.entrysize = sizeof(OrderedSeenRelsEntry);
+	ctl.hcxt = temp_context;
+
+	seen_rels = hash_create("find_all_inheritors_ordered temporary table",
+							32, /* start small and extend */
+							&ctl,
+							HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+	node = hash_search(seen_rels, &parentrelId, HASH_ENTER, &found);
+	Assert(!found);
+	node->children = NIL;
+	node->indegree = 0;
+
+	/*
+	 * Use the agenda to find every descendant and record every inheritance
+	 * edge.  The indegree is the number of direct parents within this
+	 * inheritance graph.
+	 */
+	agenda = list_make1_oid(parentrelId);
+	foreach(lc, agenda)
+	{
+		Oid			current_oid = lfirst_oid(lc);
+		List	   *children;
+		OrderedSeenRelsEntry *current;
+
+		current = hash_search(seen_rels, &current_oid, HASH_FIND, NULL);
+		Assert(current != NULL);
+
+		children = find_inheritance_children(current_oid, lockmode);
+		foreach_oid(child_oid, children)
+		{
+			node = hash_search(seen_rels, &child_oid, HASH_ENTER, &found);
+			if (!found)
+			{
+				node->children = NIL;
+				node->indegree = 0;
+				agenda = lappend_oid(agenda, child_oid);
+			}
+
+			current->children = lappend_oid(current->children, child_oid);
+			node->indegree++;
+		}
+		list_free(children);
+	}
+
+	/*
+	 * Emit nodes in topological order.  A node enters the worklist only after
+	 * all of its direct parents have been emitted.
+	 */
+	foreach_oid(rel_oid, agenda)
+	{
+		node = hash_search(seen_rels, &rel_oid, HASH_FIND, NULL);
+		Assert(node != NULL);
+		if (node->indegree == 0)
+			worklist = lappend_oid(worklist, rel_oid);
+	}
+
+	/*
+	 * Move nodes from the worklist to the output list, and add their children
+	 * to the worklist when all of their parents have been emitted.
+	 */
+	foreach_oid(rel_oid, worklist)
+	{
+		node = hash_search(seen_rels, &rel_oid, HASH_FIND, NULL);
+		Assert(node != NULL);
+		ordered = lappend_oid(ordered, rel_oid);
+
+		foreach_oid(child_oid, node->children)
+		{
+			OrderedSeenRelsEntry *child;
+
+			child = hash_search(seen_rels, &child_oid, HASH_FIND, NULL);
+			Assert(child != NULL);
+			Assert(child->indegree > 0);
+			if (--child->indegree == 0)
+				worklist = lappend_oid(worklist, child_oid);
+		}
+	}
+
+	Assert(list_length(ordered) == list_length(agenda));
+
+	MemoryContextSwitchTo(old_context);
+	result = list_copy(ordered);
+	MemoryContextDelete(temp_context);
+
+	return result;
 }
 
 
