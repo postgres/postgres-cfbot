@@ -3921,7 +3921,11 @@ match_clause_to_ordering_op(IndexOptInfo *index,
  *		of the specified relation.
  *
  * predOK is set true if the index is partial and its predicate is satisfied
- * for this query, ie the query's WHERE clauses imply the predicate.
+ * for this query, ie the query's WHERE clauses imply the predicate.  The
+ * proof can use base restrictions, movable join clauses, and EC-derived
+ * clauses.
+ *
+ * predOKBase is set true if base restrictions alone imply the predicate.
  *
  * indrestrictinfo is set to the relation's baserestrictinfo list less any
  * conditions that are implied by the index's predicate.  (Obviously, for a
@@ -3939,7 +3943,9 @@ match_clause_to_ordering_op(IndexOptInfo *index,
 void
 check_index_predicates(PlannerInfo *root, RelOptInfo *rel)
 {
-	List	   *clauselist;
+	List	   *base_clauses;
+	List	   *all_clauses;
+	bool		have_extra_clauses;
 	bool		have_partial;
 	bool		is_target_rel;
 	Relids		otherrels;
@@ -3972,7 +3978,8 @@ check_index_predicates(PlannerInfo *root, RelOptInfo *rel)
 	 * rel.  Also, we can consider any EC-derivable join clauses (which must
 	 * be "movable to" this rel, by definition).
 	 */
-	clauselist = list_copy(rel->baserestrictinfo);
+	base_clauses = rel->baserestrictinfo;
+	all_clauses = list_copy(base_clauses);
 
 	/* Scan the rel's join clauses */
 	foreach(lc, rel->joininfo)
@@ -3983,7 +3990,7 @@ check_index_predicates(PlannerInfo *root, RelOptInfo *rel)
 		if (!join_clause_is_movable_to(rinfo, rel))
 			continue;
 
-		clauselist = lappend(clauselist, rinfo);
+		all_clauses = lappend(all_clauses, rinfo);
 	}
 
 	/*
@@ -4002,14 +4009,18 @@ check_index_predicates(PlannerInfo *root, RelOptInfo *rel)
 	otherrels = bms_del_members(otherrels, rel->nulling_relids);
 
 	if (!bms_is_empty(otherrels))
-		clauselist =
-			list_concat(clauselist,
+		all_clauses =
+			list_concat(all_clauses,
 						generate_join_implied_equalities(root,
 														 bms_union(rel->relids,
 																   otherrels),
 														 otherrels,
 														 rel,
 														 NULL));
+
+	/* Avoid repeating the base-only proof if no extra clauses were added. */
+	have_extra_clauses =
+		(list_length(all_clauses) != list_length(base_clauses));
 
 	/*
 	 * Normally we remove quals that are implied by a partial index's
@@ -4041,8 +4052,19 @@ check_index_predicates(PlannerInfo *root, RelOptInfo *rel)
 		if (index->indpred == NIL)
 			continue;			/* ignore non-partial indexes here */
 
-		if (!index->predOK)		/* don't repeat work if already proven OK */
-			index->predOK = predicate_implied_by(index->indpred, clauselist,
+		if (!index->predOKBase)
+			index->predOKBase = predicate_implied_by(index->indpred,
+													 base_clauses, false);
+
+		/*
+		 * A base-only proof also proves predOK.  Otherwise, try any added
+		 * movable join and EC-derived clauses.
+		 */
+		if (index->predOKBase)
+			index->predOK = true;
+		else if (have_extra_clauses &&
+				 !index->predOK)	/* don't repeat work if already proven OK */
+			index->predOK = predicate_implied_by(index->indpred, all_clauses,
 												 false);
 
 		/* If rel is an update target, leave indrestrictinfo as set above */

@@ -456,6 +456,7 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 
 			info->indrestrictinfo = NIL;	/* set later, in indxpath.c */
 			info->predOK = false;	/* set later, in indxpath.c */
+			info->predOKBase = false;	/* set later, in indxpath.c */
 			info->unique = index->indisunique;
 			info->nullsnotdistinct = index->indnullsnotdistinct;
 			info->immediate = index->indimmediate;
@@ -2482,16 +2483,17 @@ has_unique_index(RelOptInfo *rel, AttrNumber attno)
 
 		/*
 		 * Note: ignore partial indexes, since they don't allow us to conclude
-		 * that all attr values are distinct, *unless* they are marked predOK
-		 * which means we know the index's predicate is satisfied by the
-		 * query. We don't take any interest in expressional indexes either.
-		 * Also, a multicolumn unique index doesn't allow us to conclude that
-		 * just the specified attr is unique.
+		 * that all attr values are distinct, *unless* they are marked
+		 * predOKBase which means we know the index's predicate is satisfied
+		 * by the base restrictions. We don't take any interest in
+		 * expressional indexes either. Also, a multicolumn unique index
+		 * doesn't allow us to conclude that just the specified attr is
+		 * unique.
 		 */
 		if (index->unique &&
 			index->nkeycolumns == 1 &&
 			index->indexkeys[0] == attno &&
-			(index->indpred == NIL || index->predOK))
+			(index->indpred == NIL || index->predOKBase))
 			return true;
 	}
 	return false;
