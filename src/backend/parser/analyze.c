@@ -76,6 +76,8 @@ post_parse_analyze_hook_type post_parse_analyze_hook = NULL;
 static Query *transformOptionalSelectInto(ParseState *pstate, Node *parseTree);
 static Query *transformDeleteStmt(ParseState *pstate, DeleteStmt *stmt);
 static Query *transformInsertStmt(ParseState *pstate, InsertStmt *stmt);
+static void transformInsertSetClause(ParseState *pstate, List *setClause,
+									 List **cols_p, List **valuesLists_p);
 static OnConflictExpr *transformOnConflictClause(ParseState *pstate,
 												 OnConflictClause *onConflictClause);
 static ForPortionOfExpr *transformForPortionOfClause(ParseState *pstate,
@@ -656,6 +658,166 @@ transformDeleteStmt(ParseState *pstate, DeleteStmt *stmt)
 }
 
 /*
+ * transformInsertSetClause -
+ *	  Transform INSERT ... SET clause into column list and VALUES lists.
+ *
+ * This function handles both single-row and multi-row SET syntax:
+ *   Single row: INSERT INTO t SET c1=1, c2=2
+ *   Multi-row:  INSERT INTO t SET (c1=1, c2=2), (c1=3, c2=4)
+ *
+ * The function supports different column sets across rows. For example:
+ *   INSERT INTO t SET (c1=1, c2=2, c3=3), (c1=4, c2=5)
+ * This will generate:
+ *   - Column list: c1, c2, c3
+ *   - Values: (1, 2, 3), (4, 5, DEFAULT)
+ *
+ * Missing columns in any row are filled with DEFAULT.
+ *
+ * A SET target's identity is its column name *and* its indirection (the
+ * ".field" / "[subscript]" part, if any), matching the whole-column-vs-
+ * partial-column rules that checkInsertTargets() enforces later for
+ * ordinary column-list INSERTs: a whole-column assignment (no indirection)
+ * conflicts with any other assignment to the same column, but assignments
+ * to different subfields/elements of the same column (e.g. c.x and c.y, or
+ * arr[1] and arr[2]) target different things and are not duplicates.
+ *
+ * Because all rows are flattened into one shared column list (as with an
+ * ordinary multi-row VALUES INSERT), every row must agree on which
+ * particular subfield/element of a column it is targeting.  A row that
+ * omits a partial target used by another row gets DEFAULT for it, which is
+ * then rejected downstream (DEFAULT is not allowed for an indirection
+ * target) rather than silently landing in the wrong subfield/element.
+ */
+static void
+transformInsertSetClause(ParseState *pstate, List *setClause,
+						 List **cols_p, List **valuesLists_p)
+{
+	List	   *all_cols = NIL;		/* List of all unique SET targets */
+	List	   *valuesLists = NIL;
+
+	/*
+	 * First pass: collect all unique SET targets from all rows.  We need
+	 * to scan all rows first to determine the complete set of targets.
+	 * Also check for conflicting targets within each row.
+	 */
+	foreach_node(List, set_clause, setClause)
+	{
+		List	   *row_cols = NIL;		/* Targets seen in this row */
+
+		foreach_node(ResTarget, res, set_clause)
+		{
+			bool		found = false;
+
+			/*
+			 * Check for a conflicting target in the same row.  A
+			 * whole-column assignment can't coexist with any other
+			 * assignment to the same column name, but multiple partial
+			 * (subfield/subscript) assignments to different targets of the
+			 * same column are fine.
+			 */
+			foreach_node(ResTarget, row_col, row_cols)
+			{
+				if (strcmp(row_col->name, res->name) == 0 &&
+					(res->indirection == NIL || row_col->indirection == NIL))
+				{
+					ereport(ERROR,
+							(errcode(ERRCODE_SYNTAX_ERROR),
+							 errmsg("column \"%s\" specified more than once",
+									res->name),
+							 parser_errposition(pstate, res->location)));
+				}
+			}
+
+			/* Add to this row's target list */
+			row_cols = lappend(row_cols, res);
+
+			/*
+			 * Check if we've already seen this exact target (same column
+			 * name and same indirection) across all rows processed so
+			 * far.
+			 */
+			foreach_node(ResTarget, existing, all_cols)
+			{
+				if (strcmp(existing->name, res->name) == 0 &&
+					equal(existing->indirection, res->indirection))
+				{
+					found = true;
+					break;
+				}
+			}
+
+			/* If this is a new target across all rows, add it to our list */
+			if (!found)
+			{
+				ResTarget  *col = makeNode(ResTarget);
+
+				col->name = res->name;
+				col->indirection = res->indirection;
+				col->val = NULL;
+				col->location = res->location;
+				all_cols = lappend(all_cols, col);
+			}
+		}
+	}
+
+	/*
+	 * Second pass: for each row, create a values list matching the target
+	 * order from all_cols. Use DEFAULT for any target not present in this
+	 * row.
+	 */
+	foreach_node(List, set_clause, setClause)
+	{
+		List	   *vals = NIL;
+
+		/* For each target in the complete target list */
+		foreach_node(ResTarget, col, all_cols)
+		{
+			Node	   *val = NULL;
+			bool		found = false;
+
+			/*
+			 * Search for this exact target in the current row.  Scan the
+			 * whole row (rather than stopping at the first match) so that,
+			 * if the same target is assigned more than once in a row, the
+			 * last assignment wins, consistent with ordinary column-list
+			 * INSERT/UPDATE SET behavior for repeated partial targets.
+			 */
+			foreach_node(ResTarget, res, set_clause)
+			{
+				if (strcmp(col->name, res->name) == 0 &&
+					equal(col->indirection, res->indirection))
+				{
+					val = res->val;
+					found = true;
+				}
+			}
+
+			if (found)
+				vals = lappend(vals, val);
+			else
+			{
+				/*
+				 * The target is not present in this row.  Fill with
+				 * DEFAULT; if the target has indirection, this will be
+				 * rejected downstream rather than silently misapplied.
+				 */
+				SetToDefault *def = makeNode(SetToDefault);
+
+				def->location = -1;
+				vals = lappend(vals, def);
+			}
+		}
+
+		/* Add this row's values to the valuesLists */
+		valuesLists = lappend(valuesLists, vals);
+	}
+
+	/* Return the results */
+	*cols_p = all_cols;
+	*valuesLists_p = valuesLists;
+}
+
+/*
  * transformInsertStmt -
  *	  transform an Insert Statement
  */
@@ -693,6 +855,26 @@ transformInsertStmt(ParseState *pstate, InsertStmt *stmt)
 	}
 
 	qry->override = stmt->override;
+
+	/*
+	 * If we have SET clause (INSERT ... SET col=val, ...), transform it
+	 * into column list and VALUES list before further processing.
+	 */
+	if (stmt->setClause != NIL)
+	{
+		List	   *cols = NIL;
+		List	   *valuesLists = NIL;
+
+		/* Transform SET clause into columns and values */
+		transformInsertSetClause(pstate, stmt->setClause, &cols, &valuesLists);
+
+		/* Create a SelectStmt with multiple VALUES rows */
+		selectStmt = makeNode(SelectStmt);
+		selectStmt->valuesLists = valuesLists;
+		stmt->selectStmt = (Node *) selectStmt;
+		stmt->cols = cols;
+		stmt->setClause = NIL;	/* clear it so we don't process again */
+	}
 
 	/*
 	 * ON CONFLICT DO UPDATE and ON CONFLICT DO SELECT FOR UPDATE/SHARE
