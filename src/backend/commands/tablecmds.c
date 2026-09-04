@@ -556,7 +556,8 @@ static ObjectAddress ATExecSetStorage(Relation rel, const char *colName,
 static void ATPrepDropColumn(List **wqueue, Relation rel, bool recurse, bool recursing,
 							 AlterTableCmd *cmd, LOCKMODE lockmode,
 							 AlterTableUtilityContext *context);
-static ObjectAddress ATExecDropColumn(List **wqueue, Relation rel, const char *colName,
+static ObjectAddress ATExecDropColumn(List **wqueue, AlteredTableInfo *tab,
+									  Relation rel, const char *colName,
 									  DropBehavior behavior,
 									  bool recurse, bool recursing,
 									  bool missing_ok, LOCKMODE lockmode,
@@ -5409,7 +5410,8 @@ ATRewriteCatalogs(List **wqueue, LOCKMODE lockmode,
 			 * (this is not done in ATExecAlterColumnType since it should be
 			 * done only once if multiple columns of a table are altered).
 			 */
-			if (pass == AT_PASS_ALTER_TYPE || pass == AT_PASS_SET_EXPRESSION)
+			if (pass == AT_PASS_ADD_COL || pass == AT_PASS_DROP ||
+				pass == AT_PASS_ALTER_TYPE || pass == AT_PASS_SET_EXPRESSION)
 				ATPostAlterTypeCleanup(wqueue, tab, lockmode);
 
 			if (tab->rel)
@@ -5508,7 +5510,7 @@ ATExecCmd(List **wqueue, AlteredTableInfo *tab,
 										   lockmode);
 			break;
 		case AT_DropColumn:		/* DROP COLUMN */
-			address = ATExecDropColumn(wqueue, rel, cmd->name,
+			address = ATExecDropColumn(wqueue, tab, rel, cmd->name,
 									   cmd->behavior, cmd->recurse, false,
 									   cmd->missing_ok, lockmode,
 									   NULL);
@@ -7444,6 +7446,12 @@ ATExecAddColumn(List **wqueue, AlteredTableInfo *tab, Relation rel,
 				(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
 				 errmsg("cannot recursively add identity column to table that has child tables")));
 
+	/*
+	 * Remember we need to invalidate whole-row dependents, to make sure they
+	 * correctly handle the new column.
+	 */
+	RememberWholeRowDependentForRebuilding(tab, AT_AddColumn, rel);
+
 	pgclass = table_open(RelationRelationId, RowExclusiveLock);
 
 	reltup = SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(myrelid));
@@ -9362,11 +9370,10 @@ ATPrepDropColumn(List **wqueue, Relation rel, bool recurse, bool recursing,
  * checked recursively.
  */
 static ObjectAddress
-ATExecDropColumn(List **wqueue, Relation rel, const char *colName,
-				 DropBehavior behavior,
-				 bool recurse, bool recursing,
-				 bool missing_ok, LOCKMODE lockmode,
-				 ObjectAddresses *addrs)
+ATExecDropColumn(List **wqueue, AlteredTableInfo *tab, Relation rel,
+				 const char *colName, DropBehavior behavior,
+				 bool recurse, bool recursing, bool missing_ok,
+				 LOCKMODE lockmode, ObjectAddresses *addrs)
 {
 	HeapTuple	tuple;
 	Form_pg_attribute targetatt;
@@ -9446,6 +9453,9 @@ ATExecDropColumn(List **wqueue, Relation rel, const char *colName,
 
 	ReleaseSysCache(tuple);
 
+	/* Invalidate whole-row */
+	RememberWholeRowDependentForRebuilding(tab, AT_DropColumn, rel);
+
 	/*
 	 * Propagate to children as appropriate.  Unlike most other ALTER
 	 * routines, we have to do this one level of recursion at a time; we can't
@@ -9500,9 +9510,9 @@ ATExecDropColumn(List **wqueue, Relation rel, const char *colName,
 				if (childatt->attinhcount == 1 && !childatt->attislocal)
 				{
 					/* Time to delete this child column, too */
-					ATExecDropColumn(wqueue, childrel, colName,
-									 behavior, true, true,
-									 false, lockmode, addrs);
+					ATExecDropColumn(wqueue, tab, childrel,
+									 colName, behavior, true,
+									 true, false, lockmode, addrs);
 				}
 				else
 				{
@@ -15327,6 +15337,13 @@ ATExecAlterColumnType(AlteredTableInfo *tab, Relation rel,
 	RememberAllDependentForRebuilding(tab, AT_AlterColumnType, rel, attnum, colName);
 
 	/*
+	 * Find whole-row referenced objects that depend on the column
+	 * (constraints, indexes, etc.), and record enough information to let us
+	 * recreate the objects.
+	 */
+	RememberWholeRowDependentForRebuilding(tab, AT_AlterColumnType, rel);
+
+	/*
 	 * Now scan for dependencies of this column on other things.  The only
 	 * things we should find are the dependency on the column datatype and
 	 * possibly a collation dependency.  Those can be removed.
@@ -15521,8 +15538,9 @@ ATExecAlterColumnType(AlteredTableInfo *tab, Relation rel,
 }
 
 /*
- * Subroutine for ATExecAlterColumnType and ATExecSetExpression: Find everything
- * that depends on the column (constraints, indexes, etc), and record enough
+ * Subroutine for ATExecAlterColumnType, ATExecSetExpression, ATExecAddColumn,
+ * and ATExecDropColumn: Find everything that depends on the column or
+ * whole-row reference (constraints, indexes, etc), and record enough
  * information to let us recreate the objects.
  */
 static void
@@ -15534,7 +15552,9 @@ RememberAllDependentForRebuilding(AlteredTableInfo *tab, AlterTableType subtype,
 	SysScanDesc scan;
 	HeapTuple	depTup;
 
-	Assert(subtype == AT_AlterColumnType || subtype == AT_SetExpression);
+	Assert(subtype == AT_AlterColumnType || subtype == AT_SetExpression ||
+		   (attnum == WholeRowAttrNumber && (subtype == AT_AddColumn ||
+											 subtype == AT_DropColumn)));
 
 	depRel = table_open(DependRelationId, RowExclusiveLock);
 
@@ -15608,8 +15628,10 @@ RememberAllDependentForRebuilding(AlteredTableInfo *tab, AlterTableType subtype,
 				 *
 				 * This is only a problem for AT_AlterColumnType, not
 				 * AT_SetExpression.
+				 *
+				 * Whole Row expressions are ignored.
 				 */
-				if (subtype == AT_AlterColumnType)
+				if (subtype == AT_AlterColumnType && attnum != WholeRowAttrNumber)
 					ereport(ERROR,
 							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 							 errmsg("cannot alter type of a column used by a function or procedure"),
@@ -15624,7 +15646,7 @@ RememberAllDependentForRebuilding(AlteredTableInfo *tab, AlterTableType subtype,
 				 * View/rule bodies have pretty much the same issues as
 				 * function bodies.  FIXME someday.
 				 */
-				if (subtype == AT_AlterColumnType)
+				if (subtype == AT_AlterColumnType && attnum != WholeRowAttrNumber)
 					ereport(ERROR,
 							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 							 errmsg("cannot alter type of a column used by a view or rule"),
@@ -15644,7 +15666,7 @@ RememberAllDependentForRebuilding(AlteredTableInfo *tab, AlterTableType subtype,
 				 * issues as above.  Since we can't easily tell which case
 				 * applies, we punt for both.  FIXME someday.
 				 */
-				if (subtype == AT_AlterColumnType)
+				if (subtype == AT_AlterColumnType && attnum != WholeRowAttrNumber)
 					ereport(ERROR,
 							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 							 errmsg("cannot alter type of a column used in a trigger definition"),
@@ -15663,7 +15685,7 @@ RememberAllDependentForRebuilding(AlteredTableInfo *tab, AlterTableType subtype,
 				 * easy enough to remove and recreate the policy; still, FIXME
 				 * someday.
 				 */
-				if (subtype == AT_AlterColumnType)
+				if (subtype == AT_AlterColumnType && attnum != WholeRowAttrNumber)
 					ereport(ERROR,
 							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 							 errmsg("cannot alter type of a column used in a policy definition"),
@@ -15694,7 +15716,7 @@ RememberAllDependentForRebuilding(AlteredTableInfo *tab, AlterTableType subtype,
 						 * by SQL standard, so just punt for now.  It might be
 						 * doable with some thinking and effort.
 						 */
-						if (subtype == AT_AlterColumnType)
+						if (subtype == AT_AlterColumnType && attnum != WholeRowAttrNumber)
 							ereport(ERROR,
 									(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 									 errmsg("cannot alter type of a column used by a generated column"),
@@ -15722,7 +15744,7 @@ RememberAllDependentForRebuilding(AlteredTableInfo *tab, AlterTableType subtype,
 				 * Column reference in a PUBLICATION ... FOR TABLE ... WHERE
 				 * clause.  Same issues as above.  FIXME someday.
 				 */
-				if (subtype == AT_AlterColumnType)
+				if (subtype == AT_AlterColumnType && attnum != WholeRowAttrNumber)
 					ereport(ERROR,
 							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 							 errmsg("cannot alter type of a column used by a publication WHERE clause"),
@@ -15759,160 +15781,8 @@ RememberAllDependentForRebuilding(AlteredTableInfo *tab, AlterTableType subtype,
 static void
 RememberWholeRowDependentForRebuilding(AlteredTableInfo *tab, AlterTableType subtype, Relation rel)
 {
-	ScanKeyData skey;
-	Relation	pg_constraint;
-	Relation	pg_index;
-	SysScanDesc conscan;
-	SysScanDesc indscan;
-	HeapTuple	constrTuple;
-	HeapTuple	indexTuple;
-	bool		isnull;
-
-	Assert(subtype == AT_SetExpression);
-
-	/*
-	 * Check CHECK constraints with whole-row references first.
-	 */
-	if (RelationGetDescr(rel)->constr &&
-		RelationGetDescr(rel)->constr->num_check > 0)
-	{
-		pg_constraint = table_open(ConstraintRelationId, AccessShareLock);
-
-		ScanKeyInit(&skey,
-					Anum_pg_constraint_conrelid,
-					BTEqualStrategyNumber, F_OIDEQ,
-					ObjectIdGetDatum(RelationGetRelid(rel)));
-
-		conscan = systable_beginscan(pg_constraint,
-									 ConstraintRelidTypidNameIndexId,
-									 true,
-									 NULL,
-									 1,
-									 &skey);
-
-		while (HeapTupleIsValid(constrTuple = systable_getnext(conscan)))
-		{
-			Form_pg_constraint conform = (Form_pg_constraint) GETSTRUCT(constrTuple);
-			Datum		exprDatum;
-
-			if (conform->contype != CONSTRAINT_CHECK)
-				continue;
-
-			exprDatum = heap_getattr(constrTuple,
-									 Anum_pg_constraint_conbin,
-									 RelationGetDescr(pg_constraint),
-									 &isnull);
-			if (isnull)
-				elog(ERROR, "null conbin for relation \"%s\"",
-					 RelationGetRelationName(rel));
-			else
-			{
-				char	   *exprString;
-				Node	   *expr;
-				Bitmapset  *expr_attrs = NULL;
-
-				exprString = TextDatumGetCString(exprDatum);
-				expr = stringToNode(exprString);
-				pfree(exprString);
-
-				/* Find all attributes referenced */
-				pull_varattnos(expr, 1, &expr_attrs);
-
-				/*
-				 * If the CHECK constraint contains whole-row reference then
-				 * remember it.
-				 */
-				if (bms_is_member(InvalidAttrNumber - FirstLowInvalidHeapAttributeNumber, expr_attrs))
-				{
-					RememberConstraintForRebuilding(conform->oid, tab);
-				}
-			}
-		}
-		systable_endscan(conscan);
-		table_close(pg_constraint, AccessShareLock);
-	}
-
-	/*
-	 * Now check indexes with whole-row references. Prepare to scan pg_index
-	 * for entries having indrelid matching this relation.
-	 */
-	ScanKeyInit(&skey,
-				Anum_pg_index_indrelid,
-				BTEqualStrategyNumber, F_OIDEQ,
-				ObjectIdGetDatum(RelationGetRelid(rel)));
-
-	pg_index = table_open(IndexRelationId, AccessShareLock);
-
-	indscan = systable_beginscan(pg_index,
-								 IndexIndrelidIndexId,
-								 true,
-								 NULL,
-								 1,
-								 &skey);
-
-	while (HeapTupleIsValid(indexTuple = systable_getnext(indscan)))
-	{
-		Form_pg_index index = (Form_pg_index) GETSTRUCT(indexTuple);
-		Datum		exprDatum;
-
-		exprDatum = heap_getattr(indexTuple,
-								 Anum_pg_index_indexprs,
-								 RelationGetDescr(pg_index),
-								 &isnull);
-		if (!isnull)
-		{
-			char	   *exprString;
-			Node	   *expr;
-			Bitmapset  *expr_attrs = NULL;
-
-			exprString = TextDatumGetCString(exprDatum);
-			expr = stringToNode(exprString);
-			pfree(exprString);
-
-			/* Find all attributes referenced */
-			pull_varattnos(expr, 1, &expr_attrs);
-
-			/*
-			 * If the index expression contains a whole-row reference then
-			 * remember it.
-			 */
-			if (bms_is_member(InvalidAttrNumber - FirstLowInvalidHeapAttributeNumber, expr_attrs))
-			{
-				RememberIndexForRebuilding(index->indexrelid, tab);
-				continue;
-			}
-		}
-
-		exprDatum = heap_getattr(indexTuple,
-								 Anum_pg_index_indpred,
-								 RelationGetDescr(pg_index),
-								 &isnull);
-		if (!isnull)
-		{
-			char	   *exprString;
-			Node	   *expr;
-			Bitmapset  *expr_attrs = NULL;
-
-			exprString = TextDatumGetCString(exprDatum);
-			expr = stringToNode(exprString);
-			pfree(exprString);
-
-			/* Find all attributes referenced */
-			pull_varattnos(expr, 1, &expr_attrs);
-
-			/*
-			 * If the index predicate expression contains a whole-row
-			 * reference then remember it.
-			 */
-			if (bms_is_member(InvalidAttrNumber - FirstLowInvalidHeapAttributeNumber, expr_attrs))
-			{
-				RememberIndexForRebuilding(index->indexrelid, tab);
-			}
-		}
-	}
-
-	systable_endscan(indscan);
-	table_close(pg_index, AccessShareLock);
+	return RememberAllDependentForRebuilding(tab, subtype, rel,
+											 WholeRowAttrNumber, "*");
 }
 
 /*
@@ -16094,11 +15964,11 @@ RememberStatisticsForRebuilding(Oid stxoid, AlteredTableInfo *tab)
 }
 
 /*
- * Cleanup after we've finished all the ALTER TYPE or SET EXPRESSION
- * operations for a particular relation.  We have to drop and recreate all the
- * indexes and constraints that depend on the altered columns.  We do the
- * actual dropping here, but re-creation is managed by adding work queue
- * entries to do those steps later.
+ * Cleanup after we've finished all the ADD COLUMN, DROP COLUMN, ALTER TYPE,
+ * or SET EXPRESSION operations for a particular relation.  We have to drop
+ * and recreate all the indexes and constraints that depend on the altered
+ * columns.  We do the actual dropping here, but re-creation is managed by
+ * adding work queue entries to do those steps later.
  */
 static void
 ATPostAlterTypeCleanup(List **wqueue, AlteredTableInfo *tab, LOCKMODE lockmode)
