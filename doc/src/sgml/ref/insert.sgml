@@ -23,6 +23,7 @@ PostgreSQL documentation
 <synopsis>
 [ WITH [ RECURSIVE ] <replaceable class="parameter">with_query</replaceable> [, ...] ]
 INSERT INTO <replaceable class="parameter">table_name</replaceable> [ AS <replaceable class="parameter">alias</replaceable> ] [ ( <replaceable class="parameter">column_name</replaceable> [, ...] ) ]
+    [ BY { NAME | POSITION } ]
     [ OVERRIDING { SYSTEM | USER } VALUE ]
     { DEFAULT VALUES | VALUES ( { <replaceable class="parameter">expression</replaceable> | DEFAULT } [, ...] ) [, ...] | <replaceable class="parameter">query</replaceable> }
     [ ON CONFLICT [ <replaceable class="parameter">conflict_target</replaceable> ] <replaceable class="parameter">conflict_action</replaceable> ]
@@ -63,6 +64,34 @@ INSERT INTO <replaceable class="parameter">table_name</replaceable> [ AS <replac
    <literal>VALUES</literal> clause or <replaceable>query</replaceable>.  The values
    supplied by the <literal>VALUES</literal> clause or <replaceable>query</replaceable> are
    associated with the explicit or implicit column list left-to-right.
+  </para>
+
+  <para>
+   When the data source is a <replaceable>query</replaceable>, the optional
+   <literal>BY NAME</literal> clause changes how its result columns are
+   associated with the target columns: instead of being matched
+   left-to-right (<literal>BY POSITION</literal>, the default), each result
+   column of the <replaceable>query</replaceable> is matched to the target
+   column that has the same name.  This is convenient when the source and
+   target columns are known by name but might be listed in a different order.
+   For example:
+<programlisting>
+INSERT INTO t1 (c1, c2)
+    BY NAME
+    SELECT c1 * 10 AS c2, c2 + 5 AS c1 FROM t2;
+</programlisting>
+   assigns <literal>c2 + 5</literal> to <literal>c1</literal> and
+   <literal>c1 * 10</literal> to <literal>c2</literal>.  Every result column of
+   the <replaceable>query</replaceable> must match a target column, and no two
+   result columns may match the same target column.  Target columns not named
+   by the <replaceable>query</replaceable> receive their default values, just as
+   if they had been omitted from the column list.  <literal>BY NAME</literal>
+   cannot be used with <literal>VALUES</literal> or
+   <literal>DEFAULT VALUES</literal>, since those have no column names to match
+   against.  <literal>BY POSITION</literal> is the default behavior; with
+   <literal>DEFAULT VALUES</literal>, it has no effect.
+   <literal>BY NAME</literal> cannot be used when the target column list
+   assigns to subfields or array elements.
   </para>
 
   <para>
@@ -210,6 +239,29 @@ INSERT INTO <replaceable class="parameter">table_name</replaceable> [ AS <replac
         example, <literal>INSERT INTO table_name ... ON CONFLICT DO UPDATE
         SET table_name.col = 1</literal> is invalid (this follows the general
         behavior for <command>UPDATE</command>).
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><literal>BY NAME</literal></term>
+      <term><literal>BY POSITION</literal></term>
+      <listitem>
+       <para>
+        Specifies how the result columns of the source
+        <replaceable class="parameter">query</replaceable> are matched to the
+        target columns.  With <literal>BY POSITION</literal> (the default) they
+        are matched left-to-right.  With <literal>BY NAME</literal> each result
+        column is matched to the target column of the same name; the result
+        columns may then appear in any order, and target columns not named by
+        the <replaceable class="parameter">query</replaceable> are filled with
+        their default values.  <literal>BY NAME</literal> requires a
+        <replaceable class="parameter">query</replaceable> source and cannot be
+        combined with <literal>VALUES</literal> or
+        <literal>DEFAULT VALUES</literal>.  With
+        <literal>DEFAULT VALUES</literal>, <literal>BY POSITION</literal> has no
+        effect.  <literal>BY NAME</literal> cannot be used when the target
+        column list assigns to subfields or array elements.
        </para>
       </listitem>
      </varlistentry>

@@ -2230,6 +2230,8 @@ typedef struct InsertStmt
 	ReturningClause *returningClause;	/* RETURNING clause */
 	WithClause *withClause;		/* WITH clause */
 	OverridingKind override;	/* OVERRIDING clause */
+	bool		byName;			/* BY NAME: match source columns to target
+								 * columns by name rather than by position */
 } InsertStmt;
 
 /* ----------------------
