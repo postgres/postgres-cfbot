@@ -38,6 +38,7 @@
 #include "settings.h"
 
 static const char *map_typename_pattern(const char *pattern);
+static bool describeOneSchemaDetails(const char *schemaname, bool verbose);
 static bool describeOneTableDetails(const char *schemaname,
 									const char *relationname,
 									const char *oid,
@@ -5262,22 +5263,19 @@ listCollations(const char *pattern, bool verbose, bool showSystem)
 }
 
 /*
- * \dn
- *
- * Describes schemas (namespaces)
+ * Print details and footer information for the specified schema.
  */
-bool
-listSchemas(const char *pattern, bool verbose, bool showSystem)
+static bool
+describeOneSchemaDetails(const char *schemaname, bool verbose)
 {
 	PQExpBufferData buf;
 	PGresult   *res;
 	printQueryOpt myopt = pset.popt;
-	int			pub_schema_tuples = 0;
+	PQExpBufferData title;
 	char	  **footers = NULL;
 
 	initPQExpBuffer(&buf);
-
-	printfPQExpBuffer(&buf, "/* %s */\n", _("Get matching schemas"));
+	printfPQExpBuffer(&buf, "/* %s */\n", _("Get matching schema"));
 	appendPQExpBuffer(&buf,
 					  "SELECT n.nspname AS \"%s\",\n"
 					  "  pg_catalog.pg_get_userbyid(n.nspowner) AS \"%s\"",
@@ -5294,32 +5292,26 @@ listSchemas(const char *pattern, bool verbose, bool showSystem)
 	}
 
 	appendPQExpBufferStr(&buf,
-						 "\nFROM pg_catalog.pg_namespace n\n");
-
-	if (!showSystem && !pattern)
-		appendPQExpBufferStr(&buf,
-							 "WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'\n");
-
-	if (!validateSQLNamePattern(&buf, pattern,
-								!showSystem && !pattern, false,
-								NULL, "n.nspname", NULL,
-								NULL,
-								NULL, 2))
-		goto error_return;
-
-	appendPQExpBufferStr(&buf, "ORDER BY 1;");
+						 "\nFROM pg_catalog.pg_namespace n"
+						 "\nWHERE n.nspname = ");
+	appendStringLiteralConn(&buf, schemaname, pset.db);
 
 	res = PSQLexec(buf.data);
 	if (!res)
 		goto error_return;
 
-	myopt.title = _("List of schemas");
+	initPQExpBuffer(&title);
+	printfPQExpBuffer(&title, _("Schema \"%s\""), schemaname);
+	myopt.title = title.data;
 	myopt.translate_header = true;
 
-	if (pattern && pset.sversion >= 150000)
+	/* Footer */
+	if (pset.sversion >= 150000)
 	{
 		PGresult   *result;
 		int			i;
+		int			pub_schema_tuples = 0;
+
 
 		printfPQExpBuffer(&buf, "/* %s */\n",
 						  _("Get publications that publish this schema"));
@@ -5328,14 +5320,19 @@ listSchemas(const char *pattern, bool verbose, bool showSystem)
 						  "FROM pg_catalog.pg_publication p\n"
 						  "     JOIN pg_catalog.pg_publication_namespace pn ON p.oid = pn.pnpubid\n"
 						  "     JOIN pg_catalog.pg_namespace n ON n.oid = pn.pnnspid \n"
-						  "WHERE n.nspname = '%s'\n"
-						  "ORDER BY 1",
-						  pattern);
+						  "WHERE n.nspname = ");
+		appendStringLiteralConn(&buf, schemaname, pset.db);
+
+		appendPQExpBufferStr(&buf, "ORDER BY 1;");
+
 		result = PSQLexec(buf.data);
 		if (!result)
 			goto error_return;
 		else
 			pub_schema_tuples = PQntuples(result);
+
+		/* Avoid showing "(1 row)" for tables without footers */
+		myopt.topt.default_footer = false;
 
 		if (pub_schema_tuples > 0)
 		{
@@ -5379,6 +5376,108 @@ listSchemas(const char *pattern, bool verbose, bool showSystem)
 		pg_free(footers);
 	}
 
+	return true;
+
+error_return:
+	termPQExpBuffer(&buf);
+	return false;
+}
+
+/*
+ * \dn
+ *
+ * Describes schemas (namespaces)
+ *
+ * If no pattern is specified list all schemas.
+ *
+ * If a pattern is specified call describeOneSchemaDetails for each schema
+ * that matches the pattern.
+ */
+bool
+listSchemas(const char *pattern, bool verbose, bool showSystem)
+{
+	PQExpBufferData buf;
+	PGresult   *res;
+	printQueryOpt myopt = pset.popt;
+	int			num_schemas;
+
+	initPQExpBuffer(&buf);
+
+	printfPQExpBuffer(&buf, "/* %s */\n", _("Get matching schemas"));
+	appendPQExpBuffer(&buf,
+					  "SELECT n.nspname AS \"%s\",\n"
+					  "  pg_catalog.pg_get_userbyid(n.nspowner) AS \"%s\"",
+					  gettext_noop("Name"),
+					  gettext_noop("Owner"));
+
+	if (verbose)
+	{
+		appendPQExpBufferStr(&buf, ",\n  ");
+		printACLColumn(&buf, "n.nspacl");
+		appendPQExpBuffer(&buf,
+						  ",\n  pg_catalog.obj_description(n.oid, 'pg_namespace') AS \"%s\"",
+						  gettext_noop("Description"));
+	}
+
+	appendPQExpBufferStr(&buf,
+						 "\nFROM pg_catalog.pg_namespace n\n");
+
+	if (!showSystem && !pattern)
+		appendPQExpBufferStr(&buf,
+							 "WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'\n");
+
+	if (!validateSQLNamePattern(&buf, pattern,
+								!showSystem && !pattern, false,
+								NULL, "n.nspname", NULL,
+								NULL,
+								NULL, 2))
+		goto error_return;
+
+	appendPQExpBufferStr(&buf, "ORDER BY 1;");
+
+	res = PSQLexec(buf.data);
+	if (!res)
+		goto error_return;
+
+	num_schemas = PQntuples(res);
+
+	/*
+	 * Most functions in this file are content to print an empty table when
+	 * there are no matching objects.  We intentionally deviate from that
+	 * here, but only in !quiet mode, to be same as \dt
+	 */
+	if (num_schemas == 0 && !pset.quiet)
+	{
+		if (pattern)
+			pg_log_error("Did not find any schemas named \"%s\".",
+						 pattern);
+		else
+			pg_log_error("Did not find any schemas");
+
+		PQclear(res);
+		termPQExpBuffer(&buf);
+		return false;
+	}
+
+	if (pattern == NULL || num_schemas == 0)
+	{
+		myopt.title = _("List of schemas");
+		myopt.translate_header = true;
+
+		printQuery(res, &myopt, pset.queryFout, false, pset.logfile);
+	}
+	else
+	{
+		for (int i = 0; i < num_schemas; i++)
+		{
+			const char *nspname = PQgetvalue(res, i, 0);
+
+			describeOneSchemaDetails(nspname, verbose);
+		}
+	}
+
+	termPQExpBuffer(&buf);
+	PQclear(res);
 	return true;
 
 error_return:
