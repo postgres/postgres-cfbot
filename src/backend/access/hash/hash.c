@@ -562,6 +562,12 @@ bucket_loop:
 		Page		page;
 		bool		split_cleanup = false;
 
+		/*
+		 * Check for interrupts before acquiring the cleanup lock on the next
+		 * bucket.
+		 */
+		vacuum_delay_point(false);
+
 		/* Get address of bucket's start page */
 		bucket_blkno = BUCKET_TO_BLKNO(cachedmetap, cur_bucket);
 
@@ -798,8 +804,6 @@ hashbucketcleanup(Relation rel, Bucket cur_bucket, Buffer bucket_buf,
 		int			ndeletable = 0;
 		bool		retain_pin = false;
 		bool		clear_dead_marking = false;
-
-		vacuum_delay_point(false);
 
 		page = BufferGetPage(buf);
 		opaque = HashPageGetOpaque(page);
