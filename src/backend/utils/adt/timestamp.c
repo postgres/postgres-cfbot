@@ -5055,13 +5055,17 @@ timestamptz_trunc_internal(text *units, TimestampTz timestamp, pg_tz *tzp)
 				pg_fallthrough;
 			case DTK_DAY:
 				tm->tm_hour = 0;
-				redotz = true;	/* for all cases >= DAY */
 				pg_fallthrough;
 			case DTK_HOUR:
 				tm->tm_min = 0;
 				pg_fallthrough;
 			case DTK_MINUTE:
 				tm->tm_sec = 0;
+				/*
+				 * Truncating anything larger than a second it might
+				 * cross a time transition.
+				 */
+				redotz = true;
 				pg_fallthrough;
 			case DTK_SECOND:
 				fsec = 0;
