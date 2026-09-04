@@ -6352,18 +6352,25 @@ StartupXLOG(void)
 		 * recover from an online backup but never called pg_backup_stop(), or
 		 * you didn't archive all the WAL needed.
 		 */
-		if (ArchiveRecoveryRequested || ControlFile->backupEndRequired)
-		{
-			if (XLogRecPtrIsValid(ControlFile->backupStartPoint) || ControlFile->backupEndRequired)
-				ereport(FATAL,
-						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-						 errmsg("WAL ends before end of online backup"),
-						 errhint("All WAL generated while online backup was taken must be available at recovery.")));
-			else
-				ereport(FATAL,
-						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-						 errmsg("WAL ends before consistent recovery point")));
-		}
+		if (ControlFile->backupEndRequired ||
+			(XLogRecPtrIsValid(ControlFile->backupStartPoint) &&
+			 ArchiveRecoveryRequested))
+			ereport(FATAL,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("WAL ends before end of online backup"),
+					 errhint("All WAL generated while online backup was taken must be available at recovery.")));
+
+		/*
+		 * If minRecoveryPoint has not been reached, the data is not yet
+		 * consistent. This applies regardless of whether archive recovery
+		 * was requested - pg_rewind sets minRecoveryPoint without signal
+		 * files, and opening the database without reaching it would expose
+		 * inconsistent data.
+		 */
+		if (EndOfLog < LocalMinRecoveryPoint)
+			ereport(FATAL,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("WAL ends before consistent recovery point")));
 	}
 
 	/*
