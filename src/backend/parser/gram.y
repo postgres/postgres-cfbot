@@ -165,6 +165,7 @@ static Node *makeBitStringConst(char *str, int location);
 static Node *makeNullAConst(int location);
 static Node *makeAConst(Node *v, int location);
 static RoleSpec *makeRoleSpec(RoleSpecType type, int location);
+static List *makeStarTargetList(void);
 static void check_qualified_name(List *names, core_yyscan_t yyscanner);
 static List *check_func_name(List *names, core_yyscan_t yyscanner);
 static List *check_indirection(List *indirection, core_yyscan_t yyscanner);
@@ -13695,6 +13696,17 @@ select_clause:
  *
  * NOTE: only the leftmost component SelectStmt should have INTO.
  * However, this is not checked by the grammar; parse analysis must check it.
+ *
+ * The last three productions accept the clauses in the order in which they
+ * are logically evaluated: the FROM clause first, the select list last of
+ * all, or left out altogether, in which case it means SELECT *.  That is not
+ * in the SQL standard, but it is handy for clients completing column names,
+ * and it produces exactly the same SelectStmt as the standard spelling does.
+ *
+ * The select list stays at the end of the query, rather than being allowed
+ * anywhere among the other clauses: accepting it in both places would mean
+ * deciding, at the SELECT token, whether an omitted WHERE belongs before it
+ * or after it, which needs a lookahead the parser does not have.
  */
 simple_select:
 			SELECT opt_all_clause opt_target_list
@@ -13730,23 +13742,61 @@ simple_select:
 					n->windowClause = $9;
 					$$ = (Node *) n;
 				}
+			| FROM from_list where_clause
+			group_clause having_clause window_clause
+				{
+					/* omitted SELECT clause is the same as SELECT * */
+					SelectStmt *n = makeNode(SelectStmt);
+
+					n->targetList = makeStarTargetList();
+					n->fromClause = $2;
+					n->whereClause = $3;
+					n->groupClause = ($4)->list;
+					n->groupDistinct = ($4)->distinct;
+					n->havingClause = $5;
+					n->windowClause = $6;
+					$$ = (Node *) n;
+				}
+			| FROM from_list where_clause
+			group_clause having_clause window_clause
+			SELECT opt_all_clause opt_target_list into_clause
+				{
+					SelectStmt *n = makeNode(SelectStmt);
+
+					n->targetList = $9;
+					n->intoClause = $10;
+					n->fromClause = $2;
+					n->whereClause = $3;
+					n->groupClause = ($4)->list;
+					n->groupDistinct = ($4)->distinct;
+					n->havingClause = $5;
+					n->windowClause = $6;
+					$$ = (Node *) n;
+				}
+			| FROM from_list where_clause
+			group_clause having_clause window_clause
+			SELECT distinct_clause target_list into_clause
+				{
+					SelectStmt *n = makeNode(SelectStmt);
+
+					n->distinctClause = $8;
+					n->targetList = $9;
+					n->intoClause = $10;
+					n->fromClause = $2;
+					n->whereClause = $3;
+					n->groupClause = ($4)->list;
+					n->groupDistinct = ($4)->distinct;
+					n->havingClause = $5;
+					n->windowClause = $6;
+					$$ = (Node *) n;
+				}
 			| values_clause							{ $$ = $1; }
 			| TABLE relation_expr
 				{
 					/* same as SELECT * FROM relation_expr */
-					ColumnRef  *cr = makeNode(ColumnRef);
-					ResTarget  *rt = makeNode(ResTarget);
 					SelectStmt *n = makeNode(SelectStmt);
 
-					cr->fields = list_make1(makeNode(A_Star));
-					cr->location = -1;
-
-					rt->name = NULL;
-					rt->indirection = NIL;
-					rt->val = (Node *) cr;
-					rt->location = -1;
-
-					n->targetList = list_make1(rt);
+					n->targetList = makeStarTargetList();
 					n->fromClause = list_make1($2);
 					$$ = (Node *) n;
 				}
@@ -20085,6 +20135,29 @@ makeRoleSpec(RoleSpecType type, int location)
 	spec->location = location;
 
 	return spec;
+}
+
+/* makeStarTargetList --- build the target list for an implicit "SELECT *"
+ *
+ * Used where the syntax doesn't spell out a target list, that is TABLE and
+ * a FROM-first SELECT with the SELECT clause omitted.  The locations are
+ * unknown, since nothing in the source text corresponds to the star.
+ */
+static List *
+makeStarTargetList(void)
+{
+	ColumnRef  *cr = makeNode(ColumnRef);
+	ResTarget  *rt = makeNode(ResTarget);
+
+	cr->fields = list_make1(makeNode(A_Star));
+	cr->location = -1;
+
+	rt->name = NULL;
+	rt->indirection = NIL;
+	rt->val = (Node *) cr;
+	rt->location = -1;
+
+	return list_make1(rt);
 }
 
 /* check_qualified_name --- check the result of qualified_name production
