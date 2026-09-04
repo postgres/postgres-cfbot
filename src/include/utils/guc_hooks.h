@@ -66,6 +66,7 @@ extern bool check_huge_page_size(int *newval, void **extra, GucSource source);
 extern void assign_io_method(int newval, void *extra);
 extern bool check_io_max_concurrency(int *newval, void **extra, GucSource source);
 extern const char *show_in_hot_standby(void);
+extern bool check_listen_mptcp(bool *newval, void **extra, GucSource source);
 extern bool check_locale_messages(char **newval, void **extra, GucSource source);
 extern void assign_locale_messages(const char *newval, void *extra);
 extern bool check_locale_monetary(char **newval, void **extra, GucSource source);
