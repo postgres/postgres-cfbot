@@ -18938,6 +18938,47 @@ dumpConstraint(Archive *fout, const ConstraintInfo *coninfo)
 							  fmtId(indxinfo->dobj.name));
 		}
 
+		/*
+		 * If the index has any statistics on some of its columns, generate
+		 * the associated ALTER INDEX queries.
+		 */
+		if (strlen(indxinfo->indstatcols) != 0 ||
+			strlen(indxinfo->indstatvals) != 0)
+		{
+			char	  **indstatcolsarray = NULL;
+			char	  **indstatvalsarray = NULL;
+			int			nstatcols = 0;
+			int			nstatvals = 0;
+			int			j;
+
+			if (!parsePGArray(indxinfo->indstatcols, &indstatcolsarray,
+							  &nstatcols))
+				pg_fatal("could not parse index statistic columns");
+			if (!parsePGArray(indxinfo->indstatvals, &indstatvalsarray,
+							  &nstatvals))
+				pg_fatal("could not parse index statistic values");
+			if (nstatcols != nstatvals)
+				pg_fatal("mismatched number of columns and values for index statistics");
+
+			for (j = 0; j < nstatcols; j++)
+			{
+				appendPQExpBuffer(q, "ALTER INDEX %s ",
+								  fmtQualifiedDumpable(indxinfo));
+
+				/*
+				 * Note that this is a column number, so no quotes should be
+				 * used.
+				 */
+				appendPQExpBuffer(q, "ALTER COLUMN %s ",
+								  indstatcolsarray[j]);
+				appendPQExpBuffer(q, "SET STATISTICS %s;\n",
+								  indstatvalsarray[j]);
+			}
+
+			free(indstatcolsarray);
+			free(indstatvalsarray);
+		}
+
 		/* If the index defines identity, we need to record that. */
 		if (indxinfo->indisreplident)
 		{
