@@ -62,6 +62,13 @@ SELECT JSON_SERIALIZE('{ "a" : 1 } ' RETURNING jsonb);
 EXPLAIN (VERBOSE, COSTS OFF) SELECT JSON_SERIALIZE('{}');
 EXPLAIN (VERBOSE, COSTS OFF) SELECT JSON_SERIALIZE('{}' RETURNING bytea);
 
+-- JSON_SERIALIZE() with jsonb input
+SELECT JSON_SERIALIZE('{"a": 1}'::jsonb);
+SELECT JSON_SERIALIZE('{"a": 1}'::jsonb RETURNING bytea);
+
+-- Test implicit typmod coercion with jsonb input
+SELECT JSON_SERIALIZE('{ "a" : 1 } '::jsonb RETURNING varchar(2));
+
 -- JSON_OBJECT()
 SELECT JSON_OBJECT();
 SELECT JSON_OBJECT(RETURNING json);
