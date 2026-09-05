@@ -139,7 +139,7 @@ json_parse_manifest_incremental_init(JsonManifestParseContext *context)
 	parse->state = JM_EXPECT_TOPLEVEL_START;
 	parse->saw_version_field = false;
 
-	makeJsonLexContextIncremental(&(incstate->lex), PG_UTF8, true);
+	makeJsonLexContextIncremental(&(incstate->lex), PG_UTF8, true, false);
 
 	incstate->sem.semstate = parse;
 	incstate->sem.object_start = json_manifest_object_start;
@@ -238,7 +238,7 @@ json_parse_manifest(JsonManifestParseContext *context, const char *buffer,
 	parse.saw_version_field = false;
 
 	/* Create a JSON lexing context. */
-	lex = makeJsonLexContextCstringLen(NULL, buffer, size, PG_UTF8, true);
+	lex = makeJsonLexContextCstringLen(NULL, buffer, size, PG_UTF8, true, false);
 
 	/* Set up semantic actions. */
 	sem.semstate = &parse;

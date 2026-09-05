@@ -235,7 +235,7 @@ test_gb18030_json(pe_test_config *tc)
 
 	/* test itself */
 	lex = makeJsonLexContextCstringLen(NULL, raw_buf->data, input_len,
-									   PG_GB18030, false);
+									   PG_GB18030, false, false);
 	json_error = pg_parse_json(lex, &sem);
 	report_result(tc, json_error == JSON_UNICODE_ESCAPE_FORMAT,
 				  testname->data, "",
