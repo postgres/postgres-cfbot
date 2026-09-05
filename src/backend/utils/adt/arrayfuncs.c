@@ -6001,6 +6001,117 @@ generate_subscripts_nodir(PG_FUNCTION_ARGS)
 }
 
 /*
+ * Planner support function for generate_subscripts(anyarray, int [, bool])
+ *
+ * Unlike unnest(), generate_subscripts() returns one row per subscript of
+ * the *requested dimension*, not one row per array element.  Those are the
+ * same thing for a one-dimensional array, but in general we need the length
+ * of dimension "dim", which we can only determine when the array itself is
+ * available as a constant.
+ */
+Datum
+generate_subscripts_support(PG_FUNCTION_ARGS)
+{
+	Node	   *rawreq = (Node *) PG_GETARG_POINTER(0);
+	Node	   *ret = NULL;
+
+	if (IsA(rawreq, SupportRequestRows))
+	{
+		/* Try to estimate the number of rows returned */
+		SupportRequestRows *req = (SupportRequestRows *) rawreq;
+
+		if (is_funcclause(req->node))	/* be paranoid */
+		{
+			List	   *args = ((FuncExpr *) req->node)->args;
+			Node	   *arg1,
+					   *arg2,
+					   *arg3;
+
+			/* We can use estimated argument values here */
+			arg1 = estimate_expression_value(req->root, linitial(args));
+			arg2 = estimate_expression_value(req->root, lsecond(args));
+			if (list_length(args) >= 3)
+				arg3 = estimate_expression_value(req->root, lthird(args));
+			else
+				arg3 = NULL;
+
+			/*
+			 * The function is strict, so a constant NULL in any argument
+			 * position means that no rows will be returned.  Otherwise we
+			 * need to know the dimension number to say anything at all.
+			 */
+			if ((IsA(arg1, Const) &&
+				 ((Const *) arg1)->constisnull) ||
+				(IsA(arg2, Const) &&
+				 ((Const *) arg2)->constisnull) ||
+				(arg3 != NULL && IsA(arg3, Const) &&
+				 ((Const *) arg3)->constisnull))
+			{
+				req->rows = 0;
+				ret = (Node *) req;
+			}
+			else if (IsA(arg2, Const))
+			{
+				int32		reqdim = DatumGetInt32(((Const *) arg2)->constvalue);
+
+				if (reqdim <= 0)
+				{
+					/* generate_subscripts() returns no rows for such dims */
+					req->rows = 0;
+					ret = (Node *) req;
+				}
+				else if (IsA(arg1, Const))
+				{
+					ArrayType  *arr;
+
+					/*
+					 * We know the array, so we can report the length of the
+					 * requested dimension exactly.  Note that the dimension's
+					 * lower bound does not enter into it.  A dimension the
+					 * array doesn't have yields no rows, which also covers
+					 * empty arrays, whose ndim is zero.
+					 *
+					 * Unlike estimate_array_length(), we don't bother to look
+					 * through array coercions here; if one is in the way we
+					 * simply fall through to the cases below.
+					 */
+					arr = DatumGetArrayTypeP(((Const *) arg1)->constvalue);
+
+					if (reqdim > ARR_NDIM(arr))
+						req->rows = 0;	/* no such dimension */
+					else
+						req->rows = ARR_DIMS(arr)[reqdim - 1];
+					ret = (Node *) req;
+				}
+				else if (reqdim == 1)
+				{
+					/*
+					 * All we have is estimate_array_length(), which counts
+					 * every element rather than the length of one dimension.
+					 * Those agree for 1-D arrays, and since dimension 1 was
+					 * requested it's fair to suppose that's what we have.  If
+					 * not we'll overestimate, but no per-dimension statistics
+					 * exist that could do better.
+					 */
+					req->rows = estimate_array_length(req->root, arg1);
+					ret = (Node *) req;
+				}
+
+				/*
+				 * Otherwise a dimension above the first was requested for an
+				 * array that isn't a constant.  We know nothing about the
+				 * array's dimensionality, let alone the length of the
+				 * requested dimension, so leave ret as NULL to make the
+				 * caller fall back on prorows.
+				 */
+			}
+		}
+	}
+
+	PG_RETURN_POINTER(ret);
+}
+
+/*
  * array_fill_with_lower_bounds
  *		Create and fill array with defined lower bounds.
  */
