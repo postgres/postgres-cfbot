@@ -184,6 +184,19 @@ heap_force_common(FunctionCallInfo fcinfo, HeapTupleForceOption heap_force_opt)
 
 		maxoffset = PageGetMaxOffsetNumber(page);
 
+		if (maxoffset > MaxHeapTuplesPerPage)
+		{
+			UnlockReleaseBuffer(buf);
+
+			/* Update the current_start_ptr before moving to the next page. */
+			curr_start_ptr = next_start_ptr;
+
+			ereport(NOTICE,
+					(errmsg("skipping block %u for relation \"%s\" because the page header is invalid",
+							blkno, RelationGetRelationName(rel))));
+			continue;
+		}
+
 		/*
 		 * Figure out which TIDs we are going to process and which ones we are
 		 * going to skip.
@@ -227,6 +240,28 @@ heap_force_common(FunctionCallInfo fcinfo, HeapTupleForceOption heap_force_opt)
 						(errmsg("skipping tid (%u, %u) for relation \"%s\" because it is marked unused",
 								blkno, offno, RelationGetRelationName(rel))));
 				continue;
+			}
+
+			/*
+			 * A freeze dereferences the tuple, so its line pointer must point
+			 * at a MAXALIGNed location within the page's tuple area that is
+			 * large enough to hold a heap tuple header.  A kill only marks the
+			 * line pointer dead, which is safe even for a bogus pointer.
+			 */
+			if (heap_force_opt == HEAP_FORCE_FREEZE)
+			{
+				PageHeader	phdr = (PageHeader) page;
+
+				if (ItemIdGetLength(itemid) < SizeofHeapTupleHeader ||
+					ItemIdGetOffset(itemid) != MAXALIGN(ItemIdGetOffset(itemid)) ||
+					ItemIdGetOffset(itemid) < phdr->pd_upper ||
+					ItemIdGetOffset(itemid) + ItemIdGetLength(itemid) > phdr->pd_special)
+				{
+					ereport(NOTICE,
+							(errmsg("skipping tid (%u, %u) for relation \"%s\" because its line pointer is invalid",
+									blkno, offno, RelationGetRelationName(rel))));
+					continue;
+				}
 			}
 
 			/* Mark it for processing. */
