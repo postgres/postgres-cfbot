@@ -1961,6 +1961,55 @@ DetermineSlotInvalidationCause(uint32 possible_causes, ReplicationSlot *s,
 }
 
 /*
+ * Return true if a local logical slot would be invalidated by the given
+ * snapshot conflict horizon.
+ *
+ * Synchronized slots are managed by the slot synchronization worker and
+ * cannot be consumed or dropped on the standby, so callers cannot resolve
+ * their conflicts locally.
+ */
+bool
+ReplicationSlotsHaveLogicalHorizonConflict(Oid dboid,
+										   TransactionId snapshotConflictHorizon)
+{
+	bool		conflict = false;
+	TimestampTz inactive_since = 0;
+
+	Assert(TransactionIdIsValid(snapshotConflictHorizon));
+
+	if (IsBinaryUpgrade)
+		return false;
+
+	if (max_replication_slots == 0 && max_repack_replication_slots == 0)
+		return false;
+
+	LWLockAcquire(ReplicationSlotControlLock, LW_SHARED);
+	for (int i = 0;
+		 i < max_replication_slots + max_repack_replication_slots;
+		 i++)
+	{
+		ReplicationSlot *s = &ReplicationSlotCtl->replication_slots[i];
+
+		if (!s->in_use)
+			continue;
+
+		SpinLockAcquire(&s->mutex);
+		if (!s->data.synced && s->data.invalidated == RS_INVAL_NONE &&
+			DetermineSlotInvalidationCause(RS_INVAL_HORIZON, s, 0, dboid,
+										   snapshotConflictHorizon,
+										   &inactive_since, 0) == RS_INVAL_HORIZON)
+			conflict = true;
+		SpinLockRelease(&s->mutex);
+
+		if (conflict)
+			break;
+	}
+	LWLockRelease(ReplicationSlotControlLock);
+
+	return conflict;
+}
+
+/*
  * Helper for InvalidateObsoleteReplicationSlots
  *
  * Acquires the given slot and mark it invalid, if necessary and possible.
