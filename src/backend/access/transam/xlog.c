@@ -43,7 +43,6 @@
 #include <time.h>
 #include <fcntl.h>
 #include <sys/stat.h>
-#include <sys/time.h>
 #include <unistd.h>
 
 #include "access/clog.h"
@@ -69,6 +68,7 @@
 #include "catalog/pg_database.h"
 #include "common/controldata_utils.h"
 #include "common/file_utils.h"
+#include "common/system_identifier.h"
 #include "executor/instrument.h"
 #include "miscadmin.h"
 #include "pg_trace.h"
@@ -5488,28 +5488,12 @@ BootStrapXLOG(uint32 data_checksum_version)
 	XLogRecord *record;
 	char	   *recptr;
 	uint64		sysidentifier;
-	struct timeval tv;
 	pg_crc32c	crc;
 
 	/* allow ordinary WAL segment creation, like StartupXLOG() would */
 	SetInstallXLogFileSegmentActive();
 
-	/*
-	 * Select a hopefully-unique system identifier code for this installation.
-	 * We use the result of gettimeofday(), including the fractional seconds
-	 * field, as being about as unique as we can easily get.  (Think not to
-	 * use random(), since it hasn't been seeded and there's no portable way
-	 * to seed it other than the system clock value...)  The upper half of the
-	 * uint64 value is just the tv_sec part, while the lower half contains the
-	 * tv_usec part (which must fit in 20 bits), plus 12 bits from our current
-	 * PID for a little extra uniqueness.  A person knowing this encoding can
-	 * determine the initialization time of the installation, which could
-	 * perhaps be useful sometimes.
-	 */
-	gettimeofday(&tv, NULL);
-	sysidentifier = ((uint64) tv.tv_sec) << 32;
-	sysidentifier |= ((uint64) tv.tv_usec) << 12;
-	sysidentifier |= getpid() & 0xFFF;
+	sysidentifier = GenerateSystemIdentifier();
 
 	memset(&buffer, 0, sizeof buffer);
 	page = (XLogPageHeader) &buffer;
