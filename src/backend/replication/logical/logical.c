@@ -784,10 +784,15 @@ OutputPluginPrepareWrite(struct LogicalDecodingContext *ctx, bool last_write)
 void
 OutputPluginWrite(struct LogicalDecodingContext *ctx, bool last_write)
 {
+	int64		outputBytes;
+
 	if (!ctx->prepared_write)
 		elog(ERROR, "OutputPluginPrepareWrite needs to be called before OutputPluginWrite");
 
+	outputBytes = ctx->out->len;
+
 	ctx->write(ctx, ctx->write_location, ctx->write_xid, last_write);
+	ctx->reorder->stats.output_bytes += outputBytes;
 	ctx->prepared_write = false;
 }
 
@@ -2040,46 +2045,34 @@ void
 UpdateDecodingStats(LogicalDecodingContext *ctx)
 {
 	ReorderBuffer *rb = ctx->reorder;
-	PgStat_StatReplSlotEntry repSlotStat;
 
 	/* Nothing to do if we don't have any replication stats to be sent. */
-	if (rb->spillBytes <= 0 && rb->streamBytes <= 0 && rb->totalBytes <= 0 &&
-		rb->memExceededCount <= 0)
+	if (rb->stats.spill_bytes <= 0 && rb->stats.stream_bytes <= 0 &&
+		rb->stats.total_bytes <= 0 && rb->stats.mem_exceeded_count <= 0)
 		return;
 
-	elog(DEBUG2, "UpdateDecodingStats: updating stats %p %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64,
+	elog(DEBUG2,
+		 "UpdateDecodingStats: updating stats %p spill_txns=%" PRId64
+		 " spill_count=%" PRId64 " spill_bytes=%" PRId64
+		 " stream_txns=%" PRId64 " stream_count=%" PRId64
+		 " stream_bytes=%" PRId64 " mem_exceeded_count=%" PRId64
+		 " total_txns=%" PRId64 " total_bytes=%" PRId64
+		 " output_bytes=%" PRId64,
 		 rb,
-		 rb->spillTxns,
-		 rb->spillCount,
-		 rb->spillBytes,
-		 rb->streamTxns,
-		 rb->streamCount,
-		 rb->streamBytes,
-		 rb->memExceededCount,
-		 rb->totalTxns,
-		 rb->totalBytes);
+		 rb->stats.spill_txns,
+		 rb->stats.spill_count,
+		 rb->stats.spill_bytes,
+		 rb->stats.stream_txns,
+		 rb->stats.stream_count,
+		 rb->stats.stream_bytes,
+		 rb->stats.mem_exceeded_count,
+		 rb->stats.total_txns,
+		 rb->stats.total_bytes,
+		 rb->stats.output_bytes);
 
-	repSlotStat.spill_txns = rb->spillTxns;
-	repSlotStat.spill_count = rb->spillCount;
-	repSlotStat.spill_bytes = rb->spillBytes;
-	repSlotStat.stream_txns = rb->streamTxns;
-	repSlotStat.stream_count = rb->streamCount;
-	repSlotStat.stream_bytes = rb->streamBytes;
-	repSlotStat.mem_exceeded_count = rb->memExceededCount;
-	repSlotStat.total_txns = rb->totalTxns;
-	repSlotStat.total_bytes = rb->totalBytes;
+	pgstat_report_replslot(ctx->slot, &rb->stats);
 
-	pgstat_report_replslot(ctx->slot, &repSlotStat);
-
-	rb->spillTxns = 0;
-	rb->spillCount = 0;
-	rb->spillBytes = 0;
-	rb->streamTxns = 0;
-	rb->streamCount = 0;
-	rb->streamBytes = 0;
-	rb->memExceededCount = 0;
-	rb->totalTxns = 0;
-	rb->totalBytes = 0;
+	MemSet(&rb->stats, 0, sizeof(PgStat_ReplSlotStats));
 }
 
 /*
