@@ -1531,6 +1531,8 @@ CREATE VIEW pg_replication_origin_status AS
     FROM pg_show_replication_origin_status();
 
 REVOKE ALL ON pg_replication_origin_status FROM public;
+GRANT SELECT ON pg_replication_origin_status TO pg_read_all_stats;
+GRANT EXECUTE ON FUNCTION pg_show_replication_origin_status() TO pg_read_all_stats;
 
 -- All columns of pg_subscription except subconninfo are publicly readable.
 REVOKE ALL ON pg_subscription FROM public;

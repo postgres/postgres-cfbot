@@ -3528,6 +3528,18 @@ SELECT has_table_privilege('regress_readallstats','pg_dsm_registry_allocations',
  f
 (1 row)
 
+SELECT has_table_privilege('regress_readallstats','pg_replication_origin_status','SELECT'); -- no
+ has_table_privilege 
+---------------------
+ f
+(1 row)
+
+SELECT has_function_privilege('regress_readallstats','pg_show_replication_origin_status()','EXECUTE'); -- no
+ has_function_privilege 
+------------------------
+ f
+(1 row)
+
 GRANT pg_read_all_stats TO regress_readallstats;
 SELECT has_table_privilege('regress_readallstats','pg_aios','SELECT'); -- yes
  has_table_privilege 
@@ -3559,6 +3571,18 @@ SELECT has_table_privilege('regress_readallstats','pg_dsm_registry_allocations',
  t
 (1 row)
 
+SELECT has_table_privilege('regress_readallstats','pg_replication_origin_status','SELECT'); -- yes
+ has_table_privilege 
+---------------------
+ t
+(1 row)
+
+SELECT has_function_privilege('regress_readallstats','pg_show_replication_origin_status()','EXECUTE'); -- yes
+ has_function_privilege 
+------------------------
+ t
+(1 row)
+
 -- run query to ensure that functions within views can be executed
 SET ROLE regress_readallstats;
 SELECT COUNT(*) >= 0 AS ok FROM pg_aios;
@@ -3574,6 +3598,12 @@ SELECT COUNT(*) >= 0 AS ok FROM pg_backend_memory_contexts;
 (1 row)
 
 SELECT COUNT(*) >= 0 AS ok FROM pg_shmem_allocations;
+ ok 
+----
+ t
+(1 row)
+
+SELECT COUNT(*) >= 0 AS ok FROM pg_replication_origin_status;
  ok 
 ----
  t
