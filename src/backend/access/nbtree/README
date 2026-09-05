@@ -103,6 +103,15 @@ We also remember the left-link, and follow it when the scan moves backwards
 (though this requires extra handling to account for concurrent splits of
 the left sibling; see detailed move-left algorithm below).
 
+Despite the described mechanics in place, inconsistent results may still occur
+during non-MVCC scans (SnapshotDirty and SnapshotSelf). This issue can occur if a 
+concurrent transaction deletes a tuple and inserts a new tuple with a new TID in the 
+same page or to the left/right (depending on scan direction) of current scan position.
+If the scan has already visited the page and cached its content in the
+backend-local storage, it might skip the old tuple due to deletion and miss the new 
+tuple because the scan does not re-read the page. Note it affects not only btree
+scan but also a heap scan.
+
 In most cases we release our lock and pin on a page before attempting
 to acquire pin and lock on the page we are moving to.  In a few places
 it is necessary to lock the next page before releasing the current one.
