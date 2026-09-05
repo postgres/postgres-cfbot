@@ -118,6 +118,7 @@ static const SlotInvalidationCauseMap SlotInvalidationCauses[] = {
 	{RS_INVAL_HORIZON, "rows_removed"},
 	{RS_INVAL_WAL_LEVEL, "wal_level_insufficient"},
 	{RS_INVAL_IDLE_TIMEOUT, "idle_timeout"},
+	{RS_INVAL_XID_AGE, "xid_aged"},
 };
 
 /*
@@ -168,6 +169,12 @@ int			max_repack_replication_slots = 5;	/* the maximum number of slots
  * duration; '0' disables it.
  */
 int			idle_replication_slot_timeout_secs = 0;
+
+/*
+ * Invalidate replication slots whose xmin or catalog_xmin transaction age
+ * has exceeded this setting; '0' disables it.
+ */
+int			max_slot_xid_age = 0;
 
 /*
  * This GUC lists streaming replication standby server slot names that
@@ -1792,7 +1799,10 @@ ReportSlotInvalidation(ReplicationSlotInvalidationCause cause,
 					   XLogRecPtr restart_lsn,
 					   XLogRecPtr oldestLSN,
 					   TransactionId snapshotConflictHorizon,
-					   long slot_idle_seconds)
+					   long slot_idle_seconds,
+					   TransactionId xidLimit,
+					   TransactionId slot_xmin,
+					   TransactionId slot_catalog_xmin)
 {
 	StringInfoData err_detail;
 	StringInfoData err_hint;
@@ -1837,6 +1847,45 @@ ReportSlotInvalidation(ReplicationSlotInvalidationCause cause,
 								 "idle_replication_slot_timeout");
 				break;
 			}
+
+		case RS_INVAL_XID_AGE:
+			{
+				/*
+				 * The caller passes only the xmin or catalog_xmin that has
+				 * aged past the limit (or both, in the rare case that both
+				 * have), so report whichever is valid. exceeded_by is
+				 * positive because the reported xid precedes xidLimit. Note
+				 * that at least one of them is always valid here.
+				 */
+				if (TransactionIdIsValid(slot_xmin))
+				{
+					int32		exceeded_by = (int32) (xidLimit - slot_xmin);
+					int32		slot_age = (int32) max_slot_xid_age + exceeded_by;
+
+					/* translator: %s is a GUC variable name */
+					appendStringInfo(&err_detail, _("The slot's xmin age of %d exceeds the configured \"%s\" of %d by %d transactions."),
+									 slot_age, "max_slot_xid_age", max_slot_xid_age, exceeded_by);
+				}
+
+				if (TransactionIdIsValid(slot_catalog_xmin))
+				{
+					int32		exceeded_by = (int32) (xidLimit - slot_catalog_xmin);
+					int32		slot_age = (int32) max_slot_xid_age + exceeded_by;
+
+					if (err_detail.len > 0)
+						appendStringInfoChar(&err_detail, ' ');
+
+					/* translator: %s is a GUC variable name */
+					appendStringInfo(&err_detail, _("The slot's catalog xmin age of %d exceeds the configured \"%s\" of %d by %d transactions."),
+									 slot_age, "max_slot_xid_age", max_slot_xid_age, exceeded_by);
+				}
+
+				/* translator: %s is a GUC variable name */
+				appendStringInfo(&err_hint, _("You might need to increase \"%s\"."),
+								 "max_slot_xid_age");
+				break;
+			}
+
 		case RS_INVAL_NONE:
 			pg_unreachable();
 	}
@@ -1876,6 +1925,30 @@ CanInvalidateIdleSlot(ReplicationSlot *s)
 }
 
 /*
+ * Can we invalidate an XID-aged replication slot?
+ *
+ * XID age invalidation is allowed only when:
+ *
+ * 1. XID age limit is set
+ * 2. Slot has a valid xmin or catalog_xmin
+ *
+ * Note that this includes synced slots on a standby. A synced slot's
+ * catalog_xmin is sent to the primary's physical slot through
+ * hot_standby_feedback and holds the catalog horizon back there, so a synced
+ * slot whose catalog_xmin has aged can keep vacuum on the primary from pruning
+ * dead catalog rows and freezing XIDs, even though it does no decoding of its
+ * own on the standby. Invalidating it advances the catalog_xmin held by the
+ * primary's physical slot, letting vacuum there proceed.
+ */
+static inline bool
+CanInvalidateXidAgedSlot(ReplicationSlot *s)
+{
+	return (max_slot_xid_age != 0 &&
+			(TransactionIdIsValid(s->data.xmin) ||
+			 TransactionIdIsValid(s->data.catalog_xmin)));
+}
+
+/*
  * DetermineSlotInvalidationCause - Determine the cause for which a slot
  * becomes invalid among the given possible causes.
  *
@@ -1886,7 +1959,11 @@ static ReplicationSlotInvalidationCause
 DetermineSlotInvalidationCause(uint32 possible_causes, ReplicationSlot *s,
 							   XLogRecPtr oldestLSN, Oid dboid,
 							   TransactionId snapshotConflictHorizon,
-							   TimestampTz *inactive_since, TimestampTz now)
+							   TimestampTz *inactive_since, TimestampTz now,
+							   TransactionId xidLimit,
+							   TransactionId *slot_xmin,
+							   TransactionId *slot_catalog_xmin,
+							   bool check_catalog_xmin)
 {
 	Assert(possible_causes != RS_INVAL_NONE);
 
@@ -1957,6 +2034,37 @@ DetermineSlotInvalidationCause(uint32 possible_causes, ReplicationSlot *s,
 		}
 	}
 
+	/* Check if the slot needs to be invalidated due to max_slot_xid_age GUC */
+	if ((possible_causes & RS_INVAL_XID_AGE) && CanInvalidateXidAgedSlot(s))
+	{
+		Assert(TransactionIdIsValid(xidLimit));
+
+		/*
+		 * Record whichever of xmin and catalog_xmin has aged past the limit,
+		 * so the invalidation message names the xid that actually triggered
+		 * it. Both can have aged in the rare case of a physical slot that
+		 * also holds a catalog_xmin for cascaded logical decoding.
+		 *
+		 * catalog_xmin is considered only when it is relevant for the
+		 * caller's relation. A slot holding only a catalog_xmin cannot block
+		 * a vacuum of a user table, so such a slot is left alone there; a
+		 * checkpoint or a vacuum of a catalog relation still invalidates it
+		 * later.
+		 */
+		if (TransactionIdIsValid(s->data.xmin) &&
+			TransactionIdPrecedes(s->data.xmin, xidLimit))
+			*slot_xmin = s->data.xmin;
+
+		if (check_catalog_xmin &&
+			TransactionIdIsValid(s->data.catalog_xmin) &&
+			TransactionIdPrecedes(s->data.catalog_xmin, xidLimit))
+			*slot_catalog_xmin = s->data.catalog_xmin;
+
+		if (TransactionIdIsValid(*slot_xmin) ||
+			TransactionIdIsValid(*slot_catalog_xmin))
+			return RS_INVAL_XID_AGE;
+	}
+
 	return RS_INVAL_NONE;
 }
 
@@ -1979,6 +2087,9 @@ InvalidatePossiblyObsoleteSlot(uint32 possible_causes,
 							   ReplicationSlot *s,
 							   XLogRecPtr oldestLSN,
 							   Oid dboid, TransactionId snapshotConflictHorizon,
+							   TransactionId xidLimit,
+							   bool nowait,
+							   bool check_catalog_xmin,
 							   bool *released_lock_out)
 {
 	int			last_signaled_pid = 0;
@@ -1995,6 +2106,8 @@ InvalidatePossiblyObsoleteSlot(uint32 possible_causes,
 		ReplicationSlotInvalidationCause invalidation_cause = RS_INVAL_NONE;
 		TimestampTz now = 0;
 		long		slot_idle_secs = 0;
+		TransactionId slot_xmin = InvalidTransactionId;
+		TransactionId slot_catalog_xmin = InvalidTransactionId;
 
 		Assert(LWLockHeldByMeInMode(ReplicationSlotControlLock, LW_SHARED));
 
@@ -2032,7 +2145,11 @@ InvalidatePossiblyObsoleteSlot(uint32 possible_causes,
 																dboid,
 																snapshotConflictHorizon,
 																&inactive_since,
-																now);
+																now,
+																xidLimit,
+																&slot_xmin,
+																&slot_catalog_xmin,
+																check_catalog_xmin);
 
 		/* if there's no invalidation, we're done */
 		if (invalidation_cause == RS_INVAL_NONE)
@@ -2097,6 +2214,10 @@ InvalidatePossiblyObsoleteSlot(uint32 possible_causes,
 
 		if (active_proc != INVALID_PROC_NUMBER)
 		{
+			/* A nowait caller leaves an active slot untouched. */
+			if (nowait)
+				break;
+
 			/*
 			 * Prepare the sleep on the slot's condition variable before
 			 * releasing the lock, to close a possible race condition if the
@@ -2124,7 +2245,8 @@ InvalidatePossiblyObsoleteSlot(uint32 possible_causes,
 				ReportSlotInvalidation(invalidation_cause, true, active_pid,
 									   slotname, restart_lsn,
 									   oldestLSN, snapshotConflictHorizon,
-									   slot_idle_secs);
+									   slot_idle_secs, xidLimit,
+									   slot_xmin, slot_catalog_xmin);
 
 				if (MyBackendType == B_STARTUP)
 					(void) SignalRecoveryConflict(GetPGProcByNumber(active_proc),
@@ -2177,7 +2299,8 @@ InvalidatePossiblyObsoleteSlot(uint32 possible_causes,
 			ReportSlotInvalidation(invalidation_cause, false, active_pid,
 								   slotname, restart_lsn,
 								   oldestLSN, snapshotConflictHorizon,
-								   slot_idle_secs);
+								   slot_idle_secs, xidLimit,
+								   slot_xmin, slot_catalog_xmin);
 
 			/* done with this slot for now */
 			break;
@@ -2204,10 +2327,17 @@ InvalidatePossiblyObsoleteSlot(uint32 possible_causes,
  *   logical.
  * - RS_INVAL_IDLE_TIMEOUT: has been idle longer than the configured
  *   "idle_replication_slot_timeout" duration.
+ * - RS_INVAL_XID_AGE: has an xmin or catalog_xmin whose age exceeds the
+ *   configured "max_slot_xid_age".
  *
  * Note: This function attempts to invalidate the slot for multiple possible
  * causes in a single pass, minimizing redundant iterations. The "cause"
  * parameter can be a MASK representing one or more of the defined causes.
+ *
+ * If "nowait" is true, slots that are currently held by a live process are
+ * left untouched instead of terminating the owner and waiting for the slot to
+ * be released. Vacuum uses this for XID-age invalidation so it never blocks.
+ * Those slots are instead cleaned up by the checkpointer, which always waits.
  *
  * If it invalidates the last logical slot in the cluster, it requests to
  * disable logical decoding.
@@ -2217,7 +2347,10 @@ InvalidatePossiblyObsoleteSlot(uint32 possible_causes,
 bool
 InvalidateObsoleteReplicationSlots(uint32 possible_causes,
 								   XLogSegNo oldestSegno, Oid dboid,
-								   TransactionId snapshotConflictHorizon)
+								   TransactionId snapshotConflictHorizon,
+								   TransactionId xidLimit,
+								   bool nowait,
+								   bool check_catalog_xmin)
 {
 	XLogRecPtr	oldestLSN;
 	bool		invalidated = false;
@@ -2226,6 +2359,7 @@ InvalidateObsoleteReplicationSlots(uint32 possible_causes,
 
 	Assert(!(possible_causes & RS_INVAL_HORIZON) || TransactionIdIsValid(snapshotConflictHorizon));
 	Assert(!(possible_causes & RS_INVAL_WAL_REMOVED) || oldestSegno > 0);
+	Assert(!(possible_causes & RS_INVAL_XID_AGE) || TransactionIdIsValid(xidLimit));
 	Assert(possible_causes != RS_INVAL_NONE);
 
 	if (max_replication_slots == 0 && max_repack_replication_slots == 0)
@@ -2256,6 +2390,7 @@ restart:
 
 		if (InvalidatePossiblyObsoleteSlot(possible_causes, s, oldestLSN,
 										   dboid, snapshotConflictHorizon,
+										   xidLimit, nowait, check_catalog_xmin,
 										   &released_lock))
 		{
 			Assert(released_lock);
