@@ -46,8 +46,6 @@
 
 #define MAX_PENDING_WRITES XLR_MAX_BLOCK_ID
 
-static const PGIOAlignedBlock zero_buffer = {0};	/* worth BLCKSZ */
-
 typedef struct PendingWrite
 {
 	BulkWriteBuffer buf;
@@ -290,14 +288,14 @@ smgr_bulk_flush(BulkWriteState *bulkstate)
 			 * space will read as zeroes anyway), but it should help to avoid
 			 * fragmentation.  The dummy pages aren't WAL-logged though.
 			 */
-			while (blkno > bulkstate->relsize)
+			if (blkno > bulkstate->relsize)
 			{
-				/* don't set checksum for all-zero page */
-				smgrextend(bulkstate->smgr, bulkstate->forknum,
-						   bulkstate->relsize,
-						   &zero_buffer,
-						   true);
-				bulkstate->relsize++;
+				/* don't set checksum for all-zero pages */
+				smgrzeroextend(bulkstate->smgr, bulkstate->forknum,
+							   bulkstate->relsize,
+							   blkno - bulkstate->relsize,
+							   true);
+				bulkstate->relsize = blkno;
 			}
 
 			smgrextend(bulkstate->smgr, bulkstate->forknum, blkno, page, true);
