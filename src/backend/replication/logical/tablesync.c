@@ -126,8 +126,6 @@
 
 List	   *table_states_not_ready = NIL;
 
-static StringInfo copybuf = NULL;
-
 /*
  * Wait until the relation sync state is set in the catalog to the expected
  * one; return true when it happens.
@@ -645,17 +643,18 @@ make_copy_attnamelist(LogicalRepRelMapEntry *rel)
 static int
 copy_read_data(void *outbuf, int minread, int maxread)
 {
+	static StringInfoData copybuf = {0};
 	int			bytesread = 0;
 	int			avail;
 
 	/* If there are some leftover data from previous read, use it. */
-	avail = copybuf->len - copybuf->cursor;
+	avail = copybuf.len - copybuf.cursor;
 	if (avail)
 	{
 		if (avail > maxread)
 			avail = maxread;
-		memcpy(outbuf, &copybuf->data[copybuf->cursor], avail);
-		copybuf->cursor += avail;
+		memcpy(outbuf, &copybuf.data[copybuf.cursor], avail);
+		copybuf.cursor += avail;
 		maxread -= avail;
 		bytesread += avail;
 	}
@@ -680,16 +679,14 @@ copy_read_data(void *outbuf, int minread, int maxread)
 			else
 			{
 				/* Process the data */
-				copybuf->data = buf;
-				copybuf->len = len;
-				copybuf->cursor = 0;
+				initReadOnlyStringInfo(&copybuf, buf, len);
 
-				avail = copybuf->len - copybuf->cursor;
+				avail = copybuf.len - copybuf.cursor;
 				if (avail > maxread)
 					avail = maxread;
-				memcpy(outbuf, &copybuf->data[copybuf->cursor], avail);
+				memcpy(outbuf, &copybuf.data[copybuf.cursor], avail);
 				outbuf = (char *) outbuf + avail;
-				copybuf->cursor += avail;
+				copybuf.cursor += avail;
 				maxread -= avail;
 				bytesread += avail;
 			}
@@ -1198,8 +1195,6 @@ copy_table(Relation rel)
 				 errmsg("could not start initial contents copy for table \"%s.%s\": %s",
 						lrel.nspname, lrel.relname, res->err)));
 	walrcv_clear_result(res);
-
-	copybuf = makeStringInfo();
 
 	pstate = make_parsestate(NULL);
 	(void) addRangeTableEntryForRelation(pstate, rel, AccessShareLock,
