@@ -1682,7 +1682,7 @@ exprs_error:
 	if (astate != NULL)
 		pfree(astate);
 	return (Datum) 0;
-};
+}
 
 /*
  * Remove an existing pg_statistic_ext_data row for a given pg_statistic_ext
