@@ -5680,6 +5680,46 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
         This parameter can only be set in the <filename>postgresql.conf</filename>
         file or on the server command line.
        </para>
+     </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-recovery-pause-on-logical-slot-conflict" xreflabel="recovery_pause_on_logical_slot_conflict">
+      <term><varname>recovery_pause_on_logical_slot_conflict</varname> (<type>boolean</type>)
+      <indexterm>
+       <primary><varname>recovery_pause_on_logical_slot_conflict</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        When enabled, recovery pauses before replay of a catalog cleanup
+        record would invalidate a local logical replication slot.  This gives
+        the slot owner an opportunity to consume already-replayed WAL so that
+        logical decoding can advance the slot's <structfield>xmin</structfield>
+        horizons.  Recovery resumes automatically once no local logical slot
+        still has a conflicting horizon.  It can also be resumed explicitly
+        with <function>pg_wal_replay_resume</function>, or by promoting the
+        standby.
+       </para>
+       <para>
+        When recovery resumes, each affected slot is checked again and is
+        invalidated if either its <structfield>xmin</structfield> or
+        <structfield>catalog_xmin</structfield> still conflicts with the
+        cleanup record.  Thus, resuming without allowing these horizons to
+        advance preserves the default invalidation behavior.  Synchronized
+        logical slots are not protected by this setting because they are
+        managed by the slot synchronization worker.
+       </para>
+       <para>
+        Pausing recovery does not guarantee that a slot can be preserved.
+        If logical decoding cannot derive a sufficiently recent safe horizon
+        from the WAL already replayed, the slot owner must either drop the
+        slot or resume recovery and allow the slot to be invalidated.
+       </para>
+       <para>
+        This parameter is disabled by default.  It can only be set in the
+        <filename>postgresql.conf</filename> file or on the server command
+        line.
+       </para>
       </listitem>
      </varlistentry>
 

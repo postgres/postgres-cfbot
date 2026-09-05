@@ -60,6 +60,8 @@ typedef enum RecoveryPauseState
 	RECOVERY_PAUSED,			/* recovery is paused */
 } RecoveryPauseState;
 
+typedef bool (*RecoveryPauseResumePredicate) (void *arg);
+
 /*
  * Shared-memory state for WAL recovery.
  */
@@ -124,6 +126,7 @@ typedef struct XLogRecoveryCtlData
 	TimestampTz currentChunkStartTime;
 	/* Recovery pause state */
 	RecoveryPauseState recoveryPauseState;
+	uint64		recoveryPauseGeneration;
 	ConditionVariable recoveryNotPausedCV;
 
 	slock_t		info_lck;		/* locks shared variables shown above */
@@ -135,6 +138,7 @@ extern PGDLLIMPORT XLogRecoveryCtlData *XLogRecoveryCtl;
 extern PGDLLIMPORT bool recoveryTargetInclusive;
 extern PGDLLIMPORT int recoveryTargetAction;
 extern PGDLLIMPORT int recovery_min_apply_delay;
+extern PGDLLIMPORT bool recovery_pause_on_logical_slot_conflict;
 extern PGDLLIMPORT char *PrimaryConnInfo;
 extern PGDLLIMPORT char *PrimarySlotName;
 extern PGDLLIMPORT char *recoveryRestoreCommand;
@@ -218,7 +222,10 @@ extern void RemovePromoteSignalFiles(void);
 extern bool HotStandbyActive(void);
 extern XLogRecPtr GetXLogReplayRecPtr(TimeLineID *replayTLI);
 extern RecoveryPauseState GetRecoveryPauseState(void);
-extern void SetRecoveryPause(bool recoveryPause);
+extern uint64 SetRecoveryPause(bool recoveryPause);
+extern bool ResumeRecoveryPauseIfUnchanged(uint64 pause_token);
+extern bool WaitForRecoveryToResume(RecoveryPauseResumePredicate predicate,
+									void *arg);
 extern void GetXLogReceiptTime(TimestampTz *rtime, bool *fromStream);
 extern TimestampTz GetLatestXTime(void);
 extern TimestampTz GetCurrentChunkReplayStartTime(void);
