@@ -146,6 +146,13 @@ StaticAssertDecl(MAX_BACKENDS_BITS <= (BUF_LOCK_BITS - 2),
 StaticAssertDecl(BM_MAX_USAGE_COUNT < (UINT64CONST(1) << BUF_USAGECOUNT_BITS),
 				 "BM_MAX_USAGE_COUNT doesn't fit in BUF_USAGECOUNT_BITS bits");
 
+
+/* Note: these two macros only work on shared buffers, not local ones! */
+#define BufHdrGetBlock(bufHdr) \
+	(AssertMacro((bufHdr)->buf_id >= 0), \
+	 (Block) (BufferBlocks + ((Size) (bufHdr)->buf_id) * BLCKSZ))
+#define BufferGetLSN(bufHdr)	(PageGetLSN(BufHdrGetBlock(bufHdr)))
+
 /*
  * Buffer tag identifies which disk block the buffer contains.
  *
@@ -516,6 +523,7 @@ extern uint64 WaitBufHdrUnlocked(BufferDesc *buf);
 typedef struct CkptSortItem
 {
 	Oid			tsId;
+	Oid			dbId;
 	RelFileNumber relNumber;
 	ForkNumber	forkNum;
 	BlockNumber blockNum;
@@ -550,14 +558,19 @@ ResourceOwnerForgetBufferIO(ResourceOwner owner, Buffer buffer)
 	ResourceOwnerForget(owner, Int32GetDatum(buffer), &buffer_io_resowner_desc);
 }
 
+/* For use in freelist.c but defined in bufmgr.c */
+extern bool ClaimVictimBuffer(BufferAccessStrategy strategy,
+							  BufferDesc *buf_hdr, Buffer bufnum,
+							  uint64 buf_state,
+							  bool from_ring,
+							  IOContext io_context);
+
 /*
  * Internal buffer management routines
  */
 /* bufmgr.c */
 extern void WritebackContextInit(WritebackContext *context, int *max_pending);
 extern void IssuePendingWritebacks(WritebackContext *wb_context, IOContext io_context);
-extern void ScheduleBufferTagForWriteback(WritebackContext *wb_context,
-										  IOContext io_context, BufferTag *tag);
 
 extern void TrackNewBufferPin(Buffer buf);
 
@@ -583,13 +596,22 @@ extern StartBufferIOResult StartSharedBufferIO(BufferDesc *buf, bool forInput, b
 extern void TerminateBufferIO(BufferDesc *buf, bool clear_dirty, uint64 set_flag_bits,
 							  bool forget_owner, bool release_aio);
 
+extern void WriteBufferAndNeighbors(Buffer bufnum, BufferDesc *buf_hdr, IOContext io_context,
+									WritebackContext *wb_context);
+extern int	BgwriterWriteBuffers(int lru_maxpages, WritebackContext *wb_context,
+								 int *next_to_clean, uint32 *next_passes,
+								 int *num_to_scan, int *reusable_buffers,
+								 int upcoming_alloc_est, bool *maxwritten_clean);
+
 
 /* freelist.c */
 extern IOContext IOContextForStrategy(BufferAccessStrategy strategy);
-extern BufferDesc *StrategyGetBuffer(BufferAccessStrategy strategy,
-									 uint64 *buf_state, bool *from_ring);
+extern Buffer GetBufferFromRing(BufferAccessStrategy strategy,
+								IOContext io_context);
+extern void AddBufferToRing(BufferAccessStrategy strategy, Buffer bufnum);
+extern Buffer GetBufferFromClocksweep(IOContext io_context);
 extern bool StrategyRejectBuffer(BufferAccessStrategy strategy,
-								 BufferDesc *buf, bool from_ring);
+								 BufferDesc *buf, uint64 buf_state);
 
 extern int	StrategySyncStart(uint32 *complete_passes, uint32 *num_buf_alloc);
 extern void StrategyNotifyBgWriter(int bgwprocno);
