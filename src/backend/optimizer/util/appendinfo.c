@@ -259,8 +259,8 @@ adjust_appendrel_attrs_mutator(Node *node,
 		 * also needs to be copied to the translated Var.  That too would fail
 		 * if the translation wasn't a Var, but that should never happen since
 		 * a non-default var->varreturningtype is only used for Vars referring
-		 * to the result relation, which should never be a flattened UNION ALL
-		 * subquery.
+		 * to the result relation or the EXCLUDED pseudo-relation, which can
+		 * never be a flattened UNION ALL subquery.
 		 */
 
 		for (cnt = 0; cnt < nappinfos; cnt++)

@@ -1864,10 +1864,12 @@ create view uv_iocu_view as
    select b, b+1 as c, a, '2.0'::text as two from uv_iocu_tab;
 
 insert into uv_iocu_view (a, b) values ('xyxyxy', 1)
-   on conflict (a) do update set b = uv_iocu_view.b;
+   on conflict (a) do update set b = uv_iocu_view.b
+   returning old.*, new.*, excluded.*;
 select * from uv_iocu_tab;
 insert into uv_iocu_view (a, b) values ('xyxyxy', 1)
-   on conflict (a) do update set b = excluded.b;
+   on conflict (a) do update set b = excluded.b
+   returning old.*, new.*, excluded.*;
 select * from uv_iocu_tab;
 insert into uv_iocu_view (a, b) values ('xyxyxy', 1)
    on conflict (a) do select where uv_iocu_view.c = 2 and excluded.c = 2 returning *;
@@ -1987,12 +1989,14 @@ insert into uv_iocu_view (aa,bb) values (1,'y')
    on conflict (aa) do update set bb = 'Rejected: '||excluded.*
    where excluded.aa > 0
    and excluded.bb != ''
-   and excluded.cc is not null;
+   and excluded.cc is not null
+   returning 'Old: '||old.*, 'New: '||new.*, 'Excluded: '||excluded.*;
 insert into uv_iocu_view (aa,bb) values (1,'y')
    on conflict (aa) do update set bb = 'Rejected: '||excluded.*
    where excluded.aa > 0
    and excluded.bb != ''
-   and excluded.cc is not null;
+   and excluded.cc is not null
+   returning 'Old: '||old.*, 'New: '||new.*, 'Excluded: '||excluded.*;
 select * from uv_iocu_view;
 explain (costs off)
 insert into uv_iocu_view (aa,bb) values (1,'Rejected: (y,1,"(1,y)")')

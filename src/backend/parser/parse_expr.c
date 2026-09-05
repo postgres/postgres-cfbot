@@ -2685,7 +2685,7 @@ transformWholeRowRef(ParseState *pstate, ParseNamespaceItem *nsitem,
 		result = makeWholeRowVar(nsitem->p_rte, nsitem->p_rtindex,
 								 sublevels_up, true);
 
-		/* mark Var for RETURNING OLD/NEW, as necessary */
+		/* mark Var for RETURNING OLD/NEW/EXCLUDED, as necessary */
 		result->varreturningtype = nsitem->p_returning_type;
 
 		/* location is not filled in by makeWholeRowVar */
