@@ -1805,6 +1805,16 @@ WALReadFromBuffers(char *dstbuf, XLogRecPtr startptr, Size count,
 	if (RecoveryInProgress() || tli != GetWALInsertionTimeLine())
 		return 0;
 
+	/*
+	 * Force a buffer miss for reads not starting at a segment boundary. See
+	 * logical_read_xlog_page() for details.
+	 */
+#ifdef USE_INJECTION_POINTS
+	if (XLogSegmentOffset(startptr, wal_segment_size) != 0 &&
+		IS_INJECTION_POINT_ATTACHED("wal-read-from-buffers-force-miss"))
+		return 0;
+#endif
+
 	Assert(XLogRecPtrIsValid(startptr));
 
 	/*

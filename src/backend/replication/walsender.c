@@ -1098,6 +1098,7 @@ logical_read_xlog_page(XLogReaderState *state, XLogRecPtr targetPagePtr, int req
 	WALReadError errinfo;
 	XLogSegNo	segno;
 	TimeLineID	currTLI;
+	Size		rbytes;
 
 	/*
 	 * Make sure we have enough WAL available before retrieving the current
@@ -1157,16 +1158,47 @@ logical_read_xlog_page(XLogReaderState *state, XLogRecPtr targetPagePtr, int req
 	else
 		count = flushptr - targetPagePtr;	/* part of the page available */
 
-	/* now actually read the data, we know it's there */
-	if (!WALRead(state,
-				 cur_page,
-				 targetPagePtr,
-				 count,
-				 currTLI,		/* Pass the current TLI because only
+	/* attempt to read WAL from WAL buffers first */
+	rbytes = WALReadFromBuffers(cur_page, targetPagePtr, count, currTLI);
+
+	targetPagePtr += rbytes;
+
+	/* now read the remaining WAL from WAL file */
+	if (rbytes < count)
+	{
+		if (!WALRead(state,
+					 cur_page + rbytes,
+					 targetPagePtr,
+					 count - rbytes,
+					 currTLI,	/* Pass the current TLI because only
 								 * WalSndSegmentOpen controls whether new TLI
 								 * is needed. */
-				 &errinfo))
-		WALReadRaiseError(&errinfo);
+					 &errinfo))
+		{
+			WALReadRaiseError(&errinfo);
+		}
+		rbytes = count;			/* All requested bytes read */
+	}
+	else if (state->seg.ws_file >= 0)
+	{
+		/*
+		 * A read fully satisfied from WAL buffers skips WALRead(), which is
+		 * where ws_file is closed and reopened as the reader crosses
+		 * segments. So a buffer-only read never notices the segment change.
+		 * ws_file stays open on the old segment while ReadPageInternal()
+		 * advances ws_segno. For example, when the first page of segment 2
+		 * comes from buffers, ws_segno becomes 2 but ws_file is still open on
+		 * segment 1. A later read of segment 2 that falls back to the file
+		 * reuses the stale descriptor, since WALRead() decides whether to
+		 * reopen from ws_segno (already 2) rather than the open file. It
+		 * reads segment 1 and returns the wrong segment's WAL, seen during
+		 * decoding as an "unexpected pageaddr" error. Close the segment after
+		 * a buffer-only read so the next file read reopens the correct one.
+		 */
+		state->routine.segment_close(state);
+	}
+
+	Assert(rbytes == count);
 
 	/*
 	 * After reading into the buffer, check that what we read was valid. We do
