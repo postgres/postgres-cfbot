@@ -107,8 +107,16 @@ static void ComputeIndexAttrs(ParseState *pstate,
 							  int *ddl_save_nestlevel);
 static char *ChooseIndexName(const char *tabname, Oid namespaceId,
 							 const List *colnames, const List *exclusionOpNames,
-							 bool primary, bool isconstraint);
+							 bool primary, bool isconstraint,
+							 List *others);
 static char *ChooseIndexNameAddition(const List *colnames);
+static List *CollectReservedIndexNames(const IndexStmt *stmt,
+									   Oid tableId,
+									   Oid namespaceId);
+static bool IndexNameIsReserved(const List *reserved_names,
+								const char *indexname);
+static void TransferPartitionIndexProps(const IndexStmt *stmt, Oid childRelid,
+										IndexStmt *childStmt);
 static List *ChooseIndexColumnNames(Relation rel, const List *indexElems);
 static char *ChooseIndexExpressionName(Relation rel, Node *indexExpr);
 static bool ChooseIndexExpressionName_walker(Node *node,
@@ -558,6 +566,89 @@ SetIndexStatTargets(Oid indexRelationId, List *stattargets)
 
 
 /*
+ * Copy this partition's properties not preserved by the cloned rebuild
+ * definition (name, comment, replica identity, cluster-on, per-column stats
+ * targets, tablespace) from the saved descendant properties into the newly
+ * created IndexStmt for the child partition index as part of an ALTER COLUMN
+ * TYPE (or SET EXPRESSION) operation.
+ *
+ * These were saved in a list before dropping the index in an earlier phase.
+ * After we create the child partition index, we'll update the catalog table
+ * entries according to these values.
+ */
+static void
+TransferPartitionIndexProps(const IndexStmt *stmt, Oid childRelid,
+							IndexStmt *childStmt)
+{
+	foreach_node(PartitionIndexProps, props, stmt->oldPartIndexProps)
+	{
+		/*
+		 * Match entries by the partition table's OID (stable), since the old
+		 * index's OID is gone.
+		 */
+		if (props->partrelid != childRelid)
+			continue;
+
+		childStmt->idxname = pstrdup(props->idxname);
+		childStmt->idxcomment = props->idxcomment;
+		childStmt->idxconstraintcomment = props->constraintcomment;
+		childStmt->idxisreplident = props->isreplident;
+		childStmt->idxisclustered = props->isclustered;
+		childStmt->idxstattargets = props->stattargets;
+		childStmt->idxextensionOids = props->extensionOids;
+
+		/*
+		 * Override the parent's reloptions with the descendant's own, so
+		 * independently-set descendant options survive.
+		 */
+		childStmt->options = props->reloptions;
+		childStmt->tableSpace = props->tableSpace ?
+			pstrdup(props->tableSpace) : NULL;
+		childStmt->reset_default_tblspc = stmt->reset_default_tblspc;
+		return;
+	}
+}
+
+/*
+ * Collect relation names that an auto-generated child index name must avoid
+ * because a later step in the same rebuild will restore them explicitly.
+ */
+static List *
+CollectReservedIndexNames(const IndexStmt *stmt, Oid tableId,
+						  Oid namespaceId)
+{
+	List	   *others = NIL;
+
+	foreach_node(PartitionIndexProps, props, stmt->oldPartIndexProps)
+	{
+		if (props->partrelid == tableId)
+			continue;
+
+		if (get_rel_namespace(props->partrelid) != namespaceId)
+			continue;
+
+		others = lappend(others, props->idxname);
+	}
+
+	return others;
+}
+
+static bool
+IndexNameIsReserved(const List *reserved_names, const char *indexname)
+{
+	ListCell   *l;
+
+	foreach(l, reserved_names)
+	{
+		if (strcmp((char *) lfirst(l), indexname) == 0)
+			return true;
+	}
+
+	return false;
+}
+
+
+/*
  * DefineIndex
  *		Creates a new index.
  *
@@ -888,12 +979,21 @@ DefineIndex(ParseState *pstate,
 	 */
 	indexRelationName = stmt->idxname;
 	if (indexRelationName == NULL)
+	{
+		List	   *reserved_names = NIL;
+
+		if (stmt->oldPartIndexProps != NIL)
+			reserved_names = CollectReservedIndexNames(stmt, tableId,
+													   namespaceId);
 		indexRelationName = ChooseIndexName(RelationGetRelationName(rel),
 											namespaceId,
 											indexColNames,
 											stmt->excludeOpNames,
 											stmt->primary,
-											stmt->isconstraint);
+											stmt->isconstraint,
+											reserved_names);
+		list_free(reserved_names);
+	}
 
 	/*
 	 * look up the access method, verify it can handle the requested features
@@ -1374,6 +1474,10 @@ DefineIndex(ParseState *pstate,
 	if (stmt->idxcomment != NULL)
 		CreateComments(indexRelationId, RelationRelationId, 0,
 					   stmt->idxcomment);
+	if (stmt->idxconstraintcomment != NULL)
+		CreateComments(createdConstraintId, ConstraintRelationId, 0,
+					   stmt->idxconstraintcomment);
+
 	if (stmt->idxextensionOids != NIL)
 	{
 		ObjectAddress indexAddress;
@@ -1391,6 +1495,62 @@ DefineIndex(ParseState *pstate,
 
 	if (stmt->idxstattargets != NIL)
 		SetIndexStatTargets(indexRelationId, stmt->idxstattargets);
+
+	/*
+	 * index_create() has no inputs for indisclustered or indisreplident, so
+	 * restore them with a direct single-row pg_index update.  Don't use
+	 * mark_index_clustered() or relation_mark_replica_identity(), because
+	 * they clear the flag on sibling indexes which are mid-drop here.  That
+	 * is safe to skip because at most one index per table carries each flag
+	 * and it is this newly-created one.  Since this directly alters the new
+	 * index, also invoke the corresponding post-alter hook below.
+	 */
+	if (stmt->idxisclustered || stmt->idxisreplident)
+	{
+		Relation	pg_index;
+		HeapTuple	idxtuple;
+		Form_pg_index indexForm;
+
+		pg_index = table_open(IndexRelationId, RowExclusiveLock);
+		idxtuple = SearchSysCacheCopy1(INDEXRELID,
+									   ObjectIdGetDatum(indexRelationId));
+		if (!HeapTupleIsValid(idxtuple))
+			elog(ERROR, "cache lookup failed for index %u", indexRelationId);
+		indexForm = (Form_pg_index) GETSTRUCT(idxtuple);
+
+		if (stmt->idxisclustered)
+			indexForm->indisclustered = true;
+		if (stmt->idxisreplident)
+			indexForm->indisreplident = true;
+
+		CatalogTupleUpdate(pg_index, &idxtuple->t_self, idxtuple);
+		InvokeObjectPostAlterHookArg(IndexRelationId, indexRelationId, 0,
+									 InvalidOid, !check_rights);
+		heap_freetuple(idxtuple);
+		table_close(pg_index, RowExclusiveLock);
+	}
+
+	/* Replica identity also marks the owning table's relreplident. */
+	if (stmt->idxisreplident)
+	{
+		Relation	pg_class;
+		Oid			heapId = IndexGetRelation(indexRelationId, false);
+		HeapTuple	ctup;
+		Form_pg_class classForm;
+
+		pg_class = table_open(RelationRelationId, RowExclusiveLock);
+		ctup = SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(heapId));
+		if (!HeapTupleIsValid(ctup))
+			elog(ERROR, "cache lookup failed for relation %u", heapId);
+		classForm = (Form_pg_class) GETSTRUCT(ctup);
+		if (classForm->relreplident != REPLICA_IDENTITY_INDEX)
+		{
+			classForm->relreplident = REPLICA_IDENTITY_INDEX;
+			CatalogTupleUpdate(pg_class, &ctup->t_self, ctup);
+		}
+		heap_freetuple(ctup);
+		table_close(pg_class, RowExclusiveLock);
+	}
 
 	if (partitioned)
 	{
@@ -1613,6 +1773,17 @@ DefineIndex(ParseState *pstate,
 														parentIndex,
 														attmap,
 														NULL);
+
+					/*
+					 * Transfer properties not preserved by the cloned rebuild
+					 * definition into the child IndexStmt. The child also
+					 * needs a pointer to the list in case it is an
+					 * intermediate partitioned index and needs its own
+					 * children to be able to find their entries upon
+					 * recursing.
+					 */
+					childStmt->oldPartIndexProps = stmt->oldPartIndexProps;
+					TransferPartitionIndexProps(stmt, childRelid, childStmt);
 
 					/*
 					 * Recurse as the starting user ID.  Callee will use that
@@ -2713,6 +2884,10 @@ makeObjectName(const char *name1, const char *name2, const char *label)
  * should be unique within schemas, so we follow that for autogenerated
  * constraint names.)
  *
+ * 'others' can be a list of relation names already chosen within the current
+ * command, or otherwise reserved by it, but not yet visible in the catalogs;
+ * we will not choose a duplicate of one of these either.
+ *
  * Note: it is theoretically possible to get a collision anyway, if someone
  * else chooses the same name concurrently.  We shorten the race condition
  * window by checking for conflicting relations using SnapshotDirty, but
@@ -2727,7 +2902,7 @@ makeObjectName(const char *name1, const char *name2, const char *label)
 char *
 ChooseRelationName(const char *name1, const char *name2,
 				   const char *label, Oid namespaceid,
-				   bool isconstraint)
+				   bool isconstraint, List *others)
 {
 	int			pass = 0;
 	char	   *relname = NULL;
@@ -2747,6 +2922,7 @@ ChooseRelationName(const char *name1, const char *name2,
 		ScanKeyData key[2];
 		SysScanDesc scan;
 		bool		collides;
+		bool		reserved = false;
 
 		relname = makeObjectName(name1, name2, modlabel);
 
@@ -2769,8 +2945,11 @@ ChooseRelationName(const char *name1, const char *name2,
 
 		systable_endscan(scan);
 
-		/* break out of loop if no conflict */
 		if (!collides)
+			reserved = IndexNameIsReserved(others, relname);
+
+		/* break out of loop if no conflict */
+		if (!collides && !reserved)
 		{
 			if (!isconstraint ||
 				!ConstraintNameExists(relname, namespaceid))
@@ -2795,7 +2974,7 @@ ChooseRelationName(const char *name1, const char *name2,
 static char *
 ChooseIndexName(const char *tabname, Oid namespaceId,
 				const List *colnames, const List *exclusionOpNames,
-				bool primary, bool isconstraint)
+				bool primary, bool isconstraint, List *others)
 {
 	char	   *indexname;
 
@@ -2806,7 +2985,8 @@ ChooseIndexName(const char *tabname, Oid namespaceId,
 									   NULL,
 									   "pkey",
 									   namespaceId,
-									   true);
+									   true,
+									   others);
 	}
 	else if (exclusionOpNames != NIL)
 	{
@@ -2814,7 +2994,8 @@ ChooseIndexName(const char *tabname, Oid namespaceId,
 									   ChooseIndexNameAddition(colnames),
 									   "excl",
 									   namespaceId,
-									   true);
+									   true,
+									   others);
 	}
 	else if (isconstraint)
 	{
@@ -2822,7 +3003,8 @@ ChooseIndexName(const char *tabname, Oid namespaceId,
 									   ChooseIndexNameAddition(colnames),
 									   "key",
 									   namespaceId,
-									   true);
+									   true,
+									   others);
 	}
 	else
 	{
@@ -2830,7 +3012,8 @@ ChooseIndexName(const char *tabname, Oid namespaceId,
 									   ChooseIndexNameAddition(colnames),
 									   "idx",
 									   namespaceId,
-									   false);
+									   false,
+									   others);
 	}
 
 	return indexname;
@@ -4201,7 +4384,8 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 											NULL,
 											"ccnew",
 											get_rel_namespace(indexRel->rd_index->indrelid),
-											false);
+											false,
+											NIL);
 
 		/* Choose the new tablespace, indexes of toast tables are not moved */
 		if (OidIsValid(params->tablespaceOid) &&
@@ -4513,7 +4697,8 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 									 NULL,
 									 "ccold",
 									 get_rel_namespace(oldidx->tableId),
-									 false);
+									 false,
+									 NIL);
 
 		/*
 		 * Swapping the indexes might involve TOAST table access, so ensure we
