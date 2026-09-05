@@ -483,7 +483,8 @@ generateSerialExtraStmts(CreateStmtContext *cxt, ColumnDef *column,
 								   column->colname,
 								   "seq",
 								   snamespaceid,
-								   false);
+								   false,
+								   NIL);
 	}
 
 	ereport(DEBUG1,
