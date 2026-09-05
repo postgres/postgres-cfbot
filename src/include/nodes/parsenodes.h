@@ -3612,8 +3612,6 @@ typedef struct IndexStmt
 	List	   *options;		/* WITH clause options: a list of DefElem */
 	Node	   *whereClause;	/* qualification (partial-index predicate) */
 	List	   *excludeOpNames; /* exclusion operator names, or NIL if none */
-	char	   *idxcomment;		/* comment to apply to index, or NULL */
-	List	   *idxextensionOids;	/* extensions to depend on */
 	Oid			indexOid;		/* OID of an existing index, if any */
 	RelFileNumber oldNumber;	/* relfilenumber of existing storage, if any */
 	SubTransactionId oldCreateSubid;	/* rd_createSubid of oldNumber */
@@ -3631,7 +3629,27 @@ typedef struct IndexStmt
 	bool		if_not_exists;	/* just do nothing if index already exists? */
 	bool		reset_default_tblspc;	/* reset default_tablespace prior to
 										 * executing */
+
+	/*
+	 * When doing an operation on the index that causes it to be dropped and
+	 * recreated, these properties are not automatically cloned from the old
+	 * index to the new and must be explicitly saved before dropping the old
+	 * index and restored after creating the new index.
+	 */
+	char	   *idxcomment;		/* comment to apply to index, or NULL */
+	List	   *idxstattargets; /* list of IndexStatTarget to restore */
+	List	   *idxextensionOids;	/* extensions to depend on */
 } IndexStmt;
+
+/* one per-column statistics target carried across an index rebuild */
+typedef struct IndexStatTarget
+{
+	pg_node_attr(no_equal, no_query_jumble)
+
+	NodeTag		type;
+	int			attnum;			/* index column number (1-based) */
+	int16		stattarget;		/* attstattarget value to restore */
+} IndexStatTarget;
 
 /* ----------------------
  *		Create Statistics Statement
