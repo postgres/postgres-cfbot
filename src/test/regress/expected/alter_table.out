@@ -2346,6 +2346,42 @@ select c.relname, d.deptype, e.extname
 (2 rows)
 
 drop table at_reb_dep;
+-- Per-column statistics targets should still exist after an ALTER COLUMN TYPE
+create table at_reb_plain (id int not null, val int not null);
+create index at_reb_plain_expr on at_reb_plain ((val + 1));
+create unique index at_reb_plain_u on at_reb_plain ((id + 0), (val + 0));
+alter index at_reb_plain_expr alter column 1 set statistics 321;
+alter index at_reb_plain_u alter column 1 set statistics 111;
+alter index at_reb_plain_u alter column 2 set statistics 222;
+alter table at_reb_plain alter column val type bigint;
+select c.relname, a.attnum, a.attstattarget
+  from pg_attribute a join pg_class c on c.oid = a.attrelid
+  where c.relname in ('at_reb_plain_expr', 'at_reb_plain_u') and a.attnum > 0
+  order by c.relname, a.attnum;
+      relname      | attnum | attstattarget 
+-------------------+--------+---------------
+ at_reb_plain_expr |      1 |           321
+ at_reb_plain_u    |      1 |           111
+ at_reb_plain_u    |      2 |           222
+(3 rows)
+
+drop table at_reb_plain;
+-- SET EXPRESSION rebuilds indexes through the same path.
+create table at_reb_set
+  (id int not null, val int not null,
+   gen int generated always as (val + 1) stored);
+create index at_reb_set_idx on at_reb_set ((gen + 1));
+alter index at_reb_set_idx alter column 1 set statistics 654;
+alter table at_reb_set alter column gen set expression as (val + 2);
+select c.relname, a.attnum, a.attstattarget
+  from pg_attribute a join pg_class c on c.oid = a.attrelid
+  where c.relname = 'at_reb_set_idx' and a.attnum > 0;
+    relname     | attnum | attstattarget 
+----------------+--------+---------------
+ at_reb_set_idx |      1 |           654
+(1 row)
+
+drop table at_reb_set;
 -- disallow recursive containment of row types
 create temp table recur1 (f1 int);
 alter table recur1 add column f2 recur1; -- fails
