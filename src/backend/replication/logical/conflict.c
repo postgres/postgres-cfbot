@@ -325,7 +325,7 @@ InitConflictIndexes(ResultRelInfo *relInfo)
 			continue;
 
 		/* Don't support conflict detection for deferrable index */
-		if (!indexRelation->rd_index->indimmediate)
+		if (!RelationGetIndex(indexRelation)->indimmediate)
 			continue;
 
 		uniqueIndexes = lappend_oid(uniqueIndexes,

@@ -181,7 +181,7 @@ index_checkable(Relation rel, Oid am_id)
 				 errdetail("Index \"%s\" is associated with temporary relation.",
 						   RelationGetRelationName(rel))));
 
-	if (!rel->rd_index->indisvalid)
+	if (!RelationGetIndex(rel)->indisvalid)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("cannot check index \"%s\"",

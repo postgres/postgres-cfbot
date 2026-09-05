@@ -1075,7 +1075,7 @@ gin_clean_pending_list(PG_FUNCTION_ARGS)
 	 * is merely awaiting missed aminsert calls, we're capable of processing
 	 * it.  Decline to do so, out of an abundance of caution.
 	 */
-	if (indexRel->rd_index->indisvalid)
+	if (RelationGetIndex(indexRel)->indisvalid)
 	{
 		GinState	ginstate;
 

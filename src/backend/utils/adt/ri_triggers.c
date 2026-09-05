@@ -3658,7 +3658,7 @@ ri_populate_fastpath_metadata(RI_ConstraintInfo *riinfo,
 		 */
 		for (idx_col = 0; idx_col < riinfo->nkeys; idx_col++)
 		{
-			if (idx_rel->rd_index->indkey.values[idx_col] == riinfo->pk_attnums[i])
+			if (RelationGetIndex(idx_rel)->indkey.values[idx_col] == riinfo->pk_attnums[i])
 				break;
 		}
 		Assert(idx_col < riinfo->nkeys);

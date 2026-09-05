@@ -23,6 +23,7 @@
 #include "access/xlogrecovery.h"
 #include "access/xlog_internal.h"
 #include "access/xlogutils.h"
+#include "catalog/pg_tablespace_d.h"
 #include "miscadmin.h"
 #include "storage/fd.h"
 #include "storage/smgr.h"
@@ -617,14 +618,21 @@ CreateFakeRelcacheEntry(RelFileLocator rlocator)
 	sprintf(RelationGetRelationName(rel), "%u", rlocator.relNumber);
 
 	/*
-	 * We set up the lockRelId in case anything tries to lock the dummy
-	 * relation.  Note that this is fairly bogus since relNumber may be
-	 * different from the relation's OID.  It shouldn't really matter though.
-	 * In recovery, we are running by ourselves and can't have any lock
-	 * conflicts.  While syncing, we already hold AccessExclusiveLock.
+	 * RelationGetLockRelId() derives the LockRelId to use for locking the
+	 * relation from rd_id and rd_rel->relisshared, in case anything tries
+	 * to lock the dummy relation.  We don't have a real OID for this fake
+	 * entry, so use relNumber instead.  Note that this is fairly bogus
+	 * since relNumber may be different from the relation's real OID.  It
+	 * shouldn't really matter though.  In recovery, we are running by
+	 * ourselves and can't have any lock conflicts.  While syncing, we
+	 * already hold AccessExclusiveLock.  Set relisshared to match rlocator
+	 * so that RelationGetLockRelId() derives the correct dbId for shared
+	 * relations (InvalidOid); for non-shared relations it'll derive
+	 * MyDatabaseId, which is correct whenever this is called from a real
+	 * backend (e.g. while syncing) and simply irrelevant during recovery.
 	 */
-	rel->rd_lockInfo.lockRelId.dbId = rlocator.dbOid;
-	rel->rd_lockInfo.lockRelId.relId = rlocator.relNumber;
+	rel->rd_id = rlocator.relNumber;
+	rel->rd_rel->relisshared = (rlocator.spcOid == GLOBALTABLESPACE_OID);
 
 	/*
 	 * Set up a non-pinned SMgrRelation reference, so that we don't need to

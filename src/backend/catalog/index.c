@@ -1250,7 +1250,7 @@ index_create(Relation heapRelation,
 	else
 		Assert(indexRelation->rd_indexcxt != NULL);
 
-	indexRelation->rd_index->indnkeyatts = indexInfo->ii_NumIndexKeyAttrs;
+	RelationGetIndex(indexRelation)->indnkeyatts = indexInfo->ii_NumIndexKeyAttrs;
 
 	/* Validate opclass-specific options */
 	if (opclassOptions)
@@ -1420,7 +1420,7 @@ index_create_copy(Relation heapRelation, uint16 flags,
 							oldInfo->ii_WithoutOverlaps);
 
 	/* fetch exclusion constraint info if any */
-	if (indexRelation->rd_index->indisexclusion)
+	if (RelationGetIndex(indexRelation)->indisexclusion)
 	{
 		/*
 		 * XXX Beware: we're making newInfo point to oldInfo-owned memory.  It
@@ -2267,9 +2267,9 @@ index_drop(Oid indexId, bool concurrent, bool concurrent_lock_mode)
 		CacheInvalidateRelcache(userHeapRelation);
 
 		/* save lockrelid and locktag for below, then close but keep locks */
-		heaprelid = userHeapRelation->rd_lockInfo.lockRelId;
+		heaprelid = RelationGetLockRelId(userHeapRelation);
 		SET_LOCKTAG_RELATION(heaplocktag, heaprelid.dbId, heaprelid.relId);
-		indexrelid = userIndexRelation->rd_lockInfo.lockRelId;
+		indexrelid = RelationGetLockRelId(userIndexRelation);
 
 		table_close(userHeapRelation, NoLock);
 		index_close(userIndexRelation, NoLock);
@@ -2461,7 +2461,7 @@ IndexInfo *
 BuildIndexInfo(Relation index)
 {
 	IndexInfo  *ii;
-	Form_pg_index indexStruct = index->rd_index;
+	Form_pg_index indexStruct = RelationGetIndex(index);
 	int			i;
 	int			numAtts;
 
@@ -2521,7 +2521,7 @@ IndexInfo *
 BuildDummyIndexInfo(Relation index)
 {
 	IndexInfo  *ii;
-	Form_pg_index indexStruct = index->rd_index;
+	Form_pg_index indexStruct = RelationGetIndex(index);
 	int			i;
 	int			numAtts;
 

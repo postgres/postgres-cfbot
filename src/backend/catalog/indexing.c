@@ -135,7 +135,7 @@ CatalogIndexInsert(CatalogIndexState indstate, HeapTuple heapTuple,
 		Assert(indexInfo->ii_Expressions == NIL);
 		Assert(indexInfo->ii_Predicate == NIL);
 		Assert(indexInfo->ii_ExclusionOps == NULL);
-		Assert(index->rd_index->indimmediate);
+		Assert(RelationGetIndex(index)->indimmediate);
 		Assert(indexInfo->ii_NumIndexKeyAttrs != 0);
 
 		/* see earlier check above */
@@ -172,7 +172,7 @@ CatalogIndexInsert(CatalogIndexState indstate, HeapTuple heapTuple,
 					 isnull,	/* is-null flags */
 					 &(heapTuple->t_self),	/* tid of heap tuple */
 					 heapRelation,
-					 index->rd_index->indisunique ?
+					 RelationGetIndex(index)->indisunique ?
 					 UNIQUE_CHECK_YES : UNIQUE_CHECK_NO,
 					 false,
 					 indexInfo);

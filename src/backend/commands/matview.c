@@ -727,7 +727,7 @@ refresh_by_match_merge(Oid matviewOid, Oid tempOid, Oid relowner,
 		indexRel = index_open(indexoid, RowExclusiveLock);
 		if (is_usable_unique_index(indexRel))
 		{
-			Form_pg_index indexStruct = indexRel->rd_index;
+			Form_pg_index indexStruct = RelationGetIndex(indexRel);
 			int			indnkeyatts = indexStruct->indnkeyatts;
 			oidvector  *indclass;
 			Datum		indclassDatum;
@@ -904,7 +904,7 @@ refresh_by_heap_swap(Oid matviewOid, Oid OIDNewHeap, char relpersistence)
 static bool
 is_usable_unique_index(Relation indexRel)
 {
-	Form_pg_index indexStruct = indexRel->rd_index;
+	Form_pg_index indexStruct = RelationGetIndex(indexRel);
 
 	/*
 	 * Must be unique, valid, immediate, non-partial, and be defined over

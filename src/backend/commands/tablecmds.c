@@ -1312,7 +1312,7 @@ DefineRelation(CreateStmt *stmt, char relkind, Oid ownerId,
 
 			if (rel->rd_rel->relkind == RELKIND_FOREIGN_TABLE)
 			{
-				if (idxRel->rd_index->indisunique)
+				if (RelationGetIndex(idxRel)->indisunique)
 					ereport(ERROR,
 							(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 							 errmsg("cannot create foreign partition of partitioned table \"%s\"",
@@ -9085,12 +9085,12 @@ ATExecSetStatistics(Relation rel, const char *colName, int16 colNum, Node *newVa
 	if (rel->rd_rel->relkind == RELKIND_INDEX ||
 		rel->rd_rel->relkind == RELKIND_PARTITIONED_INDEX)
 	{
-		if (attnum > rel->rd_index->indnkeyatts)
+		if (attnum > RelationGetIndex(rel)->indnkeyatts)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("cannot alter statistics on included column \"%s\" of index \"%s\"",
 							NameStr(attrtuple->attname), RelationGetRelationName(rel))));
-		else if (rel->rd_index->indkey.values[attnum - 1] != 0)
+		else if (RelationGetIndex(rel)->indkey.values[attnum - 1] != 0)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("cannot alter statistics on non-expression column \"%s\" of index \"%s\"",
@@ -9225,9 +9225,9 @@ SetIndexStorageProperties(Relation rel, Relation attrelation,
 
 		indrel = index_open(indexoid, lockmode);
 
-		for (int i = 0; i < indrel->rd_index->indnatts; i++)
+		for (int i = 0; i < RelationGetIndex(indrel)->indnatts; i++)
 		{
-			if (indrel->rd_index->indkey.values[i] == attnum)
+			if (RelationGetIndex(indrel)->indkey.values[i] == attnum)
 			{
 				indattnum = i + 1;
 				break;
@@ -14630,8 +14630,8 @@ dropconstraint_internal(Relation rel, HeapTuple constraintTup, DropBehavior beha
 				Relation	pk = relation_open(pkindex, AccessShareLock);
 
 				pkattrs = NULL;
-				for (int i = 0; i < pk->rd_index->indnkeyatts; i++)
-					pkattrs = bms_add_member(pkattrs, pk->rd_index->indkey.values[i]);
+				for (int i = 0; i < RelationGetIndex(pk)->indnkeyatts; i++)
+					pkattrs = bms_add_member(pkattrs, RelationGetIndex(pk)->indkey.values[i]);
 
 				relation_close(pk, AccessShareLock);
 			}
@@ -19204,8 +19204,8 @@ ATExecReplicaIdentity(Relation rel, ReplicaIdentityStmt *stmt, LOCKMODE lockmode
 	indexRel = index_open(indexOid, ShareLock);
 
 	/* Check that the index is on the relation we're altering. */
-	if (indexRel->rd_index == NULL ||
-		indexRel->rd_index->indrelid != RelationGetRelid(rel))
+	if (RelationGetIndex(indexRel) == NULL ||
+		RelationGetIndex(indexRel)->indrelid != RelationGetRelid(rel))
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not an index for table \"%s\"",
@@ -19218,14 +19218,14 @@ ATExecReplicaIdentity(Relation rel, ReplicaIdentityStmt *stmt, LOCKMODE lockmode
 	 * exclusion), we can use that too.
 	 */
 	if ((!indexRel->rd_indam->amcanunique ||
-		 !indexRel->rd_index->indisunique) &&
-		!(indexRel->rd_index->indisunique && indexRel->rd_index->indisexclusion))
+		 !RelationGetIndex(indexRel)->indisunique) &&
+		!(RelationGetIndex(indexRel)->indisunique && RelationGetIndex(indexRel)->indisexclusion))
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("cannot use non-unique index \"%s\" as replica identity",
 						RelationGetRelationName(indexRel))));
 	/* Deferred indexes are not guaranteed to be always unique. */
-	if (!indexRel->rd_index->indimmediate)
+	if (!RelationGetIndex(indexRel)->indimmediate)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot use non-immediate index \"%s\" as replica identity",
@@ -19246,7 +19246,7 @@ ATExecReplicaIdentity(Relation rel, ReplicaIdentityStmt *stmt, LOCKMODE lockmode
 	/* Check index for nullable columns. */
 	for (key = 0; key < IndexRelationGetNumberOfKeyAttributes(indexRel); key++)
 	{
-		int16		attno = indexRel->rd_index->indkey.values[key];
+		int16		attno = RelationGetIndex(indexRel)->indkey.values[key];
 		Form_pg_attribute attr;
 		HeapTuple	contup;
 		Form_pg_constraint conForm;
@@ -21377,8 +21377,8 @@ AttachPartitionEnsureIndexes(List **wqueue, Relation rel, Relation attachrel)
 			Oid			idx = lfirst_oid(cell);
 			Relation	idxRel = index_open(idx, AccessShareLock);
 
-			if (idxRel->rd_index->indisunique ||
-				idxRel->rd_index->indisprimary)
+			if (RelationGetIndex(idxRel)->indisunique ||
+				RelationGetIndex(idxRel)->indisprimary)
 				ereport(ERROR,
 						(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 						 errmsg("cannot attach foreign table \"%s\" as partition of partitioned table \"%s\"",
@@ -21437,7 +21437,7 @@ AttachPartitionEnsureIndexes(List **wqueue, Relation rel, Relation attachrel)
 				continue;
 
 			/* If this index is invalid, can't use it */
-			if (!attachrelIdxRels[i]->rd_index->indisvalid)
+			if (!RelationGetIndex(attachrelIdxRels[i])->indisvalid)
 				continue;
 
 			if (CompareIndexInfo(attachInfos[i], info,
@@ -22361,7 +22361,7 @@ ATExecAttachPartitionIdx(List **wqueue, Relation parentIdx, RangeVar *name)
 	 * partition, so lock that one too.
 	 */
 	state.partitionOid = InvalidOid;
-	state.parentTblOid = parentIdx->rd_index->indrelid;
+	state.parentTblOid = RelationGetIndex(parentIdx)->indrelid;
 	state.lockedParentTbl = false;
 	partIdxId =
 		RangeVarGetRelidExtended(name, AccessExclusiveLock, 0,
@@ -22377,8 +22377,8 @@ ATExecAttachPartitionIdx(List **wqueue, Relation parentIdx, RangeVar *name)
 	partIdx = relation_open(partIdxId, AccessExclusiveLock);
 
 	/* we already hold locks on both tables, so this is safe: */
-	parentTbl = relation_open(parentIdx->rd_index->indrelid, AccessShareLock);
-	partTbl = relation_open(partIdx->rd_index->indrelid, NoLock);
+	parentTbl = relation_open(RelationGetIndex(parentIdx)->indrelid, AccessShareLock);
+	partTbl = relation_open(RelationGetIndex(partIdx)->indrelid, NoLock);
 
 	ObjectAddressSet(address, RelationRelationId, RelationGetRelid(partIdx));
 
@@ -22481,7 +22481,7 @@ ATExecAttachPartitionIdx(List **wqueue, Relation parentIdx, RangeVar *name)
 		 * If it's a primary key, make sure the columns in the partition are
 		 * NOT NULL.
 		 */
-		if (parentIdx->rd_index->indisprimary)
+		if (RelationGetIndex(parentIdx)->indisprimary)
 			verifyPartitionIndexNotNull(childInfo, partTbl);
 
 		/* All good -- do it */
@@ -22494,7 +22494,7 @@ ATExecAttachPartitionIdx(List **wqueue, Relation parentIdx, RangeVar *name)
 
 		validatePartitionedIndex(parentIdx, parentTbl);
 	}
-	else if (!parentIdx->rd_index->indisvalid)
+	else if (!RelationGetIndex(parentIdx)->indisvalid)
 	{
 		/*
 		 * The index is attached, but the parent is still invalid; see if it
@@ -22627,7 +22627,7 @@ validatePartitionedIndex(Relation partedIdx, Relation partedTbl)
 		parentTblId = get_partition_parent(RelationGetRelid(partedTbl), false);
 		parentIdx = relation_open(parentIdxId, AccessExclusiveLock);
 		parentTbl = relation_open(parentTblId, AccessExclusiveLock);
-		Assert(!parentIdx->rd_index->indisvalid);
+		Assert(!RelationGetIndex(parentIdx)->indisvalid);
 
 		validatePartitionedIndex(parentIdx, parentTbl);
 

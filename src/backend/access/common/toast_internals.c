@@ -327,11 +327,11 @@ toast_save_datum(Relation rel, Datum value,
 		for (int i = 0; i < num_indexes; i++)
 		{
 			/* Only index relations marked as ready can be updated */
-			if (toastidxs[i]->rd_index->indisready)
+			if (RelationGetIndex(toastidxs[i])->indisready)
 				index_insert(toastidxs[i], t_values, t_isnull,
 							 &(toasttup->t_self),
 							 toastrel,
-							 toastidxs[i]->rd_index->indisunique ?
+							 RelationGetIndex(toastidxs[i])->indisunique ?
 							 UNIQUE_CHECK_YES : UNIQUE_CHECK_NO,
 							 false, NULL);
 		}
@@ -577,7 +577,7 @@ toast_open_indexes(Relation toastrel,
 	{
 		Relation	toastidx = (*toastidxs)[i];
 
-		if (toastidx->rd_index->indisvalid)
+		if (RelationGetIndex(toastidx)->indisvalid)
 		{
 			res = i;
 			found = true;

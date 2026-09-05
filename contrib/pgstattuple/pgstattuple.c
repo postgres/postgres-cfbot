@@ -262,7 +262,7 @@ pgstat_relation(Relation rel, FunctionCallInfo fcinfo)
 	else if (rel->rd_rel->relkind == RELKIND_INDEX)
 	{
 		/* see pgstatindex_impl */
-		if (!rel->rd_index->indisvalid)
+		if (!RelationGetIndex(rel)->indisvalid)
 			ereport(ERROR,
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 					 errmsg("index \"%s\" is not valid",

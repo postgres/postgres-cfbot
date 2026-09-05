@@ -4387,8 +4387,8 @@ check_lock_if_inplace_updateable_rel(Relation relation,
 				LOCKTAG		tuptag;
 
 				SET_LOCKTAG_TUPLE(tuptag,
-								  relation->rd_lockInfo.lockRelId.dbId,
-								  relation->rd_lockInfo.lockRelId.relId,
+								  RelationGetLockRelId(relation).dbId,
+								  RelationGetLockRelId(relation).relId,
 								  ItemPointerGetBlockNumber(otid),
 								  ItemPointerGetOffsetNumber(otid));
 				if (LockHeldByMe(&tuptag, InplaceUpdateTupleLock, false))
@@ -4419,7 +4419,7 @@ check_lock_if_inplace_updateable_rel(Relation relation,
 				{
 					Relation	irel = index_open(relid, AccessShareLock);
 
-					SET_LOCKTAG_RELATION(tag, dbid, irel->rd_index->indrelid);
+					SET_LOCKTAG_RELATION(tag, dbid, RelationGetIndex(irel)->indrelid);
 					index_close(irel, AccessShareLock);
 				}
 				else
@@ -4473,7 +4473,7 @@ check_inplace_rel_lock(HeapTuple oldtup)
 	{
 		Relation	irel = index_open(relid, AccessShareLock);
 
-		SET_LOCKTAG_RELATION(tag, dbid, irel->rd_index->indrelid);
+		SET_LOCKTAG_RELATION(tag, dbid, RelationGetIndex(irel)->indrelid);
 		index_close(irel, AccessShareLock);
 	}
 	else

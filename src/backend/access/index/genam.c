@@ -199,7 +199,7 @@ BuildIndexValueDescription(Relation indexRelation,
 	 * Next we need to check table-level SELECT access and then, if there is
 	 * no access there, check column-level permissions.
 	 */
-	idxrec = indexRelation->rd_index;
+	idxrec = RelationGetIndex(indexRelation);
 	indrelid = idxrec->indrelid;
 	Assert(indexrelid == idxrec->indexrelid);
 
@@ -444,7 +444,7 @@ systable_beginscan(Relation heapRelation,
 
 			for (j = 0; j < IndexRelationGetNumberOfAttributes(irel); j++)
 			{
-				if (key[i].sk_attno == irel->rd_index->indkey.values[j])
+				if (key[i].sk_attno == RelationGetIndex(irel)->indkey.values[j])
 				{
 					idxkey[i].sk_attno = j + 1;
 					break;
@@ -698,7 +698,7 @@ systable_beginscan_ordered(Relation heapRelation,
 
 		for (j = 0; j < IndexRelationGetNumberOfAttributes(indexRelation); j++)
 		{
-			if (key[i].sk_attno == indexRelation->rd_index->indkey.values[j])
+			if (key[i].sk_attno == RelationGetIndex(indexRelation)->indkey.values[j])
 			{
 				idxkey[i].sk_attno = j + 1;
 				break;

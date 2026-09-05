@@ -597,7 +597,7 @@ cluster_rel(RepackCommand cmd, Relation OldHeap, Oid indexOid,
 	 */
 	if (cmd != REPACK_COMMAND_CLUSTER &&
 		!allowSystemTableMods && OidIsValid(indexOid) &&
-		IsCatalogRelation(OldHeap) && !index->rd_index->indisclustered)
+		IsCatalogRelation(OldHeap) && !RelationGetIndex(index)->indisclustered)
 		ereport(ERROR,
 				errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				errmsg("permission denied: \"%s\" is a system catalog",
@@ -746,8 +746,8 @@ check_index_is_clusterable(Relation OldHeap, Oid indexOid, LOCKMODE lockmode)
 	/*
 	 * Check that index is in fact an index on the given relation
 	 */
-	if (OldIndex->rd_index == NULL ||
-		OldIndex->rd_index->indrelid != RelationGetRelid(OldHeap))
+	if (RelationGetIndex(OldIndex) == NULL ||
+		RelationGetIndex(OldIndex)->indrelid != RelationGetRelid(OldHeap))
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not an index for table \"%s\"",
@@ -781,7 +781,7 @@ check_index_is_clusterable(Relation OldHeap, Oid indexOid, LOCKMODE lockmode)
 	 * might put recently-dead tuples out-of-order in the new table, and there
 	 * is little harm in that.)
 	 */
-	if (!OldIndex->rd_index->indisvalid)
+	if (!RelationGetIndex(OldIndex)->indisvalid)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot cluster on invalid index \"%s\"",
@@ -2893,7 +2893,7 @@ static bool
 find_target_tuple(Relation rel, ChangeContext *chgcxt, TupleTableSlot *locator,
 				  TupleTableSlot *retrieved)
 {
-	Form_pg_index idx = chgcxt->cc_ident_index->rd_index;
+	Form_pg_index idx = RelationGetIndex(chgcxt->cc_ident_index);
 	IndexScanDesc scan;
 	bool		retval = false;
 
@@ -2952,7 +2952,7 @@ identity_key_equal(ChangeContext *chgcxt, TupleTableSlot *locator,
 	for (int i = 0; i < chgcxt->cc_ident_key_nentries; i++)
 	{
 		ScanKey		entry = &chgcxt->cc_ident_key[i];
-		AttrNumber	attno = chgcxt->cc_ident_index->rd_index->indkey.values[i];
+		AttrNumber	attno = RelationGetIndex(chgcxt->cc_ident_index)->indkey.values[i];
 
 		Assert(attno > 0);
 
@@ -3123,7 +3123,7 @@ initialize_change_context(ChangeContext *chgcxt,
 	{
 		Form_pg_index indexForm;
 
-		indexForm = chgcxt->cc_ident_index->rd_index;
+		indexForm = RelationGetIndex(chgcxt->cc_ident_index);
 		chgcxt->cc_ident_key_nentries = indexForm->indnkeyatts;
 		chgcxt->cc_ident_key = (ScanKey) palloc_array(ScanKeyData, indexForm->indnkeyatts);
 		for (int i = 0; i < indexForm->indnkeyatts; i++)
@@ -3167,7 +3167,7 @@ initialize_change_context(ChangeContext *chgcxt,
 	chgcxt->cc_last_key_attno = InvalidAttrNumber;
 	for (int i = 0; i < chgcxt->cc_ident_key_nentries; i++)
 	{
-		AttrNumber	attno = chgcxt->cc_ident_index->rd_index->indkey.values[i];
+		AttrNumber	attno = RelationGetIndex(chgcxt->cc_ident_index)->indkey.values[i];
 
 		Assert(attno > 0);
 		chgcxt->cc_last_key_attno = Max(chgcxt->cc_last_key_attno, attno);
@@ -3432,7 +3432,7 @@ build_new_indexes(Relation NewHeap, Relation OldHeap, List *OldIndexes)
 		newName = ChooseRelationName(get_rel_name(oldindex),
 									 NULL,
 									 "repacknew",
-									 get_rel_namespace(ind->rd_index->indrelid),
+									 get_rel_namespace(RelationGetIndex(ind)->indrelid),
 									 false);
 		newindex = index_create_copy(NewHeap, INDEX_CREATE_SUPPRESS_PROGRESS,
 									 oldindex, ind->rd_rel->reltablespace,
@@ -3478,7 +3478,7 @@ copy_index_constraints(Relation old_index, Oid new_index_id, Oid new_heap_id)
 	ScanKeyInit(&skey,
 				Anum_pg_constraint_conrelid,
 				BTEqualStrategyNumber, F_OIDEQ,
-				ObjectIdGetDatum(old_index->rd_index->indrelid));
+				ObjectIdGetDatum(RelationGetIndex(old_index)->indrelid));
 	scan = systable_beginscan(rel, ConstraintRelidTypidNameIndexId, true,
 							  NULL, 1, &skey);
 	desc = RelationGetDescr(rel);

@@ -2202,7 +2202,7 @@ vacuum_rel(Oid relid, RangeVar *relation, VacuumParams params,
 	 * because the lock manager knows that both lock requests are from the
 	 * same process.
 	 */
-	lockrelid = rel->rd_lockInfo.lockRelId;
+	lockrelid = RelationGetLockRelId(rel);
 	LockRelationIdForSession(&lockrelid, lmode);
 
 	/*
@@ -2441,7 +2441,7 @@ vac_open_indexes(Relation relation, LOCKMODE lockmode,
 		Relation	indrel;
 
 		indrel = index_open(indexoid, lockmode);
-		if (indrel->rd_index->indisready)
+		if (RelationGetIndex(indrel)->indisready)
 			(*Irel)[i++] = indrel;
 		else
 			index_close(indrel, lockmode);
