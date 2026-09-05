@@ -68,6 +68,8 @@ static inline bool FilterPrepare(LogicalDecodingContext *ctx,
 static bool DecodeTXNNeedSkip(LogicalDecodingContext *ctx,
 							  XLogRecordBuffer *buf, Oid txn_dbid,
 							  ReplOriginId origin_id);
+static bool InvalidationsTouchSharedCatalog(uint32 nmsgs,
+											SharedInvalidationMessage *msgs);
 
 /*
  * Take every XLogReadRecord()ed record and perform the actions required to
@@ -692,6 +694,7 @@ DecodeCommit(LogicalDecodingContext *ctx, XLogRecordBuffer *buf,
 	XLogRecPtr	origin_lsn = InvalidXLogRecPtr;
 	TimestampTz commit_time = parsed->xact_time;
 	ReplOriginId origin_id = XLogRecGetOrigin(buf->record);
+	bool		distribute = true;
 	int			i;
 
 	if (parsed->xinfo & XACT_XINFO_HAS_ORIGIN)
@@ -700,9 +703,19 @@ DecodeCommit(LogicalDecodingContext *ctx, XLogRecordBuffer *buf,
 		commit_time = parsed->origin_timestamp;
 	}
 
+	/*
+	 * Catalog changes in another database cannot influence the decoding of
+	 * this slot, unless shared catalogs were touched.  All changes to shared
+	 * catalogs produce invalidation messages, so we can use the presence of
+	 * such messages to determine that.
+	 */
+	if (parsed->dbId != ctx->slot->data.database &&
+		!InvalidationsTouchSharedCatalog(parsed->nmsgs, parsed->msgs))
+		distribute = false;
+
 	SnapBuildCommitTxn(ctx->snapshot_builder, buf->origptr, xid,
 					   parsed->nsubxacts, parsed->subxacts,
-					   parsed->xinfo);
+					   parsed->xinfo, distribute);
 
 	/* ----
 	 * Check whether we are interested in this specific transaction, and tell
@@ -1340,6 +1353,38 @@ DecodeTXNNeedSkip(LogicalDecodingContext *ctx, XLogRecordBuffer *buf,
 	{
 		ctx->processing_required = true;
 		return true;
+	}
+
+	return false;
+}
+
+/*
+ * Check whether any of the given invalidation messages concern a shared
+ * catalog.
+ */
+static bool
+InvalidationsTouchSharedCatalog(uint32 nmsgs, SharedInvalidationMessage *msgs)
+{
+	uint32		i;
+
+	for (i = 0; i < nmsgs; i++)
+	{
+		SharedInvalidationMessage *msg = &msgs[i];
+
+		if (msg->id == SHAREDINVALSMGR_ID)
+		{
+			/* shared relations have a zero dbOid in their RelFileLocator */
+			if (msg->sm.rlocator.dbOid == InvalidOid)
+				return true;
+		}
+		else if (msg->cc.dbId == InvalidOid)
+		{
+			/*
+			 * All the other message types carry the database ID (0 for a
+			 * shared relation) right after the type field.
+			 */
+			return true;
+		}
 	}
 
 	return false;
