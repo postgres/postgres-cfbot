@@ -1750,6 +1750,152 @@ SELECT avg(t1.a), avg(t2.b), avg(t3.a + t3.b), t1.c, t2.c, t3.c FROM pht1 t1, ph
  273.0000000000000000 | 273.0000000000000000 | 548.0000000000000000 | 0005 | 0005 | A0005
 (6 rows)
 
+--
+-- hash partitioned by a varchar column and an int column
+--
+-- The partition key for c is a plain Var, but an equivalence class member
+-- derived from comparing it against a text value is wrapped in a RelabelType.
+-- Proving the partition keys equal therefore requires ignoring
+-- binary-compatible relabeling on both sides of the comparison.
+--
+-- Below, c's equality is proven by the equivalence class rather than by a join
+-- clause, which is why both sides are compared to a constant instead of to
+-- each other; d's equality comes from the join clause. Hash pruning needs
+-- every partition key column to be constrained, so constraining only c prunes
+-- nothing and all partitions remain on both sides, which is what makes the
+-- partitionwise join visible here.
+--
+CREATE TABLE pht3 (a int, c varchar(40), d int) PARTITION BY HASH (c, d);
+CREATE TABLE pht3_p1 PARTITION OF pht3 FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+CREATE TABLE pht3_p2 PARTITION OF pht3 FOR VALUES WITH (MODULUS 2, REMAINDER 1);
+INSERT INTO pht3 SELECT i, to_char(i/50, 'FM0000'), i % 10 FROM generate_series(0, 599, 2) i;
+ANALYZE pht3;
+CREATE TABLE pht4 (a int, c varchar(40), d int) PARTITION BY HASH (c, d);
+CREATE TABLE pht4_p1 PARTITION OF pht4 FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+CREATE TABLE pht4_p2 PARTITION OF pht4 FOR VALUES WITH (MODULUS 2, REMAINDER 1);
+INSERT INTO pht4 SELECT i, to_char(i/50, 'FM0000'), i % 10 FROM generate_series(0, 599, 3) i;
+ANALYZE pht4;
+-- avoid hash and merge joins, whose costs here are close enough to the
+-- partitionwise nested loop's to make the test output unstable
+SET enable_hashjoin = off;
+SET enable_mergejoin = off;
+EXPLAIN (COSTS OFF)
+SELECT t1.a, t2.a FROM pht3 t1 JOIN pht4 t2 ON t1.d = t2.d WHERE t1.c = '0002' AND t2.c = '0002';
+                       QUERY PLAN                       
+--------------------------------------------------------
+ Append
+   ->  Nested Loop
+         Join Filter: (t1_1.d = t2_1.d)
+         ->  Seq Scan on pht3_p1 t1_1
+               Filter: ((c)::text = '0002'::text)
+         ->  Materialize
+               ->  Seq Scan on pht4_p1 t2_1
+                     Filter: ((c)::text = '0002'::text)
+   ->  Nested Loop
+         Join Filter: (t1_2.d = t2_2.d)
+         ->  Seq Scan on pht3_p2 t1_2
+               Filter: ((c)::text = '0002'::text)
+         ->  Materialize
+               ->  Seq Scan on pht4_p2 t2_2
+                     Filter: ((c)::text = '0002'::text)
+(15 rows)
+
+SELECT count(*) FROM pht3 t1 JOIN pht4 t2 ON t1.d = t2.d WHERE t1.c = '0002' AND t2.c = '0002';
+ count 
+-------
+    40
+(1 row)
+
+RESET enable_hashjoin;
+RESET enable_mergejoin;
+-- outer join on a partition key that is an expression wrapped in a RelabelType
+CREATE TABLE pht5 (a int, c varchar(40)) PARTITION BY HASH ((c::text));
+CREATE TABLE pht5_p1 PARTITION OF pht5 FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+CREATE TABLE pht5_p2 PARTITION OF pht5 FOR VALUES WITH (MODULUS 2, REMAINDER 1);
+INSERT INTO pht5 SELECT i, to_char(i/50, 'FM0000') FROM generate_series(0, 599, 2) i;
+-- a key with no match in pht6, so that the join produces a null-extended row
+INSERT INTO pht5 VALUES (600, '9999');
+ANALYZE pht5;
+CREATE TABLE pht6 (a int, c varchar(40)) PARTITION BY HASH ((c::text));
+CREATE TABLE pht6_p1 PARTITION OF pht6 FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+CREATE TABLE pht6_p2 PARTITION OF pht6 FOR VALUES WITH (MODULUS 2, REMAINDER 1);
+INSERT INTO pht6 SELECT i, to_char(i/50, 'FM0000') FROM generate_series(0, 599, 3) i;
+ANALYZE pht6;
+CREATE TABLE pht7 (a int, c varchar(40)) PARTITION BY HASH ((c::text));
+CREATE TABLE pht7_p1 PARTITION OF pht7 FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+CREATE TABLE pht7_p2 PARTITION OF pht7 FOR VALUES WITH (MODULUS 2, REMAINDER 1);
+INSERT INTO pht7 SELECT i, to_char(i/50, 'FM0000') FROM generate_series(0, 599, 5) i;
+ANALYZE pht7;
+-- avoid hash and merge joins, whose costs here are close enough to the
+-- partitionwise nested loop's to make the test output unstable
+SET enable_hashjoin = off;
+SET enable_mergejoin = off;
+SET max_parallel_workers_per_gather = 0;
+-- the second count() shows that a null-extended row is produced
+EXPLAIN (COSTS OFF)
+SELECT count(*), count(t2.a) FROM pht5 t1 LEFT JOIN pht6 t2 ON t1.c::text = t2.c::text;
+                          QUERY PLAN                          
+--------------------------------------------------------------
+ Aggregate
+   ->  Append
+         ->  Nested Loop Left Join
+               Join Filter: ((t1_1.c)::text = (t2_1.c)::text)
+               ->  Seq Scan on pht5_p1 t1_1
+               ->  Materialize
+                     ->  Seq Scan on pht6_p1 t2_1
+         ->  Nested Loop Left Join
+               Join Filter: ((t1_2.c)::text = (t2_2.c)::text)
+               ->  Seq Scan on pht5_p2 t1_2
+               ->  Materialize
+                     ->  Seq Scan on pht6_p2 t2_2
+(12 rows)
+
+SELECT count(*), count(t2.a) FROM pht5 t1 LEFT JOIN pht6 t2 ON t1.c::text = t2.c::text;
+ count | count 
+-------+-------
+  5001 |  5000
+(1 row)
+
+-- Here the upper join clause references t2.c, which is a nullable partition
+-- key expression of the (pht5, pht6) join relation, so matching it requires
+-- ignoring relabeling on nullable_partexprs as well.
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM (pht5 t1 LEFT JOIN pht6 t2 ON t1.c::text = t2.c::text)
+                     LEFT JOIN pht7 t3 ON t2.c::text = t3.c::text;
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
+ Aggregate
+   ->  Append
+         ->  Nested Loop Left Join
+               Join Filter: ((t1_1.c)::text = (t2_1.c)::text)
+               ->  Seq Scan on pht5_p1 t1_1
+               ->  Materialize
+                     ->  Nested Loop Left Join
+                           Join Filter: ((t2_1.c)::text = (t3_1.c)::text)
+                           ->  Seq Scan on pht6_p1 t2_1
+                           ->  Materialize
+                                 ->  Seq Scan on pht7_p1 t3_1
+         ->  Nested Loop Left Join
+               Join Filter: ((t1_2.c)::text = (t2_2.c)::text)
+               ->  Seq Scan on pht5_p2 t1_2
+               ->  Materialize
+                     ->  Nested Loop Left Join
+                           Join Filter: ((t2_2.c)::text = (t3_2.c)::text)
+                           ->  Seq Scan on pht6_p2 t2_2
+                           ->  Materialize
+                                 ->  Seq Scan on pht7_p2 t3_2
+(20 rows)
+
+SELECT count(*) FROM (pht5 t1 LEFT JOIN pht6 t2 ON t1.c::text = t2.c::text)
+                     LEFT JOIN pht7 t3 ON t2.c::text = t3.c::text;
+ count 
+-------
+ 50001
+(1 row)
+
+RESET max_parallel_workers_per_gather;
+RESET enable_hashjoin;
+RESET enable_mergejoin;
 -- test default partition behavior for range
 ALTER TABLE prt1 DETACH PARTITION prt1_p3;
 ALTER TABLE prt1 ATTACH PARTITION prt1_p3 DEFAULT;

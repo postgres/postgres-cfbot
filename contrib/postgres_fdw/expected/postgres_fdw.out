@@ -11192,6 +11192,16 @@ CREATE FOREIGN TABLE ftprt2_p2 PARTITION OF fprt2 FOR VALUES FROM (250) TO (500)
 ANALYZE fprt2;
 ANALYZE fprt2_p1;
 ANALYZE fprt2_p2;
+CREATE TABLE fprt3 (a int, b int, c varchar(40)) PARTITION BY HASH(c);
+CREATE TABLE fprt3_ft (a int, b int, c varchar(40));
+CREATE TABLE fprt3_p1 PARTITION OF fprt3 FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+CREATE FOREIGN TABLE fprt3_p2 PARTITION OF fprt3 FOR VALUES WITH (MODULUS 2, REMAINDER 1)
+	SERVER loopback OPTIONS (table_name 'fprt3_ft');
+CREATE TABLE fprt4 (a int, b int, c varchar(40)) PARTITION BY HASH(c);
+CREATE TABLE fprt4_ft (a int, b int, c varchar(40));
+CREATE TABLE fprt4_p1 PARTITION OF fprt4 FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+CREATE FOREIGN TABLE fprt4_p2 PARTITION OF fprt4 FOR VALUES WITH (MODULUS 2, REMAINDER 1)
+	SERVER loopback OPTIONS (table_name 'fprt4_ft');
 -- inner join three tables
 EXPLAIN (COSTS OFF)
 SELECT t1.a,t2.b,t3.c FROM fprt1 t1 INNER JOIN fprt2 t2 ON (t1.a = t2.b) INNER JOIN fprt1 t3 ON (t2.b = t3.a) WHERE t1.a % 25 =0 ORDER BY 1,2,3;
@@ -11359,6 +11369,18 @@ SELECT t1.a, t2.b FROM fprt1 t1 INNER JOIN fprt2 t2 ON (t1.a = t2.b) WHERE t1.a 
  150 | 150
  250 | 250
  400 | 400
+(4 rows)
+
+-- with a varchar partition key, the partitionwise join lets the whole join be
+-- pushed down to the remote server
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT fprt3.a, fprt4.a FROM fprt3 JOIN fprt4 ON fprt3.c = fprt4.c WHERE fprt3.c = '0002';
+                                                              QUERY PLAN                                                              
+--------------------------------------------------------------------------------------------------------------------------------------
+ Foreign Scan
+   Output: fprt3.a, fprt4.a
+   Relations: (public.fprt3_p2 fprt3) INNER JOIN (public.fprt4_p2 fprt4)
+   Remote SQL: SELECT r4.a, r5.a FROM (public.fprt3_ft r4 INNER JOIN public.fprt4_ft r5 ON (((r5.c = '0002')) AND ((r4.c = '0002'))))
 (4 rows)
 
 RESET enable_partitionwise_join;

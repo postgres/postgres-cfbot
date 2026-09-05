@@ -2481,6 +2481,18 @@ have_partkey_equi_join(PlannerInfo *root, RelOptInfo *joinrel,
 }
 
 /*
+ * strip_relabel_decorations
+ *		Remove any RelabelType decorations from "expr".
+ */
+static Expr *
+strip_relabel_decorations(Expr *expr)
+{
+	while (expr && IsA(expr, RelabelType))
+		expr = ((RelabelType *) expr)->arg;
+	return expr;
+}
+
+/*
  * match_expr_to_partition_keys
  *
  * Tries to match an expression to one of the nullable or non-nullable
@@ -2501,9 +2513,14 @@ match_expr_to_partition_keys(Expr *expr, RelOptInfo *rel, bool strict_op)
 	Assert(rel->partexprs);
 	Assert(rel->nullable_partexprs);
 
-	/* Remove any relabel decorations. */
-	while (IsA(expr, RelabelType))
-		expr = (Expr *) (castNode(RelabelType, expr))->arg;
+	/*
+	 * Remove any relabel decorations, from the clause expression here and
+	 * from each partition key expression below. A key involving a
+	 * binary-compatible cast is itself stored wrapped in a RelabelType. The
+	 * collation is not lost, as the caller compares the clause's inputcollid
+	 * against the partition collation.
+	 */
+	expr = strip_relabel_decorations(expr);
 
 	for (cnt = 0; cnt < rel->part_scheme->partnatts; cnt++)
 	{
@@ -2512,7 +2529,7 @@ match_expr_to_partition_keys(Expr *expr, RelOptInfo *rel, bool strict_op)
 		/* We can always match to the non-nullable partition keys. */
 		foreach(lc, rel->partexprs[cnt])
 		{
-			if (equal(lfirst(lc), expr))
+			if (equal(strip_relabel_decorations(lfirst(lc)), expr))
 				return cnt;
 		}
 
@@ -2528,7 +2545,7 @@ match_expr_to_partition_keys(Expr *expr, RelOptInfo *rel, bool strict_op)
 		 */
 		foreach(lc, rel->nullable_partexprs[cnt])
 		{
-			if (equal(lfirst(lc), expr))
+			if (equal(strip_relabel_decorations(lfirst(lc)), expr))
 				return cnt;
 		}
 	}
