@@ -229,6 +229,9 @@ typedef struct AggStatePerAggData
 	 * aggregates because the final function is read-write.
 	 */
 	bool		shareable;
+
+	/* ExprState for evaluating ON EMPTY default value, or NULL */
+	ExprState  *aggonemptystate;
 } AggStatePerAggData;
 
 /*
@@ -264,6 +267,13 @@ typedef struct AggStatePerGroupData
 	 * NULL and not auto-replace it with a later input value. Only the first
 	 * non-NULL input will be auto-substituted.
 	 */
+
+	/*
+	 * Whether this group has seen any input row yet.  Used by the ON EMPTY
+	 * clause to detect the empty-input case at finalization.
+	 */
+#define FIELDNO_AGGSTATEPERGROUPDATA_INPUTRECEIVED 3
+	bool		inputReceived;
 } AggStatePerGroupData;
 
 /*
