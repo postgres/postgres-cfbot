@@ -2868,6 +2868,28 @@ acl      | {postgres=arwdDxtm/postgres,foo=r/postgres}
       <row>
        <entry role="func_table_entry"><para role="func_signature">
         <indexterm>
+         <primary>pg_current_vxact_id</primary>
+        </indexterm>
+        <function>pg_current_vxact_id</function> ()
+        <returnvalue>text</returnvalue>
+       </para>
+       <para>
+        Returns the current virtual transaction ID (VXID) in the
+        format <literal>procNumber/localXID</literal>
+        (for example, <literal>3/42</literal>).
+        Virtual transaction ID is always assigned when a transaction starts,
+        unlike regular transaction IDs which are only assigned when the
+        transaction performs a database write.  VXIDs are session-scoped and
+        do not persist across server restarts.  They are primarily useful for
+        correlating transactions with log entries that use the <literal>%v</literal> placeholder
+        in <xref linkend="guc-log-line-prefix"/>.
+        See <xref linkend="transaction-id"/> for details.
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
          <primary>pg_xact_status</primary>
         </indexterm>
         <function>pg_xact_status</function> ( <type>xid8</type> )
