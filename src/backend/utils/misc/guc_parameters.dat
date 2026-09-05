@@ -2466,6 +2466,14 @@
   max => 'INT_MAX',
 },
 
+{ name => 'recovery_pause_on_logical_slot_conflict', type => 'bool',
+  context => 'PGC_SIGHUP', group => 'REPLICATION_STANDBY',
+  short_desc => 'Pauses recovery before invalidating a local logical replication slot.',
+  long_desc => 'Allows the slot to consume already-replayed WAL and advance its xmin horizons before recovery resumes automatically.',
+  variable => 'recovery_pause_on_logical_slot_conflict',
+  boot_val => 'false',
+},
+
 { name => 'recovery_prefetch', type => 'enum', context => 'PGC_SIGHUP', group => 'WAL_RECOVERY',
   short_desc => 'Prefetch referenced blocks during recovery.',
   long_desc => 'Look ahead in the WAL to find references to uncached data.',
