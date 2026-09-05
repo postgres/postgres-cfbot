@@ -848,7 +848,15 @@ transformRangeTableFunc(ParseState *pstate, RangeTableFunc *rtf)
 			Node	   *ns_uri;
 
 			Assert(IsA(r, ResTarget));
-			ns_uri = transformExpr(pstate, r->val, EXPR_KIND_FROM_FUNCTION);
+
+			if (!r->name && !r->val)
+			{
+				/* Create an empty string for NO DEFAULT namespaces */
+				ns_uri = transformExpr(pstate, makeStringConst("", r->location), EXPR_KIND_FROM_FUNCTION);
+			}
+			else
+				ns_uri = transformExpr(pstate, r->val, EXPR_KIND_FROM_FUNCTION);
+
 			ns_uri = coerce_to_specific_type(pstate, ns_uri,
 											 TEXTOID, constructName);
 			assign_expr_collations(pstate, ns_uri);
