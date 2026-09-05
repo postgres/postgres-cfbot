@@ -43,6 +43,18 @@ typedef uint16 StrategyNumber;
 #define HTMaxStrategyNumber				1
 
 /*
+ * Strategy number groups used by GIST, one for each GIS object type. Each number
+ * group can contain up to 'GeoStrategyNumberOffset' strategies.
+ */
+#define GeoStrategyNumberOffset		20
+#define PointStrategyNumberGroup	0
+#define BoxStrategyNumberGroup		1
+#define PolygonStrategyNumberGroup	2
+#define CircleStrategyNumberGroup	3
+
+#define GeoMaxStrategyNumberGroup	3
+
+/*
  * Strategy numbers common to (some) GiST, SP-GiST and BRIN opclasses.
  *
  * The first few of these come from the R-Tree indexing method (hence the
@@ -80,6 +92,6 @@ typedef uint16 StrategyNumber;
 #define RTOldAboveStrategyNumber		30	/* for old spelling of |>> */
 
 #define RTMaxStrategyNumber				30
-
+#define MaxStrategyNumber				63
 
 #endif							/* STRATNUM_H */
