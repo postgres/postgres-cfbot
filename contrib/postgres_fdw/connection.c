@@ -310,20 +310,24 @@ GetConnection(UserMapping *user, bool will_prep_stmt, PgFdwConnState **state)
 		/*
 		 * Determine whether to try to reestablish the connection.
 		 *
-		 * After a broken connection is detected in libpq, any error other
-		 * than connection failure (e.g., out-of-memory) can be thrown
-		 * somewhere between return from libpq and the expected ereport() call
-		 * in pgfdw_report_error(). In this case, since PQstatus() indicates
-		 * CONNECTION_BAD, checking only PQstatus() causes the false detection
-		 * of connection failure. To avoid this, we also verify that the
-		 * error's sqlstate is ERRCODE_CONNECTION_FAILURE. Note that also
-		 * checking only the sqlstate can cause another false detection
-		 * because pgfdw_report_error() may report ERRCODE_CONNECTION_FAILURE
-		 * for any libpq-originated error condition.
+		 * We retry only if the remote connection has actually been lost:
+		 * libpq has marked it CONNECTION_BAD and the error we caught is one
+		 * that pgfdw_report_error() raised to report a remote failure.
+		 * Checking the origin is essential: once libpq has flagged
+		 * CONNECTION_BAD, an unrelated error (e.g., out-of-memory, or a local
+		 * statement cancel) can be thrown somewhere between the return from
+		 * libpq and that expected ereport(). Such an error also sees
+		 * CONNECTION_BAD, so relying on PQstatus() alone would wrongly
+		 * swallow it and retry. The error's funcname tells us where it was
+		 * raised: every remote failure, including a FATAL that the server
+		 * sends as it closes the connection, is reported from
+		 * pgfdw_report_internal(), whereas a stray local error is raised
+		 * elsewhere. (Keep this name in sync with that function.)
 		 */
-		if (errdata->sqlerrcode != ERRCODE_CONNECTION_FAILURE ||
-			PQstatus(entry->conn) != CONNECTION_BAD ||
-			entry->xact_depth > 0)
+		if (PQstatus(entry->conn) != CONNECTION_BAD ||
+			entry->xact_depth > 0 ||
+			errdata->funcname == NULL ||
+			strcmp(errdata->funcname, "pgfdw_report_internal") != 0)
 		{
 			MemoryContextSwitchTo(ecxt);
 			PG_RE_THROW();
