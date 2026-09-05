@@ -1842,6 +1842,7 @@ OpenTableList(List *tables)
 	ListCell   *lc;
 	List	   *relids_with_rf = NIL;
 	List	   *relids_with_collist = NIL;
+	List	   *relids_recursing = NIL;
 
 	/*
 	 * Open, share-lock, and check all the explicitly-specified relations
@@ -1883,6 +1884,22 @@ OpenTableList(List *tables)
 						 errmsg("conflicting or redundant column lists for table \"%s\"",
 								RelationGetRelationName(rel))));
 
+			/*
+			 * Disallow duplicate tables if one mention specifies ONLY and
+			 * another does not, since it's not clear whether descendant
+			 * tables should be included.  Plain "foo, foo" (agreeing on
+			 * ONLY-ness) remains a silently-tolerated no-op, as before.
+			 *
+			 * Mismatching ONLY-ness remains silently-tolerated for
+			 * partitioned tables since ONLY has no meaning for them anyway.
+			 */
+			if (recurse != list_member_oid(relids_recursing, myrelid) &&
+				rel->rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
+				ereport(ERROR,
+						(errcode(ERRCODE_DUPLICATE_OBJECT),
+						 errmsg("conflicting ONLY specifications for table \"%s\"",
+								RelationGetRelationName(rel))));
+
 			table_close(rel, ShareUpdateExclusiveLock);
 			continue;
 		}
@@ -1900,6 +1917,9 @@ OpenTableList(List *tables)
 
 		if (t->columns)
 			relids_with_collist = lappend_oid(relids_with_collist, myrelid);
+
+		if (recurse)
+			relids_recursing = lappend_oid(relids_recursing, myrelid);
 
 		/*
 		 * Add children of this rel, if requested, so that they too are added
