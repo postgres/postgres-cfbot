@@ -394,6 +394,7 @@ struct pg_conn
 	char	   *pgservice;		/* Postgres service, if any */
 	char	   *pgservicefile;	/* path to a service file containing
 								 * service(s) */
+	char	   *pgldapserviceurl;	/* Postgres LDAP service URL, if any */
 	char	   *pguser;			/* Postgres username and password, if any */
 	char	   *pgpass;
 	char	   *pgpassfile;		/* path to a file containing password(s) */
