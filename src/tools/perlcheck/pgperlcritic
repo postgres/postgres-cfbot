@@ -1,20 +1,8 @@
 #!/bin/sh
 
-# src/tools/perlcheck/pgperlcritic
+# Copyright (c) 2021-2026, PostgreSQL Global Development Group
 
-test -f src/tools/perlcheck/perlcriticrc || {
-	echo could not find src/tools/perlcheck/perlcriticrc
-	exit 1
-	}
+# Wrapper that runs pgcheck in perlcritic-only mode.
+# See src/tools/pgcheck/pgcheck for the full implementation.
 
-set -e
-
-# set this to override default perlcritic program:
-PERLCRITIC=${PERLCRITIC:-perlcritic}
-
-. src/tools/perlcheck/find_perl_files
-
-find_perl_files "$@" | xargs $PERLCRITIC \
-	  --quiet \
-	  --program-extensions .pl \
-	  --profile=src/tools/perlcheck/perlcriticrc
+exec "$(dirname "$0")/../pgcheck/pgcheck" --perlcritic "$@"
