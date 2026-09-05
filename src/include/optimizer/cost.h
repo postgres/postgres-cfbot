@@ -32,6 +32,7 @@
 /* defaults for non-Cost parameters */
 #define DEFAULT_RECURSIVE_WORKTABLE_FACTOR  10.0
 #define DEFAULT_EFFECTIVE_CACHE_SIZE  524288	/* measured in pages */
+#define DEFAULT_EFFECTIVE_CPU_CACHE_SIZE  8192	/* measured in kilobytes */
 
 typedef enum
 {

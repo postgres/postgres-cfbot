@@ -844,6 +844,16 @@
   max => 'INT_MAX',
 },
 
+{ name => 'effective_cpu_cache_size', type => 'int', context => 'PGC_USERSET', group => 'QUERY_TUNING_COST',
+  short_desc => 'Sets the planner\'s assumption about the size of the CPU data cache.',
+  long_desc => 'Hash tables larger than this are charged for the additional memory traffic of probes that miss cache. 0 removes the extra cost.',
+  flags => 'GUC_UNIT_KB | GUC_EXPLAIN',
+  variable => 'effective_cpu_cache_size',
+  boot_val => 'DEFAULT_EFFECTIVE_CPU_CACHE_SIZE',
+  min => '0',
+  max => 'MAX_KILOBYTES',
+},
+
 { name => 'effective_io_concurrency', type => 'int', context => 'PGC_USERSET', group => 'RESOURCES_IO',
   short_desc => 'Number of simultaneous requests that can be handled efficiently by the disk subsystem.',
   long_desc => '0 disables simultaneous requests.',
