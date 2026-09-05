@@ -126,6 +126,7 @@ static int	ldapServiceLookup(const char *purl, PQconninfoOption *options,
 #endif
 #define DefaultTargetSessionAttrs	"any"
 #define DefaultLoadBalanceHosts	"disable"
+#define DefaultTryAllAddrs	"0"
 #ifdef USE_SSL
 #define DefaultSSLMode "prefer"
 #define DefaultSSLCertMode "allow"
@@ -394,6 +395,11 @@ static const internalPQconninfoOption PQconninfoOptions[] = {
 
 	{"scram_server_key", NULL, NULL, NULL, "SCRAM-Server-Key", "D", SCRAM_MAX_KEY_LEN * 2,
 	offsetof(struct pg_conn, scram_server_key)},
+
+	{"try_all_addrs", "PGTRYALLADDRS",
+		DefaultTryAllAddrs, NULL,
+		"Try-All-Addrs", "", 1,
+	offsetof(struct pg_conn, try_all_addrs)},
 
 	/* OAuth v2 */
 	{"oauth_issuer", NULL, NULL, NULL,
@@ -2037,6 +2043,21 @@ pqConnectOptions2(PGconn *conn)
 	}
 	else
 		conn->target_server_type = SERVER_TYPE_ANY;
+
+	if (conn->try_all_addrs){
+		if (strcmp(conn->try_all_addrs, "0") == 0)
+			conn->try_all_addrs_type = TRY_ALL_ADDRS_DISABLE;
+		else if (strcmp(conn->try_all_addrs, "1") == 0)
+			conn->try_all_addrs_type = TRY_ALL_ADDRS_ENABLE;
+		else {
+			conn->status = CONNECTION_BAD;
+			libpq_append_conn_error(conn, "invalid %s value: \"%s\"",
+									"try_all_addrs",
+									conn->try_all_addrs);
+			return false;
+		}
+	} else
+		conn->try_all_addrs_type = TRY_ALL_ADDRS_DISABLE;
 
 	if (conn->scram_client_key)
 	{
@@ -4452,11 +4473,11 @@ keep_going:						/* We will come back to here until there is
 						conn->status = CONNECTION_OK;
 						sendTerminateConn(conn);
 
-						/*
-						 * Try next host if any, but we don't want to consider
-						 * additional addresses for this host.
-						 */
-						conn->try_next_host = true;
+						if (conn->try_all_addrs_type == TRY_ALL_ADDRS_ENABLE)
+							conn->try_next_addr = true;
+						else
+							conn->try_next_host = true;
+
 						goto keep_going;
 					}
 				}
@@ -4507,11 +4528,11 @@ keep_going:						/* We will come back to here until there is
 						conn->status = CONNECTION_OK;
 						sendTerminateConn(conn);
 
-						/*
-						 * Try next host if any, but we don't want to consider
-						 * additional addresses for this host.
-						 */
-						conn->try_next_host = true;
+						if (conn->try_all_addrs_type == TRY_ALL_ADDRS_ENABLE)
+							conn->try_next_addr = true;
+						else
+							conn->try_next_host = true;
+
 						goto keep_going;
 					}
 				}
@@ -5146,6 +5167,7 @@ freePGconn(PGconn *conn)
 	free(conn->inBuffer);
 	free(conn->outBuffer);
 	free(conn->rowBuf);
+	free(conn->try_all_addrs);
 	termPQExpBuffer(&conn->errorMessage);
 	termPQExpBuffer(&conn->workBuffer);
 
