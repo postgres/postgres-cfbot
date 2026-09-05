@@ -1,0 +1,93 @@
+Parsed test spec with 3 sessions
+
+starting permutation: lock vacuum unlock drop_table wakeup noop check_stats detach
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step lock: 
+	BEGIN;
+	LOCK TABLE test_skip IN ACCESS EXCLUSIVE MODE;
+
+s2: WARNING:  skipping vacuum of "test_skip" --- lock not available
+step vacuum: VACUUM (SKIP_LOCKED) test_skip; <waiting ...>
+step unlock: COMMIT;
+step drop_table: DROP TABLE test_skip;
+step wakeup: SELECT injection_points_wakeup('skipped-vacuum-analyze-before-entry-lock');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step vacuum: <... completed>
+step noop: 
+step check_stats: 
+	SELECT pg_stat_force_next_flush();
+	SELECT pg_stat_get_lock_skipped_vacuum_count(oid_val) AS skip_count
+	FROM saved_oid;
+
+pg_stat_force_next_flush
+------------------------
+                        
+(1 row)
+
+skip_count
+----------
+         0
+(1 row)
+
+step detach: SELECT injection_points_detach('skipped-vacuum-analyze-before-entry-lock');
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: lock vacuum unlock rollback_drop wakeup noop check_stats detach
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step lock: 
+	BEGIN;
+	LOCK TABLE test_skip IN ACCESS EXCLUSIVE MODE;
+
+s2: WARNING:  skipping vacuum of "test_skip" --- lock not available
+step vacuum: VACUUM (SKIP_LOCKED) test_skip; <waiting ...>
+step unlock: COMMIT;
+step rollback_drop: 
+	BEGIN;
+	DROP TABLE test_skip;
+	ROLLBACK;
+
+step wakeup: SELECT injection_points_wakeup('skipped-vacuum-analyze-before-entry-lock');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step vacuum: <... completed>
+step noop: 
+step check_stats: 
+	SELECT pg_stat_force_next_flush();
+	SELECT pg_stat_get_lock_skipped_vacuum_count(oid_val) AS skip_count
+	FROM saved_oid;
+
+pg_stat_force_next_flush
+------------------------
+                        
+(1 row)
+
+skip_count
+----------
+         1
+(1 row)
+
+step detach: SELECT injection_points_detach('skipped-vacuum-analyze-before-entry-lock');
+injection_points_detach
+-----------------------
+                       
+(1 row)
+

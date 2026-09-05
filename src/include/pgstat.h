@@ -512,6 +512,15 @@ typedef struct PgStat_StatTabEntry
 	TimestampTz last_autoanalyze_time;	/* autovacuum initiated */
 	PgStat_Counter autoanalyze_count;
 
+	TimestampTz last_lock_skipped_vacuum_time;	/* user initiated vacuum */
+	PgStat_Counter lock_skipped_vacuum_count;
+	TimestampTz last_lock_skipped_autovacuum_time;	/* autovacuum initiated */
+	PgStat_Counter lock_skipped_autovacuum_count;
+	TimestampTz last_lock_skipped_analyze_time; /* user initiated */
+	PgStat_Counter lock_skipped_analyze_count;
+	TimestampTz last_lock_skipped_autoanalyze_time; /* autovacuum initiated */
+	PgStat_Counter lock_skipped_autoanalyze_count;
+
 	PgStat_Counter total_vacuum_time;	/* times in milliseconds */
 	PgStat_Counter total_autovacuum_time;
 	PgStat_Counter total_analyze_time;
@@ -762,6 +771,14 @@ extern void pgstat_report_vacuum(Relation rel, PgStat_Counter livetuples,
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								  bool resetcounter, TimestampTz starttime);
+
+/* flags for pgstat_flush_backend() */
+#define PGSTAT_REPORT_LOCK_SKIPPED_VACUUM		(1 << 0)	/* vacuum is skipped */
+#define PGSTAT_REPORT_LOCK_SKIPPED_ANALYZE		(1 << 1)	/* analyze is skipped */
+#define PGSTAT_REPORT_LOCK_SKIPPED_AUTOVACUUM	(1 << 2)	/* autovacuum is skipped */
+#define PGSTAT_REPORT_LOCK_SKIPPED_AUTOANALYZE	(1 << 3)	/* autoanalyze is
+															 * skipped */
+extern void pgstat_report_skipped_vacuum_analyze(Oid relid, int flags);
 
 /*
  * If stats are enabled, but pending data hasn't been prepared yet, call

@@ -4681,6 +4681,16 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>last_lock_skipped_vacuum</structfield> <type>timestamp with time zone</type>
+      </para>
+      <para>
+       Last time a manual vacuum on this table was attempted but skipped due to
+       lock unavailability (not counting <command>VACUUM FULL</command>)
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
        <structfield>last_autovacuum</structfield> <type>timestamp with time zone</type>
       </para>
       <para>
@@ -4691,10 +4701,30 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>last_lock_skipped_autovacuum</structfield> <type>timestamp with time zone</type>
+      </para>
+      <para>
+       Last time a vacuum on this table by the autovacuum daemon was attempted
+       but skipped due to lock unavailability
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
        <structfield>last_analyze</structfield> <type>timestamp with time zone</type>
       </para>
       <para>
        Last time at which this table was manually analyzed
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>last_lock_skipped_analyze</structfield> <type>timestamp with time zone</type>
+      </para>
+      <para>
+       Last time a manual analyze on this table was attempted but skipped due to
+       lock unavailability
       </para></entry>
      </row>
 
@@ -4710,11 +4740,31 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>last_lock_skipped_autoanalyze</structfield> <type>timestamp with time zone</type>
+      </para>
+      <para>
+       Last time at which an analyze on this table by the autovacuum was
+       attempted but skipped due to lock unavailability
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
        <structfield>vacuum_count</structfield> <type>bigint</type>
       </para>
       <para>
        Number of times this table has been manually vacuumed
        (not counting <command>VACUUM FULL</command>)
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>lock_skipped_vacuum_count</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of times manual vacuums on this table have been attempted but skipped
+       due to lock unavailability (not counting <command>VACUUM FULL</command>)
       </para></entry>
      </row>
 
@@ -4730,10 +4780,30 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>lock_skipped_autovacuum_count</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of times vacuums on this table by the autovacuum daemon have been
+       attempted but skipped due to lock unavailability
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
        <structfield>analyze_count</structfield> <type>bigint</type>
       </para>
       <para>
        Number of times this table has been manually analyzed
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>lock_skipped_analyze_count</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of times manual analyzes on this table have been attempted but
+       skipped due to lock unavailability
       </para></entry>
      </row>
 
@@ -4744,6 +4814,16 @@ description | Waiting for a newly initialized WAL file to reach durable storage
       <para>
        Number of times this table has been analyzed by the autovacuum
        daemon
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>lock_skipped_autoanalyze_count</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of times analyzes on this table by the autovacuum daemon have
+       been attempted but skipped due to lock unavailability
       </para></entry>
      </row>
 
@@ -4801,6 +4881,14 @@ description | Waiting for a newly initialized WAL file to reach durable storage
     </tbody>
    </tgroup>
   </table>
+
+  <note>
+   <para>
+    When a manual vacuum or analyze on a parent table in an inheritance or
+    partitioning hierarchy is skipped, the statistics are recorded only for
+    the parent table, not for its children.
+   </para>
+  </note>
 
  </sect2>
 
