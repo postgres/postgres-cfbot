@@ -17454,6 +17454,19 @@ ATExecSetRelOptions(Relation rel, List *defList, AlterTableType operation,
 
 	ReleaseSysCache(tuple);
 
+	/* If toast_flavour is being set to 'direct', ensure the TOAST table supports it */
+	if (OidIsValid(rel->rd_rel->reltoastrelid) && newOptions != (Datum) 0 &&
+		(rel->rd_rel->relkind == RELKIND_RELATION || rel->rd_rel->relkind == RELKIND_MATVIEW))
+	{
+		StdRdOptions *opts = (StdRdOptions *) heap_reloptions(rel->rd_rel->relkind, newOptions, false);
+
+		if (opts && opts->toast_flavour == TOAST_FLAVOUR_DIRECT)
+			ensure_direct_toast(rel->rd_rel->reltoastrelid);
+
+		if (opts)
+			pfree(opts);
+	}
+
 	/* repeat the whole exercise for the toast table, if there's one */
 	if (OidIsValid(rel->rd_rel->reltoastrelid))
 	{

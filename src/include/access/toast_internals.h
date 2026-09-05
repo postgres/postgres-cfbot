@@ -16,6 +16,15 @@
 #include "storage/lockdefs.h"
 #include "utils/relcache.h"
 #include "utils/snapshot.h"
+#include "utils/rel.h"
+
+#define RelationGetToastFlavour(relation) \
+	((relation)->rd_options ? \
+	 (((StdRdOptions *) (relation)->rd_options)->toast_flavour != TOAST_FLAVOUR_NOT_SET ? \
+	  ((StdRdOptions *) (relation)->rd_options)->toast_flavour : (ToastFlavour) toast_flavour) \
+	 : (ToastFlavour) toast_flavour)
+
+extern PGDLLIMPORT int toast_flavour;
 
 /*
  *	The information at the start of the compressed toast data.

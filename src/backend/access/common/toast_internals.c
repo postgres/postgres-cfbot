@@ -21,13 +21,45 @@
 #include "access/toast_internals.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
+#include "catalog/pg_type.h"
 #include "miscadmin.h"
 #include "utils/fmgroids.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
+#include "utils/array.h"
+
+int			toast_flavour = TOAST_FLAVOUR_PLAIN;
+
+/*
+ * Direct TOAST chunk organization parameters:
+ *
+ * - DIRECT_TOAST_TREE_THRESHOLD (100):
+ *   Values requiring up to 100 chunks (~200KB) are structured with a flat
+ *   root chunk containing a single chunk_tids array of all leaf chunk TIDs.
+ *   This avoids tree depth overhead for small to medium values.
+ *
+ * - DIRECT_TOAST_FANOUT (50):
+ *   When a value exceeds DIRECT_TOAST_TREE_THRESHOLD, a multi-level balanced
+ *   tree is constructed where intermediate index chunks hold up to 50 child
+ *   TIDs (chunk_tids) and cumulative byte boundaries (chunk_tid_offsets).
+ *   This enables O(log N) slice retrieval without index scans.
+ */
+#define DIRECT_TOAST_TREE_THRESHOLD	100
+#define DIRECT_TOAST_FANOUT			50
+
+typedef struct DirectToastItem
+{
+	ItemPointerData tid;
+	int64		start_offset;
+	int64		end_offset;
+} DirectToastItem;
 
 static bool toastrel_valueid_exists(Relation toastrel, Oid valueid);
 static bool toastid_valueid_exists(Oid toastrelid, Oid valueid);
+static Datum toast_save_datum_direct(Relation rel, Datum value,
+									 varlena *oldexternal, int options);
+static void toast_delete_datum_direct(Relation rel, Datum value, bool is_speculative);
+static void toast_delete_datum_direct_recursive(Relation toastrel, ItemPointer tid, bool is_speculative);
 
 /* ----------
  * toast_compress_datum -
@@ -133,6 +165,9 @@ toast_save_datum(Relation rel, Datum value,
 	int			validIndex;
 
 	Assert(!VARATT_IS_EXTERNAL(dval));
+
+	if (RelationGetToastFlavour(rel) == TOAST_FLAVOUR_DIRECT)
+		return toast_save_datum_direct(rel, value, oldexternal, options);
 
 	/*
 	 * Open the toast relation and its indexes.  We can use the index to check
@@ -283,8 +318,8 @@ toast_save_datum(Relation rel, Datum value,
 	while (data_todo > 0)
 	{
 		HeapTuple	toasttup;
-		Datum		t_values[3];
-		bool		t_isnull[3] = {0};
+		Datum		t_values[5];
+		bool		t_isnull[5] = {0};
 		union
 		{
 			alignas(int32) varlena hdr;
@@ -308,6 +343,10 @@ toast_save_datum(Relation rel, Datum value,
 		SET_VARSIZE(&chunk_data, chunk_size + VARHDRSZ);
 		memcpy(VARDATA(&chunk_data), data_p, chunk_size);
 		t_values[2] = PointerGetDatum(&chunk_data);
+		t_values[3] = PointerGetDatum(NULL);
+		t_isnull[3] = true;
+		t_values[4] = PointerGetDatum(NULL);
+		t_isnull[4] = true;
 
 		toasttup = heap_form_tuple(toasttupDesc, t_values, t_isnull);
 
@@ -384,6 +423,12 @@ toast_delete_datum(Relation rel, Datum value, bool is_speculative)
 	HeapTuple	toasttup;
 	int			num_indexes;
 	int			validIndex;
+
+	if (VARATT_IS_EXTERNAL_DIRECT(attr))
+	{
+		toast_delete_datum_direct(rel, value, is_speculative);
+		return;
+	}
 
 	if (!VARATT_IS_EXTERNAL_ONDISK(attr))
 		return;
@@ -644,4 +689,389 @@ get_toast_snapshot(void)
 		elog(ERROR, "cannot fetch toast data without an active snapshot");
 
 	return &SnapshotToastData;
+}
+
+/*
+ * Context struct for direct TOAST write operations.
+ */
+typedef struct DirectToastWriteState
+{
+	Relation	toastrel;
+	TupleDesc	toasttupDesc;
+	CommandId	mycid;
+	int			options;
+	int32		chunk_seq;
+} DirectToastWriteState;
+
+/*
+ * Helper to form and insert a direct TOAST chunk tuple into the toast table.
+ * Encapsulates array construction and memory management for child TIDs and offsets.
+ */
+static inline ItemPointerData
+toast_direct_insert_chunk(DirectToastWriteState *state,
+						  const char *chunk_data_p, int32 chunk_size,
+						  const ItemPointerData *tids, int num_tids,
+						  const int64 *offsets, int num_offsets)
+{
+	Datum		t_values[5];
+	bool		t_isnull[5];
+	HeapTuple	toasttup;
+	ItemPointerData tid;
+	ArrayType  *tid_array = NULL;
+	ArrayType  *offset_array = NULL;
+	union
+	{
+		struct varlena hdr;
+		char		data[TOAST_MAX_CHUNK_SIZE + VARHDRSZ];
+		int32		align_it;
+	}			chunk_buf;
+
+	t_values[0] = (Datum) 0;
+	t_isnull[0] = true;			/* chunk_id is NULL */
+
+	t_values[1] = Int32GetDatum(state->chunk_seq++);
+	t_isnull[1] = false;
+
+	if (chunk_data_p && chunk_size > 0)
+	{
+		SET_VARSIZE(&chunk_buf, chunk_size + VARHDRSZ);
+		memcpy(VARDATA(&chunk_buf), chunk_data_p, chunk_size);
+		t_values[2] = PointerGetDatum(&chunk_buf);
+		t_isnull[2] = false;
+	}
+	else
+	{
+		t_values[2] = (Datum) 0;
+		t_isnull[2] = true;
+	}
+
+	if (tids && num_tids > 0)
+	{
+		Datum	   *tids_datums = palloc(sizeof(Datum) * num_tids);
+
+		for (int i = 0; i < num_tids; i++)
+			tids_datums[i] = PointerGetDatum(&tids[i]);
+		tid_array = construct_array_builtin(tids_datums, num_tids, TIDOID);
+		pfree(tids_datums);
+
+		t_values[3] = PointerGetDatum(tid_array);
+		t_isnull[3] = false;
+	}
+	else
+	{
+		t_values[3] = (Datum) 0;
+		t_isnull[3] = true;
+	}
+
+	if (offsets && num_offsets > 0)
+	{
+		Datum	   *offsets_datums = palloc(sizeof(Datum) * num_offsets);
+
+		for (int i = 0; i < num_offsets; i++)
+			offsets_datums[i] = Int64GetDatum(offsets[i]);
+		offset_array = construct_array_builtin(offsets_datums, num_offsets, INT8OID);
+		pfree(offsets_datums);
+
+		t_values[4] = PointerGetDatum(offset_array);
+		t_isnull[4] = false;
+	}
+	else
+	{
+		t_values[4] = (Datum) 0;
+		t_isnull[4] = true;
+	}
+
+	toasttup = heap_form_tuple(state->toasttupDesc, t_values, t_isnull);
+	heap_insert(state->toastrel, toasttup, state->mycid, state->options, NULL);
+	tid = toasttup->t_self;
+	heap_freetuple(toasttup);
+
+	if (tid_array)
+		pfree(tid_array);
+	if (offset_array)
+		pfree(offset_array);
+
+	return tid;
+}
+
+/*
+ * Single-chunk direct TOAST write path (Tier 1: <= ~2 kB).
+ * Returns the physical TID of the single chunk.
+ */
+static ItemPointerData
+toast_save_direct_single(DirectToastWriteState *state,
+						 const char *data_p, int32 data_len)
+{
+	return toast_direct_insert_chunk(state, data_p, data_len,
+									 NULL, 0, NULL, 0);
+}
+
+/*
+ * Flat multi-chunk direct TOAST write path (Tier 2: <= 100 chunks, up to ~200 kB).
+ * Writes leaf chunks 0 to N-2, and writes chunk N-1 containing the remaining data
+ * plus an array of TIDs of chunks 0 to N-2. Returns chunk N-1 TID.
+ */
+static ItemPointerData
+toast_save_direct_flat(DirectToastWriteState *state,
+					   const char *data_p, int32 data_todo, int total_chunks)
+{
+	ItemPointerData *tids = palloc(sizeof(ItemPointerData) * (total_chunks - 1));
+	ItemPointerData root_tid;
+	int32		chunk_size;
+
+	/* Insert leaf chunks 0 to N-2 */
+	for (int i = 0; i < total_chunks - 1; i++)
+	{
+		CHECK_FOR_INTERRUPTS();
+		chunk_size = Min(TOAST_MAX_CHUNK_SIZE, data_todo);
+
+		tids[i] = toast_direct_insert_chunk(state, data_p, chunk_size,
+											NULL, 0, NULL, 0);
+		data_todo -= chunk_size;
+		data_p += chunk_size;
+	}
+
+	/* Insert final chunk containing remaining data and previous TIDs */
+	CHECK_FOR_INTERRUPTS();
+	chunk_size = data_todo;
+	Assert(chunk_size <= TOAST_MAX_CHUNK_SIZE);
+
+	root_tid = toast_direct_insert_chunk(state, data_p, chunk_size,
+										 tids, total_chunks - 1,
+										 NULL, 0);
+	pfree(tids);
+	return root_tid;
+}
+
+/*
+ * Hierarchical tree DAG direct TOAST write path (Tier 3: > 100 chunks, up to 1 GB+).
+ * Writes all leaf data chunks first, then recursively builds interior nodes
+ * recording child TIDs and byte offset boundaries. Returns the top root TID.
+ */
+static ItemPointerData
+toast_save_direct_tree(DirectToastWriteState *state,
+					   const char *data_p, int32 data_todo, int total_chunks)
+{
+	DirectToastItem *items = palloc(sizeof(DirectToastItem) * total_chunks);
+	int			num_items = total_chunks;
+	int64		cur_offset = 0;
+	ItemPointerData root_tid;
+
+	/* Step 1: Write all leaf data chunks */
+	for (int i = 0; i < total_chunks; i++)
+	{
+		int32		chunk_size;
+
+		CHECK_FOR_INTERRUPTS();
+		chunk_size = Min(TOAST_MAX_CHUNK_SIZE, data_todo);
+
+		items[i].tid = toast_direct_insert_chunk(state, data_p, chunk_size,
+												 NULL, 0, NULL, 0);
+		items[i].start_offset = cur_offset;
+		cur_offset += chunk_size;
+		items[i].end_offset = cur_offset;
+
+		data_todo -= chunk_size;
+		data_p += chunk_size;
+	}
+
+	/* Step 2: Build tree levels until only 1 root node remains */
+	while (num_items > 1)
+	{
+		int			num_parents = (num_items + DIRECT_TOAST_FANOUT - 1) / DIRECT_TOAST_FANOUT;
+		DirectToastItem *parent_items = palloc(sizeof(DirectToastItem) * num_parents);
+
+		for (int p = 0; p < num_parents; p++)
+		{
+			int			start_idx = p * DIRECT_TOAST_FANOUT;
+			int			count = Min(DIRECT_TOAST_FANOUT, num_items - start_idx);
+			ItemPointerData child_tids[DIRECT_TOAST_FANOUT];
+			int64		child_offsets[DIRECT_TOAST_FANOUT + 1];
+
+			CHECK_FOR_INTERRUPTS();
+
+			for (int k = 0; k < count; k++)
+			{
+				child_tids[k] = items[start_idx + k].tid;
+				child_offsets[k] = items[start_idx + k].start_offset;
+			}
+			child_offsets[count] = items[start_idx + count - 1].end_offset;
+
+			parent_items[p].tid = toast_direct_insert_chunk(state, NULL, 0,
+															child_tids, count,
+															child_offsets, count + 1);
+			parent_items[p].start_offset = items[start_idx].start_offset;
+			parent_items[p].end_offset = items[start_idx + count - 1].end_offset;
+		}
+
+		pfree(items);
+		items = parent_items;
+		num_items = num_parents;
+	}
+
+	root_tid = items[0].tid;
+	pfree(items);
+	return root_tid;
+}
+
+/*
+ * Direct TOAST write path.
+ * Stores the TID of the root chunk directly in the varlena header.
+ * Dispatches to single-chunk, flat multi-chunk, or tree-structured writers.
+ */
+static Datum
+toast_save_datum_direct(Relation rel, Datum value,
+						struct varlena *oldexternal, int options)
+{
+	DirectToastWriteState state;
+	struct varatt_direct toast_pointer;
+	struct varlena *result;
+	char	   *data_p;
+	int32		data_todo;
+	Pointer		dval = DatumGetPointer(value);
+	int			total_chunks;
+
+	Assert(!VARATT_IS_EXTERNAL(dval));
+	memset(&toast_pointer, 0, sizeof(toast_pointer));
+
+	state.toastrel = table_open(rel->rd_rel->reltoastrelid, RowExclusiveLock);
+	state.toasttupDesc = state.toastrel->rd_att;
+	state.mycid = GetCurrentCommandId(true);
+	state.options = options;
+	state.chunk_seq = 0;
+
+	if (state.toasttupDesc->natts < 5)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot write direct TOAST datum to legacy TOAST table \"%s\"",
+						RelationGetRelationName(state.toastrel)),
+				 errhint("Run \"SELECT pg_ensure_direct_toast('%s'::regclass);\" or \"ALTER TABLE %s SET (toast_flavour = 'direct');\" to upgrade the TOAST table.",
+						 RelationGetRelationName(rel),
+						 RelationGetRelationName(rel))));
+
+	if (VARATT_IS_SHORT(dval))
+	{
+		data_p = VARDATA_SHORT(dval);
+		data_todo = VARSIZE_SHORT(dval) - VARHDRSZ_SHORT;
+		toast_pointer.va_rawsize = data_todo + VARHDRSZ;
+		toast_pointer.va_extinfo = data_todo;
+	}
+	else if (VARATT_IS_COMPRESSED(dval))
+	{
+		data_p = VARDATA(dval);
+		data_todo = VARSIZE(dval) - VARHDRSZ;
+		toast_pointer.va_rawsize = VARDATA_COMPRESSED_GET_EXTSIZE(dval) + VARHDRSZ;
+		VARATT_EXTERNAL_SET_SIZE_AND_COMPRESS_METHOD(toast_pointer, data_todo,
+													 VARDATA_COMPRESSED_GET_COMPRESS_METHOD(dval));
+	}
+	else
+	{
+		data_p = VARDATA(dval);
+		data_todo = VARSIZE(dval) - VARHDRSZ;
+		toast_pointer.va_rawsize = VARSIZE(dval);
+		toast_pointer.va_extinfo = data_todo;
+	}
+
+	if (OidIsValid(rel->rd_toastoid))
+		toast_pointer.va_toastrelid = rel->rd_toastoid;
+	else
+		toast_pointer.va_toastrelid = RelationGetRelid(state.toastrel);
+
+	total_chunks = ((data_todo - 1) / TOAST_MAX_CHUNK_SIZE) + 1;
+
+	if (total_chunks == 1)
+		toast_pointer.va_tid = toast_save_direct_single(&state, data_p, data_todo);
+	else if (total_chunks <= DIRECT_TOAST_TREE_THRESHOLD)
+		toast_pointer.va_tid = toast_save_direct_flat(&state, data_p, data_todo, total_chunks);
+	else
+		toast_pointer.va_tid = toast_save_direct_tree(&state, data_p, data_todo, total_chunks);
+
+	table_close(state.toastrel, NoLock);
+
+	result = (struct varlena *) palloc(DIRECT_POINTER_SIZE);
+	SET_VARTAG_EXTERNAL(result, VARTAG_DIRECT);
+	memcpy(VARDATA_EXTERNAL(result), &toast_pointer, sizeof(toast_pointer));
+
+	Assert(VARATT_IS_EXTERNAL(result));
+	Assert(VARTAG_EXTERNAL(result) == VARTAG_DIRECT);
+	Assert(VARSIZE_EXTERNAL(result) == DIRECT_POINTER_SIZE);
+
+	return PointerGetDatum(result);
+}
+
+/*
+ * Direct TOAST delete path.
+ */
+static void
+toast_delete_datum_direct(Relation rel, Datum value, bool is_speculative)
+{
+	struct varlena *attr = (varlena *) DatumGetPointer(value);
+	struct varatt_direct toast_pointer;
+	Relation	toastrel;
+
+	VARATT_EXTERNAL_GET_POINTER_DIRECT(toast_pointer, attr);
+
+	toastrel = table_open(toast_pointer.va_toastrelid, RowExclusiveLock);
+
+	toast_delete_datum_direct_recursive(toastrel, &toast_pointer.va_tid, is_speculative);
+
+	table_close(toastrel, RowExclusiveLock);
+}
+
+/*
+ * Recursively delete direct TOAST tuples.
+ */
+static void
+toast_delete_datum_direct_recursive(Relation toastrel, ItemPointer tid, bool is_speculative)
+{
+	TupleTableSlot *slot;
+	Snapshot	snapshot = get_toast_snapshot();
+	Datum		tids_datum;
+	bool		is_null_tids;
+
+	slot = table_slot_create(toastrel, NULL);
+
+	if (!table_tuple_fetch_row_version(toastrel, tid, snapshot, slot))
+	{
+		ExecDropSingleTupleTableSlot(slot);
+		return;
+	}
+
+	tids_datum = slot_getattr(slot, 4, &is_null_tids);
+
+	if (!is_null_tids)
+	{
+		ArrayType  *arr = DatumGetArrayTypePCopy(tids_datum);
+		Datum	   *elems;
+		bool	   *nulls;
+		int			nelems;
+		int			i;
+
+		deconstruct_array_builtin(arr, TIDOID, &elems, &nulls, &nelems);
+
+		ExecClearTuple(slot);
+
+		for (i = 0; i < nelems; i++)
+		{
+			ItemPointer elem_tid = (ItemPointer) DatumGetPointer(elems[i]);
+			if (!ItemPointerEquals(elem_tid, tid))
+			{
+				toast_delete_datum_direct_recursive(toastrel, elem_tid, is_speculative);
+			}
+		}
+		pfree(elems);
+		pfree(nulls);
+		pfree(arr);
+	}
+	else
+	{
+		ExecClearTuple(slot);
+	}
+
+	ExecDropSingleTupleTableSlot(slot);
+
+	if (is_speculative)
+		heap_abort_speculative(toastrel, tid);
+	else
+		simple_heap_delete(toastrel, tid);
 }

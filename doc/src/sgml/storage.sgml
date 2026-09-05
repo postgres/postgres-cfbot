@@ -424,17 +424,141 @@ belonging to the owning table.  Every
 <acronym>TOAST</acronym> table has the columns <structfield>chunk_id</structfield> (an OID
 identifying the particular <acronym>TOAST</acronym>ed value),
 <structfield>chunk_seq</structfield> (a sequence number for the chunk within its value),
-and <structfield>chunk_data</structfield> (the actual data of the chunk).  A unique index
-on <structfield>chunk_id</structfield> and <structfield>chunk_seq</structfield> provides fast
-retrieval of the values.  A pointer datum representing an out-of-line on-disk
-<acronym>TOAST</acronym>ed value therefore needs to store the OID of the
-<acronym>TOAST</acronym> table in which to look and the OID of the specific value
-(its <structfield>chunk_id</structfield>).  For convenience, pointer datums also store the
-logical datum size (original uncompressed data length), physical stored size
-(different if compression was applied), and the compression method used, if
-any.  Allowing for the varlena header bytes,
-the total size of an on-disk <acronym>TOAST</acronym> pointer datum is therefore 18
-bytes regardless of the actual size of the represented value.
+<structfield>chunk_data</structfield> (the actual data of the chunk),
+<structfield>chunk_tids</structfield> (an array of chunk tuple identifiers, used by Direct TOAST),
+and <structfield>chunk_tid_offsets</structfield> (an array of byte offsets, used for hierarchical Direct TOAST trees).
+</para>
+
+<para>
+<productname>PostgreSQL</productname> supports two flavours of on-disk <acronym>TOAST</acronym>
+storage:
+<itemizedlist>
+ <listitem>
+  <para>
+   <firstterm>Plain TOAST</firstterm> (the default): A unique index
+   on <structfield>chunk_id</structfield> and <structfield>chunk_seq</structfield> provides
+   retrieval of the values.  A pointer datum representing a plain on-disk
+   <acronym>TOAST</acronym>ed value stores the OID of the <acronym>TOAST</acronym> table
+   and the OID of the specific value (<structfield>chunk_id</structfield>).
+   Allowing for the varlena header bytes, the total size of a plain on-disk
+   <acronym>TOAST</acronym> pointer datum is 18 bytes.
+  </para>
+ </listitem>
+ <listitem>
+  <para>
+   <firstterm>Direct TOAST</firstterm> (<literal>toast_flavour = 'direct'</literal>):
+   Instead of looking up chunks through a B-Tree index, the <acronym>TOAST</acronym>
+   pointer directly stores the physical Tuple Identifier (<type>TID</type>) of the root/final chunk
+   in a 19-byte pointer datum.  For single-chunk values (up to ~2 kB), reading the data
+   requires only a single buffer pin without any index access.  For multi-chunk values up to 100 chunks,
+   the final chunk contains a <structfield>chunk_tids</structfield> array pointing directly
+   to all data chunks.  For larger values (> 100 chunks), an internal hierarchical tree
+   is constructed with intermediate index nodes storing child TIDs and byte offsets in
+   <structfield>chunk_tid_offsets</structfield>, enabling efficient tree traversal and slice pruning.
+   In Direct TOAST, <structfield>chunk_id</structfield> is set to <literal>NULL</literal>,
+   and the unique index on the TOAST table is a partial index (<literal>WHERE chunk_id IS NOT NULL</literal>),
+   completely avoiding index maintenance and WAL logging overhead for direct chunks.
+  </para>
+ </listitem>
+</itemizedlist>
+</para>
+
+<para>
+For convenience, pointer datums also store the logical datum size (original
+uncompressed data length), physical stored size (different if compression was applied),
+and the compression method used, if any.
+</para>
+
+<para>
+Direct <acronym>TOAST</acronym> is fully compatible with
+<application>pg_upgrade</application> (including <option>--link</option> mode).
+Because <application>pg_upgrade --link</application> preserves the physical block
+and offset layout of heap and <acronym>TOAST</acronym> relation files,
+physical <type>TID</type> pointers remain valid across major version upgrades.
+Furthermore, <literal>plain</literal> and <literal>direct</literal> <acronym>TOAST</acronym>
+pointers can seamlessly coexist within the same table, allowing tables upgraded from
+older <productname>PostgreSQL</productname> versions to be read transparently and
+gradually adopt Direct <acronym>TOAST</acronym> for new writes.
+When upgrading a pre-existing table that was created prior to Direct <acronym>TOAST</acronym>
+support (having a legacy 3-column <acronym>TOAST</acronym> table), executing
+<command>ALTER TABLE ... SET (toast_flavour = 'direct')</command> automatically
+upgrades the <acronym>TOAST</acronym> table in-place to the 5-column format with a
+partial index.  Administrators can also explicitly upgrade any table or <acronym>TOAST</acronym>
+table by calling <function>pg_ensure_direct_toast(<type>regclass</type>)</function>.
+</para>
+
+<para>
+To upgrade all user tables' <acronym>TOAST</acronym> tables in a quiet database in bulk,
+the following query can be used:
+<programlisting>
+SELECT c.oid::regclass AS tablename,
+       pg_ensure_direct_toast(c.reltoastrelid::regclass)
+  FROM pg_class AS c
+ WHERE c.reltoastrelid != 0
+   AND EXISTS (SELECT FROM pg_stat_user_tables AS t WHERE t.relid = c.oid);
+</programlisting>
+</para>
+
+<para>
+For a busy production database, tables can be upgraded one by one with lock timeouts
+and growing wait times between retries to avoid lock contention:
+<programlisting>
+DO $$
+DECLARE
+  lock_timeout_ms int := 100;
+  max_attempts int := 10;
+  tablename text;
+  toastoid regclass;
+  attempt_nr int;
+  update_completed boolean;
+  attempts text;
+  any_found boolean := false;
+BEGIN
+  PERFORM set_config('lock_timeout', lock_timeout_ms || 'ms', false);
+
+  FOR tablename, toastoid IN
+    SELECT c.oid::regclass::text,
+           c.reltoastrelid::regclass
+      FROM pg_class AS c
+     WHERE EXISTS (SELECT FROM pg_stat_user_tables AS t WHERE t.relid = c.oid)
+       AND (SELECT count(*)
+              FROM pg_attribute AS a
+             WHERE a.attrelid = c.reltoastrelid) = 3
+  LOOP
+    any_found := true;
+    update_completed := false;
+    FOR attempt_nr IN 1..max_attempts LOOP
+      BEGIN
+        PERFORM pg_ensure_direct_toast(toastoid);
+        update_completed := true;
+        EXIT;
+      EXCEPTION
+        WHEN lock_not_available THEN
+          PERFORM pg_sleep(0.1 * attempt_nr); /* sleep a little longer each time */
+        WHEN OTHERS THEN
+          RAISE WARNING 'Error updating % to Direct TOAST: %', tablename, SQLERRM;
+          EXIT;
+      END;
+    END LOOP;
+
+    IF update_completed THEN
+      IF attempt_nr > 1 THEN
+        attempts := format(' after %s attempts', attempt_nr);
+      ELSE
+        attempts := '';
+      END IF;
+      RAISE INFO 'Table % updated to Direct TOAST%', tablename, attempts;
+    ELSE
+      RAISE WARNING 'Timeout waiting to update table % to Direct TOAST', tablename;
+    END IF;
+  END LOOP;
+
+  IF NOT any_found THEN
+    RAISE INFO 'No tables needed update to use Direct TOAST';
+  END IF;
+END;
+$$;
+</programlisting>
 </para>
 
 <para>

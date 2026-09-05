@@ -3119,6 +3119,13 @@
   show_hook => 'show_timing_clock_source',
 },
 
+{ name => 'toast_flavour', type => 'enum', context => 'PGC_USERSET', group => 'CLIENT_CONN_STATEMENT',
+  short_desc => 'Sets the TOAST flavour to use for new writes.',
+  variable => 'toast_flavour',
+  boot_val => 'TOAST_FLAVOUR_PLAIN',
+  options => 'toast_flavour_options',
+},
+
 { name => 'trace_connection_negotiation', type => 'bool', context => 'PGC_POSTMASTER', group => 'DEVELOPER_OPTIONS',
   short_desc => 'Logs details of pre-authentication connection handshake.',
   flags => 'GUC_NOT_IN_SAMPLE',

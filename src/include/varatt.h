@@ -15,6 +15,8 @@
 #ifndef VARATT_H
 #define VARATT_H
 
+#include "storage/itemptr.h"
+
 /*
  * varatt_external is a traditional "TOAST pointer", that is, the
  * information needed to fetch a Datum stored out-of-line in a TOAST table.
@@ -37,6 +39,28 @@ typedef struct varatt_external
 	Oid			va_valueid;		/* Unique ID of value within TOAST table */
 	Oid			va_toastrelid;	/* RelID of TOAST table containing it */
 } varatt_external;
+
+/*
+ * varatt_direct is a "Direct TOAST pointer".
+ *
+ * Instead of identifying chunks via an OID (va_valueid) which requires a
+ * B-Tree index scan on (chunk_id, chunk_seq), va_tid points directly to the
+ * root/terminal chunk tuple on disk.
+ *
+ * Notice that sizeof(varatt_direct) == sizeof(varatt_external) == 18 bytes.
+ * This ensures that switching to Direct TOAST causes no size difference or
+ * alignment change in parent table tuples.
+ *
+ * Like varatt_external, this struct is stored unaligned within actual tuples.
+ */
+typedef struct varatt_direct
+{
+	int32		va_rawsize;		/* Original data size (includes header) */
+	uint32		va_extinfo;		/* External saved size (without header) and
+								 * compression method */
+	Oid			va_toastrelid;	/* RelID of TOAST table containing it */
+	ItemPointerData va_tid;		/* Physical TID of the final chunk */
+} varatt_direct;
 
 /*
  * These macros define the "saved size" portion of va_extinfo.  Its remaining
@@ -86,7 +110,8 @@ typedef enum vartag_external
 	VARTAG_INDIRECT = 1,
 	VARTAG_EXPANDED_RO = 2,
 	VARTAG_EXPANDED_RW = 3,
-	VARTAG_ONDISK = 18
+	VARTAG_ONDISK = 18,
+	VARTAG_DIRECT = 19
 } vartag_external;
 
 /* Is a TOAST pointer either type of expanded-object pointer? */
@@ -107,6 +132,8 @@ VARTAG_SIZE(vartag_external tag)
 		return sizeof(varatt_expanded);
 	else if (tag == VARTAG_ONDISK)
 		return sizeof(varatt_external);
+	else if (tag == VARTAG_DIRECT)
+		return sizeof(varatt_direct);
 	else
 	{
 		Assert(false);
@@ -363,6 +390,19 @@ VARATT_IS_EXTERNAL_ONDISK(const void *PTR)
 	return VARATT_IS_EXTERNAL(PTR) && VARTAG_EXTERNAL(PTR) == VARTAG_ONDISK;
 }
 
+static inline bool
+VARATT_IS_EXTERNAL_DIRECT(const void *PTR)
+{
+	return VARATT_IS_EXTERNAL(PTR) && VARTAG_EXTERNAL(PTR) == VARTAG_DIRECT;
+}
+
+static inline bool
+VARATT_IS_EXTERNAL_ONDISK_OR_DIRECT(const void *PTR)
+{
+	return VARATT_IS_EXTERNAL(PTR) &&
+		(VARTAG_EXTERNAL(PTR) == VARTAG_ONDISK || VARTAG_EXTERNAL(PTR) == VARTAG_DIRECT);
+}
+
 /* Is varlena datum an indirect pointer? */
 static inline bool
 VARATT_IS_EXTERNAL_INDIRECT(const void *PTR)
@@ -536,6 +576,25 @@ static inline bool
 VARATT_EXTERNAL_IS_COMPRESSED(varatt_external toast_pointer)
 {
 	return VARATT_EXTERNAL_GET_EXTSIZE(toast_pointer) <
+		(Size) (toast_pointer.va_rawsize - VARHDRSZ);
+}
+
+static inline Size
+VARATT_DIRECT_GET_EXTSIZE(varatt_direct toast_pointer)
+{
+	return toast_pointer.va_extinfo & VARLENA_EXTSIZE_MASK;
+}
+
+static inline uint32
+VARATT_DIRECT_GET_COMPRESS_METHOD(varatt_direct toast_pointer)
+{
+	return toast_pointer.va_extinfo >> VARLENA_EXTSIZE_BITS;
+}
+
+static inline bool
+VARATT_DIRECT_IS_COMPRESSED(varatt_direct toast_pointer)
+{
+	return VARATT_DIRECT_GET_EXTSIZE(toast_pointer) <
 		(Size) (toast_pointer.va_rawsize - VARHDRSZ);
 }
 

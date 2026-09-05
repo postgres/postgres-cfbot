@@ -12776,4 +12776,8 @@
   proname => 'hashoid8extended', prorettype => 'int8',
   proargtypes => 'oid8 int8', prosrc => 'hashoid8extended' },
 
+{ oid => '9225', descr => 'ensure a TOAST table supports Direct TOAST format',
+  proname => 'pg_ensure_direct_toast', provolatile => 'v', prorettype => 'void',
+  proargtypes => 'regclass', prosrc => 'pg_ensure_direct_toast' },
+
 ]

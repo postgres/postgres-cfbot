@@ -19,6 +19,7 @@ ISOLATION = basic \
 	    repack_temporal \
 	    repack_temporal_multirange \
 	    repack_toast \
+	    repack_direct_toast \
 	    ri_fastpath_reindex \
 	    syscache-update-pruned \
 	    wait_cleanup \
