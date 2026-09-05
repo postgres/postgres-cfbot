@@ -377,4 +377,32 @@ $node->issues_sql_unlike(
 	qr/statement:\ VACUUM/sx,
 	'--analyze-only does not run vacuum');
 
+# A database that cannot be connected to terminates --all, unless --continue
+# is given.  This needs its own cluster: connections can only be refused to a
+# non-superuser, and the tests above leave behind objects that such a role
+# cannot process (pg_maintain covers the relations, but not schema USAGE).
+my $cnode = PostgreSQL::Test::Cluster->new('continue');
+$cnode->init(auth_extra => [ '--create-role' => 'regress_continue' ]);
+$cnode->start;
+$cnode->safe_psql('postgres',
+	'CREATE ROLE regress_continue LOGIN IN ROLE pg_maintain');
+$cnode->safe_psql('postgres', 'CREATE DATABASE regress_noconn');
+$cnode->safe_psql('postgres',
+	'REVOKE CONNECT ON DATABASE regress_noconn FROM PUBLIC');
+
+$cnode->command_fails_like(
+	[ 'vacuumdb', '--all', '--username' => 'regress_continue' ],
+	qr/permission denied for database "regress_noconn"/,
+	'--all fails on a database that cannot be connected to');
+$cnode->command_fails_like(
+	[ 'vacuumdb', '--continue', 'postgres' ],
+	qr/cannot use the "continue" option without "all"/,
+	'--continue requires --all');
+$cnode->command_checks_all(
+	[ 'vacuumdb', '--all', '--continue', '--username' => 'regress_continue' ],
+	0,
+	[qr/vacuuming database "template1"/],
+	[qr/warning: skipping database "regress_noconn": /],
+	'--all --continue skips databases that cannot be connected to');
+
 done_testing();
