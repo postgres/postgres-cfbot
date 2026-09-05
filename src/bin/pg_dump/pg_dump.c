@@ -1927,6 +1927,19 @@ checkExtensionMembership(DumpableObject *dobj, Archive *fout)
 	if (ext == NULL)
 		return false;
 
+	/*
+	 * If this is the "owned_schema" of the extension, then we don't want to
+	 * create it manually, because it gets created together with the
+	 * extension.
+	 */
+	if (dobj->objType == DO_NAMESPACE &&
+		ext->ownedschema && strcmp(ext->namespace, dobj->name) == 0)
+	{
+		NamespaceInfo *nsinfo = (NamespaceInfo *) dobj;
+
+		nsinfo->create = false;
+	}
+
 	dobj->ext_member = true;
 
 	/* Record dependency so that getDependencies needn't deal with that */
@@ -5996,7 +6009,7 @@ binary_upgrade_extension_member(PQExpBuffer upgrade_buffer,
 								const char *objname,
 								const char *objnamespace)
 {
-	DumpableObject *extobj = NULL;
+	ExtensionInfo *ext = NULL;
 	int			i;
 
 	if (!dobj->ext_member)
@@ -6010,19 +6023,33 @@ binary_upgrade_extension_member(PQExpBuffer upgrade_buffer,
 	 */
 	for (i = 0; i < dobj->nDeps; i++)
 	{
-		extobj = findObjectByDumpId(dobj->dependencies[i]);
+		DumpableObject *extobj = findObjectByDumpId(dobj->dependencies[i]);
+
 		if (extobj && extobj->objType == DO_EXTENSION)
+		{
+			ext = (ExtensionInfo *) extobj;
 			break;
-		extobj = NULL;
+		}
 	}
-	if (extobj == NULL)
+	if (ext == NULL)
 		pg_fatal("could not find parent extension for %s %s",
 				 objtype, objname);
+
+	/*
+	 * If the object is the "owned_schema" of the extension, we don't need to
+	 * add it to the extension because it was already made a member of the
+	 * extension when the extension was created.
+	 */
+	if (dobj->objType == DO_NAMESPACE &&
+		ext->ownedschema && strcmp(ext->namespace, dobj->name) == 0)
+	{
+		return;
+	}
 
 	appendPQExpBufferStr(upgrade_buffer,
 						 "\n-- For binary upgrade, handle extension membership the hard way\n");
 	appendPQExpBuffer(upgrade_buffer, "ALTER EXTENSION %s ADD %s ",
-					  fmtId(extobj->name),
+					  fmtId(ext->dobj.name),
 					  objtype);
 	if (objnamespace && *objnamespace)
 		appendPQExpBuffer(upgrade_buffer, "%s.", fmtId(objnamespace));
@@ -6179,6 +6206,7 @@ getExtensions(Archive *fout, int *numExtensions)
 	int			i_extname;
 	int			i_nspname;
 	int			i_extrelocatable;
+	int			i_extownedschema;
 	int			i_extversion;
 	int			i_extconfig;
 	int			i_extcondition;
@@ -6187,7 +6215,14 @@ getExtensions(Archive *fout, int *numExtensions)
 
 	appendPQExpBufferStr(query, "SELECT x.tableoid, x.oid, "
 						 "x.extname, n.nspname, x.extrelocatable, x.extversion, x.extconfig, x.extcondition "
-						 "FROM pg_extension x "
+		);
+
+	if (fout->remoteVersion >= 180000)
+		appendPQExpBufferStr(query, ", x.extownedschema ");
+	else
+		appendPQExpBufferStr(query, ", false AS extownedschema ");
+
+	appendPQExpBufferStr(query, "FROM pg_extension x "
 						 "JOIN pg_namespace n ON n.oid = x.extnamespace");
 
 	res = ExecuteSqlQuery(fout, query->data, PGRES_TUPLES_OK);
@@ -6203,6 +6238,7 @@ getExtensions(Archive *fout, int *numExtensions)
 	i_extname = PQfnumber(res, "extname");
 	i_nspname = PQfnumber(res, "nspname");
 	i_extrelocatable = PQfnumber(res, "extrelocatable");
+	i_extownedschema = PQfnumber(res, "extownedschema");
 	i_extversion = PQfnumber(res, "extversion");
 	i_extconfig = PQfnumber(res, "extconfig");
 	i_extcondition = PQfnumber(res, "extcondition");
@@ -6216,6 +6252,7 @@ getExtensions(Archive *fout, int *numExtensions)
 		extinfo[i].dobj.name = pg_strdup(PQgetvalue(res, i, i_extname));
 		extinfo[i].namespace = pg_strdup(PQgetvalue(res, i, i_nspname));
 		extinfo[i].relocatable = *(PQgetvalue(res, i, i_extrelocatable)) == 't';
+		extinfo[i].ownedschema = *(PQgetvalue(res, i, i_extownedschema)) == 't';
 		extinfo[i].extversion = pg_strdup(PQgetvalue(res, i, i_extversion));
 		extinfo[i].extconfig = pg_strdup(PQgetvalue(res, i, i_extconfig));
 		extinfo[i].extcondition = pg_strdup(PQgetvalue(res, i, i_extcondition));
@@ -11852,9 +11889,9 @@ dumpNamespace(Archive *fout, const NamespaceInfo *nspinfo)
 	{
 		/* see selectDumpableNamespace() */
 		appendPQExpBufferStr(delq,
-							 "-- *not* dropping schema, since initdb creates it\n");
+							 "-- *not* dropping schema, since initdb or CREATE EXTENSION creates it\n");
 		appendPQExpBufferStr(q,
-							 "-- *not* creating schema, since initdb creates it\n");
+							 "-- *not* creating schema, since initdb or CREATE EXTENSION creates it\n");
 	}
 
 	if (dopt->binary_upgrade)
@@ -11966,6 +12003,7 @@ dumpExtension(Archive *fout, const ExtensionInfo *extinfo)
 		appendStringLiteralAH(q, extinfo->namespace, fout);
 		appendPQExpBufferStr(q, ", ");
 		appendPQExpBuffer(q, "%s, ", extinfo->relocatable ? "true" : "false");
+		appendPQExpBuffer(q, "%s, ", extinfo->ownedschema ? "true" : "false");
 		appendStringLiteralAH(q, extinfo->extversion, fout);
 		appendPQExpBufferStr(q, ", ");
 
