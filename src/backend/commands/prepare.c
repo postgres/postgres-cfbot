@@ -27,6 +27,7 @@
 #include "commands/prepare.h"
 #include "funcapi.h"
 #include "nodes/nodeFuncs.h"
+#include "nodes/queryjumble.h"
 #include "parser/parse_coerce.h"
 #include "parser/parse_collate.h"
 #include "parser/parse_expr.h"
@@ -66,6 +67,8 @@ PrepareQuery(ParseState *pstate, PrepareStmt *stmt,
 	Oid		   *argtypes = NULL;
 	int			nargs;
 	List	   *query_list;
+	const char *new_query;
+	ListCell   *lc;
 
 	/*
 	 * Disallow empty-string statement name (conflicts with protocol-level
@@ -84,12 +87,29 @@ PrepareQuery(ParseState *pstate, PrepareStmt *stmt,
 	rawstmt->stmt = stmt->query;
 	rawstmt->stmt_location = stmt_location;
 	rawstmt->stmt_len = stmt_len;
+	new_query = pstate->p_sourcetext;
+
+	/*
+	 * If we have a multi-statement string, extract only the PREPARE statement
+	 * for storage in the plan cache.
+	 */
+	if (stmt_location >= 0)
+	{
+		const char *cleaned;
+		char	   *tmp;
+
+		cleaned = CleanQuerytext(pstate->p_sourcetext, &rawstmt->stmt_location, &rawstmt->stmt_len);
+
+		tmp = palloc(rawstmt->stmt_len + 1);
+		strlcpy(tmp, cleaned, rawstmt->stmt_len + 1);
+		new_query = tmp;
+	}
 
 	/*
 	 * Create the CachedPlanSource before we do parse analysis, since it needs
 	 * to see the unmodified raw parse tree.
 	 */
-	plansource = CreateCachedPlan(rawstmt, pstate->p_sourcetext,
+	plansource = CreateCachedPlan(rawstmt, new_query,
 								  CreateCommandTag(stmt->query));
 
 	/* Transform list of TypeNames to array of type OIDs */
@@ -120,6 +140,18 @@ PrepareQuery(ParseState *pstate, PrepareStmt *stmt,
 	 */
 	query_list = pg_analyze_and_rewrite_varparams(rawstmt, pstate->p_sourcetext,
 												  &argtypes, &nargs, NULL);
+
+	/*
+	 * Reset stmt_location to 0 since the query text stored in the plan cache
+	 * now contains only the PREPARE statement.
+	 */
+	foreach(lc, query_list)
+	{
+		Query	   *query = lfirst_node(Query, lc);
+
+		if (query->stmt_location > 0)
+			query->stmt_location = 0;
+	}
 
 	/* Finish filling in the CachedPlanSource */
 	CompleteCachedPlan(plansource,
