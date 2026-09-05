@@ -365,6 +365,13 @@ SELECT query_id IS NOT NULL AS qid_set FROM pg_stat_activity
 RESET track_activities;
 RESET compute_query_id;
 
+-- Test GUC_SHOW_IN_OCTAL
+SELECT name, min_val, max_val, boot_val
+FROM pg_settings
+WHERE name IN ('data_directory_mode', 'log_file_mode',
+               'unix_socket_permissions');
+ALTER SYSTEM SET log_file_mode = 0640;  -- decimal, so out of range
+
 -- Test GUC categories and flag patterns
 SELECT pg_settings_get_flags(NULL);
 SELECT pg_settings_get_flags('does_not_exist');
