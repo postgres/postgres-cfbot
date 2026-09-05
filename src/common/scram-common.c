@@ -19,6 +19,8 @@
 #include "postgres_fe.h"
 #endif
 
+#include <limits.h>
+
 #include "common/base64.h"
 #include "common/hmac.h"
 #include "common/scram-common.h"
@@ -27,18 +29,54 @@
 #endif
 #include "port/pg_bswap.h"
 
+#ifdef FRONTEND
+/*
+ * Invoke the caller-supplied interrupt callback every this many PBKDF2
+ * iterations.
+ */
+#define SCRAM_INTERRUPT_CHECK_INTERVAL 4096
+#endif
+
 /*
  * Calculate SaltedPassword.
  *
- * The password should already be normalized by SASLprep.  Returns 0 on
- * success, -1 on failure with *errstr pointing to a message about the
- * error details.
+ * Equivalent to scram_SaltedPasswordExt() with no interrupt callback.
+ * Preserved as a stable entry point for backend code and any external
+ * consumers compiled against the pre-callback signature.
  */
 int
 scram_SaltedPassword(const char *password,
 					 pg_cryptohash_type hash_type, int key_length,
 					 const uint8 *salt, int saltlen, int iterations,
 					 uint8 *result, const char **errstr)
+{
+	return scram_SaltedPasswordExt(password, hash_type, key_length,
+								   salt, saltlen, iterations,
+								   NULL, NULL,
+								   result, errstr);
+}
+
+/*
+ * Calculate SaltedPassword, with an optional caller interrupt callback.
+ *
+ * The password should already be normalized by SASLprep.  Returns 0 on
+ * success, -1 on failure with *errstr pointing to a message about the
+ * error details.
+ *
+ * In frontend code, an optional interrupt callback may be supplied.  It
+ * is invoked periodically from within the PBKDF2 iteration loop, and if
+ * it returns true the loop aborts with the callback-provided errstr.
+ * The callback is the frontend analogue of the backend's
+ * CHECK_FOR_INTERRUPTS() check.  Pass NULL to disable.  Ignored in the
+ * backend, which uses CHECK_FOR_INTERRUPTS() directly.
+ */
+int
+scram_SaltedPasswordExt(const char *password,
+						pg_cryptohash_type hash_type, int key_length,
+						const uint8 *salt, int saltlen, int iterations,
+						scram_interrupt_callback interrupt_cb,
+						void *interrupt_arg,
+						uint8 *result, const char **errstr)
 {
 	int			password_len = strlen(password);
 	uint32		one = pg_hton32(1);
@@ -82,6 +120,20 @@ scram_SaltedPassword(const char *password,
 		 * set to a large value.
 		 */
 		CHECK_FOR_INTERRUPTS();
+#else
+		/*
+		 * In the frontend, the iteration count is dictated by the server
+		 * and could be set to a large value.  Allow the caller to abort
+		 * the loop via the interrupt callback.  The callback owns both the
+		 * abort policy and the error message.
+		 */
+		if (interrupt_cb != NULL &&
+			(i % SCRAM_INTERRUPT_CHECK_INTERVAL) == 0 &&
+			interrupt_cb(interrupt_arg, errstr))
+		{
+			pg_hmac_free(hmac_ctx);
+			return -1;
+		}
 #endif
 
 		if (pg_hmac_init(hmac_ctx, (const uint8 *) password, password_len) < 0 ||
@@ -326,4 +378,55 @@ scram_build_secret(pg_cryptohash_type hash_type, int key_length,
 	Assert(p - result <= maxlen);
 
 	return result;
+}
+
+/*
+ * Parse a SCRAM iteration count from a null-terminated string.
+ *
+ * On success, stores the parsed value in *iterations and returns true.
+ * On failure, *iterations is unchanged and false is returned.
+ *
+ * The accepted input is a non-empty sequence of ASCII digits ('0'-'9').
+ * Leading whitespace, a leading '+' or '-' sign, and any trailing
+ * non-digit characters are rejected, even though strtol() would
+ * otherwise accept them; the SCRAM verifier and server-first-message
+ * formats both define the iteration count as a sequence of digits with
+ * no surrounding decoration, so anything else is malformed.
+ *
+ * Beyond digit shape we also reject ERANGE (overflow of long), values
+ * that would silently truncate when narrowed to int on platforms where
+ * sizeof(long) is greater than sizeof(int), and any value below 1
+ * (RFC 5802 requires a positive iteration count).
+ */
+bool
+scram_parse_iterations(const char *str, int *iterations)
+{
+	const char *p;
+	char	   *endptr;
+	long		val;
+
+	/* Require a non-empty, pure-digit string. */
+	if (*str == '\0')
+		return false;
+	for (p = str; *p != '\0'; p++)
+	{
+		if (*p < '0' || *p > '9')
+			return false;
+	}
+
+	errno = 0;
+	val = strtol(str, &endptr, 10);
+
+	/*
+	 * The digit-only pre-scan guarantees strtol() consumes the entire
+	 * string, so *endptr is always '\0' here.  ERANGE still has to be
+	 * checked because strtol() reports long overflow that way; the
+	 * int-range and below-1 checks catch inputs that are valid as longs
+	 * but unacceptable as iteration counts.
+	 */
+	Assert(*endptr == '\0');
+	if (errno != 0 || val <= 0 || val > INT_MAX)
+		return false;
+	*iterations = (int) val;
+	return true;
 }
