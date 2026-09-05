@@ -724,7 +724,7 @@ X014	Attributes of XML type			YES
 X015	Fields of XML type			NO	
 X016	Persistent XML values			YES	
 X020	XMLConcat			YES	
-X025	XMLCast			NO	
+X025	XMLCast			YES	
 X030	XMLDocument			NO	
 X031	XMLElement			YES	
 X032	XMLForest			YES	

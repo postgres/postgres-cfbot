@@ -79,7 +79,9 @@ extern xmltype *xmlroot(xmltype *data, text *version, int standalone);
 extern bool xml_is_document(xmltype *arg);
 extern text *xmltotext_with_options(xmltype *data, XmlOptionType xmloption_arg,
 									bool indent);
+extern Datum exec_xmlcast(Datum value, Oid sourceType, Oid targetType);
 extern char *escape_xml(const char *str);
+extern char *unescape_xml(const char *str);
 
 extern char *map_sql_identifier_to_xml_name(const char *ident, bool fully_escaped, bool escape_period);
 extern char *map_xml_name_to_sql_identifier(const char *name);

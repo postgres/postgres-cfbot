@@ -1946,6 +1946,9 @@ FigureColnameInternal(Node *node, char **name)
 			/* make SQL/XML functions act like a regular function */
 			switch (((XmlExpr *) node)->op)
 			{
+				case IS_XMLCAST:
+					*name = "xmlcast";
+					return 2;
 				case IS_XMLCONCAT:
 					*name = "xmlconcat";
 					return 2;
@@ -1972,6 +1975,10 @@ FigureColnameInternal(Node *node, char **name)
 					break;
 			}
 			break;
+		case T_XmlCast:
+			/* make XMLCAST act like a regular function */
+			*name = "xmlcast";
+			return 2;
 		case T_XmlSerialize:
 			/* make XMLSERIALIZE act like a regular function */
 			*name = "xmlserialize";

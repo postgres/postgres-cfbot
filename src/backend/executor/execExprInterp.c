@@ -70,6 +70,7 @@
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/date.h"
+#include "utils/datetime.h"
 #include "utils/datum.h"
 #include "utils/expandedrecord.h"
 #include "utils/json.h"
@@ -4719,11 +4720,26 @@ ExecEvalXmlExpr(ExprState *state, ExprEvalStep *op)
 				*op->resnull = false;
 			}
 			break;
+			case IS_XMLCAST:
+			{
+				Datum	   *argvalue = op->d.xmlexpr.argvalue;
+				bool	   *argnull = op->d.xmlexpr.argnull;
 
-		default:
-			elog(ERROR, "unrecognized XML operation");
+				Assert(list_length(xexpr->args) == 1);
+
+				if (argnull[0])
+					return;
+
+				*op->resvalue = exec_xmlcast(argvalue[0],
+											 xexpr->type,
+											 xexpr->targetType);
+				*op->resnull = false;
+			}
 			break;
-	}
+			default:
+				elog(ERROR, "unrecognized XML operation");
+				break;
+			}
 }
 
 /*
