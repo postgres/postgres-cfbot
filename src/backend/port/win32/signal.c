@@ -63,13 +63,18 @@ pg_usleep(long microsec)
 		return;
 	}
 
-	if (WaitForSingleObject(pgwin32_signal_event,
-							(microsec < 500 ? 1 : (microsec + 500) / 1000))
-		== WAIT_OBJECT_0)
+	switch (WaitForSingleObject(pgwin32_signal_event,
+								(microsec < 500 ? 1 : (microsec + 500) / 1000)))
 	{
-		pgwin32_dispatch_queued_signals();
-		errno = EINTR;
-		return;
+		case WAIT_OBJECT_0:
+			pgwin32_dispatch_queued_signals();
+			errno = EINTR;
+			return;
+		case WAIT_TIMEOUT:
+			return;
+		default:
+			elog(FATAL, "could not wait on signal event: error code %lu",
+				 GetLastError());
 	}
 }
 
