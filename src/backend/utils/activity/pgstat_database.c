@@ -218,9 +218,10 @@ pgstat_report_checksum_failures_in_db(Oid dboid, int failurecount)
  * Report creation of temporary file.
  */
 void
-pgstat_report_tempfile(size_t filesize)
+pgstat_report_tempfile(size_t filesize, const char *path)
 {
 	PgStat_StatDBEntry *dbent;
+	Oid			spcoid;
 
 	if (!pgstat_track_counts)
 		return;
@@ -228,6 +229,16 @@ pgstat_report_tempfile(size_t filesize)
 	dbent = pgstat_prep_database_pending(MyDatabaseId);
 	dbent->temp_bytes += filesize;
 	dbent->temp_files++;
+
+	spcoid = pgstat_tablespace_from_tempfile_path(path);
+	if (OidIsValid(spcoid))
+	{
+		PgStat_StatTabspaceEntry *tsent;
+
+		tsent = pgstat_prep_tablespace_pending(spcoid);
+		tsent->temp_bytes += filesize;
+		tsent->temp_files++;
+	}
 }
 
 /*

@@ -2371,6 +2371,22 @@ pg_stat_sys_tables| SELECT relid,
     stats_reset
    FROM pg_stat_all_tables
   WHERE ((schemaname = ANY (ARRAY['pg_catalog'::name, 'information_schema'::name])) OR (schemaname ~ '^pg_toast'::text));
+pg_stat_tablespace| SELECT t.oid AS tablespace_id,
+    t.spcname AS tablespace_name,
+    (s.blks_fetched - s.blks_hit) AS blks_read,
+    s.blks_hit,
+    s.blk_read_time,
+    s.blk_write_time,
+    s.temp_files,
+    s.temp_bytes,
+    s.tup_returned,
+    s.tup_fetched,
+    s.tup_inserted,
+    s.tup_updated,
+    s.tup_deleted,
+    s.stats_reset
+   FROM pg_tablespace t,
+    LATERAL pg_stat_get_tablespace(t.oid) s(blks_fetched, blks_hit, blk_read_time, blk_write_time, temp_files, temp_bytes, tup_returned, tup_fetched, tup_inserted, tup_updated, tup_deleted, stats_reset);
 pg_stat_user_functions| SELECT p.oid AS funcid,
     n.nspname AS schemaname,
     p.proname AS funcname,

@@ -68,6 +68,7 @@
 #include "commands/tablespace.h"
 #include "common/file_perm.h"
 #include "miscadmin.h"
+#include "pgstat.h"
 #include "postmaster/bgwriter.h"
 #include "storage/fd.h"
 #include "storage/lwlock.h"
@@ -545,6 +546,9 @@ DropTableSpace(DropTableSpaceStmt *stmt)
 
 		(void) XLogInsert(RM_TBLSPC_ID, XLOG_TBLSPC_DROP);
 	}
+
+	/* Keep the cumulative stats system up-to-date */
+	pgstat_drop_tablespace(tablespaceoid);
 
 	/*
 	 * Note: because we checked that the tablespace was empty, there should be

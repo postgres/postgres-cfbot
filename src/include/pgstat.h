@@ -203,6 +203,7 @@ typedef struct PgStat_RelationStatus
 {
 	PgStat_Kind kind;			/* PGSTAT_KIND_RELATION or PGSTAT_KIND_INDEX */
 	Relation	relation;		/* rel that is using this entry */
+	Oid			tablespace_oid; /* tablespace the relation lives in */
 	union
 	{
 		/* table counters */
@@ -251,7 +252,7 @@ typedef struct PgStat_TableXactStatus
  * ------------------------------------------------------------
  */
 
-#define PGSTAT_FILE_FORMAT_ID	0x01A5BCBD
+#define PGSTAT_FILE_FORMAT_ID	0x01A5BCBE
 
 typedef struct PgStat_ArchiverStats
 {
@@ -434,6 +435,23 @@ typedef struct PgStat_StatDBEntry
 
 	TimestampTz stat_reset_timestamp;
 } PgStat_StatDBEntry;
+
+typedef struct PgStat_StatTabspaceEntry
+{
+	PgStat_Counter blocks_fetched;
+	PgStat_Counter blocks_hit;
+	PgStat_Counter blk_read_time;	/* times in microseconds */
+	PgStat_Counter blk_write_time;
+	PgStat_Counter temp_files;
+	PgStat_Counter temp_bytes;
+	PgStat_Counter tuples_returned;
+	PgStat_Counter tuples_fetched;
+	PgStat_Counter tuples_inserted;
+	PgStat_Counter tuples_updated;
+	PgStat_Counter tuples_deleted;
+
+	TimestampTz stat_reset_timestamp;
+} PgStat_StatTabspaceEntry;
 
 typedef struct PgStat_StatFuncEntry
 {
@@ -755,6 +773,7 @@ extern void pgstat_copy_relation_stats(Relation dst, Relation src);
 extern void pgstat_init_relation(Relation rel);
 extern void pgstat_assoc_relation(Relation rel);
 extern void pgstat_unlink_relation(Relation rel);
+extern void pgstat_relation_update_tablespace(Relation rel);
 
 extern void pgstat_report_vacuum(Relation rel, PgStat_Counter livetuples,
 								 PgStat_Counter deadtuples,
@@ -859,6 +878,18 @@ extern PgStat_StatIdxEntry *pgstat_fetch_stat_idxentry(Oid relid);
 extern PgStat_StatIdxEntry *pgstat_fetch_stat_idxentry_ext(bool shared,
 														   Oid reloid,
 														   bool *may_free);
+
+
+/*
+ * Functions in pgstat_tablespace.c
+ */
+
+extern void pgstat_drop_tablespace(Oid spcoid);
+extern PgStat_StatTabspaceEntry *pgstat_fetch_stat_tabspaceentry(Oid spcoid);
+extern PgStat_StatTabspaceEntry *pgstat_prep_tablespace_pending(Oid spcoid);
+extern Oid	pgstat_tablespace_from_tempfile_path(const char *path);
+extern void pgstat_count_tablespace_blk_read_time(Oid spcoid, instr_time io_start);
+extern void pgstat_count_tablespace_blk_write_time(Oid spcoid, instr_time io_start);
 
 
 /*

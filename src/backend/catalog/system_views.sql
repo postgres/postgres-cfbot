@@ -1146,6 +1146,25 @@ CREATE VIEW pg_stat_replication_slots AS
         LATERAL pg_stat_get_replication_slot(slot_name) as s
     WHERE r.datoid IS NOT NULL; -- excluding physical slots
 
+CREATE VIEW pg_stat_tablespace AS
+    SELECT
+        T.oid AS tablespace_id,
+        T.spcname AS tablespace_name,
+        S.blks_fetched - S.blks_hit AS blks_read,
+        S.blks_hit,
+        S.blk_read_time,
+        S.blk_write_time,
+        S.temp_files,
+        S.temp_bytes,
+        S.tup_returned,
+        S.tup_fetched,
+        S.tup_inserted,
+        S.tup_updated,
+        S.tup_deleted,
+        S.stats_reset
+    FROM pg_tablespace T,
+        LATERAL pg_stat_get_tablespace(T.oid) S;
+
 CREATE VIEW pg_stat_database AS
     SELECT
             D.oid AS datid,
