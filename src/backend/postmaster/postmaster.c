@@ -209,6 +209,9 @@ char	   *Unix_socket_directories;
 /* The TCP listen address(es) */
 char	   *ListenAddresses;
 
+/* Whether to use MPTCP */
+bool		ListenMPTCP;
+
 /*
  * SuperuserReservedConnections is the number of backends reserved for
  * superuser use, and ReservedConnections is the number of backends reserved
