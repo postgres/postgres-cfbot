@@ -923,3 +923,80 @@ create function mr_inoutparam_fail(inout i anyelement, out r anymultirange)
 --should fail
 create function mr_table_fail(i anyelement) returns table(i anyelement, r anymultirange)
   as $$ select $1, '[1,10]' $$ language sql;
+
+-- Restore GUCs changed by earlier index tests
+RESET enable_seqscan;
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+
+--
+-- test selectivity of multirange join operators
+--
+create table test_mr_join_1 (mr1 int4multirange);
+create table test_mr_join_2 (mr2 int4multirange);
+create table test_mr_join_3 (mr3 int4multirange);
+
+insert into test_mr_join_1 select int4multirange(int4range(g, g+10)) from generate_series(1, 1000) g;
+insert into test_mr_join_1 select int4multirange(int4range(g, g+100)) from generate_series(1, 1000, 10) g;
+insert into test_mr_join_2 select int4multirange(int4range(g, g+10)) from generate_series(1, 500) g;
+insert into test_mr_join_2 select int4multirange(int4range(g, g+100)) from generate_series(1, 500, 10) g;
+insert into test_mr_join_3 select int4multirange(int4range(g, g+10)) from generate_series(501, 1000) g;
+insert into test_mr_join_3 select int4multirange(int4range(g, g+100)) from generate_series(501, 1000, 10) g;
+
+analyze test_mr_join_1;
+analyze test_mr_join_2;
+analyze test_mr_join_3;
+
+-- multirange vs multirange: reorder joins based on computed selectivity
+explain (costs off) select count(*) from test_mr_join_1, test_mr_join_2, test_mr_join_3 where mr1 && mr2 and mr2 && mr3;
+explain (costs off) select count(*) from test_mr_join_1, test_mr_join_2, test_mr_join_3 where mr1 << mr2 and mr2 << mr3;
+explain (costs off) select count(*) from test_mr_join_1, test_mr_join_2, test_mr_join_3 where mr1 >> mr2 and mr2 >> mr3;
+
+drop table test_mr_join_1;
+drop table test_mr_join_2;
+drop table test_mr_join_3;
+
+--
+-- test multirange join selectivity with fully disjoint histograms
+--
+create table test_mr_join_lo (r int4multirange);
+create table test_mr_join_hi (r int4multirange);
+
+insert into test_mr_join_lo select int4multirange(int4range(g, g+10)) from generate_series(1, 500) g;
+insert into test_mr_join_hi select int4multirange(int4range(g, g+10)) from generate_series(10001, 10500) g;
+
+analyze test_mr_join_lo;
+analyze test_mr_join_hi;
+
+-- These should not crash and should produce stable plans.
+explain (costs off) select count(*) from test_mr_join_lo a, test_mr_join_hi b where a.r << b.r;
+explain (costs off) select count(*) from test_mr_join_lo a, test_mr_join_hi b where a.r >> b.r;
+explain (costs off) select count(*) from test_mr_join_lo a, test_mr_join_hi b where a.r && b.r;
+
+drop table test_mr_join_lo;
+drop table test_mr_join_hi;
+
+--
+-- test range vs multirange join selectivity
+--
+create table test_mr_join_r (r int4range);
+create table test_mr_join_mr (mr int4multirange);
+
+insert into test_mr_join_r select int4range(g, g+10) from generate_series(1, 500) g;
+insert into test_mr_join_mr select int4multirange(int4range(g, g+10)) from generate_series(10001, 10500) g;
+
+analyze test_mr_join_r;
+analyze test_mr_join_mr;
+
+-- range vs multirange operators should use multirangejoinsel
+explain (costs off) select count(*) from test_mr_join_r a, test_mr_join_mr b where a.r << b.mr;
+explain (costs off) select count(*) from test_mr_join_r a, test_mr_join_mr b where a.r >> b.mr;
+explain (costs off) select count(*) from test_mr_join_r a, test_mr_join_mr b where a.r && b.mr;
+
+-- multirange vs range (reverse direction)
+explain (costs off) select count(*) from test_mr_join_mr a, test_mr_join_r b where a.mr << b.r;
+explain (costs off) select count(*) from test_mr_join_mr a, test_mr_join_r b where a.mr >> b.r;
+explain (costs off) select count(*) from test_mr_join_mr a, test_mr_join_r b where a.mr && b.r;
+
+drop table test_mr_join_r;
+drop table test_mr_join_mr;
