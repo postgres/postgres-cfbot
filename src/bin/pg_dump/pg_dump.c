@@ -535,6 +535,7 @@ main(int argc, char **argv)
 		{"exclude-extension", required_argument, NULL, 17},
 		{"sequence-data", no_argument, &dopt.sequence_data, 1},
 		{"restrict-key", required_argument, NULL, 25},
+		{"max-table-segment-pages", required_argument, NULL, 26},
 
 		{NULL, 0, NULL, 0}
 	};
@@ -797,6 +798,12 @@ main(int argc, char **argv)
 
 			case 25:
 				dopt.restrict_key = pg_strdup(optarg);
+				break;
+
+			case 26:
+				if (!option_parse_uint32(optarg, "--max-table-segment-pages", 1, MaxBlockNumber,
+									  &dopt.max_table_segment_pages))
+					exit_nicely(1);
 				break;
 
 			default:
@@ -1344,6 +1351,9 @@ help(const char *progname)
 	printf(_("  --extra-float-digits=NUM     override default setting for extra_float_digits\n"));
 	printf(_("  --filter=FILENAME            include or exclude objects and data from dump\n"
 			 "                               based on expressions in FILENAME\n"));
+	printf(_("  --max-table-segment-pages=NUMPAGES\n"
+		     "                               number of main table pages above which data is \n"
+			 "                               copied out in chunks, also determines the chunk size\n"));
 	printf(_("  --if-exists                  use IF EXISTS when dropping objects\n"));
 	printf(_("  --include-foreign-data=PATTERN\n"
 			 "                               include data of foreign tables on foreign\n"
@@ -2370,7 +2380,7 @@ dumpTableData_copy(Archive *fout, const void *dcontext)
 	 * dumping an old pg_largeobject_metadata defined WITH OIDS.  For other
 	 * cases a simple COPY suffices.
 	 */
-	if (tdinfo->filtercond || tbinfo->relkind == RELKIND_FOREIGN_TABLE ||
+	if (tdinfo->filtercond || is_segment(tdinfo) || tbinfo->relkind == RELKIND_FOREIGN_TABLE ||
 		(fout->dopt->binary_upgrade && fout->remoteVersion < 120000 &&
 		 tbinfo->dobj.catId.oid == LargeObjectMetadataRelationId))
 	{
@@ -2388,9 +2398,37 @@ dumpTableData_copy(Archive *fout, const void *dcontext)
 		else
 			appendPQExpBufferStr(q, "* ");
 
-		appendPQExpBuffer(q, "FROM %s %s) TO stdout;",
+		appendPQExpBuffer(q, "FROM %s %s",
 						  fmtQualifiedDumpable(tbinfo),
 						  tdinfo->filtercond ? tdinfo->filtercond : "");
+		/* If it's a segment, we need to add a filter condition to select the
+		 * right page range 
+		 * - for first segment we add "ctid < (endPage+1, 0)" 
+		 *   first segment is the one with startPage == 0
+		 * - for last segment we add "ctid >= (startPage, 1)"
+		 *   last segment is the one with endPage == InvalidBlockNumber
+		 *   we leave to upper bound open for the case where more pages 
+		 *   were added after we measured 
+		 * - for middle segments we add 
+		 *   "ctid >= (startPage, 1) AND ctid < (endPage+1, 0)"
+		 *
+		 * "ctid < (endPage+1, 0)" instead of "ctid <= (endPage, maxtuple)"
+		 * was chosen as range end so that we do not have to estimate the maxtuple
+		 * 
+		 */
+		if (is_segment(tdinfo))
+		{
+			appendPQExpBufferStr(q, tdinfo->filtercond?" AND ":" WHERE ");
+			if(tdinfo->startPage == 0)
+				appendPQExpBuffer(q, "ctid < '(%u,0)'", tdinfo->endPage+1);			
+			else if(tdinfo->endPage != InvalidBlockNumber)
+				appendPQExpBuffer(q, "ctid >= '(%u,1)' AND ctid < '(%u,0)'",
+								 tdinfo->startPage, tdinfo->endPage+1);
+			else
+				appendPQExpBuffer(q, "ctid >= '(%u,1)'", tdinfo->startPage);
+		}
+
+		appendPQExpBuffer(q, ") TO stdout;");
 	}
 	else
 	{
@@ -2398,6 +2436,10 @@ dumpTableData_copy(Archive *fout, const void *dcontext)
 						  fmtQualifiedDumpable(tbinfo),
 						  column_list);
 	}
+
+	if (is_segment(tdinfo))
+		pg_log_debug("CHUNKING: data query: %s", q->data);
+	
 	res = ExecuteSqlQuery(fout, q->data, PGRES_COPY_OUT);
 	PQclear(res);
 	destroyPQExpBuffer(clistBuf);
@@ -2556,6 +2598,18 @@ dumpTableData_insert(Archive *fout, const void *dcontext)
 					  fmtQualifiedDumpable(tbinfo));
 	if (tdinfo->filtercond)
 		appendPQExpBuffer(q, " %s", tdinfo->filtercond);
+
+	if (is_segment(tdinfo))
+	{
+		appendPQExpBufferStr(q, tdinfo->filtercond ? " AND " : " WHERE ");
+		if (tdinfo->startPage == 0)
+			appendPQExpBuffer(q, "ctid < '(%u,0)'", tdinfo->endPage + 1);
+		else if (tdinfo->endPage != InvalidBlockNumber)
+			appendPQExpBuffer(q, "ctid >= '(%u,1)' AND ctid < '(%u,0)'",
+							  tdinfo->startPage, tdinfo->endPage + 1);
+		else
+			appendPQExpBuffer(q, "ctid >= '(%u,1)'", tdinfo->startPage);
+	}
 
 	ExecuteSqlStatement(fout, q->data);
 
@@ -2893,42 +2947,89 @@ dumpTableData(Archive *fout, const TableDataInfo *tdinfo)
 	{
 		TocEntry   *te;
 
-		te = ArchiveEntry(fout, tdinfo->dobj.catId, tdinfo->dobj.dumpId,
-						  ARCHIVE_OPTS(.tag = tbinfo->dobj.name,
-									   .namespace = tbinfo->dobj.namespace->dobj.name,
-									   .owner = tbinfo->rolname,
-									   .description = "TABLE DATA",
-									   .section = SECTION_DATA,
-									   .createStmt = tdDefn,
-									   .copyStmt = copyStmt,
-									   .deps = &(tbinfo->dobj.dumpId),
-									   .nDeps = 1,
-									   .dumpFn = dumpFn,
-									   .dumpArg = tdinfo));
-
-		/*
-		 * Set the TocEntry's dataLength in case we are doing a parallel dump
-		 * and want to order dump jobs by table size.  We choose to measure
-		 * dataLength in table pages (including TOAST pages) during dump, so
-		 * no scaling is needed.
-		 *
-		 * However, relpages is declared as "integer" in pg_class, and hence
-		 * also in TableInfo, but it's really BlockNumber a/k/a unsigned int.
-		 * Cast so that we get the right interpretation of table sizes
-		 * exceeding INT_MAX pages.
+		/* data chunking works off relpages, which are computed exactly using
+		 * pg_relation_size() when --max-table-segment-pages was set
+		 * 
+		 * We also don't chunk if table access method is not "heap"
+		 * TODO: we may add chunking for other access methods later, maybe 
+		 * based on primary key tranges
 		 */
-		te->dataLength = (BlockNumber) tbinfo->relpages;
-		te->dataLength += (BlockNumber) tbinfo->toastpages;
+		if (tbinfo->relpages <= dopt->max_table_segment_pages || 
+			strcmp(tbinfo->amname, "heap") != 0)
+		{
+			te = ArchiveEntry(fout, tdinfo->dobj.catId, tdinfo->dobj.dumpId,
+							ARCHIVE_OPTS(.tag = tbinfo->dobj.name,
+										.namespace = tbinfo->dobj.namespace->dobj.name,
+										.owner = tbinfo->rolname,
+										.description = "TABLE DATA",
+										.section = SECTION_DATA,
+										.createStmt = tdDefn,
+										.copyStmt = copyStmt,
+										.deps = &(tbinfo->dobj.dumpId),
+										.nDeps = 1,
+										.dumpFn = dumpFn,
+										.dumpArg = tdinfo));
 
-		/*
-		 * If pgoff_t is only 32 bits wide, the above refinement is useless,
-		 * and instead we'd better worry about integer overflow.  Clamp to
-		 * INT_MAX if the correct result exceeds that.
-		 */
-		if (sizeof(te->dataLength) == 4 &&
-			(tbinfo->relpages < 0 || tbinfo->toastpages < 0 ||
-			 te->dataLength < 0))
-			te->dataLength = INT_MAX;
+			/*
+			 * Set the TocEntry's dataLength in case we are doing a parallel dump
+			 * and want to order dump jobs by table size.  We choose to measure
+			 * dataLength in table pages (including TOAST pages) during dump, so
+			 * no scaling is needed.
+			 *
+			 * While pg_class.relpages which stores BlockNumber, a/k/a unsigned int,
+			 * is declared as "integer" we convert it back and store it as 
+			 * BlockNumber in TableInfo.
+			 * And dataLenght is pgoff_t (long int) so does now overflow for
+			 * 2 x UINT32_MAX 
+			 */
+			te->dataLength = tbinfo->relpages;
+			te->dataLength += tbinfo->toastpages;
+		}
+		else
+		{
+			uint64 current_chunk_start = 0;
+			PQExpBuffer chunk_desc = createPQExpBuffer();
+
+			while (current_chunk_start < tbinfo->relpages)
+			{
+				TableDataInfo *chunk_tdinfo = (TableDataInfo *) pg_malloc(sizeof(TableDataInfo));
+
+				memcpy(chunk_tdinfo, tdinfo, sizeof(TableDataInfo));
+				AssignDumpId(&chunk_tdinfo->dobj);
+				addObjectDependency(&chunk_tdinfo->dobj, tbinfo->dobj.dumpId);
+				chunk_tdinfo->startPage = (BlockNumber) current_chunk_start;
+				chunk_tdinfo->endPage = chunk_tdinfo->startPage + dopt->max_table_segment_pages - 1;
+				
+				current_chunk_start += dopt->max_table_segment_pages;
+				if (current_chunk_start >= tbinfo->relpages)
+					chunk_tdinfo->endPage = InvalidBlockNumber; /* last chunk is for "all the rest" */
+
+				printfPQExpBuffer(chunk_desc, "TABLE DATA (pages %u:%u)", chunk_tdinfo->startPage, chunk_tdinfo->endPage);
+
+				te = ArchiveEntry(fout, chunk_tdinfo->dobj.catId, chunk_tdinfo->dobj.dumpId,
+							ARCHIVE_OPTS(.tag = tbinfo->dobj.name,
+										.namespace = tbinfo->dobj.namespace->dobj.name,
+										.owner = tbinfo->rolname,
+										.description = chunk_desc->data,
+										.section = SECTION_DATA,
+										.createStmt = tdDefn,
+										.copyStmt = copyStmt,
+										.deps = &(tbinfo->dobj.dumpId),
+										.nDeps = 1,
+										.dumpFn = dumpFn,
+										.dumpArg = chunk_tdinfo));
+
+				if(chunk_tdinfo->endPage == InvalidBlockNumber)
+					te->dataLength = tbinfo->relpages - chunk_tdinfo->startPage;
+				else
+					te->dataLength = dopt->max_table_segment_pages;
+				/* let's assume toast pages distribute evenly among chunks */
+				if(tbinfo->relpages)
+					te->dataLength += te->dataLength * tbinfo->toastpages / tbinfo->relpages;
+			}
+
+			destroyPQExpBuffer(chunk_desc);
+		}
 	}
 
 	destroyPQExpBuffer(copyBuf);
@@ -3055,6 +3156,8 @@ makeTableDataInfo(DumpOptions *dopt, TableInfo *tbinfo)
 	tdinfo->dobj.namespace = tbinfo->dobj.namespace;
 	tdinfo->tdtable = tbinfo;
 	tdinfo->filtercond = NULL;	/* might get set later */
+	tdinfo->startPage = InvalidBlockNumber; /* we use this as indication that no chunking is needed */
+	tdinfo->endPage = InvalidBlockNumber;
 	addObjectDependency(&tdinfo->dobj, tbinfo->dobj.dumpId);
 
 	/* A TableDataInfo contains data, of course */
@@ -7212,8 +7315,16 @@ getTables(Archive *fout, int *numTables)
 						 "c.relnamespace, c.relkind, c.reltype, "
 						 "c.relowner, "
 						 "c.relchecks, "
-						 "c.relhasindex, c.relhasrules, c.relpages, "
-						 "c.reltuples, c.relallvisible, ");
+						 "c.relhasindex, c.relhasrules, ");
+
+	/* fetch current relation size if chunking is requested */
+	if(dopt->max_table_segment_pages != InvalidBlockNumber)
+		appendPQExpBufferStr(query, "pg_relation_size(c.oid)/current_setting('block_size')::int AS relpages, ");
+	else
+		/* pg_class.relpages stores BlockNumber (uint32) in an int field, convert to oid to get unsigned int out */
+		appendPQExpBufferStr(query, "c.relpages::oid, ");
+
+	appendPQExpBufferStr(query, "c.reltuples, c.relallvisible, ");
 
 	if (fout->remoteVersion >= 180000)
 		appendPQExpBufferStr(query, "c.relallfrozen, ");
@@ -7429,7 +7540,7 @@ getTables(Archive *fout, int *numTables)
 		tblinfo[i].ncheck = atoi(PQgetvalue(res, i, i_relchecks));
 		tblinfo[i].hasindex = (strcmp(PQgetvalue(res, i, i_relhasindex), "t") == 0);
 		tblinfo[i].hasrules = (strcmp(PQgetvalue(res, i, i_relhasrules), "t") == 0);
-		tblinfo[i].relpages = atoi(PQgetvalue(res, i, i_relpages));
+		tblinfo[i].relpages = strtoul(PQgetvalue(res, i, i_relpages), NULL, 10);
 		if (PQgetisnull(res, i, i_toastpages))
 			tblinfo[i].toastpages = 0;
 		else
