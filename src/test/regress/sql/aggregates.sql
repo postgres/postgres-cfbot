@@ -1786,3 +1786,196 @@ drop table agg_hash_1;
 drop table agg_hash_2;
 drop table agg_hash_3;
 drop table agg_hash_4;
+
+-- Error context is inconsistent.  Suppress it.
+\set VERBOSITY terse
+
+-- PRODUCT(numeric)
+
+-- Test with regular GROUP BY and grouping over all rows
+CREATE TABLE product_numeric (a int, val numeric);
+SELECT product(val) FROM product_numeric;    -- over empty table
+INSERT INTO product_numeric SELECT i, i FROM generate_series(1, 10) i;
+SELECT product(val) FROM product_numeric GROUP BY a%2 ORDER BY 1;
+SELECT product(val) FROM product_numeric;
+
+-- Test with NULL values
+CREATE TABLE product_numeric_nulls (val numeric);
+INSERT INTO product_numeric_nulls VALUES (NULL), (NULL);
+SELECT product(val) FROM product_numeric_nulls;    -- over all NULLs
+
+-- Test with mixed values, NULL + values
+INSERT INTO product_numeric_nulls VALUES (4), (2), (2), (4);
+SELECT product(val) FROM product_numeric_nulls GROUP BY val%2 ORDER BY 1 NULLS LAST;
+SELECT product(val) FILTER (WHERE val > 2) FROM product_numeric_nulls GROUP BY val ORDER BY 1 NULLS LAST;
+SELECT product(DISTINCT val) FROM product_numeric_nulls GROUP BY val ORDER BY 1 NULLS LAST;
+SELECT product(val) FROM product_numeric_nulls;
+
+-- Test with zero and negative values.  A zero makes the product zero, and the
+-- sign follows the parity of the negative inputs.  Exercise the numeric,
+-- integer and float transition functions.
+CREATE TABLE product_signs (a int, val numeric);
+INSERT INTO product_signs VALUES (1, -2), (1, 3), (1, -4), (2, 5), (2, -6), (3, 0), (3, 7);
+SELECT product(val) FROM product_signs;                  -- a zero forces 0
+SELECT product(val) FROM product_signs WHERE val <> 0;   -- three negatives -> -5040
+SELECT a, product(val) FROM product_signs GROUP BY a ORDER BY a;
+SELECT product(val::int) FROM product_signs;             -- 0
+SELECT product(val::int) FROM product_signs WHERE val <> 0;
+SELECT product(val::float8) FROM product_signs;          -- 0
+
+-- Test parallel aggregation with PARTIAL product().  Force a parallel plan on
+-- a small table and pin the worker count so the plan does not depend on the
+-- table or block size.
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET min_parallel_table_scan_size = 0;
+SET max_parallel_workers_per_gather = 4;
+CREATE TABLE product_numeric_parallel (a int, val numeric);
+INSERT INTO product_numeric_parallel
+  SELECT i, CASE WHEN i % 1000 = 0 THEN 2 ELSE 1 END FROM generate_series(1, 3000) i;
+ALTER TABLE product_numeric_parallel SET (parallel_workers = 2);
+EXPLAIN (VERBOSE, COSTS OFF) SELECT product(val) FROM product_numeric_parallel GROUP BY a%2 ORDER BY 1;
+-- The parallel-combined result must match the serial product (8 for the even group)
+SELECT product(val) FROM product_numeric_parallel GROUP BY a%2 ORDER BY 1;
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+RESET min_parallel_table_scan_size;
+RESET max_parallel_workers_per_gather;
+
+-- A numeric product can overflow; verify the error is reported
+CREATE TABLE product_numeric_overflow (val numeric);
+INSERT INTO product_numeric_overflow VALUES ('1e100000'), ('1e100000');
+SELECT product(val) FROM product_numeric_overflow;    -- overflow error
+
+-- Test with special NUMERIC values
+CREATE TABLE product_numeric_special (val numeric);
+INSERT INTO product_numeric_special VALUES ('Infinity'), ('NAN');
+SELECT product(val) FROM product_numeric_special GROUP BY val ORDER BY 1;
+SELECT product(val) FROM product_numeric_special GROUP BY val%2 ORDER BY 1;
+-- Special values mixed with ordinary positive values in the same set: a NaN
+-- input dominates and yields NaN, while Infinity propagates (with sign).
+SELECT product(v) FROM (VALUES ('NaN'::numeric), ('Infinity'), (3.14)) j(v);
+SELECT product(v) FROM (VALUES ('Infinity'::numeric), (3.14), (2)) j(v);
+SELECT product(v) FROM (VALUES ('-Infinity'::numeric), (3.14), (2)) j(v);
+
+
+-- PRODUCT(smallint), PRODUCT(int4), and PRODUCT(bigint)
+
+-- Test with regular GROUP BY and grouping over all rows
+CREATE TABLE product_integers (a int, val int);
+SELECT product(val::smallint) FROM product_integers;  -- over empty table
+SELECT product(val::int) FROM product_integers;       -- over empty table
+SELECT product(val::bigint) FROM product_integers;    -- over empty table
+INSERT INTO product_integers SELECT i, i FROM generate_series(1, 10) i;
+SELECT product(val::smallint) FROM product_integers GROUP BY a%2 ORDER BY 1;
+SELECT product(val::int) FROM product_integers GROUP BY a%2 ORDER BY 1;
+SELECT product(val::bigint) FROM product_integers GROUP BY a%2 ORDER BY 1;
+SELECT product(val::smallint) FROM product_integers;
+SELECT product(val::int) FROM product_integers;
+SELECT product(val::bigint) FROM product_integers;
+
+-- Test with NULL values
+CREATE TABLE product_integers_nulls (val int);
+INSERT INTO product_integers_nulls VALUES (NULL), (NULL);
+SELECT product(val::smallint) FROM product_integers_nulls;  -- over all NULLs
+SELECT product(val::int) FROM product_integers_nulls;       -- over all NULLs
+SELECT product(val::bigint) FROM product_integers_nulls;    -- over all NULLs
+
+-- Test with mixed values, NULL + values
+INSERT INTO product_integers_nulls VALUES (4), (2), (2), (4);
+SELECT product(val::smallint) FILTER (WHERE val > 2) FROM product_integers_nulls GROUP BY val ORDER BY 1 NULLS LAST;
+SELECT product(DISTINCT val::smallint) FROM product_integers_nulls GROUP BY val ORDER BY 1 NULLS LAST;
+SELECT product(val::smallint) FROM product_integers_nulls;
+SELECT product(val::int) FILTER (WHERE val > 2) FROM product_integers_nulls GROUP BY val ORDER BY 1 NULLS LAST;
+SELECT product(DISTINCT val::int) FROM product_integers_nulls GROUP BY val ORDER BY 1 NULLS LAST;
+SELECT product(val::int) FROM product_integers_nulls;
+SELECT product(val::bigint) FILTER (WHERE val > 2) FROM product_integers_nulls GROUP BY val ORDER BY 1 NULLS LAST;
+SELECT product(DISTINCT val::bigint) FROM product_integers_nulls GROUP BY val ORDER BY 1 NULLS LAST;
+SELECT product(val::bigint) FROM product_integers_nulls;
+
+-- Test parallel aggregation with PARTIAL product()
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET min_parallel_table_scan_size = 0;
+SET max_parallel_workers_per_gather = 4;
+CREATE TABLE product_integers_parallel (a int, val int);
+INSERT INTO product_integers_parallel
+  SELECT i, CASE WHEN i % 1000 = 0 THEN 2 ELSE 1 END FROM generate_series(1, 3000) i;
+ALTER TABLE product_integers_parallel SET (parallel_workers = 2);
+EXPLAIN (VERBOSE, COSTS OFF) SELECT product(val) FROM product_integers_parallel GROUP BY a%2 ORDER BY 1;
+SELECT product(val) FROM product_integers_parallel GROUP BY a%2 ORDER BY 1;
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+RESET min_parallel_table_scan_size;
+RESET max_parallel_workers_per_gather;
+
+
+-- PRODUCT(float4) and PRODUCT(float8)
+
+-- Test with regular GROUP BY and grouping over all rows
+CREATE TABLE product_floats (a int, val float4);
+SELECT product(val::float4) FROM product_floats;  -- over empty table
+SELECT product(val::float8) FROM product_floats;    -- over empty table
+INSERT INTO product_floats SELECT i, i + 0.1 FROM generate_series(1, 10) i;
+SELECT product(val::float4) FROM product_floats GROUP BY a%2 ORDER BY 1;
+SELECT product(val::float8)::numeric(20,5) FROM product_floats GROUP BY a%2 ORDER BY 1;
+SELECT product(val::float4) FROM product_floats;
+SELECT product(val::float8)::numeric(20,5) FROM product_floats;
+
+-- Test with NULL values
+CREATE TABLE product_floats_nulls (val float4);
+INSERT INTO product_floats_nulls VALUES (NULL), (NULL);
+SELECT product(val::float4) FROM product_floats_nulls;  -- over all NULLs
+SELECT product(val::float8) FROM product_floats_nulls;    -- over all NULLs
+
+-- Test with mixed values, NULL + values
+INSERT INTO product_floats_nulls VALUES (4.5), (2.4), (2.4), (4.5);
+SELECT product(val::float4) FILTER (WHERE val > 2) FROM product_floats_nulls GROUP BY val ORDER BY 1 NULLS LAST;
+SELECT product(DISTINCT val::float4) FROM product_floats_nulls GROUP BY val ORDER BY 1 NULLS LAST;
+SELECT product(val::float4) FROM product_floats_nulls;
+SELECT (product(val::float8) FILTER (WHERE val > 2))::numeric(10,3) FROM product_floats_nulls GROUP BY val ORDER BY 1 NULLS LAST;
+SELECT product(DISTINCT val::float8)::numeric(10,3) FROM product_floats_nulls GROUP BY val ORDER BY 1 NULLS LAST;
+SELECT product(val::float8)::numeric(10,3) FROM product_floats_nulls;
+
+-- Test parallel aggregation with PARTIAL product()
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET min_parallel_table_scan_size = 0;
+SET max_parallel_workers_per_gather = 4;
+CREATE TABLE product_floats_parallel (a int, val float4);
+INSERT INTO product_floats_parallel
+  SELECT i, CASE WHEN i % 1000 = 0 THEN 2 ELSE 1 END FROM generate_series(1, 3000) i;
+ALTER TABLE product_floats_parallel SET (parallel_workers = 2);
+EXPLAIN (VERBOSE, COSTS OFF) SELECT product(val) FROM product_floats_parallel GROUP BY a%2 ORDER BY 1;
+SELECT product(val) FROM product_floats_parallel GROUP BY a%2 ORDER BY 1;
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+RESET min_parallel_table_scan_size;
+RESET max_parallel_workers_per_gather;
+
+-- Test with special FLOAT values
+CREATE TABLE product_floats_special (val float);
+INSERT INTO product_floats_special VALUES ('Infinity'), ('NAN');
+SELECT product(val) FROM product_floats_special GROUP BY val ORDER BY 1;
+-- Special values mixed with ordinary positive values in the same set: a NaN
+-- input dominates and yields NaN, while Infinity propagates (with sign).
+SELECT product(v) FROM (VALUES ('NaN'::float), ('Infinity'), (3.14)) j(v);
+SELECT product(v) FROM (VALUES ('Infinity'::float4), (3.14), (2)) j(v);
+SELECT product(v) FROM (VALUES ('-Infinity'::float8), (3.14), (2)) j(v);
+
+DROP TABLE product_numeric;
+DROP TABLE product_numeric_nulls;
+DROP TABLE product_signs;
+DROP TABLE product_numeric_parallel;
+DROP TABLE product_numeric_overflow;
+DROP TABLE product_numeric_special;
+DROP TABLE product_integers;
+DROP TABLE product_integers_nulls;
+DROP TABLE product_integers_parallel;
+DROP TABLE product_floats;
+DROP TABLE product_floats_nulls;
+DROP TABLE product_floats_parallel;
+DROP TABLE product_floats_special;
+
+
+\set VERBOSITY default
