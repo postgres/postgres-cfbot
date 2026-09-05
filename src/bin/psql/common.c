@@ -742,6 +742,27 @@ PSQLexecWatch(const char *query, const printQueryOpt *opt, FILE *printQueryFout,
 
 
 /*
+ * ReportGracefulDisconnect: if the server has asked us to disconnect, say so
+ *
+ * The server advertises the disconnect_requested GUC via ParameterStatus when
+ * it wants us to disconnect gracefully (e.g. during a smart shutdown).  It's
+ * advisory, so we just tell the user about it once per connection.
+ */
+static void
+ReportGracefulDisconnect(void)
+{
+	const char *disconnect_requested;
+
+	disconnect_requested = PQparameterStatus(pset.db, "disconnect_requested");
+	if (!pset.disconnect_request_reported && disconnect_requested &&
+		strcmp(disconnect_requested, "on") == 0)
+	{
+		pg_log_info("Server requested graceful disconnect when convenient.");
+		pset.disconnect_request_reported = true;
+	}
+}
+
+/*
  * PrintNotifications: check for asynchronous notifications, and print them out
  */
 static void
@@ -763,6 +784,8 @@ PrintNotifications(void)
 		PQfreemem(notify);
 		PQconsumeInput(pset.db);
 	}
+
+	ReportGracefulDisconnect();
 }
 
 

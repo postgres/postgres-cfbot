@@ -2153,7 +2153,34 @@ process_pm_shutdown_request(void)
 			 * later state, do not change it.
 			 */
 			if (pmState == PM_RUN || pmState == PM_HOT_STANDBY)
+			{
+				dlist_iter	iter;
+
 				connsAllowed = false;
+
+				/*
+				 * Signal all backends to politely request that their clients
+				 * disconnect gracefully.  Each signaled backend reports this to
+				 * its client by turning on its disconnect_requested GUC.
+				 */
+				dlist_foreach(iter, &ActiveChildList)
+				{
+					PMChild    *bp = dlist_container(PMChild, elem, iter.cur);
+
+					/*
+					 * Only signal regular backends, since those are the ones
+					 * that have a client to notify.  Follow the same pattern as
+					 * SignalChildren to correctly distinguish backends from WAL
+					 * senders.
+					 */
+					if (bp->bkend_type == B_BACKEND &&
+						!IsPostmasterChildWalSender(bp->child_slot))
+					{
+						SendProcSignal(bp->pid, PROCSIG_REQUEST_DISCONNECT,
+									   INVALID_PROC_NUMBER);
+					}
+				}
+			}
 			else if (pmState == PM_STARTUP || pmState == PM_RECOVERY)
 			{
 				/* There should be no clients, so proceed to stop children */
