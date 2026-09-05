@@ -198,10 +198,10 @@ DROP TABLE prt;
 
 RESET enable_partitionwise_join;
 
--- Exercise Memoize code that flushes the cache when a parameter changes which
--- is not part of the cache key.
+-- Ensure Params which are part of the base quals are also added as a cache
+-- key.
 
--- Ensure we get a Memoize plan
+-- Ensure we get a Memoize plan with the Param as a cache key
 EXPLAIN (COSTS OFF)
 SELECT unique1 FROM tenk1 t0
 WHERE unique1 < 3
@@ -217,6 +217,24 @@ WHERE unique1 < 3
 	SELECT 1 FROM tenk1 t1
 	INNER JOIN tenk1 t2 ON t1.unique1 = t2.hundred
 	WHERE t0.ten = t1.twenty AND t0.two <> t2.four OFFSET 0);
+
+-- Ensure a Param which is buried inside a larger cache key expression is made
+-- a cache key by itself too.
+
+-- Ensure we get a Memoize plan with both cache keys
+EXPLAIN (COSTS OFF)
+SELECT sum(c) FROM (
+  SELECT (SELECT count(*) FROM tenk1 t1
+          INNER JOIN tenk1 t2 ON t1.unique1 = t2.hundred + t0.ten
+          WHERE t1.twenty = t0.ten) AS c
+  FROM tenk1 t0 WHERE t0.unique1 < 2) s;
+
+-- Ensure the above query returns the correct result
+SELECT sum(c) FROM (
+  SELECT (SELECT count(*) FROM tenk1 t1
+          INNER JOIN tenk1 t2 ON t1.unique1 = t2.hundred + t0.ten
+          WHERE t1.twenty = t0.ten) AS c
+  FROM tenk1 t0 WHERE t0.unique1 < 2) s;
 
 RESET enable_seqscan;
 RESET enable_material;
