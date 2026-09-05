@@ -1613,6 +1613,10 @@ StartReadBuffersImpl(ReadBuffersOperation *operation,
  * buffers must remain valid until WaitReadBuffers() is called, and any
  * forwarded buffers must also be preserved for a continuing call unless
  * they are explicitly released.
+ *
+ * If true was returned, the memory underlying the ReadBuffersOperation needs
+ * to stay around until either WaitReadBuffers() or AbandonReadBuffers() is
+ * called (or an error is thrown).
  */
 bool
 StartReadBuffers(ReadBuffersOperation *operation,
@@ -2172,6 +2176,36 @@ AsyncReadBuffers(ReadBuffersOperation *operation, int *nblocks_progress)
 	*nblocks_progress = io_buffers_len;
 
 	return true;
+}
+
+/*
+ * Declare that this backend is not interested in the operation anymore. This
+ * needs to be called if StartReadBuffers() returned true and the
+ * ReadBuffersOperation is to be freed without calling WaitReadBuffers()
+ * (leaving errors aside).
+ *
+ * It is the caller's responsibility to release buffer pins (seems simpler
+ * that way, as that already is required if no IO had been necessary).
+ */
+void
+AbandonReadBuffers(ReadBuffersOperation *operation)
+{
+	PgAioWaitRef io_wref = operation->io_wref;
+
+	/* see equivalent WaitReadBuffers() check */
+	if (!pgaio_wref_valid(&io_wref) && io_method != IOMETHOD_SYNC)
+		elog(ERROR, "abandoning read operation that didn't read");
+
+	if (!pgaio_wref_valid(&io_wref))
+		return;
+
+	pgaio_wref_clear(&operation->io_wref);
+
+	/* can't abandon foreign IOs (nor do we need to) */
+	if (operation->foreign_io)
+		operation->foreign_io = false;
+	else
+		pgaio_wref_abandon(&io_wref);
 }
 
 /*
@@ -8327,7 +8361,7 @@ MarkDirtyAllUnpinnedBuffers(int32 *buffers_dirtied,
  * replaced while IO is ongoing.
  */
 static pg_always_inline void
-buffer_stage_common(PgAioHandle *ioh, bool is_write, bool is_temp)
+buffer_stage_common(PgAioHandle *ioh, uint8 cb_data, bool is_write, bool is_temp)
 {
 	uint64	   *io_data;
 	uint8		handle_data_len;
@@ -8426,7 +8460,23 @@ buffer_stage_common(PgAioHandle *ioh, bool is_write, bool is_temp)
 		 * keeps track.
 		 */
 		if (!is_temp)
+		{
 			ResourceOwnerForgetBufferIO(CurrentResourceOwner, buffer);
+
+			/*
+			 * A backend might have started waiting for the IO using the
+			 * buffer's condition variable, but once the IO is submitted, it
+			 * should wait via the AIO subsystem, as a waiter might need to
+			 * complete the IO.
+			 *
+			 * However, doing broadcasts is not free, so we like to avoid it
+			 * when not necessary. If the IO is being executed synchronously,
+			 * this backend will always end up signalling the IOCV without
+			 * further waiting, therefore avoid doing so here.
+			 */
+			if (!(cb_data & READ_BUFFERS_SYNCHRONOUSLY))
+				ConditionVariableBroadcast(BufferDescriptorGetIOCV(buf_hdr));
+		}
 	}
 }
 
@@ -8922,7 +8972,7 @@ buffer_readv_report(PgAioResult result, const PgAioTargetData *td,
 static void
 shared_buffer_readv_stage(PgAioHandle *ioh, uint8 cb_data)
 {
-	buffer_stage_common(ioh, false, false);
+	buffer_stage_common(ioh, cb_data, false, false);
 }
 
 static PgAioResult
@@ -8973,7 +9023,7 @@ shared_buffer_readv_complete_local(PgAioHandle *ioh, PgAioResult prior_result,
 static void
 local_buffer_readv_stage(PgAioHandle *ioh, uint8 cb_data)
 {
-	buffer_stage_common(ioh, false, true);
+	buffer_stage_common(ioh, cb_data, false, true);
 }
 
 static PgAioResult

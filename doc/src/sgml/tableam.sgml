@@ -130,6 +130,13 @@ my_tableam_handler(PG_FUNCTION_ARGS)
  </para>
 
  <para>
+  Table access methods must support index scans that are driven by index
+  access methods implementing the <function>amgetbatch</function> interface.
+  See <xref linkend="index-scanning-batches"/> for details on consuming
+  <function>amgetbatch</function> batches and managing the scan's position.
+ </para>
+
+ <para>
   For crash safety, an AM can use postgres' <link
   linkend="wal"><acronym>WAL</acronym></link>, or a custom implementation.
   If <acronym>WAL</acronym> is chosen, either <link

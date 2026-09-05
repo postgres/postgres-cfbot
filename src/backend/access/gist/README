@@ -48,7 +48,7 @@ The original algorithms were modified in several ways:
 
 * They had to be adapted to PostgreSQL conventions. For example, the SEARCH
   algorithm was considerably changed, because in PostgreSQL the search function
-  should return one tuple (next), not all tuples at once. Also, it should
+  returns matching tuples incrementally, not all at once. Also, it should
   release page locks between calls.
 * Since we added support for variable length keys, it's not possible to
   guarantee enough free space for all keys on pages after splitting. User
@@ -71,20 +71,24 @@ was not touched in the paper.
 Search Algorithm
 ----------------
 
-The search code maintains a queue of unvisited items, where an "item" is
-either a heap tuple known to satisfy the search conditions, or an index
-page that is consistent with the search conditions according to inspection
-of its parent page's downlink item.  Initially the root page is searched
-to find unvisited items in it.  Then we pull items from the queue.  A
-heap tuple pointer is just returned immediately; an index page entry
-causes that page to be searched, generating more queue entries.
+The search code maintains a queue of unvisited items.  For a plain index
+scan an "item" is always an index page that is consistent with the search
+conditions according to inspection of its parent page's downlink item;
+matching heap tuples are not queued, but are gathered into a batch as each
+leaf page is scanned (see "Returning matches in batches", below).  For a
+nearest-neighbor (ordered) scan the queue additionally holds heap tuples
+known to satisfy the search conditions, so that heap tuples and index
+pages can be interleaved in distance order.  Initially the root page is
+added to the queue.  Then we pull items from the queue: an index page
+entry causes that page to be scanned, generating more queue entries, while
+a heap tuple entry (ordered scans only) is a match to be returned.
 
-The queue is kept ordered with heap tuple items at the front, then
-index page entries, with any newly-added index page entry inserted
-before existing index page entries.  This ensures depth-first traversal
-of the index, and in particular causes the first few heap tuples to be
-returned as soon as possible.  That is helpful in case there is a LIMIT
-that requires only a few tuples to be produced.
+The queue is kept ordered so that we perform a depth-first traversal of
+the index: any newly-added index page entry is inserted before existing
+index page entries, and (for ordered scans) heap tuple items are kept at
+the front.  This causes the first few matching heap tuples to be returned
+as soon as possible, which is helpful in case there is a LIMIT that
+requires only a few tuples to be produced.
 
 To implement nearest-neighbor search, the queue entries are augmented
 with distance data: heap tuple entries are labeled with exact distance
@@ -94,17 +98,18 @@ queue entries are retrieved in smallest-distance-first order, with
 entries having identical distances managed as stated in the previous
 paragraph.
 
-The search algorithm keeps an index page locked only long enough to scan
-its entries and queue those that satisfy the search conditions.  Since
-insertions can occur concurrently with searches, it is possible for an
-index child page to be split between the time we make a queue entry for it
-(while visiting its parent page) and the time we actually reach and scan
-the child page.  To avoid missing the entries that were moved to the right
-sibling, we detect whether a split has occurred by comparing the child
-page's NSN (node sequence number, a special-purpose LSN) to the LSN that
-the parent had when visited.  If it did, the sibling page is immediately
-added to the front of the queue, ensuring that its items will be scanned
-in the same order as if they were still on the original child page.
+The search algorithm keeps an index page locked only long enough to scan its
+entries -- queueing the child pages that satisfy the search conditions, and
+gathering any matching heap tuples (into a batch, or onto the queue for an
+ordered scan).  Since insertions can occur concurrently with searches, it is
+possible for an index child page to be split between the time we make a queue
+entry for it (while visiting its parent page) and the time we actually reach
+and scan the child page.  To avoid missing the entries that were moved to the
+right sibling, we detect whether a split has occurred by comparing the child
+page's NSN (node sequence number, a special-purpose LSN) to the LSN that the
+parent had when visited.  If it did, the sibling page is immediately added to
+the front of the queue, ensuring that its items will be scanned in the same
+order as if they were still on the original child page.
 
 As is usual in Postgres, the search algorithm only guarantees to find index
 entries that existed before the scan started; index entries added during
@@ -114,6 +119,36 @@ of scan start.  In particular, this means that we need not worry about
 cases where a parent page's downlink key is "enlarged" after we look at it.
 Any such enlargement would be to add child items that we aren't interested
 in returning anyway.
+
+
+Returning matches in batches
+----------------------------
+
+GiST implements the amgetbatch index AM interface, whose contract is
+documented in doc/src/sgml/indexam.sgml (see also
+src/backend/access/nbtree/README).  Each call hands the table AM a batch of
+matching TIDs rather than a single TID.  GiST forms two kinds of batch:
+
+* A plain (non-ordered) scan returns one "conventional" batch per leaf
+  page, holding all of that page's matching TIDs in physical order.  As in
+  nbtree and hash, the batch retains the leaf page's buffer pin (though not
+  its content lock) as the interlock against concurrent TID recycling by
+  VACUUM.
+
+* A nearest-neighbor (ordered) scan returns a single "virtual" batch.  Its
+  matches don't arrive one leaf page at a time, so instead we drain the
+  distance-ordered queue, copying matching TIDs into the batch in distance
+  order -- typically spanning many leaf pages.  A virtual batch retains no
+  buffer pin; each leaf page's pin is dropped as soon as the page is scanned.
+
+VACUUM honors a batch's pin by taking a cleanup lock on the leaf page (see
+"Bulk delete algorithm (VACUUM)", below), just as nbtree does.  Because a
+virtual batch holds no such pin, ordered scans come with two restrictions,
+both also seen in bitmap (amgetbitmap) scans and both explained in
+doc/src/sgml/indexam.sgml: they never set LP_DEAD bits (gistkillitemsbatch
+does nothing for a virtual batch), and they are never planned as index-only
+scans (a virtual batch has no pin to offer as the TID-recycling interlock
+that index-only scans depend on).
 
 
 Insert Algorithm
@@ -451,6 +486,15 @@ one half of the page was moved to a position that we already scanned, we
 B-tree VACUUM uses, but because we already have NSNs on pages, to detect page
 splits during searches, we don't need a "vacuum cycle ID" concept for that
 like B-tree does.
+
+We take a full cleanup lock on every leaf page as we scan it, even leaf
+pages with no deletable tuples.  As in nbtree, this is the interlock that
+holds concurrent scans off from TID recycling; see "Returning matches in
+batches", above.  Replay of the resulting XLOG_GIST_PAGE_VACUUM records
+takes the same cleanup lock, so that the interlock also protects index-only
+scans running on a hot standby.  Recovery only needs the cleanup lock on
+pages that actually have items to delete (the only pages that generate a
+record), not on every leaf page.
 
 While we scan all the pages, we also make note of any completely empty leaf
 pages. We will try to unlink them from the tree after the scan. We also record

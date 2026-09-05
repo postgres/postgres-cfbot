@@ -5125,7 +5125,12 @@ description | Waiting for a newly initialized WAL file to reach durable storage
     index entries retrieved from the index while <structfield>idx_tup_fetch</structfield>
     counts live rows fetched from the table.  The latter will be less if any
     dead or not-yet-committed rows are fetched using the index, or if any
-    heap fetches are avoided by means of an index-only scan.
+    heap fetches are avoided by means of an index-only scan.  It will also be
+    less when <structfield>idx_tup_read</structfield> counts index entries that
+    are read from the index but never returned to the scan (matching entries
+    are read an index page at a time, so a full page's worth can be counted
+    even when a <literal>LIMIT</literal> clause causes the scan to stop before
+    returning them all).
    </para>
   </note>
 

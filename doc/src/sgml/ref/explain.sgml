@@ -313,6 +313,8 @@ ROLLBACK;
       In text format, only non-zero values are printed.
       This parameter may only be used when <literal>ANALYZE</literal> is also
       enabled.  It defaults to <literal>FALSE</literal>.
+      <xref linkend="using-explain-analyze"/> describes the information
+      provided.
      </para>
     </listitem>
    </varlistentry>

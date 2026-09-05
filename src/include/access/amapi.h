@@ -14,9 +14,12 @@
 
 #include "access/cmptype.h"
 #include "access/genam.h"
+#include "access/relscan.h"
 #include "access/stratnum.h"
 #include "nodes/nodes.h"
 #include "nodes/pg_list.h"
+#include "pgstat.h"
+#include "utils/rel.h"
 
 /*
  * We don't wish to include planner header files here, since most of an index
@@ -199,6 +202,23 @@ typedef void (*amrescan_function) (IndexScanDesc scan,
 typedef bool (*amgettuple_function) (IndexScanDesc scan,
 									 ScanDirection direction);
 
+/* next batch of valid tuples */
+typedef IndexScanBatch (*amgetbatch_function) (IndexScanDesc scan,
+											   IndexScanBatch priorbatch,
+											   ScanDirection direction);
+
+/* drop TID recycling interlock held to prevent concurrent VACUUM recycling */
+typedef void (*amunguardbatch_function) (IndexScanDesc scan,
+										 IndexScanBatch batch);
+
+/* mark dead items in index page */
+typedef void (*amkillitemsbatch_function) (IndexScanDesc scan,
+										   IndexScanBatch batch);
+
+/* Set up the scan's xs_hitup output tuple for the given batch item */
+typedef void (*amgettransform_function) (IndexScanDesc scan,
+										 IndexScanBatch batch, int item);
+
 /* fetch all valid tuples */
 typedef int64 (*amgetbitmap_function) (IndexScanDesc scan,
 									   TIDBitmap *tbm);
@@ -206,11 +226,9 @@ typedef int64 (*amgetbitmap_function) (IndexScanDesc scan,
 /* end index scan */
 typedef void (*amendscan_function) (IndexScanDesc scan);
 
-/* mark current scan position */
-typedef void (*ammarkpos_function) (IndexScanDesc scan);
-
-/* restore marked scan position */
-typedef void (*amrestrpos_function) (IndexScanDesc scan);
+/* invalidate index AM state that independently tracks scan's position */
+typedef void (*amposreset_function) (IndexScanDesc scan,
+									 IndexScanBatch batch);
 
 /*
  * Callback function signatures - for parallel index scans.
@@ -255,6 +273,8 @@ typedef struct IndexAmRoutine
 	bool		amconsistentordering;
 	/* does AM support backward scanning? */
 	bool		amcanbackward;
+	/* does AM support mark/restore of a scan position? */
+	bool		amcanmarkpos;
 	/* does AM support UNIQUE indexes? */
 	bool		amcanunique;
 	/* does AM support multi-column indexes? */
@@ -310,10 +330,13 @@ typedef struct IndexAmRoutine
 	ambeginscan_function ambeginscan;
 	amrescan_function amrescan;
 	amgettuple_function amgettuple; /* can be NULL */
+	amgetbatch_function amgetbatch; /* can be NULL */
+	amunguardbatch_function amunguardbatch; /* can be NULL */
+	amkillitemsbatch_function amkillitemsbatch; /* can be NULL */
+	amgettransform_function amgettransform; /* can be NULL */
 	amgetbitmap_function amgetbitmap;	/* can be NULL */
 	amendscan_function amendscan;
-	ammarkpos_function ammarkpos;	/* can be NULL */
-	amrestrpos_function amrestrpos; /* can be NULL */
+	amposreset_function amposreset; /* can be NULL */
 
 	/* interface functions to support parallel index scans */
 	amestimateparallelscan_function amestimateparallelscan; /* can be NULL */
@@ -331,5 +354,38 @@ extern const IndexAmRoutine *GetIndexAmRoutine(Oid amhandler);
 extern const IndexAmRoutine *GetIndexAmRoutineByAmId(Oid amoid, bool noerror);
 extern CompareType IndexAmTranslateStrategy(StrategyNumber strategy, Oid amoid, Oid opfamily, bool missing_ok);
 extern StrategyNumber IndexAmTranslateCompareType(CompareType cmptype, Oid amoid, Oid opfamily, bool missing_ok);
+
+/*
+ * index_getnext_tid - amgettuple interface
+ *
+ * Fetch the next matching TID for the scan (or the first).  Returns true when
+ * a TID was found (the index AM will have saved it in scan->xs_heaptid), or
+ * false when we're out of index entries.
+ */
+static inline bool
+index_getnext_tid(IndexScanDesc scan, ScanDirection direction)
+{
+	bool		found;
+
+	Assert(RelationIsValid(scan->indexRelation));
+	Assert(scan->indexRelation->rd_indam != NULL);
+	Assert(scan->indexRelation->rd_indam->amgettuple != NULL);
+
+	found = scan->indexRelation->rd_indam->amgettuple(scan, direction);
+
+	/* Reset kill flag immediately for safety */
+	scan->kill_prior_tuple = false;
+	scan->xs_heap_continue = false;
+
+	/* If we're out of index entries, we're done */
+	if (!found)
+		return false;
+
+	Assert(ItemPointerIsValid(&scan->xs_heaptid));
+
+	pgstat_count_index_tuples(scan->indexRelation, 1);
+
+	return true;
+}
 
 #endif							/* AMAPI_H */
