@@ -17,6 +17,7 @@
 #ifndef TABLEAM_H
 #define TABLEAM_H
 
+#include "access/amapi.h"
 #include "access/relscan.h"
 #include "access/sdir.h"
 #include "access/xact.h"
@@ -322,6 +323,65 @@ typedef struct TableAmRoutine
 {
 	/* this must be set to T_TableAmRoutine */
 	NodeTag		type;
+
+
+	/* ------------------------------------------------------------------------
+	 * Reloption parsing.
+	 * ------------------------------------------------------------------------
+	 */
+
+	/*
+	 * Parse and validate AM-specific reloptions.  Optional: when NULL, the
+	 * caller falls back to the standard heap reloption parser
+	 * (default_reloptions with RELOPT_KIND_HEAP) and the result is laid out
+	 * as StdRdOptions.
+	 *
+	 * When non-NULL, the AM owns the option set entirely.  It is free to
+	 * accept all standard heap options, only a subset, or to add its own. The
+	 * returned bytea must begin with a VARSIZE header and is stored in
+	 * Relation->rd_options, so the AM dictates the in-memory layout that its
+	 * other callbacks read.  Core code that reads StdRdOptions fields out of
+	 * rd_options (RelationGetFillFactor, RelationIsUsedAsCatalogTable, ...)
+	 * checks RelationHasStdRdOptions() first, so a custom layout will not be
+	 * misinterpreted -- unless the AM sets has_std_options_prefix below to
+	 * declare that its struct is a StdRdOptions superset after all.
+	 *
+	 * The callback validates user-supplied values but must not silently
+	 * rewrite them: a user inspecting pg_class.reloptions must see exactly
+	 * what they passed in.  Out-of-range or unknown options should be
+	 * reported with ereport(ERROR) when validate is true.
+	 *
+	 * Signature matches the index AM's amoptions callback so the same helper
+	 * machinery (add_string_reloption, add_int_reloption, etc.) can be used.
+	 */
+	amoptions_function amoptions;
+
+	/*
+	 * Set to true when amoptions is non-NULL and the bytea it returns
+	 * begins with a full "StdRdOptions std;" as its first member (i.e. the
+	 * AM's own reloptions struct is a superset of StdRdOptions, not just a
+	 * layout that happens to share a prefix).  This tells core code that it
+	 * is safe to read StdRdOptions fields directly out of rd_options
+	 * (RelationGetFillFactor, RelationIsUsedAsCatalogTable, ...) for
+	 * relations of this AM, exactly as it would for plain heap.
+	 *
+	 * An AM that sets this must register every StdRdOptions field those
+	 * macros read (fillfactor, toast_tuple_target, user_catalog_table,
+	 * parallel_workers, vacuum_index_cleanup, vacuum_truncate,
+	 * vacuum_max_eager_freeze_failure_rate, autovacuum_enabled) with
+	 * add_reloption_to_kind(), even if it exposes none of them as options
+	 * the AM cares about itself: build_reloptions() only fills in fields
+	 * that are registered for the AM's relopt_kind, so an embedded
+	 * StdRdOptions field the AM never registers is left zeroed rather than
+	 * at that option's real default (0 is not a valid "unset" sentinel for
+	 * several of these fields, e.g. parallel_workers and
+	 * vacuum_max_eager_freeze_failure_rate both use -1).  Registering the
+	 * field via add_reloption_to_kind lets each one pick up its normal
+	 * catalog default instead.
+	 *
+	 * Ignored when amoptions is NULL.
+	 */
+	bool		has_std_options_prefix;
 
 
 	/* ------------------------------------------------------------------------

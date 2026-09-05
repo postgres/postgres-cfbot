@@ -363,11 +363,32 @@ typedef struct StdRdOptions
 #define HEAP_DEFAULT_FILLFACTOR		100
 
 /*
+ * RelationHasStdRdOptions
+ *		Returns true when the relation's rd_options buffer is safe to read
+ *		as StdRdOptions: either it was produced by the standard heap
+ *		reloption parser (the AM has no amoptions callback), or the AM's
+ *		own amoptions callback returns a struct that embeds a full
+ *		StdRdOptions as its first member and says so via
+ *		TableAmRoutine.has_std_options_prefix.  A table access method that
+ *		supplies amoptions without setting that flag owns its rd_options
+ *		layout entirely and is not required to expose StdRdOptions fields;
+ *		macros that read those fields must check this first to avoid
+ *		reading garbage, or past the end of a smaller custom struct.  For
+ *		indexes and other relkinds rd_options is in an AM-specific layout,
+ *		so this returns false for them.
+ *
+ *		Defined as a function (in reloptions.c) rather than a macro
+ *		because the test needs the full TableAmRoutine struct definition,
+ *		which would create an #include cycle if pulled into rel.h.
+ */
+extern bool RelationHasStdRdOptions(Relation relation);
+
+/*
  * RelationGetToastTupleTarget
  *		Returns the relation's toast_tuple_target.  Note multiple eval of argument!
  */
 #define RelationGetToastTupleTarget(relation, defaulttarg) \
-	((relation)->rd_options ? \
+	(RelationHasStdRdOptions(relation) ? \
 	 ((StdRdOptions *) (relation)->rd_options)->toast_tuple_target : (defaulttarg))
 
 /*
@@ -375,7 +396,7 @@ typedef struct StdRdOptions
  *		Returns the relation's fillfactor.  Note multiple eval of argument!
  */
 #define RelationGetFillFactor(relation, defaultff) \
-	((relation)->rd_options ? \
+	(RelationHasStdRdOptions(relation) ? \
 	 ((StdRdOptions *) (relation)->rd_options)->fillfactor : (defaultff))
 
 /*
@@ -398,7 +419,7 @@ typedef struct StdRdOptions
  *		from the pov of logical decoding.  Note multiple eval of argument!
  */
 #define RelationIsUsedAsCatalogTable(relation)	\
-	((relation)->rd_options && \
+	(RelationHasStdRdOptions(relation) && \
 	 ((relation)->rd_rel->relkind == RELKIND_RELATION || \
 	  (relation)->rd_rel->relkind == RELKIND_MATVIEW) ? \
 	 ((StdRdOptions *) (relation)->rd_options)->user_catalog_table : false)
@@ -409,7 +430,7 @@ typedef struct StdRdOptions
  *		Note multiple eval of argument!
  */
 #define RelationGetParallelWorkers(relation, defaultpw) \
-	((relation)->rd_options ? \
+	(RelationHasStdRdOptions(relation) ? \
 	 ((StdRdOptions *) (relation)->rd_options)->parallel_workers : (defaultpw))
 
 /* ViewOptions->check_option values */

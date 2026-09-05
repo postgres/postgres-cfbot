@@ -483,9 +483,11 @@ RelationParseRelOptions(Relation relation, HeapTuple tuple)
 	switch (relation->rd_rel->relkind)
 	{
 		case RELKIND_RELATION:
+		case RELKIND_MATVIEW:
+			amoptsfn = relation->rd_tableam ? relation->rd_tableam->amoptions : NULL;
+			break;
 		case RELKIND_TOASTVALUE:
 		case RELKIND_VIEW:
-		case RELKIND_MATVIEW:
 		case RELKIND_PARTITIONED_TABLE:
 			amoptsfn = NULL;
 			break;
