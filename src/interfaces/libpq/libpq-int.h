@@ -427,6 +427,8 @@ struct pg_conn
 	char	   *ssl_min_protocol_version;	/* minimum TLS protocol version */
 	char	   *ssl_max_protocol_version;	/* maximum TLS protocol version */
 	char	   *target_session_attrs;	/* desired session properties */
+	char	   *require_wal_receiver;	/* require a live WAL receiver on a
+										 * standby? */
 	char	   *require_auth;	/* name of the expected auth method */
 	char	   *load_balance_hosts; /* load balance over hosts */
 	char	   *scram_client_key;	/* base64-encoded SCRAM client key */
@@ -535,6 +537,8 @@ struct pg_conn
 
 	/* Transient state needed while establishing connection */
 	PGTargetServerType target_server_type;	/* desired session properties */
+	bool		wal_receiver_required;	/* decoded value of
+										 * require_wal_receiver */
 	PGLoadBalanceType load_balance_type;	/* desired load balancing
 											 * algorithm */
 	bool		try_next_addr;	/* time to advance to next address/host? */
@@ -548,6 +552,8 @@ struct pg_conn
 	uint8	   *scram_server_key_binary;	/* binary SCRAM server key */
 	ProtocolVersion min_pversion;	/* protocol version to request */
 	ProtocolVersion max_pversion;	/* protocol version to request */
+	bool		wal_receiver_checked;	/* did we already ask this host about
+										 * its WAL receiver? */
 
 	/* Miscellaneous stuff */
 	int			be_pid;			/* PID of backend --- needed for cancels */
