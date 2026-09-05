@@ -16281,6 +16281,27 @@ ATPostAlterTypeCleanup(List **wqueue, AlteredTableInfo *tab, LOCKMODE lockmode)
 	free_object_addresses(objects);
 
 	/*
+	 * This function may be called a second time (once after the ALTER TYPE
+	 * pass, again after the SET EXPRESSION pass). Reset the lists so objects
+	 * already dropped and re-queued here aren't processed again.
+	 */
+	list_free(tab->changedConstraintOids);
+	list_free(tab->changedConstraintDefs);
+	list_free(tab->changedIndexOids);
+	list_free(tab->changedIndexDefs);
+	list_free(tab->changedStatisticsOids);
+	list_free(tab->changedStatisticsDefs);
+
+	tab->changedConstraintOids = NIL;
+	tab->changedConstraintDefs = NIL;
+	tab->changedIndexOids = NIL;
+	tab->changedIndexDefs = NIL;
+	tab->changedStatisticsOids = NIL;
+	tab->changedStatisticsDefs = NIL;
+	tab->replicaIdentityIndex = NULL;
+	tab->clusterOnIndex = NULL;
+
+	/*
 	 * The objects will get recreated during subsequent passes over the work
 	 * queue.
 	 */
