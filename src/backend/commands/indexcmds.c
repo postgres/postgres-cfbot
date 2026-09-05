@@ -25,6 +25,7 @@
 #include "access/tableam.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
+#include "catalog/dependency.h"
 #include "catalog/index.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
@@ -33,6 +34,7 @@
 #include "catalog/pg_collation.h"
 #include "catalog/pg_constraint.h"
 #include "catalog/pg_database.h"
+#include "catalog/pg_extension.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_opclass.h"
@@ -1323,6 +1325,21 @@ DefineIndex(ParseState *pstate,
 	if (stmt->idxcomment != NULL)
 		CreateComments(indexRelationId, RelationRelationId, 0,
 					   stmt->idxcomment);
+
+	if (stmt->idxextensionOids != NIL)
+	{
+		ObjectAddress indexAddress;
+
+		ObjectAddressSet(indexAddress, RelationRelationId, indexRelationId);
+		foreach_oid(extensionOid, stmt->idxextensionOids)
+		{
+			ObjectAddress extensionAddress;
+
+			ObjectAddressSet(extensionAddress, ExtensionRelationId, extensionOid);
+			recordDependencyOn(&indexAddress, &extensionAddress,
+							   DEPENDENCY_AUTO_EXTENSION);
+		}
+	}
 
 	if (partitioned)
 	{

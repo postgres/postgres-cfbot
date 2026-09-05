@@ -1530,6 +1530,20 @@ select conname, obj_description(oid, 'pg_constraint') as desc
 
 -- Don't remove this DROP, it exposes bug #15672
 drop table at_partitioned;
+create table at_reb_dep (id int not null, val int not null);
+create index at_reb_dep_expr on at_reb_dep ((val + 1));
+alter table at_reb_dep add constraint at_reb_dep_key unique (id, val);
+alter index at_reb_dep_expr depends on extension plpgsql;
+alter index at_reb_dep_key depends on extension plpgsql;
+alter table at_reb_dep alter column val type bigint;
+select c.relname, d.deptype, e.extname
+  from pg_depend d join pg_class c on c.oid = d.objid
+    join pg_extension e on e.oid = d.refobjid
+  where d.classid = 'pg_class'::regclass
+    and c.relname in ('at_reb_dep_expr', 'at_reb_dep_key')
+    and d.refclassid = 'pg_extension'::regclass
+  order by c.relname;
+drop table at_reb_dep;
 
 -- disallow recursive containment of row types
 create temp table recur1 (f1 int);
