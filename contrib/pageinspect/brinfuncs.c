@@ -95,6 +95,8 @@ verify_brin_page(bytea *raw_page, uint16 type, const char *strtype)
 {
 	Page		page = get_page_from_raw(raw_page);
 
+	verify_page_header(page);
+
 	if (PageIsNew(page))
 		return page;
 
@@ -232,6 +234,15 @@ brin_page_items(PG_FUNCTION_ARGS)
 			itemId = PageGetItemId(page, offset);
 			if (ItemIdIsUsed(itemId))
 			{
+				/* Check that the line pointer and tuple lie within the page. */
+				if (ItemIdGetOffset(itemId) != MAXALIGN(ItemIdGetOffset(itemId)) ||
+					ItemIdGetLength(itemId) < SizeOfBrinTuple ||
+					ItemIdGetOffset(itemId) + ItemIdGetLength(itemId) > BLCKSZ)
+					ereport(ERROR,
+							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+							 errmsg("invalid line pointer at offset %u in BRIN page",
+									offset)));
+
 				dtup = brin_deform_tuple(bdesc,
 										 (BrinTuple *) PageGetItem(page, itemId),
 										 NULL);
