@@ -439,8 +439,10 @@ ExecCheckTIDVisible(EState *estate,
  * Initialize generated columns handling for a tuple
  *
  * This fills the resultRelInfo's ri_GeneratedExprsI/ri_NumGeneratedNeededI or
- * ri_GeneratedExprsU/ri_NumGeneratedNeededU fields, depending on cmdtype.
- * This is used only for stored generated columns.
+ * ri_GeneratedExprsU/ri_NumGeneratedNeededU fields for stored generated
+ * columns, and ri_VirtualGeneratedExprsI/ri_NumVirtualGeneratedNeededI or
+ * ri_VirtualGeneratedExprsU/ri_NumVirtualGeneratedNeededU fields for virtual
+ * generated columns, depending on cmdtype.
  *
  * If cmdType == CMD_UPDATE, the ri_extraUpdatedCols field is filled too.
  * This is used by both stored and virtual generated columns.
@@ -460,6 +462,8 @@ ExecInitGenerated(ResultRelInfo *resultRelInfo,
 	int			natts = tupdesc->natts;
 	ExprState **ri_GeneratedExprs;
 	int			ri_NumGeneratedNeeded;
+	ExprState **ri_VirtualGeneratedExprs;
+	int			ri_NumVirtualGeneratedNeeded;
 	Bitmapset  *updatedCols;
 	MemoryContext oldContext;
 
@@ -487,6 +491,8 @@ ExecInitGenerated(ResultRelInfo *resultRelInfo,
 
 	ri_GeneratedExprs = palloc0_array(ExprState *, natts);
 	ri_NumGeneratedNeeded = 0;
+	ri_VirtualGeneratedExprs = (ExprState **) palloc0(natts * sizeof(ExprState *));
+	ri_NumVirtualGeneratedNeeded = 0;
 
 	for (int i = 0; i < natts; i++)
 	{
@@ -522,6 +528,11 @@ ExecInitGenerated(ResultRelInfo *resultRelInfo,
 				ri_GeneratedExprs[i] = ExecPrepareExpr(expr, estate);
 				ri_NumGeneratedNeeded++;
 			}
+			else if (attgenerated == ATTRIBUTE_GENERATED_VIRTUAL)
+			{
+				ri_VirtualGeneratedExprs[i] = ExecPrepareExpr(expr, estate);
+				ri_NumVirtualGeneratedNeeded++;
+			}
 
 			/* If UPDATE, mark column in resultRelInfo->ri_extraUpdatedCols */
 			if (cmdtype == CMD_UPDATE)
@@ -538,14 +549,24 @@ ExecInitGenerated(ResultRelInfo *resultRelInfo,
 		ri_GeneratedExprs = NULL;
 	}
 
+	if (ri_NumVirtualGeneratedNeeded == 0)
+	{
+		/* didn't need it after all */
+		pfree(ri_VirtualGeneratedExprs);
+		ri_VirtualGeneratedExprs = NULL;
+	}
+
 	/* Save in appropriate set of fields */
 	if (cmdtype == CMD_UPDATE)
 	{
 		/* Don't call twice */
 		Assert(resultRelInfo->ri_GeneratedExprsU == NULL);
+		Assert(resultRelInfo->ri_VirtualGeneratedExprsU == NULL);
 
 		resultRelInfo->ri_GeneratedExprsU = ri_GeneratedExprs;
 		resultRelInfo->ri_NumGeneratedNeededU = ri_NumGeneratedNeeded;
+		resultRelInfo->ri_VirtualGeneratedExprsU = ri_VirtualGeneratedExprs;
+		resultRelInfo->ri_NumVirtualGeneratedNeededU = ri_NumVirtualGeneratedNeeded;
 
 		resultRelInfo->ri_extraUpdatedCols_valid = true;
 	}
@@ -553,9 +574,12 @@ ExecInitGenerated(ResultRelInfo *resultRelInfo,
 	{
 		/* Don't call twice */
 		Assert(resultRelInfo->ri_GeneratedExprsI == NULL);
+		Assert(resultRelInfo->ri_VirtualGeneratedExprsI == NULL);
 
 		resultRelInfo->ri_GeneratedExprsI = ri_GeneratedExprs;
 		resultRelInfo->ri_NumGeneratedNeededI = ri_NumGeneratedNeeded;
+		resultRelInfo->ri_VirtualGeneratedExprsI = ri_VirtualGeneratedExprs;
+		resultRelInfo->ri_NumVirtualGeneratedNeededI = ri_NumVirtualGeneratedNeeded;
 	}
 
 	MemoryContextSwitchTo(oldContext);
@@ -647,6 +671,85 @@ ExecComputeStoredGenerated(ResultRelInfo *resultRelInfo,
 	memcpy(slot->tts_isnull, nulls, sizeof(*nulls) * natts);
 	ExecStoreVirtualTuple(slot);
 	ExecMaterializeSlot(slot);
+
+	MemoryContextSwitchTo(oldContext);
+}
+
+/*
+ * Compute virtual generated columns for a tuple
+ *
+ * This evaluates the generation expressions for virtual generated columns
+ * and stores the results directly in the slot. Unlike stored generated
+ * columns, these values are not persisted to disk but are computed for
+ * use in constraint checking and error messages.
+ */
+void
+ExecComputeVirtualGenerated(ResultRelInfo *resultRelInfo,
+							EState *estate, TupleTableSlot *slot,
+							CmdType cmdtype)
+{
+	Relation	rel = resultRelInfo->ri_RelationDesc;
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+	int			natts = tupdesc->natts;
+	ExprContext *econtext = GetPerTupleExprContext(estate);
+	ExprState **ri_VirtualGeneratedExprs;
+	MemoryContext oldContext;
+
+	/* We should not be called unless this is true */
+	Assert(tupdesc->constr && tupdesc->constr->has_generated_virtual);
+
+	/*
+	 * Initialize the expressions if we didn't already, and check whether we
+	 * can exit early because nothing needs to be computed.
+	 */
+	if (cmdtype == CMD_UPDATE)
+	{
+		if (resultRelInfo->ri_VirtualGeneratedExprsU == NULL)
+			ExecInitGenerated(resultRelInfo, estate, cmdtype);
+		if (resultRelInfo->ri_NumVirtualGeneratedNeededU == 0)
+			return;
+		ri_VirtualGeneratedExprs = resultRelInfo->ri_VirtualGeneratedExprsU;
+	}
+	else
+	{
+		if (resultRelInfo->ri_VirtualGeneratedExprsI == NULL)
+			ExecInitGenerated(resultRelInfo, estate, cmdtype);
+		if (resultRelInfo->ri_NumVirtualGeneratedNeededI == 0)
+			return;
+		ri_VirtualGeneratedExprs = resultRelInfo->ri_VirtualGeneratedExprsI;
+	}
+
+	oldContext = MemoryContextSwitchTo(GetPerTupleMemoryContext(estate));
+
+	/* Make sure all base column values are available */
+	slot_getallattrs(slot);
+
+	econtext->ecxt_scantuple = slot;
+
+	for (int i = 0; i < natts; i++)
+	{
+		CompactAttribute *attr = TupleDescCompactAttr(tupdesc, i);
+
+		if (ri_VirtualGeneratedExprs[i])
+		{
+			Datum		val;
+			bool		isnull;
+
+			Assert(TupleDescAttr(tupdesc, i)->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL);
+
+			val = ExecEvalExpr(ri_VirtualGeneratedExprs[i], econtext, &isnull);
+
+			/*
+			 * We must make a copy of val as we have no guarantees about where
+			 * memory for a pass-by-reference Datum is located.
+			 */
+			if (!isnull)
+				val = datumCopy(val, attr->attbyval, attr->attlen);
+
+			slot->tts_values[i] = val;
+			slot->tts_isnull[i] = isnull;
+		}
+	}
 
 	MemoryContextSwitchTo(oldContext);
 }
@@ -960,6 +1063,14 @@ ExecInsert(ModifyTableContext *context,
 									   CMD_INSERT);
 
 		/*
+		 * Compute virtual generated columns
+		 */
+		if (resultRelationDesc->rd_att->constr &&
+			resultRelationDesc->rd_att->constr->has_generated_virtual)
+			ExecComputeVirtualGenerated(resultRelInfo, estate, slot,
+										CMD_INSERT);
+
+		/*
 		 * If the FDW supports batching, and batching is requested, accumulate
 		 * rows and insert them in batches. Otherwise use the per-row inserts.
 		 */
@@ -1083,6 +1194,14 @@ ExecInsert(ModifyTableContext *context,
 			resultRelationDesc->rd_att->constr->has_generated_stored)
 			ExecComputeStoredGenerated(resultRelInfo, estate, slot,
 									   CMD_INSERT);
+
+		/*
+		 * Compute virtual generated columns
+		 */
+		if (resultRelationDesc->rd_att->constr &&
+			resultRelationDesc->rd_att->constr->has_generated_virtual)
+			ExecComputeVirtualGenerated(resultRelInfo, estate, slot,
+										CMD_INSERT);
 
 		/*
 		 * Check any RLS WITH CHECK policies.
@@ -2439,6 +2558,14 @@ ExecUpdatePrepareSlot(ResultRelInfo *resultRelInfo,
 		resultRelationDesc->rd_att->constr->has_generated_stored)
 		ExecComputeStoredGenerated(resultRelInfo, estate, slot,
 								   CMD_UPDATE);
+
+	/*
+	 * Compute virtual generated columns
+	 */
+	if (resultRelationDesc->rd_att->constr &&
+		resultRelationDesc->rd_att->constr->has_generated_virtual)
+		ExecComputeVirtualGenerated(resultRelInfo, estate, slot,
+									CMD_UPDATE);
 }
 
 /*
