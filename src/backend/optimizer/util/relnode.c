@@ -1295,6 +1295,7 @@ build_joinrel_tlist(PlannerInfo *root, RelOptInfo *joinrel,
 	foreach(vars, input_rel->reltarget->exprs)
 	{
 		Var		   *var = (Var *) lfirst(vars);
+		RelOptInfo *baserel = NULL;
 
 		/*
 		 * For a PlaceHolderVar, we have to look up the PlaceHolderInfo.
@@ -1366,28 +1367,45 @@ build_joinrel_tlist(PlannerInfo *root, RelOptInfo *joinrel,
 		}
 		else
 		{
-			RelOptInfo *baserel;
-			int			ndx;
-
 			/* Get the Var's original base rel */
 			baserel = find_base_rel(root, var->varno);
 
-			/* Is it still needed above this joinrel? */
-			ndx = var->varattno - baserel->min_attr;
-			if (!bms_nonempty_difference(baserel->attr_needed[ndx], relids))
-				continue;		/* nope, skip it */
+			if (var->varattno > baserel->max_attr)
+			{
+				/*
+				 * An out-of-range attno (> max_attr) is an FDW row-identity
+				 * pseudo-column (postgres_fdw's remote table OID for
+				 * UPDATE/DELETE; see add_vars_to_targetlist()) with no
+				 * attr_needed[]/attr_widths[] slot; like a ROWID_VAR, always
+				 * needed above every join.
+				 */
+				Assert(baserel->fdwroutine != NULL);
+				tuple_width += get_typavgwidth(var->vartype, var->vartypmod);
+			}
+			else
+			{
+				int			ndx;
 
-			/* Update reltarget width estimate from baserel's attr_widths */
-			tuple_width += baserel->attr_widths[ndx];
+				/* Is it still needed above this joinrel? */
+				ndx = var->varattno - baserel->min_attr;
+				if (!bms_nonempty_difference(baserel->attr_needed[ndx], relids))
+					continue;	/* nope, skip it */
+
+				/* Update reltarget width estimate from baserel's attr_widths */
+				tuple_width += baserel->attr_widths[ndx];
+			}
 		}
 
 		/*
 		 * Add the Var to the output.  If this join potentially nulls this
 		 * input, we have to update the Var's varnullingrels, which means
 		 * making a copy.  But note that we don't ever add nullingrel bits to
-		 * row identity Vars (cf. comments in setrefs.c).
+		 * row identity Vars (cf. comments in setrefs.c); that includes the
+		 * FDW row-identity pseudo-columns handled just above, which have an
+		 * out-of-range attribute number.
 		 */
-		if (can_null && var->varno != ROWID_VAR)
+		if (can_null && var->varno != ROWID_VAR &&
+			var->varattno <= baserel->max_attr)
 		{
 			var = copyObject(var);
 			/* See comments above to understand this logic */
