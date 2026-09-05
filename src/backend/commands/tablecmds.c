@@ -30,6 +30,7 @@
 #include "access/xlog.h"
 #include "access/xloginsert.h"
 #include "catalog/catalog.h"
+#include "catalog/dependency.h"
 #include "catalog/heap.h"
 #include "catalog/index.h"
 #include "catalog/namespace.h"
@@ -16377,6 +16378,9 @@ ATPostAlterTypeParse(Oid oldId, Oid oldRelId, Oid refRelId, Oid ownerId,
 			stmt->reset_default_tblspc = true;
 			/* keep the index's comment */
 			stmt->idxcomment = GetComment(oldId, RelationRelationId, 0);
+			/* keep any auto-extension dependencies */
+			stmt->idxextensionOids =
+				getAutoExtensionsOfObject(RelationRelationId, oldId);
 
 			newcmd = makeNode(AlterTableCmd);
 			newcmd->subtype = AT_ReAddIndex;
@@ -16406,6 +16410,9 @@ ATPostAlterTypeParse(Oid oldId, Oid oldRelId, Oid refRelId, Oid ownerId,
 					/* keep any comment on the index */
 					indstmt->idxcomment = GetComment(indoid,
 													 RelationRelationId, 0);
+					/* keep any auto-extension dependencies */
+					indstmt->idxextensionOids =
+						getAutoExtensionsOfObject(RelationRelationId, indoid);
 					indstmt->reset_default_tblspc = true;
 
 					cmd->subtype = AT_ReAddIndex;

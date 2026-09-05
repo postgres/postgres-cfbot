@@ -3613,6 +3613,7 @@ typedef struct IndexStmt
 	Node	   *whereClause;	/* qualification (partial-index predicate) */
 	List	   *excludeOpNames; /* exclusion operator names, or NIL if none */
 	char	   *idxcomment;		/* comment to apply to index, or NULL */
+	List	   *idxextensionOids;	/* extensions to depend on */
 	Oid			indexOid;		/* OID of an existing index, if any */
 	RelFileNumber oldNumber;	/* relfilenumber of existing storage, if any */
 	SubTransactionId oldCreateSubid;	/* rd_createSubid of oldNumber */
