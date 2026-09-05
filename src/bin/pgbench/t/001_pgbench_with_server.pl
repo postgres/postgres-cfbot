@@ -164,6 +164,35 @@ $node->pgbench(
 # Check data state, after server-side data generation.
 check_data_state($node, 'server-side');
 
+# Test parallel initialization with range partitions (client-side generation).
+# Use -j to control the number of worker threads; partitions must be >= -j.
+$node->pgbench(
+	'-i -j 2 -s 1 --partitions=4 --partition-method=range',
+	0,
+	[qr{^$}],
+	[
+		qr{creating tables},
+		qr{creating 4 partitions},
+		qr{loading pgbench_accounts with 2 threads},
+		qr{partition \d loaded by thread \d \(in \d+\.\d\d s\)},
+		qr{vacuuming},
+		qr{creating primary keys},
+		qr{done in \d+\.\d\d s }
+	],
+	'pgbench parallel initialization with range partitions');
+
+check_data_state($node, 'parallel-range-partitions');
+
+# Uneven distribution: 5 partitions across 2 threads (3 + 2).
+$node->pgbench(
+	'-i -j 2 -s 1 --partitions=5 --partition-method=range',
+	0,
+	[qr{^$}],
+	[ qr{loading pgbench_accounts with 2 threads}, qr{done in \d+\.\d\d s } ],
+	'pgbench parallel init with uneven partition distribution');
+
+check_data_state($node, 'parallel-range-uneven');
+
 # Run all builtin scripts, for a few transactions each
 $node->pgbench(
 	'--transactions=5 -Dfoo=bla --client=2 --protocol=simple --builtin=t'
