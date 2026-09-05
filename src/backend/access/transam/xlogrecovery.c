@@ -97,6 +97,9 @@ char	   *recoveryTargetName;
 XLogRecPtr	recoveryTargetLSN;
 int			recovery_min_apply_delay = 0;
 
+/* Pause recovery before invalidating local logical replication slots. */
+bool		recovery_pause_on_logical_slot_conflict = false;
+
 /* options formerly taken from recovery.conf for XLOG streaming */
 char	   *PrimaryConnInfo = NULL;
 char	   *PrimarySlotName = NULL;
@@ -1652,6 +1655,7 @@ PerformWalRecovery(void)
 	XLogRecoveryCtl->recoveryLastXTime = 0;
 	XLogRecoveryCtl->currentChunkStartTime = 0;
 	XLogRecoveryCtl->recoveryPauseState = RECOVERY_NOT_PAUSED;
+	XLogRecoveryCtl->recoveryPauseGeneration = 0;
 	SpinLockRelease(&XLogRecoveryCtl->info_lck);
 
 	/* Also ensure XLogReceiptTime has a sane value */
@@ -2932,28 +2936,7 @@ recoveryPausesHere(bool endOfRecovery)
 				(errmsg("recovery has paused"),
 				 errhint("Execute pg_wal_replay_resume() to continue.")));
 
-	/* loop until recoveryPauseState is set to RECOVERY_NOT_PAUSED */
-	while (GetRecoveryPauseState() != RECOVERY_NOT_PAUSED)
-	{
-		ProcessStartupProcInterrupts();
-		if (CheckForStandbyTrigger())
-			return;
-
-		/*
-		 * If recovery pause is requested then set it paused.  While we are in
-		 * the loop, user might resume and pause again so set this every time.
-		 */
-		ConfirmRecoveryPaused();
-
-		/*
-		 * We wait on a condition variable that will wake us as soon as the
-		 * pause ends, but we use a timeout so we can check the above exit
-		 * condition periodically too.
-		 */
-		ConditionVariableTimedSleep(&XLogRecoveryCtl->recoveryNotPausedCV, 1000,
-									WAIT_EVENT_RECOVERY_PAUSE);
-	}
-	ConditionVariableCancelSleep();
+	(void) WaitForRecoveryToResume(NULL, NULL);
 }
 
 /*
@@ -3070,27 +3053,68 @@ GetRecoveryPauseState(void)
 }
 
 /*
- * Set the recovery pause state.
+ * Set the recovery pause state.  A pause request returns a token if it
+ * introduced the pause, or zero if recovery was already paused.
  *
  * If recovery pause is requested then sets the recovery pause state to
  * 'pause requested' if it is not already 'paused'.  Otherwise, sets it
  * to 'not paused' to resume the recovery.  The recovery pause will be
  * confirmed by the ConfirmRecoveryPaused.
  */
-void
+uint64
 SetRecoveryPause(bool recoveryPause)
 {
+	uint64		pause_token = 0;
+
 	SpinLockAcquire(&XLogRecoveryCtl->info_lck);
 
 	if (!recoveryPause)
 		XLogRecoveryCtl->recoveryPauseState = RECOVERY_NOT_PAUSED;
-	else if (XLogRecoveryCtl->recoveryPauseState == RECOVERY_NOT_PAUSED)
-		XLogRecoveryCtl->recoveryPauseState = RECOVERY_PAUSE_REQUESTED;
+	else
+	{
+		XLogRecoveryCtl->recoveryPauseGeneration++;
+		if (XLogRecoveryCtl->recoveryPauseGeneration == 0)
+			XLogRecoveryCtl->recoveryPauseGeneration++;
+
+		if (XLogRecoveryCtl->recoveryPauseState == RECOVERY_NOT_PAUSED)
+		{
+			XLogRecoveryCtl->recoveryPauseState = RECOVERY_PAUSE_REQUESTED;
+			pause_token = XLogRecoveryCtl->recoveryPauseGeneration;
+		}
+	}
 
 	SpinLockRelease(&XLogRecoveryCtl->info_lck);
 
 	if (!recoveryPause)
 		ConditionVariableBroadcast(&XLogRecoveryCtl->recoveryNotPausedCV);
+
+	return pause_token;
+}
+
+/*
+ * Resume recovery if no later pause request superseded pause_token.  Return
+ * true if recovery was already unpaused or this call resumed it.
+ */
+bool
+ResumeRecoveryPauseIfUnchanged(uint64 pause_token)
+{
+	bool		resumed = false;
+
+	SpinLockAcquire(&XLogRecoveryCtl->info_lck);
+	if (XLogRecoveryCtl->recoveryPauseState == RECOVERY_NOT_PAUSED)
+		resumed = true;
+	else if (pause_token != 0 &&
+		XLogRecoveryCtl->recoveryPauseGeneration == pause_token)
+	{
+		XLogRecoveryCtl->recoveryPauseState = RECOVERY_NOT_PAUSED;
+		resumed = true;
+	}
+	SpinLockRelease(&XLogRecoveryCtl->info_lck);
+
+	if (resumed)
+		ConditionVariableBroadcast(&XLogRecoveryCtl->recoveryNotPausedCV);
+
+	return resumed;
 }
 
 /*
@@ -3105,6 +3129,46 @@ ConfirmRecoveryPaused(void)
 	if (XLogRecoveryCtl->recoveryPauseState == RECOVERY_PAUSE_REQUESTED)
 		XLogRecoveryCtl->recoveryPauseState = RECOVERY_PAUSED;
 	SpinLockRelease(&XLogRecoveryCtl->info_lck);
+}
+
+/*
+ * Wait until shared recoveryPauseState is set to RECOVERY_NOT_PAUSED, a
+ * promotion is requested, or the optional predicate permits auto-resume.
+ * Return true only in the last case.
+ */
+bool
+WaitForRecoveryToResume(RecoveryPauseResumePredicate predicate, void *arg)
+{
+	bool		auto_resume = false;
+
+	Assert(AmStartupProcess() || !IsUnderPostmaster);
+
+	while (GetRecoveryPauseState() != RECOVERY_NOT_PAUSED)
+	{
+		ProcessStartupProcInterrupts();
+		if (CheckForStandbyTrigger())
+			break;
+		if (predicate != NULL && predicate(arg))
+		{
+			auto_resume = true;
+			break;
+		}
+
+		/*
+		 * While we are in the loop, a user might resume and pause again, so
+		 * confirm the pause every time.
+		 */
+		ConfirmRecoveryPaused();
+
+		/*
+		 * The timeout lets us check for interrupts and promotion requests.
+		 */
+		ConditionVariableTimedSleep(&XLogRecoveryCtl->recoveryNotPausedCV, 1000,
+									WAIT_EVENT_RECOVERY_PAUSE);
+	}
+	ConditionVariableCancelSleep();
+
+	return auto_resume;
 }
 
 

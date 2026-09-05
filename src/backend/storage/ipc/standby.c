@@ -63,6 +63,12 @@ typedef struct RecoveryLockXidEntry
 	struct RecoveryLockEntry *head; /* chain head */
 } RecoveryLockXidEntry;
 
+typedef struct LogicalSlotConflict
+{
+	Oid			dboid;
+	TransactionId snapshotConflictHorizon;
+}			LogicalSlotConflict;
+
 static HTAB *RecoveryLockHash = NULL;
 static HTAB *RecoveryLockXidHash = NULL;
 
@@ -79,6 +85,9 @@ static void SendRecoveryConflictWithBufferPin(RecoveryConflictReason reason);
 static XLogRecPtr LogCurrentRunningXacts(RunningTransactions CurrRunningXacts);
 static void LogAccessExclusiveLocks(int nlocks, xl_standby_lock *locks);
 static const char *get_recovery_conflict_desc(RecoveryConflictReason reason);
+static void MaybePauseOnLogicalSlotConflict(Oid dboid,
+											TransactionId snapshotConflictHorizon);
+static bool LogicalSlotConflictHasResolved(void *arg);
 
 /*
  * InitRecoveryTransactionEnvironment
@@ -503,8 +512,68 @@ ResolveRecoveryConflictWithSnapshot(TransactionId snapshotConflictHorizon,
 	 * reached, e.g. due to using a physical replication slot.
 	 */
 	if (IsLogicalDecodingEnabled() && isCatalogRel)
+	{
+		MaybePauseOnLogicalSlotConflict(locator.dbOid, snapshotConflictHorizon);
 		InvalidateObsoleteReplicationSlots(RS_INVAL_HORIZON, 0, locator.dbOid,
 										   snapshotConflictHorizon);
+	}
+}
+
+/*
+ * Pause before replay invalidates a local logical replication slot.
+ *
+ * The slot owner can consume the WAL that has already been replayed.  Logical
+ * decoding will then advance the slot's effective xmin horizons if it is safe
+ * to do so.  On resume, InvalidateObsoleteReplicationSlots() rechecks the
+ * current horizons and either leaves the slot intact or invalidates it as
+ * usual.  We must not advance the horizons here: confirmed_flush alone does
+ * not prove that logical decoding no longer needs older catalog rows.
+ *
+ * Do not pause before Hot Standby is active, since no client could connect to
+ * resolve the conflict.  The normal invalidation behavior is retained then.
+ */
+static void
+MaybePauseOnLogicalSlotConflict(Oid dboid, TransactionId snapshotConflictHorizon)
+{
+	LogicalSlotConflict conflict;
+	bool		auto_resume;
+	uint64		pause_token;
+
+	if (!recovery_pause_on_logical_slot_conflict || !HotStandbyActive())
+		return;
+
+	if (!ReplicationSlotsHaveLogicalHorizonConflict(dboid,
+													snapshotConflictHorizon))
+		return;
+
+	ereport(LOG,
+			(errmsg("recovery has paused to avoid invalidating a logical replication slot"),
+			 errdetail("WAL replay at %X/%X has a snapshot conflict horizon of %u.",
+					   LSN_FORMAT_ARGS(GetXLogReplayRecPtr(NULL)),
+					   snapshotConflictHorizon),
+			 errhint("Allow the affected slot to advance its xmin horizons, drop it, or accept its invalidation, then execute pg_wal_replay_resume().")));
+
+	conflict.dboid = dboid;
+	conflict.snapshotConflictHorizon = snapshotConflictHorizon;
+
+	pause_token = SetRecoveryPause(true);
+	auto_resume = WaitForRecoveryToResume(LogicalSlotConflictHasResolved,
+										  &conflict);
+
+	/* Do not override an explicit pause requested before or during our wait. */
+	if (auto_resume && !ResumeRecoveryPauseIfUnchanged(pause_token))
+		ereport(LOG,
+				(errmsg("recovery remains paused due to a separate pause request")));
+}
+
+/* Return true once no locally consumable slot still blocks replay. */
+static bool
+LogicalSlotConflictHasResolved(void *arg)
+{
+	LogicalSlotConflict *conflict = arg;
+
+	return !ReplicationSlotsHaveLogicalHorizonConflict(conflict->dboid,
+													   conflict->snapshotConflictHorizon);
 }
 
 /*
