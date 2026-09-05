@@ -265,6 +265,44 @@ multirange_gist_compress(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(entry);
 }
 
+/*
+ * Check if given multirange might contain another multirange by the union
+ * range of latter.  We can't consider multirange gaps as union range don't
+ * contain them.  But the union range must contain another union range.
+ */
+static bool
+multirange_contains_union_range(TypeCacheEntry *rangetyp,
+								const MultirangeType *mr,
+								const RangeType *r)
+{
+	RangeBound	lower1,
+				upper1,
+				lower2,
+				upper2,
+				tmp;
+	bool		empty;
+
+	/*
+	 * Every multirange contains an infinite number of empty multiranges, even
+	 * an empty one.
+	 */
+	if (RangeIsEmpty(r))
+		return true;
+
+	if (MultirangeIsEmpty(mr))
+		return false;
+
+	/* Multirange might contain multirange if union range contains union range */
+	range_deserialize(rangetyp, r, &lower2, &upper2, &empty);
+	Assert(!empty);
+	multirange_get_bounds(rangetyp, mr, 0, &lower1, &tmp);
+	multirange_get_bounds(rangetyp, mr, mr->rangeCount - 1, &tmp, &upper1);
+
+	return (range_cmp_bounds(rangetyp, &lower1, &lower2) <= 0 &&
+			range_cmp_bounds(rangetyp, &upper1, &upper2) >= 0);
+}
+
+
 /* GiST query consistency check for multiranges */
 Datum
 multirange_gist_consistent(PG_FUNCTION_ARGS)
@@ -295,8 +333,22 @@ multirange_gist_consistent(PG_FUNCTION_ARGS)
 	if (GIST_LEAF(entry))
 	{
 		if (!OidIsValid(subtype) || subtype == ANYMULTIRANGEOID)
-			result = range_gist_consistent_leaf_multirange(typcache, strategy, key,
-														   DatumGetMultirangeTypeP(query));
+		{
+			/*
+			 * The union range is not necessarily contained by a multirange
+			 * that contains the original multirange, because it also covers
+			 * the gaps in the original multirange.  Use a special test
+			 * function for this case.
+			 */
+			if (strategy != RANGESTRAT_CONTAINED_BY)
+				result = range_gist_consistent_leaf_multirange(typcache, strategy,
+															   key,
+															   DatumGetMultirangeTypeP(query));
+			else
+				result = multirange_contains_union_range(typcache,
+														 DatumGetMultirangeTypeP(query),
+														 key);
+		}
 		else if (subtype == ANYRANGEOID)
 			result = range_gist_consistent_leaf_range(typcache, strategy, key,
 													  DatumGetRangeTypeP(query));
