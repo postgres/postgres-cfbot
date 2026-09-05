@@ -21,6 +21,7 @@
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_operator.h"
+#include "catalog/pg_temp_statistic.h"
 #include "nodes/makefuncs.h"
 #include "statistics/statistics.h"
 #include "statistics/stat_utils.h"
@@ -217,6 +218,7 @@ attribute_statistics_update_internal(Oid reloid,
 									 bool inherited, FunctionCallInfo fcinfo)
 {
 	Relation	starel;
+	SysCacheIdentifier cacheId;
 	HeapTuple	statup;
 
 	Oid			atttypid = InvalidOid;
@@ -349,9 +351,18 @@ attribute_statistics_update_internal(Oid reloid,
 
 	fmgr_info(F_ARRAY_IN, &array_in_fn);
 
-	starel = table_open(StatisticRelationId, RowExclusiveLock);
+	if (rel_is_global_temp(reloid))
+	{
+		starel = table_open(TempStatisticRelationId, RowExclusiveLock);
+		cacheId = TEMPSTATRELATTINH;
+	}
+	else
+	{
+		starel = table_open(StatisticRelationId, RowExclusiveLock);
+		cacheId = STATRELATTINH;
+	}
 
-	statup = SearchSysCache3(STATRELATTINH, ObjectIdGetDatum(reloid), Int16GetDatum(attnum), BoolGetDatum(inherited));
+	statup = SearchSysCache3(cacheId, ObjectIdGetDatum(reloid), Int16GetDatum(attnum), BoolGetDatum(inherited));
 
 	/* initialize from existing tuple if exists */
 	if (HeapTupleIsValid(statup))
@@ -593,12 +604,24 @@ upsert_pg_statistic(Relation starel, HeapTuple oldtup,
 static bool
 delete_pg_statistic(Oid reloid, AttrNumber attnum, bool stainherit)
 {
-	Relation	sd = table_open(StatisticRelationId, RowExclusiveLock);
+	Relation	sd;
 	HeapTuple	oldtup;
 	bool		result = false;
+	SysCacheIdentifier cacheId;
+
+	if (rel_is_global_temp(reloid))
+	{
+		sd = table_open(TempStatisticRelationId, RowExclusiveLock);
+		cacheId = TEMPSTATRELATTINH;
+	}
+	else
+	{
+		sd = table_open(StatisticRelationId, RowExclusiveLock);
+		cacheId = STATRELATTINH;
+	}
 
 	/* Is there already a pg_statistic tuple for this attribute? */
-	oldtup = SearchSysCache3(STATRELATTINH,
+	oldtup = SearchSysCache3(cacheId,
 							 ObjectIdGetDatum(reloid),
 							 Int16GetDatum(attnum),
 							 BoolGetDatum(stainherit));

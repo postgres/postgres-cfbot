@@ -1151,7 +1151,7 @@ typedef struct BTOptions
 /*
  * external entry points for btree, in nbtree.c
  */
-extern void btbuildempty(Relation index);
+extern void btbuildempty(Relation index, ForkNumber forknum);
 extern bool btinsert(Relation rel, Datum *values, bool *isnull,
 					 ItemPointer ht_ctid, Relation heapRel,
 					 IndexUniqueCheck checkUnique,

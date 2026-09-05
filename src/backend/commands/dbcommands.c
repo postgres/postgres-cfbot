@@ -411,11 +411,13 @@ ScanSourceDatabasePgClassTuple(HeapTupleData *tuple, Oid tbid, Oid dbid,
 	 * are inaccessible outside of the session that created them, which must
 	 * be gone already, and couldn't connect to a different database if it
 	 * still existed. autovacuum will eventually remove the pg_class entries
-	 * as well.
+	 * as well. Likewise, global temporary relations don't need to be copied,
+	 * though their pg_class entries never go away.
 	 */
 	if (classForm->reltablespace == GLOBALTABLESPACE_OID ||
 		!RELKIND_HAS_STORAGE(classForm->relkind) ||
-		classForm->relpersistence == RELPERSISTENCE_TEMP)
+		classForm->relpersistence == RELPERSISTENCE_TEMP ||
+		classForm->relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
 		return NULL;
 
 	/*
@@ -445,7 +447,8 @@ ScanSourceDatabasePgClassTuple(HeapTupleData *tuple, Oid tbid, Oid dbid,
 	relinfo->reloid = classForm->oid;
 
 	/* Temporary relations were rejected above. */
-	Assert(classForm->relpersistence != RELPERSISTENCE_TEMP);
+	Assert(classForm->relpersistence != RELPERSISTENCE_TEMP &&
+		   classForm->relpersistence != RELPERSISTENCE_GLOBAL_TEMP);
 	relinfo->permanent =
 		(classForm->relpersistence == RELPERSISTENCE_PERMANENT) ? true : false;
 

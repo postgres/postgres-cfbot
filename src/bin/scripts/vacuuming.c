@@ -630,7 +630,9 @@ retrieve_objects(PGconn *conn, vacuumingOptions *vacopts,
 	 */
 	appendPQExpBufferStr(&catalog_query,
 						 " WHERE c.relpersistence OPERATOR(pg_catalog.!=) "
-						 CppAsString2(RELPERSISTENCE_TEMP) "\n");
+						 CppAsString2(RELPERSISTENCE_TEMP)
+						 "\nAND c.relpersistence OPERATOR(pg_catalog.!=) "
+						 CppAsString2(RELPERSISTENCE_GLOBAL_TEMP) "\n");
 
 	/*
 	 * Used to match the tables or schemas listed by the user, for the WHERE

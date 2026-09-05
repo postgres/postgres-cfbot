@@ -1319,10 +1319,14 @@ static const pgsql_thing_t words_after_create[] = {
 	{"FOREIGN DATA WRAPPER", NULL, NULL, NULL},
 	{"FOREIGN TABLE", NULL, NULL, NULL},
 	{"FUNCTION", NULL, NULL, Query_for_list_of_functions},
+	{"GLOBAL", NULL, NULL, NULL, NULL, THING_NO_DROP | THING_NO_ALTER}, /* for CREATE GLOBAL
+																		 * TEMP TABLE ... */
 	{"GROUP", Query_for_list_of_roles},
 	{"INDEX", NULL, NULL, &Query_for_list_of_indexes},
 	{"LANGUAGE", Query_for_list_of_languages},
 	{"LARGE OBJECT", NULL, NULL, NULL, NULL, THING_NO_CREATE | THING_NO_DROP},
+	{"LOCAL", NULL, NULL, NULL, NULL, THING_NO_DROP | THING_NO_ALTER},	/* for CREATE LOCAL TEMP
+																		 * TABLE ... */
 	{"MATERIALIZED VIEW", NULL, NULL, &Query_for_list_of_matviews},
 	{"OPERATOR", NULL, NULL, NULL}, /* Querying for this is probably not such
 									 * a good idea. */
@@ -3809,14 +3813,17 @@ match_previous_words(int pattern_id,
 
 /* CREATE SEQUENCE --- is allowed inside CREATE SCHEMA, so use TailMatches */
 	else if (TailMatches("CREATE", "SEQUENCE", MatchAny) ||
-			 TailMatches("CREATE", "TEMP|TEMPORARY", "SEQUENCE", MatchAny))
+			 TailMatches("CREATE", "TEMP|TEMPORARY", "SEQUENCE", MatchAny) ||
+			 TailMatches("CREATE", "GLOBAL|LOCAL", "TEMP|TEMPORARY", "SEQUENCE", MatchAny))
 		COMPLETE_WITH("AS", "INCREMENT BY", "MINVALUE", "MAXVALUE", "NO",
 					  "CACHE", "CYCLE", "OWNED BY", "START WITH");
 	else if (TailMatches("CREATE", "SEQUENCE", MatchAny, "AS") ||
-			 TailMatches("CREATE", "TEMP|TEMPORARY", "SEQUENCE", MatchAny, "AS"))
+			 TailMatches("CREATE", "TEMP|TEMPORARY", "SEQUENCE", MatchAny, "AS") ||
+			 TailMatches("CREATE", "GLOBAL|LOCAL", "TEMP|TEMPORARY", "SEQUENCE", MatchAny, "AS"))
 		COMPLETE_WITH_CS("smallint", "integer", "bigint");
 	else if (TailMatches("CREATE", "SEQUENCE", MatchAny, "NO") ||
-			 TailMatches("CREATE", "TEMP|TEMPORARY", "SEQUENCE", MatchAny, "NO"))
+			 TailMatches("CREATE", "TEMP|TEMPORARY", "SEQUENCE", MatchAny, "NO") ||
+			 TailMatches("CREATE", "GLOBAL|LOCAL", "TEMP|TEMPORARY", "SEQUENCE", MatchAny, "NO"))
 		COMPLETE_WITH("MINVALUE", "MAXVALUE", "CYCLE");
 
 /* CREATE SERVER <name> */
@@ -3834,8 +3841,19 @@ match_previous_words(int pattern_id,
 		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_tables);
 
 /* CREATE TABLE --- is allowed inside CREATE SCHEMA, so use TailMatches */
-	/* Complete "CREATE TEMP/TEMPORARY" with the possible temp objects */
-	else if (TailMatches("CREATE", "TEMP|TEMPORARY"))
+	/* Complete "CREATE GLOBAL|LOCAL" with TEMP or TEMPORARY */
+	else if (TailMatches("CREATE", "GLOBAL|LOCAL"))
+		COMPLETE_WITH("TEMP", "TEMPORARY");
+	/* Complete "CREATE GLOBAL TEMP/TEMPORARY" with SEQUENCE or TABLE */
+	else if (TailMatches("CREATE", "GLOBAL", "TEMP|TEMPORARY"))
+		COMPLETE_WITH("SEQUENCE", "TABLE");
+
+	/*
+	 * Complete "CREATE [ LOCAL ] TEMP/TEMPORARY" with SEQUENCE, TABLE, or
+	 * VIEW.
+	 */
+	else if (TailMatches("CREATE", "TEMP|TEMPORARY") ||
+			 TailMatches("CREATE", "LOCAL", "TEMP|TEMPORARY"))
 		COMPLETE_WITH("SEQUENCE", "TABLE", "VIEW");
 	/* Complete "CREATE UNLOGGED" with TABLE or SEQUENCE */
 	else if (TailMatches("CREATE", "UNLOGGED"))
@@ -3851,36 +3869,47 @@ match_previous_words(int pattern_id,
 		COMPLETE_WITH("FOR VALUES", "DEFAULT");
 	/* Complete CREATE TABLE <name> with '(', AS, OF or PARTITION OF */
 	else if (TailMatches("CREATE", "TABLE", MatchAny) ||
-			 TailMatches("CREATE", "TEMP|TEMPORARY|UNLOGGED", "TABLE", MatchAny))
+			 TailMatches("CREATE", "TEMP|TEMPORARY|UNLOGGED", "TABLE", MatchAny) ||
+			 TailMatches("CREATE", "GLOBAL|LOCAL", "TEMP|TEMPORARY", "TABLE", MatchAny))
 		COMPLETE_WITH("(", "AS", "OF", "PARTITION OF");
 	/* Complete CREATE TABLE <name> OF with list of composite types */
 	else if (TailMatches("CREATE", "TABLE", MatchAny, "OF") ||
-			 TailMatches("CREATE", "TEMP|TEMPORARY|UNLOGGED", "TABLE", MatchAny, "OF"))
+			 TailMatches("CREATE", "TEMP|TEMPORARY|UNLOGGED", "TABLE", MatchAny, "OF") ||
+			 TailMatches("CREATE", "GLOBAL|LOCAL", "TEMP|TEMPORARY", "TABLE", MatchAny, "OF"))
 		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_composite_datatypes);
 	/* Complete CREATE TABLE <name> [ (...) ] AS with list of keywords */
 	else if (TailMatches("CREATE", "TABLE", MatchAny, "AS") ||
 			 TailMatches("CREATE", "TABLE", MatchAny, "(*)", "AS") ||
 			 TailMatches("CREATE", "TEMP|TEMPORARY|UNLOGGED", "TABLE", MatchAny, "AS") ||
-			 TailMatches("CREATE", "TEMP|TEMPORARY|UNLOGGED", "TABLE", MatchAny, "(*)", "AS"))
+			 TailMatches("CREATE", "TEMP|TEMPORARY|UNLOGGED", "TABLE", MatchAny, "(*)", "AS") ||
+			 TailMatches("CREATE", "GLOBAL|LOCAL", "TEMP|TEMPORARY", "TABLE", MatchAny, "AS") ||
+			 TailMatches("CREATE", "GLOBAL|LOCAL", "TEMP|TEMPORARY", "TABLE", MatchAny, "(*)", "AS"))
 		COMPLETE_WITH("EXECUTE", "SELECT", "TABLE", "VALUES", "WITH");
 	/* Complete CREATE TABLE name (...) with supported options */
 	else if (TailMatches("CREATE", "TABLE", MatchAny, "(*)"))
 		COMPLETE_WITH("AS", "INHERITS (", "PARTITION BY", "USING", "TABLESPACE", "WITH (");
 	else if (TailMatches("CREATE", "UNLOGGED", "TABLE", MatchAny, "(*)"))
 		COMPLETE_WITH("AS", "INHERITS (", "USING", "TABLESPACE", "WITH (");
-	else if (TailMatches("CREATE", "TEMP|TEMPORARY", "TABLE", MatchAny, "(*)"))
+	else if (TailMatches("CREATE", "TEMP|TEMPORARY", "TABLE", MatchAny, "(*)") ||
+			 TailMatches("CREATE", "GLOBAL|LOCAL", "TEMP|TEMPORARY", "TABLE", MatchAny, "(*)"))
 		COMPLETE_WITH("AS", "INHERITS (", "ON COMMIT", "PARTITION BY", "USING",
 					  "TABLESPACE", "WITH (");
 	/* Complete CREATE TABLE (...) USING with table access methods */
 	else if (TailMatches("CREATE", "TABLE", MatchAny, "(*)", "USING") ||
-			 TailMatches("CREATE", "TEMP|TEMPORARY|UNLOGGED", "TABLE", MatchAny, "(*)", "USING"))
+			 TailMatches("CREATE", "TEMP|TEMPORARY|UNLOGGED", "TABLE", MatchAny, "(*)", "USING") ||
+			 TailMatches("CREATE", "GLOBAL|LOCAL", "TEMP|TEMPORARY", "TABLE", MatchAny, "(*)", "USING"))
 		COMPLETE_WITH_QUERY(Query_for_list_of_table_access_methods);
 	/* Complete CREATE TABLE (...) WITH with storage parameters */
 	else if (TailMatches("CREATE", "TABLE", MatchAny, "(*)", "WITH", "(") ||
-			 TailMatches("CREATE", "TEMP|TEMPORARY|UNLOGGED", "TABLE", MatchAny, "(*)", "WITH", "("))
+			 TailMatches("CREATE", "TEMP|TEMPORARY|UNLOGGED", "TABLE", MatchAny, "(*)", "WITH", "(") ||
+			 TailMatches("CREATE", "GLOBAL|LOCAL", "TEMP|TEMPORARY", "TABLE", MatchAny, "(*)", "WITH", "("))
 		COMPLETE_WITH_LIST(table_storage_parameters);
-	/* Complete CREATE TABLE ON COMMIT with actions */
-	else if (TailMatches("CREATE", "TEMP|TEMPORARY", "TABLE", MatchAny, "(*)", "ON", "COMMIT"))
+	/* Complete CREATE GLOBAL TEMP TABLE ON COMMIT with actions */
+	else if (TailMatches("CREATE", "GLOBAL", "TEMP|TEMPORARY", "TABLE", MatchAny, "(*)", "ON", "COMMIT"))
+		COMPLETE_WITH("DELETE ROWS", "PRESERVE ROWS");
+	/* Complete CREATE [ LOCAL ] TEMP TABLE ON COMMIT with actions */
+	else if (TailMatches("CREATE", "TEMP|TEMPORARY", "TABLE", MatchAny, "(*)", "ON", "COMMIT") ||
+			 TailMatches("CREATE", "LOCAL", "TEMP|TEMPORARY", "TABLE", MatchAny, "(*)", "ON", "COMMIT"))
 		COMPLETE_WITH("DELETE ROWS", "DROP", "PRESERVE ROWS");
 
 /* CREATE TABLESPACE */
@@ -4361,7 +4390,7 @@ match_previous_words(int pattern_id,
 
 /* DISCARD */
 	else if (Matches("DISCARD"))
-		COMPLETE_WITH("ALL", "PLANS", "SEQUENCES", "TEMP");
+		COMPLETE_WITH("ALL", "GLOBAL TEMP", "PLANS", "SEQUENCES", "TEMP");
 
 /* DO */
 	else if (Matches("DO"))

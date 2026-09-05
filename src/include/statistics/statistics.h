@@ -94,9 +94,9 @@ typedef struct MCVList
 	MCVItem		items[FLEXIBLE_ARRAY_MEMBER];	/* array of MCV items */
 } MCVList;
 
-extern MVNDistinct *statext_ndistinct_load(Oid mvoid, bool inh);
-extern MVDependencies *statext_dependencies_load(Oid mvoid, bool inh);
-extern MCVList *statext_mcv_load(Oid mvoid, bool inh);
+extern MVNDistinct *statext_ndistinct_load(Oid relid, Oid mvoid, bool inh);
+extern MVDependencies *statext_dependencies_load(Oid relid, Oid mvoid, bool inh);
+extern MCVList *statext_mcv_load(Oid relid, Oid mvoid, bool inh);
 
 extern void BuildRelationExtStatistics(Relation onerel, bool inh, double totalrows,
 									   int numrows, HeapTuple *rows,
@@ -126,7 +126,7 @@ extern StatisticExtInfo *choose_best_statistics(List *stats, char requiredkind,
 												Bitmapset **clause_attnums,
 												List **clause_exprs,
 												int nclauses);
-extern HeapTuple statext_expressions_load(Oid stxoid, bool inh, int idx);
+extern HeapTuple statext_expressions_load(Oid relid, Oid stxoid, bool inh, int idx);
 
 extern bool import_relation_statistics(Relation rel,
 									   const NullableDatum *version,

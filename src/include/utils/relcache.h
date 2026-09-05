@@ -17,6 +17,7 @@
 #include "access/tupdesc.h"
 #include "common/relpath.h"
 #include "nodes/bitmapset.h"
+#include "nodes/primnodes.h"
 
 
 /*
@@ -121,7 +122,8 @@ extern Relation RelationBuildLocalRelation(const char *relname,
 										   bool shared_relation,
 										   bool mapped_relation,
 										   char relpersistence,
-										   char relkind);
+										   char relkind,
+										   OnCommitAction oncommit);
 
 /*
  * Routines to manage assignment of new relfilenumber to a relation

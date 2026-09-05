@@ -1567,6 +1567,14 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
    </para>
 
    <para>
+    If <command>ALTER TABLE</command> is invoked on a global temporary table,
+    and a table scan or rewrite is required, an error is thrown if any other
+    session is accessing the table because <productname>PostgreSQL</productname>
+    has no way to access the contents of a global temporary table in another
+    session.
+   </para>
+
+   <para>
     The <literal>USING</literal> option of <literal>SET DATA TYPE</literal> can actually
     specify any expression involving the old values of the row; that is, it
     can refer to other columns as well as the one being converted.  This allows

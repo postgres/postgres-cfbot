@@ -88,3 +88,6 @@ PG_SHMEM_SUBSYSTEM(DataChecksumsShmemCallbacks)
 
 /* AIO subsystem. This delegates to the method-specific callbacks */
 PG_SHMEM_SUBSYSTEM(AioShmemCallbacks)
+
+/* global temporary relation usage table */
+PG_SHMEM_SUBSYSTEM(GlobalTempRelShmemCallbacks)

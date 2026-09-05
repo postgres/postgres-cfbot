@@ -44,6 +44,7 @@
 /* Options that may appear after CATALOG (on the same line) */
 #define BKI_BOOTSTRAP
 #define BKI_SHARED_RELATION
+#define BKI_TEMP_RELATION
 #define BKI_ROWTYPE_OID(oid,oidmacro)
 #define BKI_SCHEMA_MACRO
 

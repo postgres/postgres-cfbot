@@ -19,6 +19,7 @@
 #include "catalog/pg_authid.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_tablespace.h"
+#include "catalog/pg_temp_class.h"
 #include "commands/tablespace.h"
 #include "miscadmin.h"
 #include "storage/fd.h"
@@ -901,7 +902,7 @@ pg_relation_filenode(PG_FUNCTION_ARGS)
 	HeapTuple	tuple;
 	Form_pg_class relform;
 
-	tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+	tuple = GetEffectivePgClassTuple(relid);
 	if (!HeapTupleIsValid(tuple))
 		PG_RETURN_NULL();
 	relform = (Form_pg_class) GETSTRUCT(tuple);
@@ -920,7 +921,7 @@ pg_relation_filenode(PG_FUNCTION_ARGS)
 		result = InvalidRelFileNumber;
 	}
 
-	ReleaseSysCache(tuple);
+	heap_freetuple(tuple);
 
 	if (!RelFileNumberIsValid(result))
 		PG_RETURN_NULL();
@@ -978,7 +979,7 @@ pg_relation_filepath(PG_FUNCTION_ARGS)
 	ProcNumber	backend;
 	RelPathStr	path;
 
-	tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+	tuple = GetEffectivePgClassTuple(relid);
 	if (!HeapTupleIsValid(tuple))
 		PG_RETURN_NULL();
 	relform = (Form_pg_class) GETSTRUCT(tuple);
@@ -1011,7 +1012,7 @@ pg_relation_filepath(PG_FUNCTION_ARGS)
 
 	if (!RelFileNumberIsValid(rlocator.relNumber))
 	{
-		ReleaseSysCache(tuple);
+		heap_freetuple(tuple);
 		PG_RETURN_NULL();
 	}
 
@@ -1032,13 +1033,16 @@ pg_relation_filepath(PG_FUNCTION_ARGS)
 				Assert(backend != INVALID_PROC_NUMBER);
 			}
 			break;
+		case RELPERSISTENCE_GLOBAL_TEMP:
+			backend = ProcNumberForTempRelations();
+			break;
 		default:
 			elog(ERROR, "invalid relpersistence: %c", relform->relpersistence);
 			backend = INVALID_PROC_NUMBER;	/* placate compiler */
 			break;
 	}
 
-	ReleaseSysCache(tuple);
+	heap_freetuple(tuple);
 
 	path = relpathbackend(rlocator, backend, MAIN_FORKNUM);
 

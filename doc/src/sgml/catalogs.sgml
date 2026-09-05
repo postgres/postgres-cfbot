@@ -351,6 +351,26 @@
      </row>
 
      <row>
+      <entry><link linkend="catalog-pg-temp-class"><structname>pg_temp_class</structname></link></entry>
+      <entry>global temporary relations used in the current session</entry>
+     </row>
+
+     <row>
+      <entry><link linkend="catalog-pg-temp-index"><structname>pg_temp_index</structname></link></entry>
+      <entry>additional index information for indexes on global temporary tables</entry>
+     </row>
+
+     <row>
+      <entry><link linkend="catalog-pg-temp-statistic"><structname>pg_temp_statistic</structname></link></entry>
+      <entry>planner statistics for global temporary relations</entry>
+     </row>
+
+     <row>
+      <entry><link linkend="catalog-pg-temp-statistic-ext-data"><structname>pg_temp_statistic_ext_data</structname></link></entry>
+      <entry>extended planner statistics (built statistics) for global temporary tables</entry>
+     </row>
+
+     <row>
       <entry><link linkend="catalog-pg-transform"><structname>pg_transform</structname></link></entry>
       <entry>transforms (data type to procedural language conversions)</entry>
      </row>
@@ -2028,7 +2048,12 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
       <para>
        Name of the on-disk file of this relation; zero means this
        is a <quote>mapped</quote> relation whose disk file name is determined
-       by low-level state
+       by low-level state.
+      </para>
+      <para>
+       For a global temporary relation, the value from
+       <link linkend="catalog-pg-temp-class"><structname>pg_temp_class</structname></link>.<structfield>relfilenode</structfield>,
+       if any, takes precedence over the value from this catalog.
       </para></entry>
      </row>
 
@@ -2044,6 +2069,11 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
        except for partitioned tables, where this is the tablespace
        in which partitions will be created when one is not
        specified in the creation command.
+      </para>
+      <para>
+       For a global temporary relation, the value from
+       <link linkend="catalog-pg-temp-class"><structname>pg_temp_class</structname></link>.<structfield>reltablespace</structfield>,
+       if any, takes precedence over the value from this catalog.
       </para></entry>
      </row>
 
@@ -2061,6 +2091,11 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
       <para>
        This is effectively an unsigned 32-bit integer; values larger than
        2<superscript>31</superscript>−1 are stored as negative values.
+      </para>
+      <para>
+       For a global temporary relation, the value from
+       <link linkend="catalog-pg-temp-class"><structname>pg_temp_class</structname></link>.<structfield>relpages</structfield>,
+       if any, takes precedence over the value from this catalog.
       </para></entry>
      </row>
 
@@ -2077,6 +2112,11 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
        analyzed, <structfield>reltuples</structfield>
        contains <literal>-1</literal> indicating that the row count is
        unknown.
+      </para>
+      <para>
+       For a global temporary relation, the value from
+       <link linkend="catalog-pg-temp-class"><structname>pg_temp_class</structname></link>.<structfield>reltuples</structfield>,
+       if any, takes precedence over the value from this catalog.
       </para></entry>
      </row>
 
@@ -2094,6 +2134,11 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
       <para>
        This is effectively an unsigned 32-bit integer; values larger than
        2<superscript>31</superscript>−1 are stored as negative values.
+      </para>
+      <para>
+       For a global temporary relation, the value from
+       <link linkend="catalog-pg-temp-class"><structname>pg_temp_class</structname></link>.<structfield>relallvisible</structfield>,
+       if any, takes precedence over the value from this catalog.
       </para></entry>
      </row>
 
@@ -2108,7 +2153,6 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
        scheduling manual vacuums and tuning <link
        linkend="runtime-config-vacuum-freezing">vacuum's freezing
        behavior</link>.
-
        It is updated by
        <link linkend="sql-vacuum"><command>VACUUM</command></link>,
        <link linkend="sql-analyze"><command>ANALYZE</command></link>,
@@ -2118,9 +2162,13 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
       <para>
        This is effectively an unsigned 32-bit integer; values larger than
        2<superscript>31</superscript>−1 are stored as negative values.
+      </para>
+      <para>
+       For a global temporary relation, the value from
+       <link linkend="catalog-pg-temp-class"><structname>pg_temp_class</structname></link>.<structfield>relallfrozen</structfield>,
+       if any, takes precedence over the value from this catalog.
       </para></entry>
      </row>
-
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
@@ -2159,8 +2207,10 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
        <structfield>relpersistence</structfield> <type>char</type>
       </para>
       <para>
-       <literal>p</literal> = permanent table/sequence, <literal>u</literal> = unlogged table/sequence,
-       <literal>t</literal> = temporary table/sequence
+       <literal>p</literal> = permanent table/sequence,
+       <literal>u</literal> = unlogged table/sequence,
+       <literal>t</literal> = local temporary table/sequence,
+       <literal>g</literal> = global temporary table/sequence
       </para></entry>
      </row>
 
@@ -2180,6 +2230,22 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
        <literal>p</literal> = partitioned table,
        <literal>I</literal> = partitioned index,
        <literal>g</literal> = property graph
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>reloncommit</structfield> <type>char</type>
+      </para>
+      <para>
+       The relation's <literal>ON COMMIT</literal> action:
+       <literal>n</literal> = none,
+       <literal>p</literal> = preserve rows,
+       <literal>d</literal> = delete rows,
+       <literal>D</literal> = drop.
+       Values other than <literal>n</literal> are only supported for
+       temporary tables; see
+       <link linkend="sql-createtable"><command>CREATE TABLE</command></link>.
       </para></entry>
      </row>
 
@@ -2311,6 +2377,11 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
        whether the table needs to be vacuumed in order to prevent transaction
        ID wraparound or to allow <literal>pg_xact</literal> to be shrunk.  Zero
        (<symbol>InvalidTransactionId</symbol>) if the relation is not a table.
+      </para>
+      <para>
+       For a global temporary relation, this value is always zero, and the value from
+       <link linkend="catalog-pg-temp-class"><structname>pg_temp_class</structname></link>.<structfield>relfrozenxid</structfield>
+       is used instead.
       </para></entry>
      </row>
 
@@ -2324,6 +2395,11 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
        whether the table needs to be vacuumed in order to prevent multixact ID
        wraparound or to allow <literal>pg_multixact</literal> to be shrunk.  Zero
        (<symbol>InvalidMultiXactId</symbol>) if the relation is not a table.
+      </para>
+      <para>
+       For a global temporary relation, this value is always zero, and the value from
+       <link linkend="catalog-pg-temp-class"><structname>pg_temp_class</structname></link>.<structfield>relminmxid</structfield>
+       is used instead.
       </para></entry>
      </row>
 
@@ -4543,6 +4619,11 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
        <link linkend="sql-insert"><command>INSERT</command></link>/<link linkend="sql-update"><command>UPDATE</command></link> operations, but it cannot safely
        be used for queries. If it is unique, the uniqueness property is not
        guaranteed true either.
+      </para>
+      <para>
+       For an index on a global temporary table, the value from
+       <link linkend="catalog-pg-temp-index"><structname>pg_temp_index</structname></link>.<structfield>indisvalid</structfield>,
+       if any, takes precedence over the value from this catalog.
       </para></entry>
      </row>
 
@@ -8112,6 +8193,16 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
    about those tables that are readable by the current user.
   </para>
 
+  <para>
+   Statistical data about global temporary relations is stored in
+   <link linkend="catalog-pg-temp-statistic"><structname>pg_temp_statistic</structname></link>,
+   instead of <structname>pg_statistic</structname>, because the contents of
+   global temporary relations can vary greatly between different sessions,
+   and so the statistical data needs to be local to each session
+   (<structname>pg_temp_statistic</structname> is itself a global temporary
+   table).
+  </para>
+
   <table>
    <title><structname>pg_statistic</structname> Columns</title>
    <tgroup cols="1">
@@ -8445,6 +8536,16 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
    on <structname>pg_statistic_ext_data</structname> (after joining
    with <link linkend="catalog-pg-statistic-ext"><structname>pg_statistic_ext</structname></link>) that only exposes
    information about tables the current user owns.
+  </para>
+
+  <para>
+   Extended statistics data for global temporary tables is stored in
+   <link linkend="catalog-pg-temp-statistic-ext-data"><structname>pg_temp_statistic_ext_data</structname></link>,
+   instead of <structname>pg_statistic_ext_data</structname>, because the
+   contents of global temporary tables can vary between different sessions,
+   and so the statistical data needs to be local to each session
+   (<structname>pg_temp_statistic_ext_data</structname> is itself a global
+   temporary table).
   </para>
 
   <table>
@@ -9000,6 +9101,342 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
     </tbody>
    </tgroup>
   </table>
+ </sect1>
+
+
+ <sect1 id="catalog-pg-temp-class">
+  <title><structname>pg_temp_class</structname></title>
+
+  <indexterm zone="catalog-pg-temp-class">
+   <primary>pg_temp_class</primary>
+  </indexterm>
+
+  <para>
+   The catalog <structname>pg_temp_class</structname> is a global temporary
+   table that stores information about all global temporary relations
+   (including <structname>pg_temp_class</structname> itself) in use in the
+   current session.
+  </para>
+
+  <para>
+   The attributes of <structname>pg_temp_class</structname> are a subset of
+   the attributes of
+   <link linkend="catalog-pg-class"><structname>pg_class</structname></link>,
+   used to store local overrides to the values from
+   <structname>pg_class</structname> for each session.
+  </para>
+
+  <table>
+   <title><structname>pg_temp_class</structname> Columns</title>
+   <tgroup cols="1">
+    <thead>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       Column Type
+      </para>
+      <para>
+       Description
+      </para></entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>oid</structfield> <type>oid</type>
+      </para>
+      <para>
+       Row identifier
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>relfilenode</structfield> <type>oid</type>
+      </para>
+      <para>
+       Name of the on-disk file of this relation in the current session,
+       overriding the value from
+       <link linkend="catalog-pg-class"><structname>pg_class</structname></link>.<structfield>relfilenode</structfield>.
+       This is always non-zero, because global temporary relations are never
+       <quote>mapped</quote>.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>reltablespace</structfield> <type>oid</type>
+       (references <link linkend="catalog-pg-tablespace"><structname>pg_tablespace</structname></link>.<structfield>oid</structfield>)
+      </para>
+      <para>
+       The tablespace in which this relation is stored in the current
+       session, overriding the value from
+       <link linkend="catalog-pg-class"><structname>pg_class</structname></link>.<structfield>reltablespace</structfield>.
+       If zero, the database's default tablespace is implied.
+       Not meaningful if the relation has no on-disk file,
+       except for partitioned tables, where this is the tablespace
+       in which partitions will be created when one is not
+       specified in the creation command.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>relpages</structfield> <type>int4</type>
+      </para>
+      <para>
+       Size of the on-disk representation of this table in the current
+       session in pages (of size <symbol>BLCKSZ</symbol>).
+       This is only an estimate used by the planner.  It is updated by
+       <link linkend="sql-vacuum"><command>VACUUM</command></link>,
+       <link linkend="sql-analyze"><command>ANALYZE</command></link>,
+       and a few DDL commands such as
+       <link linkend="sql-createindex"><command>CREATE INDEX</command></link>.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>reltuples</structfield> <type>float4</type>
+      </para>
+      <para>
+       Number of live rows in the table in the current session.  This is only
+       an estimate used by the planner.  It is updated by
+       <link linkend="sql-vacuum"><command>VACUUM</command></link>,
+       <link linkend="sql-analyze"><command>ANALYZE</command></link>,
+       and a few DDL commands such as
+       <link linkend="sql-createindex"><command>CREATE INDEX</command></link>.
+       If the table has never yet been vacuumed or analyzed in the current
+       session, <structfield>reltuples</structfield> contains
+       <literal>-1</literal> indicating that the row count is unknown.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>relallvisible</structfield> <type>int4</type>
+      </para>
+      <para>
+       Number of pages that are marked all-visible in the table's visibility
+       map for the current session.  This is only an estimate used by the
+       planner.  It is updated by
+       <link linkend="sql-vacuum"><command>VACUUM</command></link>,
+       <link linkend="sql-analyze"><command>ANALYZE</command></link>,
+       and a few DDL commands such as
+       <link linkend="sql-createindex"><command>CREATE INDEX</command></link>.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>relallfrozen</structfield> <type>int4</type>
+      </para>
+      <para>
+       Number of pages that are marked all-frozen in the table's visibility
+       map for the current session.  This is only an estimate that can be
+       used along with <structfield>relallvisible</structfield> for
+       scheduling manual vacuums and tuning
+       <link linkend="runtime-config-vacuum-freezing">vacuum's freezing behavior</link>.
+       It is updated by
+       <link linkend="sql-vacuum"><command>VACUUM</command></link>,
+       <link linkend="sql-analyze"><command>ANALYZE</command></link>,
+       and a few DDL commands such as
+       <link linkend="sql-createindex"><command>CREATE INDEX</command></link>.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>relfrozenxid</structfield> <type>xid</type>
+      </para>
+      <para>
+       All transaction IDs before this one have been replaced with a permanent
+       (<quote>frozen</quote>) transaction ID in this table in the current
+       session.  This is used to track whether the table needs to be vacuumed
+       in order to prevent transaction ID wraparound or to allow
+       <literal>pg_xact</literal> to be shrunk.  Zero
+       (<symbol>InvalidTransactionId</symbol>) if the relation is not a table.
+       The minimum <structfield>relfrozenxid</structfield> over all global
+       temporary tables being used in each session is included in the
+       <literal>tempfrozenxid</literal> column of the
+       <link linkend="monitoring-pg-stat-activity-view"><structname>pg_stat_activity</structname></link>
+       view.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>relminmxid</structfield> <type>xid</type>
+      </para>
+      <para>
+       All multixact IDs before this one have been replaced by a
+       transaction ID in this table in the current session.  This is used to
+       track whether the table needs to be vacuumed in order to prevent
+       multixact ID wraparound or to allow <literal>pg_multixact</literal> to
+       be shrunk.  Zero (<symbol>InvalidMultiXactId</symbol>) if the relation
+       is not a table.  The minimum <structfield>relminmxid</structfield>
+       over all global temporary tables being used in each session is
+       included in the <literal>tempminmxid</literal> column of the
+       <link linkend="monitoring-pg-stat-activity-view"><structname>pg_stat_activity</structname></link>
+       view.
+      </para></entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+
+  <note>
+   <para>
+    Tuples are only added to <structname>pg_temp_class</structname> for global
+    temporary relations that have been used in the current session.
+   </para>
+  </note>
+ </sect1>
+
+
+ <sect1 id="catalog-pg-temp-index">
+  <title><structname>pg_temp_index</structname></title>
+
+  <indexterm zone="catalog-pg-temp-index">
+   <primary>pg_temp_index</primary>
+  </indexterm>
+
+  <para>
+   The catalog <structname>pg_temp_index</structname> is a global temporary
+   table that stores information about indexes on global temporary tables in
+   use in the current session.
+  </para>
+
+  <para>
+   The attributes of <structname>pg_temp_index</structname> are a subset of
+   the attributes of
+   <link linkend="catalog-pg-index"><structname>pg_index</structname></link>,
+   used to store local overrides to the values from
+   <structname>pg_index</structname> for each session.  Currently, the only
+   attribute is <structfield>indisvalid</structfield>, used to indicate
+   whether an index is valid in the current session &mdash; a new index
+   created on a global temporary table will be marked invalid in all other
+   currently active sessions that have already added data to the table (see
+   <link linkend="sql-createindex"><command>CREATE INDEX</command></link>).
+  </para>
+
+  <table>
+   <title><structname>pg_temp_index</structname> Columns</title>
+   <tgroup cols="1">
+    <thead>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       Column Type
+      </para>
+      <para>
+       Description
+      </para></entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>indexrelid</structfield> <type>oid</type>
+       (references <link linkend="catalog-pg-class"><structname>pg_class</structname></link>.<structfield>oid</structfield>)
+      </para>
+      <para>
+       The OID of the <link linkend="catalog-pg-class"><structname>pg_class</structname></link> entry for this index
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>indisvalid</structfield> <type>bool</type>
+      </para>
+      <para>
+       If true, the index is currently valid for queries in the current session.
+       False means the index is possibly incomplete: it must still be modified by
+       <link linkend="sql-insert"><command>INSERT</command></link>/<link linkend="sql-update"><command>UPDATE</command></link> operations, but it cannot safely
+       be used for queries. If it is unique, the uniqueness property is not
+       guaranteed true either.
+      </para></entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+
+  <note>
+   <para>
+    Tuples are only added to <structname>pg_temp_index</structname> for indexes
+    on global temporary tables that have been used in the current session.
+   </para>
+  </note>
+ </sect1>
+
+
+ <sect1 id="catalog-pg-temp-statistic">
+  <title><structname>pg_temp_statistic</structname></title>
+
+  <indexterm zone="catalog-pg-temp-statistic">
+   <primary>pg_temp_statistic</primary>
+  </indexterm>
+
+  <para>
+   The catalog <structname>pg_temp_statistic</structname> is a global
+   temporary table that stores statistical data about the contents of global
+   temporary relations in the database.  Entries are created by
+   <link linkend="sql-analyze"><command>ANALYZE</command></link>
+   and subsequently used by the query planner.
+  </para>
+
+  <para>
+   <structname>pg_temp_statistic</structname> has the same columns as
+   <structname>pg_statistic</structname>, and its contents are created and
+   used by the planner in exactly the same way, except that they are local to
+   the current session, and are automatically deleted when the session exits.
+   Therefore, each session should run
+   <link linkend="sql-analyze"><command>ANALYZE</command></link> to create
+   its own statistical data about the contents of global temporary relations
+   used by the session.
+  </para>
+
+  <para>
+   For more information about the table structure, and how its contents are
+   interpreted, see
+   <link linkend="catalog-pg-statistic"><structname>pg_statistic</structname></link>.
+  </para>
+ </sect1>
+
+
+ <sect1 id="catalog-pg-temp-statistic-ext-data">
+  <title><structname>pg_temp_statistic_ext_data</structname></title>
+
+  <indexterm zone="catalog-pg-temp-statistic-ext-data">
+   <primary>pg_temp_statistic_ext_data</primary>
+  </indexterm>
+
+  <para>
+   The catalog <structname>pg_temp_statistic_ext_data</structname> is a global
+   temporary table that holds data for extended planner statistics defined in
+   <link linkend="catalog-pg-statistic-ext"><structname>pg_statistic_ext</structname></link>
+   for global temporary tables.  Each row in this catalog corresponds to a
+   <firstterm>statistics object</firstterm> created with
+   <link linkend="sql-createstatistics"><command>CREATE STATISTICS</command></link>
+   on a global temporary table.
+  </para>
+
+  <para>
+   <structname>pg_temp_statistic_ext_data</structname> has the same columns as
+   <structname>pg_statistic_ext_data</structname>, and its contents are created
+   and used by the planner in exactly the same way, except that they are local
+   to the current session, and are automatically deleted when the session exits.
+   Therefore, each session should run
+   <link linkend="sql-analyze"><command>ANALYZE</command></link> to create
+   its own extended statistics data for the contents of global temporary tables
+   with extended statistics defined, used in the session.
+  </para>
+
+  <para>
+   For more information about the table structure, and how its contents are
+   interpreted, see
+   <link linkend="catalog-pg-statistic-ext-data"><structname>pg_statistic_ext_data</structname></link>.
+  </para>
  </sect1>
 
 

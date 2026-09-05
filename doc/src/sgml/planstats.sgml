@@ -49,7 +49,8 @@ EXPLAIN SELECT * FROM tenk1;
    How the planner determines the cardinality of <structname>tenk1</structname>
    is covered in <xref linkend="planner-stats"/>, but is repeated here for
    completeness. The number of pages and rows is looked up in
-   <structname>pg_class</structname>:
+   <structname>pg_class</structname> (or <structname>pg_temp_class</structname>
+   for a global temporary table):
 
 <programlisting>
 SELECT relpages, reltuples FROM pg_class WHERE relname = 'tenk1';
@@ -92,7 +93,9 @@ EXPLAIN SELECT * FROM tenk1 WHERE unique1 &lt; 1000;
    and the entry in this case is <function>scalarltsel</function>.
    The <function>scalarltsel</function> function retrieves the histogram for
    <structfield>unique1</structfield> from
-   <structname>pg_statistic</structname>.  For manual queries it is more
+   <structname>pg_statistic</structname> (or
+   <structname>pg_temp_statistic</structname> for a global temporary
+   relation).  For manual queries it is more
    convenient to look in the simpler <structname>pg_stats</structname>
    view:
 
@@ -470,7 +473,8 @@ ANALYZE t;
 
     As explained in <xref linkend="planner-stats"/>, the planner can determine
     cardinality of <structname>t</structname> using the number of pages and
-    rows obtained from <structname>pg_class</structname>:
+    rows obtained from <structname>pg_class</structname> (or
+    <structname>pg_temp_class</structname> for a global temporary table):
 
 <programlisting>
 SELECT relpages, reltuples FROM pg_class WHERE relname = 't';
@@ -703,7 +707,8 @@ EXPLAIN (ANALYZE, TIMING OFF, BUFFERS OFF) SELECT * FROM t WHERE a &lt;= 49 AND 
   <title>Planner Statistics and Security</title>
 
   <para>
-   Access to the table <structname>pg_statistic</structname> is restricted to
+   Access to the tables <structname>pg_statistic</structname> and
+   <structname>pg_temp_statistic</structname> is restricted to
    superusers, so that ordinary users cannot learn about the contents of the
    tables of other users from it.  Some selectivity estimation functions will
    use a user-provided operator (either the operator appearing in the query or
@@ -711,12 +716,14 @@ EXPLAIN (ANALYZE, TIMING OFF, BUFFERS OFF) SELECT * FROM t WHERE a &lt;= 49 AND 
    to determine whether a stored most common value is applicable, the
    selectivity estimator will have to run the appropriate <literal>=</literal>
    operator to compare the constant in the query to the stored value.
-   Thus the data in <structname>pg_statistic</structname> is potentially
+   Thus the data in <structname>pg_statistic</structname> and
+   <structname>pg_temp_statistic</structname> is potentially
    passed to user-defined operators.  An appropriately crafted operator can
    intentionally leak the passed operands (for example, by logging them
    or writing them to a different table), or accidentally leak them by showing
    their values in error messages, in either case possibly exposing data from
-   <structname>pg_statistic</structname> to a user who should not be able to
+   <structname>pg_statistic</structname> and
+   <structname>pg_temp_statistic</structname> to a user who should not be able to
    see it.
   </para>
 
@@ -750,7 +757,8 @@ EXPLAIN (ANALYZE, TIMING OFF, BUFFERS OFF) SELECT * FROM t WHERE a &lt;= 49 AND 
   <para>
    This restriction applies only to cases where the planner would need to
    execute a user-defined operator on one or more values
-   from <structname>pg_statistic</structname>.  Thus the planner is permitted
+   from <structname>pg_statistic</structname> or
+   <structname>pg_temp_statistic</structname>.  Thus the planner is permitted
    to use generic statistical information, such as the fraction of null values
    or the number of distinct values in a column, regardless of access
    privileges.

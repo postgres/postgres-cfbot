@@ -134,15 +134,15 @@ createTempGistContext(void)
 }
 
 /*
- *	gistbuildempty() -- build an empty gist index in the initialization fork
+ *	gistbuildempty() -- build an empty gist index in the specified fork
  */
 void
-gistbuildempty(Relation index)
+gistbuildempty(Relation index, ForkNumber forknum)
 {
 	Buffer		buffer;
 
 	/* Initialize the root page */
-	buffer = ExtendBufferedRel(BMR_REL(index), INIT_FORKNUM, NULL,
+	buffer = ExtendBufferedRel(BMR_REL(index), forknum, NULL,
 							   EB_SKIP_EXTENSION_LOCK | EB_LOCK_FIRST);
 
 	/* Initialize and xlog buffer */

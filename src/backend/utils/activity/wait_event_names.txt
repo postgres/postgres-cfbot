@@ -371,6 +371,7 @@ WaitLSN	"Waiting to read or update shared Wait-for-LSN state."
 LogicalDecodingControl	"Waiting to read or update logical decoding status information."
 DataChecksumsWorker	"Waiting for data checksums worker."
 AioWorkerControl	"Waiting to update AIO worker information."
+GlobalTempRelControl	"Waiting to update global temporary relation information."
 
 #
 # END OF PREDEFINED LWLOCKS (DO NOT CHANGE THIS LINE)
@@ -418,6 +419,8 @@ XactSLRU	"Waiting to access the transaction status SLRU cache."
 ParallelVacuumDSA	"Waiting for parallel vacuum dynamic shared memory allocation."
 AioUringCompletion	"Waiting for another process to complete IO via io_uring."
 ShmemIndex	"Waiting to find or allocate space in shared memory."
+GlobalTempRelDSA	"Waiting for global temporary relation dynamic shared memory allocation."
+GlobalTempRelHash	"Waiting to access global temporary relation shared usage table."
 
 # No "ABI_compatibility" region here as WaitEventLWLock has its own C code.
 

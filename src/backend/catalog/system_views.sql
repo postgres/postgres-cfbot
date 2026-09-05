@@ -187,6 +187,11 @@ CREATE VIEW pg_sequences AS
     WHERE NOT pg_is_other_temp_schema(N.oid)
           AND relkind = 'S';
 
+CREATE VIEW pg_all_statistic AS
+    SELECT * FROM pg_statistic
+    UNION ALL
+    SELECT * FROM pg_temp_statistic;
+
 CREATE VIEW pg_stats WITH (security_barrier) AS
     SELECT
         nspname AS schemaname,
@@ -268,7 +273,7 @@ CREATE VIEW pg_stats WITH (security_barrier) AS
             WHEN stakind4 = 7 THEN stavalues4
             WHEN stakind5 = 7 THEN stavalues5
             END AS range_bounds_histogram
-    FROM pg_statistic s JOIN pg_class c ON (c.oid = s.starelid)
+    FROM pg_all_statistic s JOIN pg_class c ON (c.oid = s.starelid)
          JOIN pg_attribute a ON (c.oid = attrelid AND attnum = s.staattnum)
          LEFT JOIN pg_namespace n ON (n.oid = c.relnamespace)
     WHERE NOT attisdropped
@@ -276,6 +281,13 @@ CREATE VIEW pg_stats WITH (security_barrier) AS
     AND (c.relrowsecurity = false OR NOT row_security_active(c.oid));
 
 REVOKE ALL ON pg_statistic FROM public;
+REVOKE ALL ON pg_temp_statistic FROM public;
+REVOKE ALL ON pg_all_statistic FROM public;
+
+CREATE VIEW pg_all_statistic_ext_data AS
+    SELECT * FROM pg_statistic_ext_data
+    UNION ALL
+    SELECT * FROM pg_temp_statistic_ext_data;
 
 CREATE VIEW pg_stats_ext WITH (security_barrier) AS
     SELECT cn.nspname AS schemaname,
@@ -300,7 +312,7 @@ CREATE VIEW pg_stats_ext WITH (security_barrier) AS
            m.most_common_freqs,
            m.most_common_base_freqs
     FROM pg_statistic_ext s JOIN pg_class c ON (c.oid = s.stxrelid)
-         JOIN pg_statistic_ext_data sd ON (s.oid = sd.stxoid)
+         JOIN pg_all_statistic_ext_data sd ON (s.oid = sd.stxoid)
          LEFT JOIN pg_namespace cn ON (cn.oid = c.relnamespace)
          LEFT JOIN pg_namespace sn ON (sn.oid = s.stxnamespace)
          LEFT JOIN LATERAL
@@ -397,7 +409,7 @@ CREATE VIEW pg_stats_ext_exprs WITH (security_barrier) AS
                WHEN (stat.a).stakind5 = 7 THEN (stat.a).stavalues5
                END) AS range_bounds_histogram
     FROM pg_statistic_ext s JOIN pg_class c ON (c.oid = s.stxrelid)
-         LEFT JOIN pg_statistic_ext_data sd ON (s.oid = sd.stxoid)
+         LEFT JOIN pg_all_statistic_ext_data sd ON (s.oid = sd.stxoid)
          LEFT JOIN pg_namespace cn ON (cn.oid = c.relnamespace)
          LEFT JOIN pg_namespace sn ON (sn.oid = s.stxnamespace)
          JOIN LATERAL (
@@ -407,8 +419,11 @@ CREATE VIEW pg_stats_ext_exprs WITH (security_barrier) AS
     WHERE pg_has_role(c.relowner, 'USAGE')
     AND (c.relrowsecurity = false OR NOT row_security_active(c.oid));
 
--- unprivileged users may read pg_statistic_ext but not pg_statistic_ext_data
+-- unprivileged users may read pg_statistic_ext but not pg_statistic_ext_data,
+-- pg_temp_statistic_ext_data, or pg_all_statistic_ext_data
 REVOKE ALL ON pg_statistic_ext_data FROM public;
+REVOKE ALL ON pg_temp_statistic_ext_data FROM public;
+REVOKE ALL ON pg_all_statistic_ext_data FROM public;
 
 CREATE VIEW pg_publication_tables AS
     SELECT
@@ -957,6 +972,8 @@ CREATE VIEW pg_stat_activity AS
             S.state,
             S.backend_xid,
             S.backend_xmin,
+            S.tempfrozenxid,
+            S.tempminmxid,
             S.query_id,
             S.query,
             S.backend_type

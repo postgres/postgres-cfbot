@@ -119,6 +119,11 @@ CreatePropGraph(ParseState *pstate, const CreatePropGraphStmt *stmt)
 				(errcode(ERRCODE_SYNTAX_ERROR),
 				 errmsg("property graphs cannot be unlogged because they do not have storage")));
 
+	if (stmt->pgname->relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("property graphs cannot be global temporary because they do not have storage")));
+
 	components_persistence = RELPERSISTENCE_PERMANENT;
 
 	foreach(lc, stmt->vertex_tables)

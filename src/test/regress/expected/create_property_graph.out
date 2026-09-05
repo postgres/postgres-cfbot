@@ -123,6 +123,8 @@ SELECT pg_get_propgraphdef('g5'::regclass);
 -- error cases
 CREATE UNLOGGED PROPERTY GRAPH gx VERTEX TABLES (xx, yy);
 ERROR:  property graphs cannot be unlogged because they do not have storage
+CREATE GLOBAL TEMP PROPERTY GRAPH gx VERTEX TABLES (xx, yy);
+ERROR:  property graphs cannot be global temporary because they do not have storage
 CREATE PROPERTY GRAPH gx VERTEX TABLES (xx, yy);
 ERROR:  relation "xx" does not exist
 CREATE PROPERTY GRAPH gx VERTEX TABLES (t1 KEY (a), t2 KEY (i), t1 KEY (a));

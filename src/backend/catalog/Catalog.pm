@@ -176,6 +176,8 @@ sub ParseHeader
 			$catalog{bootstrap} = /BKI_BOOTSTRAP/ ? ' bootstrap' : '';
 			$catalog{shared_relation} =
 			  /BKI_SHARED_RELATION/ ? ' shared_relation' : '';
+			$catalog{temp_relation} =
+			  /BKI_TEMP_RELATION/ ? ' temp_relation' : '';
 			if (/BKI_ROWTYPE_OID\(\s*
 				 (?<rowtype_oid>\d+),\s*
 				 (?<rowtype_oid_macro>\w+)\s*

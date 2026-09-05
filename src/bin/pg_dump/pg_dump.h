@@ -309,6 +309,7 @@ typedef struct _tableInfo
 	const char *rolname;
 	char		relkind;
 	char		relpersistence; /* relation persistence */
+	char		reloncommit;	/* ON COMMIT action (for global temp table) */
 	bool		relispopulated; /* relation is populated */
 	char		relreplident;	/* replica identifier */
 	char	   *reltablespace;	/* relation tablespace */

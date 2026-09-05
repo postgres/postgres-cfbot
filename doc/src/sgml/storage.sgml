@@ -205,7 +205,13 @@ which can be found in <structname>pg_class</structname>.<structfield>relfilenode
 for temporary relations, the file name is of the form
 <literal>t<replaceable>BBB</replaceable>_<replaceable>FFF</replaceable></literal>, where <replaceable>BBB</replaceable>
 is the process number of the backend which created the file, and <replaceable>FFF</replaceable>
-is the filenode number.  In either case, in addition to the main file (a/k/a
+is the filenode number.  Global temporary relations have no physical storage until
+they are used by a backend, at which point their filenode number can be found in
+<structname>pg_temp_class</structname>.<structfield>relfilenode</structfield>.
+The initial value of <structname>pg_temp_class</structname>.<structfield>relfilenode</structfield>
+comes from <structname>pg_class</structname>.<structfield>relfilenode</structfield>,
+but as noted below, certain operations may cause the filenode to change.
+In each case, in addition to the main file (a/k/a
 main fork), each table and index has a <firstterm>free space map</firstterm> (see <xref
 linkend="storage-fsm"/>), which stores information about free space available in
 the relation.  The free space map is stored in a file named with the filenode
@@ -221,7 +227,8 @@ with the suffix <literal>_init</literal> (see <xref linkend="storage-init"/>).
 <para>
 Note that while a table's filenode often matches its OID, this is
 <emphasis>not</emphasis> necessarily the case; some operations, like
-<command>TRUNCATE</command>, <command>REINDEX</command>, <command>CLUSTER</command> and some forms
+<command>TRUNCATE</command>, <command>REINDEX</command>, <command>CLUSTER</command>,
+<command>REPACK</command>, <command>VACUUM FULL</command>, and some forms
 of <command>ALTER TABLE</command>, can change the filenode while preserving the OID.
 Avoid assuming that filenode and table OID are the same.
 Also, for certain system catalogs including <structname>pg_class</structname> itself,

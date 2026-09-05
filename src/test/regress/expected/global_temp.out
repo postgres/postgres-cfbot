@@ -1,0 +1,1268 @@
+--
+-- GLOBAL TEMP
+--
+CREATE SCHEMA global_temp_tests;
+GRANT USAGE ON SCHEMA global_temp_tests TO PUBLIC;
+SET search_path = global_temp_tests;
+CREATE ROLE regress_global_temp_user;
+GRANT CREATE ON SCHEMA global_temp_tests TO regress_global_temp_user;
+GRANT CREATE ON DATABASE regression TO regress_global_temp_user;
+SET ROLE regress_global_temp_user;
+-- Test table creation
+CREATE GLOBAL TEMP TABLE pg_temp.tmp1 (a int); -- fail
+ERROR:  cannot create global temporary relation in temporary schema
+LINE 1: CREATE GLOBAL TEMP TABLE pg_temp.tmp1 (a int);
+                                 ^
+CREATE GLOBAL TEMP TABLE tmp1 (a int PRIMARY KEY, b text, c serial);
+CREATE SCHEMA global_temp_xxx CREATE GLOBAL TEMP TABLE tmp2 (a int);
+CREATE SCHEMA global_temp_yyy;
+CREATE GLOBAL TEMP TABLE global_temp_yyy.tmp3 (a int);
+\d tmp1
+              Global temporary table "global_temp_tests.tmp1"
+ Column |  Type   | Collation | Nullable |             Default             
+--------+---------+-----------+----------+---------------------------------
+ a      | integer |           | not null | 
+ b      | text    |           |          | 
+ c      | integer |           | not null | nextval('tmp1_c_seq'::regclass)
+Indexes:
+    "tmp1_pkey" PRIMARY KEY, btree (a)
+
+\dt+ global_temp_*.tmp*
+                                              List of tables
+      Schema       | Name | Type  |          Owner           |   Persistence    |    Size    | Description 
+-------------------+------+-------+--------------------------+------------------+------------+-------------
+ global_temp_tests | tmp1 | table | regress_global_temp_user | global temporary | 8192 bytes | 
+ global_temp_xxx   | tmp2 | table | regress_global_temp_user | global temporary | 0 bytes    | 
+ global_temp_yyy   | tmp3 | table | regress_global_temp_user | global temporary | 0 bytes    | 
+(3 rows)
+
+-- Information schema
+SELECT table_catalog, table_schema, table_name, table_type
+FROM information_schema.tables
+WHERE table_name ~ 'tmp' AND table_schema ~ 'global_temp'
+ORDER BY table_name;
+ table_catalog |   table_schema    | table_name |    table_type    
+---------------+-------------------+------------+------------------
+ regression    | global_temp_tests | tmp1       | GLOBAL TEMPORARY
+ regression    | global_temp_xxx   | tmp2       | GLOBAL TEMPORARY
+ regression    | global_temp_yyy   | tmp3       | GLOBAL TEMPORARY
+(3 rows)
+
+-- Check pg_stat_activity
+SELECT tempfrozenxid, tempminmxid -- not visible without privilege
+  FROM pg_stat_activity
+ WHERE pid = pg_backend_pid();
+ tempfrozenxid | tempminmxid 
+---------------+-------------
+               |            
+(1 row)
+
+RESET ROLE;
+GRANT pg_read_all_stats TO regress_global_temp_user;
+SET ROLE regress_global_temp_user;
+SELECT tempfrozenxid::text::bigint - (SELECT min(relfrozenxid::text::bigint)
+                                        FROM pg_temp_class
+                                       WHERE relfrozenxid::text != '0'),
+       tempminmxid::text::bigint - (SELECT min(relminmxid::text::bigint)
+                                      FROM pg_temp_class
+                                     WHERE relminmxid::text != '0')
+  FROM pg_stat_activity
+ WHERE pid = pg_backend_pid();
+ ?column? | ?column? 
+----------+----------
+        0 |        0
+(1 row)
+
+DROP SCHEMA global_temp_xxx CASCADE;
+NOTICE:  drop cascades to table global_temp_xxx.tmp2
+DROP SCHEMA global_temp_yyy CASCADE;
+NOTICE:  drop cascades to table global_temp_yyy.tmp3
+-- Basic tests
+INSERT INTO tmp1 VALUES (1, 'xxx');
+SELECT * FROM tmp1;
+ a |  b  | c 
+---+-----+---
+ 1 | xxx | 1
+(1 row)
+
+\c
+SET search_path = global_temp_tests;
+SELECT oid::regclass FROM pg_temp_class ORDER BY 1;
+                  oid                  
+---------------------------------------
+ pg_temp_class
+ pg_temp_class_oid_index
+ pg_temp_statistic
+ pg_temp_statistic_relid_att_inh_index
+ pg_temp_index
+ pg_temp_index_indexrelid_index
+(6 rows)
+
+SELECT * FROM tmp1;
+ a | b | c 
+---+---+---
+(0 rows)
+
+SELECT oid::regclass FROM pg_temp_class ORDER BY 1;
+                  oid                  
+---------------------------------------
+ pg_temp_class
+ pg_temp_class_oid_index
+ pg_temp_statistic
+ pg_temp_statistic_relid_att_inh_index
+ pg_temp_index
+ pg_temp_index_indexrelid_index
+ tmp1
+ tmp1_pkey
+(8 rows)
+
+-- Test pg_relation_filenode() matches global relfilenode
+SELECT relfilenode = pg_relation_filenode('tmp1'::regclass) AS ok
+  FROM pg_class WHERE oid = 'tmp1'::regclass;
+ ok 
+----
+ t
+(1 row)
+
+-- Test index
+INSERT INTO tmp1 VALUES (1, 'xxx');
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+SELECT * FROM tmp1 WHERE a = 1;
+             QUERY PLAN             
+------------------------------------
+ Index Scan using tmp1_pkey on tmp1
+   Index Cond: (a = 1)
+(2 rows)
+
+SELECT * FROM tmp1 WHERE a = 1;
+ a |  b  | c 
+---+-----+---
+ 1 | xxx | 1
+(1 row)
+
+RESET enable_seqscan;
+-- Test concurrent index build -- CONCURRENTLY is ignored with temp tables
+CREATE INDEX CONCURRENTLY tmp1_b_idx ON tmp1(b);
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+SELECT * FROM tmp1 WHERE b = 'xxx';
+             QUERY PLAN              
+-------------------------------------
+ Index Scan using tmp1_b_idx on tmp1
+   Index Cond: (b = 'xxx'::text)
+(2 rows)
+
+SELECT * FROM tmp1 WHERE b = 'xxx';
+ a |  b  | c 
+---+-----+---
+ 1 | xxx | 1
+(1 row)
+
+RESET enable_seqscan;
+REINDEX INDEX CONCURRENTLY tmp1_b_idx;
+REINDEX TABLE CONCURRENTLY tmp1;
+-- Test REINDEX -- relfilenode only changes locally
+SELECT c.relfilenode AS global_relfilenode, t.relfilenode AS local_relfilenode
+  FROM pg_class c LEFT JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.relname = 'tmp1_b_idx' \gset
+REINDEX INDEX tmp1_b_idx;
+SELECT CASE WHEN c.relfilenode = :global_relfilenode THEN 'unchanged' ELSE 'changed' END AS global_relfilenode,
+       CASE WHEN t.relfilenode = :local_relfilenode THEN 'unchange' ELSE 'changed' END AS local_relfilenode
+  FROM pg_class c LEFT JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.relname = 'tmp1_b_idx';
+ global_relfilenode | local_relfilenode 
+--------------------+-------------------
+ unchanged          | changed
+(1 row)
+
+DROP INDEX CONCURRENTLY tmp1_b_idx;
+-- REINDEX not allowed on pg_temp_class
+REINDEX INDEX pg_temp_class_oid_index;
+NOTICE:  cannot reindex temporary system index "pg_temp_class_oid_index", skipping
+REINDEX TABLE pg_temp_class;
+NOTICE:  cannot reindex temporary system index "pg_temp_class_oid_index", skipping
+-- Test ON COMMIT DELETE ROWS
+CREATE GLOBAL TEMP TABLE tmp2 (a int) ON COMMIT DELETE ROWS;
+BEGIN;
+INSERT INTO tmp2 VALUES (1);
+SELECT * FROM tmp2;
+ a 
+---
+ 1
+(1 row)
+
+COMMIT;
+SELECT * FROM tmp2;
+ a 
+---
+(0 rows)
+
+-- Repeat test in a new session
+\c
+SET search_path = global_temp_tests;
+BEGIN;
+INSERT INTO tmp2 VALUES (1);
+SELECT * FROM tmp2;
+ a 
+---
+ 1
+(1 row)
+
+COMMIT;
+SELECT * FROM tmp2;
+ a 
+---
+(0 rows)
+
+DROP TABLE tmp2;
+-- ON COMMIT DROP not allowed
+CREATE GLOBAL TEMP TABLE tmp2 (a int) ON COMMIT DROP; -- fail
+ERROR:  ON COMMIT DROP cannot be used on global temporary tables
+-- Two-phase commit not allowed with global temp tables
+BEGIN;
+SELECT * FROM tmp1;
+ a | b | c 
+---+---+---
+(0 rows)
+
+PREPARE TRANSACTION 'twophase'; -- fail
+ERROR:  cannot PREPARE a transaction that has operated on temporary objects
+-- Test partitioned global temp table
+CREATE GLOBAL TEMP TABLE tmp2 (a int) PARTITION BY LIST (a);
+CREATE GLOBAL TEMP TABLE tmp2_p1 PARTITION OF tmp2 FOR VALUES IN (1);
+CREATE GLOBAL TEMP TABLE tmp2_p2 (a int);
+ALTER TABLE tmp2 ATTACH PARTITION tmp2_p2 FOR VALUES IN (2);
+CREATE TEMP TABLE local_tmp PARTITION OF tmp2 FOR VALUES IN (3); -- fail
+ERROR:  cannot create a local temporary relation as partition of global temporary relation "tmp2"
+CREATE TEMP TABLE local_tmp (a int);
+ALTER TABLE tmp2 ATTACH PARTITION local_tmp FOR VALUES IN (3); -- fail
+ERROR:  cannot attach a local temporary relation as partition of global temporary relation "tmp2"
+CREATE TABLE perm PARTITION OF tmp2 FOR VALUES IN (3); -- fail
+ERROR:  cannot create a permanent relation as partition of global temporary relation "tmp2"
+CREATE TABLE perm (a int);
+ALTER TABLE tmp2 ATTACH PARTITION perm FOR VALUES IN (3); -- fail
+ERROR:  cannot attach a permanent relation as partition of global temporary relation "tmp2"
+INSERT INTO tmp2 VALUES (1), (2);
+SELECT tableoid::regclass, * FROM tmp2 ORDER BY a;
+ tableoid | a 
+----------+---
+ tmp2_p1  | 1
+ tmp2_p2  | 2
+(2 rows)
+
+\c
+SET search_path = global_temp_tests;
+SELECT tableoid::regclass, * FROM tmp2 ORDER BY a;
+ tableoid | a 
+----------+---
+(0 rows)
+
+DROP TABLE tmp2, perm;
+-- Test partitioned index validity
+CREATE GLOBAL TEMP TABLE tmp2 (a int) PARTITION BY LIST (a);
+CREATE GLOBAL TEMP TABLE tmp2_p1 PARTITION OF tmp2 FOR VALUES IN (1);
+CREATE INDEX tmp2_a_idx ON tmp2 (a);
+SELECT c.relname, i.indisvalid AS global_valid, t.indisvalid AS local_valid
+  FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
+  LEFT JOIN pg_temp_index t ON t.indexrelid = i.indexrelid
+ WHERE c.relname ~ 'tmp2(.*)_a_idx'
+ ORDER BY c.relname;
+    relname    | global_valid | local_valid 
+---------------+--------------+-------------
+ tmp2_a_idx    | t            | t
+ tmp2_p1_a_idx | t            | t
+(2 rows)
+
+\d tmp2
+Global temporary partitioned table "global_temp_tests.tmp2"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ a      | integer |           |          | 
+Partition key: LIST (a)
+Indexes:
+    "tmp2_a_idx" btree (a)
+Number of partitions: 1 (Use \d+ to list them.)
+
+\d tmp2_a_idx
+Partitioned index "global_temp_tests.tmp2_a_idx"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ a      | integer | yes  | a
+btree, for table "global_temp_tests.tmp2"
+Number of partitions: 1 (Use \d+ to list them.)
+
+DROP INDEX tmp2_a_idx;
+CREATE INDEX tmp2_a_idx ON ONLY tmp2 (a);
+SELECT c.relname, i.indisvalid AS global_valid, t.indisvalid AS local_valid
+  FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
+  LEFT JOIN pg_temp_index t ON t.indexrelid = i.indexrelid
+ WHERE c.relname ~ 'tmp2(.*)_a_idx'
+ ORDER BY c.relname;
+  relname   | global_valid | local_valid 
+------------+--------------+-------------
+ tmp2_a_idx | f            | f
+(1 row)
+
+\d tmp2
+Global temporary partitioned table "global_temp_tests.tmp2"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ a      | integer |           |          | 
+Partition key: LIST (a)
+Indexes:
+    "tmp2_a_idx" btree (a) INVALID
+Number of partitions: 1 (Use \d+ to list them.)
+
+\d tmp2_a_idx
+Partitioned index "global_temp_tests.tmp2_a_idx"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ a      | integer | yes  | a
+btree, for table "global_temp_tests.tmp2", invalid
+Number of partitions: 0
+
+CREATE INDEX tmp2_p1_a_idx ON tmp2_p1 (a);
+ALTER INDEX tmp2_a_idx ATTACH PARTITION tmp2_p1_a_idx;
+SELECT c.relname, i.indisvalid AS global_valid, t.indisvalid AS local_valid
+  FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
+  LEFT JOIN pg_temp_index t ON t.indexrelid = i.indexrelid
+ WHERE c.relname ~ 'tmp2(.*)_a_idx'
+ ORDER BY c.relname;
+    relname    | global_valid | local_valid 
+---------------+--------------+-------------
+ tmp2_a_idx    | t            | t
+ tmp2_p1_a_idx | t            | t
+(2 rows)
+
+\d tmp2
+Global temporary partitioned table "global_temp_tests.tmp2"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ a      | integer |           |          | 
+Partition key: LIST (a)
+Indexes:
+    "tmp2_a_idx" btree (a)
+Number of partitions: 1 (Use \d+ to list them.)
+
+\d tmp2_a_idx
+Partitioned index "global_temp_tests.tmp2_a_idx"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ a      | integer | yes  | a
+btree, for table "global_temp_tests.tmp2"
+Number of partitions: 1 (Use \d+ to list them.)
+
+\d tmp2_p1_a_idx
+Index "global_temp_tests.tmp2_p1_a_idx"
+ Column |  Type   | Key? | Definition 
+--------+---------+------+------------
+ a      | integer | yes  | a
+Partition of: tmp2_a_idx 
+btree, for table "global_temp_tests.tmp2_p1"
+
+DROP TABLE tmp2;
+-- Test ALTER TABLE with rewrite
+CREATE GLOBAL TEMP TABLE tmp2 (a int);
+INSERT INTO tmp2 VALUES (1);
+ALTER TABLE tmp2 ALTER COLUMN a SET DATA TYPE numeric;
+SELECT a, pg_typeof(a) FROM tmp2;
+ a | pg_typeof 
+---+-----------
+ 1 | numeric
+(1 row)
+
+DROP TABLE tmp2;
+-- Test foreign keys
+CREATE TABLE perm_pk_rel (a int PRIMARY KEY);
+CREATE TEMP TABLE temp_pk_rel (a int PRIMARY KEY);
+CREATE GLOBAL TEMP TABLE gtemp_pk_rel (a int PRIMARY KEY);
+CREATE TABLE tmp2 (a int REFERENCES gtemp_pk_rel); -- fail
+ERROR:  constraints on permanent tables may reference only permanent tables
+CREATE TEMP TABLE tmp2 (a int REFERENCES gtemp_pk_rel); -- fail
+ERROR:  constraints on local temporary tables may reference only local temporary tables
+CREATE GLOBAL TEMP TABLE tmp2 (a int REFERENCES perm_pk_rel); -- fail
+ERROR:  constraints on global temporary tables may reference only global temporary tables
+CREATE GLOBAL TEMP TABLE tmp2 (a int REFERENCES temp_pk_rel); -- fail
+ERROR:  constraints on global temporary tables may reference only global temporary tables
+CREATE GLOBAL TEMP TABLE tmp2 (a int REFERENCES gtemp_pk_rel);
+INSERT INTO gtemp_pk_rel VALUES (1);
+INSERT INTO tmp2 VALUES (1);
+INSERT INTO tmp2 VALUES (2); -- fail
+ERROR:  insert or update on table "tmp2" violates foreign key constraint "tmp2_a_fkey"
+DETAIL:  Key (a)=(2) is not present in table "gtemp_pk_rel".
+DELETE FROM gtemp_pk_rel WHERE a = 1; -- fail
+ERROR:  update or delete on table "gtemp_pk_rel" violates foreign key constraint "tmp2_a_fkey" on table "tmp2"
+DETAIL:  Key (a)=(1) is still referenced from table "tmp2".
+ALTER TABLE tmp2 DROP CONSTRAINT tmp2_a_fkey;
+ALTER TABLE tmp2 ADD FOREIGN KEY (a) REFERENCES gtemp_pk_rel ON DELETE CASCADE;
+DELETE FROM gtemp_pk_rel WHERE a = 1;
+SELECT * FROM tmp2;
+ a 
+---
+(0 rows)
+
+DROP TABLE perm_pk_rel, temp_pk_rel, tmp2;
+-- Test ALTER TABLE ... SET TABLESPACE -- reltablespace changes locally and globally
+CREATE GLOBAL TEMP TABLE tmp2 (a int);
+INSERT INTO tmp2 VALUES (1);
+SELECT * FROM tmp2;
+ a 
+---
+ 1
+(1 row)
+
+SELECT c.reltablespace AS global_tablespace,
+       t.reltablespace AS local_tablespace,
+       regexp_replace(pg_relation_filepath('tmp2'), '(\d+)', 'NNN', 'g')
+  FROM pg_class c
+  LEFT JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.relname = 'tmp2';
+ global_tablespace | local_tablespace |  regexp_replace   
+-------------------+------------------+-------------------
+                 0 |                0 | base/NNN/tNNN_NNN
+(1 row)
+
+ALTER TABLE tmp2 SET TABLESPACE regress_tblspace;
+SELECT * FROM tmp2;
+ a 
+---
+ 1
+(1 row)
+
+SELECT s1.spcname AS global_tablespace, s2.spcname AS local_tablespace,
+       regexp_replace(pg_relation_filepath('tmp2'), '(\d+)', 'NNN', 'g')
+  FROM pg_class c
+  JOIN pg_tablespace s1 ON s1.oid = c.reltablespace
+  LEFT JOIN pg_temp_class t ON t.oid = c.oid
+  JOIN pg_tablespace s2 ON s2.oid = t.reltablespace
+ WHERE c.relname = 'tmp2';
+ global_tablespace | local_tablespace |            regexp_replace             
+-------------------+------------------+---------------------------------------
+ regress_tblspace  | regress_tblspace | pg_tblspc/NNN/PG_NNN_NNN/NNN/tNNN_NNN
+(1 row)
+
+DROP TABLE tmp2;
+-- Test dependency on tablespace
+SET allow_in_place_tablespaces = true;
+CREATE TABLESPACE regress_temp_test_tablespace LOCATION '';
+CREATE GLOBAL TEMP TABLE tmp2 (a int) TABLESPACE regress_temp_test_tablespace;
+\c
+SET search_path = global_temp_tests;
+DROP TABLESPACE regress_temp_test_tablespace; -- fail
+ERROR:  tablespace "regress_temp_test_tablespace" cannot be dropped because some objects depend on it
+DETAIL:  tablespace for table tmp2
+DROP TABLE tmp2;
+DROP TABLESPACE regress_temp_test_tablespace;
+SET allow_in_place_tablespaces = true;
+CREATE TABLESPACE regress_temp_test_tablespace LOCATION '';
+CREATE GLOBAL TEMP TABLE tmp2 (a int);
+ALTER TABLE tmp2 SET TABLESPACE regress_temp_test_tablespace;
+\c
+SET search_path = global_temp_tests;
+DROP TABLESPACE regress_temp_test_tablespace; -- fail
+ERROR:  tablespace "regress_temp_test_tablespace" cannot be dropped because some objects depend on it
+DETAIL:  tablespace for table tmp2
+DROP TABLE tmp2;
+DROP TABLESPACE regress_temp_test_tablespace;
+-- Test TRUNCATE
+INSERT INTO tmp1 VALUES (1, 'xxx');
+BEGIN;
+TRUNCATE tmp1;
+SELECT * FROM tmp1;
+ a | b | c 
+---+---+---
+(0 rows)
+
+ROLLBACK;
+SELECT * FROM tmp1;
+ a |  b  | c 
+---+-----+---
+ 1 | xxx | 1
+(1 row)
+
+BEGIN;
+SAVEPOINT sp1;
+TRUNCATE tmp1;
+SELECT * FROM tmp1;
+ a | b | c 
+---+---+---
+(0 rows)
+
+RELEASE sp1;
+SELECT * FROM tmp1;
+ a | b | c 
+---+---+---
+(0 rows)
+
+ROLLBACK;
+SELECT * FROM tmp1;
+ a |  b  | c 
+---+-----+---
+ 1 | xxx | 1
+(1 row)
+
+BEGIN;
+SAVEPOINT sp1;
+TRUNCATE tmp1;
+SELECT * FROM tmp1;
+ a | b | c 
+---+---+---
+(0 rows)
+
+ROLLBACK TO sp1;
+SELECT * FROM tmp1;
+ a |  b  | c 
+---+-----+---
+ 1 | xxx | 1
+(1 row)
+
+COMMIT;
+SELECT * FROM tmp1;
+ a |  b  | c 
+---+-----+---
+ 1 | xxx | 1
+(1 row)
+
+TRUNCATE tmp1;
+SELECT * FROM tmp1;
+ a | b | c 
+---+---+---
+(0 rows)
+
+-- Test CLUSTER -- relfilenode only changes locally
+SELECT c.relfilenode AS global_relfilenode, t.relfilenode AS local_relfilenode
+  FROM pg_class c LEFT JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.relname = 'tmp1' \gset
+CLUSTER tmp1 USING tmp1_pkey;
+SELECT CASE WHEN c.relfilenode = :global_relfilenode THEN 'unchanged' ELSE 'changed' END AS global_relfilenode,
+       CASE WHEN t.relfilenode = :local_relfilenode THEN 'unchange' ELSE 'changed' END AS local_relfilenode
+  FROM pg_class c LEFT JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.relname = 'tmp1';
+ global_relfilenode | local_relfilenode 
+--------------------+-------------------
+ unchanged          | changed
+(1 row)
+
+-- CLUSTER not allowed on pg_temp_class
+CLUSTER pg_temp_class; -- fail
+ERROR:  cannot execute CLUSTER on temporary system catalog "pg_temp_class"
+-- Test REPACK -- relfilenode only changes locally
+SELECT c.relfilenode AS global_relfilenode, t.relfilenode AS local_relfilenode
+  FROM pg_class c LEFT JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.relname = 'tmp1' \gset
+REPACK tmp1;
+SELECT CASE WHEN c.relfilenode = :global_relfilenode THEN 'unchanged' ELSE 'changed' END AS global_relfilenode,
+       CASE WHEN t.relfilenode = :local_relfilenode THEN 'unchange' ELSE 'changed' END AS local_relfilenode
+  FROM pg_class c LEFT JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.relname = 'tmp1';
+ global_relfilenode | local_relfilenode 
+--------------------+-------------------
+ unchanged          | changed
+(1 row)
+
+-- REPACK not allowed on pg_temp_class
+REPACK pg_temp_class; -- fail
+ERROR:  cannot execute REPACK on temporary system catalog "pg_temp_class"
+-- Test VACUUM FULL -- relfilenode only changes locally
+SELECT c.relfilenode AS global_relfilenode, t.relfilenode AS local_relfilenode
+  FROM pg_class c LEFT JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.relname = 'tmp1' \gset
+VACUUM FULL tmp1;
+SELECT CASE WHEN c.relfilenode = :global_relfilenode THEN 'unchanged' ELSE 'changed' END AS global_relfilenode,
+       CASE WHEN t.relfilenode = :local_relfilenode THEN 'unchange' ELSE 'changed' END AS local_relfilenode
+  FROM pg_class c LEFT JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.relname = 'tmp1';
+ global_relfilenode | local_relfilenode 
+--------------------+-------------------
+ unchanged          | changed
+(1 row)
+
+-- VACUUM FULL not allowed on pg_temp_class
+VACUUM FULL pg_temp_class; -- silently ignored
+-- Test pg_relation_filenode() now matches local relfilenode
+SELECT relfilenode = pg_relation_filenode('tmp1'::regclass) AS ok
+  FROM pg_temp_class WHERE oid = 'tmp1'::regclass;
+ ok 
+----
+ t
+(1 row)
+
+-- VACUUM initializes toast tables
+\c
+SET search_path = global_temp_tests;
+SELECT EXISTS (SELECT 1 FROM pg_class t WHERE t.oid = c.reltoastrelid),
+       EXISTS (SELECT 1 FROM pg_temp_class t WHERE t.oid = c.reltoastrelid)
+FROM pg_class c
+WHERE oid = 'tmp1'::regclass;
+ exists | exists 
+--------+--------
+ t      | f
+(1 row)
+
+VACUUM tmp1;
+SELECT EXISTS (SELECT 1 FROM pg_class t WHERE t.oid = c.reltoastrelid),
+       EXISTS (SELECT 1 FROM pg_temp_class t WHERE t.oid = c.reltoastrelid)
+FROM pg_class c
+WHERE oid = 'tmp1'::regclass;
+ exists | exists 
+--------+--------
+ t      | t
+(1 row)
+
+\c
+SET search_path = global_temp_tests;
+VACUUM FULL tmp1;
+SELECT EXISTS (SELECT 1 FROM pg_class t WHERE t.oid = c.reltoastrelid),
+       EXISTS (SELECT 1 FROM pg_temp_class t WHERE t.oid = c.reltoastrelid)
+FROM pg_class c
+WHERE oid = 'tmp1'::regclass;
+ exists | exists 
+--------+--------
+ t      | t
+(1 row)
+
+-- Test subtransaction rollback of pending pg_temp_class inserts
+\c
+SET search_path = global_temp_tests;
+BEGIN;
+SELECT count(*) FROM tmp1;
+ count 
+-------
+     0
+(1 row)
+
+SAVEPOINT sp;
+DROP TABLE tmp1;
+ROLLBACK TO sp;
+INSERT INTO tmp1 VALUES (1, 'xxx');
+COMMIT;
+SELECT oid::regclass FROM pg_temp_class ORDER BY 1;
+                  oid                  
+---------------------------------------
+ pg_temp_class
+ pg_temp_class_oid_index
+ pg_temp_statistic
+ pg_temp_statistic_relid_att_inh_index
+ pg_temp_index
+ pg_temp_index_indexrelid_index
+ tmp1_c_seq
+ tmp1
+ tmp1_pkey
+(9 rows)
+
+SELECT * FROM tmp1;
+ a |  b  | c 
+---+-----+---
+ 1 | xxx | 1
+(1 row)
+
+-- Test stats updates applied by CREATE INDEX, ANALYZE, VACUUM, and REPACK
+CREATE GLOBAL TEMP TABLE tmp2 (a int);
+INSERT INTO tmp2 SELECT * FROM generate_series(1, 100);
+SELECT c.oid::regclass,
+       c.relpages AS global_relpages, c.reltuples AS global_reltuples,
+       CASE WHEN t.relpages = 0 THEN 'zero' ELSE 'non-zero' END AS local_relpages,
+       t.reltuples AS local_reltuples
+  FROM pg_class c JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.oid = 'tmp2'::regclass;
+ oid  | global_relpages | global_reltuples | local_relpages | local_reltuples 
+------+-----------------+------------------+----------------+-----------------
+ tmp2 |               0 |               -1 | zero           |              -1
+(1 row)
+
+CREATE INDEX tmp2_a_idx ON tmp2(a);
+SELECT c.oid::regclass,
+       c.relpages AS global_relpages, c.reltuples AS global_reltuples,
+       CASE WHEN t.relpages = 0 THEN 'zero' ELSE 'non-zero' END AS local_relpages,
+       t.reltuples AS local_reltuples
+  FROM pg_class c JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.oid = 'tmp2'::regclass OR c.oid = 'tmp2_a_idx'::regclass ORDER BY 1;
+    oid     | global_relpages | global_reltuples | local_relpages | local_reltuples 
+------------+-----------------+------------------+----------------+-----------------
+ tmp2       |               0 |               -1 | non-zero       |             100
+ tmp2_a_idx |               0 |                0 | non-zero       |             100
+(2 rows)
+
+INSERT INTO tmp2 SELECT * FROM generate_series(101, 300);
+ANALYZE tmp2;
+SELECT c.oid::regclass,
+       c.relpages AS global_relpages, c.reltuples AS global_reltuples,
+       CASE WHEN t.relpages = 0 THEN 'zero' ELSE 'non-zero' END AS local_relpages,
+       t.reltuples AS local_reltuples
+  FROM pg_class c JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.oid = 'tmp2'::regclass OR c.oid = 'tmp2_a_idx'::regclass ORDER BY 1;
+    oid     | global_relpages | global_reltuples | local_relpages | local_reltuples 
+------------+-----------------+------------------+----------------+-----------------
+ tmp2       |               0 |               -1 | non-zero       |             300
+ tmp2_a_idx |               0 |                0 | non-zero       |             300
+(2 rows)
+
+DELETE FROM tmp2 WHERE a % 2 = 0;
+VACUUM ANALYZE tmp2;
+SELECT c.oid::regclass,
+       c.relpages AS global_relpages, c.reltuples AS global_reltuples,
+       CASE WHEN t.relpages = 0 THEN 'zero' ELSE 'non-zero' END AS local_relpages,
+       t.reltuples AS local_reltuples
+  FROM pg_class c JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.oid = 'tmp2'::regclass OR c.oid = 'tmp2_a_idx'::regclass ORDER BY 1;
+    oid     | global_relpages | global_reltuples | local_relpages | local_reltuples 
+------------+-----------------+------------------+----------------+-----------------
+ tmp2       |               0 |               -1 | non-zero       |             150
+ tmp2_a_idx |               0 |                0 | non-zero       |             150
+(2 rows)
+
+DELETE FROM tmp2 WHERE a % 3 = 0;
+REPACK (ANALYZE) tmp2;
+SELECT c.oid::regclass,
+       c.relpages AS global_relpages, c.reltuples AS global_reltuples,
+       CASE WHEN t.relpages = 0 THEN 'zero' ELSE 'non-zero' END AS local_relpages,
+       t.reltuples AS local_reltuples
+  FROM pg_class c JOIN pg_temp_class t ON t.oid = c.oid
+ WHERE c.oid = 'tmp2'::regclass OR c.oid = 'tmp2_a_idx'::regclass ORDER BY 1;
+    oid     | global_relpages | global_reltuples | local_relpages | local_reltuples 
+------------+-----------------+------------------+----------------+-----------------
+ tmp2       |               0 |               -1 | non-zero       |             100
+ tmp2_a_idx |               0 |                0 | non-zero       |             100
+(2 rows)
+
+-- Test stats usage
+CREATE FUNCTION row_estimate(query text) RETURNS int
+LANGUAGE plpgsql AS
+$$
+DECLARE
+  line text;
+BEGIN
+  FOR line IN EXECUTE FORMAT('EXPLAIN %s', query)
+  LOOP
+    RETURN (regexp_match(line, 'rows=(\d*)'))[1]::int;
+  END LOOP;
+END;
+$$;
+SELECT row_estimate('SELECT * FROM tmp2');
+ row_estimate 
+--------------
+          100
+(1 row)
+
+-- Test in-place stats update (non-transactional)
+TRUNCATE tmp2;
+SELECT reltuples FROM pg_temp_class WHERE oid = 'tmp2'::regclass;
+ reltuples 
+-----------
+        -1
+(1 row)
+
+SELECT row_estimate('SELECT * FROM tmp2');
+ row_estimate 
+--------------
+         2550
+(1 row)
+
+BEGIN;
+INSERT INTO tmp2 SELECT * FROM generate_series(1, 100);
+ANALYZE tmp2;
+SELECT reltuples FROM pg_temp_class WHERE oid = 'tmp2'::regclass;
+ reltuples 
+-----------
+       100
+(1 row)
+
+SELECT row_estimate('SELECT * FROM tmp2');
+ row_estimate 
+--------------
+          100
+(1 row)
+
+ROLLBACK;
+SELECT reltuples FROM pg_temp_class WHERE oid = 'tmp2'::regclass;
+ reltuples 
+-----------
+       100
+(1 row)
+
+SELECT row_estimate('SELECT * FROM tmp2');
+ row_estimate 
+--------------
+          100
+(1 row)
+
+-- Test in-place stats update after regular update (transactional)
+BEGIN;
+TRUNCATE tmp2;
+INSERT INTO tmp2 SELECT * FROM generate_series(1, 50);
+ANALYZE tmp2;
+SELECT reltuples FROM pg_temp_class WHERE oid = 'tmp2'::regclass;
+ reltuples 
+-----------
+        50
+(1 row)
+
+SELECT row_estimate('SELECT * FROM tmp2');
+ row_estimate 
+--------------
+           50
+(1 row)
+
+ROLLBACK;
+SELECT reltuples FROM pg_temp_class WHERE oid = 'tmp2'::regclass;
+ reltuples 
+-----------
+       100
+(1 row)
+
+SELECT row_estimate('SELECT * FROM tmp2');
+ row_estimate 
+--------------
+          100
+(1 row)
+
+-- Test manually updating stats
+SELECT pg_clear_relation_stats('global_temp_tests', 'tmp2');
+ pg_clear_relation_stats 
+-------------------------
+ 
+(1 row)
+
+SELECT oid::regclass, relpages, reltuples, relallvisible, relallfrozen
+  FROM pg_class WHERE oid = 'tmp2'::regclass;
+ oid  | relpages | reltuples | relallvisible | relallfrozen 
+------+----------+-----------+---------------+--------------
+ tmp2 |        0 |        -1 |             0 |            0
+(1 row)
+
+SELECT oid::regclass, relpages, reltuples, relallvisible, relallfrozen
+  FROM pg_temp_class WHERE oid = 'tmp2'::regclass;
+ oid  | relpages | reltuples | relallvisible | relallfrozen 
+------+----------+-----------+---------------+--------------
+ tmp2 |        0 |        -1 |             0 |            0
+(1 row)
+
+SELECT pg_restore_relation_stats(
+  'schemaname', 'global_temp_tests',
+  'relname', 'tmp2',
+  'relpages', 5,
+  'reltuples', 150::real,
+  'relallvisible', 10,
+  'relallfrozen', 20);
+ pg_restore_relation_stats 
+---------------------------
+ t
+(1 row)
+
+SELECT oid::regclass, relpages, reltuples, relallvisible, relallfrozen
+  FROM pg_class WHERE oid = 'tmp2'::regclass;
+ oid  | relpages | reltuples | relallvisible | relallfrozen 
+------+----------+-----------+---------------+--------------
+ tmp2 |        0 |        -1 |             0 |            0
+(1 row)
+
+SELECT oid::regclass, relpages, reltuples, relallvisible, relallfrozen
+  FROM pg_temp_class WHERE oid = 'tmp2'::regclass;
+ oid  | relpages | reltuples | relallvisible | relallfrozen 
+------+----------+-----------+---------------+--------------
+ tmp2 |        5 |       150 |            10 |           20
+(1 row)
+
+DROP TABLE tmp2;
+-- Test column stats
+CREATE GLOBAL TEMP TABLE tmp2 (a int, b int);
+INSERT INTO tmp2 SELECT x, floor(sqrt(x)) FROM generate_series(36, 99) x;
+ANALYZE tmp2;
+SELECT stavalues1 FROM pg_statistic
+ WHERE starelid = 'tmp2'::regclass AND staattnum = 2;
+ stavalues1 
+------------
+(0 rows)
+
+SELECT stavalues1 FROM pg_temp_statistic
+ WHERE starelid = 'tmp2'::regclass AND staattnum = 2;
+ stavalues1 
+------------
+ {9,8,7,6}
+(1 row)
+
+SELECT most_common_vals FROM pg_stats
+ WHERE tablename = 'tmp2' AND attname = 'b';
+ most_common_vals 
+------------------
+ {9,8,7,6}
+(1 row)
+
+SELECT COUNT(*) FROM tmp2 WHERE b = 8;
+ count 
+-------
+    17
+(1 row)
+
+SELECT row_estimate('SELECT * FROM tmp2 WHERE b = 8');
+ row_estimate 
+--------------
+           17
+(1 row)
+
+DROP TABLE tmp2;
+-- Test extended stats
+CREATE GLOBAL TEMP TABLE tmp2 (a int, b int, c int);
+INSERT INTO tmp2
+  SELECT x, floor(sqrt(x)), floor(sqrt(x)) + 100 FROM generate_series(36, 99) x;
+CREATE STATISTICS tmp2_stats ON b, c FROM tmp2;
+ANALYZE tmp2;
+SELECT stxname,
+       replace(d.stxdndistinct, '}, ', E'},\n') AS stxdndistinct,
+       replace(d.stxddependencies, '}, ', E'},\n') AS stxddependencies
+  FROM pg_statistic_ext s
+  LEFT JOIN pg_statistic_ext_data d ON d.stxoid = s.oid
+ WHERE s.stxname = 'tmp2_stats';
+  stxname   | stxdndistinct | stxddependencies 
+------------+---------------+------------------
+ tmp2_stats |               | 
+(1 row)
+
+SELECT stxname,
+       replace(d.stxdndistinct, '}, ', E'},\n') AS stxdndistinct,
+       replace(d.stxddependencies, '}, ', E'},\n') AS stxddependencies
+  FROM pg_statistic_ext s
+  LEFT JOIN pg_temp_statistic_ext_data d ON d.stxoid = s.oid
+ WHERE s.stxname = 'tmp2_stats';
+  stxname   |              stxdndistinct               |                      stxddependencies                      
+------------+------------------------------------------+------------------------------------------------------------
+ tmp2_stats | [{"attributes": [2, 3], "ndistinct": 4}] | [{"attributes": [2], "dependency": 3, "degree": 1.000000},+
+            |                                          | {"attributes": [3], "dependency": 2, "degree": 1.000000}]
+(1 row)
+
+SELECT m.*
+  FROM pg_statistic_ext s, pg_statistic_ext_data d,
+       pg_mcv_list_items(d.stxdmcv) m
+ WHERE s.stxname = 'tmp2_stats'
+   AND d.stxoid = s.oid;
+ index | values | nulls | frequency | base_frequency 
+-------+--------+-------+-----------+----------------
+(0 rows)
+
+SELECT m.*
+  FROM pg_statistic_ext s, pg_temp_statistic_ext_data d,
+       pg_mcv_list_items(d.stxdmcv) m
+ WHERE s.stxname = 'tmp2_stats'
+   AND d.stxoid = s.oid;
+ index | values  | nulls | frequency | base_frequency 
+-------+---------+-------+-----------+----------------
+     0 | {9,109} | {f,f} |  0.296875 | 0.088134765625
+     1 | {8,108} | {f,f} |  0.265625 | 0.070556640625
+     2 | {7,107} | {f,f} |  0.234375 | 0.054931640625
+     3 | {6,106} | {f,f} |  0.203125 | 0.041259765625
+(4 rows)
+
+SELECT most_common_vals FROM pg_stats_ext
+ WHERE schemaname = 'global_temp_tests' AND tablename = 'tmp2';
+         most_common_vals          
+-----------------------------------
+ {{9,109},{8,108},{7,107},{6,106}}
+(1 row)
+
+SELECT COUNT(*) FROM tmp2 WHERE b = 8 AND c = 108;
+ count 
+-------
+    17
+(1 row)
+
+SELECT row_estimate('SELECT * FROM tmp2 WHERE b = 8 AND c = 108');
+ row_estimate 
+--------------
+           17
+(1 row)
+
+DROP TABLE tmp2;
+-- Test view creation
+CREATE VIEW v AS SELECT * FROM tmp1;
+SELECT * FROM v;
+ a |  b  | c 
+---+-----+---
+ 1 | xxx | 1
+(1 row)
+
+DROP VIEW v;
+CREATE TEMP VIEW v AS SELECT * FROM tmp1;
+SELECT * FROM v;
+ a |  b  | c 
+---+-----+---
+ 1 | xxx | 1
+(1 row)
+
+DROP VIEW v;
+CREATE GLOBAL TEMP VIEW v AS SELECT * FROM tmp1; -- fail
+ERROR:  views cannot be global temporary because they do not have storage
+-- Test global temp sequence
+CREATE GLOBAL TEMP SEQUENCE s MINVALUE 100 MAXVALUE 130 INCREMENT 10 START WITH 110 CYCLE;
+\d s
+         Global temporary sequence "global_temp_tests.s"
+  Type  | Start | Minimum | Maximum | Increment | Cycles? | Cache 
+--------+-------+---------+---------+-----------+---------+-------
+ bigint |   110 |     100 |     130 |        10 | yes     |     1
+
+SELECT nextval('s') FROM generate_series(1, 5);
+ nextval 
+---------
+     110
+     120
+     130
+     100
+     110
+(5 rows)
+
+\c
+SET search_path = global_temp_tests;
+SELECT nextval('s') FROM generate_series(1, 5);
+ nextval 
+---------
+     110
+     120
+     130
+     100
+     110
+(5 rows)
+
+-- Test that sequence initialization survives ROLLBACK
+\c
+SET search_path = global_temp_tests;
+BEGIN;
+SELECT nextval('s') FROM generate_series(1, 2);
+ nextval 
+---------
+     110
+     120
+(2 rows)
+
+ROLLBACK;
+SELECT nextval('s') FROM generate_series(1, 2);
+ nextval 
+---------
+     130
+     100
+(2 rows)
+
+\c
+SET search_path = global_temp_tests;
+BEGIN;
+SAVEPOINT sp;
+SELECT nextval('s') FROM generate_series(1, 2);
+ nextval 
+---------
+     110
+     120
+(2 rows)
+
+ROLLBACK TO sp;
+SELECT nextval('s') FROM generate_series(1, 3);
+ nextval 
+---------
+     130
+     100
+     110
+(3 rows)
+
+ROLLBACK;
+SELECT nextval('s') FROM generate_series(1, 2);
+ nextval 
+---------
+     120
+     130
+(2 rows)
+
+-- Test lastval() after ROLLBACK of sequence initialization
+\c
+SET search_path = global_temp_tests;
+BEGIN;
+SELECT nextval('s') FROM generate_series(1, 2);
+ nextval 
+---------
+     110
+     120
+(2 rows)
+
+ROLLBACK;
+SELECT lastval();
+ lastval 
+---------
+     120
+(1 row)
+
+\c
+SET search_path = global_temp_tests;
+BEGIN;
+SAVEPOINT sp;
+SELECT nextval('s') FROM generate_series(1, 2);
+ nextval 
+---------
+     110
+     120
+(2 rows)
+
+ROLLBACK TO sp;
+SELECT lastval();
+ lastval 
+---------
+     120
+(1 row)
+
+ROLLBACK;
+SELECT lastval();
+ lastval 
+---------
+     120
+(1 row)
+
+SELECT nextval('s') FROM generate_series(1, 2);
+ nextval 
+---------
+     130
+     100
+(2 rows)
+
+-- Test tempfrozenxid/tempminmxid update on commit
+\c
+SET search_path = global_temp_tests;
+SELECT tempfrozenxid, tempminmxid FROM pg_stat_activity WHERE pid = pg_backend_pid();
+ tempfrozenxid | tempminmxid 
+---------------+-------------
+               |            
+(1 row)
+
+BEGIN;
+CREATE GLOBAL TEMP TABLE tmp2 (a int);
+SELECT tempfrozenxid, tempminmxid FROM pg_stat_activity WHERE pid = pg_backend_pid();
+ tempfrozenxid | tempminmxid 
+---------------+-------------
+               |            
+(1 row)
+
+ROLLBACK;
+SELECT tempfrozenxid, tempminmxid FROM pg_stat_activity WHERE pid = pg_backend_pid();
+ tempfrozenxid | tempminmxid 
+---------------+-------------
+               |            
+(1 row)
+
+BEGIN;
+SAVEPOINT sp;
+CREATE GLOBAL TEMP TABLE tmp2 (a int);
+SELECT tempfrozenxid, tempminmxid FROM pg_stat_activity WHERE pid = pg_backend_pid();
+ tempfrozenxid | tempminmxid 
+---------------+-------------
+               |            
+(1 row)
+
+ROLLBACK TO sp;
+SELECT tempfrozenxid, tempminmxid FROM pg_stat_activity WHERE pid = pg_backend_pid();
+ tempfrozenxid | tempminmxid 
+---------------+-------------
+               |            
+(1 row)
+
+COMMIT;
+SELECT tempfrozenxid, tempminmxid FROM pg_stat_activity WHERE pid = pg_backend_pid();
+ tempfrozenxid | tempminmxid 
+---------------+-------------
+               |            
+(1 row)
+
+CREATE GLOBAL TEMP TABLE tmp2 (a int);
+SELECT tempfrozenxid::text::bigint - (SELECT min(relfrozenxid::text::bigint)
+                                        FROM pg_temp_class
+                                       WHERE relfrozenxid::text != '0'),
+       tempminmxid::text::bigint - (SELECT min(relminmxid::text::bigint)
+                                      FROM pg_temp_class
+                                     WHERE relminmxid::text != '0')
+  FROM pg_stat_activity
+ WHERE pid = pg_backend_pid();
+ ?column? | ?column? 
+----------+----------
+        0 |        0
+(1 row)
+
+VACUUM FREEZE pg_temp_class;
+BEGIN;
+SAVEPOINT sp;
+DROP TABLE tmp2;
+ROLLBACK TO SAVEPOINT sp;
+COMMIT;
+SELECT tempfrozenxid::text::bigint - (SELECT min(relfrozenxid::text::bigint)
+                                        FROM pg_temp_class
+                                       WHERE relfrozenxid::text != '0'),
+       tempminmxid::text::bigint - (SELECT min(relminmxid::text::bigint)
+                                      FROM pg_temp_class
+                                     WHERE relminmxid::text != '0')
+  FROM pg_stat_activity
+ WHERE pid = pg_backend_pid();
+ ?column? | ?column? 
+----------+----------
+        0 |        0
+(1 row)
+
+DROP TABLE tmp2;
+-- Test DISCARD GLOBAL TEMP
+\c
+SET search_path = global_temp_tests;
+INSERT INTO tmp1 VALUES (1, 'xxx'), (10, 'yyy');
+SELECT * FROM tmp1;
+ a  |  b  | c 
+----+-----+---
+  1 | xxx | 1
+ 10 | yyy | 2
+(2 rows)
+
+CREATE GLOBAL TEMP TABLE tmp2 (a int PRIMARY KEY, b text) PARTITION BY LIST (a);
+CREATE GLOBAL TEMP TABLE tmp2_p1 PARTITION OF tmp2 FOR VALUES IN (1);
+CREATE GLOBAL TEMP TABLE tmp2_p2 PARTITION OF tmp2 FOR VALUES IN (2);
+INSERT INTO tmp2 VALUES (1, 'Row 1'), (2, 'Row 2');
+SELECT tableoid::regclass, * FROM tmp2;
+ tableoid | a |   b   
+----------+---+-------
+ tmp2_p1  | 1 | Row 1
+ tmp2_p2  | 2 | Row 2
+(2 rows)
+
+DISCARD GLOBAL TEMP;
+SELECT tempfrozenxid, tempminmxid
+  FROM pg_stat_activity
+ WHERE pid = pg_backend_pid();
+ tempfrozenxid | tempminmxid 
+---------------+-------------
+               |            
+(1 row)
+
+SELECT relname, pg_relation_size(oid)
+  FROM pg_class
+ WHERE (relname ~ 'tmp1' OR relname ~ 'tmp2' OR relname ~ 'pg_temp_')
+   AND relpersistence = 'g' AND relkind IN ('r', 'p')
+ ORDER BY relname;
+          relname           | pg_relation_size 
+----------------------------+------------------
+ pg_temp_class              |                0
+ pg_temp_index              |                0
+ pg_temp_statistic          |                0
+ pg_temp_statistic_ext_data |                0
+ tmp1                       |                0
+ tmp2                       |                0
+ tmp2_p1                    |                0
+ tmp2_p2                    |                0
+(8 rows)
+
+SELECT * FROM tmp1;
+ a | b | c 
+---+---+---
+(0 rows)
+
+SELECT * FROM tmp2;
+ a | b 
+---+---
+(0 rows)
+
+INSERT INTO tmp1 VALUES (1, 'xxx'), (10, 'yyy');
+SELECT * FROM tmp1;
+ a  |  b  | c 
+----+-----+---
+  1 | xxx | 1
+ 10 | yyy | 2
+(2 rows)
+
