@@ -5161,8 +5161,8 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 	 * as a reference for building the ResultRelInfo of the target partition.
 	 * In either case, it doesn't matter which result relation is kept, so we
 	 * just keep the first one, if all others have been pruned.  See also,
-	 * ExecDoInitialPruning(), which ensures that this first result relation
-	 * has been locked.
+	 * AcquireExecutorLocksPrepared(), which ensures that this first result
+	 * relation has been locked.
 	 */
 	i = 0;
 	foreach(l, node->resultRelations)
@@ -5176,6 +5176,9 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 			/* all result relations pruned; keep the first one */
 			keep_rel = true;
 			rti = linitial_int(node->resultRelations);
+			if (!list_member_int(estate->es_plannedstmt->firstResultRels, rti))
+				elog(ERROR, "first result relation %u not found in firstResultRels",
+					 rti);
 			i = 0;
 		}
 

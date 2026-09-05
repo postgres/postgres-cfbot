@@ -402,3 +402,66 @@ select name, generic_plans, custom_plans from pg_prepared_statements
 (1 row)
 
 drop table test_mode;
+-- This exercises the CachedPlanPrepCleanup() path, which must free
+-- the EState created by ExecutorPrep() when the plan is invalidated
+-- before execution begins.  The pruning expression uses a stable SQL
+-- function that calls a volatile plpgsql function.  That function
+-- performs DDL on a partition when a separate "signal" table says to
+-- do so.  The second EXECUTE should replan cleanly after the DDL.
+set plan_cache_mode to force_generic_plan;
+create table inval_during_pruning_p (a int) partition by list (a);
+create table inval_during_pruning_p1 partition of inval_during_pruning_p for values in (1);
+create table inval_during_pruning_p2 partition of inval_during_pruning_p for values in (2);
+insert into inval_during_pruning_p values (1), (2);
+create table inval_during_pruning_signal (create_idx bool not null);
+insert into inval_during_pruning_signal values (false);
+create or replace function invalidate_plancache_func() returns int
+as $$
+declare
+	create_index bool;
+begin
+	-- Perform DDL on a partition if asked to
+	select create_idx into create_index from inval_during_pruning_signal for update;
+	if create_index = true then
+		raise notice 'creating index on partition inval_during_pruning_p1';
+		create index on inval_during_pruning_p1 (a);
+		update inval_during_pruning_signal set create_idx = false;
+	end if;
+	-- value that pruning will match against partition bounds
+	return 1;
+end;
+$$ language plpgsql volatile;
+create or replace function stable_pruning_val() returns int as $$
+	select invalidate_plancache_func();
+$$ language sql stable;
+prepare inval_during_pruning_q as select * from inval_during_pruning_p where a = stable_pruning_val();
+-- Build a generic plan and run pruning once, but don't set the signal
+-- for invalidate_plancache_func() to perform the DDL.
+explain (verbose, costs off) execute inval_during_pruning_q;
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Append
+   Subplans Removed: 1
+   ->  Seq Scan on public.inval_during_pruning_p1 inval_during_pruning_p_1
+         Output: inval_during_pruning_p_1.a
+         Filter: (inval_during_pruning_p_1.a = stable_pruning_val())
+(5 rows)
+
+-- Reuse the generic plan.  Make invalidate_plancache_func() perform DDL
+-- during this execution, which should force replanning without errors.
+update inval_during_pruning_signal set create_idx = true;
+explain (verbose, costs off) execute inval_during_pruning_q;
+NOTICE:  creating index on partition inval_during_pruning_p1
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Append
+   Subplans Removed: 1
+   ->  Seq Scan on public.inval_during_pruning_p1 inval_during_pruning_p_1
+         Output: inval_during_pruning_p_1.a
+         Filter: (inval_during_pruning_p_1.a = stable_pruning_val())
+(5 rows)
+
+deallocate inval_during_pruning_q;
+drop table inval_during_pruning_p, inval_during_pruning_signal;
+drop function invalidate_plancache_func, stable_pruning_val;
+reset plan_cache_mode;
