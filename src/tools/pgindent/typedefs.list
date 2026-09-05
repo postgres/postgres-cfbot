@@ -2194,6 +2194,7 @@ PartitionDirectoryEntry
 PartitionDispatch
 PartitionElem
 PartitionHashBound
+PartitionIndexProps
 PartitionKey
 PartitionListValue
 PartitionMap
