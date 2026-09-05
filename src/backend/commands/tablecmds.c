@@ -18130,8 +18130,9 @@ decompile_conbin(HeapTuple contup, TupleDesc tupdesc)
 	if (isnull)
 		elog(ERROR, "null conbin for constraint %u", con->oid);
 
-	expr = DirectFunctionCall2(pg_get_expr, attr,
-							   ObjectIdGetDatum(con->conrelid));
+	expr = DirectFunctionCall3(pg_get_expr, attr,
+							   ObjectIdGetDatum(con->conrelid),
+							   BoolGetDatum(false));
 	return TextDatumGetCString(expr);
 }
 
