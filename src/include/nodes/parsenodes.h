@@ -3631,14 +3631,26 @@ typedef struct IndexStmt
 										 * executing */
 
 	/*
-	 * When doing an operation on the index that causes it to be dropped and
-	 * recreated, these properties are not automatically cloned from the old
-	 * index to the new and must be explicitly saved before dropping the old
-	 * index and restored after creating the new index.
+	 * Properties not preserved by a cloned rebuild definition.
 	 */
+	bool		idxisreplident; /* restore this index as REPLICA IDENTITY */
+	bool		idxisclustered; /* restore CLUSTER ON this index */
 	char	   *idxcomment;		/* comment to apply to index, or NULL */
+	char	   *idxconstraintcomment;	/* comment to apply to index
+										 * constraint */
 	List	   *idxstattargets; /* list of IndexStatTarget to restore */
 	List	   *idxextensionOids;	/* extensions to depend on */
+
+	/*
+	 * For a partitioned index, oldPartIndexProps holds one entry per old
+	 * descendant index. The whole list is propagated to every IndexStmt in
+	 * DefineIndex()'s recursion so that intermediate levels can still find
+	 * deeper descendants' entries. Each stmt then copies its own matching
+	 * entry into the corresponding scalar fields in the IndexStmt (see
+	 * TransferPartitionIndexProps).
+	 */
+	List	   *oldPartIndexProps;	/* list of PartitionIndexProps
+									 * (partitioned index rebuild only) */
 } IndexStmt;
 
 /* one per-column statistics target carried across an index rebuild */
@@ -3650,6 +3662,29 @@ typedef struct IndexStatTarget
 	int			attnum;			/* index column number (1-based) */
 	int16		stattarget;		/* attstattarget value to restore */
 } IndexStatTarget;
+
+/*
+ * Properties of one old descendant partition index that are not preserved by
+ * the cloned rebuild definition, captured before ALTER COLUMN TYPE or SET
+ * EXPRESSION drops the index.
+ */
+typedef struct PartitionIndexProps
+{
+	pg_node_attr(no_equal, no_query_jumble)
+
+	NodeTag		type;
+	Oid			partrelid;		/* partition table owning this index */
+	char	   *idxname;		/* index name to restore */
+	char	   *idxcomment;		/* comment, or NULL */
+	char	   *constraintcomment;	/* index constraint comment, or NULL */
+	bool		isreplident;	/* was replica identity */
+	bool		isclustered;	/* was clustered on */
+	List	   *stattargets;	/* list of IndexStatTarget */
+	List	   *extensionOids;	/* extensions this index depends on */
+	List	   *reloptions;		/* index's own reloptions (untransformed
+								 * DefElem list), or NIL */
+	char	   *tableSpace;		/* index's own tablespace for the rebuild */
+} PartitionIndexProps;
 
 /* ----------------------
  *		Create Statistics Statement
