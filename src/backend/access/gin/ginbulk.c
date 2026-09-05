@@ -17,107 +17,118 @@
 #include <limits.h>
 
 #include "access/gin_private.h"
+#include "common/hashfn.h"
 #include "utils/datum.h"
 #include "utils/memutils.h"
 
+#define DEF_NENTRY			2048	/* Initial hash table size */
+#define DEF_ITEMS_PER_KEY	8		/* Initial ItemPointer array size per key */
 
-#define DEF_NENTRY	2048		/* GinEntryAccumulator allocation quantum */
-#define DEF_NPTR	5			/* ItemPointer initial allocation quantum */
-
-
-/* Combiner function for rbtree.c */
-static void
-ginCombineData(RBTNode *existing, const RBTNode *newdata, void *arg)
+typedef struct GinHashKey
 {
-	GinEntryAccumulator *eo = (GinEntryAccumulator *) existing;
-	const GinEntryAccumulator *en = (const GinEntryAccumulator *) newdata;
-	BuildAccumulator *accum = (BuildAccumulator *) arg;
+	OffsetNumber	attnum;
+	GinNullCategory	category;
+	Datum			key;
+} GinHashKey;
+
+typedef struct GinHashEntry
+{
+	GinHashKey		hashkey;
+	uint32			hash;
+	char			status;
+	ItemPointerData	*items;
+	uint32			numItems;
+	uint32			allocatedItems;
+} GinHashEntry;
+
+typedef struct GinSortEntry
+{
+	GinHashKey		hashkey;
+	ItemPointerData *items;
+	uint32			numItems;
+} GinSortEntry;
+
+static uint32 gin_hash_key(struct ginbuild_hash *tb, GinHashKey *key);
+static bool gin_equal_key(struct ginbuild_hash *tb, GinHashKey *a, GinHashKey *b);
+
+#define SH_PREFIX ginbuild
+#define SH_ELEMENT_TYPE GinHashEntry
+#define SH_KEY_TYPE GinHashKey
+#define SH_KEY hashkey
+#define SH_HASH_KEY(tb, key) gin_hash_key(tb, &key)
+#define SH_EQUAL(tb, a, b) gin_equal_key(tb, &a, &b)
+#define SH_SCOPE static inline
+#define SH_STORE_HASH
+#define SH_GET_HASH(tb, a) (a)->hash
+#define SH_DEFINE
+#define SH_DECLARE
+#include "lib/simplehash.h"
+
+static uint32
+gin_hash_key(struct ginbuild_hash *tb, GinHashKey *key)
+{
+	BuildAccumulator *accum = (BuildAccumulator *) tb->private_data;
+	uint32		hash;
+
+	hash = hash_combine(0, murmurhash32((uint32) key->attnum));
+	hash = hash_combine(hash, murmurhash32((uint32) key->category));
+
+	if (key->category == GIN_CAT_NORM_KEY)
+	{
+		CompactAttribute *att;
+
+		att = TupleDescCompactAttr(accum->ginstate->origTupdesc, key->attnum - 1);
+		hash = hash_combine(hash, datum_image_hash(key->key, att->attbyval, att->attlen));
+	}
+
+	return hash;
+}
+
+static bool
+gin_equal_key(struct ginbuild_hash *tb, GinHashKey *a, GinHashKey *b)
+{
+	BuildAccumulator *accum = (BuildAccumulator *) tb->private_data;
+	CompactAttribute *att;
+
+	if (a->attnum != b->attnum)
+		return false;
+	if (a->category != b->category)
+		return false;
+	if (a->category != GIN_CAT_NORM_KEY)
+		return true;
 
 	/*
-	 * Note this code assumes that newdata contains only one itempointer.
+	 * Compare the actual key values using image equality.
+	 * This is correct because we don't want to deduplicate at this point.
 	 */
-	if (eo->count >= eo->maxcount)
-	{
-		if (eo->maxcount > INT_MAX)
-			ereport(ERROR,
-					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-					 errmsg("posting list is too long"),
-					 errhint("Reduce \"maintenance_work_mem\".")));
-
-		accum->allocatedMemory -= GetMemoryChunkSpace(eo->list);
-		eo->maxcount *= 2;
-		eo->list = (ItemPointerData *)
-			repalloc_huge(eo->list, sizeof(ItemPointerData) * eo->maxcount);
-		accum->allocatedMemory += GetMemoryChunkSpace(eo->list);
-	}
-
-	/* If item pointers are not ordered, they will need to be sorted later */
-	if (eo->shouldSort == false)
-	{
-		int			res;
-
-		res = ginCompareItemPointers(eo->list + eo->count - 1, en->list);
-		Assert(res != 0);
-
-		if (res > 0)
-			eo->shouldSort = true;
-	}
-
-	eo->list[eo->count] = en->list[0];
-	eo->count++;
+	att = TupleDescCompactAttr(accum->ginstate->origTupdesc, a->attnum - 1);
+	return datumIsEqual(a->key, b->key, att->attbyval, att->attlen);
 }
 
-/* Comparator function for rbtree.c */
-static int
-cmpEntryAccumulator(const RBTNode *a, const RBTNode *b, void *arg)
-{
-	const GinEntryAccumulator *ea = (const GinEntryAccumulator *) a;
-	const GinEntryAccumulator *eb = (const GinEntryAccumulator *) b;
-	BuildAccumulator *accum = (BuildAccumulator *) arg;
+#define ST_SORT sort_itempointers
+#define ST_ELEMENT_TYPE ItemPointerData
+#define ST_COMPARE(a, b) ginCompareItemPointers(a, b)
+#define ST_SCOPE static
+#define ST_DEFINE
+#include "lib/sort_template.h"
 
-	return ginCompareAttEntries(accum->ginstate,
-								ea->attnum, ea->key, ea->category,
-								eb->attnum, eb->key, eb->category);
-}
-
-/* Allocator function for rbtree.c */
-static RBTNode *
-ginAllocEntryAccumulator(void *arg)
-{
-	BuildAccumulator *accum = (BuildAccumulator *) arg;
-	GinEntryAccumulator *ea;
-
-	/*
-	 * Allocate memory by rather big chunks to decrease overhead.  We have no
-	 * need to reclaim RBTNodes individually, so this costs nothing.
-	 */
-	if (accum->entryallocator == NULL || accum->eas_used >= DEF_NENTRY)
-	{
-		accum->entryallocator = palloc_array(GinEntryAccumulator, DEF_NENTRY);
-		accum->allocatedMemory += GetMemoryChunkSpace(accum->entryallocator);
-		accum->eas_used = 0;
-	}
-
-	/* Allocate new RBTNode from current chunk */
-	ea = accum->entryallocator + accum->eas_used;
-	accum->eas_used++;
-
-	return (RBTNode *) ea;
-}
+#define ST_SORT sort_keys
+#define ST_ELEMENT_TYPE GinSortEntry
+#define ST_COMPARE_ARG_TYPE GinState
+#define ST_COMPARE(a, b, state) ginCompareAttEntries(state, a->hashkey.attnum, a->hashkey.key, a->hashkey.category, b->hashkey.attnum, b->hashkey.key, b->hashkey.category)
+#define ST_SCOPE static
+#define ST_DEFINE
+#include "lib/sort_template.h"
 
 void
 ginInitBA(BuildAccumulator *accum)
 {
 	/* accum->ginstate is intentionally not set here */
-	accum->allocatedMemory = 0;
-	accum->entryallocator = NULL;
-	accum->eas_used = 0;
-	accum->tree = rbt_create(sizeof(GinEntryAccumulator),
-							 cmpEntryAccumulator,
-							 ginCombineData,
-							 ginAllocEntryAccumulator,
-							 NULL,	/* no freefunc needed */
-							 accum);
+	accum->hash = ginbuild_create(CurrentMemoryContext, DEF_NENTRY, accum);
+	accum->allocatedMemory = accum->hash->size * sizeof(GinHashEntry);
+	accum->sorted_entries = NULL;
+	accum->num_entries = 0;
+	accum->current_pos = 0;
 }
 
 /*
@@ -142,124 +153,109 @@ getDatumCopy(BuildAccumulator *accum, OffsetNumber attnum, Datum value)
 }
 
 /*
- * Find/store one entry from indexed value.
+ * Insert one entry into the hash map.
+ * If the key already exists, append to its ItemPointer array.
+ * Otherwise, create a new hash entry with a new ItemPointer array.
  */
 static void
 ginInsertBAEntry(BuildAccumulator *accum,
 				 ItemPointer heapptr, OffsetNumber attnum,
 				 Datum key, GinNullCategory category)
 {
-	GinEntryAccumulator eatmp;
-	GinEntryAccumulator *ea;
-	bool		isNew;
+	GinHashKey	hashkey;
+	GinHashEntry *entry;
+	bool		found;
+	uint64		oldsize;
 
-	/*
-	 * For the moment, fill only the fields of eatmp that will be looked at by
-	 * cmpEntryAccumulator or ginCombineData.
-	 */
-	eatmp.attnum = attnum;
-	eatmp.key = key;
-	eatmp.category = category;
-	/* temporarily set up single-entry itempointer list */
-	eatmp.list = heapptr;
-
-	ea = (GinEntryAccumulator *) rbt_insert(accum->tree, (RBTNode *) &eatmp,
-											&isNew);
-
-	if (isNew)
-	{
-		/*
-		 * Finish initializing new tree entry, including making permanent
-		 * copies of the datum (if it's not null) and itempointer.
-		 */
-		if (category == GIN_CAT_NORM_KEY)
-			ea->key = getDatumCopy(accum, attnum, key);
-		ea->maxcount = DEF_NPTR;
-		ea->count = 1;
-		ea->shouldSort = false;
-		ea->list = palloc_array(ItemPointerData, DEF_NPTR);
-		ea->list[0] = *heapptr;
-		accum->allocatedMemory += GetMemoryChunkSpace(ea->list);
-	}
+	hashkey.attnum = attnum;
+	hashkey.category = category;
+	if (category == GIN_CAT_NORM_KEY)
+		hashkey.key = getDatumCopy(accum, attnum, key);
 	else
+		hashkey.key = key;
+
+	oldsize = accum->hash->size;
+	entry = ginbuild_insert(accum->hash, hashkey, &found);
+
+	if (!found)
 	{
-		/*
-		 * ginCombineData did everything needed.
-		 */
+		entry->items = palloc_array(ItemPointerData, DEF_ITEMS_PER_KEY);
+		entry->numItems = 0;
+		entry->allocatedItems = DEF_ITEMS_PER_KEY;
+		accum->allocatedMemory += (accum->hash->size - oldsize) * sizeof(GinHashEntry);
+		accum->allocatedMemory += GetMemoryChunkSpace(entry->items);
 	}
+
+	if (entry->numItems >= entry->allocatedItems)
+	{
+		uint32		new_allocated;
+
+		if (entry->allocatedItems > UINT32_MAX / 2)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("too many GIN item pointers for a single key"),
+					 errhint("Reduce \"maintenance_work_mem\".")));
+
+		accum->allocatedMemory -= GetMemoryChunkSpace(entry->items);
+		new_allocated = entry->allocatedItems * 2;
+		entry->items = repalloc_huge(entry->items, mul_size(sizeof(ItemPointerData), new_allocated));
+		entry->allocatedItems = new_allocated;
+		accum->allocatedMemory += GetMemoryChunkSpace(entry->items);
+	}
+
+	entry->items[entry->numItems++] = *heapptr;
 }
 
-/*
- * Insert the entries for one heap pointer.
- *
- * Since the entries are being inserted into a balanced binary tree, you
- * might think that the order of insertion wouldn't be critical, but it turns
- * out that inserting the entries in sorted order results in a lot of
- * rebalancing operations and is slow.  To prevent this, we attempt to insert
- * the nodes in an order that will produce a nearly-balanced tree if the input
- * is in fact sorted.
- *
- * We do this as follows.  First, we imagine that we have an array whose size
- * is the smallest power of two greater than or equal to the actual array
- * size.  Second, we insert the middle entry of our virtual array into the
- * tree; then, we insert the middles of each half of our virtual array, then
- * middles of quarters, etc.
- */
 void
 ginInsertBAEntries(BuildAccumulator *accum,
 				   ItemPointer heapptr, OffsetNumber attnum,
 				   Datum *entries, GinNullCategory *categories,
 				   int32 nentries)
 {
-	uint32		step = nentries;
-
 	if (nentries <= 0)
 		return;
 
 	Assert(ItemPointerIsValid(heapptr) && attnum >= FirstOffsetNumber);
 
-	/*
-	 * step will contain largest power of 2 and <= nentries
-	 */
-	step |= (step >> 1);
-	step |= (step >> 2);
-	step |= (step >> 4);
-	step |= (step >> 8);
-	step |= (step >> 16);
-	step >>= 1;
-	step++;
-
-	while (step > 0)
-	{
-		int			i;
-
-		for (i = step - 1; i < nentries && i >= 0; i += step << 1 /* *2 */ )
-			ginInsertBAEntry(accum, heapptr, attnum,
-							 entries[i], categories[i]);
-
-		step >>= 1;				/* /2 */
-	}
+	for (int i = 0; i < nentries; i++)
+		ginInsertBAEntry(accum, heapptr, attnum, entries[i], categories[i]);
 }
 
-static int
-qsortCompareItemPointers(const void *a, const void *b)
-{
-	int			res = ginCompareItemPointers((const ItemPointerData *) a, (const ItemPointerData *) b);
-
-	/* Assert that there are no equal item pointers being sorted */
-	Assert(res != 0);
-	return res;
-}
-
-/* Prepare to read out the rbtree contents using ginGetBAEntry */
+/* Prepare to read out the hash table contents using ginGetBAEntry */
 void
 ginBeginBAScan(BuildAccumulator *accum)
 {
-	rbt_begin_iterate(accum->tree, LeftRightWalk, &accum->tree_walk);
+	ginbuild_iterator iter;
+	GinHashEntry *entry;
+	uint32		i = 0;
+
+	accum->num_entries = accum->hash->members;
+	accum->current_pos = 0;
+
+	if (accum->num_entries == 0)
+		return;
+
+	accum->sorted_entries = palloc_array(GinSortEntry, accum->num_entries);
+	ginbuild_start_iterate(accum->hash, &iter);
+
+	while ((entry = ginbuild_iterate(accum->hash, &iter)) != NULL)
+	{
+		GinSortEntry *se = &accum->sorted_entries[i];
+		sort_itempointers(entry->items, entry->numItems);
+
+		se->hashkey = entry->hashkey;
+		se->items = entry->items;
+		se->numItems = entry->numItems;
+		i++;
+	}
+
+	Assert(i == accum->num_entries);
+	sort_keys(accum->sorted_entries, accum->num_entries, accum->ginstate);
+	accum->current_pos = 0;
 }
 
 /*
- * Get the next entry in sequence from the BuildAccumulator's rbtree.
+ * Get the next entry in sequence from the BuildAccumulator's sorted hash entries.
  * This consists of a single key datum and a list (array) of one or more
  * heap TIDs in which that key is found.  The list is guaranteed sorted.
  */
@@ -268,25 +264,18 @@ ginGetBAEntry(BuildAccumulator *accum,
 			  OffsetNumber *attnum, Datum *key, GinNullCategory *category,
 			  uint32 *n)
 {
-	GinEntryAccumulator *entry;
-	ItemPointerData *list;
+	GinSortEntry *entry;
 
-	entry = (GinEntryAccumulator *) rbt_iterate(&accum->tree_walk);
-
-	if (entry == NULL)
+	if (accum->current_pos >= accum->num_entries)
 		return NULL;			/* no more entries */
 
-	*attnum = entry->attnum;
-	*key = entry->key;
-	*category = entry->category;
-	list = entry->list;
-	*n = entry->count;
+	entry = &accum->sorted_entries[accum->current_pos];
+	accum->current_pos++;
 
-	Assert(list != NULL && entry->count > 0);
+	*attnum = entry->hashkey.attnum;
+	*key = entry->hashkey.key;
+	*category = entry->hashkey.category;
+	*n = entry->numItems;
 
-	if (entry->shouldSort && entry->count > 1)
-		qsort(list, entry->count, sizeof(ItemPointerData),
-			  qsortCompareItemPointers);
-
-	return list;
+	return entry->items;
 }

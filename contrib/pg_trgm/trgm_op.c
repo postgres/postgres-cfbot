@@ -226,13 +226,58 @@ CMPTRGM_CHOOSE(const void *a, const void *b)
 	return CMPTRGM(a, b);
 }
 
-#define ST_SORT trigram_qsort_signed
-#define ST_ELEMENT_TYPE_VOID
-#define ST_COMPARE(a, b) CMPTRGM_SIGNED(a, b)
-#define ST_SCOPE static
-#define ST_DEFINE
-#define ST_DECLARE
-#include "lib/sort_template.h"
+/*
+ * Needed to properly handle negative numbers in case char is signed.
+ */
+static inline unsigned char
+flip_sign(char x)
+{
+	return x ^ 0x80;
+}
+
+static void
+radix_sort_trigrams_signed(trgm *trg, int count)
+{
+	trgm *buffer = palloc_array(trgm, count);
+	trgm *starts[256];
+	trgm *from = trg;
+	trgm *to = buffer;
+	int freqs[3][256];
+
+	/*
+	 * Compute frequencies to partition the buffer.
+	 */
+	memset(freqs, 0, sizeof(freqs));
+
+	for (int i = 0; i < count; i++)
+		for (int j = 0; j < 3; j++)
+			freqs[j][flip_sign(trg[i][j])]++;
+
+	/*
+	 * Do the sorting. Start with last character because that's the is "LSB"
+	 * in a trigram. Avoid unnecessary copies by ping-ponging between the buffers.
+	 */
+	for (int i = 2; i >= 0; i--)
+	{
+		trgm *old_from = from;
+		trgm *next = to;
+
+		for (int j = 0; j < 256; j++)
+		{
+			starts[j] = next;
+			next += freqs[i][j];
+		}
+
+		for (int j = 0; j < count; j++)
+			memcpy(starts[flip_sign(from[j][i])]++, from[j], sizeof(trgm));
+
+		from = to;
+		to = old_from;
+	}
+
+	memcpy(trg, buffer, sizeof(trgm) * count);
+	pfree(buffer);
+}
 
 #define ST_SORT trigram_qsort_unsigned
 #define ST_ELEMENT_TYPE_VOID
@@ -247,7 +292,7 @@ static void
 trigram_qsort(trgm *array, size_t n)
 {
 	if (GetDefaultCharSignedness())
-		trigram_qsort_signed(array, n, sizeof(trgm));
+		radix_sort_trigrams_signed(array, n);
 	else
 		trigram_qsort_unsigned(array, n, sizeof(trgm));
 }
