@@ -4321,3 +4321,30 @@ SELECT COUNT(*) FROM onek t1 LEFT JOIN tenk1 t2
     ON (t2.thousand = t1.tenthous OR t2.thousand = t1.thousand);
 SELECT COUNT(*) FROM onek t1 LEFT JOIN tenk1 t2
     ON (t2.thousand = t1.tenthous OR t2.thousand = t1.thousand);
+
+-- Outer-only ON-clauses become a gating Result on the inner side; for a
+-- parameter-independent inner, NestLoop.keep_inner_rewind retains REWIND so
+-- a Materialize below the gate replays its buffer across rescans rather than
+-- rebuilding it for every outer tuple that passes the gate.
+create function platform_independent_explain(query text) returns setof text
+language plpgsql as
+$$
+declare
+    ln text;
+begin
+    for ln in
+        execute format('explain (analyze, costs off, summary off, timing off, buffers off) %s', query)
+    loop
+        ln := regexp_replace(ln, 'Maximum Storage: \d+', 'Maximum Storage: N');
+        return next ln;
+    end loop;
+end;
+$$;
+set enable_hashjoin = off;
+set enable_mergejoin = off;
+select platform_independent_explain('
+    select count(*) from onek t1 left join int4_tbl t2
+      on (t1.unique1 = t2.f1 and t1.hundred in (1, 2))');
+reset enable_hashjoin;
+reset enable_mergejoin;
+drop function platform_independent_explain(text);
