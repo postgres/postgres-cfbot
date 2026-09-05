@@ -411,6 +411,35 @@ JOIN relnodes_new n ON o.relname = n.relname
 WHERE o.relfilenode <> n.relfilenode
 ORDER BY o.relname;
 
+-- An index that a failed CREATE INDEX CONCURRENTLY left neither valid nor
+-- ready is skipped by a rewrite; rebuilding this one would fail on the row
+-- its expression rejects.
+CREATE TABLE clstr_invalid (i int PRIMARY KEY, j int);
+INSERT INTO clstr_invalid VALUES (1, 0), (2, 1);
+CREATE INDEX CONCURRENTLY clstr_invalid_expr ON clstr_invalid ((1/j));
+SELECT indisvalid, indisready FROM pg_index
+WHERE indexrelid = 'clstr_invalid_expr'::regclass;
+SELECT relfilenode AS invalid_expr_node FROM pg_class
+WHERE oid = 'clstr_invalid_expr'::regclass \gset
+VACUUM FULL clstr_invalid;
+CLUSTER clstr_invalid USING clstr_invalid_pkey;
+REPACK clstr_invalid;
+ALTER TABLE clstr_invalid ALTER COLUMN i TYPE bigint;
+-- the index storage is untouched, and the rows are still there
+SELECT relfilenode = :invalid_expr_node FROM pg_class
+WHERE oid = 'clstr_invalid_expr'::regclass;
+SELECT * FROM clstr_invalid ORDER BY i;
+-- changing persistence has to rebuild the index, which fails here
+ALTER TABLE clstr_invalid SET UNLOGGED;
+-- REINDEX INDEX still rebuilds it, and fails on the same row
+REINDEX INDEX clstr_invalid_expr;
+-- once that row is gone it makes the index valid again
+DELETE FROM clstr_invalid WHERE j = 0;
+REINDEX INDEX clstr_invalid_expr;
+SELECT indisvalid, indisready FROM pg_index
+WHERE indexrelid = 'clstr_invalid_expr'::regclass;
+DROP TABLE clstr_invalid;
+
 -- clean up
 DROP TABLE clustertest;
 DROP TABLE clstr_1;
