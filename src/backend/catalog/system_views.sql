@@ -1568,3 +1568,22 @@ CREATE VIEW pg_aios AS
     SELECT * FROM pg_get_aios();
 REVOKE ALL ON pg_aios FROM PUBLIC;
 GRANT SELECT ON pg_aios TO pg_read_all_stats;
+
+CREATE VIEW pg_stat_vfdcache AS
+    SELECT
+        pg_stat_get_vfd_hits() AS hits,
+        pg_stat_get_vfd_misses() AS misses,
+        pg_stat_get_vfd_cache_open_entries() AS open_entries,
+        pg_stat_get_vfd_cache_allocated_entries() AS allocated_entries,
+        pg_stat_get_vfd_cache_bytes() AS cache_bytes,
+        pg_stat_get_vfd_max_open_fds() AS max_open_fds,
+        CASE
+            WHEN pg_stat_get_vfd_hits() + pg_stat_get_vfd_misses() = 0
+            THEN NULL::float8
+            ELSE pg_stat_get_vfd_hits()::float8
+                 / (pg_stat_get_vfd_hits() + pg_stat_get_vfd_misses())
+        END AS hit_ratio,
+        pg_stat_get_vfd_stat_reset_time() AS stats_reset;
+
+REVOKE ALL ON pg_stat_vfdcache FROM PUBLIC;
+GRANT SELECT ON pg_stat_vfdcache TO PUBLIC;

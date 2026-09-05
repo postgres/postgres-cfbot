@@ -226,6 +226,14 @@ static Size SizeVfdCache = 0;
 static int	nfile = 0;
 
 /*
+ * Running total of memory used by the VFD cache for this backend,
+ * including sizeof(Vfd) for each allocated slot plus the malloc'd
+ * fileName string for each populated slot.  Updated incrementally in
+ * AllocateVfd(), PathNameOpenFilePerm(), and FreeVfd().
+ */
+static uint64 VfdCacheFootprintBytes = 0;
+
+/*
  * Flag to tell whether it's worth scanning VfdCache looking for temp files
  * to close
  */
@@ -1444,8 +1452,10 @@ AllocateVfd(void)
 		VfdCache[0].nextFree = SizeVfdCache;
 
 		/*
-		 * Record the new size
+		 * Record the new size and account for the newly allocated Vfd
+		 * structs.
 		 */
+		VfdCacheFootprintBytes += (newCacheSize - SizeVfdCache) * sizeof(Vfd);
 		SizeVfdCache = newCacheSize;
 	}
 
@@ -1466,6 +1476,7 @@ FreeVfd(File file)
 
 	if (vfdP->fileName != NULL)
 	{
+		VfdCacheFootprintBytes -= strlen(vfdP->fileName) + 1;
 		free(vfdP->fileName);
 		vfdP->fileName = NULL;
 	}
@@ -1480,6 +1491,7 @@ static int
 FileAccess(File file)
 {
 	int			returnValue;
+	bool		is_open;
 
 	DO_DB(elog(LOG, "FileAccess %d (%s)",
 			   file, VfdCache[file].fileName));
@@ -1488,8 +1500,10 @@ FileAccess(File file)
 	 * Is the file open?  If not, open it and put it at the head of the LRU
 	 * ring (possibly closing the least recently used file to get an FD).
 	 */
+	is_open = !FileIsNotOpen(file);
+	pgstat_count_vfd_access(is_open);
 
-	if (FileIsNotOpen(file))
+	if (!is_open)
 	{
 		returnValue = LruInsert(file);
 		if (returnValue != 0)
@@ -1507,6 +1521,40 @@ FileAccess(File file)
 	}
 
 	return 0;
+}
+
+/*
+ * Return the number of VFD slots currently holding an open file descriptor.
+ * This is the nfile counter, which tracks FDs actually open in the kernel.
+ */
+uint64
+GetVfdCacheOpenEntries(void)
+{
+	return (uint64) nfile;
+}
+
+/*
+ * Return the number of currently allocated VFD entries for this backend,
+ * excluding slot 0 which is used as freelist/LRU header.
+ */
+uint64
+GetVfdCacheAllocatedEntries(void)
+{
+	if (SizeVfdCache == 0)
+		return 0;
+
+	return (uint64) (SizeVfdCache - 1);
+}
+
+/*
+ * Return the current memory footprint of the VFD cache for this backend.
+ * This includes sizeof(Vfd) for each allocated slot and the malloc'd
+ * fileName bytes for each currently-populated slot.
+ */
+uint64
+GetVfdCacheBytes(void)
+{
+	return VfdCacheFootprintBytes;
 }
 
 /*
@@ -1621,6 +1669,7 @@ PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 			   vfdP->fd));
 
 	vfdP->fileName = fnamecopy;
+	VfdCacheFootprintBytes += strlen(fnamecopy) + 1;
 	/* Saved flags are adjusted to be OK for re-opening file */
 	vfdP->fileFlags = fileFlags & ~(O_CREAT | O_TRUNC | O_EXCL);
 	vfdP->fileMode = fileMode;

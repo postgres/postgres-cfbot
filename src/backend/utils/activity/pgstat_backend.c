@@ -27,6 +27,7 @@
 #include "access/xlog.h"
 #include "executor/instrument.h"
 #include "storage/bufmgr.h"
+#include "storage/fd.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "utils/memutils.h"
@@ -48,6 +49,12 @@ static bool backend_has_lockstats = false;
  * previous counters from the current ones.
  */
 static WalUsage prevBackendWalUsage;
+
+/*
+ * Last per-backend VFD cache gauges published to backend stats.
+ * Used to detect whether anything changed since the last flush.
+ */
+static PgStat_BackendVfdCacheStats prevBackendVfdCacheStats;
 
 /*
  * Utility routines to report I/O stats for backends, kept here to avoid
@@ -254,6 +261,21 @@ pgstat_backend_wal_have_pending(void)
 }
 
 /*
+ * Determine whether VFD cache gauges have changed since the last flush.
+ */
+static inline bool
+pgstat_backend_vfdcache_have_pending(void)
+{
+	PgStat_Counter cur_open = (PgStat_Counter) GetVfdCacheOpenEntries();
+	PgStat_Counter cur_alloc = (PgStat_Counter) GetVfdCacheAllocatedEntries();
+	PgStat_Counter cur_bytes = (PgStat_Counter) GetVfdCacheBytes();
+
+	return cur_open != prevBackendVfdCacheStats.open_entries ||
+		cur_alloc != prevBackendVfdCacheStats.allocated_entries ||
+		cur_bytes != prevBackendVfdCacheStats.cache_bytes;
+}
+
+/*
  * Flush out locally pending backend WAL statistics.  Locking is managed
  * by the caller.
  */
@@ -327,6 +349,27 @@ pgstat_flush_backend_entry_lock(PgStat_EntryRef *entry_ref)
 }
 
 /*
+ * Flush out locally pending backend VFD cache gauges.  Locking is managed
+ * by the caller.  No need to check for pending data here; the caller does
+ * that before acquiring the lock.
+ */
+static void
+pgstat_flush_backend_entry_vfdcache(PgStat_EntryRef *entry_ref)
+{
+	PgStatShared_Backend *shbackendent;
+	PgStat_BackendVfdCacheStats *bktype_shstats;
+
+	shbackendent = (PgStatShared_Backend *) entry_ref->shared_stats;
+	bktype_shstats = &shbackendent->stats.vfdcache_stats;
+
+	bktype_shstats->open_entries = (PgStat_Counter) GetVfdCacheOpenEntries();
+	bktype_shstats->allocated_entries = (PgStat_Counter) GetVfdCacheAllocatedEntries();
+	bktype_shstats->cache_bytes = (PgStat_Counter) GetVfdCacheBytes();
+
+	prevBackendVfdCacheStats = *bktype_shstats;
+}
+
+/*
  * Flush out locally pending backend statistics
  *
  * "flags" parameter controls which statistics to flush.  Returns true
@@ -354,6 +397,11 @@ pgstat_flush_backend(bool nowait, uint32 flags)
 	if ((flags & PGSTAT_BACKEND_FLUSH_LOCK) && backend_has_lockstats)
 		has_pending_data = true;
 
+	/* Some VFD cache data pending? */
+	if ((flags & PGSTAT_BACKEND_FLUSH_VFDCACHE) &&
+		pgstat_backend_vfdcache_have_pending())
+		has_pending_data = true;
+
 	if (!has_pending_data)
 		return false;
 
@@ -371,6 +419,9 @@ pgstat_flush_backend(bool nowait, uint32 flags)
 
 	if (flags & PGSTAT_BACKEND_FLUSH_LOCK)
 		pgstat_flush_backend_entry_lock(entry_ref);
+
+	if (flags & PGSTAT_BACKEND_FLUSH_VFDCACHE)
+		pgstat_flush_backend_entry_vfdcache(entry_ref);
 
 	pgstat_unlock_entry(entry_ref);
 
@@ -411,6 +462,7 @@ pgstat_create_backend(ProcNumber procnum)
 	MemSet(&PendingBackendStats, 0, sizeof(PgStat_BackendPending));
 	backend_has_iostats = false;
 	backend_has_lockstats = false;
+	MemSet(&prevBackendVfdCacheStats, 0, sizeof(prevBackendVfdCacheStats));
 
 	/*
 	 * Initialize prevBackendWalUsage with pgWalUsage so that
