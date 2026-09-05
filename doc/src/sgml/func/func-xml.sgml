@@ -93,6 +93,60 @@ SELECT xmlcomment('hello');
     </para>
    </sect3>
 
+   <sect3 id="functions-producing-xml-xmldocument">
+    <title><literal>xmldocument</literal></title>
+
+    <indexterm>
+     <primary>xmldocument</primary>
+    </indexterm>
+
+<synopsis>
+<function>xmldocument</function> ( <type>xml</type> ) <returnvalue>xml</returnvalue>
+</synopsis>
+
+    <para>
+     The <function>xmldocument</function> function returns the input argument
+     unchanged, or <literal>NULL</literal> if the argument is <literal>NULL</literal>,
+     and is provided for compatibility.
+
+     The SQL-standard <replaceable>XMLDocument</replaceable> function applied to an
+     XML value <literal>$EXPR</literal>, has effects equivalent to the XML
+     Query expression <literal>document { <replaceable>$EXPR</replaceable> }</literal>.
+     It replaces any document nodes in the input with their children and wraps the whole
+     result in a single <replaceable>document node</replaceable>.
+
+     In the XML Query standard, a <replaceable>document node</replaceable> represents
+     a relaxed version of an XML document structure. This corresponds to what PostgreSQL's
+     single XML type allows, meaning that any valid non-null PostgreSQL XML value can be
+     returned unchanged. Other systems may support more permissive XML data types,
+     such as <literal>XML(SEQUENCE)</literal>, which allow values that do not conform to
+     this structure. In PostgreSQL, every valid non-null value of the XML type already has
+     that structure, making additional processing by this function unnecessary.
+    </para>
+
+    <para>
+     Example:
+<screen><![CDATA[
+WITH xmldata (val) AS (
+  VALUES
+    (xmlparse(DOCUMENT '<root><foo>bar</foo></root>')),
+    (xmltext('foo&bar')),
+    (xmlelement(NAME el)),
+    (xmlforest(42 AS foo, 73 AS bar))
+)
+SELECT xmldocument(val) FROM xmldata;
+
+         xmldocument
+-----------------------------
+ <root><foo>bar</foo></root>
+ foo&amp;bar
+ <el/>
+ <foo>42</foo><bar>73</bar>
+(4 rows)
+]]></screen>
+    </para>
+   </sect3>
+
    <sect3 id="functions-producing-xml-xmlconcat">
     <title><literal>xmlconcat</literal></title>
 
