@@ -30,6 +30,7 @@
 #include "access/xlog.h"
 #include "access/xloginsert.h"
 #include "catalog/catalog.h"
+#include "catalog/dependency.h"
 #include "catalog/heap.h"
 #include "catalog/index.h"
 #include "catalog/namespace.h"
@@ -684,6 +685,8 @@ static void RebuildConstraintComment(AlteredTableInfo *tab, AlterTablePass pass,
 									 Oid objid, Relation rel, List *domname,
 									 const char *conname);
 static void TryReuseIndex(Oid oldId, IndexStmt *stmt);
+static void RememberPartitionIndexProps(Oid indoid, IndexStmt *stmt);
+static List *GetIndexStatTargets(Oid indexOid);
 static void TryReuseForeignKey(Oid oldId, Constraint *con);
 static ObjectAddress ATExecAlterColumnGenericOptions(Relation rel, const char *colName,
 													 List *options, LOCKMODE lockmode);
@@ -15918,6 +15921,13 @@ RememberWholeRowDependentForRebuilding(AlteredTableInfo *tab, AlterTableType sub
 /*
  * Subroutine for ATExecAlterColumnType: remember that a replica identity
  * needs to be reset.
+ *
+ * We save the index by name and restore it later via an AT_ReplicaIdentity
+ * subcommand (see ATPostAlterTypeCleanup), rather than stamping
+ * indisreplident at creation like the partition-descendant path. The top-level
+ * index may not be rebuilt at all, or may have live siblings whose flag must
+ * be cleared, so it needs the relation-wide relation_mark_replica_identity()
+ * run after the rebuild.
  */
 static void
 RememberReplicaIdentityForRebuilding(Oid indoid, AlteredTableInfo *tab)
@@ -16372,11 +16382,21 @@ ATPostAlterTypeParse(Oid oldId, Oid oldRelId, Oid refRelId, Oid ownerId,
 			IndexStmt  *stmt = (IndexStmt *) stm;
 			AlterTableCmd *newcmd;
 
+			/*
+			 * capture properties not preserved by the cloned rebuild
+			 * definition
+			 */
+			RememberPartitionIndexProps(oldId, stmt);
 			if (!rewrite)
 				TryReuseIndex(oldId, stmt);
 			stmt->reset_default_tblspc = true;
 			/* keep the index's comment */
 			stmt->idxcomment = GetComment(oldId, RelationRelationId, 0);
+			/* keep the index's per-column statistics targets */
+			stmt->idxstattargets = GetIndexStatTargets(oldId);
+			/* keep any auto-extension dependencies */
+			stmt->idxextensionOids =
+				getAutoExtensionsOfObject(RelationRelationId, oldId);
 
 			newcmd = makeNode(AlterTableCmd);
 			newcmd->subtype = AT_ReAddIndex;
@@ -16401,11 +16421,17 @@ ATPostAlterTypeParse(Oid oldId, Oid oldRelId, Oid refRelId, Oid ownerId,
 					indstmt = castNode(IndexStmt, cmd->def);
 					indoid = get_constraint_index(oldId);
 
+					RememberPartitionIndexProps(indoid, indstmt);
 					if (!rewrite)
 						TryReuseIndex(indoid, indstmt);
 					/* keep any comment on the index */
 					indstmt->idxcomment = GetComment(indoid,
 													 RelationRelationId, 0);
+					/* keep the index's per-column statistics targets */
+					indstmt->idxstattargets = GetIndexStatTargets(indoid);
+					/* keep any auto-extension dependencies */
+					indstmt->idxextensionOids =
+						getAutoExtensionsOfObject(RelationRelationId, indoid);
 					indstmt->reset_default_tblspc = true;
 
 					cmd->subtype = AT_ReAddIndex;
@@ -16551,6 +16577,122 @@ RebuildConstraintComment(AlteredTableInfo *tab, AlterTablePass pass, Oid objid,
 	newcmd->subtype = AT_ReAddComment;
 	newcmd->def = (Node *) cmd;
 	tab->subcmds[pass] = lappend(tab->subcmds[pass], newcmd);
+}
+
+/*
+ * Before a partitioned index is dropped and rebuilt as part of an ALTER
+ * COLUMN TYPE (or SET EXPRESSION), capture each of its descendant indexes'
+ * properties not preserved by the cloned rebuild definition (name, comment,
+ * replica identity, cluster-on, per-column stat targets) into a list saved on
+ * the parent index's IndexStmt. These would otherwise be lost when recreating
+ * the descendant index.
+ *
+ * Must run before the drop, while the old descendant indexes still exist.
+ */
+static void
+RememberPartitionIndexProps(Oid indoid, IndexStmt *stmt)
+{
+	List	   *descendantIndexOids;
+
+	if (get_rel_relkind(indoid) != RELKIND_PARTITIONED_INDEX)
+		return;
+
+	descendantIndexOids = find_all_inheritors(indoid, NoLock, NULL);
+	foreach_oid(descendantIndexOid, descendantIndexOids)
+	{
+		PartitionIndexProps *props;
+		HeapTuple	idxtup;
+		HeapTuple	classtup;
+		Form_pg_index idxform;
+		Form_pg_class classform;
+		Oid			constraintOid;
+		Datum		reloptions;
+		bool		rel_isnull;
+
+		if (descendantIndexOid == indoid)
+			continue;
+
+		idxtup = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(descendantIndexOid));
+		if (!HeapTupleIsValid(idxtup))
+			continue;
+		idxform = (Form_pg_index) GETSTRUCT(idxtup);
+
+		classtup = SearchSysCache1(RELOID, ObjectIdGetDatum(descendantIndexOid));
+		if (!HeapTupleIsValid(classtup))
+			elog(ERROR, "cache lookup failed for relation %u", descendantIndexOid);
+		classform = (Form_pg_class) GETSTRUCT(classtup);
+
+		props = makeNode(PartitionIndexProps);
+		props->partrelid = idxform->indrelid;
+		props->idxname = pstrdup(NameStr(classform->relname));
+		props->idxcomment = GetComment(descendantIndexOid, RelationRelationId, 0);
+		props->constraintcomment = NULL;
+		constraintOid = get_index_constraint(descendantIndexOid);
+		if (OidIsValid(constraintOid))
+			props->constraintcomment =
+				GetComment(constraintOid, ConstraintRelationId, 0);
+		props->isreplident = idxform->indisreplident;
+		props->isclustered = idxform->indisclustered;
+		props->reloptions = NIL;
+		props->extensionOids =
+			getAutoExtensionsOfObject(RelationRelationId, descendantIndexOid);
+		if (OidIsValid(classform->reltablespace))
+			props->tableSpace = get_tablespace_name(classform->reltablespace);
+		else
+			props->tableSpace = NULL;
+
+		reloptions = SysCacheGetAttr(RELOID, classtup,
+									 Anum_pg_class_reloptions, &rel_isnull);
+		if (!rel_isnull)
+			props->reloptions = untransformRelOptions(reloptions);
+
+		ReleaseSysCache(classtup);
+		ReleaseSysCache(idxtup);
+
+		props->stattargets = GetIndexStatTargets(descendantIndexOid);
+
+		stmt->oldPartIndexProps = lappend(stmt->oldPartIndexProps, props);
+	}
+	list_free(descendantIndexOids);
+}
+
+/*
+ * Collect the per-column statistics targets of an index into a list of
+ * IndexStatTarget nodes. Returns NIL if none are set.
+ */
+static List *
+GetIndexStatTargets(Oid indexOid)
+{
+	List	   *result = NIL;
+	Relation	irel;
+
+	irel = index_open(indexOid, AccessShareLock);
+	for (int i = 1; i <= IndexRelationGetNumberOfAttributes(irel); i++)
+	{
+		HeapTuple	atup;
+		Datum		d;
+		bool		isnull;
+
+		atup = SearchSysCache2(ATTNUM, ObjectIdGetDatum(indexOid),
+							   Int16GetDatum(i));
+		if (!HeapTupleIsValid(atup))
+			elog(ERROR, "cache lookup failed for attribute %d of relation %u",
+				 i, indexOid);
+		d = SysCacheGetAttr(ATTNUM, atup,
+							Anum_pg_attribute_attstattarget, &isnull);
+		if (!isnull)
+		{
+			IndexStatTarget *st = makeNode(IndexStatTarget);
+
+			st->attnum = i;
+			st->stattarget = DatumGetInt16(d);
+			result = lappend(result, st);
+		}
+		ReleaseSysCache(atup);
+	}
+	index_close(irel, AccessShareLock);
+
+	return result;
 }
 
 /*
