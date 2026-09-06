@@ -1,6 +1,7 @@
 # Copyright (c) 2022-2026, PostgreSQL Global Development Group
 
 pgbench_sources = files(
+  'commands.c',
   'pgbench.c',
   'poller.c',
   'script.c',

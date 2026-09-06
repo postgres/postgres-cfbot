@@ -11,6 +11,7 @@
 #ifndef PGBENCH_H
 #define PGBENCH_H
 
+#include <signal.h>
 #include "libpq-fe.h"
 #include "fe_utils/conditional.h"
 #include "fe_utils/psqlscan.h"
@@ -90,5 +91,9 @@ struct CState
 								 * and failed transactions are also counted
 								 * here */
 };
+
+extern volatile sig_atomic_t timer_exceeded;
+
+#include "commands.h"
 
 #endif							/* PGBENCH_H */
