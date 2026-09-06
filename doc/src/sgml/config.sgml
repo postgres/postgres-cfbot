@@ -5694,10 +5694,16 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
         than typical time deviations between servers.
        </para>
        <para>
-        The delay occurs only on WAL records for transaction commits.
+        The delay occurs only on WAL records for transaction commits and on
+        the time-stamped records that database and tablespace commands write
+        (see <xref linkend="guc-recovery-target-time"/>).
         Other records are replayed as quickly as possible, which
         is not a problem because MVCC visibility rules ensure their effects
         are not visible until the corresponding commit record is applied.
+        Database and tablespace commands change files without waiting for the
+        commit, but each such command writes its time-stamped record before
+        those changes in the WAL, so the changes are not replayed until that
+        record's delay has passed.
        </para>
        <para>
         The delay occurs once the database in recovery has reached a consistent
