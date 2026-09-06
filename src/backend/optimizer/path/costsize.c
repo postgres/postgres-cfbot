@@ -145,6 +145,7 @@ int			max_parallel_workers_per_gather = 2;
 
 bool		enable_seqscan = true;
 bool		enable_indexscan = true;
+bool		enable_index_skip_merge = true;
 bool		enable_indexonlyscan = true;
 bool		enable_bitmapscan = true;
 bool		enable_tidscan = true;
@@ -166,6 +167,7 @@ bool		enable_partition_pruning = true;
 bool		enable_presorted_aggregate = true;
 bool		enable_async_append = true;
 
+int         max_index_merge_scans = 32;
 typedef struct
 {
 	PlannerInfo *root;
