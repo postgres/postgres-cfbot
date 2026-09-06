@@ -872,10 +872,13 @@ read_stream_for_blocks(PG_FUNCTION_ARGS)
 {
 	Oid			relid = PG_GETARG_OID(0);
 	ArrayType  *blocksarray = PG_GETARG_ARRAYTYPE_P(1);
+	bool		dedup = PG_GETARG_BOOL(2);
+	int			evict_before = PG_GETARG_INT32(3);
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	Relation	rel;
 	BlocksReadStreamData stream_data;
 	ReadStream *stream;
+	int			flags = READ_STREAM_FULL;
 
 	InitMaterializedSRF(fcinfo, 0);
 
@@ -895,7 +898,10 @@ read_stream_for_blocks(PG_FUNCTION_ARGS)
 
 	rel = relation_open(relid, AccessShareLock);
 
-	stream = read_stream_begin_relation(READ_STREAM_FULL,
+	if (dedup)
+		flags |= READ_STREAM_DEDUP_RECENT;
+
+	stream = read_stream_begin_relation(flags,
 										NULL,
 										rel,
 										MAIN_FORKNUM,
@@ -905,12 +911,26 @@ read_stream_for_blocks(PG_FUNCTION_ARGS)
 
 	for (int i = 0; i < stream_data.nblocks; i++)
 	{
-		Buffer		buf = read_stream_next_buffer(stream, NULL);
+		Buffer		buf;
 		Datum		values[3] = {0};
 		bool		nulls[3] = {0};
 
+		/*
+		 * Evict the block that this request asks for, so that a stream which
+		 * deduplicates recent blocks has to read it again when the turn of
+		 * its repeat entry comes.  That only works for a block the stream has
+		 * already handed out, as an evicted buffer must not be pinned.
+		 */
+		if (i == evict_before)
+			invalidate_one_block(rel, MAIN_FORKNUM, stream_data.blocks[i]);
+
+		buf = read_stream_next_buffer(stream, NULL);
+
 		if (!BufferIsValid(buf))
 			elog(ERROR, "read_stream_next_buffer() call %d is unexpectedly invalid", i);
+		if (BufferGetBlockNumber(buf) != stream_data.blocks[i])
+			elog(ERROR, "read_stream_next_buffer() call %d returned block %u, expected block %u",
+				 i, BufferGetBlockNumber(buf), stream_data.blocks[i]);
 
 		values[0] = Int32GetDatum(i);
 		values[1] = UInt32GetDatum(stream_data.blocks[i]);
