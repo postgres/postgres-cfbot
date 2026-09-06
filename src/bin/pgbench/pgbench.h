@@ -12,6 +12,7 @@
 #define PGBENCH_H
 
 #include "fe_utils/psqlscan.h"
+#include "poller.h"
 #include "stats.h"
 #include "variable.h"
 
