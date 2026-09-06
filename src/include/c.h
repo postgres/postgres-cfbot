@@ -1285,6 +1285,9 @@ typedef struct PGAlignedXLogBlock PGAlignedXLogBlock;
 /* msb for char */
 #define HIGHBIT					(0x80)
 #define IS_HIGHBIT_SET(ch)		((unsigned char)(ch) & HIGHBIT)
+/* ____-___ */ #define BITWISE_HI_AT(n)		(1llu << n)
+/* _____--- */ #define BITWISE_HI_RIGHT(n)		((1llu << (n + 1)) - 1)
+/* -----___ */ #define BITWISE_LO_RIGHT(n)		~BIT_MASK_HI_RIGHT(n)
 
 /*
  * Support macros for escaping strings.  escape_backslash should be true
@@ -1564,6 +1567,8 @@ typedef uint16_t char16_t;
 typedef uint32_t char32_t;
 #endif
 #endif
+
+
 
 /* IWYU pragma: end_exports */
 

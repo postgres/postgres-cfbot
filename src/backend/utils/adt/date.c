@@ -3201,7 +3201,7 @@ timetz_zone(PG_FUNCTION_ARGS)
 	 */
 	text_to_cstring_buffer(zone, tzname, sizeof(tzname));
 
-	type = DecodeTimezoneName(tzname, &val, &tzp);
+	type = DecodeTimezoneName(tzname, &val, &tzp, NULL);
 
 	if (type == TZNAME_FIXED_OFFSET)
 	{
