@@ -85,44 +85,6 @@ typedef struct MTTargetRelLookup
 } MTTargetRelLookup;
 
 /*
- * Context struct for a ModifyTable operation, containing basic execution
- * state and some output variables populated by ExecUpdateAct() and
- * ExecDeleteAct() to report the result of their actions to callers.
- */
-typedef struct ModifyTableContext
-{
-	/* Operation state */
-	ModifyTableState *mtstate;
-	EPQState   *epqstate;
-	EState	   *estate;
-
-	/*
-	 * Slot containing tuple obtained from ModifyTable's subplan.  Used to
-	 * access "junk" columns that are not going to be stored.
-	 */
-	TupleTableSlot *planSlot;
-
-	/*
-	 * Information about the changes that were made concurrently to a tuple
-	 * being updated or deleted
-	 */
-	TM_FailureData tmfd;
-
-	/*
-	 * The tuple deleted when doing a cross-partition UPDATE with a RETURNING
-	 * clause that refers to OLD columns (converted to the root's tuple
-	 * descriptor).
-	 */
-	TupleTableSlot *cpDeletedSlot;
-
-	/*
-	 * The tuple projected by the INSERT's RETURNING clause, when doing a
-	 * cross-partition UPDATE
-	 */
-	TupleTableSlot *cpUpdateReturningSlot;
-} ModifyTableContext;
-
-/*
  * Context struct containing output data specific to UPDATE operations.
  */
 typedef struct UpdateContext
@@ -865,18 +827,23 @@ ExecGetUpdateNewTuple(ResultRelInfo *relinfo,
  *		*insert_destrel is the relation where it was inserted.
  *		These are only set on success.
  *
+ * 		If conflict_relOid is not NULL, we also checks if a unique constraint
+ * 		violation actually occurred for the ON CONFLICT DO NOTHING clause. If so,
+ * 		we sets *conflict_relOid to the OID of that relation.
+ *
  *		This may change the currently active tuple conversion map in
  *		mtstate->mt_transition_capture, so the callers must take care to
  *		save the previous value to avoid losing track of it.
  * ----------------------------------------------------------------
  */
-static TupleTableSlot *
+TupleTableSlot *
 ExecInsert(ModifyTableContext *context,
 		   ResultRelInfo *resultRelInfo,
 		   TupleTableSlot *slot,
 		   bool canSetTag,
 		   TupleTableSlot **inserted_tuple,
-		   ResultRelInfo **insert_destrel)
+		   ResultRelInfo **insert_destrel,
+		   Oid *conflict_relOid)
 {
 	ModifyTableState *mtstate = context->mtstate;
 	EState	   *estate = context->estate;
@@ -1160,6 +1127,9 @@ ExecInsert(ModifyTableContext *context,
 										   &conflictTid, &invalidItemPtr,
 										   arbiterIndexes))
 			{
+				if (conflict_relOid)
+					*conflict_relOid = RelationGetRelid(resultRelationDesc);
+
 				/* committed conflict tuple found */
 				if (onconflict == ONCONFLICT_UPDATE)
 				{
@@ -1616,7 +1586,7 @@ ExecForPortionOfLeftovers(ModifyTableContext *context,
 		AfterTriggerBeginQuery();
 		ExecSetupTransitionCaptureState(mtstate, estate);
 		fireBSTriggers(mtstate);
-		ExecInsert(context, resultRelInfo, leftoverSlot, false, NULL, NULL);
+		ExecInsert(context, resultRelInfo, leftoverSlot, false, NULL, NULL, NULL);
 		fireASTriggers(mtstate);
 		AfterTriggerEndQuery(estate);
 	}
@@ -2356,7 +2326,7 @@ ExecCrossPartitionUpdate(ModifyTableContext *context,
 	/* Tuple routing starts from the root table. */
 	context->cpUpdateReturningSlot =
 		ExecInsert(context, mtstate->rootResultRelInfo, slot, canSetTag,
-				   inserted_tuple, insert_destrel);
+				   inserted_tuple, insert_destrel, NULL);
 
 	/*
 	 * Reset the transition state that may possibly have been written by
@@ -4137,7 +4107,7 @@ ExecMergeNotMatched(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 				mtstate->mt_merge_action = action;
 
 				rslot = ExecInsert(context, mtstate->rootResultRelInfo,
-								   newslot, canSetTag, NULL, NULL);
+								   newslot, canSetTag, NULL, NULL, NULL);
 				mtstate->mt_merge_inserted += 1;
 				break;
 			case CMD_NOTHING:
@@ -4978,7 +4948,7 @@ ExecModifyTable(PlanState *pstate)
 					ExecInitInsertProjection(node, resultRelInfo);
 				slot = ExecGetInsertNewTuple(resultRelInfo, context.planSlot);
 				slot = ExecInsert(&context, resultRelInfo, slot,
-								  node->canSetTag, NULL, NULL);
+								  node->canSetTag, NULL, NULL, NULL);
 				break;
 
 			case CMD_UPDATE:

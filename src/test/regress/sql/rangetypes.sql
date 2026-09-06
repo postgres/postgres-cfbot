@@ -415,6 +415,7 @@ drop table test_range_elem;
 -- constraints with range types, use singleton int ranges for the "="
 -- portion of the constraint.
 --
+create temp table unique_conflict0(copy_tbl oid, filename text, lineno bigint, line text);
 
 create table test_range_excl(
   room int4range,
@@ -429,11 +430,21 @@ insert into test_range_excl
 insert into test_range_excl
   values(int4range(123, 123, '[]'), int4range(2, 2, '[]'), '[2010-01-02 11:00, 2010-01-02 12:00)');
 insert into test_range_excl
-  values(int4range(123, 123, '[]'), int4range(3, 3, '[]'), '[2010-01-02 10:10, 2010-01-02 11:00)');
+  values(int4range(123, 123, '[]'), int4range(3, 3, '[]'), '[2010-01-02 10:10, 2010-01-02 11:00)'); -- error
+insert into test_range_excl
+  values(int4range(123, 123, '[]'), int4range(3, 3, '[]'), '[2010-01-02 10:10, 2010-01-02 11:00)') on conflict do nothing;
 insert into test_range_excl
   values(int4range(124, 124, '[]'), int4range(3, 3, '[]'), '[2010-01-02 10:10, 2010-01-02 11:10)');
 insert into test_range_excl
-  values(int4range(125, 125, '[]'), int4range(1, 1, '[]'), '[2010-01-02 10:10, 2010-01-02 11:00)');
+  values(int4range(125, 125, '[]'), int4range(1, 1, '[]'), '[2010-01-02 10:10, 2010-01-02 11:00)'); -- error
+insert into test_range_excl
+  values(int4range(125, 125, '[]'), int4range(1, 1, '[]'), '[2010-01-02 10:10, 2010-01-02 11:00)') on conflict do nothing;
+
+copy test_range_excl from stdin with (delimiter ';', on_conflict table, conflict_table unique_conflict0);
+[123,123];[3,3];[2010-01-02 10:10, 2010-01-02 11:00]
+[125,125];[1,1];[2010-01-02 10:10, 2010-01-02 11:00]
+\.
+drop table unique_conflict0;
 
 -- test bigint ranges
 select int8range(10000000000::int8, 20000000000::int8,'(]');

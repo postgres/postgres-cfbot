@@ -888,7 +888,224 @@ ERROR:  skipped more than REJECT_LIMIT (3) rows due to data type incompatibility
 CONTEXT:  COPY check_ign_err, line 5, column n: ""
 COPY check_ign_err FROM STDIN WITH (on_error ignore, reject_limit 4);
 NOTICE:  4 rows were skipped due to data type incompatibility
+CREATE DOMAIN d_text as TEXT;
+CREATE TABLE t_copy_tblp(c text, b int, a int) PARTITION BY RANGE(a);
+CREATE TABLE t_copy_tbl(a int, b int, c text);
+ALTER TABLE t_copy_tblp ATTACH PARTITION t_copy_tbl FOR VALUES FROM (MINVALUE) TO (100);
+CREATE TABLE t_copy_tbl1 PARTITION OF t_copy_tblp FOR VALUES FROM (100) TO (200);
+CREATE TABLE err_tbl1(copy_tbl oid, filename text, lineno bigint, line text generated always as ('hh') stored);
+COPY instead_of_insert_tbl_view FROM STDIN (on_conflict table, conflict_table err_tbl1); -- error
+ERROR:  cannot use relation "err_tbl1" for COPY on_conflict error saving
+DETAIL:  The conflict_table cannot have generated columns.
+CREATE POLICY p1 ON err_tbl1 FOR SELECT USING (true);
+ALTER TABLE err_tbl1 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE err_tbl1 FORCE ROW LEVEL SECURITY;
+CREATE VIEW err_tblv AS SELECT * FROM err_tbl1;
+COPY t_copy_tbl FROM STDIN WITH (on_conflict table, conflict_table err_tblv); -- error
+ERROR:  cannot use relation "err_tblv" for COPY on_conflict error saving
+DETAIL:  This operation is not supported for views.
+DROP VIEW err_tblv;
+COPY t_copy_tbl FROM STDIN WITH (on_conflict table); -- error
+ERROR:  COPY ON_CONFLICT requires CONFLICT_TABLE option
+COPY t_copy_tbl FROM STDIN WITH (conflict_table err_tbl1); -- error
+ERROR:  COPY CONFLICT_TABLE requires ON_CONFLICT option specified as TABLE
+COPY t_copy_tbl TO STDOUT (on_conflict table, conflict_table err_tbl1); -- error
+ERROR:  COPY ON_CONFLICT cannot be used with COPY TO
+LINE 1: COPY t_copy_tbl TO STDOUT (on_conflict table, conflict_table...
+                                   ^
+-- error, conflict_table cannot have generated column
+COPY t_copy_tbl FROM STDIN WITH (on_conflict table, conflict_table err_tbl1);
+ERROR:  cannot use relation "err_tbl1" for COPY on_conflict error saving
+DETAIL:  The conflict_table cannot have generated columns.
+ALTER TABLE err_tbl1 ALTER COLUMN line DROP EXPRESSION;
+-- error, conflict_table cannot have RLS
+COPY t_copy_tbl FROM STDIN WITH (on_conflict table, conflict_table err_tbl1);
+ERROR:  cannot use relation "err_tbl1" for COPY on_conflict error saving
+DETAIL:  The conflict_table cannot have row-level security policies.
+DROP POLICY IF EXISTS p1 ON err_tbl1;
+ALTER TABLE err_tbl1 DISABLE ROW LEVEL SECURITY;
+ALTER TABLE err_tbl1 ALTER COLUMN line SET DATA TYPE d_text;
+COPY t_copy_tbl FROM STDIN WITH (on_conflict table, conflict_table err_tbl1); -- error, data type mismatch
+ERROR:  cannot use relation "err_tbl1" for COPY on_conflict error saving
+DETAIL:  The fourth column of the conflict_table data type is not TEXT.
+HINT:  The conflict_table must contain exactly four columns with data types, in order: OID, TEXT, BIGINT, TEXT
+ALTER TABLE err_tbl1 DROP COLUMN line;
+COPY t_copy_tbl FROM STDIN WITH (on_conflict table, conflict_table err_tbl1); -- error, less column
+ERROR:  cannot use relation "err_tbl1" for COPY on_conflict error saving
+DETAIL:  The conflict_table should only have four columns
+HINT:  The conflict_table must contain exactly four columns with data types, in order: OID, TEXT, BIGINT, TEXT
+ALTER TABLE err_tbl1 ADD COLUMN line text, ADD column extra int;
+COPY t_copy_tbl FROM STDIN WITH (on_conflict table, conflict_table err_tbl1); -- error, extra column
+ERROR:  cannot use relation "err_tbl1" for COPY on_conflict error saving
+DETAIL:  The conflict_table should only have four columns
+HINT:  The conflict_table must contain exactly four columns with data types, in order: OID, TEXT, BIGINT, TEXT
+ALTER TABLE err_tbl1 DROP COLUMN extra;
+COPY t_copy_tblp(a, c, b) FROM STDIN (format binary, on_conflict table, conflict_table err_tbl1); -- error
+ERROR:  only ON_CONFLICT STOP is allowed in BINARY mode
+COPY t_copy_tblp(a, c, b) FROM STDIN (on_conflict 'table', conflict_table 'err_tbl1'); -- single quote is ok
+COPY t_copy_tblp(a, c, b) FROM STDIN (on_conflict "table", conflict_table "err_tbl1"); -- double quote is ok
+COPY t_copy_tblp(a, c, b) FROM STDIN (delimiter ',', on_conflict table, conflict_table 'err_tbl1'); -- no quote is ok
+-- COPY on_conflict table cannot apply to deferred unique constraint
+ALTER TABLE t_copy_tbl ADD CONSTRAINT t_copy_tbl_unq1 UNIQUE (a) DEFERRABLE INITIALLY DEFERRED;
+BEGIN;
+COPY t_copy_tbl FROM STDIN (delimiter ',', on_conflict table, conflict_table err_tbl1);
+ERROR:  ON CONFLICT does not support deferrable unique constraints/exclusion constraints as arbiters
+CONTEXT:  COPY t_copy_tbl, line 1: "1,2,3"
+ROLLBACK;
+ALTER TABLE t_copy_tbl DROP CONSTRAINT t_copy_tbl_unq1;
+ALTER TABLE err_tbl1 ADD CONSTRAINT cc CHECK (lineno > 0);
+ALTER TABLE err_tbl1 ADD CONSTRAINT nn NOT NULL copy_tbl;
+CREATE UNIQUE INDEX ON t_copy_tbl (b) WHERE a = 1;
+CREATE UNIQUE INDEX ON t_copy_tbl ((b+1));
+CREATE UNIQUE INDEX ON t_copy_tbl (c);
+-- permission check
+BEGIN;
+CREATE USER regress_user31;
+GRANT INSERT(copy_tbl, filename, lineno) ON TABLE err_tbl1 TO regress_user31;
+GRANT SELECT ON TABLE err_tbl1 TO regress_user31;
+GRANT ALL ON TABLE t_copy_tbl TO regress_user31;
+SAVEPOINT s1;
+SET ROLE regress_user31;
+COPY t_copy_tbl FROM STDIN (delimiter ',',on_conflict table, conflict_table err_tbl1); -- error, insufficient privilege
+ERROR:  permission denied for table err_tbl1
+ROLLBACK TO SAVEPOINT s1;
+GRANT INSERT ON TABLE err_tbl1 to regress_user31;
+GRANT INSERT(line) ON TABLE err_tbl1 TO regress_user31;
+SET ROLE regress_user31;
+COPY t_copy_tbl FROM STDIN (delimiter ',',on_conflict table, conflict_table err_tbl1); -- ok
+RESET ROLE;
+ROLLBACK;
+COPY t_copy_tbl(b, a, c) FROM STDIN (delimiter ',', on_conflict table, conflict_table err_tbl1, log_verbosity verbose); -- ok
+NOTICE:  2 rows were saved to conflict table "err_tbl1" due to unique constraint violation
+SELECT tableoid::regclass, * FROM t_copy_tblp;
+  tableoid  | c | b | a 
+------------+---+---+---
+ t_copy_tbl | 3 | 2 | 1
+(1 row)
+
+SELECT copy_tbl::regclass, filename, lineno, line FROM err_tbl1;
+  copy_tbl  | filename | lineno |  line   
+------------+----------+--------+---------
+ t_copy_tbl | STDIN    |      1 | 2,1,aaa
+ t_copy_tbl | STDIN    |      2 | 2,1,XXX
+(2 rows)
+
+CREATE OR REPLACE FUNCTION trig_copy_conflict_insert()
+RETURNS TRIGGER LANGUAGE plpgsql AS
+$$
+BEGIN
+    if (TG_LEVEL = 'STATEMENT' and TG_WHEN = 'AFTER') then
+      RAISE NOTICE E'trigger name: %, % % FOR EACH %\n', TG_NAME,  TG_WHEN, TG_OP, TG_LEVEL;
+    else
+      RAISE NOTICE 'trigger name: %, % % FOR EACH %', TG_NAME,  TG_WHEN, TG_OP, TG_LEVEL;
+    end if;
+    if (TG_OP = 'INSERT' and TG_LEVEL = 'ROW' and TG_WHEN = 'BEFORE') then
+      RAISE NOTICE 'NEW lineno: %, line: %', NEW.lineno, NEW.line;
+    end if;
+    return new;
+END;
+$$;
+CREATE TRIGGER t_copy_tbl_before_row_trig
+  BEFORE INSERT ON err_tbl1
+  FOR EACH ROW EXECUTE PROCEDURE trig_copy_conflict_insert();
+CREATE TRIGGER t_copy_tbl_after_row_trig
+  AFTER INSERT ON err_tbl1
+  FOR EACH ROW EXECUTE PROCEDURE trig_copy_conflict_insert();
+CREATE TRIGGER t_copy_tbl_before_stmt_trig
+  BEFORE INSERT ON err_tbl1
+  FOR EACH STATEMENT EXECUTE PROCEDURE trig_copy_conflict_insert();
+CREATE TRIGGER t_copy_tbl_after_stmt_trig
+  AFTER INSERT ON err_tbl1
+  REFERENCING NEW TABLE AS new_rows
+  FOR EACH STATEMENT EXECUTE PROCEDURE trig_copy_conflict_insert();
+CREATE UNIQUE INDEX ON t_copy_tblp (a);
+table t_copy_tblp;
+ c | b | a 
+---+---+---
+ 3 | 2 | 1
+(1 row)
+
+\d+ t_copy_tblp
+                          Partitioned table "public.t_copy_tblp"
+ Column |  Type   | Collation | Nullable | Default | Storage  | Stats target | Description 
+--------+---------+-----------+----------+---------+----------+--------------+-------------
+ c      | text    |           |          |         | extended |              | 
+ b      | integer |           |          |         | plain    |              | 
+ a      | integer |           |          |         | plain    |              | 
+Partition key: RANGE (a)
+Indexes:
+    "t_copy_tblp_a_idx" UNIQUE, btree (a)
+Partitions:
+    t_copy_tbl FOR VALUES FROM (MINVALUE) TO (100)
+    t_copy_tbl1 FOR VALUES FROM (100) TO (200)
+
+-- Row-level and statement-level triggers will fire for each row inserted into
+-- conflict_table
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+INSERT INTO t_copy_tblp(b, a, c) VALUES (14,7,'xxxxxxxx');
+DELETE FROM t_copy_tblp WHERE b = 14 and a = 7 and c = 'xxxxxxxx';
+COPY t_copy_tblp(b, a, c) FROM STDIN (delimiter ',', on_conflict table, conflict_table err_tbl1, log_verbosity verbose);
+NOTICE:  trigger name: t_copy_tbl_before_stmt_trig, BEFORE INSERT FOR EACH STATEMENT
+NOTICE:  trigger name: t_copy_tbl_before_row_trig, BEFORE INSERT FOR EACH ROW
+NOTICE:  NEW lineno: 2, line: 6,11,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+NOTICE:  trigger name: t_copy_tbl_after_row_trig, AFTER INSERT FOR EACH ROW
+NOTICE:  trigger name: t_copy_tbl_after_stmt_trig, AFTER INSERT FOR EACH STATEMENT
+
+NOTICE:  trigger name: t_copy_tbl_before_stmt_trig, BEFORE INSERT FOR EACH STATEMENT
+NOTICE:  trigger name: t_copy_tbl_before_row_trig, BEFORE INSERT FOR EACH ROW
+NOTICE:  NEW lineno: 4, line: 12,2,xxxxxxxx
+NOTICE:  trigger name: t_copy_tbl_after_row_trig, AFTER INSERT FOR EACH ROW
+NOTICE:  trigger name: t_copy_tbl_after_stmt_trig, AFTER INSERT FOR EACH STATEMENT
+
+NOTICE:  trigger name: t_copy_tbl_before_stmt_trig, BEFORE INSERT FOR EACH STATEMENT
+NOTICE:  trigger name: t_copy_tbl_before_row_trig, BEFORE INSERT FOR EACH ROW
+NOTICE:  NEW lineno: 5, line: 13,3,xxxxxxxx
+NOTICE:  trigger name: t_copy_tbl_after_row_trig, AFTER INSERT FOR EACH ROW
+NOTICE:  trigger name: t_copy_tbl_after_stmt_trig, AFTER INSERT FOR EACH STATEMENT
+
+NOTICE:  trigger name: t_copy_tbl_before_stmt_trig, BEFORE INSERT FOR EACH STATEMENT
+NOTICE:  trigger name: t_copy_tbl_before_row_trig, BEFORE INSERT FOR EACH ROW
+NOTICE:  NEW lineno: 7, line: 2,199,Z
+NOTICE:  trigger name: t_copy_tbl_after_row_trig, AFTER INSERT FOR EACH ROW
+NOTICE:  trigger name: t_copy_tbl_after_stmt_trig, AFTER INSERT FOR EACH STATEMENT
+
+NOTICE:  4 rows were saved to conflict table "err_tbl1" due to unique constraint violation
+COPY t_copy_tblp(b, a, c) FROM STDIN (delimiter ',', on_conflict table, conflict_table err_tbl1, log_verbosity verbose);
+NOTICE:  trigger name: t_copy_tbl_before_stmt_trig, BEFORE INSERT FOR EACH STATEMENT
+NOTICE:  trigger name: t_copy_tbl_before_row_trig, BEFORE INSERT FOR EACH ROW
+NOTICE:  NEW lineno: 1, line: 199,199,Y
+NOTICE:  trigger name: t_copy_tbl_after_row_trig, AFTER INSERT FOR EACH ROW
+NOTICE:  trigger name: t_copy_tbl_after_stmt_trig, AFTER INSERT FOR EACH STATEMENT
+
+NOTICE:  1 row was saved to conflict table "err_tbl1" due to unique constraint violation
+ALTER TABLE err_tbl1 DISABLE TRIGGER USER;
+COMMIT;
+CREATE TABLE err_tbl6 (
+  id1 int4range,
+  valid_at int4range,
+  CONSTRAINT err_tbl6_uq UNIQUE (id1, valid_at WITHOUT OVERLAPS)
+);
+COPY err_tbl6 FROM STDIN (on_conflict table, conflict_table err_tbl1); -- error
+ERROR:  empty WITHOUT OVERLAPS value found in column "valid_at" in relation "err_tbl6"
+CONTEXT:  COPY err_tbl6, line 1: "[11,12)	empty"
+COPY err_tbl6 FROM STDIN (on_conflict table, conflict_table err_tbl1);
+NOTICE:  1 row was saved to conflict table "err_tbl1" due to unique constraint violation
+SELECT copy_tbl::regclass, filename, lineno, line FROM err_tbl1;
+  copy_tbl   | filename | lineno |                                       line                                       
+-------------+----------+--------+----------------------------------------------------------------------------------
+ t_copy_tbl  | STDIN    |      1 | 2,1,aaa
+ t_copy_tbl  | STDIN    |      2 | 2,1,XXX
+ t_copy_tbl  | STDIN    |      2 | 6,11,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+ t_copy_tbl  | STDIN    |      4 | 12,2,xxxxxxxx
+ t_copy_tbl  | STDIN    |      5 | 13,3,xxxxxxxx
+ t_copy_tbl1 | STDIN    |      7 | 2,199,Z
+ t_copy_tbl1 | STDIN    |      1 | 199,199,Y
+ err_tbl6    | STDIN    |      2 | [1,10)  [1,12)
+(8 rows)
+
 -- clean up
+DROP TABLE err_tbl1;
+DROP DOMAIN d_text;
 DROP TABLE forcetest;
 DROP TABLE vistest;
 DROP FUNCTION truncate_in_subxact();
