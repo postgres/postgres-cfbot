@@ -20,6 +20,7 @@
 #include "access/multixact.h"
 #include "access/tableam.h"
 #include "access/xact.h"
+#include "access/xlog.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_am.h"
@@ -79,6 +80,7 @@ SetMatViewPopulatedState(Relation relation, bool newstate)
 {
 	Relation	pgrel;
 	HeapTuple	tuple;
+	Form_pg_class classform;
 
 	Assert(relation->rd_rel->relkind == RELKIND_MATVIEW);
 
@@ -94,7 +96,14 @@ SetMatViewPopulatedState(Relation relation, bool newstate)
 		elog(ERROR, "cache lookup failed for relation %u",
 			 RelationGetRelid(relation));
 
-	((Form_pg_class) GETSTRUCT(tuple))->relispopulated = newstate;
+	classform = (Form_pg_class) GETSTRUCT(tuple);
+
+	if (!newstate)
+		classform->relpopulated = RELPOPULATED_NONE;
+	else if (relation->rd_rel->relpersistence == RELPERSISTENCE_UNLOGGED)
+		classform->relpopulated = (int64) GetUnloggedPopulatedEpoch();
+	else
+		classform->relpopulated = RELPOPULATED_ETERNAL;
 
 	CatalogTupleUpdate(pgrel, &tuple->t_self, tuple);
 
@@ -106,6 +115,59 @@ SetMatViewPopulatedState(Relation relation, bool newstate)
 	 * visible.
 	 */
 	CommandCounterIncrement();
+}
+
+/*
+ * MatViewPopulatedValueIsValid
+ *		Does this pg_class.relpopulated value denote currently valid data?
+ *
+ * This only distinguishes RELPOPULATED_NONE from everything else; any other
+ * value, whether RELPOPULATED_ETERNAL or an epoch stamp, counts as valid.
+ */
+bool
+MatViewPopulatedValueIsValid(int64 value)
+{
+	return value != RELPOPULATED_NONE;
+}
+
+/*
+ * RelationIsPopulated
+ *		Does this relation currently hold valid data?  Only a materialized
+ *		view can return false.
+ */
+bool
+RelationIsPopulated(Relation relation)
+{
+	return MatViewPopulatedValueIsValid(relation->rd_rel->relpopulated);
+}
+
+/*
+ * pg_matview_is_populated
+ *		Does the materialized view currently hold valid data?
+ *
+ * Returns NULL if the argument is not a materialized view, or if it does
+ * not exist.
+ */
+Datum
+pg_matview_is_populated(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	HeapTuple	tuple;
+	Form_pg_class classform;
+	bool		result;
+
+	tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+	if (!HeapTupleIsValid(tuple))
+		PG_RETURN_NULL();
+	classform = (Form_pg_class) GETSTRUCT(tuple);
+	if (classform->relkind != RELKIND_MATVIEW)
+	{
+		ReleaseSysCache(tuple);
+		PG_RETURN_NULL();
+	}
+	result = MatViewPopulatedValueIsValid(classform->relpopulated);
+	ReleaseSysCache(tuple);
+	PG_RETURN_BOOL(result);
 }
 
 /*
