@@ -2730,7 +2730,8 @@ match_previous_words(int pattern_id,
 		COMPLETE_WITH("TO");
 	/* ALTER MATERIALIZED VIEW xxx SET */
 	else if (Matches("ALTER", "MATERIALIZED", "VIEW", MatchAny, "SET"))
-		COMPLETE_WITH("(", "ACCESS METHOD", "SCHEMA", "TABLESPACE", "WITHOUT CLUSTER");
+		COMPLETE_WITH("(", "ACCESS METHOD", "LOGGED", "SCHEMA", "TABLESPACE",
+					  "UNLOGGED", "WITHOUT CLUSTER");
 	/* ALTER MATERIALIZED VIEW xxx SET ACCESS METHOD */
 	else if (Matches("ALTER", "MATERIALIZED", "VIEW", MatchAny, "SET", "ACCESS", "METHOD"))
 		COMPLETE_WITH_QUERY(Query_for_list_of_table_access_methods);
@@ -3837,9 +3838,9 @@ match_previous_words(int pattern_id,
 	/* Complete "CREATE TEMP/TEMPORARY" with the possible temp objects */
 	else if (TailMatches("CREATE", "TEMP|TEMPORARY"))
 		COMPLETE_WITH("SEQUENCE", "TABLE", "VIEW");
-	/* Complete "CREATE UNLOGGED" with TABLE or SEQUENCE */
+	/* Complete "CREATE UNLOGGED" with the possible unlogged objects */
 	else if (TailMatches("CREATE", "UNLOGGED"))
-		COMPLETE_WITH("TABLE", "SEQUENCE");
+		COMPLETE_WITH("MATERIALIZED VIEW", "SEQUENCE", "TABLE");
 	/* Complete PARTITION BY with RANGE ( or LIST ( or ... */
 	else if (TailMatches("PARTITION", "BY"))
 		COMPLETE_WITH("RANGE (", "LIST (", "HASH (");
@@ -4231,20 +4232,24 @@ match_previous_words(int pattern_id,
 		COMPLETE_WITH("SELECT");
 
 /* CREATE MATERIALIZED VIEW */
-	else if (Matches("CREATE", "MATERIALIZED"))
+	else if (Matches("CREATE", "MATERIALIZED") ||
+			 Matches("CREATE", "UNLOGGED", "MATERIALIZED"))
 		COMPLETE_WITH("VIEW");
 	/* Complete CREATE MATERIALIZED VIEW <name> with AS or USING */
-	else if (Matches("CREATE", "MATERIALIZED", "VIEW", MatchAny))
+	else if (Matches("CREATE", "MATERIALIZED", "VIEW", MatchAny) ||
+			 Matches("CREATE", "UNLOGGED", "MATERIALIZED", "VIEW", MatchAny))
 		COMPLETE_WITH("AS", "USING");
 
 	/*
 	 * Complete CREATE MATERIALIZED VIEW <name> USING with list of access
 	 * methods
 	 */
-	else if (Matches("CREATE", "MATERIALIZED", "VIEW", MatchAny, "USING"))
+	else if (Matches("CREATE", "MATERIALIZED", "VIEW", MatchAny, "USING") ||
+			 Matches("CREATE", "UNLOGGED", "MATERIALIZED", "VIEW", MatchAny, "USING"))
 		COMPLETE_WITH_QUERY(Query_for_list_of_table_access_methods);
 	/* Complete CREATE MATERIALIZED VIEW <name> USING <access method> with AS */
-	else if (Matches("CREATE", "MATERIALIZED", "VIEW", MatchAny, "USING", MatchAny))
+	else if (Matches("CREATE", "MATERIALIZED", "VIEW", MatchAny, "USING", MatchAny) ||
+			 Matches("CREATE", "UNLOGGED", "MATERIALIZED", "VIEW", MatchAny, "USING", MatchAny))
 		COMPLETE_WITH("AS");
 
 	/*
@@ -4252,7 +4257,9 @@ match_previous_words(int pattern_id,
 	 * with "SELECT"
 	 */
 	else if (Matches("CREATE", "MATERIALIZED", "VIEW", MatchAny, "AS") ||
-			 Matches("CREATE", "MATERIALIZED", "VIEW", MatchAny, "USING", MatchAny, "AS"))
+			 Matches("CREATE", "MATERIALIZED", "VIEW", MatchAny, "USING", MatchAny, "AS") ||
+			 Matches("CREATE", "UNLOGGED", "MATERIALIZED", "VIEW", MatchAny, "AS") ||
+			 Matches("CREATE", "UNLOGGED", "MATERIALIZED", "VIEW", MatchAny, "USING", MatchAny, "AS"))
 		COMPLETE_WITH("SELECT");
 
 /* CREATE EVENT TRIGGER */

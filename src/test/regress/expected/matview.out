@@ -27,9 +27,9 @@ EXPLAIN (costs off)
 (3 rows)
 
 CREATE MATERIALIZED VIEW mvtest_tm AS SELECT type, sum(amt) AS totamt FROM mvtest_t GROUP BY type WITH NO DATA;
-SELECT relispopulated FROM pg_class WHERE oid = 'mvtest_tm'::regclass;
- relispopulated 
-----------------
+SELECT pg_matview_is_populated('mvtest_tm'::regclass);
+ pg_matview_is_populated 
+-------------------------
  f
 (1 row)
 
@@ -37,10 +37,23 @@ SELECT * FROM mvtest_tm ORDER BY type;
 ERROR:  materialized view "mvtest_tm" has not been populated
 HINT:  Use the REFRESH MATERIALIZED VIEW command.
 REFRESH MATERIALIZED VIEW mvtest_tm;
-SELECT relispopulated FROM pg_class WHERE oid = 'mvtest_tm'::regclass;
- relispopulated 
-----------------
+SELECT pg_matview_is_populated('mvtest_tm'::regclass);
+ pg_matview_is_populated 
+-------------------------
  t
+(1 row)
+
+-- ... but NULL for a relation that is not a materialized view, or nonexistent
+SELECT pg_matview_is_populated('mvtest_t'::regclass);
+ pg_matview_is_populated 
+-------------------------
+ 
+(1 row)
+
+SELECT pg_matview_is_populated(0);
+ pg_matview_is_populated 
+-------------------------
+ 
 (1 row)
 
 CREATE UNIQUE INDEX mvtest_tm_type ON mvtest_tm (type);
@@ -312,6 +325,212 @@ SELECT type, m.totamt AS mtot, v.totamt AS vtot FROM mvtest_tm m LEFT JOIN mvtes
  z    |   24 |   24
 (3 rows)
 
+-- unlogged materialized view: storage is unlogged, REFRESH/SELECT work.
+-- The data is not WAL-logged (relpersistence 'u'); crash semantics that mark
+-- the matview unpopulated after a crash are handled separately.
+CREATE UNLOGGED MATERIALIZED VIEW mvtest_unlogged AS
+  SELECT type, sum(amt) AS totamt FROM mvtest_t GROUP BY type;
+SELECT relpersistence FROM pg_class WHERE oid = 'mvtest_unlogged'::regclass;
+ relpersistence 
+----------------
+ u
+(1 row)
+
+SELECT pg_matview_is_populated('mvtest_unlogged'::regclass);
+ pg_matview_is_populated 
+-------------------------
+ t
+(1 row)
+
+-- the matview's toast table is unlogged too
+SELECT t.relpersistence FROM pg_class c JOIN pg_class t ON c.reltoastrelid = t.oid
+  WHERE c.oid = 'mvtest_unlogged'::regclass;
+ relpersistence 
+----------------
+ u
+(1 row)
+
+SELECT * FROM mvtest_unlogged ORDER BY type;
+ type | totamt 
+------+--------
+ x    |      5
+ y    |     12
+ z    |     24
+(3 rows)
+
+-- an index on an unlogged matview is unlogged as well
+CREATE UNIQUE INDEX mvtest_unlogged_type ON mvtest_unlogged (type);
+SELECT relpersistence FROM pg_class WHERE oid = 'mvtest_unlogged_type'::regclass;
+ relpersistence 
+----------------
+ u
+(1 row)
+
+-- REFRESH still works and leaves the data intact
+REFRESH MATERIALIZED VIEW mvtest_unlogged;
+SELECT * FROM mvtest_unlogged ORDER BY type;
+ type | totamt 
+------+--------
+ x    |      5
+ y    |     12
+ z    |     24
+(3 rows)
+
+DROP MATERIALIZED VIEW mvtest_unlogged;
+-- ALTER MATERIALIZED VIEW ... SET {LOGGED|UNLOGGED} rewrites persistence
+-- of the matview, its toast table and its indexes, preserving data.
+CREATE MATERIALIZED VIEW mvtest_setlog AS
+  SELECT type, sum(amt) AS totamt FROM mvtest_t GROUP BY type;
+CREATE UNIQUE INDEX mvtest_setlog_type ON mvtest_setlog (type);
+SELECT relpersistence FROM pg_class WHERE oid = 'mvtest_setlog'::regclass;  -- p
+ relpersistence 
+----------------
+ p
+(1 row)
+
+SELECT count(*) FROM mvtest_setlog;
+ count 
+-------
+     3
+(1 row)
+
+ALTER MATERIALIZED VIEW mvtest_setlog SET UNLOGGED;
+SELECT relpersistence FROM pg_class WHERE oid = 'mvtest_setlog'::regclass;  -- u
+ relpersistence 
+----------------
+ u
+(1 row)
+
+SELECT relpersistence FROM pg_class
+  WHERE oid = (SELECT reltoastrelid FROM pg_class WHERE oid = 'mvtest_setlog'::regclass);  -- u
+ relpersistence 
+----------------
+ u
+(1 row)
+
+SELECT relpersistence FROM pg_class WHERE oid = 'mvtest_setlog_type'::regclass;  -- u
+ relpersistence 
+----------------
+ u
+(1 row)
+
+SELECT pg_matview_is_populated('mvtest_setlog'::regclass);  -- t
+ pg_matview_is_populated 
+-------------------------
+ t
+(1 row)
+
+SELECT count(*) FROM mvtest_setlog;
+ count 
+-------
+     3
+(1 row)
+
+ALTER MATERIALIZED VIEW mvtest_setlog SET LOGGED;
+SELECT relpersistence FROM pg_class WHERE oid = 'mvtest_setlog'::regclass;  -- p
+ relpersistence 
+----------------
+ p
+(1 row)
+
+SELECT relpersistence FROM pg_class WHERE oid = 'mvtest_setlog_type'::regclass;  -- p
+ relpersistence 
+----------------
+ p
+(1 row)
+
+SELECT pg_matview_is_populated('mvtest_setlog'::regclass);  -- t
+ pg_matview_is_populated 
+-------------------------
+ t
+(1 row)
+
+SELECT count(*) FROM mvtest_setlog;
+ count 
+-------
+     3
+(1 row)
+
+-- cannot change persistence setting twice in one ALTER
+ALTER MATERIALIZED VIEW mvtest_setlog SET UNLOGGED, SET LOGGED;
+ERROR:  cannot change persistence setting twice
+DROP MATERIALIZED VIEW mvtest_setlog;
+-- ALTER MATERIALIZED VIEW SET LOGGED / SET UNLOGGED converts the populated state
+CREATE UNLOGGED MATERIALIZED VIEW mvtest_persist AS SELECT 1 AS a;
+SELECT pg_matview_is_populated('mvtest_persist'::regclass);
+ pg_matview_is_populated 
+-------------------------
+ t
+(1 row)
+
+ALTER MATERIALIZED VIEW mvtest_persist SET LOGGED;
+SELECT relpersistence FROM pg_class WHERE oid = 'mvtest_persist'::regclass;
+ relpersistence 
+----------------
+ p
+(1 row)
+
+SELECT relpopulated FROM pg_class WHERE oid = 'mvtest_persist'::regclass;  -- 1: eternal
+ relpopulated 
+--------------
+            1
+(1 row)
+
+SELECT * FROM mvtest_persist;
+ a 
+---
+ 1
+(1 row)
+
+ALTER MATERIALIZED VIEW mvtest_persist SET UNLOGGED;
+SELECT relpersistence FROM pg_class WHERE oid = 'mvtest_persist'::regclass;
+ relpersistence 
+----------------
+ u
+(1 row)
+
+SELECT relpopulated > 1 OR relpopulated < 0 AS is_epoch_stamp FROM pg_class WHERE oid = 'mvtest_persist'::regclass;
+ is_epoch_stamp 
+----------------
+ t
+(1 row)
+
+SELECT pg_matview_is_populated('mvtest_persist'::regclass);
+ pg_matview_is_populated 
+-------------------------
+ t
+(1 row)
+
+SELECT * FROM mvtest_persist;
+ a 
+---
+ 1
+(1 row)
+
+DROP MATERIALIZED VIEW mvtest_persist;
+-- SET UNLOGGED on an unpopulated matview keeps it unpopulated
+CREATE MATERIALIZED VIEW mvtest_nodata AS SELECT 1 AS a WITH NO DATA;
+ALTER MATERIALIZED VIEW mvtest_nodata SET UNLOGGED;
+SELECT relpopulated FROM pg_class WHERE oid = 'mvtest_nodata'::regclass;  -- 0: none
+ relpopulated 
+--------------
+            0
+(1 row)
+
+SELECT pg_matview_is_populated('mvtest_nodata'::regclass);
+ pg_matview_is_populated 
+-------------------------
+ f
+(1 row)
+
+REFRESH MATERIALIZED VIEW mvtest_nodata;
+SELECT pg_matview_is_populated('mvtest_nodata'::regclass);
+ pg_matview_is_populated 
+-------------------------
+ t
+(1 row)
+
+DROP MATERIALIZED VIEW mvtest_nodata;
 -- make sure that dependencies are reported properly when they block the drop
 DROP TABLE mvtest_t;
 ERROR:  cannot drop table mvtest_t because other objects depend on it
@@ -376,9 +595,9 @@ UNION ALL
    FROM mvtest_vt2;
 
 CREATE MATERIALIZED VIEW mv_test3 AS SELECT * FROM mv_test2 WHERE moo = 12345;
-SELECT relispopulated FROM pg_class WHERE oid = 'mv_test3'::regclass;
- relispopulated 
-----------------
+SELECT pg_matview_is_populated('mv_test3'::regclass);
+ pg_matview_is_populated 
+-------------------------
  t
 (1 row)
 

@@ -1944,7 +1944,7 @@ formrdesc(const char *relationName, Oid relationReltype,
 	relation->rd_rel->relpersistence = RELPERSISTENCE_PERMANENT;
 
 	/* ... and they're always populated, too */
-	relation->rd_rel->relispopulated = true;
+	relation->rd_rel->relpopulated = RELPOPULATED_ETERNAL;
 
 	relation->rd_rel->relreplident = REPLICA_IDENTITY_NOTHING;
 	relation->rd_rel->relpages = 0;
@@ -3668,10 +3668,8 @@ RelationBuildLocalRelation(const char *relname,
 	}
 
 	/* if it's a materialized view, it's not populated initially */
-	if (relkind == RELKIND_MATVIEW)
-		rel->rd_rel->relispopulated = false;
-	else
-		rel->rd_rel->relispopulated = true;
+	rel->rd_rel->relpopulated = (relkind == RELKIND_MATVIEW) ?
+		RELPOPULATED_NONE : RELPOPULATED_ETERNAL;
 
 	/* set replica identity -- system catalogs and non-tables don't have one */
 	if (!IsCatalogNamespace(relnamespace) &&

@@ -22,7 +22,7 @@
 
 
 /* Version identifier for this pg_control format */
-#define PG_CONTROL_VERSION	1903
+#define PG_CONTROL_VERSION	1904
 
 /* Nonce key length, see below */
 #define MOCK_AUTH_NONCE_LEN		32
@@ -143,6 +143,9 @@ typedef struct ControlFileData
 	CheckPoint	checkPointCopy; /* copy of last check point record */
 
 	XLogRecPtr	unloggedLSN;	/* current fake LSN value, for unlogged rels */
+	uint64		unloggedResetGen;	/* bumped whenever unlogged relations are
+									 * reset (end of recovery) or become
+									 * unsafe to trust (pg_resetwal) */
 
 	/*
 	 * These two values determine the minimum point we must recover up to
