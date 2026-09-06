@@ -87,6 +87,13 @@ xlog2_desc(StringInfo buf, XLogReaderState *record)
 		memcpy(&xlrec, rec, sizeof(xl_checksum_state));
 		appendStringInfoString(buf, get_checksum_state_string(xlrec.new_checksum_state));
 	}
+	else if (info == XLOG2_RECOVERY_BOUNDARY)
+	{
+		xl_recovery_boundary *xlrec = (xl_recovery_boundary *) rec;
+
+		appendStringInfo(buf, "time %s",
+						 timestamptz_to_str(xlrec->boundary_time));
+	}
 }
 
 void
@@ -289,6 +296,9 @@ xlog2_identify(uint8 info)
 	{
 		case XLOG2_CHECKSUMS:
 			id = "CHECKSUMS";
+			break;
+		case XLOG2_RECOVERY_BOUNDARY:
+			id = "RECOVERY_BOUNDARY";
 			break;
 	}
 
