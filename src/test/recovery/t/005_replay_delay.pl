@@ -17,6 +17,7 @@ $node_primary->start;
 # And some content
 $node_primary->safe_psql('postgres',
 	"CREATE TABLE tab_int AS SELECT generate_series(1, 10) AS a");
+$node_primary->safe_psql('postgres', "CREATE DATABASE db_dropped");
 
 # Take backup
 my $backup_name = 'my_backup';
@@ -55,6 +56,18 @@ $node_standby->poll_query_until('postgres',
 # the configured apply delay.
 cmp_ok(time() - $primary_insert_time,
 	'>=', $delay, "standby applies WAL only after replication delay");
+
+my $oid_dropped = $node_primary->safe_psql('postgres',
+	"SELECT oid FROM pg_database WHERE datname = 'db_dropped'");
+my $primary_drop_time = time();
+$node_primary->safe_psql('postgres', "DROP DATABASE db_dropped");
+$node_standby->poll_query_until('postgres',
+	"SELECT pg_stat_file('base/$oid_dropped', true) IS NULL")
+  or die "standby never removed the directory of db_dropped";
+cmp_ok(time() - $primary_drop_time,
+	'>=', $delay,
+	"standby removes database files only after replication delay");
+
 # Check that recovery can be paused or resumed expectedly.
 my $node_standby2 = PostgreSQL::Test::Cluster->new('standby2');
 $node_standby2->init_from_backup($node_primary, $backup_name,
