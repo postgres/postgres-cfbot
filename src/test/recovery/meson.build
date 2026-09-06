@@ -66,6 +66,8 @@ tests += {
       't/055_cascade_reconnect.pl',
       't/056_standby_snapshot_export.pl',
       't/057_snapshot_commit_race.pl',
+      't/058_unlogged_matview.pl',
+      't/059_unlogged_matview_standby.pl',
     ],
   },
 }
