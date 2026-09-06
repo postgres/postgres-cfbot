@@ -13,11 +13,184 @@
 #endif
 
 #include "common.h"
+#include "common/logging.h"
 #include "common/string.h"
 #include "input.h"
 #include "libpq/pqcomm.h"
 #include "prompt.h"
 #include "settings.h"
+#include "variables.h"
+
+#define MAX_PROMPT_SIZE 8192
+#define MAX_PROMPT_SUBST_SIZE 8192
+
+/* stdout captured from the most recent PROMPT_COMMAND execution */
+static char prompt_command_result[MAX_PROMPT_SUBST_SIZE + 1];
+
+/*
+ * Export psql state for PROMPT_COMMAND subprocesses (powerline, etc.).
+ *
+ * Enabled only when the PROMPT_SESSION_EXPORT psql variable is on (see
+ * src/bin/psql/powerline-integration.md).  A companion implementation
+ * lives in the powerline project (psql extension).
+ *
+ * Connection settings use the standard libpq PG* names, set from the
+ * current session (PQhost, PQdb, etc.) rather than stale startup env.
+ * There is no PG* variable for last-command exit status; use
+ * PSQL_SHELL_EXIT (from :SHELL_EXIT) for that.  The psql variable ``txid`` is
+ * exported as PSQL_TXID when set (e.g. via ``\\gset`` at connect).
+ * PSQL_SUPERUSER is set to ``1`` or ``0`` from the connection's superuser
+ * status (same test used for the ``%#`` prompt escape).
+ */
+static bool
+prompt_session_export_enabled(void)
+{
+	const char *val = GetVariable(pset.vars, "PROMPT_SESSION_EXPORT");
+	bool		on = false;
+
+	if (val != NULL && ParseVariableBool(val, "PROMPT_SESSION_EXPORT", &on))
+		return on;
+
+	return false;
+}
+
+static void
+export_prompt_environment(void)
+{
+	const char *val;
+
+	val = GetVariable(pset.vars, "SHELL_EXIT");
+	if (val)
+		setenv("PSQL_SHELL_EXIT", val, 1);
+
+	if (pset.db)
+	{
+		setenv("PGDATABASE", PQdb(pset.db), 1);
+		setenv("PGUSER", session_username(), 1);
+
+		val = PQhost(pset.db);
+		if (val && val[0] != '\0')
+			setenv("PGHOST", val, 1);
+		else
+			unsetenv("PGHOST");
+
+		val = PQport(pset.db);
+		if (val && val[0] != '\0')
+			setenv("PGPORT", val, 1);
+		else
+			unsetenv("PGPORT");
+
+		switch (PQtransactionStatus(pset.db))
+		{
+			case PQTRANS_IDLE:
+				setenv("PSQL_TXN", "idle", 1);
+				break;
+			case PQTRANS_ACTIVE:
+			case PQTRANS_INTRANS:
+				setenv("PSQL_TXN", "active", 1);
+				break;
+			case PQTRANS_INERROR:
+				setenv("PSQL_TXN", "error", 1);
+				break;
+			default:
+				setenv("PSQL_TXN", "unknown", 1);
+				break;
+		}
+
+		setenv("PSQL_SUPERUSER", is_superuser() ? "1" : "0", 1);
+	}
+	else
+	{
+		unsetenv("PGDATABASE");
+		unsetenv("PGUSER");
+		unsetenv("PGHOST");
+		unsetenv("PGPORT");
+		unsetenv("PSQL_TXN");
+		unsetenv("PSQL_SUPERUSER");
+	}
+
+	val = GetVariable(pset.vars, "ROW_COUNT");
+	if (val)
+		setenv("PSQL_ROW_COUNT", val, 1);
+	else
+		unsetenv("PSQL_ROW_COUNT");
+
+	val = GetVariable(pset.vars, "txid");
+	if (val && val[0] != '\0')
+		setenv("PSQL_TXID", val, 1);
+	else
+		unsetenv("PSQL_TXID");
+}
+
+/*
+ * Run PROMPT_COMMAND, if set, before generating a prompt.
+ *
+ * Like bash's PROMPT_COMMAND, this executes a shell command before each
+ * prompt is displayed.  The first line of stdout is captured and can be
+ * inserted into PROMPT1/PROMPT2 via the %D escape.  (Unlike bash, psql
+ * cannot run the command in-process, so "export" in PROMPT_COMMAND will
+ * not affect later %`command` substitutions.)
+ */
+void
+run_prompt_command(void)
+{
+	const char *cmd = GetVariable(pset.vars, "PROMPT_COMMAND");
+	FILE	   *fd;
+	size_t		len = 0;
+	int			c;
+
+	prompt_command_result[0] = '\0';
+
+	if (cmd == NULL || cmd[0] == '\0')
+		return;
+
+	if (prompt_session_export_enabled())
+		export_prompt_environment();
+
+	fflush(NULL);
+	fd = popen(cmd, "r");
+	if (fd == NULL)
+		return;
+
+	while (len < MAX_PROMPT_SUBST_SIZE && (c = fgetc(fd)) != EOF)
+	{
+		if (c == '\n' || c == '\r')
+			break;
+		prompt_command_result[len++] = (char) c;
+	}
+	prompt_command_result[len] = '\0';
+
+	/*
+	 * Do not update SHELL_EXIT or SHELL_EXIT_CODE here: PROMPT_COMMAND is not
+	 * a user command, and overwriting would hide the status of the last SQL
+	 * or shell command (e.g. for powerline --last-exit-code).
+	 */
+	(void) pclose(fd);
+}
+
+/*
+ * Reset prompt-related psql variables after a successful \connect.
+ *
+ * Clears stale row-count and exit-status from the previous session, and
+ * refreshes :varname:`txid` when that variable is already defined (e.g. via
+ * ``\\gset`` in .psqlrc for powerline).
+ */
+void
+reset_prompt_status_after_connect(void)
+{
+	PGresult   *res;
+
+	SetVariable(pset.vars, "ROW_COUNT", "0");
+	SetVariable(pset.vars, "SHELL_EXIT", "0");
+
+	if (!pset.db || GetVariable(pset.vars, "txid") == NULL)
+		return;
+
+	res = PQexec(pset.db, "SELECT txid_current()::text");
+	if (PQresultStatus(res) == PGRES_TUPLES_OK && PQntuples(res) > 0)
+		SetVariable(pset.vars, "txid", PQgetvalue(res, 0, 0));
+	PQclear(res);
+}
 
 /*--------------------------
  * get_prompt
@@ -59,8 +232,16 @@
  *					 newline stripped.
  * %:name:		   - The value of the psql variable 'name'
  * (those will not be rescanned for more escape sequences!)
+ * %D			   - stdout from PROMPT_COMMAND (first line, no trailing newline)
  *
  * %[ ... %]	   - tell readline that the contained text is invisible
+ *					 (use around ANSI color sequences from prompt utilities)
+ *
+ * PROMPT_COMMAND   - if set, a shell command run before each prompt (see
+ *					 run_prompt_command()).
+ *
+ * PROMPT_SESSION_EXPORT - if on, export connection/session environment for
+ *					 PROMPT_COMMAND (see powerline-integration.md).
  *
  * If the application-wide prompts become NULL somehow, the returned string
  * will be empty (not NULL!).
@@ -70,13 +251,20 @@
 char *
 get_prompt(promptStatus_t status, ConditionalStack cstack)
 {
-#define MAX_PROMPT_SIZE 256
-	static char destination[MAX_PROMPT_SIZE + 1];
-	char		buf[MAX_PROMPT_SIZE + 1];
+	static PQExpBuffer destination = NULL;
+	char		buf[MAX_PROMPT_SUBST_SIZE + 1];
 	bool		esc = false;
 	const char *p;
 	const char *prompt_string = "? ";
 	static size_t last_prompt1_width = 0;
+
+	if (destination == NULL)
+		destination = createPQExpBuffer();
+	else
+		resetPQExpBuffer(destination);
+
+	if (PQExpBufferBroken(destination))
+		pg_fatal("out of memory");
 
 	switch (status)
 	{
@@ -98,10 +286,8 @@ get_prompt(promptStatus_t status, ConditionalStack cstack)
 			break;
 	}
 
-	destination[0] = '\0';
-
 	for (p = prompt_string;
-		 *p && strlen(destination) < sizeof(destination) - 1;
+		 *p && destination->len < MAX_PROMPT_SIZE;
 		 p++)
 	{
 		memset(buf, 0, sizeof(buf));
@@ -307,6 +493,10 @@ get_prompt(promptStatus_t status, ConditionalStack cstack)
 					/* not here yet */
 					break;
 
+				case 'D':
+					strlcpy(buf, prompt_command_result, sizeof(buf));
+					break;
+
 				case '#':
 					if (is_superuser())
 						buf[0] = '#';
@@ -384,14 +574,17 @@ get_prompt(promptStatus_t status, ConditionalStack cstack)
 		}
 
 		if (!esc)
-			strlcat(destination, buf, sizeof(destination));
+			appendPQExpBufferStr(destination, buf);
 	}
+
+	if (PQExpBufferBroken(destination))
+		pg_fatal("out of memory");
 
 	/* Compute the visible width of PROMPT1, for PROMPT2's %w */
 	if (prompt_string == pset.prompt1)
 	{
-		char	   *p = destination;
-		char	   *end = p + strlen(p);
+		char	   *p = destination->data;
+		char	   *end = p + destination->len;
 		bool		visible = true;
 
 		last_prompt1_width = 0;
@@ -433,5 +626,5 @@ get_prompt(promptStatus_t status, ConditionalStack cstack)
 		}
 	}
 
-	return destination;
+	return destination->data;
 }

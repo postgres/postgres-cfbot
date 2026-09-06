@@ -44,10 +44,13 @@
 #endif							/* HAVE_READLINE_READLINE_H, etc */
 #endif							/* HAVE_LIBREADLINE */
 
+#include "fe_utils/conditional.h"
+#include "fe_utils/psqlscan.h"
 #include "pqexpbuffer.h"
 
 
-extern char *gets_interactive(const char *prompt, PQExpBuffer query_buf);
+extern char *gets_interactive(promptStatus_t status, ConditionalStack cstack,
+							  PQExpBuffer query_buf);
 extern char *gets_fromFile(FILE *source);
 
 extern void initializeInput(int flags);
