@@ -3017,24 +3017,30 @@ recoveryApplyDelay(XLogReaderState *record)
 		return false;
 
 	/*
-	 * Is it a COMMIT record?
+	 * Is it a COMMIT record, or a recovery boundary record?
 	 *
 	 * We deliberately choose not to delay aborts since they have no effect on
 	 * MVCC. We already allow replay of records that don't have a timestamp,
 	 * so there is already opportunity for issues caused by early conflicts on
 	 * standbys.
 	 */
-	if (XLogRecGetRmid(record) != RM_XACT_ID)
-		return false;
+	if (XLogRecGetRmid(record) == RM_XLOG2_ID &&
+		(XLogRecGetInfo(record) & ~XLR_INFO_MASK) == XLOG2_RECOVERY_BOUNDARY)
+		xtime = ((xl_recovery_boundary *) XLogRecGetData(record))->boundary_time;
+	else
+	{
+		if (XLogRecGetRmid(record) != RM_XACT_ID)
+			return false;
 
-	xact_info = XLogRecGetInfo(record) & XLOG_XACT_OPMASK;
+		xact_info = XLogRecGetInfo(record) & XLOG_XACT_OPMASK;
 
-	if (xact_info != XLOG_XACT_COMMIT &&
-		xact_info != XLOG_XACT_COMMIT_PREPARED)
-		return false;
+		if (xact_info != XLOG_XACT_COMMIT &&
+			xact_info != XLOG_XACT_COMMIT_PREPARED)
+			return false;
 
-	if (!getRecordTimestamp(record, &xtime))
-		return false;
+		if (!getRecordTimestamp(record, &xtime))
+			return false;
+	}
 
 	delayUntil = TimestampTzPlusMilliseconds(xtime, recovery_min_apply_delay);
 
