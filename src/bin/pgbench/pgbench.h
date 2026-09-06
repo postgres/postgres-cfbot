@@ -13,6 +13,7 @@
 
 #include "fe_utils/psqlscan.h"
 #include "stats.h"
+#include "variable.h"
 
 /*
  * This file is included outside exprscan.l, in places where we can't see
@@ -28,31 +29,6 @@ typedef void *yyscan_t;
  * but for now there's no need to know what the union contents are.
  */
 union YYSTYPE;
-
-/*
- * Variable types used in parser.
- */
-typedef enum
-{
-	PGBT_NO_VALUE = 0,
-	PGBT_NULL,
-	PGBT_INT,
-	PGBT_DOUBLE,
-	PGBT_BOOLEAN,
-	/* add other types here */
-} PgBenchValueType;
-
-typedef struct
-{
-	PgBenchValueType type;
-	union
-	{
-		int64		ival;
-		double		dval;
-		bool		bval;
-		/* add other types here */
-	}			u;
-} PgBenchValue;
 
 /* Types of expression nodes */
 typedef enum PgBenchExprType
@@ -157,8 +133,5 @@ extern char *expr_scanner_get_substring(PsqlScanState state,
 pg_noreturn extern void syntax_error(const char *source, int lineno, const char *line,
 									 const char *command, const char *msg,
 									 const char *more, int column);
-
-extern bool strtoint64(const char *str, bool errorOK, int64 *result);
-extern bool strtodouble(const char *str, bool errorOK, double *dv);
 
 #endif							/* PGBENCH_H */
