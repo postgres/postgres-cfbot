@@ -51,6 +51,8 @@ sub test_recovery_standby
 	  $node_standby->safe_psql('postgres', "SELECT count(*) FROM tab_int");
 	is($result, qq($num_rows), "check standby content for $test_name");
 
+	$params{checks}->($node_standby) if defined $params{checks};
+
 	# Stop standby node
 	$node_standby->teardown_node;
 
@@ -60,6 +62,11 @@ sub test_recovery_standby
 # Initialize primary node
 my $node_primary = PostgreSQL::Test::Cluster->new('primary');
 $node_primary->init(has_archiving => 1, allows_streaming => 1);
+$node_primary->append_conf(
+	'postgresql.conf', qq(
+autovacuum = off
+allow_in_place_tablespaces = on
+));
 
 # Bump the transaction ID epoch.  This is useful to stress the portability
 # of recovery_target_xid parsing.
@@ -72,6 +79,14 @@ $node_primary->start;
 # recovery_target = 'immediate'
 $node_primary->safe_psql('postgres',
 	"CREATE TABLE tab_int AS SELECT generate_series(1,1000) AS a");
+$node_primary->safe_psql('postgres',
+	"CREATE TABLESPACE ts_dropped LOCATION ''");
+$node_primary->safe_psql('postgres',
+	"CREATE TABLESPACE ts_target LOCATION ''");
+$node_primary->safe_psql('postgres', "CREATE DATABASE db_dropped");
+$node_primary->safe_psql('db_dropped',
+	"CREATE TABLE tab_dropped AS SELECT generate_series(1,100) AS a");
+$node_primary->safe_psql('postgres', "CREATE DATABASE db_moved");
 my $lsn1 =
   $node_primary->safe_psql('postgres', "SELECT pg_current_wal_lsn();");
 
@@ -114,6 +129,41 @@ $node_primary->safe_psql('postgres',
 my $lsn6 =
   $node_primary->safe_psql('postgres', "SELECT pg_current_wal_lsn()");
 
+$ret =
+  $node_primary->safe_psql('postgres', "SELECT now(), pg_current_wal_lsn()");
+my ($time_before_dbdrop, $lsn_before_dbdrop) = split /\|/, $ret;
+$node_primary->safe_psql('postgres', "DROP DATABASE db_dropped");
+
+$ret =
+  $node_primary->safe_psql('postgres', "SELECT now(), pg_current_wal_lsn()");
+my ($time_before_dbcreate, $lsn_before_dbcreate) = split /\|/, $ret;
+$node_primary->safe_psql('postgres', "CREATE DATABASE db_created");
+my $oid_db_created = $node_primary->safe_psql('postgres',
+	"SELECT oid FROM pg_database WHERE datname = 'db_created'");
+
+$ret =
+  $node_primary->safe_psql('postgres', "SELECT now(), pg_current_wal_lsn()");
+my ($time_before_tscreate, $lsn_before_tscreate) = split /\|/, $ret;
+$node_primary->safe_psql('postgres',
+	"CREATE TABLESPACE ts_created LOCATION ''");
+my $oid_ts_created = $node_primary->safe_psql('postgres',
+	"SELECT oid FROM pg_tablespace WHERE spcname = 'ts_created'");
+
+my $oid_ts_target = $node_primary->safe_psql('postgres',
+	"SELECT oid FROM pg_tablespace WHERE spcname = 'ts_target'");
+$ret =
+  $node_primary->safe_psql('postgres', "SELECT now(), pg_current_wal_lsn()");
+my ($time_before_dbmove, $lsn_before_dbmove) = split /\|/, $ret;
+$node_primary->safe_psql('postgres',
+	"ALTER DATABASE db_moved SET TABLESPACE ts_target");
+
+my $oid_ts_dropped = $node_primary->safe_psql('postgres',
+	"SELECT oid FROM pg_tablespace WHERE spcname = 'ts_dropped'");
+$ret =
+  $node_primary->safe_psql('postgres', "SELECT now(), pg_current_wal_lsn()");
+my ($time_before_tsdrop, $lsn_before_tsdrop) = split /\|/, $ret;
+$node_primary->safe_psql('postgres', "DROP TABLESPACE ts_dropped");
+
 # Force archiving of WAL file containing $lsn6
 $node_primary->safe_psql('postgres', "SELECT pg_switch_wal()");
 
@@ -133,6 +183,82 @@ test_recovery_standby('name', 'standby_4', $node_primary, \@recovery_params,
 @recovery_params = ("recovery_target_lsn = '$recovery_lsn'");
 test_recovery_standby('LSN', 'standby_5', $node_primary, \@recovery_params,
 	"5000", $lsn5);
+
+@recovery_params = ("recovery_target_time = '$time_before_dbdrop'");
+test_recovery_standby(
+	'time before DROP DATABASE',
+	'standby_dbdrop',
+	$node_primary,
+	\@recovery_params,
+	"6000",
+	$lsn_before_dbdrop,
+	checks => sub {
+		my $node = shift;
+		my ($ret, $stdout, $stderr) =
+		  $node->psql('db_dropped', "SELECT count(*) FROM tab_dropped");
+		is($ret, 0, 'can connect to db_dropped');
+		is($stdout, '100', 'content of db_dropped is intact');
+	});
+
+@recovery_params = ("recovery_target_time = '$time_before_dbcreate'");
+test_recovery_standby(
+	'time before CREATE DATABASE',
+	'standby_dbcreate',
+	$node_primary,
+	\@recovery_params,
+	"6000",
+	$lsn_before_dbcreate,
+	checks => sub {
+		my $node = shift;
+		ok( !-d $node->data_dir . "/base/$oid_db_created",
+			'no orphaned directory of db_created');
+	});
+
+@recovery_params = ("recovery_target_time = '$time_before_tscreate'");
+test_recovery_standby(
+	'time before CREATE TABLESPACE',
+	'standby_tscreate',
+	$node_primary,
+	\@recovery_params,
+	"6000",
+	$lsn_before_tscreate,
+	checks => sub {
+		my $node = shift;
+		ok(!-e $node->data_dir . "/pg_tblspc/$oid_ts_created",
+			'no orphaned directory of ts_created');
+	});
+
+@recovery_params = ("recovery_target_time = '$time_before_dbmove'");
+test_recovery_standby(
+	'time before ALTER DATABASE SET TABLESPACE',
+	'standby_dbmove',
+	$node_primary,
+	\@recovery_params,
+	"6000",
+	$lsn_before_dbmove,
+	checks => sub {
+		my $node = shift;
+		is( $node->safe_psql(
+				'postgres',
+				"SELECT count(*) FROM pg_tablespace_databases($oid_ts_target)"
+			),
+			'0',
+			'no orphaned copy of db_moved in ts_target');
+	});
+
+@recovery_params = ("recovery_target_time = '$time_before_tsdrop'");
+test_recovery_standby(
+	'time before DROP TABLESPACE',
+	'standby_tsdrop',
+	$node_primary,
+	\@recovery_params,
+	"6000",
+	$lsn_before_tsdrop,
+	checks => sub {
+		my $node = shift;
+		ok(-e $node->data_dir . "/pg_tblspc/$oid_ts_dropped",
+			'directory of ts_dropped exists');
+	});
 
 # Regression: empty-string for one recovery_target_* GUC must not clobber
 # another non-empty target.  Setting recovery_target_xid + recovery_target_time

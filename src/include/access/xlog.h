@@ -286,6 +286,7 @@ extern bool CreateRestartPoint(int flags);
 extern WALAvailability GetWALAvailability(XLogRecPtr targetLSN);
 extern void XLogPutNextOid(Oid8 nextOid);
 extern XLogRecPtr XLogRestorePoint(const char *rpName);
+extern void XLogRecoveryBoundary(void);
 extern XLogRecPtr XLogAssignLSN(void);
 extern void UpdateFullPageWrites(void);
 extern void GetFullPageWriteInfo(XLogRecPtr *RedoRecPtr_p, bool *doPageWrites_p);

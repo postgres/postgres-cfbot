@@ -88,6 +88,7 @@ typedef struct CheckPoint
 
 /* XLOG info values for XLOG2 rmgr */
 #define XLOG2_CHECKSUMS					0x00
+#define XLOG2_RECOVERY_BOUNDARY			0x10
 
 
 /*
