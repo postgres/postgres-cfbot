@@ -15,10 +15,13 @@ SELECT * FROM mvtest_tv ORDER BY type;
 EXPLAIN (costs off)
   CREATE MATERIALIZED VIEW mvtest_tm AS SELECT type, sum(amt) AS totamt FROM mvtest_t GROUP BY type WITH NO DATA;
 CREATE MATERIALIZED VIEW mvtest_tm AS SELECT type, sum(amt) AS totamt FROM mvtest_t GROUP BY type WITH NO DATA;
-SELECT relispopulated FROM pg_class WHERE oid = 'mvtest_tm'::regclass;
+SELECT pg_matview_is_populated('mvtest_tm'::regclass);
 SELECT * FROM mvtest_tm ORDER BY type;
 REFRESH MATERIALIZED VIEW mvtest_tm;
-SELECT relispopulated FROM pg_class WHERE oid = 'mvtest_tm'::regclass;
+SELECT pg_matview_is_populated('mvtest_tm'::regclass);
+-- ... but NULL for a relation that is not a materialized view, or nonexistent
+SELECT pg_matview_is_populated('mvtest_t'::regclass);
+SELECT pg_matview_is_populated(0);
 CREATE UNIQUE INDEX mvtest_tm_type ON mvtest_tm (type);
 SELECT * FROM mvtest_tm ORDER BY type;
 
@@ -122,7 +125,7 @@ CREATE VIEW mvtest_vt2 AS SELECT moo, 2*moo FROM mvtest_vt1 UNION ALL SELECT moo
 CREATE MATERIALIZED VIEW mv_test2 AS SELECT moo, 2*moo FROM mvtest_vt2 UNION ALL SELECT moo, 3*moo FROM mvtest_vt2;
 \d+ mv_test2
 CREATE MATERIALIZED VIEW mv_test3 AS SELECT * FROM mv_test2 WHERE moo = 12345;
-SELECT relispopulated FROM pg_class WHERE oid = 'mv_test3'::regclass;
+SELECT pg_matview_is_populated('mv_test3'::regclass);
 
 DROP VIEW mvtest_vt1 CASCADE;
 
