@@ -3,6 +3,7 @@
 pgbench_sources = files(
   'pgbench.c',
   'stats.c',
+  'variable.c',
 )
 
 exprscan = custom_target('exprscan',
