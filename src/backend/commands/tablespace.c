@@ -365,6 +365,8 @@ CreateTableSpace(CreateTableSpaceStmt *stmt)
 
 	create_tablespace_directories(location, tablespaceoid);
 
+	XLogRecoveryBoundary();
+
 	/* Record the filesystem change in XLOG */
 	{
 		xl_tblspc_create_rec xlrec;
@@ -538,6 +540,8 @@ DropTableSpace(DropTableSpaceStmt *stmt)
 							tablespacename)));
 		}
 	}
+
+	XLogRecoveryBoundary();
 
 	/* Record the filesystem change in XLOG */
 	{

@@ -294,6 +294,11 @@ typedef struct xl_checksum_state
 	ChecksumStateType new_checksum_state;
 } xl_checksum_state;
 
+typedef struct xl_recovery_boundary
+{
+	TimestampTz boundary_time;
+} xl_recovery_boundary;
+
 /* Overwrite of prior contrecord */
 typedef struct xl_overwrite_contrecord
 {
