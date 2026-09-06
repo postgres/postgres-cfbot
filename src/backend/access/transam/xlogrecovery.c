@@ -2410,8 +2410,8 @@ checkTimeLineSwitch(XLogRecPtr lsn, TimeLineID newTLI, TimeLineID prevTLI,
  *
  * If the record contains a timestamp, returns true, and saves the timestamp
  * in *recordXtime. If the record type has no timestamp, returns false.
- * Currently, only transaction commit/abort records and restore points contain
- * timestamps.
+ * Currently, only transaction commit/abort records and restore points are
+ * handled here.
  */
 static bool
 getRecordTimestamp(XLogReaderState *record, TimestampTz *recordXtime)
@@ -2603,6 +2603,33 @@ recoveryStopsBefore(XLogReaderState *record)
 		ereport(LOG,
 				errmsg("recovery stopping before WAL location (LSN) \"%X/%08X\"",
 					   LSN_FORMAT_ARGS(recoveryStopLSN)));
+		return true;
+	}
+
+	if (recoveryTarget == RECOVERY_TARGET_TIME &&
+		XLogRecGetRmid(record) == RM_XLOG2_ID &&
+		(XLogRecGetInfo(record) & ~XLR_INFO_MASK) == XLOG2_RECOVERY_BOUNDARY)
+	{
+		xl_recovery_boundary *xlrec = (xl_recovery_boundary *) XLogRecGetData(record);
+
+		if (recoveryTargetInclusive)
+			stopsHere = (xlrec->boundary_time > recoveryTargetTime);
+		else
+			stopsHere = (xlrec->boundary_time >= recoveryTargetTime);
+
+		if (!stopsHere)
+			return false;
+
+		recoveryStopAfter = false;
+		recoveryStopXid = InvalidTransactionId;
+		recoveryStopLSN = InvalidXLogRecPtr;
+		recoveryStopTime = xlrec->boundary_time;
+		recoveryStopName[0] = '\0';
+
+		ereport(LOG,
+				errmsg("recovery stopping before recovery boundary, time %s",
+					   timestamptz_to_str(recoveryStopTime)));
+
 		return true;
 	}
 
