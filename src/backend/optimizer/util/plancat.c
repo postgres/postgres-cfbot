@@ -32,6 +32,7 @@
 #include "catalog/pg_proc.h"
 #include "catalog/pg_statistic_ext.h"
 #include "catalog/pg_statistic_ext_data.h"
+#include "commands/matview.h"
 #include "foreign/fdwapi.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
@@ -151,6 +152,24 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 							RelationGetRelationName(relation)),
 					 errdetail_relkind_not_supported(relation->rd_rel->relkind)));
 	}
+
+	/*
+	 * An unlogged matview has no storage on a standby, though its
+	 * relpopulated may still carry an epoch stamp from the primary.  The
+	 * generic recovery guard just below would reject it too, but reporting it
+	 * as unpopulated matches what the same matview does on the primary once a
+	 * crash has invalidated its stamp.  Permanent matviews are excluded so
+	 * plan-time behavior is unchanged.  No REFRESH hint, as that cannot run
+	 * during recovery.
+	 */
+	if (relation->rd_rel->relkind == RELKIND_MATVIEW &&
+		!RelationIsPermanent(relation) &&
+		RecoveryInProgress() &&
+		!RelationIsPopulated(relation))
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("materialized view \"%s\" has not been populated",
+						RelationGetRelationName(relation))));
 
 	/* Temporary and unlogged relations are inaccessible during recovery. */
 	if (!RelationIsPermanent(relation) && RecoveryInProgress())

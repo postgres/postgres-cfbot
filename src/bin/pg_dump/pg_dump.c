@@ -3022,8 +3022,15 @@ makeTableDataInfo(DumpOptions *dopt, TableInfo *tbinfo)
 	if (tbinfo->relkind == RELKIND_PARTITIONED_TABLE)
 		return;
 
-	/* Don't dump data in unlogged tables, if so requested */
+	/*
+	 * Don't dump data in unlogged tables, if so requested.  This does not
+	 * apply to unlogged materialized views: their REFRESH carries no data,
+	 * and skipping it would break the REFRESH of any matview built on top.
+	 * XXX Whether the option should also cover them (and mark dependent
+	 * matviews unpopulated instead) is an open question.
+	 */
 	if (tbinfo->relpersistence == RELPERSISTENCE_UNLOGGED &&
+		tbinfo->relkind != RELKIND_MATVIEW &&
 		dopt->no_unlogged_table_data)
 		return;
 

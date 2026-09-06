@@ -21,7 +21,7 @@ PostgreSQL documentation
 
  <refsynopsisdiv>
 <synopsis>
-CREATE MATERIALIZED VIEW [ IF NOT EXISTS ] <replaceable>table_name</replaceable>
+CREATE [ UNLOGGED ] MATERIALIZED VIEW [ IF NOT EXISTS ] <replaceable>table_name</replaceable>
     [ (<replaceable>column_name</replaceable> [, ...] ) ]
     [ USING <replaceable class="parameter">method</replaceable> ]
     [ WITH ( <replaceable class="parameter">storage_parameter</replaceable> [= <replaceable class="parameter">value</replaceable>] [, ... ] ) ]
@@ -60,7 +60,33 @@ CREATE MATERIALIZED VIEW [ IF NOT EXISTS ] <replaceable>table_name</replaceable>
   <title>Parameters</title>
 
   <variablelist>
-   <varlistentry>
+   <varlistentry id="sql-creatematerializedview-unlogged">
+    <term><literal>UNLOGGED</literal></term>
+    <listitem>
+     <para>
+      If specified, the materialized view is created as an unlogged
+      materialized view.  Data written to an unlogged materialized view is
+      not written to the write-ahead log (see <xref linkend="wal"/>), which
+      makes populating it, whether by <command>CREATE MATERIALIZED
+      VIEW</command> or by a later <command>REFRESH MATERIALIZED
+      VIEW</command>, considerably faster.  However, an unlogged materialized
+      view is not crash-safe: its contents are discarded after a crash or
+      unclean shutdown, at which point the materialized view reverts to the
+      unpopulated state and must be rebuilt with <command>REFRESH
+      MATERIALIZED VIEW</command> before it can be queried again, the same as
+      a materialized view created with <literal>WITH NO DATA</literal> (see
+      below).  Unlike an unlogged table, which reads as empty after a crash,
+      an unlogged materialized view instead reports that it has not been
+      populated.  Contents are preserved across a normal shutdown and
+      restart.  The contents of an unlogged materialized view are also not
+      replicated to standby servers, so on a standby such a materialized view
+      always reports itself as unpopulated, even immediately after the
+      primary refreshes it.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="sql-creatematerializedview-parms-if-not-exists">
     <term><literal>IF NOT EXISTS</literal></term>
     <listitem>
      <para>
@@ -72,7 +98,7 @@ CREATE MATERIALIZED VIEW [ IF NOT EXISTS ] <replaceable>table_name</replaceable>
     </listitem>
    </varlistentry>
 
-   <varlistentry>
+   <varlistentry id="sql-creatematerializedview-parms-table-name">
     <term><replaceable>table_name</replaceable></term>
     <listitem>
      <para>
@@ -84,7 +110,7 @@ CREATE MATERIALIZED VIEW [ IF NOT EXISTS ] <replaceable>table_name</replaceable>
     </listitem>
    </varlistentry>
 
-   <varlistentry>
+   <varlistentry id="sql-creatematerializedview-parms-column-name">
     <term><replaceable>column_name</replaceable></term>
     <listitem>
      <para>
@@ -94,7 +120,7 @@ CREATE MATERIALIZED VIEW [ IF NOT EXISTS ] <replaceable>table_name</replaceable>
     </listitem>
    </varlistentry>
 
-   <varlistentry>
+   <varlistentry id="sql-creatematerializedview-parms-using">
     <term><literal>USING <replaceable class="parameter">method</replaceable></literal></term>
     <listitem>
      <para>
@@ -109,7 +135,7 @@ CREATE MATERIALIZED VIEW [ IF NOT EXISTS ] <replaceable>table_name</replaceable>
     </listitem>
    </varlistentry>
 
-   <varlistentry>
+   <varlistentry id="sql-creatematerializedview-parms-with">
     <term><literal>WITH ( <replaceable class="parameter">storage_parameter</replaceable> [= <replaceable class="parameter">value</replaceable>] [, ... ] )</literal></term>
     <listitem>
      <para>
@@ -125,7 +151,7 @@ CREATE MATERIALIZED VIEW [ IF NOT EXISTS ] <replaceable>table_name</replaceable>
     </listitem>
    </varlistentry>
 
-   <varlistentry>
+   <varlistentry id="sql-creatematerializedview-parms-tablespace">
     <term><literal>TABLESPACE <replaceable class="parameter">tablespace_name</replaceable></literal></term>
     <listitem>
      <para>
@@ -136,7 +162,7 @@ CREATE MATERIALIZED VIEW [ IF NOT EXISTS ] <replaceable>table_name</replaceable>
     </listitem>
    </varlistentry>
 
-   <varlistentry>
+   <varlistentry id="sql-creatematerializedview-parms-query">
     <term><replaceable>query</replaceable></term>
     <listitem>
      <para>
@@ -150,7 +176,7 @@ CREATE MATERIALIZED VIEW [ IF NOT EXISTS ] <replaceable>table_name</replaceable>
     </listitem>
    </varlistentry>
 
-   <varlistentry>
+   <varlistentry id="sql-creatematerializedview-parms-with-data">
     <term><literal>WITH [ NO ] DATA</literal></term>
     <listitem>
      <para>
