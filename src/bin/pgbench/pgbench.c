@@ -42,16 +42,7 @@
 #include <sys/time.h>
 #include <sys/resource.h>		/* for getrlimit */
 
-/* For testing, PGBENCH_USE_SELECT can be defined to force use of that code */
-#if defined(HAVE_PPOLL) && !defined(PGBENCH_USE_SELECT)
-#define POLL_USING_PPOLL
-#ifdef HAVE_POLL_H
-#include <poll.h>
-#endif
-#else							/* no ppoll(), so use select() */
-#define POLL_USING_SELECT
-#include <sys/select.h>
-#endif
+
 
 #include "catalog/pg_class_d.h"
 #include "common/int.h"
@@ -86,33 +77,6 @@
 #define MM2_MUL				UINT64CONST(0xc6a4a7935bd1e995)
 #define MM2_MUL_TIMES_8		UINT64CONST(0x35253c9ade8f4ca8)
 #define MM2_ROT				47
-
-/*
- * Multi-platform socket set implementations
- */
-
-#ifdef POLL_USING_PPOLL
-#define SOCKET_WAIT_METHOD "ppoll"
-
-typedef struct socket_set
-{
-	int			maxfds;			/* allocated length of pollfds[] array */
-	int			curfds;			/* number currently in use */
-	struct pollfd pollfds[FLEXIBLE_ARRAY_MEMBER];
-} socket_set;
-
-#endif							/* POLL_USING_PPOLL */
-
-#ifdef POLL_USING_SELECT
-#define SOCKET_WAIT_METHOD "select"
-
-typedef struct socket_set
-{
-	int			maxfd;			/* largest FD currently set in fds */
-	fd_set		fds;
-} socket_set;
-
-#endif							/* POLL_USING_SELECT */
 
 /*
  * Multi-platform thread implementations
@@ -678,12 +642,6 @@ static void addScript(const ParsedScript *script);
 static THREAD_FUNC_RETURN_TYPE THREAD_FUNC_CC threadRun(void *arg);
 static void finishCon(CState *st);
 static void setalarm(int seconds);
-static socket_set *alloc_socket_set(int count);
-static void free_socket_set(socket_set *sa);
-static void clear_socket_set(socket_set *sa);
-static void add_socket_to_set(socket_set *sa, int fd, int idx);
-static int	wait_on_socket_set(socket_set *sa, int64 usecs);
-static bool socket_has_input(socket_set *sa, int fd, int idx);
 
 /* callback used to build rows for COPY during data loading */
 typedef void (*initRowMethod) (PQExpBufferData *sql, int64 curr);
@@ -6898,183 +6856,3 @@ setalarm(int seconds)
 }
 
 #endif							/* WIN32 */
-
-
-/*
- * These functions provide an abstraction layer that hides the syscall
- * we use to wait for input on a set of sockets.
- *
- * Currently there are two implementations, based on ppoll(2) and select(2).
- * ppoll() is preferred where available due to its typically higher ceiling
- * on the number of usable sockets.  We do not use the more-widely-available
- * poll(2) because it only offers millisecond timeout resolution, which could
- * be problematic with high --rate settings.
- *
- * Function APIs:
- *
- * alloc_socket_set: allocate an empty socket set with room for up to
- *		"count" sockets.
- *
- * free_socket_set: deallocate a socket set.
- *
- * clear_socket_set: reset a socket set to empty.
- *
- * add_socket_to_set: add socket with indicated FD to slot "idx" in the
- *		socket set.  Slots must be filled in order, starting with 0.
- *
- * wait_on_socket_set: wait for input on any socket in set, or for timeout
- *		to expire.  timeout is measured in microseconds; 0 means wait forever.
- *		Returns result code of underlying syscall (>=0 if OK, else see errno).
- *
- * socket_has_input: after waiting, call this to see if given socket has
- *		input.  fd and idx parameters should match some previous call to
- *		add_socket_to_set.
- *
- * Note that wait_on_socket_set destructively modifies the state of the
- * socket set.  After checking for input, caller must apply clear_socket_set
- * and add_socket_to_set again before waiting again.
- */
-
-#ifdef POLL_USING_PPOLL
-
-static socket_set *
-alloc_socket_set(int count)
-{
-	socket_set *sa;
-
-	sa = (socket_set *) pg_malloc0(offsetof(socket_set, pollfds) +
-								   sizeof(struct pollfd) * count);
-	sa->maxfds = count;
-	sa->curfds = 0;
-	return sa;
-}
-
-static void
-free_socket_set(socket_set *sa)
-{
-	pg_free(sa);
-}
-
-static void
-clear_socket_set(socket_set *sa)
-{
-	sa->curfds = 0;
-}
-
-static void
-add_socket_to_set(socket_set *sa, int fd, int idx)
-{
-	Assert(idx < sa->maxfds && idx == sa->curfds);
-	sa->pollfds[idx].fd = fd;
-	sa->pollfds[idx].events = POLLIN;
-	sa->pollfds[idx].revents = 0;
-	sa->curfds++;
-}
-
-static int
-wait_on_socket_set(socket_set *sa, int64 usecs)
-{
-	if (usecs > 0)
-	{
-		struct timespec timeout;
-
-		timeout.tv_sec = usecs / 1000000;
-		timeout.tv_nsec = (usecs % 1000000) * 1000;
-		return ppoll(sa->pollfds, sa->curfds, &timeout, NULL);
-	}
-	else
-	{
-		return ppoll(sa->pollfds, sa->curfds, NULL, NULL);
-	}
-}
-
-static bool
-socket_has_input(socket_set *sa, int fd, int idx)
-{
-	/*
-	 * In some cases, threadRun will apply clear_socket_set and then try to
-	 * apply socket_has_input anyway with arguments that it used before that,
-	 * or might've used before that except that it exited its setup loop
-	 * early.  Hence, if the socket set is empty, silently return false
-	 * regardless of the parameters.  If it's not empty, we can Assert that
-	 * the parameters match a previous call.
-	 */
-	if (sa->curfds == 0)
-		return false;
-
-	Assert(idx < sa->curfds && sa->pollfds[idx].fd == fd);
-	return (sa->pollfds[idx].revents & POLLIN) != 0;
-}
-
-#endif							/* POLL_USING_PPOLL */
-
-#ifdef POLL_USING_SELECT
-
-static socket_set *
-alloc_socket_set(int count)
-{
-	return pg_malloc0_object(socket_set);
-}
-
-static void
-free_socket_set(socket_set *sa)
-{
-	pg_free(sa);
-}
-
-static void
-clear_socket_set(socket_set *sa)
-{
-	FD_ZERO(&sa->fds);
-	sa->maxfd = -1;
-}
-
-static void
-add_socket_to_set(socket_set *sa, int fd, int idx)
-{
-	/* See connect_slot() for background on this code. */
-#ifdef WIN32
-	if (sa->fds.fd_count + 1 >= FD_SETSIZE)
-	{
-		pg_log_error("too many concurrent database clients for this platform: %d",
-					 sa->fds.fd_count + 1);
-		exit(1);
-	}
-#else
-	if (fd < 0 || fd >= FD_SETSIZE)
-	{
-		pg_log_error("socket file descriptor out of range for select(): %d",
-					 fd);
-		pg_log_error_hint("Try fewer concurrent database clients.");
-		exit(1);
-	}
-#endif
-	FD_SET(fd, &sa->fds);
-	if (fd > sa->maxfd)
-		sa->maxfd = fd;
-}
-
-static int
-wait_on_socket_set(socket_set *sa, int64 usecs)
-{
-	if (usecs > 0)
-	{
-		struct timeval timeout;
-
-		timeout.tv_sec = usecs / 1000000;
-		timeout.tv_usec = usecs % 1000000;
-		return select(sa->maxfd + 1, &sa->fds, NULL, NULL, &timeout);
-	}
-	else
-	{
-		return select(sa->maxfd + 1, &sa->fds, NULL, NULL, NULL);
-	}
-}
-
-static bool
-socket_has_input(socket_set *sa, int fd, int idx)
-{
-	return (FD_ISSET(fd, &sa->fds) != 0);
-}
-
-#endif							/* POLL_USING_SELECT */
