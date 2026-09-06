@@ -1633,6 +1633,7 @@ CopyAttributeOutCSV(CopyToState cstate, const char *string,
 {
 	const char *ptr;
 	const char *start;
+	const char *tptr;
 	char		c;
 	char		delimc = cstate->opts.delim[0];
 	char		quotec = cstate->opts.quote[0];
@@ -1647,6 +1648,8 @@ CopyAttributeOutCSV(CopyToState cstate, const char *string,
 		ptr = pg_server_to_any(string, strlen(string), cstate->file_encoding);
 	else
 		ptr = string;
+
+	tptr = ptr;
 
 	/*
 	 * Make a preliminary pass to discover if it needs quoting
@@ -1664,8 +1667,6 @@ CopyAttributeOutCSV(CopyToState cstate, const char *string,
 			use_quote = true;
 		else
 		{
-			const char *tptr = ptr;
-
 			while ((c = *tptr) != '\0')
 			{
 				if (c == delimc || c == quotec || c == '\n' || c == '\r')
@@ -1684,6 +1685,18 @@ CopyAttributeOutCSV(CopyToState cstate, const char *string,
 	if (use_quote)
 	{
 		CopySendChar(cstate, quotec);
+
+		/*
+		 * When escapec == quotec, any escapec in [ptr, tptr) would have
+		 * matched quotec and triggered use_quote. Thus the scanned prefix
+		 * contains no escapec and can be emitted in bulk, skipping a
+		 * redundant re-scan in the escape loop.
+		 */
+		if (tptr > ptr && escapec == quotec)
+		{
+			CopySendData(cstate, ptr, tptr - ptr);
+			ptr = tptr;
+		}
 
 		/*
 		 * We adopt the same optimization strategy as in CopyAttributeOutText
@@ -1709,7 +1722,7 @@ CopyAttributeOutCSV(CopyToState cstate, const char *string,
 	else
 	{
 		/* If it doesn't need quoting, we can just dump it as-is */
-		CopySendString(cstate, ptr);
+		CopySendData(cstate, ptr, tptr - ptr);
 	}
 }
 
