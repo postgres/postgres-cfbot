@@ -23,6 +23,7 @@
 #include "access/tupconvert.h"
 #include "catalog/pg_inherits.h"
 #include "commands/copyapi.h"
+#include "commands/matview.h"
 #include "commands/progress.h"
 #include "executor/execdesc.h"
 #include "executor/executor.h"

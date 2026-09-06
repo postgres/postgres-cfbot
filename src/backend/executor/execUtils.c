@@ -49,6 +49,7 @@
 #include "access/table.h"
 #include "access/tableam.h"
 #include "access/tupconvert.h"
+#include "commands/matview.h"
 #include "executor/executor.h"
 #include "executor/nodeModifyTable.h"
 #include "jit/jit.h"
@@ -778,7 +779,7 @@ ExecOpenScanRelation(EState *estate, Index scanrelid, int eflags)
 	 * to do this, perhaps, but there is no better place.
 	 */
 	if ((eflags & (EXEC_FLAG_EXPLAIN_ONLY | EXEC_FLAG_WITH_NO_DATA)) == 0 &&
-		!RelationIsScannable(rel))
+		!RelationIsPopulated(rel))
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("materialized view \"%s\" has not been populated",
