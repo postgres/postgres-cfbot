@@ -53,6 +53,7 @@
 #include "catalog/pg_inherits.h"
 #include "catalog/toasting.h"
 #include "commands/defrem.h"
+#include "commands/matview.h"
 #include "commands/progress.h"
 #include "commands/repack.h"
 #include "commands/repack_internal.h"
