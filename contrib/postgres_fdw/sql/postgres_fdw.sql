@@ -442,10 +442,68 @@ EXPLAIN (VERBOSE, COSTS OFF)
   SELECT * FROM ft1 t1 WHERE t1.c1 === t1.c2 order by t1.c2 limit 1;
 SELECT * FROM ft1 t1 WHERE t1.c1 === t1.c2 order by t1.c2 limit 1;
 
--- Ensure we don't ship FETCH FIRST .. WITH TIES
+-- Ensure we ship FETCH FIRST .. WITH TIES once the remote server's version
+-- is known (i.e., a connection to it is already cached in this session, as
+-- is the case here due to preceding tests)
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT t1.c2 FROM ft1 t1 WHERE t1.c1 > 960 ORDER BY t1.c2 FETCH FIRST 2 ROWS WITH TIES;
 SELECT t1.c2 FROM ft1 t1 WHERE t1.c1 > 960 ORDER BY t1.c2 FETCH FIRST 2 ROWS WITH TIES;
+
+-- Same, but combined with OFFSET, emitted before FETCH FIRST in SQL-standard
+-- order.  Skipping into the middle of a tied group must not drop any of the
+-- remaining ties.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT t1.c2 FROM ft1 t1 WHERE t1.c1 > 960 ORDER BY t1.c2 OFFSET 1 FETCH FIRST 2 ROWS WITH TIES;
+SELECT t1.c2 FROM ft1 t1 WHERE t1.c1 > 960 ORDER BY t1.c2 OFFSET 1 FETCH FIRST 2 ROWS WITH TIES;
+
+-- Ensure we never ship FETCH FIRST .. WITH TIES for a query whose result
+-- combines rows from more than one foreign server (here, a join between
+-- ft5 on "loopback" and ft6 on "loopback2"), regardless of whether either
+-- server's version is known; there's no single remote query to push the
+-- FETCH clause into, so it must stay local
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT ft5.c1, ft5.c2 FROM ft5 JOIN ft6 USING (c1)
+  ORDER BY ft5.c2 FETCH FIRST 2 ROWS WITH TIES;
+
+-- Two independently limited scans on different foreign servers, combined
+-- locally via UNION ALL: each side's FETCH FIRST .. WITH TIES pushdown
+-- decision is made independently based on its own server's cached
+-- connection, with no coordination needed between them.  ft5's server
+-- (loopback) is already warmed up by many earlier tests, so that side
+-- pushes the FETCH clause down; ft6's server (loopback2) has not been
+-- connected to yet, so that side falls back to a local Limit.
+EXPLAIN (VERBOSE, COSTS OFF)
+(SELECT c1, c2 FROM ft6 ORDER BY c2 FETCH FIRST 2 ROWS WITH TIES)
+UNION ALL
+(SELECT c1, c2 FROM ft5 ORDER BY c2 FETCH FIRST 2 ROWS WITH TIES);
+
+-- Keep WITH TIES local when all ORDER BY keys are redundant.  ft2 uses
+-- remote estimates, so invalid remote SQL would fail during planning.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT c2, count(*) FROM ft2 GROUP BY c2
+  ORDER BY (1+1) FETCH FIRST 2 ROWS WITH TIES;
+SELECT count(*) FROM (
+  SELECT c2, count(*) FROM ft2 GROUP BY c2
+    ORDER BY (1+1) FETCH FIRST 2 ROWS WITH TIES
+) s;
+
+-- A restriction can also make the ORDER BY key redundant.  All four
+-- matching groups tie, and OFFSET must still skip one of them.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT c1, count(*) FROM ft2 WHERE c1 > 960 AND c2 = 1 GROUP BY c1, c2
+  ORDER BY c2 OFFSET 1 FETCH FIRST 2 ROWS WITH TIES;
+SELECT count(*) FROM (
+  SELECT c1, count(*) FROM ft2 WHERE c1 > 960 AND c2 = 1 GROUP BY c1, c2
+    ORDER BY c2 OFFSET 1 FETCH FIRST 2 ROWS WITH TIES
+) s;
+
+-- EXPLAIN with local estimates does not require a user mapping.
+CREATE SERVER no_mapping FOREIGN DATA WRAPPER postgres_fdw;
+CREATE FOREIGN TABLE ft_no_mapping (a int) SERVER no_mapping;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT a FROM ft_no_mapping ORDER BY a FETCH FIRST 2 ROWS WITH TIES;
+DROP FOREIGN TABLE ft_no_mapping;
+DROP SERVER no_mapping;
 
 -- Test CASE pushdown
 EXPLAIN (VERBOSE, COSTS OFF)
