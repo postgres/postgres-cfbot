@@ -45,6 +45,7 @@ ALTER MATERIALIZED VIEW ALL IN TABLESPACE <replaceable class="parameter">name</r
     SET WITHOUT CLUSTER
     SET ACCESS METHOD <replaceable class="parameter">new_access_method</replaceable>
     SET TABLESPACE <replaceable class="parameter">new_tablespace</replaceable>
+    SET { LOGGED | UNLOGGED }
     SET ( <replaceable class="parameter">storage_parameter</replaceable> [= <replaceable class="parameter">value</replaceable>] [, ... ] )
     RESET ( <replaceable class="parameter">storage_parameter</replaceable> [, ... ] )
     OWNER TO { <replaceable class="parameter">new_owner</replaceable> | CURRENT_ROLE | CURRENT_USER | SESSION_USER }
@@ -149,6 +150,26 @@ ALTER MATERIALIZED VIEW ALL IN TABLESPACE <replaceable class="parameter">name</r
     <listitem>
      <para>
       The new schema for the materialized view.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="sql-altermaterializedview-set-logged-unlogged">
+    <term><literal>SET { LOGGED | UNLOGGED }</literal></term>
+    <listitem>
+     <para>
+      This form changes the materialized view from unlogged to logged or
+      vice-versa (see <literal>UNLOGGED</literal> in
+      <link linkend="sql-creatematerializedview-unlogged"><command>CREATE
+      MATERIALIZED VIEW</command></link>), the same as
+      <link linkend="sql-altertable-desc-set-logged-unlogged"><literal>SET
+      { LOGGED | UNLOGGED }</literal></link> does for
+      <command>ALTER TABLE</command>.  The change takes effect immediately:
+      the materialized view's current contents, if any, are preserved and
+      remain queryable, no crash or refresh is involved.  Once set to
+      <literal>UNLOGGED</literal>, however, the contents will be lost after
+      a future crash or unclean shutdown, at which point the materialized
+      view reverts to the unpopulated state.
      </para>
     </listitem>
    </varlistentry>

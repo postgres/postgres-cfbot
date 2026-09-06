@@ -1567,6 +1567,29 @@ swap_relation_files(Oid r1, Oid r2, bool target_is_pg_class,
 		relform1->relpersistence = relform2->relpersistence;
 		relform2->relpersistence = swptmpchr;
 
+		/*
+		 * A matview's relpopulated value encodes its persistence class:
+		 * permanent matviews use RELPOPULATED_ETERNAL, unlogged matviews
+		 * carry an epoch stamp.  Convert the value alongside the persistence
+		 * change (relform1 is the surviving relation's own pg_class row; the
+		 * relkind check skips the transient heap and TOAST rows).  A stale
+		 * stamp (populated before the last crash or promotion) means the
+		 * storage is empty, so converting it to LOGGED must yield "not
+		 * populated" rather than eternally-populated garbage.
+		 */
+		if (relform1->relkind == RELKIND_MATVIEW &&
+			relform1->relpopulated != RELPOPULATED_NONE)
+		{
+			if (relform1->relpersistence == RELPERSISTENCE_UNLOGGED &&
+				relform1->relpopulated == RELPOPULATED_ETERNAL)
+				relform1->relpopulated = (int64) GetUnloggedPopulatedEpoch();
+			else if (relform1->relpersistence == RELPERSISTENCE_PERMANENT &&
+					 relform1->relpopulated != RELPOPULATED_ETERNAL)
+				relform1->relpopulated =
+					MatViewPopulatedValueIsValid(relform1->relpopulated)
+					? RELPOPULATED_ETERNAL : RELPOPULATED_NONE;
+		}
+
 		/* Also swap toast links, if we're swapping by links */
 		if (!swap_toast_by_content)
 		{

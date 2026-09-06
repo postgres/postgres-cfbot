@@ -697,6 +697,16 @@ initialization fork is copied over the main fork, and any other forks are
 erased (they will be recreated automatically as needed).
 </para>
 
+<para>
+An unlogged materialized view has an initialization fork too, and its
+storage is reset the same way after a crash.  Because a materialized view
+additionally tracks whether it is populated, resetting its storage also
+makes it read as unpopulated rather than as empty; a subsequent
+<command>REFRESH MATERIALIZED VIEW</command> repopulates it.  This check
+happens whenever the materialized view is accessed, so no explicit repair
+step or new session is required after the crash.
+</para>
+
 </sect1>
 
 <sect1 id="storage-page-layout">
