@@ -120,14 +120,25 @@ SetMatViewPopulatedState(Relation relation, bool newstate)
 /*
  * MatViewPopulatedValueIsValid
  *		Does this pg_class.relpopulated value denote currently valid data?
- *
- * This only distinguishes RELPOPULATED_NONE from everything else; any other
- * value, whether RELPOPULATED_ETERNAL or an epoch stamp, counts as valid.
  */
 bool
 MatViewPopulatedValueIsValid(int64 value)
 {
-	return value != RELPOPULATED_NONE;
+	if (value == RELPOPULATED_NONE)
+		return false;
+	if (value == RELPOPULATED_ETERNAL)
+		return true;
+
+	/*
+	 * Epoch stamp: valid only if it matches the current epoch.  During
+	 * recovery always treat it as invalid -- a standby never has the unlogged
+	 * data, and its epoch is still the one its base backup came with, which
+	 * may well be the primary's current one.
+	 */
+	if (RecoveryInProgress())
+		return false;
+
+	return (uint64) value == GetUnloggedPopulatedEpoch();
 }
 
 /*
@@ -138,6 +149,12 @@ MatViewPopulatedValueIsValid(int64 value)
 bool
 RelationIsPopulated(Relation relation)
 {
+	/* Only unlogged matviews may carry an epoch stamp. */
+	Assert(relation->rd_rel->relpopulated == RELPOPULATED_NONE ||
+		   relation->rd_rel->relpopulated == RELPOPULATED_ETERNAL ||
+		   (relation->rd_rel->relkind == RELKIND_MATVIEW &&
+			relation->rd_rel->relpersistence == RELPERSISTENCE_UNLOGGED));
+
 	return MatViewPopulatedValueIsValid(relation->rd_rel->relpopulated);
 }
 
@@ -356,10 +373,20 @@ RefreshMatViewByOid(Oid matviewOid, bool is_create, bool skipData,
 
 	/*
 	 * Tentatively mark the matview as populated or not, if its state is
-	 * changing (this will roll back if we fail later).
+	 * changing (this will roll back if we fail later).  WITH NO DATA must
+	 * also clear a stale epoch stamp, which reads as not populated but still
+	 * records that the matview is meant to hold data.
 	 */
-	if (RelationIsPopulated(matviewRel) != !skipData)
-		SetMatViewPopulatedState(matviewRel, !skipData);
+	if (skipData)
+	{
+		if (matviewRel->rd_rel->relpopulated != RELPOPULATED_NONE)
+			SetMatViewPopulatedState(matviewRel, false);
+	}
+	else
+	{
+		if (!RelationIsPopulated(matviewRel))
+			SetMatViewPopulatedState(matviewRel, true);
+	}
 
 	/* Concurrent refresh builds new data in temp tablespace, and does diff. */
 	if (concurrent)
