@@ -63,6 +63,7 @@
 static ControlFileData ControlFile; /* pg_control values */
 static XLogSegNo newXlogSegNo;	/* new XLOG segment # */
 static bool guessed = false;	/* T if we had to guess at any values */
+static bool unlogged_suspect = false;	/* T if unlogged data is untrustworthy */
 static const char *progname;
 
 /*
@@ -547,6 +548,14 @@ main(int argc, char *argv[])
 	}
 
 	/*
+	 * Decide whether the contents of unlogged relations survive this reset.
+	 * They do if the server shut down cleanly and we did not have to guess at
+	 * pg_control; otherwise they are torn, and nothing resets them later
+	 * because the next startup will not run crash recovery.
+	 */
+	unlogged_suspect = guessed || ControlFile.state != DB_SHUTDOWNED;
+
+	/*
 	 * Else, do the dirty deed.
 	 */
 	RewriteControlFile();
@@ -917,6 +926,16 @@ RewriteControlFile(void)
 
 	ControlFile.state = DB_SHUTDOWNED;
 	ControlFile.checkPoint = ControlFile.checkPointCopy.redo;
+
+	/*
+	 * Resetting the WAL skips the crash recovery that would otherwise reset
+	 * unlogged relations.  If their contents cannot be trusted, start a new
+	 * epoch at the new start of WAL, which is past any pre-reset epoch stamp
+	 * so those read as "not populated".
+	 */
+	if (unlogged_suspect)
+		ControlFile.unloggedResetLSN = ControlFile.checkPointCopy.redo;
+
 	ControlFile.minRecoveryPoint = InvalidXLogRecPtr;
 	ControlFile.minRecoveryPointTLI = 0;
 	ControlFile.backupStartPoint = InvalidXLogRecPtr;
