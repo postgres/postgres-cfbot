@@ -92,11 +92,10 @@ struct CState
 								 * here */
 };
 
-extern volatile sig_atomic_t timer_exceeded;
 extern bool use_quiet;
-extern PGconn *doConnect(void);
 
 #include "commands.h"
 #include "init.h"
+#include "engine.h"
 
 #endif							/* PGBENCH_H */
