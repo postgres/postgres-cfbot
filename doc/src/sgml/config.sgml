@@ -4487,6 +4487,15 @@ restore_command = 'copy "C:\\server\\archivedir\\%f" "%p"'  # Windows
         will proceed.
         The precise stopping point is also influenced by
         <xref linkend="guc-recovery-target-inclusive"/>.
+        <command>CREATE DATABASE</command>, <command>DROP DATABASE</command>,
+        <command>ALTER DATABASE ... SET TABLESPACE</command>,
+        <command>CREATE TABLESPACE</command> and
+        <command>DROP TABLESPACE</command> write a WAL record carrying a time
+        stamp before the record of their first change that takes effect
+        without waiting for the commit.
+        Recovery stops before the time-stamped record if its time stamp is at
+        or after the target time, regardless of
+        <varname>recovery_target_inclusive</varname>.
        </para>
 
        <para>

@@ -32,7 +32,7 @@
 /*
  * Each page of XLOG file has a header like this:
  */
-#define XLOG_PAGE_MAGIC 0xD122	/* can be used as WAL version indicator */
+#define XLOG_PAGE_MAGIC 0xD123	/* can be used as WAL version indicator */
 
 typedef struct XLogPageHeaderData
 {
@@ -293,6 +293,11 @@ typedef struct xl_checksum_state
 {
 	ChecksumStateType new_checksum_state;
 } xl_checksum_state;
+
+typedef struct xl_recovery_boundary
+{
+	TimestampTz boundary_time;
+} xl_recovery_boundary;
 
 /* Overwrite of prior contrecord */
 typedef struct xl_overwrite_contrecord

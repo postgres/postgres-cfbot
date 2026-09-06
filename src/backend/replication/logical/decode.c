@@ -200,6 +200,7 @@ xlog2_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	switch (info)
 	{
 		case XLOG2_CHECKSUMS:
+		case XLOG2_RECOVERY_BOUNDARY:
 			break;
 		default:
 			elog(ERROR, "unexpected RM_XLOG2_ID record type: %u", info);
