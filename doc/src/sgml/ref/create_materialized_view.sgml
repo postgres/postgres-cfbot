@@ -60,7 +60,7 @@ CREATE MATERIALIZED VIEW [ IF NOT EXISTS ] <replaceable>table_name</replaceable>
   <title>Parameters</title>
 
   <variablelist>
-   <varlistentry id="sql-creatematerializedview-unlogged">
+   <varlistentry>
     <term><literal>UNLOGGED</literal></term>
     <listitem>
      <para>

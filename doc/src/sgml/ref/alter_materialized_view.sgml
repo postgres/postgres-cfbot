@@ -154,13 +154,13 @@ ALTER MATERIALIZED VIEW ALL IN TABLESPACE <replaceable class="parameter">name</r
     </listitem>
    </varlistentry>
 
-   <varlistentry id="sql-altermaterializedview-set-logged-unlogged">
+   <varlistentry>
     <term><literal>SET { LOGGED | UNLOGGED }</literal></term>
     <listitem>
      <para>
       This form changes the materialized view from unlogged to logged or
       vice-versa (see <literal>UNLOGGED</literal> in
-      <link linkend="sql-creatematerializedview-unlogged"><command>CREATE
+      <link linkend="sql-creatematerializedview"><command>CREATE
       MATERIALIZED VIEW</command></link>), the same as
       <link linkend="sql-altertable-desc-set-logged-unlogged"><literal>SET
       { LOGGED | UNLOGGED }</literal></link> does for

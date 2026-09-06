@@ -2013,8 +2013,12 @@ describeOneTableDetails(const char *schemaname,
 							  schemaname, relationname);
 			break;
 		case RELKIND_MATVIEW:
-			printfPQExpBuffer(&title, _("Materialized view \"%s.%s\""),
-							  schemaname, relationname);
+			if (tableinfo.relpersistence == RELPERSISTENCE_UNLOGGED)
+				printfPQExpBuffer(&title, _("Unlogged materialized view \"%s.%s\""),
+								  schemaname, relationname);
+			else
+				printfPQExpBuffer(&title, _("Materialized view \"%s.%s\""),
+								  schemaname, relationname);
 			break;
 		case RELKIND_INDEX:
 			if (tableinfo.relpersistence == RELPERSISTENCE_UNLOGGED)
