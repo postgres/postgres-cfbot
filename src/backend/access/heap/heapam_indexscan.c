@@ -1300,7 +1300,8 @@ heapam_index_start_prefetching(IndexScanDesc scan, IndexScanHeapData *hscan)
 	Assert(!scan->batchringbuf.prefetchPos.valid);
 
 	hscan->xs_read_stream =
-		read_stream_begin_relation(READ_STREAM_NO_ADVICE, NULL,
+		read_stream_begin_relation(READ_STREAM_NO_ADVICE |
+								   READ_STREAM_DEDUP_RECENT, NULL,
 								   scan->heapRelation, MAIN_FORKNUM,
 								   heapam_index_prefetch_next_block, scan, 0);
 
