@@ -1581,6 +1581,7 @@ describeOneTableDetails(const char *schemaname,
 		char		relpersistence;
 		char		relreplident;
 		char	   *relam;
+		char		reloncommit;
 	}			tableinfo;
 	bool		show_column_details = false;
 
@@ -1595,7 +1596,25 @@ describeOneTableDetails(const char *schemaname,
 	/* Get general table info */
 	printfPQExpBuffer(&buf, "/* %s */\n",
 					  _("Get general information about one relation"));
-	if (pset.sversion >= 120000)
+	if (pset.sversion >= 200000)
+	{
+		appendPQExpBuffer(&buf,
+						  "SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, "
+						  "c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, "
+						  "false AS relhasoids, c.relispartition, %s, c.reltablespace, "
+						  "CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, "
+						  "c.relpersistence, c.relreplident, am.amname, c.reloncommit\n"
+						  "FROM pg_catalog.pg_class c\n "
+						  "LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)\n"
+						  "LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid)\n"
+						  "WHERE c.oid = '%s';",
+						  (verbose ?
+						   "pg_catalog.array_to_string(c.reloptions || "
+						   "array(select 'toast.' || x from pg_catalog.unnest(tc.reloptions) x), ', ')\n"
+						   : "''"),
+						  oid);
+	}
+	else if (pset.sversion >= 120000)
 	{
 		appendPQExpBuffer(&buf,
 						  "SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, "
@@ -1663,6 +1682,10 @@ describeOneTableDetails(const char *schemaname,
 			NULL : pg_strdup(PQgetvalue(res, 0, 14));
 	else
 		tableinfo.relam = NULL;
+	if (pset.sversion >= 200000)
+		tableinfo.reloncommit = *(PQgetvalue(res, 0, 15));
+	else
+		tableinfo.reloncommit = RELONCOMMIT_NONE;
 	PQclear(res);
 	res = NULL;
 
@@ -1783,6 +1806,12 @@ describeOneTableDetails(const char *schemaname,
 
 		if (tableinfo.relpersistence == RELPERSISTENCE_UNLOGGED)
 			printfPQExpBuffer(&title, _("Unlogged sequence \"%s.%s\""),
+							  schemaname, relationname);
+		else if (tableinfo.relpersistence == RELPERSISTENCE_TEMP)
+			printfPQExpBuffer(&title, _("Temporary sequence \"%s.%s\""),
+							  schemaname, relationname);
+		else if (tableinfo.relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
+			printfPQExpBuffer(&title, _("Global temporary sequence \"%s.%s\""),
 							  schemaname, relationname);
 		else
 			printfPQExpBuffer(&title, _("Sequence \"%s.%s\""),
@@ -2004,13 +2033,23 @@ describeOneTableDetails(const char *schemaname,
 			if (tableinfo.relpersistence == RELPERSISTENCE_UNLOGGED)
 				printfPQExpBuffer(&title, _("Unlogged table \"%s.%s\""),
 								  schemaname, relationname);
+			else if (tableinfo.relpersistence == RELPERSISTENCE_TEMP)
+				printfPQExpBuffer(&title, _("Temporary table \"%s.%s\""),
+								  schemaname, relationname);
+			else if (tableinfo.relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
+				printfPQExpBuffer(&title, _("Global temporary table \"%s.%s\""),
+								  schemaname, relationname);
 			else
 				printfPQExpBuffer(&title, _("Table \"%s.%s\""),
 								  schemaname, relationname);
 			break;
 		case RELKIND_VIEW:
-			printfPQExpBuffer(&title, _("View \"%s.%s\""),
-							  schemaname, relationname);
+			if (tableinfo.relpersistence == RELPERSISTENCE_TEMP)
+				printfPQExpBuffer(&title, _("Temporary view \"%s.%s\""),
+								  schemaname, relationname);
+			else
+				printfPQExpBuffer(&title, _("View \"%s.%s\""),
+								  schemaname, relationname);
 			break;
 		case RELKIND_MATVIEW:
 			printfPQExpBuffer(&title, _("Materialized view \"%s.%s\""),
@@ -2047,6 +2086,12 @@ describeOneTableDetails(const char *schemaname,
 		case RELKIND_PARTITIONED_TABLE:
 			if (tableinfo.relpersistence == RELPERSISTENCE_UNLOGGED)
 				printfPQExpBuffer(&title, _("Unlogged partitioned table \"%s.%s\""),
+								  schemaname, relationname);
+			else if (tableinfo.relpersistence == RELPERSISTENCE_TEMP)
+				printfPQExpBuffer(&title, _("Temporary partitioned table \"%s.%s\""),
+								  schemaname, relationname);
+			else if (tableinfo.relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
+				printfPQExpBuffer(&title, _("Global temporary partitioned table \"%s.%s\""),
 								  schemaname, relationname);
 			else
 				printfPQExpBuffer(&title, _("Partitioned table \"%s.%s\""),
@@ -2308,8 +2353,15 @@ describeOneTableDetails(const char *schemaname,
 
 		printfPQExpBuffer(&buf, "/* %s */\n", _("Get index details"));
 		appendPQExpBufferStr(&buf,
-							 "SELECT i.indisunique, i.indisprimary, i.indisclustered, "
-							 "i.indisvalid,\n"
+							 "SELECT i.indisunique, i.indisprimary, i.indisclustered, ");
+
+		if (pset.sversion >= 200000)
+			appendPQExpBufferStr(&buf,
+								 "COALESCE(ti.indisvalid, i.indisvalid),\n");
+		else
+			appendPQExpBufferStr(&buf, "i.indisvalid,\n");
+
+		appendPQExpBufferStr(&buf,
 							 "  (NOT i.indimmediate) AND "
 							 "EXISTS (SELECT 1 FROM pg_catalog.pg_constraint "
 							 "WHERE conrelid = i.indrelid AND "
@@ -2334,12 +2386,21 @@ describeOneTableDetails(const char *schemaname,
 		else
 			appendPQExpBufferStr(&buf, "false AS indnullsnotdistinct,\n");
 
-		appendPQExpBuffer(&buf, "  a.amname, c2.relname, "
-						  "pg_catalog.pg_get_expr(i.indpred, i.indrelid, true)\n"
-						  "FROM pg_catalog.pg_index i, pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a\n"
-						  "WHERE i.indexrelid = c.oid AND c.oid = '%s' AND c.relam = a.oid\n"
-						  "AND i.indrelid = c2.oid;",
-						  oid);
+		if (pset.sversion >= 200000)
+			appendPQExpBuffer(&buf, "  a.amname, c2.relname, "
+							  "pg_catalog.pg_get_expr(i.indpred, i.indrelid, true)\n"
+							  "FROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a, pg_catalog.pg_index i\n"
+							  "  LEFT JOIN pg_catalog.pg_temp_index ti ON ti.indexrelid = i.indexrelid\n"
+							  "WHERE i.indexrelid = c.oid AND c.oid = '%s' AND c.relam = a.oid\n"
+							  "AND i.indrelid = c2.oid;",
+							  oid);
+		else
+			appendPQExpBuffer(&buf, "  a.amname, c2.relname, "
+							  "pg_catalog.pg_get_expr(i.indpred, i.indrelid, true)\n"
+							  "FROM pg_catalog.pg_index i, pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a\n"
+							  "WHERE i.indexrelid = c.oid AND c.oid = '%s' AND c.relam = a.oid\n"
+							  "AND i.indrelid = c2.oid;",
+							  oid);
 
 		result = PSQLexec(buf.data);
 		if (!result)
@@ -2428,7 +2489,13 @@ describeOneTableDetails(const char *schemaname,
 			printfPQExpBuffer(&buf, "/* %s */\n", _("Get indexes for this table"));
 			appendPQExpBufferStr(&buf,
 								 "SELECT c2.relname, i.indisprimary, i.indisunique, "
-								 "i.indisclustered, i.indisvalid, "
+								 "i.indisclustered, ");
+			if (pset.sversion >= 200000)
+				appendPQExpBufferStr(&buf,
+									 "COALESCE(ti.indisvalid, i.indisvalid), ");
+			else
+				appendPQExpBufferStr(&buf, "i.indisvalid, ");
+			appendPQExpBufferStr(&buf,
 								 "pg_catalog.pg_get_indexdef(i.indexrelid, 0, true),\n  "
 								 "pg_catalog.pg_get_constraintdef(con.oid, true), "
 								 "contype, condeferrable, condeferred");
@@ -2438,15 +2505,27 @@ describeOneTableDetails(const char *schemaname,
 				appendPQExpBufferStr(&buf, ", con.conperiod");
 			else
 				appendPQExpBufferStr(&buf, ", false AS conperiod");
-			appendPQExpBuffer(&buf,
-							  "\nFROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i\n"
-							  "  LEFT JOIN pg_catalog.pg_constraint con ON (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ("
-							  CppAsString2(CONSTRAINT_PRIMARY) ","
-							  CppAsString2(CONSTRAINT_UNIQUE) ","
-							  CppAsString2(CONSTRAINT_EXCLUSION) "))\n"
-							  "WHERE c.oid = '%s' AND c.oid = i.indrelid AND i.indexrelid = c2.oid\n"
-							  "ORDER BY i.indisprimary DESC, c2.relname;",
-							  oid);
+			if (pset.sversion >= 200000)
+				appendPQExpBuffer(&buf,
+								  "\nFROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i\n"
+								  "  LEFT JOIN pg_catalog.pg_constraint con ON (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ("
+								  CppAsString2(CONSTRAINT_PRIMARY) ","
+								  CppAsString2(CONSTRAINT_UNIQUE) ","
+								  CppAsString2(CONSTRAINT_EXCLUSION) "))\n"
+								  "  LEFT JOIN pg_catalog.pg_temp_index ti ON ti.indexrelid = i.indexrelid\n"
+								  "WHERE c.oid = '%s' AND c.oid = i.indrelid AND i.indexrelid = c2.oid\n"
+								  "ORDER BY i.indisprimary DESC, c2.relname;",
+								  oid);
+			else
+				appendPQExpBuffer(&buf,
+								  "\nFROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i\n"
+								  "  LEFT JOIN pg_catalog.pg_constraint con ON (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ("
+								  CppAsString2(CONSTRAINT_PRIMARY) ","
+								  CppAsString2(CONSTRAINT_UNIQUE) ","
+								  CppAsString2(CONSTRAINT_EXCLUSION) "))\n"
+								  "WHERE c.oid = '%s' AND c.oid = i.indrelid AND i.indexrelid = c2.oid\n"
+								  "ORDER BY i.indisprimary DESC, c2.relname;",
+								  oid);
 			result = PSQLexec(buf.data);
 			if (!result)
 				goto error_return;
@@ -3681,6 +3760,17 @@ describeOneTableDetails(const char *schemaname,
 			printfPQExpBuffer(&buf, _("Access method: %s"), tableinfo.relam);
 			printTableAddFooter(&cont, buf.data);
 		}
+
+		/* On-commit action */
+		if (verbose && tableinfo.reloncommit != RELONCOMMIT_NONE)
+		{
+			printfPQExpBuffer(&buf, _("On-commit action: %s"),
+							  tableinfo.reloncommit == RELONCOMMIT_PRESERVE_ROWS ? "PRESERVE ROWS" :
+							  tableinfo.reloncommit == RELONCOMMIT_DELETE_ROWS ? "DELETE ROWS" :
+							  tableinfo.reloncommit == RELONCOMMIT_DROP ? "DROP" :
+							  "???");
+			printTableAddFooter(&cont, buf.data);
+		}
 	}
 
 	/* reloptions, if verbose */
@@ -4156,10 +4246,12 @@ listTables(const char *tabtypes, const char *pattern, bool verbose, bool showSys
 						  ",\n  CASE c.relpersistence "
 						  "WHEN " CppAsString2(RELPERSISTENCE_PERMANENT) " THEN '%s' "
 						  "WHEN " CppAsString2(RELPERSISTENCE_TEMP) " THEN '%s' "
+						  "WHEN " CppAsString2(RELPERSISTENCE_GLOBAL_TEMP) " THEN '%s' "
 						  "WHEN " CppAsString2(RELPERSISTENCE_UNLOGGED) " THEN '%s' "
 						  "END as \"%s\"",
 						  gettext_noop("permanent"),
 						  gettext_noop("temporary"),
+						  gettext_noop("global temporary"),
 						  gettext_noop("unlogged"),
 						  gettext_noop("Persistence"));
 		translate_columns[cols_so_far] = true;

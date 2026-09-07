@@ -1,0 +1,830 @@
+Parsed test spec with 2 sessions
+
+starting permutation: create_tblspace list_tblspaces
+step create_tblspace: CREATE TABLESPACE regress_isolation_tablespace LOCATION '';
+step list_tblspaces: SELECT spcname FROM pg_tablespace ORDER BY 1;
+spcname                     
+----------------------------
+pg_default                  
+pg_global                   
+regress_isolation_tablespace
+(3 rows)
+
+
+starting permutation: ins1 ins2 sel1 sel2
+step ins1: INSERT INTO tmp VALUES (1, 's1');
+step ins2: INSERT INTO tmp VALUES (1, 's2');
+step sel1: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s1 |  1
+(1 row)
+
+step sel2: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s2 |  1
+(1 row)
+
+
+starting permutation: ins1p1 ins1p2 ins2p1 ins2p2 sel1p sel2p
+step ins1p1: INSERT INTO tmp_parted VALUES (1, 's1 p1');
+step ins1p2: INSERT INTO tmp_parted VALUES (2, 's1 p2');
+step ins2p1: INSERT INTO tmp_parted VALUES (1, 's2 p1');
+step ins2p2: INSERT INTO tmp_parted VALUES (2, 's2 p2');
+step sel1p: SELECT tableoid::regclass, * FROM tmp_parted;
+tableoid|key|val  
+--------+---+-----
+tmp_p1  |  1|s1 p1
+tmp_p2  |  2|s1 p2
+(2 rows)
+
+step sel2p: SELECT tableoid::regclass, * FROM tmp_parted;
+tableoid|key|val  
+--------+---+-----
+tmp_p1  |  1|s2 p1
+tmp_p2  |  2|s2 p2
+(2 rows)
+
+
+starting permutation: ins1 b2 ins2 sel1 sel2 c2 sel1 sel2
+step ins1: INSERT INTO tmp VALUES (1, 's1');
+step b2: BEGIN;
+step ins2: INSERT INTO tmp VALUES (1, 's2');
+step sel1: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s1 |  1
+(1 row)
+
+step sel2: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s2 |  1
+(1 row)
+
+step c2: COMMIT;
+step sel1: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s1 |  1
+(1 row)
+
+step sel2: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s2 |  1
+(1 row)
+
+
+starting permutation: ins1 b2 ins2 sel1 sel2 r2 sel1 sel2
+step ins1: INSERT INTO tmp VALUES (1, 's1');
+step b2: BEGIN;
+step ins2: INSERT INTO tmp VALUES (1, 's2');
+step sel1: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s1 |  1
+(1 row)
+
+step sel2: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s2 |  1
+(1 row)
+
+step r2: ROLLBACK;
+step sel1: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s1 |  1
+(1 row)
+
+step sel2: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+(0 rows)
+
+
+starting permutation: ins1 b2 ins2 sel1 sel2 sp2 r2 sel1 sel2
+step ins1: INSERT INTO tmp VALUES (1, 's1');
+step b2: BEGIN;
+step ins2: INSERT INTO tmp VALUES (1, 's2');
+step sel1: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s1 |  1
+(1 row)
+
+step sel2: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s2 |  1
+(1 row)
+
+step sp2: SAVEPOINT sp;
+step r2: ROLLBACK;
+step sel1: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s1 |  1
+(1 row)
+
+step sel2: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+(0 rows)
+
+
+starting permutation: ins1 b2 sp2 ins2 sel1 sel2 rsp2 sel1 sel2 r2 sel1 sel2
+step ins1: INSERT INTO tmp VALUES (1, 's1');
+step b2: BEGIN;
+step sp2: SAVEPOINT sp;
+step ins2: INSERT INTO tmp VALUES (1, 's2');
+step sel1: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s1 |  1
+(1 row)
+
+step sel2: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s2 |  1
+(1 row)
+
+step rsp2: ROLLBACK TO SAVEPOINT sp;
+step sel1: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s1 |  1
+(1 row)
+
+step sel2: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+(0 rows)
+
+step r2: ROLLBACK;
+step sel1: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s1 |  1
+(1 row)
+
+step sel2: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+(0 rows)
+
+
+starting permutation: ins1 b2 ins2 sp2 t2 rsp2 sel1 sel2 r2 sel1 sel2
+step ins1: INSERT INTO tmp VALUES (1, 's1');
+step b2: BEGIN;
+step ins2: INSERT INTO tmp VALUES (1, 's2');
+step sp2: SAVEPOINT sp;
+step t2: TRUNCATE tmp;
+step rsp2: ROLLBACK TO SAVEPOINT sp;
+step sel1: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s1 |  1
+(1 row)
+
+step sel2: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s2 |  1
+(1 row)
+
+step r2: ROLLBACK;
+step sel1: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s1 |  1
+(1 row)
+
+step sel2: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+(0 rows)
+
+
+starting permutation: create1 ins1_2 alter1a alter1b alter1c alter1d alter1e alter1f alter1g alter1h ins2_2 seltype1 seltype2 drop1
+step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box);
+step ins1_2: INSERT INTO tmp2 VALUES (1, 's1');
+step alter1a: ALTER TABLE tmp2 ALTER COLUMN key SET DATA TYPE numeric;
+step alter1b: ALTER TABLE tmp2 ALTER COLUMN val SET NOT NULL;
+step alter1c: ALTER TABLE tmp2 ADD CONSTRAINT tmp2_nn NOT NULL key;
+step alter1d: ALTER TABLE tmp2 ADD CONSTRAINT tmp2_chk CHECK (key > 0);
+step alter1e: ALTER TABLE tmp2 ADD CONSTRAINT tmp2_pk PRIMARY KEY (key);
+step alter1f: ALTER TABLE tmp2 ADD CONSTRAINT tmp2_un UNIQUE (val);
+step alter1g: ALTER TABLE tmp2 ADD CONSTRAINT tmp2_fk FOREIGN KEY (icol) REFERENCES tmp;
+step alter1h: ALTER TABLE tmp2 ADD CONSTRAINT tmp2_ex EXCLUDE USING gist (bcol WITH &&);
+step ins2_2: INSERT INTO tmp2 VALUES (1, 's2');
+step seltype1: SELECT key, pg_typeof(key), val FROM tmp2;
+key|pg_typeof|val
+---+---------+---
+  1|numeric  |s1 
+(1 row)
+
+step seltype2: SELECT key, pg_typeof(key), val FROM tmp2;
+key|pg_typeof|val
+---+---------+---
+  1|numeric  |s2 
+(1 row)
+
+step drop1: DROP TABLE tmp2;
+
+starting permutation: create1 ins1_2 ins2_2 alter1a alter1b alter1c alter1d alter1e alter1f alter1g alter1h uniq_idx1 seltype1 seltype2 idx_valid1 idx_valid2 uniq_reidx2 idx_valid2 drop1
+step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box);
+step ins1_2: INSERT INTO tmp2 VALUES (1, 's1');
+step ins2_2: INSERT INTO tmp2 VALUES (1, 's2');
+step alter1a: ALTER TABLE tmp2 ALTER COLUMN key SET DATA TYPE numeric;
+ERROR:  cannot rewrite global temporary table "tmp2" because it is being used in another session
+step alter1b: ALTER TABLE tmp2 ALTER COLUMN val SET NOT NULL;
+ERROR:  cannot add or alter constraints of global temporary table "tmp2" because it is being used in another session
+step alter1c: ALTER TABLE tmp2 ADD CONSTRAINT tmp2_nn NOT NULL key;
+ERROR:  cannot add or alter constraints of global temporary table "tmp2" because it is being used in another session
+step alter1d: ALTER TABLE tmp2 ADD CONSTRAINT tmp2_chk CHECK (key > 0);
+ERROR:  cannot add or alter constraints of global temporary table "tmp2" because it is being used in another session
+step alter1e: ALTER TABLE tmp2 ADD CONSTRAINT tmp2_pk PRIMARY KEY (key);
+ERROR:  cannot add or alter constraints of global temporary table "tmp2" because it is being used in another session
+step alter1f: ALTER TABLE tmp2 ADD CONSTRAINT tmp2_un UNIQUE (val);
+ERROR:  cannot add or alter constraints of global temporary table "tmp2" because it is being used in another session
+step alter1g: ALTER TABLE tmp2 ADD CONSTRAINT tmp2_fk FOREIGN KEY (icol) REFERENCES tmp;
+ERROR:  cannot add or alter constraints of global temporary table "tmp2" because it is being used in another session
+step alter1h: ALTER TABLE tmp2 ADD CONSTRAINT tmp2_ex EXCLUDE USING gist (bcol WITH &&);
+ERROR:  cannot add or alter constraints of global temporary table "tmp2" because it is being used in another session
+step uniq_idx1: CREATE UNIQUE INDEX tmp2_un ON tmp2(val);
+step seltype1: SELECT key, pg_typeof(key), val FROM tmp2;
+key|pg_typeof|val
+---+---------+---
+  1|integer  |s1 
+(1 row)
+
+step seltype2: SELECT key, pg_typeof(key), val FROM tmp2;
+key|pg_typeof|val
+---+---------+---
+  1|integer  |s2 
+(1 row)
+
+step idx_valid1: 
+  SELECT indisvalid FROM pg_temp_index WHERE indexrelid = 'tmp2_un'::regclass;
+
+indisvalid
+----------
+t         
+(1 row)
+
+step idx_valid2: 
+  SELECT indisvalid FROM pg_temp_index WHERE indexrelid = 'tmp2_un'::regclass;
+
+indisvalid
+----------
+f         
+(1 row)
+
+step uniq_reidx2: REINDEX INDEX tmp2_un;
+step idx_valid2: 
+  SELECT indisvalid FROM pg_temp_index WHERE indexrelid = 'tmp2_un'::regclass;
+
+indisvalid
+----------
+t         
+(1 row)
+
+step drop1: DROP TABLE tmp2;
+
+starting permutation: create1dr b1 b2 ins1_2 ins2_2 sel1_2 sel2_2 c1 c2 sel1_2 sel2_2 drop1
+step create1dr: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text) ON COMMIT DELETE ROWS;
+step b1: BEGIN;
+step b2: BEGIN;
+step ins1_2: INSERT INTO tmp2 VALUES (1, 's1');
+step ins2_2: INSERT INTO tmp2 VALUES (1, 's2');
+step sel1_2: SELECT * FROM tmp2;
+key|val
+---+---
+  1|s1 
+(1 row)
+
+step sel2_2: SELECT * FROM tmp2;
+key|val
+---+---
+  1|s2 
+(1 row)
+
+step c1: COMMIT;
+step c2: COMMIT;
+step sel1_2: SELECT * FROM tmp2;
+key|val
+---+---
+(0 rows)
+
+step sel2_2: SELECT * FROM tmp2;
+key|val
+---+---
+(0 rows)
+
+step drop1: DROP TABLE tmp2;
+
+starting permutation: create1dr ins1_2 ins2_2 drop1 create1dr ins1_2 ins2_2 drop1
+step create1dr: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text) ON COMMIT DELETE ROWS;
+step ins1_2: INSERT INTO tmp2 VALUES (1, 's1');
+step ins2_2: INSERT INTO tmp2 VALUES (1, 's2');
+step drop1: DROP TABLE tmp2;
+step create1dr: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text) ON COMMIT DELETE ROWS;
+step ins1_2: INSERT INTO tmp2 VALUES (1, 's1');
+step ins2_2: INSERT INTO tmp2 VALUES (1, 's2');
+step drop1: DROP TABLE tmp2;
+
+starting permutation: create1 drop2 b1 prep1 cprep1
+step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box);
+step drop2: DROP TABLE tmp2;
+step b1: BEGIN;
+step prep1: PREPARE TRANSACTION 'tx';
+step cprep1: COMMIT PREPARED 'tx';
+
+starting permutation: create1 ins1_2 b1 drop2 prep1 cprep1
+step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box);
+step ins1_2: INSERT INTO tmp2 VALUES (1, 's1');
+step b1: BEGIN;
+step drop2: DROP TABLE tmp2;
+step prep1: PREPARE TRANSACTION 'tx';
+step cprep1: COMMIT PREPARED 'tx';
+
+starting permutation: create1 b1 ins1_2 drop2 prep1
+step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box);
+step b1: BEGIN;
+step ins1_2: INSERT INTO tmp2 VALUES (1, 's1');
+step drop2: DROP TABLE tmp2; <waiting ...>
+step prep1: PREPARE TRANSACTION 'tx';
+ERROR:  cannot PREPARE a transaction that has operated on temporary objects
+step drop2: <... completed>
+
+starting permutation: ins1 idx1 sel1_idx ins2 sel2_idx
+step ins1: INSERT INTO tmp VALUES (1, 's1');
+step idx1: CREATE INDEX tmp_val_idx ON tmp(val);
+step sel1_idx: 
+  SET enable_seqscan = off;
+  SET enable_bitmapscan = off;
+  EXPLAIN (COSTS OFF)
+  SELECT * FROM tmp WHERE val = 's1';
+  SELECT * FROM tmp WHERE val = 's1';
+
+QUERY PLAN                         
+-----------------------------------
+Index Scan using tmp_val_idx on tmp
+  Index Cond: (val = 's1'::text)   
+(2 rows)
+
+key|val|seq
+---+---+---
+  1|s1 |  1
+(1 row)
+
+step ins2: INSERT INTO tmp VALUES (1, 's2');
+step sel2_idx: 
+  SET enable_seqscan = off;
+  SET enable_bitmapscan = off;
+  EXPLAIN (COSTS OFF)
+  SELECT * FROM tmp WHERE val = 's2';
+  SELECT * FROM tmp WHERE val = 's2';
+
+QUERY PLAN                         
+-----------------------------------
+Index Scan using tmp_val_idx on tmp
+  Index Cond: (val = 's2'::text)   
+(2 rows)
+
+key|val|seq
+---+---+---
+  1|s2 |  1
+(1 row)
+
+
+starting permutation: ins1 ins2 idx1 sel1_idx sel2_idx
+step ins1: INSERT INTO tmp VALUES (1, 's1');
+step ins2: INSERT INTO tmp VALUES (1, 's2');
+step idx1: CREATE INDEX tmp_val_idx ON tmp(val);
+step sel1_idx: 
+  SET enable_seqscan = off;
+  SET enable_bitmapscan = off;
+  EXPLAIN (COSTS OFF)
+  SELECT * FROM tmp WHERE val = 's1';
+  SELECT * FROM tmp WHERE val = 's1';
+
+QUERY PLAN                         
+-----------------------------------
+Index Scan using tmp_val_idx on tmp
+  Index Cond: (val = 's1'::text)   
+(2 rows)
+
+key|val|seq
+---+---+---
+  1|s1 |  1
+(1 row)
+
+step sel2_idx: 
+  SET enable_seqscan = off;
+  SET enable_bitmapscan = off;
+  EXPLAIN (COSTS OFF)
+  SELECT * FROM tmp WHERE val = 's2';
+  SELECT * FROM tmp WHERE val = 's2';
+
+QUERY PLAN                  
+----------------------------
+Seq Scan on tmp             
+  Disabled: true            
+  Filter: (val = 's2'::text)
+(3 rows)
+
+key|val|seq
+---+---+---
+  1|s2 |  1
+(1 row)
+
+
+starting permutation: ins1 ins2 idx1 sel1_idx sel2_idx reidx2 sel2_idx
+step ins1: INSERT INTO tmp VALUES (1, 's1');
+step ins2: INSERT INTO tmp VALUES (1, 's2');
+step idx1: CREATE INDEX tmp_val_idx ON tmp(val);
+step sel1_idx: 
+  SET enable_seqscan = off;
+  SET enable_bitmapscan = off;
+  EXPLAIN (COSTS OFF)
+  SELECT * FROM tmp WHERE val = 's1';
+  SELECT * FROM tmp WHERE val = 's1';
+
+QUERY PLAN                         
+-----------------------------------
+Index Scan using tmp_val_idx on tmp
+  Index Cond: (val = 's1'::text)   
+(2 rows)
+
+key|val|seq
+---+---+---
+  1|s1 |  1
+(1 row)
+
+step sel2_idx: 
+  SET enable_seqscan = off;
+  SET enable_bitmapscan = off;
+  EXPLAIN (COSTS OFF)
+  SELECT * FROM tmp WHERE val = 's2';
+  SELECT * FROM tmp WHERE val = 's2';
+
+QUERY PLAN                  
+----------------------------
+Seq Scan on tmp             
+  Disabled: true            
+  Filter: (val = 's2'::text)
+(3 rows)
+
+key|val|seq
+---+---+---
+  1|s2 |  1
+(1 row)
+
+step reidx2: REINDEX INDEX tmp_val_idx;
+step sel2_idx: 
+  SET enable_seqscan = off;
+  SET enable_bitmapscan = off;
+  EXPLAIN (COSTS OFF)
+  SELECT * FROM tmp WHERE val = 's2';
+  SELECT * FROM tmp WHERE val = 's2';
+
+QUERY PLAN                         
+-----------------------------------
+Index Scan using tmp_val_idx on tmp
+  Index Cond: (val = 's2'::text)   
+(2 rows)
+
+key|val|seq
+---+---+---
+  1|s2 |  1
+(1 row)
+
+
+starting permutation: ins1 ins2 idx1 sel1_idx sel2_idx analyze2 sel2_idx reidx2 sel2_idx
+step ins1: INSERT INTO tmp VALUES (1, 's1');
+step ins2: INSERT INTO tmp VALUES (1, 's2');
+step idx1: CREATE INDEX tmp_val_idx ON tmp(val);
+step sel1_idx: 
+  SET enable_seqscan = off;
+  SET enable_bitmapscan = off;
+  EXPLAIN (COSTS OFF)
+  SELECT * FROM tmp WHERE val = 's1';
+  SELECT * FROM tmp WHERE val = 's1';
+
+QUERY PLAN                         
+-----------------------------------
+Index Scan using tmp_val_idx on tmp
+  Index Cond: (val = 's1'::text)   
+(2 rows)
+
+key|val|seq
+---+---+---
+  1|s1 |  1
+(1 row)
+
+step sel2_idx: 
+  SET enable_seqscan = off;
+  SET enable_bitmapscan = off;
+  EXPLAIN (COSTS OFF)
+  SELECT * FROM tmp WHERE val = 's2';
+  SELECT * FROM tmp WHERE val = 's2';
+
+QUERY PLAN                  
+----------------------------
+Seq Scan on tmp             
+  Disabled: true            
+  Filter: (val = 's2'::text)
+(3 rows)
+
+key|val|seq
+---+---+---
+  1|s2 |  1
+(1 row)
+
+step analyze2: ANALYZE tmp;
+step sel2_idx: 
+  SET enable_seqscan = off;
+  SET enable_bitmapscan = off;
+  EXPLAIN (COSTS OFF)
+  SELECT * FROM tmp WHERE val = 's2';
+  SELECT * FROM tmp WHERE val = 's2';
+
+QUERY PLAN                  
+----------------------------
+Seq Scan on tmp             
+  Disabled: true            
+  Filter: (val = 's2'::text)
+(3 rows)
+
+key|val|seq
+---+---+---
+  1|s2 |  1
+(1 row)
+
+step reidx2: REINDEX INDEX tmp_val_idx;
+step sel2_idx: 
+  SET enable_seqscan = off;
+  SET enable_bitmapscan = off;
+  EXPLAIN (COSTS OFF)
+  SELECT * FROM tmp WHERE val = 's2';
+  SELECT * FROM tmp WHERE val = 's2';
+
+QUERY PLAN                         
+-----------------------------------
+Index Scan using tmp_val_idx on tmp
+  Index Cond: (val = 's2'::text)   
+(2 rows)
+
+key|val|seq
+---+---+---
+  1|s2 |  1
+(1 row)
+
+
+starting permutation: ins1 ins2 t2 sel1 sel2 ins2 t1 sel1 sel2 ins1 t2 sel1 sel2
+step ins1: INSERT INTO tmp VALUES (1, 's1');
+step ins2: INSERT INTO tmp VALUES (1, 's2');
+step t2: TRUNCATE tmp;
+step sel1: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s1 |  1
+(1 row)
+
+step sel2: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+(0 rows)
+
+step ins2: INSERT INTO tmp VALUES (1, 's2');
+step t1: TRUNCATE tmp;
+step sel1: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+(0 rows)
+
+step sel2: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s2 |  2
+(1 row)
+
+step ins1: INSERT INTO tmp VALUES (1, 's1');
+step t2: TRUNCATE tmp;
+step sel1: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s1 |  2
+(1 row)
+
+step sel2: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+(0 rows)
+
+
+starting permutation: ins1 ins2 alt_tblspace get_tblspace1 get_tblspace2 sel1 sel2 reset_tblspace
+step ins1: INSERT INTO tmp VALUES (1, 's1');
+step ins2: INSERT INTO tmp VALUES (1, 's2');
+step alt_tblspace: ALTER TABLE tmp SET TABLESPACE regress_isolation_tablespace;
+step get_tblspace1: 
+  SELECT s1.spcname, s2.spcname,
+         regexp_replace(pg_relation_filepath('tmp'), '(\d+)', 'NNN', 'g')
+    FROM pg_class c
+    JOIN pg_tablespace s1 ON s1.oid = c.reltablespace
+    LEFT JOIN pg_temp_class t ON t.oid = c.oid
+    JOIN pg_tablespace s2 ON s2.oid = t.reltablespace
+   WHERE c.relname = 'tmp';
+
+spcname                     |spcname                     |regexp_replace                       
+----------------------------+----------------------------+-------------------------------------
+regress_isolation_tablespace|regress_isolation_tablespace|pg_tblspc/NNN/PG_NNN_NNN/NNN/tNNN_NNN
+(1 row)
+
+step get_tblspace2: 
+  SELECT s1.spcname, s2.spcname,
+         regexp_replace(pg_relation_filepath('tmp'), '(\d+)', 'NNN', 'g')
+    FROM pg_class c
+    JOIN pg_tablespace s1 ON s1.oid = c.reltablespace
+    LEFT JOIN pg_temp_class t ON t.oid = c.oid
+    LEFT JOIN pg_tablespace s2 ON s2.oid = t.reltablespace
+   WHERE c.relname = 'tmp';
+
+spcname                     |spcname|regexp_replace   
+----------------------------+-------+-----------------
+regress_isolation_tablespace|       |base/NNN/tNNN_NNN
+(1 row)
+
+step sel1: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s1 |  1
+(1 row)
+
+step sel2: SELECT * FROM tmp;
+key|val|seq
+---+---+---
+  1|s2 |  1
+(1 row)
+
+step reset_tblspace: ALTER TABLE tmp SET TABLESPACE pg_default;
+
+starting permutation: create1 ext_stats1 ins1_2 analyze1 cat1 drop1 cat1
+step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box);
+step ext_stats1: CREATE STATISTICS tmp2_stats ON key, val FROM tmp2;
+step ins1_2: INSERT INTO tmp2 VALUES (1, 's1');
+step analyze1: ANALYZE tmp2;
+step cat1: 
+  SELECT (SELECT count(*) FROM pg_temp_class WHERE oid >= 12000),
+         (SELECT count(*) FROM pg_temp_statistic),
+         (SELECT count(*) FROM pg_temp_statistic_ext_data);
+
+count|count|count
+-----+-----+-----
+    3|    4|    1
+(1 row)
+
+step drop1: DROP TABLE tmp2;
+step cat1: 
+  SELECT (SELECT count(*) FROM pg_temp_class WHERE oid >= 12000),
+         (SELECT count(*) FROM pg_temp_statistic),
+         (SELECT count(*) FROM pg_temp_statistic_ext_data);
+
+count|count|count
+-----+-----+-----
+    0|    0|    0
+(1 row)
+
+
+starting permutation: create1 ext_stats1 ins1_2 analyze1 cat1 drop2 cat1
+step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box);
+step ext_stats1: CREATE STATISTICS tmp2_stats ON key, val FROM tmp2;
+step ins1_2: INSERT INTO tmp2 VALUES (1, 's1');
+step analyze1: ANALYZE tmp2;
+step cat1: 
+  SELECT (SELECT count(*) FROM pg_temp_class WHERE oid >= 12000),
+         (SELECT count(*) FROM pg_temp_statistic),
+         (SELECT count(*) FROM pg_temp_statistic_ext_data);
+
+count|count|count
+-----+-----+-----
+    3|    4|    1
+(1 row)
+
+step drop2: DROP TABLE tmp2;
+step cat1: 
+  SELECT (SELECT count(*) FROM pg_temp_class WHERE oid >= 12000),
+         (SELECT count(*) FROM pg_temp_statistic),
+         (SELECT count(*) FROM pg_temp_statistic_ext_data);
+
+count|count|count
+-----+-----+-----
+    0|    0|    0
+(1 row)
+
+
+starting permutation: create1 ext_stats1 ins1_2 analyze1 cat1 b1 drop2 cat1 r1 cat1
+step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box);
+step ext_stats1: CREATE STATISTICS tmp2_stats ON key, val FROM tmp2;
+step ins1_2: INSERT INTO tmp2 VALUES (1, 's1');
+step analyze1: ANALYZE tmp2;
+step cat1: 
+  SELECT (SELECT count(*) FROM pg_temp_class WHERE oid >= 12000),
+         (SELECT count(*) FROM pg_temp_statistic),
+         (SELECT count(*) FROM pg_temp_statistic_ext_data);
+
+count|count|count
+-----+-----+-----
+    3|    4|    1
+(1 row)
+
+step b1: BEGIN;
+step drop2: DROP TABLE tmp2;
+step cat1: 
+  SELECT (SELECT count(*) FROM pg_temp_class WHERE oid >= 12000),
+         (SELECT count(*) FROM pg_temp_statistic),
+         (SELECT count(*) FROM pg_temp_statistic_ext_data);
+
+count|count|count
+-----+-----+-----
+    0|    0|    0
+(1 row)
+
+step r1: ROLLBACK;
+step cat1: 
+  SELECT (SELECT count(*) FROM pg_temp_class WHERE oid >= 12000),
+         (SELECT count(*) FROM pg_temp_statistic),
+         (SELECT count(*) FROM pg_temp_statistic_ext_data);
+
+count|count|count
+-----+-----+-----
+    0|    0|    0
+(1 row)
+
+
+starting permutation: create1 ext_stats1 ins1_2 analyze1 b1 cat1 sp1 drop2 cat1 rsp1 cat1 r1 cat1
+step create1: CREATE GLOBAL TEMP TABLE tmp2 (key int, val text, icol int, bcol box);
+step ext_stats1: CREATE STATISTICS tmp2_stats ON key, val FROM tmp2;
+step ins1_2: INSERT INTO tmp2 VALUES (1, 's1');
+step analyze1: ANALYZE tmp2;
+step b1: BEGIN;
+step cat1: 
+  SELECT (SELECT count(*) FROM pg_temp_class WHERE oid >= 12000),
+         (SELECT count(*) FROM pg_temp_statistic),
+         (SELECT count(*) FROM pg_temp_statistic_ext_data);
+
+count|count|count
+-----+-----+-----
+    3|    4|    1
+(1 row)
+
+step sp1: SAVEPOINT sp;
+step drop2: DROP TABLE tmp2;
+step cat1: 
+  SELECT (SELECT count(*) FROM pg_temp_class WHERE oid >= 12000),
+         (SELECT count(*) FROM pg_temp_statistic),
+         (SELECT count(*) FROM pg_temp_statistic_ext_data);
+
+count|count|count
+-----+-----+-----
+    0|    0|    0
+(1 row)
+
+step rsp1: ROLLBACK TO SAVEPOINT sp;
+step cat1: 
+  SELECT (SELECT count(*) FROM pg_temp_class WHERE oid >= 12000),
+         (SELECT count(*) FROM pg_temp_statistic),
+         (SELECT count(*) FROM pg_temp_statistic_ext_data);
+
+count|count|count
+-----+-----+-----
+    0|    0|    0
+(1 row)
+
+step r1: ROLLBACK;
+step cat1: 
+  SELECT (SELECT count(*) FROM pg_temp_class WHERE oid >= 12000),
+         (SELECT count(*) FROM pg_temp_statistic),
+         (SELECT count(*) FROM pg_temp_statistic_ext_data);
+
+count|count|count
+-----+-----+-----
+    0|    0|    0
+(1 row)
+
+
+starting permutation: drop_tblspace list_tblspaces
+step drop_tblspace: DROP TABLESPACE regress_isolation_tablespace;
+step list_tblspaces: SELECT spcname FROM pg_tablespace ORDER BY 1;
+spcname   
+----------
+pg_default
+pg_global 
+(2 rows)
+

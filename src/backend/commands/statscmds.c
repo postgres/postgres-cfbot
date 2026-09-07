@@ -25,6 +25,7 @@
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_statistic_ext.h"
 #include "catalog/pg_statistic_ext_data.h"
+#include "catalog/pg_temp_statistic_ext_data.h"
 #include "commands/comment.h"
 #include "commands/defrem.h"
 #include "miscadmin.h"
@@ -790,14 +791,24 @@ AlterStatistics(AlterStatsStmt *stmt)
  * exists, so don't error out.
  */
 void
-RemoveStatisticsDataById(Oid statsOid, bool inh)
+RemoveStatisticsDataById(Oid relid, Oid statsOid, bool inh)
 {
 	Relation	relation;
+	SysCacheIdentifier cacheId;
 	HeapTuple	tup;
 
-	relation = table_open(StatisticExtDataRelationId, RowExclusiveLock);
+	if (rel_is_global_temp(relid))
+	{
+		relation = table_open(TempStatisticExtDataRelationId, RowExclusiveLock);
+		cacheId = TEMPSTATEXTDATASTXOID;
+	}
+	else
+	{
+		relation = table_open(StatisticExtDataRelationId, RowExclusiveLock);
+		cacheId = STATEXTDATASTXOID;
+	}
 
-	tup = SearchSysCache2(STATEXTDATASTXOID, ObjectIdGetDatum(statsOid),
+	tup = SearchSysCache2(cacheId, ObjectIdGetDatum(statsOid),
 						  BoolGetDatum(inh));
 
 	/* We don't know if the data row for inh value exists. */
@@ -845,8 +856,8 @@ RemoveStatisticsById(Oid statsOid)
 	 */
 	rel = table_open(relid, ShareUpdateExclusiveLock);
 
-	RemoveStatisticsDataById(statsOid, true);
-	RemoveStatisticsDataById(statsOid, false);
+	RemoveStatisticsDataById(relid, statsOid, true);
+	RemoveStatisticsDataById(relid, statsOid, false);
 
 	CacheInvalidateRelcacheByRelid(relid);
 

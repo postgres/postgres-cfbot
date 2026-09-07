@@ -36,6 +36,7 @@
 #include "access/tableam.h"
 #include "catalog/binary_upgrade.h"
 #include "catalog/catalog.h"
+#include "catalog/global_temp.h"
 #include "catalog/heap.h"
 #include "catalog/index.h"
 #include "catalog/objectaccess.h"
@@ -52,6 +53,7 @@
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_subscription_rel.h"
 #include "catalog/pg_tablespace.h"
+#include "catalog/pg_temp_statistic.h"
 #include "catalog/pg_type.h"
 #include "catalog/storage.h"
 #include "commands/tablecmds.h"
@@ -294,6 +296,7 @@ heap_create(const char *relname,
 			char relpersistence,
 			bool shared_relation,
 			bool mapped_relation,
+			OnCommitAction oncommit,
 			bool allow_system_table_mods,
 			TransactionId *relfrozenxid,
 			MultiXactId *relminmxid,
@@ -371,7 +374,8 @@ heap_create(const char *relname,
 									 shared_relation,
 									 mapped_relation,
 									 relpersistence,
-									 relkind);
+									 relkind,
+									 oncommit);
 
 	/*
 	 * Have the storage manager create the relation's disk file, if needed.
@@ -387,7 +391,8 @@ heap_create(const char *relname,
 											   relpersistence,
 											   relfrozenxid, relminmxid);
 		else if (RELKIND_HAS_STORAGE(rel->rd_rel->relkind))
-			RelationCreateStorage(rel->rd_locator, relpersistence, true);
+			RelationCreateStorage(rel->rd_id, rel->rd_locator,
+								  relpersistence, true);
 		else
 			Assert(false);
 	}
@@ -396,8 +401,13 @@ heap_create(const char *relname,
 	 * If a tablespace is specified, removal of that tablespace is normally
 	 * protected by the existence of a physical file; but for relations with
 	 * no files, add a pg_shdepend entry to account for that.
+	 *
+	 * Note, however, that although global temporary relations may have files,
+	 * those files will go away at the end of the session, and so provide no
+	 * protection, and we must add a pg_shdepend entry in this case too.
 	 */
-	if (!create_storage && reltablespace != InvalidOid)
+	if ((!create_storage || relpersistence == RELPERSISTENCE_GLOBAL_TEMP) &&
+		reltablespace != InvalidOid)
 		recordDependencyOnTablespace(RelationRelationId, relid,
 									 reltablespace);
 
@@ -958,6 +968,7 @@ InsertPgClassTuple(Relation pg_class_desc,
 	values[Anum_pg_class_relisshared - 1] = BoolGetDatum(rd_rel->relisshared);
 	values[Anum_pg_class_relpersistence - 1] = CharGetDatum(rd_rel->relpersistence);
 	values[Anum_pg_class_relkind - 1] = CharGetDatum(rd_rel->relkind);
+	values[Anum_pg_class_reloncommit - 1] = CharGetDatum(rd_rel->reloncommit);
 	values[Anum_pg_class_relnatts - 1] = Int16GetDatum(rd_rel->relnatts);
 	values[Anum_pg_class_relchecks - 1] = Int16GetDatum(rd_rel->relchecks);
 	values[Anum_pg_class_relhasrules - 1] = BoolGetDatum(rd_rel->relhasrules);
@@ -969,8 +980,17 @@ InsertPgClassTuple(Relation pg_class_desc,
 	values[Anum_pg_class_relreplident - 1] = CharGetDatum(rd_rel->relreplident);
 	values[Anum_pg_class_relispartition - 1] = BoolGetDatum(rd_rel->relispartition);
 	values[Anum_pg_class_relrewrite - 1] = ObjectIdGetDatum(rd_rel->relrewrite);
-	values[Anum_pg_class_relfrozenxid - 1] = TransactionIdGetDatum(rd_rel->relfrozenxid);
-	values[Anum_pg_class_relminmxid - 1] = MultiXactIdGetDatum(rd_rel->relminmxid);
+
+	/*
+	 * For global temporary relations, relfrozenxid and relminmxid are stored
+	 * in pg_temp_class.  Set them to Invalid in the pg_class tuple.
+	 */
+	values[Anum_pg_class_relfrozenxid - 1] =
+		TransactionIdGetDatum(rd_rel->relpersistence == RELPERSISTENCE_GLOBAL_TEMP ?
+							  InvalidTransactionId : rd_rel->relfrozenxid);
+	values[Anum_pg_class_relminmxid - 1] =
+		MultiXactIdGetDatum(rd_rel->relpersistence == RELPERSISTENCE_GLOBAL_TEMP ?
+							InvalidMultiXactId : rd_rel->relminmxid);
 	if (relacl != (Datum) 0)
 		values[Anum_pg_class_relacl - 1] = relacl;
 	else
@@ -989,6 +1009,10 @@ InsertPgClassTuple(Relation pg_class_desc,
 	CatalogTupleInsert(pg_class_desc, tup);
 
 	heap_freetuple(tup);
+
+	/* If it's a global temporary relation, track our use of it */
+	if (RELATION_IS_GLOBAL_TEMP(new_rel_desc))
+		TrackGlobalTempRelation(new_rel_desc);
 }
 
 /* --------------------------------
@@ -1339,6 +1363,7 @@ heap_create_with_catalog(const char *relname,
 							   relpersistence,
 							   shared_relation,
 							   mapped_relation,
+							   oncommit,
 							   allow_system_table_mods,
 							   &relfrozenxid,
 							   &relminmxid,
@@ -1597,6 +1622,7 @@ DeleteRelationTuple(Oid relid)
 {
 	Relation	pg_class_desc;
 	HeapTuple	tup;
+	char		relpersistence;
 
 	/* Grab an appropriate lock on the pg_class relation */
 	pg_class_desc = table_open(RelationRelationId, RowExclusiveLock);
@@ -1604,6 +1630,7 @@ DeleteRelationTuple(Oid relid)
 	tup = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
 	if (!HeapTupleIsValid(tup))
 		elog(ERROR, "cache lookup failed for relation %u", relid);
+	relpersistence = ((Form_pg_class) GETSTRUCT(tup))->relpersistence;
 
 	/* delete the relation tuple from pg_class, and finish up */
 	CatalogTupleDelete(pg_class_desc, &tup->t_self);
@@ -1611,6 +1638,10 @@ DeleteRelationTuple(Oid relid)
 	ReleaseSysCache(tup);
 
 	table_close(pg_class_desc, RowExclusiveLock);
+
+	/* If it's a global temporary relation, forget our use of it */
+	if (relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
+		ForgetGlobalTempRelation(relid);
 }
 
 /*
@@ -3485,6 +3516,13 @@ CopyStatistics(Oid fromrelid, Oid torelid)
 	Relation	statrel;
 	CatalogIndexState indstate = NULL;
 
+	/*
+	 * Note: This is currently only used for concurrent index building, which
+	 * isn't supported on global temporary relations, so we never want
+	 * pg_temp_statistic here.
+	 */
+	Assert(!rel_is_global_temp(fromrelid) && !rel_is_global_temp(torelid));
+
 	statrel = table_open(StatisticRelationId, RowExclusiveLock);
 
 	/* Now search for stat records */
@@ -3533,12 +3571,22 @@ void
 RemoveStatistics(Oid relid, AttrNumber attnum)
 {
 	Relation	pgstatistic;
+	Oid			relidAttnumInhIndexId;
 	SysScanDesc scan;
 	ScanKeyData key[2];
 	int			nkeys;
 	HeapTuple	tuple;
 
-	pgstatistic = table_open(StatisticRelationId, RowExclusiveLock);
+	if (rel_is_global_temp(relid))
+	{
+		pgstatistic = table_open(TempStatisticRelationId, RowExclusiveLock);
+		relidAttnumInhIndexId = TempStatisticRelidAttnumInhIndexId;
+	}
+	else
+	{
+		pgstatistic = table_open(StatisticRelationId, RowExclusiveLock);
+		relidAttnumInhIndexId = StatisticRelidAttnumInhIndexId;
+	}
 
 	ScanKeyInit(&key[0],
 				Anum_pg_statistic_starelid,
@@ -3556,7 +3604,7 @@ RemoveStatistics(Oid relid, AttrNumber attnum)
 		nkeys = 2;
 	}
 
-	scan = systable_beginscan(pgstatistic, StatisticRelidAttnumInhIndexId, true,
+	scan = systable_beginscan(pgstatistic, relidAttnumInhIndexId, true,
 							  NULL, nkeys, key);
 
 	/* we must loop even when attnum != 0, in case of inherited stats */
@@ -3574,10 +3622,10 @@ RemoveStatistics(Oid relid, AttrNumber attnum)
  * with the heap relation to zero tuples.
  *
  * The routine will truncate and then reconstruct the indexes on
- * the specified relation.  Caller must hold exclusive lock on rel.
+ * the specified relation.  Caller must hold the specified lock on rel.
  */
 static void
-RelationTruncateIndexes(Relation heapRelation)
+RelationTruncateIndexes(Relation heapRelation, LOCKMODE lockmode)
 {
 	ListCell   *indlist;
 
@@ -3588,8 +3636,8 @@ RelationTruncateIndexes(Relation heapRelation)
 		Relation	currentIndex;
 		IndexInfo  *indexInfo;
 
-		/* Open the index relation; use exclusive lock, just to be sure */
-		currentIndex = index_open(indexId, AccessExclusiveLock);
+		/* Open the index relation; use same lock as heap relation */
+		currentIndex = index_open(indexId, lockmode);
 
 		/*
 		 * Fetch info needed for index_build.  Since we know there are no
@@ -3631,13 +3679,23 @@ heap_truncate(List *relids)
 	List	   *relations = NIL;
 	ListCell   *cell;
 
-	/* Open relations for processing, and grab exclusive access on each */
+	/*
+	 * Open relations for processing.  For most relations, we must use
+	 * AccessExclusiveLock to prevent schema and data changes.  However, for
+	 * global temporary relations, we must use RowExclusiveLock, because two
+	 * backends trying to upgrade to an exclusive lock on the same relation
+	 * here would deadlock.  This is sufficient, because the relation's data
+	 * is session-local.
+	 */
 	foreach(cell, relids)
 	{
 		Oid			rid = lfirst_oid(cell);
+		LOCKMODE	lockmode;
 		Relation	rel;
 
-		rel = table_open(rid, AccessExclusiveLock);
+		lockmode = rel_is_global_temp(rid) ? RowExclusiveLock : AccessExclusiveLock;
+
+		rel = table_open(rid, lockmode);
 		relations = lappend(relations, rel);
 	}
 
@@ -3652,7 +3710,7 @@ heap_truncate(List *relids)
 		/* Truncate the relation */
 		heap_truncate_one_rel(rel);
 
-		/* Close the relation, but keep exclusive lock on it until commit */
+		/* Close the relation, but keep lock on it until commit */
 		table_close(rel, NoLock);
 	}
 }
@@ -3664,12 +3722,21 @@ heap_truncate(List *relids)
  *
  * This is not transaction-safe, because the truncation is done immediately
  * and cannot be rolled back later.  Caller is responsible for having
- * checked permissions etc, and must have obtained AccessExclusiveLock.
+ * checked permissions etc, and must have obtained the required lock, which is
+ * typically AccessExclusiveLock, except if it's a global temporary relation,
+ * in which case RowExclusiveLock is sufficient.
  */
 void
 heap_truncate_one_rel(Relation rel)
 {
+	LOCKMODE	lockmode;
 	Oid			toastrelid;
+
+	/*
+	 * For a global temporary relation, RowExclusiveLock is sufficient.
+	 * Otherwise must use AccessExclusiveLock.
+	 */
+	lockmode = RELATION_IS_GLOBAL_TEMP(rel) ? RowExclusiveLock : AccessExclusiveLock;
 
 	/*
 	 * Truncate the relation.  Partitioned tables have no storage, so there is
@@ -3682,16 +3749,16 @@ heap_truncate_one_rel(Relation rel)
 	table_relation_nontransactional_truncate(rel);
 
 	/* If the relation has indexes, truncate the indexes too */
-	RelationTruncateIndexes(rel);
+	RelationTruncateIndexes(rel, lockmode);
 
 	/* If there is a toast table, truncate that too */
 	toastrelid = rel->rd_rel->reltoastrelid;
 	if (OidIsValid(toastrelid))
 	{
-		Relation	toastrel = table_open(toastrelid, AccessExclusiveLock);
+		Relation	toastrel = table_open(toastrelid, lockmode);
 
 		table_relation_nontransactional_truncate(toastrel);
-		RelationTruncateIndexes(toastrel);
+		RelationTruncateIndexes(toastrel, lockmode);
 		/* keep the lock... */
 		table_close(toastrel, NoLock);
 	}

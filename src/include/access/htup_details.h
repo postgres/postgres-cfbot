@@ -722,6 +722,17 @@ GETSTRUCT(const HeapTupleData *tuple)
 }
 
 /*
+ * GETSTRUCT_SAFE - given a possibly NULL HeapTuple pointer, return the
+ * address of the user data or NULL
+ */
+static inline void *
+GETSTRUCT_SAFE(const HeapTupleData *tuple)
+{
+	return HeapTupleIsValid(tuple) ?
+		((char *) (tuple->t_data) + tuple->t_data->t_hoff) : NULL;
+}
+
+/*
  * Accessor functions to be used with HeapTuple pointers.
  */
 

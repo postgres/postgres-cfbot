@@ -101,8 +101,10 @@ test: publication subscription
 # ----------
 # Another group of parallel tests
 # select_views depends on create_view
+# NB: global_temp.sql does reconnects which transiently uses 2 connections,
+# so keep this parallel group to at most 19 tests
 # ----------
-test: select_views portals_p2 foreign_key dependency guc bitmapops combocid tsearch tsdicts foreign_data window xmlmap functional_deps advisory_lock indirect_toast equivclass stats_rewrite graph_table
+test: select_views portals_p2 foreign_key dependency guc bitmapops combocid tsearch tsdicts foreign_data window xmlmap functional_deps advisory_lock indirect_toast equivclass stats_rewrite graph_table global_temp
 
 # ----------
 # Another group of parallel tests (JSON related)

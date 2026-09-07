@@ -21,7 +21,7 @@ PostgreSQL documentation
 
  <refsynopsisdiv>
 <synopsis>
-DISCARD { ALL | PLANS | SEQUENCES | TEMPORARY | TEMP }
+DISCARD { ALL | GLOBAL TEMPORARY | GLOBAL TEMP | PLANS | SEQUENCES | TEMPORARY | TEMP }
 </synopsis>
  </refsynopsisdiv>
 
@@ -41,6 +41,19 @@ DISCARD { ALL | PLANS | SEQUENCES | TEMPORARY | TEMP }
   <title>Parameters</title>
 
   <variablelist>
+
+   <varlistentry>
+    <term><literal>GLOBAL TEMPORARY</literal> or <literal>GLOBAL TEMP</literal></term>
+    <listitem>
+     <para>
+      Deletes all data from global temporary tables used in the current
+      session, and resets all global temporary sequences to their initial
+      state.  When the enclosing transaction is committed, all physical
+      storage created for global temporary relations used in the session
+      is deleted.
+     </para>
+    </listitem>
+   </varlistentry>
 
    <varlistentry>
     <term><literal>PLANS</literal></term>
@@ -90,6 +103,7 @@ RESET ALL;
 DEALLOCATE ALL;
 UNLISTEN *;
 SELECT pg_advisory_unlock_all();
+DISCARD GLOBAL TEMP;
 DISCARD PLANS;
 DISCARD TEMP;
 DISCARD SEQUENCES;

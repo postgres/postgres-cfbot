@@ -17,6 +17,7 @@ OBJS = \
 	aclchk.o \
 	catalog.o \
 	dependency.o \
+	global_temp.o \
 	heap.o \
 	index.o \
 	indexing.o \
@@ -45,6 +46,8 @@ OBJS = \
 	pg_shdepend.o \
 	pg_subscription.o \
 	pg_tablespace.o \
+	pg_temp_class.o \
+	pg_temp_index.o \
 	pg_type.o \
 	storage.o \
 	toasting.o

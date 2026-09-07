@@ -47,6 +47,8 @@ DROP TABLE temptest;
 
 CREATE TEMP TABLE temptest(col int);
 
+SELECT reloncommit FROM pg_class WHERE oid = 'temptest'::regclass;
+
 \c
 
 SELECT * FROM temptest;
@@ -54,6 +56,8 @@ SELECT * FROM temptest;
 -- Test ON COMMIT DELETE ROWS
 
 CREATE TEMP TABLE temptest(col int) ON COMMIT DELETE ROWS;
+
+SELECT reloncommit FROM pg_class WHERE oid = 'temptest'::regclass;
 
 -- while we're here, verify successful truncation of index with SQL function
 CREATE INDEX ON temptest(bit_length(''));
@@ -84,6 +88,8 @@ DROP TABLE temptest;
 BEGIN;
 
 CREATE TEMP TABLE temptest(col int) ON COMMIT DROP;
+
+SELECT reloncommit FROM pg_class WHERE oid = 'temptest'::regclass;
 
 INSERT INTO temptest VALUES (1);
 INSERT INTO temptest VALUES (2);
@@ -223,6 +229,8 @@ create temp table temp_parted_oncommit_test1
 create temp table temp_parted_oncommit_test2
   partition of temp_parted_oncommit_test
   for values in (2) on commit drop;
+select relname, reloncommit from pg_class
+ where relname ~ 'temp_parted_oncommit_test' order by relname;
 insert into temp_parted_oncommit_test values (1), (2);
 commit;
 -- Data from the remaining partition is still here as its rows are

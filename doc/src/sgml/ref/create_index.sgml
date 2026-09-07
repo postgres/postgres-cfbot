@@ -771,6 +771,22 @@ Indexes:
   </para>
 
   <para>
+   When <literal>CREATE INDEX</literal> is invoked on a global temporary
+   table, the index is initially only populated in the session that executed
+   <literal>CREATE INDEX</literal>.  Other active sessions will see the
+   index definition and automatically build an empty index using the
+   <link linkend="indexam-ambuildempty"><literal>ambuildempty</literal></link>
+   index access method, but if another active session already has data in the
+   table, the index will be marked invalid in that session, and will not be
+   usable unless <link linkend="sql-reindex"><command>REINDEX</command></link>
+   is used to rebuild it in that session.  Other active sessions that have not
+   yet inserted data into the table will be able to use the index normally;
+   each session's copy of the index will be populated as data is added to that
+   session's copy of the table.  Likewise for any future sessions started
+   after the index is defined.
+  </para>
+
+  <para>
    For index methods that support ordered scans (currently, only B-tree),
    the optional clauses <literal>ASC</literal>, <literal>DESC</literal>, <literal>NULLS
    FIRST</literal>, and/or <literal>NULLS LAST</literal> can be specified to modify

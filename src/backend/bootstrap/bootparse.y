@@ -96,7 +96,7 @@ static int num_columns_read = 0;
 %type <list>  boot_index_params
 %type <ielem> boot_index_param
 %type <str>   boot_ident
-%type <ival>  optbootstrap optsharedrelation boot_column_nullness
+%type <ival>  optbootstrap optsharedrelation opttemprelation boot_column_nullness
 %type <oidval> oidspec optrowtypeoid
 
 %token <str> ID
@@ -106,7 +106,7 @@ static int num_columns_read = 0;
 /* All the rest are unreserved, and should be handled in boot_ident! */
 %token <kw> OPEN XCLOSE XCREATE INSERT_TUPLE
 %token <kw> XDECLARE INDEX ON USING XBUILD INDICES UNIQUE XTOAST
-%token <kw> OBJ_ID XBOOTSTRAP XSHARED_RELATION XROWTYPE_OID
+%token <kw> OBJ_ID XBOOTSTRAP XSHARED_RELATION XTEMP_RELATION XROWTYPE_OID
 %token <kw> XFORCE XNOT XNULL
 
 %start TopLevel
@@ -155,13 +155,14 @@ Boot_CloseStmt:
 		;
 
 Boot_CreateStmt:
-		  XCREATE boot_ident oidspec optbootstrap optsharedrelation optrowtypeoid LPAREN
+		  XCREATE boot_ident oidspec optbootstrap optsharedrelation opttemprelation optrowtypeoid LPAREN
 				{
 					do_start();
 					numattr = 0;
-					elog(DEBUG4, "creating%s%s relation %s %u",
+					elog(DEBUG4, "creating%s%s%s relation %s %u",
 						 $4 ? " bootstrap" : "",
 						 $5 ? " shared" : "",
+						 $6 ? " global temp" : "",
 						 $2,
 						 $3);
 				}
@@ -173,6 +174,7 @@ Boot_CreateStmt:
 				{
 					TupleDesc	tupdesc;
 					bool		shared_relation;
+					bool		temp_relation;
 					bool		mapped_relation;
 
 					do_start();
@@ -180,6 +182,7 @@ Boot_CreateStmt:
 					tupdesc = CreateTupleDesc(numattr, attrtypes);
 
 					shared_relation = $5;
+					temp_relation = $6;
 
 					/*
 					 * The catalogs that use the relation mapper are the
@@ -211,9 +214,12 @@ Boot_CreateStmt:
 												   HEAP_TABLE_AM_OID,
 												   tupdesc,
 												   RELKIND_RELATION,
+												   temp_relation ?
+												   RELPERSISTENCE_GLOBAL_TEMP :
 												   RELPERSISTENCE_PERMANENT,
 												   shared_relation,
 												   mapped_relation,
+												   ONCOMMIT_NOOP,
 												   true,
 												   &relfrozenxid,
 												   &relminmxid,
@@ -228,13 +234,15 @@ Boot_CreateStmt:
 													  PG_CATALOG_NAMESPACE,
 													  shared_relation ? GLOBALTABLESPACE_OID : 0,
 													  $3,
-													  $6,
+													  $7,
 													  InvalidOid,
 													  BOOTSTRAP_SUPERUSERID,
 													  HEAP_TABLE_AM_OID,
 													  tupdesc,
 													  NIL,
 													  RELKIND_RELATION,
+													  temp_relation ?
+													  RELPERSISTENCE_GLOBAL_TEMP :
 													  RELPERSISTENCE_PERMANENT,
 													  shared_relation,
 													  mapped_relation,
@@ -432,6 +440,11 @@ optsharedrelation:
 		|						{ $$ = 0; }
 		;
 
+opttemprelation:
+			XTEMP_RELATION	{ $$ = 1; }
+		|					{ $$ = 0; }
+		;
+
 optrowtypeoid:
 			XROWTYPE_OID oidspec	{ $$ = $2; }
 		|							{ $$ = InvalidOid; }
@@ -491,6 +504,7 @@ boot_ident:
 		| OBJ_ID		{ $$ = pstrdup($1); }
 		| XBOOTSTRAP	{ $$ = pstrdup($1); }
 		| XSHARED_RELATION	{ $$ = pstrdup($1); }
+		| XTEMP_RELATION	{ $$ = pstrdup($1); }
 		| XROWTYPE_OID	{ $$ = pstrdup($1); }
 		| XFORCE		{ $$ = pstrdup($1); }
 		| XNOT			{ $$ = pstrdup($1); }

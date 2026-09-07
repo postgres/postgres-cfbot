@@ -159,13 +159,13 @@ blbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 }
 
 /*
- * Build an empty bloom index in the initialization fork.
+ * Build an empty bloom index in the specified fork.
  */
 void
-blbuildempty(Relation index)
+blbuildempty(Relation index, ForkNumber forknum)
 {
 	/* Initialize the meta page */
-	BloomInitMetapage(index, INIT_FORKNUM);
+	BloomInitMetapage(index, forknum);
 }
 
 /*

@@ -16,6 +16,7 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "catalog/pg_temp_index.h"
 #include "commands/async.h"
 #include "commands/trigger.h"
 #include "executor/spi.h"
@@ -135,7 +136,7 @@ triggered_change_notification(PG_FUNCTION_ARGS)
 		HeapTuple	indexTuple;
 		Form_pg_index index;
 
-		indexTuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(indexoid));
+		indexTuple = GetEffectivePgIndexTuple(indexoid);
 		if (!HeapTupleIsValid(indexTuple))	/* should not happen */
 			elog(ERROR, "cache lookup failed for index %u", indexoid);
 		index = (Form_pg_index) GETSTRUCT(indexTuple);
@@ -167,10 +168,10 @@ triggered_change_notification(PG_FUNCTION_ARGS)
 
 				Async_Notify(channel, payload.data);
 			}
-			ReleaseSysCache(indexTuple);
+			heap_freetuple(indexTuple);
 			break;
 		}
-		ReleaseSysCache(indexTuple);
+		heap_freetuple(indexTuple);
 	}
 
 	list_free(indexoidlist);

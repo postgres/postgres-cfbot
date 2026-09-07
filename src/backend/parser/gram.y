@@ -2162,7 +2162,7 @@ CheckPointStmt:
 
 /*****************************************************************************
  *
- * DISCARD { ALL | TEMP | PLANS | SEQUENCES }
+ * DISCARD { ALL | TEMP | PLANS | SEQUENCES | GLOBAL TEMP }
  *
  *****************************************************************************/
 
@@ -2200,6 +2200,20 @@ DiscardStmt:
 					DiscardStmt *n = makeNode(DiscardStmt);
 
 					n->target = DISCARD_SEQUENCES;
+					$$ = (Node *) n;
+				}
+			| DISCARD GLOBAL TEMP
+				{
+					DiscardStmt *n = makeNode(DiscardStmt);
+
+					n->target = DISCARD_GLOBAL_TEMP;
+					$$ = (Node *) n;
+				}
+			| DISCARD GLOBAL TEMPORARY
+				{
+					DiscardStmt *n = makeNode(DiscardStmt);
+
+					n->target = DISCARD_GLOBAL_TEMP;
 					$$ = (Node *) n;
 				}
 
@@ -3871,31 +3885,21 @@ CreateStmt:	CREATE OptTemp TABLE qualified_name '(' OptTableElementList ')'
  * Redundancy here is needed to avoid shift/reduce conflicts,
  * since TEMP is not a reserved word.  See also OptTempTableName.
  *
- * NOTE: we accept both GLOBAL and LOCAL options.  They currently do nothing,
- * but future versions might consider GLOBAL to request SQL-spec-compliant
- * temp table behavior, so warn about that.  Since we have no modules the
+ * NOTE: we accept both GLOBAL and LOCAL options.  GLOBAL results in
+ * SQL-spec-compliant temp table behavior.  Since we have no modules, the
  * LOCAL keyword is really meaningless; furthermore, some other products
- * implement LOCAL as meaning the same as our default temp table behavior,
- * so we'll probably continue to treat LOCAL as a noise word.
+ * implement LOCAL as meaning the same as our default temp table behavior of
+ * keeping the table definition private to the session that created it, and
+ * dropping the table at the end of the session, so we just treat LOCAL as a
+ * noise word.  (Actually, the SQL-spec mandates that either GLOBAL or LOCAL
+ * must be specified, but we allow it to be omitted.)
  */
 OptTemp:	TEMPORARY					{ $$ = RELPERSISTENCE_TEMP; }
 			| TEMP						{ $$ = RELPERSISTENCE_TEMP; }
 			| LOCAL TEMPORARY			{ $$ = RELPERSISTENCE_TEMP; }
 			| LOCAL TEMP				{ $$ = RELPERSISTENCE_TEMP; }
-			| GLOBAL TEMPORARY
-				{
-					ereport(WARNING,
-							(errmsg("GLOBAL is deprecated in temporary table creation"),
-							 parser_errposition(@1)));
-					$$ = RELPERSISTENCE_TEMP;
-				}
-			| GLOBAL TEMP
-				{
-					ereport(WARNING,
-							(errmsg("GLOBAL is deprecated in temporary table creation"),
-							 parser_errposition(@1)));
-					$$ = RELPERSISTENCE_TEMP;
-				}
+			| GLOBAL TEMPORARY			{ $$ = RELPERSISTENCE_GLOBAL_TEMP; }
+			| GLOBAL TEMP				{ $$ = RELPERSISTENCE_GLOBAL_TEMP; }
 			| UNLOGGED					{ $$ = RELPERSISTENCE_UNLOGGED; }
 			| /*EMPTY*/					{ $$ = RELPERSISTENCE_PERMANENT; }
 		;
@@ -13928,19 +13932,13 @@ OptTempTableName:
 				}
 			| GLOBAL TEMPORARY opt_table qualified_name
 				{
-					ereport(WARNING,
-							(errmsg("GLOBAL is deprecated in temporary table creation"),
-							 parser_errposition(@1)));
 					$$ = $4;
-					$$->relpersistence = RELPERSISTENCE_TEMP;
+					$$->relpersistence = RELPERSISTENCE_GLOBAL_TEMP;
 				}
 			| GLOBAL TEMP opt_table qualified_name
 				{
-					ereport(WARNING,
-							(errmsg("GLOBAL is deprecated in temporary table creation"),
-							 parser_errposition(@1)));
 					$$ = $4;
-					$$->relpersistence = RELPERSISTENCE_TEMP;
+					$$->relpersistence = RELPERSISTENCE_GLOBAL_TEMP;
 				}
 			| UNLOGGED opt_table qualified_name
 				{

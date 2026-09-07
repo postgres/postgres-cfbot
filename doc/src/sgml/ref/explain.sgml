@@ -378,12 +378,18 @@ ROLLBACK;
    planner to make reasonably informed decisions when optimizing
    queries, the <link
    linkend="catalog-pg-statistic"><structname>pg_statistic</structname></link>
-   data should be up-to-date for all tables used in the query.  Normally
+   data should be up-to-date for all tables used in the query (and the
+   <link linkend="catalog-pg-temp-statistic"><structname>pg_temp_statistic</structname></link>
+   data for any global temporary tables used).  Normally
    the <link linkend="autovacuum">autovacuum daemon</link> will take care
    of that automatically.  But if a table has recently had substantial
    changes in its contents, you might need to do a manual
    <link linkend="sql-analyze"><command>ANALYZE</command></link> rather than wait for autovacuum to catch up
-   with the changes.
+   with the changes.  Note also that the autovacuum daemon cannot analyze
+   temporary tables, because the data in temporary tables is only visible to
+   the backend that inserted it, so when querying from temporary tables, it
+   may be necessary to run <command>ANALYZE</command> manually from the same
+   session.
   </para>
 
   <para>

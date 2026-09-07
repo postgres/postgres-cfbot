@@ -553,18 +553,21 @@ build_column_frequencies(SortItem *groups, int ngroups,
  *		Load the MCV list for the indicated pg_statistic_ext_data tuple.
  */
 MCVList *
-statext_mcv_load(Oid mvoid, bool inh)
+statext_mcv_load(Oid relid, Oid mvoid, bool inh)
 {
+	SysCacheIdentifier cacheId;
 	MCVList    *result;
 	bool		isnull;
 	Datum		mcvlist;
-	HeapTuple	htup = SearchSysCache2(STATEXTDATASTXOID,
-									   ObjectIdGetDatum(mvoid), BoolGetDatum(inh));
+	HeapTuple	htup;
 
+	cacheId = rel_is_global_temp(relid) ? TEMPSTATEXTDATASTXOID : STATEXTDATASTXOID;
+
+	htup = SearchSysCache2(cacheId, ObjectIdGetDatum(mvoid), BoolGetDatum(inh));
 	if (!HeapTupleIsValid(htup))
 		elog(ERROR, "cache lookup failed for statistics object %u", mvoid);
 
-	mcvlist = SysCacheGetAttr(STATEXTDATASTXOID, htup,
+	mcvlist = SysCacheGetAttr(cacheId, htup,
 							  Anum_pg_statistic_ext_data_stxdmcv, &isnull);
 
 	if (isnull)
@@ -2054,7 +2057,7 @@ mcv_clauselist_selectivity(PlannerInfo *root, StatisticExtInfo *stat,
 	bool	   *matches = NULL;
 
 	/* load the MCV list stored in the statistics object */
-	mcv = statext_mcv_load(stat->statOid, rte->inh);
+	mcv = statext_mcv_load(rte->relid, stat->statOid, rte->inh);
 
 	/* build a match bitmap for the clauses */
 	matches = mcv_get_match_bitmap(root, clauses, stat->keys, stat->exprs,

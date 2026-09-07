@@ -139,16 +139,17 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
    The durability characteristics of a table are governed by its persistence
    mode.  By default, the data will be persistent and crash-safe.
    For less stringent requirements and better performance, a table can be
-   specified as <link linkend="sql-createtable-temporary">temporary</link>
+   specified as <link linkend="sql-createtable-temporary">global temporary</link>,
+   <link linkend="sql-createtable-temporary">local temporary</link>,
    or <link linkend="sql-createtable-unlogged">unlogged</link>.
   </para>
 
   <para>
    If a schema name is given (for example, <literal>CREATE TABLE
    myschema.mytable ...</literal>) then the table is created in the specified
-   schema.  Otherwise it is created in the current schema.  Temporary
+   schema.  Otherwise it is created in the current schema.  Local temporary
    tables exist in a special schema, so a schema name cannot be given
-   when creating a temporary table.  The name of the table must be
+   when creating a local temporary table.  The name of the table must be
    distinct from the name of any other relation (table, sequence, index, view,
    materialized view, or foreign table) in the same schema.
   </para>
@@ -190,18 +191,46 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
   <variablelist>
 
    <varlistentry id="sql-createtable-temporary">
-    <term><literal>TEMPORARY</literal> or <literal>TEMP</literal></term>
+    <term><literal>[ GLOBAL | LOCAL ] { TEMPORARY | TEMP }</literal></term>
     <listitem>
      <para>
-      If specified, the table is created as a temporary table.
-      Temporary tables are automatically dropped at the end of a
-      session, or optionally at the end of the current transaction
-      (see <literal>ON COMMIT</literal> below).  The default
-      search_path includes the temporary schema first and so identically
-      named existing permanent tables are not chosen for new plans
-      while the temporary table exists, unless they are referenced
-      with schema-qualified names. Any indexes created on a temporary
-      table are automatically temporary as well.
+      If specified, the table is created as a temporary table.  Temporary
+      tables may be either global or local.  If neither
+      <literal>GLOBAL</literal> nor <literal>LOCAL</literal> is specified,
+      then local is assumed.
+     </para>
+
+     <para>
+      Global temporary tables are created in the current schema by default,
+      or some other schema, if a schema-qualified table name is used, but
+      they may not be created in the temporary schema used for local
+      temporary tables.  The definition of a global temporary table is
+      persistent and visible to all sessions, but the table's contents are
+      session-local; each session may insert its own data, which is visible
+      only to that session, and is automatically deleted at the end of the
+      session, or optionally at the end of the current transaction (see
+      <link linkend="sql-createtable-parms-on-commit"><literal>ON COMMIT</literal></link>
+      below).
+     </para>
+
+     <para>
+      Local temporary tables are created in a special temporary schema,
+      visible only to the current session; the table definition and its
+      contents are not visible to other sessions.  Local temporary tables are
+      automatically dropped at the end of a session, or optionally at the end
+      of the current transaction (see
+      <link linkend="sql-createtable-parms-on-commit"><literal>ON COMMIT</literal></link>
+      below).  The default search_path includes the temporary schema first
+      and so identically named existing permanent tables are not chosen for
+      new plans while the local temporary table exists, unless they are
+      referenced with schema-qualified names.
+     </para>
+
+     <para>
+      Any indexes created on a local or global temporary table, and any
+      sequences automatically created (for identity or serial columns) are
+      assigned the same persistence mode (local or global temporary) as the
+      table.
      </para>
 
      <para>
@@ -211,14 +240,6 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
       performed via session SQL commands.  For example, if a temporary
       table is going to be used in complex queries, it is wise to run
       <command>ANALYZE</command> on the temporary table after it is populated.
-     </para>
-
-     <para>
-      Optionally, <literal>GLOBAL</literal> or <literal>LOCAL</literal>
-      can be written before <literal>TEMPORARY</literal> or <literal>TEMP</literal>.
-      This presently makes no difference in <productname>PostgreSQL</productname>
-      and is deprecated; see
-      <xref linkend="sql-createtable-compatibility"/> below.
      </para>
     </listitem>
    </varlistentry>
@@ -383,6 +404,9 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
       The optional <literal>INHERITS</literal> clause specifies a list of
       tables from which the new table automatically inherits all
       columns.  Parent tables can be plain tables or foreign tables.
+      If the parent table is a local temporary table, the child table must
+      also be local temporary.  Otherwise, the child may have any persistence
+      mode.
      </para>
 
      <para>
@@ -484,7 +508,9 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
       values using <literal>FOR VALUES</literal> or as a default partition
       using <literal>DEFAULT</literal>.  Any indexes, constraints and
       user-defined row-level triggers that exist in the parent table are cloned
-      on the new partition.
+      on the new partition.  Partitions must have the same persistence mode as
+      the parent table, except that a permanent parent table may have unlogged
+      partitions.
      </para>
 
      <para>
@@ -1260,7 +1286,8 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
       addition of a foreign key constraint requires a
       <literal>SHARE ROW EXCLUSIVE</literal> lock on the referenced table.
       Note that foreign key constraints cannot be defined between temporary
-      tables and permanent tables.
+      tables and permanent tables, or between local temporary tables and
+      global temporary tables.
      </para>
 
      <para>
@@ -1534,7 +1561,8 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
           The temporary table will be dropped at the end of the current
           transaction block.  When used on a partitioned table, this action
           drops its partitions and when used on tables with inheritance
-          children, it drops the dependent children.
+          children, it drops the dependent children.  This option is not
+          supported on global temporary tables.
          </para>
         </listitem>
        </varlistentry>
@@ -2415,51 +2443,49 @@ CREATE TABLE cities_partdef
    <title>Temporary Tables</title>
 
    <para>
-    Although the syntax of <literal>CREATE TEMPORARY TABLE</literal>
-    resembles that of the SQL standard, the effect is not the same.  In the
-    standard,
-    temporary tables are defined just once and automatically exist (starting
-    with empty contents) in every session that needs them.
-    <productname>PostgreSQL</productname> instead
-    requires each session to issue its own <literal>CREATE TEMPORARY
-    TABLE</literal> command for each temporary table to be used.  This allows
-    different sessions to use the same temporary table name for different
-    purposes, whereas the standard's approach constrains all instances of a
-    given temporary table name to have the same table structure.
+    The syntax of <literal>CREATE TEMPORARY TABLE</literal> conforms to
+    the <acronym>SQL</acronym> standard, except that in
+    <productname>PostgreSQL</productname> the <literal>GLOBAL</literal>
+    and <literal>LOCAL</literal> keywords are optional, whereas in the
+    standard they are mandatory.
    </para>
 
    <para>
-    The standard's definition of the behavior of temporary tables is
-    widely ignored.  <productname>PostgreSQL</productname>'s behavior
-    on this point is similar to that of several other SQL databases.
+    The behavior of global temporary tables conforms to the
+    <acronym>SQL</acronym> standard, except for the
+    <literal>ON COMMIT</literal> clause, as described below.
    </para>
 
    <para>
-    The SQL standard also distinguishes between global and local temporary
-    tables, where a local temporary table has a separate set of contents for
-    each SQL module within each session, though its definition is still shared
-    across sessions.  Since <productname>PostgreSQL</productname> does not
-    support SQL modules, this distinction is not relevant in
-    <productname>PostgreSQL</productname>.
-   </para>
-
-   <para>
-    For compatibility's sake, <productname>PostgreSQL</productname> will
-    accept the <literal>GLOBAL</literal> and <literal>LOCAL</literal> keywords
-    in a temporary table declaration, but they currently have no effect.
-    Use of these keywords is discouraged, since future versions of
-    <productname>PostgreSQL</productname> might adopt a more
-    standard-compliant interpretation of their meaning.
+    Local temporary tables do not conform to the standard.  In the
+    <acronym>SQL</acronym> standard, local temporary tables have separate
+    contents for each <acronym>SQL</acronym> module within each session.
+    Since <productname>PostgreSQL</productname> does not support
+    <acronym>SQL</acronym> modules, this is not possible in
+    <productname>PostgreSQL</productname>.  Instead, in
+    <productname>PostgreSQL</productname>, local temporary tables are
+    entirely session-local; both the table definition and its contents
+    are visible only to the creating session.  This requires each session
+    to issue its own <literal>CREATE TEMPORARY TABLE</literal> command for
+    each local temporary table to be used.  This allows different sessions
+    to use the same local temporary table name for different purposes,
+    whereas the standard's approach constrains all instances of a
+    given temporary table name (whether local or global) to have the same
+    table structure.  <productname>PostgreSQL</productname>'s behavior
+    on this point is similar to that of several other <acronym>SQL</acronym>
+    databases.
    </para>
 
    <para>
     The <literal>ON COMMIT</literal> clause for temporary tables
-    also resembles the SQL standard, but has some differences.
-    If the <literal>ON COMMIT</literal> clause is omitted, SQL specifies that the
-    default behavior is <literal>ON COMMIT DELETE ROWS</literal>.  However, the
+    also resembles the <acronym>SQL</acronym> standard, but has some
+    differences.  If the <literal>ON COMMIT</literal> clause is omitted,
+    the <acronym>SQL</acronym> standard specifies that the default
+    behavior is <literal>ON COMMIT DELETE ROWS</literal>.  However, the
     default behavior in <productname>PostgreSQL</productname> is
     <literal>ON COMMIT PRESERVE ROWS</literal>.  The <literal>ON COMMIT
-    DROP</literal> option does not exist in SQL.
+    DROP</literal> option for local temporary tables does not exist in
+    <acronym>SQL</acronym>.
    </para>
   </refsect2>
 

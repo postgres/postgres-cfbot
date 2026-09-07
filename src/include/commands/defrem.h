@@ -89,7 +89,7 @@ extern ObjectAddress AlterOperator(AlterOperatorStmt *stmt);
 extern ObjectAddress CreateStatistics(List *relids, CreateStatsStmt *stmt, bool check_rights);
 extern ObjectAddress AlterStatistics(AlterStatsStmt *stmt);
 extern void RemoveStatisticsById(Oid statsOid);
-extern void RemoveStatisticsDataById(Oid statsOid, bool inh);
+extern void RemoveStatisticsDataById(Oid relid, Oid statsOid, bool inh);
 extern Oid	StatisticsGetRelation(Oid statId, bool missing_ok);
 
 /* commands/aggregatecmds.c */

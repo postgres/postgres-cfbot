@@ -77,8 +77,9 @@ SELECT m.* FROM pg_statistic_ext join pg_statistic_ext_data on (oid = stxoid),
 </programlisting>
 
     Values of the <type>pg_mcv_list</type> type can be obtained only from the
-    <structname>pg_statistic_ext_data</structname>.<structfield>stxdmcv</structfield>
-    column.
+    <structname>pg_statistic_ext_data</structname>.<structfield>stxdmcv</structfield> and
+    <structname>pg_temp_statistic_ext_data</structname>.<structfield>stxdmcv</structfield>
+    columns.
    </para>
   </sect2>
 

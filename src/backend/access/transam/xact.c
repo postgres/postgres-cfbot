@@ -32,6 +32,7 @@
 #include "access/xlogrecovery.h"
 #include "access/xlogutils.h"
 #include "access/xlogwait.h"
+#include "catalog/global_temp.h"
 #include "catalog/index.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_enum.h"
@@ -64,6 +65,7 @@
 #include "storage/smgr.h"
 #include "utils/builtins.h"
 #include "utils/combocid.h"
+#include "utils/gtcatcache.h"
 #include "utils/guc.h"
 #include "utils/inval.h"
 #include "utils/memutils.h"
@@ -2346,6 +2348,17 @@ CommitTransaction(void)
 	AfterTriggerEndXact(true);
 
 	/*
+	 * Process any invalidated global temporary relations, dealing with any
+	 * that were dropped by other backends.  This needs to be done before any
+	 * ON COMMIT handling, so that we don't try to perform ON COMMIT actions
+	 * on deleted global temporary tables.  While at it, flush the global
+	 * temporary catalog caches, so that any new entries are written out
+	 * before we commit.
+	 */
+	ProcessInvalidatedGlobalTempRelations();
+	GTCatCacheFlush();
+
+	/*
 	 * Let ON COMMIT management do its thing (must happen after closing
 	 * cursors, to avoid dangling-reference problems)
 	 */
@@ -2460,6 +2473,9 @@ CommitTransaction(void)
 
 	/* Clean up the relation cache */
 	AtEOXact_RelationCache(true);
+
+	/* Clean up storage and usage records for global temporary relations */
+	AtEOXact_GlobalTempRelation(true);
 
 	/* Clean up the type cache */
 	AtEOXact_TypeCache();
@@ -2607,6 +2623,12 @@ PrepareTransaction(void)
 
 	/* Shut down the deferred-trigger manager */
 	AfterTriggerEndXact(true);
+
+	/*
+	 * Skip pre-commit processing for global temporary relations --- don't
+	 * want to process SI messages that might operate on global temporary
+	 * relations.
+	 */
 
 	/*
 	 * Let ON COMMIT management do its thing (must happen after closing
@@ -2769,6 +2791,9 @@ PrepareTransaction(void)
 
 	/* Clean up the relation cache */
 	AtEOXact_RelationCache(true);
+
+	/* Clean up storage and usage records for global temporary relations */
+	AtEOXact_GlobalTempRelation(true);
 
 	/* Clean up the type cache */
 	AtEOXact_TypeCache();
@@ -3020,6 +3045,7 @@ AbortTransaction(void)
 		AtEOXact_Aio(false);
 		AtEOXact_Buffers(false);
 		AtEOXact_RelationCache(false);
+		AtEOXact_GlobalTempRelation(false);
 		AtEOXact_TypeCache();
 		AtEOXact_Inval(false);
 		AtEOXact_MultiXact();
@@ -5213,6 +5239,8 @@ CommitSubTransaction(void)
 						 true, false);
 	AtEOSubXact_RelationCache(true, s->subTransactionId,
 							  s->parent->subTransactionId);
+	AtEOSubXact_GlobalTempRelation(true, s->subTransactionId,
+								   s->parent->subTransactionId);
 	AtEOSubXact_TypeCache();
 	AtEOSubXact_Inval(true);
 	AtSubCommit_smgr();
@@ -5399,6 +5427,8 @@ AbortSubTransaction(void)
 		AtEOXact_Aio(false);
 		AtEOSubXact_RelationCache(false, s->subTransactionId,
 								  s->parent->subTransactionId);
+		AtEOSubXact_GlobalTempRelation(false, s->subTransactionId,
+									   s->parent->subTransactionId);
 		AtEOSubXact_TypeCache();
 		AtEOSubXact_Inval(false);
 		ResourceOwnerRelease(s->curTransactionOwner,

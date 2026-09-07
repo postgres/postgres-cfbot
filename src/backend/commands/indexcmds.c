@@ -25,6 +25,7 @@
 #include "access/tableam.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
+#include "catalog/global_temp.h"
 #include "catalog/index.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
@@ -37,6 +38,7 @@
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_opclass.h"
 #include "catalog/pg_tablespace.h"
+#include "catalog/pg_temp_index.h"
 #include "catalog/pg_type.h"
 #include "commands/comment.h"
 #include "commands/defrem.h"
@@ -269,7 +271,7 @@ CheckIndexCompatible(Oid oldId,
 					  0, NULL);
 
 	/* Get the soon-obsolete pg_index tuple. */
-	tuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(oldId));
+	tuple = GetEffectivePgIndexTuple(oldId);
 	if (!HeapTupleIsValid(tuple))
 		elog(ERROR, "cache lookup failed for index %u", oldId);
 	indexForm = (Form_pg_index) GETSTRUCT(tuple);
@@ -282,7 +284,7 @@ CheckIndexCompatible(Oid oldId,
 		  heap_attisnull(tuple, Anum_pg_index_indexprs, NULL) &&
 		  indexForm->indisvalid))
 	{
-		ReleaseSysCache(tuple);
+		heap_freetuple(tuple);
 		return false;
 	}
 
@@ -299,7 +301,7 @@ CheckIndexCompatible(Oid oldId,
 	ret = (memcmp(old_indclass->values, opclassIds, old_natts * sizeof(Oid)) == 0 &&
 		   memcmp(old_indcollation->values, collationIds, old_natts * sizeof(Oid)) == 0);
 
-	ReleaseSysCache(tuple);
+	heap_freetuple(tuple);
 
 	if (!ret)
 		return false;
@@ -626,8 +628,16 @@ DefineIndex(ParseState *pstate,
 	 * is more efficient.  Do this before any use of the concurrent option is
 	 * done.
 	 */
-	if (stmt->concurrent && get_rel_persistence(tableId) != RELPERSISTENCE_TEMP)
-		concurrent = true;
+	if (stmt->concurrent)
+	{
+		char		relpersistence = get_rel_persistence(tableId);
+
+		if (relpersistence == RELPERSISTENCE_TEMP ||
+			relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
+			concurrent = false;
+		else
+			concurrent = true;
+	}
 	else
 		concurrent = false;
 
@@ -1589,19 +1599,36 @@ DefineIndex(ParseState *pstate,
 			{
 				Relation	pg_index = table_open(IndexRelationId, RowExclusiveLock);
 				HeapTuple	tup,
-							newtup;
+							temp_tup;
+				Form_pg_index form;
+				Form_pg_temp_index temp_form;
 
-				tup = SearchSysCache1(INDEXRELID,
-									  ObjectIdGetDatum(indexRelationId));
+				/*
+				 * For a global temporary index, we update indisvalid in both
+				 * pg_index and pg_temp_index, so that the change applies to
+				 * this session and all future sessions.
+				 */
+				tup = GetPgIndexAndPgTempIndexTuples(indexRelationId,
+													 &temp_tup, true);
 				if (!HeapTupleIsValid(tup))
 					elog(ERROR, "cache lookup failed for index %u",
 						 indexRelationId);
-				newtup = heap_copytuple(tup);
-				((Form_pg_index) GETSTRUCT(newtup))->indisvalid = false;
-				CatalogTupleUpdate(pg_index, &tup->t_self, newtup);
-				ReleaseSysCache(tup);
+				form = (Form_pg_index) GETSTRUCT(tup);
+				temp_form = (Form_pg_temp_index) GETSTRUCT_SAFE(temp_tup);
+
+				form->indisvalid = false;
+				if (temp_form != NULL)
+					temp_form->indisvalid = false;
+
+				CatalogTupleUpdate(pg_index, &tup->t_self, tup);
+				if (HeapTupleIsValid(temp_tup))
+				{
+					UpdatePgTempIndexTuple(indexRelationId, temp_tup);
+					heap_freetuple(temp_tup);
+				}
+
+				heap_freetuple(tup);
 				table_close(pg_index, RowExclusiveLock);
-				heap_freetuple(newtup);
 
 				/*
 				 * CCI here to make this update visible, in case this recurses
@@ -3135,7 +3162,8 @@ ReindexIndex(const ReindexStmt *stmt, const ReindexParams *params, bool isTopLev
 	if (relkind == RELKIND_PARTITIONED_INDEX)
 		ReindexPartitions(stmt, indOid, params, isTopLevel);
 	else if ((params->options & REINDEXOPT_CONCURRENTLY) != 0 &&
-			 persistence != RELPERSISTENCE_TEMP)
+			 persistence != RELPERSISTENCE_TEMP &&
+			 persistence != RELPERSISTENCE_GLOBAL_TEMP)
 		ReindexRelationConcurrently(stmt, indOid, params);
 	else
 	{
@@ -3231,6 +3259,7 @@ static Oid
 ReindexTable(const ReindexStmt *stmt, const ReindexParams *params, bool isTopLevel)
 {
 	Oid			heapOid;
+	char		persistence;
 	bool		result;
 	const RangeVar *relation = stmt->relation;
 
@@ -3248,10 +3277,13 @@ ReindexTable(const ReindexStmt *stmt, const ReindexParams *params, bool isTopLev
 									   0,
 									   RangeVarCallbackMaintainsTable, NULL);
 
+	persistence = get_rel_persistence(heapOid);
+
 	if (get_rel_relkind(heapOid) == RELKIND_PARTITIONED_TABLE)
 		ReindexPartitions(stmt, heapOid, params, isTopLevel);
 	else if ((params->options & REINDEXOPT_CONCURRENTLY) != 0 &&
-			 get_rel_persistence(heapOid) != RELPERSISTENCE_TEMP)
+			 persistence != RELPERSISTENCE_TEMP &&
+			 persistence != RELPERSISTENCE_GLOBAL_TEMP)
 	{
 		result = ReindexRelationConcurrently(stmt, heapOid, params);
 
@@ -3402,6 +3434,11 @@ ReindexMultipleTables(const ReindexStmt *stmt, const ReindexParams *params)
 		/* Skip temp tables of other backends; we can't reindex them at all */
 		if (classtuple->relpersistence == RELPERSISTENCE_TEMP &&
 			!isTempNamespace(classtuple->relnamespace))
+			continue;
+
+		/* Skip global temporary tables not in use */
+		if (classtuple->relpersistence == RELPERSISTENCE_GLOBAL_TEMP &&
+			!IsGlobalTempRelationInUse(relid))
 			continue;
 
 		/*
@@ -3675,7 +3712,8 @@ ReindexMultipleInternal(const ReindexStmt *stmt, const List *relids, const Reind
 		Assert(!RELKIND_HAS_PARTITIONS(relkind));
 
 		if ((params->options & REINDEXOPT_CONCURRENTLY) != 0 &&
-			relpersistence != RELPERSISTENCE_TEMP)
+			relpersistence != RELPERSISTENCE_TEMP &&
+			relpersistence != RELPERSISTENCE_GLOBAL_TEMP)
 		{
 			ReindexParams newparams = *params;
 
@@ -4117,7 +4155,8 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		idx->amId = indexRel->rd_rel->relam;
 
 		/* This function shouldn't be called for temporary relations. */
-		if (indexRel->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
+		if (indexRel->rd_rel->relpersistence == RELPERSISTENCE_TEMP ||
+			indexRel->rd_rel->relpersistence == RELPERSISTENCE_GLOBAL_TEMP)
 			elog(ERROR, "cannot reindex a temporary table concurrently");
 
 		pgstat_progress_start_command(PROGRESS_COMMAND_CREATE_INDEX, idx->tableId);

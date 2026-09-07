@@ -29,6 +29,7 @@ sub check_orphan_relfilenodes
 		'postgres', "
 	   SELECT pg_relation_filepath(oid) FROM pg_class
 	   WHERE reltablespace = 0 AND relpersistence <> 't' AND
+       relpersistence <> 'g' AND
 	   pg_relation_filepath(oid) IS NOT NULL;");
 	is_deeply(
 		[

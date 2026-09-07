@@ -21,7 +21,7 @@ PostgreSQL documentation
 
  <refsynopsisdiv>
 <synopsis>
-CREATE [ { TEMPORARY | TEMP } | UNLOGGED ] SEQUENCE [ IF NOT EXISTS ] <replaceable class="parameter">name</replaceable>
+CREATE [ [ GLOBAL | LOCAL ] { TEMPORARY | TEMP } | UNLOGGED ] SEQUENCE [ IF NOT EXISTS ] <replaceable class="parameter">name</replaceable>
     [ AS <replaceable class="parameter">data_type</replaceable> ]
     [ INCREMENT [ BY ] <replaceable class="parameter">increment</replaceable> ]
     [ MINVALUE <replaceable class="parameter">minvalue</replaceable> | NO MINVALUE ] [ MAXVALUE <replaceable class="parameter">maxvalue</replaceable> | NO MAXVALUE ]
@@ -46,8 +46,8 @@ CREATE [ { TEMPORARY | TEMP } | UNLOGGED ] SEQUENCE [ IF NOT EXISTS ] <replaceab
   <para>
    If a schema name is given then the sequence is created in the
    specified schema.  Otherwise it is created in the current schema.
-   Temporary sequences exist in a special schema, so a schema name cannot be
-   given when creating a temporary sequence.
+   Local temporary sequences exist in a special temporary schema, so a
+   schema name cannot be given when creating a local temporary sequence.
    The sequence name must be distinct from the name of any other relation
    (table, sequence, index, view, materialized view, or foreign table) in
    the same schema.
@@ -82,14 +82,30 @@ SELECT * FROM <replaceable>name</replaceable>;
 
   <variablelist>
    <varlistentry>
-    <term><literal>TEMPORARY</literal> or <literal>TEMP</literal></term>
+    <term><literal>[ GLOBAL | LOCAL ] { TEMPORARY | TEMP }</literal></term>
     <listitem>
      <para>
-      If specified, the sequence object is created only for this
+      If specified, a temporary sequence is created.  Temporary sequences may
+      be either global or local.  If neither <literal>GLOBAL</literal> nor
+      <literal>LOCAL</literal> is specified, then local is assumed.
+     </para>
+
+     <para>
+      A local temporary sequence object is created only for this
       session, and is automatically dropped on session exit.  Existing
       permanent sequences with the same name are not visible (in this
       session) while the temporary sequence exists, unless they are
       referenced with schema-qualified names.
+     </para>
+
+     <para>
+      A global temporary sequence is not dropped on session exit, and is
+      visible to all sessions, but the sequence operates independently in
+      each session, starting with the sequence's starting value in each
+      session.  Thus the values returned will not be unique across all
+      sessions.  A global temporary sequence may be created in any schema, by
+      specifying a schema-qualified name, but it may not be created in the
+      special temporary schema used for local temporary sequences.
      </para>
     </listitem>
    </varlistentry>
@@ -290,7 +306,8 @@ SELECT * FROM <replaceable>name</replaceable>;
   </para>
 
   <para>
-   Unexpected results might be obtained if a <replaceable
+   For non-temporary sequences,
+   unexpected results might be obtained if a <replaceable
    class="parameter">cache</replaceable> setting greater than one is
    used for a sequence object that will be used concurrently by
    multiple sessions.  Each session will allocate and cache successive
@@ -306,7 +323,8 @@ SELECT * FROM <replaceable>name</replaceable>;
 
   <para>
    Furthermore, although multiple sessions are guaranteed to allocate
-   distinct sequence values, the values might be generated out of
+   distinct sequence values for a non-temporary sequence,
+   the values might be generated out of
    sequence when all the sessions are considered.  For example, with
    a <replaceable class="parameter">cache</replaceable> setting of 10,
    session A might reserve values 1..10 and return

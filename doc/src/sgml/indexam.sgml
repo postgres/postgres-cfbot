@@ -312,15 +312,20 @@ ambuild (Relation heapRelation,
    this flag set to <literal>false</literal>.
   </para>
 
-  <para>
+  <para id="indexam-ambuildempty">
 <programlisting>
 void
-ambuildempty (Relation indexRelation);
+ambuildempty (Relation indexRelation,
+              ForkNumber forknum);
 </programlisting>
-   Build an empty index, and write it to the initialization fork (<symbol>INIT_FORKNUM</symbol>)
-   of the given relation.  This method is called only for unlogged indexes; the
-   empty index written to the initialization fork will be copied over the main
-   relation fork on each server restart.
+   Build an empty index, and write it to the specified fork of the given
+   relation.  This method is called for global temporary indexes and for
+   unlogged indexes.  For global temporary indexes, the empty index is written
+   to the main relation fork (<symbol>MAIN_FORKNUM</symbol>) in session-local
+   storage the first time the index is accessed in the session.  For unlogged
+   indexes, the empty index is written to the initialization fork
+   (<symbol>INIT_FORKNUM</symbol>) and then copied over the main relation
+   fork on each server restart.
   </para>
 
   <para>
@@ -445,7 +450,8 @@ amvacuumcleanup (IndexVacuumInfo *info,
    last <function>ambulkdelete</function> call returned, or NULL if
    <function>ambulkdelete</function> was not called because no tuples needed to be
    deleted.  If the result is not NULL it must be a palloc'd struct.
-   The statistics it contains will be used to update <structname>pg_class</structname>,
+   The statistics it contains will be used to update <structname>pg_class</structname>
+   (or <structname>pg_temp_class</structname> for an index on a global temporary table),
    and will be reported by <command>VACUUM</command> if <literal>VERBOSE</literal> is given.
    It is OK to return NULL if the index was not changed at all during the
    <command>VACUUM</command> operation, but otherwise correct stats should
@@ -1574,7 +1580,8 @@ cost_qual_eval(&amp;index_qual_cost, path-&gt;indexquals, root);
    <step>
     <para>
      Estimate the index correlation.  For a simple ordered index on a single
-     field, this can be retrieved from pg_statistic.  If the correlation
+     field, this can be retrieved from pg_statistic (or pg_temp_statistic,
+     for an index on a global temporary table).  If the correlation
      is not known, the conservative estimate is zero (no correlation).
     </para>
    </step>

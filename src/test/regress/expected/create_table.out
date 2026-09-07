@@ -46,7 +46,7 @@ CREATE TABLE pg_temp.implicitly_temp (a int primary key);		-- OK
 CREATE TEMP TABLE explicitly_temp (a int primary key);			-- also OK
 CREATE TEMP TABLE pg_temp.doubly_temp (a int primary key);		-- also OK
 CREATE TEMP TABLE public.temp_to_perm (a int primary key);		-- not OK
-ERROR:  cannot create temporary relation in non-temporary schema
+ERROR:  cannot create local temporary relation in non-temporary schema
 LINE 1: CREATE TEMP TABLE public.temp_to_perm (a int primary key);
                           ^
 DROP TABLE unlogged1, public.unlogged2;
@@ -640,7 +640,7 @@ CREATE TEMP TABLE temp_parted (
 	a int
 ) PARTITION BY LIST (a);
 CREATE TABLE fail_part PARTITION OF temp_parted FOR VALUES IN ('a');
-ERROR:  cannot create a permanent relation as partition of temporary relation "temp_parted"
+ERROR:  cannot create a permanent relation as partition of local temporary relation "temp_parted"
 DROP TABLE temp_parted;
 -- check for partition bound overlap and other invalid specifications
 CREATE TABLE list_parted2 (
@@ -1054,13 +1054,25 @@ drop table boolspart;
 -- partitions mixing temporary and permanent relations
 create table perm_parted (a int) partition by list (a);
 create temporary table temp_parted (a int) partition by list (a);
+create global temporary table global_temp_parted (a int) partition by list (a);
 create table perm_part partition of temp_parted default; -- error
-ERROR:  cannot create a permanent relation as partition of temporary relation "temp_parted"
+ERROR:  cannot create a permanent relation as partition of local temporary relation "temp_parted"
+create table perm_part partition of global_temp_parted default; -- error
+ERROR:  cannot create a permanent relation as partition of global temporary relation "global_temp_parted"
+create table perm_part partition of perm_parted default; -- ok
 create temp table temp_part partition of perm_parted default; -- error
-ERROR:  cannot create a temporary relation as partition of permanent relation "perm_parted"
+ERROR:  cannot create a local temporary relation as partition of permanent relation "perm_parted"
+create temp table temp_part partition of global_temp_parted default; -- error
+ERROR:  cannot create a local temporary relation as partition of global temporary relation "global_temp_parted"
 create temp table temp_part partition of temp_parted default; -- ok
+create global temp table global_temp_part partition of temp_parted default; -- error
+ERROR:  cannot create a global temporary relation as partition of local temporary relation "temp_parted"
+create global temp table global_temp_part partition of perm_parted default; -- error
+ERROR:  cannot create a global temporary relation as partition of permanent relation "perm_parted"
+create global temp table global_temp_part partition of global_temp_parted default; -- ok
 drop table perm_parted cascade;
 drop table temp_parted cascade;
+drop table global_temp_parted cascade;
 -- check that adding partitions to a table while it is being used is prevented
 create table tab_part_create (a int) partition by list (a);
 create or replace function func_part_create() returns trigger

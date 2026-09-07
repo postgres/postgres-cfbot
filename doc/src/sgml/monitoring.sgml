@@ -1022,6 +1022,34 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
       </para></entry>
      </row>
 
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>tempfrozenxid</structfield> <type>xid</type>
+      </para>
+      <para>
+       The minimum <literal>relfrozenxid</literal> over all global temporary
+       tables being used by this backend, or NULL if this backend hasn't used
+       any global temporary tables.  This can be used to determine which
+       backends need to vacuum or discard their global temporary tables, in
+       order to prevent transaction ID wraparound or to allow
+       <literal>pg_xact</literal> to be shrunk.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>tempminmxid</structfield> <type>xid</type>
+      </para>
+      <para>
+       The minimum <literal>relminmxid</literal> over all global temporary
+       tables being used by this backend, or NULL if this backend hasn't used
+       any global temporary tables.  This can be used to determine which
+       backends need to vacuum or discard their global temporary tables, in
+       order to prevent multixact ID wraparound or to allow
+       <literal>pg_multixact</literal> to be shrunk.
+      </para></entry>
+     </row>
+
     <row>
      <entry role="catalog_table_entry"><para role="column_definition">
       <structfield>query_id</structfield> <type>bigint</type>
@@ -6691,7 +6719,8 @@ FROM pg_stat_get_backend_idset() AS backendid;
      <row>
       <entry><literal>finalizing analyze</literal></entry>
       <entry>
-       The command is updating <structname>pg_class</structname>. When this
+       The command is updating <structname>pg_class</structname> or
+       <structname>pg_temp_class</structname>. When this
        phase is completed, <command>ANALYZE</command> will end.
       </entry>
      </row>
@@ -7986,7 +8015,8 @@ FROM pg_stat_get_backend_idset() AS backendid;
      <entry>
        <command>VACUUM</command> is performing final cleanup.  During this phase,
        <command>VACUUM</command> will vacuum the free space map, update statistics
-       in <literal>pg_class</literal>, and report statistics to the cumulative
+       in <literal>pg_class</literal> or <literal>pg_temp_class</literal>,
+       and report statistics to the cumulative
        statistics system. When this phase is completed, <command>VACUUM</command> will end.
      </entry>
     </row>
@@ -9186,6 +9216,16 @@ SELECT pg_relation_filepath(oid), relpages FROM pg_class WHERE relname = 'custom
  pg_relation_filepath | relpages
 ----------------------+----------
  base/16384/16806     |       60
+(1 row)
+</programlisting>
+    But for a global temporary table, you should use the statistical information
+from <structname>pg_temp_class</structname> instead of <structname>pg_class</structname>:
+<programlisting>
+SELECT pg_relation_filepath(oid), relpages FROM pg_temp_class WHERE oid = 'customer'::regclass;
+
+ pg_relation_filepath | relpages
+----------------------+----------
+ base/16384/t4_16398  |       46
 (1 row)
 </programlisting>
     Each page is typically 8 kilobytes. (Remember, <structfield>relpages</structfield>

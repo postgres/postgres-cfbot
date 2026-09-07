@@ -176,6 +176,10 @@ InitCatalogCache(void)
  * relcache with entries for the most-commonly-used system catalogs.
  * Therefore, we invoke this routine when we need to write a new relcache
  * init file.
+ *
+ * We skip caches based on global temporary relations because we don't want
+ * temporary relation storage to be needlessly created on startup.  Instead,
+ * always initialize these caches on first use.
  */
 void
 InitCatalogCachePhase2(void)
@@ -185,7 +189,8 @@ InitCatalogCachePhase2(void)
 	Assert(CacheInitialized);
 
 	for (cacheId = 0; cacheId < SysCacheSize; cacheId++)
-		InitCatCachePhase2(SysCache[cacheId], true);
+		if (!SysCacheTableIsGlobalTemp(cacheId))
+			InitCatCachePhase2(SysCache[cacheId], true);
 }
 
 
