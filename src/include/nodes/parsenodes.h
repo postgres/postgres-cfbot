@@ -3556,6 +3556,7 @@ typedef struct IndexStmt
 	Node	   *whereClause;	/* qualification (partial-index predicate) */
 	List	   *excludeOpNames; /* exclusion operator names, or NIL if none */
 	char	   *idxcomment;		/* comment to apply to index, or NULL */
+	List	   *stattargets;	/* per-column statistics targets, or NIL */
 	Oid			indexOid;		/* OID of an existing index, if any */
 	RelFileNumber oldNumber;	/* relfilenumber of existing storage, if any */
 	SubTransactionId oldCreateSubid;	/* rd_createSubid of oldNumber */
@@ -3590,6 +3591,7 @@ typedef struct CreateStatsStmt
 	bool		transformed;	/* true when transformStatsStmt is finished */
 	bool		if_not_exists;	/* do nothing if stats name already exists */
 	Oid			owner;			/* OID of owner, or InvalidOid for default */
+	int			stxstattarget;	/* statistics target, or -1 for default */
 } CreateStatsStmt;
 
 /*

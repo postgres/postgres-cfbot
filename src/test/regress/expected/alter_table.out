@@ -120,6 +120,42 @@ ALTER INDEX attmp_idx ALTER COLUMN 4 SET STATISTICS 1000;
 ERROR:  column number 4 of relation "attmp_idx" does not exist
 ALTER INDEX attmp_idx ALTER COLUMN 2 SET STATISTICS -1;
 DROP TABLE attmp;
+-- Check that index column statistics targets survive the index rebuilds
+-- caused by ALTER TABLE ... ALTER COLUMN TYPE, including the rebuild of
+-- an exclusion constraint's index and recursion to partitions.
+CREATE TABLE attmp (a int, b int, EXCLUDE ((a + b) WITH =));
+CREATE INDEX attmp_expr_idx ON attmp ((a * b));
+ALTER INDEX attmp_expr_idx ALTER COLUMN 1 SET STATISTICS 100;
+ALTER INDEX attmp_a_b_excl ALTER COLUMN 1 SET STATISTICS 200;
+ALTER TABLE attmp ALTER COLUMN a TYPE bigint;
+SELECT c.relname, a.attstattarget
+  FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+  WHERE c.relname IN ('attmp_expr_idx', 'attmp_a_b_excl') AND a.attnum = 1
+  ORDER BY c.relname;
+    relname     | attstattarget 
+----------------+---------------
+ attmp_a_b_excl |           200
+ attmp_expr_idx |           100
+(2 rows)
+
+DROP TABLE attmp;
+CREATE TABLE attmp (a int, b int) PARTITION BY RANGE (b);
+CREATE TABLE attmp1 PARTITION OF attmp FOR VALUES FROM (0) TO (100);
+CREATE INDEX attmp_part_idx ON attmp ((a + 1));
+ALTER INDEX attmp_part_idx ALTER COLUMN 1 SET STATISTICS 100;
+ALTER TABLE attmp ALTER COLUMN a TYPE bigint;
+SELECT c.relname, a.attstattarget
+  FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+  WHERE a.attrelid IN ('attmp_part_idx'::regclass, 'attmp1_a_1_idx'::regclass)
+    AND a.attnum = 1
+  ORDER BY c.relname;
+    relname     | attstattarget 
+----------------+---------------
+ attmp1_a_1_idx |           100
+ attmp_part_idx |           100
+(2 rows)
+
+DROP TABLE attmp;
 --
 -- rename - check on both non-temp and temp tables
 --
