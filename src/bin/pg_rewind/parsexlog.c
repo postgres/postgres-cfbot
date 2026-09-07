@@ -56,73 +56,12 @@ static int	SimpleXLogPageRead(XLogReaderState *xlogreader,
 
 /*
  * Read WAL from the datadir/pg_wal, starting from 'startpoint' on timeline
- * index 'tliIndex' in target timeline history, until 'endpoint'. Make note of
- * the data blocks touched by the WAL records, and return them in a page map.
- *
- * 'endpoint' is the end of the last record to read. The record starting at
- * 'endpoint' is the first one that is not read.
- */
-void
-extractPageMap(const char *datadir, XLogRecPtr startpoint, int tliIndex,
-			   XLogRecPtr endpoint, const char *restoreCommand)
-{
-	XLogRecord *record;
-	XLogReaderState *xlogreader;
-	char	   *errormsg;
-	XLogPageReadPrivate private;
-
-	private.tliIndex = tliIndex;
-	private.restoreCommand = restoreCommand;
-	xlogreader = XLogReaderAllocate(WalSegSz, datadir,
-									XL_ROUTINE(.page_read = &SimpleXLogPageRead),
-									&private);
-	if (xlogreader == NULL)
-		pg_fatal("out of memory while allocating a WAL reading processor");
-
-	XLogBeginRead(xlogreader, startpoint);
-	do
-	{
-		record = XLogReadRecord(xlogreader, &errormsg);
-
-		if (record == NULL)
-		{
-			XLogRecPtr	errptr = xlogreader->EndRecPtr;
-
-			if (errormsg)
-				pg_fatal("could not read WAL record at %X/%08X: %s",
-						 LSN_FORMAT_ARGS(errptr),
-						 errormsg);
-			else
-				pg_fatal("could not read WAL record at %X/%08X",
-						 LSN_FORMAT_ARGS(errptr));
-		}
-
-		extractPageInfo(xlogreader);
-	} while (xlogreader->EndRecPtr < endpoint);
-
-	/*
-	 * If 'endpoint' didn't point exactly at a record boundary, the caller
-	 * messed up.
-	 */
-	if (xlogreader->EndRecPtr != endpoint)
-		pg_fatal("end pointer %X/%08X is not a valid end point; expected %X/%08X",
-				 LSN_FORMAT_ARGS(endpoint), LSN_FORMAT_ARGS(xlogreader->EndRecPtr));
-
-	XLogReaderFree(xlogreader);
-	if (xlogreadfd != -1)
-	{
-		close(xlogreadfd);
-		xlogreadfd = -1;
-	}
-}
-
-/*
- * Reads one WAL record. Returns the end position of the record, without
- * doing anything with the record itself.
+ * index 'tliIndex' in target timeline history. Make note of the data blocks
+ * touched by the WAL records, and return the end of the last valid record.
  */
 XLogRecPtr
-readOneRecord(const char *datadir, XLogRecPtr ptr, int tliIndex,
-			  const char *restoreCommand)
+extractPageMap(const char *datadir, XLogRecPtr startpoint, int tliIndex,
+			   const char *restoreCommand)
 {
 	XLogRecord *record;
 	XLogReaderState *xlogreader;
@@ -138,16 +77,20 @@ readOneRecord(const char *datadir, XLogRecPtr ptr, int tliIndex,
 	if (xlogreader == NULL)
 		pg_fatal("out of memory while allocating a WAL reading processor");
 
-	XLogBeginRead(xlogreader, ptr);
-	record = XLogReadRecord(xlogreader, &errormsg);
-	if (record == NULL)
+	XLogBeginRead(xlogreader, startpoint);
+	for (;;)
 	{
-		if (errormsg)
-			pg_fatal("could not read WAL record at %X/%08X: %s",
-					 LSN_FORMAT_ARGS(ptr), errormsg);
-		else
-			pg_fatal("could not read WAL record at %X/%08X",
-					 LSN_FORMAT_ARGS(ptr));
+		record = XLogReadRecord(xlogreader, &errormsg);
+
+		if (record == NULL)
+		{
+			if (errormsg == NULL)
+				pg_fatal("could not read WAL record at %X/%08X",
+						 LSN_FORMAT_ARGS(xlogreader->EndRecPtr));
+			break;
+		}
+
+		extractPageInfo(xlogreader);
 	}
 	endptr = xlogreader->EndRecPtr;
 
@@ -167,9 +110,9 @@ readOneRecord(const char *datadir, XLogRecPtr ptr, int tliIndex,
 void
 findLastCheckpoint(const char *datadir, XLogRecPtr forkptr, int tliIndex,
 				   XLogRecPtr *lastchkptrec, TimeLineID *lastchkpttli,
-				   XLogRecPtr *lastchkptredo, const char *restoreCommand)
+				   XLogRecPtr *lastchkptredo, const char *restoreCommand, 
+                   XLogRecPtr cntrlfilechkptrec)
 {
-	/* Walk backwards, starting from the given record */
 	XLogRecord *record;
 	XLogRecPtr	searchptr;
 	XLogReaderState *xlogreader;
@@ -177,6 +120,7 @@ findLastCheckpoint(const char *datadir, XLogRecPtr forkptr, int tliIndex,
 	XLogPageReadPrivate private;
 	XLogSegNo	current_segno = 0;
 	TimeLineID	current_tli = 0;
+	bool		fallback_to_forward = false;
 
 	/*
 	 * The given fork pointer points to the end of the last common record,
@@ -200,66 +144,137 @@ findLastCheckpoint(const char *datadir, XLogRecPtr forkptr, int tliIndex,
 	if (xlogreader == NULL)
 		pg_fatal("out of memory while allocating a WAL reading processor");
 
+	/* 
+     * Attempt the standard backward scan first. 
+     */
 	searchptr = forkptr;
-	for (;;)
+	XLogBeginRead(xlogreader, searchptr);
+	record = XLogReadRecord(xlogreader, &errormsg);
+
+	if (record == NULL)
 	{
-		uint8		info;
-
-		XLogBeginRead(xlogreader, searchptr);
-		record = XLogReadRecord(xlogreader, &errormsg);
-
-		if (record == NULL)
-		{
-			if (errormsg)
-				pg_fatal("could not find previous WAL record at %X/%08X: %s",
-						 LSN_FORMAT_ARGS(searchptr),
-						 errormsg);
-			else
-				pg_fatal("could not find previous WAL record at %X/%08X",
-						 LSN_FORMAT_ARGS(searchptr));
-		}
-
-		/* Detect if a new WAL file has been opened */
-		if (xlogreader->seg.ws_tli != current_tli ||
-			xlogreader->seg.ws_segno != current_segno)
-		{
-			char		xlogfname[MAXFNAMELEN];
-
-			snprintf(xlogfname, MAXFNAMELEN, XLOGDIR "/");
-
-			/* update current values */
-			current_tli = xlogreader->seg.ws_tli;
-			current_segno = xlogreader->seg.ws_segno;
-
-			XLogFileName(xlogfname + sizeof(XLOGDIR),
-						 current_tli, current_segno, WalSegSz);
-
-			/* Track this filename as one to not remove */
-			keepwal_add_entry(xlogfname);
-		}
-
 		/*
-		 * Check if it is a checkpoint record. This checkpoint record needs to
-		 * be the latest checkpoint before WAL forked and not the checkpoint
-		 * where the primary has been stopped to be rewound.
+		 * If we fail to read exactly at the forkptr, we assume the target crashed 
+		 * exactly at a record boundary and the WAL is padded with zeroes. 
+		 * Instead of crashing pg_rewind, we fallback to a forward scan.
 		 */
-		info = XLogRecGetInfo(xlogreader) & ~XLR_INFO_MASK;
-		if (searchptr < forkptr &&
-			XLogRecGetRmid(xlogreader) == RM_XLOG_ID &&
-			(info == XLOG_CHECKPOINT_SHUTDOWN ||
-			 info == XLOG_CHECKPOINT_ONLINE))
+		fallback_to_forward = true;
+	}
+
+	if (!fallback_to_forward)
+	{
+		/* We successfully read the first record; proceed with backward scan */
+		for (;;)
 		{
-			CheckPoint	checkPoint;
+			uint8		info;
 
-			memcpy(&checkPoint, XLogRecGetData(xlogreader), sizeof(CheckPoint));
-			*lastchkptrec = searchptr;
-			*lastchkpttli = checkPoint.ThisTimeLineID;
-			*lastchkptredo = checkPoint.redo;
-			break;
+			if (record == NULL)
+			{
+				/* A failure mid-scan means real corruption, so we error out */
+				if (errormsg)
+					pg_fatal("could not find previous WAL record at %X/%08X: %s",
+							 LSN_FORMAT_ARGS(searchptr), errormsg);
+				else
+					pg_fatal("could not find previous WAL record at %X/%08X",
+							 LSN_FORMAT_ARGS(searchptr));
+			}
+
+			/* Detect if a new WAL file has been opened */
+			if (xlogreader->seg.ws_tli != current_tli ||
+				xlogreader->seg.ws_segno != current_segno)
+			{
+				char		xlogfname[MAXFNAMELEN];
+
+				snprintf(xlogfname, MAXFNAMELEN, XLOGDIR "/");
+				current_tli = xlogreader->seg.ws_tli;
+				current_segno = xlogreader->seg.ws_segno;
+				XLogFileName(xlogfname + sizeof(XLOGDIR),
+							 current_tli, current_segno, WalSegSz);
+				keepwal_add_entry(xlogfname);
+			}
+
+			/* Check if it is a valid checkpoint record. */
+			info = XLogRecGetInfo(xlogreader) & ~XLR_INFO_MASK;
+			if (searchptr < forkptr &&
+				XLogRecGetRmid(xlogreader) == RM_XLOG_ID &&
+				(info == XLOG_CHECKPOINT_SHUTDOWN ||
+				 info == XLOG_CHECKPOINT_ONLINE))
+			{
+				CheckPoint	checkPoint;
+
+				memcpy(&checkPoint, XLogRecGetData(xlogreader), sizeof(CheckPoint));
+				*lastchkptrec = searchptr;
+				*lastchkpttli = checkPoint.ThisTimeLineID;
+				*lastchkptredo = checkPoint.redo;
+				break;
+			}
+
+			/* Walk backwards to previous record. */
+			searchptr = record->xl_prev;
+			XLogBeginRead(xlogreader, searchptr);
+			record = XLogReadRecord(xlogreader, &errormsg);
 		}
+	}
+	else
+	{
+		/* 
+         * Fallback. Scan forward from the control file's last checkpoint. 
+         */
+		searchptr = cntrlfilechkptrec;
+		XLogBeginRead(xlogreader, searchptr);
 
-		/* Walk backwards to previous record. */
-		searchptr = record->xl_prev;
+		for (;;)
+		{
+			uint8		info;
+
+			record = XLogReadRecord(xlogreader, &errormsg);
+
+			if (record == NULL)
+			{
+				if (errormsg)
+					pg_fatal("could not read WAL record during forward scan at %X/%08X: %s",
+							 LSN_FORMAT_ARGS(searchptr), errormsg);
+				else
+					pg_fatal("could not read WAL record during forward scan at %X/%08X",
+							 LSN_FORMAT_ARGS(searchptr));
+			}
+
+			/* Update searchptr to the start of the record we just read */
+			searchptr = xlogreader->ReadRecPtr;
+
+			/* Detect if a new WAL file has been opened */
+			if (xlogreader->seg.ws_tli != current_tli ||
+				xlogreader->seg.ws_segno != current_segno)
+			{
+				char		xlogfname[MAXFNAMELEN];
+
+				snprintf(xlogfname, MAXFNAMELEN, XLOGDIR "/");
+				current_tli = xlogreader->seg.ws_tli;
+				current_segno = xlogreader->seg.ws_segno;
+				XLogFileName(xlogfname + sizeof(XLOGDIR),
+							 current_tli, current_segno, WalSegSz);
+				keepwal_add_entry(xlogfname);
+			}
+
+			/* Check if it is a checkpoint record. Update pointers iteratively. */
+			info = XLogRecGetInfo(xlogreader) & ~XLR_INFO_MASK;
+			if (searchptr < forkptr &&
+				XLogRecGetRmid(xlogreader) == RM_XLOG_ID &&
+				(info == XLOG_CHECKPOINT_SHUTDOWN ||
+				 info == XLOG_CHECKPOINT_ONLINE))
+			{
+				CheckPoint	checkPoint;
+
+				memcpy(&checkPoint, XLogRecGetData(xlogreader), sizeof(CheckPoint));
+				*lastchkptrec = searchptr;
+				*lastchkpttli = checkPoint.ThisTimeLineID;
+				*lastchkptredo = checkPoint.redo;
+			}
+
+			/* If we've reached or passed the divergence point, we are done */
+			if (xlogreader->EndRecPtr >= forkptr)
+				break;
+		}
 	}
 
 	XLogReaderFree(xlogreader);
