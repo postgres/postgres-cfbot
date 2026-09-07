@@ -153,6 +153,18 @@ typedef enum UpperRelationKind
 	/* NB: UPPERREL_FINAL must be last enum entry; it's used to size arrays */
 } UpperRelationKind;
 
+/*
+ * This enum identifies what eager aggregation pushes below the joins, if
+ * anything.  A partial aggregate emits transition values; a deduplication
+ * emits final rows.
+ */
+typedef enum EagerAggMode
+{
+	EAGER_AGG_NONE = 0,			/* eager aggregation does not apply */
+	EAGER_AGG_PARTIAL,			/* partial aggregates are pushed down */
+	EAGER_AGG_DEDUP,			/* a plain deduplication is pushed down */
+} EagerAggMode;
+
 /*----------
  * PlannerGlobal
  *		Global information for planning/optimization
@@ -501,6 +513,15 @@ struct PlannerInfo
 	/* list of GroupingExprInfos */
 	List	   *group_expr_list;
 
+	/* the SortGroupClauses the grouping expressions were derived from */
+	List	   *eager_group_clause;
+
+	/* what eager aggregation pushes below the joins, if anything */
+	EagerAggMode eager_agg_mode;
+
+	/* base rels supplying nothing the query outputs, or NULL if none */
+	Relids		filter_only_rels;
+
 	/* list of plain Vars contained in targetlist and havingQual */
 	List	   *tlist_vars;
 
@@ -641,6 +662,9 @@ struct PlannerInfo
 	bool		hasRecursion;
 	/* true if a planner extension may replan this subquery */
 	bool		assumeReplanning;
+
+	/* nesting depth of speculative costing; see clausesel.c */
+	int			speculative_costing;
 
 	/*
 	 * The rangetable index for the RTE_GROUP RTE, or 0 if there is no
@@ -1279,7 +1303,8 @@ typedef struct RelOptInfo
  *
  * "agg_useful" is a flag to indicate whether the grouped paths are considered
  * useful.  It is set true if the average partial group size is no less than
- * min_eager_agg_group_size, suggesting a significant row count reduction.
+ * min_eager_agg_group_size (or min_eager_distinct_group_size when there are no
+ * aggregates), suggesting a significant row count reduction.
  */
 typedef struct RelAggInfo
 {

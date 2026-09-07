@@ -96,7 +96,20 @@ typedef struct GroupByColInfo
 
 
 static bool is_partial_agg_memory_risky(PlannerInfo *root);
+static void collect_eager_agg_infos(PlannerInfo *root);
 static void create_agg_clause_infos(PlannerInfo *root);
+static bool grouping_key_usable(Expr *expr);
+static Index max_sortgroupref(List *tlist);
+static List *pull_agg_level_exprs(PlannerInfo *root);
+static Relids grouping_key_relids(PlannerInfo *root);
+static bool aggref_is_plain(Aggref *aggref);
+static bool aggref_idempotent(Aggref *aggref);
+static bool collect_distinct_agg_keys(Aggref *aggref, Index *nextref,
+									  List **exprs, List **clauses);
+static void add_grouping_expr_infos(PlannerInfo *root, List *exprs,
+									List *clauses);
+static void create_distinct_agg_grouping(PlannerInfo *root);
+static bool aggs_indifferent_to_duplicates(PlannerInfo *root);
 static void create_grouping_expr_infos(PlannerInfo *root);
 static EquivalenceClass *get_eclass_for_sortgroupclause(PlannerInfo *root,
 														SortGroupClause *sgc,
@@ -117,6 +130,7 @@ static SpecialJoinInfo *make_outerjoininfo(PlannerInfo *root,
 										   Relids inner_join_rels,
 										   JoinType jointype, Index ojrelid,
 										   List *clause);
+static Relids find_filter_only_rels(PlannerInfo *root);
 static void compute_semijoin_info(PlannerInfo *root, SpecialJoinInfo *sjinfo,
 								  List *clause);
 static void deconstruct_distribute_oj_quals(PlannerInfo *root,
@@ -633,6 +647,32 @@ remove_useless_groupby_columns(PlannerInfo *root)
 void
 setup_eager_aggregation(PlannerInfo *root)
 {
+	collect_eager_agg_infos(root);
+
+	/* Retain the grouping clause only when keys were collected */
+	if (root->group_expr_list == NIL)
+	{
+		root->eager_group_clause = NIL;
+		return;
+	}
+
+	/* Push a partial aggregate if there is one, otherwise a deduplication */
+	root->eager_agg_mode = (root->agg_clause_list == NIL) ?
+		EAGER_AGG_DEDUP : EAGER_AGG_PARTIAL;
+
+	root->filter_only_rels = find_filter_only_rels(root);
+}
+
+/*
+ * collect_eager_agg_infos
+ *	  Collect the aggregate expressions and grouping expressions that eager
+ *	  aggregation can push down, if any.
+ *
+ * Leaves root->group_expr_list NIL if the query cannot be handled.
+ */
+static void
+collect_eager_agg_infos(PlannerInfo *root)
+{
 	/*
 	 * Don't apply eager aggregation if disabled by user.
 	 */
@@ -640,30 +680,19 @@ setup_eager_aggregation(PlannerInfo *root)
 		return;
 
 	/*
-	 * Don't apply eager aggregation if there are no available GROUP BY
-	 * clauses.
+	 * Identify the clauses that determine which rows the query can tell
+	 * apart.  DISTINCT serves the same purpose as GROUP BY here.  DISTINCT ON
+	 * does not, since it keeps a particular row from each group.
 	 */
-	if (!root->processed_groupClause)
-		return;
+	if (root->processed_groupClause)
+		root->eager_group_clause = root->processed_groupClause;
+	else if (root->parse->distinctClause && !root->parse->hasDistinctOn)
+		root->eager_group_clause = root->processed_distinctClause;
 
 	/*
 	 * For now we don't try to support grouping sets.
 	 */
 	if (root->parse->groupingSets)
-		return;
-
-	/*
-	 * For now we don't try to support DISTINCT or ORDER BY aggregates.
-	 */
-	if (root->numOrderedAggs > 0)
-		return;
-
-	/*
-	 * If there are any aggregates that do not support partial mode, or any
-	 * partial aggregates that are non-serializable, do not apply eager
-	 * aggregation.
-	 */
-	if (root->hasNonPartialAggs || root->hasNonSerialAggs)
 		return;
 
 	/*
@@ -681,6 +710,43 @@ setup_eager_aggregation(PlannerInfo *root)
 		return;
 
 	/*
+	 * agg(DISTINCT x) supplies its arguments as grouping keys if the query
+	 * has no GROUP BY or DISTINCT.  The pushdown is then a deduplication, and
+	 * the checks below govern aggregates, so return ahead of them.
+	 */
+	if (root->eager_group_clause == NIL)
+	{
+		create_distinct_agg_grouping(root);
+		return;
+	}
+
+	/*
+	 * An idempotent aggregate ignores how often a row arrives, so a
+	 * deduplication on the query's grouping keys takes the place of a partial
+	 * aggregate.  The checks below govern aggregates, so return ahead of
+	 * them.
+	 */
+	if (aggs_indifferent_to_duplicates(root))
+	{
+		create_grouping_expr_infos(root);
+		return;
+	}
+
+	/*
+	 * For now we don't try to support DISTINCT or ORDER BY aggregates.
+	 */
+	if (root->numOrderedAggs > 0)
+		return;
+
+	/*
+	 * If there are any aggregates that do not support partial mode, or any
+	 * partial aggregates that are non-serializable, do not apply eager
+	 * aggregation.
+	 */
+	if (root->hasNonPartialAggs || root->hasNonSerialAggs)
+		return;
+
+	/*
 	 * Don't apply eager aggregation if any aggregate poses a risk of
 	 * excessive memory usage during partial aggregation.
 	 */
@@ -694,16 +760,46 @@ setup_eager_aggregation(PlannerInfo *root)
 	create_agg_clause_infos(root);
 
 	/*
-	 * If there are no suitable aggregate expressions, we cannot apply eager
-	 * aggregation.
+	 * If the query has aggregates, at least one must be suitable.  With no
+	 * aggregates, what gets pushed down is a plain deduplication.
 	 */
-	if (root->agg_clause_list == NIL)
+	if (root->parse->hasAggs && root->agg_clause_list == NIL)
 		return;
 
 	/*
 	 * Collect grouping expressions that appear in grouping clauses.
 	 */
 	create_grouping_expr_infos(root);
+}
+
+/*
+ * find_filter_only_rels
+ *	  Base relations that only decide which rows survive.
+ *
+ * Excluded from the tlist and the HAVING qual.  The query can only tell
+ * whether a match exists, so a join of these may be folded into an existence
+ * check.  This set only filters which paths get built.
+ */
+static Relids
+find_filter_only_rels(PlannerInfo *root)
+{
+	Relids		observable = NULL;
+	ListCell   *lc;
+
+	foreach(lc, root->processed_tlist)
+	{
+		TargetEntry *te = lfirst_node(TargetEntry, lc);
+
+		observable = bms_add_members(observable,
+									 pull_varnos(root, (Node *) te->expr));
+	}
+
+	if (root->parse->havingQual)
+		observable = bms_add_members(observable,
+									 pull_varnos(root,
+												 root->parse->havingQual));
+
+	return bms_difference(root->all_baserels, observable);
 }
 
 /*
@@ -861,6 +957,350 @@ create_agg_clause_infos(PlannerInfo *root)
 }
 
 /*
+ * grouping_key_usable
+ *	  Can the given expression serve as a grouping key?
+ *
+ * For now we only support plain Vars.  Beyond that, equality must imply image
+ * equality, or else merging two keys could lose information an upper qual
+ * needs.  NUMERIC is the standard counterexample: 0 and 0.0 are equal to the
+ * equality operator but do not have the same byte image.
+ */
+static bool
+grouping_key_usable(Expr *expr)
+{
+	TypeCacheEntry *tce;
+	Oid			equalimageproc;
+
+	if (!IsA(expr, Var))
+		return false;
+
+	tce = lookup_type_cache(exprType((Node *) expr),
+							TYPECACHE_BTREE_OPFAMILY);
+	if (!OidIsValid(tce->btree_opf) ||
+		!OidIsValid(tce->btree_opintype))
+		return false;
+
+	equalimageproc = get_opfamily_proc(tce->btree_opf,
+									   tce->btree_opintype,
+									   tce->btree_opintype,
+									   BTEQUALIMAGE_PROC);
+
+	/*
+	 * If there is no BTEQUALIMAGE_PROC, eager aggregation is assumed to be
+	 * unsafe.  Otherwise, we call the procedure to check.  We must be careful
+	 * to pass the expression's actual collation, rather than the data type's
+	 * default collation, to ensure that non-deterministic collations are
+	 * correctly handled.
+	 */
+	if (!OidIsValid(equalimageproc))
+		return false;
+
+	return DatumGetBool(OidFunctionCall1Coll(equalimageproc,
+											 exprCollation((Node *) expr),
+											 ObjectIdGetDatum(tce->btree_opintype)));
+}
+
+/*
+ * max_sortgroupref
+ *	  The largest sortgroupref the given targetlist uses.
+ */
+static Index
+max_sortgroupref(List *tlist)
+{
+	Index		maxref = 0;
+	ListCell   *lc;
+
+	foreach(lc, tlist)
+	{
+		TargetEntry *tle = lfirst_node(TargetEntry, lc);
+
+		if (tle->ressortgroupref > maxref)
+			maxref = tle->ressortgroupref;
+	}
+
+	return maxref;
+}
+
+/*
+ * pull_agg_level_exprs
+ *	  The aggregates and plain Vars the query evaluates above the joins.
+ */
+static List *
+pull_agg_level_exprs(PlannerInfo *root)
+{
+	List	   *exprs;
+
+	exprs = pull_var_clause((Node *) root->processed_tlist,
+							PVC_INCLUDE_AGGREGATES |
+							PVC_RECURSE_WINDOWFUNCS |
+							PVC_RECURSE_PLACEHOLDERS);
+
+	if (root->parse->havingQual != NULL)
+		exprs = list_concat(exprs,
+							pull_var_clause(root->parse->havingQual,
+											PVC_INCLUDE_AGGREGATES |
+											PVC_RECURSE_PLACEHOLDERS));
+
+	return exprs;
+}
+
+/*
+ * grouping_key_relids
+ *	  The relations the query groups by.
+ */
+static Relids
+grouping_key_relids(PlannerInfo *root)
+{
+	Relids		relids = NULL;
+	ListCell   *lc;
+
+	foreach(lc, root->eager_group_clause)
+	{
+		SortGroupClause *sgc = lfirst_node(SortGroupClause, lc);
+		Node	   *expr = get_sortgroupclause_expr(sgc, root->processed_tlist);
+
+		relids = bms_add_members(relids, pull_varnos(root, expr));
+	}
+
+	return relids;
+}
+
+/*
+ * aggref_is_plain
+ *	  Does the aggregate depend only on the set of its argument values?
+ *
+ * FILTER picks which rows reach the aggregate, while ORDER BY and the direct
+ * arguments of an ordered-set aggregate make the result depend on the order
+ * they arrive in.  A VARIADIC aggregate takes its arguments as an array, which
+ * we do not try to match against a grouping key.
+ */
+static bool
+aggref_is_plain(Aggref *aggref)
+{
+	return (aggref->aggfilter == NULL &&
+			aggref->aggorder == NIL &&
+			aggref->aggdirectargs == NIL &&
+			!aggref->aggvariadic);
+}
+
+/*
+ * aggref_idempotent
+ *	  Does the aggregate return the same result however often a row arrives?
+ *
+ * DISTINCT discards the duplicates before aggregating, so any aggregate
+ * carrying it qualifies.  So do MIN and MAX, which the catalog marks by giving
+ * them a sort operator.
+ */
+static bool
+aggref_idempotent(Aggref *aggref)
+{
+	if (!aggref_is_plain(aggref))
+		return false;
+
+	if (aggref->aggdistinct != NIL)
+		return true;
+
+	return OidIsValid(fetch_agg_sort_op(aggref->aggfnoid));
+}
+
+/*
+ * collect_distinct_agg_keys
+ *	  Make a grouping key of each expression the aggregate takes DISTINCT.
+ *
+ * Appends to *exprs and *clauses, numbering the new clauses from *nextref.
+ * Returns false if an expression cannot serve as a grouping key.
+ */
+static bool
+collect_distinct_agg_keys(Aggref *aggref, Index *nextref,
+						  List **exprs, List **clauses)
+{
+	ListCell   *lc;
+
+	foreach(lc, aggref->aggdistinct)
+	{
+		SortGroupClause *sgc = lfirst_node(SortGroupClause, lc);
+		TargetEntry *tle;
+		SortGroupClause *key;
+
+		tle = get_sortgroupclause_tle(sgc, aggref->args);
+
+		if (!grouping_key_usable(tle->expr))
+			return false;
+
+		/*
+		 * A key already collected from another aggregate needs no second
+		 * clause; grouping on it once is enough.
+		 */
+		if (list_member(*exprs, tle->expr))
+			continue;
+
+		key = makeNode(SortGroupClause);
+		key->tleSortGroupRef = ++(*nextref);
+		key->eqop = sgc->eqop;
+		key->sortop = sgc->sortop;
+		key->nulls_first = sgc->nulls_first;
+		key->hashable = sgc->hashable;
+
+		*exprs = lappend(*exprs, tle->expr);
+		*clauses = lappend(*clauses, key);
+	}
+
+	return true;
+}
+
+/*
+ * add_grouping_expr_infos
+ *	  Record a GroupingExprInfo for each of the given keys.
+ */
+static void
+add_grouping_expr_infos(PlannerInfo *root, List *exprs, List *clauses)
+{
+	ListCell   *lc;
+	ListCell   *lc2;
+
+	forboth(lc, exprs, lc2, clauses)
+	{
+		Expr	   *expr = (Expr *) lfirst(lc);
+		SortGroupClause *sgc = lfirst_node(SortGroupClause, lc2);
+		GroupingExprInfo *ge_info;
+
+		ge_info = makeNode(GroupingExprInfo);
+		ge_info->expr = (Expr *) copyObject(expr);
+		ge_info->sortgroupref = sgc->tleSortGroupRef;
+		ge_info->ec = get_eclass_for_sortgroupclause(root, sgc, expr);
+
+		root->group_expr_list = lappend(root->group_expr_list, ge_info);
+	}
+}
+
+/*
+ * create_distinct_agg_grouping
+ *	  Derive grouping keys from aggregates that ignore duplicate input rows.
+ *
+ * agg(DISTINCT x) discards duplicate x before aggregating, so its arguments
+ * serve as grouping keys for a query with no GROUP BY or DISTINCT.  Eager
+ * aggregation can then deduplicate on those keys beneath a to-many join, and
+ * since the keys are the arguments, the deduplicated rows still carry what
+ * the aggregates above read.
+ *
+ * An aggregate without DISTINCT counts duplicates and rules this out, as does
+ * a FILTER clause, whose result depends on which rows arrive.
+ *
+ * Leaves root->group_expr_list NIL if no such keys were found.
+ */
+static void
+create_distinct_agg_grouping(PlannerInfo *root)
+{
+	List	   *exprs = NIL;
+	List	   *clauses = NIL;
+	List	   *agg_level_exprs;
+	Index		nextref;
+	ListCell   *lc;
+
+	if (!root->parse->hasAggs)
+		return;
+
+	/* The synthesized clauses take the refs the query has left over */
+	nextref = max_sortgroupref(root->processed_tlist);
+
+	agg_level_exprs = pull_agg_level_exprs(root);
+
+	foreach(lc, agg_level_exprs)
+	{
+		Expr	   *expr = (Expr *) lfirst(lc);
+		Aggref	   *aggref;
+
+		/*
+		 * A plain Var outside an aggregate would have to be a grouping key,
+		 * and there is no GROUP BY here, so this cannot happen.
+		 */
+		if (!IsA(expr, Aggref))
+			return;
+
+		aggref = (Aggref *) expr;
+
+		if (aggref->aggdistinct == NIL || !aggref_is_plain(aggref))
+			return;
+
+		if (!collect_distinct_agg_keys(aggref, &nextref, &exprs, &clauses))
+			return;
+	}
+
+	list_free(agg_level_exprs);
+
+	if (exprs == NIL)
+		return;
+
+	/*
+	 * These keys have no TargetEntry to be found from, so
+	 * create_grouping_expr_infos() cannot build their GroupingExprInfos.
+	 */
+	add_grouping_expr_infos(root, exprs, clauses);
+
+	root->eager_group_clause = clauses;
+}
+
+/*
+ * aggs_indifferent_to_duplicates
+ *	  Do the query's aggregates return the same results however often a row
+ *	  arrives?
+ *
+ * A deduplication leaves each surviving row a single time, so every aggregate
+ * computed above it has to be idempotent.
+ *
+ * The aggregates must only read relations the query groups by.  A partial
+ * aggregate on such a relation groups on the same keys.
+ */
+static bool
+aggs_indifferent_to_duplicates(PlannerInfo *root)
+{
+	List	   *exprs;
+	Relids		group_relids;
+	bool		result = true;
+	ListCell   *lc;
+
+	if (!root->parse->hasAggs)
+		return false;
+
+	group_relids = grouping_key_relids(root);
+	exprs = pull_agg_level_exprs(root);
+
+	foreach(lc, exprs)
+	{
+		Expr	   *expr = (Expr *) lfirst(lc);
+		Aggref	   *aggref;
+		Relids		arg_relids;
+
+		/*
+		 * A plain Var at this level is a grouping key, or a grouped primary
+		 * key of the same relation.
+		 */
+		if (!IsA(expr, Aggref))
+			continue;
+
+		aggref = (Aggref *) expr;
+
+		if (!aggref_idempotent(aggref))
+		{
+			result = false;
+			break;
+		}
+
+		arg_relids = pull_varnos(root, (Node *) aggref->args);
+		result = bms_is_subset(arg_relids, group_relids);
+		bms_free(arg_relids);
+
+		if (!result)
+			break;
+	}
+
+	list_free(exprs);
+	bms_free(group_relids);
+
+	return result;
+}
+
+/*
  * create_grouping_expr_infos
  *	  Create a GroupingExprInfo for each expression usable as grouping key.
  *
@@ -871,86 +1311,26 @@ static void
 create_grouping_expr_infos(PlannerInfo *root)
 {
 	List	   *exprs = NIL;
-	List	   *sortgrouprefs = NIL;
-	List	   *ecs = NIL;
-	ListCell   *lc,
-			   *lc1,
-			   *lc2,
-			   *lc3;
+	List	   *clauses = NIL;
+	ListCell   *lc;
 
 	Assert(root->group_expr_list == NIL);
 
-	foreach(lc, root->processed_groupClause)
+	foreach(lc, root->eager_group_clause)
 	{
 		SortGroupClause *sgc = lfirst_node(SortGroupClause, lc);
 		TargetEntry *tle = get_sortgroupclause_tle(sgc, root->processed_tlist);
-		TypeCacheEntry *tce;
-		Oid			equalimageproc;
 
 		Assert(tle->ressortgroupref > 0);
 
-		/*
-		 * For now we only support plain Vars as grouping expressions.
-		 */
-		if (!IsA(tle->expr, Var))
-			return;
-
-		/*
-		 * Eager aggregation is only possible if equality implies image
-		 * equality for each grouping key.  Otherwise, placing keys with
-		 * different byte images into the same group may result in the loss of
-		 * information that could be necessary to evaluate upper qual clauses.
-		 *
-		 * For instance, the NUMERIC data type is not supported, as values
-		 * that are considered equal by the equality operator (e.g., 0 and
-		 * 0.0) can have different scales.
-		 */
-		tce = lookup_type_cache(exprType((Node *) tle->expr),
-								TYPECACHE_BTREE_OPFAMILY);
-		if (!OidIsValid(tce->btree_opf) ||
-			!OidIsValid(tce->btree_opintype))
-			return;
-
-		equalimageproc = get_opfamily_proc(tce->btree_opf,
-										   tce->btree_opintype,
-										   tce->btree_opintype,
-										   BTEQUALIMAGE_PROC);
-
-		/*
-		 * If there is no BTEQUALIMAGE_PROC, eager aggregation is assumed to
-		 * be unsafe.  Otherwise, we call the procedure to check.  We must be
-		 * careful to pass the expression's actual collation, rather than the
-		 * data type's default collation, to ensure that non-deterministic
-		 * collations are correctly handled.
-		 */
-		if (!OidIsValid(equalimageproc) ||
-			!DatumGetBool(OidFunctionCall1Coll(equalimageproc,
-											   exprCollation((Node *) tle->expr),
-											   ObjectIdGetDatum(tce->btree_opintype))))
+		if (!grouping_key_usable(tle->expr))
 			return;
 
 		exprs = lappend(exprs, tle->expr);
-		sortgrouprefs = lappend_int(sortgrouprefs, tle->ressortgroupref);
-		ecs = lappend(ecs, get_eclass_for_sortgroupclause(root, sgc, tle->expr));
+		clauses = lappend(clauses, sgc);
 	}
 
-	/*
-	 * Construct a GroupingExprInfo for each expression.
-	 */
-	forthree(lc1, exprs, lc2, sortgrouprefs, lc3, ecs)
-	{
-		Expr	   *expr = (Expr *) lfirst(lc1);
-		int			sortgroupref = lfirst_int(lc2);
-		EquivalenceClass *ec = (EquivalenceClass *) lfirst(lc3);
-		GroupingExprInfo *ge_info;
-
-		ge_info = makeNode(GroupingExprInfo);
-		ge_info->expr = (Expr *) copyObject(expr);
-		ge_info->sortgroupref = sortgroupref;
-		ge_info->ec = ec;
-
-		root->group_expr_list = lappend(root->group_expr_list, ge_info);
-	}
+	add_grouping_expr_infos(root, exprs, clauses);
 }
 
 /*

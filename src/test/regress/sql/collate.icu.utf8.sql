@@ -1368,6 +1368,61 @@ DROP TABLE eager_agg_t1;
 DROP TABLE eager_agg_t2;
 
 --
+-- Test that a deduplication is not pushed below a join on such a grouping
+-- key either.  It would decide which of two equal values survives, and equal
+-- values are distinguishable under this collation.
+--
+
+CREATE TABLE eager_dedup_d (id int,
+							ci text COLLATE case_insensitive,
+							c text COLLATE "C");
+CREATE TABLE eager_dedup_f (id int, d_id int);
+
+INSERT INTO eager_dedup_d
+  SELECT i, CASE WHEN i % 2 = 0 THEN 'a' ELSE 'A' END, 'c' || i
+    FROM generate_series(1, 100) i;
+INSERT INTO eager_dedup_f
+  SELECT i, i % 100 + 1 FROM generate_series(1, 2000) i;
+
+ANALYZE eager_dedup_d;
+ANALYZE eager_dedup_f;
+
+-- Twenty rows of f per row of d, so a deduplication would pay
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.ci
+  FROM eager_dedup_d d
+  JOIN eager_dedup_f f ON f.d_id = d.id;
+
+SELECT count(*) FROM (
+  SELECT DISTINCT d.ci
+    FROM eager_dedup_d d
+    JOIN eager_dedup_f f ON f.d_id = d.id) s;
+
+-- The same holds when a DISTINCT aggregate supplies the key
+EXPLAIN (COSTS OFF)
+SELECT count(DISTINCT d.ci)
+  FROM eager_dedup_d d
+  JOIN eager_dedup_f f ON f.d_id = d.id;
+
+SELECT count(DISTINCT d.ci)
+  FROM eager_dedup_d d
+  JOIN eager_dedup_f f ON f.d_id = d.id;
+
+-- The same query on the deterministic column does push a deduplication down
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT d.c
+  FROM eager_dedup_d d
+  JOIN eager_dedup_f f ON f.d_id = d.id;
+
+SELECT count(*) FROM (
+  SELECT DISTINCT d.c
+    FROM eager_dedup_d d
+    JOIN eager_dedup_f f ON f.d_id = d.id) s;
+
+DROP TABLE eager_dedup_d;
+DROP TABLE eager_dedup_f;
+
+--
 -- A unique index can prove functional dependency for GROUP BY column
 -- removal only if its per-column collation agrees on equality with
 -- the GROUP BY column's collation.  An index built under a different
