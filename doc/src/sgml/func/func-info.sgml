@@ -3863,7 +3863,7 @@ acl      | {postgres=arwdDxtm/postgres,foo=r/postgres}
 
    <para>
     The functions shown in <xref linkend="functions-get-object-ddl-table"/>
-    reconstruct DDL statements for various global database objects.
+    reconstruct DDL statements for various database objects.
     Each function returns a set of text rows, one SQL statement per row.
     (This is a decompiled reconstruction, not the original text of the
     command.)
@@ -3968,6 +3968,35 @@ acl      | {postgres=arwdDxtm/postgres,foo=r/postgres}
         returned as a separate row.  When <parameter>pretty</parameter> is
         true, the output is pretty-printed.  When <parameter>owner</parameter>
         is false, the <literal>OWNER</literal> clause is omitted.
+       </para></entry>
+      </row>
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>pg_get_domain_ddl</primary>
+        </indexterm>
+        <function>pg_get_domain_ddl</function>
+        ( <parameter>domain</parameter> <type>regtype</type>
+        <optional>, <parameter>pretty</parameter> <type>boolean</type>
+        <literal>DEFAULT</literal> false</optional> )
+        <returnvalue>setof text</returnvalue>
+       </para>
+       <para>
+        Reconstructs the <link linkend="sql-createdomain"><command>CREATE
+        DOMAIN</command></link> statement for the specified domain, followed
+        by <link linkend="sql-alterdomain"><command>ALTER DOMAIN ... ADD
+        CONSTRAINT ... NOT VALID</command></link> statements for any
+        constraints that have not been validated.  Each statement is
+        returned as a separate row.  When <parameter>pretty</parameter> is
+        true, the output is pretty-printed.
+       </para>
+       <para>
+        The <parameter>domain</parameter> parameter uses type <type>regtype</type>,
+        which follows the standard <varname>search_path</varname> for type name
+        resolution. If a domain name conflicts with a built-in type name
+        (for example, a domain named <literal>int</literal>), you must use a
+        schema-qualified name (for example, <literal>'public.int'::regtype</literal>)
+        to reference the domain.
        </para></entry>
       </row>
      </tbody>

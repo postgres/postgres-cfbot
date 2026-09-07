@@ -1378,6 +1378,86 @@ LINE 1: ...m ADD CONSTRAINT the_constraint CHECK (value > 0) NOT ENFORC...
                                                              ^
 DROP DOMAIN constraint_enforced_dom;
 --
+-- pg_get_domain_ddl
+--
+-- Pretty output for a comprehensive domain (DEFAULT + NOT NULL + multiple CHECKs)
+CREATE DOMAIN regress_ddl_comprehensive AS varchar(50)
+    NOT NULL
+    DEFAULT 'hello'
+    CHECK (LENGTH(VALUE) >= 3)
+    CHECK (VALUE !~ '^\s*$');
+SELECT pg_get_domain_ddl('regress_ddl_comprehensive', pretty => true);
+                            pg_get_domain_ddl                            
+-------------------------------------------------------------------------
+ CREATE DOMAIN public.regress_ddl_comprehensive AS character varying(50)+
+     DEFAULT 'hello'::character varying                                 +
+     CONSTRAINT regress_ddl_comprehensive_not_null                      +
+         NOT NULL                                                       +
+     CONSTRAINT regress_ddl_comprehensive_check                         +
+         CHECK (length(VALUE::text) >= 3)                               +
+     CONSTRAINT regress_ddl_comprehensive_check1                        +
+         CHECK (VALUE::text !~ '^\s*$'::text);
+(1 row)
+
+DROP DOMAIN regress_ddl_comprehensive;
+-- Quoted and special identifiers
+CREATE DOMAIN "regress_domain with space" AS int
+    CONSTRAINT "regress_Constraint A" CHECK (VALUE < 100)
+    CONSTRAINT "regress_Constraint B" CHECK (VALUE > 10);
+SELECT pg_get_domain_ddl('"regress_domain with space"', pretty => true);
+                      pg_get_domain_ddl                      
+-------------------------------------------------------------
+ CREATE DOMAIN public."regress_domain with space" AS integer+
+     CONSTRAINT "regress_Constraint A"                      +
+         CHECK (VALUE < 100)                                +
+     CONSTRAINT "regress_Constraint B"                      +
+         CHECK (VALUE > 10);
+(1 row)
+
+DROP DOMAIN "regress_domain with space";
+-- NOT VALID constraint rendering (requires ALTER DOMAIN, not CREATE:
+-- CREATE DOMAIN constraints are always validated)
+CREATE DOMAIN regress_ddl_notvalid AS int;
+ALTER DOMAIN regress_ddl_notvalid ADD CONSTRAINT check_positive CHECK (VALUE > 0) NOT VALID;
+SELECT pg_get_domain_ddl('regress_ddl_notvalid', pretty => true);
+                                          pg_get_domain_ddl                                          
+-----------------------------------------------------------------------------------------------------
+ CREATE DOMAIN public.regress_ddl_notvalid AS integer;
+ ALTER DOMAIN public.regress_ddl_notvalid ADD CONSTRAINT check_positive CHECK (VALUE > 0) NOT VALID;
+(2 rows)
+
+DROP DOMAIN regress_ddl_notvalid;
+-- Domain shadowing a built-in type name
+CREATE DOMAIN public.int AS pg_catalog.int4;
+SELECT pg_get_domain_ddl('int');  -- should fail
+ERROR:  "integer" is not a domain
+HINT:  Use a schema-qualified name if the domain name conflicts with a built-in name.
+SELECT pg_get_domain_ddl('public.int');
+           pg_get_domain_ddl            
+----------------------------------------
+ CREATE DOMAIN public."int" AS integer;
+(1 row)
+
+DROP DOMAIN public.int;
+-- Error cases
+SELECT pg_get_domain_ddl('nonexistent_domain_type'::regtype);  -- should fail
+ERROR:  type "nonexistent_domain_type" does not exist
+LINE 1: SELECT pg_get_domain_ddl('nonexistent_domain_type'::regtype)...
+                                 ^
+SELECT pg_get_domain_ddl(999999::regtype);  -- should fail - undefined OID
+ERROR:  domain with OID 999999 does not exist
+SELECT pg_get_domain_ddl(NULL);  -- strict SRF: NULL argument yields no rows
+ pg_get_domain_ddl 
+-------------------
+(0 rows)
+
+SELECT pg_get_domain_ddl('pg_class');  -- should fail - not a domain
+ERROR:  "pg_class" is not a domain
+HINT:  Use a schema-qualified name if the domain name conflicts with a built-in name.
+SELECT pg_get_domain_ddl('integer');  -- should fail - not a domain
+ERROR:  "integer" is not a domain
+HINT:  Use a schema-qualified name if the domain name conflicts with a built-in name.
+--
 -- Information schema
 --
 SELECT * FROM information_schema.column_domain_usage

@@ -895,6 +895,45 @@ ALTER DOMAIN constraint_enforced_dom ADD CONSTRAINT the_constraint CHECK (value 
 DROP DOMAIN constraint_enforced_dom;
 
 --
+-- pg_get_domain_ddl
+--
+-- Pretty output for a comprehensive domain (DEFAULT + NOT NULL + multiple CHECKs)
+CREATE DOMAIN regress_ddl_comprehensive AS varchar(50)
+    NOT NULL
+    DEFAULT 'hello'
+    CHECK (LENGTH(VALUE) >= 3)
+    CHECK (VALUE !~ '^\s*$');
+SELECT pg_get_domain_ddl('regress_ddl_comprehensive', pretty => true);
+DROP DOMAIN regress_ddl_comprehensive;
+
+-- Quoted and special identifiers
+CREATE DOMAIN "regress_domain with space" AS int
+    CONSTRAINT "regress_Constraint A" CHECK (VALUE < 100)
+    CONSTRAINT "regress_Constraint B" CHECK (VALUE > 10);
+SELECT pg_get_domain_ddl('"regress_domain with space"', pretty => true);
+DROP DOMAIN "regress_domain with space";
+
+-- NOT VALID constraint rendering (requires ALTER DOMAIN, not CREATE:
+-- CREATE DOMAIN constraints are always validated)
+CREATE DOMAIN regress_ddl_notvalid AS int;
+ALTER DOMAIN regress_ddl_notvalid ADD CONSTRAINT check_positive CHECK (VALUE > 0) NOT VALID;
+SELECT pg_get_domain_ddl('regress_ddl_notvalid', pretty => true);
+DROP DOMAIN regress_ddl_notvalid;
+
+-- Domain shadowing a built-in type name
+CREATE DOMAIN public.int AS pg_catalog.int4;
+SELECT pg_get_domain_ddl('int');  -- should fail
+SELECT pg_get_domain_ddl('public.int');
+DROP DOMAIN public.int;
+
+-- Error cases
+SELECT pg_get_domain_ddl('nonexistent_domain_type'::regtype);  -- should fail
+SELECT pg_get_domain_ddl(999999::regtype);  -- should fail - undefined OID
+SELECT pg_get_domain_ddl(NULL);  -- strict SRF: NULL argument yields no rows
+SELECT pg_get_domain_ddl('pg_class');  -- should fail - not a domain
+SELECT pg_get_domain_ddl('integer');  -- should fail - not a domain
+
+--
 -- Information schema
 --
 
