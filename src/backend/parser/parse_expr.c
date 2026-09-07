@@ -579,6 +579,7 @@ transformColumnRef(ParseState *pstate, ColumnRef *cref)
 		case EXPR_KIND_GENERATED_COLUMN:
 		case EXPR_KIND_CYCLE_MARK:
 		case EXPR_KIND_PROPGRAPH_PROPERTY:
+		case EXPR_KIND_QUALIFY:
 			/* okay */
 			break;
 
@@ -1820,6 +1821,7 @@ transformSubLink(ParseState *pstate, SubLink *sublink)
 		case EXPR_KIND_FROM_SUBSELECT:
 		case EXPR_KIND_FROM_FUNCTION:
 		case EXPR_KIND_WHERE:
+		case EXPR_KIND_QUALIFY:
 		case EXPR_KIND_POLICY:
 		case EXPR_KIND_HAVING:
 		case EXPR_KIND_FILTER:
@@ -3180,6 +3182,8 @@ ParseExprKindName(ParseExprKind exprKind)
 			return "function in FROM";
 		case EXPR_KIND_WHERE:
 			return "WHERE";
+		case EXPR_KIND_QUALIFY:
+			return "QUALIFY";
 		case EXPR_KIND_POLICY:
 			return "POLICY";
 		case EXPR_KIND_HAVING:

@@ -40,6 +40,7 @@ SELECT [ ALL | DISTINCT [ ON ( <replaceable class="parameter">expression</replac
     [ GROUP BY [ ALL | DISTINCT ] <replaceable class="parameter">grouping_element</replaceable> [, ...] ]
     [ HAVING <replaceable class="parameter">condition</replaceable> ]
     [ WINDOW <replaceable class="parameter">window_name</replaceable> AS ( <replaceable class="parameter">window_definition</replaceable> ) [, ...] ]
+    [ QUALIFY <replaceable class="parameter">condition</replaceable> ]
     [ { UNION | INTERSECT | EXCEPT } [ ALL | DISTINCT ] <replaceable class="parameter">select</replaceable> ]
     [ ORDER BY <replaceable class="parameter">expression</replaceable> [ ASC | DESC | USING <replaceable class="parameter">operator</replaceable> ] [ NULLS { FIRST | LAST } ] [, ...] ]
     [ LIMIT { <replaceable class="parameter">count</replaceable> | ALL } ]
@@ -143,6 +144,16 @@ TABLE [ ONLY ] <replaceable class="parameter">table_name</replaceable> [ * ]
       The actual output rows are computed using the
       <command>SELECT</command> output expressions for each selected
       row or row group.  (See <xref linkend="sql-select-list"/> below.)
+     </para>
+    </listitem>
+
+    <listitem>
+     <para>
+      If the <literal>QUALIFY</literal> clause is specified, all rows
+      that do not satisfy the condition are eliminated from the output.
+      Because <literal>QUALIFY</literal> is applied after the output rows
+      have been computed, its condition can reference window functions
+      and output column names.  (See <xref linkend="sql-qualify"/> below.)
      </para>
     </listitem>
 
@@ -1234,6 +1245,83 @@ EXCLUDE NO OTHERS
    </note>
   </refsect2>
 
+  <refsect2 id="sql-qualify" xreflabel="QUALIFY Clause">
+   <title><literal>QUALIFY</literal> Clause</title>
+
+   <para>
+    The optional <literal>QUALIFY</literal> clause has the general form
+<synopsis>
+QUALIFY <replaceable class="parameter">condition</replaceable>
+</synopsis>
+    where <replaceable class="parameter">condition</replaceable> is
+    any expression that evaluates to a result of type
+    <type>boolean</type>, the same as specified for the
+    <literal>WHERE</literal> clause.
+   </para>
+
+   <para>
+    <literal>QUALIFY</literal> eliminates rows that do not satisfy the
+    condition.  It is applied after window functions have been computed,
+    so its condition may refer to the results of window functions.  In
+    this respect <literal>QUALIFY</literal> is to window functions what
+    <link linkend="sql-having"><literal>HAVING</literal></link> is to
+    aggregate functions: each filters the result of its corresponding
+    computation stage.  Without <literal>QUALIFY</literal>, filtering on
+    the result of a window function requires wrapping the query in a
+    sub-query (or common table expression) and applying a
+    <literal>WHERE</literal> clause there, because window functions are
+    computed after <literal>WHERE</literal> and <literal>HAVING</literal>.
+    A row is retained only if the condition evaluates to true; rows for
+    which it evaluates to false or null are eliminated.
+   </para>
+
+   <para>
+    The condition may contain window functions, whether or not the same
+    window functions also appear in the <command>SELECT</command> list.
+    These window functions may use an inline <literal>OVER</literal>
+    clause or refer to a window defined in the
+    <link linkend="sql-window"><literal>WINDOW</literal></link> clause; a
+    <literal>WINDOW</literal> clause is not required.  Because
+    <literal>QUALIFY</literal> is evaluated after the
+    <command>SELECT</command> list, the condition may also reference
+    output column names (column aliases defined in the
+    <command>SELECT</command> list), unlike <literal>WHERE</literal> and
+    <literal>HAVING</literal>.  In case of ambiguity, a name in
+    <literal>QUALIFY</literal> is interpreted as an input-column name
+    rather than an output column name.
+   </para>
+
+   <para>
+    <literal>QUALIFY</literal> does not require window functions to be
+    present; it is a general filter applied to the computed output rows.
+    A condition that does not involve a window function and refers only to
+    input columns produces the same result as if it had been written in
+    <literal>WHERE</literal>, though writing such conditions in
+    <literal>WHERE</literal> is preferred.  Aggregate functions are
+    permitted in the condition under the same rules that apply to the
+    <command>SELECT</command> list, since aggregation has already occurred
+    by the time <literal>QUALIFY</literal> is evaluated.
+   </para>
+
+   <para>
+    The following query returns, for each department, only the
+    highest-paid employees, filtering on the result of a window function
+    without a sub-query:
+<programlisting>
+SELECT depname, empno, salary,
+       rank() OVER (PARTITION BY depname ORDER BY salary DESC) AS pos
+FROM empsalary
+QUALIFY pos = 1;
+</programlisting>
+    Here the output column name <literal>pos</literal> defined in the
+    <command>SELECT</command> list is referenced in
+    <literal>QUALIFY</literal>.  The window function could equally be
+    spelled out in the <literal>QUALIFY</literal> condition itself, in
+    which case it need not appear in the <command>SELECT</command> list at
+    all.
+   </para>
+  </refsect2>
+
   <refsect2 id="sql-distinct" xreflabel="DISTINCT Clause">
    <title><literal>DISTINCT</literal> Clause</title>
 
@@ -2036,6 +2124,17 @@ FROM manufacturers m LEFT JOIN LATERAL get_product_names(m.id) pname ON true;
    with the SQL standard.  But there are some extensions and some
    missing features.
   </para>
+
+  <refsect2>
+   <title>The <literal>QUALIFY</literal> Clause</title>
+
+   <para>
+    The <literal>QUALIFY</literal> clause conforms to the SQL standard
+    (feature O001, <quote>QUALIFY clause</quote>).  Note that
+    <literal>QUALIFY</literal> is a reserved word; existing applications
+    that use it as an identifier must quote it or choose another name.
+   </para>
+  </refsect2>
 
   <refsect2>
    <title>Omitted <literal>FROM</literal> Clauses</title>
