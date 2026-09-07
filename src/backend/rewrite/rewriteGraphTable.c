@@ -92,7 +92,7 @@ struct path_element
 
 static Node *replace_property_refs(Oid propgraphid, Node *node, const List *mappings);
 static List *build_edge_vertex_link_quals(HeapTuple edgetup, int edgerti, int refrti, Oid refid, AttrNumber catalog_key_attnum, AttrNumber catalog_ref_attnum, AttrNumber catalog_eqop_attnum);
-static List *generate_queries_for_path_pattern(RangeTblEntry *rte, List *path_pattern);
+static List *generate_queries_for_path_pattern(RangeTblEntry *rte, List *path_pattern_list);
 static Query *generate_query_for_graph_path(RangeTblEntry *rte, List *graph_path);
 static Node *generate_setop_from_pathqueries(List *pathqueries, List **rtable, List **targetlist);
 static List *generate_queries_for_path_pattern_recurse(RangeTblEntry *rte, List *pathqueries, List *cur_path, List *path_elem_lists, int elempos);
@@ -111,15 +111,12 @@ rewriteGraphTable(Query *parsetree, int rt_index)
 {
 	RangeTblEntry *rte;
 	Query	   *graph_table_query;
-	List	   *path_pattern;
 	List	   *pathqueries = NIL;
 
 	rte = rt_fetch(rt_index, parsetree->rtable);
 
-	Assert(list_length(rte->graph_pattern->path_pattern_list) == 1);
-
-	path_pattern = linitial(rte->graph_pattern->path_pattern_list);
-	pathqueries = generate_queries_for_path_pattern(rte, path_pattern);
+	pathqueries = generate_queries_for_path_pattern(rte,
+													rte->graph_pattern->path_pattern_list);
 	graph_table_query = generate_union_from_pathqueries(&pathqueries);
 
 	AcquireRewriteLocks(graph_table_query, true, false);
@@ -168,171 +165,185 @@ rewriteGraphTable(Query *parsetree, int rt_index)
  * vertex patterns.  In such a case a dummy query which returns no result is
  * returned (generate_query_for_empty_path_pattern()).
  *
- * 'path_pattern' is given path pattern to be applied on the property graph in
- * the GRAPH_TABLE clause represented by given 'rte'.
+ * 'path_pattern_list' is the list of path patterns in the MATCH
+ * clause of the GRAPH_TABLE clause represented by given 'rte'.
  */
 static List *
-generate_queries_for_path_pattern(RangeTblEntry *rte, List *path_pattern)
+generate_queries_for_path_pattern(RangeTblEntry *rte, List *path_pattern_list)
 {
 	List	   *pathqueries = NIL;
 	List	   *path_elem_lists = NIL;
 	int			factorpos = 0;
 	List	   *path_factors = NIL;
-	struct path_factor *prev_pf = NULL;
 
-	Assert(list_length(path_pattern) > 0);
+	Assert(list_length(path_pattern_list) > 0);
 
 	/*
-	 * Create a list of path factors representing the given path pattern
+	 * Create a list of path factors representing the given path patterns
 	 * linking edge path factors to their adjacent vertex path factors.
 	 *
-	 * While doing that merge element patterns with the same variable name
-	 * into a single path_factor.
+	 * Each path pattern (path term) is processed independently for adjacency
+	 * linking; prev_pf is reset at the start of every path so that the last
+	 * element of one path is not treated as adjacent to the first element of
+	 * the next one.  Across paths, element patterns with the same variable
+	 * name are still merged into a single path_factor, so shared variables
+	 * act as join points between paths and unrelated paths produce a cross
+	 * product.
 	 */
-	foreach_node(GraphElementPattern, gep, path_pattern)
+	foreach_node(List, path_pattern, path_pattern_list)
 	{
-		struct path_factor *pf = NULL;
+		struct path_factor *prev_pf = NULL;
 
-		/*
-		 * Unsupported conditions should have been caught by the parser
-		 * itself. We have corresponding Asserts here to document the
-		 * assumptions in this code.
-		 */
-		Assert(gep->kind == VERTEX_PATTERN || IS_EDGE_PATTERN(gep->kind));
-		Assert(!gep->quantifier);
-
-		foreach_ptr(struct path_factor, other, path_factors)
+		foreach_node(GraphElementPattern, gep, path_pattern)
 		{
-			if (gep->variable && other->variable &&
-				strcmp(gep->variable, other->variable) == 0)
+			struct path_factor *pf = NULL;
+
+			/*
+			 * Unsupported conditions should have been caught by the parser
+			 * itself. We have corresponding Asserts here to document the
+			 * assumptions in this code.
+			 */
+			Assert(gep->kind == VERTEX_PATTERN || IS_EDGE_PATTERN(gep->kind));
+			Assert(!gep->quantifier);
+
+			foreach_ptr(struct path_factor, other, path_factors)
 			{
-				if (other->kind != gep->kind)
-					ereport(ERROR,
-							(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-							 errmsg("element patterns with same variable name \"%s\" but different element pattern types",
-									gep->variable)));
+				if (gep->variable && other->variable &&
+					strcmp(gep->variable, other->variable) == 0)
+				{
+					if (other->kind != gep->kind)
+						ereport(ERROR,
+								(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+								 errmsg("element patterns with same variable name \"%s\" but different element pattern types",
+										gep->variable)));
 
-				/*
-				 * If both the element patterns have label expressions, they
-				 * need to be conjuncted, which is not supported right now.
-				 *
-				 * However, an empty label expression means all labels.
-				 * Conjunction of any label expression with all labels is the
-				 * expression itself. Hence if only one of the two element
-				 * patterns has a label expression use that expression.
-				 */
-				if (!other->labelexpr)
-					other->labelexpr = gep->labelexpr;
-				else if (gep->labelexpr && !equal(other->labelexpr, gep->labelexpr))
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("element patterns with same variable name \"%s\" but different label expressions are not supported",
-									gep->variable)));
+					/*
+					 * If both the element patterns have label expressions,
+					 * they need to be conjuncted, which is not supported
+					 * right now.
+					 *
+					 * However, an empty label expression means all labels.
+					 * Conjunction of any label expression with all labels is
+					 * the expression itself. Hence if only one of the two
+					 * element patterns has a label expression use that
+					 * expression.
+					 */
+					if (!other->labelexpr)
+						other->labelexpr = gep->labelexpr;
+					else if (gep->labelexpr && !equal(other->labelexpr, gep->labelexpr))
+						ereport(ERROR,
+								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								 errmsg("element patterns with same variable name \"%s\" but different label expressions are not supported",
+										gep->variable)));
 
-				/*
-				 * If two element patterns have the same variable name, they
-				 * represent the same set of graph elements and hence are
-				 * constrained by conditions from both the element patterns.
-				 */
-				if (!other->whereClause)
-					other->whereClause = gep->whereClause;
-				else if (gep->whereClause)
-					other->whereClause = (Node *) makeBoolExpr(AND_EXPR,
-															   list_make2(other->whereClause, gep->whereClause),
-															   -1);
-				pf = other;
-				break;
+					/*
+					 * If two element patterns have the same variable name,
+					 * they represent the same set of graph elements and hence
+					 * are constrained by conditions from both the element
+					 * patterns.
+					 */
+					if (!other->whereClause)
+						other->whereClause = gep->whereClause;
+					else if (gep->whereClause)
+						other->whereClause = (Node *) makeBoolExpr(AND_EXPR,
+																   list_make2(other->whereClause, gep->whereClause),
+																   -1);
+					pf = other;
+					break;
+				}
 			}
+
+			if (!pf)
+			{
+				pf = palloc0_object(struct path_factor);
+				pf->factorpos = factorpos++;
+				pf->kind = gep->kind;
+				pf->labelexpr = gep->labelexpr;
+				pf->variable = gep->variable;
+				pf->whereClause = gep->whereClause;
+
+				path_factors = lappend(path_factors, pf);
+			}
+
+			/*
+			 * Setup links to the previous path factor in the path.
+			 *
+			 * If the previous path factor represents an edge, this path
+			 * factor represents an adjacent vertex; the source vertex for an
+			 * edge pointing left or the destination vertex for an edge
+			 * pointing right. If this path factor represents an edge, the
+			 * previous path factor represents an adjacent vertex; source
+			 * vertex for an edge pointing right or the destination vertex for
+			 * an edge pointing left.
+			 *
+			 * Edge pointing in any direction is treated similar to that
+			 * pointing in right direction here.  When constructing a query in
+			 * generate_query_for_graph_path(), we will try links in both the
+			 * directions.
+			 *
+			 * If multiple edge patterns share the same variable name, they
+			 * constrain the adjacent vertex patterns since an edge can
+			 * connect only one pair of vertices. These adjacent vertex
+			 * patterns need to be merged even though they have different
+			 * variables. Such element patterns form a walk of graph where
+			 * vertex and edges are repeated. For example, in
+			 * (a)-[b]->(c)<-[b]-(d), (a) and (d) represent the same vertex
+			 * element. This is slightly harder to implement and probably less
+			 * useful. Hence not supported for now.
+			 */
+			if (prev_pf)
+			{
+				if (prev_pf->kind == EDGE_PATTERN_RIGHT || prev_pf->kind == EDGE_PATTERN_ANY)
+				{
+					Assert(!IS_EDGE_PATTERN(pf->kind));
+					if (prev_pf->dest_pf && prev_pf->dest_pf != pf)
+						ereport(ERROR,
+								errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+								errmsg("an edge cannot connect more than two vertices even in a cyclic pattern"));
+					prev_pf->dest_pf = pf;
+				}
+				else if (prev_pf->kind == EDGE_PATTERN_LEFT)
+				{
+					Assert(!IS_EDGE_PATTERN(pf->kind));
+					if (prev_pf->src_pf && prev_pf->src_pf != pf)
+						ereport(ERROR,
+								errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+								errmsg("an edge cannot connect more than two vertices even in a cyclic pattern"));
+					prev_pf->src_pf = pf;
+				}
+				else
+				{
+					Assert(prev_pf->kind == VERTEX_PATTERN);
+					Assert(IS_EDGE_PATTERN(pf->kind));
+				}
+
+				if (pf->kind == EDGE_PATTERN_RIGHT || pf->kind == EDGE_PATTERN_ANY)
+				{
+					Assert(!IS_EDGE_PATTERN(prev_pf->kind));
+					if (pf->src_pf && pf->src_pf != prev_pf)
+						ereport(ERROR,
+								errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+								errmsg("an edge cannot connect more than two vertices even in a cyclic pattern"));
+					pf->src_pf = prev_pf;
+				}
+				else if (pf->kind == EDGE_PATTERN_LEFT)
+				{
+					Assert(!IS_EDGE_PATTERN(prev_pf->kind));
+					if (pf->dest_pf && pf->dest_pf != prev_pf)
+						ereport(ERROR,
+								errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+								errmsg("an edge cannot connect more than two vertices even in a cyclic pattern"));
+					pf->dest_pf = prev_pf;
+				}
+				else
+				{
+					Assert(pf->kind == VERTEX_PATTERN);
+					Assert(IS_EDGE_PATTERN(prev_pf->kind));
+				}
+			}
+
+			prev_pf = pf;
 		}
-
-		if (!pf)
-		{
-			pf = palloc0_object(struct path_factor);
-			pf->factorpos = factorpos++;
-			pf->kind = gep->kind;
-			pf->labelexpr = gep->labelexpr;
-			pf->variable = gep->variable;
-			pf->whereClause = gep->whereClause;
-
-			path_factors = lappend(path_factors, pf);
-		}
-
-		/*
-		 * Setup links to the previous path factor in the path.
-		 *
-		 * If the previous path factor represents an edge, this path factor
-		 * represents an adjacent vertex; the source vertex for an edge
-		 * pointing left or the destination vertex for an edge pointing right.
-		 * If this path factor represents an edge, the previous path factor
-		 * represents an adjacent vertex; source vertex for an edge pointing
-		 * right or the destination vertex for an edge pointing left.
-		 *
-		 * Edge pointing in any direction is treated similar to that pointing
-		 * in right direction here.  When constructing a query in
-		 * generate_query_for_graph_path(), we will try links in both the
-		 * directions.
-		 *
-		 * If multiple edge patterns share the same variable name, they
-		 * constrain the adjacent vertex patterns since an edge can connect
-		 * only one pair of vertices. These adjacent vertex patterns need to
-		 * be merged even though they have different variables. Such element
-		 * patterns form a walk of graph where vertex and edges are repeated.
-		 * For example, in (a)-[b]->(c)<-[b]-(d), (a) and (d) represent the
-		 * same vertex element. This is slightly harder to implement and
-		 * probably less useful. Hence not supported for now.
-		 */
-		if (prev_pf)
-		{
-			if (prev_pf->kind == EDGE_PATTERN_RIGHT || prev_pf->kind == EDGE_PATTERN_ANY)
-			{
-				Assert(!IS_EDGE_PATTERN(pf->kind));
-				if (prev_pf->dest_pf && prev_pf->dest_pf != pf)
-					ereport(ERROR,
-							errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-							errmsg("an edge cannot connect more than two vertices even in a cyclic pattern"));
-				prev_pf->dest_pf = pf;
-			}
-			else if (prev_pf->kind == EDGE_PATTERN_LEFT)
-			{
-				Assert(!IS_EDGE_PATTERN(pf->kind));
-				if (prev_pf->src_pf && prev_pf->src_pf != pf)
-					ereport(ERROR,
-							errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-							errmsg("an edge cannot connect more than two vertices even in a cyclic pattern"));
-				prev_pf->src_pf = pf;
-			}
-			else
-			{
-				Assert(prev_pf->kind == VERTEX_PATTERN);
-				Assert(IS_EDGE_PATTERN(pf->kind));
-			}
-
-			if (pf->kind == EDGE_PATTERN_RIGHT || pf->kind == EDGE_PATTERN_ANY)
-			{
-				Assert(!IS_EDGE_PATTERN(prev_pf->kind));
-				if (pf->src_pf && pf->src_pf != prev_pf)
-					ereport(ERROR,
-							errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-							errmsg("an edge cannot connect more than two vertices even in a cyclic pattern"));
-				pf->src_pf = prev_pf;
-			}
-			else if (pf->kind == EDGE_PATTERN_LEFT)
-			{
-				Assert(!IS_EDGE_PATTERN(prev_pf->kind));
-				if (pf->dest_pf && pf->dest_pf != prev_pf)
-					ereport(ERROR,
-							errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-							errmsg("an edge cannot connect more than two vertices even in a cyclic pattern"));
-				pf->dest_pf = prev_pf;
-			}
-			else
-			{
-				Assert(pf->kind == VERTEX_PATTERN);
-				Assert(IS_EDGE_PATTERN(prev_pf->kind));
-			}
-		}
-
-		prev_pf = pf;
 	}
 
 	/*
