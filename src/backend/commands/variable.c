@@ -1171,46 +1171,6 @@ assign_io_combine_limit(int newval, void *extra)
 	io_combine_limit = Min(io_max_combine_limit, newval);
 }
 
-/*
- * These show hooks just exist because we want to show the values in octal.
- */
-
-/*
- * GUC show_hook for data_directory_mode
- */
-const char *
-show_data_directory_mode(void)
-{
-	static char buf[12];
-
-	snprintf(buf, sizeof(buf), "%04o", data_directory_mode);
-	return buf;
-}
-
-/*
- * GUC show_hook for log_file_mode
- */
-const char *
-show_log_file_mode(void)
-{
-	static char buf[12];
-
-	snprintf(buf, sizeof(buf), "%04o", Log_file_mode);
-	return buf;
-}
-
-/*
- * GUC show_hook for unix_socket_permissions
- */
-const char *
-show_unix_socket_permissions(void)
-{
-	static char buf[12];
-
-	snprintf(buf, sizeof(buf), "%04o", Unix_socket_permissions);
-	return buf;
-}
-
 
 /*
  * These check hooks do nothing more than reject non-default settings
