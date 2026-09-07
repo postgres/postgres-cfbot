@@ -534,13 +534,22 @@ SerializationNeededForRead(Relation relation, Snapshot snapshot)
 		return false;
 
 	/*
-	 * Don't acquire locks or conflict when scanning with a special snapshot.
+	 * Don't acquire locks or conflict when scanning with a special snapshot,
+	 * other than SnapshotDirtySerializable, which is a special case.
+	 *
 	 * This excludes things like CLUSTER and REINDEX. They use the wholesale
 	 * functions TransferPredicateLocksToHeapRelation() and
 	 * CheckTableForSerializableConflictIn() to participate in serialization,
 	 * but the scans involved don't need serialization.
+	 *
+	 * The special snapshot SnapshotDirtySerializable is a dirty snapshot,
+	 * used by check_exclusion_or_unique_constraint() to test for potential or
+	 * actual constraint violations (for example, when probing the arbiter
+	 * index for INSERT ... ON CONFLICT).  Since the outcome of such commands
+	 * is decided by the probe result, it must count as a read for
+	 * serialization purposes.
 	 */
-	if (!IsMVCCSnapshot(snapshot))
+	if (!IsMVCCSnapshot(snapshot) && snapshot != SnapshotDirtySerializable)
 		return false;
 
 	/*
