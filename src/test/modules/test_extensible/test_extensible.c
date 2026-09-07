@@ -25,6 +25,7 @@
 #include "nodes/readfuncs.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
+#include "optimizer/planner.h"
 #include "optimizer/restrictinfo.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
@@ -433,6 +434,25 @@ test_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	add_path(rel, (Path *) cpath);
 }
 
+static create_upper_paths_hook_type prev_create_upper_paths_hook = NULL;
+
+/*
+ * Report the upper planning stages we are called for.  Only partial
+ * aggregation is interesting here; the other stages have always fired the
+ * hook.
+ */
+static void
+test_create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
+						RelOptInfo *input_rel, RelOptInfo *output_rel,
+						void *extra)
+{
+	if (prev_create_upper_paths_hook)
+		prev_create_upper_paths_hook(root, stage, input_rel, output_rel, extra);
+
+	if (stage == UPPERREL_PARTIAL_GROUP_AGG)
+		elog(NOTICE, "create_upper_paths_hook: UPPERREL_PARTIAL_GROUP_AGG");
+}
+
 /*
  * test_get_extensible_node_methods
  *
@@ -586,4 +606,7 @@ _PG_init(void)
 	/* Install the path-list hook to inject CustomPaths for the test table */
 	prev_set_rel_pathlist_hook = set_rel_pathlist_hook;
 	set_rel_pathlist_hook = test_set_rel_pathlist;
+
+	prev_create_upper_paths_hook = create_upper_paths_hook;
+	create_upper_paths_hook = test_create_upper_paths;
 }
