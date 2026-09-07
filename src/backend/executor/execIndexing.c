@@ -380,20 +380,24 @@ ExecInsertIndexTuples(ResultRelInfo *resultRelInfo,
 		if (indexInfo->ii_Predicate != NIL)
 		{
 			ExprState  *predicate;
+			ExprState  *predicateExpand;
 
 			/*
 			 * If predicate state not set up yet, create it (in the estate's
 			 * per-query context)
 			 */
 			predicate = indexInfo->ii_PredicateState;
+			predicateExpand = indexInfo->ii_PredicateExpandState;
 			if (predicate == NULL)
 			{
 				predicate = ExecPrepareQual(indexInfo->ii_Predicate, estate);
+				predicateExpand = ExecPrepareQual(indexInfo->ii_PredicateExpand, estate);
 				indexInfo->ii_PredicateState = predicate;
+				indexInfo->ii_PredicateExpandState = predicateExpand;
 			}
 
 			/* Skip this index-update if the predicate isn't satisfied */
-			if (!ExecQual(predicate, econtext))
+			if (!ExecQual(predicateExpand, econtext))
 				continue;
 		}
 
@@ -616,20 +620,24 @@ ExecCheckIndexConstraints(ResultRelInfo *resultRelInfo, TupleTableSlot *slot,
 		if (indexInfo->ii_Predicate != NIL)
 		{
 			ExprState  *predicate;
+			ExprState  *predicateExpand;
 
 			/*
 			 * If predicate state not set up yet, create it (in the estate's
 			 * per-query context)
 			 */
 			predicate = indexInfo->ii_PredicateState;
+			predicateExpand = indexInfo->ii_PredicateExpandState;
 			if (predicate == NULL)
 			{
 				predicate = ExecPrepareQual(indexInfo->ii_Predicate, estate);
+				predicateExpand = ExecPrepareQual(indexInfo->ii_PredicateExpand, estate);
 				indexInfo->ii_PredicateState = predicate;
+				indexInfo->ii_PredicateExpandState = predicateExpand;
 			}
 
 			/* Skip this index-update if the predicate isn't satisfied */
-			if (!ExecQual(predicate, econtext))
+			if (!ExecQual(predicateExpand, econtext))
 				continue;
 		}
 
@@ -1102,6 +1110,7 @@ index_unchanged_by_update(ResultRelInfo *resultRelInfo, EState *estate,
 	 * pass hint.
 	 */
 	idxExprs = RelationGetIndexExpressions(indexRelation);
+	idxExprs = list_concat(idxExprs, RelationGetIndexExpressionsExpand(indexRelation));
 	hasexpression = index_expression_changed_walker((Node *) idxExprs,
 													allUpdatedCols);
 	list_free(idxExprs);

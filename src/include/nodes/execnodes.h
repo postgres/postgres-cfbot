@@ -190,13 +190,17 @@ typedef struct IndexInfo
 
 	/* expr trees for expression entries, or NIL if none */
 	List	   *ii_Expressions; /* list of Expr */
+	List	   *ii_ExpressionsExpand; 	/* list of Expr */
 	/* exec state for expressions, or NIL if none */
 	List	   *ii_ExpressionsState;	/* list of ExprState */
+	List	   *ii_ExpressionsExpandState;	/* list of ExprState */
 
 	/* partial-index predicate, or NIL if none */
 	List	   *ii_Predicate;	/* list of Expr */
+	List	   *ii_PredicateExpand;		/* list of Expr */
 	/* exec state for expressions, or NIL if none */
 	ExprState  *ii_PredicateState;
+	ExprState  *ii_PredicateExpandState;
 
 	/* Per-column exclusion operators, or NULL if none */
 	Oid		   *ii_ExclusionOps;	/* array with one entry per column */

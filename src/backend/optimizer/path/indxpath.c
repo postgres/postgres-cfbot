@@ -267,7 +267,7 @@ create_index_paths(PlannerInfo *root, RelOptInfo *rel)
 		 * (generate_bitmap_or_paths() might be able to do something with
 		 * them, but that's of no concern here.)
 		 */
-		if (index->indpred != NIL && !index->predOK)
+		if (index->indpredExpand != NIL && !index->predOK)
 			continue;
 
 		/*
@@ -1119,7 +1119,7 @@ build_paths_for_OR(PlannerInfo *root, RelOptInfo *rel,
 		 * just scanning the predOK index alone, no OR.)
 		 */
 		useful_predicate = false;
-		if (index->indpred != NIL)
+		if (index->indpredExpand != NIL)
 		{
 			if (index->predOK)
 			{
@@ -1131,10 +1131,10 @@ build_paths_for_OR(PlannerInfo *root, RelOptInfo *rel,
 				if (all_clauses == NIL)
 					all_clauses = list_concat_copy(clauses, other_clauses);
 
-				if (!predicate_implied_by(index->indpred, all_clauses, false))
+				if (!predicate_implied_by(index->indpredExpand, all_clauses, false))
 					continue;	/* can't use it at all */
 
-				if (!predicate_implied_by(index->indpred, other_clauses, false))
+				if (!predicate_implied_by(index->indpredExpand, other_clauses, false))
 					useful_predicate = true;
 			}
 		}
@@ -2183,7 +2183,7 @@ find_indexpath_quals(Path *bitmapqual, List **quals, List **preds)
 
 			*quals = lappend(*quals, iclause->rinfo->clause);
 		}
-		*preds = list_concat(*preds, ipath->indexinfo->indpred);
+		*preds = list_concat(*preds, ipath->indexinfo->indpredExpand);
 	}
 	else
 		elog(ERROR, "unrecognized node type: %d", nodeTag(bitmapqual));
@@ -3959,7 +3959,7 @@ check_index_predicates(PlannerInfo *root, RelOptInfo *rel)
 		IndexOptInfo *index = (IndexOptInfo *) lfirst(lc);
 
 		index->indrestrictinfo = rel->baserestrictinfo;
-		if (index->indpred)
+		if (index->indpredExpand)
 			have_partial = true;
 	}
 	if (!have_partial)
@@ -4038,11 +4038,11 @@ check_index_predicates(PlannerInfo *root, RelOptInfo *rel)
 		IndexOptInfo *index = (IndexOptInfo *) lfirst(lc);
 		ListCell   *lcr;
 
-		if (index->indpred == NIL)
+		if (index->indpredExpand == NIL)
 			continue;			/* ignore non-partial indexes here */
 
 		if (!index->predOK)		/* don't repeat work if already proven OK */
-			index->predOK = predicate_implied_by(index->indpred, clauselist,
+			index->predOK = predicate_implied_by(index->indpredExpand, clauselist,
 												 false);
 
 		/* If rel is an update target, leave indrestrictinfo as set above */
@@ -4068,7 +4068,7 @@ check_index_predicates(PlannerInfo *root, RelOptInfo *rel)
 			/* predicate_implied_by() assumes first arg is immutable */
 			if (contain_mutable_functions((Node *) rinfo->clause) ||
 				!predicate_implied_by(list_make1(rinfo->clause),
-									  index->indpred, false))
+									  index->indpredExpand, false))
 				index->indrestrictinfo = lappend(index->indrestrictinfo, rinfo);
 		}
 	}
@@ -4402,14 +4402,14 @@ match_index_to_operand(Node *operand,
 		int			i;
 		Node	   *indexkey;
 
-		indexpr_item = list_head(index->indexprs);
+		indexpr_item = list_head(index->indexprsExpand);
 		for (i = 0; i < indexcol; i++)
 		{
 			if (index->indexkeys[i] == 0)
 			{
 				if (indexpr_item == NULL)
 					elog(ERROR, "wrong number of index expressions");
-				indexpr_item = lnext(index->indexprs, indexpr_item);
+				indexpr_item = lnext(index->indexprsExpand, indexpr_item);
 			}
 		}
 		if (indexpr_item == NULL)

@@ -596,6 +596,12 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 	else
 	{
 		path->path.rows = baserel->rows;
+		/*
+		 * If index->predOK holds true, this index path's estimated
+		 * output tuples can not exceed the index's total tuples.
+		*/
+		if (index->predOK && path->path.rows > index->tuples)
+			path->path.rows = index->tuples;
 		/* qpquals come from just the rel's restriction clauses */
 		qpquals = extract_nonindex_conditions(path->indexinfo->indrestrictinfo,
 											  path->indexclauses);
