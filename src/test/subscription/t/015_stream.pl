@@ -201,6 +201,45 @@ $node_subscriber->safe_psql('postgres', q{SELECT 1});
 
 test_streaming($node_publisher, $node_subscriber, $appname, 1);
 
+# Verify that a parallel apply worker reports changes it does not apply.
+#
+# A table that is published but never refreshed on the subscriber has no
+# pg_subscription_rel row at all.  GetSubscriptionRelations() only returns rows
+# that exist, so such a table is invisible to AllTablesyncsReady(),
+# pa_can_start() still hands the streamed transaction to a parallel apply
+# worker, and that worker discards every change for the table.
+$node_publisher->safe_psql('postgres', "CREATE TABLE test_tab_3 (a int)");
+$node_subscriber->safe_psql('postgres', "CREATE TABLE test_tab_3 (a int)");
+$node_publisher->safe_psql('postgres',
+	"ALTER PUBLICATION tap_pub ADD TABLE test_tab_3");
+
+my $pa_offset = -s $node_subscriber->logfile;
+
+# Large enough to be streamed, given logical_decoding_work_mem = 64kB.
+$node_publisher->safe_psql('postgres',
+	"INSERT INTO test_tab_3 SELECT i FROM generate_series(1, 5000) s(i)");
+
+# The bgw_type in log_line_prefix's %b distinguishes the parallel apply worker
+# ("logical replication parallel worker") from the leader ("logical replication
+# apply worker"), so this pins the report to the parallel path specifically.
+$node_subscriber->wait_for_log(
+	qr/logical replication parallel worker\[\d+\] DEBUG: ( [A-Z0-9]+:)? logical replication apply worker for subscription "tap_sub" is not applying changes for relation "public\.test_tab_3"/,
+	$pa_offset);
+
+ok( $node_subscriber->log_contains(
+		qr/DETAIL: ( [A-Z0-9]+:)? The relation "public\.test_tab_3" is not part of the subscription\./,
+		$pa_offset),
+	'parallel apply worker names the relation it is not applying changes for'
+);
+
+$node_publisher->wait_for_catchup($appname);
+
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT count(*) FROM test_tab_3");
+is($result, qq(0),
+	'parallel apply worker discards changes for a relation not in the subscription'
+);
+
 # Test that the deadlock is detected among the leader and parallel apply
 # workers.
 
