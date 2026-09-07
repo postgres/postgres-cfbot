@@ -76,22 +76,37 @@ pglz_compress_datum(const varlena *value)
 }
 
 /*
- * Decompress a varlena that was compressed using PGLZ.
+ * Decompress a varlena that was compressed using PGLZ (or a slice from the front).
+ * If slicelength < 0 or >= decompressed size, decompress the full datum.
  */
 varlena *
-pglz_decompress_datum(const varlena *value)
+pglz_decompress_datum_slice(const varlena *value,
+							int32 slicelength)
 {
 	varlena    *result;
 	int32		rawsize;
+	int32		destsize;
+	bool		check_complete;
+
+	if (slicelength < 0 || (uint32) slicelength >= VARDATA_COMPRESSED_GET_EXTSIZE(value))
+	{
+		destsize = VARDATA_COMPRESSED_GET_EXTSIZE(value);
+		check_complete = true;
+	}
+	else
+	{
+		destsize = slicelength;
+		check_complete = false;
+	}
 
 	/* allocate memory for the uncompressed data */
-	result = (varlena *) palloc(VARDATA_COMPRESSED_GET_EXTSIZE(value) + VARHDRSZ);
+	result = (varlena *) palloc(destsize + VARHDRSZ);
 
 	/* decompress the data */
 	rawsize = pglz_decompress((const char *) value + VARHDRSZ_COMPRESSED,
 							  VARSIZE(value) - VARHDRSZ_COMPRESSED,
 							  VARDATA(result),
-							  VARDATA_COMPRESSED_GET_EXTSIZE(value), true);
+							  destsize, check_complete);
 	if (rawsize < 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
@@ -103,31 +118,12 @@ pglz_decompress_datum(const varlena *value)
 }
 
 /*
- * Decompress part of a varlena that was compressed using PGLZ.
+ * Decompress a full varlena that was compressed using PGLZ.
  */
 varlena *
-pglz_decompress_datum_slice(const varlena *value,
-							int32 slicelength)
+pglz_decompress_datum(const varlena *value)
 {
-	varlena    *result;
-	int32		rawsize;
-
-	/* allocate memory for the uncompressed data */
-	result = (varlena *) palloc(slicelength + VARHDRSZ);
-
-	/* decompress the data */
-	rawsize = pglz_decompress((const char *) value + VARHDRSZ_COMPRESSED,
-							  VARSIZE(value) - VARHDRSZ_COMPRESSED,
-							  VARDATA(result),
-							  slicelength, false);
-	if (rawsize < 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_DATA_CORRUPTED),
-				 errmsg_internal("compressed pglz data is corrupt")));
-
-	SET_VARSIZE(result, rawsize + VARHDRSZ);
-
-	return result;
+	return pglz_decompress_datum_slice(value, -1);
 }
 
 /*
@@ -176,40 +172,8 @@ lz4_compress_datum(const varlena *value)
 }
 
 /*
- * Decompress a varlena that was compressed using LZ4.
- */
-varlena *
-lz4_decompress_datum(const varlena *value)
-{
-#ifndef USE_LZ4
-	NO_COMPRESSION_SUPPORT("lz4");
-	return NULL;				/* keep compiler quiet */
-#else
-	int32		rawsize;
-	varlena    *result;
-
-	/* allocate memory for the uncompressed data */
-	result = (varlena *) palloc(VARDATA_COMPRESSED_GET_EXTSIZE(value) + VARHDRSZ);
-
-	/* decompress the data */
-	rawsize = LZ4_decompress_safe((const char *) value + VARHDRSZ_COMPRESSED,
-								  VARDATA(result),
-								  VARSIZE(value) - VARHDRSZ_COMPRESSED,
-								  VARDATA_COMPRESSED_GET_EXTSIZE(value));
-	if (rawsize < 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_DATA_CORRUPTED),
-				 errmsg_internal("compressed lz4 data is corrupt")));
-
-
-	SET_VARSIZE(result, rawsize + VARHDRSZ);
-
-	return result;
-#endif
-}
-
-/*
- * Decompress part of a varlena that was compressed using LZ4.
+ * Decompress a varlena that was compressed using LZ4 (or a slice from the front).
+ * If slicelength < 0 or >= decompressed size, decompress the full datum.
  */
 varlena *
 lz4_decompress_datum_slice(const varlena *value, int32 slicelength)
@@ -220,20 +184,37 @@ lz4_decompress_datum_slice(const varlena *value, int32 slicelength)
 #else
 	int32		rawsize;
 	varlena    *result;
+	int32		extsize = VARDATA_COMPRESSED_GET_EXTSIZE(value);
+	bool		is_slice = (slicelength >= 0 && (uint32) slicelength < extsize);
 
 	/* slice decompression not supported prior to 1.8.3 */
-	if (LZ4_versionNumber() < 10803)
-		return lz4_decompress_datum(value);
+	if (is_slice && LZ4_versionNumber() < 10803)
+		is_slice = false;
 
-	/* allocate memory for the uncompressed data */
-	result = (varlena *) palloc(slicelength + VARHDRSZ);
+	if (!is_slice)
+	{
+		/* allocate memory for full uncompressed data */
+		result = (varlena *) palloc(extsize + VARHDRSZ);
 
-	/* decompress the data */
-	rawsize = LZ4_decompress_safe_partial((const char *) value + VARHDRSZ_COMPRESSED,
-										  VARDATA(result),
-										  VARSIZE(value) - VARHDRSZ_COMPRESSED,
-										  slicelength,
-										  slicelength);
+		/* decompress the full data */
+		rawsize = LZ4_decompress_safe((const char *) value + VARHDRSZ_COMPRESSED,
+									  VARDATA(result),
+									  VARSIZE(value) - VARHDRSZ_COMPRESSED,
+									  extsize);
+	}
+	else
+	{
+		/* allocate memory for the slice uncompressed data */
+		result = (varlena *) palloc(slicelength + VARHDRSZ);
+
+		/* decompress the slice */
+		rawsize = LZ4_decompress_safe_partial((const char *) value + VARHDRSZ_COMPRESSED,
+											  VARDATA(result),
+											  VARSIZE(value) - VARHDRSZ_COMPRESSED,
+											  slicelength,
+											  slicelength);
+	}
+
 	if (rawsize < 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
@@ -243,6 +224,15 @@ lz4_decompress_datum_slice(const varlena *value, int32 slicelength)
 
 	return result;
 #endif
+}
+
+/*
+ * Decompress a full varlena that was compressed using LZ4.
+ */
+varlena *
+lz4_decompress_datum(const varlena *value)
+{
+	return lz4_decompress_datum_slice(value, -1);
 }
 
 /*

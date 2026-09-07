@@ -22,12 +22,17 @@
 #include "utils/expandeddatum.h"
 #include "utils/rel.h"
 
-static varlena *toast_fetch_datum(varlena *attr);
 static varlena *toast_fetch_datum_slice(varlena *attr,
 										int32 sliceoffset,
 										int32 slicelength);
-static varlena *toast_decompress_datum(varlena *attr);
+static inline varlena *
+toast_fetch_datum(varlena *attr)
+{
+	return toast_fetch_datum_slice(attr, 0, -1);
+}
+
 static varlena *toast_decompress_datum_slice(varlena *attr, int32 slicelength);
+
 
 /* ----------
  * detoast_external_attr -
@@ -115,79 +120,7 @@ detoast_external_attr(varlena *attr)
 varlena *
 detoast_attr(varlena *attr)
 {
-	if (VARATT_IS_EXTERNAL_ONDISK(attr))
-	{
-		/*
-		 * This is an externally stored datum --- fetch it back from there
-		 */
-		attr = toast_fetch_datum(attr);
-		/* If it's compressed, decompress it */
-		if (VARATT_IS_COMPRESSED(attr))
-		{
-			varlena    *tmp = attr;
-
-			attr = toast_decompress_datum(tmp);
-			pfree(tmp);
-		}
-	}
-	else if (VARATT_IS_EXTERNAL_INDIRECT(attr))
-	{
-		/*
-		 * This is an indirect pointer --- dereference it
-		 */
-		varatt_indirect redirect;
-
-		VARATT_EXTERNAL_GET_POINTER(redirect, attr);
-		attr = (varlena *) redirect.pointer;
-
-		/* nested indirect Datums aren't allowed */
-		Assert(!VARATT_IS_EXTERNAL_INDIRECT(attr));
-
-		/* recurse in case value is still extended in some other way */
-		attr = detoast_attr(attr);
-
-		/* if it isn't, we'd better copy it */
-		if (attr == (varlena *) redirect.pointer)
-		{
-			varlena    *result;
-
-			result = (varlena *) palloc(VARSIZE_ANY(attr));
-			memcpy(result, attr, VARSIZE_ANY(attr));
-			attr = result;
-		}
-	}
-	else if (VARATT_IS_EXTERNAL_EXPANDED(attr))
-	{
-		/*
-		 * This is an expanded-object pointer --- get flat format
-		 */
-		attr = detoast_external_attr(attr);
-		/* flatteners are not allowed to produce compressed/short output */
-		Assert(!VARATT_IS_EXTENDED(attr));
-	}
-	else if (VARATT_IS_COMPRESSED(attr))
-	{
-		/*
-		 * This is a compressed value inside of the main tuple
-		 */
-		attr = toast_decompress_datum(attr);
-	}
-	else if (VARATT_IS_SHORT(attr))
-	{
-		/*
-		 * This is a short-header varlena --- convert to 4-byte header format
-		 */
-		Size		data_size = VARSIZE_SHORT(attr) - VARHDRSZ_SHORT;
-		Size		new_size = data_size + VARHDRSZ;
-		varlena    *new_attr;
-
-		new_attr = (varlena *) palloc(new_size);
-		SET_VARSIZE(new_attr, new_size);
-		memcpy(VARDATA(new_attr), VARDATA_SHORT(attr), data_size);
-		attr = new_attr;
-	}
-
-	return attr;
+	return detoast_attr_slice(attr, 0, -1);
 }
 
 
@@ -229,6 +162,7 @@ detoast_attr_slice(varlena *attr,
 		int32		extsize;
 		uint32		compress_method;
 		bool		is_compressed;
+		int32		max_size = -1;
 
 		toast_external_info_get(attr, &toast_ext_data);
 		extsize = VARATT_EXTINFO_GET_EXTSIZE(toast_ext_data.extinfo);
@@ -242,11 +176,11 @@ detoast_attr_slice(varlena *attr,
 		/*
 		 * For compressed values, we need to fetch enough slices to decompress
 		 * at least the requested part (when a prefix is requested).
-		 * Otherwise, just fetch all slices.
+		 * Otherwise, just fetch all slices (max_size = -1).
 		 */
 		if (slicelimit >= 0)
 		{
-			int32		max_size = extsize;
+			max_size = extsize;
 
 			/*
 			 * Determine maximum amount of compressed data needed for a prefix
@@ -259,32 +193,46 @@ detoast_attr_slice(varlena *attr,
 			 */
 			if (compress_method == TOAST_PGLZ_COMPRESSION_ID)
 				max_size = pglz_maximum_compressed_size(slicelimit, max_size);
-
-			/*
-			 * Fetch enough compressed slices (compressed marker will get set
-			 * automatically).
-			 */
-			preslice = toast_fetch_datum_slice(attr, 0, max_size);
 		}
-		else
-			preslice = toast_fetch_datum(attr);
+
+		/*
+		 * Fetch enough compressed slices (compressed marker will get set
+		 * automatically).
+		 */
+		preslice = toast_fetch_datum_slice(attr, 0, max_size);
 	}
 	else if (VARATT_IS_EXTERNAL_INDIRECT(attr))
 	{
 		varatt_indirect redirect;
+		varlena    *res;
 
 		VARATT_EXTERNAL_GET_POINTER(redirect, attr);
 
 		/* nested indirect Datums aren't allowed */
 		Assert(!VARATT_IS_EXTERNAL_INDIRECT(redirect.pointer));
 
-		return detoast_attr_slice(redirect.pointer,
-								  sliceoffset, slicelength);
+		res = detoast_attr_slice(redirect.pointer, sliceoffset, slicelength);
+
+		/*
+		 * If result points directly into redirect target, make a copy in the
+		 * caller's memory context.
+		 */
+		if (res == (varlena *) redirect.pointer)
+		{
+			varlena    *copy = (varlena *) palloc(VARSIZE_ANY(res));
+
+			memcpy(copy, res, VARSIZE_ANY(res));
+			res = copy;
+		}
+
+		return res;
 	}
 	else if (VARATT_IS_EXTERNAL_EXPANDED(attr))
 	{
 		/* pass it off to detoast_external_attr to flatten */
 		preslice = detoast_external_attr(attr);
+		/* flatteners are not allowed to produce compressed/short output */
+		Assert(!VARATT_IS_EXTENDED(preslice));
 	}
 	else
 		preslice = attr;
@@ -295,15 +243,21 @@ detoast_attr_slice(varlena *attr,
 	{
 		varlena    *tmp = preslice;
 
-		/* Decompress enough to encompass the slice and the offset */
-		if (slicelimit >= 0)
-			preslice = toast_decompress_datum_slice(tmp, slicelimit);
-		else
-			preslice = toast_decompress_datum(tmp);
+		/* Decompress enough to encompass the slice and the offset (or all if slicelimit < 0) */
+		preslice = toast_decompress_datum_slice(tmp, slicelimit);
 
 		if (tmp != attr)
 			pfree(tmp);
 	}
+
+	/*
+	 * If the entire datum was requested from offset 0, and the datum is in
+	 * standard 4-byte uncompressed format (not extended/short), return it directly.
+	 * This avoids a redundant copy for inline uncompressed datums, freshly
+	 * decompressed datums, and uncompressed external fetches.
+	 */
+	if (sliceoffset == 0 && slicelength < 0 && !VARATT_IS_EXTENDED(preslice))
+		return preslice;
 
 	if (VARATT_IS_SHORT(preslice))
 	{
@@ -337,56 +291,7 @@ detoast_attr_slice(varlena *attr,
 	return result;
 }
 
-/* ----------
- * toast_fetch_datum -
- *
- *	Reconstruct an in memory Datum from the chunks saved
- *	in the toast relation
- * ----------
- */
-static varlena *
-toast_fetch_datum(varlena *attr)
-{
-	Relation	toastrel;
-	varlena    *result;
-	toast_external_data toast_ext_data;
-	int32		attrsize;
-	Oid			toastrelid;
-	Oid8		valueid;
 
-	if (!VARATT_IS_EXTERNAL_ONDISK(attr))
-		elog(ERROR, "toast_fetch_datum shouldn't be called for non-ondisk datums");
-
-	toast_external_info_get(attr, &toast_ext_data);
-	attrsize = VARATT_EXTINFO_GET_EXTSIZE(toast_ext_data.extinfo);
-	toastrelid = toast_ext_data.toastrelid;
-	valueid = toast_ext_data.valueid;
-
-	result = (varlena *) palloc(attrsize + VARHDRSZ);
-
-	if (VARATT_EXTINFO_IS_COMPRESSED(toast_ext_data.extinfo, toast_ext_data.rawsize))
-		SET_VARSIZE_COMPRESSED(result, attrsize + VARHDRSZ);
-	else
-		SET_VARSIZE(result, attrsize + VARHDRSZ);
-
-	if (attrsize == 0)
-		return result;			/* Probably shouldn't happen, but just in
-								 * case. */
-
-	/*
-	 * Open the toast relation and its indexes
-	 */
-	toastrel = table_open(toastrelid, AccessShareLock);
-
-	/* Fetch all chunks */
-	table_relation_fetch_toast_slice(toastrel, valueid,
-									 attrsize, 0, attrsize, result);
-
-	/* Close toast table */
-	table_close(toastrel, AccessShareLock);
-
-	return result;
-}
 
 /* ----------
  * toast_fetch_datum_slice -
@@ -474,41 +379,11 @@ toast_fetch_datum_slice(varlena *attr, int32 sliceoffset,
 }
 
 /* ----------
- * toast_decompress_datum -
- *
- * Decompress a compressed version of a varlena datum
- */
-static varlena *
-toast_decompress_datum(varlena *attr)
-{
-	ToastCompressionId cmid;
-
-	Assert(VARATT_IS_COMPRESSED(attr));
-
-	/*
-	 * Fetch the compression method id stored in the compression header and
-	 * decompress the data using the appropriate decompression routine.
-	 */
-	cmid = TOAST_COMPRESS_METHOD(attr);
-	switch (cmid)
-	{
-		case TOAST_PGLZ_COMPRESSION_ID:
-			return pglz_decompress_datum(attr);
-		case TOAST_LZ4_COMPRESSION_ID:
-			return lz4_decompress_datum(attr);
-		default:
-			elog(ERROR, "invalid compression method id %d", cmid);
-			return NULL;		/* keep compiler quiet */
-	}
-}
-
-
-/* ----------
  * toast_decompress_datum_slice -
  *
- * Decompress the front of a compressed version of a varlena datum.
+ * Decompress a compressed version of a varlena datum (or a slice from the front).
  * offset handling happens in detoast_attr_slice.
- * Here we just decompress a slice from the front.
+ * If slicelength < 0 or >= decompressed size, decompress the full datum.
  */
 static varlena *
 toast_decompress_datum_slice(varlena *attr, int32 slicelength)
@@ -518,19 +393,8 @@ toast_decompress_datum_slice(varlena *attr, int32 slicelength)
 	Assert(VARATT_IS_COMPRESSED(attr));
 
 	/*
-	 * Some callers may pass a slicelength that's more than the actual
-	 * decompressed size.  If so, just decompress normally.  This avoids
-	 * possibly allocating a larger-than-necessary result object, and may be
-	 * faster and/or more robust as well.  Notably, some versions of liblz4
-	 * have been seen to give wrong results if passed an output size that is
-	 * more than the data's true decompressed size.
-	 */
-	if ((uint32) slicelength >= TOAST_COMPRESS_EXTSIZE(attr))
-		return toast_decompress_datum(attr);
-
-	/*
 	 * Fetch the compression method id stored in the compression header and
-	 * decompress the data slice using the appropriate decompression routine.
+	 * decompress the data (slice or full) using the appropriate decompression routine.
 	 */
 	cmid = TOAST_COMPRESS_METHOD(attr);
 	switch (cmid)
