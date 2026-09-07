@@ -150,6 +150,15 @@ $node_pitr->poll_query_until('postgres',
 # Stop the node.  This archives the last segment.
 $node_pitr->stop();
 
+# The new timeline branched from timeline 1 at the recovery target, before
+# timeline 2 branched from timeline 1.  Its history must therefore name
+# timeline 1 as its direct parent, rather than copying timeline 2's history.
+my $history = slurp_file($node_primary->archive_dir . '/00000003.history');
+like(
+	$history,
+	qr/^1\t[0-9A-F]+\/[0-9A-F]+\t[^\r\n]*(?:\r?\n)?\z/,
+	"new timeline history has the timeline containing the target as parent");
+
 # Test archive recovery on the timeline created by the PITR.  This
 # replays the end-of-recovery record that switches from timeline 1 to
 # 3.
