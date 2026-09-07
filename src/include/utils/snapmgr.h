@@ -28,9 +28,11 @@ extern PGDLLIMPORT TransactionId RecentXmin;
 extern PGDLLIMPORT SnapshotData SnapshotSelfData;
 extern PGDLLIMPORT SnapshotData SnapshotAnyData;
 extern PGDLLIMPORT SnapshotData SnapshotToastData;
+extern PGDLLIMPORT SnapshotData SnapshotDirtySerializableData;
 
 #define SnapshotSelf		(&SnapshotSelfData)
 #define SnapshotAny			(&SnapshotAnyData)
+#define SnapshotDirtySerializable	(&SnapshotDirtySerializableData)
 
 /* Use get_toast_snapshot() for the TOAST snapshot */
 

@@ -144,6 +144,7 @@ static SnapshotData CatalogSnapshotData = {SNAPSHOT_MVCC};
 SnapshotData SnapshotSelfData = {SNAPSHOT_SELF};
 SnapshotData SnapshotAnyData = {SNAPSHOT_ANY};
 SnapshotData SnapshotToastData = {SNAPSHOT_TOAST};
+SnapshotData SnapshotDirtySerializableData = {SNAPSHOT_DIRTY};
 
 /* Pointers to valid snapshots */
 static Snapshot CurrentSnapshot = NULL;
