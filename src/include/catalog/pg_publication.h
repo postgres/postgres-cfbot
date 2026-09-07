@@ -177,10 +177,12 @@ typedef enum PublicationPartOpt
 
 extern List *GetIncludedPublicationRelations(Oid pubid,
 											 PublicationPartOpt pub_partopt);
-extern List *GetExcludedPublicationTables(Oid pubid,
-										  PublicationPartOpt pub_partopt);
+extern List *GetExcludedPublicationRelations(Oid pubid,
+											 PublicationPartOpt pub_partopt,
+											 char pubrelkind);
 extern List *GetAllTablesPublications(void);
-extern List *GetAllPublicationRelations(Oid pubid, char relkind, bool pubviaroot);
+extern List *GetAllPublicationRelations(Oid pubid, char pubrelkind,
+										bool pubviaroot);
 extern List *GetPublicationSchemas(Oid pubid);
 extern List *GetSchemaPublications(Oid schemaid);
 extern List *GetSchemaPublicationRelations(Oid schemaid,
@@ -200,7 +202,8 @@ extern bool check_and_fetch_column_list(Publication *pub, Oid relid,
 										MemoryContext mcxt, Bitmapset **cols);
 extern ObjectAddress publication_add_relation(Oid pubid, PublicationRelInfo *pri,
 											  bool if_not_exists,
-											  AlterPublicationStmt *alter_stmt);
+											  AlterPublicationStmt *alter_stmt,
+											  char pubrelkind);
 extern Bitmapset *pub_collist_validate(Relation targetrel, List *columns);
 extern ObjectAddress publication_add_schema(Oid pubid, Oid schemaid,
 											bool if_not_exists);

@@ -4571,23 +4571,31 @@ getPublications(Archive *fout)
 		{
 			NULL, NULL
 		};
+		pubinfo[i].except_sequences = (SimplePtrList)
+		{
+			NULL, NULL
+		};
 
 		/* Decide whether we want to dump it */
 		selectDumpableObject(&(pubinfo[i].dobj), fout);
 
 		/*
-		 * Get the list of tables for publications specified in the EXCEPT
-		 * TABLE clause.
+		 * Get the list of tables and sequences explicitly excluded from the
+		 * publication.
 		 *
-		 * Although individual table entries in EXCEPT list could be stored in
-		 * PublicationRelInfo, dumpPublicationTable cannot be used to emit
-		 * them, because there is no ALTER PUBLICATION ... ADD command to add
-		 * individual table entries to the EXCEPT list.
+		 * Although individual table/sequence entries in EXCEPT clause could
+		 * be stored in PublicationRelInfo, dumpPublicationTable cannot be
+		 * used to emit them, because there is no ALTER PUBLICATION ... ADD
+		 * command to add individual table entries to the EXCEPT clause.
 		 *
-		 * Therefore, the approach is to dump the complete EXCEPT list in a
+		 * Therefore, the approach is to dump the complete EXCEPT clauses in a
 		 * single CREATE PUBLICATION statement. PublicationInfo is used to
 		 * collect this information, which is then emitted by
 		 * dumpPublication().
+		 *
+		 * Note: EXCEPT (TABLE ...) was introduced in PG19, whereas EXCEPT
+		 * (SEQUENCE ...) was introduced in PG20. Hence, the version checks
+		 * below differ.
 		 */
 		if (fout->remoteVersion >= 190000)
 		{
@@ -4596,9 +4604,10 @@ getPublications(Archive *fout)
 
 			resetPQExpBuffer(query);
 			appendPQExpBuffer(query,
-							  "SELECT prrelid\n"
-							  "FROM pg_catalog.pg_publication_rel\n"
-							  "WHERE prpubid = %u AND prexcept",
+							  "SELECT pr.prrelid, pc.relkind\n"
+							  "FROM pg_catalog.pg_publication_rel pr\n"
+							  "JOIN pg_catalog.pg_class pc ON pr.prrelid = pc.oid\n"
+							  "WHERE pr.prpubid = %u AND pr.prexcept",
 							  pubinfo[i].dobj.catId.oid);
 
 			res_tbls = ExecuteSqlQuery(fout, query->data, PGRES_TUPLES_OK);
@@ -4608,14 +4617,26 @@ getPublications(Archive *fout)
 			for (int j = 0; j < ntbls; j++)
 			{
 				Oid			prrelid;
+				char		relkind;
 				TableInfo  *tbinfo;
 
 				prrelid = atooid(PQgetvalue(res_tbls, j, 0));
+				relkind = *PQgetvalue(res_tbls, j, 1);
 
 				tbinfo = findTableByOid(prrelid);
 
 				if (tbinfo != NULL)
-					simple_ptr_list_append(&pubinfo[i].except_tables, tbinfo);
+				{
+					/* EXCEPT (SEQUENCE ...) is supported from PG20 onwards. */
+					if (fout->remoteVersion >= 200000 &&
+						relkind == RELKIND_SEQUENCE)
+						simple_ptr_list_append(&pubinfo[i].except_sequences, tbinfo);
+					else if (relkind == RELKIND_RELATION ||
+							 relkind == RELKIND_PARTITIONED_TABLE)
+						simple_ptr_list_append(&pubinfo[i].except_tables, tbinfo);
+					else
+						Assert(false);
+				}
 			}
 
 			PQclear(res_tbls);
@@ -4675,12 +4696,30 @@ dumpPublication(Archive *fout, const PublicationInfo *pubinfo)
 		}
 		if (n_except > 0)
 			appendPQExpBufferChar(query, ')');
-
-		if (pubinfo->puballsequences)
-			appendPQExpBufferStr(query, ", ALL SEQUENCES");
 	}
-	else if (pubinfo->puballsequences)
-		appendPQExpBufferStr(query, " FOR ALL SEQUENCES");
+	if (pubinfo->puballsequences)
+	{
+		int			n_except = 0;
+
+		if (pubinfo->puballtables)
+			appendPQExpBufferStr(query, ", ALL SEQUENCES");
+		else
+			appendPQExpBufferStr(query, " FOR ALL SEQUENCES");
+
+		/* Include EXCEPT (SEQUENCE) clause if there are except_sequences. */
+		for (SimplePtrListCell *cell = pubinfo->except_sequences.head; cell; cell = cell->next)
+		{
+			TableInfo  *tbinfo = (TableInfo *) cell->ptr;
+			const char *seqname = fmtQualifiedDumpable(tbinfo);
+
+			if (++n_except == 1)
+				appendPQExpBuffer(query, " EXCEPT (SEQUENCE %s", seqname);
+			else
+				appendPQExpBuffer(query, ", %s", seqname);
+		}
+		if (n_except > 0)
+			appendPQExpBufferChar(query, ')');
+	}
 
 	appendPQExpBufferStr(query, " WITH (publish = '");
 	if (pubinfo->pubinsert)
