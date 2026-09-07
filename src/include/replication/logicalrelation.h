@@ -38,9 +38,18 @@ typedef struct LogicalRepRelMapEntry
 								 * for a REPLICA IDENTITY FULL remote
 								 * relation? */
 
-	/* Sync state. */
+	/*
+	 * Sync state.
+	 *
+	 * reportedstate and lastreported throttle the reports made by
+	 * report_unapplied_change(): the sync state that was last reported for
+	 * this relation, and when.  reportedstate is kept next to state so that
+	 * it occupies padding that follows it anyway.
+	 */
 	char		state;
+	char		reportedstate;
 	XLogRecPtr	statelsn;
+	TimestampTz lastreported;
 } LogicalRepRelMapEntry;
 
 extern void logicalrep_relmap_update(LogicalRepRelation *remoterel);
