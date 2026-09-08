@@ -10963,7 +10963,9 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
         Sets how binary values are to be encoded in XML.  This applies
         for example when <type>bytea</type> values are converted to
         XML by the functions <function>xmlelement</function> or
-        <function>xmlforest</function>.  Possible values are
+        <function>xmlforest</function>.  It also selects the encoding
+        that <function>xmlcast</function> expects when converting XML
+        back to <type>bytea</type>.  Possible values are
         <literal>base64</literal> and <literal>hex</literal>, which
         are both defined in the XML Schema standard.  The default is
         <literal>base64</literal>.  For further information about

@@ -527,6 +527,7 @@ xmlexpr_is_immutable(XmlExpr *xexpr)
 
 		case IS_XMLELEMENT:
 		case IS_XMLFOREST:
+		case IS_XMLCAST:
 
 			/*
 			 * These variants invoke I/O conversion functions for a wide range

@@ -45,6 +45,8 @@
 
 #include "postgres.h"
 
+#include <math.h>
+
 #ifdef USE_LIBXML
 #include <libxml/chvalid.h>
 #include <libxml/entities.h>
@@ -54,6 +56,9 @@
 #include <libxml/uri.h>
 #include <libxml/xmlerror.h>
 #include <libxml/xmlsave.h>
+#ifdef LIBXML_SCHEMAS_ENABLED
+#include <libxml/xmlschemastypes.h>
+#endif
 #include <libxml/xmlversion.h>
 #include <libxml/xmlwriter.h>
 #include <libxml/xpath.h>
@@ -99,6 +104,7 @@
 #include "utils/date.h"
 #include "utils/datetime.h"
 #include "utils/lsyscache.h"
+#include "utils/numeric.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
 #include "utils/xml.h"
@@ -1027,6 +1033,859 @@ xmlelement(XmlExpr *xexpr,
 #endif
 }
 
+/*
+ * Everything XMLCAST needs to know about a SQL target type, per SQL/XML:2023
+ * (ISO/IEC 9075-14:2023), Subclause 6.7 "<XML cast specification>", Syntax
+ * Rule 15.  A type absent from this table cannot be an XMLCAST target at all.
+ *
+ * "native" marks the targets exec_xmlcast() builds itself, because their XML
+ * Schema lexical form is not what the target type's input function would make
+ * of it; everything else it produces as text for an outer cast node to
+ * finish, which is General Rule 4.j's "CAST (A AS SQLT)".
+ *
+ * "collapse_ws" is the XML Schema whiteSpace facet: every type XMLCAST uses
+ * collapses, except xs:string, which preserves.  The atomized value has the
+ * facet applied before it is validated or converted, so that a padded
+ * "  -P1Y2M  " reaches interval_in() as "-P1Y2M".
+ *
+ * xsdtype is the lexical space an XML value must lie in, or XSD(UNKNOWN) --
+ * that is, 0 -- where no check applies: xs:string admits anything, and
+ * bytea's XSD type depends on xmlbinary, so xmlcast_validate_lexical()
+ * resolves that one itself.  It is stored as int rather than
+ * xmlSchemaValType so that this table, and the accessors below it, stay
+ * available in a build without libxml.
+ *
+ * Syntax Rules 15.c.ii and 15.d map every integer type to unbounded
+ * xs:integer and every approximate numeric to xs:double, so a value that is
+ * lexically fine but out of the SQL type's range is caught by the cast in
+ * General Rule 4.j rather than by validation.
+ */
+#ifdef LIBXML_SCHEMAS_ENABLED
+#define XSD(x) XML_SCHEMAS_##x
+#else
+#define XSD(x) 0
+#endif
+
+static const struct
+{
+	Oid			sqltype;
+	bool		native;
+	bool		collapse_ws;
+	int			xsdtype;
+	const char *xsdname;
+}			xmlcast_types[] =
+{
+	{XMLOID, true, false, XSD(UNKNOWN), NULL},
+	{TEXTOID, false, false, XSD(UNKNOWN), NULL},
+	{VARCHAROID, false, false, XSD(UNKNOWN), NULL},
+	{NAMEOID, false, false, XSD(UNKNOWN), NULL},
+	{BPCHAROID, false, false, XSD(UNKNOWN), NULL},
+	{BYTEAOID, true, true, XSD(UNKNOWN), NULL},
+	{BOOLOID, false, true, XSD(BOOLEAN), "xs:boolean"},
+	{INT2OID, false, true, XSD(INTEGER), "xs:integer"},
+	{INT4OID, false, true, XSD(INTEGER), "xs:integer"},
+	{INT8OID, false, true, XSD(INTEGER), "xs:integer"},
+	{NUMERICOID, false, true, XSD(DECIMAL), "xs:decimal"},
+	{FLOAT4OID, false, true, XSD(DOUBLE), "xs:double"},
+	{FLOAT8OID, false, true, XSD(DOUBLE), "xs:double"},
+	{DATEOID, true, true, XSD(DATE), "xs:date"},
+	{TIMEOID, true, true, XSD(TIME), "xs:time"},
+	{TIMETZOID, true, true, XSD(TIME), "xs:time"},
+	{TIMESTAMPOID, true, true, XSD(DATETIME), "xs:dateTime"},
+	{TIMESTAMPTZOID, true, true, XSD(DATETIME), "xs:dateTime"},
+	{INTERVALOID, true, true, XSD(DURATION), "xs:duration"},
+};
+
+/*
+ * Look up targetType in xmlcast_types[], or return -1 if it is not there.
+ */
+static int
+xmlcast_type_index(Oid targetType)
+{
+	int			i;
+
+	for (i = 0; i < lengthof(xmlcast_types); i++)
+	{
+		if (xmlcast_types[i].sqltype == targetType)
+			return i;
+	}
+
+	return -1;
+}
+
+/*
+ * Can exec_xmlcast() produce a value of the given type?
+ *
+ * The parser uses this to reject an unsupported target before execution.  The
+ * type category would be too coarse a test, since categories admit types we
+ * have no XML Schema mapping for -- oid and money are both
+ * TYPCATEGORY_NUMERIC -- and a domain inherits its base type's category.
+ */
+bool
+xmlcast_target_type_supported(Oid targetType)
+{
+	return xmlcast_type_index(targetType) >= 0;
+}
+
+/*
+ * Can the lexical form of a value converted to targetType be checked?
+ *
+ * Only false when libxml2 is present but was built without XML Schema
+ * support, and then only for the targets that need checking.
+ * transformXmlCast() consults this so that such a cast is refused once,
+ * during parse analysis, rather than once per row from inside
+ * exec_xmlcast().
+ *
+ * With no libxml2 at all there is nothing specific to say: report success
+ * here and let exec_xmlcast() raise the usual "unsupported XML feature", so
+ * that every XMLCAST fails the same way as the rest of the XML code.
+ */
+bool
+xmlcast_can_validate(Oid targetType)
+{
+#ifndef USE_LIBXML
+	return true;
+#elif defined(LIBXML_SCHEMAS_ENABLED)
+	return true;
+#else
+	int			i = xmlcast_type_index(targetType);
+
+	Assert(i >= 0);
+
+	/* nothing to check means nothing is missing */
+	return (targetType != BYTEAOID && xmlcast_types[i].xsdname == NULL);
+#endif
+}
+
+/*
+ * What type of value does exec_xmlcast() hand back for the given target?
+ *
+ * transformXmlCast() records this as the XmlExpr's result type, so that the
+ * outer cast node it adds converts from here to the declared target.
+ */
+Oid
+xmlcast_result_type(Oid targetType)
+{
+	int			i = xmlcast_type_index(targetType);
+
+	Assert(i >= 0);
+
+	return xmlcast_types[i].native ? targetType : TEXTOID;
+}
+
+#ifdef USE_LIBXML
+
+/*
+ * Is this node character data?  Text and CDATA sections are the same thing in
+ * the XQuery data model, so a run of them is a single text node.
+ */
+static bool
+xmlcast_node_is_text(xmlNodePtr node)
+{
+	return (node->type == XML_TEXT_NODE ||
+			node->type == XML_CDATA_SECTION_NODE);
+}
+
+/*
+ * Apply the XML Schema whiteSpace "collapse" facet: tabs, newlines and
+ * carriage returns become spaces, runs of spaces become one, and leading and
+ * trailing spaces are dropped.
+ */
+static char *
+xsd_collapse_whitespace(const char *str)
+{
+	StringInfoData buf;
+	bool		pending_space = false;
+
+	initStringInfo(&buf);
+
+	for (; *str; str++)
+	{
+		if (*str == ' ' || *str == '\t' || *str == '\n' || *str == '\r')
+		{
+			/* only emit a separator if something else follows */
+			pending_space = (buf.len > 0);
+			continue;
+		}
+
+		if (pending_space)
+		{
+			appendStringInfoChar(&buf, ' ');
+			pending_space = false;
+		}
+		appendStringInfoChar(&buf, *str);
+	}
+
+	return buf.data;
+}
+
+/*
+ * Is this node an item of the sequence to atomize?
+ *
+ * libxml child lists hold things the XQuery data model has no concept of: a
+ * document's children include the DTD internal subset as an XML_DTD_NODE.
+ * Match the node kinds XDM does have, so anything else is ignored rather than
+ * counted.  Entity references cannot appear here because xml_parse() passes
+ * XML_PARSE_NOENT, and XInclude markers require xmlXIncludeProcess(), which
+ * PostgreSQL never calls.
+ */
+static bool
+xmlcast_node_is_item(xmlNodePtr node)
+{
+	switch (node->type)
+	{
+		case XML_ELEMENT_NODE:
+		case XML_TEXT_NODE:
+		case XML_CDATA_SECTION_NODE:
+		case XML_COMMENT_NODE:
+		case XML_PI_NODE:
+			return true;
+		default:
+			return false;
+	}
+}
+
+/*
+ * Atomize an XML value, per SQL/XML:2023 Subclause 6.7 General Rules 4.a and
+ * 4.b: document nodes are removed and fn:data() applied to what remains.  For
+ * PostgreSQL's untyped content an item atomizes to its string value, which is
+ * what libxml's xmlNodeGetContent() computes.  Reversing a fixed list of
+ * escapes by hand would not do: what an XML value may arrive as is
+ * open-ended, whereas an escaper's output is not.
+ *
+ * General Rule 4.h then casts the sequence to a single value, which an XQuery
+ * cast can only do for one item, so two or more is an error rather than a
+ * concatenation: "<a>1</a><b>2</b>" must not become 12.  That counts items,
+ * not nodes -- the XQuery data model has no CDATA, so adjacent text and CDATA
+ * nodes are one item, and "<x><y>bar</y>foo</x>" is one element whose string
+ * value is legitimately "barfoo".
+ *
+ * *is_empty_sequence is set when there are no items at all, which General
+ * Rule 4.c makes a null result, unlike an item whose string value is empty.
+ */
+static char *
+xmlcast_atomize(Datum value, bool *is_empty_sequence)
+{
+	xmltype    *data = DatumGetXmlP(value);
+	XmlOptionType parsed_type;
+	volatile xmlDocPtr doc = NULL;
+	volatile xmlNodePtr nodes = NULL;
+	volatile xmlChar *content = NULL;
+	PgXmlErrorContext *volatile xmlerrcxt = NULL;
+	char	   *volatile result = NULL;
+
+	*is_empty_sequence = false;
+
+	/* xml_parse() brackets its own libxml usage; ours starts after it */
+	doc = xml_parse(data, XMLOPTION_CONTENT, true, GetDatabaseEncoding(),
+					&parsed_type, (xmlNodePtr *) &nodes, NULL);
+
+	/*
+	 * We already have a libxml document to free, so like
+	 * xmltotext_with_options() we call pg_xml_init() inside the PG_TRY and
+	 * are prepared for it not to have run.
+	 */
+	PG_TRY();
+	{
+		StringInfoData buf;
+		xmlNodePtr	list;
+		xmlNodePtr	cur;
+		int			nitems = 0;
+		bool		prev_was_text = false;
+
+		xmlerrcxt = pg_xml_init(PG_XML_STRICTNESS_ALL);
+
+		/*
+		 * Removing the document node leaves its children, so either way the
+		 * sequence to atomize is the top-level node list.
+		 */
+		list = (parsed_type == XMLOPTION_DOCUMENT) ?
+			doc->children : (xmlNodePtr) nodes;
+
+		for (cur = list; cur != NULL; cur = cur->next)
+		{
+			if (!xmlcast_node_is_item(cur))
+				continue;
+
+			/* a run of text and CDATA nodes is one item, so count it once */
+			if (xmlcast_node_is_text(cur) && prev_was_text)
+				continue;
+
+			prev_was_text = xmlcast_node_is_text(cur);
+			nitems++;
+		}
+
+		if (nitems == 0)
+		{
+			*is_empty_sequence = true;
+		}
+		else if (nitems > 1)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_ARGUMENT_FOR_XQUERY),
+					 errmsg("XMLCAST operand must atomize to a single value"),
+					 errdetail("The XML value contains %d items.", nitems)));
+		}
+		else
+		{
+			initStringInfo(&buf);
+
+			for (cur = list; cur != NULL; cur = cur->next)
+			{
+				if (!xmlcast_node_is_item(cur))
+					continue;
+
+				content = xmlNodeGetContent(cur);
+				if (content == NULL || xmlerrcxt->err_occurred)
+					xml_ereport(xmlerrcxt, ERROR, ERRCODE_OUT_OF_MEMORY,
+								"could not allocate xmlChar");
+				appendStringInfoString(&buf, (const char *) content);
+				xmlFree((void *) content);
+				content = NULL;
+			}
+
+			result = buf.data;
+		}
+	}
+	PG_CATCH();
+	{
+		if (content)
+			xmlFree((void *) content);
+		if (nodes)
+			xmlFreeNodeList((xmlNodePtr) nodes);
+		if (doc)
+			xmlFreeDoc(doc);
+		if (xmlerrcxt)
+			pg_xml_done(xmlerrcxt, true);
+
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	if (nodes)
+		xmlFreeNodeList((xmlNodePtr) nodes);
+	if (doc)
+		xmlFreeDoc(doc);
+	pg_xml_done(xmlerrcxt, false);
+
+	return result;
+}
+
+/*
+ * Check that an XML value lies in the lexical space of the XML Schema type
+ * corresponding to targetType, and complain if it does not.
+ *
+ * This is what separates XMLCAST from a plain CAST in the XML -> SQL
+ * direction: a SQL input function accepts whatever PostgreSQL accepts, which
+ * is wider than the XSD lexical space (bool "yes", int "0x10", interval
+ * "3 days") and, for dates and timestamps, depends on DateStyle.
+ *
+ * libxml2 implements every built-in XSD lexical space, so validate with it
+ * rather than reimplementing the rules.  Do not, however, reach for
+ * xmlSchemaGetCanonValue() to normalize afterwards: as of libxml2 2.12 its
+ * xs:duration canonicalization inverts the sign and drops the day component.
+ */
+static void
+xmlcast_validate_lexical(const char *str, Oid targetType)
+{
+	int			i = xmlcast_type_index(targetType);
+#ifdef LIBXML_SCHEMAS_ENABLED
+	xmlSchemaValType xsdtype;
+	const char *xsdname;
+	volatile xmlSchemaValPtr val = NULL;
+	PgXmlErrorContext *xmlerrcxt;
+	int			rc;
+#endif
+
+	Assert(i >= 0);
+
+	/*
+	 * Nothing to check for a character-string target: the lexical space of
+	 * xs:string admits anything.  Decide this before the guard below, so that
+	 * those casts keep working in a build without XML Schema support.  bytea
+	 * has no entry in the table (its XSD type depends on xmlbinary) but is
+	 * checked all the same.
+	 */
+	if (targetType != BYTEAOID && xmlcast_types[i].xsdname == NULL)
+		return;
+
+#ifdef LIBXML_SCHEMAS_ENABLED
+	if (targetType == BYTEAOID)
+	{
+		/*
+		 * Which of the two XSD binary types applies is the xmlbinary choice,
+		 * so the table cannot record it.  Note this is stricter than
+		 * binary_decode(), which ignores embedded whitespace in both
+		 * encodings: xs:base64Binary permits it, xs:hexBinary does not.
+		 */
+		if (xmlbinary == XMLBINARY_BASE64)
+		{
+			xsdtype = XML_SCHEMAS_BASE64BINARY;
+			xsdname = "xs:base64Binary";
+		}
+		else
+		{
+			xsdtype = XML_SCHEMAS_HEXBINARY;
+			xsdname = "xs:hexBinary";
+		}
+	}
+	else
+	{
+		/*
+		 * xs:double admits INF, -INF and NaN, but General Rule 4.i.v rejects
+		 * them for an approximate numeric target even so.  An infinite float
+		 * therefore does not survive a round trip through XML.
+		 */
+		if ((targetType == FLOAT4OID || targetType == FLOAT8OID) &&
+			(strcmp(str, "INF") == 0 || strcmp(str, "-INF") == 0 ||
+			 strcmp(str, "NaN") == 0))
+			ereport(ERROR,
+					(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+					 errmsg("cannot cast value \"%s\" to %s",
+							str, format_type_be(targetType)),
+					 errdetail("XMLCAST does not accept infinity or NaN for approximate numeric types.")));
+
+		xsdtype = (xmlSchemaValType) xmlcast_types[i].xsdtype;
+		xsdname = xmlcast_types[i].xsdname;
+	}
+
+	xmlerrcxt = pg_xml_init(PG_XML_STRICTNESS_ALL);
+
+	PG_TRY();
+	{
+		xmlSchemaTypePtr xsd;
+
+		/*
+		 * Required on older libxml2; newer versions initialize the built-in
+		 * types from xmlInitParser().  It guards itself against being called
+		 * twice, and its return type changed from void to int along the way,
+		 * so just call it and ignore the result.
+		 */
+		xmlSchemaInitTypes();
+
+		xsd = xmlSchemaGetBuiltInType(xsdtype);
+		if (xsd == NULL)
+			elog(ERROR, "could not find XML Schema built-in type %d",
+				 (int) xsdtype);
+
+		rc = xmlSchemaValidatePredefinedType(xsd, (const xmlChar *) str,
+											 (xmlSchemaValPtr *) &val);
+
+		/* the parsed value is libxml-allocated, so release it either way */
+		if (val != NULL)
+		{
+			xmlSchemaFreeValue(val);
+			val = NULL;
+		}
+
+		if (rc != 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_XML_CONTENT),
+					 errmsg("invalid %s value: \"%s\"", xsdname, str),
+					 errdetail("XMLCAST requires the XML value to be in the lexical space of %s.",
+							   xsdname)));
+
+		/* a lexically valid value should not have logged anything either */
+		if (xmlerrcxt->err_occurred)
+			xml_ereport(xmlerrcxt, ERROR, ERRCODE_INVALID_XML_CONTENT,
+						"could not validate XML value");
+	}
+	PG_CATCH();
+	{
+		if (val != NULL)
+			xmlSchemaFreeValue(val);
+
+		pg_xml_done(xmlerrcxt, true);
+
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	pg_xml_done(xmlerrcxt, false);
+#else
+	/* transformXmlCast() rejects such a cast via xmlcast_can_validate() */
+	elog(ERROR, "XML Schema validation is not available in this build");
+#endif							/* LIBXML_SCHEMAS_ENABLED */
+}
+
+/*
+ * If a validated XSD date/time lexical form carries a time zone, return the
+ * offset of where it starts; otherwise return -1.
+ *
+ * The zone, when present, is a trailing "Z" or "+hh:mm"/"-hh:mm".  Testing
+ * for the sign alone is not enough: in a bare "2002-09-24" the character six
+ * from the end is the year-month separator.  Requiring the ":" of "hh:mm" in
+ * its place distinguishes the two, and also leaves a leading "-" (a negative
+ * year) alone.
+ */
+static int
+xsd_datetime_timezone_offset(const char *str)
+{
+	size_t		len = strlen(str);
+
+	if (len >= 1 && str[len - 1] == 'Z')
+		return (int) len - 1;
+
+	if (len >= 6 && (str[len - 6] == '+' || str[len - 6] == '-') &&
+		str[len - 3] == ':')
+		return (int) len - 6;
+
+	return -1;
+}
+
+/*
+ * Convert a validated XSD date/time lexical form to the requested SQL type.
+ *
+ * SQL/XML:2023 Subclause 6.7 General Rules 4.h.i-iii and 4.i.vii-viii pin
+ * down how time zones are handled, and it is not what the SQL input functions
+ * do on their own:
+ *
+ * - For a target WITHOUT TIME ZONE, a value that carries a zone is first
+ *   adjusted to UTC and only then stripped of it, so "12:00:00+06:00" becomes
+ *   06:00:00 rather than 12:00:00.
+ *
+ * - For a target WITH TIME ZONE, a value that carries no zone is taken to be
+ *   in UTC, rather than in the session's TimeZone.
+ */
+static Datum
+xmlcast_to_datetime(const char *str, Oid targetType)
+{
+	int			tzoff = xsd_datetime_timezone_offset(str);
+	bool		has_tz = (tzoff >= 0);
+	Datum		d;
+
+	switch (targetType)
+	{
+		case DATEOID:
+			if (!has_tz)
+				return DirectFunctionCall3(date_in, CStringGetDatum(str),
+										   ObjectIdGetDatum(InvalidOid),
+										   Int32GetDatum(-1));
+
+			/*
+			 * An xs:date with a zone denotes midnight in that zone; normalize
+			 * that instant to UTC and take the date it falls on, which may be
+			 * the day before or after the one written.
+			 */
+			d = DirectFunctionCall3(timestamptz_in,
+									CStringGetDatum(psprintf("%.*sT00:00:00%s",
+															 tzoff, str,
+															 str + tzoff)),
+									ObjectIdGetDatum(InvalidOid),
+									Int32GetDatum(-1));
+			d = DirectFunctionCall2(timestamptz_zone,
+									CStringGetTextDatum("UTC"), d);
+			return DirectFunctionCall1(timestamp_date, d);
+
+		case TIMESTAMPOID:
+			if (!has_tz)
+				return DirectFunctionCall3(timestamp_in, CStringGetDatum(str),
+										   ObjectIdGetDatum(InvalidOid),
+										   Int32GetDatum(-1));
+
+			d = DirectFunctionCall3(timestamptz_in, CStringGetDatum(str),
+									ObjectIdGetDatum(InvalidOid),
+									Int32GetDatum(-1));
+			return DirectFunctionCall2(timestamptz_zone,
+									   CStringGetTextDatum("UTC"), d);
+
+		case TIMESTAMPTZOID:
+			/* an absent zone means UTC, not the session's TimeZone */
+			return DirectFunctionCall3(timestamptz_in,
+									   CStringGetDatum(has_tz ? str :
+													   psprintf("%sZ", str)),
+									   ObjectIdGetDatum(InvalidOid),
+									   Int32GetDatum(-1));
+
+		case TIMEOID:
+			if (!has_tz)
+				return DirectFunctionCall3(time_in, CStringGetDatum(str),
+										   ObjectIdGetDatum(InvalidOid),
+										   Int32GetDatum(-1));
+
+			d = DirectFunctionCall3(timetz_in, CStringGetDatum(str),
+									ObjectIdGetDatum(InvalidOid),
+									Int32GetDatum(-1));
+			d = DirectFunctionCall2(timetz_zone, CStringGetTextDatum("UTC"), d);
+			return DirectFunctionCall1(timetz_time, d);
+
+		case TIMETZOID:
+			/* an absent zone means UTC, not the session's TimeZone */
+			return DirectFunctionCall3(timetz_in,
+									   CStringGetDatum(has_tz ? str :
+													   psprintf("%sZ", str)),
+									   ObjectIdGetDatum(InvalidOid),
+									   Int32GetDatum(-1));
+	}
+
+	elog(ERROR, "unexpected XMLCAST datetime target type: %u", targetType);
+}
+
+#endif							/* USE_LIBXML */
+
+/*
+ * Execute an IS_XMLCAST expression.
+ *
+ * sourceType is the OID of the input value's type; targetType is the OID of
+ * the requested output type.  The returned Datum has the type that
+ * xmlcast_result_type() reports for the expression; for the targets not
+ * listed there the result is text, which an outer cast node inserted by the
+ * parser converts the rest of the way.
+ *
+ * *isnull is set when the result is the null value, which General Rule 4.c
+ * calls for when the XML value atomizes to the empty sequence.  The caller
+ * must initialize it to false.
+ */
+Datum
+exec_xmlcast(Datum value, Oid sourceType, Oid targetType, bool *isnull)
+{
+#ifdef USE_LIBXML
+	switch (targetType)
+	{
+	case XMLOID:
+		/*
+		 * The SQL -> XML direction, General Rule 3.a: the value is written in
+		 * the lexical form of the XML Schema type that Subclause 9.8 pairs
+		 * with its SQL type.  A value with no such form is rejected rather
+		 * than written approximately.
+		 *
+		 * A case that breaks out of this switch is one whose XSD form
+		 * map_sql_value_to_xml_value() already produces.
+		 */
+		switch (sourceType)
+		{
+			case XMLOID:
+				/* already XML, so nothing to escape */
+				return PointerGetDatum(DatumGetXmlP(value));
+
+			case TEXTOID:
+			case VARCHAROID:
+			case BPCHAROID:
+				/* a character string; xmltext() escapes what XML reserves */
+				return PointerGetDatum(DatumGetXmlP(DirectFunctionCall1(xmltext,
+																		value)));
+
+			case FLOAT4OID:
+			case FLOAT8OID:
+				{
+					float8		val = (sourceType == FLOAT4OID) ?
+						(float8) DatumGetFloat4(value) : DatumGetFloat8(value);
+
+					/*
+					 * xs:double writes INF and -INF where float8out() writes
+					 * Infinity.  It spells NaN the same way, but say so here
+					 * rather than leave the agreement to chance.
+					 */
+					if (isinf(val))
+						return PointerGetDatum(cstring_to_xmltype(val < 0 ?
+																  "-INF" : "INF"));
+					if (isnan(val))
+						return PointerGetDatum(cstring_to_xmltype("NaN"));
+				}
+				break;
+
+			case NUMERICOID:
+				{
+					Numeric		num = DatumGetNumeric(value);
+
+					/* xs:decimal has neither infinities nor NaN */
+					if (numeric_is_inf(num) || numeric_is_nan(num))
+						ereport(ERROR,
+								(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+								 errmsg("numeric out of range"),
+								 errdetail("XML does not support infinite or NaN numeric values.")));
+				}
+				break;
+
+			case INTERVALOID:
+				{
+					Interval   *in = DatumGetIntervalP(value);
+					struct pg_itm tt,
+							   *itm = &tt;
+					char		buf[MAXDATELEN + 1];
+					bool		negative;
+
+					/*
+					 * Infinity has no representation in the XSD lexical space
+					 * for xs:duration.
+					 */
+					if (INTERVAL_NOT_FINITE(in))
+						ereport(ERROR,
+								(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+								 errmsg("interval out of range"),
+								 errdetail("XML does not support infinite interval values.")));
+
+					/*
+					 * xs:duration carries one sign for the whole value, in
+					 * front of the "P", so a duration whose fields disagree in
+					 * sign cannot be represented at all.  EncodeInterval()
+					 * would happily write "P1Y-1D", which is not in the
+					 * lexical space.
+					 */
+					negative = (in->month < 0 || in->day < 0 || in->time < 0);
+					if (negative &&
+						(in->month > 0 || in->day > 0 || in->time > 0))
+						ereport(ERROR,
+								(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+								 errmsg("interval cannot be represented as xs:duration"),
+								 errdetail("Intervals whose fields differ in sign have no xs:duration representation.")));
+
+					/* encode the magnitude and put the sign in front */
+					if (negative)
+						in = DatumGetIntervalP(DirectFunctionCall1(interval_um,
+																   IntervalPGetDatum(in)));
+
+					interval2itm(*in, itm);
+					EncodeInterval(itm, INTSTYLE_ISO_8601, buf);
+
+					if (negative)
+						return PointerGetDatum(cstring_to_xmltype(psprintf("-%s",
+																		   buf)));
+
+					return PointerGetDatum(cstring_to_xmltype(buf));
+				}
+
+			case TIMEOID:
+			case TIMETZOID:
+				{
+					/*
+					 * xs:time wants a two-part time zone offset ("+02:00"),
+					 * which is what USE_XSD_DATES produces; time_out() and
+					 * timetz_out() would give "+02".
+					 * map_sql_value_to_xml_value() has no case for these
+					 * types, and adding one there would change the output of
+					 * XMLELEMENT and friends, so handle them here.
+					 */
+					struct pg_tm tm;
+					fsec_t		fsec;
+					int			tz;
+					char		buf[MAXDATELEN + 1];
+
+					if (sourceType == TIMEOID)
+					{
+						time2tm(DatumGetTimeADT(value), &tm, &fsec);
+						EncodeTimeOnly(&tm, fsec, false, 0, USE_XSD_DATES, buf);
+					}
+					else
+					{
+						timetz2tm(DatumGetTimeTzADTP(value), &tm, &fsec, &tz);
+						EncodeTimeOnly(&tm, fsec, true, tz, USE_XSD_DATES, buf);
+					}
+
+					return PointerGetDatum(cstring_to_xmltype(buf));
+				}
+
+			case BOOLOID:
+			case DATEOID:
+			case TIMESTAMPOID:
+			case TIMESTAMPTZOID:
+			case BYTEAOID:
+				break;
+
+			default:
+				elog(ERROR, "unexpected XMLCAST source type: %u", sourceType);
+		}
+
+		return PointerGetDatum(cstring_to_xmltype(map_sql_value_to_xml_value(value,
+																			 sourceType,
+																			 false)));
+
+	default:
+	{
+		/*
+		 * The XML -> SQL direction, SQL/XML:2023 Subclause 6.7 General Rule
+		 * 4.  Atomize first (4.a, 4.b), turn the empty sequence into a null
+		 * (4.c), check the value against the lexical space of the XML Schema
+		 * type that Syntax Rule 15 pairs with the target, then build the
+		 * value.  Anything this switch does not convert itself is handed back
+		 * as text for the outer cast node to finish, which is General Rule
+		 * 4.j's "CAST (A AS SQLT)".
+		 */
+		bool		is_empty_sequence;
+		char	   *str;
+		Datum		res;
+
+		Assert(sourceType == XMLOID);
+
+		str = xmlcast_atomize(value, &is_empty_sequence);
+
+		if (is_empty_sequence)
+		{
+			*isnull = true;
+			return (Datum) 0;
+		}
+
+		/*
+		 * Apply the target's whiteSpace facet before anything looks at the
+		 * string.  xmlSchemaValidatePredefinedType() normalizes on the fly
+		 * and would accept a padded value either way, but the conversions
+		 * below inspect the string directly.
+		 */
+		if (xmlcast_types[xmlcast_type_index(targetType)].collapse_ws)
+		{
+			char	   *collapsed = xsd_collapse_whitespace(str);
+
+			pfree(str);
+			str = collapsed;
+		}
+
+		xmlcast_validate_lexical(str, targetType);
+
+		switch (targetType)
+		{
+			case BYTEAOID:
+				res = DirectFunctionCall2(binary_decode,
+										  CStringGetTextDatum(str),
+										  CStringGetTextDatum(xmlbinary == XMLBINARY_BASE64 ?
+															  "base64" : "hex"));
+				break;
+
+			case INTERVALOID:
+				{
+					/*
+					 * interval_in() cannot read the canonical xs:duration
+					 * spelling of a negative duration: it wants "P-1Y-2M"
+					 * where the standard writes "-P1Y2M".  Convert the
+					 * magnitude and negate.
+					 */
+					bool		negative = (str[0] == '-');
+
+					res = DirectFunctionCall3(interval_in,
+											  CStringGetDatum(negative ? str + 1 : str),
+											  ObjectIdGetDatum(InvalidOid),
+											  Int32GetDatum(-1));
+					if (negative)
+						res = DirectFunctionCall1(interval_um, res);
+				}
+				break;
+
+			case DATEOID:
+			case TIMEOID:
+			case TIMETZOID:
+			case TIMESTAMPOID:
+			case TIMESTAMPTZOID:
+				res = xmlcast_to_datetime(str, targetType);
+				break;
+
+			default:
+				/*
+				 * Everything else is handed to the outer cast node as text,
+				 * so the table had better not have claimed we build it here.
+				 */
+				Assert(xmlcast_result_type(targetType) == TEXTOID);
+				res = PointerGetDatum(cstring_to_text(str));
+				break;
+		}
+
+		pfree(str);
+		return res;
+	}
+	}
+#else
+	NO_XML_SUPPORT();
+	return (Datum)0;
+#endif
+}
 
 xmltype *
 xmlparse(text *data, XmlOptionType xmloption_arg, bool preserve_whitespace, Node *escontext)

@@ -883,6 +883,22 @@ typedef struct XmlSerialize
 	ParseLoc	location;		/* token location, or -1 if unknown */
 } XmlSerialize;
 
+/*
+ * XMLCAST (in raw parse tree only)
+ */
+typedef struct XmlCast
+{
+	NodeTag		type;
+	Node	   *expr;
+	TypeName   *typeName;
+	/*
+	 * Was BY REF or BY VALUE written?  Which one makes no difference, but
+	 * Syntax Rule 9 restricts where the clause may appear at all.
+	 */
+	bool		passing_mech;
+	ParseLoc	location;		/* token location, or -1 if unknown */
+} XmlCast;
+
 /* Partitioning related definitions */
 
 /*

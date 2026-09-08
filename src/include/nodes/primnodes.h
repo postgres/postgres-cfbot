@@ -1597,6 +1597,7 @@ typedef enum XmlExprOp
 	IS_XMLROOT,					/* XMLROOT(xml, version, standalone) */
 	IS_XMLSERIALIZE,			/* XMLSERIALIZE(is_document, xmlval, indent) */
 	IS_DOCUMENT,				/* xmlval IS DOCUMENT */
+	IS_XMLCAST,					/* XMLCAST(op AS datatype) */
 } XmlExprOp;
 
 typedef enum XmlOptionType
@@ -1622,9 +1623,18 @@ typedef struct XmlExpr
 	XmlOptionType xmloption pg_node_attr(query_jumble_ignore);
 	/* INDENT option for XMLSERIALIZE */
 	bool		indent;
-	/* target type/typmod for XMLSERIALIZE */
+	/*
+	 * For XMLSERIALIZE, the declared target type/typmod; the node itself
+	 * produces text, which an outer cast converts.  For XMLCAST, the
+	 * type/typmod of the value the node produces, which exprType() reports.
+	 */
 	Oid			type pg_node_attr(query_jumble_ignore);
 	int32		typmod pg_node_attr(query_jumble_ignore);
+	/* declared target type/typmod for XMLCAST */
+	Oid			targetType;
+	int32		targetTypmod;
+	/* type of the lone argument, for XMLCAST */
+	Oid			sourceType pg_node_attr(query_jumble_ignore);
 	/* token location, or -1 if unknown */
 	ParseLoc	location;
 } XmlExpr;

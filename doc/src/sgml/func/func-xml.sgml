@@ -10,9 +10,10 @@
    The functions and function-like expressions described in this
    section operate on values of type <type>xml</type>.  See <xref
    linkend="datatype-xml"/> for information about the <type>xml</type>
-   type.  The function-like expressions <function>xmlparse</function>
-   and <function>xmlserialize</function> for converting to and from
-   type <type>xml</type> are documented there, not in this section.
+   type.  The function-like expressions <function>xmlparse</function>,
+   <function>xmlcast</function>, and <function>xmlserialize</function>
+   for converting to and from type <type>xml</type> are documented
+   there, not in this section.
   </para>
 
   <para>
