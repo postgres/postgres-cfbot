@@ -26,6 +26,7 @@ parse_node.c	create nodes for various structures
 parse_oper.c	handle operators in expressions
 parse_param.c	handle Params (for the cases used in the core backend)
 parse_relation.c support routines for tables and column handling
+parse_rpr.c	handle Row Pattern Recognition
 parse_target.c	handle the result list of the query
 parse_type.c	support routines for data type handling
 parse_utilcmd.c	parse analysis for utility commands (done at execution time)
