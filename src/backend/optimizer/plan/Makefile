@@ -19,6 +19,7 @@ OBJS = \
 	planagg.o \
 	planmain.o \
 	planner.o \
+	rpr.o \
 	setrefs.o \
 	subselect.o
 
