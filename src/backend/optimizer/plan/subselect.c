@@ -91,6 +91,7 @@ static bool contain_outer_selfref(Node *node);
 static bool contain_outer_selfref_walker(Node *node, Index *depth);
 static void inline_cte(PlannerInfo *root, CommonTableExpr *cte);
 static bool inline_cte_walker(Node *node, inline_cte_walker_context *context);
+static bool is_cte_inlineable(CommonTableExpr *cte);
 static bool sublink_testexpr_is_not_nullable(PlannerInfo *root, SubLink *sublink);
 static bool simplify_EXISTS_query(PlannerInfo *root, Query *query);
 static Query *convert_EXISTS_to_ANY(PlannerInfo *root, Query *subselect,
@@ -918,43 +919,8 @@ SS_process_ctes(PlannerInfo *root)
 		/*
 		 * Consider inlining the CTE (creating RTE_SUBQUERY RTE(s)) instead of
 		 * implementing it as a separately-planned CTE.
-		 *
-		 * We cannot inline if any of these conditions hold:
-		 *
-		 * 1. The user said not to (the CTEMaterializeAlways option).
-		 *
-		 * 2. The CTE is recursive.
-		 *
-		 * 3. The CTE has side-effects; this includes either not being a plain
-		 * SELECT, or containing volatile functions.  Inlining might change
-		 * the side-effects, which would be bad.
-		 *
-		 * 4. The CTE is multiply-referenced and contains a self-reference to
-		 * a recursive CTE outside itself.  Inlining would result in multiple
-		 * recursive self-references, which we don't support.
-		 *
-		 * Otherwise, we have an option whether to inline or not.  That should
-		 * always be a win if there's just a single reference, but if the CTE
-		 * is multiply-referenced then it's unclear: inlining adds duplicate
-		 * computations, but the ability to absorb restrictions from the outer
-		 * query level could outweigh that.  We do not have nearly enough
-		 * information at this point to tell whether that's true, so we let
-		 * the user express a preference.  Our default behavior is to inline
-		 * only singly-referenced CTEs, but a CTE marked CTEMaterializeNever
-		 * will be inlined even if multiply referenced.
-		 *
-		 * Note: we check for volatile functions last, because that's more
-		 * expensive than the other tests needed.
 		 */
-		if ((cte->ctematerialized == CTEMaterializeNever ||
-			 (cte->ctematerialized == CTEMaterializeDefault &&
-			  cte->cterefcount == 1)) &&
-			!cte->cterecursive &&
-			cmdType == CMD_SELECT &&
-			!contain_dml(cte->ctequery) &&
-			(cte->cterefcount <= 1 ||
-			 !contain_outer_selfref(cte->ctequery)) &&
-			!contain_volatile_functions(cte->ctequery))
+		if (is_cte_inlineable(cte))
 		{
 			inline_cte(root, cte);
 			/* Make a dummy entry in cte_plan_ids */
@@ -1221,6 +1187,111 @@ inline_cte_walker(Node *node, inline_cte_walker_context *context)
 	}
 
 	return expression_tree_walker(node, inline_cte_walker, context);
+}
+
+/*
+ * We cannot inline if any of these conditions hold:
+ *
+ * 1. The user said not to (the CTEMaterializeAlways option).
+ *
+ * 2. The CTE is recursive.
+ *
+ * 3. The CTE has side-effects; this includes either not being a plain
+ * SELECT, or containing volatile functions.  Inlining might change
+ * the side-effects, which would be bad.
+ *
+ * 4. The CTE is multiply-referenced and contains a self-reference to
+ * a recursive CTE outside itself.  Inlining would result in multiple
+ * recursive self-references, which we don't support.
+ *
+ * Otherwise, we have an option whether to inline or not.  That should
+ * always be a win if there's just a single reference, but if the CTE
+ * is multiply-referenced then it's unclear: inlining adds duplicate
+ * computations, but the ability to absorb restrictions from the outer
+ * query level could outweigh that.  We do not have nearly enough
+ * information at this point to tell whether that's true, so we let
+ * the user express a preference.  Our default behavior is to inline
+ * only singly-referenced CTEs, but a CTE marked CTEMaterializeNever
+ * will be inlined even if multiply referenced.
+ *
+ * Note: we check for volatile functions last, because that's more
+ * expensive than the other tests needed.
+ */
+static bool
+is_cte_inlineable(CommonTableExpr *cte)
+{
+	CmdType		cmdType = ((Query *) cte->ctequery)->commandType;
+
+	return (cte->ctematerialized == CTEMaterializeNever ||
+			(cte->ctematerialized == CTEMaterializeDefault &&
+			 cte->cterefcount == 1)) &&
+			!cte->cterecursive &&
+			cmdType == CMD_SELECT &&
+			!contain_dml(cte->ctequery) &&
+			(cte->cterefcount <= 1 ||
+			 !contain_outer_selfref(cte->ctequery)) &&
+			 !contain_volatile_functions((Node *) cte->ctequery);
+}
+
+/*
+ * SS_all_ctes_inlineable: are all CTEs in the query inlineable?
+ *
+ * Returns true if every CTE in cteList passes the inlineability checks
+ * of is_cte_inlineable().  Returns false if any CTE is not inlineable,
+ * or if there are unreferenced CTEs.  Used by is_simple_subquery to determine
+ * whether a subquery with CTEs can still be pulled up.
+ */
+bool
+SS_all_ctes_inlineable(Query *subquery)
+{
+	ListCell   *lc;
+
+	foreach(lc, subquery->cteList)
+	{
+		CommonTableExpr *cte = (CommonTableExpr *) lfirst(lc);
+		CmdType		cmdType = ((Query *) cte->ctequery)->commandType;
+
+		/*
+		 * Unreferenced SELECT CTEs are neither inlined nor materialized
+		 * by SS_process_ctes -- they are simply skipped with a dummy entry
+		 * in cte_plan_ids.
+		 */
+		if (cte->cterefcount == 0 && cmdType == CMD_SELECT)
+			return false;
+
+		if (!is_cte_inlineable(cte))
+			return false;
+	}
+
+	return true;
+}
+
+/*
+ * SS_inline_ctes: inline all inlineable CTEs in the given query.
+ *
+ * Inlineable CTEs are replaced with RTE_SUBQUERY references via
+ * inline_cte_walker, and removed from cteList.
+ *
+ * Inlineability conditions are determined by SS_all_ctes_inlineable().
+ */
+void
+SS_inline_ctes(PlannerInfo *root)
+{
+	ListCell   *lc;
+
+	foreach(lc, root->parse->cteList)
+	{
+		CommonTableExpr *cte = (CommonTableExpr *) lfirst(lc);
+
+		Assert(((Query *) cte->ctequery)->commandType == CMD_SELECT &&
+			   is_cte_inlineable(cte));
+
+		inline_cte(root, cte);
+	}
+
+	/* CTEs have inlined, so we can clean this list */
+	root->parse->cteList = NIL;
+	return;
 }
 
 /*
