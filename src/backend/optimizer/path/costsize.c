@@ -104,6 +104,7 @@
 #include "optimizer/placeholder.h"
 #include "optimizer/plancat.h"
 #include "optimizer/restrictinfo.h"
+#include "optimizer/rpr.h"
 #include "parser/parsetree.h"
 #include "utils/lsyscache.h"
 #include "utils/selfuncs.h"
@@ -3260,7 +3261,22 @@ cost_windowagg(Path *path, PlannerInfo *root,
 	 * many rows the window function will fetch, it's hard to do better.  In
 	 * any case, it's a good estimate for all the built-in window functions,
 	 * so we'll just do this for now.
+	 *
+	 * Moreover, if row pattern recognition is used, we charge the DEFINE
+	 * expressions once per tuple for each DEFINE variable.
 	 */
+	if (winclause->rpPattern)
+	{
+		QualCost	defcosts;
+
+		foreach_node(TargetEntry, def, winclause->defineClause)
+		{
+			cost_qual_eval_node(&defcosts, (Node *) def->expr, root);
+			startup_cost += defcosts.startup;
+			total_cost += defcosts.per_tuple * input_tuples;
+		}
+	}
+
 	foreach(lc, windowFuncs)
 	{
 		WindowFunc *wfunc = lfirst_node(WindowFunc, lc);
