@@ -1965,8 +1965,15 @@ FigureColnameInternal(Node *node, char **name)
 				case IS_DOCUMENT:
 					/* nothing */
 					break;
+				case IS_XMLCAST:
+					*name = "xmlcast";
+					return 2;
 			}
 			break;
+		case T_XmlCast:
+			/* make XMLCAST act like a regular function */
+			*name = "xmlcast";
+			return 2;
 		case T_XmlSerialize:
 			/* make XMLSERIALIZE act like a regular function */
 			*name = "xmlserialize";

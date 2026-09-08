@@ -220,6 +220,8 @@ exprType(const Node *expr)
 				type = BOOLOID;
 			else if (((const XmlExpr *) expr)->op == IS_XMLSERIALIZE)
 				type = TEXTOID;
+			else if (((const XmlExpr *) expr)->op == IS_XMLCAST)
+				type = ((const XmlExpr *) expr)->type;
 			else
 				type = XMLOID;
 			break;
@@ -981,11 +983,14 @@ exprCollation(const Node *expr)
 		case T_XmlExpr:
 
 			/*
-			 * XMLSERIALIZE returns text from non-collatable inputs, so its
-			 * collation is always default.  The other cases return boolean or
-			 * XML, which are non-collatable.
+			 * XMLSERIALIZE, and XMLCAST to a target it reaches by way of
+			 * text, return text, so their collation is always default.  The
+			 * other cases return boolean, XML, bytea or a date/time type,
+			 * none of which are collatable.
 			 */
-			if (((const XmlExpr *) expr)->op == IS_XMLSERIALIZE)
+			if (((const XmlExpr *) expr)->op == IS_XMLSERIALIZE ||
+				(((const XmlExpr *) expr)->op == IS_XMLCAST &&
+				 ((const XmlExpr *) expr)->type == TEXTOID))
 				coll = DEFAULT_COLLATION_OID;
 			else
 				coll = InvalidOid;
@@ -1252,7 +1257,9 @@ exprSetCollation(Node *expr, Oid collation)
 				   (collation == InvalidOid));
 			break;
 		case T_XmlExpr:
-			Assert((((XmlExpr *) expr)->op == IS_XMLSERIALIZE) ?
+			Assert((((XmlExpr *) expr)->op == IS_XMLSERIALIZE ||
+					(((XmlExpr *) expr)->op == IS_XMLCAST &&
+					 ((XmlExpr *) expr)->type == TEXTOID)) ?
 				   (collation == DEFAULT_COLLATION_OID) :
 				   (collation == InvalidOid));
 			break;
@@ -1745,6 +1752,9 @@ exprLocation(const Node *expr)
 			break;
 		case T_FunctionParameter:
 			loc = ((const FunctionParameter *) expr)->location;
+			break;
+		case T_XmlCast:
+			loc = ((const XmlCast *) expr)->location;
 			break;
 		case T_XmlSerialize:
 			/* XMLSERIALIZE keyword should always be the first thing */
@@ -4512,6 +4522,16 @@ raw_expression_tree_walker_impl(Node *node,
 				if (WALK(tc->arg))
 					return true;
 				if (WALK(tc->typeName))
+					return true;
+			}
+			break;
+		case T_XmlCast:
+			{
+				XmlCast   *xc = (XmlCast *) node;
+
+				if (WALK(xc->expr))
+					return true;
+				if (WALK(xc->typeName))
 					return true;
 			}
 			break;

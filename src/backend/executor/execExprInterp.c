@@ -4719,11 +4719,27 @@ ExecEvalXmlExpr(ExprState *state, ExprEvalStep *op)
 				*op->resnull = false;
 			}
 			break;
+			case IS_XMLCAST:
+			{
+				Datum	   *argvalue = op->d.xmlexpr.argvalue;
+				bool	   *argnull = op->d.xmlexpr.argnull;
 
-		default:
-			elog(ERROR, "unrecognized XML operation");
+				Assert(list_length(xexpr->args) == 1);
+
+				if (argnull[0])
+					return;
+
+				*op->resnull = false;
+				*op->resvalue = exec_xmlcast(argvalue[0],
+											 xexpr->sourceType,
+											 xexpr->targetType,
+											 op->resnull);
+			}
 			break;
-	}
+			default:
+				elog(ERROR, "unrecognized XML operation");
+				break;
+			}
 }
 
 /*

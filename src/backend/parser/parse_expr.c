@@ -68,6 +68,7 @@ static Node *transformMinMaxExpr(ParseState *pstate, MinMaxExpr *m);
 static Node *transformSQLValueFunction(ParseState *pstate,
 									   SQLValueFunction *svf);
 static Node *transformXmlExpr(ParseState *pstate, XmlExpr *x);
+static Node *transformXmlCast(ParseState *pstate, XmlCast *xc);
 static Node *transformXmlSerialize(ParseState *pstate, XmlSerialize *xs);
 static Node *transformBooleanTest(ParseState *pstate, BooleanTest *b);
 static Node *transformCurrentOfExpr(ParseState *pstate, CurrentOfExpr *cexpr);
@@ -274,6 +275,10 @@ transformExprRecurse(ParseState *pstate, Node *expr)
 		case T_SQLValueFunction:
 			result = transformSQLValueFunction(pstate,
 											   (SQLValueFunction *) expr);
+			break;
+
+		case T_XmlCast:
+			result = transformXmlCast(pstate, (XmlCast *) expr);
 			break;
 
 		case T_XmlExpr:
@@ -2491,12 +2496,144 @@ transformXmlExpr(ParseState *pstate, XmlExpr *x)
 				newe = coerce_to_specific_type(pstate, newe, XMLOID,
 											   "IS DOCUMENT");
 				break;
+			case IS_XMLCAST:
+				/* not handled here */
+				Assert(false);
+				break;
 		}
 		newx->args = lappend(newx->args, newe);
 		i++;
 	}
 
 	return (Node *) newx;
+}
+
+/*
+ * transformXmlCast -
+ *	  transform an XMLCAST expression
+ *
+ * XMLCAST converts a SQL value to xml, or an xml value to a SQL type, using
+ * the lexical form of the corresponding XML Schema type on the XML side.  One
+ * of the two must be xml; domains on either side are flattened to their base
+ * type.
+ *
+ * The XmlExpr built here does whatever exec_xmlcast() can do directly, and is
+ * wrapped in an ordinary cast node that converts its result to the type the
+ * user declared.  That wrapper is what applies a typmod and enforces the
+ * constraints of a domain target, and is General Rule 4.j's "CAST (A AS
+ * SQLT)".
+ */
+static Node *
+transformXmlCast(ParseState *pstate, XmlCast *xc)
+{
+	Node *result;
+	Node *expr;
+	XmlExpr *xexpr;
+	int32 targetTypmod;
+	Oid targetType;
+	Oid targetBaseType;
+	Oid inputType;
+
+	/* Transform the input expression */
+	expr = transformExprRecurse(pstate, xc->expr);
+
+	typenameTypeIdAndMod(pstate, xc->typeName, &targetType, &targetTypmod);
+
+	/*
+	 * Flatten domains on both sides.  What governs the conversion is the
+	 * underlying type: a domain over xml is still XML, and a domain over a
+	 * supported SQL type still has the same XML Schema lexical form.  The
+	 * XmlExpr below therefore deals only in base types, and the coercion
+	 * added at the end converts its result to the declared target type,
+	 * applying any domain constraints on the way.  map_sql_value_to_xml_value()
+	 * flattens domains for the same reason.
+	 */
+	inputType = getBaseType(exprType(expr));
+	targetBaseType = getBaseType(targetType);
+
+	/*
+	 * Ensure that either the cast operand or the data type is an XML, and
+	 * that both sides are types XMLCAST knows.  Both are matched against the
+	 * same exact set of type OIDs: a type category is too coarse a test,
+	 * since it says nothing about a type's physical representation, and
+	 * exec_xmlcast() would end up handing, say, a pass-by-value type to
+	 * xmltext() as though it were a varlena.  An untyped literal is the one
+	 * exception, and is resolved to text just below.
+	 */
+	if ((inputType != XMLOID && targetBaseType != XMLOID) ||
+		(inputType != UNKNOWNOID && !xmlcast_target_type_supported(inputType)) ||
+		!xmlcast_target_type_supported(targetBaseType))
+		ereport(ERROR,
+				(errcode(ERRCODE_CANNOT_COERCE),
+				 errmsg("cannot cast type %s to %s",
+						format_type_be(exprType(expr)),
+						format_type_be(targetType)),
+				 parser_errposition(pstate, xc->location)));
+
+	/*
+	 * A conversion from XML has to check the value against the lexical space
+	 * of its XML Schema type, which needs a libxml2 built with XML Schema
+	 * support.  Refuse here rather than accept whatever the target type's
+	 * input function happens to take.
+	 */
+	if (inputType == XMLOID && !xmlcast_can_validate(targetBaseType))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("XMLCAST to type %s is not supported by this build",
+						format_type_be(targetType)),
+				 errdetail("Checking the XML Schema lexical form requires libxml2 with XML Schema support."),
+				 parser_errposition(pstate, xc->location)));
+
+	/*
+	 * Syntax Rule 9: an <XML passing mechanism> may only be written when both
+	 * the operand and the target are XML types.  We ignore which one was
+	 * asked for, but where it may appear is still part of the syntax.
+	 */
+	if (xc->passing_mech && (inputType != XMLOID || targetBaseType != XMLOID))
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("BY REF and BY VALUE are only allowed when both the XMLCAST operand and target are of type xml"),
+				 parser_errposition(pstate, xc->location)));
+
+	/*
+	 * exec_xmlcast() has no mapping of its own for these, and their output
+	 * form is already the XML Schema one, so let them go through as text.
+	 */
+	if (inputType == INT2OID || inputType == INT4OID || inputType == INT8OID ||
+		inputType == NAMEOID || inputType == UNKNOWNOID)
+		inputType = TEXTOID;
+
+	xexpr = makeNode(XmlExpr);
+	xexpr->op = IS_XMLCAST;
+	xexpr->location = xc->location;
+	xexpr->type = xmlcast_result_type(targetBaseType);
+	xexpr->typmod = -1;
+	xexpr->targetType = targetBaseType;
+	xexpr->targetTypmod = targetTypmod;
+	xexpr->sourceType = inputType;
+	xexpr->args = list_make1(coerce_to_specific_type(pstate,
+													 expr,
+													 inputType,
+													 "XMLCAST"));
+
+	/*
+	 * Add a cast from whatever exec_xmlcast() actually produces to the type
+	 * the user asked for -- the declared one, so that a domain target picks
+	 * up its constraints here.  For a non-domain target that XMLCAST handles
+	 * natively this is a no-op.
+	 */
+	result = coerce_to_target_type(pstate, (Node *) xexpr,
+								   xexpr->type,
+								   targetType, targetTypmod,
+								   COERCION_EXPLICIT,
+								   COERCE_EXPLICIT_CAST,
+								   -1);
+
+	/* the target was vetted above, so this really should not happen */
+	if (result == NULL)
+		elog(ERROR, "could not coerce XMLCAST result to type %u", targetType);
+
+	return result;
 }
 
 static Node *

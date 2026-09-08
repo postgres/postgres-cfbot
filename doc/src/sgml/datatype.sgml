@@ -4511,14 +4511,186 @@ XMLPARSE ( { DOCUMENT | CONTENT } <replaceable>value</replaceable>)
 XMLPARSE (DOCUMENT '<?xml version="1.0"?><book><title>Manual</title><chapter>...</chapter></book>')
 XMLPARSE (CONTENT 'abc<foo>bar</foo><bar>foo</bar>')
 ]]></programlisting>
-    While this is the only way to convert character strings into XML
-    values according to the SQL standard, the PostgreSQL-specific
-    syntaxes:
+
+    Another option for converting values to or from <type>xml</type> is
+    <function>xmlcast</function>:<indexterm><primary>xmlcast</primary></indexterm>
+<synopsis>
+XMLCAST ( <replaceable>expression</replaceable> AS <replaceable>type</replaceable> [ BY REF | BY VALUE ] )
+</synopsis>
+    Like <literal>CAST</literal>, it converts <replaceable>expression</replaceable> to
+    <replaceable>type</replaceable>; unlike <literal>CAST</literal>, the XML side uses the
+    lexical form of the corresponding XML Schema type, in both directions.  An
+    <type>interval</type> is written as <literal>P1Y2M</literal> (<type>xs:duration</type>) and a
+    <type>timestamp</type> as <literal>2024-05-19T14:30:00</literal> (<type>xs:dateTime</type>);
+    reading back, an XML value outside that lexical space is an error, so
+    <literal>XMLCAST('yes'::xml AS boolean)</literal> and
+    <literal>XMLCAST('3 days'::xml AS interval)</literal> both fail.  A useful consequence is
+    that the result does not depend on <xref linkend="guc-datestyle"/>.
+
+    In detail:
+
+     <itemizedlist>
+      <listitem>
+        <para>
+          Either <replaceable>expression</replaceable> or <replaceable>type</replaceable> must be of type <type>xml</type>.
+        </para>
+      </listitem>
+      <listitem>
+        <para>
+          Casting is supported between <type>xml</type> and <link linkend="datatype-character-table">character</link>,
+          <link linkend="datatype-numeric">numeric</link>, <link linkend="datatype-datetime">date/time</link>,
+          <link linkend="datatype-boolean">boolean</link> and <link linkend="datatype-binary">binary</link> data types.
+        </para>
+      </listitem>
+      <listitem>
+        <para>
+          Converting from <type>xml</type> to a type other than a character
+          string checks the value against an XML Schema lexical space, which
+          requires that <application>libxml2</application> was built with XML
+          Schema support.  Where it was not, such a cast is rejected.
+        </para>
+      </listitem>
+      <listitem>
+        <para>
+          Domains are handled according to their base type, and the result is
+          of the declared domain type, so any constraints on it are enforced.
+        </para>
+      </listitem>
+      <listitem>
+        <para>
+          A character string target is not checked, since the lexical space of
+          <type>xs:string</type> admits anything.  Converting from XML
+          <emphasis>atomizes</emphasis> the value: the result is its
+          string value, so element markup is stripped, entity
+          and character references of every spelling are resolved,
+          and <literal>CDATA</literal> sections are unwrapped.
+          <literal>XMLCAST('&lt;a&gt;x&lt;/a&gt;'::xml AS text)</literal>
+          is therefore <literal>x</literal>, not <literal>&lt;a&gt;x&lt;/a&gt;</literal>;
+          use <function>xmlserialize</function> to obtain the markup instead.
+          An XML value with no content at all converts to the null value,
+          which is distinct from one whose string value happens to be empty.
+          Leading and trailing whitespace is ignored, as the XML Schema
+          <literal>whiteSpace</literal> facet requires, except for a character
+          string target, where <type>xs:string</type> preserves it.
+        </para>
+        <para>
+          The value must atomize to a single item.  One holding several, such
+          as <literal>'&lt;a&gt;1&lt;/a&gt;&lt;b&gt;2&lt;/b&gt;'</literal>, is
+          rejected rather than concatenated.  A single element whose content
+          spans several nodes is still one item, so
+          <literal>XMLCAST('&lt;x&gt;&lt;y&gt;bar&lt;/y&gt;foo&lt;/x&gt;'::xml AS text)</literal>
+          is <literal>barfoo</literal>.
+        </para>
+      </listitem>
+      <listitem>
+        <para>
+          Time zones are normalized rather than ignored.  Converting to a type
+          <literal>WITHOUT TIME ZONE</literal>, a value carrying a zone is
+          first adjusted to <acronym>UTC</acronym> and only then stripped of
+          it, so <literal>XMLCAST('2024-01-01T12:00:00+06:00'::xml AS timestamp)</literal>
+          is <literal>2024-01-01 06:00:00</literal>.  Converting to a type
+          <literal>WITH TIME ZONE</literal>, a value carrying no zone is taken
+          to be in <acronym>UTC</acronym> rather than in the session's
+          <xref linkend="guc-timezone"/>.
+        </para>
+      </listitem>
+      <listitem>
+        <para>
+          A <type>double precision</type> maps to <type>xs:double</type>,
+          which writes the infinities and not-a-number as
+          <literal>INF</literal>, <literal>-INF</literal> and
+          <literal>NaN</literal>; converting back rejects all three, so those
+          values do not survive a round trip through <type>xml</type>.  A <type>numeric</type> maps to
+          <type>xs:decimal</type>, which has no infinities and no
+          not-a-number at all, so those values cannot be converted to
+          <type>xml</type> in the first place.
+        </para>
+      </listitem>
+      <listitem>
+        <para>
+          An <type>interval</type> maps to <type>xs:duration</type>, which
+          carries a single sign in front of the value, so
+          <literal>-P1Y2M</literal> rather than <literal>P-1Y-2M</literal>.
+          An interval whose fields differ in sign, such as
+          <literal>1 year -1 day</literal>, has no
+          <type>xs:duration</type> representation at all and is rejected.
+          Note also that <type>xs:duration</type> has no week designator,
+          so <literal>P3W</literal> is not accepted even though the
+          <type>interval</type> input syntax allows it.
+        </para>
+      </listitem>
+      <listitem>
+        <para>
+          Values of type <type>bytea</type> are represented in XML as
+          <type>xs:hexBinary</type> or <type>xs:base64Binary</type>, as
+          selected by the <xref linkend="guc-xmlbinary"/> configuration
+          parameter.  That setting governs both directions, so casting a
+          <type>bytea</type> value to <type>xml</type> and back reproduces
+          the original value as long as it does not change in between.  The
+          one exception is a zero-length value, which produces empty XML
+          content and therefore comes back as the null value; the same is
+          true of the empty character string.
+        </para>
+      </listitem>
+      <listitem>
+        <para>
+          Converting a character string to <type>xml</type> escapes the
+          characters that XML reserves, as <function>xmltext</function> does:
+          <literal>&amp;</literal>, <literal>&lt;</literal>,
+          <literal>&gt;</literal>, <literal>"</literal> and carriage return.
+          Note that <literal>'</literal> is not escaped (see examples below).
+        </para>
+      </listitem>
+      <listitem>
+        <para>
+          <literal>BY REF</literal> and <literal>BY VALUE</literal> may only be
+          written when both <replaceable>expression</replaceable> and
+          <replaceable>type</replaceable> are of type <type>xml</type>, and
+          which one is written makes no difference, as discussed in
+          <xref linkend="functions-xml-limits-postgresql"/>.
+        </para>
+      </listitem>
+    </itemizedlist>
+
+     Examples:
+<screen><![CDATA[
+SELECT xmlcast('<foo&bar>'::text AS xml);
+       xmlcast
+---------------------
+ &lt;foo&amp;bar&gt;
+(1 row)
+
+SELECT xmlcast('&lt;foo&amp;bar&gt;'::xml AS text);
+  xmlcast
+-----------
+ <foo&bar>
+(1 row)
+
+SELECT xmlcast('2024-05-19 14:30:00'::timestamp AS xml);
+       xmlcast
+---------------------
+ 2024-05-19T14:30:00
+(1 row)
+
+SELECT xmlcast('P1Y2M25DT5H6M7S'::xml AS interval);
+            xmlcast
+--------------------------------
+ 1 year 2 mons 25 days 05:06:07
+(1 row)
+
+SELECT xmlcast('1 year 2 months 3 weeks 4 days 5 hours 6 minutes 7 seconds'::interval AS xml);
+     xmlcast
+-----------------
+ P1Y2M25DT5H6M7S
+(1 row)
+]]></screen>
+
+    Character strings can also be converted to XML with the
+    <productname>PostgreSQL</productname>-specific cast syntaxes:
 <programlisting><![CDATA[
 xml '<foo>bar</foo>'
 '<foo>bar</foo>'::xml
 ]]></programlisting>
-    can also be used.
    </para>
 
    <para>

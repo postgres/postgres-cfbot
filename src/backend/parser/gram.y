@@ -322,7 +322,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 
 %type <str>			opt_single_name
 %type <list>		opt_qualified_name
-%type <boolean>		opt_concurrently opt_usingindex
+%type <boolean>		opt_concurrently opt_usingindex opt_xml_passing_mech
 %type <dbehavior>	opt_drop_behavior
 %type <list>		opt_utility_option_list
 %type <list>		opt_wait_with_clause
@@ -809,7 +809,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 
 	WAIT WHEN WHERE WHITESPACE_P WINDOW WITH WITHIN WITHOUT WORK WRAPPER WRITE
 
-	XML_P XMLATTRIBUTES XMLCONCAT XMLELEMENT XMLEXISTS XMLFOREST XMLNAMESPACES
+	XML_P XMLATTRIBUTES XMLCAST XMLCONCAT XMLELEMENT XMLEXISTS XMLFOREST XMLNAMESPACES
 	XMLPARSE XMLPI XMLROOT XMLSERIALIZE XMLTABLE
 
 	YEAR_P YES_P
@@ -16497,6 +16497,16 @@ func_expr_common_subexpr:
 					v->location = @1;
 					$$ = (Node *) v;
 				}
+			| XMLCAST '(' a_expr AS Typename opt_xml_passing_mech ')'
+				{
+					XmlCast *n = makeNode(XmlCast);
+
+					n->expr = $3;
+					n->typeName = $5;
+					n->passing_mech = $6;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
 			| XMLCONCAT '(' expr_list ')'
 				{
 					$$ = makeXmlExpr(IS_XMLCONCAT, NULL, NIL, $3, @1);
@@ -16813,6 +16823,16 @@ xmlexists_argument:
 xml_passing_mech:
 			BY REF_P
 			| BY VALUE_P
+		;
+
+/*
+ * Whether a passing mechanism was written at all.  Which one it was makes no
+ * difference, but per SQL/XML Subclause 6.7 Syntax Rule 9 it may only appear
+ * when both the XMLCAST operand and target are of type xml.
+ */
+opt_xml_passing_mech:
+			xml_passing_mech						{ $$ = true; }
+			| /*EMPTY*/								{ $$ = false; }
 		;
 
 /*****************************************************************************
@@ -18572,6 +18592,7 @@ col_name_keyword:
 			| VALUES
 			| VARCHAR
 			| XMLATTRIBUTES
+			| XMLCAST
 			| XMLCONCAT
 			| XMLELEMENT
 			| XMLEXISTS
@@ -19164,6 +19185,7 @@ bare_label_keyword:
 			| WRITE
 			| XML_P
 			| XMLATTRIBUTES
+			| XMLCAST
 			| XMLCONCAT
 			| XMLELEMENT
 			| XMLEXISTS

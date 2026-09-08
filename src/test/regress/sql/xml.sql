@@ -692,3 +692,605 @@ SELECT xmltext('  ');
 SELECT xmltext('foo `$_-+?=*^%!|/\()[]{}');
 SELECT xmltext('foo & <"bar">');
 SELECT xmltext('x'|| '<P>73</P>'::xml || .42 || true || 'j'::char);
+
+-- for xmlcast() tests
+INSERT INTO xmltest
+ VALUES (42,
+'<?xml version="1.0" encoding="utf-8"?>
+ <xmlcast>
+  <period1>P1Y2M3DT4H5M6S</period1>
+  <period2>1 year 2 mons 3 days 4 hours 5 minutes 6 seconds</period2>
+  <period3>-P1Y2M3DT4H5M6S</period3>
+  <date1>2002-09-24</date1>
+  <date2>2002-09-24+06:00</date2>
+  <time>09:30:10.5</time>
+  <time_tz1>09:30:10Z</time_tz1>
+  <time_tz2>09:30:10-06:00</time_tz2>
+  <time_tz3>09:30:10+06:00</time_tz3>
+  <timestamp1>2002-05-30T09:00:00</timestamp1>
+  <timestamp2>2002-05-30T09:30:10.5</timestamp2>
+  <timestamp_tz1>2002-05-30T09:30:10Z</timestamp_tz1>
+  <timestamp_tz2>2002-05-30T09:30:10-06:00</timestamp_tz2>
+  <timestamp_tz3>2002-05-30T09:30:10+06:00</timestamp_tz3>
+  <text1>foo bar</text1>
+  <text2>       foo bar     </text2>
+  <text3>foo &amp; &lt;&quot;bar&quot;&gt;</text3>
+  <decimal1>42.7312345678910</decimal1>
+  <decimal2>+42.7312345678910</decimal2>
+  <decimal3>-42.7312345678910</decimal3>
+  <decimal4>INF</decimal4>
+  <decimal5>-INF</decimal5>
+  <decimal6>NaN</decimal6>
+  <integer1>42</integer1>
+  <integer2>+42</integer2>
+  <integer3>-42</integer3>
+  <long1>4273535420162021</long1>
+  <long2>+4273535420162021</long2>
+  <long3>-4273535420162021</long3>
+  <bool1 att="true">42</bool1>
+  <bool2 att="false">73</bool2>
+  <empty></empty>
+ </xmlcast>'::xml
+);
+
+-- This prevents the xmlcast regression tests from failing if the system's timezone has been changed.
+SET timezone TO 'America/Los_Angeles';
+
+-- xmlcast exceptions
+\set VERBOSITY terse
+SELECT xmlcast((xpath('//text1/text()', data))[1] AS text[]) FROM xmltest WHERE id = 42;
+SELECT xmlcast((xpath('//text1/integer1()', data))[1] AS int[]) FROM xmltest WHERE id = 42;
+SELECT xmlcast(NULL AS text);
+SELECT xmlcast('foo'::text AS varchar);
+SELECT xmlcast(42 AS text);
+SELECT xmlcast(array['foo','bar'] AS xml);
+SELECT xmlcast('not-a-number'::xml AS integer);
+SELECT xmlcast('not-a-date'::xml AS date);
+\set VERBOSITY default
+
+-- Both sides are matched against the same exact set of types, not against a
+-- type category, which says nothing about a type's representation: oid and
+-- money are TYPCATEGORY_NUMERIC and a user-defined type may declare any
+-- category it likes while being pass-by-value.  A domain does not launder an
+-- unsupported base type either, since the check is applied to the base type.
+CREATE DOMAIN xmlcast_doid AS oid;
+CREATE TYPE xmlcast_byval;
+CREATE FUNCTION xmlcast_byval_in(cstring) RETURNS xmlcast_byval
+  AS 'int4in' LANGUAGE internal IMMUTABLE STRICT;
+CREATE FUNCTION xmlcast_byval_out(xmlcast_byval) RETURNS cstring
+  AS 'int4out' LANGUAGE internal IMMUTABLE STRICT;
+CREATE TYPE xmlcast_byval (INPUT = xmlcast_byval_in, OUTPUT = xmlcast_byval_out,
+  INTERNALLENGTH = 4, PASSEDBYVALUE, CATEGORY = 'D');
+
+SELECT xmlcast('1'::xml AS oid);
+SELECT xmlcast('1'::xml AS money);
+SELECT xmlcast('1'::xml AS xmlcast_doid);
+SELECT xmlcast('1'::xml AS int[]);
+SELECT xmlcast(1::oid AS xml);
+SELECT xmlcast(1::money AS xml);
+SELECT xmlcast('1'::xmlcast_byval AS xml);
+SELECT xmlcast('1'::xml AS xmlcast_byval);
+
+DROP TYPE xmlcast_byval CASCADE;
+DROP DOMAIN xmlcast_doid;
+
+-- xmlcast tests for "XML to non-XML" expressions
+SELECT
+  xmlcast((xpath('//date1/text()', data))[1] AS date), pg_typeof(xmlcast((xpath('//date1/text()', data))[1] AS date)),
+  xmlcast((xpath('//date2/text()', data))[1] AS date), pg_typeof(xmlcast((xpath('//date2/text()', data))[1] AS date))
+FROM xmltest WHERE id = 42;
+
+SELECT
+  xmlcast((xpath('//period1/text()', data))[1] AS interval), pg_typeof(xmlcast((xpath('//period1/text()', data))[1] AS interval)),
+  xmlcast((xpath('//period3/text()', data))[1] AS interval), pg_typeof(xmlcast((xpath('//period3/text()', data))[1] AS interval))
+FROM xmltest WHERE id = 42;
+
+-- period2 holds PostgreSQL interval syntax, which is not in the lexical space
+-- of xs:duration and is therefore rejected
+SELECT xmlcast((xpath('//period2/text()', data))[1] AS interval) FROM xmltest WHERE id = 42;
+
+SELECT
+  xmlcast((xpath('//time/text()', data))[1] AS time), pg_typeof(xmlcast((xpath('//time/text()', data))[1] AS time)),
+  xmlcast((xpath('//time_tz1/text()', data))[1] AS time with time zone), pg_typeof(xmlcast((xpath('//time_tz1/text()', data))[1] AS time with time zone)),
+  xmlcast((xpath('//time_tz2/text()', data))[1] AS time with time zone), pg_typeof(xmlcast((xpath('//time_tz2/text()', data))[1] AS time with time zone)),
+  xmlcast((xpath('//time_tz3/text()', data))[1] AS time with time zone), pg_typeof(xmlcast((xpath('//time_tz3/text()', data))[1] AS time with time zone))
+FROM xmltest WHERE id = 42;
+
+SELECT
+  xmlcast((xpath('//text1/text()', data))[1] AS text), pg_typeof(xmlcast((xpath('//text1/text()', data))[1] AS text)),
+  xmlcast((xpath('//text2/text()', data))[1] AS text), pg_typeof(xmlcast((xpath('//text2/text()', data))[1] AS text)),
+  xmlcast((xpath('//text3/text()', data))[1] AS text), pg_typeof(xmlcast((xpath('//text3/text()', data))[1] AS text))
+FROM xmltest WHERE id = 42;
+
+SELECT
+  xmlcast((xpath('//text1/text()', data))[1] AS varchar), pg_typeof(xmlcast((xpath('//text1/text()', data))[1] AS varchar)),
+  xmlcast((xpath('//text2/text()', data))[1] AS varchar), pg_typeof(xmlcast((xpath('//text2/text()', data))[1] AS varchar)),
+  xmlcast((xpath('//text3/text()', data))[1] AS varchar), pg_typeof(xmlcast((xpath('//text3/text()', data))[1] AS varchar))
+FROM xmltest WHERE id = 42;
+
+SELECT
+  xmlcast((xpath('//text1/text()', data))[1] AS name), pg_typeof(xmlcast((xpath('//text1/text()', data))[1] AS name)),
+  xmlcast((xpath('//text2/text()', data))[1] AS name), pg_typeof(xmlcast((xpath('//text2/text()', data))[1] AS name)),
+  xmlcast((xpath('//text3/text()', data))[1] AS name), pg_typeof(xmlcast((xpath('//text3/text()', data))[1] AS name))
+FROM xmltest WHERE id = 42;
+
+SELECT
+  xmlcast((xpath('//text1/text()', data))[1] AS bpchar), pg_typeof(xmlcast((xpath('//text1/text()', data))[1] AS bpchar)),
+  xmlcast((xpath('//text2/text()', data))[1] AS bpchar), pg_typeof(xmlcast((xpath('//text2/text()', data))[1] AS bpchar)),
+  xmlcast((xpath('//text3/text()', data))[1] AS bpchar), pg_typeof(xmlcast((xpath('//text3/text()', data))[1] AS bpchar))
+FROM xmltest WHERE id = 42;
+
+SELECT
+  xmlcast((xpath('//decimal1/text()', data))[1] AS numeric), pg_typeof(xmlcast((xpath('//decimal1/text()', data))[1] AS numeric)),
+  xmlcast((xpath('//decimal2/text()', data))[1] AS numeric), pg_typeof(xmlcast((xpath('//decimal2/text()', data))[1] AS numeric)),
+  xmlcast((xpath('//decimal3/text()', data))[1] AS numeric), pg_typeof(xmlcast((xpath('//decimal3/text()', data))[1] AS numeric))
+FROM xmltest WHERE id = 42;
+
+-- decimal4/5/6 hold INF, -INF and NaN, which are outside the lexical space of
+-- xs:decimal and, for approximate numerics, rejected outright by General Rule
+-- 4.i.v
+\set VERBOSITY terse
+SELECT xmlcast((xpath('//decimal4/text()', data))[1] AS numeric) FROM xmltest WHERE id = 42;
+SELECT xmlcast((xpath('//decimal6/text()', data))[1] AS numeric) FROM xmltest WHERE id = 42;
+SELECT xmlcast((xpath('//decimal4/text()', data))[1] AS double precision) FROM xmltest WHERE id = 42;
+SELECT xmlcast((xpath('//decimal6/text()', data))[1] AS double precision) FROM xmltest WHERE id = 42;
+\set VERBOSITY default
+
+SELECT
+  xmlcast((xpath('//decimal1/text()', data))[1] AS double precision), pg_typeof(xmlcast((xpath('//decimal1/text()', data))[1] AS double precision)),
+  xmlcast((xpath('//decimal2/text()', data))[1] AS double precision), pg_typeof(xmlcast((xpath('//decimal2/text()', data))[1] AS double precision)),
+  xmlcast((xpath('//decimal3/text()', data))[1] AS double precision), pg_typeof(xmlcast((xpath('//decimal3/text()', data))[1] AS double precision))
+FROM xmltest WHERE id = 42;
+
+SELECT
+  xmlcast((xpath('//integer1/text()', data))[1] AS int), pg_typeof(xmlcast((xpath('//integer1/text()', data))[1] AS int)),
+  xmlcast((xpath('//integer2/text()', data))[1] AS int), pg_typeof(xmlcast((xpath('//integer2/text()', data))[1] AS int)),
+  xmlcast((xpath('//integer3/text()', data))[1] AS int), pg_typeof(xmlcast((xpath('//integer3/text()', data))[1] AS int))
+FROM xmltest WHERE id = 42;
+
+SELECT
+  xmlcast((xpath('//long1/text()', data))[1] AS bigint), pg_typeof(xmlcast((xpath('//long1/text()', data))[1] AS bigint)),
+  xmlcast((xpath('//long2/text()', data))[1] AS bigint), pg_typeof(xmlcast((xpath('//long2/text()', data))[1] AS bigint)),
+  xmlcast((xpath('//long3/text()', data))[1] AS bigint), pg_typeof(xmlcast((xpath('//long3/text()', data))[1] AS bigint))
+FROM xmltest WHERE id = 42;
+
+SELECT
+  xmlcast((xpath('//bool1/@att', data))[1] AS boolean), pg_typeof(xmlcast((xpath('//bool1/@att', data))[1] AS boolean)),
+  xmlcast((xpath('//bool2/@att', data))[1] AS boolean), pg_typeof(xmlcast((xpath('//bool1/@att', data))[1] AS boolean))
+FROM xmltest WHERE id = 42;
+
+SELECT xmlcast((xpath('//empty/text()', data))[1] AS text), pg_typeof(xmlcast((xpath('//empty/text()', data))[1] AS text))
+FROM xmltest WHERE id = 42;
+
+-- xmlcast tests for "XML to XML" expressions
+SELECT
+  xmlcast((xpath('//text1/text()', data))[1] AS xml), pg_typeof(xmlcast((xpath('//text1/text()', data))[1] AS xml)),
+  xmlcast((xpath('//text2/text()', data))[1] AS xml), pg_typeof(xmlcast((xpath('//text2/text()', data))[1] AS xml)),
+  xmlcast((xpath('//text3/text()', data))[1] AS xml), pg_typeof(xmlcast((xpath('//text3/text()', data))[1] AS xml))
+FROM xmltest WHERE id = 42;
+
+SELECT
+  xmlcast((xpath('//timestamp1/text()', data))[1] AS timestamp), pg_typeof(xmlcast((xpath('//timestamp1/text()', data))[1] AS timestamp)),
+  xmlcast((xpath('//timestamp2/text()', data))[1] AS timestamp), pg_typeof(xmlcast((xpath('//timestamp2/text()', data))[1] AS timestamp))
+FROM xmltest WHERE id = 42;
+
+SELECT
+  xmlcast((xpath('//timestamp_tz1/text()', data))[1] AS timestamp with time zone), pg_typeof(xmlcast((xpath('//timestamp_tz1/text()', data))[1] AS timestamp with time zone)),
+  xmlcast((xpath('//timestamp_tz2/text()', data))[1] AS timestamp with time zone), pg_typeof(xmlcast((xpath('//timestamp_tz2/text()', data))[1] AS timestamp with time zone)),
+  xmlcast((xpath('//timestamp_tz3/text()', data))[1] AS timestamp with time zone), pg_typeof(xmlcast((xpath('//timestamp_tz3/text()', data))[1] AS timestamp with time zone))
+FROM xmltest WHERE id = 42;
+
+-- xmlcast tests for "non-XML to XML" expressions
+SELECT j, pg_typeof(j) FROM xmlcast(NULL AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast('foo' AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast(''::text AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast(NULL::text AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast(''::xml AS text) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast(NULL::xml AS text) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast('foo & <"bar">'::text AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast('foo & <"bar">'::varchar AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast('foo & <"bar">'::name AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast(xmltext(E'foo & <"bar">\r') AS text) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast(xmlcast(E'foo & <"bar">\r' AS xml) AS text) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast(to_date('29/05/2024','dd/mm/yyyy') AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast('2024-05-29 12:04:10.703585+02'::timestamp with time zone at time zone 'Europe/Berlin' AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast('2024-05-29 12:04:10.703585+02'::timestamp without time zone AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast('1 year 2 months 3 days 4 hours 5 minutes 6 seconds'::interval AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast(42::smallint AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast(427353542 AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast(4273535420162021 AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast(42.007312345678910 AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast(42.007312345678910::double precision AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast(42.0::real AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast('infinity'::real AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast('-infinity'::real AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast('nan'::real AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast('infinity'::double precision AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast('-infinity'::double precision AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast('nan'::double precision AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast('infinity'::numeric AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast('-infinity'::numeric AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast('nan'::numeric AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast(true AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast(false AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast(42 = 73 AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast(42 <> 73 AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast('11:11:11.5'::time AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast('11:11:11.5+01'::time with time zone AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast('infinity'::interval AS xml) t(j);
+SELECT j, pg_typeof(j) FROM xmlcast('-infinity'::interval AS xml) t(j);
+
+-- The XML side of a binary string is xs:hexBinary or xs:base64Binary,
+-- selected by xmlbinary in both directions, so bytea round-trips under
+-- either setting.
+SET xmlbinary TO hex;
+SELECT xmlcast(E'\\xDEADBEEF'::bytea AS xml);
+SELECT xmlcast(xmlcast(E'\\xDEADBEEF'::bytea AS xml) AS bytea);
+SET xmlbinary TO base64;
+SELECT xmlcast(E'\\xDEADBEEF'::bytea AS xml);
+SELECT xmlcast(xmlcast(E'\\xDEADBEEF'::bytea AS xml) AS bytea);
+
+-- xmlcast() to bytea yields bytea directly, not text run through byteain()
+SELECT pg_typeof(xmlcast('QQ=='::xml AS bytea));
+
+-- edge values: empty, an embedded NUL, and bytes with the high bit set
+SET xmlbinary TO hex;
+SELECT xmlcast(xmlcast(''::bytea AS xml) AS bytea) IS NULL AS empty_is_null,
+       xmlcast(xmlcast(E'\\x00'::bytea AS xml) AS bytea),
+       xmlcast(xmlcast(E'\\xFF00FF'::bytea AS xml) AS bytea);
+SET xmlbinary TO base64;
+SELECT xmlcast(xmlcast(''::bytea AS xml) AS bytea) IS NULL AS empty_is_null,
+       xmlcast(xmlcast(E'\\x00'::bytea AS xml) AS bytea),
+       xmlcast(xmlcast(E'\\xFF00FF'::bytea AS xml) AS bytea);
+
+-- xs:hexBinary collapses leading/trailing whitespace but forbids embedded
+-- whitespace; xs:base64Binary permits it
+SET xmlbinary TO hex;
+SELECT xmlcast('  DEAD  '::xml AS bytea);
+SELECT xmlcast('DE AD'::xml AS bytea);
+SET xmlbinary TO base64;
+SELECT xmlcast('3q2 +7w=='::xml AS bytea);
+
+-- invalid lexical forms are rejected
+\set VERBOSITY terse
+SET xmlbinary TO hex;
+SELECT xmlcast('DEA'::xml AS bytea);
+SELECT xmlcast('zz'::xml AS bytea);
+SET xmlbinary TO base64;
+SELECT xmlcast('QQ='::xml AS bytea);
+\set VERBOSITY default
+
+-- bytea is not collatable; exercise the collation-assignment path
+SET xmlbinary TO hex;
+SELECT xmlcast(v AS bytea) FROM (VALUES ('41'::xml), ('42'::xml)) t(v) ORDER BY 1;
+
+-- a natively produced target needs no outer cast node, unlike int below
+CREATE VIEW xmlcast_bytea_view AS
+  SELECT xmlcast('DEADBEEF'::xml AS bytea) AS b, xmlcast('42'::xml AS int) AS i;
+\sv xmlcast_bytea_view
+DROP VIEW xmlcast_bytea_view;
+
+SET xmlbinary TO base64;
+
+-- XSD lexical validation on the XML -> SQL direction.  A SQL input function
+-- accepts whatever PostgreSQL accepts, which is both wider than the XSD
+-- lexical space and, for dates and timestamps, dependent on DateStyle;
+-- XMLCAST pins the input to the XML Schema lexical form instead.
+\set VERBOSITY terse
+SELECT xmlcast('yes'::xml AS boolean);
+SELECT xmlcast('on'::xml AS boolean);
+SELECT xmlcast('t'::xml AS boolean);
+SELECT xmlcast('0x10'::xml AS int);
+SELECT xmlcast('1e2'::xml AS numeric);
+SELECT xmlcast('99999'::xml AS int2);
+SELECT xmlcast('Infinity'::xml AS float8);
+SELECT xmlcast('3 days'::xml AS interval);
+SELECT xmlcast('P1Y-1D'::xml AS interval);
+-- xs:duration has no week designator, though interval input syntax does
+SELECT xmlcast('P3W'::xml AS interval);
+SELECT xmlcast('2024-01-01 12:00:00'::xml AS timestamp);
+SELECT xmlcast('12:00:00+02'::xml AS timetz);
+\set VERBOSITY default
+
+-- ... while the XSD lexical forms are accepted, including the ones a SQL
+-- input function would reject on its own
+SELECT xmlcast('1'::xml AS boolean), xmlcast('0'::xml AS boolean),
+       xmlcast('-P1Y2M'::xml AS interval),
+       xmlcast('12:00:00+02:00'::xml AS timetz);
+
+-- General Rule 4.i.v: an approximate numeric target rejects INF/-INF/NaN even
+-- though xs:double admits them, and xs:decimal has no such values at all.
+-- Mapping an infinite float to XML and back is therefore not a round trip.
+\set VERBOSITY terse
+SELECT xmlcast('INF'::xml AS float8);
+SELECT xmlcast('-INF'::xml AS float8);
+SELECT xmlcast('NaN'::xml AS float8);
+SELECT xmlcast('INF'::xml AS numeric);
+SELECT xmlcast('NaN'::xml AS numeric);
+\set VERBOSITY default
+
+-- Syntax Rule 15 picks the XSD type from the SQL target, so the very same
+-- lexical form is accepted or rejected depending on where it is going:
+-- exponents belong to xs:double but not to xs:decimal or xs:integer, and a
+-- fraction belongs to neither xs:integer nor an integer target.
+SELECT xmlcast('1e2'::xml AS float8) AS e_lower,
+       xmlcast('1E2'::xml AS float8) AS e_upper,
+       xmlcast('-1.5e-3'::xml AS float8) AS e_signed,
+       xmlcast('1.0'::xml AS float8) AS frac_float,
+       xmlcast('.5'::xml AS float8) AS leading_dot,
+       xmlcast('1.0'::xml AS numeric) AS frac_numeric;
+\set VERBOSITY terse
+SELECT xmlcast('1E2'::xml AS numeric);
+SELECT xmlcast('1e2'::xml AS int);
+SELECT xmlcast('1.0'::xml AS int);
+SELECT xmlcast('.5'::xml AS int);
+-- "Infinity" is not in the lexical space of xs:double at all, whereas "INF"
+-- is but General Rule 4.i.v refuses it: two different errors
+SELECT xmlcast('Infinity'::xml AS float8);
+SELECT xmlcast('INF'::xml AS float8);
+\set VERBOSITY default
+
+-- General Rule 4.c: a value that atomizes to the empty sequence is null,
+-- which is distinct from one whose string value is empty
+SELECT xmlcast(''::xml AS int) IS NULL AS empty_is_null,
+       xmlcast(''::xml AS text) IS NULL AS empty_text_is_null,
+       xmlcast('<a></a>'::xml AS text) = '' AS elem_is_empty_string;
+
+-- General Rules 4.a and 4.b: the value is atomized with fn:data(), so markup
+-- is stripped, references of every spelling are resolved, CDATA is unwrapped
+-- and comments contribute nothing
+SELECT xmlcast('<a>x</a>'::xml AS text) AS markup,
+       xmlcast('&lt;a&gt;x&lt;/a&gt;'::xml AS text) AS entities,
+       xmlcast('<a>x</a>'::xml AS text) = xmlcast('&lt;a&gt;x&lt;/a&gt;'::xml AS text) AS collide;
+SELECT xmlcast('&apos;'::xml AS text) AS apos,
+       xmlcast('&#65;'::xml AS text) AS dec_ref,
+       xmlcast('&#x41;'::xml AS text) AS hex_ref,
+       xmlcast('&#x0d;'::xml AS text) = E'\r' AS cr_lower,
+       xmlcast('&#x0D;'::xml AS text) = E'\r' AS cr_upper,
+       xmlcast('&#13;'::xml AS text) = E'\r' AS cr_dec,
+       xmlcast('<![CDATA[a<b]]>'::xml AS text) AS lone_cdata,
+       xmlcast('a<![CDATA[b]]>c'::xml AS text) AS text_cdata_run,
+       xmlcast('<!--c-->'::xml AS text) AS lone_comment,
+       xmlcast('<a>42</a>'::xml AS int) AS elem_to_int;
+
+-- General Rule 4.h casts the atomized sequence to a single value, which an
+-- XQuery cast can only do for one item.  Two or more items is an error, not a
+-- concatenation -- otherwise <a>1</a><b>2</b> would silently become 12.
+\set VERBOSITY terse
+SELECT xmlcast('<a/> <b/>'::xml AS text);
+SELECT xmlcast('<a>1</a><b>2</b>'::xml AS int);
+SELECT xmlcast('foo<a/>'::xml AS text);
+SELECT xmlcast('pre<!--c-->post'::xml AS text);
+\set VERBOSITY default
+
+-- ... but a single element whose content spans several nodes is one item, and
+-- its string value is legitimately the concatenation
+SELECT xmlcast('<x><y>bar</y>foo</x>'::xml AS text) AS one_element,
+       xmlcast('<x>pre<!--c-->post</x>'::xml AS text) AS comment_inside_element;
+
+-- A DTD is not a node in the XQuery data model, even though libxml links the
+-- internal subset into the document's child list, so it is not an item.
+SELECT xmlcast('<!DOCTYPE a><a>42</a>'::xml AS int) AS doctype,
+       xmlcast('<!DOCTYPE a [<!ELEMENT a (#PCDATA)>]><a>42</a>'::xml AS int) AS internal_subset,
+       xmlcast('<?xml version="1.0"?><!DOCTYPE a><a>x</a>'::xml AS text) AS decl_and_dtd,
+       xmlcast('<!DOCTYPE a [<!ENTITY e "hi">]><a>&e;</a>'::xml AS text) AS entity_in_subset;
+
+-- A comment or processing instruction in the prolog, by contrast, is an item
+\set VERBOSITY terse
+SELECT xmlcast('<!--c--><a>42</a>'::xml AS int);
+SELECT xmlcast('<?pi?><a>42</a>'::xml AS int);
+\set VERBOSITY default
+
+-- General Rules 4.h.i-iii: a target WITHOUT TIME ZONE normalizes to UTC
+-- before dropping the zone, rather than ignoring it; and 4.i.vii-viii: an
+-- absent zone means UTC, not the session's TimeZone
+SET TimeZone TO 'America/Los_Angeles';
+SELECT xmlcast('2002-09-24+06:00'::xml AS date) AS d_plus,
+       xmlcast('2002-09-24-06:00'::xml AS date) AS d_minus,
+       xmlcast('2002-09-24Z'::xml AS date) AS d_z,
+       xmlcast('2002-09-24'::xml AS date) AS d_none;
+SELECT xmlcast('2024-01-01T12:00:00+06:00'::xml AS timestamp) AS ts_plus,
+       xmlcast('09:30:10-06:00'::xml AS time) AS t_minus,
+       xmlcast('12:00:00'::xml AS timetz) AS timetz_none;
+SET TimeZone TO 'Asia/Tokyo';
+SELECT xmlcast('2002-09-24+06:00'::xml AS date) AS d_plus,
+       xmlcast('2024-01-01T12:00:00+06:00'::xml AS timestamp) AS ts_plus,
+       xmlcast('09:30:10-06:00'::xml AS time) AS t_minus,
+       xmlcast('12:00:00'::xml AS timetz) AS timetz_none;
+SET TimeZone TO 'America/Los_Angeles';
+
+-- The XML Schema whiteSpace facet is applied before validating or
+-- converting, so a padded value behaves exactly like an unpadded one -- in
+-- particular it still gets the time zone normalization above.  xs:string
+-- preserves whitespace, so character targets are left alone.
+SELECT xmlcast('  -P1Y2M  '::xml AS interval) AS interval_padded,
+       xmlcast('  2002-09-24+06:00  '::xml AS date) AS date_padded,
+       xmlcast('  2024-01-01T12:00:00+06:00  '::xml AS timestamp) AS ts_padded,
+       xmlcast('  09:30:10-06:00  '::xml AS time) AS time_padded,
+       xmlcast(E'\t\n 42 \n'::xml AS int) AS int_padded,
+       xmlcast('  true  '::xml AS boolean) AS bool_padded;
+SELECT xmlcast('  foo  bar  '::xml AS text) AS text_preserved,
+       xmlcast('  foo  bar  '::xml AS varchar) AS varchar_preserved;
+
+-- validation makes the conversion independent of DateStyle
+SET DateStyle TO 'DMY';
+SELECT xmlcast('2024-01-02'::xml AS date);
+SET DateStyle TO 'MDY';
+SELECT xmlcast('2024-01-02'::xml AS date);
+RESET DateStyle;
+
+-- an interval whose fields differ in sign has no xs:duration representation
+SELECT xmlcast('1 year -1 day'::interval AS xml);
+
+-- every supported type survives a SQL -> XML -> SQL round trip
+SET xmlbinary TO hex;
+SET TimeZone TO 'UTC';
+SELECT xmlcast(xmlcast(true AS xml) AS boolean) = true AS bool_ok,
+       xmlcast(xmlcast(42::int2 AS xml) AS int2) = 42 AS int2_ok,
+       xmlcast(xmlcast(-42 AS xml) AS int4) = -42 AS int4_ok,
+       xmlcast(xmlcast(4273535420162021::int8 AS xml) AS int8) = 4273535420162021 AS int8_ok,
+       xmlcast(xmlcast(42.73::numeric AS xml) AS numeric) = 42.73 AS numeric_ok,
+       xmlcast(xmlcast(42.5::float4 AS xml) AS float4) = 42.5 AS float4_ok,
+       xmlcast(xmlcast(42.5::float8 AS xml) AS float8) = 42.5 AS float8_ok;
+SELECT xmlcast(xmlcast('2024-05-29'::date AS xml) AS date) = '2024-05-29'::date AS date_ok,
+       xmlcast(xmlcast('11:11:11.5'::time AS xml) AS time) = '11:11:11.5'::time AS time_ok,
+       xmlcast(xmlcast('11:11:11+01'::timetz AS xml) AS timetz) = '11:11:11+01'::timetz AS timetz_ok,
+       xmlcast(xmlcast('2024-05-29 12:04:10.5'::timestamp AS xml) AS timestamp) = '2024-05-29 12:04:10.5'::timestamp AS ts_ok,
+       xmlcast(xmlcast('2024-05-29 12:04:10+02'::timestamptz AS xml) AS timestamptz) = '2024-05-29 12:04:10+02'::timestamptz AS tstz_ok,
+       xmlcast(xmlcast(E'\\xdeadbeef'::bytea AS xml) AS bytea) = E'\\xdeadbeef'::bytea AS bytea_ok,
+       xmlcast(xmlcast('foo & <"bar">'::text AS xml) AS text) = 'foo & <"bar">' AS text_ok;
+SELECT v AS original, xmlcast(v AS xml) AS as_xml,
+       xmlcast(xmlcast(v AS xml) AS interval) = v AS ok
+FROM (VALUES ('1 year 2 mons'::interval), ('-1 year -2 mons'),
+             ('P1Y2M3DT4H5M6S'), ('-1 year -2 mons -3 days -04:05:06'),
+             ('0'), ('-00:00:01'), ('1 year 1 day 1 second'),
+             ('-1 year -1 day -1 second'), ('1 mon'), ('1 minute')) t(v);
+
+-- each xs:duration designator on its own, and back again.  Note P1M is a
+-- month while PT1M is a minute, and that the trip preserves the value rather
+-- than the spelling: -P0D and PT0S denote the same duration.
+SELECT v AS lexical, xmlcast(v::xml AS interval) AS as_interval,
+       xmlcast(xmlcast(v::xml AS interval) AS xml) AS back
+FROM (VALUES ('PT0S'), ('-P0D'), ('P1Y'), ('P1M'), ('PT1M'), ('P1D'),
+             ('PT1S'), ('P1Y1DT1S'), ('-P1Y1DT1S')) t(v);
+SET TimeZone TO 'America/Los_Angeles';
+SET xmlbinary TO base64;
+
+-- Domains are flattened to their base type on both sides, so a domain over
+-- xml is still XML and a domain over a supported SQL type keeps that type's
+-- XML Schema lexical form.  The declared type is still what comes back, and
+-- its constraints are enforced.
+CREATE DOMAIN xc_dxml AS xml;
+CREATE DOMAIN xc_dint AS int;
+CREATE DOMAIN xc_dbytea AS bytea;
+CREATE DOMAIN xc_dvc AS varchar(5);
+CREATE DOMAIN xc_dts AS timestamp;
+CREATE DOMAIN xc_ddint AS xc_dint;
+
+SET xmlbinary TO hex;
+SELECT xmlcast('1'::xc_dxml AS int), xmlcast(1 AS xc_dxml),
+       pg_typeof(xmlcast(1 AS xc_dxml));
+SELECT xmlcast('1'::xml AS xc_dint), pg_typeof(xmlcast('1'::xml AS xc_dint)),
+       xmlcast(1::xc_dint AS xml);
+SELECT xmlcast('41'::xml AS xc_dbytea), pg_typeof(xmlcast('41'::xml AS xc_dbytea));
+SELECT xmlcast('hello world'::xml AS xc_dvc), pg_typeof(xmlcast('hello world'::xml AS xc_dvc));
+-- a domain over timestamp still uses the xs:dateTime form, not text
+SELECT xmlcast('2002-05-30 09:30:10'::xc_dts AS xml);
+-- domain over a domain
+SELECT xmlcast('1'::xml AS xc_ddint), pg_typeof(xmlcast('1'::xml AS xc_ddint));
+
+-- domain constraints are enforced on the result
+CREATE DOMAIN xc_dpos AS int CHECK (VALUE > 0);
+CREATE DOMAIN xc_dnn AS int NOT NULL;
+CREATE DOMAIN xc_dshort AS xml CHECK (length(VALUE::text) < 3);
+\set VERBOSITY terse
+SELECT xmlcast('-1'::xml AS xc_dpos);
+SELECT xmlcast(NULL::xml AS xc_dnn);
+SELECT xmlcast('abcdef' AS xc_dshort);
+\set VERBOSITY default
+
+CREATE VIEW xmlcast_domain_view AS
+  SELECT xmlcast('1'::xml AS xc_dint) AS a,
+         xmlcast(1 AS xc_dxml) AS b,
+         xmlcast('41'::xml AS xc_dbytea) AS c,
+         xmlcast('1'::xc_dxml AS int) AS d;
+\sv xmlcast_domain_view
+SELECT * FROM xmlcast_domain_view;
+DROP VIEW xmlcast_domain_view;
+
+DROP DOMAIN xc_dxml, xc_dint, xc_dbytea, xc_dvc, xc_dts, xc_ddint,
+            xc_dpos, xc_dnn, xc_dshort;
+SET xmlbinary TO base64;
+
+-- Syntax Rule 9: an <XML passing mechanism> may only be written when both the
+-- operand and the target are XML types.  Which one is asked for is ignored,
+-- so the results must match those without the clause.
+SELECT
+  xmlcast('foo'::xml AS xml)::text = xmlcast('foo'::xml AS xml BY REF)::text,
+  xmlcast('foo'::xml AS xml)::text = xmlcast('foo'::xml AS xml BY VALUE)::text;
+
+CREATE DOMAIN xc_byref_dxml AS xml;
+SELECT
+  xmlcast('foo'::xml AS xc_byref_dxml)::text = xmlcast('foo'::xml AS xc_byref_dxml BY REF)::text,
+  xmlcast('foo'::xc_byref_dxml AS xml)::text = xmlcast('foo'::xc_byref_dxml AS xml BY VALUE)::text;
+DROP DOMAIN xc_byref_dxml;
+
+-- ... and is rejected anywhere else
+\set VERBOSITY terse
+SELECT xmlcast('foo' AS xml BY REF);
+SELECT xmlcast('foo'::xml AS text BY REF);
+SELECT xmlcast('42'::xml AS int BY VALUE);
+SELECT xmlcast('P1Y2M'::xml AS interval BY REF);
+\set VERBOSITY default
+
+-- tests for xmlcast() with explicit length modifiers
+SELECT xmlcast('hello world'::xml AS varchar(5));
+SELECT xmlcast('42.7312'::xml AS numeric(5,2));
+
+CREATE VIEW view_xmlcast_to_xml AS
+SELECT
+  xmlcast(NULL AS xml) AS c1,
+  xmlcast('foo' AS xml) AS c2,
+  xmlcast(''::text AS xml) AS c3,
+  xmlcast(NULL::text AS xml) AS c4,
+  xmlcast(''::xml AS text) AS c5,
+  xmlcast(NULL::xml AS text) c6,
+  xmlcast('foo & <"bar">'::text AS xml) AS c7,
+  xmlcast('foo & <"bar">'::varchar AS xml) AS c8,
+  xmlcast('foo & <"bar">'::name AS xml) AS c9,
+  xmlcast(xmltext(E'foo & <"bar">\r') AS text) AS c10,
+  xmlcast(xmlcast(E'foo & <"bar">\r' AS xml) AS text) AS c11,
+  xmlcast(to_date('29/05/2024','dd/mm/yyyy') AS xml) AS c12,
+  xmlcast('2024-05-29 12:04:10.703585+02'::timestamp with time zone at time zone 'Europe/Berlin' AS xml) AS c13,
+  xmlcast('2024-05-29 12:04:10.703585+02'::timestamp without time zone AS xml) AS c14,
+  xmlcast('1 year 2 months 3 days 4 hours 5 minutes 6 seconds'::interval AS xml) AS c15,
+  xmlcast(427353542 AS xml) AS c16,
+  xmlcast(4273535420162021 AS xml) AS c17,
+  xmlcast(42.007312345678910 AS xml) AS c18,
+  xmlcast(42.007312345678910::double precision AS xml) AS c19,
+  xmlcast(true AS xml) AS c20,
+  xmlcast(false AS xml) AS c21,
+  xmlcast(42 = 73 AS xml) AS c22,
+  xmlcast(42 <> 73 AS xml) AS c23,
+  xmlcast('11:11:11.5'::time AS xml) AS c24,
+  xmlcast('11:11:11.5+01'::time with time zone AS xml) AS c25;
+
+\sv view_xmlcast_to_xml
+SELECT * FROM view_xmlcast_to_xml;
+
+CREATE VIEW view_xmlcast_from_xml AS
+SELECT
+  xmlcast('P1Y2M3DT4H5M6S'::xml AS interval) AS c1,
+  xmlcast('-P1Y2M3DT4H5M6S'::xml AS interval) AS c2,
+  xmlcast('2002-09-24'::xml AS date) AS c3,
+  xmlcast('2002-09-24+06:00'::xml AS date) AS c4,
+  xmlcast('09:30:10Z'::xml AS time with time zone) AS c5,
+  xmlcast('09:30:10-06:00'::xml AS time with time zone) AS c6,
+  xmlcast('09:30:10+06:00'::xml AS time with time zone) AS c7,
+  xmlcast('2002-05-30T09:30:10Z'::xml AS timestamp with time zone) at time zone 'Europe/Berlin' AS c8,
+  xmlcast('2002-05-30T09:30:10-06:00'::xml AS timestamp with time zone) at time zone 'Europe/Berlin' AS c9,
+  xmlcast('2002-05-30T09:30:10+06:00'::xml AS timestamp with time zone) at time zone 'Europe/Berlin' AS c10,
+  xmlcast('foo bar'::xml AS text) AS c11,
+  xmlcast('       foo bar     '::xml AS varchar) AS c12,
+  xmlcast('foo &amp; &lt;&quot;bar&quot;&gt;'::xml AS text) AS c13,
+  xmlcast('42.7312345678910'::xml AS numeric) AS c14,
+  xmlcast('+42.7312345678910'::xml AS numeric) AS c15,
+  xmlcast('-42.7312345678910'::xml AS numeric) AS c16,
+  xmlcast('42'::xml AS integer) AS c17,
+  xmlcast('+42'::xml AS integer) AS c18,
+  xmlcast('-42'::xml AS integer) AS c19,
+  xmlcast('4273535420162021'::xml AS bigint) AS c20,
+  xmlcast('+4273535420162021'::xml AS bigint) AS c21,
+  xmlcast('-4273535420162021'::xml AS bigint) AS c22,
+  xmlcast('true'::xml AS boolean) AS c23,
+  xmlcast('false'::xml AS boolean) AS c24,
+  xmlcast(''::xml AS character varying) AS c25,
+  xmlcast(NULL::xml AS character varying) AS c26,
+  xmlcast('hello world'::xml AS varchar(5)) AS c27,
+  xmlcast('42.7312'::xml AS numeric(5,2)) AS c28;
+
+\sv view_xmlcast_from_xml
+SELECT * FROM view_xmlcast_from_xml;
+
+RESET xmlbinary;
+RESET timezone;
