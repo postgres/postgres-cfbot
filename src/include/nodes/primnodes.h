@@ -2205,6 +2205,9 @@ typedef struct GraphPropertyRef
 	Oid			typeId;
 	int32		typmod;
 	Oid			collation;
+	bool		vle_list;		/* reference outside a quantified (VLE) edge's
+								 * own WHERE: value is the array of the
+							 	 * property's value over every traversed edge */
 	ParseLoc	location;
 } GraphPropertyRef;
 

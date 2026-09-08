@@ -18377,6 +18377,7 @@ opt_graph_pattern_quantifier:
 			'{' Iconst '}'					{ $$ = list_make2_int($2, $2); }
 			| '{' ',' Iconst '}'			{ $$ = list_make2_int(0, $3); }
 			| '{' Iconst ',' Iconst '}'		{ $$ = list_make2_int($2, $4); }
+			| '{' Iconst ',' '}'			{ $$ = list_make2_int($2, -1); }
 			| /*EMPTY*/						{ $$ = NULL; }
 		;
 

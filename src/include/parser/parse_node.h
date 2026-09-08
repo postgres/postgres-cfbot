@@ -114,6 +114,11 @@ typedef struct GraphTableParseState
 	GraphElementPattern *cur_gep;	/* The element pattern being transformed.
 									 * NULL if no element pattern is being
 									 * transformed. */
+	List	   *pattern_elements;	/* flattened list of GraphElementPattern
+									 * nodes of the path pattern, used to
+									 * resolve references made outside an
+									 * element pattern (COLUMNS, graph-level
+									 * WHERE). */
 } GraphTableParseState;
 
 /*
