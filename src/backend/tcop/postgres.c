@@ -2057,7 +2057,7 @@ exec_bind_message(StringInfo input_message)
 	 * CURSOR_OPT_* constants in parsenodes.h, so we map between the two
 	 * representations here.
 	 */
-	if (MyProcPort->protocol_cursor_enabled)
+	if (MyProcPort != NULL && MyProcPort->protocol_cursor_enabled)
 	{
 		int			bind_ext_flags;
 
@@ -2200,18 +2200,82 @@ exec_bind_message(StringInfo input_message)
 }
 
 /*
+ * fetch_count_wire_to_long
+ *
+ * Map the Int64 fetch count of the Execute message's _pq_.cursor field onto a
+ * platform C long, which is what PortalRunFetch expects.  PQ_FETCH_ALL is the
+ * reserved token meaning "all remaining rows", which must map to FETCH_ALL
+ * (LONG_MAX) rather than being arrived at by truncation.
+ */
+static long
+fetch_count_wire_to_long(int64 count)
+{
+	if (count == PQ_FETCH_ALL)
+		return FETCH_ALL;		/* == LONG_MAX */
+
+	/*
+	 * The wire count is a full 64-bit integer, but "long" is only 32 bits
+	 * where SIZEOF_LONG < 8 (LLP64 Windows, ILP32 platforms).  There, a value
+	 * that does not fit would be silently truncated by the cast below, so
+	 * reject it instead.  Where "long" is 64 bits this test is always false,
+	 * so compile it out rather than emit a tautological comparison.
+	 */
+#if SIZEOF_LONG < 8
+	if (count > LONG_MAX || count < LONG_MIN)
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("fetch count out of range for this platform")));
+#endif
+	return (long) count;
+}
+
+/*
+ * fetch_direction_wire_to_enum
+ *
+ * Map the wire fetch direction of the Execute message's _pq_.cursor field onto
+ * the server's FetchDirection enum.  PQ_FETCH_DEFAULT has no equivalent and is
+ * not accepted here; callers deal with it before getting this far.
+ */
+static FetchDirection
+fetch_direction_wire_to_enum(int wire_direction)
+{
+	switch (wire_direction)
+	{
+		case PQ_FETCH_FORWARD:
+			return FETCH_FORWARD;
+		case PQ_FETCH_BACKWARD:
+			return FETCH_BACKWARD;
+		case PQ_FETCH_ABSOLUTE:
+			return FETCH_ABSOLUTE;
+		case PQ_FETCH_RELATIVE:
+			return FETCH_RELATIVE;
+	}
+
+	ereport(ERROR,
+			(errcode(ERRCODE_PROTOCOL_VIOLATION),
+			 errmsg("invalid fetch direction in Execute message: %d",
+					wire_direction)));
+	return FETCH_FORWARD;		/* keep compiler quiet */
+}
+
+/*
  * exec_execute_message
  *
  * Process an "Execute" message for a portal
+ *
+ * fetch_flags and fetch_count carry the Execute message's _pq_.cursor field,
+ * or PQ_FETCH_DEFAULT and 0 when the extension is not in use.
  */
 static void
-exec_execute_message(const char *portal_name, long max_rows)
+exec_execute_message(const char *portal_name, long max_rows,
+					 int fetch_flags, int64 fetch_count)
 {
 	CommandDest dest;
 	DestReceiver *receiver;
 	Portal		portal;
 	bool		completed;
 	QueryCompletion qc;
+	int			fetch_direction = fetch_flags & PQ_FETCH_DIRECTION_MASK;
 	const char *sourceText;
 	const char *prepStmtName;
 	ParamListInfo portalParams;
@@ -2374,12 +2438,63 @@ exec_execute_message(const char *portal_name, long max_rows)
 	if (max_rows <= 0)
 		max_rows = FETCH_ALL;
 
-	completed = PortalRun(portal,
-						  max_rows,
-						  true, /* always top level */
-						  receiver,
-						  receiver,
-						  &qc);
+	if (fetch_direction == PQ_FETCH_DEFAULT)
+	{
+		completed = PortalRun(portal,
+							  max_rows,
+							  true, /* always top level */
+							  receiver,
+							  receiver,
+							  &qc);
+	}
+	else
+	{
+		FetchDirection direction = fetch_direction_wire_to_enum(fetch_direction);
+		long		count = fetch_count_wire_to_long(fetch_count);
+		bool		is_move = (fetch_flags & PQ_FETCH_MOVE) != 0;
+		uint64		nprocessed;
+
+		/*
+		 * Only a portal holding a single row-returning query can be fetched
+		 * from; PortalRunFetch would reject anything else with a less helpful
+		 * message.
+		 */
+		if (portal->strategy != PORTAL_ONE_SELECT &&
+			portal->strategy != PORTAL_ONE_RETURNING &&
+			portal->strategy != PORTAL_ONE_MOD_WITH &&
+			portal->strategy != PORTAL_UTIL_SELECT)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot fetch from a portal of this type")));
+
+		/*
+		 * A MOVE only repositions the portal, so throw the rows away rather
+		 * than sending them.  The real receiver is still destroyed below,
+		 * exactly as in the non-MOVE case.
+		 */
+		nprocessed = PortalRunFetch(portal, direction, count,
+									is_move ? None_Receiver : receiver);
+
+		/*
+		 * Report the query's own command tag, so that a scrolling Execute
+		 * looks like an ordinary one to a client that only reads the tag.  A
+		 * MOVE returns no rows, though, so it has to say so.
+		 */
+		InitializeQueryCompletion(&qc);
+		if (is_move)
+			SetQueryCompletion(&qc, CMDTAG_MOVE, nprocessed);
+		else if (portal->qc.commandTag != CMDTAG_UNKNOWN)
+		{
+			CopyQueryCompletion(&qc, &portal->qc);
+			qc.nprocessed = nprocessed;
+		}
+
+		/*
+		 * The client said exactly how many rows it wanted, so there is never
+		 * anything left over to report with PortalSuspended.
+		 */
+		completed = true;
+	}
 
 	receiver->rDestroy(receiver);
 
@@ -5057,6 +5172,8 @@ PostgresMain(const char *dbname, const char *username)
 				{
 					const char *portal_name;
 					int			max_rows;
+					int			fetch_flags = PQ_FETCH_DEFAULT;
+					int64		fetch_count = 0;
 
 					forbidden_in_wal_sender(firstchar);
 
@@ -5065,9 +5182,58 @@ PostgresMain(const char *dbname, const char *username)
 
 					portal_name = pq_getmsgstring(&input_message);
 					max_rows = pq_getmsgint(&input_message, 4);
+
+					/*
+					 * Read the fetch fields of the _pq_.cursor extension.
+					 * Like the extension's Bind field, they are mandatory
+					 * once the extension is active, so that the server never
+					 * has to guess from the message length whether they are
+					 * there.  A client with nothing to say sends
+					 * PQ_FETCH_DEFAULT and a zero count.
+					 */
+					if (MyProcPort != NULL && MyProcPort->protocol_cursor_enabled)
+					{
+						fetch_flags = pq_getmsgint(&input_message, 4);
+						fetch_count = pq_getmsgint64(&input_message);
+
+						if (fetch_flags & ~PQ_FETCH_VALID_FLAGS)
+							ereport(ERROR,
+									(errcode(ERRCODE_PROTOCOL_VIOLATION),
+									 errmsg("unrecognized fetch flags in Execute message: 0x%x",
+											fetch_flags)));
+
+						if ((fetch_flags & PQ_FETCH_DIRECTION_MASK) == PQ_FETCH_DEFAULT)
+						{
+							/*
+							 * Without a direction there is nothing for the
+							 * other fields to mean, so insist that they are
+							 * empty rather than silently ignoring them.
+							 */
+							if (fetch_flags != PQ_FETCH_DEFAULT)
+								ereport(ERROR,
+										(errcode(ERRCODE_PROTOCOL_VIOLATION),
+										 errmsg("fetch flags in Execute message require a fetch direction")));
+							if (fetch_count != 0)
+								ereport(ERROR,
+										(errcode(ERRCODE_PROTOCOL_VIOLATION),
+										 errmsg("fetch count in Execute message requires a fetch direction")));
+						}
+						else if (max_rows != 0)
+						{
+							/*
+							 * The fetch count says how many rows are wanted,
+							 * so the row-count field has no say.  Reject a
+							 * conflicting one instead of picking a winner.
+							 */
+							ereport(ERROR,
+									(errcode(ERRCODE_PROTOCOL_VIOLATION),
+									 errmsg("Execute message cannot specify both a maximum row count and a fetch direction")));
+						}
+					}
 					pq_getmsgend(&input_message);
 
-					exec_execute_message(portal_name, max_rows);
+					exec_execute_message(portal_name, max_rows,
+										 fetch_flags, fetch_count);
 
 					/* exec_execute_message does valgrind_report_error_query */
 				}
