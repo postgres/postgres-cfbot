@@ -1169,6 +1169,16 @@ pgbench <optional> <replaceable>options</replaceable> </optional> <replaceable>d
    statement.
   </para>
 
+  <para>
+   A variable holding <literal>NULL</literal> is inserted into an SQL command
+   as the unquoted word <literal>NULL</literal>.  In the
+   <literal>extended</literal> and <literal>prepared</literal> query modes,
+   however, it is passed as the string <literal>NULL</literal> rather than as
+   an SQL null parameter.  Conversely, a variable whose string value is
+   <literal>NULL</literal>, in any letter case, is treated as
+   <literal>NULL</literal> in an expression.
+  </para>
+
    <table id="pgbench-automatic-variables">
     <title>pgbench Automatic Variables</title>
     <tgroup cols="2">
