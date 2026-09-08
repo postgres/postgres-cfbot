@@ -437,8 +437,12 @@ pgstat_bestart_final(void)
 	/* pgstats state must be initialized from pgstat_beinit() */
 	Assert(beentry != NULL);
 
-	/* We have userid for client-backends, wal-sender and bgworker processes */
+	/*
+	 * We have userid for client-backends, standalone-backends, wal-sender and
+	 * bgworker processes.
+	 */
 	if (MyBackendType == B_BACKEND
+		|| MyBackendType == B_STANDALONE_BACKEND
 		|| MyBackendType == B_WAL_SENDER
 		|| MyBackendType == B_BG_WORKER)
 		userid = GetSessionUserId();
