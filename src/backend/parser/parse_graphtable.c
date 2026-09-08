@@ -395,3 +395,149 @@ transformGraphPattern(ParseState *pstate, GraphPattern *graph_pattern)
 
 	return (Node *) graph_pattern;
 }
+
+/*
+ * Collect label OIDs from a label expression (a single GraphLabelRef or an
+ * OR tree of GraphLabelRef nodes) into a list.  Returns NIL if labelexpr is
+ * NULL; callers decide what a label-less element pattern means (the graph
+ * rewrite fallback treats it as "all labels", see
+ * get_graph_all_label_oids()).  Shared by the parser, the native planner and
+ * executor, and the graph rewrite fallback.
+ */
+List *
+get_label_oids_for_labelexpr(Node *labelexpr)
+{
+	List	   *result = NIL;
+
+	if (labelexpr == NULL)
+		return NIL;
+
+	if (IsA(labelexpr, GraphLabelRef))
+	{
+		GraphLabelRef *lref = (GraphLabelRef *) labelexpr;
+
+		result = lappend_oid(result, lref->labelid);
+	}
+	else if (IsA(labelexpr, BoolExpr))
+	{
+		BoolExpr   *b = (BoolExpr *) labelexpr;
+
+		foreach_ptr(Node, arg, b->args)
+		{
+			List	   *sub = get_label_oids_for_labelexpr(arg);
+
+			if (sub != NIL)
+				result = list_concat(result, sub);
+		}
+	}
+	else
+	{
+		/*
+		 * Should not reach here: gram.y only generates label expressions
+		 * built from GraphLabelRef and OR.
+		 */
+		elog(ERROR, "unsupported label expression node: %d",
+			 (int) nodeTag(labelexpr));
+	}
+
+	return result;
+}
+
+/*
+ * Return the OIDs of all labels belonging to the given property graph.
+ *
+ * A graph element pattern without a label expression is equivalent to
+ * "%|!%" (SQL/PGQ 9.2 subclause 2.a.ii), i.e. it matches every label of the
+ * graph.
+ */
+List *
+get_graph_all_label_oids(Oid propgraphid)
+{
+	List	   *label_oids = NIL;
+	Relation	rel;
+	SysScanDesc scan;
+	ScanKeyData key[1];
+	HeapTuple	tup;
+
+	rel = table_open(PropgraphLabelRelationId, AccessShareLock);
+	ScanKeyInit(&key[0],
+				Anum_pg_propgraph_label_pglpgid,
+				BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(propgraphid));
+	scan = systable_beginscan(rel, PropgraphLabelGraphNameIndexId,
+							  true, NULL, 1, key);
+	while (HeapTupleIsValid(tup = systable_getnext(scan)))
+	{
+		Form_pg_propgraph_label label = (Form_pg_propgraph_label) GETSTRUCT(tup);
+
+		label_oids = lappend_oid(label_oids, label->oid);
+	}
+	systable_endscan(scan);
+	table_close(rel, AccessShareLock);
+
+	return label_oids;
+}
+
+/*
+ * Map a graph element pattern kind to the element-kind character ('v' for
+ * vertex, 'e' for edge) and the human-readable class name ("vertex"/"edge").
+ * Returns false for pattern kinds that do not denote a vertex or edge (e.g.
+ * PAREN_EXPR), leaving the outputs untouched.  kind_str may be NULL if the
+ * caller only needs the character.  Shared by the parser validators, the
+ * native planner, and the native executor.
+ */
+bool
+graph_element_kind_info(GraphElementPatternKind kind,
+						char *element_kind, const char **kind_str)
+{
+	switch (kind)
+	{
+		case VERTEX_PATTERN:
+			*element_kind = 'v';
+			if (kind_str)
+				*kind_str = "vertex";
+			return true;
+		case EDGE_PATTERN_ANY:
+		case EDGE_PATTERN_RIGHT:
+		case EDGE_PATTERN_LEFT:
+			*element_kind = 'e';
+			if (kind_str)
+				*kind_str = "edge";
+			return true;
+		default:
+			return false;
+	}
+}
+
+/*
+ * Match a label expression against an element, using the supplied
+ * membership callback.  A label expression is a single GraphLabelRef or a
+ * BoolExpr (OR) tree of GraphLabelRef nodes; the element matches if it
+ * carries any of the referenced labels (OR semantics).  A NULL labelexpr
+ * matches everything.
+ *
+ * See graph_label_expr_matches() in parse_graphtable.h for the shared API.
+ */
+bool
+graph_label_expr_matches(Node *labelexpr, GraphLabelHasFn has_label,
+						 void *arg)
+{
+	if (labelexpr == NULL)
+		return true;
+	if (IsA(labelexpr, GraphLabelRef))
+		return has_label(((GraphLabelRef *) labelexpr)->labelid, arg);
+	if (IsA(labelexpr, BoolExpr))
+	{
+		BoolExpr   *b = (BoolExpr *) labelexpr;
+
+		foreach_ptr(Node, sub, b->args)
+		{
+			if (graph_label_expr_matches(sub, has_label, arg))
+				return true;
+		}
+		return false;
+	}
+	elog(ERROR, "unsupported label expression node: %d",
+		 (int) nodeTag(labelexpr));
+	return false;				/* keep compiler quiet */
+}

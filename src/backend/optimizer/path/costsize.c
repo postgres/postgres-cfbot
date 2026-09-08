@@ -143,6 +143,13 @@ Cost		disable_cost = 1.0e10;
 
 int			max_parallel_workers_per_gather = 2;
 
+/*
+ * Maximum total number of edges in any path of a native graph traversal,
+ * across the whole graph pattern (not just a single variable-length hop).
+ * Guard against runaway execution on cyclic or excessively long patterns.
+ */
+int			max_graph_stack_depth = 1000;
+
 bool		enable_seqscan = true;
 bool		enable_indexscan = true;
 bool		enable_indexonlyscan = true;
@@ -155,6 +162,7 @@ bool		enable_groupagg = true;
 bool		enable_nestloop = true;
 bool		enable_material = true;
 bool		enable_memoize = true;
+bool		enable_native_graphtable = false;
 bool		enable_mergejoin = true;
 bool		enable_hashjoin = true;
 bool		enable_gathermerge = true;

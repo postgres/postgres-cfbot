@@ -452,6 +452,8 @@
 #enable_distinct_reordering = on
 #enable_self_join_elimination = on
 #enable_eager_aggregate = on
+#enable_native_graphtable = off
+#max_graph_stack_depth = 1000           # maximum total length of a graph traversal path
 
 # - Planner Cost Constants -
 
