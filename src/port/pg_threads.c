@@ -361,6 +361,10 @@ pg_mtx_init_impl(pg_mtx_impl *mtx, int type)
 	pthread_mutexattr_init(&attr);
 	if (type & pg_mtx_recursive_impl)
 		pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+#ifdef USE_ASSERT_CHECKING
+	else
+		pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
+#endif
 	result = pg_thrd_map(pthread_mutex_init(mtx, &attr));
 	pthread_mutexattr_destroy(&attr);
 

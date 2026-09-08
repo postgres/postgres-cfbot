@@ -80,14 +80,43 @@ PG_THREADS_MAP(pg_cnd_wait, pthread_cond_wait, pg_cnd_impl *, pg_mtx_impl *);
 /* mtx_t */
 PG_THREADS_FORWARD_VOID(pg_mtx_destroy, pthread_mutex_destroy, pg_mtx_impl *);
 PG_THREADS_OUTOFLINE(pg_mtx_init, int, pg_mtx_impl *, int);
+#ifndef USE_ASSERT_CHECKING
 PG_THREADS_MAP(pg_mtx_lock, pthread_mutex_lock, pg_mtx_impl *);
+#else
+/*
+ * In assertion-enabled builds, pg_mtx_init() and PG_MTX_PLAIN_INIT ask for
+ * error-checking mutexes where available.  Callers rarely check the result
+ * of locking and unlocking, so assert success here instead, turning a
+ * self-deadlock or an unlock by the wrong thread into a crash with a stack
+ * trace.
+ */
+static inline int
+pg_mtx_lock(pg_mtx_impl *mtx)
+{
+	int			result = pthread_mutex_lock(mtx);
+
+	Assert(result == 0);
+	return pg_thrd_map(result);
+}
+#endif
 #ifndef PG_MTX_TIMED_NOT_SUPPORTED
 PG_THREADS_MAP(pg_mtx_timedlock, pthread_mutex_timedlock, pg_mtx_impl *, const struct timespec *);
 #else
 PG_THREADS_MAP_ERROR_UNSUPPORTED(pg_mtx_timedlock, pg_mtx_impl *, const struct timespec *);
 #endif
 PG_THREADS_MAP(pg_mtx_trylock, pthread_mutex_trylock, pg_mtx_impl *);
+#ifndef USE_ASSERT_CHECKING
 PG_THREADS_MAP(pg_mtx_unlock, pthread_mutex_unlock, pg_mtx_impl *);
+#else
+static inline int
+pg_mtx_unlock(pg_mtx_impl *mtx)
+{
+	int			result = pthread_mutex_unlock(mtx);
+
+	Assert(result == 0);
+	return pg_thrd_map(result);
+}
+#endif
 
 /* once_flag */
 PG_THREADS_FORWARD_VOID(pg_call_once, pthread_once, pg_once_flag_impl *, pg_call_once_function_impl);
