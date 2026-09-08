@@ -1481,6 +1481,17 @@ pull_up_simple_subquery(PlannerInfo *root, Node *jtnode, RangeTblEntry *rte,
 	subroot->non_recursive_path = NULL;
 	/* We don't currently need a top JoinDomain for the subroot */
 
+	/*
+	 * If the subquery has inlineable CTEs, inline them now so that the
+	 * Assert below is satisfied.  is_simple_subquery should have already
+	 * verified that all CTEs are inlineable, so SS_inline_ctes is expected
+	 * to succeed.
+	 */
+	if (subquery->cteList)
+	{
+		SS_inline_ctes(subroot);
+	}
+
 	/* No CTEs to worry about */
 	Assert(subquery->cteList == NIL);
 
@@ -1976,7 +1987,9 @@ is_simple_subquery(PlannerInfo *root, Query *subquery, RangeTblEntry *rte,
 
 	/*
 	 * Can't pull up a subquery involving grouping, aggregation, SRFs,
-	 * sorting, limiting, or WITH.  (XXX WITH could possibly be allowed later)
+	 * sorting, limiting, or non-inlineable CTEs.  CTEs that are inlineable
+	 * will be inlined by pull_up_simple_subquery before the
+	 * Assert(cteList==NIL).
 	 *
 	 * We also don't pull up a subquery that has explicit FOR UPDATE/SHARE
 	 * clauses, because pullup would cause the locking to occur semantically
@@ -1995,7 +2008,7 @@ is_simple_subquery(PlannerInfo *root, Query *subquery, RangeTblEntry *rte,
 		subquery->limitOffset ||
 		subquery->limitCount ||
 		subquery->hasForUpdate ||
-		subquery->cteList)
+		(subquery->cteList && !SS_all_ctes_inlineable(subquery)))
 		return false;
 
 	/*
