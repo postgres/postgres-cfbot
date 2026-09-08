@@ -165,8 +165,8 @@ ginvalidate(Oid opclassoid)
 		HeapTuple	oprtup = &oprlist->members[i]->tuple;
 		Form_pg_amop oprform = (Form_pg_amop) GETSTRUCT(oprtup);
 
-		/* TODO: Check that only allowed strategy numbers exist */
-		if (oprform->amopstrategy < 1 || oprform->amopstrategy > 63)
+		/* Check that only allowed strategy numbers exist */
+		if (oprform->amopstrategy < 1 || oprform->amopstrategy > MaxStrategyNumber)
 		{
 			ereport(INFO,
 					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),

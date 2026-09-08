@@ -1330,12 +1330,6 @@ gist_point_consistent_internal(StrategyNumber strategy,
 	return result;
 }
 
-#define GeoStrategyNumberOffset		20
-#define PointStrategyNumberGroup	0
-#define BoxStrategyNumberGroup		1
-#define PolygonStrategyNumberGroup	2
-#define CircleStrategyNumberGroup	3
-
 Datum
 gist_point_consistent(PG_FUNCTION_ARGS)
 {

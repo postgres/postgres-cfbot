@@ -142,7 +142,7 @@ brinvalidate(Oid opclassoid)
 		Form_pg_amop oprform = (Form_pg_amop) GETSTRUCT(oprtup);
 
 		/* Check that only allowed strategy numbers exist */
-		if (oprform->amopstrategy < 1 || oprform->amopstrategy > 63)
+		if (oprform->amopstrategy < 1 || oprform->amopstrategy > RTMaxStrategyNumber)
 		{
 			ereport(INFO,
 					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
