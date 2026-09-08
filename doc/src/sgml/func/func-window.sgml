@@ -278,6 +278,133 @@ IGNORE NULLS
    <function>nth_value</function>.
   </para>
 
+  <para>
+   Row Pattern Recognition navigation functions are listed in
+   <xref linkend="functions-rpr-navigation-table"/>.  These functions
+   can be used to describe the DEFINE clause of Row Pattern Recognition.
+   The names <function>PREV</function>, <function>NEXT</function>,
+   <function>FIRST</function>, and <function>LAST</function> are
+   recognized as navigation functions only in an unqualified call; a
+   schema-qualified call is resolved as an ordinary function instead.
+  </para>
+
+   <table id="functions-rpr-navigation-table">
+    <title>Row Pattern Navigation Functions</title>
+    <tgroup cols="1">
+     <thead>
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        Function
+       </para>
+       <para>
+        Description
+       </para></entry>
+      </row>
+     </thead>
+
+     <tbody>
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>prev</primary>
+        </indexterm>
+        <function>prev</function> ( <parameter>value</parameter> <type>anyelement</type> [, <parameter>offset</parameter> <type>bigint</type> ] )
+        <returnvalue>anyelement</returnvalue>
+       </para>
+       <para>
+        Returns <parameter>value</parameter> evaluated at the row that is
+        <parameter>offset</parameter> rows before the current row within
+        the partition;
+        returns NULL if the target row is outside the partition.
+        <parameter>offset</parameter> defaults to 1 if omitted.
+        <parameter>offset</parameter> must be a non-negative integer;
+        an offset of 0 refers to the current row itself.
+        <parameter>offset</parameter> must not be NULL.
+        Can only be used in a <literal>DEFINE</literal> clause.
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>next</primary>
+        </indexterm>
+        <function>next</function> ( <parameter>value</parameter> <type>anyelement</type> [, <parameter>offset</parameter> <type>bigint</type> ] )
+        <returnvalue>anyelement</returnvalue>
+       </para>
+       <para>
+        Returns <parameter>value</parameter> evaluated at the row that is
+        <parameter>offset</parameter> rows after the current row within
+        the partition;
+        returns NULL if the target row is outside the partition.
+        <parameter>offset</parameter> defaults to 1 if omitted.
+        <parameter>offset</parameter> must be a non-negative integer;
+        an offset of 0 refers to the current row itself.
+        <parameter>offset</parameter> must not be NULL.
+        Can only be used in a <literal>DEFINE</literal> clause.
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>first</primary>
+        </indexterm>
+        <function>first</function> ( <parameter>value</parameter> <type>anyelement</type> [, <parameter>offset</parameter> <type>bigint</type> ] )
+        <returnvalue>anyelement</returnvalue>
+       </para>
+       <para>
+        Returns <parameter>value</parameter> evaluated at the row that is
+        <parameter>offset</parameter> rows after the match start row;
+        returns NULL if the target row is beyond the current row.
+        <parameter>offset</parameter> defaults to 0 if omitted, referring to the
+        match start row itself.
+        <parameter>offset</parameter> must be a non-negative integer.
+        <parameter>offset</parameter> must not be NULL.
+        Can only be used in a <literal>DEFINE</literal> clause.
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>last</primary>
+        </indexterm>
+        <function>last</function> ( <parameter>value</parameter> <type>anyelement</type> [, <parameter>offset</parameter> <type>bigint</type> ] )
+        <returnvalue>anyelement</returnvalue>
+       </para>
+       <para>
+        Returns <parameter>value</parameter> evaluated at the row that is
+        <parameter>offset</parameter> rows before the current row within
+        the match;
+        returns NULL if the target row is before the match start row.
+        <parameter>offset</parameter> defaults to 0 if omitted, referring to the
+        current row itself.
+        <parameter>offset</parameter> must be a non-negative integer.
+        <parameter>offset</parameter> must not be NULL.
+        Can only be used in a <literal>DEFINE</literal> clause.
+       </para></entry>
+      </row>
+
+     </tbody>
+    </tgroup>
+   </table>
+
+   <para>
+    <function>PREV</function> and <function>NEXT</function> may wrap
+    <function>FIRST</function> or <function>LAST</function> for compound
+    navigation. For example,
+    <literal>PREV(FIRST(val, 2), 3)</literal> fetches the value at
+    3 rows before the row that is 2 rows after the match start.
+    The reverse nesting (<function>FIRST</function>/<function>LAST</function>
+    wrapping <function>PREV</function>/<function>NEXT</function>) is not
+    permitted. Same-category nesting (e.g.,
+    <function>PREV</function> inside <function>PREV</function>) is also
+    prohibited.
+    The <parameter>offset</parameter> argument must be a run-time constant:
+    it cannot reference columns or contain a navigation operation.
+   </para>
+
   <note>
    <para>
     The SQL standard defines a <literal>FROM FIRST</literal> or <literal>FROM LAST</literal>

@@ -702,6 +702,88 @@ FROM tenk1 t1 WHERE t1.ten = (SELECT (random() * 10)::integer);
     happen without the sub-<literal>SELECT</literal> construct.
    </para>
 
+   <para>
+    When examining query plans for Row Pattern Recognition with
+    <command>EXPLAIN</command>, the <literal>Pattern</literal> line may
+    carry absorption markers.  They report an analysis the planner has
+    already made, not an opportunity left open.  A number sign
+    <literal>#</literal> marks the comparison point of an absorption, which
+    is always an element carrying an unbounded quantifier, and a tilde
+    <literal>~</literal> marks an element that lies within the absorbable
+    region.  Neither marker requires an alternation to be present.
+    For example, using the <structname>stock</structname>
+    table from <xref linkend="tutorial-window"/>, a query that looks for
+    repeated up-then-down movements reports its pattern as
+    <literal>(up~ down~)+#</literal>:
+
+<screen>
+EXPLAIN (COSTS OFF)
+SELECT company, tdate, price, count(price) OVER w
+FROM stock
+WINDOW w AS (
+    PARTITION BY company
+    ORDER BY tdate
+    ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING
+    AFTER MATCH SKIP PAST LAST ROW
+    INITIAL
+    PATTERN ((UP DOWN)+)
+    DEFINE UP AS price &gt; PREV(price),
+           DOWN AS price &lt; PREV(price)
+);
+
+                                              QUERY PLAN
+-------------------------------------------------------------------&zwsp;------------------------------------
+ WindowAgg
+   Window: w AS (PARTITION BY company ORDER BY tdate ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+   Pattern: (up~ down~)+#
+   Nav Mark Lookback: 1
+   -&gt;  Sort
+         Sort Key: company, tdate
+         -&gt;  Seq Scan on stock
+</screen>
+
+    Here the tildes mark <literal>up</literal> and
+    <literal>down</literal> as lying within the absorbable region, while
+    the trailing number sign marks the repeated group as the comparison
+    point.
+   </para>
+
+   <para>
+    The <literal>Nav Mark Lookback</literal> line reports the row-retention
+    bound the executor computed for the backward navigations used in
+    <literal>DEFINE</literal> (<literal>PREV</literal> and
+    <literal>LAST</literal>); a <literal>Nav Mark Lookahead</literal> line
+    appears when <literal>DEFINE</literal> navigates forward
+    (<literal>FIRST</literal>).  Each reports a row count when the
+    navigation offsets are constant; the lookahead is measured from the
+    match start, so a compound navigation that reaches back past it, such
+    as <literal>PREV(FIRST(val, 1), 2)</literal>, reports a negative one.
+    Otherwise <literal>Nav Mark Lookback</literal> reports
+    <literal>runtime</literal> for an offset that is not known until
+    execution, or <literal>retain all</literal> when no bound could be
+    computed and every row of the frame has to be kept; and
+    <literal>Nav Mark Lookahead</literal> reports <literal>runtime</literal>
+    or <literal>infinite</literal>.
+   </para>
+
+   <para>
+    Under <literal>ANALYZE</literal>, further lines report counters for the
+    matcher's internal states and contexts.  Those are diagnostics for the
+    implementation rather than a stable interface; their names and contents
+    may change.
+   </para>
+
+   <para>
+    Neither the <literal>AFTER MATCH SKIP</literal> nor the
+    <literal>INITIAL</literal> subclause is printed.  Nothing is lost for
+    <literal>INITIAL</literal>, which is the only mode currently supported,
+    but <literal>AFTER MATCH SKIP</literal> still shows through: absorption
+    is analyzed only under <literal>SKIP PAST LAST ROW</literal>, so the
+    same pattern prints with the <literal>#</literal> and
+    <literal>~</literal> markers in that mode and without them in the
+    others.
+   </para>
+
   </sect2>
 
   <sect2 id="using-explain-analyze">
