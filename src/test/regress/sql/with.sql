@@ -1800,3 +1800,43 @@ EXPLAIN (COSTS OFF)
 WITH cte AS (SELECT DISTINCT two, thousand FROM tenk1)
 SELECT * FROM cte t1, cte t2
 WHERE t1.two = 0 AND t2.two = 0 AND t1.thousand = t2.thousand;
+
+-- Test CTE inlining during subquery pull-up
+CREATE TABLE cte_pullup_t (id INT PRIMARY KEY, val TEXT);
+INSERT INTO cte_pullup_t SELECT g, 'val' || g FROM generate_series(1,100) g;
+CREATE TABLE cte_pullup_s (id INT, tid INT);
+INSERT INTO cte_pullup_s SELECT g, (g % 10) + 1 FROM generate_series(1,50) g;
+
+ANALYZE cte_pullup_t, cte_pullup_s;
+
+-- NOT MATERIALIZED CTE in subquery: should be inlined and pulled up
+EXPLAIN (COSTS OFF)
+SELECT * FROM cte_pullup_s s LEFT JOIN (
+  WITH cte AS NOT materialized (SELECT id, val FROM cte_pullup_t)
+  SELECT * FROM (SELECT id, val FROM cte) sub
+) t on t.id = s.tid
+WHERE s.id < 5;
+
+-- Default (singly-referenced) CTE in subquery: same, should be inlined and pulled up
+EXPLAIN (COSTS OFF)
+SELECT * FROM cte_pullup_s s LEFT JOIN (
+  WITH cte AS (SELECT id, val FROM cte_pullup_t)
+  SELECT * FROM (SELECT id, val FROM cte) sub
+) t on t.id = s.tid
+WHERE s.id < 5;
+
+-- MATERIALIZED CTE in subquery: should NOT be inlined
+EXPLAIN (COSTS OFF)
+SELECT * FROM cte_pullup_s s LEFT JOIN (
+  WITH cte AS materialized (SELECT id, val FROM cte_pullup_t)
+  SELECT * FROM (SELECT id, val FROM cte) sub
+) t on t.id = s.tid
+WHERE s.id < 5;
+
+-- CTE WITH volatile function: should NOT be inlined
+EXPLAIN (COSTS OFF)
+WITH cte AS NOT materialized (SELECT id, random() AS r FROM cte_pullup_t)
+SELECT * FROM (SELECT id FROM cte) sub WHERE id = 1;
+
+DROP TABLE cte_pullup_s;
+DROP TABLE cte_pullup_t;
