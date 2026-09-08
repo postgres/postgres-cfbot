@@ -46,6 +46,7 @@
 #include "postgres.h"
 
 #ifdef USE_LIBXML
+#include <libxml/c14n.h>
 #include <libxml/chvalid.h>
 #include <libxml/entities.h>
 #include <libxml/parser.h>
@@ -58,6 +59,21 @@
 #include <libxml/xmlwriter.h>
 #include <libxml/xpath.h>
 #include <libxml/xpathInternals.h>
+
+/*
+ * Canonical XML support is an optional component of libxml2, which can be
+ * built without it, and the C14N 1.1 mode we use appeared only in libxml2
+ * 2.7.4.  Probe for both here so that xmlcanonicalize() can degrade to a clean
+ * error rather than breaking the build.
+ *
+ * Note that c14n.h is self-guarding: it includes xmlversion.h and then exposes
+ * nothing at all unless LIBXML_C14N_ENABLED is defined, so including it
+ * unconditionally above is safe, and it is what makes both symbols tested here
+ * visible.
+ */
+#if defined(LIBXML_C14N_ENABLED) && LIBXML_VERSION >= 20704
+#define PG_HAVE_XML_C14N 1
+#endif
 
 /*
  * We used to check for xmlStructuredErrorContext via a configure test; but
@@ -566,6 +582,91 @@ xmltext(PG_FUNCTION_ARGS)
 #endif							/* not USE_LIBXML */
 }
 
+/*
+ * Canonicalizes the given XML document according to the W3C Canonical XML 1.1
+ * specification, using libxml2's xmlC14NDocDumpMemory().
+ *
+ * The input XML must be a well-formed document (not a fragment). The
+ * canonical form is deterministic and useful for digital signatures and
+ * comparing logically equivalent XML.
+ *
+ * The second argument determines whether comments are preserved
+ * (true) or omitted (false) in the canonicalized output.
+ *
+ * This requires a libxml2 that was built with Canonical XML support and that
+ * is new enough to know about C14N 1.1; see PG_HAVE_XML_C14N above.
+ */
+Datum
+xmlcanonicalize(PG_FUNCTION_ARGS)
+{
+#ifdef PG_HAVE_XML_C14N
+	xmltype    *arg = PG_GETARG_XML_P(0);
+	bool		keep_comments = PG_GETARG_BOOL(1);
+	text	   *result;
+	xmlChar    *volatile xmlbuf = NULL;
+	int			nbytes = 0;
+	volatile xmlDocPtr doc = NULL;
+	PgXmlErrorContext *xmlerrcxt;
+
+	/* Set up XML error context for proper libxml2 error integration */
+	xmlerrcxt = pg_xml_init(PG_XML_STRICTNESS_ALL);
+
+	PG_TRY();
+	{
+		char	   *converted;
+
+		/* Parse the input as a full XML document */
+		doc = xml_parse(arg, XMLOPTION_DOCUMENT, true,
+						GetDatabaseEncoding(), NULL, NULL, NULL);
+
+		/* Canonicalize the entire document using C14N 1.1 */
+		nbytes = xmlC14NDocDumpMemory(doc, NULL, XML_C14N_1_1,
+									  NULL, keep_comments,
+									  (xmlChar **) &xmlbuf);
+
+		if (nbytes < 0 || xmlbuf == NULL || xmlerrcxt->err_occurred)
+			xml_ereport(xmlerrcxt, ERROR, ERRCODE_INVALID_XML_DOCUMENT,
+						"could not canonicalize XML document");
+
+		/*
+		 * C14N always produces UTF-8 output regardless of the database
+		 * encoding.  Convert to the server encoding so the result is a
+		 * valid text value.
+		 */
+		converted = pg_any_to_server((char *) xmlbuf, nbytes, PG_UTF8);
+
+		result = cstring_to_text(converted);
+		if (converted != (char *) xmlbuf)
+			pfree(converted);
+	}
+	PG_CATCH();
+	{
+		if (doc)
+			xmlFreeDoc((xmlDocPtr) doc);
+		if (xmlbuf)
+			xmlFree((xmlChar *) xmlbuf);
+
+		pg_xml_done(xmlerrcxt, true);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	xmlFreeDoc((xmlDocPtr) doc);
+	xmlFree((xmlChar *) xmlbuf);
+	pg_xml_done(xmlerrcxt, false);
+
+	PG_RETURN_TEXT_P(result);
+#elif defined(USE_LIBXML)
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("unsupported XML feature"),
+			 errdetail("This functionality requires libxml2 version 2.7.4 or later, built with Canonical XML (C14N) support.")));
+	return 0;
+#else
+	NO_XML_SUPPORT();
+	return 0;
+#endif
+}
 
 /*
  * TODO: xmlconcat needs to merge the notations and unparsed entities
