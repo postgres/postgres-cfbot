@@ -237,7 +237,7 @@ pqTraceOutput_NotificationResponse(FILE *f, const char *message, int *cursor, bo
 }
 
 static void
-pqTraceOutput_Bind(FILE *f, const char *message, int *cursor)
+pqTraceOutput_Bind(FILE *f, const char *message, int *cursor, int length)
 {
 	int			nparams;
 
@@ -264,6 +264,10 @@ pqTraceOutput_Bind(FILE *f, const char *message, int *cursor)
 	nparams = pqTraceOutputInt16(f, message, cursor);
 	for (int i = 0; i < nparams; i++)
 		pqTraceOutputInt16(f, message, cursor);
+
+	/* Cursor options, present only when _pq_.cursor is negotiated */
+	if (*cursor < length + 1)
+		pqTraceOutputInt32(f, message, cursor, false);
 }
 
 static void
@@ -674,7 +678,7 @@ pqTraceOutputMessage(PGconn *conn, const char *message, bool toServer)
 			pqTraceOutput_NotificationResponse(conn->Pfdebug, message, &logCursor, regress);
 			break;
 		case PqMsg_Bind:
-			pqTraceOutput_Bind(conn->Pfdebug, message, &logCursor);
+			pqTraceOutput_Bind(conn->Pfdebug, message, &logCursor, length);
 			break;
 		case PqMsg_CopyDone:
 			fprintf(conn->Pfdebug, "CopyDone");

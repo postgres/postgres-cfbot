@@ -2100,6 +2100,517 @@ process_result(PGconn *conn, PGresult *res, int results, int numsent)
 	return got_error;
 }
 
+/* ---- _pq_.cursor extension tests ---- */
+
+/*
+ * Test holdable cursor: create a portal with PQ_BIND_CURSOR_HOLD via Bind,
+ * commit the transaction, then FETCH from the surviving portal.
+ */
+static void
+test_cursor_bind_holdable(PGconn *conn)
+{
+	PGresult   *res;
+
+	fprintf(stderr, "test_cursor_bind_holdable... ");
+
+	res = PQexec(conn, "BEGIN");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("BEGIN failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	res = PQexec(conn, "CREATE TEMP TABLE IF NOT EXISTS holdable_test(id int)");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("CREATE TABLE failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	res = PQexec(conn, "INSERT INTO holdable_test VALUES (1), (2), (3)");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("INSERT failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	res = PQprepare(conn, "holdstmt", "SELECT * FROM holdable_test", 0, NULL);
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("PREPARE failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	if (PQenterPipelineMode(conn) != 1)
+		pg_fatal("failed to enter pipeline mode: %s", PQerrorMessage(conn));
+
+	if (PQsendBindWithCursorOptions(conn, "holdstmt", 0, NULL, NULL, NULL, 0,
+									"holdportal", PQ_BIND_CURSOR_HOLD) != 1)
+		pg_fatal("PQsendBindWithCursorOptions failed: %s", PQerrorMessage(conn));
+
+	if (PQsendQueryParams(conn, "COMMIT", 0, NULL, NULL, NULL, NULL, 0) != 1)
+		pg_fatal("COMMIT failed: %s", PQerrorMessage(conn));
+
+	if (PQsendQueryParams(conn, "FETCH ALL FROM holdportal", 0, NULL, NULL, NULL, NULL, 0) != 1)
+		pg_fatal("FETCH failed: %s", PQerrorMessage(conn));
+
+	if (PQsendClosePortal(conn, "holdportal") != 1)
+		pg_fatal("PQsendClosePortal failed: %s", PQerrorMessage(conn));
+
+	if (PQpipelineSync(conn) != 1)
+		pg_fatal("pipeline sync failed: %s", PQerrorMessage(conn));
+
+	/* Bind+Describe result */
+	res = confirm_result_status(conn, PGRES_COMMAND_OK);
+	if (PQnfields(res) != 1)
+		pg_fatal("expected 1 field, got %d", PQnfields(res));
+	PQclear(res);
+	consume_null_result(conn);
+
+	/* COMMIT */
+	consume_result_status(conn, PGRES_COMMAND_OK);
+	consume_null_result(conn);
+
+	/* FETCH after commit */
+	res = confirm_result_status(conn, PGRES_TUPLES_OK);
+	if (PQntuples(res) != 3)
+		pg_fatal("expected 3 rows after commit, got %d", PQntuples(res));
+	PQclear(res);
+	consume_null_result(conn);
+
+	/* CLOSE */
+	consume_result_status(conn, PGRES_COMMAND_OK);
+	consume_null_result(conn);
+
+	consume_result_status(conn, PGRES_PIPELINE_SYNC);
+	consume_null_result(conn);
+
+	if (PQexitPipelineMode(conn) != 1)
+		pg_fatal("failed to exit pipeline mode: %s", PQerrorMessage(conn));
+
+	fprintf(stderr, "ok\n");
+}
+
+/*
+ * Test scroll cursor: create a portal with PQ_BIND_CURSOR_SCROLL and verify
+ * backward fetching works.
+ */
+static void
+test_cursor_bind_scroll(PGconn *conn)
+{
+	PGresult   *res;
+
+	fprintf(stderr, "test_cursor_bind_scroll... ");
+
+	res = PQexec(conn, "BEGIN");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("BEGIN failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	res = PQexec(conn, "CREATE TEMP TABLE IF NOT EXISTS scroll_test(id int)");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("CREATE TABLE failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	res = PQexec(conn, "INSERT INTO scroll_test VALUES (1), (2), (3)");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("INSERT failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	res = PQprepare(conn, "scrollstmt", "SELECT * FROM scroll_test ORDER BY id", 0, NULL);
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("PREPARE failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	if (PQenterPipelineMode(conn) != 1)
+		pg_fatal("failed to enter pipeline mode: %s", PQerrorMessage(conn));
+
+	if (PQsendBindWithCursorOptions(conn, "scrollstmt", 0, NULL, NULL, NULL, 0,
+									"scrollportal", PQ_BIND_CURSOR_SCROLL) != 1)
+		pg_fatal("PQsendBindWithCursorOptions failed: %s", PQerrorMessage(conn));
+
+	if (PQsendQueryParams(conn, "FETCH 2 FROM scrollportal", 0, NULL, NULL, NULL, NULL, 0) != 1)
+		pg_fatal("FETCH forward failed: %s", PQerrorMessage(conn));
+
+	if (PQsendQueryParams(conn, "FETCH BACKWARD 1 FROM scrollportal", 0, NULL, NULL, NULL, NULL, 0) != 1)
+		pg_fatal("FETCH backward failed: %s", PQerrorMessage(conn));
+
+	if (PQsendClosePortal(conn, "scrollportal") != 1)
+		pg_fatal("PQsendClosePortal failed: %s", PQerrorMessage(conn));
+
+	if (PQsendQueryParams(conn, "COMMIT", 0, NULL, NULL, NULL, NULL, 0) != 1)
+		pg_fatal("COMMIT failed: %s", PQerrorMessage(conn));
+
+	if (PQpipelineSync(conn) != 1)
+		pg_fatal("pipeline sync failed: %s", PQerrorMessage(conn));
+
+	/* Bind+Describe result */
+	res = confirm_result_status(conn, PGRES_COMMAND_OK);
+	if (PQnfields(res) != 1)
+		pg_fatal("expected 1 field, got %d", PQnfields(res));
+	PQclear(res);
+	consume_null_result(conn);
+
+	/* FETCH forward 2 */
+	res = confirm_result_status(conn, PGRES_TUPLES_OK);
+	if (PQntuples(res) != 2)
+		pg_fatal("expected 2 rows from forward fetch, got %d", PQntuples(res));
+	PQclear(res);
+	consume_null_result(conn);
+
+	/* FETCH backward 1 */
+	res = confirm_result_status(conn, PGRES_TUPLES_OK);
+	if (PQntuples(res) != 1)
+		pg_fatal("expected 1 row from backward fetch, got %d", PQntuples(res));
+	if (strcmp(PQgetvalue(res, 0, 0), "1") != 0)
+		pg_fatal("expected value '1' from backward fetch, got '%s'", PQgetvalue(res, 0, 0));
+	PQclear(res);
+	consume_null_result(conn);
+
+	/* CLOSE */
+	consume_result_status(conn, PGRES_COMMAND_OK);
+	consume_null_result(conn);
+
+	/* COMMIT */
+	consume_result_status(conn, PGRES_COMMAND_OK);
+	consume_null_result(conn);
+
+	consume_result_status(conn, PGRES_PIPELINE_SYNC);
+	consume_null_result(conn);
+
+	if (PQexitPipelineMode(conn) != 1)
+		pg_fatal("failed to exit pipeline mode: %s", PQerrorMessage(conn));
+
+	fprintf(stderr, "ok\n");
+}
+
+/*
+ * Test no-scroll cursor: create a portal with PQ_BIND_CURSOR_NO_SCROLL and
+ * verify backward fetching is rejected.
+ */
+static void
+test_cursor_bind_no_scroll(PGconn *conn)
+{
+	PGresult   *res;
+
+	fprintf(stderr, "test_cursor_bind_no_scroll... ");
+
+	res = PQexec(conn, "BEGIN");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("BEGIN failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	res = PQexec(conn, "CREATE TEMP TABLE IF NOT EXISTS noscroll_test(id int)");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("CREATE TABLE failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	res = PQexec(conn, "INSERT INTO noscroll_test VALUES (1), (2), (3)");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("INSERT failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	res = PQprepare(conn, "noscrollstmt", "SELECT * FROM noscroll_test ORDER BY id", 0, NULL);
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("PREPARE failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	if (PQenterPipelineMode(conn) != 1)
+		pg_fatal("failed to enter pipeline mode: %s", PQerrorMessage(conn));
+
+	if (PQsendBindWithCursorOptions(conn, "noscrollstmt", 0, NULL, NULL, NULL, 0,
+									"noscrollportal", PQ_BIND_CURSOR_NO_SCROLL) != 1)
+		pg_fatal("PQsendBindWithCursorOptions failed: %s", PQerrorMessage(conn));
+
+	if (PQsendQueryParams(conn, "FETCH 1 FROM noscrollportal", 0, NULL, NULL, NULL, NULL, 0) != 1)
+		pg_fatal("FETCH forward failed: %s", PQerrorMessage(conn));
+
+	if (PQsendQueryParams(conn, "FETCH BACKWARD 1 FROM noscrollportal", 0, NULL, NULL, NULL, NULL, 0) != 1)
+		pg_fatal("FETCH backward send failed: %s", PQerrorMessage(conn));
+
+	if (PQsendClosePortal(conn, "noscrollportal") != 1)
+		pg_fatal("PQsendClosePortal failed: %s", PQerrorMessage(conn));
+
+	if (PQpipelineSync(conn) != 1)
+		pg_fatal("pipeline sync failed: %s", PQerrorMessage(conn));
+
+	/* Bind+Describe result */
+	res = confirm_result_status(conn, PGRES_COMMAND_OK);
+	if (PQnfields(res) != 1)
+		pg_fatal("expected 1 field, got %d", PQnfields(res));
+	PQclear(res);
+	consume_null_result(conn);
+
+	/* FETCH forward 1 - should succeed */
+	res = confirm_result_status(conn, PGRES_TUPLES_OK);
+	if (PQntuples(res) != 1)
+		pg_fatal("expected 1 row from forward fetch, got %d", PQntuples(res));
+	PQclear(res);
+	consume_null_result(conn);
+
+	/* FETCH backward - should fail */
+	consume_result_status(conn, PGRES_FATAL_ERROR);
+	consume_null_result(conn);
+
+	/* CLOSE - pipeline is aborted after the error */
+	consume_result_status(conn, PGRES_PIPELINE_ABORTED);
+	consume_null_result(conn);
+
+	consume_result_status(conn, PGRES_PIPELINE_SYNC);
+	consume_null_result(conn);
+
+	if (PQexitPipelineMode(conn) != 1)
+		pg_fatal("failed to exit pipeline mode: %s", PQerrorMessage(conn));
+
+	res = PQexec(conn, "ROLLBACK");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("ROLLBACK failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	fprintf(stderr, "ok\n");
+}
+
+/*
+ * Test combined holdable + scrollable portal.
+ */
+static void
+test_cursor_bind_holdable_scroll(PGconn *conn)
+{
+	PGresult   *res;
+
+	fprintf(stderr, "test_cursor_bind_holdable_scroll... ");
+
+	res = PQexec(conn, "BEGIN");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("BEGIN failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	res = PQexec(conn, "CREATE TEMP TABLE IF NOT EXISTS holdscroll_test(id int)");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("CREATE TABLE failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	res = PQexec(conn, "INSERT INTO holdscroll_test VALUES (1), (2), (3)");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("INSERT failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	res = PQprepare(conn, "holdscrollstmt",
+					"SELECT * FROM holdscroll_test ORDER BY id", 0, NULL);
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("PREPARE failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	if (PQenterPipelineMode(conn) != 1)
+		pg_fatal("failed to enter pipeline mode: %s", PQerrorMessage(conn));
+
+	if (PQsendBindWithCursorOptions(conn, "holdscrollstmt", 0, NULL, NULL, NULL, 0,
+									"holdscrollportal",
+									PQ_BIND_CURSOR_HOLD | PQ_BIND_CURSOR_SCROLL) != 1)
+		pg_fatal("PQsendBindWithCursorOptions failed: %s", PQerrorMessage(conn));
+
+	if (PQsendQueryParams(conn, "COMMIT", 0, NULL, NULL, NULL, NULL, 0) != 1)
+		pg_fatal("COMMIT failed: %s", PQerrorMessage(conn));
+
+	if (PQsendQueryParams(conn, "FETCH 2 FROM holdscrollportal",
+						  0, NULL, NULL, NULL, NULL, 0) != 1)
+		pg_fatal("FETCH forward failed: %s", PQerrorMessage(conn));
+
+	if (PQsendQueryParams(conn, "FETCH BACKWARD 1 FROM holdscrollportal",
+						  0, NULL, NULL, NULL, NULL, 0) != 1)
+		pg_fatal("FETCH backward failed: %s", PQerrorMessage(conn));
+
+	if (PQsendClosePortal(conn, "holdscrollportal") != 1)
+		pg_fatal("PQsendClosePortal failed: %s", PQerrorMessage(conn));
+
+	if (PQpipelineSync(conn) != 1)
+		pg_fatal("pipeline sync failed: %s", PQerrorMessage(conn));
+
+	/* Bind+Describe */
+	res = confirm_result_status(conn, PGRES_COMMAND_OK);
+	if (PQnfields(res) != 1)
+		pg_fatal("expected 1 field, got %d", PQnfields(res));
+	PQclear(res);
+	consume_null_result(conn);
+
+	/* COMMIT */
+	consume_result_status(conn, PGRES_COMMAND_OK);
+	consume_null_result(conn);
+
+	/* FETCH forward 2 */
+	res = confirm_result_status(conn, PGRES_TUPLES_OK);
+	if (PQntuples(res) != 2)
+		pg_fatal("expected 2 rows from forward fetch, got %d", PQntuples(res));
+	PQclear(res);
+	consume_null_result(conn);
+
+	/* FETCH backward 1 */
+	res = confirm_result_status(conn, PGRES_TUPLES_OK);
+	if (PQntuples(res) != 1)
+		pg_fatal("expected 1 row from backward fetch, got %d", PQntuples(res));
+	if (strcmp(PQgetvalue(res, 0, 0), "1") != 0)
+		pg_fatal("expected value '1' from backward fetch, got '%s'",
+				 PQgetvalue(res, 0, 0));
+	PQclear(res);
+	consume_null_result(conn);
+
+	/* CLOSE */
+	consume_result_status(conn, PGRES_COMMAND_OK);
+	consume_null_result(conn);
+
+	consume_result_status(conn, PGRES_PIPELINE_SYNC);
+	consume_null_result(conn);
+
+	if (PQexitPipelineMode(conn) != 1)
+		pg_fatal("failed to exit pipeline mode: %s", PQerrorMessage(conn));
+
+	fprintf(stderr, "ok\n");
+}
+
+/*
+ * Test cursor options on a DML statement are harmlessly ignored.
+ */
+static void
+test_cursor_bind_dml(PGconn *conn)
+{
+	PGresult   *res;
+
+	fprintf(stderr, "test_cursor_bind_dml... ");
+
+	res = PQexec(conn, "CREATE TEMP TABLE IF NOT EXISTS dml_test(id int)");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("CREATE TABLE failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	res = PQprepare(conn, "dmlstmt",
+					"INSERT INTO dml_test VALUES (1), (2), (3)", 0, NULL);
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("PREPARE failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	if (PQenterPipelineMode(conn) != 1)
+		pg_fatal("failed to enter pipeline mode: %s", PQerrorMessage(conn));
+
+	if (PQsendBindWithCursorOptions(conn, "dmlstmt", 0, NULL, NULL, NULL, 0,
+									"dmlportal", PQ_BIND_CURSOR_SCROLL) != 1)
+		pg_fatal("PQsendBindWithCursorOptions failed: %s", PQerrorMessage(conn));
+
+	if (PQpipelineSync(conn) != 1)
+		pg_fatal("pipeline sync failed: %s", PQerrorMessage(conn));
+
+	res = confirm_result_status(conn, PGRES_COMMAND_OK);
+	PQclear(res);
+	consume_null_result(conn);
+
+	consume_result_status(conn, PGRES_PIPELINE_SYNC);
+	consume_null_result(conn);
+
+	if (PQexitPipelineMode(conn) != 1)
+		pg_fatal("failed to exit pipeline mode: %s", PQerrorMessage(conn));
+
+	res = PQexec(conn, "SELECT count(*) FROM dml_test");
+	if (PQresultStatus(res) != PGRES_TUPLES_OK)
+		pg_fatal("SELECT count failed: %s", PQerrorMessage(conn));
+	if (strcmp(PQgetvalue(res, 0, 0), "0") != 0)
+		pg_fatal("expected 0 rows (Bind+Describe doesn't execute), got %s",
+				 PQgetvalue(res, 0, 0));
+	PQclear(res);
+
+	fprintf(stderr, "ok\n");
+}
+
+/*
+ * Test client-side validation of cursor bind options.
+ */
+static void
+test_cursor_bind_validation(PGconn *conn)
+{
+	PGresult   *res;
+
+	fprintf(stderr, "test_cursor_bind_validation... ");
+
+	res = PQprepare(conn, "valstmt", "SELECT 1", 0, NULL);
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("PREPARE failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	if (PQenterPipelineMode(conn) != 1)
+		pg_fatal("failed to enter pipeline mode: %s", PQerrorMessage(conn));
+
+	/* Empty portal name rejected */
+	if (PQsendBindWithCursorOptions(conn, "valstmt", 0, NULL, NULL, NULL, 0,
+									"", PQ_BIND_CURSOR_HOLD) != 0)
+		pg_fatal("expected rejection of empty portal name");
+
+	/* NULL portal name rejected */
+	if (PQsendBindWithCursorOptions(conn, "valstmt", 0, NULL, NULL, NULL, 0,
+									NULL, PQ_BIND_CURSOR_HOLD) != 0)
+		pg_fatal("expected rejection of NULL portal name");
+
+	/* Invalid flag bits rejected */
+	if (PQsendBindWithCursorOptions(conn, "valstmt", 0, NULL, NULL, NULL, 0,
+									"p", 0x0008) != 0)
+		pg_fatal("expected rejection of invalid flags");
+
+	/* Mixed valid+invalid flags rejected */
+	if (PQsendBindWithCursorOptions(conn, "valstmt", 0, NULL, NULL, NULL, 0,
+									"p", PQ_BIND_CURSOR_HOLD | 0x0100) != 0)
+		pg_fatal("expected rejection of mixed invalid flags");
+
+	/* SCROLL | NO_SCROLL rejected */
+	if (PQsendBindWithCursorOptions(conn, "valstmt", 0, NULL, NULL, NULL, 0,
+									"p",
+									PQ_BIND_CURSOR_SCROLL | PQ_BIND_CURSOR_NO_SCROLL) != 0)
+		pg_fatal("expected rejection of SCROLL | NO_SCROLL");
+
+	if (PQexitPipelineMode(conn) != 1)
+		pg_fatal("failed to exit pipeline mode: %s", PQerrorMessage(conn));
+
+	fprintf(stderr, "ok\n");
+}
+
+/*
+ * Test that cursor options are rejected when _pq_.cursor is not
+ * negotiated.  This test must be run with a connection that does NOT
+ * have protocol_cursor=1.
+ */
+static void
+test_cursor_bind_without_extension(PGconn *conn)
+{
+	PGresult   *res;
+
+	fprintf(stderr, "test_cursor_bind_without_extension... ");
+
+	if (PQprotocolCursorEnabled(conn) != 0)
+		pg_fatal("expected PQprotocolCursorEnabled to return false");
+
+	res = PQprepare(conn, "noextstmt", "SELECT 1", 0, NULL);
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("PREPARE failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	if (PQenterPipelineMode(conn) != 1)
+		pg_fatal("failed to enter pipeline mode: %s", PQerrorMessage(conn));
+
+	/* Non-zero cursorOptions rejected when extension is disabled */
+	if (PQsendBindWithCursorOptions(conn, "noextstmt", 0, NULL, NULL, NULL, 0,
+									"noextportal", PQ_BIND_CURSOR_HOLD) != 0)
+		pg_fatal("expected rejection of cursor options without extension");
+
+	/* Zero cursorOptions should still succeed */
+	if (PQsendBindWithCursorOptions(conn, "noextstmt", 0, NULL, NULL, NULL, 0,
+									"noextportal", 0) != 1)
+		pg_fatal("PQsendBindWithCursorOptions with zero options failed: %s",
+				 PQerrorMessage(conn));
+
+	if (PQpipelineSync(conn) != 1)
+		pg_fatal("pipeline sync failed: %s", PQerrorMessage(conn));
+
+	res = confirm_result_status(conn, PGRES_COMMAND_OK);
+	PQclear(res);
+	consume_null_result(conn);
+
+	consume_result_status(conn, PGRES_PIPELINE_SYNC);
+	consume_null_result(conn);
+
+	if (PQexitPipelineMode(conn) != 1)
+		pg_fatal("failed to exit pipeline mode: %s", PQerrorMessage(conn));
+
+	fprintf(stderr, "ok\n");
+}
+
 
 static void
 usage(const char *progname)
@@ -2117,6 +2628,13 @@ static void
 print_test_list(void)
 {
 	printf("cancel\n");
+	printf("cursor_bind_dml\n");
+	printf("cursor_bind_holdable\n");
+	printf("cursor_bind_holdable_scroll\n");
+	printf("cursor_bind_no_scroll\n");
+	printf("cursor_bind_scroll\n");
+	printf("cursor_bind_validation\n");
+	printf("cursor_bind_without_extension\n");
 	printf("disallowed_in_pipeline\n");
 	printf("multi_pipelines\n");
 	printf("nosync\n");
@@ -2223,6 +2741,20 @@ main(int argc, char **argv)
 
 	if (strcmp(testname, "cancel") == 0)
 		test_cancel(conn);
+	else if (strcmp(testname, "cursor_bind_dml") == 0)
+		test_cursor_bind_dml(conn);
+	else if (strcmp(testname, "cursor_bind_holdable") == 0)
+		test_cursor_bind_holdable(conn);
+	else if (strcmp(testname, "cursor_bind_holdable_scroll") == 0)
+		test_cursor_bind_holdable_scroll(conn);
+	else if (strcmp(testname, "cursor_bind_no_scroll") == 0)
+		test_cursor_bind_no_scroll(conn);
+	else if (strcmp(testname, "cursor_bind_scroll") == 0)
+		test_cursor_bind_scroll(conn);
+	else if (strcmp(testname, "cursor_bind_validation") == 0)
+		test_cursor_bind_validation(conn);
+	else if (strcmp(testname, "cursor_bind_without_extension") == 0)
+		test_cursor_bind_without_extension(conn);
 	else if (strcmp(testname, "disallowed_in_pipeline") == 0)
 		test_disallowed_in_pipeline(conn);
 	else if (strcmp(testname, "multi_pipelines") == 0)

@@ -108,4 +108,18 @@
 #define AUTH_REQ_SASL_FIN  12	/* Final SASL message */
 #define AUTH_REQ_MAX	   AUTH_REQ_SASL_FIN	/* maximum AUTH_REQ_* value */
 
+/*
+ * Bind message extension flags for _pq_.cursor.
+ *
+ * These values are part of the wire protocol and must not change.
+ * Both the server and libpq need these definitions, so they live here
+ * rather than in libpq-fe.h alone.
+ */
+#define PQ_BIND_CURSOR_SCROLL		0x0001	/* SCROLL */
+#define PQ_BIND_CURSOR_NO_SCROLL	0x0002	/* NO SCROLL */
+#define PQ_BIND_CURSOR_HOLD			0x0004	/* WITH HOLD */
+#define PQ_BIND_CURSOR_VALID_FLAGS	(PQ_BIND_CURSOR_SCROLL | \
+									 PQ_BIND_CURSOR_NO_SCROLL | \
+									 PQ_BIND_CURSOR_HOLD)
+
 #endif							/* PROTOCOL_H */

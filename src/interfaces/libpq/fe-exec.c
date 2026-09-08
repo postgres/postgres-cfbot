@@ -1683,6 +1683,148 @@ PQsendQueryPrepared(PGconn *conn,
 }
 
 /*
+ * PQsendBindWithCursorOptions
+ *		Send a Bind message with cursor options, followed by Describe, but not
+ *		Execute. This creates a named portal with the specified cursor options
+ *		(PQ_BIND_CURSOR_* from libpq-fe.h) that can be fetched from later.
+ *
+ *		Non-zero cursorOptions require the _pq_.cursor protocol
+ *		extension; returns 0 if the extension was not negotiated.  Passing
+ *		cursorOptions as 0 creates a named portal without cursor options.
+ */
+int
+PQsendBindWithCursorOptions(PGconn *conn,
+							const char *stmtName,
+							int nParams,
+							const char *const *paramValues,
+							const int *paramLengths,
+							const int *paramFormats,
+							int resultFormat,
+							const char *portalName,
+							int cursorOptions)
+{
+	PGcmdQueueEntry *entry;
+
+	if (!PQsendQueryStart(conn, true))
+		return 0;
+
+	if (!stmtName)
+	{
+		libpq_append_conn_error(conn, "statement name is a null pointer");
+		return 0;
+	}
+
+	if (!portalName || portalName[0] == '\0')
+	{
+		libpq_append_conn_error(conn, "a named portal is required");
+		return 0;
+	}
+
+	if (cursorOptions != 0 && !conn->protocol_cursor_enabled)
+	{
+		libpq_append_conn_error(conn,
+								"cursor options require the _pq_.cursor protocol extension");
+		return 0;
+	}
+
+	if (cursorOptions & ~PQ_BIND_CURSOR_VALID_FLAGS)
+	{
+		libpq_append_conn_error(conn,
+								"unrecognized cursor option flags: 0x%x",
+								cursorOptions & ~PQ_BIND_CURSOR_VALID_FLAGS);
+		return 0;
+	}
+
+	if ((cursorOptions & PQ_BIND_CURSOR_SCROLL) &&
+		(cursorOptions & PQ_BIND_CURSOR_NO_SCROLL))
+	{
+		libpq_append_conn_error(conn,
+								"SCROLL and NO_SCROLL cursor options are mutually exclusive");
+		return 0;
+	}
+
+	entry = pqAllocCmdQueueEntry(conn);
+	if (entry == NULL)
+		return 0;
+
+	if (pqPutMsgStart(PqMsg_Bind, conn) < 0 ||
+		pqPuts(portalName ? portalName : "", conn) < 0 ||
+		pqPuts(stmtName, conn) < 0)
+		goto sendFailed;
+
+	if (nParams > 0 && paramFormats)
+	{
+		if (pqPutInt(nParams, 2, conn) < 0)
+			goto sendFailed;
+		for (int i = 0; i < nParams; i++)
+			if (pqPutInt(paramFormats[i], 2, conn) < 0)
+				goto sendFailed;
+	}
+	else if (pqPutInt(0, 2, conn) < 0)
+		goto sendFailed;
+
+	if (pqPutInt(nParams, 2, conn) < 0)
+		goto sendFailed;
+
+	for (int i = 0; i < nParams; i++)
+	{
+		if (paramValues && paramValues[i])
+		{
+			int			len = paramLengths ? paramLengths[i] : strlen(paramValues[i]);
+
+			if (pqPutInt(len, 4, conn) < 0 ||
+				pqPutnchar(paramValues[i], len, conn) < 0)
+				goto sendFailed;
+		}
+		else if (pqPutInt(-1, 4, conn) < 0)
+			goto sendFailed;
+	}
+
+	if (pqPutInt(1, 2, conn) < 0 ||
+		pqPutInt(resultFormat, 2, conn) < 0)
+		goto sendFailed;
+
+	/* Cursor options; mandatory once _pq_.cursor is negotiated */
+	if (conn->protocol_cursor_enabled)
+	{
+		if (pqPutInt(cursorOptions, 4, conn) < 0)
+			goto sendFailed;
+	}
+
+	if (pqPutMsgEnd(conn) < 0)
+		goto sendFailed;
+
+	if (pqPutMsgStart(PqMsg_Describe, conn) < 0 ||
+		pqPutc('P', conn) < 0 ||
+		pqPuts(portalName ? portalName : "", conn) < 0 ||
+		pqPutMsgEnd(conn) < 0)
+		goto sendFailed;
+
+	/* No Execute message - portal is created but not executed */
+
+	if (conn->pipelineStatus == PQ_PIPELINE_OFF)
+	{
+		if (pqPutMsgStart(PqMsg_Sync, conn) < 0 ||
+			pqPutMsgEnd(conn) < 0)
+			goto sendFailed;
+	}
+
+	entry->queryclass = PGQUERY_DESCRIBE;
+
+	if (pqPipelineFlush(conn) < 0)
+		goto sendFailed;
+
+	/* OK, it's launched! */
+	pqAppendCmdQueueEntry(conn, entry);
+
+	return 1;
+
+sendFailed:
+	pqRecycleCmdQueueEntry(conn, entry);
+	return 0;
+}
+
+/*
  * PQsendQueryStart
  *	Common startup code for PQsendQuery and sibling routines
  */
@@ -1883,6 +2025,19 @@ PQsendQueryGuts(PGconn *conn,
 	if (pqPutInt(1, 2, conn) < 0 ||
 		pqPutInt(resultFormat, 2, conn))
 		goto sendFailed;
+
+	/*
+	 * The cursor options field is mandatory once _pq_.cursor has been
+	 * negotiated, so it has to be sent even here, where no cursor options can
+	 * be requested.  This Bind always targets the unnamed portal, which
+	 * cannot be a cursor anyway.
+	 */
+	if (conn->protocol_cursor_enabled)
+	{
+		if (pqPutInt(0, 4, conn) < 0)
+			goto sendFailed;
+	}
+
 	if (pqPutMsgEnd(conn) < 0)
 		goto sendFailed;
 

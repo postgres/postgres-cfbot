@@ -432,6 +432,7 @@ struct pg_conn
 	char	   *scram_client_key;	/* base64-encoded SCRAM client key */
 	char	   *scram_server_key;	/* base64-encoded SCRAM server key */
 	char	   *sslkeylogfile;	/* where should the client write ssl keylogs */
+	char	   *protocol_cursor;	/* enable _pq_.cursor option */
 
 	bool		cancelRequest;	/* true if this connection is used to send a
 								 * cancel request, instead of being a normal
@@ -507,6 +508,7 @@ struct pg_conn
 	int			sversion;		/* server version, e.g. 70401 for 7.4.1 */
 	bool		pversion_negotiated;	/* true if NegotiateProtocolVersion
 										 * was received */
+	bool		protocol_cursor_enabled;	/* _pq_.cursor option */
 	bool		auth_req_received;	/* true if any type of auth req received */
 	bool		password_needed;	/* true if server demanded a password */
 	bool		gssapi_used;	/* true if authenticated via gssapi */

@@ -335,9 +335,26 @@
 
      <tbody>
       <row>
-       <entry namest="last" align="center" valign="middle">
-        <emphasis>(No supported protocol extensions are currently defined.)</emphasis>
-       </entry>
+      <entry><literal>_pq_.cursor</literal></entry>
+      <entry><literal>true</literal></entry>
+      <entry>PostgreSQL 19 and later</entry>
+      <entry>Enables cursor options in the Bind message.
+        When set to <literal>true</literal>, the Bind message includes
+        a mandatory Int32 extension field after the result-column format
+        codes.  The following flag values are defined:
+        <simplelist type="vert">
+         <member><literal>0x0001</literal> &mdash; SCROLL</member>
+         <member><literal>0x0002</literal> &mdash; NO SCROLL</member>
+         <member><literal>0x0004</literal> &mdash; WITH HOLD</member>
+        </simplelist>
+        SCROLL and NO SCROLL are mutually exclusive.
+        WITH HOLD is not permitted on unnamed portals.
+        All other bits are reserved and must be zero.
+        A portal is scrollable only if SCROLL is requested, so NO SCROLL is
+        accepted but never necessary.  A value of 0 requests no cursor options
+        at all, and creates exactly the portal that a Bind message without this
+        extension would create.
+      </entry>
       </row>
      </tbody>
     </tgroup>
@@ -1090,6 +1107,9 @@ SELCT 1/0;<!-- this typo is intentional -->
     pass NULL values for them in the Bind message.)
     Bind also specifies the format to use for any data returned
     by the query; the format can be specified overall, or per-column.
+    If the <literal>_pq_.cursor</literal> protocol option is negotiated,
+    Bind includes a mandatory Int32 field with cursor options to control
+    portal behavior, such as creating scrollable or holdable cursors.
     The response is either BindComplete or ErrorResponse.
    </para>
 
@@ -4397,6 +4417,18 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
         <para>
          The result-column format codes.  Each must presently be
          zero (text) or one (binary).
+        </para>
+       </listitem>
+      </varlistentry>
+
+      <varlistentry>
+       <term>Int32 (present when <literal>_pq_.cursor</literal> is negotiated)</term>
+       <listitem>
+        <para>
+         Cursor option flags.  See the
+         <literal>_pq_.cursor</literal> entry in
+         <xref linkend="protocol-extensions-table"/> for defined values.
+         A value of 0 means no cursor options are requested.
         </para>
        </listitem>
       </varlistentry>

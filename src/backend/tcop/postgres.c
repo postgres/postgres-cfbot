@@ -45,6 +45,7 @@
 #include "libpq/libpq.h"
 #include "libpq/pqformat.h"
 #include "libpq/pqsignal.h"
+#include "libpq/protocol.h"
 #include "mb/pg_wchar.h"
 #include "mb/stringinfo_mb.h"
 #include "miscadmin.h"
@@ -2044,6 +2045,62 @@ exec_bind_message(StringInfo input_message)
 			rformats[i] = pq_getmsgint(input_message, 2);
 	}
 
+	/*
+	 * Get bind extension flags when _pq_.cursor is negotiated.
+	 *
+	 * The Int32 field is mandatory once the extension is active: the client
+	 * always sends it, as 0 when no options are wanted.  That way the server
+	 * never has to guess from the message length whether it is there.
+	 *
+	 * The wire-level flag values (PQ_BIND_CURSOR_*) are defined in
+	 * src/include/libpq/protocol.h independently of the server-internal
+	 * CURSOR_OPT_* constants in parsenodes.h, so we map between the two
+	 * representations here.
+	 */
+	if (MyProcPort->protocol_cursor_enabled)
+	{
+		int			bind_ext_flags;
+
+		bind_ext_flags = pq_getmsgint(input_message, 4);
+
+		/* Reject any bits we don't recognize */
+		if (bind_ext_flags & ~PQ_BIND_CURSOR_VALID_FLAGS)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROTOCOL_VIOLATION),
+					 errmsg("unrecognized bind extension flags: 0x%x",
+							bind_ext_flags & ~PQ_BIND_CURSOR_VALID_FLAGS)));
+
+		/* Reject mutually exclusive SCROLL + NO_SCROLL */
+		if ((bind_ext_flags & PQ_BIND_CURSOR_SCROLL) &&
+			(bind_ext_flags & PQ_BIND_CURSOR_NO_SCROLL))
+			ereport(ERROR,
+					(errcode(ERRCODE_PROTOCOL_VIOLATION),
+					 errmsg("SCROLL and NO_SCROLL cursor options are mutually exclusive")));
+
+		/* Reject HOLD on unnamed portals; they cannot survive transactions */
+		if ((bind_ext_flags & PQ_BIND_CURSOR_HOLD) &&
+			portal_name[0] == '\0')
+			ereport(ERROR,
+					(errcode(ERRCODE_PROTOCOL_VIOLATION),
+					 errmsg("WITH HOLD cursor option is not allowed on unnamed portals")));
+
+		/*
+		 * Map protocol flags to internal CURSOR_OPT_* values.  CreatePortal
+		 * has already applied CURSOR_OPT_NO_SCROLL, which is what a portal
+		 * driven by Execute messages gets when the extension is not in use,
+		 * so the flags only add to that: a portal is scrollable when, and
+		 * only when, SCROLL is asked for.  NO_SCROLL is therefore accepted
+		 * but redundant, and all flags clear means exactly the behavior of a
+		 * Bind message without the extension.
+		 */
+		if (bind_ext_flags & PQ_BIND_CURSOR_SCROLL)
+			portal->cursorOptions = (portal->cursorOptions &
+									 ~CURSOR_OPT_NO_SCROLL) | CURSOR_OPT_SCROLL;
+		if (bind_ext_flags & PQ_BIND_CURSOR_NO_SCROLL)
+			portal->cursorOptions |= CURSOR_OPT_NO_SCROLL;
+		if (bind_ext_flags & PQ_BIND_CURSOR_HOLD)
+			portal->cursorOptions |= CURSOR_OPT_HOLD;
+	}
 	pq_getmsgend(input_message);
 
 	/*

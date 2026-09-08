@@ -1512,8 +1512,9 @@ pqGetNegotiateProtocolVersion3(PGconn *conn)
 	conn->pversion = their_version;
 
 	/*
-	 * We don't currently request any protocol extensions, so we don't expect
-	 * the server to reply with any either.
+	 * The only protocol extension we might request is _pq_.cursor, so
+	 * that is the only parameter the server can legitimately report back to
+	 * us as unsupported.
 	 */
 	for (int i = 0; i < num; i++)
 	{
@@ -1526,6 +1527,17 @@ pqGetNegotiateProtocolVersion3(PGconn *conn)
 			libpq_append_conn_error(conn, "received invalid protocol negotiation message: server reported unsupported parameter name without a \"%s\" prefix (\"%s\")", "_pq_.", conn->workBuffer.data);
 			goto failure;
 		}
+
+		/*
+		 * The server rejected an extension we requested.  Disable the
+		 * corresponding feature so we don't try to use it.
+		 */
+		if (strcmp(conn->workBuffer.data, "_pq_.cursor") == 0)
+		{
+			conn->protocol_cursor_enabled = false;
+			continue;
+		}
+
 		libpq_append_conn_error(conn, "received invalid protocol negotiation message: server reported an unsupported parameter that was not requested (\"%s\")",
 								conn->workBuffer.data);
 		goto failure;
@@ -2502,6 +2514,10 @@ build_startup_packet(const PGconn *conn, char *packet,
 
 	if (conn->client_encoding_initial && conn->client_encoding_initial[0])
 		ADD_STARTUP_OPTION("client_encoding", conn->client_encoding_initial);
+
+	/* Add _pq_.cursor option if enabled */
+	if (conn->protocol_cursor && conn->protocol_cursor[0] == '1')
+		ADD_STARTUP_OPTION("_pq_.cursor", "true");
 
 	/* Add any environment-driven GUC settings needed */
 	for (next_eo = options; next_eo->envName; next_eo++)

@@ -151,6 +151,7 @@ typedef struct Port
 	char	   *user_name;
 	char	   *cmdline_options;
 	List	   *guc_options;
+	bool		protocol_cursor_enabled;	/* _pq_.cursor option */
 
 	/*
 	 * The startup packet application name, only used here for the "connection
