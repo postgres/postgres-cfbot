@@ -60,6 +60,7 @@ static void get_matching_part_pairs(PlannerInfo *root, RelOptInfo *joinrel,
 									RelOptInfo *rel1, RelOptInfo *rel2,
 									List **parts1, List **parts2);
 
+static int join_search_level_count;
 
 /*
  * join_search_one_level
@@ -74,7 +75,7 @@ static void get_matching_part_pairs(PlannerInfo *root, RelOptInfo *joinrel,
  *
  * The result is returned in root->join_rel_level[level].
  */
-void
+int
 join_search_one_level(PlannerInfo *root, int level)
 {
 	List	  **joinrels = root->join_rel_level;
@@ -85,6 +86,8 @@ join_search_one_level(PlannerInfo *root, int level)
 
 	/* Set join_cur_level so that new joinrels are added to proper list */
 	root->join_cur_level = level;
+
+	join_search_level_count = 0;
 
 	/*
 	 * First, consider left-sided and right-sided plans, in which rels of
@@ -196,6 +199,7 @@ join_search_one_level(PlannerInfo *root, int level)
 						have_join_order_restriction(root, old_rel, new_rel))
 					{
 						(void) make_join_rel(root, old_rel, new_rel);
+						join_search_level_count++;
 					}
 				}
 			}
@@ -259,6 +263,8 @@ join_search_one_level(PlannerInfo *root, int level)
 			!root->hasLateralRTEs)
 			elog(ERROR, "failed to build any %d-way joins", level);
 	}
+
+	return join_search_level_count;
 }
 
 /*
@@ -298,6 +304,7 @@ make_rels_by_clause_joins(PlannerInfo *root,
 			 have_join_order_restriction(root, old_rel, other_rel)))
 		{
 			(void) make_join_rel(root, old_rel, other_rel);
+			join_search_level_count++;
 		}
 	}
 }
@@ -329,6 +336,7 @@ make_rels_by_clauseless_joins(PlannerInfo *root,
 		if (!bms_overlap(other_rel->relids, old_rel->relids))
 		{
 			(void) make_join_rel(root, old_rel, other_rel);
+			join_search_level_count++;
 		}
 	}
 }
