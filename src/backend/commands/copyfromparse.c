@@ -652,15 +652,29 @@ CopyLoadRawBuf(CopyFromState cstate)
  * If INPUT_BUF_BYTES(cstate) > 0, the unprocessed bytes are moved to the start
  * of the buffer and then we load more data after that.
  *
- * If "speculative" is true, this function skips reporting any encoding or
- * conversion errors, provided there are still data for the caller to process.
- * Such callers must be prepared for this function to return without loading
- * anything.
+ * If "speculative" is true, the caller has not yet examined the data left in
+ * input_buf and needn't load more to make progress.  In that case, this
+ * function skips reporting any encoding or conversion errors, and in text
+ * mode it declines to read past a backslash, as that might begin an
+ * end-of-copy marker.  Such callers must be prepared for this function to
+ * return without loading anything.
  */
 static void
 CopyLoadInputBuf(CopyFromState cstate, bool speculative)
 {
 	int			nbytes = INPUT_BUF_BYTES(cstate);
+
+	/*
+	 * In text mode, a backslash among the bytes a speculative caller has yet
+	 * to examine might begin an end-of-copy marker.  The caller must find
+	 * that on its own, without waiting on input that may never arrive, as
+	 * from a pipe whose writer has sent the marker but not closed the pipe.
+	 * So in that case, just return without loading anything.
+	 */
+	if (speculative && cstate->opts.format == COPY_FORMAT_TEXT &&
+		memchr(cstate->input_buf + cstate->input_buf_index, '\\',
+			   nbytes) != NULL)
+		return;
 
 	/*
 	 * The caller has updated input_buf_index to indicate how much of the
