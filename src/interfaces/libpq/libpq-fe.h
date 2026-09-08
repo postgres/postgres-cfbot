@@ -69,6 +69,10 @@ extern "C"
 /* Indicates presence of the PQAUTHDATA_OAUTH_BEARER_TOKEN_V2 authdata hook */
 #define LIBPQ_HAS_OAUTH_BEARER_TOKEN_V2 1
 
+/* Features added in PostgreSQL v20: */
+/* Indicates presence of the _pq_.cursor extension support functions */
+#define LIBPQ_HAS_PROTOCOL_CURSOR 1
+
 /*
  * Bind message extension flags for _pq_.cursor.
  * Canonical definitions are in src/include/libpq/protocol.h; these are
@@ -83,6 +87,30 @@ extern "C"
 #define PQ_BIND_CURSOR_VALID_FLAGS	(PQ_BIND_CURSOR_SCROLL | \
 									 PQ_BIND_CURSOR_NO_SCROLL | \
 									 PQ_BIND_CURSOR_HOLD)
+
+/*
+ * Fetch flags for PQsendExecutePortal and PQsendBindAndExecutePortal.  The low
+ * three bits select a direction, with the same meaning as the identically named
+ * direction of the SQL FETCH command; PQ_FETCH_MOVE additionally asks that the
+ * rows be discarded rather than returned, as MOVE does.
+ */
+#define PQ_FETCH_DEFAULT			0x0000	/* no fetch direction */
+#define PQ_FETCH_FORWARD			0x0001	/* FETCH FORWARD count */
+#define PQ_FETCH_BACKWARD			0x0002	/* FETCH BACKWARD count */
+#define PQ_FETCH_ABSOLUTE			0x0003	/* FETCH ABSOLUTE count */
+#define PQ_FETCH_RELATIVE			0x0004	/* FETCH RELATIVE count */
+#define PQ_FETCH_DIRECTION_MASK		0x0007
+#define PQ_FETCH_MOVE				0x0008	/* discard the rows, as MOVE does */
+#define PQ_FETCH_VALID_FLAGS		(PQ_FETCH_DIRECTION_MASK | \
+									 PQ_FETCH_MOVE)
+
+/*
+ * Fetch count meaning "all remaining rows", equivalent to FETCH ALL and FETCH
+ * BACKWARD ALL.  It is only useful with PQ_FETCH_FORWARD and
+ * PQ_FETCH_BACKWARD; with the other directions it is merely a row position
+ * beyond the end of any result set.
+ */
+#define PQ_FETCH_ALL				INT64_MAX
 
 /*
  * Option flags for PQcopyResult
@@ -561,6 +589,13 @@ extern int	PQsendBindWithCursorOptions(PGconn *conn, const char *stmtName,
 										int nParams, const char *const *paramValues,
 										const int *paramLengths, const int *paramFormats,
 										int resultFormat, const char *portalName, int cursorOptions);
+extern int	PQsendBindAndExecutePortal(PGconn *conn, const char *stmtName,
+									   int nParams, const char *const *paramValues,
+									   const int *paramLengths, const int *paramFormats,
+									   int resultFormat, const char *portalName,
+									   int cursorOptions, int fetchFlags, int64_t count);
+extern int	PQsendExecutePortal(PGconn *conn, const char *portalName,
+								int fetchFlags, int64_t count);
 extern int	PQprotocolCursorEnabled(const PGconn *conn);
 extern int	PQsetSingleRowMode(PGconn *conn);
 extern int	PQsetChunkedRowsMode(PGconn *conn, int chunkSize);

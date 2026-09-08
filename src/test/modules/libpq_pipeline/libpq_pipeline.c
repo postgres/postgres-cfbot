@@ -2611,6 +2611,435 @@ test_cursor_bind_without_extension(PGconn *conn)
 	fprintf(stderr, "ok\n");
 }
 
+/*
+ * Create a temp table with the given name holding the values 1, 2 and 3, and
+ * prepare a statement of the same name selecting from it in order.  The caller
+ * is expected to be in a transaction already.
+ */
+static void
+setup_fetch_table(PGconn *conn, const char *name)
+{
+	PGresult   *res;
+	char		buf[256];
+
+	snprintf(buf, sizeof(buf),
+			 "CREATE TEMP TABLE %s(id int); INSERT INTO %s VALUES (1), (2), (3)",
+			 name, name);
+	res = PQexec(conn, buf);
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("CREATE TABLE failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	snprintf(buf, sizeof(buf), "SELECT id FROM %s ORDER BY id", name);
+	res = PQprepare(conn, name, buf, 0, NULL);
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("PREPARE failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+}
+
+/*
+ * Consume one result of a fetch, checking the number of rows it returned and
+ * the value of the first one.  Pass an expected value of -1 to skip that.
+ */
+static void
+confirm_fetch_result(PGconn *conn, const char *what, int nrows, int firstvalue)
+{
+	PGresult   *res;
+
+	res = confirm_result_status(conn, PGRES_TUPLES_OK);
+	if (PQntuples(res) != nrows)
+		pg_fatal("expected %d row(s) from %s, got %d", nrows, what,
+				 PQntuples(res));
+	if (firstvalue >= 0)
+	{
+		char		expected[32];
+
+		snprintf(expected, sizeof(expected), "%d", firstvalue);
+		if (strcmp(PQgetvalue(res, 0, 0), expected) != 0)
+			pg_fatal("expected value %s from %s, got \"%s\"", expected, what,
+					 PQgetvalue(res, 0, 0));
+	}
+	PQclear(res);
+	consume_null_result(conn);
+}
+
+/*
+ * Test fetching from a scrollable portal in every direction with
+ * PQsendExecutePortal.
+ */
+static void
+test_cursor_execute_scroll(PGconn *conn)
+{
+	PGresult   *res;
+
+	fprintf(stderr, "test_cursor_execute_scroll... ");
+
+	res = PQexec(conn, "BEGIN");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("BEGIN failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	setup_fetch_table(conn, "exscroll_test");
+
+	if (PQenterPipelineMode(conn) != 1)
+		pg_fatal("failed to enter pipeline mode: %s", PQerrorMessage(conn));
+
+	if (PQsendBindWithCursorOptions(conn, "exscroll_test", 0, NULL, NULL, NULL, 0,
+									"exscrollportal", PQ_BIND_CURSOR_SCROLL) != 1)
+		pg_fatal("PQsendBindWithCursorOptions failed: %s", PQerrorMessage(conn));
+
+	if (PQsendExecutePortal(conn, "exscrollportal", PQ_FETCH_FORWARD, 2) != 1)
+		pg_fatal("forward fetch failed: %s", PQerrorMessage(conn));
+
+	if (PQsendExecutePortal(conn, "exscrollportal", PQ_FETCH_BACKWARD, 1) != 1)
+		pg_fatal("backward fetch failed: %s", PQerrorMessage(conn));
+
+	if (PQsendExecutePortal(conn, "exscrollportal", PQ_FETCH_ABSOLUTE, 3) != 1)
+		pg_fatal("absolute fetch failed: %s", PQerrorMessage(conn));
+
+	if (PQsendExecutePortal(conn, "exscrollportal", PQ_FETCH_RELATIVE, -1) != 1)
+		pg_fatal("relative fetch failed: %s", PQerrorMessage(conn));
+
+	if (PQsendExecutePortal(conn, "exscrollportal", PQ_FETCH_FORWARD,
+							PQ_FETCH_ALL) != 1)
+		pg_fatal("fetch all failed: %s", PQerrorMessage(conn));
+
+	if (PQsendClosePortal(conn, "exscrollportal") != 1)
+		pg_fatal("PQsendClosePortal failed: %s", PQerrorMessage(conn));
+
+	if (PQpipelineSync(conn) != 1)
+		pg_fatal("pipeline sync failed: %s", PQerrorMessage(conn));
+
+	/* Bind+Describe result */
+	res = confirm_result_status(conn, PGRES_COMMAND_OK);
+	PQclear(res);
+	consume_null_result(conn);
+
+	/*
+	 * Rows 1 and 2, leaving the portal on row 2.  A fetch reports the query's
+	 * own command tag, not FETCH, so that it looks like a plain Execute to a
+	 * client that only reads the tag.
+	 */
+	res = confirm_result_status(conn, PGRES_TUPLES_OK);
+	if (PQntuples(res) != 2)
+		pg_fatal("expected 2 rows from forward fetch, got %d", PQntuples(res));
+	if (strcmp(PQcmdStatus(res), "SELECT 2") != 0)
+		pg_fatal("expected command status \"SELECT 2\", got \"%s\"",
+				 PQcmdStatus(res));
+	PQclear(res);
+	consume_null_result(conn);
+	/* back to row 1 */
+	confirm_fetch_result(conn, "backward fetch", 1, 1);
+	/* straight to row 3 */
+	confirm_fetch_result(conn, "absolute fetch", 1, 3);
+	/* one row back from there */
+	confirm_fetch_result(conn, "relative fetch", 1, 2);
+	/* the one remaining row */
+	confirm_fetch_result(conn, "fetch all", 1, 3);
+
+	/* CLOSE */
+	consume_result_status(conn, PGRES_COMMAND_OK);
+	consume_null_result(conn);
+
+	consume_result_status(conn, PGRES_PIPELINE_SYNC);
+	consume_null_result(conn);
+
+	if (PQexitPipelineMode(conn) != 1)
+		pg_fatal("failed to exit pipeline mode: %s", PQerrorMessage(conn));
+
+	res = PQexec(conn, "COMMIT");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("COMMIT failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	fprintf(stderr, "ok\n");
+}
+
+/*
+ * Test that PQ_FETCH_MOVE repositions the portal without returning any rows,
+ * and reports itself as a MOVE.
+ */
+static void
+test_cursor_execute_move(PGconn *conn)
+{
+	PGresult   *res;
+
+	fprintf(stderr, "test_cursor_execute_move... ");
+
+	res = PQexec(conn, "BEGIN");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("BEGIN failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	setup_fetch_table(conn, "exmove_test");
+
+	if (PQenterPipelineMode(conn) != 1)
+		pg_fatal("failed to enter pipeline mode: %s", PQerrorMessage(conn));
+
+	if (PQsendBindWithCursorOptions(conn, "exmove_test", 0, NULL, NULL, NULL, 0,
+									"exmoveportal", PQ_BIND_CURSOR_SCROLL) != 1)
+		pg_fatal("PQsendBindWithCursorOptions failed: %s", PQerrorMessage(conn));
+
+	if (PQsendExecutePortal(conn, "exmoveportal",
+							PQ_FETCH_MOVE | PQ_FETCH_FORWARD, 2) != 1)
+		pg_fatal("move failed: %s", PQerrorMessage(conn));
+
+	if (PQsendExecutePortal(conn, "exmoveportal", PQ_FETCH_FORWARD, 1) != 1)
+		pg_fatal("forward fetch failed: %s", PQerrorMessage(conn));
+
+	if (PQsendClosePortal(conn, "exmoveportal") != 1)
+		pg_fatal("PQsendClosePortal failed: %s", PQerrorMessage(conn));
+
+	if (PQpipelineSync(conn) != 1)
+		pg_fatal("pipeline sync failed: %s", PQerrorMessage(conn));
+
+	/* Bind+Describe result */
+	res = confirm_result_status(conn, PGRES_COMMAND_OK);
+	PQclear(res);
+	consume_null_result(conn);
+
+	/* The MOVE returns no rows, but does say how many it skipped. */
+	res = confirm_result_status(conn, PGRES_TUPLES_OK);
+	if (PQntuples(res) != 0)
+		pg_fatal("expected no rows from MOVE, got %d", PQntuples(res));
+	if (strcmp(PQcmdStatus(res), "MOVE 2") != 0)
+		pg_fatal("expected command status \"MOVE 2\", got \"%s\"",
+				 PQcmdStatus(res));
+	PQclear(res);
+	consume_null_result(conn);
+
+	/* The MOVE did move: the next row is the third one. */
+	confirm_fetch_result(conn, "fetch after MOVE", 1, 3);
+
+	/* CLOSE */
+	consume_result_status(conn, PGRES_COMMAND_OK);
+	consume_null_result(conn);
+
+	consume_result_status(conn, PGRES_PIPELINE_SYNC);
+	consume_null_result(conn);
+
+	if (PQexitPipelineMode(conn) != 1)
+		pg_fatal("failed to exit pipeline mode: %s", PQerrorMessage(conn));
+
+	res = PQexec(conn, "COMMIT");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("COMMIT failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	fprintf(stderr, "ok\n");
+}
+
+/*
+ * Test creating a portal and fetching from it in a single command with
+ * PQsendBindAndExecutePortal.
+ */
+static void
+test_cursor_execute_bind_and_fetch(PGconn *conn)
+{
+	PGresult   *res;
+
+	fprintf(stderr, "test_cursor_execute_bind_and_fetch... ");
+
+	res = PQexec(conn, "BEGIN");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("BEGIN failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	setup_fetch_table(conn, "exbind_test");
+
+	if (PQenterPipelineMode(conn) != 1)
+		pg_fatal("failed to enter pipeline mode: %s", PQerrorMessage(conn));
+
+	if (PQsendBindAndExecutePortal(conn, "exbind_test", 0, NULL, NULL, NULL, 0,
+								   "exbindportal", PQ_BIND_CURSOR_SCROLL,
+								   PQ_FETCH_FORWARD, 2) != 1)
+		pg_fatal("PQsendBindAndExecutePortal failed: %s", PQerrorMessage(conn));
+
+	if (PQsendExecutePortal(conn, "exbindportal", PQ_FETCH_FORWARD,
+							PQ_FETCH_ALL) != 1)
+		pg_fatal("fetch all failed: %s", PQerrorMessage(conn));
+
+	if (PQsendClosePortal(conn, "exbindportal") != 1)
+		pg_fatal("PQsendClosePortal failed: %s", PQerrorMessage(conn));
+
+	if (PQpipelineSync(conn) != 1)
+		pg_fatal("pipeline sync failed: %s", PQerrorMessage(conn));
+
+	/* Bind, Describe and Execute are one command, hence one result */
+	confirm_fetch_result(conn, "bind and fetch", 2, 1);
+
+	/* the portal is still there afterwards */
+	confirm_fetch_result(conn, "fetch all", 1, 3);
+
+	/* CLOSE */
+	consume_result_status(conn, PGRES_COMMAND_OK);
+	consume_null_result(conn);
+
+	consume_result_status(conn, PGRES_PIPELINE_SYNC);
+	consume_null_result(conn);
+
+	if (PQexitPipelineMode(conn) != 1)
+		pg_fatal("failed to exit pipeline mode: %s", PQerrorMessage(conn));
+
+	res = PQexec(conn, "COMMIT");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("COMMIT failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	fprintf(stderr, "ok\n");
+}
+
+/*
+ * Test that the server refuses to fetch backwards from a portal that was
+ * created with NO SCROLL.
+ */
+static void
+test_cursor_execute_no_scroll(PGconn *conn)
+{
+	PGresult   *res;
+
+	fprintf(stderr, "test_cursor_execute_no_scroll... ");
+
+	res = PQexec(conn, "BEGIN");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("BEGIN failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	setup_fetch_table(conn, "exnoscroll_test");
+
+	if (PQenterPipelineMode(conn) != 1)
+		pg_fatal("failed to enter pipeline mode: %s", PQerrorMessage(conn));
+
+	if (PQsendBindWithCursorOptions(conn, "exnoscroll_test", 0, NULL, NULL, NULL, 0,
+									"exnoscrollportal",
+									PQ_BIND_CURSOR_NO_SCROLL) != 1)
+		pg_fatal("PQsendBindWithCursorOptions failed: %s", PQerrorMessage(conn));
+
+	if (PQsendExecutePortal(conn, "exnoscrollportal", PQ_FETCH_FORWARD, 1) != 1)
+		pg_fatal("forward fetch failed: %s", PQerrorMessage(conn));
+
+	if (PQsendExecutePortal(conn, "exnoscrollportal", PQ_FETCH_BACKWARD, 1) != 1)
+		pg_fatal("backward fetch send failed: %s", PQerrorMessage(conn));
+
+	if (PQpipelineSync(conn) != 1)
+		pg_fatal("pipeline sync failed: %s", PQerrorMessage(conn));
+
+	/* Bind+Describe result */
+	res = confirm_result_status(conn, PGRES_COMMAND_OK);
+	PQclear(res);
+	consume_null_result(conn);
+
+	/* forward fetch succeeds */
+	confirm_fetch_result(conn, "forward fetch", 1, 1);
+
+	/* backward fetch does not */
+	consume_result_status(conn, PGRES_FATAL_ERROR);
+	consume_null_result(conn);
+
+	consume_result_status(conn, PGRES_PIPELINE_SYNC);
+	consume_null_result(conn);
+
+	if (PQexitPipelineMode(conn) != 1)
+		pg_fatal("failed to exit pipeline mode: %s", PQerrorMessage(conn));
+
+	res = PQexec(conn, "ROLLBACK");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("ROLLBACK failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	fprintf(stderr, "ok\n");
+}
+
+/*
+ * Test client-side validation of the fetch flags.
+ */
+static void
+test_cursor_execute_validation(PGconn *conn)
+{
+	PGresult   *res;
+
+	fprintf(stderr, "test_cursor_execute_validation... ");
+
+	res = PQprepare(conn, "exvalstmt", "SELECT 1", 0, NULL);
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("PREPARE failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	if (PQenterPipelineMode(conn) != 1)
+		pg_fatal("failed to enter pipeline mode: %s", PQerrorMessage(conn));
+
+	/* Empty portal name rejected */
+	if (PQsendExecutePortal(conn, "", PQ_FETCH_FORWARD, 1) != 0)
+		pg_fatal("expected rejection of empty portal name");
+
+	/* NULL portal name rejected */
+	if (PQsendExecutePortal(conn, NULL, PQ_FETCH_FORWARD, 1) != 0)
+		pg_fatal("expected rejection of NULL portal name");
+
+	/* A fetch needs a direction */
+	if (PQsendExecutePortal(conn, "p", PQ_FETCH_DEFAULT, 1) != 0)
+		pg_fatal("expected rejection of PQ_FETCH_DEFAULT");
+
+	/* ... including when only PQ_FETCH_MOVE is given */
+	if (PQsendExecutePortal(conn, "p", PQ_FETCH_MOVE, 1) != 0)
+		pg_fatal("expected rejection of PQ_FETCH_MOVE without a direction");
+
+	/* Unassigned direction rejected */
+	if (PQsendExecutePortal(conn, "p", PQ_FETCH_RELATIVE + 1, 1) != 0)
+		pg_fatal("expected rejection of unassigned fetch direction");
+
+	/* Invalid flag bits rejected */
+	if (PQsendExecutePortal(conn, "p", PQ_FETCH_FORWARD | 0x0100, 1) != 0)
+		pg_fatal("expected rejection of invalid fetch flags");
+
+	/* The same checks apply to the combined entry point */
+	if (PQsendBindAndExecutePortal(conn, "exvalstmt", 0, NULL, NULL, NULL, 0,
+								   "p", 0, PQ_FETCH_DEFAULT, 0) != 0)
+		pg_fatal("expected rejection of PQ_FETCH_DEFAULT");
+
+	if (PQexitPipelineMode(conn) != 1)
+		pg_fatal("failed to exit pipeline mode: %s", PQerrorMessage(conn));
+
+	fprintf(stderr, "ok\n");
+}
+
+/*
+ * Test that fetching is rejected when _pq_.cursor is not negotiated.  This
+ * test must be run with a connection that does NOT have protocol_cursor=1.
+ */
+static void
+test_cursor_execute_without_extension(PGconn *conn)
+{
+	PGresult   *res;
+
+	fprintf(stderr, "test_cursor_execute_without_extension... ");
+
+	if (PQprotocolCursorEnabled(conn) != 0)
+		pg_fatal("expected PQprotocolCursorEnabled to return false");
+
+	res = PQprepare(conn, "exnoextstmt", "SELECT 1", 0, NULL);
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("PREPARE failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	if (PQenterPipelineMode(conn) != 1)
+		pg_fatal("failed to enter pipeline mode: %s", PQerrorMessage(conn));
+
+	if (PQsendExecutePortal(conn, "exnoextportal", PQ_FETCH_FORWARD, 1) != 0)
+		pg_fatal("expected rejection of a fetch without the extension");
+
+	/* The combined entry point always fetches, so it is rejected too. */
+	if (PQsendBindAndExecutePortal(conn, "exnoextstmt", 0, NULL, NULL, NULL, 0,
+								   "exnoextportal", 0,
+								   PQ_FETCH_FORWARD, 1) != 0)
+		pg_fatal("expected rejection of a fetch without the extension");
+
+	if (PQexitPipelineMode(conn) != 1)
+		pg_fatal("failed to exit pipeline mode: %s", PQerrorMessage(conn));
+
+	fprintf(stderr, "ok\n");
+}
+
 
 static void
 usage(const char *progname)
@@ -2635,6 +3064,12 @@ print_test_list(void)
 	printf("cursor_bind_scroll\n");
 	printf("cursor_bind_validation\n");
 	printf("cursor_bind_without_extension\n");
+	printf("cursor_execute_bind_and_fetch\n");
+	printf("cursor_execute_move\n");
+	printf("cursor_execute_no_scroll\n");
+	printf("cursor_execute_scroll\n");
+	printf("cursor_execute_validation\n");
+	printf("cursor_execute_without_extension\n");
 	printf("disallowed_in_pipeline\n");
 	printf("multi_pipelines\n");
 	printf("nosync\n");
@@ -2755,6 +3190,18 @@ main(int argc, char **argv)
 		test_cursor_bind_validation(conn);
 	else if (strcmp(testname, "cursor_bind_without_extension") == 0)
 		test_cursor_bind_without_extension(conn);
+	else if (strcmp(testname, "cursor_execute_bind_and_fetch") == 0)
+		test_cursor_execute_bind_and_fetch(conn);
+	else if (strcmp(testname, "cursor_execute_move") == 0)
+		test_cursor_execute_move(conn);
+	else if (strcmp(testname, "cursor_execute_no_scroll") == 0)
+		test_cursor_execute_no_scroll(conn);
+	else if (strcmp(testname, "cursor_execute_scroll") == 0)
+		test_cursor_execute_scroll(conn);
+	else if (strcmp(testname, "cursor_execute_validation") == 0)
+		test_cursor_execute_validation(conn);
+	else if (strcmp(testname, "cursor_execute_without_extension") == 0)
+		test_cursor_execute_without_extension(conn);
 	else if (strcmp(testname, "disallowed_in_pipeline") == 0)
 		test_disallowed_in_pipeline(conn);
 	else if (strcmp(testname, "multi_pipelines") == 0)

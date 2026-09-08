@@ -75,6 +75,21 @@ static int	PQsendQueryGuts(PGconn *conn,
 							const int *paramLengths,
 							const int *paramFormats,
 							int resultFormat);
+static int	PQsendBindGuts(PGconn *conn,
+						   const char *stmtName,
+						   int nParams,
+						   const char *const *paramValues,
+						   const int *paramLengths,
+						   const int *paramFormats,
+						   int resultFormat,
+						   const char *portalName,
+						   int cursorOptions,
+						   bool withExecute,
+						   int fetchFlags,
+						   int64_t count);
+static bool pqCheckFetchFlags(PGconn *conn, int fetchFlags);
+static int	pqPutExecuteMsg(PGconn *conn, const char *portalName,
+							int fetchFlags, int64_t count);
 static void parseInput(PGconn *conn);
 static PGresult *getCopyResult(PGconn *conn, ExecStatusType copytype);
 static bool PQexecStart(PGconn *conn);
@@ -1691,6 +1706,12 @@ PQsendQueryPrepared(PGconn *conn,
  *		Non-zero cursorOptions require the _pq_.cursor protocol
  *		extension; returns 0 if the extension was not negotiated.  Passing
  *		cursorOptions as 0 creates a named portal without cursor options.
+ *
+ *		To create the portal and fetch from it in one command, use
+ *		PQsendBindAndExecutePortal instead.
+ *
+ * Returns: 1 if successfully submitted
+ *			0 if error (conn->errorMessage is set)
  */
 int
 PQsendBindWithCursorOptions(PGconn *conn,
@@ -1703,10 +1724,237 @@ PQsendBindWithCursorOptions(PGconn *conn,
 							const char *portalName,
 							int cursorOptions)
 {
+	if (!PQsendQueryStart(conn, true))
+		return 0;
+
+	return PQsendBindGuts(conn, stmtName, nParams, paramValues,
+						  paramLengths, paramFormats, resultFormat,
+						  portalName, cursorOptions,
+						  false,	/* no Execute: create the portal only */
+						  PQ_FETCH_DEFAULT, 0);
+}
+
+/*
+ * PQsendBindAndExecutePortal
+ *		Create a named portal from a previously prepared statement, applying
+ *		the given cursor options, and fetch from it, all in one command.
+ *
+ *		This has the combined effect of PQsendBindWithCursorOptions and
+ *		PQsendExecutePortal, except that it is a single command and therefore
+ *		produces a single round of results.  The portal survives afterwards
+ *		and can be fetched from again with PQsendExecutePortal.
+ *
+ *		Because a fetch direction is always sent, this requires the _pq_.cursor
+ *		protocol extension even when cursorOptions is 0.
+ *
+ * Returns: 1 if successfully submitted
+ *			0 if error (conn->errorMessage is set)
+ */
+int
+PQsendBindAndExecutePortal(PGconn *conn,
+						   const char *stmtName,
+						   int nParams,
+						   const char *const *paramValues,
+						   const int *paramLengths,
+						   const int *paramFormats,
+						   int resultFormat,
+						   const char *portalName,
+						   int cursorOptions,
+						   int fetchFlags,
+						   int64_t count)
+{
+	if (!PQsendQueryStart(conn, true))
+		return 0;
+
+	return PQsendBindGuts(conn, stmtName, nParams, paramValues,
+						  paramLengths, paramFormats, resultFormat,
+						  portalName, cursorOptions,
+						  true, /* with a fetching Execute */
+						  fetchFlags, count);
+}
+
+/*
+ * PQsendExecutePortal
+ *		Fetch rows from an existing named portal, in the given direction,
+ *		without waiting for the result(s).
+ *
+ *		fetchFlags is a direction from the PQ_FETCH_* constants in libpq-fe.h,
+ *		optionally with PQ_FETCH_MOVE, and count is interpreted just as the SQL
+ *		FETCH command of the same direction would interpret it; PQ_FETCH_ALL
+ *		asks for all remaining rows.  Note that a count of zero means "re-fetch
+ *		the current row", as FETCH FORWARD 0 does, and not "no limit" as the
+ *		row-count field of a plain Execute message does.
+ *
+ *		This requires the _pq_.cursor protocol extension.
+ *
+ * Returns: 1 if successfully submitted
+ *			0 if error (conn->errorMessage is set)
+ */
+int
+PQsendExecutePortal(PGconn *conn, const char *portalName, int fetchFlags,
+					int64_t count)
+{
 	PGcmdQueueEntry *entry;
 
 	if (!PQsendQueryStart(conn, true))
 		return 0;
+
+	if (!portalName || portalName[0] == '\0')
+	{
+		libpq_append_conn_error(conn, "a named portal is required");
+		return 0;
+	}
+
+	if (!pqCheckFetchFlags(conn, fetchFlags))
+		return 0;
+
+	entry = pqAllocCmdQueueEntry(conn);
+	if (entry == NULL)
+		return 0;				/* error msg already set */
+
+	/*
+	 * Construct the Describe Portal message.  This is not optional: a row
+	 * description has to arrive in the same command as the data rows it
+	 * describes, and the Execute message does not produce one.  The row
+	 * description obtained when the portal was created belonged to an earlier
+	 * command and is long gone.
+	 */
+	if (pqPutMsgStart(PqMsg_Describe, conn) < 0 ||
+		pqPutc('P', conn) < 0 ||
+		pqPuts(portalName, conn) < 0 ||
+		pqPutMsgEnd(conn) < 0)
+		goto sendFailed;
+
+	/* construct the Execute message */
+	if (pqPutExecuteMsg(conn, portalName, fetchFlags, count) < 0)
+		goto sendFailed;
+
+	/* construct the Sync message if not in pipeline mode */
+	if (conn->pipelineStatus == PQ_PIPELINE_OFF)
+	{
+		if (pqPutMsgStart(PqMsg_Sync, conn) < 0 ||
+			pqPutMsgEnd(conn) < 0)
+			goto sendFailed;
+	}
+
+	/* rows will come back, so this is an ordinary extended-protocol query */
+	entry->queryclass = PGQUERY_EXTENDED;
+
+	/*
+	 * Give the data a push (in pipeline mode, only if we're past the size
+	 * threshold).  In nonblock mode, don't complain if we're unable to send
+	 * it all; PQgetResult() will do any additional flushing needed.
+	 */
+	if (pqPipelineFlush(conn) < 0)
+		goto sendFailed;
+
+	/* OK, it's launched! */
+	pqAppendCmdQueueEntry(conn, entry);
+
+	return 1;
+
+sendFailed:
+	pqRecycleCmdQueueEntry(conn, entry);
+	/* error message should be set up already */
+	return 0;
+}
+
+/*
+ * pqCheckFetchFlags
+ *		Validate the fetch flags of an Execute message client-side.
+ *
+ * Returns true if they are usable on this connection, false with
+ * conn->errorMessage set if not.
+ */
+static bool
+pqCheckFetchFlags(PGconn *conn, int fetchFlags)
+{
+	int			direction = fetchFlags & PQ_FETCH_DIRECTION_MASK;
+
+	if (!conn->protocol_cursor_enabled)
+	{
+		libpq_append_conn_error(conn,
+								"fetching from a portal requires the _pq_.cursor protocol extension");
+		return false;
+	}
+
+	if (fetchFlags & ~PQ_FETCH_VALID_FLAGS)
+	{
+		libpq_append_conn_error(conn, "unrecognized fetch flags: 0x%x",
+								fetchFlags & ~PQ_FETCH_VALID_FLAGS);
+		return false;
+	}
+
+	if (direction == PQ_FETCH_DEFAULT || direction > PQ_FETCH_RELATIVE)
+	{
+		libpq_append_conn_error(conn, "invalid fetch direction: %d", direction);
+		return false;
+	}
+
+	return true;
+}
+
+/*
+ * pqPutExecuteMsg
+ *		Construct an Execute message, with the fetch fields of the _pq_.cursor
+ *		extension if it has been negotiated.
+ *
+ * Those fields are mandatory once the extension is active, so send
+ * PQ_FETCH_DEFAULT and a zero count when no fetch behavior is wanted; the
+ * server then honors the row-count field, just as it does without the
+ * extension.  With a direction, the row-count field has no say and has to be
+ * zero.
+ *
+ * Returns 0 on success, -1 on failure (conn->errorMessage is set).
+ */
+static int
+pqPutExecuteMsg(PGconn *conn, const char *portalName, int fetchFlags,
+				int64_t count)
+{
+	int			maxRows = 0;
+
+	if (pqPutMsgStart(PqMsg_Execute, conn) < 0 ||
+		pqPuts(portalName, conn) < 0 ||
+		pqPutInt(maxRows, 4, conn) < 0)
+		return -1;
+
+	if (conn->protocol_cursor_enabled)
+	{
+		if (pqPutInt(fetchFlags, 4, conn) < 0 ||
+			pqPutInt64(count, conn) < 0)
+			return -1;
+	}
+
+	if (pqPutMsgEnd(conn) < 0)
+		return -1;
+
+	return 0;
+}
+
+/*
+ * PQsendBindGuts
+ *		Common code for PQsendBindWithCursorOptions and
+ *		PQsendBindAndExecutePortal.  PQsendQueryStart should be done already.
+ *
+ * Sends Bind and Describe Portal for the given named portal and, if
+ * withExecute is true, an Execute message carrying the fetch fields built from
+ * fetchFlags and count.  A Sync is added unless we are in pipeline mode.
+ */
+static int
+PQsendBindGuts(PGconn *conn,
+			   const char *stmtName,
+			   int nParams,
+			   const char *const *paramValues,
+			   const int *paramLengths,
+			   const int *paramFormats,
+			   int resultFormat,
+			   const char *portalName,
+			   int cursorOptions,
+			   bool withExecute,
+			   int fetchFlags,
+			   int64_t count)
+{
+	PGcmdQueueEntry *entry;
 
 	if (!stmtName)
 	{
@@ -1727,6 +1975,10 @@ PQsendBindWithCursorOptions(PGconn *conn,
 		return 0;
 	}
 
+	/* A fetching Execute always sends its fetch fields, so validate them. */
+	if (withExecute && !pqCheckFetchFlags(conn, fetchFlags))
+		return 0;
+
 	if (cursorOptions & ~PQ_BIND_CURSOR_VALID_FLAGS)
 	{
 		libpq_append_conn_error(conn,
@@ -1745,10 +1997,11 @@ PQsendBindWithCursorOptions(PGconn *conn,
 
 	entry = pqAllocCmdQueueEntry(conn);
 	if (entry == NULL)
-		return 0;
+		return 0;				/* error msg already set */
 
+	/* construct the Bind message */
 	if (pqPutMsgStart(PqMsg_Bind, conn) < 0 ||
-		pqPuts(portalName ? portalName : "", conn) < 0 ||
+		pqPuts(portalName, conn) < 0 ||
 		pqPuts(stmtName, conn) < 0)
 		goto sendFailed;
 
@@ -1794,14 +2047,22 @@ PQsendBindWithCursorOptions(PGconn *conn,
 	if (pqPutMsgEnd(conn) < 0)
 		goto sendFailed;
 
+	/* construct the Describe Portal message */
 	if (pqPutMsgStart(PqMsg_Describe, conn) < 0 ||
 		pqPutc('P', conn) < 0 ||
-		pqPuts(portalName ? portalName : "", conn) < 0 ||
+		pqPuts(portalName, conn) < 0 ||
 		pqPutMsgEnd(conn) < 0)
 		goto sendFailed;
 
-	/* No Execute message - portal is created but not executed */
+	/*
+	 * Construct the Execute message, if wanted.  Without one the portal is
+	 * created but not executed, and its description is the only result.
+	 */
+	if (withExecute &&
+		pqPutExecuteMsg(conn, portalName, fetchFlags, count) < 0)
+		goto sendFailed;
 
+	/* construct the Sync message if not in pipeline mode */
 	if (conn->pipelineStatus == PQ_PIPELINE_OFF)
 	{
 		if (pqPutMsgStart(PqMsg_Sync, conn) < 0 ||
@@ -1809,8 +2070,18 @@ PQsendBindWithCursorOptions(PGconn *conn,
 			goto sendFailed;
 	}
 
-	entry->queryclass = PGQUERY_DESCRIBE;
+	/*
+	 * With an Execute, rows will come back and this is an ordinary
+	 * extended-protocol query; without one, the portal's description is all
+	 * we expect.
+	 */
+	entry->queryclass = withExecute ? PGQUERY_EXTENDED : PGQUERY_DESCRIBE;
 
+	/*
+	 * Give the data a push (in pipeline mode, only if we're past the size
+	 * threshold).  In nonblock mode, don't complain if we're unable to send
+	 * it all; PQgetResult() will do any additional flushing needed.
+	 */
 	if (pqPipelineFlush(conn) < 0)
 		goto sendFailed;
 
@@ -1821,6 +2092,7 @@ PQsendBindWithCursorOptions(PGconn *conn,
 
 sendFailed:
 	pqRecycleCmdQueueEntry(conn, entry);
+	/* error message should be set up already */
 	return 0;
 }
 
@@ -2048,11 +2320,12 @@ PQsendQueryGuts(PGconn *conn,
 		pqPutMsgEnd(conn) < 0)
 		goto sendFailed;
 
-	/* construct the Execute message */
-	if (pqPutMsgStart(PqMsg_Execute, conn) < 0 ||
-		pqPuts("", conn) < 0 ||
-		pqPutInt(0, 4, conn) < 0 ||
-		pqPutMsgEnd(conn) < 0)
+	/*
+	 * Construct the Execute message.  The fetch fields, if _pq_.cursor has
+	 * been negotiated, say that no fetch behavior is wanted: this Execute
+	 * targets the unnamed portal, which cannot be a cursor anyway.
+	 */
+	if (pqPutExecuteMsg(conn, "", PQ_FETCH_DEFAULT, 0) < 0)
 		goto sendFailed;
 
 	/* construct the Sync message if not in pipeline mode */

@@ -811,6 +811,7 @@ extern int	pqSkipnchar(size_t len, PGconn *conn);
 extern int	pqPutnchar(const void *s, size_t len, PGconn *conn);
 extern int	pqGetInt(int *result, size_t bytes, PGconn *conn);
 extern int	pqPutInt(int value, size_t bytes, PGconn *conn);
+extern int	pqPutInt64(int64_t value, PGconn *conn);
 extern int	pqPutMsgStart(char msg_type, PGconn *conn);
 extern int	pqPutMsgEnd(PGconn *conn);
 extern int	pqReadData(PGconn *conn);

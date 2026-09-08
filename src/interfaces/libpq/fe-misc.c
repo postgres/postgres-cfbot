@@ -280,6 +280,22 @@ pqPutInt(int value, size_t bytes, PGconn *conn)
 }
 
 /*
+ * pqPutInt64
+ * write an 8-byte integer, converting from host byte order to network
+ * byte order.
+ */
+int
+pqPutInt64(int64_t value, PGconn *conn)
+{
+	uint64		tmp8 = pg_hton64((uint64) value);
+
+	if (pqPutMsgBytes((const char *) &tmp8, 8, conn))
+		return EOF;
+
+	return 0;
+}
+
+/*
  * Make sure conn's output buffer can hold bytes_needed bytes (caller must
  * include already-stored data into the value!)
  *

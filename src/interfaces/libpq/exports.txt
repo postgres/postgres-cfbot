@@ -213,3 +213,5 @@ appendPQExpBufferVA       210
 PQgetThreadLock           211
 PQsendBindWithCursorOptions 212
 PQprotocolCursorEnabled   213
+PQsendBindAndExecutePortal 214
+PQsendExecutePortal       215
