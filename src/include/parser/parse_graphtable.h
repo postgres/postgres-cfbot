@@ -49,6 +49,16 @@ extern bool graph_element_kind_info(GraphElementPatternKind kind,
 									char *element_kind, const char **kind_str);
 
 /*
+ * Verify that every label explicitly referenced by the label expressions in
+ * the given graph pattern is associated with some element of the required
+ * kind (vertex or edge); error otherwise.  Called at parse time; DDL made
+ * after parsing (cached plans) is handled by the planner-side element
+ * resolution.
+ */
+extern void validate_graph_element_label_kinds(GraphPattern *pattern,
+											   Oid graph_oid);
+
+/*
  * Callback used by graph_label_expr_matches(): does the element described
  * by arg carry the given label?
  */
