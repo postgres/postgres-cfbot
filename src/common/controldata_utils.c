@@ -233,7 +233,7 @@ update_controlfile(const char *DataDir,
 
 	errno = 0;
 #ifndef FRONTEND
-	pgstat_report_wait_start(WAIT_EVENT_CONTROL_FILE_WRITE_UPDATE);
+	pgstat_report_wait_start_timed(WAIT_EVENT_CONTROL_FILE_WRITE_UPDATE);
 #endif
 	if (write(fd, buffer, PG_CONTROL_FILE_SIZE) != PG_CONTROL_FILE_SIZE)
 	{
@@ -251,19 +251,19 @@ update_controlfile(const char *DataDir,
 #endif
 	}
 #ifndef FRONTEND
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 #endif
 
 	if (do_sync)
 	{
 #ifndef FRONTEND
-		pgstat_report_wait_start(WAIT_EVENT_CONTROL_FILE_SYNC_UPDATE);
+		pgstat_report_wait_start_timed(WAIT_EVENT_CONTROL_FILE_SYNC_UPDATE);
 		if (pg_fsync(fd) != 0)
 			ereport(PANIC,
 					(errcode_for_file_access(),
 					 errmsg("could not fsync file \"%s\": %m",
 							ControlFilePath)));
-		pgstat_report_wait_end();
+		pgstat_report_wait_end_timed();
 #else
 		if (fsync(fd) != 0)
 			pg_fatal("could not fsync file \"%s\": %m", ControlFilePath);

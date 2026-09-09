@@ -137,5 +137,5 @@ ShutdownAuxiliaryProcess(int code, Datum arg)
 {
 	LWLockReleaseAll();
 	ConditionVariableCancelSleep();
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 }
