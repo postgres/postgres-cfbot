@@ -253,9 +253,9 @@ CopyGetData(CopyFromState cstate, void *databuf, int minread, int maxread)
 	switch (cstate->copy_src)
 	{
 		case COPY_FILE:
-			pgstat_report_wait_start(WAIT_EVENT_COPY_FROM_READ);
+			pgstat_report_wait_start_timed(WAIT_EVENT_COPY_FROM_READ);
 			bytesread = fread(databuf, 1, maxread, cstate->copy_file);
-			pgstat_report_wait_end();
+			pgstat_report_wait_end_timed();
 			if (ferror(cstate->copy_file))
 				ereport(ERROR,
 						(errcode_for_file_access(),

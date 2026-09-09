@@ -201,7 +201,7 @@ BackgroundWriterMain(const void *startup_data, size_t startup_data_len)
 		pg_usleep(1000000L);
 
 		/* Report wait end here, when there is no further possibility of wait */
-		pgstat_report_wait_end();
+		pgstat_report_wait_end_timed();
 	}
 
 	/* We can now handle ereport(ERROR) */

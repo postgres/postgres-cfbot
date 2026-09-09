@@ -690,7 +690,7 @@ LWLockInitialize(LWLock *lock, int tranche_id)
 static inline void
 LWLockReportWaitStart(LWLock *lock)
 {
-	pgstat_report_wait_start(PG_WAIT_LWLOCK | lock->tranche);
+	pgstat_report_wait_start_timed(PG_WAIT_LWLOCK | lock->tranche);
 }
 
 /*
@@ -699,7 +699,7 @@ LWLockReportWaitStart(LWLock *lock)
 static inline void
 LWLockReportWaitEnd(void)
 {
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 }
 
 /*
