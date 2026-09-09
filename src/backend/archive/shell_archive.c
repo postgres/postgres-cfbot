@@ -77,9 +77,9 @@ shell_archive_file(ArchiveModuleState *state, const char *file,
 							 xlogarchcmd)));
 
 	fflush(NULL);
-	pgstat_report_wait_start(WAIT_EVENT_ARCHIVE_COMMAND);
+	pgstat_report_wait_start_timed(WAIT_EVENT_ARCHIVE_COMMAND);
 	rc = system(xlogarchcmd);
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	if (rc != 0)
 	{
