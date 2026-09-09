@@ -594,6 +594,12 @@ DROP TABLE test_vfd_activity;
 SELECT pg_stat_force_next_flush();
 SELECT (hits + misses) > :vfd_accesses_before FROM pg_stat_vfdcache;
 
+-- Test that VFD cache footprint metrics are non-negative and consistent
+SELECT open_entries <= allocated_entries,
+       allocated_entries > 0,
+       cache_bytes > 0
+FROM pg_stat_vfdcache;
+
 -- Test error case for reset_shared with unknown stats type
 SELECT pg_stat_reset_shared('unknown');
 
