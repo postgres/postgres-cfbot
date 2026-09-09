@@ -37,17 +37,25 @@ my $standby = PostgreSQL::Test::Cluster->new('standby');
 $standby->init_from_backup($primary, 'backup', has_streaming => 1);
 $standby->start;
 
-like(
-	$primary->safe_psql(
+# The walreceiver connects some time after the standby starts accepting
+# connections, so wait for its START_REPLICATION to show up rather than
+# reading pg_stat_activity once.
+ok( $primary->poll_query_until(
 		'postgres',
-		q[SELECT query FROM pg_stat_activity WHERE backend_type = 'walsender']),
-	qr/\(SKIP_WAL_PADDING\)$/,
+		q[SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+		  WHERE backend_type = 'walsender'
+		  AND query LIKE '%(SKIP_WAL_PADDING)')]),
 	'standby requests compact WAL padding messages');
 
 # Start near the beginning of a segment, then generate a small amount of WAL
 # so that the next switch leaves a large zero-filled tail.
 $primary->safe_psql('postgres', 'SELECT pg_switch_wal()');
 $primary->wait_for_replay_catchup($standby);
+
+# Count only the walreceiver's writes for the segment under test.  Counters
+# still pending in the walreceiver from before the reset can only make the
+# total larger.
+$standby->safe_psql('postgres', "SELECT pg_stat_reset_shared('io')");
 $primary->safe_psql('postgres',
 	'CREATE TABLE stream_wal_zeros AS SELECT generate_series(1, 10) AS i');
 
@@ -61,5 +69,20 @@ my $standby_path = $standby->data_dir . "/pg_wal/$walfile";
 
 ok(files_are_equal($standby_path, $primary_path),
 	'streamed WAL segment is reconstructed byte for byte');
+
+# The bytes match whether the padding was streamed or skipped, so also check
+# that the walreceiver did not write a whole segment.  Restart the standby
+# to flush its I/O statistics first.
+$standby->restart;
+
+my $written = $standby->safe_psql('postgres',
+	q[SELECT write_bytes FROM pg_stat_io
+	  WHERE backend_type = 'walreceiver' AND object = 'wal'
+	  AND context = 'normal']);
+my $segsize = $standby->safe_psql('postgres',
+	q[SELECT setting FROM pg_settings WHERE name = 'wal_segment_size']);
+cmp_ok($written, '>', 0, 'walreceiver reported its WAL writes');
+cmp_ok($written, '<', $segsize,
+	'walreceiver did not write the zero-filled padding');
 
 done_testing();
