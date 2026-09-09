@@ -1203,6 +1203,9 @@ heapam_index_build_range_scan(Relation heapRelation,
 
 	if (!scan)
 	{
+		uint32		internal_flags = SO_TYPE_SEQSCAN |
+			SO_ALLOW_PAGEMODE | SO_ALLOW_STRAT;
+
 		/*
 		 * Serial index build.
 		 *
@@ -1217,12 +1220,16 @@ heapam_index_build_range_scan(Relation heapRelation,
 		else
 			snapshot = SnapshotAny;
 
-		scan = table_beginscan_strat(heapRelation,	/* relation */
-									 snapshot,	/* snapshot */
-									 0, /* number of keys */
-									 NULL,	/* scan key */
-									 true,	/* buffer access strategy OK */
-									 allow_sync);	/* syncscan OK? */
+		if (allow_sync)
+			internal_flags |= SO_ALLOW_SYNC;
+
+		scan = table_beginscan_common(heapRelation, /* relation */
+									  snapshot, /* snapshot */
+									  0,	/* number of keys */
+									  NULL, /* scan key */
+									  NULL, /* serial scan */
+									  internal_flags,
+									  SO_MAINTENANCE);
 	}
 	else
 	{
