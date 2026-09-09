@@ -386,6 +386,15 @@ sharon	25	(15,12)	1000	sam
 sharon	y	(15,12)	x	sam
 \.
 
+begin;
+create temp table err_tbl OF copy_error_saving;
+copy tab_progress_reporting from stdin(on_error table, error_table err_tbl);
+sharon	x	(15,12)	x	sam
+sharon	25	(15,12)	1000	sam
+sharon	y	(15,12)	x	sam
+\.
+rollback;
+
 drop trigger check_after_tab_progress_reporting on tab_progress_reporting;
 drop function notice_after_tab_progress_reporting();
 drop table tab_progress_reporting;
