@@ -886,16 +886,16 @@ SlruPhysicalReadPage(SlruDesc *ctl, int64 pageno, int slotno)
 	}
 
 	errno = 0;
-	pgstat_report_wait_start(WAIT_EVENT_SLRU_READ);
+	pgstat_report_wait_start_timed(WAIT_EVENT_SLRU_READ);
 	if (pg_pread(fd, shared->page_buffer[slotno], BLCKSZ, offset) != BLCKSZ)
 	{
-		pgstat_report_wait_end();
+		pgstat_report_wait_end_timed();
 		slru_errcause = SLRU_READ_FAILED;
 		slru_errno = errno;
 		CloseTransientFile(fd);
 		return false;
 	}
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	if (CloseTransientFile(fd) != 0)
 	{
@@ -1038,10 +1038,10 @@ SlruPhysicalWritePage(SlruDesc *ctl, int64 pageno, int slotno, SlruWriteAll fdat
 	}
 
 	errno = 0;
-	pgstat_report_wait_start(WAIT_EVENT_SLRU_WRITE);
+	pgstat_report_wait_start_timed(WAIT_EVENT_SLRU_WRITE);
 	if (pg_pwrite(fd, shared->page_buffer[slotno], BLCKSZ, offset) != BLCKSZ)
 	{
-		pgstat_report_wait_end();
+		pgstat_report_wait_end_timed();
 		/* if write didn't set errno, assume problem is no disk space */
 		if (errno == 0)
 			errno = ENOSPC;
@@ -1051,7 +1051,7 @@ SlruPhysicalWritePage(SlruDesc *ctl, int64 pageno, int slotno, SlruWriteAll fdat
 			CloseTransientFile(fd);
 		return false;
 	}
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	/* Queue up a sync request for the checkpointer. */
 	if (ctl->options.sync_handler != SYNC_HANDLER_NONE)
@@ -1062,16 +1062,16 @@ SlruPhysicalWritePage(SlruDesc *ctl, int64 pageno, int slotno, SlruWriteAll fdat
 		if (!RegisterSyncRequest(&tag, SYNC_REQUEST, false))
 		{
 			/* No space to enqueue sync request.  Do it synchronously. */
-			pgstat_report_wait_start(WAIT_EVENT_SLRU_SYNC);
+			pgstat_report_wait_start_timed(WAIT_EVENT_SLRU_SYNC);
 			if (pg_fsync(fd) != 0)
 			{
-				pgstat_report_wait_end();
+				pgstat_report_wait_end_timed();
 				slru_errcause = SLRU_FSYNC_FAILED;
 				slru_errno = errno;
 				CloseTransientFile(fd);
 				return false;
 			}
-			pgstat_report_wait_end();
+			pgstat_report_wait_end_timed();
 		}
 	}
 
@@ -1893,9 +1893,9 @@ SlruSyncFileTag(SlruDesc *ctl, const FileTag *ftag, char *path)
 	if (fd < 0)
 		return -1;
 
-	pgstat_report_wait_start(WAIT_EVENT_SLRU_FLUSH_SYNC);
+	pgstat_report_wait_start_timed(WAIT_EVENT_SLRU_FLUSH_SYNC);
 	result = pg_fsync(fd);
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 	save_errno = errno;
 
 	CloseTransientFile(fd);

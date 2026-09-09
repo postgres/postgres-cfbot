@@ -2582,12 +2582,12 @@ SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel)
 	FIN_CRC32C(cp.checksum);
 
 	errno = 0;
-	pgstat_report_wait_start(WAIT_EVENT_REPLICATION_SLOT_WRITE);
+	pgstat_report_wait_start_timed(WAIT_EVENT_REPLICATION_SLOT_WRITE);
 	if ((write(fd, &cp, sizeof(cp))) != sizeof(cp))
 	{
 		int			save_errno = errno;
 
-		pgstat_report_wait_end();
+		pgstat_report_wait_end_timed();
 		CloseTransientFile(fd);
 		unlink(tmppath);
 		LWLockRelease(&slot->io_in_progress_lock);
@@ -2600,15 +2600,15 @@ SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel)
 						tmppath)));
 		return;
 	}
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	/* fsync the temporary file */
-	pgstat_report_wait_start(WAIT_EVENT_REPLICATION_SLOT_SYNC);
+	pgstat_report_wait_start_timed(WAIT_EVENT_REPLICATION_SLOT_SYNC);
 	if (pg_fsync(fd) != 0)
 	{
 		int			save_errno = errno;
 
-		pgstat_report_wait_end();
+		pgstat_report_wait_end_timed();
 		CloseTransientFile(fd);
 		unlink(tmppath);
 		LWLockRelease(&slot->io_in_progress_lock);
@@ -2620,7 +2620,7 @@ SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel)
 						tmppath)));
 		return;
 	}
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	if (CloseTransientFile(fd) != 0)
 	{
@@ -2724,13 +2724,13 @@ RestoreSlotFromDisk(const char *name)
 	 * Sync state file before we're reading from it. We might have crashed
 	 * while it wasn't synced yet and we shouldn't continue on that basis.
 	 */
-	pgstat_report_wait_start(WAIT_EVENT_REPLICATION_SLOT_RESTORE_SYNC);
+	pgstat_report_wait_start_timed(WAIT_EVENT_REPLICATION_SLOT_RESTORE_SYNC);
 	if (pg_fsync(fd) != 0)
 		ereport(PANIC,
 				(errcode_for_file_access(),
 				 errmsg("could not fsync file \"%s\": %m",
 						path)));
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	/* Also sync the parent directory */
 	START_CRIT_SECTION();
@@ -2738,9 +2738,9 @@ RestoreSlotFromDisk(const char *name)
 	END_CRIT_SECTION();
 
 	/* read part of statefile that's guaranteed to be version independent */
-	pgstat_report_wait_start(WAIT_EVENT_REPLICATION_SLOT_READ);
+	pgstat_report_wait_start_timed(WAIT_EVENT_REPLICATION_SLOT_READ);
 	readBytes = read(fd, &cp, ReplicationSlotOnDiskConstantSize);
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 	if (readBytes != ReplicationSlotOnDiskConstantSize)
 	{
 		if (readBytes < 0)
@@ -2777,11 +2777,11 @@ RestoreSlotFromDisk(const char *name)
 						path, cp.length)));
 
 	/* Now that we know the size, read the entire file */
-	pgstat_report_wait_start(WAIT_EVENT_REPLICATION_SLOT_READ);
+	pgstat_report_wait_start_timed(WAIT_EVENT_REPLICATION_SLOT_READ);
 	readBytes = read(fd,
 					 (char *) &cp + ReplicationSlotOnDiskConstantSize,
 					 cp.length);
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 	if (readBytes != cp.length)
 	{
 		if (readBytes < 0)

@@ -4304,7 +4304,7 @@ ReorderBufferSerializeChange(ReorderBuffer *rb, ReorderBufferTXN *txn,
 	ondisk->size = sz;
 
 	errno = 0;
-	pgstat_report_wait_start(WAIT_EVENT_REORDER_BUFFER_WRITE);
+	pgstat_report_wait_start_timed(WAIT_EVENT_REORDER_BUFFER_WRITE);
 	if (write(fd, rb->outbuf, ondisk->size) != ondisk->size)
 	{
 		int			save_errno = errno;
@@ -4318,7 +4318,7 @@ ReorderBufferSerializeChange(ReorderBuffer *rb, ReorderBufferTXN *txn,
 				 errmsg("could not write to data file for XID %u: %m",
 						txn->xid)));
 	}
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	/*
 	 * Keep the transaction's final_lsn up to date with each change we send to
@@ -5418,9 +5418,9 @@ ApplyLogicalMappingFile(HTAB *tuplecid_data, const char *fname)
 		memset(&key, 0, sizeof(ReorderBufferTupleCidKey));
 
 		/* read all mappings till the end of the file */
-		pgstat_report_wait_start(WAIT_EVENT_REORDER_LOGICAL_MAPPING_READ);
+		pgstat_report_wait_start_timed(WAIT_EVENT_REORDER_LOGICAL_MAPPING_READ);
 		readBytes = read(fd, &map, sizeof(LogicalRewriteMappingData));
-		pgstat_report_wait_end();
+		pgstat_report_wait_end_timed();
 
 		if (readBytes < 0)
 			ereport(ERROR,

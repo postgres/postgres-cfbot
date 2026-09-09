@@ -246,9 +246,9 @@ WaitExceedsMaxStandbyDelay(uint32 wait_event_info)
 	/*
 	 * Sleep a bit (this is essential to avoid busy-waiting).
 	 */
-	pgstat_report_wait_start(wait_event_info);
+	pgstat_report_wait_start_timed(wait_event_info);
 	pg_usleep(standbyWait_us);
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	/*
 	 * Progressively increase the sleep times, but not to more than 1s, since
