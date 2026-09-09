@@ -1900,6 +1900,27 @@ pgfdw_abort_cleanup(ConnCacheEntry *entry, bool toplevel)
 	entry->have_error = true;
 
 	/*
+	 * If a COPY FROM STDIN started by ExecForeignBatchCopy is still open on
+	 * this connection, terminate it before we can send any other commands. We
+	 * send a COPY end with an error message so the remote aborts it.
+	 */
+	if (entry->state.copy_in_progress)
+	{
+		if (PQputCopyEnd(entry->conn, "COPY aborted due to local error") == 1)
+		{
+			PGresult   *res;
+
+			/*
+			 * Consume the error result from the aborted COPY.  We don't care
+			 * about the specific error since we're aborting anyway.
+			 */
+			res = PQgetResult(entry->conn);
+			PQclear(res);
+		}
+		entry->state.copy_in_progress = false;
+	}
+
+	/*
 	 * If a command has been submitted to the remote server by using an
 	 * asynchronous execution function, the command might not have yet
 	 * completed.  Check to see if a command is still being processed by the
@@ -1971,6 +1992,26 @@ pgfdw_abort_cleanup_begin(ConnCacheEntry *entry, bool toplevel,
 
 	/* Assume we might have lost track of prepared statements */
 	entry->have_error = true;
+
+	/*
+	 * If a COPY FROM STDIN started by ExecForeignBatchCopy is still open on
+	 * this connection, terminate it before we can send any other commands.
+	 */
+	if (entry->state.copy_in_progress)
+	{
+		if (PQputCopyEnd(entry->conn, "COPY aborted due to local error") == 1)
+		{
+			PGresult   *res;
+
+			/*
+			 * Consume the error result from the aborted COPY.  We don't care
+			 * about the specific error since we're aborting anyway.
+			 */
+			res = PQgetResult(entry->conn);
+			PQclear(res);
+		}
+		entry->state.copy_in_progress = false;
+	}
 
 	/*
 	 * If a command has been submitted to the remote server by using an

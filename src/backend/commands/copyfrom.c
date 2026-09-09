@@ -464,7 +464,6 @@ CopyMultiInsertBufferFlush(CopyMultiInsertInfo *miinfo,
 		Assert(buffer->bistate == NULL);
 
 		/* Ensure that the FDW supports batching and it's enabled */
-		Assert(resultRelInfo->ri_FdwRoutine->ExecForeignBatchInsert);
 		Assert(batch_size > 1);
 
 		/*
@@ -473,6 +472,40 @@ CopyMultiInsertBufferFlush(CopyMultiInsertInfo *miinfo,
 		 */
 		Assert(!cstate->relname_only);
 		cstate->relname_only = true;
+
+		if (resultRelInfo->ri_FdwRoutine->ExecForeignBatchCopy != NULL &&
+			(resultRelInfo->ri_TrigDesc == NULL ||
+			 !resultRelInfo->ri_TrigDesc->trig_insert_after_row))
+		{
+			/*
+			 * Send the buffered tuples to the FDW in batches of at most
+			 * batch_size, as we do for ExecForeignBatchInsert. Each call is a
+			 * self-contained COPY operation.
+			 *
+			 * COPY provides no RETURNING, so this path is only usable when
+			 * there are no AFTER ROW triggers that would need the stored rows.
+			 */
+			while (sent < nused)
+			{
+				int			size = (batch_size < nused - sent) ? batch_size : (nused - sent);
+
+				resultRelInfo->ri_FdwRoutine->ExecForeignBatchCopy(estate,
+																   resultRelInfo,
+																   &slots[sent],
+																   size);
+
+				sent += size;
+
+				/* Update the row counter and progress of the COPY command */
+				*processed += size;
+				pgstat_progress_update_param(PROGRESS_COPY_TUPLES_PROCESSED,
+											 *processed);
+			}
+		}
+		else
+		{
+		/* Ensure that the FDW supports batching and it's enabled */
+		Assert(resultRelInfo->ri_FdwRoutine->ExecForeignBatchInsert);
 
 		while (sent < nused)
 		{
@@ -524,6 +557,7 @@ CopyMultiInsertBufferFlush(CopyMultiInsertInfo *miinfo,
 			*processed += inserted;
 			pgstat_progress_update_param(PROGRESS_COPY_TUPLES_PROCESSED,
 										 *processed);
+		}
 		}
 
 		for (i = 0; i < nused; i++)
@@ -775,6 +809,34 @@ CopyMultiInsertInfoStore(CopyMultiInsertInfo *miinfo, ResultRelInfo *rri,
 }
 
 /*
+ * Can this foreign result relation accept batches of tuples during COPY FROM,
+ * i.e. does CopyMultiInsertBufferFlush() have a usable path for it?
+ *
+ * The FDW can batch if it provides ExecForeignBatchInsert, or if it provides
+ * ExecForeignBatchCopy and there are no AFTER ROW triggers to feed (COPY has no
+ * RETURNING, so the stored rows are not available for them).  These two
+ * callbacks are independent: an FDW may implement either or both.
+ *
+ * Callers must have already established that batching is enabled for the
+ * relation (ri_BatchSize > 1).
+ */
+static bool
+CopyFromFdwCanBatch(ResultRelInfo *resultRelInfo)
+{
+	FdwRoutine *fdwroutine = resultRelInfo->ri_FdwRoutine;
+
+	if (fdwroutine->ExecForeignBatchInsert != NULL)
+		return true;
+
+	if (fdwroutine->ExecForeignBatchCopy != NULL &&
+		(resultRelInfo->ri_TrigDesc == NULL ||
+		 !resultRelInfo->ri_TrigDesc->trig_insert_after_row))
+		return true;
+
+	return false;
+}
+
+/*
  * Copy FROM file to relation.
  */
 uint64
@@ -951,7 +1013,8 @@ CopyFrom(CopyFromState cstate)
 	 */
 	if (resultRelInfo->ri_FdwRoutine != NULL &&
 		resultRelInfo->ri_FdwRoutine->GetForeignModifyBatchSize &&
-		resultRelInfo->ri_FdwRoutine->ExecForeignBatchInsert)
+		(resultRelInfo->ri_FdwRoutine->ExecForeignBatchInsert ||
+		 resultRelInfo->ri_FdwRoutine->ExecForeignBatchCopy))
 		resultRelInfo->ri_BatchSize =
 			resultRelInfo->ri_FdwRoutine->GetForeignModifyBatchSize(resultRelInfo);
 	else
@@ -1007,11 +1070,14 @@ CopyFrom(CopyFromState cstate)
 		insertMethod = CIM_SINGLE;
 	}
 	else if (resultRelInfo->ri_FdwRoutine != NULL &&
-			 resultRelInfo->ri_BatchSize == 1)
+			 (resultRelInfo->ri_BatchSize == 1 ||
+			  !CopyFromFdwCanBatch(resultRelInfo)))
 	{
 		/*
 		 * Can't support multi-inserts to a foreign table if the FDW does not
-		 * support batching, or it's disabled for the server or foreign table.
+		 * support batching, or it's disabled for the server or foreign table,
+		 * or the FDW only offers COPY-based batching but the table has AFTER
+		 * ROW triggers to feed.
 		 */
 		insertMethod = CIM_SINGLE;
 	}
@@ -1235,7 +1301,8 @@ CopyFrom(CopyFromState cstate)
 					!has_before_insert_row_trig &&
 					!has_instead_insert_row_trig &&
 					(resultRelInfo->ri_FdwRoutine == NULL ||
-					 resultRelInfo->ri_BatchSize > 1);
+					 (resultRelInfo->ri_BatchSize > 1 &&
+					  CopyFromFdwCanBatch(resultRelInfo)));
 
 				/* Set the multi-insert buffer to use for this partition. */
 				if (leafpart_use_multi_insert)
