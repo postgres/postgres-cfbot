@@ -820,7 +820,7 @@ read_relmap_file(RelMapFile *map, char *dbpath, bool lock_held, int elevel)
 						mapfilename)));
 
 	/* Now read the data. */
-	pgstat_report_wait_start(WAIT_EVENT_RELATION_MAP_READ);
+	pgstat_report_wait_start_timed(WAIT_EVENT_RELATION_MAP_READ);
 	r = read(fd, map, sizeof(RelMapFile));
 	if (r != sizeof(RelMapFile))
 	{
@@ -834,7 +834,7 @@ read_relmap_file(RelMapFile *map, char *dbpath, bool lock_held, int elevel)
 					 errmsg("could not read file \"%s\": read %zd of %zu",
 							mapfilename, r, sizeof(RelMapFile))));
 	}
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	if (CloseTransientFile(fd) != 0)
 		ereport(elevel,
@@ -937,7 +937,7 @@ write_relmap_file(RelMapFile *newmap, bool write_wal, bool send_sinval,
 						maptempfilename)));
 
 	/* Write new data to the file. */
-	pgstat_report_wait_start(WAIT_EVENT_RELATION_MAP_WRITE);
+	pgstat_report_wait_start_timed(WAIT_EVENT_RELATION_MAP_WRITE);
 	if (write(fd, newmap, sizeof(RelMapFile)) != sizeof(RelMapFile))
 	{
 		/* if write didn't set errno, assume problem is no disk space */
@@ -948,7 +948,7 @@ write_relmap_file(RelMapFile *newmap, bool write_wal, bool send_sinval,
 				 errmsg("could not write file \"%s\": %m",
 						maptempfilename)));
 	}
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	/* And close the file. */
 	if (CloseTransientFile(fd) != 0)
@@ -986,9 +986,9 @@ write_relmap_file(RelMapFile *newmap, bool write_wal, bool send_sinval,
 	 * NB: Although we instruct durable_rename() to use ERROR, we will often
 	 * be in a critical section at this point; if so, ERROR will become PANIC.
 	 */
-	pgstat_report_wait_start(WAIT_EVENT_RELATION_MAP_REPLACE);
+	pgstat_report_wait_start_timed(WAIT_EVENT_RELATION_MAP_REPLACE);
 	durable_rename(maptempfilename, mapfilename, ERROR);
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	/*
 	 * Now that the file is safely on disk, send sinval message to let other
