@@ -387,6 +387,12 @@
           <literal>writev</literal>, a vectored write
          </para>
         </listitem>
+        <listitem>
+         <para>
+          <literal>fsync</literal>, file synchronization using
+          <function>fsync()</function> or <function>fdatasync()</function>
+         </para>
+        </listitem>
        </itemizedlist>
       </para></entry>
      </row>
@@ -396,7 +402,7 @@
        <structfield>off</structfield> <type>int8</type>
       </para>
       <para>
-       Offset of the I/O operation.
+       Offset of the I/O operation, or NULL for <literal>fsync</literal>.
       </para></entry>
      </row>
 
@@ -405,7 +411,7 @@
        <structfield>length</structfield> <type>int8</type>
       </para>
       <para>
-       Length of the I/O operation.
+       Length of the I/O operation, or NULL for <literal>fsync</literal>.
       </para></entry>
      </row>
 
@@ -419,6 +425,18 @@
         <listitem>
          <para>
           <literal>smgr</literal>, I/O on relations
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>sync</literal>, file synchronization using a process-local
+          file descriptor
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>sync_filetag</literal>, file synchronization identified by
+          a file tag, currently used for SLRU segments
          </para>
         </listitem>
        </itemizedlist>
