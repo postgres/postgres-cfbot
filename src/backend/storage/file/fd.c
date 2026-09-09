@@ -335,6 +335,10 @@ static void ReleaseLruFiles(void);
 static File AllocateVfd(void);
 static void FreeVfd(File file);
 
+static int	pg_fsync_impl(int fd, bool do_fsync, bool writethrough);
+static int	pg_fsync_no_writethrough_unconditional(int fd);
+static int	pg_fsync_writethrough_unconditional(int fd);
+
 static int	FileAccess(File file);
 static File OpenTemporaryFileInTablespace(Oid tblspcOid, bool rejectError);
 static bool reserveAllocatedDesc(void);
@@ -389,6 +393,29 @@ ResourceOwnerForgetFile(ResourceOwner owner, File file)
 int
 pg_fsync(int fd)
 {
+	bool		writethrough = false;
+
+#ifdef HAVE_FSYNC_WRITETHROUGH
+	writethrough = wal_sync_method == WAL_SYNC_METHOD_FSYNC_WRITETHROUGH;
+#endif
+	return pg_fsync_impl(fd, enableFsync, writethrough);
+}
+
+/*
+ * Synchronize using the specified method, regardless of enableFsync and
+ * wal_sync_method.  AIO uses this after the issuer has decided whether and how
+ * to synchronize, since an IO worker's configuration may differ from the
+ * issuer's.
+ */
+int
+pg_fsync_unconditional(int fd, bool writethrough)
+{
+	return pg_fsync_impl(fd, true, writethrough);
+}
+
+static int
+pg_fsync_impl(int fd, bool do_fsync, bool writethrough)
+{
 #if !defined(WIN32) && defined(USE_ASSERT_CHECKING)
 	struct stat st;
 
@@ -424,13 +451,13 @@ pg_fsync(int fd)
 	errno = 0;
 #endif
 
-	/* #if is to skip the wal_sync_method test if there's no need for it */
-#if defined(HAVE_FSYNC_WRITETHROUGH)
-	if (wal_sync_method == WAL_SYNC_METHOD_FSYNC_WRITETHROUGH)
-		return pg_fsync_writethrough(fd);
+	if (!do_fsync)
+		return 0;
+
+	if (writethrough)
+		return pg_fsync_writethrough_unconditional(fd);
 	else
-#endif
-		return pg_fsync_no_writethrough(fd);
+		return pg_fsync_no_writethrough_unconditional(fd);
 }
 
 
@@ -441,10 +468,16 @@ pg_fsync(int fd)
 int
 pg_fsync_no_writethrough(int fd)
 {
-	int			rc;
-
 	if (!enableFsync)
 		return 0;
+
+	return pg_fsync_no_writethrough_unconditional(fd);
+}
+
+static int
+pg_fsync_no_writethrough_unconditional(int fd)
+{
+	int			rc;
 
 retry:
 	rc = fsync(fd);
@@ -461,17 +494,21 @@ retry:
 int
 pg_fsync_writethrough(int fd)
 {
-	if (enableFsync)
-	{
-#if defined(F_FULLFSYNC)
-		return (fcntl(fd, F_FULLFSYNC, 0) == -1) ? -1 : 0;
-#else
-		errno = ENOSYS;
-		return -1;
-#endif
-	}
-	else
+	if (!enableFsync)
 		return 0;
+
+	return pg_fsync_writethrough_unconditional(fd);
+}
+
+static int
+pg_fsync_writethrough_unconditional(int fd)
+{
+#if defined(F_FULLFSYNC)
+	return (fcntl(fd, F_FULLFSYNC, 0) == -1) ? -1 : 0;
+#else
+	errno = ENOSYS;
+	return -1;
+#endif
 }
 
 /*
@@ -480,10 +517,17 @@ pg_fsync_writethrough(int fd)
 int
 pg_fdatasync(int fd)
 {
-	int			rc;
-
 	if (!enableFsync)
 		return 0;
+
+	return pg_fdatasync_unconditional(fd);
+}
+
+/* Like pg_fsync_unconditional(), but synchronize only file data. */
+int
+pg_fdatasync_unconditional(int fd)
+{
+	int			rc;
 
 retry:
 	rc = fdatasync(fd);
