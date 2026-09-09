@@ -890,12 +890,13 @@ typedef OpExpr NullIfExpr;
  * flag to remember whether it's ANY or ALL, and we don't have to store
  * the result type (or the collation) because it must be boolean.
  *
- * A ScalarArrayOpExpr with a valid hashfuncid is evaluated during execution
- * by building a hash table containing the Const values from the RHS arg.
- * This table is probed during expression evaluation.  The planner will set
- * hashfuncid to the hash function which must be used to build and probe the
- * hash table.  The executor determines if it should use hash-based checks or
- * the more traditional means based on if the hashfuncid is set or not.
+ * A ScalarArrayOpExpr with a valid hashfuncid is evaluated by building a hash
+ * table from the array argument and probing it once per row; hashfuncid is the
+ * hash function used to build and probe it.  The planner sets hashfuncid when
+ * the array is a Const, or a non-Const expression it proves stays fixed for the
+ * duration of one execution (see convert_saop_to_hashed_saop()) -- in that case
+ * the executor evaluates the array once and builds the table from the result.
+ * With no valid hashfuncid the executor falls back to a linear scan.
  *
  * When performing hashed NOT IN, the negfuncid will also be set to the
  * equality function which the hash table must use to build and probe the hash
@@ -936,6 +937,13 @@ typedef struct ScalarArrayOpExpr
 	/* token location, or -1 if unknown */
 	ParseLoc	location;
 } ScalarArrayOpExpr;
+
+/*
+ * Minimum array length for which hashing a ScalarArrayOpExpr beats a linear
+ * search.  Applied by the planner when the length is known then, otherwise by
+ * the executor once the run-time array is in hand.
+ */
+#define MIN_ARRAY_SIZE_FOR_HASHED_SAOP 9
 
 /*
  * BoolExpr - expression node for the basic Boolean operators AND, OR, NOT

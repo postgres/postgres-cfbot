@@ -222,12 +222,24 @@ static uint32 saop_element_hash(struct saophash_hash *tb, Datum key);
 
 /*
  * ScalarArrayOpExprHashTable
- *		Hash table for EEOP_HASHED_SCALARARRAYOP
+ *		Run-time state for EEOP_HASHED_SCALARARRAYOP.
+ *
+ * A hash table of the array elements, built once and probed per row.  When the
+ * array is not a Const, the step's array_expr is evaluated once and copied into
+ * cached_array, and the table is built from that.  A short array leaves hashtab
+ * NULL and is searched linearly.
  */
 typedef struct ScalarArrayOpExprHashTable
 {
-	saophash_hash *hashtab;		/* underlying hash table */
+	saophash_hash *hashtab;		/* element hash table, or NULL for a short
+								 * (linear-search) array */
 	struct ExprEvalStep *op;
+	Datum		cached_array;	/* array value the state was built from */
+	bool		cache_isnull;	/* the array evaluated to SQL NULL */
+	/* element type metadata, cached when the array is built (type is fixed) */
+	int16		typlen;
+	bool		typbyval;
+	char		typalign;
 	FmgrInfo	hash_finfo;		/* function's lookup data */
 	FunctionCallInfoBaseData hash_fcinfo_data;	/* arguments etc */
 } ScalarArrayOpExprHashTable;
@@ -4235,39 +4247,64 @@ saop_hash_element_match(struct saophash_hash *tb, Datum key1, Datum key2)
 	fcinfo->args[1].value = key2;
 	fcinfo->args[1].isnull = false;
 
-	result = elements_tab->op->d.hashedscalararrayop.finfo->fn_addr(fcinfo);
+	result = fcinfo->flinfo->fn_addr(fcinfo);
 
 	return DatumGetBool(result);
 }
 
 /*
- * Evaluate "scalar op ANY (const array)".
+ * Fetch the array for ExecEvalHashedScalarArrayOp(), setting *arr_value and
+ * *arr_isnull.  A Const is already in the step's result area; a non-Const
+ * array_expr sub-expression is evaluated here (once, on the first call).
+ */
+static void
+saop_hash_eval_array(ExprEvalStep *op, ExprContext *econtext,
+					 Datum *arr_value, bool *arr_isnull)
+{
+	ExprState  *array_expr = op->d.hashedscalararrayop.array_expr;
+
+	if (array_expr == NULL)
+	{
+		*arr_value = *op->resvalue;
+		*arr_isnull = *op->resnull;
+		return;
+	}
+
+	/* Open-coded rather than ExecEvalExpr() to avoid including executor.h. */
+	*arr_value = array_expr->evalfunc(array_expr, econtext, arr_isnull);
+}
+
+/*
+ * Evaluate "scalar op ANY (array)".
  *
- * Similar to ExecEvalScalarArrayOp, but optimized for faster repeat lookups
- * by building a hashtable on the first lookup.  This hashtable will be reused
- * by subsequent lookups.  Unlike ExecEvalScalarArrayOp, this version only
- * supports OR semantics.
+ * Similar to ExecEvalScalarArrayOp, but builds a hash table of the array
+ * elements on the first call and probes it thereafter; OR semantics only.
  *
- * Source array is in our result area, scalar arg is already evaluated into
- * fcinfo->args[0].
+ * The array is fixed for the whole execution -- either a Const in our result
+ * area, or the sub-expression the planner compiled into
+ * op->d.hashedscalararrayop.array_expr -- and is evaluated once.  A NULL array
+ * yields NULL; one with fewer than MIN_ARRAY_SIZE_FOR_HASHED_SAOP elements is
+ * linear-searched every call (hashtab left NULL), as ExecEvalScalarArrayOp does.
  *
- * The operator always yields boolean.
+ * The scalar arg is already evaluated into fcinfo->args[0].  The operator
+ * always yields boolean.
  */
 void
 ExecEvalHashedScalarArrayOp(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 {
 	ScalarArrayOpExprHashTable *elements_tab = op->d.hashedscalararrayop.elements_tab;
+	ExprState  *array_expr = op->d.hashedscalararrayop.array_expr;
 	FunctionCallInfo fcinfo = op->d.hashedscalararrayop.fcinfo_data;
 	bool		inclause = op->d.hashedscalararrayop.inclause;
-	bool		strictfunc = op->d.hashedscalararrayop.finfo->fn_strict;
+	bool		strictfunc = fcinfo->flinfo->fn_strict;
 	Datum		scalar = fcinfo->args[0].value;
 	bool		scalar_isnull = fcinfo->args[0].isnull;
 	Datum		result;
 	bool		resultnull;
 	bool		hashfound;
-
-	/* We don't setup a hashed scalar array op if the array const is null. */
-	Assert(!*op->resnull);
+	ArrayType  *arr;
+	Datum		arr_value = (Datum) 0;
+	bool		arr_isnull = false;
 
 	/*
 	 * If the scalar is NULL, and the function is strict, return NULL; no
@@ -4279,33 +4316,19 @@ ExecEvalHashedScalarArrayOp(ExprState *state, ExprEvalStep *op, ExprContext *eco
 		return;
 	}
 
-	/* Build the hash table on first evaluation */
+	/*
+	 * On the first call, obtain the (single, execution-long) array value and
+	 * build the hash table from it -- or, if it turns out to be too short to
+	 * be worth hashing, decide on a linear search.
+	 */
 	if (elements_tab == NULL)
 	{
-		ScalarArrayOpExpr *saop;
-		int16		typlen;
-		bool		typbyval;
-		char		typalign;
-		uint8		typalignby;
-		int			nitems;
-		bool		has_nulls = false;
-		char	   *s;
-		uint8	   *bitmap;
-		int			bitmask;
 		MemoryContext oldcontext;
-		ArrayType  *arr;
 
-		saop = op->d.hashedscalararrayop.saop;
+		/* Evaluate the array in the current (short-lived) context ... */
+		saop_hash_eval_array(op, econtext, &arr_value, &arr_isnull);
 
-		arr = DatumGetArrayTypeP(*op->resvalue);
-		nitems = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
-
-		get_typlenbyvalalign(ARR_ELEMTYPE(arr),
-							 &typlen,
-							 &typbyval,
-							 &typalign);
-		typalignby = typalign_to_alignby(typalign);
-
+		/* ... then keep our run-time state for the whole execution. */
 		oldcontext = MemoryContextSwitchTo(econtext->ecxt_per_query_memory);
 
 		elements_tab = (ScalarArrayOpExprHashTable *)
@@ -4314,94 +4337,171 @@ ExecEvalHashedScalarArrayOp(ExprState *state, ExprEvalStep *op, ExprContext *eco
 		op->d.hashedscalararrayop.elements_tab = elements_tab;
 		elements_tab->op = op;
 
-		fmgr_info(saop->hashfuncid, &elements_tab->hash_finfo);
-		fmgr_info_set_expr((Node *) saop, &elements_tab->hash_finfo);
-
-		InitFunctionCallInfoData(elements_tab->hash_fcinfo_data,
-								 &elements_tab->hash_finfo,
-								 1,
-								 saop->inputcollid,
-								 NULL,
-								 NULL);
-
-		/*
-		 * Create the hash table sizing it according to the number of elements
-		 * in the array.  This does assume that the array has no duplicates.
-		 * If the array happens to contain many duplicate values then it'll
-		 * just mean that we sized the table a bit on the large side.
-		 */
-		elements_tab->hashtab = saophash_create(CurrentMemoryContext, nitems,
-												elements_tab);
-
-		MemoryContextSwitchTo(oldcontext);
-
-		s = (char *) ARR_DATA_PTR(arr);
-		bitmap = ARR_NULLBITMAP(arr);
-		bitmask = 1;
-		for (int i = 0; i < nitems; i++)
+		if (arr_isnull)
 		{
-			/* Get array element, checking for NULL. */
-			if (bitmap && (*bitmap & bitmask) == 0)
+			elements_tab->cache_isnull = true;
+		}
+		else
+		{
+			int16		typlen;
+			bool		typbyval;
+			char		typalign;
+			int			nitems;
+
+			/*
+			 * A computed array may be short-lived and toasted -- copy it into
+			 * the per-query context; a Const is already flat and query-lived.
+			 */
+			if (array_expr != NULL)
+				arr = DatumGetArrayTypePCopy(arr_value);
+			else
+				arr = DatumGetArrayTypeP(arr_value);
+			elements_tab->cached_array = PointerGetDatum(arr);
+			elements_tab->cache_isnull = false;
+
+			nitems = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
+			get_typlenbyvalalign(ARR_ELEMTYPE(arr), &typlen, &typbyval, &typalign);
+
+			/*
+			 * Cache the element type metadata so the linear-search path below
+			 * need not re-probe the type cache on every call, matching what
+			 * ExecEvalScalarArrayOp() does for the non-hashed step.
+			 */
+			elements_tab->typlen = typlen;
+			elements_tab->typbyval = typbyval;
+			elements_tab->typalign = typalign;
+
+			if (nitems >= MIN_ARRAY_SIZE_FOR_HASHED_SAOP)
 			{
-				has_nulls = true;
+				ScalarArrayOpExpr *saop = op->d.hashedscalararrayop.saop;
+				uint8		typalignby = typalign_to_alignby(typalign);
+				bool		has_nulls = false;
+				char	   *s;
+				uint8	   *bitmap;
+				int			bitmask;
+
+				fmgr_info(saop->hashfuncid, &elements_tab->hash_finfo);
+				fmgr_info_set_expr((Node *) saop, &elements_tab->hash_finfo);
+				InitFunctionCallInfoData(elements_tab->hash_fcinfo_data,
+										 &elements_tab->hash_finfo, 1,
+										 saop->inputcollid, NULL, NULL);
+
+				/*
+				 * Create the hash table sizing it according to the number of
+				 * elements in the array.  This does assume that the array has
+				 * no duplicates.  If it does, we just sized a bit large.
+				 */
+				elements_tab->hashtab = saophash_create(CurrentMemoryContext,
+														nitems, elements_tab);
+
+				s = (char *) ARR_DATA_PTR(arr);
+				bitmap = ARR_NULLBITMAP(arr);
+				bitmask = 1;
+				for (int i = 0; i < nitems; i++)
+				{
+					/* Get array element, checking for NULL. */
+					if (bitmap && (*bitmap & bitmask) == 0)
+					{
+						has_nulls = true;
+					}
+					else
+					{
+						Datum		element;
+
+						element = fetch_att(s, typbyval, typlen);
+						s = att_addlength_pointer(s, typlen, s);
+						s = (char *) att_nominal_alignby(s, typalignby);
+
+						saophash_insert(elements_tab->hashtab, element, &hashfound);
+					}
+
+					/* Advance bitmap pointer if any. */
+					if (bitmap)
+					{
+						bitmask <<= 1;
+						if (bitmask == 0x100)
+						{
+							bitmap++;
+							bitmask = 1;
+						}
+					}
+				}
+
+				/*
+				 * Remember if we had any nulls so that we know if we need to
+				 * execute non-strict functions with a null lhs value if no
+				 * match is found.
+				 */
+				op->d.hashedscalararrayop.has_nulls = has_nulls;
+
+				/*
+				 * When we have a non-strict equality function, check and
+				 * cache the result from looking up a NULL.  Non-strict
+				 * functions are free to treat a NULL as equal to any other
+				 * value, e.g. a 0 or an empty string.  Here we perform a
+				 * linear search over the array and cache the outcome so that
+				 * we can use that result any time we receive a NULL.
+				 */
+				if (!strictfunc)
+				{
+					bool		null_lhs_result;
+
+					fcinfo->args[0].value = (Datum) 0;
+					fcinfo->args[0].isnull = true;
+
+					ExecEvalArrayCompareInternal(fcinfo, arr, typlen, typbyval,
+												 typalign, true, &result,
+												 &resultnull);
+
+					null_lhs_result = DatumGetBool(result);
+
+					/* invert non-NULL results for NOT IN */
+					if (!resultnull && !inclause)
+						null_lhs_result = !null_lhs_result;
+
+					op->d.hashedscalararrayop.null_lhs_isnull = resultnull;
+					op->d.hashedscalararrayop.null_lhs_result = null_lhs_result;
+				}
 			}
 			else
 			{
-				Datum		element;
-
-				element = fetch_att(s, typbyval, typlen);
-				s = att_addlength_pointer(s, typlen, s);
-				s = (char *) att_nominal_alignby(s, typalignby);
-
-				saophash_insert(elements_tab->hashtab, element, &hashfound);
-			}
-
-			/* Advance bitmap pointer if any. */
-			if (bitmap)
-			{
-				bitmask <<= 1;
-				if (bitmask == 0x100)
-				{
-					bitmap++;
-					bitmask = 1;
-				}
+				/* too short to be worth hashing: linear search each row */
+				elements_tab->hashtab = NULL;
 			}
 		}
 
-		/*
-		 * Remember if we had any nulls so that we know if we need to execute
-		 * non-strict functions with a null lhs value if no match is found.
-		 */
-		op->d.hashedscalararrayop.has_nulls = has_nulls;
+		MemoryContextSwitchTo(oldcontext);
+	}
 
-		/*
-		 * When we have a non-strict equality function, check and cache the
-		 * result from looking up a NULL.  Non-strict functions are free to
-		 * treat a NULL as equal to any other value, e.g. a 0 or an empty
-		 * string.  Here we perform a linear search over the array and cache
-		 * the outcome so that we can use that result any time we receive a
-		 * NULL.
-		 */
-		if (!strictfunc)
-		{
-			bool		null_lhs_result;
+	/* A NULL array yields NULL. */
+	if (elements_tab->cache_isnull)
+	{
+		*op->resnull = true;
+		return;
+	}
 
-			fcinfo->args[0].value = (Datum) 0;
-			fcinfo->args[0].isnull = true;
+	arr = DatumGetArrayTypeP(elements_tab->cached_array);
 
-			ExecEvalArrayCompareInternal(fcinfo, arr, typlen, typbyval,
-										 typalign, true, &result,
-										 &resultnull);
+	/*
+	 * Linear-search mode: the array was too short to be worth a hash table.
+	 * Compare against every element on each call, exactly as the non-hashed
+	 * ExecEvalScalarArrayOp() would.
+	 */
+	if (elements_tab->hashtab == NULL)
+	{
+		ExecEvalArrayCompareInternal(fcinfo, arr,
+									 elements_tab->typlen,
+									 elements_tab->typbyval,
+									 elements_tab->typalign,
+									 true, &result, &resultnull);
 
-			null_lhs_result = DatumGetBool(result);
+		/* ExecEvalArrayCompareInternal computes ANY; invert for NOT IN */
+		if (!inclause && !resultnull)
+			result = BoolGetDatum(!DatumGetBool(result));
 
-			/* invert non-NULL results for NOT IN */
-			if (!resultnull && !inclause)
-				null_lhs_result = !null_lhs_result;
-
-			op->d.hashedscalararrayop.null_lhs_isnull = resultnull;
-			op->d.hashedscalararrayop.null_lhs_result = null_lhs_result;
-		}
+		*op->resvalue = result;
+		*op->resnull = resultnull;
+		return;
 	}
 
 	/*
@@ -4461,7 +4561,7 @@ ExecEvalHashedScalarArrayOp(ExprState *state, ExprEvalStep *op, ExprContext *eco
 			fcinfo->args[1].value = (Datum) 0;
 			fcinfo->args[1].isnull = true;
 
-			result = op->d.hashedscalararrayop.finfo->fn_addr(fcinfo);
+			result = fcinfo->flinfo->fn_addr(fcinfo);
 			resultnull = fcinfo->isnull;
 
 			/*

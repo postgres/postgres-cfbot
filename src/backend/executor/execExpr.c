@@ -1320,34 +1320,48 @@ ExecInitExprRec(Expr *node, ExprState *state,
 										 opexpr->inputcollid, NULL, NULL);
 
 				/*
-				 * If hashfuncid is set, we create a EEOP_HASHED_SCALARARRAYOP
-				 * step instead of a EEOP_SCALARARRAYOP.  This provides much
-				 * faster lookup performance than the normal linear search
-				 * when the number of items in the array is anything but very
-				 * small.
+				 * A valid hashfuncid means use EEOP_HASHED_SCALARARRAYOP,
+				 * which hash-probes the array instead of scanning it.  A
+				 * non-Const array is only safe to hash inside a real
+				 * execution, so for a standalone ExprState (a reused PL/pgSQL
+				 * "simple expression") fall back to the linear
+				 * EEOP_SCALARARRAYOP.
 				 */
-				if (OidIsValid(opexpr->hashfuncid))
+				if (OidIsValid(opexpr->hashfuncid) &&
+					(IsA(arrayarg, Const) || state->parent != NULL))
 				{
 					/* Evaluate scalar directly into left function argument */
 					ExecInitExprRec(scalararg, state,
 									&fcinfo->args[0].value, &fcinfo->args[0].isnull);
 
-					/*
-					 * Evaluate array argument into our return value.  There's
-					 * no danger in that, because the return value is
-					 * guaranteed to be overwritten by
-					 * EEOP_HASHED_SCALARARRAYOP, and will not be passed to
-					 * any other expression.
-					 */
-					ExecInitExprRec(arrayarg, state, resv, resnull);
-
-					/* And perform the operation */
 					scratch.opcode = EEOP_HASHED_SCALARARRAYOP;
 					scratch.d.hashedscalararrayop.inclause = opexpr->useOr;
-					scratch.d.hashedscalararrayop.finfo = finfo;
 					scratch.d.hashedscalararrayop.fcinfo_data = fcinfo;
 					scratch.d.hashedscalararrayop.saop = opexpr;
 
+					if (IsA(arrayarg, Const))
+					{
+						/*
+						 * Evaluate the Const array into our return value.
+						 * There's no danger in that: it is overwritten by
+						 * EEOP_HASHED_SCALARARRAYOP and not passed to any
+						 * other expression.
+						 */
+						ExecInitExprRec(arrayarg, state, resv, resnull);
+						scratch.d.hashedscalararrayop.array_expr = NULL;
+					}
+					else
+					{
+						/*
+						 * A non-Const array that the planner proved is fixed
+						 * for one execution (see
+						 * convert_saop_to_hashed_saop). Compile it as an
+						 * independent sub-expression; the hashed step
+						 * evaluates it once and caches the result.
+						 */
+						scratch.d.hashedscalararrayop.array_expr =
+							ExecInitExpr((Expr *) arrayarg, state->parent);
+					}
 
 					ExprEvalPushStep(state, &scratch);
 				}
