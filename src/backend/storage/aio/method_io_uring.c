@@ -436,9 +436,9 @@ pgaio_uring_submit(uint16 num_staged_ios, PgAioHandle **staged_ios)
 	{
 		int			ret;
 
-		pgstat_report_wait_start(WAIT_EVENT_AIO_IO_URING_SUBMIT);
+		pgstat_report_wait_start_timed(WAIT_EVENT_AIO_IO_URING_SUBMIT);
 		ret = io_uring_submit(uring_instance);
-		pgstat_report_wait_end();
+		pgstat_report_wait_end_timed();
 
 		if (ret == -EINTR)
 		{
@@ -609,9 +609,9 @@ pgaio_uring_wait_one(PgAioHandle *ioh, uint64 ref_generation)
 			struct io_uring_cqe *cqes;
 
 			/* need to wait in the kernel */
-			pgstat_report_wait_start(WAIT_EVENT_AIO_IO_URING_EXECUTION);
+			pgstat_report_wait_start_timed(WAIT_EVENT_AIO_IO_URING_EXECUTION);
 			ret = io_uring_wait_cqes(&owner_context->io_uring_ring, &cqes, 1, NULL, NULL);
-			pgstat_report_wait_end();
+			pgstat_report_wait_end_timed();
 
 			if (ret == -EINTR)
 			{

@@ -2189,9 +2189,9 @@ basebackup_read_file(int fd, char *buf, size_t nbytes, off_t offset,
 {
 	ssize_t		rc;
 
-	pgstat_report_wait_start(WAIT_EVENT_BASEBACKUP_READ);
+	pgstat_report_wait_start_timed(WAIT_EVENT_BASEBACKUP_READ);
 	rc = pg_pread(fd, buf, nbytes, offset);
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	if (rc < 0)
 		ereport(ERROR,

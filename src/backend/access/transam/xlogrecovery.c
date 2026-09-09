@@ -3395,14 +3395,14 @@ retry:
 	/* Measure I/O timing when reading segment */
 	io_start = pgstat_prepare_io_time(track_wal_io_timing);
 
-	pgstat_report_wait_start(WAIT_EVENT_WAL_READ);
+	pgstat_report_wait_start_timed(WAIT_EVENT_WAL_READ);
 	r = pg_pread(readFile, readBuf, XLOG_BLCKSZ, (pgoff_t) readOff);
 	if (r != XLOG_BLCKSZ)
 	{
 		char		fname[MAXFNAMELEN];
 		int			save_errno = errno;
 
-		pgstat_report_wait_end();
+		pgstat_report_wait_end_timed();
 
 		/* Count I/O stats only for successful short reads */
 		if (r > 0)
@@ -3427,7 +3427,7 @@ retry:
 							readOff, r, (Size) XLOG_BLCKSZ)));
 		goto next_record_is_invalid;
 	}
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_NORMAL, IOOP_READ,
 							io_start, 1, r);
