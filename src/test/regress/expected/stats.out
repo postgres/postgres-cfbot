@@ -1295,6 +1295,16 @@ SELECT (hits + misses) > :vfd_accesses_before FROM pg_stat_vfdcache;
  t
 (1 row)
 
+-- Test that VFD cache footprint metrics are non-negative and consistent
+SELECT open_entries <= allocated_entries,
+       allocated_entries > 0,
+       cache_bytes > 0
+FROM pg_stat_vfdcache;
+ ?column? | ?column? | ?column? 
+----------+----------+----------
+ t        | t        | t
+(1 row)
+
 -- Test error case for reset_shared with unknown stats type
 SELECT pg_stat_reset_shared('unknown');
 ERROR:  unrecognized reset target: "unknown"
