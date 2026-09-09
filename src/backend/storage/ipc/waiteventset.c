@@ -1061,7 +1061,7 @@ WaitEventSetWait(WaitEventSet *set, long timeout,
 	else
 		INSTR_TIME_SET_ZERO(start_time);
 
-	pgstat_report_wait_start(wait_event_info);
+	pgstat_report_wait_start_timed(wait_event_info);
 
 #ifndef WIN32
 	waiting = true;
@@ -1164,7 +1164,7 @@ WaitEventSetWait(WaitEventSet *set, long timeout,
 	waiting = false;
 #endif
 
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	return returned_events;
 }
