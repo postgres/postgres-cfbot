@@ -108,4 +108,47 @@
 #define AUTH_REQ_SASL_FIN  12	/* Final SASL message */
 #define AUTH_REQ_MAX	   AUTH_REQ_SASL_FIN	/* maximum AUTH_REQ_* value */
 
+/*
+ * Bind message extension flags for _pq_.cursor.
+ *
+ * These values are part of the wire protocol and must not change.
+ * Both the server and libpq need these definitions, so they live here
+ * rather than in libpq-fe.h alone.
+ */
+#define PQ_BIND_CURSOR_SCROLL		0x0001	/* SCROLL */
+#define PQ_BIND_CURSOR_NO_SCROLL	0x0002	/* NO SCROLL */
+#define PQ_BIND_CURSOR_HOLD			0x0004	/* WITH HOLD */
+#define PQ_BIND_CURSOR_VALID_FLAGS	(PQ_BIND_CURSOR_SCROLL | \
+									 PQ_BIND_CURSOR_NO_SCROLL | \
+									 PQ_BIND_CURSOR_HOLD)
+
+/*
+ * Execute message extension flags for _pq_.cursor.
+ *
+ * The low three bits select a fetch direction, with the same meaning as the
+ * identically named direction of the SQL FETCH command.  PQ_FETCH_DEFAULT
+ * asks for no fetch behavior at all: the row-count field of the Execute
+ * message governs, exactly as it does without the extension.
+ *
+ * These values are part of the wire protocol and must not change.  They are
+ * deliberately independent of the server's FetchDirection enum (parsenodes.h)
+ * so that it can be reordered or extended freely.
+ */
+#define PQ_FETCH_DEFAULT			0x0000	/* honor the row-count field */
+#define PQ_FETCH_FORWARD			0x0001	/* FETCH FORWARD count */
+#define PQ_FETCH_BACKWARD			0x0002	/* FETCH BACKWARD count */
+#define PQ_FETCH_ABSOLUTE			0x0003	/* FETCH ABSOLUTE count */
+#define PQ_FETCH_RELATIVE			0x0004	/* FETCH RELATIVE count */
+#define PQ_FETCH_DIRECTION_MASK		0x0007
+#define PQ_FETCH_MOVE				0x0008	/* reposition only, no rows */
+#define PQ_FETCH_VALID_FLAGS		(PQ_FETCH_DIRECTION_MASK | \
+									 PQ_FETCH_MOVE)
+
+/*
+ * Portable spelling of "all remaining rows" for the fetch count.  The
+ * server-internal FETCH_ALL is LONG_MAX, which is platform dependent, so the
+ * wire protocol reserves the largest Int64 instead.
+ */
+#define PQ_FETCH_ALL				INT64_MAX
+
 #endif							/* PROTOCOL_H */

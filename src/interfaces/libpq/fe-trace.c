@@ -158,6 +158,19 @@ pqTraceOutputInt32(FILE *pfdebug, const char *data, int *cursor, bool suppress)
 }
 
 /*
+ *   pqTraceOutputInt64: output an 8-byte integer message to the log
+ */
+static void
+pqTraceOutputInt64(FILE *pfdebug, const char *data, int *cursor)
+{
+	uint64		tmp;
+
+	memcpy(&tmp, data + *cursor, 8);
+	*cursor += 8;
+	fprintf(pfdebug, " " INT64_FORMAT, (int64) pg_ntoh64(tmp));
+}
+
+/*
  *   pqTraceOutputString: output a string message to the log
  *
  * If 'suppress' is true, print a literal "SSSS" instead of the actual string.
@@ -237,7 +250,7 @@ pqTraceOutput_NotificationResponse(FILE *f, const char *message, int *cursor, bo
 }
 
 static void
-pqTraceOutput_Bind(FILE *f, const char *message, int *cursor)
+pqTraceOutput_Bind(FILE *f, const char *message, int *cursor, int length)
 {
 	int			nparams;
 
@@ -264,6 +277,10 @@ pqTraceOutput_Bind(FILE *f, const char *message, int *cursor)
 	nparams = pqTraceOutputInt16(f, message, cursor);
 	for (int i = 0; i < nparams; i++)
 		pqTraceOutputInt16(f, message, cursor);
+
+	/* Cursor options, present only when _pq_.cursor is negotiated */
+	if (*cursor < length + 1)
+		pqTraceOutputInt32(f, message, cursor, false);
 }
 
 static void
@@ -349,11 +366,19 @@ pqTraceOutput_NoticeResponse(FILE *f, const char *message, int *cursor, bool reg
 }
 
 static void
-pqTraceOutput_Execute(FILE *f, const char *message, int *cursor, bool regress)
+pqTraceOutput_Execute(FILE *f, const char *message, int *cursor, int length,
+					  bool regress)
 {
 	fprintf(f, "Execute\t");
 	pqTraceOutputString(f, message, cursor, false);
 	pqTraceOutputInt32(f, message, cursor, false);
+
+	/* Fetch flags and count, present only when _pq_.cursor is negotiated */
+	if (*cursor < length + 1)
+	{
+		pqTraceOutputInt32(f, message, cursor, false);
+		pqTraceOutputInt64(f, message, cursor);
+	}
 }
 
 static void
@@ -674,7 +699,7 @@ pqTraceOutputMessage(PGconn *conn, const char *message, bool toServer)
 			pqTraceOutput_NotificationResponse(conn->Pfdebug, message, &logCursor, regress);
 			break;
 		case PqMsg_Bind:
-			pqTraceOutput_Bind(conn->Pfdebug, message, &logCursor);
+			pqTraceOutput_Bind(conn->Pfdebug, message, &logCursor, length);
 			break;
 		case PqMsg_CopyDone:
 			fprintf(conn->Pfdebug, "CopyDone");
@@ -704,7 +729,8 @@ pqTraceOutputMessage(PGconn *conn, const char *message, bool toServer)
 			/* Execute(F) and ErrorResponse(B) use the same identifier. */
 			Assert(PqMsg_Execute == PqMsg_ErrorResponse);
 			if (toServer)
-				pqTraceOutput_Execute(conn->Pfdebug, message, &logCursor, regress);
+				pqTraceOutput_Execute(conn->Pfdebug, message, &logCursor,
+									  length, regress);
 			else
 				pqTraceOutput_ErrorResponse(conn->Pfdebug, message, &logCursor, regress);
 			break;

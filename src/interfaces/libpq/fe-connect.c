@@ -420,6 +420,10 @@ static const internalPQconninfoOption PQconninfoOptions[] = {
 		"SSL-Key-Log-File", "D", 64,
 	offsetof(struct pg_conn, sslkeylogfile)},
 
+	{"protocol_cursor", NULL, "0", NULL,
+		"Protocol-Cursor", "", 1,
+	offsetof(struct pg_conn, protocol_cursor)},
+
 	/* Terminating entry --- MUST BE LAST */
 	{NULL, NULL, NULL, NULL,
 	NULL, NULL, 0}
@@ -3738,6 +3742,13 @@ keep_going:						/* We will come back to here until there is
 				 * We have now established encryption, or we are happy to
 				 * proceed without.
 				 */
+
+				/*
+				 * Set protocol_cursor_enabled based on the connection
+				 * parameter.
+				 */
+				if (conn->protocol_cursor && conn->protocol_cursor[0] == '1')
+					conn->protocol_cursor_enabled = true;
 
 				/* Build the startup packet. */
 				startpacket = pqBuildStartupPacket3(conn, &packetlen,
@@ -7818,6 +7829,12 @@ PQconnectionUsedGSSAPI(const PGconn *conn)
 		return true;
 	else
 		return false;
+}
+
+int
+PQprotocolCursorEnabled(const PGconn *conn)
+{
+	return conn != NULL && conn->protocol_cursor_enabled;
 }
 
 int

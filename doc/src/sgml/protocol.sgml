@@ -335,9 +335,54 @@
 
      <tbody>
       <row>
-       <entry namest="last" align="center" valign="middle">
-        <emphasis>(No supported protocol extensions are currently defined.)</emphasis>
-       </entry>
+      <entry><literal>_pq_.cursor</literal></entry>
+      <entry><literal>true</literal></entry>
+      <entry>PostgreSQL 20 and later</entry>
+      <entry>
+       <para>
+        Enables cursor options in the Bind message and fetching in the Execute
+        message.
+       </para>
+       <para>
+        When set to <literal>true</literal>, the Bind message includes a
+        mandatory Int32 extension field after the result-column format codes.
+        The following flag values are defined:
+        <simplelist type="vert">
+         <member><literal>0x0001</literal> &mdash; SCROLL</member>
+         <member><literal>0x0002</literal> &mdash; NO SCROLL</member>
+         <member><literal>0x0004</literal> &mdash; WITH HOLD</member>
+        </simplelist>
+        SCROLL and NO SCROLL are mutually exclusive.
+        WITH HOLD is not permitted on unnamed portals.
+        All other bits are reserved and must be zero.
+        A portal is scrollable only if SCROLL is requested, so NO SCROLL is
+        accepted but never necessary.  A value of 0 requests no cursor options
+        at all, and creates exactly the portal that a Bind message without this
+        extension would create.
+       </para>
+       <para>
+        The Execute message likewise includes a mandatory Int32 field of fetch
+        flags followed by a mandatory Int64 row count.  The low three bits of
+        the flags select a fetch direction:
+        <simplelist type="vert">
+         <member><literal>0x0000</literal> &mdash; no fetch direction</member>
+         <member><literal>0x0001</literal> &mdash; FORWARD</member>
+         <member><literal>0x0002</literal> &mdash; BACKWARD</member>
+         <member><literal>0x0003</literal> &mdash; ABSOLUTE</member>
+         <member><literal>0x0004</literal> &mdash; RELATIVE</member>
+        </simplelist>
+        and <literal>0x0008</literal> additionally requests that the rows be
+        discarded rather than returned, as
+        <link linkend="sql-move"><command>MOVE</command></link> does.  All
+        other bits are reserved and must be zero.  With a direction, the portal
+        is fetched from just as the
+        <link linkend="sql-fetch"><command>FETCH</command></link> command of
+        that direction would fetch from a cursor, and the maximum row count of
+        the Execute message must be zero.  With no direction, both the flags
+        and the row count must be zero, and the maximum row count governs as
+        usual.
+       </para>
+      </entry>
       </row>
      </tbody>
     </tgroup>
@@ -1090,6 +1135,9 @@ SELCT 1/0;<!-- this typo is intentional -->
     pass NULL values for them in the Bind message.)
     Bind also specifies the format to use for any data returned
     by the query; the format can be specified overall, or per-column.
+    If the <literal>_pq_.cursor</literal> protocol option is negotiated,
+    Bind includes a mandatory Int32 field with cursor options to control
+    portal behavior, such as creating scrollable or holdable cursors.
     The response is either BindComplete or ErrorResponse.
    </para>
 
@@ -1136,6 +1184,15 @@ SELCT 1/0;<!-- this typo is intentional -->
     responses to Execute are the same as those described above for queries
     issued via simple query protocol, except that Execute doesn't cause
     ReadyForQuery or RowDescription to be issued.
+   </para>
+
+   <para>
+    If the <literal>_pq_.cursor</literal> protocol option is negotiated,
+    Execute includes a mandatory fetch direction and row count, which allow a
+    portal created with the SCROLL cursor option to be fetched from in any
+    direction, as the <link linkend="sql-fetch"><command>FETCH</command></link>
+    command does.  Such an Execute always runs to completion and so never
+    sends PortalSuspended.
    </para>
 
    <para>
@@ -4400,6 +4457,18 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
         </para>
        </listitem>
       </varlistentry>
+
+      <varlistentry>
+       <term>Int32 (present when <literal>_pq_.cursor</literal> is negotiated)</term>
+       <listitem>
+        <para>
+         Cursor option flags.  See the
+         <literal>_pq_.cursor</literal> entry in
+         <xref linkend="protocol-extensions-table"/> for defined values.
+         A value of 0 means no cursor options are requested.
+        </para>
+       </listitem>
+      </varlistentry>
      </variablelist>
     </listitem>
    </varlistentry>
@@ -5153,7 +5222,35 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
         <para>
          Maximum number of rows to return, if portal contains
          a query that returns rows (ignored otherwise).  Zero
-         denotes <quote>no limit</quote>.
+         denotes <quote>no limit</quote>.  This field must be zero if a
+         fetch direction other than <literal>0x0000</literal> is given
+         below.
+        </para>
+       </listitem>
+      </varlistentry>
+
+      <varlistentry>
+       <term>Int32 (present when <literal>_pq_.cursor</literal> is negotiated)</term>
+       <listitem>
+        <para>
+         Fetch flags.  See the <literal>_pq_.cursor</literal> entry in
+         <xref linkend="protocol-extensions-table"/> for defined values.
+         A value of 0 means that no fetch behavior is requested, and the
+         maximum row count above governs, exactly as it does without the
+         extension.
+        </para>
+       </listitem>
+      </varlistentry>
+
+      <varlistentry>
+       <term>Int64 (present when <literal>_pq_.cursor</literal> is negotiated)</term>
+       <listitem>
+        <para>
+         Number of rows to fetch, interpreted as the count of the
+         <link linkend="sql-fetch"><command>FETCH</command></link> command
+         of the same direction would be.  The largest positive value
+         (<literal>0x7FFFFFFFFFFFFFFF</literal>) means <literal>ALL</literal>.
+         This field must be zero if the fetch flags are 0.
         </para>
        </listitem>
       </varlistentry>

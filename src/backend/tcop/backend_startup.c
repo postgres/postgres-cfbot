@@ -812,11 +812,24 @@ retry:
 			{
 				/*
 				 * Any option beginning with _pq_. is reserved for use as a
-				 * protocol-level option, but at present no such options are
-				 * defined.
+				 * protocol-level option.
 				 */
-				unrecognized_protocol_options =
-					lappend(unrecognized_protocol_options, pstrdup(nameptr));
+				if (strcmp(nameptr, "_pq_.cursor") == 0)
+				{
+					/* Enable cursor options support via Bind message */
+					if (!parse_bool(valptr, &port->protocol_cursor_enabled))
+						ereport(FATAL,
+								(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+								 errmsg("invalid value for parameter \"%s\": \"%s\"",
+										"_pq_.cursor",
+										valptr)));
+				}
+				else
+				{
+					/* Unrecognized protocol option */
+					unrecognized_protocol_options =
+						lappend(unrecognized_protocol_options, pstrdup(nameptr));
+				}
 			}
 			else
 			{

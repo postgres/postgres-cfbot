@@ -50,10 +50,20 @@ for my $testname (@tests)
 	}
 
 	# Execute the test using the latest protocol version.
+	# cursor_* tests need the protocol_cursor connection parameter.
+	my $connstr = $node->connstr('postgres') . " max_protocol_version=latest";
+	if ($testname =~ /_without_extension$/)
+	{
+		$connstr = $node->connstr('postgres') . " protocol_cursor=0";
+	}
+	elsif ($testname =~ /^cursor_/)
+	{
+		$connstr .= " protocol_cursor=1";
+	}
+
 	$node->command_ok(
 		[
-			'libpq_pipeline', @extraargs, $testname,
-			$node->connstr('postgres') . " max_protocol_version=latest"
+			'libpq_pipeline', @extraargs, $testname, $connstr
 		],
 		"libpq_pipeline $testname");
 
