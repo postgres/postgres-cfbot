@@ -1,0 +1,39 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1_begin s1_lock s1_alter_owner s2_set_role s2_alter s1_commit s2_reset_role
+step s1_begin: BEGIN;
+step s1_lock: COMMENT ON SUBSCRIPTION regress_sub_owner_lock IS 'locked';
+step s1_alter_owner: ALTER SUBSCRIPTION regress_sub_owner_lock OWNER TO regress_sub_owner2;
+step s2_set_role: SET ROLE regress_sub_owner1;
+step s2_alter: ALTER SUBSCRIPTION regress_sub_owner_lock SET (synchronous_commit = local); <waiting ...>
+step s1_commit: COMMIT;
+step s2_alter: <... completed>
+ERROR:  must be owner of subscription regress_sub_owner_lock
+step s2_reset_role: RESET ROLE;
+
+starting permutation: s1_begin s1_lock s1_alter_owner s2_set_role s2_drop s1_commit s2_reset_role
+step s1_begin: BEGIN;
+step s1_lock: COMMENT ON SUBSCRIPTION regress_sub_owner_lock IS 'locked';
+step s1_alter_owner: ALTER SUBSCRIPTION regress_sub_owner_lock OWNER TO regress_sub_owner2;
+step s2_set_role: SET ROLE regress_sub_owner1;
+step s2_drop: DROP SUBSCRIPTION regress_sub_owner_lock; <waiting ...>
+step s1_commit: COMMIT;
+step s2_drop: <... completed>
+ERROR:  must be owner of subscription regress_sub_owner_lock
+step s2_reset_role: RESET ROLE;
+
+starting permutation: s1_begin s1_drop s2_drop s1_commit
+step s1_begin: BEGIN;
+step s1_drop: DROP SUBSCRIPTION regress_sub_owner_lock;
+step s2_drop: DROP SUBSCRIPTION regress_sub_owner_lock; <waiting ...>
+step s1_commit: COMMIT;
+step s2_drop: <... completed>
+ERROR:  subscription "regress_sub_owner_lock" does not exist
+
+starting permutation: s1_begin s1_drop s2_drop_if_exists s1_commit
+step s1_begin: BEGIN;
+step s1_drop: DROP SUBSCRIPTION regress_sub_owner_lock;
+step s2_drop_if_exists: DROP SUBSCRIPTION IF EXISTS regress_sub_owner_lock; <waiting ...>
+step s1_commit: COMMIT;
+s2: NOTICE:  subscription "regress_sub_owner_lock" does not exist, skipping
+step s2_drop_if_exists: <... completed>

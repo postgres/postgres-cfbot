@@ -39,6 +39,7 @@
 #include "parser/parse_relation.h"
 #include "rewrite/rewriteHandler.h"
 #include "storage/lmgr.h"
+#include "storage/sinval.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/inval.h"
@@ -1662,54 +1663,92 @@ AlterPublication(ParseState *pstate, AlterPublicationStmt *stmt)
 
 	rel = table_open(PublicationRelationId, RowExclusiveLock);
 
-	tup = SearchSysCacheCopy1(PUBLICATIONNAME,
-							  CStringGetDatum(stmt->pubname));
-
-	if (!HeapTupleIsValid(tup))
-		ereport(ERROR,
-				(errcode(ERRCODE_UNDEFINED_OBJECT),
-				 errmsg("publication \"%s\" does not exist",
-						stmt->pubname)));
-
-	pubform = (Form_pg_publication) GETSTRUCT(tup);
-
-	/* must be owner */
-	if (!object_ownercheck(PublicationRelationId, pubform->oid, GetUserId()))
-		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_PUBLICATION,
-					   stmt->pubname);
-
 	if (stmt->options)
+	{
+		tup = SearchSysCacheCopy1(PUBLICATIONNAME,
+								  CStringGetDatum(stmt->pubname));
+
+		if (!HeapTupleIsValid(tup))
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_OBJECT),
+					 errmsg("publication \"%s\" does not exist",
+							stmt->pubname)));
+
+		pubform = (Form_pg_publication) GETSTRUCT(tup);
+
+		/* must be owner */
+		if (!object_ownercheck(PublicationRelationId, pubform->oid,
+							   GetUserId()))
+			aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_PUBLICATION,
+						   stmt->pubname);
+
 		AlterPublicationOptions(pstate, stmt, rel, tup);
+	}
 	else
 	{
 		List	   *relations = NIL;
 		List	   *exceptrelations = NIL;
 		List	   *schemaidlist = NIL;
-		Oid			pubid = pubform->oid;
+		Oid			pubid;
+
+		/*
+		 * Lock the publication so nobody else can do anything with it.
+		 *
+		 * Like RangeVarGetRelidExtended() does for relations, we resolve the
+		 * name, check ownership, and lock inside a loop. If invalidation
+		 * messages arrive (indicating concurrent DDL), we retry. We keep the
+		 * lock held across retries and only release it if the name resolves
+		 * to a different OID on the next iteration.
+		 */
+		{
+			Oid			oldPubId = InvalidOid;
+			bool		retry = false;
+
+			for (;;)
+			{
+				uint64		inval_count = SharedInvalidMessageCounter;
+
+				tup = SearchSysCacheCopy1(PUBLICATIONNAME,
+										  CStringGetDatum(stmt->pubname));
+
+				if (!HeapTupleIsValid(tup))
+					ereport(ERROR,
+							(errcode(ERRCODE_UNDEFINED_OBJECT),
+							 errmsg("publication \"%s\" does not exist",
+									stmt->pubname)));
+
+				pubform = (Form_pg_publication) GETSTRUCT(tup);
+				pubid = pubform->oid;
+
+				if (!object_ownercheck(PublicationRelationId, pubid,
+									   GetUserId()))
+					aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_PUBLICATION,
+								   stmt->pubname);
+
+				if (retry)
+				{
+					if (pubid == oldPubId)
+						break;
+					UnlockDatabaseObject(PublicationRelationId, oldPubId, 0,
+										 AccessExclusiveLock);
+				}
+
+				LockDatabaseObject(PublicationRelationId, pubid, 0,
+								   AccessExclusiveLock);
+
+				if (inval_count == SharedInvalidMessageCounter)
+					break;
+
+				retry = true;
+				oldPubId = pubid;
+				heap_freetuple(tup);
+			}
+		}
 
 		ObjectsInPublicationToOids(stmt->pubobjects, pstate, &relations,
 								   &exceptrelations, &schemaidlist);
 
 		CheckAlterPublication(stmt, tup, relations, schemaidlist);
-
-		heap_freetuple(tup);
-
-		/* Lock the publication so nobody else can do anything with it. */
-		LockDatabaseObject(PublicationRelationId, pubid, 0,
-						   AccessExclusiveLock);
-
-		/*
-		 * It is possible that by the time we acquire the lock on publication,
-		 * concurrent DDL has removed it. We can test this by checking the
-		 * existence of publication. We get the tuple again to avoid the risk
-		 * of any publication option getting changed.
-		 */
-		tup = SearchSysCacheCopy1(PUBLICATIONOID, ObjectIdGetDatum(pubid));
-		if (!HeapTupleIsValid(tup))
-			ereport(ERROR,
-					errcode(ERRCODE_UNDEFINED_OBJECT),
-					errmsg("publication \"%s\" does not exist",
-						   stmt->pubname));
 
 		relations = list_concat(relations, exceptrelations);
 		AlterPublicationTables(stmt, tup, relations, pstate->p_sourcetext,
