@@ -211,6 +211,8 @@ extern int	pg_fsync(int fd);
 extern int	pg_fsync_no_writethrough(int fd);
 extern int	pg_fsync_writethrough(int fd);
 extern int	pg_fdatasync(int fd);
+extern int	pg_fsync_unconditional(int fd, bool writethrough);
+extern int	pg_fdatasync_unconditional(int fd);
 extern bool pg_file_exists(const char *name);
 extern void pg_flush_data(int fd, pgoff_t offset, pgoff_t nbytes);
 extern int	pg_truncate(const char *path, pgoff_t length);
