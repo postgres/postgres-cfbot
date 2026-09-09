@@ -133,9 +133,9 @@ readTimeLineHistory(TimeLineID targetTLI)
 		uint32		switchpoint_lo;
 		int			nfields;
 
-		pgstat_report_wait_start(WAIT_EVENT_TIMELINE_HISTORY_READ);
+		pgstat_report_wait_start_timed(WAIT_EVENT_TIMELINE_HISTORY_READ);
 		res = fgets(fline, sizeof(fline), fd);
-		pgstat_report_wait_end();
+		pgstat_report_wait_end_timed();
 		if (res == NULL)
 		{
 			if (ferror(fd))
@@ -354,9 +354,9 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
 		for (;;)
 		{
 			errno = 0;
-			pgstat_report_wait_start(WAIT_EVENT_TIMELINE_HISTORY_READ);
+			pgstat_report_wait_start_timed(WAIT_EVENT_TIMELINE_HISTORY_READ);
 			nbytes = read(srcfd, buffer, sizeof(buffer));
-			pgstat_report_wait_end();
+			pgstat_report_wait_end_timed();
 			if (nbytes < 0 || errno != 0)
 				ereport(ERROR,
 						(errcode_for_file_access(),
@@ -364,7 +364,7 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
 			if (nbytes == 0)
 				break;
 			errno = 0;
-			pgstat_report_wait_start(WAIT_EVENT_TIMELINE_HISTORY_WRITE);
+			pgstat_report_wait_start_timed(WAIT_EVENT_TIMELINE_HISTORY_WRITE);
 			if (write(fd, buffer, nbytes) != nbytes)
 			{
 				int			save_errno = errno;
@@ -384,7 +384,7 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
 						(errcode_for_file_access(),
 						 errmsg("could not write to file \"%s\": %m", tmppath)));
 			}
-			pgstat_report_wait_end();
+			pgstat_report_wait_end_timed();
 		}
 
 		if (CloseTransientFile(srcfd) != 0)
@@ -408,7 +408,7 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
 
 	nbytes = strlen(buffer);
 	errno = 0;
-	pgstat_report_wait_start(WAIT_EVENT_TIMELINE_HISTORY_WRITE);
+	pgstat_report_wait_start_timed(WAIT_EVENT_TIMELINE_HISTORY_WRITE);
 	if (write(fd, buffer, nbytes) != nbytes)
 	{
 		int			save_errno = errno;
@@ -424,14 +424,14 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
 				(errcode_for_file_access(),
 				 errmsg("could not write to file \"%s\": %m", tmppath)));
 	}
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
-	pgstat_report_wait_start(WAIT_EVENT_TIMELINE_HISTORY_SYNC);
+	pgstat_report_wait_start_timed(WAIT_EVENT_TIMELINE_HISTORY_SYNC);
 	if (pg_fsync(fd) != 0)
 		ereport(data_sync_elevel(ERROR),
 				(errcode_for_file_access(),
 				 errmsg("could not fsync file \"%s\": %m", tmppath)));
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	if (CloseTransientFile(fd) != 0)
 		ereport(ERROR,
@@ -482,7 +482,7 @@ writeTimeLineHistoryFile(TimeLineID tli, const char *content, size_t size)
 				 errmsg("could not create file \"%s\": %m", tmppath)));
 
 	errno = 0;
-	pgstat_report_wait_start(WAIT_EVENT_TIMELINE_HISTORY_FILE_WRITE);
+	pgstat_report_wait_start_timed(WAIT_EVENT_TIMELINE_HISTORY_FILE_WRITE);
 	if (write(fd, content, size) != size)
 	{
 		int			save_errno = errno;
@@ -498,14 +498,14 @@ writeTimeLineHistoryFile(TimeLineID tli, const char *content, size_t size)
 				(errcode_for_file_access(),
 				 errmsg("could not write to file \"%s\": %m", tmppath)));
 	}
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
-	pgstat_report_wait_start(WAIT_EVENT_TIMELINE_HISTORY_FILE_SYNC);
+	pgstat_report_wait_start_timed(WAIT_EVENT_TIMELINE_HISTORY_FILE_SYNC);
 	if (pg_fsync(fd) != 0)
 		ereport(data_sync_elevel(ERROR),
 				(errcode_for_file_access(),
 				 errmsg("could not fsync file \"%s\": %m", tmppath)));
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	if (CloseTransientFile(fd) != 0)
 		ereport(ERROR,
