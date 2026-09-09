@@ -147,13 +147,13 @@ transformGraphTablePropertyRef(ParseState *pstate, ColumnRef *cref)
 			gpr->collation = pgpform->pgpcollation;
 
 			/*
-			 * A property reference made outside any element pattern
-			 * (COLUMNS clause or graph-level WHERE) to a variable bound to a
+			 * A property reference made outside any element pattern (COLUMNS
+			 * clause or graph-level WHERE) to a variable bound to a
 			 * quantified (variable-length) edge denotes the list of the
 			 * property's values over every edge traversed along the matched
 			 * path.  Represent that as an array of the property's type.
-			 * Inside the edge's own [e WHERE ...] clause cur_gep is set and
-			 * e refers to the single candidate edge, so no array is built.
+			 * Inside the edge's own [e WHERE ...] clause cur_gep is set and e
+			 * refers to the single candidate edge, so no array is built.
 			 */
 			if (gpstate->cur_gep == NULL)
 			{

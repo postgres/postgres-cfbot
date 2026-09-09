@@ -1911,6 +1911,21 @@ typedef struct SubqueryScanState
 } SubqueryScanState;
 
 /* ----------------
+ *	 GraphScanState information
+ *
+ *		GraphScanState is used for scanning a graph pattern seek (a single
+ *		quantified hop) in the range table.  It keeps the inner (1-hop) plan
+ *		as a nested child so that it can be displayed and (eventually)
+ *		executed.
+ * ----------------
+ */
+typedef struct GraphScanState
+{
+	ScanState	ss;				/* its first field is NodeTag */
+	PlanState  *inner_plan;		/* the inner (single quantified hop) plan */
+}			GraphScanState;
+
+/* ----------------
  *	 FunctionScanState information
  *
  *		Function nodes are used to scan the results of a

@@ -552,6 +552,71 @@ typedef struct SeqScan
 } SeqScan;
 
 /* ----------------
+ *		graph scan node
+ *
+ * A GraphScan evaluates a single quantified (variable-length) hop of a graph
+ * pattern with a depth-first search.  It is planned like any other scan and
+ * acts as "just another scan" in the query; its lefttree/seed rows are
+ * provided by the surrounding join (the scan is a parameterized inner), and
+ * its "righttree" (inner_plan) is the parameterized 1-hop expansion over the
+ * edge element tables matching the hop's edge pattern.
+ *
+ * scanrelid refers to an internal RTE_GRAPH_TABLE entry describing the hop.
+ * ----------------
+ */
+
+/* Direction in which a hop traverses its edges. */
+typedef enum EdgeDirection
+{
+	GRAPH_DIR_OUTGOING = 0,		/* -(e)-> or -> */
+	GRAPH_DIR_INCOMING,			/* <-(e)- or <- */
+	GRAPH_DIR_UNDIRECTED		/* -(e)- */
+}			EdgeDirection;
+
+typedef struct GraphScan
+{
+	Scan		scan;
+
+	/*
+	 * Depth of the quantified hop: min_depth/max_depth, taken verbatim from
+	 * the edge quantifier (max_depth -1 = unbounded).
+	 */
+	int			min_depth;
+	int			max_depth;
+
+	/* Direction of the hop. */
+	EdgeDirection direction;
+
+	/*
+	 * The ghost seed (pd) and ghost terminal (td) key columns of the internal
+	 * RTE, as 1-based output attnos of this scan.  The seed drives the DFS;
+	 * the terminal keys feed the relational terminal join above this node.
+	 */
+	List	   *seed_key_cols;	/* List of AttrNumber */
+	List	   *terminal_key_cols;	/* List of AttrNumber */
+
+	/* Output attnos of the VLE edge-list (array) columns, if any. */
+	List	   *edge_list_cols; /* List of AttrNumber */
+
+	/*
+	 * Edge element OIDs behind the inner 1-hop expansion (in inner_plan
+	 * order), used by the executor to interpret rows of the expansion.
+	 */
+	List	   *edge_element_oids;	/* List of Oid */
+
+	/*
+	 * The parameterized 1-hop expansion plan (the righttree).  It was planned
+	 * out-of-band with rel->subroot (see allpaths.c), whose rtable is spliced
+	 * into the global rtable at setrefs time.  The enclosing nestloop
+	 * supplies the current-vertex value as a nestloop param.
+	 */
+	Plan	   *inner_plan;
+
+	/* PARAM_EXEC id of the current-vertex parameter for inner rescans. */
+	int			vid_param;
+}			GraphScan;
+
+/* ----------------
  *		table sample scan node
  * ----------------
  */

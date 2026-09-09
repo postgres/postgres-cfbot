@@ -2197,6 +2197,49 @@ typedef struct SubqueryScanPath
 } SubqueryScanPath;
 
 /*
+ * GraphPath represents a scan of an internal RTE_GRAPH_TABLE describing a
+ * single quantified (variable-length) hop of a graph pattern.  It plans to a
+ * GraphScan node: a parameterized inner scan (seeds come from the outer
+ * join) whose inner 1-hop expansion is planned out-of-band into inner_plan.
+ */
+struct Plan;
+
+typedef struct GraphPath
+{
+	Path		path;
+
+	/* Depth of the quantified hop; max_depth -1 means unbounded. */
+	int			min_depth;
+	int			max_depth;
+
+	/*
+	 * Direction of the hop (EdgeDirection, kept as int to avoid depending on
+	 * plannodes.h from here).
+	 */
+	int			direction;
+
+	/* Seed/terminal/edge-list output attnos (see GraphScan). */
+	List	   *seed_key_cols;
+	List	   *terminal_key_cols;
+	List	   *edge_list_cols;
+
+	/* Edge element OIDs behind the inner expansion. */
+	List	   *edge_element_oids;
+
+	/* The parameterized 1-hop expansion plan. */
+	struct Plan *inner_plan;
+
+	/*
+	 * PlannerParamItems that the inner plan wants from the enclosing nestloop
+	 * (the current vertex seed); used to build nestloop params.
+	 */
+	List	   *subplan_params;
+
+	/* PARAM_EXEC id of the current-vertex parameter. */
+	int			vid_param;
+}			GraphPath;
+
+/*
  * ForeignPath represents a potential scan of a foreign table, foreign join
  * or foreign upper-relation.
  *

@@ -89,6 +89,7 @@ static void show_qual(List *qual, const char *qlabel,
 static void show_scan_qual(List *qual, const char *qlabel,
 						   PlanState *planstate, List *ancestors,
 						   ExplainState *es);
+static void show_graphscan_info(GraphScan * plan, ExplainState *es);
 static void show_upper_qual(List *qual, const char *qlabel,
 							PlanState *planstate, List *ancestors,
 							ExplainState *es);
@@ -1201,6 +1202,7 @@ ExplainPreScanNode(PlanState *planstate, Bitmapset **rels_used)
 		case T_TidScan:
 		case T_TidRangeScan:
 		case T_SubqueryScan:
+		case T_GraphScan:
 		case T_FunctionScan:
 		case T_TableFuncScan:
 		case T_ValuesScan:
@@ -1305,6 +1307,9 @@ plan_is_disabled(Plan *plan)
 	}
 	else if (IsA(plan, SubqueryScan))
 		child_disabled_nodes += ((SubqueryScan *) plan)->subplan->disabled_nodes;
+	else if (IsA(plan, GraphScan) &&
+			 ((GraphScan *) plan)->inner_plan != NULL)
+		child_disabled_nodes += ((GraphScan *) plan)->inner_plan->disabled_nodes;
 	else if (IsA(plan, CustomScan))
 	{
 		ListCell   *lc;
@@ -1473,6 +1478,9 @@ ExplainNode(PlanState *planstate, List *ancestors,
 			break;
 		case T_SubqueryScan:
 			pname = sname = "Subquery Scan";
+			break;
+		case T_GraphScan:
+			pname = sname = "Graph Scan";
 			break;
 		case T_FunctionScan:
 			pname = sname = "Function Scan";
@@ -1673,6 +1681,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 		case T_TidScan:
 		case T_TidRangeScan:
 		case T_SubqueryScan:
+		case T_GraphScan:
 		case T_FunctionScan:
 		case T_TableFuncScan:
 		case T_ValuesScan:
@@ -2023,12 +2032,15 @@ ExplainNode(PlanState *planstate, List *ancestors,
 		case T_NamedTuplestoreScan:
 		case T_WorkTableScan:
 		case T_SubqueryScan:
+		case T_GraphScan:
 			show_scan_qual(plan->qual, "Filter", planstate, ancestors, es);
 			if (plan->qual)
 				show_instrumentation_count("Rows Removed by Filter", 1,
 										   planstate, es);
 			if (IsA(plan, CteScan))
 				show_ctescan_info(castNode(CteScanState, planstate), es);
+			if (IsA(plan, GraphScan))
+				show_graphscan_info(castNode(GraphScan, plan), es);
 			show_scan_io_usage((ScanState *) planstate, es);
 			break;
 		case T_Gather:
@@ -2366,6 +2378,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 		IsA(plan, BitmapAnd) ||
 		IsA(plan, BitmapOr) ||
 		IsA(plan, SubqueryScan) ||
+		IsA(plan, GraphScan) ||
 		(IsA(planstate, CustomScanState) &&
 		 ((CustomScanState *) planstate)->custom_ps != NIL) ||
 		planstate->subPlan;
@@ -2416,6 +2429,10 @@ ExplainNode(PlanState *planstate, List *ancestors,
 		case T_SubqueryScan:
 			ExplainNode(((SubqueryScanState *) planstate)->subplan, ancestors,
 						"Subquery", NULL, es);
+			break;
+		case T_GraphScan:
+			ExplainNode(((GraphScanState *) planstate)->inner_plan, ancestors,
+						"Inner", NULL, es);
 			break;
 		case T_CustomScan:
 			ExplainCustomChildren((CustomScanState *) planstate,
@@ -2551,13 +2568,35 @@ show_qual(List *qual, const char *qlabel,
  * Show a qualifier expression for a scan plan node
  */
 static void
+show_graphscan_info(GraphScan * plan, ExplainState *es)
+{
+	ExplainOpenGroup("Graph Scan", "Graph Scan", false, es);
+	ExplainPropertyInteger("min_depth", NULL, plan->min_depth, es);
+	ExplainPropertyInteger("max_depth", NULL, plan->max_depth, es);
+	switch (plan->direction)
+	{
+		case GRAPH_DIR_OUTGOING:
+			ExplainPropertyText("direction", "outgoing", es);
+			break;
+		case GRAPH_DIR_INCOMING:
+			ExplainPropertyText("direction", "incoming", es);
+			break;
+		case GRAPH_DIR_UNDIRECTED:
+			ExplainPropertyText("direction", "undirected", es);
+			break;
+	}
+	ExplainCloseGroup("Graph Scan", "Graph Scan", false, es);
+}
+
+static void
 show_scan_qual(List *qual, const char *qlabel,
 			   PlanState *planstate, List *ancestors,
 			   ExplainState *es)
 {
 	bool		useprefix;
 
-	useprefix = (IsA(planstate->plan, SubqueryScan) || es->verbose);
+	useprefix = (IsA(planstate->plan, SubqueryScan) ||
+				 IsA(planstate->plan, GraphScan) || es->verbose);
 	show_qual(qual, qlabel, planstate, ancestors, useprefix, es);
 }
 

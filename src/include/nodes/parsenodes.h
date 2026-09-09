@@ -1274,6 +1274,14 @@ typedef struct RangeTblEntry
 	List	   *graph_table_columns;
 
 	/*
+	 * True if this graph RTE was created by the native decomposer to
+	 * represent a single quantified (variable-length) hop, to be planned as a
+	 * GraphScan node.  Planner-internal only; never user-visible or stored in
+	 * rules.
+	 */
+	bool		is_internal_graph pg_node_attr(query_jumble_ignore);
+
+	/*
 	 * Fields valid for a values RTE (else NIL):
 	 */
 	/* list of expression lists */

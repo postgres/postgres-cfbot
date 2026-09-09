@@ -778,6 +778,33 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 			return set_subqueryscan_references(root,
 											   (SubqueryScan *) plan,
 											   rtoffset);
+		case T_GraphScan:
+			{
+				GraphScan  *splan = (GraphScan *) plan;
+				RelOptInfo *rel;
+
+				/* Need to look up the rel with its pre-offset scanrelid */
+				rel = find_base_rel(root, splan->scan.scanrelid);
+
+				splan->scan.scanrelid += rtoffset;
+				splan->scan.plan.targetlist =
+					fix_scan_list(root, splan->scan.plan.targetlist,
+								  rtoffset, NUM_EXEC_TLIST(plan));
+				splan->scan.plan.qual =
+					fix_scan_list(root, splan->scan.plan.qual,
+								  rtoffset, NUM_EXEC_QUAL(plan));
+
+				/*
+				 * Recursively process the inner (1-hop) plan with its own
+				 * planner root.  We are entering a different planner context,
+				 * so recurse to set_plan_references directly.  This also adds
+				 * the inner RTEs to the flat rtable.
+				 */
+				if (splan->inner_plan != NULL)
+					splan->inner_plan =
+						set_plan_references(rel->subroot, splan->inner_plan);
+			}
+			break;
 		case T_FunctionScan:
 			{
 				FunctionScan *splan = (FunctionScan *) plan;

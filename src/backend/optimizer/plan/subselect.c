@@ -2756,6 +2756,33 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 			}
 			break;
 
+		case T_GraphScan:
+			{
+				GraphScan  *gs = (GraphScan *) plan;
+				RelOptInfo *rel;
+				Bitmapset  *subquery_params;
+
+				/* We must run finalize_plan on the inner (1-hop) query */
+				if (gs->inner_plan != NULL)
+				{
+					rel = find_base_rel(root, gs->scan.scanrelid);
+					subquery_params = rel->subroot->outer_params;
+					if (gather_param >= 0)
+						subquery_params = bms_add_member(bms_copy(subquery_params),
+														 gather_param);
+					finalize_plan(rel->subroot, gs->inner_plan,
+								  gather_param, subquery_params, NULL);
+
+					/* Now we can add its extParams to the parent's params */
+					context.paramids = bms_add_members(context.paramids,
+													   gs->inner_plan->extParam);
+				}
+
+				context.paramids = bms_add_members(context.paramids,
+												   scan_params);
+			}
+			break;
+
 		case T_FunctionScan:
 			{
 				FunctionScan *fscan = (FunctionScan *) plan;

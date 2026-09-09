@@ -1497,7 +1497,8 @@ cost_subqueryscan(SubqueryScanPath *path, PlannerInfo *root,
 
 	/* Should only be applied to base relations that are subqueries */
 	Assert(baserel->relid > 0);
-	Assert(baserel->rtekind == RTE_SUBQUERY);
+	Assert(baserel->rtekind == RTE_SUBQUERY ||
+		   baserel->rtekind == RTE_GRAPH_TABLE);
 
 	/*
 	 * We compute the rowcount estimate as the subplan's estimate times the
@@ -6174,7 +6175,8 @@ set_subquery_size_estimates(PlannerInfo *root, RelOptInfo *rel)
 
 	/* Should only be applied to base relations that are subqueries */
 	Assert(rel->relid > 0);
-	Assert(planner_rt_fetch(rel->relid, root)->rtekind == RTE_SUBQUERY);
+	Assert(planner_rt_fetch(rel->relid, root)->rtekind == RTE_SUBQUERY ||
+		   planner_rt_fetch(rel->relid, root)->rtekind == RTE_GRAPH_TABLE);
 
 	/*
 	 * Copy raw number of output rows from subquery.  All of its paths should

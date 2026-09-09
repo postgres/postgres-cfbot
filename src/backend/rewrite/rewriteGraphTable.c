@@ -17,6 +17,7 @@
 #include "access/sysattr.h"
 #include "access/table.h"
 #include "access/htup_details.h"
+#include "catalog/pg_class.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_propgraph_element.h"
 #include "catalog/pg_propgraph_element_label.h"
@@ -45,6 +46,7 @@
 #include "utils/lsyscache.h"
 #include "utils/ruleutils.h"
 #include "utils/syscache.h"
+#include "utils/typcache.h"
 
 
 /*
@@ -101,30 +103,24 @@ static Query *generate_query_for_empty_path_pattern(RangeTblEntry *rte);
 static Query *generate_union_from_pathqueries(List **pathqueries);
 static List *get_path_elements_for_path_factor(Oid propgraphid, struct path_factor *pf);
 static bool is_property_associated_with_label(Oid labeloid, Oid propoid);
-static Node *get_element_property_expr(Oid elemoid, Oid propoid, int rtindex);
+extern Node *get_element_property_expr(Oid elemoid, Oid propoid, int rtindex);
 
 /*
- * Convert GRAPH_TABLE clause into a subquery using relational
- * operators.
+ * Decompose a GRAPH_TABLE clause into a subquery using relational operators.
  *
- * If enable_native_graphtable is true, the rewriting is bypassed and the
- * RTE_GRAPH_TABLE is left intact for the planner to decompose natively (the
- * native planner support is not yet implemented; when enabled before it
- * lands, planning of such a query fails until the native path arrives).
+ * This builds the relational Query that represents the graph pattern: every
+ * element pattern is resolved (via labels to concrete graph elements backing
+ * tables) and the path patterns are generated as JOIN queries, unioned with
+ * UNION ALL.  The rewriter uses it for the non-native (fallback) path; the
+ * native planner reuses it for the relational (unquantified) parts of a
+ * pattern.  The RTE itself is left untouched here.
  */
 Query *
-rewriteGraphTable(Query *parsetree, int rt_index)
+decomposeGraphTable(RangeTblEntry *rte)
 {
-	RangeTblEntry *rte;
 	Query	   *graph_table_query;
 	List	   *path_pattern;
 	List	   *pathqueries = NIL;
-
-	rte = rt_fetch(rt_index, parsetree->rtable);
-
-	/* Native mode: leave RTE_GRAPH_TABLE intact for the planner */
-	if (enable_native_graphtable)
-		return parsetree;
 
 	Assert(list_length(rte->graph_pattern->path_pattern_list) == 1);
 
@@ -134,8 +130,30 @@ rewriteGraphTable(Query *parsetree, int rt_index)
 
 	AcquireRewriteLocks(graph_table_query, true, false);
 
+	return graph_table_query;
+}
+
+/*
+ * Convert GRAPH_TABLE clause into a subquery using relational
+ * operators.
+ *
+ * If enable_native_graphtable is true, the rewriting is bypassed and the
+ * RTE_GRAPH_TABLE is left intact for the planner to decompose natively.
+ */
+Query *
+rewriteGraphTable(Query *parsetree, int rt_index)
+{
+	RangeTblEntry *rte;
+
+	rte = rt_fetch(rt_index, parsetree->rtable);
+
+	/* Native mode: leave RTE_GRAPH_TABLE intact for the planner */
+	if (enable_native_graphtable)
+		return parsetree;
+
+	rte->subquery = decomposeGraphTable(rte);
+
 	rte->rtekind = RTE_SUBQUERY;
-	rte->subquery = graph_table_query;
 	rte->lateral = true;
 
 	/*
@@ -1266,7 +1284,7 @@ is_property_associated_with_label(Oid labeloid, Oid propoid)
  * the associated labels, return value expression of the property. Otherwise
  * NULL.
  */
-static Node *
+Node *
 get_element_property_expr(Oid elemoid, Oid propoid, int rtindex)
 {
 	Relation	rel;
@@ -1303,4 +1321,902 @@ get_element_property_expr(Oid elemoid, Oid propoid, int rtindex)
 	table_close(rel, RowShareLock);
 
 	return n;
+}
+
+/* -------------------------------------------------------------------------
+ * Native (planner-owned) per-path decomposition of a graph pattern.
+ *
+ * The pattern is decomposed by enumerating, for each non-quantified element
+ * pattern, one concrete graph element per branch (exactly like the rewrite
+ * fallback), while each quantified (variable-length) hop is kept as an
+ * internal RTE_GRAPH_TABLE that the planner turns into a GraphScan node.
+ * The branches are UNION ALL-ed, which moves every label disjunction to the
+ * branch level and gives each GraphScan concrete, well-typed seed and
+ * terminal elements (so the terminal binding can be a normal relational
+ * join, and fixed hops can follow the scan as ordinary joins).
+ * -------------------------------------------------------------------------
+ */
+
+/*
+ * Description of one quantified (variable-length) edge element pattern.
+ */
+typedef struct native_vle_factor
+{
+	int			factorpos;		/* pattern position of the edge */
+	GraphElementPattern *edge_gep;	/* the edge element pattern */
+	List	   *edge_element_oids;	/* edge element OIDs matching the label */
+	List	   *array_props;	/* GraphPropertyRef* (VLE edge-list refs) */
+	int			min_depth;		/* quantifier lower bound */
+	int			max_depth;		/* quantifier upper bound, -1 = unbounded */
+}			native_vle_factor;
+
+/* Per-branch binding of a VLE factor (edge-var list refs). */
+typedef struct native_vle_bind
+{
+	const char *varname;		/* the quantified edge variable */
+	int			gs_rti;			/* RT index of the internal graph RTE */
+	int			array_first;	/* first array output attno on the graph RTE */
+	List	   *array_props;	/* the factor's GraphPropertyRef* list */
+}			native_vle_bind;
+
+/* Binding of a concrete element variable in a branch. */
+typedef struct native_bind
+{
+	const char *varname;
+	Oid			elemoid;
+	int			rti;
+}			native_bind;
+
+/* State for the branch enumeration and assembly. */
+typedef struct native_decomp
+{
+	RangeTblEntry *rte;			/* the user's graph RTE */
+	List	   *factors;		/* one path_factor per element pattern */
+	List	   *elem_lists;		/* per factor: List of struct path_element
+								 * (NIL for a VLE factor) */
+	List	   *vle_factors;	/* per factor: native_vle_factor* or NULL */
+	int			nfactors;
+	List	   *branch_queries; /* resulting per-branch Queries */
+}			native_decomp;
+
+/* Context for resolving property references within a branch. */
+typedef struct native_prop_ctx
+{
+	Oid			propgraphid;
+	List	   *binds;			/* List of native_bind */
+	List	   *vle_binds;		/* List of native_vle_bind */
+}			native_prop_ctx;
+
+/*
+ * Return the key columns (attnum/type/typmod/collation) of the given graph
+ * element, read from the given key column array of pg_propgraph_element
+ * (pgekey for a vertex element, pgesrckey/pgedestkey for an edge element).
+ */
+List *
+get_graph_element_key_columns(Oid elemoid, int key_attnum)
+{
+	List	   *result = NIL;
+	HeapTuple	eletup;
+	Form_pg_propgraph_element pgeform;
+	Datum		datum;
+	Datum	   *d;
+	int			n;
+	int			i;
+
+	eletup = SearchSysCache1(PROPGRAPHELOID, ObjectIdGetDatum(elemoid));
+	if (!HeapTupleIsValid(eletup))
+		elog(ERROR, "cache lookup failed for property graph element %u", elemoid);
+	pgeform = (Form_pg_propgraph_element) GETSTRUCT(eletup);
+
+	datum = SysCacheGetAttrNotNull(PROPGRAPHELOID, eletup, key_attnum);
+	deconstruct_array_builtin(DatumGetArrayTypeP(datum), INT2OID, &d, NULL, &n);
+
+	for (i = 0; i < n; i++)
+	{
+		GraphElementKeyCol *kc = palloc_object(GraphElementKeyCol);
+
+		kc->attnum = DatumGetInt16(d[i]);
+		get_atttypetypmodcoll(pgeform->pgerelid, kc->attnum,
+							  &kc->typid, &kc->typmod, &kc->collation);
+		result = lappend(result, kc);
+	}
+
+	ReleaseSysCache(eletup);
+
+	return result;
+}
+
+/*
+ * Return an equality operator suitable for the given datatype, using the
+ * type's default (btree) equality operator.
+ */
+Oid
+key_equality_operator(Oid typid)
+{
+	TypeCacheEntry *tc = lookup_type_cache(typid, TYPECACHE_EQ_OPR);
+
+	if (tc->eq_opr == InvalidOid)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("no equality operator for graph key type %s",
+						format_type_be(typid))));
+
+	return tc->eq_opr;
+}
+
+/*
+ * Build an equality OpExpr between two same-typed Vars using the type's
+ * equality operator.  Collations are fixed up by the caller.
+ */
+static Expr *
+make_key_equality(Node *left, Node *right)
+{
+	Oid			eqtype = exprType(left);
+	Oid			eqop = key_equality_operator(eqtype);
+	OpExpr	   *op;
+
+	Assert(eqtype == exprType(right));
+
+	op = makeNode(OpExpr);
+	op->opno = eqop;
+	op->opfuncid = get_opcode(eqop);
+	op->opresulttype = get_op_rettype(eqop);
+	op->opretset = false;
+	op->args = list_make2(left, right);
+	op->location = -1;
+
+	return (Expr *) op;
+}
+
+/*
+ * Walker accumulating GraphPropertyRef nodes found in an expression tree.
+ */
+static bool
+collect_graph_property_ref_walker(Node *node, List **refs)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, GraphPropertyRef))
+	{
+		*refs = lappend(*refs, node);
+		return false;
+	}
+	return expression_tree_walker(node, collect_graph_property_ref_walker,
+								  refs);
+}
+
+/*
+ * Collect the VLE edge-list (array) property references of the given edge
+ * variable from the COLUMNS and the graph-level WHERE clause.
+ */
+List *
+get_vle_array_props(RangeTblEntry *rte, const char *edge_var)
+{
+	List	   *result = NIL;
+	List	   *all = NIL;
+	ListCell   *lc;
+
+	/*
+	 * An anonymous edge pattern (no explicit edge variable) cannot be
+	 * referenced in the COLUMNS or the graph-level WHERE clause, so it can
+	 * have no VLE edge-list (array) properties.  Bail out rather than
+	 * comparing property reference names against a NULL edge variable below.
+	 */
+	if (edge_var == NULL)
+		return NIL;
+
+	foreach(lc, rte->graph_table_columns)
+	{
+		TargetEntry *te = lfirst_node(TargetEntry, lc);
+
+		all = lappend(all, (Node *) te->expr);
+	}
+	if (rte->graph_pattern->whereClause)
+		all = lappend(all, (Node *) rte->graph_pattern->whereClause);
+
+	foreach(lc, all)
+	{
+		List	   *refs = NIL;
+
+		(void) collect_graph_property_ref_walker((Node *) lfirst(lc), &refs);
+		foreach_ptr(GraphPropertyRef, gpr, refs)
+		{
+			if (gpr->vle_list && gpr->elvarname &&
+				strcmp(gpr->elvarname, edge_var) == 0)
+			{
+				bool		seen = false;
+
+				foreach_ptr(GraphPropertyRef, prev, result)
+				{
+					if (prev->propid == gpr->propid)
+					{
+						seen = true;
+						break;
+					}
+				}
+				if (!seen)
+					result = lappend(result, gpr);
+			}
+		}
+	}
+
+	return result;
+}
+
+/*
+ * Build, for one branch, the internal RTE_GRAPH_TABLE representing the
+ * quantified (variable-length) hop described by vf, with concrete ghost
+ * seed (source element 'srcpe' at 'src_rti') and concrete ghost terminal
+ * ('termpe' at 'term_rti').  The RTE is appended to 'branch'; the terminal
+ * (external join) quals are appended to *term_quals.  Returns the RT index
+ * of the new RTE.
+ *
+ * For zero-hop quantifiers ({0,...}), the effective minimum depth is raised
+ * to 1 in branches whose terminal element differs from the seed element:
+ * a zero-length path ends at the seed vertex itself, which can only satisfy
+ * the (concrete) terminal element if the two elements are the same.
+ */
+static int
+native_build_vle_rte(RangeTblEntry *rte, native_vle_factor * vf,
+					 struct path_element *srcpe, int src_rti,
+					 struct path_element *termpe, int term_rti,
+					 List **term_quals, Query *branch)
+{
+	Oid			graphid = rte->relid;
+	List	   *src_keys;
+	List	   *term_keys;
+	int			nseed;
+	int			nterm;
+	int			seed_first = 1;
+	int			term_first;
+	int			array_first;
+	int			eff_min;
+	List	   *columns = NIL;
+	List	   *colnames = NIL;
+	List	   *seed_quals = NIL;
+	RangeTblEntry *gs_rte;
+	GraphPattern *gp;
+	GraphElementPattern *pd;
+	GraphElementPattern *edge_gep;
+	GraphElementPattern *td;
+	List	   *path_term;
+	RTEPermissionInfo *perminfo;
+	int			gs_rti;
+	int			colno = 0;
+	ListCell   *lc;
+
+	src_keys = get_graph_element_key_columns(srcpe->elemoid,
+											 Anum_pg_propgraph_element_pgekey);
+	term_keys = get_graph_element_key_columns(termpe->elemoid,
+											  Anum_pg_propgraph_element_pgekey);
+	nseed = list_length(src_keys);
+	nterm = list_length(term_keys);
+
+	eff_min = vf->min_depth;
+	if (eff_min == 0 && srcpe->elemoid != termpe->elemoid)
+		eff_min = 1;
+
+	term_first = seed_first + nseed;
+	array_first = term_first + nterm;
+
+	/* The RT index of the new RTE: next in the branch's rtable. */
+	gs_rti = list_length(branch->rtable) + 1;
+
+	/* Output columns: seed key, terminal key, then the edge-list arrays. */
+	foreach(lc, src_keys)
+	{
+		GraphElementKeyCol *kc = lfirst(lc);
+
+		colno++;
+		columns = lappend(columns,
+						  makeTargetEntry((Expr *) makeVar(gs_rti, colno,
+														   kc->typid, kc->typmod,
+														   kc->collation, 0),
+										  colno, pstrdup("gs_seed"), false));
+		colnames = lappend(colnames, makeString(pstrdup("gs_seed")));
+	}
+
+	foreach(lc, term_keys)
+	{
+		GraphElementKeyCol *kc = lfirst(lc);
+
+		colno++;
+		columns = lappend(columns,
+						  makeTargetEntry((Expr *) makeVar(gs_rti, colno,
+														   kc->typid, kc->typmod,
+														   kc->collation, 0),
+										  colno, pstrdup("gs_term"), false));
+		colnames = lappend(colnames, makeString(pstrdup("gs_term")));
+	}
+
+	foreach_node(GraphPropertyRef, gpr, vf->array_props)
+	{
+		colno++;
+		columns = lappend(columns,
+						  makeTargetEntry((Expr *) makeVar(gs_rti, colno,
+														   gpr->typeId, gpr->typmod,
+														   gpr->collation, 0),
+										  colno, pstrdup("gs_arr"), false));
+		colnames = lappend(colnames, makeString(pstrdup("gs_arr")));
+	}
+
+	/*
+	 * Ghost seed element: its key is exposed as the first columns, and the
+	 * seed qual (pd key = previous segment key) lives in the seed element's
+	 * WHERE clause so the planner treats the scan as parameterized by the
+	 * previous segment.
+	 */
+	{
+		int			k = 0;
+
+		foreach(lc, src_keys)
+		{
+			GraphElementKeyCol *kc = lfirst(lc);
+
+			seed_quals = lappend(seed_quals,
+								 make_key_equality((Node *) makeVar(gs_rti,
+																	seed_first + k,
+																	kc->typid,
+																	kc->typmod,
+																	kc->collation, 0),
+												   (Node *) makeVar(src_rti,
+																	kc->attnum,
+																	kc->typid,
+																	kc->typmod,
+																	kc->collation, 0)));
+			k++;
+		}
+	}
+
+	/* Terminal (external join) quals: terminal key = gs terminal key. */
+	{
+		int			k = 0;
+
+		foreach(lc, term_keys)
+		{
+			GraphElementKeyCol *kc = lfirst(lc);
+
+			*term_quals = lappend(*term_quals,
+								  make_key_equality((Node *) makeVar(term_rti,
+																	 kc->attnum,
+																	 kc->typid,
+																	 kc->typmod,
+																	 kc->collation, 0),
+													(Node *) makeVar(gs_rti,
+																	 term_first + k,
+																	 kc->typid,
+																	 kc->typmod,
+																	 kc->collation, 0)));
+			k++;
+		}
+	}
+
+	pd = makeNode(GraphElementPattern);
+	pd->kind = VERTEX_PATTERN;
+	pd->variable = NULL;
+	pd->labelexpr = NULL;
+	pd->whereClause = (Node *) makeBoolExpr(AND_EXPR, seed_quals, -1);
+	pd->quantifier = NULL;
+	pd->location = -1;
+
+	edge_gep = copyObject(vf->edge_gep);
+	edge_gep->quantifier = list_make2_int(eff_min, vf->max_depth);
+
+	td = makeNode(GraphElementPattern);
+	td->kind = VERTEX_PATTERN;
+	td->variable = NULL;
+	td->labelexpr = NULL;
+	td->whereClause = NULL;
+	td->quantifier = NULL;
+	td->location = -1;
+
+	path_term = list_make3(pd, edge_gep, td);
+
+	gp = makeNode(GraphPattern);
+	gp->path_pattern_list = list_make1(path_term);
+	gp->whereClause = NULL;
+
+	gs_rte = makeNode(RangeTblEntry);
+	gs_rte->rtekind = RTE_GRAPH_TABLE;
+	gs_rte->relid = graphid;
+	gs_rte->relkind = RELKIND_PROPGRAPH;
+	gs_rte->graph_pattern = gp;
+	gs_rte->graph_table_columns = columns;
+	gs_rte->eref = makeAlias(pstrdup("graph_scan"), colnames);
+	gs_rte->rellockmode = AccessShareLock;
+	gs_rte->lateral = true;
+	gs_rte->is_internal_graph = true;
+
+	perminfo = addRTEPermissionInfo(&branch->rteperminfos, gs_rte);
+	perminfo->requiredPerms = ACL_SELECT;
+
+	branch->rtable = lappend(branch->rtable, gs_rte);
+
+	/* Fix up collations of the freshly built key quals. */
+	{
+		ParseState *pstate = make_parsestate(NULL);
+
+		assign_expr_collations(pstate, (Node *) seed_quals);
+		assign_expr_collations(pstate, (Node *) *term_quals);
+	}
+
+	return gs_rti;
+}
+
+/*
+ * Mutator resolving GraphPropertyRef nodes against the concrete elements of
+ * a branch and against the branch's internal graph RTEs (VLE edge-list
+ * refs).  Mirrors replace_property_refs_mutator() for the concrete case.
+ */
+static Node *
+native_replace_property_refs_mutator(Node *node, native_prop_ctx * ctx)
+{
+	if (node == NULL)
+		return NULL;
+	if (IsA(node, Var))
+	{
+		Var		   *var = (Var *) node;
+		Var		   *newvar = copyObject(var);
+
+		/*
+		 * If it's already a Var, it was a lateral reference; the branch is
+		 * wrapped by the UNION, so raise the level by one.
+		 */
+		newvar->varlevelsup++;
+		return (Node *) newvar;
+	}
+	else if (IsA(node, GraphPropertyRef))
+	{
+		GraphPropertyRef *gpr = (GraphPropertyRef *) node;
+
+		/* VLE edge-list (array) reference. */
+		if (gpr->vle_list)
+		{
+			foreach_ptr(native_vle_bind, vb, ctx->vle_binds)
+			{
+				int			prop = 0;
+
+				if (vb->varname &&
+					strcmp(vb->varname, gpr->elvarname) == 0)
+				{
+					foreach_ptr(GraphPropertyRef, ap, vb->array_props)
+					{
+						if (ap->propid == gpr->propid)
+						{
+							return (Node *) makeVar(vb->gs_rti,
+													vb->array_first + prop,
+													gpr->typeId, gpr->typmod,
+													gpr->collation, 0);
+						}
+						prop++;
+					}
+					elog(ERROR, "graph VLE edge property not found in scan columns");
+				}
+			}
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_OBJECT),
+					 errmsg("property \"%s\" for element variable \"%s\" not found",
+							get_propgraph_property_name(gpr->propid),
+							gpr->elvarname)));
+		}
+
+		/* Ordinary reference to a concrete element of the branch. */
+		foreach_ptr(native_bind, bind, ctx->binds)
+		{
+			if (bind->varname && strcmp(bind->varname, gpr->elvarname) == 0)
+			{
+				Node	   *n;
+
+				n = get_element_property_expr(bind->elemoid, gpr->propid,
+											  bind->rti);
+				if (!n)
+					ereport(ERROR,
+							(errcode(ERRCODE_UNDEFINED_OBJECT),
+							 errmsg("property \"%s\" for element variable \"%s\" not found",
+									get_propgraph_property_name(gpr->propid),
+									gpr->elvarname)));
+				return n;
+			}
+		}
+
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("element variable \"%s\" not found", gpr->elvarname)));
+	}
+
+	return expression_tree_mutator(node, native_replace_property_refs_mutator,
+								   ctx);
+}
+
+static Node *
+native_replace_property_refs(Node *node, native_prop_ctx * ctx)
+{
+	return native_replace_property_refs_mutator(node, ctx);
+}
+
+/*
+ * Construct the Query for one fully-bound branch.  Returns NULL if the
+ * combination is inconsistent (fixed edge-vertex links don't line up).
+ */
+static Query *
+native_query_for_branch(native_decomp * dc, List *elems, List *vles)
+{
+	RangeTblEntry *rte = dc->rte;
+	Query	   *path_query = makeNode(Query);
+	List	   *fromlist = NIL;
+	List	   *qual_exprs = NIL;
+	List	   *binds = NIL;
+	List	   *vle_binds = NIL;
+	native_prop_ctx ctx;
+	List	   *vars;
+	int			i;
+	ListCell   *lc;
+
+	path_query->commandType = CMD_SELECT;
+
+	/*
+	 * Pass 1: add one RTE per factor, in pattern order.  Concrete elements
+	 * become relation RTEs; VLE factors become internal graph RTEs.  With no
+	 * same-variable merging, RT index of factor i is i+1.
+	 */
+	i = 0;
+	foreach(lc, elems)
+	{
+		struct path_element *pe = lfirst(lc);
+		native_vle_factor *vf = list_nth(vles, i);
+		int			rti = list_length(path_query->rtable) + 1;
+		RangeTblRef *rtr;
+
+		Assert(rti == i + 1);
+
+		if (vf != NULL)
+		{
+			struct path_element *srcpe = list_nth(elems, i - 1);
+			struct path_element *termpe = list_nth(elems, i + 1);
+			List	   *term_quals = NIL;
+			native_vle_bind *vb;
+			int			gs_rti;
+
+			/* zero-hop: gs may not traverse; seed/term elements differ */
+			gs_rti = native_build_vle_rte(rte, vf, srcpe, i, termpe, i + 2,
+										  &term_quals, path_query);
+			Assert(gs_rti == rti);
+			qual_exprs = list_concat(qual_exprs, term_quals);
+
+			vb = palloc_object(native_vle_bind);
+			vb->varname = vf->edge_gep->variable;
+			vb->gs_rti = gs_rti;
+			vb->array_first = 1
+				+ list_length(get_graph_element_key_columns(srcpe->elemoid,
+														 Anum_pg_propgraph_element_pgekey))
+				+ list_length(get_graph_element_key_columns(termpe->elemoid,
+														 Anum_pg_propgraph_element_pgekey));
+			vb->array_props = vf->array_props;
+			vle_binds = lappend(vle_binds, vb);
+		}
+		else
+		{
+			Relation	rel;
+			ParseNamespaceItem *pni;
+			native_bind *nb;
+
+			rel = table_open(pe->reloid, AccessShareLock);
+			pni = addRangeTableEntryForRelation(make_parsestate(NULL), rel,
+												AccessShareLock,
+												NULL, true, false);
+			table_close(rel, NoLock);
+			path_query->rtable = lappend(path_query->rtable, pni->p_rte);
+			path_query->rteperminfos = lappend(path_query->rteperminfos,
+											   pni->p_perminfo);
+			pni->p_rte->perminfoindex = list_length(path_query->rteperminfos);
+
+			nb = palloc_object(native_bind);
+			nb->varname = pe->path_factor->variable;
+			nb->elemoid = pe->elemoid;
+			nb->rti = rti;
+			binds = lappend(binds, nb);
+		}
+
+		rtr = makeNode(RangeTblRef);
+		rtr->rtindex = rti;
+		fromlist = lappend(fromlist, rtr);
+		i++;
+	}
+
+	/* Pass 2: fixed edge links, element WHEREs, graph-level WHERE. */
+	i = 0;
+	foreach(lc, elems)
+	{
+		struct path_element *pe = lfirst(lc);
+		native_vle_factor *vf = list_nth(vles, i);
+
+		if (pe == NULL)
+		{
+			/* VLE factor: no branch-level qual here. */
+		}
+		else if (IS_EDGE_PATTERN(pe->path_factor->kind))
+		{
+			struct path_element *src_pe = list_nth(elems, i - 1);
+			struct path_element *dest_pe = list_nth(elems, i + 1);
+			Expr	   *edge_qual = NULL;
+
+			if (src_pe->elemoid == pe->srcvertexid &&
+				dest_pe->elemoid == pe->destvertexid)
+				edge_qual = makeBoolExpr(AND_EXPR,
+										 list_concat(copyObject(pe->src_quals),
+													 copyObject(pe->dest_quals)),
+										 -1);
+
+			if (pe->path_factor->kind == EDGE_PATTERN_ANY &&
+				dest_pe->elemoid == pe->srcvertexid &&
+				src_pe->elemoid == pe->destvertexid)
+			{
+				List	   *src_quals = copyObject(pe->dest_quals);
+				List	   *dest_quals = copyObject(pe->src_quals);
+				Expr	   *rev_edge_qual;
+
+				ChangeVarNodes((Node *) dest_quals, i, i + 2, 0);
+				ChangeVarNodes((Node *) src_quals, i + 2, i, 0);
+				rev_edge_qual = makeBoolExpr(AND_EXPR,
+											 list_concat(src_quals, dest_quals),
+											 -1);
+				if (edge_qual)
+					edge_qual = makeBoolExpr(OR_EXPR,
+											 list_make2(edge_qual, rev_edge_qual),
+											 -1);
+				else
+					edge_qual = rev_edge_qual;
+			}
+
+			if (edge_qual == NULL)
+				return NULL;
+
+			qual_exprs = lappend(qual_exprs, edge_qual);
+		}
+
+		if (pe && pe->path_factor->whereClause)
+			qual_exprs = lappend(qual_exprs,
+								 replace_property_refs(rte->relid,
+													   pe->path_factor->whereClause,
+													   list_make1(pe)));
+
+		i++;
+	}
+
+	ctx.propgraphid = rte->relid;
+	ctx.binds = binds;
+	ctx.vle_binds = vle_binds;
+
+	if (rte->graph_pattern->whereClause)
+		qual_exprs = lappend(qual_exprs,
+							 native_replace_property_refs(copyObject((Node *) rte->graph_pattern->whereClause),
+														  &ctx));
+
+	path_query->jointree = makeFromExpr(fromlist,
+										qual_exprs ? (Node *) makeBoolExpr(AND_EXPR, qual_exprs, -1) : NULL);
+
+	/* Construct the branch targetlist from the COLUMNS specification. */
+	path_query->targetList = castNode(List,
+									  native_replace_property_refs(copyObject((Node *) rte->graph_table_columns),
+																   &ctx));
+
+	/*
+	 * Mark the columns being accessed in the branch query as requiring SELECT
+	 * privilege on the backing element tables.
+	 */
+	vars = pull_vars_of_level((Node *) list_make2(qual_exprs,
+												  path_query->targetList), 0);
+	foreach_node(Var, var, vars)
+	{
+		RTEPermissionInfo *perminfo;
+
+		Assert(IsA(rt_fetch(var->varno, path_query->rtable), RangeTblEntry));
+		perminfo = getRTEPermissionInfo(path_query->rteperminfos,
+										rt_fetch(var->varno, path_query->rtable));
+		perminfo->selectedCols = bms_add_member(perminfo->selectedCols,
+												var->varattno - FirstLowInvalidHeapAttributeNumber);
+	}
+
+	return path_query;
+}
+
+/*
+ * Recursively enumerate concrete elements for the non-quantified factors,
+ * descending into every VLE factor without a choice.
+ */
+static void
+native_queries_recurse(native_decomp * dc, int facpos, List *elems, List *vles)
+{
+	ListCell   *lc;
+
+	check_stack_depth();
+
+	if (facpos == dc->nfactors)
+	{
+		Query	   *path_query = native_query_for_branch(dc, elems, vles);
+
+		if (path_query)
+			dc->branch_queries = lappend(dc->branch_queries, path_query);
+		return;
+	}
+
+	if (list_nth(dc->vle_factors, facpos) != NULL)
+	{
+		native_vle_factor *vf = list_nth(dc->vle_factors, facpos);
+
+		native_queries_recurse(dc, facpos + 1,
+							   lappend(elems, NULL),
+							   lappend(vles, vf));
+	}
+	else
+	{
+		foreach(lc, list_nth(dc->elem_lists, facpos))
+		{
+			struct path_element *pe = lfirst(lc);
+
+			native_queries_recurse(dc, facpos + 1,
+								   lappend(elems, pe),
+								   lappend(vles, NULL));
+		}
+	}
+}
+
+/*
+ * Return the OIDs of the edge elements matching the given edge element
+ * pattern in the given property graph.  Used by the native planner to build
+ * the GraphScan's inner (1-hop) expansion.
+ */
+List *
+get_graph_edge_element_oids(Oid propgraphid, GraphElementPattern *gep)
+{
+	struct path_factor *src_pf;
+	struct path_factor *edge_pf;
+	struct path_factor *dest_pf;
+	List	   *pes;
+	List	   *result = NIL;
+	ListCell   *lc;
+
+	Assert(IS_EDGE_PATTERN(gep->kind));
+
+	/*
+	 * Element resolution keeps the edge factor's adjacent vertex factors (to
+	 * build the source/destination key quals), so provide a minimal ghost
+	 * vertex-edge-vertex path.
+	 */
+	src_pf = palloc0_object(struct path_factor);
+	src_pf->factorpos = 0;
+	src_pf->kind = VERTEX_PATTERN;
+
+	dest_pf = palloc0_object(struct path_factor);
+	dest_pf->factorpos = 2;
+	dest_pf->kind = VERTEX_PATTERN;
+
+	edge_pf = palloc0_object(struct path_factor);
+	edge_pf->factorpos = 1;
+	edge_pf->kind = gep->kind;
+	edge_pf->labelexpr = gep->labelexpr;
+	edge_pf->variable = gep->variable;
+	edge_pf->whereClause = gep->whereClause;
+	edge_pf->src_pf = src_pf;
+	edge_pf->dest_pf = dest_pf;
+
+	pes = get_path_elements_for_path_factor(propgraphid, edge_pf);
+	foreach_ptr(struct path_element, pe, pes)
+		result = lappend_oid(result, pe->elemoid);
+
+	return result;
+}
+
+/*
+ * Decompose a GRAPH_TABLE clause into a Query for native execution.
+ *
+ * All quantified (variable-length) hops are kept as internal
+ * RTE_GRAPH_TABLEs (to be planned as GraphScan nodes); everything else is
+ * decomposed into relational JOINs over the backing element tables, one
+ * UNION ALL branch per concrete element combination (resolving all label
+ * disjunction at the branch level).
+ */
+Query *
+decomposeGraphNative(RangeTblEntry *rte)
+{
+	GraphPattern *gp = rte->graph_pattern;
+	List	   *path_pattern;
+	native_decomp dc;
+	List	   *factors = NIL;
+	List	   *elem_lists = NIL;
+	List	   *vle_factors = NIL;
+	int			factorpos = 0;
+	Query	   *result;
+	ListCell   *lc;
+
+	Assert(list_length(gp->path_pattern_list) == 1);
+	path_pattern = linitial(gp->path_pattern_list);
+
+	/*
+	 * Build one path factor per element pattern.  Reuse of a variable across
+	 * multiple element patterns is not supported yet (Phase F).
+	 */
+	foreach_node(GraphElementPattern, gep, path_pattern)
+	{
+		struct path_factor *pf;
+
+		foreach_ptr(struct path_factor, other, factors)
+		{
+			if (other->variable && gep->variable &&
+				strcmp(other->variable, gep->variable) == 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("reuse of element variable \"%s\" is not yet supported by the native executor",
+								gep->variable)));
+		}
+
+		pf = palloc0_object(struct path_factor);
+		pf->factorpos = factorpos;
+		pf->kind = gep->kind;
+		pf->variable = gep->variable;
+		pf->labelexpr = gep->labelexpr;
+		pf->whereClause = gep->whereClause;
+		factors = lappend(factors, pf);
+		factorpos++;
+	}
+
+	/* Link edges to their adjacent vertex factors. */
+	foreach_ptr(struct path_factor, pf, factors)
+	{
+		if (IS_EDGE_PATTERN(pf->kind))
+		{
+			pf->src_pf = list_nth(factors, pf->factorpos - 1);
+			pf->dest_pf = list_nth(factors, pf->factorpos + 1);
+		}
+	}
+
+	/* Resolve elements per factor; mark the quantified edge factors. */
+	{
+		foreach_ptr(struct path_factor, pf, factors)
+		{
+			GraphElementPattern *gep = list_nth(path_pattern, pf->factorpos);
+
+			if (IS_EDGE_PATTERN(pf->kind) && gep->quantifier != NULL)
+			{
+				native_vle_factor *vf = palloc0_object(native_vle_factor);
+				List	   *edes;
+
+				vf->factorpos = pf->factorpos;
+				vf->edge_gep = gep;
+				vf->min_depth = linitial_int(gep->quantifier);
+				vf->max_depth = lsecond_int(gep->quantifier);
+				vf->array_props = get_vle_array_props(rte, gep->variable);
+				edes = get_path_elements_for_path_factor(rte->relid, pf);
+				foreach_ptr(struct path_element, pe, edes)
+					vf->edge_element_oids = lappend_oid(vf->edge_element_oids,
+														pe->elemoid);
+
+				elem_lists = lappend(elem_lists, NIL);
+				vle_factors = lappend(vle_factors, vf);
+			}
+			else
+			{
+				elem_lists = lappend(elem_lists,
+									 get_path_elements_for_path_factor(rte->relid,
+																	   pf));
+				vle_factors = lappend(vle_factors, NULL);
+			}
+		}
+	}
+
+	dc.rte = rte;
+	dc.factors = factors;
+	dc.elem_lists = elem_lists;
+	dc.vle_factors = vle_factors;
+	dc.nfactors = list_length(factors);
+	dc.branch_queries = NIL;
+
+	native_queries_recurse(&dc, 0, NIL, NIL);
+
+	if (dc.branch_queries == NIL)
+		result = generate_query_for_empty_path_pattern(rte);
+	else
+		result = generate_union_from_pathqueries(&dc.branch_queries);
+
+	return result;
 }
