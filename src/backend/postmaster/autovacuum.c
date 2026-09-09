@@ -502,7 +502,7 @@ AutoVacLauncherMain(const void *startup_data, size_t startup_data_len)
 		 * transaction.
 		 */
 		LWLockReleaseAll();
-		pgstat_report_wait_end();
+		pgstat_report_wait_end_timed();
 		pgaio_error_cleanup();
 		UnlockBuffers();
 		/* this is probably dead code, but let's be safe: */
