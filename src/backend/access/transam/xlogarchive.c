@@ -160,7 +160,7 @@ RestoreArchivedFile(char *path, const char *xlogfname,
 							 xlogRestoreCmd)));
 
 	fflush(NULL);
-	pgstat_report_wait_start(WAIT_EVENT_RESTORE_COMMAND);
+	pgstat_report_wait_start_timed(WAIT_EVENT_RESTORE_COMMAND);
 
 	/*
 	 * PreRestoreCommand() informs the SIGTERM handler for the startup process
@@ -179,7 +179,7 @@ RestoreArchivedFile(char *path, const char *xlogfname,
 
 	PostRestoreCommand();
 
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 	pfree(xlogRestoreCmd);
 
 	if (rc == 0)
@@ -327,9 +327,9 @@ ExecuteRecoveryCommand(const char *command, const char *commandName,
 	 * execute the constructed command
 	 */
 	fflush(NULL);
-	pgstat_report_wait_start(wait_event_info);
+	pgstat_report_wait_start_timed(wait_event_info);
 	rc = system(xlogRecoveryCmd);
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	pfree(xlogRecoveryCmd);
 
