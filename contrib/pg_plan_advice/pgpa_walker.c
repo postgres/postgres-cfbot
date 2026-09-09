@@ -894,6 +894,77 @@ pgpa_walker_would_advise(pgpa_plan_walker_context *walker,
 											 relids);
 		case PGPA_TAG_NO_GATHER:
 			return pgpa_walker_contains_no_gather(walker, relids);
+
+			/*
+			 * For NO_ scan tags, the advice is satisfied when the plan does
+			 * NOT use the forbidden scan strategy.
+			 */
+		case PGPA_TAG_NO_SEQ_SCAN:
+			return pgpa_walker_find_scan(walker,
+										 PGPA_SCAN_SEQ,
+										 relids) == NULL;
+		case PGPA_TAG_NO_BITMAP_HEAP_SCAN:
+			return pgpa_walker_find_scan(walker,
+										 PGPA_SCAN_BITMAP_HEAP,
+										 relids) == NULL;
+		case PGPA_TAG_NO_INDEX_SCAN:
+			return pgpa_walker_find_scan(walker,
+										 PGPA_SCAN_INDEX,
+										 relids) == NULL;
+		case PGPA_TAG_NO_INDEX_ONLY_SCAN:
+			return pgpa_walker_find_scan(walker,
+										 PGPA_SCAN_INDEX_ONLY,
+										 relids) == NULL;
+		case PGPA_TAG_NO_TID_SCAN:
+			return pgpa_walker_find_scan(walker,
+										 PGPA_SCAN_TID,
+										 relids) == NULL;
+
+			/*
+			 * For NO_ join tags, the advice is satisfied when the plan does
+			 * NOT use any of the forbidden join strategies.
+			 */
+		case PGPA_TAG_NO_HASH_JOIN:
+			return !pgpa_walker_contains_join(walker,
+											  JSTRAT_HASH_JOIN,
+											  relids);
+		case PGPA_TAG_NO_MERGE_JOIN:
+			return !pgpa_walker_contains_join(walker,
+											  JSTRAT_MERGE_JOIN_PLAIN,
+											  relids) &&
+				!pgpa_walker_contains_join(walker,
+										   JSTRAT_MERGE_JOIN_MATERIALIZE,
+										   relids);
+		case PGPA_TAG_NO_MERGE_JOIN_MATERIALIZE:
+			return !pgpa_walker_contains_join(walker,
+											  JSTRAT_MERGE_JOIN_MATERIALIZE,
+											  relids);
+		case PGPA_TAG_NO_MERGE_JOIN_PLAIN:
+			return !pgpa_walker_contains_join(walker,
+											  JSTRAT_MERGE_JOIN_PLAIN,
+											  relids);
+		case PGPA_TAG_NO_NESTED_LOOP:
+			return !pgpa_walker_contains_join(walker,
+											  JSTRAT_NESTED_LOOP_PLAIN,
+											  relids) &&
+				!pgpa_walker_contains_join(walker,
+										   JSTRAT_NESTED_LOOP_MATERIALIZE,
+										   relids) &&
+				!pgpa_walker_contains_join(walker,
+										   JSTRAT_NESTED_LOOP_MEMOIZE,
+										   relids);
+		case PGPA_TAG_NO_NESTED_LOOP_MATERIALIZE:
+			return !pgpa_walker_contains_join(walker,
+											  JSTRAT_NESTED_LOOP_MATERIALIZE,
+											  relids);
+		case PGPA_TAG_NO_NESTED_LOOP_MEMOIZE:
+			return !pgpa_walker_contains_join(walker,
+											  JSTRAT_NESTED_LOOP_MEMOIZE,
+											  relids);
+		case PGPA_TAG_NO_NESTED_LOOP_PLAIN:
+			return !pgpa_walker_contains_join(walker,
+											  JSTRAT_NESTED_LOOP_PLAIN,
+											  relids);
 	}
 
 	/* should not get here */
