@@ -20,17 +20,20 @@
 
 #include "access/sysattr.h"
 #include "access/tsmapi.h"
+#include "access/genam.h"
+#include "access/htup_details.h"
+#include "access/table.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_proc.h"
+#include "catalog/pg_propgraph_element.h"
+#include "catalog/pg_type.h"
 #include "foreign/fdwapi.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/supportnodes.h"
-#ifdef OPTIMIZER_DEBUG
 #include "nodes/print.h"
-#endif
 #include "optimizer/appendinfo.h"
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
@@ -42,13 +45,17 @@
 #include "optimizer/planner.h"
 #include "optimizer/prep.h"
 #include "optimizer/tlist.h"
+#include "optimizer/planmain.h"
 #include "parser/parse_clause.h"
+#include "parser/parse_relation.h"
 #include "parser/parsetree.h"
 #include "partitioning/partbounds.h"
 #include "port/pg_bitutils.h"
+#include "rewrite/rewriteGraphTable.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/lsyscache.h"
 #include "utils/selfuncs.h"
+#include "utils/syscache.h"
 
 
 /* Bitmask flags for pushdown_safety_info.unsafeFlags */
@@ -135,6 +142,13 @@ static Path *get_singleton_append_subpath(Path *path,
 static void set_dummy_rel_pathlist(RelOptInfo *rel);
 static void set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 								  Index rti, RangeTblEntry *rte);
+static void set_graph_pathlist(PlannerInfo *root, RelOptInfo *rel,
+							   Index rti, RangeTblEntry *rte);
+static void set_graphscan_pathlist(PlannerInfo *root, RelOptInfo *rel,
+								   Index rti, RangeTblEntry *rte);
+static Relids graph_pattern_lateral_relids(PlannerInfo *root,
+										   RangeTblEntry *rte);
+static bool graph_pattern_has_quantifier(GraphPattern *gp);
 static void set_function_pathlist(PlannerInfo *root, RelOptInfo *rel,
 								  RangeTblEntry *rte);
 static void set_values_pathlist(PlannerInfo *root, RelOptInfo *rel,
@@ -500,6 +514,17 @@ set_rel_size(PlannerInfo *root, RelOptInfo *rel,
 				/* Might as well just build the path immediately */
 				set_result_pathlist(root, rel, rte);
 				break;
+			case RTE_GRAPH_TABLE:
+
+				/*
+				 * Graph tables don't support making a choice between
+				 * parameterized and unparameterized paths, so just go ahead
+				 * and build their paths immediately (the native planner
+				 * decomposes the pattern into an internal query and plans it,
+				 * like a subquery).
+				 */
+				set_graph_pathlist(root, rel, rti, rte);
+				break;
 			default:
 				elog(ERROR, "unexpected rtekind: %d", (int) rel->rtekind);
 				break;
@@ -573,6 +598,9 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 				break;
 			case RTE_RESULT:
 				/* simple Result --- fully handled during set_rel_size */
+				break;
+			case RTE_GRAPH_TABLE:
+				/* graph table --- fully handled during set_rel_size */
 				break;
 			default:
 				elog(ERROR, "unexpected rtekind: %d", (int) rel->rtekind);
@@ -795,10 +823,9 @@ set_rel_consider_parallel(PlannerInfo *root, RelOptInfo *rel,
 		case RTE_GRAPH_TABLE:
 
 			/*
-			 * Shouldn't happen since these are replaced by subquery RTEs when
-			 * rewriting queries.
+			 * The native graph plan contains no parallel-aware nodes today,
+			 * so never consider scanning a graph table in a worker.
 			 */
-			Assert(false);
 			return;
 
 		case RTE_GROUP:
@@ -3156,6 +3183,599 @@ set_namedtuplestore_pathlist(PlannerInfo *root, RelOptInfo *rel,
 
 	/* Generate appropriate path */
 	add_path(rel, create_namedtuplestorescan_path(root, rel, required_outer));
+}
+
+/*
+ * set_graph_pathlist
+ *		Build the access path(s) for an RTE_GRAPH_TABLE
+ *
+ * The graph RTE is planned like a subquery: the pattern is decomposed by the
+ * rewriter's helpers into an internal Query that is then planned via
+ * subquery_planner().  Fully unquantified patterns become relational joins
+ * over the backing element tables; quantified (variable-length) hops are kept
+ * as internal RTE_GRAPH_TABLEs planned as GraphScan nodes in the internal
+ * query.
+ */
+static void
+set_graph_pathlist(PlannerInfo *root, RelOptInfo *rel,
+				   Index rti, RangeTblEntry *rte)
+{
+	Query	   *subquery;
+	Relids		required_outer;
+	double		tuple_fraction = 0.0;
+	RelOptInfo *sub_final_rel;
+	bool		trivial_pathtarget;
+	ListCell   *lc;
+
+	/*
+	 * Internal (single quantified hop) graph RTEs are planned directly as a
+	 * GraphScan node, not through a decomposed subquery.
+	 */
+	if (rte->is_internal_graph)
+	{
+		set_graphscan_pathlist(root, rel, rti, rte);
+		return;
+	}
+
+	/*
+	 * Decompose the pattern.  Fully unquantified patterns use the relational
+	 * decomposition; patterns with quantified hops use the native per-branch
+	 * decomposition that keeps each quantified hop as an internal graph RTE
+	 * (planned as a GraphScan).
+	 */
+	if (graph_pattern_has_quantifier(rte->graph_pattern))
+		subquery = copyObject(decomposeGraphNative(rte));
+	else
+		subquery = copyObject(decomposeGraphTable(rte));
+
+	/*
+	 * If the pattern or its COLUMNS reference outer relations (lateral), the
+	 * graph table must be treated as parameterized even though it is not
+	 * marked LATERAL in the jointree.
+	 */
+	required_outer = graph_pattern_lateral_relids(root, rte);
+
+	/* plan_params should not be in use in current query level */
+	Assert(root->plan_params == NIL);
+
+	/* Generate a subroot and Paths for the decomposed subquery */
+	rel->subroot = subquery_planner(root->glob, subquery,
+									choose_plan_name(root->glob,
+													 rte->eref->aliasname,
+													 false),
+									root, NULL, false,
+									tuple_fraction, NULL);
+
+	/* Isolate the params needed by this specific subplan */
+	rel->subplan_params = root->plan_params;
+	root->plan_params = NIL;
+
+	/*
+	 * It's possible that constraint exclusion proved the decomposed query
+	 * empty.  If so, it's desirable to produce an unadorned dummy path.
+	 */
+	sub_final_rel = fetch_upper_rel(rel->subroot, UPPERREL_FINAL, NULL);
+
+	if (IS_DUMMY_REL(sub_final_rel))
+	{
+		set_dummy_rel_pathlist(rel);
+		return;
+	}
+
+	/*
+	 * Mark rel with estimated output rows, width, etc.  Note that we have to
+	 * do this before generating outer-query paths, else cost_subqueryscan is
+	 * not happy.
+	 */
+	set_subquery_size_estimates(root, rel);
+
+	/*
+	 * Also detect whether the reltarget is trivial, so that we can pass that
+	 * info to cost_subqueryscan (rather than re-deriving it multiple times).
+	 */
+	if (list_length(rel->reltarget->exprs) != list_length(subquery->targetList))
+		trivial_pathtarget = false;
+	else
+	{
+		trivial_pathtarget = true;
+		foreach(lc, rel->reltarget->exprs)
+		{
+			Node	   *node = (Node *) lfirst(lc);
+			Var		   *var;
+
+			if (!IsA(node, Var))
+			{
+				trivial_pathtarget = false;
+				break;
+			}
+			var = (Var *) node;
+			if (var->varno != rti ||
+				var->varattno != foreach_current_index(lc) + 1)
+			{
+				trivial_pathtarget = false;
+				break;
+			}
+		}
+	}
+
+	/* For each Path that subquery_planner produced, make a SubqueryScanPath */
+	foreach(lc, sub_final_rel->pathlist)
+	{
+		Path	   *subpath = (Path *) lfirst(lc);
+		List	   *pathkeys;
+
+		/* Convert subpath's pathkeys to outer representation */
+		pathkeys = convert_subquery_pathkeys(root,
+											 rel,
+											 subpath->pathkeys,
+											 make_tlist_from_pathtarget(subpath->pathtarget));
+
+		/* Generate outer path using this subpath */
+		add_path(rel, (Path *)
+				 create_subqueryscan_path(root, rel, subpath,
+										  trivial_pathtarget,
+										  pathkeys, required_outer));
+	}
+}
+
+
+/*
+ * Return true if the graph pattern has any quantified (variable-length) hop.
+ */
+static bool
+graph_pattern_has_quantifier(GraphPattern *gp)
+{
+	List	   *path_pattern = linitial(gp->path_pattern_list);
+	ListCell   *lc;
+
+	foreach(lc, path_pattern)
+	{
+		GraphElementPattern *gep = lfirst_node(GraphElementPattern, lc);
+
+		if (gep->quantifier != NULL)
+			return true;
+	}
+	return false;
+}
+
+/*
+ * Mutator resolving the GraphPropertyRef nodes of a quantified edge's own
+ * WHERE clause against one concrete edge element (rtindex 1).  Used for each
+ * arm of the GraphScan's inner (1-hop) expansion.
+ */
+static Node *
+resolve_edge_where_mutator(Node *node, Oid *elemoid)
+{
+	if (node == NULL)
+		return NULL;
+	if (IsA(node, GraphPropertyRef))
+	{
+		GraphPropertyRef *gpr = (GraphPropertyRef *) node;
+		Node	   *n;
+
+		n = get_element_property_expr(*elemoid, gpr->propid, 1);
+		if (!n)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_OBJECT),
+					 errmsg("property \"%s\" for element variable \"%s\" not found",
+							get_propgraph_property_name(gpr->propid),
+							gpr->elvarname)));
+		return n;
+	}
+	return expression_tree_mutator(node, resolve_edge_where_mutator,
+								   (void *) elemoid);
+}
+
+/*
+ * Build the Query for the GraphScan's inner 1-hop expansion over the given
+ * edge element tables: a UNION ALL of per-table SELECTs.  Each arm outputs,
+ * for every traversed edge: one column per VLE edge-list property (the edge's
+ * property value, accumulated into arrays by the executor), the edge's ctid,
+ * and the edge element table OID (so the executor can identify the source
+ * table of each row).
+ *
+ * The returned Query is what we plan through a nested subquery_planner() to
+ * obtain the parameterized 1-hop subplan (righttree).
+ */
+static Query *
+build_graphscan_inner_query(Oid graphid, GraphElementPattern *edge_gep,
+							List *edge_element_oids, List *array_props)
+{
+	List	   *arm_queries = NIL;
+	ListCell   *lc;
+
+	if (edge_element_oids == NIL)
+		return NULL;
+
+	foreach(lc, edge_element_oids)
+	{
+		Oid			elemoid = lfirst_oid(lc);
+		HeapTuple	etup;
+		Form_pg_propgraph_element pge;
+		Query	   *arm = makeNode(Query);
+		Relation	rel;
+		ParseNamespaceItem *pni;
+		List	   *tlist = NIL;
+		List	   *quals = NIL;
+		int			resno = 0;
+
+		etup = SearchSysCache1(PROPGRAPHELOID, ObjectIdGetDatum(elemoid));
+		if (!HeapTupleIsValid(etup))
+			elog(ERROR, "cache lookup failed for property graph element %u",
+				 elemoid);
+		pge = (Form_pg_propgraph_element) GETSTRUCT(etup);
+
+		arm->commandType = CMD_SELECT;
+
+		rel = table_open(pge->pgerelid, AccessShareLock);
+		pni = addRangeTableEntryForRelation(make_parsestate(NULL), rel,
+											AccessShareLock,
+											NULL, true, false);
+		table_close(rel, NoLock);
+		arm->rtable = lappend(arm->rtable, pni->p_rte);
+		arm->rteperminfos = lappend(arm->rteperminfos, pni->p_perminfo);
+		pni->p_rte->perminfoindex = list_length(arm->rteperminfos);
+		{
+			RangeTblRef *rtr = makeNode(RangeTblRef);
+
+			rtr->rtindex = 1;
+			arm->jointree = makeFromExpr(list_make1(rtr), NULL);
+		}
+
+		/* Property value columns for the VLE edge-list refs. */
+		foreach_ptr(GraphPropertyRef, gpr, array_props)
+		{
+			Node	   *n;
+
+			resno++;
+			n = get_element_property_expr(elemoid, gpr->propid, 1);
+			if (!n)
+				n = (Node *) makeNullConst(gpr->typeId,
+										   gpr->typmod,
+										   gpr->collation);
+			tlist = lappend(tlist,
+							makeTargetEntry((Expr *) n, resno,
+											psprintf("gep%d", resno), false));
+		}
+
+		/* Edge row identity: ctid. */
+		resno++;
+		tlist = lappend(tlist,
+						makeTargetEntry((Expr *) makeVar(1,
+														 SelfItemPointerAttributeNumber,
+														 TIDOID, -1,
+														 InvalidOid, 0),
+										resno, pstrdup("gs_ctid"), false));
+		/* Source edge element table OID. */
+		resno++;
+		tlist = lappend(tlist,
+						makeTargetEntry((Expr *) makeConst(OIDOID, -1,
+														   InvalidOid,
+														   sizeof(Oid),
+														   ObjectIdGetDatum(pge->pgerelid),
+														   false, true),
+										resno, pstrdup("gs_tbl"), false));
+
+		arm->targetList = tlist;
+
+		/* The edge's own WHERE, resolved against this edge element. */
+		if (edge_gep->whereClause)
+		{
+			Node	   *w = copyObject(edge_gep->whereClause);
+
+			IncrementVarSublevelsUp(w, 1, 1);
+			quals = lappend(quals,
+							resolve_edge_where_mutator(w, &elemoid));
+			((FromExpr *) arm->jointree)->quals =
+				(Node *) makeBoolExpr(AND_EXPR, quals, -1);
+		}
+
+		ReleaseSysCache(etup);
+
+		arm_queries = lappend(arm_queries, arm);
+	}
+
+	if (list_length(arm_queries) == 1)
+		return linitial_node(Query, arm_queries);
+
+	/* Build a UNION ALL of the per-table arms. */
+	{
+		SetOperationStmt *sostmt;
+		List	   *rtable = NIL;
+		Query	   *union_query;
+		Query	   *sample_query = linitial_node(Query, arm_queries);
+		List	   *arms = arm_queries;
+		Node	   *larg = NULL;
+		int			resno = 1;
+		ListCell   *lct,
+				   *lcm,
+				   *lcc,
+				   *lctl;
+
+		/* Build the left-deep UNION tree. */
+		for (int i = 0; i < list_length(arm_queries); i++)
+		{
+			Query	   *aq = list_nth_node(Query, arm_queries, i);
+			ParseNamespaceItem *pni;
+			RangeTblRef *rtr;
+
+			IncrementVarSublevelsUp((Node *) aq, 1, 1);
+			pni = addRangeTableEntryForSubquery(make_parsestate(NULL), aq,
+												NULL, false, false);
+			rtable = lappend(rtable, pni->p_rte);
+			rtr = makeNode(RangeTblRef);
+			rtr->rtindex = list_length(rtable);
+
+			if (larg == NULL)
+			{
+				larg = (Node *) rtr;
+				continue;
+			}
+			sostmt = makeNode(SetOperationStmt);
+			sostmt->op = SETOP_UNION;
+			sostmt->all = true;
+			sostmt->larg = larg;
+			sostmt->rarg = (Node *) rtr;
+			larg = (Node *) sostmt;
+		}
+
+		union_query = makeNode(Query);
+		union_query->commandType = CMD_SELECT;
+		union_query->rtable = rtable;
+		union_query->setOperations = larg;
+		union_query->jointree = makeFromExpr(NIL, NULL);
+
+		/*
+		 * Record the union's output column types on the topmost
+		 * SetOperationStmt; plan_set_operations() uses them to build the
+		 * result targetlist.
+		 */
+		foreach_ptr(TargetEntry, sample_tle, sample_query->targetList)
+		{
+			((SetOperationStmt *) larg)->colTypes =
+				lappend_oid(((SetOperationStmt *) larg)->colTypes,
+							exprType((Node *) sample_tle->expr));
+			((SetOperationStmt *) larg)->colTypmods =
+				lappend_int(((SetOperationStmt *) larg)->colTypmods,
+							exprTypmod((Node *) sample_tle->expr));
+			((SetOperationStmt *) larg)->colCollations =
+				lappend_oid(((SetOperationStmt *) larg)->colCollations,
+							exprCollation((Node *) sample_tle->expr));
+		}
+
+		/* Dummy targetlist on var 1, typed from the sample arm. */
+		union_query->targetList = NIL;
+		forfour(lct, ((SetOperationStmt *) larg)->colTypes,
+				lcm, ((SetOperationStmt *) larg)->colTypmods,
+				lcc, ((SetOperationStmt *) larg)->colCollations,
+				lctl, sample_query->targetList)
+		{
+			TargetEntry *sample_tle = (TargetEntry *) lfirst(lctl);
+			Var		   *var;
+
+			var = makeVar(1, sample_tle->resno, lfirst_oid(lct),
+						  lfirst_int(lcm), lfirst_oid(lcc), 0);
+			union_query->targetList =
+				lappend(union_query->targetList,
+						makeTargetEntry((Expr *) var, resno++,
+										pstrdup(sample_tle->resname), false));
+		}
+
+		return union_query;
+	}
+}
+
+/*
+ * Build the GraphScan's inner (1-hop) expansion plan (the righttree).
+ * Returns the Plan and stores its PlannerInfo into *inner_rootp.
+ */
+static Plan *
+build_graphscan_inner_plan(PlannerInfo *root, Oid graphid,
+						   GraphElementPattern *edge_gep,
+						   List *edge_element_oids,
+						   List *array_props,
+						   PlannerInfo **inner_rootp)
+{
+	Query	   *qr;
+	PlannerInfo *subroot;
+	RelOptInfo *sub_final_rel;
+	Plan	   *plan;
+	char	   *plan_name;
+
+	qr = build_graphscan_inner_query(graphid, edge_gep, edge_element_oids,
+									 array_props);
+	if (qr == NULL)
+	{
+		*inner_rootp = NULL;
+		return NULL;
+	}
+
+	plan_name = choose_plan_name(root->glob, "graph_hop", false);
+	subroot = subquery_planner(root->glob, qr, plan_name, root, NULL,
+							   false, 0.0, NULL);
+
+	sub_final_rel = fetch_upper_rel(subroot, UPPERREL_FINAL, NULL);
+	if (IS_DUMMY_REL(sub_final_rel))
+	{
+		*inner_rootp = subroot;
+		return NULL;
+	}
+
+	plan = create_plan(subroot, sub_final_rel->cheapest_total_path);
+
+	*inner_rootp = subroot;
+	return plan;
+}
+
+/*
+ * set_graphscan_pathlist
+ *		Build the (single) access path for an internal RTE_GRAPH_TABLE
+ *		describing one quantified (variable-length) hop: a GraphPath that
+ *		plans to a GraphScan node.
+ */
+static void
+set_graphscan_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
+					   RangeTblEntry *rte)
+{
+	GraphPattern *gp = rte->graph_pattern;
+	List	   *path_term;
+	GraphElementPattern *edge_gep;
+	GraphPath  *gpath;
+	Relids		required_outer;
+	List	   *edge_element_oids;
+	List	   *array_props;
+	PlannerInfo *inner_root;
+	Plan	   *inner_plan;
+	List	   *seed_key_cols = NIL;
+	List	   *terminal_key_cols = NIL;
+	List	   *edge_list_cols = NIL;
+	int			col;
+	ListCell   *lc;
+
+	/* The internal pattern is exactly (pd)-[e]-{m,n}->(td). */
+	Assert(gp != NULL && gp->path_pattern_list != NIL);
+	path_term = linitial(gp->path_pattern_list);
+	edge_gep = lsecond(path_term);
+
+	/* Always a single, presumably quantified, hop. */
+	Assert(edge_gep->quantifier != NULL);
+
+	/* Determine the output column layout from the built columns. */
+	col = 1;
+	foreach(lc, rte->graph_table_columns)
+	{
+		TargetEntry *te = lfirst_node(TargetEntry, lc);
+
+		if (te->resname && strncmp(te->resname, "gs_seed", 7) == 0)
+			seed_key_cols = lappend_int(seed_key_cols, col);
+		else if (te->resname && strncmp(te->resname, "gs_term", 7) == 0)
+			terminal_key_cols = lappend_int(terminal_key_cols, col);
+		else
+			edge_list_cols = lappend_int(edge_list_cols, col);
+		col++;
+	}
+
+	/*
+	 * The seed dependency (required_outer) comes from the ghost seed's WHERE
+	 * clause, which references the previous segment's vertex.
+	 */
+	if (gp->whereClause == NULL &&
+		list_length(path_term) >= 3)
+	{
+		GraphElementPattern *pd = linitial(path_term);
+
+		required_outer = pull_varnos(root, (Node *) pd->whereClause);
+	}
+	else
+		required_outer = NULL;
+
+	/* Edge element tables backing the hop's edge pattern. */
+	edge_element_oids = get_graph_edge_element_oids(rte->relid, edge_gep);
+	array_props = get_vle_array_props(rte, edge_gep->variable);
+
+	/*
+	 * The internal single-hop query has no easy rowcount estimate; use a
+	 * minimal nonzero rowcount so the relation is not treated as dummy.
+	 */
+	rel->rows = 1;
+
+	/* Build the parameterized 1-hop inner expansion (righttree). */
+	inner_plan = build_graphscan_inner_plan(root, rte->relid, edge_gep,
+											edge_element_oids, array_props,
+											&inner_root);
+
+	gpath = makeNode(GraphPath);
+	gpath->path.pathtype = T_GraphScan;
+	gpath->path.parent = rel;
+	gpath->path.pathtarget = rel->reltarget;
+	gpath->path.rows = rel->rows;
+	gpath->path.startup_cost = 0;
+	gpath->path.total_cost = rel->rows * cpu_tuple_cost;
+	gpath->path.pathkeys = NIL;
+	gpath->min_depth = linitial_int(edge_gep->quantifier);
+	gpath->max_depth = lsecond_int(edge_gep->quantifier);
+
+	switch (edge_gep->kind)
+	{
+		case EDGE_PATTERN_LEFT:
+			gpath->direction = GRAPH_DIR_INCOMING;
+			break;
+		case EDGE_PATTERN_ANY:
+			gpath->direction = GRAPH_DIR_UNDIRECTED;
+			break;
+		default:
+			gpath->direction = GRAPH_DIR_OUTGOING;
+			break;
+	}
+
+	gpath->seed_key_cols = seed_key_cols;
+	gpath->terminal_key_cols = terminal_key_cols;
+	gpath->edge_list_cols = edge_list_cols;
+	gpath->edge_element_oids = edge_element_oids;
+	gpath->inner_plan = inner_plan;
+	gpath->subplan_params = (inner_root != NULL) ? inner_root->plan_params : NIL;
+	gpath->vid_param = -1;
+
+	/*
+	 * Remember the inner (1-hop) planner root on the RelOptInfo, like
+	 * set_subquery_pathlist() does for subquery rels.  setrefs and the
+	 * subselect finalize pass look it up again via find_base_rel() to fix up
+	 * the inner plan (its rtable is spliced into the global rtable there).
+	 */
+	rel->subroot = inner_root;
+
+	/* Parameterize the path when the seed references outer relations. */
+	if (!bms_is_empty(required_outer))
+	{
+		ParamPathInfo *param_info;
+
+		required_outer = bms_del_member(required_outer, rti);
+		param_info = get_baserel_parampathinfo(root, rel, required_outer);
+		gpath->path.param_info = param_info;
+		gpath->path.rows = param_info->ppi_rows;
+	}
+
+	add_path(rel, (Path *) gpath);
+}
+
+/*
+ * Collect the set of outer relations referenced by the graph pattern (its
+ * element WHERE clauses, COLUMNS, and the graph-level WHERE clause).  These
+ * make the graph relation parameterized, even though the RTE_GRAPH_TABLE is
+ * not marked LATERAL in the jointree.
+ */
+static Relids
+graph_pattern_lateral_relids(PlannerInfo *root, RangeTblEntry *rte)
+{
+	GraphPattern *gp = rte->graph_pattern;
+	List	   *all = NIL;
+	List	   *path_pattern = linitial(gp->path_pattern_list);
+	ListCell   *lc;
+	Relids		result = NULL;
+
+	if (gp == NULL)
+		return NULL;
+
+	foreach(lc, path_pattern)
+	{
+		GraphElementPattern *gep = lfirst_node(GraphElementPattern, lc);
+
+		if (gep->whereClause)
+			all = lappend(all, gep->whereClause);
+		if (gep->subexpr)
+			all = list_concat(all, gep->subexpr);
+	}
+	if (gp->whereClause)
+		all = lappend(all, gp->whereClause);
+	foreach(lc, rte->graph_table_columns)
+	{
+		TargetEntry *te = lfirst_node(TargetEntry, lc);
+
+		all = lappend(all, (Node *) te->expr);
+	}
+
+	result = pull_varnos(root, (Node *) all);
+	return result;
 }
 
 /*

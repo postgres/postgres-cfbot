@@ -110,6 +110,7 @@
 #include "executor/nodeSort.h"
 #include "executor/nodeSubplan.h"
 #include "executor/nodeSubqueryscan.h"
+#include "executor/nodeGraphScan.h"
 #include "executor/nodeTableFuncscan.h"
 #include "executor/nodeTidrangescan.h"
 #include "executor/nodeTidscan.h"
@@ -249,6 +250,11 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 		case T_SubqueryScan:
 			result = (PlanState *) ExecInitSubqueryScan((SubqueryScan *) node,
 														estate, eflags);
+			break;
+
+		case T_GraphScan:
+			result = (PlanState *) ExecInitGraphScan((GraphScan *) node,
+													 estate, eflags);
 			break;
 
 		case T_FunctionScan:
@@ -643,6 +649,10 @@ ExecEndNode(PlanState *node)
 
 		case T_SubqueryScanState:
 			ExecEndSubqueryScan((SubqueryScanState *) node);
+			break;
+
+		case T_GraphScanState:
+			ExecEndGraphScan((GraphScanState *) node);
 			break;
 
 		case T_FunctionScanState:

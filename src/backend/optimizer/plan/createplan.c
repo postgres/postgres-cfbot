@@ -138,6 +138,8 @@ static TidRangeScan *create_tidrangescan_plan(PlannerInfo *root,
 static SubqueryScan *create_subqueryscan_plan(PlannerInfo *root,
 											  SubqueryScanPath *best_path,
 											  List *tlist, List *scan_clauses);
+static GraphScan * create_graphscan_plan(PlannerInfo *root, GraphPath * best_path,
+										 List *tlist, List *scan_clauses);
 static FunctionScan *create_functionscan_plan(PlannerInfo *root, Path *best_path,
 											  List *tlist, List *scan_clauses);
 static ValuesScan *create_valuesscan_plan(PlannerInfo *root, Path *best_path,
@@ -410,6 +412,7 @@ create_plan_recurse(PlannerInfo *root, Path *best_path, int flags)
 		case T_TidScan:
 		case T_TidRangeScan:
 		case T_SubqueryScan:
+		case T_GraphScan:
 		case T_FunctionScan:
 		case T_TableFuncScan:
 		case T_ValuesScan:
@@ -730,6 +733,13 @@ create_scan_plan(PlannerInfo *root, Path *best_path, int flags)
 													 (SubqueryScanPath *) best_path,
 													 tlist,
 													 scan_clauses);
+			break;
+
+		case T_GraphScan:
+			plan = (Plan *) create_graphscan_plan(root,
+												  (GraphPath *) best_path,
+												  tlist,
+												  scan_clauses);
 			break;
 
 		case T_FunctionScan:
@@ -3555,7 +3565,8 @@ create_subqueryscan_plan(PlannerInfo *root, SubqueryScanPath *best_path,
 
 	/* it should be a subquery base rel... */
 	Assert(scan_relid > 0);
-	Assert(rel->rtekind == RTE_SUBQUERY);
+	Assert(rel->rtekind == RTE_SUBQUERY ||
+		   rel->rtekind == RTE_GRAPH_TABLE);
 
 	/*
 	 * Recursively create Plan from Path for subquery.  Since we are entering
@@ -3592,6 +3603,69 @@ create_subqueryscan_plan(PlannerInfo *root, SubqueryScanPath *best_path,
 								  scan_clauses,
 								  scan_relid,
 								  subplan);
+
+	copy_generic_path_info(&scan_plan->scan.plan, &best_path->path);
+
+	return scan_plan;
+}
+
+/*
+ * create_graphscan_plan
+ *	 Returns a graph scan plan for the base relation scanned by 'best_path'
+ *	 with restriction clauses 'scan_clauses' and targetlist 'tlist'.
+ *
+ * The inner (single quantified hop) plan is kept in 'inner_plan'; its RTEs
+ * are spliced into the global rtable by setrefs and it is finalized by the
+ * subselect finalize pass (both via rel->subroot), and it is displayed by
+ * EXPLAIN as a child plan.
+ */
+static GraphScan *
+create_graphscan_plan(PlannerInfo *root, GraphPath * best_path,
+					  List *tlist, List *scan_clauses)
+{
+	GraphScan  *scan_plan;
+	RelOptInfo *rel = best_path->path.parent;
+	Index		scan_relid = rel->relid;
+
+	/* it should be an internal graph base rel... */
+	Assert(scan_relid > 0);
+	Assert(rel->rtekind == RTE_GRAPH_TABLE);
+
+	scan_plan = makeNode(GraphScan);
+	scan_plan->scan.scanrelid = scan_relid;
+	scan_plan->scan.plan.targetlist = tlist;
+
+	/* Sort clauses into best execution order */
+	scan_clauses = order_qual_clauses(root, scan_clauses);
+
+	/* Reduce RestrictInfo list to bare expressions; ignore pseudoconstants */
+	scan_clauses = extract_actual_clauses(scan_clauses, false);
+
+	/*
+	 * Replace any outer-relation variables with nestloop params.
+	 *
+	 * The inner plan already uses PARAM_EXEC for the outer (seed) variables
+	 * it needs, so we must register those with the enclosing nestloop before
+	 * fixing up our own scan clauses.
+	 */
+	if (best_path->path.param_info)
+	{
+		process_subquery_nestloop_params(root, best_path->subplan_params);
+		scan_clauses = (List *)
+			replace_nestloop_params(root, (Node *) scan_clauses);
+	}
+
+	scan_plan->scan.plan.qual = scan_clauses;
+
+	scan_plan->min_depth = best_path->min_depth;
+	scan_plan->max_depth = best_path->max_depth;
+	scan_plan->direction = best_path->direction;
+	scan_plan->seed_key_cols = best_path->seed_key_cols;
+	scan_plan->terminal_key_cols = best_path->terminal_key_cols;
+	scan_plan->edge_list_cols = best_path->edge_list_cols;
+	scan_plan->edge_element_oids = best_path->edge_element_oids;
+	scan_plan->inner_plan = best_path->inner_plan;
+	scan_plan->vid_param = best_path->vid_param;
 
 	copy_generic_path_info(&scan_plan->scan.plan, &best_path->path);
 
