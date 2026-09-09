@@ -571,7 +571,7 @@ pgarch_archiveXlog(char *xlog)
 		disable_all_timeouts(false);
 		LWLockReleaseAll();
 		ConditionVariableCancelSleep();
-		pgstat_report_wait_end();
+		pgstat_report_wait_end_timed();
 		pgaio_error_cleanup();
 		ReleaseAuxProcessResources(false);
 		AtEOXact_Files(false);

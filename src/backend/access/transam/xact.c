@@ -2892,7 +2892,7 @@ AbortTransaction(void)
 	WaitLSNCleanup();
 
 	/* Clear wait information and command progress indicator */
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 	pgstat_progress_end_command();
 
 	pgaio_error_cleanup();
@@ -5308,7 +5308,7 @@ AbortSubTransaction(void)
 	 */
 	WaitLSNCleanup();
 
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 	pgstat_progress_end_command();
 
 	pgaio_error_cleanup();
