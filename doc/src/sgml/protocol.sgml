@@ -2371,7 +2371,10 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
          <para>
           Specify that this replication slot is a temporary one. Temporary
           slots are not saved to disk and are automatically dropped on error
-          or when the session has finished.
+          or when the session has finished. An error raised and caught in a
+          subtransaction, for example by a
+          <application>PL/pgSQL</application> exception block, does not drop
+          them.
          </para>
         </listitem>
        </varlistentry>
