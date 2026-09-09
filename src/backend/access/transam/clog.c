@@ -540,7 +540,7 @@ TransactionGroupUpdateXidStatus(TransactionId xid, XidStatus status,
 		int			extraWaits = 0;
 
 		/* Sleep until the leader updates our XID status. */
-		pgstat_report_wait_start(WAIT_EVENT_XACT_GROUP_UPDATE);
+		pgstat_report_wait_start_timed(WAIT_EVENT_XACT_GROUP_UPDATE);
 		for (;;)
 		{
 			/* acts as a read barrier */
@@ -549,7 +549,7 @@ TransactionGroupUpdateXidStatus(TransactionId xid, XidStatus status,
 				break;
 			extraWaits++;
 		}
-		pgstat_report_wait_end();
+		pgstat_report_wait_end_timed();
 
 		Assert(pg_atomic_read_u32(&proc->clogGroupNext) == INVALID_PROC_NUMBER);
 
