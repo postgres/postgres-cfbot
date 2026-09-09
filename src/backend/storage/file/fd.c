@@ -1511,6 +1511,42 @@ FileAccess(File file)
 }
 
 /*
+ * Return the number of VFD slots currently holding an open file descriptor.
+ * This is the nfile counter, which tracks FDs actually open in the kernel.
+ */
+uint64
+GetVfdCacheOpenEntries(void)
+{
+	return (uint64) nfile;
+}
+
+/*
+ * Return the number of currently allocated VFD entries for this backend,
+ * excluding slot 0 which is used as freelist/LRU header.
+ */
+uint64
+GetVfdCacheAllocatedEntries(void)
+{
+	if (SizeVfdCache == 0)
+		return 0;
+
+	return (uint64) (SizeVfdCache - 1);
+}
+
+/*
+ * Return the current memory footprint of the VFD cache for this backend,
+ * measured as the total memory allocated by its dedicated memory context.
+ */
+uint64
+GetVfdCacheBytes(void)
+{
+	if (VfdCxt == NULL)
+		return 0;
+
+	return (uint64) MemoryContextMemAllocated(VfdCxt, false);
+}
+
+/*
  * Called whenever a temporary file is deleted to report its size.
  */
 static void
