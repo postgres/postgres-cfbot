@@ -737,6 +737,7 @@ WalReceiverMain(const void *startup_data, size_t startup_data_len)
 				XLogArchiveNotify(xlogfname);
 		}
 		recvFile = -1;
+		recvFileIsNew = false;
 
 		elog(DEBUG1, "walreceiver ended streaming and awaits new instructions");
 		WalRcvWaitForStartPosition(&startpoint, &startpointTLI);
