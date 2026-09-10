@@ -453,6 +453,24 @@ contain_mutable_functions_walker(Node *node, void *context)
 		Const	   *cnst;
 		Node		*path_spec;
 
+		/*
+		 * An INSERT/REPLACE "= PATH <jsonpath>" source is a jsonpath evaluated
+		 * at run time against the input document; a non-constant or mutable
+		 * one makes the whole expression mutable.
+		 */
+		if (jexpr->action != NULL && jexpr->action->source_pathspec != NULL)
+		{
+			if (!IsA(jexpr->action->source_pathspec, Const))
+				return true;
+
+			cnst = castNode(Const, jexpr->action->source_pathspec);
+			Assert(cnst->consttype == JSONPATHOID);
+			if (!cnst->constisnull &&
+				jspIsMutable(DatumGetJsonPathP(cnst->constvalue),
+							 jexpr->passing_names, jexpr->passing_values))
+				return true;
+		}
+
 		if(jexpr->action)
 			path_spec = jexpr->action->pathspec;
 		else

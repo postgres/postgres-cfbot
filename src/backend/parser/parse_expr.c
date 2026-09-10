@@ -4406,16 +4406,24 @@ resolveJsonTransformBehaviors(ParseState *pstate,
 {
 	ListCell   *lc;
 
-	/* Standard implicit defaults. */
+	/*
+	 * Standard implicit defaults.  ON EMPTY / ON ERROR apply only
+	 * to INSERT/REPLACE and are consulted only for a PATH-valued
+	 * source; their defaults are NULL ON EMPTY and ERROR ON ERROR.
+	 */
 	switch (action->op)
 	{
 		case TRANSFORM_INSERT:
 			action->on_existing = JSON_TRANSFORM_BEHAVIOR_ERROR;
 			action->on_null = JSON_TRANSFORM_BEHAVIOR_NULL;
+			action->on_empty = JSON_TRANSFORM_BEHAVIOR_NULL;
+			action->on_error = JSON_TRANSFORM_BEHAVIOR_ERROR;
 			break;
 		case TRANSFORM_REPLACE:
 			action->on_missing = JSON_TRANSFORM_BEHAVIOR_IGNORE;
 			action->on_null = JSON_TRANSFORM_BEHAVIOR_NULL;
+			action->on_empty = JSON_TRANSFORM_BEHAVIOR_NULL;
+			action->on_error = JSON_TRANSFORM_BEHAVIOR_ERROR;
 			break;
 		case TRANSFORM_REMOVE:
 		case TRANSFORM_RENAME:
@@ -4479,10 +4487,27 @@ resolveJsonTransformBehaviors(ParseState *pstate,
 
 			case JSON_TRANSFORM_TARGET_EMPTY:
 			case JSON_TRANSFORM_TARGET_ERROR:
-				ereport(ERROR,
-						errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("ON EMPTY and ON ERROR clauses are not yet supported in JSON_TRANSFORM"),
-						parser_errposition(pstate, clause->location));
+				if (action->op != TRANSFORM_INSERT &&
+					action->op != TRANSFORM_REPLACE)
+					ereport(ERROR,
+							errcode(ERRCODE_SYNTAX_ERROR),
+							errmsg("%s is only valid for JSON_TRANSFORM INSERT and REPLACE",
+								   clause->target == JSON_TRANSFORM_TARGET_EMPTY ?
+								   "ON EMPTY" : "ON ERROR"),
+							parser_errposition(pstate, clause->location));
+				if (behavior != JSON_TRANSFORM_BEHAVIOR_ERROR &&
+					behavior != JSON_TRANSFORM_BEHAVIOR_IGNORE &&
+					behavior != JSON_TRANSFORM_BEHAVIOR_NULL)
+					ereport(ERROR,
+							errcode(ERRCODE_SYNTAX_ERROR),
+							errmsg("%s behavior must be ERROR, IGNORE, or NULL",
+								   clause->target == JSON_TRANSFORM_TARGET_EMPTY ?
+								   "ON EMPTY" : "ON ERROR"),
+							parser_errposition(pstate, clause->location));
+				if (clause->target == JSON_TRANSFORM_TARGET_EMPTY)
+					action->on_empty = behavior;
+				else
+					action->on_error = behavior;
 				break;
 		}
 	}
@@ -4730,11 +4755,38 @@ transformJsonFuncExpr(ParseState *pstate, JsonFuncExpr *func)
 		{
 			case TRANSFORM_INSERT:
 			case TRANSFORM_REPLACE:
-				analyzed_jst_action->value_expr = transformJsonValueExpr(pstate, func_name,
-																		 (JsonValueExpr *) jst_action->value_expr,
-																		 default_format,
-																		 JSONBOID,
-																		 false);
+				if (jst_action->value_is_path)
+				{
+					/*
+					 * "= PATH <jsonpath>" source: the value to insert/replace
+					 * is produced at run time by evaluating this jsonpath
+					 * against the input document. Coerce it to jsonpath just
+					 * like the target path.
+					 */
+					Node	   *src = transformExprRecurse(pstate, jst_action->source_pathspec);
+					Oid			srctype = exprType(src);
+					int			srcloc = exprLocation(src);
+					Node	   *coerced_src = coerce_to_target_type(pstate, src, srctype,
+																	JSONPATHOID, -1,
+																	COERCION_EXPLICIT,
+																	COERCE_IMPLICIT_CAST,
+																	srcloc);
+
+					if (coerced_src == NULL)
+						ereport(ERROR,
+								(errcode(ERRCODE_DATATYPE_MISMATCH),
+								 errmsg("JSON path expression must be of type %s, not of type %s",
+										"jsonpath", format_type_be(srctype)),
+								 parser_errposition(pstate, srcloc)));
+					analyzed_jst_action->value_is_path = true;
+					analyzed_jst_action->source_pathspec = coerced_src;
+				}
+				else
+					analyzed_jst_action->value_expr = transformJsonValueExpr(pstate, func_name,
+																			 (JsonValueExpr *) jst_action->value_expr,
+																			 default_format,
+																			 JSONBOID,
+																			 false);
 				break;
 			case TRANSFORM_RENAME:
 				{

@@ -2395,6 +2395,8 @@ expression_tree_walker_impl(Node *node,
 						return true;
 					if (WALK(jexpr->action->value_expr))
 						return true;
+					if (WALK(jexpr->action->source_pathspec))
+						return true;
 				}
 			}
 			break;
@@ -3474,6 +3476,7 @@ expression_tree_mutator_impl(Node *node,
 					FLATCOPY(newact, jexpr->action, JsonTransformAction);
 					MUTATE(newact->pathspec, jexpr->action->pathspec, Node *);
 					MUTATE(newact->value_expr, jexpr->action->value_expr, Node *);
+					MUTATE(newact->source_pathspec, jexpr->action->source_pathspec, Node *);
 					newnode->action = newact;
 				}
 				return (Node *) newnode;

@@ -1747,14 +1747,28 @@ typedef struct JsonTransformAction
 {
 	NodeTag		type;
 	JsonTransformOp op;
-	Node	   *pathspec;		/* The JSON Path: '$.a' */
-	Node	   *value_expr;
+	Node	   *pathspec;		/* The target JSON Path: '$.a' */
+
+	/*
+	 * The source of an INSERT/REPLACE value.  Per SQL/JSON, the source is
+	 * either a value expression (value_is_path = false; value_expr holds it)
+	 * or "PATH <jsonpath>" (value_is_path = true; source_pathspec holds the
+	 * jsonpath, evaluated against the input document at run time).  RENAME
+	 * carries its new key name in value_expr; REMOVE has neither.
+	 */
+	bool		value_is_path;	/* is the source a "PATH <jsonpath>"? */
+	Node	   *value_expr;		/* value source, or RENAME target name */
+	Node	   *source_pathspec;	/* jsonpath source (PATH form), else NULL */
+
 	/* raw ON-clauses from the grammar (transient; resolved in analysis) */
 	List	   *behaviors;
 	/* resolved behaviors (filled by parse analysis from defaults + clauses) */
 	JsonTransformBehavior on_existing;
 	JsonTransformBehavior on_missing;
 	JsonTransformBehavior on_null;
+	/* ON EMPTY / ON ERROR, consulted only for a PATH-valued source */
+	JsonTransformBehavior on_empty;
+	JsonTransformBehavior on_error;
 	ParseLoc	location;		/* token location, or -1 if unknown */
 }			JsonTransformAction;
 

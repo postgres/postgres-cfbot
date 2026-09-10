@@ -5530,7 +5530,67 @@ ExecEvalJsonTransform(ExprState *state, ExprEvalStep *op,
 	/* Build the value the action needs, honoring ON NULL for INSERT/REPLACE. */
 	if (action->op == TRANSFORM_INSERT || action->op == TRANSFORM_REPLACE)
 	{
-		if (jtstate->action_value.isnull)
+		if (action->value_is_path)
+		{
+			/*
+			 * "= PATH <jsonpath>" source : derive the value by running
+			 * the source jsonpath against the input document with the
+			 * PASSING variables, exactly as JSON_QUERY WITHOUT WRAPPER
+			 * does.  A sequence of more than one item is an error; zero
+			 * items triggers ON EMPTY; an evaluation error triggers
+			 * ON ERROR.  ON NULL does not apply to a PATH source.
+			 */
+			JsonPath   *jp_src = DatumGetJsonPathP(jtstate->source_pathspec.value);
+			bool		throw_error = (action->on_error == JSON_TRANSFORM_BEHAVIOR_ERROR);
+			bool		src_empty = false;
+			bool		src_error = false;
+			Datum		srcval;
+
+			srcval = JsonPathQuery(jtstate->formatted_expr.value, jp_src,
+								   JSW_NONE, &src_empty,
+								   throw_error ? NULL : &src_error,
+								   jtstate->args, NULL);
+
+			if (src_error)
+			{
+				/* soft error (incl. >1 item); on_error is IGNORE or NULL */
+				if (action->on_error == JSON_TRANSFORM_BEHAVIOR_IGNORE)
+				{
+					*op->resvalue = JsonbPGetDatum(in);
+					*op->resnull = false;
+					return;
+				}
+				/* NULL ON ERROR */
+				newvalbuf.type = jbvNull;
+				newval = &newvalbuf;
+			}
+			else if (src_empty)
+			{
+				switch (action->on_empty)
+				{
+					case JSON_TRANSFORM_BEHAVIOR_ERROR:
+						ereport(ERROR,
+								errcode(ERRCODE_NO_SQL_JSON_ITEM),
+								errmsg("no SQL/JSON item found for the JSON_TRANSFORM source path"));
+						break;
+					case JSON_TRANSFORM_BEHAVIOR_IGNORE:
+						*op->resvalue = JsonbPGetDatum(in);
+						*op->resnull = false;
+						return;
+					default:
+						/* NULL ON EMPTY */
+						newvalbuf.type = jbvNull;
+						newval = &newvalbuf;
+						break;
+				}
+			}
+			else
+			{
+				JsonbToJsonbValue(DatumGetJsonbP(srcval), &newvalbuf);
+				newval = &newvalbuf;
+			}
+		}
+		else if (jtstate->action_value.isnull)
 		{
 			switch (action->on_null)
 			{

@@ -10645,12 +10645,25 @@ get_rule_expr(Node *node, deparse_context *context,
 					if(jexpr->action->op != TRANSFORM_REMOVE)
 					{
 						appendStringInfoString(buf, " = ");
-						get_rule_expr(jexpr->action->value_expr, context, showimplicit);
+						if (jexpr->action->value_is_path)
+						{
+							appendStringInfoString(buf, "PATH ");
+							get_json_path_spec(jexpr->action->source_pathspec,
+											   context, showimplicit);
+						}
+						else
+							get_rule_expr(jexpr->action->value_expr, context, showimplicit);
 					}
 
 					get_json_transform_behavior(buf, jexpr->action->on_existing, "EXISTING");
 					get_json_transform_behavior(buf, jexpr->action->on_missing, "MISSING");
 					get_json_transform_behavior(buf, jexpr->action->on_null, "NULL");
+					/* ON EMPTY / ON ERROR apply only to a PATH-valued source */
+					if (jexpr->action->value_is_path)
+					{
+						get_json_transform_behavior(buf, jexpr->action->on_empty, "EMPTY");
+						get_json_transform_behavior(buf, jexpr->action->on_error, "ERROR");
+					}
 				}
 				else
 					get_json_path_spec(jexpr->path_spec, context, showimplicit);

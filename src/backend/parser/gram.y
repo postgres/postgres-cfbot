@@ -913,6 +913,16 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %nonassoc	IDENT PARTITION RANGE ROWS GROUPS PRECEDING FOLLOWING CUBE ROLLUP
 			SET KEYS OBJECT_P SCALAR TO USING VALUE_P WITH WITHOUT PATH
 /*
+ * The string-literal token SCONST is given a precedence just above PATH so
+ * that, in the JSON_TRANSFORM INSERT/REPLACE source "= PATH Sconst", the
+ * parser shifts the string as the jsonpath source rather than reducing PATH
+ * as an unreserved keyword introducing a "path 'literal'" typed constant.
+ * This only affects that one construct: without it the sole shift/reduce
+ * conflicts involving SCONST are those two, so the assignment cannot mask any
+ * other ambiguity.
+ */
+%nonassoc	SCONST
+/*
  * IGNORE is given a precedence so the shift/reduce conflict between window
  * null-treatment (IGNORE NULLS) and a JSON_TRANSFORM behavior clause
  * (IGNORE ON ...) resolves in favor of shifting (binding IGNORE to NULLS).
@@ -17649,6 +17659,20 @@ json_transform_action:
 				$$ = (Node *) n;
 			}
 			|
+			/* INSERT path_expr = PATH jsonpath_source */
+			INSERT a_expr '=' PATH Sconst json_transform_behavior_list_opt
+			{
+				JsonTransformAction *n = makeNode(JsonTransformAction);
+				n->op = TRANSFORM_INSERT;
+				n->pathspec = $2;
+				n->value_is_path = true;
+				n->source_pathspec = makeStringConst($5, @5);
+				n->behaviors = $6;
+				n->location = @1;
+
+				$$ = (Node *) n;
+			}
+			|
 			RENAME a_expr '=' Sconst json_transform_behavior_list_opt
 			{
 				JsonTransformAction *n = makeNode(JsonTransformAction);
@@ -17668,6 +17692,20 @@ json_transform_action:
 				n->pathspec = $2;
 				n->value_expr = $4;
 				n->behaviors = $5;
+				n->location = @1;
+
+				$$ = (Node *) n;
+			}
+			|
+			/* REPLACE path_expr = PATH jsonpath_source */
+			REPLACE a_expr '=' PATH Sconst json_transform_behavior_list_opt
+			{
+				JsonTransformAction *n = makeNode(JsonTransformAction);
+				n->op = TRANSFORM_REPLACE;
+				n->pathspec = $2;
+				n->value_is_path = true;
+				n->source_pathspec = makeStringConst($5, @5);
+				n->behaviors = $6;
 				n->location = @1;
 
 				$$ = (Node *) n;
