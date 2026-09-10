@@ -1676,6 +1676,13 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
       hand, recreates the <acronym>TOAST</acronym> relation and therefore
       applies the current value of this parameter.
      </para>
+     <para>
+      As with any storage parameter, this cannot be set on a partitioned
+      table, and a partition does not inherit it from its parent: a
+      partition created without it gets a <acronym>TOAST</acronym> relation
+      with an <type>oid</type> <literal>chunk_id</literal>.  Specify it on
+      each partition that needs it.
+     </para>
     </listitem>
    </varlistentry>
 

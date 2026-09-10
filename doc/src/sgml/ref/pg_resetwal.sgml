@@ -300,6 +300,18 @@ PostgreSQL documentation
       backwards. The counter is 8 bytes wide and never wraps around during
       the life of a cluster.
      </para>
+
+     <para>
+      Tables with <xref linkend="reloption-toast-value-type"/> set to
+      <literal>oid8</literal> are the exception: their
+      <acronym>TOAST</acronym> values take the counter's value as is, so a
+      counter set below a <structfield>chunk_id</structfield> already in use
+      makes inserts into such a table fail with duplicate key errors, and
+      each failure moves the counter forward by only one.  For these tables
+      the largest value in use is easy to find, with
+      <literal>SELECT max(chunk_id)</literal> on each of their
+      <acronym>TOAST</acronym> tables; set the next OID above it.
+     </para>
     </listitem>
    </varlistentry>
 
