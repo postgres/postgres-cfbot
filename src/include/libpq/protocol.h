@@ -67,7 +67,7 @@
 
 /* These are the codes sent by parallel workers to leader processes. */
 
-#define PqMsg_Progress              'P'
+#define PqParallelMsg_Progress 'P'
 
 
 /* Replication codes sent by the primary (wrapped in CopyData messages). */
