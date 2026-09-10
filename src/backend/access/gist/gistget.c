@@ -456,7 +456,34 @@ gistScanPage(IndexScanDesc scan, GISTSearchItem *pageItem,
 		MemoryContextSwitchTo(oldcxt);
 		MemoryContextReset(so->giststate->tempCxt);
 
-		/* Ignore tuple if it doesn't match */
+		if (GistTupleIsSkip(it))
+		{
+			OffsetNumber count = GistTupleGetSkipCount(it);
+
+			if (count > maxoff - i)
+				ereport(ERROR,
+						(errcode(ERRCODE_INDEX_CORRUPTED),
+						 errmsg("index \"%s\" contains an invalid GiST skip tuple",
+								RelationGetRelationName(r))));
+			for (OffsetNumber member = OffsetNumberNext(i);
+				 member <= i + count; member = OffsetNumberNext(member))
+			{
+				IndexTuple	member_itup = (IndexTuple) PageGetItem(page,
+																   PageGetItemId(page, member));
+
+				if (GistTupleIsSkip(member_itup))
+					ereport(ERROR,
+							(errcode(ERRCODE_INDEX_CORRUPTED),
+							 errmsg("index \"%s\" contains an invalid GiST skip tuple",
+									RelationGetRelationName(r))));
+			}
+
+			if (!match)
+				i += count;
+			continue;
+		}
+
+		/* Ignore ordinary tuple if it doesn't match. */
 		if (!match)
 			continue;
 
