@@ -605,6 +605,13 @@ typedef struct GraphScan
 	List	   *edge_element_oids;	/* List of Oid */
 
 	/*
+	 * The internal RTE's output columns (List of TargetEntry), in RTE column
+	 * order (seed keys, terminal keys, VLE edge-list columns).  Used by the
+	 * executor to build the scan's (positional) tuple descriptor.
+	 */
+	List	   *graph_columns;
+
+	/*
 	 * The parameterized 1-hop expansion plan (the righttree).  It was planned
 	 * out-of-band with rel->subroot (see allpaths.c), whose rtable is spliced
 	 * into the global rtable at setrefs time.  The enclosing nestloop
@@ -612,8 +619,19 @@ typedef struct GraphScan
 	 */
 	Plan	   *inner_plan;
 
-	/* PARAM_EXEC id of the current-vertex parameter for inner rescans. */
-	int			vid_param;
+	/* Vertex element the (ghost) seed belongs to. */
+	Oid			seed_elem_oid;
+
+	/*
+	 * PARAM_EXEC ids (List of int) of the seed key columns, in key order. The
+	 * enclosing nestloop fills them from the outer row; the executor reads
+	 * them to obtain the seed vertex for the traversal.
+	 */
+	List	   *seed_param_ids;
+
+	/* Hop-wide max src/dest key widths over the edge element arms. */
+	int			max_nsrc;
+	int			max_ndst;
 }			GraphScan;
 
 /* ----------------

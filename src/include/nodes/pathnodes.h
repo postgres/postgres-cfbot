@@ -2226,6 +2226,9 @@ typedef struct GraphPath
 	/* Edge element OIDs behind the inner expansion. */
 	List	   *edge_element_oids;
 
+	/* The internal RTE's output columns (see GraphScan). */
+	List	   *graph_columns;
+
 	/* The parameterized 1-hop expansion plan. */
 	struct Plan *inner_plan;
 
@@ -2235,8 +2238,15 @@ typedef struct GraphPath
 	 */
 	List	   *subplan_params;
 
-	/* PARAM_EXEC id of the current-vertex parameter. */
-	int			vid_param;
+	/* Vertex element the (ghost) seed belongs to. */
+	Oid			seed_elem_oid;
+
+	/* PARAM_EXEC ids of the seed key columns (filled at create_plan time). */
+	List	   *seed_param_ids;
+
+	/* Hop-wide max src/dest key widths over the edge element arms. */
+	int			max_nsrc;
+	int			max_ndst;
 }			GraphPath;
 
 /*

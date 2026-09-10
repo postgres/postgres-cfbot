@@ -3654,6 +3654,70 @@ create_graphscan_plan(PlannerInfo *root, GraphPath * best_path,
 			replace_nestloop_params(root, (Node *) scan_clauses);
 	}
 
+	/*
+	 * Identify the nestloop params that supply the current seed key values.
+	 * The ghost seed element's WHERE clause is a conjunction of equalities
+	 * "gs_seed_attr = seed_key"; after replace_nestloop_params() the seed key
+	 * side is a PARAM_EXEC that the enclosing nestloop fills from the outer
+	 * row.  Record those param ids, in key column order, so the executor can
+	 * read the seed vertex for every outer row.
+	 */
+	{
+		ListCell   *lc2;
+		List	   *seed_params = NIL;
+
+		for (int i = 0; i < list_length(best_path->seed_key_cols); i++)
+			seed_params = lappend_int(seed_params, -1);
+
+		foreach(lc2, scan_clauses)
+		{
+			OpExpr	   *op = (OpExpr *) lfirst(lc2);
+			Var		   *var = NULL;
+			Param	   *param = NULL;
+			int			pos = -1;
+			int			amp = 0;
+
+			if (!IsA(op, OpExpr) || list_length(op->args) != 2)
+				continue;
+			if (IsA(linitial(op->args), Var) &&
+				IsA(lsecond(op->args), Param))
+			{
+				var = linitial_node(Var, op->args);
+				param = lsecond_node(Param, op->args);
+			}
+			else if (IsA(linitial(op->args), Param) &&
+					 IsA(lsecond(op->args), Var))
+			{
+				param = linitial_node(Param, op->args);
+				var = lsecond_node(Var, op->args);
+			}
+			else
+				continue;
+
+			if (var->varno != scan_relid || var->varlevelsup != 0 ||
+				param->paramkind != PARAM_EXEC)
+				continue;
+
+			foreach_int(att, best_path->seed_key_cols)
+			{
+				if (att == var->varattno)
+				{
+					pos = amp;
+					break;
+				}
+				amp++;
+			}
+			if (pos >= 0)
+				lfirst_int(list_nth_cell(seed_params, pos)) = param->paramid;
+		}
+
+		if (list_length(seed_params) !=
+			list_length(best_path->seed_key_cols) ||
+			list_member_int(seed_params, -1))
+			elog(ERROR, "could not identify graph scan seed parameters");
+		scan_plan->seed_param_ids = seed_params;
+	}
+
 	scan_plan->scan.plan.qual = scan_clauses;
 
 	scan_plan->min_depth = best_path->min_depth;
@@ -3663,8 +3727,11 @@ create_graphscan_plan(PlannerInfo *root, GraphPath * best_path,
 	scan_plan->terminal_key_cols = best_path->terminal_key_cols;
 	scan_plan->edge_list_cols = best_path->edge_list_cols;
 	scan_plan->edge_element_oids = best_path->edge_element_oids;
+	scan_plan->graph_columns = best_path->graph_columns;
 	scan_plan->inner_plan = best_path->inner_plan;
-	scan_plan->vid_param = best_path->vid_param;
+	scan_plan->seed_elem_oid = best_path->seed_elem_oid;
+	scan_plan->max_nsrc = best_path->max_nsrc;
+	scan_plan->max_ndst = best_path->max_ndst;
 
 	copy_generic_path_info(&scan_plan->scan.plan, &best_path->path);
 

@@ -1282,6 +1282,14 @@ typedef struct RangeTblEntry
 	bool		is_internal_graph pg_node_attr(query_jumble_ignore);
 
 	/*
+	 * For internal graph RTEs: the graph element (vertex) the ghost seed
+	 * belongs to, and the VLE edge-list property references of the hidden
+	 * quantified edge (as GraphPropertyRef nodes).  Planner-internal only.
+	 */
+	Oid			graph_seed_elem_oid pg_node_attr(query_jumble_ignore);
+	List	   *graph_vle_props pg_node_attr(query_jumble_ignore);
+
+	/*
 	 * Fields valid for a values RTE (else NIL):
 	 */
 	/* list of expression lists */
