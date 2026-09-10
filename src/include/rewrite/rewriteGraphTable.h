@@ -85,4 +85,13 @@ extern Oid key_equality_operator(Oid typid);
  */
 extern List *get_vle_array_props(RangeTblEntry *rte, const char *edge_var);
 
+/*
+ * Apply row-level security policies to the backing relation RTEs of an
+ * internally built query.  The rewriter's fireRIRrules() does this for
+ * parsed queries; the decomposed internal query never passes through the
+ * rewriter, so its RTEs would otherwise carry no securityQuals and RLS
+ * would be silently bypassed.
+ */
+extern void native_apply_rls_to_query(Query *query);
+
 #endif							/* REWRITEGRAPHTABLE_H */

@@ -6,7 +6,7 @@
  * A GraphScan evaluates one quantified (variable-length) hop of a graph
  * pattern with a depth-first search.  The scan is a parameterized inner of
  * its enclosing join: each outer row provides a seed vertex (as nestloop
- * params, see GraphScan.seed_param_ids).  From that seed the executor walks
+ * params, see GraphScan.seed_params).  From that seed the executor walks
  * the edge elements of the hop, one depth level at a time, by driving
  * per-depth copies of the planned 1-hop expansion (the inner plan, a UNION
  * ALL of the matching edge element tables).
@@ -169,11 +169,31 @@ graph_fetch_seed(GraphScanState * node, GraphScan * plan)
 	fr->vid_nkeys = list_length(node->seed_params);
 	foreach(lc, node->seed_params)
 	{
-		ParamExecData *prm = &estate->es_param_exec_vals[lfirst_int(lc)];
+		Node	   *item = (Node *) lfirst(lc);
+		Datum		value;
+		bool		isnull;
 
-		fr->vid[k] = prm->value;
-		fr->vidnull[k] = prm->isnull;
-		if (prm->isnull)
+		if (IsA(item, Param))
+		{
+			/* bound by the enclosing nestloop (see GraphScan.seed_params) */
+			ParamExecData *prm =
+				&estate->es_param_exec_vals[((Param *) item)->paramid];
+
+			value = prm->value;
+			isnull = prm->isnull;
+		}
+		else
+		{
+			/* constant-bound seed column (see GraphScan.seed_params) */
+			Const	   *con = castNode(Const, item);
+
+			value = con->constvalue;
+			isnull = con->constisnull;
+		}
+
+		fr->vid[k] = value;
+		fr->vidnull[k] = isnull;
+		if (isnull)
 			hasnull = true;
 		k++;
 	}
@@ -665,7 +685,7 @@ ExecInitGraphScan(GraphScan * node, EState *estate, int eflags)
 	scanstate->nprops = list_length(node->edge_list_cols);
 	scanstate->max_nsrc = node->max_nsrc;
 	scanstate->max_ndst = node->max_ndst;
-	scanstate->seed_params = node->seed_param_ids;
+	scanstate->seed_params = node->seed_params;
 	scanstate->narms = list_length(node->edge_element_oids);
 	scanstate->cur_depth = -1;
 	scanstate->need_seed = true;
@@ -699,7 +719,7 @@ ExecInitGraphScan(GraphScan * node, EState *estate, int eflags)
 	 * Build the depth frames: every frame owns a copy of the inner (1-hop)
 	 * expansion plan so that each frame's scan cursor is independent.
 	 */
-	maxwidth = Max(list_length(node->seed_param_ids),
+	maxwidth = Max(list_length(node->seed_params),
 				   Max(node->max_nsrc, node->max_ndst));
 	scanstate->tmp_vid = palloc(sizeof(Datum) * Max(maxwidth, 1));
 	scanstate->tmp_vidnull = palloc(sizeof(bool) * Max(maxwidth, 1));

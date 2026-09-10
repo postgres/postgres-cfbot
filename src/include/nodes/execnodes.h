@@ -1987,7 +1987,10 @@ typedef struct GraphScanState
 	int			narms;
 	struct GraphScanArmData *arms;
 
-	/* PARAM_EXEC ids of the seed key columns (List of int), in key order. */
+	/*
+	 * Seed key values of the current seed column (List of Param or Const,
+	 * one per seed key column, in key order); see GraphScan.seed_params.
+	 */
 	List	   *seed_params;
 
 	/*

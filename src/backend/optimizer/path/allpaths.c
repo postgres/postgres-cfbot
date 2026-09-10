@@ -3230,6 +3230,13 @@ set_graph_pathlist(PlannerInfo *root, RelOptInfo *rel,
 		subquery = copyObject(decomposeGraphTable(rte));
 
 	/*
+	 * The decomposed query is planned without passing through the rewriter,
+	 * which is where RLS policies are normally attached; apply them here so
+	 * row-level security on the backing element tables is enforced.
+	 */
+	native_apply_rls_to_query(subquery);
+
+	/*
 	 * If the pattern or its COLUMNS reference outer relations (lateral), the
 	 * graph table must be treated as parameterized even though it is not
 	 * marked LATERAL in the jointree.
@@ -3649,6 +3656,9 @@ build_graphscan_inner_query(Oid graphid, GraphElementPattern *edge_gep,
 				((FromExpr *) arm->jointree)->quals =
 					(Node *) makeBoolExpr(AND_EXPR, quals, -1);
 			}
+
+			/* Edge element tables can carry RLS policies. */
+			native_apply_rls_to_query(arm);
 
 			arm_queries = lappend(arm_queries, arm);
 			ai++;

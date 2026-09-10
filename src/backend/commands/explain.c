@@ -2576,7 +2576,6 @@ show_qual(List *qual, const char *qlabel,
 static void
 show_graphscan_info(GraphScan * plan, ExplainState *es)
 {
-	ExplainOpenGroup("Graph Scan", "Graph Scan", false, es);
 	ExplainPropertyInteger("min_depth", NULL, plan->min_depth, es);
 	ExplainPropertyInteger("max_depth", NULL, plan->max_depth, es);
 	switch (plan->direction)
@@ -2591,7 +2590,6 @@ show_graphscan_info(GraphScan * plan, ExplainState *es)
 			ExplainPropertyText("direction", "undirected", es);
 			break;
 	}
-	ExplainCloseGroup("Graph Scan", "Graph Scan", false, es);
 }
 
 static void
