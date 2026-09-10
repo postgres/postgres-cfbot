@@ -55,6 +55,9 @@
  */
 #define CLOCKSWEEP_HISTORY_COEFF	0.5
 
+/* How often backend should re-fetch the CPU/node on which it is running on? */
+#define CLOCKSWEEP_CPU_NODE_REFRESH	128
+
 /*
  * Information about one partition of the ClockSweep (on a subset of buffers).
  *
@@ -348,13 +351,29 @@ ClockSweepPartitionIndex(void)
 #ifdef USE_LIBNUMA
 	if (shared_buffers_numa)
 	{
-		int		cpu;
+		/*
+		 * Cache the CPU/NUMA node, refreshing only every CLOCKSWEEP_CPU_NODE_REFRESH
+		 * allocations. It appears that sched_getcpu()/numa_node_of_cpu() are not free.
+		 * On some platforms it take price of full system call, or the rest (x86_64?)
+		 * is can be use VDSO optimization. The backend rarely migrates between NUMA
+		 * nodes, and the balance logic only needs to notice migration after some time,
+		 * so an occasional refresh is good enough.
+		 */
+		static int		cached_node = -1;
+		static uint32	refresh_counter = 0;
 
-		/* XXX do we need to check sched_getcpu is available, somehow? */
-		if ((cpu = sched_getcpu()) < 0)
+		if (cached_node < 0 || (refresh_counter++ % CLOCKSWEEP_CPU_NODE_REFRESH) == 0)
+		{
+		  int cpu;
+
+		  /* XXX do we need to check sched_getcpu is available, somehow? */
+		  if ((cpu = sched_getcpu()) < 0)
 			elog(ERROR, "sched_getcpu failed: %m");
 
-		node = numa_node_of_cpu(cpu);
+		  /* XXX/JW: use libnuma wrapper for this */
+		  cached_node = numa_node_of_cpu(cpu);
+		}
+		node = cached_node;
 	}
 #endif
 
@@ -737,7 +756,8 @@ StrategySyncBalance(void)
 
 	uint32	total_allocs = 0,	/* total number of allocations */
 			avg_allocs,			/* average allocations (per partition) */
-			delta_allocs = 0;	/* sum of allocs above average */
+			delta_allocs = 0,	/* sum of allocs above average */
+			redirect_cutoff;	/* redirect only above this many allocs */
 
 	/*
 	 * Collect the number of allocations requested in the past interval.
@@ -819,6 +839,20 @@ StrategySyncBalance(void)
 	}
 
 	/*
+	 * A partition only redirects allocations to other partitions when it
+	 * exceeds the average by more than some threshold percent.
+	 * Below this cutoff we keep allocations local, to preserve NUMA locality.
+	 *
+	 * TODO: maybe better value is possible. On 4s with 25 I've got good results,
+	 *       but with value of 50 I've got slight degradation. Maybe it should 
+	 *       be equal to 100/numa_nodes ?
+	 *
+	 */
+#define CLOCKSWEEP_CUTOFF_THRESHOLD 25
+	redirect_cutoff = avg_allocs +
+		(uint32) ((uint64) avg_allocs * CLOCKSWEEP_CUTOFF_THRESHOLD / 100);
+
+	/*
 	 * The actual rebalancing
 	 *
 	 * Partition with fewer than average allocations, should not redirect any
@@ -850,10 +884,15 @@ StrategySyncBalance(void)
 		/* reset the weights to start from scratch */
 		memset(balance, 0, sizeof(uint8) * MAX_BUFFER_PARTITIONS);
 
-		/* does this partition has fewer or more than avg_allocs? */
-		if (allocs[i] < avg_allocs)
+		/*
+		 * Does this partition exceed its fair share by more than the
+		 * threshold? If not, keep all allocations local - redirecting them
+		 * would push memory onto remote NUMA nodes for no real benefit when
+		 * the load is already close to balanced.
+		 */
+		if (allocs[i] <= redirect_cutoff)
 		{
-			/* fewer - don't redirect any allocations elsewhere */
+			/* near fair share (or below) - keep allocations local */
 			balance[i] = 100;
 		}
 		else
@@ -868,22 +907,45 @@ StrategySyncBalance(void)
 			/* fraction of the "total" delta */
 			double	delta_frac = (allocs[i] - avg_allocs) * 1.0 / delta_allocs;
 
-			/* keep just enough allocations to meet the target */
-			balance[i] = (100.0 * avg_allocs / allocs[i]);
+			/* how much we keep local; we hand out the rest below */
+			int		kept = 100;
 
 			/* redirect the extra allocations */
 			for (int j = 0; j < StrategyControl->num_partitions; j++)
 			{
 				/* How many allocations to receive from i-th partition? */
 				uint32	receive_allocs = delta_frac * (avg_allocs - allocs[j]);
+				int		w;
+
+				/* do not redirect to ourselves */
+				if (j == i)
+					continue;
 
 				/* ignore partitions that don't need additional allocations */
 				if (allocs[j] > avg_allocs)
 					continue;
 
+				/*
+				 * Only use other partitions that actually have demand of
+				 * their own (avoid idle). If we fail, there's always the
+				 * scan-all-partitions fallback.
+				 *
+				 * TODO:: just guessing,heuristics
+				 */
+				if (allocs[j] < (avg_allocs / 2))
+					continue;
+
 				/* fraction to redirect */
-				balance[j] = (100.0 * receive_allocs / allocs[i]) + 0.5;
+				w = (int) ((100.0 * receive_allocs / allocs[i]) + 0.5);
+				balance[j] = w;
+				kept -= w;
 			}
+
+			/* avoid negative balances */
+			if (kept > 0)
+				balance[i] = kept;
+			else
+				balance[i] = 1;
 		}
 
 		/* combine the old and new weights (hysteresis) */
