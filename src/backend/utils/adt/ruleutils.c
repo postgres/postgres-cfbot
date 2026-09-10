@@ -3010,6 +3010,9 @@ pg_get_functiondef(PG_FUNCTION_ARGS)
 			break;
 	}
 
+	if (proc->proerrorsafe)
+		appendStringInfoString(&buf, " ERROR SAFE");
+
 	if (proc->proisstrict)
 		appendStringInfoString(&buf, " STRICT");
 	if (proc->prosecdef)

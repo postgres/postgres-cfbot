@@ -123,7 +123,7 @@ RESET SESSION AUTHORIZATION;
 --
 CREATE FUNCTION functest_F_1(int) RETURNS bool LANGUAGE 'sql'
        AS 'SELECT $1 > 50';
-CREATE FUNCTION functest_F_2(int) RETURNS bool LANGUAGE 'sql'
+CREATE FUNCTION functest_F_2(int) RETURNS bool LANGUAGE 'sql' ERROR UNSAFE
        CALLED ON NULL INPUT AS 'SELECT $1 = 50';
 CREATE FUNCTION functest_F_3(int) RETURNS bool LANGUAGE 'sql'
        RETURNS NULL ON NULL INPUT AS 'SELECT $1 < 50';
@@ -137,6 +137,7 @@ SELECT proname, proisstrict FROM pg_proc
 
 ALTER FUNCTION functest_F_1(int) IMMUTABLE;	-- unrelated change, no effect
 ALTER FUNCTION functest_F_2(int) STRICT;
+ALTER FUNCTION functest_F_2(int) ERROR SAFE;
 ALTER FUNCTION functest_F_3(int) CALLED ON NULL INPUT;
 SELECT proname, proisstrict FROM pg_proc
        WHERE oid in ('functest_F_1'::regproc,
@@ -157,7 +158,7 @@ SELECT pg_get_functiondef('functest_F_2'::regproc);
 -- SQL-standard body
 --
 CREATE FUNCTION functest_S_1(a text, b date) RETURNS boolean
-    LANGUAGE SQL
+    LANGUAGE SQL ERROR SAFE
     RETURN a = 'abcd' AND b > '2001-01-01';
 CREATE FUNCTION functest_S_2(a text[]) RETURNS int
     RETURN a[1]::int;

@@ -39,6 +39,7 @@ ALTER FUNCTION <replaceable>name</replaceable> [ ( [ [ <replaceable class="param
     [ NOT ] LEAKPROOF
     [ EXTERNAL ] SECURITY INVOKER | [ EXTERNAL ] SECURITY DEFINER
     PARALLEL { UNSAFE | RESTRICTED | SAFE }
+    ERROR { UNSAFE | SAFE }
     COST <replaceable class="parameter">execution_cost</replaceable>
     ROWS <replaceable class="parameter">result_rows</replaceable>
     SUPPORT <replaceable class="parameter">support_function</replaceable>
@@ -218,6 +219,17 @@ ALTER FUNCTION <replaceable>name</replaceable> [ ( [ [ <replaceable class="param
     <listitem>
      <para>
       Change whether the function is deemed safe for parallelism.
+      See <xref linkend="sql-createfunction"/> for details.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><literal>ERROR</literal></term>
+
+    <listitem>
+     <para>
+      Change whether the function is deemed error safe.
       See <xref linkend="sql-createfunction"/> for details.
      </para>
     </listitem>

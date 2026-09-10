@@ -8944,6 +8944,10 @@ common_func_opt_item:
 				{
 					$$ = makeDefElem("parallel", (Node *) makeString($2), @1);
 				}
+			| ERROR_P ColId
+				{
+					$$ = makeDefElem("error", (Node *) makeString($2), @1);
+				}
 		;
 
 createfunc_opt_item:
