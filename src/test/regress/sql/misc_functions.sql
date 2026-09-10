@@ -4,6 +4,10 @@
 
 \set regresslib :libdir '/regress' :dlsuffix
 
+create function dummyx(int) returns void language plpgsql error unsafe as $$begin end$$;
+alter function dummyx error safe;
+select pg_get_functiondef('dummyx'::regproc);
+
 --
 -- num_nulls()
 --
