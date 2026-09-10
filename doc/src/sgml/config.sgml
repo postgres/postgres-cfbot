@@ -661,6 +661,68 @@ include_dir 'conf.d'
 
      <variablelist>
 
+     <varlistentry id="guc-expose-information" xreflabel="expose_information">
+      <term><varname>expose_information</varname> (<type>string</type>)
+      <indexterm>
+       <primary><varname>expose_information</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Allows for specific information to be returned from the servers without
+        requiring a login. Requests should come in as a simple HTTP request as a
+        GET or HEAD to the PostgreSQL port.
+        The default is the empty string, <literal>''</literal>, which
+        prevents any information from being output. The following options may be
+        specified alone or in a comma-separated list:
+       </para>
+
+       <table id="expose-information-options">
+        <title>Expose Information Options</title>
+        <tgroup cols="2">
+         <colspec colname="col1" colwidth="1*"/>
+         <colspec colname="col2" colwidth="2*"/>
+         <thead>
+          <row>
+           <entry>Name</entry>
+           <entry>Description</entry>
+          </row>
+         </thead>
+         <tbody>
+          <row>
+           <entry><literal>role</literal></entry>
+           <entry>Determine if the server is in recovery mode or not. If the request is
+             <literal>HEAD /replica</literal>, then an HTTP response code of 200 (yes it is a replica)
+             or 503 (not a replica) is returned. A request of <literal>HEAD /primary</literal>
+             returns the opposite values. This can be used as a drop-in replacement for the same
+             functionality provided by the Patroni program. For the request <literal>GET /replica</literal>
+             and <literal>GET /primary</literal> the string <literal>1</literal> or <literal>0</literal>
+             is returned.</entry>
+          </row>
+
+          <row>
+           <entry><literal>sysid</literal></entry>
+           <entry>Returns the system identifier of the server. This can be useful to determine if the underlying
+             server has changed, as the initdb program will always generate a new system identifier.
+             For the request <literal>GET /sysid</literal> the string <literal>12345</literal>
+             is returned, in which "12345" will be the specific system identifier
+             (typically a 20-digit number)</entry>
+          </row>
+
+          <row>
+           <entry><literal>version</literal></entry>
+           <entry>Returns the current version of the server. Specifically, the value of
+             <literal>server_version_num</literal>. For the request <literal>GET /version</literal>
+             the string <literal>200002</literal> is returned (for this example,
+             the version of Postgres is 20.2)</entry>
+          </row>
+         </tbody>
+        </tgroup>
+       </table>
+
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-listen-addresses" xreflabel="listen_addresses">
       <term><varname>listen_addresses</varname> (<type>string</type>)
       <indexterm>
