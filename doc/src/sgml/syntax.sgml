@@ -1103,6 +1103,12 @@ CAST ( '<replaceable>string</replaceable>' AS <replaceable>type</replaceable> )
        <entry>left</entry>
        <entry>logical disjunction</entry>
       </row>
+
+      <row>
+       <entry><token>IMPLIES</token></entry>
+       <entry>right</entry>
+       <entry>logical implication</entry>
+      </row>
      </tbody>
     </tgroup>
    </table>
