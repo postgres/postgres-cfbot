@@ -3655,47 +3655,56 @@ create_graphscan_plan(PlannerInfo *root, GraphPath * best_path,
 	}
 
 	/*
-	 * Identify the nestloop params that supply the current seed key values.
-	 * The ghost seed element's WHERE clause is a conjunction of equalities
+	 * Identify the values that supply the current seed key columns.  The
+	 * ghost seed element's WHERE clause is a conjunction of equalities
 	 * "gs_seed_attr = seed_key"; after replace_nestloop_params() the seed key
-	 * side is a PARAM_EXEC that the enclosing nestloop fills from the outer
-	 * row.  Record those param ids, in key column order, so the executor can
-	 * read the seed vertex for every outer row.
+	 * side is usually a PARAM_EXEC that the enclosing nestloop fills from the
+	 * outer row.  When the planner can prove the seed relation is a single
+	 * row (e.g. a constant equality on its primary key), it instead derives
+	 * the constant directly on the scan, so the equality is "gs_seed_attr =
+	 * <const>".  Record, in key column order, one Param or Const node per
+	 * seed key column so the executor can seed the traversal.
 	 */
 	{
 		ListCell   *lc2;
 		List	   *seed_params = NIL;
 
 		for (int i = 0; i < list_length(best_path->seed_key_cols); i++)
-			seed_params = lappend_int(seed_params, -1);
+			seed_params = lappend(seed_params, NULL);
 
 		foreach(lc2, scan_clauses)
 		{
 			OpExpr	   *op = (OpExpr *) lfirst(lc2);
 			Var		   *var = NULL;
-			Param	   *param = NULL;
+			Node	   *other = NULL;
+			bool		is_param;
+			bool		is_const;
 			int			pos = -1;
 			int			amp = 0;
 
 			if (!IsA(op, OpExpr) || list_length(op->args) != 2)
 				continue;
-			if (IsA(linitial(op->args), Var) &&
-				IsA(lsecond(op->args), Param))
+			if (IsA(linitial(op->args), Var))
 			{
 				var = linitial_node(Var, op->args);
-				param = lsecond_node(Param, op->args);
+				other = lsecond(op->args);
 			}
-			else if (IsA(linitial(op->args), Param) &&
-					 IsA(lsecond(op->args), Var))
+			else if (IsA(lsecond(op->args), Var))
 			{
-				param = linitial_node(Param, op->args);
 				var = lsecond_node(Var, op->args);
+				other = linitial(op->args);
 			}
 			else
 				continue;
 
-			if (var->varno != scan_relid || var->varlevelsup != 0 ||
-				param->paramkind != PARAM_EXEC)
+			if (var->varno != scan_relid || var->varlevelsup != 0)
+				continue;
+
+			is_param = (IsA(other, Param) &&
+						((Param *) other)->paramkind == PARAM_EXEC);
+			is_const = IsA(other, Const);
+
+			if (!is_param && !is_const)
 				continue;
 
 			foreach_int(att, best_path->seed_key_cols)
@@ -3707,15 +3716,31 @@ create_graphscan_plan(PlannerInfo *root, GraphPath * best_path,
 				}
 				amp++;
 			}
-			if (pos >= 0)
-				lfirst_int(list_nth_cell(seed_params, pos)) = param->paramid;
+			if (pos < 0)
+				continue;
+
+			/*
+			 * A parameter for a column overrides any previously seen clause
+			 * for it; a constant only fills a column not yet supplied.
+			 */
+			if (is_param)
+				lfirst(list_nth_cell(seed_params, pos)) = other;
+			else if (lfirst(list_nth_cell(seed_params, pos)) == NULL)
+				lfirst(list_nth_cell(seed_params, pos)) = copyObject(other);
 		}
 
-		if (list_length(seed_params) !=
-			list_length(best_path->seed_key_cols) ||
-			list_member_int(seed_params, -1))
-			elog(ERROR, "could not identify graph scan seed parameters");
-		scan_plan->seed_param_ids = seed_params;
+		/*
+		 * Every seed key column must be supplied either by a nestloop param
+		 * or by a constant; a column with neither is a planner/rewriter
+		 * disagreement we must not ignore.
+		 */
+		foreach(lc2, seed_params)
+		{
+			if (lfirst(lc2) == NULL)
+				elog(ERROR,
+					 "could not identify graph scan seed parameters");
+		}
+		scan_plan->seed_params = seed_params;
 	}
 
 	scan_plan->scan.plan.qual = scan_clauses;

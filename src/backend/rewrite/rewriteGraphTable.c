@@ -40,6 +40,8 @@
 #include "rewrite/rewriteGraphTable.h"
 #include "rewrite/rewriteHandler.h"
 #include "rewrite/rewriteManip.h"
+#include "rewrite/rowsecurity.h"
+#include "storage/lmgr.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
@@ -1546,6 +1548,110 @@ get_vle_array_props(RangeTblEntry *rte, const char *edge_var)
 }
 
 /*
+ * Walker acquiring locks on the relations referenced by sublinks found in
+ * RLS policy quals.  Mirrors acquireLocksOnSubLinks() in rewriteHandler.c:
+ * policy quals are added post-parsing, so the relations they reference must
+ * be locked here rather than by the parser.
+ */
+static bool
+native_rls_lock_sublinks(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, Query))
+	{
+		Query	   *subquery = (Query *) node;
+		ListCell   *lc;
+
+		foreach(lc, subquery->rtable)
+		{
+			RangeTblEntry *rte = lfirst_node(RangeTblEntry, lc);
+
+			if (rte->rtekind == RTE_RELATION)
+				LockRelationOid(rte->relid, AccessShareLock);
+		}
+
+		return query_tree_walker(subquery, native_rls_lock_sublinks, context,
+								 QTW_IGNORE_RC_SUBQUERIES);
+	}
+
+	return expression_tree_walker(node, native_rls_lock_sublinks, context);
+}
+
+/*
+ * Apply row-level security policies to the backing relation RTEs of an
+ * internally built query.
+ *
+ * The rewriter's fireRIRrules() performs this step for parsed queries, but
+ * the decomposed internal queries are built inside the planner and never
+ * pass through the rewriter, so without this their RTEs would carry no
+ * securityQuals and RLS would be silently bypassed.  Mirrors the RLS loop
+ * of fireRIRrules(), recursing into join subqueries (branch queries are
+ * wrapped as subquery RTEs of the UNION).
+ */
+void
+native_apply_rls_to_query(Query *query)
+{
+	int			rt_index = 0;
+	ListCell   *lc;
+
+	foreach(lc, query->rtable)
+	{
+		RangeTblEntry *rte = lfirst_node(RangeTblEntry, lc);
+		List	   *securityQuals = NIL;
+		List	   *withCheckOptions = NIL;
+		bool		hasRowSecurity = false;
+		bool		hasSubLinks = false;
+
+		rt_index++;
+
+		/* Recurse into wrapped branch (or other subquery) queries. */
+		if (rte->rtekind == RTE_SUBQUERY)
+		{
+			native_apply_rls_to_query(rte->subquery);
+			continue;
+		}
+
+		/* Only plain relations can have RLS policies. */
+		if (rte->rtekind != RTE_RELATION ||
+			(rte->relkind != RELKIND_RELATION &&
+			 rte->relkind != RELKIND_PARTITIONED_TABLE))
+			continue;
+
+		get_row_security_policies(query, rte, rt_index,
+								  &securityQuals, &withCheckOptions,
+								  &hasRowSecurity, &hasSubLinks);
+
+		if (securityQuals != NIL)
+		{
+			if (hasSubLinks)
+			{
+				/* Lock relations referenced by the policy quals. */
+				(void) native_rls_lock_sublinks((Node *) securityQuals, NULL);
+			}
+
+			/*
+			 * Add the new security barrier quals ahead of any pre-existing
+			 * security quals, exactly as fireRIRrules() does.
+			 */
+			rte->securityQuals = list_concat(securityQuals,
+											 rte->securityQuals);
+		}
+
+		/*
+		 * The decomposed queries are SELECT-only, so no WITH CHECK
+		 * OPTIONS can apply; hasRowSecurity still matters for the
+		 * plancache (dependsOnRLS).
+		 */
+		if (hasRowSecurity)
+			query->hasRowSecurity = true;
+		if (hasSubLinks)
+			query->hasSubLinks = true;
+	}
+}
+
+/*
  * Build, for one branch, the internal RTE_GRAPH_TABLE representing the
  * quantified (variable-length) hop described by vf, with concrete ghost
  * seed (source element 'srcpe' at 'src_rti') and concrete ghost terminal
@@ -2041,6 +2147,9 @@ native_query_for_branch(native_decomp * dc, List *elems, List *vles)
 		perminfo->selectedCols = bms_add_member(perminfo->selectedCols,
 												var->varattno - FirstLowInvalidHeapAttributeNumber);
 	}
+
+	/* Backing element tables can carry RLS policies: handled by the
+	 * native planner in set_graph_pathlist(), before subquery_planner. */
 
 	return path_query;
 }

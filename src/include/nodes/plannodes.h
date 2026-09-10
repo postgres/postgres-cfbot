@@ -623,11 +623,14 @@ typedef struct GraphScan
 	Oid			seed_elem_oid;
 
 	/*
-	 * PARAM_EXEC ids (List of int) of the seed key columns, in key order. The
-	 * enclosing nestloop fills them from the outer row; the executor reads
-	 * them to obtain the seed vertex for the traversal.
+	 * Seed key values (List, one entry per seed key column, in key order).
+	 * Each entry is either a Param (PARAM_EXEC) that the enclosing nestloop
+	 * fills from the outer row, or -- when the planner can prove the seed
+	 * relation is a single row (e.g. a constant equality on its primary key)
+	 * -- a Const substituted directly on the scan.  The executor seeds the
+	 * traversal from these values.
 	 */
-	List	   *seed_param_ids;
+	List	   *seed_params;
 
 	/* Hop-wide max src/dest key widths over the edge element arms. */
 	int			max_nsrc;
