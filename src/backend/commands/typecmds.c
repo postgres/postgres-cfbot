@@ -1872,6 +1872,7 @@ makeRangeConstructors(const char *name, Oid namespace,
 								 false, /* isStrict */
 								 PROVOLATILE_IMMUTABLE, /* volatility */
 								 PROPARALLEL_SAFE,	/* parallel safety */
+								 false, /* proerrorsafe */
 								 constructorArgTypesVector, /* parameterTypes */
 								 PointerGetDatum(NULL), /* allParameterTypes */
 								 PointerGetDatum(NULL), /* parameterModes */
@@ -1943,6 +1944,7 @@ makeMultirangeConstructors(const char *name, Oid namespace,
 							 true,	/* isStrict */
 							 PROVOLATILE_IMMUTABLE, /* volatility */
 							 PROPARALLEL_SAFE,	/* parallel safety */
+							 false, /* proerrorsafe */
 							 argtypes,	/* parameterTypes */
 							 PointerGetDatum(NULL), /* allParameterTypes */
 							 PointerGetDatum(NULL), /* parameterModes */
@@ -1989,6 +1991,7 @@ makeMultirangeConstructors(const char *name, Oid namespace,
 							 true,	/* isStrict */
 							 PROVOLATILE_IMMUTABLE, /* volatility */
 							 PROPARALLEL_SAFE,	/* parallel safety */
+							 false, /* proerrorsafe */
 							 argtypes,	/* parameterTypes */
 							 PointerGetDatum(NULL), /* allParameterTypes */
 							 PointerGetDatum(NULL), /* parameterModes */
@@ -2028,6 +2031,7 @@ makeMultirangeConstructors(const char *name, Oid namespace,
 							 true,	/* isStrict */
 							 PROVOLATILE_IMMUTABLE, /* volatility */
 							 PROPARALLEL_SAFE,	/* parallel safety */
+							 false, /* proerrorsafe */
 							 argtypes,	/* parameterTypes */
 							 PointerGetDatum(allParameterTypes),	/* allParameterTypes */
 							 PointerGetDatum(parameterModes),	/* parameterModes */
