@@ -345,6 +345,7 @@ typedef enum A_Expr_Kind
 	AEXPR_NOT_BETWEEN,			/* name must be "NOT BETWEEN" */
 	AEXPR_BETWEEN_SYM,			/* name must be "BETWEEN SYMMETRIC" */
 	AEXPR_NOT_BETWEEN_SYM,		/* name must be "NOT BETWEEN SYMMETRIC" */
+	AEXPR_IMPLIES,				/* name must be "IMPLIES" */
 } A_Expr_Kind;
 
 typedef struct A_Expr

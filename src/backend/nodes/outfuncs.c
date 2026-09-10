@@ -643,6 +643,10 @@ _outA_Expr(StringInfo str, const A_Expr *node)
 			appendStringInfoString(str, " NOT_BETWEEN_SYM");
 			WRITE_NODE_FIELD(name);
 			break;
+		case AEXPR_IMPLIES:
+			appendStringInfoString(str, " IMPLIES");
+			WRITE_NODE_FIELD(name);
+			break;
 		default:
 			elog(ERROR, "unrecognized A_Expr_Kind: %d", (int) node->kind);
 			break;

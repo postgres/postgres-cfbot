@@ -39,10 +39,19 @@
      <primary>negation</primary>
     </indexterm>
 
+    <indexterm>
+     <primary>IMPLIES</primary>
+    </indexterm>
+
+    <indexterm>
+     <primary>implication</primary>
+    </indexterm>
+
 <synopsis>
 <type>boolean</type> <literal>AND</literal> <type>boolean</type> <returnvalue>boolean</returnvalue>
 <type>boolean</type> <literal>OR</literal> <type>boolean</type> <returnvalue>boolean</returnvalue>
 <literal>NOT</literal> <type>boolean</type> <returnvalue>boolean</returnvalue>
+<type>boolean</type> <literal>IMPLIES</literal> <type>boolean</type> <returnvalue>boolean</returnvalue>
 </synopsis>
 
     <acronym>SQL</acronym> uses a three-valued logic system with true,
@@ -144,6 +153,62 @@
       </tbody>
      </tgroup>
     </informaltable>
+   </para>
+
+   <para>
+    The <literal>IMPLIES</literal> operator is material implication:
+    <replaceable>a</replaceable> <literal>IMPLIES</literal>
+    <replaceable>b</replaceable> is equivalent to <literal>NOT</literal>
+    <replaceable>a</replaceable> <literal>OR</literal>
+    <replaceable>b</replaceable>, and reads as <quote>if
+    <replaceable>a</replaceable> then <replaceable>b</replaceable></quote>.
+    Unlike <literal>AND</literal> and <literal>OR</literal> it is not
+    commutative, which is why its table, unlike theirs, is not symmetric
+    about the diagonal:
+
+    <informaltable rowheader="firstcol">
+     <tgroup cols="4">
+      <thead>
+       <row>
+        <entry>IMPLIES</entry>
+        <entry>True</entry>
+        <entry>False</entry>
+        <entry>Unknown</entry>
+       </row>
+      </thead>
+
+      <tbody>
+       <row>
+        <entry>True</entry>
+        <entry>True</entry>
+        <entry>False</entry>
+        <entry>Unknown</entry>
+       </row>
+
+       <row>
+        <entry>False</entry>
+        <entry>True</entry>
+        <entry>True</entry>
+        <entry>True</entry>
+       </row>
+
+       <row>
+        <entry>Unknown</entry>
+        <entry>True</entry>
+        <entry>Unknown</entry>
+        <entry>Unknown</entry>
+       </row>
+      </tbody>
+     </tgroup>
+    </informaltable>
+   </para>
+
+   <para>
+    <literal>IMPLIES</literal> binds less tightly than every other operator,
+    <literal>OR</literal> included, and it is right-associative, so
+    <literal>a = 1 IMPLIES b = 2 IMPLIES c = 3</literal> means
+    <literal>(a = 1) IMPLIES ((b = 2) IMPLIES (c = 3))</literal>.  See <xref
+    linkend="sql-precedence"/>.
    </para>
 
    <para>
