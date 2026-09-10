@@ -54,6 +54,7 @@
 #include "rewrite/rewriteGraphTable.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/lsyscache.h"
+#include "utils/array.h"
 #include "utils/selfuncs.h"
 #include "utils/syscache.h"
 
@@ -3367,37 +3368,64 @@ resolve_edge_where_mutator(Node *node, Oid *elemoid)
 }
 
 /*
+ * Key-column mapping of one edge element of a hop (catatog pgesrckey /
+ * pgedestkey entry for the element).
+ */
+typedef struct GraphHopArmKeys
+{
+	Oid			arm_relid;		/* edge element table */
+	int			nsrc;			/* source key width */
+	AttrNumber *srckey;			/* edge attnums (pgesrckey) */
+	int			ndst;			/* destination key width */
+	AttrNumber *dstkey;			/* edge attnums (pgedestkey) */
+}			GraphHopArmKeys;
+
+/*
  * Build the Query for the GraphScan's inner 1-hop expansion over the given
  * edge element tables: a UNION ALL of per-table SELECTs.  Each arm outputs,
- * for every traversed edge: one column per VLE edge-list property (the edge's
- * property value, accumulated into arrays by the executor), the edge's ctid,
- * and the edge element table OID (so the executor can identify the source
- * table of each row).
+ * for every traversed edge:
+ *
+ *	 one column per VLE edge-list property (the edge's property value,
+ *	   accumulated into arrays by the executor),
+ *	 the edge's ctid,
+ *	 the edge element table OID (so the executor can identify the source
+ *	   table of each row),
+ *	 the edge's source key columns (padded with NULLs to *max_nsrc), and
+ *	 the edge's destination key columns (padded with NULLs to *max_ndst).
+ *
+ * The hop-wide maxima *max_nsrc / *max_ndst are returned so the executor can
+ * interpret the padded layout.  All arms must agree on the datatype of each
+ * (padded) key slot, since the UNION result has one type per column.
  *
  * The returned Query is what we plan through a nested subquery_planner() to
  * obtain the parameterized 1-hop subplan (righttree).
  */
 static Query *
 build_graphscan_inner_query(Oid graphid, GraphElementPattern *edge_gep,
-							List *edge_element_oids, List *array_props)
+							List *edge_element_oids, List *array_props,
+							int *max_nsrc, int *max_ndst)
 {
 	List	   *arm_queries = NIL;
+	List	   *arm_keys = NIL;
+	int			nprops = list_length(array_props);
 	ListCell   *lc;
+
+	*max_nsrc = 0;
+	*max_ndst = 0;
 
 	if (edge_element_oids == NIL)
 		return NULL;
 
+	/* Read each edge element's src/dst key column mapping. */
 	foreach(lc, edge_element_oids)
 	{
 		Oid			elemoid = lfirst_oid(lc);
 		HeapTuple	etup;
 		Form_pg_propgraph_element pge;
-		Query	   *arm = makeNode(Query);
-		Relation	rel;
-		ParseNamespaceItem *pni;
-		List	   *tlist = NIL;
-		List	   *quals = NIL;
-		int			resno = 0;
+		GraphHopArmKeys *ak;
+		Datum		datum;
+		Datum	   *d;
+		int			n;
 
 		etup = SearchSysCache1(PROPGRAPHELOID, ObjectIdGetDatum(elemoid));
 		if (!HeapTupleIsValid(etup))
@@ -3405,74 +3433,226 @@ build_graphscan_inner_query(Oid graphid, GraphElementPattern *edge_gep,
 				 elemoid);
 		pge = (Form_pg_propgraph_element) GETSTRUCT(etup);
 
-		arm->commandType = CMD_SELECT;
+		ak = palloc_object(GraphHopArmKeys);
+		ak->arm_relid = pge->pgerelid;
 
-		rel = table_open(pge->pgerelid, AccessShareLock);
-		pni = addRangeTableEntryForRelation(make_parsestate(NULL), rel,
-											AccessShareLock,
-											NULL, true, false);
-		table_close(rel, NoLock);
-		arm->rtable = lappend(arm->rtable, pni->p_rte);
-		arm->rteperminfos = lappend(arm->rteperminfos, pni->p_perminfo);
-		pni->p_rte->perminfoindex = list_length(arm->rteperminfos);
-		{
-			RangeTblRef *rtr = makeNode(RangeTblRef);
+		datum = SysCacheGetAttrNotNull(PROPGRAPHELOID, etup,
+									   Anum_pg_propgraph_element_pgesrckey);
+		deconstruct_array_builtin(DatumGetArrayTypeP(datum), INT2OID,
+								  &d, NULL, &n);
+		ak->nsrc = n;
+		ak->srckey = palloc_array(AttrNumber, Max(n, 1));
+		for (int i = 0; i < n; i++)
+			ak->srckey[i] = DatumGetInt16(d[i]);
 
-			rtr->rtindex = 1;
-			arm->jointree = makeFromExpr(list_make1(rtr), NULL);
-		}
-
-		/* Property value columns for the VLE edge-list refs. */
-		foreach_ptr(GraphPropertyRef, gpr, array_props)
-		{
-			Node	   *n;
-
-			resno++;
-			n = get_element_property_expr(elemoid, gpr->propid, 1);
-			if (!n)
-				n = (Node *) makeNullConst(gpr->typeId,
-										   gpr->typmod,
-										   gpr->collation);
-			tlist = lappend(tlist,
-							makeTargetEntry((Expr *) n, resno,
-											psprintf("gep%d", resno), false));
-		}
-
-		/* Edge row identity: ctid. */
-		resno++;
-		tlist = lappend(tlist,
-						makeTargetEntry((Expr *) makeVar(1,
-														 SelfItemPointerAttributeNumber,
-														 TIDOID, -1,
-														 InvalidOid, 0),
-										resno, pstrdup("gs_ctid"), false));
-		/* Source edge element table OID. */
-		resno++;
-		tlist = lappend(tlist,
-						makeTargetEntry((Expr *) makeConst(OIDOID, -1,
-														   InvalidOid,
-														   sizeof(Oid),
-														   ObjectIdGetDatum(pge->pgerelid),
-														   false, true),
-										resno, pstrdup("gs_tbl"), false));
-
-		arm->targetList = tlist;
-
-		/* The edge's own WHERE, resolved against this edge element. */
-		if (edge_gep->whereClause)
-		{
-			Node	   *w = copyObject(edge_gep->whereClause);
-
-			IncrementVarSublevelsUp(w, 1, 1);
-			quals = lappend(quals,
-							resolve_edge_where_mutator(w, &elemoid));
-			((FromExpr *) arm->jointree)->quals =
-				(Node *) makeBoolExpr(AND_EXPR, quals, -1);
-		}
+		datum = SysCacheGetAttrNotNull(PROPGRAPHELOID, etup,
+									   Anum_pg_propgraph_element_pgedestkey);
+		deconstruct_array_builtin(DatumGetArrayTypeP(datum), INT2OID,
+								  &d, NULL, &n);
+		ak->ndst = n;
+		ak->dstkey = palloc_array(AttrNumber, Max(n, 1));
+		for (int i = 0; i < n; i++)
+			ak->dstkey[i] = DatumGetInt16(d[i]);
 
 		ReleaseSysCache(etup);
 
-		arm_queries = lappend(arm_queries, arm);
+		*max_nsrc = Max(*max_nsrc, ak->nsrc);
+		*max_ndst = Max(*max_ndst, ak->ndst);
+		arm_keys = lappend(arm_keys, ak);
+	}
+
+	/*
+	 * Type of each (padded) src/dst key slot: taken from the first arm that
+	 * defines the slot; every other arm must use the same datatype.
+	 */
+	{
+		Oid		   *src_types = palloc_array(Oid, Max(*max_nsrc, 1));
+		int32	   *src_typmods = palloc_array(int32, Max(*max_nsrc, 1));
+		Oid		   *src_colls = palloc_array(Oid, Max(*max_nsrc, 1));
+		Oid		   *dst_types = palloc_array(Oid, Max(*max_ndst, 1));
+		int32	   *dst_typmods = palloc_array(int32, Max(*max_ndst, 1));
+		Oid		   *dst_colls = palloc_array(Oid, Max(*max_ndst, 1));
+		int			ai = 0;
+
+		memset(src_types, 0, sizeof(Oid) * (Size) Max(*max_nsrc, 1));
+		memset(dst_types, 0, sizeof(Oid) * (Size) Max(*max_ndst, 1));
+
+		foreach_ptr(GraphHopArmKeys, ak, arm_keys)
+		{
+			for (int k = 0; k < ak->nsrc; k++)
+			{
+				Oid			typid;
+				int32		typmod;
+				Oid			coll;
+
+				get_atttypetypmodcoll(ak->arm_relid, ak->srckey[k],
+									  &typid, &typmod, &coll);
+				if (src_types[k] == InvalidOid)
+				{
+					src_types[k] = typid;
+					src_typmods[k] = typmod;
+					src_colls[k] = coll;
+				}
+				else if (src_types[k] != typid)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("graph hop source key column %d has different datatypes across edge elements", k + 1)));
+			}
+			for (int k = 0; k < ak->ndst; k++)
+			{
+				Oid			typid;
+				int32		typmod;
+				Oid			coll;
+
+				get_atttypetypmodcoll(ak->arm_relid, ak->dstkey[k],
+									  &typid, &typmod, &coll);
+				if (dst_types[k] == InvalidOid)
+				{
+					dst_types[k] = typid;
+					dst_typmods[k] = typmod;
+					dst_colls[k] = coll;
+				}
+				else if (dst_types[k] != typid)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("graph hop destination key column %d has different datatypes across edge elements", k + 1)));
+			}
+			ai++;
+		}
+
+		/* Build one Query per edge element (arm). */
+		ai = 0;
+		foreach_ptr(GraphHopArmKeys, ak, arm_keys)
+		{
+			Query	   *arm = makeNode(Query);
+			Relation	rel;
+			ParseNamespaceItem *pni;
+			List	   *tlist = NIL;
+			List	   *quals = NIL;
+			int			resno = 0;
+
+			arm->commandType = CMD_SELECT;
+
+			rel = table_open(ak->arm_relid, AccessShareLock);
+			pni = addRangeTableEntryForRelation(make_parsestate(NULL), rel,
+												AccessShareLock,
+												NULL, true, false);
+			table_close(rel, NoLock);
+			arm->rtable = lappend(arm->rtable, pni->p_rte);
+			arm->rteperminfos = lappend(arm->rteperminfos, pni->p_perminfo);
+			pni->p_rte->perminfoindex = list_length(arm->rteperminfos);
+			{
+				RangeTblRef *rtr = makeNode(RangeTblRef);
+
+				rtr->rtindex = 1;
+				arm->jointree = makeFromExpr(list_make1(rtr), NULL);
+			}
+
+			/* Property value columns for the VLE edge-list refs. */
+			foreach_ptr(GraphPropertyRef, gpr, array_props)
+			{
+				Oid			elemoid = lfirst_oid(list_nth_cell(edge_element_oids, ai));
+				Node	   *n;
+
+				resno++;
+				n = get_element_property_expr(elemoid, gpr->propid, 1);
+				if (!n)
+					n = (Node *) makeNullConst(gpr->typeId,
+											   gpr->typmod,
+											   gpr->collation);
+				tlist = lappend(tlist,
+								makeTargetEntry((Expr *) n, resno,
+												psprintf("gep%d", resno), false));
+			}
+
+			/* Edge row identity: ctid. */
+			resno++;
+			tlist = lappend(tlist,
+							makeTargetEntry((Expr *) makeVar(1,
+															 SelfItemPointerAttributeNumber,
+															 TIDOID, -1,
+															 InvalidOid, 0),
+											resno, pstrdup("gs_ctid"), false));
+			/* Source edge element table OID. */
+			resno++;
+			tlist = lappend(tlist,
+							makeTargetEntry((Expr *) makeConst(OIDOID, -1,
+															   InvalidOid,
+															   sizeof(Oid),
+															   ObjectIdGetDatum(ak->arm_relid),
+															   false, true),
+											resno, pstrdup("gs_tbl"), false));
+
+			/* Source key columns (padded to *max_nsrc). */
+			for (int k = 0; k < *max_nsrc; k++)
+			{
+				Node	   *n;
+
+				resno++;
+				if (k < ak->nsrc)
+				{
+					Oid			typid;
+					int32		typmod;
+					Oid			coll;
+
+					get_atttypetypmodcoll(ak->arm_relid, ak->srckey[k],
+										  &typid, &typmod, &coll);
+					n = (Node *) makeVar(1, ak->srckey[k],
+										 typid, typmod, coll, 0);
+				}
+				else
+					n = (Node *) makeNullConst(src_types[k], src_typmods[k],
+											   src_colls[k]);
+				tlist = lappend(tlist,
+								makeTargetEntry((Expr *) n, resno,
+												psprintf("gs_src%d", k + 1),
+												false));
+			}
+
+			/* Destination key columns (padded to *max_ndst). */
+			for (int k = 0; k < *max_ndst; k++)
+			{
+				Node	   *n;
+
+				resno++;
+				if (k < ak->ndst)
+				{
+					Oid			typid;
+					int32		typmod;
+					Oid			coll;
+
+					get_atttypetypmodcoll(ak->arm_relid, ak->dstkey[k],
+										  &typid, &typmod, &coll);
+					n = (Node *) makeVar(1, ak->dstkey[k],
+										 typid, typmod, coll, 0);
+				}
+				else
+					n = (Node *) makeNullConst(dst_types[k], dst_typmods[k],
+											   dst_colls[k]);
+				tlist = lappend(tlist,
+								makeTargetEntry((Expr *) n, resno,
+												psprintf("gs_dst%d", k + 1),
+												false));
+			}
+
+			arm->targetList = tlist;
+
+			/* The edge's own WHERE, resolved against this edge element. */
+			if (edge_gep->whereClause)
+			{
+				Oid			elemoid = lfirst_oid(list_nth_cell(edge_element_oids, ai));
+				Node	   *w = copyObject(edge_gep->whereClause);
+
+				IncrementVarSublevelsUp(w, 1, 1);
+				quals = lappend(quals,
+								resolve_edge_where_mutator(w, &elemoid));
+				((FromExpr *) arm->jointree)->quals =
+					(Node *) makeBoolExpr(AND_EXPR, quals, -1);
+			}
+
+			arm_queries = lappend(arm_queries, arm);
+			ai++;
+		}
 	}
 
 	if (list_length(arm_queries) == 1)
@@ -3484,7 +3664,6 @@ build_graphscan_inner_query(Oid graphid, GraphElementPattern *edge_gep,
 		List	   *rtable = NIL;
 		Query	   *union_query;
 		Query	   *sample_query = linitial_node(Query, arm_queries);
-		List	   *arms = arm_queries;
 		Node	   *larg = NULL;
 		int			resno = 1;
 		ListCell   *lct,
@@ -3574,7 +3753,8 @@ build_graphscan_inner_plan(PlannerInfo *root, Oid graphid,
 						   GraphElementPattern *edge_gep,
 						   List *edge_element_oids,
 						   List *array_props,
-						   PlannerInfo **inner_rootp)
+						   PlannerInfo **inner_rootp,
+						   int *max_nsrc, int *max_ndst)
 {
 	Query	   *qr;
 	PlannerInfo *subroot;
@@ -3583,7 +3763,7 @@ build_graphscan_inner_plan(PlannerInfo *root, Oid graphid,
 	char	   *plan_name;
 
 	qr = build_graphscan_inner_query(graphid, edge_gep, edge_element_oids,
-									 array_props);
+									 array_props, max_nsrc, max_ndst);
 	if (qr == NULL)
 	{
 		*inner_rootp = NULL;
@@ -3629,6 +3809,8 @@ set_graphscan_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	List	   *seed_key_cols = NIL;
 	List	   *terminal_key_cols = NIL;
 	List	   *edge_list_cols = NIL;
+	int			max_nsrc = 0;
+	int			max_ndst = 0;
 	int			col;
 	ListCell   *lc;
 
@@ -3671,7 +3853,7 @@ set_graphscan_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 
 	/* Edge element tables backing the hop's edge pattern. */
 	edge_element_oids = get_graph_edge_element_oids(rte->relid, edge_gep);
-	array_props = get_vle_array_props(rte, edge_gep->variable);
+	array_props = rte->graph_vle_props;
 
 	/*
 	 * The internal single-hop query has no easy rowcount estimate; use a
@@ -3682,7 +3864,7 @@ set_graphscan_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	/* Build the parameterized 1-hop inner expansion (righttree). */
 	inner_plan = build_graphscan_inner_plan(root, rte->relid, edge_gep,
 											edge_element_oids, array_props,
-											&inner_root);
+											&inner_root, &max_nsrc, &max_ndst);
 
 	gpath = makeNode(GraphPath);
 	gpath->path.pathtype = T_GraphScan;
@@ -3712,9 +3894,13 @@ set_graphscan_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	gpath->terminal_key_cols = terminal_key_cols;
 	gpath->edge_list_cols = edge_list_cols;
 	gpath->edge_element_oids = edge_element_oids;
+	gpath->graph_columns = rte->graph_table_columns;
 	gpath->inner_plan = inner_plan;
 	gpath->subplan_params = (inner_root != NULL) ? inner_root->plan_params : NIL;
-	gpath->vid_param = -1;
+	gpath->seed_elem_oid = rte->graph_seed_elem_oid;
+	gpath->seed_param_ids = NIL;
+	gpath->max_nsrc = max_nsrc;
+	gpath->max_ndst = max_ndst;
 
 	/*
 	 * Remember the inner (1-hop) planner root on the RelOptInfo, like

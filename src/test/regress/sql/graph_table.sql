@@ -649,27 +649,36 @@ SELECT src.vname, count(*) FROM v1 AS src
 
 -- ---------------------------------------------------------------------
 -- Quantified (variable-length) hops are planned as GraphScan nodes by the
--- native planner.  Hop *execution* is not implemented yet, so the
--- queries below use EXPLAIN; they will become plain SELECTs once the
--- GraphScan executor lands.
+-- native planner and executed by the executor.
 -- ---------------------------------------------------------------------
 
-EXPLAIN (COSTS OFF) SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{1,3}(c IS vl3) COLUMNS (a.vname AS src, c.vname AS dst));
-EXPLAIN (COSTS OFF) SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{0}(c IS vl1) COLUMNS (a.vname AS src, c.vname AS dst));
-EXPLAIN (COSTS OFF) SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{2,}(c IS vl3) COLUMNS (a.vname AS src, c.vname AS dst));
-EXPLAIN (COSTS OFF) SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{,2}(c IS vl3) COLUMNS (a.vname AS src, c.vname AS dst));
+SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{1,3}(c IS vl3) COLUMNS (a.vname AS src, c.vname AS dst)) ORDER BY src, dst;
+SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{0}(c IS vl1) COLUMNS (a.vname AS src, c.vname AS dst)) ORDER BY src, dst;
+SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{2,}(c IS vl3) COLUMNS (a.vname AS src, c.vname AS dst)) ORDER BY src, dst;
+SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{,2}(c IS vl3) COLUMNS (a.vname AS src, c.vname AS dst)) ORDER BY src, dst;
 -- a quantified hop followed by a fixed one
-EXPLAIN (COSTS OFF) SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{,2}(c IS vl3)->(d IS vl3) COLUMNS (a.vname AS src, d.vname AS dst));
+SELECT src, dst, el1, el2 FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e1 IS el1]->{,2}(c IS vl3)-[e2]->(d IS vl3) COLUMNS (a.vname AS src, d.vname AS dst, e1.ename AS el1, e2.ename AS el2)) ORDER BY src, dst, el1, el2;
 -- label disjunction inside the hop: the inner 1-hop expansion is a UNION ALL
 -- of the matching edge element tables
-EXPLAIN (COSTS OFF) SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{1,2}(c IS vl2 | vl3) COLUMNS (a.vname AS src, c.vname AS dst));
+SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{1,2}(c IS vl2 | vl3) COLUMNS (a.vname AS src, c.vname AS dst)) ORDER BY src, dst;
 -- VLE edge variable referenced outside the edge element: its value is the
 -- array of the property's value over every traversed edge
-EXPLAIN (COSTS OFF) SELECT src, dst, el FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{1,2}(c IS vl3) COLUMNS (a.vname AS src, c.vname AS dst, e.ename AS el));
+SELECT src, dst, el FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{1,2}(c IS vl3) COLUMNS (a.vname AS src, c.vname AS dst, e.ename AS el)) ORDER BY src, dst, el;
+-- wrapped list expression
+SELECT * FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{1,2}(c IS vl3) COLUMNS (a.vname AS src, c.vname AS dst, e.ename[1] AS first_e, cardinality(e.ename) AS n)) ORDER BY src, dst;
+-- zero-hop path yields an empty list
+SELECT * FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{0,2}(b IS vl1 | vl3) COLUMNS (a.vname AS src, b.vname AS dst, e.ename AS es)) ORDER BY src, dst, es;
 -- graph-level WHERE on the VLE list becomes a filter on the GraphScan
-EXPLAIN (COSTS OFF) SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{1,3}(c IS vl3) WHERE cardinality(e.ename) = 2 COLUMNS (a.vname AS src, c.vname AS dst));
--- executing a GraphScan is not yet implemented (phase D)
-EXPLAIN ANALYZE SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{1,2}(c IS vl3) COLUMNS (a.vname AS src, c.vname AS dst));
+SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{1,3}(c IS vl3) WHERE cardinality(e.ename) = 2 COLUMNS (a.vname AS src, c.vname AS dst)) ORDER BY src, dst;
+-- undirected quantified hop: each undirected edge yields a walk per orientation
+SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]-{1,2}(c IS vl3) COLUMNS (a.vname AS src, c.vname AS dst)) ORDER BY src, dst;
+-- int-typed VLE edge list, empty for a zero-hop path
+SELECT * FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{0,2}(c IS vl1 | vl3) COLUMNS (a.vname AS src, c.vname AS dst, e.eprop1 AS ep)) ORDER BY src, dst, ep;
+-- graph-level WHERE with relational references only (no VLE list)
+SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{1,2}(c IS vl3) WHERE a.vname = 'v11' COLUMNS (a.vname AS src, c.vname AS dst)) ORDER BY src, dst;
+SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{1,2}(c IS vl3) WHERE c.vname = 'v33' COLUMNS (a.vname AS src, c.vname AS dst)) ORDER BY src, dst;
+-- graph-level WHERE mixing a relational and a VLE-list reference
+SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{1,3}(c IS vl3) WHERE cardinality(e.ename) = 1 AND a.vname = 'v11' COLUMNS (a.vname AS src, c.vname AS dst)) ORDER BY src, dst;
 
 -- Locking clause on GRAPH_TABLE
 SELECT * FROM GRAPH_TABLE (g1 MATCH (src IS vl1) COLUMNS (src.vname)) gt FOR UPDATE OF gt;  -- not supported

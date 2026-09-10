@@ -1357,6 +1357,8 @@ typedef struct native_vle_bind
 	int			gs_rti;			/* RT index of the internal graph RTE */
 	int			array_first;	/* first array output attno on the graph RTE */
 	List	   *array_props;	/* the factor's GraphPropertyRef* list */
+	Node	   *seed_quals;		/* ghost seed element's WHERE clause (the seed
+								 * key equality with the previous segment) */
 }			native_vle_bind;
 
 /* Binding of a concrete element variable in a branch. */
@@ -1726,6 +1728,8 @@ native_build_vle_rte(RangeTblEntry *rte, native_vle_factor * vf,
 	gs_rte->rellockmode = AccessShareLock;
 	gs_rte->lateral = true;
 	gs_rte->is_internal_graph = true;
+	gs_rte->graph_seed_elem_oid = srcpe->elemoid;
+	gs_rte->graph_vle_props = vf->array_props;
 
 	perminfo = addRTEPermissionInfo(&branch->rteperminfos, gs_rte);
 	perminfo->requiredPerms = ACL_SELECT;
@@ -1892,6 +1896,15 @@ native_query_for_branch(native_decomp * dc, List *elems, List *vles)
 				+ list_length(get_graph_element_key_columns(termpe->elemoid,
 														 Anum_pg_propgraph_element_pgekey));
 			vb->array_props = vf->array_props;
+			{
+				RangeTblEntry *gs_rte =
+					list_nth(path_query->rtable, gs_rti - 1);
+				GraphElementPattern *pd;
+
+				pd = linitial_node(GraphElementPattern,
+								   linitial(gs_rte->graph_pattern->path_pattern_list));
+				vb->seed_quals = copyObject(pd->whereClause);
+			}
 			vle_binds = lappend(vle_binds, vb);
 		}
 		else
@@ -1932,7 +1945,19 @@ native_query_for_branch(native_decomp * dc, List *elems, List *vles)
 
 		if (pe == NULL)
 		{
-			/* VLE factor: no branch-level qual here. */
+			/*
+			 * VLE factor: keep the ghost seed's key equality with the
+			 * previous segment so the scan is parameterized by it.
+			 */
+			foreach_ptr(native_vle_bind, vb, vle_binds)
+			{
+				if (vb->gs_rti == i + 1)
+				{
+					if (vb->seed_quals)
+						qual_exprs = lappend(qual_exprs, vb->seed_quals);
+					break;
+				}
+			}
 		}
 		else if (IS_EDGE_PATTERN(pe->path_factor->kind))
 		{
@@ -2045,8 +2070,8 @@ native_queries_recurse(native_decomp * dc, int facpos, List *elems, List *vles)
 		native_vle_factor *vf = list_nth(dc->vle_factors, facpos);
 
 		native_queries_recurse(dc, facpos + 1,
-							   lappend(elems, NULL),
-							   lappend(vles, vf));
+							   lappend(list_copy(elems), NULL),
+							   lappend(list_copy(vles), vf));
 	}
 	else
 	{
@@ -2055,8 +2080,8 @@ native_queries_recurse(native_decomp * dc, int facpos, List *elems, List *vles)
 			struct path_element *pe = lfirst(lc);
 
 			native_queries_recurse(dc, facpos + 1,
-								   lappend(elems, pe),
-								   lappend(vles, NULL));
+								   lappend(list_copy(elems), pe),
+								   lappend(list_copy(vles), NULL));
 		}
 	}
 }

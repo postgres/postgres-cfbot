@@ -1070,305 +1070,160 @@ SELECT src.vname, count(*) FROM v1 AS src
 
 -- ---------------------------------------------------------------------
 -- Quantified (variable-length) hops are planned as GraphScan nodes by the
--- native planner.  Hop *execution* is not implemented yet, so the
--- queries below use EXPLAIN; they will become plain SELECTs once the
--- GraphScan executor lands.
+-- native planner and executed by the executor.
 -- ---------------------------------------------------------------------
-EXPLAIN (COSTS OFF) SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{1,3}(c IS vl3) COLUMNS (a.vname AS src, c.vname AS dst));
-                                                 QUERY PLAN                                                  
--------------------------------------------------------------------------------------------------------------
- Append
-   ->  Merge Join
-         Merge Cond: ((graph_scan.gs_term = v2.id1) AND (graph_scan.gs_term_1 = v2.id2))
-         ->  Sort
-               Sort Key: graph_scan.gs_term, graph_scan.gs_term_1
-               ->  Nested Loop
-                     ->  Seq Scan on v1
-                     ->  Graph Scan on graph_scan
-                           min_depth: 1
-                           max_depth: 3
-                           direction: outgoing
-                           ->  Append
-                                 ->  Seq Scan on e1_2
-                                 ->  Seq Scan on e1_3
-                                 ->  Seq Scan on e2_1
-         ->  Sort
-               Sort Key: v2.id1, v2.id2
-               ->  Seq Scan on v2
-   ->  Nested Loop
-         ->  Seq Scan on v3
-         ->  Materialize
-               ->  Merge Join
-                     Merge Cond: ((graph_scan_1.gs_term = v2_1.id1) AND (graph_scan_1.gs_term_1 = v2_1.id2))
-                     ->  Sort
-                           Sort Key: graph_scan_1.gs_term, graph_scan_1.gs_term_1
-                           ->  Nested Loop
-                                 ->  Seq Scan on v1 v1_1
-                                 ->  Graph Scan on graph_scan_1
-                                       min_depth: 1
-                                       max_depth: 3
-                                       direction: outgoing
-                                       ->  Append
-                                             ->  Seq Scan on e1_2
-                                             ->  Seq Scan on e1_3
-                                             ->  Seq Scan on e2_1
-                     ->  Sort
-                           Sort Key: v2_1.id1, v2_1.id2
-                           ->  Seq Scan on v2 v2_1
-(38 rows)
+SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{1,3}(c IS vl3) COLUMNS (a.vname AS src, c.vname AS dst)) ORDER BY src, dst;
+ src | dst 
+-----+-----
+ v11 | v22
+ v11 | v31
+ v11 | v33
+ v12 | v21
+ v12 | v21
+ v13 | v23
+ v13 | v23
+(7 rows)
 
-EXPLAIN (COSTS OFF) SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{0}(c IS vl1) COLUMNS (a.vname AS src, c.vname AS dst));
-                 QUERY PLAN                  
----------------------------------------------
- Hash Join
-   Hash Cond: (graph_scan.gs_term = v1_1.id)
-   ->  Nested Loop
-         ->  Seq Scan on v1
-         ->  Graph Scan on graph_scan
-               min_depth: 0
-               max_depth: 0
-               direction: outgoing
-               ->  Append
-                     ->  Seq Scan on e1_2
-                     ->  Seq Scan on e1_3
-                     ->  Seq Scan on e2_1
-   ->  Hash
-         ->  Seq Scan on v1 v1_1
-(14 rows)
+SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{0}(c IS vl1) COLUMNS (a.vname AS src, c.vname AS dst)) ORDER BY src, dst;
+ src | dst 
+-----+-----
+ v11 | v11
+ v12 | v12
+ v13 | v13
+(3 rows)
 
-EXPLAIN (COSTS OFF) SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{2,}(c IS vl3) COLUMNS (a.vname AS src, c.vname AS dst));
-                                                 QUERY PLAN                                                  
--------------------------------------------------------------------------------------------------------------
- Append
-   ->  Merge Join
-         Merge Cond: ((graph_scan.gs_term = v2.id1) AND (graph_scan.gs_term_1 = v2.id2))
-         ->  Sort
-               Sort Key: graph_scan.gs_term, graph_scan.gs_term_1
-               ->  Nested Loop
-                     ->  Seq Scan on v1
-                     ->  Graph Scan on graph_scan
-                           min_depth: 2
-                           max_depth: -1
-                           direction: outgoing
-                           ->  Append
-                                 ->  Seq Scan on e1_2
-                                 ->  Seq Scan on e1_3
-                                 ->  Seq Scan on e2_1
-         ->  Sort
-               Sort Key: v2.id1, v2.id2
-               ->  Seq Scan on v2
-   ->  Nested Loop
-         ->  Seq Scan on v3
-         ->  Materialize
-               ->  Merge Join
-                     Merge Cond: ((graph_scan_1.gs_term = v2_1.id1) AND (graph_scan_1.gs_term_1 = v2_1.id2))
-                     ->  Sort
-                           Sort Key: graph_scan_1.gs_term, graph_scan_1.gs_term_1
-                           ->  Nested Loop
-                                 ->  Seq Scan on v1 v1_1
-                                 ->  Graph Scan on graph_scan_1
-                                       min_depth: 2
-                                       max_depth: -1
-                                       direction: outgoing
-                                       ->  Append
-                                             ->  Seq Scan on e1_2
-                                             ->  Seq Scan on e1_3
-                                             ->  Seq Scan on e2_1
-                     ->  Sort
-                           Sort Key: v2_1.id1, v2_1.id2
-                           ->  Seq Scan on v2 v2_1
-(38 rows)
-
-EXPLAIN (COSTS OFF) SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{,2}(c IS vl3) COLUMNS (a.vname AS src, c.vname AS dst));
-                                                 QUERY PLAN                                                  
--------------------------------------------------------------------------------------------------------------
- Append
-   ->  Merge Join
-         Merge Cond: ((graph_scan.gs_term = v2.id1) AND (graph_scan.gs_term_1 = v2.id2))
-         ->  Sort
-               Sort Key: graph_scan.gs_term, graph_scan.gs_term_1
-               ->  Nested Loop
-                     ->  Seq Scan on v1
-                     ->  Graph Scan on graph_scan
-                           min_depth: 1
-                           max_depth: 2
-                           direction: outgoing
-                           ->  Append
-                                 ->  Seq Scan on e1_2
-                                 ->  Seq Scan on e1_3
-                                 ->  Seq Scan on e2_1
-         ->  Sort
-               Sort Key: v2.id1, v2.id2
-               ->  Seq Scan on v2
-   ->  Nested Loop
-         ->  Seq Scan on v3
-         ->  Materialize
-               ->  Merge Join
-                     Merge Cond: ((graph_scan_1.gs_term = v2_1.id1) AND (graph_scan_1.gs_term_1 = v2_1.id2))
-                     ->  Sort
-                           Sort Key: graph_scan_1.gs_term, graph_scan_1.gs_term_1
-                           ->  Nested Loop
-                                 ->  Seq Scan on v1 v1_1
-                                 ->  Graph Scan on graph_scan_1
-                                       min_depth: 1
-                                       max_depth: 2
-                                       direction: outgoing
-                                       ->  Append
-                                             ->  Seq Scan on e1_2
-                                             ->  Seq Scan on e1_3
-                                             ->  Seq Scan on e2_1
-                     ->  Sort
-                           Sort Key: v2_1.id1, v2_1.id2
-                           ->  Seq Scan on v2 v2_1
-(38 rows)
+SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{2,}(c IS vl3) COLUMNS (a.vname AS src, c.vname AS dst)) ORDER BY src, dst;
+ERROR:  exceeded maximum graph traversal depth
+HINT:  Increase max_graph_stack_depth and retry, or try to remove the infinite loop
+SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{,2}(c IS vl3) COLUMNS (a.vname AS src, c.vname AS dst)) ORDER BY src, dst;
+ src | dst 
+-----+-----
+ v11 | v22
+ v11 | v31
+ v11 | v33
+ v12 | v21
+ v13 | v23
+(5 rows)
 
 -- a quantified hop followed by a fixed one
-EXPLAIN (COSTS OFF) SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{,2}(c IS vl3)->(d IS vl3) COLUMNS (a.vname AS src, d.vname AS dst));
-        QUERY PLAN        
---------------------------
- Result
-   One-Time Filter: false
-(2 rows)
+SELECT src, dst, el1, el2 FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e1 IS el1]->{,2}(c IS vl3)-[e2]->(d IS vl3) COLUMNS (a.vname AS src, d.vname AS dst, e1.ename AS el1, e2.ename AS el2)) ORDER BY src, dst, el1, el2;
+ src | dst |  el1   | el2  
+-----+-----+--------+------
+ v11 | v32 | {e121} | e231
+ v11 | v33 | {e131} | e331
+ v11 | v33 | {e131} | E331
+(3 rows)
 
 -- label disjunction inside the hop: the inner 1-hop expansion is a UNION ALL
 -- of the matching edge element tables
-EXPLAIN (COSTS OFF) SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{1,2}(c IS vl2 | vl3) COLUMNS (a.vname AS src, c.vname AS dst));
-                                                 QUERY PLAN                                                  
--------------------------------------------------------------------------------------------------------------
- Append
-   ->  Merge Join
-         Merge Cond: ((graph_scan.gs_term = v2.id1) AND (graph_scan.gs_term_1 = v2.id2))
-         ->  Sort
-               Sort Key: graph_scan.gs_term, graph_scan.gs_term_1
-               ->  Nested Loop
-                     ->  Seq Scan on v1
-                     ->  Graph Scan on graph_scan
-                           min_depth: 1
-                           max_depth: 2
-                           direction: outgoing
-                           ->  Append
-                                 ->  Seq Scan on e1_2
-                                 ->  Seq Scan on e1_3
-                                 ->  Seq Scan on e2_1
-         ->  Sort
-               Sort Key: v2.id1, v2.id2
-               ->  Seq Scan on v2
-   ->  Nested Loop
-         ->  Seq Scan on v3
-         ->  Materialize
-               ->  Merge Join
-                     Merge Cond: ((graph_scan_1.gs_term = v2_1.id1) AND (graph_scan_1.gs_term_1 = v2_1.id2))
-                     ->  Sort
-                           Sort Key: graph_scan_1.gs_term, graph_scan_1.gs_term_1
-                           ->  Nested Loop
-                                 ->  Seq Scan on v1 v1_1
-                                 ->  Graph Scan on graph_scan_1
-                                       min_depth: 1
-                                       max_depth: 2
-                                       direction: outgoing
-                                       ->  Append
-                                             ->  Seq Scan on e1_2
-                                             ->  Seq Scan on e1_3
-                                             ->  Seq Scan on e2_1
-                     ->  Sort
-                           Sort Key: v2_1.id1, v2_1.id2
-                           ->  Seq Scan on v2 v2_1
-(38 rows)
+SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{1,2}(c IS vl2 | vl3) COLUMNS (a.vname AS src, c.vname AS dst)) ORDER BY src, dst;
+ src | dst 
+-----+-----
+ v11 | v22
+ v11 | v31
+ v11 | v33
+ v12 | v21
+ v13 | v23
+(5 rows)
 
 -- VLE edge variable referenced outside the edge element: its value is the
 -- array of the property's value over every traversed edge
-EXPLAIN (COSTS OFF) SELECT src, dst, el FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{1,2}(c IS vl3) COLUMNS (a.vname AS src, c.vname AS dst, e.ename AS el));
-                                                 QUERY PLAN                                                  
--------------------------------------------------------------------------------------------------------------
- Append
-   ->  Merge Join
-         Merge Cond: ((graph_scan.gs_term = v2.id1) AND (graph_scan.gs_term_1 = v2.id2))
-         ->  Sort
-               Sort Key: graph_scan.gs_term, graph_scan.gs_term_1
-               ->  Nested Loop
-                     ->  Seq Scan on v1
-                     ->  Graph Scan on graph_scan
-                           min_depth: 1
-                           max_depth: 2
-                           direction: outgoing
-                           ->  Append
-                                 ->  Seq Scan on e1_2
-                                 ->  Seq Scan on e1_3
-                                 ->  Seq Scan on e2_1
-         ->  Sort
-               Sort Key: v2.id1, v2.id2
-               ->  Seq Scan on v2
-   ->  Nested Loop
-         ->  Seq Scan on v3
-         ->  Materialize
-               ->  Merge Join
-                     Merge Cond: ((graph_scan_1.gs_term = v2_1.id1) AND (graph_scan_1.gs_term_1 = v2_1.id2))
-                     ->  Sort
-                           Sort Key: graph_scan_1.gs_term, graph_scan_1.gs_term_1
-                           ->  Nested Loop
-                                 ->  Seq Scan on v1 v1_1
-                                 ->  Graph Scan on graph_scan_1
-                                       min_depth: 1
-                                       max_depth: 2
-                                       direction: outgoing
-                                       ->  Append
-                                             ->  Seq Scan on e1_2
-                                             ->  Seq Scan on e1_3
-                                             ->  Seq Scan on e2_1
-                     ->  Sort
-                           Sort Key: v2_1.id1, v2_1.id2
-                           ->  Seq Scan on v2 v2_1
-(38 rows)
+SELECT src, dst, el FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{1,2}(c IS vl3) COLUMNS (a.vname AS src, c.vname AS dst, e.ename AS el)) ORDER BY src, dst, el;
+ src | dst |   el   
+-----+-----+--------
+ v11 | v22 | {e121}
+ v11 | v31 | {e132}
+ v11 | v33 | {e131}
+ v12 | v21 | {e122}
+ v13 | v23 | {e123}
+(5 rows)
+
+-- wrapped list expression
+SELECT * FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{1,2}(c IS vl3) COLUMNS (a.vname AS src, c.vname AS dst, e.ename[1] AS first_e, cardinality(e.ename) AS n)) ORDER BY src, dst;
+ src | dst | first_e | n 
+-----+-----+---------+---
+ v11 | v22 | e121    | 1
+ v11 | v31 | e132    | 1
+ v11 | v33 | e131    | 1
+ v12 | v21 | e122    | 1
+ v13 | v23 | e123    | 1
+(5 rows)
+
+-- zero-hop path yields an empty list
+SELECT * FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{0,2}(b IS vl1 | vl3) COLUMNS (a.vname AS src, b.vname AS dst, e.ename AS es)) ORDER BY src, dst, es;
+ src | dst |     es      
+-----+-----+-------------
+ v11 | v11 | {}
+ v11 | v22 | {e121}
+ v11 | v31 | {e132}
+ v11 | v33 | {e131}
+ v12 | v12 | {}
+ v12 | v12 | {e122,e211}
+ v12 | v21 | {e122}
+ v13 | v13 | {}
+ v13 | v13 | {e123,e212}
+ v13 | v23 | {e123}
+(10 rows)
 
 -- graph-level WHERE on the VLE list becomes a filter on the GraphScan
-EXPLAIN (COSTS OFF) SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{1,3}(c IS vl3) WHERE cardinality(e.ename) = 2 COLUMNS (a.vname AS src, c.vname AS dst));
-                                                 QUERY PLAN                                                  
--------------------------------------------------------------------------------------------------------------
- Append
-   ->  Merge Join
-         Merge Cond: ((graph_scan.gs_term = v2.id1) AND (graph_scan.gs_term_1 = v2.id2))
-         ->  Sort
-               Sort Key: graph_scan.gs_term, graph_scan.gs_term_1
-               ->  Nested Loop
-                     ->  Seq Scan on v1
-                     ->  Graph Scan on graph_scan
-                           Filter: (cardinality(graph_scan.gs_arr) = 2)
-                           min_depth: 1
-                           max_depth: 3
-                           direction: outgoing
-                           ->  Append
-                                 ->  Seq Scan on e1_2
-                                 ->  Seq Scan on e1_3
-                                 ->  Seq Scan on e2_1
-         ->  Sort
-               Sort Key: v2.id1, v2.id2
-               ->  Seq Scan on v2
-   ->  Nested Loop
-         ->  Seq Scan on v3
-         ->  Materialize
-               ->  Merge Join
-                     Merge Cond: ((graph_scan_1.gs_term = v2_1.id1) AND (graph_scan_1.gs_term_1 = v2_1.id2))
-                     ->  Sort
-                           Sort Key: graph_scan_1.gs_term, graph_scan_1.gs_term_1
-                           ->  Nested Loop
-                                 ->  Seq Scan on v1 v1_1
-                                 ->  Graph Scan on graph_scan_1
-                                       Filter: (cardinality(graph_scan_1.gs_arr) = 2)
-                                       min_depth: 1
-                                       max_depth: 3
-                                       direction: outgoing
-                                       ->  Append
-                                             ->  Seq Scan on e1_2
-                                             ->  Seq Scan on e1_3
-                                             ->  Seq Scan on e2_1
-                     ->  Sort
-                           Sort Key: v2_1.id1, v2_1.id2
-                           ->  Seq Scan on v2 v2_1
-(40 rows)
+SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{1,3}(c IS vl3) WHERE cardinality(e.ename) = 2 COLUMNS (a.vname AS src, c.vname AS dst)) ORDER BY src, dst;
+ src | dst 
+-----+-----
+(0 rows)
 
--- executing a GraphScan is not yet implemented (phase D)
-EXPLAIN ANALYZE SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{1,2}(c IS vl3) COLUMNS (a.vname AS src, c.vname AS dst));
-ERROR:  graph scan execution is not yet implemented
+-- undirected quantified hop: each undirected edge yields a walk per orientation
+SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]-{1,2}(c IS vl3) COLUMNS (a.vname AS src, c.vname AS dst)) ORDER BY src, dst;
+ src | dst 
+-----+-----
+ v11 | v22
+ v11 | v31
+ v11 | v33
+ v12 | v21
+ v12 | v21
+ v13 | v23
+ v13 | v23
+(7 rows)
+
+-- int-typed VLE edge list, empty for a zero-hop path
+SELECT * FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{0,2}(c IS vl1 | vl3) COLUMNS (a.vname AS src, c.vname AS dst, e.eprop1 AS ep)) ORDER BY src, dst, ep;
+ src | dst |      ep       
+-----+-----+---------------
+ v11 | v11 | {}
+ v11 | v22 | {10001}
+ v11 | v31 | {10004}
+ v11 | v33 | {10003}
+ v12 | v12 | {}
+ v12 | v12 | {10002,10006}
+ v12 | v21 | {10002}
+ v13 | v13 | {}
+ v13 | v13 | {10007,10008}
+ v13 | v23 | {10007}
+(10 rows)
+
+-- graph-level WHERE with relational references only (no VLE list)
+SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{1,2}(c IS vl3) WHERE a.vname = 'v11' COLUMNS (a.vname AS src, c.vname AS dst)) ORDER BY src, dst;
+ src | dst 
+-----+-----
+ v11 | v22
+ v11 | v31
+ v11 | v33
+(3 rows)
+
+SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{1,2}(c IS vl3) WHERE c.vname = 'v33' COLUMNS (a.vname AS src, c.vname AS dst)) ORDER BY src, dst;
+ src | dst 
+-----+-----
+ v11 | v33
+(1 row)
+
+-- graph-level WHERE mixing a relational and a VLE-list reference
+SELECT src, dst FROM GRAPH_TABLE (g1 MATCH (a IS vl1)-[e IS el1]->{1,3}(c IS vl3) WHERE cardinality(e.ename) = 1 AND a.vname = 'v11' COLUMNS (a.vname AS src, c.vname AS dst)) ORDER BY src, dst;
+ src | dst 
+-----+-----
+ v11 | v22
+ v11 | v31
+ v11 | v33
+(3 rows)
+
 -- Locking clause on GRAPH_TABLE
 SELECT * FROM GRAPH_TABLE (g1 MATCH (src IS vl1) COLUMNS (src.vname)) gt FOR UPDATE OF gt;  -- not supported
 ERROR:  FOR UPDATE cannot be applied to GRAPH_TABLE

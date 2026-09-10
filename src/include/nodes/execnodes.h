@@ -752,6 +752,12 @@ typedef struct EState
 	uint64		es_total_processed; /* total # of tuples aggregated across all
 									 * ExecutorRun() calls. */
 
+	/*
+	 * Depth of the currently active graph traversal (sum over all active
+	 * GraphScans in the query), used to enforce max_graph_stack_depth.
+	 */
+	int			es_graph_stack_depth;
+
 	int			es_top_eflags;	/* eflags passed to ExecutorStart */
 	int			es_instrument;	/* OR of InstrumentOption flags */
 	bool		es_finished;	/* true when ExecutorFinish is done */
@@ -1944,15 +1950,55 @@ typedef struct SubqueryScanState
  *	 GraphScanState information
  *
  *		GraphScanState is used for scanning a graph pattern seek (a single
- *		quantified hop) in the range table.  It keeps the inner (1-hop) plan
- *		as a nested child so that it can be displayed and (eventually)
- *		executed.
+ *		quantified hop) in the range table.  The variable-length hop is
+ *		traversed with a depth-first search over per-depth copies of the
+ *		inner 1-hop expansion plan (struct GraphDepthFrameData, defined in
+ *		executor/nodeGraphScan.h).
  * ----------------
  */
 typedef struct GraphScanState
 {
 	ScanState	ss;				/* its first field is NodeTag */
-	PlanState  *inner_plan;		/* the inner (single quantified hop) plan */
+
+	/* Effective (clamped) depth bounds. */
+	int			min_depth;
+	int			max_depth;
+
+	/* Depth frames: one per active path level, [0..ndepths-1]. */
+	int			ndepths;
+	struct GraphDepthFrameData *frames;
+	int			cur_depth;		/* innermost active frame; -1 = need a new
+								 * seed */
+
+	bool		need_seed;		/* params may hold a new seed (set on rescan) */
+	bool		seed_emitted;	/* zero-hop seed row already emitted */
+
+	/* Vertex element the (ghost) seed belongs to. */
+	Oid			seed_elem;
+
+	/* Number of VLE edge-list (array) output columns. */
+	int			nprops;
+
+	/* Hop-wide max src/dest key widths over the edge element arms. */
+	int			max_nsrc;
+	int			max_ndst;
+
+	/* Per-arm edge element info (struct GraphScanArmData). */
+	int			narms;
+	struct GraphScanArmData *arms;
+
+	/* PARAM_EXEC ids of the seed key columns (List of int), in key order. */
+	List	   *seed_params;
+
+	/*
+	 * Scratch buffers for graph_step(): resized to the max key width and
+	 * number of VLE properties at init.  They must NOT live in the per-tuple
+	 * context, which the (inner) child plans reset.
+	 */
+	Datum	   *tmp_vid;
+	bool	   *tmp_vidnull;
+	Datum	   *tmp_props;
+	bool	   *tmp_propsnull;
 }			GraphScanState;
 
 /* ----------------

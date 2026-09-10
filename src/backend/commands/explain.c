@@ -24,6 +24,7 @@
 #include "commands/explain_state.h"
 #include "commands/prepare.h"
 #include "foreign/fdwapi.h"
+#include "executor/nodeGraphScan.h"
 #include "jit/jit.h"
 #include "libpq/pqformat.h"
 #include "libpq/protocol.h"
@@ -2434,8 +2435,10 @@ ExplainNode(PlanState *planstate, List *ancestors,
 						"Subquery", NULL, es);
 			break;
 		case T_GraphScan:
-			ExplainNode(((GraphScanState *) planstate)->inner_plan, ancestors,
-						"Inner", NULL, es);
+			/* the inner 1-hop expansion lives in the first depth frame */
+			if (((GraphScanState *) planstate)->frames[0].inner_state != NULL)
+				ExplainNode(((GraphScanState *) planstate)->frames[0].inner_state,
+							ancestors, "Inner", NULL, es);
 			break;
 		case T_CustomScan:
 			ExplainCustomChildren((CustomScanState *) planstate,
