@@ -250,6 +250,66 @@ SELECT isfalse OR isnul OR istrue FROM booltbl4;
 SELECT istrue OR isfalse OR isnul FROM booltbl4;
 SELECT isnul OR istrue OR isfalse FROM booltbl4;
 
+-- Implication: "a IMPLIES b" is "NOT a OR b".  It is not commutative, so all
+-- nine combinations of three-valued logic have to be checked.
+SELECT istrue IMPLIES istrue, istrue IMPLIES isfalse, istrue IMPLIES isnul
+  FROM booltbl4;
+SELECT isfalse IMPLIES istrue, isfalse IMPLIES isfalse, isfalse IMPLIES isnul
+  FROM booltbl4;
+SELECT isnul IMPLIES istrue, isnul IMPLIES isfalse, isnul IMPLIES isnul
+  FROM booltbl4;
+
+-- the same, as constants, so that constant folding is exercised too
+SELECT true IMPLIES true, true IMPLIES false, true IMPLIES null;
+SELECT false IMPLIES true, false IMPLIES false, false IMPLIES null;
+SELECT null IMPLIES true, null IMPLIES false, null::bool IMPLIES null;
+
+-- IMPLIES is non-associative, so a chain is refused rather than grouped
+SELECT isfalse IMPLIES istrue IMPLIES isfalse FROM booltbl4;    -- error
+
+-- and it has to be, because the two groupings are different formulas.  The
+-- first row below is the interesting one: it tells them apart.
+SELECT a, b, c,
+       (a IMPLIES b) IMPLIES c AS grouped_left,
+       a IMPLIES (b IMPLIES c) AS grouped_right,
+       (a AND b) IMPLIES c AS conj_antecedent,
+       a IMPLIES (b AND c) AS conj_consequent
+  FROM (VALUES (false, false, false),
+               (true, false, false),
+               (true, true, true)) AS t(a, b, c);
+
+-- grouping to the right is implication from the conjunction of the operands
+-- (exportation), which holds for all three truth values, so no rows here
+SELECT a, b, c
+  FROM (VALUES (true), (false), (null)) AS x(a),
+       (VALUES (true), (false), (null)) AS y(b),
+       (VALUES (true), (false), (null)) AS z(c)
+ WHERE (a IMPLIES (b IMPLIES c)) IS DISTINCT FROM ((a AND b) IMPLIES c);
+
+-- and binds looser than OR, AND, NOT, the comparison operators and IS
+SELECT istrue OR isfalse IMPLIES isfalse FROM booltbl4;
+SELECT isfalse IMPLIES isfalse AND isfalse FROM booltbl4;
+SELECT NOT istrue IMPLIES istrue FROM booltbl4;
+SELECT 1 = 1 IMPLIES 2 = 3;
+SELECT isfalse IMPLIES isnul IS NULL FROM booltbl4;
+
+-- non-boolean operands are reported in terms of IMPLIES, not of its expansion
+SELECT 1 IMPLIES true;                  -- error
+SELECT true IMPLIES 1;                  -- error
+
+-- the construct is expanded during parse analysis, so this is what is stored
+CREATE VIEW boolview AS SELECT istrue IMPLIES isnul AS i FROM booltbl4;
+SELECT pg_get_viewdef('boolview', true);
+DROP VIEW boolview;
+
+-- IMPLIES is unreserved, so it remains usable as an identifier
+CREATE TABLE implies (implies bool);
+INSERT INTO implies VALUES (false);
+SELECT implies IMPLIES implies FROM implies;
+DROP TABLE implies;
+SELECT 1 AS implies;
+SELECT 1 implies;
+
 -- Casts
 SELECT 0::boolean;
 SELECT 1::boolean;

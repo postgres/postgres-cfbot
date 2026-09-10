@@ -39,10 +39,19 @@
      <primary>negation</primary>
     </indexterm>
 
+    <indexterm>
+     <primary>IMPLIES</primary>
+    </indexterm>
+
+    <indexterm>
+     <primary>implication</primary>
+    </indexterm>
+
 <synopsis>
 <type>boolean</type> <literal>AND</literal> <type>boolean</type> <returnvalue>boolean</returnvalue>
 <type>boolean</type> <literal>OR</literal> <type>boolean</type> <returnvalue>boolean</returnvalue>
 <literal>NOT</literal> <type>boolean</type> <returnvalue>boolean</returnvalue>
+<type>boolean</type> <literal>IMPLIES</literal> <type>boolean</type> <returnvalue>boolean</returnvalue>
 </synopsis>
 
     <acronym>SQL</acronym> uses a three-valued logic system with true,
@@ -144,6 +153,95 @@
       </tbody>
      </tgroup>
     </informaltable>
+   </para>
+
+   <para>
+    The <literal>IMPLIES</literal> operator is material implication:
+    <replaceable>a</replaceable> <literal>IMPLIES</literal>
+    <replaceable>b</replaceable> is equivalent to <literal>NOT</literal>
+    <replaceable>a</replaceable> <literal>OR</literal>
+    <replaceable>b</replaceable>, and reads as <quote>if
+    <replaceable>a</replaceable> then <replaceable>b</replaceable></quote>.
+    Unlike <literal>AND</literal> and <literal>OR</literal> it is not
+    commutative, which is why its table, unlike theirs, is not symmetric
+    about the diagonal:
+
+    <informaltable rowheader="firstcol">
+     <tgroup cols="4">
+      <thead>
+       <row>
+        <entry>IMPLIES</entry>
+        <entry>True</entry>
+        <entry>False</entry>
+        <entry>Unknown</entry>
+       </row>
+      </thead>
+
+      <tbody>
+       <row>
+        <entry>True</entry>
+        <entry>True</entry>
+        <entry>False</entry>
+        <entry>Unknown</entry>
+       </row>
+
+       <row>
+        <entry>False</entry>
+        <entry>True</entry>
+        <entry>True</entry>
+        <entry>True</entry>
+       </row>
+
+       <row>
+        <entry>Unknown</entry>
+        <entry>True</entry>
+        <entry>Unknown</entry>
+        <entry>Unknown</entry>
+       </row>
+      </tbody>
+     </tgroup>
+    </informaltable>
+   </para>
+
+   <para>
+    <literal>IMPLIES</literal> binds less tightly than every other operator,
+    <literal>OR</literal> included, so
+    <literal>a = 1 IMPLIES b = 2 OR c = 3</literal> means
+    <literal>(a = 1) IMPLIES ((b = 2) OR (c = 3))</literal>.  See <xref
+    linkend="sql-precedence"/>.
+   </para>
+
+   <para>
+    Implication is not associative, and <literal>IMPLIES</literal> therefore
+    does not chain: <replaceable>a</replaceable> <literal>IMPLIES</literal>
+    <replaceable>b</replaceable> <literal>IMPLIES</literal>
+    <replaceable>c</replaceable> is a syntax error, just as
+    <literal>a = b = c</literal> is.  The grouping has to be written
+    explicitly, and the two groupings mean different things:
+    (<replaceable>a</replaceable> <literal>IMPLIES</literal>
+    <replaceable>b</replaceable>) <literal>IMPLIES</literal>
+    <replaceable>c</replaceable> is not equivalent to
+    <replaceable>a</replaceable> <literal>IMPLIES</literal>
+    (<replaceable>b</replaceable> <literal>IMPLIES</literal>
+    <replaceable>c</replaceable>).
+   </para>
+
+   <para>
+    Of the two, grouping to the right is usually the one wanted: it is the
+    same as a single implication whose antecedent is the conjunction of the
+    two leading operands, so <replaceable>a</replaceable>
+    <literal>IMPLIES</literal> (<replaceable>b</replaceable>
+    <literal>IMPLIES</literal> <replaceable>c</replaceable>) is equivalent to
+    (<replaceable>a</replaceable> <literal>AND</literal>
+    <replaceable>b</replaceable>) <literal>IMPLIES</literal>
+    <replaceable>c</replaceable>, that is, <quote>if both
+    <replaceable>a</replaceable> and <replaceable>b</replaceable>, then
+    <replaceable>c</replaceable></quote>.  To say <quote>if
+    <replaceable>a</replaceable>, then both <replaceable>b</replaceable> and
+    <replaceable>c</replaceable></quote> instead, write
+    <replaceable>a</replaceable> <literal>IMPLIES</literal>
+    (<replaceable>b</replaceable> <literal>AND</literal>
+    <replaceable>c</replaceable>).
    </para>
 
    <para>
