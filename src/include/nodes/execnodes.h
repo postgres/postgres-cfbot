@@ -1101,9 +1101,11 @@ typedef struct JsonTransformExprState
 
 	/* Runtime slots — filled by prior steps */
 	NullableDatum formatted_expr;	/* input jsonb document */
-	NullableDatum pathspec;		/* compiled jsonpath Datum */
+	NullableDatum pathspec;		/* compiled target jsonpath Datum */
 	NullableDatum action_value; /* value to for transform ops (NULL for
-								 * REMOVE) */
+								 * REMOVE, or when the source is a PATH) */
+	NullableDatum source_pathspec;	/* compiled source jsonpath Datum, for the
+									 * INSERT/REPLACE "= PATH <jsonpath>" form */
 
 	/* PASSING args (only used if jsonpath needs them) */
 	List	   *args;			/* List of JsonPathVariable */

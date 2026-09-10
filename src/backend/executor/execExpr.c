@@ -5111,9 +5111,26 @@ ExecInitJsonTransformExpr(JsonExpr *jsexpr, ExprState *state,
 	ExprEvalPushStep(state, scratch);
 
 	/*
-	 * Evaluate the action's value_expr, if any.  REMOVE has no value.
+	 * Evaluate the action's source.  For the "= PATH <jsonpath>" form we
+	 * compile the source jsonpath; ExecEvalJsonTransform runs it against the
+	 * input document to derive the value.  Otherwise we compile the value
+	 * expression (RENAME's new key name, or INSERT/REPLACE's value).  REMOVE
+	 * has neither.
 	 */
-	if (action->value_expr != NULL)
+	if (action->value_is_path)
+	{
+		ExecInitExprRec((Expr *) action->source_pathspec, state,
+						&jtstate->source_pathspec.value,
+						&jtstate->source_pathspec.isnull);
+
+		/* JUMP to return-NULL landing pad if the source path is NULL */
+		jumps_return_null = lappend_int(jumps_return_null, state->steps_len);
+		scratch->opcode = EEOP_JUMP_IF_NULL;
+		scratch->resnull = &jtstate->source_pathspec.isnull;
+		scratch->d.jump.jumpdone = -1;	/* patched below */
+		ExprEvalPushStep(state, scratch);
+	}
+	else if (action->value_expr != NULL)
 	{
 		ExecInitExprRec((Expr *) action->value_expr, state,
 						&jtstate->action_value.value,
