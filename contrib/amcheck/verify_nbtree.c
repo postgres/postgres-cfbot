@@ -13,6 +13,11 @@
  * verify its structure.  A heap scan later uses Bloom filter probes to verify
  * that every visible heap tuple has a matching index tuple.
  *
+ * When heap-to-index verification (indexallkeysmatch) is requested, a Bloom
+ * filter fingerprints (key,tid) from a heap scan first.  The index scan then
+ * probes this filter; when the probe fails, a heap lookup verifies that the
+ * index tuple points to a heap tuple with the same key.
+ *
  *
  * Copyright (c) 2017-2026, PostgreSQL Global Development Group
  *
@@ -30,8 +35,9 @@
 #include "access/tableam.h"
 #include "access/transam.h"
 #include "access/xact.h"
-#include "verify_common.h"
 #include "catalog/index.h"
+#include "executor/executor.h"
+#include "verify_common.h"
 #include "catalog/pg_am.h"
 #include "catalog/pg_opfamily_d.h"
 #include "common/pg_prng.h"
@@ -82,6 +88,8 @@ typedef struct BtreeCheckState
 	bool		readonly;
 	/* Also verifying heap has no unindexed tuples? */
 	bool		heapallindexed;
+	/* Also verifying each index tuple points to heap tuple with same key? */
+	bool		indexallkeysmatch;
 	/* Also making sure non-pivot tuples can be found by new search? */
 	bool		rootdescend;
 	/* Also check uniqueness constraint if index is unique */
@@ -132,6 +140,22 @@ typedef struct BtreeCheckState
 	bloom_filter *filter;
 	/* Debug counter */
 	int64		heaptuplespresent;
+
+	/*
+	 * Mutable state, for optional indexallkeysmatch verification:
+	 */
+
+	/* Bloom filter fingerprints heap (key,tid) pairs */
+	bloom_filter *heapfilter;
+	/* Debug counter for index tuples verified */
+	int64		indextuplesverified;
+	/* Index fetch context for heap tuple lookups by TID */
+	IndexFetchTableData *index_fetch;
+	/* Reusable slot and executor state for FormIndexDatum() */
+	TupleTableSlot *iakm_slot;
+	EState	   *iakm_estate;
+	/* Short heap segments verification */
+	BlockNumber heapnblocks;
 } BtreeCheckState;
 
 /*
@@ -169,6 +193,7 @@ typedef struct BTCallbackState
 {
 	bool		parentcheck;
 	bool		heapallindexed;
+	bool		indexallkeysmatch;
 	bool		rootdescend;
 	bool		checkunique;
 } BTCallbackState;
@@ -180,7 +205,7 @@ static void bt_index_check_callback(Relation indrel, Relation heaprel,
 									void *state, bool readonly);
 static void bt_check_every_level(Relation rel, Relation heaprel,
 								 bool heapkeyspace, bool readonly, bool heapallindexed,
-								 bool rootdescend, bool checkunique);
+								 bool indexallkeysmatch, bool rootdescend, bool checkunique);
 static BtreeLevel bt_check_level_from_leftmost(BtreeCheckState *state,
 											   BtreeLevel level);
 static bool bt_leftmost_ignoring_half_dead(BtreeCheckState *state,
@@ -212,6 +237,17 @@ static void bt_downlink_missing_check(BtreeCheckState *state, bool rightsplit,
 static void bt_tuple_present_callback(Relation index, ItemPointer tid,
 									  Datum *values, bool *isnull,
 									  bool tupleIsAlive, void *checkstate);
+static void bt_heap_fingerprint_callback(Relation index, ItemPointer tid,
+										  Datum *values, bool *isnull,
+										  bool tupleIsAlive, void *checkstate);
+static void bt_verify_index_tuple_points_to_heap(BtreeCheckState *state,
+												  IndexTuple itup,
+												  BlockNumber targetblock,
+												  OffsetNumber offset);
+static void bt_report_dangling_index_entry(BtreeCheckState *state,
+											ItemPointer tid,
+											BlockNumber targetblock,
+											OffsetNumber offset);
 static IndexTuple bt_normalize_tuple(BtreeCheckState *state,
 									 IndexTuple itup);
 static inline IndexTuple bt_posting_plain_tuple(IndexTuple itup, int n);
@@ -240,13 +276,15 @@ static inline ItemPointer BTreeTupleGetHeapTIDCareful(BtreeCheckState *state,
 static inline ItemPointer BTreeTupleGetPointsToTID(IndexTuple itup);
 
 /*
- * bt_index_check(index regclass, heapallindexed boolean, checkunique boolean)
+ * bt_index_check(index regclass, heapallindexed boolean, checkunique boolean, indexallkeysmatch boolean)
  *
  * Verify integrity of B-Tree index.
  *
  * Acquires AccessShareLock on heap & index relations.  Does not consider
  * invariants that exist between parent/child pages.  Optionally verifies
- * that heap does not contain any unindexed or incorrectly indexed tuples.
+ * that heap does not contain any unindexed or incorrectly indexed tuples
+ * (heapallindexed), or that each index tuple points to a heap tuple with
+ * the same key (indexallkeysmatch).
  */
 Datum
 bt_index_check(PG_FUNCTION_ARGS)
@@ -255,6 +293,7 @@ bt_index_check(PG_FUNCTION_ARGS)
 	BTCallbackState args;
 
 	args.heapallindexed = false;
+	args.indexallkeysmatch = false;
 	args.rootdescend = false;
 	args.parentcheck = false;
 	args.checkunique = false;
@@ -263,6 +302,8 @@ bt_index_check(PG_FUNCTION_ARGS)
 		args.heapallindexed = PG_GETARG_BOOL(1);
 	if (PG_NARGS() >= 3)
 		args.checkunique = PG_GETARG_BOOL(2);
+	if (PG_NARGS() >= 4)
+		args.indexallkeysmatch = PG_GETARG_BOOL(3);
 
 	amcheck_lock_relation_and_check(indrelid, BTREE_AM_OID,
 									bt_index_check_callback,
@@ -272,13 +313,15 @@ bt_index_check(PG_FUNCTION_ARGS)
 }
 
 /*
- * bt_index_parent_check(index regclass, heapallindexed boolean, rootdescend boolean, checkunique boolean)
+ * bt_index_parent_check(index regclass, heapallindexed boolean, rootdescend boolean, checkunique boolean, indexallkeysmatch boolean)
  *
  * Verify integrity of B-Tree index.
  *
  * Acquires ShareLock on heap & index relations.  Verifies that downlinks in
  * parent pages are valid lower bounds on child pages.  Optionally verifies
- * that heap does not contain any unindexed or incorrectly indexed tuples.
+ * that heap does not contain any unindexed or incorrectly indexed tuples
+ * (heapallindexed), or that each index tuple points to a heap tuple with
+ * the same key (indexallkeysmatch).
  */
 Datum
 bt_index_parent_check(PG_FUNCTION_ARGS)
@@ -287,6 +330,7 @@ bt_index_parent_check(PG_FUNCTION_ARGS)
 	BTCallbackState args;
 
 	args.heapallindexed = false;
+	args.indexallkeysmatch = false;
 	args.rootdescend = false;
 	args.parentcheck = true;
 	args.checkunique = false;
@@ -297,6 +341,8 @@ bt_index_parent_check(PG_FUNCTION_ARGS)
 		args.rootdescend = PG_GETARG_BOOL(2);
 	if (PG_NARGS() >= 4)
 		args.checkunique = PG_GETARG_BOOL(3);
+	if (PG_NARGS() >= 5)
+		args.indexallkeysmatch = PG_GETARG_BOOL(4);
 
 	amcheck_lock_relation_and_check(indrelid, BTREE_AM_OID,
 									bt_index_check_callback,
@@ -350,7 +396,8 @@ bt_index_check_callback(Relation indrel, Relation heaprel, void *state, bool rea
 
 	/* Check index, possibly against table it is an index on */
 	bt_check_every_level(indrel, heaprel, heapkeyspace, readonly,
-						 args->heapallindexed, args->rootdescend, args->checkunique);
+						 args->heapallindexed, args->indexallkeysmatch,
+						 args->rootdescend, args->checkunique);
 }
 
 /*
@@ -378,8 +425,8 @@ bt_index_check_callback(Relation indrel, Relation heaprel, void *state, bool rea
  */
 static void
 bt_check_every_level(Relation rel, Relation heaprel, bool heapkeyspace,
-					 bool readonly, bool heapallindexed, bool rootdescend,
-					 bool checkunique)
+					 bool readonly, bool heapallindexed, bool indexallkeysmatch,
+					 bool rootdescend, bool checkunique)
 {
 	BtreeCheckState *state;
 	Page		metapage;
@@ -408,39 +455,36 @@ bt_check_every_level(Relation rel, Relation heaprel, bool heapkeyspace,
 	state->heaprel = heaprel;
 	state->heapkeyspace = heapkeyspace;
 	state->readonly = readonly;
+
+	/*
+	 * Remember the current size of the heap for beyond-EOF TID checks.
+	 *
+	 * Those checks target silent data loss: when a higher-numbered segment
+	 * of the main fork is missing or truncated, mdnblocks() returns a short
+	 * size without any error.  If instead the first segment is missing
+	 * entirely, there is nothing silent to detect -- every heap access
+	 * fails with "could not open file" -- so skip the beyond-EOF checks
+	 * (by making any comparison against heapnblocks false) rather than
+	 * fail an index-only check that otherwise would not touch the heap.
+	 * This matters for pg_amcheck, which may check an index while its
+	 * corrupt table was explicitly excluded from verification.
+	 */
+	if (smgrexists(RelationGetSmgr(state->heaprel), MAIN_FORKNUM))
+		state->heapnblocks = RelationGetNumberOfBlocks(state->heaprel);
+	else
+		state->heapnblocks = InvalidBlockNumber;
 	state->heapallindexed = heapallindexed;
+	state->indexallkeysmatch = indexallkeysmatch;
 	state->rootdescend = rootdescend;
 	state->checkunique = checkunique;
 	state->snapshot = InvalidSnapshot;
 
-	if (state->heapallindexed)
+	if (state->heapallindexed || state->indexallkeysmatch)
 	{
-		int64		total_pages;
-		int64		total_elems;
-		uint64		seed;
-
 		/*
-		 * Size Bloom filter based on estimated number of tuples in index,
-		 * while conservatively assuming that each block must contain at least
-		 * MaxTIDsPerBTreePage / 3 "plain" tuples -- see
-		 * bt_posting_plain_tuple() for definition, and details of how posting
-		 * list tuples are handled.
-		 */
-		total_pages = RelationGetNumberOfBlocks(rel);
-		total_elems = Max(total_pages * (MaxTIDsPerBTreePage / 3),
-						  (int64) state->rel->rd_rel->reltuples);
-		/* Generate a random seed to avoid repetition */
-		seed = pg_prng_uint64(&pg_global_prng_state);
-		/* Create Bloom filter to fingerprint index */
-		state->filter = bloom_create(total_elems, maintenance_work_mem, seed);
-		state->heaptuplespresent = 0;
-
-		/*
-		 * Register our own snapshot for heapallindexed, rather than asking
-		 * table_index_build_scan() to do this for us later.  This needs to
-		 * happen before index fingerprinting begins, so we can later be
-		 * certain that index fingerprinting should have reached all tuples
-		 * returned by table_index_build_scan().
+		 * Register our own snapshot for heapallindexed/indexallkeysmatch, rather
+		 * than asking table_index_build_scan() to do this for us later.  This
+		 * needs to happen before fingerprinting begins.
 		 */
 		state->snapshot = RegisterSnapshot(GetTransactionSnapshot());
 
@@ -465,16 +509,67 @@ bt_check_every_level(Relation rel, Relation heaprel, bool heapkeyspace,
 						   RelationGetRelationName(rel)));
 	}
 
+	if (state->heapallindexed)
+	{
+		int64		total_pages;
+		int64		total_elems;
+		uint64		seed;
+
+		/*
+		 * Size Bloom filter based on estimated number of tuples in index,
+		 * while conservatively assuming that each block must contain at least
+		 * MaxTIDsPerBTreePage / 3 "plain" tuples -- see
+		 * bt_posting_plain_tuple() for definition, and details of how posting
+		 * list tuples are handled.
+		 */
+		total_pages = RelationGetNumberOfBlocks(rel);
+		total_elems = Max(total_pages * (MaxTIDsPerBTreePage / 3),
+						  (int64) state->rel->rd_rel->reltuples);
+		seed = pg_prng_uint64(&pg_global_prng_state);
+		state->filter = bloom_create(total_elems, maintenance_work_mem, seed);
+		state->heaptuplespresent = 0;
+	}
+
+	if (state->indexallkeysmatch)
+	{
+		int64		total_pages;
+		int64		total_elems;
+		uint64		seed;
+
+		/*
+		 * Size Bloom filter based on estimated number of heap tuples.
+		 */
+		total_pages = RelationGetNumberOfBlocks(heaprel);
+		total_elems = Max(total_pages * MaxHeapTuplesPerPage,
+						  (int64) heaprel->rd_rel->reltuples);
+		seed = pg_prng_uint64(&pg_global_prng_state);
+		state->heapfilter = bloom_create(total_elems, maintenance_work_mem, seed);
+		state->indextuplesverified = 0;
+
+		/*
+		 * Set up reusable infrastructure for heap lookups by TID: an index
+		 * fetch context (follows LP_REDIRECT and HOT chains the same way a
+		 * regular index scan does), a slot, and an executor state for
+		 * FormIndexDatum().  Creating these once per verification avoids
+		 * rebuilding executor state (and recompiling index expressions) for
+		 * every index tuple that misses the Bloom filter.
+		 */
+		state->index_fetch = table_index_fetch_begin(heaprel, SO_NONE);
+		state->iakm_slot = table_slot_create(heaprel, NULL);
+		state->iakm_estate = CreateExecutorState();
+	}
+
 	/*
 	 * We need a snapshot to check the uniqueness of the index.  For better
 	 * performance, take it once per index check.  If one was already taken
 	 * above, use that.
 	 */
-	if (state->checkunique)
+	if (state->checkunique || state->indexallkeysmatch)
 	{
 		state->indexinfo = BuildIndexInfo(state->rel);
 
-		if (state->indexinfo->ii_Unique && state->snapshot == InvalidSnapshot)
+		if (state->checkunique && state->indexinfo->ii_Unique &&
+			state->snapshot == InvalidSnapshot)
 			state->snapshot = RegisterSnapshot(GetTransactionSnapshot());
 	}
 
@@ -491,6 +586,36 @@ bt_check_every_level(Relation rel, Relation heaprel, bool heapkeyspace,
 												 "amcheck context",
 												 ALLOCSET_DEFAULT_SIZES);
 	state->checkstrategy = GetAccessStrategy(BAS_BULKREAD);
+
+	/*
+	 * When indexallkeysmatch, fingerprint heap first so we can verify each index
+	 * tuple points to a heap tuple with the same key during the index scan.
+	 */
+	if (state->indexallkeysmatch)
+	{
+		IndexInfo  *indexinfo = BuildIndexInfo(state->rel);
+		TableScanDesc scan;
+
+		scan = table_beginscan_strat(state->heaprel,
+									 state->snapshot,
+									 0, NULL, true, true);
+		indexinfo->ii_Concurrent = true;
+		indexinfo->ii_Unique = false;
+		indexinfo->ii_ExclusionOps = NULL;
+		indexinfo->ii_ExclusionProcs = NULL;
+		indexinfo->ii_ExclusionStrats = NULL;
+
+		elog(DEBUG1, "fingerprinting heap \"%s\" for index \"%s\" verification",
+			 RelationGetRelationName(state->heaprel),
+			 RelationGetRelationName(state->rel));
+
+		table_index_build_scan(state->heaprel, state->rel, indexinfo, true, false,
+							   bt_heap_fingerprint_callback, state, scan);
+
+		ereport(DEBUG1,
+				(errmsg_internal("finished heap fingerprint with bitset %.2f%% set",
+								100.0 * bloom_prop_bits_set(state->heapfilter))));
+	}
 
 	/* Get true root block from meta-page */
 	metapage = palloc_btree_page(state, BTREE_METAPAGE);
@@ -596,6 +721,20 @@ bt_check_every_level(Relation rel, Relation heaprel, bool heapkeyspace,
 								 100.0 * bloom_prop_bits_set(state->filter))));
 
 		bloom_free(state->filter);
+	}
+
+	if (state->indexallkeysmatch)
+	{
+		ereport(DEBUG1,
+				(errmsg_internal("finished verifying " INT64_FORMAT " index tuples point to matching heap tuples",
+								 state->indextuplesverified)));
+		bloom_free(state->heapfilter);
+		table_index_fetch_end(state->index_fetch);
+		ExecDropSingleTupleTableSlot(state->iakm_slot);
+		FreeExecutorState(state->iakm_estate);
+		/* These may have been pointing to the now-gone estate */
+		state->indexinfo->ii_ExpressionsState = NIL;
+		state->indexinfo->ii_PredicateState = NULL;
 	}
 
 	/* Be tidy: */
@@ -1515,6 +1654,84 @@ bt_target_page_check(BtreeCheckState *state)
 				/* Be tidy */
 				if (norm != itup)
 					pfree(norm);
+			}
+		}
+
+		/* Check that leaf page tuples do not point beyond the end of heap */
+		if (P_ISLEAF(topaque) && !ItemIdIsDead(itemid))
+		{
+			int			nposting = 1;
+
+			if (BTreeTupleIsPosting(itup))
+				nposting = BTreeTupleGetNPosting(itup);
+
+			for (int i = 0; i < nposting; i++)
+			{
+				ItemPointer htid;
+				BlockNumber heapblk;
+				OffsetNumber heapoff;
+
+				if (nposting > 1)
+					htid = BTreeTupleGetPostingN(itup, i);
+				else
+					htid = BTreeTupleGetPointsToTID(itup);
+
+				heapblk = ItemPointerGetBlockNumber(htid);
+				heapoff = ItemPointerGetOffsetNumber(htid);
+
+				/*
+				 * Does heapblk go beyond RelationGetNumberOfBlocks(),
+				 * potentially indicating a missing relation segment?
+				 */
+				if (state->heapnblocks != InvalidBlockNumber &&
+					heapblk >= state->heapnblocks)
+				{
+					/*
+					 * The relation may have been extended concurrently;
+					 * refresh the cached value before reporting corruption.
+					 */
+					state->heapnblocks = RelationGetNumberOfBlocks(state->heaprel);
+					if (heapblk >= state->heapnblocks)
+					{
+						char	   *postingoff = "";
+
+						if (nposting > 1)
+							postingoff = psprintf(" posting list offset=%d", i);
+
+						ereport(ERROR,
+								(errcode(ERRCODE_INDEX_CORRUPTED),
+								 errmsg("index line pointer in index \"%s\" points to missing page in table \"%s\"",
+										RelationGetRelationName(state->rel),
+										RelationGetRelationName(state->heaprel)),
+								 errdetail_internal("Index tid=(%u,%u)%s points to heap tid=(%u,%u) but heap has only %u blocks.",
+													state->targetblock, offset, postingoff,
+													heapblk, heapoff,
+													state->heapnblocks),
+								 errhint("This can be caused by a lost relation segment (missing or removed file).")));
+					}
+				}
+			}
+		}
+
+		/* Verify each index tuple points to heap tuple with same key */
+		if (state->indexallkeysmatch && P_ISLEAF(topaque) && !ItemIdIsDead(itemid))
+		{
+			if (BTreeTupleIsPosting(itup))
+			{
+				for (int i = 0; i < BTreeTupleGetNPosting(itup); i++)
+				{
+					IndexTuple	logtuple;
+
+					logtuple = bt_posting_plain_tuple(itup, i);
+					bt_verify_index_tuple_points_to_heap(state, logtuple,
+														  state->targetblock, offset);
+					pfree(logtuple);
+				}
+			}
+			else
+			{
+				bt_verify_index_tuple_points_to_heap(state, itup,
+													 state->targetblock, offset);
 			}
 		}
 
@@ -2812,6 +3029,223 @@ bt_tuple_present_callback(Relation index, ItemPointer tid, Datum *values,
 	/* Cannot leak memory here */
 	if (norm != itup)
 		pfree(norm);
+}
+
+/*
+ * Per-tuple callback from table_index_build_scan for indexallkeysmatch.  Add
+ * each visible heap tuple's (key, tid) to the Bloom filter for later probe
+ * during the index scan.
+ */
+static void
+bt_heap_fingerprint_callback(Relation index, ItemPointer tid, Datum *values,
+							  bool *isnull, bool tupleIsAlive, void *checkstate)
+{
+	BtreeCheckState *state = (BtreeCheckState *) checkstate;
+	IndexTuple	itup,
+				norm;
+
+	Assert(state->indexallkeysmatch);
+
+	itup = index_form_tuple(RelationGetDescr(index), values, isnull);
+	itup->t_tid = *tid;
+	norm = bt_normalize_tuple(state, itup);
+	bloom_add_element(state->heapfilter, (unsigned char *) norm,
+					  IndexTupleSize(norm));
+	pfree(itup);
+	if (norm != itup)
+		pfree(norm);
+}
+
+/*
+ * Launched only with indexallkeysmatch:
+ * Verify that the index tuple points to a heap tuple with the same key.
+ * When the Bloom filter lacks the (key, tid), fetch the heap tuple and
+ * compare keys.
+ *
+ * The heap lookup mirrors what a regular index scan does:
+ * table_index_fetch_tuple() with our MVCC snapshot follows LP_REDIRECT and
+ * HOT chains, returning the visible tuple version.  A "not found" result
+ * means the tuple is dead or was concurrently pruned; we skip it exactly as
+ * an index scan would.  Detecting index entries that point to nonexistent
+ * heap slots is a separate class of corruption, handled elsewhere; what we
+ * verify here is that the visible heap tuple matches the index key.
+ */
+static void
+bt_verify_index_tuple_points_to_heap(BtreeCheckState *state, IndexTuple itup,
+									BlockNumber targetblock, OffsetNumber offset)
+{
+	ItemPointer tid = BTreeTupleGetHeapTID(itup);
+	IndexTuple	norm;
+	bool		in_filter;
+
+	Assert(state->indexallkeysmatch);
+
+	norm = bt_normalize_tuple(state, itup);
+	in_filter = !bloom_lacks_element(state->heapfilter, (unsigned char *) norm,
+									 IndexTupleSize(norm));
+	if (norm != itup)
+		pfree(norm);
+
+	if (in_filter)
+	{
+		/* Fingerprint contains only visible tuples, so this one is verified */
+		state->indextuplesverified++;
+		return;
+	}
+
+	/*
+	 * Bloom filter says (key, tid) not in heap.  Follow TID to verify; this
+	 * amortizes random heap lookups by only fetching when the probe indicates
+	 * absence (Bloom filters have false positives, never false negatives, so
+	 * "not in" means we must verify), or reports corruption when the index
+	 * points to a heap tuple with a different key.
+	 */
+	{
+		TupleTableSlot *slot = state->iakm_slot;
+		IndexTuple	heap_itup;
+		IndexTuple	heap_norm;
+		Datum		values[INDEX_MAX_KEYS];
+		bool		isnull[INDEX_MAX_KEYS];
+		bool		found;
+		bool		call_again = false;
+
+		/* Reclaim memory from the previous FormIndexDatum() call, if any */
+		ResetPerTupleExprContext(state->iakm_estate);
+
+		found = table_index_fetch_tuple(state->index_fetch, tid,
+										state->snapshot, slot,
+										&call_again, NULL);
+		if (!found)
+		{
+			/*
+			 * No visible tuple at this TID.  Normally that just means the
+			 * index entry is for a dead (or concurrently pruned) heap tuple
+			 * and there is nothing to compare, but it can also mean the
+			 * index entry is dangling: pointing to a heap slot that holds no
+			 * tuple at all.  Try to tell these cases apart when it is safe
+			 * to do so.
+			 */
+			bt_report_dangling_index_entry(state, tid, targetblock, offset);
+			return;
+		}
+
+		GetPerTupleExprContext(state->iakm_estate)->ecxt_scantuple = slot;
+		FormIndexDatum(state->indexinfo, slot, state->iakm_estate,
+					   values, isnull);
+
+		heap_itup = index_form_tuple(RelationGetDescr(state->rel), values, isnull);
+		heap_itup->t_tid = *tid;
+		heap_norm = bt_normalize_tuple(state, heap_itup);
+
+		norm = bt_normalize_tuple(state, itup);
+		if (IndexTupleSize(heap_norm) != IndexTupleSize(norm) ||
+			memcmp(heap_norm, norm, IndexTupleSize(norm)) != 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INDEX_CORRUPTED),
+					 errmsg("index tuple in index \"%s\" does not match heap tuple in table \"%s\"",
+							RelationGetRelationName(state->rel),
+							RelationGetRelationName(state->heaprel)),
+					 errdetail_internal("Index tid=(%u,%u) points to heap tid=(%u,%u) with different key.",
+									   targetblock, offset,
+									   ItemPointerGetBlockNumber(tid),
+									   ItemPointerGetOffsetNumber(tid))));
+
+		pfree(heap_itup);
+		if (heap_norm != heap_itup)
+			pfree(heap_norm);
+		if (norm != itup)
+			pfree(norm);
+		state->indextuplesverified++;
+	}
+}
+
+/*
+ * Try to detect a dangling index entry: an index tuple whose TID points to
+ * a heap slot that holds no tuple at all (as opposed to a dead one awaiting
+ * VACUUM).  Called when an MVCC fetch of the TID found no visible tuple.
+ *
+ * A TID pointing beyond the current end of the heap is corruption
+ * regardless of lock level: relation extension only ever grows the relation
+ * and truncation requires AccessExclusiveLock, which our AccessShareLock on
+ * the heap relation blocks.  Beyond-EOF references typically appear when a
+ * relation segment is lost or truncated by external forces.
+ *
+ * Distinguishing other dangling cases (out-of-range offset, LP_UNUSED slot)
+ * from a concurrently pruned tuple requires that the heap slot cannot
+ * change under us.  Under ShareLock (bt_index_parent_check) concurrent
+ * VACUUM is blocked, so an index-referenced slot cannot become LP_UNUSED
+ * and the line pointer array cannot be truncated: opportunistic pruning may
+ * mark slots LP_DEAD or redirect them, but it only marks HOT-chain member
+ * slots LP_UNUSED, and those are never referenced from indexes.  Under
+ * AccessShareLock (bt_index_check) concurrent VACUUM may reclaim the slot
+ * between our Bloom filter probe and the fetch, so we must not report
+ * anything.
+ *
+ * Direct line pointer inspection requires heap page layout, so it is
+ * skipped for non-heap table AMs.
+ */
+static void
+bt_report_dangling_index_entry(BtreeCheckState *state, ItemPointer tid,
+							   BlockNumber targetblock, OffsetNumber offset)
+{
+	BlockNumber blkno = ItemPointerGetBlockNumber(tid);
+	OffsetNumber offnum = ItemPointerGetOffsetNumber(tid);
+	Buffer		buffer;
+	Page		page;
+	ItemId		lp;
+
+	if (blkno >= RelationGetNumberOfBlocks(state->heaprel))
+		ereport(ERROR,
+				(errcode(ERRCODE_INDEX_CORRUPTED),
+				 errmsg("index tuple in index \"%s\" points to heap tuple in table \"%s\" beyond end of heap",
+						RelationGetRelationName(state->rel),
+						RelationGetRelationName(state->heaprel)),
+				 errdetail_internal("Index tid=(%u,%u) points to heap tid=(%u,%u), but heap has only %u blocks.",
+									targetblock, offset,
+									blkno, offnum,
+									RelationGetNumberOfBlocks(state->heaprel)),
+				 errhint("This can be caused by a lost relation segment (missing or removed file).")));
+
+	/*
+	 * Without ShareLock a missing slot is indistinguishable from a
+	 * concurrently pruned tuple; report nothing.
+	 */
+	if (!state->readonly)
+		return;
+
+	/* Line pointer inspection below assumes heap page layout */
+	if (state->heaprel->rd_rel->relam != HEAP_TABLE_AM_OID)
+		return;
+
+	buffer = ReadBufferExtended(state->heaprel, MAIN_FORKNUM, blkno,
+								RBM_NORMAL, state->checkstrategy);
+	LockBuffer(buffer, BUFFER_LOCK_SHARE);
+	page = BufferGetPage(buffer);
+
+	if (offnum > PageGetMaxOffsetNumber(page))
+		ereport(ERROR,
+				(errcode(ERRCODE_INDEX_CORRUPTED),
+				 errmsg("index tuple in index \"%s\" points to heap tuple in table \"%s\" with out-of-range offset",
+						RelationGetRelationName(state->rel),
+						RelationGetRelationName(state->heaprel)),
+				 errdetail_internal("Index tid=(%u,%u) points to heap tid=(%u,%u), but page has only %u line pointers.",
+									targetblock, offset,
+									blkno, offnum,
+									(unsigned) PageGetMaxOffsetNumber(page))));
+
+	lp = PageGetItemId(page, offnum);
+	if (!ItemIdIsUsed(lp))
+		ereport(ERROR,
+				(errcode(ERRCODE_INDEX_CORRUPTED),
+				 errmsg("index tuple in index \"%s\" points to unused heap slot in table \"%s\"",
+						RelationGetRelationName(state->rel),
+						RelationGetRelationName(state->heaprel)),
+				 errdetail_internal("Index tid=(%u,%u) points to heap tid=(%u,%u) marked LP_UNUSED.",
+									targetblock, offset,
+									blkno, offnum)));
+
+	/* LP_DEAD, LP_REDIRECT or a dead LP_NORMAL tuple: not corruption */
+	UnlockReleaseBuffer(buffer);
 }
 
 /*
