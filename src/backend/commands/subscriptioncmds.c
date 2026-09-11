@@ -19,6 +19,7 @@
 #include "access/table.h"
 #include "access/twophase.h"
 #include "access/xact.h"
+#include "catalog/binary_upgrade.h"
 #include "catalog/catalog.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
@@ -87,6 +88,12 @@
 
 /* check if the 'val' has 'bits' set */
 #define IsSet(val, bits)  (((val) & (bits)) == (bits))
+
+/*
+ * This will be set by the pg_upgrade_support function --
+ * binary_upgrade_set_next_pg_subscription_oid().
+ */
+Oid			binary_upgrade_next_pg_subscription_oid = InvalidOid;
 
 /*
  * Structure to hold a bitmap representing the user-provided CREATE/ALTER
@@ -846,8 +853,23 @@ CreateSubscription(ParseState *pstate, CreateSubscriptionStmt *stmt,
 	memset(values, 0, sizeof(values));
 	memset(nulls, false, sizeof(nulls));
 
-	subid = GetNewOidWithIndex(rel, SubscriptionObjectIndexId,
-							   Anum_pg_subscription_oid);
+	/* Use binary-upgrade override for pg_subscription.oid? */
+	if (IsBinaryUpgrade)
+	{
+		if (!OidIsValid(binary_upgrade_next_pg_subscription_oid))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("pg_subscription OID value not set when in binary upgrade mode")));
+
+		subid = binary_upgrade_next_pg_subscription_oid;
+		binary_upgrade_next_pg_subscription_oid = InvalidOid;
+	}
+	else
+	{
+		subid = GetNewOidWithIndex(rel, SubscriptionObjectIndexId,
+								   Anum_pg_subscription_oid);
+	}
+
 	values[Anum_pg_subscription_oid - 1] = ObjectIdGetDatum(subid);
 	values[Anum_pg_subscription_subdbid - 1] = ObjectIdGetDatum(MyDatabaseId);
 	values[Anum_pg_subscription_subskiplsn - 1] = LSNGetDatum(InvalidXLogRecPtr);
@@ -960,9 +982,16 @@ CreateSubscription(ParseState *pstate, CreateSubscriptionStmt *stmt,
 	 * apply workers initialization, and to handle origin creation dynamically
 	 * when tables are added to the subscription. It is not clear whether
 	 * preventing creation of origins is worth additional complexity.
+	 *
+	 * In binary-upgrade mode, skip origin creation here. It will be created
+	 * separately so that the origin ID (roident) from the old cluster can be
+	 * preserved for this subscription.
 	 */
-	ReplicationOriginNameForLogicalRep(subid, InvalidOid, originname, sizeof(originname));
-	replorigin_create(originname);
+	if (!IsBinaryUpgrade)
+	{
+		ReplicationOriginNameForLogicalRep(subid, InvalidOid, originname, sizeof(originname));
+		replorigin_create(originname);
+	}
 
 	/*
 	 * Connect to remote side to execute requested commands and fetch table
