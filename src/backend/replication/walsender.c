@@ -378,7 +378,7 @@ WalSndErrorCleanup(void)
 {
 	LWLockReleaseAll();
 	ConditionVariableCancelSleep();
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 	pgaio_error_cleanup();
 
 	if (xlogreader != NULL && xlogreader->seg.ws_file >= 0)
@@ -675,9 +675,9 @@ SendTimeLineHistory(TimeLineHistoryCmd *cmd)
 		PGAlignedBlock rbuf;
 		ssize_t		nread;
 
-		pgstat_report_wait_start(WAIT_EVENT_WALSENDER_TIMELINE_HISTORY_READ);
+		pgstat_report_wait_start_timed(WAIT_EVENT_WALSENDER_TIMELINE_HISTORY_READ);
 		nread = read(fd, rbuf.data, sizeof(rbuf));
-		pgstat_report_wait_end();
+		pgstat_report_wait_end_timed();
 		if (nread < 0)
 			ereport(ERROR,
 					(errcode_for_file_access(),

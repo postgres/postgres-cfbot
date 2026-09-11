@@ -17,10 +17,49 @@ extern const char *pgstat_get_wait_event(uint32 wait_event_info);
 extern const char *pgstat_get_wait_event_type(uint32 wait_event_info);
 static inline void pgstat_report_wait_start(uint32 wait_event_info);
 static inline void pgstat_report_wait_end(void);
+static inline void pgstat_report_wait_start_timed(uint32 wait_event_info);
+static inline void pgstat_report_wait_end_timed(void);
 extern void pgstat_set_wait_event_storage(uint32 *wait_event_info);
 extern void pgstat_reset_wait_event_storage(void);
 
 extern PGDLLIMPORT uint32 *my_wait_event_info;
+
+/*
+ * Hooks for explicitly instrumented waits.  Hook implementations may use
+ * only preallocated backend-local state; they must not wait, allocate memory,
+ * acquire locks, or report errors.  The depth guard prevents re-entry.
+ *
+ * Hook users that chain callbacks must save the previous hook pointers, call
+ * the previous begin hook before their own begin work, and perform their own
+ * end work before calling the previous end hook.
+ */
+typedef void (*wait_event_hook_type) (uint32 wait_event_info);
+
+extern PGDLLIMPORT wait_event_hook_type wait_event_begin_hook;
+extern PGDLLIMPORT wait_event_hook_type wait_event_end_hook;
+extern PGDLLIMPORT int wait_event_hook_depth;
+
+static inline void
+pgstat_wait_event_hook_begin(uint32 wait_event_info)
+{
+	if (wait_event_begin_hook != NULL && wait_event_hook_depth == 0)
+	{
+		wait_event_hook_depth++;
+		wait_event_begin_hook(wait_event_info);
+		wait_event_hook_depth--;
+	}
+}
+
+static inline void
+pgstat_wait_event_hook_end(uint32 wait_event_info)
+{
+	if (wait_event_end_hook != NULL && wait_event_hook_depth == 0)
+	{
+		wait_event_hook_depth++;
+		wait_event_end_hook(wait_event_info);
+		wait_event_hook_depth--;
+	}
+}
 
 
 /*
@@ -83,6 +122,26 @@ static inline void
 pgstat_report_wait_end(void)
 {
 	/* see pgstat_report_wait_start() */
+	*(volatile uint32 *) my_wait_event_info = 0;
+}
+
+/*
+ * Explicitly instrumented variant of the ordinary wait-event reporting pair.
+ * The ordinary functions above remain unchanged for uninstrumented sites.
+ */
+static inline void
+pgstat_report_wait_start_timed(uint32 wait_event_info)
+{
+	*(volatile uint32 *) my_wait_event_info = wait_event_info;
+	pgstat_wait_event_hook_begin(wait_event_info);
+}
+
+static inline void
+pgstat_report_wait_end_timed(void)
+{
+	uint32		wait_event_info = *(volatile uint32 *) my_wait_event_info;
+
+	pgstat_wait_event_hook_end(wait_event_info);
 	*(volatile uint32 *) my_wait_event_info = 0;
 }
 

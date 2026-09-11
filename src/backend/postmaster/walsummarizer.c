@@ -298,7 +298,7 @@ WalSummarizerMain(const void *startup_data, size_t startup_data_len)
 		/* Release resources we might have acquired. */
 		LWLockReleaseAll();
 		ConditionVariableCancelSleep();
-		pgstat_report_wait_end();
+		pgstat_report_wait_end_timed();
 		pgaio_error_cleanup();
 		ReleaseAuxProcessResources(false);
 		AtEOXact_Files(false);

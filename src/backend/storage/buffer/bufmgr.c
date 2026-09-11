@@ -5996,7 +5996,7 @@ BufferLockAcquire(Buffer buffer, BufferDesc *buf_hdr, BufferLockMode mode)
 				pg_unreachable();
 
 		}
-		pgstat_report_wait_start(wait_event);
+		pgstat_report_wait_start_timed(wait_event);
 
 		/*
 		 * Wait until awakened.
@@ -6014,7 +6014,7 @@ BufferLockAcquire(Buffer buffer, BufferDesc *buf_hdr, BufferLockMode mode)
 			extraWaits++;
 		}
 
-		pgstat_report_wait_end();
+		pgstat_report_wait_end_timed();
 
 		/* Retrying, allow BufferLockReleaseSub to release waiters again. */
 		pg_atomic_fetch_and_u64(&buf_hdr->state, ~BM_LOCK_WAKE_IN_PROGRESS);

@@ -364,7 +364,7 @@ dsm_impl_posix_resize(int fd, off_t size)
 	if (IsUnderPostmaster)
 		sigprocmask(SIG_SETMASK, &BlockSig, &save_sigmask);
 
-	pgstat_report_wait_start(WAIT_EVENT_DSM_ALLOCATE);
+	pgstat_report_wait_start_timed(WAIT_EVENT_DSM_ALLOCATE);
 #if defined(HAVE_POSIX_FALLOCATE) && defined(__linux__)
 
 	/*
@@ -397,7 +397,7 @@ dsm_impl_posix_resize(int fd, off_t size)
 		rc = ftruncate(fd, size);
 	} while (rc < 0 && errno == EINTR);
 #endif
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	if (IsUnderPostmaster)
 	{
@@ -889,12 +889,12 @@ dsm_impl_mmap(dsm_op op, dsm_handle handle, Size request_size,
 
 			if (goal > ZBUFFER_SIZE)
 				goal = ZBUFFER_SIZE;
-			pgstat_report_wait_start(WAIT_EVENT_DSM_FILL_ZERO_WRITE);
+			pgstat_report_wait_start_timed(WAIT_EVENT_DSM_FILL_ZERO_WRITE);
 			if (write(fd, zbuffer, goal) == goal)
 				remaining -= goal;
 			else
 				success = false;
-			pgstat_report_wait_end();
+			pgstat_report_wait_end_timed();
 		}
 
 		if (!success)
