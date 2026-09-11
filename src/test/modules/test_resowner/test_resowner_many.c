@@ -119,6 +119,8 @@ RememberManyTestResources(ResourceOwner owner,
 {
 	int			kind_idx = 0;
 
+	Assert(nkinds > 0);
+
 	for (int i = 0; i < nresources; i++)
 	{
 		ManyTestResource *mres = palloc_object(ManyTestResource);
@@ -214,8 +216,8 @@ test_resowner_many(PG_FUNCTION_ARGS)
 	ManyTestResourceKind *after_kinds;
 
 	/* Sanity check the arguments */
-	if (nkinds < 0)
-		elog(ERROR, "nkinds must be >= 0");
+	if (nkinds <= 0)
+		elog(ERROR, "nkinds must be greater than zero");
 	if (nremember_bl < 0)
 		elog(ERROR, "nremember_bl must be >= 0");
 	if (nforget_bl < 0 || nforget_bl > nremember_bl)
