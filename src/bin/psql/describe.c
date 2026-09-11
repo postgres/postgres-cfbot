@@ -37,6 +37,7 @@
 #include "settings.h"
 
 static const char *map_typename_pattern(const char *pattern);
+static bool describeOneSchemaDetails(const char *schemaname, bool verbose);
 static bool describeOneTableDetails(const char *schemaname,
 									const char *relationname,
 									const char *oid,
@@ -5172,18 +5173,144 @@ listCollations(const char *pattern, bool verbose, bool showSystem)
 }
 
 /*
+ * Print details and footer information for the specified schema.
+ */
+static bool
+describeOneSchemaDetails(const char *schemaname, bool verbose)
+{
+	PQExpBufferData buf;
+	PGresult   *res;
+	printQueryOpt myopt = pset.popt;
+	PQExpBufferData title;
+	char	  **footers = NULL;
+
+	initPQExpBuffer(&buf);
+	printfPQExpBuffer(&buf, "/* %s */\n", _("Get matching schema"));
+	appendPQExpBuffer(&buf,
+					  "SELECT n.nspname AS \"%s\",\n"
+					  "  pg_catalog.pg_get_userbyid(n.nspowner) AS \"%s\"",
+					  gettext_noop("Name"),
+					  gettext_noop("Owner"));
+
+	if (verbose)
+	{
+		appendPQExpBufferStr(&buf, ",\n  ");
+		printACLColumn(&buf, "n.nspacl");
+		appendPQExpBuffer(&buf,
+						  ",\n  pg_catalog.obj_description(n.oid, 'pg_namespace') AS \"%s\"",
+						  gettext_noop("Description"));
+	}
+
+	appendPQExpBufferStr(&buf,
+						 "\nFROM pg_catalog.pg_namespace n"
+						 "\nWHERE n.nspname = ");
+	appendStringLiteralConn(&buf, schemaname, pset.db);
+
+	res = PSQLexec(buf.data);
+	if (!res)
+		goto error_return;
+
+	initPQExpBuffer(&title);
+	printfPQExpBuffer(&title, _("Schema \"%s\""), schemaname);
+	myopt.title = title.data;
+	myopt.translate_header = true;
+
+	/* Footer */
+	if (pset.sversion >= 150000)
+	{
+		PGresult   *result;
+		int			i;
+		int			pub_schema_tuples = 0;
+
+		printfPQExpBuffer(&buf, "/* %s */\n",
+						  _("Get publications that publish this schema"));
+		appendPQExpBuffer(&buf,
+						  "SELECT pubname \n"
+						  "FROM pg_catalog.pg_publication p\n"
+						  "     JOIN pg_catalog.pg_publication_namespace pn ON p.oid = pn.pnpubid\n"
+						  "     JOIN pg_catalog.pg_namespace n ON n.oid = pn.pnnspid \n"
+						  "WHERE n.nspname = ");
+		appendStringLiteralConn(&buf, schemaname, pset.db);
+
+		appendPQExpBufferStr(&buf, "ORDER BY 1;");
+
+		result = PSQLexec(buf.data);
+		if (!result)
+			goto error_return;
+		else
+			pub_schema_tuples = PQntuples(result);
+
+		/* Avoid showing "(1 row)" for tables without footers */
+		myopt.topt.default_footer = false;
+
+		if (pub_schema_tuples > 0)
+		{
+			/*
+			 * Allocate memory for footers. Size of footers will be 1 (for
+			 * storing "Included in publications:" string) + publication
+			 * schema mapping count + 1 (for storing NULL).
+			 */
+			footers = pg_malloc_array(char *, 1 + pub_schema_tuples + 1);
+			footers[0] = pg_strdup(_("Included in publications:"));
+
+			/* Might be an empty set - that's ok */
+			for (i = 0; i < pub_schema_tuples; i++)
+			{
+				printfPQExpBuffer(&buf, "    \"%s\"",
+								  PQgetvalue(result, i, 0));
+
+				footers[i + 1] = pg_strdup(buf.data);
+			}
+
+			footers[i + 1] = NULL;
+			myopt.footers = footers;
+		}
+
+		PQclear(result);
+	}
+
+	printQuery(res, &myopt, pset.queryFout, false, pset.logfile);
+
+	termPQExpBuffer(&title);
+	termPQExpBuffer(&buf);
+	PQclear(res);
+
+	/* Free the memory allocated for the footer */
+	if (footers)
+	{
+		char	  **footer = NULL;
+
+		for (footer = footers; *footer; footer++)
+			pg_free(*footer);
+
+		pg_free(footers);
+	}
+
+	return true;
+
+error_return:
+	termPQExpBuffer(&title);
+	termPQExpBuffer(&buf);
+	return false;
+}
+
+/*
  * \dn
  *
  * Describes schemas (namespaces)
+ *
+ * If no pattern is specified list all schemas.
+ *
+ * If a pattern is specified call describeOneSchemaDetails for each schema
+ * that matches the pattern.
  */
 bool
 listSchemas(const char *pattern, bool verbose, bool showSystem)
 {
 	PQExpBufferData buf;
-	PGresult   *res;
+	PGresult   *res = NULL;
 	printQueryOpt myopt = pset.popt;
-	int			pub_schema_tuples = 0;
-	char	  **footers = NULL;
+	int			num_schemas;
 
 	initPQExpBuffer(&buf);
 
@@ -5223,76 +5350,52 @@ listSchemas(const char *pattern, bool verbose, bool showSystem)
 	if (!res)
 		goto error_return;
 
-	myopt.title = _("List of schemas");
-	myopt.translate_header = true;
+	num_schemas = PQntuples(res);
 
-	if (pattern && pset.sversion >= 150000)
+	/*
+	 * Most functions in this file are content to print an empty table when
+	 * there are no matching objects.  We intentionally deviate from that
+	 * here, but only in !quiet mode, to be same as \dt
+	 */
+	if (num_schemas == 0 && !pset.quiet)
 	{
-		PGresult   *result;
-		int			i;
-
-		printfPQExpBuffer(&buf, "/* %s */\n",
-						  _("Get publications that publish this schema"));
-		appendPQExpBuffer(&buf,
-						  "SELECT pubname \n"
-						  "FROM pg_catalog.pg_publication p\n"
-						  "     JOIN pg_catalog.pg_publication_namespace pn ON p.oid = pn.pnpubid\n"
-						  "     JOIN pg_catalog.pg_namespace n ON n.oid = pn.pnnspid \n"
-						  "WHERE n.nspname = '%s'\n"
-						  "ORDER BY 1",
-						  pattern);
-		result = PSQLexec(buf.data);
-		if (!result)
-			goto error_return;
+		if (pattern)
+			pg_log_error("Did not find any schemas named \"%s\".",
+						 pattern);
 		else
-			pub_schema_tuples = PQntuples(result);
+			pg_log_error("Did not find any schemas");
 
-		if (pub_schema_tuples > 0)
-		{
-			/*
-			 * Allocate memory for footers. Size of footers will be 1 (for
-			 * storing "Included in publications:" string) + publication
-			 * schema mapping count + 1 (for storing NULL).
-			 */
-			footers = pg_malloc_array(char *, 1 + pub_schema_tuples + 1);
-			footers[0] = pg_strdup(_("Included in publications:"));
-
-			/* Might be an empty set - that's ok */
-			for (i = 0; i < pub_schema_tuples; i++)
-			{
-				printfPQExpBuffer(&buf, "    \"%s\"",
-								  PQgetvalue(result, i, 0));
-
-				footers[i + 1] = pg_strdup(buf.data);
-			}
-
-			footers[i + 1] = NULL;
-			myopt.footers = footers;
-		}
-
-		PQclear(result);
+		goto error_return;
 	}
 
-	printQuery(res, &myopt, pset.queryFout, false, pset.logfile);
+	if (pattern == NULL || num_schemas == 0)
+	{
+		myopt.title = _("List of schemas");
+		myopt.translate_header = true;
+
+		printQuery(res, &myopt, pset.queryFout, false, pset.logfile);
+	}
+	else
+	{
+		for (int i = 0; i < num_schemas; i++)
+		{
+			const char *nspname = PQgetvalue(res, i, 0);
+
+			if (!describeOneSchemaDetails(nspname, verbose))
+				goto error_return;
+
+			if (cancel_pressed)
+				goto error_return;
+		}
+	}
 
 	termPQExpBuffer(&buf);
 	PQclear(res);
-
-	/* Free the memory allocated for the footer */
-	if (footers)
-	{
-		char	  **footer = NULL;
-
-		for (footer = footers; *footer; footer++)
-			pg_free(*footer);
-
-		pg_free(footers);
-	}
-
 	return true;
 
 error_return:
 	termPQExpBuffer(&buf);
+	PQclear(res);
 	return false;
 }
 
