@@ -3207,7 +3207,7 @@ TimingClockSourceType
 TmFromChar
 TmToChar
 ToastAttrInfo
-ToastCompressionId
+ToastCompressionRegistryEntry
 ToastTupleContext
 ToastedAttribute
 TocEntry

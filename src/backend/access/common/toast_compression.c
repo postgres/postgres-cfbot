@@ -32,6 +32,27 @@ int			default_toast_compression = DEFAULT_TOAST_COMPRESSION;
 			 errdetail("This functionality requires the server to be built with %s support.", method)))
 
 /*
+ * Compression Method Registry for TOAST.
+ *
+ * This holds the metadata associated to each compression method supported
+ * by TOAST: name, values in attcompression, and on-disk compression ID
+ * values in varlenas.
+ */
+typedef struct ToastCompressionRegistryEntry
+{
+	const char *name;			/* method name */
+	char		method;			/* attcompression */
+	uint32		cmid;			/* varlena on-disk ID */
+} ToastCompressionRegistryEntry;
+
+static const ToastCompressionRegistryEntry toast_compression_registry[] = {
+	{"pglz", TOAST_PGLZ_COMPRESSION, TOAST_PGLZ_COMPRESSION_ID},
+	{"lz4", TOAST_LZ4_COMPRESSION, TOAST_LZ4_COMPRESSION_ID},
+};
+
+#define TOAST_NUM_COMPRESSIONS	lengthof(toast_compression_registry)
+
+/*
  * Compress a varlena using PGLZ.
  *
  * Returns the compressed varlena, or NULL if compression fails.
@@ -250,10 +271,10 @@ lz4_decompress_datum_slice(const varlena *value, int32 slicelength)
  *
  * Returns TOAST_INVALID_COMPRESSION_ID if the varlena is not compressed.
  */
-ToastCompressionId
+uint32
 toast_get_compression_id(varlena *attr)
 {
-	ToastCompressionId cmid = TOAST_INVALID_COMPRESSION_ID;
+	uint32		cmid = TOAST_INVALID_COMPRESSION_ID;
 
 	/*
 	 * If it is stored externally then fetch the compression method id from
@@ -278,39 +299,79 @@ toast_get_compression_id(varlena *attr)
 /*
  * CompressionNameToMethod - Get compression method from compression name
  *
- * Search in the available built-in methods.  If the compression not found
- * in the built-in methods then return InvalidCompressionMethod.
+ * Search the compression registry by name.  If the method name is not found
+ * then return InvalidCompressionMethod.
  */
 char
 CompressionNameToMethod(const char *compression)
 {
-	if (strcmp(compression, "pglz") == 0)
-		return TOAST_PGLZ_COMPRESSION;
-	else if (strcmp(compression, "lz4") == 0)
+	for (int i = 0; i < TOAST_NUM_COMPRESSIONS; i++)
 	{
+		if (strcmp(compression, toast_compression_registry[i].name) == 0)
+		{
 #ifndef USE_LZ4
-		NO_COMPRESSION_SUPPORT("lz4");
+			if (strcmp(compression, "lz4") == 0)
+				NO_COMPRESSION_SUPPORT("lz4");
 #endif
-		return TOAST_LZ4_COMPRESSION;
+			return toast_compression_registry[i].method;
+		}
 	}
 
 	return InvalidCompressionMethod;
 }
 
 /*
- * GetCompressionMethodName - Get compression method name
+ * GetCompressionMethodName
+ *
+ * Get compression method name, based on a compression method char, or
+ * attcompression.
  */
 const char *
 GetCompressionMethodName(char method)
 {
-	switch (method)
+	for (int i = 0; i < TOAST_NUM_COMPRESSIONS; i++)
 	{
-		case TOAST_PGLZ_COMPRESSION:
-			return "pglz";
-		case TOAST_LZ4_COMPRESSION:
-			return "lz4";
-		default:
-			elog(ERROR, "invalid compression method %c", method);
-			return NULL;		/* keep compiler quiet */
+		if (toast_compression_registry[i].method == method)
+			return toast_compression_registry[i].name;
 	}
+
+	elog(ERROR, "invalid compression method %c", method);
+	return NULL;				/* keep compiler quiet */
+}
+
+/*
+ * MethodToCompressionId
+ *
+ * Translate a catalog compression method char (attcompression) to the
+ * corresponding on-disk varatt ID.
+ */
+uint32
+MethodToCompressionId(char method)
+{
+	for (int i = 0; i < TOAST_NUM_COMPRESSIONS; i++)
+	{
+		if (toast_compression_registry[i].method == method)
+			return toast_compression_registry[i].cmid;
+	}
+
+	elog(ERROR, "invalid compression method %c", method);
+	return TOAST_INVALID_COMPRESSION_ID;	/* keep compiler quiet */
+}
+
+/*
+ * CompressionIdIsValid
+ *
+ * Check whether a compression ID is registered.  Returns true if the
+ * ID corresponds to a known compression method, false otherwise.
+ */
+bool
+CompressionIdIsValid(uint32 cmid)
+{
+	for (int i = 0; i < TOAST_NUM_COMPRESSIONS; i++)
+	{
+		if (toast_compression_registry[i].cmid == cmid)
+			return true;
+	}
+
+	return false;
 }

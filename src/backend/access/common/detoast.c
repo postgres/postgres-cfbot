@@ -470,7 +470,7 @@ toast_fetch_datum_slice(varlena *attr, int32 sliceoffset,
 static varlena *
 toast_decompress_datum(varlena *attr)
 {
-	ToastCompressionId cmid;
+	uint32		cmid;
 
 	Assert(VARATT_IS_COMPRESSED(attr));
 
@@ -502,7 +502,7 @@ toast_decompress_datum(varlena *attr)
 static varlena *
 toast_decompress_datum_slice(varlena *attr, int32 slicelength)
 {
-	ToastCompressionId cmid;
+	uint32		cmid;
 
 	Assert(VARATT_IS_COMPRESSED(attr));
 
