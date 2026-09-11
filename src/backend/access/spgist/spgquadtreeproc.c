@@ -52,6 +52,11 @@ spg_quad_config(PG_FUNCTION_ARGS)
  *
  * Points on one of the axes are taken to lie in the lowest-numbered
  * adjacent quadrant.
+ *
+ * We normally use the fuzzy point_* operators, but those are not always
+ * decisive (see FPeq/FPlt/FPgt).  If no arm matches, fall back to exact
+ * comparisons with the same axis rule as above.  NaN still reaches the
+ * error below; cleaning that up is a separate matter.
  */
 static int16
 getQuadrant(Point *centroid, Point *tst)
@@ -75,6 +80,17 @@ getQuadrant(Point *centroid, Point *tst)
 	if (SPTEST(point_above, tst, centroid) &&
 		SPTEST(point_left, tst, centroid))
 		return 4;
+
+	/*
+	 * Fuzzy comparisons can leave gaps for finite values.  Fall back to
+	 * exact comparisons with the same axis tie-breaking as above.
+	 */
+	if (tst->y > centroid->y)
+		return (tst->x >= centroid->x) ? 1 : 4;
+	if (tst->y < centroid->y)
+		return (tst->x >= centroid->x) ? 2 : 3;
+	if (tst->y == centroid->y)
+		return (tst->x >= centroid->x) ? 1 : 3;
 
 	elog(ERROR, "getQuadrant: impossible case");
 	return 0;
