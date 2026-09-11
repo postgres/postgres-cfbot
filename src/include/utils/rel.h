@@ -148,6 +148,15 @@ typedef struct RelationData
 	bool		rd_partcheckvalid;	/* true if list has been computed */
 	MemoryContext rd_partcheckcxt;	/* private cxt for rd_partcheck, if any */
 
+	/* data managed by get_partition_index_ancestors: */
+	int			rd_partancestorcount;	/* # of cached partition-index
+									 * ancestors, or -1 if not computed */
+	union
+	{
+		Oid			single;		/* sole ancestor, when count == 1 */
+		Oid		   *array;		/* count entries, when count > 1 */
+	}			rd_partancestors;
+
 	/* data managed by RelationGetIndexList: */
 	List	   *rd_indexlist;	/* list of OIDs of indexes on relation */
 	Oid			rd_pkindex;		/* OID of (deferrable?) primary key, if any */
