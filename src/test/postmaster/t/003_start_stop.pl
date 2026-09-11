@@ -8,6 +8,7 @@ use warnings FATAL => 'all';
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
+use Config qw ( %Config );
 
 #
 # Test that dead-end backends don't prevent the server from shutting
@@ -104,6 +105,32 @@ $node->connect_ok("dbname=postgres", "works after restart");
 foreach my $socket (@raw_connections)
 {
 	$socket->close();
+}
+
+# Test the MPTCP where it is supported only
+SKIP:
+{
+	skip "MPTCP not supported by this platform" unless $Config{osname} eq 'linux';
+
+	$node->append_conf('postgresql.conf', "listen_addresses = '127.0.0.1'");
+	$node->append_conf('postgresql.conf', 'listen_mptcp=on');
+	$node->restart();
+
+	my $port = $node->port();
+	my $mptcpoff = "dbname=postgres hostaddr=127.0.0.1 host=localhost port=$port mptcp=0";
+	my $mptcpon = "dbname=postgres hostaddr=127.0.0.1 host=localhost port=$port mptcp=1";
+
+	$node->connect_ok(
+		$mptcpoff,
+		"connection without MPTCP works"
+	);
+
+	$node->connect_ok(
+		$mptcpon,
+		"connection with MPTCP works",
+		# TODO: just for now we expect it
+		expected_stderr => qr/enabling MPTCP client/
+	);
 }
 
 done_testing();
