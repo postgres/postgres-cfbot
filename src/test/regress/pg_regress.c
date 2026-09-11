@@ -839,6 +839,7 @@ initialize_environment(void)
 		unsetenv("PGPASSWORD");
 		unsetenv("PGREQUIREPEER");
 		unsetenv("PGREQUIRESSL");
+		unsetenv("PGREQUIREWALRECEIVER");
 		unsetenv("PGSERVICE");
 		unsetenv("PGSERVICEFILE");
 		unsetenv("PGSSLCERT");
