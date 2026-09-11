@@ -613,7 +613,8 @@ LogStreamerMain(logstreamer_param *param)
  * stream the logfile in parallel with the backups.
  */
 static void
-StartLogStreamer(char *startpos, uint32 timeline, char *sysidentifier,
+StartLogStreamer(PGconn *walconn, char *startpos, uint32 timeline,
+				 char *sysidentifier,
 				 pg_compress_algorithm wal_compress_algorithm,
 				 int wal_compress_level)
 {
@@ -625,6 +626,7 @@ StartLogStreamer(char *startpos, uint32 timeline, char *sysidentifier,
 	param->sysidentifier = sysidentifier;
 	param->wal_compress_algorithm = wal_compress_algorithm;
 	param->wal_compress_level = wal_compress_level;
+	param->bgconn = walconn;
 
 	/* Convert the starting position */
 	if (!pg_parse_lsn(startpos, &param->startptr))
@@ -639,45 +641,11 @@ StartLogStreamer(char *startpos, uint32 timeline, char *sysidentifier,
 		pg_fatal("could not create pipe for background process: %m");
 #endif
 
-	/* Get a second connection */
-	param->bgconn = GetConnection();
-	if (!param->bgconn)
-		/* Error message already written in GetConnection() */
-		exit(1);
-
 	/* In post-10 cluster, pg_xlog has been renamed to pg_wal */
 	snprintf(param->xlog, sizeof(param->xlog), "%s/%s",
 			 basedir,
 			 PQserverVersion(conn) < MINIMUM_VERSION_FOR_PG_WAL ?
 			 "pg_xlog" : "pg_wal");
-
-	/* Temporary replication slots are only supported in 10 and newer */
-	if (PQserverVersion(conn) < MINIMUM_VERSION_FOR_TEMP_SLOTS)
-		temp_replication_slot = false;
-
-	/*
-	 * Create replication slot if requested
-	 */
-	if (temp_replication_slot && !replication_slot)
-		replication_slot = psprintf("pg_basebackup_%u",
-									(unsigned int) PQbackendPID(param->bgconn));
-	if (temp_replication_slot || create_slot)
-	{
-		if (!CreateReplicationSlot(param->bgconn, replication_slot, NULL,
-								   temp_replication_slot, true, true, false,
-								   false, false))
-			exit(1);
-
-		if (verbose)
-		{
-			if (temp_replication_slot)
-				pg_log_info("created temporary replication slot \"%s\"",
-							replication_slot);
-			else
-				pg_log_info("created replication slot \"%s\"",
-							replication_slot);
-		}
-	}
 
 	if (format == 'p')
 	{
@@ -1754,6 +1722,7 @@ BaseBackup(char *compression_algorithm, char *compression_detail,
 	int			writing_to_stdout;
 	bool		use_new_option_syntax = false;
 	PQExpBufferData buf;
+	PGconn	   *walconn = NULL;
 
 	Assert(conn != NULL);
 	initPQExpBuffer(&buf);
@@ -1970,6 +1939,46 @@ BaseBackup(char *compression_algorithm, char *compression_detail,
 									  compression_detail);
 	}
 
+	/* If we were asked to stream WAL, create a separate connection for that */
+	if (includewal == STREAM_WAL)
+	{
+		walconn = GetConnection();
+		if (!walconn)
+			/* Error message already written in GetConnection() */
+			exit(1);
+
+		/*
+		 * If we need to create a slot, do it now, before requesting a checkpoint,
+		 * to ensure the WAL we want is not removed until we actually start
+		 * streaming.
+		 */
+
+		/* Temporary replication slots are only supported in 10 and newer */
+		if (PQserverVersion(conn) < MINIMUM_VERSION_FOR_TEMP_SLOTS)
+			temp_replication_slot = false;
+
+		if (temp_replication_slot && !replication_slot)
+			replication_slot = psprintf("pg_basebackup_%u",
+										(unsigned int) PQbackendPID(walconn));
+		if (temp_replication_slot || create_slot)
+		{
+			if (!CreateReplicationSlot(walconn, replication_slot, NULL,
+									   temp_replication_slot, true, true, false,
+									   false, false))
+				exit(1);
+
+			if (verbose)
+			{
+				if (temp_replication_slot)
+					pg_log_info("created temporary replication slot \"%s\"",
+								replication_slot);
+				else
+					pg_log_info("created replication slot \"%s\"",
+								replication_slot);
+			}
+		}
+	}
+
 	if (verbose)
 		pg_log_info("initiating base backup, waiting for checkpoint to complete");
 
@@ -2100,7 +2109,7 @@ BaseBackup(char *compression_algorithm, char *compression_detail,
 			wal_compress_level = 0;
 		}
 
-		StartLogStreamer(xlogstart, starttli, sysidentifier,
+		StartLogStreamer(walconn, xlogstart, starttli, sysidentifier,
 						 wal_compress_algorithm,
 						 wal_compress_level);
 	}
