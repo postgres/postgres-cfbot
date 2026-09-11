@@ -35,7 +35,6 @@ static bool pathkey_is_redundant(PathKey *new_pathkey, List *pathkeys);
 static bool matches_boolean_partition_clause(RestrictInfo *rinfo,
 											 RelOptInfo *partrel,
 											 int partkeycol);
-static Var *find_var_for_subquery_tle(RelOptInfo *rel, TargetEntry *tle);
 static bool right_merge_direction(PlannerInfo *root, PathKey *pathkey);
 
 
@@ -1248,7 +1247,7 @@ convert_subquery_pathkeys(PlannerInfo *root, RelOptInfo *rel,
  * We need this to ensure that we don't return pathkeys describing values
  * that are unavailable above the level of the subquery scan.
  */
-static Var *
+Var *
 find_var_for_subquery_tle(RelOptInfo *rel, TargetEntry *tle)
 {
 	ListCell   *lc;

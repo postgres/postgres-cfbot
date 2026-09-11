@@ -31,6 +31,7 @@ GROUP BY t1.a ORDER BY t1.a;
          Sort Key: t1.a
          ->  Hash Join
                Output: t1.a, (PARTIAL avg(t2.c))
+               Inner Unique: true
                Hash Cond: (t1.b = t2.b)
                ->  Seq Scan on public.eager_agg_t1 t1
                      Output: t1.a, t1.b, t1.c
@@ -41,7 +42,7 @@ GROUP BY t1.a ORDER BY t1.a;
                            Group Key: t2.b
                            ->  Seq Scan on public.eager_agg_t2 t2
                                  Output: t2.a, t2.b, t2.c
-(18 rows)
+(19 rows)
 
 SELECT t1.a, avg(t2.c)
   FROM eager_agg_t1 t1
@@ -77,6 +78,7 @@ GROUP BY t1.a ORDER BY t1.a;
          Sort Key: t1.a
          ->  Hash Join
                Output: t1.a, (PARTIAL avg(t2.c))
+               Inner Unique: true
                Hash Cond: (t1.b = t2.b)
                ->  Seq Scan on public.eager_agg_t1 t1
                      Output: t1.a, t1.b, t1.c
@@ -90,7 +92,7 @@ GROUP BY t1.a ORDER BY t1.a;
                                  Sort Key: t2.b
                                  ->  Seq Scan on public.eager_agg_t2 t2
                                        Output: t2.c, t2.b
-(21 rows)
+(22 rows)
 
 SELECT t1.a, avg(t2.c)
   FROM eager_agg_t1 t1
@@ -246,6 +248,7 @@ GROUP BY t1.a ORDER BY t1.a;
          Sort Key: t1.a
          ->  Hash Right Join
                Output: t1.a, (PARTIAL avg(t2.c))
+               Inner Unique: true
                Hash Cond: (t1.b = t2.b)
                ->  Seq Scan on public.eager_agg_t1 t1
                      Output: t1.a, t1.b, t1.c
@@ -256,7 +259,7 @@ GROUP BY t1.a ORDER BY t1.a;
                            Group Key: t2.b
                            ->  Seq Scan on public.eager_agg_t2 t2
                                  Output: t2.a, t2.b, t2.c
-(18 rows)
+(19 rows)
 
 SELECT t1.a, avg(t2.c)
   FROM eager_agg_t1 t1
@@ -344,6 +347,7 @@ GROUP BY t1.a ORDER BY t1.a;
                Sort Key: t1.a
                ->  Parallel Hash Join
                      Output: t1.a, (PARTIAL avg(t2.c))
+                     Inner Unique: true
                      Hash Cond: (t1.b = t2.b)
                      ->  Parallel Seq Scan on public.eager_agg_t1 t1
                            Output: t1.a, t1.b, t1.c
@@ -354,7 +358,7 @@ GROUP BY t1.a ORDER BY t1.a;
                                  Group Key: t2.b
                                  ->  Parallel Seq Scan on public.eager_agg_t2 t2
                                        Output: t2.a, t2.b, t2.c
-(21 rows)
+(22 rows)
 
 SELECT t1.a, avg(t2.c)
   FROM eager_agg_t1 t1
@@ -397,6 +401,7 @@ GROUP BY t1.a ORDER BY t1.a;
          Sort Key: t1.a
          ->  Hash Join
                Output: t1.a, (PARTIAL avg(t2.c))
+               Inner Unique: true
                Hash Cond: (t1.b = t2.b)
                ->  Seq Scan on public.eager_agg_t1 t1
                      Output: t1.a, t1.b, t1.c
@@ -407,7 +412,7 @@ GROUP BY t1.a ORDER BY t1.a;
                            Group Key: t2.b
                            ->  Seq Scan on public.eager_agg_t2 t2
                                  Output: t2.a, t2.b, t2.c
-(18 rows)
+(19 rows)
 
 SELECT t1.a, avg(t2.c)
   FROM eager_agg_t1 t1
@@ -527,6 +532,7 @@ GROUP BY t2.b ORDER BY t2.b;
          Sort Key: t2.b
          ->  Hash Right Semi Join
                Output: t2.b, (PARTIAL count(*))
+               Inner Unique: true
                Hash Cond: (t1.b = t2.b)
                ->  Seq Scan on public.eager_agg_t1 t1
                      Output: t1.a, t1.b, t1.c
@@ -537,7 +543,7 @@ GROUP BY t2.b ORDER BY t2.b;
                            Group Key: t2.b
                            ->  Seq Scan on public.eager_agg_t2 t2
                                  Output: t2.a, t2.b, t2.c
-(18 rows)
+(19 rows)
 
 SELECT t2.b, count(*)
   FROM eager_agg_t2 t2
@@ -596,6 +602,7 @@ GROUP BY t1.x ORDER BY t1.x;
                Group Key: t1.x
                ->  Hash Join
                      Output: t1.x, (PARTIAL sum(t1.y)), (PARTIAL count(*))
+                     Inner Unique: true
                      Hash Cond: (t2.y = t1.x)
                      ->  Seq Scan on public.eager_agg_tab2_p1 t2
                            Output: t2.y
@@ -611,6 +618,7 @@ GROUP BY t1.x ORDER BY t1.x;
                Group Key: t1_1.x
                ->  Hash Join
                      Output: t1_1.x, (PARTIAL sum(t1_1.y)), (PARTIAL count(*))
+                     Inner Unique: true
                      Hash Cond: (t2_1.y = t1_1.x)
                      ->  Seq Scan on public.eager_agg_tab2_p2 t2_1
                            Output: t2_1.y
@@ -626,6 +634,7 @@ GROUP BY t1.x ORDER BY t1.x;
                Group Key: t1_2.x
                ->  Hash Join
                      Output: t1_2.x, (PARTIAL sum(t1_2.y)), (PARTIAL count(*))
+                     Inner Unique: true
                      Hash Cond: (t2_2.y = t1_2.x)
                      ->  Seq Scan on public.eager_agg_tab2_p3 t2_2
                            Output: t2_2.y
@@ -636,7 +645,7 @@ GROUP BY t1.x ORDER BY t1.x;
                                  Group Key: t1_2.x
                                  ->  Seq Scan on public.eager_agg_tab1_p3 t1_2
                                        Output: t1_2.x, t1_2.y
-(49 rows)
+(52 rows)
 
 SELECT t1.x, sum(t1.y), count(*)
   FROM eager_agg_tab1 t1
@@ -678,6 +687,7 @@ GROUP BY t2.y ORDER BY t2.y;
                Group Key: t2.y
                ->  Hash Join
                      Output: t2.y, (PARTIAL sum(t1.y)), (PARTIAL count(*))
+                     Inner Unique: true
                      Hash Cond: (t2.y = t1.x)
                      ->  Seq Scan on public.eager_agg_tab2_p1 t2
                            Output: t2.y
@@ -693,6 +703,7 @@ GROUP BY t2.y ORDER BY t2.y;
                Group Key: t2_1.y
                ->  Hash Join
                      Output: t2_1.y, (PARTIAL sum(t1_1.y)), (PARTIAL count(*))
+                     Inner Unique: true
                      Hash Cond: (t2_1.y = t1_1.x)
                      ->  Seq Scan on public.eager_agg_tab2_p2 t2_1
                            Output: t2_1.y
@@ -708,6 +719,7 @@ GROUP BY t2.y ORDER BY t2.y;
                Group Key: t2_2.y
                ->  Hash Join
                      Output: t2_2.y, (PARTIAL sum(t1_2.y)), (PARTIAL count(*))
+                     Inner Unique: true
                      Hash Cond: (t2_2.y = t1_2.x)
                      ->  Seq Scan on public.eager_agg_tab2_p3 t2_2
                            Output: t2_2.y
@@ -718,7 +730,7 @@ GROUP BY t2.y ORDER BY t2.y;
                                  Group Key: t1_2.x
                                  ->  Seq Scan on public.eager_agg_tab1_p3 t1_2
                                        Output: t1_2.y, t1_2.x
-(49 rows)
+(52 rows)
 
 SELECT t2.y, sum(t1.y), count(*)
   FROM eager_agg_tab1 t1
@@ -762,6 +774,7 @@ GROUP BY t2.x HAVING avg(t1.x) > 5 ORDER BY t2.x;
          ->  Append
                ->  Hash Join
                      Output: t2.x, (PARTIAL sum(t1.x)), (PARTIAL count(*)), (PARTIAL avg(t1.x))
+                     Inner Unique: true
                      Hash Cond: (t2.y = t1.x)
                      ->  Seq Scan on public.eager_agg_tab2_p1 t2
                            Output: t2.x, t2.y
@@ -774,6 +787,7 @@ GROUP BY t2.x HAVING avg(t1.x) > 5 ORDER BY t2.x;
                                        Output: t1.x
                ->  Hash Join
                      Output: t2_1.x, (PARTIAL sum(t1_1.x)), (PARTIAL count(*)), (PARTIAL avg(t1_1.x))
+                     Inner Unique: true
                      Hash Cond: (t2_1.y = t1_1.x)
                      ->  Seq Scan on public.eager_agg_tab2_p2 t2_1
                            Output: t2_1.x, t2_1.y
@@ -786,6 +800,7 @@ GROUP BY t2.x HAVING avg(t1.x) > 5 ORDER BY t2.x;
                                        Output: t1_1.x
                ->  Hash Join
                      Output: t2_2.x, (PARTIAL sum(t1_2.x)), (PARTIAL count(*)), (PARTIAL avg(t1_2.x))
+                     Inner Unique: true
                      Hash Cond: (t2_2.y = t1_2.x)
                      ->  Seq Scan on public.eager_agg_tab2_p3 t2_2
                            Output: t2_2.x, t2_2.y
@@ -796,7 +811,7 @@ GROUP BY t2.x HAVING avg(t1.x) > 5 ORDER BY t2.x;
                                  Group Key: t1_2.x
                                  ->  Seq Scan on public.eager_agg_tab1_p3 t1_2
                                        Output: t1_2.x
-(44 rows)
+(47 rows)
 
 SELECT t2.x, sum(t1.x), count(*)
   FROM eager_agg_tab1 t1
@@ -1063,6 +1078,7 @@ GROUP BY t1.x ORDER BY t1.x;
                Group Key: t1.x
                ->  Hash Join
                      Output: t1.x, (PARTIAL sum(t1.y)), (PARTIAL count(*))
+                     Inner Unique: true
                      Hash Cond: (t2.y = t1.x)
                      ->  Seq Scan on public.eager_agg_tab2_p1 t2
                            Output: t2.y
@@ -1078,6 +1094,7 @@ GROUP BY t1.x ORDER BY t1.x;
                Group Key: t1_1.x
                ->  Hash Join
                      Output: t1_1.x, (PARTIAL sum(t1_1.y)), (PARTIAL count(*))
+                     Inner Unique: true
                      Hash Cond: (t2_1.y = t1_1.x)
                      ->  Seq Scan on public.eager_agg_tab2_p2 t2_1
                            Output: t2_1.y
@@ -1093,6 +1110,7 @@ GROUP BY t1.x ORDER BY t1.x;
                Group Key: t1_2.x
                ->  Hash Join
                      Output: t1_2.x, (PARTIAL sum(t1_2.y)), (PARTIAL count(*))
+                     Inner Unique: true
                      Hash Cond: (t2_2.y = t1_2.x)
                      ->  Seq Scan on public.eager_agg_tab2_p3 t2_2
                            Output: t2_2.y
@@ -1103,7 +1121,7 @@ GROUP BY t1.x ORDER BY t1.x;
                                  Group Key: t1_2.x
                                  ->  Seq Scan on public.eager_agg_tab1_p3 t1_2
                                        Output: t1_2.x, t1_2.y
-(49 rows)
+(52 rows)
 
 SELECT t1.x, sum(t1.y), count(*)
   FROM eager_agg_tab1 t1
@@ -1163,6 +1181,7 @@ GROUP BY t1.x ORDER BY t1.x;
                Group Key: t1.x
                ->  Hash Join
                      Output: t1.x, (PARTIAL sum(t2.y)), (PARTIAL count(*))
+                     Inner Unique: true
                      Hash Cond: (t1.x = t2.x)
                      ->  Seq Scan on public.eager_agg_tab_ml_p1 t1
                            Output: t1.x
@@ -1178,6 +1197,7 @@ GROUP BY t1.x ORDER BY t1.x;
                Group Key: t1_1.x
                ->  Hash Join
                      Output: t1_1.x, (PARTIAL sum(t2_1.y)), (PARTIAL count(*))
+                     Inner Unique: true
                      Hash Cond: (t1_1.x = t2_1.x)
                      ->  Seq Scan on public.eager_agg_tab_ml_p2_s1 t1_1
                            Output: t1_1.x
@@ -1193,6 +1213,7 @@ GROUP BY t1.x ORDER BY t1.x;
                Group Key: t1_2.x
                ->  Hash Join
                      Output: t1_2.x, (PARTIAL sum(t2_2.y)), (PARTIAL count(*))
+                     Inner Unique: true
                      Hash Cond: (t1_2.x = t2_2.x)
                      ->  Seq Scan on public.eager_agg_tab_ml_p2_s2 t1_2
                            Output: t1_2.x
@@ -1208,6 +1229,7 @@ GROUP BY t1.x ORDER BY t1.x;
                Group Key: t1_3.x
                ->  Hash Join
                      Output: t1_3.x, (PARTIAL sum(t2_3.y)), (PARTIAL count(*))
+                     Inner Unique: true
                      Hash Cond: (t1_3.x = t2_3.x)
                      ->  Seq Scan on public.eager_agg_tab_ml_p3_s1 t1_3
                            Output: t1_3.x
@@ -1223,6 +1245,7 @@ GROUP BY t1.x ORDER BY t1.x;
                Group Key: t1_4.x
                ->  Hash Join
                      Output: t1_4.x, (PARTIAL sum(t2_4.y)), (PARTIAL count(*))
+                     Inner Unique: true
                      Hash Cond: (t1_4.x = t2_4.x)
                      ->  Seq Scan on public.eager_agg_tab_ml_p3_s2 t1_4
                            Output: t1_4.x
@@ -1233,7 +1256,7 @@ GROUP BY t1.x ORDER BY t1.x;
                                  Group Key: t2_4.x
                                  ->  Seq Scan on public.eager_agg_tab_ml_p3_s2 t2_4
                                        Output: t2_4.y, t2_4.x
-(79 rows)
+(84 rows)
 
 SELECT t1.x, sum(t2.y), count(*)
   FROM eager_agg_tab_ml t1
@@ -1291,6 +1314,7 @@ GROUP BY t1.y ORDER BY t1.y;
          ->  Append
                ->  Hash Join
                      Output: t1.y, (PARTIAL sum(t2.y)), (PARTIAL count(*))
+                     Inner Unique: true
                      Hash Cond: (t1.x = t2.x)
                      ->  Seq Scan on public.eager_agg_tab_ml_p1 t1
                            Output: t1.y, t1.x
@@ -1303,6 +1327,7 @@ GROUP BY t1.y ORDER BY t1.y;
                                        Output: t2.y, t2.x
                ->  Hash Join
                      Output: t1_1.y, (PARTIAL sum(t2_1.y)), (PARTIAL count(*))
+                     Inner Unique: true
                      Hash Cond: (t1_1.x = t2_1.x)
                      ->  Seq Scan on public.eager_agg_tab_ml_p2_s1 t1_1
                            Output: t1_1.y, t1_1.x
@@ -1315,6 +1340,7 @@ GROUP BY t1.y ORDER BY t1.y;
                                        Output: t2_1.y, t2_1.x
                ->  Hash Join
                      Output: t1_2.y, (PARTIAL sum(t2_2.y)), (PARTIAL count(*))
+                     Inner Unique: true
                      Hash Cond: (t1_2.x = t2_2.x)
                      ->  Seq Scan on public.eager_agg_tab_ml_p2_s2 t1_2
                            Output: t1_2.y, t1_2.x
@@ -1327,6 +1353,7 @@ GROUP BY t1.y ORDER BY t1.y;
                                        Output: t2_2.y, t2_2.x
                ->  Hash Join
                      Output: t1_3.y, (PARTIAL sum(t2_3.y)), (PARTIAL count(*))
+                     Inner Unique: true
                      Hash Cond: (t1_3.x = t2_3.x)
                      ->  Seq Scan on public.eager_agg_tab_ml_p3_s1 t1_3
                            Output: t1_3.y, t1_3.x
@@ -1339,6 +1366,7 @@ GROUP BY t1.y ORDER BY t1.y;
                                        Output: t2_3.y, t2_3.x
                ->  Hash Join
                      Output: t1_4.y, (PARTIAL sum(t2_4.y)), (PARTIAL count(*))
+                     Inner Unique: true
                      Hash Cond: (t1_4.x = t2_4.x)
                      ->  Seq Scan on public.eager_agg_tab_ml_p3_s2 t1_4
                            Output: t1_4.y, t1_4.x
@@ -1349,7 +1377,7 @@ GROUP BY t1.y ORDER BY t1.y;
                                  Group Key: t2_4.x
                                  ->  Seq Scan on public.eager_agg_tab_ml_p3_s2 t2_4
                                        Output: t2_4.y, t2_4.x
-(67 rows)
+(72 rows)
 
 SELECT t1.y, sum(t2.y), count(*)
   FROM eager_agg_tab_ml t1
@@ -1725,6 +1753,7 @@ GROUP BY t1.x ORDER BY t1.x;
                Group Key: t1.x
                ->  Hash Join
                      Output: t1.x, (PARTIAL sum(t2.y)), (PARTIAL count(*))
+                     Inner Unique: true
                      Hash Cond: (t1.x = t2.x)
                      ->  Seq Scan on public.eager_agg_tab_ml_p1 t1
                            Output: t1.x
@@ -1740,6 +1769,7 @@ GROUP BY t1.x ORDER BY t1.x;
                Group Key: t1_1.x
                ->  Hash Join
                      Output: t1_1.x, (PARTIAL sum(t2_1.y)), (PARTIAL count(*))
+                     Inner Unique: true
                      Hash Cond: (t1_1.x = t2_1.x)
                      ->  Seq Scan on public.eager_agg_tab_ml_p2_s1 t1_1
                            Output: t1_1.x
@@ -1755,6 +1785,7 @@ GROUP BY t1.x ORDER BY t1.x;
                Group Key: t1_2.x
                ->  Hash Join
                      Output: t1_2.x, (PARTIAL sum(t2_2.y)), (PARTIAL count(*))
+                     Inner Unique: true
                      Hash Cond: (t1_2.x = t2_2.x)
                      ->  Seq Scan on public.eager_agg_tab_ml_p2_s2 t1_2
                            Output: t1_2.x
@@ -1770,6 +1801,7 @@ GROUP BY t1.x ORDER BY t1.x;
                Group Key: t1_3.x
                ->  Hash Join
                      Output: t1_3.x, (PARTIAL sum(t2_3.y)), (PARTIAL count(*))
+                     Inner Unique: true
                      Hash Cond: (t1_3.x = t2_3.x)
                      ->  Seq Scan on public.eager_agg_tab_ml_p3_s1 t1_3
                            Output: t1_3.x
@@ -1785,6 +1817,7 @@ GROUP BY t1.x ORDER BY t1.x;
                Group Key: t1_4.x
                ->  Hash Join
                      Output: t1_4.x, (PARTIAL sum(t2_4.y)), (PARTIAL count(*))
+                     Inner Unique: true
                      Hash Cond: (t1_4.x = t2_4.x)
                      ->  Seq Scan on public.eager_agg_tab_ml_p3_s2 t1_4
                            Output: t1_4.x
@@ -1795,7 +1828,7 @@ GROUP BY t1.x ORDER BY t1.x;
                                  Group Key: t2_4.x
                                  ->  Seq Scan on public.eager_agg_tab_ml_p3_s2 t2_4
                                        Output: t2_4.y, t2_4.x
-(79 rows)
+(84 rows)
 
 SELECT t1.x, sum(t2.y), count(*)
   FROM eager_agg_tab_ml t1
