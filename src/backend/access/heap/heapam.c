@@ -45,6 +45,7 @@
 #include "access/xloginsert.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_database_d.h"
+#include "catalog/pg_subscription.h"
 #include "commands/vacuum.h"
 #include "executor/instrument_node.h"
 #include "executor/tuptable.h"
@@ -4724,7 +4725,7 @@ HeapUpdateHotAllowable(Relation relation, const Bitmapset *modified_idx_attrs)
 	 * A non-summarizing indexed attribute changed.  HOT-indexed is supported
 	 * whenever the relation can tolerate extra index entries in a chain whose
 	 * per-chain-member keys may differ.  The logical-replication apply path
-	 * is disqualified below.  The remaining
+	 * is gated above by hot_indexed_on_apply.  The remaining
 	 * HEAP_UPDATE_ALL_INDEXES fallbacks are:
 	 *
 	 * - An UPDATE that modifies an attribute referenced by an expression
@@ -4744,14 +4745,34 @@ HeapUpdateHotAllowable(Relation relation, const Bitmapset *modified_idx_attrs)
 											   INDEX_ATTR_BITMAP_INDEXED);
 
 	/*
-	 * A logical-replication apply worker never takes the HOT-indexed path.  A
-	 * HOT-indexed update of a replica-identity attribute can leave a stale
-	 * index leaf, and the apply worker's replica-identity lookups must not be
-	 * exposed to that here; fall back to a plain non-HOT update on apply.  A
-	 * per-subscription option to relax this is added separately.
+	 * The logical-replication apply path gates HOT-indexed updates on the
+	 * per-subscription hot_indexed_on_apply option.  A HOT-indexed update of
+	 * a replica-identity attribute leaves a stale index leaf; the apply
+	 * worker's replica-identity lookups cope with that (see
+	 * RelationFindReplTupleByIndex), but only when the indexed attributes are
+	 * a subset of the replica identity.  "off" disqualifies whenever the
+	 * subscriber has any indexed attribute beyond its PK; "subset_only" (the
+	 * default) requires the indexed attributes to be a subset of the PK;
+	 * "always" applies no apply-path gating.
 	 */
 	if (IsLogicalWorker())
-		return HEAP_UPDATE_ALL_INDEXES;
+	{
+		char		mode = GetHotIndexedApplyMode();
+		const Bitmapset  *pk_attrs = RelationGetIndexAttrBitmapNoCopy(relation,
+											  INDEX_ATTR_BITMAP_PRIMARY_KEY);
+
+		if (mode == LOGICALREP_HOT_INDEXED_OFF)
+		{
+			if (!bms_equal(all_idx_attrs, pk_attrs))
+				return HEAP_UPDATE_ALL_INDEXES;
+		}
+		else if (mode == LOGICALREP_HOT_INDEXED_SUBSET_ONLY)
+		{
+			if (!bms_is_subset(all_idx_attrs, pk_attrs))
+				return HEAP_UPDATE_ALL_INDEXES;
+		}
+		/* LOGICALREP_HOT_INDEXED_ALWAYS: no apply-path gating. */
+	}
 
 	/*
 	 * System catalogs keep classic HOT (an UPDATE touching no non-summarizing
