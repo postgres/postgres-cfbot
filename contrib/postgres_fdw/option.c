@@ -122,6 +122,7 @@ postgres_fdw_validator(PG_FUNCTION_ARGS)
 			strcmp(def->defname, "parallel_abort") == 0 ||
 			strcmp(def->defname, "keep_connections") == 0 ||
 			strcmp(def->defname, "import_stats") == 0 ||
+			strcmp(def->defname, "streaming_fetch") == 0 ||
 			strcmp(def->defname, "use_scram_passthrough") == 0)
 		{
 			/* these accept only boolean values */
@@ -262,6 +263,9 @@ InitPgFdwOptions(void)
 		/* fetch_size is available on both server and table */
 		{"fetch_size", ForeignServerRelationId, false},
 		{"fetch_size", ForeignTableRelationId, false},
+		/* streaming_fetch is available on both server and table */
+		{"streaming_fetch", ForeignServerRelationId, false},
+		{"streaming_fetch", ForeignTableRelationId, false},
 		/* batch_size is available on both server and table */
 		{"batch_size", ForeignServerRelationId, false},
 		{"batch_size", ForeignTableRelationId, false},
