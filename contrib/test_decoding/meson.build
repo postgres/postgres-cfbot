@@ -68,6 +68,7 @@ tests += {
       'twophase',
       'twophase_stream',
       'rowtypes_alter',
+      'hot_indexed',
     ],
     'regress_args': [
       '--temp-config', files('logical.conf'),
