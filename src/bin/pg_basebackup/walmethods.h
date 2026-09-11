@@ -72,6 +72,9 @@ typedef struct WalWriteMethodOps
 	 */
 	ssize_t		(*write) (Walfile *f, const void *buf, size_t count);
 
+	/* Advance the output by count zero bytes. */
+	ssize_t		(*write_zeros) (Walfile *f, size_t count);
+
 	/*
 	 * fsync the contents of the specified file. Returns 0 on success.
 	 */

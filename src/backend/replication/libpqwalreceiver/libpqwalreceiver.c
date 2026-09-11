@@ -644,8 +644,13 @@ libpqrcv_startstreaming(WalReceiverConn *conn,
 		appendStringInfoChar(&cmd, ')');
 	}
 	else
+	{
 		appendStringInfo(&cmd, " TIMELINE %u",
 						 options->proto.physical.startpointTLI);
+
+		if (PQserverVersion(conn->streamConn) >= 200000)
+			appendStringInfoString(&cmd, " (SKIP_WAL_PADDING)");
+	}
 
 	/* Start streaming. */
 	res = libpqsrv_exec(conn->streamConn,

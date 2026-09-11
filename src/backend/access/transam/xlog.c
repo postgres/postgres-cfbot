@@ -2400,7 +2400,7 @@ XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible)
 			openLogTLI = tli;
 
 			/* create/use new log file */
-			openLogFile = XLogFileInit(openLogSegNo, tli);
+			openLogFile = XLogFileInit(openLogSegNo, tli, NULL);
 			ReserveExternalFD();
 		}
 
@@ -3236,6 +3236,10 @@ XLogNeedsFlush(XLogRecPtr record)
  *
  * *added: on return, true if this call raised the number of extant segments.
  *
+ * *target_created: if not NULL, set to true if this call created the requested
+ * segment rather than opening one that already existed.  In a race, the
+ * initialized file might be installed as a later segment instead.
+ *
  * path: on return, this char[MAXPGPATH] has the path to the logsegno file.
  *
  * Returns -1 or FD of opened file.  A -1 here is not an error; a caller
@@ -3244,7 +3248,7 @@ XLogNeedsFlush(XLogRecPtr record)
  */
 static int
 XLogFileInitInternal(XLogSegNo logsegno, TimeLineID logtli,
-					 bool *added, char *path)
+					 bool *added, bool *target_created, char *path)
 {
 	char		tmppath[MAXPGPATH];
 	XLogSegNo	installed_segno;
@@ -3262,6 +3266,8 @@ XLogFileInitInternal(XLogSegNo logsegno, TimeLineID logtli,
 	 * Try to use existent file (checkpoint maker may have created it already)
 	 */
 	*added = false;
+	if (target_created)
+		*target_created = false;
 	fd = BasicOpenFile(path, O_RDWR | PG_BINARY | O_CLOEXEC |
 					   get_sync_bit(wal_sync_method));
 	if (fd < 0)
@@ -3402,6 +3408,8 @@ XLogFileInitInternal(XLogSegNo logsegno, TimeLineID logtli,
 							   logtli))
 	{
 		*added = true;
+		if (target_created && installed_segno == logsegno)
+			*target_created = true;
 		elog(DEBUG2, "done creating and filling new WAL file");
 	}
 	else
@@ -3422,6 +3430,7 @@ XLogFileInitInternal(XLogSegNo logsegno, TimeLineID logtli,
  * Create a new XLOG file segment, or open a pre-existing one.
  *
  * logsegno: identify segment to be created/opened.
+ * created: if not NULL, set to true if this created the target segment.
  *
  * Returns FD of opened file.
  *
@@ -3431,15 +3440,17 @@ XLogFileInitInternal(XLogSegNo logsegno, TimeLineID logtli,
  * in a critical section.
  */
 int
-XLogFileInit(XLogSegNo logsegno, TimeLineID logtli)
+XLogFileInit(XLogSegNo logsegno, TimeLineID logtli, bool *created)
 {
 	bool		ignore_added;
+	bool		ignore_created;
 	char		path[MAXPGPATH];
 	int			fd;
 
 	Assert(logtli != 0);
 
-	fd = XLogFileInitInternal(logsegno, logtli, &ignore_added, path);
+	fd = XLogFileInitInternal(logsegno, logtli, &ignore_added,
+							  created ? created : &ignore_created, path);
 	if (fd >= 0)
 		return fd;
 
@@ -3757,7 +3768,7 @@ PreallocXlogFiles(XLogRecPtr endptr, TimeLineID tli)
 	if (offset >= (uint32) (0.75 * wal_segment_size))
 	{
 		_logSegNo++;
-		lf = XLogFileInitInternal(_logSegNo, tli, &added, path);
+		lf = XLogFileInitInternal(_logSegNo, tli, &added, NULL, path);
 		if (lf >= 0)
 			close(lf);
 		if (added)
@@ -5581,7 +5592,7 @@ BootStrapXLOG(uint32 data_checksum_version)
 
 	/* Create first XLOG segment file */
 	openLogTLI = BootstrapTimeLineID;
-	openLogFile = XLogFileInit(1, BootstrapTimeLineID);
+	openLogFile = XLogFileInit(1, BootstrapTimeLineID, NULL);
 
 	/*
 	 * We needn't bother with Reserve/ReleaseExternalFD here, since we'll
@@ -5701,7 +5712,7 @@ XLogInitNewTimeline(TimeLineID endTLI, XLogRecPtr endOfLog, TimeLineID newTLI)
 		 */
 		int			fd;
 
-		fd = XLogFileInit(startLogSegNo, newTLI);
+		fd = XLogFileInit(startLogSegNo, newTLI, NULL);
 
 		if (close(fd) != 0)
 		{
