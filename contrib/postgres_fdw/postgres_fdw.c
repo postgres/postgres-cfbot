@@ -8515,12 +8515,54 @@ add_foreign_final_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	 * determined to be safe to push down before we get here.  So in that case
 	 * the FETCH clause is safe to push down with ORDER BY if the remote
 	 * server is v13 or later, but if not, the remote query will fail entirely
-	 * for lack of support for it.  Since we do not currently have a way to do
-	 * a remote-version check (without accessing the remote server), disable
-	 * pushing the FETCH clause for now.
+	 * for lack of support for it.  Do not open a connection just to check the
+	 * remote server's version.  If a connection is already cached, perhaps
+	 * from an earlier query or remote estimates during this planning, its
+	 * version is available without additional network I/O.  Push the FETCH
+	 * clause down only when the cached version confirms support; otherwise
+	 * keep it local.
+	 *
+	 * Because of this, the pushdown decision depends on this backend's
+	 * connection history rather than solely on the query and the remote
+	 * server: the identical query planned twice in the same session can come
+	 * out with WITH TIES pushed down the second time purely because some
+	 * unrelated query against the same server opened a connection in
+	 * between, with nothing about the query itself having changed.  This is
+	 * accepted as the price of not opening a connection at plan time, but it
+	 * means EXPLAIN output for this query can differ from one planning to
+	 * the next within a session.
 	 */
 	if (parse->limitOption == LIMIT_OPTION_WITH_TIES)
-		return;
+	{
+		Oid			pushdown_userid;
+		UserMapping *user;
+
+		/*
+		 * All sort keys might have been removed as redundant.  Without an
+		 * ORDER BY clause in the remote query, WITH TIES is not valid.
+		 */
+		if (pathkeys == NIL)
+			return;
+
+		/*
+		 * final_rel->serverid is set only if the whole relation belongs to a
+		 * single FDW (see grouping_planner()); this is InvalidOid for, e.g.,
+		 * a join or partitioned scan spanning more than one foreign server,
+		 * in which case there's no single remote query to push the FETCH
+		 * clause into.
+		 */
+		if (!OidIsValid(final_rel->serverid))
+			return;
+
+		pushdown_userid = OidIsValid(final_rel->userid) ?
+			final_rel->userid : GetUserId();
+		/* EXPLAIN without remote estimates need not have a user mapping. */
+		user = GetUserMappingExtended(pushdown_userid, final_rel->serverid,
+									  DEBUG1);
+
+		if (user == NULL || GetCachedConnectionVersion(user) < 130000)
+			return;
+	}
 
 	/*
 	 * Also, the LIMIT/OFFSET cannot be pushed down, if their expressions are

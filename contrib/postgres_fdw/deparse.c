@@ -4232,15 +4232,44 @@ appendLimitClause(deparse_expr_cxt *context)
 	/* Make sure any constants in the exprs are printed portably */
 	nestlevel = set_transmission_modes();
 
-	if (root->parse->limitCount)
+	if (root->parse->limitOption == LIMIT_OPTION_WITH_TIES)
 	{
-		appendStringInfoString(buf, " LIMIT ");
+		/*
+		 * Plain LIMIT has no way to express WITH TIES, so use the
+		 * SQL-standard FETCH clause instead.  Emit OFFSET before FETCH as
+		 * required by the SQL standard.
+		 *
+		 * Unlike LIMIT/OFFSET, the value in this position is restricted to
+		 * "c_expr" rather than a full "a_expr" (see select_fetch_first_value
+		 * in gram.y), which notably disallows the "::type" cast decoration
+		 * deparseExpr() adds to constants for portability.  Parenthesize the
+		 * value to work around that; c_expr explicitly allows a parenthesized
+		 * a_expr, so this is valid regardless of what kind of expression it
+		 * turns out to be.
+		 */
+		if (root->parse->limitOffset)
+		{
+			appendStringInfoString(buf, " OFFSET (");
+			deparseExpr((Expr *) root->parse->limitOffset, context);
+			appendStringInfoString(buf, ") ROWS");
+		}
+		Assert(root->parse->limitCount);
+		appendStringInfoString(buf, " FETCH FIRST (");
 		deparseExpr((Expr *) root->parse->limitCount, context);
+		appendStringInfoString(buf, ") ROWS WITH TIES");
 	}
-	if (root->parse->limitOffset)
+	else
 	{
-		appendStringInfoString(buf, " OFFSET ");
-		deparseExpr((Expr *) root->parse->limitOffset, context);
+		if (root->parse->limitCount)
+		{
+			appendStringInfoString(buf, " LIMIT ");
+			deparseExpr((Expr *) root->parse->limitCount, context);
+		}
+		if (root->parse->limitOffset)
+		{
+			appendStringInfoString(buf, " OFFSET ");
+			deparseExpr((Expr *) root->parse->limitOffset, context);
+		}
 	}
 
 	reset_transmission_modes(nestlevel);
