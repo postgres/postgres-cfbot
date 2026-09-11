@@ -360,6 +360,7 @@ extern int	pgaio_io_get_iovec_length(PgAioHandle *ioh, struct iovec **iov);
 /* aio_target.c */
 extern bool pgaio_io_can_reopen(PgAioHandle *ioh);
 extern void pgaio_io_reopen(PgAioHandle *ioh);
+extern void pgaio_io_close_reopened(PgAioHandle *ioh);
 extern const char *pgaio_io_get_target_name(PgAioHandle *ioh);
 
 

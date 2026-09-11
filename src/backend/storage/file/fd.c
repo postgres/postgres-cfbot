@@ -268,6 +268,31 @@ typedef struct
 	}			desc;
 } AllocateDesc;
 
+/*
+ * State for asynchronously issuing the fsync()s in SyncDataDirectory(). We
+ * keep a bounded number of fsync IOs in flight, using a simple ring of
+ * entries; when the ring is full, we wait for the oldest IO to complete
+ * before issuing another.
+ */
+typedef struct DataDirSyncEntry
+{
+	int			fd;				/* transient fd being synced */
+	bool		isdir;			/* is this a directory? */
+	char		path[MAXPGPATH];	/* path to file being synced */
+	PgAioReturn ioret;
+	PgAioWaitRef iow;
+	bool		in_use;			/* is this entry being used */
+} DataDirSyncEntry;
+
+typedef struct DataDirSyncState
+{
+	int			elevel;			/* level to log errors at */
+	int			max_inflight;	/* size of the ring */
+	int			head;			/* index of oldest in-flight entry */
+	int			count;			/* number of in-flight entries */
+	DataDirSyncEntry *entries;	/* ring of max_inflight entries */
+} DataDirSyncState;
+
 static int	numAllocatedDescs = 0;
 static int	maxAllocatedDescs = 0;
 static AllocateDesc *allocatedDescs = NULL;
@@ -346,14 +371,20 @@ static void RemovePgTempRelationFiles(const char *tsdirname);
 static void RemovePgTempRelationFilesInDbspace(const char *dbspacedirname);
 
 static void walkdir(const char *path,
-					void (*action) (const char *fname, bool isdir, int elevel),
+					void (*action) (const char *fname, bool isdir, int elevel, DataDirSyncState *state),
 					bool process_symlinks,
-					int elevel);
+					int elevel,
+					DataDirSyncState *state);
 #ifdef PG_FLUSH_DATA_WORKS
-static void pre_sync_fname(const char *fname, bool isdir, int elevel);
+static void pre_sync_fname(const char *fname, bool isdir, int elevel, DataDirSyncState *state);
 #endif
-static void datadir_fsync_fname(const char *fname, bool isdir, int elevel);
-static void unlink_if_exists_fname(const char *fname, bool isdir, int elevel);
+static void datadir_fsync_fname(const char *fname, bool isdir, int elevel, DataDirSyncState *state);
+static void unlink_if_exists_fname(const char *fname, bool isdir, int elevel, DataDirSyncState *state);
+static bool fsync_fname_open(const char *fname, bool isdir, bool ignore_perm,
+							 int elevel, int *ret);
+static bool fsync_fname_close(const char *fname, bool isdir, int elevel, int fd, int returncode);
+static void datadir_sync_wait_one(DataDirSyncState *state);
+static void datadir_sync_drain_all(DataDirSyncState *state);
 
 static int	fsync_parent_path(const char *fname, int elevel);
 
@@ -1691,7 +1722,7 @@ PathNameDeleteTemporaryDir(const char *dirname)
 	 * used in a cleanup path, we wouldn't actually behave differently: we'll
 	 * just log failures.
 	 */
-	walkdir(dirname, unlink_if_exists_fname, false, LOG);
+	walkdir(dirname, unlink_if_exists_fname, false, LOG, NULL);
 }
 
 /*
@@ -2223,6 +2254,29 @@ FileStartReadV(PgAioHandle *ioh, File file,
 	vfdP = &VfdCache[file];
 
 	pgaio_io_start_readv(ioh, vfdP->fd, iovcnt, offset);
+
+	return 0;
+}
+
+int
+FileStartSync(PgAioHandle *ioh, File file, bool datasync,
+			  uint32 wait_event_info)
+{
+	int			returnCode;
+	Vfd		   *vfdP;
+
+	Assert(FileIsValid(file));
+
+	DO_DB(elog(LOG, "FileStartSync: %d (%s)",
+			   file, VfdCache[file].fileName));
+
+	returnCode = FileAccess(file);
+	if (returnCode < 0)
+		return returnCode;
+
+	vfdP = &VfdCache[file];
+
+	pgaio_io_start_fsync(ioh, vfdP->fd, datasync, wait_event_info);
 
 	return 0;
 }
@@ -3567,6 +3621,24 @@ do_syncfs(const char *path)
 #endif
 
 /*
+ * Return a safe upper bound for the number of fsyncs to keep in flight.
+ *
+ * Callers that fsync files opened with OpenTransientFile() hold one
+ * AllocateDesc for each in-flight IO.  At most max_safe_fds / 3 of those can
+ * be allocated at a time (see reserveAllocatedDesc()), and the callers of
+ * interest also traverse directories (see walkdir()), which needs
+ * AllocateDescs of its own. So, hand out at most half of the budget.
+ *
+ * XXX: This is too safe for places that don't use OpenTransientFile() and/or
+ * walkdir().
+ */
+int
+GetFsyncConcurrencyLimit(void)
+{
+	return Max(1, Min(io_max_concurrency, max_safe_fds / 6));
+}
+
+/*
  * Issue fsync recursively on PGDATA and all its contents, or issue syncfs for
  * all potential filesystem, depending on recovery_init_sync_method setting.
  *
@@ -3592,6 +3664,7 @@ void
 SyncDataDirectory(void)
 {
 	bool		xlog_is_symlink;
+	DataDirSyncState sync_state_data = {0};
 
 	/* We can skip this whole thing if fsync is disabled. */
 	if (!enableFsync)
@@ -3663,14 +3736,21 @@ SyncDataDirectory(void)
 	 * directory and its contents.  Errors in this step are even less
 	 * interesting than normal, so log them only at DEBUG1.
 	 */
-	walkdir(".", pre_sync_fname, false, DEBUG1);
+	walkdir(".", pre_sync_fname, false, DEBUG1, NULL);
 	if (xlog_is_symlink)
-		walkdir("pg_wal", pre_sync_fname, false, DEBUG1);
-	walkdir(PG_TBLSPC_DIR, pre_sync_fname, true, DEBUG1);
+		walkdir("pg_wal", pre_sync_fname, false, DEBUG1, NULL);
+	walkdir(PG_TBLSPC_DIR, pre_sync_fname, true, DEBUG1, NULL);
 #endif
 
 	/* Prepare to report progress syncing the data directory via fsync. */
 	begin_startup_progress_phase();
+
+	sync_state_data.elevel = LOG;
+	sync_state_data.max_inflight = GetFsyncConcurrencyLimit();
+	sync_state_data.head = 0;
+	sync_state_data.count = 0;
+	sync_state_data.entries = palloc0(sizeof(DataDirSyncEntry) *
+									  sync_state_data.max_inflight);
 
 	/*
 	 * Now we do the fsync()s in the same order.
@@ -3681,10 +3761,14 @@ SyncDataDirectory(void)
 	 * in pg_tblspc, they'll get fsync'd twice.  That's not an expected case
 	 * so we don't worry about optimizing it.
 	 */
-	walkdir(".", datadir_fsync_fname, false, LOG);
+	walkdir(".", datadir_fsync_fname, false, LOG, &sync_state_data);
 	if (xlog_is_symlink)
-		walkdir("pg_wal", datadir_fsync_fname, false, LOG);
-	walkdir(PG_TBLSPC_DIR, datadir_fsync_fname, true, LOG);
+		walkdir("pg_wal", datadir_fsync_fname, false, LOG, &sync_state_data);
+	walkdir(PG_TBLSPC_DIR, datadir_fsync_fname, true, LOG, &sync_state_data);
+
+	datadir_sync_drain_all(&sync_state_data);
+
+	pfree(sync_state_data.entries);
 }
 
 /*
@@ -3704,9 +3788,10 @@ SyncDataDirectory(void)
  */
 static void
 walkdir(const char *path,
-		void (*action) (const char *fname, bool isdir, int elevel),
+		void (*action) (const char *fname, bool isdir, int elevel, DataDirSyncState *state),
 		bool process_symlinks,
-		int elevel)
+		int elevel,
+		DataDirSyncState *state)
 {
 	DIR		   *dir;
 	struct dirent *de;
@@ -3728,10 +3813,10 @@ walkdir(const char *path,
 		switch (get_dirent_type(subpath, de, process_symlinks, elevel))
 		{
 			case PGFILETYPE_REG:
-				(*action) (subpath, false, elevel);
+				(*action) (subpath, false, elevel, state);
 				break;
 			case PGFILETYPE_DIR:
-				walkdir(subpath, action, false, elevel);
+				walkdir(subpath, action, false, elevel, state);
 				break;
 			default:
 
@@ -3753,7 +3838,7 @@ walkdir(const char *path,
 	 * might not be robust against that.
 	 */
 	if (dir)
-		(*action) (path, true, elevel);
+		(*action) (path, true, elevel, state);
 }
 
 
@@ -3766,9 +3851,11 @@ walkdir(const char *path,
 #ifdef PG_FLUSH_DATA_WORKS
 
 static void
-pre_sync_fname(const char *fname, bool isdir, int elevel)
+pre_sync_fname(const char *fname, bool isdir, int elevel, DataDirSyncState *state)
 {
 	int			fd;
+
+	Assert(!state);
 
 	/* Don't try to flush directories, it'll likely just fail */
 	if (isdir)
@@ -3804,21 +3891,98 @@ pre_sync_fname(const char *fname, bool isdir, int elevel)
 #endif							/* PG_FLUSH_DATA_WORKS */
 
 static void
-datadir_fsync_fname(const char *fname, bool isdir, int elevel)
+datadir_sync_wait_one(DataDirSyncState *state)
 {
+	DataDirSyncEntry *entry;
+
+	Assert(state->count > 0);
+
+	entry = &state->entries[state->head];
+	Assert(entry->in_use);
+
+	pgaio_wref_wait(&entry->iow);
+
+	/*
+	 * As we didn't register a completion callback, the IO's status is always
+	 * PGAIO_RS_OK; the raw fsync() return (0 or -errno) is available in
+	 * ->result.result.  Use the same error handling as fsync_fname_ext().
+	 */
+	if (entry->ioret.result.result < 0)
+		errno = -entry->ioret.result.result;
+
+	fsync_fname_close(entry->path, entry->isdir, state->elevel, entry->fd, entry->ioret.result.result);
+
+	entry->in_use = false;
+	state->head = (state->head + 1) % state->max_inflight;
+	state->count--;
+}
+
+static void
+datadir_sync_drain_all(DataDirSyncState *state)
+{
+	while (state->count > 0)
+		datadir_sync_wait_one(state);
+
+	Assert(state->count == 0);
+}
+
+static void
+datadir_fsync_fname(const char *fname, bool isdir, int elevel, DataDirSyncState *state)
+{
+	int			fd;
+	int			slot;
+	DataDirSyncEntry *entry;
+	PgAioHandle *ioh;
+
 	ereport_startup_progress("syncing data directory (fsync), elapsed time: %ld.%02d s, current path: %s",
 							 fname);
 
 	/*
-	 * We want to silently ignoring errors about unreadable files.  Pass that
-	 * desire on to fsync_fname_ext().
+	 * If the ring is full, wait before opening the next file, so that the
+	 * number of open descriptors never temporarily exceeds the ring size.
 	 */
-	fsync_fname_ext(fname, isdir, true, elevel);
+	if (state->count == state->max_inflight)
+		datadir_sync_wait_one(state);
+
+	/*
+	 * We want to silently ignore errors about unreadable files.  Pass that
+	 * desire on to fsync_fname_open().
+	 */
+	if (!fsync_fname_open(fname, isdir, true, elevel, &fd))
+		return;
+
+	Assert(state->count < state->max_inflight);
+	slot = (state->head + state->count) % state->max_inflight;
+	entry = &state->entries[slot];
+	Assert(!entry->in_use);
+
+	entry->fd = fd;
+	entry->isdir = isdir;
+	strlcpy(entry->path, fname, MAXPGPATH);
+	entry->in_use = true;
+
+	ioh = pgaio_io_acquire(CurrentResourceOwner, &entry->ioret);
+	pgaio_io_set_target(ioh, PGAIO_TID_SYNC);
+	pgaio_io_get_wref(ioh, &entry->iow);
+
+	/*
+	 * Interrupts must be held across staging the IO, so that the file
+	 * descriptor it references cannot be closed by interrupt processing
+	 * before the IO has been submitted.
+	 */
+	HOLD_INTERRUPTS();
+	pgaio_io_start_fsync(ioh, fd, false, WAIT_EVENT_DATA_DIR_SYNC);
+	RESUME_INTERRUPTS();
+
+	state->count++;
 }
 
 static void
-unlink_if_exists_fname(const char *fname, bool isdir, int elevel)
+unlink_if_exists_fname(const char *fname, bool isdir, int elevel, DataDirSyncState *state)
 {
+
+	Assert(!state);
+
 	if (isdir)
 	{
 		if (rmdir(fname) != 0 && errno != ENOENT)
@@ -3834,19 +3998,24 @@ unlink_if_exists_fname(const char *fname, bool isdir, int elevel)
 }
 
 /*
- * fsync_fname_ext -- Try to fsync a file or directory
+ * Helper for opening a file as part of fsync_fname_ext() and
+ * datadir_fsync_fname().  Split out because the latter performs the fsync
+ * asynchronously via AIO.
  *
- * If ignore_perm is true, ignore errors upon trying to open unreadable
- * files. Logs other errors at a caller-specified level.
+ * If ignore_perm is true, ignore errors upon trying to open unreadable files.
  *
- * Returns 0 if the operation succeeded, -1 otherwise.
+ * If the file could not be opened, false is returned; *fd is set to 0 if the
+ * failure should be ignored, or -1 otherwise.  Other errors are logged at the
+ * caller-specified level.
+ *
+ * If the file was opened successfully, true is returned and *fd is set to
+ * the file descriptor.
  */
-int
-fsync_fname_ext(const char *fname, bool isdir, bool ignore_perm, int elevel)
+static bool
+fsync_fname_open(const char *fname, bool isdir, bool ignore_perm,
+				 int elevel, int *fd)
 {
-	int			fd;
 	int			flags;
-	int			returncode;
 
 	/*
 	 * Some OSs require directories to be opened read-only whereas other
@@ -3860,27 +4029,48 @@ fsync_fname_ext(const char *fname, bool isdir, bool ignore_perm, int elevel)
 	else
 		flags |= O_RDONLY;
 
-	fd = OpenTransientFile(fname, flags);
+	*fd = OpenTransientFile(fname, flags);
 
 	/*
 	 * Some OSs don't allow us to open directories at all (Windows returns
 	 * EACCES), just ignore the error in that case.  If desired also silently
 	 * ignoring errors about unreadable files. Log others.
 	 */
-	if (fd < 0 && isdir && (errno == EISDIR || errno == EACCES))
-		return 0;
-	else if (fd < 0 && ignore_perm && errno == EACCES)
-		return 0;
-	else if (fd < 0)
+	if (*fd >= 0)
+		return true;
+	if (isdir && (errno == EISDIR || errno == EACCES))
 	{
+		*fd = 0;
+		return false;
+	}
+	else if (ignore_perm && errno == EACCES)
+	{
+		*fd = 0;
+		return false;
+	}
+	else
+	{
+		*fd = -1;
 		ereport(elevel,
 				(errcode_for_file_access(),
 				 errmsg("could not open file \"%s\": %m", fname)));
-		return -1;
+		return false;
 	}
+}
 
-	returncode = pg_fsync(fd);
-
+/*
+ * Helper for closing a file, and reporting any fsync failure, as part of
+ * fsync_fname_ext() and datadir_fsync_fname().  Split out because the latter
+ * performs the fsync asynchronously via AIO.
+ *
+ * "returncode" is the result of the preceding fsync; if it is negative, errno
+ * must describe the failure.
+ *
+ * Returns true if the operation succeeded, false otherwise.
+ */
+static bool
+fsync_fname_close(const char *fname, bool isdir, int elevel, int fd, int returncode)
+{
 	/*
 	 * Some OSes don't allow us to fsync directories at all, so we can ignore
 	 * those errors. Anything else needs to be logged.
@@ -3897,7 +4087,7 @@ fsync_fname_ext(const char *fname, bool isdir, bool ignore_perm, int elevel)
 		ereport(elevel,
 				(errcode_for_file_access(),
 				 errmsg("could not fsync file \"%s\": %m", fname)));
-		return -1;
+		return false;
 	}
 
 	if (CloseTransientFile(fd) != 0)
@@ -3905,8 +4095,34 @@ fsync_fname_ext(const char *fname, bool isdir, bool ignore_perm, int elevel)
 		ereport(elevel,
 				(errcode_for_file_access(),
 				 errmsg("could not close file \"%s\": %m", fname)));
-		return -1;
+		return false;
 	}
+
+	return true;
+}
+
+/*
+ * fsync_fname_ext -- Try to fsync a file or directory
+ *
+ * If ignore_perm is true, ignore errors upon trying to open unreadable
+ * files. Logs other errors at a caller-specified level.
+ *
+ * Returns 0 if the operation succeeded, -1 otherwise.
+ */
+int
+fsync_fname_ext(const char *fname, bool isdir, bool ignore_perm, int elevel)
+{
+	int			fd;
+	int			returncode;
+
+	if (!fsync_fname_open(fname, isdir, ignore_perm, elevel, &fd))
+		return fd;
+
+	Assert(fd >= 0);
+	returncode = pg_fsync(fd);
+
+	if (!fsync_fname_close(fname, isdir, elevel, fd, returncode))
+		return -1;
 
 	return 0;
 }
