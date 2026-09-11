@@ -1,5 +1,5 @@
 /*-------------------------------------------------------------------------
- *
+*
  * pg_restore.c
  *	pg_restore is an utility extracting postgres database definitions
  *	from a backup archive created by pg_dump using the archiver
@@ -63,9 +63,11 @@ main(int argc, char **argv)
 	int			exit_code;
 	int			numWorkers = 1;
 	Archive    *AH;
-	char	   *inputFileSpec;
+	char	   *inputFileSpec = NULL;
+	char	   *pipe_command = NULL;
 	bool		data_only = false;
 	bool		schema_only = false;
+	bool		is_pipe = false;
 	static int	disable_triggers = 0;
 	static int	enable_row_security = 0;
 	static int	if_exists = 0;
@@ -142,6 +144,7 @@ main(int argc, char **argv)
 		{"statistics-only", no_argument, &statistics_only, 1},
 		{"filter", required_argument, NULL, 4},
 		{"restrict-key", required_argument, NULL, 6},
+		{"pipe", required_argument, NULL, 7},
 
 		{NULL, 0, NULL, 0}
 	};
@@ -321,6 +324,11 @@ main(int argc, char **argv)
 				opts->restrict_key = pg_strdup(optarg);
 				break;
 
+			case 7:				/* pipe */
+				pipe_command = pg_strdup(optarg);
+				is_pipe = true;
+				break;
+
 			default:
 				/* getopt_long already emitted a complaint */
 				pg_log_error_hint("Try \"%s --help\" for more information.", progname);
@@ -328,11 +336,25 @@ main(int argc, char **argv)
 		}
 	}
 
-	/* Get file name from command line */
+	/*
+	 * Get file name from command line. Note that filename argument and pipe
+	 * can't both be set.
+	 */
 	if (optind < argc)
+	{
+		if (is_pipe)
+			pg_fatal("cannot specify both an input file and --pipe");
 		inputFileSpec = argv[optind++];
-	else
+	}
+
+	/*
+	 * Even if the file argument is not provided, if the pipe is specified, we
+	 * need to use that as the file arg and not fallback to stdio.
+	 */
+	else if (!is_pipe)
+	{
 		inputFileSpec = NULL;
+	}
 
 	/* Complain if any arguments remain */
 	if (optind < argc)
@@ -484,8 +506,16 @@ main(int argc, char **argv)
 			pg_fatal("unrecognized archive format \"%s\"; please specify \"c\", \"d\", or \"t\"",
 					 opts->formatName);
 	}
+	else
+		opts->format = archUnknown;
 
-	AH = OpenArchive(inputFileSpec, opts->format);
+	if (is_pipe && opts->format != archDirectory)
+		pg_fatal("option --pipe is only supported with directory format");
+
+	if (is_pipe && numWorkers > 1 && strstr(pipe_command, "%f") == NULL)
+		pg_log_warning("parallel jobs with --pipe usually require the \"%%f\" placeholder to avoid data corruption from multiple workers reading from the same file");
+
+	AH = OpenArchive(is_pipe ? pipe_command : inputFileSpec, opts->format, is_pipe);
 
 	SetArchiveOptions(AH, NULL, opts);
 
@@ -539,6 +569,8 @@ usage(const char *progname)
 	printf(_("\nGeneral options:\n"));
 	printf(_("  -d, --dbname=NAME        connect to database name\n"));
 	printf(_("  -f, --file=FILENAME      output file name (- for stdout)\n"));
+	printf(_("  --pipe=COMMAND           execute command for each input file and\n"
+			 "                           read data from it via pipe\n"));
 	printf(_("  -F, --format=c|d|t       backup file format (should be automatic)\n"));
 	printf(_("  -l, --list               print summarized TOC of the archive\n"));
 	printf(_("  -v, --verbose            verbose mode\n"));
