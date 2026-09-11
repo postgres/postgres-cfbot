@@ -207,7 +207,7 @@
 
  <para>
   As shown in <xref linkend="xindex-btree-support-table"/>, btree defines
-  one required and five optional support functions.  The six
+  one required and six optional support functions.  The seven
   user-defined methods are:
  </para>
  <variablelist>
@@ -609,6 +609,26 @@ options(<replaceable>relopts</replaceable> <type>local_relopts *</type>) returns
      must happen by incrementing a value copied from an index tuple.  The
      values generated must all be of the same underlying data type (the
      <quote>skipped</quote> index column's opclass input type).
+    </para>
+   </listitem>
+  </varlistentry>
+  <varlistentry>
+   <term><function>binsearchsupport</function></term>
+   <listitem>
+    <para>
+     Optionally, a btree operator family may provide a binary search support
+     function, registered under support function number 7.  This function
+     can install C-callable callbacks that compare an insertion scan key with
+     an index tuple and search all of the tuples on an index page at once.
+     It allows an operator class to avoid the repeated generic function-call
+     and tuple-deformation overhead of comparing one tuple at a time.
+    </para>
+    <para>
+     Binary search support is used only for indexes with a single key
+     attribute and same-type scan keys.  The callback can decline individual
+     searches, which makes the B-tree code restart the search using the
+     required support function number 1.  It is not sensible to register a
+     cross-type binary search support function.
     </para>
    </listitem>
   </varlistentry>
