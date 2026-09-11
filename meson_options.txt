@@ -9,7 +9,7 @@ option('blocksize', type: 'combo',
 
 option('wal_blocksize', type: 'combo',
   choices: ['1', '2', '4', '8', '16', '32', '64'],
-  value: '8',
+  value: '4',
   description: 'WAL block size, in kilobytes')
 
 option('segsize', type: 'integer', value: 1,
