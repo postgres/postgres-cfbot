@@ -5136,6 +5136,7 @@ getSubscriptions(Archive *fout)
 	int			i_subfailover;
 	int			i_subretaindeadtuples;
 	int			i_submaxretention;
+	int			i_subhotindexedonapply;
 	int			i,
 				ntups;
 
@@ -5234,6 +5235,14 @@ getSubscriptions(Archive *fout)
 							 " '-1' AS subwalrcvtimeout,\n");
 
 	if (fout->remoteVersion >= 190000)
+		appendPQExpBufferStr(query,
+							 " s.subhotindexedonapply,\n");
+	else
+		appendPQExpBuffer(query,
+						  " '%c' AS subhotindexedonapply,\n",
+						  LOGICALREP_HOT_INDEXED_SUBSET_ONLY);
+
+	if (fout->remoteVersion >= 190000)
 		appendPQExpBufferStr(query, " fs.srvname AS subservername\n");
 	else
 		appendPQExpBufferStr(query, " NULL AS subservername\n");
@@ -5277,6 +5286,7 @@ getSubscriptions(Archive *fout)
 	i_subfailover = PQfnumber(res, "subfailover");
 	i_subretaindeadtuples = PQfnumber(res, "subretaindeadtuples");
 	i_submaxretention = PQfnumber(res, "submaxretention");
+	i_subhotindexedonapply = PQfnumber(res, "subhotindexedonapply");
 	i_subservername = PQfnumber(res, "subservername");
 	i_subconninfo = PQfnumber(res, "subconninfo");
 	i_subslotname = PQfnumber(res, "subslotname");
@@ -5320,6 +5330,8 @@ getSubscriptions(Archive *fout)
 			(strcmp(PQgetvalue(res, i, i_subretaindeadtuples), "t") == 0);
 		subinfo[i].submaxretention =
 			atoi(PQgetvalue(res, i, i_submaxretention));
+		subinfo[i].subhotindexedonapply =
+			*(PQgetvalue(res, i, i_subhotindexedonapply));
 		if (PQgetisnull(res, i, i_subconninfo))
 			subinfo[i].subconninfo = NULL;
 		else
@@ -5596,6 +5608,11 @@ dumpSubscription(Archive *fout, const SubscriptionInfo *subinfo)
 
 	if (subinfo->submaxretention)
 		appendPQExpBuffer(query, ", max_retention_duration = %d", subinfo->submaxretention);
+
+	if (subinfo->subhotindexedonapply == LOGICALREP_HOT_INDEXED_OFF)
+		appendPQExpBufferStr(query, ", hot_indexed_on_apply = off");
+	else if (subinfo->subhotindexedonapply == LOGICALREP_HOT_INDEXED_ALWAYS)
+		appendPQExpBufferStr(query, ", hot_indexed_on_apply = always");
 
 	if (strcmp(subinfo->subsynccommit, "off") != 0)
 		appendPQExpBuffer(query, ", synchronous_commit = %s", fmtId(subinfo->subsynccommit));
