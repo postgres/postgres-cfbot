@@ -1489,7 +1489,9 @@ AdjustIntervalForTypmod(Interval *interval, int32 typmod,
 			/* fractional-second rounding will be dealt with below */
 		}
 		else
-			elog(ERROR, "unrecognized interval typmod: %d", typmod);
+			ereturn(escontext, false,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("unrecognized interval typmod: %d", typmod)));
 
 		/* Need to adjust sub-second precision? */
 		if (precision != INTERVAL_FULL_PRECISION)
