@@ -140,10 +140,12 @@ pgstat_fetch_stat_backend(ProcNumber procNumber)
  *
  * This routine includes sanity checks to ensure that the backend exists and
  * is running.  "bktype" can be optionally defined to return the BackendType
- * of the backend whose statistics are returned.
+ * of the backend whose statistics are returned.  "userid" can be optionally
+ * defined to return the OID of the role that owns the backend, for callers
+ * that need to check whether they are allowed to report its statistics.
  */
 PgStat_Backend *
-pgstat_fetch_stat_backend_by_pid(int pid, BackendType *bktype)
+pgstat_fetch_stat_backend_by_pid(int pid, BackendType *bktype, Oid *userid)
 {
 	PGPROC	   *proc;
 	PgBackendStatus *beentry;
@@ -153,6 +155,8 @@ pgstat_fetch_stat_backend_by_pid(int pid, BackendType *bktype)
 	proc = BackendPidGetProc(pid);
 	if (bktype)
 		*bktype = B_INVALID;
+	if (userid)
+		*userid = InvalidOid;
 
 	/* this could be an auxiliary process */
 	if (!proc)
@@ -177,6 +181,8 @@ pgstat_fetch_stat_backend_by_pid(int pid, BackendType *bktype)
 
 	if (bktype)
 		*bktype = beentry->st_backendType;
+	if (userid)
+		*userid = beentry->st_userid;
 
 	/*
 	 * Retrieve the entry.  Note that "beentry" may be freed depending on the
@@ -187,6 +193,8 @@ pgstat_fetch_stat_backend_by_pid(int pid, BackendType *bktype)
 	{
 		if (bktype)
 			*bktype = B_INVALID;
+		if (userid)
+			*userid = InvalidOid;
 		return NULL;
 	}
 
