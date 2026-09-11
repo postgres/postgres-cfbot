@@ -135,6 +135,28 @@ REFRESH MATERIALIZED VIEW mvtest_mv;
 REFRESH MATERIALIZED VIEW CONCURRENTLY mvtest_mv;
 DROP TABLE mvtest_foo CASCADE;
 
+-- test that duplicate rows containing NULLs in non-indexed columns are detected
+CREATE TABLE mvtest_foo(a text, b text);
+INSERT INTO mvtest_foo VALUES('test', NULL);
+CREATE MATERIALIZED VIEW mvtest_mv AS SELECT * FROM mvtest_foo;
+CREATE UNIQUE INDEX ON mvtest_mv(a);
+INSERT INTO mvtest_foo VALUES('test', NULL);
+REFRESH MATERIALIZED VIEW mvtest_mv;
+REFRESH MATERIALIZED VIEW CONCURRENTLY mvtest_mv;
+DROP TABLE mvtest_foo CASCADE;
+
+-- test that rows with NULLs in the indexed column are not false positives:
+-- unique indexes treat NULLs as distinct, so (NULL,NULL)x2 is a valid state
+-- and CONCURRENTLY should succeed and update the view to reflect both rows
+CREATE TABLE mvtest_foo(a int, b int);
+INSERT INTO mvtest_foo VALUES(NULL, NULL);
+CREATE MATERIALIZED VIEW mvtest_mv AS SELECT * FROM mvtest_foo;
+CREATE UNIQUE INDEX ON mvtest_mv(a);
+INSERT INTO mvtest_foo VALUES(NULL, NULL);
+REFRESH MATERIALIZED VIEW CONCURRENTLY mvtest_mv;
+SELECT COUNT(*) FROM mvtest_mv;
+DROP TABLE mvtest_foo CASCADE;
+
 -- make sure that all columns covered by unique indexes works
 CREATE TABLE mvtest_foo(a, b, c) AS VALUES(1, 2, 3);
 CREATE MATERIALIZED VIEW mvtest_mv AS SELECT * FROM mvtest_foo;
@@ -152,6 +174,30 @@ CREATE MATERIALIZED VIEW mvtest_mv1 AS SELECT 1 AS col1 WITH NO DATA;
 CREATE MATERIALIZED VIEW mvtest_mv2 AS SELECT * FROM mvtest_mv1
   WHERE col1 = (SELECT LEAST(col1) FROM mvtest_mv1) WITH NO DATA;
 DROP MATERIALIZED VIEW mvtest_mv1 CASCADE;
+
+-- test that nullable indexed columns are skipped in the join condition when
+-- the index has at least one NOT NULL column.  The NOT NULL column alone
+-- identifies matching rows, so the nullable column does not need to be in
+-- the join and its NULL values do not cause unnecessary DELETE+INSERT churn.
+CREATE TABLE mvtest_foo(a int NOT NULL, b int);
+INSERT INTO mvtest_foo VALUES(1, NULL), (2, NULL), (3, NULL);
+CREATE MATERIALIZED VIEW mvtest_mv AS SELECT * FROM mvtest_foo;
+CREATE UNIQUE INDEX ON mvtest_mv(a);  -- a is NOT NULL, b is nullable
+-- Add a second index on the nullable column alone to make it exercise the
+-- all-nullable fallback path through the pre-scan.
+CREATE UNIQUE INDEX ON mvtest_mv(b);
+REFRESH MATERIALIZED VIEW CONCURRENTLY mvtest_mv;  -- must succeed
+DROP TABLE mvtest_foo CASCADE;
+
+-- test that CONCURRENTLY still works when all indexed columns are nullable
+-- (falls back to including all columns, which is slower but correct).
+CREATE TABLE mvtest_foo(a int, b int);
+INSERT INTO mvtest_foo VALUES(NULL, 1);
+CREATE MATERIALIZED VIEW mvtest_mv AS SELECT * FROM mvtest_foo;
+CREATE UNIQUE INDEX ON mvtest_mv(a);  -- all-nullable index
+REFRESH MATERIALIZED VIEW CONCURRENTLY mvtest_mv;  -- must succeed
+SELECT * FROM mvtest_mv;
+DROP TABLE mvtest_foo CASCADE;
 
 -- make sure that types with unusual equality tests work
 CREATE TABLE mvtest_boxes (id serial primary key, b box);
