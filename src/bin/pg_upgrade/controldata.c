@@ -259,6 +259,26 @@ get_control_data(ClusterInfo *cluster)
 			cluster->controldata.chkpnt_nxtmulti = str2uint(p);
 			got_multi = true;
 		}
+		else if ((p = strstr(bufin, "Latest checkpoint's oldestCommitTsXid:")) != NULL)
+		{
+			p = strchr(p, ':');
+
+			if (p == NULL || strlen(p) <= 1)
+				pg_fatal("%d: controldata retrieval problem", __LINE__);
+
+			p++;				/* remove ':' char */
+			cluster->controldata.chkpnt_oldstCommitTsxid = str2uint(p);
+		}
+		else if ((p = strstr(bufin, "Latest checkpoint's newestCommitTsXid:")) != NULL)
+		{
+			p = strchr(p, ':');
+
+			if (p == NULL || strlen(p) <= 1)
+				pg_fatal("%d: controldata retrieval problem", __LINE__);
+
+			p++;				/* remove ':' char */
+			cluster->controldata.chkpnt_newstCommitTsxid = str2uint(p);
+		}
 		else if ((p = strstr(bufin, "Latest checkpoint's oldestXID:")) != NULL)
 		{
 			p = strchr(p, ':');
