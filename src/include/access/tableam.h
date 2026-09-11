@@ -495,6 +495,20 @@ typedef struct TableAmRoutine
 									  TupleTableSlot *slot,
 									  bool *call_again, bool *all_dead);
 
+	/*
+	 * Check whether an index TID points to a tuple visible to `snapshot`, as
+	 * needed for unique checks.  If no tuple is visible to `snapshot`, but a
+	 * tuple deleted by another transaction is visible to `crosscheck`, return
+	 * the deleting transaction's XID in *conflict_xid.  `crosscheck` may be
+	 * NULL when this information is not needed.
+	 */
+	bool		(*index_fetch_tuple_check) (struct IndexFetchTableData *scan,
+										ItemPointer tid,
+										Snapshot snapshot,
+										Snapshot crosscheck,
+										bool *all_dead,
+										TransactionId *conflict_xid);
+
 
 	/* ------------------------------------------------------------------------
 	 * Callbacks for non-modifying operations on individual tuples
@@ -1322,7 +1336,9 @@ table_index_fetch_tuple(struct IndexFetchTableData *scan,
 extern bool table_index_fetch_tuple_check(Relation rel,
 										  ItemPointer tid,
 										  Snapshot snapshot,
-										  bool *all_dead);
+										  Snapshot crosscheck,
+										  bool *all_dead,
+										  TransactionId *conflict_xid);
 
 
 /* ------------------------------------------------------------------------

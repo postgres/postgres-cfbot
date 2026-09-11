@@ -440,6 +440,10 @@ extern bool heapam_index_fetch_tuple(struct IndexFetchTableData *scan,
 									 ItemPointer tid, Snapshot snapshot,
 									 TupleTableSlot *slot, bool *heap_continue,
 									 bool *all_dead);
+extern bool heapam_index_fetch_tuple_check(struct IndexFetchTableData *scan,
+										   ItemPointer tid, Snapshot snapshot,
+										   Snapshot crosscheck, bool *all_dead,
+										   TransactionId *conflict_xid);
 
 /* in heap/pruneheap.c */
 extern void heap_page_prune_opt(Relation relation, Buffer buffer,

@@ -86,10 +86,12 @@ heapam_index_fetch_end(IndexFetchTableData *scan)
  * Unlike heap_fetch, the caller must already have pin and (at least) share
  * lock on the buffer; it is still pinned/locked at exit.
  */
-bool
-heap_hot_search_buffer(ItemPointer tid, Relation relation, Buffer buffer,
-					   Snapshot snapshot, HeapTuple heapTuple,
-					   bool *all_dead, bool first_call)
+static bool
+heap_hot_search_buffer_internal(ItemPointer tid, Relation relation,
+								Buffer buffer, Snapshot snapshot,
+								Snapshot crosscheck, HeapTuple heapTuple,
+								bool *all_dead, bool first_call,
+								TransactionId *conflict_xid)
 {
 	Page		page = BufferGetPage(buffer);
 	TransactionId prev_xmax = InvalidTransactionId;
@@ -188,6 +190,20 @@ heap_hot_search_buffer(ItemPointer tid, Relation relation, Buffer buffer,
 					*all_dead = false;
 				return true;
 			}
+
+			/*
+			 * A unique check can use SnapshotDirty to conclude that a tuple
+			 * has been deleted, even though it remains visible to the inserting
+			 * transaction's MVCC snapshot.  Report the deleting XID so that SSI
+			 * can identify the exact dependency involved.
+			 */
+			if (crosscheck != NULL &&
+				HeapTupleSatisfiesVisibility(heapTuple, crosscheck, buffer))
+			{
+				Assert(!(heapTuple->t_data->t_infomask & HEAP_XMAX_INVALID));
+				Assert(!HeapTupleHeaderIsOnlyLocked(heapTuple->t_data));
+				*conflict_xid = HeapTupleHeaderGetUpdateXid(heapTuple->t_data);
+			}
 		}
 		skip = false;
 
@@ -226,6 +242,16 @@ heap_hot_search_buffer(ItemPointer tid, Relation relation, Buffer buffer,
 	}
 
 	return false;
+}
+
+bool
+heap_hot_search_buffer(ItemPointer tid, Relation relation, Buffer buffer,
+					   Snapshot snapshot, HeapTuple heapTuple,
+					   bool *all_dead, bool first_call)
+{
+	return heap_hot_search_buffer_internal(tid, relation, buffer, snapshot,
+										   NULL, heapTuple, all_dead, first_call,
+										   NULL);
 }
 
 bool
@@ -295,4 +321,37 @@ heapam_index_fetch_tuple(struct IndexFetchTableData *scan,
 	}
 
 	return got_heap_tuple;
+}
+
+bool
+heapam_index_fetch_tuple_check(struct IndexFetchTableData *scan,
+							   ItemPointer tid, Snapshot snapshot,
+							   Snapshot crosscheck, bool *all_dead,
+							   TransactionId *conflict_xid)
+{
+	IndexFetchHeapData *hscan = (IndexFetchHeapData *) scan;
+	HeapTupleData heap_tuple;
+	bool		found;
+
+	if (hscan->xs_blk != ItemPointerGetBlockNumber(tid))
+	{
+		hscan->xs_blk = ItemPointerGetBlockNumber(tid);
+
+		if (BufferIsValid(hscan->xs_cbuf))
+			ReleaseBuffer(hscan->xs_cbuf);
+
+		hscan->xs_cbuf = ReadBuffer(hscan->xs_base.rel, hscan->xs_blk);
+		heap_page_prune_opt(hscan->xs_base.rel, hscan->xs_cbuf,
+							&hscan->xs_vmbuffer,
+							hscan->xs_base.flags & SO_HINT_REL_READ_ONLY);
+	}
+
+	LockBuffer(hscan->xs_cbuf, BUFFER_LOCK_SHARE);
+	found = heap_hot_search_buffer_internal(tid, hscan->xs_base.rel,
+											hscan->xs_cbuf, snapshot, crosscheck,
+											&heap_tuple, all_dead, true,
+											conflict_xid);
+	LockBuffer(hscan->xs_cbuf, BUFFER_LOCK_UNLOCK);
+
+	return found;
 }
