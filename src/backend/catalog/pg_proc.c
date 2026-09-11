@@ -35,6 +35,7 @@
 #include "parser/parse_coerce.h"
 #include "pgstat.h"
 #include "rewrite/rewriteHandler.h"
+#include "storage/lmgr.h"
 #include "tcop/pquery.h"
 #include "tcop/tcopprot.h"
 #include "utils/acl.h"
@@ -385,24 +386,48 @@ ProcedureCreate(const char *procedureName,
 	tupDesc = RelationGetDescr(rel);
 
 	/* Check for pre-existing definition */
-	oldtup = SearchSysCache3(PROCNAMEARGSNSP,
-							 PointerGetDatum(procedureName),
-							 PointerGetDatum(parameterTypes),
-							 ObjectIdGetDatum(procNamespace));
+	oldtup = SearchSysCacheCopy3(PROCNAMEARGSNSP,
+								 PointerGetDatum(procedureName),
+								 PointerGetDatum(parameterTypes),
+								 ObjectIdGetDatum(procNamespace));
 
 	if (HeapTupleIsValid(oldtup))
 	{
 		/* There is one; okay to replace it? */
 		Form_pg_proc oldproc = (Form_pg_proc) GETSTRUCT(oldtup);
-		Datum		proargnames;
-		bool		isnull;
-		const char *dropcmd;
+		Oid			 procoid = oldproc->oid;
 
 		if (!replace)
 			ereport(ERROR,
 					(errcode(ERRCODE_DUPLICATE_FUNCTION),
 					 errmsg("function \"%s\" already exists with same argument types",
 							procedureName)));
+
+		heap_freetuple(oldtup);
+
+		/* Lock the function so nobody else can do anything with it. */
+		LockDatabaseObject(ProcedureRelationId, procoid, 0, AccessExclusiveLock);
+
+		/*
+		 * It is possible that by the time we acquire the lock on function,
+		 * concurrent DDL has removed it. We can test this by checking the
+		 * existence of function. We get the tuple again to avoid the risk
+		 * of function definition getting changed.
+		 */
+		oldtup = SearchSysCacheCopy3(PROCNAMEARGSNSP,
+									 PointerGetDatum(procedureName),
+									 PointerGetDatum(parameterTypes),
+									 ObjectIdGetDatum(procNamespace));
+	}
+
+	if (HeapTupleIsValid(oldtup))
+	{
+
+		Form_pg_proc oldproc = (Form_pg_proc) GETSTRUCT(oldtup);
+		Datum		proargnames;
+		bool		isnull;
+		const char *dropcmd;
+
 		if (!object_ownercheck(ProcedureRelationId, oldproc->oid, proowner))
 			aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_FUNCTION,
 						   procedureName);
@@ -587,7 +612,7 @@ ProcedureCreate(const char *procedureName,
 		tup = heap_modify_tuple(oldtup, tupDesc, values, nulls, replaces);
 		CatalogTupleUpdate(rel, &tup->t_self, tup);
 
-		ReleaseSysCache(oldtup);
+		heap_freetuple(oldtup);
 		is_update = true;
 	}
 	else
