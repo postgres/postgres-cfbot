@@ -460,7 +460,7 @@ pgstat_bestart_final(void)
 
 	/* Create the backend statistics entry */
 	if (pgstat_tracks_backend_bktype(MyBackendType))
-		pgstat_create_backend(MyProcNumber);
+		pgstat_create_backend(MyProcNumber, userid);
 
 	/* Update app name to current GUC setting */
 	if (application_name)
