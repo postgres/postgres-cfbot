@@ -1983,7 +1983,7 @@ convert_EXISTS_to_ANY(PlannerInfo *root, Query *subselect,
 	subroot.type = T_PlannerInfo;
 	subroot.glob = root->glob;
 	subroot.parse = subselect;
-	whereClause = eval_const_expressions(&subroot, whereClause);
+	whereClause = eval_const_expressions_qual(&subroot, whereClause);
 	whereClause = (Node *) canonicalize_qual((Expr *) whereClause, false);
 	whereClause = (Node *) make_ands_implicit((Expr *) whereClause);
 
