@@ -2514,7 +2514,7 @@ CommitTransaction(void)
 	AtEOXact_ComboCid();
 	AtEOXact_HashTables(true);
 	AtEOXact_RI(true);
-	AtEOXact_PgStat(true, is_parallel_worker);
+	AtEOXact_PgStat(true);
 	AtEOXact_Snapshot(true, false);
 	AtEOXact_ApplyLauncher(true);
 	AtEOXact_LogicalRepWorkers(true);
@@ -3041,7 +3041,7 @@ AbortTransaction(void)
 		AtEOXact_ComboCid();
 		AtEOXact_HashTables(false);
 		AtEOXact_RI(false);
-		AtEOXact_PgStat(false, is_parallel_worker);
+		AtEOXact_PgStat(false);
 		AtEOXact_ApplyLauncher(false);
 		AtEOXact_LogicalRepWorkers(false);
 		AtEOXact_LogicalCtl();
@@ -3509,6 +3509,29 @@ AbortCurrentTransaction(void)
 	while (!AbortCurrentTransactionInternal())
 	{
 	}
+}
+
+/*
+ * AbortCurrentTransactionWithoutXactCounters
+ *
+ * Like AbortCurrentTransaction(), but don't count the abort in
+ * pg_stat_database.xact_rollback.  For internal cleanup aborts that don't
+ * represent a user-visible transaction outcome.
+ */
+void
+AbortCurrentTransactionWithoutXactCounters(void)
+{
+	pgstat_suppress_xact_counters();
+	AbortCurrentTransaction();
+
+	/*
+	 * AbortCurrentTransaction() is a no-op when already idle (e.g. an abort at
+	 * TBLOCK_DEFAULT/TRANS_DEFAULT), in which case AtEOXact_PgStat() never runs
+	 * to consume the flag.  That can't happen at the current call sites, which
+	 * always abort a live transaction, but clear it unconditionally anyway so
+	 * set and clear stay paired defensively and the flag cannot leak.
+	 */
+	pgstat_clear_xact_counter_suppression();
 }
 
 /*

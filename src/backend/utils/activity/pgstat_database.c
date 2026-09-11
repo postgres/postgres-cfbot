@@ -17,6 +17,7 @@
 
 #include "postgres.h"
 
+#include "miscadmin.h"
 #include "storage/standby.h"
 #include "utils/pgstat_internal.h"
 #include "utils/timestamp.h"
@@ -292,10 +293,17 @@ pgstat_fetch_stat_dbentry(Oid dboid)
 }
 
 void
-AtEOXact_PgStat_Database(bool isCommit, bool parallel)
+AtEOXact_PgStat_Database(bool isCommit)
 {
-	/* Don't count parallel worker transaction stats */
-	if (!parallel)
+	/*
+	 * Only count transactions of regular client backends in
+	 * xact_commit/xact_rollback.  Transactions performed by other server
+	 * processes -- autovacuum workers, walsenders, and, less obviously, logical
+	 * replication apply workers -- are not user-visible transaction outcomes and
+	 * would otherwise inflate these counters.  (This subsumes the previous
+	 * !parallel check, since parallel workers are bgworkers.)
+	 */
+	if (AmRegularBackendProcess())
 	{
 		/*
 		 * Count transaction commit or abort.  (We use counters, not just

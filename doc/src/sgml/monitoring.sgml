@@ -4056,8 +4056,10 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        <structfield>xact_commit</structfield> <type>bigint</type>
       </para>
       <para>
-       Number of transactions in this database that have been
-       committed
+       Number of transactions in this database that have been committed by
+       regular client backends.  Transactions performed by other server
+       processes, such as autovacuum workers, walsenders, and logical
+       replication apply workers, are not counted.
       </para></entry>
      </row>
 
@@ -4066,8 +4068,10 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        <structfield>xact_rollback</structfield> <type>bigint</type>
       </para>
       <para>
-       Number of transactions in this database that have been
-       rolled back
+       Number of transactions in this database that have been rolled back by
+       regular client backends.  Transactions performed by other server
+       processes, such as autovacuum workers, walsenders, and logical
+       replication apply workers, are not counted.
       </para></entry>
      </row>
 
