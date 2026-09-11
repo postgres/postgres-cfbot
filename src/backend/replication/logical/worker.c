@@ -672,6 +672,77 @@ ReplicationOriginNameForLogicalRep(Oid suboid, Oid relid,
 }
 
 /*
+ * Report that changes for this relation are not being applied.
+ *
+ * A relation that is not ready is skipped silently on every change.  That is
+ * correct while a tablesync worker is still copying it, but it is
+ * indistinguishable from a relation missing from pg_subscription_rel
+ * altogether -- one whose changes are discarded, and acknowledged to the
+ * publisher as applied, for as long as the subscription runs.  Report the
+ * latter at DEBUG1 and the former, which is transient and expected, at DEBUG2.
+ *
+ * The gate this serves is reached once per change, so reporting is throttled
+ * per relation: a change of sync state is reported immediately, and otherwise
+ * at most one report is made per wal_retrieve_retry_interval.
+ *
+ * begin_replication_step() has already stamped the statement start time for
+ * this change, so use that rather than reading the clock again.
+ */
+static void
+report_unapplied_change(LogicalRepRelMapEntry *rel)
+{
+	TimestampTz now = GetCurrentStatementStartTimestamp();
+
+	if (rel->state == rel->reportedstate &&
+		!TimestampDifferenceExceeds(rel->lastreported, now,
+									wal_retrieve_retry_interval))
+		return;
+
+	if (rel->state == SUBREL_STATE_UNKNOWN)
+	{
+		/*
+		 * Distinguish a subscription that tracks no tables at all -- what a
+		 * pre-17 pg_upgrade or a restore that loses pg_subscription_rel
+		 * leaves behind, where every change for every relation is discarded
+		 * -- from a single relation that was published without a refresh on
+		 * this side.  This is only reached on the throttled path, so the
+		 * cached lookup is not made once per change.
+		 *
+		 * Only the apply worker asks.  A parallel apply worker exists only
+		 * because pa_can_start() found all tablesyncs ready, which requires
+		 * the subscription to have tables, so the question is already
+		 * answered for it.
+		 */
+		bool		notables = (MyLogicalRepWorker->type == WORKERTYPE_APPLY &&
+								!HasSubscriptionTablesCached());
+
+		ereport(DEBUG1,
+				errmsg_internal("logical replication apply worker for subscription \"%s\" is not applying changes for relation \"%s.%s\"",
+								MySubscription->name,
+								rel->remoterel.nspname, rel->remoterel.relname),
+				notables ?
+				errdetail_internal("The subscription has no tables.") :
+				errdetail_internal("The relation \"%s.%s\" is not part of the subscription.",
+								   rel->remoterel.nspname, rel->remoterel.relname),
+				notables ?
+				errhint_internal("Use ALTER SUBSCRIPTION ... REFRESH PUBLICATION to add the published tables to the subscription.") :
+				errhint_internal("Use ALTER SUBSCRIPTION ... REFRESH PUBLICATION to add the relation to the subscription."));
+	}
+	else
+		ereport(DEBUG2,
+				errmsg_internal("logical replication apply worker for subscription \"%s\" is not applying changes for relation \"%s.%s\"",
+								MySubscription->name,
+								rel->remoterel.nspname, rel->remoterel.relname),
+				errdetail_internal("Relation synchronization state is \"%c\", synchronization LSN %X/%08X, transaction finish LSN %X/%08X.",
+								   rel->state,
+								   LSN_FORMAT_ARGS(rel->statelsn),
+								   LSN_FORMAT_ARGS(remote_ctx.finish_lsn)));
+
+	rel->reportedstate = rel->state;
+	rel->lastreported = now;
+}
+
+/*
  * Should this worker apply changes for given relation.
  *
  * This is mainly needed for initial relation data sync as that runs in
@@ -714,12 +785,20 @@ should_apply_changes_for_rel(LogicalRepRelMapEntry *rel)
 								MySubscription->name),
 						 errdetail("Cannot handle streamed replication transactions using parallel apply workers until all tables have been synchronized.")));
 
-			return rel->state == SUBREL_STATE_READY;
+			if (rel->state == SUBREL_STATE_READY)
+				return true;
+
+			report_unapplied_change(rel);
+			return false;
 
 		case WORKERTYPE_APPLY:
-			return (rel->state == SUBREL_STATE_READY ||
-					(rel->state == SUBREL_STATE_SYNCDONE &&
-					 rel->statelsn <= remote_ctx.finish_lsn));
+			if (rel->state == SUBREL_STATE_READY ||
+				(rel->state == SUBREL_STATE_SYNCDONE &&
+				 rel->statelsn <= remote_ctx.finish_lsn))
+				return true;
+
+			report_unapplied_change(rel);
+			return false;
 
 		case WORKERTYPE_SEQUENCESYNC:
 			/* Should never happen. */
