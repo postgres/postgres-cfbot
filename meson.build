@@ -3215,6 +3215,7 @@ func_checks = [
   ['posix_fadvise'],
   ['posix_fallocate'],
   ['ppoll'],
+  ['pselect'],
   ['pthread_barrier_wait', {'dependencies': [thread_dep]}],
   ['pthread_is_threaded_np', {'dependencies': [thread_dep]}],
   ['sem_init', {'dependencies': [rt_dep, thread_dep], 'skip': sema_kind != 'unnamed_posix', 'define': false}],
@@ -3641,7 +3642,7 @@ frontend_code = declare_dependency(
   include_directories: [postgres_inc],
   link_with: [fe_utils, common_static, pgport_static],
   sources: generated_headers_stamp,
-  dependencies: [os_deps, libintl],
+  dependencies: [os_deps, libintl, thread_dep],
 )
 
 backend_both_deps += [
