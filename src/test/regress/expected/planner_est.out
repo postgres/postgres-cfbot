@@ -221,4 +221,168 @@ EXPLAIN (COSTS OFF) SELECT * FROM char_table_1 WHERE c < 'Q';
    Filter: (c < 'Q'::"char")
 (2 rows)
 
+--
+-- Multi column unique index row estimates
+--
+-- Function to assist with verifying EXPLAIN row estimation.
+-- Row estimation will be replaced by >1 if row estimation is greater than 1
+CREATE FUNCTION explain_one_or_more_row(query text) RETURNS setof text
+LANGUAGE plpgsql AS
+$$
+DECLARE
+    ln text;
+BEGIN
+    -- avoid jit related output by disabling it
+    SET LOCAL jit = 0;
+
+    FOR ln IN
+        EXECUTE format('explain (costs on, summary off, timing off, buffers off) %s', query)
+    LOOP
+        ln := regexp_replace(ln, 'cost=\d+\.\d\d\.\.\d+\.\d\d', 'cost=N..N');
+        ln := regexp_replace(ln, 'rows=([2-9]|[1-9][0-9]+)', 'rows=>1');
+        ln := regexp_replace(ln, 'width=\d+', 'width=N');
+        RETURN NEXT ln;
+    END LOOP;
+END;
+$$;
+CREATE TABLE multi_column_unique (a int, b int, c int) WITH (autovacuum_enabled=false);
+CREATE UNIQUE INDEX multi_column_unique_idx ON multi_column_unique (a, b);
+INSERT INTO multi_column_unique(a, b, c) SELECT 1, i, 3 FROM generate_series(1,10) as g(i);
+INSERT INTO multi_column_unique(a, b, c) SELECT i, 1, 3 FROM generate_series(2,10) as g(i);
+ANALYZE multi_column_unique;
+CREATE TABLE multi_column_unique_null (a int, b int) WITH (autovacuum_enabled=false);
+CREATE UNIQUE INDEX multi_column_unique_null_idx ON multi_column_unique_null (a, b);
+INSERT INTO multi_column_unique_null(a, b) SELECT 1, NULL FROM generate_series(1,20);
+ANALYZE multi_column_unique_null;
+CREATE TABLE multi_column_unique_null_not_distinct (a int, b int) WITH (autovacuum_enabled=false);
+CREATE UNIQUE INDEX multi_column_unique_null_not_distinct_idx ON multi_column_unique_null_not_distinct (a, b) NULLS NOT DISTINCT;
+INSERT INTO multi_column_unique_null_not_distinct(a, b) SELECT i, NULL FROM generate_series(1,10) AS g(i);
+INSERT INTO multi_column_unique_null_not_distinct(a, b) SELECT 1, i FROM generate_series(1,10) as g(i);
+ANALYZE multi_column_unique_null_not_distinct;
+CREATE TABLE multi_column_unique_deferred (a int, b int) WITH (autovacuum_enabled=false);
+ALTER TABLE multi_column_unique_deferred
+  ADD CONSTRAINT multi_column_unique_deferred_idx UNIQUE (a, b)
+  DEFERRABLE INITIALLY DEFERRED;
+INSERT INTO multi_column_unique_deferred(a, b) SELECT 1, i FROM generate_series(1,10) as g(i);
+INSERT INTO multi_column_unique_deferred(a, b) SELECT i, 1 FROM generate_series(2,10) as g(i);
+ANALYZE multi_column_unique_deferred;
+CREATE TABLE multi_column_unique_partial (a int, b int) WITH (autovacuum_enabled=false);
+CREATE UNIQUE INDEX multi_column_unique_partial_idx  ON multi_column_unique_partial (a, b) WHERE b > 10;
+INSERT INTO multi_column_unique_partial(a, b) SELECT 1, 1 FROM generate_series(1,10);
+INSERT INTO multi_column_unique_partial(a, b) SELECT i, 11 FROM generate_series(1,10) as g(i);
+ANALYZE multi_column_unique_partial;
+set enable_seqscan to false;
+-- Matching a unique index should yield 1 row
+SELECT explain_one_or_more_row($$
+SELECT * FROM multi_column_unique WHERE a=1 AND b=1;
+$$);
+                                   explain_one_or_more_row                                   
+---------------------------------------------------------------------------------------------
+ Index Scan using multi_column_unique_idx on multi_column_unique  (cost=N..N rows=1 width=N)
+   Index Cond: ((a = 1) AND (b = 1))
+(2 rows)
+
+-- An array shouldn't invalidate the unique path and still yield 1 row
+SELECT explain_one_or_more_row($$
+SELECT * FROM multi_column_unique WHERE a=1 AND b=1 AND b=ANY('{1,2,3}');
+$$);
+                                   explain_one_or_more_row                                   
+---------------------------------------------------------------------------------------------
+ Index Scan using multi_column_unique_idx on multi_column_unique  (cost=N..N rows=1 width=N)
+   Index Cond: ((a = 1) AND (b = ANY ('{1,2,3}'::integer[])) AND (b = 1))
+(2 rows)
+
+-- Missing a unique key column should yield >1 rows
+SELECT explain_one_or_more_row($$
+SELECT * FROM multi_column_unique WHERE a=1;
+$$);
+                                   explain_one_or_more_row                                    
+----------------------------------------------------------------------------------------------
+ Index Scan using multi_column_unique_idx on multi_column_unique  (cost=N..N rows=>1 width=N)
+   Index Cond: (a = 1)
+(2 rows)
+
+SELECT explain_one_or_more_row($$
+SELECT * FROM multi_column_unique WHERE a=1 AND c=3;
+$$);
+                                   explain_one_or_more_row                                    
+----------------------------------------------------------------------------------------------
+ Index Scan using multi_column_unique_idx on multi_column_unique  (cost=N..N rows=>1 width=N)
+   Index Cond: (a = 1)
+   Filter: (c = 3)
+(3 rows)
+
+-- A missing equal op on one of the key columns should invalidate path
+-- uniqueness and yield >1 rows
+SELECT explain_one_or_more_row($$
+SELECT * FROM multi_column_unique WHERE a=1 AND b=ANY('{1,2,3}');
+$$);
+                                   explain_one_or_more_row                                    
+----------------------------------------------------------------------------------------------
+ Index Scan using multi_column_unique_idx on multi_column_unique  (cost=N..N rows=>1 width=N)
+   Index Cond: ((a = 1) AND (b = ANY ('{1,2,3}'::integer[])))
+(2 rows)
+
+SELECT explain_one_or_more_row($$
+SELECT * FROM multi_column_unique WHERE a=1 AND b>1;
+$$);
+                                   explain_one_or_more_row                                    
+----------------------------------------------------------------------------------------------
+ Index Scan using multi_column_unique_idx on multi_column_unique  (cost=N..N rows=>1 width=N)
+   Index Cond: ((a = 1) AND (b > 1))
+(2 rows)
+
+SELECT explain_one_or_more_row($$
+SELECT * FROM multi_column_unique WHERE a=1 AND b IS NOT NULL;
+$$);
+                                   explain_one_or_more_row                                    
+----------------------------------------------------------------------------------------------
+ Index Scan using multi_column_unique_idx on multi_column_unique  (cost=N..N rows=>1 width=N)
+   Index Cond: ((a = 1) AND (b IS NOT NULL))
+(2 rows)
+
+-- IS NULL + index with NULLS DISTINCT should yield >1 rows
+SELECT explain_one_or_more_row($$
+SELECT * FROM multi_column_unique_null WHERE a=1 AND b IS NULL;
+$$);
+                                           explain_one_or_more_row                                           
+-------------------------------------------------------------------------------------------------------------
+ Index Only Scan using multi_column_unique_null_idx on multi_column_unique_null  (cost=N..N rows=>1 width=N)
+   Index Cond: ((a = 1) AND (b IS NULL))
+(2 rows)
+
+-- IS NULL + Unique index with NULLS NOT DISTINCT should yield 1 row
+SELECT explain_one_or_more_row($$
+SELECT * FROM multi_column_unique_null_not_distinct WHERE a=1 AND b IS NULL;
+$$);
+                                                       explain_one_or_more_row                                                        
+--------------------------------------------------------------------------------------------------------------------------------------
+ Index Only Scan using multi_column_unique_null_not_distinct_idx on multi_column_unique_null_not_distinct  (cost=N..N rows=1 width=N)
+   Index Cond: ((a = 1) AND (b IS NULL))
+(2 rows)
+
+-- While a deferrable unique constraint is not a planner proof, it's
+-- probably closer to the truth than using statistics. So, expect one
+-- estimated row here
+SELECT explain_one_or_more_row($$
+SELECT * FROM multi_column_unique_deferred WHERE a=1 AND b=1;
+$$);
+                                              explain_one_or_more_row                                               
+--------------------------------------------------------------------------------------------------------------------
+ Index Only Scan using multi_column_unique_deferred_idx on multi_column_unique_deferred  (cost=N..N rows=1 width=N)
+   Index Cond: ((a = 1) AND (b = 1))
+(2 rows)
+
+-- Matching a unique partial index should yield 1 row
+SELECT explain_one_or_more_row($$
+SELECT * FROM multi_column_unique_partial WHERE a=1 AND b=11;
+$$);
+                                             explain_one_or_more_row                                              
+------------------------------------------------------------------------------------------------------------------
+ Index Only Scan using multi_column_unique_partial_idx on multi_column_unique_partial  (cost=N..N rows=1 width=N)
+   Index Cond: ((a = 1) AND (b = 11))
+(2 rows)
+
+reset enable_seqscan;
+DROP FUNCTION explain_one_or_more_row(text);
 DROP FUNCTION explain_mask_costs(text, bool, bool, bool, bool);
