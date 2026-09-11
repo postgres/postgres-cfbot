@@ -133,6 +133,7 @@ GetSubscription(Oid subid, bool missing_ok)
 	sub->maxretention = subform->submaxretention;
 	sub->retentionactive = subform->subretentionactive;
 	sub->conflictlogrelid = subform->subconflictlogrelid;
+	sub->hotindexedonapply = subform->subhotindexedonapply;
 
 	/* Get slotname */
 	datum = SysCacheGetAttr(SUBSCRIPTIONOID,

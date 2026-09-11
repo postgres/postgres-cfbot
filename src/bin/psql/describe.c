@@ -6804,7 +6804,7 @@ describeSubscriptions(const char *pattern, bool verbose)
 	printQueryOpt myopt = pset.popt;
 	static const bool translate_columns[] = {false, false, false, false,
 		false, false, false, false, false, false, false, false, false, false,
-	false, false, false, false, false, false, false};
+	false, false, false, false, false, false, false, false};
 
 	initPQExpBuffer(&buf);
 
@@ -6876,6 +6876,14 @@ describeSubscriptions(const char *pattern, bool verbose)
 			appendPQExpBuffer(&buf,
 							  ", submaxretention AS \"%s\"\n",
 							  gettext_noop("Max retention duration"));
+
+			appendPQExpBuffer(&buf,
+							  ", (CASE subhotindexedonapply\n"
+							  "    WHEN " CppAsString2(LOGICALREP_HOT_INDEXED_OFF) " THEN 'off'\n"
+							  "    WHEN " CppAsString2(LOGICALREP_HOT_INDEXED_SUBSET_ONLY) " THEN 'subset_only'\n"
+							  "    WHEN " CppAsString2(LOGICALREP_HOT_INDEXED_ALWAYS) " THEN 'always'\n"
+							  "   END) AS \"%s\"\n",
+							  gettext_noop("HOT-indexed on apply"));
 
 			appendPQExpBuffer(&buf,
 							  ", subretentionactive AS \"%s\"\n",
