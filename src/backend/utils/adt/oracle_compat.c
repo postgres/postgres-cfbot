@@ -1190,6 +1190,13 @@ repeat(PG_FUNCTION_ARGS)
 	if (count == 0 || slen == 0)
 		PG_RETURN_TEXT_P(result);
 
+	if (slen == 1)
+	{
+		memset(cp, *sp, count);
+		CHECK_FOR_INTERRUPTS();
+		PG_RETURN_TEXT_P(result);
+	}
+
 	for (i = 0; i < count; i++)
 	{
 		memcpy(cp, sp, slen);
