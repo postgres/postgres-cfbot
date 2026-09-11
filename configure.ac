@@ -725,10 +725,12 @@ fi
 # supply -g if --enable-debug
 if test "$enable_debug" = yes && test "$ac_cv_prog_cc_g" = yes; then
   CFLAGS="$CFLAGS -g"
+  BITCODE_CFLAGS="$BITCODE_CFLAGS -g"
 fi
 
 if test "$enable_debug" = yes && test "$ac_cv_prog_cxx_g" = yes; then
   CXXFLAGS="$CXXFLAGS -g"
+  BITCODE_CXXFLAGS="$BITCODE_CXXFLAGS -g"
 fi
 
 # enable code coverage if --enable-coverage
@@ -771,6 +773,30 @@ CFLAGS="$CFLAGS $user_CFLAGS"
 CXXFLAGS="$CXXFLAGS $user_CXXFLAGS"
 BITCODE_CFLAGS="$BITCODE_CFLAGS $user_BITCODE_CFLAGS"
 BITCODE_CXXFLAGS="$BITCODE_CXXFLAGS $user_BITCODE_CXXFLAGS"
+
+# Sanitizer instrumentation must never reach the JIT bitcode: it corrupts the
+# JIT code generator (JIT-compiled queries crash with SIGILL).  Filter it out,
+# mirroring the meson build, and warn when we do.
+pgac_tmp=""
+pgac_san_stripped=no
+for pgac_flag in $BITCODE_CFLAGS; do
+  case $pgac_flag in
+    *sanitize*) pgac_san_stripped=yes ;;
+    *) pgac_tmp="$pgac_tmp $pgac_flag" ;;
+  esac
+done
+BITCODE_CFLAGS=$pgac_tmp
+pgac_tmp=""
+for pgac_flag in $BITCODE_CXXFLAGS; do
+  case $pgac_flag in
+    *sanitize*) pgac_san_stripped=yes ;;
+    *) pgac_tmp="$pgac_tmp $pgac_flag" ;;
+  esac
+done
+BITCODE_CXXFLAGS=$pgac_tmp
+if test "$pgac_san_stripped" = yes; then
+  AC_MSG_WARN([stripping sanitizer flags from JIT bitcode; JIT-compiled code will not be instrumented])
+fi
 
 AC_SUBST(BITCODE_CFLAGS)
 AC_SUBST(BITCODE_CXXFLAGS)

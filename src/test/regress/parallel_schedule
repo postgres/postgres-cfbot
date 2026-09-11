@@ -143,6 +143,11 @@ test: event_trigger_login
 # this test also uses event triggers, so likewise run it by itself
 test: fast_default
 
+# jit forces the JIT code generator (jit on, cost thresholds 0).  The default
+# is jit = off, so the rest of the suite no longer exercises it.  Run it by
+# itself so that a JIT failure does not take down any concurrent tests.
+test: jit
+
 # run tablespace test at the end because it drops the tablespace created during
 # setup that other tests may use.
 test: tablespace
