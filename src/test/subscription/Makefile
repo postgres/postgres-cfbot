@@ -13,7 +13,8 @@ subdir = src/test/subscription
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global
 
-EXTRA_INSTALL = contrib/hstore \
+EXTRA_INSTALL = contrib/amcheck \
+	contrib/hstore \
 	src/test/modules/injection_points
 
 export with_icu
