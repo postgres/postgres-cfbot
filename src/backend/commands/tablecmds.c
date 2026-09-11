@@ -409,7 +409,6 @@ static bool ATExecAlterFKConstrEnforceability(List **wqueue, ATAlterConstraint *
 static bool ATExecAlterCheckConstrEnforceability(List **wqueue, ATAlterConstraint *cmdcon,
 												 Relation conrel, HeapTuple contuple,
 												 bool recurse, bool recursing,
-												 List *changing_conids,
 												 LOCKMODE lockmode);
 static bool ATExecAlterConstrDeferrability(List **wqueue, ATAlterConstraint *cmdcon,
 										   Relation conrel, Relation tgrel, Relation rel,
@@ -432,7 +431,6 @@ static void AlterFKConstrEnforceabilityRecurse(List **wqueue, ATAlterConstraint 
 static void AlterCheckConstrEnforceabilityRecurse(List **wqueue, ATAlterConstraint *cmdcon,
 												  Relation conrel, Oid conrelid,
 												  bool recurse, bool recursing,
-												  List *changing_conids,
 												  LOCKMODE lockmode);
 static void AlterConstrDeferrabilityRecurse(List **wqueue, ATAlterConstraint *cmdcon,
 											Relation conrel, Relation tgrel, Relation rel,
@@ -442,7 +440,6 @@ static void AlterConstrUpdateConstraintEntry(ATAlterConstraint *cmdcon, Relation
 											 HeapTuple contuple);
 static bool ATCheckCheckConstrHasEnforcedParent(Relation conrel, Relation rel,
 												HeapTuple contuple,
-												List *changing_conids,
 												Oid *enforced_parentoid);
 static ObjectAddress ATExecValidateConstraint(List **wqueue,
 											  Relation rel, char *constrName,
@@ -12468,7 +12465,7 @@ ATExecAlterConstraintInternal(List **wqueue, ATAlterConstraint *cmdcon,
 		else if (currcon->contype == CONSTRAINT_CHECK)
 			changed = ATExecAlterCheckConstrEnforceability(wqueue, cmdcon, conrel,
 														   contuple, recurse, false,
-														   NIL, lockmode);
+														   lockmode);
 	}
 	else if (cmdcon->alterDeferrability &&
 			 ATExecAlterConstrDeferrability(wqueue, cmdcon, conrel, tgrel, rel,
@@ -12656,7 +12653,6 @@ static bool
 ATExecAlterCheckConstrEnforceability(List **wqueue, ATAlterConstraint *cmdcon,
 									 Relation conrel, HeapTuple contuple,
 									 bool recurse, bool recursing,
-									 List *changing_conids,
 									 LOCKMODE lockmode)
 {
 	Form_pg_constraint currcon;
@@ -12698,7 +12694,6 @@ ATExecAlterCheckConstrEnforceability(List **wqueue, ATAlterConstraint *cmdcon,
 	if (!cmdcon->is_enforced &&
 		(!recursing || !rel->rd_rel->relispartition) &&
 		ATCheckCheckConstrHasEnforcedParent(conrel, rel, contuple,
-											changing_conids,
 											&enforced_parentoid))
 	{
 		if (!recursing)
@@ -12725,6 +12720,14 @@ ATExecAlterCheckConstrEnforceability(List **wqueue, ATAlterConstraint *cmdcon,
 		updatecon.is_enforced = target_enforced;
 		AlterConstrUpdateConstraintEntry(&updatecon, conrel, contuple);
 		changed = true;
+
+		/*
+		 * A later descendant must see this change when checking its direct
+		 * parents.  The ordered inheritance traversal guarantees that all
+		 * affected parents are processed before their children.
+		 */
+		if (!cmdcon->is_enforced)
+			CommandCounterIncrement();
 	}
 
 	/*
@@ -12745,55 +12748,38 @@ ATExecAlterCheckConstrEnforceability(List **wqueue, ATAlterConstraint *cmdcon,
 		 */
 		if (!recursing && !currcon->connoinherit)
 		{
-			Assert(changing_conids == NIL);
+			if (cmdcon->is_enforced)
 
-			children = find_all_inheritors(RelationGetRelid(rel),
-										   lockmode, NULL);
+				/*
+				 * ENFORCED does not need to check parents' enforceability, so
+				 * use find_all_inheritors() to tolerate potential inheritance
+				 * cycles.
+				 */
+				children = find_all_inheritors(RelationGetRelid(rel),
+											   lockmode, NULL);
+			else
+
+				/*
+				 * NOT ENFORCED needs to check parents' enforceability to
+				 * ensure consistency.  This requires each parent to appear
+				 * before its children in the list, so call
+				 * find_all_inheritors_ordered(). If there is an inheritance
+				 * cycle, this will fail.
+				 */
+				children = find_all_inheritors_ordered(RelationGetRelid(rel),
+													   lockmode);
 
 			/*
-			 * When setting NOT ENFORCED, build the set of equivalent CHECK
-			 * constraints that this command will attempt to change before
-			 * visiting descendants. The root itself has already been checked
-			 * above.
+			 * If we are told not to recurse, there had better not be any
+			 * child tables, because we can't change constraint enforceability
+			 * on the parent unless we have changed enforceability for all
+			 * children.
 			 */
-			if (!cmdcon->is_enforced)
-				changing_conids = list_make1_oid(currcon->oid);
-
-			foreach_oid(childoid, children)
-			{
-				if (childoid == RelationGetRelid(rel))
-					continue;
-
-				/*
-				 * If we are told not to recurse, there had better not be any
-				 * child tables, because we can't change constraint
-				 * enforceability on the parent unless we have changed
-				 * enforceability for all child.
-				 */
-				if (!recurse)
-					ereport(ERROR,
-							errcode(ERRCODE_INVALID_TABLE_DEFINITION),
-							errmsg("constraint must be altered on child tables too"),
-							errhint("Do not specify the ONLY keyword."));
-
-				/*
-				 * It is sufficient to look up the constraint by name here.
-				 * Supported DDL ensures that inheritable CHECK constraints
-				 * with the same name have equivalent definitions when they
-				 * are propagated to children or when inheritance is
-				 * established.  All descendants returned by
-				 * find_all_inheritors must have this constraint: inherited
-				 * CHECK constraints propagate to all children at
-				 * inheritance-link creation time and cannot be dropped
-				 * independently on child tables.
-				 */
-				if (!cmdcon->is_enforced)
-					changing_conids =
-						list_append_unique_oid(changing_conids,
-											   get_relation_constraint_oid(childoid,
-																		   cmdcon->conname,
-																		   false));
-			}
+			if (!recurse && list_length(children) > 1)
+				ereport(ERROR,
+						errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+						errmsg("constraint must be altered on child tables too"),
+						errhint("Do not specify the ONLY keyword."));
 		}
 
 		foreach_oid(childoid, children)
@@ -12803,7 +12789,6 @@ ATExecAlterCheckConstrEnforceability(List **wqueue, ATAlterConstraint *cmdcon,
 
 			AlterCheckConstrEnforceabilityRecurse(wqueue, cmdcon, conrel,
 												  childoid, false, true,
-												  changing_conids,
 												  lockmode);
 		}
 	}
@@ -12855,7 +12840,6 @@ static void
 AlterCheckConstrEnforceabilityRecurse(List **wqueue, ATAlterConstraint *cmdcon,
 									  Relation conrel, Oid conrelid,
 									  bool recurse, bool recursing,
-									  List *changing_conids,
 									  LOCKMODE lockmode)
 {
 	SysScanDesc pscan;
@@ -12885,21 +12869,18 @@ AlterCheckConstrEnforceabilityRecurse(List **wqueue, ATAlterConstraint *cmdcon,
 					   cmdcon->conname, get_rel_name(conrelid)));
 
 	ATExecAlterCheckConstrEnforceability(wqueue, cmdcon, conrel, childtup,
-										 recurse, recursing, changing_conids,
-										 lockmode);
+										 recurse, recursing, lockmode);
 
 	systable_endscan(pscan);
 }
 
 /*
  * When setting an inherited CHECK constraint to NOT ENFORCED, look for a
- * matching parent constraint that remains ENFORCED and is not part of the same
- * ALTER.
+ * matching parent constraint that remains ENFORCED.
  */
 static bool
 ATCheckCheckConstrHasEnforcedParent(Relation conrel, Relation rel,
 									HeapTuple contuple,
-									List *changing_conids,
 									Oid *enforced_parentoid)
 {
 	Form_pg_constraint currcon;
@@ -12929,7 +12910,6 @@ ATCheckCheckConstrHasEnforcedParent(Relation conrel, Relation rel,
 	while (HeapTupleIsValid(inheritsTuple = systable_getnext(scan)))
 	{
 		Oid			parentoid;
-		Relation	parentrel = NULL;
 		SysScanDesc pscan;
 		ScanKeyData pkey[3];
 		HeapTuple	parenttup;
@@ -12973,41 +12953,13 @@ ATCheckCheckConstrHasEnforcedParent(Relation conrel, Relation rel,
 					 RelationGetRelationName(rel),
 					 NameStr(parentcon->conname));
 
-			/*
-			 * A parent listed in changing_conids is being changed by the same
-			 * ALTER, but it may not have been updated yet.  For regular
-			 * inheritance, recurse upward to check whether an equivalent
-			 * enforced parent outside the ALTER will make it remain enforced.
-			 * Partitions cannot have multiple parents, so they do not need
-			 * this check.
-			 */
-			if (!rel->rd_rel->relispartition &&
-				list_member_oid(changing_conids, parentcon->oid))
-			{
-				Oid			parent_enforced_parentoid = InvalidOid;
-
-				if (parentrel == NULL)
-					parentrel = table_open(parentoid, NoLock);
-
-				if (!ATCheckCheckConstrHasEnforcedParent(conrel,
-														 parentrel,
-														 parenttup,
-														 changing_conids,
-														 &parent_enforced_parentoid))
-					continue;
-			}
-
 			*enforced_parentoid = parentoid;
-			if (parentrel != NULL)
-				table_close(parentrel, NoLock);
 			systable_endscan(pscan);
 			systable_endscan(scan);
 			table_close(inhrel, AccessShareLock);
 			return true;
 		}
 
-		if (parentrel != NULL)
-			table_close(parentrel, NoLock);
 		systable_endscan(pscan);
 	}
 
