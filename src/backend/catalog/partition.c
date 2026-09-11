@@ -29,12 +29,40 @@
 #include "utils/fmgroids.h"
 #include "utils/partcache.h"
 #include "utils/rel.h"
+#include "utils/lsyscache.h"
 #include "utils/syscache.h"
 
 static Oid	get_partition_parent_worker(Relation inhRel, Oid relid,
 										bool *detach_pending);
 static void get_partition_ancestors_worker(Relation inhRel, Oid relid,
-										   List **ancestors);
+										   List **ancestors,
+										   bool *detach_pending);
+
+/*
+ * Checks if a given relation can be part of a partition tree.  Returns
+ * false if the relation cannot be processed, in which case it is up to
+ * the caller to decide what to do, by either raising an error or doing
+ * something else.
+ */
+bool
+check_rel_can_be_partition(Oid relid)
+{
+	char		relkind;
+	bool		relispartition;
+
+	/* Check if relation exists */
+	if (!SearchSysCacheExists1(RELOID, ObjectIdGetDatum(relid)))
+		return false;
+
+	relkind = get_rel_relkind(relid);
+	relispartition = get_rel_relispartition(relid);
+
+	/* Only allow relation types that can appear in partition trees. */
+	if (!relispartition && !RELKIND_HAS_PARTITIONS(relkind))
+		return false;
+
+	return true;
+}
 
 /*
  * get_partition_parent
@@ -119,6 +147,63 @@ get_partition_parent_worker(Relation inhRel, Oid relid, bool *detach_pending)
 }
 
 /*
+ * get_partition_root
+ *		Obtain root partitioned table OID of the specified relation
+ *
+ * If the partition is in the process of being detached, return InvalidOid,
+ * unless `even_if_detached` is passed as true (in which case return the
+ * original `relid`).
+ *
+ * Note: This should only be called when it is known that the relation is a
+ * partition or partitioned table.
+ */
+Oid
+get_partition_root(Oid relid, bool even_if_detached)
+{
+	Oid root_relid;
+	List *ancestors = NIL;
+	Relation	inhRel;
+	bool detach_pending = false;
+
+	/* Validate relid is member of a partition tree */
+	Assert(check_rel_can_be_partition(relid));
+
+	/*
+	* Fetch the list of ancestors. This is same as get_partition_ancestors,
+	* but calling directly to get_partition_ancestors_worker exposes the
+	* `detach_pending` flag.
+	*/
+	inhRel = table_open(InheritsRelationId, AccessShareLock);
+	get_partition_ancestors_worker(inhRel, relid, &ancestors, &detach_pending);
+	table_close(inhRel, AccessShareLock);
+
+	if (ancestors)
+	{
+		/* By definition, the last ancestor is the topmost parent */
+		root_relid = llast_oid(ancestors);
+		list_free(ancestors);
+	}
+	else
+	{
+		/*
+		 * NIL ancestors can mean either:
+		 * 1. a detach is pending.
+		 * 2. relid was already the topmost parent.
+		 */
+		elog(DEBUG1, "get_partition_root found ancestors=NIL with "
+			"detach_pending=%s for relid %u",
+			detach_pending ? "true" : "false", relid);
+
+		if (detach_pending)
+			return even_if_detached ? relid : InvalidOid;
+		else
+			root_relid = relid;
+	}
+
+	return root_relid;
+}
+
+/*
  * get_partition_ancestors
  *		Obtain ancestors of given relation
  *
@@ -135,10 +220,15 @@ get_partition_ancestors(Oid relid)
 {
 	List	   *result = NIL;
 	Relation	inhRel;
+	bool		detach_pending = false;
+
+	/* Validate relid is member of a partition tree */
+	Assert(check_rel_can_be_partition(relid) ||
+		   get_rel_relkind(relid) == RELKIND_INDEX);
 
 	inhRel = table_open(InheritsRelationId, AccessShareLock);
 
-	get_partition_ancestors_worker(inhRel, relid, &result);
+	get_partition_ancestors_worker(inhRel, relid, &result, &detach_pending);
 
 	table_close(inhRel, AccessShareLock);
 
@@ -150,21 +240,21 @@ get_partition_ancestors(Oid relid)
  *		recursive worker for get_partition_ancestors
  */
 static void
-get_partition_ancestors_worker(Relation inhRel, Oid relid, List **ancestors)
+get_partition_ancestors_worker(Relation inhRel, Oid relid, List **ancestors,
+	bool *detach_pending)
 {
 	Oid			parentOid;
-	bool		detach_pending;
 
 	/*
 	 * Recursion ends at the topmost level, ie., when there's no parent; also
 	 * when the partition is being detached.
 	 */
-	parentOid = get_partition_parent_worker(inhRel, relid, &detach_pending);
-	if (parentOid == InvalidOid || detach_pending)
+	parentOid = get_partition_parent_worker(inhRel, relid, detach_pending);
+	if (parentOid == InvalidOid || *detach_pending)
 		return;
 
 	*ancestors = lappend_oid(*ancestors, parentOid);
-	get_partition_ancestors_worker(inhRel, parentOid, ancestors);
+	get_partition_ancestors_worker(inhRel, parentOid, ancestors, detach_pending);
 }
 
 /*
