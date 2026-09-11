@@ -274,6 +274,10 @@ typedef enum ExprEvalOp
 	EEOP_MERGE_SUPPORT_FUNC,
 	EEOP_SUBPLAN,
 
+	/* row pattern navigation (all eight RPRNavKind kinds) */
+	EEOP_RPR_NAV_SET,
+	EEOP_RPR_NAV_RESTORE,
+
 	/* aggregation related nodes */
 	EEOP_AGG_STRICT_DESERIALIZE,
 	EEOP_AGG_DESERIALIZE,
@@ -695,6 +699,12 @@ typedef struct ExprEvalStep
 			SubPlanState *sstate;
 		}			subplan;
 
+		/* for EEOP_RPR_NAV_SET / EEOP_RPR_NAV_RESTORE */
+		struct
+		{
+			RPRNavState *rprnavstate;
+		}			rpr_nav;
+
 		/* for EEOP_AGG_*DESERIALIZE */
 		struct
 		{
@@ -902,6 +912,10 @@ extern void ExecEvalMergeSupportFunc(ExprState *state, ExprEvalStep *op,
 									 ExprContext *econtext);
 extern void ExecEvalSubPlan(ExprState *state, ExprEvalStep *op,
 							ExprContext *econtext);
+extern void ExecEvalRPRNavSet(ExprState *state, ExprEvalStep *op,
+							  ExprContext *econtext);
+extern void ExecEvalRPRNavRestore(ExprState *state, ExprEvalStep *op,
+								  ExprContext *econtext);
 extern void ExecEvalWholeRowVar(ExprState *state, ExprEvalStep *op,
 								ExprContext *econtext);
 extern void ExecEvalSysVar(ExprState *state, ExprEvalStep *op,

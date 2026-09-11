@@ -592,6 +592,10 @@ check_agglevels_and_constraints(ParseState *pstate, Node *expr)
 
 			break;
 
+		case EXPR_KIND_RPR_DEFINE:
+			errkind = true;
+			break;
+
 			/*
 			 * There is intentionally no default: case here, so that the
 			 * compiler will warn if we add a new ParseExprKind without
@@ -1034,6 +1038,9 @@ transformWindowFuncCall(ParseState *pstate, WindowFunc *wfunc,
 		case EXPR_KIND_FOR_PORTION:
 			err = _("window functions are not allowed in FOR PORTION OF expressions");
 			break;
+		case EXPR_KIND_RPR_DEFINE:
+			errkind = true;
+			break;
 
 			/*
 			 * There is intentionally no default: case here, so that the
@@ -1114,7 +1121,8 @@ transformWindowFuncCall(ParseState *pstate, WindowFunc *wfunc,
 				equal(refwin->orderClause, windef->orderClause) &&
 				refwin->frameOptions == windef->frameOptions &&
 				equal(refwin->startOffset, windef->startOffset) &&
-				equal(refwin->endOffset, windef->endOffset))
+				equal(refwin->endOffset, windef->endOffset) &&
+				equal(refwin->rpCommonSyntax, windef->rpCommonSyntax))
 			{
 				/* found a duplicate window specification */
 				wfunc->winref = winref;
