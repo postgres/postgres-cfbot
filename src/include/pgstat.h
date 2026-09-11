@@ -671,7 +671,8 @@ extern void pgstat_count_backend_lock_fastpath_exceeded(uint8 locktag_type);
 
 extern PgStat_Backend *pgstat_fetch_stat_backend(ProcNumber procNumber);
 extern PgStat_Backend *pgstat_fetch_stat_backend_by_pid(int pid,
-														BackendType *bktype);
+														BackendType *bktype,
+														Oid *userid);
 extern bool pgstat_tracks_backend_bktype(BackendType bktype);
 extern void pgstat_create_backend(ProcNumber procnum);
 
