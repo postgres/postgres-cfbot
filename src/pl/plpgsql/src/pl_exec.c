@@ -470,6 +470,13 @@ static char *format_preparedparamsdata(PLpgSQL_execstate *estate,
 static PLpgSQL_variable *make_callstmt_target(PLpgSQL_execstate *estate,
 											  PLpgSQL_expr *expr);
 
+static void check_record_type_not_altered(PLpgSQL_rec *rec);
+static void collect_composite_type_versions(Oid typid,
+											Oid **oids, uint64 **versions,
+											int *n, int *alloc);
+static void snapshot_record_composite_types(PLpgSQL_execstate *estate,
+											PLpgSQL_rec *rec);
+static void refresh_erh_tupdesc_id(ExpandedRecordHeader *erh);
 
 /* ----------
  * plpgsql_exec_function	Called by the call handler for
@@ -3287,8 +3294,30 @@ exec_stmt_return(PLpgSQL_execstate *estate, PLpgSQL_stmt_return *stmt)
 				}
 				break;
 
-			case PLPGSQL_DTYPE_ROW:
 			case PLPGSQL_DTYPE_REC:
+				{
+					PLpgSQL_rec *rec = (PLpgSQL_rec *) retvar;
+					int32		rettypmod;
+
+					/*
+					 * Check if the record's composite type was altered since
+					 * the record was populated. If so, raise an error to
+					 * prevent crashes when outputting the record.
+					 */
+					if (rec->erh != NULL &&
+						!ExpandedRecordIsEmpty(rec->erh))
+						check_record_type_not_altered(rec);
+
+					exec_eval_datum(estate,
+									retvar,
+									&estate->rettype,
+									&rettypmod,
+									&estate->retval,
+									&estate->retisnull);
+				}
+				break;
+
+			case PLPGSQL_DTYPE_ROW:
 				{
 					/* exec_eval_datum can handle these cases */
 					int32		rettypmod;
@@ -3433,6 +3462,14 @@ exec_stmt_return_next(PLpgSQL_execstate *estate,
 					PLpgSQL_rec *rec = (PLpgSQL_rec *) retvar;
 					TupleDesc	rec_tupdesc;
 					TupleConversionMap *tupmap;
+
+					/*
+					 * Check if the record's composite type was altered since
+					 * the record was populated. If so, raise an error to
+					 * prevent crashes when storing to the tuplestore.
+					 */
+					if (rec->erh != NULL && !ExpandedRecordIsEmpty(rec->erh))
+						check_record_type_not_altered(rec);
 
 					/* If rec is null, try to convert it to a row of nulls */
 					if (rec->erh == NULL)
@@ -5451,6 +5488,14 @@ exec_eval_datum(PLpgSQL_execstate *estate,
 				}
 				else
 				{
+					/*
+					 * Check if the record's composite type was altered
+					 * since the record was populated.  This catches all
+					 * output paths: RETURN, RAISE, EXECUTE USING, etc.
+					 */
+					if (!ExpandedRecordIsEmpty(rec->erh))
+						check_record_type_not_altered(rec);
+
 					if (ExpandedRecordIsEmpty(rec->erh))
 					{
 						/* Empty record is also a NULL */
@@ -7042,6 +7087,14 @@ exec_move_row(PLpgSQL_execstate *estate,
 				if (rec->erh)
 					DeleteExpandedObject(ExpandedRecordGetDatum(rec->erh));
 				rec->erh = NULL;
+				/* Clear composite type snapshot */
+				if (rec->compTypeOids)
+					pfree(rec->compTypeOids);
+				if (rec->compTypeVersions)
+					pfree(rec->compTypeVersions);
+				rec->nCompTypes = 0;
+				rec->compTypeOids = NULL;
+				rec->compTypeVersions = NULL;
 			}
 			return;
 		}
@@ -7745,6 +7798,16 @@ exec_move_row_from_datum(PLpgSQL_execstate *estate,
 			{
 				expanded_record_set_tuple(rec->erh, erh->fvalue,
 										  true, !estate->atomic);
+				/*
+				 * The tuple bytes were replaced in place.  Refresh the
+				 * outer-type identifier and the composite-type snapshot so
+				 * that check_record_type_not_altered() compares against the
+				 * current type cache: a whole-record reassignment installs
+				 * bytes built under the current type, so any residual stale
+				 * versioning from ER creation would produce false positives.
+				 */
+				refresh_erh_tupdesc_id(rec->erh);
+				snapshot_record_composite_types(estate, rec);
 				return;
 			}
 
@@ -7859,6 +7922,9 @@ exec_move_row_from_datum(PLpgSQL_execstate *estate,
 			{
 				expanded_record_set_tuple(rec->erh, &tmptup,
 										  true, !estate->atomic);
+				/* See comment in the analogous branch above. */
+				refresh_erh_tupdesc_id(rec->erh);
+				snapshot_record_composite_types(estate, rec);
 				return;
 			}
 
@@ -7925,6 +7991,9 @@ instantiate_empty_record_variable(PLpgSQL_execstate *estate, PLpgSQL_rec *rec)
 	/* OK, do it */
 	rec->erh = make_expanded_record_from_typeid(rec->rectypeid, -1,
 												estate->datum_context);
+
+	/* Snapshot composite type versions for ALTER TYPE detection */
+	snapshot_record_composite_types(estate, rec);
 }
 
 /* ----------
@@ -8975,6 +9044,9 @@ assign_record_var(PLpgSQL_execstate *estate, PLpgSQL_rec *rec,
 
 	/* ... and install the new */
 	rec->erh = erh;
+
+	/* Snapshot composite type versions for ALTER TYPE detection */
+	snapshot_record_composite_types(estate, rec);
 }
 
 /*
@@ -9223,4 +9295,291 @@ format_preparedparamsdata(PLpgSQL_execstate *estate,
 	MemoryContextSwitchTo(oldcontext);
 
 	return paramstr.data;
+}
+
+/*
+ * check_record_type_not_altered
+ *
+ * Check if any composite type reachable from this record's type has been
+ * altered since the record was populated.  If so, raise an error to prevent
+ * crashes that would occur when outputting data that no longer matches the
+ * current type definition.
+ *
+ * The outermost type is always checked using er_tupdesc_id (which is set
+ * when the ExpandedRecord is created and works regardless of how the record
+ * was populated, whether by whole assignment, field assignment, etc.).
+ *
+ * Nested composite types are checked against the snapshot taken at record
+ * assignment time, if available.
+ */
+static void
+check_record_type_not_altered(PLpgSQL_rec *rec)
+{
+	TypeCacheEntry *typentry;
+	Oid			check_typid;
+	int			i;
+
+	/*
+	 * Determine the effective type to check.  For a variable declared as
+	 * generic RECORD, use the ExpandedRecord's actual type once it's been
+	 * assigned.  If that too is RECORDOID (truly anonymous rowtype), there
+	 * is nothing to check because such rowtypes are not versioned.
+	 */
+	if (rec->rectypeid != RECORDOID)
+		check_typid = rec->rectypeid;
+	else if (rec->erh != NULL && rec->erh->er_typeid != RECORDOID)
+		check_typid = rec->erh->er_typeid;
+	else
+		return;
+
+	/*
+	 * Always check outermost type using er_tupdesc_id.  This works for all
+	 * code paths (whole assignment, field assignment, SELECT INTO, etc.)
+	 * because er_tupdesc_id is set when the ExpandedRecord is created.
+	 * Resolve domain types to their base composite type first.
+	 */
+	if (get_typtype(check_typid) == TYPTYPE_DOMAIN)
+		check_typid = getBaseType(check_typid);
+
+	typentry = lookup_type_cache(check_typid, TYPECACHE_TUPDESC);
+
+	if (rec->erh->er_tupdesc_id != typentry->tupDesc_identifier)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("cannot return record variable \"%s\" after composite type \"%s\" was altered",
+						rec->refname,
+						format_type_be(check_typid))));
+
+	/*
+	 * If we have a snapshot of nested composite types (taken at whole-record
+	 * assignment time), check those too.  Skip index 0 since that's the
+	 * outermost type we already checked above.
+	 */
+	for (i = 1; i < rec->nCompTypes; i++)
+	{
+		typentry = lookup_type_cache(rec->compTypeOids[i], TYPECACHE_TUPDESC);
+
+		if (typentry->tupDesc_identifier != rec->compTypeVersions[i])
+			ereport(ERROR,
+					(errcode(ERRCODE_DATATYPE_MISMATCH),
+					 errmsg("cannot return record variable \"%s\" after composite type \"%s\" was altered",
+							rec->refname,
+							format_type_be(rec->compTypeOids[i]))));
+	}
+}
+
+/*
+ * collect_composite_type_versions
+ *
+ * Recursively collect tupDesc_identifier values for a composite type and
+ * all composite types reachable from its attributes.  Skips anonymous
+ * RECORD types and types already recorded (to prevent infinite recursion).
+ *
+ * oids/versions arrays are repalloc'd as needed; n/alloc updated in place.
+ */
+static void
+collect_composite_type_versions(Oid typid,
+								Oid **oids, uint64 **versions,
+								int *n, int *alloc)
+{
+	TypeCacheEntry *typentry;
+	TupleDesc	tupdesc;
+	int			i;
+
+	/* Resolve domain types to their base composite type */
+	if (get_typtype(typid) == TYPTYPE_DOMAIN)
+		typid = getBaseType(typid);
+
+	/* Skip if already recorded */
+	for (i = 0; i < *n; i++)
+	{
+		if ((*oids)[i] == typid)
+			return;
+	}
+
+	typentry = lookup_type_cache(typid, TYPECACHE_TUPDESC);
+
+	/* Grow arrays if needed */
+	if (*n >= *alloc)
+	{
+		*alloc *= 2;
+		*oids = repalloc(*oids, *alloc * sizeof(Oid));
+		*versions = repalloc(*versions, *alloc * sizeof(uint64));
+	}
+
+	(*oids)[*n] = typid;
+	(*versions)[*n] = typentry->tupDesc_identifier;
+	(*n)++;
+
+	tupdesc = typentry->tupDesc;
+	if (tupdesc == NULL)
+		return;
+
+	/* Recurse into composite-type attributes */
+	for (i = 0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+		Oid			attrtypid;
+
+		if (attr->attisdropped)
+			continue;
+
+		attrtypid = attr->atttypid;
+
+		/*
+		 * A record field can reference a composite type directly, or wrap
+		 * one inside a domain or a container type (array, range, or
+		 * multirange).  ALTER TYPE on such an indirectly-referenced
+		 * composite must still be detected, so peel off domain and
+		 * container layers until we reach a composite type (which we
+		 * snapshot) or something that cannot contain one (which we skip).
+		 * This terminates because each peel step yields a strictly
+		 * "smaller" type.  Container element types cannot be self-referential.
+		 */
+		for (;;)
+		{
+			char		typtype = get_typtype(attrtypid);
+			Oid			elemtypid;
+
+			if (attrtypid == RECORDOID)
+				break;			/* anonymous rowtype: not versionable */
+
+			if (typtype == TYPTYPE_DOMAIN)
+			{
+				attrtypid = getBaseType(attrtypid);
+				continue;
+			}
+
+			if (typtype == TYPTYPE_COMPOSITE)
+			{
+				collect_composite_type_versions(attrtypid,
+												oids, versions, n, alloc);
+				break;
+			}
+
+			/* Array element type? */
+			elemtypid = get_element_type(attrtypid);
+
+			/* Otherwise a range's subtype? */
+			if (!OidIsValid(elemtypid))
+				elemtypid = get_range_subtype(attrtypid);
+
+			/* Otherwise a multirange's range's subtype? */
+			if (!OidIsValid(elemtypid) && typtype == TYPTYPE_MULTIRANGE)
+			{
+				Oid			rangetypid = get_multirange_range(attrtypid);
+
+				if (OidIsValid(rangetypid))
+					elemtypid = get_range_subtype(rangetypid);
+			}
+
+			if (!OidIsValid(elemtypid))
+				break;			/* not a composite-bearing type */
+
+			attrtypid = elemtypid;
+		}
+	}
+}
+
+/*
+ * snapshot_record_composite_types
+ *
+ * Take a snapshot of tupDesc_identifier values for all composite types
+ * reachable from the record's declared type.  Called when a record variable
+ * is assigned a new value, so that check_record_type_not_altered() can
+ * detect mid-transaction ALTER TYPE at RETURN time.
+ *
+ * For a variable declared as generic RECORD (rectypeid == RECORDOID), the
+ * effective root type is taken from the ExpandedRecord's er_typeid, which
+ * reflects the actual composite type adopted from the assigned value.  If
+ * that too is RECORDOID (truly anonymous rowtype), no snapshot is taken
+ * because such rowtypes are not versioned by the type cache.
+ */
+static void
+snapshot_record_composite_types(PLpgSQL_execstate *estate,
+								PLpgSQL_rec *rec)
+{
+	MemoryContext oldcxt;
+	Oid			root_typid;
+	int			alloc = 8;
+	int			n = 0;
+	Oid		   *oids;
+	uint64	   *versions;
+
+	/*
+	 * Determine the effective root type.  For a variable declared as generic
+	 * RECORD, use the ExpandedRecord's actual type once it's been assigned.
+	 * Truly anonymous rowtypes (er_typeid still RECORDOID) cannot be tracked.
+	 */
+	if (rec->rectypeid != RECORDOID)
+		root_typid = rec->rectypeid;
+	else if (rec->erh != NULL && rec->erh->er_typeid != RECORDOID)
+		root_typid = rec->erh->er_typeid;
+	else
+	{
+		rec->nCompTypes = 0;
+		return;
+	}
+
+	oldcxt = MemoryContextSwitchTo(estate->datum_context);
+	oids = palloc(alloc * sizeof(Oid));
+	versions = palloc(alloc * sizeof(uint64));
+
+	collect_composite_type_versions(root_typid,
+									&oids, &versions, &n, &alloc);
+
+	MemoryContextSwitchTo(oldcxt);
+
+	if (n > 0)
+	{
+		/* Free previous snapshot if any */
+		if (rec->compTypeOids)
+			pfree(rec->compTypeOids);
+		if (rec->compTypeVersions)
+			pfree(rec->compTypeVersions);
+
+		rec->nCompTypes = n;
+		rec->compTypeOids = oids;
+		rec->compTypeVersions = versions;
+	}
+	else
+	{
+		pfree(oids);
+		pfree(versions);
+		rec->nCompTypes = 0;
+		rec->compTypeOids = NULL;
+		rec->compTypeVersions = NULL;
+	}
+}
+
+/*
+ * refresh_erh_tupdesc_id
+ *
+ * When an ExpandedRecord's tuple bytes are replaced in place (via
+ * expanded_record_set_tuple) with fresh data built under the current type
+ * definition, its er_tupdesc_id is left at the value assigned when the ER was
+ * created.  That value becomes stale after mid-transaction ALTER TYPE, causing
+ * check_record_type_not_altered() to falsely reject the freshly-installed
+ * bytes as if they still reflected the old definition.
+ *
+ * Refresh er_tupdesc_id from the current type cache so the subsequent outer-
+ * type check compares current-vs-current.  Only whole-record replacement paths
+ * should call this; field-level writes must leave er_tupdesc_id stale so the
+ * check still fires on the unwritten fields that hold pre-ALTER bytes.
+ */
+static void
+refresh_erh_tupdesc_id(ExpandedRecordHeader *erh)
+{
+	Oid			resolved;
+	TypeCacheEntry *typentry;
+
+	if (erh->er_typeid == RECORDOID)
+		return;					/* anonymous rowtype: not versionable */
+
+	resolved = erh->er_typeid;
+	if (get_typtype(resolved) == TYPTYPE_DOMAIN)
+		resolved = getBaseType(resolved);
+
+	typentry = lookup_type_cache(resolved, TYPECACHE_TUPDESC);
+	erh->er_tupdesc_id = typentry->tupDesc_identifier;
 }
