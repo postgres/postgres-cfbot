@@ -632,6 +632,16 @@ typedef struct GraphScan
 	 */
 	List	   *seed_params;
 
+	/*
+	 * PARAM_EXEC ids of the current-vertex key values used to parameterize
+	 * the inner (1-hop) arm scans, ordered [forward (source key) slots,
+	 * reverse (destination key) slots]; see build_graphscan_inner_query().
+	 * The executor binds the active direction's parameters from the current
+	 * vertex before each depth frame's fetch.  finalize_plan treats these ids
+	 * as supplied by this node (see the T_GraphScan case in subselect.c).
+	 */
+	List	   *vertex_param_ids;
+
 	/* Hop-wide max src/dest key widths over the edge element arms. */
 	int			max_nsrc;
 	int			max_ndst;

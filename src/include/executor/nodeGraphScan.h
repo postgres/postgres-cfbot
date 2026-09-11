@@ -72,6 +72,16 @@ typedef struct GraphDepthFrameData
 {
 	PlanState  *inner_state;	/* own copy of the inner 1-hop expansion */
 
+	/*
+	 * True until the frame's inner scan has been (re)started for the current
+	 * vertex: the executor (re)initializes or rescans it the first time the
+	 * frame is stepped after a push or a new seed, when the current-vertex
+	 * PARAM_EXEC parameters are bound.  Parameterized index scans only
+	 * re-evaluate their scan keys on (re)scan, so restarting like this is
+	 * what keeps them in sync with the vertex.
+	 */
+	bool		need_init;
+
 	Oid			vid_elem;		/* vertex element of the current vertex */
 	int			vid_nkeys;		/* key width of the current vertex */
 	Datum	   *vid;			/* current vertex key values */
