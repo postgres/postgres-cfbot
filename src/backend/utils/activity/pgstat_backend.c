@@ -141,6 +141,12 @@ pgstat_fetch_stat_backend(ProcNumber procNumber)
  * This routine includes sanity checks to ensure that the backend exists and
  * is running.  "bktype" can be optionally defined to return the BackendType
  * of the backend whose statistics are returned.
+ *
+ * Note that these checks apply to the backend using this PID, while the
+ * statistics may have been fetched earlier, depending on
+ * stats_fetch_consistency.  If an older backend used the same proc number
+ * at that time, its statistics are returned.  Callers checking permissions
+ * should therefore rely on the role stored in the returned entry.
  */
 PgStat_Backend *
 pgstat_fetch_stat_backend_by_pid(int pid, BackendType *bktype)
@@ -390,9 +396,14 @@ pgstat_backend_flush_cb(bool nowait)
 
 /*
  * Create backend statistics entry for proc number.
+ *
+ * "userid" is the OID of the role that owns the backend, or InvalidOid for a
+ * process that has no session user.  It is stored in the entry so that the
+ * functions reporting these statistics can check whether their caller is
+ * allowed to see them, based on the statistics data alone.
  */
 void
-pgstat_create_backend(ProcNumber procnum)
+pgstat_create_backend(ProcNumber procnum, Oid userid)
 {
 	PgStat_EntryRef *entry_ref;
 	PgStatShared_Backend *shstatent;
@@ -406,6 +417,8 @@ pgstat_create_backend(ProcNumber procnum)
 	 * e.g. if we previously used this proc number.
 	 */
 	memset(&shstatent->stats, 0, sizeof(shstatent->stats));
+	shstatent->stats.userid = userid;
+	shstatent->userid = userid;
 	pgstat_unlock_entry(entry_ref);
 
 	MemSet(&PendingBackendStats, 0, sizeof(PgStat_BackendPending));
@@ -475,5 +488,10 @@ pgstat_tracks_backend_bktype(BackendType bktype)
 void
 pgstat_backend_reset_timestamp_cb(PgStatShared_Common *header, TimestampTz ts)
 {
-	((PgStatShared_Backend *) header)->stats.stat_reset_timestamp = ts;
+	PgStatShared_Backend *shstatent = (PgStatShared_Backend *) header;
+
+	shstatent->stats.stat_reset_timestamp = ts;
+
+	/* a reset zeroes the whole entry, so restore the owner of the backend */
+	shstatent->stats.userid = shstatent->userid;
 }
