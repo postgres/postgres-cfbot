@@ -25,6 +25,7 @@
 #include "catalog/indexing.h"
 #include "catalog/objectaccess.h"
 #include "catalog/pg_constraint.h"
+#include "catalog/pg_inherits.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
@@ -580,6 +581,86 @@ ChooseConstraintName(const char *name1, const char *name2,
 	table_close(conDesc, AccessShareLock);
 
 	return conname;
+}
+
+/*
+ * Choose a constraint name for a relation.
+ *
+ * relid is the Oid for the relation to which we want to add the constraint.
+ * name2 is the actual column name which is affected by the constraint, and
+ * ultimately it matches the second argument of makeObjectName.
+ * label is the static suffix for the constraint name, while 'others' is the
+ * exclude-list of forbidden constraint names.
+ *
+ * Like ChooseConstraintName, but uses the relation's OID to derive its
+ * name and namespace.
+ *
+ * In addition, it rules out names already in use by any constraint on
+ * any descendant of the relation (e.g. partitions).
+ *
+ * This is needed because constraint-name uniqueness is enforced
+ * per-relation (conrelid, conname), while ChooseConstraintName's own
+ * uniqueness scan is per-namespace (connamespace, conname).  When a
+ * partition tree spans multiple schemas, a name that looks free at the
+ * root's namespace can still collide with an unrelated constraint on a
+ * leaf in a different schema, causing the recursive descent into that
+ * leaf to fail.  Gathering descendant constraint names into the
+ * exclusion set up-front lets the picker land on a candidate that is
+ * usable throughout the subtree.
+ *
+ * If the relation has no descendants, the behavior is identical to
+ * ChooseConstraintName.
+ *
+ * Returns a palloc'd string.
+ */
+char *
+ChooseConstraintNameForRelation(Oid relid, const char *name2,
+								const char *label, List *others)
+{
+	char	   *relname = get_rel_name(relid);
+	Oid			relnamespace = get_rel_namespace(relid);
+	List	   *inheritors;
+	List	   *exclude;
+	Relation	conrel;
+
+	inheritors = find_all_inheritors(relid, NoLock, NULL);
+
+	/* Common case: no descendants -> identical to ChooseConstraintName. */
+	if (list_length(inheritors) <= 1)
+		return ChooseConstraintName(relname, name2, label, relnamespace, others);
+
+	exclude = list_copy(others);
+	conrel = table_open(ConstraintRelationId, AccessShareLock);
+
+	foreach_oid(descoid, inheritors)
+	{
+		ScanKeyData skey;
+		SysScanDesc sscan;
+		HeapTuple	tup;
+
+		/* The picker already scans the root's own namespace. */
+		if (descoid == relid)
+			continue;
+
+		ScanKeyInit(&skey,
+					Anum_pg_constraint_conrelid,
+					BTEqualStrategyNumber, F_OIDEQ,
+					ObjectIdGetDatum(descoid));
+		sscan = systable_beginscan(conrel,
+								   ConstraintRelidTypidNameIndexId,
+								   true, NULL, 1, &skey);
+		while (HeapTupleIsValid(tup = systable_getnext(sscan)))
+		{
+			Form_pg_constraint conform = (Form_pg_constraint) GETSTRUCT(tup);
+
+			exclude = lappend(exclude, pstrdup(NameStr(conform->conname)));
+		}
+		systable_endscan(sscan);
+	}
+
+	table_close(conrel, AccessShareLock);
+
+	return ChooseConstraintName(relname, name2, label, relnamespace, exclude);
 }
 
 /*
