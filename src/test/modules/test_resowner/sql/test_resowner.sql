@@ -18,6 +18,10 @@ SELECT test_resowner_many(
 -- Test resource leak warning
 SELECT test_resowner_leak();
 
+-- There must be at least one resource kind.
+SELECT test_resowner_many(0, 1, 0, 0, 0);
+SELECT test_resowner_many(0, 0, 0, 1, 0);
+
 -- Negative tests, using a resource owner after release-phase has started.
 set client_min_messages='warning'; -- order between ERROR and NOTICE varies
 SELECT test_resowner_remember_between_phases();
