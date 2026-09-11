@@ -147,6 +147,14 @@ typedef struct TableFunc
 	ParseLoc	location;
 } TableFunc;
 
+/* WITH DATA option of CREATE MATERIALIZED VIEW */
+typedef enum WithDataOption
+{
+	WITHDATA_DEFAULT,			/* WITH DATA */
+	WITHDATA_NONE,				/* WITH NO DATA */
+	WITHDATA_OLD,				/* WITH OLD DATA */
+} WithDataOption;
+
 /*
  * IntoClause - target information for SELECT INTO, CREATE TABLE AS, and
  * CREATE MATERIALIZED VIEW
@@ -170,6 +178,8 @@ typedef struct IntoClause
 	/* materialized view's SELECT query */
 	struct Query *viewQuery pg_node_attr(query_jumble_ignore);
 	bool		skipData;		/* true for WITH NO DATA */
+	WithDataOption data;		/* WITH [ NO | OLD ] DATA */
+	bool		replace;		/* replace existing matview? */
 } IntoClause;
 
 
