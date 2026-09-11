@@ -205,7 +205,7 @@ DoCopy(ParseState *pstate, const CopyStmt *stmt,
 			}
 
 			/* Reduce WHERE clause to standard list-of-AND-terms form */
-			whereClause = eval_const_expressions(NULL, whereClause);
+			whereClause = eval_const_expressions_qual(NULL, whereClause);
 
 			whereClause = (Node *) canonicalize_qual((Expr *) whereClause, false);
 			whereClause = (Node *) make_ands_implicit((Expr *) whereClause);
