@@ -4299,6 +4299,7 @@ XLogFileRead(XLogSegNo segno, TimeLineID tli,
 static int
 XLogFileReadAnyTLI(XLogSegNo segno, XLogSource source)
 {
+	char		xlogfname[MAXFNAMELEN];
 	char		path[MAXPGPATH];
 	ListCell   *cell;
 	int			fd;
@@ -4381,6 +4382,21 @@ XLogFileReadAnyTLI(XLogSegNo segno, XLogSource source)
 				return fd;
 			}
 		}
+
+		/*
+		 * This is the newest timeline to which this segment can belong.  A
+		 * segment containing the switch point can have a valid prefix on the
+		 * parent timeline, but the rest of that file can contain divergent
+		 * WAL.  Since WAL is opened a segment at a time, recovery must wait
+		 * for the file from this timeline rather than fall back to a parent.
+		 */
+		XLogFileName(xlogfname, tli, segno, wal_segment_size);
+		ereport(DEBUG1,
+				(errmsg("not searching older timelines for WAL segment \"%s\"",
+						xlogfname),
+				 errdetail("The whole segment must be read from timeline %u.",
+						   tli)));
+		break;
 	}
 
 	/* Couldn't find it.  For simplicity, complain about front timeline */
