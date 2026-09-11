@@ -132,6 +132,7 @@ static Relids find_nonnullable_rels_walker(Node *node, bool top_level);
 static List *find_nonnullable_vars_walker(Node *node, bool top_level);
 static bool is_strict_saop(ScalarArrayOpExpr *expr, bool falseOK);
 static bool convert_saop_to_hashed_saop_walker(Node *node, void *context);
+static bool saop_array_arg_has_unstable_node_walker(Node *node, void *context);
 static bool grouping_conflict_walker(Node *node, grouping_walker_ctx *ctx);
 static bool grouping_check_operands(Oid opno, Oid inputcollid,
 									List *args, grouping_walker_ctx *ctx);
@@ -2629,7 +2630,6 @@ eval_const_expressions(PlannerInfo *root, Node *node)
 	return eval_const_expressions_mutator(node, &context);
 }
 
-#define MIN_ARRAY_SIZE_FOR_HASHED_SAOP 9
 /*--------------------
  * convert_saop_to_hashed_saop
  *
@@ -2638,13 +2638,18 @@ eval_const_expressions(PlannerInfo *root, Node *node)
  * evaluate using a hash table rather than a linear search.
  *
  * We'll use a hash table if all of the following conditions are met:
- * 1. The 2nd argument of the array contain only Consts.
+ * 1. The 2nd argument is a non-null Const array, or a non-Const expression
+ *	  whose value is fixed for the duration of one execution (no Vars, no
+ *	  volatile functions, no aggregate/grouping/window functions, no
+ *	  sub-selects).  In the latter case the executor evaluates it once and
+ *	  builds the hash table from the run-time value.
  * 2. useOr is true or there is a valid negator operator for the
  *	  ScalarArrayOpExpr's opno.
  * 3. There's valid hash function for both left and righthand operands and
  *	  these hash functions are the same.
- * 4. If the array contains enough elements for us to consider it to be
- *	  worthwhile using a hash table rather than a linear search.
+ * 4. If the array is a Const, it contains enough elements to be worth hashing
+ *	  rather than doing a linear search.  For a non-Const array the count is
+ *	  not known here, so the executor applies that cutoff at run time.
  */
 void
 convert_saop_to_hashed_saop(Node *node)
@@ -2665,9 +2670,41 @@ convert_saop_to_hashed_saop_walker(Node *node, void *context)
 		Node	   *arrayarg = (Node *) lsecond(saop->args);
 		Oid			lefthashfunc;
 		Oid			righthashfunc;
+		bool		try_hashing = false;
 
-		if (arrayarg && IsA(arrayarg, Const) &&
-			!((Const *) arrayarg)->constisnull)
+		/*
+		 * Hash the array when it is fixed for the whole execution and has at
+		 * least MIN_ARRAY_SIZE_FOR_HASHED_SAOP elements: a non-null Const, or
+		 * a non-Const expression with no volatile function and nothing
+		 * rejected by saop_array_arg_has_unstable_node_walker().  The size
+		 * cutoff is applied here when the count is known now (a Const, or a
+		 * 1-D ArrayExpr); otherwise the executor applies it at run time.
+		 */
+		if (arrayarg && IsA(arrayarg, Const))
+		{
+			Const	   *arrconst = (Const *) arrayarg;
+
+			if (!arrconst->constisnull)
+			{
+				ArrayType  *arr = (ArrayType *) DatumGetPointer(arrconst->constvalue);
+
+				try_hashing = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr)) >=
+					MIN_ARRAY_SIZE_FOR_HASHED_SAOP;
+			}
+		}
+		else if (arrayarg &&
+				 !contain_volatile_functions(arrayarg) &&
+				 !saop_array_arg_has_unstable_node_walker(arrayarg, NULL))
+		{
+			if (IsA(arrayarg, ArrayExpr) &&
+				!((ArrayExpr *) arrayarg)->multidims)
+				try_hashing = list_length(((ArrayExpr *) arrayarg)->elements) >=
+					MIN_ARRAY_SIZE_FOR_HASHED_SAOP;
+			else
+				try_hashing = true;
+		}
+
+		if (try_hashing)
 		{
 			if (saop->useOr)
 			{
@@ -2675,23 +2712,8 @@ convert_saop_to_hashed_saop_walker(Node *node, void *context)
 											  &lefthashfunc, &righthashfunc) &&
 					lefthashfunc == righthashfunc)
 				{
-					Datum		arrdatum = ((Const *) arrayarg)->constvalue;
-					ArrayType  *arr = (ArrayType *) DatumGetPointer(arrdatum);
-					int			nitems;
-
-					/*
-					 * Only fill in the hash functions if the array looks
-					 * large enough for it to be worth hashing instead of
-					 * doing a linear search.
-					 */
-					nitems = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
-
-					if (nitems >= MIN_ARRAY_SIZE_FOR_HASHED_SAOP)
-					{
-						/* Looks good. Fill in the hash functions */
-						saop->hashfuncid = lefthashfunc;
-					}
-					return false;
+					/* Looks good. Fill in the hash functions */
+					saop->hashfuncid = lefthashfunc;
 				}
 			}
 			else				/* !saop->useOr */
@@ -2708,29 +2730,14 @@ convert_saop_to_hashed_saop_walker(Node *node, void *context)
 											  &lefthashfunc, &righthashfunc) &&
 					lefthashfunc == righthashfunc)
 				{
-					Datum		arrdatum = ((Const *) arrayarg)->constvalue;
-					ArrayType  *arr = (ArrayType *) DatumGetPointer(arrdatum);
-					int			nitems;
+					/* Looks good. Fill in the hash functions */
+					saop->hashfuncid = lefthashfunc;
 
 					/*
-					 * Only fill in the hash functions if the array looks
-					 * large enough for it to be worth hashing instead of
-					 * doing a linear search.
+					 * Also set the negfuncid.  The executor will need that to
+					 * perform hashtable lookups.
 					 */
-					nitems = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
-
-					if (nitems >= MIN_ARRAY_SIZE_FOR_HASHED_SAOP)
-					{
-						/* Looks good. Fill in the hash functions */
-						saop->hashfuncid = lefthashfunc;
-
-						/*
-						 * Also set the negfuncid.  The executor will need
-						 * that to perform hashtable lookups.
-						 */
-						saop->negfuncid = get_opcode(negator);
-					}
-					return false;
+					saop->negfuncid = get_opcode(negator);
 				}
 			}
 		}
@@ -2739,6 +2746,34 @@ convert_saop_to_hashed_saop_walker(Node *node, void *context)
 	return expression_tree_walker(node, convert_saop_to_hashed_saop_walker, NULL);
 }
 
+/*
+ * saop_array_arg_has_unstable_node_walker
+ *		True if 'node' contains something that keeps a ScalarArrayOpExpr's
+ *		array argument from being evaluated once and reused for the whole
+ *		execution: a Var or PlaceHolderVar (any level -- this runs before
+ *		SS_replace_correlation_vars, so an outer reference is still a Var, not
+ *		a Param), an aggregate/grouping/window function, a sub-select, or a
+ *		non-PARAM_EXTERN Param.  Volatile functions are checked by the caller.
+ */
+static bool
+saop_array_arg_has_unstable_node_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Var) || IsA(node, PlaceHolderVar))
+		return true;
+	if (IsA(node, Param))
+		return ((Param *) node)->paramkind != PARAM_EXTERN;
+	if (IsA(node, Aggref) ||
+		IsA(node, GroupingFunc) ||
+		IsA(node, WindowFunc) ||
+		IsA(node, SubLink) ||
+		IsA(node, SubPlan) ||
+		IsA(node, AlternativeSubPlan))
+		return true;
+	return expression_tree_walker(node, saop_array_arg_has_unstable_node_walker,
+								  context);
+}
 
 /*--------------------
  * estimate_expression_value
