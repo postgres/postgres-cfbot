@@ -78,7 +78,8 @@ classifies the update:
 A non-summarizing indexed attribute changing yields HEAP_SELECTIVE_INDEX_UPDATE
 unless one of these forces HEAP_UPDATE_ALL_INDEXES:
 
-  1. The logical-replication apply path (see "Logical replication" below).
+  1. The logical-replication apply path, gated per subscription (see "Logical
+     replication" below).
   2. An UPDATE touching an attribute referenced by an expression index
      (selective maintenance of expression indexes is not implemented yet).
   3. An UPDATE that changes *every* indexed attribute: there is no index to
@@ -328,11 +329,13 @@ Logical replication
 -------------------
 
 A HOT-indexed update of a replica-identity attribute on a subscriber leaves a
-stale index leaf; the apply worker's replica-identity lookups must not be
-exposed to that here.  A logical-replication apply worker therefore never takes
-the HOT-indexed path: HeapUpdateHotAllowable returns HEAP_UPDATE_ALL_INDEXES
-unconditionally when IsLogicalWorker() is true, falling back to a plain non-HOT
-update on apply.  A per-subscription option to relax this is added separately.
+stale index leaf; the apply worker's replica-identity lookups tolerate that
+only when the indexed attributes are covered by the replica identity.  The
+per-subscription hot_indexed_on_apply option (pg_subscription.subhotindexedonapply,
+off / subset_only / always; subset_only is the default) controls this:
+HeapUpdateHotAllowable consults GetHotIndexedApplyMode on the apply path and
+falls back to non-HOT when the indexed attributes are not exactly the primary
+key (off) or not a subset of it (subset_only).
 
 
 Recovery
