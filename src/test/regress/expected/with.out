@@ -2921,13 +2921,11 @@ SELECT q1 FROM
   SELECT q1, (SELECT q2 FROM t_cte WHERE t_cte.q1 = i8.q1) AS t_sub
   FROM int8_tbl i8
 ) ss;
-              QUERY PLAN              
---------------------------------------
- Subquery Scan on ss
-   Output: ss.q1
-   ->  Seq Scan on public.int8_tbl i8
-         Output: i8.q1, NULL::bigint
-(4 rows)
+           QUERY PLAN           
+--------------------------------
+ Seq Scan on public.int8_tbl i8
+   Output: i8.q1
+(2 rows)
 
 SELECT q1 FROM
 (
@@ -3854,3 +3852,78 @@ WHERE t1.two = 0 AND t2.two = 0 AND t1.thousand = t2.thousand;
                Filter: (two = 0)
 (11 rows)
 
+-- Test CTE inlining during subquery pull-up
+CREATE TABLE cte_pullup_t (id INT PRIMARY KEY, val TEXT);
+INSERT INTO cte_pullup_t SELECT g, 'val' || g FROM generate_series(1,100) g;
+CREATE TABLE cte_pullup_s (id INT, tid INT);
+INSERT INTO cte_pullup_s SELECT g, (g % 10) + 1 FROM generate_series(1,50) g;
+ANALYZE cte_pullup_t, cte_pullup_s;
+-- NOT MATERIALIZED CTE in subquery: should be inlined and pulled up
+EXPLAIN (COSTS OFF)
+SELECT * FROM cte_pullup_s s LEFT JOIN (
+  WITH cte AS NOT materialized (SELECT id, val FROM cte_pullup_t)
+  SELECT * FROM (SELECT id, val FROM cte) sub
+) t on t.id = s.tid
+WHERE s.id < 5;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Merge Right Join
+   Merge Cond: (cte_pullup_t.id = s.tid)
+   ->  Index Scan using cte_pullup_t_pkey on cte_pullup_t
+   ->  Sort
+         Sort Key: s.tid
+         ->  Seq Scan on cte_pullup_s s
+               Filter: (id < 5)
+(7 rows)
+
+-- Default (singly-referenced) CTE in subquery: same, should be inlined and pulled up
+EXPLAIN (COSTS OFF)
+SELECT * FROM cte_pullup_s s LEFT JOIN (
+  WITH cte AS (SELECT id, val FROM cte_pullup_t)
+  SELECT * FROM (SELECT id, val FROM cte) sub
+) t on t.id = s.tid
+WHERE s.id < 5;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Merge Right Join
+   Merge Cond: (cte_pullup_t.id = s.tid)
+   ->  Index Scan using cte_pullup_t_pkey on cte_pullup_t
+   ->  Sort
+         Sort Key: s.tid
+         ->  Seq Scan on cte_pullup_s s
+               Filter: (id < 5)
+(7 rows)
+
+-- MATERIALIZED CTE in subquery: should NOT be inlined
+EXPLAIN (COSTS OFF)
+SELECT * FROM cte_pullup_s s LEFT JOIN (
+  WITH cte AS materialized (SELECT id, val FROM cte_pullup_t)
+  SELECT * FROM (SELECT id, val FROM cte) sub
+) t on t.id = s.tid
+WHERE s.id < 5;
+               QUERY PLAN               
+----------------------------------------
+ Hash Right Join
+   Hash Cond: (cte.id = s.tid)
+   ->  CTE Scan on cte
+         CTE cte
+           ->  Seq Scan on cte_pullup_t
+   ->  Hash
+         ->  Seq Scan on cte_pullup_s s
+               Filter: (id < 5)
+(8 rows)
+
+-- CTE WITH volatile function: should NOT be inlined
+EXPLAIN (COSTS OFF)
+WITH cte AS NOT materialized (SELECT id, random() AS r FROM cte_pullup_t)
+SELECT * FROM (SELECT id FROM cte) sub WHERE id = 1;
+            QUERY PLAN            
+----------------------------------
+ CTE Scan on cte
+   Filter: (id = 1)
+   CTE cte
+     ->  Seq Scan on cte_pullup_t
+(4 rows)
+
+DROP TABLE cte_pullup_s;
+DROP TABLE cte_pullup_t;
