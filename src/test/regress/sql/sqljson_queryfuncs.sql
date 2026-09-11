@@ -519,3 +519,12 @@ SELECT JSON_VALUE(jsonb '1234', '$' RETURNING bit(3)  DEFAULT 1 ON ERROR);
 SELECT JSON_VALUE(jsonb '1234', '$' RETURNING bit(3)  DEFAULT 1::bit(3) ON ERROR);
 SELECT JSON_VALUE(jsonb '"111"', '$.a'  RETURNING bit(3) DEFAULT '1111' ON EMPTY);
 DROP DOMAIN queryfuncs_d_varbit3;
+
+-- Test that the planner treats JsonExpr as non-strict: JSON_VALUE() etc. can
+-- return non-NULL even when their PASSING arguments are NULL.
+
+-- When pulling up a subquery underneath an outer join, its JsonExpr output
+-- must be wrapped in a PlaceHolderVar; this must return NULL, not '1'.
+SELECT v FROM (VALUES (1)) a
+LEFT JOIN (SELECT JSON_VALUE('1', '$' PASSING y AS p) v
+           FROM (VALUES (1), (2)) b(y)) ss ON false;
