@@ -194,8 +194,8 @@ extern Oid	GetTopMostAncestorInPublication(Oid puboid, List *ancestors,
 											int *ancestor_level);
 
 extern bool is_publishable_relation(Relation rel);
-extern bool is_schema_publication(Oid pubid);
-extern bool is_table_publication(Oid pubid);
+extern bool is_schema_publication(Form_pg_publication pubform);
+extern bool is_table_publication(Form_pg_publication pubform);
 extern bool check_and_fetch_column_list(Publication *pub, Oid relid,
 										MemoryContext mcxt, Bitmapset **cols);
 extern ObjectAddress publication_add_relation(Oid pubid, PublicationRelInfo *pri,
