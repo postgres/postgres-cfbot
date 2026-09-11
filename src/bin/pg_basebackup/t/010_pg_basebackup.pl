@@ -324,6 +324,24 @@ $node->command_ok(
 ok(-f "$tempdir/tarbackup/base.tar", 'backup tar was created');
 rmtree("$tempdir/tarbackup");
 
+# The "client-blackhole" target receives the whole backup but throws it away.
+$node->command_ok(
+	[
+		@pg_basebackup_defs,
+		'--target' => 'client-blackhole',
+		'--format' => 'plain',
+		'--wal-method' => 'none'
+	],
+	'client-blackhole target in plain format');
+$node->command_ok(
+	[
+		@pg_basebackup_defs,
+		'--target' => 'client-blackhole',
+		'--format' => 'tar',
+		'--wal-method' => 'fetch'
+	],
+	'client-blackhole target in tar format');
+
 $node->command_fails_like(
 	[
 		@pg_basebackup_defs,
@@ -683,13 +701,13 @@ $node->command_ok(
 	'pg_basebackup --wal-method fetch runs');
 
 $node->command_fails_like(
-	[ @pg_basebackup_defs, '--target' => 'blackhole' ],
+	[ @pg_basebackup_defs, '--target' => 'server-blackhole' ],
 	qr/WAL cannot be streamed when a backup target is specified/,
 	'backup target requires --wal-method');
 $node->command_fails_like(
 	[
 		@pg_basebackup_defs,
-		'--target' => 'blackhole',
+		'--target' => 'server-blackhole',
 		'--wal-method' => 'stream'
 	],
 	qr/WAL cannot be streamed when a backup target is specified/,
@@ -701,7 +719,7 @@ $node->command_fails_like(
 $node->command_fails_like(
 	[
 		@pg_basebackup_defs,
-		'--target' => 'blackhole',
+		'--target' => 'server-blackhole',
 		'--wal-method' => 'none',
 		'--pgdata' => "$tempdir/blackhole"
 	],
@@ -710,7 +728,7 @@ $node->command_fails_like(
 $node->command_fails_like(
 	[
 		@pg_basebackup_defs,
-		'--target' => 'blackhole',
+		'--target' => 'server-blackhole',
 		'--wal-method' => 'none',
 		'--format' => 'tar'
 	],
@@ -719,7 +737,7 @@ $node->command_fails_like(
 $node->command_ok(
 	[
 		@pg_basebackup_defs,
-		'--target' => 'blackhole',
+		'--target' => 'server-blackhole',
 		'--wal-method' => 'none'
 	],
 	'backup target blackhole');
@@ -780,7 +798,7 @@ $node->command_fails_like(
 $node->command_fails_like(
 	[
 		@pg_basebackup_defs,
-		'--target' => 'blackhole',
+		'--target' => 'server-blackhole',
 		'--pgdata' => "$tempdir/blackhole"
 	],
 	qr/cannot specify both output directory and backup target/,

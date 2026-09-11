@@ -37,6 +37,7 @@
 #include "fe_utils/recovery_gen.h"
 #include "getopt_long.h"
 #include "libpq/protocol.h"
+#include "portability/instr_time.h"
 #include "receivelog.h"
 #include "streamutil.h"
 
@@ -156,6 +157,7 @@ static bool manifest = true;
 static bool manifest_force_encode = false;
 static char *manifest_checksums = NULL;
 static DataDirSyncMethod sync_method = DATA_DIR_SYNC_METHOD_FSYNC;
+static bool backup_target_clientblackhole = false;
 
 static bool success = false;
 static bool made_new_pgdata = false;
@@ -1027,7 +1029,13 @@ ReceiveCopyData(PGconn *conn, WriteDataCallback callback,
 		int			r;
 		char	   *copybuf;
 
-		r = PQgetCopyData(conn, &copybuf, 0);
+		/*
+		 * Use the no-copy optimization: copybuf points directly into libpq's
+		 * receive buffer and stays valid until the next call, which is all the
+		 * callback needs (this avoids memory copy which hurts at high transfer
+		 * rates).
+		 */
+		r = PQgetCopyDataInternalBuf(conn, &copybuf, 0);
 		if (r == -1)
 		{
 			/* End of chunk. */
@@ -1041,8 +1049,6 @@ ReceiveCopyData(PGconn *conn, WriteDataCallback callback,
 			pg_fatal("background process terminated unexpectedly");
 
 		(*callback) (r, copybuf, callback_data);
-
-		PQfreemem(copybuf);
 	}
 }
 
@@ -1146,7 +1152,9 @@ CreateBackupStreamer(char *archive_name, char *spclocation,
 			directory = get_tablespace_mapping(spclocation);
 		streamer = astreamer_extractor_new(directory,
 										   get_tablespace_mapping,
-										   progress_update_filename);
+										   progress_update_filename,
+										   backup_target_clientblackhole,
+										   verbose);
 	}
 	else
 	{
@@ -1158,8 +1166,15 @@ CreateBackupStreamer(char *archive_name, char *spclocation,
 		 * Normally, we write it to the archive name provided by the caller,
 		 * but when the base directory is "-" that means we need to write to
 		 * standard output.
+		 *
+		 * When discarding writes, we send the archive to the null device.
 		 */
-		if (strcmp(basedir, "-") == 0)
+		if (backup_target_clientblackhole)
+		{
+			snprintf(archive_filename, sizeof(archive_filename), "%s", DEVNULL);
+			archive_file = NULL;
+		}
+		else if (strcmp(basedir, "-") == 0)
 		{
 			snprintf(archive_filename, sizeof(archive_filename), "-");
 			archive_file = stdout;
@@ -1171,27 +1186,34 @@ CreateBackupStreamer(char *archive_name, char *spclocation,
 			archive_file = NULL;
 		}
 
+		/*
+		 * Setup streamer. In case of using client blackhole, it does not make sense
+		 * to append compression suffixes.
+		 */
 		if (compress->algorithm == PG_COMPRESSION_NONE)
 			streamer = astreamer_plain_writer_new(archive_filename,
-												  archive_file);
+												  archive_file, verbose);
 		else if (compress->algorithm == PG_COMPRESSION_GZIP)
 		{
-			strlcat(archive_filename, ".gz", sizeof(archive_filename));
+			if (!backup_target_clientblackhole)
+				strlcat(archive_filename, ".gz", sizeof(archive_filename));
 			streamer = astreamer_gzip_writer_new(archive_filename,
 												 archive_file, compress);
 		}
 		else if (compress->algorithm == PG_COMPRESSION_LZ4)
 		{
-			strlcat(archive_filename, ".lz4", sizeof(archive_filename));
+			if (!backup_target_clientblackhole)
+				strlcat(archive_filename, ".lz4", sizeof(archive_filename));
 			streamer = astreamer_plain_writer_new(archive_filename,
-												  archive_file);
+												  archive_file, verbose);
 			streamer = astreamer_lz4_compressor_new(streamer, compress);
 		}
 		else if (compress->algorithm == PG_COMPRESSION_ZSTD)
 		{
-			strlcat(archive_filename, ".zst", sizeof(archive_filename));
+			if (!backup_target_clientblackhole)
+				strlcat(archive_filename, ".zst", sizeof(archive_filename));
 			streamer = astreamer_plain_writer_new(archive_filename,
-												  archive_file);
+												  archive_file, verbose);
 			streamer = astreamer_zstd_compressor_new(streamer, compress);
 		}
 		else
@@ -1470,6 +1492,15 @@ ReceiveArchiveStreamChunk(size_t r, char *copybuf, void *callback_data)
 					 */
 					if (state->manifest_inject_streamer != NULL)
 						state->manifest_buffer = createPQExpBuffer();
+					else if (backup_target_clientblackhole)
+					{
+						/* Throw away the manifest too */
+						snprintf(state->manifest_filename,
+								 sizeof(state->manifest_filename), "%s", DEVNULL);
+						state->manifest_file = fopen(DEVNULL, "wb");
+						if (state->manifest_file == NULL)
+							pg_fatal("could not open file \"%s\": %m", DEVNULL);
+					}
 					else
 					{
 						snprintf(state->manifest_filename,
@@ -1683,11 +1714,22 @@ ReceiveBackupManifest(PGconn *conn)
 {
 	WriteManifestState state;
 
-	snprintf(state.filename, sizeof(state.filename),
-			 "%s/backup_manifest.tmp", basedir);
-	state.file = fopen(state.filename, "wb");
-	if (state.file == NULL)
-		pg_fatal("could not create file \"%s\": %m", state.filename);
+	if (backup_target_clientblackhole)
+	{
+		/* Throw away the manifest */
+		snprintf(state.filename, sizeof(state.filename), "%s", DEVNULL);
+		state.file = fopen(DEVNULL, "wb");
+		if (state.file == NULL)
+			pg_fatal("could not open file \"%s\": %m", DEVNULL);
+	}
+	else
+	{
+		snprintf(state.filename, sizeof(state.filename),
+				 "%s/backup_manifest.tmp", basedir);
+		state.file = fopen(state.filename, "wb");
+		if (state.file == NULL)
+			pg_fatal("could not create file \"%s\": %m", state.filename);
+	}
 
 	ReceiveCopyData(conn, ReceiveBackupManifestChunk, &state);
 
@@ -1754,6 +1796,8 @@ BaseBackup(char *compression_algorithm, char *compression_detail,
 	int			writing_to_stdout;
 	bool		use_new_option_syntax = false;
 	PQExpBufferData buf;
+	instr_time	transfer_start;
+	instr_time	transfer_elapsed;
 
 	Assert(conn != NULL);
 	initPQExpBuffer(&buf);
@@ -1970,6 +2014,9 @@ BaseBackup(char *compression_algorithm, char *compression_detail,
 									  compression_detail);
 	}
 
+	if (verbose && backup_target_clientblackhole)
+		pg_log_info("the backup is being discarded and cannot be used for recovery");
+
 	if (verbose)
 		pg_log_info("initiating base backup, waiting for checkpoint to complete");
 
@@ -2052,7 +2099,8 @@ BaseBackup(char *compression_algorithm, char *compression_detail,
 		 * won't be storing anything into these directories and thus should
 		 * not create them.
 		 */
-		if (backup_target == NULL && format == 'p' && !PQgetisnull(res, i, 1))
+		if (backup_target == NULL && !backup_target_clientblackhole && format == 'p' &&
+			!PQgetisnull(res, i, 1))
 		{
 			char	   *path = PQgetvalue(res, i, 1);
 
@@ -2105,6 +2153,9 @@ BaseBackup(char *compression_algorithm, char *compression_detail,
 						 wal_compress_level);
 	}
 
+	/* Start timing the data transfer, for the average rate report. */
+	INSTR_TIME_SET_CURRENT(transfer_start);
+
 	if (serverMajor >= 1500)
 	{
 		/* Receive a single tar stream with everything. */
@@ -2156,6 +2207,13 @@ BaseBackup(char *compression_algorithm, char *compression_detail,
 		if (!writing_to_stdout && manifest)
 			ReceiveBackupManifest(conn);
 	}
+
+	/*
+	 * All backup data has been received, so measure how long the transfer
+	 * took for the average rate report shown at completion.
+	 */
+	INSTR_TIME_SET_CURRENT(transfer_elapsed);
+	INSTR_TIME_SUBTRACT(transfer_elapsed, transfer_start);
 
 	if (showprogress)
 	{
@@ -2276,11 +2334,8 @@ BaseBackup(char *compression_algorithm, char *compression_detail,
 	 * synced after being completed.  In plain format, all the data of the
 	 * base directory is synced, taking into account all the tablespaces.
 	 * Errors are not considered fatal.
-	 *
-	 * If, however, there's a backup target, we're not writing anything
-	 * locally, so in that case we skip this step.
 	 */
-	if (do_sync && backup_target == NULL)
+	if (do_sync && backup_target == NULL && !backup_target_clientblackhole)
 	{
 		if (verbose)
 			pg_log_info("syncing data to disk ...");
@@ -2302,7 +2357,7 @@ BaseBackup(char *compression_algorithm, char *compression_detail,
 	 * without a backup_manifest file, decreasing the chances that a directory
 	 * we leave behind will be mistaken for a valid backup.
 	 */
-	if (!writing_to_stdout && manifest && backup_target == NULL)
+	if (!writing_to_stdout && manifest && backup_target == NULL && !backup_target_clientblackhole)
 	{
 		char		tmp_filename[MAXPGPATH];
 		char		filename[MAXPGPATH];
@@ -2328,7 +2383,22 @@ BaseBackup(char *compression_algorithm, char *compression_detail,
 	}
 
 	if (verbose)
-		pg_log_info("base backup completed");
+	{
+		double		elapsed_sec = INSTR_TIME_GET_DOUBLE(transfer_elapsed);
+
+		/*
+		 * Avoids potential division by zero.
+		 *
+		 * Timing does not include potential fsync()/syncfs(), so data might be
+		 * still in-flight from pagecache when total_done was calculated, therefore
+		 * we make it clear to the user what we are measuring.
+		 */
+		if (elapsed_sec > 0.0)
+			pg_log_info("base backup completed (avg %.1f MB/s)",
+						(double) totaldone / (1024 * 1024) / elapsed_sec);
+		else
+			pg_log_info("base backup completed");
+	}
 }
 
 
@@ -2385,6 +2455,7 @@ main(int argc, char **argv)
 	pg_logging_init(argv[0]);
 	progname = get_progname(argv[0]);
 	set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN("pg_basebackup"));
+	pg_initialize_timing();
 
 	if (argc > 1)
 	{
@@ -2479,7 +2550,15 @@ main(int argc, char **argv)
 				temp_replication_slot = false;
 				break;
 			case 't':
-				backup_target = pg_strdup(optarg);
+
+				/*
+				 * Target: everything else than "client-blackhole" is passed
+				 * through to the server as the backup target.
+				 */
+				if (strcmp(optarg, "client-blackhole") == 0)
+					backup_target_clientblackhole = true;
+				else
+					backup_target = pg_strdup(optarg);
 				break;
 			case 'T':
 				tablespace_list_append(optarg);
@@ -2579,6 +2658,17 @@ main(int argc, char **argv)
 		backup_target = NULL;
 	}
 
+	if (backup_target_clientblackhole)
+	{
+		if (basedir != NULL || backup_target != NULL)
+		{
+			pg_log_error("cannot specify both output directory and backup target");
+			pg_log_error_hint("Try \"%s --help\" for more information.", progname);
+			exit(1);
+		}
+		basedir = pg_strdup(DEVNULL);
+	}
+
 	/*
 	 * Can't use --format with --target. Without --target, default format is
 	 * tar.
@@ -2669,6 +2759,23 @@ main(int argc, char **argv)
 		pg_log_error("only tar mode backups can be compressed");
 		pg_log_error_hint("Try \"%s --help\" for more information.", progname);
 		exit(1);
+	}
+
+	/*
+	 * The "client-blackhole" target throws the backup away as it is received.
+	 * As we do not have directories prepared, we cannot stream or write recovery
+	 * configuration.
+	 */
+	if (backup_target_clientblackhole)
+	{
+		if (includewal == STREAM_WAL)
+		{
+			pg_log_error("WAL cannot be streamed with the \"client-blackhole\" backup target");
+			pg_log_error_hint("Use \"%s\" or \"%s\".", "-X none", "-X fetch");
+			exit(1);
+		}
+		if (writerecoveryconf)
+			pg_fatal("recovery configuration cannot be written with the \"client-blackhole\" backup target");
 	}
 
 	/*
@@ -2824,9 +2931,11 @@ main(int argc, char **argv)
 	/*
 	 * If an output directory was specified, verify that it exists, or create
 	 * it. Note that for a tar backup, an output directory of "-" means we are
-	 * writing to stdout, so do nothing in that case.
+	 * writing to stdout, so do nothing in that case.  When discarding writes,
+	 * we don't create anything on disk at all.
 	 */
-	if (basedir != NULL && (format == 'p' || strcmp(basedir, "-") != 0))
+	if (basedir != NULL && !backup_target_clientblackhole &&
+		(format == 'p' || strcmp(basedir, "-") != 0))
 		verify_dir_is_empty_or_create(basedir, &made_new_pgdata, &found_existing_pgdata);
 
 	/* determine remote server's xlog segment size */
@@ -2834,7 +2943,7 @@ main(int argc, char **argv)
 		exit(1);
 
 	/* Create pg_wal symlink, if required */
-	if (xlog_dir)
+	if (xlog_dir && !backup_target_clientblackhole)
 	{
 		char	   *linkloc;
 
