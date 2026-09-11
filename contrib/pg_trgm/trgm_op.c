@@ -226,32 +226,68 @@ CMPTRGM_CHOOSE(const void *a, const void *b)
 	return CMPTRGM(a, b);
 }
 
-#define ST_SORT trigram_qsort_signed
-#define ST_ELEMENT_TYPE_VOID
-#define ST_COMPARE(a, b) CMPTRGM_SIGNED(a, b)
-#define ST_SCOPE static
-#define ST_DEFINE
-#define ST_DECLARE
-#include "lib/sort_template.h"
+/*
+ * Needed to properly handle negative numbers in case char is signed.
+ */
+static inline unsigned char
+radix_key(char x, bool char_is_signed)
+{
+	return char_is_signed ? x ^ 0x80 : x;
+}
 
-#define ST_SORT trigram_qsort_unsigned
-#define ST_ELEMENT_TYPE_VOID
-#define ST_COMPARE(a, b) CMPTRGM_UNSIGNED(a, b)
-#define ST_SCOPE static
-#define ST_DEFINE
-#define ST_DECLARE
-#include "lib/sort_template.h"
+static inline void
+trigram_radix_sort_with_signedness(trgm *trg, size_t count, bool char_is_signed)
+{
+	trgm *buffer = palloc_array(trgm, count);
+	trgm *starts[256];
+	trgm *from = trg;
+	trgm *to = buffer;
+	size_t freqs[3][256];
+
+	/*
+	 * Compute frequencies to partition the buffer.
+	 */
+	memset(freqs, 0, sizeof(freqs));
+
+	for (size_t i = 0; i < count; i++)
+		for (size_t j = 0; j < 3; j++)
+			freqs[j][radix_key(trg[i][j], char_is_signed)]++;
+
+	/*
+	 * Do the sorting. Start with last character because that's the "LSB"
+	 * in a trigram. Avoid unnecessary copies by ping-ponging between the buffers.
+	 */
+	for (int i = 2; i >= 0; i--)
+	{
+		trgm *old_from = from;
+		trgm *next = to;
+
+		for (size_t j = 0; j < 256; j++)
+		{
+			starts[j] = next;
+			next += freqs[i][j];
+		}
+
+		for (size_t j = 0; j < count; j++)
+			memcpy(starts[radix_key(from[j][i], char_is_signed)]++, from[j], sizeof(trgm));
+
+		from = to;
+		to = old_from;
+	}
+
+	memcpy(trg, buffer, sizeof(trgm) * count);
+	pfree(buffer);
+}
 
 /* Sort an array of trigrams, handling signedness correctly */
 static void
-trigram_qsort(trgm *array, size_t n)
+trigram_radix_sort(trgm *array, size_t n)
 {
 	if (GetDefaultCharSignedness())
-		trigram_qsort_signed(array, n, sizeof(trgm));
+		trigram_radix_sort_with_signedness(array, n, true);
 	else
-		trigram_qsort_unsigned(array, n, sizeof(trgm));
+		trigram_radix_sort_with_signedness(array, n, false);
 }
-
 
 /*
  * Compare two trigrams for equality.  This has the same signature as
@@ -612,7 +648,7 @@ generate_trgm(char *str, int slen)
 	 */
 	if (len > 1)
 	{
-		trigram_qsort(GETARR(trg), len);
+		trigram_radix_sort(GETARR(trg), len);
 		len = trigram_qunique(GETARR(trg), len);
 	}
 
@@ -1143,7 +1179,7 @@ generate_wildcard_trgm(const char *str, int slen)
 	len = arr.length;
 	if (len > 1)
 	{
-		trigram_qsort(GETARR(trg), len);
+		trigram_radix_sort(GETARR(trg), len);
 		len = trigram_qunique(GETARR(trg), len);
 	}
 
