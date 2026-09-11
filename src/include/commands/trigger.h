@@ -41,6 +41,7 @@ typedef struct TriggerData
 	Tuplestorestate *tg_oldtable;
 	Tuplestorestate *tg_newtable;
 	const Bitmapset *tg_updatedcols;
+	ForPortionOfState *tg_temporal;
 } TriggerData;
 
 /*
