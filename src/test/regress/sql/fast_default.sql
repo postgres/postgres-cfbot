@@ -413,7 +413,7 @@ SELECT c_text FROM T WHERE c_int = -1;
 
 SELECT comp();
 
--- query to exercise expand_tuple function
+-- query to exercise the missing-attribute expansion code
 CREATE TABLE t1 AS
 SELECT 1::int AS a , 2::int AS b
 FROM generate_series(1,20) q;
@@ -429,7 +429,7 @@ FROM t1;
 DROP TABLE T;
 
 -- test that we account for missing columns without defaults correctly
--- in expand_tuple, and that rows are correctly expanded for triggers
+-- in slot_getmissingattrs(), and that rows are correctly expanded for triggers
 
 CREATE FUNCTION test_trigger()
 RETURNS trigger
