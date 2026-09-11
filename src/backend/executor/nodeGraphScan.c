@@ -53,6 +53,10 @@ static TupleTableSlot *ExecGraphScan(PlanState *pstate);
 static void build_arms(GraphScanState * node, GraphScan * plan);
 static void build_arm_keys(List *keys, int *nkeys, FmgrInfo **eq, Oid **colls);
 static bool graph_fetch_seed(GraphScanState * node, GraphScan * plan);
+static void graph_bind_side(GraphScanState * node, GraphDepthFrameData * fr,
+							bool active, int first_slot, int nslots);
+static void graph_bind_vertex_params(GraphScanState * node,
+									 GraphDepthFrameData * fr);
 static bool graph_next(GraphScanState * node, GraphScan * plan);
 static bool graph_step(GraphScanState * node, GraphScan * plan,
 					   GraphDepthFrameData * fr);
@@ -70,7 +74,7 @@ static void graph_push(GraphScanState * node, Oid newelem, int newnkeys,
 static void graph_backtrack(GraphScanState * node);
 static void graph_reset(GraphScanState * node);
 static void graph_build_row(GraphScanState * node, TupleTableSlot *slot);
-static TupleTableSlot *graph_emit_row(GraphScanState *node, TupleTableSlot *slot);
+static TupleTableSlot *graph_emit_row(GraphScanState * node, TupleTableSlot *slot);
 static Datum graph_build_edge_array(GraphScanState * node, TupleTableSlot *slot,
 									int pi);
 
@@ -160,10 +164,14 @@ graph_fetch_seed(GraphScanState * node, GraphScan * plan)
 
 	graph_reset(node);
 
-	/* restart every depth's inner scan for the new seed */
+	/*
+	 * Every depth frame must (re)start its inner scan for the current vertex
+	 * of the new traversal (see GraphDepthFrameData.need_init); the (re)scan
+	 * happens lazily in graph_step, when the current-vertex parameters are
+	 * bound.
+	 */
 	for (int d = 0; d < node->ndepths; d++)
-		if (node->frames[d].inner_state != NULL)
-			ExecReScan(node->frames[d].inner_state);
+		node->frames[d].need_init = true;
 
 	fr->vid_elem = node->seed_elem;
 	fr->vid_nkeys = list_length(node->seed_params);
@@ -205,6 +213,57 @@ graph_fetch_seed(GraphScanState * node, GraphScan * plan)
 	node->cur_depth = 0;
 	node->seed_emitted = false;
 	return true;
+}
+
+/*
+ * Bind one side -- source (forward) or destination (reverse) -- of the
+ * current (innermost frame's) vertex key values into the PARAM_EXEC slots
+ * that parameterize the inner 1-hop arm scans.  Slots beyond the current
+ * vertex's key width, and the whole slot range of an inactive direction,
+ * are bound to NULL: "key = NULL" matches no rows, so the corresponding arm
+ * variants produce nothing.
+ */
+static void
+graph_bind_side(GraphScanState * node, GraphDepthFrameData * fr,
+				bool active, int first_slot, int nslots)
+{
+	EState	   *estate = node->ss.ps.state;
+
+	for (int k = 0; k < nslots; k++)
+	{
+		ParamExecData *prm =
+			&estate->es_param_exec_vals[lfirst_int(list_nth_cell(node->vertex_params,
+																 first_slot + k))];
+
+		if (active && k < fr->vid_nkeys && !fr->vidnull[k])
+		{
+			prm->value = fr->vid[k];
+			prm->isnull = false;
+		}
+		else
+		{
+			prm->value = (Datum) 0;
+			prm->isnull = true;
+		}
+	}
+}
+
+/*
+ * Bind the current (innermost frame's) vertex key values into the PARAM_EXEC
+ * slots that parameterize the inner 1-hop arm scans.  The forward (source
+ * key) parameters are filled when the scan traverses out of the vertex's
+ * source side (outgoing/undirected); the reverse (destination key)
+ * parameters when it traverses in (incoming/undirected).
+ */
+static void
+graph_bind_vertex_params(GraphScanState * node, GraphDepthFrameData * fr)
+{
+	if (node->vertex_params == NIL)
+		return;
+
+	/* forward (source key) slots come first, then reverse (dest key) slots */
+	graph_bind_side(node, fr, node->fwd_active, 0, node->max_nsrc);
+	graph_bind_side(node, fr, node->rev_active, node->max_nsrc, node->max_ndst);
 }
 
 /*
@@ -255,7 +314,7 @@ graph_step(GraphScanState * node, GraphScan * plan,
 
 	CHECK_FOR_INTERRUPTS();
 
-	if (fr->inner_state == NULL)
+	if (plan->inner_plan == NULL)
 		return false;
 
 	/*
@@ -265,6 +324,26 @@ graph_step(GraphScanState * node, GraphScan * plan,
 	 */
 	if (node->cur_depth >= node->max_depth)
 		return false;
+
+	/*
+	 * The inner arm scans are parameterized on the current vertex; bind it
+	 * (the frame's vertex) before pulling any rows.  Parameterized index
+	 * scans only re-evaluate their scan keys when (re)started, so a frame
+	 * whose vertex was (re)set (a fresh push or a new seed) must have its
+	 * inner scan (re)initialized or rescanned now, first and only time it is
+	 * stepped for that vertex.
+	 */
+	graph_bind_vertex_params(node, fr);
+	if (fr->need_init)
+	{
+		if (fr->inner_state == NULL)
+			fr->inner_state =
+				ExecInitNode(copyObject(plan->inner_plan),
+							 node->ss.ps.state, node->eflags);
+		else
+			ExecReScan(fr->inner_state);
+		fr->need_init = false;
+	}
 
 	for (;;)
 	{
@@ -477,6 +556,8 @@ graph_push(GraphScanState * node, Oid newelem, int newnkeys,
 		memcpy(nfr->edge_props, eprops, sizeof(Datum) * node->nprops);
 		memcpy(nfr->edge_propsnull, epropsnull, sizeof(bool) * node->nprops);
 	}
+	/* the new vertex's inner scan must (re)start (see graph_step) */
+	nfr->need_init = true;
 	node->cur_depth = d;
 }
 
@@ -604,7 +685,7 @@ graph_build_row(GraphScanState * node, TupleTableSlot *slot)
  * the row failed the qual (the caller must keep traversing).
  */
 static TupleTableSlot *
-graph_emit_row(GraphScanState *node, TupleTableSlot *slot)
+graph_emit_row(GraphScanState * node, TupleTableSlot *slot)
 {
 	graph_build_row(node, slot);
 	node->ss.ps.ps_ExprContext->ecxt_scantuple = slot;
@@ -690,6 +771,10 @@ ExecInitGraphScan(GraphScan * node, EState *estate, int eflags)
 	scanstate->cur_depth = -1;
 	scanstate->need_seed = true;
 	scanstate->seed_emitted = false;
+	scanstate->vertex_params = node->vertex_param_ids;
+	scanstate->fwd_active = (node->direction != GRAPH_DIR_INCOMING);
+	scanstate->rev_active = (node->direction != GRAPH_DIR_OUTGOING);
+	scanstate->eflags = eflags;
 
 	/*
 	 * Effective maximum depth.  Explicit bounds are honored; unbounded (or
@@ -735,11 +820,18 @@ ExecInitGraphScan(GraphScan * node, EState *estate, int eflags)
 		fr->edge_props = palloc(sizeof(Datum) * Max(scanstate->nprops, 1));
 		fr->edge_propsnull = palloc(sizeof(bool) * Max(scanstate->nprops, 1));
 
+		/*
+		 * Initialize the inner (1-hop) expansion eagerly (so EXPLAIN can
+		 * display it); mark the frame for a re-started scan (need_init) so
+		 * the inner index scans pick up the current-vertex parameters, which
+		 * are bound later, at the frame's first step.
+		 */
 		if (node->inner_plan != NULL)
 			fr->inner_state =
 				ExecInitNode(copyObject(node->inner_plan), estate, eflags);
 		else
 			fr->inner_state = NULL;
+		fr->need_init = true;
 	}
 
 	/*

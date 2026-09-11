@@ -3755,6 +3755,7 @@ create_graphscan_plan(PlannerInfo *root, GraphPath * best_path,
 	scan_plan->edge_element_oids = best_path->edge_element_oids;
 	scan_plan->graph_columns = best_path->graph_columns;
 	scan_plan->inner_plan = best_path->inner_plan;
+	scan_plan->vertex_param_ids = best_path->vertex_param_ids;
 	scan_plan->seed_elem_oid = best_path->seed_elem_oid;
 	scan_plan->max_nsrc = best_path->max_nsrc;
 	scan_plan->max_ndst = best_path->max_ndst;

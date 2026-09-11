@@ -1640,9 +1640,9 @@ native_apply_rls_to_query(Query *query)
 		}
 
 		/*
-		 * The decomposed queries are SELECT-only, so no WITH CHECK
-		 * OPTIONS can apply; hasRowSecurity still matters for the
-		 * plancache (dependsOnRLS).
+		 * The decomposed queries are SELECT-only, so no WITH CHECK OPTIONS
+		 * can apply; hasRowSecurity still matters for the plancache
+		 * (dependsOnRLS).
 		 */
 		if (hasRowSecurity)
 			query->hasRowSecurity = true;
@@ -1998,9 +1998,9 @@ native_query_for_branch(native_decomp * dc, List *elems, List *vles)
 			vb->gs_rti = gs_rti;
 			vb->array_first = 1
 				+ list_length(get_graph_element_key_columns(srcpe->elemoid,
-														 Anum_pg_propgraph_element_pgekey))
+															Anum_pg_propgraph_element_pgekey))
 				+ list_length(get_graph_element_key_columns(termpe->elemoid,
-														 Anum_pg_propgraph_element_pgekey));
+															Anum_pg_propgraph_element_pgekey));
 			vb->array_props = vf->array_props;
 			{
 				RangeTblEntry *gs_rte =
@@ -2148,8 +2148,10 @@ native_query_for_branch(native_decomp * dc, List *elems, List *vles)
 												var->varattno - FirstLowInvalidHeapAttributeNumber);
 	}
 
-	/* Backing element tables can carry RLS policies: handled by the
-	 * native planner in set_graph_pathlist(), before subquery_planner. */
+	/*
+	 * Backing element tables can carry RLS policies: handled by the native
+	 * planner in set_graph_pathlist(), before subquery_planner.
+	 */
 
 	return path_query;
 }
@@ -2235,6 +2237,36 @@ get_graph_edge_element_oids(Oid propgraphid, GraphElementPattern *gep)
 	edge_pf->dest_pf = dest_pf;
 
 	pes = get_path_elements_for_path_factor(propgraphid, edge_pf);
+	foreach_ptr(struct path_element, pe, pes)
+		result = lappend_oid(result, pe->elemoid);
+
+	return result;
+}
+
+/*
+ * Return the OIDs of the vertex elements matching the given vertex element
+ * pattern in the given property graph.  Used by the native planner to
+ * estimate the row count of a GraphScan (the terminal pattern's label set
+ * determines which vertex tables may end a walk).
+ */
+List *
+get_graph_vertex_element_oids(Oid propgraphid, GraphElementPattern *gep)
+{
+	struct path_factor *pf;
+	List	   *pes;
+	List	   *result = NIL;
+	ListCell   *lc;
+
+	Assert(gep->kind == VERTEX_PATTERN);
+
+	pf = palloc0_object(struct path_factor);
+	pf->factorpos = 0;
+	pf->kind = VERTEX_PATTERN;
+	pf->labelexpr = gep->labelexpr;
+	pf->variable = gep->variable;
+	pf->whereClause = gep->whereClause;
+
+	pes = get_path_elements_for_path_factor(propgraphid, pf);
 	foreach_ptr(struct path_element, pe, pes)
 		result = lappend_oid(result, pe->elemoid);
 

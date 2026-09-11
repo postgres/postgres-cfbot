@@ -1987,11 +1987,26 @@ typedef struct GraphScanState
 	int			narms;
 	struct GraphScanArmData *arms;
 
+	/* Flags passed to ExecInitGraphScan (needed for lazy inner init). */
+	int			eflags;
+
 	/*
-	 * Seed key values of the current seed column (List of Param or Const,
-	 * one per seed key column, in key order); see GraphScan.seed_params.
+	 * Seed key values of the current seed column (List of Param or Const, one
+	 * per seed key column, in key order); see GraphScan.seed_params.
 	 */
 	List	   *seed_params;
+
+	/*
+	 * PARAM_EXEC ids of the current-vertex key values used to parameterize
+	 * the inner (1-hop) arm scans (see GraphScan.vertex_param_ids).  The
+	 * executor binds the active direction's parameters from the current
+	 * vertex before each depth frame's fetch.
+	 */
+	List	   *vertex_params;
+
+	/* Which direction's parameter set is active (from plan->direction). */
+	bool		fwd_active;
+	bool		rev_active;
 
 	/*
 	 * Scratch buffers for graph_step(): resized to the max key width and

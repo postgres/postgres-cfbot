@@ -48,6 +48,8 @@ extern Node *get_element_property_expr(Oid elemoid, Oid propoid, int rtindex);
  */
 extern List *get_graph_edge_element_oids(Oid propgraphid,
 										 GraphElementPattern *gep);
+extern List *get_graph_vertex_element_oids(Oid propgraphid,
+										   GraphElementPattern *gep);
 
 /*
  * One key column of a graph element: the element table's column (attnum)
@@ -76,7 +78,7 @@ extern List *get_graph_element_key_columns(Oid elemoid, int key_attnum);
  * both by the filters pushed into the GraphScan's inner (1-hop) expansion
  * and by the GraphScan executor itself.
  */
-extern Oid key_equality_operator(Oid typid);
+extern Oid	key_equality_operator(Oid typid);
 
 /*
  * Return the VLE edge-list (array) property references (GraphPropertyRef

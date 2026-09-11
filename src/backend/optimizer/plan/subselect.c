@@ -2776,6 +2776,22 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 					/* Now we can add its extParams to the parent's params */
 					context.paramids = bms_add_members(context.paramids,
 													   gs->inner_plan->extParam);
+
+					/*
+					 * The current-vertex PARAM_EXEC ids referenced by the
+					 * inner (arm) plans are supplied by the GraphScan node
+					 * itself (as a NestLoop supplies its nestParams), so they
+					 * must not count as external params of this level.
+					 */
+					if (gs->vertex_param_ids != NIL)
+					{
+						Bitmapset  *vp = NULL;
+
+						foreach_int(pid, gs->vertex_param_ids)
+							vp = bms_add_member(vp, pid);
+						context.paramids =
+							bms_del_members(context.paramids, vp);
+					}
 				}
 
 				context.paramids = bms_add_members(context.paramids,

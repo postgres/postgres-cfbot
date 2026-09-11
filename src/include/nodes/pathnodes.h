@@ -2244,6 +2244,12 @@ typedef struct GraphPath
 	/* PARAM_EXEC ids of the seed key columns (filled at create_plan time). */
 	List	   *seed_param_ids;
 
+	/*
+	 * PARAM_EXEC ids of the current-vertex key values used to parameterize
+	 * the inner (1-hop) arm scans; see GraphScan.vertex_param_ids.
+	 */
+	List	   *vertex_param_ids;
+
 	/* Hop-wide max src/dest key widths over the edge element arms. */
 	int			max_nsrc;
 	int			max_ndst;
