@@ -296,15 +296,6 @@ heap_page_prune_opt(Relation relation, Buffer buffer, Buffer *vmbuffer,
 		return;
 
 	/*
-	 * Check whether prune_xid indicates that there may be dead rows that can
-	 * be cleaned up.
-	 */
-	vistest = GlobalVisTestFor(relation);
-
-	if (!GlobalVisTestIsRemovableXid(vistest, prune_xid, true))
-		return;
-
-	/*
 	 * We prune when a previous UPDATE failed to find enough space on the page
 	 * for a new tuple version, or when free space falls below the relation's
 	 * fill-factor target (but not less than 10%).
@@ -324,6 +315,17 @@ heap_page_prune_opt(Relation relation, Buffer buffer, Buffer *vmbuffer,
 	{
 		bool		record_free_space = false;
 		Size		freespace = 0;
+
+		/*
+		 * Check whether prune_xid indicates that there may be dead rows that
+		 * can be cleaned up.  Do this only after deciding that pruning would
+		 * be useful, since refreshing the visibility horizon may require
+		 * scanning the ProcArray.
+		 */
+		vistest = GlobalVisTestFor(relation);
+
+		if (!GlobalVisTestIsRemovableXid(vistest, prune_xid, true))
+			return;
 
 		/* OK, try to get exclusive buffer lock */
 		if (!ConditionalLockBufferForCleanup(buffer))
