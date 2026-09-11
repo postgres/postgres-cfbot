@@ -3119,6 +3119,228 @@ select jsonb_path_query('"a,b"', '$.split_part(",", 2147483648)', silent => true
 ------------------
 (0 rows)
 
+-- Test .split()
+select jsonb_path_query('"a,b,c"', '$.split(",")');
+ jsonb_path_query 
+------------------
+ ["a", "b", "c"]
+(1 row)
+
+select jsonb_path_query('"a,,c"', '$.split(",", "")');
+ jsonb_path_query 
+------------------
+ ["a", null, "c"]
+(1 row)
+
+-- proving the output is a real, indexable JSON array
+select jsonb_path_query('"a,b,c"', '$.split(",")[1]');
+ jsonb_path_query 
+------------------
+ "b"
+(1 row)
+
+-- Empty string delimiter (returns the original string as a single element)
+select jsonb_path_query('"abc"', '$.split("")');
+ jsonb_path_query 
+------------------
+ ["abc"]
+(1 row)
+
+-- Leading, trailing, and consecutive delimiters
+select jsonb_path_query('",a,,b,"', '$.split(",")');
+    jsonb_path_query    
+------------------------
+ ["", "a", "", "b", ""]
+(1 row)
+
+-- Perfect match with null_string
+select jsonb_path_query('"N/A"', '$.split(",", "N/A")');
+ jsonb_path_query 
+------------------
+ [null]
+(1 row)
+
+-- No delimiter match
+select jsonb_path_query('"abc"', '$.split(",")');
+ jsonb_path_query 
+------------------
+ ["abc"]
+(1 row)
+
+-- Test .join() method
+select jsonb_path_query('["a", "b", "c"]', '$.join("-")');
+ jsonb_path_query 
+------------------
+ "a-b-c"
+(1 row)
+
+-- Join with null replacement
+select jsonb_path_query('["a", "b", "c"]', '$.join("-", "N/A")');
+ jsonb_path_query 
+------------------
+ "a-b-c"
+(1 row)
+
+-- Null handling: default (skip)
+select jsonb_path_query('["a", null, "c"]', '$.join("-")');
+ jsonb_path_query 
+------------------
+ "a-c"
+(1 row)
+
+-- Null handling: replacement
+select jsonb_path_query('["a", null, "c"]', '$.join("-", "N/A")');
+ jsonb_path_query 
+------------------
+ "a-N/A-c"
+(1 row)
+
+-- Empty array (should return empty string)
+select jsonb_path_query('[]', '$.join("-")');
+ jsonb_path_query 
+------------------
+ ""
+(1 row)
+
+-- Pipeline integration: .join().upper()
+select jsonb_path_query('["hello", "world"]', '$.join(" ").upper()');
+ jsonb_path_query 
+------------------
+ "HELLO WORLD"
+(1 row)
+
+-- Pipeline integration: .split().join()
+select jsonb_path_query('"a,b,c"', '$.split(",").join("|")');
+ jsonb_path_query 
+------------------
+ "a|b|c"
+(1 row)
+
+-- Error case: Non-string element (should trigger our ereport)
+select jsonb_path_query('[1, "a"]', '$.join("-")');
+ERROR:  jsonpath .join() array elements must be strings or nulls
+-- Error case: Nested object
+select jsonb_path_query('["a", {"b": 1}]', '$.join("-")');
+ERROR:  jsonpath .join() array elements must be strings or nulls
+-- Error case: Applied to a scalar
+select jsonb_path_query('"not an array"', '$.join("-")');
+ERROR:  jsonpath item method .join() can only be applied to an array
+-- Lax mode: should still error under current conservative implementation
+select jsonb_path_query('[1, "a"]', 'lax $.join("-")');
+ERROR:  jsonpath .join() array elements must be strings or nulls
+select jsonb_path_query('"not an array"', 'lax $.join("-")');
+ERROR:  jsonpath item method .join() can only be applied to an array
+-- Silent mode: should suppress errors and return no rows
+select jsonb_path_query('[1, "a"]', '$.join("-")', silent => true);
+ jsonb_path_query 
+------------------
+(0 rows)
+
+select jsonb_path_query('"not an array"', '$.join("-")', silent => true);
+ jsonb_path_query 
+------------------
+(0 rows)
+
+-- Empty separator
+select jsonb_path_query('["a", "b", "c"]', '$.join("")');
+ jsonb_path_query 
+------------------
+ "abc"
+(1 row)
+
+-- Array with only nulls: default (skip, should return empty string)
+select jsonb_path_query('[null, null]', '$.join(",")');
+ jsonb_path_query 
+------------------
+ ""
+(1 row)
+
+-- Array with only nulls: replacement
+select jsonb_path_query('[null, null]', '$.join(",", "N/A")');
+ jsonb_path_query 
+------------------
+ "N/A,N/A"
+(1 row)
+
+-- Single element array
+select jsonb_path_query('["a"]', '$.join(",")');
+ jsonb_path_query 
+------------------
+ "a"
+(1 row)
+
+-- Test .translate()
+-- Error: method can only be applied to a string (testing with JSON null)
+select jsonb_path_query('null', '$.translate("x", "bye")');
+ERROR:  jsonpath item method .translate() can only be applied to a string
+-- Test that silent mode suppresses type mismatch errors
+select jsonb_path_query('null', '$.translate("x", "bye")', silent => true);
+ jsonb_path_query 
+------------------
+(0 rows)
+
+-- Lax mode (default): array is unwrapped and method is applied to each string element
+select jsonb_path_query('["x", "y", "z"]', '$.translate("x", "bye")');
+ jsonb_path_query 
+------------------
+ "b"
+ "y"
+ "z"
+(3 rows)
+
+-- Error: method cannot be applied to an object
+select jsonb_path_query('{}', '$.translate("x", "bye")');
+ERROR:  jsonpath item method .translate() can only be applied to a string
+-- Strict mode on an array raises an error, which is suppressed by silent mode
+select jsonb_path_query('[]', 'strict $.translate("x", "bye")', silent => true);
+ jsonb_path_query 
+------------------
+(0 rows)
+
+-- Object type mismatch error suppressed by silent mode
+select jsonb_path_query('{}', '$.translate("x", "bye")', silent => true);
+ jsonb_path_query 
+------------------
+(0 rows)
+
+-- Error: method cannot be applied to a numeric scalar
+select jsonb_path_query('1.23', '$.translate("x", "bye")');
+ERROR:  jsonpath item method .translate() can only be applied to a string
+-- Basic successful translation
+select jsonb_path_query('"hello world"', '$.translate("hello","bye")');
+ jsonb_path_query 
+------------------
+ "byee wred"
+(1 row)
+
+-- Pipeline/Predicate integration: translation followed by a boolean check
+select jsonb_path_query('"hello world"', '$.translate("hello","bye") starts with "bye"');
+ jsonb_path_query 
+------------------
+ true
+(1 row)
+
+-- Pure deletion (remove all hyphens)
+select jsonb_path_query('"12-34-56"', '$.translate("-", "")');
+ jsonb_path_query 
+------------------
+ "123456"
+(1 row)
+
+-- Overlapping characters in 'from' argument (should use first occurrence mapping)
+select jsonb_path_query('"aab"', '$.translate("aab", "xy")');
+ jsonb_path_query 
+------------------
+ "xx"
+(1 row)
+
+-- No match (should return original string)
+select jsonb_path_query('"xyz"', '$.translate("abc", "def")');
+ jsonb_path_query 
+------------------
+ "xyz"
+(1 row)
+
 -- Test string methods play nicely together
 select jsonb_path_query('"hello world"', '$.replace("hello","bye").upper()');
  jsonb_path_query 
@@ -3145,6 +3367,12 @@ select jsonb_path_query('"hElLo WorlD"', '$.lower().upper().lower().replace("hel
 (1 row)
 
 select jsonb_path_query('"   hElLo WorlD "', '$.btrim().lower().upper().lower().replace("hello","bye") starts with "bye"');
+ jsonb_path_query 
+------------------
+ true
+(1 row)
+
+select jsonb_path_query('"  A,b,C  "', '$.btrim().lower().split(",").join("-").replace("a","x").upper() starts with "X-B"');
  jsonb_path_query 
 ------------------
  true
