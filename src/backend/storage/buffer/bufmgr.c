@@ -83,6 +83,7 @@
 /* Bits in SyncOneBuffer's return value */
 #define BUF_WRITTEN				0x01
 #define BUF_REUSABLE			0x02
+#define BUF_COOLED				0x04
 
 #define RELS_BSEARCH_THRESHOLD		20
 
@@ -634,7 +635,7 @@ static void PinBuffer_Locked(BufferDesc *buf);
 static void UnpinBuffer(BufferDesc *buf);
 static void UnpinBufferNoOwner(BufferDesc *buf);
 static void BufferSync(int flags);
-static int	SyncOneBuffer(int buf_id, bool skip_recently_used,
+static int	SyncOneBuffer(int buf_id, bool skip_recently_used, bool cool_if_hot,
 						  WritebackContext *wb_context);
 static void WaitIO(BufferDesc *buf);
 static void AbortBufferIO(Buffer buffer);
@@ -2333,7 +2334,10 @@ BufferAlloc(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 	 * checkpoints, except for their "init" forks, which need to be treated
 	 * just like permanent relations.
 	 */
-	set_bits |= BM_TAG_VALID | BUF_USAGECOUNT_ONE;
+	set_bits |= BM_TAG_VALID;
+	/* Admit the newly loaded page COOL (probation); a second access via
+	 * PinBuffer promotes it to HOT.  This is what makes a one-touch scan
+	 * self-evicting -- see the cooling-state notes in buf_internals.h. */
 	if (relpersistence == RELPERSISTENCE_PERMANENT || forkNum == INIT_FORKNUM)
 		set_bits |= BM_PERMANENT;
 
@@ -3002,7 +3006,9 @@ ExtendBufferedRelShared(BufferManagerRelation bmr,
 
 			victim_buf_hdr->tag = tag;
 
-			set_bits |= BM_TAG_VALID | BUF_USAGECOUNT_ONE;
+			set_bits |= BM_TAG_VALID;
+			/* Admit COOL (probation); see the comment at the other admission
+			 * site and the cooling-state notes in buf_internals.h. */
 			if (bmr.relpersistence == RELPERSISTENCE_PERMANENT || fork == INIT_FORKNUM)
 				set_bits |= BM_PERMANENT;
 
@@ -3332,21 +3338,17 @@ PinBuffer(BufferDesc *buf, BufferAccessStrategy strategy,
 			/* increase refcount */
 			buf_state += BUF_REFCOUNT_ONE;
 
-			if (strategy == NULL)
-			{
-				/* Default case: increase usagecount unless already max. */
-				if (BUF_STATE_GET_USAGECOUNT(buf_state) < BM_MAX_USAGE_COUNT)
-					buf_state += BUF_USAGECOUNT_ONE;
-			}
-			else
-			{
-				/*
-				 * Ring buffers shouldn't evict others from pool.  Thus we
-				 * don't make usagecount more than 1.
-				 */
-				if (BUF_STATE_GET_USAGECOUNT(buf_state) == 0)
-					buf_state += BUF_USAGECOUNT_ONE;
-			}
+			/*
+			 * Accessing a resident buffer promotes it to HOT (the 2Q rescue):
+			 * a page loaded COOL on probation becomes part of the hot working
+			 * set on its second touch.  BM_MAX_USAGE_COUNT is
+			 * BUF_COOLSTATE_HOT (1), so this saturates at HOT and never
+			 * overflows the field.  We also set the second-chance ref bit so
+			 * the bgwriter's next cooling pass spares this recently-used buffer.
+			 */
+			if (BUF_STATE_GET_COOLSTATE(buf_state) < BUF_COOLSTATE_HOT)
+				buf_state += BUF_COOLSTATE_ONE;
+			buf_state |= BUF_REFBIT;
 
 			if (pg_atomic_compare_exchange_u64(&buf->state, &old_buf_state,
 											   buf_state))
@@ -3785,7 +3787,7 @@ BufferSync(int flags)
 		 */
 		if (pg_atomic_read_u64(&bufHdr->state) & BM_CHECKPOINT_NEEDED)
 		{
-			if (SyncOneBuffer(buf_id, false, &wb_context) & BUF_WRITTEN)
+			if (SyncOneBuffer(buf_id, false, false, &wb_context) & BUF_WRITTEN)
 			{
 				TRACE_POSTGRESQL_BUFFER_SYNC_WRITTEN(buf_id);
 				PendingCheckpointerStats.buffers_written++;
@@ -3876,6 +3878,19 @@ BgBufferSync(WritebackContext *wb_context)
 	float		smoothing_samples = 16;
 	float		scan_whole_pool_milliseconds = 120000.0;
 
+	/*
+	 * The cleaner scan directly observes the reusable (COOL, unpinned) buffer
+	 * density over the region it walks, which -- with the cooling-stage
+	 * evictor -- is exactly the sweep's victim predicate.  That observation is
+	 * ground truth for the buffers about to be reused, whereas the strategy
+	 * scan's positional proxy (strategy_delta/recent_alloc) blurs a pool whose
+	 * COOL population is spatially clustered (a scan burst leaves whole regions
+	 * COOL, hot OLTP regions not).  So we let the cleaner's own sample adapt on
+	 * a shorter window than the strategy proxy, tracking a burst of
+	 * probationary/scan COOL pages within a cycle or two instead of lagging it.
+	 */
+	float		cleaner_smoothing_samples = 4;
+
 	/* Used to compute how far we scan ahead */
 	long		strategy_delta;
 	int			bufs_to_lap;
@@ -3889,6 +3904,7 @@ BgBufferSync(WritebackContext *wb_context)
 	int			num_to_scan;
 	int			num_written;
 	int			reusable_buffers;
+	int			write_limit;
 
 	/* Variables for final smoothed_density update */
 	long		new_strategy_delta;
@@ -4063,8 +4079,22 @@ BgBufferSync(WritebackContext *wb_context)
 	 * Now write out dirty reusable buffers, working forward from the
 	 * next_to_clean point, until we have lapped the strategy scan, or cleaned
 	 * enough buffers to match our estimate of the next cycle's allocation
-	 * requirements, or hit the bgwriter_lru_maxpages limit.
+	 * requirements, or hit the write limit.
+	 *
+	 * The per-cycle write cap is normally bgwriter_lru_maxpages.  But under a
+	 * bulk-dirtying workload (COPY, bulk UPDATE, VACUUM) the pool fills with
+	 * dirty COOL buffers faster than that fixed cap can clean, so the
+	 * foreground clock sweep is forced to flush dirty victims inline -- the
+	 * very cost the cooling-stage evictor is meant to keep off the critical
+	 * path.  When predicted demand (upcoming_alloc_est) exceeds the fixed cap,
+	 * raise the limit to meet demand so the bgwriter stays ahead and supplies
+	 * clean victims.  This stays bounded (by demand and by lapping the
+	 * strategy point), so it cannot run away, and normal workloads are
+	 * unaffected because there upcoming_alloc_est <= bgwriter_lru_maxpages.
 	 */
+	write_limit = bgwriter_lru_maxpages;
+	if (upcoming_alloc_est > write_limit)
+		write_limit = upcoming_alloc_est;
 
 	num_to_scan = bufs_to_lap;
 	num_written = 0;
@@ -4073,7 +4103,13 @@ BgBufferSync(WritebackContext *wb_context)
 	/* Execute the LRU scan */
 	while (num_to_scan > 0 && reusable_buffers < upcoming_alloc_est)
 	{
-		int			sync_state = SyncOneBuffer(next_to_clean, true,
+		/*
+		 * cool_if_hot = false: with the cool-in-place foreground sweep, the
+		 * clock hand demotes HOT buffers on every tick, so the bgwriter does
+		 * writeback only and leaves all cooling to the sweep (no background
+		 * pre-cooling, no double-cooling).
+		 */
+		int			sync_state = SyncOneBuffer(next_to_clean, true, false,
 											   wb_context);
 
 		if (++next_to_clean >= NBuffers)
@@ -4086,7 +4122,7 @@ BgBufferSync(WritebackContext *wb_context)
 		if (sync_state & BUF_WRITTEN)
 		{
 			reusable_buffers++;
-			if (++num_written >= bgwriter_lru_maxpages)
+			if (++num_written >= write_limit)
 			{
 				PendingBgWriterStats.maxwritten_clean++;
 				break;
@@ -4121,7 +4157,7 @@ BgBufferSync(WritebackContext *wb_context)
 	{
 		scans_per_alloc = (float) new_strategy_delta / (float) new_recent_alloc;
 		smoothed_density += (scans_per_alloc - smoothed_density) /
-			smoothing_samples;
+			cleaner_smoothing_samples;
 
 #ifdef BGW_DEBUG
 		elog(DEBUG2, "bgwriter: cleaner density alloc=%u scan=%ld density=%.2f new smoothed=%.2f",
@@ -4140,16 +4176,26 @@ BgBufferSync(WritebackContext *wb_context)
  * If skip_recently_used is true, we don't write currently-pinned buffers, nor
  * buffers marked recently used, as these are not replacement candidates.
  *
+ * If cool_if_hot is true (the bgwriter's LRU scan), an unpinned HOT buffer is
+ * demoted HOT -> COOL as we pass it, pre-staging eviction candidates so the
+ * foreground clock sweep finds a COOL victim in a single pass instead of
+ * having to cool buffers itself (force_cool).  The demotion is done under the
+ * buffer header lock we already hold, so it needs no CAS and cannot race a
+ * concurrent demotion.  A concurrent PinBuffer promotes it back to HOT, which
+ * is the intended 2Q behavior (a re-accessed buffer is rescued).
+ *
  * Returns a bitmask containing the following flag bits:
  *	BUF_WRITTEN: we wrote the buffer.
  *	BUF_REUSABLE: buffer is available for replacement, ie, it has
- *		pin count 0 and usage count 0.
+ *		pin count 0 and is COOL (an eviction candidate).
+ *	BUF_COOLED: we demoted this buffer HOT -> COOL this call.
  *
  * (BUF_WRITTEN could be set in error if FlushBuffer finds the buffer clean
  * after locking it, but we don't care all that much.)
  */
 static int
-SyncOneBuffer(int buf_id, bool skip_recently_used, WritebackContext *wb_context)
+SyncOneBuffer(int buf_id, bool skip_recently_used, bool cool_if_hot,
+			  WritebackContext *wb_context)
 {
 	BufferDesc *bufHdr = GetBufferDescriptor(buf_id);
 	int			result = 0;
@@ -4171,8 +4217,38 @@ SyncOneBuffer(int buf_id, bool skip_recently_used, WritebackContext *wb_context)
 	 */
 	buf_state = LockBufHdr(bufHdr);
 
+	/*
+	 * Pre-cool with a second chance: if asked, act on an unpinned HOT buffer.
+	 * If its ref bit is set (accessed since our last pass), clear the ref bit
+	 * and leave it HOT -- a recently-used buffer earns one reprieve, keeping
+	 * the hot working set out of the COOL stage under scan pressure.  Only a
+	 * HOT buffer whose ref bit is already clear is demoted HOT -> COOL,
+	 * pre-staging it as an eviction candidate for the foreground sweep.  We
+	 * hold the header lock, so each transition is a plain masked store applied
+	 * atomically by UnlockBufHdrExt; we re-lock to continue the dirty-write
+	 * inspection below.
+	 */
+	if (cool_if_hot &&
+		BUF_STATE_GET_REFCOUNT(buf_state) == 0 &&
+		BUF_STATE_GET_COOLSTATE(buf_state) != BUF_COOLSTATE_COOL)
+	{
+		if (BUF_STATE_GET_REFBIT(buf_state))
+		{
+			/* second chance: consume the ref bit, stay HOT */
+			UnlockBufHdrExt(bufHdr, buf_state, 0, BUF_REFBIT, 0);
+			buf_state = LockBufHdr(bufHdr);
+		}
+		else
+		{
+			/* not re-accessed since last pass: demote to COOL */
+			UnlockBufHdrExt(bufHdr, buf_state, 0, BUF_USAGECOUNT_MASK, 0);
+			buf_state = LockBufHdr(bufHdr);
+			result |= BUF_COOLED;
+		}
+	}
+
 	if (BUF_STATE_GET_REFCOUNT(buf_state) == 0 &&
-		BUF_STATE_GET_USAGECOUNT(buf_state) == 0)
+		BUF_STATE_GET_COOLSTATE(buf_state) == BUF_COOLSTATE_COOL)
 	{
 		result |= BUF_REUSABLE;
 	}
