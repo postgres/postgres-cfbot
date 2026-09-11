@@ -2359,6 +2359,11 @@ typedef struct MemoizePath
 	Cardinality est_calls;		/* expected number of rescans */
 	Cardinality est_unique_keys;	/* estimated unique keys, for EXPLAIN */
 	double		est_hit_ratio;	/* estimated cache hit ratio, for EXPLAIN */
+	Bitmapset  *unhashable_params;	/* paramids of Params appearing in the key
+									 * expressions that couldn't be made cache
+									 * keys (e.g. their types have no hash
+									 * opclass); excluded from keyparamids so
+									 * that changes flush the cache */
 } MemoizePath;
 
 /*
