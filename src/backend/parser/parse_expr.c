@@ -4394,6 +4394,126 @@ transformJsonSerializeExpr(ParseState *pstate, JsonSerializeExpr *expr)
 }
 
 /*
+ * Resolve the raw ON-clause list collected by the grammar into the
+ * on_existing / on_missing / on_null fields of an analyzed
+ * JSON_TRANSFORM action, applying the standard's implicit defaults for
+ * clauses the user omitted and validating the ones they specified.
+ */
+static void
+resolveJsonTransformBehaviors(ParseState *pstate,
+							  JsonTransformAction *raw,
+							  JsonTransformAction *action)
+{
+	ListCell   *lc;
+
+	/*
+	 * Standard implicit defaults.  ON EMPTY / ON ERROR apply only
+	 * to INSERT/REPLACE and are consulted only for a PATH-valued
+	 * source; their defaults are NULL ON EMPTY and ERROR ON ERROR.
+	 */
+	switch (action->op)
+	{
+		case TRANSFORM_INSERT:
+			action->on_existing = JSON_TRANSFORM_BEHAVIOR_ERROR;
+			action->on_null = JSON_TRANSFORM_BEHAVIOR_NULL;
+			action->on_empty = JSON_TRANSFORM_BEHAVIOR_NULL;
+			action->on_error = JSON_TRANSFORM_BEHAVIOR_ERROR;
+			break;
+		case TRANSFORM_REPLACE:
+			action->on_missing = JSON_TRANSFORM_BEHAVIOR_IGNORE;
+			action->on_null = JSON_TRANSFORM_BEHAVIOR_NULL;
+			action->on_empty = JSON_TRANSFORM_BEHAVIOR_NULL;
+			action->on_error = JSON_TRANSFORM_BEHAVIOR_ERROR;
+			break;
+		case TRANSFORM_REMOVE:
+		case TRANSFORM_RENAME:
+			action->on_missing = JSON_TRANSFORM_BEHAVIOR_IGNORE;
+			break;
+	}
+
+	foreach(lc, raw->behaviors)
+	{
+		JsonTransformBehaviorClause *clause = lfirst_node(JsonTransformBehaviorClause, lc);
+		JsonTransformBehavior behavior = clause->behavior;
+
+		switch (clause->target)
+		{
+			case JSON_TRANSFORM_TARGET_EXISTING:
+				if (action->op != TRANSFORM_INSERT)
+					ereport(ERROR,
+							errcode(ERRCODE_SYNTAX_ERROR),
+							errmsg("ON EXISTING is only valid for JSON_TRANSFORM INSERT"),
+							parser_errposition(pstate, clause->location));
+				if (behavior != JSON_TRANSFORM_BEHAVIOR_ERROR &&
+					behavior != JSON_TRANSFORM_BEHAVIOR_IGNORE)
+					ereport(ERROR,
+							errcode(ERRCODE_SYNTAX_ERROR),
+							errmsg("ON EXISTING behavior must be ERROR or IGNORE"),
+							parser_errposition(pstate, clause->location));
+				action->on_existing = behavior;
+				break;
+
+			case JSON_TRANSFORM_TARGET_MISSING:
+				if (action->op == TRANSFORM_INSERT)
+					ereport(ERROR,
+							errcode(ERRCODE_SYNTAX_ERROR),
+							errmsg("ON MISSING is not valid for JSON_TRANSFORM INSERT"),
+							parser_errposition(pstate, clause->location));
+				if (behavior != JSON_TRANSFORM_BEHAVIOR_ERROR &&
+					behavior != JSON_TRANSFORM_BEHAVIOR_IGNORE)
+					ereport(ERROR,
+							errcode(ERRCODE_SYNTAX_ERROR),
+							errmsg("ON MISSING behavior must be ERROR or IGNORE"),
+							parser_errposition(pstate, clause->location));
+				action->on_missing = behavior;
+				break;
+
+			case JSON_TRANSFORM_TARGET_NULL:
+				if (action->op != TRANSFORM_INSERT &&
+					action->op != TRANSFORM_REPLACE)
+					ereport(ERROR,
+							errcode(ERRCODE_SYNTAX_ERROR),
+							errmsg("ON NULL is only valid for JSON_TRANSFORM INSERT and REPLACE"),
+							parser_errposition(pstate, clause->location));
+				/* REMOVE-on-null is disallowed for INSERT */
+				if (behavior == JSON_TRANSFORM_BEHAVIOR_REMOVE &&
+					action->op == TRANSFORM_INSERT)
+					ereport(ERROR,
+							errcode(ERRCODE_SYNTAX_ERROR),
+							errmsg("REMOVE ON NULL is not allowed for JSON_TRANSFORM INSERT"),
+							parser_errposition(pstate, clause->location));
+				action->on_null = behavior;
+				break;
+
+			case JSON_TRANSFORM_TARGET_EMPTY:
+			case JSON_TRANSFORM_TARGET_ERROR:
+				if (action->op != TRANSFORM_INSERT &&
+					action->op != TRANSFORM_REPLACE)
+					ereport(ERROR,
+							errcode(ERRCODE_SYNTAX_ERROR),
+							errmsg("%s is only valid for JSON_TRANSFORM INSERT and REPLACE",
+								   clause->target == JSON_TRANSFORM_TARGET_EMPTY ?
+								   "ON EMPTY" : "ON ERROR"),
+							parser_errposition(pstate, clause->location));
+				if (behavior != JSON_TRANSFORM_BEHAVIOR_ERROR &&
+					behavior != JSON_TRANSFORM_BEHAVIOR_IGNORE &&
+					behavior != JSON_TRANSFORM_BEHAVIOR_NULL)
+					ereport(ERROR,
+							errcode(ERRCODE_SYNTAX_ERROR),
+							errmsg("%s behavior must be ERROR, IGNORE, or NULL",
+								   clause->target == JSON_TRANSFORM_TARGET_EMPTY ?
+								   "ON EMPTY" : "ON ERROR"),
+							parser_errposition(pstate, clause->location));
+				if (clause->target == JSON_TRANSFORM_TARGET_EMPTY)
+					action->on_empty = behavior;
+				else
+					action->on_error = behavior;
+				break;
+		}
+	}
+}
+
+/*
  * Transform JSON_VALUE, JSON_QUERY, JSON_EXISTS, JSON_TABLE functions into
  * a JsonExpr node.
  */
@@ -4407,6 +4527,7 @@ transformJsonFuncExpr(ParseState *pstate, JsonFuncExpr *func)
 	Node	   *coerced_path_spec;
 	const char *func_name = NULL;
 	JsonFormatType default_format;
+	JsonTransformAction *jst_action = func->action;
 
 	switch (func->op)
 	{
@@ -4424,6 +4545,10 @@ transformJsonFuncExpr(ParseState *pstate, JsonFuncExpr *func)
 			break;
 		case JSON_TABLE_OP:
 			func_name = "JSON_TABLE";
+			default_format = JS_FORMAT_JSONB;
+			break;
+		case JSON_TRANSFORM_OP:
+			func_name = "JSON_TRANSFORM";
 			default_format = JS_FORMAT_JSONB;
 			break;
 		default:
@@ -4619,22 +4744,114 @@ transformJsonFuncExpr(ParseState *pstate, JsonFuncExpr *func)
 													false);
 	jsexpr->format = func->context_item->format;
 
-	path_spec = transformExprRecurse(pstate, func->pathspec);
-	pathspec_type = exprType(path_spec);
-	pathspec_loc = exprLocation(path_spec);
-	coerced_path_spec = coerce_to_target_type(pstate, path_spec,
-											  pathspec_type,
-											  JSONPATHOID, -1,
-											  COERCION_EXPLICIT,
-											  COERCE_IMPLICIT_CAST,
-											  pathspec_loc);
-	if (coerced_path_spec == NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_DATATYPE_MISMATCH),
-				 errmsg("JSON path expression must be of type %s, not of type %s",
-						"jsonpath", format_type_be(pathspec_type)),
-				 parser_errposition(pstate, pathspec_loc)));
-	jsexpr->path_spec = coerced_path_spec;
+	if (jst_action)
+	{
+		JsonTransformAction *analyzed_jst_action = makeNode(JsonTransformAction);
+
+		analyzed_jst_action->op = jst_action->op;
+		analyzed_jst_action->location = jst_action->location;
+
+		switch (jst_action->op)
+		{
+			case TRANSFORM_INSERT:
+			case TRANSFORM_REPLACE:
+				if (jst_action->value_is_path)
+				{
+					/*
+					 * "= PATH <jsonpath>" source: the value to insert/replace
+					 * is produced at run time by evaluating this jsonpath
+					 * against the input document. Coerce it to jsonpath just
+					 * like the target path.
+					 */
+					Node	   *src = transformExprRecurse(pstate, jst_action->source_pathspec);
+					Oid			srctype = exprType(src);
+					int			srcloc = exprLocation(src);
+					Node	   *coerced_src = coerce_to_target_type(pstate, src, srctype,
+																	JSONPATHOID, -1,
+																	COERCION_EXPLICIT,
+																	COERCE_IMPLICIT_CAST,
+																	srcloc);
+
+					if (coerced_src == NULL)
+						ereport(ERROR,
+								(errcode(ERRCODE_DATATYPE_MISMATCH),
+								 errmsg("JSON path expression must be of type %s, not of type %s",
+										"jsonpath", format_type_be(srctype)),
+								 parser_errposition(pstate, srcloc)));
+					analyzed_jst_action->value_is_path = true;
+					analyzed_jst_action->source_pathspec = coerced_src;
+				}
+				else
+					analyzed_jst_action->value_expr = transformJsonValueExpr(pstate, func_name,
+																			 (JsonValueExpr *) jst_action->value_expr,
+																			 default_format,
+																			 JSONBOID,
+																			 false);
+				break;
+			case TRANSFORM_RENAME:
+				{
+				Node	   *v = transformExprRecurse(pstate, jst_action->value_expr);
+
+				v = coerce_to_target_type(pstate, v, exprType(v),
+										  TEXTOID, -1,
+										  COERCION_EXPLICIT,
+										  COERCE_IMPLICIT_CAST,
+										  exprLocation(v));
+				if (v == NULL)
+					ereport(ERROR,
+							errcode(ERRCODE_DATATYPE_MISMATCH),
+							errmsg("RENAME target must be convertible to text"),
+							parser_errposition(pstate, exprLocation(jst_action->value_expr)));
+				analyzed_jst_action->value_expr = v;
+				break;
+				}
+			case TRANSFORM_REMOVE:
+				/* REMOVE has no value_expr */
+				analyzed_jst_action->value_expr = NULL;
+				break;
+		}
+
+		path_spec = transformExprRecurse(pstate, jst_action->pathspec);
+		pathspec_type = exprType(path_spec);
+		pathspec_loc = exprLocation(path_spec);
+		coerced_path_spec = coerce_to_target_type(pstate, path_spec,
+												  pathspec_type,
+												  JSONPATHOID, -1,
+												  COERCION_EXPLICIT,
+												  COERCE_IMPLICIT_CAST,
+												  pathspec_loc);
+		if (coerced_path_spec == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATATYPE_MISMATCH),
+					 errmsg("JSON path expression must be of type %s, not of type %s",
+							"jsonpath", format_type_be(pathspec_type)),
+					 parser_errposition(pstate, pathspec_loc)));
+		analyzed_jst_action->pathspec = coerced_path_spec;
+
+		/* Resolve ON EXISTING / ON MISSING / ON NULL clauses + defaults. */
+		resolveJsonTransformBehaviors(pstate, jst_action, analyzed_jst_action);
+
+		jsexpr->action = analyzed_jst_action;
+	}
+	else
+	{
+		path_spec = transformExprRecurse(pstate, func->pathspec);
+		pathspec_type = exprType(path_spec);
+		pathspec_loc = exprLocation(path_spec);
+		coerced_path_spec = coerce_to_target_type(pstate, path_spec,
+												  pathspec_type,
+												  JSONPATHOID, -1,
+												  COERCION_EXPLICIT,
+												  COERCE_IMPLICIT_CAST,
+												  pathspec_loc);
+		if (coerced_path_spec == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATATYPE_MISMATCH),
+					 errmsg("JSON path expression must be of type %s, not of type %s",
+							"jsonpath", format_type_be(pathspec_type)),
+					 parser_errposition(pstate, pathspec_loc)));
+		jsexpr->path_spec = coerced_path_spec;
+	}
 
 	/* Transform and coerce the PASSING arguments to jsonb. */
 	transformJsonPassingArgs(pstate, func_name,
@@ -4776,6 +4993,16 @@ transformJsonFuncExpr(ParseState *pstate, JsonFuncExpr *func)
 													 jsexpr->returning);
 			break;
 
+		case JSON_TRANSFORM_OP:
+			/* Return type is always jsonb */
+			if (!OidIsValid(jsexpr->returning->typid))
+			{
+				jsexpr->returning->typid = JSONBOID;
+				jsexpr->returning->typmod = -1;
+			}
+			jsexpr->collation = get_typcollation(jsexpr->returning->typid);
+			/* No top-level ON EMPTY / ON ERROR for JSON_TRANSFORM */
+			break;
 		default:
 			elog(ERROR, "invalid JsonFuncExpr op %d", (int) func->op);
 			break;
