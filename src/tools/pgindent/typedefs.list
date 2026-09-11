@@ -2310,6 +2310,7 @@ PgStatShared_ReplSlot
 PgStatShared_SLRU
 PgStatShared_Subscription
 PgStatShared_Wal
+PgStat_AioCounters
 PgStat_ArchiverStats
 PgStat_Backend
 PgStat_BackendPending
