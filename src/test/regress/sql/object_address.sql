@@ -69,7 +69,9 @@ DECLARE
     objtype text;
 BEGIN
     FOR objtype IN VALUES ('toast table'), ('index column'), ('sequence column'),
-        ('toast table column'), ('view column'), ('materialized view column')
+        ('toast table column'), ('view column'), ('materialized view column'),
+        ('index whole row'), ('sequence whole row'), ('toast table whole row'),
+        ('view whole row'), ('materialized view whole row')
     LOOP
         BEGIN
             PERFORM pg_get_object_address(objtype, '{one}', '{}');
@@ -96,6 +98,7 @@ BEGIN
         ('table'), ('index'), ('sequence'), ('view'),
         ('materialized view'), ('foreign table'),
         ('table column'), ('foreign table column'),
+        ('table whole row'), ('foreign table whole row'),
         ('aggregate'), ('function'), ('procedure'), ('type'), ('cast'),
         ('table constraint'), ('domain constraint'), ('conversion'), ('default value'),
         ('operator'), ('operator class'), ('operator family'), ('rule'), ('trigger'),
@@ -168,7 +171,9 @@ WITH objects (type, name, args) AS (VALUES
     ('materialized view', '{addr_nsp, genmatview}', '{}'),
     ('foreign table', '{addr_nsp, genftable}', '{}'),
     ('table column', '{addr_nsp, gentable, b}', '{}'),
+    ('table whole row', '{addr_nsp, gentable}', '{}'),
     ('foreign table column', '{addr_nsp, genftable, a}', '{}'),
+    ('foreign table whole row', '{addr_nsp, genftable}', '{}'),
     ('aggregate', '{addr_nsp, genaggr}', '{int4}'),
     ('function', '{pg_catalog, pg_identify_object}', '{pg_catalog.oid, pg_catalog.oid, int4}'),
     ('procedure', '{addr_nsp, proc}', '{int4}'),
