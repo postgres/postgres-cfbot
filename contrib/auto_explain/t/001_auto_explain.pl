@@ -7,6 +7,7 @@ use warnings FATAL => 'all';
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
+use JSON::PP;
 
 # Runs the specified query and returns the emitted server log.
 # params is an optional hash mapping GUC names to values;
@@ -25,6 +26,15 @@ sub query_log
 	$node->safe_psql("postgres", $sql);
 
 	return slurp_file($log, $offset);
+}
+
+sub get_queryid
+{
+	my ($node, $sql) = @_;
+
+	my $plan = $node->safe_psql('postgres', 'EXPLAIN (VERBOSE, FORMAT JSON) ' . $sql);
+
+	return int(decode_json($plan)->[0]->{"Query Identifier"});
 }
 
 my $node = PostgreSQL::Test::Cluster->new('main');
@@ -238,5 +248,48 @@ FROM pg_get_loaded_modules()
 WHERE module_name = 'auto_explain';
 });
 like($res, qr/^auto_explain\|t\|auto_explain$/, "pg_get_loaded_modules() ok");
+
+# test detection of broken format
+$log_contents = query_log($node, "SELECT 1;",
+	{ "auto_explain.log_queryids" => "x" });
+
+like(
+	$log_contents,
+	qr/queryId "x" is not valid/,
+	"invalid queryid detected");
+
+my $query1 = "SELECT * FROM pg_class LIMIT 1";
+my $query2 = "SELECT * FROM pg_proc LIMIT 1";
+my $query3 = "SELECT * FROM pg_namespace LIMIT 1";
+
+my $queryid1 = get_queryid($node, $query1);
+my $queryid2 = get_queryid($node, $query2);
+my $queryid3 = get_queryid($node, $query3);
+
+my $qids = "$queryid1,$queryid2";
+
+$log_contents = query_log($node, $query1,
+	{ "auto_explain.log_queryids" => $qids });
+
+like(
+	$log_contents,
+	qr/Query Text: SELECT \* FROM pg_class LIMIT 1/,
+	"plan for query specified by queryid found");
+
+$log_contents = query_log($node, $query2,
+	{ "auto_explain.log_queryids" => $qids });
+
+like(
+	$log_contents,
+	qr/Query Text: SELECT \* FROM pg_proc LIMIT 1/,
+	"plan for query specified by queryid found");
+
+$log_contents = query_log($node, $query3,
+	{ "auto_explain.log_queryids" => $qids });
+
+unlike(
+	$log_contents,
+	qr/Query Text: SELECT \* FROM pg_namespace LIMIT 1/,
+	"plan for query with disallowed queryid not found");
 
 done_testing();
