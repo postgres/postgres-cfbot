@@ -1,0 +1,18 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1_begin s2_repack s1_sleep s1_commit s1_begin s2_lto s2_repack
+step s1_begin: BEGIN; INSERT INTO repack_timeout_other VALUES (1);
+step s2_repack: REPACK (CONCURRENTLY) repack_timeout_tab; <waiting ...>
+step s1_sleep: SELECT pg_sleep(0.5);
+pg_sleep
+--------
+        
+(1 row)
+
+step s1_commit: COMMIT;
+step s2_repack: <... completed>
+step s1_begin: BEGIN; INSERT INTO repack_timeout_other VALUES (1);
+step s2_lto: SET lock_timeout = '100ms';
+step s2_repack: REPACK (CONCURRENTLY) repack_timeout_tab; <waiting ...>
+step s2_repack: <... completed>
+ERROR:  canceling statement due to lock timeout
