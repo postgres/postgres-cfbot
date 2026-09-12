@@ -3698,6 +3698,10 @@ start_repack_decoding_worker(Oid relid)
 	shared->backend_pid = MyProcPid;
 	shared->backend_proc_number = MyProcNumber;
 
+	/* Pass our timeouts to the worker.  See RepackWorkerMain(). */
+	shared->lock_timeout = LockTimeout;
+	shared->transaction_timeout = TransactionTimeout;
+
 	mq = shm_mq_create((char *) BUFFERALIGN(shared->error_queue),
 					   REPACK_ERROR_QUEUE_SIZE);
 	shm_mq_set_receiver(mq, MyProc);
