@@ -12,6 +12,7 @@
 #include "access/htup_details.h"
 #include "lib/ilist.h"
 #include "lib/pairingheap.h"
+#include "replication/replslot_stats.h"
 #include "storage/sinval.h"
 #include "utils/hsearch.h"
 #include "utils/relcache.h"
@@ -674,31 +675,8 @@ struct ReorderBuffer
 	/* Max-heap for sizes of all top-level and sub transactions */
 	pairingheap *txn_heap;
 
-	/*
-	 * Statistics about transactions spilled to disk.
-	 *
-	 * A single transaction may be spilled repeatedly, which is why we keep
-	 * two different counters. For spilling, the transaction counter includes
-	 * both toplevel transactions and subtransactions.
-	 */
-	int64		spillTxns;		/* number of transactions spilled to disk */
-	int64		spillCount;		/* spill-to-disk invocation counter */
-	int64		spillBytes;		/* amount of data spilled to disk */
-
-	/* Statistics about transactions streamed to the decoding output plugin */
-	int64		streamTxns;		/* number of transactions streamed */
-	int64		streamCount;	/* streaming invocation counter */
-	int64		streamBytes;	/* amount of data decoded */
-
-	/* Number of times the logical_decoding_work_mem limit has been reached */
-	int64		memExceededCount;
-
-	/*
-	 * Statistics about all the transactions sent to the decoding output
-	 * plugin
-	 */
-	int64		totalTxns;		/* total number of transactions sent */
-	int64		totalBytes;		/* total amount of data decoded */
+	/* Replication slot statistics collected by logical decoding. */
+	PgStat_ReplSlotStats stats;
 };
 
 
