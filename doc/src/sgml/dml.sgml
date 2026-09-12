@@ -566,6 +566,19 @@ UPDATE products SET price = price * 1.10
   </para>
 
   <para>
+   In an <command>INSERT</command> with an
+   <literal>ON CONFLICT DO SELECT/UPDATE</literal> clause, it is also possible
+   to return the values excluded, if there is a conflict.  For example:
+<programlisting>
+INSERT INTO products AS p SELECT * FROM new_products
+  ON CONFLICT (product_no) DO UPDATE SET name = excluded.name
+  RETURNING p.product_no, p.name, excluded.price;
+</programlisting>
+   Excluded values will be <literal>NULL</literal> for rows that do not
+   conflict.
+  </para>
+
+  <para>
    If there are triggers (<xref linkend="triggers"/>) on the target table,
    the data available to <literal>RETURNING</literal> is the row as modified by
    the triggers.  Thus, inspecting columns computed by triggers is another

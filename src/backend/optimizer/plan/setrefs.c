@@ -203,6 +203,8 @@ static List *set_returning_clause_references(PlannerInfo *root,
 											 List *rlist,
 											 Plan *topplan,
 											 Index resultRelation,
+											 Index exclRelRTI,
+											 indexed_tlist *excl_itlist,
 											 int rtoffset);
 static List *set_windowagg_runcondition_references(PlannerInfo *root,
 												   List *runcondition,
@@ -1104,9 +1106,14 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 			{
 				ModifyTable *splan = (ModifyTable *) plan;
 				Plan	   *subplan = outerPlan(splan);
+				indexed_tlist *excl_itlist = NULL;
 
 				Assert(splan->plan.targetlist == NIL);
 				Assert(splan->plan.qual == NIL);
+
+				if (splan->onConflictAction == ONCONFLICT_UPDATE ||
+					splan->onConflictAction == ONCONFLICT_SELECT)
+					excl_itlist = build_tlist_index(splan->exclRelTlist);
 
 				splan->withCheckOptionLists =
 					fix_scan_list(root, splan->withCheckOptionLists,
@@ -1133,6 +1140,8 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 																rlist,
 																subplan,
 																resultrel,
+																splan->exclRelRTI,
+																excl_itlist,
 																rtoffset);
 						newRL = lappend(newRL, rlist);
 					}
@@ -1161,23 +1170,19 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 				if (splan->onConflictAction == ONCONFLICT_UPDATE ||
 					splan->onConflictAction == ONCONFLICT_SELECT)
 				{
-					indexed_tlist *itlist;
-
-					itlist = build_tlist_index(splan->exclRelTlist);
-
 					splan->onConflictSet =
 						fix_join_expr(root, splan->onConflictSet,
-									  NULL, itlist,
+									  NULL, excl_itlist,
 									  linitial_int(splan->resultRelations),
 									  rtoffset, NRM_EQUAL, NUM_EXEC_QUAL(plan));
 
 					splan->onConflictWhere = (Node *)
 						fix_join_expr(root, (List *) splan->onConflictWhere,
-									  NULL, itlist,
+									  NULL, excl_itlist,
 									  linitial_int(splan->resultRelations),
 									  rtoffset, NRM_EQUAL, NUM_EXEC_QUAL(plan));
 
-					pfree(itlist);
+					pfree(excl_itlist);
 
 					splan->exclRelTlist =
 						fix_scan_list(root, splan->exclRelTlist, rtoffset, 1);
@@ -2850,12 +2855,12 @@ build_tlist_index(List *tlist)
  * build_tlist_index_other_vars --- build a restricted tlist index
  *
  * This is like build_tlist_index, but we only index tlist entries that
- * are Vars belonging to some rel other than the one specified.  We will set
+ * are Vars belonging to some rel other than the ones specified.  We will set
  * has_ph_vars (allowing PlaceHolderVars to be matched), but not has_non_vars
  * (so nothing other than Vars and PlaceHolderVars can be matched).
  */
 static indexed_tlist *
-build_tlist_index_other_vars(List *tlist, int ignore_rel)
+build_tlist_index_other_vars(List *tlist, int ignore_rel1, int ignore_rel2)
 {
 	indexed_tlist *itlist;
 	tlist_vinfo *vinfo;
@@ -2880,7 +2885,7 @@ build_tlist_index_other_vars(List *tlist, int ignore_rel)
 		{
 			Var		   *var = (Var *) tle->expr;
 
-			if (var->varno != ignore_rel)
+			if (var->varno != ignore_rel1 && var->varno != ignore_rel2)
 			{
 				vinfo->varno = var->varno;
 				vinfo->varattno = var->varattno;
@@ -3114,10 +3119,14 @@ search_indexed_tlist_for_sortgroupref(Expr *node,
  *	  acceptable_rel should be zero so that any failure to match a Var will be
  *	  reported as an error.
  * 2) RETURNING clauses, which may contain both Vars of the target relation
- *	  and Vars of other relations. In this case we want to replace the
- *	  other-relation Vars by OUTER_VAR references, while leaving target Vars
- *	  alone. Thus inner_itlist = NULL and acceptable_rel = the ID of the
- *	  target relation should be passed.
+ *	  and Vars of other relations, including the EXCLUDED pseudo-relation in
+ *	  an INSERT ... ON CONFLICT DO SELECT/UPDATE command. In this case, we
+ *	  want to replace references to EXCLUDED with INNER_VAR references, and
+ *	  other-relation Vars with OUTER_VAR references, while leaving target Vars
+ *	  alone. Thus inner_itlist is to be EXCLUDED elements, if this is an
+ *	  INSERT with an ON CONFLICT DO SELECT/UPDATE clause, outer_itlist is any
+ *	  other non-target relation elements, and acceptable_rel = the ID of the
+ *	  target relation.
  * 3) ON CONFLICT SET and WHERE clauses.  Here references to EXCLUDED are
  *	  to be replaced with INNER_VAR references, while leaving target Vars (the
  *	  to-be-updated relation) alone. Correspondingly inner_itlist is to be
@@ -3178,15 +3187,16 @@ fix_join_expr_mutator(Node *node, fix_join_expr_context *context)
 
 		/*
 		 * Verify that Vars with non-default varreturningtype only appear in
-		 * the RETURNING list, and refer to the target relation.
+		 * the RETURNING list, and that OLD/NEW Vars refer to the target
+		 * relation.
 		 */
 		if (var->varreturningtype != VAR_RETURNING_DEFAULT)
 		{
-			if (context->inner_itlist != NULL ||
-				context->outer_itlist == NULL ||
+			if (context->outer_itlist == NULL ||
 				context->acceptable_rel == 0)
-				elog(ERROR, "variable returning old/new found outside RETURNING list");
-			if (var->varno != context->acceptable_rel)
+				elog(ERROR, "variable returning old/new/excluded found outside RETURNING list");
+			if (var->varreturningtype != VAR_RETURNING_EXCLUDED &&
+				var->varno != context->acceptable_rel)
 				elog(ERROR, "wrong varno %d (expected %d) for variable returning old/new",
 					 var->varno, context->acceptable_rel);
 		}
@@ -3416,11 +3426,14 @@ fix_upper_expr_mutator(Node *node, fix_upper_expr_context *context)
  *
  * If the query involves more than just the result table, we have to
  * adjust any Vars that refer to other tables to reference junk tlist
- * entries in the top subplan's targetlist.  Vars referencing the result
- * table should be left alone, however (the executor will evaluate them
- * using the actual heap tuple, after firing triggers if any).  In the
- * adjusted RETURNING list, result-table Vars will have their original
- * varno (plus rtoffset), but Vars for other rels will have varno OUTER_VAR.
+ * entries in the top subplan's targetlist.  Vars referencing the EXCLUDED
+ * pseudo-relation of an INSERT ... ON CONFLICT DO SELECT/UPDATE command
+ * should be adjusted to reference INNER_VAR, and Vars referencing the result
+ * table should be left alone (the executor will evaluate them using the
+ * actual heap tuple, after firing triggers if any). In the adjusted RETURNING
+ * list, result-table Vars will have their original varno (plus rtoffset), but
+ * Vars for the EXCLUDED pseudo-relation and other rels will have varno
+ * INNER_VAR and OUTER_VAR espectively.
  *
  * We also must perform opcode lookup and add regclass OIDs to
  * root->glob->relationOids.
@@ -3429,6 +3442,8 @@ fix_upper_expr_mutator(Node *node, fix_upper_expr_context *context)
  * 'topplan': the top subplan node that will be just below the ModifyTable
  *		node (note it's not yet passed through set_plan_refs)
  * 'resultRelation': RT index of the associated result relation
+ * 'exclRelRTI': RT index of EXCLUDED pseudo-relation
+ * 'excl_itlist': EXCLUDED pseudo-relation elements (or NULL)
  * 'rtoffset': how much to increment varnos by
  *
  * Note: the given 'root' is for the parent query level, not the 'topplan'.
@@ -3443,6 +3458,8 @@ set_returning_clause_references(PlannerInfo *root,
 								List *rlist,
 								Plan *topplan,
 								Index resultRelation,
+								Index exclRelRTI,
+								indexed_tlist *excl_itlist,
 								int rtoffset)
 {
 	indexed_tlist *itlist;
@@ -3450,9 +3467,11 @@ set_returning_clause_references(PlannerInfo *root,
 	/*
 	 * We can perform the desired Var fixup by abusing the fix_join_expr
 	 * machinery that formerly handled inner indexscan fixup.  We search the
-	 * top plan's targetlist for Vars of non-result relations, and use
-	 * fix_join_expr to convert RETURNING Vars into references to those tlist
-	 * entries, while leaving result-rel Vars as-is.
+	 * top plan's targetlist for Vars of non-result relations (other than
+	 * EXCLUDED), and use fix_join_expr to convert RETURNING Vars into
+	 * references to those tlist entries, and convert RETURNING EXCLUDED Vars
+	 * into references to excl_itlist entries, while leaving result-rel Vars
+	 * as-is.
 	 *
 	 * PlaceHolderVars will also be sought in the targetlist, but no
 	 * more-complex expressions will be.  Note that it is not possible for a
@@ -3461,12 +3480,13 @@ set_returning_clause_references(PlannerInfo *root,
 	 * prepared to pick apart the PlaceHolderVar and evaluate its contained
 	 * expression instead.
 	 */
-	itlist = build_tlist_index_other_vars(topplan->targetlist, resultRelation);
+	itlist = build_tlist_index_other_vars(topplan->targetlist, resultRelation,
+										  exclRelRTI);
 
 	rlist = fix_join_expr(root,
 						  rlist,
 						  itlist,
-						  NULL,
+						  excl_itlist,
 						  resultRelation,
 						  rtoffset,
 						  NRM_EQUAL,
