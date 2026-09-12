@@ -22,6 +22,7 @@
 #include "parser/parse_expr.h"
 #include "utils/builtins.h"
 #include "utils/jsonb.h"
+#include "utils/jsonfuncs.h"
 
 
 /* SubscriptingRefState.workspace for jsonb subscripting execution */
@@ -33,6 +34,17 @@ typedef struct JsonbSubWorkspace
 	Datum	   *index;			/* Subscript values in Datum format */
 } JsonbSubWorkspace;
 
+typedef struct
+{
+	ForeachAIterator pub;
+	JsonbIterator *it;
+	Oid			target_typid;
+	int32		target_typmod;
+	ForeachAIteratorCoercionStrategy coercion_strategy;
+	bool		skip_nested;
+	MemoryContext cache_mcxt;
+	void	   *cache;
+} JsonbForeachAIterator;
 
 /*
  * Finish parse analysis of a SubscriptingRef expression for a jsonb.
@@ -395,6 +407,196 @@ jsonb_exec_setup(const SubscriptingRef *sbsref,
 }
 
 /*
+ * Convert JsonbValue to Datum. This function is used by
+ * generic array iterator.
+ */
+static Datum
+JsonbValueToDatum(JsonbValue *jbv,
+				  Oid *typid, int32 *typmod, bool *isnull,
+				  void **cache, MemoryContext mcxt,
+				  Oid target_typid, int32 target_typmod,
+				  ForeachAIteratorCoercionStrategy coercion_strategy)
+{
+	Datum		result;
+
+	*isnull = false;
+	*typmod = -1;
+
+	if (coercion_strategy == COERCION_STRATEGY_COMMON_TYPE)
+	{
+		result = PointerGetDatum(JsonbValueToJsonb(jbv));
+		*typid = JSONBOID;
+
+		return result;
+	}
+	else if (coercion_strategy == COERCION_STRATEGY_COERCION)
+	{
+		Jsonb	   *jb = JsonbValueToJsonb(jbv);
+
+		result = json_populate_type(PointerGetDatum(jb), JSONBOID,
+									target_typid, target_typmod,
+									cache, mcxt,
+									isnull, false, NULL);
+
+		*typid = target_typid;
+		*typmod = target_typmod;
+
+		return result;
+	}
+	else
+	{
+		/*
+		 * These types can holds JSON null, so must be processed
+		 * before processing jbvNull. We don't want to convert
+		 * JSON null, to SQL null, when targer is of JSON.
+		 */
+		if (target_typid == JSONBOID || target_typid == JSONOID)
+		{
+			Jsonb	   *jb = JsonbValueToJsonb(jbv);
+
+			if (target_typid == JSONOID)
+			{
+				char	   *str;
+
+				str = JsonbToCString(NULL, &jb->root, VARSIZE(jb));
+				result = PointerGetDatum(cstring_to_text(str));
+			}
+			else
+				result = PointerGetDatum(jb);
+
+			*typid = target_typid;
+		}
+
+		/*
+		 * For special cases we can skip conversion to Jsonb
+		 * and possibly IO cast.
+		 */
+		else if (jbv->type == jbvNull)
+		{
+			result = (Datum) 0;
+			*isnull = true;
+			*typid = target_typid;
+		}
+		else if (jbv->type == jbvString)
+		{
+			text	   *txt = cstring_to_text_with_len(jbv->val.string.val,
+													   jbv->val.string.len);
+
+			result = PointerGetDatum(txt);
+			*typid = TEXTOID;
+		}
+		else if (jbv->type == jbvNumeric)
+		{
+			result = PointerGetDatum(jbv->val.numeric);
+			*typid = NUMERICOID;
+		}
+		else if (jbv->type == jbvBool)
+		{
+			result = BoolGetDatum(jbv->val.boolean);
+			*typid = BOOLOID;
+		}
+
+		/* generic conversion */
+		else
+		{
+			Jsonb	   *jb = JsonbValueToJsonb(jbv);
+
+			result = json_populate_type(PointerGetDatum(jb), JSONBOID,
+										target_typid, target_typmod,
+										cache, mcxt,
+										isnull, false, NULL);
+
+			*typid = target_typid;
+			*typmod = target_typmod;
+		}
+
+		return result;
+	}
+}
+
+static bool
+jsonb_foreach_a_iterate(ForeachAIterator *self,
+						Datum *value, bool *isnull,
+						Oid *typid, int32 *typmod)
+{
+	JsonbForeachAIterator *iter = (JsonbForeachAIterator *) self;
+	JsonbIteratorToken r;
+	JsonbValue	jbv;
+
+	while ((r = JsonbIteratorNext(&iter->it, &jbv, iter->skip_nested)) != WJB_DONE)
+	{
+		iter->skip_nested = true;
+
+		if (r == WJB_ELEM)
+		{
+			*value = JsonbValueToDatum(&jbv, typid, typmod, isnull,
+									   &iter->cache, iter->cache_mcxt,
+									   iter->target_typid, iter->target_typmod,
+									   iter->coercion_strategy);
+
+			return true;
+		}
+	}
+
+	return false;
+}
+
+/*
+ * Create foreach array iterator for jsonb array
+ */
+static ForeachAIterator *
+create_jsonb_foreach_a_iterator(Datum value, Oid typid, int32 typmod,
+								int slice, ForeachAIteratorOptions *options)
+{
+	JsonbForeachAIterator *iter = palloc0(sizeof(JsonbForeachAIterator));
+	Jsonb	   *jb;
+
+	Assert(typid == JSONBOID);
+
+	if (slice > 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("jsonb array iterator doesn't support slicing")));
+
+	jb = DatumGetJsonbP(value);
+
+	/*
+	 * Jsonb iterator is designed like jsonb_array_element. Input value
+	 * must be json array.
+	 */
+	if (JB_ROOT_IS_SCALAR(jb))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("cannot iterate over a scalar value.")));
+	else if (JB_ROOT_IS_OBJECT(jb))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("cannot iterate over an object value.")));
+
+	Assert(JB_ROOT_IS_ARRAY(jb));
+
+	iter->pub.iterate = jsonb_foreach_a_iterate;
+	iter->it = JsonbIteratorInit(&jb->root);
+
+	if (options)
+	{
+		iter->target_typid = options->target_typid;
+		iter->target_typmod = options->target_typmod;
+		iter->coercion_strategy = options->coercion_strategy;
+	}
+	else
+	{
+		iter->target_typid = InvalidOid;
+		iter->target_typmod = -1;
+		iter->coercion_strategy = COERCION_STRATEGY_COMMON_TYPE;
+	}
+
+	iter->cache_mcxt = CurrentMemoryContext;
+
+	return (ForeachAIterator *) iter;
+}
+
+/*
  * jsonb_subscript_handler
  *		Subscripting handler for jsonb.
  *
@@ -407,7 +609,8 @@ jsonb_subscript_handler(PG_FUNCTION_ARGS)
 		.exec_setup = jsonb_exec_setup,
 		.fetch_strict = true,	/* fetch returns NULL for NULL inputs */
 		.fetch_leakproof = true,	/* fetch returns NULL for bad subscript */
-		.store_leakproof = false	/* ... but assignment throws error */
+		.store_leakproof = false,	/* ... but assignment throws error */
+		.create_foreach_a_iterator = create_jsonb_foreach_a_iterator
 	};
 
 	PG_RETURN_POINTER(&sbsroutines);

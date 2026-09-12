@@ -4869,10 +4869,10 @@ begin
 $$ language plpgsql;
 -- should fail
 select foreach_test(ARRAY[1,2,3,4]);
-ERROR:  FOREACH ... SLICE loop variable must be of an array type
+ERROR:  cannot to cast a value of array type to scalar type
 CONTEXT:  PL/pgSQL function foreach_test(anyarray) line 4 at FOREACH over array
 select foreach_test(ARRAY[[1,2],[3,4]]);
-ERROR:  FOREACH ... SLICE loop variable must be of an array type
+ERROR:  cannot to cast a value of array type to scalar type
 CONTEXT:  PL/pgSQL function foreach_test(anyarray) line 4 at FOREACH over array
 create or replace function foreach_test(anyarray)
 returns void as $$
