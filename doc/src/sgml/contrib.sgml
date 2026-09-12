@@ -160,6 +160,7 @@ CREATE EXTENSION <replaceable>extension_name</replaceable>;
  &pgprewarm;
  &pgrowlocks;
  &pgstashadvice;
+ &pgstatlog;
  &pgstatstatements;
  &pgstattuple;
  &pgsurgery;
