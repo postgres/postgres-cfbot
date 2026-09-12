@@ -429,9 +429,38 @@ CREATE PUBLICATION testpub7 FOR ALL TABLES EXCEPT (TABLE ONLY testpub_tbl_parent
 Except tables:
     "public.testpub_tbl_parent"
 
+-- Listing the same table twice is fine as long as the mentions agree on
+-- ONLY-ness.
+CREATE PUBLICATION testpub_dup1 FOR TABLE testpub_tbl_parent, TABLE testpub_tbl_parent;
+\dRp+ testpub_dup1
+                                                           Publication testpub_dup1
+          Owner           | All tables | All sequences | Inserts | Updates | Deletes | Truncates | Generated columns | Via root | Description 
+--------------------------+------------+---------------+---------+---------+---------+-----------+-------------------+----------+-------------
+ regress_publication_user | f          | f             | t       | t       | t       | t         | none              | f        | 
+Tables:
+    "public.testpub_tbl_child"
+    "public.testpub_tbl_parent"
+
+CREATE PUBLICATION testpub_dup2 FOR TABLE ONLY testpub_tbl_parent, TABLE ONLY testpub_tbl_parent;
+\dRp+ testpub_dup2
+                                                           Publication testpub_dup2
+          Owner           | All tables | All sequences | Inserts | Updates | Deletes | Truncates | Generated columns | Via root | Description 
+--------------------------+------------+---------------+---------+---------+---------+-----------+-------------------+----------+-------------
+ regress_publication_user | f          | f             | t       | t       | t       | t         | none              | f        | 
+Tables:
+    "public.testpub_tbl_parent"
+
+-- But mixing ONLY and non-ONLY mentions of the same table is ambiguous
+-- (would descendants be included or not?) and must be rejected.
 RESET client_min_messages;
+CREATE PUBLICATION testpub_conflict1 FOR TABLE testpub_tbl_parent, TABLE ONLY testpub_tbl_parent;
+ERROR:  conflicting ONLY specifications for table "testpub_tbl_parent"
+CREATE PUBLICATION testpub_conflict2 FOR TABLE ONLY testpub_tbl_parent, TABLE testpub_tbl_parent;
+ERROR:  conflicting ONLY specifications for table "testpub_tbl_parent"
+SET client_min_messages = 'ERROR';
 DROP TABLE testpub_tbl_parent, testpub_tbl_child;
 DROP PUBLICATION testpub3, testpub4, testpub5, testpub6, testpub7;
+DROP PUBLICATION testpub_dup1, testpub_dup2;
 ---------------------------------------------
 -- EXCEPT clause tests for partitioned tables
 ---------------------------------------------
@@ -606,8 +635,28 @@ HINT:  To enable updating the table, set REPLICA IDENTITY using ALTER TABLE.
 ALTER PUBLICATION testpub_forparted DROP TABLE testpub_parted;
 -- works again, because update is no longer replicated
 UPDATE testpub_parted2 SET a = 2;
+-- Mixing ONLY and non-ONLY mentions of the same partitioned table is silently
+-- tolerated because ONLY has no effect for partitioned tables anyway.
+CREATE PUBLICATION testpub_dup1 FOR TABLE testpub_parted, TABLE ONLY testpub_parted;
+\dRp+ testpub_dup1
+                                                           Publication testpub_dup1
+          Owner           | All tables | All sequences | Inserts | Updates | Deletes | Truncates | Generated columns | Via root | Description 
+--------------------------+------------+---------------+---------+---------+---------+-----------+-------------------+----------+-------------
+ regress_publication_user | f          | f             | t       | t       | t       | t         | none              | f        | 
+Tables:
+    "public.testpub_parted"
+
+CREATE PUBLICATION testpub_dup2 FOR TABLE ONLY testpub_parted, TABLE testpub_parted;
+\dRp+ testpub_dup2
+                                                           Publication testpub_dup2
+          Owner           | All tables | All sequences | Inserts | Updates | Deletes | Truncates | Generated columns | Via root | Description 
+--------------------------+------------+---------------+---------+---------+---------+-----------+-------------------+----------+-------------
+ regress_publication_user | f          | f             | t       | t       | t       | t         | none              | f        | 
+Tables:
+    "public.testpub_parted"
+
 DROP TABLE testpub_parted1, testpub_parted2;
-DROP PUBLICATION testpub_forparted, testpub_forparted1;
+DROP PUBLICATION testpub_forparted, testpub_forparted1, testpub_dup1, testpub_dup2;
 -- Tests for row filters
 CREATE TABLE testpub_rf_tbl1 (a integer, b text);
 CREATE TABLE testpub_rf_tbl2 (c text, d integer);
