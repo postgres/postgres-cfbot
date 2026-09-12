@@ -389,6 +389,16 @@ pgpa_decompose_join(pgpa_plan_walker_context *walker, Plan *plan,
 		case T_NestLoop:
 
 			/*
+			 * create_nestloop_plan() may have capped the inner side with a
+			 * gating Result that evaluates outer-only join clauses as a
+			 * one-time filter.  It sits above any Material or Memoize node,
+			 * so look through it before determining the join strategy.
+			 */
+			if (elidedinner == NULL && is_result_node_with_child(innerplan) &&
+				((Result *) innerplan)->resconstantqual != NULL)
+				elidedinner = pgpa_descend_node(pstmt, &innerplan);
+
+			/*
 			 * The planner may have chosen to place a Material or Memoize node
 			 * on the inner side of the NestLoop; if this is present, we
 			 * record it as part of the join strategy. (However, scan-level
