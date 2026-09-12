@@ -832,13 +832,15 @@ pg_stat_get_backend_subxact(PG_FUNCTION_ARGS)
 	tupdesc = CreateTemplateTupleDesc(PG_STAT_GET_SUBXACT_COLS);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "subxact_count",
 					   INT4OID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "subxact_overflow",
+	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "subxact_overflowed",
 					   BOOLOID, -1, 0);
 
 	TupleDescFinalize(tupdesc);
 	BlessTupleDesc(tupdesc);
 
-	if ((local_beentry = pgstat_get_local_beentry_by_proc_number(procNumber)) != NULL)
+	/* Report the details of a session only to a caller allowed to see them */
+	if ((local_beentry = pgstat_get_local_beentry_by_proc_number(procNumber)) != NULL &&
+		HAS_PGSTAT_PERMISSIONS(local_beentry->backendStatus.st_userid))
 	{
 		/* Fill values and NULLs */
 		values[0] = Int32GetDatum(local_beentry->backend_subxact_count);
@@ -1673,6 +1675,7 @@ pg_stat_get_backend_io(PG_FUNCTION_ARGS)
 	ReturnSetInfo *rsinfo;
 	BackendType bktype;
 	int			pid;
+	Oid			userid;
 	PgStat_Backend *backend_stats;
 	PgStat_BktypeIO *bktype_stats;
 
@@ -1680,9 +1683,10 @@ pg_stat_get_backend_io(PG_FUNCTION_ARGS)
 	rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 
 	pid = PG_GETARG_INT32(0);
-	backend_stats = pgstat_fetch_stat_backend_by_pid(pid, &bktype);
+	backend_stats = pgstat_fetch_stat_backend_by_pid(pid, &bktype, &userid);
 
-	if (!backend_stats)
+	/* Report the details of a session only to a caller allowed to see them */
+	if (!backend_stats || !HAS_PGSTAT_PERMISSIONS(userid))
 		return (Datum) 0;
 
 	bktype_stats = &backend_stats->io_stats;
@@ -1769,13 +1773,15 @@ Datum
 pg_stat_get_backend_wal(PG_FUNCTION_ARGS)
 {
 	int			pid;
+	Oid			userid;
 	PgStat_Backend *backend_stats;
 	PgStat_WalCounters bktype_stats;
 
 	pid = PG_GETARG_INT32(0);
-	backend_stats = pgstat_fetch_stat_backend_by_pid(pid, NULL);
+	backend_stats = pgstat_fetch_stat_backend_by_pid(pid, NULL, &userid);
 
-	if (!backend_stats)
+	/* Report the details of a session only to a caller allowed to see them */
+	if (!backend_stats || !HAS_PGSTAT_PERMISSIONS(userid))
 		PG_RETURN_NULL();
 
 	bktype_stats = backend_stats->wal_counters;
@@ -1857,6 +1863,7 @@ Datum
 pg_stat_get_backend_lock(PG_FUNCTION_ARGS)
 {
 	int			pid;
+	Oid			userid;
 	ReturnSetInfo *rsinfo;
 	PgStat_Backend *backend_stats;
 
@@ -1864,9 +1871,10 @@ pg_stat_get_backend_lock(PG_FUNCTION_ARGS)
 	rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 
 	pid = PG_GETARG_INT32(0);
-	backend_stats = pgstat_fetch_stat_backend_by_pid(pid, NULL);
+	backend_stats = pgstat_fetch_stat_backend_by_pid(pid, NULL, &userid);
 
-	if (!backend_stats)
+	/* Report the details of a session only to a caller allowed to see them */
+	if (!backend_stats || !HAS_PGSTAT_PERMISSIONS(userid))
 		return (Datum) 0;
 
 	pg_stat_lock_build_tuples(rsinfo, backend_stats->lock_stats.stats,
