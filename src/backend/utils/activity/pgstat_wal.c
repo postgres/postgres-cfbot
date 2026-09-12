@@ -17,6 +17,7 @@
 
 #include "postgres.h"
 
+#include "access/xact.h"
 #include "executor/instrument.h"
 #include "utils/pgstat_internal.h"
 
@@ -51,7 +52,7 @@ pgstat_report_wal(bool force)
 	nowait = !force;
 
 	/* flush wal stats */
-	(void) pgstat_wal_flush_cb(nowait);
+	(void) pgstat_wal_flush_cb(nowait, !IsTransactionOrTransactionBlock());
 	pgstat_flush_backend(nowait, PGSTAT_BACKEND_FLUSH_WAL);
 
 	/* flush IO stats */
@@ -88,7 +89,7 @@ pgstat_wal_have_pending(void)
  * acquired. Otherwise return false.
  */
 bool
-pgstat_wal_flush_cb(bool nowait)
+pgstat_wal_flush_cb(bool nowait, bool xact_boundary)
 {
 	PgStatShared_Wal *stats_shmem = &pgStatLocal.shmem->wal;
 	WalUsage	wal_usage_diff = {0};
