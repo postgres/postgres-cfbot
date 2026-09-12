@@ -28,6 +28,7 @@ tests += {
   'regress': {
     'sql': [
       'test_extensible',
+      'partial_agg',
     ],
   },
 }
