@@ -1510,6 +1510,81 @@ execute_extension_script(Oid extensionOid, ExtensionControlFile *control,
 }
 
 /*
+ * GetExtensionCreationState - report the current extension-script state
+ *
+ * Used by the parallel-query machinery to carry creating_extension and
+ * CurrentExtensionObject to workers, so a worker sees the same
+ * extension-script state as the leader.
+ */
+void
+GetExtensionCreationState(bool *creating, Oid *extensionObject)
+{
+	*creating = creating_extension;
+	*extensionObject = CurrentExtensionObject;
+}
+
+/*
+ * SetExtensionCreationState - restore extension-script state in a worker
+ */
+void
+SetExtensionCreationState(bool creating, Oid extensionObject)
+{
+	creating_extension = creating;
+	CurrentExtensionObject = extensionObject;
+}
+
+/*
+ * CurrentExtensionRequires - does the running script's extension require this
+ * extension?
+ *
+ * Only direct requirements count; those are the ones whose schemas
+ * execute_extension_script puts into the script's search path.
+ */
+bool
+CurrentExtensionRequires(Oid extensionId)
+{
+	Relation	depRel;
+	ScanKeyData key[2];
+	SysScanDesc depScan;
+	HeapTuple	depTup;
+	bool		result = false;
+
+	if (!OidIsValid(CurrentExtensionObject))
+		return false;
+
+	depRel = table_open(DependRelationId, AccessShareLock);
+
+	ScanKeyInit(&key[0],
+				Anum_pg_depend_classid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(ExtensionRelationId));
+	ScanKeyInit(&key[1],
+				Anum_pg_depend_objid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(CurrentExtensionObject));
+
+	depScan = systable_beginscan(depRel, DependDependerIndexId, true,
+								 NULL, 2, key);
+
+	while (HeapTupleIsValid(depTup = systable_getnext(depScan)))
+	{
+		Form_pg_depend pg_depend = (Form_pg_depend) GETSTRUCT(depTup);
+
+		if (pg_depend->refclassid == ExtensionRelationId &&
+			pg_depend->refobjid == extensionId)
+		{
+			result = true;
+			break;
+		}
+	}
+
+	systable_endscan(depScan);
+	table_close(depRel, AccessShareLock);
+
+	return result;
+}
+
+/*
  * Find or create an ExtensionVersionInfo for the specified version name
  *
  * Currently, we just use a List of the ExtensionVersionInfo's.  Searching

@@ -56,6 +56,8 @@ typedef struct _FuncCandidateList
 #define FGC_ARGNAMES_VALID	0x0100	/* Found a fully-valid use of argnames */
 /* These bits are actually filled by func_get_detail: */
 #define FGC_VARIADIC_FAIL	0x0200	/* Disallowed VARIADIC with named args */
+/* This bit is set only while an extension script is running: */
+#define FGC_UNTRUSTED_SKIP	0x0400	/* Ignored an untrusted candidate */
 
 /*
  * Result of checkTempNamespaceStatus
@@ -122,6 +124,8 @@ extern FuncCandidateList FuncnameGetCandidates(List *names,
 											   bool include_out_arguments,
 											   bool missing_ok,
 											   int *fgc_flags);
+extern bool ObjectIsTrustedInExtensionScript(Oid classId, Oid objectId,
+											 Oid namespaceId, Oid ownerId);
 extern bool FunctionIsVisible(Oid funcid);
 
 extern Oid	OpernameGetOprid(List *names, Oid oprleft, Oid oprright);

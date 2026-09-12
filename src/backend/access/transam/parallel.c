@@ -26,6 +26,7 @@
 #include "catalog/pg_enum.h"
 #include "catalog/storage.h"
 #include "commands/async.h"
+#include "commands/extension.h"
 #include "commands/vacuum.h"
 #include "executor/execParallel.h"
 #include "libpq/libpq.h"
@@ -90,9 +91,11 @@ typedef struct FixedParallelState
 	Oid			current_user_id;
 	Oid			temp_namespace_id;
 	Oid			temp_toast_namespace_id;
+	Oid			current_extension_object;
 	int			sec_context;
 	bool		session_user_is_superuser;
 	bool		role_is_superuser;
+	bool		creating_extension;
 	PGPROC	   *parallel_leader_pgproc;
 	pid_t		parallel_leader_pid;
 	ProcNumber	parallel_leader_proc_number;
@@ -348,6 +351,8 @@ InitializeParallelDSM(ParallelContext *pcxt)
 	fps->role_is_superuser = current_role_is_superuser;
 	GetTempNamespaceState(&fps->temp_namespace_id,
 						  &fps->temp_toast_namespace_id);
+	GetExtensionCreationState(&fps->creating_extension,
+							  &fps->current_extension_object);
 	fps->parallel_leader_pgproc = MyProc;
 	fps->parallel_leader_pid = MyProcPid;
 	fps->parallel_leader_proc_number = MyProcNumber;
@@ -1533,6 +1538,10 @@ ParallelWorkerMain(Datum main_arg)
 	/* Restore temp-namespace state to ensure search path matches leader's. */
 	SetTempNamespaceState(fps->temp_namespace_id,
 						  fps->temp_toast_namespace_id);
+
+	/* Restore extension-script state, so the worker matches the leader. */
+	SetExtensionCreationState(fps->creating_extension,
+							  fps->current_extension_object);
 
 	/* Restore uncommitted enums. */
 	uncommittedenumsspace = shm_toc_lookup(toc, PARALLEL_KEY_UNCOMMITTEDENUMS,
