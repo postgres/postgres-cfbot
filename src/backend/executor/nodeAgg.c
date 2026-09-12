@@ -1133,6 +1133,16 @@ finalize_aggregate(AggState *aggstate,
 		*resultIsNull = pergroupstate->transValueIsNull;
 	}
 
+	/*
+	 * If an ON EMPTY default is specified and the normal result came out
+	 * NULL, substitute the default -- i.e. this is exactly
+	 * COALESCE(normal_result, default_expression).
+	 */
+	if (peragg->aggonemptystate != NULL && *resultIsNull)
+		*resultVal = ExecEvalExpr(peragg->aggonemptystate,
+								  aggstate->ss.ps.ps_ExprContext,
+								  resultIsNull);
+
 	MemoryContextSwitchTo(oldContext);
 }
 
@@ -4039,6 +4049,18 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 		else
 			pertrans->aggshared = true;
 		ReleaseSysCache(aggTuple);
+
+		/*
+		 * Build expression state for the ON EMPTY default expression.  This
+		 * is per-aggregate (peragg), not per-transition-state, so it must be
+		 * done for every aggref even when its transition state is shared
+		 * with another aggregate that already built its pertrans above.
+		 */
+		if (aggref->aggonempty)
+			peragg->aggonemptystate = ExecInitExpr(aggref->aggonempty,
+												   (PlanState *) aggstate);
+		else
+			peragg->aggonemptystate = NULL;
 	}
 
 	/*

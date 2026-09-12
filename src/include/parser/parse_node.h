@@ -70,6 +70,7 @@ typedef enum ParseExprKind
 	EXPR_KIND_DOMAIN_CHECK,		/* CHECK constraint for a domain */
 	EXPR_KIND_COLUMN_DEFAULT,	/* default value for a table column */
 	EXPR_KIND_FUNCTION_DEFAULT, /* default parameter value for function */
+	EXPR_KIND_AGG_ON_EMPTY,		/* aggregate/window ON EMPTY default value */
 	EXPR_KIND_INDEX_EXPRESSION, /* index expression */
 	EXPR_KIND_INDEX_PREDICATE,	/* index predicate */
 	EXPR_KIND_STATS_EXPRESSION, /* extended statistics expression */
