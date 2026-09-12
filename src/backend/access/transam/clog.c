@@ -811,7 +811,6 @@ CLOGShmemRequest(void *arg)
 	SimpleLruRequest(.desc = &XactSlruDesc,
 					 .name = "transaction",
 					 .Dir = "pg_xact",
-					 .long_segment_names = false,
 
 					 .nslots = CLOGShmemBuffers(),
 					 .nlsns = CLOG_LSNS_PER_PAGE,

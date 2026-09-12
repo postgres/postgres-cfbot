@@ -1785,7 +1785,6 @@ MultiXactShmemRequest(void *arg)
 	SimpleLruRequest(.desc = &MultiXactOffsetSlruDesc,
 					 .name = "multixact_offset",
 					 .Dir = "pg_multixact/offsets",
-					 .long_segment_names = false,
 
 					 .nslots = multixact_offset_buffers,
 
@@ -1800,7 +1799,6 @@ MultiXactShmemRequest(void *arg)
 	SimpleLruRequest(.desc = &MultiXactMemberSlruDesc,
 					 .name = "multixact_member",
 					 .Dir = "pg_multixact/members",
-					 .long_segment_names = true,
 
 					 .nslots = multixact_member_buffers,
 
