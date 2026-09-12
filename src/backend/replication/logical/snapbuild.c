@@ -517,8 +517,22 @@ SnapBuildInitialSnapshot(SnapBuild *builder)
 						(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
 						 errmsg("initial slot snapshot too large")));
 
-			newxip[newxcnt++] = xid;
+			newxip[newxcnt] = xid;
 		}
+		else
+		{
+			/*
+			 * The commit record of this transaction has been decoded, but the
+			 * commit itself may not have finished, if it's still in the process
+			 * of removing itself from the procarray or waiting for a synchronous
+			 * standby.  To avoid producing a snapshot that inconsistently shows
+			 * this transaction as committed, wait until it actually is.
+			 */
+			if (!RecoveryInProgress())
+				XactLockTableWait(xid, NULL, NULL, XLTW_None);
+		}
+
+		newxcnt++;
 
 		TransactionIdAdvance(xid);
 	}
