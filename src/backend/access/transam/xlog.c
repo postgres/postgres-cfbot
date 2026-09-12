@@ -8671,6 +8671,19 @@ XLogRestorePoint(const char *rpName)
 	return RecPtr;
 }
 
+void
+XLogRecoveryBoundary(void)
+{
+	xl_recovery_boundary xlrec;
+
+	xlrec.boundary_time = GetCurrentTimestamp();
+
+	XLogBeginInsert();
+	XLogRegisterData(&xlrec, sizeof(xlrec));
+
+	(void) XLogInsert(RM_XLOG2_ID, XLOG2_RECOVERY_BOUNDARY);
+}
+
 /*
  * Write an empty XLOG record to assign a distinct LSN.
  *
