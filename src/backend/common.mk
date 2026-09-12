@@ -22,7 +22,10 @@ objfiles.txt: Makefile $(SUBDIROBJS) $(OBJS)
 	$(if $(filter-out $(OBJS),$?),( $(if $(SUBDIROBJS),cat $(SUBDIROBJS); )echo $(addprefix $(subdir)/,$(OBJS)) ) >$@,touch $@)
 
 ifeq ($(with_llvm), yes)
+# Ensure that .bc files get built when building .o files
 objfiles.txt: $(patsubst %.o,%.bc, $(OBJS))
+# Ensure that each .bc file depends on the corresponding .o file, to ensure
+# the dependencies required for it to be built are present.
 $(patsubst %.o,%.bc, $(OBJS)): $(OBJS)
 endif
 
