@@ -95,7 +95,7 @@ static int	alpn_cb(SSL *ssl,
 					unsigned int inlen,
 					void *userdata);
 static bool initialize_dh(SSL_CTX *context, bool isServerStart);
-static bool initialize_ecdh(SSL_CTX *context, bool isServerStart);
+static bool initialize_groups(SSL_CTX *context, bool isServerStart);
 static const char *SSLerrmessageExt(unsigned long ecode, const char *replacement);
 static const char *SSLerrmessage(unsigned long ecode);
 static bool init_host_context(HostsLine *host, bool isServerStart, bool *hasWarned)
@@ -510,10 +510,10 @@ be_tls_init(bool isServerStart)
 	SSL_CTX_set_options(context, SSL_OP_NO_CLIENT_RENEGOTIATION);
 #endif
 
-	/* set up ephemeral DH and ECDH keys */
+	/* set up DH parameters and TLS named groups */
 	if (!initialize_dh(context, isServerStart))
 		goto error;
-	if (!initialize_ecdh(context, isServerStart))
+	if (!initialize_groups(context, isServerStart))
 		goto error;
 
 	/* set up the allowed cipher list for TLSv1.2 and below */
@@ -2118,14 +2118,14 @@ initialize_dh(SSL_CTX *context, bool isServerStart)
 }
 
 /*
- * Set ECDH parameters for generating ephemeral Elliptic Curve DH
- * keys.  This is much simpler than the DH parameters, as we just
- * need to provide the name of the curve to OpenSSL.
+ * Set the group(s) to use for TLS key exchange.  This is much simpler
+ * than the static DH parameters, as we just need to provide the
+ * colon-separated list of group names to OpenSSL.
  */
 static bool
-initialize_ecdh(SSL_CTX *context, bool isServerStart)
+initialize_groups(SSL_CTX *context, bool isServerStart)
 {
-	if (SSL_CTX_set1_groups_list(context, SSLECDHCurve) != 1)
+	if (SSL_CTX_set1_groups_list(context, SSLNamedGroups) != 1)
 	{
 		/*
 		 * OpenSSL 3.3.0 introduced proper error messages for group parsing
