@@ -448,6 +448,7 @@ SnapBuildInitialSnapshot(SnapBuild *builder)
 	TransactionId safeXid;
 	TransactionId *newxip;
 	int			newxcnt = 0;
+	RunningTransactions running = NULL;
 
 	Assert(XactIsoLevel == XACT_REPEATABLE_READ);
 	Assert(builder->building_full_snapshot);
@@ -494,6 +495,17 @@ SnapBuildInitialSnapshot(SnapBuild *builder)
 	newxip = palloc_array(TransactionId, GetMaxSnapshotXidCount());
 
 	/*
+	 * Avoid excessive traffic through TransactionIdIsInProgress() below by
+	 * acquiring the list of running transactions once.
+	 */
+	if (!RecoveryInProgress())
+	{
+		running = GetRunningTransactionData();
+		LWLockRelease(XidGenLock);
+		LWLockRelease(ProcArrayLock);
+	}
+
+	/*
 	 * snapbuild.c builds transactions in an "inverted" manner, which means it
 	 * stores committed transactions in ->xip, not ones in progress. Build a
 	 * classical snapshot by marking all non-committed transactions as
@@ -518,6 +530,27 @@ SnapBuildInitialSnapshot(SnapBuild *builder)
 						 errmsg("initial slot snapshot too large")));
 
 			newxip[newxcnt++] = xid;
+		}
+
+		/*
+		 * If a transaction is in the snapshot and reported as committed, we
+		 * don't yet know for certain that the transaction was removed from
+		 * procarray as opposed to merely got its WAL commit record written.
+		 * For correctness reasons (involving hint-bit setting) we must not
+		 * allow transactions in the latter state be reported as committed, so
+		 * wait for them to end.
+		 */
+		if (!RecoveryInProgress() && test != NULL)
+		{
+			/* XXX We could qsort() and bsearch() this array ... */
+			for (int i = 0; i < running->xcnt; i++)
+			{
+				if (xid == running->xids[i])
+				{
+					XactLockTableWait(xid, NULL, NULL, XLTW_None);
+					break;
+				}
+			}
 		}
 
 		TransactionIdAdvance(xid);

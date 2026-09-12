@@ -2663,8 +2663,8 @@ GetRunningTransactionData(void)
 	 * the lock, so we can't look at numProcs.  Likewise, we allocate much
 	 * more subxip storage than is probably needed.
 	 *
-	 * Should only be allocated in bgwriter, since only ever executed during
-	 * checkpoints.
+	 * This is only called during checkpoint and during initial logical
+	 * decoding snapshot build, so the impact is limited.
 	 */
 	if (CurrentRunningXacts->xids == NULL)
 	{
