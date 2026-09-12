@@ -51,7 +51,13 @@
 #include <unistd.h>
 
 #include "common/pg_prng.h"
+#ifdef USE_STDATOMIC_H
+#include "port/atomics.h"
+#include "port/spin_delay.h"
+#include "storage/spin.h"
+#else
 #include "storage/s_lock.h"
+#endif
 #include "utils/wait_event.h"
 
 #define MIN_SPINS_PER_DELAY 10
@@ -60,6 +66,7 @@
 #define MIN_DELAY_USEC		1000L
 #define MAX_DELAY_USEC		1000000L
 
+#ifndef USE_STDATOMIC_H
 #ifdef S_LOCK_TEST
 /*
  * These are needed by pgstat_report_wait_start in the standalone compile of
@@ -68,6 +75,7 @@
 static uint32 local_my_wait_event_info;
 uint32	   *my_wait_event_info = &local_my_wait_event_info;
 #endif
+#endif							/* !USE_STDATOMIC_H */
 
 static int	spins_per_delay = DEFAULT_SPINS_PER_DELAY;
 
@@ -80,7 +88,7 @@ s_lock_stuck(const char *file, int line, const char *func)
 {
 	if (!func)
 		func = "(unknown)";
-#if defined(S_LOCK_TEST)
+#if !defined(USE_STDATOMIC_H) && defined(S_LOCK_TEST)
 	fprintf(stderr,
 			"\nStuck spinlock detected at %s, %s:%d.\n",
 			func, file, line);
@@ -101,16 +109,39 @@ s_lock(volatile slock_t *lock, const char *file, int line, const char *func)
 
 	init_spin_delay(&delayStatus, file, line, func);
 
+#ifdef USE_STDATOMIC_H
+	for (;;)
+	{
+		bool		try_to_set;
+
+#ifdef PG_SPIN_TRY_RELAXED
+		/*
+		 * Test-and-test-and-set: read the lock first and only attempt the
+		 * exchange when it looks free, to avoid taking cache-line ownership on
+		 * every spin.  PG_SPIN_TRY_RELAXED is defined only where this pre-read
+		 * is cheap (x86/x86_64 TSO, where a seq_cst load is a plain load).
+		 */
+		try_to_set = (pg_atomic_read_u32(lock) == 0);
+#else
+		try_to_set = true;
+#endif
+		if (try_to_set && pg_atomic_exchange_u32(lock, 1) == 0)
+			break;
+		perform_spin_delay(&delayStatus);
+	}
+#else							/* !USE_STDATOMIC_H */
 	while (TAS_SPIN(lock))
 	{
 		perform_spin_delay(&delayStatus);
 	}
+#endif							/* USE_STDATOMIC_H */
 
 	finish_spin_delay(&delayStatus);
 
 	return delayStatus.delays;
 }
 
+#ifndef USE_STDATOMIC_H
 #ifdef USE_DEFAULT_S_UNLOCK
 void
 s_unlock(volatile slock_t *lock)
@@ -118,6 +149,7 @@ s_unlock(volatile slock_t *lock)
 	*lock = 0;
 }
 #endif
+#endif							/* !USE_STDATOMIC_H */
 
 /*
  * Wait while spinning on a contended spinlock.
@@ -126,7 +158,11 @@ void
 perform_spin_delay(SpinDelayStatus *status)
 {
 	/* CPU-specific delay each time through the loop */
+#ifdef USE_STDATOMIC_H
+	pg_spin_delay();
+#else
 	SPIN_DELAY();
+#endif
 
 	/* Block the process every spins_per_delay tries */
 	if (++(status->spins) >= spins_per_delay)
@@ -149,7 +185,7 @@ perform_spin_delay(SpinDelayStatus *status)
 		pg_usleep(status->cur_delay);
 		pgstat_report_wait_end();
 
-#if defined(S_LOCK_TEST)
+#if !defined(USE_STDATOMIC_H) && defined(S_LOCK_TEST)
 		fprintf(stdout, "*");
 		fflush(stdout);
 #endif
@@ -232,6 +268,7 @@ update_spins_per_delay(int shared_spins_per_delay)
 
 
 /*****************************************************************************/
+#ifndef USE_STDATOMIC_H
 #if defined(S_LOCK_TEST)
 
 /*
@@ -298,3 +335,4 @@ main()
 }
 
 #endif							/* S_LOCK_TEST */
+#endif							/* !USE_STDATOMIC_H */
