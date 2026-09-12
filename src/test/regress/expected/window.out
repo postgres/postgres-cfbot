@@ -33,6 +33,30 @@ SELECT depname, empno, salary, sum(salary) OVER (PARTITION BY depname) FROM emps
  sales     |     1 |   5000 | 14600
 (10 rows)
 
+-- product() as a window function, over the whole partition, for every
+-- supported input type
+SELECT depname, empno, salary,
+    product(salary::smallint) OVER (PARTITION BY depname) product_smallint,
+    product(salary::int) OVER (PARTITION BY depname) product_int,
+    product(salary::bigint) OVER (PARTITION BY depname) product_bigint,
+    product(salary::float4) OVER (PARTITION BY depname) product_float4,
+    product(salary::float8) OVER (PARTITION BY depname) product_float8,
+    product(salary::numeric) OVER (PARTITION BY depname) product_numeric
+  FROM empsalary ORDER BY depname, salary;
+  depname  | empno | salary |  product_smallint   |     product_int     |   product_bigint    |   product_float4    |   product_float8    |   product_numeric   
+-----------+-------+--------+---------------------+---------------------+---------------------+---------------------+---------------------+---------------------
+ develop   |     7 |   4200 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000
+ develop   |     9 |   4500 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000
+ develop   |    11 |   5200 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000
+ develop   |    10 |   5200 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000
+ develop   |     8 |   6000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000
+ personnel |     5 |   3500 |            13650000 |            13650000 |            13650000 |            13650000 |            13650000 |            13650000
+ personnel |     2 |   3900 |            13650000 |            13650000 |            13650000 |            13650000 |            13650000 |            13650000
+ sales     |     3 |   4800 |        115200000000 |        115200000000 |        115200000000 |        115200000000 |        115200000000 |        115200000000
+ sales     |     4 |   4800 |        115200000000 |        115200000000 |        115200000000 |        115200000000 |        115200000000 |        115200000000
+ sales     |     1 |   5000 |        115200000000 |        115200000000 |        115200000000 |        115200000000 |        115200000000 |        115200000000
+(10 rows)
+
 SELECT depname, empno, salary, rank() OVER (PARTITION BY depname ORDER BY salary) FROM empsalary;
   depname  | empno | salary | rank 
 -----------+-------+--------+------
@@ -88,6 +112,49 @@ SELECT depname, empno, salary, sum(salary) OVER w FROM empsalary WINDOW w AS (PA
  sales     |     3 |   4800 | 14600
  sales     |     1 |   5000 | 14600
  sales     |     4 |   4800 | 14600
+(10 rows)
+
+-- product() as a window function using a named WINDOW clause
+SELECT depname, empno, salary,
+    product(salary::smallint) OVER w product_smallint,
+    product(salary::int) OVER w product_int,
+    product(salary::bigint) OVER w product_bigint,
+    product(salary::float4) OVER w product_float4,
+    product(salary::float8) OVER w product_float8,
+    product(salary::numeric) OVER w product_numeric
+  FROM empsalary WINDOW w AS (PARTITION BY depname);
+  depname  | empno | salary |  product_smallint   |     product_int     |   product_bigint    |   product_float4    |   product_float8    |   product_numeric   
+-----------+-------+--------+---------------------+---------------------+---------------------+---------------------+---------------------+---------------------
+ develop   |    11 |   5200 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000
+ develop   |     7 |   4200 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000
+ develop   |     9 |   4500 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000
+ develop   |     8 |   6000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000
+ develop   |    10 |   5200 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000 | 3066336000000000000
+ personnel |     5 |   3500 |            13650000 |            13650000 |            13650000 |            13650000 |            13650000 |            13650000
+ personnel |     2 |   3900 |            13650000 |            13650000 |            13650000 |            13650000 |            13650000 |            13650000
+ sales     |     3 |   4800 |        115200000000 |        115200000000 |        115200000000 |        115200000000 |        115200000000 |        115200000000
+ sales     |     1 |   5000 |        115200000000 |        115200000000 |        115200000000 |        115200000000 |        115200000000 |        115200000000
+ sales     |     4 |   4800 |        115200000000 |        115200000000 |        115200000000 |        115200000000 |        115200000000 |        115200000000
+(10 rows)
+
+-- product() has no inverse transition function, so a moving frame must
+-- recompute the aggregate for every row.  Exercise that path.
+SELECT empno, salary,
+    product(salary::numeric) OVER (ORDER BY empno
+        ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS product_moving
+  FROM empsalary ORDER BY empno;
+ empno | salary | product_moving 
+-------+--------+----------------
+     1 |   5000 |           5000
+     2 |   3900 |       19500000
+     3 |   4800 |       18720000
+     4 |   4800 |       23040000
+     5 |   3500 |       16800000
+     7 |   4200 |       14700000
+     8 |   6000 |       25200000
+     9 |   4500 |       27000000
+    10 |   5200 |       23400000
+    11 |   5200 |       27040000
 (10 rows)
 
 SELECT depname, empno, salary, rank() OVER w FROM empsalary WINDOW w AS (PARTITION BY depname ORDER BY salary) ORDER BY rank() OVER w;
