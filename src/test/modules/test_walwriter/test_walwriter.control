@@ -1,0 +1,4 @@
+comment = 'Test code for the WAL writer'
+default_version = '1.0'
+module_pathname = '$libdir/test_walwriter'
+relocatable = true
