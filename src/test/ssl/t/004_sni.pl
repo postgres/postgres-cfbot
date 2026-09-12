@@ -33,11 +33,6 @@ if (!$ENV{PG_TEST_EXTRA} || $ENV{PG_TEST_EXTRA} !~ /\bssl\b/)
 
 my $ssl_server = SSL::Server->new();
 
-if ($ssl_server->is_libressl)
-{
-	plan skip_all => 'SNI not supported when building with LibreSSL';
-}
-
 my $node = PostgreSQL::Test::Cluster->new('primary');
 $node->init;
 
@@ -46,6 +41,20 @@ $node->init;
 $ENV{PGHOST} = $node->host;
 $ENV{PGPORT} = $node->port;
 $node->start;
+
+# LibreSSL has no SNI support, so the view is always empty. Check that and skip
+# the rest, which needs SNI.
+if ($ssl_server->is_libressl)
+{
+	$node->append_conf('pg_hosts.conf',
+		'example.org server-cn-only.crt server-cn-only.key root+client_ca.crt');
+	my $count = $node->safe_psql('postgres',
+		'SELECT count(*) FROM pg_hosts_file_rules');
+	is($count, 0,
+		'pg_hosts_file_rules: empty on LibreSSL builds lacking SNI support');
+	done_testing();
+	exit;
+}
 
 my $exec_backend = $node->safe_psql('postgres', 'SHOW debug_exec_backend');
 chomp($exec_backend);
@@ -84,6 +93,31 @@ $node->connect_ok(
 	"$connstr sslrootcert=ssl/root+server_ca.crt sslmode=require",
 	"pg.conf: connect with correct server CA cert file sslmode=require");
 
+##############################################################################
+# pg_hosts_file_rules
+##############################################################################
+
+# The view reads pg_hosts.conf from disk, no reload needed.  Keep these tests
+# while ssl_sni is still off: the file is only loaded into the SSL config when
+# ssl_sni is on, and EXEC_BACKEND builds reload that config from disk in every
+# new backend, so entries added here would affect the connections below.
+
+# privileged connection for the pg_hosts_file_rules view
+my $su_connstr =
+  "dbname=trustdb hostaddr=$SERVERHOSTADDR sslrootcert=ssl/root+server_ca.crt sslmode=require";
+
+my $rules = $node->safe_psql('trustdb',
+	"SELECT count(*) FROM pg_hosts_file_rules",
+	connstr => $su_connstr);
+is($rules, 1, "pg_hosts_file_rules: valid conf entries are reported");
+
+# A malformed entry shows up as an error row, not a thrown error.
+$node->append_conf('pg_hosts.conf', "this line has too many fields a b c d e f");
+my $errs = $node->safe_psql('trustdb',
+	"SELECT count(*) FROM pg_hosts_file_rules WHERE error IS NOT NULL",
+	connstr => $su_connstr);
+is($errs, 1, "pg_hosts_file_rules: malformed conf entry becomes an error row");
+
 # Turn on SNI support and remove pg_hosts.conf and reload to make sure a
 # missing file is treated like an empty file.
 $node->append_conf('postgresql.conf', 'ssl_sni = on');
@@ -93,6 +127,11 @@ $node->reload;
 $node->connect_ok(
 	"$connstr sslrootcert=ssl/root+server_ca.crt sslmode=require",
 	"pg.conf: connect after deleting pg_hosts.conf");
+
+my $missing = $node->safe_psql('trustdb',
+	"SELECT count(*) FROM pg_hosts_file_rules",
+	connstr => $su_connstr);
+is($missing, 0, "pg_hosts_file_rules: missing file reported as empty");
 
 ##############################################################################
 # pg_hosts.conf
