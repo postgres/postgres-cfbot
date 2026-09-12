@@ -1675,6 +1675,17 @@ BuildOnConflictExcludedTargetlist(Relation targetrel,
 	}
 
 	/*
+	 * Add an entry for tableoid, the only system column that can appear in a
+	 * generation expression, to support references to virtual generated
+	 * columns that use it.
+	 */
+	var = makeVar(exclRelIndex, TableOidAttributeNumber,
+				  OIDOID, -1, InvalidOid, 0);
+	te = makeTargetEntry((Expr *) var, TableOidAttributeNumber,
+						 pstrdup("tableoid"), true);
+	result = lappend(result, te);
+
+	/*
 	 * Add a whole-row-Var entry to support references to "EXCLUDED.*".  Like
 	 * the other entries in the EXCLUDED tlist, its resno must match the Var's
 	 * varattno, else the wrong things happen while resolving references in

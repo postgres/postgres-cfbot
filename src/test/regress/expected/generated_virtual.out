@@ -589,6 +589,16 @@ SELECT * FROM gtest_tableoid;
  2 | t | gtest_tableoid
 (2 rows)
 
+INSERT INTO gtest_tableoid VALUES (3)
+  ON CONFLICT (a) DO UPDATE SET a = excluded.a WHERE excluded.b;
+INSERT INTO gtest_tableoid VALUES (3)
+  ON CONFLICT (a) DO UPDATE SET a = excluded.a WHERE excluded.b
+  RETURNING a, b, c;
+ a | b |       c        
+---+---+----------------
+ 3 | t | gtest_tableoid
+(1 row)
+
 -- drop column behavior
 CREATE TABLE gtest10 (a int PRIMARY KEY, b int, c int GENERATED ALWAYS AS (b * 2) VIRTUAL);
 ALTER TABLE gtest10 DROP COLUMN b;  -- fails
