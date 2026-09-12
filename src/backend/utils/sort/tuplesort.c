@@ -213,6 +213,7 @@ struct Tuplesortstate
 	 * H.  In state SORTEDONTAPE, the array is not used.
 	 */
 	SortTuple  *memtuples;		/* array of SortTuple structs */
+	Datum		boundedRootDatum1;	/* full key; may point into current root */
 	int			memtupcount;	/* number of tuples currently present */
 	int			memtupsize;		/* allocated length of memtuples array */
 	bool		growmemtuples;	/* memtuples' growth still underway? */
@@ -460,6 +461,7 @@ static void mergeonerun(Tuplesortstate *state);
 static void beginmerge(Tuplesortstate *state);
 static bool mergereadnext(Tuplesortstate *state, LogicalTape *srcTape, SortTuple *stup);
 static void dumptuples(Tuplesortstate *state, bool alltuples);
+static void cache_bounded_heap_root_key(Tuplesortstate *state);
 static void make_bounded_heap(Tuplesortstate *state);
 static void sort_bounded_heap(Tuplesortstate *state);
 static void tuplesort_sort_memtuples(Tuplesortstate *state);
@@ -759,19 +761,6 @@ tuplesort_set_bound(Tuplesortstate *state, int64 bound)
 
 	state->bounded = true;
 	state->bound = (int) bound;
-
-	/*
-	 * Bounded sorts are not an effective target for abbreviated key
-	 * optimization.  Disable by setting state to be consistent with no
-	 * abbreviation support.
-	 */
-	state->base.sortKeys->abbrev_converter = NULL;
-	if (state->base.sortKeys->abbrev_full_comparator)
-		state->base.sortKeys->comparator = state->base.sortKeys->abbrev_full_comparator;
-
-	/* Not strictly necessary, but be tidy */
-	state->base.sortKeys->abbrev_abort = NULL;
-	state->base.sortKeys->abbrev_full_comparator = NULL;
 }
 
 /*
@@ -1067,6 +1056,7 @@ tuplesort_puttuple_common(Tuplesortstate *state, SortTuple *tuple,
 						  bool useAbbrev, Size tuplen)
 {
 	MemoryContext oldcontext = MemoryContextSwitchTo(state->base.sortcontext);
+	int			compare;
 
 	Assert(!LEADER(state));
 
@@ -1083,6 +1073,16 @@ tuplesort_puttuple_common(Tuplesortstate *state, SortTuple *tuple,
 		 * converter and just set datum1 to zeroed representation (to be
 		 * consistent, and to support cheap inequality tests for NULL
 		 * abbreviated keys).
+		 */
+	}
+	else if (state->status == TSS_BOUNDED)
+	{
+		/*
+		 * Abbreviate after the tuple passes the heap boundary.
+		 *
+		 * TODO: Keep evaluating abbreviation for tuples that enter the
+		 * bounded heap, and restore its resident keys if abbreviation proves
+		 * ineffective.
 		 */
 	}
 	else if (!consider_abort_common(state))
@@ -1178,7 +1178,28 @@ tuplesort_puttuple_common(Tuplesortstate *state, SortTuple *tuple,
 			 * with just this one comparison.  Note that because we currently
 			 * have the sort direction reversed, we must check for <= not >=.
 			 */
-			if (COMPARETUP(state, tuple, &state->memtuples[0]) <= 0)
+			if (state->base.sortKeys->abbrev_converter != NULL)
+			{
+				/* Incoming datum1 is still authoritative. */
+				compare = ApplySortAbbrevFullComparator(tuple->datum1,
+														tuple->isnull1,
+														state->boundedRootDatum1,
+														state->memtuples[0].isnull1,
+														state->base.sortKeys);
+
+				/*
+				 * TODO: If the leading keys are authoritatively equal,
+				 * continue the tiebreak at the second sort key instead of
+				 * comparing the leading key again.
+				 */
+				if (compare == 0)
+					compare = state->base.comparetup_tiebreak(tuple,
+															  &state->memtuples[0], state);
+			}
+			else
+				compare = COMPARETUP(state, tuple, &state->memtuples[0]);
+
+			if (compare <= 0)
 			{
 				/* new tuple <= top of the heap, so we can discard it */
 				free_sort_tuple(state, tuple);
@@ -1186,9 +1207,16 @@ tuplesort_puttuple_common(Tuplesortstate *state, SortTuple *tuple,
 			}
 			else
 			{
+				/* Abbreviate only tuples that will enter the heap. */
+				if (useAbbrev)
+					tuple->datum1 = state->base.sortKeys->abbrev_converter(tuple->datum1,
+																		   state->base.sortKeys);
+
 				/* discard top of heap, replacing it with the new tuple */
 				free_sort_tuple(state, &state->memtuples[0]);
 				tuplesort_heap_replace_top(state, tuple);
+				if (state->base.sortKeys->abbrev_converter != NULL)
+					cache_bounded_heap_root_key(state);
 			}
 			break;
 
@@ -2471,6 +2499,16 @@ tuplesort_space_type_name(TuplesortSpaceType t)
  * Heap manipulation routines, per Knuth's Algorithm 5.2.3H.
  */
 
+static void
+cache_bounded_heap_root_key(Tuplesortstate *state)
+{
+	SortTuple	root = state->memtuples[0];
+
+	Assert(state->base.sortKeys->abbrev_converter != NULL);
+	REMOVEABBREV(state, &root, 1);
+	state->boundedRootDatum1 = root.datum1;
+}
+
 /*
  * Convert the existing unordered array of SortTuples to a bounded heap,
  * discarding all but the smallest "state->bound" tuples.
@@ -2524,6 +2562,8 @@ make_bounded_heap(Tuplesortstate *state)
 
 	Assert(state->memtupcount == state->bound);
 	state->status = TSS_BOUNDED;
+	if (state->base.sortKeys->abbrev_converter != NULL)
+		cache_bounded_heap_root_key(state);
 }
 
 /*
