@@ -1055,6 +1055,30 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
+      <term><option>--max-table-segment-pages=<replaceable class="parameter">npages</replaceable></option></term>
+      <listitem>
+       <para>
+        Dump data in segments based on number of pages in the main relation.
+        If the number of data pages in the relation is more than <replaceable class="parameter">npages</replaceable> 
+        the data is split into segments based on that number of pages.
+        Individual segments can be dumped in parallel.
+       </para>
+
+       <note>
+        <para>
+         The option <option>--max-table-segment-pages</option> is applied to only pages
+         in the main heap and if the table has a large TOASTed part this has to be
+         taken into account when deciding on the number of pages to use.
+         In the extreme case a single 8kB heap page can have ~200 toast pointers each 
+         corresponding to 1GB of data. If this data is also non-compressible then a 
+         single-page segment can dump as 200GB file.
+        </para>
+       </note>
+
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
       <term><option>--no-comments</option></term>
       <listitem>
        <para>
