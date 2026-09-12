@@ -50,6 +50,7 @@ tests += {
       'repack_decode',
       'repack_temporal',
       'repack_temporal_multirange',
+      'repack_timeout',
       'repack_toast',
       'ri_fastpath_reindex',
       'ri_fastpath_snapshot',
