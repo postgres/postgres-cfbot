@@ -1558,3 +1558,119 @@ select * from (select a, b from phv_boolpart) t
   group by grouping sets (a, b);
 
 drop table phv_boolpart;
+
+--
+-- Verify that pruning-aware locking skips pruned partitions
+-- when reusing a generic cached plan.
+--
+set plan_cache_mode to force_generic_plan;
+
+create table prunelock_p (a int) partition by list (a);
+create table prunelock_p1 partition of prunelock_p for values in (1);
+create table prunelock_p2 partition of prunelock_p for values in (2);
+create table prunelock_p3 partition of prunelock_p for values in (3);
+
+prepare prunelock_q (int) as select * from prunelock_p where a = $1;
+
+-- Force generic plan creation
+explain (costs off) execute prunelock_q(1);
+
+-- Execute and check which child partitions are locked
+begin;
+execute prunelock_q(1);
+
+select c.relname
+  from pg_locks l
+  join pg_class c on c.oid = l.relation
+ where l.pid = pg_backend_pid()
+   and c.relname like 'prunelock_p_'
+ order by c.relname;
+commit;
+
+deallocate prunelock_q;
+
+-- Turn pruning off
+set enable_partition_pruning to off;
+
+prepare prunelock_q (int) as select * from prunelock_p where a = $1;
+
+-- Force generic plan creation
+explain (costs off) execute prunelock_q(1);
+
+-- Execute and check which child partitions are locked
+begin;
+execute prunelock_q(1);
+
+select c.relname
+  from pg_locks l
+  join pg_class c on c.oid = l.relation
+ where l.pid = pg_backend_pid()
+   and c.relname like 'prunelock_p_'
+ order by c.relname;
+commit;
+
+deallocate prunelock_q;
+reset enable_partition_pruning;
+
+--
+-- Verify firstResultRels handling with multiple ModifyTable nodes
+-- (writable CTEs) targeting a partitioned table.  When a pruning
+-- parameter matches no partition, all result relations are pruned
+-- and the executor must still find a usable first result relation
+-- for each ModifyTable node.
+--
+prepare prunelock_mt_q (int, int) as
+  with upd1 as (update prunelock_p set a = a),
+       upd2 as (update prunelock_p set a = a where a = $2)
+  update prunelock_p set a = a where a = $1;
+
+-- Force generic plan creation
+explain (costs off) execute prunelock_mt_q(1, 2);
+
+-- All partitions pruned: value 4 matches no partition, so each
+-- ModifyTable must still initialize correctly with no matching
+-- result relations.
+explain (costs off) execute prunelock_mt_q(4, 5);
+
+deallocate prunelock_mt_q;
+drop table prunelock_p;
+
+--
+-- Verify that pruning-aware locking falls back to locking all
+-- partitions for multi-statement CachedPlans.  Rule rewriting can
+-- expand a single statement into multiple PlannedStmts, and later
+-- statements must not have their pruning evaluated before earlier
+-- ones have executed, since CCI between statements can change what
+-- pruning expressions see.
+--
+create table prune_config (val int);
+insert into prune_config values (1);
+
+create table multistmt_pt (a int, b int) partition by list (a);
+create table multistmt_pt_1 partition of multistmt_pt for values in (1);
+create table multistmt_pt_2 partition of multistmt_pt for values in (2);
+insert into multistmt_pt values (1, 0), (2, 0);
+
+create function get_prune_val() returns int as $$
+  select val from prune_config;
+$$ language sql stable;
+
+create rule config_upd_rule as on update to multistmt_pt
+  do also update prune_config set val = 2;
+
+set plan_cache_mode to force_generic_plan;
+prepare multi_q as update multistmt_pt set b = b + 1 where a = get_prune_val();
+-- first execute creates the generic plan
+execute multi_q;
+-- reset for the real test
+update prune_config set val = 1;
+update multistmt_pt set b = 0;
+-- second execute reuses the plan; pruning-aware locking kicks in
+execute multi_q;
+select * from multistmt_pt order by a;
+
+deallocate multi_q;
+drop rule config_upd_rule on multistmt_pt;
+drop function get_prune_val;
+drop table multistmt_pt, prune_config;
+reset plan_cache_mode;

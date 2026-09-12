@@ -291,11 +291,17 @@ Query Processing Control Flow
 
 This is a sketch of control flow for full query processing:
 
+    ExecutorPrep
+		May be run before ExecutorStart, or implicitly from ExecutorStart
+		if not done earlier.  Creates the EState in QueryDesc, performs
+		range table initialization, permission checks, and initial
+		partition pruning.
+
 	CreateQueryDesc
 
 	ExecutorStart
-		CreateExecutorState
-			creates per-query context
+		ExecutorPrep (if QueryDesc.estate is NULL)
+			creates EState and per-query context
 		switch to per-query context to run ExecInitNode
 		AfterTriggerBeginQuery
 		ExecInitNode --- recursively scans plan tree
