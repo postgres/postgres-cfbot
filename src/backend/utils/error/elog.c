@@ -117,6 +117,7 @@ int			Log_destination = LOG_DESTINATION_STDERR;
 char	   *Log_destination_string = NULL;
 bool		syslog_sequence_numbers = true;
 bool		syslog_split_messages = true;
+bool		force_core_dump_on_panic = false;
 
 /* Processed form of backtrace_functions GUC */
 static char *backtrace_function_list;
@@ -487,6 +488,7 @@ errfinish(const char *filename, int lineno, const char *funcname)
 {
 	ErrorData  *edata = &errordata[errordata_stack_depth];
 	int			elevel;
+	bool		no_core_dump;
 	MemoryContext oldcontext;
 	ErrorContextCallback *econtext;
 
@@ -520,6 +522,17 @@ errfinish(const char *filename, int lineno, const char *funcname)
 		 econtext != NULL;
 		 econtext = econtext->previous)
 		econtext->callback(econtext->arg);
+
+	/*
+	 * Capture this before releasing the current error stack entry below.  A
+	 * core-worthy outer PANIC must not be downgraded by a nested error.
+	 */
+	no_core_dump = edata->no_core_dump;
+	for (int i = 0; no_core_dump && i < errordata_stack_depth; i++)
+	{
+		if (errordata[i].elevel >= PANIC && !errordata[i].no_core_dump)
+			no_core_dump = false;
+	}
 
 	/*
 	 * If ERROR (not more nor less) we pass it off to the current handler.
@@ -611,13 +624,16 @@ errfinish(const char *filename, int lineno, const char *funcname)
 	if (elevel >= PANIC)
 	{
 		/*
-		 * Serious crash time. Postmaster will observe SIGABRT process exit
-		 * status and kill the other backends too.
+		 * Serious crash time.  If this error is marked not to dump core, exit
+		 * without running cleanup callbacks.  Exit code 2 makes the postmaster
+		 * treat this as a crash and kill the other backends too.
 		 *
 		 * XXX: what if we are *in* the postmaster?  abort() won't kill our
 		 * children...
 		 */
 		fflush(NULL);
+		if (no_core_dump && !force_core_dump_on_panic)
+			_exit(2);
 		abort();
 	}
 
@@ -1653,6 +1669,22 @@ errhidecontext(bool hide_ctx)
 }
 
 /*
+ * errnocoredump_on_errno --- skip a core dump for the specified errno
+ */
+int
+errnocoredump_on_errno(int errnum)
+{
+	ErrorData  *edata = &errordata[errordata_stack_depth];
+
+	/* we don't bother incrementing recursion_depth */
+	CHECK_STACK_DEPTH();
+
+	edata->no_core_dump |= edata->saved_errno == errnum;
+
+	return 0;					/* return value does not matter */
+}
+
+/*
  * errposition --- add cursor position to the current error
  */
 int
@@ -2130,6 +2162,7 @@ ThrowErrorData(ErrorData *edata)
 	newedata->internalpos = edata->internalpos;
 	if (edata->internalquery)
 		newedata->internalquery = pstrdup(edata->internalquery);
+	newedata->no_core_dump = edata->no_core_dump;
 
 	MemoryContextSwitchTo(oldcontext);
 	recursion_depth--;

@@ -219,6 +219,7 @@ extern int	errcontext_msg(const char *fmt, ...) pg_attribute_printf(1, 2);
 
 extern int	errhidestmt(bool hide_stmt);
 extern int	errhidecontext(bool hide_ctx);
+extern int	errnocoredump_on_errno(int errnum);
 
 extern int	errbacktrace(void);
 
@@ -422,6 +423,7 @@ extern PGDLLIMPORT ErrorContextCallback *error_context_stack;
 	pg_re_throw()
 
 extern PGDLLIMPORT sigjmp_buf *PG_exception_stack;
+extern PGDLLIMPORT bool force_core_dump_on_panic;
 
 
 /* Stuff that error handlers might want to use */
@@ -439,6 +441,7 @@ typedef struct ErrorData
 	bool		output_to_client;	/* will report to client? */
 	bool		hide_stmt;		/* true to prevent STATEMENT: inclusion */
 	bool		hide_ctx;		/* true to prevent CONTEXT: inclusion */
+	bool		no_core_dump;	/* true to skip core dump for PANIC */
 	const char *filename;		/* __FILE__ of ereport() call */
 	int			lineno;			/* __LINE__ of ereport() call */
 	const char *funcname;		/* __func__ of ereport() call */

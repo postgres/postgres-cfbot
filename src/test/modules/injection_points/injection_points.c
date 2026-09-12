@@ -17,6 +17,11 @@
 
 #include "postgres.h"
 
+#include <signal.h>
+#ifndef WIN32
+#include <unistd.h>
+#endif
+
 #include "fmgr.h"
 #include "funcapi.h"
 #include "injection_points.h"
@@ -75,6 +80,21 @@ static InjectionPointSharedState *inj_state = NULL;
 extern PGDLLEXPORT void injection_error(const char *name,
 										const void *private_data,
 										void *arg);
+extern PGDLLEXPORT void injection_error_disk_full(const char *name,
+											const void *private_data,
+											void *arg);
+extern PGDLLEXPORT void injection_error_io(const char *name,
+										   const void *private_data,
+										   void *arg);
+extern PGDLLEXPORT void injection_error_disk_full_rethrow_panic(const char *name,
+														   const void *private_data,
+														   void *arg);
+extern PGDLLEXPORT void injection_panic_disk_full(const char *name,
+											const void *private_data,
+											void *arg);
+extern PGDLLEXPORT void injection_panic_with_nested_disk_full(const char *name,
+														 const void *private_data,
+														 void *arg);
 extern PGDLLEXPORT void injection_notice(const char *name,
 										 const void *private_data,
 										 void *arg);
@@ -87,11 +107,40 @@ static bool injection_point_local = false;
 
 static void injection_shmem_request(void *arg);
 static void injection_shmem_init(void *arg);
+#ifdef WIN32
+static void injection_abort_handler(int signal);
+#else
+static void injection_abort_handler(SIGNAL_ARGS);
+#endif
+static void injection_nested_disk_full_panic(void *arg);
 
 static const ShmemCallbacks injection_shmem_callbacks = {
 	.request_fn = injection_shmem_request,
 	.init_fn = injection_shmem_init,
 };
+
+static void
+#ifdef WIN32
+injection_abort_handler(int signal)
+#else
+injection_abort_handler(SIGNAL_ARGS)
+#endif
+{
+	_exit(42);
+}
+
+static void
+injection_nested_disk_full_panic(void *arg)
+{
+	ErrorContextCallback *callback = arg;
+
+	error_context_stack = callback->previous;
+	errno = ENOSPC;
+	ereport(PANIC,
+			(errcode_for_file_access(),
+			 errnocoredump_on_errno(ENOSPC),
+			 errmsg("nested disk-full PANIC")));
+}
 
 /*
  * Routine for shared memory area initialization, used as a callback
@@ -204,6 +253,117 @@ injection_error(const char *name, const void *private_data, void *arg)
 			 name, argstr);
 	else
 		elog(ERROR, "error triggered for injection point %s", name);
+}
+
+void
+injection_error_disk_full(const char *name, const void *private_data, void *arg)
+{
+	const InjectionPointCondition *condition = private_data;
+	char	   *argstr = arg;
+
+	if (!injection_point_allowed(condition, argstr))
+		return;
+
+	errno = ENOSPC;
+	if (argstr)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errnocoredump_on_errno(ENOSPC),
+				 errmsg("error triggered for injection point %s (%s)",
+						name, argstr)));
+	else
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errnocoredump_on_errno(ENOSPC),
+				 errmsg("error triggered for injection point %s", name)));
+}
+
+void
+injection_error_io(const char *name, const void *private_data, void *arg)
+{
+	const InjectionPointCondition *condition = private_data;
+
+	if (!injection_point_allowed(condition, arg))
+		return;
+
+	errno = EIO;
+	ereport(ERROR,
+			(errcode_for_file_access(),
+			 errnocoredump_on_errno(ENOSPC),
+			 errmsg("I/O error triggered for injection point %s", name)));
+}
+
+void
+injection_error_disk_full_rethrow_panic(const char *name,
+										const void *private_data, void *arg)
+{
+	const InjectionPointCondition *condition = private_data;
+	MemoryContext oldcontext = CurrentMemoryContext;
+
+	if (!injection_point_allowed(condition, arg))
+		return;
+
+	PG_TRY();
+	{
+		errno = ENOSPC;
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errnocoredump_on_errno(ENOSPC),
+				 errmsg("rethrow disk-full PANIC for injection point %s", name)));
+	}
+	PG_CATCH();
+	{
+		ErrorData  *edata;
+
+		MemoryContextSwitchTo(oldcontext);
+		edata = CopyErrorData();
+		FlushErrorState();
+		edata->elevel = PANIC;
+		ThrowErrorData(edata);
+	}
+	PG_END_TRY();
+}
+
+void
+injection_panic_disk_full(const char *name, const void *private_data, void *arg)
+{
+	const InjectionPointCondition *condition = private_data;
+	char	   *argstr = arg;
+
+	if (!injection_point_allowed(condition, argstr))
+		return;
+
+	errno = ENOSPC;
+	if (argstr)
+		ereport(PANIC,
+				(errcode_for_file_access(),
+				 errnocoredump_on_errno(ENOSPC),
+				 errmsg("panic triggered for injection point %s (%s)",
+						name, argstr)));
+	else
+		ereport(PANIC,
+				(errcode_for_file_access(),
+				 errnocoredump_on_errno(ENOSPC),
+				 errmsg("panic triggered for injection point %s", name)));
+}
+
+void
+injection_panic_with_nested_disk_full(const char *name,
+									  const void *private_data, void *arg)
+{
+	const InjectionPointCondition *condition = private_data;
+	ErrorContextCallback callback;
+
+	if (!injection_point_allowed(condition, arg))
+		return;
+
+	callback.previous = error_context_stack;
+	callback.callback = injection_nested_disk_full_panic;
+	callback.arg = &callback;
+	error_context_stack = &callback;
+
+	ereport(PANIC,
+			(errmsg("outer core-worthy PANIC for injection point %s", name)));
 }
 
 void
@@ -331,6 +491,16 @@ injection_points_attach(PG_FUNCTION_ARGS)
 
 	if (strcmp(action, "error") == 0)
 		function = "injection_error";
+	else if (strcmp(action, "error_disk_full") == 0)
+		function = "injection_error_disk_full";
+	else if (strcmp(action, "error_io") == 0)
+		function = "injection_error_io";
+	else if (strcmp(action, "error_disk_full_rethrow_panic") == 0)
+		function = "injection_error_disk_full_rethrow_panic";
+	else if (strcmp(action, "panic_disk_full") == 0)
+		function = "injection_panic_disk_full";
+	else if (strcmp(action, "panic_with_nested_disk_full") == 0)
+		function = "injection_panic_with_nested_disk_full";
 	else if (strcmp(action, "notice") == 0)
 		function = "injection_notice";
 	else if (strcmp(action, "wait") == 0)
@@ -446,6 +616,36 @@ injection_points_run(PG_FUNCTION_ARGS)
 		arg = text_to_cstring(PG_GETARG_TEXT_PP(1));
 
 	INJECTION_POINT(name, arg);
+
+	PG_RETURN_VOID();
+}
+
+/* Trigger an injection point from a critical section. */
+PG_FUNCTION_INFO_V1(injection_points_run_in_critical_section);
+Datum
+injection_points_run_in_critical_section(PG_FUNCTION_ARGS)
+{
+	char	   *name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+
+	INJECTION_POINT_LOAD(name);
+	START_CRIT_SECTION();
+	INJECTION_POINT_CACHED(name, NULL);
+	END_CRIT_SECTION();
+
+	PG_RETURN_VOID();
+}
+
+/* Make abort() observable without producing a core file. */
+PG_FUNCTION_INFO_V1(injection_points_intercept_abort);
+Datum
+injection_points_intercept_abort(PG_FUNCTION_ARGS)
+{
+#ifdef WIN32
+	if (signal(SIGABRT, injection_abort_handler) == SIG_ERR)
+		elog(ERROR, "could not install SIGABRT handler");
+#else
+	pqsignal(SIGABRT, injection_abort_handler);
+#endif
 
 	PG_RETURN_VOID();
 }

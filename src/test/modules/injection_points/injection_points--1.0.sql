@@ -48,6 +48,18 @@ RETURNS void
 AS 'MODULE_PATHNAME', 'injection_points_run'
 LANGUAGE C PARALLEL UNSAFE;
 
+-- Execute an injection point from a critical section.
+CREATE FUNCTION injection_points_run_in_critical_section(IN point_name TEXT)
+RETURNS void
+AS 'MODULE_PATHNAME', 'injection_points_run_in_critical_section'
+LANGUAGE C STRICT PARALLEL UNSAFE;
+
+-- Replace SIGABRT with a distinctive process exit for tests.
+CREATE FUNCTION injection_points_intercept_abort()
+RETURNS void
+AS 'MODULE_PATHNAME', 'injection_points_intercept_abort'
+LANGUAGE C STRICT PARALLEL UNSAFE;
+
 --
 -- injection_points_cached()
 --
