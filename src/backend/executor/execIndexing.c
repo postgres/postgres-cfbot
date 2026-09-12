@@ -718,6 +718,7 @@ check_exclusion_or_unique_constraint(Relation heap, Relation index,
 	IndexScanDesc index_scan;
 	ScanKeyData scankeys[INDEX_MAX_KEYS];
 	SnapshotData DirtySnapshot;
+	Snapshot	snapshot;
 	int			i;
 	bool		conflict;
 	bool		found_self;
@@ -787,9 +788,21 @@ check_exclusion_or_unique_constraint(Relation heap, Relation index,
 
 	/*
 	 * Search the tuples that are in the index for any violations, including
-	 * tuples that aren't visible yet.
+	 * tuples that aren't visible yet.  If we're only reporting potential or
+	 * actual violations (for example, an arbiter index probe for INSERT ...
+	 * ON CONFLICT), we use SnapshotDirtySerializable, because the outcome of
+	 * the command depends on the probe result, and so the probe needs to
+	 * count as a read for SSI purposes.  Otherwise, we'll error out if a
+	 * violation occurs, so we can just use a regular dirty snapshot, which
+	 * does no predicate locking.
 	 */
-	InitDirtySnapshot(DirtySnapshot);
+	if (violationOK)
+		snapshot = SnapshotDirtySerializable;
+	else
+	{
+		InitDirtySnapshot(DirtySnapshot);
+		snapshot = &DirtySnapshot;
+	}
 
 	for (i = 0; i < indnkeyatts; i++)
 	{
@@ -824,7 +837,7 @@ retry:
 	conflict = false;
 	found_self = false;
 	index_scan = index_beginscan(heap, index,
-								 &DirtySnapshot, NULL, indnkeyatts, 0,
+								 snapshot, NULL, indnkeyatts, 0,
 								 SO_NONE);
 	index_rescan(index_scan, scankeys, indnkeyatts, NULL, 0);
 
@@ -879,21 +892,21 @@ retry:
 		 * happen often enough to be worth trying harder, and anyway we don't
 		 * want to hold any index internal locks while waiting.
 		 */
-		xwait = TransactionIdIsValid(DirtySnapshot.xmin) ?
-			DirtySnapshot.xmin : DirtySnapshot.xmax;
+		xwait = TransactionIdIsValid(snapshot->xmin) ?
+			snapshot->xmin : snapshot->xmax;
 
 		if (TransactionIdIsValid(xwait) &&
 			(waitMode == CEOUC_WAIT ||
 			 (waitMode == CEOUC_LIVELOCK_PREVENTING_WAIT &&
-			  DirtySnapshot.speculativeToken &&
+			  snapshot->speculativeToken &&
 			  TransactionIdPrecedes(GetCurrentTransactionId(), xwait))))
 		{
 			reason_wait = indexInfo->ii_ExclusionOps ?
 				XLTW_RecheckExclusionConstr : XLTW_InsertIndex;
 			index_endscan(index_scan);
-			if (DirtySnapshot.speculativeToken)
-				SpeculativeInsertionWait(DirtySnapshot.xmin,
-										 DirtySnapshot.speculativeToken);
+			if (snapshot->speculativeToken)
+				SpeculativeInsertionWait(snapshot->xmin,
+										 snapshot->speculativeToken);
 			else
 				XactLockTableWait(xwait, heap,
 								  &existing_slot->tts_tid, reason_wait);
