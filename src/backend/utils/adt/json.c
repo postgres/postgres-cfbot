@@ -221,27 +221,55 @@ datum_to_json_internal(Datum val, bool is_null, StringInfo result,
 				appendStringInfoChar(result, '"');
 			break;
 		case JSONTYPE_NUMERIC:
-			outputstr = OidOutputFunctionCall(outfuncoid, val);
-
-			/*
-			 * Don't quote a non-key if it's a valid JSON number (i.e., not
-			 * "Infinity", "-Infinity", or "NaN").  Since we know this is a
-			 * numeric data type's output, we simplify and open-code the
-			 * validation for better performance.
-			 */
-			if (!key_scalar &&
-				((*outputstr >= '0' && *outputstr <= '9') ||
-				 (*outputstr == '-' &&
-				  (outputstr[1] >= '0' && outputstr[1] <= '9'))))
-				appendStringInfoString(result, outputstr);
-			else
 			{
-				appendStringInfoChar(result, '"');
-				appendStringInfoString(result, outputstr);
-				appendStringInfoChar(result, '"');
+				Size		saved_limit = json_size_limit;
+				bool		saved_hit = json_size_limit_hit;
+
+				/*
+				 * Suspend the size limit before invoking type output or cast
+				 * functions. This prevents intermediate internal operations
+				 * from prematurely triggering the limit, while the final
+				 * returned output is still strictly measured against the
+				 * threshold immediately after.
+				 */
+				json_set_size_limit(0);
+
+				/*
+				 * JSON and JSONB output are already escaped, so we can call
+				 * their output functions directly without extra escaping.
+				 * Check the rendered length before appending to result.
+				 */
+				outputstr = OidOutputFunctionCall(outfuncoid, val);
+
+				json_size_limit = saved_limit;
+				json_size_limit_hit = saved_hit;
+
+				if (json_size_would_exceed(result->len, strlen(outputstr)))
+				{
+					pfree(outputstr);
+					return;
+				}
+
+				/*
+				 * Don't quote a non-key if it's a valid JSON number (i.e.,
+				 * not "Infinity", "-Infinity", or "NaN").  Since we know this
+				 * is a numeric data type's output, we simplify and open-code
+				 * the validation for better performance.
+				 */
+				if (!key_scalar &&
+					((*outputstr >= '0' && *outputstr <= '9') ||
+					 (*outputstr == '-' &&
+					  (outputstr[1] >= '0' && outputstr[1] <= '9'))))
+					appendStringInfoString(result, outputstr);
+				else
+				{
+					appendStringInfoChar(result, '"');
+					appendStringInfoString(result, outputstr);
+					appendStringInfoChar(result, '"');
+				}
+				pfree(outputstr);
+				break;
 			}
-			pfree(outputstr);
-			break;
 		case JSONTYPE_DATE:
 			{
 				char		buf[MAXDATELEN + 1];
