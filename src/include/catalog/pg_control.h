@@ -172,12 +172,16 @@ typedef struct ControlFileData
 	 * If backupEndRequired is true, we know for sure that we're restoring
 	 * from a backup, and must see a backup-end record before we can safely
 	 * start up.
+	 *
+	 * If backupLabelRequired is true, then a backup_label file must be
+	 * present in order for recovery to proceed.
 	 */
 	XLogRecPtr	minRecoveryPoint;
 	TimeLineID	minRecoveryPointTLI;
 	XLogRecPtr	backupStartPoint;
 	XLogRecPtr	backupEndPoint;
 	bool		backupEndRequired;
+	bool		backupLabelRequired;
 
 	/*
 	 * Parameter settings that determine if the WAL can be used for archival

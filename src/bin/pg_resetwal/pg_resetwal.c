@@ -922,6 +922,7 @@ RewriteControlFile(void)
 	ControlFile.backupStartPoint = InvalidXLogRecPtr;
 	ControlFile.backupEndPoint = InvalidXLogRecPtr;
 	ControlFile.backupEndRequired = false;
+	ControlFile.backupLabelRequired = false;
 
 	/*
 	 * Force the defaults for max_* settings. The values don't really matter
