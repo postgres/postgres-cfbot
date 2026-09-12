@@ -151,7 +151,19 @@ struct JsonParserStack
 	bool	   *fnull;
 	JsonTokenType scalar_tok;
 	char	   *scalar_val;
+	/* json5: last matched terminal was a comma */
+	bool		json5_after_comma;
 };
+
+/* json5 comment lexing state saved across incremental chunks */
+typedef enum Json5CommentState
+{
+	JSON5_COMMENT_NONE = 0,
+	JSON5_COMMENT_SLASH,		/* saw '/', comment kind not known yet */
+	JSON5_COMMENT_LINE,			/* inside a // comment */
+	JSON5_COMMENT_BLOCK,		/* inside a block comment */
+	JSON5_COMMENT_BLOCK_STAR,	/* inside a block comment, last byte was '*' */
+} Json5CommentState;
 
 /*
  * struct containing state used when there is a possible partial token at the
@@ -165,6 +177,8 @@ struct JsonIncrementalState
 	bool		is_last_chunk;
 	bool		partial_completed;
 	jsonapi_StrValType partial_token;
+	/* json5 comment resume state */
+	Json5CommentState comment_state;
 };
 
 /*
@@ -390,7 +404,8 @@ IsValidJsonNumber(const char *str, size_t len)
  */
 JsonLexContext *
 makeJsonLexContextCstringLen(JsonLexContext *lex, const char *json,
-							 size_t len, int encoding, bool need_escapes)
+							 size_t len, int encoding, bool need_escapes,
+							 bool json5)
 {
 	if (lex == NULL)
 	{
@@ -408,6 +423,7 @@ makeJsonLexContextCstringLen(JsonLexContext *lex, const char *json,
 	lex->input_length = len;
 	lex->input_encoding = encoding;
 	lex->need_escapes = need_escapes;
+	lex->json5 = json5;
 	if (need_escapes)
 	{
 		/*
@@ -496,7 +512,7 @@ allocate_incremental_state(JsonLexContext *lex)
  */
 JsonLexContext *
 makeJsonLexContextIncremental(JsonLexContext *lex, int encoding,
-							  bool need_escapes)
+							  bool need_escapes, bool json5)
 {
 	if (lex == NULL)
 	{
@@ -525,6 +541,7 @@ makeJsonLexContextIncremental(JsonLexContext *lex, int encoding,
 	}
 
 	lex->need_escapes = need_escapes;
+	lex->json5 = json5;
 	if (need_escapes)
 	{
 		/*
@@ -642,6 +659,59 @@ static inline bool
 have_prediction(JsonParserStack *pstack)
 {
 	return pstack->pred_index > 0;
+}
+
+/*
+ * Keywords that json5 accepts as unquoted object keys: the reserved words
+ * true/false/null, plus Infinity/NaN, which lex as numbers but are ordinary
+ * identifiers too.
+ */
+static inline bool
+json5_keyword_key(const JsonLexContext *lex, JsonTokenType tok)
+{
+	return tok == JSON_TOKEN_TRUE || tok == JSON_TOKEN_FALSE ||
+		tok == JSON_TOKEN_NULL ||
+		(tok == JSON_TOKEN_NUMBER && lex->token_is_identifier);
+}
+
+/*
+ * Copy the current token verbatim, for a json5 keyword used as an unquoted
+ * object key (the lexer only fills strval for real strings).  Returns NULL
+ * on allocation failure.
+ */
+static char *
+json5_dup_reserved_key(JsonLexContext *lex)
+{
+	size_t		klen = lex->token_terminator - lex->token_start;
+	char	   *fname = ALLOC(klen + 1);
+
+	if (fname != NULL)
+	{
+		memcpy(fname, lex->token_start, klen);
+		fname[klen] = '\0';
+	}
+	return fname;
+}
+
+/*
+ * json5 trailing comma support: discard predictions for an element that
+ * will never arrive, stopping at the enclosing close bracket/brace or the
+ * more-elements production that leads to it.
+ */
+static void
+json5_pop_to_closing(JsonParserStack *pstack)
+{
+	while (have_prediction(pstack))
+	{
+		char		next = next_prediction(pstack);
+
+		if (next == JSON_TOKEN_ARRAY_END ||
+			next == JSON_TOKEN_OBJECT_END ||
+			next == JSON_NT_MORE_ARRAY_ELEMENTS ||
+			next == JSON_NT_MORE_KEY_PAIRS)
+			break;
+		pop_prediction(pstack);
+	}
 }
 
 static inline void
@@ -905,18 +975,47 @@ pg_parse_json_incremental(JsonLexContext *lex,
 
 	while (have_prediction(pstack))
 	{
-		char		top = pop_prediction(pstack);
+		char		top;
 		td_entry	entry;
 
 		/*
-		 * these first two branches are the guts of the Table Driven method
+		 * json5 trailing comma: the last matched terminal was a comma and
+		 * the next token closes the array/object, so the predictions for the
+		 * expected next element are phantom.  Discard them down to the
+		 * enclosing MORE_* production, which accepts the close bracket.
+		 * Nothing else may unwind this way: a comma flanked by anything else
+		 * must fail like it does in strict mode.
 		 */
-		if (top == tok)
+		if (lex->json5 && pstack->json5_after_comma &&
+			(tok == JSON_TOKEN_ARRAY_END || tok == JSON_TOKEN_OBJECT_END))
+		{
+			json5_pop_to_closing(pstack);
+			pstack->json5_after_comma = false;
+			if (!have_prediction(pstack))
+				break;
+		}
+
+		top = pop_prediction(pstack);
+
+		/*
+		 * these first two branches are the guts of the Table Driven method
+		 *
+		 * In json5 mode a reserved word (true/false/null) also matches a
+		 * predicted key: key position is recognizable by the COLON prediction
+		 * that directly follows it.
+		 */
+		if (top == tok ||
+			(lex->json5 &&
+			 top == JSON_TOKEN_STRING &&
+			 json5_keyword_key(lex, tok) &&
+			 have_prediction(pstack) && next_prediction(pstack) == JSON_TOKEN_COLON))
 		{
 			/*
 			 * tok can only be a terminal symbol, so top must be too. the
 			 * token matches the top of the stack, so get the next token.
 			 */
+			if (lex->json5)
+				pstack->json5_after_comma = (top == JSON_TOKEN_COMMA);
 			if (tok < JSON_TOKEN_END)
 			{
 				result = json_lex(lex);
@@ -925,12 +1024,23 @@ pg_parse_json_incremental(JsonLexContext *lex,
 				tok = lex_peek(lex);
 			}
 		}
-		else if (IS_NT(top) && (entry = td_parser_table[OFS(top)][tok]).prod != NULL)
+		else if (IS_NT(top) &&
+				 (((entry = td_parser_table[OFS(top)][tok]).prod != NULL &&
+				   !(top == JSON_NT_JSON && tok == JSON_TOKEN_STRING &&
+					 lex->token_is_identifier)) ||
+				  (lex->json5 &&
+				   (top == JSON_NT_KEY_PAIRS || top == JSON_NT_MORE_KEY_PAIRS) &&
+				   json5_keyword_key(lex, tok) &&
+				   (entry = td_parser_table[OFS(top)][JSON_TOKEN_STRING]).prod != NULL)))
 		{
 			/*
 			 * the token is in the director set for a production of the
 			 * non-terminal at the top of the stack, so push the reversed RHS
 			 * of the production onto the stack.
+			 *
+			 * Two json5 deviations above: an unquoted identifier (lexed as a
+			 * string) must not be taken as a value, and a reserved word
+			 * (true/false/null) doubles as a key.
 			 */
 			push_prediction(pstack, entry);
 		}
@@ -1020,9 +1130,18 @@ pg_parse_json_incremental(JsonLexContext *lex,
 
 						if ((ostart != NULL || oend != NULL) && lex->need_escapes)
 						{
-							fname = STRDUP(lex->strval->data);
-							if (fname == NULL)
-								return JSON_OUT_OF_MEMORY;
+							if (lex->json5 && json5_keyword_key(lex, tok))
+							{
+								fname = json5_dup_reserved_key(lex);
+								if (fname == NULL)
+									return JSON_OUT_OF_MEMORY;
+							}
+							else
+							{
+								fname = STRDUP(lex->strval->data);
+								if (fname == NULL)
+									return JSON_OUT_OF_MEMORY;
+							}
 						}
 						set_fname(lex, fname);
 					}
@@ -1263,6 +1382,10 @@ parse_scalar(JsonLexContext *lex, const JsonSemAction *sem)
 		tok != JSON_TOKEN_NULL)
 		return report_parse_error(JSON_PARSE_VALUE, lex);
 
+	/* json5 unquoted identifiers are lexed as strings but can't be values */
+	if (tok == JSON_TOKEN_STRING && lex->token_is_identifier)
+		return report_parse_error(JSON_PARSE_VALUE, lex);
+
 	/* if no semantic function, just consume the token */
 	if (sfunc == NULL)
 		return json_lex(lex);
@@ -1325,15 +1448,27 @@ parse_object_field(JsonLexContext *lex, const JsonSemAction *sem)
 	JsonTokenType tok;
 	JsonParseErrorType result;
 
-	if (lex_peek(lex) != JSON_TOKEN_STRING)
-		return report_parse_error(JSON_PARSE_STRING, lex);
-	if ((ostart != NULL || oend != NULL) && lex->need_escapes)
+	if (lex_peek(lex) == JSON_TOKEN_STRING)
 	{
-		/* fname is NULL if need_escapes is false */
-		fname = STRDUP(lex->strval->data);
-		if (fname == NULL)
-			return JSON_OUT_OF_MEMORY;
+		if ((ostart != NULL || oend != NULL) && lex->need_escapes)
+		{
+			/* fname is NULL if need_escapes is false */
+			fname = STRDUP(lex->strval->data);
+			if (fname == NULL)
+				return JSON_OUT_OF_MEMORY;
+		}
 	}
+	else if (lex->json5 && json5_keyword_key(lex, lex_peek(lex)))
+	{
+		if ((ostart != NULL || oend != NULL) && lex->need_escapes)
+		{
+			fname = json5_dup_reserved_key(lex);
+			if (fname == NULL)
+				return JSON_OUT_OF_MEMORY;
+		}
+	}
+	else
+		return report_parse_error(JSON_PARSE_STRING, lex);
 	result = json_lex(lex);
 	if (result != JSON_SUCCESS)
 	{
@@ -1429,12 +1564,24 @@ parse_object(JsonLexContext *lex, const JsonSemAction *sem)
 	tok = lex_peek(lex);
 	switch (tok)
 	{
+		case JSON_TOKEN_TRUE:
+		case JSON_TOKEN_FALSE:
+		case JSON_TOKEN_NULL:
+		case JSON_TOKEN_NUMBER:
+			if (!lex->json5 || !json5_keyword_key(lex, tok))
+			{
+				result = report_parse_error(JSON_PARSE_OBJECT_START, lex);
+				break;
+			}
+			pg_fallthrough;
 		case JSON_TOKEN_STRING:
 			result = parse_object_field(lex, sem);
 			while (result == JSON_SUCCESS && lex_peek(lex) == JSON_TOKEN_COMMA)
 			{
 				result = json_lex(lex);
 				if (result != JSON_SUCCESS)
+					break;
+				if (lex->json5 && lex_peek(lex) == JSON_TOKEN_OBJECT_END)
 					break;
 				result = parse_object_field(lex, sem);
 			}
@@ -1548,6 +1695,8 @@ parse_array(JsonLexContext *lex, const JsonSemAction *sem)
 			result = json_lex(lex);
 			if (result != JSON_SUCCESS)
 				break;
+			if (lex->json5 && lex_peek(lex) == JSON_TOKEN_ARRAY_END)
+				break;
 			result = parse_array_element(lex, sem);
 		}
 	}
@@ -1568,6 +1717,41 @@ parse_array(JsonLexContext *lex, const JsonSemAction *sem)
 	}
 
 	return JSON_SUCCESS;
+}
+
+/*
+ * Lex a json5 signed Infinity/NaN.  s points at the '+' or '-' and a letter
+ * follows.  The whole identifier word after the sign is scanned, so trailing
+ * identifier characters make the whole word one invalid token instead of
+ * leaving a prefix match behind, and a word that might continue in the next
+ * chunk is saved as a partial token.  Sets token_type on success.
+ */
+static JsonParseErrorType
+json5_lex_signed_word(JsonLexContext *lex, const char *s)
+{
+	const char *const end = lex->input + lex->input_length;
+	const char *p;
+
+	for (p = s + 1; p < end && (JSON_ALPHANUMERIC_CHAR(*p) || *p == '$'); p++)
+		 /* skip */ ;
+
+	if (p == end && lex->incremental && !lex->inc_state->is_last_chunk)
+	{
+		jsonapi_appendBinaryStringInfo(&(lex->inc_state->partial_token),
+									   s, end - s);
+		return JSON_INCOMPLETE;
+	}
+
+	lex->prev_token_terminator = lex->token_terminator;
+	lex->token_terminator = p;
+
+	if ((p - s == 9 && memcmp(s + 1, "Infinity", 8) == 0) ||
+		(p - s == 4 && memcmp(s + 1, "NaN", 3) == 0))
+	{
+		lex->token_type = JSON_TOKEN_NUMBER;
+		return JSON_SUCCESS;
+	}
+	return JSON_INVALID_TOKEN;
 }
 
 /*
@@ -1594,6 +1778,8 @@ json_lex(JsonLexContext *lex)
 
 	if (lex == &failed_oom || lex->inc_state == &failed_inc_oom)
 		return JSON_OUT_OF_MEMORY;
+
+	lex->token_is_identifier = false;
 
 	if (lex->incremental)
 	{
@@ -1629,12 +1815,14 @@ json_lex(JsonLexContext *lex)
 		JsonLexContext dummy_lex = {0};
 		JsonParseErrorType partial_result;
 
-		if (ptok->data[0] == '"')
+		if (ptok->data[0] == '"' ||
+			(lex->json5 && ptok->data[0] == '\''))
 		{
 			/*
 			 * It's a string. Accumulate characters until we reach an
-			 * unescaped '"'.
+			 * unescaped closing quote.
 			 */
+			char		pquote = ptok->data[0];
 			int			escapes = 0;
 
 			for (int i = ptok->len - 1; i > 0; i--)
@@ -1652,7 +1840,7 @@ json_lex(JsonLexContext *lex)
 
 				jsonapi_appendStringInfoCharMacro(ptok, c);
 				added++;
-				if (c == '"' && escapes % 2 == 0)
+				if (c == pquote && escapes % 2 == 0)
 				{
 					tok_done = true;
 					break;
@@ -1668,37 +1856,72 @@ json_lex(JsonLexContext *lex)
 			/* not a string */
 			char		c = ptok->data[0];
 
-			if (c == '-' || (c >= '0' && c <= '9'))
+			if (c == '-' || (c >= '0' && c <= '9') ||
+				(lex->json5 && (c == '+' || c == '.')))
 			{
 				/*
 				 * Accumulate numeric continuations, respecting JSON number
-				 * grammar: -? int [frac] [exp]
+				 * grammar: -? int [frac] [exp], plus the json5 extensions
+				 * (leading '+', leading/trailing '.', 0x hex).
 				 *
 				 * We must track what parts of the number we've already seen
 				 * so we don't over-consume.  '.' is valid only once and not
 				 * after 'e'/'E'; 'e'/'E' is valid only once; '+'/'-' are
-				 * valid only immediately after 'e'/'E'.
+				 * valid only immediately after 'e'/'E'.  Once we know we're
+				 * looking at a json5 hex number, digits switch to the hex
+				 * alphabet and '.'/'e'/'E' just become hex digits too.
 				 */
 				bool		numend = false;
 				bool		seen_dot = false;
 				bool		seen_exp = false;
+				bool		seen_hex = false;
 				char		prev;
+				int			scan_start = (lex->json5 && (c == '+' || c == '-')) ? 1 : 0;
 
-				/* Scan existing partial token for state */
-				for (int j = 0; j < ptok->len; j++)
+				/*
+				 * hex detected in an earlier chunk, recovered from the
+				 * buffered prefix
+				 */
+				if (lex->json5 && ptok->len - scan_start >= 2 &&
+					ptok->data[scan_start] == '0' &&
+					(ptok->data[scan_start + 1] == 'x' ||
+					 ptok->data[scan_start + 1] == 'X'))
+					seen_hex = true;
+
+				if (!seen_hex)
 				{
-					char		pc = ptok->data[j];
+					/* Scan existing partial token for state */
+					for (int j = 0; j < ptok->len; j++)
+					{
+						char		pc = ptok->data[j];
 
-					if (pc == '.')
-						seen_dot = true;
-					else if (pc == 'e' || pc == 'E')
-						seen_exp = true;
+						if (pc == '.')
+							seen_dot = true;
+						else if (pc == 'e' || pc == 'E')
+							seen_exp = true;
+					}
 				}
 				prev = ptok->data[ptok->len - 1];
 
 				for (size_t i = 0; i < lex->input_length && !numend; i++)
 				{
 					char		cc = lex->input[i];
+
+					if (seen_hex)
+					{
+						if ((cc >= '0' && cc <= '9') ||
+							(cc >= 'a' && cc <= 'f') ||
+							(cc >= 'A' && cc <= 'F'))
+						{
+							jsonapi_appendStringInfoCharMacro(ptok, cc);
+							added++;
+						}
+						else
+							numend = true;
+						if (!numend)
+							prev = cc;
+						continue;
+					}
 
 					switch (cc)
 					{
@@ -1746,6 +1969,24 @@ json_lex(JsonLexContext *lex)
 							jsonapi_appendStringInfoCharMacro(ptok, cc);
 							added++;
 							break;
+						case 'x':
+						case 'X':
+
+							/*
+							 * hex 'x' just arrived this chunk, right after a
+							 * lone '0'
+							 */
+							if (lex->json5 && !seen_dot && !seen_exp &&
+								ptok->len - scan_start == 1 &&
+								ptok->data[scan_start] == '0')
+							{
+								seen_hex = true;
+								jsonapi_appendStringInfoCharMacro(ptok, cc);
+								added++;
+							}
+							else
+								numend = true;
+							break;
 						default:
 							numend = true;
 					}
@@ -1757,13 +1998,14 @@ json_lex(JsonLexContext *lex)
 			/*
 			 * Add any remaining alphanumeric chars. This takes care of the
 			 * {null, false, true} literals as well as any trailing
-			 * alphanumeric junk on non-string tokens.
+			 * alphanumeric junk on non-string tokens.  json5 identifiers can
+			 * also contain '$'.
 			 */
 			for (size_t i = added; i < lex->input_length; i++)
 			{
 				char		cc = lex->input[i];
 
-				if (JSON_ALPHANUMERIC_CHAR(cc))
+				if (JSON_ALPHANUMERIC_CHAR(cc) || (lex->json5 && cc == '$'))
 				{
 					jsonapi_appendStringInfoCharMacro(ptok, cc);
 					added++;
@@ -1809,6 +2051,7 @@ json_lex(JsonLexContext *lex)
 		dummy_lex.input_encoding = lex->input_encoding;
 		dummy_lex.incremental = false;
 		dummy_lex.need_escapes = lex->need_escapes;
+		dummy_lex.json5 = lex->json5;
 		dummy_lex.strval = lex->strval;
 
 		partial_result = json_lex(&dummy_lex);
@@ -1820,6 +2063,7 @@ json_lex(JsonLexContext *lex)
 		 * json_lex.
 		 */
 		lex->token_type = dummy_lex.token_type;
+		lex->token_is_identifier = dummy_lex.token_is_identifier;
 		lex->line_number = dummy_lex.line_number;
 
 		/*
@@ -1849,15 +2093,146 @@ json_lex(JsonLexContext *lex)
 		/* end of partial token processing */
 	}
 
-	/* Skip leading whitespace. */
-	while (s < end && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r'))
+	/*
+	 * Skip whitespace and, in json5 mode, comments.  Comments count as
+	 * whitespace, so this alternates between the two until neither matches.
+	 * At an incremental chunk boundary the comment state is saved in
+	 * inc_state and picked up again here, since the bytes deciding comment
+	 * kind and termination can open the next chunk.
+	 */
+	for (;;)
 	{
-		if (*s++ == '\n')
+		Json5CommentState cstate = JSON5_COMMENT_NONE;
+
+		if (lex->json5 && lex->incremental)
 		{
-			++lex->line_number;
-			lex->line_start = s;
+			cstate = lex->inc_state->comment_state;
+			lex->inc_state->comment_state = JSON5_COMMENT_NONE;
+		}
+
+		if (cstate == JSON5_COMMENT_NONE)
+		{
+			/* Skip leading whitespace. */
+			while (s < end && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r'))
+			{
+				if (*s++ == '\n')
+				{
+					++lex->line_number;
+					lex->line_start = s;
+				}
+			}
+
+			if (!lex->json5 || s >= end || *s != '/')
+				break;
+
+			if (s + 1 >= end)
+			{
+				/*
+				 * A lone '/' at the end of the chunk might start a comment;
+				 * ask for more input in incremental mode.  Otherwise fall
+				 * out and report the '/' as an invalid token.
+				 */
+				if (lex->incremental && !lex->inc_state->is_last_chunk)
+				{
+					lex->inc_state->comment_state = JSON5_COMMENT_SLASH;
+					return JSON_INCOMPLETE;
+				}
+				break;
+			}
+			if (*(s + 1) == '/')
+			{
+				s += 2;
+				cstate = JSON5_COMMENT_LINE;
+			}
+			else if (*(s + 1) == '*')
+			{
+				s += 2;
+				cstate = JSON5_COMMENT_BLOCK;
+			}
+			else
+				break;			/* '/' not a comment: invalid token */
+		}
+		else if (cstate == JSON5_COMMENT_SLASH)
+		{
+			/* '/' seen at the end of the previous chunk */
+			if (s < end && *s == '/')
+			{
+				s++;
+				cstate = JSON5_COMMENT_LINE;
+			}
+			else if (s < end && *s == '*')
+			{
+				s++;
+				cstate = JSON5_COMMENT_BLOCK;
+			}
+			else
+			{
+				if (s >= end && !lex->inc_state->is_last_chunk)
+				{
+					lex->inc_state->comment_state = JSON5_COMMENT_SLASH;
+					return JSON_INCOMPLETE;
+				}
+				lex->token_start = s;
+				lex->prev_token_terminator = lex->token_terminator;
+				lex->token_terminator = s;
+				return JSON_INVALID_TOKEN;
+			}
+		}
+
+		if (cstate == JSON5_COMMENT_LINE)
+		{
+			/* json5 line terminators are LF and CR */
+			while (s < end && *s != '\n' && *s != '\r')
+				s++;
+			if (s >= end && lex->incremental && !lex->inc_state->is_last_chunk)
+			{
+				lex->inc_state->comment_state = JSON5_COMMENT_LINE;
+				return JSON_INCOMPLETE;
+			}
+
+			/*
+			 * The terminator, if any, is consumed as whitespace on the next
+			 * round; at end of input the comment is implicitly closed.
+			 */
+		}
+		else
+		{
+			/* block comment body; star tracks a possible closing '*' */
+			bool		star = (cstate == JSON5_COMMENT_BLOCK_STAR);
+			bool		closed = false;
+
+			while (s < end)
+			{
+				char		c = *s++;
+
+				if (star && c == '/')
+				{
+					closed = true;
+					break;
+				}
+				star = (c == '*');
+				if (c == '\n')
+				{
+					++lex->line_number;
+					lex->line_start = s;
+				}
+			}
+			if (!closed)
+			{
+				if (lex->incremental && !lex->inc_state->is_last_chunk)
+				{
+					lex->inc_state->comment_state =
+						star ? JSON5_COMMENT_BLOCK_STAR : JSON5_COMMENT_BLOCK;
+					return JSON_INCOMPLETE;
+				}
+				lex->token_start = s;
+				lex->prev_token_terminator = lex->token_terminator;
+				lex->token_terminator = s;
+				return JSON_UNTERMINATED_COMMENT;
+			}
 		}
 	}
+
 	lex->token_start = s;
 
 	/* Determine token type. */
@@ -1903,6 +2278,18 @@ json_lex(JsonLexContext *lex)
 				lex->token_terminator = s + 1;
 				lex->token_type = JSON_TOKEN_COLON;
 				break;
+			case '\'':
+				if (lex->json5)
+				{
+					result = json_lex_string(lex);
+					if (result != JSON_SUCCESS)
+						return result;
+					lex->token_type = JSON_TOKEN_STRING;
+					break;
+				}
+				lex->prev_token_terminator = lex->token_terminator;
+				lex->token_terminator = s + 1;
+				return JSON_INVALID_TOKEN;
 			case '"':
 				/* string */
 				result = json_lex_string(lex);
@@ -1911,12 +2298,60 @@ json_lex(JsonLexContext *lex)
 				lex->token_type = JSON_TOKEN_STRING;
 				break;
 			case '-':
+				if (lex->json5 && s + 1 < end &&
+					(*(s + 1) == 'I' || *(s + 1) == 'N'))
+				{
+					/* Signed Infinity/NaN. */
+					result = json5_lex_signed_word(lex, s);
+					if (result != JSON_SUCCESS)
+						return result;
+					break;
+				}
 				/* Negative number. */
 				result = json_lex_number(lex, s + 1, NULL, NULL);
 				if (result != JSON_SUCCESS)
 					return result;
 				lex->token_type = JSON_TOKEN_NUMBER;
 				break;
+			case '+':
+				if (lex->json5)
+				{
+					if (s + 1 < end && (*(s + 1) == 'I' || *(s + 1) == 'N'))
+					{
+						/* Signed Infinity/NaN. */
+						result = json5_lex_signed_word(lex, s);
+						if (result != JSON_SUCCESS)
+							return result;
+						break;
+					}
+					/* Explicit positive sign. */
+					result = json_lex_number(lex, s + 1, NULL, NULL);
+					if (result != JSON_SUCCESS)
+						return result;
+					lex->token_type = JSON_TOKEN_NUMBER;
+					break;
+				}
+				lex->prev_token_terminator = lex->token_terminator;
+				lex->token_terminator = s + 1;
+				return JSON_INVALID_TOKEN;
+			case '.':
+				if (lex->json5)
+				{
+					/*
+					 * Leading decimal point, e.g. .5.  json_lex_number's own
+					 * incremental handling takes care of a lone '.' sitting
+					 * at the end of a chunk (it buffers just the '.' and asks
+					 * for more input).
+					 */
+					result = json_lex_number(lex, s, NULL, NULL);
+					if (result != JSON_SUCCESS)
+						return result;
+					lex->token_type = JSON_TOKEN_NUMBER;
+					break;
+				}
+				lex->prev_token_terminator = lex->token_terminator;
+				lex->token_terminator = s + 1;
+				return JSON_INVALID_TOKEN;
 			case '0':
 			case '1':
 			case '2':
@@ -1946,7 +2381,8 @@ json_lex(JsonLexContext *lex)
 					 * the whole word as an unexpected token, rather than just
 					 * some unintuitive prefix thereof.
 					 */
-					for (p = s; p < end && JSON_ALPHANUMERIC_CHAR(*p); p++)
+					for (p = s; p < end && (JSON_ALPHANUMERIC_CHAR(*p) ||
+											(lex->json5 && *p == '$')); p++)
 						 /* skip */ ;
 
 					/*
@@ -1981,11 +2417,43 @@ json_lex(JsonLexContext *lex)
 							lex->token_type = JSON_TOKEN_TRUE;
 						else if (memcmp(s, "null", 4) == 0)
 							lex->token_type = JSON_TOKEN_NULL;
+						else if (lex->json5)
+							goto json5_identifier;
 						else
 							return JSON_INVALID_TOKEN;
 					}
 					else if (p - s == 5 && memcmp(s, "false", 5) == 0)
 						lex->token_type = JSON_TOKEN_FALSE;
+					else if (lex->json5 && p - s == 8 && memcmp(s, "Infinity", 8) == 0)
+					{
+						/* also an identifier, so usable as an unquoted key */
+						lex->token_type = JSON_TOKEN_NUMBER;
+						lex->token_is_identifier = true;
+					}
+					else if (lex->json5 && p - s == 3 && memcmp(s, "NaN", 3) == 0)
+					{
+						lex->token_type = JSON_TOKEN_NUMBER;
+						lex->token_is_identifier = true;
+					}
+					else if (lex->json5)
+					{
+json5_identifier:
+						if ((*s >= 'a' && *s <= 'z') ||
+							(*s >= 'A' && *s <= 'Z') ||
+							*s == '_' || *s == '$' ||
+							IS_HIGHBIT_SET(*s))
+						{
+							lex->token_type = JSON_TOKEN_STRING;
+							lex->token_is_identifier = true;
+							if (lex->need_escapes)
+							{
+								jsonapi_resetStringInfo(lex->strval);
+								jsonapi_appendBinaryStringInfo(lex->strval, s, p - s);
+							}
+						}
+						else
+							return JSON_INVALID_TOKEN;
+					}
 					else
 						return JSON_INVALID_TOKEN;
 				}
@@ -2015,6 +2483,7 @@ json_lex_string(JsonLexContext *lex)
 	const char *s;
 	const char *const end = lex->input + lex->input_length;
 	int			hi_surrogate = -1;
+	char		quote_char = *lex->token_start;
 
 	/* Convenience macros for error exits */
 #define FAIL_OR_INCOMPLETE_AT_CHAR_START(code) \
@@ -2057,7 +2526,7 @@ json_lex_string(JsonLexContext *lex)
 		/* Premature end of the string. */
 		if (s >= end)
 			FAIL_OR_INCOMPLETE_AT_CHAR_START(JSON_INVALID_TOKEN);
-		else if (*s == '"')
+		else if (*s == quote_char)
 			break;
 		else if (*s == '\\')
 		{
@@ -2165,6 +2634,14 @@ json_lex_string(JsonLexContext *lex)
 					case '/':
 						jsonapi_appendStringInfoChar(lex->strval, *s);
 						break;
+					case '\'':
+						if (!lex->json5)
+						{
+							lex->token_start = s;
+							FAIL_AT_CHAR_END(JSON_ESCAPING_INVALID);
+						}
+						jsonapi_appendStringInfoChar(lex->strval, *s);
+						break;
 					case 'b':
 						jsonapi_appendStringInfoChar(lex->strval, '\b');
 						break;
@@ -2180,6 +2657,28 @@ json_lex_string(JsonLexContext *lex)
 					case 't':
 						jsonapi_appendStringInfoChar(lex->strval, '\t');
 						break;
+					case '\n':
+						if (lex->json5)
+						{
+							++lex->line_number;
+							lex->line_start = s + 1;
+							break;
+						}
+						lex->token_start = s;
+						FAIL_AT_CHAR_END(JSON_ESCAPING_INVALID);
+						break;
+					case '\r':
+						if (lex->json5)
+						{
+							if (s + 1 < end && *(s + 1) == '\n')
+								s++;
+							++lex->line_number;
+							lex->line_start = s + 1;
+							break;
+						}
+						lex->token_start = s;
+						FAIL_AT_CHAR_END(JSON_ESCAPING_INVALID);
+						break;
 					default:
 
 						/*
@@ -2191,17 +2690,34 @@ json_lex_string(JsonLexContext *lex)
 						FAIL_AT_CHAR_END(JSON_ESCAPING_INVALID);
 				}
 			}
-			else if (strchr("\"\\/bfnrt", *s) == NULL)
+			else
 			{
-				/*
-				 * Simpler processing if we're not bothered about de-escaping
-				 *
-				 * It's very tempting to remove the strchr() call here and
-				 * replace it with a switch statement, but testing so far has
-				 * shown it's not a performance win.
-				 */
-				lex->token_start = s;
-				FAIL_AT_CHAR_END(JSON_ESCAPING_INVALID);
+				if (lex->json5 && *s == '\r')
+				{
+					if (s + 1 < end && *(s + 1) == '\n')
+						s++;
+					++lex->line_number;
+					lex->line_start = s + 1;
+				}
+				else if (lex->json5 && *s == '\n')
+				{
+					++lex->line_number;
+					lex->line_start = s + 1;
+				}
+				else if (strchr("\"\\/bfnrt", *s) == NULL &&
+						 !(lex->json5 && *s == '\''))
+				{
+					/*
+					 * Simpler processing if we're not bothered about
+					 * de-escaping
+					 *
+					 * It's very tempting to remove the strchr() call here and
+					 * replace it with a switch statement, but testing so far
+					 * has shown it's not a performance win.
+					 */
+					lex->token_start = s;
+					FAIL_AT_CHAR_END(JSON_ESCAPING_INVALID);
+				}
 			}
 		}
 		else
@@ -2217,13 +2733,13 @@ json_lex_string(JsonLexContext *lex)
 			 */
 			while (p < end - sizeof(Vector8) &&
 				   !pg_lfind8('\\', (const uint8 *) p, sizeof(Vector8)) &&
-				   !pg_lfind8('"', (const uint8 *) p, sizeof(Vector8)) &&
+				   !pg_lfind8(quote_char, (const uint8 *) p, sizeof(Vector8)) &&
 				   !pg_lfind8_le(31, (const uint8 *) p, sizeof(Vector8)))
 				p += sizeof(Vector8);
 
 			for (; p < end; p++)
 			{
-				if (*p == '\\' || *p == '"')
+				if (*p == '\\' || *p == quote_char)
 					break;
 				else if ((unsigned char) *p <= 31)
 				{
@@ -2301,34 +2817,43 @@ json_lex_number(JsonLexContext *lex, const char *s,
 				bool *num_err, size_t *total_len)
 {
 	bool		error = false;
+	bool		is_hex = false;
 	int			len = s - lex->input;
 
 	/* Part (1): leading sign indicator. */
 	/* Caller already did this for us; so do nothing. */
 
-	/* Part (2): parse main digit string. */
-	if (len < lex->input_length && *s == '0')
+	if (lex->json5 && len < lex->input_length && *s == '0' &&
+		len + 1 < lex->input_length &&
+		(*(s + 1) == 'x' || *(s + 1) == 'X'))
 	{
-		s++;
-		len++;
-	}
-	else if (len < lex->input_length && *s >= '1' && *s <= '9')
-	{
-		do
+		/* json5 hex integer, e.g. 0x1F -- no fraction or exponent part. */
+		is_hex = true;
+		s += 2;
+		len += 2;
+		if (len >= lex->input_length ||
+			!((*s >= '0' && *s <= '9') ||
+			  (*s >= 'a' && *s <= 'f') ||
+			  (*s >= 'A' && *s <= 'F')))
+			error = true;
+		else
 		{
-			s++;
-			len++;
-		} while (len < lex->input_length && *s >= '0' && *s <= '9');
+			do
+			{
+				s++;
+				len++;
+			} while (len < lex->input_length &&
+					 ((*s >= '0' && *s <= '9') ||
+					  (*s >= 'a' && *s <= 'f') ||
+					  (*s >= 'A' && *s <= 'F')));
+		}
 	}
-	else
-		error = true;
-
-	/* Part (3): parse optional decimal portion. */
-	if (len < lex->input_length && *s == '.')
+	else if (lex->json5 && len < lex->input_length && *s == '.')
 	{
+		/* Part (2)/(3): json5 leading decimal point, e.g. .5 */
 		s++;
 		len++;
-		if (len == lex->input_length || *s < '0' || *s > '9')
+		if (len >= lex->input_length || *s < '0' || *s > '9')
 			error = true;
 		else
 		{
@@ -2339,9 +2864,52 @@ json_lex_number(JsonLexContext *lex, const char *s,
 			} while (len < lex->input_length && *s >= '0' && *s <= '9');
 		}
 	}
+	else
+	{
+		/* Part (2): parse main digit string. */
+		if (len < lex->input_length && *s == '0')
+		{
+			s++;
+			len++;
+		}
+		else if (len < lex->input_length && *s >= '1' && *s <= '9')
+		{
+			do
+			{
+				s++;
+				len++;
+			} while (len < lex->input_length && *s >= '0' && *s <= '9');
+		}
+		else
+			error = true;
 
-	/* Part (4): parse optional exponent. */
-	if (len < lex->input_length && (*s == 'e' || *s == 'E'))
+		/* Part (3): parse optional decimal portion. */
+		if (len < lex->input_length && *s == '.')
+		{
+			s++;
+			len++;
+			if (len == lex->input_length || *s < '0' || *s > '9')
+			{
+				/* json5 allows a bare trailing decimal point, e.g. 5. */
+				if (!lex->json5)
+					error = true;
+			}
+			else
+			{
+				do
+				{
+					s++;
+					len++;
+				} while (len < lex->input_length && *s >= '0' && *s <= '9');
+			}
+		}
+	}
+
+	/*
+	 * Part (4): parse optional exponent.  Shared by the leading-dot and
+	 * standard paths; hex integers have no exponent part.
+	 */
+	if (!is_hex && len < lex->input_length && (*s == 'e' || *s == 'E'))
 	{
 		s++;
 		len++;
@@ -2365,9 +2933,13 @@ json_lex_number(JsonLexContext *lex, const char *s,
 	/*
 	 * Check for trailing garbage.  As in json_lex(), any alphanumeric stuff
 	 * here should be considered part of the token for error-reporting
-	 * purposes.
+	 * purposes; in json5 that includes '$'.  The incremental partial-token
+	 * code accumulates the same characters, so the two must agree on where
+	 * the token ends.
 	 */
-	for (; len < lex->input_length && JSON_ALPHANUMERIC_CHAR(*s); s++, len++)
+	for (; len < lex->input_length &&
+		 (JSON_ALPHANUMERIC_CHAR(*s) || (lex->json5 && *s == '$'));
+		 s++, len++)
 		error = true;
 
 	if (total_len != NULL)
@@ -2551,6 +3123,8 @@ json_errdetail(JsonParseErrorType error, JsonLexContext *lex)
 			return _("Unicode high surrogate must not follow a high surrogate.");
 		case JSON_UNICODE_LOW_SURROGATE:
 			return _("Unicode low surrogate must follow a high surrogate.");
+		case JSON_UNTERMINATED_COMMENT:
+			return _("Block comment is not terminated.");
 		case JSON_SEM_ACTION_FAILED:
 			/* fall through to the error code after switch */
 			break;

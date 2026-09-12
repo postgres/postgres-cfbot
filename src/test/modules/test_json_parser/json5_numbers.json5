@@ -1,0 +1,19 @@
+{
+  hexUpper: 0xDEADBEEF,
+  hexLower: 0xdeadbeef,
+  hexZero: 0x0,
+  hexSimple: 0x1F,
+  leadingDot: .5,
+  trailingDot: 5.,
+  plusInt: +42,
+  minusInt: -42,
+  exp: 6.022e23,
+  posInfinity: +Infinity,
+  negInfinity: -Infinity,
+  infinity: Infinity,
+  notANumber: NaN,
+  plain: 123,
+  negFloat: -4.5,
+  expPlain: 1e10,
+  zero: 0
+}
