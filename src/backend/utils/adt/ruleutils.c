@@ -566,24 +566,6 @@ Datum
 pg_get_ruledef(PG_FUNCTION_ARGS)
 {
 	Oid			ruleoid = PG_GETARG_OID(0);
-	int			prettyFlags;
-	char	   *res;
-
-	prettyFlags = PRETTYFLAG_INDENT;
-
-	res = pg_get_ruledef_worker(ruleoid, prettyFlags);
-
-	if (res == NULL)
-		PG_RETURN_NULL();
-
-	PG_RETURN_TEXT_P(string_to_text(res));
-}
-
-
-Datum
-pg_get_ruledef_ext(PG_FUNCTION_ARGS)
-{
-	Oid			ruleoid = PG_GETARG_OID(0);
 	bool		pretty = PG_GETARG_BOOL(1);
 	int			prettyFlags;
 	char	   *res;
@@ -685,25 +667,6 @@ pg_get_viewdef(PG_FUNCTION_ARGS)
 {
 	/* By OID */
 	Oid			viewoid = PG_GETARG_OID(0);
-	int			prettyFlags;
-	char	   *res;
-
-	prettyFlags = PRETTYFLAG_INDENT;
-
-	res = pg_get_viewdef_worker(viewoid, prettyFlags, WRAP_COLUMN_DEFAULT);
-
-	if (res == NULL)
-		PG_RETURN_NULL();
-
-	PG_RETURN_TEXT_P(string_to_text(res));
-}
-
-
-Datum
-pg_get_viewdef_ext(PG_FUNCTION_ARGS)
-{
-	/* By OID */
-	Oid			viewoid = PG_GETARG_OID(0);
 	bool		pretty = PG_GETARG_BOOL(1);
 	int			prettyFlags;
 	char	   *res;
@@ -740,31 +703,6 @@ pg_get_viewdef_wrap(PG_FUNCTION_ARGS)
 
 Datum
 pg_get_viewdef_name(PG_FUNCTION_ARGS)
-{
-	/* By qualified name */
-	text	   *viewname = PG_GETARG_TEXT_PP(0);
-	int			prettyFlags;
-	RangeVar   *viewrel;
-	Oid			viewoid;
-	char	   *res;
-
-	prettyFlags = PRETTYFLAG_INDENT;
-
-	/* Look up view name.  Can't lock it - we might not have privileges. */
-	viewrel = makeRangeVarFromNameList(textToQualifiedNameList(viewname));
-	viewoid = RangeVarGetRelid(viewrel, NoLock, false);
-
-	res = pg_get_viewdef_worker(viewoid, prettyFlags, WRAP_COLUMN_DEFAULT);
-
-	if (res == NULL)
-		PG_RETURN_NULL();
-
-	PG_RETURN_TEXT_P(string_to_text(res));
-}
-
-
-Datum
-pg_get_viewdef_name_ext(PG_FUNCTION_ARGS)
 {
 	/* By qualified name */
 	text	   *viewname = PG_GETARG_TEXT_PP(0);
@@ -875,20 +813,6 @@ pg_get_viewdef_worker(Oid viewoid, int prettyFlags, int wrapColumn)
  */
 Datum
 pg_get_triggerdef(PG_FUNCTION_ARGS)
-{
-	Oid			trigid = PG_GETARG_OID(0);
-	char	   *res;
-
-	res = pg_get_triggerdef_worker(trigid, false);
-
-	if (res == NULL)
-		PG_RETURN_NULL();
-
-	PG_RETURN_TEXT_P(string_to_text(res));
-}
-
-Datum
-pg_get_triggerdef_ext(PG_FUNCTION_ARGS)
 {
 	Oid			trigid = PG_GETARG_OID(0);
 	bool		pretty = PG_GETARG_BOOL(1);
@@ -1182,26 +1106,6 @@ pg_get_triggerdef_worker(Oid trigid, bool pretty)
  */
 Datum
 pg_get_indexdef(PG_FUNCTION_ARGS)
-{
-	Oid			indexrelid = PG_GETARG_OID(0);
-	int			prettyFlags;
-	char	   *res;
-
-	prettyFlags = PRETTYFLAG_INDENT;
-
-	res = pg_get_indexdef_worker(indexrelid, 0, NULL,
-								 false, false,
-								 false, false,
-								 prettyFlags, true);
-
-	if (res == NULL)
-		PG_RETURN_NULL();
-
-	PG_RETURN_TEXT_P(string_to_text(res));
-}
-
-Datum
-pg_get_indexdef_ext(PG_FUNCTION_ARGS)
 {
 	Oid			indexrelid = PG_GETARG_OID(0);
 	int32		colno = PG_GETARG_INT32(1);
@@ -2151,23 +2055,6 @@ Datum
 pg_get_constraintdef(PG_FUNCTION_ARGS)
 {
 	Oid			constraintId = PG_GETARG_OID(0);
-	int			prettyFlags;
-	char	   *res;
-
-	prettyFlags = PRETTYFLAG_INDENT;
-
-	res = pg_get_constraintdef_worker(constraintId, false, prettyFlags, true);
-
-	if (res == NULL)
-		PG_RETURN_NULL();
-
-	PG_RETURN_TEXT_P(string_to_text(res));
-}
-
-Datum
-pg_get_constraintdef_ext(PG_FUNCTION_ARGS)
-{
-	Oid			constraintId = PG_GETARG_OID(0);
 	bool		pretty = PG_GETARG_BOOL(1);
 	int			prettyFlags;
 	char	   *res;
@@ -2678,23 +2565,6 @@ decompile_column_index_array(Datum column_index_array, Oid relId,
  */
 Datum
 pg_get_expr(PG_FUNCTION_ARGS)
-{
-	text	   *expr = PG_GETARG_TEXT_PP(0);
-	Oid			relid = PG_GETARG_OID(1);
-	text	   *result;
-	int			prettyFlags;
-
-	prettyFlags = PRETTYFLAG_INDENT;
-
-	result = pg_get_expr_worker(expr, relid, prettyFlags);
-	if (result)
-		PG_RETURN_TEXT_P(result);
-	else
-		PG_RETURN_NULL();
-}
-
-Datum
-pg_get_expr_ext(PG_FUNCTION_ARGS)
 {
 	text	   *expr = PG_GETARG_TEXT_PP(0);
 	Oid			relid = PG_GETARG_OID(1);
