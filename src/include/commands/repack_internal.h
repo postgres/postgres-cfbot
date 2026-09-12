@@ -106,6 +106,10 @@ typedef struct DecodingWorkerShared
 	pid_t		backend_pid;
 	ProcNumber	backend_proc_number;
 
+	/* Timeouts in effect in the backend.  See RepackWorkerMain(). */
+	int			lock_timeout;
+	int			transaction_timeout;
+
 	/*
 	 * Memory the queue is located in.
 	 *
