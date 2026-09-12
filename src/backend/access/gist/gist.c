@@ -69,6 +69,7 @@ gisthandler(PG_FUNCTION_ARGS)
 		.amconsistentequality = false,
 		.amconsistentordering = false,
 		.amcanbackward = false,
+		.amcanmarkpos = false,
 		.amcanunique = false,
 		.amcanmulticol = true,
 		.amoptionalkey = true,
@@ -102,11 +103,14 @@ gisthandler(PG_FUNCTION_ARGS)
 		.amadjustmembers = gistadjustmembers,
 		.ambeginscan = gistbeginscan,
 		.amrescan = gistrescan,
-		.amgettuple = gistgettuple,
+		.amgettuple = NULL,
+		.amgetbatch = gistgetbatch,
+		.amunguardbatch = gistunguardbatch,
+		.amkillitemsbatch = gistkillitemsbatch,
+		.amgettransform = gistgettransform,
 		.amgetbitmap = gistgetbitmap,
 		.amendscan = gistendscan,
-		.ammarkpos = NULL,
-		.amrestrpos = NULL,
+		.amposreset = NULL,
 		.amestimateparallelscan = NULL,
 		.aminitparallelscan = NULL,
 		.amparallelrescan = NULL,
@@ -591,7 +595,7 @@ gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
 
 				recptr = gistXLogUpdate(buffer,
 										deloffs, ndeloffs, itup, ntup,
-										leftchildbuf);
+										leftchildbuf, false);
 			}
 			else
 				recptr = XLogGetFakeLSN(rel);

@@ -86,7 +86,8 @@ index_scan_tids(PG_FUNCTION_ARGS)
 				 errmsg("\"%s\" is not a regular index",
 						RelationGetRelationName(indexrel))));
 
-	if (indexrel->rd_indam->amgettuple == NULL)
+	if (indexrel->rd_indam->amgettuple == NULL &&
+		indexrel->rd_indam->amgetbatch == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("index \"%s\" does not support plain index scans",
@@ -115,11 +116,11 @@ index_scan_tids(PG_FUNCTION_ARGS)
 
 	slot = table_slot_create(heaprel, NULL);
 
-	scan = index_beginscan(heaprel, indexrel, snapshot, NULL,
+	scan = index_beginscan(heaprel, indexrel, false, snapshot, NULL,
 						   0, 0, SO_NONE);
 	index_rescan(scan, NULL, 0, NULL, 0);
 
-	while (index_getnext_slot(scan, dir, slot))
+	while (table_index_getnext_slot(scan, dir, slot))
 	{
 		ItemPointerData tid = slot->tts_tid;
 		Datum		values[1];

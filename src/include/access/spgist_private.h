@@ -14,6 +14,7 @@
 #ifndef SPGIST_PRIVATE_H
 #define SPGIST_PRIVATE_H
 
+#include "access/indexbatch.h"
 #include "access/itup.h"
 #include "access/spgist.h"
 #include "catalog/pg_am_d.h"
@@ -184,6 +185,89 @@ typedef struct SpGistSearchItem
 	(offsetof(SpGistSearchItem, distances) + sizeof(double) * (n_distances))
 
 /*
+ * Per-batch data private to the SP-GiST index AM (the static index AM opaque
+ * area of an IndexScanBatch).
+ *
+ * A non-ordered batch holds all matches from a single leaf page, and its buffer
+ * pin is the TID recycling interlock.  An ordered (nearest-neighbor) scan
+ * instead returns a "virtual" batch, drained from the distance-ordered queue
+ * and spanning many leaf pages; it holds no pin (blkno == InvalidBlockNumber).
+ *
+ * reconValue/level/isNull are the shared inputs spggettransform uses to
+ * reconstruct an index-only scan's values; the prefix is the same for every
+ * match in a non-ordered batch.  (Ordered scans are never index-only.)
+ */
+typedef struct SpGistBatchData
+{
+	Buffer		buf;			/* leaf page's pin (InvalidBuffer if virtual) */
+	BlockNumber blkno;			/* leaf blkno (InvalidBlockNumber == virtual) */
+	Datum		reconValue;		/* prefix; into the recon area when
+								 * by-reference */
+	int			level;
+	bool		isNull;			/* batch came from a nulls page */
+} SpGistBatchData;
+
+#define SpGistBatchGetData(scan, batch) \
+	index_scan_batch_index_opaque_static(scan, batch, SpGistBatchData)
+
+/*
+ * Per-item data for an ordered (virtual) batch: an array in the dynamic opaque
+ * area, subscripted via SpGistBatchGetItem.  Each item has its own recheck flag
+ * (SP-GiST matching is lossy, varying per item) plus its ORDER BY distances.
+ *
+ * A non-ordered batch needs only a recheck flag per item, so its dynamic opaque
+ * area is a plain bool array, subscripted via SpGistBatchGetRecheck.
+ */
+typedef struct SpGistBatchItem
+{
+	bool		recheck;		/* T if quals must be rechecked */
+	bool		recheckDistances;	/* T if distances are lossy lower bounds */
+	IndexOrderByDistance distances[FLEXIBLE_ARRAY_MEMBER];	/* numberOfOrderBys */
+} SpGistBatchItem;
+
+#define SizeOfSpGistBatchItem(n_distances) \
+	(offsetof(SpGistBatchItem, distances) + \
+	 sizeof(IndexOrderByDistance) * (n_distances))
+
+/* Subscript an ordered (virtual) batch's item array */
+#define SpGistBatchGetItem(scan, batch, item) \
+	(AssertMacro((scan)->numberOfOrderBys > 0), \
+	 AssertMacro((item) >= 0 && (item) < (scan)->maxitemsbatch), \
+	 (SpGistBatchItem *) ((char *) index_scan_batch_index_opaque_dyn((scan), (batch)) + \
+						  (Size) (item) * SizeOfSpGistBatchItem((scan)->numberOfOrderBys)))
+
+/* Subscript a non-ordered batch's recheck-flag array */
+#define SpGistBatchGetRecheck(scan, batch) \
+	(AssertMacro((scan)->numberOfOrderBys == 0), \
+	 (bool *) index_scan_batch_index_opaque_dyn((scan), (batch)))
+
+/* Size of each layout's per-item array within the dynamic opaque area */
+#define SpGistBatchItemArraySize(scan) \
+	MAXALIGN(SizeOfSpGistBatchItem((scan)->numberOfOrderBys) * (scan)->maxitemsbatch)
+#define SpGistBatchRecheckArraySize(scan) \
+	MAXALIGN(sizeof(bool) * (scan)->maxitemsbatch)
+
+/*
+ * For an index-only scan, the shared by-reference reconstruction prefix
+ * (SpGistBatchData.reconValue) is stored after the per-item array in the
+ * dynamic opaque area, not in currTuples: the prefix is reconstructed from
+ * ancestor inner pages, so it isn't bounded by the one leaf page that
+ * currTuples is sized for.  Index-only scans are always non-ordered, so it
+ * follows the recheck array.
+ */
+#define SpGistBatchGetReconArea(scan, batch) \
+	((char *) index_scan_batch_index_opaque_dyn((scan), (batch)) + \
+	 SpGistBatchRecheckArraySize(scan))
+
+/*
+ * Size of the reconstruction-prefix workspace.  A !longValuesOK opclass (the
+ * only kind whose scans can be index-only, see spgcanreturn) only ever
+ * reconstructs prefixes of values that fit on a page, so a page's worth of
+ * space always suffices.
+ */
+#define SpGistBatchReconAreaSize	BLCKSZ
+
+/*
  * Private state of an index scan
  */
 typedef struct SpGistScanOpaqueData
@@ -217,29 +301,9 @@ typedef struct SpGistScanOpaqueData
 	double	   *zeroDistances;
 	double	   *infDistances;
 
-	/* These fields are only used in amgetbitmap scans: */
-	TIDBitmap  *tbm;			/* bitmap being filled */
-	int64		ntids;			/* number of TIDs passed to bitmap */
-
-	/* These fields are only used in amgettuple scans: */
-	bool		want_itup;		/* are we reconstructing tuples? */
-	TupleDesc	reconTupDesc;	/* if so, descriptor for reconstructed tuples */
-	int			nPtrs;			/* number of TIDs found on current page */
-	int			iPtr;			/* index for scanning through same */
-	ItemPointerData heapPtrs[MaxIndexTuplesPerPage];	/* TIDs from cur page */
-	bool		recheck[MaxIndexTuplesPerPage]; /* their recheck flags */
-	bool		recheckDistances[MaxIndexTuplesPerPage];	/* distance recheck
-															 * flags */
-	HeapTuple	reconTups[MaxIndexTuplesPerPage];	/* reconstructed tuples */
-
-	/* distances (for recheck) */
-	IndexOrderByDistance *distances[MaxIndexTuplesPerPage];
-
-	/*
-	 * Note: using MaxIndexTuplesPerPage above is a bit hokey since
-	 * SpGistLeafTuples aren't exactly IndexTuples; however, they are larger,
-	 * so this is safe.
-	 */
+	/* These fields are only used in amgetbatch scans: */
+	TupleDesc	reconTupDesc;	/* descriptor for reconstructed tuples */
+	MemoryContext reconCxt;		/* context for lazily reconstructed xs_hitup */
 } SpGistScanOpaqueData;
 
 typedef SpGistScanOpaqueData *SpGistScanOpaque;

@@ -44,7 +44,7 @@
 /* Whether we are looking for plain indexscan, bitmap scan, or either */
 typedef enum
 {
-	ST_INDEXSCAN,				/* must support amgettuple */
+	ST_INDEXSCAN,				/* must support amgettuple or amgetbatch */
 	ST_BITMAPSCAN,				/* must support amgetbitmap */
 	ST_ANYSCAN,					/* either is okay */
 } ScanTypeControl;
@@ -746,7 +746,7 @@ get_index_paths(PlannerInfo *root, RelOptInfo *rel,
 	{
 		IndexPath  *ipath = (IndexPath *) lfirst(lc);
 
-		if (index->amhasgettuple)
+		if (index->amcanplainscan)
 			add_path(rel, (Path *) ipath);
 
 		if (index->amhasgetbitmap &&
@@ -834,7 +834,7 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 	switch (scantype)
 	{
 		case ST_INDEXSCAN:
-			if (!index->amhasgettuple)
+			if (!index->amcanplainscan)
 				return NIL;
 			break;
 		case ST_BITMAPSCAN:
@@ -951,9 +951,12 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 	/*
 	 * 3. Check if an index-only scan is possible.  If we're not building
 	 * plain indexscans, this isn't relevant since bitmap scans don't support
-	 * index data retrieval anyway.
+	 * index data retrieval anyway.  If there are ordering operators then we
+	 * assume that an index-only scan is unsafe due to the difficulty with
+	 * holding index page pins sufficient to avoid concurrent TID recycling.
 	 */
 	index_only_scan = (scantype != ST_BITMAPSCAN &&
+					   orderbyclauses == NIL &&
 					   check_index_only(rel, index));
 
 	/*
