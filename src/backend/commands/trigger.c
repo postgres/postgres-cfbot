@@ -2508,7 +2508,7 @@ ExecBRInsertTriggers(EState *estate, ResultRelInfo *relinfo,
 {
 	TriggerDesc *trigdesc = relinfo->ri_TrigDesc;
 	HeapTuple	newtuple = NULL;
-	bool		should_free;
+	bool		should_free = false;
 	TriggerData LocTriggerData = {0};
 	int			i;
 
@@ -2577,6 +2577,10 @@ ExecBRInsertTriggers(EState *estate, ResultRelInfo *relinfo,
 		}
 	}
 
+	/* Free our copy of the tuple, if the last trigger handed it back. */
+	if (newtuple != NULL && should_free)
+		heap_freetuple(newtuple);
+
 	return true;
 }
 
@@ -2612,7 +2616,7 @@ ExecIRInsertTriggers(EState *estate, ResultRelInfo *relinfo,
 {
 	TriggerDesc *trigdesc = relinfo->ri_TrigDesc;
 	HeapTuple	newtuple = NULL;
-	bool		should_free;
+	bool		should_free = false;
 	TriggerData LocTriggerData = {0};
 	int			i;
 
@@ -2663,6 +2667,10 @@ ExecIRInsertTriggers(EState *estate, ResultRelInfo *relinfo,
 			newtuple = NULL;
 		}
 	}
+
+	/* Free our copy of the tuple, if the last trigger handed it back. */
+	if (newtuple != NULL && should_free)
+		heap_freetuple(newtuple);
 
 	return true;
 }
@@ -3165,6 +3173,10 @@ ExecBRUpdateTriggers(EState *estate, EPQState *epqstate,
 			newtuple = NULL;
 		}
 	}
+
+	/* Likewise free our copy of the new tuple, if we still have it. */
+	if (newtuple != NULL && should_free_new)
+		heap_freetuple(newtuple);
 	if (should_free_trig)
 		heap_freetuple(trigtuple);
 
@@ -3258,7 +3270,7 @@ ExecIRUpdateTriggers(EState *estate, ResultRelInfo *relinfo,
 	TriggerDesc *trigdesc = relinfo->ri_TrigDesc;
 	TupleTableSlot *oldslot = ExecGetTriggerOldSlot(estate, relinfo);
 	HeapTuple	newtuple = NULL;
-	bool		should_free;
+	bool		should_free = false;
 	TriggerData LocTriggerData = {0};
 	int			i;
 
@@ -3300,6 +3312,8 @@ ExecIRUpdateTriggers(EState *estate, ResultRelInfo *relinfo,
 									   GetPerTupleMemoryContext(estate));
 		if (newtuple == NULL)
 		{
+			if (should_free)
+				heap_freetuple(oldtuple);
 			return false;		/* "do nothing" */
 		}
 		else if (newtuple != oldtuple)
@@ -3313,6 +3327,10 @@ ExecIRUpdateTriggers(EState *estate, ResultRelInfo *relinfo,
 			newtuple = NULL;
 		}
 	}
+
+	/* Free our copy of the new tuple, if the last trigger handed it back. */
+	if (newtuple != NULL && should_free)
+		heap_freetuple(newtuple);
 
 	return true;
 }
