@@ -121,14 +121,15 @@ SELECT id, name, fixed_amount,
   5 | replslot     | f            | t         | t
   6 | subscription | f            | t         | t
   7 | backend      | f            | t         | f
-  8 | archiver     | t            | f         | t
-  9 | bgwriter     | t            | f         | t
- 10 | checkpointer | t            | f         | t
- 11 | io           | t            | f         | t
- 12 | lock         | t            | f         | t
- 13 | slru         | t            | f         | t
- 14 | wal          | t            | f         | t
-(14 rows)
+  8 | tablespace   | f            | t         | t
+  9 | archiver     | t            | f         | t
+ 10 | bgwriter     | t            | f         | t
+ 11 | checkpointer | t            | f         | t
+ 12 | io           | t            | f         | t
+ 13 | lock         | t            | f         | t
+ 14 | slru         | t            | f         | t
+ 15 | wal          | t            | f         | t
+(15 rows)
 
 -- ensure that both seqscan and indexscan plans are allowed
 SET enable_seqscan TO on;
@@ -1266,7 +1267,7 @@ SELECT stats_reset > :'wal_reset_ts'::timestamptz FROM pg_stat_wal;
 -- Test error case for reset_shared with unknown stats type
 SELECT pg_stat_reset_shared('unknown');
 ERROR:  unrecognized reset target: "unknown"
-HINT:  Target must be "archiver", "bgwriter", "checkpointer", "io", "lock", "recovery_prefetch", "slru", or "wal".
+HINT:  Target must be "archiver", "bgwriter", "checkpointer", "io", "lock", "recovery_prefetch", "slru", "tablespace", or "wal".
 -- Test that reset works for pg_stat_database and pg_stat_database_conflicts
 -- Since pg_stat_database stats_reset starts out as NULL, reset it once first so that we
 -- have a baseline for comparison. The same for pg_stat_database_conflicts as it shares
@@ -2154,4 +2155,107 @@ SELECT fastpath_exceeded > :backend_fastpath_exceeded_before
 (1 row)
 
 DROP TABLE part_test;
+-- Test pg_stat_tablespace
+-- pg_default and pg_global always exist
+SELECT tablespace_name FROM pg_stat_tablespace
+  WHERE tablespace_name IN ('pg_default', 'pg_global')
+  ORDER BY tablespace_name;
+ tablespace_name 
+-----------------
+ pg_default
+ pg_global
+(2 rows)
+
+-- Check only that the counters move, not by how much.  pg_stat_tablespace
+-- aggregates every relation in the tablespace and other sessions in this
+-- parallel group are busy in pg_default too, so no exact value is
+-- reproducible.  Block reads and I/O timings may legitimately not move at
+-- all, since they depend on what happens to be cached and on
+-- track_io_timing, so those are only checked for sanity.
+SELECT tup_inserted AS ts_ins_before,
+       tup_updated AS ts_upd_before,
+       tup_deleted AS ts_del_before,
+       tup_returned AS ts_ret_before,
+       blks_hit AS ts_hit_before
+  FROM pg_stat_tablespace WHERE tablespace_name = 'pg_default' \gset
+CREATE TABLE test_tablespace_stats (a int);
+INSERT INTO test_tablespace_stats SELECT generate_series(1, 100);
+UPDATE test_tablespace_stats SET a = a + 1 WHERE a > 50;
+DELETE FROM test_tablespace_stats WHERE a > 90;
+SELECT count(*) > 0 FROM test_tablespace_stats;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT tup_inserted > :ts_ins_before AS inserts_counted,
+       tup_updated > :ts_upd_before AS updates_counted,
+       tup_deleted > :ts_del_before AS deletes_counted,
+       tup_returned > :ts_ret_before AS returns_counted,
+       blks_hit > :ts_hit_before AS hits_counted,
+       blks_read >= 0 AS blks_read_sane,
+       blk_read_time >= 0 AS blk_read_time_sane,
+       blk_write_time >= 0 AS blk_write_time_sane
+  FROM pg_stat_tablespace WHERE tablespace_name = 'pg_default';
+ inserts_counted | updates_counted | deletes_counted | returns_counted | hits_counted | blks_read_sane | blk_read_time_sane | blk_write_time_sane 
+-----------------+-----------------+-----------------+-----------------+--------------+----------------+--------------------+---------------------
+ t               | t               | t               | t               | t            | t              | t                  | t
+(1 row)
+
+DROP TABLE test_tablespace_stats;
+-- Temporary files are attributed to the tablespace they were created in,
+-- which without temp_tablespaces set is pg_default.
+SELECT temp_files AS ts_tmpf_before, temp_bytes AS ts_tmpb_before
+  FROM pg_stat_tablespace WHERE tablespace_name = 'pg_default' \gset
+SET work_mem = '64kB';
+SELECT count(*) > 0 FROM
+  (SELECT * FROM generate_series(1, 10000) AS s ORDER BY s DESC) AS foo;
+ ?column? 
+----------
+ t
+(1 row)
+
+RESET work_mem;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT temp_files > :ts_tmpf_before AS temp_files_counted,
+       temp_bytes > :ts_tmpb_before AS temp_bytes_counted
+  FROM pg_stat_tablespace WHERE tablespace_name = 'pg_default';
+ temp_files_counted | temp_bytes_counted 
+--------------------+--------------------
+ t                  | t
+(1 row)
+
+-- Resetting sets the timestamp, and resetting again does not move it backwards
+SELECT pg_stat_reset_shared('tablespace');
+ pg_stat_reset_shared 
+----------------------
+ 
+(1 row)
+
+SELECT stats_reset AS ts_reset_before FROM pg_stat_tablespace
+  WHERE tablespace_name = 'pg_default' \gset
+SELECT pg_stat_reset_shared('tablespace');
+ pg_stat_reset_shared 
+----------------------
+ 
+(1 row)
+
+SELECT stats_reset >= :'ts_reset_before'::timestamptz FROM pg_stat_tablespace
+  WHERE tablespace_name = 'pg_default';
+ ?column? 
+----------
+ t
+(1 row)
+
 -- End of Stats Test
