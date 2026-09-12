@@ -1650,7 +1650,7 @@ BeginCopyFrom(ParseState *pstate,
 		{
 			Form_pg_attribute att = TupleDescAttr(tupDesc, attno - 1);
 
-			cstate->domain_with_constraint[attno - 1] = DomainHasConstraints(att->atttypid, NULL);
+			cstate->domain_with_constraint[attno - 1] = DomainHasConstraints(att->atttypid, NULL, NULL);
 		}
 	}
 
