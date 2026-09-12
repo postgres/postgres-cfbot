@@ -67,12 +67,14 @@ provider postgresql {
 	probe buffer__flush__done(ForkNumber, BlockNumber, Oid, Oid, Oid);
 	probe buffer__extend__start(ForkNumber, Oid, Oid, Oid, int, unsigned int);
 	probe buffer__extend__done(ForkNumber, Oid, Oid, Oid, int, unsigned int, BlockNumber);
+	probe buffers__flush__start(ForkNumber, Oid, Oid, Oid, int, unsigned int);
+	probe buffers__flush__done(ForkNumber, Oid, Oid, Oid, int, unsigned int, BlockNumber);
 
 	probe buffer__checkpoint__start(int);
 	probe buffer__checkpoint__sync__start();
 	probe buffer__checkpoint__done();
 	probe buffer__sync__start(int, int);
-	probe buffer__sync__written(int);
+	probe buffers__sync__written(unsigned int);
 	probe buffer__sync__done(int, int, int);
 
 	probe deadlock__found();

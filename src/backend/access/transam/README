@@ -448,7 +448,9 @@ critical section.)
 3. Apply the required changes to the shared buffer(s).
 
 4. Mark the shared buffer(s) as dirty with MarkBufferDirty().  (This must
-happen before the WAL record is inserted; see notes in SyncOneBuffer().)
+happen before the WAL record is inserted; otherwise a checkpoint could
+write the buffer without the change and its WAL record before the redo
+point, making the change unrecoverable.)
 Note that marking a buffer dirty with MarkBufferDirty() should only
 happen iff you write a WAL record; see Writing Hints below.
 

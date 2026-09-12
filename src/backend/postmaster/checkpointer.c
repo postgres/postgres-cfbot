@@ -781,8 +781,10 @@ FastCheckpointRequested(void)
 /*
  * CheckpointWriteDelay -- control rate of checkpoint
  *
- * This function is called after each page write performed by BufferSync().
- * It is responsible for throttling BufferSync()'s write rate to hit
+ * This function is called after each batch of page writes performed by
+ * CheckPointBuffers(); npages is the number of pages the call represents
+ * (including pages that were scanned but did not need writing). It is
+ * responsible for throttling the checkpoint's write rate to hit
  * checkpoint_completion_target.
  *
  * The checkpoint request flags should be passed in; currently the only one
@@ -792,7 +794,7 @@ FastCheckpointRequested(void)
  * fraction between 0.0 meaning none, and 1.0 meaning all done.
  */
 void
-CheckpointWriteDelay(int flags, double progress)
+CheckpointWriteDelay(int flags, double progress, int npages)
 {
 	static int	absorb_counter = WRITES_PER_ABSORB;
 
@@ -837,12 +839,14 @@ CheckpointWriteDelay(int flags, double progress)
 				  WAIT_EVENT_CHECKPOINT_WRITE_DELAY);
 		ResetLatch(MyLatch);
 	}
-	else if (--absorb_counter <= 0)
+	else if ((absorb_counter -= npages) <= 0)
 	{
 		/*
-		 * Absorb pending fsync requests after each WRITES_PER_ABSORB write
-		 * operations even when we don't sleep, to prevent overflow of the
-		 * fsync request queue.
+		 * Absorb pending fsync requests after each WRITES_PER_ABSORB pages of
+		 * checkpoint progress even when we don't sleep, to prevent overflow
+		 * of the fsync request queue. Combined writes mean we are called once
+		 * per batch rather than once per page, so deduct the number of pages
+		 * each call represents from the budget instead of counting calls.
 		 */
 		AbsorbSyncRequests();
 		absorb_counter = WRITES_PER_ABSORB;
