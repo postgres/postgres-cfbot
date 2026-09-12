@@ -89,6 +89,26 @@ static bool verify_server_signature(fe_scram_state *state, bool *match,
 static bool calculate_client_proof(fe_scram_state *state,
 								   const char *client_final_message_without_proof,
 								   uint8 *result, const char **errstr);
+static bool scram_check_connect_deadline(void *arg, const char **errstr);
+
+/*
+ * Interrupt callback passed to scram_SaltedPasswordExt().  Aborts the
+ * PBKDF2 loop if the in-flight connect_timeout deadline has expired and
+ * surfaces the failure as a libpq connection timeout.
+ */
+static bool
+scram_check_connect_deadline(void *arg, const char **errstr)
+{
+	PGconn	   *conn = (PGconn *) arg;
+
+	if (conn->connect_deadline > 0 &&
+		PQgetCurrentTimeUSec() > conn->connect_deadline)
+	{
+		*errstr = libpq_gettext("connection timeout expired");
+		return true;
+	}
+	return false;
+}
 
 /*
  * Initialize SCRAM exchange status.
@@ -608,7 +628,6 @@ read_server_first_message(fe_scram_state *state, char *input)
 {
 	PGconn	   *conn = state->conn;
 	char	   *iterations_str;
-	char	   *endptr;
 	char	   *encoded_salt;
 	char	   *nonce;
 	int			decoded_salt_len;
@@ -673,15 +692,38 @@ read_server_first_message(fe_scram_state *state, char *input)
 		/* read_attr_value() has appended an error string */
 		return false;
 	}
-	state->iterations = strtol(iterations_str, &endptr, 10);
-	if (*endptr != '\0' || state->iterations < 1)
+	if (!scram_parse_iterations(iterations_str, &state->iterations))
 	{
 		libpq_append_conn_error(conn, "malformed SCRAM message (invalid iteration count)");
 		return false;
 	}
 
-	if (*input != '\0')
+	if (*input != '\0') {
 		libpq_append_conn_error(conn, "malformed SCRAM message (garbage at end of server-first-message)");
+		return false;
+	}
+
+	/*
+	 * Enforce a client-side hard cap on the server-advertised iteration
+	 * count, if one was configured.  This protects callers (including
+	 * those with no connect_timeout set) from a misconfigured or hostile
+	 * server forcing arbitrarily large PBKDF2 work.
+	 */
+	if (conn->scram_max_iterations != NULL)
+	{
+		int			max_iterations;
+
+		if (!pqParseIntParam(conn->scram_max_iterations, &max_iterations, conn,
+							 "scram_max_iterations"))
+			return false;
+		if (max_iterations > 0 && state->iterations > max_iterations)
+		{
+			libpq_append_conn_error(conn,
+									"server requested SCRAM iteration count %d, exceeding scram_max_iterations (%d)",
+									state->iterations, max_iterations);
+			return false;
+		}
+	}
 
 	return true;
 }
@@ -790,14 +832,15 @@ calculate_client_proof(fe_scram_state *state,
 		 * Calculate SaltedPassword, and store it in 'state' so that we can
 		 * reuse it later in verify_server_signature.
 		 */
-		if (scram_SaltedPassword(state->password, state->hash_type,
-								 state->key_length, state->salt, state->saltlen,
-								 state->iterations, state->SaltedPassword,
-								 errstr) < 0 ||
+		if (scram_SaltedPasswordExt(state->password, state->hash_type,
+									state->key_length, state->salt, state->saltlen,
+									state->iterations,
+									scram_check_connect_deadline, state->conn,
+									state->SaltedPassword, errstr) < 0 ||
 			scram_ClientKey(state->SaltedPassword, state->hash_type,
 							state->key_length, ClientKey, errstr) < 0)
 		{
-			/* errstr is already filled here */
+			/* errstr is already filled in by the failing function */
 			pg_hmac_free(ctx);
 			return false;
 		}

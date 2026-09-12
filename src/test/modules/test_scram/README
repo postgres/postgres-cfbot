@@ -1,0 +1,18 @@
+src/test/modules/test_scram
+
+Direct tests for SCRAM helpers
+==============================
+
+This module provides SQL-callable wrappers around helper functions in
+src/common/scram-common.c so they can be exercised in isolation by a
+regression test, without going through a real SCRAM authentication
+exchange.
+
+Currently it covers scram_parse_iterations().
+
+Running the tests
+=================
+
+    make check
+or
+    make installcheck
