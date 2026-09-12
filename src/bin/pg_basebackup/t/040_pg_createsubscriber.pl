@@ -91,6 +91,19 @@ command_fails(
 		'--database' => 'pg2',
 	],
 	'wrong number of subscription names');
+command_fails_like(
+	[
+		'pg_createsubscriber',
+		'--verbose',
+		'--pgdata' => $datadir,
+		'--publisher-server' => 'port=5432',
+		'--subscription' => 'bar1',
+		'--subscription' => 'bar1',
+		'--database' => 'pg1',
+		'--database' => 'pg2',
+	],
+	qr/duplicate subscription names require replication slot names/,
+	'duplicate subscription names without replication slot names');
 command_fails(
 	[
 		'pg_createsubscriber',
@@ -334,8 +347,9 @@ is($node_s->safe_psql($db1, "SELECT COUNT(*) FROM pg_publication"),
 
 $node_s->stop;
 
-# dry run mode on node S. Use the same publication name for different
-# databases, since publication names are database-local.
+# dry run mode on node S. Use the same publication and subscription names for
+# different databases, since both names are database-local. Replication slot
+# names are specified because replication slots are cluster-global.
 command_ok(
 	[
 		'pg_createsubscriber',
@@ -348,8 +362,10 @@ command_ok(
 		'--subscriber-port' => $node_s->port,
 		'--publication' => 'same_pub',
 		'--publication' => 'same_pub',
-		'--subscription' => 'sub1',
-		'--subscription' => 'sub2',
+		'--subscription' => 'same_sub',
+		'--subscription' => 'same_sub',
+		'--replication-slot' => 'slot1',
+		'--replication-slot' => 'slot2',
 		'--database' => $db1,
 		'--database' => $db2,
 		'--logdir' => $logdir,
