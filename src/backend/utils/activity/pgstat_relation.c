@@ -17,12 +17,16 @@
 
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/twophase_rmgr.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
+#include "utils/injection_point.h"
+#include "utils/inval.h"
 #include "utils/memutils.h"
 #include "utils/pgstat_internal.h"
 #include "utils/rel.h"
+#include "utils/syscache.h"
 #include "utils/timestamp.h"
 
 
@@ -411,6 +415,89 @@ pgstat_report_analyze(Relation rel,
 		tabentry->last_analyze_time = ts;
 		tabentry->analyze_count++;
 		tabentry->total_analyze_time += elapsedtime;
+	}
+
+	pgstat_unlock_entry(entry_ref);
+
+	/* see pgstat_report_vacuum() */
+	pgstat_flush_io(false);
+	(void) pgstat_flush_backend(false, PGSTAT_BACKEND_FLUSH_IO);
+}
+
+/*
+ * Report that the table was skipped during vacuum or/and analyze.
+ */
+void
+pgstat_report_skipped_vacuum_analyze(Oid relid, int flags)
+{
+	PgStat_EntryRef *entry_ref;
+	PgStatShared_Relation *shtabentry;
+	PgStat_StatTabEntry *tabentry;
+	TimestampTz ts;
+	HeapTuple	classTup;
+	bool		isshared;
+
+	if (!pgstat_track_counts || !flags)
+		return;
+
+	classTup = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+	if (!HeapTupleIsValid(classTup))
+		return;					/* somebody deleted the rel, forget it */
+	isshared = ((Form_pg_class) GETSTRUCT(classTup))->relisshared;
+	ReleaseSysCache(classTup);
+	INJECTION_POINT("skipped-vacuum-analyze-before-entry-lock", NULL);
+
+	/* Store the data in the table's hash table entry. */
+	ts = GetCurrentTimestamp();
+
+	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_RELATION,
+											isshared ? InvalidOid : MyDatabaseId,
+											relid, false);
+
+	/*
+	 * Re-check whether the relation still exists.  Unlike the normal stats
+	 * reporting path, we don't hold a relation lock here (the whole point of
+	 * SKIP_LOCKED is that we failed to acquire one).  Without a lock, a
+	 * concurrent DROP TABLE could commit between our earlier syscache lookup
+	 * and the stats entry creation above, leaving an orphaned stats entry.
+	 *
+	 * Accept cache invalidation messages first, so that a DROP that committed
+	 * after our earlier check is visible to the syscache lookup below.
+	 */
+	AcceptInvalidationMessages();
+	classTup = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+	if (!HeapTupleIsValid(classTup))
+	{
+		pgstat_unlock_entry(entry_ref);
+		pgstat_drop_entry(PGSTAT_KIND_RELATION,
+						  isshared ? InvalidOid : MyDatabaseId, relid, true);
+		return;
+	}
+	ReleaseSysCache(classTup);
+
+	shtabentry = (PgStatShared_Relation *) entry_ref->shared_stats;
+	tabentry = &shtabentry->stats;
+
+	if (flags & PGSTAT_REPORT_LOCK_SKIPPED_VACUUM)
+	{
+		tabentry->last_lock_skipped_vacuum_time = ts;
+		tabentry->lock_skipped_vacuum_count++;
+	}
+	else if (flags & PGSTAT_REPORT_LOCK_SKIPPED_AUTOVACUUM)
+	{
+		tabentry->last_lock_skipped_autovacuum_time = ts;
+		tabentry->lock_skipped_autovacuum_count++;
+	}
+
+	if (flags & PGSTAT_REPORT_LOCK_SKIPPED_ANALYZE)
+	{
+		tabentry->last_lock_skipped_analyze_time = ts;
+		tabentry->lock_skipped_analyze_count++;
+	}
+	else if (flags & PGSTAT_REPORT_LOCK_SKIPPED_AUTOANALYZE)
+	{
+		tabentry->last_lock_skipped_autoanalyze_time = ts;
+		tabentry->lock_skipped_autoanalyze_count++;
 	}
 
 	pgstat_unlock_entry(entry_ref);
