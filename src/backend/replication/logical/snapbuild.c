@@ -471,6 +471,55 @@ SnapBuildInitialSnapshot(SnapBuild *builder)
 	snap = SnapBuildBuildSnapshot(builder);
 
 	/*
+	 * The commit records of the transactions in snap->xip have been decoded,
+	 * but the transactions themselves may not have finished committing: a
+	 * transaction writes its commit record, then updates CLOG, then waits for
+	 * synchronous replication if configured, and only then leaves the
+	 * procarray. The snapshot built here is used by HeapTupleSatisfiesMVCC(),
+	 * which takes these transactions as not running and consults CLOG about
+	 * them, so every one of them has to have finished. Read the set of
+	 * running transactions once and wait, on the transaction lock, for those
+	 * of snap->xip that are still in it; the others have left the procarray
+	 * and therefore have updated CLOG.
+	 *
+	 * A subtransaction is covered by its top-level transaction, which is in
+	 * snap->xip as well, or was purged from it because it is below xmin and
+	 * thus finished long ago.
+	 *
+	 * Historic snapshots do not need this: between xmin and xmax they rely on
+	 * xip alone, and transactions below xmin had left the procarray by the
+	 * time the xl_running_xacts record that set xmin was written.
+	 *
+	 * This is the same wait as in SnapBuildWaitSnapshot(). It is safe here
+	 * because we are creating a slot or preparing REPACK, not streaming to a
+	 * subscriber whose confirmation one of these transactions might be
+	 * waiting for.
+	 *
+	 * During recovery the decoded commit record has been replayed already,
+	 * and replaying it updates CLOG before the transaction stops being known
+	 * as running, so there is nothing to wait for.
+	 */
+	if (!RecoveryInProgress())
+	{
+		RunningTransactions running;
+		int			nrunning;
+
+		running = GetRunningTransactionData();
+		nrunning = running->xcnt + running->subxcnt;
+		LWLockRelease(ProcArrayLock);
+		LWLockRelease(XidGenLock);
+
+		for (int i = 0; i < nrunning; i++)
+		{
+			TransactionId running_xid = running->xids[i];
+
+			if (bsearch(&running_xid, snap->xip, snap->xcnt,
+						sizeof(TransactionId), xidComparator) != NULL)
+				XactLockTableWait(running_xid, NULL, NULL, XLTW_None);
+		}
+	}
+
+	/*
 	 * Building an initial snapshot is expensive and an unenforced xmin
 	 * horizon would have bad consequences, therefore always double-check that
 	 * the horizon is enforced.
