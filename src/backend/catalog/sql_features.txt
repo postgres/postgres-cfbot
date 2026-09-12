@@ -665,9 +665,9 @@ X072	XMLSerialize: character string serialization			YES
 X073	XMLSerialize: binary string serialization and CONTENT option			NO	
 X074	XMLSerialize: binary string serialization and DOCUMENT option			NO	
 X075	XMLSerialize: binary string serialization			NO	
-X076	XMLSerialize: VERSION			NO	
+X076	XMLSerialize: VERSION			YES	
 X077	XMLSerialize: explicit ENCODING option			NO	
-X078	XMLSerialize: explicit XML declaration			NO	
+X078	XMLSerialize: explicit XML declaration			YES	
 X080	Namespaces in XML publishing			NO	
 X081	Query-level XML namespace declarations			NO	
 X082	XML namespace declarations in DML			NO	
