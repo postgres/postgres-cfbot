@@ -2482,6 +2482,12 @@ vacuum_delay_point(bool is_analyze)
 {
 	double		msec = 0;
 
+	/*
+	 * A delay point may sleep and must service query cancel, so it cannot be
+	 * reached where CHECK_FOR_INTERRUPTS() would be a no-op.
+	 */
+	Assert(INTERRUPTS_CAN_BE_PROCESSED());
+
 	/* Always check for interrupts */
 	CHECK_FOR_INTERRUPTS();
 
