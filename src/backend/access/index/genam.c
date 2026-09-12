@@ -473,7 +473,7 @@ systable_beginscan(Relation heapRelation,
 		 */
 		sysscan->scan = table_beginscan_strat(heapRelation, snapshot,
 											  nkeys, key,
-											  true, false);
+											  true, false, false);
 		sysscan->iscan = NULL;
 	}
 

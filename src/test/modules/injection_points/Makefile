@@ -11,7 +11,7 @@ PGFILEDESC = "injection_points - facility for injection points"
 
 EXTRA_INSTALL = contrib/test_decoding
 
-REGRESS = injection_points hashagg reindex_conc vacuum
+REGRESS = injection_points hashagg reindex_conc vacuum cic_reset_snapshots
 REGRESS_OPTS = --dlpath=$(top_builddir)/src/test/regress
 
 ISOLATION = basic \

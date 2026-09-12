@@ -149,7 +149,7 @@ _bt_dedup_pass(Relation rel, Buffer buf, IndexTuple newitem, Size newitemsz,
 			_bt_dedup_start_pending(state, itup, offnum);
 		}
 		else if (state->deduplicate &&
-				 _bt_keep_natts_fast(rel, state->base, itup) > nkeyatts &&
+				 _bt_keep_natts_fast(rel, state->base, itup, NULL) > nkeyatts &&
 				 _bt_dedup_save_htid(state, itup))
 		{
 			/*
@@ -376,7 +376,7 @@ _bt_bottomupdel_pass(Relation rel, Buffer buf, Relation heapRel,
 			/* itup starts first pending interval */
 			_bt_dedup_start_pending(state, itup, offnum);
 		}
-		else if (_bt_keep_natts_fast(rel, state->base, itup) > nkeyatts &&
+		else if (_bt_keep_natts_fast(rel, state->base, itup, NULL) > nkeyatts &&
 				 _bt_dedup_save_htid(state, itup))
 		{
 			/* Tuple is equal; just added its TIDs to pending interval */
@@ -789,12 +789,12 @@ _bt_do_singleval(Relation rel, Page page, BTDedupState state,
 	itemid = PageGetItemId(page, minoff);
 	itup = (IndexTuple) PageGetItem(page, itemid);
 
-	if (_bt_keep_natts_fast(rel, newitem, itup) > nkeyatts)
+	if (_bt_keep_natts_fast(rel, newitem, itup, NULL) > nkeyatts)
 	{
 		itemid = PageGetItemId(page, PageGetMaxOffsetNumber(page));
 		itup = (IndexTuple) PageGetItem(page, itemid);
 
-		if (_bt_keep_natts_fast(rel, newitem, itup) > nkeyatts)
+		if (_bt_keep_natts_fast(rel, newitem, itup, NULL) > nkeyatts)
 			return true;
 	}
 
