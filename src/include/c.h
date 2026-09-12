@@ -1247,6 +1247,12 @@ typedef struct PGAlignedBlock
 	alignas(MAXIMUM_ALIGNOF) char data[BLCKSZ];
 } PGAlignedBlock;
 
+/* Same, but for an XLOG_BLCKSZ-sized buffer */
+typedef struct PGAlignedXLogBlock
+{
+	alignas(MAXIMUM_ALIGNOF) char data[XLOG_BLCKSZ];
+} PGAlignedXLogBlock;
+
 /*
  * alignas with extended alignments is buggy in g++ < 9.  As a simple
  * workaround, we disable these definitions in that case.
