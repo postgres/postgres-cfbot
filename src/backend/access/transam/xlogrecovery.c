@@ -1552,7 +1552,7 @@ FinishWalRecovery(void)
 		/* Copy the valid part of the last block */
 		len = endOfLog % XLOG_BLCKSZ;
 		page = palloc(len);
-		memcpy(page, xlogreader->readBuf, len);
+		memcpy(page, xlogreader->readBuf.data, len);
 
 		result->lastPageBeginPtr = pageBeginPtr;
 		result->lastPage = page;
