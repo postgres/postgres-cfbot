@@ -1067,6 +1067,8 @@ process_directory_recursively(Oid tsoid,
 			snprintf(manifest_path, MAXPGPATH, "%s%s", manifest_prefix,
 					 de->d_name);
 
+			snprintf(ofullpath, MAXPGPATH, "%s/%s", ofulldir, de->d_name);
+
 			/*
 			 * It's not an incremental file, so we need to copy the entire
 			 * file to the output directory.
@@ -1110,11 +1112,11 @@ process_directory_recursively(Oid tsoid,
 			 */
 			if (checksum_length != 0)
 				pg_checksum_init(&checksum_ctx, CHECKSUM_TYPE_NONE);
-			else
-				pg_checksum_init(&checksum_ctx, checksum_type);
+			else if (pg_checksum_init(&checksum_ctx, checksum_type) < 0)
+				pg_fatal("could not initialize checksum of file \"%s\"",
+						 ofullpath);
 
 			/* Actually copy the file. */
-			snprintf(ofullpath, MAXPGPATH, "%s/%s", ofulldir, de->d_name);
 			copy_file(ifullpath, ofullpath, &checksum_ctx,
 					  opt->copy_method, opt->dry_run);
 
@@ -1128,6 +1130,9 @@ process_directory_recursively(Oid tsoid,
 				checksum_payload = pg_malloc(PG_CHECKSUM_MAX_LENGTH);
 				checksum_length = pg_checksum_final(&checksum_ctx,
 													checksum_payload);
+				if (checksum_length < 0)
+					pg_fatal("could not finalize checksum of file \"%s\"",
+							 ofullpath);
 			}
 		}
 
