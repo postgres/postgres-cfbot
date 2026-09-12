@@ -665,7 +665,7 @@ restart:
 	 * ReadPageInternal always returns at least the page header, so we can
 	 * examine it now.
 	 */
-	pageHeaderSize = XLogPageHeaderSize((XLogPageHeader) state->readBuf);
+	pageHeaderSize = XLogPageHeaderSize((XLogPageHeader) state->readBuf.data);
 	if (targetRecOff == 0)
 	{
 		/*
@@ -682,7 +682,7 @@ restart:
 		goto err;
 	}
 
-	if ((((XLogPageHeader) state->readBuf)->xlp_info & XLP_FIRST_IS_CONTRECORD) &&
+	if ((((XLogPageHeader) state->readBuf.data)->xlp_info & XLP_FIRST_IS_CONTRECORD) &&
 		targetRecOff == pageHeaderSize)
 	{
 		report_invalid_record(state, "contrecord is requested by %X/%08X",
@@ -702,7 +702,7 @@ restart:
 	 * cannot access any other fields until we've verified that we got the
 	 * whole header.
 	 */
-	record = (XLogRecord *) (state->readBuf + RecPtr % XLOG_BLCKSZ);
+	record = (XLogRecord *) (state->readBuf.data + RecPtr % XLOG_BLCKSZ);
 	total_len = record->xl_tot_len;
 
 	/*
@@ -788,7 +788,7 @@ restart:
 
 		/* Copy the first fragment of the record from the first page. */
 		memcpy(state->readRecordBuf,
-			   state->readBuf + RecPtr % XLOG_BLCKSZ, len);
+			   state->readBuf.data + RecPtr % XLOG_BLCKSZ, len);
 		buffer = state->readRecordBuf + len;
 		gotlen = len;
 
@@ -810,7 +810,7 @@ restart:
 
 			Assert(SizeOfXLogShortPHD <= readOff);
 
-			pageHeader = (XLogPageHeader) state->readBuf;
+			pageHeader = (XLogPageHeader) state->readBuf.data;
 
 			/*
 			 * If we were expecting a continuation record and got an
@@ -869,7 +869,7 @@ restart:
 
 			Assert(pageHeaderSize <= readOff);
 
-			contdata = (char *) state->readBuf + pageHeaderSize;
+			contdata = (char *) state->readBuf.data + pageHeaderSize;
 			len = XLOG_BLCKSZ - pageHeaderSize;
 			if (pageHeader->xlp_rem_len < len)
 				len = pageHeader->xlp_rem_len;
@@ -920,7 +920,7 @@ restart:
 		if (!ValidXLogRecord(state, record, RecPtr))
 			goto err;
 
-		pageHeaderSize = XLogPageHeaderSize((XLogPageHeader) state->readBuf);
+		pageHeaderSize = XLogPageHeaderSize((XLogPageHeader) state->readBuf.data);
 		state->DecodeRecPtr = RecPtr;
 		state->NextRecPtr = targetPagePtr + pageHeaderSize
 			+ MAXALIGN(pageHeader->xlp_rem_len);
@@ -1124,7 +1124,7 @@ ReadPageInternal(XLogReaderState *state, XLogRecPtr pageptr, int reqLen)
 
 		readLen = state->routine.page_read(state, targetSegmentPtr, XLOG_BLCKSZ,
 										   state->currRecPtr,
-										   state->readBuf);
+										   state->readBuf.data);
 		if (readLen == XLREAD_WOULDBLOCK)
 			return XLREAD_WOULDBLOCK;
 		else if (readLen < 0)
@@ -1134,7 +1134,7 @@ ReadPageInternal(XLogReaderState *state, XLogRecPtr pageptr, int reqLen)
 		Assert(readLen == XLOG_BLCKSZ);
 
 		if (!XLogReaderValidatePageHeader(state, targetSegmentPtr,
-										  state->readBuf))
+										  state->readBuf.data))
 			goto err;
 	}
 
@@ -1144,7 +1144,7 @@ ReadPageInternal(XLogReaderState *state, XLogRecPtr pageptr, int reqLen)
 	 */
 	readLen = state->routine.page_read(state, pageptr, Max(reqLen, SizeOfXLogShortPHD),
 									   state->currRecPtr,
-									   state->readBuf);
+									   state->readBuf.data);
 	if (readLen == XLREAD_WOULDBLOCK)
 		return XLREAD_WOULDBLOCK;
 	else if (readLen < 0)
@@ -1158,14 +1158,14 @@ ReadPageInternal(XLogReaderState *state, XLogRecPtr pageptr, int reqLen)
 
 	Assert(readLen >= reqLen);
 
-	hdr = (XLogPageHeader) state->readBuf;
+	hdr = (XLogPageHeader) state->readBuf.data;
 
 	/* still not enough */
 	if (readLen < XLogPageHeaderSize(hdr))
 	{
 		readLen = state->routine.page_read(state, pageptr, XLogPageHeaderSize(hdr),
 										   state->currRecPtr,
-										   state->readBuf);
+										   state->readBuf.data);
 		if (readLen == XLREAD_WOULDBLOCK)
 			return XLREAD_WOULDBLOCK;
 		else if (readLen < 0)
@@ -1524,7 +1524,7 @@ XLogFindNextRecord(XLogReaderState *state, XLogRecPtr RecPtr, char **errormsg)
 		if (readLen < 0)
 			goto err;
 
-		header = (XLogPageHeader) state->readBuf;
+		header = (XLogPageHeader) state->readBuf.data;
 
 		pageHeaderSize = XLogPageHeaderSize(header);
 
