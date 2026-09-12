@@ -1911,6 +1911,7 @@ PERL_CONTEXT
 PERL_SI
 PFN
 PGAlignedBlock
+PGAlignedXLogBlock
 PGAsyncStatusType
 PGCALL2
 PGCRYPTO_SHA_t

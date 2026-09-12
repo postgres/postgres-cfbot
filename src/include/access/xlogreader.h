@@ -262,7 +262,7 @@ struct XLogReaderState
 	/*
 	 * Buffer for currently read page (valid up to at least readLen bytes)
 	 */
-	alignas(MAXIMUM_ALIGNOF) char readBuf[XLOG_BLCKSZ];
+	PGAlignedXLogBlock readBuf;
 	uint32		readLen;
 
 	/* last read XLOG position for data currently in readBuf */
