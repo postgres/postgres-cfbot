@@ -987,7 +987,8 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 			{
 				path = gpath;
 
-				path = (Path *) create_sort_path(root, result_rel, path,
+				if (groupList != NIL)
+					path = (Path *) create_sort_path(root, result_rel, path,
 												 make_pathkeys_for_sortclauses(root, groupList, tlist),
 												 -1.0);
 

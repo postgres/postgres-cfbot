@@ -1085,6 +1085,27 @@ select from cte union select from cte;
 --
 (1 row)
 
+-- Ensure no sort is added to a parallel plan with no sort keys
+set cpu_tuple_cost = 1000;
+set min_parallel_table_scan_size = 1;
+explain (costs off)
+select from tenk1 union select from tenk1;
+                      QUERY PLAN                      
+------------------------------------------------------
+ Unique
+   ->  Gather
+         Workers Planned: 2
+         ->  Parallel Append
+               ->  Parallel Seq Scan on tenk1
+               ->  Parallel Seq Scan on tenk1 tenk1_1
+(6 rows)
+
+select from tenk1 union select from tenk1;
+--
+(1 row)
+
+reset cpu_tuple_cost;
+reset min_parallel_table_scan_size;
 reset enable_hashagg;
 reset enable_groupagg;
 --
