@@ -15,6 +15,9 @@
 README		conflict-marker-size=48
 README.*	conflict-marker-size=48
 
+# Some files are perl even without perly extensions
+src/tools/pgcheck/pgcheck		whitespace=space-before-tab,trailing-space,indent-with-non-tab,tabwidth=4
+
 # Certain data files that contain special whitespace, and other special cases
 *.data						-whitespace
 contrib/pgcrypto/sql/pgp-armor.sql		whitespace=-blank-at-eol

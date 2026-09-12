@@ -67,6 +67,12 @@ indent_style = space
 tab_width = unset
 indent_size = 1
 
+[src/tools/pgcheck/pgcheck]
+trim_trailing_whitespace = true
+insert_final_newline = true
+indent_style = tab
+tab_width = 4
+
 [*.data]
 indent_style = unset
 indent_size = unset
