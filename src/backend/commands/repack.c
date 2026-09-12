@@ -3479,7 +3479,8 @@ build_new_indexes(Relation NewHeap, Relation OldHeap, List *OldIndexes)
 									 NULL,
 									 "repacknew",
 									 get_rel_namespace(ind->rd_index->indrelid),
-									 false);
+									 false,
+									 NIL);
 		newindex = index_create_copy(NewHeap, INDEX_CREATE_SUPPRESS_PROGRESS,
 									 oldindex, ind->rd_rel->reltablespace,
 									 newName);

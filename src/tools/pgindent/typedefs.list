@@ -1330,6 +1330,7 @@ IndexScanDesc
 IndexScanDescData
 IndexScanInstrumentation
 IndexScanState
+IndexStatTarget
 IndexStateFlagsAction
 IndexStmt
 IndexTuple
@@ -2196,6 +2197,7 @@ PartitionDirectoryEntry
 PartitionDispatch
 PartitionElem
 PartitionHashBound
+PartitionIndexProps
 PartitionKey
 PartitionListValue
 PartitionMap
