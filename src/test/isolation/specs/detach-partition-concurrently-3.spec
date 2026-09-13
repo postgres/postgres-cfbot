@@ -23,6 +23,7 @@ setup
 }
 
 teardown {
+    DROP PUBLICATION IF EXISTS pub_d3_id;
     DROP TABLE IF EXISTS d3_listp, d3_listp1, d3_listp2, d3_pid;
     DROP TABLE IF EXISTS d3_idp, d3_idp1, d3_idp2, d3_idp2_leaf;
 }
@@ -44,6 +45,14 @@ step s1exceptpart	{ CREATE PUBLICATION pub_d3 FOR ALL TABLES EXCEPT (TABLE d3_li
 step s1sid			{ SELECT * FROM d3_idp; }
 step s1insertidpart	{ INSERT INTO d3_idp1 (a) VALUES (1) RETURNING b; }
 step s1insertidleaf	{ INSERT INTO d3_idp2_leaf (a) VALUES (2) RETURNING b; }
+step s1pubid		{ CREATE PUBLICATION pub_d3_id FOR TABLE d3_idp; }
+step s1updidpart	{ UPDATE d3_idp1 SET a = 1; }
+step s1delidpart	{ DELETE FROM d3_idp1; }
+step s1updidleaf	{ UPDATE d3_idp2_leaf SET a = 2; }
+step s1delidleaf	{ DELETE FROM d3_idp2_leaf; }
+step s1lockidleaf	{ LOCK TABLE d3_idp2_leaf IN SHARE UPDATE EXCLUSIVE MODE; }
+step s1pendingid2	{ SELECT inhdetachpending FROM pg_inherits
+					  WHERE inhrelid = 'd3_idp2'::regclass; }
 step s1drop			{ DROP TABLE d3_listp; }
 step s1droppart		{ DROP TABLE d3_listp1; }
 step s1trunc		{ TRUNCATE TABLE d3_listp; }
@@ -82,6 +91,20 @@ permutation s2snitch s1b s1s s2detach s1cancel(s2detach) s1c s1updpart s1delpart
 # leaf has its columns in a different order than the root.
 permutation s2snitch s1b s1sid s2detachid s1cancel(s2detachid) s1c s1insertidpart
 permutation s2snitch s1b s1sid s2detachid2 s1cancel(s2detachid2) s1c s1insertidleaf
+
+# A session that built the publication descriptor of a partition before the
+# detach must see it leave the former root's publications as soon as the first
+# transaction commits: without a replica identity, UPDATE and DELETE fail
+# while the partition is published via the root, and are allowed afterwards.
+# The same holds for a partition of a partition pending detach.
+permutation s2snitch s1pubid s1updidpart s1b s1sid s2detachid s1cancel(s2detachid) s1c s1updidpart s1delidpart
+permutation s2snitch s1pubid s1updidleaf s1b s1sid s2detachid2 s1cancel(s2detachid2) s1c s1updidleaf s1delidleaf
+
+# Invalidating the descendants of a partitioned partition must not make the
+# first transaction wait for a lock that does not conflict with dropping them,
+# like the one VACUUM takes on a leaf.  The first transaction commits, and only
+# the finalize step waits.
+permutation s1b s1lockidleaf s2detachid2 s1pendingid2 s1c
 
 # Test partition descriptor caching
 permutation s2snitch s1b s1s s2detach2 s1cancel(s2detach2) s1c s1brr s1insert s1s s1insert s1c

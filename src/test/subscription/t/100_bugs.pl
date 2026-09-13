@@ -199,11 +199,6 @@ for my $partition_type ('regular', 'partitioned')
 		'targeted lookup does not exclude the partition pending detach either'
 	);
 
-	# Changes nothing; drops the walsender's cached mapping.
-	$node_publisher->safe_psql('postgres',
-		'ALTER PUBLICATION pub_detach SET (publish_via_partition_root = true)'
-	);
-
 	# Use another slot to check which changes pgoutput sends, independently of
 	# whether the subscriber applies them.
 	$node_publisher->safe_psql('postgres',
@@ -213,6 +208,10 @@ for my $partition_type ('regular', 'partitioned')
 	# This is what crashed.  The part1 change is sent using part1's identity, but
 	# the subscriber skips it because only parted is registered in
 	# pg_subscription_rel.  The following change shows decoding got past it.
+	#
+	# The walsender has cached part1 as published via parted since the insert
+	# before the detach; the detach must have invalidated that, or the change
+	# would still be sent via parted and applied to parted on the subscriber.
 	$node_publisher->safe_psql(
 		'postgres', q[
 	INSERT INTO part1 VALUES (1, 2);
