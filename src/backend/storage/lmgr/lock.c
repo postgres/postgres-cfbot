@@ -771,13 +771,55 @@ LockHasWaiters(const LOCKTAG *locktag, LOCKMODE lockmode, bool sessionLock)
 	LWLockAcquire(partitionLock, LW_SHARED);
 
 	/*
-	 * We don't need to re-find the lock or proclock, since we kept their
-	 * addresses in the locallock table, and they couldn't have been removed
-	 * while we were holding a lock on them.
+	 * Normally we don't need to re-find the lock or proclock, since we kept
+	 * their addresses in the locallock table. But those addresses are NULL if
+	 * we acquired the lock via the fast path, since then the lock was never
+	 * entered in the shared lock table. Such a lock can only acquire a waiter
+	 * if another backend requests a conflicting strong lock, and that request
+	 * first moves all matching fast-path locks into the shared table (see
+	 * FastPathTransferRelationLocks()). So we look for our own proclock, and
+	 * if there is none, our lock is still in our own fast-path array and
+	 * cannot have any waiters.
+	 *
+	 * Note that finding the lock is not proof that ours was transferred,
+	 * since the lock can also be there for a mode that transfers nothing,
+	 * such as another backend's ShareUpdateExclusiveLock. Hence we must find
+	 * both objects. We don't store them back into the locallock, since this
+	 * is a read-only check and LockRelease() does its own lookup anyway.
 	 */
 	lock = locallock->lock;
-	LOCK_PRINT("LockHasWaiters: found", lock, lockmode);
 	proclock = locallock->proclock;
+	if (!lock)
+	{
+		PROCLOCKTAG proclocktag;
+
+		Assert(EligibleForRelationFastPath(locktag, lockmode));
+		lock = (LOCK *) hash_search_with_hash_value(LockMethodLockHash,
+													locktag,
+													locallock->hashcode,
+													HASH_FIND,
+													NULL);
+		if (!lock)
+		{
+			/* Still fast-path only, so nobody could be waiting on it. */
+			LWLockRelease(partitionLock);
+			return false;
+		}
+
+		proclocktag.myLock = lock;
+		proclocktag.myProc = MyProc;
+		proclock = (PROCLOCK *) hash_search(LockMethodProcLockHash,
+											&proclocktag,
+											HASH_FIND,
+											NULL);
+		if (!proclock)
+		{
+			/* Our lock wasn't transferred, so it has no waiters. */
+			LWLockRelease(partitionLock);
+			return false;
+		}
+	}
+	LOCK_PRINT("LockHasWaiters: found", lock, lockmode);
 	PROCLOCK_PRINT("LockHasWaiters: found", proclock);
 
 	/*
