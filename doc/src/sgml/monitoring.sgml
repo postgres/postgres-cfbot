@@ -3174,7 +3174,9 @@ description | Waiting for a newly initialized WAL file to reach durable storage
         <structfield>reads</structfield> <type>bigint</type>
        </para>
        <para>
-        Number of read operations.
+        Number of read operations. When <varname>object</varname> is
+        <literal>wal</literal>, reads that come from the WAL buffers are
+        counted in <structfield>hits</structfield> instead.
        </para>
       </entry>
      </row>
@@ -3317,6 +3319,11 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        </para>
        <para>
         The number of times a desired block was found in a shared buffer.
+        When <varname>object</varname> is <literal>wal</literal>, the
+        number of read operations that found the requested WAL in the WAL
+        buffers, fully or in part; a read that found only part of it is
+        counted in <structfield>reads</structfield> as well, for the rest
+        of it, which comes from a file.
        </para>
       </entry>
      </row>

@@ -343,10 +343,11 @@ note "switching to physical replication slot";
 
 # Wait for the physical WAL sender to update its IO statistics.  This is
 # done before the next restart, which would force a flush of its stats, and
-# far enough from the reset done above to not impact the run time.
+# far enough from the reset done above to not impact the run time. A WAL sender
+# reads WAL either from a file or from the WAL buffers, so count both.
 $node_primary->poll_query_until(
 	'postgres',
-	qq[SELECT sum(reads) > 0
+	qq[SELECT sum(reads) + sum(hits) > 0
        FROM pg_catalog.pg_stat_io
        WHERE backend_type = 'walsender'
        AND object = 'wal']
