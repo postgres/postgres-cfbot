@@ -35,6 +35,7 @@
 #include "parser/scansup.h"
 #include "port/pg_bswap.h"
 #include "regex/regex.h"
+#include "utils/ascii.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
@@ -167,6 +168,7 @@ static void text_format_string_conversion(StringInfo buf, char conversion,
 										  int flags, int width);
 static void text_format_append_string(StringInfo buf, const char *str,
 									  int flags, int width);
+static int	valid_ascii_prefix_len(const unsigned char *s, int len);
 
 
 /*****************************************************************************
@@ -5476,6 +5478,33 @@ icu_unicode_version(PG_FUNCTION_ARGS)
 }
 
 /*
+ * Return the length of an initial portion of s[0..len) that is valid ASCII,
+ * that is, contains no zero bytes and no bytes with the high bit set, or
+ * len if all of it is.
+ *
+ * is_valid_ascii() requires a length that is a multiple of sizeof(Vector8),
+ * so check one chunk at a time with it and then the remainder byte by byte.
+ * A failure inside a chunk is reported at the start of that chunk, so the
+ * result can be up to sizeof(Vector8) - 1 bytes short of the full valid
+ * ASCII prefix.
+ */
+static int
+valid_ascii_prefix_len(const unsigned char *s, int len)
+{
+	int			chunk_len = len - (len % sizeof(Vector8));
+
+	for (int i = 0; i < chunk_len; i += sizeof(Vector8))
+		if (!is_valid_ascii(s + i, sizeof(Vector8)))
+			return i;
+
+	for (int i = chunk_len; i < len; i++)
+		if (s[i] == 0 || IS_HIGHBIT_SET(s[i]))
+			return i;
+
+	return len;
+}
+
+/*
  * Check whether the string contains only assigned Unicode code
  * points. Requires that the database encoding is UTF-8.
  */
@@ -5484,15 +5513,23 @@ unicode_assigned(PG_FUNCTION_ARGS)
 {
 	text	   *input = PG_GETARG_TEXT_PP(0);
 	unsigned char *p;
+	int			len;
 	int			size;
+	int			start;
 
 	if (GetDatabaseEncoding() != PG_UTF8)
 		ereport(ERROR,
 				(errmsg("Unicode categorization can only be performed if server encoding is UTF8")));
 
+	/* ASCII code points are always assigned, so only check the rest */
+	len = VARSIZE_ANY_EXHDR(input);
+	start = valid_ascii_prefix_len((unsigned char *) VARDATA_ANY(input), len);
+	if (start == len)
+		PG_RETURN_BOOL(true);
+
 	/* convert to char32_t */
-	size = pg_mbstrlen_with_len(VARDATA_ANY(input), VARSIZE_ANY_EXHDR(input));
-	p = (unsigned char *) VARDATA_ANY(input);
+	size = pg_mbstrlen_with_len(VARDATA_ANY(input) + start, len - start);
+	p = (unsigned char *) VARDATA_ANY(input) + start;
 	for (int i = 0; i < size; i++)
 	{
 		char32_t	uchar = utf8_to_unicode(p);
@@ -5519,26 +5556,42 @@ unicode_normalize_func(PG_FUNCTION_ARGS)
 	unsigned char *p;
 	text	   *result;
 	size_t		i;
+	int			len;
+	int			start;
 
 	form = unicode_norm_form_from_string(formstr);
 
+	/*
+	 * ASCII characters have no decomposition and a combining class of zero,
+	 * so leading ASCII is unchanged by normalization in any form, except that
+	 * its last character might compose with a following combining mark.  So
+	 * return an all-ASCII string as is, and otherwise normalize only the rest
+	 * of the string, starting with that last ASCII character.
+	 */
+	len = VARSIZE_ANY_EXHDR(input);
+	start = valid_ascii_prefix_len((unsigned char *) VARDATA_ANY(input), len);
+	if (start == len)
+		PG_RETURN_TEXT_P(input);
+	if (start > 0)
+		start--;
+
 	/* convert to char32_t */
-	size = pg_mbstrlen_with_len(VARDATA_ANY(input), VARSIZE_ANY_EXHDR(input));
+	size = pg_mbstrlen_with_len(VARDATA_ANY(input) + start, len - start);
 	input_chars = palloc_array(char32_t, size + 1);
-	p = (unsigned char *) VARDATA_ANY(input);
+	p = (unsigned char *) VARDATA_ANY(input) + start;
 	for (i = 0; i < size; i++)
 	{
 		input_chars[i] = utf8_to_unicode(p);
 		p += pg_utf_mblen(p);
 	}
 	input_chars[i] = (char32_t) '\0';
-	Assert((char *) p == VARDATA_ANY(input) + VARSIZE_ANY_EXHDR(input));
+	Assert((char *) p == VARDATA_ANY(input) + len);
 
 	/* action */
 	output_chars = unicode_normalize(form, input_chars);
 
-	/* convert back to UTF-8 string */
-	size = 0;
+	/* convert back to UTF-8 string, after the unchanged ASCII */
+	size = start;
 	for (char32_t *wp = output_chars; *wp; wp++)
 	{
 		unsigned char buf[4];
@@ -5551,6 +5604,8 @@ unicode_normalize_func(PG_FUNCTION_ARGS)
 	SET_VARSIZE(result, size + VARHDRSZ);
 
 	p = (unsigned char *) VARDATA_ANY(result);
+	memcpy(p, VARDATA_ANY(input), start);
+	p += start;
 	for (char32_t *wp = output_chars; *wp; wp++)
 	{
 		unicode_to_utf8(*wp, p);
@@ -5587,20 +5642,36 @@ unicode_is_normalized(PG_FUNCTION_ARGS)
 	UnicodeNormalizationQC quickcheck;
 	size_t		output_size;
 	bool		result;
+	int			len;
+	int			start;
 
 	form = unicode_norm_form_from_string(formstr);
 
+	/*
+	 * Leading ASCII is unchanged by normalization, except that its last
+	 * character might compose with a following combining mark (see
+	 * unicode_normalize_func()).  So an all-ASCII string is normalized in
+	 * every form, and otherwise only the rest of the string, starting with
+	 * that last ASCII character, needs to be checked.
+	 */
+	len = VARSIZE_ANY_EXHDR(input);
+	start = valid_ascii_prefix_len((unsigned char *) VARDATA_ANY(input), len);
+	if (start == len)
+		PG_RETURN_BOOL(true);
+	if (start > 0)
+		start--;
+
 	/* convert to char32_t */
-	size = pg_mbstrlen_with_len(VARDATA_ANY(input), VARSIZE_ANY_EXHDR(input));
+	size = pg_mbstrlen_with_len(VARDATA_ANY(input) + start, len - start);
 	input_chars = palloc_array(char32_t, size + 1);
-	p = (unsigned char *) VARDATA_ANY(input);
+	p = (unsigned char *) VARDATA_ANY(input) + start;
 	for (i = 0; i < size; i++)
 	{
 		input_chars[i] = utf8_to_unicode(p);
 		p += pg_utf_mblen(p);
 	}
 	input_chars[i] = (char32_t) '\0';
-	Assert((char *) p == VARDATA_ANY(input) + VARSIZE_ANY_EXHDR(input));
+	Assert((char *) p == VARDATA_ANY(input) + len);
 
 	/* quick check (see UAX #15) */
 	quickcheck = unicode_is_normalized_quickcheck(form, input_chars);
