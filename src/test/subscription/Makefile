@@ -14,6 +14,8 @@ top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global
 
 EXTRA_INSTALL = contrib/hstore \
+	contrib/pg_walinspect \
+	contrib/test_decoding \
 	src/test/modules/injection_points
 
 export with_icu
