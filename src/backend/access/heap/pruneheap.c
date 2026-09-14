@@ -333,9 +333,20 @@ heap_page_prune_opt(Relation relation, Buffer buffer, Buffer *vmbuffer,
 		 */
 		visibilitymap_pin(relation, BufferGetBlockNumber(buffer), vmbuffer);
 
-		/* OK, try to get exclusive buffer lock */
+		/*
+		 * OK, try to get exclusive buffer lock.
+		 *
+		 * Failing to get the cleanup lock means somebody else holds a pin on
+		 * the page, so we give up on pruning it.  Count that: a workload that
+		 * keeps buffers pinned for longer, direct I/O for example, can
+		 * silently lose most of its opportunistic pruning this way, and the
+		 * resulting bloat is otherwise hard to attribute.
+		 */
 		if (!ConditionalLockBufferForCleanup(buffer))
+		{
+			pgstat_count_prune_onaccess_missed(relation);
 			return;
+		}
 
 		/*
 		 * Now that we have buffer lock, get accurate information about the
@@ -367,6 +378,8 @@ heap_page_prune_opt(Relation relation, Buffer buffer, Buffer *vmbuffer,
 
 			heap_page_prune_and_freeze(&params, &presult, &dummy_off_loc,
 									   NULL, NULL);
+
+			pgstat_count_prune_onaccess(relation, presult.newly_all_visible);
 
 			/*
 			 * Report the number of tuples reclaimed to pgstats.  This is
