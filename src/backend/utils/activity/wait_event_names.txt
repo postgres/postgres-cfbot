@@ -69,6 +69,8 @@ WAL_RECEIVER_MAIN	"Waiting in main loop of WAL receiver process."
 WAL_SENDER_MAIN	"Waiting in main loop of WAL sender process."
 WAL_SUMMARIZER_WAL	"Waiting in WAL summarizer for more WAL to be generated."
 WAL_WRITER_MAIN	"Waiting in main loop of WAL writer process."
+UNDO_FLUSH_MAIN	"Waiting in main loop of UNDO flush writer process."
+UNDO_WORKER_MAIN	"Waiting in main loop of UNDO discard worker process."
 
 ABI_compatibility:
 
@@ -167,6 +169,7 @@ WAL_RECEIVER_UPSTREAM_CATCHUP	"Waiting for upstream server WAL flush position to
 WAL_RECEIVER_WAIT_START	"Waiting for startup process to send initial data for streaming replication."
 WAL_SUMMARY_READY	"Waiting for a new WAL summary to be generated."
 XACT_GROUP_UPDATE	"Waiting for the group leader to update transaction status at transaction end."
+UNDO_FLUSH_SYNC	"Waiting for UNDO flush writer to sync UNDO data to disk."
 
 ABI_compatibility:
 
@@ -419,6 +422,8 @@ XactSLRU	"Waiting to access the transaction status SLRU cache."
 ParallelVacuumDSA	"Waiting for parallel vacuum dynamic shared memory allocation."
 AioUringCompletion	"Waiting for another process to complete IO via io_uring."
 ShmemIndex	"Waiting to find or allocate space in shared memory."
+UndoLog	"Waiting to access or modify UNDO log metadata."
+UndoWorker	"Waiting to access or modify UNDO worker shared memory queue."
 
 # No "ABI_compatibility" region here as WaitEventLWLock has its own C code.
 

@@ -22,8 +22,12 @@ rmgr_desc_sources = files(
   'spgdesc.c',
   'standbydesc.c',
   'tblspcdesc.c',
+  'undodesc.c',
   'xactdesc.c',
   'xlogdesc.c',
 )
+
+
+# FLUX is always built; rmgrlist.h registers flux_desc/flux_identify
 
 backend_sources += rmgr_desc_sources

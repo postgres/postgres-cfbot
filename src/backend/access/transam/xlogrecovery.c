@@ -32,6 +32,8 @@
 
 #include "access/timeline.h"
 #include "access/transam.h"
+#include "access/undo_xlog.h"
+#include "access/undolog.h"
 #include "access/xact.h"
 #include "access/xlog_internal.h"
 #include "access/xlogarchive.h"
@@ -1868,6 +1870,29 @@ PerformWalRecovery(void)
 			ereport(LOG,
 					(errmsg("last completed transaction was at log time %s",
 							timestamptz_to_str(xtime))));
+
+		/*
+		 * ARIES-style undo phase: roll back incomplete transactions that
+		 * wrote UNDO records (XLOG_UNDO_BATCH) but did not commit.
+		 *
+		 * During the redo phase above, UndoRecoveryTrackBatch() was called
+		 * from the XLOG_UNDO_BATCH redo handler to record which transactions
+		 * have UNDO data.  UndoRecoveryRemoveXid() was called from the
+		 * XLOG_XACT_COMMIT and XLOG_XACT_ABORT redo handlers to remove
+		 * completed transactions.  Any remaining entries represent incomplete
+		 * transactions that need their UNDO chains walked for rollback.
+		 *
+		 * We check UndoRecoveryNeeded() to avoid overhead when no UNDO
+		 * records were present in the WAL stream.
+		 */
+		if (UndoRecoveryNeeded())
+		{
+			ereport(LOG,
+					(errmsg("starting undo phase for incomplete transactions")));
+			PerformUndoRecovery();
+			ereport(LOG,
+					(errmsg("undo phase complete")));
+		}
 
 		InRedo = false;
 	}
