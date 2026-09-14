@@ -74,6 +74,7 @@ tests += {
       't/062_fileops_recovery.pl',
       't/063_fileops_2pc.pl',
       't/065_fileops_crash_undo.pl',
+      't/066_fileops_createdb_crash.pl',
     ],
   },
 }
