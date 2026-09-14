@@ -25,6 +25,7 @@
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "parser/parse_enr.h"
+#include "parser/parse_expr.h"
 #include "parser/parse_relation.h"
 #include "parser/parse_type.h"
 #include "parser/parsetree.h"
@@ -3238,6 +3239,8 @@ expandTupleDesc(TupleDesc tupdesc, Alias *eref, int count, int offset,
  *	  for the non-dropped columns of the nsitem.
  *
  * The emitted Vars are marked with the given sublevels_up and location.
+ * They are column references, so we complain if those are forbidden in the
+ * expression being transformed.
  *
  * If colnames isn't NULL, a list of String items for the columns is stored
  * there; note that it's just a subset of the RTE's eref list, and hence
@@ -3251,6 +3254,8 @@ expandNSItemVars(ParseState *pstate, ParseNamespaceItem *nsitem,
 	List	   *result = NIL;
 	int			colindex;
 	ListCell   *lc;
+
+	checkColumnRefAllowed(pstate, location);
 
 	if (colnames)
 		*colnames = NIL;
