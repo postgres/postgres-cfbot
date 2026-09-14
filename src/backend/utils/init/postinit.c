@@ -21,6 +21,7 @@
 
 #include "access/genam.h"
 #include "access/heapam.h"
+#include "access/undo.h"
 #include "access/htup_details.h"
 #include "access/session.h"
 #include "access/tableam.h"
@@ -856,6 +857,9 @@ InitPostgres(const char *in_dbname, Oid dboid,
 	RelationCacheInitialize();
 	InitCatalogCache();
 	InitPlanCache();
+
+	/* Initialize per-backend undo subsystem state */
+	InitializeUndo();
 
 	/* Initialize portal manager */
 	EnablePortalManager();

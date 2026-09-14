@@ -55,6 +55,8 @@
 #include "access/timeline.h"
 #include "access/transam.h"
 #include "access/twophase.h"
+#include "access/undolog.h"
+#include "access/undo_xlog.h"
 #include "access/xact.h"
 #include "access/xlog_internal.h"
 #include "access/xlogarchive.h"
@@ -753,6 +755,7 @@ static XLogRecPtr CreateOverwriteContrecordRecord(XLogRecPtr aborted_lsn,
 												  XLogRecPtr pagePtr,
 												  TimeLineID newTLI);
 static void CheckPointGuts(XLogRecPtr checkPointRedo, int flags);
+
 static void KeepLogSeg(XLogRecPtr recptr, XLogSegNo *logSegNo);
 
 static void AdvanceXLInsertBuffer(XLogRecPtr upto, TimeLineID tli,
@@ -6843,6 +6846,15 @@ StartupXLOG(void)
 		promoted = PerformRecoveryXLogAction();
 
 	/*
+	 * Apply any UNDO transactions deferred during the UNDO phase.  During the
+	 * UNDO phase, if syscache wasn't available, we deferred applying a
+	 * transaction's UNDO chain.  Now that recovery is complete and relations
+	 * can be opened, apply each deferred chain synchronously.
+	 */
+	if (performedWalRecovery)
+		FlushDeferredUndoXacts();
+
+	/*
 	 * If any of the critical GUCs have changed, log them before we allow
 	 * backends to write WAL.
 	 */
@@ -7703,6 +7715,16 @@ CreateCheckPoint(int flags)
 	VirtualTransactionId *vxids;
 	int			nvxids;
 	int			oldXLogAllowed = 0;
+	instr_time	phase_start,
+				phase_end;
+	double		syncpre_ms = 0,
+				delay_start_ms = 0,
+				delay_complete_ms = 0,
+				xlogflush_ms = 0,
+				ctlfile_ms = 0,
+				syncpost_ms = 0,
+				removewal_ms = 0,
+				truncsub_ms = 0;
 
 	/*
 	 * An end-of-recovery checkpoint is really a shutdown checkpoint, just
@@ -7733,7 +7755,11 @@ CreateCheckPoint(int flags)
 	 * smgr must not do anything that'd have to be undone if we decide no
 	 * checkpoint is needed.
 	 */
+	INSTR_TIME_SET_CURRENT(phase_start);
 	SyncPreCheckpoint();
+	INSTR_TIME_SET_CURRENT(phase_end);
+	INSTR_TIME_SUBTRACT(phase_end, phase_start);
+	syncpre_ms = INSTR_TIME_GET_MILLISEC(phase_end);
 
 	/* Run these points outside the critical section. */
 	INJECTION_POINT("create-checkpoint-initial", NULL);
@@ -8007,6 +8033,7 @@ CreateCheckPoint(int flags)
 	 * clog and we will correctly flush the update below.  So we cannot miss
 	 * any xacts we need to wait for.
 	 */
+	INSTR_TIME_SET_CURRENT(phase_start);
 	vxids = GetVirtualXIDsDelayingChkpt(&nvxids, DELAY_CHKPT_START);
 	if (nvxids > 0)
 	{
@@ -8026,9 +8053,13 @@ CreateCheckPoint(int flags)
 											  DELAY_CHKPT_START));
 	}
 	pfree(vxids);
+	INSTR_TIME_SET_CURRENT(phase_end);
+	INSTR_TIME_SUBTRACT(phase_end, phase_start);
+	delay_start_ms = INSTR_TIME_GET_MILLISEC(phase_end);
 
 	CheckPointGuts(checkPoint.redo, flags);
 
+	INSTR_TIME_SET_CURRENT(phase_start);
 	vxids = GetVirtualXIDsDelayingChkpt(&nvxids, DELAY_CHKPT_COMPLETE);
 	if (nvxids > 0)
 	{
@@ -8043,6 +8074,9 @@ CreateCheckPoint(int flags)
 											  DELAY_CHKPT_COMPLETE));
 	}
 	pfree(vxids);
+	INSTR_TIME_SET_CURRENT(phase_end);
+	INSTR_TIME_SUBTRACT(phase_end, phase_start);
+	delay_complete_ms = INSTR_TIME_GET_MILLISEC(phase_end);
 
 	/*
 	 * Take a snapshot of running transactions and write this to WAL. This
@@ -8066,7 +8100,11 @@ CreateCheckPoint(int flags)
 						shutdown ? XLOG_CHECKPOINT_SHUTDOWN :
 						XLOG_CHECKPOINT_ONLINE);
 
+	INSTR_TIME_SET_CURRENT(phase_start);
 	XLogFlush(recptr);
+	INSTR_TIME_SET_CURRENT(phase_end);
+	INSTR_TIME_SUBTRACT(phase_end, phase_start);
+	xlogflush_ms = INSTR_TIME_GET_MILLISEC(phase_end);
 
 	/*
 	 * We mustn't write any new WAL after a shutdown checkpoint, or it will be
@@ -8100,6 +8138,7 @@ CreateCheckPoint(int flags)
 	/*
 	 * Update the control file.
 	 */
+	INSTR_TIME_SET_CURRENT(phase_start);
 	LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);
 	if (shutdown)
 		ControlFile->state = DB_SHUTDOWNED;
@@ -8153,6 +8192,9 @@ CreateCheckPoint(int flags)
 
 	UpdateControlFile();
 	LWLockRelease(ControlFileLock);
+	INSTR_TIME_SET_CURRENT(phase_end);
+	INSTR_TIME_SUBTRACT(phase_end, phase_start);
+	ctlfile_ms = INSTR_TIME_GET_MILLISEC(phase_end);
 
 	/*
 	 * We are now done with critical updates; no need for system panic if we
@@ -8182,7 +8224,11 @@ CreateCheckPoint(int flags)
 	/*
 	 * Let smgr do post-checkpoint cleanup (eg, deleting old files).
 	 */
+	INSTR_TIME_SET_CURRENT(phase_start);
 	SyncPostCheckpoint();
+	INSTR_TIME_SET_CURRENT(phase_end);
+	INSTR_TIME_SUBTRACT(phase_end, phase_start);
+	syncpost_ms = INSTR_TIME_GET_MILLISEC(phase_end);
 
 	/*
 	 * Update the average distance between checkpoints if the prior checkpoint
@@ -8211,8 +8257,12 @@ CreateCheckPoint(int flags)
 		KeepLogSeg(recptr, &_logSegNo);
 	}
 	_logSegNo--;
+	INSTR_TIME_SET_CURRENT(phase_start);
 	RemoveOldXlogFiles(_logSegNo, RedoRecPtr, recptr,
 					   checkPoint.ThisTimeLineID);
+	INSTR_TIME_SET_CURRENT(phase_end);
+	INSTR_TIME_SUBTRACT(phase_end, phase_start);
+	removewal_ms = INSTR_TIME_GET_MILLISEC(phase_end);
 
 	/*
 	 * Make more log segments if needed.  (Do this after recycling old log
@@ -8228,8 +8278,24 @@ CreateCheckPoint(int flags)
 	 * in subtrans.c).  During recovery, though, we mustn't do this because
 	 * StartupSUBTRANS hasn't been called yet.
 	 */
+	INSTR_TIME_SET_CURRENT(phase_start);
 	if (!RecoveryInProgress())
 		TruncateSUBTRANS(GetOldestTransactionIdConsideredRunning());
+	INSTR_TIME_SET_CURRENT(phase_end);
+	INSTR_TIME_SUBTRACT(phase_end, phase_start);
+	truncsub_ms = INSTR_TIME_GET_MILLISEC(phase_end);
+
+	/* Log phase breakdown for diagnosing slow checkpoints. */
+	if (log_checkpoints)
+		ereport(LOG,
+				(errmsg("checkpoint phase breakdown: "
+						"SyncPre=%.3f s, DelayStart=%.3f s, DelayComplete=%.3f s, "
+						"XLogFlush=%.3f s, ControlFile=%.3f s, SyncPost=%.3f s, "
+						"RemoveWAL=%.3f s, TruncSub=%.3f s",
+						syncpre_ms / 1000.0, delay_start_ms / 1000.0,
+						delay_complete_ms / 1000.0, xlogflush_ms / 1000.0,
+						ctlfile_ms / 1000.0, syncpost_ms / 1000.0,
+						removewal_ms / 1000.0, truncsub_ms / 1000.0)));
 
 	/* Real work is done; log and update stats. */
 	LogCheckpointEnd(false, flags);
@@ -8402,6 +8468,9 @@ CheckPointGuts(XLogRecPtr checkPointRedo, int flags)
 {
 	CheckPointRelationMap();
 	CheckPointReplicationOrigin();
+
+	/* Persist UNDO log discard pointers and log statistics */
+	CheckPointUndoLog();
 
 	/* Write out all dirty data in SLRUs and the main buffer pool */
 	TRACE_POSTGRESQL_BUFFER_CHECKPOINT_START(flags);
@@ -8969,6 +9038,26 @@ KeepLogSeg(XLogRecPtr recptr, XLogSegNo *logSegNo)
 		XLByteToSeg(keep, unsummarized_segno, wal_segment_size);
 		if (unsummarized_segno < segno)
 			segno = unsummarized_segno;
+	}
+
+	/*
+	 * If UNDO-in-WAL is active, retain WAL segments that contain UNDO records
+	 * still needed for rollback of in-progress transactions.
+	 *
+	 * Scan live per-backend UNDO batch LSN slots at every checkpoint rather
+	 * than using the worker-updated cached horizon, to ensure WAL retention
+	 * is accurate even when the UNDO worker lags.
+	 */
+	{
+		keep = UndoGetOldestBatchLSN();
+		if (XLogRecPtrIsValid(keep))
+		{
+			XLogSegNo	undo_segno;
+
+			XLByteToSeg(keep, undo_segno, wal_segment_size);
+			if (undo_segno < segno)
+				segno = undo_segno;
+		}
 	}
 
 	/* but, keep at least wal_keep_size if that's set */

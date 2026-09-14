@@ -1,0 +1,160 @@
+<!-- doc/src/sgml/undo.sgml -->
+
+<chapter id="undo" xreflabel="UNDO Logging">
+ <title>UNDO Logging</title>
+
+ <indexterm zone="undo">
+  <primary>UNDO logging</primary>
+ </indexterm>
+
+ <para>
+  <productname>PostgreSQL</productname> provides UNDO logging infrastructure
+  that records the inverse of a change, so that the change can be reversed if
+  the transaction that made it rolls back or is still in progress when the
+  server crashes.  UNDO records are written into the WAL stream, so they are
+  durable, replicated and archived like every other WAL record.
+ </para>
+
+ <para>
+  UNDO is not a cluster-wide switch.  It is always-on infrastructure that is
+  used only by the subsystems that write UNDO records.  The default
+  <literal>heap</literal> table access method does not, and ordinary heap and
+  index changes carry no UNDO overhead.  The one user of UNDO in
+  <productname>PostgreSQL</productname> today is transactional filesystem
+  operations (FILEOPS), which make the directory and file changes done by
+  <command>CREATE DATABASE</command>, <command>ALTER DATABASE SET
+  TABLESPACE</command>, <command>CREATE TABLESPACE</command> and
+  <command>DROP TABLESPACE</command> roll back with the transaction.
+ </para>
+
+ <sect1 id="undo-fileops">
+  <title>Transactional Filesystem Operations</title>
+
+  <para>
+   When a transaction creates a file or directory, changes a file's mode or
+   owner, truncates or writes a file, or creates a symbolic link, FILEOPS
+   writes a WAL record describing the change and an UNDO record describing
+   how to reverse it.  If the transaction commits, the UNDO record is never
+   used.  If it rolls back, the backend applies the transaction's UNDO
+   records, newest first, before <command>ROLLBACK</command> returns: a
+   created file is removed, a changed mode is restored, and so on.
+   Destructive operations (removing or renaming a file or directory) are not
+   done immediately; they are deferred to commit and simply dropped on
+   rollback.
+  </para>
+
+  <para>
+   FILEOPS writes WAL and UNDO only when <xref linkend="guc-wal-level"/> is
+   <literal>replica</literal> or higher.  At <literal>minimal</literal> it
+   writes neither, and a crash in the middle of a transaction can leave a
+   partly done filesystem change behind, as without FILEOPS.
+  </para>
+ </sect1>
+
+ <sect1 id="undo-crash-recovery">
+  <title>Crash Recovery and Replication</title>
+
+  <para>
+   At the end of crash recovery, after redo, the startup process finds every
+   transaction that wrote UNDO records but neither committed nor aborted
+   before the crash, and applies its UNDO records before the server accepts
+   connections.  This step takes time proportional to the number of UNDO
+   records those transactions wrote.  A prepared transaction is left
+   prepared; <command>ROLLBACK PREPARED</command> applies its UNDO
+   records later, and <command>COMMIT PREPARED</command> discards them.
+  </para>
+
+  <para>
+   An UNDO record that cannot be applied, for example because the server no
+   longer has permission to change the file it describes, is reported with a
+   <literal>WARNING</literal> and is not retried, and the change it describes
+   stays in place.  The end-of-recovery summary then also reports how many
+   records could not be applied.
+  </para>
+
+  <para>
+   A physical standby replays the WAL record of each filesystem change.
+  </para>
+ </sect1>
+
+ <sect1 id="undo-configuration">
+  <title>Configuration Parameters</title>
+
+  <variablelist>
+   <varlistentry>
+    <term><varname>undo_worker_naptime</varname> (<type>integer</type>)</term>
+    <listitem>
+     <para>
+      Time in milliseconds between runs of the UNDO discard worker.
+      Default: <literal>10000</literal> (10 seconds).
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><varname>undo_max_wal_retention_size</varname> (<type>integer</type>)</term>
+    <listitem>
+     <para>
+      If the WAL held back because of in-progress UNDO exceeds this size, in
+      megabytes, the discard worker logs a <literal>WARNING</literal>.
+      <literal>0</literal>, the default, disables the check.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><varname>undo_batch_size_kb</varname> (<type>integer</type>)</term>
+    <term><varname>undo_batch_record_limit</varname> (<type>integer</type>)</term>
+    <listitem>
+     <para>
+      A transaction's UNDO records are collected in memory and written as one
+      WAL record when this many kilobytes (default <literal>256</literal>) or
+      this many records (default <literal>1000</literal>) have accumulated,
+      and at the end of the transaction.
+     </para>
+    </listitem>
+   </varlistentry>
+  </variablelist>
+ </sect1>
+
+ <sect1 id="undo-space-management">
+  <title>UNDO Space Management</title>
+
+  <para>
+   UNDO records live in the WAL stream as <literal>XLOG_UNDO_BATCH</literal>
+   records; there are no separate UNDO files.  A checkpoint does not remove
+   WAL that still holds the UNDO records of a transaction that is in progress
+   or prepared, so a long-running or long-prepared transaction that wrote UNDO
+   holds back WAL removal until it ends, much as a replication slot does.
+  </para>
+ </sect1>
+
+ <sect1 id="undo-monitoring">
+  <title>Monitoring</title>
+
+  <para>
+   The server log shows UNDO being applied during crash recovery:
+  </para>
+
+<programlisting>
+LOG:  UNDO recovery: rolling back transaction 742
+LOG:  UNDO recovery complete: 1 transactions rolled back, 3 records applied
+</programlisting>
+
+  <para>
+   and, if some records could not be applied:
+  </para>
+
+<programlisting>
+WARNING:  UNDO recovery complete: 1 transactions processed, 0 records applied, 1 records could not be applied
+DETAIL:  The changes those records describe were not rolled back.
+</programlisting>
+
+  <para>
+   <application>pg_waldump</application> shows UNDO records with
+   <option>--rmgr=Undo</option> and the filesystem changes themselves with
+   <option>--rmgr=FileOps</option>.
+  </para>
+ </sect1>
+
+</chapter>
