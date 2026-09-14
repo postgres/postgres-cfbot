@@ -1515,7 +1515,7 @@ FileAccess(File file)
 static void
 ReportTemporaryFileUsage(const char *path, pgoff_t size)
 {
-	pgstat_report_tempfile(size);
+	pgstat_report_tempfile(size, path);
 
 	if (log_temp_files >= 0)
 	{
