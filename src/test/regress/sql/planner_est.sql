@@ -132,6 +132,103 @@ SELECT * FROM generate_series(25.0, 2.0, 0.0) g(s);$$,
 false, true, false, true);
 
 --
+-- Test the SupportRequestRows support function for generate_subscripts()
+--
+
+-- A constant array gives an exact estimate for the requested dimension
+SELECT explain_mask_costs($$
+SELECT * FROM generate_subscripts('{10,20,30,40,50}'::int[], 1) g(s);$$,
+true, true, false, true);
+
+-- As above but for the 3-argument form; "reverse" cannot change the row count
+SELECT explain_mask_costs($$
+SELECT * FROM generate_subscripts('{10,20,30,40,50}'::int[], 1, true) g(s);$$,
+true, true, false, true);
+
+-- Ensure a non-zero lower bound does not affect the estimate
+SELECT explain_mask_costs($$
+SELECT * FROM generate_subscripts('[5:9]={10,20,30,40,50}'::int[], 1) g(s);$$,
+true, true, false, true);
+
+-- Ensure each dimension of a multi-dimensional array is estimated separately
+SELECT explain_mask_costs($$
+SELECT * FROM generate_subscripts('{{1,2,3},{4,5,6}}'::int[], 1) g(s);$$,
+true, true, false, true);
+
+SELECT explain_mask_costs($$
+SELECT * FROM generate_subscripts('{{1,2,3},{4,5,6}}'::int[], 2) g(s);$$,
+true, true, false, true);
+
+-- Ensure a dimension above the second is handled too.  Each dimension of this
+-- array has a different length, so a mix-up could not go unnoticed.
+SELECT explain_mask_costs($$
+SELECT * FROM generate_subscripts('{{{1,2,3,4},{5,6,7,8},{9,10,11,12}},{{13,14,15,16},{17,18,19,20},{21,22,23,24}}}'::int[], 3) g(s);$$,
+true, true, false, true);
+
+-- Ensure cases which return no rows estimate 1 row after clamping.  Try an
+-- out-of-range dimension, a dimension below the first, and an empty array.
+SELECT explain_mask_costs($$
+SELECT * FROM generate_subscripts('{{1,2,3},{4,5,6}}'::int[], 3) g(s);$$,
+true, true, false, true);
+
+SELECT explain_mask_costs($$
+SELECT * FROM generate_subscripts('{10,20,30}'::int[], 0) g(s);$$,
+true, true, false, true);
+
+SELECT explain_mask_costs($$
+SELECT * FROM generate_subscripts('{}'::int[], 1) g(s);$$,
+true, true, false, true);
+
+-- Ensure a constant NULL in any argument position estimates no rows, since
+-- generate_subscripts() is strict
+SELECT explain_mask_costs($$
+SELECT * FROM generate_subscripts(NULL::int[], 1) g(s);$$,
+true, true, false, true);
+
+SELECT explain_mask_costs($$
+SELECT * FROM generate_subscripts('{10,20,30}'::int[], NULL) g(s);$$,
+true, true, false, true);
+
+SELECT explain_mask_costs($$
+SELECT * FROM generate_subscripts('{10,20,30}'::int[], 1, NULL) g(s);$$,
+true, true, false, true);
+
+-- An ArrayExpr is estimated by way of estimate_array_length()
+SELECT explain_mask_costs($$
+SELECT * FROM generate_subscripts(ARRAY[1, 2, (SELECT 3)], 1) g(s);$$,
+true, true, false, true);
+
+-- Ensure we get the default row estimate when the dimension number isn't a
+-- constant, since then we don't even know which dimension is wanted
+SELECT explain_mask_costs($$
+SELECT * FROM generate_subscripts(ARRAY[1, 2, (SELECT 3)], (SELECT 1)) g(s);$$,
+false, true, false, true);
+
+-- Ensure a Var array is estimated from the DECHIST statistics.  Every array
+-- below holds exactly 7 distinct elements, so the average distinct element
+-- count does not depend on which rows ANALYZE happens to sample.
+CREATE TEMP TABLE subscript_table_1 AS
+  SELECT array_agg(g) AS a FROM generate_series(1, 100) i,
+    LATERAL generate_series(1, 7) g GROUP BY i;
+ANALYZE subscript_table_1;
+
+-- Memoize is disabled here only to keep the plan shape stable; the node's
+-- capacity and hit percentage are not masked by explain_mask_costs().
+SET enable_memoize = off;
+
+SELECT explain_mask_costs($$
+SELECT * FROM subscript_table_1 t, LATERAL generate_subscripts(t.a, 1) g(s);$$,
+true, true, false, true);
+
+-- As above, but a dimension above the first falls back on prorows: the element
+-- count in the statistics says nothing about the length of that dimension
+SELECT explain_mask_costs($$
+SELECT * FROM subscript_table_1 t, LATERAL generate_subscripts(t.a, 2) g(s);$$,
+false, true, false, true);
+
+RESET enable_memoize;
+
+--
 -- Test ScalarArrayOpExpr row estimates for <> ALL for arrays with NULLs.  We
 -- expect the planner to estimate 1 row will match in both of the following
 -- tests.
