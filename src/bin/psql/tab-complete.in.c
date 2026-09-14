@@ -4854,19 +4854,22 @@ match_previous_words(int pattern_id,
 		COMPLETE_WITH_ATTR(prev2_wd);
 
 	/*
-	 * Complete INSERT INTO <table> with "(" or "VALUES" or "SELECT" or
-	 * "TABLE" or "DEFAULT VALUES" or "OVERRIDING"
+	 * Complete INSERT INTO <table> with "(" or "BY NAME" or "BY POSITION"
+	 * or "VALUES" or "SELECT" or "TABLE" or "DEFAULT VALUES" or
+	 * "OVERRIDING"
 	 */
 	else if (TailMatches("INSERT", "INTO", MatchAny))
-		COMPLETE_WITH("(", "DEFAULT VALUES", "SELECT", "TABLE", "VALUES", "OVERRIDING");
+		COMPLETE_WITH("(", "BY NAME", "BY POSITION", "DEFAULT VALUES",
+					  "SELECT", "TABLE", "VALUES", "OVERRIDING");
 
 	/*
-	 * Complete INSERT INTO <table> (attribs) with "VALUES" or "SELECT" or
-	 * "TABLE" or "OVERRIDING"
+	 * Complete INSERT INTO <table> (attribs) with "BY NAME" or "BY POSITION"
+	 * or "VALUES" or "SELECT" or "TABLE" or "OVERRIDING"
 	 */
 	else if (TailMatches("INSERT", "INTO", MatchAny, MatchAny) &&
 			 ends_with(prev_wd, ')'))
-		COMPLETE_WITH("SELECT", "TABLE", "VALUES", "OVERRIDING");
+		COMPLETE_WITH("BY NAME", "BY POSITION", "SELECT", "TABLE", "VALUES",
+					  "OVERRIDING");
 
 	/* Complete OVERRIDING */
 	else if (TailMatches("OVERRIDING"))
@@ -4874,7 +4877,7 @@ match_previous_words(int pattern_id,
 
 	/* Complete after OVERRIDING clause */
 	else if (TailMatches("OVERRIDING", MatchAny, "VALUE"))
-		COMPLETE_WITH("SELECT", "TABLE", "VALUES");
+		COMPLETE_WITH("BY NAME", "BY POSITION", "SELECT", "TABLE", "VALUES");
 
 	/* Insert an open parenthesis after "VALUES" */
 	else if (TailMatches("VALUES") && !TailMatches("DEFAULT", "VALUES"))
