@@ -42,8 +42,7 @@ extern List *get_graph_all_label_oids(Oid propgraphid);
  * vertex, 'e' for edge) and the human-readable class name ("vertex"/"edge").
  * Returns false for pattern kinds that do not denote a vertex or edge (e.g.
  * PAREN_EXPR), leaving the outputs untouched.  kind_str may be NULL if the
- * caller only needs the character.  Shared by the graph rewrite fallback,
- * the native planner, and the native executor.
+ * caller only needs the character.  Used by the label-kind validator.
  */
 extern bool graph_element_kind_info(GraphElementPatternKind kind,
 									char *element_kind, const char **kind_str);
@@ -57,21 +56,5 @@ extern bool graph_element_kind_info(GraphElementPatternKind kind,
  */
 extern void validate_graph_element_label_kinds(GraphPattern *pattern,
 											   Oid graph_oid);
-
-/*
- * Callback used by graph_label_expr_matches(): does the element described
- * by arg carry the given label?
- */
-typedef bool (*GraphLabelHasFn) (Oid labelid, void *arg);
-
-/*
- * Match a label expression (a single GraphLabelRef, or a BoolExpr OR tree of
- * GraphLabelRef nodes) against an element, invoking has_label for each label
- * the expression references.  A NULL labelexpr matches everything.  Shared by
- * the native planner (syscache-backed) and the native executor (cached
- * element model) so the OR / GraphLabelRef traversal is single-sourced.
- */
-extern bool graph_label_expr_matches(Node *labelexpr,
-									 GraphLabelHasFn has_label, void *arg);
 
 #endif							/* PARSE_GRAPHTABLE_H */

@@ -842,8 +842,7 @@ get_graph_all_label_oids(Oid propgraphid)
  * vertex, 'e' for edge) and the human-readable class name ("vertex"/"edge").
  * Returns false for pattern kinds that do not denote a vertex or edge (e.g.
  * PAREN_EXPR), leaving the outputs untouched.  kind_str may be NULL if the
- * caller only needs the character.  Shared by the parser validators, the
- * native planner, and the native executor.
+ * caller only needs the character.  Used by the label-kind validator.
  */
 bool
 graph_element_kind_info(GraphElementPatternKind kind,
@@ -866,37 +865,4 @@ graph_element_kind_info(GraphElementPatternKind kind,
 		default:
 			return false;
 	}
-}
-
-/*
- * Match a label expression against an element, using the supplied
- * membership callback.  A label expression is a single GraphLabelRef or a
- * BoolExpr (OR) tree of GraphLabelRef nodes; the element matches if it
- * carries any of the referenced labels (OR semantics).  A NULL labelexpr
- * matches everything.
- *
- * See graph_label_expr_matches() in parse_graphtable.h for the shared API.
- */
-bool
-graph_label_expr_matches(Node *labelexpr, GraphLabelHasFn has_label,
-						 void *arg)
-{
-	if (labelexpr == NULL)
-		return true;
-	if (IsA(labelexpr, GraphLabelRef))
-		return has_label(((GraphLabelRef *) labelexpr)->labelid, arg);
-	if (IsA(labelexpr, BoolExpr))
-	{
-		BoolExpr   *b = (BoolExpr *) labelexpr;
-
-		foreach_ptr(Node, sub, b->args)
-		{
-			if (graph_label_expr_matches(sub, has_label, arg))
-				return true;
-		}
-		return false;
-	}
-	elog(ERROR, "unsupported label expression node: %d",
-		 (int) nodeTag(labelexpr));
-	return false;				/* keep compiler quiet */
 }

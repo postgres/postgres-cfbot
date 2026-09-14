@@ -1344,7 +1344,6 @@ get_element_property_expr(Oid elemoid, Oid propoid, int rtindex)
  */
 typedef struct native_vle_factor
 {
-	int			factorpos;		/* pattern position of the edge */
 	GraphElementPattern *edge_gep;	/* the edge element pattern */
 	List	   *edge_element_oids;	/* edge element OIDs matching the label */
 	List	   *array_props;	/* GraphPropertyRef* (VLE edge-list refs) */
@@ -1375,7 +1374,6 @@ typedef struct native_bind
 typedef struct native_decomp
 {
 	RangeTblEntry *rte;			/* the user's graph RTE */
-	List	   *factors;		/* one path_factor per element pattern */
 	List	   *elem_lists;		/* per factor: List of struct path_element
 								 * (NIL for a VLE factor) */
 	List	   *vle_factors;	/* per factor: native_vle_factor* or NULL */
@@ -1386,7 +1384,6 @@ typedef struct native_decomp
 /* Context for resolving property references within a branch. */
 typedef struct native_prop_ctx
 {
-	Oid			propgraphid;
 	List	   *binds;			/* List of native_bind */
 	List	   *vle_binds;		/* List of native_vle_bind */
 }			native_prop_ctx;
@@ -1428,6 +1425,30 @@ get_graph_element_key_columns(Oid elemoid, int key_attnum)
 	ReleaseSysCache(eletup);
 
 	return result;
+}
+
+/*
+ * Look up the backing table and the vertex element references of a graph
+ * element (pgerelid / pgesrcvertexid / pgedestvertexid).  Shared by the
+ * native planner and the native executor.
+ */
+void
+get_graph_element_identity(Oid elemoid, Oid *relid, Oid *srcvertex,
+						   Oid *dstvertex)
+{
+	HeapTuple	eletup;
+	Form_pg_propgraph_element pgeform;
+
+	eletup = SearchSysCache1(PROPGRAPHELOID, ObjectIdGetDatum(elemoid));
+	if (!HeapTupleIsValid(eletup))
+		elog(ERROR, "cache lookup failed for property graph element %u", elemoid);
+	pgeform = (Form_pg_propgraph_element) GETSTRUCT(eletup);
+
+	*relid = pgeform->pgerelid;
+	*srcvertex = pgeform->pgesrcvertexid;
+	*dstvertex = pgeform->pgedestvertexid;
+
+	ReleaseSysCache(eletup);
 }
 
 /*
@@ -1674,10 +1695,8 @@ native_build_vle_rte(RangeTblEntry *rte, native_vle_factor * vf,
 	List	   *src_keys;
 	List	   *term_keys;
 	int			nseed;
-	int			nterm;
 	int			seed_first = 1;
 	int			term_first;
-	int			array_first;
 	int			eff_min;
 	List	   *columns = NIL;
 	List	   *colnames = NIL;
@@ -1698,14 +1717,12 @@ native_build_vle_rte(RangeTblEntry *rte, native_vle_factor * vf,
 	term_keys = get_graph_element_key_columns(termpe->elemoid,
 											  Anum_pg_propgraph_element_pgekey);
 	nseed = list_length(src_keys);
-	nterm = list_length(term_keys);
 
 	eff_min = vf->min_depth;
 	if (eff_min == 0 && srcpe->elemoid != termpe->elemoid)
 		eff_min = 1;
 
 	term_first = seed_first + nseed;
-	array_first = term_first + nterm;
 
 	/* The RT index of the new RTE: next in the branch's rtable. */
 	gs_rti = list_length(branch->rtable) + 1;
@@ -1938,12 +1955,6 @@ native_replace_property_refs_mutator(Node *node, native_prop_ctx * ctx)
 								   ctx);
 }
 
-static Node *
-native_replace_property_refs(Node *node, native_prop_ctx * ctx)
-{
-	return native_replace_property_refs_mutator(node, ctx);
-}
-
 /*
  * Construct the Query for one fully-bound branch.  Returns NULL if the
  * combination is inconsistent (fixed edge-vertex links don't line up).
@@ -2047,7 +2058,6 @@ native_query_for_branch(native_decomp * dc, List *elems, List *vles)
 	foreach(lc, elems)
 	{
 		struct path_element *pe = lfirst(lc);
-		native_vle_factor *vf = list_nth(vles, i);
 
 		if (pe == NULL)
 		{
@@ -2114,22 +2124,21 @@ native_query_for_branch(native_decomp * dc, List *elems, List *vles)
 		i++;
 	}
 
-	ctx.propgraphid = rte->relid;
 	ctx.binds = binds;
 	ctx.vle_binds = vle_binds;
 
 	if (rte->graph_pattern->whereClause)
 		qual_exprs = lappend(qual_exprs,
-							 native_replace_property_refs(copyObject((Node *) rte->graph_pattern->whereClause),
-														  &ctx));
+							 native_replace_property_refs_mutator(copyObject((Node *) rte->graph_pattern->whereClause),
+																  &ctx));
 
 	path_query->jointree = makeFromExpr(fromlist,
 										qual_exprs ? (Node *) makeBoolExpr(AND_EXPR, qual_exprs, -1) : NULL);
 
 	/* Construct the branch targetlist from the COLUMNS specification. */
 	path_query->targetList = castNode(List,
-									  native_replace_property_refs(copyObject((Node *) rte->graph_table_columns),
-																   &ctx));
+									  native_replace_property_refs_mutator(copyObject((Node *) rte->graph_table_columns),
+																		   &ctx));
 
 	/*
 	 * Mark the columns being accessed in the branch query as requiring SELECT
@@ -2198,6 +2207,21 @@ native_queries_recurse(native_decomp * dc, int facpos, List *elems, List *vles)
 }
 
 /*
+ * Return the OIDs of the elements described by the given list of resolved
+ * path elements (shared by the edge/vertex element lookups below).
+ */
+static List *
+path_element_oids(List *pes)
+{
+	List	   *result = NIL;
+
+	foreach_ptr(struct path_element, pe, pes)
+		result = lappend_oid(result, pe->elemoid);
+
+	return result;
+}
+
+/*
  * Return the OIDs of the edge elements matching the given edge element
  * pattern in the given property graph.  Used by the native planner to build
  * the GraphScan's inner (1-hop) expansion.
@@ -2208,9 +2232,6 @@ get_graph_edge_element_oids(Oid propgraphid, GraphElementPattern *gep)
 	struct path_factor *src_pf;
 	struct path_factor *edge_pf;
 	struct path_factor *dest_pf;
-	List	   *pes;
-	List	   *result = NIL;
-	ListCell   *lc;
 
 	Assert(IS_EDGE_PATTERN(gep->kind));
 
@@ -2236,11 +2257,8 @@ get_graph_edge_element_oids(Oid propgraphid, GraphElementPattern *gep)
 	edge_pf->src_pf = src_pf;
 	edge_pf->dest_pf = dest_pf;
 
-	pes = get_path_elements_for_path_factor(propgraphid, edge_pf);
-	foreach_ptr(struct path_element, pe, pes)
-		result = lappend_oid(result, pe->elemoid);
-
-	return result;
+	return path_element_oids(get_path_elements_for_path_factor(propgraphid,
+															   edge_pf));
 }
 
 /*
@@ -2253,9 +2271,6 @@ List *
 get_graph_vertex_element_oids(Oid propgraphid, GraphElementPattern *gep)
 {
 	struct path_factor *pf;
-	List	   *pes;
-	List	   *result = NIL;
-	ListCell   *lc;
 
 	Assert(gep->kind == VERTEX_PATTERN);
 
@@ -2266,11 +2281,8 @@ get_graph_vertex_element_oids(Oid propgraphid, GraphElementPattern *gep)
 	pf->variable = gep->variable;
 	pf->whereClause = gep->whereClause;
 
-	pes = get_path_elements_for_path_factor(propgraphid, pf);
-	foreach_ptr(struct path_element, pe, pes)
-		result = lappend_oid(result, pe->elemoid);
-
-	return result;
+	return path_element_oids(get_path_elements_for_path_factor(propgraphid,
+															   pf));
 }
 
 /*
@@ -2293,7 +2305,6 @@ decomposeGraphNative(RangeTblEntry *rte)
 	List	   *vle_factors = NIL;
 	int			factorpos = 0;
 	Query	   *result;
-	ListCell   *lc;
 
 	Assert(list_length(gp->path_pattern_list) == 1);
 	path_pattern = linitial(gp->path_pattern_list);
@@ -2347,7 +2358,6 @@ decomposeGraphNative(RangeTblEntry *rte)
 				native_vle_factor *vf = palloc0_object(native_vle_factor);
 				List	   *edes;
 
-				vf->factorpos = pf->factorpos;
 				vf->edge_gep = gep;
 				vf->min_depth = linitial_int(gep->quantifier);
 				vf->max_depth = lsecond_int(gep->quantifier);
@@ -2371,7 +2381,6 @@ decomposeGraphNative(RangeTblEntry *rte)
 	}
 
 	dc.rte = rte;
-	dc.factors = factors;
 	dc.elem_lists = elem_lists;
 	dc.vle_factors = vle_factors;
 	dc.nfactors = list_length(factors);

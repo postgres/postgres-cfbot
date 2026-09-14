@@ -56,11 +56,8 @@
 #include "rewrite/rewriteGraphTable.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/lsyscache.h"
-#include "utils/array.h"
-#include "utils/builtins.h"
 #include "utils/selfuncs.h"
 #include "utils/syscache.h"
-#include "utils/typcache.h"
 
 
 /* Bitmask flags for pushdown_safety_info.unsafeFlags */
@@ -4086,29 +4083,25 @@ static void
 graph_est_element_rows(Oid elemoid, Oid *relid, Oid *srcvertex,
 					   Oid *dstvertex, double *tuples)
 {
-	HeapTuple	etup;
-	Form_pg_propgraph_element pge;
+	Oid			rid;
+	Oid			srcv;
+	Oid			dstv;
 	Relation	rel;
 	BlockNumber pages;
 	double		allvisfrac;
 
-	etup = SearchSysCache1(PROPGRAPHELOID, ObjectIdGetDatum(elemoid));
-	if (!HeapTupleIsValid(etup))
-		elog(ERROR, "cache lookup failed for property graph element %u",
-			 elemoid);
-	pge = (Form_pg_propgraph_element) GETSTRUCT(etup);
+	get_graph_element_identity(elemoid, &rid, &srcv, &dstv);
 
-	*relid = pge->pgerelid;
+	if (relid)
+		*relid = rid;
 	if (srcvertex)
-		*srcvertex = pge->pgesrcvertexid;
+		*srcvertex = srcv;
 	if (dstvertex)
-		*dstvertex = pge->pgedestvertexid;
+		*dstvertex = dstv;
 
-	rel = table_open(*relid, AccessShareLock);
+	rel = table_open(rid, AccessShareLock);
 	estimate_rel_size(rel, NULL, &pages, tuples, &allvisfrac);
 	table_close(rel, NoLock);
-
-	ReleaseSysCache(etup);
 }
 
 static double
@@ -4359,7 +4352,6 @@ set_graphscan_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 		gpath->vertex_param_ids =
 		lappend_int(gpath->vertex_param_ids, vprm->paramid);
 	gpath->seed_elem_oid = rte->graph_seed_elem_oid;
-	gpath->seed_param_ids = NIL;
 	gpath->max_nsrc = max_nsrc;
 	gpath->max_ndst = max_ndst;
 
