@@ -74,8 +74,12 @@ for my $stage ('streaming', 'promoted')
 		my $name = $node->name;
 		ok(!-e "$dir/abort.dat", "$stage $name: aborted create absent");
 		ok(!-e "$dir/abortdir", "$stage $name: aborted mkdir absent");
-		is((stat("$dir/base.dat"))[2] & 07777,
-			0600, "$stage $name: original mode");
+	  SKIP:
+		{
+			skip 'POSIX permission semantics required', 1 if $windows_os;
+			is((stat("$dir/base.dat"))[2] & 07777,
+				0600, "$stage $name: original mode");
+		}
 		is(slurp_file("$dir/base.dat"),
 			'committed-base', "$stage $name: original bytes");
 	}

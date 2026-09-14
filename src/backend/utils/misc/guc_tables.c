@@ -30,6 +30,7 @@
 #endif
 
 #include "access/commit_ts.h"
+#include "access/flux.h"
 #include "access/gin.h"
 #include "access/logical_revert_worker.h"
 #include "access/slog.h"

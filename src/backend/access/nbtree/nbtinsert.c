@@ -524,13 +524,13 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
 					Assert(!BTreeTupleIsPivot(curitup));
 
 					/*
-					 * A delete-marked entry is a tombstone: an
-					 * in-place UPDATE moved the row at its TID off this key.
-					 * The key is still taken while that UPDATE is running
-					 * (wait for it) or after it aborted (its rollback may not
-					 * have been applied yet), and free once it committed.
-					 * Only the table AM knows which: table_index_fetch_tid()
-					 * below.  The tombstone is removed by VACUUM
+					 * A delete-marked entry is a tombstone: an in-place
+					 * UPDATE moved the row at its TID off this key. The key
+					 * is still taken while that UPDATE is running (wait for
+					 * it) or after it aborted (its rollback may not have been
+					 * applied yet), and free once it committed. Only the
+					 * table AM knows which: table_index_fetch_tid() below.
+					 * The tombstone is removed by VACUUM
 					 * (table_index_tombstone_removable), never here.  An AM
 					 * that cannot judge it has the tombstone skipped, the
 					 * live (k_new, T) entry being the authority.
@@ -2948,8 +2948,8 @@ _bt_delete_or_dedup_one_page(Relation rel, Relation heapRel,
 	/*
 	 * Perform deduplication pass (when enabled and index-is-allequalimage).
 	 *
-	 * Deduplication is disabled for a delete-marking table's index.
-	 * A delete-marked tombstone is an alt-TID leaf tuple whose t_tid holds
+	 * Deduplication is disabled for a delete-marking table's index. A
+	 * delete-marked tombstone is an alt-TID leaf tuple whose t_tid holds
 	 * status metadata (not a heap TID) and which must linger until VACUUM;
 	 * folding equal-key entries into posting lists around such tombstones
 	 * (and around the revive/re-insert an in-place key UPDATE produces)
@@ -3027,9 +3027,9 @@ _bt_simpledel_pass(Relation rel, Buffer buffer, Relation heapRel,
 		void	   *match;
 
 		/*
-		 * A delete-marked tombstone is never LP_DEAD and its t_tid
-		 * holds alt-TID metadata rather than a heap TID; skip it so we never
-		 * feed a bogus TID into the table AM's index-deletion call.
+		 * A delete-marked tombstone is never LP_DEAD and its t_tid holds
+		 * alt-TID metadata rather than a heap TID; skip it so we never feed a
+		 * bogus TID into the table AM's index-deletion call.
 		 */
 		if (BTreeTupleIsDeleteMarked(itup))
 		{

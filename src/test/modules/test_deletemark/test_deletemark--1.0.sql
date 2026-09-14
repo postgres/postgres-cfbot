@@ -18,3 +18,15 @@ AS 'MODULE_PATHNAME' LANGUAGE C;
 CREATE FUNCTION dm_scan_recheck(idx regclass)
 RETURNS boolean STRICT
 AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION dm_set_dead(idx regclass, t tid)
+RETURNS boolean STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION dm_is_dead(idx regclass, t tid)
+RETURNS boolean STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION dm_unmark(idx regclass, t tid)
+RETURNS boolean STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;

@@ -156,14 +156,14 @@ UndoShmemRequest_internal(void *arg)
 			 * The per-backend UNDO engine's discard worker reclaims undo log
 			 * space, and its undo launcher applies rollbacks deferred by
 			 * crash recovery.  Neither is optional: without the discard
-			 * worker the undo segment files of any FLUX table grow
-			 * without bound. Both hibernate when there is no per-backend UNDO
-			 * to process, so a cluster that never uses those AMs pays only
-			 * for two idle processes on top of the cluster-wide UNDO worker
-			 * and logical revert launcher.  The default max_worker_processes
-			 * is sized to leave parallel query its full budget alongside
-			 * these.  Registered here (request_fn phase) for the same reason
-			 * as UndoWorkerRegister(): a static background worker cannot be
+			 * worker the undo segment files of any FLUX table grow without
+			 * bound. Both hibernate when there is no per-backend UNDO to
+			 * process, so a cluster that never uses those AMs pays only for
+			 * two idle processes on top of the cluster-wide UNDO worker and
+			 * logical revert launcher.  The default max_worker_processes is
+			 * sized to leave parallel query its full budget alongside these.
+			 * Registered here (request_fn phase) for the same reason as
+			 * UndoWorkerRegister(): a static background worker cannot be
 			 * registered after BackgroundWorkerShmemInit().
 			 */
 			DiscardWorkerRegister();
@@ -182,8 +182,8 @@ UndoShmemRequest_internal(void *arg)
 	 * subsystem's pattern) rather than drawn from the slop.
 	 */
 	UndoLogShmemRequest();
-	UndoWorkerShmemRequest();
 	XactUndoShmemRequest();
+	UndoWorkerShmemRequest();
 	LogicalRevertShmemRequest();
 	PbuUndoLogShmemRequest();
 	PendingUndoShmemRequest();
@@ -258,14 +258,17 @@ UndoShmemInit(void)
  * by UndoShmemInit() is not present and must be rebuilt here.  Two distinct
  * kinds of state need re-establishing:
  *
- * 1. Process-local pointers derived from the requested shmem areas.  Every
- *    UNDO shmem area is requested with ShmemRequestStruct() from
- *    UndoShmemRequest_internal(), so the framework has already set each
- *    module's base pointer before calling us; the sub-modules' *ShmemInit()
- *    functions initialize shared contents and must not be called here.  What
- *    remains is state a module derives from its area in each process (the
- *    per-backend engine's singleton locks and queue wrappers), recomputed by
- *    its *ShmemInit() when IsUnderPostmaster.
+ * 1. Process-local pointers derived from the requested shmem areas.  The
+ *    areas themselves are all requested with ShmemRequestStruct() in
+ *    UndoShmemRequest_internal(), so the framework has already set every
+ *    module's base pointer (UndoLogShared, XactUndoInflight, UndoWorkerShmem,
+ *    RevertState and the per-backend engine's areas) before calling us.  The
+ *    per-backend engine also keeps pointers carved out of its areas (its
+ *    singleton locks and oldest-xid atomic, and the rollback queues' binaryheap
+ *    wrappers), which its *ShmemInit() functions recompute when
+ *    IsUnderPostmaster without touching the shared contents.  The cluster-wide
+ *    modules' *ShmemInit() functions initialize shared contents and must not be
+ *    called here.
  *
  * 2. The UndoRmgrs[] dispatch table and each registered AM's undo hook
  *    function pointers, both rebuilt by RegisterUndoRmgrs() (idempotent:

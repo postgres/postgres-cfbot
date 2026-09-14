@@ -299,9 +299,9 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 				 * Suppress index-only scans for indexes on a delete-marking
 				 * table: a delete-marked entry can carry a stale key that no
 				 * longer matches the live heap tuple, so an IOS that trusted
-				 * the index key without visiting the heap could return a wrong
-				 * result.  We do this here (not in btcanreturn) because we
-				 * hold the fully-built heap relcache entry, so
+				 * the index key without visiting the heap could return a
+				 * wrong result.  We do this here (not in btcanreturn) because
+				 * we hold the fully-built heap relcache entry, so
 				 * RelationSupportsDeleteMarking() is safe -- reaching for the
 				 * table AM from inside btcanreturn crashes on half-built
 				 * relcache entries during bootstrap.

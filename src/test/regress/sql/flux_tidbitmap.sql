@@ -1,0 +1,71 @@
+--
+-- FLUX: line-pointer offsets stay within MaxHeapTuplesPerPage.
+--
+-- tidbitmap.c sizes each exact page entry for TBM_MAX_TUPLES_PER_PAGE ==
+-- MaxHeapTuplesPerPage offsets, for every table AM.  FLUX must therefore
+-- never place a tuple at a higher offset, or a bitmap scan over that page
+-- fails with "tuple offset out of range".  The narrowest FLUX rows cannot get
+-- there by geometry alone (every item carries a 36-byte tuple header), but
+-- line pointers left LP_DEAD by pruning can: they are not reused until VACUUM,
+-- so repeated insert/delete churn on one page keeps appending new ones.
+--
+CREATE FUNCTION tbm_off(t tid) RETURNS int
+    LANGUAGE sql IMMUTABLE AS $$ SELECT (t::text::point)[1]::int $$;
+CREATE FUNCTION tbm_blk(t tid) RETURNS int
+    LANGUAGE sql IMMUTABLE AS $$ SELECT (t::text::point)[0]::int $$;
+-- MaxHeapTuplesPerPage: (BLCKSZ - page header) / (tuple header + line pointer)
+CREATE FUNCTION tbm_max_off() RETURNS int
+    LANGUAGE sql STABLE AS $$ SELECT (current_setting('block_size')::int - 24) / 28 $$;
+
+-- narrowest rows: a page fills up by space, well under the offset limit
+CREATE TABLE tbm_z0 () USING flux;
+INSERT INTO tbm_z0 SELECT FROM generate_series(1, 400);
+SELECT count(*) > 0 AS some_on_blk0,
+       count(*) <= tbm_max_off() AS blk0_fits
+  FROM tbm_z0 WHERE tbm_blk(ctid) = 0;
+
+CREATE TABLE tbm_b (b bool) USING flux;
+CREATE INDEX tbm_b_idx ON tbm_b (b);
+INSERT INTO tbm_b SELECT true FROM generate_series(1, 400);
+SELECT count(*) > 0 AS some_on_blk0,
+       count(*) <= tbm_max_off() AS blk0_fits
+  FROM tbm_b WHERE tbm_blk(ctid) = 0;
+
+-- insert/delete churn: pruning leaves LP_DEAD line pointers behind
+CREATE TABLE tbm_churn (i int) USING flux WITH (autovacuum_enabled = off);
+CREATE INDEX tbm_churn_idx ON tbm_churn (i);
+CREATE TABLE tbm_maxoff (round int, maxoff int);
+INSERT INTO tbm_churn SELECT g FROM generate_series(1, 150) g;
+INSERT INTO tbm_maxoff SELECT 1, max(tbm_off(ctid)) FROM tbm_churn;
+DELETE FROM tbm_churn;
+SELECT count(*) FROM tbm_churn;  -- scan prunes the page
+INSERT INTO tbm_churn SELECT g FROM generate_series(1, 150) g;
+INSERT INTO tbm_maxoff SELECT 2, max(tbm_off(ctid)) FROM tbm_churn;
+DELETE FROM tbm_churn;
+SELECT count(*) FROM tbm_churn;  -- scan prunes the page
+INSERT INTO tbm_churn SELECT g FROM generate_series(1, 150) g;
+INSERT INTO tbm_maxoff SELECT 3, max(tbm_off(ctid)) FROM tbm_churn;
+DELETE FROM tbm_churn;
+SELECT count(*) FROM tbm_churn;  -- scan prunes the page
+INSERT INTO tbm_churn SELECT g FROM generate_series(1, 150) g;
+INSERT INTO tbm_maxoff SELECT 4, max(tbm_off(ctid)) FROM tbm_churn;
+DELETE FROM tbm_churn;
+SELECT count(*) FROM tbm_churn;  -- scan prunes the page
+INSERT INTO tbm_churn SELECT g FROM generate_series(1, 150) g;
+INSERT INTO tbm_maxoff SELECT 5, max(tbm_off(ctid)) FROM tbm_churn;
+SELECT round, maxoff <= tbm_max_off() AS fits FROM tbm_maxoff ORDER BY round;
+SELECT count(*) AS beyond_max_off FROM tbm_churn WHERE tbm_off(ctid) > tbm_max_off();
+
+-- a bitmap scan over every page returns every row
+SET enable_seqscan = off;
+SET enable_indexscan = off;
+SET enable_indexonlyscan = off;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM tbm_churn WHERE i > 0;
+SELECT count(*) FROM tbm_churn WHERE i > 0;
+SELECT count(*) FROM tbm_b WHERE b;
+RESET enable_seqscan;
+RESET enable_indexscan;
+RESET enable_indexonlyscan;
+
+DROP TABLE tbm_z0, tbm_b, tbm_churn, tbm_maxoff;
+DROP FUNCTION tbm_off, tbm_blk, tbm_max_off;

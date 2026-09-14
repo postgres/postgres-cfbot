@@ -131,10 +131,11 @@ need not have.  So a producer that re-runs the undo insert in its own redo
 must not rely on the replayed undo log state: its forward record carries the
 record's placement (location, whether it carries the transaction header, the
 log's last_xact_start before it, the database), and its redo calls
-UndoLogRecoverySetPlacement() before PrepareUndoInsert().
+UndoLogRecoverySetPlacement() before PrepareUndoInsert().  FLUX does
+(xl_flux_undo, FluxPbuRedoUndo; recovery/t/154).
 
-No in-tree access method writes per-backend UNDO yet; the engine compiles,
-links, and registers, and its dispatch path is ready for a future consumer.
+The FLUX table access method (src/backend/access/flux) writes its table
+UNDO to the per-backend engine.
 
 
 ## Recovery Model

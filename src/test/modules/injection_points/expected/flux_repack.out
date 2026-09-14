@@ -1,0 +1,3103 @@
+Parsed test spec with 8 sessions
+
+starting permutation: pick_fx rp hold w_ins w_nonkey w_k w_id w_grow w_del truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_fx: 
+  ALTER TABLE fx RENAME TO t;
+  ALTER INDEX fx_pkey RENAME TO t_pkey;
+  ALTER INDEX fx_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step w_nonkey: UPDATE t SET v = repeat('n', 100) WHERE id = 20;
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step w_id: UPDATE t SET id = 1022 WHERE id = 22;
+step w_grow: 
+  UPDATE t SET v = repeat('g', 2000) WHERE id = 10;
+  SELECT (ctid::text::point)[0] > 0 AS moved FROM t WHERE id = 10;
+
+moved
+-----
+t    
+(1 row)
+
+step w_del: DELETE FROM t WHERE id = 23;
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  9238|10317|13803|16000|1a0c7d64b869b4a39f83527199b76e78|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_hp rp hold w_ins w_nonkey w_k w_id w_grow w_del truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_hp: 
+  ALTER TABLE hp RENAME TO t;
+  ALTER INDEX hp_pkey RENAME TO t_pkey;
+  ALTER INDEX hp_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step w_nonkey: UPDATE t SET v = repeat('n', 100) WHERE id = 20;
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step w_id: UPDATE t SET id = 1022 WHERE id = 22;
+step w_grow: 
+  UPDATE t SET v = repeat('g', 2000) WHERE id = 10;
+  SELECT (ctid::text::point)[0] > 0 AS moved FROM t WHERE id = 10;
+
+moved
+-----
+t    
+(1 row)
+
+step w_del: DELETE FROM t WHERE id = 23;
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  9238|10317|13803|16000|1a0c7d64b869b4a39f83527199b76e78|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_fx rp hold w_other w_k truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_fx: 
+  ALTER TABLE fx RENAME TO t;
+  ALTER INDEX fx_pkey RENAME TO t_pkey;
+  ALTER INDEX fx_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step w_other: 
+  INSERT INTO ofx VALUES (1001, 1, 'other', NULL);
+  UPDATE ofx SET k = 2100, v = repeat('o', 2000) WHERE id = 21;
+  UPDATE ofx SET id = 1022 WHERE id = 22;
+  DELETE FROM ofx WHERE id = 23;
+  INSERT INTO ohp VALUES (1001, 1, 'other', NULL);
+  UPDATE ohp SET k = 2100, v = repeat('o', 2000) WHERE id = 21;
+  UPDATE ohp SET id = 1022 WHERE id = 22;
+  DELETE FROM ohp WHERE id = 23;
+
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  7260| 9339|12000|16000|de51f4abb310dd0e8ba162224553468b|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_hp rp hold w_other w_k truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_hp: 
+  ALTER TABLE hp RENAME TO t;
+  ALTER INDEX hp_pkey RENAME TO t_pkey;
+  ALTER INDEX hp_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step w_other: 
+  INSERT INTO ofx VALUES (1001, 1, 'other', NULL);
+  UPDATE ofx SET k = 2100, v = repeat('o', 2000) WHERE id = 21;
+  UPDATE ofx SET id = 1022 WHERE id = 22;
+  DELETE FROM ofx WHERE id = 23;
+  INSERT INTO ohp VALUES (1001, 1, 'other', NULL);
+  UPDATE ohp SET k = 2100, v = repeat('o', 2000) WHERE id = 21;
+  UPDATE ohp SET id = 1022 WHERE id = 22;
+  DELETE FROM ohp WHERE id = 23;
+
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  7260| 9339|12000|16000|de51f4abb310dd0e8ba162224553468b|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_fx rp hold wb w_other w_ins wc truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_fx: 
+  ALTER TABLE fx RENAME TO t;
+  ALTER INDEX fx_pkey RENAME TO t_pkey;
+  ALTER INDEX fx_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step wb: BEGIN;
+step w_other: 
+  INSERT INTO ofx VALUES (1001, 1, 'other', NULL);
+  UPDATE ofx SET k = 2100, v = repeat('o', 2000) WHERE id = 21;
+  UPDATE ofx SET id = 1022 WHERE id = 22;
+  DELETE FROM ofx WHERE id = 23;
+  INSERT INTO ohp VALUES (1001, 1, 'other', NULL);
+  UPDATE ohp SET k = 2100, v = repeat('o', 2000) WHERE id = 21;
+  UPDATE ohp SET id = 1022 WHERE id = 22;
+  DELETE FROM ohp WHERE id = 23;
+
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step wc: COMMIT;
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  121|  8261| 8261|12003|16000|067aa91d50e89e3915ee51dc80f7f74e|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_hp rp hold wb w_other w_ins wc truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_hp: 
+  ALTER TABLE hp RENAME TO t;
+  ALTER INDEX hp_pkey RENAME TO t_pkey;
+  ALTER INDEX hp_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step wb: BEGIN;
+step w_other: 
+  INSERT INTO ofx VALUES (1001, 1, 'other', NULL);
+  UPDATE ofx SET k = 2100, v = repeat('o', 2000) WHERE id = 21;
+  UPDATE ofx SET id = 1022 WHERE id = 22;
+  DELETE FROM ofx WHERE id = 23;
+  INSERT INTO ohp VALUES (1001, 1, 'other', NULL);
+  UPDATE ohp SET k = 2100, v = repeat('o', 2000) WHERE id = 21;
+  UPDATE ohp SET id = 1022 WHERE id = 22;
+  DELETE FROM ohp WHERE id = 23;
+
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step wc: COMMIT;
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  121|  8261| 8261|12003|16000|067aa91d50e89e3915ee51dc80f7f74e|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_fx by_idx rpi hold w_ins w_k w_id w_grow w_del truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_fx: 
+  ALTER TABLE fx RENAME TO t;
+  ALTER INDEX fx_pkey RENAME TO t_pkey;
+  ALTER INDEX fx_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step by_idx: SET enable_sort = off;
+step rpi: REPACK (CONCURRENTLY) t USING INDEX t_pkey; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step w_id: UPDATE t SET id = 1022 WHERE id = 22;
+step w_grow: 
+  UPDATE t SET v = repeat('g', 2000) WHERE id = 10;
+  SELECT (ctid::text::point)[0] > 0 AS moved FROM t WHERE id = 10;
+
+moved
+-----
+t    
+(1 row)
+
+step w_del: DELETE FROM t WHERE id = 23;
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rpi: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  9238|10317|13803|16000|836f2948712aaffe935e24de2196eeeb|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_hp by_idx rpi hold w_ins w_k w_id w_grow w_del truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_hp: 
+  ALTER TABLE hp RENAME TO t;
+  ALTER INDEX hp_pkey RENAME TO t_pkey;
+  ALTER INDEX hp_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step by_idx: SET enable_sort = off;
+step rpi: REPACK (CONCURRENTLY) t USING INDEX t_pkey; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step w_id: UPDATE t SET id = 1022 WHERE id = 22;
+step w_grow: 
+  UPDATE t SET v = repeat('g', 2000) WHERE id = 10;
+  SELECT (ctid::text::point)[0] > 0 AS moved FROM t WHERE id = 10;
+
+moved
+-----
+t    
+(1 row)
+
+step w_del: DELETE FROM t WHERE id = 23;
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rpi: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  9238|10317|13803|16000|836f2948712aaffe935e24de2196eeeb|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_fx by_sort rpi hold w_ins w_k w_id w_grow w_del truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_fx: 
+  ALTER TABLE fx RENAME TO t;
+  ALTER INDEX fx_pkey RENAME TO t_pkey;
+  ALTER INDEX fx_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step by_sort: SET enable_indexscan = off;
+step rpi: REPACK (CONCURRENTLY) t USING INDEX t_pkey; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step w_id: UPDATE t SET id = 1022 WHERE id = 22;
+step w_grow: 
+  UPDATE t SET v = repeat('g', 2000) WHERE id = 10;
+  SELECT (ctid::text::point)[0] > 0 AS moved FROM t WHERE id = 10;
+
+moved
+-----
+t    
+(1 row)
+
+step w_del: DELETE FROM t WHERE id = 23;
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rpi: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  9238|10317|13803|16000|836f2948712aaffe935e24de2196eeeb|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_hp by_sort rpi hold w_ins w_k w_id w_grow w_del truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_hp: 
+  ALTER TABLE hp RENAME TO t;
+  ALTER INDEX hp_pkey RENAME TO t_pkey;
+  ALTER INDEX hp_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step by_sort: SET enable_indexscan = off;
+step rpi: REPACK (CONCURRENTLY) t USING INDEX t_pkey; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step w_id: UPDATE t SET id = 1022 WHERE id = 22;
+step w_grow: 
+  UPDATE t SET v = repeat('g', 2000) WHERE id = 10;
+  SELECT (ctid::text::point)[0] > 0 AS moved FROM t WHERE id = 10;
+
+moved
+-----
+t    
+(1 row)
+
+step w_del: DELETE FROM t WHERE id = 23;
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rpi: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  9238|10317|13803|16000|836f2948712aaffe935e24de2196eeeb|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_fx rp hold wb w_ins w_nonkey w_k w_id w_grow w_del wc truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_fx: 
+  ALTER TABLE fx RENAME TO t;
+  ALTER INDEX fx_pkey RENAME TO t_pkey;
+  ALTER INDEX fx_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step wb: BEGIN;
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step w_nonkey: UPDATE t SET v = repeat('n', 100) WHERE id = 20;
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step w_id: UPDATE t SET id = 1022 WHERE id = 22;
+step w_grow: 
+  UPDATE t SET v = repeat('g', 2000) WHERE id = 10;
+  SELECT (ctid::text::point)[0] > 0 AS moved FROM t WHERE id = 10;
+
+moved
+-----
+t    
+(1 row)
+
+step w_del: DELETE FROM t WHERE id = 23;
+step wc: COMMIT;
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  9238|10317|13803|16000|1a0c7d64b869b4a39f83527199b76e78|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_hp rp hold wb w_ins w_nonkey w_k w_id w_grow w_del wc truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_hp: 
+  ALTER TABLE hp RENAME TO t;
+  ALTER INDEX hp_pkey RENAME TO t_pkey;
+  ALTER INDEX hp_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step wb: BEGIN;
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step w_nonkey: UPDATE t SET v = repeat('n', 100) WHERE id = 20;
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step w_id: UPDATE t SET id = 1022 WHERE id = 22;
+step w_grow: 
+  UPDATE t SET v = repeat('g', 2000) WHERE id = 10;
+  SELECT (ctid::text::point)[0] > 0 AS moved FROM t WHERE id = 10;
+
+moved
+-----
+t    
+(1 row)
+
+step w_del: DELETE FROM t WHERE id = 23;
+step wc: COMMIT;
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  9238|10317|13803|16000|1a0c7d64b869b4a39f83527199b76e78|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_fx rp hold w_aba w_life w_a2b w_b2a w_ins2 w_upd2 w_del2 truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_fx: 
+  ALTER TABLE fx RENAME TO t;
+  ALTER INDEX fx_pkey RENAME TO t_pkey;
+  ALTER INDEX fx_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step w_aba: 
+  UPDATE t SET id = 1030 WHERE id = 30;
+  UPDATE t SET k = 3000 WHERE id = 1030;
+  UPDATE t SET id = 30 WHERE id = 1030;
+
+step w_life: 
+  INSERT INTO t VALUES (1040, 1040, 'life', NULL);
+  UPDATE t SET k = 1041, v = 'life2' WHERE id = 1040;
+  UPDATE t SET id = 1042 WHERE id = 1040;
+  DELETE FROM t WHERE id = 1042;
+
+step w_a2b: UPDATE t SET id = 1031 WHERE id = 31;
+step w_b2a: UPDATE t SET id = 31, k = 3100 WHERE id = 1031;
+step w_ins2: INSERT INTO t VALUES (1050, 1050, 'x', NULL);
+step w_upd2: UPDATE t SET k = 1051, id = 1052 WHERE id = 1050;
+step w_del2: DELETE FROM t WHERE id = 1052;
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  7260|13299|12000|16000|c2f0e4988647417c710b3e9e49ed870b|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_hp rp hold w_aba w_life w_a2b w_b2a w_ins2 w_upd2 w_del2 truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_hp: 
+  ALTER TABLE hp RENAME TO t;
+  ALTER INDEX hp_pkey RENAME TO t_pkey;
+  ALTER INDEX hp_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step w_aba: 
+  UPDATE t SET id = 1030 WHERE id = 30;
+  UPDATE t SET k = 3000 WHERE id = 1030;
+  UPDATE t SET id = 30 WHERE id = 1030;
+
+step w_life: 
+  INSERT INTO t VALUES (1040, 1040, 'life', NULL);
+  UPDATE t SET k = 1041, v = 'life2' WHERE id = 1040;
+  UPDATE t SET id = 1042 WHERE id = 1040;
+  DELETE FROM t WHERE id = 1042;
+
+step w_a2b: UPDATE t SET id = 1031 WHERE id = 31;
+step w_b2a: UPDATE t SET id = 31, k = 3100 WHERE id = 1031;
+step w_ins2: INSERT INTO t VALUES (1050, 1050, 'x', NULL);
+step w_upd2: UPDATE t SET k = 1051, id = 1052 WHERE id = 1050;
+step w_del2: DELETE FROM t WHERE id = 1052;
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  7260|13299|12000|16000|c2f0e4988647417c710b3e9e49ed870b|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_fx rp hold wb w_aba w_life w_a2b w_b2a w_ins2 w_upd2 w_del2 wc truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_fx: 
+  ALTER TABLE fx RENAME TO t;
+  ALTER INDEX fx_pkey RENAME TO t_pkey;
+  ALTER INDEX fx_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step wb: BEGIN;
+step w_aba: 
+  UPDATE t SET id = 1030 WHERE id = 30;
+  UPDATE t SET k = 3000 WHERE id = 1030;
+  UPDATE t SET id = 30 WHERE id = 1030;
+
+step w_life: 
+  INSERT INTO t VALUES (1040, 1040, 'life', NULL);
+  UPDATE t SET k = 1041, v = 'life2' WHERE id = 1040;
+  UPDATE t SET id = 1042 WHERE id = 1040;
+  DELETE FROM t WHERE id = 1042;
+
+step w_a2b: UPDATE t SET id = 1031 WHERE id = 31;
+step w_b2a: UPDATE t SET id = 31, k = 3100 WHERE id = 1031;
+step w_ins2: INSERT INTO t VALUES (1050, 1050, 'x', NULL);
+step w_upd2: UPDATE t SET k = 1051, id = 1052 WHERE id = 1050;
+step w_del2: DELETE FROM t WHERE id = 1052;
+step wc: COMMIT;
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  7260|13299|12000|16000|c2f0e4988647417c710b3e9e49ed870b|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_hp rp hold wb w_aba w_life w_a2b w_b2a w_ins2 w_upd2 w_del2 wc truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_hp: 
+  ALTER TABLE hp RENAME TO t;
+  ALTER INDEX hp_pkey RENAME TO t_pkey;
+  ALTER INDEX hp_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step wb: BEGIN;
+step w_aba: 
+  UPDATE t SET id = 1030 WHERE id = 30;
+  UPDATE t SET k = 3000 WHERE id = 1030;
+  UPDATE t SET id = 30 WHERE id = 1030;
+
+step w_life: 
+  INSERT INTO t VALUES (1040, 1040, 'life', NULL);
+  UPDATE t SET k = 1041, v = 'life2' WHERE id = 1040;
+  UPDATE t SET id = 1042 WHERE id = 1040;
+  DELETE FROM t WHERE id = 1042;
+
+step w_a2b: UPDATE t SET id = 1031 WHERE id = 31;
+step w_b2a: UPDATE t SET id = 31, k = 3100 WHERE id = 1031;
+step w_ins2: INSERT INTO t VALUES (1050, 1050, 'x', NULL);
+step w_upd2: UPDATE t SET k = 1051, id = 1052 WHERE id = 1050;
+step w_del2: DELETE FROM t WHERE id = 1052;
+step wc: COMMIT;
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  7260|13299|12000|16000|c2f0e4988647417c710b3e9e49ed870b|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_fx rp hold wb w_ins w_nonkey w_k w_id w_grow w_del w_aba wr w_after truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_fx: 
+  ALTER TABLE fx RENAME TO t;
+  ALTER INDEX fx_pkey RENAME TO t_pkey;
+  ALTER INDEX fx_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step wb: BEGIN;
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step w_nonkey: UPDATE t SET v = repeat('n', 100) WHERE id = 20;
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step w_id: UPDATE t SET id = 1022 WHERE id = 22;
+step w_grow: 
+  UPDATE t SET v = repeat('g', 2000) WHERE id = 10;
+  SELECT (ctid::text::point)[0] > 0 AS moved FROM t WHERE id = 10;
+
+moved
+-----
+t    
+(1 row)
+
+step w_del: DELETE FROM t WHERE id = 23;
+step w_aba: 
+  UPDATE t SET id = 1030 WHERE id = 30;
+  UPDATE t SET k = 3000 WHERE id = 1030;
+  UPDATE t SET id = 30 WHERE id = 1030;
+
+step wr: ROLLBACK;
+step w_after: UPDATE t SET v = 'later', k = 2200 WHERE id = 22;
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  7260| 9438|11905|16000|eae5d64d70d5d934192e3b974eed0daf|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_hp rp hold wb w_ins w_nonkey w_k w_id w_grow w_del w_aba wr w_after truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_hp: 
+  ALTER TABLE hp RENAME TO t;
+  ALTER INDEX hp_pkey RENAME TO t_pkey;
+  ALTER INDEX hp_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step wb: BEGIN;
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step w_nonkey: UPDATE t SET v = repeat('n', 100) WHERE id = 20;
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step w_id: UPDATE t SET id = 1022 WHERE id = 22;
+step w_grow: 
+  UPDATE t SET v = repeat('g', 2000) WHERE id = 10;
+  SELECT (ctid::text::point)[0] > 0 AS moved FROM t WHERE id = 10;
+
+moved
+-----
+t    
+(1 row)
+
+step w_del: DELETE FROM t WHERE id = 23;
+step w_aba: 
+  UPDATE t SET id = 1030 WHERE id = 30;
+  UPDATE t SET k = 3000 WHERE id = 1030;
+  UPDATE t SET id = 30 WHERE id = 1030;
+
+step wr: ROLLBACK;
+step w_after: UPDATE t SET v = 'later', k = 2200 WHERE id = 22;
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  7260| 9438|11905|16000|eae5d64d70d5d934192e3b974eed0daf|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_fx rp hold wb w_sp wc truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_fx: 
+  ALTER TABLE fx RENAME TO t;
+  ALTER INDEX fx_pkey RENAME TO t_pkey;
+  ALTER INDEX fx_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step wb: BEGIN;
+step w_sp: 
+  UPDATE t SET k = 4000 WHERE id = 40;
+  SAVEPOINT a;
+  UPDATE t SET k = 4001, id = 1040 WHERE id = 40;
+  DELETE FROM t WHERE id = 41;
+  INSERT INTO t VALUES (1043, 1043, 'sp', NULL);
+  UPDATE t SET v = repeat('s', 2000) WHERE id = 11;
+  ROLLBACK TO SAVEPOINT a;
+  UPDATE t SET v = 'after' WHERE id = 41;
+  SAVEPOINT b;
+  INSERT INTO t VALUES (1044, 1044, 'kept', NULL);
+  RELEASE SAVEPOINT b;
+
+step wc: COMMIT;
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  121|  8304|12264|11909|16000|907eafa90f7ce59a7242e06214603fa5|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_hp rp hold wb w_sp wc truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_hp: 
+  ALTER TABLE hp RENAME TO t;
+  ALTER INDEX hp_pkey RENAME TO t_pkey;
+  ALTER INDEX hp_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step wb: BEGIN;
+step w_sp: 
+  UPDATE t SET k = 4000 WHERE id = 40;
+  SAVEPOINT a;
+  UPDATE t SET k = 4001, id = 1040 WHERE id = 40;
+  DELETE FROM t WHERE id = 41;
+  INSERT INTO t VALUES (1043, 1043, 'sp', NULL);
+  UPDATE t SET v = repeat('s', 2000) WHERE id = 11;
+  ROLLBACK TO SAVEPOINT a;
+  UPDATE t SET v = 'after' WHERE id = 41;
+  SAVEPOINT b;
+  INSERT INTO t VALUES (1044, 1044, 'kept', NULL);
+  RELEASE SAVEPOINT b;
+
+step wc: COMMIT;
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  121|  8304|12264|11909|16000|907eafa90f7ce59a7242e06214603fa5|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_fx rp hold w_upsert truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_fx: 
+  ALTER TABLE fx RENAME TO t;
+  ALTER INDEX fx_pkey RENAME TO t_pkey;
+  ALTER INDEX fx_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step w_upsert: 
+  INSERT INTO t VALUES (50, 0, 'u', NULL)
+	ON CONFLICT (id) DO UPDATE SET k = excluded.k + 5000, v = 'upd';
+  INSERT INTO t VALUES (1060, 1060, 'u', NULL)
+	ON CONFLICT (id) DO UPDATE SET k = 0;
+  INSERT INTO t VALUES (51, 0, 'n', NULL) ON CONFLICT DO NOTHING;
+  INSERT INTO t VALUES (1061, 1061, 'n', NULL) ON CONFLICT DO NOTHING;
+  INSERT INTO t VALUES (52, 0, 'u', NULL)
+	ON CONFLICT (id) DO UPDATE SET id = 1062;
+
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  122| 10391|14331|11905|16000|50f34a2add247dd21bf86459d1dda042|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_hp rp hold w_upsert truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_hp: 
+  ALTER TABLE hp RENAME TO t;
+  ALTER INDEX hp_pkey RENAME TO t_pkey;
+  ALTER INDEX hp_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step w_upsert: 
+  INSERT INTO t VALUES (50, 0, 'u', NULL)
+	ON CONFLICT (id) DO UPDATE SET k = excluded.k + 5000, v = 'upd';
+  INSERT INTO t VALUES (1060, 1060, 'u', NULL)
+	ON CONFLICT (id) DO UPDATE SET k = 0;
+  INSERT INTO t VALUES (51, 0, 'n', NULL) ON CONFLICT DO NOTHING;
+  INSERT INTO t VALUES (1061, 1061, 'n', NULL) ON CONFLICT DO NOTHING;
+  INSERT INTO t VALUES (52, 0, 'u', NULL)
+	ON CONFLICT (id) DO UPDATE SET id = 1062;
+
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  122| 10391|14331|11905|16000|50f34a2add247dd21bf86459d1dda042|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_fx rp hold w_toast truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_fx: 
+  ALTER TABLE fx RENAME TO t;
+  ALTER INDEX fx_pkey RENAME TO t_pkey;
+  ALTER INDEX fx_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step w_toast: 
+  INSERT INTO t VALUES (1070, 1070, 'toast', repeat(md5('new'), 100));
+  UPDATE t SET w = repeat(md5('upd'), 100) WHERE id = 1;
+  UPDATE t SET k = 2002 WHERE id = 2;
+  UPDATE t SET id = 1003 WHERE id = 3;
+  DELETE FROM t WHERE id = 4;
+  UPDATE t SET w = NULL WHERE id = 5;
+  UPDATE t SET w = repeat(md5('grown'), 100) WHERE id = 60;
+
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  9326|10326|11905|16000|bb5b2535bbf84bdb49b76d69d72da293|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_hp rp hold w_toast truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_hp: 
+  ALTER TABLE hp RENAME TO t;
+  ALTER INDEX hp_pkey RENAME TO t_pkey;
+  ALTER INDEX hp_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step w_toast: 
+  INSERT INTO t VALUES (1070, 1070, 'toast', repeat(md5('new'), 100));
+  UPDATE t SET w = repeat(md5('upd'), 100) WHERE id = 1;
+  UPDATE t SET k = 2002 WHERE id = 2;
+  UPDATE t SET id = 1003 WHERE id = 3;
+  DELETE FROM t WHERE id = 4;
+  UPDATE t SET w = NULL WHERE id = 5;
+  UPDATE t SET w = repeat(md5('grown'), 100) WHERE id = 60;
+
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  9326|10326|11905|16000|bb5b2535bbf84bdb49b76d69d72da293|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_fx rp hold wb w_k w_id w_grow w_prep pc1 truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_fx: 
+  ALTER TABLE fx RENAME TO t;
+  ALTER INDEX fx_pkey RENAME TO t_pkey;
+  ALTER INDEX fx_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step wb: BEGIN;
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step w_id: UPDATE t SET id = 1022 WHERE id = 22;
+step w_grow: 
+  UPDATE t SET v = repeat('g', 2000) WHERE id = 10;
+  SELECT (ctid::text::point)[0] > 0 AS moved FROM t WHERE id = 10;
+
+moved
+-----
+t    
+(1 row)
+
+step w_prep: PREPARE TRANSACTION 'rp1';
+step pc1: COMMIT PREPARED 'rp1';
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  8260| 9339|13900|16000|40a27fe85c8cc1ad079bb79ed9f1cafa|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_hp rp hold wb w_k w_id w_grow w_prep pc1 truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_hp: 
+  ALTER TABLE hp RENAME TO t;
+  ALTER INDEX hp_pkey RENAME TO t_pkey;
+  ALTER INDEX hp_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step wb: BEGIN;
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step w_id: UPDATE t SET id = 1022 WHERE id = 22;
+step w_grow: 
+  UPDATE t SET v = repeat('g', 2000) WHERE id = 10;
+  SELECT (ctid::text::point)[0] > 0 AS moved FROM t WHERE id = 10;
+
+moved
+-----
+t    
+(1 row)
+
+step w_prep: PREPARE TRANSACTION 'rp1';
+step pc1: COMMIT PREPARED 'rp1';
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  8260| 9339|13900|16000|40a27fe85c8cc1ad079bb79ed9f1cafa|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_fx pp rp pc0 hold w_ins truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_fx: 
+  ALTER TABLE fx RENAME TO t;
+  ALTER INDEX fx_pkey RENAME TO t_pkey;
+  ALTER INDEX fx_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step pp: 
+  BEGIN;
+  UPDATE t SET k = 8000, v = repeat('p', 100) WHERE id = 80;
+  UPDATE t SET id = 1081 WHERE id = 81;
+  PREPARE TRANSACTION 'rp0';
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step pc0: COMMIT PREPARED 'rp0';
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  121|  9261|16181|12003|16000|6c96eae3861ba706cfa636f24f6b62f5|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_hp pp rp pc0 hold w_ins truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_hp: 
+  ALTER TABLE hp RENAME TO t;
+  ALTER INDEX hp_pkey RENAME TO t_pkey;
+  ALTER INDEX hp_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step pp: 
+  BEGIN;
+  UPDATE t SET k = 8000, v = repeat('p', 100) WHERE id = 80;
+  UPDATE t SET id = 1081 WHERE id = 81;
+  PREPARE TRANSACTION 'rp0';
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step pc0: COMMIT PREPARED 'rp0';
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  121|  9261|16181|12003|16000|6c96eae3861ba706cfa636f24f6b62f5|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_fx rrb rp hold w_k truth wake chk rrs rrc
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_fx: 
+  ALTER TABLE fx RENAME TO t;
+  ALTER INDEX fx_pkey RENAME TO t_pkey;
+  ALTER INDEX fx_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step rrb: BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT 1 AS snap;
+snap
+----
+   1
+(1 row)
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  7260| 9339|12000|16000|de51f4abb310dd0e8ba162224553468b|       0|same   |same  |ok     
+(1 row)
+
+step rrs: 
+  SELECT count(*) AS old_snapshot_rows, sum(k) AS old_snapshot_sum_k,
+	(SELECT k FROM t WHERE id = 21) AS k21 FROM t;
+
+old_snapshot_rows|old_snapshot_sum_k|k21
+-----------------+------------------+---
+                0|                  |   
+(1 row)
+
+step rrc: COMMIT;
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_hp rrb rp hold w_k truth wake chk rrs rrc
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_hp: 
+  ALTER TABLE hp RENAME TO t;
+  ALTER INDEX hp_pkey RENAME TO t_pkey;
+  ALTER INDEX hp_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step rrb: BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT 1 AS snap;
+snap
+----
+   1
+(1 row)
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  7260| 9339|12000|16000|de51f4abb310dd0e8ba162224553468b|       0|same   |same  |ok     
+(1 row)
+
+step rrs: 
+  SELECT count(*) AS old_snapshot_rows, sum(k) AS old_snapshot_sum_k,
+	(SELECT k FROM t WHERE id = 21) AS k21 FROM t;
+
+old_snapshot_rows|old_snapshot_sum_k|k21
+-----------------+------------------+---
+                0|                  |   
+(1 row)
+
+step rrc: COMMIT;
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_fx rp hold w_k rrb truth wake chk rrs rrc
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_fx: 
+  ALTER TABLE fx RENAME TO t;
+  ALTER INDEX fx_pkey RENAME TO t_pkey;
+  ALTER INDEX fx_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step rrb: BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT 1 AS snap;
+snap
+----
+   1
+(1 row)
+
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  7260| 9339|12000|16000|de51f4abb310dd0e8ba162224553468b|       0|same   |same  |ok     
+(1 row)
+
+step rrs: 
+  SELECT count(*) AS old_snapshot_rows, sum(k) AS old_snapshot_sum_k,
+	(SELECT k FROM t WHERE id = 21) AS k21 FROM t;
+
+old_snapshot_rows|old_snapshot_sum_k|k21
+-----------------+------------------+---
+                0|                  |   
+(1 row)
+
+step rrc: COMMIT;
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_hp rp hold w_k rrb truth wake chk rrs rrc
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_hp: 
+  ALTER TABLE hp RENAME TO t;
+  ALTER INDEX hp_pkey RENAME TO t_pkey;
+  ALTER INDEX hp_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step rrb: BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT 1 AS snap;
+snap
+----
+   1
+(1 row)
+
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  7260| 9339|12000|16000|de51f4abb310dd0e8ba162224553468b|       0|same   |same  |ok     
+(1 row)
+
+step rrs: 
+  SELECT count(*) AS old_snapshot_rows, sum(k) AS old_snapshot_sum_k,
+	(SELECT k FROM t WHERE id = 21) AS k21 FROM t;
+
+old_snapshot_rows|old_snapshot_sum_k|k21
+-----------------+------------------+---
+                0|                  |   
+(1 row)
+
+step rrc: COMMIT;
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_fx x2b rp x3b x2r wx3 wb w_nonkey w_k w_id w_grow w_del w_ins x3r hold wc truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_fx: 
+  ALTER TABLE fx RENAME TO t;
+  ALTER INDEX fx_pkey RENAME TO t_pkey;
+  ALTER INDEX fx_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step x2b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step x3b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step x2r: ROLLBACK;
+step wx3: SELECT wait_for('x3');
+wait_for
+--------
+        
+(1 row)
+
+step wb: BEGIN;
+step w_nonkey: UPDATE t SET v = repeat('n', 100) WHERE id = 20;
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step w_id: UPDATE t SET id = 1022 WHERE id = 22;
+step w_grow: 
+  UPDATE t SET v = repeat('g', 2000) WHERE id = 10;
+  SELECT (ctid::text::point)[0] > 0 AS moved FROM t WHERE id = 10;
+
+moved
+-----
+t    
+(1 row)
+
+step w_del: DELETE FROM t WHERE id = 23;
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step x3r: ROLLBACK;
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step wc: COMMIT;
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  9238|10317|13803|16000|1a0c7d64b869b4a39f83527199b76e78|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_hp x2b rp x3b x2r wx3 wb w_nonkey w_k w_id w_grow w_del w_ins x3r hold wc truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_hp: 
+  ALTER TABLE hp RENAME TO t;
+  ALTER INDEX hp_pkey RENAME TO t_pkey;
+  ALTER INDEX hp_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step x2b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step x3b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step x2r: ROLLBACK;
+step wx3: SELECT wait_for('x3');
+wait_for
+--------
+        
+(1 row)
+
+step wb: BEGIN;
+step w_nonkey: UPDATE t SET v = repeat('n', 100) WHERE id = 20;
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step w_id: UPDATE t SET id = 1022 WHERE id = 22;
+step w_grow: 
+  UPDATE t SET v = repeat('g', 2000) WHERE id = 10;
+  SELECT (ctid::text::point)[0] > 0 AS moved FROM t WHERE id = 10;
+
+moved
+-----
+t    
+(1 row)
+
+step w_del: DELETE FROM t WHERE id = 23;
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step x3r: ROLLBACK;
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step wc: COMMIT;
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  9238|10317|13803|16000|1a0c7d64b869b4a39f83527199b76e78|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_fx x2b rp x3b x2r wx3 wb w_nonkey w_k w_id w_grow w_del w_ins x3r hold wr w_after truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_fx: 
+  ALTER TABLE fx RENAME TO t;
+  ALTER INDEX fx_pkey RENAME TO t_pkey;
+  ALTER INDEX fx_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step x2b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step x3b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step x2r: ROLLBACK;
+step wx3: SELECT wait_for('x3');
+wait_for
+--------
+        
+(1 row)
+
+step wb: BEGIN;
+step w_nonkey: UPDATE t SET v = repeat('n', 100) WHERE id = 20;
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step w_id: UPDATE t SET id = 1022 WHERE id = 22;
+step w_grow: 
+  UPDATE t SET v = repeat('g', 2000) WHERE id = 10;
+  SELECT (ctid::text::point)[0] > 0 AS moved FROM t WHERE id = 10;
+
+moved
+-----
+t    
+(1 row)
+
+step w_del: DELETE FROM t WHERE id = 23;
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step x3r: ROLLBACK;
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step wr: ROLLBACK;
+step w_after: UPDATE t SET v = 'later', k = 2200 WHERE id = 22;
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  7260| 9438|11905|16000|eae5d64d70d5d934192e3b974eed0daf|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_hp x2b rp x3b x2r wx3 wb w_nonkey w_k w_id w_grow w_del w_ins x3r hold wr w_after truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_hp: 
+  ALTER TABLE hp RENAME TO t;
+  ALTER INDEX hp_pkey RENAME TO t_pkey;
+  ALTER INDEX hp_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step x2b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step x3b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step x2r: ROLLBACK;
+step wx3: SELECT wait_for('x3');
+wait_for
+--------
+        
+(1 row)
+
+step wb: BEGIN;
+step w_nonkey: UPDATE t SET v = repeat('n', 100) WHERE id = 20;
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step w_id: UPDATE t SET id = 1022 WHERE id = 22;
+step w_grow: 
+  UPDATE t SET v = repeat('g', 2000) WHERE id = 10;
+  SELECT (ctid::text::point)[0] > 0 AS moved FROM t WHERE id = 10;
+
+moved
+-----
+t    
+(1 row)
+
+step w_del: DELETE FROM t WHERE id = 23;
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step x3r: ROLLBACK;
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step wr: ROLLBACK;
+step w_after: UPDATE t SET v = 'later', k = 2200 WHERE id = 22;
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  7260| 9438|11905|16000|eae5d64d70d5d934192e3b974eed0daf|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_fx x2b rp x3b x2r wx3 gb x3r wg w_ins w_nonkey w_k w_id w_grow w_del w_aba gr hold truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_fx: 
+  ALTER TABLE fx RENAME TO t;
+  ALTER INDEX fx_pkey RENAME TO t_pkey;
+  ALTER INDEX fx_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step x2b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step x3b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step x2r: ROLLBACK;
+step wx3: SELECT wait_for('x3');
+wait_for
+--------
+        
+(1 row)
+
+step gb: 
+  BEGIN;
+  DO $$ BEGIN
+    EXECUTE format('CREATE TABLE %I (x int)', 'pg_temp_' || 't'::regclass::oid);
+  END $$;
+
+step x3r: ROLLBACK;
+step wg: SELECT wait_for('g');
+wait_for
+--------
+        
+(1 row)
+
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step w_nonkey: UPDATE t SET v = repeat('n', 100) WHERE id = 20;
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step w_id: UPDATE t SET id = 1022 WHERE id = 22;
+step w_grow: 
+  UPDATE t SET v = repeat('g', 2000) WHERE id = 10;
+  SELECT (ctid::text::point)[0] > 0 AS moved FROM t WHERE id = 10;
+
+moved
+-----
+t    
+(1 row)
+
+step w_del: DELETE FROM t WHERE id = 23;
+step w_aba: 
+  UPDATE t SET id = 1030 WHERE id = 30;
+  UPDATE t SET k = 3000 WHERE id = 1030;
+  UPDATE t SET id = 30 WHERE id = 1030;
+
+step gr: ROLLBACK;
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  9238|13287|13803|16000|2f6cc286819633d865aa7a52d6509356|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_hp x2b rp x3b x2r wx3 gb x3r wg w_ins w_nonkey w_k w_id w_grow w_del w_aba gr hold truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_hp: 
+  ALTER TABLE hp RENAME TO t;
+  ALTER INDEX hp_pkey RENAME TO t_pkey;
+  ALTER INDEX hp_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step x2b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step x3b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step x2r: ROLLBACK;
+step wx3: SELECT wait_for('x3');
+wait_for
+--------
+        
+(1 row)
+
+step gb: 
+  BEGIN;
+  DO $$ BEGIN
+    EXECUTE format('CREATE TABLE %I (x int)', 'pg_temp_' || 't'::regclass::oid);
+  END $$;
+
+step x3r: ROLLBACK;
+step wg: SELECT wait_for('g');
+wait_for
+--------
+        
+(1 row)
+
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step w_nonkey: UPDATE t SET v = repeat('n', 100) WHERE id = 20;
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step w_id: UPDATE t SET id = 1022 WHERE id = 22;
+step w_grow: 
+  UPDATE t SET v = repeat('g', 2000) WHERE id = 10;
+  SELECT (ctid::text::point)[0] > 0 AS moved FROM t WHERE id = 10;
+
+moved
+-----
+t    
+(1 row)
+
+step w_del: DELETE FROM t WHERE id = 23;
+step w_aba: 
+  UPDATE t SET id = 1030 WHERE id = 30;
+  UPDATE t SET k = 3000 WHERE id = 1030;
+  UPDATE t SET id = 30 WHERE id = 1030;
+
+step gr: ROLLBACK;
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  9238|13287|13803|16000|2f6cc286819633d865aa7a52d6509356|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_fx x2b rp x3b x2r wx3 wb w_ins w_k w_id w_grow gb x3r wg wc w_toast w_upsert gr hold truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_fx: 
+  ALTER TABLE fx RENAME TO t;
+  ALTER INDEX fx_pkey RENAME TO t_pkey;
+  ALTER INDEX fx_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step x2b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step x3b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step x2r: ROLLBACK;
+step wx3: SELECT wait_for('x3');
+wait_for
+--------
+        
+(1 row)
+
+step wb: BEGIN;
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step w_id: UPDATE t SET id = 1022 WHERE id = 22;
+step w_grow: 
+  UPDATE t SET v = repeat('g', 2000) WHERE id = 10;
+  SELECT (ctid::text::point)[0] > 0 AS moved FROM t WHERE id = 10;
+
+moved
+-----
+t    
+(1 row)
+
+step gb: 
+  BEGIN;
+  DO $$ BEGIN
+    EXECUTE format('CREATE TABLE %I (x int)', 'pg_temp_' || 't'::regclass::oid);
+  END $$;
+
+step x3r: ROLLBACK;
+step wg: SELECT wait_for('g');
+wait_for
+--------
+        
+(1 row)
+
+step wc: COMMIT;
+step w_toast: 
+  INSERT INTO t VALUES (1070, 1070, 'toast', repeat(md5('new'), 100));
+  UPDATE t SET w = repeat(md5('upd'), 100) WHERE id = 1;
+  UPDATE t SET k = 2002 WHERE id = 2;
+  UPDATE t SET id = 1003 WHERE id = 3;
+  DELETE FROM t WHERE id = 4;
+  UPDATE t SET w = NULL WHERE id = 5;
+  UPDATE t SET w = repeat(md5('grown'), 100) WHERE id = 60;
+
+step w_upsert: 
+  INSERT INTO t VALUES (50, 0, 'u', NULL)
+	ON CONFLICT (id) DO UPDATE SET k = excluded.k + 5000, v = 'upd';
+  INSERT INTO t VALUES (1060, 1060, 'u', NULL)
+	ON CONFLICT (id) DO UPDATE SET k = 0;
+  INSERT INTO t VALUES (51, 0, 'n', NULL) ON CONFLICT DO NOTHING;
+  INSERT INTO t VALUES (1061, 1061, 'n', NULL) ON CONFLICT DO NOTHING;
+  INSERT INTO t VALUES (52, 0, 'u', NULL)
+	ON CONFLICT (id) DO UPDATE SET id = 1062;
+
+step gr: ROLLBACK;
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  123| 14458|20477|13713|16000|43655c13bb425e94e41df2864e20f237|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_hp x2b rp x3b x2r wx3 wb w_ins w_k w_id w_grow gb x3r wg wc w_toast w_upsert gr hold truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_hp: 
+  ALTER TABLE hp RENAME TO t;
+  ALTER INDEX hp_pkey RENAME TO t_pkey;
+  ALTER INDEX hp_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step x2b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step x3b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step x2r: ROLLBACK;
+step wx3: SELECT wait_for('x3');
+wait_for
+--------
+        
+(1 row)
+
+step wb: BEGIN;
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step w_id: UPDATE t SET id = 1022 WHERE id = 22;
+step w_grow: 
+  UPDATE t SET v = repeat('g', 2000) WHERE id = 10;
+  SELECT (ctid::text::point)[0] > 0 AS moved FROM t WHERE id = 10;
+
+moved
+-----
+t    
+(1 row)
+
+step gb: 
+  BEGIN;
+  DO $$ BEGIN
+    EXECUTE format('CREATE TABLE %I (x int)', 'pg_temp_' || 't'::regclass::oid);
+  END $$;
+
+step x3r: ROLLBACK;
+step wg: SELECT wait_for('g');
+wait_for
+--------
+        
+(1 row)
+
+step wc: COMMIT;
+step w_toast: 
+  INSERT INTO t VALUES (1070, 1070, 'toast', repeat(md5('new'), 100));
+  UPDATE t SET w = repeat(md5('upd'), 100) WHERE id = 1;
+  UPDATE t SET k = 2002 WHERE id = 2;
+  UPDATE t SET id = 1003 WHERE id = 3;
+  DELETE FROM t WHERE id = 4;
+  UPDATE t SET w = NULL WHERE id = 5;
+  UPDATE t SET w = repeat(md5('grown'), 100) WHERE id = 60;
+
+step w_upsert: 
+  INSERT INTO t VALUES (50, 0, 'u', NULL)
+	ON CONFLICT (id) DO UPDATE SET k = excluded.k + 5000, v = 'upd';
+  INSERT INTO t VALUES (1060, 1060, 'u', NULL)
+	ON CONFLICT (id) DO UPDATE SET k = 0;
+  INSERT INTO t VALUES (51, 0, 'n', NULL) ON CONFLICT DO NOTHING;
+  INSERT INTO t VALUES (1061, 1061, 'n', NULL) ON CONFLICT DO NOTHING;
+  INSERT INTO t VALUES (52, 0, 'u', NULL)
+	ON CONFLICT (id) DO UPDATE SET id = 1062;
+
+step gr: ROLLBACK;
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  123| 14458|20477|13713|16000|43655c13bb425e94e41df2864e20f237|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_fx x2b rp x3b x2r wx3 gb x3r wg wb w_ins w_nonkey w_k w_id w_grow w_del wr w_after gr hold truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_fx: 
+  ALTER TABLE fx RENAME TO t;
+  ALTER INDEX fx_pkey RENAME TO t_pkey;
+  ALTER INDEX fx_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step x2b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step x3b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step x2r: ROLLBACK;
+step wx3: SELECT wait_for('x3');
+wait_for
+--------
+        
+(1 row)
+
+step gb: 
+  BEGIN;
+  DO $$ BEGIN
+    EXECUTE format('CREATE TABLE %I (x int)', 'pg_temp_' || 't'::regclass::oid);
+  END $$;
+
+step x3r: ROLLBACK;
+step wg: SELECT wait_for('g');
+wait_for
+--------
+        
+(1 row)
+
+step wb: BEGIN;
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step w_nonkey: UPDATE t SET v = repeat('n', 100) WHERE id = 20;
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step w_id: UPDATE t SET id = 1022 WHERE id = 22;
+step w_grow: 
+  UPDATE t SET v = repeat('g', 2000) WHERE id = 10;
+  SELECT (ctid::text::point)[0] > 0 AS moved FROM t WHERE id = 10;
+
+moved
+-----
+t    
+(1 row)
+
+step w_del: DELETE FROM t WHERE id = 23;
+step wr: ROLLBACK;
+step w_after: UPDATE t SET v = 'later', k = 2200 WHERE id = 22;
+step gr: ROLLBACK;
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  7260| 9438|11905|16000|eae5d64d70d5d934192e3b974eed0daf|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_hp x2b rp x3b x2r wx3 gb x3r wg wb w_ins w_nonkey w_k w_id w_grow w_del wr w_after gr hold truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_hp: 
+  ALTER TABLE hp RENAME TO t;
+  ALTER INDEX hp_pkey RENAME TO t_pkey;
+  ALTER INDEX hp_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step x2b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step x3b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step x2r: ROLLBACK;
+step wx3: SELECT wait_for('x3');
+wait_for
+--------
+        
+(1 row)
+
+step gb: 
+  BEGIN;
+  DO $$ BEGIN
+    EXECUTE format('CREATE TABLE %I (x int)', 'pg_temp_' || 't'::regclass::oid);
+  END $$;
+
+step x3r: ROLLBACK;
+step wg: SELECT wait_for('g');
+wait_for
+--------
+        
+(1 row)
+
+step wb: BEGIN;
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step w_nonkey: UPDATE t SET v = repeat('n', 100) WHERE id = 20;
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step w_id: UPDATE t SET id = 1022 WHERE id = 22;
+step w_grow: 
+  UPDATE t SET v = repeat('g', 2000) WHERE id = 10;
+  SELECT (ctid::text::point)[0] > 0 AS moved FROM t WHERE id = 10;
+
+moved
+-----
+t    
+(1 row)
+
+step w_del: DELETE FROM t WHERE id = 23;
+step wr: ROLLBACK;
+step w_after: UPDATE t SET v = 'later', k = 2200 WHERE id = 22;
+step gr: ROLLBACK;
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120|  7260| 9438|11905|16000|eae5d64d70d5d934192e3b974eed0daf|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_fx by_idx x2b rpi x3b x2r wx3 gb x3r wg w_id w_aba w_a2b w_k w_del w_ins gr hold truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_fx: 
+  ALTER TABLE fx RENAME TO t;
+  ALTER INDEX fx_pkey RENAME TO t_pkey;
+  ALTER INDEX fx_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step by_idx: SET enable_sort = off;
+step x2b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step rpi: REPACK (CONCURRENTLY) t USING INDEX t_pkey; <waiting ...>
+step x3b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step x2r: ROLLBACK;
+step wx3: SELECT wait_for('x3');
+wait_for
+--------
+        
+(1 row)
+
+step gb: 
+  BEGIN;
+  DO $$ BEGIN
+    EXECUTE format('CREATE TABLE %I (x int)', 'pg_temp_' || 't'::regclass::oid);
+  END $$;
+
+step x3r: ROLLBACK;
+step wg: SELECT wait_for('g');
+wait_for
+--------
+        
+(1 row)
+
+step w_id: UPDATE t SET id = 1022 WHERE id = 22;
+step w_aba: 
+  UPDATE t SET id = 1030 WHERE id = 30;
+  UPDATE t SET k = 3000 WHERE id = 1030;
+  UPDATE t SET id = 30 WHERE id = 1030;
+
+step w_a2b: UPDATE t SET id = 1031 WHERE id = 31;
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step w_del: DELETE FROM t WHERE id = 23;
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step gr: ROLLBACK;
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rpi: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120| 10238|13287|11903|16000|e9f7c76534c899cabbc76ee4d0243270|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_hp by_idx x2b rpi x3b x2r wx3 gb x3r wg w_id w_aba w_a2b w_k w_del w_ins gr hold truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_hp: 
+  ALTER TABLE hp RENAME TO t;
+  ALTER INDEX hp_pkey RENAME TO t_pkey;
+  ALTER INDEX hp_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step by_idx: SET enable_sort = off;
+step x2b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step rpi: REPACK (CONCURRENTLY) t USING INDEX t_pkey; <waiting ...>
+step x3b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step x2r: ROLLBACK;
+step wx3: SELECT wait_for('x3');
+wait_for
+--------
+        
+(1 row)
+
+step gb: 
+  BEGIN;
+  DO $$ BEGIN
+    EXECUTE format('CREATE TABLE %I (x int)', 'pg_temp_' || 't'::regclass::oid);
+  END $$;
+
+step x3r: ROLLBACK;
+step wg: SELECT wait_for('g');
+wait_for
+--------
+        
+(1 row)
+
+step w_id: UPDATE t SET id = 1022 WHERE id = 22;
+step w_aba: 
+  UPDATE t SET id = 1030 WHERE id = 30;
+  UPDATE t SET k = 3000 WHERE id = 1030;
+  UPDATE t SET id = 30 WHERE id = 1030;
+
+step w_a2b: UPDATE t SET id = 1031 WHERE id = 31;
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step w_del: DELETE FROM t WHERE id = 23;
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step gr: ROLLBACK;
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rpi: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120| 10238|13287|11903|16000|e9f7c76534c899cabbc76ee4d0243270|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_fx by_sort x2b rpi x3b x2r wx3 gb x3r wg w_id w_aba w_a2b w_k w_del w_ins gr hold truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_fx: 
+  ALTER TABLE fx RENAME TO t;
+  ALTER INDEX fx_pkey RENAME TO t_pkey;
+  ALTER INDEX fx_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step by_sort: SET enable_indexscan = off;
+step x2b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step rpi: REPACK (CONCURRENTLY) t USING INDEX t_pkey; <waiting ...>
+step x3b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step x2r: ROLLBACK;
+step wx3: SELECT wait_for('x3');
+wait_for
+--------
+        
+(1 row)
+
+step gb: 
+  BEGIN;
+  DO $$ BEGIN
+    EXECUTE format('CREATE TABLE %I (x int)', 'pg_temp_' || 't'::regclass::oid);
+  END $$;
+
+step x3r: ROLLBACK;
+step wg: SELECT wait_for('g');
+wait_for
+--------
+        
+(1 row)
+
+step w_id: UPDATE t SET id = 1022 WHERE id = 22;
+step w_aba: 
+  UPDATE t SET id = 1030 WHERE id = 30;
+  UPDATE t SET k = 3000 WHERE id = 1030;
+  UPDATE t SET id = 30 WHERE id = 1030;
+
+step w_a2b: UPDATE t SET id = 1031 WHERE id = 31;
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step w_del: DELETE FROM t WHERE id = 23;
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step gr: ROLLBACK;
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rpi: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120| 10238|13287|11903|16000|e9f7c76534c899cabbc76ee4d0243270|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_hp by_sort x2b rpi x3b x2r wx3 gb x3r wg w_id w_aba w_a2b w_k w_del w_ins gr hold truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_hp: 
+  ALTER TABLE hp RENAME TO t;
+  ALTER INDEX hp_pkey RENAME TO t_pkey;
+  ALTER INDEX hp_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step by_sort: SET enable_indexscan = off;
+step x2b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step rpi: REPACK (CONCURRENTLY) t USING INDEX t_pkey; <waiting ...>
+step x3b: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step x2r: ROLLBACK;
+step wx3: SELECT wait_for('x3');
+wait_for
+--------
+        
+(1 row)
+
+step gb: 
+  BEGIN;
+  DO $$ BEGIN
+    EXECUTE format('CREATE TABLE %I (x int)', 'pg_temp_' || 't'::regclass::oid);
+  END $$;
+
+step x3r: ROLLBACK;
+step wg: SELECT wait_for('g');
+wait_for
+--------
+        
+(1 row)
+
+step w_id: UPDATE t SET id = 1022 WHERE id = 22;
+step w_aba: 
+  UPDATE t SET id = 1030 WHERE id = 30;
+  UPDATE t SET k = 3000 WHERE id = 1030;
+  UPDATE t SET id = 30 WHERE id = 1030;
+
+step w_a2b: UPDATE t SET id = 1031 WHERE id = 31;
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step w_del: DELETE FROM t WHERE id = 23;
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step gr: ROLLBACK;
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rpi: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  120| 10238|13287|11903|16000|e9f7c76534c899cabbc76ee4d0243270|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_fx wxid rp w_same w_k wc hold w_ins truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_fx: 
+  ALTER TABLE fx RENAME TO t;
+  ALTER INDEX fx_pkey RENAME TO t_pkey;
+  ALTER INDEX fx_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step wxid: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step w_same: UPDATE t SET v = repeat('c', 100) WHERE id = 70;
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step wc: COMMIT;
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  121|  8261|10340|12003|16000|a0ab81a914c0f48975de77d063e1a0d1|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: pick_hp wxid rp w_same w_k wc hold w_ins truth wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step pick_hp: 
+  ALTER TABLE hp RENAME TO t;
+  ALTER INDEX hp_pkey RENAME TO t_pkey;
+  ALTER INDEX hp_k RENAME TO t_k;
+  INSERT INTO rf SELECT relfilenode FROM pg_class WHERE relname = 't';
+
+step wxid: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step rp: REPACK (CONCURRENTLY) t; <waiting ...>
+step w_same: UPDATE t SET v = repeat('c', 100) WHERE id = 70;
+step w_k: UPDATE t SET k = 2100 WHERE id = 21;
+step wc: COMMIT;
+step hold: SELECT wait_hold();
+wait_hold
+---------
+         
+(1 row)
+
+step w_ins: INSERT INTO t VALUES (1001, 1001, 'new', NULL);
+step truth: INSERT INTO truth SELECT * FROM t;
+step wake: 
+  SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step rp: <... completed>
+step chk: SELECT * FROM chk();
+rewritten|nrows|sum_id|sum_k|len_v|len_w|digest                          |vs_truth|pk_scan|k_scan|amcheck
+---------+-----+------+-----+-----+-----+--------------------------------+--------+-------+------+-------
+t        |  121|  8261|10340|12003|16000|a0ab81a914c0f48975de77d063e1a0d1|       0|same   |same  |ok     
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+

@@ -28,10 +28,10 @@
 
 /* Shared memory sizing and initialization */
 extern Size ATMShmemSize(void);
+extern void ATMEnsureCreated(void);
 extern void ATMShmemInit(void);
 
 /* Core API */
-extern void ATMEnsureCreated(void);
 extern bool ATMGetLastBatchLSN(TransactionId xid, XLogRecPtr *lsn_out);
 extern bool ATMAddAborted(TransactionId xid, Oid dboid,
 						  XLogRecPtr last_batch_lsn,

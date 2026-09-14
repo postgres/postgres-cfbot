@@ -256,6 +256,10 @@ PG_SYSROOT = @PG_SYSROOT@
 
 override CPPFLAGS += $(ICU_CFLAGS) $(LIBNUMA_CFLAGS) $(LIBURING_CFLAGS)
 
+# FLUX table access method (UNDO-based heap replacement) is always built
+USE_FLUX = 1
+override CPPFLAGS += -DUSE_FLUX
+
 # FILEOPS transactional filesystem operations (WAL rmgr RM_FILEOPS_ID) is
 # always built.  Its own guard, independent of USE_FLUX, so the FILEOPS WAL
 # resource manager can be built and registered without the FLUX table AM.

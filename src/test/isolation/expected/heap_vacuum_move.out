@@ -1,0 +1,55 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1_upd s2_vac s2_ins s1_idx s1_bmp s1_rollback s2_check
+step s1_upd: BEGIN; UPDATE hvmove SET v = 7 WHERE id = 400;
+step s2_vac: VACUUM hvmove;
+step s2_ins: INSERT INTO hvmove SELECT g, 100, repeat('n', 200) FROM generate_series(9000, 9800) g;
+step s1_idx: SELECT id, v FROM hvmove WHERE id = 400;
+ id|v
+---+-
+400|7
+(1 row)
+
+step s1_bmp: SET enable_indexscan = off; SET enable_bitmapscan = on; SELECT id, v FROM hvmove WHERE id = 400;
+ id|v
+---+-
+400|7
+(1 row)
+
+step s1_rollback: ROLLBACK;
+step s2_check: 
+  SET enable_indexscan = off; SET enable_bitmapscan = off;
+  SELECT count(*) AS n, count(DISTINCT id) AS ids, sum(v) AS sumv,
+         count(*) FILTER (WHERE id = 400) AS n400,
+         max(v) FILTER (WHERE id = 400) AS v400
+    FROM hvmove;
+
+  n|ids| sumv|n400|v400
+---+---+-----+----+----
+901|901|80100|   1|   0
+(1 row)
+
+
+starting permutation: s1_upd s2_vac s2_ins s1_idx s1_commit s2_check
+step s1_upd: BEGIN; UPDATE hvmove SET v = 7 WHERE id = 400;
+step s2_vac: VACUUM hvmove;
+step s2_ins: INSERT INTO hvmove SELECT g, 100, repeat('n', 200) FROM generate_series(9000, 9800) g;
+step s1_idx: SELECT id, v FROM hvmove WHERE id = 400;
+ id|v
+---+-
+400|7
+(1 row)
+
+step s1_commit: COMMIT;
+step s2_check: 
+  SET enable_indexscan = off; SET enable_bitmapscan = off;
+  SELECT count(*) AS n, count(DISTINCT id) AS ids, sum(v) AS sumv,
+         count(*) FILTER (WHERE id = 400) AS n400,
+         max(v) FILTER (WHERE id = 400) AS v400
+    FROM hvmove;
+
+  n|ids| sumv|n400|v400
+---+---+-----+----+----
+901|901|80107|   1|   7
+(1 row)
+

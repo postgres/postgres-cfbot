@@ -247,3 +247,101 @@ dm_scan_recheck(PG_FUNCTION_ARGS)
 	index_close(irel, AccessShareLock);
 	PG_RETURN_BOOL(any_recheck);
 }
+
+/*
+ * dm_set_dead(idx, heaptid) -- set the LP_DEAD hint on the leaf entry for
+ * heaptid, the way _bt_killitems does.  Lets a test build the state where a
+ * plain entry or a tombstone carries LP_DEAD.
+ */
+PG_FUNCTION_INFO_V1(dm_set_dead);
+Datum
+dm_set_dead(PG_FUNCTION_ARGS)
+{
+	Oid			idxoid = PG_GETARG_OID(0);
+	ItemPointer target = (ItemPointer) PG_GETARG_POINTER(1);
+	Relation	irel = index_open(idxoid, RowExclusiveLock);
+	OffsetNumber off;
+	Buffer		buf;
+	Page		page;
+
+	buf = find_leaf_entry(irel, target, &off);
+	if (buf == InvalidBuffer)
+	{
+		index_close(irel, RowExclusiveLock);
+		PG_RETURN_BOOL(false);
+	}
+	/* Tiny single-session test indexes: the entry cannot move meanwhile. */
+	LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+	page = BufferGetPage(buf);
+	ItemIdMarkDead(PageGetItemId(page, off));
+	BTPageGetOpaque(page)->btpo_flags |= BTP_HAS_GARBAGE;
+	MarkBufferDirtyHint(buf, true);
+	UnlockReleaseBuffer(buf);
+	index_close(irel, RowExclusiveLock);
+	PG_RETURN_BOOL(true);
+}
+
+/* dm_is_dead(idx, heaptid) -- does the leaf entry for heaptid carry LP_DEAD? */
+PG_FUNCTION_INFO_V1(dm_is_dead);
+Datum
+dm_is_dead(PG_FUNCTION_ARGS)
+{
+	Oid			idxoid = PG_GETARG_OID(0);
+	ItemPointer target = (ItemPointer) PG_GETARG_POINTER(1);
+	Relation	irel = index_open(idxoid, AccessShareLock);
+	OffsetNumber off;
+	Buffer		buf;
+	bool		dead;
+
+	buf = find_leaf_entry(irel, target, &off);
+	if (buf == InvalidBuffer)
+	{
+		index_close(irel, AccessShareLock);
+		PG_RETURN_NULL();
+	}
+	dead = ItemIdIsDead(PageGetItemId(BufferGetPage(buf), off));
+	UnlockReleaseBuffer(buf);
+	index_close(irel, AccessShareLock);
+	PG_RETURN_BOOL(dead);
+}
+
+/*
+ * dm_unmark(idx, heaptid) -- demote the tombstone for heaptid back to a plain
+ * entry through amundomark(clear_mark = true), as a rollback does.
+ */
+PG_FUNCTION_INFO_V1(dm_unmark);
+Datum
+dm_unmark(PG_FUNCTION_ARGS)
+{
+	Oid			idxoid = PG_GETARG_OID(0);
+	ItemPointer target = (ItemPointer) PG_GETARG_POINTER(1);
+	Relation	irel = index_open(idxoid, RowExclusiveLock);
+	Relation	heapRel;
+	OffsetNumber off;
+	Buffer		buf;
+	Datum		values[INDEX_MAX_KEYS];
+	bool		isnull[INDEX_MAX_KEYS];
+	IndexTuple	copy;
+	bool		ok;
+
+	heapRel = relation_open(irel->rd_index->indrelid, RowExclusiveLock);
+	buf = find_leaf_entry(irel, target, &off);
+	if (buf == InvalidBuffer)
+	{
+		relation_close(heapRel, RowExclusiveLock);
+		index_close(irel, RowExclusiveLock);
+		PG_RETURN_BOOL(false);
+	}
+	copy = CopyIndexTuple((IndexTuple) PageGetItem(BufferGetPage(buf),
+												   PageGetItemId(BufferGetPage(buf), off)));
+	UnlockReleaseBuffer(buf);
+	index_deform_tuple(copy, RelationGetDescr(irel), values, isnull);
+
+	ok = irel->rd_indam->amundomark(irel, heapRel, values, isnull, target,
+									true, false);
+
+	relation_close(heapRel, RowExclusiveLock);
+	index_close(irel, RowExclusiveLock);
+	PG_RETURN_BOOL(ok);
+}

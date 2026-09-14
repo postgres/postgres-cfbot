@@ -1,0 +1,101 @@
+-- A one-page heap twin makes physical page counts comparable despite headers.
+-- Temporary tables, because their VACUUM horizon depends only on this
+-- backend: a snapshot held by any other session (an autovacuum ANALYZE of a
+-- catalog, a concurrent test) would keep the rows from being all-visible,
+-- the xid from being frozen and the deleted row from being removed.
+CREATE TEMP TABLE fvs_heap (a int PRIMARY KEY) USING heap WITH (autovacuum_enabled=false);
+CREATE TEMP TABLE fvs_flux (a int PRIMARY KEY) USING flux WITH (autovacuum_enabled=false);
+INSERT INTO fvs_heap SELECT generate_series(1,20);
+INSERT INTO fvs_flux SELECT generate_series(1,20);
+VACUUM fvs_heap;
+VACUUM fvs_flux;
+SELECT relname, relpages = 1 AS pages, reltuples = 20 AS tuples,
+       relallvisible = 1 AS visible
+FROM pg_class WHERE relname IN ('fvs_heap', 'fvs_flux') ORDER BY relname;
+ relname  | pages | tuples | visible 
+----------+-------+--------+---------
+ fvs_flux | t     | t      | t
+ fvs_heap | t     | t      | t
+(2 rows)
+
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT pg_stat_clear_snapshot();
+ pg_stat_clear_snapshot 
+------------------------
+ 
+(1 row)
+
+SELECT relname, vacuum_count = 1 AS vacuum_reported
+FROM pg_stat_user_tables WHERE relname IN ('fvs_heap', 'fvs_flux') ORDER BY relname;
+ relname  | vacuum_reported 
+----------+-----------------
+ fvs_flux | t
+ fvs_heap | t
+(2 rows)
+
+-- Burn an xid so a no-op freeze cannot pass on a newly created relation.
+-- The freeze must move relfrozenxid past it.  Compare ages rather than
+-- requiring age <= 1: other sessions on the server may take xids meanwhile.
+SELECT pg_current_xact_id()::xid AS burned_xid \gset
+VACUUM (FREEZE) fvs_heap;
+VACUUM (FREEZE) fvs_flux;
+SELECT relname, age(relfrozenxid) < age(:'burned_xid'::xid) AS frozen,
+       relallfrozen = 1 AS frozen_page
+FROM pg_class WHERE relname IN ('fvs_heap', 'fvs_flux') ORDER BY relname;
+ relname  | frozen | frozen_page 
+----------+--------+-------------
+ fvs_flux | t      | t
+ fvs_heap | t      | t
+(2 rows)
+
+-- A repeated vacuum must count pages skipped as all-frozen, not report zero.
+VACUUM fvs_heap;
+VACUUM fvs_flux;
+SELECT relname, reltuples = 20 AS tuples
+FROM pg_class WHERE relname IN ('fvs_heap', 'fvs_flux') ORDER BY relname;
+ relname  | tuples 
+----------+--------
+ fvs_flux | t
+ fvs_heap | t
+(2 rows)
+
+-- Force bulk-delete so both index AMs return accurate cleanup statistics.
+INSERT INTO fvs_heap VALUES (99);
+INSERT INTO fvs_flux VALUES (99);
+DELETE FROM fvs_heap WHERE a=99;
+DELETE FROM fvs_flux WHERE a=99;
+VACUUM (INDEX_CLEANUP ON) fvs_heap;
+VACUUM (INDEX_CLEANUP ON) fvs_flux;
+SELECT relname, relpages > 0 AS pages, reltuples = 20 AS tuples
+FROM pg_class WHERE relname IN ('fvs_heap_pkey', 'fvs_flux_pkey') ORDER BY relname;
+    relname    | pages | tuples 
+---------------+-------+--------
+ fvs_flux_pkey | t     | t
+ fvs_heap_pkey | t     | t
+(2 rows)
+
+-- A cursor stores a version identity before DML freezes its before-image.
+BEGIN;
+DECLARE fvs_h CURSOR FOR SELECT * FROM fvs_heap WHERE a=1;
+DECLARE fvs_f CURSOR FOR SELECT * FROM fvs_flux WHERE a=1;
+FETCH fvs_h;
+ a 
+---
+ 1
+(1 row)
+
+FETCH fvs_f;
+ a 
+---
+ 1
+(1 row)
+
+UPDATE fvs_heap SET a=101 WHERE CURRENT OF fvs_h;
+UPDATE fvs_flux SET a=101 WHERE CURRENT OF fvs_f;
+ROLLBACK;
+DROP TABLE fvs_heap, fvs_flux;

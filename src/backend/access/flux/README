@@ -1,0 +1,307 @@
+FLUX
+====
+
+FLUX is a table access method that updates rows in place and stores old row
+versions in UNDO instead of leaving dead tuples in the main relation.  It works
+on today's executor APIs and on plain 6-byte-TID indexes, but it does add one
+index-AM entry point: nbtree delete-marking (amdeletemark), which is what lets
+an indexed-column UPDATE keep the row's TID.  The design follows the zheap
+proposal (in-place UPDATE with old versions in UNDO); zheap's README describes
+delete-marking, which zheap did not implement.
+
+This README describes FLUX's design and how it differs from heap.  For the
+UNDO substrate FLUX relies on, see src/backend/access/undo/README; FLUX writes
+its table UNDO to the per-backend engine (am_undo_engine =
+UNDO_ENGINE_PERBACKEND, see src/include/access/flux_pbu.h).
+
+
+In-place UPDATE and UNDO
+------------------------
+
+* In-place UPDATE.  The new tuple version overwrites the old one in the same
+  slot (same TID).  The old version is pushed to the per-backend undo log via
+  the tuple header's version pointer (t_verptr).  A snapshot that cannot see
+  the updater reconstructs the old version by walking that UNDO chain
+  (flux_pvs.c, FluxReconstructVisibleVersion -> FluxPbuFetchVersion).  So an
+  UPDATE that does not change any indexed column touches no index at all, and
+  FLUX keeps the TID even when an indexed column does change (see the
+  secondary-index section below).
+
+* UNDO-based rollback.  ROLLBACK (and error/abort) replays the undo chain
+  backward, restoring before-images in place (flux_undo.c's rm_undo, dispatched
+  by execute_undo_actions).  There are no dead tuples to vacuum away for a
+  rolled-back change.
+
+* UNDO-based old-version reconstruction for MVCC.  Older snapshots read the
+  pre-update image from the UNDO fork, not from a second on-page copy.
+
+* Crash safety.  Every page modification and its UNDO record are WAL-logged
+  (resource manager RM_FLUX_ID, flux_xlog.c); recovery replays them and
+  per-backend UNDO recovery restores any before-images for transactions that
+  were in flight at the crash.
+
+* sLog for uncommitted-writer tracking.  FLUX shares the cluster's sLog
+  extension (slog.c, registered once as SLogShmemCallbacks) for self-visibility,
+  command-level (CID) checks, and write-write conflict serialization.  The
+  authoritative commit oracle is CLOG; visibility is heap-shaped xmin/xmax
+  (see below).
+
+
+How FLUX differs from heap
+--------------------------
+
+1. Old versions live in UNDO, not in the table.  Heap keeps every old row
+   version in the relation until VACUUM removes it (bloat).  FLUX keeps only
+   the newest version on the page and stores the old one in the undo log,
+   which is discarded once no snapshot needs it.  A non-in-place change's old
+   version and a DELETE's tombstone are reclaimable as soon as the transaction
+   commits and the version falls below the removable horizon.
+
+2. In-place for key-changing UPDATEs too, via nbtree delete-marking, with a
+   capability gate that falls back to a new TID where in-place index
+   maintenance would be unsound.  See the next section.
+
+3. Wide values use standard heap TOAST.  A FLUX relation gets an ordinary
+   heap TOAST table (relation_needs_toast_table mirrors heap; relation_toast_am
+   returns the heap AM).  On INSERT/UPDATE, oversized varlena columns are
+   externalized through the AM-agnostic toast_helper routines (flux_toast_tuple
+   in flux_tuple.c) exactly as heap does.  As in heap, a DELETE (also the
+   delete half of an out-of-place UPDATE) deletes the external values of the
+   version it deletes (flux_toast_delete), as an MVCC delete that commits or
+   rolls back with it, and TOAST VACUUM reclaims them; VACUUM of the table
+   does not touch TOAST.  FLUX has no on-page overflow mechanism of its own.
+
+4. Heap-shaped xmin/xmax visibility.  FLUX uses the "boring correct"
+   visibility model: each tuple carries t_xmin (inserter) and t_xmax
+   (deleter/updater), resolved against CLOG and the reader's snapshot exactly
+   like HeapTupleSatisfiesMVCC.
+
+
+The uncommitted hint
+--------------------
+
+Every FLUX write sets FLUX_TUPLE_UNCOMMITTED on the version it writes.  It
+is a hint, as heap's hint bits are, and nothing depends on its being
+cleared: readers, writers and VACUUM judge a version by its writer xids,
+the proc array and CLOG.  A set hint does not mean that the writer is still
+running.  It stays set on what a released savepoint or COMMIT PREPARED
+committed, on page images that redo restores, and past the commit-time
+bound below, and a later reader or writer that finds the writer finished
+clears it.  The current transaction's own writes keep it until commit,
+which is what lets the own-write command-id checks use it as a filter.
+
+Commit clears it without WAL, page by page: each transaction remembers the
+pages it wrote (inserts included), not the rows, and at PRE_COMMIT revisits
+them and clears the hint on the versions whose t_xmin or t_xmax is one of
+its own committed (sub)transactions (flux_finish_page).  The same sweep
+marks DELETED the rows a rolled-back subtransaction inserted; it runs at
+PREPARE for those only.  The page set is bounded at NBuffers / 16 pages, so
+it costs at most about 1/2000 of shared_buffers and the pages it revisits
+are likely still cached; a transaction that writes more pages leaves the
+hint on the rest, and a rolled-back savepoint's inserts there stay as they
+are, invisible by their aborted t_xmin and reclaimed by VACUUM.
+
+The command id of the current transaction's own UPDATE or DELETE of a
+version (heap's cmax) is in the tuple too, in the high half of the word that
+holds t_xmax (t_cmax; see FluxTupleGetCmax), so no transaction keeps
+anything per row it writes.
+
+
+Secondary indexes and the key-changing UPDATE
+--------------------------------------------
+
+Secondary indexes on a FLUX table are ordinary heap-TID nbtree (or any
+standard index-AM) entries: plain 6-byte TIDs, exactly like heap.  No per-tuple
+generation and no wider index identity.  FLUX does rely on one index-AM
+addition -- nbtree delete-marking (amdeletemark / index_delete_mark) -- which is
+what lets it keep the TID across an indexed-column UPDATE.
+
+The hazard an in-place-with-stable-TID AM creates for a plain-TID index is the
+"A -> B -> A" problem: if the tuple stays at one TID while an indexed column
+changes, the index would accumulate a stale (k_old, TID) entry beside the new
+(k_new, TID) entry, both pointing at the same live TID; an index scan would then
+double-count or return rows under the wrong key.
+
+FLUX handles it in three cases:
+
+  * An UPDATE that changes NO indexed column is done IN PLACE (same TID).  The
+    index entries still point at the right key and TID, so no index
+    maintenance is needed.  flux_tuple_update sets *update_indexes = TU_None
+    and the executor inserts no index entries.
+
+  * An UPDATE that changes an indexed column, where FLUX can maintain every
+    index itself, is ALSO done IN PLACE at the same TID
+    (am_index_delete_marking = true).  flux_inplace_index_maintenance inserts
+    the new (k_new, TID) entry and delete-marks the old (k_old, TID) entry, and
+    reports TU_None so the executor does no index work.  The delete-marked
+    entry is kept, not removed, so a snapshot that predates the key change still
+    reaches the row under k_old; a scan that arrives through a delete-marked
+    entry sets xs_recheck so the executor re-evaluates the qual.  FLUX's own
+    table UNDO reverses both halves on rollback (clear the old delete-mark,
+    remove the new entry), which is why nbtree/hash suppress their separate
+    index UNDO for a delete-marking parent.
+
+  * An UPDATE that changes an indexed column where in-place maintenance would
+    NOT be sound falls back to OUT OF PLACE (new TID, TU_All, executor does all
+    index work including the constraint checks).  The gate is
+    flux_inplace_index_maint_possible(), and it refuses four cases, each of
+    which was first observed as a silent wrong answer:
+      1. an index AM without delete-marking (only nbtree has it; gist, gin,
+         spgist and brin do not) -- otherwise the stale entry stays live and an
+         index scan returns a row that does not satisfy the qual;
+      2. an EXCLUSION constraint (indisexclusion) -- the check lives in the
+         executor, so reporting TU_None would skip it entirely;
+      3. a DEFERRABLE constraint (!indimmediate) -- FLUX cannot queue the
+         end-of-statement recheck event;
+      4. an index that is not valid yet (!indisvalid), which CREATE INDEX
+         CONCURRENTLY or REINDEX CONCURRENTLY is building -- the build
+         indexes each TID once and its validation adds only missing TIDs, so
+         a key changed in place at a TID it already has is never indexed.
+         Heap never updates such a row HOT either: the new TID is what the
+         build and the validation pick up.
+    A SUMMARIZING index (BRIN) is exempt from rule 1: it has no per-row
+    (key, TID) entry to delete-mark and a range scan rechecks the table tuple.
+
+  * The same out-of-place fallback is taken when delete-marking cannot
+    describe the change in some btree index (flux_index_change_exact): the
+    old and new entries must be different keys, since the index tells them
+    apart only by its comparison.  That fails when only an INCLUDE column
+    changed (same key, so the entry would keep the old INCLUDE values), and
+    for any key change in an index whose key columns are not all
+    "equalimage" (an opclass that calls different images equal, e.g. numeric
+    3 and 3.00).  The rule is per index, from the index's own metadata: the
+    opclasses' BTEQUALIMAGE_PROC, which nbtree also uses to decide
+    deduplication.
+
+Stock PostgreSQL no longer tells the AM which columns changed, so FLUX
+self-computes it (flux_indexed_attr_changed), matching heap's internal
+HeapDetermineColumnsInfo: it deforms the old on-page tuple, reads the new
+values from the slot, and value-compares every attribute referenced by any
+index (RelationGetIndexAttrBitmap HOT_BLOCKING + SUMMARIZED).
+
+Because a delete-marked entry's key may not describe the live tuple, index-only
+scans are suppressed for indexes on a delete-marking table (enforced in the
+planner).  For the same reason every row a FLUX index scan returns is rechecked:
+flux_entry_key_mismatch forms the served version's key and compares it with the
+entry's, skipping the entry on a mismatch.  The index's IndexInfo (and, for an
+expression index, the EState its expressions run in) is built on the first
+recheck and kept with the scan (IndexScanFluxData), so the recheck costs no
+memory per row.
+
+Consequence: idxscan, seqscan, and bitmapscan return identical results across
+any sequence of key-changing UPDATEs (including A -> B -> A recurrences).
+Verified by amcheck (heapallindexed) and by the scan cross-check in the test
+suite.  Note that amcheck's heapallindexed treats a delete-marked entry whose
+key mismatches the table tuple as expected rather than as corruption.
+
+
+Limitations
+-----------
+
+* COPY FREEZE is accepted but does not pre-freeze rows or set visibility-map
+  bits on FLUX.  Rows retain ordinary MVCC visibility, so older snapshots
+  do not see the new rows as they can with heap's COPY FREEZE.
+
+* Index-only scans are not used on a FLUX table: get_relation_info()
+  (plancat.c) sets canreturn to false for every index of a table whose AM
+  does delete-marking.  A delete-marked entry left by an in-place key UPDATE
+  can carry a key that no longer matches the row until VACUUM removes the
+  entry.
+
+* An UPDATE that FLUX cannot do in place -- an indexed-column change refused
+  by flux_inplace_index_maint_possible() (exclusion or deferrable constraint,
+  an index AM without delete-marking, or an index that is not valid yet), or a new version that does not fit
+  on its page -- moves the row to a new TID.  The old version is marked
+  FLUX_TUPLE_SUPERSEDED and linked to the new one, as heap's t_ctid chain
+  does, so a waiter sees the row as updated rather than deleted.
+
+* An UPDATE that changes only INCLUDE columns of a btree index, or that
+  changes the key of a btree index with a key opclass that is not
+  "equalimage", moves the row to a new TID too (flux_index_change_exact),
+  like heap's non-HOT UPDATE.  Common such opclasses: numeric, float4 and
+  float8, interval, jsonb, arrays (anyarray), ranges and multiranges,
+  record, tsvector/tsquery, and text or varchar with a nondeterministic
+  collation.  Only the key columns count: a key change in an index on (int)
+  INCLUDE (numeric) stays in place.  UPDATEs that change no column of such
+  an index stay in place.
+
+* Row locks are held in the shared tuple sLog, not on the row.  Its hash
+  partitions have a fixed size; a row lock that does not fit fails with
+  "could not store row lock in sLog".  A prepared transaction's row locks are
+  made durable with a FLUX two-phase record (FLUX_2PC_ROWLOCK).
+
+* VACUUM scans the table, then vacuums each index, then compacts the pages.
+  It does not use parallel index vacuuming and does not report progress in
+  pg_stat_progress_vacuum.  A non-aggressive VACUUM does not compact a page
+  that another backend has pinned (it needs a cleanup lock), as heap's
+  lazy_scan_noprune does; an aggressive one waits for the pin.
+
+* While an index of the table is not valid, every UPDATE that changes an
+  indexed column moves the row to a new TID (rule 4 above), as heap makes
+  such an UPDATE non-HOT.  That lasts for the whole of a CREATE INDEX
+  CONCURRENTLY or REINDEX CONCURRENTLY, and indefinitely for an invalid index
+  that a failed concurrent build leaves behind, until it is dropped or rebuilt
+  with REINDEX.  UPDATEs that change no indexed column stay in place.
+
+* REPACK (CONCURRENTLY) works as for heap, and like heap's it is not
+  MVCC-safe: the copy takes the rows the decoding's initial snapshot sees,
+  and the changes committed after it are decoded from the WAL (flux_decode)
+  and replayed by key onto the new table.  CLUSTER and VACUUM FULL keep the
+  row versions that older snapshots still need.
+
+* user_catalog_table is refused on FLUX, at CREATE TABLE ... USING flux, at
+  ALTER TABLE ... SET (user_catalog_table = true), and at ALTER TABLE ...
+  SET ACCESS METHOD flux on an already-marked heap table
+  (CheckFluxUserCatalogTable in tablecmds.c, with a hint to use heap).  An
+  output plugin reads a user_catalog_table under a historic snapshot that
+  reconstructs a past catalog state from older row versions; FLUX visibility
+  has no branch for those historic snapshots (heap's
+  HeapTupleSatisfiesHistoricMVCC) and FLUX does not log the command ids
+  decoding needs to see catalog rows changed by the transaction being
+  decoded, so a FLUX user_catalog_table would silently return wrong rows to
+  decoding.  Put logical-decoding plugin metadata in a heap table.  Because
+  a FLUX relation can therefore never be a catalog relation,
+  RelationIsAccessibleInLogicalDecoding() is always false for FLUX: the
+  catalog_rel flag in the FLUX freeze/defrag WAL records is always false and
+  the catalog branch of ResolveRecoveryConflictWithSnapshot() is unreachable
+  for FLUX records.  The ordinary (non-catalog) snapshot recovery conflicts a
+  freeze creates on a standby are still raised (flux_pbu.c, flux_xlog.c).
+
+
+Registration
+------------
+
+* pg_am: amname 'flux', amhandler flux_tableam_handler, amtype 't'
+  (FLUX_TABLE_AM_OID = 9316; pg_proc oid 9402).
+* WAL resource manager: RM_FLUX_ID (rmgrlist.h), redo/desc/identify/mask in
+  flux_xlog.c / fluxdesc.c, logical decoding in decode.c (flux_decode).
+* UNDO resource manager: UNDO_RMID_FLUX (=5), FluxUndoRmgrInit
+  (undormgrlist.h).  FLUX's table UNDO goes to the per-backend engine
+  (am_undo_engine = UNDO_ENGINE_PERBACKEND) and its rm_undo also reverses the
+  in-place index maintenance, which is why nbtree/hash write no separate index
+  UNDO for a FLUX-parented index.
+* Two-phase commit: TWOPHASE_RM_FLUX_ID (=5), flux_twophase_* callbacks.
+* Shared memory: FluxMvccShmemCallbacks (subsystemlist.h); row locks are in
+  the tuple sLog (SLogTupleLock*), allocated on first use.
+
+FLUX is always compiled (USE_FLUX) because the catalog and rmgr
+lists reference its symbols unconditionally.
+
+
+Source layout
+-------------
+
+  flux_handler.c     table-AM routine table (flux_methods), scans, TOAST hooks
+  flux_operations.c  INSERT / DELETE / UPDATE (in-place + out-of-place),
+                     in-place index maintenance + its capability gate, VACUUM
+  flux_tuple.c       tuple form/deform, flux_toast_tuple / flux_toast_delete
+  flux_mvcc.c        heap-shaped xmin/xmax visibility state, shmem
+  flux_pvs.c         prior-version reconstruction from the undo chain
+  flux_slot.c        FLUX minimal tuple slot
+  flux_xlog.c        WAL record types, redo, mask
+  flux_undo.c        UNDO_RMID_FLUX resource manager (reverse-apply)
+  flux_pbu.c         per-backend UNDO engine glue (insert, fetch, chain)
+  flux_lock.c        tuple locking (SELECT FOR UPDATE/SHARE)
+  flux_vm.c          visibility map maintenance
+  flux_fsm.c         free-space map integration
+  flux_stats.c       relation size / density estimation helpers

@@ -190,7 +190,25 @@ SELECT count(*) AS preexisting_via_index FROM iu_late WHERE id BETWEEN 1 AND 100
 RESET enable_seqscan;
 SELECT bt_index_check('iu_late_idx', heapallindexed => true);
 
-DROP TABLE iu_btree, iu_off, iu_sub, iu_split, iu_hash, iu_late;
+-- ===========================================================================
+-- Mutual exclusion with delete-marking.
+--
+-- A delete-marking table AM drives index cleanup from its own table UNDO, so
+-- RelationUsesIndexUndo() must refuse index UNDO for it no matter what the
+-- reloption says -- otherwise the same entry would be reverted twice.
+-- ===========================================================================
+
+CREATE TABLE iu_flux (id int, val text) USING flux;
+CREATE INDEX iu_flux_idx ON iu_flux (id);
+BEGIN;
+INSERT INTO iu_flux SELECT g, 'x' FROM generate_series(1, 50) g;
+-- FLUX writes its own table UNDO, so a chain exists -- but no INDEX undo is in
+-- it.  The check that matters is that rollback leaves a consistent index.
+ROLLBACK;
+SELECT bt_index_check('iu_flux_idx', heapallindexed => true);
+SELECT count(*) AS heap_rows FROM iu_flux;
+
+DROP TABLE iu_btree, iu_off, iu_sub, iu_split, iu_hash, iu_late, iu_flux;
 
 -- ===========================================================================
 -- DEFERRED BATCHING SAFETY

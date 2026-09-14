@@ -625,8 +625,7 @@ typedef struct TableAmRoutine
 							  bool *all_dead);
 
 	/*
-	 * Optional, for am_index_delete_marking AMs; see
-	 * table_index_fetch_tid().
+	 * Optional, for am_index_delete_marking AMs; see table_index_fetch_tid().
 	 */
 	bool		(*index_fetch_tid) (Relation rel, Relation irel,
 									IndexTuple itup, ItemPointer tid,

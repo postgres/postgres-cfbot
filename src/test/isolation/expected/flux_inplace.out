@@ -1,0 +1,34 @@
+Parsed test spec with 3 sessions
+
+starting permutation: w_update o_old_key o_new_key n_new_key n_old_key o_commit
+  k|v
+---+-
+100|a
+(1 row)
+
+step w_update: UPDATE flux_ip SET k = 200, v = 'b' WHERE id = 1;
+step o_old_key: SELECT k, v FROM flux_ip WHERE k = 100;
+  k|v
+---+-
+100|a
+(1 row)
+
+step o_new_key: SELECT count(*) AS n FROM flux_ip WHERE k = 200;
+n
+-
+0
+(1 row)
+
+step n_new_key: SELECT k, v FROM flux_ip WHERE k = 200;
+  k|v
+---+-
+200|b
+(1 row)
+
+step n_old_key: SELECT count(*) AS n FROM flux_ip WHERE k = 100;
+n
+-
+0
+(1 row)
+
+step o_commit: COMMIT;

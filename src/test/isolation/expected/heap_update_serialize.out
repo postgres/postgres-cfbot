@@ -1,0 +1,169 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s1rc s2rc s1u s2u s1c s2c s3r
+step s1rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1u: UPDATE fus SET v = v + 1 WHERE id = 1;
+step s2u: UPDATE fus SET v = v + 1 WHERE id = 1; <waiting ...>
+step s1c: COMMIT;
+step s2u: <... completed>
+step s2c: COMMIT;
+step s3r: SELECT v FROM fus WHERE id = 1;
+v
+-
+2
+(1 row)
+
+
+starting permutation: s1rc s2rc s1u s2u s1a s2c s3r
+step s1rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1u: UPDATE fus SET v = v + 1 WHERE id = 1;
+step s2u: UPDATE fus SET v = v + 1 WHERE id = 1; <waiting ...>
+step s1a: ROLLBACK;
+step s2u: <... completed>
+step s2c: COMMIT;
+step s3r: SELECT v FROM fus WHERE id = 1;
+v
+-
+1
+(1 row)
+
+
+starting permutation: s1rc s2rr s2snap s1u s2u s1c s2c s3r
+step s1rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT v FROM fus WHERE id = 1;
+v
+-
+0
+(1 row)
+
+step s1u: UPDATE fus SET v = v + 1 WHERE id = 1;
+step s2u: UPDATE fus SET v = v + 1 WHERE id = 1; <waiting ...>
+step s1c: COMMIT;
+step s2u: <... completed>
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3r: SELECT v FROM fus WHERE id = 1;
+v
+-
+1
+(1 row)
+
+
+starting permutation: s1rc s2rr s2snap s1u s2u s1a s2c s3r
+step s1rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT v FROM fus WHERE id = 1;
+v
+-
+0
+(1 row)
+
+step s1u: UPDATE fus SET v = v + 1 WHERE id = 1;
+step s2u: UPDATE fus SET v = v + 1 WHERE id = 1; <waiting ...>
+step s1a: ROLLBACK;
+step s2u: <... completed>
+step s2c: COMMIT;
+step s3r: SELECT v FROM fus WHERE id = 1;
+v
+-
+1
+(1 row)
+
+
+starting permutation: s1rc s2rr s2snap s1u s1c s2u s2c s3r
+step s1rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2snap: SELECT v FROM fus WHERE id = 1;
+v
+-
+0
+(1 row)
+
+step s1u: UPDATE fus SET v = v + 1 WHERE id = 1;
+step s1c: COMMIT;
+step s2u: UPDATE fus SET v = v + 1 WHERE id = 1;
+ERROR:  could not serialize access due to concurrent update
+step s2c: COMMIT;
+step s3r: SELECT v FROM fus WHERE id = 1;
+v
+-
+1
+(1 row)
+
+
+starting permutation: s1rc s2rc s1ks s2u s1u s2c s1c s3r
+step s1rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1ks: SELECT id FROM fus WHERE id = 1 FOR KEY SHARE;
+id
+--
+ 1
+(1 row)
+
+step s2u: UPDATE fus SET v = v + 1 WHERE id = 1;
+step s1u: UPDATE fus SET v = v + 1 WHERE id = 1; <waiting ...>
+step s2c: COMMIT;
+step s1u: <... completed>
+step s1c: COMMIT;
+step s3r: SELECT v FROM fus WHERE id = 1;
+v
+-
+2
+(1 row)
+
+
+starting permutation: s1rc s2rc s1fu s2u s1u s1c s2c s3r
+step s1rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1fu: SELECT id FROM fus WHERE id = 1 FOR UPDATE;
+id
+--
+ 1
+(1 row)
+
+step s2u: UPDATE fus SET v = v + 1 WHERE id = 1; <waiting ...>
+step s1u: UPDATE fus SET v = v + 1 WHERE id = 1;
+step s1c: COMMIT;
+step s2u: <... completed>
+step s2c: COMMIT;
+step s3r: SELECT v FROM fus WHERE id = 1;
+v
+-
+2
+(1 row)
+
+
+starting permutation: s1rc s2rc s1oc s2oc s1c s2c s3r
+step s1rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1oc: INSERT INTO fus VALUES (1, 0) ON CONFLICT (id) DO UPDATE SET v = fus.v + 1;
+step s2oc: INSERT INTO fus VALUES (1, 0) ON CONFLICT (id) DO UPDATE SET v = fus.v + 1; <waiting ...>
+step s1c: COMMIT;
+step s2oc: <... completed>
+step s2c: COMMIT;
+step s3r: SELECT v FROM fus WHERE id = 1;
+v
+-
+2
+(1 row)
+
+
+starting permutation: s1rc s1big s1locks s1c s1bigsum
+step s1rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1big: UPDATE fus_big SET v = v + 1;
+step s1locks: SELECT count(*) AS tuple_locks FROM pg_locks WHERE locktype = 'tuple' AND pid = pg_backend_pid();
+tuple_locks
+-----------
+          0
+(1 row)
+
+step s1c: COMMIT;
+step s1bigsum: SELECT sum(v) FROM fus_big;
+  sum
+-----
+20000
+(1 row)
+

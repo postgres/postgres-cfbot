@@ -10,12 +10,19 @@
 #-------------------------------------------------------------------------
 
 EXTRA_INSTALL=contrib/amcheck \
+	contrib/btree_gist \
+	contrib/pg_buffercache \
+	contrib/pg_walinspect \
+	contrib/pageinspect \
+	contrib/pg_visibility \
 	contrib/pg_prewarm \
 	contrib/pg_stat_statements \
 	contrib/test_decoding \
 	src/test/modules/injection_points \
 	src/test/modules/test_fileops \
-	src/test/modules/test_wait_lsn
+	src/test/modules/test_idxundo \
+	src/test/modules/test_wait_lsn \
+	src/test/modules/xid_wraparound
 
 subdir = src/test/recovery
 top_builddir = ../../..

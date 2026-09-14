@@ -816,7 +816,7 @@ $node_primary->safe_psql('testdb',
 
 # This should trigger the conflict
 $node_primary->safe_psql('testdb',
-	qq[CREATE TABLE prun(id integer, s char(2000)) WITH (fillfactor = 75, user_catalog_table = true);]
+	qq[CREATE TABLE prun(id integer, s char(2000)) USING heap WITH (fillfactor = 75, user_catalog_table = true);]
 );
 $node_primary->safe_psql('testdb', qq[INSERT INTO prun VALUES (1, 'A');]);
 $node_primary->safe_psql('testdb', qq[UPDATE prun SET s = 'B';]);

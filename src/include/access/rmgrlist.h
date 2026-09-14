@@ -50,6 +50,9 @@ PG_RMGR(RM_LOGICALMSG_ID, "LogicalMessage", logicalmsg_redo, logicalmsg_desc, lo
 PG_RMGR(RM_XLOG2_ID, "XLOG2", xlog2_redo, xlog2_desc, xlog2_identify, NULL, NULL, NULL, xlog2_decode)
 PG_RMGR(RM_UNDO_ID, "Undo", undo_redo, undo_desc, undo_identify, NULL, NULL, undo_mask, NULL)
 PG_RMGR(RM_ATM_ID, "ATM", atm_redo, atm_desc, atm_identify, NULL, NULL, NULL, NULL)
+#ifdef USE_FLUX
+PG_RMGR(RM_FLUX_ID, "FLUX", flux_redo, flux_desc, flux_identify, NULL, NULL, flux_mask, flux_decode)
+#endif
 #ifdef USE_FILEOPS
 PG_RMGR(RM_FILEOPS_ID, "FileOps", fileops_redo, fileops_desc, fileops_identify, NULL, NULL, NULL, NULL)
 #endif

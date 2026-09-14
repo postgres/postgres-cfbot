@@ -56,6 +56,7 @@
 #include "tcop/tcopprot.h"
 
 #include "utils/hsearch.h"
+#include "utils/injection_point.h"
 #include "utils/memutils.h"
 #include "utils/resowner.h"
 
@@ -529,6 +530,9 @@ UndoWorkerPerformRequest(UndoRequestInfo *urinfo)
 	 * UndoWorkerOnExit() hands the request back.
 	 */
 	MyUndoRequest = urinfo;
+
+	/* Lets tests hold a rollback request back from the worker. */
+	INJECTION_POINT("pbu-undo-worker-before-apply", NULL);
 
 	StartTransactionCommand();
 	PG_TRY();

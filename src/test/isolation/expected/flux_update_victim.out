@@ -1,0 +1,62 @@
+Parsed test spec with 4 sessions
+
+starting permutation: s2u2 s1u1 s1u2 s2u1 s2c s1c s3c chk
+step s2u2: UPDATE fdv SET v = v + 1 WHERE id = 2; INSERT INTO fdv_hist VALUES (2);
+step s1u1: UPDATE fdv SET v = v + 1 WHERE id = 1; INSERT INTO fdv_hist VALUES (1);
+step s1u2: UPDATE fdv SET v = v + 1 WHERE id = 2; INSERT INTO fdv_hist VALUES (2); <waiting ...>
+step s2u1: UPDATE fdv SET v = v + 1 WHERE id = 1; INSERT INTO fdv_hist VALUES (1); <waiting ...>
+step s2u1: <... completed>
+ERROR:  deadlock detected
+step s1u2: <... completed>
+step s2c: COMMIT;
+step s1c: COMMIT;
+step s3c: COMMIT;
+step chk: SELECT f.id, f.v, count(h.id) AS committed FROM fdv f LEFT JOIN fdv_hist h USING (id) GROUP BY f.id, f.v ORDER BY f.id;
+id|v|committed
+--+-+---------
+ 1|1|        1
+ 2|1|        1
+(2 rows)
+
+
+starting permutation: s2u2 s1u1 s3u2 s1u2 s2u1 s2c s3c s1c chk
+step s2u2: UPDATE fdv SET v = v + 1 WHERE id = 2; INSERT INTO fdv_hist VALUES (2);
+step s1u1: UPDATE fdv SET v = v + 1 WHERE id = 1; INSERT INTO fdv_hist VALUES (1);
+step s3u2: UPDATE fdv SET v = v + 1 WHERE id = 2; INSERT INTO fdv_hist VALUES (2); <waiting ...>
+step s1u2: UPDATE fdv SET v = v + 1 WHERE id = 2; INSERT INTO fdv_hist VALUES (2); <waiting ...>
+step s2u1: UPDATE fdv SET v = v + 1 WHERE id = 1; INSERT INTO fdv_hist VALUES (1); <waiting ...>
+step s2u1: <... completed>
+ERROR:  deadlock detected
+step s3u2: <... completed>
+step s2c: COMMIT;
+step s3c: COMMIT;
+step s1u2: <... completed>
+step s1c: COMMIT;
+step chk: SELECT f.id, f.v, count(h.id) AS committed FROM fdv f LEFT JOIN fdv_hist h USING (id) GROUP BY f.id, f.v ORDER BY f.id;
+id|v|committed
+--+-+---------
+ 1|1|        1
+ 2|2|        2
+(2 rows)
+
+
+starting permutation: s1u1 s3u2 s2u1 s1c s3u1 s2u2 s2c s3c chk
+step s1u1: UPDATE fdv SET v = v + 1 WHERE id = 1; INSERT INTO fdv_hist VALUES (1);
+step s3u2: UPDATE fdv SET v = v + 1 WHERE id = 2; INSERT INTO fdv_hist VALUES (2);
+step s2u1: UPDATE fdv SET v = v + 1 WHERE id = 1; INSERT INTO fdv_hist VALUES (1); <waiting ...>
+step s1c: COMMIT;
+step s2u1: <... completed>
+step s3u1: UPDATE fdv SET v = v + 1 WHERE id = 1; INSERT INTO fdv_hist VALUES (1); <waiting ...>
+step s2u2: UPDATE fdv SET v = v + 1 WHERE id = 2; INSERT INTO fdv_hist VALUES (2); <waiting ...>
+step s2u2: <... completed>
+ERROR:  deadlock detected
+step s3u1: <... completed>
+step s2c: COMMIT;
+step s3c: COMMIT;
+step chk: SELECT f.id, f.v, count(h.id) AS committed FROM fdv f LEFT JOIN fdv_hist h USING (id) GROUP BY f.id, f.v ORDER BY f.id;
+id|v|committed
+--+-+---------
+ 1|2|        2
+ 2|1|        1
+(2 rows)
+

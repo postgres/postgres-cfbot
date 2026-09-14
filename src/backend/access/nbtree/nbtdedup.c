@@ -158,10 +158,10 @@ _bt_dedup_pass(Relation rel, Buffer buf, IndexTuple newitem, Size newitemsz,
 			 * Tuple is equal to base tuple of pending posting list.  Heap
 			 * TID(s) for itup have been saved in state.
 			 *
-			 * A delete-marked tombstone is never merged in either
-			 * direction: it carries alt-TID metadata in t_tid instead of a
-			 * heap TID, and its key no longer describes the live version. The
-			 * guards above force it through the "not equal" path, where
+			 * A delete-marked tombstone is never merged in either direction:
+			 * it carries alt-TID metadata in t_tid instead of a heap TID, and
+			 * its key no longer describes the live version. The guards above
+			 * force it through the "not equal" path, where
 			 * _bt_dedup_finish_pending() emits it verbatim as a single-item
 			 * pending list (nitems stays 1, so the bogus t_tid is never
 			 * used).

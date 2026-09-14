@@ -1,0 +1,51 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s1b s1l s2b s2l s3d s1r s2c s3chk
+step s1b: BEGIN;
+step s1l: INSERT INTO child VALUES (1);
+step s2b: BEGIN;
+step s2l: INSERT INTO child VALUES (1);
+step s3d: DELETE FROM parent; <waiting ...>
+step s1r: ROLLBACK;
+step s2c: COMMIT;
+step s3d: <... completed>
+ERROR:  update or delete on table "parent" violates foreign key constraint "child_i_fkey" on table "child"
+step s3chk: SELECT (SELECT count(*) FROM parent) AS parents, (SELECT count(*) FROM child) AS children;
+parents|children
+-------+--------
+      1|       1
+(1 row)
+
+
+starting permutation: s1b s1l s2b s2l s3d s2r s1c s3chk
+step s1b: BEGIN;
+step s1l: INSERT INTO child VALUES (1);
+step s2b: BEGIN;
+step s2l: INSERT INTO child VALUES (1);
+step s3d: DELETE FROM parent; <waiting ...>
+step s2r: ROLLBACK;
+step s1c: COMMIT;
+step s3d: <... completed>
+ERROR:  update or delete on table "parent" violates foreign key constraint "child_i_fkey" on table "child"
+step s3chk: SELECT (SELECT count(*) FROM parent) AS parents, (SELECT count(*) FROM child) AS children;
+parents|children
+-------+--------
+      1|       1
+(1 row)
+
+
+starting permutation: s1b s1l s2b s2l s3d s1r s2r s3chk
+step s1b: BEGIN;
+step s1l: INSERT INTO child VALUES (1);
+step s2b: BEGIN;
+step s2l: INSERT INTO child VALUES (1);
+step s3d: DELETE FROM parent; <waiting ...>
+step s1r: ROLLBACK;
+step s2r: ROLLBACK;
+step s3d: <... completed>
+step s3chk: SELECT (SELECT count(*) FROM parent) AS parents, (SELECT count(*) FROM child) AS children;
+parents|children
+-------+--------
+      0|       0
+(1 row)
+

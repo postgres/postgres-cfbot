@@ -1,0 +1,33 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s1b s1l s2b s2l s3u s1r s2chk s2c s3chk
+step s1b: BEGIN;
+step s1l: SELECT v FROM lu WHERE id = 1 FOR SHARE;
+v
+-
+0
+(1 row)
+
+step s2b: BEGIN;
+step s2l: SELECT v FROM lu WHERE id = 1 FOR SHARE;
+v
+-
+0
+(1 row)
+
+step s3u: UPDATE lu SET v = v + 1 WHERE id = 1; <waiting ...>
+step s1r: ROLLBACK;
+step s2chk: SELECT v FROM lu WHERE id = 1;
+v
+-
+0
+(1 row)
+
+step s2c: COMMIT;
+step s3u: <... completed>
+step s3chk: SELECT v FROM lu WHERE id = 1;
+v
+-
+1
+(1 row)
+

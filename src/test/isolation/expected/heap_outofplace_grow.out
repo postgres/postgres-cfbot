@@ -1,0 +1,35 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1b s2b s1g s2u s1c s2c s1sel
+step s1b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1g: UPDATE xg SET p1 = 1, p2 = 2, p3 = 3, p4 = 4, p5 = 5, p6 = 6,
+			  p7 = 7, p8 = 8 WHERE id = 1;
+step s2u: UPDATE xg SET n = n + 1 WHERE id = 1; <waiting ...>
+step s1c: COMMIT;
+step s2u: <... completed>
+step s2c: COMMIT;
+step s1sel: SELECT id, n, p8, (SELECT count(*) FROM xg) AS nrows
+			  FROM xg WHERE id = 1;
+id|n|p8|nrows
+--+-+--+-----
+ 1|1| 8|  400
+(1 row)
+
+
+starting permutation: s1b s2b s1g s2u s1r s2c s1sel
+step s1b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2b: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s1g: UPDATE xg SET p1 = 1, p2 = 2, p3 = 3, p4 = 4, p5 = 5, p6 = 6,
+			  p7 = 7, p8 = 8 WHERE id = 1;
+step s2u: UPDATE xg SET n = n + 1 WHERE id = 1; <waiting ...>
+step s1r: ROLLBACK;
+step s2u: <... completed>
+step s2c: COMMIT;
+step s1sel: SELECT id, n, p8, (SELECT count(*) FROM xg) AS nrows
+			  FROM xg WHERE id = 1;
+id|n|p8|nrows
+--+-+--+-----
+ 1|1|  |  400
+(1 row)
+

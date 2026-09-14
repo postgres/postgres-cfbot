@@ -298,7 +298,24 @@ index_undo_mark(Relation indexRelation,
 
 	return indexRelation->rd_indam->amundomark(indexRelation, heapRelation,
 											   values, isnull, heap_t_ctid,
-											   clear_mark);
+											   clear_mark, false);
+}
+
+/*
+ * Probe without changing a tombstone, before recording the intent to revive.
+ * Forward path only: a found tombstone is checked for a serializable
+ * rw-conflict, as an insert of the entry would be, and that may ERROR.
+ */
+bool
+index_probe_delete_mark(Relation indexRelation, Datum *values, bool *isnull,
+						ItemPointer tid, Relation heapRelation)
+{
+	RELATION_CHECKS;
+	if (indexRelation->rd_indam->amundomark == NULL ||
+		RelationUndoEngine(heapRelation) == UNDO_ENGINE_NONE)
+		return false;
+	return indexRelation->rd_indam->amundomark(indexRelation, heapRelation,
+											   values, isnull, tid, true, true);
 }
 
 /* -------------------------

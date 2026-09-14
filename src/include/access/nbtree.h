@@ -700,9 +700,9 @@ BTreeTupleGetHeapTID(IndexTuple itup)
 	else if (BTreeTupleIsDeleteMarked(itup))
 	{
 		/*
-		 * Delete-marked leaf tuple: the single heap TID lives in a
-		 * trailer at the tuple end, exactly like a pivot's heap TID.  t_tid
-		 * itself holds only alt-TID status metadata here.
+		 * Delete-marked leaf tuple: the single heap TID lives in a trailer at
+		 * the tuple end, exactly like a pivot's heap TID.  t_tid itself holds
+		 * only alt-TID status metadata here.
 		 */
 		return (ItemPointer) ((char *) itup + IndexTupleSize(itup) -
 							  sizeof(ItemPointerData));
@@ -959,8 +959,8 @@ typedef struct BTInsertStateData
 	 * with an existing posting list tuple that has its LP_DEAD bit set.
 	 */
 	int			postingoff;
-	bool		nopostingsplit; /* delete-marking index: never
-								 * posting-split on insert */
+	bool		nopostingsplit; /* delete-marking index: never posting-split
+								 * on insert */
 } BTInsertStateData;
 
 typedef BTInsertStateData *BTInsertState;
@@ -1287,7 +1287,7 @@ extern bool btdeletemark(Relation rel, Relation heapRel,
 						 Datum *values, bool *isnull, ItemPointer heap_t_ctid);
 extern bool btundomark(Relation rel, Relation heapRel,
 					   Datum *values, bool *isnull, ItemPointer heap_t_ctid,
-					   bool clear_mark);
+					   bool clear_mark, bool probe);
 extern void btrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
 					 ScanKey orderbys, int norderbys);
 extern void btparallelrescan(IndexScanDesc scan);

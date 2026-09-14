@@ -37,6 +37,8 @@
 
 #include "access/atm.h"
 #include "access/bufmask.h"
+#include "access/flux.h"
+#include "access/flux_xlog.h"
 #include "access/hash.h"
 #include "access/hash_xlog.h"
 #include "access/htup_details.h"
@@ -1087,7 +1089,8 @@ UndoResetBatchReader(void)
  * table AM or index AM that applied the UNDO record, so hand the page to that
  * AM's mask function, telling them apart by the special space the way
  * pg_filedump does: hash pages end their 16-byte special space with
- * HASHO_PAGE_ID, which no btree cycle ID can equal (MAX_BT_CYCLE_ID).
+ * HASHO_PAGE_ID, which no btree cycle ID can equal (MAX_BT_CYCLE_ID), and
+ * FLUX pages have an 8-byte one.
  */
 void
 undo_mask(char *pagedata, BlockNumber blkno)
@@ -1100,6 +1103,10 @@ undo_mask(char *pagedata, BlockNumber blkno)
 		hash_mask(pagedata, blkno);
 	else if (special == MAXALIGN(sizeof(BTPageOpaqueData)))
 		btree_mask(pagedata, blkno);
+#ifdef USE_FLUX
+	else if (special == MAXALIGN(sizeof(FluxPageOpaqueData)))
+		flux_mask(pagedata, blkno);
+#endif
 	else
 	{
 		mask_page_lsn_and_checksum(page);

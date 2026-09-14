@@ -16,11 +16,14 @@
 #include "postgres.h"
 
 #include "access/atm.h"
+#include "access/flux.h"
 #include "access/hash.h"
 #include "access/nbtree.h"
 #include "access/relation.h"
 #include "access/table.h"
+#include "access/tableam.h"
 #include "access/slog.h"
+#include "access/slog_internal.h"
 #include "access/xact.h"
 #include "access/undormgr.h"
 #include "access/xactundo.h"
@@ -39,6 +42,8 @@
 #include "utils/rel.h"
 #include "utils/tuplestore.h"
 #include "utils/wait_event.h"
+#include "utils/snapmgr.h"
+#include "utils/builtins.h"
 
 PG_MODULE_MAGIC;
 
@@ -335,14 +340,64 @@ idxundo_write_ordered_undo(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 
+/*
+ * idxundo_flux_active_xacts() -> FLUX's count of active transactions
+ *
+ * The count FLUX keeps of transactions that registered an oldest-active
+ * timestamp slot.  A PREPARE that forgets to release its slot shows up as a
+ * count that grows with every prepared transaction.
+ */
+PG_FUNCTION_INFO_V1(idxundo_flux_active_xacts);
+Datum
+idxundo_flux_active_xacts(PG_FUNCTION_ARGS)
+{
+	uint64		current_ts;
+	uint64		oldest_ts;
+	int			active;
+
+	FluxGetMvccStats(&current_ts, &oldest_ts, &active);
+	PG_RETURN_INT32(active);
+}
+
+/*
+ * idxundo_delete_nowait(rel regclass, t tid) -> text
+ *
+ * table_tuple_delete of t with wait = false, as REPACK (CONCURRENTLY) applies
+ * a delete; no SQL statement deletes without waiting.  Returns the result's
+ * name and, when it is not TM_Ok, the xid reported in tmfd->xmax.
+ */
+PG_FUNCTION_INFO_V1(idxundo_delete_nowait);
+Datum
+idxundo_delete_nowait(PG_FUNCTION_ARGS)
+{
+	static const char *const names[] = {
+		"Ok", "Invisible", "SelfModified", "Updated", "Deleted",
+		"BeingModified", "WouldBlock"
+	};
+	Relation	rel = table_open(PG_GETARG_OID(0), RowExclusiveLock);
+	TM_FailureData tmfd;
+	TM_Result	res;
+
+	res = table_tuple_delete(rel, PG_GETARG_ITEMPOINTER(1),
+							 GetCurrentCommandId(true), 0, GetActiveSnapshot(),
+							 InvalidSnapshot, false, &tmfd);
+	table_close(rel, NoLock);
+
+	Assert(res >= 0 && res < lengthof(names));
+	if (res == TM_Ok)
+		PG_RETURN_TEXT_P(cstring_to_text(names[res]));
+	PG_RETURN_TEXT_P(cstring_to_text(psprintf("%s %u", names[res],
+											  tmfd.xmax)));
+}
+
 /* Throw with both a buffer pin and an LWLock outstanding. */
 extern PGDLLEXPORT void idxundo_error_with_resources(const char *name,
-													const void *private_data,
-													void *arg);
+													 const void *private_data,
+													 void *arg);
 void
 idxundo_error_with_resources(const char *name, const void *private_data, void *arg)
 {
-	Relation rel = table_open(RelationRelationId, AccessShareLock);
+	Relation	rel = table_open(RelationRelationId, AccessShareLock);
 
 	(void) ReadBuffer(rel, 0);
 	LWLockAcquire(ProcArrayLock, LW_SHARED);
@@ -350,7 +405,7 @@ idxundo_error_with_resources(const char *name, const void *private_data, void *a
 }
 
 extern PGDLLEXPORT void idxundo_recovery_error(const char *name,
-											 const void *private_data, void *arg);
+											   const void *private_data, void *arg);
 void
 idxundo_recovery_error(const char *name, const void *private_data, void *arg)
 {

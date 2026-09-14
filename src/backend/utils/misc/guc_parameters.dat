@@ -1097,7 +1097,6 @@
   options => 'file_extend_method_options',
 },
 
-
 { name => 'from_collapse_limit', type => 'int', context => 'PGC_USERSET', group => 'QUERY_TUNING_OTHER',
   short_desc => 'Sets the FROM-list size beyond which subqueries are not collapsed.',
   long_desc => 'The planner will merge subqueries into upper queries if the resulting FROM list would have no more than this many items.',

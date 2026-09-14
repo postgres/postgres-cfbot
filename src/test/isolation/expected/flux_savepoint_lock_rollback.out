@@ -1,0 +1,1945 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s1b s1sp s1fu s1rs s2u s1c s3chk
+step s1b: BEGIN;
+step s1sp: SAVEPOINT a;
+step s1fu: SELECT * FROM lr WHERE id = 1 FOR UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1rs: ROLLBACK TO a;
+step s2u: UPDATE lr SET v = v + 1 WHERE id = 1;
+step s1c: COMMIT;
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|1
+select| 2|0
+(2 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|1
+key share| 2|0
+(2 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|1
+for update| 2|0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|101
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|101
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1sp s1fnk s1rs s2u s1c s3chk
+step s1b: BEGIN;
+step s1sp: SAVEPOINT a;
+step s1fnk: SELECT * FROM lr WHERE id = 1 FOR NO KEY UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1rs: ROLLBACK TO a;
+step s2u: UPDATE lr SET v = v + 1 WHERE id = 1;
+step s1c: COMMIT;
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|1
+select| 2|0
+(2 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|1
+key share| 2|0
+(2 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|1
+for update| 2|0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|101
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|101
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1sp s1fs s1rs s2u s1c s3chk
+step s1b: BEGIN;
+step s1sp: SAVEPOINT a;
+step s1fs: SELECT * FROM lr WHERE id = 1 FOR SHARE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1rs: ROLLBACK TO a;
+step s2u: UPDATE lr SET v = v + 1 WHERE id = 1;
+step s1c: COMMIT;
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|1
+select| 2|0
+(2 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|1
+key share| 2|0
+(2 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|1
+for update| 2|0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|101
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|101
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1sp s1fks s1rs s2u s1c s3chk
+step s1b: BEGIN;
+step s1sp: SAVEPOINT a;
+step s1fks: SELECT * FROM lr WHERE id = 1 FOR KEY SHARE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1rs: ROLLBACK TO a;
+step s2u: UPDATE lr SET v = v + 1 WHERE id = 1;
+step s1c: COMMIT;
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|1
+select| 2|0
+(2 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|1
+key share| 2|0
+(2 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|1
+for update| 2|0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|101
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|101
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1sp s1sp2 s1fu s1rs2 s1rs s2u s1c s3chk
+step s1b: BEGIN;
+step s1sp: SAVEPOINT a;
+step s1sp2: SAVEPOINT b;
+step s1fu: SELECT * FROM lr WHERE id = 1 FOR UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1rs2: ROLLBACK TO b;
+step s1rs: ROLLBACK TO a;
+step s2u: UPDATE lr SET v = v + 1 WHERE id = 1;
+step s1c: COMMIT;
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|1
+select| 2|0
+(2 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|1
+key share| 2|0
+(2 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|1
+for update| 2|0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|101
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|101
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1sp s1sp2 s1fu s1rs2 s1rel s2u s1c s3chk
+step s1b: BEGIN;
+step s1sp: SAVEPOINT a;
+step s1sp2: SAVEPOINT b;
+step s1fu: SELECT * FROM lr WHERE id = 1 FOR UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1rs2: ROLLBACK TO b;
+step s1rel: RELEASE a;
+step s2u: UPDATE lr SET v = v + 1 WHERE id = 1;
+step s1c: COMMIT;
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|1
+select| 2|0
+(2 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|1
+key share| 2|0
+(2 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|1
+for update| 2|0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|101
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|101
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1sp s1fu s1rel s2u s1c s3chk
+step s1b: BEGIN;
+step s1sp: SAVEPOINT a;
+step s1fu: SELECT * FROM lr WHERE id = 1 FOR UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1rel: RELEASE a;
+step s2u: UPDATE lr SET v = v + 1 WHERE id = 1; <waiting ...>
+step s1c: COMMIT;
+step s2u: <... completed>
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|1
+select| 2|0
+(2 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|1
+key share| 2|0
+(2 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|1
+for update| 2|0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|101
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|101
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1sp s1fu s1rs s2d s1c s3chk
+step s1b: BEGIN;
+step s1sp: SAVEPOINT a;
+step s1fu: SELECT * FROM lr WHERE id = 1 FOR UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1rs: ROLLBACK TO a;
+step s2d: DELETE FROM lr WHERE id = 1;
+step s1c: COMMIT;
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 2|0
+(1 row)
+
+via      |id|v
+---------+--+-
+key share| 2|0
+(1 row)
+
+via       |id|v
+----------+--+-
+for update| 2|0
+(1 row)
+
+via   |id|  v
+------+--+---
+update| 2|100
+(1 row)
+
+via|id|v
+---+--+-
+(0 rows)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1sp s1fu s1rs s2b s2u s2r s1c s3chk
+step s1b: BEGIN;
+step s1sp: SAVEPOINT a;
+step s1fu: SELECT * FROM lr WHERE id = 1 FOR UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1rs: ROLLBACK TO a;
+step s2b: BEGIN;
+step s2u: UPDATE lr SET v = v + 1 WHERE id = 1;
+step s2r: ROLLBACK;
+step s1c: COMMIT;
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|0
+select| 2|0
+(2 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|0
+key share| 2|0
+(2 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|0
+for update| 2|0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|100
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|100
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1sp s1fu s1rs s2b s2u s1c s2c s3chk
+step s1b: BEGIN;
+step s1sp: SAVEPOINT a;
+step s1fu: SELECT * FROM lr WHERE id = 1 FOR UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1rs: ROLLBACK TO a;
+step s2b: BEGIN;
+step s2u: UPDATE lr SET v = v + 1 WHERE id = 1;
+step s1c: COMMIT;
+step s2c: COMMIT;
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|1
+select| 2|0
+(2 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|1
+key share| 2|0
+(2 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|1
+for update| 2|0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|101
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|101
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1sp s1fu s1rs s2u s1r s3chk
+step s1b: BEGIN;
+step s1sp: SAVEPOINT a;
+step s1fu: SELECT * FROM lr WHERE id = 1 FOR UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1rs: ROLLBACK TO a;
+step s2u: UPDATE lr SET v = v + 1 WHERE id = 1;
+step s1r: ROLLBACK;
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|1
+select| 2|0
+(2 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|1
+key share| 2|0
+(2 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|1
+for update| 2|0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|101
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|101
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1fu s1r s2u s3chk
+step s1b: BEGIN;
+step s1fu: SELECT * FROM lr WHERE id = 1 FOR UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1r: ROLLBACK;
+step s2u: UPDATE lr SET v = v + 1 WHERE id = 1;
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|1
+select| 2|0
+(2 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|1
+key share| 2|0
+(2 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|1
+for update| 2|0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|101
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|101
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1sp s1u s1rs s2u s1c s3chk
+step s1b: BEGIN;
+step s1sp: SAVEPOINT a;
+step s1u: UPDATE lr SET v = v + 10 WHERE id = 1;
+step s1rs: ROLLBACK TO a;
+step s2u: UPDATE lr SET v = v + 1 WHERE id = 1;
+step s1c: COMMIT;
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|1
+select| 2|0
+(2 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|1
+key share| 2|0
+(2 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|1
+for update| 2|0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|101
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|101
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1sp s1d s1rs s2u s1c s3chk
+step s1b: BEGIN;
+step s1sp: SAVEPOINT a;
+step s1d: DELETE FROM lr WHERE id = 1;
+step s1rs: ROLLBACK TO a;
+step s2u: UPDATE lr SET v = v + 1 WHERE id = 1;
+step s1c: COMMIT;
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|1
+select| 2|0
+(2 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|1
+key share| 2|0
+(2 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|1
+for update| 2|0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|101
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|101
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1sp s1u s1rs s2b s2u s1c s2c s3chk
+step s1b: BEGIN;
+step s1sp: SAVEPOINT a;
+step s1u: UPDATE lr SET v = v + 10 WHERE id = 1;
+step s1rs: ROLLBACK TO a;
+step s2b: BEGIN;
+step s2u: UPDATE lr SET v = v + 1 WHERE id = 1;
+step s1c: COMMIT;
+step s2c: COMMIT;
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|1
+select| 2|0
+(2 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|1
+key share| 2|0
+(2 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|1
+for update| 2|0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|101
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|101
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1sp s1d s1rs s2b s2u s1c s2c s3chk
+step s1b: BEGIN;
+step s1sp: SAVEPOINT a;
+step s1d: DELETE FROM lr WHERE id = 1;
+step s1rs: ROLLBACK TO a;
+step s2b: BEGIN;
+step s2u: UPDATE lr SET v = v + 1 WHERE id = 1;
+step s1c: COMMIT;
+step s2c: COMMIT;
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|1
+select| 2|0
+(2 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|1
+key share| 2|0
+(2 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|1
+for update| 2|0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|101
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|101
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1fu s1sp s1fu s1rs s2u s1c s3chk
+step s1b: BEGIN;
+step s1fu: SELECT * FROM lr WHERE id = 1 FOR UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1sp: SAVEPOINT a;
+step s1fu: SELECT * FROM lr WHERE id = 1 FOR UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1rs: ROLLBACK TO a;
+step s2u: UPDATE lr SET v = v + 1 WHERE id = 1; <waiting ...>
+step s1c: COMMIT;
+step s2u: <... completed>
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|1
+select| 2|0
+(2 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|1
+key share| 2|0
+(2 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|1
+for update| 2|0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|101
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|101
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1fu s1sp s1fks s1rs s2u s1c s3chk
+step s1b: BEGIN;
+step s1fu: SELECT * FROM lr WHERE id = 1 FOR UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1sp: SAVEPOINT a;
+step s1fks: SELECT * FROM lr WHERE id = 1 FOR KEY SHARE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1rs: ROLLBACK TO a;
+step s2u: UPDATE lr SET v = v + 1 WHERE id = 1; <waiting ...>
+step s1c: COMMIT;
+step s2u: <... completed>
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|1
+select| 2|0
+(2 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|1
+key share| 2|0
+(2 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|1
+for update| 2|0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|101
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|101
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1fnk s1sp s1fu s1rs s2u s1c s3chk
+step s1b: BEGIN;
+step s1fnk: SELECT * FROM lr WHERE id = 1 FOR NO KEY UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1sp: SAVEPOINT a;
+step s1fu: SELECT * FROM lr WHERE id = 1 FOR UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1rs: ROLLBACK TO a;
+step s2u: UPDATE lr SET v = v + 1 WHERE id = 1; <waiting ...>
+step s1c: COMMIT;
+step s2u: <... completed>
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|1
+select| 2|0
+(2 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|1
+key share| 2|0
+(2 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|1
+for update| 2|0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|101
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|101
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1fu s1fks s2u s1c s3chk
+step s1b: BEGIN;
+step s1fu: SELECT * FROM lr WHERE id = 1 FOR UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1fks: SELECT * FROM lr WHERE id = 1 FOR KEY SHARE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s2u: UPDATE lr SET v = v + 1 WHERE id = 1; <waiting ...>
+step s1c: COMMIT;
+step s2u: <... completed>
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|1
+select| 2|0
+(2 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|1
+key share| 2|0
+(2 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|1
+for update| 2|0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|101
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|101
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1fu s1sp s1fks s1rel s2u s1c s3chk
+step s1b: BEGIN;
+step s1fu: SELECT * FROM lr WHERE id = 1 FOR UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1sp: SAVEPOINT a;
+step s1fks: SELECT * FROM lr WHERE id = 1 FOR KEY SHARE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1rel: RELEASE a;
+step s2u: UPDATE lr SET v = v + 1 WHERE id = 1; <waiting ...>
+step s1c: COMMIT;
+step s2u: <... completed>
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|1
+select| 2|0
+(2 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|1
+key share| 2|0
+(2 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|1
+for update| 2|0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|101
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|101
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1fu s1sp s1u s1rs s2u s1c s3chk
+step s1b: BEGIN;
+step s1fu: SELECT * FROM lr WHERE id = 1 FOR UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1sp: SAVEPOINT a;
+step s1u: UPDATE lr SET v = v + 10 WHERE id = 1;
+step s1rs: ROLLBACK TO a;
+step s2u: UPDATE lr SET v = v + 1 WHERE id = 1; <waiting ...>
+step s1c: COMMIT;
+step s2u: <... completed>
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|1
+select| 2|0
+(2 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|1
+key share| 2|0
+(2 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|1
+for update| 2|0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|101
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|101
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1fks s1sp s1u s1rs s2d s1c s3chk
+step s1b: BEGIN;
+step s1fks: SELECT * FROM lr WHERE id = 1 FOR KEY SHARE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1sp: SAVEPOINT a;
+step s1u: UPDATE lr SET v = v + 10 WHERE id = 1;
+step s1rs: ROLLBACK TO a;
+step s2d: DELETE FROM lr WHERE id = 1; <waiting ...>
+step s1c: COMMIT;
+step s2d: <... completed>
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 2|0
+(1 row)
+
+via      |id|v
+---------+--+-
+key share| 2|0
+(1 row)
+
+via       |id|v
+----------+--+-
+for update| 2|0
+(1 row)
+
+via   |id|  v
+------+--+---
+update| 2|100
+(1 row)
+
+via|id|v
+---+--+-
+(0 rows)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1u s1sp s1fu s1rs s1c s3chk
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = v + 10 WHERE id = 1;
+step s1sp: SAVEPOINT a;
+step s1fu: SELECT * FROM lr WHERE id = 1 FOR UPDATE;
+id| v
+--+--
+ 1|10
+(1 row)
+
+step s1rs: ROLLBACK TO a;
+step s1c: COMMIT;
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id| v
+------+--+--
+select| 1|10
+select| 2| 0
+(2 rows)
+
+via      |id| v
+---------+--+--
+key share| 1|10
+key share| 2| 0
+(2 rows)
+
+via       |id| v
+----------+--+--
+for update| 1|10
+for update| 2| 0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|110
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|110
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1u s1sp s1u s1rs s1c s3chk
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = v + 10 WHERE id = 1;
+step s1sp: SAVEPOINT a;
+step s1u: UPDATE lr SET v = v + 10 WHERE id = 1;
+step s1rs: ROLLBACK TO a;
+step s1c: COMMIT;
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id| v
+------+--+--
+select| 1|10
+select| 2| 0
+(2 rows)
+
+via      |id| v
+---------+--+--
+key share| 1|10
+key share| 2| 0
+(2 rows)
+
+via       |id| v
+----------+--+--
+for update| 1|10
+for update| 2| 0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|110
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|110
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1u s1sp s1fu s1rs s2u s1c s3chk
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = v + 10 WHERE id = 1;
+step s1sp: SAVEPOINT a;
+step s1fu: SELECT * FROM lr WHERE id = 1 FOR UPDATE;
+id| v
+--+--
+ 1|10
+(1 row)
+
+step s1rs: ROLLBACK TO a;
+step s2u: UPDATE lr SET v = v + 1 WHERE id = 1; <waiting ...>
+step s1c: COMMIT;
+step s2u: <... completed>
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id| v
+------+--+--
+select| 1|11
+select| 2| 0
+(2 rows)
+
+via      |id| v
+---------+--+--
+key share| 1|11
+key share| 2| 0
+(2 rows)
+
+via       |id| v
+----------+--+--
+for update| 1|11
+for update| 2| 0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|111
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|111
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1u s1sp s1fks s1rs s2u s1r s3chk
+step s1b: BEGIN;
+step s1u: UPDATE lr SET v = v + 10 WHERE id = 1;
+step s1sp: SAVEPOINT a;
+step s1fks: SELECT * FROM lr WHERE id = 1 FOR KEY SHARE;
+id| v
+--+--
+ 1|10
+(1 row)
+
+step s1rs: ROLLBACK TO a;
+step s2u: UPDATE lr SET v = v + 1 WHERE id = 1; <waiting ...>
+step s1r: ROLLBACK;
+step s2u: <... completed>
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|1
+select| 2|0
+(2 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|1
+key share| 2|0
+(2 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|1
+for update| 2|0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|101
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|101
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1i s1sp s1fu3 s1rs s1c s3chk
+step s1b: BEGIN;
+step s1i: INSERT INTO lr VALUES (3, 0);
+step s1sp: SAVEPOINT a;
+step s1fu3: SELECT * FROM lr WHERE id = 3 FOR UPDATE;
+id|v
+--+-
+ 3|0
+(1 row)
+
+step s1rs: ROLLBACK TO a;
+step s1c: COMMIT;
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|0
+select| 2|0
+select| 3|0
+(3 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|0
+key share| 2|0
+key share| 3|0
+(3 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|0
+for update| 2|0
+for update| 3|0
+(3 rows)
+
+via   |id|  v
+------+--+---
+update| 1|100
+update| 2|100
+update| 3|100
+(3 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|100
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+after delete| 3|100
+(2 rows)
+
+
+starting permutation: s1b s1sp s1i s1rs s1c s3chk
+step s1b: BEGIN;
+step s1sp: SAVEPOINT a;
+step s1i: INSERT INTO lr VALUES (3, 0);
+step s1rs: ROLLBACK TO a;
+step s1c: COMMIT;
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|0
+select| 2|0
+(2 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|0
+key share| 2|0
+(2 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|0
+for update| 2|0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|100
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|100
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1i s1sp s1u3 s1rs s1c s3chk
+step s1b: BEGIN;
+step s1i: INSERT INTO lr VALUES (3, 0);
+step s1sp: SAVEPOINT a;
+step s1u3: UPDATE lr SET v = v + 10 WHERE id = 3;
+step s1rs: ROLLBACK TO a;
+step s1c: COMMIT;
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|0
+select| 2|0
+select| 3|0
+(3 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|0
+key share| 2|0
+key share| 3|0
+(3 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|0
+for update| 2|0
+for update| 3|0
+(3 rows)
+
+via   |id|  v
+------+--+---
+update| 1|100
+update| 2|100
+update| 3|100
+(3 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|100
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+after delete| 3|100
+(2 rows)
+
+
+starting permutation: s1b s1sp s1i s1rel s1sp2 s1u3 s1rs2 s1c s3chk
+step s1b: BEGIN;
+step s1sp: SAVEPOINT a;
+step s1i: INSERT INTO lr VALUES (3, 0);
+step s1rel: RELEASE a;
+step s1sp2: SAVEPOINT b;
+step s1u3: UPDATE lr SET v = v + 10 WHERE id = 3;
+step s1rs2: ROLLBACK TO b;
+step s1c: COMMIT;
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|0
+select| 2|0
+select| 3|0
+(3 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|0
+key share| 2|0
+key share| 3|0
+(3 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|0
+for update| 2|0
+for update| 3|0
+(3 rows)
+
+via   |id|  v
+------+--+---
+update| 1|100
+update| 2|100
+update| 3|100
+(3 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|100
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+after delete| 3|100
+(2 rows)
+
+
+starting permutation: s1b s1fks s1sp s1fu s1rs s2u s1c s3chk
+step s1b: BEGIN;
+step s1fks: SELECT * FROM lr WHERE id = 1 FOR KEY SHARE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1sp: SAVEPOINT a;
+step s1fu: SELECT * FROM lr WHERE id = 1 FOR UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1rs: ROLLBACK TO a;
+step s2u: UPDATE lr SET v = v + 1 WHERE id = 1;
+step s1c: COMMIT;
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|1
+select| 2|0
+(2 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|1
+key share| 2|0
+(2 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|1
+for update| 2|0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|101
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|101
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1fks s1sp s1sp2 s1fu s1rs2 s1rs s2u s1c s3chk
+step s1b: BEGIN;
+step s1fks: SELECT * FROM lr WHERE id = 1 FOR KEY SHARE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1sp: SAVEPOINT a;
+step s1sp2: SAVEPOINT b;
+step s1fu: SELECT * FROM lr WHERE id = 1 FOR UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1rs2: ROLLBACK TO b;
+step s1rs: ROLLBACK TO a;
+step s2u: UPDATE lr SET v = v + 1 WHERE id = 1;
+step s1c: COMMIT;
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|1
+select| 2|0
+(2 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|1
+key share| 2|0
+(2 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|1
+for update| 2|0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|101
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|101
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
+
+starting permutation: s1b s1fks s1sp s1sp2 s1fu s1rel s2u s1c s3chk
+step s1b: BEGIN;
+step s1fks: SELECT * FROM lr WHERE id = 1 FOR KEY SHARE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1sp: SAVEPOINT a;
+step s1sp2: SAVEPOINT b;
+step s1fu: SELECT * FROM lr WHERE id = 1 FOR UPDATE;
+id|v
+--+-
+ 1|0
+(1 row)
+
+step s1rel: RELEASE a;
+step s2u: UPDATE lr SET v = v + 1 WHERE id = 1; <waiting ...>
+step s1c: COMMIT;
+step s2u: <... completed>
+step s3chk: 
+  SELECT 'select' AS via, * FROM lr ORDER BY id;
+  SELECT 'key share' AS via, * FROM lr ORDER BY id FOR KEY SHARE;
+  SELECT 'for update' AS via, * FROM lr ORDER BY id FOR UPDATE;
+  WITH u AS (UPDATE lr SET v = v + 100 RETURNING *)
+    SELECT 'update' AS via, * FROM u ORDER BY id;
+  DELETE FROM lr WHERE id = 1 RETURNING 'delete' AS via, *;
+  SELECT 'after delete' AS via, * FROM lr ORDER BY id;
+
+via   |id|v
+------+--+-
+select| 1|1
+select| 2|0
+(2 rows)
+
+via      |id|v
+---------+--+-
+key share| 1|1
+key share| 2|0
+(2 rows)
+
+via       |id|v
+----------+--+-
+for update| 1|1
+for update| 2|0
+(2 rows)
+
+via   |id|  v
+------+--+---
+update| 1|101
+update| 2|100
+(2 rows)
+
+via   |id|  v
+------+--+---
+delete| 1|101
+(1 row)
+
+via         |id|  v
+------------+--+---
+after delete| 2|100
+(1 row)
+
