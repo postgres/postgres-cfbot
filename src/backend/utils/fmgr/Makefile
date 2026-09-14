@@ -15,6 +15,7 @@ include $(top_builddir)/src/Makefile.global
 OBJS = \
 	dfmgr.o \
 	fmgr.o \
-	funcapi.o
+	funcapi.o \
+	slopesupport.o
 
 include $(top_srcdir)/src/backend/common.mk
