@@ -960,6 +960,7 @@ DefineRelation(CreateStmt *stmt, char relkind, Oid ownerId,
 			break;
 		default:
 			(void) heap_reloptions(relkind, reloptions, true);
+			break;
 	}
 
 	if (stmt->ofTypename)

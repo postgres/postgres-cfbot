@@ -3221,6 +3221,68 @@ MarkBufferDirty(Buffer buffer)
 }
 
 /*
+ * MarkBufferDirtyShared
+ *
+ *	Like MarkBufferDirty, but callable while holding only a SHARED content
+ *	lock on the buffer.  The BM_DIRTY bit is set atomically via CAS on the
+ *	buffer header state word, which is safe regardless of lock mode.
+ *
+ *	The caller MUST ensure that either:
+ *	  (a) a WAL record covering the modification has already been inserted
+ *		  (so the WAL flush in the checkpointer will find the record), or
+ *	  (b) full_page_writes will capture a consistent image (the modification
+ *		  is protected by a per-tuple lock that prevents torn pages).
+ *
+ *	This is used by an in-place-update table AM's tuple-level CAS update path
+ *	where per-tuple atomics protect individual tuple data under a shared page
+ *	lock.
+ */
+void
+MarkBufferDirtyShared(Buffer buffer)
+{
+	BufferDesc *bufHdr;
+	uint64		buf_state;
+	uint64		old_buf_state;
+
+	if (!BufferIsValid(buffer))
+		elog(ERROR, "bad buffer ID: %d", buffer);
+
+	if (BufferIsLocal(buffer))
+	{
+		MarkLocalBufferDirty(buffer);
+		return;
+	}
+
+	bufHdr = GetBufferDescriptor(buffer - 1);
+
+	Assert(BufferIsPinned(buffer));
+	/* Caller holds at least BUFFER_LOCK_SHARE -- no exclusive assertion */
+
+	old_buf_state = pg_atomic_read_u64(&bufHdr->state);
+	for (;;)
+	{
+		if (old_buf_state & BM_LOCKED)
+			old_buf_state = WaitBufHdrUnlocked(bufHdr);
+
+		buf_state = old_buf_state;
+
+		Assert(BUF_STATE_GET_REFCOUNT(buf_state) > 0);
+		buf_state |= BM_DIRTY;
+
+		if (pg_atomic_compare_exchange_u64(&bufHdr->state, &old_buf_state,
+										   buf_state))
+			break;
+	}
+
+	if (!(old_buf_state & BM_DIRTY))
+	{
+		pgBufferUsage.shared_blks_dirtied++;
+		if (VacuumCostActive)
+			VacuumCostBalance += VacuumCostPageDirty;
+	}
+}
+
+/*
  * ReleaseAndReadBuffer -- combine ReleaseBuffer() and ReadBuffer()
  *
  * Formerly, this saved one cycle of acquiring/releasing the BufMgrLock
@@ -4903,6 +4965,38 @@ DropRelationBuffers(SMgrRelation smgr_reln, ForkNumber *forkNum,
 }
 
 /* ---------------------------------------------------------------------
+ *		DropRelationBufferRange
+ *
+ *		This function removes from the buffer pool the pages of one fork of
+ *		a shared relation whose block numbers lie in [firstDelBlock,
+ *		endBlock).  Dirty pages are discarded without being written.
+ *
+ *		DropRelationBuffers() drops everything at or beyond firstDelBlock,
+ *		which suits truncation.  A caller that retires the *head* of a
+ *		relation while its tail is still live -- the UNDO log discarding
+ *		consumed space below its insert point -- needs an upper bound, or
+ *		it would lose the live tail.  The caller must guarantee that no
+ *		backend can need the dropped pages again, and must drop them before
+ *		removing the file that holds them: a dirty page left behind would
+ *		later be written to a file that no longer exists.
+ *
+ *		Only shared (non-temporary) relations are handled.
+ *		--------------------------------------------------------------------
+ */
+void
+DropRelationBufferRange(SMgrRelation smgr_reln, ForkNumber forkNum,
+						BlockNumber firstDelBlock, BlockNumber endBlock)
+{
+	Assert(!RelFileLocatorBackendIsTemp(smgr_reln->smgr_rlocator));
+
+	if (firstDelBlock >= endBlock)
+		return;
+
+	FindAndDropRelationBuffers(smgr_reln->smgr_rlocator.locator, forkNum,
+							   endBlock, firstDelBlock);
+}
+
+/* ---------------------------------------------------------------------
  *		DropRelationsAllBuffers
  *
  *		This function removes from the buffer pool all the pages of all
@@ -5902,6 +5996,79 @@ UnlockBuffers(void)
 						0);
 
 		PinCountWaitBuf = NULL;
+	}
+}
+
+/*
+ * BufferLockReleaseAll -- release any buffer content locks still held by this
+ * backend.
+ *
+ * Normally, buffer content locks are released as part of resource-owner
+ * cleanup (see ResOwnerReleaseBuffer, which calls BufferLockUnlock on any
+ * entry whose data.lockmode != BUFFER_LOCK_UNLOCK).  However, that cleanup
+ * runs in ResourceOwnerRelease(RESOURCE_RELEASE_LOCKS), which is *after*
+ * AtAbort_XactUndo() in AbortTransaction().  Inline UNDO application may
+ * itself take buffer content locks, and BufferLockAcquire asserts that no
+ * lock is already held.  If a statement errors out while holding a share
+ * or exclusive content lock, that assert would trip on any re-lock during
+ * UNDO application.
+ *
+ * This helper releases such stragglers early, before inline UNDO runs.
+ * It mirrors the still-locked branch of ResOwnerReleaseBuffer (matching
+ * the HOLD_INTERRUPTS/BufferLockUnlock discipline).  Callers must be in
+ * an error-recovery path -- releasing content locks under a live statement
+ * would violate correctness.
+ *
+ * The subsequent ResourceOwnerRelease pass at RESOURCE_RELEASE_LOCKS still
+ * runs, but ResOwnerReleaseBuffer only calls BufferLockUnlock when
+ * data.lockmode != BUFFER_LOCK_UNLOCK, so already-released buffers are
+ * skipped -- no double-unlock.
+ */
+void
+BufferLockReleaseAll(void)
+{
+	PrivateRefCountEntry *res;
+	int			i;
+
+	/* Walk the small array first (fast path, covers the usual case). */
+	for (i = 0; i < REFCOUNT_ARRAY_ENTRIES; i++)
+	{
+		Buffer		buffer = PrivateRefCountArrayKeys[i];
+
+		if (buffer == InvalidBuffer)
+			continue;
+
+		res = &PrivateRefCountArray[i];
+		if (res->data.lockmode == BUFFER_LOCK_UNLOCK)
+			continue;
+
+		/* Local buffers do not have content locks. */
+		if (BufferIsLocal(buffer))
+			continue;
+
+		HOLD_INTERRUPTS();		/* matched by RESUME_INTERRUPTS in
+								 * BufferLockUnlock */
+		BufferLockUnlock(buffer, GetBufferDescriptor(buffer - 1));
+	}
+
+	/* Then the overflow hash, if any. */
+	if (PrivateRefCountOverflowed)
+	{
+		refcount_iterator iter;
+
+		refcount_start_iterate(PrivateRefCountHash, &iter);
+		while ((res = refcount_iterate(PrivateRefCountHash, &iter)) != NULL)
+		{
+			Buffer		buffer = res->buffer;
+
+			if (res->data.lockmode == BUFFER_LOCK_UNLOCK)
+				continue;
+			if (BufferIsLocal(buffer))
+				continue;
+
+			HOLD_INTERRUPTS();
+			BufferLockUnlock(buffer, GetBufferDescriptor(buffer - 1));
+		}
 	}
 }
 

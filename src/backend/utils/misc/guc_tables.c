@@ -34,6 +34,8 @@
 #include "access/slru.h"
 #include "access/toast_compression.h"
 #include "access/twophase.h"
+#include "access/undolog.h"
+#include "access/xactundo.h"
 #include "access/xlog_internal.h"
 #include "access/xlogprefetcher.h"
 #include "access/xlogrecovery.h"

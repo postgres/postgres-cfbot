@@ -1,0 +1,612 @@
+<!-- doc/src/sgml/undo.sgml -->
+
+<chapter id="undo" xreflabel="UNDO Logging">
+ <title>UNDO Logging</title>
+
+ <indexterm zone="undo">
+  <primary>UNDO logging</primary>
+ </indexterm>
+
+ <para>
+  <productname>PostgreSQL</productname> provides UNDO logging
+  infrastructure that records the inverse of data modifications, so that a
+  transaction can be rolled back by restoring the recorded before-images,
+  with full crash recovery and standby replay support.
+ </para>
+
+ <para>
+  UNDO is not a cluster-wide switch.  It is always-on infrastructure that only
+  the access methods which opt in actually use: a table access method declares
+  <structfield>am_supports_undo</structfield>, and the default
+  <literal>heap</literal> access method does not, so ordinary heap tables carry
+  no UNDO overhead.  A table gets UNDO by being created with an access method
+  that uses it.
+ </para>
+
+ <para>
+  The UNDO system uses a <emphasis>physical</emphasis> approach to
+  transaction rollback: rather than replaying high-level operations in
+  reverse, it restores the original page bytes directly.  Each rollback
+  operation generates a WAL record (called a Compensation Log Record, or
+  CLR) that ensures correct replay on standbys and during crash recovery.
+ </para>
+
+ <sect1 id="undo-enabling">
+  <title>Enabling UNDO Logging</title>
+
+  <para>
+   A table uses UNDO when its access method uses UNDO.  There is no server-level
+   toggle and no per-table UNDO storage parameter:
+  </para>
+
+<programlisting>
+CREATE TABLE important_data (
+    id      serial PRIMARY KEY,
+    payload text
+) USING <replaceable>undo_am</replaceable>;
+</programlisting>
+
+  <para>
+   Index UNDO is separate and is controlled per relation by the
+   <literal>index_undo</literal> storage parameter, which reverses a table's
+   index entries during <command>ROLLBACK</command> instead of leaving them for
+   <command>VACUUM</command>.  It defaults to on:
+  </para>
+
+<programlisting>
+-- opt out for a commit-mostly table
+ALTER TABLE important_data SET (index_undo = off);
+</programlisting>
+
+  <note>
+   <para>
+    Changing <literal>index_undo</literal> requires an
+    <literal>ACCESS EXCLUSIVE</literal> lock on the table.  Plan for
+    a maintenance window if the table is under active use.  The setting affects
+    only subsequent inserts; index entries that already exist have no UNDO
+    record and are left to <command>VACUUM</command> as before.
+   </para>
+  </note>
+ </sect1>
+
+ <sect1 id="undo-use-cases">
+  <title>When to Use UNDO</title>
+
+  <para>
+   Consider enabling UNDO logging when:
+  </para>
+
+  <itemizedlist>
+   <listitem>
+    <para>
+     You want crash-safe rollback with full WAL integration for
+     critical tables, ensuring that aborted transactions are correctly
+     rolled back even after a crash or on streaming replication standbys.
+    </para>
+   </listitem>
+  </itemizedlist>
+
+  <para>
+   Do not enable UNDO logging on:
+  </para>
+
+  <itemizedlist>
+   <listitem>
+    <para>
+     High-throughput write-heavy tables where the additional I/O
+     overhead is unacceptable.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     Temporary tables or tables with short-lived data that does not
+     need recovery protection.
+    </para>
+   </listitem>
+  </itemizedlist>
+ </sect1>
+
+ <sect1 id="undo-operations">
+  <title>Logged Operations</title>
+
+  <para>
+   On a table whose access method uses UNDO, the following operations generate
+   UNDO records:
+  </para>
+
+  <variablelist>
+   <varlistentry>
+    <term><literal>INSERT</literal></term>
+    <listitem>
+     <para>
+      Records the block and offset of the newly inserted tuple along
+      with the ItemId state.  On rollback, the inserted tuple is
+      physically removed from the page and the ItemId is restored to
+      its prior state.  No full tuple payload is stored.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><literal>DELETE</literal></term>
+    <listitem>
+     <para>
+      Records the full raw tuple data as it appears on the heap page.
+      On rollback, the original tuple bytes are restored to the page
+      via direct memory copy, and the ItemId is restored.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><literal>UPDATE</literal></term>
+    <listitem>
+     <para>
+      Records the full raw data of the old tuple version before the
+      update.  On rollback, the old tuple bytes are restored to their
+      original page location, and the new tuple is removed.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>Pruning (HOT cleanup and VACUUM)</term>
+    <listitem>
+     <para>
+      Records full copies of tuples being marked as dead or unused
+      during page pruning.  These records are not rolled back: pruning
+      is a maintenance operation, not a transactional data change.  They are
+      retained for diagnostics only; there is no user-facing tool that reads
+      them back.
+     </para>
+    </listitem>
+   </varlistentry>
+  </variablelist>
+
+  <para>
+   Each rollback operation generates a Compensation Log Record (CLR) in
+   the WAL stream.  CLRs carry full page images, ensuring that the
+   rollback is correctly replayed on standbys and during crash recovery.
+  </para>
+ </sect1>
+
+ <sect1 id="undo-crash-recovery">
+  <title>Crash Recovery and Replication</title>
+
+  <para>
+   The UNDO system is fully integrated with PostgreSQL's WAL-based
+   crash recovery and streaming replication.
+  </para>
+
+  <para>
+   When a transaction with UNDO records aborts, each UNDO application
+   generates a CLR (Compensation Log Record) WAL record.  These CLRs
+   contain full page images of the restored heap pages, making them
+   self-contained and safe to replay.
+  </para>
+
+  <para>
+   During crash recovery:
+  </para>
+
+  <orderedlist>
+   <listitem>
+    <para>
+     The redo phase replays all WAL records forward, including any CLRs
+     that were generated before the crash.  Pages are restored to their
+     post-rollback state.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     For transactions that were aborting at crash time but had not
+     completed rollback, the recovery process walks the remaining UNDO
+     chain and generates new CLRs, using CLR pointers to skip
+     already-applied records.
+    </para>
+   </listitem>
+  </orderedlist>
+
+  <para>
+   On streaming replication standbys, CLRs are replayed like any other
+   WAL record.  The standby does not need access to the UNDO log data
+   itself, since the CLR WAL records are self-contained with full page
+   images.
+  </para>
+ </sect1>
+
+ <sect1 id="undo-configuration">
+  <title>Configuration Parameters</title>
+
+  <variablelist>
+   <varlistentry>
+    <term><varname>undo_worker_naptime</varname> (<type>integer</type>)</term>
+    <listitem>
+     <para>
+      Time in milliseconds between UNDO discard worker cycles.
+      The worker wakes periodically to check for UNDO records that
+      are no longer needed by any active transaction.
+      Default: <literal>10000</literal> (10 seconds).
+     </para>
+    </listitem>
+   </varlistentry>
+  </variablelist>
+
+  <para>
+   UNDO data is stored in the standard shared buffer pool alongside
+   heap and index pages.  No dedicated UNDO buffer cache configuration
+   is needed.  The shared buffer pool dynamically adapts to the UNDO
+   workload through its normal clock-sweep eviction policy.
+  </para>
+ </sect1>
+
+ <sect1 id="undo-space-management">
+  <title>UNDO Space Management</title>
+
+  <para>
+   UNDO records are embedded directly in the WAL stream as
+   <literal>XLOG_UNDO_BATCH</literal> records (UNDO-in-WAL architecture).
+   There are no separate UNDO segment files or directories.  This
+   eliminates a separate storage tier and leverages existing WAL
+   infrastructure for durability, replication, and archival.
+  </para>
+
+  <para>
+   The UNDO discard worker background process advances the
+   <varname>undo_discard_horizon</varname>, allowing WAL segments
+   containing fully-discarded UNDO batches to be recycled.  UNDO records
+   for unresolved (uncommitted/unaborted) transactions are never discarded.
+  </para>
+
+  <para>
+   To monitor UNDO WAL retention:
+  </para>
+
+<programlisting>
+SELECT pg_size_pretty(
+    pg_wal_lsn_diff(pg_current_wal_lsn(), undo_discard_horizon)
+) AS undo_wal_retained
+FROM pg_stat_undo;
+</programlisting>
+
+  <para>
+   If UNDO space is growing unexpectedly, check for:
+  </para>
+
+  <itemizedlist>
+   <listitem>
+    <para>
+     Long-running transactions that prevent discard.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     The UNDO worker not running (check
+     <structname>pg_stat_activity</structname> for the
+     <literal>undo worker</literal> process).
+    </para>
+   </listitem>
+  </itemizedlist>
+ </sect1>
+
+ <sect1 id="undo-performance">
+  <title>Performance Impact</title>
+
+  <para>
+   For an access method that does not use UNDO, such as the default
+   <literal>heap</literal>, there is no measurable performance impact.  For one
+   that does, expect:
+  </para>
+
+  <itemizedlist>
+   <listitem>
+    <para>
+     <emphasis>INSERT:</emphasis> Minimal overhead.  A small header
+     record (~40 bytes) is written to the UNDO log recording the
+     ItemId state.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     <emphasis>DELETE/UPDATE:</emphasis> Moderate overhead.  The old tuple
+     data is copied to the UNDO log as raw page bytes; an in-place UPDATE may
+     instead log only the changed byte range.
+     Cost scales with tuple size.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     <emphasis>PRUNE:</emphasis> Overhead proportional to the number
+     of tuples being pruned.  Records are batched for efficiency.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     <emphasis>ABORT:</emphasis> Each UNDO record applied during
+     rollback generates a CLR WAL record with a full page image
+     (~8 KB).  This increases abort latency by approximately 20-50%
+     compared to systems without CLR generation, but ensures crash
+     safety and correct standby replay.
+    </para>
+   </listitem>
+  </itemizedlist>
+
+  <para>
+   UNDO I/O is performed outside critical sections, so it does not
+   extend the time that buffer locks are held.
+  </para>
+ </sect1>
+
+ <sect1 id="undo-monitoring">
+  <title>Monitoring</title>
+
+  <para>
+   Monitor UNDO system health using the following SQL-callable functions
+   and views:
+  </para>
+
+  <itemizedlist>
+   <listitem>
+    <para>
+     <function>pg_stat_get_undo_logs()</function>: returns one row per
+     UNDO log with its log number, insert and discard offsets, size in
+     bytes, oldest active transaction, and state.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     <function>pg_stat_get_undo_buffers()</function>: returns a single row
+     of UNDO buffer-cache statistics (buffer count, hits, misses,
+     evictions, writes, and hit ratio).
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     <function>pg_undo_force_discard(force_rotate boolean)</function>:
+     forces an immediate discard of reclaimable UNDO records and returns
+     the number of log segments freed.  Membership in the
+     <literal>pg_maintain</literal> role is required.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     <application>pg_waldump</application>: Inspect CLR records in WAL.
+     CLR records appear as <literal>UNDO/APPLY_RECORD</literal> entries
+     and can be filtered with <option>--rmgr=undo</option>.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     <structname>pg_stat_activity</structname>: Verify the
+     <literal>undo worker</literal> background process is running.
+    </para>
+   </listitem>
+  </itemizedlist>
+
+  <para>
+   Key log messages to watch for (at <literal>DEBUG1</literal> and above):
+  </para>
+
+  <itemizedlist>
+   <listitem>
+    <para>
+     <literal>"applying UNDO chain starting at ..."</literal> indicates
+     a transaction abort is applying its UNDO chain.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     <literal>"UNDO rollback: relation %u no longer exists, skipping"</literal>
+     indicates an UNDO record was skipped because the target relation was
+     dropped before rollback completed.
+    </para>
+   </listitem>
+  </itemizedlist>
+ </sect1>
+
+ <sect1 id="undo-architecture-notes">
+  <title>Architecture Notes</title>
+
+  <para>
+   The following notes describe the internal architecture for users
+   interested in the design rationale.
+  </para>
+
+  <sect2 id="undo-physical-vs-logical">
+   <title>Physical vs Logical UNDO</title>
+
+   <para>
+    The UNDO system uses <emphasis>physical</emphasis> UNDO operations:
+    when rolling back a transaction, the original page bytes are restored
+    directly using memory copy operations.  This contrasts with a
+    <emphasis>logical</emphasis> approach that would replay high-level
+    operations (like <function>simple_heap_insert</function> or
+    <function>simple_heap_delete</function>) in reverse.
+   </para>
+
+   <para>
+    Advantages of physical UNDO:
+   </para>
+
+   <itemizedlist>
+    <listitem>
+     <para>
+      <emphasis>Crash Safety:</emphasis> Each UNDO application generates a
+      Compensation Log Record (CLR) in WAL, ensuring that rollback completes
+      correctly even after a system crash.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      <emphasis>Standby Support:</emphasis> CLRs are replayed on physical
+      standbys just like forward-progress WAL records.  Standbys see
+      identical heap state as the primary after an abort.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      <emphasis>Determinism:</emphasis> Physical operations cannot fail due
+      to page-full conditions, TOAST complications, or index conflicts.
+      The operation is a direct memory copy with no side effects.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      <emphasis>Simplicity:</emphasis> Direct memory copy operations are
+      simpler and faster than reconstructing logical operations, and have
+      no side effects (no index updates, no TOAST operations, no
+      statistics maintenance).
+     </para>
+    </listitem>
+   </itemizedlist>
+
+   <para>
+    Trade-offs:
+   </para>
+
+   <itemizedlist>
+    <listitem>
+     <para>
+      <emphasis>WAL Volume:</emphasis> CLRs with full page images (~8 KB
+      each) increase WAL generation significantly per abort compared to
+      <productname>PostgreSQL</productname>'s default rollback mechanism
+      which generates no WAL.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      <emphasis>Abort Latency:</emphasis> Approximately 20-50% overhead
+      compared to <productname>PostgreSQL</productname>'s default rollback,
+      due to reading UNDO records, modifying pages, and writing CLRs.
+     </para>
+    </listitem>
+   </itemizedlist>
+
+   <para>
+    The design prioritizes correctness and crash safety over abort speed.
+    For workloads where transaction aborts are rare, the overhead is
+    negligible.
+   </para>
+  </sect2>
+
+  <sect2 id="undo-clr-mechanism">
+   <title>Compensation Log Records (CLRs)</title>
+
+   <para>
+    A CLR is a WAL record generated each time an UNDO record is physically
+    applied to a heap page during rollback.  CLRs serve three purposes:
+   </para>
+
+   <orderedlist>
+    <listitem>
+     <para>
+      <emphasis>Crash recovery:</emphasis> If the server crashes during
+      rollback, the redo phase replays any CLRs that were already written,
+      restoring pages to their post-undo state.  Rollback then continues
+      from where it left off, using CLR pointers in the UNDO records to
+      skip already-applied operations.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      <emphasis>Standby replication:</emphasis> CLRs are streamed to
+      standbys like any other WAL record.  The standby does not need
+      access to the UNDO log data itself, since CLRs are self-contained
+      with full page images.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      <emphasis>Audit trail:</emphasis> CLRs provide a permanent record
+      in WAL of every rollback operation, viewable with
+      <application>pg_waldump</application>.
+     </para>
+    </listitem>
+   </orderedlist>
+
+   <para>
+    Each CLR uses <literal>REGBUF_FORCE_IMAGE</literal> to store a
+    complete page image, making the CLR self-contained for recovery.
+    During redo, the page image is restored directly without needing
+    to re-read the UNDO record or re-apply the operation.
+   </para>
+  </sect2>
+
+  <sect2 id="undo-buffer-integration">
+   <title>Buffer Pool Integration</title>
+
+   <para>
+    UNDO log data is stored in the standard shared buffer pool alongside
+    heap and index pages.  Each UNDO log is mapped to a virtual
+    <structname>RelFileLocator</structname> with a dedicated pseudo-database
+    OID (<literal>UNDO_DB_OID = 9</literal>), allowing the buffer manager
+    to handle UNDO data without any changes to the core
+    <structname>BufferTag</structname> structure.
+   </para>
+
+   <para>
+    This design eliminates the need for a separate UNDO buffer cache,
+    reducing code complexity and allowing UNDO pages to participate in
+    the buffer manager's clock-sweep eviction and checkpoint mechanisms
+    automatically.  No dedicated UNDO buffer cache configuration is needed;
+    the standard <varname>shared_buffers</varname> setting controls memory
+    available for all buffer types including UNDO.
+   </para>
+  </sect2>
+
+  <sect2 id="undo-rollback-flow">
+   <title>Rollback Flow</title>
+
+   <para>
+    When a transaction aborts, the rollback proceeds as follows:
+   </para>
+
+   <orderedlist>
+    <listitem>
+     <para>
+      The transaction manager (<filename>xact.c</filename>) calls
+      <function>ApplyUndoChain()</function> with the first UNDO record
+      pointer for the aborting transaction.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      For each UNDO record in the chain (walked backward):
+     </para>
+     <orderedlist>
+      <listitem>
+       <para>Read the UNDO record from the log.</para>
+      </listitem>
+      <listitem>
+       <para>Check the CLR pointer: if valid, this record was already
+       applied during a previous rollback attempt; skip it.</para>
+      </listitem>
+      <listitem>
+       <para>Open the target relation and read the target page into a
+       shared buffer with an exclusive lock.</para>
+      </listitem>
+      <listitem>
+       <para>Apply the physical modification (memcpy) within a critical
+       section.</para>
+      </listitem>
+      <listitem>
+       <para>Generate a CLR WAL record with a full page image.</para>
+      </listitem>
+      <listitem>
+       <para>Store the CLR's LSN back into the UNDO record's
+       <structfield>urec_clr_ptr</structfield> field to mark it as
+       applied.</para>
+      </listitem>
+     </orderedlist>
+    </listitem>
+    <listitem>
+     <para>
+      <function>AtAbort_XactUndo()</function> cleans up record sets and
+      resets per-transaction state.
+     </para>
+    </listitem>
+   </orderedlist>
+  </sect2>
+ </sect1>
+
+</chapter>

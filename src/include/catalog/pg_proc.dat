@@ -12779,4 +12779,26 @@
   proname => 'hashoid8extended', prorettype => 'int8',
   proargtypes => 'oid8 int8', prosrc => 'hashoid8extended' },
 
+# UNDO subsystem statistics and maintenance
+{ oid => '9410', descr => 'statistics: per-log UNDO storage and discard progress',
+  proname => 'pg_stat_get_undo_logs', prorows => '128', proretset => 't',
+  provolatile => 'v', proparallel => 'r', prorettype => 'record',
+  proargtypes => '',
+  proallargtypes => '{int4,int8,int8,int8,xid,text}',
+  proargmodes => '{o,o,o,o,o,o}',
+  proargnames => '{log_number,insert_offset,discard_offset,size_bytes,oldest_xid,state}',
+  prosrc => 'pg_stat_get_undo_logs' },
+{ oid => '9411', descr => 'statistics: UNDO buffer cache hit/miss/eviction',
+  proname => 'pg_stat_get_undo_buffers', proisstrict => 'f',
+  provolatile => 'v', proparallel => 'r', prorettype => 'record',
+  proargtypes => '',
+  proallargtypes => '{int4,int8,int8,int8,int8,float4}',
+  proargmodes => '{o,o,o,o,o,o}',
+  proargnames => '{num_buffers,cache_hits,cache_misses,cache_evictions,cache_writes,hit_ratio}',
+  prosrc => 'pg_stat_get_undo_buffers' },
+{ oid => '9412', descr => 'force discard of reclaimable UNDO records',
+  proname => 'pg_undo_force_discard', provolatile => 'v', proparallel => 'r',
+  prorettype => 'int4', proargtypes => 'bool',
+  prosrc => 'pg_undo_force_discard' },
+
 ]

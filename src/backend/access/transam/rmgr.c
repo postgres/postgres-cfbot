@@ -40,6 +40,7 @@
 #include "replication/origin.h"
 #include "storage/standby.h"
 #include "utils/relmapper.h"
+#include "access/undo_xlog.h"
 /* IWYU pragma: end_keep */
 
 

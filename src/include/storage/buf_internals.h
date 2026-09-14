@@ -147,6 +147,20 @@ StaticAssertDecl(BM_MAX_USAGE_COUNT < (UINT64CONST(1) << BUF_USAGECOUNT_BITS),
 				 "BM_MAX_USAGE_COUNT doesn't fit in BUF_USAGECOUNT_BITS bits");
 
 /*
+ * Reserved fork number for UNDO log buffers.
+ *
+ * This constant is reserved for future use when the smgr layer is extended
+ * to support undo-specific file management.  Currently, undo buffers use
+ * MAIN_FORKNUM (following ZHeap's UndoLogForkNum convention) because the
+ * smgr layer sizes internal arrays to MAX_FORKNUM+1.  Undo buffers are
+ * distinguished from regular relation data by using a pseudo-database OID
+ * (UNDO_DB_OID = 9) in the BufferTag's dbOid field.
+ *
+ * See src/include/access/undo_bufmgr.h for the undo buffer manager API.
+ */
+#define UNDO_FORKNUM			5
+
+/*
  * Buffer tag identifies which disk block the buffer contains.
  *
  * Note: the BufferTag data must be sufficient to determine where to write the
