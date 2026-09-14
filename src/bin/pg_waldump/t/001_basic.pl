@@ -97,7 +97,8 @@ ReplicationOrigin
 Generic
 LogicalMessage
 XLOG2
-Undo$/,
+Undo
+FileOps$/,
 	'rmgr list');
 
 

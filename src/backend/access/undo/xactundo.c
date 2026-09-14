@@ -996,12 +996,6 @@ AtAbort_XactUndo(void)
 		}
 	}
 
-	/* Close cached UNDO log fds. */
-	UndoLogCloseFiles();
-
-	/* Reset per-backend write pointer tracking. */
-	UndoFlushResetMaxWritePtr();
-
 	/*
 	 * Release the WAL retention hold if nothing needs the UNDO records any
 	 * more: inline UNDO completed, or the ATM recorded the transaction (the
@@ -1271,12 +1265,6 @@ AtProcExit_XactUndo(void)
 			XactUndo.record_set[i] = NULL;
 		}
 	}
-
-	/* Close any cached UNDO log fds before process exit. */
-	UndoLogCloseFiles();
-
-	/* Reset per-backend write pointer tracking. */
-	UndoFlushResetMaxWritePtr();
 
 	/* Release any WAL retention hold (in case process exits mid-transaction). */
 	UndoClearBatchLSN();
