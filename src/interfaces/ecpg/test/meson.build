@@ -1,7 +1,7 @@
 # Copyright (c) 2022-2026, PostgreSQL Global Development Group
 
-# can't run ecpg to build test dependencies, at least not without an emulator
-if meson.is_cross_build()
+# We need to run ecpg to build test dependencies.
+if not meson.can_run_host_binaries()
   subdir_done()
 endif
 
