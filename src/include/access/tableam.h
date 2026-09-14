@@ -72,6 +72,9 @@ typedef enum ScanOptions
 
 	/* collect scan instrumentation */
 	SO_SCAN_INSTRUMENT = 1 << 11,
+
+	/* use maintenance I/O concurrency */
+	SO_MAINTENANCE = 1 << 12,
 }			ScanOptions;
 
 /*

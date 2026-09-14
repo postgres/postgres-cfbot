@@ -1281,6 +1281,10 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 		scan->rs_base.rs_flags & SO_TYPE_TIDRANGESCAN)
 	{
 		ReadStreamBlockNumberCB cb;
+		int			stream_flags = READ_STREAM_SEQUENTIAL | READ_STREAM_USE_BATCHING;
+
+		if (scan->rs_base.rs_flags & SO_MAINTENANCE)
+			stream_flags |= READ_STREAM_MAINTENANCE;
 
 		if (scan->rs_base.rs_parallel)
 			cb = heap_scan_stream_read_next_parallel;
@@ -1294,8 +1298,7 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 		 * - in the parallel case, only spinlocks and atomics are used
 		 * ---
 		 */
-		scan->rs_read_stream = read_stream_begin_relation(READ_STREAM_SEQUENTIAL |
-														  READ_STREAM_USE_BATCHING,
+		scan->rs_read_stream = read_stream_begin_relation(stream_flags,
 														  scan->rs_strategy,
 														  scan->rs_base.rs_rd,
 														  MAIN_FORKNUM,
