@@ -20,6 +20,9 @@ extern PGDLLIMPORT bool Transform_null_equals;
 
 extern Node *transformExpr(ParseState *pstate, Node *expr, ParseExprKind exprKind);
 
+extern void checkColumnRefAllowed(ParseState *pstate, ParseExprKind exprKind,
+								  int location);
+
 extern const char *ParseExprKindName(ParseExprKind exprKind);
 
 #endif							/* PARSE_EXPR_H */
