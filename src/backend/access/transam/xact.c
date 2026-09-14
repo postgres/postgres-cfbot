@@ -59,6 +59,7 @@
 #include "storage/aio_subsys.h"
 #include "storage/condition_variable.h"
 #include "storage/fd.h"
+#include "storage/fileops.h"
 #include "storage/lmgr.h"
 #include "storage/md.h"
 #include "storage/predicate.h"
@@ -1890,6 +1891,8 @@ RecordTransactionAbort(bool isSubXact)
 	TransactionId *children;
 	TimestampTz xact_time;
 	bool		replorigin;
+	char	   *fileops;
+	uint32		fileops_len;
 
 	/*
 	 * If we haven't been assigned an XID, nobody will care whether we aborted
@@ -1908,9 +1911,9 @@ RecordTransactionAbort(bool isSubXact)
 	/*
 	 * We have a valid XID, so we should write an ABORT record for it.
 	 *
-	 * We do not flush XLOG to disk here, since the default assumption after a
-	 * crash would be that we aborted, anyway.  For the same reason, we don't
-	 * need to worry about interlocking against checkpoint start.
+	 * An ordinary abort need not flush WAL: a crash treats it as a loser.
+	 * FILEOPS inverses, however, must follow a durable abort decision, with
+	 * checkpoint start delayed until their filesystem effects are synced.
 	 */
 
 	/*
@@ -1932,6 +1935,10 @@ RecordTransactionAbort(bool isSubXact)
 	nchildren = xactGetCommittedChildren(&children);
 	ndroppedstats = pgstat_get_transactional_drops(false, &droppedstats);
 
+	FileOpsGetAbortData(&fileops, &fileops_len);
+	if (fileops_len)
+		FileOpsBeginAbort();
+
 	/* XXX do we really need a critical section here? */
 	START_CRIT_SECTION();
 
@@ -1948,7 +1955,7 @@ RecordTransactionAbort(bool isSubXact)
 					   nrels, rels,
 					   ndroppedstats, droppedstats,
 					   MyXactFlags, InvalidTransactionId,
-					   NULL);
+					   NULL, fileops, fileops_len);
 
 	if (replorigin)
 		/* Move LSNs forward for this replication origin */
@@ -1977,7 +1984,25 @@ RecordTransactionAbort(bool isSubXact)
 	 */
 	TransactionIdAbortTree(xid, nchildren, children);
 
+	if (fileops_len)
+		XLogFlush(XactLastRecEnd);
 	END_CRIT_SECTION();
+
+	if (fileops_len)
+	{
+		PG_TRY();
+		{
+			INJECTION_POINT("fileops-abort-after-flush", NULL);
+			FileOpsApplyAbort(fileops, fileops_len);
+		}
+		PG_FINALLY();
+		{
+			FileOpsEndAbort();
+		}
+		PG_END_TRY();
+	}
+	if (fileops)
+		pfree(fileops);
 
 	/* Compute latestXid while we have the child XIDs handy */
 	latestXid = TransactionIdLatest(xid, nchildren, children);
@@ -3112,8 +3137,21 @@ AbortTransaction(void)
 	s->parallelModeLevel = 0;
 	s->parallelChildXact = false;	/* should be false already */
 
-	/* Clean up transaction undo state (free per-persistence record sets) */
-	AtAbort_XactUndo();
+	/*
+	 * Apply the transaction's UNDO, except FILEOPS: its inverses ride in the
+	 * abort record (RecordTransactionAbort), so that a standby and crash
+	 * recovery apply them too.  The generic chain is for crash losers.
+	 */
+	FileOpsSkipUndo = true;
+	PG_TRY();
+	{
+		AtAbort_XactUndo();
+	}
+	PG_FINALLY();
+	{
+		FileOpsSkipUndo = false;
+	}
+	PG_END_TRY();
 
 	/*
 	 * do abort processing
@@ -6236,7 +6274,8 @@ XactLogAbortRecord(TimestampTz abort_time,
 				   int nrels, RelFileLocator *rels,
 				   int ndroppedstats, xl_xact_stats_item *droppedstats,
 				   int xactflags, TransactionId twophase_xid,
-				   const char *twophase_gid)
+				   const char *twophase_gid,
+				   const char *fileops, uint32 fileops_len)
 {
 	xl_xact_abort xlrec;
 	xl_xact_xinfo xl_xinfo;
@@ -6251,7 +6290,7 @@ XactLogAbortRecord(TimestampTz abort_time,
 
 	Assert(CritSectionCount > 0);
 
-	xl_xinfo.xinfo = 0;
+	xl_xinfo.xinfo = fileops_len ? XACT_XINFO_HAS_FILEOPS : 0;
 
 	/* decide between a plain and 2pc abort */
 	if (!TransactionIdIsValid(twophase_xid))
@@ -6363,6 +6402,12 @@ XactLogAbortRecord(TimestampTz abort_time,
 
 	if (xl_xinfo.xinfo & XACT_XINFO_HAS_ORIGIN)
 		XLogRegisterData(&xl_origin, sizeof(xl_xact_origin));
+
+	if (fileops_len)
+	{
+		XLogRegisterData(&fileops_len, sizeof(fileops_len));
+		XLogRegisterData(fileops, fileops_len);
+	}
 
 	/* Include the replication origin */
 	XLogSetRecordFlags(XLOG_INCLUDE_ORIGIN);
@@ -6584,6 +6629,13 @@ xact_redo_abort(xl_xact_parsed_abort *parsed, TransactionId xid,
 		/* recover apply progress */
 		replorigin_advance(origin_id, parsed->origin_lsn, lsn,
 						   false /* backward */ , false /* WAL */ );
+	}
+
+	if (parsed->fileops_len)
+	{
+		XLogFlush(lsn);
+		INJECTION_POINT("fileops-abort-after-flush", NULL);
+		FileOpsApplyAbort(parsed->fileops, parsed->fileops_len);
 	}
 
 	/* Make sure files supposed to be dropped are dropped */

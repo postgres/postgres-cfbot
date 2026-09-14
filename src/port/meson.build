@@ -14,6 +14,7 @@ pgport_sources = [
   'pg_popcount_aarch64.c',
   'pg_popcount_x86.c',
   'pg_strong_random.c',
+  'pg_xattr.c',
   'pgcheckdir.c',
   'pgmkdirp.c',
   'pgsleep.c',

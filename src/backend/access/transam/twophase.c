@@ -100,6 +100,7 @@
 #include "replication/origin.h"
 #include "replication/syncrep.h"
 #include "storage/fd.h"
+#include "storage/fileops.h"
 #include "storage/ipc.h"
 #include "storage/md.h"
 #include "storage/predicate.h"
@@ -149,6 +150,15 @@ int			max_prepared_xacts = 0;
  * typedef struct GlobalTransactionData *GlobalTransaction appears in
  * twophase.h
  */
+
+/*
+ * FILEOPS 2PC prepare hook (fileops.c).  Declared locally by prototype to
+ * avoid pulling storage/fileops.h into this file.  Serializes this
+ * transaction's pending file operations into the 2PC state file so
+ * COMMIT/ROLLBACK PREPARED -- possibly from another backend after a crash --
+ * can perform the deferred commit-time ops or the abort-time filesystem undo.
+ */
+extern void FileOpsAtPrepare(void);
 
 typedef struct GlobalTransactionData
 {
@@ -241,7 +251,9 @@ static void RecordTransactionAbortPrepared(TransactionId xid,
 										   RelFileLocator *rels,
 										   int nstats,
 										   xl_xact_stats_item *stats,
-										   const char *gid);
+										   const char *gid,
+										   const char *fileops,
+										   uint32 fileops_len);
 static void ProcessRecords(char *bufptr, FullTransactionId fxid,
 						   const TwoPhaseCallback callbacks[]);
 static void RemoveGXact(GlobalTransaction gxact);
@@ -996,11 +1008,17 @@ TwoPhaseFilePath(char *path, FullTransactionId fxid)
  *
  * TWOPHASE_MAGIC must be bumped whenever xl_xact_prepare changes layout.
  * The struct gained last_batch_lsn[NUndoPersistenceLevels] (24 bytes) for
- * UNDO chain tracking across 2PC boundaries, requiring this bump from
+ * UNDO chain tracking across 2PC boundaries, requiring a bump from
  * 0x57F94534 to 0x57F94535 to prevent old servers from silently misreading
  * the variable-length arrays that follow the fixed header at the wrong offsets.
+ *
+ * Bumped again to 0x57F94536: FILEOPS now registers TWOPHASE_RM_FILEOPS_ID
+ * records so deferred commit-time file operations (RENAME/DELETE/RMDIR/RMTREE)
+ * and abort-time filesystem undo survive PREPARE.  This adds a new 2PC record
+ * type (not a header field), but a bump still keeps a mixed-version cluster
+ * from replaying a state file whose record stream it does not understand.
  */
-#define TWOPHASE_MAGIC	0x57F94535	/* format identifier */
+#define TWOPHASE_MAGIC	0x57F94536	/* format identifier */
 
 typedef xl_xact_prepare TwoPhaseFileHeader;
 
@@ -1178,6 +1196,13 @@ EndPrepare(GlobalTransaction gxact)
 	TwoPhaseFileHeader *hdr;
 	StateFileChunk *record;
 	bool		replorigin;
+
+	/*
+	 * FILEOPS: persist this transaction's pending file operations into the
+	 * 2PC state file, so COMMIT PREPARED can run them after a crash.  Must
+	 * run before the END sentinel while the record chain is still open.  A no-op if this transaction registered no file operations.
+	 */
+	FileOpsAtPrepare();
 
 	/* Add the end sentinel to the list of 2PC records */
 	RegisterTwoPhaseRecord(TWOPHASE_RM_END_ID, 0,
@@ -1652,12 +1677,38 @@ FinishPreparedTransaction(const char *gid, bool isCommit)
 										hdr->initfileinval, gid);
 	else
 	{
+		char	   *fileops = NULL;
+		uint32		fileops_len = 0;
+		char	   *scan = bufptr;
+
+		/*
+		 * The abort decision and the FILEOPS inverses must be in the same WAL
+		 * record, so a standby and crash recovery apply the inverses whenever
+		 * they replay the abort.  PREPARE saved them as a 2PC record.
+		 */
+		for (;;)
+		{
+			TwoPhaseRecordOnDisk *record = (TwoPhaseRecordOnDisk *) scan;
+
+			if (record->rmid == TWOPHASE_RM_END_ID)
+				break;
+			scan += MAXALIGN(sizeof(TwoPhaseRecordOnDisk));
+			if (record->rmid == TWOPHASE_RM_FILEOPS_ID &&
+				record->info == FILEOPS_TWOPHASE_INVERSES)
+			{
+				fileops = scan;
+				fileops_len = record->len;
+				break;
+			}
+			scan += MAXALIGN(record->len);
+		}
+
 		RecordTransactionAbortPrepared(xid,
 									   hdr->nsubxacts, children,
 									   hdr->nabortrels, abortrels,
 									   hdr->nabortstats,
 									   abortstats,
-									   gid);
+									   gid, fileops, fileops_len);
 
 		/*
 		 * ROLLBACK PREPARED: apply any cluster-wide UNDO chain synchronously,
@@ -2574,7 +2625,9 @@ RecordTransactionAbortPrepared(TransactionId xid,
 							   RelFileLocator *rels,
 							   int nstats,
 							   xl_xact_stats_item *stats,
-							   const char *gid)
+							   const char *gid,
+							   const char *fileops,
+							   uint32 fileops_len)
 {
 	XLogRecPtr	recptr;
 	bool		replorigin;
@@ -2619,7 +2672,7 @@ RecordTransactionAbortPrepared(TransactionId xid,
 								nrels, rels,
 								nstats, stats,
 								MyXactFlags | XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK,
-								xid, gid);
+								xid, gid, fileops, fileops_len);
 
 	if (replorigin)
 		/* Move LSNs forward for this replication origin */
@@ -2632,10 +2685,29 @@ RecordTransactionAbortPrepared(TransactionId xid,
 	/* Mark the transaction aborted in clog */
 	TransactionIdAbortTree(xid, nchildren, children);
 
-	/* Checkpoint can proceed now */
-	MyProc->delayChkptFlags &= ~DELAY_CHKPT_START;
+	/*
+	 * Checkpoint can proceed now, unless FILEOPS inverses still have to be
+	 * applied: a checkpoint must not move the redo pointer past this abort
+	 * record until they are durable, so keep it delayed until then.
+	 */
+	if (!fileops_len)
+		MyProc->delayChkptFlags &= ~DELAY_CHKPT_START;
 
 	END_CRIT_SECTION();
+
+	if (fileops_len)
+	{
+		PG_TRY();
+		{
+			INJECTION_POINT("fileops-abort-after-flush", NULL);
+			FileOpsApplyAbort(fileops, fileops_len);
+		}
+		PG_FINALLY();
+		{
+			MyProc->delayChkptFlags &= ~DELAY_CHKPT_START;
+		}
+		PG_END_TRY();
+	}
 
 	/*
 	 * Wait for synchronous replication, if required.
