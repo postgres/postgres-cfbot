@@ -261,7 +261,8 @@ pgstat_drop_relation(Relation rel)
  */
 void
 pgstat_report_vacuum(Relation rel, PgStat_Counter livetuples,
-					 PgStat_Counter deadtuples, TimestampTz starttime)
+					 PgStat_Counter deadtuples,
+					 PgStat_Counter missed_dead_pages, TimestampTz starttime)
 {
 	PgStat_EntryRef *entry_ref;
 	PgStatShared_Relation *shtabentry;
@@ -286,6 +287,14 @@ pgstat_report_vacuum(Relation rel, PgStat_Counter livetuples,
 
 	tabentry->live_tuples = livetuples;
 	tabentry->dead_tuples = deadtuples;
+
+	/*
+	 * Pages this VACUUM could not clean up because it failed to acquire a
+	 * cleanup lock on them.  Like prune_onaccess_missed, this accumulates:
+	 * it measures how much cleanup work concurrent buffer pins are
+	 * deferring, rather than being a property of the last VACUUM.
+	 */
+	tabentry->vacuum_missed_dead_pages += missed_dead_pages;
 
 	/*
 	 * It is quite possible that a non-aggressive VACUUM ended up skipping
@@ -520,6 +529,46 @@ pgstat_update_heap_dead_tuples(Relation rel, int delta)
 		Assert(pgstat_info->kind == PGSTAT_KIND_RELATION);
 
 		pgstat_info->tab.counts_xact.delta_dead_tuples -= delta;
+	}
+}
+
+/*
+ * Count an on-access prune of one heap page.
+ *
+ * newly_all_visible is true if this prune also marked the page all-visible
+ * in the visibility map.
+ */
+void
+pgstat_count_prune_onaccess(Relation rel, bool newly_all_visible)
+{
+	if (pgstat_should_count_relation(rel))
+	{
+		PgStat_RelationStatus *pgstat_info = rel->pgstat_info;
+
+		Assert(pgstat_info->kind == PGSTAT_KIND_RELATION);
+
+		pgstat_info->tab.counts.prune_onaccess++;
+		if (newly_all_visible)
+			pgstat_info->tab.counts.pages_all_visible_onaccess++;
+	}
+}
+
+/*
+ * Count an on-access prune that was abandoned because the buffer cleanup
+ * lock could not be acquired, i.e. some other backend held a pin on the
+ * page.  A page counted here keeps its dead tuples until some later prune
+ * or VACUUM gets to it.
+ */
+void
+pgstat_count_prune_onaccess_missed(Relation rel)
+{
+	if (pgstat_should_count_relation(rel))
+	{
+		PgStat_RelationStatus *pgstat_info = rel->pgstat_info;
+
+		Assert(pgstat_info->kind == PGSTAT_KIND_RELATION);
+
+		pgstat_info->tab.counts.prune_onaccess_missed++;
 	}
 }
 
@@ -931,6 +980,10 @@ pgstat_relation_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 	tabentry->tuples_deleted += lstats->tab.counts_xact.tuples_deleted;
 	tabentry->tuples_hot_updated += lstats->tab.counts_xact.tuples_hot_updated;
 	tabentry->tuples_newpage_updated += lstats->tab.counts_xact.tuples_newpage_updated;
+	tabentry->prune_onaccess += lstats->tab.counts.prune_onaccess;
+	tabentry->prune_onaccess_missed += lstats->tab.counts.prune_onaccess_missed;
+	tabentry->pages_all_visible_onaccess +=
+		lstats->tab.counts.pages_all_visible_onaccess;
 
 	/*
 	 * If table was truncated/dropped, first reset the live/dead counters.
