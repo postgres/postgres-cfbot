@@ -185,13 +185,17 @@ static SyncStandbySlotsConfigData *synchronized_standby_slots_config;
 static XLogRecPtr ss_oldest_flush_lsn = InvalidXLogRecPtr;
 
 static void ReplicationSlotShmemExit(int code, Datum arg);
+static void ReplicationSlotReleaseInternal(bool update_inactive_since);
+static void ReplicationSlotReleaseOnError(int code, Datum arg);
 static bool IsSlotForConflictCheck(const char *name);
 static void ReplicationSlotDropPtr(ReplicationSlot *slot);
 
 /* internal persistency functions */
 static void RestoreSlotFromDisk(const char *name);
 static void CreateSlotOnDisk(ReplicationSlot *slot);
-static void SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel);
+static void SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel,
+						   ReplicationSlotInvalidationCause invalidation_cause,
+						   bool clear_restart_lsn);
 
 /*
  * Register shared memory space needed for replication slots.
@@ -770,12 +774,22 @@ retry:
 void
 ReplicationSlotRelease(void)
 {
+	ReplicationSlotReleaseInternal(true);
+}
+
+/*
+ * Release the replication slot, optionally preserving inactive_since.
+ */
+static void
+ReplicationSlotReleaseInternal(bool update_inactive_since)
+{
 	ReplicationSlot *slot = MyReplicationSlot;
 	char	   *slotname = NULL;	/* keep compiler quiet */
 	bool		is_logical;
 	TimestampTz now = 0;
 
 	Assert(slot != NULL && slot->active_proc != INVALID_PROC_NUMBER);
+	Assert(update_inactive_since || slot->data.persistency == RS_PERSISTENT);
 
 	is_logical = SlotIsLogical(slot);
 
@@ -808,10 +822,12 @@ ReplicationSlotRelease(void)
 		}
 
 		/*
-		 * Set the time since the slot has become inactive. We get the current
-		 * time beforehand to avoid system call while holding the spinlock.
+		 * Set the time since the slot has become inactive, unless the caller
+		 * needs to preserve it. Get the current time beforehand to avoid a
+		 * system call while holding the spinlock.
 		 */
-		now = GetCurrentTimestamp();
+		if (update_inactive_since)
+			now = GetCurrentTimestamp();
 
 		if (slot->data.persistency == RS_PERSISTENT)
 		{
@@ -821,11 +837,12 @@ ReplicationSlotRelease(void)
 			 */
 			SpinLockAcquire(&slot->mutex);
 			slot->active_proc = INVALID_PROC_NUMBER;
-			ReplicationSlotSetInactiveSince(slot, now, false);
+			if (update_inactive_since)
+				ReplicationSlotSetInactiveSince(slot, now, false);
 			SpinLockRelease(&slot->mutex);
 			ConditionVariableBroadcast(&slot->active_cv);
 		}
-		else
+		else if (update_inactive_since)
 			ReplicationSlotSetInactiveSince(slot, now, true);
 
 		MyReplicationSlot = NULL;
@@ -848,6 +865,18 @@ ReplicationSlotRelease(void)
 
 		pfree(slotname);
 	}
+}
+
+/*
+ * Release a slot claimed internally for invalidation after an error.
+ */
+static void
+ReplicationSlotReleaseOnError(int code, Datum arg)
+{
+	ReplicationSlot *slot = (ReplicationSlot *) DatumGetPointer(arg);
+
+	if (MyReplicationSlot == slot)
+		ReplicationSlotReleaseInternal(false);
 }
 
 /*
@@ -1168,7 +1197,29 @@ ReplicationSlotSave(void)
 	Assert(MyReplicationSlot != NULL);
 
 	sprintf(path, "%s/%s", PG_REPLSLOT_DIR, NameStr(MyReplicationSlot->data.name));
-	SaveSlotToPath(MyReplicationSlot, path, ERROR);
+	SaveSlotToPath(MyReplicationSlot, path, ERROR, RS_INVAL_NONE, false);
+}
+
+/*
+ * Persist an invalidated image of the acquired slot before publishing the
+ * invalidation in shared memory.
+ */
+void
+ReplicationSlotPersistInvalidation(ReplicationSlotInvalidationCause cause,
+								   bool clear_restart_lsn)
+{
+	char		path[MAXPGPATH];
+
+	Assert(MyReplicationSlot != NULL);
+	Assert(MyReplicationSlot->data.persistency != RS_EPHEMERAL);
+	Assert(MyReplicationSlot->data.invalidated == RS_INVAL_NONE);
+	Assert(cause != RS_INVAL_NONE);
+	Assert(!clear_restart_lsn || cause == RS_INVAL_WAL_REMOVED);
+
+	sprintf(path, "%s/%s", PG_REPLSLOT_DIR,
+			NameStr(MyReplicationSlot->data.name));
+
+	SaveSlotToPath(MyReplicationSlot, path, ERROR, cause, clear_restart_lsn);
 }
 
 /*
@@ -2047,9 +2098,8 @@ InvalidatePossiblyObsoleteSlot(uint32 possible_causes,
 		active_proc = s->active_proc;
 
 		/*
-		 * If the slot can be acquired, do so and mark it invalidated
-		 * immediately.  Otherwise we'll signal the owning process, below, and
-		 * retry.
+		 * If the slot can be acquired, do so.  Otherwise we'll signal the
+		 * owning process, below, and retry.
 		 *
 		 * Note: Unlike other slot attributes, slot's inactive_since can't be
 		 * changed until the acquired slot is released or the owning process
@@ -2058,22 +2108,9 @@ InvalidatePossiblyObsoleteSlot(uint32 possible_causes,
 		 */
 		if (active_proc == INVALID_PROC_NUMBER)
 		{
+			Assert(s->data.persistency == RS_PERSISTENT);
 			MyReplicationSlot = s;
 			s->active_proc = MyProcNumber;
-			s->data.invalidated = invalidation_cause;
-
-			/*
-			 * XXX: We should consider not overwriting restart_lsn and instead
-			 * just rely on .invalidated.
-			 */
-			if (invalidation_cause == RS_INVAL_WAL_REMOVED)
-			{
-				s->data.restart_lsn = InvalidXLogRecPtr;
-				s->last_saved_restart_lsn = InvalidXLogRecPtr;
-			}
-
-			/* Let caller know */
-			invalidated = true;
 		}
 		else
 		{
@@ -2159,8 +2196,8 @@ InvalidatePossiblyObsoleteSlot(uint32 possible_causes,
 		else
 		{
 			/*
-			 * We hold the slot now and have already invalidated it; flush it
-			 * to ensure that state persists.
+			 * We hold the slot now. Persist its invalidation before
+			 * publishing it in shared memory.
 			 *
 			 * Don't want to hold ReplicationSlotControlLock across file
 			 * system operations, so release it now but be sure to tell caller
@@ -2169,9 +2206,18 @@ InvalidatePossiblyObsoleteSlot(uint32 possible_causes,
 			LWLockRelease(ReplicationSlotControlLock);
 			released_lock = true;
 
-			/* Make sure the invalidated state persists across server restart */
-			ReplicationSlotMarkDirty();
-			ReplicationSlotSave();
+			PG_ENSURE_ERROR_CLEANUP(ReplicationSlotReleaseOnError,
+									PointerGetDatum(s));
+			{
+				ReplicationSlotPersistInvalidation(
+												   invalidation_cause,
+												   invalidation_cause == RS_INVAL_WAL_REMOVED);
+			}
+			PG_END_ENSURE_ERROR_CLEANUP(ReplicationSlotReleaseOnError,
+										PointerGetDatum(s));
+
+			/* Let caller know */
+			invalidated = true;
 			ReplicationSlotRelease();
 
 			ReportSlotInvalidation(invalidation_cause, false, active_pid,
@@ -2380,7 +2426,7 @@ CheckPointReplicationSlots(bool is_shutdown)
 		if (s->last_saved_restart_lsn != s->data.restart_lsn)
 			last_saved_restart_lsn_updated = true;
 
-		SaveSlotToPath(s, path, LOG);
+		SaveSlotToPath(s, path, LOG, RS_INVAL_NONE, false);
 	}
 	LWLockRelease(ReplicationSlotAllocationLock);
 
@@ -2493,7 +2539,7 @@ CreateSlotOnDisk(ReplicationSlot *slot)
 
 	/* Write the actual state file. */
 	slot->dirty = true;			/* signal that we really need to write */
-	SaveSlotToPath(slot, tmppath, ERROR);
+	SaveSlotToPath(slot, tmppath, ERROR, RS_INVAL_NONE, false);
 
 	/* Rename the directory into place. */
 	if (rename(tmppath, path) != 0)
@@ -2519,13 +2565,17 @@ CreateSlotOnDisk(ReplicationSlot *slot)
  * Shared functionality between saving and creating a replication slot.
  */
 static void
-SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel)
+SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel,
+			   ReplicationSlotInvalidationCause invalidation_cause,
+			   bool clear_restart_lsn)
 {
 	char		tmppath[MAXPGPATH];
 	char		path[MAXPGPATH];
 	int			fd;
 	ReplicationSlotOnDisk cp;
 	bool		was_dirty;
+
+	Assert(!clear_restart_lsn || invalidation_cause == RS_INVAL_WAL_REMOVED);
 
 	/* first check whether there's something to write out */
 	SpinLockAcquire(&slot->mutex);
@@ -2534,8 +2584,10 @@ SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel)
 	SpinLockRelease(&slot->mutex);
 
 	/* and don't do anything if there's nothing to write */
-	if (!was_dirty)
+	if (!was_dirty && invalidation_cause == RS_INVAL_NONE)
 		return;
+
+	INJECTION_POINT("replication-slot-save-error", NameStr(slot->data.name));
 
 	LWLockAcquire(&slot->io_in_progress_lock, LW_EXCLUSIVE);
 
@@ -2575,6 +2627,20 @@ SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel)
 	memcpy(&cp.slotdata, &slot->data, sizeof(ReplicationSlotPersistentData));
 
 	SpinLockRelease(&slot->mutex);
+
+	if (invalidation_cause != RS_INVAL_NONE)
+	{
+		Assert(cp.slotdata.invalidated == RS_INVAL_NONE);
+
+		cp.slotdata.invalidated = invalidation_cause;
+
+		/*
+		 * XXX: We should consider not overwriting restart_lsn and instead
+		 * just rely on .invalidated.
+		 */
+		if (clear_restart_lsn)
+			cp.slotdata.restart_lsn = InvalidXLogRecPtr;
+	}
 
 	COMP_CRC32C(cp.checksum,
 				(char *) (&cp) + ReplicationSlotOnDiskNotChecksummedSize,
@@ -2669,6 +2735,14 @@ SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel)
 	 * already and remember the confirmed_flush LSN value.
 	 */
 	SpinLockAcquire(&slot->mutex);
+	if (invalidation_cause != RS_INVAL_NONE)
+	{
+		Assert(slot->data.invalidated == RS_INVAL_NONE);
+
+		slot->data.invalidated = invalidation_cause;
+		if (clear_restart_lsn)
+			slot->data.restart_lsn = InvalidXLogRecPtr;
+	}
 	if (!slot->just_dirtied)
 		slot->dirty = false;
 	slot->last_saved_confirmed_flush = cp.slotdata.confirmed_flush;
