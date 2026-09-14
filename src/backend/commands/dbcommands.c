@@ -56,6 +56,7 @@
 #include "replication/slot.h"
 #include "storage/copydir.h"
 #include "storage/fd.h"
+#include "storage/fileops.h"
 #include "storage/ipc.h"
 #include "storage/lmgr.h"
 #include "storage/md.h"
@@ -473,55 +474,91 @@ CreateDirAndVersionFile(char *dbpath, Oid dbid, Oid tsid, bool isRedo)
 	nbytes = strlen(PG_MAJORVERSION) + 1;
 
 	/* Create database directory. */
-	if (MakePGDirectory(dbpath) < 0)
+	if (!isRedo)
 	{
-		/* Failure other than already exists or not in WAL replay? */
-		if (errno != EEXIST || !isRedo)
-			ereport(ERROR,
-					(errcode_for_file_access(),
-					 errmsg("could not create directory \"%s\": %m", dbpath)));
+		FileOpsMkdir(dbpath, pg_dir_create_mode);
+	}
+	else
+	{
+		if (MakePGDirectory(dbpath) < 0)
+		{
+			/* Failure other than already exists or not in WAL replay? */
+			if (errno != EEXIST)
+				ereport(ERROR,
+						(errcode_for_file_access(),
+						 errmsg("could not create directory \"%s\": %m", dbpath)));
+		}
 	}
 
 	/*
-	 * Create PG_VERSION file in the database path.  If the file already
-	 * exists and we are in WAL replay then try again to open it in write
-	 * mode.
+	 * Create PG_VERSION file in the database path.
 	 */
 	snprintf(versionfile, sizeof(versionfile), "%s/%s", dbpath, "PG_VERSION");
 
-	fd = OpenTransientFile(versionfile, O_WRONLY | O_CREAT | O_EXCL | PG_BINARY);
-	if (fd < 0 && errno == EEXIST && isRedo)
-		fd = OpenTransientFile(versionfile, O_WRONLY | O_TRUNC | PG_BINARY);
-
-	if (fd < 0)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not create file \"%s\": %m", versionfile)));
-
-	/* Write PG_MAJORVERSION in the PG_VERSION file. */
-	pgstat_report_wait_start(WAIT_EVENT_VERSION_FILE_WRITE);
-	errno = 0;
-	if (write(fd, buf, nbytes) != nbytes)
+	if (!isRedo)
 	{
-		/* If write didn't set errno, assume problem is no disk space. */
-		if (errno == 0)
-			errno = ENOSPC;
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not write to file \"%s\": %m", versionfile)));
+		/*
+		 * Use FileOpsCreate + FileOpsWrite for transactional version file
+		 * creation with crash-safe rollback support.
+		 */
+		fd = FileOpsCreate(versionfile, O_WRONLY | PG_BINARY,
+						   pg_file_create_mode, true);
+		pgstat_report_wait_start(WAIT_EVENT_VERSION_FILE_WRITE);
+		errno = 0;
+		if ((int) write(fd, buf, nbytes) != nbytes)
+		{
+			if (errno == 0)
+				errno = ENOSPC;
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not write to file \"%s\": %m", versionfile)));
+		}
+		pgstat_report_wait_end();
+
+		pgstat_report_wait_start(WAIT_EVENT_VERSION_FILE_SYNC);
+		if (pg_fsync(fd) != 0)
+			ereport(data_sync_elevel(ERROR),
+					(errcode_for_file_access(),
+					 errmsg("could not fsync file \"%s\": %m", versionfile)));
+		fsync_fname(dbpath, true);
+		pgstat_report_wait_end();
+
+		CloseTransientFile(fd);
 	}
-	pgstat_report_wait_end();
+	else
+	{
+		/* WAL replay: use raw file operations */
+		fd = OpenTransientFile(versionfile, O_WRONLY | O_CREAT | O_EXCL | PG_BINARY);
+		if (fd < 0 && errno == EEXIST)
+			fd = OpenTransientFile(versionfile, O_WRONLY | O_TRUNC | PG_BINARY);
 
-	pgstat_report_wait_start(WAIT_EVENT_VERSION_FILE_SYNC);
-	if (pg_fsync(fd) != 0)
-		ereport(data_sync_elevel(ERROR),
-				(errcode_for_file_access(),
-				 errmsg("could not fsync file \"%s\": %m", versionfile)));
-	fsync_fname(dbpath, true);
-	pgstat_report_wait_end();
+		if (fd < 0)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not create file \"%s\": %m", versionfile)));
 
-	/* Close the version file. */
-	CloseTransientFile(fd);
+		pgstat_report_wait_start(WAIT_EVENT_VERSION_FILE_WRITE);
+		errno = 0;
+		if ((int) write(fd, buf, nbytes) != nbytes)
+		{
+			if (errno == 0)
+				errno = ENOSPC;
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not write to file \"%s\": %m", versionfile)));
+		}
+		pgstat_report_wait_end();
+
+		pgstat_report_wait_start(WAIT_EVENT_VERSION_FILE_SYNC);
+		if (pg_fsync(fd) != 0)
+			ereport(data_sync_elevel(ERROR),
+					(errcode_for_file_access(),
+					 errmsg("could not fsync file \"%s\": %m", versionfile)));
+		fsync_fname(dbpath, true);
+		pgstat_report_wait_end();
+
+		CloseTransientFile(fd);
+	}
 
 	/* If we are not in WAL replay then write the WAL. */
 	if (!isRedo)
@@ -633,9 +670,11 @@ CreateDatabaseUsingFileCopy(Oid src_dboid, Oid dst_dboid, Oid src_tsid,
 		/*
 		 * Copy this subdirectory to the new location
 		 *
-		 * We don't need to copy subdirectories
+		 * We don't need to copy subdirectories.  Register the destination for
+		 * delete-on-abort so a transaction abort recursively removes the
+		 * partial copy.
 		 */
-		copydir(srcpath, dstpath, false);
+		copydir(srcpath, dstpath, false, true);
 
 		/* Record the filesystem change in XLOG */
 		{
@@ -2221,8 +2260,18 @@ movedb(const char *dbname, const char *tblspcname)
 		FreeDir(dstdir);
 
 		/*
-		 * The directory exists but is empty. We must remove it before using
+		 * The directory exists but is empty.  We must remove it before using
 		 * the copydir function.
+		 *
+		 * NB: this rmdir is deliberately NOT routed through FILEOPS.  The
+		 * destination tablespace path is not yet referenced by any catalog
+		 * row (the pg_database.dattablespace update happens later, and is
+		 * what binds dst_dbpath to the database on commit), so an abort that
+		 * leaves dst_dbpath missing does not orphan any catalog state -- the
+		 * database remains in src_tblspcoid.  copydir() below will recreate
+		 * dst_dbpath via MakePGDirectory in its first action and registers
+		 * the destination tree for delete-on-abort, so the partial-copy
+		 * window is covered.
 		 */
 		if (rmdir(dst_dbpath) != 0)
 			elog(ERROR, "could not remove directory \"%s\": %m",
@@ -2245,9 +2294,13 @@ movedb(const char *dbname, const char *tblspcname)
 		bool		new_record_repl[Natts_pg_database] = {0};
 
 		/*
-		 * Copy files from the old tablespace to the new one
+		 * Copy files from the old tablespace to the new one.  Register the
+		 * destination for delete-on-abort so a transaction abort recursively
+		 * removes the partial copy (closing the long-standing crash-asymmetry
+		 * with the source tree, which is preserved until commit by movedb's
+		 * post-commit cleanup).
 		 */
-		copydir(src_dbpath, dst_dbpath, false);
+		copydir(src_dbpath, dst_dbpath, false, true);
 
 		/*
 		 * Record the filesystem change in XLOG
@@ -3407,9 +3460,12 @@ dbase_redo(XLogReaderState *record)
 		/*
 		 * Copy this subdirectory to the new location
 		 *
-		 * We don't need to copy subdirectories
+		 * We don't need to copy subdirectories.  Pass false for
+		 * register_for_abort_cleanup: this is a WAL replay path with no
+		 * surrounding transaction; the redo handler is itself the recovery
+		 * action.
 		 */
-		copydir(src_path, dst_path, false);
+		copydir(src_path, dst_path, false, false);
 
 		pfree(src_path);
 		pfree(dst_path);
