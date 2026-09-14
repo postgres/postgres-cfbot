@@ -129,6 +129,7 @@ do
 	# These files are not meant to be included standalone, because
 	# they contain lists that might have multiple use-cases.
 	test "$f" = src/include/access/rmgrlist.h && continue
+	test "$f" = src/include/access/undormgrlist.h && continue
 	test "$f" = src/include/parser/kwlist.h && continue
 	test "$f" = src/include/postmaster/proctypelist.h && continue
 	test "$f" = src/include/regex/regerrs.h && continue

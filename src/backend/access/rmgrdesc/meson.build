@@ -22,6 +22,7 @@ rmgr_desc_sources = files(
   'spgdesc.c',
   'standbydesc.c',
   'tblspcdesc.c',
+  'undodesc.c',
   'xactdesc.c',
   'xlogdesc.c',
 )

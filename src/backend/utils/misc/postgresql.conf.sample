@@ -915,6 +915,13 @@
                                         # (change requires restart)
 #recovery_init_sync_method = fsync      # fsync, syncfs (Linux 5.8+)
 
+# - UNDO -
+
+#undo_max_wal_retention_size = 0        # MB; 0 = unlimited UNDO WAL retention
+#undo_worker_naptime = 10s              # time between UNDO discard worker runs
+#undo_batch_size_kb = 256               # KB per UNDO batch flush (64-4096); reload
+#undo_batch_record_limit = 1000         # records per UNDO batch flush (100-100000); reload
+
 
 #------------------------------------------------------------------------------
 # CONFIG FILE INCLUDES

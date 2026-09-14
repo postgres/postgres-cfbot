@@ -48,6 +48,7 @@ extern GlobalTransaction MarkAsPreparing(FullTransactionId fxid, const char *gid
 extern void StartPrepare(GlobalTransaction gxact);
 extern void EndPrepare(GlobalTransaction gxact);
 extern bool StandbyTransactionIdIsPrepared(TransactionId xid);
+extern bool RecoveryTransactionIdIsPrepared(TransactionId xid);
 
 extern TransactionId PrescanPreparedTransactions(TransactionId **xids_p,
 												 int *nxids_p);
@@ -71,5 +72,7 @@ extern void TwoPhaseTransactionGid(Oid subid, TransactionId xid, char *gid_res,
 extern bool LookupGXactBySubid(Oid subid);
 
 extern TransactionId TwoPhaseGetOldestXidInCommit(void);
+
+extern XLogRecPtr TwoPhaseGetOldestUndoBatchLSN(void);
 
 #endif							/* TWOPHASE_H */

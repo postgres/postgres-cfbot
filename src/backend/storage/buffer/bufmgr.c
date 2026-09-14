@@ -5906,6 +5906,79 @@ UnlockBuffers(void)
 }
 
 /*
+ * BufferLockReleaseAll -- release any buffer content locks still held by this
+ * backend.
+ *
+ * Normally, buffer content locks are released as part of resource-owner
+ * cleanup (see ResOwnerReleaseBuffer, which calls BufferLockUnlock on any
+ * entry whose data.lockmode != BUFFER_LOCK_UNLOCK).  However, that cleanup
+ * runs in ResourceOwnerRelease(RESOURCE_RELEASE_LOCKS), which is *after*
+ * AtAbort_XactUndo() in AbortTransaction().  Inline UNDO application may
+ * itself take buffer content locks, and BufferLockAcquire asserts that no
+ * lock is already held.  If a statement errors out while holding a share
+ * or exclusive content lock, that assert would trip on any re-lock during
+ * UNDO application.
+ *
+ * This helper releases such stragglers early, before inline UNDO runs.
+ * It mirrors the still-locked branch of ResOwnerReleaseBuffer (matching
+ * the HOLD_INTERRUPTS/BufferLockUnlock discipline).  Callers must be in
+ * an error-recovery path -- releasing content locks under a live statement
+ * would violate correctness.
+ *
+ * The subsequent ResourceOwnerRelease pass at RESOURCE_RELEASE_LOCKS still
+ * runs, but ResOwnerReleaseBuffer only calls BufferLockUnlock when
+ * data.lockmode != BUFFER_LOCK_UNLOCK, so already-released buffers are
+ * skipped -- no double-unlock.
+ */
+void
+BufferLockReleaseAll(void)
+{
+	PrivateRefCountEntry *res;
+	int			i;
+
+	/* Walk the small array first (fast path, covers the usual case). */
+	for (i = 0; i < REFCOUNT_ARRAY_ENTRIES; i++)
+	{
+		Buffer		buffer = PrivateRefCountArrayKeys[i];
+
+		if (buffer == InvalidBuffer)
+			continue;
+
+		res = &PrivateRefCountArray[i];
+		if (res->data.lockmode == BUFFER_LOCK_UNLOCK)
+			continue;
+
+		/* Local buffers do not have content locks. */
+		if (BufferIsLocal(buffer))
+			continue;
+
+		HOLD_INTERRUPTS();		/* matched by RESUME_INTERRUPTS in
+								 * BufferLockUnlock */
+		BufferLockUnlock(buffer, GetBufferDescriptor(buffer - 1));
+	}
+
+	/* Then the overflow hash, if any. */
+	if (PrivateRefCountOverflowed)
+	{
+		refcount_iterator iter;
+
+		refcount_start_iterate(PrivateRefCountHash, &iter);
+		while ((res = refcount_iterate(PrivateRefCountHash, &iter)) != NULL)
+		{
+			Buffer		buffer = res->buffer;
+
+			if (res->data.lockmode == BUFFER_LOCK_UNLOCK)
+				continue;
+			if (BufferIsLocal(buffer))
+				continue;
+
+			HOLD_INTERRUPTS();
+			BufferLockUnlock(buffer, GetBufferDescriptor(buffer - 1));
+		}
+	}
+}
+
+/*
  * Acquire the buffer content lock in the specified mode
  *
  * If the lock is not available, sleep until it is.
