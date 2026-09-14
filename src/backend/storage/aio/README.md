@@ -256,9 +256,15 @@ synchronous manner.
 
 #### io_uring
 
-`io_method=io_uring` is available on Linux 5.1+. In contrast to worker mode it
+`io_method=io_uring` is available on Linux 5.6+. In contrast to worker mode it
 dispatches all IO from within the process, lowering context switch rate /
 latency.
+
+While io_uring was introduced in Linux kernel 5.1, the operations required by
+PostgreSQL (IORING_OP_READ and IORING_OP_WRITE opcodes for non-vectored I/O)
+are only available starting with Linux kernel 5.6. Attempting to use io_uring
+on kernels between 5.1 and 5.5 will result in runtime errors (EINVAL) when
+connections are established.
 
 
 ### AIO Handles
