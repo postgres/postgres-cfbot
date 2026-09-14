@@ -1874,13 +1874,18 @@ DecodeXLogRecord(XLogReaderState *state,
 				datatotal += blk->bimg_len;
 
 				/*
-				 * cross-check that hole_offset > 0, hole_length > 0 and
-				 * bimg_len < BLCKSZ if the HAS_HOLE flag is set.
+				 * cross-check that hole_offset > 0, hole_length > 0,
+				 * bimg_len < BLCKSZ, and the hole fits in the page if the
+				 * HAS_HOLE flag is set.  Compare hole_length with
+				 * BLCKSZ - hole_offset so the two untrusted fields are never
+				 * added together.
 				 */
 				if ((blk->bimg_info & BKPIMAGE_HAS_HOLE) &&
 					(blk->hole_offset == 0 ||
 					 blk->hole_length == 0 ||
-					 blk->bimg_len == BLCKSZ))
+					 blk->bimg_len == BLCKSZ ||
+					 blk->hole_offset > BLCKSZ ||
+					 blk->hole_length > BLCKSZ - blk->hole_offset))
 				{
 					report_invalid_record(state,
 										  "BKPIMAGE_HAS_HOLE set, but hole offset %d length %d block image length %d at %X/%08X",
@@ -2148,6 +2153,21 @@ RestoreBlockImage(XLogReaderState *record, uint8 block_id, char *page)
 
 	bkpb = &record->record->blocks[block_id];
 	ptr = bkpb->bkp_image;
+
+	/*
+	 * The hole must fit in the page.  DecodeXLogRecord() already enforces
+	 * this; re-check here before using the values as memcpy/MemSet lengths
+	 * or as the decompressor output capacity.
+	 */
+	if (bkpb->hole_offset > BLCKSZ ||
+		bkpb->hole_length > BLCKSZ - bkpb->hole_offset)
+	{
+		report_invalid_record(record,
+							  "could not restore image at %X/%X with invalid state, block %d",
+							  LSN_FORMAT_ARGS(record->ReadRecPtr),
+							  block_id);
+		return false;
+	}
 
 	if (BKPIMAGE_COMPRESSED(bkpb->bimg_info))
 	{
