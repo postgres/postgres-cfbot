@@ -3871,44 +3871,6 @@ SELECT count(*) FROM ft1;
 PREPARE TRANSACTION 'fdw_tpc';
 ROLLBACK;
 
--- ===================================================================
--- reestablish new connection
--- ===================================================================
-
--- Change application_name of remote connection to special one
--- so that we can easily terminate the connection later.
-ALTER SERVER loopback OPTIONS (application_name 'fdw_retry_check');
-
--- Make sure we have a remote connection.
-SELECT 1 FROM ft1 LIMIT 1;
-
--- Terminate the remote connection and wait for the termination to complete.
--- (If a cache flush happens, the remote connection might have already been
--- dropped; so code this step in a way that doesn't fail if no connection.)
-DO $$ BEGIN
-PERFORM pg_terminate_backend(pid, 180000) FROM pg_stat_activity
-	WHERE application_name = 'fdw_retry_check';
-END $$;
-
--- This query should detect the broken connection when starting new remote
--- transaction, reestablish new connection, and then succeed.
-BEGIN;
-SELECT 1 FROM ft1 LIMIT 1;
-
--- If we detect the broken connection when starting a new remote
--- subtransaction, we should fail instead of establishing a new connection.
--- Terminate the remote connection and wait for the termination to complete.
-DO $$ BEGIN
-PERFORM pg_terminate_backend(pid, 180000) FROM pg_stat_activity
-	WHERE application_name = 'fdw_retry_check';
-END $$;
-SAVEPOINT s;
--- The text of the error might vary across platforms, so only show SQLSTATE.
-\set VERBOSITY sqlstate
-SELECT 1 FROM ft1 LIMIT 1;    -- should fail
-\set VERBOSITY default
-COMMIT;
-
 -- =============================================================================
 -- test connection invalidation cases and postgres_fdw_get_connections function
 -- =============================================================================
@@ -5035,7 +4997,7 @@ SET debug_discard_caches TO '0';
 \set VERBOSITY sqlstate
 
 SELECT 1 FROM postgres_fdw_disconnect_all();
-ALTER SERVER loopback OPTIONS (SET application_name 'fdw_conn_check');
+ALTER SERVER loopback OPTIONS (application_name 'fdw_conn_check');
 SELECT 1 FROM ft1 LIMIT 1;
 
 -- Since the remote server is still connected, "closed" should be FALSE,
