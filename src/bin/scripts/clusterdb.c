@@ -18,11 +18,12 @@
 #include "fe_utils/simple_list.h"
 
 
-static void cluster_one_database(const ConnParams *cparams, const char *table,
-								 const char *progname, bool verbose, bool echo);
+static bool cluster_one_database(const ConnParams *cparams, const char *table,
+								 const char *progname, bool verbose, bool echo,
+								 bool conn_fail_ok);
 static void cluster_all_databases(ConnParams *cparams, SimpleStringList *tables,
 								  const char *progname, bool verbose, bool echo,
-								  bool quiet);
+								  bool quiet, bool conn_fail_ok);
 static void help(const char *progname);
 
 
@@ -42,6 +43,7 @@ main(int argc, char *argv[])
 		{"table", required_argument, NULL, 't'},
 		{"verbose", no_argument, NULL, 'v'},
 		{"maintenance-db", required_argument, NULL, 2},
+		{"continue", no_argument, NULL, 3},
 		{NULL, 0, NULL, 0}
 	};
 
@@ -60,6 +62,7 @@ main(int argc, char *argv[])
 	bool		quiet = false;
 	bool		alldb = false;
 	bool		verbose = false;
+	bool		conn_fail_ok = false;
 	SimpleStringList tables = {NULL, NULL};
 
 	pg_logging_init(argv[0]);
@@ -108,6 +111,9 @@ main(int argc, char *argv[])
 			case 2:
 				maintenance_db = pg_strdup(optarg);
 				break;
+			case 3:
+				conn_fail_ok = true;
+				break;
 			default:
 				/* getopt_long already emitted a complaint */
 				pg_log_error_hint("Try \"%s --help\" for more information.", progname);
@@ -142,6 +148,11 @@ main(int argc, char *argv[])
 
 	setup_cancel_handler(NULL);
 
+	/* --continue only governs the all-databases loop. */
+	if (conn_fail_ok && !alldb)
+		pg_fatal("cannot use the \"%s\" option without \"%s\"",
+				 "continue", "all");
+
 	if (alldb)
 	{
 		if (dbname)
@@ -150,7 +161,7 @@ main(int argc, char *argv[])
 		cparams.dbname = maintenance_db;
 
 		cluster_all_databases(&cparams, &tables,
-							  progname, verbose, echo, quiet);
+							  progname, verbose, echo, quiet, conn_fail_ok);
 	}
 	else
 	{
@@ -173,27 +184,40 @@ main(int argc, char *argv[])
 			for (cell = tables.head; cell; cell = cell->next)
 			{
 				cluster_one_database(&cparams, cell->val,
-									 progname, verbose, echo);
+									 progname, verbose, echo, false);
 			}
 		}
 		else
 			cluster_one_database(&cparams, NULL,
-								 progname, verbose, echo);
+								 progname, verbose, echo, false);
 	}
 
 	exit(0);
 }
 
 
-static void
+/*
+ * Cluster one database (or one table in it).  Returns false if the database
+ * had to be skipped because it could not be connected to, which is only
+ * possible when conn_fail_ok is set; see cluster_all_databases().
+ */
+static bool
 cluster_one_database(const ConnParams *cparams, const char *table,
-					 const char *progname, bool verbose, bool echo)
+					 const char *progname, bool verbose, bool echo,
+					 bool conn_fail_ok)
 {
 	PQExpBufferData sql;
 
 	PGconn	   *conn;
 
-	conn = connectDatabase(cparams, progname, echo, false, true);
+	conn = connectDatabase(cparams, progname, echo, conn_fail_ok, true);
+	if (PQstatus(conn) == CONNECTION_BAD)
+	{
+		pg_log_warning("skipping database \"%s\": %s",
+					   PQdb(conn), PQerrorMessage(conn));
+		PQfinish(conn);
+		return false;
+	}
 
 	initPQExpBuffer(&sql);
 
@@ -220,13 +244,15 @@ cluster_one_database(const ConnParams *cparams, const char *table,
 	}
 	PQfinish(conn);
 	termPQExpBuffer(&sql);
+
+	return true;
 }
 
 
 static void
 cluster_all_databases(ConnParams *cparams, SimpleStringList *tables,
 					  const char *progname, bool verbose, bool echo,
-					  bool quiet)
+					  bool quiet, bool conn_fail_ok)
 {
 	PGconn	   *conn;
 	PGresult   *result;
@@ -255,12 +281,17 @@ cluster_all_databases(ConnParams *cparams, SimpleStringList *tables,
 			SimpleStringListCell *cell;
 
 			for (cell = tables->head; cell; cell = cell->next)
-				cluster_one_database(cparams, cell->val,
-									 progname, verbose, echo);
+			{
+				/* one warning per skipped database, not per table */
+				if (!cluster_one_database(cparams, cell->val,
+										  progname, verbose, echo,
+										  conn_fail_ok))
+					break;
+			}
 		}
 		else
 			cluster_one_database(cparams, NULL,
-								 progname, verbose, echo);
+								 progname, verbose, echo, conn_fail_ok);
 	}
 
 	PQclear(result);
@@ -275,6 +306,8 @@ help(const char *progname)
 	printf(_("  %s [OPTION]... [DBNAME]\n"), progname);
 	printf(_("\nOptions:\n"));
 	printf(_("  -a, --all                 cluster all databases\n"));
+	printf(_("      --continue            with --all, skip databases that cannot be\n"
+			 "                            connected to instead of exiting\n"));
 	printf(_("  -d, --dbname=DBNAME       database to cluster\n"));
 	printf(_("  -e, --echo                show the commands being sent to the server\n"));
 	printf(_("  -q, --quiet               don't write any messages\n"));
