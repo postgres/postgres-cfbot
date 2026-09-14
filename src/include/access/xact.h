@@ -213,6 +213,7 @@ typedef struct SavedTransactionCharacteristics
 #define XACT_XINFO_HAS_AE_LOCKS			(1U << 6)
 #define XACT_XINFO_HAS_GID				(1U << 7)
 #define XACT_XINFO_HAS_DROPPED_STATS	(1U << 8)
+#define XACT_XINFO_HAS_FILEOPS			(1U << 9)
 
 /*
  * Also stored in xinfo, these indicating a variety of additional actions that
@@ -468,6 +469,10 @@ typedef struct xl_xact_parsed_abort
 
 	XLogRecPtr	origin_lsn;
 	TimestampTz origin_timestamp;
+
+	/* FILEOPS inverses to apply on redo (XACT_XINFO_HAS_FILEOPS) */
+	uint32		fileops_len;
+	const char *fileops;
 } xl_xact_parsed_abort;
 
 
@@ -559,7 +564,8 @@ extern XLogRecPtr XactLogAbortRecord(TimestampTz abort_time,
 									 int ndroppedstats,
 									 xl_xact_stats_item *droppedstats,
 									 int xactflags, TransactionId twophase_xid,
-									 const char *twophase_gid);
+									 const char *twophase_gid,
+									 const char *fileops, uint32 fileops_len);
 extern void xact_redo(XLogReaderState *record);
 
 /* xactdesc.c */
