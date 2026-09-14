@@ -463,3 +463,45 @@ create index gist_tbl_box_index on gist_tbl using gist (b);
 insert into gist_tbl
   select box(point(0.05*i, 0.05*i)) from generate_series(0,10) as i;
 drop table gist_tbl;
+-- Test that tuples passing through nodeIndexscan.c's reorder queue keep their
+-- real ctid.  poly_ops' distance is only a lower bound (the bounding box), so
+-- gist_poly_consistent sets recheck and the ORDER BY value is recomputed; thin
+-- diagonal triangles make the estimate strictly low, forcing the requeue path,
+-- which re-stores the tuple with ExecForceStoreHeapTuple().  Note the first
+-- tuple is returned without queueing, so any check must look past LIMIT 1.
+create table gist_knn_ctid (id int, p polygon);
+insert into gist_knn_ctid
+select i, format('((%s,0),(%s,9),(%s,0))', i * 10, i * 10 + 9, i * 10 + 9)::polygon
+from generate_series(1,20) i;
+create index gist_knn_ctid_idx on gist_knn_ctid using gist (p);
+vacuum analyze gist_knn_ctid;
+set enable_seqscan = off;
+-- the reorder queue is only reached through an ORDER BY-op index scan, so pin
+-- the plan that the checks below depend on
+explain (costs off)
+select ctid, id from gist_knn_ctid order by p <-> point(100,4) limit 5;
+                        QUERY PLAN                         
+-----------------------------------------------------------
+ Limit
+   ->  Index Scan using gist_knn_ctid_idx on gist_knn_ctid
+         Order By: (p <-> '(100,4)'::point)
+(3 rows)
+
+-- Materialize the ordered result before checking it.  Filtering the ordered
+-- subquery directly would let the planner push the qual into the scan, which
+-- would no longer exercise the same path.
+create temp table gist_knn_ctid_res as
+select ctid as c, id from gist_knn_ctid order by p <-> point(100,4) limit 5;
+-- every row must be findable by the ctid it reported
+select count(*) as ctid_not_found
+from gist_knn_ctid_res r
+where not exists (select 1 from gist_knn_ctid t
+                  where t.ctid = r.c and t.id = r.id);
+ ctid_not_found 
+----------------
+              0
+(1 row)
+
+reset enable_seqscan;
+drop table gist_knn_ctid_res;
+drop table gist_knn_ctid;
