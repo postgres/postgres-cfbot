@@ -324,6 +324,15 @@ typedef struct TableAmRoutine
 	/* this must be set to T_TableAmRoutine */
 	NodeTag		type;
 
+	/*
+	 * am_supports_undo: true if this AM records UNDO for its own table
+	 * changes and relies on applying it to roll back an aborted transaction,
+	 * rather than on visibility rules alone as heap does.  The records are
+	 * opaque to the UNDO core; the AM's own UNDO resource manager interprets
+	 * them and its page format.  Heap leaves this false.
+	 */
+	bool		am_supports_undo;
+
 
 	/* ------------------------------------------------------------------------
 	 * Slot related callbacks.
