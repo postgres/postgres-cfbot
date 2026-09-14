@@ -752,6 +752,37 @@ $$ LANGUAGE plpython3u;
     </varlistentry>
 
     <varlistentry>
+     <term><literal>TD["period_name"]</literal></term>
+     <listitem>
+      <para>
+       contains the column name used in a <literal>FOR PORTION OF</literal>
+       clause. This key is not present if <literal>FOR PORTION OF</literal>
+       was not used. Also set for the implicit
+       <literal>INSERT</literal> statements to add the
+       <glossterm linkend="glossary-temporal-leftovers">temporal
+       leftovers</glossterm>.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><literal>TD["period_bounds"]</literal></term>
+     <listitem>
+      <para>
+       contains the range/multirange given as the bounds of a
+       <literal>FOR PORTION OF</literal> clause, either directly (with parens
+       syntax) or computed from the <literal>FROM</literal> and
+       <literal>TO</literal> bounds. This key is not present if
+       <literal>FOR PORTION OF</literal> was not used. Also set for the
+       implicit <literal>INSERT</literal> statements to add the
+       <glossterm linkend="glossary-temporal-leftovers">temporal
+       leftovers</glossterm>. This is a text value based on the type's output
+       function, since the type can't be known at function creation time.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
      <term><literal>TD["args"]</literal></term>
      <listitem>
       <para>

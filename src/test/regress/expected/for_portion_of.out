@@ -1350,8 +1350,13 @@ CREATE FUNCTION dump_trigger()
 RETURNS TRIGGER LANGUAGE plpgsql AS
 $$
 BEGIN
-  RAISE NOTICE '%: % % %:',
-    TG_NAME, TG_WHEN, TG_OP, TG_LEVEL;
+  IF TG_PERIOD_NAME IS NOT NULL THEN
+    RAISE NOTICE '%: % % FOR PORTION OF % (%) %:',
+      TG_NAME, TG_WHEN, TG_OP, TG_PERIOD_NAME, TG_PERIOD_BOUNDS, TG_LEVEL;
+  ELSE
+    RAISE NOTICE '%: % % %:',
+      TG_NAME, TG_WHEN, TG_OP, TG_LEVEL;
+  END IF;
 
   IF TG_ARGV[0] THEN
     RAISE NOTICE '  old: %', (SELECT string_agg(old_table::text, '\n       ') FROM old_table);
@@ -1407,85 +1412,85 @@ UPDATE for_portion_of_test
   FOR PORTION OF valid_at FROM '2021-01-01' TO '2022-01-01'
   SET name = 'five^3'
   WHERE id = '[5,6)';
-NOTICE:  fpo_before_stmt: BEFORE UPDATE STATEMENT:
+NOTICE:  fpo_before_stmt: BEFORE UPDATE FOR PORTION OF valid_at ([2021-01-01,2022-01-01)) STATEMENT:
 NOTICE:    old: <NULL>
 NOTICE:    new: <NULL>
-NOTICE:  fpo_before_stmt1: BEFORE UPDATE STATEMENT:
+NOTICE:  fpo_before_stmt1: BEFORE UPDATE FOR PORTION OF valid_at ([2021-01-01,2022-01-01)) STATEMENT:
 NOTICE:    old: <NULL>
 NOTICE:    new: <NULL>
-NOTICE:  fpo_before_row: BEFORE UPDATE ROW:
+NOTICE:  fpo_before_row: BEFORE UPDATE FOR PORTION OF valid_at ([2021-01-01,2022-01-01)) ROW:
 NOTICE:    old: [2019-01-01,2030-01-01)
 NOTICE:    new: [2021-01-01,2022-01-01)
-NOTICE:  fpo_before_row1: BEFORE UPDATE ROW:
+NOTICE:  fpo_before_row1: BEFORE UPDATE FOR PORTION OF valid_at ([2021-01-01,2022-01-01)) ROW:
 NOTICE:    old: [2019-01-01,2030-01-01)
 NOTICE:    new: [2021-01-01,2022-01-01)
-NOTICE:  fpo_before_stmt: BEFORE INSERT STATEMENT:
+NOTICE:  fpo_before_stmt: BEFORE INSERT FOR PORTION OF valid_at ([2021-01-01,2022-01-01)) STATEMENT:
 NOTICE:    old: <NULL>
 NOTICE:    new: <NULL>
-NOTICE:  fpo_before_row: BEFORE INSERT ROW:
+NOTICE:  fpo_before_row: BEFORE INSERT FOR PORTION OF valid_at ([2021-01-01,2022-01-01)) ROW:
 NOTICE:    old: <NULL>
 NOTICE:    new: [2019-01-01,2021-01-01)
-NOTICE:  fpo_after_insert_row: AFTER INSERT ROW:
+NOTICE:  fpo_after_insert_row: AFTER INSERT FOR PORTION OF valid_at ([2021-01-01,2022-01-01)) ROW:
 NOTICE:    old: <NULL>
 NOTICE:    new: [2019-01-01,2021-01-01)
-NOTICE:  fpo_after_insert_stmt: AFTER INSERT STATEMENT:
+NOTICE:  fpo_after_insert_stmt: AFTER INSERT FOR PORTION OF valid_at ([2021-01-01,2022-01-01)) STATEMENT:
 NOTICE:    old: <NULL>
 NOTICE:    new: <NULL>
-NOTICE:  fpo_before_stmt: BEFORE INSERT STATEMENT:
+NOTICE:  fpo_before_stmt: BEFORE INSERT FOR PORTION OF valid_at ([2021-01-01,2022-01-01)) STATEMENT:
 NOTICE:    old: <NULL>
 NOTICE:    new: <NULL>
-NOTICE:  fpo_before_row: BEFORE INSERT ROW:
+NOTICE:  fpo_before_row: BEFORE INSERT FOR PORTION OF valid_at ([2021-01-01,2022-01-01)) ROW:
 NOTICE:    old: <NULL>
 NOTICE:    new: [2022-01-01,2030-01-01)
-NOTICE:  fpo_after_insert_row: AFTER INSERT ROW:
+NOTICE:  fpo_after_insert_row: AFTER INSERT FOR PORTION OF valid_at ([2021-01-01,2022-01-01)) ROW:
 NOTICE:    old: <NULL>
 NOTICE:    new: [2022-01-01,2030-01-01)
-NOTICE:  fpo_after_insert_stmt: AFTER INSERT STATEMENT:
+NOTICE:  fpo_after_insert_stmt: AFTER INSERT FOR PORTION OF valid_at ([2021-01-01,2022-01-01)) STATEMENT:
 NOTICE:    old: <NULL>
 NOTICE:    new: <NULL>
-NOTICE:  fpo_after_update_row: AFTER UPDATE ROW:
+NOTICE:  fpo_after_update_row: AFTER UPDATE FOR PORTION OF valid_at ([2021-01-01,2022-01-01)) ROW:
 NOTICE:    old: [2019-01-01,2030-01-01)
 NOTICE:    new: [2021-01-01,2022-01-01)
-NOTICE:  fpo_after_update_stmt: AFTER UPDATE STATEMENT:
+NOTICE:  fpo_after_update_stmt: AFTER UPDATE FOR PORTION OF valid_at ([2021-01-01,2022-01-01)) STATEMENT:
 NOTICE:    old: <NULL>
 NOTICE:    new: <NULL>
 DELETE FROM for_portion_of_test
   FOR PORTION OF valid_at FROM '2023-01-01' TO '2024-01-01'
   WHERE id = '[5,6)';
-NOTICE:  fpo_before_stmt: BEFORE DELETE STATEMENT:
+NOTICE:  fpo_before_stmt: BEFORE DELETE FOR PORTION OF valid_at ([2023-01-01,2024-01-01)) STATEMENT:
 NOTICE:    old: <NULL>
 NOTICE:    new: <NULL>
-NOTICE:  fpo_before_row: BEFORE DELETE ROW:
+NOTICE:  fpo_before_row: BEFORE DELETE FOR PORTION OF valid_at ([2023-01-01,2024-01-01)) ROW:
 NOTICE:    old: [2022-01-01,2030-01-01)
 NOTICE:    new: <NULL>
-NOTICE:  fpo_before_stmt: BEFORE INSERT STATEMENT:
+NOTICE:  fpo_before_stmt: BEFORE INSERT FOR PORTION OF valid_at ([2023-01-01,2024-01-01)) STATEMENT:
 NOTICE:    old: <NULL>
 NOTICE:    new: <NULL>
-NOTICE:  fpo_before_row: BEFORE INSERT ROW:
+NOTICE:  fpo_before_row: BEFORE INSERT FOR PORTION OF valid_at ([2023-01-01,2024-01-01)) ROW:
 NOTICE:    old: <NULL>
 NOTICE:    new: [2022-01-01,2023-01-01)
-NOTICE:  fpo_after_insert_row: AFTER INSERT ROW:
+NOTICE:  fpo_after_insert_row: AFTER INSERT FOR PORTION OF valid_at ([2023-01-01,2024-01-01)) ROW:
 NOTICE:    old: <NULL>
 NOTICE:    new: [2022-01-01,2023-01-01)
-NOTICE:  fpo_after_insert_stmt: AFTER INSERT STATEMENT:
+NOTICE:  fpo_after_insert_stmt: AFTER INSERT FOR PORTION OF valid_at ([2023-01-01,2024-01-01)) STATEMENT:
 NOTICE:    old: <NULL>
 NOTICE:    new: <NULL>
-NOTICE:  fpo_before_stmt: BEFORE INSERT STATEMENT:
+NOTICE:  fpo_before_stmt: BEFORE INSERT FOR PORTION OF valid_at ([2023-01-01,2024-01-01)) STATEMENT:
 NOTICE:    old: <NULL>
 NOTICE:    new: <NULL>
-NOTICE:  fpo_before_row: BEFORE INSERT ROW:
+NOTICE:  fpo_before_row: BEFORE INSERT FOR PORTION OF valid_at ([2023-01-01,2024-01-01)) ROW:
 NOTICE:    old: <NULL>
 NOTICE:    new: [2024-01-01,2030-01-01)
-NOTICE:  fpo_after_insert_row: AFTER INSERT ROW:
+NOTICE:  fpo_after_insert_row: AFTER INSERT FOR PORTION OF valid_at ([2023-01-01,2024-01-01)) ROW:
 NOTICE:    old: <NULL>
 NOTICE:    new: [2024-01-01,2030-01-01)
-NOTICE:  fpo_after_insert_stmt: AFTER INSERT STATEMENT:
+NOTICE:  fpo_after_insert_stmt: AFTER INSERT FOR PORTION OF valid_at ([2023-01-01,2024-01-01)) STATEMENT:
 NOTICE:    old: <NULL>
 NOTICE:    new: <NULL>
-NOTICE:  fpo_after_delete_row: AFTER DELETE ROW:
+NOTICE:  fpo_after_delete_row: AFTER DELETE FOR PORTION OF valid_at ([2023-01-01,2024-01-01)) ROW:
 NOTICE:    old: [2022-01-01,2030-01-01)
 NOTICE:    new: <NULL>
-NOTICE:  fpo_after_delete_stmt: AFTER DELETE STATEMENT:
+NOTICE:  fpo_after_delete_stmt: AFTER DELETE FOR PORTION OF valid_at ([2023-01-01,2024-01-01)) STATEMENT:
 NOTICE:    old: <NULL>
 NOTICE:    new: <NULL>
 SELECT * FROM for_portion_of_test ORDER BY id, valid_at;
@@ -1553,68 +1558,68 @@ BEGIN;
 UPDATE for_portion_of_test
   FOR PORTION OF valid_at FROM '2018-01-15' TO '2019-01-01'
   SET name = '2018-01-15_to_2019-01-01';
-NOTICE:  fpo_before_stmt: BEFORE UPDATE STATEMENT:
+NOTICE:  fpo_before_stmt: BEFORE UPDATE FOR PORTION OF valid_at ([2018-01-15,2019-01-01)) STATEMENT:
 NOTICE:    old: <NULL>
 NOTICE:    new: <NULL>
-NOTICE:  fpo_before_row: BEFORE UPDATE ROW:
+NOTICE:  fpo_before_row: BEFORE UPDATE FOR PORTION OF valid_at ([2018-01-15,2019-01-01)) ROW:
 NOTICE:    old: [2018-01-01,2020-01-01)
 NOTICE:    new: [2018-01-15,2019-01-01)
-NOTICE:  fpo_before_stmt: BEFORE INSERT STATEMENT:
+NOTICE:  fpo_before_stmt: BEFORE INSERT FOR PORTION OF valid_at ([2018-01-15,2019-01-01)) STATEMENT:
 NOTICE:    old: <NULL>
 NOTICE:    new: <NULL>
-NOTICE:  fpo_before_row: BEFORE INSERT ROW:
+NOTICE:  fpo_before_row: BEFORE INSERT FOR PORTION OF valid_at ([2018-01-15,2019-01-01)) ROW:
 NOTICE:    old: <NULL>
 NOTICE:    new: [2018-01-01,2018-01-15)
-NOTICE:  fpo_after_insert_row: AFTER INSERT ROW:
+NOTICE:  fpo_after_insert_row: AFTER INSERT FOR PORTION OF valid_at ([2018-01-15,2019-01-01)) ROW:
 NOTICE:    old: <NULL>
 NOTICE:    new: ("[1,2)","[2018-01-01,2018-01-15)",one)
-NOTICE:  fpo_after_insert_stmt: AFTER INSERT STATEMENT:
+NOTICE:  fpo_after_insert_stmt: AFTER INSERT FOR PORTION OF valid_at ([2018-01-15,2019-01-01)) STATEMENT:
 NOTICE:    old: <NULL>
 NOTICE:    new: ("[1,2)","[2018-01-01,2018-01-15)",one)
-NOTICE:  fpo_before_stmt: BEFORE INSERT STATEMENT:
+NOTICE:  fpo_before_stmt: BEFORE INSERT FOR PORTION OF valid_at ([2018-01-15,2019-01-01)) STATEMENT:
 NOTICE:    old: <NULL>
 NOTICE:    new: <NULL>
-NOTICE:  fpo_before_row: BEFORE INSERT ROW:
+NOTICE:  fpo_before_row: BEFORE INSERT FOR PORTION OF valid_at ([2018-01-15,2019-01-01)) ROW:
 NOTICE:    old: <NULL>
 NOTICE:    new: [2019-01-01,2020-01-01)
-NOTICE:  fpo_after_insert_row: AFTER INSERT ROW:
+NOTICE:  fpo_after_insert_row: AFTER INSERT FOR PORTION OF valid_at ([2018-01-15,2019-01-01)) ROW:
 NOTICE:    old: <NULL>
 NOTICE:    new: ("[1,2)","[2019-01-01,2020-01-01)",one)
-NOTICE:  fpo_after_insert_stmt: AFTER INSERT STATEMENT:
+NOTICE:  fpo_after_insert_stmt: AFTER INSERT FOR PORTION OF valid_at ([2018-01-15,2019-01-01)) STATEMENT:
 NOTICE:    old: <NULL>
 NOTICE:    new: ("[1,2)","[2019-01-01,2020-01-01)",one)
-NOTICE:  fpo_after_update_row: AFTER UPDATE ROW:
+NOTICE:  fpo_after_update_row: AFTER UPDATE FOR PORTION OF valid_at ([2018-01-15,2019-01-01)) ROW:
 NOTICE:    old: ("[1,2)","[2018-01-01,2020-01-01)",one)
 NOTICE:    new: ("[1,2)","[2018-01-15,2019-01-01)",2018-01-15_to_2019-01-01)
-NOTICE:  fpo_after_update_stmt: AFTER UPDATE STATEMENT:
+NOTICE:  fpo_after_update_stmt: AFTER UPDATE FOR PORTION OF valid_at ([2018-01-15,2019-01-01)) STATEMENT:
 NOTICE:    old: ("[1,2)","[2018-01-01,2020-01-01)",one)
 NOTICE:    new: ("[1,2)","[2018-01-15,2019-01-01)",2018-01-15_to_2019-01-01)
 ROLLBACK;
 BEGIN;
 DELETE FROM for_portion_of_test
   FOR PORTION OF valid_at FROM NULL TO '2018-01-21';
-NOTICE:  fpo_before_stmt: BEFORE DELETE STATEMENT:
+NOTICE:  fpo_before_stmt: BEFORE DELETE FOR PORTION OF valid_at ((,2018-01-21)) STATEMENT:
 NOTICE:    old: <NULL>
 NOTICE:    new: <NULL>
-NOTICE:  fpo_before_row: BEFORE DELETE ROW:
+NOTICE:  fpo_before_row: BEFORE DELETE FOR PORTION OF valid_at ((,2018-01-21)) ROW:
 NOTICE:    old: [2018-01-01,2020-01-01)
 NOTICE:    new: <NULL>
-NOTICE:  fpo_before_stmt: BEFORE INSERT STATEMENT:
+NOTICE:  fpo_before_stmt: BEFORE INSERT FOR PORTION OF valid_at ((,2018-01-21)) STATEMENT:
 NOTICE:    old: <NULL>
 NOTICE:    new: <NULL>
-NOTICE:  fpo_before_row: BEFORE INSERT ROW:
+NOTICE:  fpo_before_row: BEFORE INSERT FOR PORTION OF valid_at ((,2018-01-21)) ROW:
 NOTICE:    old: <NULL>
 NOTICE:    new: [2018-01-21,2020-01-01)
-NOTICE:  fpo_after_insert_row: AFTER INSERT ROW:
+NOTICE:  fpo_after_insert_row: AFTER INSERT FOR PORTION OF valid_at ((,2018-01-21)) ROW:
 NOTICE:    old: <NULL>
 NOTICE:    new: ("[1,2)","[2018-01-21,2020-01-01)",one)
-NOTICE:  fpo_after_insert_stmt: AFTER INSERT STATEMENT:
+NOTICE:  fpo_after_insert_stmt: AFTER INSERT FOR PORTION OF valid_at ((,2018-01-21)) STATEMENT:
 NOTICE:    old: <NULL>
 NOTICE:    new: ("[1,2)","[2018-01-21,2020-01-01)",one)
-NOTICE:  fpo_after_delete_row: AFTER DELETE ROW:
+NOTICE:  fpo_after_delete_row: AFTER DELETE FOR PORTION OF valid_at ((,2018-01-21)) ROW:
 NOTICE:    old: ("[1,2)","[2018-01-01,2020-01-01)",one)
 NOTICE:    new: <NULL>
-NOTICE:  fpo_after_delete_stmt: AFTER DELETE STATEMENT:
+NOTICE:  fpo_after_delete_stmt: AFTER DELETE FOR PORTION OF valid_at ((,2018-01-21)) STATEMENT:
 NOTICE:    old: ("[1,2)","[2018-01-01,2020-01-01)",one)
 NOTICE:    new: <NULL>
 ROLLBACK;
@@ -1622,28 +1627,28 @@ BEGIN;
 UPDATE for_portion_of_test
   FOR PORTION OF valid_at FROM NULL TO '2018-01-02'
   SET name = 'NULL_to_2018-01-01';
-NOTICE:  fpo_before_stmt: BEFORE UPDATE STATEMENT:
+NOTICE:  fpo_before_stmt: BEFORE UPDATE FOR PORTION OF valid_at ((,2018-01-02)) STATEMENT:
 NOTICE:    old: <NULL>
 NOTICE:    new: <NULL>
-NOTICE:  fpo_before_row: BEFORE UPDATE ROW:
+NOTICE:  fpo_before_row: BEFORE UPDATE FOR PORTION OF valid_at ((,2018-01-02)) ROW:
 NOTICE:    old: [2018-01-01,2020-01-01)
 NOTICE:    new: [2018-01-01,2018-01-02)
-NOTICE:  fpo_before_stmt: BEFORE INSERT STATEMENT:
+NOTICE:  fpo_before_stmt: BEFORE INSERT FOR PORTION OF valid_at ((,2018-01-02)) STATEMENT:
 NOTICE:    old: <NULL>
 NOTICE:    new: <NULL>
-NOTICE:  fpo_before_row: BEFORE INSERT ROW:
+NOTICE:  fpo_before_row: BEFORE INSERT FOR PORTION OF valid_at ((,2018-01-02)) ROW:
 NOTICE:    old: <NULL>
 NOTICE:    new: [2018-01-02,2020-01-01)
-NOTICE:  fpo_after_insert_row: AFTER INSERT ROW:
+NOTICE:  fpo_after_insert_row: AFTER INSERT FOR PORTION OF valid_at ((,2018-01-02)) ROW:
 NOTICE:    old: <NULL>
 NOTICE:    new: ("[1,2)","[2018-01-02,2020-01-01)",one)
-NOTICE:  fpo_after_insert_stmt: AFTER INSERT STATEMENT:
+NOTICE:  fpo_after_insert_stmt: AFTER INSERT FOR PORTION OF valid_at ((,2018-01-02)) STATEMENT:
 NOTICE:    old: <NULL>
 NOTICE:    new: ("[1,2)","[2018-01-02,2020-01-01)",one)
-NOTICE:  fpo_after_update_row: AFTER UPDATE ROW:
+NOTICE:  fpo_after_update_row: AFTER UPDATE FOR PORTION OF valid_at ((,2018-01-02)) ROW:
 NOTICE:    old: ("[1,2)","[2018-01-01,2020-01-01)",one)
 NOTICE:    new: ("[1,2)","[2018-01-01,2018-01-02)",NULL_to_2018-01-01)
-NOTICE:  fpo_after_update_stmt: AFTER UPDATE STATEMENT:
+NOTICE:  fpo_after_update_stmt: AFTER UPDATE FOR PORTION OF valid_at ((,2018-01-02)) STATEMENT:
 NOTICE:    old: ("[1,2)","[2018-01-01,2020-01-01)",one)
 NOTICE:    new: ("[1,2)","[2018-01-01,2018-01-02)",NULL_to_2018-01-01)
 ROLLBACK;
@@ -1674,26 +1679,26 @@ UPDATE for_portion_of_test
   FOR PORTION OF valid_at FROM '2018-01-15' TO '2019-01-01'
   SET name = '2018-01-15_to_2019-01-01';
 COMMIT;
-NOTICE:  fpo_after_insert_row: AFTER INSERT ROW:
+NOTICE:  fpo_after_insert_row: AFTER INSERT FOR PORTION OF valid_at ([2018-01-15,2019-01-01)) ROW:
 NOTICE:    old: <NULL>
 NOTICE:    new: [2018-01-01,2018-01-15)
-NOTICE:  fpo_after_insert_row: AFTER INSERT ROW:
+NOTICE:  fpo_after_insert_row: AFTER INSERT FOR PORTION OF valid_at ([2018-01-15,2019-01-01)) ROW:
 NOTICE:    old: <NULL>
 NOTICE:    new: [2019-01-01,2020-01-01)
-NOTICE:  fpo_after_update_row: AFTER UPDATE ROW:
+NOTICE:  fpo_after_update_row: AFTER UPDATE FOR PORTION OF valid_at ([2018-01-15,2019-01-01)) ROW:
 NOTICE:    old: [2018-01-01,2020-01-01)
 NOTICE:    new: [2018-01-15,2019-01-01)
 BEGIN;
 DELETE FROM for_portion_of_test
   FOR PORTION OF valid_at FROM NULL TO '2018-01-21';
 COMMIT;
-NOTICE:  fpo_after_insert_row: AFTER INSERT ROW:
+NOTICE:  fpo_after_insert_row: AFTER INSERT FOR PORTION OF valid_at ((,2018-01-21)) ROW:
 NOTICE:    old: <NULL>
 NOTICE:    new: [2018-01-21,2019-01-01)
-NOTICE:  fpo_after_delete_row: AFTER DELETE ROW:
+NOTICE:  fpo_after_delete_row: AFTER DELETE FOR PORTION OF valid_at ((,2018-01-21)) ROW:
 NOTICE:    old: [2018-01-15,2019-01-01)
 NOTICE:    new: <NULL>
-NOTICE:  fpo_after_delete_row: AFTER DELETE ROW:
+NOTICE:  fpo_after_delete_row: AFTER DELETE FOR PORTION OF valid_at ((,2018-01-21)) ROW:
 NOTICE:    old: [2018-01-01,2018-01-15)
 NOTICE:    new: <NULL>
 BEGIN;
@@ -1707,6 +1712,66 @@ SELECT * FROM for_portion_of_test;
  [1,2) | [2019-01-01,2020-01-01) | one
  [1,2) | [2018-01-21,2019-01-01) | 2018-01-15_to_2019-01-01
 (2 rows)
+
+-- test inserts fired from triggers during FOR PORTION OF:
+DROP TABLE for_portion_of_test;
+CREATE TABLE for_portion_of_test (
+  id int4range,
+  valid_at daterange,
+  name text
+);
+INSERT INTO for_portion_of_test (id, valid_at, name) VALUES
+  ('[1,2)', '[2018-01-01,2020-01-01)', 'one');
+CREATE FUNCTION trg_fpo_insert()
+RETURNS TRIGGER LANGUAGE plpgsql AS
+$$
+BEGIN
+  IF pg_trigger_depth() = 1 THEN
+    INSERT INTO for_portion_of_test
+      (id, valid_at, name) VALUES
+      (int4range(lower(NEW.id) + 1, upper(NEW.id) + 1), NEW.valid_at, NEW.name);
+  END IF;
+  RETURN CASE WHEN 'TG_OP' = 'DELETE' THEN OLD ELSE NEW END;
+END;
+$$;
+CREATE TRIGGER fpo_01_dump_before
+  BEFORE INSERT OR UPDATE OR DELETE ON for_portion_of_test
+  FOR EACH ROW EXECUTE PROCEDURE dump_trigger(false, false);
+CREATE TRIGGER fpo_02_before_row
+  BEFORE INSERT OR UPDATE OR DELETE ON for_portion_of_test
+  FOR EACH ROW EXECUTE PROCEDURE trg_fpo_insert();
+UPDATE for_portion_of_test
+  FOR PORTION OF valid_at FROM '2019-01-01' TO '2019-06-01'
+  SET name = CONCAT(name, '^')
+  WHERE id = '[1,2)';
+NOTICE:  fpo_01_dump_before: BEFORE UPDATE FOR PORTION OF valid_at ([2019-01-01,2019-06-01)) ROW:
+NOTICE:    old: [2018-01-01,2020-01-01)
+NOTICE:    new: [2019-01-01,2019-06-01)
+NOTICE:  fpo_01_dump_before: BEFORE INSERT ROW:
+NOTICE:    old: <NULL>
+NOTICE:    new: [2019-01-01,2019-06-01)
+NOTICE:  fpo_01_dump_before: BEFORE INSERT FOR PORTION OF valid_at ([2019-01-01,2019-06-01)) ROW:
+NOTICE:    old: <NULL>
+NOTICE:    new: [2018-01-01,2019-01-01)
+NOTICE:  fpo_01_dump_before: BEFORE INSERT ROW:
+NOTICE:    old: <NULL>
+NOTICE:    new: [2018-01-01,2019-01-01)
+NOTICE:  fpo_01_dump_before: BEFORE INSERT FOR PORTION OF valid_at ([2019-01-01,2019-06-01)) ROW:
+NOTICE:    old: <NULL>
+NOTICE:    new: [2019-06-01,2020-01-01)
+NOTICE:  fpo_01_dump_before: BEFORE INSERT ROW:
+NOTICE:    old: <NULL>
+NOTICE:    new: [2019-06-01,2020-01-01)
+SELECT * FROM for_portion_of_test ORDER BY id, valid_at;
+  id   |        valid_at         | name 
+-------+-------------------------+------
+ [1,2) | [2018-01-01,2019-01-01) | one
+ [1,2) | [2019-01-01,2019-06-01) | one^
+ [1,2) | [2019-06-01,2020-01-01) | one
+ [2,3) | [2018-01-01,2019-01-01) | one
+ [2,3) | [2019-01-01,2019-06-01) | one^
+ [2,3) | [2019-06-01,2020-01-01) | one
+(6 rows)
 
 -- test FOR PORTION OF from triggers during FOR PORTION OF:
 DROP TABLE for_portion_of_test;
@@ -2669,10 +2734,10 @@ CREATE TRIGGER fpo_before_row2
 UPDATE fpo_update_of_trigger
   FOR PORTION OF valid_at FROM 30 TO 70
   SET id = 2;
-NOTICE:  fpo_before_row2: BEFORE UPDATE STATEMENT:
+NOTICE:  fpo_before_row2: BEFORE UPDATE FOR PORTION OF valid_at ([30,70)) STATEMENT:
 NOTICE:    old: <NULL>
 NOTICE:    new: <NULL>
-NOTICE:  fpo_before_row1: BEFORE UPDATE ROW:
+NOTICE:  fpo_before_row1: BEFORE UPDATE FOR PORTION OF valid_at ([30,70)) ROW:
 NOTICE:    old: [10,100)
 NOTICE:    new: [30,70)
 DROP TABLE fpo_update_of_trigger;

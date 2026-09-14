@@ -1249,6 +1249,32 @@ pltcl_trigger_handler(PG_FUNCTION_ARGS, pltcl_call_state *call_state,
 		else
 			elog(ERROR, "unrecognized LEVEL tg_event: %u", trigdata->tg_event);
 
+		/*
+		 * The FOR PORTION OF details for TG_period_name and
+		 * TG_period_bounds.  The bounds could be any range or multirange
+		 * type, so the best we can offer is their text representation.
+		 */
+		if (trigdata->tg_temporal)
+		{
+			ForPortionOfState *fpo = trigdata->tg_temporal;
+			Oid			funcid;
+			bool		varlena;
+
+			Tcl_ListObjAppendElement(NULL, tcl_cmd,
+									 Tcl_NewStringObj(utf_e2u(fpo->fp_rangeName), -1));
+
+			getTypeOutputInfo(fpo->fp_rangeType, &funcid, &varlena);
+			stroid = OidOutputFunctionCall(funcid, fpo->fp_targetRange);
+			Tcl_ListObjAppendElement(NULL, tcl_cmd,
+									 Tcl_NewStringObj(utf_e2u(stroid), -1));
+			pfree(stroid);
+		}
+		else
+		{
+			Tcl_ListObjAppendElement(NULL, tcl_cmd, Tcl_NewObj());
+			Tcl_ListObjAppendElement(NULL, tcl_cmd, Tcl_NewObj());
+		}
+
 		/* Finally append the arguments from CREATE TRIGGER */
 		for (i = 0; i < trigdata->tg_trigger->tgnargs; i++)
 			Tcl_ListObjAppendElement(NULL, tcl_cmd,
@@ -1703,7 +1729,7 @@ compile_pltcl_function(Oid fn_oid, Oid tgreloid,
 		{
 			/* trigger procedure has fixed args */
 			Tcl_DStringAppend(&proc_internal_args,
-							  "TG_name TG_relid TG_table_name TG_table_schema TG_relatts TG_when TG_level TG_op __PLTcl_Tup_NEW __PLTcl_Tup_OLD args",
+							  "TG_name TG_relid TG_table_name TG_table_schema TG_relatts TG_when TG_level TG_op __PLTcl_Tup_NEW __PLTcl_Tup_OLD TG_period_name TG_period_bounds args",
 							  -1);
 		}
 		else if (is_event_trigger)
