@@ -22,6 +22,19 @@ pg_combinebackup = executable('pg_combinebackup',
 )
 bin_targets += pg_combinebackup
 
+test_checksum_helper = executable('test_checksum_helper',
+  files(
+    'test_checksum_helper.c',
+    '../../common/checksum_helper.c',
+  ),
+  dependencies: [frontend_code],
+  kwargs: default_bin_args + {
+    'c_args': ['-DFRONTEND'],
+    'install': false,
+  },
+)
+testprep_targets += test_checksum_helper
+
 tests += {
   'name': 'pg_combinebackup',
   'sd': meson.current_source_dir(),
@@ -40,7 +53,9 @@ tests += {
       't/010_hardlink.pl',
       't/011_ib_truncation.pl',
       't/012_vm_consistency.pl',
+      't/013_checksum_helper.pl',
     ],
+    'deps': [test_checksum_helper],
   }
 }
 
