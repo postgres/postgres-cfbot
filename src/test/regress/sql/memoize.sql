@@ -198,10 +198,10 @@ DROP TABLE prt;
 
 RESET enable_partitionwise_join;
 
--- Exercise Memoize code that flushes the cache when a parameter changes which
--- is not part of the cache key.
+-- Ensure Params which are part of the base quals are also added as a cache
+-- key.
 
--- Ensure we get a Memoize plan
+-- Ensure we get a Memoize plan with the Param as a cache key
 EXPLAIN (COSTS OFF)
 SELECT unique1 FROM tenk1 t0
 WHERE unique1 < 3
@@ -218,6 +218,24 @@ WHERE unique1 < 3
 	INNER JOIN tenk1 t2 ON t1.unique1 = t2.hundred
 	WHERE t0.ten = t1.twenty AND t0.two <> t2.four OFFSET 0);
 
+-- Ensure a Param which is buried inside a larger cache key expression is made
+-- a cache key by itself too.
+
+-- Ensure we get a Memoize plan with both cache keys
+EXPLAIN (COSTS OFF)
+SELECT sum(c) FROM (
+  SELECT (SELECT count(*) FROM tenk1 t1
+          INNER JOIN tenk1 t2 ON t1.unique1 = t2.hundred + t0.ten
+          WHERE t1.twenty = t0.ten) AS c
+  FROM tenk1 t0 WHERE t0.unique1 < 2) s;
+
+-- Ensure the above query returns the correct result
+SELECT sum(c) FROM (
+  SELECT (SELECT count(*) FROM tenk1 t1
+          INNER JOIN tenk1 t2 ON t1.unique1 = t2.hundred + t0.ten
+          WHERE t1.twenty = t0.ten) AS c
+  FROM tenk1 t0 WHERE t0.unique1 < 2) s;
+
 RESET enable_seqscan;
 RESET enable_material;
 RESET enable_mergejoin;
@@ -225,6 +243,112 @@ RESET work_mem;
 RESET hash_mem_multiplier;
 RESET enable_bitmapscan;
 RESET enable_hashjoin;
+
+-- Test the original report "bug: query returns different result with and
+-- without memoization".  The result must be the same with Memoize on and off.
+SET enable_seqscan TO off;
+SET enable_material TO off;
+SET enable_mergejoin TO off;
+SET enable_hashjoin TO off;
+SET work_mem TO '64kB';
+
+EXPLAIN (COSTS OFF)
+SELECT sum(c) FROM (
+  SELECT t0.unique1,
+    (SELECT count(*) FROM tenk1 t2 JOIN tenk1 t1
+        ON t1.unique1 = t2.hundred + t0.ten
+      WHERE t1.twenty = t0.ten) AS c
+  FROM tenk1 t0 WHERE t0.unique1 < 200) s;
+
+SET enable_memoize = off;
+SELECT sum(c) FROM (
+  SELECT t0.unique1,
+    (SELECT count(*) FROM tenk1 t2 JOIN tenk1 t1
+        ON t1.unique1 = t2.hundred + t0.ten
+      WHERE t1.twenty = t0.ten) AS c
+  FROM tenk1 t0 WHERE t0.unique1 < 200) s;
+SET enable_memoize = on;
+SELECT sum(c) FROM (
+  SELECT t0.unique1,
+    (SELECT count(*) FROM tenk1 t2 JOIN tenk1 t1
+        ON t1.unique1 = t2.hundred + t0.ten
+      WHERE t1.twenty = t0.ten) AS c
+  FROM tenk1 t0 WHERE t0.unique1 < 200) s;
+
+RESET enable_seqscan;
+RESET enable_material;
+RESET enable_mergejoin;
+RESET enable_hashjoin;
+RESET work_mem;
+
+-- Test Params of types with no hash opclass (point) buried inside cache key
+-- expressions.  Such Params can't be made cache keys; instead they must not
+-- be part of keyparamids, so that the cache is flushed when their values
+-- change.
+CREATE TABLE mp0 (p point, id int);
+CREATE TABLE mpa (n int, k int);
+CREATE TABLE mpb (n int, k int);
+CREATE INDEX mpa_n ON mpa(n);
+CREATE INDEX mpb_n ON mpb(n);
+INSERT INTO mp0 SELECT point(d, d), 1 FROM generate_series(1, 5) d;
+INSERT INTO mpa SELECT g % 20, g % 10 FROM generate_series(1, 1000) g;
+INSERT INTO mpb SELECT g % 20, g % 10 FROM generate_series(1, 1000) g;
+ANALYZE mp0; ANALYZE mpa; ANALYZE mpb;
+
+SET enable_seqscan TO off;
+SET enable_material TO off;
+SET enable_mergejoin TO off;
+SET enable_hashjoin TO off;
+
+-- buried unhashable Param also used in a base qual; without the fix the
+-- cache would serve stale entries
+EXPLAIN (COSTS OFF)
+SELECT sum(c) FROM (
+  SELECT (SELECT count(*) FROM mpa JOIN mpb
+          ON mpb.n = mpa.k + ((mp0.p <-> point '(0,0)') * 3)::int
+          WHERE mpb.k = ((mp0.p <-> point '(0,0)') * 9)::int % 10) AS c
+  FROM mp0) s;
+
+SET enable_memoize = off;
+SELECT sum(c) FROM (
+  SELECT (SELECT count(*) FROM mpa JOIN mpb
+          ON mpb.n = mpa.k + ((mp0.p <-> point '(0,0)') * 3)::int
+          WHERE mpb.k = ((mp0.p <-> point '(0,0)') * 9)::int % 10) AS c
+  FROM mp0) s;
+SET enable_memoize = on;
+SELECT sum(c) FROM (
+  SELECT (SELECT count(*) FROM mpa JOIN mpb
+          ON mpb.n = mpa.k + ((mp0.p <-> point '(0,0)') * 3)::int
+          WHERE mpb.k = ((mp0.p <-> point '(0,0)') * 9)::int % 10) AS c
+  FROM mp0) s;
+
+-- buried unhashable Param used only in the key expression; the plan must
+-- keep the Memoize node
+EXPLAIN (COSTS OFF)
+SELECT sum(c) FROM (
+  SELECT (SELECT count(*) FROM mpa JOIN mpb
+          ON mpb.n = mpa.k + ((mp0.p <-> point '(0,0)') * 3)::int
+          WHERE mpb.k = 1) AS c
+  FROM mp0) s;
+
+SET enable_memoize = off;
+SELECT sum(c) FROM (
+  SELECT (SELECT count(*) FROM mpa JOIN mpb
+          ON mpb.n = mpa.k + ((mp0.p <-> point '(0,0)') * 3)::int
+          WHERE mpb.k = 1) AS c
+  FROM mp0) s;
+SET enable_memoize = on;
+SELECT sum(c) FROM (
+  SELECT (SELECT count(*) FROM mpa JOIN mpb
+          ON mpb.n = mpa.k + ((mp0.p <-> point '(0,0)') * 3)::int
+          WHERE mpb.k = 1) AS c
+  FROM mp0) s;
+
+RESET enable_seqscan;
+RESET enable_material;
+RESET enable_mergejoin;
+RESET enable_hashjoin;
+DROP TABLE mp0, mpa, mpb;
 
 -- Test parallel plans with Memoize
 SET min_parallel_table_scan_size TO 0;
