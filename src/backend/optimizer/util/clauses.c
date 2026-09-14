@@ -451,11 +451,35 @@ contain_mutable_functions_walker(Node *node, void *context)
 	{
 		JsonExpr   *jexpr = castNode(JsonExpr, node);
 		Const	   *cnst;
+		Node		*path_spec;
 
-		if (!IsA(jexpr->path_spec, Const))
+		/*
+		 * An INSERT/REPLACE "= PATH <jsonpath>" source is a jsonpath evaluated
+		 * at run time against the input document; a non-constant or mutable
+		 * one makes the whole expression mutable.
+		 */
+		if (jexpr->action != NULL && jexpr->action->source_pathspec != NULL)
+		{
+			if (!IsA(jexpr->action->source_pathspec, Const))
+				return true;
+
+			cnst = castNode(Const, jexpr->action->source_pathspec);
+			Assert(cnst->consttype == JSONPATHOID);
+			if (!cnst->constisnull &&
+				jspIsMutable(DatumGetJsonPathP(cnst->constvalue),
+							 jexpr->passing_names, jexpr->passing_values))
+				return true;
+		}
+
+		if(jexpr->action)
+			path_spec = jexpr->action->pathspec;
+		else
+			path_spec = jexpr->path_spec;
+
+		if (!IsA(path_spec, Const))
 			return true;
 
-		cnst = castNode(Const, jexpr->path_spec);
+		cnst = castNode(Const, path_spec);
 
 		Assert(cnst->consttype == JSONPATHOID);
 		if (cnst->constisnull)
